@@ -4,7 +4,7 @@
 - Branch: `T1174-rust-port`
 - Status: draft for spec review (slice 0)
 - Binary: `clojure-rs`, Cargo workspace at `rust/`
-- Codegen: LLVM via inkwell, pinned LLVM 23 (Cranelift rejected)
+- Codegen: LLVM via inkwell, pinned LLVM 22 (Cranelift rejected)
 
 This spec has two parts: Part 1 is the user/functional specification
 (scenarios, behavior, acceptance criteria); Part 2 is the technical
@@ -253,7 +253,7 @@ C8. CLI exit codes: 0 success; 1 evaluation/compile error; 2 usage
 - Toolchain: stable Rust, MSRV 1.85 (inkwell floor). `cargo fmt
   --check` and `cargo clippy --all-targets -- -D warnings` clean.
 - LLVM: pinned major 23 everywhere (dev + CI + gate image);
-  `inkwell` single feature `llvm23-1`-family; CI asserts the major.
+  `inkwell` single feature `llvm22-1` (inkwell 0.10.0 supports up to LLVM 22); CI asserts the major.
 - Dependencies: mirrored deny policy (MIT/Apache-2.0/BSD-3/BSL/
   Unicode/Unlicense/Zlib + LLVM-exception); `multiple-versions =
   "deny"`; `rpds`/`rustyline`/`clap` approved pending gate pass.
@@ -322,7 +322,7 @@ New: `.github/workflows/rust.yml` (fmt+clippy / test×3 /
 gates / build-release×3), `.github/workflows/rust-release.yml`
 (`v*` → build×3 → attach archives), `.github/actions/
 profile-runner`, `scripts/ci/go`, `scripts/ci/
-quality-gates.Dockerfile` (+LLVM 23), `codecov.yml`,
+quality-gates.Dockerfile` (+LLVM 22), `codecov.yml`,
 `rust/deny.toml`, geiger/complexity baselines. Secrets/vars to
 provision (non-blocking: local-only image, token-less upload):
 `GATE_IMAGE` namespace, `DOCKERHUB_*`, `CODECOV_TOKEN`.
