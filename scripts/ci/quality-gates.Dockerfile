@@ -54,7 +54,7 @@ ENV LLVM_SYS_221_PREFIX=/usr/lib/llvm-22
 RUN wget -q https://apt.llvm.org/llvm.sh \
     && chmod +x llvm.sh \
     && ./llvm.sh "${LLVM_VERSION}" \
-    && apt-get install -y llvm-22-dev libzstd-dev zlib1g-dev libxml2-dev libtinfo-dev \
+    && apt-get install -y llvm-22-dev libpolly-22-dev libffi-dev libzstd-dev zlib1g-dev libxml2-dev libtinfo-dev libedit-dev \
     && rm llvm.sh \
     && rm -rf /var/lib/apt/lists/* \
     && /usr/lib/llvm-22/bin/llvm-config --version | grep -q '^22\.1\.'

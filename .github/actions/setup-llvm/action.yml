@@ -28,9 +28,11 @@ runs:
         sudo ./llvm.sh "${{ inputs.version }}"
         # llvm-22-dev brings llvm-config, CMake files, headers, and
         # static archives; the lib*-dev companions satisfy whatever
-        # llvm-config --system-libs reports for static linking.
+        # llvm-config --libs/--system-libs reports for static linking
+        # (notably libPolly, which ships separately).
         sudo apt-get install -y "llvm-${{ inputs.version }}-dev" \
-          libzstd-dev zlib1g-dev libxml2-dev libtinfo-dev
+          "libpolly-${{ inputs.version }}-dev" \
+          libffi-dev libzstd-dev zlib1g-dev libxml2-dev libtinfo-dev libedit-dev
         dir="/usr/lib/llvm-${{ inputs.version }}"
         test -x "$dir/bin/llvm-config"
         "$dir/bin/llvm-config" --version | grep -q '^22\.1\.'
@@ -50,7 +52,24 @@ runs:
       run: |
         set -euo pipefail
         choco install llvm --version="${{ inputs.patch }}" -y --no-progress
-        dir="C:/Program Files/LLVM"
-        "$dir/bin/llvm-config" --version | grep -q '^22\.1\.'
+        # Discover the install: choco wraps the official exe installer
+        # (default C:\Program Files\LLVM), but probe defensively.
+        dir=""
+        for cand in "C:/Program Files/LLVM" "C:/Program Files (x86)/LLVM"; do
+          if [ -x "$cand/bin/llvm-config.exe" ]; then dir="$cand"; break; fi
+        done
+        if [ -z "$dir" ]; then
+          located="$(where llvm-config.exe 2>/dev/null | head -1 || true)"
+          if [ -n "$located" ]; then dir="$(dirname "$(dirname "$located")")"; fi
+        fi
+        if [ -z "$dir" ] || [ ! -x "$dir/bin/llvm-config.exe" ]; then
+          echo "setup-llvm: llvm-config.exe not found"
+          echo "--- where:"; where llvm-config.exe || true
+          echo "--- Program Files:"; ls "C:/Program Files" | grep -i llvm || true
+          echo "--- choco lib:"; ls "C:/ProgramData/chocolatey/lib" | grep -i llvm || true
+          exit 1
+        fi
+        echo "setup-llvm: LLVM at $dir"
+        "$dir/bin/llvm-config.exe" --version | grep -q '^22\.1\.'
         echo "$dir/bin" >> "$GITHUB_PATH"
         echo "LLVM_SYS_221_PREFIX=$dir" >> "$GITHUB_ENV"
