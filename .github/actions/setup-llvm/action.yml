@@ -72,3 +72,22 @@ runs:
         "$dir/bin/llvm-config.exe" --version | grep -q '^22\.1\.'
         echo "$dir/bin" >> "$GITHUB_PATH"
         echo "LLVM_SYS_221_PREFIX=$dir" >> "$GITHUB_ENV"
+        # Static linking needs xml2s.lib, which the tarball omits:
+        # vcpkg's static libxml2 provides it (tolerating its sibling
+        # static names by copying to the expected file name).
+        VCPKG="${VCPKG_INSTALLATION_ROOT:-C:/vcpkg}"
+        "$VCPKG/vcpkg.exe" install libxml2:x64-windows-static --clean-after-build
+        xmldir="$VCPKG/installed/x64-windows-static/lib"
+        echo "--- xml libs:"; ls "$xmldir" | grep -i xml || true
+        if [ ! -f "$xmldir/xml2s.lib" ]; then
+          for cand in libxml2s.lib libxml2.lib xml2.lib; do
+            if [ -f "$xmldir/$cand" ]; then
+              cp "$xmldir/$cand" "$xmldir/xml2s.lib"
+              echo "setup-llvm: using $cand as xml2s.lib"
+              break
+            fi
+          done
+        fi
+        test -f "$xmldir/xml2s.lib"
+        echo "RUSTFLAGS=-L $xmldir" >> "$GITHUB_ENV"
+        echo "$VCPKG/installed/x64-windows-static/bin" >> "$GITHUB_PATH"
