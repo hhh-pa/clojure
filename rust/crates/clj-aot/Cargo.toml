@@ -11,4 +11,11 @@ license = "EPL-1.0"
 # feature only compiles against LLVM 22 (llvm-sys build script
 # rejects anything else), which is the real version enforcement;
 # CI additionally asserts `llvm-config --version`.
-inkwell = { version = "0.10.0", features = ["llvm22-1"] }
+# Host targets only (default `target-all` references every target's
+# init symbols, which the Windows MSVC import set does not satisfy;
+# x86+aarch64 covers all supported runners and release hosts).
+inkwell = { version = "0.10.0", default-features = false, features = [
+    "llvm22-1",
+    "target-aarch64",
+    "target-x86",
+] }
