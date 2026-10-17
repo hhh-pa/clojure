@@ -1,0 +1,13 @@
+Render an lcov.info coverage report as GitHub Markdown.
+
+Usage: coverage-summary [--out COMMENT.md] <lcov.info>
+  Prints the job-summary flavor to stdout; with --out, also writes the
+  PR-comment flavor to FILE (parents created). Exits 0 with an
+  "unavailable" note when the report is missing (an earlier gate failed
+  before coverage ran).
+
+Both flavors show the total line rate plus the 15 lowest-covered files;
+the full HTML report rides along as the `coverage-report` workflow
+artifact. The comment flavor adds the threshold verdict plus a link to
+the run that produced it.
+

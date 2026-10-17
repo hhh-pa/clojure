@@ -1,0 +1,1 @@
+{"spaces": [{"kind": "function", "metrics": {"cognitive": {"sum": 2}, "cyclomatic": {"sum": 2}}, "name": "ok"}, {"kind": "function", "metrics": {"cognitive": {"sum": 25}, "cyclomatic": {"sum": 3}}, "name": "cog"}, {"kind": "function", "metrics": {"cognitive": {"sum": 99}, "cyclomatic": {"sum": 99}}, "name": "<anonymous>"}]}

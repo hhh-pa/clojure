@@ -1,0 +1,1 @@
+Usage: coverage-floor <lcov.info> [floor=80.0]

@@ -1,0 +1,13 @@
+#!/bin/sh
+# Stub rustc(1): sysroot/host answers, or failure for the PATH-fallback run.
+if [ -n "$STUB_LOG" ]; then
+  printf '%s\n' "rustc $*" >> "$STUB_LOG"
+fi
+if [ -n "$STUB_RUSTC_FAIL" ]; then
+  exit 1
+fi
+case "$1" in
+  --print) echo "$STUB_SYSROOT" ;;
+  -vV) printf 'rustc 9.9.9\nbinary: rustc\ncommit-hash: stub\nhost: %s\n' "$STUB_HOST" ;;
+  *) exit 1 ;;
+esac

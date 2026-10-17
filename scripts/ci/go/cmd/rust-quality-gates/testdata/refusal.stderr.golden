@@ -1,0 +1,1 @@
+refusing nextest cov-runner containing 'run': omit the subcommand, llvm-cov inserts it (else it filters tests by name)

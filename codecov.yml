@@ -1,0 +1,7 @@
+# The Go CI-tools are black-box tested (golden tests execute compiled
+# binaries as subprocesses), so a Go coverprofile structurally
+# under-reports and would only pollute the Rust numbers. Their gate
+# is `go test` itself, not coverage: exclude the whole module from
+# coverage accounting.
+ignore:
+  - "scripts/ci/go/**"

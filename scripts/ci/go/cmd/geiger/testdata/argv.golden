@@ -1,0 +1,3 @@
+metadata --no-deps --format-version 1
+geiger alpha --manifest-path /fake/ws/alpha/Cargo.toml --output-format Json --features feat-a feat-b
+geiger beta --manifest-path /fake/ws/beta/Cargo.toml --output-format Json

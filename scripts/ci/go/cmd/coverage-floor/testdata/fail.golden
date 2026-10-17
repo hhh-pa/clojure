@@ -1,0 +1,5 @@
+coverage floor: 60.00% lines (3/5, 2 files) vs 80.00% floor (floor.lcov)
+per-file table (lowest first):
+    0.00%     0/2     /work/rust/src/b.rs
+  100.00%     3/3     /work/rust/src/a.rs
+FAIL: line coverage 60.00% is below the 80.00% floor

@@ -1,0 +1,67 @@
+name: profile-runner
+description: >
+  Log the runner's hardware profile (CPU, memory, storage) to the step log
+  and the job summary, so per-execution performance can be understood
+  (T1170 PROF). Runs the in-repo Go profiler from a prebuilt binary kept
+  in the Actions cache (rebuilt on miss, like ci-tools); no external
+  dependencies beyond setup-go.
+inputs:
+  cache-key:
+    description: >
+      Full cache key for the prebuilt profiler binary, shared by every
+      job on the OS: runner-profile-<os>-<hash>, where the hash covers
+      this action's sources plus exactly the Go inputs the build reads
+      (go.mod, cmd/runner-profile, internal/executil), e.g.
+      runner-profile-ubuntu-a1b2c3. One entry per OS serves all jobs
+      (like ci-tools); unrelated Go tool changes no longer invalidate
+      it, while the action hash re-keys automatically whenever this
+      manifest changes, so stale entries from older designs can never
+      shadow a fresh build. (Callers build the key from the runner and
+      hashFiles contexts, which exist in workflows but not in this
+      manifest.)
+    required: true
+runs:
+  using: composite
+  steps:
+    - id: cache
+      uses: actions/cache@v5
+      with:
+        # The whole dir: the file inside is runner-profile(.exe)
+        # depending on the OS, and a dir path sidesteps that.
+        # Relative on purpose: an absolute workspace path fails
+        # post-save validation ("Path(s) ... do(es) not exist",
+        # CI-proven). Relative resolves against the workspace for the
+        # main step (hits extract to WS/profiler-bin, CI-proven) and
+        # for the post step only in the saver manifest shape below.
+        path: profiler-bin
+        key: ${{ inputs.cache-key }}
+    - if: steps.cache.outputs.cache-hit != 'true'
+      uses: actions/setup-go@v6
+      with:
+        go-version-file: scripts/ci/go/go.mod
+        cache: false
+    # NO working-directory KEY anywhere in this manifest — deliberate
+    # and CI-proven twice over. (1) A build step with an explicit
+    # working-directory key silently produced no file (exit 0 after a
+    # full compile, then 127 on every job of run 39060453994), while
+    # the identical command with an in-script cd works on all three
+    # OSes — the context and env workspace spellings were probed equal,
+    # so the key itself is what breaks file output (mechanism unknown).
+    # (2) The cache post step resolves relative profiler-bin against
+    # the workspace only when an implicit-cwd run step exists:
+    # all-explicit shapes warned "do(es) not exist" and never saved,
+    # while runs 39050345211 and 39060992365 saved with this shape.
+    # Every path uses the quoted $GITHUB_WORKSPACE env (double quotes
+    # keep Windows backslashes literal for bash; Go and the Windows API
+    # accept the mixed slashes). DO NOT add working-directory, and DO
+    # NOT respell a path relatively or via ${{ }}, without re-proving
+    # run + post-save on all three OSes.
+    - if: steps.cache.outputs.cache-hit != 'true'
+      shell: bash
+      run: |
+        cd "$GITHUB_WORKSPACE/scripts/ci/go"
+        CGO_ENABLED=0 go build -o "$GITHUB_WORKSPACE/profiler-bin/runner-profile" ./cmd/runner-profile
+    # Implicit cwd (see above).
+    - name: profile runner hardware
+      shell: bash
+      run: "$GITHUB_WORKSPACE/profiler-bin/runner-profile"

@@ -1,0 +1,47 @@
+#!/bin/sh
+# Stub cargo(1) for geiger golden/oracle tests. STUB_DATA points at the
+# fixture JSONs; STUB_LOG (optional) collects one argv line per call.
+mode="$1"
+shift
+log() {
+  if [ -n "$STUB_LOG" ]; then
+    printf '%s\n' "$*" >> "$STUB_LOG"
+  fi
+}
+case "$mode" in
+  metadata)
+    log "metadata $*"
+    if [ -n "$STUB_FAIL_METADATA" ]; then
+      echo "error: stub metadata failure" >&2
+      echo "note: extra context line" >&2
+      exit 1
+    fi
+    cat "$STUB_DATA/metadata.json"
+    ;;
+  geiger)
+    mp=""
+    prev=""
+    for a in "$@"; do
+      if [ "$prev" = "--manifest-path" ]; then mp="$a"; fi
+      prev="$a"
+    done
+    name=$(basename "$(dirname "$mp")")
+    log "geiger $name $*"
+    if [ "$STUB_FAIL_GEIGER" = "$name" ]; then
+      echo "error: stub geiger failure for $name" >&2
+      echo "warning: some warning" >&2
+      echo "error: second error line" >&2
+      echo "tail context" >&2
+      exit 101
+    fi
+    if [ "$STUB_NOJSON" = "$name" ]; then
+      echo "this is not JSON"
+      exit 0
+    fi
+    cat "$STUB_DATA/geiger-$name.json"
+    ;;
+  *)
+    echo "stub cargo: unexpected $mode" >&2
+    exit 99
+    ;;
+esac

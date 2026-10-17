@@ -1,0 +1,6 @@
+#!/bin/sh
+# Stub rustup(1): provisioning calls always succeed.
+if [ -n "$STUB_LOG" ]; then
+  printf '%s\n' "rustup $*" >> "$STUB_LOG"
+fi
+exit 0

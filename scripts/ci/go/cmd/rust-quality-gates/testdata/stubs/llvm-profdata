@@ -1,0 +1,12 @@
+#!/bin/sh
+# Stub llvm-profdata: merge touches its -o output.
+if [ -n "$STUB_LOG" ]; then
+  printf '%s\n' "llvm-profdata $*" >> "$STUB_LOG"
+fi
+dest=""
+prev=""
+for a in "$@"; do
+  [ "$prev" = "-o" ] && dest="$a"
+  prev="$a"
+done
+printf 'profdata' > "$dest"

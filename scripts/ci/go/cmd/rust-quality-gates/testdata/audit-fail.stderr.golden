@@ -1,0 +1,2 @@
+stub: audit found advisories
+rust quality gates: 1 failure(s); first: FAILED: cargo audit --db $WS/target/advisory-db --deny warnings (exit 1)

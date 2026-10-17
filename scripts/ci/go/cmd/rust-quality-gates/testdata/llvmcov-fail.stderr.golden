@@ -1,0 +1,2 @@
+stub: llvm-cov suite failed
+rust quality gates: 1 failure(s); first: coverage: FAILED: cargo llvm-cov --no-report --workspace nextest --run-ignored all --no-fail-fast (exit 1)

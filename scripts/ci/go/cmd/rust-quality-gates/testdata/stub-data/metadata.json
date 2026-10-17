@@ -1,0 +1,1 @@
+{"packages": [{"manifest_path": "/fake/ws/solo/Cargo.toml", "name": "solo", "targets": [{"required-features": ["feat-x"]}]}]}

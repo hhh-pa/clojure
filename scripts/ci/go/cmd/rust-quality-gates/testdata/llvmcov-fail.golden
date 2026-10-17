@@ -1,0 +1,28 @@
+==> rust quality gates: provisioning tools
++ rustup component add llvm-tools-preview
++ rustup toolchain install nightly-2026-10-01 --profile minimal --no-self-update
+==> $WS: cargo audit --deny warnings
++ cargo audit --db $WS/target/advisory-db --deny warnings
+stub: audit ok
+==> $WS: cargo deny check licenses bans sources
++ cargo deny check licenses bans sources
+stub: deny ok
+==> $WS: udeps seed holds 2 fingerprints
+==> $WS: cargo udeps (nightly-2026-10-01)
++ cargo +nightly-2026-10-01 udeps --workspace --all-targets
+stub: udeps ok
+==> $WS: geiger unsafe ratchet
++ $BIN/geiger $WS
+geiger solo...
+  unsafe in solo                                          2
+geiger: workspace unsafe total 2; deps allowing unsafe: 0 (informational)
+geiger: OK
+==> $WS: complexity ratchet
++ $BIN/complexity $WS
+--- most complex functions ---
+  a.rs:big cyclomatic=16 cognitive=1
+complexity: 1 violations (1 baselined) -> OK
+==> $WS: coverage reports -> $REPORT
+seeding llvm-cov target dir from $WS/target/debug
+llvm-cov target seeded in Ns
++ cargo llvm-cov --no-report --workspace nextest --run-ignored all --no-fail-fast

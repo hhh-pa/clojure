@@ -1,0 +1,56 @@
+name: setup-llvm
+description: >
+  Install the pinned LLVM 22 toolchain for this runner via its OS
+  package manager (apt.llvm.org on Linux, Homebrew llvm@22 on macOS,
+  Chocolatey llvm on Windows), export LLVM_SYS_221_PREFIX plus PATH
+  for the inkwell (clj-aot) build, and assert the LLVM 22.1 major so
+  local, CI, and gate-image toolchains cannot drift (spec 2.3).
+inputs:
+  version:
+    description: Pinned LLVM major (apt.llvm.org + brew llvm@N form).
+    required: false
+    default: "22"
+  patch:
+    description: Pinned Windows Chocolatey version (exact).
+    required: false
+    default: "22.1.8"
+runs:
+  using: composite
+  steps:
+    - if: runner.os == 'Linux'
+      shell: bash
+      run: |
+        set -euo pipefail
+        sudo apt-get update
+        sudo apt-get install -y wget gnupg lsb-release
+        wget -q https://apt.llvm.org/llvm.sh
+        chmod +x llvm.sh
+        sudo ./llvm.sh "${{ inputs.version }}"
+        # llvm-22-dev brings llvm-config, CMake files, headers, and
+        # static archives; the lib*-dev companions satisfy whatever
+        # llvm-config --system-libs reports for static linking.
+        sudo apt-get install -y "llvm-${{ inputs.version }}-dev" \
+          libzstd-dev zlib1g-dev libxml2-dev libtinfo-dev
+        dir="/usr/lib/llvm-${{ inputs.version }}"
+        test -x "$dir/bin/llvm-config"
+        "$dir/bin/llvm-config" --version | grep -q '^22\.1\.'
+        echo "$dir/bin" >> "$GITHUB_PATH"
+        echo "LLVM_SYS_221_PREFIX=$dir" >> "$GITHUB_ENV"
+    - if: runner.os == 'macOS'
+      shell: bash
+      run: |
+        set -euo pipefail
+        HOMEBREW_NO_AUTO_UPDATE=1 brew install "llvm@${{ inputs.version }}"
+        dir="$(brew --prefix "llvm@${{ inputs.version }}")"
+        "$dir/bin/llvm-config" --version | grep -q '^22\.1\.'
+        echo "$dir/bin" >> "$GITHUB_PATH"
+        echo "LLVM_SYS_221_PREFIX=$dir" >> "$GITHUB_ENV"
+    - if: runner.os == 'Windows'
+      shell: bash
+      run: |
+        set -euo pipefail
+        choco install llvm --version="${{ inputs.patch }}" -y --no-progress
+        dir="C:/Program Files/LLVM"
+        "$dir/bin/llvm-config" --version | grep -q '^22\.1\.'
+        echo "$dir/bin" >> "$GITHUB_PATH"
+        echo "LLVM_SYS_221_PREFIX=$dir" >> "$GITHUB_ENV"

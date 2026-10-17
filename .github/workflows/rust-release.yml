@@ -1,0 +1,110 @@
+name: rust-release
+
+# Pushing a `v*` tag builds the `clojure-rs` release binary on Linux,
+# macOS, and Windows and attaches the archives to the GitHub release
+# of the same name (the download page). `workflow_dispatch` runs the
+# same builds without publishing, as a dry run.
+#
+# NOTE: this file is `rust-release.yml`, not `release.yml`: that name
+# runs the Maven JVM release ("Release on demand") and must keep
+# working untouched.
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+# Least privilege: jobs inherit read-only; artifact upload and
+# release publishing widen their own job below.
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read # checkout
+      actions: write # artifact upload
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    defaults:
+      run:
+        working-directory: rust
+        shell: bash
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/profile-runner
+        with:
+          cache-key: runner-profile-${{ runner.os }}-${{ hashFiles('.github/actions/profile-runner/**', 'scripts/ci/go/go.mod', 'scripts/ci/go/cmd/runner-profile/**', 'scripts/ci/go/internal/executil/**') }}
+      - uses: ./.github/actions/setup-llvm
+      - uses: dtolnay/rust-toolchain@stable
+      # Cargo registry + target/ cache: warm runs skip crate downloads
+      # and reuse prior compilation. `save-if` forces a save on branch
+      # runs too, so the second push already hits.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+          save-if: 'true'
+      - run: cargo build --release --locked
+      - name: package binary
+        run: |
+          set -euo pipefail
+          target=$(rustc -vV | sed -n 's/^host: //p')
+          bin=target/release/clojure-rs
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            bin="$bin.exe"
+          fi
+          test -x "$bin"
+          "$bin" --version | grep -q '^clojure-rs '
+          "$bin" --help | grep -q 'Usage:'
+          mkdir -p dist
+          asset="dist/clojure-rs-$target.tar.gz"
+          tar -czf "$asset" -C target/release "$(basename "$bin")"
+          echo "asset=$asset" >> "$GITHUB_OUTPUT"
+          echo "target=$target" >> "$GITHUB_OUTPUT"
+        id: package
+      - uses: actions/upload-artifact@v6
+        with:
+          name: clojure-rs-${{ steps.package.outputs.target }}
+          path: rust/dist/clojure-rs-*.tar.gz
+          if-no-files-found: error
+
+  publish:
+    name: publish to GitHub release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create/update the GitHub release
+      actions: write # artifact download (same-repo scope)
+    steps:
+      # gh release needs the git remote (and full history + tags for
+      # --generate-notes); download-artifact alone leaves no checkout.
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - uses: ./.github/actions/profile-runner
+        with:
+          cache-key: runner-profile-${{ runner.os }}-${{ hashFiles('.github/actions/profile-runner/**', 'scripts/ci/go/go.mod', 'scripts/ci/go/cmd/runner-profile/**', 'scripts/ci/go/internal/executil/**') }}
+      - uses: actions/download-artifact@v7
+        with:
+          path: dist
+          merge-multiple: true
+      - name: attach archives to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          ls dist
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload --clobber "$tag" dist/clojure-rs-*.tar.gz
+          else
+            gh release create "$tag" --generate-notes dist/clojure-rs-*.tar.gz
+          fi
