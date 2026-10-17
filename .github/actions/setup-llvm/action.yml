@@ -56,11 +56,15 @@ runs:
         # instead (full tool tree, exact pin, no admin install).
         V="${{ inputs.patch }}"
         asset="clang+llvm-$V-x86_64-pc-windows-msvc.tar.xz"
-        dir="$GITHUB_WORKSPACE/.llvm-cache/llvm-$V"
+        # Forward slashes: GITHUB_WORKSPACE uses backslashes, which
+        # msys mkdir/tar resolve inconsistently; the normalized form
+        # works for both msys tools and the Windows API.
+        dir="$(printf '%s' "$GITHUB_WORKSPACE" | tr '\\' '/')/.llvm-cache/llvm-$V"
         rm -rf "$dir"
         mkdir -p "$dir"
-        curl -sSL --retry 3 -o /tmp/llvm.tar.xz \
+        curl -sSLf --retry 3 -o /tmp/llvm.tar.xz \
           "https://github.com/llvm/llvm-project/releases/download/llvmorg-$V/$asset"
+        test -s /tmp/llvm.tar.xz
         tar -xJf /tmp/llvm.tar.xz -C "$dir" --strip-components=1
         rm /tmp/llvm.tar.xz
         echo "--- key tools:"; ls "$dir/bin" | grep -iE '^(llvm-config|clang|lld)' || true
