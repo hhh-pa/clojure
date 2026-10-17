@@ -89,6 +89,15 @@ runs:
           done
         fi
         test -f "$xmldir/xml2s.lib"
+        # rustc checks `static=` native libs at rlib time using only -L
+        # paths, and llvm-sys marks psapi static; its home is the
+        # spaceful SDK dir RUSTFLAGS cannot spell (space splitting).
+        # Transplant the genuine import lib next to xml2s.lib, which
+        # is already on the -L path.
+        sdkver="$(ls 'C:/Program Files (x86)/Windows Kits/10/Lib/' | grep -E '^[0-9]+\.' | sort -V | tail -1)"
+        sdkdir="C:/Program Files (x86)/Windows Kits/10/Lib/$sdkver/um/x64"
+        test -f "$sdkdir/psapi.lib"
+        cp "$sdkdir/psapi.lib" "$xmldir/psapi.lib"
         # Static CRT: the tarball's LLVM archives are MT_StaticRelease
         # (like vcpkg's static triplet), while Rust defaults to the
         # dynamic CRT; mixing the two crashes at runtime (LNK4098 +
