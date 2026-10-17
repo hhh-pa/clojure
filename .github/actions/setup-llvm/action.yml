@@ -66,7 +66,10 @@ runs:
           echo "setup-llvm: llvm-config.exe not found"
           echo "--- where:"; where llvm-config.exe || true
           echo "--- Program Files:"; ls "C:/Program Files" | grep -i llvm || true
-          echo "--- choco lib:"; ls "C:/ProgramData/chocolatey/lib" | grep -i llvm || true
+          echo "--- LLVM dir:"; ls -la "C:/Program Files/LLVM" || true
+          echo "--- LLVM bin:"; ls "C:/Program Files/LLVM/bin" | head -30 || true
+          echo "--- LLVM bin count:"; ls "C:/Program Files/LLVM/bin" 2>/dev/null | wc -l
+          echo "--- choco lib:"; ls "C:/ProgramData/chocolatey/lib/llvm" || true
           exit 1
         fi
         echo "setup-llvm: LLVM at $dir"

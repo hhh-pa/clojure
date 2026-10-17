@@ -113,5 +113,20 @@ RUN mkdir -p /tmp/warm/rust/src/bin/clojure-rs \
         fi; \
         echo "udeps warm: nightly tree prebuilt (udeps exit $STATUS; unused-deps verdict deferred to runtime)"; } \
     && rm -rf /tmp/warm
+# Scrub the warm stub crates' own artifacts: the stubs share the real
+# crates' names+versions, and their fingerprints survive into gate
+# runs (same-job image builds are NEWER than the checkout), so cargo
+# reuses the stub rlibs for member libs instead of rebuilding from
+# /work (seen: clj_aot::probe_ir unresolved under coverage). Keep the
+# registry-dependency artifacts (the actual warmup) and build-script
+# outputs (source-independent). Both spellings: bins use dashes,
+# rlibs/fingerprints use underscores.
+RUN for d in /opt/target/debug /opt/target/nightly/debug; do \
+        for c in clj-aot clj-core clj-eval clj-reader clj-repl clj-value clojure-rs \
+                 clj_aot clj_core clj_eval clj_reader clj_repl clj_value clojure_rs; do \
+            rm -rf "$d/.fingerprint/$c-"* "$d/deps/$c-"* "$d/deps/lib$c-"*; \
+        done; \
+    done \
+    && ls /opt/target/debug/.fingerprint | grep -cE '^clj' || true
 
 WORKDIR /work
