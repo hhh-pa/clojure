@@ -89,5 +89,10 @@ runs:
           done
         fi
         test -f "$xmldir/xml2s.lib"
-        echo "RUSTFLAGS=-L $xmldir" >> "$GITHUB_ENV"
+        # Static CRT: the tarball's LLVM archives are MT_StaticRelease
+        # (like vcpkg's static triplet), while Rust defaults to the
+        # dynamic CRT; mixing the two crashes at runtime (LNK4098 +
+        # STATUS_ACCESS_VIOLATION). Building Rust static-CRT makes the
+        # whole binary single-CRT — and VCRedist-independent.
+        echo "RUSTFLAGS=-L $xmldir -C target-feature=+crt-static" >> "$GITHUB_ENV"
         echo "$VCPKG/installed/x64-windows-static/bin" >> "$GITHUB_PATH"
