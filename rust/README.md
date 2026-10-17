@@ -42,9 +42,11 @@ at it with `LLVM_SYS_221_PREFIX`:
 - Linux: `wget https://apt.llvm.org/llvm.sh && chmod +x llvm.sh &&
   sudo ./llvm.sh 22 && sudo apt-get install -y llvm-22-dev`,
   then `export LLVM_SYS_221_PREFIX=/usr/lib/llvm-22`.
-- Windows: `choco install llvm --version=22.1.8 -y`, then
-  `LLVM_SYS_221_PREFIX=C:\Program Files\LLVM` (plus its `bin`
-  on `PATH` so test binaries find `LLVM-C.dll` at runtime).
+- Windows: download `clang+llvm-22.1.8-x86_64-pc-windows-msvc.tar.xz`
+  from the LLVM project releases (the choco package omits
+  llvm-config.exe, which llvm-sys requires), extract it, and set
+  `LLVM_SYS_221_PREFIX` to the extracted dir (plus its `bin` on
+  `PATH` so test binaries find `LLVM-C.dll` at runtime).
 
 ## Build and test
 

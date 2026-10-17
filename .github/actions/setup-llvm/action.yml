@@ -1,8 +1,8 @@
 name: setup-llvm
 description: >
-  Install the pinned LLVM 22 toolchain for this runner via its OS
-  package manager (apt.llvm.org on Linux, Homebrew llvm@22 on macOS,
-  Chocolatey llvm on Windows), export LLVM_SYS_221_PREFIX plus PATH
+  Install the pinned LLVM 22 toolchain for this runner (apt.llvm.org
+  on Linux, Homebrew llvm@22 on macOS, official MSVC tarball on
+  Windows), export LLVM_SYS_221_PREFIX plus PATH
   for the inkwell (clj-aot) build, and assert the LLVM 22.1 major so
   local, CI, and gate-image toolchains cannot drift (spec 2.3).
 inputs:
@@ -11,7 +11,7 @@ inputs:
     required: false
     default: "22"
   patch:
-    description: Pinned Windows Chocolatey version (exact).
+    description: Pinned exact LLVM version (Windows tarball asset).
     required: false
     default: "22.1.8"
 runs:
@@ -51,28 +51,20 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
-        choco install llvm --version="${{ inputs.patch }}" -y --no-progress
-        # Discover the install: choco wraps the official exe installer
-        # (default C:\Program Files\LLVM), but probe defensively.
-        dir=""
-        for cand in "C:/Program Files/LLVM" "C:/Program Files (x86)/LLVM"; do
-          if [ -x "$cand/bin/llvm-config.exe" ]; then dir="$cand"; break; fi
-        done
-        if [ -z "$dir" ]; then
-          located="$(where llvm-config.exe 2>/dev/null | head -1 || true)"
-          if [ -n "$located" ]; then dir="$(dirname "$(dirname "$located")")"; fi
-        fi
-        if [ -z "$dir" ] || [ ! -x "$dir/bin/llvm-config.exe" ]; then
-          echo "setup-llvm: llvm-config.exe not found"
-          echo "--- where:"; where llvm-config.exe || true
-          echo "--- Program Files:"; ls "C:/Program Files" | grep -i llvm || true
-          echo "--- LLVM dir:"; ls -la "C:/Program Files/LLVM" || true
-          echo "--- LLVM bin:"; ls "C:/Program Files/LLVM/bin" | head -30 || true
-          echo "--- LLVM bin count:"; ls "C:/Program Files/LLVM/bin" 2>/dev/null | wc -l
-          echo "--- choco lib:"; ls "C:/ProgramData/chocolatey/lib/llvm" || true
-          exit 1
-        fi
-        echo "setup-llvm: LLVM at $dir"
+        # The choco llvm package's install omits llvm-config.exe, which
+        # llvm-sys requires; use the official MSVC release tarball
+        # instead (full tool tree, exact pin, no admin install).
+        V="${{ inputs.patch }}"
+        asset="clang+llvm-$V-x86_64-pc-windows-msvc.tar.xz"
+        dir="$GITHUB_WORKSPACE/.llvm-cache/llvm-$V"
+        rm -rf "$dir"
+        mkdir -p "$dir"
+        curl -sSL --retry 3 -o /tmp/llvm.tar.xz \
+          "https://github.com/llvm/llvm-project/releases/download/llvmorg-$V/$asset"
+        tar -xJf /tmp/llvm.tar.xz -C "$dir" --strip-components=1
+        rm /tmp/llvm.tar.xz
+        echo "--- key tools:"; ls "$dir/bin" | grep -iE '^(llvm-config|clang|lld)' || true
+        test -x "$dir/bin/llvm-config.exe"
         "$dir/bin/llvm-config.exe" --version | grep -q '^22\.1\.'
         echo "$dir/bin" >> "$GITHUB_PATH"
         echo "LLVM_SYS_221_PREFIX=$dir" >> "$GITHUB_ENV"
