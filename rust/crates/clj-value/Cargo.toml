@@ -1,0 +1,6 @@
+[package]
+name = "clj-value"
+version = "0.1.0"
+edition = "2024"
+description = "Clojure value model and persistent collections"
+license = "EPL-1.0"

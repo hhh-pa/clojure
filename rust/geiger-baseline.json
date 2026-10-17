@@ -1,0 +1,4 @@
+{
+  "_comment": "cargo-geiger baseline (T1174): total unsafe items/expressions summed over workspace crates (used + unused). CI fails when the total grows; lower it when unsafe is removed.",
+  "unsafe_total": 0
+}

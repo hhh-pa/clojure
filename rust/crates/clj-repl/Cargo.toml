@@ -1,0 +1,6 @@
+[package]
+name = "clj-repl"
+version = "0.1.0"
+edition = "2024"
+description = "Interactive REPL loop for clojure-rs"
+license = "EPL-1.0"

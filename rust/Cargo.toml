@@ -1,0 +1,37 @@
+[workspace]
+members = [
+    "crates/clj-aot",
+    "crates/clj-core",
+    "crates/clj-eval",
+    "crates/clj-reader",
+    "crates/clj-repl",
+    "crates/clj-value",
+]
+resolver = "2"
+
+[package]
+name = "clojure-rs"
+version = "0.1.0"
+edition = "2024"
+description = "Native Clojure runtime, REPL, and LLVM AOT compiler"
+license = "EPL-1.0"
+autobins = false
+
+[[bin]]
+name = "clojure-rs"
+path = "src/bin/clojure-rs/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+clj-aot = { path = "crates/clj-aot", optional = true }
+
+[features]
+default = ["aot"]
+aot = ["clj-aot"]
+
+# Deny the `unused` lint group package-wide, on every platform and
+# profile: clippy's `-D warnings` only runs on Linux CI, so without
+# this, Windows/macOS-only dead code compiles with warnings no gate
+# catches. Mirrors the arcanist rust workspace policy.
+[lints.rust]
+unused = "deny"
