@@ -162,7 +162,15 @@ impl Reader {
         if is_unquote_splicing(&form) {
             return Err(ReaderError::SpliceTop { span: self.span() });
         }
-        let ret = match &form {
+        let ret = self.sq_expand_form(form.clone())?;
+        self.with_sq_meta(form, ret)
+    }
+
+    /// Expand one non-symbol form under syntax-quote: collections to
+    /// their `apply`/`seq`/`concat` shapes, plain atoms as-is, the
+    /// rest quoted.
+    fn sq_expand_form(&mut self, form: Value) -> Result<Value, ReaderError> {
+        match &form {
             Value::Map(m) => {
                 let mut keyvals = Vec::with_capacity(m.size() * 2);
                 for (k, v) in m.iter() {
@@ -193,8 +201,7 @@ impl Reader {
             | Value::Char(_)
             | Value::Str(_) => Ok(form.clone()),
             _ => Ok(quote_list(form.clone())),
-        }?;
-        self.with_sq_meta(form, ret)
+        }
     }
 
     /// Resolve one symbol under syntax-quote (gensym, `C.`, `.m`,
@@ -227,26 +234,38 @@ impl Reader {
             }
         }
         if sym.namespace().is_some() {
-            let ns = sym.namespace().unwrap().to_owned();
-            let name = sym.name().to_owned();
-            // A class namespace always rewrites (even `String/b.c` ⇒
-            // `java.lang.String/b.c`); otherwise `Compiler.resolveSymbol`
-            // leaves dotted names alone before trying the alias
-            // (`str/b.c` stays `str/b.c`).
-            if let Some(dotted) = self.opts.class_map.get(&ns) {
-                sym = Symbol::new(Some(dotted), &name);
-            } else {
-                let target = if has_inner_dot(&name) {
-                    None
-                } else {
-                    self.opts.aliases.get(&ns)
-                };
-                if let Some(target) = target {
-                    sym = Symbol::new(Some(target), &name);
-                }
-            }
-            return Value::Symbol(sym);
+            return self.sq_qualified(sym);
         }
+        self.sq_plain(sym)
+    }
+
+    /// Resolve a namespace-qualified symbol under syntax-quote
+    /// (class namespace, else alias unless dotted).
+    fn sq_qualified(&mut self, mut sym: Symbol) -> Value {
+        let ns = sym.namespace().unwrap().to_owned();
+        let name = sym.name().to_owned();
+        // A class namespace always rewrites (even `String/b.c` ⇒
+        // `java.lang.String/b.c`); otherwise `Compiler.resolveSymbol`
+        // leaves dotted names alone before trying the alias
+        // (`str/b.c` stays `str/b.c`).
+        if let Some(dotted) = self.opts.class_map.get(&ns) {
+            sym = Symbol::new(Some(dotted), &name);
+        } else {
+            let target = if has_inner_dot(&name) {
+                None
+            } else {
+                self.opts.aliases.get(&ns)
+            };
+            if let Some(target) = target {
+                sym = Symbol::new(Some(target), &name);
+            }
+        }
+        Value::Symbol(sym)
+    }
+
+    /// Resolve a plain unqualified symbol under syntax-quote
+    /// (dotted ⇒ classname as-is, else class/refers/current-ns).
+    fn sq_plain(&self, mut sym: Symbol) -> Value {
         let name = sym.name().to_owned();
         // Dotted unqualified names are classnames: quote as-is
         // (`` `clojure.core `` ⇒ `(quote clojure.core)`).
