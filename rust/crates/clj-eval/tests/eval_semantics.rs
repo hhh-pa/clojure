@@ -232,6 +232,21 @@ fn closures_and_scope() {
         run_last(&mut eval, "((fn ([x] :one) ([x y] :two)) 1 2)"),
         ":two"
     );
+    // `&` is a valid function name (mangled on the JVM, probe33
+    // `fn-amp-*`/`letfn-amp`).
+    assert_eq!(run_last(&mut eval, "((fn & [x] x) 7)"), "7");
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "((fn & [a] (if (t-zero? a) :d (& (t-dec a)))) 2)"
+        ),
+        ":d"
+    );
+    assert_eq!(run_last(&mut eval, "(letfn [(& [x] x)] (& 5))"), "5");
+    assert_eq!(
+        uncaught("((fn & [x] x) 1 2)"),
+        "clojure.lang.ArityException | Wrong number of args (2) passed to: user/eval3/&--2"
+    );
 }
 
 #[test]

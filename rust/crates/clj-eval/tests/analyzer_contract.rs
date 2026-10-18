@@ -562,6 +562,7 @@ fn fn_spec_errors() {
         "(fn ([x] x) [y])",
         "(fn nm [1] 1)",
         "(fn [u/x] u/x)",
+        "(fn u/f [x] x)",
         "(fn [{:as 5}] 1)",
         "(fn [{:keys [5]}] 1)",
         "(fn [{:foo/strs [a]}] a)",

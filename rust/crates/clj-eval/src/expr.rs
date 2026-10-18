@@ -917,6 +917,13 @@ fn is_local_name(sym: &Symbol) -> bool {
     sym.namespace().is_none() && sym.name() != "&"
 }
 
+/// `fn`/`letfn` names: any unqualified symbol — including `&`,
+/// which the JVM mangles (`_AMPERSAND_`) but otherwise treats
+/// as a name (probe33 `fn-amp-name`, `letfn-amp`).
+fn is_fn_name(sym: &Symbol) -> bool {
+    sym.namespace().is_none()
+}
+
 /// Characters allowed after `&` in key lists are unrestricted; the
 /// bindings before it must be idents (symbols or keywords).
 fn is_ident(v: &Value) -> bool {
@@ -2285,7 +2292,7 @@ impl<'a> Analyzer<'a> {
                     .first()
                     .is_some_and(|f| matches!(f, Value::Vector(_) | Value::List(_))) =>
             {
-                if !is_local_name(sym) {
+                if !is_fn_name(sym) {
                     return Err(self.spec_error("clojure.core/fn", span));
                 }
                 name = Some(sym.name().to_owned());
@@ -2751,15 +2758,9 @@ impl<'a> Analyzer<'a> {
                 Some("letfn*".to_owned()),
             ));
         }
-        if !is_local_name(name) {
-            return Err(self.err(
-                class::ILLEGAL_ARG,
-                format!("Bad binding form, expected symbol, got: {name}"),
-                span,
-                Verb::Compiling,
-                Some("letfn*".to_owned()),
-            ));
-        }
+        // Non-symbols and qualified names are rejected above;
+        // `&` is a valid function name (mangled, probe33
+        // `letfn-amp`).
         Ok(FnSpec {
             name: name.name().to_owned(),
             tail: parts.get(1..).unwrap_or(&[]).to_vec(),

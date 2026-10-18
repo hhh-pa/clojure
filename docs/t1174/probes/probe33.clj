@@ -1,4 +1,5 @@
-;; S4 oracle probes, round 1b: direct let*/loop*/fn* (M10).
+;; S4 oracle probes, round 1b: direct let*/loop*/fn* (M10),
+;; `&` function names (L4).
 ;; Exit 0 (caught; chains printed).
 (defn tx [label f]
   (println label "=>" (pr-str (try (f) (catch Throwable t
@@ -72,3 +73,10 @@
 (tx "fn*-vecempty-body" #(eval '(fn* ([] 1))))
 (tx "fn*-nil" #(eval '(fn* nil)))
 (tx "fn*-nil-body" #(eval '(fn* nil 1)))
+(tx "fn-amp-name" #(eval '(fn & [x] x)))
+(tx "fn-amp-invoke" #(eval '((fn & [x] x) 7)))
+(tx "fn-amp-self" #(eval '((fn & [a] (if (zero? a) :d (& (dec a)))) 2)))
+(tx "fn-amp-multi" #(eval '(fn & ([x] x) ([x y] y))))
+(tx "fn-amp-arity" #(eval '((fn & [x] x) 1 2)))
+(tx "fn-qualname" #(eval '(fn u/f329 [x] x)))
+(tx "letfn-amp" #(eval '(letfn [(& [x] x)] (& 5))))

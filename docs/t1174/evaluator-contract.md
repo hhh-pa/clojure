@@ -138,6 +138,10 @@ Qualified `::ns-keys` (`:ns/keys`, `:ns/syms`, `:ns/keys!`, `:ns/syms!`)
 take simple-symbol vectors; `:ns/strs`, `:ns/strs!`, and qualified
 values under a qualified directive are spec failures (probe29
 `qual-*`; unqualified `:keys` still takes idents, `:syms` symbols).
+Function names admit any unqualified symbol, including `&` (mangled
+to `_AMPERSAND_` on the JVM; `((fn & [x] x) 7)` → `7`, self-recursion
+via `(& …)`, arity failures name `&--N`, probe33 `fn-amp-*`);
+qualified names spec-fail (probe33 `fn-qualname`).
 Post-spec destructuring is infallible for `let`/`fn` (every spec-passing
 shape destructures; shared code with `loop` keeps the error path).
 
@@ -171,6 +175,7 @@ wrapper naming the operator **as written** (`macroexpanding loop at …`):
 
 `(loop [[a] [1]] a)` → `1` (loop destructures like `let`).
 `(loop [[a & b :as m] [1 2]] …)` → `a=1 b=(2) m=[1 2]` (rest + `:as`).
+`letfn` fnspec names follow the `fn` rule (`&` accepted, probe33 `letfn-amp`).
 
 ## E5. `fn*` errors (analyzer, `compiling fn*` wrapper)
 
