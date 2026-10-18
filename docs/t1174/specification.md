@@ -251,7 +251,7 @@ C8. CLI exit codes: 0 success; 1 evaluation/compile error; 2 usage
 ### 2.3 Constraints
 
 - Toolchain: stable Rust, MSRV 1.85 (inkwell floor). `cargo fmt
-  --check` and `cargo clippy --all-targets -- -D warnings` clean.
+  --check` and `cargo clippy --workspace --all-targets -- -D warnings` clean.
 - LLVM: pinned major 22 everywhere (dev + CI + gate image);
   `inkwell` single feature `llvm22-1` (inkwell 0.10.0 supports up to LLVM 22); CI asserts the major.
 - Dependencies: mirrored deny policy (MIT/Apache-2.0/BSD-3/BSL/

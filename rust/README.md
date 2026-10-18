@@ -52,8 +52,8 @@ at it with `LLVM_SYS_221_PREFIX`:
 
 ```sh
 cargo fmt --all --check
-cargo clippy --all-targets -- -D warnings
-cargo test --locked
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace --locked
 cargo build --release --locked
 ```
 
