@@ -181,6 +181,9 @@ Multi-clause validation failures name `fn*`:
 post wraps the body: `(let [% body] (assert c) %)`; combined pre+post is
 `(do pre-asserts… (let [% body] post-asserts… %))`.
 Failure: `AssertionError | Assert failed: (cond-form)` (form printed).
+A leading map is pre/post only when a body form follows it; a lone
+trailing map is the body (`((fn [x] {:pre [false]}) -5)` →
+`{:pre [false]}`, probe31 `fn-lone-*`).
 
 Var-arg rest with no args binds `nil` (probe21 `variadic0 [1 nil]`).
 

@@ -2362,11 +2362,13 @@ impl<'a> Analyzer<'a> {
                     return Err(self.spec_error("clojure.core/fn", span));
                 }
             }
+            // A leading map is pre/post only when a body form follows
+            // it; a lone map is the body (probe31 `fn-lone-*`).
             let (pre, post, body) = match body.split_first() {
-                Some((Value::Map(prepost), body)) => {
+                Some((Value::Map(prepost), rest)) if !rest.is_empty() => {
                     let pre = self.prepost_conds(prepost, "pre", span)?;
                     let post = self.prepost_conds(prepost, "post", span)?;
-                    (pre, post, body.to_vec())
+                    (pre, post, rest.to_vec())
                 }
                 _ => (Vec::new(), Vec::new(), body.to_vec()),
             };

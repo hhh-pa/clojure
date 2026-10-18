@@ -357,6 +357,19 @@ fn prepost() {
         uncaught("((fn [x] {:post [(t-pos? x)]} x) -1)"),
         "java.lang.AssertionError | Assert failed: (t-pos? x)"
     );
+    // A lone trailing map is the body, not conditions (probe31).
+    assert_eq!(
+        run_last(&mut eval, "((fn [x] {:pre [false]}) -5)"),
+        "{:pre [false]}"
+    );
+    assert_eq!(
+        run_last(&mut eval, "((fn [x] {:post [false]}) -5)"),
+        "{:post [false]}"
+    );
+    assert_eq!(
+        run_last(&mut eval, "((fn ([x] {:pre [false]}) ([x y] x)) -5)"),
+        "{:pre [false]}"
+    );
 }
 
 #[test]
