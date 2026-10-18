@@ -162,6 +162,11 @@ wrapper naming the operator **as written** (`macroexpanding loop at …`):
 | `(loop [[a :as 5] …] …)` | `Exception` | `Unsupported binding form: 5` (the `:as` value walks as a binding form immediately, before emission; dangling `:as` walks `nil` → `Unsupported binding form: `; shape values pass the walk and die at the inner-`let` spec instead, probe31 `loop-as-*`) |
 | `(loop [{:keys/:syms [x]} …] …)`, `x` a non-ident | `ClassCastException` | `Cannot cast <class> to clojure.lang.Named` (only symbols/keywords pass the key-list walk — everything else takes the `(namespace x)` cast; `nil` is the helpful-NPE text `Cannot invoke "clojure.lang.Named.getNamespace()" because "x" is null`; probe32 `keys-*`/`syms-*`) |
 | `(loop [{:strs [x]} …] …)`, `x` a non-ident | `Exception` | `Unsupported binding form: <str>` (`:strs` never casts; keywords walk fine and die at the inner-`let` spec instead — except under `:keys`, whose spec takes idents, so `(loop [{:keys [:a]} {:a 1}] a)` → `1`; probe32 `strs-*`/`keys-kw`) |
+| `(let* B …)` / `(loop* B …)`, `B` missing or a non-vector | `IllegalArgumentException` | `Bad binding form, expected vector` (wrapper: `compiling let*` / `compiling loop*`; direct star forms take raw symbol bindings — no spec, no destructuring; probe33 `let*-*`/`loop*-*`) |
+| `(let* [pats] …)` / `(loop* [pats] …)`, odd count | `IllegalArgumentException` | `Bad binding form, expected matched symbol expression pairs` (same wrappers) |
+| `(let* [P _] …)` / `(loop* [P _] …)`, `P` a non-symbol | `IllegalArgumentException` | `Bad binding form, expected symbol, got: <pr>` (same wrappers; destructuring shapes rejected) |
+| `(let* [… & …] …)` / `(loop* [… & …] …)` | `RuntimeException` | `Can't use & as a local binding` (same wrappers; shared with the all-symbol `loop` path) |
+| `(let* [u/a _] …)` / `(loop* [u/a _] …)` | `RuntimeException` | `Can't let qualified name: u/a` (same wrappers) |
 | bare `(loop)` / `(letfn)` / `(binding)` | `ArityException` | `Wrong number of args (0) passed to: clojure.core/NAME` — no wrapper at all (the macro fn itself rejects 0 args before any body runs, probe25 `loop-bare`/`letfn-bare`/`binding-bare`) |
 
 `(loop [[a] [1]] a)` → `1` (loop destructures like `let`).
@@ -177,6 +182,26 @@ Multi-clause validation failures name `fn*`:
 | two variadic overloads | `RuntimeException` | `Can't have more than 1 variadic overload` (probe25 `fn-two-variadic`) |
 | fixed > variadic-fixed (any order) | `RuntimeException` | `Can't have fixed arity function with more params than variadic function` |
 | 21+ params | `RuntimeException` | `Can't specify more than 20 params` (20 OK) |
+| `(fn* A …)`, arity item `A` a non-seq (non-vector head) | `ClassCastException` | `Cannot cast <class> to clojure.lang.ISeq` (stable CCE text, E8; `nil` passes the cast and dies at the arglist-NPE like `()`; probe33 `fn*-nonvec`/`fn*-badname`/`fn*-mixed`/`fn*-maparity`/`fn*-strarity`/`fn*-nil`) |
+| `(fn* (P …) …)`, params `P` a non-vector | `ClassCastException` | `Cannot cast <class> to clojure.lang.IPersistentVector` (probe33 `fn*-symparams`) |
+| `(fn* () …)` / `(fn* nil …)` | `NullPointerException` | `Cannot invoke "clojure.lang.IPersistentVector.count()" because "arglist" is null` (probe33 `fn*-emptyarity`/`fn*-nil`) |
+| `(fn* [P] …)`, `P` (or a rest name) a non-symbol | `IllegalArgumentException` | `fn params must be Symbols` (no `got:` suffix; probe33 `fn*-numparam`/`fn*-destr`/`fn*-restnum`/`fn*-restvec`) |
+| `(fn* [u/a] …)` | `RuntimeException` | `Can't use qualified name as parameter: u/a` (probe33 `fn*-qual`/`fn*-restqual`) |
+| `(fn* [… & &] …)` / `(fn* [p & r & …] …)` | `RuntimeException` | `Invalid parameter list` (`&` as the rest name, or after the rest; probe33 `fn*-amp-amp`/`fn*-amp-restamp`/`fn*-amp-tail`) |
+| `(fn* [p & r x] …)` | `RuntimeException` | `Unexpected parameter` (a plain parameter after the rest; probe33 `fn*-amp-mid`) |
+
+Direct `fn*` is raw `FnExpr`: a leading symbol is always the name (any
+symbol; the simple name binds for self-recursion, so a qualified
+self-call resolves globally — `No such namespace`, probe33
+`fn*-selfqual`/`fn*-selfsimple`), a leading vector is the single
+clause, a trailing `&` drops (fixed arity — `(fn* [a &] a)` compiles,
+probe33 `fn*-amponly`), bare `(fn*)` compiles with zero arities, and a
+leading map is a body form (no pre/post extraction — `((fn* [x]
+{:pre [(pos? x)]} x) -1)` → `-1`, probe33 `fn*-pre`). The dup /
+two-variadic / fixed-vs-variadic / 20-count checks are shared with
+`fn` (same messages, same `compiling fn*` wrapper). Star heads are
+never shadowed (`(let [let* 5] (let* [a 1] a))` → `1`, probe33
+`shadow-let*`).
 
 Checks run per clause in source order — 20-count, the parameter walk
 (emitted-`let` wrapper), the body, then the dup/variadic checks

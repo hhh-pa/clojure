@@ -728,6 +728,175 @@ fn keys_element_cast_matrix() {
 }
 
 #[test]
+fn star_form_errors() {
+    // Direct `let*`/`loop*` take raw symbol bindings (probe33):
+    // missing or non-vector bindings, odd counts, and
+    // non-symbol bindings fail with `Bad binding form`.
+    let star_let = "Syntax error compiling let* at (test:1:1).";
+    for (src, cause) in [
+        (
+            "(let* [a] a)",
+            "java.lang.IllegalArgumentException | Bad binding form, expected matched symbol expression pairs",
+        ),
+        (
+            "(let* a a)",
+            "java.lang.IllegalArgumentException | Bad binding form, expected vector",
+        ),
+        (
+            "(let* [[a] [1]] a)",
+            "java.lang.IllegalArgumentException | Bad binding form, expected symbol, got: [a]",
+        ),
+        (
+            "(let* [a 1 & [2]] a)",
+            "java.lang.RuntimeException | Can't use & as a local binding",
+        ),
+        (
+            "(let*)",
+            "java.lang.IllegalArgumentException | Bad binding form, expected vector",
+        ),
+    ] {
+        check(src, star_let, cause);
+    }
+    let star_loop = "Syntax error compiling loop* at (test:1:1).";
+    for (src, cause) in [
+        (
+            "(loop* [a] a)",
+            "java.lang.IllegalArgumentException | Bad binding form, expected matched symbol expression pairs",
+        ),
+        (
+            "(loop* [{a :x} {:x 1}] a)",
+            "java.lang.IllegalArgumentException | Bad binding form, expected symbol, got: {a :x}",
+        ),
+        (
+            "(loop* [u/a 1] a)",
+            "java.lang.RuntimeException | Can't let qualified name: u/a",
+        ),
+        (
+            "(loop*)",
+            "java.lang.IllegalArgumentException | Bad binding form, expected vector",
+        ),
+    ] {
+        check(src, star_loop, cause);
+    }
+    // Direct `fn*` is raw `FnExpr`: a leading symbol is always
+    // the name, arity items are seqs, params are plain symbols
+    // (probe33).
+    let star_fn = "Syntax error compiling fn* at (test:1:1).";
+    for (src, cause) in [
+        (
+            "(fn* a a)",
+            "java.lang.ClassCastException | Cannot cast clojure.lang.Symbol to clojure.lang.ISeq",
+        ),
+        (
+            "(fn* 5 [a] a)",
+            "java.lang.ClassCastException | Cannot cast java.lang.Long to clojure.lang.ISeq",
+        ),
+        (
+            "(fn* ([a] a) [b])",
+            "java.lang.ClassCastException | Cannot cast clojure.lang.PersistentVector to clojure.lang.ISeq",
+        ),
+        (
+            "(fn* {:a 1})",
+            "java.lang.ClassCastException | Cannot cast clojure.lang.PersistentArrayMap to clojure.lang.ISeq",
+        ),
+        (
+            "(fn* \"doc\" [a] a)",
+            "java.lang.ClassCastException | Cannot cast java.lang.String to clojure.lang.ISeq",
+        ),
+        (
+            "(fn* [1] 1)",
+            "java.lang.IllegalArgumentException | fn params must be Symbols",
+        ),
+        (
+            "(fn* [[a]] a)",
+            "java.lang.IllegalArgumentException | fn params must be Symbols",
+        ),
+        (
+            "(fn* [u/a] a)",
+            "java.lang.RuntimeException | Can't use qualified name as parameter: u/a",
+        ),
+        (
+            "(fn* [a & 5] a)",
+            "java.lang.IllegalArgumentException | fn params must be Symbols",
+        ),
+        (
+            "(fn* [a & u/b] a)",
+            "java.lang.RuntimeException | Can't use qualified name as parameter: u/b",
+        ),
+        (
+            "(fn* [& &] 1)",
+            "java.lang.RuntimeException | Invalid parameter list",
+        ),
+        (
+            "(fn* [a & &] 1)",
+            "java.lang.RuntimeException | Invalid parameter list",
+        ),
+        (
+            "(fn* [a & b & c] 1)",
+            "java.lang.RuntimeException | Invalid parameter list",
+        ),
+        (
+            "(fn* [a & b c] a)",
+            "java.lang.RuntimeException | Unexpected parameter",
+        ),
+        (
+            "(fn* (a b))",
+            "java.lang.ClassCastException | Cannot cast clojure.lang.Symbol to clojure.lang.IPersistentVector",
+        ),
+        (
+            "(fn* ())",
+            "java.lang.NullPointerException | Cannot invoke \"clojure.lang.IPersistentVector.count()\" because \"arglist\" is null",
+        ),
+        (
+            "(fn* nil)",
+            "java.lang.NullPointerException | Cannot invoke \"clojure.lang.IPersistentVector.count()\" because \"arglist\" is null",
+        ),
+        (
+            "(fn* ([a] a) ([b] b))",
+            "java.lang.RuntimeException | Can't have 2 overloads with same arity",
+        ),
+        (
+            "(fn* ([a & r] a) ([b & s] b))",
+            "java.lang.RuntimeException | Can't have more than 1 variadic overload",
+        ),
+        (
+            "(fn* ([a b] a) ([x & r] x))",
+            "java.lang.RuntimeException | Can't have fixed arity function with more params than variadic function",
+        ),
+    ] {
+        check(src, star_fn, cause);
+    }
+    let params21 = (0..21)
+        .map(|n| format!("p{n}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    check(
+        &format!("(fn* [{params21}] 1)"),
+        star_fn,
+        "java.lang.RuntimeException | Can't specify more than 20 params",
+    );
+    // Star bodies share the resolve and recur machinery; the
+    // wrapper names the failing subform (probe33). A qualified
+    // `fn*` name binds only its simple name, so a qualified
+    // self-call resolves globally.
+    check(
+        "(let* [a 1] nope321)",
+        "Syntax error compiling at (test:1:1).",
+        "java.lang.RuntimeException | Unable to resolve symbol: nope321 in this context",
+    );
+    check(
+        "(loop* [a 1] (recur 1 2))",
+        "Syntax error compiling recur at (test:1:14).",
+        "java.lang.IllegalArgumentException | Mismatched argument count to recur, expected: 1 args, got: 2",
+    );
+    check(
+        "((fn* u/foo327 [a] (if a :d (u/foo327 a))) 2)",
+        "Syntax error compiling at (test:1:29).",
+        "java.lang.RuntimeException | No such namespace: u",
+    );
+}
+
+#[test]
 fn letfn_errors() {
     check(
         "(letfn [f] 1)",

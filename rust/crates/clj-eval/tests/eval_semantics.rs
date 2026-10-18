@@ -663,6 +663,67 @@ fn try_catch_finally() {
 }
 
 #[test]
+fn star_form_values() {
+    // Direct `let*`/`loop*`/`fn*` evaluate with raw semantics:
+    // sequential symbol bindings, no destructuring, no spec,
+    // no pre/post (probe33).
+    let (mut eval, _) = rigged();
+    for (src, want) in [
+        ("(let* [a 1] a)", "1"),
+        ("(loop* [a 1] a)", "1"),
+        ("(let* [a 1 b a] b)", "1"),
+        ("(let* [a 1 a 2] a)", "2"),
+        ("(let* [] 1)", "1"),
+        ("(loop* [] 1)", "1"),
+        (
+            "(loop* [a 3] (if (t-zero? a) :done (recur (t-dec a))))",
+            ":done",
+        ),
+        ("((fn* [a] a) 5)", "5"),
+        ("((fn* [a & r] r) 1 2 3)", "(2 3)"),
+        ("((fn* [& r] r) 1 2)", "(1 2)"),
+        ("((fn* [a &] a) 1)", "1"),
+        ("((fn* [x] {:pre [(t-pos? x)]} x) -1)", "-1"),
+        (
+            "((fn* foo322 [a] (if (t-zero? a) :d (foo322 (t-dec a)))) 3)",
+            ":d",
+        ),
+        (
+            "((fn* u/foo328 [a] (if (t-zero? a) :d (foo328 (t-dec a)))) 2)",
+            ":d",
+        ),
+        ("(let [let* 5] (let* [a 1] a))", "1"),
+        ("((fn* ([a] a) ([a b] b)) 1 2)", "2"),
+        ("((fn* [a]) 1)", "nil"),
+        (
+            "((fn* [a] (if (t-zero? a) :done (recur (t-dec a)))) 3)",
+            ":done",
+        ),
+    ] {
+        assert_eq!(run_last(&mut eval, src), want, "{src}");
+    }
+    // Arity failures name the display (`user/eval3/fn--2`: fresh
+    // evaluator, setup fn first, probe33 `fn*-invoke-amp` and
+    // `fn*-invoke0`).
+    for (src, want) in [
+        (
+            "((fn* [a &] a) 1 2)",
+            "clojure.lang.ArityException | Wrong number of args (2) passed to: user/eval3/fn--2",
+        ),
+        (
+            "((fn*) 1)",
+            "clojure.lang.ArityException | Wrong number of args (1) passed to: user/eval3/fn--2",
+        ),
+        (
+            "((fn* [a] a))",
+            "clojure.lang.ArityException | Wrong number of args (0) passed to: user/eval3/fn--2",
+        ),
+    ] {
+        assert_eq!(uncaught(src), want, "{src}");
+    }
+}
+
+#[test]
 fn invoke_table() {
     let (mut eval, _) = rigged();
     for (src, want) in [

@@ -358,9 +358,12 @@ fn is_special(name: &str) -> bool {
             | "if"
             | "do"
             | "let"
+            | "let*"
             | "loop"
+            | "loop*"
             | "letfn"
             | "fn"
+            | "fn*"
             | "recur"
             | "quote"
             | "var"
@@ -582,15 +585,7 @@ impl<'a> Analyzer<'a> {
         // Unspec'd macros with no arguments fail arity, unwrapped
         // (spec'd ones reach their spec/assert checks instead).
         if items.len() == 1 {
-            let name = match op {
-                "loop" => Some("clojure.core/loop"),
-                "binding" => Some("clojure.core/binding"),
-                "letfn" => Some("clojure.core/letfn"),
-                _ => None,
-            };
-            if let Some(name) = name {
-                return Err(CompileError::macro_arity(name, span, &self.source));
-            }
+            self.check_bare_arity(op, span)?;
         }
         match op {
             "def" => self.parse_def(items, span),
@@ -602,13 +597,26 @@ impl<'a> Analyzer<'a> {
             "recur" => self.parse_recur(items, span, tail),
             "set!" => self.parse_set(items, span),
             "try" => self.parse_try(items, span, tail),
-            "let" => self.parse_let(op, items, span, tail),
-            "loop" => self.parse_let(op, items, span, tail),
+            "let" | "let*" => self.parse_let(op, items, span, tail),
+            "loop" | "loop*" => self.parse_let(op, items, span, tail),
             "letfn" => self.parse_letfn(op, items, span, tail),
             "fn" => self.parse_fn(items, span),
+            "fn*" => self.parse_fn_star(items, span),
             "binding" => self.parse_binding(items, span, tail),
             _ => unreachable!("dispatch covers every special form"),
         }
+    }
+
+    /// Bare `(loop)`/`(binding)`/`(letfn)`: the macro fn itself
+    /// rejects 0 args before any body runs (probe25).
+    fn check_bare_arity(&self, op: &str, span: Span) -> Result<(), CompileError> {
+        let name = match op {
+            "loop" => "clojure.core/loop",
+            "binding" => "clojure.core/binding",
+            "letfn" => "clojure.core/letfn",
+            _ => return Ok(()),
+        };
+        Err(CompileError::macro_arity(name, span, &self.source))
     }
 
     /// `(def sym doc? init?)`: count routing first (a 3-count with a
@@ -1845,28 +1853,10 @@ impl<'a> Analyzer<'a> {
         span: Span,
         tail: bool,
     ) -> Result<Expr, CompileError> {
-        let is_loop = op == "loop";
-        let bindings = items.get(1).copied().unwrap_or(&Value::Nil);
-        let Value::Vector(vec) = bindings else {
-            return Err(self.shape_error(is_loop, "a vector for its binding", span, op));
-        };
-        let forms: Vec<&Value> = vec.iter().collect();
-        // MSRV 1.85: `usize::is_multiple_of` is 1.87+.
-        #[allow(clippy::manual_is_multiple_of)]
-        if forms.len() % 2 != 0 {
-            return Err(self.shape_error(
-                is_loop,
-                "an even number of forms in binding vector",
-                span,
-                op,
-            ));
-        }
+        let is_loop = op == "loop" || op == "loop*";
+        let forms = self.let_binding_forms(op, items, span)?;
         let pats: Vec<&Value> = forms.iter().step_by(2).copied().collect();
-        if is_loop {
-            self.validate_loop_bindings(&pats, span, op)?;
-        } else {
-            self.validate_let_bindings(&pats, span, op)?;
-        }
+        self.validate_let_pats(op, &pats, span)?;
         let saved_recur = self.recur;
         if is_loop {
             self.recur = None;
@@ -1903,6 +1893,57 @@ impl<'a> Analyzer<'a> {
                 bindings: bindings_out,
                 body,
             })
+        }
+    }
+
+    /// The `let`/`loop`/`let*`/`loop*` bindings vector,
+    /// shape-checked: star shapes fail `Bad binding form`, macro
+    /// shapes route to the spec/assert checks.
+    fn let_binding_forms<'v>(
+        &self,
+        op: &str,
+        items: &[&'v Value],
+        span: Span,
+    ) -> Result<Vec<&'v Value>, CompileError> {
+        let is_loop = op == "loop" || op == "loop*";
+        let is_star = matches!(op, "let*" | "loop*");
+        let bindings = items.get(1).copied().unwrap_or(&Value::Nil);
+        let Value::Vector(vec) = bindings else {
+            if is_star {
+                return Err(self.star_shape_error(op, "expected vector", span));
+            }
+            return Err(self.shape_error(is_loop, "a vector for its binding", span, op));
+        };
+        let forms: Vec<&Value> = vec.iter().collect();
+        // MSRV 1.85: `usize::is_multiple_of` is 1.87+.
+        #[allow(clippy::manual_is_multiple_of)]
+        if forms.len() % 2 != 0 {
+            if is_star {
+                return Err(self.star_shape_error(
+                    op,
+                    "expected matched symbol expression pairs",
+                    span,
+                ));
+            }
+            return Err(self.shape_error(
+                is_loop,
+                "an even number of forms in binding vector",
+                span,
+                op,
+            ));
+        }
+        Ok(forms)
+    }
+
+    /// Binding-pattern validation for `parse_let`: the star
+    /// checks, the `loop` checks, or the `let` spec+walk.
+    fn validate_let_pats(&self, op: &str, pats: &[&Value], span: Span) -> Result<(), CompileError> {
+        if matches!(op, "let*" | "loop*") {
+            self.validate_star_bindings(pats, span, op)
+        } else if op == "loop" {
+            self.validate_loop_bindings(pats, span, op)
+        } else {
+            self.validate_let_bindings(pats, span, op)
         }
     }
 
@@ -1950,28 +1991,58 @@ impl<'a> Analyzer<'a> {
             }
             return Ok(());
         }
+        self.validate_star_bindings(pats, span, "loop*")
+    }
+
+    /// Raw `let*`/`loop*` binding checks (probe33): symbols only
+    /// (`Bad binding form, expected symbol, got: <pr>`), no `&`,
+    /// no qualified names.
+    fn validate_star_bindings(
+        &self,
+        pats: &[&Value],
+        span: Span,
+        op: &str,
+    ) -> Result<(), CompileError> {
         for pat in pats {
             let Value::Symbol(sym) = pat else {
-                unreachable!("all-symbol case checked above")
+                return Err(self.err(
+                    class::ILLEGAL_ARG,
+                    format!("Bad binding form, expected symbol, got: {}", pr_of(pat)),
+                    span,
+                    Verb::Compiling,
+                    Some(op.to_owned()),
+                ));
             };
-            if sym.name() == "&" && sym.namespace().is_none() {
-                return Err(self.star_error("Can't use & as a local binding", span));
+            if is_amp(pat) {
+                return Err(self.err(
+                    class::RUNTIME,
+                    "Can't use & as a local binding".to_owned(),
+                    span,
+                    Verb::Compiling,
+                    Some(op.to_owned()),
+                ));
             }
             if sym.namespace().is_some() {
-                return Err(self.star_error(&format!("Can't let qualified name: {sym}"), span));
+                return Err(self.err(
+                    class::RUNTIME,
+                    format!("Can't let qualified name: {sym}"),
+                    span,
+                    Verb::Compiling,
+                    Some(op.to_owned()),
+                ));
             }
         }
         Ok(())
     }
 
-    /// A `loop*` (`Compiling`) binding error.
-    fn star_error(&self, message: &str, span: Span) -> CompileError {
+    /// A raw `let*`/`loop*` bindings-shape error (`Compiling`).
+    fn star_shape_error(&self, op: &str, what: &str, span: Span) -> CompileError {
         self.err(
-            class::RUNTIME,
-            message.to_owned(),
+            class::ILLEGAL_ARG,
+            format!("Bad binding form, {what}"),
             span,
             Verb::Compiling,
-            Some("loop*".to_owned()),
+            Some(op.to_owned()),
         )
     }
 
@@ -2225,6 +2296,58 @@ impl<'a> Analyzer<'a> {
         let owned = self.collect_fn_clauses(rest, span)?;
         let slices: Vec<&[&Value]> = owned.iter().map(Vec::as_slice).collect();
         let raw = self.parse_clause_slices(&slices, span)?;
+        self.finish_fn(name, &raw, span)
+    }
+
+    /// `(fn* name? params body* | name? (params body*)+)`: raw
+    /// `FnExpr` semantics — no spec, no destructuring, no
+    /// pre/post. A leading symbol is always the name (any symbol;
+    /// the simple name binds for self-recursion, probe33
+    /// `fn*-selfsimple`); a leading vector is the single clause,
+    /// otherwise every item is a list clause. `nil` passes the
+    /// seq cast and dies at the arglist-NPE like `()` (probe33
+    /// `fn*-nil`); anything else is the `ISeq` CCE.
+    fn parse_fn_star(&mut self, items: &[&Value], span: Span) -> Result<Expr, CompileError> {
+        let mut rest = &items[1..];
+        let mut name: Option<String> = None;
+        if let Some((Value::Symbol(sym), tail)) = rest.split_first() {
+            name = Some(sym.name().to_owned());
+            rest = tail;
+        }
+        let owned: Vec<Vec<&Value>> = if rest.is_empty() {
+            Vec::new()
+        } else if matches!(rest.first(), Some(Value::Vector(_))) {
+            vec![rest.to_vec()]
+        } else {
+            let mut out = Vec::with_capacity(rest.len());
+            for clause in rest {
+                match clause {
+                    Value::List(list) => out.push(list.iter().collect()),
+                    Value::Nil => out.push(Vec::new()),
+                    other => {
+                        return Err(self.fn_star_error(
+                            class::CLASS_CAST,
+                            &NativeError::cast(&jvm_class_of(other), "clojure.lang.ISeq").message,
+                            span,
+                        ));
+                    }
+                }
+            }
+            out
+        };
+        let slices: Vec<&[&Value]> = owned.iter().map(Vec::as_slice).collect();
+        let raw = self.parse_star_clauses(&slices, span)?;
+        self.finish_fn(name, &raw, span)
+    }
+
+    /// Shared `fn`/`fn*` tail: display name, the self-recursion
+    /// slot, per-clause analysis, the `LetFn` wrap for names.
+    fn finish_fn(
+        &mut self,
+        name: Option<String>,
+        raw: &[RawClause],
+        span: Span,
+    ) -> Result<Expr, CompileError> {
         *self.fn_seq += 1;
         let seq = *self.fn_seq;
         let display = match &name {
@@ -2238,7 +2361,7 @@ impl<'a> Analyzer<'a> {
         } else {
             None
         };
-        let arities = self.analyze_arities(&raw, span)?;
+        let arities = self.analyze_arities(raw, span)?;
         self.locals.truncate(base);
         let fun = FunExpr { display, arities };
         // A named `fn` is a one-function `letfn`: the frame extends
@@ -2252,6 +2375,115 @@ impl<'a> Analyzer<'a> {
             }),
             _ => Ok(Expr::Fn(fun)),
         }
+    }
+
+    /// One raw `fn*` clause per slice: the params vector plus the
+    /// whole body (no pre/post extraction — a leading map is a
+    /// body form, probe33 `fn*-pre`). Missing params are the
+    /// arglist-NPE; non-vectors are the `IPersistentVector` CCE.
+    fn parse_star_clauses<'v>(
+        &self,
+        clauses: &[&[&'v Value]],
+        span: Span,
+    ) -> Result<Vec<RawClause<'v>>, CompileError> {
+        let mut raw = Vec::with_capacity(clauses.len());
+        for clause in clauses {
+            let Some((params, body)) = clause.split_first() else {
+                return Err(self.fn_star_error(
+                    class::NULL_POINTER,
+                    "Cannot invoke \"clojure.lang.IPersistentVector.count()\" because \"arglist\" is null",
+                    span,
+                ));
+            };
+            let Value::Vector(vec) = params else {
+                return Err(self.fn_star_error(
+                    class::CLASS_CAST,
+                    &NativeError::cast(&jvm_class_of(params), "clojure.lang.IPersistentVector")
+                        .message,
+                    span,
+                ));
+            };
+            let param_forms: Vec<&Value> = vec.iter().collect();
+            let (fixed, rest) = self.star_params(&param_forms, span)?;
+            raw.push(RawClause {
+                fixed,
+                rest,
+                pre: Vec::new(),
+                post: Vec::new(),
+                body: body.to_vec(),
+            });
+        }
+        Ok(raw)
+    }
+
+    /// Raw `fn*` parameter splitting (probe33): a trailing `&`
+    /// drops (fixed arity); `&` as the rest name, or after the
+    /// rest, is `Invalid parameter list`; a plain parameter after
+    /// the rest is `Unexpected parameter`.
+    fn star_params<'v>(
+        &self,
+        forms: &[&'v Value],
+        span: Span,
+    ) -> Result<(Vec<&'v Value>, Option<&'v Value>), CompileError> {
+        let mut fixed = Vec::new();
+        let mut rest = None;
+        let mut i = 0;
+        while i < forms.len() {
+            let form = forms[i];
+            if is_amp(form) {
+                if rest.is_some() {
+                    return Err(self.fn_star_error(class::RUNTIME, "Invalid parameter list", span));
+                }
+                i += 1;
+                match forms.get(i) {
+                    None => {}
+                    Some(f) if is_amp(f) => {
+                        return Err(self.fn_star_error(
+                            class::RUNTIME,
+                            "Invalid parameter list",
+                            span,
+                        ));
+                    }
+                    Some(f) => {
+                        self.check_star_param(f, span)?;
+                        rest = Some(*f);
+                    }
+                }
+            } else if rest.is_some() {
+                return Err(self.fn_star_error(class::RUNTIME, "Unexpected parameter", span));
+            } else {
+                self.check_star_param(form, span)?;
+                fixed.push(form);
+            }
+            i += 1;
+        }
+        Ok((fixed, rest))
+    }
+
+    /// One raw `fn*` parameter: symbols only, unqualified.
+    fn check_star_param(&self, form: &Value, span: Span) -> Result<(), CompileError> {
+        let Value::Symbol(sym) = form else {
+            return Err(self.fn_star_error(class::ILLEGAL_ARG, "fn params must be Symbols", span));
+        };
+        if sym.namespace().is_some() {
+            return Err(self.fn_star_error(
+                class::RUNTIME,
+                &format!("Can't use qualified name as parameter: {sym}"),
+                span,
+            ));
+        }
+        Ok(())
+    }
+
+    /// A `fn*` (`Compiling`) shape error.
+    fn fn_star_error(&self, class: &'static str, message: &str, span: Span) -> CompileError {
+        self.err(
+            class,
+            message.to_owned(),
+            span,
+            Verb::Compiling,
+            Some("fn*".to_owned()),
+        )
     }
 
     /// Collect one clause per arity: a leading vector is the

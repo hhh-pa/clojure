@@ -25,8 +25,8 @@
   {
    "file": "crates/clj-eval/src/expr.rs",
    "function": "Analyzer<'a>::analyze_special",
-   "cyclomatic": 23.0,
-   "cognitive": 6.0,
+   "cyclomatic": 20.0,
+   "cognitive": 2.0,
    "justification": "one arm per special form; dispatch to per-form parsers"
   },
   {
