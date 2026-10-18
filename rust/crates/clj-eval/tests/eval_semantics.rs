@@ -346,6 +346,7 @@ fn destructure_values() {
         ("((fn [{:foo/keys [a]}] a) {:foo/a 1})", "1"),
         ("(loop [{:foo/keys [a]} {:foo/a 1}] a)", "1"),
         ("(let [{:syms [s]} {'s 1}] s)", "1"),
+        ("(let [{:keys [:b]} {:b 1}] b)", "1"),
         ("(let [[a & [b c]] [1 2 3]] [a b c])", "[1 2 3]"),
         ("(let [[a b] \"xy\"] [a b])", "[\\x \\y]"),
         ("(let [{:keys! [a]} {:a 1}] a)", "1"),
@@ -505,6 +506,15 @@ fn try_catch_finally() {
             "(try ((fn [x] {:pre [(t-pos? x)]} x) -1) (catch Throwable t :t))"
         ),
         ":t"
+    );
+    // Unthrowable catch classes resolve and never match (probe25
+    // `catch-string`; the JVM VerifyErrors instead — E6 divergence).
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(try (throw (t-ex \"e\")) (catch String s :s) (catch Exception e :e))"
+        ),
+        ":e"
     );
     // `binding` unwinds through throws.
     assert_eq!(

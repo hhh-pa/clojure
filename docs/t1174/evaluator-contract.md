@@ -1,7 +1,7 @@
 # T1174 S4 evaluator contract (analyzer + tree-walk evaluator)
 
 Normative error texts, spans, and value semantics for `clj-eval`, pinned
-against JVM oracle probes 20-23 (`probes/probe20.clj` … `probe23.clj`).
+against JVM oracle probes 20-29 (`probes/probe20.clj` … `probe29.clj`).
 All `CompilerException` causes below are oracle-verified verbatim; wrapper
 rules mirror `Compiler.java` (`makeMsg`, `checkSpecs`, `macroexpand1`).
 
@@ -23,6 +23,11 @@ class name, a message, and a span. Rendering has two layers:
      attributed to a subform (`(nil 1)`, resolve errors, unknown ns/var).
    - `<source>` is the file path; eval-fallback forms use line/col of the
      analyzed form. The trailing `.` is part of the message.
+   - Macroexpansion failures caused by a `ClassCastException` render
+     `Unexpected error` in place of `Syntax error`: the destructure
+     walk's `^Named`-hinted `namespace` and entry casts surface as
+     `Unexpected error macroexpanding loop at …` (probe25
+     `loop-keys-nonsym`, `loop-or-string`).
 2. **Cause**: `Class | message` (the informative layer). Tests assert the
    full chain `wrapper <= cause`.
 
@@ -58,6 +63,8 @@ Operator as written names the wrapper (`Syntax error compiling if at …`).
 | `(let [x 1] (set! x 2))` | `IllegalArgumentException` | `Cannot assign to non-mutable: x` (wrapper sym is the constant `fn*`, even inside a named `fn`; on the JVM this fires at emit time, hence the enclosing-method attribution) |
 | `(var)` | `NullPointerException` | `Cannot read field "ns" because "sym" is null` (stable text = modern JDK; JDK-varying, documented) |
 | `(var no-such)` | `RuntimeException` | `Unable to resolve var: no-such in this context` |
+| `(var foo/x)` / `(var user/nope)` / `(var local)` | `RuntimeException` | `Unable to resolve var: X in this context` (one shape for unknown-ns, unknown-name, and local syms alike, probe25 `var-foo-ns`/`var-user-nope`/`var-local`) |
+| `(var v extra…)` | — | extras ignored, returns `#'user/v` (probe25 `var-extra`) |
 | `(var :k)` | `ClassCastException` | stable CCE Keyword→Symbol (E8) |
 | `(recur)` top level | `UnsupportedOperationException` | `Can only recur from tail position` (**divergence**: the JVM hangs in an infinite self-jump here — verified 2× by marker isolation, probe23 notes it; the port rejects like every other enclosure-less `recur`) |
 | `(recur 1)` top level | `IllegalArgumentException` | `Mismatched argument count to recur, expected: 0 args, got: 1` |
@@ -79,6 +86,12 @@ non-assignable (`1`) is `Invalid assignment target`.
 
 `(def user/q 1)` (qualified, current ns) works and returns `#'user/q`.
 
+`(def d "docstring" 1)` binds `1` and records `:doc` in the var's meta
+(auto `:line`/`:column`/`:file`/`:name`/`:ns` plus user meta, probe25
+`def-doc-meta`); a 3-arg `def` whose second arg is not a string is
+`Too many arguments to def` (probe25 `def-nonstring-doc`,
+`def-attrmap` — the special form takes no attr-map).
+
 ## E3. `let` / `fn` spec errors (analyzer, `macroexpanding` wrapper)
 
 The JVM runs every `let`/`fn` form through `clojure.spec.alpha`
@@ -98,8 +111,10 @@ every level must be symbol | vector | map), non-map `:or`, dangling `&`
 replicates the routing with a deep spec-shape check for `let`/`fn`:
 plain symbol (not `&`, unqualified) | vector (recursively valid; `&`
 only as second-to-last with a valid rest form after, `:as` alone may
-follow the rest) | map (keys `:keys`/`:strs`/`:syms` vectors of symbols,
-`:or` a map, `:as` a symbol, other entries `symbol keyword`).
+follow the rest) | map (`:keys` a vector of idents — keywords bind by
+name, probe25 `keys-keyword-first` — `:syms` a vector of symbols,
+`:strs` a vector of simple symbols, `:or` a map, `:as` a symbol, other
+entries `symbol keyword`).
 Qualified `::ns-keys` (`:ns/keys`, `:ns/syms`, `:ns/keys!`, `:ns/syms!`)
 take simple-symbol vectors; `:ns/strs`, `:ns/strs!`, and qualified
 values under a qualified directive are spec failures (probe29
@@ -124,6 +139,7 @@ wrapper naming the operator **as written** (`macroexpanding loop at …`):
 | `(loop [u/x 1] …)` | `RuntimeException` | `Can't let qualified name: u/x` (wrapper: `compiling loop*`) |
 | `(loop [[a & b c] …] …)` | `Exception` | `Unsupported binding form, only :as can follow & parameter` |
 | `(loop [[a &] …] …)` | `Exception` | `Unsupported binding form: ` (nil rest prints empty) |
+| bare `(loop)` / `(letfn)` / `(binding)` | `ArityException` | `Wrong number of args (0) passed to: clojure.core/NAME` — no wrapper at all (the macro fn itself rejects 0 args before any body runs, probe25 `loop-bare`/`letfn-bare`/`binding-bare`) |
 
 `(loop [[a] [1]] a)` → `1` (loop destructures like `let`).
 `(loop [[a & b :as m] [1 2]] …)` → `a=1 b=(2) m=[1 2]` (rest + `:as`).
@@ -135,6 +151,7 @@ Multi-clause validation failures name `fn*`:
 | Form | Cause class | Cause message |
 |---|---|---|
 | dup arity | `RuntimeException` | `Can't have 2 overloads with same arity` |
+| two variadic overloads | `RuntimeException` | `Can't have more than 1 variadic overload` (probe25 `fn-two-variadic`) |
 | fixed > variadic-fixed (any order) | `RuntimeException` | `Can't have fixed arity function with more params than variadic function` |
 | 21+ params | `RuntimeException` | `Can't specify more than 20 params` (20 OK) |
 
@@ -168,9 +185,13 @@ handler path), propagating its own throw instead (probe29
 
 Catch classes resolve against the default import table (`java.lang.*`,
 `clojure.lang.*` short names); anything else is `Unable to resolve
-classname: X`. Catch matching is by class hierarchy (S4 builtin hierarchy,
-see E9). A bare `(catch …)` outside `try` is an invoke of the unresolvable
-symbol `catch` (E7).
+classname: X`. Real-but-unthrowable classes (`String`, `Object`,
+`Number`, …) resolve and never match (**divergence**: the JVM emits
+the handler and dies with `VerifyError | Catch type is not a subclass
+of Throwable …` at class load, probe25 `catch-string`; the port has no
+bytecode verifier, so the handler is dead code). Catch matching is by
+class hierarchy (S4 builtin hierarchy, see E9). A bare `(catch …)`
+outside `try` is an invoke of the unresolvable symbol `catch` (E7).
 
 ## E7. Resolve + invocation errors
 
@@ -269,7 +290,8 @@ Mirrors `destvec*`/`destmap*` (`core.clj`), including the 1.13 directives.
   (`(let [[a b] "xy"] …)` → `[\x \y]`); wrong-type target (number, map,
   closure, …) → `UnsupportedOperationException | nth not supported on
   this type: SIMPLE` (SIMPLE = `getSimpleName` rule: full name for
-  generated classes, e.g. `user$eval447$fn__448`); `nil` → `nil`s.
+  generated classes, e.g. `user$eval447$vec__444__448` with volatile
+  ids, probe25 `closure-nth-simple`); `nil` → `nil`s.
 - Vector with `&`: fixed via `first`/`next` over `(seq v)`; `& rest`
   binds the remainder seq (`(let [[a & r] [1 2 3]] …)` → `a=1 r=(2 3)`);
   exhausted remainder binds `nil` (`(let [[a & r] [1]] …)` → `[1 nil]`,
@@ -309,7 +331,9 @@ Mirrors `destvec*`/`destmap*` (`core.clj`), including the 1.13 directives.
   `5`, `(let [{x :x :or {:x 7}} {}] x)` → `7`, probe26). Both a local
   and a key default for one binding →
   `Exception | Multiple :or defaults for same key: K 'local'`
-  (compile time, `macroexpanding let`/`loop` as-written wrapper).
+  (compile time, `macroexpanding let`/`loop` as-written wrapper — but
+  `fn` params destructure through the emitted `let`, so the wrapper is
+  `macroexpanding clojure.core/let`, probe25 `fn-or-multi`).
 - 1.13 directives: `:keys!`/`:syms!`/`:strs!` require presence, else
   `IllegalArgumentException | Missing required key: K` at runtime (K
   printed bare); a required key with any `:or` default →
@@ -325,7 +349,8 @@ Mirrors `destvec*`/`destmap*` (`core.clj`), including the 1.13 directives.
   keys must name bindings, else `IllegalArgumentException | symbol X in
   :or does not refer to a binding`, and keys outside the selection →
   `IllegalArgumentException | keys #{…} appear only in :or` (both
-  compile time, as-written wrapper). Unknown map directives →
+  compile time, as-written wrapper — `clojure.core/let` for `fn`
+  params, same emitted-`let` rule). Unknown map directives →
   `Exception | Unsupported map directive: K` (loop-destructure path;
   `let`/`fn` spec rejects them first).
 - `get` (shared lookup): map → val/nil; vector with `Int` key → elem

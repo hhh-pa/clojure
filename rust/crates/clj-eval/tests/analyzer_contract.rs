@@ -7,7 +7,7 @@
 // You must not remove this notice, or any other, from this software.
 
 //! Analyzer contract tests: every §E2–E6/E11/E12 shape error, with
-//! oracle-verbatim classes, messages, and wrappers (probes 20–25).
+//! oracle-verbatim classes, messages, and wrappers (probes 20–29).
 //! Single-line sources blame 1:1; one multi-line case pins real
 //! spans.
 

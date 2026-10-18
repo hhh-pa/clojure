@@ -29,7 +29,7 @@
 (tx "fn-dup-arity" #(eval '(fn ([x234] x234) ([y234] y234))))
 (tx "fn-mixed" #(eval '(fn ([x234] x234) [y234])))
 (tx "fn-fixed-after-variadic" #(eval '(fn ([x234 & r234] x234) ([a234 b234] a234))))
-(tx "fn-variadic-after-fixed-ok" #(eval '(fn ([a234 b234] a234) ([x234 & r234] x234))))
+(tx "fn-variadic-after-fixed-err" #(eval '(fn ([a234 b234] a234) ([x234 & r234] x234))))
 (tx "fn-bare-amp" #(eval '(fn [a234 &] a234)))
 (tx "fn-only-rest" #(eval '(fn [& r234] r234)))
 (tx "fn-too-many" #(eval (list* 'fn (vec (map (fn [n] (symbol (str "p" n))) (range 21))) '(1))))
