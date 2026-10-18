@@ -935,8 +935,8 @@ impl Evaluator {
                     pairs = &pairs[..pairs.len() - 1];
                     self.cons_trailing(&mut map, trailing)?;
                 }
-                for pair in pairs.chunks_exact(2) {
-                    map = map.insert(pair[0].clone(), pair[1].clone());
+                for i in (0..pairs.len()).step_by(2) {
+                    map = map.insert(pairs[i].clone(), pairs[i + 1].clone());
                 }
                 Ok(Value::Map(map))
             }

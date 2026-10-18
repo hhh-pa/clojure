@@ -1043,8 +1043,10 @@ impl<'a> Analyzer<'a> {
             ));
         }
         let mut pairs = Vec::with_capacity(forms.len() / 2);
-        for pair in forms.chunks_exact(2) {
-            let var_sym = match pair[0] {
+        // Step indexing, not `chunks_exact` (new clippy wants
+        // `as_chunks`, which needs Rust 1.88 > MSRV 1.85).
+        for i in (0..forms.len()).step_by(2) {
+            let var_sym = match forms[i] {
                 Value::Symbol(sym) => self.resolve_var(sym, span, "var")?,
                 other => {
                     return Err(self.err(
@@ -1056,7 +1058,7 @@ impl<'a> Analyzer<'a> {
                     ));
                 }
             };
-            pairs.push((var_sym, self.analyze(pair[1], span, false)?));
+            pairs.push((var_sym, self.analyze(forms[i + 1], span, false)?));
         }
         Ok(Expr::Binding {
             pairs,
@@ -1659,9 +1661,9 @@ impl<'a> Analyzer<'a> {
         }
         let base = self.locals.len();
         let mut bindings_out = Vec::with_capacity(pats.len());
-        for pair in forms.chunks_exact(2) {
-            let init = self.analyze(pair[1], span, false)?;
-            let (pat, names) = self.build_pattern(pair[0], span)?;
+        for i in (0..forms.len()).step_by(2) {
+            let init = self.analyze(forms[i + 1], span, false)?;
+            let (pat, names) = self.build_pattern(forms[i], span)?;
             self.locals.extend(names);
             bindings_out.push((pat, init));
         }
