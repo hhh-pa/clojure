@@ -43,12 +43,19 @@ fn rigged() -> (Evaluator, Arc<Mutex<Vec<String>>>) {
     (eval, log)
 }
 
-/// `t-plus` (with the `Number` cast) and `t-minus`.
+/// `t-plus` (with the `Number` cast) and `t-minus`. Checked
+/// arithmetic: like `clojure.core/+`, overflow is
+/// `ArithmeticException`, never a debug panic.
 fn install_arith(eval: &mut Evaluator) {
     eval.install_native(
         "t-plus",
         Arc::new(move |args| match args {
-            [Value::Int(a), Value::Int(b)] => Ok(Value::Int(a + b)),
+            [Value::Int(a), Value::Int(b)] => a.checked_add(*b).map(Value::Int).ok_or_else(|| {
+                NativeError::new(
+                    ThrowClass::ArithmeticException,
+                    "integer overflow".to_owned(),
+                )
+            }),
             [a, b] => Err(NativeError::cast(
                 &clj_eval::jvm_class_of(if matches!(a, Value::Int(_)) { b } else { a }),
                 "java.lang.Number",
@@ -59,7 +66,12 @@ fn install_arith(eval: &mut Evaluator) {
     eval.install_native(
         "t-minus",
         Arc::new(|args| match args {
-            [Value::Int(a), Value::Int(b)] => Ok(Value::Int(a - b)),
+            [Value::Int(a), Value::Int(b)] => a.checked_sub(*b).map(Value::Int).ok_or_else(|| {
+                NativeError::new(
+                    ThrowClass::ArithmeticException,
+                    "integer overflow".to_owned(),
+                )
+            }),
             _ => Err(NativeError::arity("test/t-minus", args.len())),
         }),
     );
@@ -77,7 +89,16 @@ fn install_int_fns(eval: &mut Evaluator) {
     );
     eval.install_native(
         "t-dec",
-        Arc::new(|args| int(args).map(|n| Value::Int(n - 1))),
+        Arc::new(|args| {
+            int(args).and_then(|n| {
+                n.checked_sub(1).map(Value::Int).ok_or_else(|| {
+                    NativeError::new(
+                        ThrowClass::ArithmeticException,
+                        "integer overflow".to_owned(),
+                    )
+                })
+            })
+        }),
     );
 }
 
@@ -93,10 +114,13 @@ fn install_misc(eval: &mut Evaluator, log: &Arc<Mutex<Vec<String>>>) {
     let logged = Arc::clone(log);
     eval.install_native(
         "t-log",
-        Arc::new(move |args| {
-            let mut log = logged.lock().unwrap();
-            log.push(pr(&args[0]));
-            Ok(args[0].clone())
+        Arc::new(move |args| match args {
+            [] => Err(NativeError::arity("test/t-log", 0)),
+            [first, ..] => {
+                let mut log = logged.lock().unwrap();
+                log.push(pr(first));
+                Ok(first.clone())
+            }
         }),
     );
     eval.install_native(
@@ -140,6 +164,24 @@ fn uncaught_with(setup: &str, src: &str) -> String {
 
 fn uncaught(src: &str) -> String {
     uncaught_with("", src)
+}
+
+#[test]
+fn doubles_dont_panic() {
+    // 0-arg `t-log` is an arity error, not an index panic.
+    assert_eq!(
+        uncaught("(t-log)"),
+        "clojure.lang.ArityException | Wrong number of args (0) passed to: test/t-log"
+    );
+    // Overflowing arithmetic is `ArithmeticException`, not a debug panic.
+    assert_eq!(
+        uncaught("(t-plus 9223372036854775807 1)"),
+        "java.lang.ArithmeticException | integer overflow"
+    );
+    assert_eq!(
+        uncaught("(t-minus -9223372036854775808 1)"),
+        "java.lang.ArithmeticException | integer overflow"
+    );
 }
 
 #[test]
