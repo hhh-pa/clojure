@@ -937,13 +937,20 @@ impl Evaluator {
             _ => {
                 let mut map = new_map();
                 let mut pairs = &items[..];
-                if pairs.len() % 2 == 1 {
-                    let trailing = pairs[pairs.len() - 1];
+                // Pairs first, trailing last (`(conj (apply hash-map
+                // (pop v)) (peek v))`): the trailer wins duplicates.
+                let trailing = if pairs.len() % 2 == 1 {
+                    let last = pairs[pairs.len() - 1];
                     pairs = &pairs[..pairs.len() - 1];
-                    self.cons_trailing(&mut map, trailing)?;
-                }
+                    Some(last)
+                } else {
+                    None
+                };
                 for i in (0..pairs.len()).step_by(2) {
                     map = map.insert(pairs[i].clone(), pairs[i + 1].clone());
+                }
+                if let Some(last) = trailing {
+                    self.cons_trailing(&mut map, last)?;
                 }
                 Ok(Value::Map(map))
             }

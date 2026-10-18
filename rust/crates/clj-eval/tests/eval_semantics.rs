@@ -348,6 +348,11 @@ fn destructure_values() {
             "{:a 1, :c 3}",
         ),
         ("(let [{a :a} '(:a 1)] a)", "1"),
+        ("(let [{a :a} '(:a 1 {:a 9 :b 8})] [a])", "[9]"),
+        (
+            "(let [{:keys [a b] :as m} '(:a 1 {:b 2})] m)",
+            "{:a 1, :b 2}",
+        ),
         ("(let [[a & r] [1]] [a r])", "[1 nil]"),
     ] {
         if want == "UnsupportedOperationException" {

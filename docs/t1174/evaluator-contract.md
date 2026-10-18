@@ -276,7 +276,9 @@ Mirrors `destvec*`/`destmap*` (`core.clj`), including the 1.13 directives.
   seq-conversion) map; nesting composes; param hints ignored.
 - Seq targets convert first (`seq-to-map-for-destructuring`): empty →
   `{}`, one element → the element, 2+ → pairs as if by assoc (last wins)
-  plus the trailing rule for odd counts: trailing map merges, trailing
+  plus the trailing rule for odd counts, applied LAST so the trailer
+  wins duplicates (probe27 `trailing-wins`/`trailing-order`):
+  trailing map merges, trailing
   2-vector assocs (other lengths → `IllegalArgumentException | Vector arg
   to map conj must be a pair`), trailing `nil` is a no-op, trailing
   sequential contributors must be map entries (ours never are — 2-vectors
