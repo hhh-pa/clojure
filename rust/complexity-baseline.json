@@ -30,13 +30,6 @@
    "justification": "one arm per special form; dispatch to per-form parsers"
   },
   {
-   "file": "crates/clj-eval/src/expr.rs",
-   "function": "Analyzer<'a>::resolve_classname",
-   "cyclomatic": 21.0,
-   "cognitive": 2.0,
-   "justification": "JVM catch-class name table; exact-name arms stay inline"
-  },
-  {
    "file": "crates/clj-eval/src/ext.rs",
    "function": "munge",
    "cyclomatic": 27.0,

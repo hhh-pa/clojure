@@ -206,6 +206,7 @@ Var-arg rest with no args binds `nil` (probe21 `variadic0 [1 nil]`).
 | `(catch Exception q/e …)` | `RuntimeException` | `Can't bind qualified name:q/e` (no space) |
 | `(catch Nope …)` | `IllegalArgumentException` | `Unable to resolve classname: Nope` |
 | `(catch q/Nope …)` | `IllegalArgumentException` | `Unable to resolve classname: q/Nope` |
+| `(catch java.io.Nope …)` | `ClassNotFoundException` | `java.io.Nope` (unknown dotted names are CNFE, probe32 `catch-*-nope`) |
 | clause after `finally` | `RuntimeException` | `finally clause must be last in try expression` |
 | non-clause after `finally` | `RuntimeException` | `finally clause must be last in try expression` (anything past a `finally` reports this, probe32 `try-after-finally`) |
 | non-clause after `catch` | `RuntimeException` | `Only catch or finally clause can follow catch in try expression` |
@@ -216,15 +217,29 @@ A `finally` that throws masks the in-flight exception (body or
 handler path), propagating its own throw instead (probe29
 `finally-masks-*`).
 
-Catch classes resolve against the default import table (`java.lang.*`,
-`clojure.lang.*` short names); anything else is `Unable to resolve
-classname: X`. Real-but-unthrowable classes (`String`, `Object`,
-`Number`, …) resolve and never match (**divergence**: the JVM emits
-the handler and dies with `VerifyError | Catch type is not a subclass
-of Throwable …` at class load, probe25 `catch-string`; the port has no
-bytecode verifier, so the handler is dead code). Catch matching is by
-class hierarchy (S4 builtin hierarchy, see E9). A bare `(catch …)`
-outside `try` is an invoke of the unresolvable symbol `catch` (E7).
+Catch classes resolve against the default imports: every `java.lang`
+throwable short (bulk-verified, probe32 `catch-short-*`), the
+`ExceptionInfo` short (but NOT the `ArityException` short —
+oracle-verified asymmetry, probe32), and the curated throwable FQNs
+(`java.io.IOException`, `java.io.FileNotFoundException`,
+`java.io.EOFException`, `java.io.UncheckedIOException`,
+`java.util.NoSuchElementException`,
+`java.util.concurrent.ExecutionException`,
+`java.lang.reflect.InvocationTargetException`, probe32 `catch-fqn-*`).
+The widened names are dead handlers in S4 (nothing throws them), but
+they analyze clean. Unknown shorts are `Unable to resolve classname:
+X`; unknown dotted names are `ClassNotFoundException | FQN` (probe32
+`catch-fqn-nope`, `catch-jlang-nope`, `catch-clj-nope`).
+**Fence**: exotic-but-real FQNs outside the curated set report
+`ClassNotFoundException` on the port while the JVM resolves them (the
+port has no class loader). Real-but-unthrowable classes (`String`,
+`Object`, `Number`, …) resolve and never match (**divergence**: the
+JVM emits the handler and dies with `VerifyError | Catch type is not
+a subclass of Throwable …` at class load, probe25 `catch-string`; the
+port has no bytecode verifier, so the handler is dead code). Catch
+matching is by class hierarchy (S4 builtin hierarchy, see E9). A bare
+`(catch …)` outside `try` is an invoke of the unresolvable symbol
+`catch` (E7).
 
 ## E7. Resolve + invocation errors
 

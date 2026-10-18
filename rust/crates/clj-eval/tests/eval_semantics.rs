@@ -624,6 +624,15 @@ fn try_catch_finally() {
         ),
         ":e"
     );
+    // Widened `catch` classes resolve (probe32 `catch-*`).
+    assert_eq!(
+        run_last(&mut eval, "(try 1 (catch java.io.IOException e 1))"),
+        "1"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(try 1 (catch InterruptedException e 1))"),
+        "1"
+    );
     // `binding` unwinds through throws.
     assert_eq!(
         run_last(

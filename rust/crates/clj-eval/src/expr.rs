@@ -174,6 +174,154 @@ mod class {
     pub const CLASS_CAST: &str = "java.lang.ClassCastException";
     pub const EX_INFO: &str = "clojure.lang.ExceptionInfo";
     pub const EXCEPTION: &str = "java.lang.Exception";
+    pub const CLASS_NOT_FOUND: &str = "java.lang.ClassNotFoundException";
+}
+
+/// `java.lang` short names that resolve as `catch` classes: the
+/// builtin throwable shorts, every other `java.lang` throwable
+/// (bulk-verified on the oracle, probe32 — dead handlers in S4 since
+/// nothing throws them), and the real-but-unthrowable shorts
+/// (accepted, never match — the JVM `VerifyError`s those instead,
+/// §E6 documents the divergence).
+const JAVA_LANG_CLASSES: &[(&str, &str)] = &[
+    ("Throwable", "java.lang.Throwable"),
+    ("Exception", "java.lang.Exception"),
+    ("Error", "java.lang.Error"),
+    ("RuntimeException", "java.lang.RuntimeException"),
+    (
+        "IllegalArgumentException",
+        "java.lang.IllegalArgumentException",
+    ),
+    ("IllegalStateException", "java.lang.IllegalStateException"),
+    (
+        "UnsupportedOperationException",
+        "java.lang.UnsupportedOperationException",
+    ),
+    ("AssertionError", "java.lang.AssertionError"),
+    ("NullPointerException", "java.lang.NullPointerException"),
+    ("ClassCastException", "java.lang.ClassCastException"),
+    (
+        "IndexOutOfBoundsException",
+        "java.lang.IndexOutOfBoundsException",
+    ),
+    ("ArithmeticException", "java.lang.ArithmeticException"),
+    ("InterruptedException", "java.lang.InterruptedException"),
+    ("NumberFormatException", "java.lang.NumberFormatException"),
+    (
+        "IllegalMonitorStateException",
+        "java.lang.IllegalMonitorStateException",
+    ),
+    (
+        "IllegalThreadStateException",
+        "java.lang.IllegalThreadStateException",
+    ),
+    (
+        "ArrayIndexOutOfBoundsException",
+        "java.lang.ArrayIndexOutOfBoundsException",
+    ),
+    (
+        "StringIndexOutOfBoundsException",
+        "java.lang.StringIndexOutOfBoundsException",
+    ),
+    (
+        "NegativeArraySizeException",
+        "java.lang.NegativeArraySizeException",
+    ),
+    ("ArrayStoreException", "java.lang.ArrayStoreException"),
+    ("NoSuchMethodError", "java.lang.NoSuchMethodError"),
+    ("NoSuchFieldError", "java.lang.NoSuchFieldError"),
+    ("AbstractMethodError", "java.lang.AbstractMethodError"),
+    ("UnsatisfiedLinkError", "java.lang.UnsatisfiedLinkError"),
+    (
+        "ExceptionInInitializerError",
+        "java.lang.ExceptionInInitializerError",
+    ),
+    ("StackOverflowError", "java.lang.StackOverflowError"),
+    ("OutOfMemoryError", "java.lang.OutOfMemoryError"),
+    ("ClassFormatError", "java.lang.ClassFormatError"),
+    ("NoClassDefFoundError", "java.lang.NoClassDefFoundError"),
+    ("VerifyError", "java.lang.VerifyError"),
+    ("LinkageError", "java.lang.LinkageError"),
+    ("ClassCircularityError", "java.lang.ClassCircularityError"),
+    (
+        "IncompatibleClassChangeError",
+        "java.lang.IncompatibleClassChangeError",
+    ),
+    ("InstantiationError", "java.lang.InstantiationError"),
+    ("InternalError", "java.lang.InternalError"),
+    ("UnknownError", "java.lang.UnknownError"),
+    ("ThreadDeath", "java.lang.ThreadDeath"),
+    (
+        "ReflectiveOperationException",
+        "java.lang.ReflectiveOperationException",
+    ),
+    ("ClassNotFoundException", "java.lang.ClassNotFoundException"),
+    ("IllegalAccessException", "java.lang.IllegalAccessException"),
+    ("InstantiationException", "java.lang.InstantiationException"),
+    ("NoSuchMethodException", "java.lang.NoSuchMethodException"),
+    ("NoSuchFieldException", "java.lang.NoSuchFieldException"),
+    (
+        "CloneNotSupportedException",
+        "java.lang.CloneNotSupportedException",
+    ),
+    ("SecurityException", "java.lang.SecurityException"),
+    (
+        "TypeNotPresentException",
+        "java.lang.TypeNotPresentException",
+    ),
+    (
+        "EnumConstantNotPresentException",
+        "java.lang.EnumConstantNotPresentException",
+    ),
+    ("Object", "java.lang.Object"),
+    ("String", "java.lang.String"),
+    ("Number", "java.lang.Number"),
+    ("Boolean", "java.lang.Boolean"),
+    ("Character", "java.lang.Character"),
+    ("Byte", "java.lang.Byte"),
+    ("Short", "java.lang.Short"),
+    ("Integer", "java.lang.Integer"),
+    ("Long", "java.lang.Long"),
+    ("Float", "java.lang.Float"),
+    ("Double", "java.lang.Double"),
+    ("Void", "java.lang.Void"),
+    ("Class", "java.lang.Class"),
+    ("Thread", "java.lang.Thread"),
+];
+
+/// The span a form binds: only lists rebind it — vectors, maps,
+/// sets, and atoms inherit the fallback, like the JVM (which binds
+/// `LINE`/`COLUMN` for seq forms only, probe31 `span-*`).
+fn analyze_span(form: &Value, fallback: Span) -> Span {
+    match form {
+        Value::List(_) => span_of(form, fallback),
+        _ => fallback,
+    }
+}
+
+/// A `java.lang` short name's JVM binary name, if it resolves.
+fn resolve_java_lang(name: &str) -> Option<&'static str> {
+    JAVA_LANG_CLASSES
+        .iter()
+        .find(|(short, _)| *short == name)
+        .map(|(_, jvm)| *jvm)
+}
+
+/// Curated throwable FQNs outside `java.lang` (each oracle-verified,
+/// probe32 `catch-fqn-*`): the port has no class loader, so only
+/// these resolve; anything else dotted is `ClassNotFoundException`
+/// (§E6 fences the exotic remainder).
+fn is_curated_fqn(fqn: &str) -> bool {
+    matches!(
+        fqn,
+        "java.io.IOException"
+            | "java.io.FileNotFoundException"
+            | "java.io.EOFException"
+            | "java.io.UncheckedIOException"
+            | "java.util.NoSuchElementException"
+            | "java.util.concurrent.ExecutionException"
+            | "java.lang.reflect.InvocationTargetException"
+    )
 }
 
 /// Clojure `str` of a value (`nil` → `""`): the `Unsupported binding
@@ -276,19 +424,14 @@ impl<'a> Analyzer<'a> {
     }
 
     /// Analyze one form (`fallback` = enclosing span; `tail` = tail
-    /// position for `recur`). Only lists rebind the span: vectors,
-    /// maps, sets, and atoms inherit it, like the JVM (which binds
-    /// `LINE`/`COLUMN` for seq forms only, probe31 `span-*`).
+    /// position for `recur`).
     pub fn analyze(
         &mut self,
         form: &Value,
         fallback: Span,
         tail: bool,
     ) -> Result<Expr, CompileError> {
-        let span = match form {
-            Value::List(_) => span_of(form, fallback),
-            _ => fallback,
-        };
+        let span = analyze_span(form, fallback);
         match form {
             Value::Symbol(sym) => self.analyze_symbol(sym, span),
             Value::List(list) if !list.is_empty() => {
@@ -910,10 +1053,10 @@ impl<'a> Analyzer<'a> {
     }
 
     /// One `(catch class binding body*)`. Shape errors blame the
-    /// `catch` clause itself (innermost line bindings); clause-order
-    /// errors (in `parse_try`) blame the `try`.
+    /// `try` (the clause is parsed inline, without rebinding —
+    /// probe25 `catch-nonsym`, probe32 `catch-*-nope`); only the
+    /// clause body descends (via [`Analyzer::analyze`]).
     fn parse_catch(&mut self, form: &Value, span: Span) -> Result<Catch, CompileError> {
-        let span = span_of(form, span);
         let Value::List(list) = form else {
             unreachable!("clauses are lists")
         };
@@ -979,58 +1122,77 @@ impl<'a> Analyzer<'a> {
         Ok(Catch { class, slot, body })
     }
 
-    /// Resolve a `catch` class: the throwable hierarchy (short or
-    /// `java.lang.*`, plus the two `clojure.lang.*` throwables)
-    /// matches; real-but-unthrowable classes resolve and never
-    /// match (the JVM `VerifyError`s those instead, §E6 documents
-    /// the divergence); anything else is `Unable to resolve
-    /// classname`.
+    /// Resolve a `catch` class: default-import shorts (`java.lang`
+    /// throwables, the real-but-unthrowable names — which resolve
+    /// and never match, the JVM `VerifyError`s those instead — plus
+    /// clojure's `ExceptionInfo` short), and dotted FQNs (curated
+    /// throwables, `java.lang.*` shorts, the two `clojure.lang.*`
+    /// throwables). Unknown shorts are `Unable to resolve
+    /// classname`; unknown dotted names are `ClassNotFoundException`
+    /// (probe32; §E6).
     fn resolve_classname(&self, sym: &Symbol, span: Span) -> Result<String, CompileError> {
-        let name = match sym.namespace() {
-            None => sym.name().to_owned(),
-            Some("java.lang") => sym.name().to_owned(),
-            Some("clojure.lang") => format!("clojure.lang.{}", sym.name()),
-            Some(_) => {
-                return Err(self.err(
-                    class::ILLEGAL_ARG,
-                    format!("Unable to resolve classname: {sym}"),
-                    span,
-                    Verb::Compiling,
-                    Some("try".to_owned()),
-                ));
+        match sym.namespace() {
+            // Default imports (`ArityException` short does NOT
+            // resolve — oracle-verified, probe32). Dotted bare names
+            // are FQNs: the curated set resolves, `java.lang.*` and
+            // `clojure.lang.*` prefixes strip to their short rules,
+            // anything else dotted is `ClassNotFoundException`.
+            None => {
+                if sym.name().contains('.') {
+                    return self.resolve_dotted(sym.name(), span);
+                }
+                match resolve_java_lang(sym.name()) {
+                    Some(jvm) => Ok(jvm.to_owned()),
+                    None if sym.name() == "ExceptionInfo" => {
+                        Ok("clojure.lang.ExceptionInfo".to_owned())
+                    }
+                    None => Err(self.err(
+                        class::ILLEGAL_ARG,
+                        format!("Unable to resolve classname: {sym}"),
+                        span,
+                        Verb::Compiling,
+                        Some("try".to_owned()),
+                    )),
+                }
             }
-        };
-        let jvm = match name.as_str() {
-            "Throwable" => "java.lang.Throwable",
-            "Exception" => "java.lang.Exception",
-            "Error" => "java.lang.Error",
-            "RuntimeException" => "java.lang.RuntimeException",
-            "IllegalArgumentException" => "java.lang.IllegalArgumentException",
-            "IllegalStateException" => "java.lang.IllegalStateException",
-            "UnsupportedOperationException" => "java.lang.UnsupportedOperationException",
-            "AssertionError" => "java.lang.AssertionError",
-            "NullPointerException" => "java.lang.NullPointerException",
-            "ClassCastException" => "java.lang.ClassCastException",
-            "IndexOutOfBoundsException" => "java.lang.IndexOutOfBoundsException",
-            "ArithmeticException" => "java.lang.ArithmeticException",
-            "clojure.lang.ExceptionInfo" => "clojure.lang.ExceptionInfo",
-            "clojure.lang.ArityException" => "clojure.lang.ArityException",
-            // Real but unthrowable: accepted, never matches.
-            "String" | "Object" | "Number" | "Integer" | "Long" | "Double" | "Float" | "Short"
-            | "Byte" | "Boolean" | "Character" | "Class" | "Thread" => {
-                return Ok(format!("java.lang.{name}"));
-            }
-            _ => {
-                return Err(self.err(
-                    class::ILLEGAL_ARG,
-                    format!("Unable to resolve classname: {sym}"),
-                    span,
-                    Verb::Compiling,
-                    Some("try".to_owned()),
-                ));
-            }
-        };
-        Ok(jvm.to_owned())
+            // Slash-qualified: dotless namespaces (`q/Nope`) never
+            // resolve; dotted ones (`java.lang`, `clojure.lang`,
+            // `java.io`, …) join with a dot and run the FQN rule.
+            Some(ns) if !ns.contains('.') => Err(self.err(
+                class::ILLEGAL_ARG,
+                format!("Unable to resolve classname: {sym}"),
+                span,
+                Verb::Compiling,
+                Some("try".to_owned()),
+            )),
+            Some(ns) => self.resolve_dotted(&format!("{ns}.{}", sym.name()), span),
+        }
+    }
+
+    /// A dotted fully-qualified classname: the curated set resolves,
+    /// `java.lang.*` strips to the short rule, `clojure.lang.*`
+    /// takes the two throwables, anything else is
+    /// `ClassNotFoundException` (probe32).
+    fn resolve_dotted(&self, fqn: &str, span: Span) -> Result<String, CompileError> {
+        if is_curated_fqn(fqn) {
+            return Ok(fqn.to_owned());
+        }
+        if let Some(jvm) = fqn.strip_prefix("java.lang.").and_then(resolve_java_lang) {
+            return Ok(jvm.to_owned());
+        }
+        if fqn
+            .strip_prefix("clojure.lang.")
+            .is_some_and(|short| matches!(short, "ExceptionInfo" | "ArityException"))
+        {
+            return Ok(fqn.to_owned());
+        }
+        Err(self.err(
+            class::CLASS_NOT_FOUND,
+            fqn.to_owned(),
+            span,
+            Verb::Compiling,
+            Some("try".to_owned()),
+        ))
     }
 
     /// `(binding [var init …] body…)`: assert-args shapes, then each

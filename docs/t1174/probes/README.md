@@ -86,7 +86,8 @@ root-cause exception (class | message | ex-data line/col).
   pre/post maps (`fn-lone-*`), macro shadowing (`shadow-*`),
   list-only spans (`span-*`).
 - `probe32.clj` (S4 review round 1b): `fn` clause-check order
-  (`fn-*`), `try` clause order (`try-after-*`).
+  (`fn-*`), `try` clause order (`try-after-*`), `catch` classes
+  (`catch-*`).
 
 Run: `./probe.sh [outdir]`. Gensym ids (`p1__243#`), identity hashes
 (`@7fc19ced`), and inst renderings vary between runs; the contract

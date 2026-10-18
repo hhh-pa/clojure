@@ -296,37 +296,37 @@ fn recur_rules() {
 fn try_shapes() {
     check(
         "(try 1 (catch))",
-        "Syntax error compiling try at (test:1:8).",
+        "Syntax error compiling try at (test:1:1).",
         "java.lang.IllegalArgumentException | Unable to resolve classname: null",
     );
     check(
         "(try 1 (catch String))",
-        "Syntax error compiling try at (test:1:8).",
+        "Syntax error compiling try at (test:1:1).",
         "java.lang.IllegalArgumentException | Bad binding form, expected symbol, got: null",
     );
     check(
         "(try 1 (catch String \"s\" 1))",
-        "Syntax error compiling try at (test:1:8).",
+        "Syntax error compiling try at (test:1:1).",
         "java.lang.IllegalArgumentException | Bad binding form, expected symbol, got: s",
     );
     check(
         "(try 1 (catch Exception q/e 1))",
-        "Syntax error compiling try at (test:1:8).",
+        "Syntax error compiling try at (test:1:1).",
         "java.lang.RuntimeException | Can't bind qualified name:q/e",
     );
     check(
         "(try 1 (catch NopeZZZ e 1))",
-        "Syntax error compiling try at (test:1:8).",
+        "Syntax error compiling try at (test:1:1).",
         "java.lang.IllegalArgumentException | Unable to resolve classname: NopeZZZ",
     );
     check(
         "(try 1 (catch q/NopeZZZ e 1))",
-        "Syntax error compiling try at (test:1:8).",
+        "Syntax error compiling try at (test:1:1).",
         "java.lang.IllegalArgumentException | Unable to resolve classname: q/NopeZZZ",
     );
     check(
         "(try 1 (catch 5 e 1))",
-        "Syntax error compiling try at (test:1:8).",
+        "Syntax error compiling try at (test:1:1).",
         "java.lang.IllegalArgumentException | Unable to resolve classname: 5",
     );
     check(
@@ -349,6 +349,85 @@ fn try_shapes() {
         "Syntax error compiling try at (test:1:1).",
         "java.lang.RuntimeException | finally clause must be last in try expression",
     );
+    // Unknown dotted names are `ClassNotFoundException` (probe32).
+    for (class, fqn) in [
+        ("foo.bar.Baz", "foo.bar.Baz"),
+        ("java.io.Nope", "java.io.Nope"),
+        ("java.lang.Nope", "java.lang.Nope"),
+        ("clojure.lang.Nope", "clojure.lang.Nope"),
+    ] {
+        check(
+            &format!("(try 1 (catch {class} e 1))"),
+            "Syntax error compiling try at (test:1:1).",
+            &format!("java.lang.ClassNotFoundException | {fqn}"),
+        );
+    }
+    // The `ArityException` short does not resolve (probe32).
+    check(
+        "(try 1 (catch ArityException e 1))",
+        "Syntax error compiling try at (test:1:1).",
+        "java.lang.IllegalArgumentException | Unable to resolve classname: ArityException",
+    );
+}
+
+#[test]
+fn catch_class_table() {
+    // Every `java.lang` throwable short, the `ExceptionInfo` short,
+    // and the curated FQNs resolve (probe32 `catch-*`).
+    let mut names = vec![
+        "InterruptedException",
+        "NumberFormatException",
+        "IllegalMonitorStateException",
+        "IllegalThreadStateException",
+        "ArrayIndexOutOfBoundsException",
+        "StringIndexOutOfBoundsException",
+        "NegativeArraySizeException",
+        "ArrayStoreException",
+        "NoSuchMethodError",
+        "NoSuchFieldError",
+        "AbstractMethodError",
+        "UnsatisfiedLinkError",
+        "ExceptionInInitializerError",
+        "StackOverflowError",
+        "OutOfMemoryError",
+        "ClassFormatError",
+        "NoClassDefFoundError",
+        "VerifyError",
+        "LinkageError",
+        "ClassCircularityError",
+        "IncompatibleClassChangeError",
+        "InstantiationError",
+        "InternalError",
+        "UnknownError",
+        "ThreadDeath",
+        "ReflectiveOperationException",
+        "ClassNotFoundException",
+        "IllegalAccessException",
+        "InstantiationException",
+        "NoSuchMethodException",
+        "NoSuchFieldException",
+        "CloneNotSupportedException",
+        "SecurityException",
+        "TypeNotPresentException",
+        "EnumConstantNotPresentException",
+        "ExceptionInfo",
+        "java.io.IOException",
+        "java.io.FileNotFoundException",
+        "java.io.EOFException",
+        "java.io.UncheckedIOException",
+        "java.util.NoSuchElementException",
+        "java.util.concurrent.ExecutionException",
+        "java.lang.reflect.InvocationTargetException",
+    ];
+    assert_eq!(names.len(), 43);
+    names.sort_unstable();
+    names.dedup();
+    assert_eq!(names.len(), 43);
+    for class in names {
+        let src = format!("(try 1 (catch {class} e 1))");
+        let form = read_str(&src, &ReaderOpts::default()).unwrap();
+        Evaluator::new("test").analyze(&form).unwrap();
+    }
     check(
         "(catch Exception e 1)",
         "Syntax error compiling at (test:1:1).",
