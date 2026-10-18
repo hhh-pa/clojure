@@ -2030,10 +2030,9 @@ fn split_params<'v>(forms: &[&'v Value]) -> Option<(Vec<&'v Value>, Option<&'v V
 
 impl<'a> Analyzer<'a> {
     /// `(fn name? params body* | name? (params body*)+)`: the deep
-    /// spec first, then the shared walk over every parameter (under
-    /// the `clojure.core/let` wrapper the emitted destructuring
-    /// `let` carries), then per-clause `fn*` validation in source
-    /// order (20-count, body, dup checks; fixed-vs-variadic last).
+    /// spec first, then per-clause validation in source order
+    /// (20-count, parameter walk under the emitted `let`'s wrapper,
+    /// body, dup checks; fixed-vs-variadic last).
     fn parse_fn(&mut self, items: &[&Value], span: Span) -> Result<Expr, CompileError> {
         let mut rest = &items[1..];
         let mut name: Option<String> = None;
@@ -2054,7 +2053,6 @@ impl<'a> Analyzer<'a> {
         let owned = self.collect_fn_clauses(rest, span)?;
         let slices: Vec<&[&Value]> = owned.iter().map(Vec::as_slice).collect();
         let raw = self.parse_clause_slices(&slices, span)?;
-        self.walk_params(&raw, span)?;
         *self.fn_seq += 1;
         let seq = *self.fn_seq;
         let display = match &name {
@@ -2108,21 +2106,21 @@ impl<'a> Analyzer<'a> {
         Ok(out)
     }
 
-    /// The fn macro's `maybe-destructured` runs before `FnExpr`:
-    /// parameter walks carry the emitted `let`'s wrapper.
-    fn walk_params(&self, raw: &[RawClause], span: Span) -> Result<(), CompileError> {
-        for clause in raw {
-            for pat in clause.fixed.iter().chain(clause.rest.iter()) {
-                if let Err(e) = walk_binding(pat) {
-                    return Err(self.walk_error(e, span, "clojure.core/let"));
-                }
+    /// One clause's parameter walk (the fn macro's
+    /// `maybe-destructured` runs before `FnExpr`): carries the
+    /// emitted `let`'s wrapper.
+    fn walk_clause(&self, clause: &RawClause, span: Span) -> Result<(), CompileError> {
+        for pat in clause.fixed.iter().chain(clause.rest.iter()) {
+            if let Err(e) = walk_binding(pat) {
+                return Err(self.walk_error(e, span, "clojure.core/let"));
             }
         }
         Ok(())
     }
 
-    /// Per-clause `fn*` validation in source order (20-count, body,
-    /// dup checks; fixed-vs-variadic last).
+    /// Per-clause `fn*` validation in source order: 20-count, the
+    /// parameter walk, the body, then the dup/variadic checks;
+    /// fixed-vs-variadic last (probe32 `fn-*`).
     fn analyze_arities(
         &mut self,
         raw: &[RawClause],
@@ -2141,6 +2139,7 @@ impl<'a> Analyzer<'a> {
                     Some("fn*".to_owned()),
                 ));
             }
+            self.walk_clause(clause, span)?;
             let arity = self.analyze_clause(clause, span)?;
             if clause.rest.is_some() {
                 if variadic_fixed.is_some() {
@@ -2288,7 +2287,6 @@ impl<'a> Analyzer<'a> {
             let owned = self.collect_fn_clauses(&tail_refs, span)?;
             let slices: Vec<&[&Value]> = owned.iter().map(Vec::as_slice).collect();
             let raw = self.parse_clause_slices(&slices, span)?;
-            self.walk_params(&raw, span)?;
             let arities = self.analyze_arities(&raw, span)?;
             fns.push((spec.name.clone(), FunExpr { display, arities }));
         }

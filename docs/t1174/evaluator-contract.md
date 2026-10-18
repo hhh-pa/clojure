@@ -176,6 +176,14 @@ Multi-clause validation failures name `fn*`:
 | fixed > variadic-fixed (any order) | `RuntimeException` | `Can't have fixed arity function with more params than variadic function` |
 | 21+ params | `RuntimeException` | `Can't specify more than 20 params` (20 OK) |
 
+Checks run per clause in source order — 20-count, the parameter walk
+(emitted-`let` wrapper), the body, then the dup/variadic checks
+against earlier clauses — with fixed-vs-variadic last. So a dup
+between clauses 1–2 beats clause 3's `:or` error, but clause 1's own
+body error beats that same dup (probe32 `fn-*`). Clause lists are
+span-transparent (clause errors blame the `fn` form); body lists
+rebind (probe32 `fn-body-span`, `fn-clause-span`).
+
 `([x] …)` + `([x & r] …)` is legal (`((fn ([x] x) ([x & r] r)) 1 2)` → `(2)`).
 `([& r] …)` alone is legal. Pre/post: pre conditions become leading
 `(assert c)` … in the body (`(fn* ([x] (assert (pos? x)) (inc x)))`);

@@ -654,6 +654,50 @@ fn fn_star_errors() {
         "Syntax error compiling fn* at (test:1:1).",
         "java.lang.RuntimeException | Can't specify more than 20 params",
     );
+    // Per-clause order: 20-count, walk, body, dup checks (probe32).
+    check(
+        "(fn ([x] x) ([y] y) ([{a :x :or {a 1 :x 2}}] a))",
+        "Syntax error compiling fn* at (test:1:1).",
+        "java.lang.RuntimeException | Can't have 2 overloads with same arity",
+    );
+    check(
+        "(fn ([x] nope) ([y] y) ([z] z))",
+        "Syntax error compiling at (test:1:1).",
+        "java.lang.RuntimeException | Unable to resolve symbol: nope in this context",
+    );
+    check(
+        "(fn ([x] x) ([y] nope))",
+        "Syntax error compiling at (test:1:1).",
+        "java.lang.RuntimeException | Unable to resolve symbol: nope in this context",
+    );
+    let or21 = format!(
+        "(fn ([{{a :x :or {{a 1 :x 2}}}} {}] x))",
+        (0..20)
+            .map(|n| format!("p{n}"))
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
+    check(
+        &or21,
+        "Syntax error compiling fn* at (test:1:1).",
+        "java.lang.RuntimeException | Can't specify more than 20 params",
+    );
+    check(
+        "(fn ([x & r] x) ([a b] a) ([{a :x :or {a 1 :x 2}}] z))",
+        "Syntax error macroexpanding clojure.core/let at (test:1:1).",
+        "java.lang.Exception | Multiple :or defaults for same key: :x 'a'",
+    );
+    check(
+        "(fn [{a :x :or {a 1 :x 2}}] nope)",
+        "Syntax error macroexpanding clojure.core/let at (test:1:1).",
+        "java.lang.Exception | Multiple :or defaults for same key: :x 'a'",
+    );
+    // Clause lists are span-transparent, but body lists rebind.
+    check(
+        "(fn [x] (do nope 2))",
+        "Syntax error compiling at (test:1:9).",
+        "java.lang.RuntimeException | Unable to resolve symbol: nope in this context",
+    );
 }
 
 #[test]
