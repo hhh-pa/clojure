@@ -521,6 +521,32 @@ pub fn fnv1a_hex(s: &str) -> String {
 
 /// Compare our outcome against an expected one (exact for `:jvm`,
 /// snapshot for `:ours`); `Err` describes the first difference.
+/// Compare one rendered pair after gensym normalization (`raw`
+/// adds the raw renderings to the mismatch message, as before).
+fn compare_rendered(
+    i: usize,
+    label: &str,
+    x: &Option<String>,
+    y: &Option<String>,
+    raw: Option<(&Option<String>, &Option<String>)>,
+) -> Result<(), String> {
+    match (x, y) {
+        (Some(xc), Some(yc)) => {
+            let xc = normalize_gensyms(xc);
+            let yc = normalize_gensyms(yc);
+            if xc != yc {
+                let mut msg = format!("form {i} {label}:\n  ours {xc:?}\n  want {yc:?}");
+                if let Some((xr, yr)) = raw {
+                    msg.push_str(&format!("\n  ours raw {xr:?}\n  want raw {yr:?}"));
+                }
+                return Err(msg);
+            }
+            Ok(())
+        }
+        _ => Err(format!("form {i}: unrepresentable rendering compared")),
+    }
+}
+
 pub fn compare_outcomes(ours: &Outcome, want: &Outcome) -> Result<(), String> {
     match (ours, want) {
         (Outcome::Ok(a), Outcome::Ok(b)) => {
@@ -528,31 +554,8 @@ pub fn compare_outcomes(ours: &Outcome, want: &Outcome) -> Result<(), String> {
                 return Err(format!("form count: ours {} vs want {}", a.len(), b.len()));
             }
             for (i, (x, y)) in a.iter().zip(b.iter()).enumerate() {
-                match (&x.canon, &y.canon) {
-                    (Some(xc), Some(yc)) => {
-                        let xc = normalize_gensyms(xc);
-                        let yc = normalize_gensyms(yc);
-                        if xc != yc {
-                            return Err(format!(
-                                "form {i} canon:\n  ours {xc:?}\n  want {yc:?}\n  ours raw {:?}\n  want raw {:?}",
-                                x.raw, y.raw
-                            ));
-                        }
-                    }
-                    _ => return Err(format!("form {i}: unrepresentable rendering compared")),
-                }
-                match (&x.canon_meta, &y.canon_meta) {
-                    (Some(xm), Some(ym)) => {
-                        let xm = normalize_gensyms(xm);
-                        let ym = normalize_gensyms(ym);
-                        if xm != ym {
-                            return Err(format!(
-                                "form {i} canon-meta:\n  ours {xm:?}\n  want {ym:?}"
-                            ));
-                        }
-                    }
-                    _ => return Err(format!("form {i}: unrepresentable rendering compared")),
-                }
+                compare_rendered(i, "canon", &x.canon, &y.canon, Some((&x.raw, &y.raw)))?;
+                compare_rendered(i, "canon-meta", &x.canon_meta, &y.canon_meta, None)?;
             }
             Ok(())
         }
