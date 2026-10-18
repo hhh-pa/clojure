@@ -1,0 +1,44 @@
+==> rust quality gates: provisioning tools
++ rustup component add llvm-tools-preview
++ rustup toolchain install nightly-2026-10-01 --profile minimal --no-self-update
+==> $WS: cargo audit --deny warnings
++ cargo audit --db $WS/target/advisory-db --deny warnings
+FAILED: cargo audit --db $WS/target/advisory-db --deny warnings (exit 1)
+==> $WS: cargo deny check licenses bans sources
++ cargo deny check licenses bans sources
+stub: deny ok
+==> $WS: udeps seed holds 2 fingerprints
+==> $WS: cargo udeps (nightly-2026-10-01)
++ cargo +nightly-2026-10-01 udeps --workspace --all-targets
+stub: udeps ok
+==> $WS: geiger unsafe ratchet
++ $BIN/geiger $WS
+geiger solo...
+  unsafe in solo                                          2
+geiger: workspace unsafe total 2; deps allowing unsafe: 0 (informational)
+geiger: OK
+==> $WS: complexity ratchet
++ $BIN/complexity $WS
+--- most complex functions ---
+  a.rs:big cyclomatic=16 cognitive=1
+complexity: 1 violations (1 baselined) -> OK
+==> $WS: coverage reports -> $REPORT
+seeding llvm-cov target dir from $WS/target/debug
+llvm-cov target seeded in Ns
++ cargo llvm-cov --no-report --workspace nextest --run-ignored all --no-fail-fast
+stub: suite ran
++ cargo llvm-cov report --lcov --workspace --output-path $REPORT/lcov.info
+WARNING: $REPORT/lcov.info has absurd count 18446744073709551615 at src/absurd.rs DA:1; clamped to 0
++ cargo llvm-cov report --html --workspace --output-dir $REPORT
++ $SYS/lib/rustlib/x86_64-stub/bin/llvm-profdata merge -sparse ... (1 profraw) -o $WS/target/llvm-cov-target/canonical.profdata
++ $SYS/lib/rustlib/x86_64-stub/bin/llvm-cov export -instr-profile=$WS/target/llvm-cov-target/canonical.profdata --format=lcov ... (1 objects)
+WARNING: raw export has absurd count 18446744073709551615 at $WS/crates/app/tests/../src/tour.rs DA:2; clamped to 0
++ $SYS/lib/rustlib/x86_64-stub/bin/llvm-cov show -instr-profile=$WS/target/llvm-cov-target/canonical.profdata --format=html --output-dir=$REPORT/html.canonical -object ... (1 objects)
+canonical coverage: cargo 8/9 lines -> canonical 10/12 (recovered 2 genuinely-executed lines)
+coverage for $WS: 83.33% lines (10/12, 3 files)
+    0.00%     0/1     src/absurd.rs
+   50.00%     1/2     crates/app/src/tour.rs
+  100.00%     9/9     src/a.rs
++ $BIN/coverage-floor $REPORT/lcov.info 80
+coverage floor: 83.33% lines (10/12, 3 files) vs 80.00% floor ($REPORT/lcov.info)
+coverage floor: OK

@@ -1,0 +1,118 @@
+name: setup-llvm
+description: >
+  Install the pinned LLVM 22 toolchain for this runner (apt.llvm.org
+  on Linux, Homebrew llvm@22 on macOS, official MSVC tarball on
+  Windows), export LLVM_SYS_221_PREFIX plus PATH
+  for the inkwell (clj-aot) build, and assert the LLVM 22.1 major so
+  local, CI, and gate-image toolchains cannot drift (spec 2.3).
+inputs:
+  version:
+    description: Pinned LLVM major (apt.llvm.org + brew llvm@N form).
+    required: false
+    default: "22"
+  patch:
+    description: Pinned exact LLVM version (Windows tarball asset).
+    required: false
+    default: "22.1.8"
+runs:
+  using: composite
+  steps:
+    - if: runner.os == 'Linux'
+      shell: bash
+      run: |
+        set -euo pipefail
+        sudo apt-get update
+        sudo apt-get install -y wget gnupg lsb-release
+        wget -q https://apt.llvm.org/llvm.sh
+        chmod +x llvm.sh
+        sudo ./llvm.sh "${{ inputs.version }}"
+        # llvm-22-dev brings llvm-config, CMake files, headers, and
+        # static archives; the lib*-dev companions satisfy whatever
+        # llvm-config --libs/--system-libs reports for static linking
+        # (notably libPolly, which ships separately).
+        sudo apt-get install -y "llvm-${{ inputs.version }}-dev" \
+          "libpolly-${{ inputs.version }}-dev" \
+          libffi-dev libzstd-dev zlib1g-dev libxml2-dev libtinfo-dev libedit-dev
+        dir="/usr/lib/llvm-${{ inputs.version }}"
+        test -x "$dir/bin/llvm-config"
+        "$dir/bin/llvm-config" --version | grep -q '^22\.1\.'
+        echo "$dir/bin" >> "$GITHUB_PATH"
+        echo "LLVM_SYS_221_PREFIX=$dir" >> "$GITHUB_ENV"
+    - if: runner.os == 'macOS'
+      shell: bash
+      run: |
+        set -euo pipefail
+        HOMEBREW_NO_AUTO_UPDATE=1 brew install "llvm@${{ inputs.version }}"
+        dir="$(brew --prefix "llvm@${{ inputs.version }}")"
+        "$dir/bin/llvm-config" --version | grep -q '^22\.1\.'
+        echo "$dir/bin" >> "$GITHUB_PATH"
+        echo "LLVM_SYS_221_PREFIX=$dir" >> "$GITHUB_ENV"
+    - if: runner.os == 'Windows'
+      shell: bash
+      run: |
+        set -euo pipefail
+        # The choco llvm package's install omits llvm-config.exe, which
+        # llvm-sys requires; use the official MSVC release tarball
+        # instead (full tool tree, exact pin, no admin install).
+        V="${{ inputs.patch }}"
+        asset="clang+llvm-$V-x86_64-pc-windows-msvc.tar.xz"
+        # Forward slashes: GITHUB_WORKSPACE uses backslashes, which
+        # msys mkdir/tar resolve inconsistently; the normalized form
+        # works for both msys tools and the Windows API.
+        dir="$(printf '%s' "$GITHUB_WORKSPACE" | tr '\\' '/')/.llvm-cache/llvm-$V"
+        rm -rf "$dir"
+        mkdir -p "$dir"
+        curl -sSLf --retry 3 -o /tmp/llvm.tar.xz \
+          "https://github.com/llvm/llvm-project/releases/download/llvmorg-$V/$asset"
+        test -s /tmp/llvm.tar.xz
+        tar -xJf /tmp/llvm.tar.xz -C "$dir" --strip-components=1
+        rm /tmp/llvm.tar.xz
+        echo "--- key tools:"; ls "$dir/bin" | grep -iE '^(llvm-config|clang|lld)' || true
+        test -x "$dir/bin/llvm-config.exe"
+        "$dir/bin/llvm-config.exe" --version | grep -q '^22\.1\.'
+        echo "$dir/bin" >> "$GITHUB_PATH"
+        echo "LLVM_SYS_221_PREFIX=$dir" >> "$GITHUB_ENV"
+        # Static linking needs xml2s.lib, which the tarball omits:
+        # vcpkg's static libxml2 provides it (tolerating its sibling
+        # static names by copying to the expected file name).
+        VCPKG="${VCPKG_INSTALLATION_ROOT:-C:/vcpkg}"
+        "$VCPKG/vcpkg.exe" install libxml2:x64-windows-static --clean-after-build
+        xmldir="$VCPKG/installed/x64-windows-static/lib"
+        echo "--- xml libs:"; ls "$xmldir" | grep -i xml || true
+        if [ ! -f "$xmldir/xml2s.lib" ]; then
+          for cand in libxml2s.lib libxml2.lib xml2.lib; do
+            if [ -f "$xmldir/$cand" ]; then
+              cp "$xmldir/$cand" "$xmldir/xml2s.lib"
+              echo "setup-llvm: using $cand as xml2s.lib"
+              break
+            fi
+          done
+        fi
+        test -f "$xmldir/xml2s.lib"
+        # rustc checks `static=` native libs at rlib time using only -L
+        # paths, and llvm-sys marks Windows system libs static; their
+        # home is the spaceful SDK dir RUSTFLAGS cannot spell (space
+        # splitting). Transplant the genuine import libs next to
+        # xml2s.lib, which is already on the -L path.
+        sdkver="$(ls 'C:/Program Files (x86)/Windows Kits/10/Lib/' | grep -E '^[0-9]+\.' | sort -V | tail -1)"
+        sdkdir="C:/Program Files (x86)/Windows Kits/10/Lib/$sdkver/um/x64"
+        for lib in psapi shell32 ole32 uuid advapi32 ws2_32 ntdll userenv dbghelp kernel32; do
+          if [ -f "$sdkdir/$lib.lib" ]; then
+            cp "$sdkdir/$lib.lib" "$xmldir/$lib.lib"
+          else
+            echo "setup-llvm: no $lib.lib in $sdkdir"
+          fi
+        done
+        legacy="$(find 'C:/Program Files/Microsoft Visual Studio' -name legacy_stdio_definitions.lib -path '*x64*' 2>/dev/null | head -1 || true)"
+        if [ -n "$legacy" ]; then
+          cp "$legacy" "$xmldir/legacy_stdio_definitions.lib"
+        else
+          echo 'setup-llvm: legacy_stdio_definitions.lib not found (may be unneeded)'
+        fi
+        # Static CRT: the tarball's LLVM archives are MT_StaticRelease
+        # (like vcpkg's static triplet), while Rust defaults to the
+        # dynamic CRT; mixing the two crashes at runtime (LNK4098 +
+        # STATUS_ACCESS_VIOLATION). Building Rust static-CRT makes the
+        # whole binary single-CRT — and VCRedist-independent.
+        echo "RUSTFLAGS=-L $xmldir -C target-feature=+crt-static" >> "$GITHUB_ENV"
+        echo "$VCPKG/installed/x64-windows-static/bin" >> "$GITHUB_PATH"

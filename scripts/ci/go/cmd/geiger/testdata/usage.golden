@@ -1,0 +1,17 @@
+cargo-geiger gate (T1174): fail when workspace `unsafe` grows.
+
+geiger 0.13 cannot run on virtual manifests, so this runs it once per
+workspace member and sums each member's own unsafe counters (used + unused,
+so used/unused reclassification alone never trips the gate). Crates whose
+bins carry required-features get those
+features enabled from cargo metadata, so the bins are analyzed too.
+
+The sum is compared against <workspace>/geiger-baseline.json: a higher total
+fails, a lower one prints a tighten-at-leisure note. Dependency unsafe is
+reported (informational) but never gated: new deps routinely allow unsafe.
+
+Usage: geiger <workspace> [--regen]
+  --regen rewrites the baseline instead of checking (adoption/updates only).
+
+Requires cargo-geiger on PATH.
+

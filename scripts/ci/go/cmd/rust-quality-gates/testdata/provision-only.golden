@@ -1,0 +1,4 @@
+==> rust quality gates: provisioning tools
++ rustup component add llvm-tools-preview
++ rustup toolchain install nightly-2026-10-01 --profile minimal --no-self-update
+rust quality gates: tools provisioned for $WS

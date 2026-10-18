@@ -1,0 +1,4 @@
+cargo metadata failed:
+error: stub metadata failure
+note: extra context line
+

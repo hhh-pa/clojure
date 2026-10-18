@@ -1,0 +1,10 @@
+geiger alpha...
+cargo geiger failed for alpha: cargo geiger --manifest-path /fake/ws/alpha/Cargo.toml --output-format Json --features feat-a feat-b
+error: stub geiger failure for alpha
+error: second error line
+--- stderr tail ---
+error: stub geiger failure for alpha
+warning: some warning
+error: second error line
+tail context
+

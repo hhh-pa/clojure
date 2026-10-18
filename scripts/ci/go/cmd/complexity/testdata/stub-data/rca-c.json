@@ -1,0 +1,1 @@
+{"spaces": [{"kind": "impl", "name": "Foo", "spaces": [{"kind": "function", "metrics": {"cognitive": {"sum": 1}, "cyclomatic": {"sum": 20}}, "name": "method"}]}, {"kind": "struct", "spaces": [{"kind": "function", "metrics": {"cognitive": {"sum": 0}, "cyclomatic": {"sum": 0}}, "name": "zero"}]}, {"name": "NoKind", "spaces": []}]}

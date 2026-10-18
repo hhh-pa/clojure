@@ -1,0 +1,1 @@
+{"packages": [{"package": {"id": {"name": "solo"}}, "unsafety": {"unused": {"exprs": {"unsafe_": 0}, "functions": {"unsafe_": 0}, "item_impls": {"unsafe_": 0}, "item_traits": {"unsafe_": 0}, "methods": {"unsafe_": 0}}, "used": {"exprs": {"unsafe_": 0}, "functions": {"unsafe_": 2}, "item_impls": {"unsafe_": 0}, "item_traits": {"unsafe_": 0}, "methods": {"unsafe_": 0}}}}]}

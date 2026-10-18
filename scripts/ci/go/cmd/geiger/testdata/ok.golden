@@ -1,0 +1,6 @@
+geiger alpha...
+geiger beta...
+  unsafe in alpha                                         3
+  unsafe in beta                                          1
+geiger: workspace unsafe total 4; deps allowing unsafe: 2 (informational)
+geiger: OK

@@ -1,0 +1,1 @@
+FAIL: collected zero violations but the baseline lists 4 (tool failure or mass fix?); regen explicitly if the code is really clean

@@ -1,0 +1,31 @@
+#!/bin/sh
+# Stub llvm-cov: export serves the raw LCOV fixture (SFs rebased onto
+# the workspace); show builds the canonical HTML dir.
+if [ -n "$STUB_LOG" ]; then
+  printf '%s\n' "llvm-cov $*" >> "$STUB_LOG"
+fi
+case "$1" in
+  export)
+    raw="$STUB_DATA/raw.lcov"
+    case "$STUB_RAW" in
+      small) raw="$STUB_DATA/raw-small.lcov" ;;
+      narrow) raw="$STUB_DATA/raw-narrow.lcov" ;;
+    esac
+    sed "s|/ws/|$PWD/|g" "$raw"
+    ;;
+  show)
+    dir=""
+    prev=""
+    for a in "$@"; do
+      case "$a" in
+        --output-dir=*) dir="${a#--output-dir=}" ;;
+        *) [ "$prev" = "--output-dir" ] && dir="$a" ;;
+      esac
+      prev="$a"
+    done
+    rm -rf "$dir"
+    mkdir -p "$dir"
+    printf 'canonical-html\n' > "$dir/index.html"
+    ;;
+  *) echo "stub: unexpected llvm-cov $*" >&2; exit 1 ;;
+esac

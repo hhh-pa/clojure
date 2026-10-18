@@ -1,0 +1,7 @@
+note: 1 baseline entry no longer violate (prune at leisure)
+--- most complex functions ---
+  a.rs:big cyclomatic=30 cognitive=5
+  b.rs:cog cyclomatic=3 cognitive=25
+  sub/c.rs:Foo::method cyclomatic=20 cognitive=1
+  a.rs:big::inner cyclomatic=16 cognitive=1
+complexity: 4 violations (5 baselined) -> OK

@@ -1,0 +1,1 @@
+{"packages": [{"manifest_path": "/fake/ws/alpha/Cargo.toml", "name": "alpha", "targets": [{"required-features": ["feat-b"]}, {"required-features": ["feat-a", "feat-b"]}, {}]}, {"manifest_path": "/fake/ws/beta/Cargo.toml", "name": "beta", "targets": [{"required-features": null}]}]}

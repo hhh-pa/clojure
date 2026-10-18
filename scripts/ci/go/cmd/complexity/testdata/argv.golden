@@ -1,0 +1,1 @@
+rca -m -O json -o OUT -p ./a.rs -p ./b.rs -p ./sub/c.rs

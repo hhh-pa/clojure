@@ -1,0 +1,40 @@
+Rust quality gates (T1174): audit, deny, udeps, geiger, complexity, coverage.
+
+Usage: rust-quality-gates <workspace-dir> <report-dir> <cov-runner> [cov-args...]
+       rust-quality-gates <workspace-dir> --provision-only
+  workspace-dir: Rust workspace root (Cargo.toml, Cargo.lock, deny.toml,
+    .cargo/audit.toml, *-baseline.json)
+  report-dir: where coverage reports land (lcov.info + html/)
+  cov-runner + cov-args: how llvm-cov runs the suite, e.g.
+    nextest --profile ci --run-ignored all
+    test --workspace
+  --provision-only: install every pinned tool plus the toolchains they
+    need, then exit without running any gate. Used to bake the CI gate
+    image (scripts/ci/quality-gates.Dockerfile).
+  NOTE: for nextest, OMIT the run subcommand. `cargo llvm-cov nextest`
+  calls `cargo nextest run` internally, so a literal run would be treated
+  as a test-name filter and the coverage run would silently execute only
+  the tests with "run" in their name. The script refuses such args.
+
+Runs every gate plus coverage on every build; exits nonzero citing the
+first failure (a red gate never hides the others' signal, and coverage —
+report-only observability — always publishes so Codecov trends never gap).
+Tools are pinned below and provisioned idempotently (prebuilt binaries
+into the stage's cargo bin with a cargo-install fallback when a prebuilt
+cannot execute here — upstream gnu builds may need newer glibc than
+bookworm's 2.36 — plus rustup components).
+Linux-only:
+every call site is a Linux container. Pure Go, stdlib only.
+
+Coverage note (T1174): rustc records #[path]-included modules in binary
+crates under `<crate>/tests/../src/*.rs`,
+which cargo-llvm-cov 0.9.1 silently drops from every report. The LCOV
+step therefore re-exports from the same profile data with raw llvm-cov
+and merges those records onto their canonical paths (pure test sources
+stay excluded), validated as a line-superset of cargo's view with a
+fallback to cargo's reports. The recovered lines are genuinely executed
+by the suite; without this the binary workspaces report ~10-66% for
+suites that actually cover >80%. Execution counts above 2**62 (llvm
+occasionally emits u64::MAX on async-block boundaries) are clamped to 0
+on every published LCOV — they crash the Coverage plugin's parser.
+

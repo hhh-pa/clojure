@@ -1,0 +1,75 @@
+#!/bin/sh
+# Stub cargo(1) for rust-quality-gates tests. Handles smoke probes,
+# audit/deny/udeps/metadata/geiger, and the llvm-cov suite + reports.
+# STUB_DATA holds fixtures; STUB_LOG collects argv lines.
+if [ -n "$STUB_LOG" ]; then
+  printf '%s\n' "cargo $*" >> "$STUB_LOG"
+fi
+fail() { echo "stub: $1" >&2; exit "${2:-1}"; }
+case "$1" in
+  audit)
+    [ "$2" = "--version" ] && { echo "stub: audit 0.0.0"; exit 0; }
+    [ -n "$STUB_AUDIT_FAIL" ] && fail "audit found advisories"
+    echo "stub: audit ok"
+    ;;
+  deny)
+    echo "stub: deny ok"
+    ;;
+  +*)
+    echo "stub: udeps ok"
+    ;;
+  metadata)
+    cat "$STUB_DATA/metadata.json"
+    ;;
+  geiger)
+    cat "$STUB_DATA/geiger-solo.json"
+    ;;
+  llvm-cov)
+    [ "$2" = "--version" ] && { echo "stub: llvm-cov 0.0.0"; exit 0; }
+    case "$2" in
+      --no-report)
+        [ -n "$STUB_LLVMCOV_FAIL" ] && fail "llvm-cov suite failed"
+        ct="${CARGO_TARGET_DIR:-$PWD/target}/llvm-cov-target"
+        mkdir -p "$ct/debug/deps"
+        printf 'profraw' > "$ct/new.profraw"
+        printf '#!/bin/sh\n' > "$ct/debug/deps/testobj"
+        chmod +x "$ct/debug/deps/testobj"
+        printf 'not-an-object\n' > "$ct/debug/deps/testobj.d"
+        echo "stub: suite ran"
+        ;;
+      report)
+        case "$3" in
+          --lcov)
+            out=""
+            prev=""
+            for a in "$@"; do
+              [ "$prev" = "--output-path" ] && out="$a"
+              prev="$a"
+            done
+            sed "s|/ws/|$PWD/|g" "$STUB_DATA/cargo.lcov" > "$out"
+            ;;
+          --html)
+            dir=""
+            prev=""
+            for a in "$@"; do
+              [ "$prev" = "--output-dir" ] && dir="$a"
+              prev="$a"
+            done
+            mkdir -p "$dir/html"
+            printf 'cargo-html\n' > "$dir/html/index.html"
+            ;;
+          *) fail "unexpected llvm-cov report $3" ;;
+        esac
+        ;;
+      *) fail "unexpected llvm-cov $2" ;;
+    esac
+    ;;
+  *)
+    # Smoke probes ("cargo <sub> --version") and anything else: succeed.
+    if [ "$2" = "--version" ]; then
+      echo "stub: $1 0.0.0"
+      exit 0
+    fi
+    fail "unexpected cargo $*"
+    ;;
+esac

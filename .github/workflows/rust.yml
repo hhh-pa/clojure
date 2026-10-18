@@ -1,0 +1,336 @@
+name: rust
+
+on:
+  # Daily master build (default branch only, full job matrix, no path
+  # filter): catches toolchain drift and flaky gates even on quiet
+  # days. Off-peak minute to dodge the top-of-hour queue.
+  schedule:
+    - cron: "30 5 * * *"
+  # Manual full runs (same unfiltered matrix as the schedule).
+  workflow_dispatch:
+  push:
+    paths:
+      - "rust/**"
+      - "scripts/ci/**"
+      - ".dockerignore"
+      - ".github/workflows/rust.yml"
+      # Local composite actions (profile-runner, setup-llvm) run in
+      # every job; without this, edits to them never trigger CI.
+      - ".github/actions/**"
+  pull_request:
+    paths:
+      - "rust/**"
+      - "scripts/ci/**"
+      - ".dockerignore"
+      - ".github/workflows/rust.yml"
+      - ".github/actions/**"
+
+env:
+  CARGO_TERM_COLOR: always
+
+# Least privilege: jobs inherit read-only; artifact upload, the GHA
+# cache, and PR comments widen their own job below.
+permissions:
+  contents: read
+
+jobs:
+  fmt-clippy:
+    name: fmt + clippy
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read # checkout
+      actions: write # cargo cache
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/profile-runner
+        with:
+          cache-key: runner-profile-${{ runner.os }}-${{ hashFiles('.github/actions/profile-runner/**', 'scripts/ci/go/go.mod', 'scripts/ci/go/cmd/runner-profile/**', 'scripts/ci/go/internal/executil/**') }}
+      - uses: ./.github/actions/setup-llvm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      # Cargo registry + target/ cache: warm runs skip crate downloads
+      # and reuse prior compilation. `save-if` forces a save on branch
+      # runs too, so the second push already hits.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+          save-if: 'true'
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read # checkout
+      actions: write # cargo cache
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/profile-runner
+        with:
+          cache-key: runner-profile-${{ runner.os }}-${{ hashFiles('.github/actions/profile-runner/**', 'scripts/ci/go/go.mod', 'scripts/ci/go/cmd/runner-profile/**', 'scripts/ci/go/internal/executil/**') }}
+      - uses: ./.github/actions/setup-llvm
+      - uses: dtolnay/rust-toolchain@stable
+      # Cargo registry + target/ cache: warm runs skip crate downloads
+      # and reuse prior compilation. `save-if` forces a save on branch
+      # runs too, so the second push already hits.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+          save-if: 'true'
+      - run: cargo test --workspace --locked
+
+  quality-gates:
+    name: quality gates
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read # checkout
+      actions: write # coverage artifact + GHA image cache
+      pull-requests: write # sticky coverage comment
+    env:
+      # Image repo for the cached gate image (public, so pulls stay
+      # anonymous). Override with the GATE_IMAGE repo variable; pushes need
+      # the DOCKERHUB_USERNAME / DOCKERHUB_TOKEN secrets (a PAT with
+      # read+write on the namespace). Without the token the image builds
+      # local-only and the gates still run (fork PRs stay green, slower).
+      GATE_IMAGE: ${{ vars.GATE_IMAGE || 'hhhpa/clojure' }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/profile-runner
+        with:
+          cache-key: runner-profile-${{ runner.os }}-${{ hashFiles('.github/actions/profile-runner/**', 'scripts/ci/go/go.mod', 'scripts/ci/go/cmd/runner-profile/**', 'scripts/ci/go/internal/executil/**') }}
+      # Cache key: every input the image depends on. A hit pulls the image
+      # and runs the gates in it; a miss rebuilds, pushes, then runs.
+      - name: compute image key
+        run: |
+          key="${{ hashFiles('rust/Cargo.lock', 'scripts/ci/quality-gates.Dockerfile', 'scripts/ci/go/**') }}"
+          echo "GATE_KEY=$key" >> "$GITHUB_ENV"
+          echo "Gate image: $GATE_IMAGE:$key"
+      - name: pull gate image
+        id: pull
+        continue-on-error: true
+        run: docker pull "$GATE_IMAGE:$GATE_KEY"
+      - name: set up buildx
+        if: steps.pull.outcome == 'failure'
+        uses: docker/setup-buildx-action@v4
+      # `secrets` is unusable in `if:`, so probe it in `run:` and gate on
+      # the output instead.
+      - name: check docker hub credentials
+        id: creds
+        if: steps.pull.outcome == 'failure'
+        run: |
+          if [ -n "${{ secrets.DOCKERHUB_TOKEN }}" ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: docker hub login
+        if: steps.pull.outcome == 'failure' && steps.creds.outputs.available == 'true'
+        uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: build gate image
+        if: steps.pull.outcome == 'failure'
+        run: |
+          if [ -n "${{ secrets.DOCKERHUB_TOKEN }}" ]; then
+            docker buildx build --push --cache-from type=gha --cache-to type=gha,mode=max \
+              -t "$GATE_IMAGE:$GATE_KEY" -f scripts/ci/quality-gates.Dockerfile .
+          else
+            echo '::warning::DOCKERHUB_TOKEN not set; gate image stays local.'
+            docker buildx build --load --cache-from type=gha --cache-to type=gha,mode=max \
+              -t "$GATE_IMAGE:$GATE_KEY" -f scripts/ci/quality-gates.Dockerfile .
+          fi
+      # Go CI-tools: the built binaries are cached by exact source hash,
+      # so runs without Go changes skip setup-go, test, and build
+      # entirely; a miss rebuilds (with the Go build cache warm) and
+      # re-saves only after a successful build. The live invocations
+      # below run ./ci-tools-bin (bind-mounted into the gate container
+      # where the gates need the provisioned image).
+      - name: restore ci-tools binaries
+        id: tools-bin-cache
+        uses: actions/cache/restore@v5
+        with:
+          path: ci-tools-bin
+          key: ci-tools-${{ runner.os }}-${{ hashFiles('scripts/ci/go/**') }}
+      - name: set up Go
+        if: steps.tools-bin-cache.outputs.cache-hit != 'true'
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: scripts/ci/go/go.mod
+          cache: false # stdlib-only module: nothing to cache but the build below
+      - name: cache Go build
+        if: steps.tools-bin-cache.outputs.cache-hit != 'true'
+        uses: actions/cache@v5
+        with:
+          path: ~/.cache/go-build
+          key: go-build-${{ runner.os }}-${{ hashFiles('scripts/ci/go/**') }}
+          restore-keys: |
+            go-build-${{ runner.os }}-
+      - name: test Go CI-tools
+        if: steps.tools-bin-cache.outputs.cache-hit != 'true'
+        working-directory: scripts/ci/go
+        run: |
+          test -z "$(gofmt -l .)"
+          go vet ./...
+          go test ./...
+          # Platform-tagged files never compile on Linux CI otherwise;
+          # build every CI OS.
+          GOOS=windows go build ./...
+          GOOS=darwin go build ./...
+      - name: build ci-tools binaries
+        id: build-tools
+        if: steps.tools-bin-cache.outputs.cache-hit != 'true'
+        run: |
+          rm -rf ci-tools-bin && mkdir -p ci-tools-bin
+          cd scripts/ci/go
+          for tool in coverage-floor coverage-summary geiger complexity rust-quality-gates; do
+            CGO_ENABLED=0 go build -o "$GITHUB_WORKSPACE/ci-tools-bin/$tool" ./cmd/$tool
+          done
+          ls "$GITHUB_WORKSPACE/ci-tools-bin"
+      - name: save ci-tools binaries
+        if: steps.tools-bin-cache.outputs.cache-hit != 'true' && steps.build-tools.outcome == 'success'
+        uses: actions/cache/save@v5
+        with:
+          path: ci-tools-bin
+          key: ci-tools-${{ runner.os }}-${{ hashFiles('scripts/ci/go/**') }}
+      - name: run quality gates
+        run: docker run --rm -v "${{ github.workspace }}:/work" -v "${{ github.workspace }}/ci-tools-bin:/tools" -w /work "$GATE_IMAGE:$GATE_KEY" /tools/rust-quality-gates rust rust/target/llvm-cov nextest --run-ignored all --no-fail-fast
+      # The container runs as root; hand the report back so later steps can
+      # read it.
+      - name: take ownership of coverage report
+        if: always()
+        run: |
+          if [ -d rust/target/llvm-cov ]; then
+            sudo chown -R "$(id -u):$(id -g)" rust/target/llvm-cov
+          fi
+      - name: publish coverage summary
+        if: always()
+        run: ./ci-tools-bin/coverage-summary --out rust/target/llvm-cov/coverage-comment.md rust/target/llvm-cov/lcov.info >> "$GITHUB_STEP_SUMMARY"
+      - name: upload coverage report
+        if: always() && hashFiles('rust/target/llvm-cov/lcov.info') != ''
+        uses: actions/upload-artifact@v6
+        with:
+          name: coverage-report
+          path: rust/target/llvm-cov/
+          retention-days: 30
+      - name: coverage PR comment
+        if: always() && github.event_name == 'pull_request' && hashFiles('rust/target/llvm-cov/coverage-comment.md') != ''
+        uses: marocchino/sticky-pull-request-comment@v3.0.5
+        with:
+          header: coverage
+          path: rust/target/llvm-cov/coverage-comment.md
+          skip_unchanged: true
+      - name: upload coverage to codecov
+        if: always() && hashFiles('rust/target/llvm-cov/lcov.info') != ''
+        uses: codecov/codecov-action@v7
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: rust/target/llvm-cov/lcov.info
+          fail_ci_if_error: false
+      - name: upload test results to codecov
+        if: ${{ !cancelled() && hashFiles('rust/target/nextest/default/junit.xml') != '' }}
+        uses: codecov/codecov-action@v7
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: rust/target/nextest/default/junit.xml
+          report_type: test_results
+          fail_ci_if_error: false
+
+  go-tools-test:
+    name: go ci-tools tests
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read # checkout
+      actions: write # profiler cache save; ci-tools restore only (gates owns that save)
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/profile-runner
+        with:
+          cache-key: runner-profile-${{ runner.os }}-${{ hashFiles('.github/actions/profile-runner/**', 'scripts/ci/go/go.mod', 'scripts/ci/go/cmd/runner-profile/**', 'scripts/ci/go/internal/executil/**') }}
+      # Same binary cache as the gates preamble: a hit means this
+      # exact source hash already passed, so setup and tests skip.
+      # Restore-only here; the gates job owns the save.
+      - name: restore ci-tools binaries
+        id: tools-bin-cache
+        uses: actions/cache/restore@v5
+        with:
+          path: ci-tools-bin
+          key: ci-tools-${{ runner.os }}-${{ hashFiles('scripts/ci/go/**') }}
+      - uses: actions/setup-go@v6
+        if: steps.tools-bin-cache.outputs.cache-hit != 'true'
+        with:
+          go-version-file: scripts/ci/go/go.mod
+          cache: false # stdlib-only module: no go.sum to cache against
+      - run: go test ./...
+        if: steps.tools-bin-cache.outputs.cache-hit != 'true'
+        working-directory: scripts/ci/go
+
+  # Every run keeps its release binaries as downloadable Actions artifacts
+  # (`clojure-rs-<target>.tar.gz` per OS, 14-day retention), so any
+  # commit's build can be fetched without cutting a tag release.
+  build-release:
+    name: release (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read # checkout
+      actions: write # artifact upload
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/profile-runner
+        with:
+          cache-key: runner-profile-${{ runner.os }}-${{ hashFiles('.github/actions/profile-runner/**', 'scripts/ci/go/go.mod', 'scripts/ci/go/cmd/runner-profile/**', 'scripts/ci/go/internal/executil/**') }}
+      - uses: ./.github/actions/setup-llvm
+      - uses: dtolnay/rust-toolchain@stable
+      # Cargo registry + target/ cache: warm runs skip crate downloads
+      # and reuse prior compilation. `save-if` forces a save on branch
+      # runs too, so the second push already hits.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+          save-if: 'true'
+      - run: cargo build --release --locked
+      # Same package steps as rust-release.yml: smoke-test the binary,
+      # then tar it as dist/clojure-rs-<target>.tar.gz.
+      - name: package binary
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+          target=$(rustc -vV | sed -n 's/^host: //p')
+          bin=target/release/clojure-rs
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            bin="$bin.exe"
+          fi
+          test -x "$bin"
+          "$bin" --version | grep -q '^clojure-rs '
+          "$bin" --help | grep -q 'Usage:'
+          mkdir -p dist
+          asset="dist/clojure-rs-$target.tar.gz"
+          tar -czf "$asset" -C target/release "$(basename "$bin")"
+          echo "target=$target" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v6
+        with:
+          name: clojure-rs-${{ steps.package.outputs.target }}
+          path: rust/dist/clojure-rs-*.tar.gz
+          if-no-files-found: error
+          retention-days: 14

@@ -1,0 +1,23 @@
+#!/bin/sh
+# Stub rust-code-analysis-cli: serves rca-<basename>.json per -p file.
+outdir=""
+files=""
+prev=""
+for a in "$@"; do
+  case "$prev" in
+    -o) outdir="$a" ;;
+    -p) files="$files $a" ;;
+  esac
+  prev="$a"
+done
+if [ -n "$STUB_LOG" ]; then
+  printf '%s\n' "rca $*" >> "$STUB_LOG"
+fi
+if [ "$1" = "--version" ]; then
+  echo "stub: rca 0.0.0"
+  exit 0
+fi
+for f in $files; do
+  mkdir -p "$outdir/$(dirname "$f")"
+  cat "$STUB_DATA/rca-$(basename "$f" .rs).json" > "$outdir/$f.json"
+done

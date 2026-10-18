@@ -1,0 +1,21 @@
+[package]
+name = "clj-aot"
+version = "0.1.0"
+edition = "2024"
+description = "LLVM AOT backend for the pure Clojure subset"
+license = "EPL-1.0"
+
+[dependencies]
+# Pinned LLVM major for the whole workspace (spec 2.3): inkwell 0.10.0
+# supports up to LLVM 22, so the pin is 22, not 23. The `llvm22-1`
+# feature only compiles against LLVM 22 (llvm-sys build script
+# rejects anything else), which is the real version enforcement;
+# CI additionally asserts `llvm-config --version`.
+# Host targets only (default `target-all` references every target's
+# init symbols, which the Windows MSVC import set does not satisfy;
+# x86+aarch64 covers all supported runners and release hosts).
+inkwell = { version = "0.10.0", default-features = false, features = [
+    "llvm22-1",
+    "target-aarch64",
+    "target-x86",
+] }

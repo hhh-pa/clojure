@@ -1,0 +1,1 @@
+{"violations": [{"file": "a.rs", "function": "big", "cyclomatic": 16, "cognitive": 1}]}

@@ -1,0 +1,22 @@
+rust-code-analysis gate (T1174): fail on new/worsened complexity violations.
+
+Collects per-function cyclomatic/cognitive metrics over every .rs file in the
+workspace (excluding build output) and compares named-function violations
+(cyclomatic > 15 or cognitive > 20) against the checked-in
+<workspace>/complexity-baseline.json ratchet:
+
+* a violation not in the baseline -> error (fix the function or, with a
+  reviewer, extend the baseline)
+* a baselined violation whose metrics grew -> error
+* a baseline entry that no longer violates -> note (prune at leisure)
+
+Fail-closed: no .rs files collected, an empty result against a non-empty
+baseline, or any unparseable rca output file is an error, never a silent
+OK — a green gate must mean "analyzed, nothing new", not "analyzed
+nothing".
+
+Usage: complexity <workspace-dir> [--regen]
+  --regen rewrites the baseline instead of checking (adoption/updates only).
+
+Requires rust-code-analysis-cli on PATH.
+

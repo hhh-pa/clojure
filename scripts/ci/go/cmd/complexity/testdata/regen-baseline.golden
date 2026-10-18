@@ -1,0 +1,29 @@
+{
+ "_comment": "rust-code-analysis baseline (T1174): named functions with cyclomatic>15 or cognitive>20. CI fails on NEW violations or worsened ones; prune entries that no longer violate.",
+ "violations": [
+  {
+   "file": "a.rs",
+   "function": "big",
+   "cyclomatic": 30,
+   "cognitive": 5
+  },
+  {
+   "file": "a.rs",
+   "function": "big::inner",
+   "cyclomatic": 16,
+   "cognitive": 1
+  },
+  {
+   "file": "b.rs",
+   "function": "cog",
+   "cyclomatic": 3,
+   "cognitive": 25
+  },
+  {
+   "file": "sub/c.rs",
+   "function": "Foo::method",
+   "cyclomatic": 20,
+   "cognitive": 1
+  }
+ ]
+}

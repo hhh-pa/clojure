@@ -1,0 +1,4 @@
+{
+ "_comment": "rust-code-analysis baseline (T1174): named functions with cyclomatic>15 or cognitive>20. CI fails on NEW violations or worsened ones; prune entries that no longer violate.",
+ "violations": []
+}

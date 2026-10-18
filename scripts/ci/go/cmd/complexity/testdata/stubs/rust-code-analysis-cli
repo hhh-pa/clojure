@@ -1,0 +1,33 @@
+#!/bin/sh
+# Stub rust-code-analysis-cli for complexity golden/oracle tests.
+# Serves $STUB_DATA/rca-<basename>.json per -p file, mirroring rca's
+# outdir layout (<outdir>/<input>.json). STUB_LOG collects argv lines.
+outdir=""
+files=""
+prev=""
+for a in "$@"; do
+  case "$prev" in
+    -o) outdir="$a" ;;
+    -p) files="$files $a" ;;
+  esac
+  prev="$a"
+done
+if [ -n "$STUB_LOG" ]; then
+  printf '%s\n' "rca $*" >> "$STUB_LOG"
+fi
+if [ -n "$STUB_RCA_FAIL" ]; then
+  echo "error: stub rca failure" >&2
+  echo "note: extra context" >&2
+  exit 1
+fi
+for f in $files; do
+  mkdir -p "$outdir/$(dirname "$f")"
+  base=$(basename "$f" .rs)
+  if [ "$STUB_BADJSON" = "$base" ]; then
+    printf '{oops\n' > "$outdir/$f.json"
+  elif [ -n "$STUB_EMPTY" ]; then
+    printf '{"spaces": []}\n' > "$outdir/$f.json"
+  else
+    cat "$STUB_DATA/rca-$base.json" > "$outdir/$f.json"
+  fi
+done
