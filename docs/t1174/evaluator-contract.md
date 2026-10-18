@@ -75,7 +75,8 @@ Operator as written names the wrapper (`Syntax error compiling if at …`).
 Check order (mirrors `RecurExpr.Parser`, probe23 order pins): tail/enclosure
 → across-`try` → arity. So `(loop [a] (try (recur 1 2) …))` reports
 across-`try`, and non-tail `(recur 1 2)` reports tail position, never the
-mismatch.
+mismatch. A `fn` boundary resets the fence (fresh `NO_RECUR` per
+`FnExpr`, whole clause — probe30 `fence-fn-try`, `fence-fn-prepost`).
 
 `set!` analyzes its target first, then requires an assignable: a list
 target such as `(set! (x) 2)` fails during analysis

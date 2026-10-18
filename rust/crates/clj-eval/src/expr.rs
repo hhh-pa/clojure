@@ -2159,6 +2159,11 @@ impl<'a> Analyzer<'a> {
         let saved_recur = self.recur;
         let count = clause.fixed.len() + usize::from(clause.rest.is_some());
         self.recur = Some(count);
+        // A `fn` boundary resets the try/recur fence (`Compiler.java`
+        // binds `NO_RECUR` null per `FnExpr`), for the whole clause
+        // (pre/post included, probe30 `fence-fn-*`).
+        let saved_no_recur = self.no_recur;
+        self.no_recur = false;
         let mut body = Vec::with_capacity(clause.pre.len() + clause.body.len() + 1);
         for cond in &clause.pre {
             body.push(self.analyze_assert(cond, span)?);
@@ -2182,6 +2187,7 @@ impl<'a> Analyzer<'a> {
         }
         self.locals.truncate(base);
         self.recur = saved_recur;
+        self.no_recur = saved_no_recur;
         Ok(Arity {
             fixed,
             rest: rest_pat,

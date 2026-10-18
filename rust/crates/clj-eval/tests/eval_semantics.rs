@@ -247,6 +247,22 @@ fn loop_recur() {
         ),
         ":done"
     );
+    // A `fn` boundary resets the try/recur fence (probe30): the
+    // fence error fires at analysis, so these values pin the reset.
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(try ((fn [n] (if n 1 (recur 2))) 0) (catch Exception e 2))"
+        ),
+        "1"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(try ((fn [n] {:pre [(t-pos? (t-plus n 1))]} (if (t-zero? n) :d (recur (t-dec n)))) 2) (catch Exception e :c))"
+        ),
+        ":d"
+    );
     // `recur` rebinds through patterns (with `:or`).
     assert_eq!(
         run_last(

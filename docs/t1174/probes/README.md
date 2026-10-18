@@ -77,6 +77,8 @@ root-cause exception (class | message | ex-data line/col).
   order (`binding-*`), qualified `::ns-keys` matrix (`qual-*`),
   `(throw nil)` NPE (`throw-nil`), `finally` masking
   (`finally-masks-*`).
+- `probe30.clj` (S4 review round 1b): `fn` try-fence reset
+  (`fence-fn-*`).
 
 Run: `./probe.sh [outdir]`. Gensym ids (`p1__243#`), identity hashes
 (`@7fc19ced`), and inst renderings vary between runs; the contract
