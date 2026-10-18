@@ -118,6 +118,19 @@ fn match_int(s: &str) -> Option<Result<NumLit, NumErr>> {
         Some(b) => (b, true),
         None => (rest, false),
     };
+    if let Some(r) = match_int_zero_prefixed(body, neg, has_n) {
+        return Some(r);
+    }
+    // Decimal.
+    if is_dec(body) {
+        return Some(int_value(body, 10, neg, has_n));
+    }
+    None
+}
+
+/// `intPat` zero-prefixed alternatives: `(0)`, hex, octal, and the
+/// `0[0-9]+` poison. `None` falls through to decimal/float.
+fn match_int_zero_prefixed(body: &str, neg: bool, has_n: bool) -> Option<Result<NumLit, NumErr>> {
     // `(0)`, alone or with `N`.
     if body == "0" {
         return Some(if has_n {
@@ -143,10 +156,6 @@ fn match_int(s: &str) -> Option<Result<NumLit, NumErr>> {
             return Some(Err(NumErr::InvalidNumber));
         }
         return None;
-    }
-    // Decimal.
-    if is_dec(body) {
-        return Some(int_value(body, 10, neg, has_n));
     }
     None
 }
