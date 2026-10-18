@@ -48,6 +48,9 @@ that need to pass these values around.
   (filter preserves chunking).
 - The `tests/seq.rs` map/filter/take helpers mirror core.clj's
   chunked paths; S5's core fns reuse the same primitives.
+- Map seqs yield plain 2-vectors, so `(type (first {:a 1}))`
+  will read `Vector`, not JVM `MapEntry`, once core fns land
+  (S5 decides whether to close that gap).
 
 ## §3 Equality and ordering (probe17, spec C2)
 
