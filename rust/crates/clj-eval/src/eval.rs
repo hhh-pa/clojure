@@ -377,7 +377,7 @@ impl Evaluator {
         let env = env.extend(vec![Value::Nil; count]);
         let base = env.len() - count;
         let mut out = Vec::with_capacity(count);
-        self.destructure(pat, &value, &env, &mut out)?;
+        self.destructure(pat, &value, &env, &mut out, ForceSet::default())?;
         debug_assert_eq!(out.len(), count, "destructure fills every slot");
         for (i, v) in out.into_iter().enumerate() {
             env.set(base + i, v);
@@ -464,7 +464,7 @@ impl Evaluator {
                     for ((pat, _), value) in bindings.iter().zip(values) {
                         let count = pattern_names(pat).len();
                         let mut out = Vec::with_capacity(count);
-                        self.destructure(pat, &value, &env, &mut out)?;
+                        self.destructure(pat, &value, &env, &mut out, ForceSet::default())?;
                         for (i, v) in out.into_iter().enumerate() {
                             env.set(slot + i, v);
                         }
@@ -681,7 +681,7 @@ impl Evaluator {
             for (pat, value) in pats.iter().zip(rebind) {
                 let count = pattern_names(pat).len();
                 let mut out = Vec::with_capacity(count);
-                self.destructure(pat, &value, &frame, &mut out)?;
+                self.destructure(pat, &value, &frame, &mut out, ForceSet::default())?;
                 for (i, v) in out.into_iter().enumerate() {
                     frame.set(slot + i, v);
                 }
@@ -700,21 +700,27 @@ impl Evaluator {
     }
 
     /// Destructure a value against a pattern, pushing bound values
-    /// in [`pattern_names`] order.
+    /// in [`pattern_names`] order. Returns the computed outlet
+    /// values (requested or forced) for `subs` projection.
     fn destructure(
         &mut self,
         pat: &Pattern,
         value: &Value,
         env: &Env,
         out: &mut Vec<Value>,
-    ) -> Result<(), Signal> {
+        force: ForceSet,
+    ) -> Result<OutletVals, Signal> {
         match pat {
             Pattern::Symbol(_) => {
                 out.push(value.clone());
-                Ok(())
+                Ok(OutletVals::default())
             }
-            Pattern::Vec(v) => self.destructure_seq(v, value, env, out),
-            Pattern::Map(m) => self.bind_map(m, value, env, out),
+            Pattern::Vec(v) => {
+                // Vectors neither force nor project (`(map? bb)`).
+                self.destructure_seq(v, value, env, out)?;
+                Ok(OutletVals::default())
+            }
+            Pattern::Map(m) => self.bind_map(m, value, env, out, force),
         }
     }
 
@@ -731,7 +737,7 @@ impl Evaluator {
         if pat.rest.is_none() {
             for (i, fixed) in pat.fixed.iter().enumerate() {
                 let nth = nth_or_nil(value, i, self)?;
-                self.destructure(fixed, &nth, env, out)?;
+                let _ = self.destructure(fixed, &nth, env, out, ForceSet::default())?;
             }
         } else {
             // `destvec*` binds `gseq` to `(seq gvec)`: the `&`
@@ -740,11 +746,11 @@ impl Evaluator {
             let mut current = self.seq_val(value)?;
             for fixed in &pat.fixed {
                 let first = first_of(&current);
-                self.destructure(fixed, &first, env, out)?;
+                let _ = self.destructure(fixed, &first, env, out, ForceSet::default())?;
                 current = next_of(&current);
             }
             if let Some(rest) = &pat.rest {
-                self.destructure(rest, &current, env, out)?;
+                let _ = self.destructure(rest, &current, env, out, ForceSet::default())?;
             }
         }
         if pat.as_sym.is_some() {
@@ -755,36 +761,38 @@ impl Evaluator {
 
     /// `destmap*`: seq-convert, eager `:or`, entries, keys,
     /// outlets. Pushes values in [`pattern_names`] order (entries,
-    /// keys, `:as`, `:select`, `:all`, `:excess`, `:missing`).
+    /// keys, `:as`, `:select`, `:all`, `:excess`, `:missing`) and
+    /// returns every computed outlet (requested or forced) for the
+    /// parent's `subs` projection — each nested pattern binds once,
+    /// so `:or` defaults fire exactly once.
     fn bind_map(
         &mut self,
         pat: &MapPattern,
         value: &Value,
         env: &Env,
         out: &mut Vec<Value>,
-    ) -> Result<(), Signal> {
+        force: ForceSet,
+    ) -> Result<OutletVals, Signal> {
         let converted = self.seq_to_map(value)?;
         let defaults = self.eval_defaults(pat, env)?;
         let ctx = MapBind {
             pat,
-            value,
             env,
             converted: &converted,
             defaults: &defaults,
+            force,
         };
         // Entries and keys (missing keys take the local-then-key
-        // default; required keys `req!`).
-        let mut missing: Option<Map> = pat.missing.is_some().then(new_map);
-        self.bind_entries(&ctx, &mut missing, out)?;
+        // default; required keys `req!`). `:missing` starts absent:
+        // nothing missing means `nil`, not `{}`.
+        let mut missing: Option<Map> = None;
+        let mut subs = SubMaps::default();
+        self.bind_entries(&ctx, &mut missing, &mut subs, out)?;
         self.bind_key_list(&ctx, &mut missing, out)?;
         if pat.as_sym.is_some() {
             out.push(converted.clone());
         }
-        self.bind_outlets(&ctx, &mut missing, out)?;
-        if pat.missing.is_some() {
-            out.push(missing.map(Value::Map).unwrap_or(Value::Nil));
-        }
-        Ok(())
+        self.bind_outlets(&ctx, &mut missing, &subs, out)
     }
 
     /// The eager `:or` defaults (evaluated once, before any lookup).
@@ -797,11 +805,13 @@ impl Evaluator {
         Ok(defaults)
     }
 
-    /// The `symbol keyword` entries.
+    /// The `symbol keyword` entries, accumulating `subs` (entry
+    /// key → outlet value) from each nested map's single bind.
     fn bind_entries(
         &mut self,
         ctx: &MapBind,
         missing: &mut Option<Map>,
+        subs: &mut SubMaps,
         out: &mut Vec<Value>,
     ) -> Result<(), Signal> {
         for (local, key) in &ctx.pat.entries {
@@ -812,15 +822,23 @@ impl Evaluator {
                 Pattern::Symbol(name) => Some(Value::Symbol(Symbol::new(None, name))),
                 _ => None,
             };
-            let val = self.map_binding(
-                ctx.converted,
-                ctx.defaults,
-                local_val.as_ref(),
-                key,
-                false,
-                missing,
-            )?;
-            self.destructure(local, &val, ctx.env, out)?;
+            let val = self.map_binding(ctx, local_val.as_ref(), key, false, missing)?;
+            // Forcing (`destmap*` gensym outlets): an effective
+            // outlet the nested map lacks is still computed, for
+            // `subs` (never bound).
+            let force = ForceSet {
+                select: ctx.effective(Outlet::Select) && !has_outlet(local, Outlet::Select),
+                all: ctx.effective(Outlet::All) && !has_outlet(local, Outlet::All),
+                excess: ctx.effective(Outlet::Excess) && !has_outlet(local, Outlet::Excess),
+                missing: ctx.effective(Outlet::Missing) && !has_outlet(local, Outlet::Missing),
+            };
+            let ov = self.destructure(local, &val, ctx.env, out, force)?;
+            if matches!(local, Pattern::Map(_)) {
+                insert_sub(&mut subs.select, key, ov.select);
+                insert_sub(&mut subs.all, key, ov.all);
+                insert_sub(&mut subs.excess, key, ov.excess);
+                insert_sub(&mut subs.missing, key, ov.missing);
+            }
         }
         Ok(())
     }
@@ -834,60 +852,65 @@ impl Evaluator {
     ) -> Result<(), Signal> {
         for key in &ctx.pat.keys {
             let local_key = Value::Symbol(Symbol::new(None, &key.local));
-            let val = self.map_binding(
-                ctx.converted,
-                ctx.defaults,
-                Some(&local_key),
-                &key.key,
-                key.required,
-                missing,
-            )?;
+            let val = self.map_binding(ctx, Some(&local_key), &key.key, key.required, missing)?;
             out.push(val);
         }
         Ok(())
     }
 
-    /// The 1.13 outlets (`:select`/`:all`/`:excess`, folding the
-    /// nested-outlet `:missing` merge in when requested).
+    /// The 1.13 outlets, computed exactly when effective
+    /// (requested or forced), bound only when requested. Merges use
+    /// JVM `merge` semantics over the *converted* target
+    /// (`nil`-skipping; non-map survivors pass through).
     fn bind_outlets(
         &mut self,
         ctx: &MapBind,
         missing: &mut Option<Map>,
+        subs: &SubMaps,
         out: &mut Vec<Value>,
-    ) -> Result<(), Signal> {
+    ) -> Result<OutletVals, Signal> {
         let pat = ctx.pat;
-        if pat.select.is_none() && pat.all.is_none() && pat.excess.is_none() {
-            if pat.missing.is_some() {
-                let subs_missing = self.sub_outlets(pat, ctx.value, ctx.env, Outlet::Missing)?;
-                *missing = merge_missing(missing.take(), subs_missing);
-            }
-            return Ok(());
-        }
+        let dm = or_mapped(pat, ctx.defaults);
+        // `(if (empty? dm) nil dm)`.
+        let dm_v = if dm.is_empty() {
+            Value::Nil
+        } else {
+            Value::Map(dm)
+        };
         let sel = selection(pat);
-        let subs_select = self.sub_outlets(pat, ctx.value, ctx.env, Outlet::Select)?;
-        let subs_all = self.sub_outlets(pat, ctx.value, ctx.env, Outlet::All)?;
-        let subs_excess = self.sub_outlets(pat, ctx.value, ctx.env, Outlet::Excess)?;
-        let subs_missing = self.sub_outlets(pat, ctx.value, ctx.env, Outlet::Missing)?;
-        *missing = merge_missing(missing.take(), subs_missing);
-        if pat.select.is_some() {
-            let dm = or_mapped(pat, ctx.defaults);
-            let merged = merge3(&dm, ctx.converted, &subs_select);
-            out.push(select_keys(&merged, &sel));
-        }
-        if pat.all.is_some() {
-            let dm = or_mapped(pat, ctx.defaults);
-            out.push(Value::Map(merge3(&dm, ctx.converted, &subs_all)));
-        }
-        if pat.excess.is_some() {
-            let leftover = dissoc_all(ctx.converted, &sel);
-            let base = if leftover.is_empty() {
-                None
+        let mut ov = OutletVals::default();
+        if ctx.effective(Outlet::Select) {
+            let mm = self.jvm_merge3(
+                dm_v.clone(),
+                ctx.converted.clone(),
+                opt_val(subs.select.clone()),
+            )?;
+            // `when-let`: an all-absent merge binds `nil`.
+            let v = if matches!(mm, Value::Nil) {
+                Value::Nil
             } else {
-                Some(Value::Map(leftover))
+                self.select_keys_general(&mm, &sel)?
             };
-            out.push(merge_opt(base.as_ref(), subs_excess.as_ref()));
+            emit_outlet(out, &mut ov.select, pat.select.is_some(), v);
         }
-        Ok(())
+        if ctx.effective(Outlet::All) {
+            let v = self.jvm_merge3(
+                dm_v.clone(),
+                ctx.converted.clone(),
+                opt_val(subs.all.clone()),
+            )?;
+            emit_outlet(out, &mut ov.all, pat.all.is_some(), v);
+        }
+        if ctx.effective(Outlet::Excess) {
+            let base = self.dissoc_opt(ctx.converted, &sel)?;
+            let v = self.jvm_merge2(opt_val(base), opt_val(subs.excess.clone()))?;
+            emit_outlet(out, &mut ov.excess, pat.excess.is_some(), v);
+        }
+        if ctx.effective(Outlet::Missing) {
+            let v = self.jvm_merge2(opt_val(missing.take()), opt_val(subs.missing.clone()))?;
+            emit_outlet(out, &mut ov.missing, pat.missing.is_some(), v);
+        }
+        Ok(ov)
     }
 
     /// One map binding: present keys read, missing keys take the
@@ -895,24 +918,22 @@ impl Evaluator {
     /// record into `:missing` and bind `nil`).
     fn map_binding(
         &mut self,
-        converted: &Value,
-        defaults: &Map,
+        ctx: &MapBind,
         local: Option<&Value>,
         key: &Value,
         required: bool,
         missing: &mut Option<Map>,
     ) -> Result<Value, Signal> {
-        if let Some(val) = lookup(converted, key) {
+        if let Some(val) = lookup(ctx.converted, key) {
             return Ok(val);
         }
         let default = local
-            .and_then(|local| defaults.get(local).cloned())
-            .or_else(|| defaults.get(key).cloned());
+            .and_then(|local| ctx.defaults.get(local).cloned())
+            .or_else(|| ctx.defaults.get(key).cloned());
         if required && default.is_none() {
-            if missing.is_some() {
-                if let Some(m) = missing.take() {
-                    *missing = Some(m.insert(key.clone(), Value::Nil));
-                }
+            if ctx.pat.missing.is_some() {
+                let m = missing.take().unwrap_or_else(new_map);
+                *missing = Some(m.insert(key.clone(), Value::Nil));
                 return Ok(Value::Nil);
             }
             return Err(self.throw(NativeError::new(
@@ -921,6 +942,147 @@ impl Evaluator {
             )));
         }
         Ok(default.unwrap_or(Value::Nil))
+    }
+
+    /// JVM 2-`merge`: `nil`s skipped, else `into1`.
+    fn jvm_merge2(&mut self, x: Value, y: Value) -> Result<Value, Signal> {
+        match (&x, &y) {
+            (Value::Nil, Value::Nil) => Ok(Value::Nil),
+            (Value::Nil, _) => Ok(y),
+            (_, Value::Nil) => Ok(x),
+            _ => self.into1(x, &y),
+        }
+    }
+
+    /// JVM 3-`merge`: left-associated `jvm_merge2`.
+    fn jvm_merge3(&mut self, x: Value, y: Value, z: Value) -> Result<Value, Signal> {
+        let merged = self.jvm_merge2(x, y)?;
+        self.jvm_merge2(merged, z)
+    }
+
+    /// `select-keys` over a merge result: maps select, anything else
+    /// is the `.entryAt` hint cast (`IPersistentMap`).
+    fn select_keys_general(&mut self, merged: &Value, sel: &[Value]) -> Result<Value, Signal> {
+        match merged {
+            Value::Map(m) => Ok(select_keys(m, sel)),
+            other => Err(self.throw(NativeError::cast(
+                &jvm_class_of(other),
+                "clojure.lang.IPersistentMap",
+            ))),
+        }
+    }
+
+    /// A `dissoc` base: `nil` is absent, maps shed the selection
+    /// (`not-empty`), anything else is the `IPersistentMap` cast error.
+    fn dissoc_opt(&mut self, converted: &Value, sel: &[Value]) -> Result<Option<Map>, Signal> {
+        match converted {
+            Value::Nil => Ok(None),
+            Value::Map(m) => {
+                let mut out = m.clone();
+                for key in sel {
+                    out = out.without(key);
+                }
+                Ok((!out.is_empty()).then_some(out))
+            }
+            other => Err(self.throw(NativeError::cast(
+                &jvm_class_of(other),
+                "clojure.lang.IPersistentMap",
+            ))),
+        }
+    }
+
+    /// `into1`: map targets cast `from`'s elements to entries
+    /// (real map entries assoc; anything else is the `Map$Entry`
+    /// cast error, `nil` the entry-NPE); other targets `conj` each
+    /// element. `nil` adds nothing; unseqables are the `ISeq` error.
+    fn into1(&mut self, to: Value, from: &Value) -> Result<Value, Signal> {
+        if let Value::Map(m) = from {
+            let mut out = to;
+            for (k, v) in m.iter() {
+                out = self.conj_entry_val(out, k.clone(), v.clone())?;
+            }
+            return Ok(out);
+        }
+        match self.seq_val(from)? {
+            Value::Nil => Ok(to),
+            Value::List(l) => {
+                if matches!(to, Value::Map(_)) {
+                    // Casts, not conjs: the first element always
+                    // fails (nothing representable is an entry).
+                    return match l.iter().next() {
+                        Some(first) => Err(self.throw(cast_entry(first))),
+                        None => Ok(to),
+                    };
+                }
+                let mut out = to;
+                for elem in l.iter() {
+                    out = self.conj_one(out, elem.clone())?;
+                }
+                Ok(out)
+            }
+            _ => unreachable!("seq_val yields a list or nil"),
+        }
+    }
+
+    /// One real entry conjed: maps assoc, vectors/lists/sets take
+    /// the `[k v]` form, `nil` starts a list, anything else is the
+    /// `IPersistentCollection` cast error.
+    fn conj_entry_val(&mut self, coll: Value, k: Value, v: Value) -> Result<Value, Signal> {
+        if let Value::Map(m) = coll {
+            return Ok(Value::Map(m.insert(k, v)));
+        }
+        let entry = Value::Vector(Vector::from_vec(vec![k, v]));
+        self.conj_one(coll, entry)
+    }
+
+    /// `conj` of one element: lists prepend, vectors append, sets
+    /// insert, maps take entries, `nil` starts a list, anything else
+    /// is the `IPersistentCollection` cast error.
+    fn conj_one(&mut self, coll: Value, elem: Value) -> Result<Value, Signal> {
+        match coll {
+            Value::Nil => Ok(Value::List(List::from_vec(vec![elem]))),
+            Value::Map(m) => self.conj_map(m, elem).map(Value::Map),
+            Value::Vector(v) => Ok(Value::Vector(v.push_back(elem))),
+            Value::List(l) => Ok(Value::List(l.push_front(elem))),
+            Value::Set(s) => Ok(Value::Set(s.insert(elem))),
+            other => Err(self.throw(NativeError::cast(
+                &jvm_class_of(&other),
+                "clojure.lang.IPersistentCollection",
+            ))),
+        }
+    }
+
+    /// `conj` onto a map: `nil` is identity, maps merge, 2-vectors
+    /// assoc, other vectors are the pair error, seqables contribute
+    /// entries (non-entries are the `Map$Entry` cast error).
+    fn conj_map(&mut self, mut map: Map, elem: Value) -> Result<Map, Signal> {
+        match elem {
+            Value::Nil => Ok(map),
+            Value::Map(other) => {
+                for (k, v) in other.iter() {
+                    map = map.insert(k.clone(), v.clone());
+                }
+                Ok(map)
+            }
+            Value::Vector(v) => {
+                let items: Vec<Value> = v.iter().cloned().collect();
+                match items.as_slice() {
+                    [k, val] => Ok(map.insert(k.clone(), val.clone())),
+                    _ => Err(self.throw(NativeError::new(
+                        ThrowClass::IllegalArgumentException,
+                        "Vector arg to map conj must be a pair".to_owned(),
+                    ))),
+                }
+            }
+            other => match self.seq_val(&other)? {
+                Value::Nil => Ok(map),
+                Value::List(l) => match l.iter().next() {
+                    Some(first) => Err(self.throw(cast_entry(first))),
+                    None => Ok(map),
+                },
+                _ => unreachable!("seq_val yields a list or nil"),
+            },
+        }
     }
 
     /// `seq-to-map-for-destructuring`: only lists convert (S4 has no
@@ -996,75 +1158,27 @@ impl Evaluator {
             ))),
         }
     }
-
-    /// Nested outlet values (`:subs`/`:suba`/…): for each entry
-    /// with a nested map pattern carrying the outlet, the
-    /// entry-key → outlet-value pair, `nil`s dropped (`some-vals`).
-    fn sub_outlets(
-        &mut self,
-        pat: &MapPattern,
-        value: &Value,
-        env: &Env,
-        outlet: Outlet,
-    ) -> Result<Option<Map>, Signal> {
-        let converted = self.seq_to_map(value)?;
-        let mut out: Option<Map> = None;
-        for (local, key) in &pat.entries {
-            let Pattern::Map(nested) = local else {
-                continue;
-            };
-            if outlet.name(nested).is_none() {
-                continue;
-            }
-            let Some(entry_val) = lookup(&converted, key) else {
-                continue;
-            };
-            self.sub_outlet_entry(nested, key, &entry_val, env, outlet, &mut out)?;
-        }
-        Ok(out)
-    }
-
-    /// One nested entry's outlet contribution (entry-key →
-    /// outlet-value, `nil`s dropped).
-    fn sub_outlet_entry(
-        &mut self,
-        nested: &MapPattern,
-        key: &Value,
-        entry_val: &Value,
-        env: &Env,
-        outlet: Outlet,
-        out: &mut Option<Map>,
-    ) -> Result<(), Signal> {
-        let mut vals = Vec::new();
-        self.bind_map(nested, entry_val, env, &mut vals)?;
-        let names = pattern_names(&Pattern::Map(nested.clone()));
-        let Some(want) = outlet.name(nested) else {
-            return Ok(());
-        };
-        for (name, val) in names.iter().zip(vals) {
-            if name == want && !matches!(val, Value::Nil) {
-                let map = out.take().unwrap_or_else(new_map);
-                *out = Some(map.insert(key.clone(), val));
-            }
-        }
-        Ok(())
-    }
 }
 
 /// The shared inputs to one map-pattern bind.
 struct MapBind<'a> {
     pat: &'a MapPattern,
-    value: &'a Value,
     env: &'a Env,
     converted: &'a Value,
     defaults: &'a Map,
+    force: ForceSet,
 }
 
-/// Merge the nested-outlet `:missing` map into the local one.
-fn merge_missing(local: Option<Map>, sub: Option<Map>) -> Option<Map> {
-    match (local, sub) {
-        (Some(m), Some(s)) => Some(merge_maps(&m, &s)),
-        (m, s) => m.or(s),
+impl MapBind<'_> {
+    /// An outlet is effective when requested or forced.
+    fn effective(&self, outlet: Outlet) -> bool {
+        let requested = match outlet {
+            Outlet::Select => self.pat.select.is_some(),
+            Outlet::All => self.pat.all.is_some(),
+            Outlet::Excess => self.pat.excess.is_some(),
+            Outlet::Missing => self.pat.missing.is_some(),
+        };
+        requested || self.force.get(outlet)
     }
 }
 
@@ -1077,15 +1191,93 @@ enum Outlet {
     Missing,
 }
 
-impl Outlet {
-    /// The outlet's local name in a nested pattern, if bound.
-    fn name(self, nested: &MapPattern) -> Option<&String> {
-        match self {
-            Outlet::Select => nested.select.as_ref(),
-            Outlet::All => nested.all.as_ref(),
-            Outlet::Excess => nested.excess.as_ref(),
-            Outlet::Missing => nested.missing.as_ref(),
+/// Inherited outlet forcing: an effective outlet the nested map
+/// lacks is still computed, for `subs` (never bound).
+#[derive(Clone, Copy, Default)]
+struct ForceSet {
+    select: bool,
+    all: bool,
+    excess: bool,
+    missing: bool,
+}
+
+impl ForceSet {
+    fn get(self, outlet: Outlet) -> bool {
+        match outlet {
+            Outlet::Select => self.select,
+            Outlet::All => self.all,
+            Outlet::Excess => self.excess,
+            Outlet::Missing => self.missing,
         }
+    }
+}
+
+/// Computed outlet values (`Some` ⟺ effective; values may be `nil`).
+#[derive(Default)]
+struct OutletVals {
+    select: Option<Value>,
+    all: Option<Value>,
+    excess: Option<Value>,
+    missing: Option<Value>,
+}
+
+/// `subs`: entry key → nested outlet value (`some-vals`: non-`nil`
+/// only, hence never `Some`-empty).
+#[derive(Default)]
+struct SubMaps {
+    select: Option<Map>,
+    all: Option<Map>,
+    excess: Option<Map>,
+    missing: Option<Map>,
+}
+
+/// Whether a pattern is a map requesting an outlet (forcing and
+/// `subs` only concern direct map locals).
+fn has_outlet(local: &Pattern, outlet: Outlet) -> bool {
+    let Pattern::Map(nested) = local else {
+        return false;
+    };
+    match outlet {
+        Outlet::Select => nested.select.is_some(),
+        Outlet::All => nested.all.is_some(),
+        Outlet::Excess => nested.excess.is_some(),
+        Outlet::Missing => nested.missing.is_some(),
+    }
+}
+
+/// Record one `subs` contribution (`nil`s dropped).
+fn insert_sub(slot: &mut Option<Map>, key: &Value, value: Option<Value>) {
+    let Some(v) = value else {
+        return;
+    };
+    if !matches!(v, Value::Nil) {
+        let map = slot.take().unwrap_or_else(new_map);
+        *slot = Some(map.insert(key.clone(), v));
+    }
+}
+
+/// An optional map as a merge argument (absent ⟺ `nil`).
+fn opt_val(map: Option<Map>) -> Value {
+    map.map(Value::Map).unwrap_or(Value::Nil)
+}
+
+/// Record a computed outlet value, binding it only when requested.
+fn emit_outlet(out: &mut Vec<Value>, slot: &mut Option<Value>, requested: bool, v: Value) {
+    if requested {
+        out.push(v.clone());
+    }
+    *slot = Some(v);
+}
+
+/// Cast one element to `Map$Entry` (`nil` is the entry-NPE;
+/// nothing representable is an entry).
+fn cast_entry(entry: &Value) -> NativeError {
+    match entry {
+        Value::Nil => NativeError::new(
+            ThrowClass::NullPointerException,
+            "Cannot invoke \"java.util.Map$Entry.getKey()\" because \"e\" is null".to_owned(),
+        ),
+        other => NativeError::cast(&jvm_class_of(other), "java.util.Map$Entry"),
     }
 }
 
@@ -1286,38 +1478,6 @@ fn or_mapped(pat: &MapPattern, defaults: &Map) -> Map {
     dm
 }
 
-/// Left-biased merge of two maps.
-fn merge_maps(a: &Map, b: &Map) -> Map {
-    let mut out = a.clone();
-    for (k, v) in b.iter() {
-        out = out.insert(k.clone(), v.clone());
-    }
-    out
-}
-
-/// `(merge dm m subs?)`.
-fn merge3(dm: &Map, converted: &Value, subs: &Option<Map>) -> Map {
-    let mut out = dm.clone();
-    if let Value::Map(m) = converted {
-        out = merge_maps(&out, m);
-    }
-    if let Some(sub) = subs {
-        out = merge_maps(&out, sub);
-    }
-    out
-}
-
-/// `(merge base? subs?)`: `nil` when both are absent.
-fn merge_opt(base: Option<&Value>, subs: Option<&Map>) -> Value {
-    match (base, subs) {
-        (None, None) => Value::Nil,
-        (Some(v), None) => v.clone(),
-        (None, Some(s)) => Value::Map(s.clone()),
-        (Some(Value::Map(m)), Some(s)) => Value::Map(merge_maps(m, s)),
-        (Some(v), Some(_)) => v.clone(),
-    }
-}
-
 /// `(select-keys m sel)` in selection order.
 fn select_keys(converted: &Map, sel: &[Value]) -> Value {
     let mut out = new_map();
@@ -1327,20 +1487,6 @@ fn select_keys(converted: &Map, sel: &[Value]) -> Value {
         }
     }
     Value::Map(out)
-}
-
-/// `(apply dissoc m sel…)`: our maps have no removal, so rebuild
-/// (insertion order preserved).
-fn dissoc_all(converted: &Value, sel: &[Value]) -> Map {
-    let mut out = new_map();
-    if let Value::Map(m) = converted {
-        for (k, v) in m.iter() {
-            if !sel.contains(k) {
-                out = out.insert(k.clone(), v.clone());
-            }
-        }
-    }
-    out
 }
 
 /// The first element of a seqable (`nil` when empty).

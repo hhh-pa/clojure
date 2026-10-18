@@ -372,6 +372,34 @@ fn destructure_values() {
         "5"
     );
     assert_eq!(*log.lock().unwrap(), vec!["7".to_owned()]);
+    // Nested `:or` defaults fire exactly once under outlet forcing
+    // (probe28): the nested pattern binds once, projecting `subs`.
+    for (src, want) in [
+        (
+            "(let [{{:keys [b] :or {b (t-log 7)}} :m :select s} {:m {}}] [s])",
+            "[{:m {:b 7}}]",
+        ),
+        (
+            "(let [{{:keys [b] :or {b (t-log 7)}} :m :all s} {:m {}}] [s])",
+            "[{:m {:b 7}}]",
+        ),
+        (
+            "(let [{{:keys [b] :or {b (t-log 7)}} :m :excess s} {:m {} :z 9}] [s])",
+            "[{:z 9}]",
+        ),
+        (
+            "(let [{{:keys [b] :select ns :or {b (t-log 7)}} :m :select s} {:m {}}] [ns s])",
+            "[{:b 7} {:m {:b 7}}]",
+        ),
+        (
+            "(let [{{:keys [b] :or {b (t-log 7)}} :m :select s} {:m {:b 1}}] [s])",
+            "[{:m {:b 1}}]",
+        ),
+    ] {
+        let (mut eval, log) = rigged();
+        assert_eq!(run_last(&mut eval, src), want, "{src}");
+        assert_eq!(*log.lock().unwrap(), vec!["7".to_owned()], "{src}");
+    }
     // Required keys throw when missing.
     assert_eq!(
         uncaught("(let [{:keys! [a]} {}] a)"),

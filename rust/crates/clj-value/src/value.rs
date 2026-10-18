@@ -257,6 +257,22 @@ impl Map {
         }
     }
 
+    /// Remove a key (`dissoc` one key). A missing key is a no-op;
+    /// otherwise both the entries and the insertion-order sidecar
+    /// drop it, and later positions shift down.
+    #[must_use]
+    pub fn without(mut self, k: &Value) -> Self {
+        if self.inner.get(k).is_none() {
+            return self;
+        }
+        self.keys.retain(|key| key != k);
+        Self {
+            inner: self.inner.remove(k),
+            meta: self.meta,
+            keys: self.keys,
+        }
+    }
+
     /// Look up a key.
     #[must_use]
     pub fn get(&self, k: &Value) -> Option<&Value> {

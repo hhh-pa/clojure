@@ -250,7 +250,7 @@ so the port pins stable equivalents:
   observing iteration N's bindings after the rebind (probe27
   `recur-alias-loop`/`recur-alias-fn` → `2`).
 
-## E12. Destructure value semantics (probes 21/23/25)
+## E12. Destructure value semantics (probes 21/23/25/26/27/28)
 
 Mirrors `destvec*`/`destmap*` (`core.clj`), including the 1.13 directives.
 
@@ -287,6 +287,11 @@ Mirrors `destvec*`/`destmap*` (`core.clj`), including the 1.13 directives.
   CLASS`.
 - `:or` maps binding-local-or-key → default expression. Defaults are
   evaluated eagerly, once, before any lookup (even unused ones fire).
+  Nested patterns bind once: outlet forcing projects `subs` from the
+  single bind (never rebinds), so nested `:or` defaults fire exactly
+  once however many parent outlets are requested (probe28
+  `or-nested-*`, side-log `[7]` each; nested defaults flow into the
+  parent outlet via `subs`).
   A default fires on MISSING keys only — present `nil` stays `nil`.
   Lookup is local-first, then key (`(let [{x :x :or {x 5}} {}] x)` →
   `5`, `(let [{x :x :or {:x 7}} {}] x)` → `7`, probe26). Both a local
