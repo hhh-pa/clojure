@@ -45,6 +45,17 @@ root-cause exception (class | message | ex-data line/col).
   vec10 10), mid-chunk remainder (31 from 1), nil-punning (C4).
 - `probe19.clj` (S3): transient printing, `IllegalAccessError` rules,
   `assoc!`/`conj!`/`pop!` edges.
+- `probe20.clj` (S4): analyzer error cause chains (if/quote/let/loop/fn/
+  var/throw/set!/try/catch/recur), fn arity texts, nil/number/keyword/
+  vector invocation, unbound-var uses, unknown ns/var, pre/post failure,
+  `def` return shape.
+- `probe21.clj` (S4): closure/shadow/loop/recur/letfn values, destructure
+  matrix (incl. `:or`-nil stays nil, variadic0 rest is nil), pre/post
+  pass, `def` value/type/meta, `set!` roundtrip, `(do)`/`quote`.
+- `probe22.clj` (S4): try/catch/finally values, `ex-info`/`ex-data`,
+  `throw`/`finally` interplay.
+- `probe23.clj` (S4): try/def/fn/let/loop/letfn shape matrix,
+  variadic legality rule, `pre` expansion, interop sanity.
 
 Run: `./probe.sh [outdir]`. Gensym ids (`p1__243#`), identity hashes
 (`@7fc19ced`), and inst renderings vary between runs; the contract
