@@ -20,6 +20,7 @@ use clj_value::{ExtensionValue, Value};
 
 use crate::env::Env;
 use crate::error::NativeError;
+use crate::eval::Evaluator;
 use crate::expr::Arity;
 
 /// `Compiler.munge` for display names (`-` → `_`, `/` → `$`,
@@ -100,9 +101,10 @@ impl ExtensionValue for Closure {
 }
 
 /// A Rust callable: `display` names arity errors, `func` runs the
-/// call. Failures are [`NativeError`]s (the evaluator stamps the
-/// identity when throwing).
-pub type NativeImpl = dyn Fn(&[Value]) -> Result<Value, NativeError> + Send + Sync;
+/// call with the live evaluator (natives can intern, resolve, and
+/// eval §N vars). Failures are [`NativeError`]s (the evaluator
+/// stamps the identity when throwing).
+pub type NativeImpl = dyn Fn(&mut Evaluator, &[Value]) -> Result<Value, NativeError> + Send + Sync;
 
 #[derive(Clone)]
 pub struct NativeFn {

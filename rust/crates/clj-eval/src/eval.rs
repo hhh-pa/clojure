@@ -46,6 +46,22 @@ impl std::fmt::Display for SourceError {
 
 impl std::error::Error for SourceError {}
 
+/// The body of a top-level `do`-headed list (head unqualified,
+/// mirroring the analyzer's special-form check), `None` for any
+/// other form or a bare `(do)`.
+fn split_top_do(form: &Value) -> Option<Vec<&Value>> {
+    let Value::List(list) = form else {
+        return None;
+    };
+    let mut items = list.iter();
+    match items.next() {
+        Some(Value::Symbol(sym)) if sym.namespace().is_none() && sym.name() == "do" => {}
+        _ => return None,
+    }
+    let rest: Vec<&Value> = items.collect();
+    if rest.is_empty() { None } else { Some(rest) }
+}
+
 /// The evaluator: namespace registry, bindings, load path, and the
 /// deterministic counters (form/fn numbering for display names, one
 /// identity sequence for throwables/closures/natives).
@@ -96,39 +112,51 @@ impl Evaluator {
     }
 
     /// Read every form in `text` (default `:read-cond :allow`
-    /// options), analyze, and evaluate each in turn, collecting the
-    /// values. Uncaught throwables (including bare macro-arity
+    /// options) and evaluate each in turn, collecting one value per
+    /// read form. Uncaught throwables (including bare macro-arity
     /// failures) abort the load.
     pub fn eval_source(&mut self, text: &str) -> Result<Vec<Value>, SourceError> {
         let forms = read_all(text, &ReaderOpts::default()).map_err(SourceError::Reader)?;
         let mut out = Vec::with_capacity(forms.len());
         for form in &forms {
-            self.eval_seq += 1;
-            let expr = self.analyze(form).map_err(|e| {
-                if e.bare {
-                    let id = self.next_id();
-                    SourceError::Uncaught(Throwable {
-                        id,
-                        class: ThrowClass::ArityException,
-                        message: Arc::from(e.message.as_str()),
-                        data: None,
-                        cause: None,
-                    })
-                } else {
-                    SourceError::Compile(e)
-                }
-            })?;
-            match self.eval(&expr, &Env::new()) {
-                Ok(v) => out.push(v),
-                Err(Signal::Throw(t)) => return Err(SourceError::Uncaught(t)),
-                Err(Signal::Recur(_)) => {
-                    return Err(SourceError::Internal(
-                        "recur escaped its loop or fn".to_owned(),
-                    ));
-                }
-            }
+            out.push(self.eval_top_form(form)?);
         }
         Ok(out)
+    }
+
+    /// Evaluate one top-level form. A `do`-headed list splits like
+    /// `Compiler.eval`: each element analyzes after the previous
+    /// evaluates, and only the last value survives (§do-split).
+    pub fn eval_top_form(&mut self, form: &Value) -> Result<Value, SourceError> {
+        if let Some(elements) = split_top_do(form) {
+            let mut last = Value::Nil;
+            for element in elements {
+                last = self.eval_top_form(element)?;
+            }
+            return Ok(last);
+        }
+        self.eval_seq += 1;
+        let expr = self.analyze(form).map_err(|e| {
+            if e.bare {
+                let id = self.next_id();
+                SourceError::Uncaught(Throwable {
+                    id,
+                    class: ThrowClass::ArityException,
+                    message: Arc::from(e.message.as_str()),
+                    data: None,
+                    cause: None,
+                })
+            } else {
+                SourceError::Compile(e)
+            }
+        })?;
+        match self.eval(&expr, &Env::new()) {
+            Ok(v) => Ok(v),
+            Err(Signal::Throw(t)) => Err(SourceError::Uncaught(t)),
+            Err(Signal::Recur(_)) => Err(SourceError::Internal(
+                "recur escaped its loop or fn".to_owned(),
+            )),
+        }
     }
 
     /// Install a native fn under `ns`/`name` (test doubles land
@@ -623,7 +651,7 @@ impl Evaluator {
         }
         if let Some(native) = as_native(callee) {
             let func = Arc::clone(&native.func);
-            return func(args).map_err(|e| self.throw(e));
+            return func(self, args).map_err(|e| self.throw(e));
         }
         Err(self.throw(NativeError::cast(&jvm_class_of(callee), "clojure.lang.IFn")))
     }

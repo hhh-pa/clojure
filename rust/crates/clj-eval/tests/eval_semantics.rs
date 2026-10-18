@@ -18,7 +18,7 @@
 use std::sync::{Arc, Mutex};
 
 use clj_eval::{Evaluator, NativeError, SourceError};
-use clj_value::{PrintOpts, ThrowClass, Throwable, Value, pr_to_string};
+use clj_value::{PrintOpts, Symbol, ThrowClass, Throwable, Value, pr_to_string};
 
 fn pr(v: &Value) -> String {
     pr_to_string(v, &PrintOpts::pr())
@@ -50,7 +50,7 @@ fn install_arith(eval: &mut Evaluator) {
     eval.install_native(
         "user",
         "t-plus",
-        Arc::new(move |args| match args {
+        Arc::new(move |_, args| match args {
             [Value::Int(a), Value::Int(b)] => a.checked_add(*b).map(Value::Int).ok_or_else(|| {
                 NativeError::new(
                     ThrowClass::ArithmeticException,
@@ -67,7 +67,7 @@ fn install_arith(eval: &mut Evaluator) {
     eval.install_native(
         "user",
         "t-minus",
-        Arc::new(|args| match args {
+        Arc::new(|_, args| match args {
             [Value::Int(a), Value::Int(b)] => a.checked_sub(*b).map(Value::Int).ok_or_else(|| {
                 NativeError::new(
                     ThrowClass::ArithmeticException,
@@ -84,17 +84,17 @@ fn install_int_fns(eval: &mut Evaluator) {
     eval.install_native(
         "user",
         "t-zero?",
-        Arc::new(|args| int(args).map(|n| Value::Bool(n == 0))),
+        Arc::new(|_, args| int(args).map(|n| Value::Bool(n == 0))),
     );
     eval.install_native(
         "user",
         "t-pos?",
-        Arc::new(|args| int(args).map(|n| Value::Bool(n > 0))),
+        Arc::new(|_, args| int(args).map(|n| Value::Bool(n > 0))),
     );
     eval.install_native(
         "user",
         "t-dec",
-        Arc::new(|args| {
+        Arc::new(|_, args| {
             int(args).and_then(|n| {
                 n.checked_sub(1).map(Value::Int).ok_or_else(|| {
                     NativeError::new(
@@ -112,7 +112,7 @@ fn install_misc(eval: &mut Evaluator, log: &Arc<Mutex<Vec<String>>>) {
     eval.install_native(
         "user",
         "t-id",
-        Arc::new(|args| match args {
+        Arc::new(|_, args| match args {
             [v] => Ok(v.clone()),
             _ => Err(NativeError::arity("test/t-id", args.len())),
         }),
@@ -121,7 +121,7 @@ fn install_misc(eval: &mut Evaluator, log: &Arc<Mutex<Vec<String>>>) {
     eval.install_native(
         "user",
         "t-log",
-        Arc::new(move |args| match args {
+        Arc::new(move |_, args| match args {
             [] => Err(NativeError::arity("test/t-log", 0)),
             [first, ..] => {
                 let mut log = logged.lock().unwrap();
@@ -133,7 +133,7 @@ fn install_misc(eval: &mut Evaluator, log: &Arc<Mutex<Vec<String>>>) {
     eval.install_native(
         "user",
         "t-ex",
-        Arc::new(|args| match args {
+        Arc::new(|_, args| match args {
             [Value::Str(m)] => Ok(Value::Throwable(Throwable {
                 id: 0,
                 class: ThrowClass::ExceptionInfo,
@@ -883,4 +883,51 @@ fn object_prints() {
         run_last(&mut eval, "(fn foo [x] x)"),
         "#object[user$eval2$foo__2 0x2 \"user$eval2$foo__2@2\"]"
     );
+}
+
+#[test]
+fn top_do_splits_each_element() {
+    let mut eval = Evaluator::new("split");
+    eval.install_native(
+        "user",
+        "t-mkvar",
+        Arc::new(|e, _| {
+            let sym = Symbol::new(Some("user"), "t-made");
+            let id = e.registry.intern(&sym);
+            if let Some(state) = e.registry.state_mut(id) {
+                state.root = Some(Value::Int(5));
+            }
+            Ok(Value::Nil)
+        }),
+    );
+    // Without the split, `t-made` would analyze before `t-mkvar`
+    // evaluates (`Unable to resolve symbol`).
+    let out = eval.eval_source("(do (t-mkvar) t-made)").unwrap();
+    assert_eq!(out, vec![Value::Int(5)]);
+    // A nested `do` stays one analysis unit: inside a `fn` body the
+    // reference analyzes before anything evaluates.
+    let mut nested = Evaluator::new("split-nested");
+    nested.install_native(
+        "user",
+        "t-mkvar",
+        Arc::new(|e, _| {
+            let sym = Symbol::new(Some("user"), "t-made");
+            let id = e.registry.intern(&sym);
+            if let Some(state) = e.registry.state_mut(id) {
+                state.root = Some(Value::Int(5));
+            }
+            Ok(Value::Nil)
+        }),
+    );
+    let err = nested
+        .eval_source("(fn [] (do (t-mkvar) t-made))")
+        .unwrap_err();
+    match err {
+        SourceError::Compile(e) => assert!(
+            e.message.contains("Unable to resolve symbol: t-made"),
+            "unexpected message: {}",
+            e.message
+        ),
+        other => panic!("expected a compile error, got {other}"),
+    }
 }
