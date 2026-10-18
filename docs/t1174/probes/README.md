@@ -41,8 +41,8 @@ root-cause exception (class | message | ex-data line/col).
 - `probe17.clj` (S3): equality categories (`=` same-category only),
   reader ints always `Long`, `compare` matrix incl. NaN-is-0 and
   CCE shapes, numeric hashing, `sorted-map` compare-collapse.
-- `probe18.clj` (S3): chunked-seq realization counts (32/2/32/64/32/16)
-  and nil-punning (C4).
+- `probe18.clj` (S3): chunked-seq realization counts (32/2/32/64/32/16,
+  vec10 10), mid-chunk remainder (31 from 1), nil-punning (C4).
 - `probe19.clj` (S3): transient printing, `IllegalAccessError` rules,
   `assoc!`/`conj!`/`pop!` edges.
 

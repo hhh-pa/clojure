@@ -35,3 +35,13 @@
 (println "(next [1]) =>" (pr-str (next [1])))
 (println "(rest [1]) =>" (pr-str (rest [1])))
 (println "(seq [1]) =>" (pr-str (seq [1])))
+(do
+  (reset! realized [])
+  (doall (take 2 (map rec (vec (range 10)))))
+  (println "take2-map-vec10 computed =>" (pr-str (count @realized))))
+(let [s (next (seq (vec (range 100))))
+      c (.chunkedFirst ^clojure.lang.IChunkedSeq s)]
+  (println "mid-chunk chunk count =>" (.count c) " first =>" (.nth c 0)))
+(let [s (seq (vec (range 100)))
+      c (.chunkedFirst ^clojure.lang.IChunkedSeq s)]
+  (println "fresh chunk count =>" (.count c) " first =>" (.nth c 0)))

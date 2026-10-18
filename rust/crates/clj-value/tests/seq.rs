@@ -213,6 +213,23 @@ fn chunked_realization_counts_match_jvm() {
     let got = take_seq(2, &map_seq(f, filter_seq(p, r)));
     assert_eq!(got, vec![int(1), int(3)]);
     assert_eq!(c.count(), 16);
+    // take2-map-vec10 => 10 (small vectors are chunked too).
+    let (c, f) = mk();
+    let v = Seq::from_vector(&Vector::from_vec(ints(10))).unwrap();
+    assert_eq!(take_seq(2, &map_seq(f, v)), vec![int(0), int(1)]);
+    assert_eq!(c.count(), 10);
+}
+
+#[test]
+fn chunk_next_serves_remainder_mid_chunk() {
+    let s = Seq::from_vector(&Vector::from_vec(ints(100))).unwrap();
+    let mid = s.next().unwrap();
+    let (chunk, rest) = mid.chunk_next().unwrap();
+    assert_eq!(chunk.len(), 31);
+    assert_eq!(chunk[0], int(1));
+    assert_eq!(rest.first(), Some(&int(32)));
+    let (fresh, _) = s.chunk_next().unwrap();
+    assert_eq!(fresh.len(), 32);
 }
 
 #[test]
