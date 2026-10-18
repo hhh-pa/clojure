@@ -54,24 +54,23 @@ machine-read — keep `| var | status | notes |` rows exact.
 ## Vars (S5B)
 
 | var | status | notes |
-| `alter-var-root` | planned | atomic root swap |
-| `with-redefs` | planned | scoped root rebinding |
-| `bound?` | planned | |
-| `thread-bound?` | planned | |
-| `var-get` | planned | |
-| `var-set` | planned | |
-| `push-thread-bindings` | planned | |
-| `pop-thread-bindings` | planned | |
-| `clone-thread-bindings` | planned | |
-| `get-thread-bindings` | planned | |
-| `with-bindings*` | planned | |
-| `with-bindings` | planned | macro |
-| `bound-fn` | planned | conveyance primitive (S6 builds on it) |
-| `meta` | planned | |
-| `with-meta` | planned | |
-| `vary-meta` | planned | |
-| `alter-meta!` | planned | |
-| `reset-meta!` | planned | |
+| `alter-var-root` | implemented | atomic root swap |
+| `with-redefs` | planned | form in S5B, var resolves in S5C |
+| `bound?` | implemented | |
+| `thread-bound?` | implemented | |
+| `var-get` | implemented | |
+| `var-set` | implemented | |
+| `push-thread-bindings` | implemented | |
+| `pop-thread-bindings` | implemented | |
+| `get-thread-bindings` | implemented | |
+| `with-bindings*` | implemented | |
+| `with-bindings` | planned | form in S5B, var resolves in S5C |
+| `bound-fn` | planned | form in S5B, var resolves in S5C; conveyance primitive (S6 builds on it) |
+| `meta` | implemented | |
+| `with-meta` | implemented | |
+| `vary-meta` | implemented | |
+| `alter-meta!` | implemented | |
+| `reset-meta!` | implemented | |
 
 ## Macros (S5C)
 
@@ -366,6 +365,7 @@ machine-read — keep `| var | status | notes |` rows exact.
 ## Out of scope (significant exclusions)
 
 | var | status | notes |
+| `clone-thread-bindings` | out-of-scope | does not exist on the JVM (probe37 `clone-missing`) |
 | `sequence` | out-of-scope | transducers: no slice |
 | `transduce` | out-of-scope | transducers: no slice |
 | `eduction` | out-of-scope | transducers: no slice |

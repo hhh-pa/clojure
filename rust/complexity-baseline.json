@@ -11,9 +11,9 @@
   {
    "file": "crates/clj-eval/src/eval.rs",
    "function": "Evaluator::eval",
-   "cyclomatic": 30.0,
+   "cyclomatic": 33.0,
    "cognitive": 8.0,
-   "justification": "one arm per Expr variant; arms delegate to small-step helpers"
+   "justification": "one arm per Expr variant; arms delegate to small-step helpers. S5B adds the WithRedefs/WithBindings/BoundFn arms."
   },
   {
    "file": "crates/clj-eval/src/eval.rs",
@@ -25,9 +25,9 @@
   {
    "file": "crates/clj-eval/src/expr.rs",
    "function": "Analyzer<'a>::analyze_special",
-   "cyclomatic": 20.0,
+   "cyclomatic": 23.0,
    "cognitive": 2.0,
-   "justification": "one arm per special form; dispatch to per-form parsers"
+   "justification": "one arm per special form; dispatch to per-form parsers. S5B adds the with-redefs/with-bindings/bound-fn arms."
   },
   {
    "file": "crates/clj-eval/src/ext.rs",

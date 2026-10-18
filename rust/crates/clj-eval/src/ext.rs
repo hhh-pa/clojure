@@ -16,9 +16,9 @@ use std::any::Any;
 use std::hash::Hasher;
 use std::sync::Arc;
 
-use clj_value::{ExtensionValue, Value};
+use clj_value::{ExtensionValue, Map, Value};
 
-use crate::env::Env;
+use crate::env::{Bindings, Env};
 use crate::error::NativeError;
 use crate::eval::Evaluator;
 use crate::expr::Arity;
@@ -62,13 +62,18 @@ pub fn munge(display: &str) -> String {
 }
 
 /// An interpreted function value: display name, arities, captured
-/// frame. Identity is the sequence `id`.
+/// frame, optional metadata (`with-meta`), and optional conveyed
+/// thread bindings (`bound-fn` snapshots these at creation and
+/// re-pushes them around every invocation). Identity is the
+/// sequence `id`.
 #[derive(Clone, Debug)]
 pub struct Closure {
     pub id: u64,
     pub display: Arc<str>,
     pub arities: Vec<Arity>,
     pub env: Env,
+    pub meta: Option<Map>,
+    pub conveyed: Option<Bindings>,
 }
 
 impl ExtensionValue for Closure {
@@ -111,6 +116,7 @@ pub struct NativeFn {
     pub id: u64,
     pub display: Arc<str>,
     pub func: Arc<NativeImpl>,
+    pub meta: Option<Map>,
 }
 
 impl std::fmt::Debug for NativeFn {

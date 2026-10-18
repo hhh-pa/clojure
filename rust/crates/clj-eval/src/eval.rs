@@ -21,7 +21,7 @@ use clj_value::{Keyword, List, Map, Symbol, ThrowClass, Throwable, Value, Var, V
 use crate::env::{Bindings, Env, NamespaceRegistry};
 use crate::error::{CompileError, NativeError, Signal, jvm_class_of, simple_class_of};
 use crate::expr::{Analyzer, Catch, Expr, MapPattern, Pattern, pattern_names};
-use crate::ext::{Closure, NativeFn, as_closure, as_native};
+use crate::ext::{Closure, NativeFn, NsHandle, as_closure, as_native};
 
 /// `eval_source` failures: reader errors, analyzer errors, uncaught
 /// throwables, and (unreachable by construction) escaping `recur`s.
@@ -182,13 +182,24 @@ impl Evaluator {
         out
     }
 
-    /// Push one thread-binding frame, returning the depth to pass
-    /// to [`pop_bindings`](Self::pop_bindings) (natives bind
-    /// `*file*`/`*pending-paths*` around loads).
-    pub(crate) fn push_binding(&mut self, id: u64, value: Value) -> usize {
+    /// Push one single-entry thread-binding frame, returning the
+    /// depth to pass to [`pop_bindings`](Self::pop_bindings)
+    /// (natives bind `*file*`/`*pending-paths*` around loads).
+    pub(crate) fn push_binding(&mut self, var: Var, value: Value) -> usize {
         let depth = self.bindings.depth();
-        self.bindings.push(id, value);
+        self.bindings.push_frame(vec![(var, value)]);
         depth
+    }
+
+    /// Push one thread-binding frame (validated entries).
+    pub(crate) fn push_frame(&mut self, entries: Vec<(Var, Value)>) {
+        self.bindings.push_frame(entries);
+    }
+
+    /// Pop one thread-binding frame (`None` when the stack is
+    /// empty — `pop-thread-bindings` raises then).
+    pub(crate) fn pop_frame(&mut self) -> Option<Vec<(Var, Value)>> {
+        self.bindings.pop_frame()
     }
 
     /// Pop thread-binding frames back to `depth`.
@@ -200,6 +211,19 @@ impl Evaluator {
     /// exists — `in-ns` falls back to the root then).
     pub(crate) fn set_binding_top(&mut self, id: u64, value: Value) -> bool {
         self.bindings.set_top(id, value)
+    }
+
+    /// Whether a var has a thread-local entry (`thread-bound?`).
+    pub(crate) fn is_thread_bound(&self, id: u64) -> bool {
+        self.bindings.get(id).is_some()
+    }
+
+    /// Every binding entry oldest-first (for snapshots).
+    pub(crate) fn binding_pairs(&self) -> Vec<(Var, Value)> {
+        self.bindings
+            .pairs()
+            .map(|(var, v)| (var.clone(), v.clone()))
+            .collect()
     }
 
     /// The current load path (`:file`), for spans.
@@ -222,6 +246,7 @@ impl Evaluator {
             id,
             display: Arc::from(format!("{ns}/{name}").as_str()),
             func,
+            meta: None,
         }));
         if let Some(state) = self.registry.state_mut(var_id) {
             state.root = Some(native.clone());
@@ -311,6 +336,9 @@ impl Evaluator {
             } => self.eval_try(body, catches, finally_body, env),
             Expr::Set { sym, val } => self.eval_set(sym, val, env),
             Expr::Binding { pairs, body } => self.eval_binding(pairs, body, env),
+            Expr::WithRedefs { pairs, body } => self.eval_with_redefs(pairs, body, env),
+            Expr::WithBindings { map, body } => self.eval_with_bindings(map, body, env),
+            Expr::BoundFn { name, fun } => self.eval_bound_fn(name.as_deref(), fun, env),
             Expr::Invoke { head, args } => {
                 let callee = self.eval(head, env)?;
                 let mut values = Vec::with_capacity(args.len());
@@ -439,13 +467,100 @@ impl Evaluator {
             }
         }
         let depth = self.bindings.depth();
+        let mut frame = Vec::with_capacity(pairs.len());
         for ((sym, _), value) in pairs.iter().zip(values) {
             let id = self.var_id(sym);
-            self.bindings.push(id, value);
+            frame.push((
+                Var {
+                    id,
+                    sym: sym.clone(),
+                },
+                value,
+            ));
         }
+        self.bindings.push_frame(frame);
         let result = self.eval_body(body, env);
         self.bindings.truncate(depth);
         result
+    }
+
+    /// `with-redefs`: a PARALLEL ROOT SWAP, not thread bindings.
+    /// Every init evaluates against the old roots (a repeated var
+    /// keeps the last value, map-style), the roots install, the body
+    /// runs, and the saved roots — or rootlessness — restore in a
+    /// `finally`, even on throw (probe37 `wrd-*`).
+    fn eval_with_redefs(
+        &mut self,
+        pairs: &[(Symbol, Expr)],
+        body: &[Expr],
+        env: &Env,
+    ) -> Result<Value, Signal> {
+        let mut saves: Vec<(u64, Option<Value>, Value)> = Vec::with_capacity(pairs.len());
+        for (sym, init) in pairs {
+            let value = self.eval(init, env)?;
+            let id = self.var_id(sym);
+            match saves.iter_mut().find(|(i, _, _)| *i == id) {
+                Some(slot) => slot.2 = value,
+                None => {
+                    let saved = self.registry.state(id).and_then(|s| s.root.clone());
+                    saves.push((id, saved, value));
+                }
+            }
+        }
+        for (id, _, value) in &saves {
+            if let Some(st) = self.registry.state_mut(*id) {
+                st.root = Some(value.clone());
+            }
+        }
+        let result = self.eval_body(body, env);
+        for (id, saved, _) in saves.iter().rev() {
+            if let Some(st) = self.registry.state_mut(*id) {
+                st.root = saved.clone();
+            }
+        }
+        result
+    }
+
+    /// `with-bindings`: evaluate the map expression and run the body
+    /// over one pushed frame (the macro expands to
+    /// `with-bindings*`, probe37 `wb-expansion`).
+    fn eval_with_bindings(
+        &mut self,
+        map: &Expr,
+        body: &[Expr],
+        env: &Env,
+    ) -> Result<Value, Signal> {
+        let bindings = self.eval(map, env)?;
+        let entries = crate::vars::push_entries(self, &bindings).map_err(|e| self.throw(e))?;
+        let depth = self.bindings.depth();
+        self.bindings.push_frame(entries);
+        let result = self.eval_body(body, env);
+        self.bindings.truncate(depth);
+        result
+    }
+
+    /// `bound-fn`: like `fn`, but the closure snapshots the thread
+    /// bindings at creation and re-pushes them around every
+    /// invocation. Named `bound-fn` replays the single-`letfn`
+    /// layout (same slot math, conveyed closure).
+    fn eval_bound_fn(
+        &mut self,
+        name: Option<&str>,
+        fun: &crate::expr::FunExpr,
+        env: &Env,
+    ) -> Result<Value, Signal> {
+        let conveyed = self.bindings.clone();
+        if name.is_none() {
+            let mut closure = self.make_closure(fun, env);
+            closure.conveyed = Some(conveyed);
+            return Ok(Value::Extension(Arc::new(closure)));
+        }
+        let env = env.extend(vec![Value::Nil]);
+        let mut closure = self.make_closure(fun, &env);
+        closure.conveyed = Some(conveyed);
+        let value = Value::Extension(Arc::new(closure));
+        env.set(env.len() - 1, value.clone());
+        Ok(value)
     }
 
     /// A body: the last value, or `nil` when empty.
@@ -507,6 +622,8 @@ impl Evaluator {
                 meta.get(&probe)
             })
             .is_some_and(Value::is_truthy);
+        let cur = self.registry.current().to_owned();
+        let cur_id = self.registry.get(&cur).map_or(0, |ns| ns.id());
         if let Some(state) = self.registry.state_mut(id) {
             if let Some(v) = value {
                 state.root = Some(v);
@@ -521,12 +638,19 @@ impl Evaluator {
                 ("column", Value::Int(i64::from(span.col))),
                 ("file", Value::Str(Arc::clone(&self.source))),
                 ("name", Value::Symbol(Symbol::new(None, sym.name()))),
+                (
+                    "ns",
+                    Value::Extension(Arc::new(NsHandle {
+                        name: Arc::from(cur.as_str()),
+                        id: cur_id,
+                    })),
+                ),
             ];
             for (key, val) in auto {
                 let key = Value::Keyword(Keyword::new(None, key));
                 meta = meta.insert(key, val);
             }
-            state.meta = meta;
+            state.meta = Some(meta);
             state.dynamic = dynamic;
         }
         Ok(Value::Var(Var {
@@ -634,6 +758,8 @@ impl Evaluator {
             display: Arc::from(fun.display.as_str()),
             arities: fun.arities.clone(),
             env: env.clone(),
+            meta: None,
+            conveyed: None,
         }
     }
 
@@ -748,8 +874,27 @@ impl Evaluator {
     }
 
     /// Apply a closure: fixed arities by count, else the variadic
-    /// arity (`rest` binds `nil` when empty, §E5).
+    /// arity (`rest` binds `nil` when empty, §E5). A `bound-fn`
+    /// closure re-pushes its conveyed bindings as one frame around
+    /// the call (popped in a `finally`, like the JVM's
+    /// `resetThreadBindingFrame`).
     fn apply_closure(&mut self, closure: &Closure, args: &[Value]) -> Result<Value, Signal> {
+        if let Some(conveyed) = closure.conveyed.clone() {
+            let depth = self.bindings.depth();
+            let frame: Vec<(Var, Value)> = conveyed
+                .pairs()
+                .map(|(var, v)| (var.clone(), v.clone()))
+                .collect();
+            self.bindings.push_frame(frame);
+            let result = self.apply_closure_inner(closure, args);
+            self.bindings.truncate(depth);
+            return result;
+        }
+        self.apply_closure_inner(closure, args)
+    }
+
+    /// The arity dispatch behind [`apply_closure`](Self::apply_closure).
+    fn apply_closure_inner(&mut self, closure: &Closure, args: &[Value]) -> Result<Value, Signal> {
         let mut variadic: Option<&crate::expr::Arity> = None;
         for arity in &closure.arities {
             if arity.rest.is_none() && arity.fixed.len() == args.len() {

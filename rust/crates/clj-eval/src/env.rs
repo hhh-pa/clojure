@@ -15,7 +15,9 @@ use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use std::sync::Arc;
 
-use clj_value::{Map, Symbol, Unbound, Value, new_map};
+use clj_value::{Keyword, Map, Symbol, Unbound, Value, Var, new_map};
+
+use crate::ext::NsHandle;
 
 /// A var's evaluator-side state: the handle in [`Value::Var`] is
 /// just `(id, sym)`; everything mutable lives here.
@@ -23,9 +25,10 @@ use clj_value::{Map, Symbol, Unbound, Value, new_map};
 pub struct VarState {
     /// The root (`None` = freshly interned, never set).
     pub root: Option<Value>,
-    /// The var's metadata (auto `:line`/`:column`/`:file`/`:name`
-    /// plus user meta; never `:ns` — S4 has no namespace objects).
-    pub meta: Map,
+    /// The var's metadata (`None` = cleared via `reset-meta!`/
+    /// `alter-meta!`; fresh interns carry `:ns`/`:name`, `def`
+    /// stamps the auto keys plus user meta).
+    pub meta: Option<Map>,
     /// `^:dynamic`: required for `binding`/`set!`.
     pub dynamic: bool,
 }
@@ -34,7 +37,7 @@ impl VarState {
     fn fresh() -> Self {
         Self {
             root: None,
-            meta: new_map(),
+            meta: None,
             dynamic: false,
         }
     }
@@ -54,10 +57,12 @@ pub struct Namespace {
     ids: HashMap<Symbol, u64>,
     aliases: HashMap<String, (String, u64)>,
     refers: HashMap<String, (Symbol, u64)>,
+    meta: Option<Map>,
 }
 
 impl Namespace {
-    /// A fresh namespace with a registry-issued id.
+    /// A fresh namespace with a registry-issued id (`nil` meta,
+    /// like the JVM).
     #[must_use]
     pub fn new(name: &str, id: u64) -> Self {
         Self {
@@ -67,6 +72,7 @@ impl Namespace {
             ids: HashMap::new(),
             aliases: HashMap::new(),
             refers: HashMap::new(),
+            meta: None,
         }
     }
 
@@ -104,21 +110,42 @@ impl Namespace {
     }
 
     /// Intern (find or create) a var in this namespace (the symbol
-    /// must already name it). Creation leaves root/meta fresh;
-    /// `eval` fills them. Ids come from the registry counter.
-    /// Creation drops any refer of the same name (`def`/`intern`
-    /// silently replace refers, like `Namespace.reference` minus
-    /// its `*err*` warning, which waits for S5D).
+    /// must already name it). Creation stamps the `:ns`/`:name`
+    /// meta (JVM `Var.intern`) and drops any refer of the same name
+    /// (`def`/`intern` silently replace refers, like
+    /// `Namespace.reference` minus its `*err*` warning, which waits
+    /// for S5D). Ids come from the registry counter.
     pub fn intern(&mut self, sym: &Symbol, next_id: &mut u64) -> u64 {
         if let Some(id) = self.ids.get(sym) {
             return *id;
         }
         let id = *next_id;
         *next_id += 1;
-        self.vars.insert(id, VarState::fresh());
+        let mut state = VarState::fresh();
+        let ns_key = Value::Keyword(Keyword::new(None, "ns"));
+        let ns_val = Value::Extension(std::sync::Arc::new(NsHandle {
+            name: std::sync::Arc::from(self.name.as_str()),
+            id: self.id,
+        }));
+        let name_key = Value::Keyword(Keyword::new(None, "name"));
+        let name_val = Value::Symbol(Symbol::new(None, sym.name()));
+        state.meta = Some(new_map().insert(ns_key, ns_val).insert(name_key, name_val));
+        self.vars.insert(id, state);
         self.ids.insert(sym.clone(), id);
         self.refers.remove(sym.name());
         id
+    }
+
+    /// This namespace's metadata (`None` = `nil`, like the JVM).
+    #[must_use]
+    pub fn meta(&self) -> Option<&Map> {
+        self.meta.as_ref()
+    }
+
+    /// Replace this namespace's metadata (`alter-meta!`/
+    /// `reset-meta!`).
+    pub fn set_meta(&mut self, meta: Option<Map>) {
+        self.meta = meta;
     }
 
     /// Install an alias: fresh and identical-target installs are
@@ -517,11 +544,13 @@ impl NamespaceRegistry {
     }
 }
 
-/// The thread-binding stack (`binding` push/pop). Entries shadow by
-/// recency; `set!` writes the topmost frame for its var.
+/// The thread-binding stack: one frame per `binding` /
+/// `push-thread-bindings` / `with-bindings*` / `bound-fn`
+/// invocation. Entries shadow by recency across frames; `set!`
+/// writes the topmost entry for its var.
 #[derive(Clone, Debug, Default)]
 pub struct Bindings {
-    stack: Vec<(u64, Value)>,
+    frames: Vec<Vec<(Var, Value)>>,
 }
 
 impl Bindings {
@@ -530,35 +559,56 @@ impl Bindings {
         Self::default()
     }
 
-    /// The depth (for restoring after a `binding` body).
+    /// The frame depth (for restoring after a `binding` body).
     #[must_use]
     pub fn depth(&self) -> usize {
-        self.stack.len()
+        self.frames.len()
     }
 
-    /// Push one frame.
-    pub fn push(&mut self, id: u64, value: Value) {
-        self.stack.push((id, value));
+    /// Push one frame (possibly empty, like the JVM).
+    pub fn push_frame(&mut self, entries: Vec<(Var, Value)>) {
+        self.frames.push(entries);
+    }
+
+    /// Pop one frame (`None` when the stack is empty —
+    /// `pop-thread-bindings` raises then).
+    pub fn pop_frame(&mut self) -> Option<Vec<(Var, Value)>> {
+        self.frames.pop()
     }
 
     /// Pop back to an earlier depth.
     pub fn truncate(&mut self, depth: usize) {
-        self.stack.truncate(depth);
+        self.frames.truncate(depth);
     }
 
     /// The visible value for a var, if bound.
     #[must_use]
     pub fn get(&self, id: u64) -> Option<&Value> {
-        self.stack
-            .iter()
-            .rev()
-            .find_map(|(i, v)| (*i == id).then_some(v))
+        self.frames.iter().rev().find_map(|frame| {
+            frame
+                .iter()
+                .rev()
+                .find_map(|(var, v)| (var.id == id).then_some(v))
+        })
     }
 
-    /// `set!`: replace the topmost frame for a var (false when no
-    /// frame exists — the evaluator raises then).
+    /// Every entry oldest-first (for snapshots: later entries win
+    /// per var when folded into a map).
+    pub fn pairs(&self) -> impl Iterator<Item = (&Var, &Value)> + '_ {
+        self.frames
+            .iter()
+            .flat_map(|frame| frame.iter().map(|(var, v)| (var, v)))
+    }
+
+    /// `set!`: replace the topmost entry for a var (false when no
+    /// entry exists — the evaluator raises then).
     pub fn set_top(&mut self, id: u64, value: Value) -> bool {
-        match self.stack.iter_mut().rev().find(|(i, _)| *i == id) {
+        match self
+            .frames
+            .iter_mut()
+            .rev()
+            .find_map(|frame| frame.iter_mut().rev().find(|(var, _)| var.id == id))
+        {
             Some((_, slot)) => {
                 *slot = value;
                 true

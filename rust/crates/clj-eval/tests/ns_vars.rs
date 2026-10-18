@@ -281,17 +281,25 @@ fn ns_map_family() {
         &mut eval,
         "(do (create-ns 'fx) (intern 'fx 'pub 1) (intern 'fx 'priv 2))",
     );
-    // Privates need meta the S5A2 surface cannot set yet (S5B owns
-    // `alter-meta!`), so the test sets it directly.
+    // Privates need one meta key the surface cannot set yet (no
+    // `assoc` to build the map via `alter-meta!`), so the test sets
+    // it directly.
     let priv_id = eval
         .registry
         .lookup(&clj_value::Symbol::new(Some("fx"), "priv"))
         .unwrap();
-    eval.registry.state_mut(priv_id).unwrap().meta =
-        eval.registry.state(priv_id).unwrap().meta.clone().insert(
+    let meta = eval
+        .registry
+        .state(priv_id)
+        .unwrap()
+        .meta
+        .clone()
+        .unwrap()
+        .insert(
             Value::Keyword(clj_value::Keyword::new(None, "private")),
             Value::Bool(true),
         );
+    eval.registry.state_mut(priv_id).unwrap().meta = Some(meta);
     run(
         &mut eval,
         "(do (create-ns 'usefx) (in-ns 'usefx) (clojure.core/refer 'fx :only '[pub]) (clojure.core/in-ns 'user))",
@@ -403,11 +411,18 @@ fn refer_private_and_shadow() {
         .registry
         .lookup(&clj_value::Symbol::new(Some("pl"), "priv"))
         .unwrap();
-    eval.registry.state_mut(priv_id).unwrap().meta =
-        eval.registry.state(priv_id).unwrap().meta.clone().insert(
+    let meta = eval
+        .registry
+        .state(priv_id)
+        .unwrap()
+        .meta
+        .clone()
+        .unwrap()
+        .insert(
             Value::Keyword(clj_value::Keyword::new(None, "private")),
             Value::Bool(true),
         );
+    eval.registry.state_mut(priv_id).unwrap().meta = Some(meta);
     assert_eq!(
         uncaught(&mut eval, "(refer 'pl :only '[priv])"),
         "java.lang.IllegalAccessError | priv is not public"

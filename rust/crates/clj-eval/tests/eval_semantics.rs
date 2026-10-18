@@ -453,10 +453,10 @@ fn def_var_set() {
         .registry
         .lookup(&clj_value::Symbol::new(Some("user"), "pm913"))
         .unwrap();
-    let meta = &eval.registry.state(id).unwrap().meta;
+    let meta = eval.registry.state(id).unwrap().meta.clone().unwrap();
     assert_eq!(
-        pr(&Value::Map(meta.clone())),
-        "{:private true, :doc \"d\", :line 1, :column 1, :file \"test\", :name pm913}"
+        pr(&Value::Map(meta)),
+        "{:private true, :doc \"d\", :line 1, :column 1, :file \"test\", :name pm913, :ns #object[clojure.lang.Namespace 0x1 \"user\"]}"
     );
     assert!(!eval.registry.state(id).unwrap().dynamic);
     // Unbound vars: the sentinel value, `str` shape, numeric CCE.

@@ -158,6 +158,23 @@ pub enum Expr {
         pairs: Vec<(Symbol, Expr)>,
         body: Vec<Expr>,
     },
+    /// `(with-redefs [var init …] body…)` (S5B parallel root
+    /// swap; symbols are resolved, like `var`).
+    WithRedefs {
+        pairs: Vec<(Symbol, Expr)>,
+        body: Vec<Expr>,
+    },
+    /// `(with-bindings map-expr body…)` (S5B).
+    WithBindings {
+        map: Box<Expr>,
+        body: Vec<Expr>,
+    },
+    /// `(bound-fn name? argv body…)` (S5B: like `fn`, snapshots
+    /// the thread bindings at creation).
+    BoundFn {
+        name: Option<String>,
+        fun: FunExpr,
+    },
     Invoke {
         head: Box<Expr>,
         args: Vec<Expr>,
@@ -371,14 +388,20 @@ fn is_special(name: &str) -> bool {
             | "try"
             | "set!"
             | "binding"
+            | "with-redefs"
+            | "with-bindings"
+            | "bound-fn"
     )
 }
 
-/// The five macro-implemented specials: a local or global binding
+/// The macro-implemented specials: a local or global binding
 /// with one of these names shadows the macro (real specials never
 /// shadow, probe31 `shadow-*`).
 fn is_shadowable_macro(name: &str) -> bool {
-    matches!(name, "let" | "loop" | "letfn" | "fn" | "binding")
+    matches!(
+        name,
+        "let" | "loop" | "letfn" | "fn" | "binding" | "with-redefs" | "with-bindings" | "bound-fn"
+    )
 }
 
 /// The analyzer: reader values become [`Expr`]s. Holds the local
@@ -600,6 +623,9 @@ impl<'a> Analyzer<'a> {
             "fn" => self.parse_fn(items, span),
             "fn*" => self.parse_fn_star(items, span),
             "binding" => self.parse_binding(items, span, tail),
+            "with-redefs" => self.parse_with_redefs(items, span, tail),
+            "with-bindings" => self.parse_with_bindings(items, span, tail),
+            "bound-fn" => self.parse_bound_fn(items, span),
             _ => unreachable!("dispatch covers every special form"),
         }
     }
@@ -611,6 +637,8 @@ impl<'a> Analyzer<'a> {
             "loop" => "clojure.core/loop",
             "binding" => "clojure.core/binding",
             "letfn" => "clojure.core/letfn",
+            "with-redefs" => "clojure.core/with-redefs",
+            "with-bindings" => "clojure.core/with-bindings",
             _ => return Ok(()),
         };
         Err(CompileError::macro_arity(name, span, &self.source))
@@ -1275,6 +1303,122 @@ impl<'a> Analyzer<'a> {
             pairs,
             body: self.analyze_body(&items[2..], span, tail)?,
         })
+    }
+
+    /// `(with-redefs bindings body…)`: bindings seq like the
+    /// macro's `zipmap` — vectors, lists, sets, and nil (empty);
+    /// maps seq entries, so a non-empty map fails the entry's
+    /// `Symbol` cast under `compiling var`; anything else is the
+    /// `ISeq` error under `macroexpanding with-redefs`. An odd
+    /// trailing binding silently drops (probe37 `wrd-odd`).
+    fn parse_with_redefs(
+        &mut self,
+        items: &[&Value],
+        span: Span,
+        tail: bool,
+    ) -> Result<Expr, CompileError> {
+        let op = match items[0] {
+            Value::Symbol(sym) => sym.name().to_owned(),
+            _ => unreachable!("dispatched on the operator symbol"),
+        };
+        let bindings = items.get(1).copied().unwrap_or(&Value::Nil);
+        let forms = self.with_redefs_forms(bindings, span, &op)?;
+        let mut pairs = Vec::with_capacity(forms.len() / 2);
+        // Step indexing, not `chunks_exact` (new clippy wants
+        // `as_chunks`, which needs Rust 1.88 > MSRV 1.85); the
+        // `len() - len() % 2` drops an odd tail like `zipmap`.
+        for i in (0..forms.len() - forms.len() % 2).step_by(2) {
+            let var_sym = match forms[i] {
+                Value::Symbol(sym) => self.resolve_var(sym, span, "var")?,
+                other => {
+                    return Err(self.err(
+                        class::CLASS_CAST,
+                        NativeError::cast(&jvm_class_of(other), "clojure.lang.Symbol").message,
+                        span,
+                        Verb::Compiling,
+                        Some("var".to_owned()),
+                    ));
+                }
+            };
+            pairs.push((var_sym, self.analyze(forms[i + 1], span, false)?));
+        }
+        Ok(Expr::WithRedefs {
+            pairs,
+            body: self.analyze_body(&items[2..], span, tail)?,
+        })
+    }
+
+    /// The `with-redefs` binding items: vectors, lists, sets, and
+    /// nil (empty) seq; a non-empty map fails its first entry's
+    /// `Symbol` cast under `compiling var` (entries aren't
+    /// symbols); anything else is the `ISeq` error under
+    /// `macroexpanding with-redefs`.
+    fn with_redefs_forms<'v>(
+        &self,
+        bindings: &'v Value,
+        span: Span,
+        op: &str,
+    ) -> Result<Vec<&'v Value>, CompileError> {
+        match bindings {
+            Value::Vector(v) => Ok(v.iter().collect()),
+            Value::List(l) => Ok(l.iter().collect()),
+            Value::Nil => Ok(Vec::new()),
+            Value::Set(s) => Ok(s.iter().collect()),
+            Value::Map(m) if m.is_empty() => Ok(Vec::new()),
+            Value::Map(_) => Err(self.err(
+                class::CLASS_CAST,
+                NativeError::cast("clojure.lang.MapEntry", "clojure.lang.Symbol").message,
+                span,
+                Verb::Compiling,
+                Some("var".to_owned()),
+            )),
+            other => Err(self.err(
+                class::ILLEGAL_ARG,
+                format!(
+                    "Don't know how to create ISeq from: {}",
+                    jvm_class_of(other)
+                ),
+                span,
+                Verb::Macroexpanding,
+                Some(op.to_owned()),
+            )),
+        }
+    }
+
+    /// `(with-bindings map-expr body…)`: the map is an evaluated
+    /// expression (computed maps work, probe37 `wb-computed-map`).
+    /// Bare `(with-bindings)` is intercepted by `check_bare_arity`.
+    fn parse_with_bindings(
+        &mut self,
+        items: &[&Value],
+        span: Span,
+        tail: bool,
+    ) -> Result<Expr, CompileError> {
+        let Some(map) = items.get(1) else {
+            unreachable!("bare with-bindings fails arity before dispatch");
+        };
+        Ok(Expr::WithBindings {
+            map: Box::new(self.analyze(map, span, false)?),
+            body: self.analyze_body(&items[2..], span, tail)?,
+        })
+    }
+
+    /// `(bound-fn name? argv body…)`: parsed exactly like `fn` (the
+    /// macro expands to one, probe37 `bf-expansion`) — including
+    /// the named single-`letfn` shape, whose slot layout the
+    /// evaluator replays with a conveyed closure.
+    fn parse_bound_fn(&mut self, items: &[&Value], span: Span) -> Result<Expr, CompileError> {
+        match self.parse_fn(items, span)? {
+            Expr::Fn(fun) => Ok(Expr::BoundFn { name: None, fun }),
+            Expr::LetFn { mut fns, .. } if fns.len() == 1 => {
+                let (name, fun) = fns.remove(0);
+                Ok(Expr::BoundFn {
+                    name: Some(name),
+                    fun,
+                })
+            }
+            _ => unreachable!("parse_fn returns Fn or a single LetFn"),
+        }
     }
 }
 

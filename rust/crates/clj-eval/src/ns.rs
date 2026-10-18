@@ -31,7 +31,7 @@ use crate::eval::{Evaluator, SourceError};
 use crate::ext::{NsHandle, as_ns};
 
 /// `clojure.lang.Symbol`, the cast target for namespace arguments.
-const SYMBOL_CLASS: &str = "clojure.lang.Symbol";
+pub(crate) const SYMBOL_CLASS: &str = "clojure.lang.Symbol";
 
 /// `clojure.lang.Named`, the cast target for lib names.
 const NAMED_CLASS: &str = "clojure.lang.Named";
@@ -46,20 +46,20 @@ const NIL_SYM_NPE: &str = "Cannot read field \"ns\" because \"sym\" is null";
 /// Reading `.getName` off a nil nameable (probe36 `req-nil-lib`).
 const NIL_NAME_NPE: &str = "Cannot invoke \"clojure.lang.Named.getName()\" because \"x\" is null";
 
-fn npe(message: &str) -> NativeError {
+pub(crate) fn npe(message: &str) -> NativeError {
     NativeError::new(ThrowClass::NullPointerException, message.to_owned())
 }
 
-fn ex(message: String) -> NativeError {
+pub(crate) fn ex(message: String) -> NativeError {
     NativeError::new(ThrowClass::Exception, message)
 }
 
-fn cast_err(v: &Value, to: &str) -> NativeError {
+pub(crate) fn cast_err(v: &Value, to: &str) -> NativeError {
     NativeError::cast(&jvm_class_of(v), to)
 }
 
 /// `str` a value (`nil` prints empty, unlike `print`).
-fn str_of(v: &Value) -> String {
+pub(crate) fn str_of(v: &Value) -> String {
     match v {
         Value::Nil => String::new(),
         _ => pr_to_string(v, &PrintOpts::print()),
@@ -67,7 +67,7 @@ fn str_of(v: &Value) -> String {
 }
 
 /// A symbol as written (`a/b` or `a`).
-fn sym_str(s: &Symbol) -> String {
+pub(crate) fn sym_str(s: &Symbol) -> String {
     match s.namespace() {
         Some(ns) => format!("{ns}/{}", s.name()),
         None => s.name().to_owned(),
@@ -109,19 +109,28 @@ fn ns_value(name: &str, id: u64) -> Value {
 }
 
 /// A var value for an id and qualified symbol.
-fn var_value(id: u64, sym: &Symbol) -> Value {
+pub(crate) fn var_value(id: u64, sym: &Symbol) -> Value {
     Value::Var(Var {
         id,
         sym: sym.clone(),
     })
 }
 
+/// Stamp the `:ns`/`:name` keys onto a var meta map (JVM
+/// `Var.intern`: always present, winning over adopted meta).
+pub(crate) fn stamped_meta(base: Map, ns_name: &str, ns_id: u64, name: &str) -> Map {
+    let ns_key = Value::Keyword(Keyword::new(None, "ns"));
+    let name_key = Value::Keyword(Keyword::new(None, "name"));
+    base.insert(ns_key, ns_value(ns_name, ns_id))
+        .insert(name_key, Value::Symbol(Symbol::new(None, name)))
+}
+
 /// Whether a var id is public (`^:private` meta is truthiness-tested,
 /// `Var.isPublic`).
-fn is_public(reg: &NamespaceRegistry, id: u64) -> bool {
+pub(crate) fn is_public(reg: &NamespaceRegistry, id: u64) -> bool {
     let probe = Value::Keyword(Keyword::new(None, "private"));
     !reg.state(id)
-        .and_then(|s| s.meta.get(&probe))
+        .and_then(|s| s.meta.as_ref()?.get(&probe))
         .is_some_and(Value::is_truthy)
 }
 
@@ -182,7 +191,11 @@ fn sorted_map(pairs: Vec<(String, Value)>) -> Map {
 
 /// Fixed arities (`display` is the qualified `clojure.core/name`,
 /// probe35 `arity-intern-1`).
-fn check_arity(display: &str, args: &[Value], want: &[usize]) -> Result<(), NativeError> {
+pub(crate) fn check_arity(
+    display: &str,
+    args: &[Value],
+    want: &[usize],
+) -> Result<(), NativeError> {
     if want.contains(&args.len()) {
         Ok(())
     } else {
@@ -217,7 +230,7 @@ fn throwable_to_native(t: &Throwable) -> NativeError {
 
 /// An invoked value's failure as a native error (an escaping `recur`
 /// is unreachable — the analyzer cages every one).
-fn signal_to_native(s: Signal) -> NativeError {
+pub(crate) fn signal_to_native(s: Signal) -> NativeError {
     match s {
         Signal::Throw(t) => throwable_to_native(&t),
         Signal::Recur(_) => ex("recur escaped its loop or fn".to_owned()),
@@ -654,11 +667,17 @@ fn native_intern(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeEr
         Some(id) => id,
         None => return Err(ex(format!("No namespace: {ns_name} found"))),
     };
+    let home = eval.registry.get(&ns_name).map_or(0, |ns| ns.id());
     if let Some(st) = eval.registry.state_mut(id) {
         // The var adopts the name symbol's meta, if any (core.clj
-        // `intern`); 3-arity resets the root on the same var.
+        // `intern`); 3-arity resets the root on the same var. The
+        // `:ns`/`:name` keys are always (re)stamped (JVM
+        // `Var.intern`; a cleared meta stays cleared).
         if let Some(m) = meta {
-            st.meta = m;
+            st.meta = Some(m);
+        }
+        if let Some(m) = st.meta.clone() {
+            st.meta = Some(stamped_meta(m, &ns_name, home, name.name()));
         }
         if args.len() == 3 {
             st.root = Some(args[2].clone());
@@ -821,6 +840,15 @@ fn source_to_native(source: &str, e: SourceError) -> NativeError {
 }
 
 /// A `clojure.core` var id, if installed.
+/// A `Var` handle for a `clojure.core` var id (binding frames
+/// carry the handle so snapshots print without re-lookup).
+fn core_var_handle(id: u64, name: &str) -> Var {
+    Var {
+        id,
+        sym: Symbol::new(Some("clojure.core"), name),
+    }
+}
+
 fn core_var(eval: &Evaluator, name: &str) -> Option<u64> {
     id_of(&eval.registry, &Symbol::new(Some("clojure.core"), name))
 }
@@ -970,7 +998,7 @@ fn run_loaded(
     let cur = eval.registry.current().to_owned();
     let mut depth = None;
     if let Some(id) = core_var(eval, "*file*") {
-        depth = Some(eval.push_binding(id, file_star));
+        depth = Some(eval.push_binding(core_var_handle(id, "*file*"), file_star));
     }
     if isolate_ns {
         push_ns_frame(eval, &mut depth);
@@ -988,7 +1016,7 @@ fn run_loaded(
 fn push_ns_frame(eval: &mut Evaluator, depth: &mut Option<usize>) {
     if let Some(id) = core_var(eval, "*ns*") {
         let v = deref_core(eval, "*ns*");
-        let d = eval.push_binding(id, v);
+        let d = eval.push_binding(core_var_handle(id, "*ns*"), v);
         if depth.is_none() {
             *depth = Some(d);
         }
@@ -1035,7 +1063,7 @@ fn load_all(
     let Some(id) = core_var(eval, "*loaded-libs*") else {
         return load_one(eval, lib, need_ns, require_);
     };
-    let depth = eval.push_binding(id, Value::Set(new_set()));
+    let depth = eval.push_binding(core_var_handle(id, "*loaded-libs*"), Value::Set(new_set()));
     let out = load_one(eval, lib, need_ns, require_);
     let new = libs_set(eval);
     eval.pop_bindings(depth);
@@ -1120,8 +1148,12 @@ fn load_lib_phase(
     // The verbose binding is observable; the echo itself waits for
     // `*out*` printing in S5D.
     let outer_verbose = deref_core(eval, "*loading-verbosely*").is_truthy() || opts.verbose;
-    let depth = core_var(eval, "*loading-verbosely*")
-        .map(|id| eval.push_binding(id, Value::Bool(outer_verbose)));
+    let depth = core_var(eval, "*loading-verbosely*").map(|id| {
+        eval.push_binding(
+            core_var_handle(id, "*loading-verbosely*"),
+            Value::Bool(outer_verbose),
+        )
+    });
     let out = match load {
         Some(kind) => {
             let r = match kind {
@@ -1407,9 +1439,10 @@ fn load_one_path(eval: &mut Evaluator, full: &str) -> Result<(), NativeError> {
     let (file_star, text) = resolve_source(eval, &root)?;
     let pending_depth = match core_var(eval, "*pending-paths*") {
         Some(id) => match deref_core(eval, "*pending-paths*") {
-            Value::List(l) => {
-                Some(eval.push_binding(id, Value::List(l.push_front(Value::Str(Arc::from(full))))))
-            }
+            Value::List(l) => Some(eval.push_binding(
+                core_var_handle(id, "*pending-paths*"),
+                Value::List(l.push_front(Value::Str(Arc::from(full)))),
+            )),
             v => return Err(cast_err(&v, "clojure.lang.IPersistentList")),
         },
         None => None,
@@ -1511,7 +1544,7 @@ fn native_eval(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErro
 }
 
 /// A native fn pointer (all §N natives share the signature).
-type NativeFnPtr = fn(&mut Evaluator, &[Value]) -> Result<Value, NativeError>;
+pub(crate) type NativeFnPtr = fn(&mut Evaluator, &[Value]) -> Result<Value, NativeError>;
 
 /// The §N natives installed into `clojure.core` by [`boot`].
 const NATIVES: &[(&str, NativeFnPtr)] = &[
@@ -1591,12 +1624,22 @@ fn def_var(eval: &mut Evaluator, name: &str, root: Value, dynamic: bool, private
     if let Some(st) = eval.registry.state_mut(id) {
         st.root = Some(root);
         st.dynamic = dynamic;
+        // `intern` stamped `:ns`/`:name`; boot adds `:dynamic`
+        // (JVM `def^:dynamic` keeps it in the meta) and `:private`.
+        let mut meta = st.meta.clone().unwrap_or_else(new_map);
+        if dynamic {
+            meta = meta.insert(
+                Value::Keyword(Keyword::new(None, "dynamic")),
+                Value::Bool(true),
+            );
+        }
         if private {
-            st.meta = st.meta.clone().insert(
+            meta = meta.insert(
                 Value::Keyword(Keyword::new(None, "private")),
                 Value::Bool(true),
             );
         }
+        st.meta = Some(meta);
     }
 }
 
@@ -1611,7 +1654,7 @@ pub fn boot() -> Evaluator {
     eval.registry.ensure_ns("clojure.core");
     let user_ns = eval.registry.ensure_ns("user").id();
     eval.registry.set_current("user");
-    for (name, f) in NATIVES {
+    for (name, f) in NATIVES.iter().chain(crate::vars::VAR_NATIVES.iter()) {
         let func: Arc<crate::ext::NativeImpl> = Arc::new(*f);
         eval.install_native("clojure.core", name, func);
     }
@@ -1619,7 +1662,11 @@ pub fn boot() -> Evaluator {
     for (name, root, dynamic, private) in core_vars(user_handle.clone()) {
         def_var(&mut eval, &name, root, dynamic, private);
     }
-    let mut names: Vec<String> = NATIVES.iter().map(|(n, _)| (*n).to_owned()).collect();
+    let mut names: Vec<String> = NATIVES
+        .iter()
+        .chain(crate::vars::VAR_NATIVES.iter())
+        .map(|(n, _)| (*n).to_owned())
+        .collect();
     names.extend(
         [
             "*ns*",
@@ -1645,7 +1692,7 @@ pub fn boot() -> Evaluator {
         }
     }
     if let Some(id) = core_var(&eval, "*ns*") {
-        eval.push_binding(id, user_handle);
+        eval.push_binding(core_var_handle(id, "*ns*"), user_handle);
     }
     eval
 }
