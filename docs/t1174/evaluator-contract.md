@@ -211,8 +211,9 @@ so the port pins stable equivalents:
   `clojure.lang.PersistentList`; map with ≤8 pairs, or ≤64 pairs whose
   keys past the first 8 are all keywords, →
   `clojure.lang.PersistentArrayMap`, else `clojure.lang.PersistentHashMap`
-  (mirrors `canBePAM`; order beyond insertion is unavailable to our map,
-  so the 9–64 mixed-key band uses all-keys-keyword, documented); vector →
+  (mirrors `canBePAM` exactly — our maps keep insertion order, so keys
+  past the first 8 pairs are checked for keyword-ness like the JVM);
+  vector →
   `clojure.lang.PersistentVector`, set → `clojure.lang.PersistentHashSet`.
 - Runtime nil invoke: `NullPointerException | Cannot invoke nil as a
   function`.
@@ -246,23 +247,60 @@ so the port pins stable equivalents:
 - **Recur**: `recur` in tail position loops with re-bound args; `(recur)`
   with no values outside a recursion point is E2 (tail-position error).
 
-## E12. Destructure value semantics (probes 21/23)
+## E12. Destructure value semantics (probes 21/23/25)
 
-- Vector: sequential access; missing elements bind `nil`
-  (`(let [[a b] [1]] [a b])` → `[1 nil]`); `& rest` binds the seq remainder
-  (`(let [[a & r] [1 2 3]] …)` → `a=1 r=(2 3)`); `&` first binds the whole
-  seq (`(let [[& r] [1 2]] r)` → `(1 2)`); rest itself destructures
-  (`[a & [b c]]` → `[1 2 3]`); `:as` binds the whole
+Mirrors `destvec*`/`destmap*` (`core.clj`), including the 1.13 directives.
+
+- Vector without `&`: positional `(nth v n nil)`; missing → `nil`
+  (`(let [[a b] [1]] [a b])` → `[1 nil]`); strings yield chars
+  (`(let [[a b] "xy"] …)` → `[\x \y]`); wrong-type target (number, map,
+  closure, …) → `UnsupportedOperationException | nth not supported on
+  this type: SIMPLE` (SIMPLE = `getSimpleName` rule: full name for
+  generated classes, e.g. `user$eval447$fn__448`); `nil` → `nil`s.
+- Vector with `&`: fixed via `first`/`next` over `(seq v)`; `& rest`
+  binds the remainder seq (`(let [[a & r] [1 2 3]] …)` → `a=1 r=(2 3)`);
+  exhausted remainder binds `nil` (`(let [[a & r] [1]] …)` → `[1 nil]`,
+  `(let [[a & r] {:a 1}] …)` → `[[:a 1] nil]`); `&` first binds the
+  whole seq (`(let [[& r] [1 2]] r)` → `(1 2)`); rest itself
+  destructures (`[a & [b c]]` → `[1 2 3]`); `:as` binds the whole
   (`[a :as v]` → `[1 [1 2]]`).
-- Map: `symbol keyword` entries look up by keyword; `:keys`/`:strs`/`:syms`
-  bind by name/string/symbol keys; `:as` binds the whole map; `:or`
-  supplies defaults on MISSING keys only — a present `nil` stays `nil`
-  (`(let [{x :x :or {x 5}} {:x nil}] x)` → `nil`); `:or` applies to
-  `:keys` bindings too (`(let [{:keys [a] :or {a 1}} {}] a)` → `1`).
-- Nesting composes (`[1 2 3]`, `[1 9]` in probe21); param hints
-  (`[^String x]`) are accepted and ignored.
-- `:or` defaults are evaluated expressions, not literals
-  (`(let [{x :x :or {x (+ 1 2)}} {}] x)` → `3`).
+- Map: `symbol keyword` entries `get` by keyword; `:keys`/`:strs`/`:syms`
+  bind by name/string/symbol keys; `:as` binds the whole (post
+  seq-conversion) map; nesting composes; param hints ignored.
+- Seq targets convert first (`seq-to-map-for-destructuring`): empty →
+  `{}`, one element → the element, 2+ → pairs as if by assoc (last wins)
+  plus the trailing rule for odd counts: trailing map merges, trailing
+  2-vector assocs (other lengths → `IllegalArgumentException | Vector arg
+  to map conj must be a pair`), trailing `nil` is a no-op, trailing
+  sequential contributors must be map entries (ours never are — 2-vectors
+  included — so `ClassCastException` X→`java.util.Map$Entry`), anything
+  else → `IllegalArgumentException | Don't know how to create ISeq from:
+  CLASS`.
+- `:or` maps binding-local-or-key → default expression. Defaults are
+  evaluated eagerly, once, before any lookup (even unused ones fire).
+  A default fires on MISSING keys only — present `nil` stays `nil`.
+  Both a local and a key default for one binding →
+  `Exception | Multiple :or defaults for same key: K 'local'`
+  (compile time, `macroexpanding let`/`loop` as-written wrapper).
+- 1.13 directives: `:keys!`/`:syms!`/`:strs!` require presence, else
+  `IllegalArgumentException | Missing required key: K` at runtime (K
+  printed bare); `:select s` binds `(select-keys (merge dm m subs) sel)`;
+  `:all m` binds `(merge dm m subs)`; `:excess e` binds the leftover map
+  (`(merge (not-empty (dissoc m sel)) subs)`); `:missing m` starts `nil`
+  and assocs `nil` for each missing required key; `&` inside a key list
+  adds later keys to `sel` without binding them; `:defaults` is silently
+  ignored (its "binding" never exists). With `:select`/`:all`, `:or`
+  keys must name bindings, else `IllegalArgumentException | symbol X in
+  :or does not refer to a binding`, and keys outside the selection →
+  `IllegalArgumentException | keys #{…} appear only in :or` (both
+  compile time, as-written wrapper). Unknown map directives →
+  `Exception | Unsupported map directive: K` (loop-destructure path;
+  `let`/`fn` spec rejects them first).
+- `get` (shared lookup): map → val/nil; vector with `Int` key → elem
+  (`nil`/notFound on OOB), non-`Int` key → `nil`/notFound; string with
+  `Int` key → char (`nil`/notFound on OOB); set → member/`nil`; list and
+  everything else → `nil`/notFound; `nil` coll → `nil`/notFound. `get`
+  never throws on OOB (unlike `nth` and vector-invoke).
 
 ## E10. Volatility log (shape-faithful, value-volatile)
 

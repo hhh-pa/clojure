@@ -59,6 +59,10 @@ root-cause exception (class | message | ex-data line/col).
 - `probe24.clj` (S4): `set!` targets, `:or` evaluation, full `IFn`
   invoke table (keywords/symbols/vectors/maps/sets/vars/unbound),
   arity-name rules, CCE from-names, index coercion.
+- `probe25.clj` (S4): fn-param destructuring (fixed + rest), 1.13 map
+  directives (`:keys!`/`:select`/`:all`/`:excess`/`:missing`), strict
+  `:or` errors, seq→map conversion + trailing rule, nth/get matrix,
+  `def` docstring/meta, empty list.
 
 Run: `./probe.sh [outdir]`. Gensym ids (`p1__243#`), identity hashes
 (`@7fc19ced`), and inst renderings vary between runs; the contract
