@@ -33,6 +33,10 @@ workspace (excluding build output) and compares named-function violations
 * a baselined violation whose metrics grew -> error
 * a baseline entry that no longer violates -> note (prune at leisure)
 
+A baselined entry may carry a justification string naming why the
+function is inherently complex; --regen preserves justifications
+on entries that still violate.
+
 Fail-closed: no .rs files collected, an empty result against a non-empty
 baseline, or any unparseable rca output file is an error, never a silent
 OK — a green gate must mean "analyzed, nothing new", not "analyzed
@@ -56,10 +60,11 @@ const baselineCommentFmt = "rust-code-analysis baseline (T1174): named functions
 	"or worsened ones; prune entries that no longer violate."
 
 type violation struct {
-	File       string      `json:"file"`
-	Function   string      `json:"function"`
-	Cyclomatic json.Number `json:"cyclomatic"`
-	Cognitive  json.Number `json:"cognitive"`
+	File          string      `json:"file"`
+	Function      string      `json:"function"`
+	Cyclomatic    json.Number `json:"cyclomatic"`
+	Cognitive     json.Number `json:"cognitive"`
+	Justification string      `json:"justification,omitempty"`
 }
 
 type violationKey struct {
@@ -313,12 +318,29 @@ func run(argv []string) int {
 	}
 
 	if regen {
+		keep := map[violationKey]string{}
+		if raw, err := os.ReadFile(baselinePath); err == nil {
+			var prev struct {
+				Violations []violation `json:"violations"`
+			}
+			if json.Unmarshal(raw, &prev) == nil {
+				for _, v := range prev.Violations {
+					if v.Justification != "" {
+						keep[keyOf(v)] = v.Justification
+					}
+				}
+			}
+		}
+		out := append([]violation(nil), current...)
+		for i := range out {
+			out[i].Justification = keep[keyOf(out[i])]
+		}
 		base := struct {
 			Comment    string      `json:"_comment"`
 			Violations []violation `json:"violations"`
 		}{
 			fmt.Sprintf(baselineCommentFmt, cyThreshold, coThreshold),
-			current,
+			out,
 		}
 		data, err := pyjson.MarshalIndent1(base)
 		if err != nil {

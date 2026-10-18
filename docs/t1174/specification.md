@@ -285,8 +285,9 @@ runtime archive. JIT is a follow-up, not this task.
 
 S1 scaffold+CI: workspace, `--help`/`--version`, vendored CI,
   LLVM provisioning, green on 3 OSes. TDD: CLI smoke tests first.
-S2 reader+printer: reader per `LispReader.java`/`EdnReader.java`
-  behavior, printer per C3, corpus harness. TDD: round-trip
+S2 reader+printer: reader per `LispReader.java` behavior
+  (`EdnReader` out of S2 scope per reader contract §24 item 11),
+  printer per C3, corpus harness. TDD: round-trip
   property tests + differential entries first.
 S3 values+collections: `Value`, rpds-backed types, transients,
   seqs (C4), equality/ordering (C2). TDD: model tests + threaded
@@ -312,6 +313,9 @@ updates in-slice when behavior changes.
   run in CI on Linux; fixed seeds, no nondeterminism.
 - Integration tests in `rust/tests/` mirror arcanist layout:
   `common/` harness, `fixtures/`, one file per area.
+  Crate-local harnesses with crate-local fixtures (e.g. the S2
+  reader corpus under `clj-reader/tests/`) use the same layout
+  in place.
 - Differential oracle: stock JVM jar built once per run from the
   untouched Maven build; corpus entries are `(input, expected)`
   pairs where `expected` is JVM-printed output captured at seed

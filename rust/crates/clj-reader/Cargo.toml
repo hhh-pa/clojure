@@ -4,3 +4,9 @@ version = "0.1.0"
 edition = "2024"
 description = "Clojure/EDN reader and printer with source spans"
 license = "EPL-1.0"
+
+[lints]
+workspace = true
+
+[dependencies]
+clj-value = { path = "../clj-value" }

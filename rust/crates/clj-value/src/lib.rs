@@ -6,7 +6,20 @@
 // the terms of this license.
 // You must not remove this notice, or any other, from this software.
 
-//! Clojure value model: the `Value` enum, `rpds`-backed persistent
-//! collections, transients, and lazy chunked seqs.
+//! Clojure value model: [`Value`] plus [`Symbol`] and [`Keyword`].
 //!
-//! Lands in slice S3 (`docs/t1174/specification.md`).
+//! Values are immutable and `Send + Sync`, shared by `Arc`. Equality
+//! is Clojure `=` and hashing is equiv-consistent (see
+//! [`value`](crate::value)); printing lives in [`print`](crate::print).
+
+mod keyword;
+mod print;
+mod symbol;
+mod value;
+
+pub use keyword::Keyword;
+pub use print::{
+    java_debug, java_double_string, pr_to_string, print, print_opts::PrintOpts, print_to_string,
+};
+pub use symbol::Symbol;
+pub use value::{FxBuildHasher, List, Map, Set, Value, Vector, new_map, new_set};

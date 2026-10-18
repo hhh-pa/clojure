@@ -1,0 +1,44 @@
+# S2 oracle probes
+
+Clojure scripts that pin JVM `LispReader` behavior for the S2 reader
+contract (`../reader-contract.md`). Each `(t "...")` / `(tm "...")` call
+prints one `>>>` line with either the pr-str of every form read or the
+root-cause exception (class | message | ex-data line/col).
+
+- `probe.clj`: numbers, chars, strings, symbols, `##`, dispatch basics,
+  conditionals, ns-maps, meta, fn, syntax-quote, delims, EOF, whitespace.
+- `probe2.clj`: appended to `probe.clj` (`probe-all.clj`); ends in a
+  deliberate top-level reader error (dup map literal), exit nonzero.
+- `probe3.clj`: position state machine (`POS ...`), CR normalization,
+  boundaries, backquote atoms, splice shapes, char codes, ns-map print,
+  print-meta (dies partway on a deliberate `^:k "s"` error; earlier
+  sections are the evidence).
+- `probe4.clj`: dup-check basics, `#?@` positions, print-meta short
+  forms, regex `\Q` char codes.
+- `probe5.clj`: NaN map keys, radix overflow, big-set dup, print-meta
+  `:tag` falsy / `:type`, regex qmode branch.
+- `probe6.clj`: dup-check order dependence (`[1]`/`(1)` asymmetry).
+- `probe7.clj`: `hash` values, nested-double dups, big-scale dups,
+  `ReaderConditional` dup messages.
+- `probe8.clj`: set nested-double dups, big-map new-reporting,
+  `TaggedLiteral` dup messages.
+- `probe9.clj`: big-map first-vs-new (programmatic), `TaggedLiteral`
+  nested-double keys (OK), big-map 1/1.0 (OK both).
+- `probe10.clj`: small/big threshold (16 forms), all-keyword path,
+  big-map seq-cross and map-nested dups.
+- `probe11.clj`: set map-nested dups (unifies set/big-map rule),
+  big 1/1.0 coexistence.
+- `probe12.clj` (S2 review): radix-10 digit errors omit `under radix`;
+  greedy radix digits swallow `N` (`36r1N`⇒59, `2r1N` errors on `"1N"`).
+- `probe13.clj` (S2 review): bare seq-cross dups BOTH orders in small
+  maps (no asymmetry); length-mismatched pairs stay OK.
+- `probe14.clj` (S2 review): same-length mixed-seq nested doubles DUP
+  (patched recursion everywhere); mixed numerics stay OK.
+- `probe15.clj` (S2 review): `TaggedLiteral`/`ReaderConditional`
+  nested-double keys stay OK in sets (plain-form rule).
+- `probe16.clj` (S2 review): splice leftovers dropped across top-level
+  forms (`'#?@(:clj (1 2)) X` ⇒ `(quote 1)`, `X`).
+
+Run: `./probe.sh [outdir]`. Gensym ids (`p1__243#`), identity hashes
+(`@7fc19ced`), and inst renderings vary between runs; the contract
+records only the stable shapes.
