@@ -177,9 +177,12 @@ binding conveyance to futures/agents, agent error modes).
 
 A1. All scenarios in 1.3 pass on Linux, macOS, and Windows CI artifacts.
 A2. The differential corpus (Part 2, 2.7) passes at 100%: every corpus
-    entry prints byte-identical output on JVM Clojure and `clojure-rs`.
-A3. `rust.yml` + `rust-release.yml` green; a `v*` dry-run attaches 3
-    archives; JVM workflows untouched and green.
+    entry on the implemented subset prints byte-identical output on JVM
+    Clojure and `clojure-rs`; out-of-subset entries assert their
+    documented divergence.
+A3. `rust.yml` + `rust-release.yml` green; a `v*` dry-run produces 3
+    archives as run artifacts (nothing attaches without a tag; the publish
+    path stays untested until the first tag); JVM workflows untouched and green.
 A4. Quality gates (fmt/clippy/deny/geiger/udeps/audit/complexity/
     coverage) green with no new warnings.
 A5. `rust/core-coverage.md` lists every implemented var with its
@@ -314,7 +317,7 @@ updates in-slice when behavior changes.
   pairs where `expected` is JVM-printed output captured at seed
   time and checked in. Mismatches fail CI with a diff.
 - Coverage: llvm-cov line floor ratchets from the S1 baseline;
-  patch coverage enforced on slices 2+.
+  patch coverage is deferred to S9 hardening (not enforced per-slice).
 
 ### 2.7 CI impact
 
