@@ -7,3 +7,6 @@ license = "EPL-1.0"
 
 [lints]
 workspace = true
+
+[dependencies]
+clj-value = { path = "../clj-value" }
