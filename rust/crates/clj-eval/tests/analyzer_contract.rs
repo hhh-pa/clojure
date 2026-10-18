@@ -754,12 +754,30 @@ fn keys_element_cast_matrix() {
             "(loop [{:foo/syms [\"a\"]} {}] a)",
             "java.lang.Exception | Unsupported binding form: a",
         ),
+        // Shapes under `:strs` walk as nested patterns: malformed
+        // content still throws (probe33 `strs-shape-nested`,
+        // `strs-shape-set`).
+        (
+            "(loop [{:strs [[5]]} {}] a)",
+            "java.lang.Exception | Unsupported binding form: 5",
+        ),
+        (
+            "(loop [{:strs [#{a}]} {}] a)",
+            "java.lang.Exception | Unsupported binding form: #{a}",
+        ),
     ] {
         check(src, syn, cause);
     }
     // Keywords ride the fast path untouched: `:strs`/`:syms`
-    // walk fine and die at the inner spec (probe32).
-    for src in ["(loop [{:strs [:a]} {}] a)", "(loop [{:syms [:a]} {}] a)"] {
+    // walk fine and die at the inner spec (probe32), as do
+    // `:strs` shapes (probe33 `strs-shape-*`).
+    for src in [
+        "(loop [{:strs [:a]} {}] a)",
+        "(loop [{:syms [:a]} {}] a)",
+        "(loop [{:strs [[a]]} {}] a)",
+        "(loop [{:strs [{a 1}]} {}] a)",
+        "(loop [{:foo/strs [[a]]} {}] a)",
+    ] {
         check(
             src,
             "Syntax error macroexpanding clojure.core/let at (test:1:1).",

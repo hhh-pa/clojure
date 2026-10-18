@@ -102,3 +102,8 @@
 (tx "keys-vec" #(eval '(loop [{:keys [[a]]} {}] a)))
 (tx "keys-map" #(eval '(loop [{:keys [{a 1}]} {}] a)))
 (tx "syms-set" #(eval '(loop [{:syms [#{a}]} {}] a)))
+(tx "strs-shape-vec" #(eval '(loop [{:strs [[a]]} {}] a)))
+(tx "strs-shape-map" #(eval '(loop [{:strs [{a 1}]} {}] a)))
+(tx "strs-shape-nested" #(eval '(loop [{:strs [[5]]} {}] a)))
+(tx "strs-shape-set" #(eval '(loop [{:strs [#{a}]} {}] a)))
+(tx "strs-shape-qstrs" #(eval '(loop [{:foo/strs [[a]]} {}] a)))

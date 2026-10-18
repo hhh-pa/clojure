@@ -1661,6 +1661,16 @@ fn walk_key_list(
             sel.push(form.clone());
             continue;
         }
+        // `:strs` never casts (`core.clj:4556` bare `str`):
+        // vectors and maps take the `push1`/`pb` recurse —
+        // validated as nested patterns here, rejected by the spec
+        // downstream (probe33 `strs-shape-*`). The `sel` push is
+        // unobservable (the spec always fails after), so only
+        // validation runs.
+        if matches!(dir.kind, KeyKind::Strs) && matches!(form, Value::Vector(_) | Value::Map(_)) {
+            walk_binding(form)?;
+            continue;
+        }
         let (key, local) = key_for(dir, form)?;
         sel.push(key.clone());
         bound_keys.insert(local.clone(), key.clone());
