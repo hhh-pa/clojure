@@ -493,46 +493,50 @@ position: col right after `#=`, probe1 `#=(+ 1 2)`).
   `@{1}`).
 - Duplicates ⇒ `[IAE] "Duplicate key: {dbg(key)}"` with java-debug
   rendering (§22; strings raw: `{"a" 1 "a" 2}` ⇒ `Duplicate key: a`,
-  probe2). Rules (30+ probes, probe1–11):
+  probe2). One match function everywhere; only the scan and the
+  reported side differ (40+ probes, probe1–16):
   - Small maps (`canBePAM`: ≤16 forms, or ≤128 forms with every key
     at even index ≥16 a Keyword — replicate `RT.map`/`canBePAM`
-    exactly): pairwise `smallMapDup` over earlier/later pairs,
-    **report the FIRST**. Else big-map rule.
+    exactly): pairwise match over earlier/later pairs, **report the
+    FIRST**. Else big-map rule.
   - Big maps + all sets: incremental (each new element vs all
     previous), **report the NEW** (`{0.0 … -0.0}` small ⇒ `0.0`,
     big ⇒ `-0.0`, probe10).
-  - `smallMapDup(a, b)`: both Keyword ⇒ value-eq (stands in for
-    JVM identity — equivalent under interning); same variant ⇒
-    `deepPatched`; (List, Vector) in this order ⇒ `loosePlain`;
-    else false. Reports `a`.
-  - `setDup(a, b)` (sets + big maps): same variant ⇒
-    `deepPatched`; mixed List/Vector either order ⇒ `loosePlain`;
-    else false. Reports `b`.
-  - `deepPatched` (same variant required): Nil true; Bool Int Str
-    Char Symbol Keyword by value; **Double by `Double.compare == 0`**
-    (`0.0`≡`-0.0`, NaN≡NaN); List/Vector elementwise `deepPatched`;
-    Map kv `deepPatched`; Set memberwise `deepPatched`; Regex false
+  - `dupMatch(a, b)`: both Keyword ⇒ value-eq (stands in for JVM
+    identity — equivalent under interning); both sequential
+    (List/Vector in either order) ⇒ same length + elementwise
+    `dupMatch`; same variant otherwise ⇒ deep rule below; else
+    false. Sequential comparison crosses List/Vector **in both
+    orders at every nesting level** (`{[1] :a (1) :b}` DUP,
+    probe13; `{(0.0) :a [-0.0] :b}` DUP, probe14). Apparent
+    counter-examples are length mismatches (`{[1] :a (quote (1))
+    :b}` OK, `{(quote (0.0)) :a [-0.0] :b}` OK — 1 vs 2 elements).
+    (Mechanism: `.equiv`, not `.equals`, crosses `Sequential` both
+    ways with equiv recursion.)
+  - Deep rule: Nil true; Bool Int Str Char Symbol Keyword by value;
+    **Double by `Double.compare == 0`** (`0.0`≡`-0.0`, NaN≡NaN);
+    Map kv `dupMatch`; Set memberwise `dupMatch`; Regex false
     (identity: `#{#"a" #"a"}` keeps both, probe4); TaggedLiteral /
     ReaderConditional by `(tag, form)` with the **form compared via
     `plainEquals`** (`{#inst [0.0] 1 #inst [-0.0] 2}` preserved ⇒ OK,
-    probe9).
-  - `loosePlain`: same length + elementwise `plainEquals`.
-  - `plainEquals` (JVM `.equals`): scalars by value with **Double by
-    bits**; Vector strict (other must be Vector); List loose
-    (List/Vector); Map same-size + kv `plainEquals`; Set same-size +
-    memberwise `plainEquals` (linear scan — outcome-equivalent to
+    probe9; same in sets, probe15).
+  - `plainEquals` (JVM `.equals`, used only for TL/RC forms and
+    scalar fallbacks): scalars by value with **Double by bits**;
+    Vector strict (other must be Vector); List loose (List/Vector);
+    Map same-size + kv `plainEquals`; Set same-size + memberwise
+    `plainEquals` (linear scan — outcome-equivalent to
     hash-contains since `.equals`⇒same `hashCode` holds); Regex
-    false; TaggedLiteral/ReaderConditional as in `deepPatched`.
+    false; TaggedLiteral/ReaderConditional by tag + `plainEquals`
+    form.
   - Consequences (all probed): `{1 :a 1.0 :b}` OK (both); `#{1 1.0}`
     OK; `#{0.0 -0.0}` DUP; `#{##NaN ##NaN}` DUP (`Duplicate key:
-    NaN`); `{[1] :a (1) :b}` OK but `{(1) :a [1] :b}` DUP (small-map
-    asymmetry); both orders DUP in sets and big maps; nested-double
-    collections DUP same-variant (`{[0.0] :a [-0.0] :b}`,
+    NaN`); seq-cross DUPs both orders in small maps, sets and big
+    maps; nested-double collections DUP (`{[0.0] :a [-0.0] :b}`,
     `{{:x 0.0} :a {:x -0.0} :b}`, `#{[0.0] [-0.0]}`,
-    `#{{:x 0.0} {:x -0.0}}`); mixed-seq-nested OK
-    (`{(quote (0.0)) :a [-0.0] :b}`, `#{[(0.0)] (quote ((-0.0)))}`);
-    `{[1] :a [1.0] :b}` OK; `#{[1] [1.0]}` OK; non-adjacent dups
-    detected; scale-independent (verified to 20+ elements).
+    `#{{:x 0.0} {:x -0.0}}`, `{(0.0) :a [-0.0] :b}`,
+    `#{[(0.0)] ((-0.0))}`); `{[1] :a [1.0] :b}` OK; `#{[1] [1.0]}`
+    OK; `{(1) :a [1.0] :b}` OK; non-adjacent dups detected;
+    scale-independent (verified to 20+ elements).
   - Message divergence: `TaggedLiteral`/`ReaderConditional` keys
     render on the JVM as `clojure.lang.TaggedLiteral@7fc19ced`
     (identity hash — nondeterministic, probe7/8); ours renders
@@ -754,13 +758,14 @@ process-global counter). Errors abort the read (no recovery).
 ## §27 Guesses the corpus must confirm (implement as stated; on JVM
 mismatch, report back instead of guessing further)
 
-- `ReaderConditional` in dup-checks behaves like `TaggedLiteral`
-  (tag/form with `plainEquals` form).
-- `TaggedLiteral`/`ReaderConditional` in *set* and *big-map* dup
-  positions use the same plain-form rule.
-- `loosePlain` nested recursion is full `plainEquals` (transitively).
 - Integer-vs-Long same-value dup pairs (unreachable until S3's
   `Integer` variant; S3 re-probes: likely dup via `Numbers.equal`).
 - `print-dup` parity is not attempted (only `pr`/`print` configs).
+
+Resolved during S2 review (probe12–15, now normative above):
+radix-10 digit errors omit `under radix`; greedy radix digits swallow
+`N` (`36r1N`⇒59); seq-cross dups both orders with patched recursion
+everywhere (no small-map asymmetry, no plain elementwise); TL/RC
+forms compare plain in maps, sets and big maps alike.
 
 

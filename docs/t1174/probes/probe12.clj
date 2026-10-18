@@ -1,0 +1,17 @@
+(def EOFMARK (Object.))
+(defn root-cause [e] (loop [e ^Throwable e] (if-let [c (.getCause e)] (recur c) e)))
+(def ALLOW {:read-cond :allow})
+(defn t [s]
+  (print (str ">>> " (pr-str s) " "))
+  (flush)
+  (try
+    (binding [*read-eval* false]
+      (let [rdr (clojure.lang.LineNumberingPushbackReader. (java.io.StringReader. s))
+            o1 (clojure.lang.LispReader/read rdr ALLOW)]
+        (prn [:ok (pr-str o1)])))
+    (catch Throwable e
+      (let [r (root-cause e)]
+        (prn [:err (str (.getName ^Class (class r))) "|" (str (.getMessage ^Throwable r))])))))
+(doseq [s ["10r5N" "36r1N" "2r1N" "36rZZN" "10r99N" "16rFFN"]]
+  (t s))
+(println ">>> PROBE12-DONE")

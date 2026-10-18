@@ -106,6 +106,14 @@ impl Reader {
         return_on: Option<char>,
         top: bool,
     ) -> Result<Form, ReaderError> {
+        // A fresh top-level `read()` starts with a null (= empty)
+        // pending list on the JVM; nested frames share the parent's.
+        // Without this, splice leftovers (e.g. `'#?@(:clj (1 2))`,
+        // where the quote consumes only the first item) leak into the
+        // NEXT top-level form instead of being dropped (probe16).
+        if top {
+            self.pending.clear();
+        }
         loop {
             if let Some(v) = self.pending.pop_front() {
                 return Ok(Form::Value(v));
@@ -286,4 +294,31 @@ pub fn read_all(s: &str, opts: &ReaderOpts) -> Result<Vec<Value>, ReaderError> {
         forms.push(v);
     }
     Ok(forms)
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{ReaderOpts, read_all};
+    use clj_value::{PrintOpts, pr_to_string};
+
+    fn pr(v: &clj_value::Value) -> String {
+        pr_to_string(v, &PrintOpts::pr())
+    }
+
+    #[test]
+    fn splice_leftovers_do_not_leak_across_top_level_forms() {
+        // probe16: the quote consumes only the first spliced item; the
+        // leftover is dropped, not returned as the next form.
+        let opts = ReaderOpts::default();
+        let forms = read_all("'#?@(:clj (1 2)) X", &opts).unwrap();
+        assert_eq!(forms.len(), 2);
+        assert_eq!(pr(&forms[0]), "(quote 1)");
+        assert_eq!(pr(&forms[1]), "X");
+        let forms = read_all("'#?@(:clj (1 2))", &opts).unwrap();
+        assert_eq!(forms.len(), 1);
+        assert_eq!(pr(&forms[0]), "(quote 1)");
+        let forms = read_all("#(1 #?@(:clj (2 3)))", &opts).unwrap();
+        assert_eq!(forms.len(), 1);
+        assert!(pr(&forms[0]).starts_with("(fn* [] (1 2 3))"));
+    }
 }

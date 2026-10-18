@@ -28,6 +28,16 @@ root-cause exception (class | message | ex-data line/col).
   big-map seq-cross and map-nested dups.
 - `probe11.clj`: set map-nested dups (unifies set/big-map rule),
   big 1/1.0 coexistence.
+- `probe12.clj` (S2 review): radix-10 digit errors omit `under radix`;
+  greedy radix digits swallow `N` (`36r1N`⇒59, `2r1N` errors on `"1N"`).
+- `probe13.clj` (S2 review): bare seq-cross dups BOTH orders in small
+  maps (no asymmetry); length-mismatched pairs stay OK.
+- `probe14.clj` (S2 review): same-length mixed-seq nested doubles DUP
+  (patched recursion everywhere); mixed numerics stay OK.
+- `probe15.clj` (S2 review): `TaggedLiteral`/`ReaderConditional`
+  nested-double keys stay OK in sets (plain-form rule).
+- `probe16.clj` (S2 review): splice leftovers dropped across top-level
+  forms (`'#?@(:clj (1 2)) X` ⇒ `(quote 1)`, `X`).
 
 Run: `./probe.sh [outdir]`. Gensym ids (`p1__243#`), identity hashes
 (`@7fc19ced`), and inst renderings vary between runs; the contract
