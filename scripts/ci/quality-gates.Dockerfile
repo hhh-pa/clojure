@@ -104,7 +104,7 @@ RUN mkdir -p /tmp/warm/rust/src/bin/clojure-rs \
     && [ -n "$NIGHTLY" ] \
     && UDEPS_LOG=/tmp/warm/udeps.log \
     && { NIGHTLY_TARGET="${CARGO_TARGET_DIR}/nightly"; \
-        CARGO_TARGET_DIR="$NIGHTLY_TARGET" cargo +"$NIGHTLY" udeps --all-targets >"$UDEPS_LOG" 2>&1; \
+        CARGO_TARGET_DIR="$NIGHTLY_TARGET" cargo +"$NIGHTLY" udeps --workspace --all-targets >"$UDEPS_LOG" 2>&1; \
         STATUS=$?; \
         if [ $STATUS -ne 0 ] \
             && { grep -q "could not compile" "$UDEPS_LOG" \
