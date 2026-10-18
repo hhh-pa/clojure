@@ -606,6 +606,10 @@ fn invoke_table() {
             "(throw 42)",
             "java.lang.ClassCastException | Cannot cast java.lang.Long to java.lang.Throwable",
         ),
+        (
+            "(throw nil)",
+            "java.lang.NullPointerException | Cannot throw exception because \"null\" is null",
+        ),
     ] {
         assert_eq!(uncaught(src), want, "{src}");
     }

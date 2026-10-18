@@ -185,6 +185,9 @@ symbol `catch` (E7).
   `NullPointerException | Cannot invoke nil as a function`
   (stable text; JVM NPE text varies by JDK, documented).
 - `(throw 42)`: `ClassCastException` Long→Throwable (stable CCE text, E8).
+  `(throw nil)`: `NullPointerException | Cannot throw exception because
+  "null" is null` (Clojure-constructed, stable — not JDK NPE text,
+  probe29 `throw-nil`).
 - `(throw (ex-info …))` + catch: `ExceptionInfo` values carry message+data
   (probe22 roundtrip).
 

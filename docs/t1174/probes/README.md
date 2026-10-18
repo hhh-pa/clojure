@@ -74,7 +74,8 @@ root-cause exception (class | message | ex-data line/col).
   outlet forcing (`or-nested-*`), `subs` projection into parent
   `:select`/`:all`.
 - `probe29.clj` (S4 review round 1): `binding` init-before-validate
-  order (`binding-*`), qualified `::ns-keys` matrix (`qual-*`).
+  order (`binding-*`), qualified `::ns-keys` matrix (`qual-*`),
+  `(throw nil)` NPE (`throw-nil`).
 
 Run: `./probe.sh [outdir]`. Gensym ids (`p1__243#`), identity hashes
 (`@7fc19ced`), and inst renderings vary between runs; the contract

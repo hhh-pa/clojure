@@ -292,6 +292,12 @@ impl Evaluator {
         let value = self.eval(inner, env)?;
         match value {
             Value::Throwable(t) => Err(Signal::Throw(t)),
+            // `nil` is not the cast error: the JVM throws a
+            // Clojure-constructed NPE with stable text (probe29).
+            Value::Nil => Err(self.throw(NativeError::new(
+                ThrowClass::NullPointerException,
+                "Cannot throw exception because \"null\" is null".to_owned(),
+            ))),
             other => Err(self.throw(NativeError::cast(
                 &jvm_class_of(&other),
                 "java.lang.Throwable",
