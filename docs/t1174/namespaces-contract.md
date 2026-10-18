@@ -1,7 +1,8 @@
 # Namespaces contract (S5A, normative)
 
-Resolution, `def`, and evaluation-splitting rules for the
-multi-namespace registry. Oracle: probe34. Wrappers are the S4 ones
+Resolution, `def`, evaluation-splitting, namespace vars, and loader
+rules for the multi-namespace registry. Oracles: probe34 (registry),
+probe35 (vars), probe36 (loader). Wrappers are the S4 ones
 (`Syntax error compiling … at …`); only the rules below are new.
 
 ## Resolution
@@ -51,3 +52,134 @@ the split (S5C extends it past macroexpansion).
 - `intern` never creates namespaces: missing ns →
   `Exception | No namespace: X found` at runtime (probe34
   `ns-intern-creates`).
+
+## Namespace values and vars (S5A2, probe35)
+
+- Namespaces print `#object[clojure.lang.Namespace 0x{id}
+  "{name}"]` with the registry creation id in hex (deterministic,
+  like the S4 `#object` ids); `str` is the bare name (probe35
+  `ns-print`, `create-ns-fresh`). Equality and hashing are by id
+  (JVM identity: a removed-then-recreated namespace is a new
+  value).
+- `all-ns` returns every live namespace. The JVM order is
+  hash-unspecified; the port sorts by name (deterministic,
+  probe35 `all-ns-shape`).
+- Argument types: `create-ns`/`in-ns`/`find-ns`/`remove-ns` take a
+  Symbol (anything else is the §E8 stable cast `Cannot cast X to
+  clojure.lang.Symbol`); `the-ns`/`ns-name`/the `ns-*`
+  family/`intern`/`ns-resolve`/`ns-unmap`/`ns-unalias` take a
+  Symbol or a namespace; `alias` takes a Symbol name and a
+  Symbol-or-namespace target; `resolve`'s symbol is strict
+  (probe35 `create-ns-string`, `in-ns-ns-arg`, `find-ns-ns-arg`,
+  `remove-ns-ns-arg`, `the-ns-string`, `resolve-ns-arg`,
+  `alias-ns-target`).
+- `create-ns` returns the existing-or-fresh namespace; `in-ns`
+  creates-or-finds, makes it current, and returns it. Neither
+  refers `clojure.core` (probe35 `create-vs-in-ns-refers`).
+- Missing-namespace reads throw `Exception | No namespace: {sym}
+  found`: `the-ns`, `ns-name` on a symbol, the `ns-*` family,
+  `intern`, `ns-resolve` (probe35 `the-ns-missing`,
+  `ns-name-missing`, `ns-map-missing`, `intern-missing-ns`,
+  `ns-resolve-missing-ns`).
+- `find-ns` on a missing name returns nil; on nil it is the
+  modern-JDK `NullPointerException | Cannot invoke
+  "Object.hashCode()" because "key" is null` (S4 NPE convention,
+  probe35 `find-ns-nil`).
+- `remove-ns` returns the removed namespace or nil; a removed
+  handle keeps its name for `ns-name` (probe35 `ns-name-removed`),
+  and removing the current namespace leaves `*ns*` dangling
+  (probe35 `remove-ns-current`).
+- `alias` installs into the current namespace and returns nil.
+  Re-aliasing to a different target is `IllegalStateException |
+  Alias {a} already exists in namespace {ns}, aliasing {old}`;
+  the same target is a silent no-op (probe35 `alias-overwrite`,
+  `alias-same-twice`); a missing target is the `No namespace:`
+  error (probe35 `alias-bad-target`). Aliases shadow real
+  namespaces for lookup while `find-ns` still sees the real one
+  (probe35 `alias-shadow`, §Resolution).
+- `ns-map` is interns plus refers plus imports keyed by
+  unqualified symbol; aliases are excluded and interns win over
+  refers on collision (probe35 `ns-map-fx`). The JVM also prints
+  a `REJECTED: … you must ns-unmap first` warning when `refer`
+  lands on an intern; the port omits the warning until `*err*`
+  printing lands in S5D (probe35 `refer-shadow`).
+- `ns-publics` excludes `^:private` vars (probe35
+  `ns-publics-fx`). The port orders the family maps by symbol
+  (deterministic; JVM hash order unspecified).
+- `resolve`/`ns-resolve` return the Var or nil on a miss (probe35
+  `resolve-miss`, `ns-resolve-ns-arg`). `resolve` also sees
+  imports on the JVM (`(resolve 'String)` is the class); the port
+  has no classes, so that miss is nil (N1 divergence, probe35
+  `resolve-class`).
+- `intern` returns the var (the same object across overwrites —
+  3-arity resets the root, probe35 `intern-overwrite`); 2-arity
+  leaves it unbound.
+- `refer`/`refer-clojure` return nil and are idempotent (probe35
+  `refer-twice`); `refer-clojure` adds every core public minus
+  `:exclude` (probe35 `refer-clojure-exclude`). `declare` is the
+  same internals behind its S5C macro (probe35
+  `declare-visible`).
+- `ns-unmap`/`ns-unalias` return nil and tolerate absence
+  (probe35 `ns-unmap-effect`, `ns-unalias-effect`,
+  `ns-unmap-sym-ns`, `ns-unalias-sym-ns`).
+- `ns-imports` is always `{}` and `ns-map` carries no imports
+  (N1: no host classes; `import` out of scope).
+- `binding [*ns* …]` does not redirect analysis: resolution reads
+  the registry current only, until S5B syncs the two (fence).
+
+## Loader (S5A2, probe36)
+
+- `require`/`use`/`load` return nil; `loaded-libs` is a set of
+  symbols. The JVM set is sorted (`sorted?` true); the port has
+  no sorted sets, so it prints in load order and `sorted?` is
+  false (divergence, probe36 `libs-initial`,
+  `loaded-libs-shape`). `*loaded-libs*` holds the set directly
+  (the JVM wraps it in a Ref; the single-threaded port conjs the
+  root instead).
+- Membership — not namespace existence — decides the load:
+  `require` loads iff the lib is absent from `loaded-libs`, then
+  applies `:as`/`:refer` even on skip (probe36 `alias-on-skip`,
+  `req-mem-fixture`, `mem-survives`). A failed load marks nothing
+  and destroys nothing (probe36 `req-missing-clean`).
+- The `ns` form marks its lib loaded (probe36 `ns-marks-loaded`,
+  macro in S5C); `load` alone never marks (probe36
+  `load-no-nsform`).
+- Libspec grammar: a symbol, `[lib & opts]`, or prefix lists
+  `(prefix & args)`; `:as` plus `:refer` (a vector or `:all`)
+  (probe36 `req-prefix`, `req-as-refer`, `req-refer-all`). `use`
+  is require-plus-refer with `:only`/`:exclude`/`:rename`
+  (probe36 `use-only`, `use-exclude`, `use-rename`, `use-bare`).
+- Flags: `:reload` forces the load; `:reload-all` forces the load
+  plus transitive embedded deps (the embedded set is flat, so it
+  behaves as `:reload`); `:verbose` echoes each action —
+  `(clojure.core/in-ns '…)` and `(clojure.core/alias …)` on skip,
+  `(clojure.core/load "…")` on load (probe36 `verbose-*`). The
+  echo is suppressed until `*out*` printing lands in S5D.
+- Missing file: `java.io.FileNotFoundException | Could not locate
+  {root}__init.class, {root}.clj or {root}.cljc on classpath.`
+  plus ` Please check that namespaces with dashes use underscores
+  in the Clojure file name.` iff the root contains `_` (probe36
+  `req-missing`, `req-dash-map`, `req-underscore-note`). Dashes
+  map to underscores, dots to slashes.
+- `load` roots: a leading `/` is absolute, otherwise relative to
+  the current namespace's namespace-part (`aa.bb` + `"y"` →
+  `aa/y`; a one-segment namespace leaves the root bare, probe36
+  `load-rel-user`, `load-rel-nested`). Extensions never strip:
+  `"x.clj"` tries `x.clj.clj` (probe36 `load-ext`).
+- Post-load checks: `:as`/`:refer` against a missing namespace is
+  `Exception | namespace '{lib}' not found`, or `… not found after
+  loading '{root}'` when a load just ran (probe36 `req-stale`,
+  `req-mismatch-as`, `req-mismatch-stale`); a bare-symbol require
+  never checks (probe36 `req-mismatch-plain`).
+- `(require)` is `Exception | Nothing specified to load`;
+  unknown flags are `Exception | Unsupported option(s) supplied:
+  {kw}` (probe36 `req-empty`, `req-unsupported`).
+- Each libspec must be a symbol or sequential, else the ISeq
+  coercion error (`(require "x")` → `IllegalArgumentException |
+  Don't know how to create ISeq from: java.lang.Character`,
+  probe36 `req-string`).
+- The port resolves libs from the embedded set first, then
+  `*load-path*` files (matrix note). Load-boundary throws surface
+  as the inner `SourceError::Uncaught` without the JVM's
+  `CompilerException` file:line wrap (S4 E1: runtime failures have
+  no wrapper).

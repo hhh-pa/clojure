@@ -36,13 +36,18 @@ machine-read — keep `| var | status | notes |` rows exact.
 | `ns-interns` | planned | |
 | `ns-publics` | planned | |
 | `ns-refers` | planned | |
+| `ns-map` | planned | |
+| `ns-imports` | divergent | always `{}`; no host classes (N1) |
+| `ns-unmap` | planned | |
+| `ns-unalias` | planned | |
 | `load` | planned | file by path over `*load-path*` |
 | `load-string` | planned | |
 | `load-file` | planned | |
 | `loaded-libs` | planned | |
 | `*ns*` | planned | |
 | `*file*` | planned | bound while loading |
-| `*loaded-libs*` | planned | |
+| `*loaded-libs*` | planned | set, not a Ref (S5A2) |
+| `*loading-verbosely*` | planned | read by `load` |
 | `*load-path*` | planned | port extension: vector of dirs |
 
 ## Vars (S5B)
