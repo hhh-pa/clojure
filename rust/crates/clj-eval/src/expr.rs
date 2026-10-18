@@ -450,57 +450,7 @@ impl<'a> Analyzer<'a> {
     /// check. Interns before analyzing the init (self-`def` stays
     /// unbound, probe25).
     fn parse_def(&mut self, items: &[&Value], span: Span) -> Result<Expr, CompileError> {
-        let argc = items.len() - 1;
-        let sym_err = |me: &Self| {
-            me.err(
-                class::RUNTIME,
-                "First argument to def must be a Symbol".to_owned(),
-                span,
-                Verb::Compiling,
-                Some("def".to_owned()),
-            )
-        };
-        let too_many = || {
-            self.err(
-                class::RUNTIME,
-                "Too many arguments to def".to_owned(),
-                span,
-                Verb::Compiling,
-                Some("def".to_owned()),
-            )
-        };
-        let (sym, doc, init) = match argc {
-            0 => {
-                return Err(self.err(
-                    class::RUNTIME,
-                    "Too few arguments to def".to_owned(),
-                    span,
-                    Verb::Compiling,
-                    Some("def".to_owned()),
-                ));
-            }
-            1 => (
-                as_symbol(items[1]).ok_or_else(|| sym_err(self))?,
-                None,
-                None,
-            ),
-            2 => (
-                as_symbol(items[1]).ok_or_else(|| sym_err(self))?,
-                None,
-                Some(items[2]),
-            ),
-            3 if matches!(items[2], Value::Str(_)) => {
-                let Value::Str(doc) = items[2] else {
-                    unreachable!("guard matched Str")
-                };
-                (
-                    as_symbol(items[1]).ok_or_else(|| sym_err(self))?,
-                    Some(doc.to_string()),
-                    Some(items[3]),
-                )
-            }
-            _ => return Err(too_many()),
-        };
+        let (sym, doc, init) = self.def_parts(items, span)?;
         if sym.namespace().is_some_and(|ns| ns != self.ns.name()) {
             return Err(self.err(
                 class::RUNTIME,
@@ -521,6 +471,49 @@ impl<'a> Analyzer<'a> {
             init,
             span,
         })
+    }
+
+    /// `def` arity shapes: bare, init, or docstring + init (a
+    /// 3-arg form without a string second arg is `Too many`).
+    fn def_parts<'v>(
+        &self,
+        items: &[&'v Value],
+        span: Span,
+    ) -> Result<(&'v Symbol, Option<String>, Option<&'v Value>), CompileError> {
+        match items.len() - 1 {
+            0 => Err(self.def_error("Too few arguments to def", span)),
+            1 => Ok((self.def_target(items[1], span)?, None, None)),
+            2 => Ok((self.def_target(items[1], span)?, None, Some(items[2]))),
+            3 if matches!(items[2], Value::Str(_)) => {
+                let Value::Str(doc) = items[2] else {
+                    unreachable!("guard matched Str")
+                };
+                Ok((
+                    self.def_target(items[1], span)?,
+                    Some(doc.to_string()),
+                    Some(items[3]),
+                ))
+            }
+            _ => Err(self.def_error("Too many arguments to def", span)),
+        }
+    }
+
+    /// The `def` target symbol (anything else is the
+    /// `First argument` error).
+    fn def_target<'v>(&self, form: &'v Value, span: Span) -> Result<&'v Symbol, CompileError> {
+        as_symbol(form)
+            .ok_or_else(|| self.def_error("First argument to def must be a Symbol", span))
+    }
+
+    /// A `def` (`Compiling`) shape error.
+    fn def_error(&self, message: &str, span: Span) -> CompileError {
+        self.err(
+            class::RUNTIME,
+            message.to_owned(),
+            span,
+            Verb::Compiling,
+            Some("def".to_owned()),
+        )
     }
 
     /// `(if test then else?)`.
@@ -1126,34 +1119,47 @@ fn spec_valid_binding(form: &Value) -> bool {
 }
 
 fn spec_valid_seq(forms: &[&Value]) -> bool {
-    let mut rest = forms;
-    // Optional trailing `:as sym`.
-    if rest.len() >= 2
-        && matches!(rest[rest.len() - 2], Value::Keyword(kw) if kw.namespace().is_none() && kw.name() == "as")
-    {
-        if !matches!(rest[rest.len() - 1], Value::Symbol(sym) if is_local_name(sym)) {
-            return false;
-        }
-        rest = &rest[..rest.len() - 2];
-    }
-    // Optional `& rest` (dangling `&` fails).
-    if let Some(pos) = rest.iter().position(
-        |f| matches!(f, Value::Symbol(sym) if sym.namespace().is_none() && sym.name() == "&"),
-    ) {
-        if pos + 1 != rest.len() - 1 {
-            return false;
-        }
-        if !spec_valid_binding(rest[pos + 1]) {
-            return false;
-        }
-        rest = &rest[..pos];
-    }
+    let Some(rest) = strip_spec_as(forms) else {
+        return false;
+    };
+    let Some(rest) = strip_spec_rest(rest) else {
+        return false;
+    };
     // Fixed forms, none `&`/`:as`.
     rest.iter().all(|f| match f {
         Value::Symbol(sym) if sym.namespace().is_none() && sym.name() == "&" => false,
         Value::Keyword(kw) if kw.namespace().is_none() && kw.name() == "as" => false,
         other => spec_valid_binding(other),
     })
+}
+
+/// Strip an optional trailing `:as sym` (`None` = spec failure).
+fn strip_spec_as<'a, 'v>(forms: &'a [&'v Value]) -> Option<&'a [&'v Value]> {
+    let as_at_end = forms.len() >= 2
+        && matches!(forms[forms.len() - 2], Value::Keyword(kw) if kw.namespace().is_none() && kw.name() == "as");
+    if !as_at_end {
+        return Some(forms);
+    }
+    if !matches!(forms[forms.len() - 1], Value::Symbol(sym) if is_local_name(sym)) {
+        return None;
+    }
+    Some(&forms[..forms.len() - 2])
+}
+
+/// Strip an optional `& rest` (`None` = dangling/invalid `&`).
+fn strip_spec_rest<'a, 'v>(forms: &'a [&'v Value]) -> Option<&'a [&'v Value]> {
+    let Some(pos) = forms.iter().position(
+        |f| matches!(f, Value::Symbol(sym) if sym.namespace().is_none() && sym.name() == "&"),
+    ) else {
+        return Some(forms);
+    };
+    if pos + 1 != forms.len() - 1 {
+        return None;
+    }
+    if !spec_valid_binding(forms[pos + 1]) {
+        return None;
+    }
+    Some(&forms[..pos])
 }
 
 fn spec_valid_map(m: &Map) -> bool {
@@ -1362,32 +1368,39 @@ fn walk_map(m: &Map) -> Result<(), WalkError> {
     let mut sel: Vec<Value> = Vec::new();
     let mut bound_keys: HashMap<String, Value> = HashMap::new();
     for (k, v) in m.iter() {
-        if let Value::Keyword(kw) = k {
-            if kw.namespace().is_none()
-                && matches!(
-                    kw.name(),
-                    "as" | "or" | "select" | "excess" | "missing" | "defaults" | "all"
-                )
-            {
-                continue;
-            }
-            let Some(dir) = as_key_directive(kw) else {
-                return Err(WalkError {
-                    class: class::EXCEPTION,
-                    message: format!("Unsupported map directive: {kw}"),
-                });
-            };
-            walk_key_list(v, kw, &dir, or_map, &mut sel, &mut bound_keys)?;
-        } else {
-            walk_binding(k)?;
-            sel.push((*v).clone());
-            if let Value::Symbol(local) = k {
-                bound_keys.insert(local.name().to_owned(), (*v).clone());
-                check_or_pair(or_map, local.name(), v, false)?;
-            }
-        }
+        walk_map_pair(k, v, or_map, &mut sel, &mut bound_keys)?;
     }
     check_strict_or(m, or_map, &sel, &bound_keys)?;
+    Ok(())
+}
+
+/// One map-pattern pair: outlet directives pass, key-list
+/// directives validate, binding entries recurse.
+fn walk_map_pair(
+    k: &Value,
+    v: &Value,
+    or_map: Option<&Map>,
+    sel: &mut Vec<Value>,
+    bound_keys: &mut HashMap<String, Value>,
+) -> Result<(), WalkError> {
+    if let Value::Keyword(kw) = k {
+        if is_outlet_directive(kw) {
+            return Ok(());
+        }
+        let Some(dir) = as_key_directive(kw) else {
+            return Err(WalkError {
+                class: class::EXCEPTION,
+                message: format!("Unsupported map directive: {kw}"),
+            });
+        };
+        return walk_key_list(v, kw, &dir, or_map, sel, bound_keys);
+    }
+    walk_binding(k)?;
+    sel.push(v.clone());
+    if let Value::Symbol(local) = k {
+        bound_keys.insert(local.name().to_owned(), v.clone());
+        check_or_pair(or_map, local.name(), v, false)?;
+    }
     Ok(())
 }
 
@@ -1571,6 +1584,12 @@ struct RawClause<'v> {
     body: Vec<&'v Value>,
 }
 
+/// One validated `letfn` fnspec: the name plus its tail forms.
+struct FnSpec {
+    name: String,
+    tail: Vec<Value>,
+}
+
 impl<'a> Analyzer<'a> {
     /// The `CheckSpecs` failure for `let`/`fn`.
     fn spec_error(&self, macro_name: &str, span: Span) -> CompileError {
@@ -1630,53 +1649,9 @@ impl<'a> Analyzer<'a> {
         }
         let pats: Vec<&Value> = forms.iter().step_by(2).copied().collect();
         if is_loop {
-            for pat in &pats {
-                if let Err(e) = walk_binding(pat) {
-                    return Err(self.walk_error(e, span, op));
-                }
-            }
-            if pats.iter().any(|p| !matches!(p, Value::Symbol(_))) {
-                for pat in &pats {
-                    if !spec_valid_binding(pat) {
-                        return Err(self.spec_error("clojure.core/let", span));
-                    }
-                }
-            } else {
-                for pat in &pats {
-                    let Value::Symbol(sym) = pat else {
-                        unreachable!("all-symbol case checked above")
-                    };
-                    if sym.name() == "&" && sym.namespace().is_none() {
-                        return Err(self.err(
-                            class::RUNTIME,
-                            "Can't use & as a local binding".to_owned(),
-                            span,
-                            Verb::Compiling,
-                            Some("loop*".to_owned()),
-                        ));
-                    }
-                    if sym.namespace().is_some() {
-                        return Err(self.err(
-                            class::RUNTIME,
-                            format!("Can't let qualified name: {sym}"),
-                            span,
-                            Verb::Compiling,
-                            Some("loop*".to_owned()),
-                        ));
-                    }
-                }
-            }
+            self.validate_loop_bindings(&pats, span, op)?;
         } else {
-            for pat in &pats {
-                if !spec_valid_binding(pat) {
-                    return Err(self.spec_error("clojure.core/let", span));
-                }
-            }
-            for pat in &pats {
-                if let Err(e) = walk_binding(pat) {
-                    return Err(self.walk_error(e, span, op));
-                }
-            }
+            self.validate_let_bindings(&pats, span, op)?;
         }
         let saved_recur = self.recur;
         if is_loop {
@@ -1707,6 +1682,75 @@ impl<'a> Analyzer<'a> {
                 body,
             })
         }
+    }
+
+    /// `let` validation: deep spec first, then the shared walk
+    /// (as-written wrapper).
+    fn validate_let_bindings(
+        &self,
+        pats: &[&Value],
+        span: Span,
+        op: &str,
+    ) -> Result<(), CompileError> {
+        for pat in pats {
+            if !spec_valid_binding(pat) {
+                return Err(self.spec_error("clojure.core/let", span));
+            }
+        }
+        for pat in pats {
+            if let Err(e) = walk_binding(pat) {
+                return Err(self.walk_error(e, span, op));
+            }
+        }
+        Ok(())
+    }
+
+    /// `loop` validation: asserts, the walk (`loop` wrapper), then
+    /// the emission re-validation (inner-`let` spec) for
+    /// destructuring patterns, or the `loop*` star checks for
+    /// all-symbol bindings.
+    fn validate_loop_bindings(
+        &self,
+        pats: &[&Value],
+        span: Span,
+        op: &str,
+    ) -> Result<(), CompileError> {
+        for pat in pats {
+            if let Err(e) = walk_binding(pat) {
+                return Err(self.walk_error(e, span, op));
+            }
+        }
+        if pats.iter().any(|p| !matches!(p, Value::Symbol(_))) {
+            for pat in pats {
+                if !spec_valid_binding(pat) {
+                    return Err(self.spec_error("clojure.core/let", span));
+                }
+            }
+            return Ok(());
+        }
+        for pat in pats {
+            let Value::Symbol(sym) = pat else {
+                unreachable!("all-symbol case checked above")
+            };
+            if sym.name() == "&" && sym.namespace().is_none() {
+                return Err(self.star_error("Can't use & as a local binding", span));
+            }
+            if sym.namespace().is_some() {
+                return Err(self.star_error(&format!("Can't let qualified name: {sym}"), span));
+            }
+        }
+        Ok(())
+    }
+
+    /// A `loop*` (`Compiling`) binding error.
+    fn star_error(&self, message: &str, span: Span) -> CompileError {
+        self.err(
+            class::RUNTIME,
+            message.to_owned(),
+            span,
+            Verb::Compiling,
+            Some("loop*".to_owned()),
+        )
     }
 
     /// The bindings-shape failure: spec for `let`, assert-args for
@@ -1779,60 +1823,92 @@ impl<'a> Analyzer<'a> {
 
     /// Build a validated map pattern, analyzing `:or` defaults.
     fn build_map(&mut self, m: &Map, span: Span) -> Result<Pattern, CompileError> {
-        let mut entries = Vec::new();
-        let mut keys = Vec::new();
-        let mut extra_keys = Vec::new();
-        let mut as_sym = None;
-        let mut select = None;
-        let mut all = None;
-        let mut excess = None;
-        let mut missing = None;
+        let mut acc = MapAcc::default();
         for (k, v) in m.iter() {
-            if let Value::Keyword(kw) = k {
-                let outlet = match kw.namespace() {
-                    None => matches!(
-                        kw.name(),
-                        "as" | "or" | "select" | "excess" | "missing" | "defaults" | "all"
-                    ),
-                    Some(_) => false,
-                };
-                if outlet {
-                    match kw.name() {
-                        "as" => as_sym = as_symbol(v).map(|s| s.name().to_owned()),
-                        "select" => select = as_symbol(v).map(|s| s.name().to_owned()),
-                        "all" => all = as_symbol(v).map(|s| s.name().to_owned()),
-                        "excess" => excess = as_symbol(v).map(|s| s.name().to_owned()),
-                        "missing" => missing = as_symbol(v).map(|s| s.name().to_owned()),
-                        _ => {}
-                    }
-                    continue;
-                }
-                if let Some(dir) = as_key_directive(kw) {
-                    build_keys(v, &dir, &mut keys, &mut extra_keys);
-                }
-                continue;
-            }
-            let (pat, _) = self.build_pattern(k, span)?;
-            entries.push((pat, (*v).clone()));
+            self.build_map_pair(k, v, span, &mut acc)?;
         }
+        let or = self.build_or(m, span)?;
+        Ok(Pattern::Map(MapPattern {
+            entries: acc.entries,
+            keys: acc.keys,
+            extra_keys: acc.extra_keys,
+            as_sym: acc.as_sym,
+            or,
+            select: acc.select,
+            all: acc.all,
+            excess: acc.excess,
+            missing: acc.missing,
+        }))
+    }
+
+    /// One map-pattern pair: outlet directive, key-list
+    /// directive, or a binding entry.
+    fn build_map_pair(
+        &mut self,
+        k: &Value,
+        v: &Value,
+        span: Span,
+        acc: &mut MapAcc,
+    ) -> Result<(), CompileError> {
+        if let Value::Keyword(kw) = k {
+            if is_outlet_directive(kw) {
+                set_outlet(kw, v, acc);
+            } else if let Some(dir) = as_key_directive(kw) {
+                build_keys(v, &dir, &mut acc.keys, &mut acc.extra_keys);
+            }
+            return Ok(());
+        }
+        let (pat, _) = self.build_pattern(k, span)?;
+        acc.entries.push((pat, v.clone()));
+        Ok(())
+    }
+
+    /// The analyzed `:or` defaults (eager at runtime).
+    fn build_or(&mut self, m: &Map, span: Span) -> Result<Vec<(Value, Expr)>, CompileError> {
         let mut or = Vec::new();
         if let Some(Value::Map(or_map)) = map_get(m, "or") {
             for (k, default) in or_map.iter() {
                 or.push(((*k).clone(), self.analyze(default, span, false)?));
             }
         }
-        Ok(Pattern::Map(MapPattern {
-            entries,
-            keys,
-            extra_keys,
-            as_sym,
-            or,
-            select,
-            all,
-            excess,
-            missing,
-        }))
+        Ok(or)
     }
+}
+
+/// A map pattern under construction.
+#[derive(Default)]
+struct MapAcc {
+    entries: Vec<(Pattern, Value)>,
+    keys: Vec<KeyBinding>,
+    extra_keys: Vec<Value>,
+    as_sym: Option<String>,
+    select: Option<String>,
+    all: Option<String>,
+    excess: Option<String>,
+    missing: Option<String>,
+}
+
+/// Unqualified `:as`/`:or`/outlet directives (validation ran
+/// already; unknown directives never reach the builder).
+fn is_outlet_directive(kw: &Keyword) -> bool {
+    kw.namespace().is_none()
+        && matches!(
+            kw.name(),
+            "as" | "or" | "select" | "excess" | "missing" | "defaults" | "all"
+        )
+}
+
+/// Record one outlet binding (`:or`/`:defaults` carry no local).
+fn set_outlet(kw: &Keyword, v: &Value, acc: &mut MapAcc) {
+    let slot = match kw.name() {
+        "as" => &mut acc.as_sym,
+        "select" => &mut acc.select,
+        "all" => &mut acc.all,
+        "excess" => &mut acc.excess,
+        "missing" => &mut acc.missing,
+        _ => return,
+    };
+    *slot = as_symbol(v).map(|s| s.name().to_owned());
 }
 
 /// One validated key-list: pre-`&` elements bind, post-`&`
@@ -1926,23 +2002,7 @@ impl<'a> Analyzer<'a> {
             }
             _ => {}
         }
-        // `parse_clauses` borrows the form; collect clause slices
-        // without leaking by re-splitting per clause below.
-        let owned: Vec<Vec<&Value>> = if matches!(rest.first(), Some(Value::Vector(_))) {
-            vec![rest.to_vec()]
-        } else {
-            let mut out = Vec::with_capacity(rest.len());
-            for clause in rest {
-                let Value::List(list) = clause else {
-                    return Err(self.spec_error("clojure.core/fn", span));
-                };
-                out.push(list.iter().collect());
-            }
-            if out.is_empty() {
-                return Err(self.spec_error("clojure.core/fn", span));
-            }
-            out
-        };
+        let owned = self.collect_fn_clauses(rest, span)?;
         let slices: Vec<&[&Value]> = owned.iter().map(Vec::as_slice).collect();
         let raw = self.parse_clause_slices(&slices, span)?;
         self.walk_params(&raw, span)?;
@@ -1973,6 +2033,30 @@ impl<'a> Analyzer<'a> {
             }),
             _ => Ok(Expr::Fn(fun)),
         }
+    }
+
+    /// Collect one clause per arity: a leading vector is the
+    /// single clause, otherwise every item is a list clause
+    /// (non-lists and empty arities fail spec).
+    fn collect_fn_clauses<'v>(
+        &self,
+        rest: &[&'v Value],
+        span: Span,
+    ) -> Result<Vec<Vec<&'v Value>>, CompileError> {
+        if matches!(rest.first(), Some(Value::Vector(_))) {
+            return Ok(vec![rest.to_vec()]);
+        }
+        let mut out = Vec::with_capacity(rest.len());
+        for clause in rest {
+            let Value::List(list) = clause else {
+                return Err(self.spec_error("clojure.core/fn", span));
+            };
+            out.push(list.iter().collect());
+        }
+        if out.is_empty() {
+            return Err(self.spec_error("clojure.core/fn", span));
+        }
+        Ok(out)
     }
 
     /// The fn macro's `maybe-destructured` runs before `FnExpr`:
@@ -2135,50 +2219,7 @@ impl<'a> Analyzer<'a> {
             }
         };
         // Validate every fnspec before analyzing any tail.
-        struct Spec {
-            name: String,
-            tail: Vec<Value>,
-        }
-        let mut validated = Vec::with_capacity(specs.len());
-        for spec in &specs {
-            // `(map first fnspecs)`: strict `seq`, then the head.
-            if !is_seqable(spec) {
-                return Err(self.err(
-                    class::ILLEGAL_ARG,
-                    format!("Don't know how to create ISeq from: {}", jvm_class_of(spec)),
-                    span,
-                    Verb::Macroexpanding,
-                    Some(op.to_owned()),
-                ));
-            }
-            let parts = seq_values(spec);
-            let head = parts.first();
-            let Some(Value::Symbol(name)) = head else {
-                return Err(self.err(
-                    class::ILLEGAL_ARG,
-                    format!(
-                        "Bad binding form, expected symbol, got: {}",
-                        head.map_or("null".to_owned(), value_of)
-                    ),
-                    span,
-                    Verb::Compiling,
-                    Some("letfn*".to_owned()),
-                ));
-            };
-            if !is_local_name(name) {
-                return Err(self.err(
-                    class::ILLEGAL_ARG,
-                    format!("Bad binding form, expected symbol, got: {name}"),
-                    span,
-                    Verb::Compiling,
-                    Some("letfn*".to_owned()),
-                ));
-            }
-            validated.push(Spec {
-                name: name.name().to_owned(),
-                tail: parts.get(1..).unwrap_or(&[]).to_vec(),
-            });
-        }
+        let validated = self.validate_fnspecs(&specs, span, op)?;
         let base = self.locals.len();
         for spec in &validated {
             self.locals.push(spec.name.clone());
@@ -2189,21 +2230,7 @@ impl<'a> Analyzer<'a> {
             let seq = *self.fn_seq;
             let display = format!("user/eval{}/{}--{seq}", self.eval_seq, spec.name);
             let tail_refs: Vec<&Value> = spec.tail.iter().collect();
-            let owned: Vec<Vec<&Value>> = if matches!(tail_refs.first(), Some(Value::Vector(_))) {
-                vec![tail_refs]
-            } else {
-                let mut out = Vec::with_capacity(tail_refs.len());
-                for clause in &tail_refs {
-                    let Value::List(list) = clause else {
-                        return Err(self.spec_error("clojure.core/fn", span));
-                    };
-                    out.push(list.iter().collect());
-                }
-                if out.is_empty() {
-                    return Err(self.spec_error("clojure.core/fn", span));
-                }
-                out
-            };
+            let owned = self.collect_fn_clauses(&tail_refs, span)?;
             let slices: Vec<&[&Value]> = owned.iter().map(Vec::as_slice).collect();
             let raw = self.parse_clause_slices(&slices, span)?;
             self.walk_params(&raw, span)?;
@@ -2213,6 +2240,62 @@ impl<'a> Analyzer<'a> {
         let body = self.analyze_body(&items[2..], span, tail)?;
         self.locals.truncate(base);
         Ok(Expr::LetFn { fns, body })
+    }
+
+    /// Validate every fnspec (`(map first fnspecs)`: strict
+    /// `seq`, then a plain-symbol head) before any tail analysis.
+    fn validate_fnspecs(
+        &self,
+        specs: &[Value],
+        span: Span,
+        op: &str,
+    ) -> Result<Vec<FnSpec>, CompileError> {
+        let mut validated = Vec::with_capacity(specs.len());
+        for spec in specs {
+            if !is_seqable(spec) {
+                return Err(self.err(
+                    class::ILLEGAL_ARG,
+                    format!("Don't know how to create ISeq from: {}", jvm_class_of(spec)),
+                    span,
+                    Verb::Macroexpanding,
+                    Some(op.to_owned()),
+                ));
+            }
+            let parts = seq_values(spec);
+            validated.push(self.fnspec_head(&parts, span)?);
+        }
+        Ok(validated)
+    }
+
+    /// One fnspec head: a plain symbol (anything else is the
+    /// `letfn*` error).
+    fn fnspec_head(&self, parts: &[Value], span: Span) -> Result<FnSpec, CompileError> {
+        let head = parts.first();
+        let Some(Value::Symbol(name)) = head else {
+            return Err(self.err(
+                class::ILLEGAL_ARG,
+                format!(
+                    "Bad binding form, expected symbol, got: {}",
+                    head.map_or("null".to_owned(), value_of)
+                ),
+                span,
+                Verb::Compiling,
+                Some("letfn*".to_owned()),
+            ));
+        };
+        if !is_local_name(name) {
+            return Err(self.err(
+                class::ILLEGAL_ARG,
+                format!("Bad binding form, expected symbol, got: {name}"),
+                span,
+                Verb::Compiling,
+                Some("letfn*".to_owned()),
+            ));
+        }
+        Ok(FnSpec {
+            name: name.name().to_owned(),
+            tail: parts.get(1..).unwrap_or(&[]).to_vec(),
+        })
     }
 
     /// Parse `fn` clause slices (shared by `fn` and `letfn`):

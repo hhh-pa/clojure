@@ -35,7 +35,16 @@ fn int(args: &[Value]) -> Result<i64, NativeError> {
 fn rigged() -> (Evaluator, Arc<Mutex<Vec<String>>>) {
     let mut eval = Evaluator::new("test");
     let log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-    let plus_log = Arc::clone(&log);
+    install_arith(&mut eval);
+    install_int_fns(&mut eval);
+    install_misc(&mut eval, &log);
+    eval.eval_source("(def vfn251 (fn [x] x)) (def vu251)")
+        .unwrap();
+    (eval, log)
+}
+
+/// `t-plus` (with the `Number` cast) and `t-minus`.
+fn install_arith(eval: &mut Evaluator) {
     eval.install_native(
         "t-plus",
         Arc::new(move |args| match args {
@@ -54,6 +63,10 @@ fn rigged() -> (Evaluator, Arc<Mutex<Vec<String>>>) {
             _ => Err(NativeError::arity("test/t-minus", args.len())),
         }),
     );
+}
+
+/// Single-int natives: `t-zero?`, `t-pos?`, `t-dec`.
+fn install_int_fns(eval: &mut Evaluator) {
     eval.install_native(
         "t-zero?",
         Arc::new(|args| int(args).map(|n| Value::Bool(n == 0))),
@@ -66,6 +79,10 @@ fn rigged() -> (Evaluator, Arc<Mutex<Vec<String>>>) {
         "t-dec",
         Arc::new(|args| int(args).map(|n| Value::Int(n - 1))),
     );
+}
+
+/// `t-id` plus the side-logging `t-log`.
+fn install_misc(eval: &mut Evaluator, log: &Arc<Mutex<Vec<String>>>) {
     eval.install_native(
         "t-id",
         Arc::new(|args| match args {
@@ -73,17 +90,15 @@ fn rigged() -> (Evaluator, Arc<Mutex<Vec<String>>>) {
             _ => Err(NativeError::arity("test/t-id", args.len())),
         }),
     );
+    let logged = Arc::clone(log);
     eval.install_native(
         "t-log",
         Arc::new(move |args| {
-            let mut log = plus_log.lock().unwrap();
+            let mut log = logged.lock().unwrap();
             log.push(pr(&args[0]));
             Ok(args[0].clone())
         }),
     );
-    eval.eval_source("(def vfn251 (fn [x] x)) (def vu251)")
-        .unwrap();
-    (eval, log)
 }
 
 fn run(eval: &mut Evaluator, src: &str) -> Vec<String> {

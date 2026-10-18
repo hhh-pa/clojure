@@ -166,36 +166,16 @@ impl Evaluator {
     pub fn eval(&mut self, expr: &Expr, env: &Env) -> Result<Value, Signal> {
         match expr {
             Expr::Literal(v) | Expr::Quote(v) => Ok(v.clone()),
-            Expr::VecLit(elems) => {
-                let mut out = Vec::with_capacity(elems.len());
-                for elem in elems {
-                    out.push(self.eval(elem, env)?);
-                }
-                Ok(Value::Vector(Vector::from_vec(out)))
-            }
-            Expr::MapLit(pairs) => {
-                let mut out = new_map();
-                for (k, v) in pairs {
-                    let key = self.eval(k, env)?;
-                    let val = self.eval(v, env)?;
-                    out = out.insert(key, val);
-                }
-                Ok(Value::Map(out))
-            }
-            Expr::SetLit(elems) => {
-                let mut out = clj_value::new_set();
-                for elem in elems {
-                    out = out.insert(self.eval(elem, env)?);
-                }
-                Ok(Value::Set(out))
-            }
+            Expr::VecLit(elems) => self.eval_vec(elems, env),
+            Expr::MapLit(pairs) => self.eval_map_lit(pairs, env),
+            Expr::SetLit(elems) => self.eval_set_lit(elems, env),
             Expr::Global(sym) => {
-                let id = self.ns.lookup(sym).unwrap_or_else(|| self.ns.intern(sym));
+                let id = self.var_id(sym);
                 Ok(self.deref_var(id, sym))
             }
             Expr::Local(idx) => Ok(env.get(*idx)),
             Expr::VarRef(sym) => {
-                let id = self.ns.lookup(sym).unwrap_or_else(|| self.ns.intern(sym));
+                let id = self.var_id(sym);
                 Ok(Value::Var(Var {
                     id,
                     sym: sym.clone(),
@@ -214,27 +194,13 @@ impl Evaluator {
                     self.eval(els, env)
                 }
             }
-            Expr::Do(exprs) => {
-                let mut value = Value::Nil;
-                for expr in exprs {
-                    value = self.eval(expr, env)?;
-                }
-                Ok(value)
-            }
+            Expr::Do(exprs) => self.eval_body(exprs, env),
             Expr::Let { bindings, body } => {
                 let env = self.bind_all(bindings, env)?;
                 self.eval_body(body, &env)
             }
             Expr::Loop { bindings, body } => self.eval_loop(bindings, body, env),
-            Expr::LetFn { fns, body } => {
-                let env = env.extend(vec![Value::Nil; fns.len()]);
-                let base = env.len() - fns.len();
-                for (i, (_, fun)) in fns.iter().enumerate() {
-                    let closure = self.make_closure(fun, &env);
-                    env.set(base + i, Value::Extension(Arc::new(closure)));
-                }
-                self.eval_body(body, &env)
-            }
+            Expr::LetFn { fns, body } => self.eval_letfn(fns, body, env),
             Expr::Fn(fun) => Ok(Value::Extension(Arc::new(self.make_closure(fun, env)))),
             Expr::Recur(args) => {
                 let mut values = Vec::with_capacity(args.len());
@@ -243,16 +209,7 @@ impl Evaluator {
                 }
                 Err(Signal::Recur(values))
             }
-            Expr::Throw(inner) => {
-                let value = self.eval(inner, env)?;
-                match value {
-                    Value::Throwable(t) => Err(Signal::Throw(t)),
-                    other => Err(self.throw(NativeError::cast(
-                        &jvm_class_of(&other),
-                        "java.lang.Throwable",
-                    ))),
-                }
-            }
+            Expr::Throw(inner) => self.eval_throw(inner, env),
             Expr::NewThrowable { class, message } => Ok(Value::Throwable(Throwable {
                 id: self.next_id(),
                 class: *class,
@@ -265,46 +222,8 @@ impl Evaluator {
                 catches,
                 finally_body,
             } => self.eval_try(body, catches, finally_body, env),
-            Expr::Set { sym, val } => {
-                let value = self.eval(val, env)?;
-                let id = self.ns.lookup(sym).unwrap_or_else(|| self.ns.intern(sym));
-                if self.bindings.set_top(id, value.clone()) {
-                    Ok(value)
-                } else {
-                    Err(self.throw(NativeError::new(
-                        ThrowClass::IllegalStateException,
-                        format!(
-                            "Can't change/establish root binding of: {} with set",
-                            sym.name()
-                        ),
-                    )))
-                }
-            }
-            Expr::Binding { pairs, body } => {
-                let depth = self.bindings.depth();
-                for (sym, init) in pairs {
-                    let id = self.ns.lookup(sym).unwrap_or_else(|| self.ns.intern(sym));
-                    let dynamic = self.ns.state(id).is_some_and(|s| s.dynamic);
-                    if !dynamic {
-                        self.bindings.truncate(depth);
-                        return Err(self.throw(NativeError::new(
-                            ThrowClass::IllegalStateException,
-                            format!("Can't dynamically bind non-dynamic var: {sym}"),
-                        )));
-                    }
-                    let value = match self.eval(init, env) {
-                        Ok(v) => v,
-                        Err(signal) => {
-                            self.bindings.truncate(depth);
-                            return Err(signal);
-                        }
-                    };
-                    self.bindings.push(id, value);
-                }
-                let result = self.eval_body(body, env);
-                self.bindings.truncate(depth);
-                result
-            }
+            Expr::Set { sym, val } => self.eval_set(sym, val, env),
+            Expr::Binding { pairs, body } => self.eval_binding(pairs, body, env),
             Expr::Invoke { head, args } => {
                 let callee = self.eval(head, env)?;
                 let mut values = Vec::with_capacity(args.len());
@@ -314,6 +233,121 @@ impl Evaluator {
                 self.invoke(&callee, &values)
             }
         }
+    }
+
+    /// A var id, interning on first reference.
+    fn var_id(&mut self, sym: &Symbol) -> u64 {
+        self.ns.lookup(sym).unwrap_or_else(|| self.ns.intern(sym))
+    }
+
+    /// A vector literal (elements evaluate left to right).
+    fn eval_vec(&mut self, elems: &[Expr], env: &Env) -> Result<Value, Signal> {
+        let mut out = Vec::with_capacity(elems.len());
+        for elem in elems {
+            out.push(self.eval(elem, env)?);
+        }
+        Ok(Value::Vector(Vector::from_vec(out)))
+    }
+
+    /// A map literal (keys and values evaluate left to right).
+    fn eval_map_lit(&mut self, pairs: &[(Expr, Expr)], env: &Env) -> Result<Value, Signal> {
+        let mut out = new_map();
+        for (k, v) in pairs {
+            let key = self.eval(k, env)?;
+            let val = self.eval(v, env)?;
+            out = out.insert(key, val);
+        }
+        Ok(Value::Map(out))
+    }
+
+    /// A set literal (elements evaluate left to right).
+    fn eval_set_lit(&mut self, elems: &[Expr], env: &Env) -> Result<Value, Signal> {
+        let mut out = clj_value::new_set();
+        for elem in elems {
+            out = out.insert(self.eval(elem, env)?);
+        }
+        Ok(Value::Set(out))
+    }
+
+    /// `letfn`: extend the frame, fill each slot with its closure
+    /// (self/mutual recursion), run the body.
+    fn eval_letfn(
+        &mut self,
+        fns: &[(String, crate::expr::FunExpr)],
+        body: &[Expr],
+        env: &Env,
+    ) -> Result<Value, Signal> {
+        let env = env.extend(vec![Value::Nil; fns.len()]);
+        let base = env.len() - fns.len();
+        for (i, (_, fun)) in fns.iter().enumerate() {
+            let closure = self.make_closure(fun, &env);
+            env.set(base + i, Value::Extension(Arc::new(closure)));
+        }
+        self.eval_body(body, &env)
+    }
+
+    /// `throw`: throwables signal, anything else is the
+    /// `Throwable` cast error.
+    fn eval_throw(&mut self, inner: &Expr, env: &Env) -> Result<Value, Signal> {
+        let value = self.eval(inner, env)?;
+        match value {
+            Value::Throwable(t) => Err(Signal::Throw(t)),
+            other => Err(self.throw(NativeError::cast(
+                &jvm_class_of(&other),
+                "java.lang.Throwable",
+            ))),
+        }
+    }
+
+    /// `set!`: rebind the thread-local top, else the root-binding
+    /// error.
+    fn eval_set(&mut self, sym: &Symbol, val: &Expr, env: &Env) -> Result<Value, Signal> {
+        let value = self.eval(val, env)?;
+        let id = self.var_id(sym);
+        if self.bindings.set_top(id, value.clone()) {
+            Ok(value)
+        } else {
+            Err(self.throw(NativeError::new(
+                ThrowClass::IllegalStateException,
+                format!(
+                    "Can't change/establish root binding of: {} with set",
+                    sym.name()
+                ),
+            )))
+        }
+    }
+
+    /// `binding`: push dynamic bindings (validating dynamic-ness
+    /// first), run the body, always pop.
+    fn eval_binding(
+        &mut self,
+        pairs: &[(Symbol, Expr)],
+        body: &[Expr],
+        env: &Env,
+    ) -> Result<Value, Signal> {
+        let depth = self.bindings.depth();
+        for (sym, init) in pairs {
+            let id = self.var_id(sym);
+            let dynamic = self.ns.state(id).is_some_and(|s| s.dynamic);
+            if !dynamic {
+                self.bindings.truncate(depth);
+                return Err(self.throw(NativeError::new(
+                    ThrowClass::IllegalStateException,
+                    format!("Can't dynamically bind non-dynamic var: {sym}"),
+                )));
+            }
+            let value = match self.eval(init, env) {
+                Ok(v) => v,
+                Err(signal) => {
+                    self.bindings.truncate(depth);
+                    return Err(signal);
+                }
+            };
+            self.bindings.push(id, value);
+        }
+        let result = self.eval_body(body, env);
+        self.bindings.truncate(depth);
+        result
     }
 
     /// A body: the last value, or `nil` when empty.
@@ -504,16 +538,7 @@ impl Evaluator {
                 ThrowClass::NullPointerException,
                 "Cannot invoke nil as a function".to_owned(),
             ))),
-            Value::Extension(_) => {
-                if let Some(closure) = as_closure(callee) {
-                    return self.apply_closure(closure, args);
-                }
-                if let Some(native) = as_native(callee) {
-                    let func = Arc::clone(&native.func);
-                    return func(args).map_err(|e| self.throw(e));
-                }
-                Err(self.throw(NativeError::cast(&jvm_class_of(callee), "clojure.lang.IFn")))
-            }
+            Value::Extension(_) => self.invoke_extension(callee, args),
             Value::Keyword(kw) => {
                 let name = kw.to_string();
                 match args {
@@ -529,28 +554,7 @@ impl Evaluator {
                 [coll, not_found] => Ok(lookup(coll, callee).unwrap_or_else(|| not_found.clone())),
                 _ => Err(self.throw(NativeError::arity("clojure.lang.Symbol", args.len()))),
             },
-            Value::Vector(v) => {
-                if args.len() != 1 {
-                    return Err(self.throw(NativeError::arity(
-                        "clojure.lang.PersistentVector",
-                        args.len(),
-                    )));
-                }
-                let Value::Int(n) = &args[0] else {
-                    return Err(self.throw(NativeError::new(
-                        ThrowClass::IllegalArgumentException,
-                        "Key must be integer".to_owned(),
-                    )));
-                };
-                let n = *n;
-                match usize::try_from(n).ok().and_then(|i| v.iter().nth(i)) {
-                    Some(elem) => Ok(elem.clone()),
-                    None => Err(self.throw(NativeError::new(
-                        ThrowClass::IndexOutOfBoundsException,
-                        String::new(),
-                    ))),
-                }
-            }
+            Value::Vector(v) => self.invoke_vector(v, args),
             Value::Map(_) => {
                 let name = jvm_class_of(callee);
                 match args {
@@ -569,22 +573,63 @@ impl Evaluator {
                     args.len(),
                 ))),
             },
-            Value::Var(v) => {
-                let root = self.deref_var(v.id, &v.sym);
-                if matches!(root, Value::Unbound(_)) {
-                    return Err(self.throw(NativeError::new(
-                        ThrowClass::IllegalStateException,
-                        format!("Attempting to call unbound fn: #'{}", v.sym),
-                    )));
-                }
-                self.invoke(&root, args)
-            }
+            Value::Var(v) => self.invoke_var(v, args),
             Value::Unbound(u) => Err(self.throw(NativeError::new(
                 ThrowClass::IllegalStateException,
                 format!("Attempting to call unbound fn: #'{}", u.sym),
             ))),
             _ => Err(self.throw(NativeError::cast(&jvm_class_of(callee), "clojure.lang.IFn"))),
         }
+    }
+
+    /// Invoke an extension value: closures apply, natives run,
+    /// anything else is the `IFn` cast error.
+    fn invoke_extension(&mut self, callee: &Value, args: &[Value]) -> Result<Value, Signal> {
+        if let Some(closure) = as_closure(callee) {
+            return self.apply_closure(closure, args);
+        }
+        if let Some(native) = as_native(callee) {
+            let func = Arc::clone(&native.func);
+            return func(args).map_err(|e| self.throw(e));
+        }
+        Err(self.throw(NativeError::cast(&jvm_class_of(callee), "clojure.lang.IFn")))
+    }
+
+    /// Invoke a vector: exactly one integer key (arity, key-type,
+    /// then bounds, §E7).
+    fn invoke_vector(&mut self, v: &clj_value::Vector, args: &[Value]) -> Result<Value, Signal> {
+        if args.len() != 1 {
+            return Err(self.throw(NativeError::arity(
+                "clojure.lang.PersistentVector",
+                args.len(),
+            )));
+        }
+        let Value::Int(n) = &args[0] else {
+            return Err(self.throw(NativeError::new(
+                ThrowClass::IllegalArgumentException,
+                "Key must be integer".to_owned(),
+            )));
+        };
+        match usize::try_from(*n).ok().and_then(|i| v.iter().nth(i)) {
+            Some(elem) => Ok(elem.clone()),
+            None => Err(self.throw(NativeError::new(
+                ThrowClass::IndexOutOfBoundsException,
+                String::new(),
+            ))),
+        }
+    }
+
+    /// Invoke a var: deref and delegate (unbounds are the
+    /// `IllegalStateException`).
+    fn invoke_var(&mut self, v: &Var, args: &[Value]) -> Result<Value, Signal> {
+        let root = self.deref_var(v.id, &v.sym);
+        if matches!(root, Value::Unbound(_)) {
+            return Err(self.throw(NativeError::new(
+                ThrowClass::IllegalStateException,
+                format!("Attempting to call unbound fn: #'{}", v.sym),
+            )));
+        }
+        self.invoke(&root, args)
     }
 
     /// Apply a closure: fixed arities by count, else the variadic
@@ -712,15 +757,47 @@ impl Evaluator {
         out: &mut Vec<Value>,
     ) -> Result<(), Signal> {
         let converted = self.seq_to_map(value)?;
+        let defaults = self.eval_defaults(pat, env)?;
+        let ctx = MapBind {
+            pat,
+            value,
+            env,
+            converted: &converted,
+            defaults: &defaults,
+        };
+        // Entries and keys (missing keys take the local-then-key
+        // default; required keys `req!`).
+        let mut missing: Option<Map> = pat.missing.is_some().then(new_map);
+        self.bind_entries(&ctx, &mut missing, out)?;
+        self.bind_key_list(&ctx, &mut missing, out)?;
+        if pat.as_sym.is_some() {
+            out.push(converted.clone());
+        }
+        self.bind_outlets(&ctx, &mut missing, out)?;
+        if pat.missing.is_some() {
+            out.push(missing.map(Value::Map).unwrap_or(Value::Nil));
+        }
+        Ok(())
+    }
+
+    /// The eager `:or` defaults (evaluated once, before any lookup).
+    fn eval_defaults(&mut self, pat: &MapPattern, env: &Env) -> Result<Map, Signal> {
         let mut defaults: Map = new_map();
         for (key, default) in &pat.or {
             let val = self.eval(default, env)?;
             defaults = defaults.insert((*key).clone(), val);
         }
-        // Entries and keys (missing keys take the local-then-key
-        // default; required keys `req!`).
-        let mut missing: Option<Map> = pat.missing.is_some().then(new_map);
-        for (local, key) in &pat.entries {
+        Ok(defaults)
+    }
+
+    /// The `symbol keyword` entries.
+    fn bind_entries(
+        &mut self,
+        ctx: &MapBind,
+        missing: &mut Option<Map>,
+        out: &mut Vec<Value>,
+    ) -> Result<(), Signal> {
+        for (local, key) in &ctx.pat.entries {
             // `:or` is keyed by the binding local first, then the
             // lookup key (`destmap*` `push1`); nested locals have no
             // `Value` form, so only symbols get the local lookup.
@@ -729,68 +806,79 @@ impl Evaluator {
                 _ => None,
             };
             let val = self.map_binding(
-                &converted,
-                &defaults,
+                ctx.converted,
+                ctx.defaults,
                 local_val.as_ref(),
                 key,
                 false,
-                &mut missing,
+                missing,
             )?;
-            self.destructure(local, &val, env, out)?;
+            self.destructure(local, &val, ctx.env, out)?;
         }
-        for key in &pat.keys {
+        Ok(())
+    }
+
+    /// The `:keys`/`:strs`/`:syms` bindings.
+    fn bind_key_list(
+        &mut self,
+        ctx: &MapBind,
+        missing: &mut Option<Map>,
+        out: &mut Vec<Value>,
+    ) -> Result<(), Signal> {
+        for key in &ctx.pat.keys {
             let local_key = Value::Symbol(Symbol::new(None, &key.local));
             let val = self.map_binding(
-                &converted,
-                &defaults,
+                ctx.converted,
+                ctx.defaults,
                 Some(&local_key),
                 &key.key,
                 key.required,
-                &mut missing,
+                missing,
             )?;
             out.push(val);
         }
-        if pat.as_sym.is_some() {
-            out.push(converted.clone());
+        Ok(())
+    }
+
+    /// The 1.13 outlets (`:select`/`:all`/`:excess`, folding the
+    /// nested-outlet `:missing` merge in when requested).
+    fn bind_outlets(
+        &mut self,
+        ctx: &MapBind,
+        missing: &mut Option<Map>,
+        out: &mut Vec<Value>,
+    ) -> Result<(), Signal> {
+        let pat = ctx.pat;
+        if pat.select.is_none() && pat.all.is_none() && pat.excess.is_none() {
+            if pat.missing.is_some() {
+                let subs_missing = self.sub_outlets(pat, ctx.value, ctx.env, Outlet::Missing)?;
+                *missing = merge_missing(missing.take(), subs_missing);
+            }
+            return Ok(());
         }
-        if pat.select.is_some() || pat.all.is_some() || pat.excess.is_some() {
-            let sel = selection(pat);
-            let subs_select = self.sub_outlets(pat, value, env, Outlet::Select)?;
-            let subs_all = self.sub_outlets(pat, value, env, Outlet::All)?;
-            let subs_excess = self.sub_outlets(pat, value, env, Outlet::Excess)?;
-            let subs_missing = self.sub_outlets(pat, value, env, Outlet::Missing)?;
-            let merged_missing = match (&missing, subs_missing) {
-                (Some(m), Some(sub)) => Some(merge_maps(m, &sub)),
-                (m, sub) => m.clone().or(sub),
-            };
-            missing = merged_missing;
-            if pat.select.is_some() {
-                let dm = or_mapped(pat, &defaults);
-                let merged = merge3(&dm, &converted, &subs_select);
-                out.push(select_keys(&merged, &sel));
-            }
-            if pat.all.is_some() {
-                let dm = or_mapped(pat, &defaults);
-                out.push(Value::Map(merge3(&dm, &converted, &subs_all)));
-            }
-            if pat.excess.is_some() {
-                let leftover = dissoc_all(&converted, &sel);
-                let base = if leftover.is_empty() {
-                    None
-                } else {
-                    Some(Value::Map(leftover))
-                };
-                out.push(merge_opt(base.as_ref(), subs_excess.as_ref()));
-            }
-        } else if pat.missing.is_some() {
-            let subs_missing = self.sub_outlets(pat, value, env, Outlet::Missing)?;
-            missing = match (&missing, subs_missing) {
-                (Some(m), Some(sub)) => Some(merge_maps(m, &sub)),
-                (m, sub) => m.clone().or(sub),
-            };
+        let sel = selection(pat);
+        let subs_select = self.sub_outlets(pat, ctx.value, ctx.env, Outlet::Select)?;
+        let subs_all = self.sub_outlets(pat, ctx.value, ctx.env, Outlet::All)?;
+        let subs_excess = self.sub_outlets(pat, ctx.value, ctx.env, Outlet::Excess)?;
+        let subs_missing = self.sub_outlets(pat, ctx.value, ctx.env, Outlet::Missing)?;
+        *missing = merge_missing(missing.take(), subs_missing);
+        if pat.select.is_some() {
+            let dm = or_mapped(pat, ctx.defaults);
+            let merged = merge3(&dm, ctx.converted, &subs_select);
+            out.push(select_keys(&merged, &sel));
         }
-        if pat.missing.is_some() {
-            out.push(missing.map(Value::Map).unwrap_or(Value::Nil));
+        if pat.all.is_some() {
+            let dm = or_mapped(pat, ctx.defaults);
+            out.push(Value::Map(merge3(&dm, ctx.converted, &subs_all)));
+        }
+        if pat.excess.is_some() {
+            let leftover = dissoc_all(ctx.converted, &sel);
+            let base = if leftover.is_empty() {
+                None
+            } else {
+                Some(Value::Map(leftover))
+            };
+            out.push(merge_opt(base.as_ref(), subs_excess.as_ref()));
         }
         Ok(())
     }
@@ -911,37 +999,58 @@ impl Evaluator {
             let Pattern::Map(nested) = local else {
                 continue;
             };
-            let has = match outlet {
-                Outlet::Select => nested.select.is_some(),
-                Outlet::All => nested.all.is_some(),
-                Outlet::Excess => nested.excess.is_some(),
-                Outlet::Missing => nested.missing.is_some(),
-            };
-            if !has {
+            if outlet.name(nested).is_none() {
                 continue;
             }
             let Some(entry_val) = lookup(&converted, key) else {
                 continue;
             };
-            let mut vals = Vec::new();
-            self.bind_map(nested, &entry_val, env, &mut vals)?;
-            let names = pattern_names(&Pattern::Map(nested.clone()));
-            let outlet_name = match outlet {
-                Outlet::Select => nested.select.as_ref(),
-                Outlet::All => nested.all.as_ref(),
-                Outlet::Excess => nested.excess.as_ref(),
-                Outlet::Missing => nested.missing.as_ref(),
-            };
-            if let Some(want) = outlet_name {
-                for (name, val) in names.iter().zip(vals) {
-                    if name == want && !matches!(val, Value::Nil) {
-                        let map = out.take().unwrap_or_else(new_map);
-                        out = Some(map.insert(key.clone(), val));
-                    }
-                }
-            }
+            self.sub_outlet_entry(nested, key, &entry_val, env, outlet, &mut out)?;
         }
         Ok(out)
+    }
+
+    /// One nested entry's outlet contribution (entry-key →
+    /// outlet-value, `nil`s dropped).
+    fn sub_outlet_entry(
+        &mut self,
+        nested: &MapPattern,
+        key: &Value,
+        entry_val: &Value,
+        env: &Env,
+        outlet: Outlet,
+        out: &mut Option<Map>,
+    ) -> Result<(), Signal> {
+        let mut vals = Vec::new();
+        self.bind_map(nested, entry_val, env, &mut vals)?;
+        let names = pattern_names(&Pattern::Map(nested.clone()));
+        let Some(want) = outlet.name(nested) else {
+            return Ok(());
+        };
+        for (name, val) in names.iter().zip(vals) {
+            if name == want && !matches!(val, Value::Nil) {
+                let map = out.take().unwrap_or_else(new_map);
+                *out = Some(map.insert(key.clone(), val));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The shared inputs to one map-pattern bind.
+struct MapBind<'a> {
+    pat: &'a MapPattern,
+    value: &'a Value,
+    env: &'a Env,
+    converted: &'a Value,
+    defaults: &'a Map,
+}
+
+/// Merge the nested-outlet `:missing` map into the local one.
+fn merge_missing(local: Option<Map>, sub: Option<Map>) -> Option<Map> {
+    match (local, sub) {
+        (Some(m), Some(s)) => Some(merge_maps(&m, &s)),
+        (m, s) => m.or(s),
     }
 }
 
@@ -952,6 +1061,18 @@ enum Outlet {
     All,
     Excess,
     Missing,
+}
+
+impl Outlet {
+    /// The outlet's local name in a nested pattern, if bound.
+    fn name(self, nested: &MapPattern) -> Option<&String> {
+        match self {
+            Outlet::Select => nested.select.as_ref(),
+            Outlet::All => nested.all.as_ref(),
+            Outlet::Excess => nested.excess.as_ref(),
+            Outlet::Missing => nested.missing.as_ref(),
+        }
+    }
 }
 
 /// `get` without the not-found: maps, int-keyed vectors/strings
