@@ -133,14 +133,33 @@ impl Reader {
             // so the symbol read below reports `Eof`.
             None => false,
         };
+        let (sym, next) = self.nsmap_head(auto)?;
+        // EOF here (including right after the symbol) means "must
+        // specify a map", not `Eof`.
+        if next != Some('{') {
+            return Err(ReaderError::NsMapMap { span: self.span() });
+        }
+        let ns = self.resolve_nsmap_ns(auto, sym)?;
+        self.nsmap_assemble(&ns)
+    }
+
+    /// Skip whitespace chars, returning the first non-ws char (or EOF).
+    fn skip_ws(&mut self, mut next: Option<char>) -> Option<char> {
+        while next.is_some_and(is_whitespace) {
+            next = self.stream.read();
+        }
+        next
+    }
+
+    /// Scan the ns-map head: optional alias symbol plus the char that
+    /// follows it (whitespace skipped). A bad namespace errors here.
+    fn nsmap_head(&mut self, auto: bool) -> Result<(Option<Value>, Option<char>), ReaderError> {
         let mut sym: Option<Value> = None;
         let mut next = self.stream.read();
         if next.is_some_and(is_whitespace) {
             if auto {
                 // `#:: { }`: skip to `{`, else no namespace.
-                while next.is_some_and(is_whitespace) {
-                    next = self.stream.read();
-                }
+                next = self.skip_ws(next);
                 if next != Some('{') {
                     if let Some(c) = next {
                         self.stream.unread(c);
@@ -158,24 +177,22 @@ impl Reader {
                 self.stream.unread(c);
             }
             sym = Some(self.read_nested_value()?);
-            next = self.stream.read();
-            while next.is_some_and(is_whitespace) {
-                next = self.stream.read();
-            }
+            let head = self.stream.read();
+            next = self.skip_ws(head);
         }
-        // EOF here (including right after the symbol) means "must
-        // specify a map", not `Eof`.
-        if next != Some('{') {
-            return Err(ReaderError::NsMapMap { span: self.span() });
-        }
-        let ns = self.resolve_nsmap_ns(auto, sym)?;
+        Ok((sym, next))
+    }
+
+    /// Assemble the ns-map body: read `{...}`, check evenness, rewrite
+    /// keys, build the checked map.
+    fn nsmap_assemble(&mut self, ns: &str) -> Result<Option<Value>, ReaderError> {
         let items = self.read_delimited('}')?;
         if items.len() % 2 == 1 {
             return Err(ReaderError::NsMapOdd { span: self.span() });
         }
         let pairs = crate::coll::pair_up(items)
             .into_iter()
-            .map(|(k, v)| (nsmap_key(k, &ns), v))
+            .map(|(k, v)| (nsmap_key(k, ns), v))
             .collect();
         Self::checked_map(pairs, self.span()).map(|m| Some(Value::Map(m)))
     }
@@ -252,9 +269,7 @@ impl Reader {
             splicing = true;
             ch = self.stream.read();
         }
-        while ch.is_some_and(is_whitespace) {
-            ch = self.stream.read();
-        }
+        ch = self.skip_ws(ch);
         let Some(ch) = ch else {
             return Err(ReaderError::EofChar { span: self.span() });
         };
@@ -289,70 +304,103 @@ impl Reader {
         let firstline = self.firstline();
         let mut result: Option<Value> = None;
         loop {
-            if result.is_none() {
-                match self.read_inner(false, Some(')'), false)? {
-                    crate::Form::Eof => return Err(self.eof_delimited(firstline)),
-                    crate::Form::Finished => break,
-                    crate::Form::Value(f) => {
-                        if is_reserved_feature(&f) {
-                            return Err(ReaderError::ReservedFeature {
-                                span: self.span(),
-                                kw: java_debug(&f),
-                            });
-                        }
-                        let Value::Keyword(kw) = &f else {
-                            return Err(ReaderError::BadFeature {
-                                span: self.span(),
-                                dbg: java_debug(&f),
-                            });
-                        };
-                        if is_default(kw) || self.opts.features.contains(kw) {
-                            match self.read_inner(false, Some(')'), false)? {
-                                crate::Form::Eof => return Err(self.eof_delimited(firstline)),
-                                crate::Form::Finished => {
-                                    return Err(ReaderError::CondEven {
-                                        span: self.span(),
-                                        line: firstline,
-                                    });
-                                }
-                                crate::Form::Value(v) => result = Some(v),
-                            }
-                        }
-                    }
-                }
+            if result.is_none() && self.cond_match_arm(&mut result, firstline)? {
+                break;
             }
             // The discard runs ALWAYS — even right after a match.
-            let prev = self.suppress;
-            self.suppress = true;
-            let discarded = self.read_inner(false, Some(')'), false);
-            self.suppress = prev;
-            match discarded? {
-                crate::Form::Eof => return Err(self.eof_delimited(firstline)),
-                crate::Form::Finished => break,
-                crate::Form::Value(_) => {}
+            if self.cond_discard(firstline)? {
+                break;
             }
         }
+        self.cond_finish(result, splicing, top)
+    }
+
+    /// One feature-match attempt of the cond loop: read a feature,
+    /// validate it, and read its value on match. True finishes the
+    /// loop (`)` where a feature was expected).
+    fn cond_match_arm(
+        &mut self,
+        result: &mut Option<Value>,
+        firstline: Option<u32>,
+    ) -> Result<bool, ReaderError> {
+        match self.read_inner(false, Some(')'), false)? {
+            crate::Form::Eof => Err(self.eof_delimited(firstline)),
+            crate::Form::Finished => Ok(true),
+            crate::Form::Value(f) => {
+                if is_reserved_feature(&f) {
+                    return Err(ReaderError::ReservedFeature {
+                        span: self.span(),
+                        kw: java_debug(&f),
+                    });
+                }
+                let Value::Keyword(kw) = &f else {
+                    return Err(ReaderError::BadFeature {
+                        span: self.span(),
+                        dbg: java_debug(&f),
+                    });
+                };
+                if is_default(kw) || self.opts.features.contains(kw) {
+                    match self.read_inner(false, Some(')'), false)? {
+                        crate::Form::Eof => Err(self.eof_delimited(firstline)),
+                        crate::Form::Finished => Err(ReaderError::CondEven {
+                            span: self.span(),
+                            line: firstline,
+                        }),
+                        crate::Form::Value(v) => {
+                            *result = Some(v);
+                            Ok(false)
+                        }
+                    }
+                } else {
+                    Ok(false)
+                }
+            }
+        }
+    }
+
+    /// The ALWAYS-run suppressed discard of the cond loop. True
+    /// finishes the loop.
+    fn cond_discard(&mut self, firstline: Option<u32>) -> Result<bool, ReaderError> {
+        let prev = self.suppress;
+        self.suppress = true;
+        let discarded = self.read_inner(false, Some(')'), false);
+        self.suppress = prev;
+        match discarded? {
+            crate::Form::Eof => Err(self.eof_delimited(firstline)),
+            crate::Form::Finished => Ok(true),
+            crate::Form::Value(_) => Ok(false),
+        }
+    }
+
+    /// Finish the cond loop: no match ⇒ sentinel; splicing matches
+    /// prepend to the pending queue (top-level splices reject).
+    fn cond_finish(
+        &mut self,
+        result: Option<Value>,
+        splicing: bool,
+        top: bool,
+    ) -> Result<Option<Value>, ReaderError> {
         let Some(result) = result else {
             // No match: the reader sentinel (recur).
             return Ok(None);
         };
-        if splicing {
-            let items = match &result {
-                Value::List(l) => l.iter().cloned().collect::<Vec<_>>(),
-                Value::Vector(v) => v.iter().cloned().collect::<Vec<_>>(),
-                _ => {
-                    return Err(ReaderError::SpliceType { span: self.span() });
-                }
-            };
-            if top {
-                return Err(ReaderError::SpliceTopLevel { span: self.span() });
-            }
-            for v in items.into_iter().rev() {
-                self.pending.push_front(v);
-            }
-            return Ok(None);
+        if !splicing {
+            return Ok(Some(result));
         }
-        Ok(Some(result))
+        let items = match &result {
+            Value::List(l) => l.iter().cloned().collect::<Vec<_>>(),
+            Value::Vector(v) => v.iter().cloned().collect::<Vec<_>>(),
+            _ => {
+                return Err(ReaderError::SpliceType { span: self.span() });
+            }
+        };
+        if top {
+            return Err(ReaderError::SpliceTopLevel { span: self.span() });
+        }
+        for v in items.into_iter().rev() {
+            self.pending.push_front(v);
+        }
+        Ok(None)
     }
 }
 
