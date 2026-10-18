@@ -1,0 +1,23 @@
+;; S3 oracle probes: transient printing, errors, and op semantics.
+;; Exit 0 (all errors caught and printed as class | message).
+(defn tx [label f]
+  (println label "=>" (pr-str (try (f) (catch Throwable t (str (.getName (class t)) " | " (.getMessage t)))))))
+(tx "(pr-str (transient [1 2]))" #(pr-str (transient [1 2])))
+(tx "(pr-str (transient {:a 1}))" #(pr-str (transient {:a 1})))
+(tx "(pr-str (transient #{1}))" #(pr-str (transient #{1})))
+(tx "vec-use-after-persistent" #(let [t (transient [1])] (persistent! t) (conj! t 2)))
+(tx "map-use-after-persistent" #(let [t (transient {:a 1})] (persistent! t) (assoc! t :b 2)))
+(tx "set-use-after-persistent" #(let [t (transient #{1})] (persistent! t) (disj! t 1)))
+(tx "(assoc! (transient [1]) 5 :x)" #(assoc! (transient [1]) 5 :x))
+(tx "(assoc! (transient [1]) 1 :x)" #(persistent! (assoc! (transient [1]) 1 :x)))
+(tx "(conj! (transient {:a 1}) [:b 2])" #(persistent! (conj! (transient {:a 1}) [:b 2])))
+(tx "(conj! (transient [1]) 2 3)" #(persistent! (conj! (transient [1]) 2 3)))
+(tx "(pop! (transient [1]))" #(persistent! (pop! (transient [1]))))
+(tx "(pop! (transient []))" #(pop! (transient [])))
+(tx "(dissoc! (transient {:a 1}) :a)" #(persistent! (dissoc! (transient {:a 1}) :a)))
+(tx "(disj! (transient #{1}) 1)" #(persistent! (disj! (transient #{1}) 1)))
+(tx "(assoc! (transient {:a 1}) :b 2 :c 3)" #(persistent! (assoc! (transient {:a 1}) :b 2 :c 3)))
+(tx "double-persistent!" #(let [t (transient [1])] (persistent! t) (persistent! t)))
+(tx "(count (transient [1 2]))" #(count (transient [1 2])))
+(tx "(get (transient {:a 1}) :a)" #(get (transient {:a 1}) :a))
+(tx "(nth (transient [1 2]) 1)" #(nth (transient [1 2]) 1))
