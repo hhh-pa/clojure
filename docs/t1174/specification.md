@@ -285,8 +285,9 @@ runtime archive. JIT is a follow-up, not this task.
 
 S1 scaffold+CI: workspace, `--help`/`--version`, vendored CI,
   LLVM provisioning, green on 3 OSes. TDD: CLI smoke tests first.
-S2 reader+printer: reader per `LispReader.java`/`EdnReader.java`
-  behavior, printer per C3, corpus harness. TDD: round-trip
+S2 reader+printer: reader per `LispReader.java` behavior
+  (`EdnReader` out of S2 scope per reader contract §24 item 11),
+  printer per C3, corpus harness. TDD: round-trip
   property tests + differential entries first.
 S3 values+collections: `Value`, rpds-backed types, transients,
   seqs (C4), equality/ordering (C2). TDD: model tests + threaded
