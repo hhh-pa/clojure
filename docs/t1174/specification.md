@@ -312,6 +312,9 @@ updates in-slice when behavior changes.
   run in CI on Linux; fixed seeds, no nondeterminism.
 - Integration tests in `rust/tests/` mirror arcanist layout:
   `common/` harness, `fixtures/`, one file per area.
+  Crate-local harnesses with crate-local fixtures (e.g. the S2
+  reader corpus under `clj-reader/tests/`) use the same layout
+  in place.
 - Differential oracle: stock JVM jar built once per run from the
   untouched Maven build; corpus entries are `(input, expected)`
   pairs where `expected` is JVM-printed output captured at seed
