@@ -85,18 +85,19 @@ RUN mkdir -p /tmp/prov-work \
 # re-extraction would stale every prebuilt unit.
 ENV CARGO_TARGET_DIR=/opt/target
 COPY rust/Cargo.toml rust/Cargo.lock /tmp/warm/rust/
-COPY rust/crates/clj-aot/Cargo.toml /tmp/warm/rust/crates/clj-aot/Cargo.toml
-COPY rust/crates/clj-core/Cargo.toml /tmp/warm/rust/crates/clj-core/Cargo.toml
-COPY rust/crates/clj-eval/Cargo.toml /tmp/warm/rust/crates/clj-eval/Cargo.toml
-COPY rust/crates/clj-reader/Cargo.toml /tmp/warm/rust/crates/clj-reader/Cargo.toml
-COPY rust/crates/clj-repl/Cargo.toml /tmp/warm/rust/crates/clj-repl/Cargo.toml
-COPY rust/crates/clj-value/Cargo.toml /tmp/warm/rust/crates/clj-value/Cargo.toml
+# Copy every crate dir (never hardcode the crate list: adding a crate must
+# not require editing this file), then drop all code below so the warm
+# layer fingerprints manifests only.
+COPY rust/crates/ /tmp/warm/rust/crates/
 COPY scripts/ci/go/cmd/rust-quality-gates/main.go /tmp/warm/pins.go
 RUN mkdir -p /tmp/warm/rust/src/bin/clojure-rs \
     && printf 'fn main() {}\n' > /tmp/warm/rust/src/bin/clojure-rs/main.rs \
-    && for c in clj-aot clj-core clj-eval clj-reader clj-repl clj-value; do \
-        mkdir -p /tmp/warm/rust/crates/$c/src; \
-        printf '' > /tmp/warm/rust/crates/$c/src/lib.rs; \
+    && rm -f /tmp/warm-crates.txt \
+    && for d in /tmp/warm/rust/crates/*/; do \
+        rm -rf "$d/src" "$d/tests" "$d/benches" "$d/examples" "$d/build.rs"; \
+        mkdir -p "$d/src"; \
+        printf '' > "$d/src/lib.rs"; \
+        basename "$d" >> /tmp/warm-crates.txt; \
     done \
     && cd /tmp/warm/rust && cargo fetch \
     && cargo test --workspace --no-run \
@@ -121,12 +122,15 @@ RUN mkdir -p /tmp/warm/rust/src/bin/clojure-rs \
 # registry-dependency artifacts (the actual warmup) and build-script
 # outputs (source-independent). Both spellings: bins use dashes,
 # rlibs/fingerprints use underscores.
-RUN for d in /opt/target/debug /opt/target/nightly/debug; do \
-        for c in clj-aot clj-core clj-eval clj-reader clj-repl clj-value clojure-rs \
-                 clj_aot clj_core clj_eval clj_reader clj_repl clj_value clojure_rs; do \
-            rm -rf "$d/.fingerprint/$c-"* "$d/deps/$c-"* "$d/deps/lib$c-"*; \
-        done; \
+RUN for t in /opt/target/debug /opt/target/nightly/debug; do \
+        while IFS= read -r c; do \
+            u=$(printf '%s' "$c" | tr '-' '_'); \
+            rm -rf "$t/.fingerprint/$c-"* "$t/deps/$c-"* "$t/deps/lib$c-"* \
+                   "$t/.fingerprint/$u-"* "$t/deps/$u-"* "$t/deps/lib$u-"*; \
+        done < /tmp/warm-crates.txt; \
+        rm -rf "$t/.fingerprint/clojure-rs-"* "$t/deps/clojure-rs-"* "$t/deps/libclojure-rs-"* \
+               "$t/.fingerprint/clojure_rs-"* "$t/deps/clojure_rs-"* "$t/deps/libclojure_rs-"*; \
     done \
-    && ls /opt/target/debug/.fingerprint | grep -cE '^clj' || true
+    && ls /opt/target/debug/.fingerprint | wc -l
 
 WORKDIR /work
