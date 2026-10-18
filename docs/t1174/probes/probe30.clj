@@ -14,3 +14,7 @@
 (tx "fence-fn-in-catch" #(eval '(try 1 (catch Exception e ((fn [x302] (recur x302)) 1)))))
 (tx "fence-loop-in-catch" #(eval '(try 1 (catch Exception e (loop [a302 1] (recur a302))))))
 (tx "fence-loop-nontail" #(eval '(do (loop [a303 3] (if (zero? a303) :d (recur (dec a303)))) 2)))
+(tx "recur-args-first" #(eval '(loop [a301 1] (recur nope-xyz q301))))
+(tx "recur-targetless-badarg" #(eval '(do (recur nope-xyz304) 2)))
+(tx "recur-nontail-targetless" #(eval '(do (recur 1) 2)))
+(tx "recur-nontail-badargs" #(eval '(loop [a304 1] (do (recur nope-xyz304 q304) 3))))

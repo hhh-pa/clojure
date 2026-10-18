@@ -66,18 +66,23 @@ Operator as written names the wrapper (`Syntax error compiling if at …`).
 | `(var foo/x)` / `(var user/nope)` / `(var local)` | `RuntimeException` | `Unable to resolve var: X in this context` (one shape for unknown-ns, unknown-name, and local syms alike, probe25 `var-foo-ns`/`var-user-nope`/`var-local`) |
 | `(var v extra…)` | — | extras ignored, returns `#'user/v` (probe25 `var-extra`) |
 | `(var :k)` | `ClassCastException` | stable CCE Keyword→Symbol (E8) |
-| `(recur)` top level | `UnsupportedOperationException` | `Can only recur from tail position` (**divergence**: the JVM hangs in an infinite self-jump here — verified 2× by marker isolation, probe23 notes it; the port rejects like every other enclosure-less `recur`) |
+| `(recur)` without a target | `UnsupportedOperationException` | `Can only recur from tail position` (**divergence**: the JVM hangs in an infinite self-jump here — verified 2× by marker isolation, probe23 notes it; the port rejects like every other enclosure-less `recur`) |
 | `(recur 1)` top level | `IllegalArgumentException` | `Mismatched argument count to recur, expected: 0 args, got: 1` |
 | non-tail `(recur …)` | `UnsupportedOperationException` | `Can only recur from tail position` |
 | `(recur …)` across `try` | `UnsupportedOperationException` | `Cannot recur across try` |
 | arity mismatch | `IllegalArgumentException` | `Mismatched argument count to recur, expected: E args, got: G` |
 
 Check order (mirrors `RecurExpr.Parser`): across-`try` first — it beats
-tail, target, and arity alike — then tail/enclosure, then arity. So
-`(loop [a] (try (recur 1 2) …))` reports across-`try`, non-tail
-`(recur 1 2)` with a target reports tail position (never the
-mismatch), and a non-tail `recur` in a `try` still reports
-across-`try` (probe30 `fence-loop-init`). A `fn` boundary resets the
+tail, target, and arity alike — then tail (targeted only; targetless
+never consults it), then arg analysis (failures keep their own
+wrappers), then arity. So `(loop [a] (try (recur 1 2) …))` reports
+across-`try`; `(loop [a 1] (recur nope q))` reports the resolve error,
+never the mismatch (probe30 `recur-args-first`); non-tail
+`(recur 1 2)` with a target reports tail position, but targetless
+`(do (recur 1) 2)` reports the 0-vs-1 mismatch (probe30
+`recur-nontail-targetless`, `recur-nontail-badargs`); and a non-tail
+`recur` in a `try` still reports across-`try` (probe30
+`fence-loop-init`). A `fn` boundary resets the
 fence (fresh `NO_RECUR` per `FnExpr`, whole clause — probe30
 `fence-fn-try`, `fence-fn-prepost`); a `loop` body resets it too, but
 `loop` inits keep the outer fence (probe30 `fence-loop-try` → `7`).

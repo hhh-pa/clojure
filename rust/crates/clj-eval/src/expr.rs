@@ -629,9 +629,11 @@ impl<'a> Analyzer<'a> {
     }
 
     /// `(recur expr*)`: across-`try` first (beats tail, target,
-    /// and arity alike), then tail/enclosure, then arity (§E2). A
-    /// bare top-level `(recur)` is the constant tail-position error
-    /// (the JVM hangs; §E2 documents the divergence).
+    /// and arity alike), then tail (targeted only — targetless never
+    /// consults it), then arg analysis (failures keep their own
+    /// wrappers), then arity (§E2). A targetless `(recur)` is the
+    /// constant tail-position error (the JVM hangs; §E2 documents the
+    /// divergence).
     fn parse_recur(
         &mut self,
         items: &[&Value],
@@ -639,15 +641,6 @@ impl<'a> Analyzer<'a> {
         tail: bool,
     ) -> Result<Expr, CompileError> {
         let argc = items.len() - 1;
-        let tail_err = || {
-            self.err(
-                class::UNSUPPORTED,
-                "Can only recur from tail position".to_owned(),
-                span,
-                Verb::Compiling,
-                Some("recur".to_owned()),
-            )
-        };
         if self.no_recur {
             return Err(self.err(
                 class::UNSUPPORTED,
@@ -657,23 +650,16 @@ impl<'a> Analyzer<'a> {
                 Some("recur".to_owned()),
             ));
         }
-        let Some(count) = self.recur else {
-            if argc == 0 && tail {
-                return Err(tail_err());
-            }
-            if !tail {
-                return Err(tail_err());
-            }
-            return Err(self.err(
-                class::ILLEGAL_ARG,
-                format!("Mismatched argument count to recur, expected: 0 args, got: {argc}"),
-                span,
-                Verb::Compiling,
-                Some("recur".to_owned()),
-            ));
-        };
-        if !tail {
-            return Err(tail_err());
+        if self.recur.is_some() && !tail {
+            return Err(self.tail_err(span));
+        }
+        let mut args = Vec::with_capacity(argc);
+        for arg in &items[1..] {
+            args.push(self.analyze(arg, span, false)?);
+        }
+        let count = self.recur.unwrap_or(0);
+        if argc == 0 && self.recur.is_none() {
+            return Err(self.tail_err(span));
         }
         if argc != count {
             return Err(self.err(
@@ -684,11 +670,18 @@ impl<'a> Analyzer<'a> {
                 Some("recur".to_owned()),
             ));
         }
-        let mut args = Vec::with_capacity(argc);
-        for arg in &items[1..] {
-            args.push(self.analyze(arg, span, false)?);
-        }
         Ok(Expr::Recur(args))
+    }
+
+    /// The constant tail-position error.
+    fn tail_err(&self, span: Span) -> CompileError {
+        self.err(
+            class::UNSUPPORTED,
+            "Can only recur from tail position".to_owned(),
+            span,
+            Verb::Compiling,
+            Some("recur".to_owned()),
+        )
     }
 
     /// `(set! target val)`: the target analyzes first (failures

@@ -261,6 +261,28 @@ fn recur_rules() {
         "Syntax error compiling recur at (test:1:44).",
         "java.lang.UnsupportedOperationException | Cannot recur across try",
     );
+    // Arg analysis precedes the arity check (failures keep their own
+    // wrappers); targetless never consults tail (probe30 `recur-*`).
+    check(
+        "(loop [a 1] (recur nope-xyz q))",
+        "Syntax error compiling at (test:1:13).",
+        "java.lang.RuntimeException | Unable to resolve symbol: nope-xyz in this context",
+    );
+    check(
+        "(do (recur nope-xyz) 2)",
+        "Syntax error compiling at (test:1:5).",
+        "java.lang.RuntimeException | Unable to resolve symbol: nope-xyz in this context",
+    );
+    check(
+        "(do (recur 1) 2)",
+        "Syntax error compiling recur at (test:1:5).",
+        "java.lang.IllegalArgumentException | Mismatched argument count to recur, expected: 0 args, got: 1",
+    );
+    check(
+        "(loop [a 1] (do (recur nope-xyz q) 3))",
+        "Syntax error compiling recur at (test:1:17).",
+        "java.lang.UnsupportedOperationException | Can only recur from tail position",
+    );
 }
 
 #[test]
