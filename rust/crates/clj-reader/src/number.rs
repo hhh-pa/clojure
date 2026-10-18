@@ -17,8 +17,9 @@
 //! the JDK `BigInteger` messages exactly (radix 10 omits the
 //! `under radix` suffix); radix digits eat a trailing `N` greedily
 //! (`36r1N` is an `Int`, `2r1N` errors on `"1N"`). Overflow past
-//! `i64` defers to BigInt (S2 produces `Int` for all in-range
-//! integers; S3's `Integer(i32)` split hooks in here).
+//! `i64` defers to BigInt. All in-range integers are `Int` (the
+//! JVM reader likewise always yields `Long`, even int-sized —
+//! probe17 — so no `Integer` split exists).
 
 use clj_value::Value;
 
