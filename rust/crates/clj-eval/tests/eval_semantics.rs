@@ -18,7 +18,7 @@
 use std::sync::{Arc, Mutex};
 
 use clj_eval::{Evaluator, NativeError, SourceError};
-use clj_value::{PrintOpts, Value, pr_to_string};
+use clj_value::{PrintOpts, ThrowClass, Throwable, Value, pr_to_string};
 
 fn pr(v: &Value) -> String {
     pr_to_string(v, &PrintOpts::pr())
@@ -97,6 +97,19 @@ fn install_misc(eval: &mut Evaluator, log: &Arc<Mutex<Vec<String>>>) {
             let mut log = logged.lock().unwrap();
             log.push(pr(&args[0]));
             Ok(args[0].clone())
+        }),
+    );
+    eval.install_native(
+        "t-ex",
+        Arc::new(|args| match args {
+            [Value::Str(m)] => Ok(Value::Throwable(Throwable {
+                id: 0,
+                class: ThrowClass::ExceptionInfo,
+                message: Arc::clone(m),
+                data: None,
+                cause: None,
+            })),
+            _ => Err(NativeError::arity("test/t-ex", args.len())),
         }),
     );
 }
@@ -482,6 +495,22 @@ fn try_catch_finally() {
             "(def ^:dynamic bw913 1) (try (binding [bw913 2] (throw 42)) (catch Exception e bw913))"
         ),
         "1"
+    );
+    // Every init evaluates before any var validates (probe29):
+    // an init throw beats the dynamic-ness error either way round.
+    assert_eq!(
+        uncaught_with(
+            "(def ^:dynamic bd913 1) (def bn913 1)",
+            "(binding [bd913 1 bn913 (throw (t-ex \"init\"))] :body)"
+        ),
+        "clojure.lang.ExceptionInfo | init"
+    );
+    assert_eq!(
+        uncaught_with(
+            "(def ^:dynamic bd913 1) (def bn913 1)",
+            "(binding [bn913 1 bd913 (throw (t-ex \"init3\"))] :body)"
+        ),
+        "clojure.lang.ExceptionInfo | init3"
     );
 }
 

@@ -343,5 +343,8 @@ Mirrors `destvec*`/`destmap*` (`core.clj`), including the 1.13 directives.
 - `set!` requires an established thread-local binding: missing binding →
   `IllegalStateException | Can't change/establish root binding of: X with
   set` whether or not the var is `^:dynamic` (probe20/21). `binding` is
-  implemented minimally in S4 (push/pop bindings around a body).
+  implemented minimally in S4 (push/pop bindings around a body): every
+  init evaluates before any var validates, so an init throw beats
+  `IllegalStateException | Can't dynamically bind non-dynamic var: X`
+  (probe29 `binding-*`).
 - `monitor-enter`/`monitor-exit`: not supported (resolve errors).

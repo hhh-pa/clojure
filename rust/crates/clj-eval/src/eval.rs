@@ -317,32 +317,35 @@ impl Evaluator {
         }
     }
 
-    /// `binding`: push dynamic bindings (validating dynamic-ness
-    /// first), run the body, always pop.
+    /// `binding`: evaluate every init, validate every var, then
+    /// push all and run the body, always popping. The JVM builds
+    /// the push map (all inits) before `push-thread-bindings`
+    /// validates, so an init throw beats a dynamic-ness error
+    /// (probe29 `binding-*`); nothing is pushed before the body,
+    /// so pre-body failures need no unwind.
     fn eval_binding(
         &mut self,
         pairs: &[(Symbol, Expr)],
         body: &[Expr],
         env: &Env,
     ) -> Result<Value, Signal> {
-        let depth = self.bindings.depth();
-        for (sym, init) in pairs {
+        let mut values = Vec::with_capacity(pairs.len());
+        for (_, init) in pairs {
+            values.push(self.eval(init, env)?);
+        }
+        for (sym, _) in pairs {
             let id = self.var_id(sym);
             let dynamic = self.ns.state(id).is_some_and(|s| s.dynamic);
             if !dynamic {
-                self.bindings.truncate(depth);
                 return Err(self.throw(NativeError::new(
                     ThrowClass::IllegalStateException,
                     format!("Can't dynamically bind non-dynamic var: {sym}"),
                 )));
             }
-            let value = match self.eval(init, env) {
-                Ok(v) => v,
-                Err(signal) => {
-                    self.bindings.truncate(depth);
-                    return Err(signal);
-                }
-            };
+        }
+        let depth = self.bindings.depth();
+        for ((sym, _), value) in pairs.iter().zip(values) {
+            let id = self.var_id(sym);
             self.bindings.push(id, value);
         }
         let result = self.eval_body(body, env);
