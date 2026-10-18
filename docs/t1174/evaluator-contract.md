@@ -246,6 +246,9 @@ so the port pins stable equivalents:
   catch matching uses this closed hierarchy.
 - **Recur**: `recur` in tail position loops with re-bound args; `(recur)`
   with no values outside a recursion point is E2 (tail-position error).
+  Each iteration gets a fresh frame: closures from iteration N keep
+  observing iteration N's bindings after the rebind (probe27
+  `recur-alias-loop`/`recur-alias-fn` → `2`).
 
 ## E12. Destructure value semantics (probes 21/23/25)
 

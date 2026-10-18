@@ -457,6 +457,9 @@ impl Evaluator {
             match self.eval_body(body, &env) {
                 Ok(v) => return Ok(v),
                 Err(Signal::Recur(values)) => {
+                    // Copy-on-recur: closures from this iteration
+                    // keep observing the old frame.
+                    env = env.duplicate();
                     let mut slot = base;
                     for ((pat, _), value) in bindings.iter().zip(values) {
                         let count = pattern_names(pat).len();
@@ -671,7 +674,7 @@ impl Evaluator {
             let count = pattern_names(pat).len();
             env = env.extend(vec![Value::Nil; count]);
         }
-        let frame = env.clone();
+        let mut frame = env.clone();
         let mut rebind = values;
         loop {
             let mut slot = base;
@@ -686,7 +689,11 @@ impl Evaluator {
             }
             match self.eval_body(&arity.body, &frame) {
                 Ok(v) => return Ok(v),
-                Err(Signal::Recur(values)) => rebind = values,
+                Err(Signal::Recur(values)) => {
+                    // Copy-on-recur (see `eval_loop`).
+                    rebind = values;
+                    frame = frame.duplicate();
+                }
                 Err(signal) => return Err(signal),
             }
         }

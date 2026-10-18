@@ -200,6 +200,22 @@ fn loop_recur() {
         ),
         "3"
     );
+    // Copy-on-recur: a closure from iteration N keeps observing
+    // iteration N's frame after the rebind (oracle: 2).
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(loop [x 2] (if (t-pos? (t-minus x 1)) (do (def g2 (fn [] x)) (recur 0)) (g2)))"
+        ),
+        "2"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "((fn [x] (if (t-pos? (t-minus x 1)) (do (def g3 (fn [] x)) (recur 0)) (g3))) 2)"
+        ),
+        "2"
+    );
 }
 
 #[test]

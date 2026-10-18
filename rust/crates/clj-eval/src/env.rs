@@ -199,10 +199,10 @@ impl Bindings {
 }
 
 /// Local slots: shared (`Arc`) so closures capture their frame,
-/// mutable (`Mutex`) only for `letfn`/named-`fn` patching and
-/// `loop` rebinding. Extension never mutates (it clones), so
-/// siblings never observe each other's locals. Locks are never
-/// held across evaluation.
+/// mutable (`Mutex`) only for `letfn`/named-`fn` patching (before
+/// any observer exists). Extension and `recur` never mutate in
+/// place (they clone), so iteration N's closures never observe
+/// iteration N+1's rebinds. Locks are never held across evaluation.
 #[derive(Clone, Debug, Default)]
 pub struct Env {
     slots: Arc<std::sync::Mutex<Vec<Value>>>,
@@ -250,7 +250,22 @@ impl Env {
         }
     }
 
-    /// Overwrite one slot (`letfn` patching, `loop` rebinding).
+    /// A private copy of this frame (copy-on-`recur`: the old
+    /// frame stays intact for closures that captured it).
+    #[must_use]
+    pub fn duplicate(&self) -> Self {
+        let slots = self
+            .slots
+            .lock()
+            .map(|slots| slots.clone())
+            .unwrap_or_default();
+        Self {
+            slots: Arc::new(std::sync::Mutex::new(slots)),
+        }
+    }
+
+    /// Overwrite one slot (`letfn`/named-`fn` patching only; `recur`
+    /// duplicates first).
     pub fn set(&self, idx: usize, value: Value) {
         let Ok(mut slots) = self.slots.lock() else {
             return;
