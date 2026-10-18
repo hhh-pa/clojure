@@ -697,6 +697,36 @@ fn keys_element_cast_matrix() {
             "(loop [{:syms [nil]} {}] a)",
             "java.lang.NullPointerException | Cannot invoke \"clojure.lang.Named.getNamespace()\" because \"x\" is null",
         ),
+        // Shapes take the same Named cast (probe33 `keys-vec`,
+        // `keys-map`, `syms-set`).
+        (
+            "(loop [{:keys [[a]]} {}] a)",
+            "java.lang.ClassCastException | Cannot cast clojure.lang.PersistentVector to clojure.lang.Named",
+        ),
+        (
+            "(loop [{:keys [{a 1}]} {}] a)",
+            "java.lang.ClassCastException | Cannot cast clojure.lang.PersistentArrayMap to clojure.lang.Named",
+        ),
+        (
+            "(loop [{:syms [#{a}]} {}] a)",
+            "java.lang.ClassCastException | Cannot cast clojure.lang.PersistentHashSet to clojure.lang.Named",
+        ),
+        // Qualified directives short-circuit `(namespace %)`: only
+        // `(name %)` runs, so vectors/numbers keep the same CCE
+        // text but nil takes the `getName` NPE (probe33
+        // `qual-cast-*`).
+        (
+            "(loop [{:foo/keys [[a]]} {}] a)",
+            "java.lang.ClassCastException | Cannot cast clojure.lang.PersistentVector to clojure.lang.Named",
+        ),
+        (
+            "(loop [{:foo/keys [5]} {}] a)",
+            "java.lang.ClassCastException | Cannot cast java.lang.Long to clojure.lang.Named",
+        ),
+        (
+            "(loop [{:foo/keys [nil]} {}] a)",
+            "java.lang.NullPointerException | Cannot invoke \"clojure.lang.Named.getName()\" because \"x\" is null",
+        ),
     ] {
         check(src, unexp, cause);
     }
@@ -713,6 +743,16 @@ fn keys_element_cast_matrix() {
         (
             "(loop [{:strs [nil]} {}] a)",
             "java.lang.Exception | Unsupported binding form: ",
+        ),
+        // Qualified strings skip the cast into `push1`/`pb`
+        // (probe33 `qual-cast-str`, `qual-cast-syms-str`).
+        (
+            "(loop [{:foo/keys [\"a\"]} {}] a)",
+            "java.lang.Exception | Unsupported binding form: a",
+        ),
+        (
+            "(loop [{:foo/syms [\"a\"]} {}] a)",
+            "java.lang.Exception | Unsupported binding form: a",
         ),
     ] {
         check(src, syn, cause);

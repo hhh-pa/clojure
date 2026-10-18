@@ -1,6 +1,5 @@
-;; S4 oracle probes, round 1b: direct let*/loop*/fn* (M10),
-;; `&` function names (L4), map-valued pre/post (L5), `:or`
-;; key rendering (L6).
+;; S4 oracle probes, round 1b (M10/L4/L5/L6) and round 2
+;; (R2M1 qualified casts, R2M2 `:strs` shapes).
 ;; Exit 0 (caught; chains printed).
 ;; NOTE: forms mentioning `%` use `(fn [] …)`, never `#(…)`
 ;; (the `#()` reader would capture `%` as its own argument).
@@ -95,3 +94,11 @@
 (tx "post-fail" (fn [] (eval '((fn [x] {:post [(pos? %)]} x) -5))))
 (tx "or-multi-strs" #(eval '(loop [{:strs [s] :or {s 1 "s" 2}} {}] s)))
 (tx "or-multi-keys" #(eval '(loop [{:keys [a] :or {a 1 :a 2}} {}] a)))
+(tx "qual-cast-str" #(eval '(loop [{:foo/keys ["a"]} {}] a)))
+(tx "qual-cast-nil" #(eval '(loop [{:foo/keys [nil]} {}] a)))
+(tx "qual-cast-vec" #(eval '(loop [{:foo/keys [[a]]} {}] a)))
+(tx "qual-cast-num" #(eval '(loop [{:foo/keys [5]} {}] a)))
+(tx "qual-cast-syms-str" #(eval '(loop [{:foo/syms ["a"]} {}] a)))
+(tx "keys-vec" #(eval '(loop [{:keys [[a]]} {}] a)))
+(tx "keys-map" #(eval '(loop [{:keys [{a 1}]} {}] a)))
+(tx "syms-set" #(eval '(loop [{:syms [#{a}]} {}] a)))

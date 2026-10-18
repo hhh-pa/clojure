@@ -1694,20 +1694,33 @@ fn key_for(dir: &KeyDirective, form: &Value) -> Result<(Value, String), WalkErro
     Ok((key, name))
 }
 
-/// The `(namespace x)` cast for a non-ident key-list element
+/// The `(tr bb)` cast for a non-ident key-list element
 /// (probe32): `ClassCastException … to clojure.lang.Named`,
 /// the helpful-NPE text for `nil` — but `:strs` never casts
 /// and reports `Unsupported binding form` (str-rendered)
-/// instead.
+/// instead, and qualified directives short-circuit the
+/// namespace call (`core.clj:4554` `(or mkns (namespace %))`):
+/// only `(name %)` runs, so strings fall into `push1`/`pb`
+/// (`Unsupported`) and `nil` takes the `getName` NPE text
+/// (probe33 `qual-cast-*`).
 fn key_cast_err(dir: &KeyDirective, form: &Value) -> WalkError {
     if matches!(dir.kind, KeyKind::Strs) {
         return WalkError::unsupported(form);
     }
+    if dir.ns.is_some() && matches!(form, Value::Str(_)) {
+        return WalkError::unsupported(form);
+    }
     if matches!(form, Value::Nil) {
+        let method = if dir.ns.is_some() {
+            "getName"
+        } else {
+            "getNamespace"
+        };
         return WalkError {
             class: class::NULL_POINTER,
-            message: "Cannot invoke \"clojure.lang.Named.getNamespace()\" because \"x\" is null"
-                .to_owned(),
+            message: format!(
+                "Cannot invoke \"clojure.lang.Named.{method}()\" because \"x\" is null"
+            ),
         };
     }
     WalkError {
