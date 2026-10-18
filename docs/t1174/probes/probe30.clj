@@ -18,3 +18,4 @@
 (tx "recur-targetless-badarg" #(eval '(do (recur nope-xyz304) 2)))
 (tx "recur-nontail-targetless" #(eval '(do (recur 1) 2)))
 (tx "recur-nontail-badargs" #(eval '(loop [a304 1] (do (recur nope-xyz304 q304) 3))))
+(tx "recur-targetless-try" #(eval '(try (recur 1) (catch Exception e 2))))

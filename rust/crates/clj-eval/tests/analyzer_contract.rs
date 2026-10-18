@@ -283,6 +283,13 @@ fn recur_rules() {
         "Syntax error compiling recur at (test:1:17).",
         "java.lang.UnsupportedOperationException | Can only recur from tail position",
     );
+    // Targetless `recur` in a `try` body is across-`try`, not the
+    // 0-vs-N mismatch (probe30 `recur-targetless-try`).
+    check(
+        "(try (recur 1) (catch Exception e 2))",
+        "Syntax error compiling recur at (test:1:6).",
+        "java.lang.UnsupportedOperationException | Cannot recur across try",
+    );
 }
 
 #[test]

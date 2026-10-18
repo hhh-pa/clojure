@@ -81,8 +81,9 @@ never the mismatch (probe30 `recur-args-first`); non-tail
 `(recur 1 2)` with a target reports tail position, but targetless
 `(do (recur 1) 2)` reports the 0-vs-1 mismatch (probe30
 `recur-nontail-targetless`, `recur-nontail-badargs`); and a non-tail
-`recur` in a `try` still reports across-`try` (probe30
-`fence-loop-init`). A `fn` boundary resets the
+`recur` in a `try` still reports across-`try` — even targetless, where
+it beats the 0-vs-N mismatch (probe30 `fence-loop-init`,
+`recur-targetless-try`). A `fn` boundary resets the
 fence (fresh `NO_RECUR` per `FnExpr`, whole clause — probe30
 `fence-fn-try`, `fence-fn-prepost`); a `loop` body resets it too, but
 `loop` inits keep the outer fence (probe30 `fence-loop-try` → `7`).
