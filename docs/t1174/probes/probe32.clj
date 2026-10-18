@@ -1,5 +1,5 @@
-;; S4 oracle probes, round 1b: fn clause-check order (M6).
-;; Exit 0 (caught; chains printed).
+;; S4 oracle probes, round 1b: fn clause-check order (M6),
+;; try clause order (M7). Exit 0 (caught; chains printed).
 (defn tx [label f]
   (println label "=>" (pr-str (try (f) (catch Throwable t
     (loop [t t acc []] (if t (recur (.getCause t) (conj acc (str (.getName (class t)) " | " (.getMessage t)))) acc)))))))
@@ -11,3 +11,5 @@
 (tx "fn-or-beats-body" #(eval '(fn [{a321 :x321 :or {a321 1 :x321 2}}] nope321)))
 (tx "fn-body-span" #(eval '(fn [x323] (do nope323 2))))
 (tx "fn-clause-span" #(eval '(fn ([x323] (do nope323 2)))))
+(tx "try-after-finally" #(eval '(try 1 (finally 1) 2)))
+(tx "try-after-catch" #(eval '(try 1 (catch Exception e 1) 2)))

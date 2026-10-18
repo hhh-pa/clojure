@@ -207,6 +207,7 @@ Var-arg rest with no args binds `nil` (probe21 `variadic0 [1 nil]`).
 | `(catch Nope …)` | `IllegalArgumentException` | `Unable to resolve classname: Nope` |
 | `(catch q/Nope …)` | `IllegalArgumentException` | `Unable to resolve classname: q/Nope` |
 | clause after `finally` | `RuntimeException` | `finally clause must be last in try expression` |
+| non-clause after `finally` | `RuntimeException` | `finally clause must be last in try expression` (anything past a `finally` reports this, probe32 `try-after-finally`) |
 | non-clause after `catch` | `RuntimeException` | `Only catch or finally clause can follow catch in try expression` |
 
 `(try 1 (catch Exception e))` → `1` (empty catch body is legal);

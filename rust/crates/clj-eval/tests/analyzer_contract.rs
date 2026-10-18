@@ -345,6 +345,11 @@ fn try_shapes() {
         "java.lang.RuntimeException | Only catch or finally clause can follow catch in try expression",
     );
     check(
+        "(try 1 (finally 1) 2)",
+        "Syntax error compiling try at (test:1:1).",
+        "java.lang.RuntimeException | finally clause must be last in try expression",
+    );
+    check(
         "(catch Exception e 1)",
         "Syntax error compiling at (test:1:1).",
         "java.lang.RuntimeException | Unable to resolve symbol: catch in this context",

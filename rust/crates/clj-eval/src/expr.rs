@@ -882,10 +882,17 @@ impl<'a> Analyzer<'a> {
                     finally_body = self.analyze_body(&parts[1..], span, false)?;
                 }
                 _ => {
+                    // Past a `finally`, anything is the must-be-last
+                    // error; otherwise the only-catch-or-finally one
+                    // (probe32 `try-after-*`).
+                    let message = if seen_finally {
+                        "finally clause must be last in try expression"
+                    } else {
+                        "Only catch or finally clause can follow catch in try expression"
+                    };
                     return Err(self.err(
                         class::RUNTIME,
-                        "Only catch or finally clause can follow catch in try expression"
-                            .to_owned(),
+                        message.to_owned(),
                         span,
                         Verb::Compiling,
                         Some("try".to_owned()),
