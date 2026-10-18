@@ -31,4 +31,7 @@ run probe13 probe13.clj 0
 run probe14 probe14.clj 0
 run probe15 probe15.clj 0
 run probe16 probe16.clj 0
+run probe17 probe17.clj 0
+run probe18 probe18.clj 0
+run probe19 probe19.clj 0
 echo "outputs in $OUT (gensym ids, @hex suffixes, and inst dates vary run to run)"

@@ -228,9 +228,12 @@ C1. Numbers: `Int` is i64 with checked arithmetic; overflow raises a
     promote to double. `/` on ints is exact only when divisible,
     else double division (documented deviation from ratio behavior
     until the big-number follow-up; the corpus pins it).
-C2. Equality: `=` is value equality across Int/Double numerically
-    (`(= 1 1.0)` is true); `==` is numeric-only equality.
-    Ordering matches JVM `compare` on the subset.
+C2. Equality: `=` is same-category equality (`(= 1 1.0)` is
+    false — `Numbers.equal` gates on category, probe17; `(==
+    1 1.0)` is the cross-category comparison, S4); `==` is
+    numeric equality across categories. Ordering is JVM
+    `compare` (numeric across Int/Double with NaN-is-0,
+    within-type otherwise, incomparable pairs error).
 C3. Printing: `pr` round-trips through the reader for EDN values;
     `print`/`println` are human-readable; `*print-length*`/
     `*print-level*` truncate with `...`. Stack traces are Rust-side

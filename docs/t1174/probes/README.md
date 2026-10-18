@@ -38,6 +38,13 @@ root-cause exception (class | message | ex-data line/col).
   nested-double keys stay OK in sets (plain-form rule).
 - `probe16.clj` (S2 review): splice leftovers dropped across top-level
   forms (`'#?@(:clj (1 2)) X` ⇒ `(quote 1)`, `X`).
+- `probe17.clj` (S3): equality categories (`=` same-category only),
+  reader ints always `Long`, `compare` matrix incl. NaN-is-0 and
+  CCE shapes, numeric hashing, `sorted-map` compare-collapse.
+- `probe18.clj` (S3): chunked-seq realization counts (32/2/32/64/32/16,
+  vec10 10), mid-chunk remainder (31 from 1), nil-punning (C4).
+- `probe19.clj` (S3): transient printing, `IllegalAccessError` rules,
+  `assoc!`/`conj!`/`pop!` edges.
 
 Run: `./probe.sh [outdir]`. Gensym ids (`p1__243#`), identity hashes
 (`@7fc19ced`), and inst renderings vary between runs; the contract
