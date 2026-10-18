@@ -168,3 +168,49 @@ pub fn as_native(v: &Value) -> Option<&NativeFn> {
         _ => None,
     }
 }
+
+/// A namespace handle: `name` plus the registry creation `id`.
+/// Equality and hashing use the `id` only, like JVM identity — a
+/// removed-then-recreated namespace is a new value.
+#[derive(Clone, Debug)]
+pub struct NsHandle {
+    pub name: Arc<str>,
+    pub id: u64,
+}
+
+impl ExtensionValue for NsHandle {
+    fn class_name(&self) -> String {
+        "clojure.lang.Namespace".to_owned()
+    }
+
+    fn print(&self) -> String {
+        format!(
+            "#object[clojure.lang.Namespace 0x{:x} \"{}\"]",
+            self.id, self.name
+        )
+    }
+
+    fn dyn_eq(&self, other: &dyn ExtensionValue) -> bool {
+        other
+            .as_any()
+            .downcast_ref::<NsHandle>()
+            .is_some_and(|o| o.id == self.id)
+    }
+
+    fn dyn_hash(&self, state: &mut dyn Hasher) {
+        state.write_u64(self.id);
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+/// Downcast a value to a namespace handle, if it is one.
+#[must_use]
+pub fn as_ns(v: &Value) -> Option<&NsHandle> {
+    match v {
+        Value::Extension(e) => e.as_any().downcast_ref::<NsHandle>(),
+        _ => None,
+    }
+}

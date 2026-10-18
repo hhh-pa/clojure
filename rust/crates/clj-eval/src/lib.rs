@@ -17,6 +17,7 @@ pub mod error;
 pub mod eval;
 pub mod expr;
 pub mod ext;
+pub mod ns;
 
 pub use env::{Bindings, Env, Namespace, NamespaceRegistry, VarState};
 pub use error::{CompileError, NativeError, Signal, Verb, jvm_class_of, simple_class_of, span_of};
@@ -24,4 +25,5 @@ pub use eval::{Evaluator, SourceError};
 pub use expr::{
     Analyzer, Arity, Catch, Expr, FunExpr, KeyBinding, MapPattern, Pattern, VecPattern,
 };
-pub use ext::{Closure, NativeFn, NativeImpl, as_closure, as_native, munge};
+pub use ext::{Closure, NativeFn, NativeImpl, NsHandle, as_closure, as_native, as_ns, munge};
+pub use ns::boot;

@@ -88,7 +88,19 @@ the split (S5C extends it past macroexpansion).
 - `remove-ns` returns the removed namespace or nil; a removed
   handle keeps its name for `ns-name` (probe35 `ns-name-removed`),
   and removing the current namespace leaves `*ns*` dangling
-  (probe35 `remove-ns-current`).
+  (probe35 `remove-ns-current`). Removing `clojure.core` is
+  `IllegalArgumentException | Cannot remove clojure namespace`
+  (probe36 `remove-ns-core`). Removed namespaces survive as
+  tombstones (S5A2 supersedes S5A1's drop): stale handles read the
+  frozen mappings and captured vars keep their roots — only
+  resolution treats the name as gone.
+- `in-ns` is a thread-local `set` (source: `RT.java`
+  `inNamespace`): it writes the top `*ns*` frame when bound (boot
+  pushes a permanent base frame, so the `*ns*` root never moves),
+  else the root — and always the registry current. `ns-resolve`
+  sees aliases for qualified symbols (probe36
+  `ns-resolve-alias`). `intern` adopts meta from the name symbol
+  (source: core.clj `intern`).
 - `alias` installs into the current namespace and returns nil.
   Re-aliasing to a different target is `IllegalStateException |
   Alias {a} already exists in namespace {ns}, aliasing {old}`;
@@ -118,14 +130,30 @@ the split (S5C extends it past macroexpansion).
   `refer-twice`); `refer-clojure` adds every core public minus
   `:exclude` (probe35 `refer-clojure-exclude`). `declare` is the
   same internals behind its S5C macro (probe35
-  `declare-visible`).
+  `declare-visible`). `refer` errors: missing lib `Exception | No
+  namespace: {sym}` (no `found` suffix); private var
+  `IllegalAccessError | {sym} is not public`; absent var
+  `IllegalAccessError | {sym} does not exist`; non-sequential
+  `:only`/`:refer` `Exception | :only/:refer value must be a
+  sequential collection of symbols` (probe36 `refer-missing-lib`,
+  `refer-private`, `refer-missing-var`, `req-refer-scalar`). A
+  non-map `:rename` is invoked as a function, with nil falling
+  back to the plain name (probe36 `refer-rename-scalar`); a scalar
+  `:exclude` is the ISeq coercion error (probe36
+  `refer-exclude-scalar`).
 - `ns-unmap`/`ns-unalias` return nil and tolerate absence
   (probe35 `ns-unmap-effect`, `ns-unalias-effect`,
   `ns-unmap-sym-ns`, `ns-unalias-sym-ns`).
 - `ns-imports` is always `{}` and `ns-map` carries no imports
   (N1: no host classes; `import` out of scope).
-- `binding [*ns* …]` does not redirect analysis: resolution reads
-  the registry current only, until S5B syncs the two (fence).
+- `binding [*ns* …]` does not redirect analysis or installation:
+  resolution, `refer`, `alias`, and `def` read the registry
+  current only, until S5B syncs the two (fence).
+- `def`/`alias`/`refer` into a removed current namespace recreate
+  it (the JVM installs into the stale object — unprobed corner,
+  fenced).
+- `eval`-native error spans use the form's reader meta or 1:1
+  (natives receive no caller span — fenced).
 
 ## Loader (S5A2, probe36)
 
@@ -148,7 +176,22 @@ the split (S5C extends it past macroexpansion).
   `(prefix & args)`; `:as` plus `:refer` (a vector or `:all`)
   (probe36 `req-prefix`, `req-as-refer`, `req-refer-all`). `use`
   is require-plus-refer with `:only`/`:exclude`/`:rename`
-  (probe36 `use-only`, `use-exclude`, `use-rename`, `use-bare`).
+  (probe36 `use-only`, `use-exclude`, `use-rename`, `use-bare`)
+  and honors `:as` too (probe36 `use-with-as`). A libspec is a
+  symbol or a vector whose second item is nil or a keyword —
+  lists and strings take the prefix path (source: core.clj
+  `libspec?`; probe36 `req-string`). `require` is `load-libs`
+  with `:require`, `use` with `:require :use` (source). Top-level
+  `:as` is a supported flag, so `(require 'lib :as)` aliases
+  `true` and fails the symbol cast down the general path (probe36
+  `req-opts-bare`).
+- `:as-alias` creates the empty namespace without loading,
+  aliases it, and never marks the lib (probe36 `as-alias-opt`).
+  A dotted lib under a prefix is `Exception | Found lib name
+  '{lib}' containing period with prefix '{prefix}'.  lib names
+  inside prefix lists must not contain periods` (two spaces); a
+  nil prefix is `Exception | prefix cannot be nil` (probe36
+  `req-prefix-period`, `req-nil-prefix`).
 - Flags: `:reload` forces the load; `:reload-all` forces the load
   plus transitive embedded deps (the embedded set is flat, so it
   behaves as `:reload`); `:verbose` echoes each action —
@@ -173,13 +216,31 @@ the split (S5C extends it past macroexpansion).
   never checks (probe36 `req-mismatch-plain`).
 - `(require)` is `Exception | Nothing specified to load`;
   unknown flags are `Exception | Unsupported option(s) supplied:
-  {kw}` (probe36 `req-empty`, `req-unsupported`).
+  {kw}` (`, `-interposed past the first, source: core.clj
+  `load-libs`; probe36 `req-empty`, `req-unsupported`). The
+  `throw-if` sites wrap in `CompilerException` directly (source);
+  the port surfaces the inner cause (S4 E1: runtime failures have
+  no wrapper), so catching `CompilerException` itself is
+  unsupported (fence). `throw-if` is a function: `load-lib` names
+  the lib eagerly, and non-`Named` libs fail the `Named` cast (or
+  the nil `getName` NPE) before any check (probe36 `req-num-lib`,
+  `req-nil-lib`).
+- `load` guards re-entry with `*pending-paths*`: a repeat path is
+  `Exception | Cyclic load dependency: {chain}` (`->`-interposed,
+  repeats bracketed `[ p ]`); loading the file already on top is
+  exempt (probe36 `cyclic-msg`).
+- `load` binds `*file*` to the path as opened; `load-file` to the
+  absolute path (`..` preserved, probe36 `file-dotdot`);
+  `load-string` binds `*file*` nil (probe36 `file-loadstring`).
+  A missing `load-file` is `java.io.FileNotFoundException |
+  {path} ({strerror})` with the path as given (probe36
+  `loadfile-missing`). `load` arguments cast to String.
+- `*load-path*` searches each directory for `.clj` first, then
+  `.cljc` (source: `RT.java` lookup order); embedded libs win
+  over files.
 - Each libspec must be a symbol or sequential, else the ISeq
   coercion error (`(require "x")` → `IllegalArgumentException |
   Don't know how to create ISeq from: java.lang.Character`,
   probe36 `req-string`).
 - The port resolves libs from the embedded set first, then
-  `*load-path*` files (matrix note). Load-boundary throws surface
-  as the inner `SourceError::Uncaught` without the JVM's
-  `CompilerException` file:line wrap (S4 E1: runtime failures have
-  no wrapper).
+  `*load-path*` files (matrix note).

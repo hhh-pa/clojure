@@ -16,39 +16,40 @@ machine-read — keep `| var | status | notes |` rows exact.
 
 | var | status | notes |
 | `ns` | planned | macro over the loader |
-| `in-ns` | planned | |
-| `create-ns` | planned | |
-| `remove-ns` | planned | |
-| `find-ns` | planned | |
-| `all-ns` | planned | |
-| `the-ns` | planned | |
-| `ns-name` | planned | |
-| `ns-aliases` | planned | |
-| `ns-resolve` | planned | |
-| `resolve` | planned | |
-| `alias` | planned | |
-| `refer` | planned | |
-| `use` | planned | |
-| `require` | planned | embedded + `*load-path*` files |
-| `refer-clojure` | planned | |
-| `intern` | planned | |
+| `in-ns` | implemented | |
+| `create-ns` | implemented | |
+| `remove-ns` | implemented | |
+| `find-ns` | implemented | |
+| `all-ns` | implemented | |
+| `the-ns` | implemented | |
+| `ns-name` | implemented | |
+| `ns-aliases` | implemented | |
+| `ns-resolve` | implemented | |
+| `resolve` | implemented | |
+| `alias` | implemented | |
+| `refer` | implemented | |
+| `use` | implemented | |
+| `require` | implemented | embedded + `*load-path*` files |
+| `refer-clojure` | implemented | |
+| `intern` | implemented | |
 | `declare` | planned | forward declaration |
-| `ns-interns` | planned | |
-| `ns-publics` | planned | |
-| `ns-refers` | planned | |
-| `ns-map` | planned | |
+| `ns-interns` | implemented | |
+| `ns-publics` | implemented | |
+| `ns-refers` | implemented | |
+| `ns-map` | implemented | |
 | `ns-imports` | divergent | always `{}`; no host classes (N1) |
-| `ns-unmap` | planned | |
-| `ns-unalias` | planned | |
-| `load` | planned | file by path over `*load-path*` |
-| `load-string` | planned | |
-| `load-file` | planned | |
-| `loaded-libs` | planned | |
-| `*ns*` | planned | |
-| `*file*` | planned | bound while loading |
-| `*loaded-libs*` | planned | set, not a Ref (S5A2) |
-| `*loading-verbosely*` | planned | read by `load` |
-| `*load-path*` | planned | port extension: vector of dirs |
+| `ns-unmap` | implemented | |
+| `ns-unalias` | implemented | |
+| `load` | implemented | file by path over `*load-path*` |
+| `load-string` | implemented | |
+| `load-file` | implemented | |
+| `loaded-libs` | implemented | |
+| `*ns*` | implemented | |
+| `*file*` | implemented | bound while loading |
+| `*loaded-libs*` | implemented | set, not a Ref (S5A2) |
+| `*loading-verbosely*` | implemented | read by `load` |
+| `*pending-paths*` | implemented | private; cycle guard |
+| `*load-path*` | implemented | port-only; dirs vector |
 
 ## Vars (S5B)
 
@@ -346,7 +347,7 @@ machine-read — keep `| var | status | notes |` rows exact.
 ## Misc (S5D)
 
 | var | status | notes |
-| `eval` | planned | eval one form in the current ns |
+| `eval` | implemented | eval one form in the current ns |
 | `trampoline` | planned | |
 | `*assert*` | planned | default true |
 | `*unchecked-math*` | planned | fixed false (always checked, C1) |

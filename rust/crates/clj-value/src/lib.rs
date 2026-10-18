@@ -27,7 +27,7 @@ pub use keyword::Keyword;
 pub use print::{
     java_debug, java_double_string, pr_to_string, print, print_opts::PrintOpts, print_to_string,
 };
-pub use seq::{CHUNK_SIZE, Seq};
+pub use seq::{CHUNK_SIZE, Seq, seq_vec};
 pub use symbol::Symbol;
 pub use transient::{TransientError, TransientMap, TransientSet, TransientVector};
 pub use value::{FxBuildHasher, List, Map, Set, Value, Vector, new_map, new_set};

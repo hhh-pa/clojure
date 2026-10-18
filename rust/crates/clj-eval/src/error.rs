@@ -106,11 +106,13 @@ impl CompileError {
 
     /// The wrapper line, e.g.
     /// `Syntax error compiling if at (src:1:2).` (trailing dot
-    /// included, mirroring `Compiler.makeMsg`).
+    /// included, mirroring `Compiler.makeMsg`). An empty source
+    /// (string loads) omits the `source:` prefix, like the JVM's
+    /// null-source branch.
     #[must_use]
     pub fn wrapper(&self) -> String {
         format!(
-            "{} {} {}at ({}:{}:{}).",
+            "{} {} {}at ({}).",
             if self.unexpected {
                 "Unexpected error"
             } else {
@@ -120,9 +122,7 @@ impl CompileError {
             self.sym
                 .as_deref()
                 .map_or(String::new(), |s| format!("{s} ")),
-            self.source,
-            self.span.line,
-            self.span.col,
+            site_of(&self.source, self.span),
         )
     }
 
@@ -141,6 +141,18 @@ impl CompileError {
         } else {
             vec![self.wrapper(), self.cause()]
         }
+    }
+}
+
+/// The `at (...)` site: `source:line:col`, or `line:col` when
+/// the source is empty (string loads mirror the JVM's
+/// null-source branch, probe36 `loadstring-errspan`).
+#[must_use]
+pub fn site_of(source: &str, span: Span) -> String {
+    if source.is_empty() {
+        format!("{}:{}", span.line, span.col)
+    } else {
+        format!("{source}:{}:{}", span.line, span.col)
     }
 }
 

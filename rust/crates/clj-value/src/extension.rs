@@ -52,6 +52,9 @@ pub enum ThrowClass {
     IndexOutOfBoundsException,
     ArithmeticException,
     ExceptionInfo,
+    FileNotFoundException,
+    IllegalAccessError,
+    NumberFormatException,
 }
 
 impl ThrowClass {
@@ -72,6 +75,9 @@ impl ThrowClass {
             Self::IndexOutOfBoundsException => "java.lang.IndexOutOfBoundsException",
             Self::ArithmeticException => "java.lang.ArithmeticException",
             Self::ExceptionInfo => "clojure.lang.ExceptionInfo",
+            Self::FileNotFoundException => "java.io.FileNotFoundException",
+            Self::IllegalAccessError => "java.lang.IllegalAccessError",
+            Self::NumberFormatException => "java.lang.NumberFormatException",
         }
     }
 
@@ -102,7 +108,12 @@ fn throw_parent(jvm_name: &str) -> Option<&'static str> {
         "java.lang.Throwable" => None,
         "java.lang.Exception" | "java.lang.Error" => Some("java.lang.Throwable"),
         "java.lang.RuntimeException" => Some("java.lang.Exception"),
+        "java.lang.NumberFormatException" => Some("java.lang.IllegalArgumentException"),
+        "java.io.FileNotFoundException" => Some("java.io.IOException"),
+        "java.io.IOException" => Some("java.lang.Exception"),
         "java.lang.AssertionError" => Some("java.lang.Error"),
+        "java.lang.IllegalAccessError" => Some("java.lang.LinkageError"),
+        "java.lang.LinkageError" => Some("java.lang.Error"),
         "java.lang.IllegalArgumentException"
         | "java.lang.IllegalStateException"
         | "java.lang.UnsupportedOperationException"
@@ -292,11 +303,23 @@ mod tests {
                 "java.lang.ArithmeticException",
             ),
             (ThrowClass::ExceptionInfo, "clojure.lang.ExceptionInfo"),
+            (
+                ThrowClass::FileNotFoundException,
+                "java.io.FileNotFoundException",
+            ),
+            (
+                ThrowClass::IllegalAccessError,
+                "java.lang.IllegalAccessError",
+            ),
+            (
+                ThrowClass::NumberFormatException,
+                "java.lang.NumberFormatException",
+            ),
         ];
         for (class, want) in cases {
             assert_eq!(class.jvm_name(), want);
         }
-        assert_eq!(cases.len(), 13);
+        assert_eq!(cases.len(), 16);
     }
 
     #[test]
@@ -440,12 +463,25 @@ mod tests {
             ThrowClass::IndexOutOfBoundsException,
             ThrowClass::ArithmeticException,
             ThrowClass::ExceptionInfo,
+            ThrowClass::FileNotFoundException,
+            ThrowClass::IllegalAccessError,
+            ThrowClass::NumberFormatException,
         ];
         for class in all {
             assert!(class.matches("java.lang.Throwable"));
             assert!(class.matches(class.jvm_name()));
             assert!(!class.matches("java.lang.NoSuchClass"));
         }
+        assert!(ThrowClass::FileNotFoundException.matches("java.io.IOException"));
+        assert!(ThrowClass::FileNotFoundException.matches("java.lang.Exception"));
+        assert!(!ThrowClass::FileNotFoundException.matches("java.lang.Error"));
+        assert!(ThrowClass::IllegalAccessError.matches("java.lang.LinkageError"));
+        assert!(ThrowClass::IllegalAccessError.matches("java.lang.Error"));
+        assert!(!ThrowClass::IllegalAccessError.matches("java.lang.Exception"));
+        assert!(ThrowClass::NumberFormatException.matches("java.lang.IllegalArgumentException"));
+        assert!(ThrowClass::NumberFormatException.matches("java.lang.RuntimeException"));
+        assert!(ThrowClass::NumberFormatException.matches("java.lang.Exception"));
+        assert!(!ThrowClass::NumberFormatException.matches("java.lang.Error"));
     }
 
     fn throwable(id: u64, message: &str) -> Value {

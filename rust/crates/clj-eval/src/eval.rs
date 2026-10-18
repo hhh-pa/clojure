@@ -77,14 +77,23 @@ pub struct Evaluator {
 impl Evaluator {
     /// A fresh evaluator loading from `source` (`:file`, used in
     /// spans and `def` meta), with a lone `user` namespace current
-    /// (S5A `boot` grows this into the full registry).
+    /// (tests install doubles into it; `boot` builds the real
+    /// registry from [`new_bare`](Self::new_bare) instead).
     #[must_use]
     pub fn new(source: &str) -> Self {
-        let mut registry = NamespaceRegistry::new();
-        registry.ensure_ns("user");
-        registry.set_current("user");
+        let mut this = Self::new_bare(source);
+        this.registry.ensure_ns("user");
+        this.registry.set_current("user");
+        this
+    }
+
+    /// A fresh evaluator with an empty registry (boot ensures
+    /// `clojure.core` first, so it takes id 1 like the JVM's
+    /// creation order, then `user`).
+    #[must_use]
+    pub fn new_bare(source: &str) -> Self {
         Self {
-            registry,
+            registry: NamespaceRegistry::new(),
             bindings: Bindings::new(),
             source: Arc::from(source),
             eval_seq: 0,
@@ -159,6 +168,45 @@ impl Evaluator {
         }
     }
 
+    /// Evaluate `text` as a load from `path`: spans blame the
+    /// path while the load runs, then the previous source returns
+    /// (callers bind `*file*` and save the current namespace).
+    pub(crate) fn load_source(
+        &mut self,
+        path: &str,
+        text: &str,
+    ) -> Result<Vec<Value>, SourceError> {
+        let prev = std::mem::replace(&mut self.source, Arc::from(path));
+        let out = self.eval_source(text);
+        self.source = prev;
+        out
+    }
+
+    /// Push one thread-binding frame, returning the depth to pass
+    /// to [`pop_bindings`](Self::pop_bindings) (natives bind
+    /// `*file*`/`*pending-paths*` around loads).
+    pub(crate) fn push_binding(&mut self, id: u64, value: Value) -> usize {
+        let depth = self.bindings.depth();
+        self.bindings.push(id, value);
+        depth
+    }
+
+    /// Pop thread-binding frames back to `depth`.
+    pub(crate) fn pop_bindings(&mut self, depth: usize) {
+        self.bindings.truncate(depth);
+    }
+
+    /// `set!` on the topmost frame for a var (false when no frame
+    /// exists — `in-ns` falls back to the root then).
+    pub(crate) fn set_binding_top(&mut self, id: u64, value: Value) -> bool {
+        self.bindings.set_top(id, value)
+    }
+
+    /// The current load path (`:file`), for spans.
+    pub(crate) fn source(&self) -> &str {
+        &self.source
+    }
+
     /// Install a native fn under `ns`/`name` (test doubles land
     /// in `user`; S5 installs the core subset into `clojure.core`).
     pub fn install_native(
@@ -194,7 +242,7 @@ impl Evaluator {
 
     /// The visible value of a var: thread binding, else root (or
     /// the var's own `Unbound` sentinel, never a throw).
-    fn deref_var(&self, id: u64, sym: &Symbol) -> Value {
+    pub(crate) fn deref_var(&self, id: u64, sym: &Symbol) -> Value {
         if let Some(v) = self.bindings.get(id) {
             return v.clone();
         }
@@ -593,6 +641,12 @@ impl Evaluator {
     /// vectors, maps, sets, vars (deref-and-delegate), unbounds
     /// (the `IllegalStateException`), and the `ClassCastException`
     /// for everything else.
+    /// Invoke any value (natives reuse this for `:rename`
+    /// fallbacks and other higher-order calls).
+    pub(crate) fn call(&mut self, callee: &Value, args: &[Value]) -> Result<Value, Signal> {
+        self.invoke(callee, args)
+    }
+
     fn invoke(&mut self, callee: &Value, args: &[Value]) -> Result<Value, Signal> {
         match callee {
             Value::Nil => Err(self.throw(NativeError::new(

@@ -24,6 +24,26 @@ use crate::{List, Map, Set, Value, Vector};
 /// The JVM chunk size: 32 items per chunk.
 pub const CHUNK_SIZE: usize = 32;
 
+/// `seq` a value into items (`None` is unseqable — callers raise
+/// the ISeq coercion error). `nil` seqs to empty, strings to chars,
+/// maps to `[k v]` entries, like the JVM.
+#[must_use]
+pub fn seq_vec(v: &Value) -> Option<Vec<Value>> {
+    match v {
+        Value::Nil => Some(Vec::new()),
+        Value::Str(s) => Some(s.chars().map(Value::Char).collect()),
+        Value::List(l) => Some(l.iter().cloned().collect()),
+        Value::Vector(v) => Some(v.iter().cloned().collect()),
+        Value::Map(m) => Some(
+            m.iter()
+                .map(|(k, v)| Value::Vector(Vector::from_vec(vec![k.clone(), v.clone()])))
+                .collect(),
+        ),
+        Value::Set(s) => Some(s.iter().cloned().collect()),
+        _ => None,
+    }
+}
+
 /// A sequence over values. Clones are cheap (all `Arc`-backed).
 #[derive(Clone)]
 pub enum Seq {

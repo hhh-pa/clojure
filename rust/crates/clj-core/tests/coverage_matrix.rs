@@ -31,12 +31,21 @@ fn coverage_rows() -> Vec<(String, String)> {
     rows
 }
 
-/// Does `name` resolve to a var in the booted core?
+/// Does `name` resolve to a var in the booted core (unqualified,
+/// or qualified for privates, which `refer` never installs)?
 fn resolves(eval: &mut clj_eval::Evaluator, name: &str) -> bool {
-    match eval.eval_source(&format!("(resolve '{name})")) {
-        Ok(values) => !matches!(values.as_slice(), [clj_value::Value::Nil]),
-        Err(_) => false,
+    for probe in [
+        format!("(resolve '{name})"),
+        format!("(resolve 'clojure.core/{name})"),
+    ] {
+        match eval.eval_source(&probe) {
+            Ok(values) if !matches!(values.as_slice(), [clj_value::Value::Nil]) => {
+                return true;
+            }
+            _ => {}
+        }
     }
+    false
 }
 
 #[test]

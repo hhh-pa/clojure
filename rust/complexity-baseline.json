@@ -112,6 +112,20 @@
    "cyclomatic": 32.0,
    "cognitive": 4.0,
    "justification": "duplicate-key plain-form equality; per-variant-pair table"
+  },
+  {
+   "file": "crates/clj-value/src/extension.rs",
+   "function": "jvm_name",
+   "cyclomatic": 17.0,
+   "cognitive": 1.0,
+   "justification": "one arm per ThrowClass variant; JVM class table stays exhaustive (S5A2 grew it 14->17)"
+  },
+  {
+   "file": "crates/clj-eval/src/ns.rs",
+   "function": "throw_class_for",
+   "cyclomatic": 18.0,
+   "cognitive": 1.0,
+   "justification": "one arm per class name; load-error class table stays exhaustive"
   }
  ]
 }
