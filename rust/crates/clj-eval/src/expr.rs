@@ -1086,26 +1086,30 @@ fn as_clause(form: &Value) -> Option<&str> {
     }
 }
 
-/// Map directives the spec accepts (line 55 of the spec): anything
-/// else in keyword position fails `let`/`fn` spec, or is
-/// `Unsupported map directive` on the `loop` path.
+/// Map directives the spec accepts (`::map-special-binding` plus
+/// `::ns-keys`, spec lines 44-50): anything else in keyword position
+/// fails `let`/`fn` spec, or is `Unsupported map directive` on the
+/// `loop` path. Qualified names are keys/syms only (`:foo/strs` and
+/// `:foo/strs!` are not `::ns-keys`).
 fn is_known_directive(kw: &Keyword) -> bool {
-    kw.namespace().is_none()
-        && matches!(
-            kw.name(),
-            "as" | "or"
-                | "keys"
-                | "syms"
-                | "strs"
-                | "keys!"
-                | "syms!"
-                | "strs!"
-                | "select"
-                | "excess"
-                | "missing"
-                | "defaults"
-                | "all"
-        )
+    if kw.namespace().is_some() {
+        return matches!(kw.name(), "keys" | "syms" | "keys!" | "syms!");
+    }
+    matches!(
+        kw.name(),
+        "as" | "or"
+            | "keys"
+            | "syms"
+            | "strs"
+            | "keys!"
+            | "syms!"
+            | "strs!"
+            | "select"
+            | "excess"
+            | "missing"
+            | "defaults"
+            | "all"
+    )
 }
 
 /// The deep `::binding-form` spec mirror: plain symbol, sequential
@@ -1178,9 +1182,15 @@ fn spec_valid_map(m: &Map) -> bool {
 }
 
 /// One directive's value shape (`::as`/`::or`/`::keys-form`/…).
+/// Qualified `::ns-keys` take `::simple-syms-form` regardless of
+/// kind (simple symbols only — stricter than unqualified `:keys`
+/// idents or `:syms` symbols).
 fn spec_valid_directive(kw: &Keyword, v: &Value) -> bool {
     if !is_known_directive(kw) {
         return false;
+    }
+    if kw.namespace().is_some() {
+        return spec_valid_key_list(v, KeyKind::Strs);
     }
     match kw.name() {
         "as" | "select" | "excess" | "missing" | "defaults" | "all" => {

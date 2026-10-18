@@ -100,6 +100,10 @@ plain symbol (not `&`, unqualified) | vector (recursively valid; `&`
 only as second-to-last with a valid rest form after, `:as` alone may
 follow the rest) | map (keys `:keys`/`:strs`/`:syms` vectors of symbols,
 `:or` a map, `:as` a symbol, other entries `symbol keyword`).
+Qualified `::ns-keys` (`:ns/keys`, `:ns/syms`, `:ns/keys!`, `:ns/syms!`)
+take simple-symbol vectors; `:ns/strs`, `:ns/strs!`, and qualified
+values under a qualified directive are spec failures (probe29
+`qual-*`; unqualified `:keys` still takes idents, `:syms` symbols).
 Post-spec destructuring is infallible for `let`/`fn` (every spec-passing
 shape destructures; shared code with `loop` keeps the error path).
 
@@ -272,8 +276,10 @@ Mirrors `destvec*`/`destmap*` (`core.clj`), including the 1.13 directives.
   Don't know how to create ISeq from: CLASS` (`(let [[& r] 5] r)`,
   unlike the no-`&` `nth` path).
 - Map: `symbol keyword` entries `get` by keyword; `:keys`/`:strs`/`:syms`
-  bind by name/string/symbol keys; `:as` binds the whole (post
-  seq-conversion) map; nesting composes; param hints ignored.
+  bind by name/string/symbol keys, qualified `:ns/keys`/`:ns/syms`
+  (and `!`) qualifying the lookup (`:ns/name`, `ns/name`); `:as`
+  binds the whole (post seq-conversion) map; nesting composes; param
+  hints ignored.
 - Seq targets convert first (`seq-to-map-for-destructuring`): empty →
   `{}`, one element → the element, 2+ → pairs as if by assoc (last wins)
   plus the trailing rule for odd counts, applied LAST so the trailer

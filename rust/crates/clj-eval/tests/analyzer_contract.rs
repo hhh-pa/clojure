@@ -343,6 +343,10 @@ fn let_spec_errors() {
         "(let [{:as 5} {}] 5)",
         "(let [{a :x :or nil} {:x 1}] a)",
         "(let [{:keys [a] :req [a]} {:a 1}] a)",
+        "(let [{:foo/strs [a]} {}] a)",
+        "(let [{:foo/strs! [a]} {}] a)",
+        "(let [{:foo/keys [b/c]} {}] a)",
+        "(let [{:strs [b/c]} {}] a)",
     ] {
         check(src, wrapper, cause);
     }
@@ -364,6 +368,8 @@ fn fn_spec_errors() {
         "(fn [u/x] u/x)",
         "(fn [{:as 5}] 1)",
         "(fn [{:keys [5]}] 1)",
+        "(fn [{:foo/strs [a]}] a)",
+        "(fn [{:foo/keys [b/c]}] a)",
     ] {
         check(src, wrapper, cause);
     }
@@ -608,6 +614,13 @@ fn valid_shapes_pass() {
         "(fn ([x] x) ([x & r] r))",
         "(let [[& r] [1 2]] r)",
         "(loop [[a] [1]] a)",
+        "(let [{:foo/keys [a]} {}] a)",
+        "(let [{:foo/syms [a]} {}] a)",
+        "(let [{:foo/keys! [a]} {}] a)",
+        "(let [{:foo/syms! [a]} {}] a)",
+        "(let [{:keys [b/c]} {}] c)",
+        "(fn [{:foo/keys [a]}] a)",
+        "(loop [{:foo/keys [a]} {}] a)",
         "(letfn [(f [x] x)] (f 1))",
         "(if 1 2)",
         "(if 1 2 3)",
