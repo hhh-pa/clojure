@@ -459,6 +459,28 @@ fn loop_assert_errors() {
         "Syntax error macroexpanding loop at (test:1:1).",
         "java.lang.Exception | Unsupported binding form: ",
     );
+    // `:as` values validate immediately, before emission (probe31):
+    // scalars fail the walk, shapes pass and die at the inner spec.
+    check(
+        "(loop [[a :as 5] [1]] a)",
+        "Syntax error macroexpanding loop at (test:1:1).",
+        "java.lang.Exception | Unsupported binding form: 5",
+    );
+    check(
+        "(loop [[a :as] [1]] a)",
+        "Syntax error macroexpanding loop at (test:1:1).",
+        "java.lang.Exception | Unsupported binding form: ",
+    );
+    check(
+        "(loop [[a :as \"s\"] [1]] a)",
+        "Syntax error macroexpanding loop at (test:1:1).",
+        "java.lang.Exception | Unsupported binding form: s",
+    );
+    check(
+        "(loop [[a :as [b]] [1 2]] a)",
+        "Syntax error macroexpanding clojure.core/let at (test:1:1).",
+        "clojure.lang.ExceptionInfo | Call to clojure.core/let did not conform to spec.",
+    );
     check(
         "(loop [a 1 & [2]] a)",
         "Syntax error compiling loop* at (test:1:1).",

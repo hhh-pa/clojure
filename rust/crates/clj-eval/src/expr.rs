@@ -1320,8 +1320,8 @@ fn walk_binding(form: &Value) -> Result<(), WalkError> {
 
 /// `destvec*`: fixed shapes recurse; `&` takes the next form as the
 /// rest pattern (dangling `&` walks `nil`); after `&` only `:as`
-/// may follow; `:as` ends the scan (trailing junk ignored, per the
-/// source).
+/// may follow; `:as` validates its value (dangling walks `nil`)
+/// immediately — before emission — then ends the scan.
 fn walk_seq(forms: &[&Value]) -> Result<(), WalkError> {
     let mut rest = forms;
     let mut seen_rest = false;
@@ -1332,9 +1332,11 @@ fn walk_seq(forms: &[&Value]) -> Result<(), WalkError> {
             rest = tail.get(1..).unwrap_or(&[]);
             seen_rest = true;
         } else if is_as(first) {
-            // `:as` ends the scan (trailing junk ignored, per the
-            // source); its value passes through unchecked (the
-            // emitted `let`'s spec validates it, §E4).
+            // The `:as` value walks as a binding form right away
+            // (probe31 `loop-as-*`): scalars fail here, while shapes
+            // pass and die at the emitted `let`'s spec instead.
+            let value = tail.first().copied().unwrap_or(&Value::Nil);
+            walk_binding(value)?;
             return Ok(());
         } else {
             if seen_rest {

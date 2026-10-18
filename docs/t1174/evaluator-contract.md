@@ -158,6 +158,7 @@ wrapper naming the operator **as written** (`macroexpanding loop at …`):
 | `(loop [u/x 1] …)` | `RuntimeException` | `Can't let qualified name: u/x` (wrapper: `compiling loop*`) |
 | `(loop [[a & b c] …] …)` | `Exception` | `Unsupported binding form, only :as can follow & parameter` |
 | `(loop [[a &] …] …)` | `Exception` | `Unsupported binding form: ` (nil rest prints empty) |
+| `(loop [[a :as 5] …] …)` | `Exception` | `Unsupported binding form: 5` (the `:as` value walks as a binding form immediately, before emission; dangling `:as` walks `nil` → `Unsupported binding form: `; shape values pass the walk and die at the inner-`let` spec instead, probe31 `loop-as-*`) |
 | bare `(loop)` / `(letfn)` / `(binding)` | `ArityException` | `Wrong number of args (0) passed to: clojure.core/NAME` — no wrapper at all (the macro fn itself rejects 0 args before any body runs, probe25 `loop-bare`/`letfn-bare`/`binding-bare`) |
 
 `(loop [[a] [1]] a)` → `1` (loop destructures like `let`).
