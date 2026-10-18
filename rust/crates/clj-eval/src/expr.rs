@@ -21,7 +21,7 @@ use std::sync::Arc;
 use clj_reader::Span;
 use clj_value::{Keyword, Map, PrintOpts, Symbol, Value, Vector, pr_to_string, print_to_string};
 
-use crate::env::Namespace;
+use crate::env::NamespaceRegistry;
 use crate::error::{CompileError, NativeError, Verb, jvm_class_of, span_of};
 
 /// A `catch` clause: resolved class name, local slot, body.
@@ -386,7 +386,7 @@ fn is_shadowable_macro(name: &str) -> bool {
 /// (resolve checks plus `def` interning, like the JVM).
 pub struct Analyzer<'a> {
     source: Arc<str>,
-    ns: &'a mut Namespace,
+    registry: &'a mut NamespaceRegistry,
     locals: Vec<String>,
     recur: Option<usize>,
     no_recur: bool,
@@ -395,18 +395,18 @@ pub struct Analyzer<'a> {
 }
 
 impl<'a> Analyzer<'a> {
-    /// Analyze top-level forms from `source` against `ns` (`eval_seq`
-    /// numbers the form for anonymous-`fn` display names; `fn_seq`
-    /// numbers every `fn` analyzed).
+    /// Analyze top-level forms from `source` against the namespace
+    /// registry (`eval_seq` numbers the form for anonymous-`fn`
+    /// display names; `fn_seq` numbers every `fn` analyzed).
     pub fn new(
         source: &Arc<str>,
-        ns: &'a mut Namespace,
+        registry: &'a mut NamespaceRegistry,
         eval_seq: u64,
         fn_seq: &'a mut u64,
     ) -> Self {
         Self {
             source: Arc::clone(source),
-            ns,
+            registry,
             locals: Vec::new(),
             recur: None,
             no_recur: false,
@@ -497,36 +497,34 @@ impl<'a> Analyzer<'a> {
         {
             return Ok(Expr::Local(idx));
         }
+        if let Some(target) = self.registry.resolve(sym) {
+            return Ok(Expr::Global(target));
+        }
         match sym.namespace() {
-            Some(ns) if ns != self.ns.name() => Err(self.err(
+            // Aliases count as namespaces even when dangling
+            // (probe34 `ns-alias-removed`); both miss shapes blame
+            // the symbol as written (probe34 `ns-alias-novar`).
+            Some(ns) if self.registry.namespace_target(ns).is_none() => Err(self.err(
                 class::RUNTIME,
                 format!("No such namespace: {ns}"),
                 span,
                 Verb::Compiling,
                 None,
             )),
-            _ => {
-                let q = self.ns.qualify(sym);
-                if self.ns.lookup(&q).is_some() {
-                    Ok(Expr::Global(q))
-                } else if sym.namespace().is_some() {
-                    Err(self.err(
-                        class::RUNTIME,
-                        format!("No such var: {sym}"),
-                        span,
-                        Verb::Compiling,
-                        None,
-                    ))
-                } else {
-                    Err(self.err(
-                        class::RUNTIME,
-                        format!("Unable to resolve symbol: {sym} in this context"),
-                        span,
-                        Verb::Compiling,
-                        None,
-                    ))
-                }
-            }
+            Some(_) => Err(self.err(
+                class::RUNTIME,
+                format!("No such var: {sym}"),
+                span,
+                Verb::Compiling,
+                None,
+            )),
+            None => Err(self.err(
+                class::RUNTIME,
+                format!("Unable to resolve symbol: {sym} in this context"),
+                span,
+                Verb::Compiling,
+                None,
+            )),
         }
     }
 
@@ -542,12 +540,11 @@ impl<'a> Analyzer<'a> {
         let head = items[0];
         match head {
             Value::Symbol(sym) if sym.namespace().is_none() && is_special(sym.name()) => {
-                // The five macros defer to any binding (a local or a
-                // user-ns global); real specials never do (probe31
-                // `shadow-*`).
-                let global = self.ns.qualify(sym);
+                // The five macros defer to any binding (a local, a
+                // current-ns global, or a referred one); real
+                // specials never do (probe31 `shadow-*`).
                 let bound =
-                    self.local_idx(sym.name()).is_some() || self.ns.lookup(&global).is_some();
+                    self.local_idx(sym.name()).is_some() || self.registry.resolve(sym).is_some();
                 if !(is_shadowable_macro(sym.name()) && bound) {
                     return self.analyze_special(sym.name(), items, span, tail);
                 }
@@ -625,17 +622,29 @@ impl<'a> Analyzer<'a> {
     /// unbound, probe25).
     fn parse_def(&mut self, items: &[&Value], span: Span) -> Result<Expr, CompileError> {
         let (sym, doc, init) = self.def_parts(items, span)?;
-        if sym.namespace().is_some_and(|ns| ns != self.ns.name()) {
+        // `def` always defines in the current namespace: same-ns
+        // symbols create, other-ns symbols fail — "Can't create
+        // defs" when the var exists, "Can't refer" when it doesn't
+        // (probe34 `ns-intern-def`, `ns-crossdef-missing`).
+        if sym
+            .namespace()
+            .is_some_and(|ns| ns != self.registry.current())
+        {
+            let message = if self.registry.resolve(sym).is_some() {
+                "Can't create defs outside of current ns"
+            } else {
+                "Can't refer to qualified var that doesn't exist"
+            };
             return Err(self.err(
                 class::RUNTIME,
-                "Can't refer to qualified var that doesn't exist".to_owned(),
+                message.to_owned(),
                 span,
                 Verb::Compiling,
                 Some("def".to_owned()),
             ));
         }
-        let qualified = self.ns.qualify(sym).with_meta(sym.meta().cloned());
-        self.ns.intern(&qualified);
+        let qualified = self.registry.qualify(sym).with_meta(sym.meta().cloned());
+        self.registry.intern(&qualified);
         let init = init
             .map(|form| self.analyze(form, span, false).map(Box::new))
             .transpose()?;
@@ -740,14 +749,14 @@ impl<'a> Analyzer<'a> {
     }
 
     /// Resolve a symbol as a var (shared by `var` and `binding`
-    /// var-forms): locals are invisible, and every miss is the
-    /// single `Unable to resolve var` shape (probe25).
+    /// var-forms): locals are invisible, refers and other
+    /// namespaces are visible (probe34 `ns-var-refer`,
+    /// `ns-var-cross`), and every miss is the single `Unable to
+    /// resolve var` shape (probe25).
     fn resolve_var(&self, sym: &Symbol, span: Span, op: &str) -> Result<Symbol, CompileError> {
         // Locals are invisible: only namespace membership matters.
-        let q = self.ns.qualify(sym);
-        let known = q.namespace() == Some(self.ns.name()) && self.ns.lookup(&q).is_some();
-        if known {
-            Ok(q)
+        if let Some(target) = self.registry.resolve(sym) {
+            Ok(target)
         } else {
             Err(self.err(
                 class::RUNTIME,

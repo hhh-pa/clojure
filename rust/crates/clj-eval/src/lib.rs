@@ -18,7 +18,7 @@ pub mod eval;
 pub mod expr;
 pub mod ext;
 
-pub use env::{Bindings, Env, Namespace, VarState};
+pub use env::{Bindings, Env, Namespace, NamespaceRegistry, VarState};
 pub use error::{CompileError, NativeError, Signal, Verb, jvm_class_of, simple_class_of, span_of};
 pub use eval::{Evaluator, SourceError};
 pub use expr::{

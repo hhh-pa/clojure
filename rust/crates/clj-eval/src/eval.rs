@@ -18,7 +18,7 @@ use std::sync::Arc;
 use clj_reader::{ReaderOpts, Span, read_all};
 use clj_value::{Keyword, List, Map, Symbol, ThrowClass, Throwable, Value, Var, Vector, new_map};
 
-use crate::env::{Bindings, Env, Namespace};
+use crate::env::{Bindings, Env, NamespaceRegistry};
 use crate::error::{CompileError, NativeError, Signal, jvm_class_of, simple_class_of};
 use crate::expr::{Analyzer, Catch, Expr, MapPattern, Pattern, pattern_names};
 use crate::ext::{Closure, NativeFn, as_closure, as_native};
@@ -46,11 +46,11 @@ impl std::fmt::Display for SourceError {
 
 impl std::error::Error for SourceError {}
 
-/// The evaluator: namespace, bindings, load path, and the
+/// The evaluator: namespace registry, bindings, load path, and the
 /// deterministic counters (form/fn numbering for display names, one
 /// identity sequence for throwables/closures/natives).
 pub struct Evaluator {
-    pub ns: Namespace,
+    pub registry: NamespaceRegistry,
     bindings: Bindings,
     source: Arc<str>,
     eval_seq: u64,
@@ -60,11 +60,15 @@ pub struct Evaluator {
 
 impl Evaluator {
     /// A fresh evaluator loading from `source` (`:file`, used in
-    /// spans and `def` meta).
+    /// spans and `def` meta), with a lone `user` namespace current
+    /// (S5A `boot` grows this into the full registry).
     #[must_use]
     pub fn new(source: &str) -> Self {
+        let mut registry = NamespaceRegistry::new();
+        registry.ensure_ns("user");
+        registry.set_current("user");
         Self {
-            ns: Namespace::new("user"),
+            registry,
             bindings: Bindings::new(),
             source: Arc::from(source),
             eval_seq: 0,
@@ -82,11 +86,13 @@ impl Evaluator {
     /// Analyze one form against the current namespace (tests use
     /// this for contract errors without evaluating).
     pub fn analyze(&mut self, form: &Value) -> Result<Expr, CompileError> {
-        Analyzer::new(&self.source, &mut self.ns, self.eval_seq, &mut self.fn_seq).analyze(
-            form,
-            Span::new(1, 1),
-            true,
+        Analyzer::new(
+            &self.source,
+            &mut self.registry,
+            self.eval_seq,
+            &mut self.fn_seq,
         )
+        .analyze(form, Span::new(1, 1), true)
     }
 
     /// Read every form in `text` (default `:read-cond :allow`
@@ -125,18 +131,23 @@ impl Evaluator {
         Ok(out)
     }
 
-    /// Install a native fn under `name` (test doubles; S5 grows
-    /// this into the core subset).
-    pub fn install_native(&mut self, name: &str, func: Arc<crate::ext::NativeImpl>) -> Value {
+    /// Install a native fn under `ns`/`name` (test doubles land
+    /// in `user`; S5 installs the core subset into `clojure.core`).
+    pub fn install_native(
+        &mut self,
+        ns: &str,
+        name: &str,
+        func: Arc<crate::ext::NativeImpl>,
+    ) -> Value {
         let id = self.next_id();
-        let sym = Symbol::new(Some("user"), name);
-        let var_id = self.ns.intern(&sym);
+        let sym = Symbol::new(Some(ns), name);
+        let var_id = self.registry.intern(&sym);
         let native = Value::Extension(Arc::new(NativeFn {
             id,
-            display: Arc::from(format!("user/{name}").as_str()),
+            display: Arc::from(format!("{ns}/{name}").as_str()),
             func,
         }));
-        if let Some(state) = self.ns.state_mut(var_id) {
+        if let Some(state) = self.registry.state_mut(var_id) {
             state.root = Some(native.clone());
         }
         native
@@ -159,7 +170,7 @@ impl Evaluator {
         if let Some(v) = self.bindings.get(id) {
             return v.clone();
         }
-        self.ns.root_or_unbound(id, sym)
+        self.registry.root_or_unbound(id, sym)
     }
 
     /// Evaluate an expression to a value (or a control signal).
@@ -237,7 +248,9 @@ impl Evaluator {
 
     /// A var id, interning on first reference.
     fn var_id(&mut self, sym: &Symbol) -> u64 {
-        self.ns.lookup(sym).unwrap_or_else(|| self.ns.intern(sym))
+        self.registry
+            .lookup(sym)
+            .unwrap_or_else(|| self.registry.intern(sym))
     }
 
     /// A vector literal (elements evaluate left to right).
@@ -341,7 +354,7 @@ impl Evaluator {
         }
         for (sym, _) in pairs {
             let id = self.var_id(sym);
-            let dynamic = self.ns.state(id).is_some_and(|s| s.dynamic);
+            let dynamic = self.registry.state(id).is_some_and(|s| s.dynamic);
             if !dynamic {
                 return Err(self.throw(NativeError::new(
                     ThrowClass::IllegalStateException,
@@ -406,7 +419,7 @@ impl Evaluator {
         span: Span,
         env: &Env,
     ) -> Result<Value, Signal> {
-        let id = self.ns.intern(sym);
+        let id = self.registry.intern(sym);
         let value = match init {
             Some(init) => Some(self.eval(init, env)?),
             None => None,
@@ -418,7 +431,7 @@ impl Evaluator {
                 meta.get(&probe)
             })
             .is_some_and(Value::is_truthy);
-        if let Some(state) = self.ns.state_mut(id) {
+        if let Some(state) = self.registry.state_mut(id) {
             if let Some(v) = value {
                 state.root = Some(v);
             }

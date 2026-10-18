@@ -48,6 +48,7 @@ fn rigged() -> (Evaluator, Arc<Mutex<Vec<String>>>) {
 /// `ArithmeticException`, never a debug panic.
 fn install_arith(eval: &mut Evaluator) {
     eval.install_native(
+        "user",
         "t-plus",
         Arc::new(move |args| match args {
             [Value::Int(a), Value::Int(b)] => a.checked_add(*b).map(Value::Int).ok_or_else(|| {
@@ -64,6 +65,7 @@ fn install_arith(eval: &mut Evaluator) {
         }),
     );
     eval.install_native(
+        "user",
         "t-minus",
         Arc::new(|args| match args {
             [Value::Int(a), Value::Int(b)] => a.checked_sub(*b).map(Value::Int).ok_or_else(|| {
@@ -80,14 +82,17 @@ fn install_arith(eval: &mut Evaluator) {
 /// Single-int natives: `t-zero?`, `t-pos?`, `t-dec`.
 fn install_int_fns(eval: &mut Evaluator) {
     eval.install_native(
+        "user",
         "t-zero?",
         Arc::new(|args| int(args).map(|n| Value::Bool(n == 0))),
     );
     eval.install_native(
+        "user",
         "t-pos?",
         Arc::new(|args| int(args).map(|n| Value::Bool(n > 0))),
     );
     eval.install_native(
+        "user",
         "t-dec",
         Arc::new(|args| {
             int(args).and_then(|n| {
@@ -105,6 +110,7 @@ fn install_int_fns(eval: &mut Evaluator) {
 /// `t-id` plus the side-logging `t-log`.
 fn install_misc(eval: &mut Evaluator, log: &Arc<Mutex<Vec<String>>>) {
     eval.install_native(
+        "user",
         "t-id",
         Arc::new(|args| match args {
             [v] => Ok(v.clone()),
@@ -113,6 +119,7 @@ fn install_misc(eval: &mut Evaluator, log: &Arc<Mutex<Vec<String>>>) {
     );
     let logged = Arc::clone(log);
     eval.install_native(
+        "user",
         "t-log",
         Arc::new(move |args| match args {
             [] => Err(NativeError::arity("test/t-log", 0)),
@@ -124,6 +131,7 @@ fn install_misc(eval: &mut Evaluator, log: &Arc<Mutex<Vec<String>>>) {
         }),
     );
     eval.install_native(
+        "user",
         "t-ex",
         Arc::new(|args| match args {
             [Value::Str(m)] => Ok(Value::Throwable(Throwable {
@@ -442,19 +450,19 @@ fn def_var_set() {
     // `def` meta: auto keys plus user meta.
     run(&mut eval, "(def ^:private pm913 \"d\" 1)");
     let id = eval
-        .ns
+        .registry
         .lookup(&clj_value::Symbol::new(Some("user"), "pm913"))
         .unwrap();
-    let meta = &eval.ns.state(id).unwrap().meta;
+    let meta = &eval.registry.state(id).unwrap().meta;
     assert_eq!(
         pr(&Value::Map(meta.clone())),
         "{:private true, :doc \"d\", :line 1, :column 1, :file \"test\", :name pm913}"
     );
-    assert!(!eval.ns.state(id).unwrap().dynamic);
+    assert!(!eval.registry.state(id).unwrap().dynamic);
     // Unbound vars: the sentinel value, `str` shape, numeric CCE.
     assert_eq!(run_last(&mut eval, "(def ub913)"), "#'user/ub913");
     let ub_id = eval
-        .ns
+        .registry
         .lookup(&clj_value::Symbol::new(Some("user"), "ub913"))
         .unwrap();
     assert_eq!(
