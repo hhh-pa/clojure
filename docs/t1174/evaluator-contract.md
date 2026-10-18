@@ -421,7 +421,9 @@ Mirrors `destvec*`/`destmap*` (`core.clj`), including the 1.13 directives.
   `Exception | Multiple :or defaults for same key: K 'local'`
   (compile time, `macroexpanding let`/`loop` as-written wrapper — but
   `fn` params destructure through the emitted `let`, so the wrapper is
-  `macroexpanding clojure.core/let`, probe25 `fn-or-multi`).
+  `macroexpanding clojure.core/let`, probe25 `fn-or-multi`; K renders
+  via `str`, so a `:strs` key prints bare — `s 's'` — probe33
+  `or-multi-strs`).
 - 1.13 directives: `:keys!`/`:syms!`/`:strs!` require presence, else
   `IllegalArgumentException | Missing required key: K` at runtime (K
   printed bare); a required key with any `:or` default →

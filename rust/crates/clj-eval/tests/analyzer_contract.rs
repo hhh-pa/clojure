@@ -1041,6 +1041,13 @@ fn destructure_semantic_errors() {
         "Syntax error macroexpanding clojure.core/let at (test:1:1).",
         "java.lang.Exception | Multiple :or defaults for same key: :x 'a'",
     );
+    // The key renders via `str`, so a `:strs` key prints bare
+    // (probe33 `or-multi-strs`).
+    check(
+        "(loop [{:strs [s] :or {s 1 \"s\" 2}} {}] s)",
+        "Syntax error macroexpanding loop at (test:1:1).",
+        "java.lang.Exception | Multiple :or defaults for same key: s 's'",
+    );
 }
 
 #[test]

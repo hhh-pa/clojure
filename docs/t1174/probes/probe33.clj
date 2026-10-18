@@ -1,5 +1,6 @@
 ;; S4 oracle probes, round 1b: direct let*/loop*/fn* (M10),
-;; `&` function names (L4), map-valued pre/post (L5).
+;; `&` function names (L4), map-valued pre/post (L5), `:or`
+;; key rendering (L6).
 ;; Exit 0 (caught; chains printed).
 ;; NOTE: forms mentioning `%` use `(fn [] …)`, never `#(…)`
 ;; (the `#()` reader would capture `%` as its own argument).
@@ -92,3 +93,5 @@
 (tx "pre-vecmap" #(eval '((fn [x] {:pre [{nil 1}]} x) 1)))
 (tx "post-normal" (fn [] (eval '((fn [x] {:post [(pos? %)]} x) 5))))
 (tx "post-fail" (fn [] (eval '((fn [x] {:post [(pos? %)]} x) -5))))
+(tx "or-multi-strs" #(eval '(loop [{:strs [s] :or {s 1 "s" 2}} {}] s)))
+(tx "or-multi-keys" #(eval '(loop [{:keys [a] :or {a 1 :a 2}} {}] a)))

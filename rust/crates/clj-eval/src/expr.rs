@@ -1737,7 +1737,7 @@ fn check_or_pair(
             class: class::EXCEPTION,
             message: format!(
                 "Multiple :or defaults for same key: {} '{local}'",
-                pr_of(key)
+                str_of(key)
             ),
         });
     }
