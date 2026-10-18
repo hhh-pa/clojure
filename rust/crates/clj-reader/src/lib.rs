@@ -131,35 +131,42 @@ impl Reader {
             if return_on == Some(ch) {
                 return Ok(Form::Finished);
             }
-            if is_digit_start(ch) {
-                return Ok(Form::Value(self.read_number_value(ch)?));
+            if let Some(form) = self.dispatch_char(ch, top)? {
+                return Ok(form);
             }
-            if is_macro(ch) {
-                if let Some(v) = self.invoke_macro(ch, top)? {
-                    return Ok(Form::Value(v));
-                }
-                continue;
+        }
+    }
+
+    /// Dispatch one non-whitespace char: the number path, macros
+    /// (sentinel ⇒ `None`, the loop recurs), `+`/`-`-then-digit,
+    /// else a token.
+    fn dispatch_char(&mut self, ch: char, top: bool) -> Result<Option<Form>, ReaderError> {
+        if is_digit_start(ch) {
+            return Ok(Some(Form::Value(self.read_number_value(ch)?)));
+        }
+        if is_macro(ch) {
+            return match self.invoke_macro(ch, top)? {
+                Some(v) => Ok(Some(Form::Value(v))),
+                None => Ok(None),
+            };
+        }
+        if ch == '+' || ch == '-' {
+            let ch2 = self.stream.read();
+            if ch2.is_some_and(is_digit_start) {
+                self.stream.unread(ch2.unwrap());
+                return Ok(Some(Form::Value(self.read_number_value(ch)?)));
             }
-            if ch == '+' || ch == '-' {
-                let ch2 = self.stream.read();
-                if ch2.is_some_and(is_digit_start) {
-                    self.stream.unread(ch2.unwrap());
-                    return Ok(Form::Value(self.read_number_value(ch)?));
-                }
-                if let Some(c2) = ch2 {
-                    self.stream.unread(c2);
-                }
+            if let Some(c2) = ch2 {
+                self.stream.unread(c2);
             }
-            let token = read_token(&mut self.stream, ch);
-            match interpret_token(&token, &self.opts) {
-                Some(v) => return Ok(Form::Value(v)),
-                None => {
-                    return Err(E::InvalidToken {
-                        span: self.span(),
-                        token,
-                    });
-                }
-            }
+        }
+        let token = read_token(&mut self.stream, ch);
+        match interpret_token(&token, &self.opts) {
+            Some(v) => Ok(Some(Form::Value(v))),
+            None => Err(E::InvalidToken {
+                span: self.span(),
+                token,
+            }),
         }
     }
 
