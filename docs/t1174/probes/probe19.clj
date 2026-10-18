@@ -21,3 +21,6 @@
 (tx "(count (transient [1 2]))" #(count (transient [1 2])))
 (tx "(get (transient {:a 1}) :a)" #(get (transient {:a 1}) :a))
 (tx "(nth (transient [1 2]) 1)" #(nth (transient [1 2]) 1))
+(tx "get-after-persistent" #(let [t (transient {:a 1})] (persistent! t) (get t :a)))
+(tx "nth-after-persistent" #(let [t (transient [1 2])] (persistent! t) (nth t 0)))
+(tx "count-after-persistent" #(let [t (transient [1 2])] (persistent! t) (count t)))
