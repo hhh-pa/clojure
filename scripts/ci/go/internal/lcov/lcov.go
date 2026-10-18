@@ -1,7 +1,7 @@
-// Package lcov parses, merges, and emits LCOV coverage records,
-// mirroring scripts/ci/lib: coverage-floor-check.py's DA-only merge,
-// coverage-summary.py's LF/LH reader, and rust-quality-gates.py's full
-// DA/BRDA/FNDA/FN record model with absurd-count clamping.
+// Package lcov parses, merges, and emits LCOV coverage records
+// (vendored from arcanist's scripts/ci/go): DA-only merge, LF/LH
+// reading, and a full DA/BRDA/FNDA/FN record model with
+// absurd-count clamping.
 package lcov
 
 import (
@@ -221,7 +221,7 @@ func ParseRecords(text string) ([]SFRecord, []Sanitized) {
 }
 
 // ParseDA merges DA-only records per file, mirroring
-// coverage-floor-check.py's parse_lcov_lines (no count clamping).
+// DA lines only (no count clamping).
 func ParseDA(text string) map[string]map[string]int64 {
 	files := map[string]map[string]int64{}
 	var sf string

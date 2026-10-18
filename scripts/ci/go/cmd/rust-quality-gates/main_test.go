@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/hhh-pa/arcanist/scripts/ci/go/internal/cmdtest"
+	"github.com/hhh-pa/clojure/scripts/ci/go/internal/cmdtest"
 )
 
 func TestUsageGolden(t *testing.T) {

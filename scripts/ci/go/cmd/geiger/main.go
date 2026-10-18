@@ -1,9 +1,7 @@
-// Command geiger is the Go port of scripts/ci/lib/geiger-check.py:
-// cargo-geiger gate, failing when workspace `unsafe` grows. Usage text
-// names this binary (the Python usage hardcodes its own filename);
-// otherwise stdout matches the oracle byte-for-byte. Like the oracle,
-// internal tool failures that Python reports via traceback or
-// SystemExit go to stderr with exit 1; their text is Go's own.
+// Command geiger is the cargo-geiger gate (vendored from arcanist's
+// scripts/ci/go), failing when workspace `unsafe` grows. Usage text
+// names this binary; otherwise stdout matches the arcanist oracle
+// byte-for-byte. Internal tool failures go to stderr with exit 1.
 package main
 
 import (
@@ -16,16 +14,16 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/hhh-pa/arcanist/scripts/ci/go/internal/executil"
-	"github.com/hhh-pa/arcanist/scripts/ci/go/internal/pyjson"
+	"github.com/hhh-pa/clojure/scripts/ci/go/internal/executil"
+	"github.com/hhh-pa/clojure/scripts/ci/go/internal/pyjson"
 )
 
-const usage = `cargo-geiger gate (T968): fail when workspace ` + "`unsafe`" + ` grows.
+const usage = `cargo-geiger gate (T1174): fail when workspace ` + "`unsafe`" + ` grows.
 
 geiger 0.13 cannot run on virtual manifests, so this runs it once per
 workspace member and sums each member's own unsafe counters (used + unused,
 so used/unused reclassification alone never trips the gate). Crates whose
-bins carry required-features (backend-worker, uniffi-bindgen) get those
+bins carry required-features get those
 features enabled from cargo metadata, so the bins are analyzed too.
 
 The sum is compared against <workspace>/geiger-baseline.json: a higher total
@@ -35,11 +33,11 @@ reported (informational) but never gated: new deps routinely allow unsafe.
 Usage: geiger <workspace> [--regen]
   --regen rewrites the baseline instead of checking (adoption/updates only).
 
-Requires cargo-geiger on PATH. Python 3.9 compatible.
+Requires cargo-geiger on PATH.
 
 `
 
-const baselineComment = "cargo-geiger baseline (T968): total unsafe items/expressions " +
+const baselineComment = "cargo-geiger baseline (T1174): total unsafe items/expressions " +
 	"summed over workspace crates (used + unused). CI fails when " +
 	"the total grows; lower it when unsafe is removed."
 

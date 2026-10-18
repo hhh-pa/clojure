@@ -52,9 +52,8 @@ func RunEnv(t *testing.T, bin, workdir string, extraEnv []string, args ...string
 }
 
 // RunBothEnv executes bin with args in workdir, returning stdout,
-// stderr, and exit code. Used where the oracle itself writes stderr
-// (rust-quality-gates raises SystemExit with a message, which Python
-// prints to stderr).
+// stderr, and exit code. Used where the tool itself writes stderr
+// (rust-quality-gates reports fatal errors on stderr with exit 1).
 func RunBothEnv(t *testing.T, bin, workdir string, extraEnv []string, args ...string) (string, string, int) {
 	t.Helper()
 	cmd := exec.Command(bin, args...)

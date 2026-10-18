@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/hhh-pa/arcanist/scripts/ci/go/internal/executil"
+	"github.com/hhh-pa/clojure/scripts/ci/go/internal/executil"
 )
 
 const winHWScript = `$c = Get-CimInstance Win32_Processor | Select-Object -First 1

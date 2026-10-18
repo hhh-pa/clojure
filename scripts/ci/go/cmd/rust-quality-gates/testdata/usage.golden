@@ -1,4 +1,4 @@
-Rust quality gates (T968): audit, deny, udeps, geiger, complexity, coverage.
+Rust quality gates (T1174): audit, deny, udeps, geiger, complexity, coverage.
 
 Usage: rust-quality-gates <workspace-dir> <report-dir> <cov-runner> [cov-args...]
        rust-quality-gates <workspace-dir> --provision-only
@@ -18,16 +18,16 @@ Usage: rust-quality-gates <workspace-dir> <report-dir> <cov-runner> [cov-args...
 
 Runs every gate plus coverage on every build; exits nonzero citing the
 first failure (a red gate never hides the others' signal, and coverage —
-report-only observability — always publishes so Jenkins trends never gap).
+report-only observability — always publishes so Codecov trends never gap).
 Tools are pinned below and provisioned idempotently (prebuilt binaries
 into the stage's cargo bin with a cargo-install fallback when a prebuilt
 cannot execute here — upstream gnu builds may need newer glibc than
 bookworm's 2.36 — plus rustup components).
 Linux-only:
-every call site is a Linux container. Python 3.9 compatible, stdlib only.
+every call site is a Linux container. Pure Go, stdlib only.
 
-Coverage note (T970): rustc records #[path]-included modules — the
-headless GUI tours in binary crates — under `<crate>/tests/../src/*.rs`,
+Coverage note (T1174): rustc records #[path]-included modules in binary
+crates under `<crate>/tests/../src/*.rs`,
 which cargo-llvm-cov 0.9.1 silently drops from every report. The LCOV
 step therefore re-exports from the same profile data with raw llvm-cov
 and merges those records onto their canonical paths (pure test sources

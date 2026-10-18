@@ -4,7 +4,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/hhh-pa/arcanist/scripts/ci/go/internal/cmdtest"
+	"github.com/hhh-pa/clojure/scripts/ci/go/internal/cmdtest"
 )
 
 func TestGoldenPaths(t *testing.T) {

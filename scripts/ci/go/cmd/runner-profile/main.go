@@ -1,4 +1,4 @@
-// Command runner-profile prints the CI runner's hardware profile (T1170
+// Command runner-profile prints the CI runner's hardware profile (T1174
 // PROF): CPU count/model/frequency/cache, memory, and storage, one block
 // on stdout plus a Markdown table appended to GITHUB_STEP_SUMMARY when
 // set. Every probe is best-effort and fast; failures degrade to
@@ -14,7 +14,7 @@ import (
 	"strings"
 )
 
-const usage = `Runner hardware profile (T1170 PROF): log CPU, memory, and
+const usage = `Runner hardware profile (T1174 PROF): log CPU, memory, and
 storage for the machine executing this CI job, to stdout and the job
 summary, so per-execution performance can be understood.
 

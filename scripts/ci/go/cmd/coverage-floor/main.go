@@ -1,8 +1,7 @@
-// Command coverage-floor is the Go port of
-// scripts/ci/lib/coverage-floor-check.py: fail when LCOV line coverage
-// drops below the floor. Usage text names this binary (the Python
-// usage hardcodes its own filename); all other output matches the
-// oracle byte-for-byte.
+// Command coverage-floor fails when LCOV line coverage drops below
+// the floor (vendored from arcanist's scripts/ci/go). Usage text
+// names this binary; all other output matches the arcanist oracle
+// byte-for-byte.
 package main
 
 import (
@@ -11,7 +10,7 @@ import (
 	"sort"
 	"strconv"
 
-	"github.com/hhh-pa/arcanist/scripts/ci/go/internal/lcov"
+	"github.com/hhh-pa/clojure/scripts/ci/go/internal/lcov"
 )
 
 const usage = "Usage: coverage-floor <lcov.info> [floor=80.0]\n"

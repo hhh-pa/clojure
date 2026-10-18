@@ -1,12 +1,9 @@
-// Command rust-quality-gates is the Go port of
-// scripts/ci/lib/rust-quality-gates.py: audit, deny, udeps, geiger,
-// complexity, coverage. Usage text names this binary (the Python
-// usage hardcodes its own filename). Internal gates run the sibling
-// Go binaries (resolved next to the running executable, the LIB_DIR
-// analogue), so the "+ <sibling> ..." lines name binaries instead of
-// "python3 ...py"; all other stdout matches the oracle byte-for-byte.
-// Messages the oracle raises via SystemExit go to stderr with exit 1,
-// exactly as Python prints them.
+// Command rust-quality-gates runs the Rust quality gates (vendored
+// from arcanist's scripts/ci/go): audit, deny, udeps, geiger,
+// complexity, coverage. Usage text names this binary; internal gates
+// run the sibling binaries resolved next to the running executable.
+// All other stdout matches the arcanist oracle byte-for-byte; fatal
+// errors go to stderr with exit 1.
 package main
 
 import (
@@ -26,11 +23,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/hhh-pa/arcanist/scripts/ci/go/internal/executil"
-	"github.com/hhh-pa/arcanist/scripts/ci/go/internal/lcov"
+	"github.com/hhh-pa/clojure/scripts/ci/go/internal/executil"
+	"github.com/hhh-pa/clojure/scripts/ci/go/internal/lcov"
 )
 
-const usage = `Rust quality gates (T968): audit, deny, udeps, geiger, complexity, coverage.
+const usage = `Rust quality gates (T1174): audit, deny, udeps, geiger, complexity, coverage.
 
 Usage: rust-quality-gates <workspace-dir> <report-dir> <cov-runner> [cov-args...]
        rust-quality-gates <workspace-dir> --provision-only
@@ -50,16 +47,16 @@ Usage: rust-quality-gates <workspace-dir> <report-dir> <cov-runner> [cov-args...
 
 Runs every gate plus coverage on every build; exits nonzero citing the
 first failure (a red gate never hides the others' signal, and coverage —
-report-only observability — always publishes so Jenkins trends never gap).
+report-only observability — always publishes so Codecov trends never gap).
 Tools are pinned below and provisioned idempotently (prebuilt binaries
 into the stage's cargo bin with a cargo-install fallback when a prebuilt
 cannot execute here — upstream gnu builds may need newer glibc than
 bookworm's 2.36 — plus rustup components).
 Linux-only:
-every call site is a Linux container. Python 3.9 compatible, stdlib only.
+every call site is a Linux container. Pure Go, stdlib only.
 
-Coverage note (T970): rustc records #[path]-included modules — the
-headless GUI tours in binary crates — under ` + "`<crate>/tests/../src/*.rs`" + `,
+Coverage note (T1174): rustc records #[path]-included modules in binary
+crates under ` + "`<crate>/tests/../src/*.rs`" + `,
 which cargo-llvm-cov 0.9.1 silently drops from every report. The LCOV
 step therefore re-exports from the same profile data with raw llvm-cov
 and merges those records onto their canonical paths (pure test sources
@@ -85,12 +82,11 @@ const (
 	rcaVersion     = "0.0.25"
 	nextestVersion = "0.9.148"
 	// UDEPSNightly is exported so the gate Dockerfile can grep the
-	// pin from this source (the pins.py analogue).
+	// pin from this source (single pin source on purpose).
 	UDEPSNightly = "nightly-2026-10-01"
 )
 
-// fail reports a fatal error the way uncaught SystemExit(msg) does:
-// the message on stderr, exit 1.
+// fail reports a fatal error: the message on stderr, exit 1.
 func fail(err error) int {
 	fmt.Fprintln(os.Stderr, err.Error())
 	return 1
@@ -466,7 +462,7 @@ func cargoTargetDir(env []string, workspace string) string {
 }
 
 // restampTree applies a uniform mtime stamp over a seeded target
-// tree (T971): every file and dir gets one shared timestamp, so no
+// tree (T1174): every file and dir gets one shared timestamp, so no
 // dependency output is newer than its dependent and dep-info files
 // are newer than every input they list. Best-effort: a missing tree
 // just compiles from scratch.
@@ -864,8 +860,7 @@ func printLCOVSummary(lcovPath, workspace string) error {
 	return nil
 }
 
-// sibling resolves a sibling Go tool next to the running executable
-// (the LIB_DIR analogue).
+// sibling resolves a sibling Go tool next to the running executable.
 func sibling(name string) (string, error) {
 	exe, err := os.Executable()
 	if err != nil {
@@ -1149,7 +1144,7 @@ func runMain(argv []string) int {
 	}
 	keep(msg)
 
-	// udeps runs in the cooked nested target dir (T971): its
+	// udeps runs in the cooked nested target dir (T1174): its
 	// fingerprints match only udeps-cooked artifacts, and the
 	// separate dir keeps its nightly .rustc_info.json from dirtying
 	// the stable tree.
@@ -1161,7 +1156,7 @@ func runMain(argv []string) int {
 	} else {
 		fmt.Printf("==> %s: udeps seed MISSING (%s)\n", workspace, nightlyFP)
 	}
-	// Restamp after provisioning (T971).
+	// Restamp after provisioning (T1174).
 	restampTree(udepsTargetDir)
 	msg, err = attempt("cargo udeps ("+UDEPSNightly+")",
 		[]string{"cargo", "+" + UDEPSNightly, "udeps", "--workspace", "--all-targets"},

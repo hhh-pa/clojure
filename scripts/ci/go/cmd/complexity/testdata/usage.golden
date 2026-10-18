@@ -1,4 +1,4 @@
-rust-code-analysis gate (T968): fail on new/worsened complexity violations.
+rust-code-analysis gate (T1174): fail on new/worsened complexity violations.
 
 Collects per-function cyclomatic/cognitive metrics over every .rs file in the
 workspace (excluding build output) and compares named-function violations
@@ -18,5 +18,5 @@ nothing".
 Usage: complexity <workspace-dir> [--regen]
   --regen rewrites the baseline instead of checking (adoption/updates only).
 
-Requires rust-code-analysis-cli on PATH. Python 3.9 compatible (no tomllib).
+Requires rust-code-analysis-cli on PATH.
 

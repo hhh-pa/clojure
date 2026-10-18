@@ -1,11 +1,11 @@
-// Command canonical-lcov reproduces CI's canonical LCOV locally (T1170;
+// Command canonical-lcov reproduces CI's canonical LCOV locally (T1174;
 // dev-only helper).
 //
 // CI's published lcov.info is NOT cargo-llvm-cov's output:
 // rust-quality-gates re-exports the same profile data with raw
 // `llvm-cov export` and merges twin path spellings (`tests/../src` ->
 // `src`), recovering genuinely-executed lines cargo's filter drops (see
-// the T970 coverage note in rust-quality-gates). A plain local
+// the T1174 coverage note in rust-quality-gates). A plain local
 // `cargo llvm-cov` run therefore under-reports (72% vs CI's 93% on the
 // same suite).
 //

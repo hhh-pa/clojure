@@ -1,8 +1,8 @@
-// Command coverage-summary is the Go port of
-// scripts/ci/lib/coverage-summary.py: render an lcov.info report as
-// GitHub Markdown (job-summary flavor to stdout, PR-comment flavor to
-// --out). Usage text names this binary (the Python usage hardcodes its
-// own filename); all other output matches the oracle byte-for-byte.
+// Command coverage-summary renders an lcov.info report as GitHub
+// Markdown (vendored from arcanist's scripts/ci/go): job-summary
+// flavor to stdout, PR-comment flavor to --out. Usage text names
+// this binary; all other output matches the arcanist oracle
+// byte-for-byte.
 package main
 
 import (
@@ -12,7 +12,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/hhh-pa/arcanist/scripts/ci/go/internal/lcov"
+	"github.com/hhh-pa/clojure/scripts/ci/go/internal/lcov"
 )
 
 // Must match the floor enforced by rust-quality-gates (the

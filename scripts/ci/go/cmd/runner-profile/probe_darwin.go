@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/hhh-pa/arcanist/scripts/ci/go/internal/executil"
+	"github.com/hhh-pa/clojure/scripts/ci/go/internal/executil"
 )
 
 func sysctl(name string) string {

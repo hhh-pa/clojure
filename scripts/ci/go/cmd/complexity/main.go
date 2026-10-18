@@ -1,12 +1,9 @@
-// Command complexity is the Go port of
-// scripts/ci/lib/complexity-check.py: the rust-code-analysis gate,
-// failing on new or worsened complexity violations. Usage text names
-// this binary (the Python usage hardcodes its own filename);
-// otherwise stdout matches the oracle byte-for-byte. Metric numbers
-// keep their raw JSON literals (as Python %s would print them). Like
-// the oracle, internal tool failures that Python reports via
-// traceback or sys.exit go to stderr (exit 1) or stdout (exit 2)
-// respectively; Go's own text fills the traceback cases.
+// Command complexity is the rust-code-analysis gate (vendored from
+// arcanist's scripts/ci/go), failing on new or worsened complexity
+// violations. Usage text names this binary; otherwise stdout matches
+// the arcanist oracle byte-for-byte: metric numbers keep their raw
+// JSON literals, and internal tool failures go to stderr (exit 1)
+// or stdout (exit 2) respectively.
 package main
 
 import (
@@ -20,11 +17,11 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/hhh-pa/arcanist/scripts/ci/go/internal/executil"
-	"github.com/hhh-pa/arcanist/scripts/ci/go/internal/pyjson"
+	"github.com/hhh-pa/clojure/scripts/ci/go/internal/executil"
+	"github.com/hhh-pa/clojure/scripts/ci/go/internal/pyjson"
 )
 
-const usage = `rust-code-analysis gate (T968): fail on new/worsened complexity violations.
+const usage = `rust-code-analysis gate (T1174): fail on new/worsened complexity violations.
 
 Collects per-function cyclomatic/cognitive metrics over every .rs file in the
 workspace (excluding build output) and compares named-function violations
@@ -44,17 +41,17 @@ nothing".
 Usage: complexity <workspace-dir> [--regen]
   --regen rewrites the baseline instead of checking (adoption/updates only).
 
-Requires rust-code-analysis-cli on PATH. Python 3.9 compatible (no tomllib).
+Requires rust-code-analysis-cli on PATH.
 
 `
 
-// Thresholds mirrored with scripts/ci/complexity-scan.ps1.
+// Thresholds mirrored with arcanist's scripts/ci/complexity-scan.ps1.
 const (
 	cyThreshold = 15
 	coThreshold = 20
 )
 
-const baselineCommentFmt = "rust-code-analysis baseline (T968): named functions with " +
+const baselineCommentFmt = "rust-code-analysis baseline (T1174): named functions with " +
 	"cyclomatic>%d or cognitive>%d. CI fails on NEW violations " +
 	"or worsened ones; prune entries that no longer violate."
 
