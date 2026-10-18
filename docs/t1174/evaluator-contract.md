@@ -224,7 +224,10 @@ post wraps the body: `(let [% body] (assert c) %)`; combined pre+post is
 Failure: `AssertionError | Assert failed: (cond-form)` (form printed).
 A leading map is pre/post only when a body form follows it; a lone
 trailing map is the body (`((fn [x] {:pre [false]}) -5)` →
-`{:pre [false]}`, probe31 `fn-lone-*`).
+`{:pre [false]}`, probe31 `fn-lone-*`). Map-valued `:pre`/`:post` seq
+to whole entry vectors (evaluated in map order, key then value —
+always truthy, so `((fn [x] {:pre {nil 1}} x) 1)` → `1`, probe33
+`pre-map-*`/`post-map-*`).
 
 Var-arg rest with no args binds `nil` (probe21 `variadic0 [1 nil]`).
 

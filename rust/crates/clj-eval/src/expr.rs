@@ -19,7 +19,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use clj_reader::Span;
-use clj_value::{Keyword, Map, PrintOpts, Symbol, Value, pr_to_string, print_to_string};
+use clj_value::{Keyword, Map, PrintOpts, Symbol, Value, Vector, pr_to_string, print_to_string};
 
 use crate::env::Namespace;
 use crate::error::{CompileError, NativeError, Verb, jvm_class_of, span_of};
@@ -1808,8 +1808,8 @@ fn map_get<'m>(m: &'m Map, key: &str) -> Option<&'m Value> {
 struct RawClause<'v> {
     fixed: Vec<&'v Value>,
     rest: Option<&'v Value>,
-    pre: Vec<&'v Value>,
-    post: Vec<&'v Value>,
+    pre: Vec<Value>,
+    post: Vec<Value>,
     body: Vec<&'v Value>,
 }
 
@@ -2810,16 +2810,22 @@ impl<'a> Analyzer<'a> {
     }
 
     /// One pre/post condition list: `nil` is empty, seqables are
-    /// conditions, anything else is the `fn*` `ISeq` error.
-    fn prepost_conds<'v>(
+    /// conditions, anything else is the `fn*` `ISeq` error. Map
+    /// values seq to whole entry vectors (evaluated in map order),
+    /// never flattened to k/v conds (probe33 `pre-map-*`).
+    fn prepost_conds(
         &self,
-        prepost: &'v Map,
+        prepost: &Map,
         which: &str,
         span: Span,
-    ) -> Result<Vec<&'v Value>, CompileError> {
+    ) -> Result<Vec<Value>, CompileError> {
         match map_get(prepost, which) {
             None | Some(Value::Nil) => Ok(Vec::new()),
-            Some(v) if is_seqable(v) => Ok(seq_refs(v)),
+            Some(Value::Map(m)) => Ok(m
+                .iter()
+                .map(|(k, v)| Value::Vector(Vector::from_vec(vec![k.clone(), v.clone()])))
+                .collect()),
+            Some(v) if is_seqable(v) => Ok(seq_refs(v).into_iter().cloned().collect()),
             Some(other) => Err(self.err(
                 class::ILLEGAL_ARG,
                 format!(

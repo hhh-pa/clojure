@@ -389,6 +389,30 @@ fn prepost() {
         run_last(&mut eval, "((fn ([x] {:pre [false]}) ([x y] x)) -5)"),
         "{:pre [false]}"
     );
+    // Map-valued pre/post seq to whole entry vectors, never
+    // flattened to k/v conds (probe33 `pre-map-*`).
+    assert_eq!(run_last(&mut eval, "((fn [x] {:pre {nil 1}} x) 1)"), "1");
+    assert_eq!(run_last(&mut eval, "((fn [x] {:post {nil 1}} x) 5)"), "5");
+    assert_eq!(run_last(&mut eval, "((fn [x] {:pre [{nil 1}]} x) 1)"), "1");
+    // Entries evaluate in map order, key then value (probe33
+    // `pre-map-side`, `pre-map-order`, `post-map-side`).
+    let (mut eval, log) = rigged();
+    assert_eq!(
+        run_last(&mut eval, "((fn [x] {:pre {(t-log :k) (t-log :v)}} x) 1)"),
+        "1"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "((fn [x] {:pre {(t-log :a) 1 (t-log :b) 2}} x) 1)"
+        ),
+        "1"
+    );
+    assert_eq!(
+        run_last(&mut eval, "((fn [x] {:post {(t-log :p) 1}} x) 5)"),
+        "5"
+    );
+    assert_eq!(*log.lock().unwrap(), vec![":k", ":v", ":a", ":b", ":p"]);
 }
 
 #[test]

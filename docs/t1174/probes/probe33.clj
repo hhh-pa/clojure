@@ -1,6 +1,8 @@
 ;; S4 oracle probes, round 1b: direct let*/loop*/fn* (M10),
-;; `&` function names (L4).
+;; `&` function names (L4), map-valued pre/post (L5).
 ;; Exit 0 (caught; chains printed).
+;; NOTE: forms mentioning `%` use `(fn [] …)`, never `#(…)`
+;; (the `#()` reader would capture `%` as its own argument).
 (defn tx [label f]
   (println label "=>" (pr-str (try (f) (catch Throwable t
     (loop [t t acc []] (if t (recur (.getCause t) (conj acc (str (.getName (class t)) " | " (.getMessage t)))) acc)))))))
@@ -80,3 +82,13 @@
 (tx "fn-amp-arity" #(eval '((fn & [x] x) 1 2)))
 (tx "fn-qualname" #(eval '(fn u/f329 [x] x)))
 (tx "letfn-amp" #(eval '(letfn [(& [x] x)] (& 5))))
+(tx "pre-map-nil" #(eval '((fn [x] {:pre {nil 1}} x) 1)))
+(tx "pre-map-side" #(eval '(do (def log331 (atom [])) ((fn [x] {:pre {(do (swap! log331 conj :k) nil) (do (swap! log331 conj :v) 1)}} x) 1) @log331)))
+(tx "pre-map-order" #(eval '(do (def log332 (atom [])) ((fn [x] {:pre {(do (swap! log332 conj :a) 1) :x (do (swap! log332 conj :b) 2) :y}} x) 1) @log332)))
+(tx "post-map" #(eval '((fn [x] {:post {nil 1}} x) 5)))
+(tx "post-map-pct" (fn [] (eval '((fn [x] {:post {1 %}} x) 5))))
+(tx "pre-pct" (fn [] (eval '((fn [x] {:pre [%]} x) 5))))
+(tx "post-map-side" (fn [] (eval '(do (def log333 (atom [])) ((fn [x] {:post {(do (swap! log333 conj :k) nil) 1}} x) 5) @log333))))
+(tx "pre-vecmap" #(eval '((fn [x] {:pre [{nil 1}]} x) 1)))
+(tx "post-normal" (fn [] (eval '((fn [x] {:post [(pos? %)]} x) 5))))
+(tx "post-fail" (fn [] (eval '((fn [x] {:post [(pos? %)]} x) -5))))
