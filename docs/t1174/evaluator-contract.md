@@ -160,6 +160,8 @@ wrapper naming the operator **as written** (`macroexpanding loop at …`):
 | `(loop [[a & b c] …] …)` | `Exception` | `Unsupported binding form, only :as can follow & parameter` |
 | `(loop [[a &] …] …)` | `Exception` | `Unsupported binding form: ` (nil rest prints empty) |
 | `(loop [[a :as 5] …] …)` | `Exception` | `Unsupported binding form: 5` (the `:as` value walks as a binding form immediately, before emission; dangling `:as` walks `nil` → `Unsupported binding form: `; shape values pass the walk and die at the inner-`let` spec instead, probe31 `loop-as-*`) |
+| `(loop [{:keys/:syms [x]} …] …)`, `x` a non-ident | `ClassCastException` | `Cannot cast <class> to clojure.lang.Named` (only symbols/keywords pass the key-list walk — everything else takes the `(namespace x)` cast; `nil` is the helpful-NPE text `Cannot invoke "clojure.lang.Named.getNamespace()" because "x" is null`; probe32 `keys-*`/`syms-*`) |
+| `(loop [{:strs [x]} …] …)`, `x` a non-ident | `Exception` | `Unsupported binding form: <str>` (`:strs` never casts; keywords walk fine and die at the inner-`let` spec instead — except under `:keys`, whose spec takes idents, so `(loop [{:keys [:a]} {:a 1}] a)` → `1`; probe32 `strs-*`/`keys-kw`) |
 | bare `(loop)` / `(letfn)` / `(binding)` | `ArityException` | `Wrong number of args (0) passed to: clojure.core/NAME` — no wrapper at all (the macro fn itself rejects 0 args before any body runs, probe25 `loop-bare`/`letfn-bare`/`binding-bare`) |
 
 `(loop [[a] [1]] a)` → `1` (loop destructures like `let`).

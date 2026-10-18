@@ -915,15 +915,6 @@ fn is_ident(v: &Value) -> bool {
     matches!(v, Value::Symbol(_) | Value::Keyword(_))
 }
 
-/// `localize`: idents become plain symbols by name (probe25).
-fn localize(v: &Value) -> Option<String> {
-    match v {
-        Value::Symbol(s) => Some(s.name().to_owned()),
-        Value::Keyword(k) => Some(k.name().to_owned()),
-        _ => None,
-    }
-}
-
 /// Bound names of a pattern in canonical slot order (entries, then
 /// keys, then `:as`/outlets; fixed, then rest, then `:as`). The
 /// builder and the evaluator share this order.
@@ -1655,36 +1646,26 @@ fn walk_key_list(
             sel.push(form.clone());
             continue;
         }
-        let key = key_for(dir, form)?;
+        let (key, local) = key_for(dir, form)?;
         sel.push(key.clone());
-        if let Some(local) = localize(form) {
-            bound_keys.insert(local.clone(), key.clone());
-            check_or_pair(or_map, &local, &key, dir.required)?;
-        } else {
-            // Strings name fine but never bind (`localize` keeps
-            // them; `push1` re-walks them as patterns).
-            walk_binding(form)?;
-        }
+        bound_keys.insert(local.clone(), key.clone());
+        check_or_pair(or_map, &local, &key, dir.required)?;
     }
     Ok(())
 }
 
-/// `(tr bb)`: the lookup key for one pre-`&` element. Non-`Named`
-/// elements are `ClassCastException … to clojure.lang.Named`;
-/// strings name fine (and fail later as binding forms).
-fn key_for(dir: &KeyDirective, form: &Value) -> Result<Value, WalkError> {
+/// `(tr bb)`: the lookup key plus the bound local for one
+/// pre-`&` element. Only idents pass (probe32): keywords ride
+/// the fast path untouched, and the local is the plain name.
+/// Anything else takes the `(namespace x)` cast — except under
+/// `:strs`, which never casts (see `key_cast_err`).
+fn key_for(dir: &KeyDirective, form: &Value) -> Result<(Value, String), WalkError> {
     let (elem_ns, name) = match form {
         Value::Symbol(s) => (s.namespace().map(str::to_owned), s.name().to_owned()),
         Value::Keyword(k) => (k.namespace().map(str::to_owned), k.name().to_owned()),
-        Value::Str(s) => (None, s.to_string()),
-        other => {
-            return Err(WalkError {
-                class: class::CLASS_CAST,
-                message: NativeError::cast(&jvm_class_of(other), "clojure.lang.Named").message,
-            });
-        }
+        _ => return Err(key_cast_err(dir, form)),
     };
-    Ok(match dir.kind {
+    let key = match dir.kind {
         KeyKind::Keys => {
             let ns = dir.ns.clone().or(elem_ns);
             Value::Keyword(Keyword::new(ns.as_deref(), &name))
@@ -1694,7 +1675,30 @@ fn key_for(dir: &KeyDirective, form: &Value) -> Result<Value, WalkError> {
             Value::Symbol(Symbol::new(ns.as_deref(), &name))
         }
         KeyKind::Strs => Value::Str(Arc::from(name.as_str())),
-    })
+    };
+    Ok((key, name))
+}
+
+/// The `(namespace x)` cast for a non-ident key-list element
+/// (probe32): `ClassCastException … to clojure.lang.Named`,
+/// the helpful-NPE text for `nil` — but `:strs` never casts
+/// and reports `Unsupported binding form` (str-rendered)
+/// instead.
+fn key_cast_err(dir: &KeyDirective, form: &Value) -> WalkError {
+    if matches!(dir.kind, KeyKind::Strs) {
+        return WalkError::unsupported(form);
+    }
+    if matches!(form, Value::Nil) {
+        return WalkError {
+            class: class::NULL_POINTER,
+            message: "Cannot invoke \"clojure.lang.Named.getNamespace()\" because \"x\" is null"
+                .to_owned(),
+        };
+    }
+    WalkError {
+        class: class::CLASS_CAST,
+        message: NativeError::cast(&jvm_class_of(form), "clojure.lang.Named").message,
+    }
 }
 
 /// `:or` semantics for one binding (compile time): `Multiple :or
@@ -2147,8 +2151,7 @@ fn build_keys(
             extra_keys.push(form);
             continue;
         }
-        let key = key_for(dir, &form).unwrap_or(Value::Nil);
-        if let Some(local) = localize(&form) {
+        if let Ok((key, local)) = key_for(dir, &form) {
             keys.push(KeyBinding {
                 local,
                 key,

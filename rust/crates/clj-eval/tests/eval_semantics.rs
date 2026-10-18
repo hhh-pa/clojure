@@ -455,6 +455,9 @@ fn destructure_values() {
         ("(loop [{:foo/keys [a]} {:foo/a 1}] a)", "1"),
         ("(let [{:syms [s]} {'s 1}] s)", "1"),
         ("(let [{:keys [:b]} {:b 1}] b)", "1"),
+        // Keywords ride the key-list fast path on every form
+        // (probe32 `keys-kw` evaluates).
+        ("(loop [{:keys [:a]} {:a 1}] a)", "1"),
         ("(let [[a & [b c]] [1 2 3]] [a b c])", "[1 2 3]"),
         ("(let [[a b] \"xy\"] [a b])", "[\\x \\y]"),
         ("(let [{:keys! [a]} {:a 1}] a)", "1"),

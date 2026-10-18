@@ -669,6 +669,65 @@ fn loop_assert_errors() {
 }
 
 #[test]
+fn keys_element_cast_matrix() {
+    // Only idents pass the key-list walk (probe32): anything else
+    // takes the `(namespace x)` cast — CCE to Named, the
+    // helpful-NPE text for nil — except under `:strs`, which
+    // never casts and reports `Unsupported binding form`.
+    let unexp = "Unexpected error macroexpanding loop at (test:1:1).";
+    for (src, cause) in [
+        (
+            "(loop [{:keys [\"a\"]} {}] a)",
+            "java.lang.ClassCastException | Cannot cast java.lang.String to clojure.lang.Named",
+        ),
+        (
+            "(loop [{:syms [\"a\"]} {}] a)",
+            "java.lang.ClassCastException | Cannot cast java.lang.String to clojure.lang.Named",
+        ),
+        (
+            "(loop [{:keys [true]} {}] a)",
+            "java.lang.ClassCastException | Cannot cast java.lang.Boolean to clojure.lang.Named",
+        ),
+        (
+            "(loop [{:keys [nil]} {}] a)",
+            "java.lang.NullPointerException | Cannot invoke \"clojure.lang.Named.getNamespace()\" because \"x\" is null",
+        ),
+        (
+            "(loop [{:syms [nil]} {}] a)",
+            "java.lang.NullPointerException | Cannot invoke \"clojure.lang.Named.getNamespace()\" because \"x\" is null",
+        ),
+    ] {
+        check(src, unexp, cause);
+    }
+    let syn = "Syntax error macroexpanding loop at (test:1:1).";
+    for (src, cause) in [
+        (
+            "(loop [{:strs [\"a\"]} {}] a)",
+            "java.lang.Exception | Unsupported binding form: a",
+        ),
+        (
+            "(loop [{:strs [5]} {}] a)",
+            "java.lang.Exception | Unsupported binding form: 5",
+        ),
+        (
+            "(loop [{:strs [nil]} {}] a)",
+            "java.lang.Exception | Unsupported binding form: ",
+        ),
+    ] {
+        check(src, syn, cause);
+    }
+    // Keywords ride the fast path untouched: `:strs`/`:syms`
+    // walk fine and die at the inner spec (probe32).
+    for src in ["(loop [{:strs [:a]} {}] a)", "(loop [{:syms [:a]} {}] a)"] {
+        check(
+            src,
+            "Syntax error macroexpanding clojure.core/let at (test:1:1).",
+            "clojure.lang.ExceptionInfo | Call to clojure.core/let did not conform to spec.",
+        );
+    }
+}
+
+#[test]
 fn letfn_errors() {
     check(
         "(letfn [f] 1)",

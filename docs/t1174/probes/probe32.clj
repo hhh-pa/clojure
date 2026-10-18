@@ -1,5 +1,6 @@
 ;; S4 oracle probes, round 1b: fn clause-check order (M6),
-;; try clause order (M7), catch classes (M8).
+;; try clause order (M7), catch classes (M8), key-list element
+;; casts (M9: only idents pass; strs never casts).
 ;; Exit 0 (caught; chains printed).
 (defn tx [label f]
   (println label "=>" (pr-str (try (f) (catch Throwable t
@@ -62,3 +63,16 @@
 (tx "catch-fqn-nope" #(eval '(try 1 (catch foo.bar.Baz e 1))))
 (tx "catch-jlang-nope" #(eval '(try 1 (catch java.lang.Nope e 1))))
 (tx "catch-clj-nope" #(eval '(try 1 (catch clojure.lang.Nope e 1))))
+(tx "keys-str" #(eval '(loop [{:keys ["a"]} {}] a)))
+(tx "keys-num" #(eval '(loop [{:keys [5]} {}] a)))
+(tx "keys-bool" #(eval '(loop [{:keys [true]} {}] a)))
+(tx "keys-nil" #(eval '(loop [{:keys [nil]} {}] a)))
+(tx "keys-kw" #(eval '(loop [{:keys [:a]} {}] a)))
+(tx "syms-str" #(eval '(loop [{:syms ["a"]} {}] a)))
+(tx "syms-num" #(eval '(loop [{:syms [5]} {}] a)))
+(tx "syms-nil" #(eval '(loop [{:syms [nil]} {}] a)))
+(tx "syms-kw" #(eval '(loop [{:syms [:a]} {}] a)))
+(tx "strs-str" #(eval '(loop [{:strs ["a"]} {}] a)))
+(tx "strs-num" #(eval '(loop [{:strs [5]} {}] a)))
+(tx "strs-nil" #(eval '(loop [{:strs [nil]} {}] a)))
+(tx "strs-kw" #(eval '(loop [{:strs [:a]} {}] a)))
