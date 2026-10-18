@@ -2313,6 +2313,17 @@ impl<'a> Analyzer<'a> {
                 Some("letfn*".to_owned()),
             ));
         };
+        // Qualified names hit the `let` pre-seed rule, not the
+        // binding-form check (probe31 `letfn-qual-name`).
+        if name.namespace().is_some() {
+            return Err(self.err(
+                class::RUNTIME,
+                format!("Can't let qualified name: {name}"),
+                span,
+                Verb::Compiling,
+                Some("letfn*".to_owned()),
+            ));
+        }
         if !is_local_name(name) {
             return Err(self.err(
                 class::ILLEGAL_ARG,

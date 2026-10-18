@@ -153,6 +153,7 @@ wrapper naming the operator **as written** (`macroexpanding loop at …`):
 | `(letfn [f] 1)` | `IllegalArgumentException` | `Don't know how to create ISeq from: clojure.lang.Symbol` (class name of the offending value) |
 | `(letfn [(f)] 1)` | `ExceptionInfo` | `Call to clojure.core/fn did not conform to spec.` (wrapper: `macroexpanding clojure.core/fn`; innermost macro names the error) |
 | `(letfn [(1 [x] x)] …)` | `IllegalArgumentException` | `Bad binding form, expected symbol, got: 1` (wrapper: `compiling letfn*`) |
+| `(letfn [(u/f …)] …)` | `RuntimeException` | `Can't let qualified name: u/f` (wrapper: `compiling letfn*`; the pre-seed `let` rejects qualified names before the binding-form check, probe31 `letfn-qual-name`) |
 | `(loop [a 1 & [2]] …)` | `RuntimeException` | `Can't use & as a local binding` (wrapper: `compiling loop*`; all-symbol bindings skip destructuring) |
 | `(loop [u/x 1] …)` | `RuntimeException` | `Can't let qualified name: u/x` (wrapper: `compiling loop*`) |
 | `(loop [[a & b c] …] …)` | `Exception` | `Unsupported binding form, only :as can follow & parameter` |

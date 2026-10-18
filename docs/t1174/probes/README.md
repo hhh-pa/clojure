@@ -81,6 +81,8 @@ root-cause exception (class | message | ex-data line/col).
   resets (`fence-fn-*`, `fence-loop-*`), unfenced clause bodies
   (`fence-catch-*`, `fence-finally-*`, `fence-nested-*`), `recur`
   error order (`recur-*`).
+- `probe31.clj` (S4 review round 1b): `letfn` qualified name
+  (`letfn-qual-name`).
 
 Run: `./probe.sh [outdir]`. Gensym ids (`p1__243#`), identity hashes
 (`@7fc19ced`), and inst renderings vary between runs; the contract

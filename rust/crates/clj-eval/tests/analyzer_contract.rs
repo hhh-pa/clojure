@@ -534,6 +534,11 @@ fn letfn_errors() {
         "Syntax error compiling letfn* at (test:1:1).",
         "java.lang.IllegalArgumentException | Bad binding form, expected symbol, got: null",
     );
+    check(
+        "(letfn [(u/f [x] x)] 1)",
+        "Syntax error compiling letfn* at (test:1:1).",
+        "java.lang.RuntimeException | Can't let qualified name: u/f",
+    );
 }
 
 #[test]
