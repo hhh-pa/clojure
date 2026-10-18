@@ -165,7 +165,7 @@ impl Default for TransientVector {
 
 /// A transient map: `assoc!`/`dissoc!` buffer with insertion-ordered
 /// freeze (re-assoc keeps the original key and position).
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct TransientMap {
     entries: Vec<(Value, Value)>,
     index: HashMap<Value, usize, FxBuildHasher>,
@@ -253,9 +253,15 @@ impl TransientMap {
     }
 }
 
+impl Default for TransientMap {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// A transient set: `conj!`/`disj!` buffer with insertion-ordered
 /// freeze (re-conj keeps the original member).
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct TransientSet {
     members: Vec<Value>,
     index: HashSet<Value, FxBuildHasher>,
@@ -333,5 +339,11 @@ impl TransientSet {
         }
         self.index.clear();
         Ok(set)
+    }
+}
+
+impl Default for TransientSet {
+    fn default() -> Self {
+        Self::new()
     }
 }
