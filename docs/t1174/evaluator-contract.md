@@ -72,11 +72,22 @@ Operator as written names the wrapper (`Syntax error compiling if at …`).
 | `(recur …)` across `try` | `UnsupportedOperationException` | `Cannot recur across try` |
 | arity mismatch | `IllegalArgumentException` | `Mismatched argument count to recur, expected: E args, got: G` |
 
-Check order (mirrors `RecurExpr.Parser`, probe23 order pins): tail/enclosure
-→ across-`try` → arity. So `(loop [a] (try (recur 1 2) …))` reports
-across-`try`, and non-tail `(recur 1 2)` reports tail position, never the
-mismatch. A `fn` boundary resets the fence (fresh `NO_RECUR` per
-`FnExpr`, whole clause — probe30 `fence-fn-try`, `fence-fn-prepost`).
+Check order (mirrors `RecurExpr.Parser`): across-`try` first — it beats
+tail, target, and arity alike — then tail/enclosure, then arity. So
+`(loop [a] (try (recur 1 2) …))` reports across-`try`, non-tail
+`(recur 1 2)` with a target reports tail position (never the
+mismatch), and a non-tail `recur` in a `try` still reports
+across-`try` (probe30 `fence-loop-init`). A `fn` boundary resets the
+fence (fresh `NO_RECUR` per `FnExpr`, whole clause — probe30
+`fence-fn-try`, `fence-fn-prepost`); a `loop` body resets it too, but
+`loop` inits keep the outer fence (probe30 `fence-loop-try` → `7`).
+Only the `try` body is fenced: catch/finally bodies reset the fence
+and hide the target (empty, never absent), so any `recur` there is
+the tail-position error — even targetless or under an outer fence
+(probe30 `fence-catch-*`, `fence-finally-*`). A nested `try` body
+inside a clause re-arms the fence; a nested `fn`/`loop` re-establishes
+a target (probe30 `fence-nested-try-in-catch`, `fence-fn-in-catch`,
+`fence-loop-in-catch`).
 
 `set!` analyzes its target first, then requires an assignable: a list
 target such as `(set! (x) 2)` fails during analysis

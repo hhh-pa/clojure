@@ -628,9 +628,10 @@ impl<'a> Analyzer<'a> {
         Ok(Expr::Throw(Box::new(self.analyze(items[1], span, false)?)))
     }
 
-    /// `(recur expr*)`: tail/enclosure, then `try`, then arity (§E2).
-    /// A bare top-level `(recur)` is the constant tail-position
-    /// error (the JVM hangs; §E2 documents the divergence).
+    /// `(recur expr*)`: across-`try` first (beats tail, target,
+    /// and arity alike), then tail/enclosure, then arity (§E2). A
+    /// bare top-level `(recur)` is the constant tail-position error
+    /// (the JVM hangs; §E2 documents the divergence).
     fn parse_recur(
         &mut self,
         items: &[&Value],
@@ -647,6 +648,15 @@ impl<'a> Analyzer<'a> {
                 Some("recur".to_owned()),
             )
         };
+        if self.no_recur {
+            return Err(self.err(
+                class::UNSUPPORTED,
+                "Cannot recur across try".to_owned(),
+                span,
+                Verb::Compiling,
+                Some("recur".to_owned()),
+            ));
+        }
         let Some(count) = self.recur else {
             if argc == 0 && tail {
                 return Err(tail_err());
@@ -664,15 +674,6 @@ impl<'a> Analyzer<'a> {
         };
         if !tail {
             return Err(tail_err());
-        }
-        if self.no_recur {
-            return Err(self.err(
-                class::UNSUPPORTED,
-                "Cannot recur across try".to_owned(),
-                span,
-                Verb::Compiling,
-                Some("recur".to_owned()),
-            ));
         }
         if argc != count {
             return Err(self.err(
@@ -820,6 +821,15 @@ impl<'a> Analyzer<'a> {
         let saved_recur = self.no_recur;
         self.no_recur = true;
         let body = self.analyze_body(&items[1..splits], span, tail)?;
+        // Catch/finally bodies reset the fence and hide the recur
+        // target (empty, never `nil`): a `recur` there is always the
+        // tail-position error, whatever the outer fence or target
+        // (probe30 `fence-catch-*`, `fence-finally-*`). Nested `try`
+        // bodies re-arm the fence; nested `fn`/`loop` re-establish a
+        // target.
+        self.no_recur = false;
+        let saved_target = self.recur;
+        self.recur = Some(0);
         let mut catches = Vec::new();
         let mut finally_body = Vec::new();
         let mut seen_finally = false;
@@ -868,6 +878,7 @@ impl<'a> Analyzer<'a> {
             }
         }
         self.no_recur = saved_recur;
+        self.recur = saved_target;
         Ok(Expr::Try {
             body,
             catches,
@@ -1677,12 +1688,20 @@ impl<'a> Analyzer<'a> {
             self.locals.extend(names);
             bindings_out.push((pat, init));
         }
+        // A `loop` body resets the try/recur fence; the inits keep
+        // the outer fence (probe30 `fence-loop-*`). The body is
+        // self-tail (like `fn`): a `loop` in non-tail position still
+        // takes `recur` (probe30 `fence-loop-in-catch`).
+        let saved_no_recur = self.no_recur;
         if is_loop {
             self.recur = Some(pats.len());
+            self.no_recur = false;
         }
-        let body = self.analyze_body(&items[2..], span, tail)?;
+        let body_tail = if is_loop { true } else { tail };
+        let body = self.analyze_body(&items[2..], span, body_tail)?;
         self.locals.truncate(base);
         self.recur = saved_recur;
+        self.no_recur = saved_no_recur;
         if is_loop {
             Ok(Expr::Loop {
                 bindings: bindings_out,

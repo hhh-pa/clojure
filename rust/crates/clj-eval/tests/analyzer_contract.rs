@@ -233,6 +233,34 @@ fn recur_rules() {
         "Syntax error compiling recur at (test:1:29).",
         "java.lang.UnsupportedOperationException | Can only recur from tail position",
     );
+    // `loop` inits keep the outer fence (probe30 `fence-loop-init`).
+    check(
+        "(loop [x 1] (loop [n (try (recur 5) (catch Exception e 2))] n))",
+        "Syntax error compiling recur at (test:1:27).",
+        "java.lang.UnsupportedOperationException | Cannot recur across try",
+    );
+    // Catch/finally bodies reset the fence and hide the target: any
+    // `recur` there is the tail-position error (probe30).
+    for (src, col) in [
+        ("(try (throw 42) (catch Exception e (recur 1)))", 36),
+        ("(try 1 (finally (recur 1)))", 17),
+        (
+            "(try (loop [a 1] (try 1 (catch Exception e (recur 1)))) (catch Exception f 2))",
+            44,
+        ),
+    ] {
+        check(
+            src,
+            &format!("Syntax error compiling recur at (test:1:{col})."),
+            "java.lang.UnsupportedOperationException | Can only recur from tail position",
+        );
+    }
+    // A nested `try` body inside a clause re-arms the fence.
+    check(
+        "(loop [a 1] (try 1 (catch Exception e (try (recur 1) (catch Exception f 2)))))",
+        "Syntax error compiling recur at (test:1:44).",
+        "java.lang.UnsupportedOperationException | Cannot recur across try",
+    );
 }
 
 #[test]

@@ -263,6 +263,39 @@ fn loop_recur() {
         ),
         ":d"
     );
+    // A `loop` body resets the fence too (probe30 `fence-loop-try`).
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(try (loop [n 5] (if n 7 (recur 1))) (catch Exception e 2))"
+        ),
+        "7"
+    );
+    // Nested `fn`/`loop` inside a clause re-establish a target: the
+    // clauses analyze clean (probe30 `fence-fn-in-catch`,
+    // `fence-loop-in-catch`; the bodies never run).
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(try 1 (catch Exception e ((fn [x] (recur x)) 1)))"
+        ),
+        "1"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(try 1 (catch Exception e (loop [a 1] (recur a))))"
+        ),
+        "1"
+    );
+    // `loop` bodies are self-tail: `recur` works in non-tail loops.
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(do (loop [a 3] (if (t-zero? a) :d (recur (t-dec a)))) 2)"
+        ),
+        "2"
+    );
     // `recur` rebinds through patterns (with `:or`).
     assert_eq!(
         run_last(
