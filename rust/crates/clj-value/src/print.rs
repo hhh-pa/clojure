@@ -143,9 +143,12 @@ fn print_into(v: &Value, opts: &PrintOpts, level: Option<i64>, out: &mut String)
         }
         Value::Map(m) => {
             let entries: Vec<(&Value, &Value)> = m.iter().collect();
-            if opts.namespace_maps
-                && let Some((ns, lifted)) = lift_ns(&entries)
-            {
+            let lifted = if opts.namespace_maps {
+                lift_ns(&entries)
+            } else {
+                None
+            };
+            if let Some((ns, lifted)) = lifted {
                 let flat: Vec<(&Value, &Value)> = lifted.iter().map(|(k, v)| (k, v)).collect();
                 print_map_entries(&format!("#:{ns}"), &flat, opts, level, out);
             } else {

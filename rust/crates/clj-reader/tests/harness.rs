@@ -346,10 +346,12 @@ pub fn our_err(e: &clj_reader::ReaderError) -> Outcome {
 /// namespace-map lifting, and the `^meta` prefix rules.
 pub fn canon(v: &Value, print_meta: bool) -> String {
     let mut out = String::new();
-    if print_meta
-        && let Some(m) = v.meta()
-        && !m.is_empty()
-    {
+    let meta_to_print = if print_meta {
+        v.meta().filter(|m| !m.is_empty())
+    } else {
+        None
+    };
+    if let Some(m) = meta_to_print {
         let tag_key = Value::Keyword(Keyword::new(None, "tag"));
         out.push('^');
         match m.get(&tag_key) {

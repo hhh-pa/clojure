@@ -235,10 +235,15 @@ impl Reader {
             // (`str/b.c` stays `str/b.c`).
             if let Some(dotted) = self.opts.class_map.get(&ns) {
                 sym = Symbol::new(Some(dotted), &name);
-            } else if !has_inner_dot(&name)
-                && let Some(target) = self.opts.aliases.get(&ns)
-            {
-                sym = Symbol::new(Some(target), &name);
+            } else {
+                let target = if has_inner_dot(&name) {
+                    None
+                } else {
+                    self.opts.aliases.get(&ns)
+                };
+                if let Some(target) = target {
+                    sym = Symbol::new(Some(target), &name);
+                }
             }
             return Value::Symbol(sym);
         }
@@ -414,32 +419,34 @@ fn is_special(sym: &Symbol) -> bool {
 
 /// A non-empty list headed by `clojure.core/unquote`.
 fn is_unquote(form: &Value) -> bool {
-    if let Value::List(l) = form
-        && let Some(Value::Symbol(head)) = l.first()
-    {
-        return head.namespace() == Some("clojure.core") && head.name() == "unquote";
+    if let Value::List(l) = form {
+        return matches!(
+            l.first(),
+            Some(Value::Symbol(head))
+                if head.namespace() == Some("clojure.core") && head.name() == "unquote"
+        );
     }
     false
 }
 
 /// A non-empty list headed by `clojure.core/unquote-splicing`.
 fn is_unquote_splicing(form: &Value) -> bool {
-    if let Value::List(l) = form
-        && let Some(Value::Symbol(head)) = l.first()
-    {
-        return head.namespace() == Some("clojure.core") && head.name() == "unquote-splicing";
+    if let Value::List(l) = form {
+        return matches!(
+            l.first(),
+            Some(Value::Symbol(head))
+                if head.namespace() == Some("clojure.core") && head.name() == "unquote-splicing"
+        );
     }
     false
 }
 
 /// `RT.second` (`nil` when missing).
 fn second(form: &Value) -> Value {
-    if let Value::List(l) = form
-        && let Some(v) = l.iter().nth(1)
-    {
-        return v.clone();
+    match form {
+        Value::List(l) => l.iter().nth(1).cloned().unwrap_or(Value::Nil),
+        _ => Value::Nil,
     }
-    Value::Nil
 }
 
 fn core_sym(name: &str) -> Value {
