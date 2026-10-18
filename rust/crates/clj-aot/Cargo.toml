@@ -5,6 +5,9 @@ edition = "2024"
 description = "LLVM AOT backend for the pure Clojure subset"
 license = "EPL-1.0"
 
+[lints]
+workspace = true
+
 [dependencies]
 # Pinned LLVM major for the whole workspace (spec 2.3): inkwell 0.10.0
 # supports up to LLVM 22, so the pin is 22, not 23. The `llvm22-1`

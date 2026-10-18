@@ -29,9 +29,12 @@ clj-aot = { path = "crates/clj-aot", optional = true }
 default = ["aot"]
 aot = ["clj-aot"]
 
-# Deny the `unused` lint group package-wide, on every platform and
+# Deny the `unused` lint group workspace-wide, on every platform and
 # profile: clippy's `-D warnings` only runs on Linux CI, so without
 # this, Windows/macOS-only dead code compiles with warnings no gate
 # catches. Mirrors the arcanist rust workspace policy.
-[lints.rust]
+[workspace.lints.rust]
 unused = "deny"
+
+[lints]
+workspace = true
