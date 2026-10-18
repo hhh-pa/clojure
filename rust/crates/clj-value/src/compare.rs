@@ -61,7 +61,7 @@ pub fn compare(a: &Value, b: &Value) -> Result<Ordering, CompareError> {
         (_, Value::Nil) => Ok(Ordering::Greater),
         (Value::Char(x), Value::Char(y)) => Ok(x.cmp(y)),
         (Value::Bool(x), Value::Bool(y)) => Ok(x.cmp(y)),
-        (Value::Str(x), Value::Str(y)) => Ok(x.cmp(y)),
+        (Value::Str(x), Value::Str(y)) => Ok(utf16_cmp(x, y)),
         (Value::Symbol(x), Value::Symbol(y)) => Ok(compare_namespaced(
             x.namespace(),
             x.name(),
@@ -116,11 +116,18 @@ fn compare_namespaced(
     b_name: &str,
 ) -> Ordering {
     match (a_ns, b_ns) {
-        (None, None) => a_name.cmp(b_name),
+        (None, None) => utf16_cmp(a_name, b_name),
         (None, Some(_)) => Ordering::Less,
         (Some(_), None) => Ordering::Greater,
-        (Some(x), Some(y)) => x.cmp(y).then_with(|| a_name.cmp(b_name)),
+        (Some(x), Some(y)) => utf16_cmp(x, y).then_with(|| utf16_cmp(a_name, b_name)),
     }
+}
+
+/// `String.compareTo`: lexicographic over UTF-16 units. Byte order
+/// flips against it when a BMP char `>= U+E000` meets an astral
+/// char (`\uFFFF` sorts after astral — reviewer probe).
+fn utf16_cmp(a: &str, b: &str) -> Ordering {
+    a.encode_utf16().cmp(b.encode_utf16())
 }
 
 /// Lexicographic element compare (element errors propagate, like the

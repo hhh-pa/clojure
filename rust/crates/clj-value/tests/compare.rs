@@ -115,6 +115,26 @@ fn vectors_compare_lexicographically() {
 }
 
 #[test]
+fn astral_strings_follow_utf16_order() {
+    // JVM: "\uFFFF" sorts AFTER astral chars (0xFFFF > 0xD800 lead);
+    // byte order says the opposite.
+    let ffff = Value::Str(Arc::from("\u{FFFF}"));
+    let astral = Value::Str(Arc::from("\u{10000}"));
+    assert_eq!(ord(&ffff, &astral), Ordering::Greater);
+    assert_eq!(ord(&astral, &ffff), Ordering::Less);
+    // Astral-astral still code-point ordered.
+    let grin = Value::Str(Arc::from("\u{1F601}"));
+    assert_eq!(ord(&astral, &grin), Ordering::Less);
+    // Same rule inside symbols and keywords.
+    let s1 = Value::Symbol(Symbol::new(None, "\u{FFFF}"));
+    let s2 = Value::Symbol(Symbol::new(None, "\u{10000}"));
+    assert_eq!(ord(&s1, &s2), Ordering::Greater);
+    let k1 = Value::Keyword(Keyword::new(None, "\u{FFFF}"));
+    let k2 = Value::Keyword(Keyword::new(None, "\u{10000}"));
+    assert_eq!(ord(&k1, &k2), Ordering::Greater);
+}
+
+#[test]
 fn nil_orders_first() {
     assert_eq!(ord(&Value::Nil, &Value::Nil), Ordering::Equal);
     assert_eq!(ord(&Value::Nil, &int(1)), Ordering::Less);
