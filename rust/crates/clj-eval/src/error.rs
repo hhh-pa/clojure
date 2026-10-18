@@ -59,9 +59,10 @@ pub struct CompileError {
     /// `Unexpected error` (macro-body `ClassCastException`s) instead
     /// of `Syntax error` (probe25).
     pub unexpected: bool,
-    /// Bare macro-arity failure (`(loop)`/`(binding)`/`(letfn)` with
-    /// no arguments): no wrapper, just the `ArityException` cause,
-    /// which escapes `eval` like any uncaught throwable (probe25).
+    /// Bare failure (no wrapper, just the cause, which escapes
+    /// `eval` like any uncaught throwable): macro arities
+    /// (probe25), `declare`'s `IObj` cast, stripped macro-arity
+    /// errors (probe37/38).
     pub bare: bool,
 }
 
@@ -94,6 +95,23 @@ impl CompileError {
         let message = NativeError::arity(name, 0).message;
         Self {
             class: "clojure.lang.ArityException",
+            message,
+            span,
+            source: Arc::clone(source),
+            verb: Verb::Compiling,
+            sym: None,
+            unexpected: false,
+            bare: true,
+        }
+    }
+
+    /// A bare failure of any class (single-line chain, escaping
+    /// `eval` like an uncaught throwable): `declare`'s `IObj` cast
+    /// and stripped macro-arity errors.
+    #[must_use]
+    pub fn bare(class: &'static str, message: String, span: Span, source: &Arc<str>) -> Self {
+        Self {
+            class,
             message,
             span,
             source: Arc::clone(source),

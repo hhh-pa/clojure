@@ -19,7 +19,7 @@ use clj_reader::{ReaderOpts, Span, read_all};
 use clj_value::{Keyword, List, Map, Symbol, ThrowClass, Throwable, Value, Var, Vector, new_map};
 
 use crate::env::{Bindings, Env, NamespaceRegistry};
-use crate::error::{CompileError, NativeError, Signal, jvm_class_of, simple_class_of};
+use crate::error::{CompileError, NativeError, Signal, jvm_class_of, simple_class_of, span_of};
 use crate::expr::{Analyzer, Catch, Expr, MapPattern, Pattern, pattern_names};
 use crate::ext::{Closure, NativeFn, NsHandle, as_closure, as_native};
 
@@ -72,6 +72,20 @@ pub struct Evaluator {
     eval_seq: u64,
     fn_seq: u64,
     next_id: u64,
+    gensym: u64,
+    native_call_span: Option<Span>,
+}
+
+/// A `defmacro` definition's parts (bundles `eval_defmacro`'s
+/// parameters).
+#[derive(Clone, Copy)]
+struct DefMacroParts<'a> {
+    sym: &'a Symbol,
+    doc: Option<&'a str>,
+    attr: Option<&'a Map>,
+    arglists: &'a [Value],
+    fun: &'a crate::expr::FunExpr,
+    span: Span,
 }
 
 impl Evaluator {
@@ -99,7 +113,48 @@ impl Evaluator {
             eval_seq: 0,
             fn_seq: 0,
             next_id: 1,
+            gensym: 1,
+            native_call_span: None,
         }
+    }
+
+    /// The innermost call form's span while a native runs (set by
+    /// `Invoke` evaluation; natives needing the call site — the
+    /// `macroexpand` wrap position — read this).
+    pub(crate) fn native_call_span(&self) -> Option<Span> {
+        self.native_call_span
+    }
+
+    /// The next `fn` display sequence number (the analyzer
+    /// numbers every `fn` it analyzes).
+    pub(crate) fn next_fn_seq(&mut self) -> u64 {
+        self.fn_seq += 1;
+        self.fn_seq
+    }
+
+    /// The next `gensym` counter value (per-boot, from 1).
+    pub(crate) fn next_gensym(&mut self) -> u64 {
+        let n = self.gensym;
+        self.gensym += 1;
+        n
+    }
+
+    /// The `*ns*`-synced current namespace name: the thread-local
+    /// `*ns*` handle when bound (boot binds a base frame and
+    /// `in-ns` keeps both in sync), else the registry current.
+    pub(crate) fn current_ns_name(&self) -> String {
+        let star_ns = Symbol::new(Some("clojure.core"), "*ns*");
+        let bound = self
+            .registry
+            .get("clojure.core")
+            .and_then(|ns| ns.lookup(&star_ns))
+            .and_then(|id| self.bindings.get(id))
+            .and_then(|v| match v {
+                Value::Extension(h) => h.as_any().downcast_ref::<NsHandle>(),
+                _ => None,
+            })
+            .map(|ns| ns.name.to_string());
+        bound.unwrap_or_else(|| self.registry.current().to_owned())
     }
 
     fn next_id(&mut self) -> u64 {
@@ -111,13 +166,9 @@ impl Evaluator {
     /// Analyze one form against the current namespace (tests use
     /// this for contract errors without evaluating).
     pub fn analyze(&mut self, form: &Value) -> Result<Expr, CompileError> {
-        Analyzer::new(
-            &self.source,
-            &mut self.registry,
-            self.eval_seq,
-            &mut self.fn_seq,
-        )
-        .analyze(form, Span::new(1, 1), true)
+        let source = Arc::clone(&self.source);
+        let seq = self.eval_seq;
+        Analyzer::new(&source, self, seq).analyze(form, Span::new(1, 1), true)
     }
 
     /// Read every form in `text` (default `:read-cond :allow`
@@ -125,7 +176,18 @@ impl Evaluator {
     /// read form. Uncaught throwables (including bare macro-arity
     /// failures) abort the load.
     pub fn eval_source(&mut self, text: &str) -> Result<Vec<Value>, SourceError> {
-        let forms = read_all(text, &ReaderOpts::default()).map_err(SourceError::Reader)?;
+        // Syntax-quote and `::` resolve against the synced
+        // current namespace (read-time, like the JVM).
+        let cur = self.current_ns_name();
+        let mut opts = ReaderOpts {
+            current_ns: cur.clone(),
+            ..Default::default()
+        };
+        if let Some(ns) = self.registry.get(&cur) {
+            opts.aliases = ns.alias_map();
+            opts.refers = ns.refer_map();
+        }
+        let forms = read_all(text, &opts).map_err(SourceError::Reader)?;
         let mut out = Vec::with_capacity(forms.len());
         for form in &forms {
             out.push(self.eval_top_form(form)?);
@@ -137,7 +199,15 @@ impl Evaluator {
     /// `Compiler.eval`: each element analyzes after the previous
     /// evaluates, and only the last value survives (§do-split).
     pub fn eval_top_form(&mut self, form: &Value) -> Result<Value, SourceError> {
-        if let Some(elements) = split_top_do(form) {
+        // `Compiler.eval` macroexpands first (fully), then splits
+        // `do`-headed expansions; each element re-enters `eval`
+        // (macros defining macros before later-element analysis
+        // see them).
+        let source = Arc::clone(&self.source);
+        let span = span_of(form, Span::new(1, 1));
+        let expanded = crate::macros::macroexpand_full(self, form, span, &source)
+            .map_err(|e| self.compile_err(e))?;
+        if let Some(elements) = split_top_do(&expanded) {
             let mut last = Value::Nil;
             for element in elements {
                 last = self.eval_top_form(element)?;
@@ -145,26 +215,32 @@ impl Evaluator {
             return Ok(last);
         }
         self.eval_seq += 1;
-        let expr = self.analyze(form).map_err(|e| {
-            if e.bare {
-                let id = self.next_id();
-                SourceError::Uncaught(Throwable {
-                    id,
-                    class: ThrowClass::ArityException,
-                    message: Arc::from(e.message.as_str()),
-                    data: None,
-                    cause: None,
-                })
-            } else {
-                SourceError::Compile(e)
-            }
-        })?;
+        let expr = self.analyze(&expanded).map_err(|e| self.compile_err(e))?;
         match self.eval(&expr, &Env::new()) {
             Ok(v) => Ok(v),
             Err(Signal::Throw(t)) => Err(SourceError::Uncaught(t)),
             Err(Signal::Recur(_)) => Err(SourceError::Internal(
                 "recur escaped its loop or fn".to_owned(),
             )),
+        }
+    }
+
+    /// A compile failure as a source error: bare causes escape
+    /// like uncaught throwables of their own class (macro arities,
+    /// `declare`'s cast, stripped macro arities); wrapped chains
+    /// stay compile errors.
+    fn compile_err(&mut self, e: CompileError) -> SourceError {
+        if e.bare {
+            let id = self.next_id();
+            SourceError::Uncaught(Throwable {
+                id,
+                class: crate::ns::throw_class_for(e.class),
+                message: Arc::from(e.message.as_str()),
+                data: None,
+                cause: None,
+            })
+        } else {
+            SourceError::Compile(e)
         }
     }
 
@@ -255,7 +331,7 @@ impl Evaluator {
     }
 
     /// Stamp a runtime failure with an identity and throw it.
-    fn throw(&mut self, err: NativeError) -> Signal {
+    pub(crate) fn throw(&mut self, err: NativeError) -> Signal {
         Signal::Throw(Throwable {
             id: self.next_id(),
             class: err.class,
@@ -339,13 +415,43 @@ impl Evaluator {
             Expr::WithRedefs { pairs, body } => self.eval_with_redefs(pairs, body, env),
             Expr::WithBindings { map, body } => self.eval_with_bindings(map, body, env),
             Expr::BoundFn { name, fun } => self.eval_bound_fn(name.as_deref(), fun, env),
-            Expr::Invoke { head, args } => {
+            Expr::DefMacro {
+                sym,
+                doc,
+                attr,
+                arglists,
+                fun,
+                span,
+            } => {
+                let parts = DefMacroParts {
+                    sym,
+                    doc: doc.as_deref(),
+                    attr: attr.as_ref(),
+                    arglists,
+                    fun,
+                    span: *span,
+                };
+                self.eval_defmacro(&parts, env)
+            }
+            Expr::Declare { syms, span } => self.eval_declare(syms, *span, env),
+            Expr::Ns {
+                name,
+                doc,
+                attr,
+                clauses,
+            } => crate::ns::eval_ns_form(self, name, doc.as_deref(), attr.as_ref(), clauses),
+            Expr::Invoke { head, args, span } => {
                 let callee = self.eval(head, env)?;
                 let mut values = Vec::with_capacity(args.len());
                 for arg in args {
                     values.push(self.eval(arg, env)?);
                 }
-                self.invoke(&callee, &values)
+                // The call site stays visible to natives for the
+                // duration of the call (nesting saves/restores).
+                let saved = self.native_call_span.replace(*span);
+                let out = self.invoke(&callee, &values);
+                self.native_call_span = saved;
+                out
             }
         }
     }
@@ -563,6 +669,98 @@ impl Evaluator {
         Ok(value)
     }
 
+    /// `defmacro`: like `def` of the `&form`/`&env`-prepended
+    /// `fn`, plus `:macro true` and `:arglists` meta (name-symbol
+    /// meta under the attrmap; the attrmap wins over the docstring
+    /// for `:doc`; autos win over all).
+    fn eval_defmacro(&mut self, parts: &DefMacroParts<'_>, env: &Env) -> Result<Value, Signal> {
+        let DefMacroParts {
+            sym,
+            doc,
+            attr,
+            arglists,
+            fun,
+            span,
+        } = *parts;
+        let id = self.registry.intern(sym);
+        let closure = self.make_closure(fun, env);
+        let dynamic = Self::dynamic_of(sym);
+        let cur = self.current_ns_name();
+        let cur_id = self.registry.get(&cur).map_or(0, |ns| ns.id());
+        if let Some(state) = self.registry.state_mut(id) {
+            state.root = Some(Value::Extension(Arc::new(closure)));
+            let mut meta = sym.meta().cloned().unwrap_or_else(new_map);
+            if let Some(attr) = attr {
+                for (k, v) in attr.iter() {
+                    meta = meta.insert(k.clone(), v.clone());
+                }
+            }
+            meta = meta
+                .insert(
+                    Value::Keyword(Keyword::new(None, "macro")),
+                    Value::Bool(true),
+                )
+                .insert(
+                    Value::Keyword(Keyword::new(None, "arglists")),
+                    Value::List(List::from_vec(arglists.to_vec())),
+                );
+            let doc_key = Value::Keyword(Keyword::new(None, "doc"));
+            if let Some(doc) = doc.filter(|_| meta.get(&doc_key).is_none()) {
+                meta = meta.insert(doc_key, Value::Str(Arc::from(doc)));
+            }
+            let auto = [
+                ("line", Value::Int(i64::from(span.line))),
+                ("column", Value::Int(i64::from(span.col))),
+                ("file", Value::Str(Arc::clone(&self.source))),
+                ("name", Value::Symbol(Symbol::new(None, sym.name()))),
+                (
+                    "ns",
+                    Value::Extension(Arc::new(NsHandle {
+                        name: Arc::from(cur.as_str()),
+                        id: cur_id,
+                    })),
+                ),
+            ];
+            for (key, value) in auto {
+                meta = meta.insert(Value::Keyword(Keyword::new(None, key)), value);
+            }
+            state.meta = Some(meta);
+            state.dynamic = dynamic;
+        }
+        Ok(Value::Var(Var {
+            id,
+            sym: sym.clone(),
+        }))
+    }
+
+    /// `declare`: per-name `def`-with-no-init plus `:declared`
+    /// true, returning the last var (roots survive: `def` only
+    /// sets given inits; empty `declare` is nil).
+    fn eval_declare(&mut self, syms: &[Symbol], span: Span, env: &Env) -> Result<Value, Signal> {
+        let mut last = Value::Nil;
+        for sym in syms {
+            let mut meta = sym.meta().cloned().unwrap_or_else(new_map);
+            meta = meta.insert(
+                Value::Keyword(Keyword::new(None, "declared")),
+                Value::Bool(true),
+            );
+            let sym = sym.clone().with_meta(Some(meta));
+            last = self.eval_def(&sym, None, None, span, env)?;
+        }
+        Ok(last)
+    }
+
+    /// Dynamic is the truthiness of the sym's `:dynamic` meta,
+    /// reset by every `def` (shared by `def`/`defmacro`).
+    fn dynamic_of(sym: &Symbol) -> bool {
+        sym.meta()
+            .and_then(|meta| {
+                let probe = Value::Keyword(Keyword::new(None, "dynamic"));
+                meta.get(&probe)
+            })
+            .is_some_and(Value::is_truthy)
+    }
+
     /// A body: the last value, or `nil` when empty.
     fn eval_body(&mut self, body: &[Expr], env: &Env) -> Result<Value, Signal> {
         let mut value = Value::Nil;
@@ -615,14 +813,8 @@ impl Evaluator {
             Some(init) => Some(self.eval(init, env)?),
             None => None,
         };
-        let dynamic = sym
-            .meta()
-            .and_then(|meta| {
-                let probe = Value::Keyword(Keyword::new(None, "dynamic"));
-                meta.get(&probe)
-            })
-            .is_some_and(Value::is_truthy);
-        let cur = self.registry.current().to_owned();
+        let dynamic = Self::dynamic_of(sym);
+        let cur = self.current_ns_name();
         let cur_id = self.registry.get(&cur).map_or(0, |ns| ns.id());
         if let Some(state) = self.registry.state_mut(id) {
             if let Some(v) = value {

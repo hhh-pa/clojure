@@ -639,15 +639,3 @@ fn alter_and_reset_meta() {
         "java.lang.ClassCastException | Cannot cast clojure.lang.PersistentVector to clojure.lang.IReference"
     );
 }
-
-#[test]
-fn s5c_fences_stay_unresolved() {
-    // The S5B forms evaluate; their vars (and `declare`/`ns`) land
-    // in S5C.
-    let mut eval = boot();
-    assert_eq!(run_last(&mut eval, "(resolve 'declare)"), "nil");
-    assert_eq!(run_last(&mut eval, "(resolve 'ns)"), "nil");
-    assert_eq!(run_last(&mut eval, "(resolve 'with-redefs)"), "nil");
-    assert_eq!(run_last(&mut eval, "(resolve 'with-bindings)"), "nil");
-    assert_eq!(run_last(&mut eval, "(resolve 'bound-fn)"), "nil");
-}

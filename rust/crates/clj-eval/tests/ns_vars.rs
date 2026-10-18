@@ -48,11 +48,22 @@ fn boot_shape() {
         "#object[clojure.lang.Namespace 0x2 \"user\"]"
     );
     assert_eq!(run_last(&mut eval, "*file*"), "\"NO_SOURCE_PATH\"");
-    assert_eq!(run_last(&mut eval, "clojure.core/*loaded-libs*"), "#{}");
-    assert_eq!(run_last(&mut eval, "*load-path*"), "[]");
-    assert_eq!(run_last(&mut eval, "clojure.core/*pending-paths*"), "()");
+    // `*loaded-libs*` is private: read it through `var`
+    // (unchecked, like the JVM) plus `var-get`.
     assert_eq!(
-        run_last(&mut eval, "clojure.core/*loading-verbosely*"),
+        run_last(&mut eval, "(var-get (var clojure.core/*loaded-libs*))"),
+        "#{}"
+    );
+    assert_eq!(run_last(&mut eval, "*load-path*"), "[]");
+    assert_eq!(
+        run_last(&mut eval, "(var-get (var clojure.core/*pending-paths*))"),
+        "()"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(var-get (var clojure.core/*loading-verbosely*))"
+        ),
         "false"
     );
     // Privates stay out of the user refers; publics resolve.

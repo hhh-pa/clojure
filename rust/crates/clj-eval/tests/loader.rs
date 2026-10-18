@@ -91,7 +91,12 @@ fn require_marks_and_skips() {
     // Already loaded: skipped, still nil.
     assert_eq!(run_last(&mut eval, &fx.within("(require 'tlib)")), "nil");
     assert_eq!(run_last(&mut eval, "(loaded-libs)"), "#{tlib}");
-    assert_eq!(run_last(&mut eval, "clojure.core/*pending-paths*"), "()");
+    // `*pending-paths*` is private: read it through `var` (unchecked,
+    // like the JVM) plus `var-get`, not a direct cross-ns reference.
+    assert_eq!(
+        run_last(&mut eval, "(var-get (var clojure.core/*pending-paths*))"),
+        "()"
+    );
 }
 
 #[test]
@@ -423,7 +428,12 @@ fn cyclic_loads_fail_clean() {
     assert_eq!(run_last(&mut eval, "(find-ns 'cyc.a)"), "nil");
     assert_eq!(run_last(&mut eval, "(find-ns 'cyc.b)"), "nil");
     assert_eq!(run_last(&mut eval, "(loaded-libs)"), "#{}");
-    assert_eq!(run_last(&mut eval, "clojure.core/*pending-paths*"), "()");
+    // `*pending-paths*` is private: read it through `var` (unchecked,
+    // like the JVM) plus `var-get`, not a direct cross-ns reference.
+    assert_eq!(
+        run_last(&mut eval, "(var-get (var clojure.core/*pending-paths*))"),
+        "()"
+    );
 }
 
 #[test]

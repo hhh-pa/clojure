@@ -28,6 +28,7 @@ use clj_value::{
 use crate::env::{Namespace, NamespaceRegistry};
 use crate::error::{NativeError, Signal, jvm_class_of, site_of};
 use crate::eval::{Evaluator, SourceError};
+use crate::expr::NsClause;
 use crate::ext::{NsHandle, as_ns};
 
 /// `clojure.lang.Symbol`, the cast target for namespace arguments.
@@ -774,7 +775,7 @@ fn native_ns_unalias(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nati
 /// A JVM class name (simple or fully qualified) to its
 /// [`ThrowClass`]. Unknown names — including the port-only
 /// `ReaderError` deferrals — fall back to `Exception`.
-fn throw_class_for(name: &str) -> ThrowClass {
+pub(crate) fn throw_class_for(name: &str) -> ThrowClass {
     match name.rsplit('.').next().unwrap_or(name) {
         "Exception" => ThrowClass::Exception,
         "Error" => ThrowClass::Error,
@@ -1380,6 +1381,75 @@ fn native_require(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeE
     load_libs(eval, &["require"], args)
 }
 
+/// Evaluate an `(ns …)` form: `in-ns`, unconditional `resetMeta`
+/// (the attrmap wins over the docstring for `:doc`; no attrmap
+/// clears), default-or-clause `refer-clojure`, each
+/// `:require`/`:use` clause in order through the loader (failures
+/// surface raw), then mark the lib loaded (probe37 `ns-*`).
+/// `with-loading-context` needs no analog: the loader already
+/// scopes `*loaded-libs*` per load.
+pub(crate) fn eval_ns_form(
+    eval: &mut Evaluator,
+    name: &str,
+    doc: Option<&str>,
+    attr: Option<&Map>,
+    clauses: &[NsClause],
+) -> Result<Value, Signal> {
+    let name_arg = Value::Symbol(Symbol::new(None, name));
+    native_in_ns(eval, &[name_arg]).map_err(|e| eval.throw(e))?;
+    let meta = ns_form_meta(doc, attr);
+    if let Some(ns) = eval.registry.get_mut(name) {
+        ns.set_meta(meta);
+    }
+    run_ns_clauses(eval, clauses)?;
+    let lib = Symbol::new(None, name);
+    mark_loaded(eval, &lib).map_err(|e| eval.throw(e))?;
+    Ok(Value::Nil)
+}
+
+/// An `(ns …)` form's meta: the attrmap (winning over the
+/// docstring for `:doc`), the docstring alone, or nothing (which
+/// clears, like the unconditional `resetMeta`).
+fn ns_form_meta(doc: Option<&str>, attr: Option<&Map>) -> Option<Map> {
+    let doc_key = Value::Keyword(Keyword::new(None, "doc"));
+    match attr {
+        None => doc.map(|d| new_map().insert(doc_key, Value::Str(Arc::from(d)))),
+        Some(a) => {
+            let mut m = a.clone();
+            if let Some(d) = doc.filter(|_| m.get(&doc_key).is_none()) {
+                m = m.insert(doc_key, Value::Str(Arc::from(d)));
+            }
+            Some(m)
+        }
+    }
+}
+
+/// An `(ns …)` form's clauses: the default `refer-clojure` unless
+/// a clause overrides it, then each `:require`/`:use` clause in
+/// order through the loader (failures surface raw).
+fn run_ns_clauses(eval: &mut Evaluator, clauses: &[NsClause]) -> Result<(), Signal> {
+    let has_refer_clojure = clauses
+        .iter()
+        .any(|c| matches!(c, NsClause::ReferClojure(_)));
+    if !has_refer_clojure {
+        native_refer_clojure(eval, &[]).map_err(|e| eval.throw(e))?;
+    }
+    for clause in clauses {
+        match clause {
+            NsClause::ReferClojure(filters) => {
+                native_refer_clojure(eval, filters).map_err(|e| eval.throw(e))?;
+            }
+            NsClause::Require(libspecs) => {
+                native_require(eval, libspecs).map_err(|e| eval.throw(e))?;
+            }
+            NsClause::Use(libspecs) => {
+                native_use(eval, libspecs).map_err(|e| eval.throw(e))?;
+            }
+        }
+    }
+    Ok(())
+}
+
 fn native_use(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     load_libs(eval, &["require", "use"], args)
 }
@@ -1654,9 +1724,38 @@ pub fn boot() -> Evaluator {
     eval.registry.ensure_ns("clojure.core");
     let user_ns = eval.registry.ensure_ns("user").id();
     eval.registry.set_current("user");
-    for (name, f) in NATIVES.iter().chain(crate::vars::VAR_NATIVES.iter()) {
+    for (name, f) in NATIVES
+        .iter()
+        .chain(crate::vars::VAR_NATIVES.iter())
+        .chain(crate::macros::MACRO_NATIVES.iter())
+    {
         let func: Arc<crate::ext::NativeImpl> = Arc::new(*f);
         eval.install_native("clojure.core", name, func);
+    }
+    // Builtin-macro vars (`let`, `defmacro`, `declare`, `ns`, …):
+    // the analyzer intercepts the forms, so the roots are
+    // placeholders that fail LOUDLY on direct invocation.
+    for name in crate::macros::BUILTIN_MACROS {
+        let display = format!("clojure.core/{name}");
+        eval.install_native(
+            "clojure.core",
+            name,
+            Arc::new(move |_, _| {
+                Err(NativeError::new(
+                    ThrowClass::IllegalStateException,
+                    format!("Can't invoke builtin macro: {display}"),
+                ))
+            }),
+        );
+        let q = Symbol::new(Some("clojure.core"), name);
+        let id = eval.registry.intern(&q);
+        if let Some(st) = eval.registry.state_mut(id) {
+            let meta = st.meta.clone().unwrap_or_else(new_map).insert(
+                Value::Keyword(Keyword::new(None, "macro")),
+                Value::Bool(true),
+            );
+            st.meta = Some(meta);
+        }
     }
     let user_handle = ns_value("user", user_ns);
     for (name, root, dynamic, private) in core_vars(user_handle.clone()) {
@@ -1665,8 +1764,14 @@ pub fn boot() -> Evaluator {
     let mut names: Vec<String> = NATIVES
         .iter()
         .chain(crate::vars::VAR_NATIVES.iter())
+        .chain(crate::macros::MACRO_NATIVES.iter())
         .map(|(n, _)| (*n).to_owned())
         .collect();
+    names.extend(
+        crate::macros::BUILTIN_MACROS
+            .iter()
+            .map(|s| (*s).to_owned()),
+    );
     names.extend(
         [
             "*ns*",

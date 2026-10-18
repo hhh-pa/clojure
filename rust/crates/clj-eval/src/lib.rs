@@ -17,6 +17,7 @@ pub mod error;
 pub mod eval;
 pub mod expr;
 pub mod ext;
+pub mod macros;
 pub mod ns;
 pub mod vars;
 

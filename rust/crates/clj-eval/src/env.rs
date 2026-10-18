@@ -136,6 +136,29 @@ impl Namespace {
         id
     }
 
+    /// Alias → target-namespace-name (for reader options).
+    #[must_use]
+    pub fn alias_map(&self) -> HashMap<String, String> {
+        self.aliases
+            .iter()
+            .map(|(alias, (target, _))| (alias.clone(), target.clone()))
+            .collect()
+    }
+
+    /// Referred name → (home namespace, name) (for reader
+    /// options; syntax-quote qualifies refers home).
+    #[must_use]
+    pub fn refer_map(&self) -> HashMap<String, (String, String)> {
+        self.refers
+            .iter()
+            .filter_map(|(name, (target, _))| {
+                target
+                    .namespace()
+                    .map(|ns| (name.clone(), (ns.to_owned(), target.name().to_owned())))
+            })
+            .collect()
+    }
+
     /// This namespace's metadata (`None` = `nil`, like the JVM).
     #[must_use]
     pub fn meta(&self) -> Option<&Map> {
@@ -380,10 +403,17 @@ impl NamespaceRegistry {
     /// explicit namespaces pass through untouched.
     #[must_use]
     pub fn qualify(&self, sym: &Symbol) -> Symbol {
+        self.qualify_in(&self.current, sym)
+    }
+
+    /// [`qualify`](Self::qualify) against an explicit namespace
+    /// (the analyzer passes the `*ns*`-synced name).
+    #[must_use]
+    pub fn qualify_in(&self, ns_name: &str, sym: &Symbol) -> Symbol {
         if sym.namespace().is_some() {
             sym.clone()
         } else {
-            Symbol::new(Some(&self.current), sym.name())
+            Symbol::new(Some(ns_name), sym.name())
         }
     }
 
@@ -452,7 +482,14 @@ impl NamespaceRegistry {
     /// Resolve a symbol to its var id (`None` is unresolvable).
     #[must_use]
     pub fn lookup(&self, sym: &Symbol) -> Option<u64> {
-        let target = self.resolve(sym)?;
+        self.lookup_in(&self.current, sym)
+    }
+
+    /// [`lookup`](Self::lookup) against an explicit namespace (the
+    /// analyzer passes the `*ns*`-synced name).
+    #[must_use]
+    pub fn lookup_in(&self, ns_name: &str, sym: &Symbol) -> Option<u64> {
+        let target = self.resolve_in(ns_name, sym)?;
         let ns = self.namespaces.get(target.namespace()?)?;
         ns.ids.get(&target).copied()
     }

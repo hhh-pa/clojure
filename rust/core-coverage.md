@@ -15,7 +15,7 @@ machine-read — keep `| var | status | notes |` rows exact.
 ## Namespaces (S5A)
 
 | var | status | notes |
-| `ns` | planned | macro over the loader |
+| `ns` | implemented | validated upfront, then in-ns/refer/require/use/mark-loaded |
 | `in-ns` | implemented | |
 | `create-ns` | implemented | |
 | `remove-ns` | implemented | |
@@ -32,7 +32,7 @@ machine-read — keep `| var | status | notes |` rows exact.
 | `require` | implemented | embedded + `*load-path*` files |
 | `refer-clojure` | implemented | |
 | `intern` | implemented | |
-| `declare` | planned | forward declaration |
+| `declare` | implemented | `(def name)` per name plus `:declared` |
 | `ns-interns` | implemented | |
 | `ns-publics` | implemented | |
 | `ns-refers` | implemented | |
@@ -55,7 +55,7 @@ machine-read — keep `| var | status | notes |` rows exact.
 
 | var | status | notes |
 | `alter-var-root` | implemented | atomic root swap |
-| `with-redefs` | planned | form in S5B, var resolves in S5C |
+| `with-redefs` | divergent | analyzer builtin (S5B); resolves as macro; `macroexpand-1` identity (documented) |
 | `bound?` | implemented | |
 | `thread-bound?` | implemented | |
 | `var-get` | implemented | |
@@ -64,8 +64,8 @@ machine-read — keep `| var | status | notes |` rows exact.
 | `pop-thread-bindings` | implemented | |
 | `get-thread-bindings` | implemented | |
 | `with-bindings*` | implemented | |
-| `with-bindings` | planned | form in S5B, var resolves in S5C |
-| `bound-fn` | planned | form in S5B, var resolves in S5C; conveyance primitive (S6 builds on it) |
+| `with-bindings` | divergent | analyzer builtin (S5B); resolves as macro; `macroexpand-1` identity (documented) |
+| `bound-fn` | divergent | analyzer builtin (S5B); resolves as macro; `macroexpand-1` identity (documented); conveyance primitive (S6 builds on it) |
 | `meta` | implemented | |
 | `with-meta` | implemented | |
 | `vary-meta` | implemented | |
@@ -75,10 +75,10 @@ machine-read — keep `| var | status | notes |` rows exact.
 ## Macros (S5C)
 
 | var | status | notes |
-| `defmacro` | planned | mechanism TBD in S5C |
-| `macroexpand-1` | planned | |
-| `macroexpand` | planned | |
-| `gensym` | planned | Rust-backed counter |
+| `defmacro` | implemented | def of the `&form`/`&env`-prepended fn; `:macro` + user `:arglists` |
+| `macroexpand-1` | implemented | one head step; call-site spans; builtins identity (documented) |
+| `macroexpand` | implemented | head loop; builtins identity (documented) |
+| `gensym` | implemented | Rust-backed counter |
 
 ## Arithmetic (S5D, checked per C1)
 
@@ -169,7 +169,7 @@ machine-read — keep `| var | status | notes |` rows exact.
 | `count` | planned | |
 | `empty?` | planned | |
 | `not-empty` | planned | |
-| `seq` | planned | nil-punning |
+| `seq` | implemented | eager (S5D makes it lazy); nil-punning |
 | `first` | planned | |
 | `second` | planned | |
 | `last` | planned | |
@@ -191,8 +191,8 @@ machine-read — keep `| var | status | notes |` rows exact.
 | `merge-with` | planned | |
 | `select-keys` | planned | |
 | `vec` | planned | |
-| `vector` | planned | |
-| `list` | planned | |
+| `vector` | implemented | early for syntax-quote (S5C) |
+| `list` | implemented | early for syntax-quote (S5C) |
 | `list*` | planned | |
 | `nth` | planned | |
 | `update` | planned | |
@@ -201,8 +201,8 @@ machine-read — keep `| var | status | notes |` rows exact.
 | `get-in` | planned | |
 | `zipmap` | planned | |
 | `array-map` | planned | |
-| `hash-map` | planned | |
-| `hash-set` | planned | |
+| `hash-map` | implemented | early for syntax-quote (S5C) |
+| `hash-set` | implemented | early for syntax-quote (S5C) |
 | `transient` | planned | over S3 transients |
 | `persistent!` | planned | |
 | `conj!` | planned | |
@@ -231,7 +231,7 @@ machine-read — keep `| var | status | notes |` rows exact.
 | `drop-last` | planned | |
 | `split-at` | planned | |
 | `split-with` | planned | |
-| `concat` | planned | variadic, lazy |
+| `concat` | implemented | eager (S5D makes it lazy); variadic |
 | `cycle` | planned | |
 | `interleave` | planned | |
 | `interpose` | planned | |
@@ -268,7 +268,7 @@ machine-read — keep `| var | status | notes |` rows exact.
 ## Higher-order (S5D)
 
 | var | status | notes |
-| `apply` | planned | |
+| `apply` | implemented | early for syntax-quote (S5C) |
 | `comp` | planned | variadic; fn composition (not xform comp) |
 | `partial` | planned | |
 | `complement` | planned | |
