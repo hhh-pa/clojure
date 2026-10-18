@@ -28,6 +28,12 @@ class name, a message, and a span. Rendering has two layers:
 
 Evaluator (runtime) failures have no wrapper: just `Class | message`.
 
+Spans come from the form's `:line`/`:column` reader meta (lists,
+vectors, maps carry it); atoms and meta-less forms inherit the nearest
+enclosing span, defaulting to the top-level fallback (1:1 for a fresh
+`eval_source`). This matches JVM precision: the JVM likewise has no
+position for bare atoms (eval'd forms report the caller's line).
+
 `CompilerException` ex-data (`:phase/:line/:column/:source/:symbol`, see
 `Compiler.java` ctor) is NOT reproduced: our errors carry the span
 structurally and render it in the wrapper. (`ex-data` on a compile error
@@ -49,6 +55,7 @@ Operator as written names the wrapper (`Syntax error compiling if at …`).
 | `(throw)` / `(throw a b)` | `RuntimeException` | `Too few/many arguments to throw, throw expects a single Throwable instance` |
 | `(set! x)` | `IllegalArgumentException` | `Malformed assignment, expecting (set! target val)` |
 | `(set! 1 2)` | `IllegalArgumentException` | `Invalid assignment target` |
+| `(let [x 1] (set! x 2))` | `IllegalArgumentException` | `Cannot assign to non-mutable: x` (wrapper sym is the constant `fn*`, even inside a named `fn`; on the JVM this fires at emit time, hence the enclosing-method attribution) |
 | `(var)` | `NullPointerException` | `Cannot read field "ns" because "sym" is null` (stable text = modern JDK; JDK-varying, documented) |
 | `(var no-such)` | `RuntimeException` | `Unable to resolve var: no-such in this context` |
 | `(var :k)` | `ClassCastException` | stable CCE Keyword→Symbol (E8) |
@@ -173,16 +180,23 @@ symbol `catch` (E7).
 - Runtime nil operator (`(let [f nil] (f 1))`):
   `NullPointerException | Cannot invoke nil as a function`
   (stable text; JVM NPE text varies by JDK, documented).
-- Number operator (`(1 2)`): `ClassCastException` (stable CCE text, E8).
-- Keyword with 0 args (`(:k)`):
-  `ArityException | Wrong number of args (0) passed to: :k`.
-- Vector as fn, index OOB (`([1] 5)`):
-  `IndexOutOfBoundsException | ` (empty message).
-- Fn arity: `ArityException | Wrong number of args (N) passed to: NAME`
-  (N = count passed; NAME volatile for anonymous fns, E10).
 - `(throw 42)`: `ClassCastException` Long→Throwable (stable CCE text, E8).
 - `(throw (ex-info …))` + catch: `ExceptionInfo` values carry message+data
   (probe22 roundtrip).
+
+`IFn` invoke table (probe24; N = true count passed, `> 20` past 20):
+
+| Callee | Arities | Miss | Wrong arity |
+|---|---|---|---|
+| closure / native fn | per-arities (+ rest) | — | `ArityException | Wrong number of args (N) passed to: NAME` (NAME volatile for anonymous fns, E10) |
+| keyword | 1–2 (lookup + not-found) | `nil` (any coll incl. numbers/`nil`) | name is the printed keyword (`:k`), true count |
+| symbol | 1–2 (lookup + not-found) | `nil` | name is `clojure.lang.Symbol`, true count |
+| vector | exactly 1 (`nth`; OOB → `IndexOutOfBoundsException` with empty message; non-`Int` key → `IllegalArgumentException | Key must be integer`) | IOOBE | name is `clojure.lang.PersistentVector`, true count |
+| map | 1–2 (lookup + not-found) | `nil` | name is `clojure.lang.PersistentArrayMap` / `clojure.lang.PersistentHashMap` (size rule, E8), true count |
+| set | 1–2 (member + notFound) | `nil` | name is `clojure.lang.PersistentHashSet`, true count |
+| var | deref, then invoke root | — | unbound → `IllegalStateException | Attempting to call unbound fn: #'ns/name`; non-fn root → CCE root→`IFn` |
+| unbound object | — | — | `IllegalStateException | Attempting to call unbound fn: #'ns/name` (any arity) |
+| anything else | — | — | `ClassCastException` X→`clojure.lang.IFn` (stable, E8) |
 
 ## E8. Stable texts for JVM-volatile messages (documented divergences)
 
@@ -191,7 +205,15 @@ so the port pins stable equivalents:
 
 - CCE: `ClassCastException | Cannot cast <from> to <to>` with JVM class
   names (`java.lang.Long`, `clojure.lang.IFn`, `java.lang.Throwable`,
-  `java.lang.Number`, `clojure.lang.Var$Unbound`, …).
+  `java.lang.Number`, `clojure.lang.Var$Unbound`, …). Structure names are
+  size-dependent like the JVM's (`AFn.name = getClass().getName()`):
+  empty list → `clojure.lang.PersistentList$EmptyList`, else
+  `clojure.lang.PersistentList`; map with ≤8 pairs, or ≤64 pairs whose
+  keys past the first 8 are all keywords, →
+  `clojure.lang.PersistentArrayMap`, else `clojure.lang.PersistentHashMap`
+  (mirrors `canBePAM`; order beyond insertion is unavailable to our map,
+  so the 9–64 mixed-key band uses all-keys-keyword, documented); vector →
+  `clojure.lang.PersistentVector`, set → `clojure.lang.PersistentHashSet`.
 - Runtime nil invoke: `NullPointerException | Cannot invoke nil as a
   function`.
 - `(var)`: `NullPointerException | Cannot read field "ns" because "sym"
@@ -239,6 +261,8 @@ so the port pins stable equivalents:
   `:keys` bindings too (`(let [{:keys [a] :or {a 1}} {}] a)` → `1`).
 - Nesting composes (`[1 2 3]`, `[1 9]` in probe21); param hints
   (`[^String x]`) are accepted and ignored.
+- `:or` defaults are evaluated expressions, not literals
+  (`(let [{x :x :or {x (+ 1 2)}} {}] x)` → `3`).
 
 ## E10. Volatility log (shape-faithful, value-volatile)
 

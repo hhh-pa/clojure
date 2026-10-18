@@ -56,6 +56,9 @@ root-cause exception (class | message | ex-data line/col).
   `throw`/`finally` interplay.
 - `probe23.clj` (S4): try/def/fn/let/loop/letfn shape matrix,
   variadic legality rule, `pre` expansion, interop sanity.
+- `probe24.clj` (S4): `set!` targets, `:or` evaluation, full `IFn`
+  invoke table (keywords/symbols/vectors/maps/sets/vars/unbound),
+  arity-name rules, CCE from-names, index coercion.
 
 Run: `./probe.sh [outdir]`. Gensym ids (`p1__243#`), identity hashes
 (`@7fc19ced`), and inst renderings vary between runs; the contract
