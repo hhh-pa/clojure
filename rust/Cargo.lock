@@ -133,6 +133,10 @@ dependencies = [
 [[package]]
 name = "clj-core"
 version = "0.1.0"
+dependencies = [
+ "clj-eval",
+ "clj-value",
+]
 
 [[package]]
 name = "clj-eval"

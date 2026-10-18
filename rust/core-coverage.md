@@ -53,6 +53,7 @@ machine-read — keep `| var | status | notes |` rows exact.
 | `bound?` | planned | |
 | `thread-bound?` | planned | |
 | `var-get` | planned | |
+| `var-set` | planned | |
 | `push-thread-bindings` | planned | |
 | `pop-thread-bindings` | planned | |
 | `clone-thread-bindings` | planned | |
@@ -108,6 +109,7 @@ machine-read — keep `| var | status | notes |` rows exact.
 
 | var | status | notes |
 | `nil?` | planned | |
+| `not` | planned | |
 | `some?` | planned | |
 | `true?` | planned | |
 | `false?` | planned | |
@@ -154,6 +156,7 @@ machine-read — keep `| var | status | notes |` rows exact.
 | `subs` | planned | |
 | `pr-str` | planned | |
 | `print-str` | planned | |
+| `format` | planned | Formatter subset, oracle-pinned |
 
 ## Collections (S5D)
 
@@ -185,6 +188,13 @@ machine-read — keep `| var | status | notes |` rows exact.
 | `vec` | planned | |
 | `vector` | planned | |
 | `list` | planned | |
+| `list*` | planned | |
+| `nth` | planned | |
+| `update` | planned | |
+| `update-in` | planned | |
+| `assoc-in` | planned | |
+| `get-in` | planned | |
+| `zipmap` | planned | |
 | `array-map` | planned | |
 | `hash-map` | planned | |
 | `hash-set` | planned | |
@@ -240,6 +250,15 @@ machine-read — keep `| var | status | notes |` rows exact.
 | `butlast` | planned | |
 | `dorun` | planned | |
 | `doall` | planned | |
+| `mapv` | planned | eager |
+| `filterv` | planned | eager |
+| `reductions` | planned | |
+| `every-pred` | planned | |
+| `some-fn` | planned | |
+| `group-by` | planned | |
+| `frequencies` | planned | |
+| `max-key` | planned | |
+| `min-key` | planned | |
 
 ## Higher-order (S5D)
 
@@ -281,6 +300,7 @@ machine-read — keep `| var | status | notes |` rows exact.
 | `comment` | planned | macro |
 | `defn` | planned | macro |
 | `defn-` | planned | macro |
+| `defonce` | planned | macro |
 | `dotimes` | planned | macro |
 | `doseq` | planned | macro |
 | `for` | planned | macro |
@@ -322,16 +342,20 @@ machine-read — keep `| var | status | notes |` rows exact.
 
 | var | status | notes |
 | `eval` | planned | eval one form in the current ns |
-| `delay` | planned | |
-| `force` | planned | |
-| `deref` | planned | delay + var (atom/future join in S6) |
 | `trampoline` | planned | |
-| `clojure-version` | planned | version map |
-| `*clojure-version*` | planned | |
 | `*assert*` | planned | default true |
 | `*unchecked-math*` | planned | fixed false (always checked, C1) |
 | `*warn-on-reflection*` | planned | fixed false (no interop, N1) |
 | `*allow-unresolved-vars*` | planned | fixed false (always strict) |
+
+## Special-form macros (S4 builtins, S5C vars)
+
+| var | status | notes |
+| `let` | divergent | analyzer builtin; resolves as macro; `macroexpand-1` returns the form unchanged (documented) |
+| `loop` | divergent | analyzer builtin; resolves as macro; `macroexpand-1` returns the form unchanged (documented) |
+| `fn` | divergent | analyzer builtin; resolves as macro; `macroexpand-1` returns the form unchanged (documented) |
+| `binding` | divergent | analyzer builtin; resolves as macro; `macroexpand-1` returns the form unchanged (documented) |
+| `letfn` | divergent | analyzer builtin; resolves as macro; `macroexpand-1` returns the form unchanged (documented) |
 
 ## Out of scope (significant exclusions)
 
@@ -350,7 +374,6 @@ machine-read — keep `| var | status | notes |` rows exact.
 | `sorted-set-by` | out-of-scope | sorted collections: no slice |
 | `subseq` | out-of-scope | sorted collections: no slice |
 | `rsubseq` | out-of-scope | sorted collections: no slice |
-| `format` | out-of-scope | Formatter-coupled; no slice |
 | `rand` | out-of-scope | RNG: no slice |
 | `rand-int` | out-of-scope | RNG: no slice |
 | `shuffle` | out-of-scope | RNG: no slice |
@@ -385,6 +408,14 @@ machine-read — keep `| var | status | notes |` rows exact.
 | `extend-protocol` | out-of-scope | protocols: no slice |
 | `satisfies?` | out-of-scope | protocols: no slice |
 | `extends?` | out-of-scope | protocols: no slice |
+| `atom` | out-of-scope | S6 concurrency |
+| `swap!` | out-of-scope | S6 concurrency |
+| `reset!` | out-of-scope | S6 concurrency |
+| `compare-and-set!` | out-of-scope | S6 concurrency |
+| `shutdown-agents` | out-of-scope | S6 concurrency |
+| `delay` | out-of-scope | S6 concurrency |
+| `force` | out-of-scope | S6 concurrency |
+| `deref` | out-of-scope | S6 concurrency |
 | `future` | out-of-scope | S6 concurrency |
 | `future-call` | out-of-scope | S6 concurrency |
 | `future?` | out-of-scope | S6 concurrency |
@@ -421,3 +452,5 @@ machine-read — keep `| var | status | notes |` rows exact.
 | `*3` | out-of-scope | S7 REPL |
 | `*e` | out-of-scope | S7 REPL |
 | `*command-line-args*` | out-of-scope | S7 CLI |
+| `clojure-version` | out-of-scope | S7 environment |
+| `*clojure-version*` | out-of-scope | S7 environment |

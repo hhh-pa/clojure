@@ -35,12 +35,14 @@ fails until each var lands.
 
 ## S5D. Core vars (`rust/core-coverage.md` is normative)
 
-- Rust-backed: arithmetic, comparison, predicates, collections,
-  chunked-lazy seqs (`map`/`filter`/… over S3 `Seq`), higher-order fns,
-  `str`/`keyword`/`symbol`/`name`/`namespace`, `ex-info` family,
+- Rust-backed: arithmetic, comparison, predicates, collections
+  (incl. `nth`/`update-in`/`get-in`/`zipmap`), chunked-lazy seqs
+  (`map`/`filter`/… over S3 `Seq`; eager `mapv`/`filterv`/…),
+  higher-order fns, `str`/`keyword`/`symbol`/`name`/`namespace`,
+  `format` (Formatter subset, oracle-pinned), `ex-info` family,
   print fns + `*out*`/`*err*`, `slurp`/`spit`, `read-string`,
-  `with-out-str`, `eval`, `clojure-version`, transients (`conj!`…),
-  `delay`/`force`/`deref` (atom/future extend `deref` in S6), `declare`.
+  `with-out-str`, `eval`, transients (`conj!`…), `declare`,
+  `var-set`. `delay`/`force`/`deref` stay in S6 per the S1 seed.
 - Embedded `.clj`: `defn`/`defn-`, `and`/`or`, `when*`/`if-*`,
   `cond`/`condp`/`case`, threaders (`->`/`->>`/`as->`/`cond->*`),
   `dotimes`/`doseq`/`for`, `lazy-seq`/`lazy-cat`, `comment`, `assert`,
