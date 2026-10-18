@@ -14,6 +14,7 @@
 
 mod keyword;
 mod print;
+mod seq;
 mod symbol;
 mod transient;
 mod value;
@@ -22,6 +23,7 @@ pub use keyword::Keyword;
 pub use print::{
     java_debug, java_double_string, pr_to_string, print, print_opts::PrintOpts, print_to_string,
 };
+pub use seq::{CHUNK_SIZE, Seq};
 pub use symbol::Symbol;
 pub use transient::{TransientError, TransientMap, TransientSet, TransientVector};
 pub use value::{FxBuildHasher, List, Map, Set, Value, Vector, new_map, new_set};
