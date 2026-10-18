@@ -43,35 +43,14 @@ impl Reader {
         if token.chars().count() == 1 {
             return Ok(Some(Value::Char(token.chars().next().unwrap())));
         }
-        match token.as_str() {
-            "newline" => return Ok(Some(Value::Char('\n'))),
-            "space" => return Ok(Some(Value::Char(' '))),
-            "tab" => return Ok(Some(Value::Char('\t'))),
-            "backspace" => return Ok(Some(Value::Char('\u{8}'))),
-            "formfeed" => return Ok(Some(Value::Char('\u{c}'))),
-            "return" => return Ok(Some(Value::Char('\r'))),
-            _ => {}
+        if let Some(c) = char_named(&token) {
+            return Ok(Some(Value::Char(c)));
         }
         if let Some(rest) = token.strip_prefix('u') {
-            let v = unicode_token_value(&token, rest, 16, 4, span)?;
-            if matches!(v, 0xD800..=0xDFFF) {
-                return Err(ReaderError::InvalidCharConst {
-                    span,
-                    hex: format!("{v:x}"),
-                });
-            }
-            return Ok(Some(Value::Char(char::from_u32(v).unwrap())));
+            return char_unicode_escape(&token, rest, span).map(|c| Some(Value::Char(c)));
         }
         if let Some(rest) = token.strip_prefix('o') {
-            let len = rest.chars().count();
-            if len > 3 {
-                return Err(ReaderError::BadOctalLen { span, len });
-            }
-            let v = unicode_token_value(&token, rest, 8, len, span)?;
-            if v > 0o377 {
-                return Err(ReaderError::OctalRange { span });
-            }
-            return Ok(Some(Value::Char(char::from_u32(v).unwrap())));
+            return char_octal_escape(&token, rest, span).map(|c| Some(Value::Char(c)));
         }
         Err(ReaderError::InvalidChar { span, token })
     }
@@ -93,30 +72,37 @@ impl Reader {
             let Some(e) = self.stream.read() else {
                 return Err(ReaderError::EofString { span: self.span() });
             };
-            match e {
-                't' => out.push('\t'),
-                'r' => out.push('\r'),
-                'n' => out.push('\n'),
-                '\\' => out.push('\\'),
-                '"' => out.push('"'),
-                'b' => out.push('\u{8}'),
-                'f' => out.push('\u{c}'),
-                'u' => {
-                    let c = self.string_unicode_escape()?;
-                    out.push(c);
-                }
-                c if c.is_ascii_digit() => {
-                    let v = self.string_octal_escape(c)?;
-                    out.push(char::from_u32(v).unwrap());
-                }
-                c => {
-                    return Err(ReaderError::BadEscape {
-                        span: self.span(),
-                        c,
-                    });
-                }
+            self.string_escape(e, &mut out)?;
+        }
+    }
+
+    /// One backslash escape in a string: push the resolved char or
+    /// raise the exact error.
+    fn string_escape(&mut self, e: char, out: &mut String) -> Result<(), ReaderError> {
+        match e {
+            't' => out.push('\t'),
+            'r' => out.push('\r'),
+            'n' => out.push('\n'),
+            '\\' => out.push('\\'),
+            '"' => out.push('"'),
+            'b' => out.push('\u{8}'),
+            'f' => out.push('\u{c}'),
+            'u' => {
+                let c = self.string_unicode_escape()?;
+                out.push(c);
+            }
+            c if c.is_ascii_digit() => {
+                let v = self.string_octal_escape(c)?;
+                out.push(char::from_u32(v).unwrap());
+            }
+            c => {
+                return Err(ReaderError::BadEscape {
+                    span: self.span(),
+                    c,
+                });
             }
         }
+        Ok(())
     }
 
     /// `\u` plus 4 hex in a string (first digit eager, exact length).
@@ -169,6 +155,44 @@ impl Reader {
             }
         }
     }
+}
+
+/// Named char words (`newline`, `space`, ...).
+fn char_named(token: &str) -> Option<char> {
+    match token {
+        "newline" => Some('\n'),
+        "space" => Some(' '),
+        "tab" => Some('\t'),
+        "backspace" => Some('\u{8}'),
+        "formfeed" => Some('\u{c}'),
+        "return" => Some('\r'),
+        _ => None,
+    }
+}
+
+/// `\u` + exactly 4 hex in a char token (surrogates rejected).
+fn char_unicode_escape(token: &str, rest: &str, span: Span) -> Result<char, ReaderError> {
+    let v = unicode_token_value(token, rest, 16, 4, span)?;
+    if matches!(v, 0xD800..=0xDFFF) {
+        return Err(ReaderError::InvalidCharConst {
+            span,
+            hex: format!("{v:x}"),
+        });
+    }
+    Ok(char::from_u32(v).unwrap())
+}
+
+/// `\o` + up to 3 octal digits in a char token.
+fn char_octal_escape(token: &str, rest: &str, span: Span) -> Result<char, ReaderError> {
+    let len = rest.chars().count();
+    if len > 3 {
+        return Err(ReaderError::BadOctalLen { span, len });
+    }
+    let v = unicode_token_value(token, rest, 8, len, span)?;
+    if v > 0o377 {
+        return Err(ReaderError::OctalRange { span });
+    }
+    Ok(char::from_u32(v).unwrap())
 }
 
 /// `readUnicodeChar(String token, offset, length, base)`: exact
