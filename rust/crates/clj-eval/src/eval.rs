@@ -513,14 +513,22 @@ impl Evaluator {
                                 return Ok(value);
                             }
                             Err(Signal::Throw(_)) => {
-                                let _ = self.eval_body(finally_body, &env);
+                                // A throwing `finally` masks the
+                                // in-flight exception (probe29).
+                                if let Err(signal @ Signal::Throw(_)) =
+                                    self.eval_body(finally_body, &env)
+                                {
+                                    return Err(signal);
+                                }
                                 return result;
                             }
                             Err(signal) => return Err(signal),
                         }
                     }
                 }
-                let _ = self.eval_body(finally_body, env);
+                if let Err(signal @ Signal::Throw(_)) = self.eval_body(finally_body, env) {
+                    return Err(signal);
+                }
                 Err(Signal::Throw(thrown))
             }
             Err(signal) => {

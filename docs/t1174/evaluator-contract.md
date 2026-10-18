@@ -162,6 +162,9 @@ Var-arg rest with no args binds `nil` (probe21 `variadic0 [1 nil]`).
 
 `(try 1 (catch Exception e))` → `1` (empty catch body is legal);
 `(try)` → `nil`; `(try 1 2 3)` → `3`; `(try 1 (finally))` → `1`.
+A `finally` that throws masks the in-flight exception (body or
+handler path), propagating its own throw instead (probe29
+`finally-masks-*`).
 
 Catch classes resolve against the default import table (`java.lang.*`,
 `clojure.lang.*` short names); anything else is `Unable to resolve

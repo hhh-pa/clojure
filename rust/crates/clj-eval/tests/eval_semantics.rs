@@ -482,6 +482,18 @@ fn try_catch_finally() {
         *log.lock().unwrap(),
         vec![":body".to_owned(), ":fin".to_owned()]
     );
+    // A throwing `finally` masks the in-flight exception (probe29),
+    // on the body path and the handler path alike.
+    assert_eq!(
+        uncaught("(try (throw (t-ex \"A\")) (finally (throw (t-ex \"F\"))))"),
+        "clojure.lang.ExceptionInfo | F"
+    );
+    assert_eq!(
+        uncaught(
+            "(try (throw (t-ex \"A\")) (catch Exception e (throw (t-ex \"H\"))) (finally (throw (t-ex \"F\"))))"
+        ),
+        "clojure.lang.ExceptionInfo | F"
+    );
     // `AssertionError` is not an `Exception`, but `Throwable` catches all.
     assert_eq!(
         uncaught("(try ((fn [x] {:pre [(t-pos? x)]} x) -1) (catch Exception e :ex))"),
