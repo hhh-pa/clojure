@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -190,6 +191,57 @@ func TestStubGoldens(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestJustificationIgnored(t *testing.T) {
+	bin := cmdtest.Build(t, ".")
+	justified := strings.Replace(baseFull, `"cognitive": 5}`, `"cognitive": 5, "justification": "tabular dispatch"}`, 1)
+	ws := stubWS(t, justified)
+	log := filepath.Join(t.TempDir(), "argv.log")
+	out, code := cmdtest.RunEnv(t, bin, ".", stubEnv(t, log), ws)
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0\n%s", code, out)
+	}
+	if !strings.Contains(out, "-> OK") {
+		t.Fatalf("output lacks OK verdict:\n%s", out)
+	}
+}
+
+func TestRegenPreservesJustification(t *testing.T) {
+	bin := cmdtest.Build(t, ".")
+	justified := strings.Replace(basePartial, `"cognitive": 5}`, `"cognitive": 5, "justification": "tabular dispatch"}`, 1)
+	ws := stubWS(t, justified)
+	log := filepath.Join(t.TempDir(), "argv.log")
+	out, code := cmdtest.RunEnv(t, bin, ".", stubEnv(t, log), ws, "--regen")
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0\n%s", code, out)
+	}
+	data, err := os.ReadFile(filepath.Join(ws, "complexity-baseline.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var base struct {
+		Violations []violation `json:"violations"`
+	}
+	if err := json.Unmarshal(data, &base); err != nil {
+		t.Fatal(err)
+	}
+	seen := false
+	for _, v := range base.Violations {
+		if v.File == "a.rs" && v.Function == "big" {
+			seen = true
+			if v.Justification != "tabular dispatch" {
+				t.Fatalf("big justification = %q, want carried", v.Justification)
+			}
+			continue
+		}
+		if v.Justification != "" {
+			t.Fatalf("%s:%s justification = %q, want empty", v.File, v.Function, v.Justification)
+		}
+	}
+	if !seen {
+		t.Fatal("regen dropped a.rs:big")
 	}
 }
 

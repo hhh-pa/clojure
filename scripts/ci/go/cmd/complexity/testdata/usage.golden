@@ -10,6 +10,10 @@ workspace (excluding build output) and compares named-function violations
 * a baselined violation whose metrics grew -> error
 * a baseline entry that no longer violates -> note (prune at leisure)
 
+A baselined entry may carry a justification string naming why the
+function is inherently complex; --regen preserves justifications
+on entries that still violate.
+
 Fail-closed: no .rs files collected, an empty result against a non-empty
 baseline, or any unparseable rca output file is an error, never a silent
 OK — a green gate must mean "analyzed, nothing new", not "analyzed
