@@ -63,6 +63,11 @@ root-cause exception (class | message | ex-data line/col).
   directives (`:keys!`/`:select`/`:all`/`:excess`/`:missing`), strict
   `:or` errors, seq→map conversion + trailing rule, nth/get matrix,
   `def` docstring/meta, empty list.
+- `probe26.clj` (S4): `:or` local-vs-key lookup (`or-local-entry`,
+  `or-key-entry`), both-defaults error, `:keys!` + `:or`
+  (`Can't supply default value for required key`), `:req` spec
+  rejection, `:or`-unknown ignored without `:select`/`:all`,
+  `&`-target seq conversion (`rest-on-*`).
 
 Run: `./probe.sh [outdir]`. Gensym ids (`p1__243#`), identity hashes
 (`@7fc19ced`), and inst renderings vary between runs; the contract

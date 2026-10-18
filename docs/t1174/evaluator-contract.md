@@ -263,7 +263,11 @@ Mirrors `destvec*`/`destmap*` (`core.clj`), including the 1.13 directives.
   `(let [[a & r] {:a 1}] …)` → `[[:a 1] nil]`); `&` first binds the
   whole seq (`(let [[& r] [1 2]] r)` → `(1 2)`); rest itself
   destructures (`[a & [b c]]` → `[1 2 3]`); `:as` binds the whole
-  (`[a :as v]` → `[1 [1 2]]`).
+  (`[a :as v]` → `[1 [1 2]]`). The seq conversion is `(seq v)`
+  (`destvec*` `gseq`, probe26): empty/nil target → `nil` rest,
+  strings → char seqs, and non-seqables → `IllegalArgumentException |
+  Don't know how to create ISeq from: CLASS` (`(let [[& r] 5] r)`,
+  unlike the no-`&` `nth` path).
 - Map: `symbol keyword` entries `get` by keyword; `:keys`/`:strs`/`:syms`
   bind by name/string/symbol keys; `:as` binds the whole (post
   seq-conversion) map; nesting composes; param hints ignored.
@@ -279,12 +283,18 @@ Mirrors `destvec*`/`destmap*` (`core.clj`), including the 1.13 directives.
 - `:or` maps binding-local-or-key → default expression. Defaults are
   evaluated eagerly, once, before any lookup (even unused ones fire).
   A default fires on MISSING keys only — present `nil` stays `nil`.
-  Both a local and a key default for one binding →
+  Lookup is local-first, then key (`(let [{x :x :or {x 5}} {}] x)` →
+  `5`, `(let [{x :x :or {:x 7}} {}] x)` → `7`, probe26). Both a local
+  and a key default for one binding →
   `Exception | Multiple :or defaults for same key: K 'local'`
   (compile time, `macroexpanding let`/`loop` as-written wrapper).
 - 1.13 directives: `:keys!`/`:syms!`/`:strs!` require presence, else
   `IllegalArgumentException | Missing required key: K` at runtime (K
-  printed bare); `:select s` binds `(select-keys (merge dm m subs) sel)`;
+  printed bare); a required key with any `:or` default →
+  `Exception | Can't supply default value for required key: K`
+  (compile time, probe26; required-ness comes only from the `!`
+  suffix — `:req` is not a directive and fails `let`/`fn` spec);
+  `:select s` binds `(select-keys (merge dm m subs) sel)`;
   `:all m` binds `(merge dm m subs)`; `:excess e` binds the leftover map
   (`(merge (not-empty (dissoc m sel)) subs)`); `:missing m` starts `nil`
   and assocs `nil` for each missing required key; `&` inside a key list
