@@ -369,7 +369,12 @@ pub fn canon(v: &Value, print_meta: bool) -> String {
         | Value::Char(_)
         | Value::Symbol(_)
         | Value::Keyword(_)
-        | Value::Regex(_) => out.push_str(&pr_to_string(v, &PrintOpts::pr())),
+        | Value::Regex(_)
+        // Evaluator-only values (the reader never emits them).
+        | Value::Var(_)
+        | Value::Unbound(_)
+        | Value::Throwable(_)
+        | Value::Extension(_) => out.push_str(&pr_to_string(v, &PrintOpts::pr())),
         Value::List(l) => {
             out.push('(');
             join_canon(&mut out, l.iter(), " ", print_meta);

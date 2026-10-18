@@ -45,6 +45,52 @@ root-cause exception (class | message | ex-data line/col).
   vec10 10), mid-chunk remainder (31 from 1), nil-punning (C4).
 - `probe19.clj` (S3): transient printing, `IllegalAccessError` rules,
   `assoc!`/`conj!`/`pop!` edges.
+- `probe20.clj` (S4): analyzer error cause chains (if/quote/let/loop/fn/
+  var/throw/set!/try/catch/recur), fn arity texts, nil/number/keyword/
+  vector invocation, unbound-var uses, unknown ns/var, pre/post failure,
+  `def` return shape.
+- `probe21.clj` (S4): closure/shadow/loop/recur/letfn values, destructure
+  matrix (incl. `:or`-nil stays nil, variadic0 rest is nil), pre/post
+  pass, `def` value/type/meta, `set!` roundtrip, `(do)`/`quote`.
+- `probe22.clj` (S4): try/catch/finally values, `ex-info`/`ex-data`,
+  `throw`/`finally` interplay.
+- `probe23.clj` (S4): try/def/fn/let/loop/letfn shape matrix,
+  variadic legality rule, `pre` expansion, interop sanity.
+- `probe24.clj` (S4): `set!` targets, `:or` evaluation, full `IFn`
+  invoke table (keywords/symbols/vectors/maps/sets/vars/unbound),
+  arity-name rules, CCE from-names, index coercion.
+- `probe25.clj` (S4): fn-param destructuring (fixed + rest), 1.13 map
+  directives (`:keys!`/`:select`/`:all`/`:excess`/`:missing`), strict
+  `:or` errors, seq→map conversion + trailing rule, nth/get matrix,
+  `def` docstring/meta, empty list.
+- `probe26.clj` (S4): `:or` local-vs-key lookup (`or-local-entry`,
+  `or-key-entry`), both-defaults error, `:keys!` + `:or`
+  (`Can't supply default value for required key`), `:req` spec
+  rejection, `:or`-unknown ignored without `:select`/`:all`,
+  `&`-target seq conversion (`rest-on-*`).
+- `probe27.clj` (S4 review round 1): `recur` frame aliasing
+  (`recur-alias-*`), seq→map trailer order (`trailing-*`).
+- `probe28.clj` (S4 review round 1): nested `:or` fire-once under
+  outlet forcing (`or-nested-*`), `subs` projection into parent
+  `:select`/`:all`.
+- `probe29.clj` (S4 review round 1): `binding` init-before-validate
+  order (`binding-*`), qualified `::ns-keys` matrix (`qual-*`),
+  `(throw nil)` NPE (`throw-nil`), `finally` masking
+  (`finally-masks-*`).
+- `probe30.clj` (S4 review round 1b): `fn`/`loop` try-fence
+  resets (`fence-fn-*`, `fence-loop-*`), unfenced clause bodies
+  (`fence-catch-*`, `fence-finally-*`, `fence-nested-*`), `recur`
+  error order (`recur-*`).
+- `probe31.clj` (S4 review round 1b): `letfn` qualified name
+  (`letfn-qual-name`), seq `:as` timing (`loop-as-*`), lone
+  pre/post maps (`fn-lone-*`), macro shadowing (`shadow-*`),
+  list-only spans (`span-*`).
+- `probe32.clj` (S4 review round 1b): `fn` clause-check order
+  (`fn-*`), `try` clause order (`try-after-*`), `catch` classes
+  (`catch-*`), key-list element casts (`keys-*`/`syms-*`/`strs-*`).
+- `probe33.clj` (S4 review round 1b): direct `let*`/`loop*`/`fn*`
+  (raw shapes, `&` rules, arity casts, arglist-NPE, pre/post
+  blindness, unshadowed heads).
 
 Run: `./probe.sh [outdir]`. Gensym ids (`p1__243#`), identity hashes
 (`@7fc19ced`), and inst renderings vary between runs; the contract

@@ -1,0 +1,1517 @@
+// Copyright (c) Rich Hickey. All rights reserved.
+// The use and distribution terms for this software are covered by the
+// Eclipse Public License 1.0 (http://opensource.org/licenses/eclipse-1.0.php)
+// which can be found in the file epl-v10.html at the root of this distribution.
+// By using this software in any fashion, you are agreeing to be bound by
+// the terms of this license.
+// You must not remove this notice, or any other, from this software.
+
+//! The tree-walking [`Evaluator`]: [`Expr`]s become values, throwing
+//! [`Signal`]s. Covers invocation (§E7), `try`, `loop`/`recur`,
+//! `def`/`set!`/`binding`, and the full destructure engine (§E12).
+//!
+//! S4 ships no prelude: tests inject [`NativeFn`](crate::ext::NativeFn)
+//! doubles; `ex-info` et al. arrive with the S5 core subset.
+
+use std::sync::Arc;
+
+use clj_reader::{ReaderOpts, Span, read_all};
+use clj_value::{Keyword, List, Map, Symbol, ThrowClass, Throwable, Value, Var, Vector, new_map};
+
+use crate::env::{Bindings, Env, Namespace};
+use crate::error::{CompileError, NativeError, Signal, jvm_class_of, simple_class_of};
+use crate::expr::{Analyzer, Catch, Expr, MapPattern, Pattern, pattern_names};
+use crate::ext::{Closure, NativeFn, as_closure, as_native};
+
+/// `eval_source` failures: reader errors, analyzer errors, uncaught
+/// throwables, and (unreachable by construction) escaping `recur`s.
+#[derive(Debug)]
+pub enum SourceError {
+    Reader(clj_reader::ReaderError),
+    Compile(CompileError),
+    Uncaught(Throwable),
+    Internal(String),
+}
+
+impl std::fmt::Display for SourceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Reader(e) => write!(f, "{e}"),
+            Self::Compile(e) => write!(f, "{e}"),
+            Self::Uncaught(t) => write!(f, "{} | {}", t.class.jvm_name(), t.message),
+            Self::Internal(msg) => write!(f, "internal error: {msg}"),
+        }
+    }
+}
+
+impl std::error::Error for SourceError {}
+
+/// The evaluator: namespace, bindings, load path, and the
+/// deterministic counters (form/fn numbering for display names, one
+/// identity sequence for throwables/closures/natives).
+pub struct Evaluator {
+    pub ns: Namespace,
+    bindings: Bindings,
+    source: Arc<str>,
+    eval_seq: u64,
+    fn_seq: u64,
+    next_id: u64,
+}
+
+impl Evaluator {
+    /// A fresh evaluator loading from `source` (`:file`, used in
+    /// spans and `def` meta).
+    #[must_use]
+    pub fn new(source: &str) -> Self {
+        Self {
+            ns: Namespace::new("user"),
+            bindings: Bindings::new(),
+            source: Arc::from(source),
+            eval_seq: 0,
+            fn_seq: 0,
+            next_id: 1,
+        }
+    }
+
+    fn next_id(&mut self) -> u64 {
+        let id = self.next_id;
+        self.next_id += 1;
+        id
+    }
+
+    /// Analyze one form against the current namespace (tests use
+    /// this for contract errors without evaluating).
+    pub fn analyze(&mut self, form: &Value) -> Result<Expr, CompileError> {
+        Analyzer::new(&self.source, &mut self.ns, self.eval_seq, &mut self.fn_seq).analyze(
+            form,
+            Span::new(1, 1),
+            true,
+        )
+    }
+
+    /// Read every form in `text` (default `:read-cond :allow`
+    /// options), analyze, and evaluate each in turn, collecting the
+    /// values. Uncaught throwables (including bare macro-arity
+    /// failures) abort the load.
+    pub fn eval_source(&mut self, text: &str) -> Result<Vec<Value>, SourceError> {
+        let forms = read_all(text, &ReaderOpts::default()).map_err(SourceError::Reader)?;
+        let mut out = Vec::with_capacity(forms.len());
+        for form in &forms {
+            self.eval_seq += 1;
+            let expr = self.analyze(form).map_err(|e| {
+                if e.bare {
+                    let id = self.next_id();
+                    SourceError::Uncaught(Throwable {
+                        id,
+                        class: ThrowClass::ArityException,
+                        message: Arc::from(e.message.as_str()),
+                        data: None,
+                        cause: None,
+                    })
+                } else {
+                    SourceError::Compile(e)
+                }
+            })?;
+            match self.eval(&expr, &Env::new()) {
+                Ok(v) => out.push(v),
+                Err(Signal::Throw(t)) => return Err(SourceError::Uncaught(t)),
+                Err(Signal::Recur(_)) => {
+                    return Err(SourceError::Internal(
+                        "recur escaped its loop or fn".to_owned(),
+                    ));
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Install a native fn under `name` (test doubles; S5 grows
+    /// this into the core subset).
+    pub fn install_native(&mut self, name: &str, func: Arc<crate::ext::NativeImpl>) -> Value {
+        let id = self.next_id();
+        let sym = Symbol::new(Some("user"), name);
+        let var_id = self.ns.intern(&sym);
+        let native = Value::Extension(Arc::new(NativeFn {
+            id,
+            display: Arc::from(format!("user/{name}").as_str()),
+            func,
+        }));
+        if let Some(state) = self.ns.state_mut(var_id) {
+            state.root = Some(native.clone());
+        }
+        native
+    }
+
+    /// Stamp a runtime failure with an identity and throw it.
+    fn throw(&mut self, err: NativeError) -> Signal {
+        Signal::Throw(Throwable {
+            id: self.next_id(),
+            class: err.class,
+            message: Arc::from(err.message.as_str()),
+            data: err.data.map(Box::new),
+            cause: err.cause.map(Box::new),
+        })
+    }
+
+    /// The visible value of a var: thread binding, else root (or
+    /// the var's own `Unbound` sentinel, never a throw).
+    fn deref_var(&self, id: u64, sym: &Symbol) -> Value {
+        if let Some(v) = self.bindings.get(id) {
+            return v.clone();
+        }
+        self.ns.root_or_unbound(id, sym)
+    }
+
+    /// Evaluate an expression to a value (or a control signal).
+    pub fn eval(&mut self, expr: &Expr, env: &Env) -> Result<Value, Signal> {
+        match expr {
+            Expr::Literal(v) | Expr::Quote(v) => Ok(v.clone()),
+            Expr::VecLit(elems) => self.eval_vec(elems, env),
+            Expr::MapLit(pairs) => self.eval_map_lit(pairs, env),
+            Expr::SetLit(elems) => self.eval_set_lit(elems, env),
+            Expr::Global(sym) => {
+                let id = self.var_id(sym);
+                Ok(self.deref_var(id, sym))
+            }
+            Expr::Local(idx) => Ok(env.get(*idx)),
+            Expr::VarRef(sym) => {
+                let id = self.var_id(sym);
+                Ok(Value::Var(Var {
+                    id,
+                    sym: sym.clone(),
+                }))
+            }
+            Expr::Def {
+                sym,
+                doc,
+                init,
+                span,
+            } => self.eval_def(sym, doc.clone(), init.as_deref(), *span, env),
+            Expr::If { test, then, els } => {
+                if self.eval(test, env)?.is_truthy() {
+                    self.eval(then, env)
+                } else {
+                    self.eval(els, env)
+                }
+            }
+            Expr::Do(exprs) => self.eval_body(exprs, env),
+            Expr::Let { bindings, body } => {
+                let env = self.bind_all(bindings, env)?;
+                self.eval_body(body, &env)
+            }
+            Expr::Loop { bindings, body } => self.eval_loop(bindings, body, env),
+            Expr::LetFn { fns, body } => self.eval_letfn(fns, body, env),
+            Expr::Fn(fun) => Ok(Value::Extension(Arc::new(self.make_closure(fun, env)))),
+            Expr::Recur(args) => {
+                let mut values = Vec::with_capacity(args.len());
+                for arg in args {
+                    values.push(self.eval(arg, env)?);
+                }
+                Err(Signal::Recur(values))
+            }
+            Expr::Throw(inner) => self.eval_throw(inner, env),
+            Expr::NewThrowable { class, message } => Ok(Value::Throwable(Throwable {
+                id: self.next_id(),
+                class: *class,
+                message: Arc::from(message.as_str()),
+                data: None,
+                cause: None,
+            })),
+            Expr::Try {
+                body,
+                catches,
+                finally_body,
+            } => self.eval_try(body, catches, finally_body, env),
+            Expr::Set { sym, val } => self.eval_set(sym, val, env),
+            Expr::Binding { pairs, body } => self.eval_binding(pairs, body, env),
+            Expr::Invoke { head, args } => {
+                let callee = self.eval(head, env)?;
+                let mut values = Vec::with_capacity(args.len());
+                for arg in args {
+                    values.push(self.eval(arg, env)?);
+                }
+                self.invoke(&callee, &values)
+            }
+        }
+    }
+
+    /// A var id, interning on first reference.
+    fn var_id(&mut self, sym: &Symbol) -> u64 {
+        self.ns.lookup(sym).unwrap_or_else(|| self.ns.intern(sym))
+    }
+
+    /// A vector literal (elements evaluate left to right).
+    fn eval_vec(&mut self, elems: &[Expr], env: &Env) -> Result<Value, Signal> {
+        let mut out = Vec::with_capacity(elems.len());
+        for elem in elems {
+            out.push(self.eval(elem, env)?);
+        }
+        Ok(Value::Vector(Vector::from_vec(out)))
+    }
+
+    /// A map literal (keys and values evaluate left to right).
+    fn eval_map_lit(&mut self, pairs: &[(Expr, Expr)], env: &Env) -> Result<Value, Signal> {
+        let mut out = new_map();
+        for (k, v) in pairs {
+            let key = self.eval(k, env)?;
+            let val = self.eval(v, env)?;
+            out = out.insert(key, val);
+        }
+        Ok(Value::Map(out))
+    }
+
+    /// A set literal (elements evaluate left to right).
+    fn eval_set_lit(&mut self, elems: &[Expr], env: &Env) -> Result<Value, Signal> {
+        let mut out = clj_value::new_set();
+        for elem in elems {
+            out = out.insert(self.eval(elem, env)?);
+        }
+        Ok(Value::Set(out))
+    }
+
+    /// `letfn`: extend the frame, fill each slot with its closure
+    /// (self/mutual recursion), run the body.
+    fn eval_letfn(
+        &mut self,
+        fns: &[(String, crate::expr::FunExpr)],
+        body: &[Expr],
+        env: &Env,
+    ) -> Result<Value, Signal> {
+        let env = env.extend(vec![Value::Nil; fns.len()]);
+        let base = env.len() - fns.len();
+        for (i, (_, fun)) in fns.iter().enumerate() {
+            let closure = self.make_closure(fun, &env);
+            env.set(base + i, Value::Extension(Arc::new(closure)));
+        }
+        self.eval_body(body, &env)
+    }
+
+    /// `throw`: throwables signal, anything else is the
+    /// `Throwable` cast error.
+    fn eval_throw(&mut self, inner: &Expr, env: &Env) -> Result<Value, Signal> {
+        let value = self.eval(inner, env)?;
+        match value {
+            Value::Throwable(t) => Err(Signal::Throw(t)),
+            // `nil` is not the cast error: the JVM throws a
+            // Clojure-constructed NPE with stable text (probe29).
+            Value::Nil => Err(self.throw(NativeError::new(
+                ThrowClass::NullPointerException,
+                "Cannot throw exception because \"null\" is null".to_owned(),
+            ))),
+            other => Err(self.throw(NativeError::cast(
+                &jvm_class_of(&other),
+                "java.lang.Throwable",
+            ))),
+        }
+    }
+
+    /// `set!`: rebind the thread-local top, else the root-binding
+    /// error.
+    fn eval_set(&mut self, sym: &Symbol, val: &Expr, env: &Env) -> Result<Value, Signal> {
+        let value = self.eval(val, env)?;
+        let id = self.var_id(sym);
+        if self.bindings.set_top(id, value.clone()) {
+            Ok(value)
+        } else {
+            Err(self.throw(NativeError::new(
+                ThrowClass::IllegalStateException,
+                format!(
+                    "Can't change/establish root binding of: {} with set",
+                    sym.name()
+                ),
+            )))
+        }
+    }
+
+    /// `binding`: evaluate every init, validate every var, then
+    /// push all and run the body, always popping. The JVM builds
+    /// the push map (all inits) before `push-thread-bindings`
+    /// validates, so an init throw beats a dynamic-ness error
+    /// (probe29 `binding-*`); nothing is pushed before the body,
+    /// so pre-body failures need no unwind.
+    fn eval_binding(
+        &mut self,
+        pairs: &[(Symbol, Expr)],
+        body: &[Expr],
+        env: &Env,
+    ) -> Result<Value, Signal> {
+        let mut values = Vec::with_capacity(pairs.len());
+        for (_, init) in pairs {
+            values.push(self.eval(init, env)?);
+        }
+        for (sym, _) in pairs {
+            let id = self.var_id(sym);
+            let dynamic = self.ns.state(id).is_some_and(|s| s.dynamic);
+            if !dynamic {
+                return Err(self.throw(NativeError::new(
+                    ThrowClass::IllegalStateException,
+                    format!("Can't dynamically bind non-dynamic var: {sym}"),
+                )));
+            }
+        }
+        let depth = self.bindings.depth();
+        for ((sym, _), value) in pairs.iter().zip(values) {
+            let id = self.var_id(sym);
+            self.bindings.push(id, value);
+        }
+        let result = self.eval_body(body, env);
+        self.bindings.truncate(depth);
+        result
+    }
+
+    /// A body: the last value, or `nil` when empty.
+    fn eval_body(&mut self, body: &[Expr], env: &Env) -> Result<Value, Signal> {
+        let mut value = Value::Nil;
+        for expr in body {
+            value = self.eval(expr, env)?;
+        }
+        Ok(value)
+    }
+
+    /// Bind `let`/`loop` pairs left to right (each init sees the
+    /// previous pairs), returning the extended frame.
+    fn bind_all(&mut self, bindings: &[(Pattern, Expr)], env: &Env) -> Result<Env, Signal> {
+        let mut env = env.clone();
+        for (pat, init) in bindings {
+            let value = self.eval(init, &env)?;
+            env = self.bind_pattern(pat, value, &env)?;
+        }
+        Ok(env)
+    }
+
+    /// Bind one pattern: extend the frame, evaluate `:or` defaults
+    /// against the pre-extension frame, destructure into the slots.
+    fn bind_pattern(&mut self, pat: &Pattern, value: Value, env: &Env) -> Result<Env, Signal> {
+        let count = pattern_names(pat).len();
+        let env = env.extend(vec![Value::Nil; count]);
+        let base = env.len() - count;
+        let mut out = Vec::with_capacity(count);
+        self.destructure(pat, &value, &env, &mut out, ForceSet::default())?;
+        debug_assert_eq!(out.len(), count, "destructure fills every slot");
+        for (i, v) in out.into_iter().enumerate() {
+            env.set(base + i, v);
+        }
+        Ok(env)
+    }
+
+    /// `(def …)`: evaluate the init (or leave rootless), refresh
+    /// root/meta/dynamic, return the var. Dynamic is the truthiness
+    /// of the sym's `:dynamic` meta, reset by every `def`
+    /// (probe25).
+    fn eval_def(
+        &mut self,
+        sym: &Symbol,
+        doc: Option<String>,
+        init: Option<&Expr>,
+        span: Span,
+        env: &Env,
+    ) -> Result<Value, Signal> {
+        let id = self.ns.intern(sym);
+        let value = match init {
+            Some(init) => Some(self.eval(init, env)?),
+            None => None,
+        };
+        let dynamic = sym
+            .meta()
+            .and_then(|meta| {
+                let probe = Value::Keyword(Keyword::new(None, "dynamic"));
+                meta.get(&probe)
+            })
+            .is_some_and(Value::is_truthy);
+        if let Some(state) = self.ns.state_mut(id) {
+            if let Some(v) = value {
+                state.root = Some(v);
+            }
+            let mut meta = sym.meta().cloned().unwrap_or_else(new_map);
+            if let Some(doc) = doc {
+                let key = Value::Keyword(Keyword::new(None, "doc"));
+                meta = meta.insert(key, Value::Str(Arc::from(doc.as_str())));
+            }
+            let auto = [
+                ("line", Value::Int(i64::from(span.line))),
+                ("column", Value::Int(i64::from(span.col))),
+                ("file", Value::Str(Arc::clone(&self.source))),
+                ("name", Value::Symbol(Symbol::new(None, sym.name()))),
+            ];
+            for (key, val) in auto {
+                let key = Value::Keyword(Keyword::new(None, key));
+                meta = meta.insert(key, val);
+            }
+            state.meta = meta;
+            state.dynamic = dynamic;
+        }
+        Ok(Value::Var(Var {
+            id,
+            sym: sym.clone(),
+        }))
+    }
+
+    /// `(loop …)`: bind once, then run the body, rebinding through
+    /// the patterns on every `recur`.
+    fn eval_loop(
+        &mut self,
+        bindings: &[(Pattern, Expr)],
+        body: &[Expr],
+        env: &Env,
+    ) -> Result<Value, Signal> {
+        let base = env.len();
+        // Bind sequentially (each init sees the previous pairs),
+        // then run the body against the frame.
+        let mut env = env.clone();
+        for (pat, init) in bindings {
+            let value = self.eval(init, &env)?;
+            env = self.bind_pattern(pat, value, &env)?;
+        }
+        loop {
+            match self.eval_body(body, &env) {
+                Ok(v) => return Ok(v),
+                Err(Signal::Recur(values)) => {
+                    // Copy-on-recur: closures from this iteration
+                    // keep observing the old frame.
+                    env = env.duplicate();
+                    let mut slot = base;
+                    for ((pat, _), value) in bindings.iter().zip(values) {
+                        let count = pattern_names(pat).len();
+                        let mut out = Vec::with_capacity(count);
+                        self.destructure(pat, &value, &env, &mut out, ForceSet::default())?;
+                        for (i, v) in out.into_iter().enumerate() {
+                            env.set(slot + i, v);
+                        }
+                        slot += count;
+                    }
+                }
+                Err(signal) => return Err(signal),
+            }
+        }
+    }
+
+    /// `(try …)`: the first matching `catch` wins (by hierarchy);
+    /// `finally` runs on every path and its value is discarded.
+    fn eval_try(
+        &mut self,
+        body: &[Expr],
+        catches: &[Catch],
+        finally_body: &[Expr],
+        env: &Env,
+    ) -> Result<Value, Signal> {
+        let result = self.eval_body(body, env);
+        match result {
+            Ok(value) => {
+                self.eval_body(finally_body, env)?;
+                Ok(value)
+            }
+            Err(Signal::Throw(thrown)) => {
+                for catch in catches {
+                    if thrown.class.matches(&catch.class) {
+                        let env = env.extend(vec![Value::Throwable(thrown.clone())]);
+                        debug_assert_eq!(env.len() - 1, catch.slot, "catch binds one slot");
+                        let result = self.eval_body(&catch.body, &env);
+                        // `finally` still runs when the handler throws.
+                        match result {
+                            Ok(value) => {
+                                self.eval_body(finally_body, &env)?;
+                                return Ok(value);
+                            }
+                            Err(Signal::Throw(_)) => {
+                                // A throwing `finally` masks the
+                                // in-flight exception (probe29).
+                                if let Err(signal @ Signal::Throw(_)) =
+                                    self.eval_body(finally_body, &env)
+                                {
+                                    return Err(signal);
+                                }
+                                return result;
+                            }
+                            Err(signal) => return Err(signal),
+                        }
+                    }
+                }
+                if let Err(signal @ Signal::Throw(_)) = self.eval_body(finally_body, env) {
+                    return Err(signal);
+                }
+                Err(Signal::Throw(thrown))
+            }
+            Err(signal) => {
+                let _ = self.eval_body(finally_body, env);
+                Err(signal)
+            }
+        }
+    }
+
+    /// Build a closure over the current frame.
+    fn make_closure(&mut self, fun: &crate::expr::FunExpr, env: &Env) -> Closure {
+        Closure {
+            id: self.next_id(),
+            display: Arc::from(fun.display.as_str()),
+            arities: fun.arities.clone(),
+            env: env.clone(),
+        }
+    }
+
+    /// The §E7 `IFn` table: closures/natives, keywords, symbols,
+    /// vectors, maps, sets, vars (deref-and-delegate), unbounds
+    /// (the `IllegalStateException`), and the `ClassCastException`
+    /// for everything else.
+    fn invoke(&mut self, callee: &Value, args: &[Value]) -> Result<Value, Signal> {
+        match callee {
+            Value::Nil => Err(self.throw(NativeError::new(
+                ThrowClass::NullPointerException,
+                "Cannot invoke nil as a function".to_owned(),
+            ))),
+            Value::Extension(_) => self.invoke_extension(callee, args),
+            Value::Keyword(kw) => {
+                let name = kw.to_string();
+                match args {
+                    [coll] => Ok(lookup(coll, callee).unwrap_or(Value::Nil)),
+                    [coll, not_found] => {
+                        Ok(lookup(coll, callee).unwrap_or_else(|| not_found.clone()))
+                    }
+                    _ => Err(self.throw(NativeError::arity(&name, args.len()))),
+                }
+            }
+            Value::Symbol(_) => match args {
+                [coll] => Ok(lookup(coll, callee).unwrap_or(Value::Nil)),
+                [coll, not_found] => Ok(lookup(coll, callee).unwrap_or_else(|| not_found.clone())),
+                _ => Err(self.throw(NativeError::arity("clojure.lang.Symbol", args.len()))),
+            },
+            Value::Vector(v) => self.invoke_vector(v, args),
+            Value::Map(_) => {
+                let name = jvm_class_of(callee);
+                match args {
+                    [key] => Ok(lookup(callee, key).unwrap_or(Value::Nil)),
+                    [key, not_found] => {
+                        Ok(lookup(callee, key).unwrap_or_else(|| not_found.clone()))
+                    }
+                    _ => Err(self.throw(NativeError::arity(&name, args.len()))),
+                }
+            }
+            Value::Set(s) => match args {
+                [key] => Ok(member(s, key).unwrap_or(Value::Nil)),
+                [key, not_found] => Ok(member(s, key).unwrap_or_else(|| not_found.clone())),
+                _ => Err(self.throw(NativeError::arity(
+                    "clojure.lang.PersistentHashSet",
+                    args.len(),
+                ))),
+            },
+            Value::Var(v) => self.invoke_var(v, args),
+            Value::Unbound(u) => Err(self.throw(NativeError::new(
+                ThrowClass::IllegalStateException,
+                format!("Attempting to call unbound fn: #'{}", u.sym),
+            ))),
+            _ => Err(self.throw(NativeError::cast(&jvm_class_of(callee), "clojure.lang.IFn"))),
+        }
+    }
+
+    /// Invoke an extension value: closures apply, natives run,
+    /// anything else is the `IFn` cast error.
+    fn invoke_extension(&mut self, callee: &Value, args: &[Value]) -> Result<Value, Signal> {
+        if let Some(closure) = as_closure(callee) {
+            return self.apply_closure(closure, args);
+        }
+        if let Some(native) = as_native(callee) {
+            let func = Arc::clone(&native.func);
+            return func(args).map_err(|e| self.throw(e));
+        }
+        Err(self.throw(NativeError::cast(&jvm_class_of(callee), "clojure.lang.IFn")))
+    }
+
+    /// Invoke a vector: exactly one integer key (arity, key-type,
+    /// then bounds, §E7).
+    fn invoke_vector(&mut self, v: &clj_value::Vector, args: &[Value]) -> Result<Value, Signal> {
+        if args.len() != 1 {
+            return Err(self.throw(NativeError::arity(
+                "clojure.lang.PersistentVector",
+                args.len(),
+            )));
+        }
+        let Value::Int(n) = &args[0] else {
+            return Err(self.throw(NativeError::new(
+                ThrowClass::IllegalArgumentException,
+                "Key must be integer".to_owned(),
+            )));
+        };
+        match usize::try_from(*n).ok().and_then(|i| v.iter().nth(i)) {
+            Some(elem) => Ok(elem.clone()),
+            None => Err(self.throw(NativeError::new(
+                ThrowClass::IndexOutOfBoundsException,
+                String::new(),
+            ))),
+        }
+    }
+
+    /// Invoke a var: deref and delegate (unbounds are the
+    /// `IllegalStateException`).
+    fn invoke_var(&mut self, v: &Var, args: &[Value]) -> Result<Value, Signal> {
+        let root = self.deref_var(v.id, &v.sym);
+        if matches!(root, Value::Unbound(_)) {
+            return Err(self.throw(NativeError::new(
+                ThrowClass::IllegalStateException,
+                format!("Attempting to call unbound fn: #'{}", v.sym),
+            )));
+        }
+        self.invoke(&root, args)
+    }
+
+    /// Apply a closure: fixed arities by count, else the variadic
+    /// arity (`rest` binds `nil` when empty, §E5).
+    fn apply_closure(&mut self, closure: &Closure, args: &[Value]) -> Result<Value, Signal> {
+        let mut variadic: Option<&crate::expr::Arity> = None;
+        for arity in &closure.arities {
+            if arity.rest.is_none() && arity.fixed.len() == args.len() {
+                return self.apply_arity(closure, arity, args, None);
+            }
+            if arity.rest.is_some() {
+                variadic = Some(arity);
+            }
+        }
+        if let Some(arity) = variadic.filter(|a| args.len() >= a.fixed.len()) {
+            let rest = rest_list(&args[arity.fixed.len()..]);
+            return self.apply_arity(closure, arity, args, Some(rest));
+        }
+        Err(self.throw(NativeError::arity(&closure.display, args.len())))
+    }
+
+    /// Bind one arity's parameters (sequentially, like `let`) and
+    /// run the body, looping on `recur`.
+    fn apply_arity(
+        &mut self,
+        closure: &Closure,
+        arity: &crate::expr::Arity,
+        args: &[Value],
+        rest: Option<Value>,
+    ) -> Result<Value, Signal> {
+        let mut values: Vec<Value> = args[..arity.fixed.len()].to_vec();
+        if let Some(rest) = rest {
+            values.push(rest);
+        }
+        let pats: Vec<&Pattern> = arity.fixed.iter().chain(arity.rest.iter()).collect();
+        let base = closure.env.len();
+        let mut env = closure.env.clone();
+        for pat in &pats {
+            let count = pattern_names(pat).len();
+            env = env.extend(vec![Value::Nil; count]);
+        }
+        let mut frame = env.clone();
+        let mut rebind = values;
+        loop {
+            let mut slot = base;
+            for (pat, value) in pats.iter().zip(rebind) {
+                let count = pattern_names(pat).len();
+                let mut out = Vec::with_capacity(count);
+                self.destructure(pat, &value, &frame, &mut out, ForceSet::default())?;
+                for (i, v) in out.into_iter().enumerate() {
+                    frame.set(slot + i, v);
+                }
+                slot += count;
+            }
+            match self.eval_body(&arity.body, &frame) {
+                Ok(v) => return Ok(v),
+                Err(Signal::Recur(values)) => {
+                    // Copy-on-recur (see `eval_loop`).
+                    rebind = values;
+                    frame = frame.duplicate();
+                }
+                Err(signal) => return Err(signal),
+            }
+        }
+    }
+
+    /// Destructure a value against a pattern, pushing bound values
+    /// in [`pattern_names`] order. Returns the computed outlet
+    /// values (requested or forced) for `subs` projection.
+    fn destructure(
+        &mut self,
+        pat: &Pattern,
+        value: &Value,
+        env: &Env,
+        out: &mut Vec<Value>,
+        force: ForceSet,
+    ) -> Result<OutletVals, Signal> {
+        match pat {
+            Pattern::Symbol(_) => {
+                out.push(value.clone());
+                Ok(OutletVals::default())
+            }
+            Pattern::Vec(v) => {
+                // Vectors neither force nor project (`(map? bb)`).
+                self.destructure_seq(v, value, env, out)?;
+                Ok(OutletVals::default())
+            }
+            Pattern::Map(m) => self.bind_map(m, value, env, out, force),
+        }
+    }
+
+    /// `destvec*`: without `&`, positional `nth`-with-`nil` (wrong
+    /// types are `nth not supported`); with `&`, `first`/`next`
+    /// chaining; `:as` takes the whole.
+    fn destructure_seq(
+        &mut self,
+        pat: &crate::expr::VecPattern,
+        value: &Value,
+        env: &Env,
+        out: &mut Vec<Value>,
+    ) -> Result<(), Signal> {
+        if pat.rest.is_none() {
+            for (i, fixed) in pat.fixed.iter().enumerate() {
+                let nth = nth_or_nil(value, i, self)?;
+                let _ = self.destructure(fixed, &nth, env, out, ForceSet::default())?;
+            }
+        } else {
+            // `destvec*` binds `gseq` to `(seq gvec)`: the `&`
+            // pattern gets a seq (`nil` when empty) and
+            // non-seqables raise the `ISeq` error (§E12).
+            let mut current = self.seq_val(value)?;
+            for fixed in &pat.fixed {
+                let first = first_of(&current);
+                let _ = self.destructure(fixed, &first, env, out, ForceSet::default())?;
+                current = next_of(&current);
+            }
+            if let Some(rest) = &pat.rest {
+                let _ = self.destructure(rest, &current, env, out, ForceSet::default())?;
+            }
+        }
+        if pat.as_sym.is_some() {
+            out.push(value.clone());
+        }
+        Ok(())
+    }
+
+    /// `destmap*`: seq-convert, eager `:or`, entries, keys,
+    /// outlets. Pushes values in [`pattern_names`] order (entries,
+    /// keys, `:as`, `:select`, `:all`, `:excess`, `:missing`) and
+    /// returns every computed outlet (requested or forced) for the
+    /// parent's `subs` projection — each nested pattern binds once,
+    /// so `:or` defaults fire exactly once.
+    fn bind_map(
+        &mut self,
+        pat: &MapPattern,
+        value: &Value,
+        env: &Env,
+        out: &mut Vec<Value>,
+        force: ForceSet,
+    ) -> Result<OutletVals, Signal> {
+        let converted = self.seq_to_map(value)?;
+        let defaults = self.eval_defaults(pat, env)?;
+        let ctx = MapBind {
+            pat,
+            env,
+            converted: &converted,
+            defaults: &defaults,
+            force,
+        };
+        // Entries and keys (missing keys take the local-then-key
+        // default; required keys `req!`). `:missing` starts absent:
+        // nothing missing means `nil`, not `{}`.
+        let mut missing: Option<Map> = None;
+        let mut subs = SubMaps::default();
+        self.bind_entries(&ctx, &mut missing, &mut subs, out)?;
+        self.bind_key_list(&ctx, &mut missing, out)?;
+        if pat.as_sym.is_some() {
+            out.push(converted.clone());
+        }
+        self.bind_outlets(&ctx, &mut missing, &subs, out)
+    }
+
+    /// The eager `:or` defaults (evaluated once, before any lookup).
+    fn eval_defaults(&mut self, pat: &MapPattern, env: &Env) -> Result<Map, Signal> {
+        let mut defaults: Map = new_map();
+        for (key, default) in &pat.or {
+            let val = self.eval(default, env)?;
+            defaults = defaults.insert((*key).clone(), val);
+        }
+        Ok(defaults)
+    }
+
+    /// The `symbol keyword` entries, accumulating `subs` (entry
+    /// key → outlet value) from each nested map's single bind.
+    fn bind_entries(
+        &mut self,
+        ctx: &MapBind,
+        missing: &mut Option<Map>,
+        subs: &mut SubMaps,
+        out: &mut Vec<Value>,
+    ) -> Result<(), Signal> {
+        for (local, key) in &ctx.pat.entries {
+            // `:or` is keyed by the binding local first, then the
+            // lookup key (`destmap*` `push1`); nested locals have no
+            // `Value` form, so only symbols get the local lookup.
+            let local_val = match local {
+                Pattern::Symbol(name) => Some(Value::Symbol(Symbol::new(None, name))),
+                _ => None,
+            };
+            let val = self.map_binding(ctx, local_val.as_ref(), key, false, missing)?;
+            // Forcing (`destmap*` gensym outlets): an effective
+            // outlet the nested map lacks is still computed, for
+            // `subs` (never bound).
+            let force = ForceSet {
+                select: ctx.effective(Outlet::Select) && !has_outlet(local, Outlet::Select),
+                all: ctx.effective(Outlet::All) && !has_outlet(local, Outlet::All),
+                excess: ctx.effective(Outlet::Excess) && !has_outlet(local, Outlet::Excess),
+                missing: ctx.effective(Outlet::Missing) && !has_outlet(local, Outlet::Missing),
+            };
+            let ov = self.destructure(local, &val, ctx.env, out, force)?;
+            if matches!(local, Pattern::Map(_)) {
+                insert_sub(&mut subs.select, key, ov.select);
+                insert_sub(&mut subs.all, key, ov.all);
+                insert_sub(&mut subs.excess, key, ov.excess);
+                insert_sub(&mut subs.missing, key, ov.missing);
+            }
+        }
+        Ok(())
+    }
+
+    /// The `:keys`/`:strs`/`:syms` bindings.
+    fn bind_key_list(
+        &mut self,
+        ctx: &MapBind,
+        missing: &mut Option<Map>,
+        out: &mut Vec<Value>,
+    ) -> Result<(), Signal> {
+        for key in &ctx.pat.keys {
+            let local_key = Value::Symbol(Symbol::new(None, &key.local));
+            let val = self.map_binding(ctx, Some(&local_key), &key.key, key.required, missing)?;
+            out.push(val);
+        }
+        Ok(())
+    }
+
+    /// The 1.13 outlets, computed exactly when effective
+    /// (requested or forced), bound only when requested. Merges use
+    /// JVM `merge` semantics over the *converted* target
+    /// (`nil`-skipping; non-map survivors pass through).
+    fn bind_outlets(
+        &mut self,
+        ctx: &MapBind,
+        missing: &mut Option<Map>,
+        subs: &SubMaps,
+        out: &mut Vec<Value>,
+    ) -> Result<OutletVals, Signal> {
+        let pat = ctx.pat;
+        let dm = or_mapped(pat, ctx.defaults);
+        // `(if (empty? dm) nil dm)`.
+        let dm_v = if dm.is_empty() {
+            Value::Nil
+        } else {
+            Value::Map(dm)
+        };
+        let sel = selection(pat);
+        let mut ov = OutletVals::default();
+        if ctx.effective(Outlet::Select) {
+            let mm = self.jvm_merge3(
+                dm_v.clone(),
+                ctx.converted.clone(),
+                opt_val(subs.select.clone()),
+            )?;
+            // `when-let`: an all-absent merge binds `nil`.
+            let v = if matches!(mm, Value::Nil) {
+                Value::Nil
+            } else {
+                self.select_keys_general(&mm, &sel)?
+            };
+            emit_outlet(out, &mut ov.select, pat.select.is_some(), v);
+        }
+        if ctx.effective(Outlet::All) {
+            let v = self.jvm_merge3(
+                dm_v.clone(),
+                ctx.converted.clone(),
+                opt_val(subs.all.clone()),
+            )?;
+            emit_outlet(out, &mut ov.all, pat.all.is_some(), v);
+        }
+        if ctx.effective(Outlet::Excess) {
+            let base = self.dissoc_opt(ctx.converted, &sel)?;
+            let v = self.jvm_merge2(opt_val(base), opt_val(subs.excess.clone()))?;
+            emit_outlet(out, &mut ov.excess, pat.excess.is_some(), v);
+        }
+        if ctx.effective(Outlet::Missing) {
+            let v = self.jvm_merge2(opt_val(missing.take()), opt_val(subs.missing.clone()))?;
+            emit_outlet(out, &mut ov.missing, pat.missing.is_some(), v);
+        }
+        Ok(ov)
+    }
+
+    /// One map binding: present keys read, missing keys take the
+    /// local-then-key default, missing required keys `req!` (or
+    /// record into `:missing` and bind `nil`).
+    fn map_binding(
+        &mut self,
+        ctx: &MapBind,
+        local: Option<&Value>,
+        key: &Value,
+        required: bool,
+        missing: &mut Option<Map>,
+    ) -> Result<Value, Signal> {
+        if let Some(val) = lookup(ctx.converted, key) {
+            return Ok(val);
+        }
+        let default = local
+            .and_then(|local| ctx.defaults.get(local).cloned())
+            .or_else(|| ctx.defaults.get(key).cloned());
+        if required && default.is_none() {
+            if ctx.pat.missing.is_some() {
+                let m = missing.take().unwrap_or_else(new_map);
+                *missing = Some(m.insert(key.clone(), Value::Nil));
+                return Ok(Value::Nil);
+            }
+            return Err(self.throw(NativeError::new(
+                ThrowClass::IllegalArgumentException,
+                format!("Missing required key: {}", pr_of(key)),
+            )));
+        }
+        Ok(default.unwrap_or(Value::Nil))
+    }
+
+    /// JVM 2-`merge`: `nil`s skipped, else `into1`.
+    fn jvm_merge2(&mut self, x: Value, y: Value) -> Result<Value, Signal> {
+        match (&x, &y) {
+            (Value::Nil, Value::Nil) => Ok(Value::Nil),
+            (Value::Nil, _) => Ok(y),
+            (_, Value::Nil) => Ok(x),
+            _ => self.into1(x, &y),
+        }
+    }
+
+    /// JVM 3-`merge`: left-associated `jvm_merge2`.
+    fn jvm_merge3(&mut self, x: Value, y: Value, z: Value) -> Result<Value, Signal> {
+        let merged = self.jvm_merge2(x, y)?;
+        self.jvm_merge2(merged, z)
+    }
+
+    /// `select-keys` over a merge result: maps select, anything else
+    /// is the `.entryAt` hint cast (`IPersistentMap`).
+    fn select_keys_general(&mut self, merged: &Value, sel: &[Value]) -> Result<Value, Signal> {
+        match merged {
+            Value::Map(m) => Ok(select_keys(m, sel)),
+            other => Err(self.throw(NativeError::cast(
+                &jvm_class_of(other),
+                "clojure.lang.IPersistentMap",
+            ))),
+        }
+    }
+
+    /// A `dissoc` base: `nil` is absent, maps shed the selection
+    /// (`not-empty`), anything else is the `IPersistentMap` cast error.
+    fn dissoc_opt(&mut self, converted: &Value, sel: &[Value]) -> Result<Option<Map>, Signal> {
+        match converted {
+            Value::Nil => Ok(None),
+            Value::Map(m) => {
+                let mut out = m.clone();
+                for key in sel {
+                    out = out.without(key);
+                }
+                Ok((!out.is_empty()).then_some(out))
+            }
+            other => Err(self.throw(NativeError::cast(
+                &jvm_class_of(other),
+                "clojure.lang.IPersistentMap",
+            ))),
+        }
+    }
+
+    /// `into1`: map targets cast `from`'s elements to entries
+    /// (real map entries assoc; anything else is the `Map$Entry`
+    /// cast error, `nil` the entry-NPE); other targets `conj` each
+    /// element. `nil` adds nothing; unseqables are the `ISeq` error.
+    fn into1(&mut self, to: Value, from: &Value) -> Result<Value, Signal> {
+        if let Value::Map(m) = from {
+            let mut out = to;
+            for (k, v) in m.iter() {
+                out = self.conj_entry_val(out, k.clone(), v.clone())?;
+            }
+            return Ok(out);
+        }
+        match self.seq_val(from)? {
+            Value::Nil => Ok(to),
+            Value::List(l) => {
+                if matches!(to, Value::Map(_)) {
+                    // Casts, not conjs: the first element always
+                    // fails (nothing representable is an entry).
+                    return match l.iter().next() {
+                        Some(first) => Err(self.throw(cast_entry(first))),
+                        None => Ok(to),
+                    };
+                }
+                let mut out = to;
+                for elem in l.iter() {
+                    out = self.conj_one(out, elem.clone())?;
+                }
+                Ok(out)
+            }
+            _ => unreachable!("seq_val yields a list or nil"),
+        }
+    }
+
+    /// One real entry conjed: maps assoc, vectors/lists/sets take
+    /// the `[k v]` form, `nil` starts a list, anything else is the
+    /// `IPersistentCollection` cast error.
+    fn conj_entry_val(&mut self, coll: Value, k: Value, v: Value) -> Result<Value, Signal> {
+        if let Value::Map(m) = coll {
+            return Ok(Value::Map(m.insert(k, v)));
+        }
+        let entry = Value::Vector(Vector::from_vec(vec![k, v]));
+        self.conj_one(coll, entry)
+    }
+
+    /// `conj` of one element: lists prepend, vectors append, sets
+    /// insert, maps take entries, `nil` starts a list, anything else
+    /// is the `IPersistentCollection` cast error.
+    fn conj_one(&mut self, coll: Value, elem: Value) -> Result<Value, Signal> {
+        match coll {
+            Value::Nil => Ok(Value::List(List::from_vec(vec![elem]))),
+            Value::Map(m) => self.conj_map(m, elem).map(Value::Map),
+            Value::Vector(v) => Ok(Value::Vector(v.push_back(elem))),
+            Value::List(l) => Ok(Value::List(l.push_front(elem))),
+            Value::Set(s) => Ok(Value::Set(s.insert(elem))),
+            other => Err(self.throw(NativeError::cast(
+                &jvm_class_of(&other),
+                "clojure.lang.IPersistentCollection",
+            ))),
+        }
+    }
+
+    /// `conj` onto a map: `nil` is identity, maps merge, 2-vectors
+    /// assoc, other vectors are the pair error, seqables contribute
+    /// entries (non-entries are the `Map$Entry` cast error).
+    fn conj_map(&mut self, mut map: Map, elem: Value) -> Result<Map, Signal> {
+        match elem {
+            Value::Nil => Ok(map),
+            Value::Map(other) => {
+                for (k, v) in other.iter() {
+                    map = map.insert(k.clone(), v.clone());
+                }
+                Ok(map)
+            }
+            Value::Vector(v) => {
+                let items: Vec<Value> = v.iter().cloned().collect();
+                match items.as_slice() {
+                    [k, val] => Ok(map.insert(k.clone(), val.clone())),
+                    _ => Err(self.throw(NativeError::new(
+                        ThrowClass::IllegalArgumentException,
+                        "Vector arg to map conj must be a pair".to_owned(),
+                    ))),
+                }
+            }
+            other => match self.seq_val(&other)? {
+                Value::Nil => Ok(map),
+                Value::List(l) => match l.iter().next() {
+                    Some(first) => Err(self.throw(cast_entry(first))),
+                    None => Ok(map),
+                },
+                _ => unreachable!("seq_val yields a list or nil"),
+            },
+        }
+    }
+
+    /// `seq-to-map-for-destructuring`: only lists convert (S4 has no
+    /// other `ISeq`s). Empty is `{}`, one element is the element,
+    /// longer reads pairs plus the trailing rule (§E12).
+    fn seq_to_map(&mut self, value: &Value) -> Result<Value, Signal> {
+        let Value::List(list) = value else {
+            return Ok(value.clone());
+        };
+        let items: Vec<&Value> = list.iter().collect();
+        match items.as_slice() {
+            [] => Ok(Value::Map(new_map())),
+            [single] => Ok((*single).clone()),
+            _ => {
+                let mut map = new_map();
+                let mut pairs = &items[..];
+                // Pairs first, trailing last (`(conj (apply hash-map
+                // (pop v)) (peek v))`): the trailer wins duplicates.
+                let trailing = if pairs.len() % 2 == 1 {
+                    let last = pairs[pairs.len() - 1];
+                    pairs = &pairs[..pairs.len() - 1];
+                    Some(last)
+                } else {
+                    None
+                };
+                for i in (0..pairs.len()).step_by(2) {
+                    map = map.insert(pairs[i].clone(), pairs[i + 1].clone());
+                }
+                if let Some(last) = trailing {
+                    self.cons_trailing(&mut map, last)?;
+                }
+                Ok(Value::Map(map))
+            }
+        }
+    }
+
+    /// The odd-tail rule: maps merge, 2-vectors assoc, `nil`/empty
+    /// seqables vanish, seqable elements are entries-or-`CCE`,
+    /// anything else is the `ISeq` error (§E12).
+    fn cons_trailing(&mut self, map: &mut Map, trailing: &Value) -> Result<(), Signal> {
+        match trailing {
+            Value::Map(m) => {
+                for (k, v) in m.iter() {
+                    *map = std::mem::replace(map, new_map()).insert(k.clone(), v.clone());
+                }
+                Ok(())
+            }
+            Value::Vector(v) => {
+                let items: Vec<&Value> = v.iter().collect();
+                if items.len() != 2 {
+                    return Err(self.throw(NativeError::new(
+                        ThrowClass::IllegalArgumentException,
+                        "Vector arg to map conj must be a pair".to_owned(),
+                    )));
+                }
+                *map = std::mem::replace(map, new_map()).insert(items[0].clone(), items[1].clone());
+                Ok(())
+            }
+            Value::Nil => Ok(()),
+            Value::List(_) | Value::Set(_) | Value::Str(_) => match seq_first(trailing) {
+                None => Ok(()),
+                Some(first) => Err(self.throw(NativeError::cast(
+                    &jvm_class_of(&first),
+                    "java.util.Map$Entry",
+                ))),
+            },
+            other => Err(self.throw(NativeError::new(
+                ThrowClass::IllegalArgumentException,
+                format!(
+                    "Don't know how to create ISeq from: {}",
+                    jvm_class_of(other)
+                ),
+            ))),
+        }
+    }
+}
+
+/// The shared inputs to one map-pattern bind.
+struct MapBind<'a> {
+    pat: &'a MapPattern,
+    env: &'a Env,
+    converted: &'a Value,
+    defaults: &'a Map,
+    force: ForceSet,
+}
+
+impl MapBind<'_> {
+    /// An outlet is effective when requested or forced.
+    fn effective(&self, outlet: Outlet) -> bool {
+        let requested = match outlet {
+            Outlet::Select => self.pat.select.is_some(),
+            Outlet::All => self.pat.all.is_some(),
+            Outlet::Excess => self.pat.excess.is_some(),
+            Outlet::Missing => self.pat.missing.is_some(),
+        };
+        requested || self.force.get(outlet)
+    }
+}
+
+/// The four nested outlets (`:subs`/`:suba`/`:subexcess`/`:submissing`).
+#[derive(Clone, Copy)]
+enum Outlet {
+    Select,
+    All,
+    Excess,
+    Missing,
+}
+
+/// Inherited outlet forcing: an effective outlet the nested map
+/// lacks is still computed, for `subs` (never bound).
+#[derive(Clone, Copy, Default)]
+struct ForceSet {
+    select: bool,
+    all: bool,
+    excess: bool,
+    missing: bool,
+}
+
+impl ForceSet {
+    fn get(self, outlet: Outlet) -> bool {
+        match outlet {
+            Outlet::Select => self.select,
+            Outlet::All => self.all,
+            Outlet::Excess => self.excess,
+            Outlet::Missing => self.missing,
+        }
+    }
+}
+
+/// Computed outlet values (`Some` ⟺ effective; values may be `nil`).
+#[derive(Default)]
+struct OutletVals {
+    select: Option<Value>,
+    all: Option<Value>,
+    excess: Option<Value>,
+    missing: Option<Value>,
+}
+
+/// `subs`: entry key → nested outlet value (`some-vals`: non-`nil`
+/// only, hence never `Some`-empty).
+#[derive(Default)]
+struct SubMaps {
+    select: Option<Map>,
+    all: Option<Map>,
+    excess: Option<Map>,
+    missing: Option<Map>,
+}
+
+/// Whether a pattern is a map requesting an outlet (forcing and
+/// `subs` only concern direct map locals).
+fn has_outlet(local: &Pattern, outlet: Outlet) -> bool {
+    let Pattern::Map(nested) = local else {
+        return false;
+    };
+    match outlet {
+        Outlet::Select => nested.select.is_some(),
+        Outlet::All => nested.all.is_some(),
+        Outlet::Excess => nested.excess.is_some(),
+        Outlet::Missing => nested.missing.is_some(),
+    }
+}
+
+/// Record one `subs` contribution (`nil`s dropped).
+fn insert_sub(slot: &mut Option<Map>, key: &Value, value: Option<Value>) {
+    let Some(v) = value else {
+        return;
+    };
+    if !matches!(v, Value::Nil) {
+        let map = slot.take().unwrap_or_else(new_map);
+        *slot = Some(map.insert(key.clone(), v));
+    }
+}
+
+/// An optional map as a merge argument (absent ⟺ `nil`).
+fn opt_val(map: Option<Map>) -> Value {
+    map.map(Value::Map).unwrap_or(Value::Nil)
+}
+
+/// Record a computed outlet value, binding it only when requested.
+fn emit_outlet(out: &mut Vec<Value>, slot: &mut Option<Value>, requested: bool, v: Value) {
+    if requested {
+        out.push(v.clone());
+    }
+    *slot = Some(v);
+}
+
+/// Cast one element to `Map$Entry` (`nil` is the entry-NPE;
+/// nothing representable is an entry).
+fn cast_entry(entry: &Value) -> NativeError {
+    match entry {
+        Value::Nil => NativeError::new(
+            ThrowClass::NullPointerException,
+            "Cannot invoke \"java.util.Map$Entry.getKey()\" because \"e\" is null".to_owned(),
+        ),
+        other => NativeError::cast(&jvm_class_of(other), "java.util.Map$Entry"),
+    }
+}
+
+/// `get` without the not-found: maps, int-keyed vectors/strings
+/// (in range), sets (membership), else `None` (§E12). Never throws.
+fn lookup(coll: &Value, key: &Value) -> Option<Value> {
+    match coll {
+        Value::Map(m) => m.get(key).cloned(),
+        Value::Vector(v) => match key {
+            Value::Int(n) => usize::try_from(*n)
+                .ok()
+                .and_then(|i| v.iter().nth(i).cloned()),
+            _ => None,
+        },
+        Value::Str(s) => match key {
+            Value::Int(n) => usize::try_from(*n)
+                .ok()
+                .and_then(|i| s.chars().nth(i))
+                .map(Value::Char),
+            _ => None,
+        },
+        Value::Set(s) => member(s, key),
+        _ => None,
+    }
+}
+
+/// Set membership: the key when present (`get` returns the equal
+/// key; ours is identical by construction).
+fn member(s: &clj_value::Set, key: &Value) -> Option<Value> {
+    s.contains(key).then(|| key.clone())
+}
+
+/// `pr` of a value (assert conditions, `:or` key sets).
+fn pr_of(v: &Value) -> String {
+    clj_value::pr_to_string(v, &clj_value::PrintOpts::pr())
+}
+
+/// Variadic rest: `nil` when empty, else the list (§E5).
+fn rest_list(args: &[Value]) -> Value {
+    if args.is_empty() {
+        Value::Nil
+    } else {
+        Value::List(List::from_vec(args.to_vec()))
+    }
+}
+
+/// `(nth coll i nil)`: vectors/lists/strings (OOB is `nil`),
+/// `nil` is `nil`, anything else is `nth not supported` (§E12).
+fn nth_or_nil(coll: &Value, i: usize, eval: &mut Evaluator) -> Result<Value, Signal> {
+    match coll {
+        Value::Nil => Ok(Value::Nil),
+        Value::Vector(v) => Ok(v.iter().nth(i).cloned().unwrap_or(Value::Nil)),
+        Value::List(l) => Ok(l.iter().nth(i).cloned().unwrap_or(Value::Nil)),
+        Value::Str(s) => Ok(s.chars().nth(i).map(Value::Char).unwrap_or(Value::Nil)),
+        other => Err(eval.throw(NativeError::new(
+            ThrowClass::UnsupportedOperationException,
+            format!("nth not supported on this type: {}", simple_class_of(other)),
+        ))),
+    }
+}
+
+/// `first`: head element (map entries as 2-vectors), `nil` when
+/// empty or unsupported.
+fn first_of(coll: &Value) -> Value {
+    match coll {
+        Value::Nil => Value::Nil,
+        Value::Vector(v) => v.iter().next().cloned().unwrap_or(Value::Nil),
+        Value::List(l) => l.iter().next().cloned().unwrap_or(Value::Nil),
+        Value::Str(s) => s.chars().next().map(Value::Char).unwrap_or(Value::Nil),
+        Value::Map(m) => m
+            .iter()
+            .next()
+            .map(|(k, v)| Value::Vector(Vector::from_vec(vec![k.clone(), v.clone()])))
+            .unwrap_or(Value::Nil),
+        Value::Set(s) => s.iter().next().cloned().unwrap_or(Value::Nil),
+        _ => Value::Nil,
+    }
+}
+
+impl Evaluator {
+    /// `clojure.lang.RT.seq`: `nil` in, `nil` out; empties to
+    /// `nil`; vectors/strings/sets to element lists; maps to
+    /// entry lists; anything else is the `ISeq` error.
+    fn seq_val(&mut self, value: &Value) -> Result<Value, Signal> {
+        match value {
+            Value::Nil => Ok(Value::Nil),
+            Value::List(l) => {
+                if l.is_empty() {
+                    Ok(Value::Nil)
+                } else {
+                    Ok(value.clone())
+                }
+            }
+            Value::Vector(v) => {
+                let elems: Vec<Value> = v.iter().cloned().collect();
+                Ok(Self::seq_list(elems))
+            }
+            Value::Set(s) => {
+                let elems: Vec<Value> = s.iter().cloned().collect();
+                Ok(Self::seq_list(elems))
+            }
+            Value::Str(s) => {
+                let elems: Vec<Value> = s.chars().map(Value::Char).collect();
+                Ok(Self::seq_list(elems))
+            }
+            Value::Map(m) => {
+                let elems: Vec<Value> = m
+                    .iter()
+                    .map(|(k, v)| Value::Vector(Vector::from_vec(vec![k.clone(), v.clone()])))
+                    .collect();
+                Ok(Self::seq_list(elems))
+            }
+            other => Err(self.throw(NativeError::new(
+                ThrowClass::IllegalArgumentException,
+                format!(
+                    "Don't know how to create ISeq from: {}",
+                    jvm_class_of(other)
+                ),
+            ))),
+        }
+    }
+
+    fn seq_list(elems: Vec<Value>) -> Value {
+        if elems.is_empty() {
+            Value::Nil
+        } else {
+            Value::List(List::from_vec(elems))
+        }
+    }
+}
+
+/// `next`: the tail as a list, `nil` when empty or unsupported.
+fn next_of(coll: &Value) -> Value {
+    let tail: Vec<Value> = match coll {
+        Value::Vector(v) => v.iter().skip(1).cloned().collect(),
+        Value::List(l) => l.iter().skip(1).cloned().collect(),
+        Value::Str(s) => s.chars().skip(1).map(Value::Char).collect(),
+        Value::Map(m) => m
+            .iter()
+            .skip(1)
+            .map(|(k, v)| Value::Vector(Vector::from_vec(vec![k.clone(), v.clone()])))
+            .collect(),
+        Value::Set(s) => s.iter().skip(1).cloned().collect(),
+        _ => Vec::new(),
+    };
+    if tail.is_empty() {
+        Value::Nil
+    } else {
+        Value::List(List::from_vec(tail))
+    }
+}
+
+/// The selection: entry keys, key-list keys, and `&`-tail keys in
+/// first-seen order (source order; the JVM iterates a hash-ordered
+/// set, §E12 documents the divergence).
+fn selection(pat: &MapPattern) -> Vec<Value> {
+    let mut sel = Vec::new();
+    for (_, key) in &pat.entries {
+        if !sel.contains(key) {
+            sel.push(key.clone());
+        }
+    }
+    for key in &pat.keys {
+        if !sel.contains(&key.key) {
+            sel.push(key.key.clone());
+        }
+    }
+    for key in &pat.extra_keys {
+        if !sel.contains(key) {
+            sel.push(key.clone());
+        }
+    }
+    sel
+}
+
+/// `:or` defaults keyed by lookup key (symbols resolve through the
+/// local→key map; strict-validated under `:select`/`:all`).
+fn or_mapped(pat: &MapPattern, defaults: &Map) -> Map {
+    let mut b_to_k: std::collections::HashMap<&str, &Value> = std::collections::HashMap::new();
+    for (local, key) in &pat.entries {
+        if let Pattern::Symbol(name) = local {
+            b_to_k.insert(name.as_str(), key);
+        }
+    }
+    for key in &pat.keys {
+        b_to_k.insert(key.local.as_str(), &key.key);
+    }
+    let mut dm = new_map();
+    for (key, _) in defaults.iter() {
+        let mapped = match key {
+            Value::Symbol(sym) => b_to_k.get(sym.name()).copied().unwrap_or(key),
+            _ => key,
+        };
+        if let Some(val) = defaults.get(key) {
+            dm = dm.insert(mapped.clone(), val.clone());
+        }
+    }
+    dm
+}
+
+/// `(select-keys m sel)` in selection order.
+fn select_keys(converted: &Map, sel: &[Value]) -> Value {
+    let mut out = new_map();
+    for key in sel {
+        if let Some(val) = converted.get(key) {
+            out = out.insert(key.clone(), val.clone());
+        }
+    }
+    Value::Map(out)
+}
+
+/// The first element of a seqable (`nil` when empty).
+fn seq_first(v: &Value) -> Option<Value> {
+    match v {
+        Value::List(l) => l.iter().next().cloned(),
+        Value::Set(s) => s.iter().next().cloned(),
+        Value::Str(s) => s.chars().next().map(Value::Char),
+        _ => None,
+    }
+}

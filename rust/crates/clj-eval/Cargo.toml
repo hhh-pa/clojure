@@ -5,5 +5,9 @@ edition = "2024"
 description = "Analyzer and tree-walking interpreter for Clojure"
 license = "EPL-1.0"
 
+[dependencies]
+clj-reader = { path = "../clj-reader" }
+clj-value = { path = "../clj-value" }
+
 [lints]
 workspace = true

@@ -13,6 +13,7 @@
 //! [`value`](crate::value)); printing lives in [`print`](crate::print).
 
 mod compare;
+mod extension;
 mod keyword;
 mod print;
 mod seq;
@@ -21,6 +22,7 @@ mod transient;
 mod value;
 
 pub use compare::{CompareError, compare};
+pub use extension::{ExtensionValue, ThrowClass, Throwable, Unbound, Var};
 pub use keyword::Keyword;
 pub use print::{
     java_debug, java_double_string, pr_to_string, print, print_opts::PrintOpts, print_to_string,

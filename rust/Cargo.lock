@@ -137,6 +137,10 @@ version = "0.1.0"
 [[package]]
 name = "clj-eval"
 version = "0.1.0"
+dependencies = [
+ "clj-reader",
+ "clj-value",
+]
 
 [[package]]
 name = "clj-reader"
