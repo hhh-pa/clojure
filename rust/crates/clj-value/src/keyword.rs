@@ -10,11 +10,13 @@
 //! colon in their printed form. Value-compared, never interned (see
 //! [`Symbol`](crate::Symbol)).
 
+use std::cmp::Ordering;
 use std::fmt;
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 /// A Clojure keyword such as `:ok` or `:user/id`.
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Debug)]
 pub struct Keyword {
     ns: Option<Arc<str>>,
     name: Arc<str>,
@@ -40,6 +42,36 @@ impl Keyword {
     #[must_use]
     pub fn name(&self) -> &str {
         &self.name
+    }
+}
+
+// Manual impls over `(ns, name)`, mirroring `Symbol` (keywords never
+// carry metadata, so these equal the derived ones; they are explicit
+// so a future field cannot silently join the identity).
+impl PartialEq for Keyword {
+    fn eq(&self, other: &Self) -> bool {
+        self.ns == other.ns && self.name == other.name
+    }
+}
+
+impl Eq for Keyword {}
+
+impl Hash for Keyword {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.ns.hash(state);
+        self.name.hash(state);
+    }
+}
+
+impl PartialOrd for Keyword {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Keyword {
+    fn cmp(&self, other: &Self) -> Ordering {
+        (self.ns.as_deref(), self.name.as_ref()).cmp(&(other.ns.as_deref(), other.name.as_ref()))
     }
 }
 

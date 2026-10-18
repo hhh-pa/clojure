@@ -18,6 +18,8 @@ mod symbol;
 mod value;
 
 pub use keyword::Keyword;
-pub use print::{print, print_opts::PrintOpts, print_to_string, pr_to_string};
+pub use print::{
+    java_debug, java_double_string, pr_to_string, print, print_opts::PrintOpts, print_to_string,
+};
 pub use symbol::Symbol;
 pub use value::{FxBuildHasher, List, Map, Set, Value, Vector, new_map, new_set};

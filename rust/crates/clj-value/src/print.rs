@@ -14,8 +14,8 @@
 //!
 //! Doubles print exactly like `Double.toString`: shortest round-trip
 //! digits (via `ryu`) laid out by the JDK magnitude rules (plain in
-//! `[1e-3, 1e7)`, scientific otherwise). `*print-meta*` is not
-//! implemented (S5, alongside `meta`).
+//! `[1e-3, 1e7)`, scientific otherwise). `*print-meta*` prints the
+//! `^meta` prefix when `meta` is set (and `readably`, as on the JVM).
 
 use std::fmt::Write;
 
@@ -23,16 +23,32 @@ use crate::Value;
 
 pub(crate) mod print_opts {
     /// Printer options mirroring the `*print-*` dynamic vars.
-    #[derive(Clone, Debug, Default)]
+    #[derive(Clone, Debug)]
     pub struct PrintOpts {
         /// `*print-length*`: max items per collection, then `...`.
         pub length: Option<usize>,
         /// `*print-level*`: max nesting depth; deeper collections print `#`.
         pub level: Option<usize>,
         /// `*print-namespace-maps*`: lift single-ns maps to `#:ns{...}`.
+        /// Defaults to true, matching `clojure.main` (which binds it
+        /// for scripts and the REPL).
         pub namespace_maps: bool,
         /// `*print-readably*`: quote strings/chars (pr) or not (print).
         pub readably: bool,
+        /// `*print-meta*`: print the `^meta` prefix (needs `readably`).
+        pub meta: bool,
+    }
+
+    impl Default for PrintOpts {
+        fn default() -> Self {
+            Self {
+                length: None,
+                level: None,
+                namespace_maps: true,
+                readably: false,
+                meta: false,
+            }
+        }
     }
 
     impl PrintOpts {
@@ -80,6 +96,7 @@ pub fn print(v: &Value, opts: &PrintOpts) -> String {
 /// `print-sequential`: each collection decrements first, then prints
 /// `#` when the budget goes negative.
 fn print_into(v: &Value, opts: &PrintOpts, level: Option<i64>, out: &mut String) {
+    print_meta_prefix(v, opts, level, out);
     match v {
         Value::Nil => out.push_str("nil"),
         Value::Bool(true) => out.push_str("true"),
@@ -92,24 +109,80 @@ fn print_into(v: &Value, opts: &PrintOpts, level: Option<i64>, out: &mut String)
         Value::Keyword(k) => write!(out, "{k}").unwrap(),
         Value::Regex(pattern) => print_regex(pattern, out),
         Value::List(l) => {
-            print_sequential("(", l.iter().collect::<Vec<_>>(), ")", " ", opts, level, out);
+            print_sequential(
+                "(",
+                l.iter().collect::<Vec<_>>(),
+                ")",
+                " ",
+                opts,
+                level,
+                out,
+            );
         }
         Value::Vector(v) => {
-            print_sequential("[", v.iter().collect::<Vec<_>>(), "]", " ", opts, level, out);
+            print_sequential(
+                "[",
+                v.iter().collect::<Vec<_>>(),
+                "]",
+                " ",
+                opts,
+                level,
+                out,
+            );
         }
         Value::Set(s) => {
-            print_sequential("#{", s.iter().collect::<Vec<_>>(), "}", " ", opts, level, out);
+            print_sequential(
+                "#{",
+                s.iter().collect::<Vec<_>>(),
+                "}",
+                " ",
+                opts,
+                level,
+                out,
+            );
         }
         Value::Map(m) => {
             let entries: Vec<(&Value, &Value)> = m.iter().collect();
-            if opts.namespace_maps && let Some((ns, lifted)) = lift_ns(&entries) {
+            if opts.namespace_maps
+                && let Some((ns, lifted)) = lift_ns(&entries)
+            {
                 let flat: Vec<(&Value, &Value)> = lifted.iter().map(|(k, v)| (k, v)).collect();
                 print_map_entries(&format!("#:{ns}"), &flat, opts, level, out);
             } else {
                 print_map_entries("", &entries, opts, level, out);
             }
         }
+        Value::TaggedLiteral { tag, form } => {
+            write!(out, "#{tag} ").unwrap();
+            print_into(form, opts, level, out);
+        }
+        Value::ReaderConditional { form, splicing } => {
+            out.push_str(if *splicing { "#?@" } else { "#?" });
+            print_into(form, opts, level, out);
+        }
     }
+}
+
+/// `print-meta` (`core_print.clj`): with `meta` and `readably`, print
+/// `^tag ` for a single truthy `:tag`, else `^map `. Empty metas and
+/// non-`readably` output print nothing.
+fn print_meta_prefix(v: &Value, opts: &PrintOpts, level: Option<i64>, out: &mut String) {
+    if !opts.meta || !opts.readably {
+        return;
+    }
+    let Some(m) = v.meta() else {
+        return;
+    };
+    if m.is_empty() {
+        return;
+    }
+    out.push('^');
+    let tag_key = Value::Keyword(crate::Keyword::new(None, "tag"));
+    match m.get(&tag_key) {
+        Some(tag) if m.size() == 1 && tag.is_truthy() => print_into(tag, opts, level, out),
+        _ => print_into(&Value::Map(m.clone()), opts, level, out),
+    }
+    out.push(' ');
 }
 
 fn print_sequential(
@@ -201,9 +274,7 @@ fn lift_ns<'a>(entries: &[(&'a Value, &'a Value)]) -> Option<(String, Vec<(Value
             ),
             _ => return None,
         };
-        let Some(key_ns) = key_ns else {
-            return None;
-        };
+        let key_ns = key_ns?;
         match &ns {
             None => ns = Some(key_ns),
             Some(want) if *want == key_ns => {}
@@ -303,6 +374,30 @@ fn print_double(d: f64) -> String {
     java_double_string(d)
 }
 
+/// Render a value the way the JVM reader interpolates it into error
+/// messages (`"" + x`: scalars raw, collections readably; doubles
+/// via [`java_double_string`], never `##`-forms).
+#[must_use]
+pub fn java_debug(v: &Value) -> String {
+    match v {
+        Value::Nil => "null".to_owned(),
+        Value::Bool(b) => b.to_string(),
+        Value::Int(i) => i.to_string(),
+        Value::Double(d) => java_double_string(*d),
+        Value::Str(s) => s.to_string(),
+        Value::Char(c) => c.to_string(),
+        Value::Symbol(s) => s.to_string(),
+        Value::Keyword(k) => k.to_string(),
+        Value::Regex(pattern) => pattern.to_string(),
+        Value::List(_)
+        | Value::Vector(_)
+        | Value::Map(_)
+        | Value::Set(_)
+        | Value::TaggedLiteral { .. }
+        | Value::ReaderConditional { .. } => pr_to_string(v, &PrintOpts::pr()),
+    }
+}
+
 /// Shortest digits + decimal exponent parsed back from ryu's
 /// unambiguous output: value = `d1.d2..dn × 10^exp10` with `d1 != 0`.
 fn ryu_parts(d: f64) -> (bool, String, i32) {
@@ -333,14 +428,55 @@ fn ryu_parts(d: f64) -> (bool, String, i32) {
     (neg, digits, exp10)
 }
 
-fn java_double_string(d: f64) -> String {
-    assert!(d.is_finite(), "non-finite handled by print_double");
+/// `Double.toString`'s rendering for the subnormal doubles where it
+/// is not shortest: `ryu` rounds these eight up to one digit (e.g.
+/// `5e-324`) but `dtoa` keeps two (`4.9E-324`). The magnitude bits
+/// select the fixed rendering; the caller re-applies the sign.
+/// Verified against the JVM oracle over all `k = 1..100000`, every
+/// subnormal parsed from a `<= 3`-digit decimal, every subnormal
+/// parsed from a `<= 4`-digit decimal ending in `9`, and thousands
+/// of random normals/subnormals: exactly these eight diverge.
+fn dtoa_subnormal_patch(magnitude_bits: u64) -> Option<&'static str> {
+    match magnitude_bits {
+        0x1 => Some("4.9E-324"),
+        0x2 => Some("9.9E-324"),
+        0xa => Some("4.9E-323"),
+        0xc => Some("5.9E-323"),
+        0xe => Some("6.9E-323"),
+        0x10 => Some("7.9E-323"),
+        0x12 => Some("8.9E-323"),
+        0x14 => Some("9.9E-323"),
+        _ => None,
+    }
+}
+
+/// `Double.toString`: [`print_double`]'s finite rendering, with
+/// non-finite values as `Infinity`/`-Infinity`/`NaN` (used by error
+/// interpolation, never by the value printer).
+#[must_use]
+pub fn java_double_string(d: f64) -> String {
+    if d.is_nan() {
+        return "NaN".to_owned();
+    }
+    if d.is_infinite() {
+        return if d.is_sign_positive() {
+            "Infinity".to_owned()
+        } else {
+            "-Infinity".to_owned()
+        };
+    }
     if d == 0.0 {
         return if d.is_sign_negative() {
             "-0.0".to_owned()
         } else {
             "0.0".to_owned()
         };
+    }
+    if let Some(patched) = dtoa_subnormal_patch(d.to_bits() & 0x7FFF_FFFF_FFFF_FFFF) {
+        if d.is_sign_negative() {
+            return format!("-{patched}");
+        }
+        return patched.to_owned();
     }
     let (neg, digits, exp10) = ryu_parts(d);
     debug_assert!(!digits.is_empty() && !digits.starts_with('0'));
@@ -388,7 +524,7 @@ fn java_double_string(d: f64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{PrintOpts, pr_to_string, print_to_string};
+    use super::{PrintOpts, java_double_string, pr_to_string, print_to_string};
     use crate::{Keyword, Symbol, Value};
     use std::sync::Arc;
 
@@ -408,21 +544,18 @@ mod tests {
         assert_eq!(pr(&Value::Char('\n')), "\\newline");
         assert_eq!(pr(&Value::Char(' ')), "\\space");
         assert_eq!(pr(&Value::Symbol(Symbol::new(None, "x"))), "x");
-        assert_eq!(
-            pr(&Value::Symbol(Symbol::new(Some("a"), "b"))),
-            "a/b"
-        );
+        assert_eq!(pr(&Value::Symbol(Symbol::new(Some("a"), "b"))), "a/b");
         assert_eq!(pr(&Value::Keyword(Keyword::new(None, "k"))), ":k");
-        assert_eq!(
-            pr(&Value::Keyword(Keyword::new(Some("u"), "id"))),
-            ":u/id"
-        );
+        assert_eq!(pr(&Value::Keyword(Keyword::new(Some("u"), "id"))), ":u/id");
         assert_eq!(pr(&Value::Regex(Arc::from("a+"))), "#\"a+\"");
     }
 
     #[test]
     fn string_escapes() {
-        assert_eq!(pr(&Value::Str(Arc::from("a\nb\t\"\\"))), "\"a\\nb\\t\\\"\\\\\"");
+        assert_eq!(
+            pr(&Value::Str(Arc::from("a\nb\t\"\\"))),
+            "\"a\\nb\\t\\\"\\\\\""
+        );
         assert_eq!(pr(&Value::Str(Arc::from("\u{8}\u{c}\r"))), "\"\\b\\f\\r\"");
         // Other control chars print raw (as on the JVM).
         assert_eq!(pr(&Value::Str(Arc::from("\u{1}é"))), "\"\u{1}é\"");
@@ -436,7 +569,10 @@ mod tests {
         // `"` outside \Q..\E is backslash-escaped.
         assert_eq!(pr(&Value::Regex(Arc::from("a\"b"))), "#\"a\\\"b\"");
         // Inside \Q..\E the printer closes, escapes, and reopens quoting.
-        assert_eq!(pr(&Value::Regex(Arc::from("\\Qa\"b\\E"))), "#\"\\Qa\\E\\\"\\Qb\\E\"");
+        assert_eq!(
+            pr(&Value::Regex(Arc::from("\\Qa\"b\\E"))),
+            "#\"\\Qa\\E\\\"\\Qb\\E\""
+        );
     }
 
     #[test]
@@ -455,8 +591,37 @@ mod tests {
         assert_eq!(pr(&Value::Double(f64::INFINITY)), "##Inf");
         assert_eq!(pr(&Value::Double(f64::NEG_INFINITY)), "##-Inf");
         assert_eq!(pr(&Value::Double(f64::NAN)), "##NaN");
-        assert_eq!(pr(&Value::Double(5e-324)), "5.0E-324");
-        assert_eq!(pr(&Value::Double(1.797_693_134_862_315_7e308)), "1.7976931348623157E308");
+        assert_eq!(
+            pr(&Value::Double(1.797_693_134_862_315_7e308)),
+            "1.7976931348623157E308"
+        );
+    }
+
+    #[test]
+    fn doubles_dtoa_subnormal_patch() {
+        // `Double.toString` keeps two digits here; `ryu` would round
+        // up to one. Oracle-pinned (see `dtoa_subnormal_patch`).
+        let cases = [
+            (0x1u64, "4.9E-324"),
+            (0x2, "9.9E-324"),
+            (0xa, "4.9E-323"),
+            (0xc, "5.9E-323"),
+            (0xe, "6.9E-323"),
+            (0x10, "7.9E-323"),
+            (0x12, "8.9E-323"),
+            (0x14, "9.9E-323"),
+        ];
+        for (bits, want) in cases {
+            assert_eq!(pr(&Value::Double(f64::from_bits(bits))), want);
+            assert_eq!(
+                pr(&Value::Double(f64::from_bits(bits | 0x8000_0000_0000_0000))),
+                format!("-{want}")
+            );
+            assert_eq!(java_double_string(f64::from_bits(bits)), want);
+        }
+        // Neighbors still take the `ryu` path.
+        assert_eq!(pr(&Value::Double(f64::from_bits(0x3))), "1.5E-323");
+        assert_eq!(pr(&Value::Double(f64::from_bits(0x16))), "1.1E-322");
     }
 
     #[test]
@@ -483,8 +648,7 @@ mod tests {
     #[test]
     fn map_separators_and_single_entry() {
         let m = Value::Map(
-            crate::new_map()
-                .insert(Value::Keyword(Keyword::new(None, "a")), Value::Int(1)),
+            crate::new_map().insert(Value::Keyword(Keyword::new(None, "a")), Value::Int(1)),
         );
         assert_eq!(pr(&m), "{:a 1}");
         // Multi-entry order is hasher-defined; assert setwise below.
@@ -518,11 +682,9 @@ mod tests {
         };
         assert_eq!(pr_to_string(&v, &exact), "[1 2 3]");
 
-        let nested = Value::Vector(
-            crate::Vector::new_sync().push_back(Value::Vector(
-                crate::Vector::new_sync().push_back(Value::Int(1)),
-            )),
-        );
+        let nested = Value::Vector(crate::Vector::new_sync().push_back(Value::Vector(
+            crate::Vector::new_sync().push_back(Value::Int(1)),
+        )));
         let deep = PrintOpts {
             level: Some(1),
             ..PrintOpts::pr()
@@ -553,21 +715,114 @@ mod tests {
                     Value::Int(2),
                 ),
         );
-        let plain = pr(&m);
-        assert!(plain.contains(":user/a"), "{plain}");
-        let opts = PrintOpts {
-            namespace_maps: true,
+        // Lifting is on by default (matching `clojure.main`).
+        let lifted = pr(&m);
+        assert!(lifted.starts_with("#:user{"), "{lifted}");
+        assert!(
+            lifted.contains(":a 1") && lifted.contains(":b 2"),
+            "{lifted}"
+        );
+        let flat_opts = PrintOpts {
+            namespace_maps: false,
             ..PrintOpts::pr()
         };
-        let lifted = pr_to_string(&m, &opts);
-        assert!(lifted.starts_with("#:user{"), "{lifted}");
-        assert!(lifted.contains(":a 1") && lifted.contains(":b 2"), "{lifted}");
+        let plain = pr_to_string(&m, &flat_opts);
+        assert!(plain.contains(":user/a"), "{plain}");
         // Mixed namespaces do not lift.
         let mixed = Value::Map(
             crate::new_map()
                 .insert(Value::Keyword(Keyword::new(Some("u"), "a")), Value::Int(1))
                 .insert(Value::Keyword(Keyword::new(None, "b")), Value::Int(2)),
         );
-        assert!(!pr_to_string(&mixed, &opts).starts_with("#:"),);
+        assert!(!pr(&mixed).starts_with("#:"),);
+    }
+
+    #[test]
+    fn print_meta_prefix() {
+        use crate::Vector;
+        let tag_key = || Value::Keyword(Keyword::new(None, "tag"));
+        // ^String short form: single truthy :tag prints bare.
+        let tag_meta =
+            crate::new_map().insert(tag_key(), Value::Symbol(Symbol::new(None, "String")));
+        let v = Value::Vector(Vector::from_vec(vec![Value::Symbol(Symbol::new(
+            None, "x",
+        ))]));
+        assert_eq!(pr(&v), "[x]");
+        let with_tag = v.clone().with_meta(Some(tag_meta.clone()));
+        let opts = PrintOpts {
+            meta: true,
+            ..PrintOpts::pr()
+        };
+        assert_eq!(pr_to_string(&with_tag, &opts), "^String [x]");
+        // Full map otherwise (two entries: order-insensitive check).
+        let full_meta = tag_meta.insert(Value::Keyword(Keyword::new(None, "k")), Value::Bool(true));
+        let full = v.clone().with_meta(Some(full_meta));
+        let text = pr_to_string(&full, &opts);
+        assert!(text.starts_with("^{") && text.ends_with("} [x]"), "{text}");
+        assert!(
+            text.contains(":tag String") && text.contains(":k true"),
+            "{text}"
+        );
+        // Falsy :tag prints the full map.
+        let falsy = crate::new_map().insert(tag_key(), Value::Nil);
+        let with_falsy = v.clone().with_meta(Some(falsy));
+        assert_eq!(pr_to_string(&with_falsy, &opts), "^{:tag nil} [x]");
+        // Needs readably: `print` never shows meta.
+        assert_eq!(print_to_string(&with_tag), "[x]");
+        let no_readably = PrintOpts {
+            meta: true,
+            ..PrintOpts::print()
+        };
+        assert_eq!(pr_to_string(&with_tag, &no_readably), "[x]");
+        // Symbols print meta too.
+        let sym = Value::Symbol(Symbol::new(None, "x")).with_meta(Some(
+            crate::new_map().insert(Value::Keyword(Keyword::new(None, "k")), Value::Bool(true)),
+        ));
+        assert_eq!(pr_to_string(&sym, &opts), "^{:k true} x");
+    }
+
+    #[test]
+    fn tagged_and_conditional_printing() {
+        let tl = Value::TaggedLiteral {
+            tag: Symbol::new(None, "inst"),
+            form: Box::new(Value::Str(std::sync::Arc::from("2020-01-01"))),
+        };
+        assert_eq!(pr(&tl), "#inst \"2020-01-01\"");
+        let rc = Value::ReaderConditional {
+            form: Box::new(Value::List(crate::List::from_vec(vec![
+                Value::Keyword(Keyword::new(None, "a")),
+                Value::Int(1),
+            ]))),
+            splicing: false,
+        };
+        assert_eq!(pr(&rc), "#?(:a 1)");
+        let rcs = Value::ReaderConditional {
+            form: Box::new(Value::List(crate::List::from_vec(vec![Value::Int(1)]))),
+            splicing: true,
+        };
+        assert_eq!(pr(&rcs), "#?@(1)");
+    }
+
+    #[test]
+    fn java_debug_rendering() {
+        use super::java_debug;
+        assert_eq!(java_debug(&Value::Nil), "null");
+        assert_eq!(java_debug(&Value::Bool(true)), "true");
+        assert_eq!(java_debug(&Value::Int(-7)), "-7");
+        assert_eq!(java_debug(&Value::Double(f64::INFINITY)), "Infinity");
+        assert_eq!(java_debug(&Value::Double(f64::NEG_INFINITY)), "-Infinity");
+        assert_eq!(java_debug(&Value::Double(f64::NAN)), "NaN");
+        assert_eq!(java_debug(&Value::Double(1.5)), "1.5");
+        assert_eq!(java_debug(&Value::Str(std::sync::Arc::from("s"))), "s");
+        assert_eq!(java_debug(&Value::Char('c')), "c");
+        assert_eq!(java_debug(&Value::Char('\n')), "\n");
+        assert_eq!(
+            java_debug(&Value::Symbol(Symbol::new(Some("a"), "b"))),
+            "a/b"
+        );
+        assert_eq!(java_debug(&Value::Keyword(Keyword::new(None, "k"))), ":k");
+        assert_eq!(java_debug(&Value::Regex(std::sync::Arc::from("a+"))), "a+");
+        let v = Value::Vector(crate::Vector::from_vec(vec![Value::Int(1)]));
+        assert_eq!(java_debug(&v), "[1]");
     }
 }
