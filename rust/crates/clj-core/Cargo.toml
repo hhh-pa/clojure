@@ -5,5 +5,11 @@ edition = "2024"
 description = "Namespaces, vars, macros, and the Rust-backed clojure.core subset"
 license = "EPL-1.0"
 
+[dependencies]
+clj-eval = { path = "../clj-eval" }
+
+[dev-dependencies]
+clj-value = { path = "../clj-value" }
+
 [lints]
 workspace = true

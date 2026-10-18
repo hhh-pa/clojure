@@ -10,3 +10,11 @@
 //! `clojure.core` subset with its coverage list.
 //!
 //! Lands in slice S5 (`docs/t1174/specification.md`).
+
+/// Boot a fresh evaluator with `clojure.core` installed and referred
+/// into `user` (S5A wires the real registry; the stub boots a bare
+/// S4 evaluator so the coverage matrix starts red).
+#[must_use]
+pub fn boot() -> clj_eval::Evaluator {
+    clj_eval::Evaluator::new("user")
+}
