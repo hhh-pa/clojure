@@ -163,7 +163,53 @@ fn print_into(v: &Value, opts: &PrintOpts, level: Option<i64>, out: &mut String)
             out.push_str(if *splicing { "#?@" } else { "#?" });
             print_into(form, opts, level, out);
         }
+        Value::Var(v) => {
+            out.push_str("#'");
+            write!(out, "{}", v.sym).unwrap();
+        }
+        Value::Unbound(u) => {
+            write!(out, "#object[clojure.lang.Var$Unbound 0x{:x} ", u.var_id).unwrap();
+            print_string(&format!("Unbound: #'{}", u.sym), true, out);
+            out.push(']');
+        }
+        Value::Throwable(t) => print_throwable(t, opts, level, out),
+        Value::Extension(e) => out.push_str(&e.print()),
     }
+}
+
+/// `#error` rendering (the `print-throwable` shape): the outermost
+/// cause and data, then one `:via` entry per cause-chain link (each
+/// with its own `:data` when present), and an empty `:trace` (no JVM
+/// stacks here). Messages always print as Clojure string literals;
+/// data prints recursively with the ambient options.
+fn print_throwable(t: &crate::Throwable, opts: &PrintOpts, level: Option<i64>, out: &mut String) {
+    out.push_str("#error {:cause ");
+    print_string(&t.message, true, out);
+    out.push_str(" :data ");
+    match &t.data {
+        Some(d) => print_into(d, opts, level, out),
+        None => out.push_str("nil"),
+    }
+    out.push_str(" :via [");
+    let mut first = true;
+    let mut current = Some(t);
+    while let Some(th) = current {
+        if !first {
+            out.push(' ');
+        }
+        first = false;
+        out.push_str("{:type ");
+        out.push_str(th.class.jvm_name());
+        out.push_str(" :message ");
+        print_string(&th.message, true, out);
+        if let Some(d) = &th.data {
+            out.push_str(" :data ");
+            print_into(d, opts, level, out);
+        }
+        out.push('}');
+        current = th.cause.as_deref();
+    }
+    out.push_str("] :trace []}");
 }
 
 /// `print-meta` (`core_print.clj`): with `meta` and `readably`, print
@@ -392,6 +438,16 @@ pub fn java_debug(v: &Value) -> String {
         Value::Symbol(s) => s.to_string(),
         Value::Keyword(k) => k.to_string(),
         Value::Regex(pattern) => pattern.to_string(),
+        Value::Var(v) => format!("#'{}", v.sym),
+        Value::Unbound(u) => format!("Unbound: #'{}", u.sym),
+        Value::Throwable(t) => {
+            if t.message.is_empty() {
+                t.class.jvm_name().to_owned()
+            } else {
+                format!("{}: {}", t.class.jvm_name(), t.message)
+            }
+        }
+        Value::Extension(e) => e.print(),
         Value::List(_)
         | Value::Vector(_)
         | Value::Map(_)

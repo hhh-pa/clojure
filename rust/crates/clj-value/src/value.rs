@@ -35,7 +35,7 @@
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
-use crate::{Keyword, Symbol};
+use crate::{ExtensionValue, Keyword, Symbol, Throwable, Unbound, Var};
 
 /// Deterministic Fx hasher for maps/sets (rpds's default RandomState
 /// is not stable across runs). Same non-crypto posture as the JVM's
@@ -500,6 +500,14 @@ pub enum Value {
     TaggedLiteral { tag: Symbol, form: Box<Value> },
     /// `#?` / `#?@` under `:read-cond :preserve`.
     ReaderConditional { form: Box<Value>, splicing: bool },
+    /// A namespace Var (S4): identity-compared by `id`, like the JVM.
+    Var(Var),
+    /// An unbound Var's sentinel root (S4): compared by `var_id`.
+    Unbound(Unbound),
+    /// A throwable (S4): identity-compared by `id`, like the JVM.
+    Throwable(Throwable),
+    /// A host-defined value behind the [`ExtensionValue`] trait (S4).
+    Extension(Arc<dyn ExtensionValue>),
 }
 
 impl Value {
@@ -587,6 +595,12 @@ impl PartialEq for Value {
                     splicing: s2,
                 },
             ) => s1 == s2 && plain_equals(f1, f2),
+            // S4 identity semantics, mirroring `=`: ids only, never
+            // payloads; extensions dispatch through the trait.
+            (Value::Var(a), Value::Var(b)) => a.id == b.id,
+            (Value::Unbound(a), Value::Unbound(b)) => a.var_id == b.var_id,
+            (Value::Throwable(a), Value::Throwable(b)) => a.id == b.id,
+            (Value::Extension(a), Value::Extension(b)) => a.dyn_eq(&**b),
             _ => false,
         }
     }
@@ -679,6 +693,22 @@ impl Hash for Value {
                 state.write_u8(13);
                 splicing.hash(state);
                 form.hash(state);
+            }
+            Value::Var(v) => {
+                state.write_u8(14);
+                state.write_u64(v.id);
+            }
+            Value::Unbound(u) => {
+                state.write_u8(15);
+                state.write_u64(u.var_id);
+            }
+            Value::Throwable(t) => {
+                state.write_u8(16);
+                state.write_u64(t.id);
+            }
+            Value::Extension(e) => {
+                state.write_u8(17);
+                e.dyn_hash(state);
             }
         }
     }
@@ -905,6 +935,10 @@ fn plain_equals(a: &Value, b: &Value) -> bool {
                 splicing: s2,
             },
         ) => s1 == s2 && plain_equals(f1, f2),
+        (Value::Var(a), Value::Var(b)) => a.id == b.id,
+        (Value::Unbound(a), Value::Unbound(b)) => a.var_id == b.var_id,
+        (Value::Throwable(a), Value::Throwable(b)) => a.id == b.id,
+        (Value::Extension(a), Value::Extension(b)) => a.dyn_eq(&**b),
         // `.equals` is loose across List/Vector too (`doEquals` takes
         // the `java.util.List` branch; `ASeq.equals` accepts `List`).
         (Value::List(items), Value::List(o)) => {

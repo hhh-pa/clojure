@@ -152,8 +152,19 @@ fn type_name(v: &Value) -> &'static str {
         Value::Char(_) => "Character",
         Value::Symbol(_) => "Symbol",
         Value::Keyword(_) => "Keyword",
+        Value::Var(_) => "Var",
+        Value::Unbound(_) => "Unbound",
+        Value::Throwable(_) => "Throwable",
+        Value::Extension(e) => extension_type_name(e),
         _ => collection_type_name(v),
     }
+}
+
+/// The extension's own class name. [`CompareError`] borrows its
+/// names, so the owned name is leaked — compare errors are
+/// exceptional, never hot-loop values.
+fn extension_type_name(e: &std::sync::Arc<dyn crate::ExtensionValue>) -> &'static str {
+    Box::leak(e.class_name().into_boxed_str())
 }
 
 fn collection_type_name(v: &Value) -> &'static str {
