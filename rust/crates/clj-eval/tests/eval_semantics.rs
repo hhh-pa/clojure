@@ -190,6 +190,10 @@ fn core_forms() {
     assert_eq!(run_last(&mut eval, "(if 1 2 3)"), "2");
     assert_eq!(run_last(&mut eval, "(if nil 2 3)"), "3");
     assert_eq!(run_last(&mut eval, "(if false 2)"), "nil");
+    // Real specials ignore bindings; the five macros defer to them
+    // (probe31 `shadow-*`).
+    assert_eq!(run_last(&mut eval, "(let [if 5] (if 1 2))"), "2");
+    assert_eq!(run_last(&mut eval, "(let [loop t-plus] (loop 1 2))"), "3");
     assert_eq!(run_last(&mut eval, "(do)"), "nil");
     assert_eq!(run_last(&mut eval, "(do 1 2 3)"), "3");
     assert_eq!(run_last(&mut eval, "()"), "()");

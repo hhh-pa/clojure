@@ -223,6 +223,13 @@ fn is_special(name: &str) -> bool {
     )
 }
 
+/// The five macro-implemented specials: a local or global binding
+/// with one of these names shadows the macro (real specials never
+/// shadow, probe31 `shadow-*`).
+fn is_shadowable_macro(name: &str) -> bool {
+    matches!(name, "let" | "loop" | "letfn" | "fn" | "binding")
+}
+
 /// The analyzer: reader values become [`Expr`]s. Holds the local
 /// scope, the `recur` target, the `try` fence, and the namespace
 /// (resolve checks plus `def` interning, like the JVM).
@@ -268,15 +275,20 @@ impl<'a> Analyzer<'a> {
         CompileError::new(class, message, span, &self.source, verb, sym)
     }
 
-    /// Analyze one form (`fallback` = enclosing span for meta-less
-    /// atoms; `tail` = tail position for `recur`).
+    /// Analyze one form (`fallback` = enclosing span; `tail` = tail
+    /// position for `recur`). Only lists rebind the span: vectors,
+    /// maps, sets, and atoms inherit it, like the JVM (which binds
+    /// `LINE`/`COLUMN` for seq forms only, probe31 `span-*`).
     pub fn analyze(
         &mut self,
         form: &Value,
         fallback: Span,
         tail: bool,
     ) -> Result<Expr, CompileError> {
-        let span = span_of(form, fallback);
+        let span = match form {
+            Value::List(_) => span_of(form, fallback),
+            _ => fallback,
+        };
         match form {
             Value::Symbol(sym) => self.analyze_symbol(sym, span),
             Value::List(list) if !list.is_empty() => {
@@ -326,12 +338,15 @@ impl<'a> Analyzer<'a> {
         Ok(out)
     }
 
+    /// A local slot by name (innermost wins).
+    fn local_idx(&self, name: &str) -> Option<usize> {
+        self.locals.iter().rposition(|l| l == name)
+    }
+
     /// Resolve a symbol in value position.
     fn analyze_symbol(&mut self, sym: &Symbol, span: Span) -> Result<Expr, CompileError> {
         if let Some(idx) = self
-            .locals
-            .iter()
-            .rposition(|l| l == sym.name())
+            .local_idx(sym.name())
             .filter(|_| sym.namespace().is_none())
         {
             return Ok(Expr::Local(idx));
@@ -381,7 +396,15 @@ impl<'a> Analyzer<'a> {
         let head = items[0];
         match head {
             Value::Symbol(sym) if sym.namespace().is_none() && is_special(sym.name()) => {
-                return self.analyze_special(sym.name(), items, span, tail);
+                // The five macros defer to any binding (a local or a
+                // user-ns global); real specials never do (probe31
+                // `shadow-*`).
+                let global = self.ns.qualify(sym);
+                let bound =
+                    self.local_idx(sym.name()).is_some() || self.ns.lookup(&global).is_some();
+                if !(is_shadowable_macro(sym.name()) && bound) {
+                    return self.analyze_special(sym.name(), items, span, tail);
+                }
             }
             _ => {}
         }

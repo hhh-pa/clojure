@@ -33,11 +33,12 @@ class name, a message, and a span. Rendering has two layers:
 
 Evaluator (runtime) failures have no wrapper: just `Class | message`.
 
-Spans come from the form's `:line`/`:column` reader meta (lists,
-vectors, maps carry it); atoms and meta-less forms inherit the nearest
-enclosing span, defaulting to the top-level fallback (1:1 for a fresh
-`eval_source`). This matches JVM precision: the JVM likewise has no
-position for bare atoms (eval'd forms report the caller's line).
+Spans come from the form's `:line`/`:column` reader meta — but only
+lists rebind the span. Vectors, maps, sets, and atoms inherit the
+nearest enclosing *list's* span (the JVM binds `LINE`/`COLUMN` for
+seq forms only: `(do [nope] 1)` blames the `do`, probe31 `span-*`),
+defaulting to the top-level fallback (1:1 for a fresh `eval_source`;
+eval'd forms report the caller's line).
 
 `CompilerException` ex-data (`:phase/:line/:column/:source/:symbol`, see
 `Compiler.java` ctor) is NOT reproduced: our errors carry the span
@@ -218,6 +219,11 @@ outside `try` is an invoke of the unresolvable symbol `catch` (E7).
 
 ## E7. Resolve + invocation errors
 
+- The five macros (`let`/`loop`/`letfn`/`fn`/`binding`) in operator
+  position defer to a local or user-ns global binding: the form
+  analyzes as an invocation (`(let [loop 5] (loop [x 1] x))` →
+  `Unable to resolve symbol: x`, probe31 `shadow-*`). Every other
+  special form ignores bindings (`(let [if 5] (if 1 2))` → `2`).
 - Operator unresolvable: wrapper with **empty** sym
   (`Syntax error compiling at (…)`), cause
   `RuntimeException | Unable to resolve symbol: X in this context`.

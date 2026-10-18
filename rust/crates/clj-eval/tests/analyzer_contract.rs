@@ -381,6 +381,61 @@ fn resolve_errors() {
 }
 
 #[test]
+fn macro_shadowing() {
+    // The five macros defer to local bindings (probe31 `shadow-*`):
+    // the form analyzes as an invocation, and the error blames the
+    // nearest enclosing list (vectors are span-transparent).
+    for (src, col, name) in [
+        ("(let [loop 5] (loop [x 1] x))", 15, "x"),
+        ("(let [fn 5] (fn [x] x))", 13, "x"),
+        ("(let [let 5] (let [x 1] x))", 14, "x"),
+        ("(let [binding 5] (binding [x 1] x))", 18, "x"),
+        ("(let [letfn 5] (letfn [(f [x] x)] (f 1)))", 24, "f"),
+    ] {
+        check(
+            src,
+            &format!("Syntax error compiling at (test:1:{col})."),
+            &format!(
+                "java.lang.RuntimeException | Unable to resolve symbol: {name} in this context"
+            ),
+        );
+    }
+    // A user-ns global shadows too (probe31 `shadow-global`).
+    let mut eval = Evaluator::new("test");
+    let setup = read_str("(def loop 5)", &ReaderOpts::default()).unwrap();
+    let _ = eval.analyze(&setup);
+    let form = read_str("(loop [x 1] x)", &ReaderOpts::default()).unwrap();
+    assert_eq!(
+        eval.analyze(&form).unwrap_err().chain(),
+        vec![
+            "Syntax error compiling at (test:1:1).".to_owned(),
+            "java.lang.RuntimeException | Unable to resolve symbol: x in this context".to_owned(),
+        ]
+    );
+}
+
+#[test]
+fn span_lists_only() {
+    // Vectors and maps are span-transparent; only lists rebind the
+    // span (probe31 `span-*`).
+    check(
+        "(do [nope] 1)",
+        "Syntax error compiling at (test:1:1).",
+        "java.lang.RuntimeException | Unable to resolve symbol: nope in this context",
+    );
+    check(
+        "(do {:a nope} 1)",
+        "Syntax error compiling at (test:1:1).",
+        "java.lang.RuntimeException | Unable to resolve symbol: nope in this context",
+    );
+    check(
+        "(do (t-plus nope 1) 2)",
+        "Syntax error compiling at (test:1:5).",
+        "java.lang.RuntimeException | Unable to resolve symbol: t-plus in this context",
+    );
+}
+
+#[test]
 fn let_spec_errors() {
     let wrapper = "Syntax error macroexpanding clojure.core/let at (test:1:1).";
     let cause = "clojure.lang.ExceptionInfo | Call to clojure.core/let did not conform to spec.";
