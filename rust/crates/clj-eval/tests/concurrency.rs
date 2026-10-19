@@ -1622,3 +1622,1074 @@ fn future_stress_swap() {
         "2000"
     );
 }
+
+fn assert_agent_object(pr: &str) {
+    assert_object_shape(pr, "clojure.lang.Agent");
+}
+
+#[test]
+fn agent_ctor_rows() {
+    let mut eval = boot();
+    assert_eq!(run_last(&mut eval, "(deref (agent 1))"), "1");
+    assert_eq!(run_last(&mut eval, "(deref (agent nil))"), "nil");
+    assert_eq!(
+        run_last(&mut eval, "(meta (agent 1 :meta {:k :v}))"),
+        "{:k :v}"
+    );
+    assert_eq!(run_last(&mut eval, "(meta (agent 1))"), "nil");
+    assert_eq!(run_last(&mut eval, "(meta (agent 1 :meta nil))"), "nil");
+    // Falsy validators/handlers never install; unknown options are ignored.
+    assert_eq!(
+        run_last(&mut eval, "(do (agent 2 :validator even?) :ok)"),
+        ":ok"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(do (agent 1 :validator nil) :ok)"),
+        ":ok"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(do (agent 1 :error-handler nil) :ok)"),
+        ":ok"
+    );
+    assert_eq!(run_last(&mut eval, "(do (agent 1 :foo 2) :ok)"), ":ok");
+    // Duplicate options: last wins (hash-map build).
+    assert_eq!(
+        run_last(&mut eval, "(meta (agent 1 :meta {:a 1} :meta {:b 2}))"),
+        "{:b 2}"
+    );
+    // A bogus mode installs (behaves as `:fail` — pinned in the mode test).
+    assert_eq!(
+        run_last(&mut eval, "(do (agent 1 :error-mode :bogus) :ok)"),
+        ":ok"
+    );
+    assert_eq!(class_of(&mut eval, "(agent 1)"), "clojure.lang.Agent");
+    assert_agent_object(&run_last(&mut eval, "(agent 1)"));
+    let rendered = run_last(&mut eval, "(str (agent 1))");
+    assert!(
+        rendered.starts_with("\"clojure.lang.Agent@"),
+        "bad agent str: {rendered}"
+    );
+    // Identity equality (never by value).
+    assert_eq!(run_last(&mut eval, "(let [a (agent 1)] (= a a))"), "true");
+    assert_eq!(run_last(&mut eval, "(= (agent 1) (agent 1))"), "false");
+    assert_eq!(run_last(&mut eval, "(= (agent 1) (atom 1))"), "false");
+    assert_eq!(run_last(&mut eval, "(integer? (hash (agent 1)))"), "true");
+    // Every send fn returns the agent itself.
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [a (agent 0)] [(= a (send a inc)) (await a) @a])"
+        ),
+        "[true nil 1]"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [a (agent 0)] [(= a (send-off a inc)) (await a) @a])"
+        ),
+        "[true nil 1]"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [a (agent 0)] [(= a (send-via nil a inc)) (await a) @a])"
+        ),
+        "[true nil 1]"
+    );
+}
+
+#[test]
+fn agent_ctor_errors() {
+    let mut eval = boot();
+    // The ctor validates the initial value too.
+    assert_eq!(
+        uncaught(&mut eval, "(agent 2 :validator odd?)"),
+        "java.lang.IllegalStateException | Invalid reference state"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(agent 1 :validator)"),
+        "java.lang.IllegalArgumentException | No value supplied for key: :validator"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(agent 1 :meta 5)"),
+        cce("java.lang.Long", "clojure.lang.IPersistentMap")
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(agent 1 :validator 5)"),
+        cce("java.lang.Long", "clojure.lang.IFn")
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(agent 1 :error-handler 5)"),
+        cce("java.lang.Long", "clojure.lang.IFn")
+    );
+    // A truthy non-keyword mode fails the `Keyword` cast (falsy modes
+    // fall back to the default).
+    assert_eq!(
+        uncaught(&mut eval, "(agent 1 :error-mode 5)"),
+        cce("java.lang.Long", "clojure.lang.Keyword")
+    );
+    assert_eq!(
+        run_last(&mut eval, "(do (agent 1 :error-mode nil) :ok)"),
+        ":ok"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(do (agent 1 :error-mode false) :ok)"),
+        ":ok"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(agent)"),
+        "clojure.lang.ArityException | Wrong number of args (0) passed to: clojure.core/agent"
+    );
+}
+
+#[test]
+fn agent_error_mode_rows() {
+    let mut eval = boot();
+    // `:continue`: a failed action leaves the state unchanged, clears
+    // the error, and later sends process (`await` returns nil).
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [a (agent 0 :error-mode :continue)] (send a (fn [s] (throw (ex-info \"x\" {})))) (send a inc) (await a) [@a (agent-error a)])"
+        ),
+        "[1 nil]"
+    );
+    // The default mode is `:fail` without a handler: the state parks
+    // and the error latches (the `await` throw below proves the latch
+    // landed before every later assertion runs).
+    run(&mut eval, "(def s6c-fm (agent 0))");
+    run(
+        &mut eval,
+        "(send s6c-fm (fn [s] (throw (ex-info \"boom\" {:n 1}))))",
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(try (await s6c-fm) (catch RuntimeException e :failed))"
+        ),
+        ":failed"
+    );
+    assert_eq!(
+        run_last(&mut eval, "[(nil? (agent-error s6c-fm)) @s6c-fm]"),
+        "[false 0]"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "[(ex-message (agent-error s6c-fm)) (ex-data (agent-error s6c-fm))]"
+        ),
+        "[\"boom\" {:n 1}]"
+    );
+    assert_eq!(
+        class_of(&mut eval, "(agent-error s6c-fm)"),
+        "clojure.lang.ExceptionInfo"
+    );
+    // Every send fn and both awaits throw while failed.
+    let failed = "java.lang.RuntimeException | Agent is failed, needs restart";
+    assert_eq!(uncaught(&mut eval, "(send s6c-fm inc)"), failed);
+    assert_eq!(uncaught(&mut eval, "(send-off s6c-fm inc)"), failed);
+    assert_eq!(uncaught(&mut eval, "(send-via nil s6c-fm inc)"), failed);
+    assert_eq!(uncaught(&mut eval, "(await s6c-fm)"), failed);
+    assert_eq!(uncaught(&mut eval, "(await-for 5000 s6c-fm)"), failed);
+    // The failure carries the latched error as its cause.
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(try (send s6c-fm inc) (catch RuntimeException e [(ex-message (ex-cause e)) (ex-data (ex-cause e))]))"
+        ),
+        "[\"boom\" {:n 1}]"
+    );
+    // The default mode is `:continue` with a handler: the handler
+    // observes `[agent error]` and the queue proceeds.
+    run(&mut eval, "(def s6c-hp (promise))");
+    run(
+        &mut eval,
+        "(def s6c-ha (agent 0 :error-handler (fn [ag ex] (deliver s6c-hp [(= ag s6c-ha) (ex-message ex)]))))",
+    );
+    run(
+        &mut eval,
+        "(send s6c-ha (fn [s] (throw (ex-info \"kb\" {}))))",
+    );
+    run(&mut eval, "(send s6c-ha inc)");
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "[@s6c-hp (await s6c-ha) @s6c-ha (agent-error s6c-ha)]"
+        ),
+        "[[true \"kb\"] nil 1 nil]"
+    );
+    // ... but an explicit `:fail` wins over the handler default.
+    run(
+        &mut eval,
+        "(def s6c-fh (agent 0 :error-mode :fail :error-handler (fn [ag ex] :seen)))",
+    );
+    run(
+        &mut eval,
+        "(send s6c-fh (fn [s] (throw (ex-info \"x\" {}))))",
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(try (await s6c-fh) (catch RuntimeException e :failed))"
+        ),
+        ":failed"
+    );
+    assert_eq!(
+        run_last(&mut eval, "[(nil? (agent-error s6c-fh)) @s6c-fh]"),
+        "[false 0]"
+    );
+    // A bogus mode behaves as `:fail`.
+    run(&mut eval, "(def s6c-bg (agent 0 :error-mode :bogus))");
+    run(
+        &mut eval,
+        "(send s6c-bg (fn [s] (throw (ex-info \"x\" {}))))",
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(try (await s6c-bg) (catch RuntimeException e :failed))"
+        ),
+        ":failed"
+    );
+    assert_eq!(
+        run_last(&mut eval, "[(nil? (agent-error s6c-bg)) @s6c-bg]"),
+        "[false 0]"
+    );
+}
+
+#[test]
+fn agent_restart_rows() {
+    let mut eval = boot();
+    // Failing with a queued follower: the gate holds the failing
+    // action until the follower queues (both sends land while
+    // healthy, deterministically).
+    run(
+        &mut eval,
+        "(def s6c-ra (agent 0)) (def s6c-ra-gate (promise)) (send s6c-ra (fn [s] @s6c-ra-gate (throw (ex-info \"x\" {})))) (send s6c-ra inc) (deliver s6c-ra-gate :go)",
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(try (await s6c-ra) (catch RuntimeException e :failed))"
+        ),
+        ":failed"
+    );
+    // `restart-agent` returns the new state, clears the error, and
+    // the held queue proceeds — while the restart itself fires no
+    // watches (only the follower and the barrier do).
+    run(&mut eval, "(def s6c-rlog (atom []))");
+    run(
+        &mut eval,
+        "(add-watch s6c-ra :k (fn [k r o n] (swap! s6c-rlog conj [o n])))",
+    );
+    assert_eq!(run_last(&mut eval, "(restart-agent s6c-ra 10)"), "10");
+    assert_eq!(
+        run_last(&mut eval, "[(await s6c-ra) @s6c-ra (agent-error s6c-ra)]"),
+        "[nil 11 nil]"
+    );
+    assert_eq!(run_last(&mut eval, "(first @s6c-rlog)"), "[10 11]");
+    // `:clear-actions` drops the held queue (the barrier proves the
+    // queue drained: anything held would run before it).
+    run(&mut eval, "(def s6c-rclog (atom []))");
+    run(
+        &mut eval,
+        "(def s6c-rc (agent 0)) (def s6c-rc-gate (promise)) (send s6c-rc (fn [s] @s6c-rc-gate (throw (ex-info \"x\" {})))) (send s6c-rc (fn [s] (swap! s6c-rclog conj :held) 99)) (deliver s6c-rc-gate :go)",
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(try (await s6c-rc) (catch RuntimeException e :failed))"
+        ),
+        ":failed"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(restart-agent s6c-rc 10 :clear-actions true)"),
+        "10"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(await s6c-rc) [@s6c-rc @s6c-rclog (agent-error s6c-rc)]"
+        ),
+        "[10 [] nil]"
+    );
+    // A falsy `:clear-actions` keeps the queue.
+    run(
+        &mut eval,
+        "(def s6c-rk (agent 0)) (def s6c-rk-gate (promise)) (send s6c-rk (fn [s] @s6c-rk-gate (throw (ex-info \"x\" {})))) (send s6c-rk inc) (deliver s6c-rk-gate :go)",
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(try (await s6c-rk) (catch RuntimeException e :failed))"
+        ),
+        ":failed"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(restart-agent s6c-rk 10 :clear-actions false)"),
+        "10"
+    );
+    assert_eq!(run_last(&mut eval, "(await s6c-rk) @s6c-rk"), "11");
+    // The new state validates: a veto keeps the agent failed with
+    // its old state and error.
+    run(&mut eval, "(def s6c-rv (agent 0 :validator even?))");
+    run(
+        &mut eval,
+        "(send s6c-rv (fn [s] (throw (ex-info \"x\" {}))))",
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(try (await s6c-rv) (catch RuntimeException e :failed))"
+        ),
+        ":failed"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(restart-agent s6c-rv 3)"),
+        "java.lang.IllegalStateException | Invalid reference state"
+    );
+    assert_eq!(
+        run_last(&mut eval, "[@s6c-rv (nil? (agent-error s6c-rv))]"),
+        "[0 false]"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "[(restart-agent s6c-rv 4) @s6c-rv (agent-error s6c-rv)]"
+        ),
+        "[4 4 nil]"
+    );
+    // Restarting an unfailed agent throws (before validating).
+    assert_eq!(
+        uncaught(&mut eval, "(restart-agent (agent 1) 2)"),
+        "java.lang.RuntimeException | Agent does not need a restart"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(restart-agent (agent 0 :validator even?) 3)"),
+        "java.lang.RuntimeException | Agent does not need a restart"
+    );
+    // ... but options still parse first, and receivers check first.
+    assert_eq!(
+        uncaught(&mut eval, "(restart-agent (agent 1) 2 :clear-actions)"),
+        "java.lang.IllegalArgumentException | No value supplied for key: :clear-actions"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(restart-agent (agent 1))"),
+        "clojure.lang.ArityException | Wrong number of args (1) passed to: clojure.core/restart-agent"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(restart-agent nil 1)"),
+        "java.lang.NullPointerException | Cannot invoke \"clojure.lang.Agent.restart(Object, boolean)\" because \"a\" is null"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(restart-agent 5 1)"),
+        cce("java.lang.Long", "clojure.lang.Agent")
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(agent-error)"),
+        "clojure.lang.ArityException | Wrong number of args (0) passed to: clojure.core/agent-error"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(agent-error nil)"),
+        "java.lang.NullPointerException | Cannot invoke \"clojure.lang.Agent.getError()\" because \"a\" is null"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(agent-error 5)"),
+        cce("java.lang.Long", "clojure.lang.Agent")
+    );
+    assert_eq!(run_last(&mut eval, "(agent-error (agent 1))"), "nil");
+}
+
+#[test]
+fn agent_await_rows() {
+    let mut eval = boot();
+    // `await` joins every agent (nil); `await-for` reports bool.
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [a (agent 0) b (agent 10)] (send a inc) (send b inc) (await a b) [@a @b])"
+        ),
+        "[1 11]"
+    );
+    assert_eq!(run_last(&mut eval, "(await)"), "nil");
+    assert_eq!(run_last(&mut eval, "(await-for 50)"), "true");
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [a (agent 0)] (send a inc) [(await-for 5000 a) @a])"
+        ),
+        "[true 1]"
+    );
+    // A gated action times out deterministically (the barrier cannot
+    // run before the delivery), then completes after it.
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [p (promise) a (agent 0)] (send a (fn [s] @p :never)) [(await-for 50 a) (do (deliver p :go) (await a) @a)])"
+        ),
+        "[false :never]"
+    );
+    // Negative timeouts wait nothing (the gated barrier cannot run).
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [p (promise) a (agent 0)] (send a (fn [s] @p :never)) (await-for -5 a))"
+        ),
+        "false"
+    );
+    // ... and an idle agent times out too (the barrier loses the race).
+    assert_eq!(run_last(&mut eval, "(await-for -5 (agent 0))"), "false");
+    // Doubles truncate like `deref` timeouts.
+    assert_eq!(run_last(&mut eval, "(await-for 5000.9 (agent 0))"), "true");
+    // `await` refuses inside actions (a plain `Exception`, even with
+    // no agents — and so does `await-for`).
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [p (promise) a (agent 0)] (send a (fn [s] (deliver p (try (await a) (catch RuntimeException e :runtime) (catch Exception e :plain))) s)) @p)"
+        ),
+        ":plain"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [p (promise) a (agent 0)] (send a (fn [s] (deliver p (try (await) (catch Exception e (ex-message e)))) s)) @p)"
+        ),
+        "\"Can't await in agent action\""
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [p (promise) a (agent 0)] (send a (fn [s] (deliver p (try (await-for 50 a) (catch Exception e (ex-message e)))) s)) @p)"
+        ),
+        "\"Can't await in agent action\""
+    );
+    // Receivers validate before anything waits (agents before the
+    // timeout converts — the `doseq` precedes the latch wait).
+    assert_eq!(
+        uncaught(&mut eval, "(await 1)"),
+        cce("java.lang.Long", "clojure.lang.Agent")
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(await nil)"),
+        "java.lang.NullPointerException | Cannot invoke \"clojure.lang.Agent.dispatch(clojure.lang.IFn, clojure.lang.ISeq, java.util.concurrent.Executor)\" because \"a\" is null"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(await-for \"50\" 1)"),
+        cce("java.lang.Long", "clojure.lang.Agent")
+    );
+    // ... then the timeout converts like `deref`.
+    assert_eq!(
+        uncaught(&mut eval, "(await-for \"50\" (agent 0))"),
+        cce("java.lang.String", "java.lang.Number")
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(await-for nil (agent 0))"),
+        "java.lang.NullPointerException | Cannot invoke \"java.lang.Number.doubleValue()\" because \"x\" is null"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(await-for)"),
+        "clojure.lang.ArityException | Wrong number of args (0) passed to: clojure.core/await-for"
+    );
+    // A failing second agent still throws (the first barrier queued fine).
+    run(&mut eval, "(def s6c-aw (agent 0))");
+    run(&mut eval, "(def s6c-awf (agent 0))");
+    run(
+        &mut eval,
+        "(send s6c-awf (fn [s] (throw (ex-info \"x\" {}))))",
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(try (await s6c-awf) (catch RuntimeException e :failed))"
+        ),
+        ":failed"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(await s6c-aw s6c-awf)"),
+        "java.lang.RuntimeException | Agent is failed, needs restart"
+    );
+}
+
+#[test]
+fn agent_nested_rows() {
+    let mut eval = boot();
+    // A nested send runs after the enclosing action (the promise
+    // rendezvous proves the nest queued before the barrier did).
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [log (atom []) p (promise) a (agent 0)] (send a (fn [s] (send a (fn [s2] (swap! log conj :inner) s2)) (swap! log conj :outer) (deliver p :sent) s)) @p (await a) @log)"
+        ),
+        "[:outer :inner]"
+    );
+    // Doubly nested sends order FIFO (no self-deadlock at any depth).
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [log (atom []) p (promise) a (agent 0)] (send a (fn [s] (send a (fn [s2] (send a (fn [s3] (swap! log conj :in3) (deliver p :d) s3)) (swap! log conj :in2) s2)) (swap! log conj :out) s)) @p (await a) @log)"
+        ),
+        "[:out :in2 :in3]"
+    );
+    // Several nests from one action run in send order.
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [log (atom []) p (promise) a (agent 0)] (send a (fn [s] (send a (fn [x] (swap! log conj :n1) x)) (send a (fn [x] (swap! log conj :n2) x)) (swap! log conj :o) (deliver p :d) s)) @p (await a) @log)"
+        ),
+        "[:o :n1 :n2]"
+    );
+}
+
+#[test]
+fn agent_nested_discarded_on_failure() {
+    let mut eval = boot();
+    // A nested send from a failing action never runs — not even
+    // after a restart without `:clear-actions` (the JVM discards
+    // the unreleased `nested` buffer on failure).
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [log (atom []) a (agent 0)] (send a (fn [s] (send a (fn [s2] (swap! log conj :nested) s2)) (throw (ex-info \"boom\" {})))) (try (await a) (catch RuntimeException _ nil)) (restart-agent a 0) (await a) [@a @log])"
+        ),
+        "[0 []]"
+    );
+    // ... same under `:continue` (the nest drops with the failure).
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [log (atom []) a (agent 0 :error-mode :continue)] (send a (fn [s] (send a (fn [s2] (swap! log conj :nested) s2)) (throw (ex-info \"boom\" {})))) (await a) [@a @log])"
+        ),
+        "[0 []]"
+    );
+}
+
+#[test]
+fn agent_validator_rows() {
+    let mut eval = boot();
+    // A veto inside a `:continue` action keeps the state, clears the
+    // error, and `await` returns nil.
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [a (agent 0 :validator even? :error-mode :continue)] (send a (fn [s] 3)) (await a) [@a (agent-error a)])"
+        ),
+        "[0 nil]"
+    );
+    // ... while `:fail` parks with the veto latched.
+    run(&mut eval, "(def s6c-va (agent 0 :validator even?))");
+    run(&mut eval, "(send s6c-va (fn [s] 3))");
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(try (await s6c-va) (catch RuntimeException e :failed))"
+        ),
+        ":failed"
+    );
+    assert_eq!(
+        run_last(&mut eval, "[@s6c-va (ex-message (agent-error s6c-va))]"),
+        "[0 \"Invalid reference state\"]"
+    );
+    assert_eq!(
+        class_of(&mut eval, "(agent-error s6c-va)"),
+        "java.lang.IllegalStateException"
+    );
+    // A throwing validator fails the action with its own throw
+    // (the ctor's initial value still passes).
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [a (agent 0 :validator (fn [x] (if (zero? x) true (throw (ex-info \"vv\" {})))) :error-mode :continue)] (send a inc) (await a) [@a (agent-error a)])"
+        ),
+        "[0 nil]"
+    );
+}
+
+#[test]
+fn agent_watch_rows() {
+    let mut eval = boot();
+    // Watches fire `[key ref old new]` on the action's publish (the
+    // first entry is deterministic: the action's fire completes
+    // before the `await` barrier signals).
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [log (atom []) a (agent 0)] (add-watch a :k (fn [k r o n] (swap! log conj [k (= r a) o n]))) (send a inc) (await a) (first @log))"
+        ),
+        "[:k true 0 1]"
+    );
+    // Unconditional fire (like atoms: `identity` still fires).
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [log (atom []) a (agent 1)] (add-watch a :k (fn [k r o n] (swap! log conj [o n]))) (send a identity) (await a) (first @log))"
+        ),
+        "[1 1]"
+    );
+    // Removal stops the fire; both fns return the agent.
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [log (atom []) a (agent 0)] (add-watch a :k (fn [k r o n] (swap! log conj 1))) (remove-watch a :k) (send a inc) (await a) @log)"
+        ),
+        "[]"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [a (agent 1)] (= a (add-watch a :k (fn [k r o n]))))"
+        ),
+        "true"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [a (agent 1)] (add-watch a :k (fn [k r o n])) (= a (remove-watch a :k)))"
+        ),
+        "true"
+    );
+    // Nil fns install but never fire.
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [log (atom []) a (agent 0)] (add-watch a :k nil) (add-watch a :j (fn [k r o n] (swap! log conj :j))) (send a inc) (await a) (first @log))"
+        ),
+        ":j"
+    );
+    // A throwing watch fails the action AFTER publishing: `:continue`
+    // clears, `:fail` latches the published state.
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [a (agent 1 :error-mode :continue)] (add-watch a :k (fn [k r o n] (throw (ex-info \"w\" {})))) (send a inc) (await a) [@a (agent-error a)])"
+        ),
+        "[2 nil]"
+    );
+    run(&mut eval, "(def s6c-wf (agent 1))");
+    run(
+        &mut eval,
+        "(add-watch s6c-wf :k (fn [k r o n] (throw (ex-info \"w\" {}))))",
+    );
+    run(&mut eval, "(send s6c-wf inc)");
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(try (await s6c-wf) (catch RuntimeException e :failed))"
+        ),
+        ":failed"
+    );
+    assert_eq!(
+        run_last(&mut eval, "[@s6c-wf (nil? (agent-error s6c-wf))]"),
+        "[2 false]"
+    );
+    // The barrier's own publish fires watches too (like the JVM's
+    // `count-down`): `shutdown-agents` joins the pool, so the full
+    // log is deterministic here (a bare `await` would race the
+    // barrier's fire). Last: shutdown poisons this evaluator.
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [log (atom []) a (agent 5)] (add-watch a :k (fn [k r o n] (swap! log conj [o n]))) (send a inc) (await a) (shutdown-agents) @log)"
+        ),
+        "[[5 6] [6 6]]"
+    );
+}
+
+#[test]
+fn agent_star_rows() {
+    let mut eval = boot();
+    // `*agent*` binds the agent inside actions (nil outside).
+    assert_eq!(run_last(&mut eval, "(nil? *agent*)"), "true");
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [p (promise) a (agent 0)] (send a (fn [s] (deliver p (= *agent* a)) s)) @p)"
+        ),
+        "true"
+    );
+    // A nested send observes its own agent.
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [p (promise) a (agent 0) b (agent 0)] (send a (fn [s] (send b (fn [t] (deliver p [(= *agent* b) (= *agent* a)]) t)) s)) @p)"
+        ),
+        "[true false]"
+    );
+    // Bindings convey from the sending thread (like futures).
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(do (def ^:dynamic s6c-dx 1) (let [p (promise) a (agent 0)] (binding [s6c-dx 2] (send a (fn [s] (deliver p s6c-dx) s))) @p))"
+        ),
+        "2"
+    );
+    // ... but watchers run bare (the conveyor popped, like the JVM).
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [p (promise) a (agent 0)] (add-watch a :k (fn [k r o n] (deliver p (nil? *agent*)))) (send a inc) @p)"
+        ),
+        "true"
+    );
+}
+
+#[test]
+fn agent_send_shapes() {
+    let mut eval = boot();
+    assert_eq!(
+        uncaught(&mut eval, "(send 1 inc)"),
+        cce("java.lang.Long", "clojure.lang.Agent")
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(send-off 1 inc)"),
+        cce("java.lang.Long", "clojure.lang.Agent")
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(send-via nil 1 inc)"),
+        cce("java.lang.Long", "clojure.lang.Agent")
+    );
+    let dispatch_npe = "java.lang.NullPointerException | Cannot invoke \"clojure.lang.Agent.dispatch(clojure.lang.IFn, clojure.lang.ISeq, java.util.concurrent.Executor)\" because \"a\" is null";
+    assert_eq!(uncaught(&mut eval, "(send nil inc)"), dispatch_npe);
+    assert_eq!(uncaught(&mut eval, "(send-off nil inc)"), dispatch_npe);
+    assert_eq!(uncaught(&mut eval, "(send-via nil nil inc)"), dispatch_npe);
+    assert_eq!(
+        uncaught(&mut eval, "(send (agent 1))"),
+        "clojure.lang.ArityException | Wrong number of args (1) passed to: clojure.core/send"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(send-off (agent 1))"),
+        "clojure.lang.ArityException | Wrong number of args (1) passed to: clojure.core/send-off"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(send-via nil (agent 1))"),
+        "clojure.lang.ArityException | Wrong number of args (2) passed to: clojure.core/send-via"
+    );
+    // Extra args apply (`(apply f old args*)`); any executor value
+    // is accepted and ignored.
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [a (agent 0)] (send a + 1 2 3) (await a) @a)"
+        ),
+        "6"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [a (agent 0)] (send-off a + 1 2) (await a) @a)"
+        ),
+        "3"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [a (agent 0)] (send-via :exec a + 1 2 3 4) (await a) @a)"
+        ),
+        "10"
+    );
+    // The fn is never validated eagerly: a bad fn fails inside the
+    // action (the evaluator's call shapes, latched).
+    run(&mut eval, "(def s6c-bf (agent 0))");
+    run(&mut eval, "(send s6c-bf 5)");
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(try (await s6c-bf) (catch RuntimeException e :failed))"
+        ),
+        ":failed"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(ex-message (agent-error s6c-bf))"),
+        "\"Cannot cast java.lang.Long to clojure.lang.IFn\""
+    );
+    assert_eq!(
+        class_of(&mut eval, "(agent-error s6c-bf)"),
+        "java.lang.ClassCastException"
+    );
+    run(&mut eval, "(def s6c-nf (agent 0))");
+    run(&mut eval, "(send s6c-nf nil)");
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(try (await s6c-nf) (catch RuntimeException e :failed))"
+        ),
+        ":failed"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(ex-message (agent-error s6c-nf))"),
+        "\"Cannot invoke nil as a function\""
+    );
+    assert_eq!(
+        class_of(&mut eval, "(agent-error s6c-nf)"),
+        "java.lang.NullPointerException"
+    );
+}
+
+#[test]
+fn agent_panic_rows() {
+    let mut eval = boot();
+    // A panicking native inside an action (or its validator) latches
+    // an `Error` instead of killing the pool worker.
+    eval.install_native(
+        "user",
+        "s6c-panic",
+        std::sync::Arc::new(|_, _| panic!("s6c-boom")),
+    );
+    run(
+        &mut eval,
+        "(def s6c-pa (agent 0 :validator (fn [x] (if (zero? x) true (s6c-panic))) :error-mode :continue))",
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(send s6c-pa s6c-panic) (await s6c-pa) [@s6c-pa (agent-error s6c-pa)]"
+        ),
+        "[0 nil]"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(send s6c-pa inc) (await s6c-pa) [@s6c-pa (agent-error s6c-pa)]"
+        ),
+        "[0 nil]"
+    );
+    // The latched panic is an `Error` carrying the payload.
+    run(&mut eval, "(def s6c-pf (agent 0))");
+    run(&mut eval, "(send s6c-pf s6c-panic)");
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(try (await s6c-pf) (catch RuntimeException e :failed))"
+        ),
+        ":failed"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(ex-message (agent-error s6c-pf))"),
+        "\"s6c-boom\""
+    );
+    assert_eq!(
+        class_of(&mut eval, "(agent-error s6c-pf)"),
+        "java.lang.Error"
+    );
+}
+
+#[test]
+fn agent_value_shapes() {
+    let mut eval = boot();
+    // `deref` reads agents (1-arity only — the timeout arity casts
+    // to `Future` first, like atoms and delays).
+    assert_eq!(run_last(&mut eval, "(deref (agent 5))"), "5");
+    assert_eq!(run_last(&mut eval, "@(agent 5)"), "5");
+    assert_eq!(
+        uncaught(&mut eval, "(deref (agent 1) 50 :t)"),
+        cce("clojure.lang.Agent", "java.util.concurrent.Future")
+    );
+    // Agents are not pending (but `force` passes them through).
+    assert_eq!(
+        uncaught(&mut eval, "(realized? (agent 1))"),
+        cce("clojure.lang.Agent", "clojure.lang.IPending")
+    );
+    assert_eq!(
+        run_last(&mut eval, "(let [a (agent 1)] (= a (force a)))"),
+        "true"
+    );
+    assert_eq!(run_last(&mut eval, "(future? (agent 1))"), "false");
+    // Agents carry `IReference` meta (never `IObj`).
+    assert_eq!(
+        run_last(&mut eval, "(alter-meta! (agent 1) assoc :a 1)"),
+        "{:a 1}"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(reset-meta! (agent 1) {:a 1})"),
+        "{:a 1}"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [a (agent 1)] (alter-meta! a assoc :a 1) (meta a))"
+        ),
+        "{:a 1}"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(with-meta (agent 1) {:a 1})"),
+        "java.lang.ClassCastException | Cannot cast clojure.lang.Agent to clojure.lang.IObj"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(vary-meta (agent 1) assoc :a 1)"),
+        "java.lang.ClassCastException | Cannot cast clojure.lang.Agent to clojure.lang.IObj"
+    );
+    let with_meta = run_last(
+        &mut eval,
+        "(binding [*print-meta* true] (pr-str (agent 1 :meta {:a 1})))",
+    );
+    assert!(
+        with_meta.starts_with("\"^{:a 1} #object[clojure.lang.Agent 0x"),
+        "missing meta prefix: {with_meta}"
+    );
+    // `seq`/`count`/`nth` error shapes.
+    assert_eq!(
+        uncaught(&mut eval, "(seq (agent 1))"),
+        "java.lang.IllegalArgumentException | Don't know how to create ISeq from: clojure.lang.Agent"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(first (agent 1))"),
+        "java.lang.IllegalArgumentException | Don't know how to create ISeq from: clojure.lang.Agent"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(count (agent 1))"),
+        "java.lang.UnsupportedOperationException | count not supported on this type: Agent"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(nth (agent 1) 0)"),
+        "java.lang.UnsupportedOperationException | nth not supported on this type: Agent"
+    );
+    // Predicates and collection casts.
+    for (src, want) in [
+        ("(coll? (agent 1))", "false"),
+        ("(seq? (agent 1))", "false"),
+        ("(counted? (agent 1))", "false"),
+        ("(fn? (agent 1))", "false"),
+        ("(ifn? (agent 1))", "false"),
+        ("(map? (agent 1))", "false"),
+        ("(vector? (agent 1))", "false"),
+        ("(var? (agent 1))", "false"),
+        ("(get (agent {:a 1}) :a)", "nil"),
+    ] {
+        assert_eq!(run_last(&mut eval, src), want, "for {src}");
+    }
+    assert_eq!(
+        uncaught(&mut eval, "(find (agent {}) :a)"),
+        "java.lang.IllegalArgumentException | find not supported on type: clojure.lang.Agent"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(conj (agent 1) 2)"),
+        cce("clojure.lang.Agent", "clojure.lang.IPersistentCollection")
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(compare (agent 1) 1)"),
+        cce("clojure.lang.Agent", "java.lang.Comparable")
+    );
+    // Invoking an agent keeps the evaluator's cast shape (like atoms).
+    assert_eq!(
+        uncaught(&mut eval, "((agent 1))"),
+        "java.lang.ClassCastException | Cannot cast clojure.lang.Agent to clojure.lang.IFn"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(deliver (agent 1) 2)"),
+        "java.lang.ClassCastException | Cannot cast clojure.lang.Agent to clojure.lang.IFn"
+    );
+}
+
+#[test]
+fn agent_stress() {
+    // Eight agents race 250 `send` increments each (exact totals —
+    // per-agent FIFO serializes, like the JVM), then again over
+    // `send-off`.
+    let mut eval = boot();
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(do (def s6c-n 8) (def s6c-m 250) (def s6c-as (vec (map (fn [_] (agent 0)) (range s6c-n)))) (doseq [a s6c-as] (dotimes [_ s6c-m] (send a inc))) (doseq [a s6c-as] (await a)) (vec (map deref s6c-as)))"
+        ),
+        "[250 250 250 250 250 250 250 250]"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(do (def s6c-bs (vec (map (fn [_] (agent 0)) (range s6c-n)))) (doseq [a s6c-bs] (dotimes [_ s6c-m] (send-off a inc))) (doseq [a s6c-bs] (await a)) (vec (map deref s6c-bs)))"
+        ),
+        "[250 250 250 250 250 250 250 250]"
+    );
+}
+
+#[test]
+fn agent_shutdown_rows() {
+    let mut eval = boot();
+    // `shutdown-agents` is nil (idempotent, even with no pools yet).
+    assert_eq!(run_last(&mut eval, "(shutdown-agents)"), "nil");
+    assert_eq!(run_last(&mut eval, "(shutdown-agents)"), "nil");
+    assert_eq!(
+        uncaught(&mut eval, "(shutdown-agents 1)"),
+        "clojure.lang.ArityException | Wrong number of args (1) passed to: clojure.core/shutdown-agents"
+    );
+    // Sends after shutdown return the agent but never run (like the
+    // JVM's swallowed executor rejection); the agent keeps its state.
+    run(&mut eval, "(def s6c-sa (agent 0))");
+    assert_agent_object(&run_last(&mut eval, "(send s6c-sa inc)"));
+    assert_agent_object(&run_last(&mut eval, "(send-off s6c-sa inc)"));
+    assert_agent_object(&run_last(&mut eval, "(send-via nil s6c-sa inc)"));
+    assert_eq!(run_last(&mut eval, "@s6c-sa"), "0");
+    // ... and `await-for` times out false (its barriers never run).
+    // Plain `await` would hang on both runtimes (unpinned parity).
+    assert_eq!(run_last(&mut eval, "(await-for 100 s6c-sa)"), "false");
+}
+
+#[test]
+fn agent_restart_resumed_after_shutdown() {
+    let mut eval = boot();
+    // A restart resumed after shutdown drops its head (the restart
+    // itself succeeds and clears the error; the held queue never
+    // runs again). Fresh evaluator: the failure setup must run
+    // while the pools are alive.
+    run(
+        &mut eval,
+        "(def s6c-rs2 (agent 0)) (def s6c-rs2-g (promise)) (send s6c-rs2 (fn [s] @s6c-rs2-g (throw (ex-info \"x\" {})))) (send s6c-rs2 inc) (deliver s6c-rs2-g :go)",
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(try (await s6c-rs2) (catch RuntimeException e :failed))"
+        ),
+        ":failed"
+    );
+    assert_eq!(run_last(&mut eval, "(shutdown-agents)"), "nil");
+    assert_eq!(run_last(&mut eval, "(restart-agent s6c-rs2 5)"), "5");
+    assert_eq!(
+        run_last(&mut eval, "[@s6c-rs2 (agent-error s6c-rs2)]"),
+        "[5 nil]"
+    );
+}
+
+#[test]
+fn agent_shutdown_joins() {
+    let mut eval = boot();
+    // Running actions complete across shutdown (the join waits out
+    // the gated action on both pools).
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [p (promise) q (promise) a (agent 0) b (agent 0)] (send a (fn [s] @p 1)) (send-off b (fn [s] @q 2)) (deliver p :go) (deliver q :go) (shutdown-agents) [@a @b])"
+        ),
+        "[1 2]"
+    );
+    // ... and future threads join too (done without deref).
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [p (promise) f (future @p :done)] (deliver p :go) (shutdown-agents) (future-done? f))"
+        ),
+        "true"
+    );
+}
+
+#[test]
+fn agent_restart_after_shutdown() {
+    let mut eval = boot();
+    // A restart after shutdown drops the resumed head (the JVM's
+    // rejected re-`execute`); the gate holds the failing action
+    // until the follower queues (both sends land while healthy).
+    run(
+        &mut eval,
+        "(def s6c-rs (agent 0)) (def s6c-rs-gate (promise)) (send s6c-rs (fn [s] @s6c-rs-gate (throw (ex-info \"x\" {})))) (send s6c-rs inc) (deliver s6c-rs-gate :go)",
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(try (await s6c-rs) (catch RuntimeException e :failed))"
+        ),
+        ":failed"
+    );
+    assert_eq!(run_last(&mut eval, "(shutdown-agents)"), "nil");
+    assert_eq!(run_last(&mut eval, "(restart-agent s6c-rs 10)"), "10");
+    assert_eq!(run_last(&mut eval, "@s6c-rs"), "10");
+}

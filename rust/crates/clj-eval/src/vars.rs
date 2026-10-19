@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-use clj_value::{Atom, Map, ThrowClass, Value, Var, new_map};
+use clj_value::{Agent, Atom, Map, ThrowClass, Value, Var, new_map};
 
 use crate::error::NativeError;
 use crate::eval::Evaluator;
@@ -207,6 +207,7 @@ pub(crate) fn meta_of(eval: &Evaluator, v: &Value) -> Option<Map> {
     match v {
         Value::Var(var) => eval.registry.state(var.id)?.meta.clone(),
         Value::Atom(a) => a.meta(),
+        Value::Agent(a) => a.meta(),
         Value::Future(f) => f.meta(),
         Value::Promise(p) => p.meta(),
         Value::Symbol(s) => s.meta().cloned(),
@@ -331,17 +332,19 @@ fn native_vary_meta(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nativ
     with_meta_val(&args[0], &next)
 }
 
-/// An `IReference` target (vars, namespaces, and atoms).
+/// An `IReference` target (vars, namespaces, atoms, and agents).
 enum RefTarget {
     Var(u64),
     Ns(String, u64),
     Atom(Atom),
+    Agent(Agent),
 }
 
 fn as_ref_target(v: &Value) -> Result<RefTarget, NativeError> {
     match v {
         Value::Var(var) => Ok(RefTarget::Var(var.id)),
         Value::Atom(a) => Ok(RefTarget::Atom(a.clone())),
+        Value::Agent(a) => Ok(RefTarget::Agent(a.clone())),
         // Futures and promises carry `IObj` meta but are not
         // `IReference`s (no validator/watches to alter).
         Value::Future(_) | Value::Promise(_) => Err(cast_err(v, IREF_CLASS)),
@@ -369,6 +372,9 @@ fn install_ref_meta(eval: &mut Evaluator, target: &RefTarget, meta: Option<Map>)
         RefTarget::Atom(a) => {
             a.lock().meta = meta;
         }
+        RefTarget::Agent(a) => {
+            a.lock().meta = meta;
+        }
     }
 }
 
@@ -377,6 +383,7 @@ fn ref_meta(eval: &Evaluator, target: &RefTarget) -> Option<Map> {
         RefTarget::Var(id) => eval.registry.state(*id)?.meta.clone(),
         RefTarget::Ns(name, id) => eval.registry.ns_for_handle(name, *id)?.meta().cloned(),
         RefTarget::Atom(a) => a.meta(),
+        RefTarget::Agent(a) => a.meta(),
     }
 }
 

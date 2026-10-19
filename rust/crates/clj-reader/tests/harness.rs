@@ -379,6 +379,7 @@ pub fn canon(v: &Value, print_meta: bool) -> String {
         | Value::Delay(_)
         | Value::Future(_)
         | Value::Promise(_)
+        | Value::Agent(_)
         | Value::Extension(_) => out.push_str(&pr_to_string(v, &PrintOpts::pr())),
         Value::List(l) => {
             out.push('(');

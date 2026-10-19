@@ -12,6 +12,7 @@
 //! is Clojure `=` and hashing is equiv-consistent (see
 //! [`value`](crate::value)); printing lives in [`print`](crate::print).
 
+mod agent;
 mod atom;
 mod compare;
 mod delay;
@@ -26,6 +27,7 @@ mod symbol;
 mod transient;
 mod value;
 
+pub use agent::{Agent, AgentAction, AgentInner, AgentPool, ErrorMode, QueuedAction};
 pub use atom::{Atom, AtomState};
 pub use compare::{CompareError, compare};
 pub use delay::{Delay, DelayState};

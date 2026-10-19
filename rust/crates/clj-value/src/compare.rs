@@ -183,6 +183,7 @@ fn ref_or_collection_type_name(v: &Value) -> &'static str {
         Value::Delay(_) => "Delay",
         Value::Future(_) => "Future",
         Value::Promise(_) => "Promise",
+        Value::Agent(_) => "Agent",
         _ => collection_type_name(v),
     }
 }

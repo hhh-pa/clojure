@@ -1129,11 +1129,13 @@ fn str_of_realized(eval: &mut Evaluator, v: &Value) -> Result<String, NativeErro
         Value::Nil => String::new(),
         Value::Str(s) => s.to_string(),
         Value::Char(c) => c.to_string(),
-        // Atoms, delays, futures, and promises render their
+        // Atoms, delays, futures, promises, and agents render their
         // `toString` (`Class@hex`), never the `#object[…]` print form.
-        Value::Atom(_) | Value::Delay(_) | Value::Future(_) | Value::Promise(_) => {
-            clj_value::java_debug(&r)
-        }
+        Value::Atom(_)
+        | Value::Delay(_)
+        | Value::Future(_)
+        | Value::Promise(_)
+        | Value::Agent(_) => clj_value::java_debug(&r),
         Value::List(_) | Value::Vector(_) | Value::Map(_) | Value::Set(_) | Value::Extension(_) => {
             clj_value::pr_to_string(&r, &clj_value::PrintOpts::pr())
         }

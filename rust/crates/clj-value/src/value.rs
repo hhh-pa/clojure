@@ -36,8 +36,8 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use crate::{
-    Atom, Delay, ExtensionValue, Future, Keyword, Promise, Symbol, Throwable, Transient, Unbound,
-    Var,
+    Agent, Atom, Delay, ExtensionValue, Future, Keyword, Promise, Symbol, Throwable, Transient,
+    Unbound, Var,
 };
 
 /// Deterministic Fx hasher for maps/sets (rpds's default RandomState
@@ -617,6 +617,8 @@ pub enum Value {
     Future(Future),
     /// A promise (S6B): identity equality (shared cell).
     Promise(Promise),
+    /// An agent (S6C): identity equality (shared cell).
+    Agent(Agent),
     /// A host-defined value behind the [`ExtensionValue`] trait (S4).
     Extension(Arc<dyn ExtensionValue>),
 }
@@ -784,6 +786,7 @@ impl PartialEq for Value {
             (Value::Delay(a), Value::Delay(b)) => a.same_cell(b),
             (Value::Future(a), Value::Future(b)) => a.same_cell(b),
             (Value::Promise(a), Value::Promise(b)) => a.same_cell(b),
+            (Value::Agent(a), Value::Agent(b)) => a.same_cell(b),
             (Value::Extension(a), Value::Extension(b)) => a.dyn_eq(&**b),
             _ => false,
         }
@@ -909,6 +912,10 @@ impl Hash for Value {
             Value::Promise(p) => {
                 state.write_u8(21);
                 state.write_u64(p.id());
+            }
+            Value::Agent(a) => {
+                state.write_u8(22);
+                state.write_u64(a.id());
             }
             Value::Extension(e) => {
                 // Realized seqs hash as sequential family (marker 8

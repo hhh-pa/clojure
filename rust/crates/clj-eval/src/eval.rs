@@ -101,7 +101,12 @@ pub struct Evaluator {
     bindings: Bindings,
     source: Arc<str>,
     future_threads: Arc<std::sync::Mutex<Vec<std::thread::JoinHandle<()>>>>,
+    agent_system: Arc<crate::concurrency::AgentSystem>,
     native_call_span: Option<Span>,
+    /// Sends buffered while an agent action fn runs (the JVM's
+    /// thread-local `nested`): released on success, discarded on
+    /// failure. `None` outside an action fn.
+    pub(crate) agent_outbox: Option<Vec<(clj_value::Agent, clj_value::QueuedAction)>>,
 }
 
 /// A `defmacro` definition's parts (bundles `eval_defmacro`'s
@@ -139,7 +144,9 @@ impl Evaluator {
             bindings: Bindings::new(),
             source: Arc::from(source),
             future_threads: Arc::new(std::sync::Mutex::new(Vec::new())),
+            agent_system: Arc::new(crate::concurrency::AgentSystem::new()),
             native_call_span: None,
+            agent_outbox: None,
         }
     }
 
@@ -159,7 +166,9 @@ impl Evaluator {
             bindings,
             source: Arc::clone(&self.source),
             future_threads: Arc::clone(&self.future_threads),
+            agent_system: Arc::clone(&self.agent_system),
             native_call_span: None,
+            agent_outbox: None,
         }
     }
 
@@ -177,6 +186,31 @@ impl Evaluator {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .push(handle);
+    }
+
+    /// This lineage's agent pools, creating them on first use
+    /// (`None` after [`shutdown_agents`](Self::shutdown_agents):
+    /// dispatches drop like the JVM's rejected `execute`).
+    pub(crate) fn agent_pools_for_send(
+        &self,
+    ) -> Result<Option<Arc<crate::concurrency::AgentPools>>, NativeError> {
+        self.agent_system.pools_for_send()
+    }
+
+    /// Stop the agent pools (running and queued actions complete; new
+    /// sends fail) and join the pool workers, the send-off threads,
+    /// and every spawned future thread.
+    pub(crate) fn shutdown_agents(&self) {
+        self.agent_system.shutdown();
+        let handles = std::mem::take(
+            &mut *self
+                .future_threads
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()),
+        );
+        for handle in handles {
+            let _ = handle.join();
+        }
     }
 
     /// The innermost call form's span while a native runs (set by

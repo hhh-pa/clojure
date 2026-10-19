@@ -72,6 +72,7 @@ pub enum ThrowClass {
     CompilerException,
     ExecutionException,
     CancellationException,
+    RejectedExecutionException,
 }
 
 impl ThrowClass {
@@ -116,6 +117,7 @@ impl ThrowClass {
             Self::CompilerException => "clojure.lang.Compiler$CompilerException",
             Self::ExecutionException => "java.util.concurrent.ExecutionException",
             Self::CancellationException => "java.util.concurrent.CancellationException",
+            Self::RejectedExecutionException => "java.util.concurrent.RejectedExecutionException",
         }
     }
 
@@ -148,6 +150,7 @@ fn throw_parent(jvm_name: &str) -> Option<&'static str> {
         "java.lang.RuntimeException" => Some("java.lang.Exception"),
         "java.util.concurrent.ExecutionException" => Some("java.lang.Exception"),
         "java.util.concurrent.CancellationException" => Some("java.lang.IllegalStateException"),
+        "java.util.concurrent.RejectedExecutionException" => Some("java.lang.RuntimeException"),
         "java.lang.NumberFormatException" => Some("java.lang.IllegalArgumentException"),
         "java.io.FileNotFoundException" => Some("java.io.IOException"),
         "java.io.IOException" => Some("java.lang.Exception"),
@@ -391,11 +394,15 @@ mod tests {
                 ThrowClass::CancellationException,
                 "java.util.concurrent.CancellationException",
             ),
+            (
+                ThrowClass::RejectedExecutionException,
+                "java.util.concurrent.RejectedExecutionException",
+            ),
         ];
         for (class, want) in cases {
             assert_eq!(class.jvm_name(), want);
         }
-        assert_eq!(cases.len(), 19);
+        assert_eq!(cases.len(), 20);
     }
 
     #[test]
@@ -557,6 +564,26 @@ mod tests {
                 true,
             ),
             (ThrowClass::CancellationException, "java.lang.Error", false),
+            (
+                ThrowClass::RejectedExecutionException,
+                "java.util.concurrent.RejectedExecutionException",
+                true,
+            ),
+            (
+                ThrowClass::RejectedExecutionException,
+                "java.lang.RuntimeException",
+                true,
+            ),
+            (
+                ThrowClass::RejectedExecutionException,
+                "java.lang.Exception",
+                true,
+            ),
+            (
+                ThrowClass::RejectedExecutionException,
+                "java.lang.Error",
+                false,
+            ),
         ];
         for (class, catch, want) in cases {
             assert_eq!(
@@ -590,6 +617,7 @@ mod tests {
             ThrowClass::CompilerException,
             ThrowClass::ExecutionException,
             ThrowClass::CancellationException,
+            ThrowClass::RejectedExecutionException,
         ];
         for class in all {
             assert!(class.matches("java.lang.Throwable"));

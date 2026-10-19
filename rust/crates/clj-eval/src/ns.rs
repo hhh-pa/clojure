@@ -832,6 +832,7 @@ pub(crate) fn throw_class_for(name: &str) -> ThrowClass {
         "FileNotFoundException" => ThrowClass::FileNotFoundException,
         "ExecutionException" => ThrowClass::ExecutionException,
         "CancellationException" => ThrowClass::CancellationException,
+        "RejectedExecutionException" => ThrowClass::RejectedExecutionException,
         "IllegalAccessError" => ThrowClass::IllegalAccessError,
         "NumberFormatException" => ThrowClass::NumberFormatException,
         "StringIndexOutOfBoundsException" => ThrowClass::StringIndexOutOfBoundsException,
@@ -1921,6 +1922,9 @@ fn boot_core_vars(eval: &mut Evaluator, user_handle: Value) {
     def_dynamic_root(eval, "*print-meta*", Value::Bool(false));
     def_dynamic_root(eval, "*print-readably*", Value::Bool(true));
     def_dynamic_root(eval, "*print-dup*", Value::Bool(false));
+    // `RT.java`: `*agent*` is a dynamic slot with a nil root (bound
+    // to the agent inside each action by `send`).
+    def_dynamic_root(eval, "*agent*", Value::Nil);
 }
 
 /// Refer every public install into `user` (JVM boot refers
@@ -1960,6 +1964,7 @@ fn boot_refer_user(eval: &mut Evaluator) {
             "*print-meta*",
             "*print-readably*",
             "*print-dup*",
+            "*agent*",
             "*print-length*",
             "*print-level*",
             "*print-namespace-maps*",

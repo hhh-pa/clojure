@@ -204,6 +204,14 @@ fn print_into(v: &Value, opts: &PrintOpts, level: Option<i64>, out: &mut String)
             let id = p.id();
             write!(out, "#object[{class} 0x{id:x} \"{class}@{id:x}\"]").unwrap();
         }
+        Value::Agent(a) => {
+            let id = a.id();
+            write!(
+                out,
+                "#object[clojure.lang.Agent 0x{id:x} \"clojure.lang.Agent@{id:x}\"]"
+            )
+            .unwrap();
+        }
         Value::Extension(e) => {
             // Realized seqs print as lists with ambient options
             // (length/level truncation applies, like the JVM);
@@ -276,6 +284,7 @@ fn print_meta_prefix(v: &Value, opts: &PrintOpts, level: Option<i64>, out: &mut 
     // promises carry per-handle meta outside `Value::meta` too.
     let extra = match v {
         Value::Atom(a) => Some(a.meta()),
+        Value::Agent(a) => Some(a.meta()),
         Value::Future(f) => Some(f.meta()),
         Value::Promise(p) => Some(p.meta()),
         _ => None,
@@ -520,6 +529,7 @@ pub fn java_debug(v: &Value) -> String {
         Value::Delay(d) => format!("clojure.lang.Delay@{:x}", d.id()),
         Value::Future(f) => format!("{}@{:x}", f.jvm_class(), f.id()),
         Value::Promise(p) => format!("{}@{:x}", p.jvm_class(), p.id()),
+        Value::Agent(a) => format!("clojure.lang.Agent@{:x}", a.id()),
         Value::Extension(e) => e.print(),
         Value::List(_)
         | Value::Vector(_)

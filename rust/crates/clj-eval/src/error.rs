@@ -302,6 +302,7 @@ pub fn jvm_class_of(v: &Value) -> String {
         Value::Delay(d) => d.jvm_class().to_owned(),
         Value::Future(f) => f.jvm_class().to_owned(),
         Value::Promise(p) => p.jvm_class().to_owned(),
+        Value::Agent(a) => a.jvm_class().to_owned(),
         Value::Extension(e) => e.class_name(),
     }
 }

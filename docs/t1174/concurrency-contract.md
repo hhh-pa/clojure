@@ -59,9 +59,21 @@ shapes are exact JVM text (en_US/UTC).
   `restart-agent` (returns new state, clears error;
   `:clear-actions` drops the queue) (P5).
 - `await` → `nil` (throws when failed); `await-for` →
-  bool. Nested sends run after the enclosing action (P5).
+  bool. Nested sends run after the enclosing action (P5);
+  nested sends from a FAILED action are discarded (the JVM's
+  unreleased `nested` buffer — never resurrected by a later
+  restart without `:clear-actions`).
 - `*agent*` bound inside actions. `shutdown-agents` → `nil`,
-  joins pools + future threads.
+  joins pools + future threads (BLOCKING — DIVERGENCE: the
+  JVM returns at once and drains async; timing-only).
+- After shutdown, sends return the agent but their actions
+  never run (like the JVM's swallowed executor rejection —
+  the queue wedges, `await-for` times out `false`, plain
+  `await` hangs on both runtimes). Submission failures
+  notify the error handler with a
+  `RejectedExecutionException` first, like the JVM's
+  `execute` catch (the message is port-fixed: the JVM's
+  embeds pool identity).
 
 ## Threads (port rules)
 

@@ -108,6 +108,7 @@ pub fn hasheq(v: &Value) -> i32 {
         Value::Delay(d) => id_hash(d.id()),
         Value::Future(f) => id_hash(f.id()),
         Value::Promise(p) => id_hash(p.id()),
+        Value::Agent(a) => id_hash(a.id()),
         Value::Extension(ext) => match realized_items(&**ext) {
             Some(items) => hash_ordered(items.iter().map(hasheq)),
             None => UNREALIZED_EXTENSION_HASH,
@@ -165,6 +166,7 @@ pub fn hash_code(v: &Value) -> i32 {
         Value::Delay(d) => id_hash(d.id()),
         Value::Future(f) => id_hash(f.id()),
         Value::Promise(p) => id_hash(p.id()),
+        Value::Agent(a) => id_hash(a.id()),
         Value::Extension(ext) => match realized_items(&**ext) {
             Some(items) => list_hash_code(items.iter().map(hash_code)),
             None => UNREALIZED_EXTENSION_HASH,

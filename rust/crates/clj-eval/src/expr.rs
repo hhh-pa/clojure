@@ -434,6 +434,7 @@ fn is_curated_fqn(fqn: &str) -> bool {
             | "java.util.NoSuchElementException"
             | "java.util.concurrent.ExecutionException"
             | "java.util.concurrent.CancellationException"
+            | "java.util.concurrent.RejectedExecutionException"
             | "java.lang.reflect.InvocationTargetException"
             | "clojure.lang.Compiler$CompilerException"
     )
