@@ -473,13 +473,13 @@ machine-read — keep `| var | status | notes |` rows exact.
 | `ensure` | out-of-scope | STM (N4): never |
 | `alter` | out-of-scope | STM (N4): never |
 | `ref-set` | out-of-scope | STM (N4): never |
-| `*1` | out-of-scope | S7 REPL |
-| `*2` | out-of-scope | S7 REPL |
-| `*3` | out-of-scope | S7 REPL |
-| `*e` | out-of-scope | S7 REPL |
-| `*command-line-args*` | out-of-scope | S7 CLI |
-| `clojure-version` | out-of-scope | S7 environment |
-| `*clojure-version*` | out-of-scope | S7 environment |
+| `*1` | implemented | S7 REPL: dynamic nil root; session window (P1) |
+| `*2` | implemented | S7 REPL: dynamic nil root; session window (P1) |
+| `*3` | implemented | S7 REPL: dynamic nil root; session window (P1) |
+| `*e` | implemented | S7 REPL: dynamic nil root; last throwable (P2) |
+| `*command-line-args*` | implemented | S7 CLI: dynamic nil root; run binds the arg seq (P4) |
+| `clojure-version` | implemented | S7 environment: port release literal "0.1.0" (P3) |
+| `*clojure-version*` | implemented | S7 environment: plain root version map (P3) |
 | `identical?` | out-of-scope | reference identity: no slice (values clone) |
 | `re-find` | out-of-scope | regex matching: no slice (reader keeps #"...") |
 | `re-matches` | out-of-scope | regex matching: no slice |

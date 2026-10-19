@@ -244,7 +244,8 @@ impl Evaluator {
     /// The `*ns*`-synced current namespace name: the thread-local
     /// `*ns*` handle when bound (boot binds a base frame and
     /// `in-ns` keeps both in sync), else the registry current.
-    pub(crate) fn current_ns_name(&self) -> String {
+    /// Public for S7 drivers (the REPL prompt tracks this).
+    pub fn current_ns_name(&self) -> String {
         let star_ns = Symbol::new(Some("clojure.core"), "*ns*");
         let bound = self
             .registry
@@ -259,7 +260,10 @@ impl Evaluator {
         bound.unwrap_or_else(|| self.registry.current().to_owned())
     }
 
-    pub(crate) fn next_id(&mut self) -> u64 {
+    /// The next lineage identity (S7 drivers stamp
+    /// driver-synthesized throwables — e.g. the REPL's `*e` on
+    /// read errors — with these, like [`throw`](Self::throw)).
+    pub fn next_id(&mut self) -> u64 {
         self.registry.next_id()
     }
 
@@ -367,7 +371,9 @@ impl Evaluator {
     /// Push one single-entry thread-binding frame, returning the
     /// depth to pass to [`pop_bindings`](Self::pop_bindings)
     /// (natives bind `*file*`/`*pending-paths*` around loads).
-    pub(crate) fn push_binding(&mut self, var: Var, value: Value) -> usize {
+    /// Public for S7 drivers (the REPL session frame, the `run`
+    /// `*command-line-args*` binding); the var should be dynamic.
+    pub fn push_binding(&mut self, var: Var, value: Value) -> usize {
         let depth = self.bindings.depth();
         self.bindings.push_frame(vec![(var, value)]);
         depth
@@ -384,14 +390,18 @@ impl Evaluator {
         self.bindings.pop_frame()
     }
 
-    /// Pop thread-binding frames back to `depth`.
-    pub(crate) fn pop_bindings(&mut self, depth: usize) {
+    /// Pop thread-binding frames back to `depth`. Public for S7
+    /// drivers (restores the depth a [`push_binding`](Self::push_binding)
+    /// returned).
+    pub fn pop_bindings(&mut self, depth: usize) {
         self.bindings.truncate(depth);
     }
 
     /// `set!` on the topmost frame for a var (false when no frame
-    /// exists — `in-ns` falls back to the root then).
-    pub(crate) fn set_binding_top(&mut self, id: u64, value: Value) -> bool {
+    /// exists — `in-ns` falls back to the root then). Public for
+    /// S7 drivers (the REPL shifts `*1`/`*2`/`*3`/`*e` through
+    /// this, like `var-set`).
+    pub fn set_binding_top(&mut self, id: u64, value: Value) -> bool {
         self.bindings.set_top(id, value)
     }
 
@@ -457,8 +467,10 @@ impl Evaluator {
     }
 
     /// The visible value of a var: thread binding, else root (or
-    /// the var's own `Unbound` sentinel, never a throw).
-    pub(crate) fn deref_var(&self, id: u64, sym: &Symbol) -> Value {
+    /// the var's own `Unbound` sentinel, never a throw). Public
+    /// for S7 drivers (the REPL reads the current `*1`/`*2` to
+    /// shift the window).
+    pub fn deref_var(&self, id: u64, sym: &Symbol) -> Value {
         if let Some(v) = self.bindings.get(id) {
             return v.clone();
         }

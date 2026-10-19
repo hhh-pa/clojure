@@ -1752,7 +1752,40 @@ fn core_vars(user_ns: Value) -> Vec<(String, Value, bool, bool)> {
             true,
             false,
         ),
+        // S7 REPL dynamics (P1/P2): nil roots; the session binds and
+        // shifts them (`^:dynamic`, like core.clj).
+        ("*1".to_owned(), Value::Nil, true, false),
+        ("*2".to_owned(), Value::Nil, true, false),
+        ("*3".to_owned(), Value::Nil, true, false),
+        ("*e".to_owned(), Value::Nil, true, false),
+        // S7 CLI (P4): nil root; `run` binds the arg seq.
+        ("*command-line-args*".to_owned(), Value::Nil, true, false),
+        // S7 environment (P3): a plain (non-dynamic) root map over
+        // the workspace release version.
+        (
+            "*clojure-version*".to_owned(),
+            clojure_version_map(),
+            false,
+            false,
+        ),
     ]
+}
+
+/// The `*clojure-version*` root (P3): same keys as the JVM map over
+/// the port release (`{:major 0, :minor 1, :incremental 0,
+/// :qualifier nil, :interim true}`).
+fn clojure_version_map() -> Value {
+    let mut map = new_map();
+    for (key, value) in [
+        ("major", Value::Int(0)),
+        ("minor", Value::Int(1)),
+        ("incremental", Value::Int(0)),
+        ("qualifier", Value::Nil),
+        ("interim", Value::Bool(true)),
+    ] {
+        map = map.insert(Value::Keyword(Keyword::new(None, key)), value);
+    }
+    Value::Map(map)
 }
 
 /// Install one `clojure.core` var with the dynamic SLOT set but no
@@ -1968,6 +2001,12 @@ fn boot_refer_user(eval: &mut Evaluator) {
             "*print-length*",
             "*print-level*",
             "*print-namespace-maps*",
+            "*1",
+            "*2",
+            "*3",
+            "*e",
+            "*command-line-args*",
+            "*clojure-version*",
         ]
         .iter()
         .map(|s| (*s).to_owned()),

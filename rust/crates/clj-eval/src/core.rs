@@ -1063,7 +1063,11 @@ fn print_limit(v: &Value, is_level: bool) -> Result<Option<usize>, NativeError> 
     }
 }
 
-pub(crate) fn print_opts(
+/// Printer options from the bound `*print-*` vars (`readably`
+/// overrides the binding when given — `print` passes false, `pr`
+/// honors). Public for S7 drivers: the REPL prints results exactly
+/// like `prn` (pass `None`).
+pub fn print_opts(
     eval: &Evaluator,
     readably: Option<bool>,
 ) -> Result<clj_value::PrintOpts, NativeError> {
@@ -1760,6 +1764,16 @@ fn native_even(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErr
     }
 }
 
+/// `clojure-version`: the port release string (S7 P3). A literal,
+/// not `env!("CARGO_PKG_VERSION")`: versions live per-crate while
+/// the release version belongs to the workspace — the literal keeps
+/// every crate reporting the release (bump it with the release;
+/// `clj-repl` tests pin the semver shape).
+fn native_clojure_version(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.core/clojure-version", args, &[0])?;
+    Ok(Value::Str(Arc::from("0.1.0")))
+}
+
 /// The S5D scalar natives installed into `clojure.core`.
 pub(crate) const CORE_NATIVES: &[(&str, NativeFnPtr)] = &[
     ("+", native_add),
@@ -1851,4 +1865,5 @@ pub(crate) const CORE_NATIVES: &[(&str, NativeFnPtr)] = &[
     ("throw-npe!", native_throw_npe),
     ("odd?", native_odd),
     ("even?", native_even),
+    ("clojure-version", native_clojure_version),
 ];
