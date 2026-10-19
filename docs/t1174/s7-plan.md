@@ -83,9 +83,11 @@ tests first (spec §2.5).
 
 ## Design (spikes before S7C)
 
-D1. `rustyline` version vs MSRV 1.85 + deny policy (check
-    `rust-version`, licenses, duplicate versions before add;
-    record the choice + rationale here).
+D1. `rustyline` 19.0.0: MIT, edition 2024 (needs ≥1.85,
+    at the floor, never below it); `cargo deny check`
+    (advisories/bans/licenses/sources) green; `cargo tree -d`
+    clean workspace-wide. Chosen over hand-rolled editing:
+    maintained, tty-correct on 3 OSes, spec-pre-approved.
 D2. Incomplete-form detection: exactly which `ReaderError`
     variants mean "continue" (probe + unit test per variant;
     `Eof` at top level means done, never continue).

@@ -26,6 +26,7 @@ clap = { version = "4", features = ["derive"] }
 clj-aot = { path = "crates/clj-aot", optional = true }
 clj-eval = { path = "crates/clj-eval" }
 clj-repl = { path = "crates/clj-repl" }
+clj-value = { path = "crates/clj-value" }
 
 [features]
 default = ["aot"]

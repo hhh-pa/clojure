@@ -188,6 +188,7 @@ name = "clj-repl"
 version = "0.1.0"
 dependencies = [
  "clj-eval",
+ "clj-reader",
  "clj-value",
  "rustyline",
 ]
@@ -210,6 +211,7 @@ dependencies = [
  "clj-aot",
  "clj-eval",
  "clj-repl",
+ "clj-value",
 ]
 
 [[package]]
