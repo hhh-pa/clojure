@@ -982,7 +982,9 @@ fn resolve_source(eval: &Evaluator, root: &str) -> Result<(String, String), Nati
     let dirs = load_dirs(eval)?;
     for ext in ["clj", "cljc"] {
         for dir in &dirs {
-            let candidate = format!("{dir}/{root}.{ext}");
+            // `*file*` pins `/` separators on every platform (S5A2
+            // file_star_during_load); Win32 file access accepts them.
+            let candidate = format!("{dir}/{root}.{ext}").replace('\\', "/");
             if std::path::Path::new(&candidate).is_file() {
                 match std::fs::read_to_string(&candidate) {
                     Ok(text) => return Ok((candidate, text)),
