@@ -210,18 +210,19 @@ fn run_missing_file_is_io_error() {
 }
 
 #[test]
+#[cfg(unix)]
 fn run_unreadable_file_is_io_error() {
     // Read-time IO failures (chmod-000) exit 3 per C8 — not 1.
+    // Unix-only: Windows ACLs have no chmod-000 equivalent, so the
+    // probe file would stay readable and the run would succeed.
     let path = std::env::temp_dir().join(format!("clojure-rs-noperm-{}.clj", std::process::id()));
     std::fs::write(&path, "(println :nope)\n").expect("write probe file");
-    #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000))
             .expect("chmod probe file");
     }
     let out = run(["run", path.to_string_lossy().as_ref()]);
-    #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
