@@ -191,6 +191,7 @@ pub(crate) fn is_ifn(v: &Value) -> bool {
         | Value::Map(_)
         | Value::Set(_)
         | Value::Var(_)
+        | Value::Promise(_)
         | Value::Unbound(_) => true,
         _ => false,
     }
@@ -1120,13 +1121,21 @@ fn lazy_seq_str(eval: &mut Evaluator, v: &Value) -> Result<String, NativeError> 
 }
 
 /// `str` of a realized non-`LazySeq` value: seq objects and strict
-/// collections print readably without limits, anything else plainly.
+/// collections print readably without limits, atoms/delays render
+/// their `toString`, anything else prints plainly.
 fn str_of_realized(eval: &mut Evaluator, v: &Value) -> Result<String, NativeError> {
     let r = realize_deep(eval, v).map_err(signal_to_native)?;
     Ok(match &r {
         Value::Nil => String::new(),
         Value::Str(s) => s.to_string(),
         Value::Char(c) => c.to_string(),
+        // Atoms, delays, futures, promises, and agents render their
+        // `toString` (`Class@hex`), never the `#object[…]` print form.
+        Value::Atom(_)
+        | Value::Delay(_)
+        | Value::Future(_)
+        | Value::Promise(_)
+        | Value::Agent(_) => clj_value::java_debug(&r),
         Value::List(_) | Value::Vector(_) | Value::Map(_) | Value::Set(_) | Value::Extension(_) => {
             clj_value::pr_to_string(&r, &clj_value::PrintOpts::pr())
         }

@@ -21,7 +21,7 @@ use clj_value::{
     new_set, pr_to_string, seq_vec,
 };
 
-use crate::env::{Namespace, NamespaceRegistry};
+use crate::env::{Namespace, SharedRegistry};
 use crate::error::{NativeError, Signal, jvm_class_of, site_of};
 use crate::eval::{Evaluator, SourceError};
 use crate::expr::NsClause;
@@ -90,7 +90,7 @@ fn strict_sym(v: &Value) -> Result<&Symbol, NativeError> {
 /// `clojure.core/the-ns`: a handle resolves to its name (handles
 /// never miss, like the JVM's identity return — stale ones read
 /// tombstones downstream); a symbol must name a live namespace.
-fn the_ns_name(reg: &NamespaceRegistry, v: &Value) -> Result<String, NativeError> {
+fn the_ns_name(reg: &SharedRegistry, v: &Value) -> Result<String, NativeError> {
     if let Some(h) = as_ns(v) {
         return Ok(h.name.to_string());
     }
@@ -129,11 +129,14 @@ pub(crate) fn stamped_meta(base: Map, ns_name: &str, ns_id: u64, name: &str) -> 
 
 /// Whether a var id is public (`^:private` meta is truthiness-tested,
 /// `Var.isPublic`).
-pub(crate) fn is_public(reg: &NamespaceRegistry, id: u64) -> bool {
+pub(crate) fn is_public(reg: &SharedRegistry, id: u64) -> bool {
     let probe = Value::Keyword(Keyword::new(None, "private"));
-    !reg.state(id)
-        .and_then(|s| s.meta.as_ref()?.get(&probe))
-        .is_some_and(Value::is_truthy)
+    !reg.state(id).is_some_and(|s| {
+        s.meta
+            .as_ref()
+            .and_then(|m| m.get(&probe))
+            .is_some_and(Value::is_truthy)
+    })
 }
 
 /// Resolve a symbol against an explicit namespace home, returning the
@@ -141,11 +144,7 @@ pub(crate) fn is_public(reg: &NamespaceRegistry, id: u64) -> bool {
 /// id (the referred object survives re-interns, like the JVM); alias
 /// targets may dangle into tombstones, but real-namespace qualifiers
 /// must be live.
-fn resolve_var_in(
-    home: &Namespace,
-    reg: &NamespaceRegistry,
-    sym: &Symbol,
-) -> Option<(Symbol, u64)> {
+fn resolve_var_in(home: &Namespace, reg: &SharedRegistry, sym: &Symbol) -> Option<(Symbol, u64)> {
     match sym.namespace() {
         Some(part) if part == home.name() => home.lookup(sym).map(|id| (sym.clone(), id)),
         Some(part) => resolve_qualified(home, reg, part, sym),
@@ -165,7 +164,7 @@ fn resolve_var_in(
 /// dangle into tombstones) win over live namespaces.
 fn resolve_qualified(
     home: &Namespace,
-    reg: &NamespaceRegistry,
+    reg: &SharedRegistry,
     part: &str,
     sym: &Symbol,
 ) -> Option<(Symbol, u64)> {
@@ -207,7 +206,7 @@ pub(crate) fn check_arity(
 
 /// A qualified symbol's var id, without the alias step (the target
 /// is already resolved).
-fn id_of(reg: &NamespaceRegistry, q: &Symbol) -> Option<u64> {
+fn id_of(reg: &SharedRegistry, q: &Symbol) -> Option<u64> {
     reg.get(q.namespace()?).and_then(|ns| ns.lookup(q))
 }
 
@@ -260,17 +259,17 @@ fn native_in_ns(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErr
 }
 
 /// Overwrite one var's root.
-fn set_root(reg: &mut NamespaceRegistry, id: u64, v: Value) {
-    if let Some(st) = reg.state_mut(id) {
+fn set_root(reg: &SharedRegistry, id: u64, v: Value) {
+    reg.with_state_mut(id, |st| {
         st.root = Some(v);
-    }
+    });
 }
 
 /// `in-ns` assignment: the top `*ns*` frame when bound, else the
 /// root (`RT.inNamespace` is a thread-local `set`).
 fn set_ns_current(eval: &mut Evaluator, var_id: u64, handle: Value) {
     if !eval.set_binding_top(var_id, handle.clone()) {
-        set_root(&mut eval.registry, var_id, handle);
+        set_root(&eval.registry, var_id, handle);
     }
 }
 
@@ -339,11 +338,7 @@ fn native_all_ns(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeEr
 
 /// The home namespace for the `ns-*` family (handles read
 /// tombstones; the `None` arm is unreachable — `the-ns` checked).
-fn family_home<'a>(
-    eval: &'a Evaluator,
-    args: &[Value],
-    display: &str,
-) -> Result<&'a Namespace, NativeError> {
+fn family_home(eval: &Evaluator, args: &[Value], display: &str) -> Result<Namespace, NativeError> {
     check_arity(display, args, &[1])?;
     let name = the_ns_name(&eval.registry, &args[0])?;
     // Handles pin their generation (stale ones read the tombstone);
@@ -439,13 +434,13 @@ fn native_alias(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErr
     };
     let a = sym_str(alias_sym);
     let cur = eval.current_ns_name();
+    eval.registry.ensure_ns(&cur);
     match eval
         .registry
-        .ensure_ns(&cur)
-        .add_alias(&a, &target, target_id)
+        .with_ns_mut(&cur, |home| home.add_alias(&a, &target, target_id))
     {
-        Ok(()) => Ok(Value::Nil),
-        Err(old) => Err(NativeError::new(
+        Some(Ok(())) | None => Ok(Value::Nil),
+        Some(Err(old)) => Err(NativeError::new(
             ThrowClass::IllegalStateException,
             format!("Alias {a} already exists in namespace {cur}, aliasing {old}"),
         )),
@@ -632,11 +627,13 @@ fn refer_into(eval: &mut Evaluator, lib: &Value, filters: &[Value]) -> Result<Va
         // Interns win over refers (the JVM's REJECTED warning waits
         // for `*err*` in S5D).
         let cur = eval.current_ns_name();
-        let home = eval.registry.ensure_ns(&cur);
+        eval.registry.ensure_ns(&cur);
         let q = Symbol::new(Some(cur.as_str()), renamed.name());
-        if home.lookup(&q).is_none() {
-            home.add_refer(renamed.name(), target_q, var_id);
-        }
+        eval.registry.with_ns_mut(&cur, |home| {
+            if home.lookup(&q).is_none() {
+                home.add_refer(renamed.name(), target_q, var_id);
+            }
+        });
     }
     Ok(Value::Nil)
 }
@@ -695,21 +692,22 @@ fn native_intern(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeEr
     let q = Symbol::new(Some(ns_name.as_str()), name.name());
     let pinned = as_ns(&args[0]).map(|h| h.id);
     let (id, home) = intern_routed(eval, &ns_name, pinned, &q)?;
-    if let Some(st) = eval.registry.state_mut(id) {
-        // The var adopts the name symbol's meta, if any (core.clj
-        // `intern`); 3-arity resets the root on the same var. The
-        // `:ns`/`:name` keys are always (re)stamped (JVM
-        // `Var.intern`; a cleared meta stays cleared).
+    // The var adopts the name symbol's meta, if any (core.clj
+    // `intern`); 3-arity resets the root on the same var. The
+    // `:ns`/`:name` keys are always (re)stamped (JVM
+    // `Var.intern`; a cleared meta stays cleared).
+    let reset = args.get(2).cloned();
+    eval.registry.with_state_mut(id, |st| {
         if let Some(m) = meta {
             st.meta = Some(m);
         }
         if let Some(m) = st.meta.clone() {
             st.meta = Some(stamped_meta(m, &ns_name, home, name.name()));
         }
-        if args.len() == 3 {
-            st.root = Some(args[2].clone());
+        if let Some(v) = reset {
+            st.root = Some(v);
         }
-    }
+    });
     Ok(var_value(id, &q))
 }
 
@@ -743,7 +741,7 @@ fn do_resolve(
         Some(id) => eval.registry.ns_for_handle(ns_name, id),
         None => eval.registry.ns_live_or_removed(ns_name),
     };
-    match home.and_then(|h| resolve_var_in(h, &eval.registry, sym)) {
+    match home.and_then(|h| resolve_var_in(&h, &eval.registry, sym)) {
         Some((q, id)) => Ok(var_value(id, &q)),
         None => Ok(Value::Nil),
     }
@@ -782,13 +780,14 @@ fn native_ns_unmap(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Native
         v => return Err(cast_err(v, SYMBOL_CLASS)),
     };
     // Handles pin their generation (stale ones unmap the tombstone).
-    let home = match as_ns(&args[0]).map(|h| h.id) {
-        Some(id) => eval.registry.ns_for_handle_mut(&ns_name, id),
-        None => eval.registry.ns_live_or_removed_mut(&ns_name),
+    match as_ns(&args[0]).map(|h| h.id) {
+        Some(id) => eval
+            .registry
+            .with_handle_mut(&ns_name, id, |home| home.unmap(&simple)),
+        None => eval
+            .registry
+            .with_live_or_removed_mut(&ns_name, |home| home.unmap(&simple)),
     };
-    if let Some(home) = home {
-        home.unmap(&simple);
-    }
     Ok(Value::Nil)
 }
 
@@ -801,13 +800,14 @@ fn native_ns_unalias(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nati
         v => return Err(cast_err(v, SYMBOL_CLASS)),
     };
     // Handles pin their generation (stale ones unalias the tombstone).
-    let home = match as_ns(&args[0]).map(|h| h.id) {
-        Some(id) => eval.registry.ns_for_handle_mut(&ns_name, id),
-        None => eval.registry.ns_live_or_removed_mut(&ns_name),
+    match as_ns(&args[0]).map(|h| h.id) {
+        Some(id) => eval
+            .registry
+            .with_handle_mut(&ns_name, id, |home| home.remove_alias(&simple)),
+        None => eval
+            .registry
+            .with_live_or_removed_mut(&ns_name, |home| home.remove_alias(&simple)),
     };
-    if let Some(home) = home {
-        home.remove_alias(&simple);
-    }
     Ok(Value::Nil)
 }
 
@@ -830,6 +830,9 @@ pub(crate) fn throw_class_for(name: &str) -> ThrowClass {
         "ArithmeticException" => ThrowClass::ArithmeticException,
         "ExceptionInfo" => ThrowClass::ExceptionInfo,
         "FileNotFoundException" => ThrowClass::FileNotFoundException,
+        "ExecutionException" => ThrowClass::ExecutionException,
+        "CancellationException" => ThrowClass::CancellationException,
+        "RejectedExecutionException" => ThrowClass::RejectedExecutionException,
         "IllegalAccessError" => ThrowClass::IllegalAccessError,
         "NumberFormatException" => ThrowClass::NumberFormatException,
         "StringIndexOutOfBoundsException" => ThrowClass::StringIndexOutOfBoundsException,
@@ -926,7 +929,7 @@ fn set_loaded_libs(eval: &mut Evaluator, v: Value) {
     // (Match guard, not a let-chain: MSRV 1.85.)
     match core_var(eval, "*loaded-libs*") {
         Some(id) if !eval.set_binding_top(id, v.clone()) => {
-            set_root(&mut eval.registry, id, v);
+            set_root(&eval.registry, id, v);
         }
         _ => {}
     }
@@ -1454,9 +1457,9 @@ pub(crate) fn eval_ns_form(
     let name_arg = Value::Symbol(Symbol::new(None, name));
     native_in_ns(eval, &[name_arg]).map_err(|e| eval.throw(e))?;
     let meta = ns_form_meta(doc, attr);
-    if let Some(ns) = eval.registry.get_mut(name) {
+    eval.registry.with_ns_mut(name, |ns| {
         ns.set_meta(meta);
-    }
+    });
     run_ns_clauses(eval, clauses)?;
     let lib = Symbol::new(None, name);
     mark_loaded(eval, &lib).map_err(|e| eval.throw(e))?;
@@ -1762,10 +1765,10 @@ fn core_vars(user_ns: Value) -> Vec<(String, Value, bool, bool)> {
 fn def_dynamic_root(eval: &mut Evaluator, name: &str, root: Value) {
     let q = Symbol::new(Some("clojure.core"), name);
     let id = eval.registry.intern(&q);
-    if let Some(st) = eval.registry.state_mut(id) {
+    eval.registry.with_state_mut(id, |st| {
         st.root = Some(root);
         st.dynamic = true;
-    }
+    });
 }
 
 /// Install one `clojure.core` var (private vars carry
@@ -1773,7 +1776,7 @@ fn def_dynamic_root(eval: &mut Evaluator, name: &str, root: Value) {
 fn def_var(eval: &mut Evaluator, name: &str, root: Value, dynamic: bool, private: bool) {
     let q = Symbol::new(Some("clojure.core"), name);
     let id = eval.registry.intern(&q);
-    if let Some(st) = eval.registry.state_mut(id) {
+    eval.registry.with_state_mut(id, |st| {
         st.root = Some(root);
         st.dynamic = dynamic;
         // `intern` stamped `:ns`/`:name`; boot adds `:dynamic`
@@ -1792,7 +1795,7 @@ fn def_var(eval: &mut Evaluator, name: &str, root: Value, dynamic: bool, private
             );
         }
         st.meta = Some(meta);
-    }
+    });
 }
 
 /// Evaluate one boot form: the embedded boot sequence is fixed, so
@@ -1850,6 +1853,7 @@ fn boot_install_natives(eval: &mut Evaluator) {
         .chain(crate::seqs::SEQS_NATIVES.iter())
         .chain(crate::coll::COLL_NATIVES.iter())
         .chain(crate::io::IO_NATIVES.iter())
+        .chain(crate::concurrency::CONC_NATIVES.iter())
     {
         let func: Arc<crate::ext::NativeImpl> = Arc::new(*f);
         eval.install_native("clojure.core", name, func);
@@ -1874,13 +1878,13 @@ fn boot_install_builtin_macros(eval: &mut Evaluator) {
         );
         let q = Symbol::new(Some("clojure.core"), name);
         let id = eval.registry.intern(&q);
-        if let Some(st) = eval.registry.state_mut(id) {
+        eval.registry.with_state_mut(id, |st| {
             let meta = st.meta.clone().unwrap_or_else(new_map).insert(
                 Value::Keyword(Keyword::new(None, "macro")),
                 Value::Bool(true),
             );
             st.meta = Some(meta);
-        }
+        });
     }
 }
 
@@ -1891,13 +1895,13 @@ fn boot_mark_private(eval: &mut Evaluator) {
     for name in ["throw-illegal-arg!", "throw-npe!", "hash-code"] {
         let q = Symbol::new(Some("clojure.core"), name);
         let id = eval.registry.intern(&q);
-        if let Some(st) = eval.registry.state_mut(id) {
+        eval.registry.with_state_mut(id, |st| {
             let meta = st.meta.clone().unwrap_or_else(new_map).insert(
                 Value::Keyword(Keyword::new(None, "private")),
                 Value::Bool(true),
             );
             st.meta = Some(meta);
-        }
+        });
     }
 }
 
@@ -1918,6 +1922,9 @@ fn boot_core_vars(eval: &mut Evaluator, user_handle: Value) {
     def_dynamic_root(eval, "*print-meta*", Value::Bool(false));
     def_dynamic_root(eval, "*print-readably*", Value::Bool(true));
     def_dynamic_root(eval, "*print-dup*", Value::Bool(false));
+    // `RT.java`: `*agent*` is a dynamic slot with a nil root (bound
+    // to the agent inside each action by `send`).
+    def_dynamic_root(eval, "*agent*", Value::Nil);
 }
 
 /// Refer every public install into `user` (JVM boot refers
@@ -1932,6 +1939,7 @@ fn boot_refer_user(eval: &mut Evaluator) {
         .chain(crate::seqs::SEQS_NATIVES.iter())
         .chain(crate::coll::COLL_NATIVES.iter())
         .chain(crate::io::IO_NATIVES.iter())
+        .chain(crate::concurrency::CONC_NATIVES.iter())
         .map(|(n, _)| (*n).to_owned())
         .collect();
     names.extend(
@@ -1956,6 +1964,7 @@ fn boot_refer_user(eval: &mut Evaluator) {
             "*print-meta*",
             "*print-readably*",
             "*print-dup*",
+            "*agent*",
             "*print-length*",
             "*print-level*",
             "*print-namespace-maps*",
@@ -1970,9 +1979,9 @@ fn boot_refer_user(eval: &mut Evaluator) {
             refers.push((name.clone(), q, id));
         }
     }
-    if let Some(user) = eval.registry.get_mut("user") {
+    eval.registry.with_ns_mut("user", |user| {
         for (name, q, id) in refers {
             user.add_refer(&name, q, id);
         }
-    }
+    });
 }

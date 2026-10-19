@@ -1,0 +1,20 @@
+:locking-val  => 42
+:locking-empty  => nil
+:locking-multi  => 3
+:locking-reentrant  => :inner
+:locking-nil  => "THROW java.lang.NullPointerException: Cannot enter synchronized block because \"locklocal__5902__auto__149\" is null"
+:locking-arity  => "THROW clojure.lang.ArityException: Wrong number of args (0) passed to: clojure.core/locking"
+:locking-mutex  => 200
+:locking-unlock-on-throw  => 2
+:pmap-basic  => (2 3 4)
+:pmap-empty  => ()
+:pmap-chunk  => (0 1 4 9 16 25 36 49 64 81 100 121 144 169 196 225 256 289 324 361 400 441 484 529 576 625 676 729 784 841 900 961 1024 1089 1156 1225 1296 1369 1444 1521)
+:pmap-multi  => (11 22 33)
+:pmap-multi-short  => (11 22)
+:pmap-lazy  => (1 2)
+:pmap-str  => (":a" ":b")
+:pcalls-basic  => (1 2)
+:pcalls-empty  => ()
+:pvalues-basic  => (1 2 :three)
+:pvalues-sidefx  => [(1 2) 2]
+S6-05 DONE

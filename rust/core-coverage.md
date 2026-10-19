@@ -434,39 +434,39 @@ machine-read — keep `| var | status | notes |` rows exact.
 | `extend-protocol` | out-of-scope | protocols: no slice |
 | `satisfies?` | out-of-scope | protocols: no slice |
 | `extends?` | out-of-scope | protocols: no slice |
-| `atom` | out-of-scope | S6 concurrency |
-| `swap!` | out-of-scope | S6 concurrency |
-| `reset!` | out-of-scope | S6 concurrency |
-| `compare-and-set!` | out-of-scope | S6 concurrency |
-| `shutdown-agents` | out-of-scope | S6 concurrency |
-| `delay` | out-of-scope | S6 concurrency |
-| `force` | out-of-scope | S6 concurrency |
-| `deref` | out-of-scope | S6 concurrency |
-| `future` | out-of-scope | S6 concurrency |
-| `future-call` | out-of-scope | S6 concurrency |
-| `future?` | out-of-scope | S6 concurrency |
-| `future-cancel` | out-of-scope | S6 concurrency |
-| `future-done?` | out-of-scope | S6 concurrency |
-| `promise` | out-of-scope | S6 concurrency |
-| `deliver` | out-of-scope | S6 concurrency |
-| `realized?` | out-of-scope | S6 concurrency |
-| `send` | out-of-scope | S6 concurrency |
-| `send-off` | out-of-scope | S6 concurrency |
-| `send-via` | out-of-scope | S6 concurrency |
-| `await` | out-of-scope | S6 concurrency |
-| `await-for` | out-of-scope | S6 concurrency |
-| `agent` | out-of-scope | S6 concurrency |
-| `agent-error` | out-of-scope | S6 concurrency |
-| `restart-agent` | out-of-scope | S6 concurrency |
-| `set-error-handler!` | out-of-scope | S6 concurrency |
-| `set-error-mode!` | out-of-scope | S6 concurrency |
-| `add-watch` | out-of-scope | S6 concurrency |
-| `remove-watch` | out-of-scope | S6 concurrency |
-| `locking` | out-of-scope | S6 concurrency |
-| `pvalues` | out-of-scope | S6 concurrency |
-| `pcalls` | out-of-scope | S6 concurrency |
-| `pmap` | out-of-scope | S6 concurrency |
-| `memoize` | out-of-scope | needs atom: S6 |
+| `atom` | implemented | concurrency.rs atom_ctor_rows (validator/meta options, odd-opts IAE) |
+| `swap!` | implemented | concurrency.rs swap_rows (CAS loop, extra args, unconditional watch fire) |
+| `reset!` | implemented | concurrency.rs reset_rows (validates, fires) |
+| `compare-and-set!` | implemented | concurrency.rs cas_rows (bool, validates pre-compare, no fire on miss) |
+| `shutdown-agents` | implemented | concurrency.rs agent_shutdown_rows (nil; joins pools + future threads; later sends drop like the JVM) |
+| `delay` | implemented | concurrency.rs delay_rows (delay* form over trapped closure) |
+| `force` | implemented | concurrency.rs force_rows (non-delays pass through) |
+| `deref` | implemented | concurrency.rs deref_rows + deref_timeout_rows (1-arity atoms/delays/vars/futures/promises; 3-arity IBlockingDeref with Future-cast-first) |
+| `future` | implemented | concurrency.rs future_rows (core.clj macro over future-call) |
+| `future-call` | implemented | concurrency.rs future_rows (binding conveyance, cached failures) |
+| `future?` | implemented | concurrency.rs future_pred_rows (futures only; promises false) |
+| `future-cancel` | implemented | concurrency.rs future_cancel_rows (bool; no interrupt) |
+| `future-done?` | implemented | concurrency.rs future_pred_rows (done incl. cancelled) |
+| `promise` | implemented | concurrency.rs promise_rows (pending latch, invokable) |
+| `deliver` | implemented | concurrency.rs promise_rows (invokes; first wins) |
+| `realized?` | implemented | concurrency.rs realized_rows (delays + lazy seqs + futures/promises; atoms CCE) |
+| `send` | implemented | concurrency.rs agent_send_shapes (fixed pool; extra args; failed throws) |
+| `send-off` | implemented | concurrency.rs agent_send_shapes (unbounded pool; failed throws) |
+| `send-via` | implemented | concurrency.rs agent_send_shapes (executor ignored; routes to send-off pool) |
+| `await` | implemented | concurrency.rs agent_await_rows (nil; barrier rendezvous; throws when failed/in action) |
+| `await-for` | implemented | concurrency.rs agent_await_rows (bool; deref-style timeout; throws when failed) |
+| `agent` | implemented | concurrency.rs agent_ctor_rows (meta/validator/handler/mode options; validates initial) |
+| `agent-error` | implemented | concurrency.rs agent_error_mode_rows (latched throwable or nil) |
+| `restart-agent` | implemented | concurrency.rs agent_restart_rows (new state; clears; :clear-actions; validates) |
+| `set-error-handler!` | implemented | concurrency.rs set_error_handler_rows (nil clears; void→nil; fires on next failure) |
+| `set-error-mode!` | implemented | concurrency.rs set_error_mode_rows (void→nil; :bogus/nil behave as :fail) |
+| `add-watch` | implemented | concurrency.rs watch_rows (returns ref, [k ref old new]) |
+| `remove-watch` | implemented | concurrency.rs watch_rows (returns ref, missing keys no-op) |
+| `locking` | divergent | analyzer builtin (S6D); single global reentrant monitor; resolves as macro; `macroexpand-1` identity (documented) |
+| `pvalues` | implemented | concurrency.rs pvalues_rows (core.clj port over pcalls) |
+| `pcalls` | implemented | concurrency.rs pcalls_rows (core.clj port over pmap) |
+| `pmap` | implemented | concurrency.rs pmap_rows (core.clj port; fixed lookahead 6; lazy) |
+| `memoize` | implemented | concurrency.rs memoize_rows (core.clj port, find-based cache) |
 | `ref` | out-of-scope | STM (N4): never |
 | `dosync` | out-of-scope | STM (N4): never |
 | `commute` | out-of-scope | STM (N4): never |

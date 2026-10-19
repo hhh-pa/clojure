@@ -309,6 +309,12 @@ S8 aot: 2.4, differential vs interpreter. TDD: subset corpus first
   (unsupported-form diagnostics asserted too).
 S9 hardening: corpus growth, ratchet floors, docs, follow-up tasks.
 
+Post-S9 end state: the Rust port replaces the original
+implementation — the Java sources, `pom.xml`, and Maven workflows
+are removed. G5 (JVM build untouched) holds only while the port
+is under construction; everything assuming a JDK (oracle-based
+CI, dual-path docs) must be removable in that follow-up.
+
 Each slice lands as its own `T1174:` commit series + PR; the spec
 updates in-slice when behavior changes.
 

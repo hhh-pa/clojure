@@ -37,12 +37,14 @@
 //!   realized here) hash to a fixed tag, so the `hash` and `format`
 //!   natives MUST realize seqs before calling either function.
 //! - Never assert exact values for identity hashes: [`Value::Transient`],
-//!   [`Value::Var`], [`Value::Unbound`], [`Value::Throwable`], and
-//!   unrecognized extensions have NO stable JVM hash (identity
-//!   hashCode). Here they hash from the per-process `id` (or a fixed
-//!   tag), so values are stable only within one process. The
-//!   differential corpus must not assert them — the same rule as the
-//!   `#object ... 0x<id>` print hex.
+//!   [`Value::Atom`], [`Value::Delay`], [`Value::Future`],
+//!   [`Value::Promise`], [`Value::Agent`], [`Value::Var`],
+//!   [`Value::Unbound`], [`Value::Throwable`], and unrecognized
+//!   extensions have NO stable JVM hash (identity hashCode). Here
+//!   they hash from the per-process `id` (or a fixed tag), so values
+//!   are stable only within one process. The differential corpus must
+//!   not assert them — the same rule as the `#object ... 0x<id>`
+//!   print hex.
 //! - [`Value::Regex`] is a deliberate deterministic stand-in: the JVM
 //!   hashes patterns by identity, but here a regex hashes as its source
 //!   string. Do not assert it against JVM output either.
@@ -102,6 +104,11 @@ pub fn hasheq(v: &Value) -> i32 {
         Value::Unbound(u) => id_hash(u.var_id),
         Value::Throwable(t) => id_hash(t.id),
         Value::Transient(t) => id_hash(t.id()),
+        Value::Atom(a) => id_hash(a.id()),
+        Value::Delay(d) => id_hash(d.id()),
+        Value::Future(f) => id_hash(f.id()),
+        Value::Promise(p) => id_hash(p.id()),
+        Value::Agent(a) => id_hash(a.id()),
         Value::Extension(ext) => match realized_items(&**ext) {
             Some(items) => hash_ordered(items.iter().map(hasheq)),
             None => UNREALIZED_EXTENSION_HASH,
@@ -155,6 +162,11 @@ pub fn hash_code(v: &Value) -> i32 {
         Value::Unbound(u) => id_hash(u.var_id),
         Value::Throwable(t) => id_hash(t.id),
         Value::Transient(t) => id_hash(t.id()),
+        Value::Atom(a) => id_hash(a.id()),
+        Value::Delay(d) => id_hash(d.id()),
+        Value::Future(f) => id_hash(f.id()),
+        Value::Promise(p) => id_hash(p.id()),
+        Value::Agent(a) => id_hash(a.id()),
         Value::Extension(ext) => match realized_items(&**ext) {
             Some(items) => list_hash_code(items.iter().map(hash_code)),
             None => UNREALIZED_EXTENSION_HASH,
@@ -249,9 +261,11 @@ fn double_hasheq(d: f64) -> i32 {
     }
 }
 
-/// Identity-typed values (`Var`, `Unbound`, `Throwable`, `Transient`):
-/// the JVM uses identity hashCode; here the per-process `id` mixed as
-/// a long. Stable within one process only — see the module docs.
+/// Identity-typed values (`Var`, `Unbound`, `Throwable`, `Transient`,
+/// `Atom`, `Delay`, `Future`, `Promise`): the JVM uses identity
+/// hashCode; here the
+/// per-process `id` mixed as a long. Stable within one process only —
+/// see the module docs.
 fn id_hash(id: u64) -> i32 {
     long_hash_code(id)
 }

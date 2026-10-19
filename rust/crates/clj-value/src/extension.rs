@@ -70,6 +70,9 @@ pub enum ThrowClass {
     IllegalFormatArgumentIndexException,
     IOException,
     CompilerException,
+    ExecutionException,
+    CancellationException,
+    RejectedExecutionException,
 }
 
 impl ThrowClass {
@@ -112,6 +115,9 @@ impl ThrowClass {
             }
             Self::IOException => "java.io.IOException",
             Self::CompilerException => "clojure.lang.Compiler$CompilerException",
+            Self::ExecutionException => "java.util.concurrent.ExecutionException",
+            Self::CancellationException => "java.util.concurrent.CancellationException",
+            Self::RejectedExecutionException => "java.util.concurrent.RejectedExecutionException",
         }
     }
 
@@ -142,6 +148,9 @@ fn throw_parent(jvm_name: &str) -> Option<&'static str> {
         "java.lang.Throwable" => None,
         "java.lang.Exception" | "java.lang.Error" => Some("java.lang.Throwable"),
         "java.lang.RuntimeException" => Some("java.lang.Exception"),
+        "java.util.concurrent.ExecutionException" => Some("java.lang.Exception"),
+        "java.util.concurrent.CancellationException" => Some("java.lang.IllegalStateException"),
+        "java.util.concurrent.RejectedExecutionException" => Some("java.lang.RuntimeException"),
         "java.lang.NumberFormatException" => Some("java.lang.IllegalArgumentException"),
         "java.io.FileNotFoundException" => Some("java.io.IOException"),
         "java.io.IOException" => Some("java.lang.Exception"),
@@ -158,6 +167,14 @@ fn throw_parent(jvm_name: &str) -> Option<&'static str> {
         | "clojure.lang.ArityException"
         | "clojure.lang.ExceptionInfo"
         | "clojure.lang.Compiler$CompilerException" => Some("java.lang.RuntimeException"),
+        _ => throw_parent_format(jvm_name),
+    }
+}
+
+/// The `java.util` formatting branch of [`throw_parent`] (split for
+/// the complexity budget).
+fn throw_parent_format(jvm_name: &str) -> Option<&'static str> {
+    match jvm_name {
         "java.util.IllegalFormatConversionException"
         | "java.util.UnknownFormatConversionException"
         | "java.util.MissingFormatConversionException"
@@ -369,11 +386,23 @@ mod tests {
                 ThrowClass::CompilerException,
                 "clojure.lang.Compiler$CompilerException",
             ),
+            (
+                ThrowClass::ExecutionException,
+                "java.util.concurrent.ExecutionException",
+            ),
+            (
+                ThrowClass::CancellationException,
+                "java.util.concurrent.CancellationException",
+            ),
+            (
+                ThrowClass::RejectedExecutionException,
+                "java.util.concurrent.RejectedExecutionException",
+            ),
         ];
         for (class, want) in cases {
             assert_eq!(class.jvm_name(), want);
         }
-        assert_eq!(cases.len(), 17);
+        assert_eq!(cases.len(), 20);
     }
 
     #[test]
@@ -501,6 +530,60 @@ mod tests {
                 true,
             ),
             (ThrowClass::CompilerException, "java.lang.Error", false),
+            (
+                ThrowClass::ExecutionException,
+                "java.util.concurrent.ExecutionException",
+                true,
+            ),
+            (ThrowClass::ExecutionException, "java.lang.Exception", true),
+            (ThrowClass::ExecutionException, "java.lang.Throwable", true),
+            (
+                ThrowClass::ExecutionException,
+                "java.lang.RuntimeException",
+                false,
+            ),
+            (ThrowClass::ExecutionException, "java.lang.Error", false),
+            (
+                ThrowClass::CancellationException,
+                "java.util.concurrent.CancellationException",
+                true,
+            ),
+            (
+                ThrowClass::CancellationException,
+                "java.lang.IllegalStateException",
+                true,
+            ),
+            (
+                ThrowClass::CancellationException,
+                "java.lang.RuntimeException",
+                true,
+            ),
+            (
+                ThrowClass::CancellationException,
+                "java.lang.Exception",
+                true,
+            ),
+            (ThrowClass::CancellationException, "java.lang.Error", false),
+            (
+                ThrowClass::RejectedExecutionException,
+                "java.util.concurrent.RejectedExecutionException",
+                true,
+            ),
+            (
+                ThrowClass::RejectedExecutionException,
+                "java.lang.RuntimeException",
+                true,
+            ),
+            (
+                ThrowClass::RejectedExecutionException,
+                "java.lang.Exception",
+                true,
+            ),
+            (
+                ThrowClass::RejectedExecutionException,
+                "java.lang.Error",
+                false,
+            ),
         ];
         for (class, catch, want) in cases {
             assert_eq!(
@@ -532,6 +615,9 @@ mod tests {
             ThrowClass::IllegalAccessError,
             ThrowClass::NumberFormatException,
             ThrowClass::CompilerException,
+            ThrowClass::ExecutionException,
+            ThrowClass::CancellationException,
+            ThrowClass::RejectedExecutionException,
         ];
         for class in all {
             assert!(class.matches("java.lang.Throwable"));

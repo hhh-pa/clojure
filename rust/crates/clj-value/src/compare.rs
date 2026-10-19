@@ -166,10 +166,24 @@ fn type_name(v: &Value) -> &'static str {
         Value::Char(_) => "Character",
         Value::Symbol(_) => "Symbol",
         Value::Keyword(_) => "Keyword",
+        Value::Extension(e) => extension_type_name(e),
+        _ => ref_or_collection_type_name(v),
+    }
+}
+
+/// Identity and collection type names (split from [`type_name`] for
+/// the complexity budget).
+fn ref_or_collection_type_name(v: &Value) -> &'static str {
+    match v {
         Value::Var(_) => "Var",
         Value::Unbound(_) => "Unbound",
         Value::Throwable(_) => "Throwable",
-        Value::Extension(e) => extension_type_name(e),
+        Value::Transient(_) => "Transient",
+        Value::Atom(_) => "Atom",
+        Value::Delay(_) => "Delay",
+        Value::Future(_) => "Future",
+        Value::Promise(_) => "Promise",
+        Value::Agent(_) => "Agent",
         _ => collection_type_name(v),
     }
 }

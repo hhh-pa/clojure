@@ -13,7 +13,7 @@
 
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use clj_value::{Keyword, Map, Symbol, Unbound, Value, Var, new_map};
 
@@ -630,6 +630,318 @@ impl NamespaceRegistry {
                 var_id: id,
             }),
         }
+    }
+}
+
+/// Per-lineage shared evaluator state (S6B, D1 spike choice): the
+/// namespace registry plus the identity counters behind one mutex.
+/// Cloning shares (`future` bodies fork an evaluator over the same
+/// handle, so `def`s inside a body are globally visible and bodies
+/// see every committed `def`, like the JVM's global namespaces).
+/// Bindings stay per-evaluator (conveyed explicitly at fork, like
+/// `bound-fn`); only the registry and counters are lineage-global.
+///
+/// This is spike option (a) — per-thread evaluator clones over
+/// shared `Arc<Mutex<..>>` state. Message-passing (b) would
+/// serialize every global lookup through the spawning thread, and
+/// `thread::scope` borrowing (c) cannot serve detached `future`
+/// threads (the spawner returns before the body finishes).
+///
+/// Lock discipline: one lock per method call, never spanning
+/// evaluation (a body that `def`s while another thread holds the
+/// lock would deadlock — `Mutex` is not reentrant), and the
+/// `with_*` closures below must neither touch the registry nor
+/// evaluate. Compound read-modify-write sequences (e.g.
+/// `alter-var-root`'s read-call-install) are NOT atomic across
+/// threads; single calls (`intern`, publishes) are.
+/// The registry `current` namespace is lineage-global, but the
+/// per-evaluator `*ns*` binding shadows it through
+/// `current_ns_name`, so the global fallback is unobservable
+/// while `*ns*` stays bound (boot binds it permanently).
+#[derive(Clone, Debug)]
+pub struct SharedRegistry {
+    inner: Arc<Mutex<SharedInner>>,
+}
+
+/// The lineage-global contents: the registry plus the evaluator
+/// identity counters (throwable/closure/native ids, `fn` display
+/// numbers, `gensym`, form numbers — shared so forked evaluators
+/// never stamp colliding identities).
+#[derive(Debug)]
+struct SharedInner {
+    registry: NamespaceRegistry,
+    next_id: u64,
+    fn_seq: u64,
+    gensym: u64,
+    eval_seq: u64,
+}
+
+impl Default for SharedRegistry {
+    /// A fresh lineage (same seeds as [`SharedRegistry::new`]).
+    fn default() -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(SharedInner {
+                registry: NamespaceRegistry::new(),
+                next_id: 1,
+                fn_seq: 0,
+                gensym: 1,
+                eval_seq: 0,
+            })),
+        }
+    }
+}
+
+impl SharedRegistry {
+    /// A fresh lineage: an empty registry with evaluator counters
+    /// seeded exactly like [`Evaluator::new_bare`](crate::eval::Evaluator::new_bare).
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Lock the lineage state (short critical sections only — poison
+    /// is unreachable).
+    fn lock(&self) -> MutexGuard<'_, SharedInner> {
+        self.inner.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The next throwable/closure/native identity.
+    pub fn next_id(&self) -> u64 {
+        let mut inner = self.lock();
+        let id = inner.next_id;
+        inner.next_id += 1;
+        id
+    }
+
+    /// The next `fn` display sequence number.
+    pub fn next_fn_seq(&self) -> u64 {
+        let mut inner = self.lock();
+        inner.fn_seq += 1;
+        inner.fn_seq
+    }
+
+    /// The next `gensym` counter value.
+    pub fn next_gensym(&self) -> u64 {
+        let mut inner = self.lock();
+        let n = inner.gensym;
+        inner.gensym += 1;
+        n
+    }
+
+    /// Reset the `gensym` counter to 1 (boot restarts the
+    /// user-visible counter after loading `core.clj`).
+    pub fn reset_gensym(&self) {
+        self.lock().gensym = 1;
+    }
+
+    /// The current top-level form number.
+    #[must_use]
+    pub fn eval_seq(&self) -> u64 {
+        self.lock().eval_seq
+    }
+
+    /// Number the next top-level form, returning its number.
+    pub fn bump_eval_seq(&self) -> u64 {
+        let mut inner = self.lock();
+        inner.eval_seq += 1;
+        inner.eval_seq
+    }
+
+    /// The current namespace name.
+    #[must_use]
+    pub fn current(&self) -> String {
+        self.lock().registry.current().to_owned()
+    }
+
+    /// Switch the current namespace (it must exist).
+    pub fn set_current(&self, name: &str) {
+        self.lock().registry.set_current(name);
+    }
+
+    /// Find or create a namespace, returning the (owned) namespace.
+    pub fn ensure_ns(&self, name: &str) -> Namespace {
+        self.lock().registry.ensure_ns(name).clone()
+    }
+
+    /// Look up a namespace by name.
+    #[must_use]
+    pub fn get(&self, name: &str) -> Option<Namespace> {
+        self.lock().registry.get(name).cloned()
+    }
+
+    /// A live namespace's id (`None` when missing or removed).
+    #[must_use]
+    pub fn ns_id(&self, name: &str) -> Option<u64> {
+        self.lock().registry.ns_id(name)
+    }
+
+    /// All live namespaces as `(name, id)`, sorted by name.
+    #[must_use]
+    pub fn all_ns_sorted(&self) -> Vec<(String, u64)> {
+        self.lock().registry.all_ns_sorted()
+    }
+
+    /// A live or removed namespace by name (see
+    /// [`NamespaceRegistry::ns_live_or_removed`]).
+    #[must_use]
+    pub fn ns_live_or_removed(&self, name: &str) -> Option<Namespace> {
+        self.lock().registry.ns_live_or_removed(name).cloned()
+    }
+
+    /// A namespace through a handle-pinned id (see
+    /// [`NamespaceRegistry::ns_for_handle`]).
+    #[must_use]
+    pub fn ns_for_handle(&self, name: &str, id: u64) -> Option<Namespace> {
+        self.lock().registry.ns_for_handle(name, id).cloned()
+    }
+
+    /// Drop a namespace (see [`NamespaceRegistry::remove_ns`]).
+    pub fn remove_ns(&self, name: &str) -> bool {
+        self.lock().registry.remove_ns(name)
+    }
+
+    /// Qualify an unqualified symbol into the current namespace.
+    #[must_use]
+    pub fn qualify(&self, sym: &Symbol) -> Symbol {
+        self.lock().registry.qualify(sym)
+    }
+
+    /// [`qualify`](Self::qualify) against an explicit namespace.
+    #[must_use]
+    pub fn qualify_in(&self, ns_name: &str, sym: &Symbol) -> Symbol {
+        self.lock().registry.qualify_in(ns_name, sym)
+    }
+
+    /// The namespace a qualifier names (aliases win over real
+    /// namespaces).
+    #[must_use]
+    pub fn namespace_target(&self, part: &str) -> Option<String> {
+        self.lock()
+            .registry
+            .namespace_target(part)
+            .map(str::to_owned)
+    }
+
+    /// [`namespace_target`](Self::namespace_target) against an
+    /// explicit namespace.
+    #[must_use]
+    pub fn namespace_target_in(&self, ns_name: &str, part: &str) -> Option<String> {
+        self.lock()
+            .registry
+            .namespace_target_in(ns_name, part)
+            .map(str::to_owned)
+    }
+
+    /// Resolve a symbol to its qualified target.
+    #[must_use]
+    pub fn resolve(&self, sym: &Symbol) -> Option<Symbol> {
+        self.lock().registry.resolve(sym)
+    }
+
+    /// [`resolve`](Self::resolve) against an explicit namespace.
+    #[must_use]
+    pub fn resolve_in(&self, ns_name: &str, sym: &Symbol) -> Option<Symbol> {
+        self.lock().registry.resolve_in(ns_name, sym)
+    }
+
+    /// Resolve a symbol to its var id (`None` is unresolvable).
+    #[must_use]
+    pub fn lookup(&self, sym: &Symbol) -> Option<u64> {
+        self.lock().registry.lookup(sym)
+    }
+
+    /// [`lookup`](Self::lookup) against an explicit namespace.
+    #[must_use]
+    pub fn lookup_in(&self, ns_name: &str, sym: &Symbol) -> Option<u64> {
+        self.lock().registry.lookup_in(ns_name, sym)
+    }
+
+    /// Intern (find or create) a var (see
+    /// [`NamespaceRegistry::intern`]).
+    pub fn intern(&self, sym: &Symbol) -> u64 {
+        self.lock().registry.intern(sym)
+    }
+
+    /// Intern a var into a live or removed namespace (see
+    /// [`NamespaceRegistry::intern_in`]).
+    pub fn intern_in(&self, ns_name: &str, sym: &Symbol) -> Option<u64> {
+        self.lock().registry.intern_in(ns_name, sym)
+    }
+
+    /// Intern a var through a handle-pinned id (see
+    /// [`NamespaceRegistry::intern_in_pinned`]).
+    pub fn intern_in_pinned(
+        &self,
+        ns_name: &str,
+        expected: u64,
+        sym: &Symbol,
+    ) -> Option<(u64, u64)> {
+        self.lock()
+            .registry
+            .intern_in_pinned(ns_name, expected, sym)
+    }
+
+    /// The var's state, if interned (an owned copy — mutate through
+    /// [`with_state_mut`](Self::with_state_mut)).
+    #[must_use]
+    pub fn state(&self, id: u64) -> Option<VarState> {
+        self.lock().registry.state(id).cloned()
+    }
+
+    /// `Var.isBound` (minus thread bindings).
+    #[must_use]
+    pub fn has_root(&self, id: u64) -> bool {
+        self.lock().registry.has_root(id)
+    }
+
+    /// `Var.deref` (minus thread bindings). Never throws.
+    #[must_use]
+    pub fn root_or_unbound(&self, id: u64, sym: &Symbol) -> Value {
+        self.lock().registry.root_or_unbound(id, sym)
+    }
+
+    /// Run `f` over a var's state (`None` when uninterned). The
+    /// closure must neither touch the registry nor evaluate (the
+    /// lock is held throughout).
+    pub fn with_state_mut<R>(&self, id: u64, f: impl FnOnce(&mut VarState) -> R) -> Option<R> {
+        let mut inner = self.lock();
+        let state = inner.registry.state_mut(id)?;
+        Some(f(state))
+    }
+
+    /// Run `f` over a live namespace (`None` when missing). Same
+    /// closure discipline as [`with_state_mut`](Self::with_state_mut).
+    pub fn with_ns_mut<R>(&self, name: &str, f: impl FnOnce(&mut Namespace) -> R) -> Option<R> {
+        let mut inner = self.lock();
+        let ns = inner.registry.get_mut(name)?;
+        Some(f(ns))
+    }
+
+    /// Run `f` over a live or removed namespace (`None` when
+    /// neither). Same closure discipline as
+    /// [`with_state_mut`](Self::with_state_mut).
+    pub fn with_live_or_removed_mut<R>(
+        &self,
+        name: &str,
+        f: impl FnOnce(&mut Namespace) -> R,
+    ) -> Option<R> {
+        let mut inner = self.lock();
+        let ns = inner.registry.ns_live_or_removed_mut(name)?;
+        Some(f(ns))
+    }
+
+    /// Run `f` over a handle-pinned namespace (`None` when neither
+    /// generation matches). Same closure discipline as
+    /// [`with_state_mut`](Self::with_state_mut).
+    pub fn with_handle_mut<R>(
+        &self,
+        name: &str,
+        id: u64,
+        f: impl FnOnce(&mut Namespace) -> R,
+    ) -> Option<R> {
+        let mut inner = self.lock();
+        let ns = inner.registry.ns_for_handle_mut(name, id)?;
+        Some(f(ns))
     }
 }
 

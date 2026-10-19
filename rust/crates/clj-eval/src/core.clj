@@ -637,6 +637,82 @@
   [& colls]
   `(lazy-seq (concat ~@colls)))
 
+(defmacro delay
+  "Takes a body of expressions and yields a Delay object that will
+  invoke the body only the first time it is forced (with force or deref/@), and
+  will cache the result and return it on all subsequent force
+  calls. See also - realized?"
+  {:added "1.0"}
+  [& body]
+  (list* 'delay* body))
+
+(defn memoize
+  "Returns a memoized version of a referentially transparent function. The
+  memoized version of the function keeps a cache of the mapping from arguments
+  to results and, when calls with the same arguments are repeated often, has
+  higher performance at the expense of higher memory use."
+  {:added "1.0"}
+  [f]
+  (let [mem (atom {})]
+    (fn [& args]
+      (if-let [e (find @mem args)]
+        (val e)
+        (let [ret (apply f args)]
+          (swap! mem assoc args ret)
+          ret)))))
+
+(defmacro future
+  "Takes a body of expressions and yields a future object that will
+  invoke the body in another thread, and will cache the result and
+  return it on all subsequent calls to deref/@. If the computation has
+  not yet finished, calls to deref/@ will block, unless the variant of
+  deref with timeout is used. See also - realized?."
+  {:added "1.1"}
+  [& body]
+  (list 'future-call (list* 'fn [] body)))
+
+;; --- `pmap`/`pcalls`/`pvalues` (S6D): verbatim ports, except the
+;; lookahead's `(.. Runtime getRuntime availableProcessors)` is a
+;; fixed count (interop is N1; the lookahead only paces future
+;; creation — timing-only — while `future-call` conveys bindings).
+
+(defn pmap
+  "Like map, except f is applied in parallel. Semi-lazy in that the
+  parallel computation stays ahead of the consumption, but doesn't
+  realize the entire result unless required. Only useful for
+  computationally intensive functions where the time of f dominates
+  the coordination overhead."
+  {:added "1.0"}
+  ([f coll]
+   (let [n (+ 2 4)
+         rets (map #(future (f %)) coll)
+         step (fn step [[x & xs :as vs] fs]
+                (lazy-seq
+                 (if-let [s (seq fs)]
+                   (cons (deref x) (step xs (rest s)))
+                   (map deref vs))))]
+     (step rets (drop n rets))))
+  ([f coll & colls]
+   (let [step (fn step [cs]
+                (lazy-seq
+                 (let [ss (map seq cs)]
+                   (when (every? identity ss)
+                     (cons (map first ss) (step (map rest ss)))))))]
+     (pmap #(apply f %) (step (cons coll colls))))))
+
+(defn pcalls
+  "Executes the no-arg fns in parallel, returning a lazy sequence of
+  their values"
+  {:added "1.0"}
+  [& fns] (pmap #(%) fns))
+
+(defmacro pvalues
+  "Returns a lazy sequence of the values of the exprs, which are
+  evaluated in parallel"
+  {:added "1.0"}
+  [& exprs]
+  `(pcalls ~@(map #(list `fn [] %) exprs)))
+
 ;; --- `case`/`condp` (S5D): verbatim ports, except `condp`/`case`
 ;; throw through `throw-illegal-arg!` (no `new` exists), `Util/hash`
 ;; is the private `hash-code` native, `into1`/`reduce1` are
