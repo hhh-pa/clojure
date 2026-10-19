@@ -1,0 +1,8 @@
+3
+ArithmeticException: Divide by zero
+:e? true
+nil
+nil
+1:2: Unmatched delimiter: )
+Syntax error compiling at (user:1:1).
+java.lang.RuntimeException | Unable to resolve symbol: no-such-sym-xyz in this context
