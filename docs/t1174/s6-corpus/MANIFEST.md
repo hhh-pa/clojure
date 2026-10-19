@@ -1,6 +1,8 @@
 # S6 differential corpus MANIFEST
 
-4 files, `NN-topic.clj` + `expected/NN-topic.out` (golden stdout).
+5 files, `NN-topic.clj` + `expected/NN-topic.out` (golden stdout).
+489 entries total (128 + 51 + 105 + 186 + 19); every golden is
+byte-identical across re-runs (stability-verified).
 Truth source: `s6-pins.md` (P1–P6). Probe inputs live in
 `/tmp/s6-probe*.clj` (not committed); corpus files are the durable,
 runnable record. The row tests in
@@ -52,8 +54,10 @@ check: entry tags in each `.clj` match `^:tag` lines in its `.out`).
   `await` on a failing agent can hang the JVM).
 - Every blocked worker is released before the file ends (promise
   delivers inside entries or bare top-level, never as extra tags), and
-  03/04 end with `shutdown-agents`, so the JVM exits promptly (pool
-  threads otherwise linger ~60s and the run must be killed).
+  03/04 end with `shutdown-agents`, so the JVM exits promptly
+  (pool threads are non-daemon and linger forever otherwise —
+  04's final call sits after its DONE trailer because the
+  post-shutdown restart pins resurrect the pools).
 - Never unbounded-`await` an agent fed by nil-executor `send-via`
   (the queue wedges — pinned via `await-for` in `:sendvia-nil-wedges`).
 - Countdown/timeout entries use latch rendezvous (promise gates), never
@@ -355,11 +359,24 @@ shared by two tests). Test fns are in
 - `agent_restart_resumed_after_shutdown` (3): `:rs2-failed`
   `:rs2-restart` `:rs2-state`
 
+### 05-locking-pmap.clj
+
+- `locking_rows` (6): `:locking-val` `:locking-empty`
+  `:locking-multi` `:locking-reentrant` `:locking-nil`
+  `:locking-arity` (via `eval`: the arity error is a macro
+  compile error, uncatchable inline)
+- `locking_mutual_exclusion` (2): `:locking-mutex` (4 futures x
+  50 increments, exact 200) `:locking-unlock-on-throw`
+- `pmap_rows` (7): `:pmap-basic` `:pmap-empty` `:pmap-chunk`
+  `:pmap-multi` `:pmap-multi-short` `:pmap-lazy` `:pmap-str`
+- `pcalls_rows` (2): `:pcalls-basic` `:pcalls-empty`
+- `pvalues_rows` (2): `:pvalues-basic` `:pvalues-sidefx`
+  (`doall` + `sort`: the raw shape `[(2 1) 0]` is a
+  laziness/race artifact — unrealized at counter read, order
+  racy; normalized to `[(1 2) 2]`)
+
 ## Tests without corpus tags
 
-- `locking_rows`, `locking_mutual_exclusion`, `pmap_rows`,
-  `pcalls_rows`, `pvalues_rows`: no locking/pmap file was
-  commissioned (4-file scope: atoms/delay/futures/agents).
 - `evaluator_is_send_sync`: Rust-only (no Clojure surface).
 - Every other test fn in `concurrency.rs` has at least one tag
   above; every tag maps to exactly one test (except
@@ -418,10 +435,9 @@ shared by two tests). Test fns are in
 ## Open items
 
 - A jar rebuild may renumber the `reify__NNNN` counters; regen
-  all four goldens and expect diffs confined to the
+  all five goldens and expect diffs confined to the
   counter-bearing lines.
-- `locking`/`pmap`/`pcalls`/`pvalues` have row tests but no
-  corpus file (out of scope); the locking-nil NPE carries a
-  gensym (`locklocal__...__auto__...`) and can only pin as a
-  shape, never raw.
+- The locking-nil NPE carries a gensym
+  (`locklocal__...__auto__...`); pinned raw on this JDK, shape
+  only across JDKs.
 - `defn/def/let/loop/fn/recur` shapes remain out of scope (s5d).
