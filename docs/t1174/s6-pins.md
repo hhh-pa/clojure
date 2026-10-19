@@ -62,6 +62,8 @@ Probes: `/tmp/s6-probe{,2,3,4}.clj` against the repo-built
 - `send` returns the agent; `shutdown-agents` → `nil`.
 - Validator veto inside a `:continue` action behaves like an
   action error (state kept, error cleared, await nil).
+- `*agent*` is bound in the action fn, the watches, and the
+  error handler; only the validator runs bare.
 - 3-arity `deref` casts to `java.util.concurrent.Future`
   FIRST: atoms AND delays throw `ClassCastException` to
   `Future` (only futures/promises accept timeouts).

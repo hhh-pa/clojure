@@ -432,9 +432,7 @@ fn count_fallback(eval: &mut Evaluator, v: &Value) -> Result<i64, NativeError> {
     if let Some(s) = as_realized(v) {
         return Ok(s.items().len() as i64);
     }
-    if let Some(r) = as_repeat(v)
-        && let Some(n) = r.n()
-    {
+    if let Some(n) = as_repeat(v).and_then(|r| r.n()) {
         return Ok(n.max(0));
     }
     if is_seq_value(v) {

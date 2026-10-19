@@ -1361,13 +1361,14 @@ fn future_cancel_rows() {
     let cancelled = "java.util.concurrent.CancellationException | ";
     assert_eq!(uncaught(&mut eval, "@s6b-fc"), cancelled);
     assert_eq!(uncaught(&mut eval, "(deref s6b-fc 5000 :t)"), cancelled);
-    // The message is empty (like the port's other message-less throws).
+    // There is no message at all (`ex-message` → nil, like the
+    // JVM's no-arg `CancellationException`).
     assert_eq!(
         run_last(
             &mut eval,
             "(try @s6b-fc (catch java.util.concurrent.CancellationException e (ex-message e)))"
         ),
-        "\"\""
+        "nil"
     );
     // `CancellationException` extends `IllegalStateException`.
     assert_eq!(
@@ -1585,13 +1586,14 @@ fn promise_meta_rows() {
         run_last(&mut eval, "(meta (with-meta (future 1) {:a 1}))"),
         "{:a 1}"
     );
-    // `with-meta` shares the cell but not the meta.
+    // `with-meta` shares the cell but not the meta — so the copy
+    // compares unequal (equality conjoins cell and meta).
     assert_eq!(
         run_last(
             &mut eval,
             "(let [p (promise) q (with-meta p {:a 1})] [(meta p) (meta q) (= p q) (do (deliver p :v) @q)])"
         ),
-        "[nil {:a 1} true :v]"
+        "[nil {:a 1} false :v]"
     );
     assert_eq!(
         run_last(&mut eval, "(meta (vary-meta (promise) assoc :a 1))"),
@@ -2323,13 +2325,14 @@ fn agent_star_rows() {
         ),
         "2"
     );
-    // ... but watchers run bare (the conveyor popped, like the JVM).
+    // ... and watches (like the error handler) still observe it
+    // bound — only the validator runs bare (probed oracle truth).
     assert_eq!(
         run_last(
             &mut eval,
             "(let [p (promise) a (agent 0)] (add-watch a :k (fn [k r o n] (deliver p (nil? *agent*)))) (send a inc) @p)"
         ),
-        "true"
+        "false"
     );
 }
 
@@ -2980,4 +2983,150 @@ fn pvalues_rows() {
         ),
         "3"
     );
+}
+
+#[test]
+fn shutdown_agents_from_future_body() {
+    let mut eval = boot();
+    // `shutdown-agents` inside a future body returns at once (the
+    // body's own thread is skipped, like the JVM's join-free
+    // shutdown) instead of self-joining and hanging.
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(deref (future (shutdown-agents) :done) 8000 :t)"
+        ),
+        ":done"
+    );
+}
+
+#[test]
+fn shutdown_agents_from_agent_action() {
+    let mut eval = boot();
+    // `shutdown-agents` inside an action skips the worker's own
+    // handle: the action completes, and `await-for` still
+    // rendezvouses (the dropped barrier ends the wait).
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(do (def s6-sha (agent 0)) (send s6-sha (fn [s] (shutdown-agents) (inc s))) [(await-for 8000 s6-sha) @s6-sha])"
+        ),
+        "[true 1]"
+    );
+}
+
+#[test]
+fn agent_star_bound_over_watches_and_handler() {
+    let mut eval = boot();
+    // Action fns, watches, and the error handler all observe
+    // `*agent*` bound; only the validator runs bare.
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [seen (atom nil) a (agent 0)] (add-watch a :w (fn [k r o n] (reset! seen (nil? *agent*)))) (send a inc) (await a) @seen)"
+        ),
+        "false"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [seen (atom nil) a (agent 0 :error-handler (fn [ag e] (reset! seen (nil? *agent*))))] (send a (fn [_] (throw (ex-info \"kb\" {})))) (await a) @seen)"
+        ),
+        "false"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [seen (atom nil) a (agent 0 :validator (fn [n] (reset! seen (nil? *agent*)) true))] (send a inc) (await a) @seen)"
+        ),
+        "true"
+    );
+}
+
+#[test]
+fn delay_cross_thread_force_shares_outcome() {
+    let mut eval = boot();
+    // Eight gated futures race one slow delay: all share the one
+    // published outcome — no fellow thread reports
+    // `IllegalStateException`.
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(do (def s6-dgate (promise)) (def s6-dd (delay (reduce + 0 (range 100000)))) (def s6-dfs (vec (map (fn [_] (future @s6-dgate (force s6-dd))) (range 8)))) (deliver s6-dgate :go) (let [vs (vec (map deref s6-dfs))] [(count vs) (apply = vs) (first vs)]))"
+        ),
+        "[8 true 4999950000]"
+    );
+}
+
+#[test]
+fn restart_agent_race_serializes() {
+    let mut eval = boot();
+    run(
+        &mut eval,
+        "(do (def s6-ra (agent 0)) (send s6-ra (fn [_] (throw (ex-info \"boom\" {})))) (try (await s6-ra) (catch RuntimeException e :failed)))",
+    );
+    // Two gated futures race `restart-agent` on the failed agent:
+    // exactly one wins (returning its new state) while the other
+    // reports "does not need a restart" — order-insensitive.
+    let out = run_last(
+        &mut eval,
+        "(do (def s6-rgate (promise)) (def s6-r1 (future @s6-rgate (try (restart-agent s6-ra 1) (catch RuntimeException e :restart-err)))) (def s6-r2 (future @s6-rgate (try (restart-agent s6-ra 2) (catch RuntimeException e :restart-err)))) (deliver s6-rgate :go) [(deref s6-r1) (deref s6-r2)])",
+    );
+    let body = out
+        .strip_prefix('[')
+        .and_then(|s| s.strip_suffix(']'))
+        .expect("a two-vector");
+    let mut parts: Vec<&str> = body.split(' ').collect();
+    parts.sort_unstable();
+    assert_eq!(parts.len(), 2);
+    assert_eq!(parts[1], ":restart-err");
+    assert!(
+        parts[0] == "1" || parts[0] == "2",
+        "unexpected winner: {out}"
+    );
+    assert_eq!(run_last(&mut eval, "@s6-ra"), parts[0]);
+}
+
+#[test]
+fn identity_meta_equality_rows() {
+    let mut eval = boot();
+    // Every identity type equals itself ...
+    assert_eq!(run_last(&mut eval, "(let [a (atom 1)] (= a a))"), "true");
+    assert_eq!(run_last(&mut eval, "(let [d (delay 1)] (= d d))"), "true");
+    assert_eq!(run_last(&mut eval, "(let [f (future 1)] (= f f))"), "true");
+    assert_eq!(run_last(&mut eval, "(let [p (promise)] (= p p))"), "true");
+    assert_eq!(run_last(&mut eval, "(let [a (agent 1)] (= a a))"), "true");
+    // ... but a `with-meta` copy shares the cell with different
+    // meta, so it compares unequal (futures/promises carry `IObj`
+    // meta; atoms/agents/delays reject `with-meta` outright).
+    assert_eq!(
+        run_last(&mut eval, "(let [f (future 1)] (= f (with-meta f {:a 1})))"),
+        "false"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(let [p (promise)] (= p (with-meta p {:a 1})))"),
+        "false"
+    );
+    // Atoms/agents hold meta behind the shared cell (`reset-meta!`
+    // mutates it in place), so same-cell handles stay equal ...
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [a (atom 1)] (reset-meta! a {:a 1}) (= a a))"
+        ),
+        "true"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [a (agent 1)] (reset-meta! a {:a 1}) (= a a))"
+        ),
+        "true"
+    );
+    // ... and distinct cells never compare equal.
+    assert_eq!(run_last(&mut eval, "(= (atom 1) (atom 1))"), "false");
+    assert_eq!(run_last(&mut eval, "(= (delay 1) (delay 1))"), "false");
+    assert_eq!(run_last(&mut eval, "(= (future 1) (future 1))"), "false");
+    assert_eq!(run_last(&mut eval, "(= (promise) (promise))"), "false");
+    assert_eq!(run_last(&mut eval, "(= (agent 1) (agent 1))"), "false");
 }

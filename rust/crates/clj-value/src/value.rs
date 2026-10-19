@@ -609,15 +609,15 @@ pub enum Value {
     Throwable(Throwable),
     /// A transient buffer (S5D): identity equality (shared cell).
     Transient(Transient),
-    /// An atom (S6A): identity equality (shared cell).
+    /// An atom (S6A): identity equality (shared cell, equal meta).
     Atom(Atom),
-    /// A delay (S6A): identity equality (shared cell).
+    /// A delay (S6A): identity equality (shared cell — no meta).
     Delay(Delay),
-    /// A future (S6B): identity equality (shared cell).
+    /// A future (S6B): identity equality (shared cell, equal meta).
     Future(Future),
-    /// A promise (S6B): identity equality (shared cell).
+    /// A promise (S6B): identity equality (shared cell, equal meta).
     Promise(Promise),
-    /// An agent (S6C): identity equality (shared cell).
+    /// An agent (S6C): identity equality (shared cell, equal meta).
     Agent(Agent),
     /// A host-defined value behind the [`ExtensionValue`] trait (S4).
     Extension(Arc<dyn ExtensionValue>),
@@ -718,6 +718,13 @@ impl Value {
     }
 }
 
+/// Shared-cell identity plus equal metadata (a `with-meta` copy
+/// shares the cell but compares unequal — split out so
+/// [`Value::eq`] stays within the complexity budget).
+fn cell_meta_eq(same_cell: bool, a: Option<Map>, b: Option<Map>) -> bool {
+    same_cell && a == b
+}
+
 impl PartialEq for Value {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
@@ -782,11 +789,18 @@ impl PartialEq for Value {
             (Value::Unbound(a), Value::Unbound(b)) => a.var_id == b.var_id,
             (Value::Throwable(a), Value::Throwable(b)) => a.id == b.id,
             (Value::Transient(a), Value::Transient(b)) => a.same_cell(b),
-            (Value::Atom(a), Value::Atom(b)) => a.same_cell(b),
+            // Shared cell AND equal meta: a `with-meta` copy shares
+            // the cell but compares unequal (delays carry no meta,
+            // so the cell alone decides there).
+            (Value::Atom(a), Value::Atom(b)) => cell_meta_eq(a.same_cell(b), a.meta(), b.meta()),
             (Value::Delay(a), Value::Delay(b)) => a.same_cell(b),
-            (Value::Future(a), Value::Future(b)) => a.same_cell(b),
-            (Value::Promise(a), Value::Promise(b)) => a.same_cell(b),
-            (Value::Agent(a), Value::Agent(b)) => a.same_cell(b),
+            (Value::Future(a), Value::Future(b)) => {
+                cell_meta_eq(a.same_cell(b), a.meta(), b.meta())
+            }
+            (Value::Promise(a), Value::Promise(b)) => {
+                cell_meta_eq(a.same_cell(b), a.meta(), b.meta())
+            }
+            (Value::Agent(a), Value::Agent(b)) => cell_meta_eq(a.same_cell(b), a.meta(), b.meta()),
             (Value::Extension(a), Value::Extension(b)) => a.dyn_eq(&**b),
             _ => false,
         }

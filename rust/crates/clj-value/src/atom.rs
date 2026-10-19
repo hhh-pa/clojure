@@ -11,8 +11,9 @@
 //!
 //! The cell holds the current value, the `:validator` fn (if any),
 //! the `:meta` map (if any), and the watches map (`{key fn}`, fired
-//! in insertion order). Equality is shared-cell identity (atoms have
-//! no value equality on the JVM); printing follows the transient
+//! in insertion order). Equality is shared-cell identity plus
+//! equal meta (atoms have no value equality on the JVM); printing
+//! follows the transient
 //! `#object[…]` convention (the JVM's `deref-as-map` rendering is
 //! deliberately not reproduced — see the concurrency contract).
 //! Metadata lives behind the lock (it is mutable via
@@ -44,7 +45,8 @@ pub struct AtomState {
 }
 
 /// A first-class atom value: an identity plus the shared cell.
-/// Identity equality (same cell); `counted?` is false, like the JVM.
+/// Identity equality (same cell, equal meta); `counted?` is false,
+/// like the JVM.
 #[derive(Clone, Debug)]
 pub struct Atom {
     id: u64,

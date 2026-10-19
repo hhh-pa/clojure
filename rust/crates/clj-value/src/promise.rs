@@ -17,13 +17,14 @@
 //! are `IDeref`/`IBlockingDeref`/`IPending`/`IFn` (one arg) but NOT
 //! `java.util.concurrent.Future`s: `future?` is false of them and
 //! `future-done?`/`future-cancel` fail the `Future` cast. Equality
-//! is shared-cell identity, and printing follows the transient
+//! is shared-cell identity plus equal meta, and printing follows
+//! the transient
 //! `#object[…]` convention. Metadata is a plain per-handle field
 //! (see [`Future`](crate::Future): `with-meta` shares the latch).
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::{Map, Value};
 
@@ -50,7 +51,7 @@ struct PromiseCell {
 
 /// A first-class promise value: an identity plus the shared latch
 /// cell (and the per-handle metadata). Identity equality (same
-/// cell); `counted?` is false, like the JVM.
+/// cell, equal meta); `counted?` is false, like the JVM.
 #[derive(Clone, Debug)]
 pub struct Promise {
     id: u64,
@@ -128,14 +129,20 @@ impl Promise {
 
     /// Block up to `timeout` for a delivery: `Some` value when it
     /// arrives in time, `None` on timeout (the `deref` timeout
-    /// value).
+    /// value). A spurious wakeup re-waits only the remaining span
+    /// (against one deadline), never a fresh full timeout.
     pub fn get_timeout(&self, timeout: Duration) -> Option<Value> {
+        let deadline = Instant::now() + timeout;
         let mut state = self.lock();
         while let PromiseState::Pending = *state {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return None;
+            }
             let (next, result) = self
                 .cell
                 .ready
-                .wait_timeout(state, timeout)
+                .wait_timeout(state, remaining)
                 .unwrap_or_else(|e| e.into_inner());
             state = next;
             if result.timed_out() && matches!(*state, PromiseState::Pending) {

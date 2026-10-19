@@ -24,9 +24,10 @@
 //! Actions are evaluator callbacks behind [`AgentAction`] (the
 //! forked evaluator lives in `clj-eval`, which this crate cannot
 //! name): the queue moves them by value, and pool workers run them
-//! outside the cell lock. Equality is shared-cell identity (agents
-//! have no value equality on the JVM); printing follows the
-//! transient `#object[…]` convention. Metadata lives behind the
+//! outside the cell lock. Equality is shared-cell identity plus
+//! equal meta (agents have no value equality on the JVM); printing
+//! follows the transient `#object[…]` convention. Metadata lives
+//! behind the
 //! lock (mutable via `alter-meta!`/`reset-meta!`), so
 //! [`Value::meta`](crate::Value::meta) — which borrows — cannot
 //! serve agents; readers use [`Agent::meta`] (a clone) instead.
@@ -152,7 +153,8 @@ pub struct AgentInner {
 }
 
 /// A first-class agent value: an identity plus the shared cell.
-/// Identity equality (same cell); `counted?` is false, like the JVM.
+/// Identity equality (same cell, equal meta); `counted?` is false,
+/// like the JVM.
 #[derive(Clone, Debug)]
 pub struct Agent {
     id: u64,
@@ -277,24 +279,28 @@ impl Agent {
     /// the caller — a veto never reaches here, so the agent stays
     /// failed with its old state and error), clear the failure, and
     /// either drop the held queue (`clear`) or resume it (returning
-    /// the head to execute). Watches never fire for restarts.
-    pub fn restart_publish(&self, new_state: Value, clear: bool) -> Option<QueuedAction> {
+    /// the head to execute). Watches never fire for restarts. The
+    /// failure is re-checked under the lock, so two racing restarts
+    /// serialize: the loser finds the error already cleared and gets
+    /// `None` (the caller reports "does not need a restart").
+    pub fn restart_publish(&self, new_state: Value, clear: bool) -> Option<Option<QueuedAction>> {
         let mut inner = self.lock();
+        inner.error.as_ref()?;
         inner.value = new_state;
         inner.error = None;
         if clear {
             inner.queue.clear();
             inner.running = false;
-            return None;
+            return Some(None);
         }
         match inner.queue.pop_front() {
             Some(head) => {
                 inner.running = true;
-                Some(head)
+                Some(Some(head))
             }
             None => {
                 inner.running = false;
-                None
+                Some(None)
             }
         }
     }

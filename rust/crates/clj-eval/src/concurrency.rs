@@ -123,18 +123,17 @@ fn atom_options(args: &[Value]) -> Result<Map, NativeError> {
 /// value, so a vetoing ctor throws). Falsy options never install.
 fn install_atom_options(eval: &mut Evaluator, atom: &Atom, opts: &Map) -> Result<(), NativeError> {
     let meta_key = Value::Keyword(Keyword::new(None, "meta"));
-    if let Some(m) = opts.get(&meta_key)
-        && m.is_truthy()
-    {
+    if let Some(m) = opts.get(&meta_key).filter(|m| m.is_truthy()) {
         match m {
             Value::Map(mm) => atom.lock().meta = Some(mm.clone()),
             _ => return Err(cce_err(m, "clojure.lang.IPersistentMap")),
         }
     }
     let validator_key = Value::Keyword(Keyword::new(None, "validator"));
-    if let Some(f) = opts.get(&validator_key)
-        && f.is_truthy()
-    {
+    if let Some(f) = opts.get(&validator_key) {
+        if !f.is_truthy() {
+            return Ok(());
+        }
         if !is_ifn(f) {
             return Err(cce_err(f, "clojure.lang.IFn"));
         }
@@ -408,18 +407,32 @@ fn native_remove_watch(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, N
 }
 
 /// A taken delay: either the cached outcome or the fn to run (the
-/// cell now reads `Forcing`, so a re-entrant force errors instead of
-/// recursing).
+/// cell now reads `Forcing` owned by this thread, so a re-entrant
+/// force errors instead of recursing while fellow threads wait).
 enum DelayTake {
     Done(Result<Value, Signal>),
     Thunk(Value),
 }
 
 /// Take a delay's cached outcome or its pending fn (leaving
-/// `Forcing` behind; cached states restore themselves).
+/// `Forcing` behind; cached states restore themselves). A force
+/// owned by a fellow thread blocks on the cell condvar until it
+/// settles, then shares the outcome (like the JVM's synchronized
+/// force); only same-thread re-entry errors.
 fn take_delay_thunk(eval: &mut Evaluator, delay: &Delay) -> DelayTake {
     let mut state = delay.lock();
-    match std::mem::replace(&mut *state, DelayState::Forcing) {
+    loop {
+        let fellow_forcing = match &*state {
+            DelayState::Forcing(owner) => *owner != thread::current().id(),
+            _ => false,
+        };
+        if !fellow_forcing {
+            break;
+        }
+        state = delay.wait_for_settle(state);
+    }
+    let me = thread::current().id();
+    match std::mem::replace(&mut *state, DelayState::Forcing(me)) {
         DelayState::Realized(v) => {
             *state = DelayState::Realized(v.clone());
             DelayTake::Done(Ok(v))
@@ -428,8 +441,9 @@ fn take_delay_thunk(eval: &mut Evaluator, delay: &Delay) -> DelayTake {
             *state = DelayState::Failed(t.clone());
             DelayTake::Done(Err(Signal::Throw(t)))
         }
-        DelayState::Forcing => {
-            *state = DelayState::Forcing;
+        DelayState::Forcing(owner) => {
+            debug_assert_eq!(owner, me, "a fellow force waits above");
+            *state = DelayState::Forcing(owner);
             DelayTake::Done(Err(eval.throw(NativeError::new(
                 ThrowClass::IllegalStateException,
                 "Delay is already being forced".to_owned(),
@@ -446,16 +460,19 @@ fn finish_delay_force(eval: &mut Evaluator, delay: &Delay, thunk: Value) -> Resu
     match eval.call(&thunk, &[]) {
         Ok(v) => {
             *delay.lock() = DelayState::Realized(v.clone());
+            delay.notify_settled();
             Ok(v)
         }
         Err(Signal::Throw(t)) => {
             *delay.lock() = DelayState::Failed(t.clone());
+            delay.notify_settled();
             Err(Signal::Throw(t))
         }
         Err(other) => {
             // A `recur` escaped its frame (the analyzer rejects
             // those — restore, so a retry re-runs).
             *delay.lock() = DelayState::Pending(thunk);
+            delay.notify_settled();
             Err(other)
         }
     }
@@ -533,7 +550,8 @@ fn throwable_string(t: &Throwable) -> String {
 }
 
 /// A cancelled future's `deref` failure: `CancellationException`
-/// with an empty message (any arity, even with a timeout value).
+/// with no message (`ex-message` → nil, like the JVM's no-arg
+/// throw — any arity, even with a timeout value).
 fn cancelled() -> NativeError {
     NativeError::new(ThrowClass::CancellationException, String::new())
 }
@@ -774,9 +792,11 @@ impl AgentSystem {
     /// Stop the pools and join every pool worker and send-off thread
     /// (in-flight heads finish; queued-but-unstarted heads drop like
     /// the JVM's rejected `execute`; later sends enqueue-then-drop).
-    /// BLOCKING (DIVERGENCE: the JVM's `shutdown` returns at once
-    /// and drains async; the port joins so tests observe a settled
-    /// system — timing-only, unpinnable either way).
+    /// BLOCKING except from inside a future body or agent action,
+    /// where the current thread's own handle is skipped (DIVERGENCE:
+    /// the JVM's `shutdown` returns at once and drains async; the
+    /// port joins so tests observe a settled system — pinned by the
+    /// shutdown-from-future/action regression tests).
     pub(crate) fn shutdown(&self) {
         let pools = {
             let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
@@ -893,12 +913,23 @@ impl AgentPools {
                 std::mem::take(&mut inner.sendoff_handles),
             )
         };
-        for handle in send_handles {
-            let _ = handle.join();
+        join_all(send_handles);
+        join_all(sendoff_handles);
+    }
+}
+
+/// Join every handle except the current thread's own: shutdown
+/// from inside a future body or agent action must return at once
+/// (like the JVM's, which never joins its workers) instead of
+/// joining the current thread and hanging. A skipped handle
+/// detaches — its thread runs on and publishes normally.
+pub(crate) fn join_all(handles: Vec<JoinHandle<()>>) {
+    let me = thread::current().id();
+    for handle in handles {
+        if handle.thread().id() == me {
+            continue;
         }
-        for handle in sendoff_handles {
-            let _ = handle.join();
-        }
+        let _ = handle.join();
     }
 }
 
@@ -1095,9 +1126,10 @@ fn fail_head(
 
 /// One evaluated agent action: the fn plus its extra args over a
 /// forked evaluator (bindings conveyed at send time, `*agent*` bound
-/// around the fn call only — validators, watches, and the handler run
-/// bare, like the JVM's popped conveyor). The validator is captured
-/// at send (no setter exists, so it never changes).
+/// around the fn call, the watches, and the error handler — only
+/// the validator runs bare, like the JVM's popped conveyor). The
+/// validator is captured at send (no setter exists, so it never
+/// changes).
 struct EvalAction {
     child: Evaluator,
     agent: Value,
@@ -1149,21 +1181,37 @@ impl AgentAction for EvalAction {
         new: &Value,
         watches: &Map,
     ) -> Result<(), Throwable> {
+        // `*agent*` stays bound over the watches (like the fn call —
+        // the JVM's conveyor is still installed there).
+        let bound = bind_agent(&mut self.child, agent);
+        let mut out = Ok(());
         for (k, f) in watches.iter() {
             if matches!(f, Value::Nil) {
                 continue;
             }
             let args = [k.clone(), agent.clone(), old.clone(), new.clone()];
-            child_call(&mut self.child, f, &args)?;
+            if let Err(error) = child_call(&mut self.child, f, &args) {
+                out = Err(error);
+                break;
+            }
         }
-        Ok(())
+        if bound {
+            self.child.pop_frame();
+        }
+        out
     }
 
     fn handle_error(&mut self, handler: &Value, agent: &Value, error: &Throwable) {
+        // `*agent*` stays bound over the handler too (only the
+        // validator runs bare).
+        let bound = bind_agent(&mut self.child, agent);
         let args = [agent.clone(), Value::Throwable(error.clone())];
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             self.child.call(handler, &args)
         }));
+        if bound {
+            self.child.pop_frame();
+        }
     }
 }
 
@@ -1575,19 +1623,22 @@ fn native_restart_agent(eval: &mut Evaluator, args: &[Value]) -> Result<Value, N
     // agent with a bad state still reports the restart error).
     let opts = atom_options(&args[2..])?;
     if agent.error().is_none() {
-        return Err(NativeError::new(
-            ThrowClass::RuntimeException,
-            "Agent does not need a restart".to_owned(),
-        ));
+        return Err(restart_not_needed());
     }
     let clear_key = Value::Keyword(Keyword::new(None, "clear-actions"));
     let clear = opts.get(&clear_key).is_some_and(|v| v.is_truthy());
     // A veto leaves the agent failed with its old state and error
-    // (the publish below never runs); watchers never fire.
+    // (the publish below never runs); watchers never fire. The
+    // validator runs OUTSIDE the publish lock (which is
+    // non-reentrant) — a racing restart that clears the error first
+    // makes this one lose under the lock instead.
     if let Some(validator) = agent.lock().validator.clone() {
         validate_new(eval, &validator, &args[1])?;
     }
-    if let Some(head) = agent.restart_publish(args[1].clone(), clear) {
+    let head = agent
+        .restart_publish(args[1].clone(), clear)
+        .ok_or_else(restart_not_needed)?;
+    if let Some(head) = head {
         match eval.agent_pools_for_send()? {
             Some(pools) => pools_dispatch(&pools, &agent, head),
             // Shut down: the resumed head drops (the JVM's rejected
@@ -1596,6 +1647,15 @@ fn native_restart_agent(eval: &mut Evaluator, args: &[Value]) -> Result<Value, N
         }
     }
     Ok(args[1].clone())
+}
+
+/// A restart on an unfailed agent (the pre-check and the
+/// under-lock re-check in [`Agent::restart_publish`] share this).
+fn restart_not_needed() -> NativeError {
+    NativeError::new(
+        ThrowClass::RuntimeException,
+        "Agent does not need a restart".to_owned(),
+    )
 }
 
 fn native_shutdown_agents(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {

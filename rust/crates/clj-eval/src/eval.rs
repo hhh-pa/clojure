@@ -199,7 +199,9 @@ impl Evaluator {
 
     /// Stop the agent pools (running and queued actions complete; new
     /// sends fail) and join the pool workers, the send-off threads,
-    /// and every spawned future thread.
+    /// and every spawned future thread — except the current thread's
+    /// own handle, so shutdown from inside a future body or agent
+    /// action returns at once instead of hanging on a self-join.
     pub(crate) fn shutdown_agents(&self) {
         self.agent_system.shutdown();
         let handles = std::mem::take(
@@ -208,9 +210,7 @@ impl Evaluator {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner()),
         );
-        for handle in handles {
-            let _ = handle.join();
-        }
+        crate::concurrency::join_all(handles);
     }
 
     /// The innermost call form's span while a native runs (set by
@@ -439,10 +439,18 @@ impl Evaluator {
     /// Stamp a runtime failure with an identity and throw it.
     pub(crate) fn throw(&mut self, err: NativeError) -> Signal {
         let inner = err.into_inner();
+        // A missing message stays missing (the JVM's no-arg
+        // `CancellationException` reports a nil message, and
+        // `NativeError` encodes that as the empty string).
+        let message = if inner.message.is_empty() {
+            None
+        } else {
+            Some(Arc::from(inner.message.as_str()))
+        };
         Signal::Throw(Throwable {
             id: self.next_id(),
             class: inner.class,
-            message: Some(Arc::from(inner.message.as_str())),
+            message,
             data: inner.data.map(Box::new),
             cause: inner.cause.map(Box::new),
         })
