@@ -59,9 +59,33 @@ fn uncaught(eval: &mut Evaluator, src: &str) -> String {
 }
 
 fn unquote(s: &str) -> String {
-    // `pr` of a string: strip the surrounding quotes.
+    // `pr` of a string: strip the surrounding quotes and unescape.
+    // Single pass mirroring print.rs string escaping (\n \t \r \" \\ \f \b);
+    // chained replaces would mis-handle `\\` before the other escapes.
     let inner = &s[1..s.len() - 1];
-    inner.replace("\\n", "\n").replace("\\\"", "\"")
+    let mut out = String::with_capacity(inner.len());
+    let mut chars = inner.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('n') => out.push('\n'),
+            Some('t') => out.push('\t'),
+            Some('r') => out.push('\r'),
+            Some('"') => out.push('"'),
+            Some('\\') => out.push('\\'),
+            Some('f') => out.push('\u{c}'),
+            Some('b') => out.push('\u{8}'),
+            Some(other) => {
+                out.push('\\');
+                out.push(other);
+            }
+            None => out.push('\\'),
+        }
+    }
+    out
 }
 
 fn fmt(eval: &mut Evaluator, src: &str) -> String {
@@ -1128,6 +1152,9 @@ fn format_n_and_pct_errors() {
     // JVM Formatter %n emits the platform line separator (CRLF on Windows).
     let nl = if cfg!(windows) { "\r\n" } else { "\n" };
     assert_eq!(fmt(&mut eval, "(format \"%n\")"), nl);
+    // Platform-independent pins for the unquote escapes %n needs on Windows.
+    assert_eq!(fmt(&mut eval, "(format \"%s\" \"\\r\")"), "\r");
+    assert_eq!(fmt(&mut eval, "(format \"%s\" \"\\\\\")"), "\\");
     let rows = [
         (
             "(format \"%5n\")",
