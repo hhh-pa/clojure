@@ -213,21 +213,26 @@ fn run_missing_file_is_io_error() {
 #[cfg(unix)]
 fn run_unreadable_file_is_io_error() {
     // Read-time IO failures (chmod-000) exit 3 per C8 — not 1.
-    // Unix-only: Windows ACLs have no chmod-000 equivalent, so the
-    // probe file would stay readable and the run would succeed.
+    // Unix-only: Windows ACLs have no chmod-000 equivalent. The
+    // test self-calibrates: when the file stays readable after
+    // chmod (running as root, e.g. the quality-gates container),
+    // there is no IO failure to assert and the test passes
+    // vacuously.
+    use std::os::unix::fs::PermissionsExt;
     let path = std::env::temp_dir().join(format!("clojure-rs-noperm-{}.clj", std::process::id()));
     std::fs::write(&path, "(println :nope)\n").expect("write probe file");
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000))
-            .expect("chmod probe file");
-    }
-    let out = run(["run", path.to_string_lossy().as_ref()]);
-    {
-        use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000))
+        .expect("chmod probe file");
+    if std::fs::read(&path).is_ok() {
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
             .expect("restore probe file");
+        std::fs::remove_file(&path).expect("remove probe file");
+        eprintln!("skipping: probe file readable despite chmod-000 (root?)");
+        return;
     }
+    let out = run(["run", path.to_string_lossy().as_ref()]);
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
+        .expect("restore probe file");
     std::fs::remove_file(&path).expect("remove probe file");
     assert_eq!(out.status.code(), Some(3));
     assert!(
