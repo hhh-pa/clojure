@@ -129,6 +129,11 @@ fn cmd_eval(form: &str, edn: bool) -> ExitCode {
                 return ExitCode::from(1);
             }
         };
+        if matches!(value, Value::Nil) {
+            // JVM `-e` suppresses nil results (pins P5); the REPL
+            // still prints them (pins P1).
+            continue;
+        }
         match print_value(&mut eval, &value) {
             Ok(text) => println!("{text}"),
             Err(diagnostic) => {

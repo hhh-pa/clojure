@@ -152,6 +152,17 @@ fn eval_multi_form_prints_each_value() {
 }
 
 #[test]
+fn eval_suppresses_nil_results() {
+    // JVM `-e` prints nothing for nil (pins P5).
+    let out = run(["eval", "nil"]);
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(stdout(&out), "");
+    let out = run(["eval", "1 nil 2"]);
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(stdout(&out), "1\n2\n");
+}
+
+#[test]
 fn eval_edn_restricts_reader() {
     // `--edn` rejects the fn-literal dispatch (non-EDN syntax)...
     let out = run(["eval", "--edn", "(map #(inc %) [1])"]);

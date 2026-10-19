@@ -48,6 +48,9 @@ truth first; port deviations are explicit and spec-justified.
   `file:line` (no col); compile syntax errors carry
   `file:line:col` (`Syntax error compiling at (REPL:1:1)`).
 - `-e '(+ 1 2)'` prints `3`, exit 0.
+- `-e` prints every form's value EXCEPT nil, which is
+  suppressed (`-e 'nil'` silent, `-e '1 nil 2'` → `1\n2`).
+  The REPL still prints nil results (P1).
 - `-e '1 2'` prints EVERY form (`1\n2`), exit 0 (multi-form
   `-e` is per-form, verified by execution).
 - `-e ''` prints nothing, exit 0 (blank input is silent,
