@@ -2116,12 +2116,15 @@ fn agent_await_rows() {
 #[test]
 fn agent_nested_rows() {
     let mut eval = boot();
-    // A nested send runs after the enclosing action (the promise
-    // rendezvous proves the nest queued before the barrier did).
+    // A nested send runs after the enclosing action. The inner action
+    // delivers `p2` after logging, so `@p2` proves `:inner` is in the
+    // log no matter when the await barrier lands (a barrier sent on
+    // `@p` may run before the outbox releases — on either runtime —
+    // so awaiting alone cannot prove the nest ran).
     assert_eq!(
         run_last(
             &mut eval,
-            "(let [log (atom []) p (promise) a (agent 0)] (send a (fn [s] (send a (fn [s2] (swap! log conj :inner) s2)) (swap! log conj :outer) (deliver p :sent) s)) @p (await a) @log)"
+            "(let [log (atom []) p (promise) p2 (promise) a (agent 0)] (send a (fn [s] (send a (fn [s2] (swap! log conj :inner) (deliver p2 :d) s2)) (swap! log conj :outer) (deliver p :sent) s)) @p @p2 (await a) @log)"
         ),
         "[:outer :inner]"
     );
@@ -2133,11 +2136,12 @@ fn agent_nested_rows() {
         ),
         "[:out :in2 :in3]"
     );
-    // Several nests from one action run in send order.
+    // Several nests from one action run in send order (the last nest
+    // delivers `p2` after logging, for the same barrier race as above).
     assert_eq!(
         run_last(
             &mut eval,
-            "(let [log (atom []) p (promise) a (agent 0)] (send a (fn [s] (send a (fn [x] (swap! log conj :n1) x)) (send a (fn [x] (swap! log conj :n2) x)) (swap! log conj :o) (deliver p :d) s)) @p (await a) @log)"
+            "(let [log (atom []) p (promise) p2 (promise) a (agent 0)] (send a (fn [s] (send a (fn [x] (swap! log conj :n1) x)) (send a (fn [x] (swap! log conj :n2) (deliver p2 :d) x)) (swap! log conj :o) (deliver p :d) s)) @p @p2 (await a) @log)"
         ),
         "[:o :n1 :n2]"
     );

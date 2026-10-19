@@ -124,9 +124,9 @@
 (p ":await-second-failed" #(let [a (agent 0)] (await a (failed))))
 
 ;; --- nested sends (agent_nested_rows, agent_nested_discarded_on_failure) ---
-(p ":nest-single" #(let [log (atom []) p (promise) a (agent 0)] (send a (fn [s] (send a (fn [s2] (swap! log conj :inner) s2)) (swap! log conj :outer) (deliver p :sent) s)) @p (await a) @log))
+(p ":nest-single" #(let [log (atom []) p (promise) p2 (promise) a (agent 0)] (send a (fn [s] (send a (fn [s2] (swap! log conj :inner) (deliver p2 :d) s2)) (swap! log conj :outer) (deliver p :sent) s)) @p @p2 (await a) @log))
 (p ":nest-double" #(let [log (atom []) p (promise) a (agent 0)] (send a (fn [s] (send a (fn [s2] (send a (fn [s3] (swap! log conj :in3) (deliver p :d) s3)) (swap! log conj :in2) s2)) (swap! log conj :out) s)) @p (await a) @log))
-(p ":nest-two" #(let [log (atom []) p (promise) a (agent 0)] (send a (fn [s] (send a (fn [x] (swap! log conj :n1) x)) (send a (fn [x] (swap! log conj :n2) x)) (swap! log conj :o) (deliver p :d) s)) @p (await a) @log))
+(p ":nest-two" #(let [log (atom []) p (promise) p2 (promise) a (agent 0)] (send a (fn [s] (send a (fn [x] (swap! log conj :n1) x)) (send a (fn [x] (swap! log conj :n2) (deliver p2 :d) x)) (swap! log conj :o) (deliver p :d) s)) @p @p2 (await a) @log))
 (p ":nest-dropped-fail" #(let [log (atom []) a (agent 0)] (send a (fn [s] (send a (fn [s2] (swap! log conj :nested) s2)) (throw (ex-info "boom" {})))) (latched a) (try (await a) (catch RuntimeException _ nil)) (restart-agent a 0) (await a) [@a @log]))
 (p ":nest-dropped-continue" #(let [log (atom []) a (agent 0 :error-mode :continue)] (send a (fn [s] (send a (fn [s2] (swap! log conj :nested) s2)) (throw (ex-info "boom" {})))) (await a) [@a @log]))
 
