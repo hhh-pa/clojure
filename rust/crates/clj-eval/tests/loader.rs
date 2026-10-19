@@ -290,6 +290,55 @@ fn require_stale_mark() {
 }
 
 #[test]
+fn reload_all_marks_nested_loads() {
+    let fx = Fixture::new("reloadall");
+    fx.write(
+        "ra_inner.clj",
+        "(clojure.core/in-ns 'ra_inner)\n(def iv 1)\n",
+    );
+    fx.write(
+        "ra_outer.clj",
+        "(clojure.core/in-ns 'ra_outer)\n(clojure.core/require 'ra_inner)\n(def ov 2)\n",
+    );
+    let mut eval = boot();
+    assert_eq!(
+        run_last(&mut eval, &fx.within("(require 'ra_outer :reload-all)")),
+        "nil"
+    );
+    // Nested marks accumulate through the `load-all` frame (a
+    // root-writing mark would leave this empty).
+    assert_eq!(run_last(&mut eval, "(loaded-libs)"), "#{ra_inner ra_outer}");
+    assert_eq!(run_last(&mut eval, "ra_inner/iv"), "1");
+    assert_eq!(run_last(&mut eval, "ra_outer/ov"), "2");
+}
+
+#[test]
+fn require_as_under_ns_star_binding() {
+    let fx = Fixture::new("bindas");
+    fx.write(
+        "bindlib.clj",
+        "(clojure.core/in-ns 'bindlib)\n(def answer 7)\n",
+    );
+    let mut eval = boot();
+    run(&mut eval, "(create-ns 'bw)");
+    // The `:as` alias lands in the BOUND namespace (the
+    // `load-lib` finish reads the synced `*ns*`).
+    assert_eq!(
+        run_last(
+            &mut eval,
+            &fx.within("(binding [*ns* (the-ns 'bw)] (require '[bindlib :as b]))")
+        ),
+        "nil"
+    );
+    assert!(run_last(&mut eval, "(ns-aliases 'bw)").contains("b #object[clojure.lang.Namespace"));
+    assert_eq!(run_last(&mut eval, "(ns-resolve 'user 'b/answer)"), "nil");
+    assert_eq!(
+        run_last(&mut eval, "(ns-resolve 'bw 'b/answer)"),
+        "#'bindlib/answer"
+    );
+}
+
+#[test]
 fn require_reload() {
     let fx = Fixture::new("reload");
     fx.write("cnt.clj", "(clojure.core/in-ns 'cnt)\n(def n 1)\n");

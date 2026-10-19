@@ -219,7 +219,12 @@ pub(crate) fn meta_of(eval: &Evaluator, v: &Value) -> Option<Map> {
                 return n.meta.clone();
             }
             if let Some(ns) = as_ns(v) {
-                return eval.registry.ns_live_or_removed(&ns.name)?.meta().cloned();
+                // Handles pin their generation (stale ones read the tombstone).
+                return eval
+                    .registry
+                    .ns_for_handle(&ns.name, ns.id)?
+                    .meta()
+                    .cloned();
             }
             None
         }
@@ -232,9 +237,32 @@ fn native_meta(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErro
     Ok(meta_of(eval, &args[0]).map_or(Value::Nil, Value::Map))
 }
 
+/// The `with-meta` receiver check, before meta validation (a
+/// both-bad call reports `IObj`; a nil object with bad meta is
+/// still the `withMeta` NPE).
+fn check_iobj(obj: &Value) -> Result<(), NativeError> {
+    match obj {
+        Value::Nil => Err(npe(NIL_WITHMETA_NPE)),
+        Value::Symbol(_) | Value::List(_) | Value::Vector(_) | Value::Map(_) | Value::Set(_) => {
+            Ok(())
+        }
+        Value::Extension(e) => {
+            let is_fn = e.as_any().downcast_ref::<Closure>().is_some()
+                || e.as_any().downcast_ref::<NativeFn>().is_some();
+            if is_fn {
+                Ok(())
+            } else {
+                Err(cast_err(obj, IOBJ_CLASS))
+            }
+        }
+        _ => Err(cast_err(obj, IOBJ_CLASS)),
+    }
+}
+
 /// Attach `meta` (a map or nil) to an `IObj` (the object checks
 /// before the meta arg, JVM receiver first).
 fn with_meta_val(obj: &Value, meta: &Value) -> Result<Value, NativeError> {
+    check_iobj(obj)?;
     let meta = match meta {
         Value::Nil => None,
         Value::Map(m) => Some(m.clone()),
@@ -283,14 +311,14 @@ fn native_vary_meta(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nativ
 /// exist yet).
 enum RefTarget {
     Var(u64),
-    Ns(String),
+    Ns(String, u64),
 }
 
 fn as_ref_target(v: &Value) -> Result<RefTarget, NativeError> {
     match v {
         Value::Var(var) => Ok(RefTarget::Var(var.id)),
         Value::Extension(_) => match as_ns(v) {
-            Some(ns) => Ok(RefTarget::Ns(ns.name.to_string())),
+            Some(ns) => Ok(RefTarget::Ns(ns.name.to_string(), ns.id)),
             None => Err(cast_err(v, IREF_CLASS)),
         },
         _ => Err(cast_err(v, IREF_CLASS)),
@@ -304,8 +332,9 @@ fn install_ref_meta(eval: &mut Evaluator, target: &RefTarget, meta: Option<Map>)
                 st.meta = meta;
             }
         }
-        RefTarget::Ns(name) => {
-            if let Some(ns) = eval.registry.ns_live_or_removed_mut(name) {
+        RefTarget::Ns(name, id) => {
+            // Handles pin their generation (stale ones write the tombstone).
+            if let Some(ns) = eval.registry.ns_for_handle_mut(name, *id) {
                 ns.set_meta(meta);
             }
         }
@@ -315,7 +344,7 @@ fn install_ref_meta(eval: &mut Evaluator, target: &RefTarget, meta: Option<Map>)
 fn ref_meta(eval: &Evaluator, target: &RefTarget) -> Option<Map> {
     match target {
         RefTarget::Var(id) => eval.registry.state(*id)?.meta.clone(),
-        RefTarget::Ns(name) => eval.registry.ns_live_or_removed(name)?.meta().cloned(),
+        RefTarget::Ns(name, id) => eval.registry.ns_for_handle(name, *id)?.meta().cloned(),
     }
 }
 

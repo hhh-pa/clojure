@@ -51,8 +51,8 @@
 ;;   bound? (.hasRoot is inexpressible; extra/missing exprs are an
 ;;   accepted superset of the JVM's strict [name expr]).
 ;; - defn lands :arglists (with sigs-style prepost meta) via
-;;   alter-meta!/assoc after a plain def. :pre/:post conditions are
-;;   NOT wired (known gap: the map stays a stray body form).
+;;   alter-meta!/assoc after a plain def; each clause's prepost
+;;   map rides the emitted fn unchanged (fn enforces :pre/:post).
 ;; - case prep is a verbatim port minus the shift-mask search (no bit
 ;;   ops; :sparse is always correct), sorted-map (plain {}, order is
 ;;   eval-irrelevant), int/Integer casts (identity/literals), and
@@ -88,7 +88,7 @@
   ([x & next]
    (let [g (gensym "and")]
      (list 'let* (vector g x)
-           (list 'if g (apply list 'and next) g)))))
+           (list 'if g (apply list 'clojure.core/and next) g)))))
 
 (defmacro or
   "Evaluates exprs one at a time, from left to right. If a form
@@ -101,7 +101,7 @@
   ([x & next]
    (let [g (gensym "or")]
      (list 'let* (vector g x)
-           (list 'if g g (apply list 'or next))))))
+           (list 'if g g (apply list 'clojure.core/or next))))))
 
 (defmacro when
   "Evaluates test. If logical true, evaluates body in an implicit do."
@@ -119,7 +119,7 @@
   "Evaluates test. If logical false, evaluates and returns then expr,
   otherwise else expr, if supplied, else nil."
   {:added "1.0"}
-  ([test then] (list 'if-not test then nil))
+  ([test then] (list 'clojure.core/if-not test then nil))
   ([test then else] (list 'if test else then)))
 
 (defmacro if-let
@@ -129,7 +129,7 @@
   test, if not, yields else"
   {:added "1.0"}
   ([bindings then]
-   (list 'if-let bindings then nil))
+   (list 'clojure.core/if-let bindings then nil))
   ([bindings then else & oldform]
    (assert-args
      (vector? bindings) "a vector for its binding"
@@ -161,7 +161,7 @@
    value of test, if not, yields else"
   {:added "1.6"}
   ([bindings then]
-   (list 'if-some bindings then nil))
+   (list 'clojure.core/if-some bindings then nil))
   ([bindings then else & oldform]
    (assert-args
      (vector? bindings) "a vector for its binding"

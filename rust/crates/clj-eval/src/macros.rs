@@ -362,7 +362,10 @@ fn native_gensym(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeEr
     check_arity("clojure.core/gensym", args, &[0, 1])?;
     let prefix = args.first().map_or_else(|| "G__".to_owned(), str_of);
     let n = eval.next_gensym();
-    Ok(Value::Symbol(Symbol::new(None, &format!("{prefix}{n}"))))
+    // `Symbol.intern` semantics: a `/` in the prefix splits off a
+    // namespace (JVM-oracle-verified: `(gensym "a/")` namespaces
+    // `"a"`).
+    Ok(Value::Symbol(Symbol::intern(&format!("{prefix}{n}"))))
 }
 
 // ---------------------------------------------------------------------------

@@ -675,3 +675,25 @@ fn alter_and_reset_meta() {
         "java.lang.ClassCastException | Cannot cast clojure.lang.PersistentVector to clojure.lang.IReference"
     );
 }
+
+#[test]
+fn with_meta_receiver_first() {
+    // The object checks before the meta arg: a both-bad call
+    // reports `IObj`, and a nil object with bad meta is still the
+    // `withMeta` NPE.
+    let mut eval = boot();
+    assert_eq!(
+        uncaught(&mut eval, "(with-meta 1 5)"),
+        "java.lang.ClassCastException | Cannot cast java.lang.Long to clojure.lang.IObj"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(with-meta nil 5)"),
+        "java.lang.NullPointerException | Cannot invoke \"clojure.lang.IObj.withMeta(clojure.lang.IPersistentMap)\" because \"x\" is null"
+    );
+    // `vary-meta` shares the `with-meta` path, so the both-bad
+    // order holds there too.
+    assert_eq!(
+        uncaught(&mut eval, "(vary-meta 1 (fn [m] 5))"),
+        "java.lang.ClassCastException | Cannot cast java.lang.Long to clojure.lang.IObj"
+    );
+}

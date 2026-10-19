@@ -544,6 +544,15 @@ fn gensym_test() {
 }
 
 #[test]
+fn gensym_splits_namespace() {
+    // `Symbol.intern` semantics: the prefix splits on the first `/`
+    // (JVM-oracle-verified).
+    let mut eval = boot();
+    assert_eq!(run_last(&mut eval, "(namespace (gensym \"a/\"))"), "\"a\"");
+    assert_eq!(run_last(&mut eval, "(namespace (gensym))"), "nil");
+}
+
+#[test]
 fn declare_test() {
     let mut eval = boot();
     // Returns the last var; roots survive, `:declared` lands.

@@ -375,15 +375,40 @@ impl NamespaceRegistry {
         self.namespaces.get(name).or_else(|| self.removed.get(name))
     }
 
-    /// A live or removed namespace by name, mutably (`intern` and
-    /// `ns-unmap` through a stale handle mutate the tombstone,
-    /// like the JVM's detached objects).
+    /// A live or removed namespace by name, mutably (name-based
+    /// callers only; handle-pinned writers use
+    /// [`NamespaceRegistry::ns_for_handle_mut`]).
     pub fn ns_live_or_removed_mut(&mut self, name: &str) -> Option<&mut Namespace> {
         if self.namespaces.contains_key(name) {
             self.namespaces.get_mut(name)
         } else {
             self.removed.get_mut(name)
         }
+    }
+
+    /// A namespace through a handle-pinned id: the live namespace
+    /// when its generation matches, else the tombstone when it
+    /// matches (stale handles read frozen mappings after
+    /// remove+recreate, like the JVM's detached objects). `None`
+    /// when neither generation matches (only the latest removal
+    /// is kept, so older handles dangle).
+    #[must_use]
+    pub fn ns_for_handle(&self, name: &str, id: u64) -> Option<&Namespace> {
+        // (Match guards, not let-chains: MSRV 1.85.)
+        match self.namespaces.get(name) {
+            Some(ns) if ns.id() == id => return Some(ns),
+            _ => {}
+        }
+        self.removed.get(name).filter(|ns| ns.id() == id)
+    }
+
+    /// [`NamespaceRegistry::ns_for_handle`], mutably.
+    pub fn ns_for_handle_mut(&mut self, name: &str, id: u64) -> Option<&mut Namespace> {
+        match self.namespaces.get_mut(name) {
+            Some(ns) if ns.id() == id => return Some(ns),
+            _ => {}
+        }
+        self.removed.get_mut(name).filter(|ns| ns.id() == id)
     }
 
     /// Drop a namespace (aliases pointing at it dangle, like the
@@ -514,8 +539,8 @@ impl NamespaceRegistry {
     }
 
     /// Intern a var into a live or removed namespace (never
-    /// creates: callers resolve through `the-ns` first, and stale
-    /// handles land in the tombstone). Returns `None` only when
+    /// creates: callers resolve through `the-ns` first; live wins
+    /// over the tombstone by name). Returns `None` only when
     /// the namespace is neither live nor removed.
     pub fn intern_in(&mut self, ns_name: &str, sym: &Symbol) -> Option<u64> {
         let Self {
@@ -531,6 +556,33 @@ impl NamespaceRegistry {
         let id = ns.intern(sym, next_id);
         by_id.insert(id, ns_name.to_owned());
         Some(id)
+    }
+
+    /// Intern a var through a handle-pinned id (stale handles land
+    /// in the tombstone after remove+recreate). Returns the var id
+    /// and the home namespace id, or `None` when neither
+    /// generation matches the pin.
+    pub fn intern_in_pinned(
+        &mut self,
+        ns_name: &str,
+        expected: u64,
+        sym: &Symbol,
+    ) -> Option<(u64, u64)> {
+        let Self {
+            namespaces,
+            removed,
+            next_id,
+            by_id,
+            ..
+        } = self;
+        let ns = match namespaces.get_mut(ns_name) {
+            Some(ns) if ns.id() == expected => ns,
+            _ => removed.get_mut(ns_name).filter(|ns| ns.id() == expected)?,
+        };
+        let home = ns.id();
+        let id = ns.intern(sym, next_id);
+        by_id.insert(id, ns_name.to_owned());
+        Some((id, home))
     }
 
     /// The var's state, if interned (tombstones answer for vars

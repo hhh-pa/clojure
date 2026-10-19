@@ -861,3 +861,73 @@ fn ex_data_trampoline_rows() {
         ":done"
     );
 }
+
+#[test]
+fn defn_pre_violation() {
+    let mut eval = boot();
+    run(&mut eval, "(defn f [x] {:pre [(pos? x)]} x)");
+    assert_eq!(
+        uncaught(&mut eval, "(f -1)"),
+        "java.lang.AssertionError | Assert failed: (pos? x)"
+    );
+    assert_eq!(run_last(&mut eval, "(f 1)"), "1");
+}
+
+#[test]
+fn defn_post_violation() {
+    let mut eval = boot();
+    run(&mut eval, "(defn f [x] {:post [(pos? %)]} x)");
+    assert_eq!(
+        uncaught(&mut eval, "(f -1)"),
+        "java.lang.AssertionError | Assert failed: (pos? %)"
+    );
+    assert_eq!(run_last(&mut eval, "(f 1)"), "1");
+}
+
+#[test]
+fn defn_multi_arity_pre_per_clause() {
+    let mut eval = boot();
+    run(
+        &mut eval,
+        "(defn f ([x] {:pre [(pos? x)]} x) ([x y] {:pre [(pos? y)]} (+ x y)))",
+    );
+    // Each clause enforces only its own conditions.
+    assert_eq!(
+        uncaught(&mut eval, "(f -1)"),
+        "java.lang.AssertionError | Assert failed: (pos? x)"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(f 1 -2)"),
+        "java.lang.AssertionError | Assert failed: (pos? y)"
+    );
+    assert_eq!(run_last(&mut eval, "(f 1)"), "1");
+    assert_eq!(run_last(&mut eval, "(f 1 2)"), "3");
+}
+
+#[test]
+fn core_self_calls_survive_shadow() {
+    let mut eval = boot();
+    // A shadowing `and` hijacks bare 3+-arity recursion unless the
+    // emitted self-call is qualified (same for if-let/if-some).
+    run(&mut eval, "(defmacro and [& _] :shadowed)");
+    assert_eq!(run_last(&mut eval, "(and true true true)"), ":shadowed");
+    assert_eq!(
+        run_last(&mut eval, "(clojure.core/and true true true)"),
+        "true"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(clojure.core/and true false true)"),
+        "false"
+    );
+    assert_eq!(run_last(&mut eval, "(clojure.core/and 1 2 3)"), "3");
+    run(&mut eval, "(defmacro if-let [& _] :shadowed)");
+    assert_eq!(run_last(&mut eval, "(if-let [x 1] x)"), ":shadowed");
+    assert_eq!(
+        run_last(&mut eval, "(clojure.core/if-let [x 1] x :else)"),
+        "1"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(clojure.core/if-let [x nil] x :else)"),
+        ":else"
+    );
+}

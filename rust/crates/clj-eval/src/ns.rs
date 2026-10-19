@@ -346,7 +346,13 @@ fn family_home<'a>(
 ) -> Result<&'a Namespace, NativeError> {
     check_arity(display, args, &[1])?;
     let name = the_ns_name(&eval.registry, &args[0])?;
-    match eval.registry.ns_live_or_removed(&name) {
+    // Handles pin their generation (stale ones read the tombstone);
+    // symbols resolve by name.
+    let found = match as_ns(&args[0]).map(|h| h.id) {
+        Some(id) => eval.registry.ns_for_handle(&name, id),
+        None => eval.registry.ns_live_or_removed(&name),
+    };
+    match found {
         Some(ns) => Ok(ns),
         None => Err(ex(format!("No namespace: {name} found"))),
     }
@@ -432,7 +438,7 @@ fn native_alias(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErr
         v => return Err(cast_err(v, SYMBOL_CLASS)),
     };
     let a = sym_str(alias_sym);
-    let cur = eval.registry.current().to_owned();
+    let cur = eval.current_ns_name();
     match eval
         .registry
         .ensure_ns(&cur)
@@ -625,7 +631,7 @@ fn refer_into(eval: &mut Evaluator, lib: &Value, filters: &[Value]) -> Result<Va
         let renamed = refer_renamed(eval, rename, &item_sym, item)?;
         // Interns win over refers (the JVM's REJECTED warning waits
         // for `*err*` in S5D).
-        let cur = eval.registry.current().to_owned();
+        let cur = eval.current_ns_name();
         let home = eval.registry.ensure_ns(&cur);
         let q = Symbol::new(Some(cur.as_str()), renamed.name());
         if home.lookup(&q).is_none() {
@@ -647,6 +653,30 @@ fn native_refer_clojure(eval: &mut Evaluator, args: &[Value]) -> Result<Value, N
     refer_into(eval, &lib, args)
 }
 
+/// Route an `intern` through a handle pin (stale handles land in
+/// the tombstone, which becomes the var's home) or by name (live
+/// first). Returns the var id and the home namespace id.
+fn intern_routed(
+    eval: &mut Evaluator,
+    ns_name: &str,
+    pinned: Option<u64>,
+    q: &Symbol,
+) -> Result<(u64, u64), NativeError> {
+    match pinned {
+        Some(expected) => eval
+            .registry
+            .intern_in_pinned(ns_name, expected, q)
+            .ok_or_else(|| ex(format!("No namespace: {ns_name} found"))),
+        None => {
+            let id = eval
+                .registry
+                .intern_in(ns_name, q)
+                .ok_or_else(|| ex(format!("No namespace: {ns_name} found")))?;
+            Ok((id, eval.registry.get(ns_name).map_or(0, |ns| ns.id())))
+        }
+    }
+}
+
 fn native_intern(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/intern", args, &[2, 3])?;
     let ns_name = the_ns_name(&eval.registry, &args[0])?;
@@ -663,11 +693,8 @@ fn native_intern(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeEr
     };
     let meta = name.meta().cloned();
     let q = Symbol::new(Some(ns_name.as_str()), name.name());
-    let id = match eval.registry.intern_in(&ns_name, &q) {
-        Some(id) => id,
-        None => return Err(ex(format!("No namespace: {ns_name} found"))),
-    };
-    let home = eval.registry.get(&ns_name).map_or(0, |ns| ns.id());
+    let pinned = as_ns(&args[0]).map(|h| h.id);
+    let (id, home) = intern_routed(eval, &ns_name, pinned, &q)?;
     if let Some(st) = eval.registry.state_mut(id) {
         // The var adopts the name symbol's meta, if any (core.clj
         // `intern`); 3-arity resets the root on the same var. The
@@ -692,6 +719,7 @@ fn native_intern(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeEr
 fn do_resolve(
     eval: &Evaluator,
     ns_name: &str,
+    pinned: Option<u64>,
     env: Option<&Value>,
     sym_v: &Value,
 ) -> Result<Value, NativeError> {
@@ -710,11 +738,12 @@ fn do_resolve(
         Value::Symbol(s) => s,
         v => return Err(cast_err(v, SYMBOL_CLASS)),
     };
-    match eval
-        .registry
-        .ns_live_or_removed(ns_name)
-        .and_then(|h| resolve_var_in(h, &eval.registry, sym))
-    {
+    // Handles pin their generation (stale ones resolve the tombstone).
+    let home = match pinned {
+        Some(id) => eval.registry.ns_for_handle(ns_name, id),
+        None => eval.registry.ns_live_or_removed(ns_name),
+    };
+    match home.and_then(|h| resolve_var_in(h, &eval.registry, sym)) {
         Some((q, id)) => Ok(var_value(id, &q)),
         None => Ok(Value::Nil),
     }
@@ -728,18 +757,19 @@ fn native_ns_resolve(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nati
     } else {
         (None, &args[1])
     };
-    do_resolve(eval, &ns_name, env, sym_v)
+    let pinned = as_ns(&args[0]).map(|h| h.id);
+    do_resolve(eval, &ns_name, pinned, env, sym_v)
 }
 
 fn native_resolve(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/resolve", args, &[1, 2])?;
-    let cur = eval.registry.current().to_owned();
+    let cur = eval.current_ns_name();
     let (env, sym_v) = if args.len() == 2 {
         (Some(&args[0]), &args[1])
     } else {
         (None, &args[0])
     };
-    do_resolve(eval, &cur, env, sym_v)
+    do_resolve(eval, &cur, None, env, sym_v)
 }
 
 fn native_ns_unmap(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
@@ -751,7 +781,12 @@ fn native_ns_unmap(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Native
         Value::Symbol(_) => return Ok(Value::Nil),
         v => return Err(cast_err(v, SYMBOL_CLASS)),
     };
-    if let Some(home) = eval.registry.ns_live_or_removed_mut(&ns_name) {
+    // Handles pin their generation (stale ones unmap the tombstone).
+    let home = match as_ns(&args[0]).map(|h| h.id) {
+        Some(id) => eval.registry.ns_for_handle_mut(&ns_name, id),
+        None => eval.registry.ns_live_or_removed_mut(&ns_name),
+    };
+    if let Some(home) = home {
         home.unmap(&simple);
     }
     Ok(Value::Nil)
@@ -765,7 +800,12 @@ fn native_ns_unalias(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nati
         Value::Symbol(s) => sym_str(s),
         v => return Err(cast_err(v, SYMBOL_CLASS)),
     };
-    if let Some(home) = eval.registry.ns_live_or_removed_mut(&ns_name) {
+    // Handles pin their generation (stale ones unalias the tombstone).
+    let home = match as_ns(&args[0]).map(|h| h.id) {
+        Some(id) => eval.registry.ns_for_handle_mut(&ns_name, id),
+        None => eval.registry.ns_live_or_removed_mut(&ns_name),
+    };
+    if let Some(home) = home {
         home.remove_alias(&simple);
     }
     Ok(Value::Nil)
@@ -871,13 +911,6 @@ pub(crate) fn deref_core(eval: &Evaluator, name: &str) -> Value {
     }
 }
 
-/// Overwrite a `clojure.core` var's root.
-fn set_core_root(eval: &mut Evaluator, name: &str, v: Value) {
-    if let Some(id) = core_var(eval, name) {
-        set_root(&mut eval.registry, id, v);
-    }
-}
-
 /// The visible `*loaded-libs*` set.
 fn libs_set(eval: &Evaluator) -> Result<Set, NativeError> {
     match deref_core(eval, "*loaded-libs*") {
@@ -886,15 +919,26 @@ fn libs_set(eval: &Evaluator) -> Result<Set, NativeError> {
     }
 }
 
-/// Mark a lib loaded (conjs the root — the port holds the set
-/// directly, where the JVM commutes a `Ref`).
+/// `*loaded-libs*` assignment: the top frame when thread-bound
+/// (`load-all` scopes a blank set per load), else the root
+/// (mirrors [`set_ns_current`]).
+fn set_loaded_libs(eval: &mut Evaluator, v: Value) {
+    // (Match guard, not a let-chain: MSRV 1.85.)
+    match core_var(eval, "*loaded-libs*") {
+        Some(id) if !eval.set_binding_top(id, v.clone()) => {
+            set_root(&mut eval.registry, id, v);
+        }
+        _ => {}
+    }
+}
+
+/// Mark a lib loaded (conjs the visible set — the port holds the
+/// set directly, where the JVM commutes a `Ref` — and writes it
+/// back through [`set_loaded_libs`], so marks under `load-all`
+/// accumulate in its frame instead of leaking to the root).
 fn mark_loaded(eval: &mut Evaluator, lib: &Symbol) -> Result<(), NativeError> {
     let set = libs_set(eval)?;
-    set_core_root(
-        eval,
-        "*loaded-libs*",
-        Value::Set(set.insert(Value::Symbol(lib.clone()))),
-    );
+    set_loaded_libs(eval, Value::Set(set.insert(Value::Symbol(lib.clone()))));
     Ok(())
 }
 
@@ -1085,7 +1129,9 @@ fn load_all(
             acc = acc.insert(m.clone());
         }
     }
-    set_core_root(eval, "*loaded-libs*", Value::Set(acc));
+    // The union lands in the caller's frame when a load-all
+    // nests (an outer frame is still pushed), else the root.
+    set_loaded_libs(eval, Value::Set(acc));
     Ok(())
 }
 

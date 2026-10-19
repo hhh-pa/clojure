@@ -290,6 +290,36 @@ fn stale_handles_read_tombstones() {
 }
 
 #[test]
+fn stale_handles_pin_tombstone_after_recreate() {
+    let mut eval = boot();
+    run(&mut eval, "(do (create-ns 't) (intern 't 'x 1))");
+    run(&mut eval, "(def th (the-ns 't))");
+    run(&mut eval, "(remove-ns 't)");
+    run(&mut eval, "(create-ns 't)");
+    // Reads through the stale handle see the frozen mappings, not the new ns.
+    assert_eq!(run_last(&mut eval, "(ns-interns th)"), "{x #'t/x}");
+    assert_eq!(run_last(&mut eval, "(ns-interns (the-ns 't))"), "{}");
+    // Interns through the stale handle land in the tombstone...
+    run(&mut eval, "(intern th 'y 2)");
+    assert_eq!(run_last(&mut eval, "(ns-resolve th 'y)"), "#'t/y");
+    assert_eq!(run_last(&mut eval, "(ns-resolve (the-ns 't) 'y)"), "nil");
+    // ...as do unmaps, meta reads and meta writes.
+    run(&mut eval, "(ns-unmap th 'x)");
+    assert_eq!(run_last(&mut eval, "(ns-interns th)"), "{y #'t/y}");
+    run(&mut eval, "(alter-meta! th assoc :k :v)");
+    assert_eq!(run_last(&mut eval, "(meta th)"), "{:k :v}");
+    assert_eq!(run_last(&mut eval, "(meta (the-ns 't))"), "nil");
+    // A second remove+recreate dangles the handle (only the latest
+    // removal is kept): reads report the name as gone.
+    run(&mut eval, "(remove-ns 't)");
+    run(&mut eval, "(create-ns 't)");
+    assert_eq!(
+        uncaught(&mut eval, "(ns-interns th)"),
+        "java.lang.Exception | No namespace: t found"
+    );
+}
+
+#[test]
 fn alias_rules() {
     let mut eval = boot();
     run(&mut eval, "(do (create-ns 't1) (create-ns 't2))");
@@ -387,8 +417,9 @@ fn ns_map_family() {
 
 #[test]
 fn refer_and_use_filters() {
-    // NOTE: `binding [*ns* ...]` does not redirect installation
-    // (fenced to S5B), so these tests switch with `in-ns` and back.
+    // `binding [*ns* ...]` redirects installation too (the S5B
+    // sync — see the `ns_star_binding_redirects_*` tests), but
+    // these tests keep the `in-ns` round-trip style.
     let mut eval = boot();
     run(
         &mut eval,
@@ -462,6 +493,64 @@ fn refer_and_use_filters() {
         run_last(&mut eval, "(ns-refers 'w5)"),
         "{a #'lib/a, b #'lib/b}"
     );
+}
+
+#[test]
+fn ns_star_binding_redirects_refer() {
+    let mut eval = boot();
+    run(
+        &mut eval,
+        "(do (create-ns 'blib) (intern 'blib 'x 1) (create-ns 'btarget))",
+    );
+    // `refer` installs into the BOUND namespace (JVM-true), not
+    // the registry current.
+    run(
+        &mut eval,
+        "(binding [*ns* (the-ns 'btarget)] (refer 'blib :only '[x]))",
+    );
+    assert_eq!(run_last(&mut eval, "(ns-refers 'btarget)"), "{x #'blib/x}");
+    assert_eq!(run_last(&mut eval, "(ns-resolve 'user 'x)"), "nil");
+}
+
+#[test]
+fn ns_star_binding_redirects_alias() {
+    let mut eval = boot();
+    run(
+        &mut eval,
+        "(do (create-ns 'blib) (intern 'blib 'x 1) (create-ns 'btarget))",
+    );
+    // `alias` installs into the BOUND namespace too.
+    run(
+        &mut eval,
+        "(binding [*ns* (the-ns 'btarget)] (alias 'bx 'blib))",
+    );
+    assert_eq!(
+        run_last(&mut eval, "(ns-aliases 'btarget)"),
+        "{bx #object[clojure.lang.Namespace 0x3 \"blib\"]}"
+    );
+    assert_eq!(run_last(&mut eval, "(ns-resolve 'user 'bx/x)"), "nil");
+    assert_eq!(
+        run_last(&mut eval, "(ns-resolve 'btarget 'bx/x)"),
+        "#'blib/x"
+    );
+}
+
+#[test]
+fn ns_star_binding_redirects_resolve() {
+    let mut eval = boot();
+    run(
+        &mut eval,
+        "(do (create-ns 'btarget) (intern 'btarget 'by 2))",
+    );
+    // `resolve` reads the BOUND namespace too.
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(binding [*ns* (the-ns 'btarget)] (resolve 'by))"
+        ),
+        "#'btarget/by"
+    );
+    assert_eq!(run_last(&mut eval, "(resolve 'by)"), "nil");
 }
 
 #[test]
