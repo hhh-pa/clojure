@@ -92,9 +92,9 @@ fn eval_reader_error_reports_position() {
 
 #[test]
 fn eval_unclosed_input_is_eof_error() {
-    // Unclosed input must error (the eval wrap's closers must not
-    // silently balance it); the site mirrors the reader's own EOF
-    // line-bump rule (col 1, line past a non-empty last line).
+    // Unclosed input errors with the reader's own span (col 1,
+    // line past a non-empty last line; the opener line is the
+    // innermost unclosed one).
     let out = run(["eval", "("]);
     assert_eq!(out.status.code(), Some(1));
     assert_eq!(
@@ -111,26 +111,44 @@ fn eval_unclosed_input_is_eof_error() {
     assert_eq!(out.status.code(), Some(1));
     assert_eq!(
         stderr(&out),
-        "<eval>:3:1: EOF while reading, starting at line 1\n"
+        "<eval>:3:1: EOF while reading, starting at line 2\n"
     );
 }
 
 #[test]
-fn eval_empty_input_is_error() {
-    // S7A decision (deviation from the JVM `-e ''`, which exits 0
-    // silent): spec 1.4 promises one form, and empty input has none.
-    let out = run(["eval", ""]);
-    assert_eq!(out.status.code(), Some(1));
-    assert_eq!(
-        stderr(&out),
-        "<eval>:1:1: empty input: nothing to evaluate\n"
-    );
-    let out = run(["eval", "  ; nothing but a comment\n"]);
-    assert_eq!(out.status.code(), Some(1));
-    assert_eq!(
-        stderr(&out),
-        "<eval>:1:1: empty input: nothing to evaluate\n"
-    );
+fn eval_blank_input_is_silent() {
+    // JVM `-e ''` parity (pins P5): blank input prints nothing,
+    // exit 0 — including vertical-tab-only (unified blank check)
+    // and comment-only input.
+    for form in ["", "   ", "\u{b}", "  ; nothing but a comment\n"] {
+        let out = run(["eval", form]);
+        assert_eq!(out.status.code(), Some(0), "form {form:?}");
+        assert_eq!(stdout(&out), "", "form {form:?}");
+        assert_eq!(stderr(&out), "", "form {form:?}");
+    }
+}
+
+#[test]
+fn eval_ignores_trailing_comments() {
+    // Nothing is appended to the input line, so trailing `;`/`#!`
+    // comments swallow no closers.
+    let out = run(["eval", "(+ 1 2) ; hello"]);
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(stdout(&out), "3\n");
+    let out = run(["eval", "(+ 1 2) #! tail"]);
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(stdout(&out), "3\n");
+    let out = run(["eval", "#! (oops\n(+ 1 2)"]);
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(stdout(&out), "3\n");
+}
+
+#[test]
+fn eval_multi_form_prints_each_value() {
+    // JVM `-e '1 2'` parity (pins P5): every form prints.
+    let out = run(["eval", "1 2"]);
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(stdout(&out), "1\n2\n");
 }
 
 #[test]
@@ -150,11 +168,76 @@ fn eval_edn_restricts_reader() {
 }
 
 #[test]
+fn eval_edn_rejects_symbolic_and_auto_resolve() {
+    // Neither `##NaN` (no EDN literal) nor `::foo` (needs ns
+    // context) is EDN — but single-`:` keywords stay valid.
+    let out = run(["eval", "--edn", "##NaN"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(stderr(&out), "<eval>:1:1: non-EDN reader syntax: '##'\n");
+    let out = run(["eval", "--edn", "::foo"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(stderr(&out), "<eval>:1:1: non-EDN reader syntax: '::'\n");
+    let out = run(["eval", "--edn", ":foo"]);
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(stdout(&out), ":foo\n");
+}
+
+#[test]
+fn eval_edn_accepts_discard() {
+    // `#_` is in the EDN spec: the discarded form vanishes.
+    let out = run(["eval", "--edn", "#_ 1 2"]);
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(stdout(&out), "2\n");
+}
+
+#[test]
 fn run_missing_file_is_io_error() {
     // Spec C8: I/O errors exit 3 and name the file.
     let out = run(["run", "nope-missing.clj"]);
     assert_eq!(out.status.code(), Some(3));
     assert!(stderr(&out).contains("nope-missing.clj"));
+}
+
+#[test]
+fn run_unreadable_file_is_io_error() {
+    // Read-time IO failures (chmod-000) exit 3 per C8 — not 1.
+    let path = std::env::temp_dir().join(format!("clojure-rs-noperm-{}.clj", std::process::id()));
+    std::fs::write(&path, "(println :nope)\n").expect("write probe file");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000))
+            .expect("chmod probe file");
+    }
+    let out = run(["run", path.to_string_lossy().as_ref()]);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
+            .expect("restore probe file");
+    }
+    std::fs::remove_file(&path).expect("remove probe file");
+    assert_eq!(out.status.code(), Some(3));
+    assert!(
+        stderr(&out).contains("cannot open"),
+        "stderr:\n{}",
+        stderr(&out)
+    );
+}
+
+#[test]
+fn run_directory_names_the_real_problem() {
+    // A directory reports itself — not "no such file".
+    let dir = std::env::temp_dir().join(format!("clojure-rs-isdir-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("create probe dir");
+    let out = run(["run", dir.to_string_lossy().as_ref()]);
+    std::fs::remove_dir(&dir).expect("remove probe dir");
+    assert_eq!(out.status.code(), Some(3));
+    assert!(
+        stderr(&out).contains("is a directory"),
+        "stderr:\n{}",
+        stderr(&out)
+    );
 }
 
 #[test]
@@ -255,6 +338,15 @@ fn repl_empty_input_exits_clean() {
     let out = run_with_stdin(["repl", "--no-history"], "");
     assert_eq!(out.status.code(), Some(0));
     assert_eq!(stdout(&out), "");
+}
+
+#[test]
+fn repl_streaming_ignores_history_flags() {
+    // Off-tty there is no history write (spec): a bogus history
+    // path must not fail the streaming session.
+    let out = run_with_stdin(["repl", "--history-file", "/nonexistent/x"], "(+ 1 2)\n");
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(stdout(&out), "3\n");
 }
 
 #[test]

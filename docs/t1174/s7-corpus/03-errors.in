@@ -1,6 +1,6 @@
 (+ 1 2)
 (/ 1 0)
-(prn :e? (some? *e))
 *1
+(prn :e? (some? *e))
 )
 no-such-sym-xyz

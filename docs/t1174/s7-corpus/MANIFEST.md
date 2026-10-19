@@ -39,15 +39,18 @@ at:` lines. After normalization:
   nil, strings. Differential.
 - `02-multiline` (2 units): paren continuation across lines,
   `do` + inner print. Differential.
-- `03-errors` (6 forms): runtime throw, `:e?`, `*1`
-  preserved, unmatched `)`, unresolvable symbol.
+- `03-errors` (6 forms): runtime throw, `*1` preserved
+  (→ `3` differential, read before `:e?` shifts the window),
+  `:e?`, unmatched `)`, unresolvable symbol.
   Ours-pinned (see above).
 - `04-ns` (3 forms): `ns-name`, `in-ns` + switch marker,
   qualified `ns-name` in the bare ns. Differential.
   (Raw `(in-ns 'foo)` is unpinnable — the Namespace print
   carries an identity hash — so the script swallows it in
-  a `do`; bare-ns `Unable to resolve` matches the JVM and
-  was observed during commissioning.)
+  a `do`. An earlier script version held bare-ns forms whose
+  `Unable to resolve` matched the JVM — observed during
+  commissioning, before the qualified rewrite; the current
+  script holds none.)
 
 ## Regression test
 

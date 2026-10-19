@@ -1,7 +1,7 @@
 3
 ArithmeticException: Divide by zero
+3
 :e? true
-nil
 nil
 1:2: Unmatched delimiter: )
 Syntax error compiling at (user:1:1).

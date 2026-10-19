@@ -99,6 +99,30 @@ fn multi_form_line_prints_each_value() {
 }
 
 #[test]
+fn per_form_buffer_prints_before_later_error() {
+    // Per-form iteration (pins P1): `1` prints and shifts `*1`
+    // before `nope` errors — earlier values are never dropped.
+    assert_eq!(
+        run("1 nope\n*1\n", None),
+        (
+            0,
+            "1\nSyntax error compiling at (user:1:1).\njava.lang.RuntimeException | Unable to resolve symbol: nope in this context\n1\n"
+                .to_owned()
+        )
+    );
+}
+
+#[test]
+fn per_form_buffer_stops_at_first_eval_error() {
+    // The failing form aborts its buffer (`2` never evals) but
+    // the session continues; `*1` keeps the last good value.
+    assert_eq!(
+        run("1 (/ 1 0) 2\n*1\n", None),
+        (0, "1\nArithmeticException: Divide by zero\n1\n".to_owned())
+    );
+}
+
+#[test]
 fn read_error_prints_and_continues() {
     // Span 1:2: the tracker sits past the consumed `)` (JVM: REPL:1:2).
     assert_eq!(

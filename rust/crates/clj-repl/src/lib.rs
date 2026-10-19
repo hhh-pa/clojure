@@ -18,7 +18,7 @@
 pub mod editor;
 pub mod session;
 
-pub use editor::{HistoryOptions, LineHandler, LoopAction, RustyLineSource, TtyEditor};
+pub use editor::{HistoryOptions, LineHandler, LoopAction, RustyLineSource, TtyEditor, core_names};
 pub use session::{
     Session, core_var, is_incomplete_error, is_incomplete_message, read_is_complete,
 };

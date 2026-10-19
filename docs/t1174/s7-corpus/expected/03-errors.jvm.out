@@ -2,9 +2,9 @@ Clojure 1.13.0-master-SNAPSHOT
 user=> 3
 user=> Execution error (ArithmeticException) at user/eval3 (REPL:1).
 Divide by zero
+user=> 3
 user=> :e? true
 nil
-user=> nil
 user=> Syntax error reading source at (REPL:5:2).
 Unmatched delimiter: )
 user=> Syntax error compiling at (REPL:0:0).

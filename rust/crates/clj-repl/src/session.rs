@@ -20,10 +20,10 @@
 //! Shift-before-print order and EOF-mid-form reporting are
 //! JVM-probed (`(+ 1`-at-EOF prints its diagnostic, then exits 0).
 //!
-//! One buffer evaluates atomically: a hard error anywhere in the
-//! accumulated lines discards the whole buffer (earlier forms' side
-//! effects stand, but their values never shift `*1`). Single-form
-//! lines — the interactive norm — match the JVM exactly.
+//! One buffer iterates per-form like the JVM: each form evals,
+//! prints, and shifts `*1` in turn, stopping at the first error
+//! (so `1 nope` prints `1`, then the `Unable to resolve`
+//! diagnostic — earlier values are never dropped).
 
 use std::io::{BufRead, Write};
 use std::sync::Arc;
@@ -216,26 +216,32 @@ impl<R: BufRead, W: Write> Session<R, W> {
         }
     }
 
-    /// Evaluate one accumulated buffer: every form in turn, or the
-    /// incomplete verdict when the reader wants more lines.
+    /// Evaluate one accumulated buffer per-form: read every form,
+    /// then eval + print + shift each in turn, stopping at the
+    /// first error — or the incomplete verdict when the reader
+    /// wants more lines.
     fn step(&mut self, buf: &str) -> Step {
-        match self.eval.eval_source(buf) {
-            Ok(values) => {
-                for value in values {
+        let forms = match self.eval.read_forms(buf) {
+            Ok(forms) => forms,
+            Err(err) => {
+                if is_incomplete_error(&err) {
+                    return Step::More(err);
+                }
+                return Step::Done(self.fail(&err));
+            }
+        };
+        for form in &forms {
+            match self.eval.eval_top_form(form) {
+                Ok(value) => {
                     let status = self.emit(value);
                     if status != 0 {
                         return Step::Done(status);
                     }
                 }
-                Step::Done(0)
-            }
-            Err(err) => {
-                if is_incomplete_error(&err) {
-                    return Step::More(err);
-                }
-                Step::Done(self.fail(&err))
+                Err(err) => return Step::Done(self.fail(&err)),
             }
         }
+        Step::Done(0)
     }
 
     /// Emit one successful value: shift the window, then print like

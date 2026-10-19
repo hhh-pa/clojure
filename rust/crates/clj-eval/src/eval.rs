@@ -275,13 +275,12 @@ impl Evaluator {
         Analyzer::new(&source, self, seq).analyze(form, Span::new(1, 1), true)
     }
 
-    /// Read every form in `text` (default `:read-cond :allow`
-    /// options) and evaluate each in turn, collecting one value per
-    /// read form. Uncaught throwables (including bare macro-arity
-    /// failures) abort the load.
-    pub fn eval_source(&mut self, text: &str) -> Result<Vec<Value>, SourceError> {
-        // Syntax-quote and `::` resolve against the synced
-        // current namespace (read-time, like the JVM).
+    /// Read every form in `text` against the synced current
+    /// namespace (syntax-quote and `::` resolve read-time, like the
+    /// JVM). S7 drivers use this + [`eval_top_form`](Self::eval_top_form)
+    /// to iterate per-form (print/shift each value, stop at the
+    /// first error).
+    pub fn read_forms(&self, text: &str) -> Result<Vec<Value>, SourceError> {
         let cur = self.current_ns_name();
         let mut opts = ReaderOpts {
             current_ns: cur.clone(),
@@ -291,7 +290,15 @@ impl Evaluator {
             opts.aliases = ns.alias_map();
             opts.refers = ns.refer_map();
         }
-        let forms = read_all(text, &opts).map_err(SourceError::Reader)?;
+        read_all(text, &opts).map_err(SourceError::Reader)
+    }
+
+    /// Read every form in `text` (default `:read-cond :allow`
+    /// options) and evaluate each in turn, collecting one value per
+    /// read form. Uncaught throwables (including bare macro-arity
+    /// failures) abort the load.
+    pub fn eval_source(&mut self, text: &str) -> Result<Vec<Value>, SourceError> {
+        let forms = self.read_forms(text)?;
         let mut out = Vec::with_capacity(forms.len());
         for form in &forms {
             out.push(self.eval_top_form(form)?);

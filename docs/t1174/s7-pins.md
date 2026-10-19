@@ -14,6 +14,11 @@ truth first; port deviations are explicit and spec-justified.
   `(nil,3,nil)` [the prn] → `(nil,nil,3)` [the nil]).
 - Errors do NOT shift (`:star-after-err 3 nil nil` — `*1` keeps
   the last good value) and set `*e` (`:e? true`).
+- The session iterates PER-FORM: each form evals, prints, and
+  shifts in turn, stopping at the first error — so `1 nope`
+  prints `1` first, then the `Unable to resolve` diagnostic
+  (verified against the piped JVM; earlier values are never
+  dropped and `*1` shifts per form).
 
 ## P2. `*e`
 
@@ -43,6 +48,16 @@ truth first; port deviations are explicit and spec-justified.
   `file:line` (no col); compile syntax errors carry
   `file:line:col` (`Syntax error compiling at (REPL:1:1)`).
 - `-e '(+ 1 2)'` prints `3`, exit 0.
+- `-e '1 2'` prints EVERY form (`1\n2`), exit 0 (multi-form
+  `-e` is per-form, verified by execution).
+- `-e ''` prints nothing, exit 0 (blank input is silent,
+  verified by execution).
+- `-e` binds no `*1` (`-e '1 *1'` prints just `1` — the
+  second form reads nil — verified by execution).
+- `-e` suppresses nil results (`-e '1 nil 2'` prints `1\n2`,
+  verified by execution). PORT (open deviation, flagged in
+  PR #8 round-1 fixes): `eval` prints EVERY value including
+  nil (`1\nnil\n2`) — awaiting a reviewer call.
 - Missing script file: `Execution error
   (FileNotFoundException) ... (No such file or directory)` +
   full report, exit 1. PORT (spec C8, deliberate): exit 3

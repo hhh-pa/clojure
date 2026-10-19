@@ -21,11 +21,11 @@ def main() -> None:
                 continue
             if line.startswith("Full report at:"):
                 continue
-            if PROMPT.match(line) and PROMPT.sub("", line).strip() == "":
+            if PROMPT.match(line) and PROMPT.sub("", line, count=1).strip() == "":
                 # A lone prompt (`user=> ` with no result): the
                 # trailing prompt and any prompt echoing blank input.
                 continue
-            sys.stdout.write(PROMPT.sub("", line))
+            sys.stdout.write(PROMPT.sub("", line, count=1))
 
 
 main()

@@ -207,6 +207,47 @@ impl Completer for NameCompleter {
     }
 }
 
+/// Push the unqualified name of every symbol in `items`.
+fn push_symbol_names<'a>(
+    names: &mut Vec<String>,
+    items: impl Iterator<Item = &'a clj_value::Value>,
+) {
+    use clj_value::Value;
+    for item in items {
+        if let Value::Symbol(sym) = item {
+            names.push(sym.name().to_owned());
+        }
+    }
+}
+
+/// The completion vocabulary: every interned `clojure.core` public
+/// name (plus the `*1`/`*e` session vars, which users reach for in
+/// a repl). Read once at startup; later `def`s complete next time.
+/// (`keys` returns a lazy seq, so the query pours it into a vector
+/// first — the driver only collects strict lists/vectors.)
+pub fn core_names(eval: &mut clj_eval::Evaluator) -> Vec<String> {
+    use clj_value::Value;
+    let mut names = vec![
+        "*1".to_owned(),
+        "*2".to_owned(),
+        "*3".to_owned(),
+        "*e".to_owned(),
+    ];
+    let listed = eval.eval_source("(into [] (keys (ns-publics 'clojure.core)))");
+    if let Ok(values) = listed {
+        for value in values {
+            match &value {
+                Value::List(items) => push_symbol_names(&mut names, items.iter()),
+                Value::Vector(items) => push_symbol_names(&mut names, items.iter()),
+                _ => {}
+            }
+        }
+    }
+    names.sort();
+    names.dedup();
+    names
+}
+
 // ---------------------------------------------------------------------------
 // rustyline helper (completion + multiline validation)
 // ---------------------------------------------------------------------------
@@ -277,12 +318,35 @@ impl Helper for ReplHelper {}
 /// `%USERPROFILE%` when `HOME` is unset. No new deps; `Path::join` keeps
 /// separators Windows-safe. Returns `None` when no home resolves.
 #[must_use]
-pub fn default_history_path() -> Option<PathBuf> {
+/// The home directory for history paths (`HOME`, else
+/// `USERPROFILE` on Windows; empty counts as missing).
+fn home_dir() -> Option<PathBuf> {
     let home = env::var_os("HOME").or_else(|| env::var_os("USERPROFILE"))?;
     if home.is_empty() {
         return None;
     }
-    Some(Path::new(&home).join(".clojure-rs").join("history"))
+    Some(PathBuf::from(home))
+}
+
+pub fn default_history_path() -> Option<PathBuf> {
+    Some(home_dir()?.join(".clojure-rs").join("history"))
+}
+
+/// Expand a leading `~/` (or bare `~`) against the home directory;
+/// anything else passes through unchanged (`~user/` stays the
+/// shell's job).
+fn expand_tilde(path: &Path) -> PathBuf {
+    if path.as_os_str() == "~" {
+        return home_dir().unwrap_or_else(|| path.to_owned());
+    }
+    let text = path.to_string_lossy();
+    match text.strip_prefix("~/") {
+        Some(rest) => match home_dir() {
+            Some(home) => home.join(rest),
+            None => path.to_owned(),
+        },
+        None => path.to_owned(),
+    }
 }
 
 /// History persistence policy for [`TtyEditor`].
@@ -321,14 +385,16 @@ impl HistoryOptions {
     }
 
     /// Resolve the effective path, or `None` when disabled or unresolvable
-    /// (in which case the session simply runs without history).
+    /// (in which case the session simply runs without history). A
+    /// leading `~/` in an explicit path expands against the home
+    /// directory.
     #[must_use]
     pub fn resolve_path(&self) -> Option<PathBuf> {
         if !self.enabled {
             return None;
         }
         if let Some(path) = &self.path {
-            return Some(path.clone());
+            return Some(expand_tilde(path));
         }
         default_history_path()
     }

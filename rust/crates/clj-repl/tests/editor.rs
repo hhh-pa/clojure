@@ -239,6 +239,25 @@ fn helper_and_source_share_is_complete() {
     assert!(source.is_complete("(def x)"));
 }
 
+#[test]
+fn real_vocabulary_covers_core_and_session_vars() {
+    // The completion vocabulary over a booted evaluator (not the
+    // 8-name stub above), sorted + deduped. The floor is 300: the
+    // port interns ~350 `clojure.core` publics (349 observed —
+    // the JVM holds 600+, but the test pins the port's own
+    // vocabulary, not the JVM's).
+    let mut eval = clj_eval::boot();
+    let names = clj_repl::core_names(&mut eval);
+    assert!(names.len() >= 300, "vocabulary size: {}", names.len());
+    for want in ["map", "defn", "*1", "*2", "*3", "*e"] {
+        assert!(names.contains(&want.to_owned()), "missing {want}");
+    }
+    let mut sorted = names.clone();
+    sorted.sort();
+    sorted.dedup();
+    assert_eq!(names, sorted, "vocabulary sorted + deduped");
+}
+
 // ---------------------------------------------------------------------------
 // History (real rustyline file backend; no tty needed)
 // ---------------------------------------------------------------------------
@@ -346,6 +365,27 @@ fn default_history_option_matches_helper() {
             .and_then(|s| s.to_str());
         assert_eq!(parent_name, Some(".clojure-rs"));
     }
+}
+
+#[test]
+fn history_tilde_expands_against_home() {
+    // No env mutation (see above): read HOME, then assert the
+    // `~/` expansion agrees with it.
+    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"));
+    let Some(home) = home.filter(|h| !h.is_empty()) else {
+        return;
+    };
+    let home = PathBuf::from(home);
+    assert_eq!(
+        HistoryOptions::with_path("~/hist").resolve_path(),
+        Some(home.join("hist"))
+    );
+    assert_eq!(HistoryOptions::with_path("~").resolve_path(), Some(home));
+    // Non-leading tildes pass through (the shell's job).
+    assert_eq!(
+        HistoryOptions::with_path("/x/~/hist").resolve_path(),
+        Some(PathBuf::from("/x/~/hist"))
+    );
 }
 
 // ---------------------------------------------------------------------------

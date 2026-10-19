@@ -84,10 +84,13 @@ tests first (spec §2.5).
 ## Design (spikes before S7C)
 
 D1. `rustyline` 19.0.0: MIT, edition 2024 (needs ≥1.85,
-    at the floor, never below it); `cargo deny check`
+    matching the MSRV floor); `cargo deny check`
     (advisories/bans/licenses/sources) green; `cargo tree -d`
     clean workspace-wide. Chosen over hand-rolled editing:
     maintained, tty-correct on 3 OSes, spec-pre-approved.
+    (No `rust-version` keys exist yet to enforce the floor —
+    tracked as S9 hardening: add the keys + a 1.85-toolchain
+    check.)
 D2. Incomplete-form detection: exactly which `ReaderError`
     variants mean "continue" (probe + unit test per variant;
     `Eof` at top level means done, never continue).

@@ -13,7 +13,8 @@
 //! `docs/t1174/`).
 
 use clap::{Parser, Subcommand};
-use clj_eval::{SourceError, boot};
+use clj_eval::{Evaluator, SourceError, boot};
+use clj_value::Value;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -90,19 +91,10 @@ fn main() -> ExitCode {
 /// The `<eval>` file token (pins P5).
 const EVAL_FILE: &str = "<eval>";
 
-/// `eval` evaluates `(prn (do <input>))` rather than `<input>` bare:
-/// the binary crate cannot print the returned value itself (neither
-/// the printer nor the value type is a dependency of the binary, and
-/// S7A may not touch `Cargo.toml`), so printing goes through the
-/// evaluator's own `prn` — which also realizes lazy seqs, like the
-/// JVM's print walk. Observable effects:
-/// - single-form input (spec 1.4's contract) prints exactly its value;
-/// - multi-form input evaluates every form and prints the LAST (the
-///   JVM `-e` prints EVERY form — a documented gap until a one-form
-///   reader API exists);
-/// - spans on line 1 shift by the prefix width ([`dewrap_col`]).
-const EVAL_PREFIX: &str = "(prn (do ";
-
+/// `eval` reads every form and evaluates + prints EACH value on
+/// its own line — exactly like JVM `clojure.main -e` (pins P5).
+/// Reader spans blame the input directly (no textual wrap, so no
+/// shift to undo); `*1` stays untouched (the JVM binds none here).
 fn cmd_eval(form: &str, edn: bool) -> ExitCode {
     let scan = EvalScanner::new(form).run();
     // (Match guard, not a let-chain: MSRV 1.85.)
@@ -117,50 +109,84 @@ fn cmd_eval(form: &str, edn: bool) -> ExitCode {
         _ => {}
     }
     if !scan.has_code {
-        // S7A decision, probed against the JVM
-        // (1.13.0-master-SNAPSHOT): `clojure.main -e ''` exits 0
-        // printing nothing, but spec 1.4 promises ONE form and empty
-        // input holds none, so the port reports exit 1 with a
-        // diagnostic instead.
-        eprintln!("{EVAL_FILE}:1:1: empty input: nothing to evaluate");
-        return ExitCode::from(1);
-    }
-    if let Some((open_line, end_line, end_col)) = scan.unclosed_eof {
-        // The wrap's closers would silently balance these (or skew
-        // the reader's span), so unbalanced input never reaches the
-        // evaluator; the message mirrors the reader's own EOF text.
-        eprintln!(
-            "{EVAL_FILE}:{end_line}:{end_col}: EOF while reading, starting at line {open_line}"
-        );
-        return ExitCode::from(1);
+        // Blank input (whitespace/commas/comments only): silent
+        // exit 0, like JVM `-e ''` (pins P5).
+        return ExitCode::SUCCESS;
     }
     let mut eval = boot();
-    let wrapped = format!("{EVAL_PREFIX}{form}))");
-    match eval.eval_source(&wrapped) {
-        Ok(_) => ExitCode::SUCCESS,
+    let forms = match eval.read_forms(form) {
+        Ok(forms) => forms,
         Err(e) => {
-            eprintln!("{}", eval_diagnostic(form, &e));
-            ExitCode::from(1)
+            eprintln!("{}", eval_diagnostic(&e));
+            return ExitCode::from(1);
         }
+    };
+    for form in &forms {
+        let value = match eval.eval_top_form(form) {
+            Ok(value) => value,
+            Err(e) => {
+                eprintln!("{}", eval_diagnostic(&e));
+                return ExitCode::from(1);
+            }
+        };
+        match print_value(&mut eval, &value) {
+            Ok(text) => println!("{text}"),
+            Err(diagnostic) => {
+                eprintln!("{EVAL_FILE}:1:1: {diagnostic}");
+                return ExitCode::from(1);
+            }
+        }
+    }
+    ExitCode::SUCCESS
+}
+
+/// Render one eval value exactly like `prn`: bound `*print-*`
+/// opts, deep-realized (lazy seqs print walked, like the JVM).
+/// Failures come back as their one-line diagnostic.
+fn print_value(eval: &mut Evaluator, value: &Value) -> Result<String, String> {
+    let opts = match clj_eval::core::print_opts(eval, None) {
+        Ok(opts) => opts,
+        Err(err) => return Err(class_diagnostic(err.class, &err.message)),
+    };
+    let realized = match eval.realize_deep(value) {
+        Ok(realized) => realized,
+        Err(clj_eval::Signal::Throw(t)) => {
+            let message = t.message.as_deref().unwrap_or("");
+            return Err(class_diagnostic(t.class, message));
+        }
+        Err(clj_eval::Signal::Recur(_)) => {
+            return Err("internal error: recur escaped its loop or fn".to_owned());
+        }
+    };
+    Ok(clj_value::pr_to_string(&realized, &opts))
+}
+
+/// The one-line `SimpleClass: message` diagnostic (bare class when
+/// the message is empty).
+fn class_diagnostic(class: clj_value::ThrowClass, message: &str) -> String {
+    let simple = class.jvm_name().rsplit('.').next().unwrap_or("Throwable");
+    if message.is_empty() {
+        simple.to_owned()
+    } else {
+        format!("{simple}: {message}")
     }
 }
 
 /// A `SourceError` as `file:line:col: message` (pins P5: col always
-/// present). `Throwable` carries no span, so uncaught runtime errors
-/// blame the single form's start (1:1).
-fn eval_diagnostic(form: &str, e: &SourceError) -> String {
-    let lens = line_lens(form);
+/// present). Spans blame the input directly. `Throwable` carries no
+/// span, so uncaught runtime errors blame the input start (1:1).
+fn eval_diagnostic(e: &SourceError) -> String {
     match e {
         SourceError::Reader(e) => {
             let span = e.span();
             let line = span.line;
-            let col = dewrap_col(line, span.col, &lens);
+            let col = span.col;
             let msg = e.message();
             format!("{EVAL_FILE}:{line}:{col}: {msg}")
         }
         SourceError::Compile(e) => {
             let line = e.span.line;
-            let col = dewrap_col(line, e.span.col, &lens);
+            let col = e.span.col;
             if e.bare {
                 let class = e.class;
                 let msg = &e.message;
@@ -181,51 +207,6 @@ fn eval_diagnostic(form: &str, e: &SourceError) -> String {
     }
 }
 
-/// Undo the [`EVAL_PREFIX`] shift and clamp to the input's own
-/// width: line 1 loses the prefix width, and every line caps at
-/// end-of-line + 1. (The form starts where the prefix ends, so
-/// line-1 spans into it always clear the width; spans past end + 1
-/// are suffix-absorption artifacts — the wrap's closers skew
-/// EOF-position spans — so the clamp restores the input's own EOF.)
-fn dewrap_col(line: u32, col: u32, lens: &[usize]) -> u32 {
-    let shifted = if line == 1 {
-        col.saturating_sub(EVAL_PREFIX.len() as u32).max(1)
-    } else {
-        col
-    };
-    let idx = (line.max(1) as usize) - 1;
-    match lens.get(idx) {
-        Some(len) => shifted
-            .min(u32::try_from(len + 1).unwrap_or(u32::MAX))
-            .max(1),
-        None => shifted,
-    }
-}
-
-/// Char lengths per normalized line (`\r\n`/`\r` break lines, like
-/// the reader's stream).
-fn line_lens(src: &str) -> Vec<usize> {
-    let mut lens = vec![0usize];
-    let mut chars = src.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '\n' {
-            lens.push(0);
-            continue;
-        }
-        if c == '\r' {
-            if chars.peek() == Some(&'\n') {
-                chars.next();
-            }
-            lens.push(0);
-            continue;
-        }
-        if let Some(last) = lens.last_mut() {
-            *last += 1;
-        }
-    }
-    lens
-}
-
 /// The wrapper line minus its ` at (site).` tail, e.g. `Syntax error
 /// compiling if` (`CompileError::wrapper` always ends with one; the
 /// whole line is the fallback).
@@ -237,8 +218,18 @@ fn compile_head(wrapper: &str) -> &str {
 }
 
 fn cmd_run(file: &Path, args: &[String]) -> ExitCode {
-    if !file.is_file() {
+    if !file.exists() {
         eprintln!("run: no such file: {}", file.display());
+        return ExitCode::from(3);
+    }
+    if file.is_dir() {
+        eprintln!("run: is a directory: {}", file.display());
+        return ExitCode::from(3);
+    }
+    // Read-time IO failures (permissions, races) are C8 exit 3 —
+    // before `load-file` can reframe them as eval errors.
+    if let Err(e) = std::fs::File::open(file) {
+        eprintln!("run: cannot open {}: {e}", file.display());
         return ExitCode::from(3);
     }
     let path = file.to_string_lossy();
@@ -307,8 +298,9 @@ const COMPILER_EXCEPTION: &str = "clojure.lang.Compiler$CompilerException";
 fn run_diagnostic(path: &str, e: &SourceError) -> String {
     match e {
         SourceError::Reader(e) => {
+            let span = e.span();
             let msg = e.message();
-            format!("{path}:1:1: {msg}")
+            format!("{path}:{}:{}: {msg}", span.line, span.col)
         }
         SourceError::Compile(e) => {
             if e.bare {
@@ -362,14 +354,12 @@ fn load_site(message: &str) -> Option<(u32, u32)> {
     Some((line, col))
 }
 
-/// The eval pre-scan: whether the input holds code outside comments,
-/// the first non-EDN reader lexeme (if any), and the unbalanced-input
-/// EOF site (if any: first unclosed opener's line plus the input's own
-/// end position).
+/// The eval pre-scan: whether the input holds code outside
+/// comments/whitespace, and the first non-EDN reader lexeme (if
+/// any). Balance is the reader's job (it reports real spans).
 struct EvalScan {
     has_code: bool,
     edn_violation: Option<EdnViolation>,
-    unclosed_eof: Option<(u32, u32, u32)>,
 }
 
 /// A non-EDN reader lexeme and its 1-based position.
@@ -379,27 +369,15 @@ struct EdnViolation {
     lexeme: String,
 }
 
-/// Whether a closer matches its opener kind.
-fn opener_matches(open: char, close: char) -> bool {
-    matches!((open, close), ('(', ')') | ('[', ']') | ('{', '}'))
-}
-
 /// One pass over eval input, tracking line/col while skipping string
-/// bodies, `;` comments, and `\` char literals. Commas and ASCII
-/// whitespace are blank (mirroring the reader's `is_whitespace` for
-/// the ASCII range); entering a string counts as code, so an
-/// unterminated string still reaches the reader's diagnostic. Openers
-/// and closers also feed a depth stack so unclosed input (which the
-/// eval wrap would silently balance) is reported instead of run.
+/// bodies, `;`/`#!` comments, and `\` char literals. Commas and
+/// `char::is_whitespace` are blank; entering a string counts as code,
+/// so an unterminated string still reaches the reader's diagnostic.
 struct EvalScanner<'a> {
     chars: std::iter::Peekable<std::str::Chars<'a>>,
     line: u32,
     col: u32,
     scan: EvalScan,
-    stack: Vec<(char, u32)>,
-    stack_clean: bool,
-    ended_in_string: bool,
-    bumpable: bool,
 }
 
 impl<'a> EvalScanner<'a> {
@@ -411,12 +389,7 @@ impl<'a> EvalScanner<'a> {
             scan: EvalScan {
                 has_code: false,
                 edn_violation: None,
-                unclosed_eof: None,
             },
-            stack: Vec::new(),
-            stack_clean: true,
-            ended_in_string: false,
-            bumpable: false,
         }
     }
 
@@ -429,79 +402,63 @@ impl<'a> EvalScanner<'a> {
                 ';' => self.skip_comment(),
                 '"' => {
                     self.scan.has_code = true;
-                    self.skip_string_counted();
+                    self.skip_string();
                 }
                 '\\' => {
                     self.scan.has_code = true;
                     self.skip_char_tail();
                 }
-                '#' => {
-                    self.scan.has_code = true;
-                    self.hash_dispatch(at_line, at_col);
-                }
+                '#' => self.hash_dispatch(at_line, at_col),
                 '\'' | '`' | '~' | '@' | '^' => {
                     self.scan.has_code = true;
                     self.flag_edn(at_line, at_col, c.to_string());
                 }
-                '(' | '[' | '{' => {
+                ':' => {
                     self.scan.has_code = true;
-                    self.stack.push((c, at_line));
+                    self.colon_dispatch(at_line, at_col);
                 }
-                ')' | ']' | '}' => {
-                    self.scan.has_code = true;
-                    self.close(c);
-                }
-                _ if c.is_ascii_whitespace() || c == ',' => {}
+                _ if c.is_whitespace() || c == ',' => {}
                 _ => {
                     self.scan.has_code = true;
                 }
             }
         }
-        self.finish_unclosed();
         self.scan
     }
 
-    /// One `#` dispatch: flag the `#x` lexeme as non-EDN (a regex
-    /// body skins string rules — escapes honored — so its parens
-    /// must not skew the depth count).
+    /// One `#` dispatch: flag the `#x` lexeme as non-EDN. `#_` is
+    /// valid EDN (no flag); `#!` is a line comment (skipped, holds
+    /// no code by itself); a regex body skins string rules (escapes
+    /// honored) so its contents flag nothing.
     fn hash_dispatch(&mut self, at_line: u32, at_col: u32) {
         match self.chars.peek().copied() {
-            Some(d) if matches!(d, '(' | '"' | '\'' | '_' | '?' | '!' | '=' | ':') => {
+            Some('!') => {
+                self.next();
+                self.advance('!');
+                self.skip_comment();
+            }
+            Some(d) if matches!(d, '(' | '"' | '\'' | '?' | '=' | ':' | '#') => {
+                self.scan.has_code = true;
                 self.flag_edn(at_line, at_col, format!("#{d}"));
                 self.next();
                 self.advance(d);
                 if d == '"' {
-                    self.skip_string_counted();
+                    self.skip_string();
                 }
             }
-            _ => {}
-        }
-    }
-
-    /// Clean-but-unclosed input (still in code at EOF, not inside
-    /// a string) earns the reader's EOF diagnostic; mismatches and
-    /// stray closers go to the reader itself (clamped spans). The
-    /// EOF site mirrors the reader's line-bump rule (col 1, line
-    /// bumped past a non-empty last line).
-    /// (Match guards, not let-chains: MSRV 1.85.)
-    fn finish_unclosed(&mut self) {
-        match self.stack.first() {
-            Some((_, open_line)) if self.stack_clean && !self.ended_in_string => {
-                let end_line = self.line + u32::from(self.bumpable);
-                self.scan.unclosed_eof = Some((*open_line, end_line, 1));
-            }
-            _ => {}
-        }
-    }
-
-    /// Pop one opener for a closer; underflow or kind mismatch marks
-    /// the stack unclean (the reader reports those itself).
-    fn close(&mut self, c: char) {
-        match self.stack.pop() {
-            Some((open, _)) if opener_matches(open, c) => {}
             _ => {
-                self.stack_clean = false;
+                self.scan.has_code = true;
             }
+        }
+    }
+
+    /// A `::` opener is non-EDN (auto-resolve needs ns context);
+    /// single-`:` keywords stay valid.
+    fn colon_dispatch(&mut self, at_line: u32, at_col: u32) {
+        if self.chars.peek() == Some(&':') {
+            self.flag_edn(at_line, at_col, "::".to_owned());
+            self.next();
+            self.advance(':');
         }
     }
 
@@ -518,16 +475,13 @@ impl<'a> EvalScanner<'a> {
         Some(c)
     }
 
-    /// Consume one already-read char's worth of position (plus the
-    /// reader's EOF bump flag: set by content, cleared by newlines).
+    /// Consume one already-read char's worth of position.
     fn advance(&mut self, c: char) {
         if c == '\n' {
             self.line += 1;
             self.col = 1;
-            self.bumpable = false;
         } else {
             self.col += 1;
-            self.bumpable = true;
         }
     }
 
@@ -538,7 +492,7 @@ impl<'a> EvalScanner<'a> {
         }
     }
 
-    /// Skip a `;` comment body (the newline re-syncs position).
+    /// Skip a `;`/`#!` comment body (the newline re-syncs position).
     fn skip_comment(&mut self) {
         while let Some(d) = self.next() {
             self.advance(d);
@@ -548,10 +502,8 @@ impl<'a> EvalScanner<'a> {
         }
     }
 
-    /// Skip a string body after the opening quote (escapes honored),
-    /// noting an EOF inside (the reader's string/regex diagnostic
-    /// then wins over the unbalanced-input one).
-    fn skip_string_counted(&mut self) {
+    /// Skip a string body after the opening quote (escapes honored).
+    fn skip_string(&mut self) {
         while let Some(d) = self.next() {
             self.advance(d);
             if d == '\\' {
@@ -564,7 +516,6 @@ impl<'a> EvalScanner<'a> {
                 return;
             }
         }
-        self.ended_in_string = true;
     }
 
     /// Skip a char literal's tail after the backslash (one char plus
@@ -617,7 +568,7 @@ fn cmd_repl(history_file: Option<PathBuf>, no_history: bool) -> ExitCode {
     let stdout = std::io::stdout();
     let mut session = clj_repl::Session::new(boot(), std::io::empty(), stdout.lock());
     session.set_prompt(Some("{ns}=> ".to_owned()));
-    let names = core_names(&mut session);
+    let names = clj_repl::core_names(session.evaluator_mut());
     let source = match clj_repl::RustyLineSource::new(names, clj_repl::read_is_complete) {
         Ok(source) => source,
         Err(msg) => {
@@ -675,45 +626,4 @@ impl<W: std::io::Write> clj_repl::LineHandler for SessionHandler<W> {
         }
         clj_repl::LoopAction::Continue
     }
-}
-
-/// Push the unqualified name of every symbol in `items`.
-fn push_symbol_names<'a>(
-    names: &mut Vec<String>,
-    items: impl Iterator<Item = &'a clj_value::Value>,
-) {
-    use clj_value::Value;
-    for item in items {
-        if let Value::Symbol(sym) = item {
-            names.push(sym.name().to_owned());
-        }
-    }
-}
-
-/// The completion vocabulary: every interned `clojure.core` public
-/// name (plus the `*1`/`*e` session vars, which users reach for in
-/// a repl). Read once at startup; later `def`s complete next time.
-fn core_names(session: &mut clj_repl::Session<std::io::Empty, impl std::io::Write>) -> Vec<String> {
-    use clj_value::Value;
-    let mut names = vec![
-        "*1".to_owned(),
-        "*2".to_owned(),
-        "*3".to_owned(),
-        "*e".to_owned(),
-    ];
-    let listed = session
-        .evaluator_mut()
-        .eval_source("(keys (ns-publics 'clojure.core))");
-    if let Ok(values) = listed {
-        for value in values {
-            match &value {
-                Value::List(items) => push_symbol_names(&mut names, items.iter()),
-                Value::Vector(items) => push_symbol_names(&mut names, items.iter()),
-                _ => {}
-            }
-        }
-    }
-    names.sort();
-    names.dedup();
-    names
 }
