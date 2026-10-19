@@ -11,9 +11,9 @@
   {
    "file": "crates/clj-eval/src/eval.rs",
    "function": "Evaluator::eval",
-   "cyclomatic": 42.0,
+   "cyclomatic": 43.0,
    "cognitive": 8.0,
-   "justification": "one arm per Expr variant; arms delegate to small-step helpers. S5B adds the WithRedefs/WithBindings/BoundFn arms; S5C the DefMacro/Declare/Ns arms. S5D adds the Assert/CaseStar/LazySeqStar/Time/WithOutStr arms. S6A adds the DelayStar arm."
+   "justification": "one arm per Expr variant; arms delegate to small-step helpers. S5B adds the WithRedefs/WithBindings/BoundFn arms; S5C the DefMacro/Declare/Ns arms. S5D adds the Assert/CaseStar/LazySeqStar/Time/WithOutStr arms. S6A adds the DelayStar arm. S6D adds the Locking arm."
   },
   {
    "file": "crates/clj-eval/src/eval.rs",
@@ -25,9 +25,9 @@
   {
    "file": "crates/clj-eval/src/expr.rs",
    "function": "Analyzer<'a>::analyze_special",
-   "cyclomatic": 32.0,
+   "cyclomatic": 33.0,
    "cognitive": 2.0,
-   "justification": "one arm per special form; dispatch to per-form parsers. S5B adds the with-redefs/with-bindings/bound-fn arms; S5C the defmacro/declare/ns arms. S5D adds the assert/time/with-out-str/lazy-seq*/case* arms. S6A adds the delay* arm."
+   "justification": "one arm per special form; dispatch to per-form parsers. S5B adds the with-redefs/with-bindings/bound-fn arms; S5C the defmacro/declare/ns arms. S5D adds the assert/time/with-out-str/lazy-seq*/case* arms. S6A adds the delay* arm. S6D adds the locking arm."
   },
   {
    "file": "crates/clj-eval/src/ext.rs",

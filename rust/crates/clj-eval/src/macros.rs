@@ -42,6 +42,7 @@ pub(crate) const BUILTIN_MACROS: &[&str] = &[
     "assert",
     "time",
     "with-out-str",
+    "locking",
 ];
 
 /// A resolved macro's current root (the call runs it with

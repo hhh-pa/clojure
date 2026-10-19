@@ -2693,3 +2693,291 @@ fn agent_restart_after_shutdown() {
     assert_eq!(run_last(&mut eval, "(restart-agent s6c-rs 10)"), "10");
     assert_eq!(run_last(&mut eval, "@s6c-rs"), "10");
 }
+
+#[test]
+fn set_error_handler_rows() {
+    let mut eval = boot();
+    // The `void` setter returns nil — installing and clearing alike.
+    run(&mut eval, "(def s6d-sh (agent 0 :error-mode :continue))");
+    assert_eq!(
+        run_last(&mut eval, "(set-error-handler! s6d-sh (fn [a e] :h))"),
+        "nil"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(set-error-handler! s6d-sh nil)"),
+        "nil"
+    );
+    // The installed handler fires on the NEXT failure (observed via
+    // a promise; the queue proceeds under `:continue`).
+    run(&mut eval, "(def s6d-hp (promise))");
+    run(
+        &mut eval,
+        "(set-error-handler! s6d-sh (fn [ag ex] (deliver s6d-hp [(= ag s6d-sh) (ex-message ex)])))",
+    );
+    run(
+        &mut eval,
+        "(send s6d-sh (fn [s] (throw (ex-info \"sh\" {}))))",
+    );
+    run(&mut eval, "(send s6d-sh inc)");
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "[@s6d-hp (await s6d-sh) @s6d-sh (agent-error s6d-sh)]"
+        ),
+        "[[true \"sh\"] nil 1 nil]"
+    );
+    // A cleared handler stays silent on later failures.
+    run(&mut eval, "(set-error-handler! s6d-sh nil)");
+    run(&mut eval, "(def s6d-hp2 (promise))");
+    run(
+        &mut eval,
+        "(send s6d-sh (fn [s] (throw (ex-info \"sh2\" {}))))",
+    );
+    run(&mut eval, "(send s6d-sh inc)");
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "[(await s6d-sh) @s6d-sh (agent-error s6d-sh) (realized? s6d-hp2)]"
+        ),
+        "[nil 2 nil false]"
+    );
+    // Shapes: nil-agent NPE, non-agent `Agent` cast, non-fn `IFn`
+    // cast (the single overload compiles to a checkcast, P6).
+    assert_eq!(
+        uncaught(&mut eval, "(set-error-handler! nil (fn [a e]))"),
+        "java.lang.NullPointerException | Cannot invoke \"clojure.lang.Agent.setErrorHandler(clojure.lang.IFn)\" because \"a\" is null"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(set-error-handler! 42 (fn [a e]))"),
+        cce("java.lang.Long", "clojure.lang.Agent")
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(set-error-handler! s6d-sh 42)"),
+        cce("java.lang.Long", "clojure.lang.IFn")
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(set-error-handler! s6d-sh)"),
+        "clojure.lang.ArityException | Wrong number of args (1) passed to: clojure.core/set-error-handler!"
+    );
+}
+
+#[test]
+fn set_error_mode_rows() {
+    let mut eval = boot();
+    // The `void` setter returns nil; `:continue` clears the next failure.
+    run(&mut eval, "(def s6d-sm (agent 0))");
+    assert_eq!(
+        run_last(&mut eval, "(set-error-mode! s6d-sm :continue)"),
+        "nil"
+    );
+    run(
+        &mut eval,
+        "(send s6d-sm (fn [s] (throw (ex-info \"x\" {}))))",
+    );
+    run(&mut eval, "(send s6d-sm inc)");
+    assert_eq!(
+        run_last(&mut eval, "[(await s6d-sm) @s6d-sm (agent-error s6d-sm)]"),
+        "[nil 1 nil]"
+    );
+    // `:fail` latches the next failure instead.
+    run(&mut eval, "(set-error-mode! s6d-sm :fail)");
+    run(
+        &mut eval,
+        "(send s6d-sm (fn [s] (throw (ex-info \"y\" {}))))",
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(try (await s6d-sm) (catch RuntimeException e :failed))"
+        ),
+        ":failed"
+    );
+    assert_eq!(
+        run_last(&mut eval, "[(nil? (agent-error s6d-sm)) @s6d-sm]"),
+        "[false 1]"
+    );
+    // A bogus mode behaves as `:fail` (like the ctor).
+    run(&mut eval, "(restart-agent s6d-sm 1)");
+    run(&mut eval, "(set-error-mode! s6d-sm :bogus)");
+    run(
+        &mut eval,
+        "(send s6d-sm (fn [s] (throw (ex-info \"z\" {}))))",
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(try (await s6d-sm) (catch RuntimeException e :failed))"
+        ),
+        ":failed"
+    );
+    // ... as does nil (the checkcast passes it through, P6).
+    run(&mut eval, "(restart-agent s6d-sm 1)");
+    assert_eq!(run_last(&mut eval, "(set-error-mode! s6d-sm nil)"), "nil");
+    run(
+        &mut eval,
+        "(send s6d-sm (fn [s] (throw (ex-info \"w\" {}))))",
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(try (await s6d-sm) (catch RuntimeException e :failed))"
+        ),
+        ":failed"
+    );
+    // Shapes: nil-agent NPE, non-agent `Agent` cast, non-keyword
+    // `Keyword` cast.
+    assert_eq!(
+        uncaught(&mut eval, "(set-error-mode! nil :continue)"),
+        "java.lang.NullPointerException | Cannot invoke \"clojure.lang.Agent.setErrorMode(clojure.lang.Keyword)\" because \"a\" is null"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(set-error-mode! 42 :continue)"),
+        cce("java.lang.Long", "clojure.lang.Agent")
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(set-error-mode! s6d-sm \"continue\")"),
+        cce("java.lang.String", "clojure.lang.Keyword")
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(set-error-mode! s6d-sm)"),
+        "clojure.lang.ArityException | Wrong number of args (1) passed to: clojure.core/set-error-mode!"
+    );
+}
+
+#[test]
+fn locking_rows() {
+    let mut eval = boot();
+    // The body's value (implicit `do`; empty body is nil).
+    assert_eq!(run_last(&mut eval, "(locking \"x\" 1 2 3)"), "3");
+    assert_eq!(run_last(&mut eval, "(locking \"x\")"), "nil");
+    // The lockee evaluates once, before the body.
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [n (atom 0)] (locking (do (swap! n inc) :l) :body) @n)"
+        ),
+        "1"
+    );
+    // Reentrant: nested `locking` on one thread proceeds.
+    assert_eq!(
+        run_last(&mut eval, "(locking :a (locking :b :inner))"),
+        ":inner"
+    );
+    // A throwing body still releases: the next `locking` proceeds.
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(try (locking :a (throw (ex-info \"t\" {}))) (catch Exception e :caught)) (locking :a :after)"
+        ),
+        ":after"
+    );
+    // A nil lockee is the synchronized-block NPE (the JVM embeds a
+    // gensym'd local, so the port fixes the lock name — P6).
+    assert_eq!(
+        uncaught(&mut eval, "(locking nil 1)"),
+        "java.lang.NullPointerException | Cannot enter synchronized block because \"lock\" is null"
+    );
+    // Bare arity matches the macro's.
+    assert_eq!(
+        uncaught(&mut eval, "(locking)"),
+        "clojure.lang.ArityException | Wrong number of args (0) passed to: clojure.core/locking"
+    );
+    // A builtin: `macroexpand-1` is identity.
+    assert_eq!(
+        run_last(&mut eval, "(macroexpand-1 '(locking x 1))"),
+        "(locking x 1)"
+    );
+}
+
+#[test]
+fn locking_mutual_exclusion() {
+    let mut eval = boot();
+    // Racing read-modify-writes under the monitor total exactly (a
+    // lost update would park the sum below the trip count).
+    run(&mut eval, "(def s6d-lc (atom 0))");
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(doall (map deref (map (fn [_] (future (dotimes [_ 200] (locking s6d-lc (let [v @s6d-lc] (reset! s6d-lc (inc v))))))) (range 8)))) @s6d-lc"
+        ),
+        "1600"
+    );
+}
+
+#[test]
+fn pmap_rows() {
+    let mut eval = boot();
+    // Values in order (the port's lookahead is 6: sizes below, on,
+    // and above the boundary all agree).
+    for n in [0, 1, 5, 6, 7, 20, 100] {
+        let got = run_last(&mut eval, &format!("(vec (pmap #(* 2 %) (range {n})))"));
+        let want: Vec<String> = (0..n).map(|i| (2 * i).to_string()).collect();
+        assert_eq!(
+            got,
+            format!("[{}]", want.join(" ")),
+            "pmap over (range {n})"
+        );
+    }
+    // Multi-colls stop at the shortest (like `map`).
+    assert_eq!(
+        run_last(&mut eval, "(vec (pmap + [1 2 3] [10 20]))"),
+        "[11 22]"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(vec (pmap vector [1 2] [:a :b] [true false]))"),
+        "[[1 :a true] [2 :b false]]"
+    );
+    // A lazy seq: unrealized until consumed ...
+    run(
+        &mut eval,
+        "(def s6d-pm (pmap (fn [x] (throw (ex-info \"p\" {}))) [1 2 3]))",
+    );
+    assert_eq!(
+        run_last(&mut eval, "[(seq? s6d-pm) (realized? s6d-pm)]"),
+        "[true false]"
+    );
+    // ... and failures surface (wrapped, like futures) only on
+    // consumption.
+    assert_eq!(
+        uncaught(&mut eval, "(doall s6d-pm)"),
+        "java.util.concurrent.ExecutionException | clojure.lang.ExceptionInfo: p {}"
+    );
+    // Bodies see the spawning thread's bindings (`future-call`
+    // conveys them).
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(do (def ^:dynamic s6d-px 1) (binding [s6d-px 2] (vec (pmap (fn [x] s6d-px) [1 2 3]))))"
+        ),
+        "[2 2 2]"
+    );
+}
+
+#[test]
+fn pcalls_rows() {
+    let mut eval = boot();
+    assert_eq!(
+        run_last(&mut eval, "(vec (pcalls (fn [] 1) (fn [] 2) (fn [] 3)))"),
+        "[1 2 3]"
+    );
+    assert_eq!(run_last(&mut eval, "(vec (pcalls))"), "[]");
+    assert_eq!(run_last(&mut eval, "(seq? (pcalls (fn [] 1)))"), "true");
+}
+
+#[test]
+fn pvalues_rows() {
+    let mut eval = boot();
+    assert_eq!(
+        run_last(&mut eval, "(vec (pvalues 1 (+ 1 1) :a))"),
+        "[1 2 :a]"
+    );
+    assert_eq!(run_last(&mut eval, "(vec (pvalues))"), "[]");
+    // Every expr evaluates (all side effects land).
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [n (atom 0)] (doall (pvalues (swap! n inc) (swap! n inc) (swap! n inc))) @n)"
+        ),
+        "3"
+    );
+}

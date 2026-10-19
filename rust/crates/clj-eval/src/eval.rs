@@ -559,6 +559,7 @@ impl Evaluator {
                 env.clone(),
             )),
             Expr::DelayStar { display, body } => Ok(self.eval_delay_star(display, body, env)),
+            Expr::Locking { lockee, body } => self.eval_locking(lockee, body, env),
             Expr::CaseStar {
                 expr,
                 shift,
@@ -1259,6 +1260,25 @@ impl Evaluator {
         Value::Delay(Delay::new(Value::Extension(Arc::new(closure))))
     }
 
+    /// `(locking lockee body…)`: evaluate the lockee once, hold the
+    /// global monitor over the implicit-`do` body, return its value
+    /// (nil for an empty body). A nil lockee is the JVM's
+    /// synchronized-block NPE — with a port-fixed lock name (the JVM
+    /// embeds a gensym'd local, P6). The guard drops on every exit
+    /// path (values, throws, `recur` signals, panics), so the
+    /// monitor always releases.
+    fn eval_locking(&mut self, lockee: &Expr, body: &[Expr], env: &Env) -> Result<Value, Signal> {
+        let target = self.eval(lockee, env)?;
+        if matches!(target, Value::Nil) {
+            return Err(self.throw(NativeError::new(
+                ThrowClass::NullPointerException,
+                "Cannot enter synchronized block because \"lock\" is null".to_owned(),
+            )));
+        }
+        let _guard = crate::concurrency::locking_acquire();
+        self.eval_body(body, env)
+    }
+
     /// The §E7 `IFn` table: closures/natives, keywords, symbols,
     /// vectors, maps, sets, vars (deref-and-delegate), unbounds
     /// (the `IllegalStateException`), promises (one arg delivers),
@@ -1545,11 +1565,11 @@ impl Evaluator {
             // `destvec*` binds `gseq` to `(seq gvec)`: the `&`
             // pattern gets a seq (`nil` when empty) and
             // non-seqables raise the `ISeq` error (§E12).
-            let mut current = self.seq_val(value)?;
+            let mut current = self.destructure_gseq(value)?;
             for fixed in &pat.fixed {
-                let first = first_of(&current);
+                let first = crate::lazy::first_value(self, &current)?;
                 let _ = self.destructure(fixed, &first, env, out, ForceSet::default())?;
-                current = next_of(&current);
+                current = crate::lazy::next_value(self, &current)?;
             }
             if let Some(rest) = &pat.rest {
                 let _ = self.destructure(rest, &current, env, out, ForceSet::default())?;
@@ -1559,6 +1579,16 @@ impl Evaluator {
             out.push(value.clone());
         }
         Ok(())
+    }
+
+    /// The `&`-pattern `gseq`: seq values (S6D: `pmap`'s `rets`)
+    /// coerce through the canonical `seq` (which forces), while
+    /// concrete collections keep `seq_val`'s eager lists.
+    fn destructure_gseq(&mut self, value: &Value) -> Result<Value, Signal> {
+        match value {
+            Value::Extension(_) => crate::lazy::seq_value(self, value),
+            _ => self.seq_val(value),
+        }
     }
 
     /// `destmap*`: seq-convert, eager `:or`, entries, keys,
@@ -2143,24 +2173,6 @@ fn nth_or_nil(coll: &Value, i: usize, eval: &mut Evaluator) -> Result<Value, Sig
     }
 }
 
-/// `first`: head element (map entries as 2-vectors), `nil` when
-/// empty or unsupported.
-fn first_of(coll: &Value) -> Value {
-    match coll {
-        Value::Nil => Value::Nil,
-        Value::Vector(v) => v.iter().next().cloned().unwrap_or(Value::Nil),
-        Value::List(l) => l.iter().next().cloned().unwrap_or(Value::Nil),
-        Value::Str(s) => s.chars().next().map(Value::Char).unwrap_or(Value::Nil),
-        Value::Map(m) => m
-            .iter()
-            .next()
-            .map(|(k, v)| Value::Vector(Vector::from_vec(vec![k.clone(), v.clone()])))
-            .unwrap_or(Value::Nil),
-        Value::Set(s) => s.iter().next().cloned().unwrap_or(Value::Nil),
-        _ => Value::Nil,
-    }
-}
-
 impl Evaluator {
     /// `clojure.lang.RT.seq`: `nil` in, `nil` out; empties to
     /// `nil`; vectors/strings/sets to element lists; maps to
@@ -2210,27 +2222,6 @@ impl Evaluator {
         } else {
             Value::List(List::from_vec(elems))
         }
-    }
-}
-
-/// `next`: the tail as a list, `nil` when empty or unsupported.
-fn next_of(coll: &Value) -> Value {
-    let tail: Vec<Value> = match coll {
-        Value::Vector(v) => v.iter().skip(1).cloned().collect(),
-        Value::List(l) => l.iter().skip(1).cloned().collect(),
-        Value::Str(s) => s.chars().skip(1).map(Value::Char).collect(),
-        Value::Map(m) => m
-            .iter()
-            .skip(1)
-            .map(|(k, v)| Value::Vector(Vector::from_vec(vec![k.clone(), v.clone()])))
-            .collect(),
-        Value::Set(s) => s.iter().skip(1).cloned().collect(),
-        _ => Vec::new(),
-    };
-    if tail.is_empty() {
-        Value::Nil
-    } else {
-        Value::List(List::from_vec(tail))
     }
 }
 

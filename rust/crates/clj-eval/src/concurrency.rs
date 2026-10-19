@@ -30,6 +30,10 @@
 //! Oracles: `/tmp/s6c-probe*.clj`; rules:
 //! `docs/t1174/concurrency-contract.md`, `docs/t1174/s6-pins.md` P5.
 //!
+//! S6D adds `set-error-handler!`/`set-error-mode!` and the `locking`
+//! monitor (one global reentrant lock; oracles: `/tmp/s6d-probe*.clj`;
+//! pins P6).
+//!
 //! Publish discipline: validators run BEFORE publishing (vetoes and
 //! `f` failures leave the state untouched and fire no watches);
 //! watches fire AFTER publishing, lock-free, even when the value is
@@ -1598,6 +1602,113 @@ fn native_shutdown_agents(eval: &mut Evaluator, args: &[Value]) -> Result<Value,
     Ok(Value::Nil)
 }
 
+/// `set-error-handler!`: install (or clear, with nil) the cell's
+/// handler. The JVM's single-overload call compiles to a checkcast
+/// (probed: a bad handler is the `IFn` CCE, not a Reflector
+/// mismatch), and the `void` setter returns nil.
+fn native_set_error_handler(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.core/set-error-handler!", args, &[2])?;
+    let agent = as_agent(
+        &args[0],
+        "Cannot invoke \"clojure.lang.Agent.setErrorHandler(clojure.lang.IFn)\" because \"a\" is null",
+    )?;
+    if !matches!(&args[1], Value::Nil) && !is_ifn(&args[1]) {
+        return Err(cce_err(&args[1], "clojure.lang.IFn"));
+    }
+    agent.lock().error_handler = match &args[1] {
+        Value::Nil => None,
+        handler => Some(handler.clone()),
+    };
+    Ok(Value::Nil)
+}
+
+/// `set-error-mode!`: install the cell's mode (`:continue` continues
+/// past the next failure, anything else — including nil, which the
+/// JVM's checkcast passes through — latches it, since the worker
+/// compares against `CONTINUE`). The `void` setter returns nil.
+fn native_set_error_mode(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.core/set-error-mode!", args, &[2])?;
+    let agent = as_agent(
+        &args[0],
+        "Cannot invoke \"clojure.lang.Agent.setErrorMode(clojure.lang.Keyword)\" because \"a\" is null",
+    )?;
+    if !matches!(&args[1], Value::Nil) && !matches!(&args[1], Value::Keyword(_)) {
+        return Err(cce_err(&args[1], "clojure.lang.Keyword"));
+    }
+    agent.lock().error_mode = if args[1] == Value::Keyword(Keyword::new(None, "continue")) {
+        ErrorMode::Continue
+    } else {
+        ErrorMode::Fail
+    };
+    Ok(Value::Nil)
+}
+
+/// The `locking` monitor: one process-global reentrant lock (every
+/// forked evaluator shares it, so futures and agent actions mutually
+/// exclude; per-object monitors would be observably identical — only
+/// timing differs — and `std::Mutex` is non-reentrant, so ownership
+/// is tracked explicitly for nested `locking` on one thread).
+struct LockingMonitor {
+    state: Mutex<LockingState>,
+}
+
+struct LockingState {
+    owner: Option<thread::ThreadId>,
+    count: u64,
+}
+
+impl LockingMonitor {
+    const fn new() -> Self {
+        Self {
+            state: Mutex::new(LockingState {
+                owner: None,
+                count: 0,
+            }),
+        }
+    }
+}
+
+static LOCKING_MONITOR: LockingMonitor = LockingMonitor::new();
+
+/// One held `locking` monitor: released on drop (Rust-side, so body
+/// throws and panics both release — no `finally` needed).
+pub(crate) struct LockingGuard {
+    _held: (),
+}
+
+impl Drop for LockingGuard {
+    fn drop(&mut self) {
+        let mut state = LOCKING_MONITOR
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        state.count -= 1;
+        if state.count == 0 {
+            state.owner = None;
+        }
+    }
+}
+
+/// Hold the `locking` monitor (reentrant on the calling thread;
+/// contended threads yield-spin — critical sections are short).
+pub(crate) fn locking_acquire() -> LockingGuard {
+    let me = thread::current().id();
+    loop {
+        {
+            let mut state = LOCKING_MONITOR
+                .state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if state.owner.is_none_or(|owner| owner == me) {
+                state.owner = Some(me);
+                state.count += 1;
+                return LockingGuard { _held: () };
+            }
+        }
+        thread::yield_now();
+    }
+}
+
 /// The S6A/S6B/S6C natives installed into `clojure.core` by
 /// [`boot`](crate::ns::boot).
 pub(crate) const CONC_NATIVES: &[(&str, NativeFnPtr)] = &[
@@ -1625,4 +1736,6 @@ pub(crate) const CONC_NATIVES: &[(&str, NativeFnPtr)] = &[
     ("agent-error", native_agent_error),
     ("restart-agent", native_restart_agent),
     ("shutdown-agents", native_shutdown_agents),
+    ("set-error-handler!", native_set_error_handler),
+    ("set-error-mode!", native_set_error_mode),
 ];

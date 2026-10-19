@@ -65,3 +65,29 @@ Probes: `/tmp/s6-probe{,2,3,4}.clj` against the repo-built
 - 3-arity `deref` casts to `java.util.concurrent.Future`
   FIRST: atoms AND delays throw `ClassCastException` to
   `Future` (only futures/promises accept timeouts).
+
+## P6 setters/locking (`/tmp/s6d-probe{,2}.clj`)
+
+- Both setters return **`nil`** (the `void` Java methods), never
+  the agent — including the nil-accepting arities.
+- `set-error-handler!` accepts nil (clears); a non-fn is the
+  `IFn` CCE (the single overload compiles to a checkcast, NOT a
+  Reflector mismatch). The installed handler fires on the next
+  failure with `[agent error]`.
+- `set-error-mode!` accepts nil (mode reads nil, behaves as
+  `:fail` — the worker compares against `CONTINUE`); `:bogus`
+  assigns fine and behaves as `:fail`; a non-keyword is the
+  `Keyword` CCE.
+- Nil agents: `NullPointerException |
+  Cannot invoke "clojure.lang.Agent.setErrorHandler(clojure.lang.IFn)"
+  because "a" is null` (resp. `setErrorMode(clojure.lang.Keyword)`);
+  non-agents: the `Agent` CCE.
+- `(locking nil 1)` → `NullPointerException | Cannot enter
+  synchronized block because "locklocal__5902__auto__171" is null`
+  — the lock name is a GENSYM (PORT-FIXED: the port reports
+  `"lock"`). `(locking)` → `ArityException | Wrong number of
+  args (0) passed to: clojure.core/locking`; empty body → `nil`;
+  multi-body → last value.
+- CAUTION: `await` on a `:fail` agent whose barrier won the race
+  hangs the JVM (the barrier parks behind the latched error);
+  probes must `sleep` for the latch or use `await-for`.

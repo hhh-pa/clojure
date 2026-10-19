@@ -458,14 +458,14 @@ machine-read — keep `| var | status | notes |` rows exact.
 | `agent` | implemented | concurrency.rs agent_ctor_rows (meta/validator/handler/mode options; validates initial) |
 | `agent-error` | implemented | concurrency.rs agent_error_mode_rows (latched throwable or nil) |
 | `restart-agent` | implemented | concurrency.rs agent_restart_rows (new state; clears; :clear-actions; validates) |
-| `set-error-handler!` | out-of-scope | S6 concurrency |
-| `set-error-mode!` | out-of-scope | S6 concurrency |
+| `set-error-handler!` | implemented | concurrency.rs set_error_handler_rows (nil clears; void→nil; fires on next failure) |
+| `set-error-mode!` | implemented | concurrency.rs set_error_mode_rows (void→nil; :bogus/nil behave as :fail) |
 | `add-watch` | implemented | concurrency.rs watch_rows (returns ref, [k ref old new]) |
 | `remove-watch` | implemented | concurrency.rs watch_rows (returns ref, missing keys no-op) |
-| `locking` | out-of-scope | S6 concurrency |
-| `pvalues` | out-of-scope | S6 concurrency |
-| `pcalls` | out-of-scope | S6 concurrency |
-| `pmap` | out-of-scope | S6 concurrency |
+| `locking` | divergent | analyzer builtin (S6D); single global reentrant monitor; resolves as macro; `macroexpand-1` identity (documented) |
+| `pvalues` | implemented | concurrency.rs pvalues_rows (core.clj port over pcalls) |
+| `pcalls` | implemented | concurrency.rs pcalls_rows (core.clj port over pmap) |
+| `pmap` | implemented | concurrency.rs pmap_rows (core.clj port; fixed lookahead 6; lazy) |
 | `memoize` | implemented | concurrency.rs memoize_rows (core.clj port, find-based cache) |
 | `ref` | out-of-scope | STM (N4): never |
 | `dosync` | out-of-scope | STM (N4): never |

@@ -255,6 +255,14 @@ pub enum Expr {
         display: String,
         body: Vec<Expr>,
     },
+    /// `(locking lockee body…)` (S6D analyzer form — the JVM's
+    /// `locking` is a `core.clj` macro over `monitor-enter/-exit`,
+    /// but the port has no per-object monitors, so the analyzer
+    /// takes the single global one directly).
+    Locking {
+        lockee: Box<Expr>,
+        body: Vec<Expr>,
+    },
     /// `(case* ge shift mask default imap switch-type test-type
     /// skip?)` (S5D analyzer form, emitted by the `case` macro):
     /// `cases` maps dispatch keys to `(test, then)` (`test` is an
@@ -499,6 +507,7 @@ pub(crate) fn is_special(name: &str) -> bool {
             | "lazy-seq*"
             | "delay*"
             | "case*"
+            | "locking"
     )
 }
 
@@ -506,7 +515,8 @@ pub(crate) fn is_special(name: &str) -> bool {
 /// with one of these names shadows the macro (real specials never
 /// shadow, probe31 `shadow-*`). `case*` is not shadowable (the JVM
 /// hardcodes it); `lazy-seq*` and `delay*` are (the JVM has no such
-/// forms, so a user definition wins there).
+/// forms, so a user definition wins there), as is `locking` (a JVM
+/// `core.clj` macro).
 fn is_shadowable_macro(name: &str) -> bool {
     matches!(
         name,
@@ -526,6 +536,7 @@ fn is_shadowable_macro(name: &str) -> bool {
             | "with-out-str"
             | "lazy-seq*"
             | "delay*"
+            | "locking"
     )
 }
 
@@ -1002,6 +1013,7 @@ impl<'a> Analyzer<'a> {
             "with-out-str" => self.parse_with_out_str(items, span),
             "lazy-seq*" => self.parse_lazy_seq_star(items, span),
             "delay*" => self.parse_delay_star(items, span),
+            "locking" => self.parse_locking(items, span, tail),
             "case*" => self.parse_case_star(items, span, tail),
             _ => unreachable!("dispatch covers every special form"),
         }
@@ -1017,6 +1029,7 @@ impl<'a> Analyzer<'a> {
             "with-redefs" => "clojure.core/with-redefs",
             "with-bindings" => "clojure.core/with-bindings",
             "defmacro" => "clojure.core/defmacro",
+            "locking" => "clojure.core/locking",
             _ => return Ok(()),
         };
         Err(CompileError::macro_arity(name, span, &self.source))
@@ -2688,6 +2701,27 @@ impl<'a> Analyzer<'a> {
         self.no_recur = saved_no_recur;
         Ok(Expr::DelayStar {
             display,
+            body: body?,
+        })
+    }
+
+    /// `(locking lockee body…)`: the lockee evaluates once (like the
+    /// macro's `lockee#`); the body is an implicit `do` under the
+    /// monitor. `recur` is fenced like `try` (the JVM expansion wraps
+    /// the body in `try`/`finally`, which `recur` cannot cross).
+    fn parse_locking(
+        &mut self,
+        items: &[&Value],
+        span: Span,
+        tail: bool,
+    ) -> Result<Expr, CompileError> {
+        let lockee = self.analyze(items[1], span, false)?;
+        let saved_no_recur = self.no_recur;
+        self.no_recur = true;
+        let body = self.analyze_body(&items[2..], span, tail);
+        self.no_recur = saved_no_recur;
+        Ok(Expr::Locking {
+            lockee: Box::new(lockee),
             body: body?,
         })
     }
