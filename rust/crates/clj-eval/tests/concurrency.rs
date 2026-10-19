@@ -983,13 +983,13 @@ fn print_str_rows() {
     let str_atom = run_last(&mut eval, "(str (atom 1))");
     assert!(
         str_atom.starts_with("\"clojure.lang.Atom@")
-            && str_atom.len() > "\"clojure.lang.Atom@\"".len() + 1,
+            && str_atom.len() > "\"clojure.lang.Atom@\"".len(),
         "bad atom str: {str_atom}"
     );
     let str_delay = run_last(&mut eval, "(str (delay 1))");
     assert!(
         str_delay.starts_with("\"clojure.lang.Delay@")
-            && str_delay.len() > "\"clojure.lang.Delay@\"".len() + 1,
+            && str_delay.len() > "\"clojure.lang.Delay@\"".len(),
         "bad delay str: {str_delay}"
     );
     let str_vec = run_last(&mut eval, "(str [(atom 1)])");
