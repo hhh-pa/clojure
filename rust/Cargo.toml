@@ -24,6 +24,8 @@ path = "src/bin/clojure-rs/main.rs"
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 clj-aot = { path = "crates/clj-aot", optional = true }
+clj-eval = { path = "crates/clj-eval" }
+clj-repl = { path = "crates/clj-repl" }
 
 [features]
 default = ["aot"]
