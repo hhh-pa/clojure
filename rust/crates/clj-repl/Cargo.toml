@@ -7,3 +7,9 @@ license = "EPL-1.0"
 
 [lints]
 workspace = true
+
+[dependencies]
+clj-eval = { path = "../clj-eval" }
+clj-reader = { path = "../clj-reader" }
+clj-value = { path = "../clj-value" }
+rustyline = "19.0.0"

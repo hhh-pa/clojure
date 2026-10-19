@@ -1,0 +1,3 @@
+(ns-name *ns*)
+(do (in-ns 'foo) :switched)
+(clojure.core/ns-name clojure.core/*ns*)

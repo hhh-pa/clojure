@@ -1,0 +1,5 @@
+Clojure 1.13.0-master-SNAPSHOT
+user=> user
+user=> :switched
+foo=> foo
+foo=> 

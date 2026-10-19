@@ -25,6 +25,31 @@ where
     bin().args(args).output().expect("spawn clojure-rs")
 }
 
+/// Run the binary with `args` and `input` on stdin (piped stdin is
+/// never a tty, so `repl` takes the streaming path).
+pub fn run_with_stdin<I, S>(args: I, input: &str) -> Output
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    use std::io::Write;
+    use std::process::Stdio;
+    let mut child = bin()
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn clojure-rs");
+    child
+        .stdin
+        .take()
+        .expect("piped stdin")
+        .write_all(input.as_bytes())
+        .expect("write stdin");
+    child.wait_with_output().expect("wait clojure-rs")
+}
+
 /// Lossy stdout of an output.
 pub fn stdout(output: &Output) -> String {
     String::from_utf8_lossy(&output.stdout).into_owned()

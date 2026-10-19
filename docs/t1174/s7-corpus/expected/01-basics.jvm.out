@@ -1,0 +1,9 @@
+Clojure 1.13.0-master-SNAPSHOT
+user=> 6
+user=> #'user/x
+user=> 42
+user=> 42
+user=> nil
+user=> nil
+user=> "str"
+user=> 
