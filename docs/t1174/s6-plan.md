@@ -57,13 +57,13 @@ TDD: stress/determinism tests first (spec §2.5).
 
 ## Design (spike before S6B)
 
-D1. `Evaluator` across threads: audit `Send`-ability
-    (`NamespaceRegistry`, `Bindings`, `Value`, `Closure`,
-    `NativeImpl`). Options: (a) per-thread `Evaluator` clones
-    over a shared `Arc<Mutex<Registry>>`; (b) single-owner
-    evaluator with message-passing eval requests;
-    (c) `thread::scope` borrowing. Spike picks one; the plan
-    updates with the choice + rationale.
+D1. `Evaluator` across threads: `Send+Sync` VERIFIED (probe
+    test, removed after). Remaining: the SHARING shape for
+    per-thread evaluators (shared registry? atomic counters?).
+    Options: (a) clones over a shared `Arc<Mutex<Registry>>`;
+    (b) single-owner evaluator with message-passing eval
+    requests; (c) `thread::scope` borrowing. The S6B spike
+    picks one; the plan updates with the choice + rationale.
 D2. Deterministic tests: scripted interleavings via
     promise/latch rendezvous (no sleeps); stress tests use
     fixed iteration counts and generous timeouts, Linux CI
