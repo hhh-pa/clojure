@@ -59,7 +59,10 @@ shapes are exact JVM text (en_US/UTC).
   `restart-agent` (returns new state, clears error;
   `:clear-actions` drops the queue) (P5).
 - `await` → `nil` (throws when failed); `await-for` →
-  bool. Nested sends run after the enclosing action (P5);
+  bool. An agent that fails AFTER its barrier queued throws
+  instead of hanging (DIVERGENCE: the JVM blocks forever on
+  `await`, and `await-for` waits out the full deadline for
+  `false`). Nested sends run after the enclosing action (P5);
   nested sends from a FAILED action are discarded (the JVM's
   unreleased `nested` buffer — never resurrected by a later
   restart without `:clear-actions`).

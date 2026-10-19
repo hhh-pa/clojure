@@ -1496,7 +1496,9 @@ fn check_await_errors(agents: &[Agent]) -> Result<(), NativeError> {
 /// Wait for every barrier (an `await` rendezvous): each loop polls
 /// the latch and the agents' errors, so an agent that fails after its
 /// barrier queued throws instead of hanging (DIVERGENCE: the JVM
-/// blocks forever there). A deadline bounds the wait (`false` on
+/// blocks forever there; `await-for` likewise throws on observed
+/// failure instead of waiting out the deadline for `false`).
+/// A deadline bounds the wait (`false` on
 /// expiry); an expired deadline waits nothing (like the JVM's latch,
 /// which checks once without waiting). A dropped barrier — a
 /// `:clear-actions` restart racing the wait — ends it early
