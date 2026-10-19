@@ -1125,7 +1125,9 @@ fn format_parse_errors() {
 #[test]
 fn format_n_and_pct_errors() {
     let mut eval = boot();
-    assert_eq!(fmt(&mut eval, "(format \"%n\")"), "\n");
+    // JVM Formatter %n emits the platform line separator (CRLF on Windows).
+    let nl = if cfg!(windows) { "\r\n" } else { "\n" };
+    assert_eq!(fmt(&mut eval, "(format \"%n\")"), nl);
     let rows = [
         (
             "(format \"%5n\")",
