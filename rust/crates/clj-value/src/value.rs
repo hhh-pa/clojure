@@ -35,7 +35,7 @@
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
-use crate::{ExtensionValue, Keyword, Symbol, Throwable, Unbound, Var};
+use crate::{ExtensionValue, Keyword, Symbol, Throwable, Transient, Unbound, Var};
 
 /// Deterministic Fx hasher for maps/sets (rpds's default RandomState
 /// is not stable across runs). Same non-crypto posture as the JVM's
@@ -76,11 +76,17 @@ pub struct Vector {
 /// iterate in murmur-hash order, which no insertion record can
 /// reproduce; the harness canonicalizes map/set order away, so only
 /// syntax-quote expansion and rendering observe this.)
+///
+/// `hashy` reports `PersistentHashMap` instead of
+/// `PersistentArrayMap`: promotion is one-way and history-dependent
+/// (content alone cannot decide — `dissoc` never demotes and
+/// `array-map` forces array), so it is stored, not derived.
 #[derive(Clone, Debug)]
 pub struct Map {
     inner: RpdsMap,
     meta: Option<Arc<Map>>,
     keys: Vec<Value>,
+    hashy: bool,
 }
 
 /// A persistent set of values (thread-safe rpds hash-trie set) with
@@ -127,6 +133,16 @@ impl List {
     #[must_use]
     pub fn first(&self) -> Option<&Value> {
         self.inner.iter().next()
+    }
+
+    /// The list without its first value (`None` when empty;
+    /// metadata is preserved — `rest` strips it separately).
+    #[must_use]
+    pub fn drop_first(&self) -> Option<Self> {
+        self.inner.drop_first().map(|inner| Self {
+            inner,
+            meta: self.meta.clone(),
+        })
     }
 
     /// Iterate front to back.
@@ -189,6 +205,24 @@ impl Vector {
         }
     }
 
+    /// Replace the item at `index` (`None` when out of bounds).
+    #[must_use]
+    pub fn set_nth(&self, index: usize, v: Value) -> Option<Self> {
+        self.inner.set(index, v).map(|inner| Self {
+            inner,
+            meta: self.meta.clone(),
+        })
+    }
+
+    /// The vector without its last item (`None` when empty).
+    #[must_use]
+    pub fn drop_last(&self) -> Option<Self> {
+        self.inner.drop_last().map(|inner| Self {
+            inner,
+            meta: self.meta.clone(),
+        })
+    }
+
     /// Iterate front to back.
     pub fn iter(&self) -> impl Iterator<Item = &Value> {
         self.inner.iter()
@@ -223,43 +257,52 @@ impl Vector {
 impl Map {
     /// Build a map from key/value pairs, duplicate-checking them with
     /// the JVM literal rules: `Err` is the offending key (the FIRST
-    /// of the pair for small maps, the NEW key otherwise).
+    /// of the pair for small maps, the NEW key otherwise). Literals
+    /// take their class from `canBePAM` (`RT.map`/`mapUniqueKeys`).
     pub fn from_kvs_checked(pairs: Vec<(Value, Value)>) -> Result<Self, Value> {
         let keys: Vec<&Value> = pairs.iter().map(|(k, _)| k).collect();
         if let Some(dup) = find_map_dup(&keys) {
             return Err(dup.clone());
         }
+        let hashy = !can_be_small_map(&keys);
         let mut map = new_map();
         for (k, v) in pairs {
             map = map.insert(k, v);
         }
+        map.hashy = hashy;
         Ok(map)
     }
 
     /// Assoc a key/value pair. A new key appends to the insertion
     /// order; an existing key keeps its position (and key object).
+    /// Promotion follows `PersistentArrayMap.assoc`: past 8 pairs a
+    /// non-keyword key promotes, past 64 pairs anything does.
     #[must_use]
     pub fn insert(self, k: Value, v: Value) -> Self {
         if self.inner.get(&k).is_some() {
-            Self {
+            return Self {
                 inner: self.inner.insert(k, v),
                 meta: self.meta,
                 keys: self.keys,
-            }
-        } else {
-            let mut keys = self.keys;
-            keys.push(k.clone());
-            Self {
-                inner: self.inner.insert(k, v),
-                meta: self.meta,
-                keys,
-            }
+                hashy: self.hashy,
+            };
+        }
+        let size = self.inner.size();
+        let promote = !self.hashy && (size >= 64 || (size >= 8 && !matches!(k, Value::Keyword(_))));
+        let mut keys = self.keys;
+        keys.push(k.clone());
+        Self {
+            inner: self.inner.insert(k, v),
+            meta: self.meta,
+            keys,
+            hashy: self.hashy || promote,
         }
     }
 
     /// Remove a key (`dissoc` one key). A missing key is a no-op;
     /// otherwise both the entries and the insertion-order sidecar
-    /// drop it, and later positions shift down.
+    /// drop it, and later positions shift down. The class never
+    /// demotes (a shrunk hash-map stays a hash-map).
     #[must_use]
     pub fn without(mut self, k: &Value) -> Self {
         if self.inner.get(k).is_none() {
@@ -270,7 +313,22 @@ impl Map {
             inner: self.inner.remove(k),
             meta: self.meta,
             keys: self.keys,
+            hashy: self.hashy,
         }
+    }
+
+    /// Whether this reports `PersistentHashMap` (else array-map).
+    #[must_use]
+    pub fn is_hashy(&self) -> bool {
+        self.hashy
+    }
+
+    /// Force the reported class (`hash-map` forces hash,
+    /// `array-map`/transient-array forces array).
+    #[must_use]
+    pub fn with_hashy(mut self, hashy: bool) -> Self {
+        self.hashy = hashy;
+        self
     }
 
     /// Look up a key.
@@ -354,6 +412,29 @@ impl Set {
     #[must_use]
     pub fn contains(&self, v: &Value) -> bool {
         self.inner.contains(v)
+    }
+
+    /// The stored member equal to `v`, if present (`get` on a set
+    /// returns the member, not the key).
+    #[must_use]
+    pub fn get(&self, v: &Value) -> Option<&Value> {
+        self.members.iter().find(|m| *m == v)
+    }
+
+    /// Remove a value (`disj` one item). A missing value is a no-op;
+    /// otherwise both the entries and the insertion-order sidecar
+    /// drop it, and later positions shift down.
+    #[must_use]
+    pub fn without(mut self, v: &Value) -> Self {
+        if !self.inner.contains(v) {
+            return self;
+        }
+        self.members.retain(|m| m != v);
+        Self {
+            inner: self.inner.remove(v),
+            meta: self.meta,
+            members: self.members,
+        }
     }
 
     /// The element count.
@@ -469,6 +550,7 @@ pub fn new_map() -> Map {
         inner: RpdsMap::new_with_hasher_and_ptr_kind(FxBuildHasher::default()),
         meta: None,
         keys: Vec::new(),
+        hashy: false,
     }
 }
 
@@ -522,6 +604,8 @@ pub enum Value {
     Unbound(Unbound),
     /// A throwable (S4): identity-compared by `id`, like the JVM.
     Throwable(Throwable),
+    /// A transient buffer (S5D): identity equality (shared cell).
+    Transient(Transient),
     /// A host-defined value behind the [`ExtensionValue`] trait (S4).
     Extension(Arc<dyn ExtensionValue>),
 }
@@ -534,7 +618,7 @@ impl Value {
     }
 
     /// The metadata map, if this value carries one (Symbol, List,
-    /// Vector, Map, Set — never Keyword).
+    /// Vector, Map, Set, realized seqs — never Keyword).
     #[must_use]
     pub fn meta(&self) -> Option<&Map> {
         match self {
@@ -543,6 +627,43 @@ impl Value {
             Value::Vector(v) => v.meta(),
             Value::Map(m) => m.meta(),
             Value::Set(s) => s.meta(),
+            Value::Extension(e) => {
+                let any = e.as_any();
+                any.downcast_ref::<crate::RealizedSeq>()
+                    .and_then(crate::RealizedSeq::meta)
+                    .or_else(|| {
+                        any.downcast_ref::<crate::RangeValue>()
+                            .and_then(crate::RangeValue::meta)
+                    })
+                    .or_else(|| {
+                        any.downcast_ref::<crate::RepeatValue>()
+                            .and_then(crate::RepeatValue::meta)
+                    })
+                    .or_else(|| {
+                        any.downcast_ref::<crate::CycleValue>()
+                            .and_then(crate::CycleValue::meta)
+                    })
+                    .or_else(|| {
+                        any.downcast_ref::<crate::IterateValue>()
+                            .and_then(crate::IterateValue::meta)
+                    })
+                    .or_else(|| {
+                        any.downcast_ref::<crate::ConsValue>()
+                            .and_then(crate::ConsValue::meta)
+                    })
+                    .or_else(|| {
+                        any.downcast_ref::<crate::KeySeqValue>()
+                            .and_then(crate::KeySeqValue::meta)
+                    })
+                    .or_else(|| {
+                        any.downcast_ref::<crate::ValSeqValue>()
+                            .and_then(crate::ValSeqValue::meta)
+                    })
+                    .or_else(|| {
+                        any.downcast_ref::<crate::SubVectorValue>()
+                            .and_then(crate::SubVectorValue::meta)
+                    })
+            }
             _ => None,
         }
     }
@@ -557,6 +678,28 @@ impl Value {
             Value::Vector(v) => Value::Vector(v.with_meta(meta)),
             Value::Map(m) => Value::Map(m.with_meta(meta)),
             Value::Set(s) => Value::Set(s.with_meta(meta)),
+            Value::Extension(e) => {
+                let any = e.as_any();
+                macro_rules! retag {
+                    ($t:ty) => {
+                        if let Some(v) = any.downcast_ref::<$t>() {
+                            return Value::Extension(std::sync::Arc::new(
+                                v.clone().with_meta(meta),
+                            ));
+                        }
+                    };
+                }
+                retag!(crate::RealizedSeq);
+                retag!(crate::RangeValue);
+                retag!(crate::RepeatValue);
+                retag!(crate::CycleValue);
+                retag!(crate::IterateValue);
+                retag!(crate::ConsValue);
+                retag!(crate::KeySeqValue);
+                retag!(crate::ValSeqValue);
+                retag!(crate::SubVectorValue);
+                Value::Extension(e)
+            }
             other => other,
         }
     }
@@ -582,6 +725,15 @@ impl PartialEq for Value {
             (Value::Vector(a), Value::Vector(b)) => a.iter().eq(b.iter()),
             (Value::List(a), Value::Vector(b)) | (Value::Vector(b), Value::List(a)) => {
                 a.iter().eq(b.iter())
+            }
+            // Realized seqs compare sequentially against
+            // List/Vector/realized seqs (never maps, sets, or
+            // pending seqs, which `=` realizes first).
+            (a, b) if seq_items(a).is_some() || seq_items(b).is_some() => {
+                match (seq_items(a), seq_items(b)) {
+                    (Some(x), Some(y)) => x == y,
+                    _ => false,
+                }
             }
             (Value::Map(a), Value::Map(b)) => {
                 a.size() == b.size() && a.iter().all(|(k, v)| b.get(k) == Some(v))
@@ -616,6 +768,7 @@ impl PartialEq for Value {
             (Value::Var(a), Value::Var(b)) => a.id == b.id,
             (Value::Unbound(a), Value::Unbound(b)) => a.var_id == b.var_id,
             (Value::Throwable(a), Value::Throwable(b)) => a.id == b.id,
+            (Value::Transient(a), Value::Transient(b)) => a.same_cell(b),
             (Value::Extension(a), Value::Extension(b)) => a.dyn_eq(&**b),
             _ => false,
         }
@@ -722,9 +875,39 @@ impl Hash for Value {
                 state.write_u8(16);
                 state.write_u64(t.id);
             }
-            Value::Extension(e) => {
+            Value::Transient(t) => {
                 state.write_u8(17);
-                e.dyn_hash(state);
+                state.write_u64(t.id());
+            }
+            Value::Extension(e) => {
+                // Realized seqs hash as sequential family (marker 8
+                // plus length-prefixed elements — identical writes
+                // to `List`, so sequential equals hash equally).
+                if let Some(s) = e.as_any().downcast_ref::<crate::RealizedSeq>() {
+                    state.write_u8(8);
+                    let items = s.items();
+                    items.len().hash(state);
+                    for item in &items {
+                        item.hash(state);
+                    }
+                } else if let Some(r) = e.as_any().downcast_ref::<crate::RangeValue>() {
+                    state.write_u8(8);
+                    r.walked_len().hash(state);
+                    r.for_each(&mut |v| v.hash(state));
+                } else if let Some(r) = e.as_any().downcast_ref::<crate::RepeatValue>() {
+                    state.write_u8(8);
+                    r.walked_len().hash(state);
+                    r.for_each(&mut |v| v.hash(state));
+                } else if let Some(sv) = e.as_any().downcast_ref::<crate::SubVectorValue>() {
+                    state.write_u8(8);
+                    sv.len().hash(state);
+                    for item in sv.iter() {
+                        item.hash(state);
+                    }
+                } else {
+                    state.write_u8(17);
+                    e.dyn_hash(state);
+                }
             }
         }
     }
@@ -922,6 +1105,38 @@ fn coll_equiv(c: &Value, x: &Value) -> bool {
 }
 
 /// Port of Java `.equals` (`Util.equals` + the collection
+/// Sequential items for equality: lists, vectors, and realized
+/// seqs (anything else — maps, sets, pending seqs — is not
+/// sequential here).
+fn seq_items(v: &Value) -> Option<Vec<Value>> {
+    match v {
+        Value::List(l) => Some(l.iter().cloned().collect()),
+        Value::Vector(v) => Some(v.iter().cloned().collect()),
+        Value::Extension(e) => {
+            if let Some(s) = e.as_any().downcast_ref::<crate::RealizedSeq>() {
+                return Some(s.items());
+            }
+            // Strict pure seqs walk without the evaluator
+            // (infinite ones hang, like the JVM's `Util.equiv`).
+            if let Some(r) = e.as_any().downcast_ref::<crate::RangeValue>() {
+                let mut out = Vec::new();
+                r.for_each(&mut |v| out.push(v.clone()));
+                return Some(out);
+            }
+            if let Some(r) = e.as_any().downcast_ref::<crate::RepeatValue>() {
+                let mut out = Vec::new();
+                r.for_each(&mut |v| out.push(v.clone()));
+                return Some(out);
+            }
+            if let Some(sv) = e.as_any().downcast_ref::<crate::SubVectorValue>() {
+                return Some(sv.items());
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
 /// `equals`/`mapEquals`/`setEquals`): like [`jvm_equiv`] except
 /// doubles compare by bits, and it is only reached for scalar pairs
 /// or nested inside [`Value::TaggedLiteral`]/[`Value::ReaderConditional`]

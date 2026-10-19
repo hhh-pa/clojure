@@ -373,6 +373,7 @@ pub fn canon(v: &Value, print_meta: bool) -> String {
         // Evaluator-only values (the reader never emits them).
         | Value::Var(_)
         | Value::Unbound(_)
+        | Value::Transient(_)
         | Value::Throwable(_)
         | Value::Extension(_) => out.push_str(&pr_to_string(v, &PrintOpts::pr())),
         Value::List(l) => {

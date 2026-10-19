@@ -11,14 +11,10 @@
 //! native doubles (S4 ships no prelude; full probe replay waits
 //! for the S5 core subset).
 
-// The doubles return `NativeError` by value because `NativeImpl`
-// says so; boxing it would ripple through the error API.
-#![allow(clippy::result_large_err)]
-
 use std::sync::{Arc, Mutex};
 
 use clj_eval::{Evaluator, NativeError, SourceError};
-use clj_value::{PrintOpts, ThrowClass, Throwable, Value, pr_to_string};
+use clj_value::{PrintOpts, Symbol, ThrowClass, Throwable, Value, pr_to_string};
 
 fn pr(v: &Value) -> String {
     pr_to_string(v, &PrintOpts::pr())
@@ -48,8 +44,9 @@ fn rigged() -> (Evaluator, Arc<Mutex<Vec<String>>>) {
 /// `ArithmeticException`, never a debug panic.
 fn install_arith(eval: &mut Evaluator) {
     eval.install_native(
+        "user",
         "t-plus",
-        Arc::new(move |args| match args {
+        Arc::new(move |_, args| match args {
             [Value::Int(a), Value::Int(b)] => a.checked_add(*b).map(Value::Int).ok_or_else(|| {
                 NativeError::new(
                     ThrowClass::ArithmeticException,
@@ -64,8 +61,9 @@ fn install_arith(eval: &mut Evaluator) {
         }),
     );
     eval.install_native(
+        "user",
         "t-minus",
-        Arc::new(|args| match args {
+        Arc::new(|_, args| match args {
             [Value::Int(a), Value::Int(b)] => a.checked_sub(*b).map(Value::Int).ok_or_else(|| {
                 NativeError::new(
                     ThrowClass::ArithmeticException,
@@ -80,16 +78,19 @@ fn install_arith(eval: &mut Evaluator) {
 /// Single-int natives: `t-zero?`, `t-pos?`, `t-dec`.
 fn install_int_fns(eval: &mut Evaluator) {
     eval.install_native(
+        "user",
         "t-zero?",
-        Arc::new(|args| int(args).map(|n| Value::Bool(n == 0))),
+        Arc::new(|_, args| int(args).map(|n| Value::Bool(n == 0))),
     );
     eval.install_native(
+        "user",
         "t-pos?",
-        Arc::new(|args| int(args).map(|n| Value::Bool(n > 0))),
+        Arc::new(|_, args| int(args).map(|n| Value::Bool(n > 0))),
     );
     eval.install_native(
+        "user",
         "t-dec",
-        Arc::new(|args| {
+        Arc::new(|_, args| {
             int(args).and_then(|n| {
                 n.checked_sub(1).map(Value::Int).ok_or_else(|| {
                     NativeError::new(
@@ -105,16 +106,18 @@ fn install_int_fns(eval: &mut Evaluator) {
 /// `t-id` plus the side-logging `t-log`.
 fn install_misc(eval: &mut Evaluator, log: &Arc<Mutex<Vec<String>>>) {
     eval.install_native(
+        "user",
         "t-id",
-        Arc::new(|args| match args {
+        Arc::new(|_, args| match args {
             [v] => Ok(v.clone()),
             _ => Err(NativeError::arity("test/t-id", args.len())),
         }),
     );
     let logged = Arc::clone(log);
     eval.install_native(
+        "user",
         "t-log",
-        Arc::new(move |args| match args {
+        Arc::new(move |_, args| match args {
             [] => Err(NativeError::arity("test/t-log", 0)),
             [first, ..] => {
                 let mut log = logged.lock().unwrap();
@@ -124,12 +127,13 @@ fn install_misc(eval: &mut Evaluator, log: &Arc<Mutex<Vec<String>>>) {
         }),
     );
     eval.install_native(
+        "user",
         "t-ex",
-        Arc::new(|args| match args {
+        Arc::new(|_, args| match args {
             [Value::Str(m)] => Ok(Value::Throwable(Throwable {
                 id: 0,
                 class: ThrowClass::ExceptionInfo,
-                message: Arc::clone(m),
+                message: Some(Arc::clone(m)),
                 data: None,
                 cause: None,
             })),
@@ -142,8 +146,22 @@ fn run(eval: &mut Evaluator, src: &str) -> Vec<String> {
     eval.eval_source(src)
         .unwrap_or_else(|e| panic!("{src}: {e}"))
         .iter()
-        .map(pr)
+        .map(|v| pr(&realized(eval, v)))
         .collect()
+}
+
+/// Realize before printing (like the JVM, whose print walks —
+/// forcing errors surface here).
+fn realized(eval: &mut Evaluator, v: &Value) -> Value {
+    match eval.realize_deep(v) {
+        Ok(v) => v,
+        Err(clj_eval::Signal::Throw(t)) => panic!(
+            "unexpected throw while printing: {} | {}",
+            t.class.jvm_name(),
+            t.message.as_deref().unwrap_or("")
+        ),
+        Err(other) => panic!("unexpected signal while printing: {other:?}"),
+    }
 }
 
 fn run_last(eval: &mut Evaluator, src: &str) -> String {
@@ -156,8 +174,29 @@ fn uncaught_with(setup: &str, src: &str) -> String {
         eval.eval_source(setup).unwrap();
     }
     match eval.eval_source(src) {
-        Ok(_) => panic!("expected {src} to throw"),
-        Err(SourceError::Uncaught(t)) => format!("{} | {}", t.class.jvm_name(), t.message),
+        Ok(vs) => {
+            // Print forces (like the JVM): a lazy top-level value
+            // can still throw.
+            for v in &vs {
+                match eval.realize_deep(v) {
+                    Ok(_) => {}
+                    Err(clj_eval::Signal::Throw(t)) => {
+                        return format!(
+                            "{} | {}",
+                            t.class.jvm_name(),
+                            t.message.as_deref().unwrap_or("")
+                        );
+                    }
+                    Err(other) => panic!("unexpected signal while printing: {other:?}"),
+                }
+            }
+            panic!("expected {src} to throw")
+        }
+        Err(SourceError::Uncaught(t)) => format!(
+            "{} | {}",
+            t.class.jvm_name(),
+            t.message.as_deref().unwrap_or("")
+        ),
         Err(e) => panic!("expected uncaught throwable for {src}: {e}"),
     }
 }
@@ -442,19 +481,19 @@ fn def_var_set() {
     // `def` meta: auto keys plus user meta.
     run(&mut eval, "(def ^:private pm913 \"d\" 1)");
     let id = eval
-        .ns
+        .registry
         .lookup(&clj_value::Symbol::new(Some("user"), "pm913"))
         .unwrap();
-    let meta = &eval.ns.state(id).unwrap().meta;
+    let meta = eval.registry.state(id).unwrap().meta.clone().unwrap();
     assert_eq!(
-        pr(&Value::Map(meta.clone())),
-        "{:private true, :doc \"d\", :line 1, :column 1, :file \"test\", :name pm913}"
+        pr(&Value::Map(meta)),
+        "{:private true, :doc \"d\", :line 1, :column 1, :file \"test\", :name pm913, :ns #object[clojure.lang.Namespace 0x1 \"user\"]}"
     );
-    assert!(!eval.ns.state(id).unwrap().dynamic);
+    assert!(!eval.registry.state(id).unwrap().dynamic);
     // Unbound vars: the sentinel value, `str` shape, numeric CCE.
     assert_eq!(run_last(&mut eval, "(def ub913)"), "#'user/ub913");
     let ub_id = eval
-        .ns
+        .registry
         .lookup(&clj_value::Symbol::new(Some("user"), "ub913"))
         .unwrap();
     assert_eq!(
@@ -875,4 +914,51 @@ fn object_prints() {
         run_last(&mut eval, "(fn foo [x] x)"),
         "#object[user$eval2$foo__2 0x2 \"user$eval2$foo__2@2\"]"
     );
+}
+
+#[test]
+fn top_do_splits_each_element() {
+    let mut eval = Evaluator::new("split");
+    eval.install_native(
+        "user",
+        "t-mkvar",
+        Arc::new(|e, _| {
+            let sym = Symbol::new(Some("user"), "t-made");
+            let id = e.registry.intern(&sym);
+            if let Some(state) = e.registry.state_mut(id) {
+                state.root = Some(Value::Int(5));
+            }
+            Ok(Value::Nil)
+        }),
+    );
+    // Without the split, `t-made` would analyze before `t-mkvar`
+    // evaluates (`Unable to resolve symbol`).
+    let out = eval.eval_source("(do (t-mkvar) t-made)").unwrap();
+    assert_eq!(out, vec![Value::Int(5)]);
+    // A nested `do` stays one analysis unit: inside a `fn` body the
+    // reference analyzes before anything evaluates.
+    let mut nested = Evaluator::new("split-nested");
+    nested.install_native(
+        "user",
+        "t-mkvar",
+        Arc::new(|e, _| {
+            let sym = Symbol::new(Some("user"), "t-made");
+            let id = e.registry.intern(&sym);
+            if let Some(state) = e.registry.state_mut(id) {
+                state.root = Some(Value::Int(5));
+            }
+            Ok(Value::Nil)
+        }),
+    );
+    let err = nested
+        .eval_source("(fn [] (do (t-mkvar) t-made))")
+        .unwrap_err();
+    match err {
+        SourceError::Compile(e) => assert!(
+            e.message.contains("Unable to resolve symbol: t-made"),
+            "unexpected message: {}",
+            e.message
+        ),
+        other => panic!("expected a compile error, got {other}"),
+    }
 }

@@ -18,10 +18,11 @@ use std::sync::Arc;
 use clj_reader::{ReaderOpts, Span, read_all};
 use clj_value::{Keyword, List, Map, Symbol, ThrowClass, Throwable, Value, Var, Vector, new_map};
 
-use crate::env::{Bindings, Env, Namespace};
-use crate::error::{CompileError, NativeError, Signal, jvm_class_of, simple_class_of};
-use crate::expr::{Analyzer, Catch, Expr, MapPattern, Pattern, pattern_names};
-use crate::ext::{Closure, NativeFn, as_closure, as_native};
+use crate::coll::native_nth;
+use crate::env::{Bindings, Env, NamespaceRegistry};
+use crate::error::{CompileError, NativeError, Signal, jvm_class_of, span_of};
+use crate::expr::{Analyzer, CaseTest, Catch, Expr, MapPattern, Pattern, pattern_names};
+use crate::ext::{Closure, NativeFn, NsHandle, as_closure, as_native};
 
 /// `eval_source` failures: reader errors, analyzer errors, uncaught
 /// throwables, and (unreachable by construction) escaping `recur`s.
@@ -38,7 +39,12 @@ impl std::fmt::Display for SourceError {
         match self {
             Self::Reader(e) => write!(f, "{e}"),
             Self::Compile(e) => write!(f, "{e}"),
-            Self::Uncaught(t) => write!(f, "{} | {}", t.class.jvm_name(), t.message),
+            Self::Uncaught(t) => write!(
+                f,
+                "{} | {}",
+                t.class.jvm_name(),
+                t.message.as_deref().unwrap_or("")
+            ),
             Self::Internal(msg) => write!(f, "internal error: {msg}"),
         }
     }
@@ -46,34 +52,148 @@ impl std::fmt::Display for SourceError {
 
 impl std::error::Error for SourceError {}
 
-/// The evaluator: namespace, bindings, load path, and the
+/// The body of a top-level `do`-headed list (head unqualified,
+/// mirroring the analyzer's special-form check), `None` for any
+/// other form or a bare `(do)`.
+fn split_top_do(form: &Value) -> Option<Vec<&Value>> {
+    let Value::List(list) = form else {
+        return None;
+    };
+    let mut items = list.iter();
+    match items.next() {
+        Some(Value::Symbol(sym)) if sym.namespace().is_none() && sym.name() == "do" => {}
+        _ => return None,
+    }
+    let rest: Vec<&Value> = items.collect();
+    if rest.is_empty() { None } else { Some(rest) }
+}
+
+/// `Number.intValue` for `:int` `case*` dispatch (`None` for
+/// non-numbers — characters included, which miss like on the JVM).
+/// `Int` truncates; `Double` narrows exactly like Java (`as`
+/// saturates and maps `NaN` to 0, same as `(int)`).
+fn case_int_value(v: &Value) -> Option<i32> {
+    match v {
+        Value::Int(i) => Some(*i as i32),
+        Value::Double(d) => Some(*d as i32),
+        _ => None,
+    }
+}
+
+/// `case*` dispatch-key masking (a zero mask skips the shift).
+fn case_shift_mask(key: i32, shift: i32, mask: i32) -> i32 {
+    if mask == 0 {
+        key
+    } else {
+        key.wrapping_shr((shift & 31) as u32) & mask
+    }
+}
+
+/// The evaluator: namespace registry, bindings, load path, and the
 /// deterministic counters (form/fn numbering for display names, one
 /// identity sequence for throwables/closures/natives).
 pub struct Evaluator {
-    pub ns: Namespace,
+    pub registry: NamespaceRegistry,
     bindings: Bindings,
     source: Arc<str>,
     eval_seq: u64,
     fn_seq: u64,
     next_id: u64,
+    gensym: u64,
+    native_call_span: Option<Span>,
+}
+
+/// A `defmacro` definition's parts (bundles `eval_defmacro`'s
+/// parameters).
+#[derive(Clone, Copy)]
+struct DefMacroParts<'a> {
+    sym: &'a Symbol,
+    doc: Option<&'a str>,
+    attr: Option<&'a Map>,
+    arglists: &'a [Value],
+    fun: &'a crate::expr::FunExpr,
+    span: Span,
 }
 
 impl Evaluator {
     /// A fresh evaluator loading from `source` (`:file`, used in
-    /// spans and `def` meta).
+    /// spans and `def` meta), with a lone `user` namespace current
+    /// (tests install doubles into it; `boot` builds the real
+    /// registry from [`new_bare`](Self::new_bare) instead).
     #[must_use]
     pub fn new(source: &str) -> Self {
+        let mut this = Self::new_bare(source);
+        this.registry.ensure_ns("user");
+        this.registry.set_current("user");
+        this
+    }
+
+    /// A fresh evaluator with an empty registry (boot ensures
+    /// `clojure.core` first, so it takes id 1 like the JVM's
+    /// creation order, then `user`).
+    #[must_use]
+    pub fn new_bare(source: &str) -> Self {
         Self {
-            ns: Namespace::new("user"),
+            registry: NamespaceRegistry::new(),
             bindings: Bindings::new(),
             source: Arc::from(source),
             eval_seq: 0,
             fn_seq: 0,
             next_id: 1,
+            gensym: 1,
+            native_call_span: None,
         }
     }
 
-    fn next_id(&mut self) -> u64 {
+    /// The innermost call form's span while a native runs (set by
+    /// `Invoke` evaluation; natives needing the call site — the
+    /// `macroexpand` wrap position — read this).
+    pub(crate) fn native_call_span(&self) -> Option<Span> {
+        self.native_call_span
+    }
+
+    /// The next `fn` display sequence number (the analyzer
+    /// numbers every `fn` it analyzes).
+    pub(crate) fn next_fn_seq(&mut self) -> u64 {
+        self.fn_seq += 1;
+        self.fn_seq
+    }
+
+    /// The next `gensym` counter value (per-boot, from 1).
+    pub(crate) fn next_gensym(&mut self) -> u64 {
+        let n = self.gensym;
+        self.gensym += 1;
+        n
+    }
+
+    /// Reset the `gensym` counter to 1: `boot` loads the embedded
+    /// `core.clj` (whose macroexpansions consume numbers), but the
+    /// user-visible counter starts from 1 (`macros-contract.md`
+    /// pins `G__1` first). Sound: boot-time expansions evaluate to
+    /// closed values, so reused numbers can never capture them.
+    pub(crate) fn reset_gensym(&mut self) {
+        self.gensym = 1;
+    }
+
+    /// The `*ns*`-synced current namespace name: the thread-local
+    /// `*ns*` handle when bound (boot binds a base frame and
+    /// `in-ns` keeps both in sync), else the registry current.
+    pub(crate) fn current_ns_name(&self) -> String {
+        let star_ns = Symbol::new(Some("clojure.core"), "*ns*");
+        let bound = self
+            .registry
+            .get("clojure.core")
+            .and_then(|ns| ns.lookup(&star_ns))
+            .and_then(|id| self.bindings.get(id))
+            .and_then(|v| match v {
+                Value::Extension(h) => h.as_any().downcast_ref::<NsHandle>(),
+                _ => None,
+            })
+            .map(|ns| ns.name.to_string());
+        bound.unwrap_or_else(|| self.registry.current().to_owned())
+    }
+
+    pub(crate) fn next_id(&mut self) -> u64 {
         let id = self.next_id;
         self.next_id += 1;
         id
@@ -82,84 +202,195 @@ impl Evaluator {
     /// Analyze one form against the current namespace (tests use
     /// this for contract errors without evaluating).
     pub fn analyze(&mut self, form: &Value) -> Result<Expr, CompileError> {
-        Analyzer::new(&self.source, &mut self.ns, self.eval_seq, &mut self.fn_seq).analyze(
-            form,
-            Span::new(1, 1),
-            true,
-        )
+        let source = Arc::clone(&self.source);
+        let seq = self.eval_seq;
+        Analyzer::new(&source, self, seq).analyze(form, Span::new(1, 1), true)
     }
 
     /// Read every form in `text` (default `:read-cond :allow`
-    /// options), analyze, and evaluate each in turn, collecting the
-    /// values. Uncaught throwables (including bare macro-arity
+    /// options) and evaluate each in turn, collecting one value per
+    /// read form. Uncaught throwables (including bare macro-arity
     /// failures) abort the load.
     pub fn eval_source(&mut self, text: &str) -> Result<Vec<Value>, SourceError> {
-        let forms = read_all(text, &ReaderOpts::default()).map_err(SourceError::Reader)?;
+        // Syntax-quote and `::` resolve against the synced
+        // current namespace (read-time, like the JVM).
+        let cur = self.current_ns_name();
+        let mut opts = ReaderOpts {
+            current_ns: cur.clone(),
+            ..Default::default()
+        };
+        if let Some(ns) = self.registry.get(&cur) {
+            opts.aliases = ns.alias_map();
+            opts.refers = ns.refer_map();
+        }
+        let forms = read_all(text, &opts).map_err(SourceError::Reader)?;
         let mut out = Vec::with_capacity(forms.len());
         for form in &forms {
-            self.eval_seq += 1;
-            let expr = self.analyze(form).map_err(|e| {
-                if e.bare {
-                    let id = self.next_id();
-                    SourceError::Uncaught(Throwable {
-                        id,
-                        class: ThrowClass::ArityException,
-                        message: Arc::from(e.message.as_str()),
-                        data: None,
-                        cause: None,
-                    })
-                } else {
-                    SourceError::Compile(e)
-                }
-            })?;
-            match self.eval(&expr, &Env::new()) {
-                Ok(v) => out.push(v),
-                Err(Signal::Throw(t)) => return Err(SourceError::Uncaught(t)),
-                Err(Signal::Recur(_)) => {
-                    return Err(SourceError::Internal(
-                        "recur escaped its loop or fn".to_owned(),
-                    ));
-                }
-            }
+            out.push(self.eval_top_form(form)?);
         }
         Ok(out)
     }
 
-    /// Install a native fn under `name` (test doubles; S5 grows
-    /// this into the core subset).
-    pub fn install_native(&mut self, name: &str, func: Arc<crate::ext::NativeImpl>) -> Value {
+    /// Deep-realize a value for printing (like the JVM, whose
+    /// print walks — forcing errors surface here, not in `eval`).
+    pub fn realize_deep(&mut self, v: &Value) -> Result<Value, crate::error::Signal> {
+        crate::lazy::realize_deep(self, v)
+    }
+
+    /// Evaluate one top-level form. A `do`-headed list splits like
+    /// `Compiler.eval`: each element analyzes after the previous
+    /// evaluates, and only the last value survives (§do-split).
+    pub fn eval_top_form(&mut self, form: &Value) -> Result<Value, SourceError> {
+        // `Compiler.eval` macroexpands first (fully), then splits
+        // `do`-headed expansions; each element re-enters `eval`
+        // (macros defining macros before later-element analysis
+        // see them).
+        let source = Arc::clone(&self.source);
+        let span = span_of(form, Span::new(1, 1));
+        let expanded = crate::macros::macroexpand_full(self, form, span, &source)
+            .map_err(|e| self.compile_err(e))?;
+        if let Some(elements) = split_top_do(&expanded) {
+            let mut last = Value::Nil;
+            for element in elements {
+                last = self.eval_top_form(element)?;
+            }
+            return Ok(last);
+        }
+        self.eval_seq += 1;
+        let expr = self.analyze(&expanded).map_err(|e| self.compile_err(e))?;
+        match self.eval(&expr, &Env::new()) {
+            Ok(v) => Ok(v),
+            Err(Signal::Throw(t)) => Err(SourceError::Uncaught(t)),
+            Err(Signal::Recur(_)) => Err(SourceError::Internal(
+                "recur escaped its loop or fn".to_owned(),
+            )),
+        }
+    }
+
+    /// A compile failure as a source error: bare causes escape
+    /// like uncaught throwables of their own class (macro arities,
+    /// `declare`'s cast, stripped macro arities); wrapped chains
+    /// stay compile errors.
+    fn compile_err(&mut self, e: CompileError) -> SourceError {
+        if e.bare {
+            let id = self.next_id();
+            SourceError::Uncaught(Throwable {
+                id,
+                class: crate::ns::throw_class_for(e.class),
+                message: Some(Arc::from(e.message.as_str())),
+                data: None,
+                cause: None,
+            })
+        } else {
+            SourceError::Compile(e)
+        }
+    }
+
+    /// Evaluate `text` as a load from `path`: spans blame the
+    /// path while the load runs, then the previous source returns
+    /// (callers bind `*file*` and save the current namespace).
+    pub(crate) fn load_source(
+        &mut self,
+        path: &str,
+        text: &str,
+    ) -> Result<Vec<Value>, SourceError> {
+        let prev = std::mem::replace(&mut self.source, Arc::from(path));
+        let out = self.eval_source(text);
+        self.source = prev;
+        out
+    }
+
+    /// Push one single-entry thread-binding frame, returning the
+    /// depth to pass to [`pop_bindings`](Self::pop_bindings)
+    /// (natives bind `*file*`/`*pending-paths*` around loads).
+    pub(crate) fn push_binding(&mut self, var: Var, value: Value) -> usize {
+        let depth = self.bindings.depth();
+        self.bindings.push_frame(vec![(var, value)]);
+        depth
+    }
+
+    /// Push one thread-binding frame (validated entries).
+    pub(crate) fn push_frame(&mut self, entries: Vec<(Var, Value)>) {
+        self.bindings.push_frame(entries);
+    }
+
+    /// Pop one thread-binding frame (`None` when the stack is
+    /// empty — `pop-thread-bindings` raises then).
+    pub(crate) fn pop_frame(&mut self) -> Option<Vec<(Var, Value)>> {
+        self.bindings.pop_frame()
+    }
+
+    /// Pop thread-binding frames back to `depth`.
+    pub(crate) fn pop_bindings(&mut self, depth: usize) {
+        self.bindings.truncate(depth);
+    }
+
+    /// `set!` on the topmost frame for a var (false when no frame
+    /// exists — `in-ns` falls back to the root then).
+    pub(crate) fn set_binding_top(&mut self, id: u64, value: Value) -> bool {
+        self.bindings.set_top(id, value)
+    }
+
+    /// Whether a var has a thread-local entry (`thread-bound?`).
+    pub(crate) fn is_thread_bound(&self, id: u64) -> bool {
+        self.bindings.get(id).is_some()
+    }
+
+    /// Every binding entry oldest-first (for snapshots).
+    pub(crate) fn binding_pairs(&self) -> Vec<(Var, Value)> {
+        self.bindings
+            .pairs()
+            .map(|(var, v)| (var.clone(), v.clone()))
+            .collect()
+    }
+
+    /// The current load path (`:file`), for spans.
+    pub(crate) fn source(&self) -> &str {
+        &self.source
+    }
+
+    /// Install a native fn under `ns`/`name` (test doubles land
+    /// in `user`; S5 installs the core subset into `clojure.core`).
+    pub fn install_native(
+        &mut self,
+        ns: &str,
+        name: &str,
+        func: Arc<crate::ext::NativeImpl>,
+    ) -> Value {
         let id = self.next_id();
-        let sym = Symbol::new(Some("user"), name);
-        let var_id = self.ns.intern(&sym);
+        let sym = Symbol::new(Some(ns), name);
+        let var_id = self.registry.intern(&sym);
         let native = Value::Extension(Arc::new(NativeFn {
             id,
-            display: Arc::from(format!("user/{name}").as_str()),
+            display: Arc::from(format!("{ns}/{name}").as_str()),
             func,
+            meta: None,
         }));
-        if let Some(state) = self.ns.state_mut(var_id) {
+        if let Some(state) = self.registry.state_mut(var_id) {
             state.root = Some(native.clone());
         }
         native
     }
 
     /// Stamp a runtime failure with an identity and throw it.
-    fn throw(&mut self, err: NativeError) -> Signal {
+    pub(crate) fn throw(&mut self, err: NativeError) -> Signal {
+        let inner = err.into_inner();
         Signal::Throw(Throwable {
             id: self.next_id(),
-            class: err.class,
-            message: Arc::from(err.message.as_str()),
-            data: err.data.map(Box::new),
-            cause: err.cause.map(Box::new),
+            class: inner.class,
+            message: Some(Arc::from(inner.message.as_str())),
+            data: inner.data.map(Box::new),
+            cause: inner.cause.map(Box::new),
         })
     }
 
     /// The visible value of a var: thread binding, else root (or
     /// the var's own `Unbound` sentinel, never a throw).
-    fn deref_var(&self, id: u64, sym: &Symbol) -> Value {
+    pub(crate) fn deref_var(&self, id: u64, sym: &Symbol) -> Value {
         if let Some(v) = self.bindings.get(id) {
             return v.clone();
         }
-        self.ns.root_or_unbound(id, sym)
+        self.registry.root_or_unbound(id, sym)
     }
 
     /// Evaluate an expression to a value (or a control signal).
@@ -213,7 +444,7 @@ impl Evaluator {
             Expr::NewThrowable { class, message } => Ok(Value::Throwable(Throwable {
                 id: self.next_id(),
                 class: *class,
-                message: Arc::from(message.as_str()),
+                message: Some(Arc::from(message.as_str())),
                 data: None,
                 cause: None,
             })),
@@ -224,20 +455,75 @@ impl Evaluator {
             } => self.eval_try(body, catches, finally_body, env),
             Expr::Set { sym, val } => self.eval_set(sym, val, env),
             Expr::Binding { pairs, body } => self.eval_binding(pairs, body, env),
-            Expr::Invoke { head, args } => {
+            Expr::WithRedefs { pairs, body } => self.eval_with_redefs(pairs, body, env),
+            Expr::WithBindings { map, body } => self.eval_with_bindings(map, body, env),
+            Expr::BoundFn { name, fun } => self.eval_bound_fn(name.as_deref(), fun, env),
+            Expr::DefMacro {
+                sym,
+                doc,
+                attr,
+                arglists,
+                fun,
+                span,
+            } => {
+                let parts = DefMacroParts {
+                    sym,
+                    doc: doc.as_deref(),
+                    attr: attr.as_ref(),
+                    arglists,
+                    fun,
+                    span: *span,
+                };
+                self.eval_defmacro(&parts, env)
+            }
+            Expr::Declare { syms, span } => self.eval_declare(syms, *span, env),
+            Expr::Ns {
+                name,
+                doc,
+                attr,
+                clauses,
+            } => crate::ns::eval_ns_form(self, name, doc.as_deref(), attr.as_ref(), clauses),
+            Expr::Assert {
+                test,
+                message,
+                form,
+            } => self.eval_assert(test, message.as_deref(), form, env),
+            Expr::Time { expr } => self.eval_time(expr, env),
+            Expr::WithOutStr { out, body } => self.eval_with_out_str(out, body, env),
+            Expr::LazySeqStar { body } => Ok(crate::lazy::thunk0_value(
+                Arc::new(body.clone()),
+                env.clone(),
+            )),
+            Expr::CaseStar {
+                expr,
+                shift,
+                mask,
+                default,
+                cases,
+                skip,
+                test,
+            } => self.eval_case_star(expr, *shift, *mask, default, cases, skip, *test, env),
+            Expr::Invoke { head, args, span } => {
                 let callee = self.eval(head, env)?;
                 let mut values = Vec::with_capacity(args.len());
                 for arg in args {
                     values.push(self.eval(arg, env)?);
                 }
-                self.invoke(&callee, &values)
+                // The call site stays visible to natives for the
+                // duration of the call (nesting saves/restores).
+                let saved = self.native_call_span.replace(*span);
+                let out = self.invoke(&callee, &values);
+                self.native_call_span = saved;
+                out
             }
         }
     }
 
     /// A var id, interning on first reference.
     fn var_id(&mut self, sym: &Symbol) -> u64 {
-        self.ns.lookup(sym).unwrap_or_else(|| self.ns.intern(sym))
+        self.registry
+            .lookup(sym)
+            .unwrap_or_else(|| self.registry.intern(sym))
     }
 
     /// A vector literal (elements evaluate left to right).
@@ -341,7 +627,7 @@ impl Evaluator {
         }
         for (sym, _) in pairs {
             let id = self.var_id(sym);
-            let dynamic = self.ns.state(id).is_some_and(|s| s.dynamic);
+            let dynamic = self.registry.state(id).is_some_and(|s| s.dynamic);
             if !dynamic {
                 return Err(self.throw(NativeError::new(
                     ThrowClass::IllegalStateException,
@@ -350,13 +636,351 @@ impl Evaluator {
             }
         }
         let depth = self.bindings.depth();
+        let mut frame = Vec::with_capacity(pairs.len());
         for ((sym, _), value) in pairs.iter().zip(values) {
             let id = self.var_id(sym);
-            self.bindings.push(id, value);
+            frame.push((
+                Var {
+                    id,
+                    sym: sym.clone(),
+                },
+                value,
+            ));
         }
+        self.bindings.push_frame(frame);
         let result = self.eval_body(body, env);
         self.bindings.truncate(depth);
         result
+    }
+
+    /// `(assert x)` / `(assert x message)`: a falsy test throws
+    /// `AssertionError` (`Assert failed: <form>` /
+    /// `Assert failed: <msg>\n<form>`, the message evaluated only on
+    /// failure); a truthy test yields `nil` (the `when-not`
+    /// expansion).
+    fn eval_assert(
+        &mut self,
+        test: &Expr,
+        message: Option<&Expr>,
+        form: &str,
+        env: &Env,
+    ) -> Result<Value, Signal> {
+        if self.eval(test, env)?.is_truthy() {
+            return Ok(Value::Nil);
+        }
+        let text = match message {
+            None => format!("Assert failed: {form}"),
+            Some(m) => {
+                let mv = self.eval(m, env)?;
+                let rendered = crate::core::native_str(self, std::slice::from_ref(&mv))
+                    .map_err(|e| self.throw(e))?;
+                let Value::Str(s) = rendered else {
+                    unreachable!("str always returns a string")
+                };
+                format!("Assert failed: {s}\n{form}")
+            }
+        };
+        Err(self.throw(NativeError::new(ThrowClass::AssertionError, text)))
+    }
+
+    /// `(time expr)`: wall-clock the expr, `prn` the JVM line to
+    /// `*out*` (`"Elapsed time: <millis> msecs"`, quoted by `prn`),
+    /// return the value.
+    fn eval_time(&mut self, expr: &Expr, env: &Env) -> Result<Value, Signal> {
+        let start = std::time::Instant::now();
+        let v = self.eval(expr, env)?;
+        let millis = start.elapsed().as_nanos() as f64 / 1_000_000.0;
+        let dstr = clj_value::pr_to_string(&Value::Double(millis), &clj_value::PrintOpts::print());
+        let line = format!("Elapsed time: {dstr} msecs");
+        crate::io::prn_str(self, &line).map_err(|e| self.throw(e))?;
+        Ok(v)
+    }
+
+    /// `(with-out-str body…)`: bind `*out*` to a fresh string writer
+    /// (the `binding` push/pop discipline, so throws still pop),
+    /// discard the body, return the captured output.
+    fn eval_with_out_str(
+        &mut self,
+        out: &Symbol,
+        body: &[Expr],
+        env: &Env,
+    ) -> Result<Value, Signal> {
+        let writer = crate::io::string_writer(self);
+        let pairs = vec![(out.clone(), Expr::Literal(writer.clone()))];
+        self.eval_binding(&pairs, body, env)?;
+        let contents = crate::io::writer_contents(&writer).unwrap_or_default();
+        Ok(Value::Str(Arc::from(contents.as_str())))
+    }
+
+    /// `(case* …)`: the interpreter's `CaseExpr.doEmit` on the boxed
+    /// path (the only one here — no primitives). `:int` funnels
+    /// numbers through `intValue` (non-numbers miss, then an `equiv`
+    /// post-check); hash modes realize, hash, and post-check (skip
+    /// members run their collision-`condp` unchecked).
+    #[allow(clippy::too_many_arguments)]
+    fn eval_case_star(
+        &mut self,
+        expr: &Expr,
+        shift: i32,
+        mask: i32,
+        default: &Expr,
+        cases: &[(i32, Expr, Expr)],
+        skip: &[i32],
+        test: CaseTest,
+        env: &Env,
+    ) -> Result<Value, Signal> {
+        let v = self.eval(expr, env)?;
+        if test == CaseTest::Int {
+            self.eval_case_star_int(&v, shift, mask, default, cases, env)
+        } else {
+            self.eval_case_star_hash(&v, shift, mask, default, cases, skip, env)
+        }
+    }
+
+    /// `:int` `case*` dispatch: `intValue` the target (non-numbers
+    /// miss), shift-mask, then an `equiv` post-check on a hit.
+    fn eval_case_star_int(
+        &mut self,
+        v: &Value,
+        shift: i32,
+        mask: i32,
+        default: &Expr,
+        cases: &[(i32, Expr, Expr)],
+        env: &Env,
+    ) -> Result<Value, Signal> {
+        let Some(key) = case_int_value(v) else {
+            return self.eval(default, env);
+        };
+        let key = case_shift_mask(key, shift, mask);
+        let hit = cases.iter().find(|(k, _, _)| *k == key);
+        match hit {
+            None => self.eval(default, env),
+            Some((_, t, then)) => {
+                let tv = self.eval(t, env)?;
+                if crate::lazy::equiv_vals(self, v, &tv)? {
+                    self.eval(then, env)
+                } else {
+                    self.eval(default, env)
+                }
+            }
+        }
+    }
+
+    /// Hash `case*` dispatch: reject unbounded seqs, realize, hash,
+    /// shift-mask, then a hit runs directly (`skip`) or behind an
+    /// `equiv` post-check.
+    #[allow(clippy::too_many_arguments)]
+    fn eval_case_star_hash(
+        &mut self,
+        v: &Value,
+        shift: i32,
+        mask: i32,
+        default: &Expr,
+        cases: &[(i32, Expr, Expr)],
+        skip: &[i32],
+        env: &Env,
+    ) -> Result<Value, Signal> {
+        if clj_value::seq_hash_unsupported(v) {
+            return Err(self.unsupported_hash());
+        }
+        let r = crate::lazy::realize_deep(self, v)?;
+        if clj_value::seq_hash_unsupported(&r) {
+            return Err(self.unsupported_hash());
+        }
+        let key = case_shift_mask(clj_value::hash_code(&r), shift, mask);
+        let hit = cases.iter().find(|(k, _, _)| *k == key);
+        match hit {
+            None => self.eval(default, env),
+            Some((k, _, then)) if skip.contains(k) => self.eval(then, env),
+            Some((_, t, then)) => {
+                let tv = self.eval(t, env)?;
+                if crate::lazy::equiv_vals(self, &r, &tv)? {
+                    self.eval(then, env)
+                } else {
+                    self.eval(default, env)
+                }
+            }
+        }
+    }
+
+    /// Bare `UnsupportedOperationException` (the JVM `hasheq` /
+    /// `hashCode` overrides on unbounded seqs).
+    fn unsupported_hash(&mut self) -> Signal {
+        self.throw(NativeError::new(
+            ThrowClass::UnsupportedOperationException,
+            String::new(),
+        ))
+    }
+
+    /// `with-redefs`: a PARALLEL ROOT SWAP, not thread bindings.
+    /// Every init evaluates against the old roots (a repeated var
+    /// keeps the last value, map-style), the roots install, the body
+    /// runs, and the saved roots — or rootlessness — restore in a
+    /// `finally`, even on throw (probe37 `wrd-*`).
+    fn eval_with_redefs(
+        &mut self,
+        pairs: &[(Symbol, Expr)],
+        body: &[Expr],
+        env: &Env,
+    ) -> Result<Value, Signal> {
+        let mut saves: Vec<(u64, Option<Value>, Value)> = Vec::with_capacity(pairs.len());
+        for (sym, init) in pairs {
+            let value = self.eval(init, env)?;
+            let id = self.var_id(sym);
+            match saves.iter_mut().find(|(i, _, _)| *i == id) {
+                Some(slot) => slot.2 = value,
+                None => {
+                    let saved = self.registry.state(id).and_then(|s| s.root.clone());
+                    saves.push((id, saved, value));
+                }
+            }
+        }
+        for (id, _, value) in &saves {
+            if let Some(st) = self.registry.state_mut(*id) {
+                st.root = Some(value.clone());
+            }
+        }
+        let result = self.eval_body(body, env);
+        for (id, saved, _) in saves.iter().rev() {
+            if let Some(st) = self.registry.state_mut(*id) {
+                st.root = saved.clone();
+            }
+        }
+        result
+    }
+
+    /// `with-bindings`: evaluate the map expression and run the body
+    /// over one pushed frame (the macro expands to
+    /// `with-bindings*`, probe37 `wb-expansion`).
+    fn eval_with_bindings(
+        &mut self,
+        map: &Expr,
+        body: &[Expr],
+        env: &Env,
+    ) -> Result<Value, Signal> {
+        let bindings = self.eval(map, env)?;
+        let entries = crate::vars::push_entries(self, &bindings).map_err(|e| self.throw(e))?;
+        let depth = self.bindings.depth();
+        self.bindings.push_frame(entries);
+        let result = self.eval_body(body, env);
+        self.bindings.truncate(depth);
+        result
+    }
+
+    /// `bound-fn`: like `fn`, but the closure snapshots the thread
+    /// bindings at creation and re-pushes them around every
+    /// invocation. Named `bound-fn` replays the single-`letfn`
+    /// layout (same slot math, conveyed closure).
+    fn eval_bound_fn(
+        &mut self,
+        name: Option<&str>,
+        fun: &crate::expr::FunExpr,
+        env: &Env,
+    ) -> Result<Value, Signal> {
+        let conveyed = self.bindings.clone();
+        if name.is_none() {
+            let mut closure = self.make_closure(fun, env);
+            closure.conveyed = Some(conveyed);
+            return Ok(Value::Extension(Arc::new(closure)));
+        }
+        let env = env.extend(vec![Value::Nil]);
+        let mut closure = self.make_closure(fun, &env);
+        closure.conveyed = Some(conveyed);
+        let value = Value::Extension(Arc::new(closure));
+        env.set(env.len() - 1, value.clone());
+        Ok(value)
+    }
+
+    /// `defmacro`: like `def` of the `&form`/`&env`-prepended
+    /// `fn`, plus `:macro true` and `:arglists` meta (name-symbol
+    /// meta under the attrmap; the attrmap wins over the docstring
+    /// for `:doc`; autos win over all).
+    fn eval_defmacro(&mut self, parts: &DefMacroParts<'_>, env: &Env) -> Result<Value, Signal> {
+        let DefMacroParts {
+            sym,
+            doc,
+            attr,
+            arglists,
+            fun,
+            span,
+        } = *parts;
+        let id = self.registry.intern(sym);
+        let closure = self.make_closure(fun, env);
+        let dynamic = Self::dynamic_of(sym);
+        let cur = self.current_ns_name();
+        let cur_id = self.registry.get(&cur).map_or(0, |ns| ns.id());
+        if let Some(state) = self.registry.state_mut(id) {
+            state.root = Some(Value::Extension(Arc::new(closure)));
+            let mut meta = sym.meta().cloned().unwrap_or_else(new_map);
+            if let Some(attr) = attr {
+                for (k, v) in attr.iter() {
+                    meta = meta.insert(k.clone(), v.clone());
+                }
+            }
+            meta = meta
+                .insert(
+                    Value::Keyword(Keyword::new(None, "macro")),
+                    Value::Bool(true),
+                )
+                .insert(
+                    Value::Keyword(Keyword::new(None, "arglists")),
+                    Value::List(List::from_vec(arglists.to_vec())),
+                );
+            let doc_key = Value::Keyword(Keyword::new(None, "doc"));
+            if let Some(doc) = doc.filter(|_| meta.get(&doc_key).is_none()) {
+                meta = meta.insert(doc_key, Value::Str(Arc::from(doc)));
+            }
+            let auto = [
+                ("line", Value::Int(i64::from(span.line))),
+                ("column", Value::Int(i64::from(span.col))),
+                ("file", Value::Str(Arc::clone(&self.source))),
+                ("name", Value::Symbol(Symbol::new(None, sym.name()))),
+                (
+                    "ns",
+                    Value::Extension(Arc::new(NsHandle {
+                        name: Arc::from(cur.as_str()),
+                        id: cur_id,
+                    })),
+                ),
+            ];
+            for (key, value) in auto {
+                meta = meta.insert(Value::Keyword(Keyword::new(None, key)), value);
+            }
+            state.meta = Some(meta);
+            state.dynamic = dynamic;
+        }
+        Ok(Value::Var(Var {
+            id,
+            sym: sym.clone(),
+        }))
+    }
+
+    /// `declare`: per-name `def`-with-no-init plus `:declared`
+    /// true, returning the last var (roots survive: `def` only
+    /// sets given inits; empty `declare` is nil).
+    fn eval_declare(&mut self, syms: &[Symbol], span: Span, env: &Env) -> Result<Value, Signal> {
+        let mut last = Value::Nil;
+        for sym in syms {
+            let mut meta = sym.meta().cloned().unwrap_or_else(new_map);
+            meta = meta.insert(
+                Value::Keyword(Keyword::new(None, "declared")),
+                Value::Bool(true),
+            );
+            let sym = sym.clone().with_meta(Some(meta));
+            last = self.eval_def(&sym, None, None, span, env)?;
+        }
+        Ok(last)
+    }
+
+    /// Dynamic is the truthiness of the sym's `:dynamic` meta,
+    /// reset by every `def` (shared by `def`/`defmacro`).
+    fn dynamic_of(sym: &Symbol) -> bool {
+        sym.meta()
+            .and_then(|meta| {
+                let probe = Value::Keyword(Keyword::new(None, "dynamic"));
+                meta.get(&probe)
+            })
+            .is_some_and(Value::is_truthy)
     }
 
     /// A body: the last value, or `nil` when empty.
@@ -406,19 +1030,15 @@ impl Evaluator {
         span: Span,
         env: &Env,
     ) -> Result<Value, Signal> {
-        let id = self.ns.intern(sym);
+        let id = self.registry.intern(sym);
         let value = match init {
             Some(init) => Some(self.eval(init, env)?),
             None => None,
         };
-        let dynamic = sym
-            .meta()
-            .and_then(|meta| {
-                let probe = Value::Keyword(Keyword::new(None, "dynamic"));
-                meta.get(&probe)
-            })
-            .is_some_and(Value::is_truthy);
-        if let Some(state) = self.ns.state_mut(id) {
+        let dynamic = Self::dynamic_of(sym);
+        let cur = self.current_ns_name();
+        let cur_id = self.registry.get(&cur).map_or(0, |ns| ns.id());
+        if let Some(state) = self.registry.state_mut(id) {
             if let Some(v) = value {
                 state.root = Some(v);
             }
@@ -432,12 +1052,19 @@ impl Evaluator {
                 ("column", Value::Int(i64::from(span.col))),
                 ("file", Value::Str(Arc::clone(&self.source))),
                 ("name", Value::Symbol(Symbol::new(None, sym.name()))),
+                (
+                    "ns",
+                    Value::Extension(Arc::new(NsHandle {
+                        name: Arc::from(cur.as_str()),
+                        id: cur_id,
+                    })),
+                ),
             ];
             for (key, val) in auto {
                 let key = Value::Keyword(Keyword::new(None, key));
                 meta = meta.insert(key, val);
             }
-            state.meta = meta;
+            state.meta = Some(meta);
             state.dynamic = dynamic;
         }
         Ok(Value::Var(Var {
@@ -545,6 +1172,8 @@ impl Evaluator {
             display: Arc::from(fun.display.as_str()),
             arities: fun.arities.clone(),
             env: env.clone(),
+            meta: None,
+            conveyed: None,
         }
     }
 
@@ -552,6 +1181,12 @@ impl Evaluator {
     /// vectors, maps, sets, vars (deref-and-delegate), unbounds
     /// (the `IllegalStateException`), and the `ClassCastException`
     /// for everything else.
+    /// Invoke any value (natives reuse this for `:rename`
+    /// fallbacks and other higher-order calls).
+    pub(crate) fn call(&mut self, callee: &Value, args: &[Value]) -> Result<Value, Signal> {
+        self.invoke(callee, args)
+    }
+
     fn invoke(&mut self, callee: &Value, args: &[Value]) -> Result<Value, Signal> {
         match callee {
             Value::Nil => Err(self.throw(NativeError::new(
@@ -610,7 +1245,10 @@ impl Evaluator {
         }
         if let Some(native) = as_native(callee) {
             let func = Arc::clone(&native.func);
-            return func(args).map_err(|e| self.throw(e));
+            return func(self, args).map_err(|e| self.throw(e));
+        }
+        if let Some(sv) = crate::lazy::as_subvector(callee) {
+            return self.invoke_subvector(sv, args);
         }
         Err(self.throw(NativeError::cast(&jvm_class_of(callee), "clojure.lang.IFn")))
     }
@@ -639,6 +1277,34 @@ impl Evaluator {
         }
     }
 
+    /// Invoke a subvector: exactly one integer key (the arity error
+    /// names `APersistentVector/SubVector`, like the JVM).
+    fn invoke_subvector(
+        &mut self,
+        sv: &clj_value::SubVectorValue,
+        args: &[Value],
+    ) -> Result<Value, Signal> {
+        if args.len() != 1 {
+            return Err(self.throw(NativeError::arity(
+                "clojure.lang.APersistentVector/SubVector",
+                args.len(),
+            )));
+        }
+        let Value::Int(n) = &args[0] else {
+            return Err(self.throw(NativeError::new(
+                ThrowClass::IllegalArgumentException,
+                "Key must be integer".to_owned(),
+            )));
+        };
+        match usize::try_from(*n).ok().and_then(|i| sv.nth(i)) {
+            Some(elem) => Ok(elem.clone()),
+            None => Err(self.throw(NativeError::new(
+                ThrowClass::IndexOutOfBoundsException,
+                String::new(),
+            ))),
+        }
+    }
+
     /// Invoke a var: deref and delegate (unbounds are the
     /// `IllegalStateException`).
     fn invoke_var(&mut self, v: &Var, args: &[Value]) -> Result<Value, Signal> {
@@ -653,8 +1319,27 @@ impl Evaluator {
     }
 
     /// Apply a closure: fixed arities by count, else the variadic
-    /// arity (`rest` binds `nil` when empty, §E5).
+    /// arity (`rest` binds `nil` when empty, §E5). A `bound-fn`
+    /// closure re-pushes its conveyed bindings as one frame around
+    /// the call (popped in a `finally`, like the JVM's
+    /// `resetThreadBindingFrame`).
     fn apply_closure(&mut self, closure: &Closure, args: &[Value]) -> Result<Value, Signal> {
+        if let Some(conveyed) = closure.conveyed.clone() {
+            let depth = self.bindings.depth();
+            let frame: Vec<(Var, Value)> = conveyed
+                .pairs()
+                .map(|(var, v)| (var.clone(), v.clone()))
+                .collect();
+            self.bindings.push_frame(frame);
+            let result = self.apply_closure_inner(closure, args);
+            self.bindings.truncate(depth);
+            return result;
+        }
+        self.apply_closure_inner(closure, args)
+    }
+
+    /// The arity dispatch behind [`apply_closure`](Self::apply_closure).
+    fn apply_closure_inner(&mut self, closure: &Closure, args: &[Value]) -> Result<Value, Signal> {
         let mut variadic: Option<&crate::expr::Arity> = None;
         for arity in &closure.arities {
             if arity.rest.is_none() && arity.fixed.len() == args.len() {
@@ -1342,17 +2027,19 @@ fn rest_list(args: &[Value]) -> Value {
 }
 
 /// `(nth coll i nil)`: vectors/lists/strings (OOB is `nil`),
-/// `nil` is `nil`, anything else is `nth not supported` (§E12).
+/// `nil` is `nil`; anything else delegates to `nth` (lazy
+/// seqs force and walk, subvectors index, the rest is
+/// `nth not supported`) (§E12).
 fn nth_or_nil(coll: &Value, i: usize, eval: &mut Evaluator) -> Result<Value, Signal> {
     match coll {
         Value::Nil => Ok(Value::Nil),
         Value::Vector(v) => Ok(v.iter().nth(i).cloned().unwrap_or(Value::Nil)),
         Value::List(l) => Ok(l.iter().nth(i).cloned().unwrap_or(Value::Nil)),
         Value::Str(s) => Ok(s.chars().nth(i).map(Value::Char).unwrap_or(Value::Nil)),
-        other => Err(eval.throw(NativeError::new(
-            ThrowClass::UnsupportedOperationException,
-            format!("nth not supported on this type: {}", simple_class_of(other)),
-        ))),
+        other => {
+            let idx = Value::Int(i64::try_from(i).unwrap_or(i64::MAX));
+            native_nth(eval, &[other.clone(), idx, Value::Nil]).map_err(|err| eval.throw(err))
+        }
     }
 }
 

@@ -12,16 +12,26 @@
 //! `docs/t1174/evaluator-contract.md` shape rules; [`Evaluator`]
 //! runs them. Single namespace (`user`), no prelude yet (S5).
 
+pub mod coll;
+pub mod core;
 pub mod env;
 pub mod error;
 pub mod eval;
 pub mod expr;
 pub mod ext;
+pub mod fmt;
+pub mod io;
+pub mod lazy;
+pub mod macros;
+pub mod ns;
+pub mod seqs;
+pub mod vars;
 
-pub use env::{Bindings, Env, Namespace, VarState};
+pub use env::{Bindings, Env, Namespace, NamespaceRegistry, VarState};
 pub use error::{CompileError, NativeError, Signal, Verb, jvm_class_of, simple_class_of, span_of};
 pub use eval::{Evaluator, SourceError};
 pub use expr::{
     Analyzer, Arity, Catch, Expr, FunExpr, KeyBinding, MapPattern, Pattern, VecPattern,
 };
-pub use ext::{Closure, NativeFn, NativeImpl, as_closure, as_native, munge};
+pub use ext::{Closure, NativeFn, NativeImpl, NsHandle, as_closure, as_native, as_ns, munge};
+pub use ns::boot;

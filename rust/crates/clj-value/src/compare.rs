@@ -19,7 +19,7 @@
 use std::cmp::Ordering;
 use std::fmt;
 
-use crate::{Value, Vector};
+use crate::{SubVectorValue, Value};
 
 /// A failed comparison: the JVM throws `ClassCastException` here.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -55,6 +55,9 @@ pub fn compare(a: &Value, b: &Value) -> Result<Ordering, CompareError> {
     if let Some(ord) = compare_numbers(a, b) {
         return Ok(ord);
     }
+    if let (Some(x), Some(y)) = (vector_items(a), vector_items(b)) {
+        return compare_item_slices(&x, &y);
+    }
     match (a, b) {
         (Value::Nil, Value::Nil) => Ok(Ordering::Equal),
         (Value::Nil, _) => Ok(Ordering::Less),
@@ -74,7 +77,6 @@ pub fn compare(a: &Value, b: &Value) -> Result<Ordering, CompareError> {
             y.namespace(),
             y.name(),
         )),
-        (Value::Vector(x), Value::Vector(y)) => compare_vector(x, y),
         _ => Err(CompareError {
             left: type_name(a),
             right: type_name(b),
@@ -132,7 +134,19 @@ fn utf16_cmp(a: &str, b: &str) -> Ordering {
 
 /// Lexicographic element compare (element errors propagate, like the
 /// JVM's recursive `compareTo`).
-fn compare_vector(a: &Vector, b: &Vector) -> Result<Ordering, CompareError> {
+/// The items when `v` is a vector or subvector (`None` otherwise).
+fn vector_items(v: &Value) -> Option<Vec<Value>> {
+    match v {
+        Value::Vector(x) => Some(x.iter().cloned().collect()),
+        Value::Extension(e) => e
+            .as_any()
+            .downcast_ref::<SubVectorValue>()
+            .map(SubVectorValue::items),
+        _ => None,
+    }
+}
+
+fn compare_item_slices(a: &[Value], b: &[Value]) -> Result<Ordering, CompareError> {
     for (x, y) in a.iter().zip(b.iter()) {
         let ord = compare(x, y)?;
         if ord != Ordering::Equal {

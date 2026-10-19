@@ -91,6 +91,9 @@ root-cause exception (class | message | ex-data line/col).
 - `probe33.clj` (S4 review round 1b): direct `let*`/`loop*`/`fn*`
   (raw shapes, `&` rules, arity casts, arglist-NPE, pre/post
   blindness, unshadowed heads).
+- `probe34.clj` (S5A): namespace resolution (aliases, refers,
+  dangling aliases, cross-ns `def`/`var`) and top-level `do`
+  splitting in `eval`.
 
 Run: `./probe.sh [outdir]`. Gensym ids (`p1__243#`), identity hashes
 (`@7fc19ced`), and inst renderings vary between runs; the contract

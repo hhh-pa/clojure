@@ -4,16 +4,16 @@
   {
    "file": "crates/clj-eval/src/error.rs",
    "function": "jvm_class_of",
-   "cyclomatic": 22.0,
+   "cyclomatic": 23.0,
    "cognitive": 1.0,
-   "justification": "one arm per Value variant; JVM class table stays exhaustive"
+   "justification": "one arm per Value variant; JVM class table stays exhaustive S5D adds the Transient arm."
   },
   {
    "file": "crates/clj-eval/src/eval.rs",
    "function": "Evaluator::eval",
-   "cyclomatic": 30.0,
+   "cyclomatic": 41.0,
    "cognitive": 8.0,
-   "justification": "one arm per Expr variant; arms delegate to small-step helpers"
+   "justification": "one arm per Expr variant; arms delegate to small-step helpers. S5B adds the WithRedefs/WithBindings/BoundFn arms; S5C the DefMacro/Declare/Ns arms. S5D adds the Assert/CaseStar/LazySeqStar/Time/WithOutStr arms."
   },
   {
    "file": "crates/clj-eval/src/eval.rs",
@@ -25,9 +25,9 @@
   {
    "file": "crates/clj-eval/src/expr.rs",
    "function": "Analyzer<'a>::analyze_special",
-   "cyclomatic": 20.0,
+   "cyclomatic": 31.0,
    "cognitive": 2.0,
-   "justification": "one arm per special form; dispatch to per-form parsers"
+   "justification": "one arm per special form; dispatch to per-form parsers. S5B adds the with-redefs/with-bindings/bound-fn arms; S5C the defmacro/declare/ns arms. S5D adds the assert/time/with-out-str/lazy-seq*/case* arms."
   },
   {
    "file": "crates/clj-eval/src/ext.rs",
@@ -67,9 +67,9 @@
   {
    "file": "crates/clj-value/src/print.rs",
    "function": "java_debug",
-   "cyclomatic": 16.0,
-   "cognitive": 4.0,
-   "justification": "one arm per Value variant; JVM toString mirror stays exhaustive"
+   "cyclomatic": 18.0,
+   "cognitive": 3.0,
+   "justification": "one arm per Value variant; JVM toString mirror stays exhaustive S5D adds the Transient/Throwable arms."
   },
   {
    "file": "crates/clj-value/src/print.rs",
@@ -81,23 +81,23 @@
   {
    "file": "crates/clj-value/src/print.rs",
    "function": "print_into",
-   "cyclomatic": 25.0,
-   "cognitive": 10.0,
-   "justification": "one arm per Value variant; printer stays exhaustive"
+   "cyclomatic": 28.0,
+   "cognitive": 14.0,
+   "justification": "one arm per Value variant; printer stays exhaustive S5D adds the Transient/Throwable/Extension branches."
   },
   {
    "file": "crates/clj-value/src/value.rs",
    "function": "Value::eq",
-   "cyclomatic": 28.0,
-   "cognitive": 2.0,
-   "justification": "per-variant-pair equality table incl. numeric cross-type (spec C2)"
+   "cyclomatic": 34.0,
+   "cognitive": 5.0,
+   "justification": "per-variant-pair equality table incl. numeric cross-type (spec C2) S5D adds the Transient/Throwable/Extension pairs."
   },
   {
    "file": "crates/clj-value/src/value.rs",
    "function": "Value::hash",
-   "cyclomatic": 20.0,
-   "cognitive": 1.0,
-   "justification": "one arm per Value variant; mirrors eq"
+   "cyclomatic": 29.0,
+   "cognitive": 13.0,
+   "justification": "one arm per Value variant; mirrors eq S5D adds the Transient/Throwable/Extension arms."
   },
   {
    "file": "crates/clj-value/src/value.rs",
@@ -112,6 +112,55 @@
    "cyclomatic": 32.0,
    "cognitive": 4.0,
    "justification": "duplicate-key plain-form equality; per-variant-pair table"
+  },
+  {
+   "file": "crates/clj-eval/src/ns.rs",
+   "function": "throw_class_for",
+   "cyclomatic": 27.0,
+   "cognitive": 1.0,
+   "justification": "one arm per class name; load-error class table stays exhaustive. S5D extends the table with the core/format throw-site classes (ArithmeticException, format exceptions, IO, IllegalState, FileNotFound)."
+  },
+  {
+   "file": "crates/clj-eval/src/fmt.rs",
+   "function": "format_time",
+   "cyclomatic": 34.0,
+   "cognitive": 5.0,
+   "justification": "one arm per %t verb; JVM time-conversion table stays exhaustive"
+  },
+  {
+   "file": "crates/clj-eval/src/lazy.rs",
+   "function": "step_thunk",
+   "cyclomatic": 29.0,
+   "cognitive": 4.0,
+   "justification": "one arm per ThunkKind; arms delegate to per-kind step helpers"
+  },
+  {
+   "file": "crates/clj-value/src/extension.rs",
+   "function": "ThrowClass::jvm_name",
+   "cyclomatic": 32.0,
+   "cognitive": 1.0,
+   "justification": "one arm per throw class; JVM binary-name table stays exhaustive (renamed from free fn jvm_name)"
+  },
+  {
+   "file": "crates/clj-value/src/hasheq.rs",
+   "function": "hash_code",
+   "cyclomatic": 25.0,
+   "cognitive": 7.0,
+   "justification": "one arm per Value variant; mirrors hasheq per spec C2"
+  },
+  {
+   "file": "crates/clj-value/src/hasheq.rs",
+   "function": "hasheq",
+   "cyclomatic": 23.0,
+   "cognitive": 3.0,
+   "justification": "one arm per Value variant incl. numeric cross-type (spec C2)"
+  },
+  {
+   "file": "crates/clj-value/src/value.rs",
+   "function": "Value::meta",
+   "cyclomatic": 16.0,
+   "cognitive": 1.0,
+   "justification": "one arm per IMeta-bearing variant; passthrough table stays exhaustive"
   }
  ]
 }

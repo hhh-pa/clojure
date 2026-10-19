@@ -10,3 +10,11 @@
 //! `clojure.core` subset with its coverage list.
 //!
 //! Lands in slice S5 (`docs/t1174/specification.md`).
+
+/// Boot a fresh evaluator with `clojure.core` installed and referred
+/// into `user` (S5A2 wires the namespace vars and the loader; later
+/// slices grow the installed subset).
+#[must_use]
+pub fn boot() -> clj_eval::Evaluator {
+    clj_eval::boot()
+}

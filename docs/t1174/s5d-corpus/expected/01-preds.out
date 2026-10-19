@@ -1,0 +1,97 @@
+val	coll?	sequential?	associative?	counted?	list?	vector?	map?	set?	seq?	string?	seqable?	ifn?	fn?
+nil	 false	 false	 false	 false	 false	 false	 false	 false	 false	 false	 true	 false	 false
+true	 false	 false	 false	 false	 false	 false	 false	 false	 false	 false	 false	 false	 false
+0	 false	 false	 false	 false	 false	 false	 false	 false	 false	 false	 false	 false	 false
+1.5	 false	 false	 false	 false	 false	 false	 false	 false	 false	 false	 false	 false	 false
+1N	 false	 false	 false	 false	 false	 false	 false	 false	 false	 false	 false	 false	 false
+2/3	 false	 false	 false	 false	 false	 false	 false	 false	 false	 false	 false	 false	 false
+\a	 false	 false	 false	 false	 false	 false	 false	 false	 false	 false	 false	 false	 false
+s	 false	 false	 false	 false	 false	 false	 false	 false	 false	 true	 true	 false	 false
+:k	 false	 false	 false	 false	 false	 false	 false	 false	 false	 false	 false	 true	 false
+'s	 false	 false	 false	 false	 false	 false	 false	 false	 false	 false	 false	 true	 false
+[]	 true	 true	 true	 true	 false	 true	 false	 false	 false	 false	 true	 true	 false
+[1]	 true	 true	 true	 true	 false	 true	 false	 false	 false	 false	 true	 true	 false
+{}	 true	 false	 true	 true	 false	 false	 true	 false	 false	 false	 true	 true	 false
+#{}	 true	 false	 false	 true	 false	 false	 false	 true	 false	 false	 true	 true	 false
+'(1)	 true	 true	 false	 true	 true	 false	 false	 false	 true	 false	 true	 false	 false
+(list)	 true	 true	 false	 true	 true	 false	 false	 false	 true	 false	 true	 false	 false
+(seq[1])	 true	 true	 false	 true	 false	 false	 false	 false	 true	 false	 true	 false	 false
+(lazy-seq)	 true	 true	 false	 false	 false	 false	 false	 false	 true	 false	 true	 false	 false
+(range)	 true	 true	 false	 true	 false	 false	 false	 false	 true	 false	 true	 false	 false
+(map)	 true	 true	 false	 false	 false	 false	 false	 false	 true	 false	 true	 false	 false
+(concat)	 true	 true	 false	 false	 false	 false	 false	 false	 true	 false	 true	 false	 false
+(repeat)	 true	 true	 false	 false	 false	 false	 false	 false	 true	 false	 true	 false	 false
+(str-seq)	 true	 true	 false	 true	 false	 false	 false	 false	 true	 false	 true	 false	 false
+#'+ 	 false	 false	 false	 false	 false	 false	 false	 false	 false	 false	 false	 true	 false
+(fn)	 false	 false	 false	 false	 false	 false	 false	 false	 false	 false	 false	 true	 true
+(atom)	 false	 false	 false	 false	 false	 false	 false	 false	 false	 false	 false	 false	 false
+(delay)	 false	 false	 false	 false	 false	 false	 false	 false	 false	 false	 false	 false	 false
+(var)	 false	 false	 false	 false	 false	 false	 false	 false	 false	 false	 false	 true	 false
+int?	 true	 false	 false	 false	 false	 false
+integer?	 true	 true	 false	 false	 false
+float?	 true	 true	 false
+double?	 true	 false	 false
+number?	 true	 true	 true	 true	 true	 false	 false
+char?	 true	 false	 false
+boolean?	 true	 true	 false	 false
+record?	 false	 false
+var?	 true	 false
+fn?	 false	 false	 false
+ifn?	 true	 true	 true	 true	 true	 true	 true	 false	 false	 false
+ident?	 true	 true	 false	 false
+qualified-ident?	 true	 true	 false	 false
+simple-ident?	 false	 true	 false	 true
+qualified-keyword?	 true	 false	 false
+simple-keyword?	 false	 true
+qualified-symbol?	 true	 false	 false
+simple-symbol?	 false	 true
+:nil?-t  => true
+:nil?-f  => false
+:not-nil  => true
+:not-0  => false
+:not-str  => false
+:some?-nil  => false
+:some?-false  => true
+:true?-1  => false
+:false?-nil  => false
+:seqable?-1  => false
+:fn?-native  => true
+:fn?-str  => true
+:ifn?-lazy  => false
+:int-class  => "class java.lang.Integer"
+:int?-int  => true
+:int?-Integer  => true
+:integer?-int  => true
+:int?-1N  => false
+:int-eq-long  => true
+:record?-inst  => true
+:record?-map  => false
+:record?-nil  => false
+:class-lazyseq  => "class clojure.lang.LazySeq"
+:class-mapfn  => "class clojure.lang.LazySeq"
+:class-filterfn  => "class clojure.lang.LazySeq"
+:class-mapxform  => "class clojure.core$map$fn__6050"
+:class-filterxform  => "class clojure.core$filter$fn__6077"
+:class-range  => "class clojure.lang.LongRange"
+:class-repeat  => "class clojure.lang.Repeat"
+:class-cycle  => "class clojure.lang.Cycle"
+:class-iterate  => "class clojure.lang.Iterate"
+:class-cons  => "class clojure.lang.Cons"
+:class-mapSeq  => "class clojure.lang.PersistentArrayMap$Seq"
+:class-strSeq  => "class clojure.lang.StringSeq"
+:class-emptylist  => "class clojure.lang.PersistentList$EmptyList"
+:class-sort  => "class clojure.lang.ArraySeq"
+:class-keyword  => "class clojure.lang.Keyword"
+:class-symbol  => "class clojure.lang.Symbol"
+:class-var  => "class clojure.lang.Var"
+:class-atom  => "class clojure.lang.Atom"
+:distinct?-0  => "THROW clojure.lang.ArityException: Wrong number of args (0) passed to: clojure.core/distinct?"
+:a-distinctq  => "THROW clojure.lang.ArityException: Wrong number of args (0) passed to: clojure.core/distinct?"
+:distinct?-1  => true
+:distinct?-eq  => false
+:distinct?-late  => false
+:distinct?-ok  => true
+:distinct?-mixed  => true
+:distinct?-nil  => false
+:distinct?-strs  => false
+S5D-01 DONE

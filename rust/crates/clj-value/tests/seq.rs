@@ -12,7 +12,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use clj_value::{List, Map, Seq, Set, Value, Vector};
+use clj_value::{List, Map, Seq, Set, Value, Vector, seq_vec};
 
 fn int(i: i64) -> Value {
     Value::Int(i)
@@ -274,4 +274,29 @@ fn lazy_memoizes_once_across_threads() {
 fn seq_is_send_sync() {
     fn assert_send_sync<T: Send + Sync>() {}
     assert_send_sync::<Seq>();
+}
+
+#[test]
+fn seq_vec_coerces_seqables() {
+    assert_eq!(seq_vec(&Value::Nil), Some(Vec::new()));
+    assert_eq!(
+        seq_vec(&Value::Str(Arc::from("ab"))),
+        Some(vec![Value::Char('a'), Value::Char('b')])
+    );
+    let list = Value::List(List::from_vec(vec![Value::Int(1)]));
+    assert_eq!(seq_vec(&list), Some(vec![Value::Int(1)]));
+    let vec = Value::Vector(Vector::from_vec(vec![Value::Int(2)]));
+    assert_eq!(seq_vec(&vec), Some(vec![Value::Int(2)]));
+    let map = Value::Map(Map::from_kvs_checked(vec![(Value::Int(1), Value::Int(2))]).unwrap());
+    assert_eq!(
+        seq_vec(&map),
+        Some(vec![Value::Vector(Vector::from_vec(vec![
+            Value::Int(1),
+            Value::Int(2)
+        ]))])
+    );
+    let set = Value::Set(Set::from_items_checked(vec![Value::Int(3)]).unwrap());
+    assert_eq!(seq_vec(&set), Some(vec![Value::Int(3)]));
+    assert_eq!(seq_vec(&Value::Int(1)), None);
+    assert_eq!(seq_vec(&Value::Bool(true)), None);
 }

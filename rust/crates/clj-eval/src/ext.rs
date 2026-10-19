@@ -16,10 +16,11 @@ use std::any::Any;
 use std::hash::Hasher;
 use std::sync::Arc;
 
-use clj_value::{ExtensionValue, Value};
+use clj_value::{ExtensionValue, Map, Value};
 
-use crate::env::Env;
+use crate::env::{Bindings, Env};
 use crate::error::NativeError;
+use crate::eval::Evaluator;
 use crate::expr::Arity;
 
 /// `Compiler.munge` for display names (`-` → `_`, `/` → `$`,
@@ -61,13 +62,18 @@ pub fn munge(display: &str) -> String {
 }
 
 /// An interpreted function value: display name, arities, captured
-/// frame. Identity is the sequence `id`.
+/// frame, optional metadata (`with-meta`), and optional conveyed
+/// thread bindings (`bound-fn` snapshots these at creation and
+/// re-pushes them around every invocation). Identity is the
+/// sequence `id`.
 #[derive(Clone, Debug)]
 pub struct Closure {
     pub id: u64,
     pub display: Arc<str>,
     pub arities: Vec<Arity>,
     pub env: Env,
+    pub meta: Option<Map>,
+    pub conveyed: Option<Bindings>,
 }
 
 impl ExtensionValue for Closure {
@@ -100,15 +106,17 @@ impl ExtensionValue for Closure {
 }
 
 /// A Rust callable: `display` names arity errors, `func` runs the
-/// call. Failures are [`NativeError`]s (the evaluator stamps the
-/// identity when throwing).
-pub type NativeImpl = dyn Fn(&[Value]) -> Result<Value, NativeError> + Send + Sync;
+/// call with the live evaluator (natives can intern, resolve, and
+/// eval §N vars). Failures are [`NativeError`]s (the evaluator
+/// stamps the identity when throwing).
+pub type NativeImpl = dyn Fn(&mut Evaluator, &[Value]) -> Result<Value, NativeError> + Send + Sync;
 
 #[derive(Clone)]
 pub struct NativeFn {
     pub id: u64,
     pub display: Arc<str>,
     pub func: Arc<NativeImpl>,
+    pub meta: Option<Map>,
 }
 
 impl std::fmt::Debug for NativeFn {
@@ -163,6 +171,52 @@ pub fn as_closure(v: &Value) -> Option<&Closure> {
 pub fn as_native(v: &Value) -> Option<&NativeFn> {
     match v {
         Value::Extension(e) => e.as_any().downcast_ref::<NativeFn>(),
+        _ => None,
+    }
+}
+
+/// A namespace handle: `name` plus the registry creation `id`.
+/// Equality and hashing use the `id` only, like JVM identity — a
+/// removed-then-recreated namespace is a new value.
+#[derive(Clone, Debug)]
+pub struct NsHandle {
+    pub name: Arc<str>,
+    pub id: u64,
+}
+
+impl ExtensionValue for NsHandle {
+    fn class_name(&self) -> String {
+        "clojure.lang.Namespace".to_owned()
+    }
+
+    fn print(&self) -> String {
+        format!(
+            "#object[clojure.lang.Namespace 0x{:x} \"{}\"]",
+            self.id, self.name
+        )
+    }
+
+    fn dyn_eq(&self, other: &dyn ExtensionValue) -> bool {
+        other
+            .as_any()
+            .downcast_ref::<NsHandle>()
+            .is_some_and(|o| o.id == self.id)
+    }
+
+    fn dyn_hash(&self, state: &mut dyn Hasher) {
+        state.write_u64(self.id);
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+/// Downcast a value to a namespace handle, if it is one.
+#[must_use]
+pub fn as_ns(v: &Value) -> Option<&NsHandle> {
+    match v {
+        Value::Extension(e) => e.as_any().downcast_ref::<NsHandle>(),
         _ => None,
     }
 }

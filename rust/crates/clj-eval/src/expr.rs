@@ -19,10 +19,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use clj_reader::Span;
-use clj_value::{Keyword, Map, PrintOpts, Symbol, Value, Vector, pr_to_string, print_to_string};
+use clj_value::{
+    Keyword, Map, PrintOpts, Symbol, Value, Vector, new_map, pr_to_string, print_to_string,
+};
 
-use crate::env::Namespace;
-use crate::error::{CompileError, NativeError, Verb, jvm_class_of, span_of};
+use crate::error::{CompileError, NativeError, Signal, Verb, jvm_class_of, span_of};
+use crate::eval::Evaluator;
 
 /// A `catch` clause: resolved class name, local slot, body.
 #[derive(Clone, Debug)]
@@ -93,6 +95,27 @@ pub struct FunExpr {
     pub arities: Vec<Arity>,
 }
 
+/// One `ns` clause (raw unevaluated items, like the macro's
+/// quoted args).
+#[derive(Clone, Debug)]
+pub enum NsClause {
+    ReferClojure(Vec<Value>),
+    Require(Vec<Value>),
+    Use(Vec<Value>),
+}
+
+/// A `case*` dispatch mode: `:int` funnels numbers through
+/// `intValue` (non-numbers miss, then an `equiv` post-check);
+/// `:hash-equiv`/`:hash-identity` hash and post-check (`identity`
+/// is `equiv` here — keywords are not interned, and equal keywords
+/// must match either way).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CaseTest {
+    Int,
+    HashEquiv,
+    HashIdentity,
+}
+
 /// An analyzed expression.
 #[derive(Clone, Debug)]
 pub enum Expr {
@@ -158,9 +181,92 @@ pub enum Expr {
         pairs: Vec<(Symbol, Expr)>,
         body: Vec<Expr>,
     },
+    /// `(with-redefs [var init …] body…)` (S5B parallel root
+    /// swap; symbols are resolved, like `var`).
+    WithRedefs {
+        pairs: Vec<(Symbol, Expr)>,
+        body: Vec<Expr>,
+    },
+    /// `(with-bindings map-expr body…)` (S5B).
+    WithBindings {
+        map: Box<Expr>,
+        body: Vec<Expr>,
+    },
+    /// `(bound-fn name? argv body…)` (S5B: like `fn`, snapshots
+    /// the thread bindings at creation).
+    BoundFn {
+        name: Option<String>,
+        fun: FunExpr,
+    },
+    /// `(defmacro name doc? attr? fdecl)` (S5C: like `def` of a
+    /// `fn` with `&form`/`&env` prepended, plus `:macro` and
+    /// `:arglists` meta).
+    DefMacro {
+        sym: Symbol,
+        doc: Option<String>,
+        attr: Option<Map>,
+        arglists: Vec<Value>,
+        fun: FunExpr,
+        span: Span,
+    },
+    /// `(declare name…)` (S5C: per-name `def`-with-no-init plus
+    /// `:declared`, returning the last var).
+    Declare {
+        syms: Vec<Symbol>,
+        span: Span,
+    },
+    /// `(ns name doc? attr? clause…)` (S5C: `in-ns`, `resetMeta`,
+    /// `refer-clojure`, `:require`/`:use` clauses, mark loaded).
+    Ns {
+        name: String,
+        doc: Option<String>,
+        attr: Option<Map>,
+        clauses: Vec<NsClause>,
+    },
+    /// `(assert x)` / `(assert x message)` (S5D analyzer builtin):
+    /// `*assert*` was truthy at analysis (else analysis emits
+    /// `Literal(Nil)` without touching `test`). `form` is the
+    /// `pr-str` of the test form.
+    Assert {
+        test: Box<Expr>,
+        message: Option<Box<Expr>>,
+        form: String,
+    },
+    /// `(time expr)` (S5D analyzer builtin).
+    Time {
+        expr: Box<Expr>,
+    },
+    /// `(with-out-str body…)` (S5D analyzer builtin): `out` is the
+    /// `*out*` binding target (resolved like `binding`, so user
+    /// shadows apply).
+    WithOutStr {
+        out: Symbol,
+        body: Vec<Expr>,
+    },
+    /// `(lazy-seq* body…)` (S5D analyzer form — the JVM has no such
+    /// var; `lazy-seq` expands to this).
+    LazySeqStar {
+        body: Vec<Expr>,
+    },
+    /// `(case* ge shift mask default imap switch-type test-type
+    /// skip?)` (S5D analyzer form, emitted by the `case` macro):
+    /// `cases` maps dispatch keys to `(test, then)` (`test` is an
+    /// analyzed expr, evaluated on a hash hit like the JVM
+    /// `test.emit`); `skip` holds case ints whose `then` is already
+    /// a collision-`condp` (no post-check).
+    CaseStar {
+        expr: Box<Expr>,
+        shift: i32,
+        mask: i32,
+        default: Box<Expr>,
+        cases: Vec<(i32, Expr, Expr)>,
+        skip: Vec<i32>,
+        test: CaseTest,
+    },
     Invoke {
         head: Box<Expr>,
         args: Vec<Expr>,
+        span: Span,
     },
 }
 
@@ -321,6 +427,7 @@ fn is_curated_fqn(fqn: &str) -> bool {
             | "java.util.NoSuchElementException"
             | "java.util.concurrent.ExecutionException"
             | "java.lang.reflect.InvocationTargetException"
+            | "clojure.lang.Compiler$CompilerException"
     )
 }
 
@@ -351,7 +458,7 @@ fn pr_of(v: &Value) -> String {
 }
 
 /// Whether a symbol names a special form (unqualified only).
-fn is_special(name: &str) -> bool {
+pub(crate) fn is_special(name: &str) -> bool {
     matches!(
         name,
         "def"
@@ -371,48 +478,79 @@ fn is_special(name: &str) -> bool {
             | "try"
             | "set!"
             | "binding"
+            | "with-redefs"
+            | "with-bindings"
+            | "bound-fn"
+            | "defmacro"
+            | "declare"
+            | "ns"
+            | "assert"
+            | "time"
+            | "with-out-str"
+            | "lazy-seq*"
+            | "case*"
     )
 }
 
-/// The five macro-implemented specials: a local or global binding
+/// The macro-implemented specials: a local or global binding
 /// with one of these names shadows the macro (real specials never
-/// shadow, probe31 `shadow-*`).
+/// shadow, probe31 `shadow-*`). `case*` is not shadowable (the JVM
+/// hardcodes it); `lazy-seq*` is (the JVM has no such form, so a
+/// user definition wins there).
 fn is_shadowable_macro(name: &str) -> bool {
-    matches!(name, "let" | "loop" | "letfn" | "fn" | "binding")
+    matches!(
+        name,
+        "let"
+            | "loop"
+            | "letfn"
+            | "fn"
+            | "binding"
+            | "with-redefs"
+            | "with-bindings"
+            | "bound-fn"
+            | "defmacro"
+            | "declare"
+            | "ns"
+            | "assert"
+            | "time"
+            | "with-out-str"
+            | "lazy-seq*"
+    )
 }
 
 /// The analyzer: reader values become [`Expr`]s. Holds the local
-/// scope, the `recur` target, the `try` fence, and the namespace
-/// (resolve checks plus `def` interning, like the JVM).
+/// scope, the `recur` target, the `try` fence, and the live
+/// evaluator (namespace resolve checks plus `def` interning like
+/// the JVM, macro calls, and the `*ns*`-synced current name).
 pub struct Analyzer<'a> {
     source: Arc<str>,
-    ns: &'a mut Namespace,
+    eval: &'a mut Evaluator,
     locals: Vec<String>,
     recur: Option<usize>,
     no_recur: bool,
     eval_seq: u64,
-    fn_seq: &'a mut u64,
 }
 
 impl<'a> Analyzer<'a> {
-    /// Analyze top-level forms from `source` against `ns` (`eval_seq`
-    /// numbers the form for anonymous-`fn` display names; `fn_seq`
-    /// numbers every `fn` analyzed).
-    pub fn new(
-        source: &Arc<str>,
-        ns: &'a mut Namespace,
-        eval_seq: u64,
-        fn_seq: &'a mut u64,
-    ) -> Self {
+    /// Analyze top-level forms from `source` against the evaluator
+    /// (`eval_seq` numbers the form for anonymous-`fn` display
+    /// names).
+    pub fn new(source: &Arc<str>, eval: &'a mut Evaluator, eval_seq: u64) -> Self {
         Self {
             source: Arc::clone(source),
-            ns,
+            eval,
             locals: Vec::new(),
             recur: None,
             no_recur: false,
             eval_seq,
-            fn_seq,
         }
+    }
+
+    /// The `*ns*`-synced current namespace name (every resolve
+    /// check and installation reads this, never the raw registry
+    /// current).
+    fn current_ns(&self) -> String {
+        self.eval.current_ns_name()
     }
 
     fn err(
@@ -441,32 +579,73 @@ impl<'a> Analyzer<'a> {
                 let items: Vec<&Value> = list.iter().collect();
                 self.analyze_list(form, &items, span, tail)
             }
-            Value::Vector(v) => {
-                let mut out = Vec::with_capacity(v.len());
-                for elem in v.iter() {
-                    out.push(self.analyze(elem, span, false)?);
-                }
-                Ok(Expr::VecLit(out))
-            }
-            Value::Map(m) => {
-                let mut out = Vec::with_capacity(m.size());
-                for (k, val) in m.iter() {
-                    out.push((
-                        self.analyze(k, span, false)?,
-                        self.analyze(val, span, false)?,
-                    ));
-                }
-                Ok(Expr::MapLit(out))
-            }
-            Value::Set(s) => {
-                let mut out = Vec::with_capacity(s.size());
-                for elem in s.iter() {
-                    out.push(self.analyze(elem, span, false)?);
-                }
-                Ok(Expr::SetLit(out))
-            }
+            form if crate::lazy::is_seq_value(form) => self.analyze_seq_form(form, span, tail),
+            Value::Vector(v) => self.analyze_vec_lit(v, span),
+            Value::Map(m) => self.analyze_map_lit(m, span),
+            Value::Set(s) => self.analyze_set_lit(s, span),
             _ => Ok(Expr::Literal(form.clone())),
         }
+    }
+
+    /// Any other seq value (macro expansions built at runtime by
+    /// `seq`/`concat` arrive as realized or pending seq extensions;
+    /// the JVM analyzes every `ISeq` as a form).
+    fn analyze_seq_form(
+        &mut self,
+        form: &Value,
+        span: Span,
+        tail: bool,
+    ) -> Result<Expr, CompileError> {
+        let items = match crate::lazy::collect_all(self.eval, form) {
+            Ok(items) => items,
+            Err(Signal::Throw(t)) => {
+                return Err(CompileError::bare(
+                    t.class.jvm_name(),
+                    t.message.as_deref().unwrap_or("").to_owned(),
+                    span,
+                    &self.source,
+                ));
+            }
+            Err(Signal::Recur(_)) => {
+                unreachable!("recur cannot escape forcing a form")
+            }
+        };
+        if items.is_empty() {
+            // `EmptyExpr`: an empty form evaluates to itself.
+            return Ok(Expr::Literal(form.clone()));
+        }
+        let refs: Vec<&Value> = items.iter().collect();
+        self.analyze_list(form, &refs, span, tail)
+    }
+
+    /// A vector literal (elements analyze left to right).
+    fn analyze_vec_lit(&mut self, v: &Vector, span: Span) -> Result<Expr, CompileError> {
+        let mut out = Vec::with_capacity(v.len());
+        for elem in v.iter() {
+            out.push(self.analyze(elem, span, false)?);
+        }
+        Ok(Expr::VecLit(out))
+    }
+
+    /// A map literal (keys and values analyze left to right).
+    fn analyze_map_lit(&mut self, m: &Map, span: Span) -> Result<Expr, CompileError> {
+        let mut out = Vec::with_capacity(m.size());
+        for (k, val) in m.iter() {
+            out.push((
+                self.analyze(k, span, false)?,
+                self.analyze(val, span, false)?,
+            ));
+        }
+        Ok(Expr::MapLit(out))
+    }
+
+    /// A set literal (elements analyze left to right).
+    fn analyze_set_lit(&mut self, s: &clj_value::Set, span: Span) -> Result<Expr, CompileError> {
+        let mut out = Vec::with_capacity(s.size());
+        for elem in s.iter() {
+            out.push(self.analyze(elem, span, false)?);
+        }
+        Ok(Expr::SetLit(out))
     }
 
     /// A body: every form non-tail except the last.
@@ -497,36 +676,67 @@ impl<'a> Analyzer<'a> {
         {
             return Ok(Expr::Local(idx));
         }
+        let cur = self.current_ns();
+        if let Some(target) = self.eval.registry.resolve_in(&cur, sym) {
+            // Value-position checks (`analyzeSymbol` order: private
+            // first, then macro). Neither wrapper names an operator
+            // (probed); the private message spells the symbol as
+            // written without `#'`, the macro one the `#'` target.
+            // (Invoke position has its own check in `analyze_list`.)
+            let home = target.namespace().unwrap_or("");
+            let id = self
+                .eval
+                .registry
+                .get(home)
+                .and_then(|ns| ns.lookup(&target));
+            if let Some(id) = id {
+                if home != cur && crate::macros::is_private_var(self.eval, id) {
+                    return Err(self.err(
+                        class::ILLEGAL_STATE,
+                        format!("var: {sym} is not public"),
+                        span,
+                        Verb::Compiling,
+                        None,
+                    ));
+                }
+                if crate::macros::is_macro_var(self.eval, id) {
+                    return Err(self.err(
+                        class::RUNTIME,
+                        format!("Can't take value of a macro: #'{}", target),
+                        span,
+                        Verb::Compiling,
+                        None,
+                    ));
+                }
+            }
+            return Ok(Expr::Global(target));
+        }
         match sym.namespace() {
-            Some(ns) if ns != self.ns.name() => Err(self.err(
+            // Aliases count as namespaces even when dangling
+            // (probe34 `ns-alias-removed`); both miss shapes blame
+            // the symbol as written (probe34 `ns-alias-novar`).
+            Some(ns) if self.eval.registry.namespace_target_in(&cur, ns).is_none() => Err(self
+                .err(
+                    class::RUNTIME,
+                    format!("No such namespace: {ns}"),
+                    span,
+                    Verb::Compiling,
+                    None,
+                )),
+            Some(_) => Err(self.err(
                 class::RUNTIME,
-                format!("No such namespace: {ns}"),
+                format!("No such var: {sym}"),
                 span,
                 Verb::Compiling,
                 None,
             )),
-            _ => {
-                let q = self.ns.qualify(sym);
-                if self.ns.lookup(&q).is_some() {
-                    Ok(Expr::Global(q))
-                } else if sym.namespace().is_some() {
-                    Err(self.err(
-                        class::RUNTIME,
-                        format!("No such var: {sym}"),
-                        span,
-                        Verb::Compiling,
-                        None,
-                    ))
-                } else {
-                    Err(self.err(
-                        class::RUNTIME,
-                        format!("Unable to resolve symbol: {sym} in this context"),
-                        span,
-                        Verb::Compiling,
-                        None,
-                    ))
-                }
-            }
+            None => Err(self.err(
+                class::RUNTIME,
+                format!("Unable to resolve symbol: {sym} in this context"),
+                span,
+                Verb::Compiling,
+                None,
+            )),
         }
     }
 
@@ -540,19 +750,20 @@ impl<'a> Analyzer<'a> {
         tail: bool,
     ) -> Result<Expr, CompileError> {
         let head = items[0];
-        match head {
-            Value::Symbol(sym) if sym.namespace().is_none() && is_special(sym.name()) => {
-                // The five macros defer to any binding (a local or a
-                // user-ns global); real specials never do (probe31
-                // `shadow-*`).
-                let global = self.ns.qualify(sym);
-                let bound =
-                    self.local_idx(sym.name()).is_some() || self.ns.lookup(&global).is_some();
-                if !(is_shadowable_macro(sym.name()) && bound) {
-                    return self.analyze_special(sym.name(), items, span, tail);
-                }
-            }
-            _ => {}
+        if let Some(expr) = self.intercept_head(head, items, span, tail)? {
+            return Ok(expr);
+        }
+        // Macro expansion (`analyzeSeq` order: specials, then
+        // macros): an expanded form re-analyzes from the top.
+        if let Some(expanded) = self.try_expand_macro(form, head, &items[1..], span)? {
+            return self.analyze(&expanded, span, tail);
+        }
+        // Private cross-namespace invocation (the `isInline`
+        // analog): the wrapper names the operator as written, the
+        // message the `#'`-qualified target. Macros took the
+        // expansion path above and never reach this.
+        if let Value::Symbol(sym) = head {
+            self.check_private_invoke(sym, span)?;
         }
         if matches!(head, Value::Nil) {
             return Err(self.err(
@@ -571,7 +782,173 @@ impl<'a> Analyzer<'a> {
         Ok(Expr::Invoke {
             head: Box::new(head_expr),
             args,
+            span,
         })
+    }
+
+    /// Intercept special/builtin heads: bare specials (shadowable
+    /// macros defer to any binding; real specials never do), and
+    /// `clojure.core`-qualified builtins while the core var is
+    /// intact (syntax-quote emits `(clojure.core/let …)`).
+    /// Qualified real specials stay var lookups that miss. `Some`
+    /// when a form parsed, `None` to continue to expansion.
+    fn intercept_head(
+        &mut self,
+        head: &Value,
+        items: &[&Value],
+        span: Span,
+        tail: bool,
+    ) -> Result<Option<Expr>, CompileError> {
+        let Value::Symbol(sym) = head else {
+            return Ok(None);
+        };
+        // Shadowable macros defer to any binding (a local, a
+        // current-ns global, or a referred one); real specials
+        // never do (probe31 `shadow-*`). The builtin's own
+        // `clojure.core` macro var is the builtin, not a shadow
+        // (only a non-macro re-`def` there shadows).
+        if sym.namespace().is_none() && is_special(sym.name()) {
+            let shadowed = is_shadowable_macro(sym.name())
+                && (self.local_idx(sym.name()).is_some() || self.global_shadows(sym));
+            if shadowed {
+                return Ok(None);
+            }
+            let expr = self.analyze_special(sym.name(), items, span, tail)?;
+            return Ok(Some(expr));
+        }
+        if sym.namespace() == Some("clojure.core")
+            && is_shadowable_macro(sym.name())
+            && self.core_macro_intact(sym)
+        {
+            let expr = self.analyze_special(sym.name(), items, span, tail)?;
+            return Ok(Some(expr));
+        }
+        Ok(None)
+    }
+
+    /// The `&env` for macro calls: nil at top level, else the
+    /// in-scope local names mapped to `true` (the JVM's
+    /// `LocalBinding` values are unobservable here — keys,
+    /// `contains?`, and truthiness behave — fence).
+    fn macro_env(&self) -> Value {
+        if self.locals.is_empty() {
+            Value::Nil
+        } else {
+            let mut out = new_map();
+            for name in &self.locals {
+                out = out.insert(Value::Symbol(Symbol::new(None, name)), Value::Bool(true));
+            }
+            Value::Map(out)
+        }
+    }
+
+    /// Whether `clojure.core/{name}` still resolves to its
+    /// builtin macro var (a re-`def` there falls through to
+    /// ordinary invocation).
+    fn core_macro_intact(&self, sym: &Symbol) -> bool {
+        let cur = self.current_ns();
+        let Some(target) = self.eval.registry.resolve_in(&cur, sym) else {
+            return false;
+        };
+        if target.namespace() != Some("clojure.core") || target.name() != sym.name() {
+            return false;
+        }
+        self.eval
+            .registry
+            .get("clojure.core")
+            .and_then(|ns| ns.lookup(&target))
+            .is_some_and(|id| crate::macros::is_macro_var(self.eval, id))
+    }
+
+    /// Invoke-position private check (the `isInline` analog):
+    /// cross-namespace private non-macro vars fail with the
+    /// operator as written and the `#'` target (probed).
+    fn check_private_invoke(&self, sym: &Symbol, span: Span) -> Result<(), CompileError> {
+        let cur = self.current_ns();
+        let Some(target) = self.eval.registry.resolve_in(&cur, sym) else {
+            return Ok(());
+        };
+        let home = target.namespace().unwrap_or("");
+        if home == cur {
+            return Ok(());
+        }
+        let id = self
+            .eval
+            .registry
+            .get(home)
+            .and_then(|ns| ns.lookup(&target));
+        let Some(id) = id else {
+            return Ok(());
+        };
+        if crate::macros::is_macro_var(self.eval, id) {
+            return Ok(());
+        }
+        if crate::macros::is_private_var(self.eval, id) {
+            return Err(self.err(
+                class::ILLEGAL_STATE,
+                format!("var: #'{} is not public", target),
+                span,
+                Verb::Compiling,
+                Some(sym.to_string()),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Expand a macro-headed list (`isMacro` + call): locals shadow
+    /// macros; private cross-namespace macros escape bare (probed:
+    /// direct and nested invocations alike surface the raw
+    /// `IllegalStateException`).
+    fn try_expand_macro(
+        &mut self,
+        form: &Value,
+        head: &Value,
+        args: &[&Value],
+        span: Span,
+    ) -> Result<Option<Value>, CompileError> {
+        if matches!(head, Value::Symbol(sym) if sym.namespace().is_none() && self.local_idx(sym.name()).is_some())
+        {
+            return Ok(None);
+        }
+        let mac = match crate::macros::lookup_macro(self.eval, head) {
+            Err(private) => {
+                return Err(CompileError::bare(
+                    class::ILLEGAL_STATE,
+                    private.into_inner().message,
+                    span,
+                    &self.source,
+                ));
+            }
+            Ok(mac) => mac,
+        };
+        let Some(mac) = mac else {
+            return Ok(None);
+        };
+        let env = self.macro_env();
+        let arg_vals: Vec<Value> = args.iter().map(|a| (*a).clone()).collect();
+        let expanded =
+            crate::macros::expand1(self.eval, head, &mac.root, form, &env, &arg_vals, span)?;
+        Ok(Some(expanded))
+    }
+
+    /// Whether a global binding shadows a shadowable-macro
+    /// builtin (the builtin's own `clojure.core` macro var does
+    /// not — only locals, other-namespace targets, and non-macro
+    /// re-`def`s do).
+    fn global_shadows(&self, sym: &Symbol) -> bool {
+        let cur = self.current_ns();
+        let Some(target) = self.eval.registry.resolve_in(&cur, sym) else {
+            return false;
+        };
+        if target.namespace() == Some("clojure.core") && target.name() == sym.name() {
+            let id = self
+                .eval
+                .registry
+                .get("clojure.core")
+                .and_then(|ns| ns.lookup(&target));
+            return id.is_none_or(|id| !crate::macros::is_macro_var(self.eval, id));
+        }
+        true
     }
 
     /// Dispatch one special form (operator already matched).
@@ -603,6 +980,17 @@ impl<'a> Analyzer<'a> {
             "fn" => self.parse_fn(items, span),
             "fn*" => self.parse_fn_star(items, span),
             "binding" => self.parse_binding(items, span, tail),
+            "with-redefs" => self.parse_with_redefs(items, span, tail),
+            "with-bindings" => self.parse_with_bindings(items, span, tail),
+            "bound-fn" => self.parse_bound_fn(items, span),
+            "defmacro" => self.parse_defmacro(items, span),
+            "declare" => self.parse_declare(items, span),
+            "ns" => self.parse_ns(items, span),
+            "assert" => self.parse_assert(items, span),
+            "time" => self.parse_time(items, span),
+            "with-out-str" => self.parse_with_out_str(items, span),
+            "lazy-seq*" => self.parse_lazy_seq_star(items, span),
+            "case*" => self.parse_case_star(items, span, tail),
             _ => unreachable!("dispatch covers every special form"),
         }
     }
@@ -614,6 +1002,9 @@ impl<'a> Analyzer<'a> {
             "loop" => "clojure.core/loop",
             "binding" => "clojure.core/binding",
             "letfn" => "clojure.core/letfn",
+            "with-redefs" => "clojure.core/with-redefs",
+            "with-bindings" => "clojure.core/with-bindings",
+            "defmacro" => "clojure.core/defmacro",
             _ => return Ok(()),
         };
         Err(CompileError::macro_arity(name, span, &self.source))
@@ -623,19 +1014,41 @@ impl<'a> Analyzer<'a> {
     /// non-string second is "Too many", probe25), then the symbol
     /// check. Interns before analyzing the init (self-`def` stays
     /// unbound, probe25).
-    fn parse_def(&mut self, items: &[&Value], span: Span) -> Result<Expr, CompileError> {
-        let (sym, doc, init) = self.def_parts(items, span)?;
-        if sym.namespace().is_some_and(|ns| ns != self.ns.name()) {
+    /// `def` target rules shared by `def` and `declare`: same-ns
+    /// symbols create, other-ns symbols fail — "Can't create defs"
+    /// when the var exists, "Can't refer" when it doesn't (probe34
+    /// `ns-intern-def`, `ns-crossdef-missing`, probe37
+    /// `declare-qualified`).
+    fn check_def_target(&self, sym: &Symbol, span: Span) -> Result<(), CompileError> {
+        let cur = self.current_ns();
+        if sym.namespace().is_some_and(|ns| ns != cur) {
+            let message = if self.eval.registry.resolve_in(&cur, sym).is_some() {
+                "Can't create defs outside of current ns"
+            } else {
+                "Can't refer to qualified var that doesn't exist"
+            };
             return Err(self.err(
                 class::RUNTIME,
-                "Can't refer to qualified var that doesn't exist".to_owned(),
+                message.to_owned(),
                 span,
                 Verb::Compiling,
                 Some("def".to_owned()),
             ));
         }
-        let qualified = self.ns.qualify(sym).with_meta(sym.meta().cloned());
-        self.ns.intern(&qualified);
+        Ok(())
+    }
+
+    fn parse_def(&mut self, items: &[&Value], span: Span) -> Result<Expr, CompileError> {
+        let (sym, doc, init) = self.def_parts(items, span)?;
+        // `def` always defines in the current namespace.
+        self.check_def_target(sym, span)?;
+        let cur = self.current_ns();
+        let qualified = self
+            .eval
+            .registry
+            .qualify_in(&cur, sym)
+            .with_meta(sym.meta().cloned());
+        self.eval.registry.intern(&qualified);
         let init = init
             .map(|form| self.analyze(form, span, false).map(Box::new))
             .transpose()?;
@@ -740,14 +1153,15 @@ impl<'a> Analyzer<'a> {
     }
 
     /// Resolve a symbol as a var (shared by `var` and `binding`
-    /// var-forms): locals are invisible, and every miss is the
-    /// single `Unable to resolve var` shape (probe25).
+    /// var-forms): locals are invisible, refers and other
+    /// namespaces are visible (probe34 `ns-var-refer`,
+    /// `ns-var-cross`), and every miss is the single `Unable to
+    /// resolve var` shape (probe25).
     fn resolve_var(&self, sym: &Symbol, span: Span, op: &str) -> Result<Symbol, CompileError> {
         // Locals are invisible: only namespace membership matters.
-        let q = self.ns.qualify(sym);
-        let known = q.namespace() == Some(self.ns.name()) && self.ns.lookup(&q).is_some();
-        if known {
-            Ok(q)
+        let cur = self.current_ns();
+        if let Some(target) = self.eval.registry.resolve_in(&cur, sym) {
+            Ok(target)
         } else {
             Err(self.err(
                 class::RUNTIME,
@@ -774,7 +1188,9 @@ impl<'a> Analyzer<'a> {
         let Value::Symbol(sym) = second else {
             return Err(self.err(
                 class::CLASS_CAST,
-                NativeError::cast(&jvm_class_of(second), "clojure.lang.Symbol").message,
+                NativeError::cast(&jvm_class_of(second), "clojure.lang.Symbol")
+                    .into_inner()
+                    .message,
                 span,
                 Verb::Compiling,
                 Some("var".to_owned()),
@@ -1253,7 +1669,9 @@ impl<'a> Analyzer<'a> {
                 other => {
                     return Err(self.err(
                         class::CLASS_CAST,
-                        NativeError::cast(&jvm_class_of(other), "clojure.lang.Symbol").message,
+                        NativeError::cast(&jvm_class_of(other), "clojure.lang.Symbol")
+                            .into_inner()
+                            .message,
                         span,
                         Verb::Compiling,
                         Some("var".to_owned()),
@@ -1265,6 +1683,308 @@ impl<'a> Analyzer<'a> {
         Ok(Expr::Binding {
             pairs,
             body: self.analyze_body(&items[2..], span, tail)?,
+        })
+    }
+
+    /// `(with-redefs bindings body…)`: bindings seq like the
+    /// macro's `zipmap` — vectors, lists, sets, and nil (empty);
+    /// maps seq entries, so a non-empty map fails the entry's
+    /// `Symbol` cast under `compiling var`; anything else is the
+    /// `ISeq` error under `macroexpanding with-redefs`. An odd
+    /// trailing binding silently drops (probe37 `wrd-odd`).
+    fn parse_with_redefs(
+        &mut self,
+        items: &[&Value],
+        span: Span,
+        tail: bool,
+    ) -> Result<Expr, CompileError> {
+        let op = match items[0] {
+            Value::Symbol(sym) => sym.name().to_owned(),
+            _ => unreachable!("dispatched on the operator symbol"),
+        };
+        let bindings = items.get(1).copied().unwrap_or(&Value::Nil);
+        let forms = self.with_redefs_forms(bindings, span, &op)?;
+        let mut pairs = Vec::with_capacity(forms.len() / 2);
+        // Step indexing, not `chunks_exact` (new clippy wants
+        // `as_chunks`, which needs Rust 1.88 > MSRV 1.85); the
+        // `len() - len() % 2` drops an odd tail like `zipmap`.
+        for i in (0..forms.len() - forms.len() % 2).step_by(2) {
+            let var_sym = match forms[i] {
+                Value::Symbol(sym) => self.resolve_var(sym, span, "var")?,
+                other => {
+                    return Err(self.err(
+                        class::CLASS_CAST,
+                        NativeError::cast(&jvm_class_of(other), "clojure.lang.Symbol")
+                            .into_inner()
+                            .message,
+                        span,
+                        Verb::Compiling,
+                        Some("var".to_owned()),
+                    ));
+                }
+            };
+            pairs.push((var_sym, self.analyze(forms[i + 1], span, false)?));
+        }
+        Ok(Expr::WithRedefs {
+            pairs,
+            body: self.analyze_body(&items[2..], span, tail)?,
+        })
+    }
+
+    /// The `with-redefs` binding items: vectors, lists, sets, and
+    /// nil (empty) seq; a non-empty map fails its first entry's
+    /// `Symbol` cast under `compiling var` (entries aren't
+    /// symbols); anything else is the `ISeq` error under
+    /// `macroexpanding with-redefs`.
+    fn with_redefs_forms<'v>(
+        &self,
+        bindings: &'v Value,
+        span: Span,
+        op: &str,
+    ) -> Result<Vec<&'v Value>, CompileError> {
+        match bindings {
+            Value::Vector(v) => Ok(v.iter().collect()),
+            Value::List(l) => Ok(l.iter().collect()),
+            Value::Nil => Ok(Vec::new()),
+            Value::Set(s) => Ok(s.iter().collect()),
+            Value::Map(m) if m.is_empty() => Ok(Vec::new()),
+            Value::Map(_) => Err(self.err(
+                class::CLASS_CAST,
+                NativeError::cast("clojure.lang.MapEntry", "clojure.lang.Symbol")
+                    .into_inner()
+                    .message,
+                span,
+                Verb::Compiling,
+                Some("var".to_owned()),
+            )),
+            other => Err(self.err(
+                class::ILLEGAL_ARG,
+                format!(
+                    "Don't know how to create ISeq from: {}",
+                    jvm_class_of(other)
+                ),
+                span,
+                Verb::Macroexpanding,
+                Some(op.to_owned()),
+            )),
+        }
+    }
+
+    /// `(with-bindings map-expr body…)`: the map is an evaluated
+    /// expression (computed maps work, probe37 `wb-computed-map`).
+    /// Bare `(with-bindings)` is intercepted by `check_bare_arity`.
+    fn parse_with_bindings(
+        &mut self,
+        items: &[&Value],
+        span: Span,
+        tail: bool,
+    ) -> Result<Expr, CompileError> {
+        let Some(map) = items.get(1) else {
+            unreachable!("bare with-bindings fails arity before dispatch");
+        };
+        Ok(Expr::WithBindings {
+            map: Box::new(self.analyze(map, span, false)?),
+            body: self.analyze_body(&items[2..], span, tail)?,
+        })
+    }
+
+    /// `(bound-fn name? argv body…)`: parsed exactly like `fn` (the
+    /// macro expands to one, probe37 `bf-expansion`) — including
+    /// the named single-`letfn` shape, whose slot layout the
+    /// evaluator replays with a conveyed closure.
+    fn parse_bound_fn(&mut self, items: &[&Value], span: Span) -> Result<Expr, CompileError> {
+        match self.parse_fn(items, span)? {
+            Expr::Fn(fun) => Ok(Expr::BoundFn { name: None, fun }),
+            Expr::LetFn { mut fns, .. } if fns.len() == 1 => {
+                let (name, fun) = fns.remove(0);
+                Ok(Expr::BoundFn {
+                    name: Some(name),
+                    fun,
+                })
+            }
+            _ => unreachable!("parse_fn returns Fn or a single LetFn"),
+        }
+    }
+
+    /// `(defmacro name doc? attr? fdecl)`: the name must be an
+    /// unqualified symbol and the fdecl a vector-headed single
+    /// arity or list-of-clauses (else the `defmacro` spec shape —
+    /// the JVM routes through `defn`, the port names its own
+    /// validator); clause *contents* parse through `parse_fn`
+    /// with `fn`-flavored errors. `&form`/`&env` prepend
+    /// positionally (an explicit leading `&form` shadows, probe38
+    /// `83-explicit-ampersand`); the display is the qualified var
+    /// name (arity errors name `user/m`, probe38 `06`).
+    /// A `defmacro` fdecl's user arglists (without `&form`/`&env`,
+    /// for `:arglists`): one vector, or one vector per list clause
+    /// (anything else is the `defmacro` spec error).
+    fn defmacro_arglists(&self, rest: &[&Value], span: Span) -> Result<Vec<Value>, CompileError> {
+        let spec = || self.spec_error("clojure.core/defmacro", span);
+        match rest[0] {
+            Value::Vector(v) => Ok(vec![Value::Vector(v.clone())]),
+            Value::List(_) => {
+                let mut out = Vec::with_capacity(rest.len());
+                for clause in rest.iter().copied() {
+                    match clause {
+                        Value::List(l) => match l.first() {
+                            Some(Value::Vector(argv)) => {
+                                out.push(Value::Vector(argv.clone()));
+                            }
+                            _ => return Err(spec()),
+                        },
+                        _ => return Err(spec()),
+                    }
+                }
+                Ok(out)
+            }
+            _ => Err(spec()),
+        }
+    }
+
+    fn parse_defmacro(&mut self, items: &[&Value], span: Span) -> Result<Expr, CompileError> {
+        let spec = || self.spec_error("clojure.core/defmacro", span);
+        let Some(name_value) = items.get(1) else {
+            return Err(spec());
+        };
+        let Value::Symbol(name_sym) = name_value else {
+            return Err(spec());
+        };
+        if name_sym.namespace().is_some() {
+            return Err(spec());
+        }
+        let mut rest = &items[2..];
+        let mut doc = None;
+        if let Some(Value::Str(s)) = rest.first() {
+            doc = Some(s.to_string());
+            rest = &rest[1..];
+        }
+        let mut attr = None;
+        if let Some(Value::Map(m)) = rest.first() {
+            attr = Some((*m).clone());
+            rest = &rest[1..];
+        }
+        if rest.is_empty() {
+            return Err(spec());
+        }
+        // The `:arglists` (user arglists, without `&form`/`&env`).
+        let arglists = self.defmacro_arglists(rest, span)?;
+        // Clause contents through the `fn` parser stages, with
+        // `&form`/`&env` consed onto every arglist *before*
+        // analysis (like the JVM `defmacro`), so bodies resolve
+        // user params at their shifted slots. The shape above
+        // guarantees no leading name symbol, so this always
+        // yields a plain `Fn`.
+        let owned = self.collect_fn_clauses(rest, span)?;
+        let slices: Vec<&[&Value]> = owned.iter().map(Vec::as_slice).collect();
+        let mut raw = self.parse_clause_slices(&slices, span)?;
+        let ampform = Value::Symbol(Symbol::new(None, "&form"));
+        let ampenv = Value::Symbol(Symbol::new(None, "&env"));
+        for clause in &mut raw {
+            clause.fixed.insert(0, &ampenv);
+            clause.fixed.insert(0, &ampform);
+        }
+        let mut fun = match self.finish_fn(None, &raw, span)? {
+            Expr::Fn(fun) => fun,
+            _ => unreachable!("defmacro fdecl has no leading name"),
+        };
+        let cur = self.current_ns();
+        fun.display = format!("{cur}/{}", name_sym.name());
+        let qualified =
+            Symbol::new(Some(&cur), name_sym.name()).with_meta(name_sym.meta().cloned());
+        self.eval.registry.intern(&qualified);
+        Ok(Expr::DefMacro {
+            sym: qualified,
+            doc,
+            attr,
+            arglists,
+            fun,
+            span,
+        })
+    }
+
+    /// `(declare name…)`: every name must be a symbol (else the
+    /// bare `IObj` cast — the JVM reaches it through `vary-meta`
+    /// during expansion, probe37 `declare-num`) and pass the
+    /// `def` target rules (probe37 `declare-qualified`).
+    fn parse_declare(&mut self, items: &[&Value], span: Span) -> Result<Expr, CompileError> {
+        let mut syms = Vec::with_capacity(items.len().saturating_sub(1));
+        for form in items[1..].iter().copied() {
+            let Value::Symbol(sym) = form else {
+                return Err(CompileError::bare(
+                    class::CLASS_CAST,
+                    NativeError::cast(&jvm_class_of(form), "clojure.lang.IObj")
+                        .into_inner()
+                        .message,
+                    span,
+                    &self.source,
+                ));
+            };
+            self.check_def_target(sym, span)?;
+            // `declare` is `(def name)` per name: qualify and
+            // intern exactly like `parse_def`.
+            let cur = self.current_ns();
+            let qualified = self
+                .eval
+                .registry
+                .qualify_in(&cur, sym)
+                .with_meta(sym.meta().cloned());
+            self.eval.registry.intern(&qualified);
+            syms.push(qualified);
+        }
+        Ok(Expr::Declare { syms, span })
+    }
+
+    /// `(ns name doc? attr? clause…)`: the name must be an
+    /// unqualified symbol and every clause a list headed by
+    /// `:refer-clojure`/`:require`/`:use` (else the `ns` spec
+    /// shape, probe37 `ns-bad-clause`, `ns-num-name`).
+    /// `:import`/`:gen-class`/`:load` are spec errors too (N1:
+    /// no host classes — loud, never skipped).
+    fn parse_ns(&mut self, items: &[&Value], span: Span) -> Result<Expr, CompileError> {
+        let spec = || self.spec_error("clojure.core/ns", span);
+        let Some(name_value) = items.get(1) else {
+            return Err(spec());
+        };
+        let Value::Symbol(name_sym) = name_value else {
+            return Err(spec());
+        };
+        if name_sym.namespace().is_some() {
+            return Err(spec());
+        }
+        let mut rest = &items[2..];
+        let mut doc = None;
+        if let Some(Value::Str(s)) = rest.first() {
+            doc = Some(s.to_string());
+            rest = &rest[1..];
+        }
+        let mut attr = None;
+        if let Some(Value::Map(m)) = rest.first() {
+            attr = Some((*m).clone());
+            rest = &rest[1..];
+        }
+        let mut clauses = Vec::with_capacity(rest.len());
+        for form in rest.iter().copied() {
+            let Value::List(l) = form else {
+                return Err(spec());
+            };
+            let mut elems = l.iter();
+            match elems.next() {
+                Some(Value::Keyword(kw)) if kw.namespace().is_none() => match kw.name() {
+                    "refer-clojure" => {
+                        clauses.push(NsClause::ReferClojure(elems.cloned().collect()));
+                    }
+                    "require" => clauses.push(NsClause::Require(elems.cloned().collect())),
+                    "use" => clauses.push(NsClause::Use(elems.cloned().collect())),
+                    _ => return Err(spec()),
+                },
+                _ => return Err(spec()),
+            }
+        }
+        Ok(Expr::Ns {
+            name: name_sym.name().to_owned(),
+            doc,
+            attr,
+            clauses,
         })
     }
 }
@@ -1576,7 +2296,9 @@ fn walk_map(m: &Map) -> Result<(), WalkError> {
             Some(first) => {
                 return Err(WalkError {
                     class: class::CLASS_CAST,
-                    message: NativeError::cast(&jvm_class_of(first), "java.util.Map$Entry").message,
+                    message: NativeError::cast(&jvm_class_of(first), "java.util.Map$Entry")
+                        .into_inner()
+                        .message,
                 });
             }
         },
@@ -1735,7 +2457,9 @@ fn key_cast_err(dir: &KeyDirective, form: &Value) -> WalkError {
     }
     WalkError {
         class: class::CLASS_CAST,
-        message: NativeError::cast(&jvm_class_of(form), "clojure.lang.Named").message,
+        message: NativeError::cast(&jvm_class_of(form), "clojure.lang.Named")
+            .into_inner()
+            .message,
     }
 }
 
@@ -1852,6 +2576,215 @@ impl<'a> Analyzer<'a> {
             Verb::Macroexpanding,
             Some(macro_name.to_owned()),
         )
+    }
+
+    /// A bare analyzer-builtin arity failure (`assert`/`time`
+    /// reject 0 and 3+ args like the JVM macros — the `ArityException`
+    /// escapes `eval` unwrapped).
+    fn builtin_arity(&self, name: &'static str, argc: usize, span: Span) -> CompileError {
+        CompileError::bare(
+            "clojure.lang.ArityException",
+            NativeError::arity(name, argc).into_inner().message,
+            span,
+            &self.source,
+        )
+    }
+
+    /// `(assert x)` / `(assert x message)`: the expansion-time
+    /// `*assert*` check reads the DYNAMIC value (a `binding` around
+    /// `eval` disables, corpus 15 `:assert-bound-false-eval`); when
+    /// off, the test is neither analyzed nor evaluated (the
+    /// expansion is `nil`). A missing/unbound `*assert*` reads
+    /// truthy (assert on).
+    fn parse_assert(&mut self, items: &[&Value], span: Span) -> Result<Expr, CompileError> {
+        let argc = items.len() - 1;
+        if argc != 1 && argc != 2 {
+            return Err(self.builtin_arity("clojure.core/assert", argc, span));
+        }
+        let sym = Symbol::new(Some("clojure.core"), "*assert*");
+        let on = self
+            .eval
+            .registry
+            .get("clojure.core")
+            .and_then(|ns| ns.lookup(&sym))
+            .is_none_or(|id| self.eval.deref_var(id, &sym).is_truthy());
+        if !on {
+            return Ok(Expr::Literal(Value::Nil));
+        }
+        let test = self.analyze(items[1], span, false)?;
+        let message = match items.get(2) {
+            Some(m) => Some(Box::new(self.analyze(m, span, false)?)),
+            None => None,
+        };
+        Ok(Expr::Assert {
+            test: Box::new(test),
+            message,
+            form: pr_to_string(items[1], &PrintOpts::pr()),
+        })
+    }
+
+    /// `(time expr)`: exactly one arg (else the bare macro arity).
+    /// The expr is not in tail position (it binds `ret#` on the
+    /// JVM), so an inner `recur` is the tail-position error.
+    fn parse_time(&mut self, items: &[&Value], span: Span) -> Result<Expr, CompileError> {
+        let argc = items.len() - 1;
+        if argc != 1 {
+            return Err(self.builtin_arity("clojure.core/time", argc, span));
+        }
+        Ok(Expr::Time {
+            expr: Box::new(self.analyze(items[1], span, false)?),
+        })
+    }
+
+    /// `(with-out-str body…)`: the body never runs in tail position
+    /// (the JVM expansion ends in `(str s#)`). `*out*` resolves like
+    /// a `binding` target, so user shadows apply.
+    fn parse_with_out_str(&mut self, items: &[&Value], span: Span) -> Result<Expr, CompileError> {
+        let body = self.analyze_body(&items[1..], span, false)?;
+        Ok(Expr::WithOutStr {
+            out: Symbol::new(None, "*out*"),
+            body,
+        })
+    }
+
+    /// `(lazy-seq* body…)`: a zero-arg `fn` boundary for `recur`
+    /// (an empty `recur` re-invokes the body at force time, like the
+    /// JVM closure; anything else is the mismatch error).
+    fn parse_lazy_seq_star(&mut self, items: &[&Value], span: Span) -> Result<Expr, CompileError> {
+        let saved_recur = self.recur;
+        let saved_no_recur = self.no_recur;
+        self.recur = Some(0);
+        self.no_recur = false;
+        let body = self.analyze_body(&items[1..], span, true);
+        self.recur = saved_recur;
+        self.no_recur = saved_no_recur;
+        Ok(Expr::LazySeqStar { body: body? })
+    }
+
+    /// `(case* ge shift mask default imap switch-type test-type
+    /// skip?)`: the `case` macro's expansion shape (anything else is
+    /// the spec error — hand-written `case*` beyond the macro shape
+    /// is a port-level error). `default`/`then`s inherit tail
+    /// position; `test`s analyze as exprs (evaluated on a hash hit,
+    /// like the JVM `test.emit`); `skip` defaults to empty.
+    fn parse_case_star(
+        &mut self,
+        items: &[&Value],
+        span: Span,
+        tail: bool,
+    ) -> Result<Expr, CompileError> {
+        if items.len() != 8 && items.len() != 9 {
+            return Err(self.spec_error("clojure.core/case*", span));
+        }
+        let (shift, mask, imap, test) = self.parse_case_star_head(items, span)?;
+        let skip = self.parse_case_star_skip(items, span)?;
+        let expr = self.analyze(items[1], span, false)?;
+        let default = self.analyze(items[4], span, tail)?;
+        let cases = self.parse_case_star_cases(imap, span, tail)?;
+        Ok(Expr::CaseStar {
+            expr: Box::new(expr),
+            shift,
+            mask,
+            default: Box::new(default),
+            cases,
+            skip,
+            test,
+        })
+    }
+
+    /// A `case*` integer slot (`i32`-ranged `Int`, else `None`).
+    fn case_star_int(v: &Value) -> Option<i32> {
+        match v {
+            Value::Int(i) => i32::try_from(*i).ok(),
+            _ => None,
+        }
+    }
+
+    /// The `case*` header: shift, mask, the case map, the test kind,
+    /// and the switch-kind check (all spec errors).
+    fn parse_case_star_head<'v>(
+        &self,
+        items: &[&'v Value],
+        span: Span,
+    ) -> Result<(i32, i32, &'v Map, CaseTest), CompileError> {
+        let (Some(shift), Some(mask)) =
+            (Self::case_star_int(items[2]), Self::case_star_int(items[3]))
+        else {
+            return Err(self.spec_error("clojure.core/case*", span));
+        };
+        let Value::Map(imap) = items[5] else {
+            return Err(self.spec_error("clojure.core/case*", span));
+        };
+        let test = self.parse_case_star_test(items[7], span)?;
+        if !matches!(items[6], Value::Keyword(kw) if kw.namespace().is_none() && matches!(kw.name(), "sparse" | "compact"))
+        {
+            return Err(self.spec_error("clojure.core/case*", span));
+        }
+        Ok((shift, mask, imap, test))
+    }
+
+    /// The `case*` test kind (`:int` / `:hash-equiv` /
+    /// `:hash-identity`, unqualified).
+    fn parse_case_star_test(&self, v: &Value, span: Span) -> Result<CaseTest, CompileError> {
+        match v {
+            Value::Keyword(kw) if kw.namespace().is_none() => match kw.name() {
+                "int" => Ok(CaseTest::Int),
+                "hash-equiv" => Ok(CaseTest::HashEquiv),
+                "hash-identity" => Ok(CaseTest::HashIdentity),
+                _ => Err(self.spec_error("clojure.core/case*", span)),
+            },
+            _ => Err(self.spec_error("clojure.core/case*", span)),
+        }
+    }
+
+    /// The optional `case*` skip set (absent or `nil` means empty).
+    fn parse_case_star_skip(&self, items: &[&Value], span: Span) -> Result<Vec<i32>, CompileError> {
+        let mut skip = Vec::new();
+        if let Some(s) = items.get(8).copied()
+            && !matches!(s, Value::Nil)
+        {
+            let Value::Set(set) = s else {
+                return Err(self.spec_error("clojure.core/case*", span));
+            };
+            for v in set.iter() {
+                let Some(k) = Self::case_star_int(v) else {
+                    return Err(self.spec_error("clojure.core/case*", span));
+                };
+                skip.push(k);
+            }
+        }
+        Ok(skip)
+    }
+
+    /// The `case*` case map: dispatch keys to `(test, then)` (test
+    /// constants are literal data — probed: symbols, lists, and
+    /// defined-var names all match as data, never evaluated; only
+    /// the `then` is an expression).
+    fn parse_case_star_cases(
+        &mut self,
+        imap: &Map,
+        span: Span,
+        tail: bool,
+    ) -> Result<Vec<(i32, Expr, Expr)>, CompileError> {
+        let mut cases = Vec::new();
+        for (k, v) in imap.iter() {
+            let Some(key) = Self::case_star_int(k) else {
+                return Err(self.spec_error("clojure.core/case*", span));
+            };
+            let Value::Vector(pair) = v else {
+                return Err(self.spec_error("clojure.core/case*", span));
+            };
+            let mut pair_forms = pair.iter();
+            let (Some(test_form), Some(then_form), None) =
+                (pair_forms.next(), pair_forms.next(), pair_forms.next())
+            else {
+                return Err(self.spec_error("clojure.core/case*", span));
+            };
+            let test_expr = Expr::Literal(test_form.clone());
+            let then_expr = self.analyze(then_form, span, tail)?;
+            cases.push((key, test_expr, then_expr));
+        }
+        Ok(cases)
     }
 
     /// Attribute a destructure-body failure: `Syntax error` for
@@ -2357,7 +3290,9 @@ impl<'a> Analyzer<'a> {
                     other => {
                         return Err(self.fn_star_error(
                             class::CLASS_CAST,
-                            &NativeError::cast(&jvm_class_of(other), "clojure.lang.ISeq").message,
+                            &NativeError::cast(&jvm_class_of(other), "clojure.lang.ISeq")
+                                .into_inner()
+                                .message,
                             span,
                         ));
                     }
@@ -2378,8 +3313,7 @@ impl<'a> Analyzer<'a> {
         raw: &[RawClause],
         span: Span,
     ) -> Result<Expr, CompileError> {
-        *self.fn_seq += 1;
-        let seq = *self.fn_seq;
+        let seq = self.eval.next_fn_seq();
         let display = match &name {
             Some(n) => format!("user/eval{}/{}--{seq}", self.eval_seq, n),
             None => format!("user/eval{}/fn--{seq}", self.eval_seq),
@@ -2714,8 +3648,7 @@ impl<'a> Analyzer<'a> {
         }
         let mut fns = Vec::with_capacity(validated.len());
         for spec in &validated {
-            *self.fn_seq += 1;
-            let seq = *self.fn_seq;
+            let seq = self.eval.next_fn_seq();
             let display = format!("user/eval{}/{}--{seq}", self.eval_seq, spec.name);
             let tail_refs: Vec<&Value> = spec.tail.iter().collect();
             let owned = self.collect_fn_clauses(&tail_refs, span)?;

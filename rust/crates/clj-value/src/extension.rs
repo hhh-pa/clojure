@@ -52,6 +52,24 @@ pub enum ThrowClass {
     IndexOutOfBoundsException,
     ArithmeticException,
     ExceptionInfo,
+    FileNotFoundException,
+    IllegalAccessError,
+    NumberFormatException,
+    StringIndexOutOfBoundsException,
+    IllegalFormatConversionException,
+    UnknownFormatConversionException,
+    MissingFormatConversionException,
+    MissingFormatArgumentException,
+    IllegalFormatPrecisionException,
+    IllegalFormatCodePointException,
+    FormatFlagsConversionMismatchException,
+    DuplicateFormatFlagsException,
+    IllegalFormatFlagsException,
+    IllegalFormatWidthException,
+    MissingFormatWidthException,
+    IllegalFormatArgumentIndexException,
+    IOException,
+    CompilerException,
 }
 
 impl ThrowClass {
@@ -72,6 +90,28 @@ impl ThrowClass {
             Self::IndexOutOfBoundsException => "java.lang.IndexOutOfBoundsException",
             Self::ArithmeticException => "java.lang.ArithmeticException",
             Self::ExceptionInfo => "clojure.lang.ExceptionInfo",
+            Self::FileNotFoundException => "java.io.FileNotFoundException",
+            Self::IllegalAccessError => "java.lang.IllegalAccessError",
+            Self::NumberFormatException => "java.lang.NumberFormatException",
+            Self::StringIndexOutOfBoundsException => "java.lang.StringIndexOutOfBoundsException",
+            Self::IllegalFormatConversionException => "java.util.IllegalFormatConversionException",
+            Self::UnknownFormatConversionException => "java.util.UnknownFormatConversionException",
+            Self::MissingFormatConversionException => "java.util.MissingFormatConversionException",
+            Self::MissingFormatArgumentException => "java.util.MissingFormatArgumentException",
+            Self::IllegalFormatPrecisionException => "java.util.IllegalFormatPrecisionException",
+            Self::IllegalFormatCodePointException => "java.util.IllegalFormatCodePointException",
+            Self::FormatFlagsConversionMismatchException => {
+                "java.util.FormatFlagsConversionMismatchException"
+            }
+            Self::DuplicateFormatFlagsException => "java.util.DuplicateFormatFlagsException",
+            Self::IllegalFormatFlagsException => "java.util.IllegalFormatFlagsException",
+            Self::IllegalFormatWidthException => "java.util.IllegalFormatWidthException",
+            Self::MissingFormatWidthException => "java.util.MissingFormatWidthException",
+            Self::IllegalFormatArgumentIndexException => {
+                "java.util.IllegalFormatArgumentIndexException"
+            }
+            Self::IOException => "java.io.IOException",
+            Self::CompilerException => "clojure.lang.Compiler$CompilerException",
         }
     }
 
@@ -102,7 +142,12 @@ fn throw_parent(jvm_name: &str) -> Option<&'static str> {
         "java.lang.Throwable" => None,
         "java.lang.Exception" | "java.lang.Error" => Some("java.lang.Throwable"),
         "java.lang.RuntimeException" => Some("java.lang.Exception"),
+        "java.lang.NumberFormatException" => Some("java.lang.IllegalArgumentException"),
+        "java.io.FileNotFoundException" => Some("java.io.IOException"),
+        "java.io.IOException" => Some("java.lang.Exception"),
         "java.lang.AssertionError" => Some("java.lang.Error"),
+        "java.lang.IllegalAccessError" => Some("java.lang.LinkageError"),
+        "java.lang.LinkageError" => Some("java.lang.Error"),
         "java.lang.IllegalArgumentException"
         | "java.lang.IllegalStateException"
         | "java.lang.UnsupportedOperationException"
@@ -111,7 +156,23 @@ fn throw_parent(jvm_name: &str) -> Option<&'static str> {
         | "java.lang.IndexOutOfBoundsException"
         | "java.lang.ArithmeticException"
         | "clojure.lang.ArityException"
-        | "clojure.lang.ExceptionInfo" => Some("java.lang.RuntimeException"),
+        | "clojure.lang.ExceptionInfo"
+        | "clojure.lang.Compiler$CompilerException" => Some("java.lang.RuntimeException"),
+        "java.util.IllegalFormatConversionException"
+        | "java.util.UnknownFormatConversionException"
+        | "java.util.MissingFormatConversionException"
+        | "java.util.MissingFormatArgumentException"
+        | "java.util.IllegalFormatPrecisionException"
+        | "java.util.IllegalFormatCodePointException"
+        | "java.util.FormatFlagsConversionMismatchException"
+        | "java.util.DuplicateFormatFlagsException"
+        | "java.util.IllegalFormatFlagsException"
+        | "java.util.IllegalFormatWidthException"
+        | "java.util.MissingFormatWidthException"
+        | "java.util.IllegalFormatArgumentIndexException" => {
+            Some("java.util.IllegalFormatException")
+        }
+        "java.util.IllegalFormatException" => Some("java.lang.IllegalArgumentException"),
         _ => None,
     }
 }
@@ -124,7 +185,7 @@ fn throw_parent(jvm_name: &str) -> Option<&'static str> {
 pub struct Throwable {
     pub id: u64,
     pub class: ThrowClass,
-    pub message: Arc<str>,
+    pub message: Option<Arc<str>>,
     pub data: Option<Box<Value>>,
     pub cause: Option<Box<Throwable>>,
 }
@@ -207,7 +268,7 @@ mod tests {
         let t = Value::Throwable(Throwable {
             id: 1,
             class: ThrowClass::Exception,
-            message: Arc::from("boom"),
+            message: Some(Arc::from("boom")),
             data: None,
             cause: None,
         });
@@ -222,21 +283,21 @@ mod tests {
         let root = Throwable {
             id: 3,
             class: ThrowClass::IllegalArgumentException,
-            message: Arc::from("root \"cause\""),
+            message: Some(Arc::from("root \"cause\"")),
             data: None,
             cause: None,
         };
         let mid = Throwable {
             id: 2,
             class: ThrowClass::RuntimeException,
-            message: Arc::from("mid"),
+            message: Some(Arc::from("mid")),
             data: Some(Box::new(Value::Int(7))),
             cause: Some(Box::new(root)),
         };
         let top = Value::Throwable(Throwable {
             id: 1,
             class: ThrowClass::ExceptionInfo,
-            message: Arc::from("top"),
+            message: Some(Arc::from("top")),
             data: Some(Box::new(Value::Vector(crate::Vector::from_vec(vec![
                 Value::Int(1),
                 Value::Str(Arc::from("s")),
@@ -292,11 +353,27 @@ mod tests {
                 "java.lang.ArithmeticException",
             ),
             (ThrowClass::ExceptionInfo, "clojure.lang.ExceptionInfo"),
+            (
+                ThrowClass::FileNotFoundException,
+                "java.io.FileNotFoundException",
+            ),
+            (
+                ThrowClass::IllegalAccessError,
+                "java.lang.IllegalAccessError",
+            ),
+            (
+                ThrowClass::NumberFormatException,
+                "java.lang.NumberFormatException",
+            ),
+            (
+                ThrowClass::CompilerException,
+                "clojure.lang.Compiler$CompilerException",
+            ),
         ];
         for (class, want) in cases {
             assert_eq!(class.jvm_name(), want);
         }
-        assert_eq!(cases.len(), 13);
+        assert_eq!(cases.len(), 17);
     }
 
     #[test]
@@ -413,6 +490,17 @@ mod tests {
                 "java.lang.RuntimeException",
                 true,
             ),
+            (
+                ThrowClass::CompilerException,
+                "clojure.lang.Compiler$CompilerException",
+                true,
+            ),
+            (
+                ThrowClass::CompilerException,
+                "java.lang.RuntimeException",
+                true,
+            ),
+            (ThrowClass::CompilerException, "java.lang.Error", false),
         ];
         for (class, catch, want) in cases {
             assert_eq!(
@@ -440,19 +528,33 @@ mod tests {
             ThrowClass::IndexOutOfBoundsException,
             ThrowClass::ArithmeticException,
             ThrowClass::ExceptionInfo,
+            ThrowClass::FileNotFoundException,
+            ThrowClass::IllegalAccessError,
+            ThrowClass::NumberFormatException,
+            ThrowClass::CompilerException,
         ];
         for class in all {
             assert!(class.matches("java.lang.Throwable"));
             assert!(class.matches(class.jvm_name()));
             assert!(!class.matches("java.lang.NoSuchClass"));
         }
+        assert!(ThrowClass::FileNotFoundException.matches("java.io.IOException"));
+        assert!(ThrowClass::FileNotFoundException.matches("java.lang.Exception"));
+        assert!(!ThrowClass::FileNotFoundException.matches("java.lang.Error"));
+        assert!(ThrowClass::IllegalAccessError.matches("java.lang.LinkageError"));
+        assert!(ThrowClass::IllegalAccessError.matches("java.lang.Error"));
+        assert!(!ThrowClass::IllegalAccessError.matches("java.lang.Exception"));
+        assert!(ThrowClass::NumberFormatException.matches("java.lang.IllegalArgumentException"));
+        assert!(ThrowClass::NumberFormatException.matches("java.lang.RuntimeException"));
+        assert!(ThrowClass::NumberFormatException.matches("java.lang.Exception"));
+        assert!(!ThrowClass::NumberFormatException.matches("java.lang.Error"));
     }
 
     fn throwable(id: u64, message: &str) -> Value {
         Value::Throwable(Throwable {
             id,
             class: ThrowClass::Exception,
-            message: Arc::from(message),
+            message: Some(Arc::from(message)),
             data: Some(Box::new(Value::Int(id as i64))),
             cause: None,
         })
@@ -497,12 +599,12 @@ mod tests {
         let t1_other_payload = Value::Throwable(Throwable {
             id: 1,
             class: ThrowClass::Error,
-            message: Arc::from("different"),
+            message: Some(Arc::from("different")),
             data: None,
             cause: Some(Box::new(Throwable {
                 id: 9,
                 class: ThrowClass::Exception,
-                message: Arc::from("cause"),
+                message: Some(Arc::from("cause")),
                 data: None,
                 cause: None,
             })),
