@@ -20,19 +20,76 @@ fn pr(v: &Value) -> String {
 }
 
 fn run(eval: &mut Evaluator, src: &str) -> Vec<String> {
-    eval.eval_source(src).unwrap().iter().map(pr).collect()
+    eval.eval_source(src)
+        .unwrap()
+        .iter()
+        .map(|v| pr(&realized(eval, v)))
+        .collect()
+}
+
+/// Realize before printing (like the JVM, whose print walks —
+/// forcing errors surface here).
+fn realized(eval: &mut Evaluator, v: &Value) -> Value {
+    match eval.realize_deep(v) {
+        Ok(v) => v,
+        Err(clj_eval::Signal::Throw(t)) => panic!(
+            "unexpected throw while printing: {} | {}",
+            t.class.jvm_name(),
+            t.message.as_deref().unwrap_or("")
+        ),
+        Err(other) => panic!("unexpected signal while printing: {other:?}"),
+    }
 }
 
 fn run_last(eval: &mut Evaluator, src: &str) -> String {
     run(eval, src).pop().unwrap()
 }
 
+fn uncaught_chain(eval: &mut Evaluator, src: &str) -> Vec<String> {
+    let Err(SourceError::Uncaught(t)) = eval.eval_source(src) else {
+        panic!("expected an uncaught throw for {src}");
+    };
+    let mut out = Vec::new();
+    let mut cur = Some(&t);
+    while let Some(th) = cur {
+        out.push(format!(
+            "{} | {}",
+            th.class.jvm_name(),
+            th.message.as_deref().unwrap_or("")
+        ));
+        cur = th.cause.as_deref();
+    }
+    out
+}
+
 fn uncaught(eval: &mut Evaluator, src: &str) -> String {
-    match eval.eval_source(src).unwrap_err() {
-        SourceError::Uncaught(t) => {
-            format!("{} | {}", t.class.jvm_name(), t.message)
+    match eval.eval_source(src) {
+        Err(SourceError::Uncaught(t)) => {
+            format!(
+                "{} | {}",
+                t.class.jvm_name(),
+                t.message.as_deref().unwrap_or("")
+            )
         }
-        other => panic!("expected an uncaught throw, got {other}"),
+        Err(other) => panic!("expected an uncaught throw, got {other}"),
+        Ok(vs) => {
+            // Print forces (like the JVM): a lazy top-level value
+            // can still throw.
+            for v in &vs {
+                match eval.realize_deep(v) {
+                    Ok(_) => {}
+                    Err(clj_eval::Signal::Throw(t)) => {
+                        return format!(
+                            "{} | {}",
+                            t.class.jvm_name(),
+                            t.message.as_deref().unwrap_or("")
+                        );
+                    }
+                    Err(other) => panic!("unexpected signal while printing: {other:?}"),
+                }
+            }
+            panic!("expected an uncaught throw, got values")
+        }
     }
 }
 
@@ -365,11 +422,16 @@ fn load_file_and_load_string() {
     run(&mut eval, "(load-string \"(def lsv 7) (def lsf *file*)\")");
     assert_eq!(run_last(&mut eval, "lsv"), "7");
     assert_eq!(run_last(&mut eval, "lsf"), "nil");
-    // Load failures surface with the cause class and the full
-    // wrapper text (probe36 loadstring/loadfile errors).
+    // Load failures surface as a real `CompilerException` wrapper
+    // with the structured cause (probe36 loadstring/loadfile
+    // errors, S5D control chains).
     assert_eq!(
-        uncaught(&mut eval, "(load-string \"(if)\")"),
-        "java.lang.RuntimeException | Syntax error compiling if at (1:1).\njava.lang.RuntimeException | Too few arguments to if"
+        uncaught_chain(&mut eval, "(load-string \"(if)\")"),
+        vec![
+            "clojure.lang.Compiler$CompilerException | Syntax error compiling if at (1:1)."
+                .to_owned(),
+            "java.lang.RuntimeException | Too few arguments to if".to_owned(),
+        ]
     );
 }
 
@@ -394,17 +456,23 @@ fn load_failure_texts() {
     let mut eval = boot();
     let bad = format!("{}/bad.clj", fx.dir.to_string_lossy().replace('\\', "/"));
     assert_eq!(
-        uncaught(&mut eval, &format!("(load-file \"{bad}\")")),
-        format!(
-            "java.lang.RuntimeException | Syntax error compiling if at ({bad}:1:1).\njava.lang.RuntimeException | Too few arguments to if"
-        )
+        uncaught_chain(&mut eval, &format!("(load-file \"{bad}\")")),
+        vec![
+            format!(
+                "clojure.lang.Compiler$CompilerException | Syntax error compiling if at ({bad}:1:1)."
+            ),
+            "java.lang.RuntimeException | Too few arguments to if".to_owned(),
+        ]
     );
     let broken = format!("{}/broken.clj", fx.dir.to_string_lossy().replace('\\', "/"));
     assert_eq!(
-        uncaught(&mut eval, &format!("(load-file \"{broken}\")")),
-        format!(
-            "java.lang.RuntimeException | Syntax error reading source at ({broken}:1:13).\njava.lang.RuntimeException | Unmatched delimiter: )"
-        )
+        uncaught_chain(&mut eval, &format!("(load-file \"{broken}\")")),
+        vec![
+            format!(
+                "clojure.lang.Compiler$CompilerException | Syntax error reading source at ({broken}:1:13)."
+            ),
+            "java.lang.RuntimeException | Unmatched delimiter: )".to_owned(),
+        ]
     );
 }
 

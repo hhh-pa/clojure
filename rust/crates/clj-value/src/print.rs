@@ -173,7 +173,27 @@ fn print_into(v: &Value, opts: &PrintOpts, level: Option<i64>, out: &mut String)
             out.push(']');
         }
         Value::Throwable(t) => print_throwable(t, opts, level, out),
-        Value::Extension(e) => out.push_str(&e.print()),
+        Value::Transient(t) => {
+            let class = t.jvm_class();
+            let id = t.id();
+            write!(out, "#object[{class} 0x{id:x} \"{class}@{id:x}\"]").unwrap();
+        }
+        Value::Extension(e) => {
+            // Realized seqs print as lists with ambient options
+            // (length/level truncation applies, like the JVM);
+            // every other extension prints its fixed rendering.
+            if let Some(s) = e.as_any().downcast_ref::<crate::RealizedSeq>() {
+                let items = s.items();
+                let refs: Vec<&Value> = items.iter().collect();
+                print_sequential("(", refs, ")", " ", opts, level, out);
+            } else if let Some(sv) = e.as_any().downcast_ref::<crate::SubVectorValue>() {
+                let items = sv.items();
+                let refs: Vec<&Value> = items.iter().collect();
+                print_sequential("[", refs, "]", " ", opts, level, out);
+            } else {
+                out.push_str(&e.print());
+            }
+        }
     }
 }
 
@@ -184,7 +204,10 @@ fn print_into(v: &Value, opts: &PrintOpts, level: Option<i64>, out: &mut String)
 /// data prints recursively with the ambient options.
 fn print_throwable(t: &crate::Throwable, opts: &PrintOpts, level: Option<i64>, out: &mut String) {
     out.push_str("#error {:cause ");
-    print_string(&t.message, true, out);
+    match &t.message {
+        Some(m) => print_string(m, true, out),
+        None => out.push_str("nil"),
+    }
     out.push_str(" :data ");
     match &t.data {
         Some(d) => print_into(d, opts, level, out),
@@ -201,7 +224,10 @@ fn print_throwable(t: &crate::Throwable, opts: &PrintOpts, level: Option<i64>, o
         out.push_str("{:type ");
         out.push_str(th.class.jvm_name());
         out.push_str(" :message ");
-        print_string(&th.message, true, out);
+        match &th.message {
+            Some(m) => print_string(m, true, out),
+            None => out.push_str("nil"),
+        }
         if let Some(d) = &th.data {
             out.push_str(" :data ");
             print_into(d, opts, level, out);
@@ -440,13 +466,11 @@ pub fn java_debug(v: &Value) -> String {
         Value::Regex(pattern) => pattern.to_string(),
         Value::Var(v) => format!("#'{}", v.sym),
         Value::Unbound(u) => format!("Unbound: #'{}", u.sym),
-        Value::Throwable(t) => {
-            if t.message.is_empty() {
-                t.class.jvm_name().to_owned()
-            } else {
-                format!("{}: {}", t.class.jvm_name(), t.message)
-            }
-        }
+        Value::Throwable(t) => match &t.message {
+            None => t.class.jvm_name().to_owned(),
+            Some(m) => format!("{}: {}", t.class.jvm_name(), m),
+        },
+        Value::Transient(t) => format!("{}@{:x}", t.jvm_class(), t.id()),
         Value::Extension(e) => e.print(),
         Value::List(_)
         | Value::Vector(_)

@@ -6,10 +6,6 @@
 // the terms of this license.
 // You must not remove this notice, or any other, from this software.
 
-// Natives return `NativeError` by value because `NativeImpl` says
-// so; boxing it would ripple through the error API.
-#![allow(clippy::result_large_err)]
-
 //! S5C macroexpansion (`macroexpand-1`, `macroexpand`, `gensym`)
 //! plus the early list-building natives syntax-quote expansions
 //! call (`seq`, `concat`, `list`, `apply`, `vector`, `hash-map`,
@@ -43,6 +39,9 @@ pub(crate) const BUILTIN_MACROS: &[&str] = &[
     "with-redefs",
     "with-bindings",
     "bound-fn",
+    "assert",
+    "time",
+    "with-out-str",
 ];
 
 /// A resolved macro's current root (the call runs it with
@@ -174,19 +173,33 @@ fn wrap_expansion(
     if t.class == ThrowClass::ArityException {
         // The failing name rides after `passed to: ` (displays
         // never contain the marker).
-        let failing = t.message.rsplit("passed to: ").next();
+        let failing = t
+            .message
+            .as_deref()
+            .and_then(|m| m.rsplit("passed to: ").next());
         let own = failing.is_some_and(|name| Some(name) == root_display(root));
+        if !own {
+            // Not ours (an inner call failed): the original error
+            // escapes bare and untouched (probed Q1: `(max)` of
+            // nothing inside `case` keeps its `(0)` count).
+            return CompileError {
+                class: "clojure.lang.ArityException",
+                message: t.message.clone().unwrap_or_default().to_string(),
+                span,
+                source: Arc::clone(source),
+                verb: Verb::Compiling,
+                sym: None,
+                unexpected: false,
+                bare: true,
+            };
+        }
         // The macro received `(form env & user-args)`: strip the 2
         // hidden params from OUR count (exact, no message parse).
-        let actual = if own {
-            call_argc.saturating_sub(2)
-        } else {
-            call_argc
-        };
+        let actual = call_argc.saturating_sub(2);
         let name = failing.unwrap_or("clojure.core/fn");
         return CompileError {
             class: "clojure.lang.ArityException",
-            message: NativeError::arity(name, actual).message,
+            message: NativeError::arity(name, actual).into_inner().message,
             span,
             source: Arc::clone(source),
             verb: Verb::Compiling,
@@ -206,7 +219,7 @@ fn wrap_expansion(
     );
     CompileError {
         class: t.class.jvm_name(),
-        message: t.message.to_string(),
+        message: t.message.as_deref().unwrap_or("").to_owned(),
         span,
         source: Arc::clone(source),
         verb: Verb::Macroexpanding,
@@ -264,9 +277,10 @@ pub(crate) fn macroexpand1_value(
     }
     let keen = match lookup_macro(eval, op) {
         Err(private) => {
+            let inner = private.into_inner();
             return Err(CompileError {
-                class: private.class.jvm_name(),
-                message: private.message,
+                class: inner.class.jvm_name(),
+                message: inner.message,
                 span,
                 source: Arc::clone(source),
                 verb: Verb::Compiling,
@@ -322,19 +336,9 @@ pub(crate) fn macroexpand_full(
 /// wrapped chains render `wrapper\ncause`, like `eval`).
 fn expansion_to_native(e: CompileError) -> NativeError {
     if e.bare {
-        NativeError {
-            class: throw_class_for(e.class),
-            message: e.message,
-            data: None,
-            cause: None,
-        }
+        NativeError::new(throw_class_for(e.class), e.message)
     } else {
-        NativeError {
-            class: throw_class_for(e.class),
-            message: e.to_string(),
-            data: None,
-            cause: None,
-        }
+        NativeError::new(throw_class_for(e.class), e.to_string())
     }
 }
 
@@ -429,7 +433,7 @@ fn native_hash_map(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nativ
     for i in (0..args.len()).step_by(2) {
         out = out.insert(args[i].clone(), args[i + 1].clone());
     }
-    Ok(Value::Map(out))
+    Ok(Value::Map(out.with_hashy(true)))
 }
 
 fn native_hash_set(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
@@ -445,9 +449,10 @@ fn native_apply(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErr
         return Err(NativeError::arity("clojure.core/apply", args.len()));
     }
     let mut call_args: Vec<Value> = args[1..args.len() - 1].to_vec();
-    if let Some(spread) = seq_items(&args[args.len() - 1])? {
-        call_args.extend(spread);
-    }
+    // The spread realizes (JVM `spreadToArray`); any seq value —
+    // including the lazy ones syntax-quote expansions build — seqs.
+    let spread = crate::lazy::collect_all(eval, &args[args.len() - 1]).map_err(signal_to_native)?;
+    call_args.extend(spread);
     eval.call(&args[0], &call_args).map_err(signal_to_native)
 }
 

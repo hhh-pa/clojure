@@ -1,0 +1,839 @@
+;;   Copyright (c) Rich Hickey. All rights reserved.
+;;   The use and distribution terms for this software are covered by the
+;;   Eclipse Public License 1.0 (http://opensource.org/licenses/eclipse-1.0.php)
+;;   which can be found in the file epl-v10.html at the root of this distribution.
+;;   By using this software in any fashion, you are agreeing to be bound by
+;;   the terms of this license.
+;;   You must not remove this notice, or any other, from this software.
+
+;; Embedded S5D clojure.core composites. Boot loads this file with the
+;; current namespace already clojure.core and every native installed,
+;; so there is intentionally no ns form. Only the Control-table macros
+;; that are neither specials nor analyzer builtins live here; assert,
+;; time, and with-out-str resolve to analyzer builtins and must never
+;; be redefined in this file. case/condp ARE real macros below
+;; (case emits the case* analyzer form); lazy-seq expands to the
+;; lazy-seq* analyzer form.
+;;
+;; Porting notes (vs src/clj/clojure/core.clj, which this adapts):
+;; - and/or emit bare let* (our let never expands further).
+;; - Emitted recur/if/do/def/quote/var are always bare: only bare
+;;   non-shadowable specials analyze (qualified let/loop/fn are fine,
+;;   so plain syntax-quote is used wherever templates need just those;
+;;   ~'x splices a bare x otherwise).
+;; - Emitted calls are built with list/apply, never cons: cons may be
+;;   lazy while analysis only treats concrete lists as forms.
+;; - if-not swaps its branches instead of calling not (same
+;;   evaluation count/order, one less call).
+;; - even? is out of the allowed vocabulary: cond->/cond->> shadow a
+;;   local even? so the stock assert text is preserved, and
+;;   cond->/cond->>/as-> step with loop instead of partition.
+;; - Errors that need IllegalArgumentException on the JVM throw
+;;   through the private throw-illegal-arg! native (no `new` exists);
+;;   doseq's invalid-keyword path throws the stock steppair
+;;   NullPointerException verbatim through throw-npe!.
+;; - assert-args matches the JVM macro, except it renders the
+;;   namespace via (ns-name *ns*): a raw *ns* str would print the
+;;   port's #object[...] handle instead of the bare name.
+;; - for/doseq are map/filter/take-while/mapcat composites (no chunk
+;;   fns or atoms exist). Groups without :while fuse their :let/:when
+;;   chain into one mapcat stage (single evaluation, JVM order);
+;;   groups with :while keep the take-while-outside shape so :while
+;;   tests stop after the first false exactly like the JVM. Two count
+;;   caveats are inherent to the composite design: :let inits before
+;;   a :while re-evaluate (pred plus element), and a :when before a
+;;   :while tests eagerly per chunk instead of stopping with it.
+;; - (for [] body) is (list body) (single evaluation, consistent with
+;;   doseq); stock errors on 1.13 (nil binding spec) and returned nil
+;;   pre-spec.
+;; - dotimes truncates fractional n via (- n (mod n 1)), matching
+;;   (long n) iteration counts. defonce keeps [name & body] and
+;;   bound? (.hasRoot is inexpressible; extra/missing exprs are an
+;;   accepted superset of the JVM's strict [name expr]).
+;; - defn lands :arglists (with sigs-style prepost meta) via
+;;   alter-meta!/assoc after a plain def. :pre/:post conditions are
+;;   NOT wired (known gap: the map stays a stray body form).
+;; - case prep is a verbatim port minus the shift-mask search (no bit
+;;   ops; :sparse is always correct), sorted-map (plain {}, order is
+;;   eval-irrelevant), int/Integer casts (identity/literals), and
+;;   into1/reduce1/ffirst (into/reduce/inlined); dispatch hashing is
+;;   the private hash-code native (Util/hash, not murmur).
+
+(defmacro ^{:private true} assert-args
+  [& pairs]
+  (let [test (first pairs)
+        what (second pairs)
+        more (nnext pairs)]
+    (list 'do
+          (list 'when-not test
+                ;; `#'` (not a qualified call): expansions are
+                ;; analyzed at the use site, where the private is
+                ;; unreachable — the `var` form bypasses that (probed).
+                (list (list 'var 'clojure.core/throw-illegal-arg!)
+                      (list 'str (list 'first '&form)
+                            " requires " what " in "
+                            (list 'ns-name '*ns*)
+                            ":" (list :line (list 'meta '&form)))))
+          (if more
+            (apply list 'assert-args more)))))
+
+(defmacro and
+  "Evaluates exprs one at a time, from left to right. If a form
+  returns logical false (nil or false), and returns that value and
+  doesn't evaluate any of the other expressions, otherwise it returns
+  the value of the last expr. (and) returns true."
+  {:added "1.0"}
+  ([] true)
+  ([x] x)
+  ([x & next]
+   (let [g (gensym "and")]
+     (list 'let* (vector g x)
+           (list 'if g (apply list 'and next) g)))))
+
+(defmacro or
+  "Evaluates exprs one at a time, from left to right. If a form
+  returns a logical true value, or returns that value and doesn't
+  evaluate any of the other expressions, otherwise it returns the
+  value of the last expression. (or) returns nil."
+  {:added "1.0"}
+  ([] nil)
+  ([x] x)
+  ([x & next]
+   (let [g (gensym "or")]
+     (list 'let* (vector g x)
+           (list 'if g g (apply list 'or next))))))
+
+(defmacro when
+  "Evaluates test. If logical true, evaluates body in an implicit do."
+  {:added "1.0"}
+  [test & body]
+  (list 'if test (apply list 'do body)))
+
+(defmacro when-not
+  "Evaluates test. If logical false, evaluates body in an implicit do."
+  {:added "1.0"}
+  [test & body]
+  (list 'if test nil (apply list 'do body)))
+
+(defmacro if-not
+  "Evaluates test. If logical false, evaluates and returns then expr,
+  otherwise else expr, if supplied, else nil."
+  {:added "1.0"}
+  ([test then] (list 'if-not test then nil))
+  ([test then else] (list 'if test else then)))
+
+(defmacro if-let
+  "bindings => binding-form test
+
+  If test is true, evaluates then with binding-form bound to the value of
+  test, if not, yields else"
+  {:added "1.0"}
+  ([bindings then]
+   (list 'if-let bindings then nil))
+  ([bindings then else & oldform]
+   (assert-args
+     (vector? bindings) "a vector for its binding"
+     (nil? oldform) "1 or 2 forms after binding vector"
+     (= 2 (count bindings)) "exactly 2 forms in binding vector")
+   (let [form (bindings 0) tst (bindings 1)]
+     `(let [temp# ~tst]
+        (~'if temp# (let [~form temp#] ~then) ~else)))))
+
+(defmacro when-let
+  "bindings => binding-form test
+
+  When test is true, evaluates body with binding-form bound to the value of test"
+  {:added "1.0"}
+  [bindings & body]
+  (assert-args
+    (vector? bindings) "a vector for its binding"
+    (= 2 (count bindings)) "exactly 2 forms in binding vector")
+  (let [form (bindings 0) tst (bindings 1)]
+    `(let [temp# ~tst]
+       (when temp#
+         (let [~form temp#]
+           ~@body)))))
+
+(defmacro if-some
+  "bindings => binding-form test
+
+   If test is not nil, evaluates then with binding-form bound to the
+   value of test, if not, yields else"
+  {:added "1.6"}
+  ([bindings then]
+   (list 'if-some bindings then nil))
+  ([bindings then else & oldform]
+   (assert-args
+     (vector? bindings) "a vector for its binding"
+     (nil? oldform) "1 or 2 forms after binding vector"
+     (= 2 (count bindings)) "exactly 2 forms in binding vector")
+   (let [form (bindings 0) tst (bindings 1)]
+     `(let [temp# ~tst]
+        (~'if (nil? temp#)
+          ~else
+          (let [~form temp#]
+            ~then))))))
+
+(defmacro when-some
+  "bindings => binding-form test
+
+   When test is not nil, evaluates body with binding-form bound to the
+   value of test"
+  {:added "1.6"}
+  [bindings & body]
+  (assert-args
+    (vector? bindings) "a vector for its binding"
+    (= 2 (count bindings)) "exactly 2 forms in binding vector")
+  (let [form (bindings 0) tst (bindings 1)]
+    `(let [temp# ~tst]
+       (~'if (nil? temp#)
+         nil
+         (let [~form temp#]
+           ~@body)))))
+
+(defmacro cond
+  "Takes a set of test/expr pairs. It evaluates each test one at a
+  time.  If a test returns logical true, cond evaluates and returns
+  the value of the corresponding expr and doesn't evaluate any of the
+  other tests or exprs. (cond) returns nil."
+  {:added "1.0"}
+  [& clauses]
+  (when clauses
+    (list 'if (first clauses)
+          (if (next clauses)
+            (second clauses)
+            (throw-illegal-arg! "cond requires an even number of forms"))
+          (apply list 'clojure.core/cond (next (next clauses))))))
+
+(defmacro ->
+  "Threads the expr through the forms. Inserts x as the
+  second item in the first form, making a list of it if it is not a
+  list already. If there are more forms, inserts the first form as the
+  second item in second form, etc."
+  {:added "1.0"}
+  [x & forms]
+  (loop [x x, forms forms]
+    (if forms
+      (let [form (first forms)
+            threaded (if (seq? form)
+                       (with-meta (apply list (first form) x (next form))
+                         (meta form))
+                       (list form x))]
+        (recur threaded (next forms)))
+      x)))
+
+(defmacro ->>
+  "Threads the expr through the forms. Inserts x as the
+  last item in the first form, making a list of it if it is not a
+  list already. If there are more forms, inserts the first form as the
+  last item in second form, etc."
+  {:added "1.1"}
+  [x & forms]
+  (loop [x x, forms forms]
+    (if forms
+      (let [form (first forms)
+            threaded (if (seq? form)
+                       (with-meta (apply list (first form)
+                                         (concat (next form) (list x)))
+                         (meta form))
+                       (list form x))]
+        (recur threaded (next forms)))
+      x)))
+
+(defmacro as->
+  "Binds name to expr, evaluates the first form in the lexical context
+  of that binding, then binds name to that result, repeating for each
+  successive form, returning the result of the last form."
+  {:added "1.5"}
+  [expr name & forms]
+  (if (empty? forms)
+    `(let [~name ~expr]
+       ~name)
+    (let [mid (loop [fs (pop (vec forms)) out []]
+                (if (empty? fs)
+                  out
+                  (recur (rest fs) (conj out name (first fs)))))]
+      `(let [~name ~expr ~@mid]
+         ~(last forms)))))
+
+(defmacro cond->
+  "Takes an expression and a set of test/form pairs. Threads expr (via ->)
+  through each form for which the corresponding test
+  expression is true. Note that, unlike cond branching, cond-> threading does
+  not short circuit after the first true test expression."
+  {:added "1.5"}
+  [expr & clauses]
+  ;; even? is out of the native vocabulary; a local with the same
+  ;; name keeps the stock "Assert failed: (even? ...)" text.
+  (let [even? (fn [n] (zero? (mod n 2)))]
+    (assert (even? (count clauses))))
+  (let [g (gensym)
+        steps (loop [cs clauses acc []]
+                (if cs
+                  (let [test (first cs) step (second cs)]
+                    (recur (nnext cs)
+                           (conj acc `(~'if ~test (-> ~g ~step) ~g))))
+                  acc))]
+    (if (empty? steps)
+      `(let [~g ~expr]
+         ~g)
+      (let [mid (loop [ss (pop steps) out []]
+                  (if (empty? ss)
+                    out
+                    (recur (rest ss) (conj out g (first ss)))))]
+        `(let [~g ~expr ~@mid]
+           ~(peek steps))))))
+
+(defmacro cond->>
+  "Takes an expression and a set of test/form pairs. Threads expr (via ->>)
+  through each form for which the corresponding test expression
+  is true.  Note that, unlike cond branching, cond->> threading does not short circuit
+  after the first true test expression."
+  {:added "1.5"}
+  [expr & clauses]
+  ;; even? is out of the native vocabulary; a local with the same
+  ;; name keeps the stock "Assert failed: (even? ...)" text.
+  (let [even? (fn [n] (zero? (mod n 2)))]
+    (assert (even? (count clauses))))
+  (let [g (gensym)
+        steps (loop [cs clauses acc []]
+                (if cs
+                  (let [test (first cs) step (second cs)]
+                    (recur (nnext cs)
+                           (conj acc `(~'if ~test (->> ~g ~step) ~g))))
+                  acc))]
+    (if (empty? steps)
+      `(let [~g ~expr]
+         ~g)
+      (let [mid (loop [ss (pop steps) out []]
+                  (if (empty? ss)
+                    out
+                    (recur (rest ss) (conj out g (first ss)))))]
+        `(let [~g ~expr ~@mid]
+           ~(peek steps))))))
+
+(defmacro doto
+  "Evaluates x then calls all of the functions with the
+  value of x supplied at the front of the given arguments.  The forms
+  are evaluated in order.  Returns x."
+  {:added "1.0"}
+  [x & forms]
+  (let [gx (gensym)]
+    `(let [~gx ~x]
+       ~@(map (fn [f]
+                (with-meta
+                  (if (seq? f)
+                    (apply list (first f) gx (next f))
+                    (list f gx))
+                  (meta f)))
+              forms)
+       ~gx)))
+
+(defmacro comment
+  "Ignores body, yields nil"
+  {:added "1.0"}
+  [& body])
+
+(defmacro defn
+  "Same as (def name (fn [params* ] exprs*)) or (def
+   name (fn ([params* ] exprs*)+)) with any doc-string or attrs added
+   to the var metadata. prepost-map defines a map with optional keys
+   :pre and :post that contain collections of pre or post conditions."
+  {:added "1.0"
+   :arglists '([name doc-string? attr-map? [params*] prepost-map? body]
+               [name doc-string? attr-map? ([params*] prepost-map? body)+ attr-map?])}
+  [name & fdecl]
+  (when-not (symbol? name)
+    (throw-illegal-arg! "First argument to defn must be a symbol"))
+  (let [doc (when (string? (first fdecl)) (first fdecl))
+        fdecl (if (string? (first fdecl)) (next fdecl) fdecl)
+        attr (when (map? (first fdecl)) (first fdecl))
+        fdecl (if (map? (first fdecl)) (next fdecl) fdecl)
+        fdecl (if (vector? (first fdecl)) (list fdecl) fdecl)
+        attr2 (when (map? (last fdecl)) (last fdecl))
+        fdecl (if (map? (last fdecl)) (take (dec (count fdecl)) fdecl) fdecl)
+        attr (merge attr attr2)
+        arglists (apply list
+                        (map (fn [sig]
+                               (let [args (first sig)
+                                     args (if (= '&form (first args))
+                                            (vec (drop 2 args))
+                                            args)
+                                     pp (second sig)]
+                                 (if (and (map? pp) (nnext sig))
+                                   (with-meta args (merge (meta args) pp))
+                                   args)))
+                             fdecl))
+        fnform (apply list 'fn fdecl)
+        defform (if doc
+                  (list 'def name doc fnform)
+                  (list 'def name fnform))
+        metaform (list 'alter-meta! (list 'var name)
+                       'assoc :arglists (list 'quote arglists))]
+    (if (seq attr)
+      (list 'do defform metaform
+            (list 'alter-meta! (list 'var name)
+                  'merge (list 'quote attr))
+            (list 'var name))
+      (list 'do defform metaform (list 'var name)))))
+
+(defmacro defn-
+  "same as defn, yielding non-public def"
+  {:added "1.0"}
+  [name & decls]
+  (list* 'defn (with-meta name (assoc (meta name) :private true)) decls))
+
+(defmacro defonce
+  "defs name to have the root value of the expr iff the named var has no root value,
+  else expr is unevaluated"
+  {:added "1.0"}
+  [name & body]
+  `(let [v# (~'def ~name)]
+     (when-not (bound? v#) (~'def ~name ~@body))))
+
+(defmacro dotimes
+  "bindings => name n
+
+  Repeatedly executes body (presumably for side-effects) with name
+  bound to integers from 0 through n-1."
+  {:added "1.0"}
+  [bindings & body]
+  (assert-args
+    (vector? bindings) "a vector for its binding"
+    (= 2 (count bindings)) "exactly 2 forms in binding vector")
+  (let [i (first bindings) n (second bindings)]
+    `(let [n# ~n]
+       ;; (- n (mod n 1)) truncates like (long n) for iteration counts.
+       (let [n# (- n# (mod n# 1))]
+         (loop [~i 0]
+           (when (< ~i n#)
+             ~@body
+             (~'recur (inc ~i))))))))
+
+(defmacro doseq
+  "Repeatedly executes body (presumably for side-effects) with
+  bindings and filtering as provided by \"for\".  Does not retain
+  the head of the sequence. Returns nil."
+  {:added "1.0"}
+  [seq-exprs & body]
+  (assert-args
+    (vector? seq-exprs) "a vector for its binding"
+    (zero? (mod (count seq-exprs) 2)) "an even number of forms in binding vector")
+  (let [groups (loop [ps (seq seq-exprs) groups []]
+                 (if ps
+                   (let [k (first ps) v (second ps)]
+                     (if (keyword? k)
+                       (recur (nnext ps)
+                              (conj (pop groups) (conj (peek groups) [k v])))
+                       (recur (nnext ps) (conj groups [[k v]]))))
+                   groups))]
+    (if (empty? groups)
+      (apply list 'do body)
+      (let [firstg (first groups)
+            pat (first (first firstg))
+            xs (second (first firstg))
+            mods (rest firstg)
+            tmp (gensym)
+            wrap-let (fn [lets inner]
+                       (if (empty? lets) inner (list 'let lets inner)))
+            scan (loop [ms mods w false t false]
+                   (if (empty? ms)
+                     [w t]
+                     (let [k (first (first ms))]
+                       (recur (rest ms)
+                              (or w (= k :when))
+                              (or t (= k :while))))))
+            has-when (first scan)
+            has-while (second scan)
+            flat (loop [gs (rest groups) out []]
+                   (if (empty? gs)
+                     out
+                     (let [gg (first gs)
+                           bx (first gg)]
+                       (recur (rest gs)
+                              (loop [pp (rest gg)
+                                     o (conj out (first bx) (second bx))]
+                                (if (empty? pp)
+                                  o
+                                  (let [p (first pp)]
+                                    (recur (rest pp)
+                                           (conj o (first p) (second p))))))))))
+            core (if (empty? (rest groups))
+                   (apply list 'do body)
+                   (apply list 'doseq flat body))]
+        (if (and has-when (not has-while))
+          ;; Fuse the :let/:when chain into one mapcat stage, so lets
+          ;; and tests evaluate exactly once per element, in order.
+          ;; The nest builds inside-out, hence the reversed walk.
+          (let [guard (loop [ms (reverse mods) inner (list 'list core)]
+                        (if (empty? ms)
+                          inner
+                          (let [k (first (first ms)) v (second (first ms))]
+                            (cond (= k :let)
+                                  (recur (rest ms) (list 'let v inner))
+                                  (= k :when)
+                                  (recur (rest ms) (list 'if v inner nil))
+                                  :else
+                                  (throw-npe! "Cannot invoke \"clojure.lang.IFn.invoke(Object)\" because \"steppair\" is null")))))
+                element (list 'let (vector pat tmp) guard)]
+            (list 'dorun (list 'mapcat (list 'fn (vector tmp) element) xs)))
+          ;; Take-while-outside: :while stops after the first false,
+          ;; exactly like the JVM.
+          (let [pair (loop [ms mods se xs ls []]
+                       (if (empty? ms)
+                         [se ls]
+                         (let [k (first (first ms)) v (second (first ms))]
+                           (cond (= k :let)
+                                 (recur (rest ms) se (into ls v))
+                                 (= k :when)
+                                 (recur (rest ms)
+                                        (list 'filter
+                                              (list 'fn (vector tmp)
+                                                    (list 'let (vector pat tmp)
+                                                          (wrap-let ls v)))
+                                              se)
+                                        ls)
+                                 (= k :while)
+                                 (recur (rest ms)
+                                        (list 'take-while
+                                              (list 'fn (vector tmp)
+                                                    (list 'let (vector pat tmp)
+                                                          (wrap-let ls v)))
+                                              se)
+                                        ls)
+                                 :else
+                                 (throw-npe! "Cannot invoke \"clojure.lang.IFn.invoke(Object)\" because \"steppair\" is null")))))
+                fseq (first pair)
+                lets (second pair)
+                element (list 'let (vector pat tmp) (wrap-let lets core))]
+            (list 'dorun (list 'map (list 'fn (vector tmp) element) fseq))))))))
+
+(defmacro for
+  "List comprehension. Takes a vector of one or more
+   binding-form/collection-expr pairs, each followed by zero or more
+   modifiers, and yields a lazy sequence of evaluations of expr.
+   Collections are iterated in a nested fashion, rightmost fastest,
+   and nested coll-exprs can refer to bindings created in prior
+   binding-forms.  Supported modifiers are: :let [binding-form expr ...],
+   :while test, :when test.
+
+  (take 100 (for [x (range 100000000) y (range 1000000) :while (< y x)] [x y]))"
+  {:added "1.0"}
+  [seq-exprs body-expr]
+  (assert-args
+    (vector? seq-exprs) "a vector for its binding"
+    (zero? (mod (count seq-exprs) 2)) "an even number of forms in binding vector")
+  (let [groups (loop [ps (seq seq-exprs) groups []]
+                 (if ps
+                   (let [k (first ps) v (second ps)]
+                     (if (keyword? k)
+                       (recur (nnext ps)
+                              (conj (pop groups) (conj (peek groups) [k v])))
+                       (recur (nnext ps) (conj groups [[k v]]))))
+                   groups))]
+    (if (empty? groups)
+      (list 'list body-expr)
+      (let [firstg (first groups)
+            pat (first (first firstg))
+            xs (second (first firstg))
+            mods (rest firstg)
+            tmp (gensym)
+            wrap-let (fn [lets inner]
+                       (if (empty? lets) inner (list 'let lets inner)))
+            scan (loop [ms mods w false t false]
+                   (if (empty? ms)
+                     [w t]
+                     (let [k (first (first ms))]
+                       (recur (rest ms)
+                              (or w (= k :when))
+                              (or t (= k :while))))))
+            has-when (first scan)
+            has-while (second scan)
+            flat (loop [gs (rest groups) out []]
+                   (if (empty? gs)
+                     out
+                     (let [gg (first gs)
+                           bx (first gg)]
+                       (recur (rest gs)
+                              (loop [pp (rest gg)
+                                     o (conj out (first bx) (second bx))]
+                                (if (empty? pp)
+                                  o
+                                  (let [p (first pp)]
+                                    (recur (rest pp)
+                                           (conj o (first p) (second p))))))))))
+            core (if (empty? (rest groups))
+                   body-expr
+                   (apply list 'for flat (list body-expr)))]
+        (if (and has-when (not has-while))
+          ;; Fuse the :let/:when chain into one mapcat stage, so lets
+          ;; and tests evaluate exactly once per element, in order.
+          ;; The nest builds inside-out, hence the reversed walk. A
+          ;; nested core is already a seq, so only a single-group
+          ;; body gets wrapped for the concat.
+          (let [seed (if (empty? (rest groups)) (list 'list core) core)
+                guard (loop [ms (reverse mods) inner seed]
+                        (if (empty? ms)
+                          inner
+                          (let [k (first (first ms)) v (second (first ms))]
+                            (cond (= k :let)
+                                  (recur (rest ms) (list 'let v inner))
+                                  (= k :when)
+                                  (recur (rest ms) (list 'if v inner nil))
+                                  :else
+                                  (throw-illegal-arg! (str "Invalid 'for' keyword " k))))))
+                element (list 'let (vector pat tmp) guard)]
+            (list 'mapcat (list 'fn (vector tmp) element) xs))
+          ;; Take-while-outside: :while stops after the first false,
+          ;; exactly like the JVM.
+          (let [pair (loop [ms mods se xs ls []]
+                       (if (empty? ms)
+                         [se ls]
+                         (let [k (first (first ms)) v (second (first ms))]
+                           (cond (= k :let)
+                             (recur (rest ms) se (into ls v))
+                             (= k :when)
+                             (recur (rest ms)
+                                    (list 'filter
+                                          (list 'fn (vector tmp)
+                                                (list 'let (vector pat tmp)
+                                                      (wrap-let ls v)))
+                                          se)
+                                    ls)
+                             (= k :while)
+                             (recur (rest ms)
+                                    (list 'take-while
+                                          (list 'fn (vector tmp)
+                                                (list 'let (vector pat tmp)
+                                                      (wrap-let ls v)))
+                                          se)
+                                    ls)
+                             :else
+                             (throw-illegal-arg! (str "Invalid 'for' keyword " k))))))
+                fseq (first pair)
+                lets (second pair)
+                element (list 'let (vector pat tmp) (wrap-let lets core))
+                mapper (list 'fn (vector tmp) element)]
+            (if (empty? (rest groups))
+              (list 'map mapper fseq)
+              (list 'mapcat mapper fseq))))))))
+
+(defmacro lazy-seq
+  "Takes a body of expressions that returns an ISeq or nil, and yields
+  a Seqable object that will invoke the body only the first time seq
+  is called, and will cache the result and return it on all subsequent
+  seq calls. See also - realized?"
+  {:added "1.0"}
+  [& body]
+  (list* 'lazy-seq* body))
+
+(defmacro lazy-cat
+  "Expands to code which yields a lazy sequence of the concatenation
+  of the supplied colls.  Each coll expr is not evaluated until it is
+  needed.
+
+  (lazy-cat xs ys zs) === (concat (lazy-seq xs) (lazy-seq ys) (lazy-seq zs))"
+  {:added "1.0"}
+  [& colls]
+  `(lazy-seq (concat ~@colls)))
+
+;; --- `case`/`condp` (S5D): verbatim ports, except `condp`/`case`
+;; throw through `throw-illegal-arg!` (no `new` exists), `Util/hash`
+;; is the private `hash-code` native, `into1`/`reduce1` are
+;; `into`/`reduce`, `ffirst` is inlined, `int` is `identity`
+;; (tests are already int-sized; pr-identical), `Integer/MIN_VALUE`
+;; is an inlined literal, the imap builds over `{}` (`sorted-map`
+;; is out of scope; order is eval-irrelevant), and the shift-mask
+;; search is skipped (no bit ops; `:sparse` is always correct).
+
+(def ^:private max-switch-table-size 8192) ;; (bit-shift-left 1 13)
+
+(defn- fits-table?
+  "Returns true if the collection of ints can fit within the
+  max-table-switch-size, false otherwise."
+  [ints]
+  (< (- (apply max (seq ints)) (apply min (seq ints))) max-switch-table-size))
+
+(defn- case-map
+  "Transforms a sequence of test constants and a corresponding sequence of then
+  expressions into a sorted map to be consumed by case*. The form of the map
+  entries are {(case-f test) [(test-f test) then]}."
+  [case-f test-f tests thens]
+  (into {}
+    (zipmap (map case-f tests)
+            (map vector
+              (map test-f tests)
+              thens))))
+
+(defn- prep-ints
+  "Takes a sequence of int-sized test constants and a corresponding sequence of
+  then expressions. Returns a tuple of [shift mask case-map switch-type] where
+  case-map is a map of int case values to [test then] tuples, and switch-type
+  is either :sparse or :compact."
+  [tests thens]
+  (if (fits-table? tests)
+    ; compact case ints, no shift-mask
+    [0 0 (case-map identity identity tests thens) :compact]
+    ; sparse case ints, no shift-mask
+    [0 0 (case-map identity identity tests thens) :sparse]))
+
+(defn- merge-hash-collisions
+  "Takes a case expression, default expression, and a sequence of test constants
+  and a corresponding sequence of then expressions. Returns a tuple of
+  [tests thens skip-check-set] where no tests have the same hash. Each set of
+  input test constants with the same hash is replaced with a single test
+  constant (the case int), and their respective thens are combined into:
+  (condp = expr
+    test-1 then-1
+    ...
+    test-n then-n
+    default).
+  The skip-check is a set of case ints for which post-switch equivalence
+  checking must not be done (the cases holding the above condp thens)."
+  [expr-sym default tests thens]
+  (let [buckets (loop [m {} ks tests vs thens]
+                  (if (and ks vs)
+                    (recur
+                      (update m (hash-code (first ks)) (fnil conj []) [(first ks) (first vs)])
+                      (next ks) (next vs))
+                    m))
+        assoc-multi (fn [m h bucket]
+                      (let [testexprs (mapcat (fn [kv] [(list 'quote (first kv)) (second kv)]) bucket)
+                            expr `(condp = ~expr-sym ~@testexprs ~default)]
+                        (assoc m h expr)))
+        hmap (reduce
+               (fn [m [h bucket]]
+                 (if (== 1 (count bucket))
+                   (assoc m (first (first bucket)) (second (first bucket)))
+                   (assoc-multi m h bucket)))
+               {} buckets)
+        skip-check (->> buckets
+                     (filter #(< 1 (count (second %))))
+                     (map first)
+                     (into #{}))]
+    [(keys hmap) (vals hmap) skip-check]))
+
+(defn- prep-hashes
+  "Takes a sequence of test constants and a corresponding sequence of then
+  expressions. Returns a tuple of [shift mask case-map switch-type skip-check]
+  where case-map is a map of int case values to [test then] tuples, switch-type
+  is either :sparse or :compact, and skip-check is a set of case ints for which
+  post-switch equivalence checking must not be done (occurs with hash
+  collisions)."
+  [expr-sym default tests thens]
+  (let [hashcode #(hash-code %)
+        hashes (into #{} (map hashcode tests))]
+    (if (== (count tests) (count hashes))
+      (if (fits-table? hashes)
+        ; compact case ints, no shift-mask
+        [0 0 (case-map hashcode identity tests thens) :compact]
+        ; sparse case ints, no shift-mask
+        [0 0 (case-map hashcode identity tests thens) :sparse])
+      ; resolve hash collisions and try again
+      (let [[tests thens skip-check] (merge-hash-collisions expr-sym default tests thens)
+            [shift mask case-map switch-type] (prep-hashes expr-sym default tests thens)]
+        ; (the shift-mask skip-check remap is dead: mask is always 0)
+        [shift mask case-map switch-type skip-check]))))
+
+(defmacro condp
+  "Takes a binary predicate, an expression, and a set of clauses.
+  Each clause can take the form of either:
+
+  test-expr result-expr
+
+  test-expr :>> result-fn
+
+  Note :>> is an ordinary keyword.
+
+  For each clause, (pred test-expr expr) is evaluated. If it returns
+  logical true, the clause is a match. If a binary clause matches, the
+  result-expr is returned, if a ternary clause matches, its result-fn,
+  which must be a unary function, is called with the result of the
+  predicate as its argument, the result of that call being the return
+  value of condp. A single default expression can follow the clauses,
+  and its value will be returned if no clause matches. If no default
+  expression is provided and no clause matches, an
+  IllegalArgumentException is thrown."
+  {:added "1.0"}
+
+  [pred expr & clauses]
+  (let [gpred (gensym "pred__")
+        gexpr (gensym "expr__")
+        emit (fn emit [pred expr args]
+               (let [[[a b c :as clause] more]
+                       (split-at (if (= :>> (second args)) 3 2) args)
+                     n (count clause)]
+                 (cond
+                  (= 0 n) `((var throw-illegal-arg!) (str "No matching clause: " ~expr))
+                  (= 1 n) a
+                  (= 2 n) `(if (~pred ~a ~expr)
+                             ~b
+                             ~(emit pred expr more))
+                  :else `(if-let [p# (~pred ~a ~expr)]
+                           (~c p#)
+                           ~(emit pred expr more)))))]
+    `(let [~gpred ~pred
+           ~gexpr ~expr]
+       ~(emit gpred gexpr clauses))))
+
+(defmacro case
+  "Takes an expression, and a set of clauses.
+
+  Each clause can take the form of either:
+
+  test-constant result-expr
+
+  (test-constant1 ... test-constantN)  result-expr
+
+  The test-constants are not evaluated. They must be compile-time
+  literals, and need not be quoted.  If the expression is equal to a
+  test-constant, the corresponding result-expr is returned. A single
+  default expression can follow the clauses, and its value will be
+  returned if no clause matches. If no default expression is provided
+  and no clause matches, an IllegalArgumentException is thrown.
+
+  Unlike cond and condp, case does a constant-time dispatch, the
+  clauses are not considered sequentially.  All manner of constant
+  expressions are acceptable in case, including numbers, strings,
+  symbols, keywords, and (Clojure) composites thereof. Note that since
+  lists are used to group multiple constants that map to the same
+  expression, a vector can be used to match a list if needed. The
+  test-constants need not be all of the same type."
+  {:added "1.2"}
+
+  [e & clauses]
+  (let [ge (with-meta (gensym) '{:tag Object})
+        default (if (odd? (count clauses))
+                  (last clauses)
+                  `((var throw-illegal-arg!) (str "No matching clause: " ~ge)))]
+    (if (> 2 (count clauses))
+      `(let [~ge ~e] ~default)
+      (let [pairs (partition 2 clauses)
+            assoc-test (fn assoc-test [m test expr]
+                         (if (contains? m test)
+                           (throw-illegal-arg! (str "Duplicate case test constant: " test))
+                           (assoc m test expr)))
+            pairs (reduce
+                       (fn [m [test expr]]
+                         (if (seq? test)
+                           (reduce #(assoc-test %1 %2 expr) m test)
+                           (assoc-test m test expr)))
+                       {} pairs)
+            tests (keys pairs)
+            thens (vals pairs)
+            mode (cond
+                   (every? #(and (integer? %) (<= -2147483648 % 2147483647)) tests)
+                   :ints
+                   (every? keyword? tests)
+                   :identity
+                   :else :hashes)]
+        (condp = mode
+          :ints
+          (let [[shift mask imap switch-type] (prep-ints tests thens)]
+            `(let [~ge ~e] (case* ~ge ~shift ~mask ~default ~imap ~switch-type :int)))
+          :hashes
+          (let [[shift mask imap switch-type skip-check] (prep-hashes ge default tests thens)]
+            `(let [~ge ~e] (case* ~ge ~shift ~mask ~default ~imap ~switch-type :hash-equiv ~skip-check)))
+          :identity
+          (let [[shift mask imap switch-type skip-check] (prep-hashes ge default tests thens)]
+            `(let [~ge ~e] (case* ~ge ~shift ~mask ~default ~imap ~switch-type :hash-identity ~skip-check))))))))

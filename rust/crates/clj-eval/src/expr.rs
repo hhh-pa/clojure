@@ -23,7 +23,7 @@ use clj_value::{
     Keyword, Map, PrintOpts, Symbol, Value, Vector, new_map, pr_to_string, print_to_string,
 };
 
-use crate::error::{CompileError, NativeError, Verb, jvm_class_of, span_of};
+use crate::error::{CompileError, NativeError, Signal, Verb, jvm_class_of, span_of};
 use crate::eval::Evaluator;
 
 /// A `catch` clause: resolved class name, local slot, body.
@@ -102,6 +102,18 @@ pub enum NsClause {
     ReferClojure(Vec<Value>),
     Require(Vec<Value>),
     Use(Vec<Value>),
+}
+
+/// A `case*` dispatch mode: `:int` funnels numbers through
+/// `intValue` (non-numbers miss, then an `equiv` post-check);
+/// `:hash-equiv`/`:hash-identity` hash and post-check (`identity`
+/// is `equiv` here — keywords are not interned, and equal keywords
+/// must match either way).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CaseTest {
+    Int,
+    HashEquiv,
+    HashIdentity,
 }
 
 /// An analyzed expression.
@@ -210,6 +222,46 @@ pub enum Expr {
         doc: Option<String>,
         attr: Option<Map>,
         clauses: Vec<NsClause>,
+    },
+    /// `(assert x)` / `(assert x message)` (S5D analyzer builtin):
+    /// `*assert*` was truthy at analysis (else analysis emits
+    /// `Literal(Nil)` without touching `test`). `form` is the
+    /// `pr-str` of the test form.
+    Assert {
+        test: Box<Expr>,
+        message: Option<Box<Expr>>,
+        form: String,
+    },
+    /// `(time expr)` (S5D analyzer builtin).
+    Time {
+        expr: Box<Expr>,
+    },
+    /// `(with-out-str body…)` (S5D analyzer builtin): `out` is the
+    /// `*out*` binding target (resolved like `binding`, so user
+    /// shadows apply).
+    WithOutStr {
+        out: Symbol,
+        body: Vec<Expr>,
+    },
+    /// `(lazy-seq* body…)` (S5D analyzer form — the JVM has no such
+    /// var; `lazy-seq` expands to this).
+    LazySeqStar {
+        body: Vec<Expr>,
+    },
+    /// `(case* ge shift mask default imap switch-type test-type
+    /// skip?)` (S5D analyzer form, emitted by the `case` macro):
+    /// `cases` maps dispatch keys to `(test, then)` (`test` is an
+    /// analyzed expr, evaluated on a hash hit like the JVM
+    /// `test.emit`); `skip` holds case ints whose `then` is already
+    /// a collision-`condp` (no post-check).
+    CaseStar {
+        expr: Box<Expr>,
+        shift: i32,
+        mask: i32,
+        default: Box<Expr>,
+        cases: Vec<(i32, Expr, Expr)>,
+        skip: Vec<i32>,
+        test: CaseTest,
     },
     Invoke {
         head: Box<Expr>,
@@ -375,6 +427,7 @@ fn is_curated_fqn(fqn: &str) -> bool {
             | "java.util.NoSuchElementException"
             | "java.util.concurrent.ExecutionException"
             | "java.lang.reflect.InvocationTargetException"
+            | "clojure.lang.Compiler$CompilerException"
     )
 }
 
@@ -431,12 +484,19 @@ pub(crate) fn is_special(name: &str) -> bool {
             | "defmacro"
             | "declare"
             | "ns"
+            | "assert"
+            | "time"
+            | "with-out-str"
+            | "lazy-seq*"
+            | "case*"
     )
 }
 
 /// The macro-implemented specials: a local or global binding
 /// with one of these names shadows the macro (real specials never
-/// shadow, probe31 `shadow-*`).
+/// shadow, probe31 `shadow-*`). `case*` is not shadowable (the JVM
+/// hardcodes it); `lazy-seq*` is (the JVM has no such form, so a
+/// user definition wins there).
 fn is_shadowable_macro(name: &str) -> bool {
     matches!(
         name,
@@ -451,6 +511,10 @@ fn is_shadowable_macro(name: &str) -> bool {
             | "defmacro"
             | "declare"
             | "ns"
+            | "assert"
+            | "time"
+            | "with-out-str"
+            | "lazy-seq*"
     )
 }
 
@@ -514,6 +578,32 @@ impl<'a> Analyzer<'a> {
             Value::List(list) if !list.is_empty() => {
                 let items: Vec<&Value> = list.iter().collect();
                 self.analyze_list(form, &items, span, tail)
+            }
+            // Any other seq value (macro expansions built at
+            // runtime by `seq`/`concat` arrive as realized or
+            // pending seq extensions; the JVM analyzes every
+            // `ISeq` as a form).
+            form if crate::lazy::is_seq_value(form) => {
+                let items = match crate::lazy::collect_all(self.eval, form) {
+                    Ok(items) => items,
+                    Err(Signal::Throw(t)) => {
+                        return Err(CompileError::bare(
+                            t.class.jvm_name(),
+                            t.message.as_deref().unwrap_or("").to_owned(),
+                            span,
+                            &self.source,
+                        ));
+                    }
+                    Err(Signal::Recur(_)) => {
+                        unreachable!("recur cannot escape forcing a form")
+                    }
+                };
+                if items.is_empty() {
+                    // `EmptyExpr`: an empty form evaluates to itself.
+                    return Ok(Expr::Literal(form.clone()));
+                }
+                let refs: Vec<&Value> = items.iter().collect();
+                self.analyze_list(form, &refs, span, tail)
             }
             Value::Vector(v) => {
                 let mut out = Vec::with_capacity(v.len());
@@ -809,7 +899,7 @@ impl<'a> Analyzer<'a> {
             Err(private) => {
                 return Err(CompileError::bare(
                     class::ILLEGAL_STATE,
-                    private.message,
+                    private.into_inner().message,
                     span,
                     &self.source,
                 ));
@@ -881,6 +971,11 @@ impl<'a> Analyzer<'a> {
             "defmacro" => self.parse_defmacro(items, span),
             "declare" => self.parse_declare(items, span),
             "ns" => self.parse_ns(items, span),
+            "assert" => self.parse_assert(items, span),
+            "time" => self.parse_time(items, span),
+            "with-out-str" => self.parse_with_out_str(items, span),
+            "lazy-seq*" => self.parse_lazy_seq_star(items, span),
+            "case*" => self.parse_case_star(items, span, tail),
             _ => unreachable!("dispatch covers every special form"),
         }
     }
@@ -1078,7 +1173,9 @@ impl<'a> Analyzer<'a> {
         let Value::Symbol(sym) = second else {
             return Err(self.err(
                 class::CLASS_CAST,
-                NativeError::cast(&jvm_class_of(second), "clojure.lang.Symbol").message,
+                NativeError::cast(&jvm_class_of(second), "clojure.lang.Symbol")
+                    .into_inner()
+                    .message,
                 span,
                 Verb::Compiling,
                 Some("var".to_owned()),
@@ -1557,7 +1654,9 @@ impl<'a> Analyzer<'a> {
                 other => {
                     return Err(self.err(
                         class::CLASS_CAST,
-                        NativeError::cast(&jvm_class_of(other), "clojure.lang.Symbol").message,
+                        NativeError::cast(&jvm_class_of(other), "clojure.lang.Symbol")
+                            .into_inner()
+                            .message,
                         span,
                         Verb::Compiling,
                         Some("var".to_owned()),
@@ -1600,7 +1699,9 @@ impl<'a> Analyzer<'a> {
                 other => {
                     return Err(self.err(
                         class::CLASS_CAST,
-                        NativeError::cast(&jvm_class_of(other), "clojure.lang.Symbol").message,
+                        NativeError::cast(&jvm_class_of(other), "clojure.lang.Symbol")
+                            .into_inner()
+                            .message,
                         span,
                         Verb::Compiling,
                         Some("var".to_owned()),
@@ -1634,7 +1735,9 @@ impl<'a> Analyzer<'a> {
             Value::Map(m) if m.is_empty() => Ok(Vec::new()),
             Value::Map(_) => Err(self.err(
                 class::CLASS_CAST,
-                NativeError::cast("clojure.lang.MapEntry", "clojure.lang.Symbol").message,
+                NativeError::cast("clojure.lang.MapEntry", "clojure.lang.Symbol")
+                    .into_inner()
+                    .message,
                 span,
                 Verb::Compiling,
                 Some("var".to_owned()),
@@ -1794,7 +1897,9 @@ impl<'a> Analyzer<'a> {
             let Value::Symbol(sym) = form else {
                 return Err(CompileError::bare(
                     class::CLASS_CAST,
-                    NativeError::cast(&jvm_class_of(form), "clojure.lang.IObj").message,
+                    NativeError::cast(&jvm_class_of(form), "clojure.lang.IObj")
+                        .into_inner()
+                        .message,
                     span,
                     &self.source,
                 ));
@@ -2176,7 +2281,9 @@ fn walk_map(m: &Map) -> Result<(), WalkError> {
             Some(first) => {
                 return Err(WalkError {
                     class: class::CLASS_CAST,
-                    message: NativeError::cast(&jvm_class_of(first), "java.util.Map$Entry").message,
+                    message: NativeError::cast(&jvm_class_of(first), "java.util.Map$Entry")
+                        .into_inner()
+                        .message,
                 });
             }
         },
@@ -2335,7 +2442,9 @@ fn key_cast_err(dir: &KeyDirective, form: &Value) -> WalkError {
     }
     WalkError {
         class: class::CLASS_CAST,
-        message: NativeError::cast(&jvm_class_of(form), "clojure.lang.Named").message,
+        message: NativeError::cast(&jvm_class_of(form), "clojure.lang.Named")
+            .into_inner()
+            .message,
     }
 }
 
@@ -2452,6 +2561,175 @@ impl<'a> Analyzer<'a> {
             Verb::Macroexpanding,
             Some(macro_name.to_owned()),
         )
+    }
+
+    /// A bare analyzer-builtin arity failure (`assert`/`time`
+    /// reject 0 and 3+ args like the JVM macros — the `ArityException`
+    /// escapes `eval` unwrapped).
+    fn builtin_arity(&self, name: &'static str, argc: usize, span: Span) -> CompileError {
+        CompileError::bare(
+            "clojure.lang.ArityException",
+            NativeError::arity(name, argc).into_inner().message,
+            span,
+            &self.source,
+        )
+    }
+
+    /// `(assert x)` / `(assert x message)`: the expansion-time
+    /// `*assert*` check reads the DYNAMIC value (a `binding` around
+    /// `eval` disables, corpus 15 `:assert-bound-false-eval`); when
+    /// off, the test is neither analyzed nor evaluated (the
+    /// expansion is `nil`). A missing/unbound `*assert*` reads
+    /// truthy (assert on).
+    fn parse_assert(&mut self, items: &[&Value], span: Span) -> Result<Expr, CompileError> {
+        let argc = items.len() - 1;
+        if argc != 1 && argc != 2 {
+            return Err(self.builtin_arity("clojure.core/assert", argc, span));
+        }
+        let sym = Symbol::new(Some("clojure.core"), "*assert*");
+        let on = self
+            .eval
+            .registry
+            .get("clojure.core")
+            .and_then(|ns| ns.lookup(&sym))
+            .is_none_or(|id| self.eval.deref_var(id, &sym).is_truthy());
+        if !on {
+            return Ok(Expr::Literal(Value::Nil));
+        }
+        let test = self.analyze(items[1], span, false)?;
+        let message = match items.get(2) {
+            Some(m) => Some(Box::new(self.analyze(m, span, false)?)),
+            None => None,
+        };
+        Ok(Expr::Assert {
+            test: Box::new(test),
+            message,
+            form: pr_to_string(items[1], &PrintOpts::pr()),
+        })
+    }
+
+    /// `(time expr)`: exactly one arg (else the bare macro arity).
+    /// The expr is not in tail position (it binds `ret#` on the
+    /// JVM), so an inner `recur` is the tail-position error.
+    fn parse_time(&mut self, items: &[&Value], span: Span) -> Result<Expr, CompileError> {
+        let argc = items.len() - 1;
+        if argc != 1 {
+            return Err(self.builtin_arity("clojure.core/time", argc, span));
+        }
+        Ok(Expr::Time {
+            expr: Box::new(self.analyze(items[1], span, false)?),
+        })
+    }
+
+    /// `(with-out-str body…)`: the body never runs in tail position
+    /// (the JVM expansion ends in `(str s#)`). `*out*` resolves like
+    /// a `binding` target, so user shadows apply.
+    fn parse_with_out_str(&mut self, items: &[&Value], span: Span) -> Result<Expr, CompileError> {
+        let body = self.analyze_body(&items[1..], span, false)?;
+        Ok(Expr::WithOutStr {
+            out: Symbol::new(None, "*out*"),
+            body,
+        })
+    }
+
+    /// `(lazy-seq* body…)`: a zero-arg `fn` boundary for `recur`
+    /// (an empty `recur` re-invokes the body at force time, like the
+    /// JVM closure; anything else is the mismatch error).
+    fn parse_lazy_seq_star(&mut self, items: &[&Value], span: Span) -> Result<Expr, CompileError> {
+        let saved_recur = self.recur;
+        let saved_no_recur = self.no_recur;
+        self.recur = Some(0);
+        self.no_recur = false;
+        let body = self.analyze_body(&items[1..], span, true);
+        self.recur = saved_recur;
+        self.no_recur = saved_no_recur;
+        Ok(Expr::LazySeqStar { body: body? })
+    }
+
+    /// `(case* ge shift mask default imap switch-type test-type
+    /// skip?)`: the `case` macro's expansion shape (anything else is
+    /// the spec error — hand-written `case*` beyond the macro shape
+    /// is a port-level error). `default`/`then`s inherit tail
+    /// position; `test`s analyze as exprs (evaluated on a hash hit,
+    /// like the JVM `test.emit`); `skip` defaults to empty.
+    fn parse_case_star(
+        &mut self,
+        items: &[&Value],
+        span: Span,
+        tail: bool,
+    ) -> Result<Expr, CompileError> {
+        if items.len() != 8 && items.len() != 9 {
+            return Err(self.spec_error("clojure.core/case*", span));
+        }
+        let int_arg = |v: &Value| match v {
+            Value::Int(i) => i32::try_from(*i).ok(),
+            _ => None,
+        };
+        let (Some(shift), Some(mask)) = (int_arg(items[2]), int_arg(items[3])) else {
+            return Err(self.spec_error("clojure.core/case*", span));
+        };
+        let Value::Map(imap) = items[5] else {
+            return Err(self.spec_error("clojure.core/case*", span));
+        };
+        let test = match items[7] {
+            Value::Keyword(kw) if kw.namespace().is_none() => match kw.name() {
+                "int" => CaseTest::Int,
+                "hash-equiv" => CaseTest::HashEquiv,
+                "hash-identity" => CaseTest::HashIdentity,
+                _ => return Err(self.spec_error("clojure.core/case*", span)),
+            },
+            _ => return Err(self.spec_error("clojure.core/case*", span)),
+        };
+        if !matches!(items[6], Value::Keyword(kw) if kw.namespace().is_none() && matches!(kw.name(), "sparse" | "compact"))
+        {
+            return Err(self.spec_error("clojure.core/case*", span));
+        }
+        let mut skip = Vec::new();
+        if let Some(s) = items.get(8).copied()
+            && !matches!(s, Value::Nil)
+        {
+            let Value::Set(set) = s else {
+                return Err(self.spec_error("clojure.core/case*", span));
+            };
+            for v in set.iter() {
+                let Some(k) = int_arg(v) else {
+                    return Err(self.spec_error("clojure.core/case*", span));
+                };
+                skip.push(k);
+            }
+        }
+        let expr = self.analyze(items[1], span, false)?;
+        let default = self.analyze(items[4], span, tail)?;
+        let mut cases = Vec::new();
+        for (k, v) in imap.iter() {
+            let Some(key) = int_arg(k) else {
+                return Err(self.spec_error("clojure.core/case*", span));
+            };
+            let Value::Vector(pair) = v else {
+                return Err(self.spec_error("clojure.core/case*", span));
+            };
+            let mut pair_forms = pair.iter();
+            let (Some(test_form), Some(then_form), None) =
+                (pair_forms.next(), pair_forms.next(), pair_forms.next())
+            else {
+                return Err(self.spec_error("clojure.core/case*", span));
+            };
+            // Test constants are literal data (probed: symbols,
+            // lists, and defined-var names all match as data, never
+            // evaluated); only the `then` is an expression.
+            let test_expr = Expr::Literal(test_form.clone());
+            let then_expr = self.analyze(then_form, span, tail)?;
+            cases.push((key, test_expr, then_expr));
+        }
+        Ok(Expr::CaseStar {
+            expr: Box::new(expr),
+            shift,
+            mask,
+            default: Box::new(default),
+            cases,
+            skip,
+            test,
+        })
     }
 
     /// Attribute a destructure-body failure: `Syntax error` for
@@ -2957,7 +3235,9 @@ impl<'a> Analyzer<'a> {
                     other => {
                         return Err(self.fn_star_error(
                             class::CLASS_CAST,
-                            &NativeError::cast(&jvm_class_of(other), "clojure.lang.ISeq").message,
+                            &NativeError::cast(&jvm_class_of(other), "clojure.lang.ISeq")
+                                .into_inner()
+                                .message,
                             span,
                         ));
                     }

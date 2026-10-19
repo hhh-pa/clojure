@@ -418,11 +418,12 @@ fn catch_class_table() {
         "java.util.NoSuchElementException",
         "java.util.concurrent.ExecutionException",
         "java.lang.reflect.InvocationTargetException",
+        "clojure.lang.Compiler$CompilerException",
     ];
-    assert_eq!(names.len(), 43);
+    assert_eq!(names.len(), 44);
     names.sort_unstable();
     names.dedup();
-    assert_eq!(names.len(), 43);
+    assert_eq!(names.len(), 44);
     for class in names {
         let src = format!("(try 1 (catch {class} e 1))");
         let form = read_str(&src, &ReaderOpts::default()).unwrap();

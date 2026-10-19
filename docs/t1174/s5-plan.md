@@ -48,7 +48,7 @@ fails until each var lands.
   `dotimes`/`doseq`/`for`, `lazy-seq`/`lazy-cat`, `comment`, `assert`,
   `time`, `doto` (fn calls only; methods are N1 interop).
 - Out of scope (coverage records each with its reason): transducers
-  and xform arities, sorted collections, `format`, `rand-*`/`shuffle`,
+  and xform arities, sorted collections, `rand-*`/`shuffle`,
   `instance?`/`type`, multimethods, `with-in-str`/`read`, `deftype`/
   `defrecord`/`reify`/`proxy`/`gen-class` (no type-system slice),
   `with-open`, protocols (`extend`/`satisfies?`), `*in*`,

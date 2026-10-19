@@ -10,10 +10,6 @@
 //! Namespace ids are deterministic per boot (`clojure.core` is 1,
 //! `user` is 2), so handle prints pin the full `#object` shape.
 
-// The doubles return `NativeError` by value because `NativeImpl`
-// says so; boxing it would ripple through the error API.
-#![allow(clippy::result_large_err)]
-
 use clj_eval::{Evaluator, SourceError, boot};
 use clj_value::{PrintOpts, Value, pr_to_string};
 
@@ -22,7 +18,25 @@ fn pr(v: &Value) -> String {
 }
 
 fn run(eval: &mut Evaluator, src: &str) -> Vec<String> {
-    eval.eval_source(src).unwrap().iter().map(pr).collect()
+    eval.eval_source(src)
+        .unwrap()
+        .iter()
+        .map(|v| pr(&realized(eval, v)))
+        .collect()
+}
+
+/// Realize before printing (like the JVM, whose print walks —
+/// forcing errors surface here).
+fn realized(eval: &mut Evaluator, v: &Value) -> Value {
+    match eval.realize_deep(v) {
+        Ok(v) => v,
+        Err(clj_eval::Signal::Throw(t)) => panic!(
+            "unexpected throw while printing: {} | {}",
+            t.class.jvm_name(),
+            t.message.as_deref().unwrap_or("")
+        ),
+        Err(other) => panic!("unexpected signal while printing: {other:?}"),
+    }
 }
 
 fn run_last(eval: &mut Evaluator, src: &str) -> String {
@@ -31,12 +45,51 @@ fn run_last(eval: &mut Evaluator, src: &str) -> String {
 
 /// The `Class | message` of an uncaught throw (natives surface
 /// through `SourceError::Uncaught`).
+fn uncaught_chain(eval: &mut Evaluator, src: &str) -> Vec<String> {
+    let Err(SourceError::Uncaught(t)) = eval.eval_source(src) else {
+        panic!("expected an uncaught throw for {src}");
+    };
+    let mut out = Vec::new();
+    let mut cur = Some(&t);
+    while let Some(th) = cur {
+        out.push(format!(
+            "{} | {}",
+            th.class.jvm_name(),
+            th.message.as_deref().unwrap_or("")
+        ));
+        cur = th.cause.as_deref();
+    }
+    out
+}
+
 fn uncaught(eval: &mut Evaluator, src: &str) -> String {
-    match eval.eval_source(src).unwrap_err() {
-        SourceError::Uncaught(t) => {
-            format!("{} | {}", t.class.jvm_name(), t.message)
+    match eval.eval_source(src) {
+        Err(SourceError::Uncaught(t)) => {
+            format!(
+                "{} | {}",
+                t.class.jvm_name(),
+                t.message.as_deref().unwrap_or("")
+            )
         }
-        other => panic!("expected an uncaught throw, got {other}"),
+        Err(other) => panic!("expected an uncaught throw, got {other}"),
+        Ok(vs) => {
+            // Print forces (like the JVM): a lazy top-level value
+            // can still throw.
+            for v in &vs {
+                match eval.realize_deep(v) {
+                    Ok(_) => {}
+                    Err(clj_eval::Signal::Throw(t)) => {
+                        return format!(
+                            "{} | {}",
+                            t.class.jvm_name(),
+                            t.message.as_deref().unwrap_or("")
+                        );
+                    }
+                    Err(other) => panic!("unexpected signal while printing: {other:?}"),
+                }
+            }
+            panic!("expected an uncaught throw, got values")
+        }
     }
 }
 
@@ -606,8 +659,13 @@ fn eval_reenters_top_level() {
     assert_eq!(run_last(&mut eval, "(eval '(do (def ev1 1) ev1))"), "1");
     assert_eq!(run_last(&mut eval, "ev1"), "1");
     assert_eq!(
-        uncaught(&mut eval, "(eval 'nope)"),
-        "java.lang.RuntimeException | Syntax error compiling at (user:1:1).\njava.lang.RuntimeException | Unable to resolve symbol: nope in this context"
+        uncaught_chain(&mut eval, "(eval 'nope)"),
+        vec![
+            "clojure.lang.Compiler$CompilerException | Syntax error compiling at (user:1:1)."
+                .to_owned(),
+            "java.lang.RuntimeException | Unable to resolve symbol: nope in this context"
+                .to_owned(),
+        ]
     );
 }
 

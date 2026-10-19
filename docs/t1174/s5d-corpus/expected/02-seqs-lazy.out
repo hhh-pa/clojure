@@ -1,0 +1,242 @@
+val	coll?	sequential?	associative?	counted?	list?	vector?	map?	set?	seq?
+(seq map)	 true	 true	 false	 true	 false	 false	 false	 false	 true
+(seq set)	 true	 true	 false	 false	 false	 false	 false	 false	 true
+(seq list)	 true	 true	 false	 true	 true	 false	 false	 false	 true
+(seq str)	 true	 true	 false	 true	 false	 false	 false	 false	 true
+(seq vec)	 true	 true	 false	 true	 false	 false	 false	 false	 true
+(range)	 true	 true	 false	 true	 false	 false	 false	 false	 true
+(range0)	 true	 true	 false	 true	 true	 false	 false	 false	 true
+(take)	 true	 true	 false	 false	 false	 false	 false	 false	 true
+(drop)	 true	 true	 false	 true	 false	 false	 false	 false	 true
+(filter)	 true	 true	 false	 false	 false	 false	 false	 false	 true
+(cons-nil)	 true	 true	 false	 true	 true	 false	 false	 false	 true
+(cons-vec)	 true	 true	 false	 false	 false	 false	 false	 false	 true
+(rest-vec)	 true	 true	 false	 true	 false	 false	 false	 false	 true
+(next-vec)	 true	 true	 false	 true	 false	 false	 false	 false	 true
+(cycle)	 true	 true	 false	 false	 false	 false	 false	 false	 true
+(reverse)	 true	 true	 false	 true	 true	 false	 false	 false	 true
+(sort)	 true	 true	 false	 true	 false	 false	 false	 false	 true
+(butlast)	 true	 true	 false	 true	 false	 false	 false	 false	 true
+(mapcat)	 true	 true	 false	 false	 false	 false	 false	 false	 true
+(interleave)	 true	 true	 false	 false	 false	 false	 false	 false	 true
+(partition)	 true	 true	 false	 false	 false	 false	 false	 false	 true
+(dedupe)	 true	 true	 false	 false	 false	 false	 false	 false	 true
+(reductions)	 true	 true	 false	 false	 false	 false	 false	 false	 true
+(take-nth)	 true	 true	 false	 false	 false	 false	 false	 false	 true
+(iterate)	 true	 true	 false	 false	 false	 false	 false	 false	 true
+(repeat-n)	 true	 true	 false	 false	 false	 false	 false	 false	 true
+(keep)	 true	 true	 false	 false	 false	 false	 false	 false	 true
+(mapidx)	 true	 true	 false	 false	 false	 false	 false	 false	 true
+(distinct)	 true	 true	 false	 false	 false	 false	 false	 false	 true
+(partby)	 true	 true	 false	 false	 false	 false	 false	 false	 true
+(interpose)	 true	 true	 false	 false	 false	 false	 false	 false	 true
+(cycle-nil)	 true	 true	 false	 true	 true	 false	 false	 false	 true
+(lazycat)	 true	 true	 false	 false	 false	 false	 false	 false	 true
+(doall)	 true	 true	 false	 false	 false	 false	 false	 false	 true
+(flatten)	 true	 true	 false	 false	 false	 false	 false	 false	 true
+(sortby)	 true	 true	 false	 true	 false	 false	 false	 false	 true
+(split-take)	 true	 true	 false	 false	 false	 false	 false	 false	 true
+(grpb-val)	 true	 true	 true	 true	 false	 true	 false	 false	 false
+(subvec-seq)	 true	 true	 false	 true	 false	 false	 false	 false	 true
+(entry)	 true	 true	 true	 true	 false	 true	 false	 false	 false
+(map-seq-first)	 true	 true	 true	 true	 false	 true	 false	 false	 false
+(liststar)	 true	 true	 false	 false	 false	 false	 false	 false	 true
+(lazy-took)	 true	 true	 false	 false	 false	 false	 false	 false	 true
+(dorun)	 false	 false	 false	 false	 false	 false	 false	 false	 false
+(reductions1)	 true	 true	 false	 false	 false	 false	 false	 false	 true
+(tree)	 true	 true	 false	 false	 false	 false	 false	 false	 true
+val	coll?	sequential?	associative?	counted?	list?	vector?	map?	set?	seq?
+(rep-n)	 true	 true	 false	 false	 false	 false	 false	 false	 true
+(rep-inf)	 true	 true	 false	 false	 false	 false	 false	 false	 true
+(repd-n)	 true	 true	 false	 false	 false	 false	 false	 false	 true
+(repd-inf)	 true	 true	 false	 false	 false	 false	 false	 false	 true
+(cycle-vec)	 true	 true	 false	 false	 false	 false	 false	 false	 true
+(interleave1)	 true	 true	 false	 false	 false	 false	 false	 false	 true
+(concat0)	 true	 true	 false	 false	 false	 false	 false	 false	 true
+(concat1)	 true	 true	 false	 false	 false	 false	 false	 false	 true
+(keys-map)	 true	 true	 false	 false	 false	 false	 false	 false	 true
+(vals-map)	 true	 true	 false	 false	 false	 false	 false	 false	 true
+(part-empty)	 true	 true	 false	 false	 false	 false	 false	 false	 true
+(map-nil)	 true	 true	 false	 false	 false	 false	 false	 false	 true
+(take-nil)	 true	 true	 false	 false	 false	 false	 false	 false	 true
+(drop0-vec)	 true	 true	 false	 true	 false	 false	 false	 false	 true
+(drop0-list)	 true	 true	 false	 false	 false	 false	 false	 false	 true
+(drop-range)	 true	 true	 false	 true	 false	 false	 false	 false	 true
+(drop-str)	 true	 true	 false	 false	 false	 false	 false	 false	 true
+(take-range)	 true	 true	 false	 false	 false	 false	 false	 false	 true
+(drop-list)	 true	 true	 false	 false	 false	 false	 false	 false	 true
+(take-list)	 true	 true	 false	 false	 false	 false	 false	 false	 true
+(takelast)	 true	 true	 false	 true	 false	 false	 false	 false	 true
+(droplast)	 true	 true	 false	 false	 false	 false	 false	 false	 true
+(rest-nil)	 true	 true	 false	 true	 true	 false	 false	 false	 true
+(butlast-str)	 true	 true	 false	 true	 false	 false	 false	 false	 true
+(rev-nil)	 true	 true	 false	 true	 true	 false	 false	 false	 true
+(sort-nil)	 true	 true	 false	 true	 true	 false	 false	 false	 true
+(trans-vec)	 false	 false	 false	 true	 false	 false	 false	 false	 false
+(trans-map)	 false	 false	 false	 true	 false	 false	 false	 false	 false
+(trans-set)	 false	 false	 false	 true	 false	 false	 false	 false	 false
+(reduced)	 false	 false	 false	 false	 false	 false	 false	 false	 false
+(exinfo)	 false	 false	 false	 false	 false	 false	 false	 false	 false
+:c-map  => [clojure.lang.LazySeq true false false true true]
+:c-reductions  => [clojure.lang.LazySeq true false false true true]
+:c-lazyseq  => [clojure.lang.LazySeq true false false true true]
+:c-nextstr  => [clojure.lang.StringSeq true true false true true]
+:c-nextmap  => [clojure.lang.PersistentArrayMap$Seq true true false true true]
+:c-seqstr  => [clojure.lang.StringSeq true true false true true]
+:c-seqmap  => [clojure.lang.PersistentArrayMap$Seq true true false true true]
+:c-seqset  => [clojure.lang.APersistentMap$KeySeq true false false true true]
+:c-seqvec  => [clojure.lang.PersistentVector$ChunkedSeq true true false true true]
+:second-nil  => nil
+:second-1  => nil
+:last-nil  => nil
+:last-12  => 2
+:last-str  => \b
+:last-vec  => nil
+:nnext-short  => nil
+:nnext-123  => (3)
+:fnext-nil  => nil
+:fnext-123  => 2
+:nfirst-nest  => (2)
+:next-e  => nil
+:rest-e  => ()
+:seq-nil  => nil
+:seq-e  => nil
+:seq-1  => (1)
+:first-nil  => nil
+:first-e  => nil
+:first-str  => \a
+:rest-nil  => ()
+:rest-e2  => ()
+:rest-str  => (\b \c)
+:next-nil  => nil
+:next-1  => nil
+:seq-5  => "THROW java.lang.IllegalArgumentException: Don't know how to create ISeq from: java.lang.Long"
+:seq-empty  => nil
+:first-empty  => nil
+:rest-empty  => ()
+:a-seq  => "THROW clojure.lang.ArityException: Wrong number of args (0) passed to: clojure.core/seq--5582"
+:a-first  => "THROW clojure.lang.ArityException: Wrong number of args (0) passed to: clojure.core/first--5564"
+:a-second  => "THROW clojure.lang.ArityException: Wrong number of args (0) passed to: clojure.core/second--5572"
+:a-last  => "THROW clojure.lang.ArityException: Wrong number of args (0) passed to: clojure.core/last--5610"
+:a-rest  => "THROW clojure.lang.ArityException: Wrong number of args (0) passed to: clojure.core/rest--5568"
+:a-next  => "THROW clojure.lang.ArityException: Wrong number of args (0) passed to: clojure.core/next--5566"
+:a-nnext  => "THROW clojure.lang.ArityException: Wrong number of args (0) passed to: clojure.core/nnext--5580"
+:a-fnext  => "THROW clojure.lang.ArityException: Wrong number of args (0) passed to: clojure.core/fnext--5578"
+:a-nfirst  => "THROW clojure.lang.ArityException: Wrong number of args (0) passed to: clojure.core/nfirst--5576"
+:map-chunked  => [0 32 1 32]
+:map-unchunked-list  => [0 1]
+:repeat-chunked  => [0 1]
+:iterate-chunked  => [0 1]
+:repeatedly-one  => [7 1]
+:for-chunked  => [0 32]
+:lazy-seq-once  => [1 1 1 [1 2]]
+:lazy-cat-basic  => [(1 2 3 4) (0 1)]
+:binding-convey-lazy  => [:root :inner]
+:map-0  => "THROW clojure.lang.ArityException: Wrong number of args (0) passed to: clojure.core/map"
+:filter-0  => "THROW clojure.lang.ArityException: Wrong number of args (0) passed to: clojure.core/filter"
+:map-1  => [true "class clojure.core$map$fn__6050"]
+:filter-xform  => [true "class clojure.core$filter$fn__6077"]
+:map-multi  => [(11 22) ([:a 1] [:b 2]) () ((1 3 5) (2 4 6))]
+:map-4-colls  => ((1 2 3 4))
+:map-list12  => ((1) (2))
+:map-empty  => ()
+:map-nil  => ()
+:filter-nil  => "THROW java.lang.NullPointerException: Cannot invoke \"clojure.lang.IFn.invoke(Object)\" because \"this.pred\" is null"
+:filter-false-coll  => "THROW java.lang.IllegalArgumentException: Don't know how to create ISeq from: java.lang.Boolean"
+:filter-remove-keep  => [(1 3 5) () (0 2 4) (10 30 50) (:b :d) ([0 :a] [1 :b]) ()]
+:keep-nil-fn  => "THROW java.lang.NullPointerException: Cannot invoke \"clojure.lang.IFn.invoke(Object)\" because \"this.f\" is null"
+:keepidx  => (:b)
+:mapidx  => ([0 :a] [1 :b])
+:map-indexed-str  => ([0 \a] [1 \b])
+:keep-false  => (false 0)
+:a-map  => "THROW clojure.lang.ArityException: Wrong number of args (0) passed to: clojure.core/map"
+:a-filter  => "THROW clojure.lang.ArityException: Wrong number of args (0) passed to: clojure.core/filter"
+:a-remove  => "THROW clojure.lang.ArityException: Wrong number of args (0) passed to: clojure.core/remove"
+:a-keep  => "THROW clojure.lang.ArityException: Wrong number of args (0) passed to: clojure.core/keep"
+:a-keepidx  => "THROW clojure.lang.ArityException: Wrong number of args (0) passed to: clojure.core/keep-indexed"
+:a-mapidx  => "THROW clojure.lang.ArityException: Wrong number of args (0) passed to: clojure.core/map-indexed"
+:xform-arity  => [true true true true true true true true]
+:distinct-basic  => (1 2 3)
+:distinct-empty  => ()
+:distinct-order  => (3 1 2)
+:dedupe-basic  => (1 2 1)
+:dedupe-str  => (\a \b)
+:dedupe-two-arg  => "THROW clojure.lang.ArityException: Wrong number of args (2) passed to: clojure.core/dedupe"
+:mapcat-basic  => (1 2 3 4 5 6)
+:mapcat-empty  => ()
+:mapcat-nil  => ()
+:mapcat-seq  => (1 2 3)
+:mapcat-kw  => (1 2 3)
+:mapcat-nocolls  => #object[clojure.core$comp$fn__5995 0x4565a70a "clojure.core$comp$fn__5995@4565a70a"]
+:a-distinct  => #object[clojure.core$distinct$fn__6638 0x6569dded "clojure.core$distinct$fn__6638@6569dded"]
+:a-dedupe  => #object[clojure.core$dedupe$fn__9073 0x6d367020 "clojure.core$dedupe$fn__9073@6d367020"]
+:a-mapcat  => "THROW clojure.lang.ArityException: Wrong number of args (0) passed to: clojure.core/mapcat"
+:reduce-nofn  => 6
+:reduce-init  => 13
+:reduce-empty  => 0
+:reduce-empty-init  => 10
+:reduce-1  => 5
+:reduce-nil  => 0
+:reduce-init-nil  => 10
+:reduce-early  => 3
+:reduce-init-reduced  => "THROW java.lang.ClassCastException: class clojure.lang.Reduced cannot be cast to class java.lang.Number (clojure.lang.Reduced is in unnamed module of loader 'app'; java.lang.Number is in module java.base of loader 'bootstrap')"
+:reduce-conj-reduced-init  => "THROW java.lang.ClassCastException: class clojure.lang.Reduced cannot be cast to class clojure.lang.IPersistentCollection (clojure.lang.Reduced and clojure.lang.IPersistentCollection are in unnamed module of loader 'app')"
+:reduce-empty-str  => 0
+:reduced?-t  => true
+:reduced?-f  => false
+:reductions-basic  => (1 3 6)
+:reductions-init  => (10 11 13)
+:reductions-empty  => (1)
+:reductions-e  => (0)
+:reductions-nil  => (0)
+:reductions-reduced-init  => (10)
+:reductions-no-init-single  => (5)
+:reductions-str  => ("a" "ab")
+:reductions-init-str  => ("S" "Sa" "Sab")
+:reductions-empty-str  => (0)
+:a-reduce  => "THROW clojure.lang.ArityException: Wrong number of args (0) passed to: clojure.core/reduce"
+:a-reductions  => "THROW clojure.lang.ArityException: Wrong number of args (0) passed to: clojure.core/reductions"
+:groupby-basic  => {true [1 3], false [2 4]}
+:groupby-empty  => {}
+:groupby-odd  => {false [0 2 4], true [1 3 5]}
+:groupby-nilcoll  => {}
+:groupby-empty-str  => {}
+:frequencies-basic  => {:a 2, :b 1}
+:frequencies-empty  => {}
+:frequencies-vec  => {:a 2, :b 1}
+:frequencies-order  => {:b 2, :a 1}
+:frequencies-str  => {\a 2, \b 2}
+:frequencies-empty-str  => {}
+:a-groupby  => "THROW clojure.lang.ArityException: Wrong number of args (0) passed to: clojure.core/group-by"
+:a-frequencies  => "THROW clojure.lang.ArityException: Wrong number of args (0) passed to: clojure.core/frequencies"
+:everyq-basic  => true
+:everyq-nil  => true
+:everyq-empty  => true
+:everyq-empty-str  => true
+:some-basic  => 2
+:some-nilp  => true
+:some-empty  => nil
+:some-kw  => 2
+:some-odd-nil  => nil
+:some-empty-str  => nil
+:notany-basic  => true
+:notany-nil  => true
+:notany-empty  => true
+:notevery-basic  => true
+:notevery-nil  => false
+:notevery-empty  => false
+:a-everyq  => "THROW clojure.lang.ArityException: Wrong number of args (0) passed to: clojure.core/every?"
+:a-some  => "THROW clojure.lang.ArityException: Wrong number of args (0) passed to: clojure.core/some"
+:a-notany  => "THROW clojure.lang.ArityException: Wrong number of args (0) passed to: clojure.core/some"
+:a-notevery  => "THROW clojure.lang.ArityException: Wrong number of args (0) passed to: clojure.core/every?"
+:mapv-basic  => [2 3]
+:mapv-multi  => [11 22]
+:mapv-3  => [6]
+:mapv-nil  => []
+:mapv-empty-str  => []
+:filterv-basic  => [1 3]
+:filterv-range  => [1 3]
+:filterv-nil  => []
+:a-mapv  => "THROW clojure.lang.ArityException: Wrong number of args (0) passed to: clojure.core/mapv"
+:a-filterv  => "THROW clojure.lang.ArityException: Wrong number of args (0) passed to: clojure.core/filterv"
+S5D-02 DONE

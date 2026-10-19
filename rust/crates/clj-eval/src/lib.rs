@@ -12,13 +12,19 @@
 //! `docs/t1174/evaluator-contract.md` shape rules; [`Evaluator`]
 //! runs them. Single namespace (`user`), no prelude yet (S5).
 
+pub mod coll;
+pub mod core;
 pub mod env;
 pub mod error;
 pub mod eval;
 pub mod expr;
 pub mod ext;
+pub mod fmt;
+pub mod io;
+pub mod lazy;
 pub mod macros;
 pub mod ns;
+pub mod seqs;
 pub mod vars;
 
 pub use env::{Bindings, Env, Namespace, NamespaceRegistry, VarState};

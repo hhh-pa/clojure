@@ -236,7 +236,10 @@ C2. Equality: `=` is same-category equality (`(= 1 1.0)` is
     within-type otherwise, incomparable pairs error).
 C3. Printing: `pr` round-trips through the reader for EDN values;
     `print`/`println` are human-readable; `*print-length*`/
-    `*print-level*` truncate with `...`. Stack traces are Rust-side
+    `*print-level*` truncate with `...` when bound to a
+    non-negative int or integral double (nil, negative,
+    fractional non-integral, and NaN are unlimited; a
+    non-positive level prints `#`). Stack traces are Rust-side
     diagnostic chains (`file:line:col: message`, `:cause` chains),
     not JVM stack dumps — a documented deviation.
 C4. Seqs: lazy, chunked (32), with nil-punning; side-effect order of

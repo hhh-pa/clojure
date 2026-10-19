@@ -92,7 +92,7 @@ impl CompileError {
     /// A bare macro-arity failure (see [`CompileError::bare`]).
     #[must_use]
     pub fn macro_arity(name: &'static str, span: Span, source: &Arc<str>) -> Self {
-        let message = NativeError::arity(name, 0).message;
+        let message = NativeError::arity(name, 0).into_inner().message;
         Self {
             class: "clojure.lang.ArityException",
             message,
@@ -195,24 +195,55 @@ pub enum Signal {
 
 /// A runtime failure before identity assignment: native fns and
 /// helpers build these, and the evaluator stamps the `id` when
-/// converting to [`Signal::Throw`].
+/// converting to [`Signal::Throw`]. Boxed to stay small in
+/// `Result` positions (the payload is way past clippy's
+/// large-`Err` threshold); field access derefs through.
 #[derive(Clone, Debug)]
-pub struct NativeError {
+pub struct NativeError(Box<NativeErrorInner>);
+
+/// The boxed [`NativeError`] payload (fields stay `pub` so
+/// deref'd access looks identical). Public only because
+/// [`Deref`](std::ops::Deref) names it.
+#[derive(Clone, Debug)]
+#[doc(hidden)]
+pub struct NativeErrorInner {
     pub class: ThrowClass,
     pub message: String,
     pub data: Option<Value>,
     pub cause: Option<Throwable>,
 }
 
+impl std::ops::Deref for NativeError {
+    type Target = NativeErrorInner;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for NativeError {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+const _: () = assert!(std::mem::size_of::<NativeError>() <= 16);
+
 impl NativeError {
     #[must_use]
     pub fn new(class: ThrowClass, message: String) -> Self {
-        Self {
+        Self(Box::new(NativeErrorInner {
             class,
             message,
             data: None,
             cause: None,
-        }
+        }))
+    }
+
+    /// Unbox the payload (for moves the borrow checker cannot see
+    /// through the [`Deref`](std::ops::Deref)).
+    pub(crate) fn into_inner(self) -> NativeErrorInner {
+        *self.0
     }
 
     /// `Wrong number of args (N) passed to: NAME`, with the JVM's
@@ -266,38 +297,30 @@ pub fn jvm_class_of(v: &Value) -> String {
         Value::Var(_) => "clojure.lang.Var".to_owned(),
         Value::Unbound(_) => "clojure.lang.Var$Unbound".to_owned(),
         Value::Throwable(t) => t.class.jvm_name().to_owned(),
+        Value::Transient(t) => t.jvm_class().to_owned(),
         Value::Extension(e) => e.class_name(),
     }
 }
 
-/// The `canBePAM` rule: ≤8 pairs is an array map; up to 64 pairs is
-/// one when the keys past the first 8 pairs are all keywords.
+/// The reported map class: stored, never derived (promotion is
+/// one-way and history-dependent — `dissoc` never demotes and
+/// `array-map` forces array at any size).
 fn map_class_of(m: &clj_value::Map) -> &'static str {
-    let size = m.size();
-    if size <= 8 {
-        return "clojure.lang.PersistentArrayMap";
+    if m.is_hashy() {
+        "clojure.lang.PersistentHashMap"
+    } else {
+        "clojure.lang.PersistentArrayMap"
     }
-    if size <= 64
-        && m.iter()
-            .skip(8)
-            .all(|(k, _)| matches!(k, Value::Keyword(_)))
-    {
-        return "clojure.lang.PersistentArrayMap";
-    }
-    "clojure.lang.PersistentHashMap"
 }
 
 /// The `nth not supported on this type: X` name: the JVM's
-/// `getSimpleName` rule — generated classes keep their full munged
-/// name (probe25), nested classes strip to the inner name.
+/// `getSimpleName` rule — strip the package only (`$`-inners stay,
+/// so `PersistentList$EmptyList` and `core$map` survive; default
+/// packages like `user$eval$fn` have no dots to strip).
 #[must_use]
 pub fn simple_class_of(v: &Value) -> String {
-    if matches!(v, Value::Extension(_)) {
-        return jvm_class_of(v);
-    }
     let full = jvm_class_of(v);
-    let after_dot = full.rsplit('.').next().unwrap_or(&full);
-    after_dot.rsplit('$').next().unwrap_or(after_dot).to_owned()
+    full.rsplit('.').next().unwrap_or(&full).to_owned()
 }
 
 /// A form's span: `:line`/`:column` reader meta when present, else

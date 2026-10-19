@@ -206,6 +206,7 @@ impl Reader {
 
     /// Resolve one symbol under syntax-quote (gensym, `C.`, `.m`,
     /// class/alias/var/current-ns).
+    #[allow(clippy::mutable_key_type)]
     fn syntax_quote_symbol(&mut self, mut sym: Symbol) -> Value {
         if sym.namespace().is_none() {
             if let Some(base) = sym.name().strip_suffix('#') {

@@ -1,0 +1,88 @@
+;; S5D differential corpus 14: %a hex-float, %t date/time (UTC), %c character.
+;; Oracle: java -Duser.language=en -Duser.country=US -Duser.timezone=UTC -cp clojure.jar clojure.main
+;; Sources: s5d-pins.md (Format %a/%t/%c), FmtProbe/2 (Clojure mirrors),
+;; s5d-gaps7f/7h/7h2 (%c/%a/%t), /tmp/cq.clj (%c/%t int coercions).
+;; KNOWN DIVERGENCES: lone-surrogate %c output is unportable (:c-surrogate);
+;; (format "%c" (int 65)) prints A on the JVM but the port keeps (int x) as
+;; Long and rejects it (:c-int-div); %t renders UTC only (:t-neg, :t-comp,
+;; :t-zone); 32-bit (int x) is Long in the port.
+(defn p [tag thunk]
+  (print tag " => ")
+  (prn (try (thunk)
+            (catch Throwable t
+              (str "THROW " (.getName (class t)) ": " (.getMessage t))))))
+(def T 1234567890123)
+
+;; --- %a / %A hex-float (FmtProbe/2 mirrors + Clojure args, 7h2 :a-conv) ---
+(p ":a-conv" #(format "%a" 1.5))
+(p ":a-dbl" #(format "%a" 1.5))
+(p ":a-neg" #(format "%a" -0.0))
+(p ":a-nan-up" #(format "%A" Double/NaN))
+(p ":a-nan-clj" #(format "%A" ##NaN))
+(p ":a-inf" #(format "%a" Double/POSITIVE_INFINITY))
+(p ":a-long" #(format "%a" 5))
+(p ":a-null" #(format "%a" nil))
+(p ":a0d" #(format "%a" 0.0))
+(p ":a1" #(format "%a" 1.0))
+(p ":a01" #(format "%a" 0.1))
+(p ":a-big" #(format "%a" 1e300))
+(p ":a-small" #(format "%a" 5e-324))
+(p ":a-prec2" #(format "[%.2a]" 1.5))
+(p ":a-prec0" #(format "[%.0a]" 1.5))
+(p ":a-prec12" #(format "[%.12a]" 0.1))
+(p ":a-width" #(format "[[%12a]]" 1.5))
+(p ":a-ljust" #(format "[[%-12a]]" 1.5))
+(p ":a-plus" #(format "%+a" 1.5))
+(p ":a-hash" #(format "%#a" 1.5))
+(p ":a-upper" #(format "%A" 1.5))
+(p ":a-nan-lo" #(format "[%a]" Double/NaN))
+(p ":a-inf-lo" #(format "[%a]" Double/NEGATIVE_INFINITY))
+(p ":a-bigint" #(format "%a" 5N))
+(p ":a-ratio" #(format "%a" 1/2))
+(p ":a-bigdec" #(format "%a" 1.5M))
+(p ":a-float" #(format "%a" (float 1.5)))
+
+;; --- %t date/time, millis since epoch, UTC (FmtProbe/2 mirrors, 7h2, cq) ---
+(p ":t-conv" #(format "%tY" 5))
+(p ":ty-long" #(format "%tY" 5))
+(p ":ty-null" #(format "%tY" nil))
+(p ":tQ-long" #(format "%tQ" 5))
+(p ":tY-0" #(format "[%tY]" 0))
+(p ":t-neg" #(format "[%tY-%tm-%td %tH:%tM:%tS]" -1 -1 -1 -1 -1 -1))
+(p ":t-dbl" #(format "%tY" 1.5))
+(p ":t-str" #(format "%tY" "x"))
+(p ":t-bool" #(format "%tY" true))
+(p ":ty-int" #(format "%tY" (int 5)))
+(p ":t-full" #(format "[%tY %ty %tm %td %te %tH %tk %tI %tl %tM %tS %tL %tN %tp %ts %tQ]" T T T T T T T T T T T T T T T T))
+(p ":t-names" #(format "[%tA %ta %tB %tb %th]" T T T T T))
+(p ":t-misc-V" #(format "%tV" T))
+(p ":t-comp" #(format "[%tR %tT %tD %tF %tc]" T T T T T))
+(p ":t-zone" #(format "[%tz %tZ]" 0 0))
+(p ":t-upper" #(format "%TY" 5))
+(p ":t-lower-bad" #(format "%tq" 5))
+(p ":t-end" #(format "x%t"))
+(p ":tO" #(format "%tO" T))
+(p ":tE" #(format "%tE" T))
+(p ":tOy" #(format "%tOy" T))
+(p ":t-date" #(format "[%tY %tF %tc]" (java.util.Date. T) (java.util.Date. T) (java.util.Date. 0)))
+(p ":t-date-0" #(format "[%tY-%tm-%td]" (java.util.Date. 0) (java.util.Date. 0) (java.util.Date. 0)))
+
+;; --- %c (7f, 7h, cq; DIVERGENT: (int 65), lone surrogate) ---
+(p ":fmt-c-char" #(format "%c" \A))
+(p ":fmt-c-int-long" #(format "%c" 65))
+(p ":fmt-c-str" #(format "%c" "A"))
+(p ":c-bool" #(format "%c" true))
+(p ":c-null" #(format "%c" nil))
+(p ":c-long" #(format "%c" 65))
+(p ":c-int-div" #(format "%c" (int 65)))
+(p ":c-char" #(format "%c" \A))
+(p ":c-dbl" #(format "%c" 65.0))
+(p ":c-0" #(format "[%c]" (int 0)))
+(p ":c-127" #(format "[%c]" (int 127)))
+(p ":c-128" #(format "[%c]" (int 128)))
+(p ":c-max" #(format "[%c]" (int 0x10FFFF)))
+(p ":c-surrogate" #(format "[%c]" (int 0xD800)))
+(p ":codepoint-neg" #(format "%c" (int -1)))
+(p ":codepoint-big" #(format "%c" (int 0x110000)))
+(p ":prec-c" #(format "%.3c" \A))
+(println "S5D-14 DONE")

@@ -11,10 +11,6 @@
 //! native doubles (S4 ships no prelude; full probe replay waits
 //! for the S5 core subset).
 
-// The doubles return `NativeError` by value because `NativeImpl`
-// says so; boxing it would ripple through the error API.
-#![allow(clippy::result_large_err)]
-
 use std::sync::{Arc, Mutex};
 
 use clj_eval::{Evaluator, NativeError, SourceError};
@@ -137,7 +133,7 @@ fn install_misc(eval: &mut Evaluator, log: &Arc<Mutex<Vec<String>>>) {
             [Value::Str(m)] => Ok(Value::Throwable(Throwable {
                 id: 0,
                 class: ThrowClass::ExceptionInfo,
-                message: Arc::clone(m),
+                message: Some(Arc::clone(m)),
                 data: None,
                 cause: None,
             })),
@@ -150,8 +146,22 @@ fn run(eval: &mut Evaluator, src: &str) -> Vec<String> {
     eval.eval_source(src)
         .unwrap_or_else(|e| panic!("{src}: {e}"))
         .iter()
-        .map(pr)
+        .map(|v| pr(&realized(eval, v)))
         .collect()
+}
+
+/// Realize before printing (like the JVM, whose print walks —
+/// forcing errors surface here).
+fn realized(eval: &mut Evaluator, v: &Value) -> Value {
+    match eval.realize_deep(v) {
+        Ok(v) => v,
+        Err(clj_eval::Signal::Throw(t)) => panic!(
+            "unexpected throw while printing: {} | {}",
+            t.class.jvm_name(),
+            t.message.as_deref().unwrap_or("")
+        ),
+        Err(other) => panic!("unexpected signal while printing: {other:?}"),
+    }
 }
 
 fn run_last(eval: &mut Evaluator, src: &str) -> String {
@@ -164,8 +174,29 @@ fn uncaught_with(setup: &str, src: &str) -> String {
         eval.eval_source(setup).unwrap();
     }
     match eval.eval_source(src) {
-        Ok(_) => panic!("expected {src} to throw"),
-        Err(SourceError::Uncaught(t)) => format!("{} | {}", t.class.jvm_name(), t.message),
+        Ok(vs) => {
+            // Print forces (like the JVM): a lazy top-level value
+            // can still throw.
+            for v in &vs {
+                match eval.realize_deep(v) {
+                    Ok(_) => {}
+                    Err(clj_eval::Signal::Throw(t)) => {
+                        return format!(
+                            "{} | {}",
+                            t.class.jvm_name(),
+                            t.message.as_deref().unwrap_or("")
+                        );
+                    }
+                    Err(other) => panic!("unexpected signal while printing: {other:?}"),
+                }
+            }
+            panic!("expected {src} to throw")
+        }
+        Err(SourceError::Uncaught(t)) => format!(
+            "{} | {}",
+            t.class.jvm_name(),
+            t.message.as_deref().unwrap_or("")
+        ),
         Err(e) => panic!("expected uncaught throwable for {src}: {e}"),
     }
 }

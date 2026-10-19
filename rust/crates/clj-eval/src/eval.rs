@@ -18,9 +18,10 @@ use std::sync::Arc;
 use clj_reader::{ReaderOpts, Span, read_all};
 use clj_value::{Keyword, List, Map, Symbol, ThrowClass, Throwable, Value, Var, Vector, new_map};
 
+use crate::coll::native_nth;
 use crate::env::{Bindings, Env, NamespaceRegistry};
-use crate::error::{CompileError, NativeError, Signal, jvm_class_of, simple_class_of, span_of};
-use crate::expr::{Analyzer, Catch, Expr, MapPattern, Pattern, pattern_names};
+use crate::error::{CompileError, NativeError, Signal, jvm_class_of, span_of};
+use crate::expr::{Analyzer, CaseTest, Catch, Expr, MapPattern, Pattern, pattern_names};
 use crate::ext::{Closure, NativeFn, NsHandle, as_closure, as_native};
 
 /// `eval_source` failures: reader errors, analyzer errors, uncaught
@@ -38,7 +39,12 @@ impl std::fmt::Display for SourceError {
         match self {
             Self::Reader(e) => write!(f, "{e}"),
             Self::Compile(e) => write!(f, "{e}"),
-            Self::Uncaught(t) => write!(f, "{} | {}", t.class.jvm_name(), t.message),
+            Self::Uncaught(t) => write!(
+                f,
+                "{} | {}",
+                t.class.jvm_name(),
+                t.message.as_deref().unwrap_or("")
+            ),
             Self::Internal(msg) => write!(f, "internal error: {msg}"),
         }
     }
@@ -60,6 +66,18 @@ fn split_top_do(form: &Value) -> Option<Vec<&Value>> {
     }
     let rest: Vec<&Value> = items.collect();
     if rest.is_empty() { None } else { Some(rest) }
+}
+
+/// `Number.intValue` for `:int` `case*` dispatch (`None` for
+/// non-numbers — characters included, which miss like on the JVM).
+/// `Int` truncates; `Double` narrows exactly like Java (`as`
+/// saturates and maps `NaN` to 0, same as `(int)`).
+fn case_int_value(v: &Value) -> Option<i32> {
+    match v {
+        Value::Int(i) => Some(*i as i32),
+        Value::Double(d) => Some(*d as i32),
+        _ => None,
+    }
 }
 
 /// The evaluator: namespace registry, bindings, load path, and the
@@ -139,6 +157,15 @@ impl Evaluator {
         n
     }
 
+    /// Reset the `gensym` counter to 1: `boot` loads the embedded
+    /// `core.clj` (whose macroexpansions consume numbers), but the
+    /// user-visible counter starts from 1 (`macros-contract.md`
+    /// pins `G__1` first). Sound: boot-time expansions evaluate to
+    /// closed values, so reused numbers can never capture them.
+    pub(crate) fn reset_gensym(&mut self) {
+        self.gensym = 1;
+    }
+
     /// The `*ns*`-synced current namespace name: the thread-local
     /// `*ns*` handle when bound (boot binds a base frame and
     /// `in-ns` keeps both in sync), else the registry current.
@@ -157,7 +184,7 @@ impl Evaluator {
         bound.unwrap_or_else(|| self.registry.current().to_owned())
     }
 
-    fn next_id(&mut self) -> u64 {
+    pub(crate) fn next_id(&mut self) -> u64 {
         let id = self.next_id;
         self.next_id += 1;
         id
@@ -193,6 +220,12 @@ impl Evaluator {
             out.push(self.eval_top_form(form)?);
         }
         Ok(out)
+    }
+
+    /// Deep-realize a value for printing (like the JVM, whose
+    /// print walks — forcing errors surface here, not in `eval`).
+    pub fn realize_deep(&mut self, v: &Value) -> Result<Value, crate::error::Signal> {
+        crate::lazy::realize_deep(self, v)
     }
 
     /// Evaluate one top-level form. A `do`-headed list splits like
@@ -235,7 +268,7 @@ impl Evaluator {
             SourceError::Uncaught(Throwable {
                 id,
                 class: crate::ns::throw_class_for(e.class),
-                message: Arc::from(e.message.as_str()),
+                message: Some(Arc::from(e.message.as_str())),
                 data: None,
                 cause: None,
             })
@@ -332,12 +365,13 @@ impl Evaluator {
 
     /// Stamp a runtime failure with an identity and throw it.
     pub(crate) fn throw(&mut self, err: NativeError) -> Signal {
+        let inner = err.into_inner();
         Signal::Throw(Throwable {
             id: self.next_id(),
-            class: err.class,
-            message: Arc::from(err.message.as_str()),
-            data: err.data.map(Box::new),
-            cause: err.cause.map(Box::new),
+            class: inner.class,
+            message: Some(Arc::from(inner.message.as_str())),
+            data: inner.data.map(Box::new),
+            cause: inner.cause.map(Box::new),
         })
     }
 
@@ -401,7 +435,7 @@ impl Evaluator {
             Expr::NewThrowable { class, message } => Ok(Value::Throwable(Throwable {
                 id: self.next_id(),
                 class: *class,
-                message: Arc::from(message.as_str()),
+                message: Some(Arc::from(message.as_str())),
                 data: None,
                 cause: None,
             })),
@@ -440,6 +474,26 @@ impl Evaluator {
                 attr,
                 clauses,
             } => crate::ns::eval_ns_form(self, name, doc.as_deref(), attr.as_ref(), clauses),
+            Expr::Assert {
+                test,
+                message,
+                form,
+            } => self.eval_assert(test, message.as_deref(), form, env),
+            Expr::Time { expr } => self.eval_time(expr, env),
+            Expr::WithOutStr { out, body } => self.eval_with_out_str(out, body, env),
+            Expr::LazySeqStar { body } => Ok(crate::lazy::thunk0_value(
+                Arc::new(body.clone()),
+                env.clone(),
+            )),
+            Expr::CaseStar {
+                expr,
+                shift,
+                mask,
+                default,
+                cases,
+                skip,
+                test,
+            } => self.eval_case_star(expr, *shift, *mask, default, cases, skip, *test, env),
             Expr::Invoke { head, args, span } => {
                 let callee = self.eval(head, env)?;
                 let mut values = Vec::with_capacity(args.len());
@@ -588,6 +642,141 @@ impl Evaluator {
         let result = self.eval_body(body, env);
         self.bindings.truncate(depth);
         result
+    }
+
+    /// `(assert x)` / `(assert x message)`: a falsy test throws
+    /// `AssertionError` (`Assert failed: <form>` /
+    /// `Assert failed: <msg>\n<form>`, the message evaluated only on
+    /// failure); a truthy test yields `nil` (the `when-not`
+    /// expansion).
+    fn eval_assert(
+        &mut self,
+        test: &Expr,
+        message: Option<&Expr>,
+        form: &str,
+        env: &Env,
+    ) -> Result<Value, Signal> {
+        if self.eval(test, env)?.is_truthy() {
+            return Ok(Value::Nil);
+        }
+        let text = match message {
+            None => format!("Assert failed: {form}"),
+            Some(m) => {
+                let mv = self.eval(m, env)?;
+                let rendered = crate::core::native_str(self, std::slice::from_ref(&mv))
+                    .map_err(|e| self.throw(e))?;
+                let Value::Str(s) = rendered else {
+                    unreachable!("str always returns a string")
+                };
+                format!("Assert failed: {s}\n{form}")
+            }
+        };
+        Err(self.throw(NativeError::new(ThrowClass::AssertionError, text)))
+    }
+
+    /// `(time expr)`: wall-clock the expr, `prn` the JVM line to
+    /// `*out*` (`"Elapsed time: <millis> msecs"`, quoted by `prn`),
+    /// return the value.
+    fn eval_time(&mut self, expr: &Expr, env: &Env) -> Result<Value, Signal> {
+        let start = std::time::Instant::now();
+        let v = self.eval(expr, env)?;
+        let millis = start.elapsed().as_nanos() as f64 / 1_000_000.0;
+        let dstr = clj_value::pr_to_string(&Value::Double(millis), &clj_value::PrintOpts::print());
+        let line = format!("Elapsed time: {dstr} msecs");
+        crate::io::prn_str(self, &line).map_err(|e| self.throw(e))?;
+        Ok(v)
+    }
+
+    /// `(with-out-str body…)`: bind `*out*` to a fresh string writer
+    /// (the `binding` push/pop discipline, so throws still pop),
+    /// discard the body, return the captured output.
+    fn eval_with_out_str(
+        &mut self,
+        out: &Symbol,
+        body: &[Expr],
+        env: &Env,
+    ) -> Result<Value, Signal> {
+        let writer = crate::io::string_writer(self);
+        let pairs = vec![(out.clone(), Expr::Literal(writer.clone()))];
+        self.eval_binding(&pairs, body, env)?;
+        let contents = crate::io::writer_contents(&writer).unwrap_or_default();
+        Ok(Value::Str(Arc::from(contents.as_str())))
+    }
+
+    /// `(case* …)`: the interpreter's `CaseExpr.doEmit` on the boxed
+    /// path (the only one here — no primitives). `:int` funnels
+    /// numbers through `intValue` (non-numbers miss, then an `equiv`
+    /// post-check); hash modes realize, hash, and post-check (skip
+    /// members run their collision-`condp` unchecked).
+    #[allow(clippy::too_many_arguments)]
+    fn eval_case_star(
+        &mut self,
+        expr: &Expr,
+        shift: i32,
+        mask: i32,
+        default: &Expr,
+        cases: &[(i32, Expr, Expr)],
+        skip: &[i32],
+        test: CaseTest,
+        env: &Env,
+    ) -> Result<Value, Signal> {
+        let v = self.eval(expr, env)?;
+        let shift_mask = |key: i32| {
+            if mask == 0 {
+                key
+            } else {
+                key.wrapping_shr((shift & 31) as u32) & mask
+            }
+        };
+        if test == CaseTest::Int {
+            let Some(key) = case_int_value(&v) else {
+                return self.eval(default, env);
+            };
+            let key = shift_mask(key);
+            let hit = cases.iter().find(|(k, _, _)| *k == key);
+            match hit {
+                None => self.eval(default, env),
+                Some((_, t, then)) => {
+                    let tv = self.eval(t, env)?;
+                    if crate::lazy::equiv_vals(self, &v, &tv)? {
+                        self.eval(then, env)
+                    } else {
+                        self.eval(default, env)
+                    }
+                }
+            }
+        } else {
+            if clj_value::seq_hash_unsupported(&v) {
+                return Err(self.unsupported_hash());
+            }
+            let r = crate::lazy::realize_deep(self, &v)?;
+            if clj_value::seq_hash_unsupported(&r) {
+                return Err(self.unsupported_hash());
+            }
+            let key = shift_mask(clj_value::hash_code(&r));
+            let hit = cases.iter().find(|(k, _, _)| *k == key);
+            match hit {
+                None => self.eval(default, env),
+                Some((k, _, then)) if skip.contains(k) => self.eval(then, env),
+                Some((_, t, then)) => {
+                    let tv = self.eval(t, env)?;
+                    if crate::lazy::equiv_vals(self, &r, &tv)? {
+                        self.eval(then, env)
+                    } else {
+                        self.eval(default, env)
+                    }
+                }
+            }
+        }
+    }
+
+    /// Bare `UnsupportedOperationException` (the JVM `hasheq` /
+    /// `hashCode` overrides on unbounded seqs).
+    fn unsupported_hash(&mut self) -> Signal {
+        self.throw(NativeError::new(
+            ThrowClass::UnsupportedOperationException,
+            String::new(),
+        ))
     }
 
     /// `with-redefs`: a PARALLEL ROOT SWAP, not thread bindings.
@@ -1025,6 +1214,9 @@ impl Evaluator {
             let func = Arc::clone(&native.func);
             return func(self, args).map_err(|e| self.throw(e));
         }
+        if let Some(sv) = crate::lazy::as_subvector(callee) {
+            return self.invoke_subvector(sv, args);
+        }
         Err(self.throw(NativeError::cast(&jvm_class_of(callee), "clojure.lang.IFn")))
     }
 
@@ -1044,6 +1236,34 @@ impl Evaluator {
             )));
         };
         match usize::try_from(*n).ok().and_then(|i| v.iter().nth(i)) {
+            Some(elem) => Ok(elem.clone()),
+            None => Err(self.throw(NativeError::new(
+                ThrowClass::IndexOutOfBoundsException,
+                String::new(),
+            ))),
+        }
+    }
+
+    /// Invoke a subvector: exactly one integer key (the arity error
+    /// names `APersistentVector/SubVector`, like the JVM).
+    fn invoke_subvector(
+        &mut self,
+        sv: &clj_value::SubVectorValue,
+        args: &[Value],
+    ) -> Result<Value, Signal> {
+        if args.len() != 1 {
+            return Err(self.throw(NativeError::arity(
+                "clojure.lang.APersistentVector/SubVector",
+                args.len(),
+            )));
+        }
+        let Value::Int(n) = &args[0] else {
+            return Err(self.throw(NativeError::new(
+                ThrowClass::IllegalArgumentException,
+                "Key must be integer".to_owned(),
+            )));
+        };
+        match usize::try_from(*n).ok().and_then(|i| sv.nth(i)) {
             Some(elem) => Ok(elem.clone()),
             None => Err(self.throw(NativeError::new(
                 ThrowClass::IndexOutOfBoundsException,
@@ -1774,17 +1994,19 @@ fn rest_list(args: &[Value]) -> Value {
 }
 
 /// `(nth coll i nil)`: vectors/lists/strings (OOB is `nil`),
-/// `nil` is `nil`, anything else is `nth not supported` (§E12).
+/// `nil` is `nil`; anything else delegates to `nth` (lazy
+/// seqs force and walk, subvectors index, the rest is
+/// `nth not supported`) (§E12).
 fn nth_or_nil(coll: &Value, i: usize, eval: &mut Evaluator) -> Result<Value, Signal> {
     match coll {
         Value::Nil => Ok(Value::Nil),
         Value::Vector(v) => Ok(v.iter().nth(i).cloned().unwrap_or(Value::Nil)),
         Value::List(l) => Ok(l.iter().nth(i).cloned().unwrap_or(Value::Nil)),
         Value::Str(s) => Ok(s.chars().nth(i).map(Value::Char).unwrap_or(Value::Nil)),
-        other => Err(eval.throw(NativeError::new(
-            ThrowClass::UnsupportedOperationException,
-            format!("nth not supported on this type: {}", simple_class_of(other)),
-        ))),
+        other => {
+            let idx = Value::Int(i64::try_from(i).unwrap_or(i64::MAX));
+            native_nth(eval, &[other.clone(), idx, Value::Nil]).map_err(|err| eval.throw(err))
+        }
     }
 }
 

@@ -6,10 +6,6 @@
 // the terms of this license.
 // You must not remove this notice, or any other, from this software.
 
-// Natives return `NativeError` by value because `NativeImpl` says
-// so; boxing it would ripple through the error API.
-#![allow(clippy::result_large_err)]
-
 //! S5B natives: var roots (`alter-var-root`, `var-get`, `var-set`),
 //! predicates (`bound?`, `thread-bound?`), thread-binding frames
 //! (`push-`/`pop-`/`get-thread-bindings`, `with-bindings*`), and
@@ -49,7 +45,11 @@ fn as_var(v: &Value) -> Result<&Var, NativeError> {
 
 /// Arity with a minimum (`alter-var-root`, `with-bindings*`,
 /// `vary-meta`, `alter-meta!` take trailing args).
-fn check_min_arity(display: &str, args: &[Value], min: usize) -> Result<(), NativeError> {
+pub(crate) fn check_min_arity(
+    display: &str,
+    args: &[Value],
+    min: usize,
+) -> Result<(), NativeError> {
     if args.len() >= min {
         Ok(())
     } else {
@@ -203,7 +203,7 @@ fn native_with_bindings_star(eval: &mut Evaluator, args: &[Value]) -> Result<Val
 /// The metadata of any value (`meta`): vars (nil once cleared),
 /// namespaces (nil when fresh), symbols, collections, and
 /// functions; everything else reads nil.
-fn meta_of(eval: &Evaluator, v: &Value) -> Option<Map> {
+pub(crate) fn meta_of(eval: &Evaluator, v: &Value) -> Option<Map> {
     match v {
         Value::Var(var) => eval.registry.state(var.id)?.meta.clone(),
         Value::Symbol(s) => s.meta().cloned(),

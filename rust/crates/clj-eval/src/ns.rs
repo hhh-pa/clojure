@@ -6,10 +6,6 @@
 // the terms of this license.
 // You must not remove this notice, or any other, from this software.
 
-// Natives return `NativeError` by value because `NativeImpl` says
-// so; boxing it would ripple through the error API.
-#![allow(clippy::result_large_err)]
-
 //! S5A2 namespace vars, the loader, and `boot` (normative:
 //! `docs/t1174/namespaces-contract.md`, oracles probe35-36).
 //!
@@ -46,6 +42,11 @@ const NIL_SYM_NPE: &str = "Cannot read field \"ns\" because \"sym\" is null";
 
 /// Reading `.getName` off a nil nameable (probe36 `req-nil-lib`).
 const NIL_NAME_NPE: &str = "Cannot invoke \"clojure.lang.Named.getName()\" because \"x\" is null";
+
+/// The embedded `clojure.core` composites: `boot` loads this with
+/// the current namespace already `clojure.core` (so the file carries
+/// intentionally no `ns` form), then refers the publics into `user`.
+const CORE_CLJ: &str = include_str!("core.clj");
 
 pub(crate) fn npe(message: &str) -> NativeError {
     NativeError::new(ThrowClass::NullPointerException, message.to_owned())
@@ -221,12 +222,10 @@ fn iseq_err(v: &Value) -> NativeError {
 /// A `throw` signal as a native error (the class, message, data, and
 /// cause survive; the evaluator stamps a fresh identity).
 fn throwable_to_native(t: &Throwable) -> NativeError {
-    NativeError {
-        class: t.class,
-        message: t.message.to_string(),
-        data: t.data.clone().map(|b| *b),
-        cause: t.cause.clone().map(|b| *b),
-    }
+    let mut err = NativeError::new(t.class, t.message.as_deref().unwrap_or("").to_owned());
+    err.data = t.data.clone().map(|b| *b);
+    err.cause = t.cause.clone().map(|b| *b);
+    err
 }
 
 /// An invoked value's failure as a native error (an escaping `recur`
@@ -793,48 +792,57 @@ pub(crate) fn throw_class_for(name: &str) -> ThrowClass {
         "FileNotFoundException" => ThrowClass::FileNotFoundException,
         "IllegalAccessError" => ThrowClass::IllegalAccessError,
         "NumberFormatException" => ThrowClass::NumberFormatException,
+        "StringIndexOutOfBoundsException" => ThrowClass::StringIndexOutOfBoundsException,
+        "IllegalFormatConversionException" => ThrowClass::IllegalFormatConversionException,
+        "UnknownFormatConversionException" => ThrowClass::UnknownFormatConversionException,
+        "MissingFormatConversionException" => ThrowClass::MissingFormatConversionException,
+        "MissingFormatArgumentException" => ThrowClass::MissingFormatArgumentException,
+        "IllegalFormatPrecisionException" => ThrowClass::IllegalFormatPrecisionException,
+        "IllegalFormatCodePointException" => ThrowClass::IllegalFormatCodePointException,
+        "IOException" => ThrowClass::IOException,
+        "Compiler$CompilerException" => ThrowClass::CompilerException,
         _ => ThrowClass::Exception,
     }
 }
 
-/// A simple reader class to its qualified cause name (deferrals keep
-/// the port-only `ReaderError` label, which has no JVM counterpart).
-fn reader_class_full(simple: &str) -> &str {
-    match simple {
-        "RuntimeException" => "java.lang.RuntimeException",
-        "NumberFormatException" => "java.lang.NumberFormatException",
-        "IllegalArgumentException" => "java.lang.IllegalArgumentException",
-        "IllegalStateException" => "java.lang.IllegalStateException",
-        other => other,
-    }
-}
-
-/// A load/eval failure as a native error. Reader failures gain the
-/// `Syntax error reading source` wrap (`Compiler.load`); everything
-/// surfaces with the cause class (catching `CompilerException`
-/// itself is unsupported — the port never wraps, S4 E1).
-fn source_to_native(source: &str, e: SourceError) -> NativeError {
+/// A load/eval failure as a native error: a real
+/// `CompilerException` wrapper with the structured cause (so `catch`
+/// and `ex-cause` walk the JVM chain); bare failures (macro arity)
+/// escape unwrapped, cause class and cause message only.
+fn source_to_native(eval: &mut Evaluator, source: &str, e: SourceError) -> NativeError {
     match e {
         SourceError::Reader(e) => {
             let span = e.span();
-            NativeError {
-                class: throw_class_for(e.jvm_class()),
-                message: format!(
-                    "Syntax error reading source at ({}).\n{} | {}",
-                    site_of(source, span),
-                    reader_class_full(e.jvm_class()),
-                    e.message(),
+            let mut outer = NativeError::new(
+                ThrowClass::CompilerException,
+                format!(
+                    "Syntax error reading source at ({}).",
+                    site_of(source, span)
                 ),
+            );
+            outer.cause = Some(Throwable {
+                id: eval.next_id(),
+                class: throw_class_for(e.jvm_class()),
+                message: Some(Arc::from(e.message().as_str())),
                 data: None,
                 cause: None,
-            }
+            });
+            outer
         }
-        SourceError::Compile(e) => NativeError {
-            class: throw_class_for(e.class),
-            message: e.to_string(),
-            data: None,
-            cause: None,
-        },
+        SourceError::Compile(e) => {
+            if e.bare {
+                return NativeError::new(throw_class_for(e.class), e.message.clone());
+            }
+            let mut outer = NativeError::new(ThrowClass::CompilerException, e.wrapper());
+            outer.cause = Some(Throwable {
+                id: eval.next_id(),
+                class: throw_class_for(e.class),
+                message: Some(Arc::from(e.message.as_str())),
+                data: None,
+                cause: None,
+            });
+            outer
+        }
         SourceError::Uncaught(t) => throwable_to_native(&t),
         SourceError::Internal(m) => ex(format!("internal error: {m}")),
     }
@@ -856,7 +864,7 @@ fn core_var(eval: &Evaluator, name: &str) -> Option<u64> {
 
 /// The visible value of a `clojure.core` var (total fallback nil —
 /// boot installs every var the loader touches).
-fn deref_core(eval: &Evaluator, name: &str) -> Value {
+pub(crate) fn deref_core(eval: &Evaluator, name: &str) -> Value {
     match core_var(eval, name) {
         Some(id) => eval.deref_var(id, &Symbol::new(Some("clojure.core"), name)),
         None => Value::Nil,
@@ -1529,7 +1537,7 @@ fn load_one_path(eval: &mut Evaluator, full: &str) -> Result<(), NativeError> {
     }
     match out {
         Ok(_) => Ok(()),
-        Err(e) => Err(source_to_native(&file_star, e)),
+        Err(e) => Err(source_to_native(eval, &file_star, e)),
     }
 }
 
@@ -1581,7 +1589,7 @@ fn native_load_file(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nativ
         false,
     ) {
         Ok(_) => Ok(Value::Nil),
-        Err(e) => Err(source_to_native(&abs, e)),
+        Err(e) => Err(source_to_native(eval, &abs, e)),
     }
 }
 
@@ -1595,7 +1603,7 @@ fn native_load_string(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nat
     // `file-loadstring`, `loadstring-errspan`).
     match run_loaded(eval, Value::Nil, "", &text, false) {
         Ok(_) => Ok(Value::Nil),
-        Err(e) => Err(source_to_native("", e)),
+        Err(e) => Err(source_to_native(eval, "", e)),
     }
 }
 
@@ -1609,7 +1617,7 @@ fn native_eval(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErro
     let source = eval.source().to_owned();
     match eval.eval_top_form(&args[0]) {
         Ok(v) => Ok(v),
-        Err(e) => Err(source_to_native(&source, e)),
+        Err(e) => Err(source_to_native(eval, &source, e)),
     }
 }
 
@@ -1683,7 +1691,33 @@ fn core_vars(user_ns: Value) -> Vec<(String, Value, bool, bool)> {
             true,
             false,
         ),
+        // `core.clj` `^:dynamic` vars: slot AND `:dynamic` meta
+        // (corpus 11 `:print-vars-dynamic` pins all three `true`).
+        ("*print-length*".to_owned(), Value::Nil, true, false),
+        ("*print-level*".to_owned(), Value::Nil, true, false),
+        (
+            "*print-namespace-maps*".to_owned(),
+            Value::Bool(true),
+            true,
+            false,
+        ),
     ]
+}
+
+/// Install one `clojure.core` var with the dynamic SLOT set but no
+/// `:dynamic` meta — the JVM `RT.java` interns (`Var.intern(...).
+/// setDynamic()`): `*assert*`, the `*unchecked-math*` /
+/// `*warn-on-reflection*` / `*allow-unresolved-vars*` flags, `*out*` /
+/// `*err*`, and the `*print-meta*` / `*print-readably*` /
+/// `*print-dup*` triad (corpus 11/15 pin the meta `false` while
+/// `binding` still works).
+fn def_dynamic_root(eval: &mut Evaluator, name: &str, root: Value) {
+    let q = Symbol::new(Some("clojure.core"), name);
+    let id = eval.registry.intern(&q);
+    if let Some(st) = eval.registry.state_mut(id) {
+        st.root = Some(root);
+        st.dynamic = true;
+    }
 }
 
 /// Install one `clojure.core` var (private vars carry
@@ -1713,11 +1747,22 @@ fn def_var(eval: &mut Evaluator, name: &str, root: Value, dynamic: bool, private
     }
 }
 
+/// Evaluate one boot form: the embedded boot sequence is fixed, so
+/// any failure is a port bug (pinned by `core_loads`), never user
+/// input.
+fn boot_eval(eval: &mut Evaluator, src: &str) {
+    if let Err(e) = eval.eval_source(src) {
+        unreachable!("boot form failed ({src}): {e:?}");
+    }
+}
+
 /// Boot a fresh evaluator: `clojure.core` plus `user` (current),
 /// the §N natives and vars installed, every public install referred
-/// into `user` (JVM boot refers `clojure.core`), and a permanent
-/// `*ns*` base frame (so `in-ns` writes the top frame and the root
-/// never moves, like `RT.inNamespace` under `clojure.main`).
+/// into `user` (JVM boot refers `clojure.core`), a permanent `*ns*`
+/// base frame (so `in-ns` writes the top frame and the root never
+/// moves, like `RT.inNamespace` under `clojure.main`), and the
+/// embedded `core.clj` composites loaded into `clojure.core` with
+/// their publics referred into `user`.
 #[must_use]
 pub fn boot() -> Evaluator {
     let mut eval = Evaluator::new_bare("user");
@@ -1728,6 +1773,11 @@ pub fn boot() -> Evaluator {
         .iter()
         .chain(crate::vars::VAR_NATIVES.iter())
         .chain(crate::macros::MACRO_NATIVES.iter())
+        .chain(crate::lazy::LAZY_NATIVES.iter())
+        .chain(crate::core::CORE_NATIVES.iter())
+        .chain(crate::seqs::SEQS_NATIVES.iter())
+        .chain(crate::coll::COLL_NATIVES.iter())
+        .chain(crate::io::IO_NATIVES.iter())
     {
         let func: Arc<crate::ext::NativeImpl> = Arc::new(*f);
         eval.install_native("clojure.core", name, func);
@@ -1757,14 +1807,45 @@ pub fn boot() -> Evaluator {
             st.meta = Some(meta);
         }
     }
+    // Port-internal natives (macro-expansion errors, `case` dispatch
+    // hashing): usable but never referred into `user` (the refers
+    // below filter on `is_public`).
+    for name in ["throw-illegal-arg!", "throw-npe!", "hash-code"] {
+        let q = Symbol::new(Some("clojure.core"), name);
+        let id = eval.registry.intern(&q);
+        if let Some(st) = eval.registry.state_mut(id) {
+            let meta = st.meta.clone().unwrap_or_else(new_map).insert(
+                Value::Keyword(Keyword::new(None, "private")),
+                Value::Bool(true),
+            );
+            st.meta = Some(meta);
+        }
+    }
     let user_handle = ns_value("user", user_ns);
     for (name, root, dynamic, private) in core_vars(user_handle.clone()) {
         def_var(&mut eval, &name, root, dynamic, private);
     }
+    // `RT.java` dynamics: slot set, no `:dynamic` meta.
+    let stdout = crate::io::stdout_writer(&mut eval);
+    let stderr = crate::io::stderr_writer(&mut eval);
+    def_dynamic_root(&mut eval, "*out*", stdout);
+    def_dynamic_root(&mut eval, "*err*", stderr);
+    def_dynamic_root(&mut eval, "*assert*", Value::Bool(true));
+    def_dynamic_root(&mut eval, "*unchecked-math*", Value::Bool(false));
+    def_dynamic_root(&mut eval, "*warn-on-reflection*", Value::Bool(false));
+    def_dynamic_root(&mut eval, "*allow-unresolved-vars*", Value::Bool(false));
+    def_dynamic_root(&mut eval, "*print-meta*", Value::Bool(false));
+    def_dynamic_root(&mut eval, "*print-readably*", Value::Bool(true));
+    def_dynamic_root(&mut eval, "*print-dup*", Value::Bool(false));
     let mut names: Vec<String> = NATIVES
         .iter()
         .chain(crate::vars::VAR_NATIVES.iter())
         .chain(crate::macros::MACRO_NATIVES.iter())
+        .chain(crate::lazy::LAZY_NATIVES.iter())
+        .chain(crate::core::CORE_NATIVES.iter())
+        .chain(crate::seqs::SEQS_NATIVES.iter())
+        .chain(crate::coll::COLL_NATIVES.iter())
+        .chain(crate::io::IO_NATIVES.iter())
         .map(|(n, _)| (*n).to_owned())
         .collect();
     names.extend(
@@ -1780,6 +1861,18 @@ pub fn boot() -> Evaluator {
             "*pending-paths*",
             "*loading-verbosely*",
             "*load-path*",
+            "*out*",
+            "*err*",
+            "*assert*",
+            "*unchecked-math*",
+            "*warn-on-reflection*",
+            "*allow-unresolved-vars*",
+            "*print-meta*",
+            "*print-readably*",
+            "*print-dup*",
+            "*print-length*",
+            "*print-level*",
+            "*print-namespace-maps*",
         ]
         .iter()
         .map(|s| (*s).to_owned()),
@@ -1799,5 +1892,15 @@ pub fn boot() -> Evaluator {
     if let Some(id) = core_var(&eval, "*ns*") {
         eval.push_binding(core_var_handle(id, "*ns*"), user_handle);
     }
+    // Embedded `core.clj` composites (their privates resolve in
+    // `clojure.core`), then `user` refers the publics — the file
+    // carries no `ns` form by design.
+    boot_eval(&mut eval, "(in-ns 'clojure.core)");
+    boot_eval(&mut eval, CORE_CLJ);
+    boot_eval(&mut eval, "(in-ns 'user)");
+    boot_eval(&mut eval, "(refer 'clojure.core)");
+    // The load's macroexpansions consume `gensym` numbers; the
+    // user-visible counter restarts from 1 (S5C pins `G__1` first).
+    eval.reset_gensym();
     eval
 }

@@ -20,6 +20,8 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::{FxBuildHasher, Map, Set, Value, Vector, new_map, new_set};
 
@@ -163,13 +165,30 @@ impl Default for TransientVector {
     }
 }
 
+/// The simulated array capacity growth
+/// (`TransientArrayMap.newCapacity`: `min(ceil(n*1.65),128)`, even).
+fn transient_capacity(n: usize) -> usize {
+    let grown = ((n as f64 * 1.65).ceil() as usize).min(128);
+    grown + (grown & 1)
+}
+
 /// A transient map: `assoc!`/`dissoc!` buffer with insertion-ordered
 /// freeze (re-assoc keeps the original key and position).
+///
+/// `len`/`cap` simulate the JVM array (slots, 2 per pair):
+/// appends below capacity never promote; a full array promotes to
+/// hash when holding 128 slots or receiving a non-keyword key,
+/// else grows (`newCapacity`) for keyword keys. A hash source
+/// starts promoted. `dissoc!` swap-removes (the JVM moves the last
+/// pair into the hole).
 #[derive(Clone, Debug)]
 pub struct TransientMap {
     entries: Vec<(Value, Value)>,
     index: HashMap<Value, usize, FxBuildHasher>,
     valid: bool,
+    len: usize,
+    cap: usize,
+    promoted: bool,
 }
 
 impl TransientMap {
@@ -180,10 +199,14 @@ impl TransientMap {
             entries: Vec::new(),
             index: HashMap::default(),
             valid: true,
+            len: 0,
+            cap: 16,
+            promoted: false,
         }
     }
 
-    /// A transient over `m`'s entries (insertion order kept).
+    /// A transient over `m`'s entries (insertion order kept; hash
+    /// sources start promoted with their exact array size).
     #[must_use]
     pub fn from_map(m: &Map) -> Self {
         let mut t = Self::new();
@@ -191,6 +214,9 @@ impl TransientMap {
             t.index.insert(k.clone(), t.entries.len());
             t.entries.push((k.clone(), v.clone()));
         }
+        t.len = t.entries.len() * 2;
+        t.cap = t.len.max(16);
+        t.promoted = m.is_hashy();
         t
     }
 
@@ -198,26 +224,45 @@ impl TransientMap {
         ensure(self.valid)
     }
 
+    /// Whether this is a hash transient (promoted or hash-born).
+    #[must_use]
+    pub fn is_hashy(&self) -> bool {
+        self.promoted
+    }
+
     /// Assoc a key/value pair.
     pub fn assoc(&mut self, k: Value, v: Value) -> Result<(), TransientError> {
         self.check()?;
-        match self.index.get(&k) {
-            Some(&i) => self.entries[i].1 = v,
-            None => {
-                self.index.insert(k.clone(), self.entries.len());
-                self.entries.push((k, v));
+        if let Some(&i) = self.index.get(&k) {
+            self.entries[i].1 = v;
+            return Ok(());
+        }
+        if !self.promoted {
+            if self.len < self.cap {
+                self.len += 2;
+            } else if self.len >= 128 || !matches!(k, Value::Keyword(_)) {
+                self.promoted = true;
+                self.len += 2;
+            } else {
+                self.cap = transient_capacity(self.cap);
+                self.len += 2;
             }
         }
+        self.index.insert(k.clone(), self.entries.len());
+        self.entries.push((k, v));
         Ok(())
     }
 
-    /// Drop a key (missing is a no-op).
+    /// Drop a key (missing is a no-op; the last pair moves into the
+    /// hole, like the JVM).
     pub fn dissoc(&mut self, k: &Value) -> Result<(), TransientError> {
         self.check()?;
         if let Some(i) = self.index.remove(k) {
-            self.entries.remove(i);
-            for (j, (ek, _)) in self.entries.iter().enumerate().skip(i) {
-                self.index.insert(ek.clone(), j);
+            self.entries.swap_remove(i);
+            self.len = self.len.saturating_sub(2);
+            if let Some((moved, _)) = self.entries.get(i) {
+                let moved = moved.clone();
+                self.index.insert(moved, i);
             }
         }
         Ok(())
@@ -241,6 +286,8 @@ impl TransientMap {
     }
 
     /// Freeze into a persistent map (invalidates this transient).
+    /// The class comes from the promotion simulation, never the
+    /// content (an unpromoted array keeps array class at any size).
     pub fn persistent(&mut self) -> Result<Map, TransientError> {
         self.check()?;
         self.valid = false;
@@ -249,7 +296,7 @@ impl TransientMap {
             map = map.insert(k, v);
         }
         self.index.clear();
-        Ok(map)
+        Ok(map.with_hashy(self.promoted))
     }
 }
 
@@ -345,5 +392,94 @@ impl TransientSet {
 impl Default for TransientSet {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Which persistent type a transient builds.
+#[derive(Clone, Debug)]
+pub enum TransientKind {
+    /// `clojure.lang.PersistentVector$TransientVector`.
+    Vector(TransientVector),
+    /// `clojure.lang.PersistentArrayMap$TransientArrayMap`.
+    Map(TransientMap),
+    /// `clojure.lang.PersistentHashSet$TransientHashSet`.
+    Set(TransientSet),
+}
+
+impl TransientKind {
+    /// The JVM class name (for casts, `seq` errors, and printing).
+    /// Map transients report hash past promotion.
+    #[must_use]
+    pub fn jvm_class(&self) -> &'static str {
+        match self {
+            TransientKind::Vector(_) => "clojure.lang.PersistentVector$TransientVector",
+            TransientKind::Map(m) if m.is_hashy() => {
+                "clojure.lang.PersistentHashMap$TransientHashMap"
+            }
+            TransientKind::Map(_) => "clojure.lang.PersistentArrayMap$TransientArrayMap",
+            TransientKind::Set(_) => "clojure.lang.PersistentHashSet$TransientHashSet",
+        }
+    }
+}
+
+/// Fresh transient identities (print-only; equality is shared-cell).
+static TRANSIENT_ID: AtomicU64 = AtomicU64::new(1);
+
+/// A first-class transient value: shared mutable buffer plus the
+/// source metadata (invisible to `meta`, restored by
+/// `persistent!`). Identity equality (same cell); only `counted?`
+/// among the type predicates.
+#[derive(Clone, Debug)]
+pub struct Transient {
+    id: u64,
+    cell: Arc<Mutex<TransientKind>>,
+    meta: Option<Map>,
+}
+
+impl Transient {
+    /// A transient over `kind` (fresh identity, no metadata).
+    #[must_use]
+    pub fn new(kind: TransientKind) -> Self {
+        Self::with_meta(kind, None)
+    }
+
+    /// A transient over `kind` carrying the source metadata.
+    #[must_use]
+    pub fn with_meta(kind: TransientKind, meta: Option<Map>) -> Self {
+        Self {
+            id: TRANSIENT_ID.fetch_add(1, Ordering::Relaxed),
+            cell: Arc::new(Mutex::new(kind)),
+            meta,
+        }
+    }
+
+    /// The print identity.
+    #[must_use]
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+
+    /// Whether `other` shares this transient's buffer.
+    #[must_use]
+    pub fn same_cell(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.cell, &other.cell)
+    }
+
+    /// The source metadata (restored by `persistent!`).
+    #[must_use]
+    pub fn source_meta(&self) -> Option<&Map> {
+        self.meta.as_ref()
+    }
+
+    /// Lock the buffer (single-threaded use; poison is unreachable).
+    pub fn lock(&self) -> MutexGuard<'_, TransientKind> {
+        self.cell.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The JVM class name of the buffer kind (live: map
+    /// transients report hash past promotion).
+    #[must_use]
+    pub fn jvm_class(&self) -> &'static str {
+        self.lock().jvm_class()
     }
 }
