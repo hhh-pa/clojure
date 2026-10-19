@@ -28,7 +28,10 @@ fn check_session(name: &str) {
     let input =
         std::fs::read_to_string(dir.join(format!("{name}.in"))).expect("read session script");
     let expected = std::fs::read_to_string(dir.join(format!("expected/{name}.ours.out")))
-        .expect("read pinned transcript");
+        .expect("read pinned transcript")
+        // Belt-and-braces over .gitattributes (which pins LF): a stale
+        // CRLF checkout must not fail the comparison.
+        .replace("\r\n", "\n");
     let out = run_with_stdin(["repl", "--no-history"], &input);
     assert_eq!(out.status.code(), Some(0), "{name}: exit code");
     assert_eq!(stdout(&out), expected, "{name}: transcript");
