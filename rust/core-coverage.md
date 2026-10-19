@@ -434,14 +434,14 @@ machine-read — keep `| var | status | notes |` rows exact.
 | `extend-protocol` | out-of-scope | protocols: no slice |
 | `satisfies?` | out-of-scope | protocols: no slice |
 | `extends?` | out-of-scope | protocols: no slice |
-| `atom` | out-of-scope | S6 concurrency |
-| `swap!` | out-of-scope | S6 concurrency |
-| `reset!` | out-of-scope | S6 concurrency |
-| `compare-and-set!` | out-of-scope | S6 concurrency |
+| `atom` | implemented | concurrency.rs atom_ctor_rows (validator/meta options, odd-opts IAE) |
+| `swap!` | implemented | concurrency.rs swap_rows (CAS loop, extra args, unconditional watch fire) |
+| `reset!` | implemented | concurrency.rs reset_rows (validates, fires) |
+| `compare-and-set!` | implemented | concurrency.rs cas_rows (bool, validates pre-compare, no fire on miss) |
 | `shutdown-agents` | out-of-scope | S6 concurrency |
-| `delay` | out-of-scope | S6 concurrency |
-| `force` | out-of-scope | S6 concurrency |
-| `deref` | out-of-scope | S6 concurrency |
+| `delay` | implemented | concurrency.rs delay_rows (delay* form over trapped closure) |
+| `force` | implemented | concurrency.rs force_rows (non-delays pass through) |
+| `deref` | implemented | concurrency.rs deref_rows (1-arity atoms/delays/vars; timeout arity S6B) |
 | `future` | out-of-scope | S6 concurrency |
 | `future-call` | out-of-scope | S6 concurrency |
 | `future?` | out-of-scope | S6 concurrency |
@@ -449,7 +449,7 @@ machine-read — keep `| var | status | notes |` rows exact.
 | `future-done?` | out-of-scope | S6 concurrency |
 | `promise` | out-of-scope | S6 concurrency |
 | `deliver` | out-of-scope | S6 concurrency |
-| `realized?` | out-of-scope | S6 concurrency |
+| `realized?` | implemented | concurrency.rs realized_rows (delays + lazy seqs; atoms CCE) |
 | `send` | out-of-scope | S6 concurrency |
 | `send-off` | out-of-scope | S6 concurrency |
 | `send-via` | out-of-scope | S6 concurrency |
@@ -460,13 +460,13 @@ machine-read — keep `| var | status | notes |` rows exact.
 | `restart-agent` | out-of-scope | S6 concurrency |
 | `set-error-handler!` | out-of-scope | S6 concurrency |
 | `set-error-mode!` | out-of-scope | S6 concurrency |
-| `add-watch` | out-of-scope | S6 concurrency |
-| `remove-watch` | out-of-scope | S6 concurrency |
+| `add-watch` | implemented | concurrency.rs watch_rows (returns ref, [k ref old new]) |
+| `remove-watch` | implemented | concurrency.rs watch_rows (returns ref, missing keys no-op) |
 | `locking` | out-of-scope | S6 concurrency |
 | `pvalues` | out-of-scope | S6 concurrency |
 | `pcalls` | out-of-scope | S6 concurrency |
 | `pmap` | out-of-scope | S6 concurrency |
-| `memoize` | out-of-scope | needs atom: S6 |
+| `memoize` | implemented | concurrency.rs memoize_rows (core.clj port, find-based cache) |
 | `ref` | out-of-scope | STM (N4): never |
 | `dosync` | out-of-scope | STM (N4): never |
 | `commute` | out-of-scope | STM (N4): never |

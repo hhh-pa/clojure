@@ -35,7 +35,7 @@
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
-use crate::{ExtensionValue, Keyword, Symbol, Throwable, Transient, Unbound, Var};
+use crate::{Atom, Delay, ExtensionValue, Keyword, Symbol, Throwable, Transient, Unbound, Var};
 
 /// Deterministic Fx hasher for maps/sets (rpds's default RandomState
 /// is not stable across runs). Same non-crypto posture as the JVM's
@@ -606,6 +606,10 @@ pub enum Value {
     Throwable(Throwable),
     /// A transient buffer (S5D): identity equality (shared cell).
     Transient(Transient),
+    /// An atom (S6A): identity equality (shared cell).
+    Atom(Atom),
+    /// A delay (S6A): identity equality (shared cell).
+    Delay(Delay),
     /// A host-defined value behind the [`ExtensionValue`] trait (S4).
     Extension(Arc<dyn ExtensionValue>),
 }
@@ -769,6 +773,8 @@ impl PartialEq for Value {
             (Value::Unbound(a), Value::Unbound(b)) => a.var_id == b.var_id,
             (Value::Throwable(a), Value::Throwable(b)) => a.id == b.id,
             (Value::Transient(a), Value::Transient(b)) => a.same_cell(b),
+            (Value::Atom(a), Value::Atom(b)) => a.same_cell(b),
+            (Value::Delay(a), Value::Delay(b)) => a.same_cell(b),
             (Value::Extension(a), Value::Extension(b)) => a.dyn_eq(&**b),
             _ => false,
         }
@@ -878,6 +884,14 @@ impl Hash for Value {
             Value::Transient(t) => {
                 state.write_u8(17);
                 state.write_u64(t.id());
+            }
+            Value::Atom(a) => {
+                state.write_u8(18);
+                state.write_u64(a.id());
+            }
+            Value::Delay(d) => {
+                state.write_u8(19);
+                state.write_u64(d.id());
             }
             Value::Extension(e) => {
                 // Realized seqs hash as sequential family (marker 8

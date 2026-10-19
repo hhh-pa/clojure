@@ -16,7 +16,9 @@
 use std::sync::Arc;
 
 use clj_reader::{ReaderOpts, Span, read_all};
-use clj_value::{Keyword, List, Map, Symbol, ThrowClass, Throwable, Value, Var, Vector, new_map};
+use clj_value::{
+    Delay, Keyword, List, Map, Symbol, ThrowClass, Throwable, Value, Var, Vector, new_map,
+};
 
 use crate::coll::native_nth;
 use crate::env::{Bindings, Env, NamespaceRegistry};
@@ -494,6 +496,7 @@ impl Evaluator {
                 Arc::new(body.clone()),
                 env.clone(),
             )),
+            Expr::DelayStar { display, body } => Ok(self.eval_delay_star(display, body, env)),
             Expr::CaseStar {
                 expr,
                 shift,
@@ -1175,6 +1178,21 @@ impl Evaluator {
             meta: None,
             conveyed: None,
         }
+    }
+
+    /// `(delay* body…)`: trap a zero-arg closure over the current
+    /// frame in an unrealized delay (forced by `deref`/`force`).
+    fn eval_delay_star(&mut self, display: &str, body: &[Expr], env: &Env) -> Value {
+        let fun = crate::expr::FunExpr {
+            display: display.to_owned(),
+            arities: vec![crate::expr::Arity {
+                fixed: Vec::new(),
+                rest: None,
+                body: body.to_vec(),
+            }],
+        };
+        let closure = self.make_closure(&fun, env);
+        Value::Delay(Delay::new(Value::Extension(Arc::new(closure))))
     }
 
     /// The §E7 `IFn` table: closures/natives, keywords, symbols,

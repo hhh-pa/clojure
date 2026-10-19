@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-use clj_value::{Map, ThrowClass, Value, Var, new_map};
+use clj_value::{Atom, Map, ThrowClass, Value, Var, new_map};
 
 use crate::error::NativeError;
 use crate::eval::Evaluator;
@@ -201,11 +201,12 @@ fn native_with_bindings_star(eval: &mut Evaluator, args: &[Value]) -> Result<Val
 }
 
 /// The metadata of any value (`meta`): vars (nil once cleared),
-/// namespaces (nil when fresh), symbols, collections, and
+/// namespaces (nil when fresh), atoms, symbols, collections, and
 /// functions; everything else reads nil.
 pub(crate) fn meta_of(eval: &Evaluator, v: &Value) -> Option<Map> {
     match v {
         Value::Var(var) => eval.registry.state(var.id)?.meta.clone(),
+        Value::Atom(a) => a.meta(),
         Value::Symbol(s) => s.meta().cloned(),
         Value::List(l) => l.meta().cloned(),
         Value::Vector(x) => x.meta().cloned(),
@@ -307,16 +308,17 @@ fn native_vary_meta(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nativ
     with_meta_val(&args[0], &next)
 }
 
-/// An `IReference` target (vars and namespaces; atoms don't
-/// exist yet).
+/// An `IReference` target (vars, namespaces, and atoms).
 enum RefTarget {
     Var(u64),
     Ns(String, u64),
+    Atom(Atom),
 }
 
 fn as_ref_target(v: &Value) -> Result<RefTarget, NativeError> {
     match v {
         Value::Var(var) => Ok(RefTarget::Var(var.id)),
+        Value::Atom(a) => Ok(RefTarget::Atom(a.clone())),
         Value::Extension(_) => match as_ns(v) {
             Some(ns) => Ok(RefTarget::Ns(ns.name.to_string(), ns.id)),
             None => Err(cast_err(v, IREF_CLASS)),
@@ -338,6 +340,9 @@ fn install_ref_meta(eval: &mut Evaluator, target: &RefTarget, meta: Option<Map>)
                 ns.set_meta(meta);
             }
         }
+        RefTarget::Atom(a) => {
+            a.lock().meta = meta;
+        }
     }
 }
 
@@ -345,6 +350,7 @@ fn ref_meta(eval: &Evaluator, target: &RefTarget) -> Option<Map> {
     match target {
         RefTarget::Var(id) => eval.registry.state(*id)?.meta.clone(),
         RefTarget::Ns(name, id) => eval.registry.ns_for_handle(name, *id)?.meta().cloned(),
+        RefTarget::Atom(a) => a.meta(),
     }
 }
 

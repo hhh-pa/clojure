@@ -231,6 +231,16 @@ impl PendingSeq {
         self.meta.as_ref()
     }
 
+    /// Whether the seq has forced its first step (`realized?` — a
+    /// pending thunk reads false without forcing, like the JVM's
+    /// `LazySeq.isRealized`).
+    pub(crate) fn is_realized(&self) -> bool {
+        !matches!(
+            *self.state.lock().unwrap_or_else(|e| e.into_inner()),
+            SeqState::Pending(_)
+        )
+    }
+
     /// A metadata-carrying clone with a FRESH memo cell (like the
     /// JVM, whose `withMeta` re-wraps the fn). Staged for
     /// `with-meta` (S5D).

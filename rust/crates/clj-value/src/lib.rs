@@ -12,7 +12,9 @@
 //! is Clojure `=` and hashing is equiv-consistent (see
 //! [`value`](crate::value)); printing lives in [`print`](crate::print).
 
+mod atom;
 mod compare;
+mod delay;
 mod extension;
 pub mod hasheq;
 mod keyword;
@@ -22,7 +24,9 @@ mod symbol;
 mod transient;
 mod value;
 
+pub use atom::{Atom, AtomState};
 pub use compare::{CompareError, compare};
+pub use delay::{Delay, DelayState};
 pub use extension::{ExtensionValue, ThrowClass, Throwable, Unbound, Var};
 pub use hasheq::{hash_code, hasheq, seq_hash_unsupported};
 pub use keyword::Keyword;

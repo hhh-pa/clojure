@@ -178,6 +178,22 @@ fn print_into(v: &Value, opts: &PrintOpts, level: Option<i64>, out: &mut String)
             let id = t.id();
             write!(out, "#object[{class} 0x{id:x} \"{class}@{id:x}\"]").unwrap();
         }
+        Value::Atom(a) => {
+            let id = a.id();
+            write!(
+                out,
+                "#object[clojure.lang.Atom 0x{id:x} \"clojure.lang.Atom@{id:x}\"]"
+            )
+            .unwrap();
+        }
+        Value::Delay(d) => {
+            let id = d.id();
+            write!(
+                out,
+                "#object[clojure.lang.Delay 0x{id:x} \"clojure.lang.Delay@{id:x}\"]"
+            )
+            .unwrap();
+        }
         Value::Extension(e) => {
             // Realized seqs print as lists with ambient options
             // (length/level truncation applies, like the JVM);
@@ -245,9 +261,21 @@ fn print_meta_prefix(v: &Value, opts: &PrintOpts, level: Option<i64>, out: &mut 
     if !opts.meta || !opts.readably {
         return;
     }
+    // Atoms hold their meta behind the lock (`Value::meta` borrows,
+    // so it cannot serve them — clone it out instead).
+    if let Value::Atom(a) = v {
+        if let Some(m) = a.meta() {
+            print_meta_map(&m, opts, level, out);
+        }
+        return;
+    }
     let Some(m) = v.meta() else {
         return;
     };
+    print_meta_map(m, opts, level, out);
+}
+
+fn print_meta_map(m: &crate::Map, opts: &PrintOpts, level: Option<i64>, out: &mut String) {
     if m.is_empty() {
         return;
     }
@@ -471,6 +499,8 @@ pub fn java_debug(v: &Value) -> String {
             Some(m) => format!("{}: {}", t.class.jvm_name(), m),
         },
         Value::Transient(t) => format!("{}@{:x}", t.jvm_class(), t.id()),
+        Value::Atom(a) => format!("clojure.lang.Atom@{:x}", a.id()),
+        Value::Delay(d) => format!("clojure.lang.Delay@{:x}", d.id()),
         Value::Extension(e) => e.print(),
         Value::List(_)
         | Value::Vector(_)

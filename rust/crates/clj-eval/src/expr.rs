@@ -248,6 +248,13 @@ pub enum Expr {
     LazySeqStar {
         body: Vec<Expr>,
     },
+    /// `(delay* body…)` (S6A analyzer form — the JVM has no such
+    /// var; `delay` expands to this). `display` names the trapped
+    /// zero-arg closure, as `fn` displays do.
+    DelayStar {
+        display: String,
+        body: Vec<Expr>,
+    },
     /// `(case* ge shift mask default imap switch-type test-type
     /// skip?)` (S5D analyzer form, emitted by the `case` macro):
     /// `cases` maps dispatch keys to `(test, then)` (`test` is an
@@ -488,6 +495,7 @@ pub(crate) fn is_special(name: &str) -> bool {
             | "time"
             | "with-out-str"
             | "lazy-seq*"
+            | "delay*"
             | "case*"
     )
 }
@@ -495,8 +503,8 @@ pub(crate) fn is_special(name: &str) -> bool {
 /// The macro-implemented specials: a local or global binding
 /// with one of these names shadows the macro (real specials never
 /// shadow, probe31 `shadow-*`). `case*` is not shadowable (the JVM
-/// hardcodes it); `lazy-seq*` is (the JVM has no such form, so a
-/// user definition wins there).
+/// hardcodes it); `lazy-seq*` and `delay*` are (the JVM has no such
+/// forms, so a user definition wins there).
 fn is_shadowable_macro(name: &str) -> bool {
     matches!(
         name,
@@ -515,6 +523,7 @@ fn is_shadowable_macro(name: &str) -> bool {
             | "time"
             | "with-out-str"
             | "lazy-seq*"
+            | "delay*"
     )
 }
 
@@ -990,6 +999,7 @@ impl<'a> Analyzer<'a> {
             "time" => self.parse_time(items, span),
             "with-out-str" => self.parse_with_out_str(items, span),
             "lazy-seq*" => self.parse_lazy_seq_star(items, span),
+            "delay*" => self.parse_delay_star(items, span),
             "case*" => self.parse_case_star(items, span, tail),
             _ => unreachable!("dispatch covers every special form"),
         }
@@ -2659,6 +2669,25 @@ impl<'a> Analyzer<'a> {
         self.recur = saved_recur;
         self.no_recur = saved_no_recur;
         Ok(Expr::LazySeqStar { body: body? })
+    }
+
+    /// `(delay* body…)`: a zero-arg `fn` boundary for `recur` (like
+    /// `lazy-seq*` — the body runs at force time, as the JVM's
+    /// `(fn* [] …)` does). The display names the trapped closure.
+    fn parse_delay_star(&mut self, items: &[&Value], span: Span) -> Result<Expr, CompileError> {
+        let seq = self.eval.next_fn_seq();
+        let display = format!("user/eval{}/delay--{seq}", self.eval_seq);
+        let saved_recur = self.recur;
+        let saved_no_recur = self.no_recur;
+        self.recur = Some(0);
+        self.no_recur = false;
+        let body = self.analyze_body(&items[1..], span, true);
+        self.recur = saved_recur;
+        self.no_recur = saved_no_recur;
+        Ok(Expr::DelayStar {
+            display,
+            body: body?,
+        })
     }
 
     /// `(case* ge shift mask default imap switch-type test-type

@@ -1850,6 +1850,7 @@ fn boot_install_natives(eval: &mut Evaluator) {
         .chain(crate::seqs::SEQS_NATIVES.iter())
         .chain(crate::coll::COLL_NATIVES.iter())
         .chain(crate::io::IO_NATIVES.iter())
+        .chain(crate::concurrency::CONC_NATIVES.iter())
     {
         let func: Arc<crate::ext::NativeImpl> = Arc::new(*f);
         eval.install_native("clojure.core", name, func);
@@ -1932,6 +1933,7 @@ fn boot_refer_user(eval: &mut Evaluator) {
         .chain(crate::seqs::SEQS_NATIVES.iter())
         .chain(crate::coll::COLL_NATIVES.iter())
         .chain(crate::io::IO_NATIVES.iter())
+        .chain(crate::concurrency::CONC_NATIVES.iter())
         .map(|(n, _)| (*n).to_owned())
         .collect();
     names.extend(

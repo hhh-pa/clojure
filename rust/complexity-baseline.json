@@ -4,16 +4,16 @@
   {
    "file": "crates/clj-eval/src/error.rs",
    "function": "jvm_class_of",
-   "cyclomatic": 23.0,
+   "cyclomatic": 25.0,
    "cognitive": 1.0,
-   "justification": "one arm per Value variant; JVM class table stays exhaustive S5D adds the Transient arm."
+   "justification": "one arm per Value variant; JVM class table stays exhaustive S5D adds the Transient arm. S6A adds the Atom/Delay arms."
   },
   {
    "file": "crates/clj-eval/src/eval.rs",
    "function": "Evaluator::eval",
-   "cyclomatic": 41.0,
+   "cyclomatic": 42.0,
    "cognitive": 8.0,
-   "justification": "one arm per Expr variant; arms delegate to small-step helpers. S5B adds the WithRedefs/WithBindings/BoundFn arms; S5C the DefMacro/Declare/Ns arms. S5D adds the Assert/CaseStar/LazySeqStar/Time/WithOutStr arms."
+   "justification": "one arm per Expr variant; arms delegate to small-step helpers. S5B adds the WithRedefs/WithBindings/BoundFn arms; S5C the DefMacro/Declare/Ns arms. S5D adds the Assert/CaseStar/LazySeqStar/Time/WithOutStr arms. S6A adds the DelayStar arm."
   },
   {
    "file": "crates/clj-eval/src/eval.rs",
@@ -25,9 +25,9 @@
   {
    "file": "crates/clj-eval/src/expr.rs",
    "function": "Analyzer<'a>::analyze_special",
-   "cyclomatic": 31.0,
+   "cyclomatic": 32.0,
    "cognitive": 2.0,
-   "justification": "one arm per special form; dispatch to per-form parsers. S5B adds the with-redefs/with-bindings/bound-fn arms; S5C the defmacro/declare/ns arms. S5D adds the assert/time/with-out-str/lazy-seq*/case* arms."
+   "justification": "one arm per special form; dispatch to per-form parsers. S5B adds the with-redefs/with-bindings/bound-fn arms; S5C the defmacro/declare/ns arms. S5D adds the assert/time/with-out-str/lazy-seq*/case* arms. S6A adds the delay* arm."
   },
   {
    "file": "crates/clj-eval/src/ext.rs",
@@ -67,9 +67,9 @@
   {
    "file": "crates/clj-value/src/print.rs",
    "function": "java_debug",
-   "cyclomatic": 18.0,
+   "cyclomatic": 20.0,
    "cognitive": 3.0,
-   "justification": "one arm per Value variant; JVM toString mirror stays exhaustive S5D adds the Transient/Throwable arms."
+   "justification": "one arm per Value variant; JVM toString mirror stays exhaustive S5D adds the Transient/Throwable arms. S6A adds the Atom/Delay arms."
   },
   {
    "file": "crates/clj-value/src/print.rs",
@@ -81,23 +81,23 @@
   {
    "file": "crates/clj-value/src/print.rs",
    "function": "print_into",
-   "cyclomatic": 28.0,
+   "cyclomatic": 30.0,
    "cognitive": 14.0,
-   "justification": "one arm per Value variant; printer stays exhaustive S5D adds the Transient/Throwable/Extension branches."
+   "justification": "one arm per Value variant; printer stays exhaustive S5D adds the Transient/Throwable/Extension branches. S6A adds the Atom/Delay arms."
   },
   {
    "file": "crates/clj-value/src/value.rs",
    "function": "Value::eq",
-   "cyclomatic": 34.0,
+   "cyclomatic": 36.0,
    "cognitive": 5.0,
-   "justification": "per-variant-pair equality table incl. numeric cross-type (spec C2) S5D adds the Transient/Throwable/Extension pairs."
+   "justification": "per-variant-pair equality table incl. numeric cross-type (spec C2) S5D adds the Transient/Throwable/Extension pairs. S6A adds the Atom/Delay arms."
   },
   {
    "file": "crates/clj-value/src/value.rs",
    "function": "Value::hash",
-   "cyclomatic": 29.0,
+   "cyclomatic": 31.0,
    "cognitive": 13.0,
-   "justification": "one arm per Value variant; mirrors eq S5D adds the Transient/Throwable/Extension arms."
+   "justification": "one arm per Value variant; mirrors eq S5D adds the Transient/Throwable/Extension arms. S6A adds the Atom/Delay arms."
   },
   {
    "file": "crates/clj-value/src/value.rs",
@@ -144,16 +144,16 @@
   {
    "file": "crates/clj-value/src/hasheq.rs",
    "function": "hash_code",
-   "cyclomatic": 25.0,
+   "cyclomatic": 27.0,
    "cognitive": 7.0,
-   "justification": "one arm per Value variant; mirrors hasheq per spec C2"
+   "justification": "one arm per Value variant; mirrors hasheq per spec C2 S6A adds the Atom/Delay arms."
   },
   {
    "file": "crates/clj-value/src/hasheq.rs",
    "function": "hasheq",
-   "cyclomatic": 23.0,
+   "cyclomatic": 25.0,
    "cognitive": 3.0,
-   "justification": "one arm per Value variant incl. numeric cross-type (spec C2)"
+   "justification": "one arm per Value variant incl. numeric cross-type (spec C2) S6A adds the Atom/Delay arms."
   },
   {
    "file": "crates/clj-value/src/value.rs",

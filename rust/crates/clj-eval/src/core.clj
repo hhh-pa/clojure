@@ -637,6 +637,30 @@
   [& colls]
   `(lazy-seq (concat ~@colls)))
 
+(defmacro delay
+  "Takes a body of expressions and yields a Delay object that will
+  invoke the body only the first time it is forced (with force or deref/@), and
+  will cache the result and return it on all subsequent force
+  calls. See also - realized?"
+  {:added "1.0"}
+  [& body]
+  (list* 'delay* body))
+
+(defn memoize
+  "Returns a memoized version of a referentially transparent function. The
+  memoized version of the function keeps a cache of the mapping from arguments
+  to results and, when calls with the same arguments are repeated often, has
+  higher performance at the expense of higher memory use."
+  {:added "1.0"}
+  [f]
+  (let [mem (atom {})]
+    (fn [& args]
+      (if-let [e (find @mem args)]
+        (val e)
+        (let [ret (apply f args)]
+          (swap! mem assoc args ret)
+          ret)))))
+
 ;; --- `case`/`condp` (S5D): verbatim ports, except `condp`/`case`
 ;; throw through `throw-illegal-arg!` (no `new` exists), `Util/hash`
 ;; is the private `hash-code` native, `into1`/`reduce1` are

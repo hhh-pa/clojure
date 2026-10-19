@@ -13,6 +13,7 @@
 //! runs them. Single namespace (`user`), no prelude yet (S5).
 
 pub mod coll;
+pub mod concurrency;
 pub mod core;
 pub mod env;
 pub mod error;
