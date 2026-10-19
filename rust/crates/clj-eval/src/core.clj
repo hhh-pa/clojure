@@ -661,6 +661,16 @@
           (swap! mem assoc args ret)
           ret)))))
 
+(defmacro future
+  "Takes a body of expressions and yields a future object that will
+  invoke the body in another thread, and will cache the result and
+  return it on all subsequent calls to deref/@. If the computation has
+  not yet finished, calls to deref/@ will block, unless the variant of
+  deref with timeout is used. See also - realized?."
+  {:added "1.1"}
+  [& body]
+  (list 'future-call (list* 'fn [] body)))
+
 ;; --- `case`/`condp` (S5D): verbatim ports, except `condp`/`case`
 ;; throw through `throw-illegal-arg!` (no `new` exists), `Util/hash`
 ;; is the private `hash-code` native, `into1`/`reduce1` are

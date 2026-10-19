@@ -433,6 +433,7 @@ fn is_curated_fqn(fqn: &str) -> bool {
             | "java.io.UncheckedIOException"
             | "java.util.NoSuchElementException"
             | "java.util.concurrent.ExecutionException"
+            | "java.util.concurrent.CancellationException"
             | "java.lang.reflect.InvocationTargetException"
             | "clojure.lang.Compiler$CompilerException"
     )

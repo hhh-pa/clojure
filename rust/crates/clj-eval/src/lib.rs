@@ -28,7 +28,7 @@ pub mod ns;
 pub mod seqs;
 pub mod vars;
 
-pub use env::{Bindings, Env, Namespace, NamespaceRegistry, VarState};
+pub use env::{Bindings, Env, Namespace, NamespaceRegistry, SharedRegistry, VarState};
 pub use error::{CompileError, NativeError, Signal, Verb, jvm_class_of, simple_class_of, span_of};
 pub use eval::{Evaluator, SourceError};
 pub use expr::{

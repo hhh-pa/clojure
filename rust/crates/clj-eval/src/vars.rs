@@ -73,9 +73,9 @@ fn native_alter_var_root(eval: &mut Evaluator, args: &[Value]) -> Result<Value, 
     // A throwing `f` leaves the root untouched (the install runs
     // only on success, probe37 `avr-fail-keeps`).
     let next = eval.call(&args[1], &f_args).map_err(signal_to_native)?;
-    if let Some(st) = eval.registry.state_mut(var.id) {
+    eval.registry.with_state_mut(var.id, |st| {
         st.root = Some(next.clone());
-    }
+    });
     Ok(next)
 }
 
@@ -207,30 +207,37 @@ pub(crate) fn meta_of(eval: &Evaluator, v: &Value) -> Option<Map> {
     match v {
         Value::Var(var) => eval.registry.state(var.id)?.meta.clone(),
         Value::Atom(a) => a.meta(),
+        Value::Future(f) => f.meta(),
+        Value::Promise(p) => p.meta(),
         Value::Symbol(s) => s.meta().cloned(),
         Value::List(l) => l.meta().cloned(),
         Value::Vector(x) => x.meta().cloned(),
         Value::Map(m) => m.meta().cloned(),
         Value::Set(s) => s.meta().cloned(),
-        Value::Extension(_) => {
-            if let Some(c) = as_closure(v) {
-                return c.meta.clone();
-            }
-            if let Some(n) = as_native(v) {
-                return n.meta.clone();
-            }
-            if let Some(ns) = as_ns(v) {
-                // Handles pin their generation (stale ones read the tombstone).
-                return eval
-                    .registry
-                    .ns_for_handle(&ns.name, ns.id)?
-                    .meta()
-                    .cloned();
-            }
-            None
-        }
+        Value::Extension(_) => extension_meta(eval, v),
         _ => None,
     }
+}
+
+/// An extension value's metadata (split from [`meta_of`] for the
+/// complexity budget): closures and natives carry it, namespace
+/// handles pin their generation (stale ones read the tombstone),
+/// anything else reads nil.
+fn extension_meta(eval: &Evaluator, v: &Value) -> Option<Map> {
+    if let Some(c) = as_closure(v) {
+        return c.meta.clone();
+    }
+    if let Some(n) = as_native(v) {
+        return n.meta.clone();
+    }
+    if let Some(ns) = as_ns(v) {
+        return eval
+            .registry
+            .ns_for_handle(&ns.name, ns.id)?
+            .meta()
+            .cloned();
+    }
+    None
 }
 
 fn native_meta(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
@@ -244,9 +251,13 @@ fn native_meta(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErro
 fn check_iobj(obj: &Value) -> Result<(), NativeError> {
     match obj {
         Value::Nil => Err(npe(NIL_WITHMETA_NPE)),
-        Value::Symbol(_) | Value::List(_) | Value::Vector(_) | Value::Map(_) | Value::Set(_) => {
-            Ok(())
-        }
+        Value::Symbol(_)
+        | Value::List(_)
+        | Value::Vector(_)
+        | Value::Map(_)
+        | Value::Set(_)
+        | Value::Future(_)
+        | Value::Promise(_) => Ok(()),
         Value::Extension(e) => {
             let is_fn = e.as_any().downcast_ref::<Closure>().is_some()
                 || e.as_any().downcast_ref::<NativeFn>().is_some();
@@ -276,21 +287,33 @@ fn with_meta_val(obj: &Value, meta: &Value) -> Result<Value, NativeError> {
         Value::Vector(x) => Ok(Value::Vector(x.clone().with_meta(meta))),
         Value::Map(m) => Ok(Value::Map(m.clone().with_meta(meta))),
         Value::Set(s) => Ok(Value::Set(s.clone().with_meta(meta))),
-        Value::Extension(e) => {
-            if let Some(c) = e.as_any().downcast_ref::<Closure>() {
-                let mut next = c.clone();
-                next.meta = meta;
-                return Ok(Value::Extension(Arc::new(next)));
-            }
-            if let Some(n) = e.as_any().downcast_ref::<NativeFn>() {
-                let mut next = n.clone();
-                next.meta = meta;
-                return Ok(Value::Extension(Arc::new(next)));
-            }
-            Err(cast_err(obj, IOBJ_CLASS))
-        }
+        // New handles sharing the outcome/latch cell (the reify's
+        // `withMeta` field copy — the original keeps its meta).
+        Value::Future(f) => Ok(Value::Future(f.with_meta(meta))),
+        Value::Promise(p) => Ok(Value::Promise(p.with_meta(meta))),
+        Value::Extension(e) => with_meta_extension(obj, e, meta),
         _ => Err(cast_err(obj, IOBJ_CLASS)),
     }
+}
+
+/// Attach `meta` to a function extension value (split from
+/// [`with_meta_val`] for the complexity budget).
+fn with_meta_extension(
+    obj: &Value,
+    e: &Arc<dyn clj_value::ExtensionValue>,
+    meta: Option<Map>,
+) -> Result<Value, NativeError> {
+    if let Some(c) = e.as_any().downcast_ref::<Closure>() {
+        let mut next = c.clone();
+        next.meta = meta;
+        return Ok(Value::Extension(Arc::new(next)));
+    }
+    if let Some(n) = e.as_any().downcast_ref::<NativeFn>() {
+        let mut next = n.clone();
+        next.meta = meta;
+        return Ok(Value::Extension(Arc::new(next)));
+    }
+    Err(cast_err(obj, IOBJ_CLASS))
 }
 
 fn native_with_meta(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
@@ -319,6 +342,9 @@ fn as_ref_target(v: &Value) -> Result<RefTarget, NativeError> {
     match v {
         Value::Var(var) => Ok(RefTarget::Var(var.id)),
         Value::Atom(a) => Ok(RefTarget::Atom(a.clone())),
+        // Futures and promises carry `IObj` meta but are not
+        // `IReference`s (no validator/watches to alter).
+        Value::Future(_) | Value::Promise(_) => Err(cast_err(v, IREF_CLASS)),
         Value::Extension(_) => match as_ns(v) {
             Some(ns) => Ok(RefTarget::Ns(ns.name.to_string(), ns.id)),
             None => Err(cast_err(v, IREF_CLASS)),
@@ -330,15 +356,15 @@ fn as_ref_target(v: &Value) -> Result<RefTarget, NativeError> {
 fn install_ref_meta(eval: &mut Evaluator, target: &RefTarget, meta: Option<Map>) {
     match target {
         RefTarget::Var(id) => {
-            if let Some(st) = eval.registry.state_mut(*id) {
+            eval.registry.with_state_mut(*id, |st| {
                 st.meta = meta;
-            }
+            });
         }
         RefTarget::Ns(name, id) => {
             // Handles pin their generation (stale ones write the tombstone).
-            if let Some(ns) = eval.registry.ns_for_handle_mut(name, *id) {
+            eval.registry.with_handle_mut(name, *id, |ns| {
                 ns.set_meta(meta);
-            }
+            });
         }
         RefTarget::Atom(a) => {
             a.lock().meta = meta;

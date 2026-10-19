@@ -925,9 +925,9 @@ fn top_do_splits_each_element() {
         Arc::new(|e, _| {
             let sym = Symbol::new(Some("user"), "t-made");
             let id = e.registry.intern(&sym);
-            if let Some(state) = e.registry.state_mut(id) {
+            e.registry.with_state_mut(id, |state| {
                 state.root = Some(Value::Int(5));
-            }
+            });
             Ok(Value::Nil)
         }),
     );
@@ -944,9 +944,9 @@ fn top_do_splits_each_element() {
         Arc::new(|e, _| {
             let sym = Symbol::new(Some("user"), "t-made");
             let id = e.registry.intern(&sym);
-            if let Some(state) = e.registry.state_mut(id) {
+            e.registry.with_state_mut(id, |state| {
                 state.root = Some(Value::Int(5));
-            }
+            });
             Ok(Value::Nil)
         }),
     );

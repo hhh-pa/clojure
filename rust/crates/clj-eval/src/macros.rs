@@ -53,20 +53,24 @@ pub(crate) struct MacroRef {
 /// Whether a var id is a macro (`:macro` meta truthy).
 pub(crate) fn is_macro_var(eval: &Evaluator, id: u64) -> bool {
     let probe = Value::Keyword(Keyword::new(None, "macro"));
-    eval.registry
-        .state(id)
-        .and_then(|s| s.meta.as_ref()?.get(&probe))
-        .is_some_and(Value::is_truthy)
+    eval.registry.state(id).is_some_and(|s| {
+        s.meta
+            .as_ref()
+            .and_then(|m| m.get(&probe))
+            .is_some_and(Value::is_truthy)
+    })
 }
 
 /// Whether a var id is private (`:private` meta truthy; cleared
 /// metas read public).
 pub(crate) fn is_private_var(eval: &Evaluator, id: u64) -> bool {
     let probe = Value::Keyword(Keyword::new(None, "private"));
-    eval.registry
-        .state(id)
-        .and_then(|s| s.meta.as_ref()?.get(&probe))
-        .is_some_and(Value::is_truthy)
+    eval.registry.state(id).is_some_and(|s| {
+        s.meta
+            .as_ref()
+            .and_then(|m| m.get(&probe))
+            .is_some_and(Value::is_truthy)
+    })
 }
 
 /// Whether a symbol names a builtin-macro var.

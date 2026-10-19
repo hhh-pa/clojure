@@ -441,15 +441,15 @@ machine-read — keep `| var | status | notes |` rows exact.
 | `shutdown-agents` | out-of-scope | S6 concurrency |
 | `delay` | implemented | concurrency.rs delay_rows (delay* form over trapped closure) |
 | `force` | implemented | concurrency.rs force_rows (non-delays pass through) |
-| `deref` | implemented | concurrency.rs deref_rows (1-arity atoms/delays/vars; timeout arity S6B) |
-| `future` | out-of-scope | S6 concurrency |
-| `future-call` | out-of-scope | S6 concurrency |
-| `future?` | out-of-scope | S6 concurrency |
-| `future-cancel` | out-of-scope | S6 concurrency |
-| `future-done?` | out-of-scope | S6 concurrency |
-| `promise` | out-of-scope | S6 concurrency |
-| `deliver` | out-of-scope | S6 concurrency |
-| `realized?` | implemented | concurrency.rs realized_rows (delays + lazy seqs; atoms CCE) |
+| `deref` | implemented | concurrency.rs deref_rows + deref_timeout_rows (1-arity atoms/delays/vars/futures/promises; 3-arity IBlockingDeref with Future-cast-first) |
+| `future` | implemented | concurrency.rs future_rows (core.clj macro over future-call) |
+| `future-call` | implemented | concurrency.rs future_rows (binding conveyance, cached failures) |
+| `future?` | implemented | concurrency.rs future_pred_rows (futures only; promises false) |
+| `future-cancel` | implemented | concurrency.rs future_cancel_rows (bool; no interrupt) |
+| `future-done?` | implemented | concurrency.rs future_pred_rows (done incl. cancelled) |
+| `promise` | implemented | concurrency.rs promise_rows (pending latch, invokable) |
+| `deliver` | implemented | concurrency.rs promise_rows (invokes; first wins) |
+| `realized?` | implemented | concurrency.rs realized_rows (delays + lazy seqs + futures/promises; atoms CCE) |
 | `send` | out-of-scope | S6 concurrency |
 | `send-off` | out-of-scope | S6 concurrency |
 | `send-via` | out-of-scope | S6 concurrency |

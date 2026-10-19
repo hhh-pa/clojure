@@ -393,7 +393,11 @@ fn ns_map_family() {
             Value::Keyword(clj_value::Keyword::new(None, "private")),
             Value::Bool(true),
         );
-    eval.registry.state_mut(priv_id).unwrap().meta = Some(meta);
+    eval.registry
+        .with_state_mut(priv_id, |st| {
+            st.meta = Some(meta);
+        })
+        .unwrap();
     run(
         &mut eval,
         "(do (create-ns 'usefx) (in-ns 'usefx) (clojure.core/refer 'fx :only '[pub]) (clojure.core/in-ns 'user))",
@@ -575,7 +579,11 @@ fn refer_private_and_shadow() {
             Value::Keyword(clj_value::Keyword::new(None, "private")),
             Value::Bool(true),
         );
-    eval.registry.state_mut(priv_id).unwrap().meta = Some(meta);
+    eval.registry
+        .with_state_mut(priv_id, |st| {
+            st.meta = Some(meta);
+        })
+        .unwrap();
     assert_eq!(
         uncaught(&mut eval, "(refer 'pl :only '[priv])"),
         "java.lang.IllegalAccessError | priv is not public"

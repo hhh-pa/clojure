@@ -181,6 +181,8 @@ fn ref_or_collection_type_name(v: &Value) -> &'static str {
         Value::Transient(_) => "Transient",
         Value::Atom(_) => "Atom",
         Value::Delay(_) => "Delay",
+        Value::Future(_) => "Future",
+        Value::Promise(_) => "Promise",
         _ => collection_type_name(v),
     }
 }

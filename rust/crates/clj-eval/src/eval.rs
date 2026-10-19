@@ -17,11 +17,11 @@ use std::sync::Arc;
 
 use clj_reader::{ReaderOpts, Span, read_all};
 use clj_value::{
-    Delay, Keyword, List, Map, Symbol, ThrowClass, Throwable, Value, Var, Vector, new_map,
+    Delay, Keyword, List, Map, Promise, Symbol, ThrowClass, Throwable, Value, Var, Vector, new_map,
 };
 
 use crate::coll::native_nth;
-use crate::env::{Bindings, Env, NamespaceRegistry};
+use crate::env::{Bindings, Env, SharedRegistry};
 use crate::error::{CompileError, NativeError, Signal, jvm_class_of, span_of};
 use crate::expr::{Analyzer, CaseTest, Catch, Expr, MapPattern, Pattern, pattern_names};
 use crate::ext::{Closure, NativeFn, NsHandle, as_closure, as_native};
@@ -91,17 +91,16 @@ fn case_shift_mask(key: i32, shift: i32, mask: i32) -> i32 {
     }
 }
 
-/// The evaluator: namespace registry, bindings, load path, and the
-/// deterministic counters (form/fn numbering for display names, one
-/// identity sequence for throwables/closures/natives).
+/// The evaluator: shared lineage state (namespace registry plus
+/// identity counters), per-thread bindings, load path, spawned
+/// future threads, and the ambient native call span. `Send + Sync`
+/// (the shared state travels by `Arc`); per-thread evaluators fork
+/// over one lineage (see [`fork_for_thread`](Self::fork_for_thread)).
 pub struct Evaluator {
-    pub registry: NamespaceRegistry,
+    pub registry: SharedRegistry,
     bindings: Bindings,
     source: Arc<str>,
-    eval_seq: u64,
-    fn_seq: u64,
-    next_id: u64,
-    gensym: u64,
+    future_threads: Arc<std::sync::Mutex<Vec<std::thread::JoinHandle<()>>>>,
     native_call_span: Option<Span>,
 }
 
@@ -124,7 +123,7 @@ impl Evaluator {
     /// registry from [`new_bare`](Self::new_bare) instead).
     #[must_use]
     pub fn new(source: &str) -> Self {
-        let mut this = Self::new_bare(source);
+        let this = Self::new_bare(source);
         this.registry.ensure_ns("user");
         this.registry.set_current("user");
         this
@@ -136,15 +135,48 @@ impl Evaluator {
     #[must_use]
     pub fn new_bare(source: &str) -> Self {
         Self {
-            registry: NamespaceRegistry::new(),
+            registry: SharedRegistry::new(),
             bindings: Bindings::new(),
             source: Arc::from(source),
-            eval_seq: 0,
-            fn_seq: 0,
-            next_id: 1,
-            gensym: 1,
+            future_threads: Arc::new(std::sync::Mutex::new(Vec::new())),
             native_call_span: None,
         }
+    }
+
+    /// Fork a per-thread evaluator over this evaluator's lineage
+    /// (S6B D1): the namespace registry, identity counters, and
+    /// future-thread list are shared, while `bindings` (the
+    /// conveyed snapshot — like `bound-fn`'s `resetThreadBindingFrame`)
+    /// is installed as the whole thread-binding stack. `def`s on any
+    /// fork are globally visible; bindings stay thread-local. The
+    /// current-namespace *pointer* is lineage-global (the JVM keeps
+    /// it thread-local — a port fence), but resolution reads the
+    /// thread-local `*ns*` binding first, so an `in-ns` on one
+    /// thread never redirects another's lookups.
+    pub(crate) fn fork_for_thread(&self, bindings: Bindings) -> Self {
+        Self {
+            registry: self.registry.clone(),
+            bindings,
+            source: Arc::clone(&self.source),
+            future_threads: Arc::clone(&self.future_threads),
+            native_call_span: None,
+        }
+    }
+
+    /// Snapshot the thread bindings for conveyance (the
+    /// `binding-conveyor-fn` frame clone, installed by
+    /// [`fork_for_thread`](Self::fork_for_thread)).
+    pub(crate) fn clone_bindings(&self) -> Bindings {
+        self.bindings.clone()
+    }
+
+    /// Record a spawned future thread (S6C's `shutdown-agents`
+    /// drains and joins these).
+    pub(crate) fn push_future_thread(&self, handle: std::thread::JoinHandle<()>) {
+        self.future_threads
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(handle);
     }
 
     /// The innermost call form's span while a native runs (set by
@@ -155,17 +187,15 @@ impl Evaluator {
     }
 
     /// The next `fn` display sequence number (the analyzer
-    /// numbers every `fn` it analyzes).
+    /// numbers every `fn` it analyzes; lineage-shared, so forked
+    /// evaluators never collide).
     pub(crate) fn next_fn_seq(&mut self) -> u64 {
-        self.fn_seq += 1;
-        self.fn_seq
+        self.registry.next_fn_seq()
     }
 
-    /// The next `gensym` counter value (per-boot, from 1).
+    /// The next `gensym` counter value (per-boot lineage, from 1).
     pub(crate) fn next_gensym(&mut self) -> u64 {
-        let n = self.gensym;
-        self.gensym += 1;
-        n
+        self.registry.next_gensym()
     }
 
     /// Reset the `gensym` counter to 1: `boot` loads the embedded
@@ -174,7 +204,7 @@ impl Evaluator {
     /// pins `G__1` first). Sound: boot-time expansions evaluate to
     /// closed values, so reused numbers can never capture them.
     pub(crate) fn reset_gensym(&mut self) {
-        self.gensym = 1;
+        self.registry.reset_gensym();
     }
 
     /// The `*ns*`-synced current namespace name: the thread-local
@@ -196,16 +226,14 @@ impl Evaluator {
     }
 
     pub(crate) fn next_id(&mut self) -> u64 {
-        let id = self.next_id;
-        self.next_id += 1;
-        id
+        self.registry.next_id()
     }
 
     /// Analyze one form against the current namespace (tests use
     /// this for contract errors without evaluating).
     pub fn analyze(&mut self, form: &Value) -> Result<Expr, CompileError> {
         let source = Arc::clone(&self.source);
-        let seq = self.eval_seq;
+        let seq = self.registry.eval_seq();
         Analyzer::new(&source, self, seq).analyze(form, Span::new(1, 1), true)
     }
 
@@ -258,7 +286,7 @@ impl Evaluator {
             }
             return Ok(last);
         }
-        self.eval_seq += 1;
+        self.registry.bump_eval_seq();
         let expr = self.analyze(&expanded).map_err(|e| self.compile_err(e))?;
         match self.eval(&expr, &Env::new()) {
             Ok(v) => Ok(v),
@@ -368,9 +396,9 @@ impl Evaluator {
             func,
             meta: None,
         }));
-        if let Some(state) = self.registry.state_mut(var_id) {
+        self.registry.with_state_mut(var_id, |state| {
             state.root = Some(native.clone());
-        }
+        });
         native
     }
 
@@ -839,15 +867,15 @@ impl Evaluator {
             }
         }
         for (id, _, value) in &saves {
-            if let Some(st) = self.registry.state_mut(*id) {
+            self.registry.with_state_mut(*id, |st| {
                 st.root = Some(value.clone());
-            }
+            });
         }
         let result = self.eval_body(body, env);
         for (id, saved, _) in saves.iter().rev() {
-            if let Some(st) = self.registry.state_mut(*id) {
+            self.registry.with_state_mut(*id, |st| {
                 st.root = saved.clone();
-            }
+            });
         }
         result
     }
@@ -912,46 +940,48 @@ impl Evaluator {
         let dynamic = Self::dynamic_of(sym);
         let cur = self.current_ns_name();
         let cur_id = self.registry.get(&cur).map_or(0, |ns| ns.id());
-        if let Some(state) = self.registry.state_mut(id) {
-            state.root = Some(Value::Extension(Arc::new(closure)));
-            let mut meta = sym.meta().cloned().unwrap_or_else(new_map);
-            if let Some(attr) = attr {
-                for (k, v) in attr.iter() {
-                    meta = meta.insert(k.clone(), v.clone());
-                }
+        let mut meta = sym.meta().cloned().unwrap_or_else(new_map);
+        if let Some(attr) = attr {
+            for (k, v) in attr.iter() {
+                meta = meta.insert(k.clone(), v.clone());
             }
-            meta = meta
-                .insert(
-                    Value::Keyword(Keyword::new(None, "macro")),
-                    Value::Bool(true),
-                )
-                .insert(
-                    Value::Keyword(Keyword::new(None, "arglists")),
-                    Value::List(List::from_vec(arglists.to_vec())),
-                );
-            let doc_key = Value::Keyword(Keyword::new(None, "doc"));
-            if let Some(doc) = doc.filter(|_| meta.get(&doc_key).is_none()) {
-                meta = meta.insert(doc_key, Value::Str(Arc::from(doc)));
-            }
-            let auto = [
-                ("line", Value::Int(i64::from(span.line))),
-                ("column", Value::Int(i64::from(span.col))),
-                ("file", Value::Str(Arc::clone(&self.source))),
-                ("name", Value::Symbol(Symbol::new(None, sym.name()))),
-                (
-                    "ns",
-                    Value::Extension(Arc::new(NsHandle {
-                        name: Arc::from(cur.as_str()),
-                        id: cur_id,
-                    })),
-                ),
-            ];
-            for (key, value) in auto {
-                meta = meta.insert(Value::Keyword(Keyword::new(None, key)), value);
-            }
+        }
+        meta = meta
+            .insert(
+                Value::Keyword(Keyword::new(None, "macro")),
+                Value::Bool(true),
+            )
+            .insert(
+                Value::Keyword(Keyword::new(None, "arglists")),
+                Value::List(List::from_vec(arglists.to_vec())),
+            );
+        let doc_key = Value::Keyword(Keyword::new(None, "doc"));
+        if let Some(doc) = doc.filter(|_| meta.get(&doc_key).is_none()) {
+            meta = meta.insert(doc_key, Value::Str(Arc::from(doc)));
+        }
+        let auto = [
+            ("line", Value::Int(i64::from(span.line))),
+            ("column", Value::Int(i64::from(span.col))),
+            ("file", Value::Str(Arc::clone(&self.source))),
+            ("name", Value::Symbol(Symbol::new(None, sym.name()))),
+            (
+                "ns",
+                Value::Extension(Arc::new(NsHandle {
+                    name: Arc::from(cur.as_str()),
+                    id: cur_id,
+                })),
+            ),
+        ];
+        for (key, value) in auto {
+            let key = Value::Keyword(Keyword::new(None, key));
+            meta = meta.insert(key, value);
+        }
+        let root = Value::Extension(Arc::new(closure));
+        self.registry.with_state_mut(id, |state| {
+            state.root = Some(root);
             state.meta = Some(meta);
             state.dynamic = dynamic;
-        }
+        });
         Ok(Value::Var(Var {
             id,
             sym: sym.clone(),
@@ -1041,35 +1071,35 @@ impl Evaluator {
         let dynamic = Self::dynamic_of(sym);
         let cur = self.current_ns_name();
         let cur_id = self.registry.get(&cur).map_or(0, |ns| ns.id());
-        if let Some(state) = self.registry.state_mut(id) {
+        let mut meta = sym.meta().cloned().unwrap_or_else(new_map);
+        if let Some(doc) = doc {
+            let key = Value::Keyword(Keyword::new(None, "doc"));
+            meta = meta.insert(key, Value::Str(Arc::from(doc.as_str())));
+        }
+        let auto = [
+            ("line", Value::Int(i64::from(span.line))),
+            ("column", Value::Int(i64::from(span.col))),
+            ("file", Value::Str(Arc::clone(&self.source))),
+            ("name", Value::Symbol(Symbol::new(None, sym.name()))),
+            (
+                "ns",
+                Value::Extension(Arc::new(NsHandle {
+                    name: Arc::from(cur.as_str()),
+                    id: cur_id,
+                })),
+            ),
+        ];
+        for (key, val) in auto {
+            let key = Value::Keyword(Keyword::new(None, key));
+            meta = meta.insert(key, val);
+        }
+        self.registry.with_state_mut(id, |state| {
             if let Some(v) = value {
                 state.root = Some(v);
             }
-            let mut meta = sym.meta().cloned().unwrap_or_else(new_map);
-            if let Some(doc) = doc {
-                let key = Value::Keyword(Keyword::new(None, "doc"));
-                meta = meta.insert(key, Value::Str(Arc::from(doc.as_str())));
-            }
-            let auto = [
-                ("line", Value::Int(i64::from(span.line))),
-                ("column", Value::Int(i64::from(span.col))),
-                ("file", Value::Str(Arc::clone(&self.source))),
-                ("name", Value::Symbol(Symbol::new(None, sym.name()))),
-                (
-                    "ns",
-                    Value::Extension(Arc::new(NsHandle {
-                        name: Arc::from(cur.as_str()),
-                        id: cur_id,
-                    })),
-                ),
-            ];
-            for (key, val) in auto {
-                let key = Value::Keyword(Keyword::new(None, key));
-                meta = meta.insert(key, val);
-            }
             state.meta = Some(meta);
             state.dynamic = dynamic;
-        }
+        });
         Ok(Value::Var(Var {
             id,
             sym: sym.clone(),
@@ -1197,8 +1227,8 @@ impl Evaluator {
 
     /// The §E7 `IFn` table: closures/natives, keywords, symbols,
     /// vectors, maps, sets, vars (deref-and-delegate), unbounds
-    /// (the `IllegalStateException`), and the `ClassCastException`
-    /// for everything else.
+    /// (the `IllegalStateException`), promises (one arg delivers),
+    /// and the `ClassCastException` for everything else.
     /// Invoke any value (natives reuse this for `:rename`
     /// fallbacks and other higher-order calls).
     pub(crate) fn call(&mut self, callee: &Value, args: &[Value]) -> Result<Value, Signal> {
@@ -1251,7 +1281,25 @@ impl Evaluator {
                 ThrowClass::IllegalStateException,
                 format!("Attempting to call unbound fn: #'{}", u.sym),
             ))),
+            Value::Promise(p) => self.invoke_promise(p, args),
             _ => Err(self.throw(NativeError::cast(&jvm_class_of(callee), "clojure.lang.IFn"))),
+        }
+    }
+
+    /// Invoke a promise: exactly one argument delivers it (the
+    /// first delivery wins, returning the promise; later ones
+    /// return `nil`). Any other arity is the `ArityException`
+    /// (the JVM's undeclared reify overloads throw
+    /// `AbstractMethodError` instead — a pinned divergence, since
+    /// the port has no such class).
+    fn invoke_promise(&mut self, p: &Promise, args: &[Value]) -> Result<Value, Signal> {
+        if args.len() != 1 {
+            return Err(self.throw(NativeError::arity(p.jvm_class(), args.len())));
+        }
+        if p.deliver(args[0].clone()) {
+            Ok(Value::Promise(p.clone()))
+        } else {
+            Ok(Value::Nil)
         }
     }
 

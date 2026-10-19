@@ -784,6 +784,27 @@ fn realized_rows() {
         run_last(&mut eval, "(let [s (map inc [1])] (first s) (realized? s))"),
         "true"
     );
+    // Futures and promises (S6B): pending until settled (failures
+    // and cancellations count as realized).
+    assert_eq!(
+        run_last(&mut eval, "(let [f (future @(promise))] (realized? f))"),
+        "false"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(let [f (future 1)] @f (realized? f))"),
+        "true"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(let [p (promise)] (deliver p 1) (realized? p))"),
+        "true"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [f (future (throw (ex-info \"b\" {})))] (try @f (catch Exception e :x)) (realized? f))"
+        ),
+        "true"
+    );
 }
 
 #[test]
@@ -1052,5 +1073,552 @@ fn print_str_rows() {
     assert_eq!(
         uncaught(&mut eval, "((atom 1))"),
         "java.lang.ClassCastException | Cannot cast clojure.lang.Atom to clojure.lang.IFn"
+    );
+}
+
+fn assert_future_object(pr: &str) {
+    assert_object_shape(pr, "clojure.core$future_call$reify");
+}
+
+fn assert_promise_object(pr: &str) {
+    assert_object_shape(pr, "clojure.core$promise$reify");
+}
+
+#[test]
+fn evaluator_is_send_sync() {
+    fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<Evaluator>();
+}
+
+#[test]
+fn future_rows() {
+    let mut eval = boot();
+    assert_eq!(run_last(&mut eval, "@(future 1)"), "1");
+    assert_eq!(run_last(&mut eval, "(deref (future 1 2 3))"), "3");
+    assert_eq!(
+        run_last(&mut eval, "(deref (future-call (fn [] 41)))"),
+        "41"
+    );
+    // Bindings convey from the spawning thread (P3).
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(do (def ^:dynamic s6b-dx 1) (binding [s6b-dx 2] @(future s6b-dx)))"
+        ),
+        "2"
+    );
+    // ... but stay thread-local: the body cannot rebind the parent.
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(do (def ^:dynamic s6b-dy 1) @(future (binding [s6b-dy 9] s6b-dy)) s6b-dy)"
+        ),
+        "1"
+    );
+    assert_eq!(
+        class_of(&mut eval, "(future 1)"),
+        "clojure.core$future_call$reify"
+    );
+    assert_future_object(&run_last(&mut eval, "(future 1)"));
+    // `str` renders the `toString` (`Class@hex`).
+    let rendered = run_last(&mut eval, "(str (future 1))");
+    assert!(
+        rendered.starts_with("\"clojure.core$future_call$reify@"),
+        "bad future str: {rendered}"
+    );
+    // Failures never surface at spawn (no eager validation).
+    assert_future_object(&run_last(&mut eval, "(future-call 5)"));
+    // `force` passes futures through.
+    assert_eq!(run_last(&mut eval, "(future? (force (future 1)))"), "true");
+    assert_eq!(
+        uncaught(&mut eval, "(future-call)"),
+        "clojure.lang.ArityException | Wrong number of args (0) passed to: clojure.core/future-call"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(future-call (fn []) (fn []))"),
+        "clojure.lang.ArityException | Wrong number of args (2) passed to: clojure.core/future-call"
+    );
+}
+
+#[test]
+fn future_pred_rows() {
+    let mut eval = boot();
+    // `future?` is true of futures only (promises are not Futures).
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(vec (map future? [(future 1) (promise) 1 nil (delay 1) \"s\"]))"
+        ),
+        "[true false false false false false]"
+    );
+    // `future-done?` reports settledness (completion AND cancel).
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [f (future 1)] [@f (future-done? f) (realized? f)])"
+        ),
+        "[1 true true]"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(future-done? (future @(promise)))"),
+        "false"
+    );
+    // Promises fail the `Future` cast (they only share the
+    // `IBlockingDeref` timeout path).
+    assert_eq!(
+        uncaught(&mut eval, "(future-done? (promise))"),
+        cce("clojure.core$promise$reify", "java.util.concurrent.Future")
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(future-done? (delay 1))"),
+        cce("clojure.lang.Delay", "java.util.concurrent.Future")
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(future-done? 5)"),
+        cce("java.lang.Long", "java.util.concurrent.Future")
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(future-done? nil)"),
+        "java.lang.NullPointerException | Cannot invoke \"java.util.concurrent.Future.isDone()\" because \"f\" is null"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(future-done?)"),
+        "clojure.lang.ArityException | Wrong number of args (0) passed to: clojure.core/future-done?"
+    );
+}
+
+#[test]
+fn future_throw_cached() {
+    let mut eval = boot();
+    eval.install_native(
+        "user",
+        "s6b-boom",
+        std::sync::Arc::new(|_, _| {
+            Err(clj_eval::NativeError::new(
+                clj_value::ThrowClass::Exception,
+                "boom".to_owned(),
+            ))
+        }),
+    );
+    run(&mut eval, "(def s6b-ff (future-call s6b-boom))");
+    // A failure rethrows the same shape on every deref (the first
+    // deref rendezvous with completion; only then is `realized?`
+    // deterministic).
+    let shape = "java.util.concurrent.ExecutionException | java.lang.Exception: boom";
+    assert_eq!(uncaught(&mut eval, "@s6b-ff"), shape);
+    assert_eq!(run_last(&mut eval, "(realized? s6b-ff)"), "true");
+    assert_eq!(run_last(&mut eval, "(future-done? s6b-ff)"), "true");
+    assert_eq!(uncaught(&mut eval, "@s6b-ff"), shape);
+    assert_eq!(uncaught(&mut eval, "(deref s6b-ff 5000 :t)"), shape);
+    // Wrappers are fresh per `deref`; the cause is the cached object.
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(try @s6b-ff (catch java.util.concurrent.ExecutionException e1 (try @s6b-ff (catch java.util.concurrent.ExecutionException e2 [(= e1 e2) (= (ex-cause e1) (ex-cause e2))]))))"
+        ),
+        "[false true]"
+    );
+    // A non-function fn fails inside the body (never at spawn).
+    assert_eq!(
+        uncaught(&mut eval, "@(future-call 5)"),
+        "java.util.concurrent.ExecutionException | java.lang.ClassCastException: Cannot cast java.lang.Long to clojure.lang.IFn"
+    );
+    // The `ex-info` message carries its data map (`toString` rule).
+    assert_eq!(
+        uncaught(&mut eval, "@(future (throw (ex-info \"boom\" {:n 1})))"),
+        "java.util.concurrent.ExecutionException | clojure.lang.ExceptionInfo: boom {:n 1}"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(try @(future (throw (ex-info \"boom\" {:n 1}))) (catch java.util.concurrent.ExecutionException e [(ex-message e) (ex-message (ex-cause e)) (ex-data (ex-cause e))]))"
+        ),
+        "[\"clojure.lang.ExceptionInfo: boom {:n 1}\" \"boom\" {:n 1}]"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "@(future (throw (ex-info nil {:n 1})))"),
+        "java.util.concurrent.ExecutionException | clojure.lang.ExceptionInfo: null {:n 1}"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "@(future (throw (ex-info \"x\" nil)))"),
+        "java.util.concurrent.ExecutionException | clojure.lang.ExceptionInfo: x {}"
+    );
+    // `ExecutionException` extends `Exception` (not `RuntimeException`).
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(try @(future (throw (ex-info \"b\" {}))) (catch RuntimeException e :r) (catch Exception e :e))"
+        ),
+        ":e"
+    );
+}
+
+#[test]
+fn deref_timeout_rows() {
+    let mut eval = boot();
+    // Only futures/promises honor timeouts: atoms, delays, vars, and
+    // the rest fail the `Future` cast first (P5).
+    assert_eq!(
+        uncaught(&mut eval, "(deref (atom 1) 50 :t)"),
+        cce("clojure.lang.Atom", "java.util.concurrent.Future")
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(deref (delay 1) 50 :t)"),
+        cce("clojure.lang.Delay", "java.util.concurrent.Future")
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(do (def s6b-tv 1) (deref #'s6b-tv 50 :t))"),
+        cce("clojure.lang.Var", "java.util.concurrent.Future")
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(deref 5 50 :t)"),
+        cce("java.lang.Long", "java.util.concurrent.Future")
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(deref nil 50 :t)"),
+        "java.lang.NullPointerException | Cannot invoke \"java.util.concurrent.Future.get(long, java.util.concurrent.TimeUnit)\" because \"fut\" is null"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(deref (future 1) 50)"),
+        "clojure.lang.ArityException | Wrong number of args (2) passed to: clojure.core/deref"
+    );
+    // The timeout converts like `.get`'s `long` (non-numbers fail to
+    // `Number`; `nil` trips the `doubleValue` NPE).
+    for (msec, want) in [
+        ("\"50\"", cce("java.lang.String", "java.lang.Number")),
+        (":x", cce("clojure.lang.Keyword", "java.lang.Number")),
+        ("true", cce("java.lang.Boolean", "java.lang.Number")),
+        ("\\a", cce("java.lang.Character", "java.lang.Number")),
+    ] {
+        assert_eq!(
+            uncaught(&mut eval, &format!("(deref (future 1) {msec} :t)")),
+            want,
+            "for {msec}"
+        );
+    }
+    assert_eq!(
+        uncaught(&mut eval, "(deref (future 1) nil :t)"),
+        "java.lang.NullPointerException | Cannot invoke \"java.lang.Number.doubleValue()\" because \"x\" is null"
+    );
+    // Doubles truncate (`0.9` waits nothing); negatives and zero
+    // check once without waiting.
+    assert_eq!(run_last(&mut eval, "(deref (promise) 0.9 :t)"), ":t");
+    assert_eq!(run_last(&mut eval, "(deref (promise) -5 :t)"), ":t");
+    assert_eq!(run_last(&mut eval, "(deref (promise) 0 :t)"), ":t");
+    assert_eq!(run_last(&mut eval, "(deref (future 1) 5000.9 :t)"), "1");
+    // Conversion runs before the outcome: bad timeouts fail even on
+    // settled futures (and cancelled ones throw only with good ones).
+    assert_eq!(
+        uncaught(&mut eval, "(let [f (future :v)] @f (deref f \"50\" :t))"),
+        cce("java.lang.String", "java.lang.Number")
+    );
+    assert_eq!(
+        run_last(&mut eval, "(let [f (future :v)] @f (deref f 50 :t))"),
+        ":v"
+    );
+}
+
+#[test]
+fn future_timeout_rows() {
+    let mut eval = boot();
+    // A pending body times out (the latch rendezvous keeps this
+    // deterministic: the body cannot finish before the timeout).
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [p (promise)] (deref (future @p :never) 50 :t))"
+        ),
+        ":t"
+    );
+    // A delivery racing the wait lands first (the main thread
+    // delivers before the body can time out).
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [p (promise) f (future (deref p 5000 :slow))] (deliver p :fast) @f)"
+        ),
+        ":fast"
+    );
+    assert_eq!(run_last(&mut eval, "(deref (promise) 50 :t)"), ":t");
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [p (promise)] (deliver p :v) (deref p 50 :t))"
+        ),
+        ":v"
+    );
+}
+
+#[test]
+fn future_cancel_rows() {
+    let mut eval = boot();
+    // Cancelling a pending future settles it: both `deref` arities
+    // throw `CancellationException` (the timeout value is ignored).
+    run(&mut eval, "(def s6b-fc (future @(promise) :never))");
+    assert_eq!(run_last(&mut eval, "(future-cancel s6b-fc)"), "true");
+    assert_eq!(run_last(&mut eval, "(future-done? s6b-fc)"), "true");
+    assert_eq!(run_last(&mut eval, "(realized? s6b-fc)"), "true");
+    let cancelled = "java.util.concurrent.CancellationException | ";
+    assert_eq!(uncaught(&mut eval, "@s6b-fc"), cancelled);
+    assert_eq!(uncaught(&mut eval, "(deref s6b-fc 5000 :t)"), cancelled);
+    // The message is empty (like the port's other message-less throws).
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(try @s6b-fc (catch java.util.concurrent.CancellationException e (ex-message e)))"
+        ),
+        "\"\""
+    );
+    // `CancellationException` extends `IllegalStateException`.
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(try @s6b-fc (catch IllegalStateException e :ise) (catch Throwable t :other))"
+        ),
+        ":ise"
+    );
+    // Cancelling twice, or a completed future, reports false.
+    assert_eq!(run_last(&mut eval, "(future-cancel s6b-fc)"), "false");
+    assert_eq!(
+        run_last(&mut eval, "(let [f (future 1)] @f (future-cancel f))"),
+        "false"
+    );
+    // A bad timeout still converts first on a cancelled future.
+    assert_eq!(
+        uncaught(&mut eval, "(deref s6b-fc \"50\" :t)"),
+        cce("java.lang.String", "java.lang.Number")
+    );
+    // Only futures cancel (promises fail the `Future` cast).
+    assert_eq!(
+        uncaught(&mut eval, "(future-cancel (promise))"),
+        cce("clojure.core$promise$reify", "java.util.concurrent.Future")
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(future-cancel 5)"),
+        cce("java.lang.Long", "java.util.concurrent.Future")
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(future-cancel nil)"),
+        "java.lang.NullPointerException | Cannot invoke \"java.util.concurrent.Future.cancel(boolean)\" because \"f\" is null"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(future-cancel)"),
+        "clojure.lang.ArityException | Wrong number of args (0) passed to: clojure.core/future-cancel"
+    );
+}
+
+#[test]
+fn future_cancel_running_discards() {
+    let mut eval = boot();
+    // A running body cannot be interrupted (pinned divergence): it
+    // runs to completion while its late result is discarded. The
+    // second latch rendezvous with the body's completion.
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [p (promise) q (promise) log (atom []) f (future (do @p (swap! log conj :ran) (deliver q :body-done) :done))] (future-cancel f) (deliver p :go) [@q @log (future-done? f)])"
+        ),
+        "[:body-done [:ran] true]"
+    );
+    run(&mut eval, "(def s6b-fcr (future @(promise) :never))");
+    run_last(&mut eval, "(future-cancel s6b-fcr)");
+    assert_eq!(
+        uncaught(&mut eval, "@s6b-fcr"),
+        "java.util.concurrent.CancellationException | "
+    );
+}
+
+#[test]
+fn future_ns_sharing() {
+    let mut eval = boot();
+    // A `def` inside a future body is globally visible (JVM
+    // namespaces are global).
+    assert_eq!(
+        run_last(&mut eval, "(do @(future (def s6b-shared 42)) s6b-shared)"),
+        "42"
+    );
+    // And a body sees `def`s committed after it spawns (through
+    // `resolve`: the analyzer binds eagerly, like the JVM).
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [p (promise) f (future @p (deref (resolve 's6b-late)))] (def s6b-late :late) (deliver p :go) @f)"
+        ),
+        ":late"
+    );
+    // Conveyed bindings travel with the body (re-proved across the
+    // shared registry: the var resolves on the worker thread).
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(do (def ^:dynamic s6b-bv 1) (binding [s6b-bv 7] @(future (+ s6b-bv 1))))"
+        ),
+        "8"
+    );
+}
+
+#[test]
+fn promise_rows() {
+    let mut eval = boot();
+    // First delivery wins (returning the promise); later ones are nil.
+    assert_eq!(
+        run_last(&mut eval, "(let [p (promise)] (= p (deliver p 1)))"),
+        "true"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [p (promise)] (deliver p 1) [(deliver p 2) @p (realized? p)])"
+        ),
+        "[nil 1 true]"
+    );
+    // A delivered `nil` still realizes (delivery is a transition).
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [p (promise)] [(= p (deliver p nil)) @p (realized? p) (deliver p 2)])"
+        ),
+        "[true nil true nil]"
+    );
+    assert_eq!(run_last(&mut eval, "(realized? (promise))"), "false");
+    assert_promise_object(&run_last(&mut eval, "(promise)"));
+    assert_eq!(
+        class_of(&mut eval, "(promise)"),
+        "clojure.core$promise$reify"
+    );
+    let rendered = run_last(&mut eval, "(str (promise))");
+    assert!(
+        rendered.starts_with("\"clojure.core$promise$reify@"),
+        "bad promise str: {rendered}"
+    );
+    // Pending `deref` blocks until a delivery lands (the future body
+    // below cannot proceed first — the main thread delivers).
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [p (promise) f (future @p)] (deliver p :v) @f)"
+        ),
+        ":v"
+    );
+    // Promises invoke (one arg delivers); `deliver` is an invocation.
+    assert_eq!(
+        run_last(&mut eval, "(let [p (promise)] [(= p (p 5)) @p (p 6)])"),
+        "[true 5 nil]"
+    );
+    assert_eq!(run_last(&mut eval, "(deliver + 5)"), "5");
+    assert_eq!(run_last(&mut eval, "(ifn? (promise))"), "true");
+    assert_eq!(run_last(&mut eval, "(ifn? (future 1))"), "false");
+    // ... so non-functions fail exactly like a call (the evaluator's
+    // cast shapes, without the JDK module verbiage).
+    assert_eq!(
+        uncaught(&mut eval, "(deliver 5 6)"),
+        "java.lang.ClassCastException | Cannot cast java.lang.Long to clojure.lang.IFn"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(deliver nil 1)"),
+        "java.lang.NullPointerException | Cannot invoke nil as a function"
+    );
+    // Other arities are the `ArityException` (the JVM throws
+    // `AbstractMethodError` for its undeclared reify overloads).
+    assert_eq!(
+        uncaught(&mut eval, "((promise))"),
+        "clojure.lang.ArityException | Wrong number of args (0) passed to: clojure.core$promise$reify"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "((promise) 1 2)"),
+        "clojure.lang.ArityException | Wrong number of args (2) passed to: clojure.core$promise$reify"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(promise 1)"),
+        "clojure.lang.ArityException | Wrong number of args (1) passed to: clojure.core/promise"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(deliver (promise))"),
+        "clojure.lang.ArityException | Wrong number of args (1) passed to: clojure.core/deliver"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(deliver (promise) 1 2)"),
+        "clojure.lang.ArityException | Wrong number of args (3) passed to: clojure.core/deliver"
+    );
+}
+
+#[test]
+fn promise_threaded_deliver() {
+    use std::sync::{Arc, Barrier};
+
+    // A Rust-spawned deliverer hands the value to a blocked `deref`
+    // (barrier rendezvous — no sleeps; either order yields the value,
+    // while a broken block would hang or misdeliver).
+    let mut eval = boot();
+    let vs = eval.eval_source("(promise)").unwrap();
+    let Value::Promise(p) = vs[0].clone() else {
+        panic!("expected a promise");
+    };
+    let sym = clj_value::Symbol::new(Some("user"), "s6b-tp");
+    let id = eval.registry.intern(&sym);
+    eval.registry.with_state_mut(id, |st| {
+        st.root = Some(Value::Promise(p.clone()));
+    });
+    let barrier = Arc::new(Barrier::new(2));
+    let rendezvous = Arc::clone(&barrier);
+    let deliverer = std::thread::spawn(move || {
+        rendezvous.wait();
+        assert!(p.deliver(Value::Int(7)));
+    });
+    barrier.wait();
+    assert_eq!(run_last(&mut eval, "@s6b-tp"), "7");
+    deliverer.join().unwrap();
+    assert_eq!(run_last(&mut eval, "@s6b-tp"), "7");
+}
+
+#[test]
+fn promise_meta_rows() {
+    let mut eval = boot();
+    // Futures and promises carry `IObj` meta (the reify behavior).
+    assert_eq!(run_last(&mut eval, "(meta (promise))"), "nil");
+    assert_eq!(run_last(&mut eval, "(meta (future 1))"), "nil");
+    assert_eq!(
+        run_last(&mut eval, "(meta (with-meta (promise) {:a 1}))"),
+        "{:a 1}"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(meta (with-meta (future 1) {:a 1}))"),
+        "{:a 1}"
+    );
+    // `with-meta` shares the cell but not the meta.
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [p (promise) q (with-meta p {:a 1})] [(meta p) (meta q) (= p q) (do (deliver p :v) @q)])"
+        ),
+        "[nil {:a 1} true :v]"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(meta (vary-meta (promise) assoc :a 1))"),
+        "{:a 1}"
+    );
+    // ... but they are not `IReference`s (no validator/watches;
+    // the stable cast shape, like the other `alter-meta!` targets).
+    assert_eq!(
+        uncaught(&mut eval, "(alter-meta! (promise) assoc :a 1)"),
+        "java.lang.ClassCastException | Cannot cast clojure.core$promise$reify to clojure.lang.IReference"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(reset-meta! (future 1) {:a 1})"),
+        "java.lang.ClassCastException | Cannot cast clojure.core$future_call$reify to clojure.lang.IReference"
+    );
+}
+
+#[test]
+fn future_stress_swap() {
+    // Eight futures race `swap!` over one shared atom (2,000
+    // increments, exact total — atoms linearize, like the JVM).
+    let mut eval = boot();
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(do (def s6b-n 8) (def s6b-m 250) (def s6b-a (atom 0)) (def s6b-futs (vec (map (fn [_] (future (dotimes [_ s6b-m] (swap! s6b-a inc)))) (range s6b-n)))) (doseq [f s6b-futs] @f) @s6b-a)"
+        ),
+        "2000"
     );
 }

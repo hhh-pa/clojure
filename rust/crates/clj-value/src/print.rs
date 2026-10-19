@@ -194,6 +194,16 @@ fn print_into(v: &Value, opts: &PrintOpts, level: Option<i64>, out: &mut String)
             )
             .unwrap();
         }
+        Value::Future(f) => {
+            let class = f.jvm_class();
+            let id = f.id();
+            write!(out, "#object[{class} 0x{id:x} \"{class}@{id:x}\"]").unwrap();
+        }
+        Value::Promise(p) => {
+            let class = p.jvm_class();
+            let id = p.id();
+            write!(out, "#object[{class} 0x{id:x} \"{class}@{id:x}\"]").unwrap();
+        }
         Value::Extension(e) => {
             // Realized seqs print as lists with ambient options
             // (length/level truncation applies, like the JVM);
@@ -262,9 +272,16 @@ fn print_meta_prefix(v: &Value, opts: &PrintOpts, level: Option<i64>, out: &mut 
         return;
     }
     // Atoms hold their meta behind the lock (`Value::meta` borrows,
-    // so it cannot serve them — clone it out instead).
-    if let Value::Atom(a) = v {
-        if let Some(m) = a.meta() {
+    // so it cannot serve them — clone it out instead). Futures and
+    // promises carry per-handle meta outside `Value::meta` too.
+    let extra = match v {
+        Value::Atom(a) => Some(a.meta()),
+        Value::Future(f) => Some(f.meta()),
+        Value::Promise(p) => Some(p.meta()),
+        _ => None,
+    };
+    if let Some(meta) = extra {
+        if let Some(m) = meta {
             print_meta_map(&m, opts, level, out);
         }
         return;
@@ -501,6 +518,8 @@ pub fn java_debug(v: &Value) -> String {
         Value::Transient(t) => format!("{}@{:x}", t.jvm_class(), t.id()),
         Value::Atom(a) => format!("clojure.lang.Atom@{:x}", a.id()),
         Value::Delay(d) => format!("clojure.lang.Delay@{:x}", d.id()),
+        Value::Future(f) => format!("{}@{:x}", f.jvm_class(), f.id()),
+        Value::Promise(p) => format!("{}@{:x}", p.jvm_class(), p.id()),
         Value::Extension(e) => e.print(),
         Value::List(_)
         | Value::Vector(_)

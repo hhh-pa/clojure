@@ -16,9 +16,11 @@ mod atom;
 mod compare;
 mod delay;
 mod extension;
+mod future;
 pub mod hasheq;
 mod keyword;
 mod print;
+mod promise;
 mod seq;
 mod symbol;
 mod transient;
@@ -28,11 +30,13 @@ pub use atom::{Atom, AtomState};
 pub use compare::{CompareError, compare};
 pub use delay::{Delay, DelayState};
 pub use extension::{ExtensionValue, ThrowClass, Throwable, Unbound, Var};
+pub use future::{Future, FutureOutcome, FutureState};
 pub use hasheq::{hash_code, hasheq, seq_hash_unsupported};
 pub use keyword::Keyword;
 pub use print::{
     java_debug, java_double_string, pr_to_string, print, print_opts::PrintOpts, print_to_string,
 };
+pub use promise::{Promise, PromiseState};
 pub use seq::{
     CHUNK_SIZE, ConsValue, CycleValue, IterateValue, KeySeqValue, RangeNum, RangeValue,
     RealizedSeq, RepeatValue, Seq, SeqKind, SubVectorValue, ValSeqValue, seq_vec,
