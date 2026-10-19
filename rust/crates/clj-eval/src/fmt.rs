@@ -48,16 +48,7 @@ pub(crate) fn native_format(eval: &mut Evaluator, args: &[Value]) -> Result<Valu
     if args.is_empty() {
         return Err(NativeError::arity("clojure.core/format", 0));
     }
-    let fmt = match &args[0] {
-        Value::Str(s) => s.to_string(),
-        Value::Nil => {
-            return Err(NativeError::new(
-                ThrowClass::NullPointerException,
-                "Cannot invoke \"String.length()\" because \"s\" is null".to_owned(),
-            ));
-        }
-        v => return Err(cce_err(v, "java.lang.String")),
-    };
+    let fmt = format_first_arg(args)?;
     let mut out = String::new();
     let mut rest = fmt.as_str();
     let mut auto_idx = 0usize;
@@ -67,43 +58,77 @@ pub(crate) fn native_format(eval: &mut Evaluator, args: &[Value]) -> Result<Valu
         rest = &rest[pct + 1..];
         let (spec, after) = parse_spec(rest)?;
         rest = after;
-        // `%n` and `%%` take no argument (and disturb neither the
-        // auto index nor the previous-argument slot).
         if spec.conversion == 'n' || spec.conversion == '%' {
-            check_spec(&spec)?;
-            if spec.conversion == 'n' {
-                out.push_str(line_separator());
-            } else {
-                out.push_str(&pad("%", &spec));
-            }
+            emit_bare_spec(&spec, &mut out)?;
             continue;
         }
         check_spec(&spec)?;
-        let arg_idx = match spec.index {
-            Some(i) => i,
-            None if spec.reuse_last => last_idx.ok_or_else(|| {
-                NativeError::new(
-                    ThrowClass::MissingFormatArgumentException,
-                    format!("Format specifier '{}'", spec.text),
-                )
-            })?,
-            None => {
-                let i = auto_idx;
-                auto_idx += 1;
-                i
-            }
-        };
+        let arg_idx = resolve_arg_index(&spec, &mut auto_idx, last_idx)?;
         last_idx = Some(arg_idx);
-        let arg = args.get(arg_idx + 1).ok_or_else(|| {
-            NativeError::new(
-                ThrowClass::MissingFormatArgumentException,
-                format!("Format specifier '{}'", spec.text),
-            )
-        })?;
+        let arg = fetch_format_arg(args, arg_idx, &spec)?;
         out.push_str(&apply_spec(eval, &spec, arg)?);
     }
     out.push_str(rest);
     Ok(Value::Str(Arc::from(out.as_str())))
+}
+
+/// The format string (argument 0 is a `String`, never nil).
+fn format_first_arg(args: &[Value]) -> Result<String, NativeError> {
+    match &args[0] {
+        Value::Str(s) => Ok(s.to_string()),
+        Value::Nil => Err(NativeError::new(
+            ThrowClass::NullPointerException,
+            "Cannot invoke \"String.length()\" because \"s\" is null".to_owned(),
+        )),
+        v => Err(cce_err(v, "java.lang.String")),
+    }
+}
+
+/// Emit `%n`/`%%` (no argument; neither the auto index nor the
+/// previous-argument slot is disturbed).
+fn emit_bare_spec(spec: &FormatSpec, out: &mut String) -> Result<(), NativeError> {
+    check_spec(spec)?;
+    if spec.conversion == 'n' {
+        out.push_str(line_separator());
+    } else {
+        out.push_str(&pad("%", spec));
+    }
+    Ok(())
+}
+
+/// Resolve the 0-based argument index (explicit, `<`, or auto).
+fn resolve_arg_index(
+    spec: &FormatSpec,
+    auto_idx: &mut usize,
+    last_idx: Option<usize>,
+) -> Result<usize, NativeError> {
+    match spec.index {
+        Some(i) => Ok(i),
+        None if spec.reuse_last => last_idx.ok_or_else(|| missing_format_arg(spec)),
+        None => {
+            let i = *auto_idx;
+            *auto_idx += 1;
+            Ok(i)
+        }
+    }
+}
+
+/// Fetch the indexed argument (index 0 is `args[1]`).
+fn fetch_format_arg<'a>(
+    args: &'a [Value],
+    arg_idx: usize,
+    spec: &FormatSpec,
+) -> Result<&'a Value, NativeError> {
+    args.get(arg_idx + 1)
+        .ok_or_else(|| missing_format_arg(spec))
+}
+
+/// `MissingFormatArgumentException` (the full spec text).
+fn missing_format_arg(spec: &FormatSpec) -> NativeError {
+    NativeError::new(
+        ThrowClass::MissingFormatArgumentException,
+        format!("Format specifier '{}'", spec.text),
+    )
 }
 
 /// The platform line separator (`%n` renders it).
@@ -131,38 +156,61 @@ struct FormatSpec {
 
 /// Parse one specifier (the text AFTER `%`).
 fn parse_spec(s: &str) -> Result<(FormatSpec, &str), NativeError> {
-    let mut pos = 0usize;
+    let (index, pos) = parse_arg_index(s)?;
+    let (flags, reuse_last, pos) = parse_flags(s, pos)?;
+    let (width, pos) = parse_width(s, pos)?;
+    let (precision, pos) = parse_precision(s, pos)?;
+    let (conversion, suffix, pos) = parse_conversion(s, pos)?;
+    let text = format!("%{}", &s[..pos]);
+    Ok((
+        FormatSpec {
+            text,
+            index,
+            reuse_last,
+            flags,
+            width,
+            precision,
+            conversion,
+            suffix,
+        },
+        &s[pos..],
+    ))
+}
+
+/// Explicit argument index (`2$`): the 0-based index plus the
+/// position after the `$` (or 0 when no index is present).
+fn parse_arg_index(s: &str) -> Result<(Option<usize>, usize), NativeError> {
     let bytes = s.as_bytes();
-    // Explicit argument index (`2$`).
-    let mut index = None;
-    {
-        let mut end = 0usize;
-        while end < bytes.len() && bytes[end].is_ascii_digit() {
-            end += 1;
-        }
-        if end > 0 && bytes.get(end) == Some(&b'$') {
-            let digits = &s[..end];
-            match digits.parse::<u64>() {
-                Ok(n) if n <= i32::MAX as u64 => {
-                    if n == 0 {
-                        return Err(NativeError::new(
-                            ThrowClass::IllegalFormatArgumentIndexException,
-                            "Illegal format argument index = 0".to_owned(),
-                        ));
-                    }
-                    index = Some(n as usize - 1);
-                }
-                _ => {
+    let mut end = 0usize;
+    while end < bytes.len() && bytes[end].is_ascii_digit() {
+        end += 1;
+    }
+    if end > 0 && bytes.get(end) == Some(&b'$') {
+        let digits = &s[..end];
+        let index = match digits.parse::<u64>() {
+            Ok(n) if n <= i32::MAX as u64 => {
+                if n == 0 {
                     return Err(NativeError::new(
                         ThrowClass::IllegalFormatArgumentIndexException,
-                        "Format argument index: (not representable as int)".to_owned(),
+                        "Illegal format argument index = 0".to_owned(),
                     ));
                 }
+                n as usize - 1
             }
-            pos = end + 1;
-        }
+            _ => {
+                return Err(NativeError::new(
+                    ThrowClass::IllegalFormatArgumentIndexException,
+                    "Format argument index: (not representable as int)".to_owned(),
+                ));
+            }
+        };
+        return Ok((Some(index), end + 1));
     }
-    // Flags (duplicates, including `<`, fail during parse).
+    Ok((None, 0))
+}
+
+/// Flags (duplicates, including `<`, fail during parse).
+fn parse_flags(s: &str, mut pos: usize) -> Result<(Vec<char>, bool, usize), NativeError> {
     let mut flags = Vec::new();
     let mut reuse_last = false;
     while let Some(c) = s[pos..].chars().next() {
@@ -183,7 +231,12 @@ fn parse_spec(s: &str) -> Result<(FormatSpec, &str), NativeError> {
             pos += c.len_utf8();
         }
     }
-    // Width (overflowing the `int` is the constant `MIN_VALUE`).
+    Ok((flags, reuse_last, pos))
+}
+
+/// Width (overflowing the `int` is the constant `MIN_VALUE`).
+fn parse_width(s: &str, pos: usize) -> Result<(Option<usize>, usize), NativeError> {
+    let bytes = s.as_bytes();
     let mut end = pos;
     while end < bytes.len() && bytes[end].is_ascii_digit() {
         end += 1;
@@ -201,9 +254,13 @@ fn parse_spec(s: &str) -> Result<(FormatSpec, &str), NativeError> {
     } else {
         None
     };
-    pos = end;
-    // Precision (`.` plus at least one digit, else the `.` stays for
-    // the conversion slot and the parse fails below).
+    Ok((width, end))
+}
+
+/// Precision (`.` plus at least one digit, else the `.` stays for
+/// the conversion slot and the parse fails below).
+fn parse_precision(s: &str, mut pos: usize) -> Result<(Option<usize>, usize), NativeError> {
+    let bytes = s.as_bytes();
     let mut precision = None;
     if s[pos..].starts_with('.') {
         let mut digits = pos + 1;
@@ -223,8 +280,13 @@ fn parse_spec(s: &str) -> Result<(FormatSpec, &str), NativeError> {
             pos = digits;
         }
     }
-    // Conversion: `[a-zA-Z%]`, else the char after `%` is the
-    // unknown conversion (`%` itself when the string ends there).
+    Ok((precision, pos))
+}
+
+/// Conversion (`[a-zA-Z%]`, plus the `%t`/`%T` suffix): else the
+/// char after `%` is the unknown conversion (`%` itself when the
+/// string ends there).
+fn parse_conversion(s: &str, mut pos: usize) -> Result<(char, Option<char>, usize), NativeError> {
     let Some(conversion) = s[pos..].chars().next() else {
         return Err(unknown_conversion(s.chars().next().unwrap_or('%'), None));
     };
@@ -243,20 +305,7 @@ fn parse_spec(s: &str) -> Result<(FormatSpec, &str), NativeError> {
         suffix = Some(second);
         pos += second.len_utf8();
     }
-    let text = format!("%{}", &s[..pos]);
-    Ok((
-        FormatSpec {
-            text,
-            index,
-            reuse_last,
-            flags,
-            width,
-            precision,
-            conversion,
-            suffix,
-        },
-        &s[pos..],
-    ))
+    Ok((conversion, suffix, pos))
 }
 
 /// `DuplicateFormatFlagsException` (`Flags = 'X'`).
@@ -346,42 +395,61 @@ fn canonical_flags(flags: &[char]) -> Vec<char> {
 fn check_spec(spec: &FormatSpec) -> Result<(), NativeError> {
     let conv = spec.conversion;
     if conv == 'n' {
-        if let Some(p) = spec.precision {
-            return Err(precision_err(p));
-        }
-        if let Some(w) = spec.width {
-            return Err(NativeError::new(
-                ThrowClass::IllegalFormatWidthException,
-                w.to_string(),
-            ));
-        }
-        check_sign_pair(spec)?;
-        if !spec.flags.is_empty() {
-            let all: String = canonical_flags(&spec.flags).into_iter().collect();
-            return Err(NativeError::new(
-                ThrowClass::IllegalFormatFlagsException,
-                format!("Flags = '{all}'"),
-            ));
-        }
-        return Ok(());
+        return check_line_spec(spec);
     }
     if conv == '%' {
-        if let Some(p) = spec.precision {
-            return Err(precision_err(p));
-        }
-        check_sign_pair(spec)?;
-        let bad_flag = allowed_flags(conv)
-            .is_some_and(|allowed| spec.flags.iter().any(|f| !allowed.contains(f)));
-        if bad_flag {
-            let all: String = canonical_flags(&spec.flags).into_iter().collect();
-            return Err(NativeError::new(
-                ThrowClass::IllegalFormatFlagsException,
-                format!("Flags = '{all}'"),
-            ));
-        }
-        check_width_required(spec)?;
-        return Ok(());
+        return check_percent_spec(spec);
     }
+    check_spec_arg_kind(spec)?;
+    if let Some(p) = spec.precision.filter(|_| precision_illegal(conv)) {
+        return Err(precision_err(p));
+    }
+    Ok(())
+}
+
+/// `%n` checks: precision → width → pair → flags.
+fn check_line_spec(spec: &FormatSpec) -> Result<(), NativeError> {
+    if let Some(p) = spec.precision {
+        return Err(precision_err(p));
+    }
+    if let Some(w) = spec.width {
+        return Err(NativeError::new(
+            ThrowClass::IllegalFormatWidthException,
+            w.to_string(),
+        ));
+    }
+    check_sign_pair(spec)?;
+    if !spec.flags.is_empty() {
+        let all: String = canonical_flags(&spec.flags).into_iter().collect();
+        return Err(NativeError::new(
+            ThrowClass::IllegalFormatFlagsException,
+            format!("Flags = '{all}'"),
+        ));
+    }
+    Ok(())
+}
+
+/// `%%` checks: precision → pair → flags → width.
+fn check_percent_spec(spec: &FormatSpec) -> Result<(), NativeError> {
+    if let Some(p) = spec.precision {
+        return Err(precision_err(p));
+    }
+    check_sign_pair(spec)?;
+    let bad_flag = allowed_flags(spec.conversion)
+        .is_some_and(|allowed| spec.flags.iter().any(|f| !allowed.contains(f)));
+    if bad_flag {
+        let all: String = canonical_flags(&spec.flags).into_iter().collect();
+        return Err(NativeError::new(
+            ThrowClass::IllegalFormatFlagsException,
+            format!("Flags = '{all}'"),
+        ));
+    }
+    check_width_required(spec)
+}
+
+/// Per-kind check order for conversions that take an argument.
+fn check_spec_arg_kind(spec: &FormatSpec) -> Result<(), NativeError> {
+    let conv = spec.conversion;
     if is_numeric_conv(conv) {
         check_width_required(spec)?;
         check_sign_pair(spec)?;
@@ -395,9 +463,6 @@ fn check_spec(spec: &FormatSpec) -> Result<(), NativeError> {
     } else {
         check_mismatch(spec)?;
         check_width_required(spec)?;
-    }
-    if let Some(p) = spec.precision.filter(|_| precision_illegal(conv)) {
-        return Err(precision_err(p));
     }
     Ok(())
 }
@@ -533,137 +598,175 @@ fn check_mismatch(spec: &FormatSpec) -> Result<(), NativeError> {
 
 /// Apply one checked spec to its argument.
 fn apply_spec(eval: &mut Evaluator, spec: &FormatSpec, arg: &Value) -> Result<String, NativeError> {
-    let conv = spec.conversion;
-    match conv {
-        'b' | 'B' => {
-            let mut s = match arg {
-                Value::Nil => "false".to_owned(),
-                Value::Bool(b) => b.to_string(),
-                _ => "true".to_owned(),
-            };
-            if let Some(p) = spec.precision {
-                s = truncate_chars(&s, p);
-            }
-            if conv == 'B' {
-                s = s.to_uppercase();
-            }
-            Ok(pad(&s, spec))
-        }
-        'h' | 'H' => {
-            let mut s = match arg {
-                Value::Nil => "null".to_owned(),
-                v => {
-                    // `.hashCode` over the realized value (infinite
-                    // lazies hang, like the JVM hash walk).
-                    let r = realize_deep(eval, v).map_err(signal_to_native)?;
-                    let h = clj_value::hash_code(&r);
-                    if conv == 'H' {
-                        format!("{:X}", h as u32)
-                    } else {
-                        format!("{:x}", h as u32)
-                    }
-                }
-            };
-            if let Some(p) = spec.precision {
-                s = truncate_chars(&s, p);
-            }
-            Ok(pad(&s, spec))
-        }
-        's' | 'S' => {
-            let mut s = match arg {
-                Value::Nil => "null".to_owned(),
-                Value::Str(st) => st.to_string(),
-                v => str_of_one(eval, v)?,
-            };
-            if let Some(p) = spec.precision {
-                s = truncate_chars(&s, p);
-            }
-            if conv == 'S' {
-                s = s.to_uppercase();
-            }
-            Ok(pad(&s, spec))
-        }
-        'c' | 'C' => {
-            let mut s = match arg {
-                Value::Nil => "null".to_owned(),
-                Value::Char(c) => c.to_string(),
-                // Only `Character` (a Clojure `Long` is `Long`, not
-                // `int` — the port has no `Integer` at all).
-                v => return Err(conversion_err(conv, v)),
-            };
-            if conv == 'C' {
-                s = s.to_uppercase();
-            }
-            Ok(pad(&s, spec))
-        }
-        'd' => {
-            let n = match arg {
-                Value::Nil => return Ok(pad("null", spec)),
-                Value::Int(n) => *n,
-                v => return Err(conversion_err(conv, v)),
-            };
-            Ok(format_int(n, spec))
-        }
-        'o' | 'x' | 'X' => {
-            let n = match arg {
-                Value::Nil => return Ok(pad("null", spec)),
-                Value::Int(n) => *n as u64,
-                v => return Err(conversion_err(conv, v)),
-            };
-            let digits = match conv {
-                'o' => format!("{n:o}"),
-                'x' => format!("{n:x}"),
-                _ => format!("{n:X}"),
-            };
-            let prefix = if spec.flags.contains(&'#') {
-                match conv {
-                    'o' => "0",
-                    'x' => "0x",
-                    _ => "0X",
-                }
-            } else {
-                ""
-            };
-            Ok(pad_zero_prefixed(prefix, &digits, spec))
-        }
-        'e' | 'E' | 'f' | 'g' | 'G' => {
-            let d = match arg {
-                Value::Nil => return Ok(pad("null", spec)),
-                Value::Double(d) => *d,
-                v => return Err(conversion_err(conv, v)),
-            };
-            let s = format_float(d, conv, spec.precision.unwrap_or(6), spec);
-            Ok(if conv.is_ascii_uppercase() {
-                s.to_uppercase()
-            } else {
-                s
-            })
-        }
-        'a' | 'A' => {
-            let d = match arg {
-                Value::Nil => return Ok(pad("null", spec)),
-                Value::Double(d) => *d,
-                v => return Err(conversion_err(conv, v)),
-            };
-            let s = format_hexfloat(d, spec.precision, spec);
-            Ok(if conv == 'A' { s.to_uppercase() } else { s })
-        }
-        't' | 'T' => {
-            let suffix = spec.suffix.unwrap_or('Y');
-            let millis = match arg {
-                Value::Nil => return Ok(pad("null", spec)),
-                Value::Int(n) => *n,
-                v => return Err(conversion_err(suffix, v)),
-            };
-            let s = format_time(millis, suffix);
-            let s = if conv == 'T' { s.to_uppercase() } else { s };
-            Ok(pad(&s, spec))
-        }
-        _ => Err(NativeError::new(
+    match spec.conversion {
+        'b' | 'B' => apply_bool_spec(spec, arg),
+        'h' | 'H' => apply_hash_spec(eval, spec, arg),
+        's' | 'S' => apply_str_spec(eval, spec, arg),
+        'c' | 'C' => apply_char_spec(spec, arg),
+        'd' => apply_dec_spec(spec, arg),
+        'o' | 'x' | 'X' => apply_radix_spec(spec, arg),
+        'e' | 'E' | 'f' | 'g' | 'G' => apply_decimal_float_spec(spec, arg),
+        'a' | 'A' => apply_hexfloat_spec(spec, arg),
+        't' | 'T' => apply_time_spec(spec, arg),
+        conv => Err(NativeError::new(
             ThrowClass::UnknownFormatConversionException,
             format!("Conversion = '{conv}'"),
         )),
     }
+}
+
+/// `%b`/`%B` (nil is `false`; anything non-boolean is `true`).
+fn apply_bool_spec(spec: &FormatSpec, arg: &Value) -> Result<String, NativeError> {
+    let mut s = match arg {
+        Value::Nil => "false".to_owned(),
+        Value::Bool(b) => b.to_string(),
+        _ => "true".to_owned(),
+    };
+    if let Some(p) = spec.precision {
+        s = truncate_chars(&s, p);
+    }
+    if spec.conversion == 'B' {
+        s = s.to_uppercase();
+    }
+    Ok(pad(&s, spec))
+}
+
+/// `%h`/`%H` (`.hashCode` in hex over the realized value).
+fn apply_hash_spec(
+    eval: &mut Evaluator,
+    spec: &FormatSpec,
+    arg: &Value,
+) -> Result<String, NativeError> {
+    let mut s = match arg {
+        Value::Nil => "null".to_owned(),
+        v => {
+            // `.hashCode` over the realized value (infinite
+            // lazies hang, like the JVM hash walk).
+            let r = realize_deep(eval, v).map_err(signal_to_native)?;
+            let h = clj_value::hash_code(&r);
+            if spec.conversion == 'H' {
+                format!("{:X}", h as u32)
+            } else {
+                format!("{:x}", h as u32)
+            }
+        }
+    };
+    if let Some(p) = spec.precision {
+        s = truncate_chars(&s, p);
+    }
+    Ok(pad(&s, spec))
+}
+
+/// `%s`/`%S` (`str` of one value).
+fn apply_str_spec(
+    eval: &mut Evaluator,
+    spec: &FormatSpec,
+    arg: &Value,
+) -> Result<String, NativeError> {
+    let mut s = match arg {
+        Value::Nil => "null".to_owned(),
+        Value::Str(st) => st.to_string(),
+        v => str_of_one(eval, v)?,
+    };
+    if let Some(p) = spec.precision {
+        s = truncate_chars(&s, p);
+    }
+    if spec.conversion == 'S' {
+        s = s.to_uppercase();
+    }
+    Ok(pad(&s, spec))
+}
+
+/// `%c`/`%C` (only `Character`: a Clojure `Long` is `Long`, not
+/// `int` — the port has no `Integer` at all).
+fn apply_char_spec(spec: &FormatSpec, arg: &Value) -> Result<String, NativeError> {
+    let conv = spec.conversion;
+    let mut s = match arg {
+        Value::Nil => "null".to_owned(),
+        Value::Char(c) => c.to_string(),
+        v => return Err(conversion_err(conv, v)),
+    };
+    if conv == 'C' {
+        s = s.to_uppercase();
+    }
+    Ok(pad(&s, spec))
+}
+
+/// `%d` over a Clojure `Long`.
+fn apply_dec_spec(spec: &FormatSpec, arg: &Value) -> Result<String, NativeError> {
+    let n = match arg {
+        Value::Nil => return Ok(pad("null", spec)),
+        Value::Int(n) => *n,
+        v => return Err(conversion_err(spec.conversion, v)),
+    };
+    Ok(format_int(n, spec))
+}
+
+/// `%o`/`%x`/`%X` over a Clojure `Long` (two's complement).
+fn apply_radix_spec(spec: &FormatSpec, arg: &Value) -> Result<String, NativeError> {
+    let conv = spec.conversion;
+    let n = match arg {
+        Value::Nil => return Ok(pad("null", spec)),
+        Value::Int(n) => *n as u64,
+        v => return Err(conversion_err(conv, v)),
+    };
+    let digits = match conv {
+        'o' => format!("{n:o}"),
+        'x' => format!("{n:x}"),
+        _ => format!("{n:X}"),
+    };
+    let prefix = if spec.flags.contains(&'#') {
+        match conv {
+            'o' => "0",
+            'x' => "0x",
+            _ => "0X",
+        }
+    } else {
+        ""
+    };
+    Ok(pad_zero_prefixed(prefix, &digits, spec))
+}
+
+/// `%e`/`%E`/`%f`/`%g`/`%G` over a Clojure `Double`.
+fn apply_decimal_float_spec(spec: &FormatSpec, arg: &Value) -> Result<String, NativeError> {
+    let conv = spec.conversion;
+    let d = match arg {
+        Value::Nil => return Ok(pad("null", spec)),
+        Value::Double(d) => *d,
+        v => return Err(conversion_err(conv, v)),
+    };
+    let s = format_float(d, conv, spec.precision.unwrap_or(6), spec);
+    Ok(if conv.is_ascii_uppercase() {
+        s.to_uppercase()
+    } else {
+        s
+    })
+}
+
+/// `%a`/`%A` over a Clojure `Double`.
+fn apply_hexfloat_spec(spec: &FormatSpec, arg: &Value) -> Result<String, NativeError> {
+    let conv = spec.conversion;
+    let d = match arg {
+        Value::Nil => return Ok(pad("null", spec)),
+        Value::Double(d) => *d,
+        v => return Err(conversion_err(conv, v)),
+    };
+    let s = format_hexfloat(d, spec.precision, spec);
+    Ok(if conv == 'A' { s.to_uppercase() } else { s })
+}
+
+/// `%t`/`%T` over epoch millis (a Clojure `Long`).
+fn apply_time_spec(spec: &FormatSpec, arg: &Value) -> Result<String, NativeError> {
+    let conv = spec.conversion;
+    let suffix = spec.suffix.unwrap_or('Y');
+    let millis = match arg {
+        Value::Nil => return Ok(pad("null", spec)),
+        Value::Int(n) => *n,
+        v => return Err(conversion_err(suffix, v)),
+    };
+    let s = format_time(millis, suffix);
+    let s = if conv == 'T' { s.to_uppercase() } else { s };
+    Ok(pad(&s, spec))
 }
 
 /// `{conversion} != {arg JVM class}`.
@@ -733,23 +836,7 @@ fn format_int(n: i64, spec: &FormatSpec) -> String {
         n.unsigned_abs().to_string()
     };
     if spec.flags.contains(&'(') {
-        let inner = if spec.flags.contains(&'0') {
-            let width = spec.width.unwrap_or(0).saturating_sub(2);
-            let len = digits.chars().count();
-            if len >= width {
-                digits
-            } else {
-                format!("{}{digits}", "0".repeat(width - len))
-            }
-        } else {
-            digits
-        };
-        let s = if negative {
-            format!("({inner})")
-        } else {
-            inner
-        };
-        return pad(&s, spec);
+        return format_int_paren(&digits, negative, spec);
     }
     let sign = if negative {
         "-"
@@ -769,6 +856,28 @@ fn format_int(n: i64, spec: &FormatSpec) -> String {
         return format!("{sign}{}{digits}", "0".repeat(width - len));
     }
     pad(&format!("{sign}{digits}"), spec)
+}
+
+/// `%d` with the `(` flag (negatives in parens; `0` zero-pads
+/// inside the parens).
+fn format_int_paren(digits: &str, negative: bool, spec: &FormatSpec) -> String {
+    let inner = if spec.flags.contains(&'0') {
+        let width = spec.width.unwrap_or(0).saturating_sub(2);
+        let len = digits.chars().count();
+        if len >= width {
+            digits.to_owned()
+        } else {
+            format!("{}{digits}", "0".repeat(width - len))
+        }
+    } else {
+        digits.to_owned()
+    };
+    let s = if negative {
+        format!("({inner})")
+    } else {
+        inner
+    };
+    pad(&s, spec)
 }
 
 /// Group the integer part of a rendered float (`1,234,567.891`).
@@ -941,77 +1050,114 @@ fn render_e(digits: &[u8], exp: i32, prec: usize) -> String {
 /// `%e`/`%f`/`%g` over the shortest decimal (`HALF_UP`, like
 /// `BigDecimal(Double.toString)`).
 fn format_float(d: f64, conv: char, precision: usize, spec: &FormatSpec) -> String {
-    if d.is_nan() {
-        // `NaN` ignores all sign flags.
-        return pad("NaN", spec);
-    }
-    if d.is_infinite() {
-        // Infinity honors them (`%(f` of `-Inf` is `(Infinity)`).
-        let neg = d.is_sign_negative();
-        if neg && spec.flags.contains(&'(') {
-            return pad("(Infinity)", spec);
-        }
-        let s = if neg {
-            "-Infinity"
-        } else if spec.flags.contains(&'+') {
-            "+Infinity"
-        } else if spec.flags.contains(&' ') {
-            " Infinity"
-        } else {
-            "Infinity"
-        };
-        return pad(s, spec);
+    if let Some(s) = format_float_nonfinite(d, spec) {
+        return s;
     }
     let neg = d.is_sign_negative();
-    let mut body = if d == 0.0 {
-        match conv {
-            'f' => format!("0.{}", "0".repeat(precision)),
-            'e' | 'E' => format!("0.{}e+00", "0".repeat(precision)),
-            _ => {
-                let p = precision.max(1);
-                format!("0.{}", "0".repeat(p - 1))
-            }
+    let body = if d == 0.0 {
+        float_zero_body(conv, precision)
+    } else {
+        float_nonzero_body(d, conv, precision)
+    };
+    finish_float_body(body, neg, conv, spec)
+}
+
+/// `NaN`/`Infinity` (`NaN` ignores all sign flags; Infinity
+/// honors them — `%(f` of `-Inf` is `(Infinity)`).
+fn format_float_nonfinite(d: f64, spec: &FormatSpec) -> Option<String> {
+    if d.is_nan() {
+        return Some(pad("NaN", spec));
+    }
+    if d.is_infinite() {
+        return Some(format_infinity(d.is_sign_negative(), spec));
+    }
+    None
+}
+
+/// Infinity with sign flags (and `(` for negatives).
+fn format_infinity(neg: bool, spec: &FormatSpec) -> String {
+    if neg && spec.flags.contains(&'(') {
+        return pad("(Infinity)", spec);
+    }
+    pad(&apply_float_sign("Infinity".to_owned(), neg, spec), spec)
+}
+
+/// The unsigned `%e`/`%f`/`%g` body of a zero.
+fn float_zero_body(conv: char, precision: usize) -> String {
+    match conv {
+        'f' => format!("0.{}", "0".repeat(precision)),
+        'e' | 'E' => format!("0.{}e+00", "0".repeat(precision)),
+        _ => {
+            let p = precision.max(1);
+            format!("0.{}", "0".repeat(p - 1))
+        }
+    }
+}
+
+/// The unsigned `%e`/`%f`/`%g` body of a finite nonzero value.
+fn float_nonzero_body(d: f64, conv: char, precision: usize) -> String {
+    let dec = dec_split(d);
+    match conv {
+        'f' => float_f_body(&dec, precision),
+        'e' | 'E' => {
+            let (digits, carried) = round_half_up(&dec.digits, 1 + precision);
+            let exp = dec.exp + i32::from(carried);
+            render_e(&digits, exp, precision)
+        }
+        _ => float_g_body(&dec, precision),
+    }
+}
+
+/// The unsigned `%f` body (rounded to `precision` fraction digits).
+fn float_f_body(dec: &Dec, precision: usize) -> String {
+    let keep = dec.exp as i64 + precision as i64;
+    if keep <= 0 {
+        // Rounds to zero or one ulp (`0.009` at prec 2
+        // is `0.01`: half-up on the leading digit).
+        let up = dec.digits.first().is_some_and(|b| *b >= b'5');
+        if up {
+            render_f(b"1", 1 - precision as i32, precision)
+        } else {
+            render_f(&[], dec.exp, precision)
         }
     } else {
-        let dec = dec_split(d);
-        match conv {
-            'f' => {
-                let keep = dec.exp as i64 + precision as i64;
-                if keep <= 0 {
-                    // Rounds to zero or one ulp (`0.009` at prec 2
-                    // is `0.01`: half-up on the leading digit).
-                    let up = dec.digits.first().is_some_and(|b| *b >= b'5');
-                    if up {
-                        render_f(b"1", 1 - precision as i32, precision)
-                    } else {
-                        render_f(&[], dec.exp, precision)
-                    }
-                } else {
-                    let (digits, carried) = round_half_up(&dec.digits, keep as usize);
-                    let exp = dec.exp + i32::from(carried);
-                    render_f(&digits, exp, precision)
-                }
-            }
-            'e' | 'E' => {
-                let (digits, carried) = round_half_up(&dec.digits, 1 + precision);
-                let exp = dec.exp + i32::from(carried);
-                render_e(&digits, exp, precision)
-            }
-            _ => {
-                let p = precision.max(1);
-                let (digits, carried) = round_half_up(&dec.digits, p);
-                let exp = dec.exp + i32::from(carried);
-                // Scientific when the decimal exponent is `< -4`
-                // or `>= p`; otherwise `%f`-shaped (never stripped).
-                if exp - 1 < -4 || exp > p as i32 {
-                    render_e(&digits, exp, p - 1)
-                } else {
-                    render_f(&digits, exp, (p as i32 - exp).max(0) as usize)
-                }
-            }
-        }
-    };
-    // `#` forces the decimal point (`%#.0f` → `5.`).
+        let (digits, carried) = round_half_up(&dec.digits, keep as usize);
+        let exp = dec.exp + i32::from(carried);
+        render_f(&digits, exp, precision)
+    }
+}
+
+/// The unsigned `%g` body (`max(1, p)` significant digits).
+fn float_g_body(dec: &Dec, precision: usize) -> String {
+    let p = precision.max(1);
+    let (digits, carried) = round_half_up(&dec.digits, p);
+    let exp = dec.exp + i32::from(carried);
+    // Scientific when the decimal exponent is `< -4`
+    // or `>= p`; otherwise `%f`-shaped (never stripped).
+    if exp - 1 < -4 || exp > p as i32 {
+        render_e(&digits, exp, p - 1)
+    } else {
+        render_f(&digits, exp, (p as i32 - exp).max(0) as usize)
+    }
+}
+
+/// Finish a float body: `#` point, grouping, sign, parens,
+/// zero-pad.
+fn finish_float_body(body: String, neg: bool, conv: char, spec: &FormatSpec) -> String {
+    let mut body = force_float_point(body, conv, spec);
+    if spec.flags.contains(&',') {
+        body = group_float_int_part(&body);
+    }
+    let body = apply_float_sign(body, neg, spec);
+    if spec.flags.contains(&'(') && neg {
+        let paren = format!("({})", body.trim_start_matches('-'));
+        return pad(&paren, spec);
+    }
+    pad_zero_sign_aware(&body, spec)
+}
+
+/// `#` forces the decimal point (`%#.0f` → `5.`).
+fn force_float_point(mut body: String, conv: char, spec: &FormatSpec) -> String {
     if spec.flags.contains(&'#') && matches!(conv, 'f' | 'e' | 'E') && !body.contains('.') {
         if let Some(e) = body.find('e') {
             body.insert(e, '.');
@@ -1019,75 +1165,85 @@ fn format_float(d: f64, conv: char, precision: usize, spec: &FormatSpec) -> Stri
             body.push('.');
         }
     }
-    if spec.flags.contains(&',') {
-        body = group_float_int_part(&body);
-    }
+    body
+}
+
+/// Prefix the `-`/`+`/space sign.
+fn apply_float_sign(body: String, neg: bool, spec: &FormatSpec) -> String {
     if neg {
-        body = format!("-{body}");
+        format!("-{body}")
     } else if spec.flags.contains(&'+') {
-        body = format!("+{body}");
+        format!("+{body}")
     } else if spec.flags.contains(&' ') {
-        body = format!(" {body}");
+        format!(" {body}")
+    } else {
+        body
     }
-    if spec.flags.contains(&'(') && neg {
-        body = format!("({})", body.trim_start_matches('-'));
-        return pad(&body, spec);
-    }
+}
+
+/// Zero-pad to width after the sign (else space-pad).
+fn pad_zero_sign_aware(body: &str, spec: &FormatSpec) -> String {
     if spec.flags.contains(&'0') && !spec.flags.contains(&'-') {
         let width = spec.width.unwrap_or(0);
         let len = body.chars().count();
         if len < width {
-            let (sign, rest) = if let Some(r) = body.strip_prefix('-') {
-                ("-", r)
-            } else if let Some(r) = body.strip_prefix('+') {
-                ("+", r)
-            } else if let Some(r) = body.strip_prefix(' ') {
-                (" ", r)
-            } else {
-                ("", body.as_str())
-            };
+            let (sign, rest) = split_sign(body);
             return format!("{sign}{}{rest}", "0".repeat(width - len));
         }
-        return body;
+        return body.to_owned();
     }
-    pad(&body, spec)
+    pad(body, spec)
+}
+
+/// Split one leading `-`/`+`/space sign off the body.
+fn split_sign(body: &str) -> (&str, &str) {
+    if let Some(r) = body.strip_prefix('-') {
+        ("-", r)
+    } else if let Some(r) = body.strip_prefix('+') {
+        ("+", r)
+    } else if let Some(r) = body.strip_prefix(' ') {
+        (" ", r)
+    } else {
+        ("", body)
+    }
 }
 
 /// `%a`: `Double.toHexString` (bit-exact; precision is hex digits
 /// after the point, `max(1, p)`, half-up in hex).
 fn format_hexfloat(d: f64, precision: Option<usize>, spec: &FormatSpec) -> String {
+    if let Some(s) = format_hexfloat_nonfinite(d, spec) {
+        return s;
+    }
+    let body = hexfloat_body(d.abs(), precision);
+    let body = apply_float_sign(body, d.is_sign_negative(), spec);
+    pad_zero_sign_aware(&body, spec)
+}
+
+/// `%a` `NaN`/`Infinity` (sign flags honored, no parens).
+fn format_hexfloat_nonfinite(d: f64, spec: &FormatSpec) -> Option<String> {
     if d.is_nan() {
-        return pad("NaN", spec);
+        return Some(pad("NaN", spec));
     }
     if d.is_infinite() {
-        let s = if d.is_sign_negative() {
-            "-Infinity"
-        } else if spec.flags.contains(&'+') {
-            "+Infinity"
-        } else if spec.flags.contains(&' ') {
-            " Infinity"
-        } else {
-            "Infinity"
-        };
-        return pad(s, spec);
+        let body = apply_float_sign("Infinity".to_owned(), d.is_sign_negative(), spec);
+        return Some(pad(&body, spec));
     }
-    let neg = d.is_sign_negative();
-    let bits = d.abs().to_bits();
+    None
+}
+
+/// The unsigned `%a` body (`0xh.hhhp<exp>`) of a finite value.
+fn hexfloat_body(abs: f64, precision: Option<usize>) -> String {
+    let bits = abs.to_bits();
     let raw_exp = ((bits >> 52) & 0x7ff) as i32;
     let mant = bits & 0x000f_ffff_ffff_ffff;
-    let (lead, digits, exp) = if raw_exp == 0 {
-        // Zero (exponent `0`) or subnormal (exponent `-1022`).
-        let mut digits = format!("{mant:013x}").into_bytes();
-        strip_hex_zeros(&mut digits);
-        (b'0', digits, if mant == 0 { 0 } else { -1022 })
-    } else {
-        let mut digits = format!("{mant:013x}").into_bytes();
-        strip_hex_zeros(&mut digits);
-        (b'1', digits, raw_exp - 1023)
-    };
+    let (lead, exp) = hexfloat_lead_exp(raw_exp, mant);
     let (lead, digits, exp) = match precision {
         Some(p) => round_hex(lead, mant, raw_exp == 0, p.max(1), exp),
-        None => (lead, digits, exp),
+        None => {
+            let mut digits = format!("{mant:013x}").into_bytes();
+            strip_hex_zeros(&mut digits);
+            (lead, digits, exp)
+        }
     };
     let mut body = String::from("0x");
     body.push(lead as char);
@@ -1095,31 +1251,17 @@ fn format_hexfloat(d: f64, precision: Option<usize>, spec: &FormatSpec) -> Strin
     body.extend(digits.iter().map(|b| *b as char));
     body.push('p');
     body.push_str(&exp.to_string());
-    if neg {
-        body = format!("-{body}");
-    } else if spec.flags.contains(&'+') {
-        body = format!("+{body}");
-    } else if spec.flags.contains(&' ') {
-        body = format!(" {body}");
+    body
+}
+
+/// The `%a` leading digit and binary exponent (zero has exponent
+/// `0`; subnormals have exponent `-1022`).
+fn hexfloat_lead_exp(raw_exp: i32, mant: u64) -> (u8, i32) {
+    if raw_exp == 0 {
+        (b'0', if mant == 0 { 0 } else { -1022 })
+    } else {
+        (b'1', raw_exp - 1023)
     }
-    if spec.flags.contains(&'0') && !spec.flags.contains(&'-') {
-        let width = spec.width.unwrap_or(0);
-        let len = body.chars().count();
-        if len < width {
-            let (sign, rest) = if let Some(r) = body.strip_prefix('-') {
-                ("-", r)
-            } else if let Some(r) = body.strip_prefix('+') {
-                ("+", r)
-            } else if let Some(r) = body.strip_prefix(' ') {
-                (" ", r)
-            } else {
-                ("", body.as_str())
-            };
-            return format!("{sign}{}{rest}", "0".repeat(width - len));
-        }
-        return body;
-    }
-    pad(&body, spec)
 }
 
 /// Strip trailing hex zeros (at least one digit remains).

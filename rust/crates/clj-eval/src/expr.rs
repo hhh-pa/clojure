@@ -579,58 +579,73 @@ impl<'a> Analyzer<'a> {
                 let items: Vec<&Value> = list.iter().collect();
                 self.analyze_list(form, &items, span, tail)
             }
-            // Any other seq value (macro expansions built at
-            // runtime by `seq`/`concat` arrive as realized or
-            // pending seq extensions; the JVM analyzes every
-            // `ISeq` as a form).
-            form if crate::lazy::is_seq_value(form) => {
-                let items = match crate::lazy::collect_all(self.eval, form) {
-                    Ok(items) => items,
-                    Err(Signal::Throw(t)) => {
-                        return Err(CompileError::bare(
-                            t.class.jvm_name(),
-                            t.message.as_deref().unwrap_or("").to_owned(),
-                            span,
-                            &self.source,
-                        ));
-                    }
-                    Err(Signal::Recur(_)) => {
-                        unreachable!("recur cannot escape forcing a form")
-                    }
-                };
-                if items.is_empty() {
-                    // `EmptyExpr`: an empty form evaluates to itself.
-                    return Ok(Expr::Literal(form.clone()));
-                }
-                let refs: Vec<&Value> = items.iter().collect();
-                self.analyze_list(form, &refs, span, tail)
-            }
-            Value::Vector(v) => {
-                let mut out = Vec::with_capacity(v.len());
-                for elem in v.iter() {
-                    out.push(self.analyze(elem, span, false)?);
-                }
-                Ok(Expr::VecLit(out))
-            }
-            Value::Map(m) => {
-                let mut out = Vec::with_capacity(m.size());
-                for (k, val) in m.iter() {
-                    out.push((
-                        self.analyze(k, span, false)?,
-                        self.analyze(val, span, false)?,
-                    ));
-                }
-                Ok(Expr::MapLit(out))
-            }
-            Value::Set(s) => {
-                let mut out = Vec::with_capacity(s.size());
-                for elem in s.iter() {
-                    out.push(self.analyze(elem, span, false)?);
-                }
-                Ok(Expr::SetLit(out))
-            }
+            form if crate::lazy::is_seq_value(form) => self.analyze_seq_form(form, span, tail),
+            Value::Vector(v) => self.analyze_vec_lit(v, span),
+            Value::Map(m) => self.analyze_map_lit(m, span),
+            Value::Set(s) => self.analyze_set_lit(s, span),
             _ => Ok(Expr::Literal(form.clone())),
         }
+    }
+
+    /// Any other seq value (macro expansions built at runtime by
+    /// `seq`/`concat` arrive as realized or pending seq extensions;
+    /// the JVM analyzes every `ISeq` as a form).
+    fn analyze_seq_form(
+        &mut self,
+        form: &Value,
+        span: Span,
+        tail: bool,
+    ) -> Result<Expr, CompileError> {
+        let items = match crate::lazy::collect_all(self.eval, form) {
+            Ok(items) => items,
+            Err(Signal::Throw(t)) => {
+                return Err(CompileError::bare(
+                    t.class.jvm_name(),
+                    t.message.as_deref().unwrap_or("").to_owned(),
+                    span,
+                    &self.source,
+                ));
+            }
+            Err(Signal::Recur(_)) => {
+                unreachable!("recur cannot escape forcing a form")
+            }
+        };
+        if items.is_empty() {
+            // `EmptyExpr`: an empty form evaluates to itself.
+            return Ok(Expr::Literal(form.clone()));
+        }
+        let refs: Vec<&Value> = items.iter().collect();
+        self.analyze_list(form, &refs, span, tail)
+    }
+
+    /// A vector literal (elements analyze left to right).
+    fn analyze_vec_lit(&mut self, v: &Vector, span: Span) -> Result<Expr, CompileError> {
+        let mut out = Vec::with_capacity(v.len());
+        for elem in v.iter() {
+            out.push(self.analyze(elem, span, false)?);
+        }
+        Ok(Expr::VecLit(out))
+    }
+
+    /// A map literal (keys and values analyze left to right).
+    fn analyze_map_lit(&mut self, m: &Map, span: Span) -> Result<Expr, CompileError> {
+        let mut out = Vec::with_capacity(m.size());
+        for (k, val) in m.iter() {
+            out.push((
+                self.analyze(k, span, false)?,
+                self.analyze(val, span, false)?,
+            ));
+        }
+        Ok(Expr::MapLit(out))
+    }
+
+    /// A set literal (elements analyze left to right).
+    fn analyze_set_lit(&mut self, s: &clj_value::Set, span: Span) -> Result<Expr, CompileError> {
+        let mut out = Vec::with_capacity(s.size());
+        for elem in s.iter() {
+            out.push(self.analyze(elem, span, false)?);
+        }
+        Ok(Expr::SetLit(out))
     }
 
     /// A body: every form non-tail except the last.
@@ -2661,29 +2676,69 @@ impl<'a> Analyzer<'a> {
         if items.len() != 8 && items.len() != 9 {
             return Err(self.spec_error("clojure.core/case*", span));
         }
-        let int_arg = |v: &Value| match v {
+        let (shift, mask, imap, test) = self.parse_case_star_head(items, span)?;
+        let skip = self.parse_case_star_skip(items, span)?;
+        let expr = self.analyze(items[1], span, false)?;
+        let default = self.analyze(items[4], span, tail)?;
+        let cases = self.parse_case_star_cases(imap, span, tail)?;
+        Ok(Expr::CaseStar {
+            expr: Box::new(expr),
+            shift,
+            mask,
+            default: Box::new(default),
+            cases,
+            skip,
+            test,
+        })
+    }
+
+    /// A `case*` integer slot (`i32`-ranged `Int`, else `None`).
+    fn case_star_int(v: &Value) -> Option<i32> {
+        match v {
             Value::Int(i) => i32::try_from(*i).ok(),
             _ => None,
-        };
-        let (Some(shift), Some(mask)) = (int_arg(items[2]), int_arg(items[3])) else {
+        }
+    }
+
+    /// The `case*` header: shift, mask, the case map, the test kind,
+    /// and the switch-kind check (all spec errors).
+    fn parse_case_star_head<'v>(
+        &self,
+        items: &[&'v Value],
+        span: Span,
+    ) -> Result<(i32, i32, &'v Map, CaseTest), CompileError> {
+        let (Some(shift), Some(mask)) =
+            (Self::case_star_int(items[2]), Self::case_star_int(items[3]))
+        else {
             return Err(self.spec_error("clojure.core/case*", span));
         };
         let Value::Map(imap) = items[5] else {
             return Err(self.spec_error("clojure.core/case*", span));
         };
-        let test = match items[7] {
-            Value::Keyword(kw) if kw.namespace().is_none() => match kw.name() {
-                "int" => CaseTest::Int,
-                "hash-equiv" => CaseTest::HashEquiv,
-                "hash-identity" => CaseTest::HashIdentity,
-                _ => return Err(self.spec_error("clojure.core/case*", span)),
-            },
-            _ => return Err(self.spec_error("clojure.core/case*", span)),
-        };
+        let test = self.parse_case_star_test(items[7], span)?;
         if !matches!(items[6], Value::Keyword(kw) if kw.namespace().is_none() && matches!(kw.name(), "sparse" | "compact"))
         {
             return Err(self.spec_error("clojure.core/case*", span));
         }
+        Ok((shift, mask, imap, test))
+    }
+
+    /// The `case*` test kind (`:int` / `:hash-equiv` /
+    /// `:hash-identity`, unqualified).
+    fn parse_case_star_test(&self, v: &Value, span: Span) -> Result<CaseTest, CompileError> {
+        match v {
+            Value::Keyword(kw) if kw.namespace().is_none() => match kw.name() {
+                "int" => Ok(CaseTest::Int),
+                "hash-equiv" => Ok(CaseTest::HashEquiv),
+                "hash-identity" => Ok(CaseTest::HashIdentity),
+                _ => Err(self.spec_error("clojure.core/case*", span)),
+            },
+            _ => Err(self.spec_error("clojure.core/case*", span)),
+        }
+    }
+
+    /// The optional `case*` skip set (absent or `nil` means empty).
+    fn parse_case_star_skip(&self, items: &[&Value], span: Span) -> Result<Vec<i32>, CompileError> {
         let mut skip = Vec::new();
         if let Some(s) = items.get(8).copied()
             && !matches!(s, Value::Nil)
@@ -2692,17 +2747,28 @@ impl<'a> Analyzer<'a> {
                 return Err(self.spec_error("clojure.core/case*", span));
             };
             for v in set.iter() {
-                let Some(k) = int_arg(v) else {
+                let Some(k) = Self::case_star_int(v) else {
                     return Err(self.spec_error("clojure.core/case*", span));
                 };
                 skip.push(k);
             }
         }
-        let expr = self.analyze(items[1], span, false)?;
-        let default = self.analyze(items[4], span, tail)?;
+        Ok(skip)
+    }
+
+    /// The `case*` case map: dispatch keys to `(test, then)` (test
+    /// constants are literal data — probed: symbols, lists, and
+    /// defined-var names all match as data, never evaluated; only
+    /// the `then` is an expression).
+    fn parse_case_star_cases(
+        &mut self,
+        imap: &Map,
+        span: Span,
+        tail: bool,
+    ) -> Result<Vec<(i32, Expr, Expr)>, CompileError> {
         let mut cases = Vec::new();
         for (k, v) in imap.iter() {
-            let Some(key) = int_arg(k) else {
+            let Some(key) = Self::case_star_int(k) else {
                 return Err(self.spec_error("clojure.core/case*", span));
             };
             let Value::Vector(pair) = v else {
@@ -2714,22 +2780,11 @@ impl<'a> Analyzer<'a> {
             else {
                 return Err(self.spec_error("clojure.core/case*", span));
             };
-            // Test constants are literal data (probed: symbols,
-            // lists, and defined-var names all match as data, never
-            // evaluated); only the `then` is an expression.
             let test_expr = Expr::Literal(test_form.clone());
             let then_expr = self.analyze(then_form, span, tail)?;
             cases.push((key, test_expr, then_expr));
         }
-        Ok(Expr::CaseStar {
-            expr: Box::new(expr),
-            shift,
-            mask,
-            default: Box::new(default),
-            cases,
-            skip,
-            test,
-        })
+        Ok(cases)
     }
 
     /// Attribute a destructure-body failure: `Syntax error` for

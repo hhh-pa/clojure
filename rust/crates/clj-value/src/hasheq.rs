@@ -274,29 +274,38 @@ pub fn seq_hash_unsupported(v: &Value) -> bool {
             .iter()
             .any(|(k, v)| seq_hash_unsupported(k) || seq_hash_unsupported(v)),
         Value::Set(s) => s.iter().any(seq_hash_unsupported),
-        Value::Extension(ext) => {
-            let any = ext.as_any();
-            if let Some(r) = any.downcast_ref::<RepeatValue>() {
-                return r.n().is_none();
-            }
-            if any.downcast_ref::<CycleValue>().is_some()
-                || any.downcast_ref::<IterateValue>().is_some()
-            {
-                return true;
-            }
-            if let Some(r) = any.downcast_ref::<RangeValue>() {
-                if r.end().is_none() {
-                    return true;
-                }
-                return match r.step() {
-                    RangeNum::Int(0) => true,
-                    RangeNum::Double(x) => x == 0.0,
-                    _ => false,
-                };
-            }
-            // Realized seqs: a nested infinite still throws.
-            realized_items(&**ext).is_some_and(|items| items.iter().any(seq_hash_unsupported))
-        }
+        Value::Extension(ext) => extension_hash_unsupported(&**ext),
+        _ => false,
+    }
+}
+
+/// Whether hashing an extension value throws (unbounded `repeat` /
+/// `cycle` / `iterate` / `range` steps, or a realized seq with a
+/// nested infinite).
+fn extension_hash_unsupported(ext: &dyn ExtensionValue) -> bool {
+    let any = ext.as_any();
+    if let Some(r) = any.downcast_ref::<RepeatValue>() {
+        return r.n().is_none();
+    }
+    if any.downcast_ref::<CycleValue>().is_some() || any.downcast_ref::<IterateValue>().is_some() {
+        return true;
+    }
+    if let Some(r) = any.downcast_ref::<RangeValue>() {
+        return range_hash_unsupported(r);
+    }
+    // Realized seqs: a nested infinite still throws.
+    realized_items(ext).is_some_and(|items| items.iter().any(seq_hash_unsupported))
+}
+
+/// Whether hashing a range throws (open-ended, or a zero step that
+/// never reaches its end).
+fn range_hash_unsupported(r: &RangeValue) -> bool {
+    if r.end().is_none() {
+        return true;
+    }
+    match r.step() {
+        RangeNum::Int(0) => true,
+        RangeNum::Double(x) => x == 0.0,
         _ => false,
     }
 }

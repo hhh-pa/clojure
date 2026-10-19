@@ -686,56 +686,88 @@ fn native_neg(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErro
 /// non-`Comparable`s (whose own class fails against
 /// `Comparable`). All probed.
 pub(crate) fn jvm_compare(x: &Value, y: &Value) -> Result<std::cmp::Ordering, NativeError> {
+    if let Some(ord) = compare_nil(x, y) {
+        return Ok(ord);
+    }
+    if let Some(ord) = compare_numbers(x, y)? {
+        return Ok(ord);
+    }
+    if let Some(ord) = compare_same_type(x, y)? {
+        return Ok(ord);
+    }
+    Err(compare_cast_err(x, y))
+}
+
+/// Nils sort first (`nil` is less than everything, equal to itself).
+fn compare_nil(x: &Value, y: &Value) -> Option<std::cmp::Ordering> {
     use std::cmp::Ordering;
     match (x, y) {
-        (Value::Nil, Value::Nil) => return Ok(Ordering::Equal),
-        (Value::Nil, _) => return Ok(Ordering::Less),
-        (_, Value::Nil) => return Ok(Ordering::Greater),
-        _ => {}
+        (Value::Nil, Value::Nil) => Some(Ordering::Equal),
+        (Value::Nil, _) => Some(Ordering::Less),
+        (_, Value::Nil) => Some(Ordering::Greater),
+        _ => None,
     }
-    if matches!(x, Value::Int(_) | Value::Double(_))
-        && matches!(y, Value::Int(_) | Value::Double(_))
-    {
-        let (a, b) = (to_f64(as_num(x)?), to_f64(as_num(y)?));
-        // The `<`/`>` pair (never `total_cmp`): `NaN` ties.
-        if a < b {
-            return Ok(Ordering::Less);
-        }
-        if a > b {
-            return Ok(Ordering::Greater);
-        }
-        return Ok(Ordering::Equal);
+}
+
+/// Numeric cross-compare (`None` when `x` is not numeric, so the
+/// caller falls through; a numeric `x` against a non-numeric `y`
+/// fails `y` to `Number`).
+fn compare_numbers(x: &Value, y: &Value) -> Result<Option<std::cmp::Ordering>, NativeError> {
+    use std::cmp::Ordering;
+    if !matches!(x, Value::Int(_) | Value::Double(_)) {
+        return Ok(None);
     }
-    if matches!(x, Value::Int(_) | Value::Double(_)) {
+    if !matches!(y, Value::Int(_) | Value::Double(_)) {
         return Err(cce_err(y, "java.lang.Number"));
     }
-    match (x, y) {
-        (Value::Str(a), Value::Str(b)) => {
-            return Ok(compare_utf16(a, b));
-        }
-        (Value::Char(a), Value::Char(b)) => return Ok(a.cmp(b)),
-        (Value::Bool(a), Value::Bool(b)) => return Ok(a.cmp(b)),
-        (Value::Keyword(a), Value::Keyword(b)) => return Ok(compare_named(a, b)),
-        (Value::Symbol(a), Value::Symbol(b)) => return Ok(compare_named(a, b)),
-        (Value::Vector(a), Value::Vector(b)) => {
-            let mut ai = a.iter();
-            let mut bi = b.iter();
-            loop {
-                match (ai.next(), bi.next()) {
-                    (None, None) => return Ok(Ordering::Equal),
-                    (None, _) => return Ok(Ordering::Less),
-                    (_, None) => return Ok(Ordering::Greater),
-                    (Some(u), Some(v)) => match jvm_compare(u, v)? {
-                        Ordering::Equal => {}
-                        ord => return Ok(ord),
-                    },
-                }
-            }
-        }
-        _ => {}
+    let (a, b) = (to_f64(as_num(x)?), to_f64(as_num(y)?));
+    // The `<`/`>` pair (never `total_cmp`): `NaN` ties.
+    if a < b {
+        return Ok(Some(Ordering::Less));
     }
-    // `x.compareTo(y)`: checkcast `y` to `x`'s class (vectors name
-    // the interface); non-`Comparable` `x` fails itself.
+    if a > b {
+        return Ok(Some(Ordering::Greater));
+    }
+    Ok(Some(Ordering::Equal))
+}
+
+/// Same-type scalars and vectors (`None` when the types differ).
+fn compare_same_type(x: &Value, y: &Value) -> Result<Option<std::cmp::Ordering>, NativeError> {
+    match (x, y) {
+        (Value::Str(a), Value::Str(b)) => Ok(Some(compare_utf16(a, b))),
+        (Value::Char(a), Value::Char(b)) => Ok(Some(a.cmp(b))),
+        (Value::Bool(a), Value::Bool(b)) => Ok(Some(a.cmp(b))),
+        (Value::Keyword(a), Value::Keyword(b)) => Ok(Some(compare_named(a, b))),
+        (Value::Symbol(a), Value::Symbol(b)) => Ok(Some(compare_named(a, b))),
+        (Value::Vector(a), Value::Vector(b)) => Ok(Some(compare_vectors(a, b)?)),
+        _ => Ok(None),
+    }
+}
+
+/// Lexicographic vector order (recursive element `compare`).
+fn compare_vectors(
+    a: &clj_value::Vector,
+    b: &clj_value::Vector,
+) -> Result<std::cmp::Ordering, NativeError> {
+    use std::cmp::Ordering;
+    let mut ai = a.iter();
+    let mut bi = b.iter();
+    loop {
+        match (ai.next(), bi.next()) {
+            (None, None) => return Ok(Ordering::Equal),
+            (None, _) => return Ok(Ordering::Less),
+            (_, None) => return Ok(Ordering::Greater),
+            (Some(u), Some(v)) => match jvm_compare(u, v)? {
+                Ordering::Equal => {}
+                ord => return Ok(ord),
+            },
+        }
+    }
+}
+
+/// `x.compareTo(y)`: checkcast `y` to `x`'s class (vectors name
+/// the interface); non-`Comparable` `x` fails itself.
+fn compare_cast_err(x: &Value, y: &Value) -> NativeError {
     let target = match x {
         Value::Str(_) => "java.lang.String",
         Value::Char(_) => "java.lang.Character",
@@ -743,9 +775,9 @@ pub(crate) fn jvm_compare(x: &Value, y: &Value) -> Result<std::cmp::Ordering, Na
         Value::Keyword(_) => "clojure.lang.Keyword",
         Value::Symbol(_) => "clojure.lang.Symbol",
         Value::Vector(_) => "clojure.lang.IPersistentVector",
-        _ => return Err(cce_err(x, "java.lang.Comparable")),
+        _ => return cce_err(x, "java.lang.Comparable"),
     };
-    Err(cce_err(y, target))
+    cce_err(y, target)
 }
 
 /// UTF-16 code-unit order (the JVM's `String.compareTo`).
@@ -1070,30 +1102,36 @@ pub(crate) fn str_of_one(eval: &mut Evaluator, v: &Value) -> Result<String, Nati
         Value::Nil => Ok(String::new()),
         Value::Str(s) => Ok(s.to_string()),
         Value::Char(c) => Ok(c.to_string()),
-        _ if is_lazy_seq_str(v) => {
-            let items = collect_all(eval, v).map_err(signal_to_native)?;
-            let mut h: i32 = 1;
-            for item in &items {
-                let r = realize_deep(eval, item).map_err(signal_to_native)?;
-                h = h.wrapping_mul(31).wrapping_add(clj_value::hash_code(&r));
-            }
-            Ok(format!("clojure.lang.LazySeq@{:x}", h as u32))
-        }
-        _ => {
-            let r = realize_deep(eval, v).map_err(signal_to_native)?;
-            Ok(match &r {
-                Value::Nil => String::new(),
-                Value::Str(s) => s.to_string(),
-                Value::Char(c) => c.to_string(),
-                Value::List(_)
-                | Value::Vector(_)
-                | Value::Map(_)
-                | Value::Set(_)
-                | Value::Extension(_) => clj_value::pr_to_string(&r, &clj_value::PrintOpts::pr()),
-                _ => pr_to_string(&r, &PrintOpts::print()),
-            })
-        }
+        _ if is_lazy_seq_str(v) => lazy_seq_str(eval, v),
+        _ => str_of_realized(eval, v),
     }
+}
+
+/// A `LazySeq` renders `clojure.lang.LazySeq@<hex>` with the Java
+/// `List` content hash over the fully forced items.
+fn lazy_seq_str(eval: &mut Evaluator, v: &Value) -> Result<String, NativeError> {
+    let items = collect_all(eval, v).map_err(signal_to_native)?;
+    let mut h: i32 = 1;
+    for item in &items {
+        let r = realize_deep(eval, item).map_err(signal_to_native)?;
+        h = h.wrapping_mul(31).wrapping_add(clj_value::hash_code(&r));
+    }
+    Ok(format!("clojure.lang.LazySeq@{:x}", h as u32))
+}
+
+/// `str` of a realized non-`LazySeq` value: seq objects and strict
+/// collections print readably without limits, anything else plainly.
+fn str_of_realized(eval: &mut Evaluator, v: &Value) -> Result<String, NativeError> {
+    let r = realize_deep(eval, v).map_err(signal_to_native)?;
+    Ok(match &r {
+        Value::Nil => String::new(),
+        Value::Str(s) => s.to_string(),
+        Value::Char(c) => c.to_string(),
+        Value::List(_) | Value::Vector(_) | Value::Map(_) | Value::Set(_) | Value::Extension(_) => {
+            clj_value::pr_to_string(&r, &clj_value::PrintOpts::pr())
+        }
+        _ => pr_to_string(&r, &PrintOpts::print()),
+    })
 }
 
 /// `str`: concatenates the per-arg rendering (no spaces).

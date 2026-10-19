@@ -22,7 +22,7 @@ use std::sync::{Arc, Mutex};
 
 use clj_value::{
     CHUNK_SIZE, ConsValue, CycleValue, ExtensionValue, IterateValue, KeySeqValue, List, Map,
-    RangeNum, RangeValue, RealizedSeq, RepeatValue, Seq, SeqKind, SubVectorValue, ThrowClass,
+    RangeNum, RangeValue, RealizedSeq, RepeatValue, Seq, SeqKind, Set, SubVectorValue, ThrowClass,
     ValSeqValue, Value, Vector,
 };
 
@@ -473,97 +473,139 @@ fn force_pending(eval: &mut Evaluator, p: &PendingSeq) -> Result<Forced, Signal>
     }
 }
 
+/// Step a pending seq (forcing one step; empty chunks fall through
+/// to the tail).
+fn step_pending_unit(eval: &mut Evaluator, p: &PendingSeq) -> Result<StepUnit, Signal> {
+    match force_pending(eval, p)? {
+        Forced::Empty => Ok(StepUnit::Empty),
+        Forced::Chunk { items, tail } => {
+            if items.is_empty() {
+                step_unit(eval, &tail)
+            } else {
+                Ok(StepUnit::Chunk { items, tail })
+            }
+        }
+    }
+}
+
+/// Step a subvector view (eager).
+fn step_subvector_unit(sv: &SubVectorValue) -> Result<StepUnit, Signal> {
+    step_realized(&sv.items(), false).map_or_else(
+        || Ok(StepUnit::Empty),
+        |s| step_seq(&s, true, false, SeqKind::Subvec, None),
+    )
+}
+
+/// Step the entry-view arms (keys take the `true` projection).
+fn step_entry_unit(eval: &mut Evaluator, v: &Value) -> Result<Option<StepUnit>, Signal> {
+    if let Some(k) = as_keys(v) {
+        return step_keys_unit(eval, k.underlying(), true).map(Some);
+    }
+    if let Some(k) = as_vals(v) {
+        return step_keys_unit(eval, k.underlying(), false).map(Some);
+    }
+    Ok(None)
+}
+
+/// Step an extension input.
+fn step_unit_extension(eval: &mut Evaluator, v: &Value) -> Result<StepUnit, Signal> {
+    if let Some(p) = as_pending(v) {
+        return step_pending_unit(eval, p);
+    }
+    if let Some(s) = as_realized(v) {
+        return step_seq(s.seq(), s.is_counted(), s.is_idrop(), s.kind(), s.meta());
+    }
+    if let Some(r) = as_range(v) {
+        return step_range_value(eval, r);
+    }
+    if let Some(r) = as_repeat(v) {
+        return step_repeat_value(r);
+    }
+    if let Some(c) = as_cycle(v) {
+        return step_cycle_value(eval, c);
+    }
+    if let Some(it) = as_iterate(v) {
+        return step_iterate_value(eval, it);
+    }
+    if let Some(c) = as_cons_value(v) {
+        return step_cons_value(eval, c);
+    }
+    if let Some(unit) = step_entry_unit(eval, v)? {
+        return Ok(unit);
+    }
+    if let Some(sv) = as_subvector(v) {
+        return step_subvector_unit(sv);
+    }
+    Err(eval.throw(iseq_err(v)))
+}
+
+/// Step a list (one head plus its tail).
+fn step_list_unit(l: &List) -> Result<StepUnit, Signal> {
+    match l.first() {
+        None => Ok(StepUnit::Empty),
+        Some(head) => {
+            let tail = l
+                .drop_first()
+                .map(|t| Value::List(t.with_meta(None)))
+                .unwrap_or_else(|| Value::List(List::new_sync()));
+            Ok(StepUnit::One {
+                head: head.clone(),
+                tail,
+            })
+        }
+    }
+}
+
+/// Step a vector (chunked).
+fn step_vector_unit(x: &Vector) -> Result<StepUnit, Signal> {
+    step_realized(&x.iter().cloned().collect::<Vec<_>>(), true).map_or_else(
+        || Ok(StepUnit::Empty),
+        |s| step_seq(&s, true, true, SeqKind::Chunked, None),
+    )
+}
+
+/// Step a map (small maps keep `Map` kind).
+fn step_map_unit(m: &Map) -> Result<StepUnit, Signal> {
+    let entries: Vec<Value> = m
+        .iter()
+        .map(|(k, val)| Value::Vector(Vector::from_vec(vec![k.clone(), val.clone()])))
+        .collect();
+    let small = !m.is_hashy();
+    let kind = if small { SeqKind::Map } else { SeqKind::Key };
+    step_realized(&entries, false).map_or_else(
+        || Ok(StepUnit::Empty),
+        |s| step_seq(&s, small, small, kind, None),
+    )
+}
+
+/// Step a set.
+fn step_set_unit(s: &Set) -> Result<StepUnit, Signal> {
+    step_realized(&s.iter().cloned().collect::<Vec<_>>(), false).map_or_else(
+        || Ok(StepUnit::Empty),
+        |s| step_seq(&s, false, false, SeqKind::Key, None),
+    )
+}
+
+/// Step a string.
+fn step_str_unit(s: &str) -> Result<StepUnit, Signal> {
+    let chars: Vec<Value> = s.chars().map(Value::Char).collect();
+    step_realized(&chars, false).map_or_else(
+        || Ok(StepUnit::Empty),
+        |s| step_seq(&s, true, true, SeqKind::Str, None),
+    )
+}
+
 /// Step one input: empty, one head, or a whole chunk (chunked
 /// inputs yield their current chunk up to [`CHUNK_SIZE`]).
 pub(crate) fn step_unit(eval: &mut Evaluator, v: &Value) -> Result<StepUnit, Signal> {
     match v {
         Value::Nil => Ok(StepUnit::Empty),
-        Value::Extension(_) => {
-            if let Some(p) = as_pending(v) {
-                return match force_pending(eval, p)? {
-                    Forced::Empty => Ok(StepUnit::Empty),
-                    Forced::Chunk { items, tail } => {
-                        if items.is_empty() {
-                            step_unit(eval, &tail)
-                        } else {
-                            Ok(StepUnit::Chunk { items, tail })
-                        }
-                    }
-                };
-            }
-            if let Some(s) = as_realized(v) {
-                return step_seq(s.seq(), s.is_counted(), s.is_idrop(), s.kind(), s.meta());
-            }
-            if let Some(r) = as_range(v) {
-                return step_range_value(eval, r);
-            }
-            if let Some(r) = as_repeat(v) {
-                return step_repeat_value(r);
-            }
-            if let Some(c) = as_cycle(v) {
-                return step_cycle_value(eval, c);
-            }
-            if let Some(it) = as_iterate(v) {
-                return step_iterate_value(eval, it);
-            }
-            if let Some(c) = as_cons_value(v) {
-                return step_cons_value(eval, c);
-            }
-            if let Some(k) = as_keys(v) {
-                return step_keys_unit(eval, k.underlying(), true);
-            }
-            if let Some(k) = as_vals(v) {
-                return step_keys_unit(eval, k.underlying(), false);
-            }
-            if let Some(sv) = as_subvector(v) {
-                return step_realized(&sv.items(), false).map_or_else(
-                    || Ok(StepUnit::Empty),
-                    |s| step_seq(&s, true, false, SeqKind::Subvec, None),
-                );
-            }
-            Err(eval.throw(iseq_err(v)))
-        }
-        Value::List(l) => match l.first() {
-            None => Ok(StepUnit::Empty),
-            Some(head) => {
-                let tail = l
-                    .drop_first()
-                    .map(|t| Value::List(t.with_meta(None)))
-                    .unwrap_or_else(|| Value::List(List::new_sync()));
-                Ok(StepUnit::One {
-                    head: head.clone(),
-                    tail,
-                })
-            }
-        },
-        Value::Vector(x) => step_realized(&x.iter().cloned().collect::<Vec<_>>(), true)
-            .map_or_else(
-                || Ok(StepUnit::Empty),
-                |s| step_seq(&s, true, true, SeqKind::Chunked, None),
-            ),
-        Value::Map(m) => {
-            let entries: Vec<Value> = m
-                .iter()
-                .map(|(k, val)| Value::Vector(Vector::from_vec(vec![k.clone(), val.clone()])))
-                .collect();
-            let small = !m.is_hashy();
-            let kind = if small { SeqKind::Map } else { SeqKind::Key };
-            step_realized(&entries, false).map_or_else(
-                || Ok(StepUnit::Empty),
-                |s| step_seq(&s, small, small, kind, None),
-            )
-        }
-        Value::Set(s) => step_realized(&s.iter().cloned().collect::<Vec<_>>(), false).map_or_else(
-            || Ok(StepUnit::Empty),
-            |s| step_seq(&s, false, false, SeqKind::Key, None),
-        ),
-        Value::Str(s) => {
-            let chars: Vec<Value> = s.chars().map(Value::Char).collect();
-            step_realized(&chars, false).map_or_else(
-                || Ok(StepUnit::Empty),
-                |s| step_seq(&s, true, true, SeqKind::Str, None),
-            )
-        }
+        Value::Extension(_) => step_unit_extension(eval, v),
+        Value::List(l) => step_list_unit(l),
+        Value::Vector(x) => step_vector_unit(x),
+        Value::Map(m) => step_map_unit(m),
+        Value::Set(s) => step_set_unit(s),
+        Value::Str(s) => step_str_unit(s),
         _ => Err(eval.throw(iseq_err(v))),
     }
 }
@@ -935,89 +977,113 @@ pub(crate) fn is_idrop(v: &Value) -> bool {
     }
 }
 
+/// Eager `IDrop` shift of a vector (`None` past the end).
+fn idrop_shift_vector(x: &Vector, n: i32, n64: i64) -> Option<Value> {
+    if n64 < 0 || n64 >= x.len() as i64 {
+        return None;
+    }
+    let rest: Vec<Value> = x.iter().skip(n as usize).cloned().collect();
+    Some(realized_value(rest, true, true, true, SeqKind::Chunked))
+}
+
+/// Eager `IDrop` shift of a small map (`None` past the end).
+fn idrop_shift_map(m: &Map, n: i32, n64: i64) -> Option<Value> {
+    let entries: Vec<Value> = m
+        .iter()
+        .map(|(k, val)| Value::Vector(Vector::from_vec(vec![k.clone(), val.clone()])))
+        .collect();
+    if n64 < 0 || n64 >= entries.len() as i64 {
+        return None;
+    }
+    Some(realized_value(
+        entries[n as usize..].to_vec(),
+        false,
+        true,
+        true,
+        SeqKind::Map,
+    ))
+}
+
+/// Eager `IDrop` shift of a long range (`None` past the end).
+fn idrop_shift_range(r: &RangeValue, n64: i64) -> Option<Value> {
+    if !r.is_long() {
+        return None;
+    }
+    let (RangeNum::Int(start), RangeNum::Int(step)) = (r.cur(), r.step()) else {
+        return None;
+    };
+    let count = r.count().unwrap_or(0);
+    if n64 >= count {
+        return None;
+    }
+    let shifted = RangeValue::new(
+        RangeNum::Int(start.wrapping_add(step.wrapping_mul(n64))),
+        r.end(),
+        RangeNum::Int(step),
+        true,
+        Some(count - n64),
+    );
+    Some(Value::Extension(Arc::new(shifted)))
+}
+
+/// Eager `IDrop` shift of a repeat (infinite drops return `this`,
+/// metadata kept; `None` past the end).
+fn idrop_shift_repeat(v: &Value, r: &RepeatValue, n64: i64) -> Option<Value> {
+    match r.n() {
+        None => Some(v.clone()),
+        Some(c) if c - n64 > 0 => Some(Value::Extension(Arc::new(RepeatValue::new(
+            r.x().clone(),
+            Some(c - n64),
+        )))),
+        _ => None,
+    }
+}
+
+/// Eager `IDrop` shift of a chunked/string/small-map realized seq
+/// (`None` past the end).
+fn idrop_shift_realized(s: &RealizedSeq, n64: i64) -> Option<Value> {
+    if !matches!(s.kind(), SeqKind::Chunked | SeqKind::Str | SeqKind::Map) {
+        return None;
+    }
+    let mut cur = s.seq().clone();
+    for _ in 0..n64 {
+        cur = cur.next()?;
+    }
+    if cur.is_empty() {
+        return None;
+    }
+    Some(Value::Extension(Arc::new(RealizedSeq::flagged(
+        cur,
+        s.is_counted(),
+        s.is_idrop(),
+        s.kind(),
+    ))))
+}
+
+/// Eager `IDrop` shift of an extension value (`None` past the end
+/// or for non-`IDrop` extensions).
+fn idrop_shift_extension(v: &Value, n64: i64) -> Option<Value> {
+    if let Some(r) = as_range(v) {
+        return idrop_shift_range(r, n64);
+    }
+    if let Some(r) = as_repeat(v) {
+        return idrop_shift_repeat(v, r, n64);
+    }
+    if let Some(s) = as_realized(v) {
+        return idrop_shift_realized(s, n64);
+    }
+    None
+}
+
 /// Eager `IDrop` shift by a positive `i32` count (metadata always
 /// dropped, like every `.drop`; `None` past the end, like the
 /// JVM's null). Callers only pass `IDrop` values.
 fn idrop_shift(v: &Value, n: i32) -> Option<Value> {
     let n64 = i64::from(n);
     match v {
-        Value::Vector(x) => {
-            if n64 < 0 || n64 >= x.len() as i64 {
-                return None;
-            }
-            let rest: Vec<Value> = x.iter().skip(n as usize).cloned().collect();
-            Some(realized_value(rest, true, true, true, SeqKind::Chunked))
-        }
-        Value::Map(m) if !m.is_hashy() => {
-            let entries: Vec<Value> = m
-                .iter()
-                .map(|(k, val)| Value::Vector(Vector::from_vec(vec![k.clone(), val.clone()])))
-                .collect();
-            if n64 < 0 || n64 >= entries.len() as i64 {
-                return None;
-            }
-            Some(realized_value(
-                entries[n as usize..].to_vec(),
-                false,
-                true,
-                true,
-                SeqKind::Map,
-            ))
-        }
-        Value::Extension(_) => {
-            if let Some(r) = as_range(v) {
-                if !r.is_long() {
-                    return None;
-                }
-                let (RangeNum::Int(start), RangeNum::Int(step)) = (r.cur(), r.step()) else {
-                    return None;
-                };
-                let count = r.count().unwrap_or(0);
-                if n64 >= count {
-                    return None;
-                }
-                let shifted = RangeValue::new(
-                    RangeNum::Int(start.wrapping_add(step.wrapping_mul(n64))),
-                    r.end(),
-                    RangeNum::Int(step),
-                    true,
-                    Some(count - n64),
-                );
-                return Some(Value::Extension(Arc::new(shifted)));
-            }
-            if let Some(r) = as_repeat(v) {
-                match r.n() {
-                    // Infinite drops return `this` (metadata kept).
-                    None => return Some(v.clone()),
-                    Some(c) if c - n64 > 0 => {
-                        return Some(Value::Extension(Arc::new(RepeatValue::new(
-                            r.x().clone(),
-                            Some(c - n64),
-                        ))));
-                    }
-                    _ => return None,
-                }
-            }
-            if let Some(s) = as_realized(v) {
-                if !matches!(s.kind(), SeqKind::Chunked | SeqKind::Str | SeqKind::Map) {
-                    return None;
-                }
-                let mut cur = s.seq().clone();
-                for _ in 0..n64 {
-                    cur = cur.next()?;
-                }
-                if cur.is_empty() {
-                    return None;
-                }
-                return Some(Value::Extension(Arc::new(RealizedSeq::flagged(
-                    cur,
-                    s.is_counted(),
-                    s.is_idrop(),
-                    s.kind(),
-                ))));
-            }
-            None
-        }
+        Value::Vector(x) => idrop_shift_vector(x, n, n64),
+        Value::Map(m) if !m.is_hashy() => idrop_shift_map(m, n, n64),
+        Value::Extension(_) => idrop_shift_extension(v, n64),
         _ => None,
     }
 }
@@ -1041,30 +1107,29 @@ pub(crate) fn drop_value(eval: &mut Evaluator, n: &Value, coll: Value) -> Result
     Ok(idrop_shift(&coll, n32).unwrap_or_else(empty_list_value))
 }
 
-/// `nthrest`: `(pos? n)` first — eager, before coll dispatch (nil
-/// is the `getClass` NPE, non-numbers the `Number` CCE, on vectors
-/// AND lists). Non-positive `n` returns the coll ITSELF (never
-/// seqed); `IDrop` colls shift eagerly (out-of-`i32` fails, like
-/// `drop`); anything else walks the JVM's strict
-/// `(loop [n n xs coll] ...)` — huge `n` walks to the end silently
-/// (no `AE`/`IAE`), and the `(or … ())` maps empty to `()`.
-pub(crate) fn nthrest_value(eval: &mut Evaluator, coll: Value, n: &Value) -> Result<Value, Signal> {
-    let mut cur = match n {
-        Value::Int(i) => *i as f64,
-        Value::Double(d) => *d,
-        Value::Nil => return Err(eval.throw(crate::core::npe_getclass())),
-        _ => return Err(eval.throw(crate::core::cce_err(n, "java.lang.Number"))),
-    };
-    if cur <= 0.0 || cur.is_nan() {
-        return Ok(coll);
+/// The `nthrest` count coercion (`(pos? n)` first — eager, before
+/// coll dispatch; nil is the `getClass` NPE, non-numbers the
+/// `Number` CCE).
+fn nthrest_count(eval: &mut Evaluator, n: &Value) -> Result<f64, Signal> {
+    match n {
+        Value::Int(i) => Ok(*i as f64),
+        Value::Double(d) => Ok(*d),
+        Value::Nil => Err(eval.throw(crate::core::npe_getclass())),
+        _ => Err(eval.throw(crate::core::cce_err(n, "java.lang.Number"))),
     }
-    if is_idrop(&coll) {
-        let n32 = crate::core::idrop_coerce(n).map_err(|e| eval.throw(e))?;
-        return Ok(idrop_shift(&coll, n32).unwrap_or_else(empty_list_value));
-    }
-    // The strict walk (`(dec n)` per step as `f64`: exact for small
-    // counts; huge counts on finite colls exit via exhaustion, on
-    // infinite colls hang — both like the JVM loop).
+}
+
+/// The `nthrest` eager `IDrop` shift (out-of-`i32` fails, like `drop`).
+fn nthrest_idrop(eval: &mut Evaluator, coll: &Value, n: &Value) -> Result<Value, Signal> {
+    let n32 = crate::core::idrop_coerce(n).map_err(|e| eval.throw(e))?;
+    Ok(idrop_shift(coll, n32).unwrap_or_else(empty_list_value))
+}
+
+/// The `nthrest` strict walk (`(dec n)` per step as `f64`: exact for
+/// small counts; huge counts on finite colls exit via exhaustion, on
+/// infinite colls hang — both like the JVM loop), plus the `(or … ())`
+/// empty-to-`()` mapping.
+fn nthrest_walk(eval: &mut Evaluator, coll: Value, mut cur: f64) -> Result<Value, Signal> {
     let mut xs = coll;
     loop {
         if cur <= 0.0 || cur.is_nan() {
@@ -1082,6 +1147,24 @@ pub(crate) fn nthrest_value(eval: &mut Evaluator, coll: Value, n: &Value) -> Res
         Value::Nil => Ok(empty_list_value()),
         s => Ok(s),
     }
+}
+
+/// `nthrest`: `(pos? n)` first — eager, before coll dispatch (nil
+/// is the `getClass` NPE, non-numbers the `Number` CCE, on vectors
+/// AND lists). Non-positive `n` returns the coll ITSELF (never
+/// seqed); `IDrop` colls shift eagerly (out-of-`i32` fails, like
+/// `drop`); anything else walks the JVM's strict
+/// `(loop [n n xs coll] ...)` — huge `n` walks to the end silently
+/// (no `AE`/`IAE`), and the `(or … ())` maps empty to `()`.
+pub(crate) fn nthrest_value(eval: &mut Evaluator, coll: Value, n: &Value) -> Result<Value, Signal> {
+    let cur = nthrest_count(eval, n)?;
+    if cur <= 0.0 || cur.is_nan() {
+        return Ok(coll);
+    }
+    if is_idrop(&coll) {
+        return nthrest_idrop(eval, &coll, n);
+    }
+    nthrest_walk(eval, coll, cur)
 }
 
 /// `map`: step every input; the first input's unit sets the width
@@ -1985,6 +2068,139 @@ fn keys_empty(u: &Value) -> bool {
     }
 }
 
+/// `seq` of a pending seq (forcing one step; nil-punning).
+fn seq_pending(eval: &mut Evaluator, v: &Value, p: &PendingSeq) -> Result<Value, Signal> {
+    match force_pending(eval, p)? {
+        Forced::Empty => Ok(Value::Nil),
+        Forced::Chunk { .. } => Ok(v.clone()),
+    }
+}
+
+/// `seq` of a realized seq (nil-punning empties).
+fn seq_realized(v: &Value, s: &RealizedSeq) -> Value {
+    if s.seq().is_empty() {
+        Value::Nil
+    } else {
+        v.clone()
+    }
+}
+
+/// `seq` of a range (nil-punning done ranges).
+fn seq_range(v: &Value, r: &RangeValue) -> Value {
+    if r.done() { Value::Nil } else { v.clone() }
+}
+
+/// `seq` of a repeat (nil-punning spent repeats).
+fn seq_repeat(v: &Value, r: &RepeatValue) -> Value {
+    let empty = r.n().is_some_and(|n| n <= 0);
+    if empty { Value::Nil } else { v.clone() }
+}
+
+/// `seq` of a cycle (nil-punning doubly-nil cycles).
+fn seq_cycle(v: &Value, c: &CycleValue) -> Value {
+    let empty = matches!(c.prev(), Value::Nil) && matches!(c.current(), Value::Nil);
+    if empty { Value::Nil } else { v.clone() }
+}
+
+/// `seq` of an entry view (nil-punning spent underlyings).
+fn seq_key_view(v: &Value, underlying: &Value) -> Value {
+    if keys_empty(underlying) {
+        Value::Nil
+    } else {
+        v.clone()
+    }
+}
+
+/// `seq` of a subvector view (as a realized subvec seq).
+fn seq_subvector(sv: &SubVectorValue) -> Value {
+    realized_value(sv.items(), false, true, false, SeqKind::Subvec)
+}
+
+/// `seq` of iterate/cons values (never empty).
+fn is_always_seq(v: &Value) -> bool {
+    as_iterate(v).is_some() || as_cons_value(v).is_some()
+}
+
+/// `seq` of an extension value.
+fn seq_value_extension(eval: &mut Evaluator, v: &Value) -> Result<Value, Signal> {
+    if let Some(p) = as_pending(v) {
+        return seq_pending(eval, v, p);
+    }
+    if let Some(s) = as_realized(v) {
+        return Ok(seq_realized(v, s));
+    }
+    if let Some(r) = as_range(v) {
+        return Ok(seq_range(v, r));
+    }
+    if let Some(r) = as_repeat(v) {
+        return Ok(seq_repeat(v, r));
+    }
+    if let Some(c) = as_cycle(v) {
+        return Ok(seq_cycle(v, c));
+    }
+    if is_always_seq(v) {
+        return Ok(v.clone());
+    }
+    if let Some(k) = as_keys(v) {
+        return Ok(seq_key_view(v, k.underlying()));
+    }
+    if let Some(k) = as_vals(v) {
+        return Ok(seq_key_view(v, k.underlying()));
+    }
+    if let Some(sv) = as_subvector(v) {
+        return Ok(seq_subvector(sv));
+    }
+    Err(eval.throw(iseq_err(v)))
+}
+
+/// `seq` of a vector (chunked).
+fn seq_vector(x: &Vector) -> Value {
+    realized_value(
+        x.iter().cloned().collect::<Vec<_>>(),
+        true,
+        true,
+        true,
+        SeqKind::Chunked,
+    )
+}
+
+/// `seq` of a map (small maps keep `Map` kind).
+fn seq_map(m: &Map) -> Value {
+    let small = !m.is_hashy();
+    let kind = if small { SeqKind::Map } else { SeqKind::Key };
+    realized_value(
+        m.iter()
+            .map(|(k, val)| Value::Vector(Vector::from_vec(vec![k.clone(), val.clone()])))
+            .collect::<Vec<_>>(),
+        false,
+        small,
+        small,
+        kind,
+    )
+}
+
+/// `seq` of a set.
+fn seq_set(s: &Set) -> Value {
+    realized_value(
+        s.iter().cloned().collect::<Vec<_>>(),
+        false,
+        false,
+        false,
+        SeqKind::Key,
+    )
+}
+
+/// `seq` of a string.
+fn seq_str(s: &str) -> Value {
+    realized_value(
+        s.chars().map(Value::Char).collect::<Vec<_>>(),
+        false,
+        true,
+        true,
+        SeqKind::Str,
+    )
+}
+
 /// Nil-punning `seq`: nil for empties, the seq value otherwise.
 /// Pending seqs force one step; strict seqs decide emptiness from
 /// their bounds (never stepping, like the JVM's `.seq()` on
@@ -1993,95 +2209,53 @@ fn keys_empty(u: &Value) -> bool {
 pub(crate) fn seq_value(eval: &mut Evaluator, v: &Value) -> Result<Value, Signal> {
     match v {
         Value::Nil => Ok(Value::Nil),
-        Value::Extension(_) => {
-            if let Some(p) = as_pending(v) {
-                return match force_pending(eval, p)? {
-                    Forced::Empty => Ok(Value::Nil),
-                    Forced::Chunk { .. } => Ok(v.clone()),
-                };
-            }
-            if let Some(s) = as_realized(v) {
-                return Ok(if s.seq().is_empty() {
-                    Value::Nil
-                } else {
-                    v.clone()
-                });
-            }
-            if let Some(r) = as_range(v) {
-                return Ok(if r.done() { Value::Nil } else { v.clone() });
-            }
-            if let Some(r) = as_repeat(v) {
-                let empty = r.n().is_some_and(|n| n <= 0);
-                return Ok(if empty { Value::Nil } else { v.clone() });
-            }
-            if let Some(c) = as_cycle(v) {
-                let empty = matches!(c.prev(), Value::Nil) && matches!(c.current(), Value::Nil);
-                return Ok(if empty { Value::Nil } else { v.clone() });
-            }
-            if as_iterate(v).is_some() || as_cons_value(v).is_some() {
-                return Ok(v.clone());
-            }
-            if let Some(k) = as_keys(v) {
-                return Ok(if keys_empty(k.underlying()) {
-                    Value::Nil
-                } else {
-                    v.clone()
-                });
-            }
-            if let Some(k) = as_vals(v) {
-                return Ok(if keys_empty(k.underlying()) {
-                    Value::Nil
-                } else {
-                    v.clone()
-                });
-            }
-            if let Some(sv) = as_subvector(v) {
-                return Ok(realized_value(
-                    sv.items(),
-                    false,
-                    true,
-                    false,
-                    SeqKind::Subvec,
-                ));
-            }
-            Err(eval.throw(iseq_err(v)))
-        }
+        Value::Extension(_) => seq_value_extension(eval, v),
         Value::List(l) => Ok(if l.is_empty() { Value::Nil } else { v.clone() }),
-        Value::Vector(x) => Ok(realized_value(
-            x.iter().cloned().collect::<Vec<_>>(),
-            true,
-            true,
-            true,
-            SeqKind::Chunked,
-        )),
-        Value::Map(m) => {
-            let small = !m.is_hashy();
-            let kind = if small { SeqKind::Map } else { SeqKind::Key };
-            Ok(realized_value(
-                m.iter()
-                    .map(|(k, val)| Value::Vector(Vector::from_vec(vec![k.clone(), val.clone()])))
-                    .collect::<Vec<_>>(),
-                false,
-                small,
-                small,
-                kind,
-            ))
-        }
-        Value::Set(s) => Ok(realized_value(
-            s.iter().cloned().collect::<Vec<_>>(),
-            false,
-            false,
-            false,
-            SeqKind::Key,
-        )),
-        Value::Str(s) => Ok(realized_value(
-            s.chars().map(Value::Char).collect::<Vec<_>>(),
-            false,
-            true,
-            true,
-            SeqKind::Str,
-        )),
+        Value::Vector(x) => Ok(seq_vector(x)),
+        Value::Map(m) => Ok(seq_map(m)),
+        Value::Set(s) => Ok(seq_set(s)),
+        Value::Str(s) => Ok(seq_str(s)),
         _ => Err(eval.throw(iseq_err(v))),
+    }
+}
+
+/// The first item of a directly-readable collection (`None` for
+/// anything else, including seq values and unseqables).
+fn first_direct(v: &Value) -> Option<Value> {
+    match v {
+        Value::List(l) => Some(l.first().cloned().unwrap_or(Value::Nil)),
+        Value::Vector(x) => Some(x.iter().next().cloned().unwrap_or(Value::Nil)),
+        Value::Map(m) => Some(
+            m.iter()
+                .next()
+                .map(|(k, val)| Value::Vector(Vector::from_vec(vec![k.clone(), val.clone()])))
+                .unwrap_or(Value::Nil),
+        ),
+        Value::Set(s) => Some(s.iter().next().cloned().unwrap_or(Value::Nil)),
+        Value::Str(s) => Some(s.chars().next().map(Value::Char).unwrap_or(Value::Nil)),
+        Value::Extension(_) => {
+            as_subvector(v).map(|sv| sv.iter().next().cloned().unwrap_or(Value::Nil))
+        }
+        _ => None,
+    }
+}
+
+/// The first item of a seq value (iterate heads read without
+/// stepping; entry views cast; anything else steps one unit).
+fn first_seq_value(eval: &mut Evaluator, v: &Value) -> Result<Value, Signal> {
+    if let Some(it) = as_iterate(v) {
+        return iterate_seed(eval, it);
+    }
+    if let Some(k) = as_keys(v) {
+        return keys_first(eval, k.underlying(), true);
+    }
+    if let Some(k) = as_vals(v) {
+        return keys_first(eval, k.underlying(), false);
+    }
+    match step_unit(eval, v)? {
+        StepUnit::Empty => Ok(Value::Nil),
+        StepUnit::One { head, .. } => Ok(head),
+        StepUnit::Chunk { items, .. } => Ok(items.first().cloned().unwrap_or(Value::Nil)),
     }
 }
 
@@ -2090,38 +2264,16 @@ pub(crate) fn seq_value(eval: &mut Evaluator, v: &Value) -> Result<Value, Signal
 /// read without stepping (never calling `f` for realized seeds);
 /// entry views cast.
 pub(crate) fn first_value(eval: &mut Evaluator, v: &Value) -> Result<Value, Signal> {
-    match v {
-        Value::Nil => Ok(Value::Nil),
-        Value::List(l) => Ok(l.first().cloned().unwrap_or(Value::Nil)),
-        Value::Vector(x) => Ok(x.iter().next().cloned().unwrap_or(Value::Nil)),
-        Value::Map(m) => Ok(m
-            .iter()
-            .next()
-            .map(|(k, val)| Value::Vector(Vector::from_vec(vec![k.clone(), val.clone()])))
-            .unwrap_or(Value::Nil)),
-        Value::Set(s) => Ok(s.iter().next().cloned().unwrap_or(Value::Nil)),
-        Value::Str(s) => Ok(s.chars().next().map(Value::Char).unwrap_or(Value::Nil)),
-        Value::Extension(_) if as_subvector(v).is_some() => Ok(as_subvector(v)
-            .and_then(|sv| sv.iter().next().cloned())
-            .unwrap_or(Value::Nil)),
-        Value::Extension(_) if is_seq_value(v) => {
-            if let Some(it) = as_iterate(v) {
-                return iterate_seed(eval, it);
-            }
-            if let Some(k) = as_keys(v) {
-                return keys_first(eval, k.underlying(), true);
-            }
-            if let Some(k) = as_vals(v) {
-                return keys_first(eval, k.underlying(), false);
-            }
-            match step_unit(eval, v)? {
-                StepUnit::Empty => Ok(Value::Nil),
-                StepUnit::One { head, .. } => Ok(head),
-                StepUnit::Chunk { items, .. } => Ok(items.first().cloned().unwrap_or(Value::Nil)),
-            }
-        }
-        _ => Err(eval.throw(iseq_err(v))),
+    if matches!(v, Value::Nil) {
+        return Ok(Value::Nil);
     }
+    if let Some(direct) = first_direct(v) {
+        return Ok(direct);
+    }
+    if is_seq_value(v) {
+        return first_seq_value(eval, v);
+    }
+    Err(eval.throw(iseq_err(v)))
 }
 
 /// A range shifted past its head (`()` when spent; metadata
@@ -2149,6 +2301,100 @@ fn range_rest(r: &RangeValue) -> Value {
     }
 }
 
+/// `rest` of a forced pending chunk: multi-item chunks rest to a
+/// `ChunkedCons` (like the JVM's `more`); empty chunks fall through
+/// to the tail; single items seq the tail (nil-punning to `()`).
+fn rest_pending_chunk(
+    eval: &mut Evaluator,
+    items: &Arc<[Value]>,
+    tail: Value,
+) -> Result<Value, Signal> {
+    if items.len() > 1 {
+        return Ok(PendingSeq::pending_kind(
+            Thunk::Chain {
+                head: items[1..].to_vec(),
+                tail,
+            },
+            LazyKind::ChunkedCons,
+        ));
+    }
+    if items.is_empty() {
+        let s = seq_value(eval, &tail)?;
+        return rest_of_seq(eval, &s);
+    }
+    match seq_value(eval, &tail)? {
+        Value::Nil => Ok(empty_list_value()),
+        t => Ok(t),
+    }
+}
+
+/// `rest` of a pending seq (forcing one step).
+fn rest_pending(eval: &mut Evaluator, p: &PendingSeq) -> Result<Value, Signal> {
+    match force_pending(eval, p)? {
+        Forced::Empty => Ok(empty_list_value()),
+        Forced::Chunk { items, tail } => rest_pending_chunk(eval, &items, tail),
+    }
+}
+
+/// `rest` of a realized seq (shifting, preserving kind; `StringSeq`
+/// keeps metadata).
+fn rest_realized_seq(r: &RealizedSeq) -> Value {
+    let more = r.seq().more();
+    if more.is_empty() {
+        return empty_list_value();
+    }
+    Value::Extension(Arc::new(seq_tail(
+        more,
+        r.is_counted(),
+        r.is_idrop(),
+        r.kind(),
+        r.meta(),
+    )))
+}
+
+/// Map a stepped tail to its `rest` (nil/empty tails answer `()`).
+fn rest_tail_value(tail: Value) -> Value {
+    match &tail {
+        Value::Nil => empty_list_value(),
+        Value::List(l) if l.is_empty() => empty_list_value(),
+        _ => {
+            if as_realized(&tail).is_some_and(|r| r.seq().is_empty()) {
+                return empty_list_value();
+            }
+            tail
+        }
+    }
+}
+
+/// `rest` of a one-step strict seq (stepping once, then mapping the
+/// tail).
+fn rest_stepped(eval: &mut Evaluator, s: &Value) -> Result<Value, Signal> {
+    match step_unit(eval, s)? {
+        StepUnit::Empty => Ok(empty_list_value()),
+        StepUnit::One { tail, .. } | StepUnit::Chunk { tail, .. } => Ok(rest_tail_value(tail)),
+    }
+}
+
+/// `rest` of a seqed extension value.
+fn rest_extension(eval: &mut Evaluator, s: &Value) -> Result<Value, Signal> {
+    if let Some(p) = as_pending(s) {
+        return rest_pending(eval, p);
+    }
+    if let Some(r) = as_realized(s) {
+        return Ok(rest_realized_seq(r));
+    }
+    if let Some(r) = as_range(s) {
+        return Ok(range_rest(r));
+    }
+    if let Some(k) = as_keys(s) {
+        return keys_rest(eval, k.underlying(), true);
+    }
+    if let Some(k) = as_vals(s) {
+        return keys_rest(eval, k.underlying(), false);
+    }
+    rest_stepped(eval, s)
+}
+
 /// `rest` of a seqed value (never nil): lists drop their head,
 /// realized seqs shift (preserving kind, `StringSeq` keeping
 /// metadata), ranges shift, one-step strict seqs step, entry
@@ -2161,67 +2407,7 @@ fn rest_of_seq(eval: &mut Evaluator, s: &Value) -> Result<Value, Signal> {
             .drop_first()
             .map(|t| Value::List(t.with_meta(None)))
             .unwrap_or_else(empty_list_value)),
-        Value::Extension(_) => {
-            if let Some(p) = as_pending(s) {
-                return match force_pending(eval, p)? {
-                    Forced::Empty => Ok(empty_list_value()),
-                    Forced::Chunk { items, tail } => {
-                        if items.len() > 1 {
-                            Ok(PendingSeq::pending_kind(
-                                Thunk::Chain {
-                                    head: items[1..].to_vec(),
-                                    tail,
-                                },
-                                LazyKind::ChunkedCons,
-                            ))
-                        } else if items.is_empty() {
-                            let s = seq_value(eval, &tail)?;
-                            rest_of_seq(eval, &s)
-                        } else {
-                            match seq_value(eval, &tail)? {
-                                Value::Nil => Ok(empty_list_value()),
-                                t => Ok(t),
-                            }
-                        }
-                    }
-                };
-            }
-            if let Some(r) = as_realized(s) {
-                let more = r.seq().more();
-                if more.is_empty() {
-                    return Ok(empty_list_value());
-                }
-                return Ok(Value::Extension(Arc::new(seq_tail(
-                    more,
-                    r.is_counted(),
-                    r.is_idrop(),
-                    r.kind(),
-                    r.meta(),
-                ))));
-            }
-            if let Some(r) = as_range(s) {
-                return Ok(range_rest(r));
-            }
-            if let Some(k) = as_keys(s) {
-                return keys_rest(eval, k.underlying(), true);
-            }
-            if let Some(k) = as_vals(s) {
-                return keys_rest(eval, k.underlying(), false);
-            }
-            match step_unit(eval, s)? {
-                StepUnit::Empty => Ok(empty_list_value()),
-                StepUnit::One { tail, .. } | StepUnit::Chunk { tail, .. } => match &tail {
-                    Value::Nil => Ok(empty_list_value()),
-                    Value::List(l) if l.is_empty() => Ok(empty_list_value()),
-                    _ => {
-                        if as_realized(&tail).is_some_and(|r| r.seq().is_empty()) {
-                            return Ok(empty_list_value());
-                        }
-                        Ok(tail)
-                    }
-                },
-            }
-        }
+        Value::Extension(_) => rest_extension(eval, s),
         _ => {
             let s = seq_value(eval, s)?;
             rest_of_seq(eval, &s)
@@ -2392,6 +2578,52 @@ fn equiv_seq(eval: &mut Evaluator, a: &Value, b: &Value) -> Result<bool, Signal>
     }
 }
 
+/// Map `=` branch: size plus per-key recursion (missing keys fail
+/// even for nil values, like the JVM's sentinel lookup).
+fn equiv_map_vals(eval: &mut Evaluator, x: &Map, y: &Map) -> Result<bool, Signal> {
+    if x.size() != y.size() {
+        return Ok(false);
+    }
+    for (k, v) in x.iter() {
+        if is_hash_uoe(k) {
+            return Err(eval.throw(uoe()));
+        }
+        let Some(w) = y.get(k) else {
+            return Ok(false);
+        };
+        if !equiv_vals(eval, v, w)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// Set `=` branch: size plus per-member pairwise search.
+fn equiv_set_vals(eval: &mut Evaluator, x: &Set, y: &Set) -> Result<bool, Signal> {
+    if x.size() != y.size() {
+        return Ok(false);
+    }
+    for v in x.iter() {
+        if is_hash_uoe(v) {
+            return Err(eval.throw(uoe()));
+        }
+        if !equiv_set_member(eval, v, y)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// Whether one set member has a pairwise-equal partner.
+fn equiv_set_member(eval: &mut Evaluator, v: &Value, y: &Set) -> Result<bool, Signal> {
+    for w in y.iter() {
+        if equiv_vals(eval, v, w)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// `Util.equiv`: sequential pairs walk pairwise (early exit);
 /// maps compare by size plus per-key recursion (missing keys fail
 /// even for nil values, like the JVM's sentinel lookup);
@@ -2402,44 +2634,121 @@ pub(crate) fn equiv_vals(eval: &mut Evaluator, a: &Value, b: &Value) -> Result<b
         return equiv_seq(eval, a, b);
     }
     if let (Value::Map(x), Value::Map(y)) = (a, b) {
-        if x.size() != y.size() {
-            return Ok(false);
-        }
-        for (k, v) in x.iter() {
-            if is_hash_uoe(k) {
-                return Err(eval.throw(uoe()));
-            }
-            let Some(w) = y.get(k) else {
-                return Ok(false);
-            };
-            if !equiv_vals(eval, v, w)? {
-                return Ok(false);
-            }
-        }
-        return Ok(true);
+        return equiv_map_vals(eval, x, y);
     }
     if let (Value::Set(x), Value::Set(y)) = (a, b) {
-        if x.size() != y.size() {
-            return Ok(false);
-        }
-        for v in x.iter() {
-            if is_hash_uoe(v) {
-                return Err(eval.throw(uoe()));
-            }
-            let mut found = false;
-            for w in y.iter() {
-                if equiv_vals(eval, v, w)? {
-                    found = true;
-                    break;
-                }
-            }
-            if !found {
-                return Ok(false);
-            }
-        }
-        return Ok(true);
+        return equiv_set_vals(eval, x, y);
     }
     Ok(a == b)
+}
+
+/// Deep-realize a pending seq into a realized one (metadata preserved).
+fn realize_pending_deep(eval: &mut Evaluator, v: &Value, p: &PendingSeq) -> Result<Value, Signal> {
+    let items = collect_all(eval, v)?;
+    let mut seq = RealizedSeq::new(Seq::eager(items).unwrap_or_else(Seq::empty));
+    seq = seq.with_meta(p.meta().cloned());
+    Ok(Value::Extension(Arc::new(seq)))
+}
+
+/// Deep-realize a realized seq (items rebuilt, metadata preserved).
+fn realize_realized_deep(eval: &mut Evaluator, s: &RealizedSeq) -> Result<Value, Signal> {
+    let mut items = Vec::new();
+    for item in s.items() {
+        items.push(realize_deep(eval, &item)?);
+    }
+    let mut seq = RealizedSeq::new(Seq::eager(items).unwrap_or_else(Seq::empty));
+    seq = seq.with_meta(s.meta().cloned());
+    Ok(Value::Extension(Arc::new(seq)))
+}
+
+/// Whether the value is a strict seq object that deep-realizes by
+/// collecting (ranges, repeats, cycles, iterates, conses, entry views).
+fn is_collectable_seq(v: &Value) -> bool {
+    as_range(v).is_some()
+        || as_repeat(v).is_some()
+        || as_cycle(v).is_some()
+        || as_iterate(v).is_some()
+        || as_cons_value(v).is_some()
+        || as_keys(v).is_some()
+        || as_vals(v).is_some()
+}
+
+/// Deep-realize a strict seq object by collecting (metadata preserved).
+fn realize_strict_seq_deep(eval: &mut Evaluator, v: &Value) -> Result<Value, Signal> {
+    let items = collect_all(eval, v)?;
+    let mut seq = RealizedSeq::new(Seq::eager(items).unwrap_or_else(Seq::empty));
+    seq = seq.with_meta(v.meta().cloned());
+    Ok(Value::Extension(Arc::new(seq)))
+}
+
+/// Deep-realize a subvector view (window rebuilt with realized items).
+fn realize_subvector_deep(eval: &mut Evaluator, sv: &SubVectorValue) -> Result<Value, Signal> {
+    let mut items = Vec::with_capacity(sv.len());
+    for item in sv.iter() {
+        items.push(realize_deep(eval, item)?);
+    }
+    Ok(Value::Extension(Arc::new(sv.with_window(items))))
+}
+
+/// Deep-realize an extension value into a realized one.
+fn realize_deep_extension(eval: &mut Evaluator, v: &Value) -> Result<Value, Signal> {
+    if let Some(p) = as_pending(v) {
+        return realize_pending_deep(eval, v, p);
+    }
+    if let Some(s) = as_realized(v) {
+        return realize_realized_deep(eval, s);
+    }
+    if is_collectable_seq(v) {
+        return realize_strict_seq_deep(eval, v);
+    }
+    if let Some(sv) = as_subvector(v) {
+        return realize_subvector_deep(eval, sv);
+    }
+    Ok(v.clone())
+}
+
+/// Deep-realize a list (metadata preserved).
+fn realize_deep_list(eval: &mut Evaluator, l: &List) -> Result<Value, Signal> {
+    let mut items = Vec::with_capacity(l.len());
+    for item in l.iter() {
+        items.push(realize_deep(eval, item)?);
+    }
+    Ok(Value::List(
+        List::from_vec(items).with_meta(l.meta().cloned()),
+    ))
+}
+
+/// Deep-realize a vector (metadata preserved).
+fn realize_deep_vector(eval: &mut Evaluator, x: &Vector) -> Result<Value, Signal> {
+    let mut items = Vec::with_capacity(x.len());
+    for item in x.iter() {
+        items.push(realize_deep(eval, item)?);
+    }
+    Ok(Value::Vector(
+        Vector::from_vec(items).with_meta(x.meta().cloned()),
+    ))
+}
+
+/// Deep-realize a map (metadata preserved).
+fn realize_deep_map(eval: &mut Evaluator, m: &Map) -> Result<Value, Signal> {
+    let mut pairs = Vec::with_capacity(m.size());
+    for (k, val) in m.iter() {
+        pairs.push((realize_deep(eval, k)?, realize_deep(eval, val)?));
+    }
+    let mut out = clj_value::new_map();
+    for (k, val) in pairs {
+        out = out.insert(k, val);
+    }
+    Ok(Value::Map(out.with_meta(m.meta().cloned())))
+}
+
+/// Deep-realize a set (metadata preserved).
+fn realize_deep_set(eval: &mut Evaluator, s: &Set) -> Result<Value, Signal> {
+    let mut out = clj_value::new_set();
+    for item in s.iter() {
+        out = out.insert(realize_deep(eval, item)?);
+    }
+    Ok(Value::Set(out.with_meta(s.meta().cloned())))
 }
 
 /// Deep-realize pending seqs into realized ones (for printing,
@@ -2447,80 +2756,11 @@ pub(crate) fn equiv_vals(eval: &mut Evaluator, a: &Value, b: &Value) -> Result<b
 /// preserved metadata.
 pub(crate) fn realize_deep(eval: &mut Evaluator, v: &Value) -> Result<Value, Signal> {
     match v {
-        Value::Extension(_) => {
-            if let Some(p) = as_pending(v) {
-                let items = collect_all(eval, v)?;
-                let mut seq = RealizedSeq::new(Seq::eager(items).unwrap_or_else(Seq::empty));
-                seq = seq.with_meta(p.meta().cloned());
-                return Ok(Value::Extension(Arc::new(seq)));
-            }
-            if let Some(s) = as_realized(v) {
-                let mut items = Vec::new();
-                for item in s.items() {
-                    items.push(realize_deep(eval, &item)?);
-                }
-                let mut seq = RealizedSeq::new(Seq::eager(items).unwrap_or_else(Seq::empty));
-                seq = seq.with_meta(s.meta().cloned());
-                return Ok(Value::Extension(Arc::new(seq)));
-            }
-            if as_range(v).is_some()
-                || as_repeat(v).is_some()
-                || as_cycle(v).is_some()
-                || as_iterate(v).is_some()
-                || as_cons_value(v).is_some()
-                || as_keys(v).is_some()
-                || as_vals(v).is_some()
-            {
-                let items = collect_all(eval, v)?;
-                let mut seq = RealizedSeq::new(Seq::eager(items).unwrap_or_else(Seq::empty));
-                seq = seq.with_meta(v.meta().cloned());
-                return Ok(Value::Extension(Arc::new(seq)));
-            }
-            if let Some(sv) = as_subvector(v) {
-                let mut items = Vec::with_capacity(sv.len());
-                for item in sv.iter() {
-                    items.push(realize_deep(eval, item)?);
-                }
-                return Ok(Value::Extension(Arc::new(sv.with_window(items))));
-            }
-            Ok(v.clone())
-        }
-        Value::List(l) => {
-            let mut items = Vec::with_capacity(l.len());
-            for item in l.iter() {
-                items.push(realize_deep(eval, item)?);
-            }
-            Ok(Value::List(
-                List::from_vec(items).with_meta(l.meta().cloned()),
-            ))
-        }
-        Value::Vector(x) => {
-            let mut items = Vec::with_capacity(x.len());
-            for item in x.iter() {
-                items.push(realize_deep(eval, item)?);
-            }
-            Ok(Value::Vector(
-                Vector::from_vec(items).with_meta(x.meta().cloned()),
-            ))
-        }
-        Value::Map(m) => {
-            let mut pairs = Vec::with_capacity(m.size());
-            for (k, val) in m.iter() {
-                pairs.push((realize_deep(eval, k)?, realize_deep(eval, val)?));
-            }
-            let mut out = clj_value::new_map();
-            for (k, val) in pairs {
-                out = out.insert(k, val);
-            }
-            Ok(Value::Map(out.with_meta(m.meta().cloned())))
-        }
-        Value::Set(s) => {
-            let mut out = clj_value::new_set();
-            for item in s.iter() {
-                out = out.insert(realize_deep(eval, item)?);
-            }
-            Ok(Value::Set(out.with_meta(s.meta().cloned())))
-        }
+        Value::Extension(_) => realize_deep_extension(eval, v),
+        Value::List(l) => realize_deep_list(eval, l),
+        Value::Vector(x) => realize_deep_vector(eval, x),
+        Value::Map(m) => realize_deep_map(eval, m),
+        Value::Set(s) => realize_deep_set(eval, s),
         _ => Ok(v.clone()),
     }
 }

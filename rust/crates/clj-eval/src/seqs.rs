@@ -574,38 +574,79 @@ fn native_every_pred(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nati
     Ok(native_fn(
         eval,
         "clojure.core/every-pred",
-        move |eval, args| {
-            if args.is_empty() {
-                return Ok(Value::Bool(true));
-            }
-            let fixed = args.len().min(3);
-            for p in &preds {
-                for a in &args[..fixed] {
-                    if !call_checked(eval, p, std::slice::from_ref(a))?.is_truthy() {
-                        return Ok(Value::Bool(false));
-                    }
-                }
-            }
-            if preds.len() <= 3 {
-                for a in &args[fixed..] {
-                    for p in &preds {
-                        if !call_checked(eval, p, std::slice::from_ref(a))?.is_truthy() {
-                            return Ok(Value::Bool(false));
-                        }
-                    }
-                }
-            } else {
-                for p in &preds {
-                    for a in &args[fixed..] {
-                        if !call_checked(eval, p, std::slice::from_ref(a))?.is_truthy() {
-                            return Ok(Value::Bool(false));
-                        }
-                    }
-                }
-            }
-            Ok(Value::Bool(true))
-        },
+        move |eval, args| every_pred_apply(eval, &preds, args),
     ))
+}
+
+/// The combined `every-pred`: every pred truthy on every arg
+/// (vacuous `true` on zero args; the first three args run
+/// pred-major, the rest dispatch on the pred count).
+fn every_pred_apply(
+    eval: &mut Evaluator,
+    preds: &[Value],
+    args: &[Value],
+) -> Result<Value, NativeError> {
+    if args.is_empty() {
+        return Ok(Value::Bool(true));
+    }
+    let fixed = args.len().min(3);
+    if !every_pred_fixed(eval, preds, &args[..fixed])? {
+        return Ok(Value::Bool(false));
+    }
+    let rest_ok = if preds.len() <= 3 {
+        every_pred_rest_by_arg(eval, preds, &args[fixed..])?
+    } else {
+        every_pred_rest_by_pred(eval, preds, &args[fixed..])?
+    };
+    Ok(Value::Bool(rest_ok))
+}
+
+/// Every pred truthy on each fixed arg (pred-major).
+fn every_pred_fixed(
+    eval: &mut Evaluator,
+    preds: &[Value],
+    fixed: &[Value],
+) -> Result<bool, NativeError> {
+    for p in preds {
+        for a in fixed {
+            if !call_checked(eval, p, std::slice::from_ref(a))?.is_truthy() {
+                return Ok(false);
+            }
+        }
+    }
+    Ok(true)
+}
+
+/// Every pred truthy on each rest arg (arg-major: ≤3 preds).
+fn every_pred_rest_by_arg(
+    eval: &mut Evaluator,
+    preds: &[Value],
+    rest: &[Value],
+) -> Result<bool, NativeError> {
+    for a in rest {
+        for p in preds {
+            if !call_checked(eval, p, std::slice::from_ref(a))?.is_truthy() {
+                return Ok(false);
+            }
+        }
+    }
+    Ok(true)
+}
+
+/// Every pred truthy on each rest arg (pred-major: >3 preds).
+fn every_pred_rest_by_pred(
+    eval: &mut Evaluator,
+    preds: &[Value],
+    rest: &[Value],
+) -> Result<bool, NativeError> {
+    for p in preds {
+        for a in rest {
+            if !call_checked(eval, p, std::slice::from_ref(a))?.is_truthy() {
+                return Ok(false);
+            }
+        }
+    }
+    Ok(true)
 }
 
 fn native_some_fn(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
@@ -614,41 +655,83 @@ fn native_some_fn(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeE
     Ok(native_fn(
         eval,
         "clojure.core/some-fn",
-        move |eval, args| {
-            if args.is_empty() {
-                return Ok(Value::Nil);
-            }
-            let fixed = args.len().min(3);
-            for p in &preds {
-                for a in &args[..fixed] {
-                    let r = call_checked(eval, p, std::slice::from_ref(a))?;
-                    if r.is_truthy() {
-                        return Ok(r);
-                    }
-                }
-            }
-            if preds.len() <= 3 {
-                for a in &args[fixed..] {
-                    for p in &preds {
-                        let r = call_checked(eval, p, std::slice::from_ref(a))?;
-                        if r.is_truthy() {
-                            return Ok(r);
-                        }
-                    }
-                }
-            } else {
-                for p in &preds {
-                    for a in &args[fixed..] {
-                        let r = call_checked(eval, p, std::slice::from_ref(a))?;
-                        if r.is_truthy() {
-                            return Ok(r);
-                        }
-                    }
-                }
-            }
-            Ok(Value::Nil)
-        },
+        move |eval, args| some_fn_apply(eval, &preds, args),
     ))
+}
+
+/// The combined `some-fn`: the first truthy pred result (`nil` on
+/// zero args or no hit; the first three args run pred-major, the
+/// rest dispatch on the pred count).
+fn some_fn_apply(
+    eval: &mut Evaluator,
+    preds: &[Value],
+    args: &[Value],
+) -> Result<Value, NativeError> {
+    if args.is_empty() {
+        return Ok(Value::Nil);
+    }
+    let fixed = args.len().min(3);
+    if let Some(hit) = some_fn_fixed(eval, preds, &args[..fixed])? {
+        return Ok(hit);
+    }
+    if preds.len() <= 3 {
+        some_fn_rest_by_arg(eval, preds, &args[fixed..])
+    } else {
+        some_fn_rest_by_pred(eval, preds, &args[fixed..])
+    }
+}
+
+/// The first truthy pred result over the fixed args (pred-major).
+fn some_fn_fixed(
+    eval: &mut Evaluator,
+    preds: &[Value],
+    fixed: &[Value],
+) -> Result<Option<Value>, NativeError> {
+    for p in preds {
+        for a in fixed {
+            let r = call_checked(eval, p, std::slice::from_ref(a))?;
+            if r.is_truthy() {
+                return Ok(Some(r));
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// The first truthy pred result over the rest args (arg-major: ≤3
+/// preds; `nil` when nothing hits).
+fn some_fn_rest_by_arg(
+    eval: &mut Evaluator,
+    preds: &[Value],
+    rest: &[Value],
+) -> Result<Value, NativeError> {
+    for a in rest {
+        for p in preds {
+            let r = call_checked(eval, p, std::slice::from_ref(a))?;
+            if r.is_truthy() {
+                return Ok(r);
+            }
+        }
+    }
+    Ok(Value::Nil)
+}
+
+/// The first truthy pred result over the rest args (pred-major: >3
+/// preds; `nil` when nothing hits).
+fn some_fn_rest_by_pred(
+    eval: &mut Evaluator,
+    preds: &[Value],
+    rest: &[Value],
+) -> Result<Value, NativeError> {
+    for p in preds {
+        for a in rest {
+            let r = call_checked(eval, p, std::slice::from_ref(a))?;
+            if r.is_truthy() {
+                return Ok(r);
+            }
+        }
+    }
+    Ok(Value::Nil)
 }
 
 fn native_max_key(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {

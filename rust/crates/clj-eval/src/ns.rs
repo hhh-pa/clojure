@@ -1769,6 +1769,30 @@ pub fn boot() -> Evaluator {
     eval.registry.ensure_ns("clojure.core");
     let user_ns = eval.registry.ensure_ns("user").id();
     eval.registry.set_current("user");
+    boot_install_natives(&mut eval);
+    boot_install_builtin_macros(&mut eval);
+    boot_mark_private(&mut eval);
+    let user_handle = ns_value("user", user_ns);
+    boot_core_vars(&mut eval, user_handle.clone());
+    boot_refer_user(&mut eval);
+    if let Some(id) = core_var(&eval, "*ns*") {
+        eval.push_binding(core_var_handle(id, "*ns*"), user_handle);
+    }
+    // Embedded `core.clj` composites (their privates resolve in
+    // `clojure.core`), then `user` refers the publics — the file
+    // carries no `ns` form by design.
+    boot_eval(&mut eval, "(in-ns 'clojure.core)");
+    boot_eval(&mut eval, CORE_CLJ);
+    boot_eval(&mut eval, "(in-ns 'user)");
+    boot_eval(&mut eval, "(refer 'clojure.core)");
+    // The load's macroexpansions consume `gensym` numbers; the
+    // user-visible counter restarts from 1 (S5C pins `G__1` first).
+    eval.reset_gensym();
+    eval
+}
+
+/// Install the §N natives into `clojure.core`.
+fn boot_install_natives(eval: &mut Evaluator) {
     for (name, f) in NATIVES
         .iter()
         .chain(crate::vars::VAR_NATIVES.iter())
@@ -1782,9 +1806,12 @@ pub fn boot() -> Evaluator {
         let func: Arc<crate::ext::NativeImpl> = Arc::new(*f);
         eval.install_native("clojure.core", name, func);
     }
-    // Builtin-macro vars (`let`, `defmacro`, `declare`, `ns`, …):
-    // the analyzer intercepts the forms, so the roots are
-    // placeholders that fail LOUDLY on direct invocation.
+}
+
+/// Builtin-macro vars (`let`, `defmacro`, `declare`, `ns`, …):
+/// the analyzer intercepts the forms, so the roots are
+/// placeholders that fail LOUDLY on direct invocation.
+fn boot_install_builtin_macros(eval: &mut Evaluator) {
     for name in crate::macros::BUILTIN_MACROS {
         let display = format!("clojure.core/{name}");
         eval.install_native(
@@ -1807,9 +1834,12 @@ pub fn boot() -> Evaluator {
             st.meta = Some(meta);
         }
     }
-    // Port-internal natives (macro-expansion errors, `case` dispatch
-    // hashing): usable but never referred into `user` (the refers
-    // below filter on `is_public`).
+}
+
+/// Port-internal natives (macro-expansion errors, `case` dispatch
+/// hashing): usable but never referred into `user` (the refers
+/// filter on `is_public`).
+fn boot_mark_private(eval: &mut Evaluator) {
     for name in ["throw-illegal-arg!", "throw-npe!", "hash-code"] {
         let q = Symbol::new(Some("clojure.core"), name);
         let id = eval.registry.intern(&q);
@@ -1821,22 +1851,30 @@ pub fn boot() -> Evaluator {
             st.meta = Some(meta);
         }
     }
-    let user_handle = ns_value("user", user_ns);
-    for (name, root, dynamic, private) in core_vars(user_handle.clone()) {
-        def_var(&mut eval, &name, root, dynamic, private);
+}
+
+/// Install the `clojure.core` vars and the `RT.java` dynamics (slot
+/// set, no `:dynamic` meta).
+fn boot_core_vars(eval: &mut Evaluator, user_handle: Value) {
+    for (name, root, dynamic, private) in core_vars(user_handle) {
+        def_var(eval, &name, root, dynamic, private);
     }
-    // `RT.java` dynamics: slot set, no `:dynamic` meta.
-    let stdout = crate::io::stdout_writer(&mut eval);
-    let stderr = crate::io::stderr_writer(&mut eval);
-    def_dynamic_root(&mut eval, "*out*", stdout);
-    def_dynamic_root(&mut eval, "*err*", stderr);
-    def_dynamic_root(&mut eval, "*assert*", Value::Bool(true));
-    def_dynamic_root(&mut eval, "*unchecked-math*", Value::Bool(false));
-    def_dynamic_root(&mut eval, "*warn-on-reflection*", Value::Bool(false));
-    def_dynamic_root(&mut eval, "*allow-unresolved-vars*", Value::Bool(false));
-    def_dynamic_root(&mut eval, "*print-meta*", Value::Bool(false));
-    def_dynamic_root(&mut eval, "*print-readably*", Value::Bool(true));
-    def_dynamic_root(&mut eval, "*print-dup*", Value::Bool(false));
+    let stdout = crate::io::stdout_writer(eval);
+    let stderr = crate::io::stderr_writer(eval);
+    def_dynamic_root(eval, "*out*", stdout);
+    def_dynamic_root(eval, "*err*", stderr);
+    def_dynamic_root(eval, "*assert*", Value::Bool(true));
+    def_dynamic_root(eval, "*unchecked-math*", Value::Bool(false));
+    def_dynamic_root(eval, "*warn-on-reflection*", Value::Bool(false));
+    def_dynamic_root(eval, "*allow-unresolved-vars*", Value::Bool(false));
+    def_dynamic_root(eval, "*print-meta*", Value::Bool(false));
+    def_dynamic_root(eval, "*print-readably*", Value::Bool(true));
+    def_dynamic_root(eval, "*print-dup*", Value::Bool(false));
+}
+
+/// Refer every public install into `user` (JVM boot refers
+/// `clojure.core`).
+fn boot_refer_user(eval: &mut Evaluator) {
     let mut names: Vec<String> = NATIVES
         .iter()
         .chain(crate::vars::VAR_NATIVES.iter())
@@ -1889,18 +1927,4 @@ pub fn boot() -> Evaluator {
             user.add_refer(&name, q, id);
         }
     }
-    if let Some(id) = core_var(&eval, "*ns*") {
-        eval.push_binding(core_var_handle(id, "*ns*"), user_handle);
-    }
-    // Embedded `core.clj` composites (their privates resolve in
-    // `clojure.core`), then `user` refers the publics — the file
-    // carries no `ns` form by design.
-    boot_eval(&mut eval, "(in-ns 'clojure.core)");
-    boot_eval(&mut eval, CORE_CLJ);
-    boot_eval(&mut eval, "(in-ns 'user)");
-    boot_eval(&mut eval, "(refer 'clojure.core)");
-    // The load's macroexpansions consume `gensym` numbers; the
-    // user-visible counter restarts from 1 (S5C pins `G__1` first).
-    eval.reset_gensym();
-    eval
 }

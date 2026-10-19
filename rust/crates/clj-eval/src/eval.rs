@@ -80,6 +80,15 @@ fn case_int_value(v: &Value) -> Option<i32> {
     }
 }
 
+/// `case*` dispatch-key masking (a zero mask skips the shift).
+fn case_shift_mask(key: i32, shift: i32, mask: i32) -> i32 {
+    if mask == 0 {
+        key
+    } else {
+        key.wrapping_shr((shift & 31) as u32) & mask
+    }
+}
+
 /// The evaluator: namespace registry, bindings, load path, and the
 /// deterministic counters (form/fn numbering for display names, one
 /// identity sequence for throwables/closures/natives).
@@ -721,50 +730,74 @@ impl Evaluator {
         env: &Env,
     ) -> Result<Value, Signal> {
         let v = self.eval(expr, env)?;
-        let shift_mask = |key: i32| {
-            if mask == 0 {
-                key
-            } else {
-                key.wrapping_shr((shift & 31) as u32) & mask
-            }
-        };
         if test == CaseTest::Int {
-            let Some(key) = case_int_value(&v) else {
-                return self.eval(default, env);
-            };
-            let key = shift_mask(key);
-            let hit = cases.iter().find(|(k, _, _)| *k == key);
-            match hit {
-                None => self.eval(default, env),
-                Some((_, t, then)) => {
-                    let tv = self.eval(t, env)?;
-                    if crate::lazy::equiv_vals(self, &v, &tv)? {
-                        self.eval(then, env)
-                    } else {
-                        self.eval(default, env)
-                    }
+            self.eval_case_star_int(&v, shift, mask, default, cases, env)
+        } else {
+            self.eval_case_star_hash(&v, shift, mask, default, cases, skip, env)
+        }
+    }
+
+    /// `:int` `case*` dispatch: `intValue` the target (non-numbers
+    /// miss), shift-mask, then an `equiv` post-check on a hit.
+    fn eval_case_star_int(
+        &mut self,
+        v: &Value,
+        shift: i32,
+        mask: i32,
+        default: &Expr,
+        cases: &[(i32, Expr, Expr)],
+        env: &Env,
+    ) -> Result<Value, Signal> {
+        let Some(key) = case_int_value(v) else {
+            return self.eval(default, env);
+        };
+        let key = case_shift_mask(key, shift, mask);
+        let hit = cases.iter().find(|(k, _, _)| *k == key);
+        match hit {
+            None => self.eval(default, env),
+            Some((_, t, then)) => {
+                let tv = self.eval(t, env)?;
+                if crate::lazy::equiv_vals(self, v, &tv)? {
+                    self.eval(then, env)
+                } else {
+                    self.eval(default, env)
                 }
             }
-        } else {
-            if clj_value::seq_hash_unsupported(&v) {
-                return Err(self.unsupported_hash());
-            }
-            let r = crate::lazy::realize_deep(self, &v)?;
-            if clj_value::seq_hash_unsupported(&r) {
-                return Err(self.unsupported_hash());
-            }
-            let key = shift_mask(clj_value::hash_code(&r));
-            let hit = cases.iter().find(|(k, _, _)| *k == key);
-            match hit {
-                None => self.eval(default, env),
-                Some((k, _, then)) if skip.contains(k) => self.eval(then, env),
-                Some((_, t, then)) => {
-                    let tv = self.eval(t, env)?;
-                    if crate::lazy::equiv_vals(self, &r, &tv)? {
-                        self.eval(then, env)
-                    } else {
-                        self.eval(default, env)
-                    }
+        }
+    }
+
+    /// Hash `case*` dispatch: reject unbounded seqs, realize, hash,
+    /// shift-mask, then a hit runs directly (`skip`) or behind an
+    /// `equiv` post-check.
+    #[allow(clippy::too_many_arguments)]
+    fn eval_case_star_hash(
+        &mut self,
+        v: &Value,
+        shift: i32,
+        mask: i32,
+        default: &Expr,
+        cases: &[(i32, Expr, Expr)],
+        skip: &[i32],
+        env: &Env,
+    ) -> Result<Value, Signal> {
+        if clj_value::seq_hash_unsupported(v) {
+            return Err(self.unsupported_hash());
+        }
+        let r = crate::lazy::realize_deep(self, v)?;
+        if clj_value::seq_hash_unsupported(&r) {
+            return Err(self.unsupported_hash());
+        }
+        let key = case_shift_mask(clj_value::hash_code(&r), shift, mask);
+        let hit = cases.iter().find(|(k, _, _)| *k == key);
+        match hit {
+            None => self.eval(default, env),
+            Some((k, _, then)) if skip.contains(k) => self.eval(then, env),
+            Some((_, t, then)) => {
+                let tv = self.eval(t, env)?;
+                if crate::lazy::equiv_vals(self, &r, &tv)? {
+                    self.eval(then, env)
+                } else {
+                    self.eval(default, env)
                 }
             }
         }

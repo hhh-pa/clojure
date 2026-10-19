@@ -139,53 +139,68 @@ fn transient_get(t: &Transient, key: &Value) -> Result<Option<Value>, NativeErro
 /// `RT.find`: the `[k v]` entry for a present key (`None` when
 /// missing; the key reads back as passed). Transient sets and
 /// anything else is the `find not supported` error.
+/// `RT.find` over a vector (the `[k v]` entry at the truncated index).
+fn find_entry_vector(x: &Vector, key: &Value) -> Option<(Value, Value)> {
+    int_key(key).and_then(|i| {
+        usize::try_from(i as i32)
+            .ok()
+            .and_then(|idx| x.iter().nth(idx).map(|v| (key.clone(), v.clone())))
+    })
+}
+
+/// `RT.find` over a transient (maps/vectors read; sets fail).
+fn find_entry_transient(
+    coll: &Value,
+    t: &Transient,
+    key: &Value,
+) -> Result<Option<(Value, Value)>, NativeError> {
+    // Read the class before locking (`jvm_class_of` locks
+    // transients itself — locking twice deadlocks).
+    let from = jvm_class_of(coll);
+    let guard = t.lock();
+    match &*guard {
+        TransientKind::Map(tm) => Ok(tm
+            .get(key)
+            .map_err(transient_err)?
+            .map(|v| (key.clone(), v.clone()))),
+        TransientKind::Vector(tv) => {
+            let Some(i) = int_key(key) else {
+                return Ok(None);
+            };
+            let Some(idx) = usize::try_from(i as i32).ok() else {
+                return Ok(None);
+            };
+            Ok(tv
+                .nth(idx)
+                .map_err(transient_err)?
+                .map(|v| (key.clone(), v.clone())))
+        }
+        TransientKind::Set(_) => Err(NativeError::new(
+            ThrowClass::IllegalArgumentException,
+            format!("find not supported on type: {from}"),
+        )),
+    }
+}
+
+/// `RT.find` over anything else (subvectors read; the rest fail).
+fn find_entry_fallback(coll: &Value, key: &Value) -> Result<Option<(Value, Value)>, NativeError> {
+    if let Some(sv) = as_subvector(coll) {
+        return Ok(int_key(key).and_then(|i| {
+            usize::try_from(i as i32)
+                .ok()
+                .and_then(|idx| sv.nth(idx).map(|v| (key.clone(), v.clone())))
+        }));
+    }
+    Err(find_unsupported(coll))
+}
+
 pub(crate) fn find_entry(coll: &Value, key: &Value) -> Result<Option<(Value, Value)>, NativeError> {
     match coll {
         Value::Nil => Ok(None),
         Value::Map(m) => Ok(m.get(key).map(|v| (key.clone(), v.clone()))),
-        Value::Vector(x) => Ok(int_key(key).and_then(|i| {
-            usize::try_from(i as i32)
-                .ok()
-                .and_then(|idx| x.iter().nth(idx).map(|v| (key.clone(), v.clone())))
-        })),
-        Value::Transient(t) => {
-            // Read the class before locking (`jvm_class_of` locks
-            // transients itself — locking twice deadlocks).
-            let from = jvm_class_of(coll);
-            let guard = t.lock();
-            match &*guard {
-                TransientKind::Map(tm) => Ok(tm
-                    .get(key)
-                    .map_err(transient_err)?
-                    .map(|v| (key.clone(), v.clone()))),
-                TransientKind::Vector(tv) => {
-                    let Some(i) = int_key(key) else {
-                        return Ok(None);
-                    };
-                    let Some(idx) = usize::try_from(i as i32).ok() else {
-                        return Ok(None);
-                    };
-                    Ok(tv
-                        .nth(idx)
-                        .map_err(transient_err)?
-                        .map(|v| (key.clone(), v.clone())))
-                }
-                TransientKind::Set(_) => Err(NativeError::new(
-                    ThrowClass::IllegalArgumentException,
-                    format!("find not supported on type: {from}"),
-                )),
-            }
-        }
-        _ => {
-            if let Some(sv) = as_subvector(coll) {
-                return Ok(int_key(key).and_then(|i| {
-                    usize::try_from(i as i32)
-                        .ok()
-                        .and_then(|idx| sv.nth(idx).map(|v| (key.clone(), v.clone())))
-                }));
-            }
-            Err(find_unsupported(coll))
-        }
+        Value::Vector(x) => Ok(find_entry_vector(x, key)),
+        Value::Transient(t) => find_entry_transient(coll, t, key),
+        _ => find_entry_fallback(coll, key),
     }
 }
 
@@ -393,6 +408,44 @@ fn walk_count(eval: &mut Evaluator, v: &Value) -> Result<usize, NativeError> {
     }
 }
 
+/// `RT.count` over a transient buffer.
+fn count_transient(t: &Transient) -> Result<i64, NativeError> {
+    let guard = t.lock();
+    let n = match &*guard {
+        TransientKind::Vector(tv) => tv.len(),
+        TransientKind::Map(tm) => tm.len(),
+        TransientKind::Set(ts) => ts.len(),
+    }
+    .map_err(transient_err)?;
+    Ok(n as i64)
+}
+
+/// `RT.count` over the extension/seq tail (subvectors, ranges,
+/// realized seqs, repeats, then a seq walk).
+fn count_fallback(eval: &mut Evaluator, v: &Value) -> Result<i64, NativeError> {
+    if let Some(sv) = as_subvector(v) {
+        return Ok(sv.len() as i64);
+    }
+    if let Some(r) = as_range(v) {
+        return Ok(r.walked_len() as i64);
+    }
+    if let Some(s) = as_realized(v) {
+        return Ok(s.items().len() as i64);
+    }
+    if let Some(r) = as_repeat(v)
+        && let Some(n) = r.n()
+    {
+        return Ok(n.max(0));
+    }
+    if is_seq_value(v) {
+        return Ok(walk_count(eval, v)? as i64);
+    }
+    Err(NativeError::new(
+        ThrowClass::UnsupportedOperationException,
+        format!("count not supported on this type: {}", java_simple_name(v)),
+    ))
+}
+
 /// `RT.count` as an `i64` (`count`/`empty?`/arities share this).
 fn count_of(eval: &mut Evaluator, v: &Value) -> Result<i64, NativeError> {
     match v {
@@ -402,39 +455,8 @@ fn count_of(eval: &mut Evaluator, v: &Value) -> Result<i64, NativeError> {
         Value::Vector(x) => Ok(x.len() as i64),
         Value::Map(m) => Ok(m.size() as i64),
         Value::Set(s) => Ok(s.size() as i64),
-        Value::Transient(t) => {
-            let guard = t.lock();
-            let n = match &*guard {
-                TransientKind::Vector(tv) => tv.len(),
-                TransientKind::Map(tm) => tm.len(),
-                TransientKind::Set(ts) => ts.len(),
-            }
-            .map_err(transient_err)?;
-            Ok(n as i64)
-        }
-        _ => {
-            if let Some(sv) = as_subvector(v) {
-                return Ok(sv.len() as i64);
-            }
-            if let Some(r) = as_range(v) {
-                return Ok(r.walked_len() as i64);
-            }
-            if let Some(s) = as_realized(v) {
-                return Ok(s.items().len() as i64);
-            }
-            if let Some(r) = as_repeat(v)
-                && let Some(n) = r.n()
-            {
-                return Ok(n.max(0));
-            }
-            if is_seq_value(v) {
-                return Ok(walk_count(eval, v)? as i64);
-            }
-            Err(NativeError::new(
-                ThrowClass::UnsupportedOperationException,
-                format!("count not supported on this type: {}", java_simple_name(v)),
-            ))
-        }
+        Value::Transient(t) => count_transient(t),
+        _ => count_fallback(eval, v),
     }
 }
 
@@ -485,26 +507,34 @@ fn merge_kv(
 /// Three-way `merge-with` (maps and vectors take the `kvreduce`
 /// path; anything else seqs and casts its first element to
 /// `Map.Entry`).
-fn merge_with3(
+/// Early `merge-with` exit when either side is falsy.
+fn merge_with3_early(x: &Value, y: &Value) -> Option<Value> {
+    if !(x.is_truthy() && y.is_truthy()) {
+        if x.is_truthy() {
+            return Some(x.clone());
+        }
+        return Some(y.clone());
+    }
+    None
+}
+
+/// `merge-with` over a map right-hand side (the `kvreduce` path).
+fn merge_with3_map(
     eval: &mut Evaluator,
     f: &Value,
     x: &Value,
-    y: &Value,
+    ym: &Map,
 ) -> Result<Value, NativeError> {
-    if !(x.is_truthy() && y.is_truthy()) {
-        if x.is_truthy() {
-            return Ok(x.clone());
-        }
-        return Ok(y.clone());
+    let mut m = x.clone();
+    for (k, v) in ym.iter() {
+        m = merge_kv(eval, &m, k.clone(), v.clone(), f)?;
     }
-    if let Value::Map(ym) = y {
-        let mut m = x.clone();
-        for (k, v) in ym.iter() {
-            m = merge_kv(eval, &m, k.clone(), v.clone(), f)?;
-        }
-        return Ok(m);
-    }
-    let pairs: Option<Vec<(Value, Value)>> = match y {
+    Ok(m)
+}
+
+/// `merge-with` index/value pairs for a vector-family right-hand side.
+fn merge_with3_indexed_pairs(y: &Value) -> Option<Vec<(Value, Value)>> {
+    match y {
         Value::Vector(yv) => Some(
             yv.iter()
                 .enumerate()
@@ -517,20 +547,49 @@ fn merge_with3(
                 .map(|(i, v)| (Value::Int(i as i64), v.clone()))
                 .collect()
         }),
-    };
-    if let Some(pairs) = pairs {
-        let mut m = x.clone();
-        for (k, v) in pairs {
-            m = merge_kv(eval, &m, k, v, f)?;
-        }
-        return Ok(m);
     }
+}
+
+/// `merge-with` folding one pair per key through `merge_kv`.
+fn merge_with3_fold_pairs(
+    eval: &mut Evaluator,
+    f: &Value,
+    x: &Value,
+    pairs: Vec<(Value, Value)>,
+) -> Result<Value, NativeError> {
+    let mut m = x.clone();
+    for (k, v) in pairs {
+        m = merge_kv(eval, &m, k, v, f)?;
+    }
+    Ok(m)
+}
+
+/// `merge-with` over a sequential right-hand side (seqs and casts).
+fn merge_with3_seq_tail(eval: &mut Evaluator, x: &Value, y: &Value) -> Result<Value, NativeError> {
     let s = seq_value(eval, y).map_err(signal_to_native)?;
     if matches!(s, Value::Nil) {
         return Ok(x.clone());
     }
     let head = first_value(eval, &s).map_err(signal_to_native)?;
     Err(cce_err(&head, "java.util.Map$Entry"))
+}
+
+fn merge_with3(
+    eval: &mut Evaluator,
+    f: &Value,
+    x: &Value,
+    y: &Value,
+) -> Result<Value, NativeError> {
+    if let Some(v) = merge_with3_early(x, y) {
+        return Ok(v);
+    }
+    if let Value::Map(ym) = y {
+        return merge_with3_map(eval, f, x, ym);
+    }
+    if let Some(pairs) = merge_with3_indexed_pairs(y) {
+        return merge_with3_fold_pairs(eval, f, x, pairs);
+    }
+    merge_with3_seq_tail(eval, x, y)
 }
 
 /// Split a keyseq into its head key and tail (`update-in` /
@@ -780,40 +839,47 @@ fn native_get(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErro
     }
 }
 
+/// `contains?` over a vector (integer keys in range).
+fn contains_vector(x: &Vector, key: &Value) -> bool {
+    int_key(key).is_some_and(|i| usize::try_from(i as i32).is_ok_and(|idx| idx < x.len()))
+}
+
+/// `contains?` over a string (any numeric index in UTF-16 range).
+fn contains_str(s: &str, coll: &Value, key: &Value) -> Result<Value, NativeError> {
+    let Some(i) = num_index(key) else {
+        return Err(NativeError::new(
+            ThrowClass::IllegalArgumentException,
+            format!("contains? not supported on type: {}", jvm_class_of(coll)),
+        ));
+    };
+    let len = s.encode_utf16().count();
+    Ok(Value::Bool(usize::try_from(i).is_ok_and(|idx| idx < len)))
+}
+
+/// `contains?` over anything else (subvectors read; the rest fail).
+fn contains_fallback(coll: &Value, key: &Value) -> Result<Value, NativeError> {
+    if let Some(sv) = as_subvector(coll) {
+        return Ok(Value::Bool(int_key(key).is_some_and(|i| {
+            usize::try_from(i as i32).is_ok_and(|idx| idx < sv.len())
+        })));
+    }
+    Err(NativeError::new(
+        ThrowClass::IllegalArgumentException,
+        format!("contains? not supported on type: {}", jvm_class_of(coll)),
+    ))
+}
+
 fn native_contains(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/contains?", args, &[2])?;
     let (coll, key) = (&args[0], &args[1]);
     match coll {
         Value::Nil => Ok(Value::Bool(false)),
         Value::Map(m) => Ok(Value::Bool(m.contains_key(key))),
-        Value::Vector(x) => {
-            Ok(Value::Bool(int_key(key).is_some_and(|i| {
-                usize::try_from(i as i32).is_ok_and(|idx| idx < x.len())
-            })))
-        }
+        Value::Vector(x) => Ok(Value::Bool(contains_vector(x, key))),
         Value::Set(s) => Ok(Value::Bool(s.contains(key))),
-        Value::Str(s) => {
-            let Some(i) = num_index(key) else {
-                return Err(NativeError::new(
-                    ThrowClass::IllegalArgumentException,
-                    format!("contains? not supported on type: {}", jvm_class_of(coll)),
-                ));
-            };
-            let len = s.encode_utf16().count();
-            Ok(Value::Bool(usize::try_from(i).is_ok_and(|idx| idx < len)))
-        }
+        Value::Str(s) => contains_str(s, coll, key),
         Value::Transient(t) => Ok(Value::Bool(transient_get(t, key)?.is_some())),
-        _ => {
-            if let Some(sv) = as_subvector(coll) {
-                return Ok(Value::Bool(int_key(key).is_some_and(|i| {
-                    usize::try_from(i as i32).is_ok_and(|idx| idx < sv.len())
-                })));
-            }
-            Err(NativeError::new(
-                ThrowClass::IllegalArgumentException,
-                format!("contains? not supported on type: {}", jvm_class_of(coll)),
-            ))
-        }
+        _ => contains_fallback(coll, key),
     }
 }
 
@@ -827,24 +893,23 @@ fn native_find(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErr
 
 /// `nth` over an indexed value (nil-`not_found` throws, like the
 /// 2-arity; vectors, subvectors, and transient vectors share this).
-fn nth_indexed(coll: &Value, n: i32, not_found: Option<&Value>) -> Result<Value, NativeError> {
-    let found = match coll {
-        Value::Vector(x) => usize::try_from(n)
-            .ok()
-            .and_then(|idx| x.iter().nth(idx).cloned()),
-        Value::Transient(t) => {
-            let guard = t.lock();
-            match &*guard {
-                TransientKind::Vector(tv) => match usize::try_from(n).ok() {
-                    Some(idx) => tv.nth(idx).map_err(transient_err)?.cloned(),
-                    None => None,
-                },
-                _ => None,
-            }
-        }
-        _ => as_subvector(coll)
-            .and_then(|sv| usize::try_from(n).ok().and_then(|idx| sv.nth(idx).cloned())),
-    };
+/// `nth` over a transient (only transient vectors are indexed).
+fn nth_indexed_transient(t: &Transient, n: i32) -> Result<Option<Value>, NativeError> {
+    let guard = t.lock();
+    match &*guard {
+        TransientKind::Vector(tv) => match usize::try_from(n).ok() {
+            Some(idx) => Ok(tv.nth(idx).map_err(transient_err)?.cloned()),
+            None => Ok(None),
+        },
+        _ => Ok(None),
+    }
+}
+
+/// An indexed `nth` hit, else `not-found` (nil-`not-found` throws).
+fn nth_indexed_found(
+    found: Option<Value>,
+    not_found: Option<&Value>,
+) -> Result<Value, NativeError> {
     match found {
         Some(v) => Ok(v),
         None => match not_found {
@@ -855,6 +920,18 @@ fn nth_indexed(coll: &Value, n: i32, not_found: Option<&Value>) -> Result<Value,
             )),
         },
     }
+}
+
+fn nth_indexed(coll: &Value, n: i32, not_found: Option<&Value>) -> Result<Value, NativeError> {
+    let found = match coll {
+        Value::Vector(x) => usize::try_from(n)
+            .ok()
+            .and_then(|idx| x.iter().nth(idx).cloned()),
+        Value::Transient(t) => nth_indexed_transient(t, n)?,
+        _ => as_subvector(coll)
+            .and_then(|sv| usize::try_from(n).ok().and_then(|idx| sv.nth(idx).cloned())),
+    };
+    nth_indexed_found(found, not_found)
 }
 
 /// `nth` over a sequential value by walking (nil-`not_found`
@@ -888,6 +965,46 @@ fn nth_walk(
     first_value(eval, &cur).map_err(signal_to_native)
 }
 
+/// `nth` over the indexed family (transient maps/sets are unsupported).
+fn nth_indexed_dispatch(
+    coll: &Value,
+    n: i32,
+    not_found: Option<&Value>,
+) -> Result<Value, NativeError> {
+    // Transient maps/sets fall through to `nth not supported`
+    // below; only transient vectors are indexed.
+    if let Value::Transient(t) = coll {
+        let is_vec = matches!(&*t.lock(), TransientKind::Vector(_));
+        if !is_vec {
+            return Err(nth_unsupported(coll));
+        }
+    }
+    nth_indexed(coll, n, not_found)
+}
+
+/// `nth` over a string (chars; `StringIndexOutOfBounds` without `not-found`).
+fn nth_str(s: &str, n: i32, not_found: Option<&Value>) -> Result<Value, NativeError> {
+    let found = usize::try_from(n)
+        .ok()
+        .and_then(|idx| s.chars().nth(idx).map(Value::Char));
+    match found {
+        Some(c) => Ok(c),
+        None => {
+            if let Some(nf) = not_found {
+                return Ok(nf.clone());
+            }
+            Err(NativeError::new(
+                ThrowClass::StringIndexOutOfBoundsException,
+                format!(
+                    "Index {} out of bounds for length {}",
+                    n,
+                    s.encode_utf16().count()
+                ),
+            ))
+        }
+    }
+}
+
 pub(crate) fn native_nth(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/nth", args, &[2, 3])?;
     // The index coerces first (before the collection dispatches).
@@ -904,36 +1021,10 @@ pub(crate) fn native_nth(eval: &mut Evaluator, args: &[Value]) -> Result<Value, 
         || as_subvector(coll).is_some()
         || matches!(coll, Value::Transient(_))
     {
-        // Transient maps/sets fall through to `nth not supported`
-        // below; only transient vectors are indexed.
-        if let Value::Transient(t) = coll {
-            let is_vec = matches!(&*t.lock(), TransientKind::Vector(_));
-            if !is_vec {
-                return Err(nth_unsupported(coll));
-            }
-        }
-        return nth_indexed(coll, n, not_found);
+        return nth_indexed_dispatch(coll, n, not_found);
     }
     if let Value::Str(s) = coll {
-        let found = usize::try_from(n)
-            .ok()
-            .and_then(|idx| s.chars().nth(idx).map(Value::Char));
-        match found {
-            Some(c) => return Ok(c),
-            None => {
-                if let Some(nf) = not_found {
-                    return Ok(nf.clone());
-                }
-                return Err(NativeError::new(
-                    ThrowClass::StringIndexOutOfBoundsException,
-                    format!(
-                        "Index {} out of bounds for length {}",
-                        n,
-                        s.encode_utf16().count()
-                    ),
-                ));
-            }
-        }
+        return nth_str(s, n, not_found);
     }
     if matches!(coll, Value::List(_)) || is_seq_value(coll) {
         return nth_walk(eval, coll, n, not_found);
@@ -1147,6 +1238,77 @@ fn native_persistent(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nat
     }
 }
 
+/// The checked `conj!` map plan (computed unlocked: seqing the
+/// element runs user code, and the head can be this transient
+/// itself — locking twice deadlocks).
+fn conj_bang_plan(
+    eval: &mut Evaluator,
+    t: &Transient,
+    x: &Value,
+) -> Result<Option<MapConjPlan>, NativeError> {
+    let plan = if matches!(&*t.lock(), TransientKind::Map(_)) {
+        Some(map_conj_plan(eval, x)?)
+    } else {
+        None
+    };
+    if let Some(MapConjPlan::SeqFirst(head)) = &plan {
+        return Err(cce_err(head, "java.util.Map$Entry"));
+    }
+    Ok(plan)
+}
+
+/// `conj!` applying a plan to a transient map (lock held).
+fn conj_bang_apply_map(
+    tm: &mut TransientMap,
+    plan: Option<MapConjPlan>,
+) -> Result<(), NativeError> {
+    match plan {
+        Some(MapConjPlan::Nil) | None => {}
+        Some(MapConjPlan::Pair(k, v)) => {
+            tm.assoc(k, v).map_err(transient_err)?;
+        }
+        Some(MapConjPlan::Entries(entries)) => {
+            for (k, v) in entries {
+                tm.assoc(k, v).map_err(transient_err)?;
+            }
+        }
+        Some(MapConjPlan::SeqFirst(_)) => {
+            unreachable!("SeqFirst returns before locking")
+        }
+    }
+    Ok(())
+}
+
+/// `conj!` applying one element to a locked transient (lock held).
+fn conj_bang_apply(
+    kind: &mut TransientKind,
+    plan: Option<MapConjPlan>,
+    x: &Value,
+) -> Result<(), NativeError> {
+    match kind {
+        TransientKind::Vector(tv) => {
+            tv.conj(x.clone()).map_err(transient_err)?;
+        }
+        TransientKind::Map(tm) => conj_bang_apply_map(tm, plan)?,
+        TransientKind::Set(ts) => {
+            ts.conj(x.clone()).map_err(transient_err)?;
+        }
+    }
+    Ok(())
+}
+
+/// `conj!` onto a transient (plan first, then apply under the lock).
+fn conj_bang_transient(
+    eval: &mut Evaluator,
+    t: &Transient,
+    x: &Value,
+) -> Result<Value, NativeError> {
+    let plan = conj_bang_plan(eval, t, x)?;
+    let mut guard = t.lock();
+    conj_bang_apply(&mut guard, plan, x)?;
+    Ok(Value::Transient(t.clone()))
+}
+
 fn native_conj_bang(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/conj!", args, &[0, 1, 2])?;
     if args.is_empty() {
@@ -1158,45 +1320,7 @@ fn native_conj_bang(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nativ
         return Ok(args[0].clone());
     }
     match &args[0] {
-        Value::Transient(t) => {
-            // Map plans run unlocked first: seqing the element
-            // runs user code (which may touch this transient),
-            // and the `SeqFirst` head can be this transient
-            // itself (whose class read locks — locking twice
-            // deadlocks).
-            let plan = if matches!(&*t.lock(), TransientKind::Map(_)) {
-                Some(map_conj_plan(eval, &args[1])?)
-            } else {
-                None
-            };
-            if let Some(MapConjPlan::SeqFirst(head)) = &plan {
-                return Err(cce_err(head, "java.util.Map$Entry"));
-            }
-            let mut guard = t.lock();
-            match &mut *guard {
-                TransientKind::Vector(tv) => {
-                    tv.conj(args[1].clone()).map_err(transient_err)?;
-                }
-                TransientKind::Map(tm) => match plan {
-                    Some(MapConjPlan::Nil) | None => {}
-                    Some(MapConjPlan::Pair(k, v)) => {
-                        tm.assoc(k, v).map_err(transient_err)?;
-                    }
-                    Some(MapConjPlan::Entries(entries)) => {
-                        for (k, v) in entries {
-                            tm.assoc(k, v).map_err(transient_err)?;
-                        }
-                    }
-                    Some(MapConjPlan::SeqFirst(_)) => {
-                        unreachable!("SeqFirst returns before locking")
-                    }
-                },
-                TransientKind::Set(ts) => {
-                    ts.conj(args[1].clone()).map_err(transient_err)?;
-                }
-            }
-            Ok(Value::Transient(t.clone()))
-        }
+        Value::Transient(t) => conj_bang_transient(eval, t, &args[1]),
         Value::Nil => Err(NativeError::new(
             ThrowClass::NullPointerException,
             "Cannot invoke \"clojure.lang.ITransientCollection.conj(Object)\" because \"coll\" is null"
@@ -1345,55 +1469,64 @@ fn native_peek(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErr
     }
 }
 
+/// `pop` over a list (empty lists throw; empty tails drop metadata-clean).
+fn pop_list(l: &List) -> Result<Value, NativeError> {
+    if l.is_empty() {
+        return Err(NativeError::new(
+            ThrowClass::IllegalStateException,
+            "Can't pop empty list".to_owned(),
+        ));
+    }
+    match l.drop_first() {
+        Some(tail) if !tail.is_empty() => Ok(Value::List(tail)),
+        _ => Ok(Value::List(List::new_sync().with_meta(l.meta().cloned()))),
+    }
+}
+
+/// `pop` over a vector (empty vectors throw).
+fn pop_vector(x: &Vector) -> Result<Value, NativeError> {
+    if x.is_empty() {
+        return Err(NativeError::new(
+            ThrowClass::IllegalStateException,
+            "Can't pop empty vector".to_owned(),
+        ));
+    }
+    match x.drop_last() {
+        Some(out) => Ok(Value::Vector(out)),
+        None => Err(NativeError::new(
+            ThrowClass::IllegalStateException,
+            "Can't pop empty vector".to_owned(),
+        )),
+    }
+}
+
+/// `pop` over anything else (subvectors shrink; the rest fail).
+fn pop_fallback(arg: &Value) -> Result<Value, NativeError> {
+    if let Some(sv) = as_subvector(arg) {
+        if sv.len() == 1 {
+            return Ok(Value::Vector(Vector::from_vec(Vec::new())));
+        }
+        if sv.len() > 1 {
+            return Ok(Value::Extension(Arc::new(
+                SubVectorValue::new(sv.vec().clone(), sv.start(), sv.end() - 1)
+                    .with_meta(sv.meta().cloned()),
+            )));
+        }
+        return Err(NativeError::new(
+            ThrowClass::IllegalStateException,
+            "Can't pop empty vector".to_owned(),
+        ));
+    }
+    Err(cce_err(arg, "clojure.lang.IPersistentStack"))
+}
+
 fn native_pop(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/pop", args, &[1])?;
     match &args[0] {
         Value::Nil => Ok(Value::Nil),
-        Value::List(l) => {
-            if l.is_empty() {
-                return Err(NativeError::new(
-                    ThrowClass::IllegalStateException,
-                    "Can't pop empty list".to_owned(),
-                ));
-            }
-            match l.drop_first() {
-                Some(tail) if !tail.is_empty() => Ok(Value::List(tail)),
-                _ => Ok(Value::List(List::new_sync().with_meta(l.meta().cloned()))),
-            }
-        }
-        Value::Vector(x) => {
-            if x.is_empty() {
-                return Err(NativeError::new(
-                    ThrowClass::IllegalStateException,
-                    "Can't pop empty vector".to_owned(),
-                ));
-            }
-            match x.drop_last() {
-                Some(out) => Ok(Value::Vector(out)),
-                None => Err(NativeError::new(
-                    ThrowClass::IllegalStateException,
-                    "Can't pop empty vector".to_owned(),
-                )),
-            }
-        }
-        _ => {
-            if let Some(sv) = as_subvector(&args[0]) {
-                if sv.len() == 1 {
-                    return Ok(Value::Vector(Vector::from_vec(Vec::new())));
-                }
-                if sv.len() > 1 {
-                    return Ok(Value::Extension(Arc::new(
-                        SubVectorValue::new(sv.vec().clone(), sv.start(), sv.end() - 1)
-                            .with_meta(sv.meta().cloned()),
-                    )));
-                }
-                return Err(NativeError::new(
-                    ThrowClass::IllegalStateException,
-                    "Can't pop empty vector".to_owned(),
-                ));
-            }
-            Err(cce_err(&args[0], "clojure.lang.IPersistentStack"))
-        }
+        Value::List(l) => pop_list(l),
+        Value::Vector(x) => pop_vector(x),
+        _ => pop_fallback(&args[0]),
     }
 }
 
