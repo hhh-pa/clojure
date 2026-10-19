@@ -38,7 +38,7 @@
 //!   natives MUST realize seqs before calling either function.
 //! - Never assert exact values for identity hashes: [`Value::Transient`],
 //!   [`Value::Atom`], [`Value::Delay`], [`Value::Future`],
-//!   [`Value::Promise`], [`Value::Var`],
+//!   [`Value::Promise`], [`Value::Agent`], [`Value::Var`],
 //!   [`Value::Unbound`], [`Value::Throwable`], and unrecognized
 //!   extensions have NO stable JVM hash (identity hashCode). Here
 //!   they hash from the per-process `id` (or a fixed tag), so values

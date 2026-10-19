@@ -14,7 +14,7 @@
 
 ;; --- deref delay parts (deref_rows; atom/var parts in 01) ---
 (p ":deref-delay" #(deref (delay 42)))
-(p ":deref-delay-reader" #(@(delay 42)))
+(p ":deref-delay-reader" #(do @(delay 42)))
 
 ;; --- delay rows (delay_rows) ---
 (p ":force-delay" #(force (delay 42)))

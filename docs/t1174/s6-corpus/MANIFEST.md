@@ -1,7 +1,7 @@
 # S6 differential corpus MANIFEST
 
 5 files, `NN-topic.clj` + `expected/NN-topic.out` (golden stdout).
-489 entries total (128 + 51 + 105 + 186 + 19); every golden is
+491 entries total (128 + 51 + 105 + 188 + 19); every golden is
 byte-identical across re-runs (stability-verified).
 Truth source: `s6-pins.md` (P1–P6). Probe inputs live in
 `/tmp/s6-probe*.clj` (not committed); corpus files are the durable,
@@ -93,7 +93,7 @@ check: entry tags in each `.clj` match `^:tag` lines in its `.out`).
   future_cancel_running_discards, future_ns_sharing, promise_rows,
   promise_threaded_deliver, promise_meta_rows, future_stress_swap,
   realized_rows, agent_shutdown_rows (`:shutdown` only).
-- `04-agents.clj` (186): agent ctor/options, send family (+extra
+- `04-agents.clj` (188): agent ctor/options, send family (+extra
   args, bad-fn latch), await/await-for (incl. in-action refusal),
   error modes (continue/fail/handler/bogus), restart (+clear-actions,
   veto), nested order (+discard-on-failure), validator-in-action,
@@ -314,9 +314,14 @@ shared by two tests). Test fns are in
   `:watch-throw-fail` `:watch-throw-fail-state`, plus
   `:shutdown-join-all` (shared with `agent_shutdown_joins`:
   barrier-full-log `[[5 6] [6 6]]`)
-- `agent_star_rows` (5): `:star-nil-outside`
+- `agent_star_rows` (7): `:star-nil-outside`
   `:star-bound-in-action` `:star-nested-own` `:star-conveys`
-  `:star-watcher-bare`
+  `:star-watcher-bound` (renamed: the golden `false` pins
+  JVM-bound; the old `-bare` name was wrong)
+  `:star-validator-bare` (ctor-time validator runs outside
+  any action → `true`) `:star-handler-bound` (error-handler
+  under `:continue` sees bound → `false`; deliver-then-read,
+  modeled on `:handler-default-continues`)
 - `agent_send_shapes` (13): `:send-long` `:sendoff-long`
   `:sendvia-long` `:send-nil` `:sendoff-nil` `:sendvia-nil`
   `:send-arity-1` `:sendoff-arity-1` `:sendvia-arity-2`

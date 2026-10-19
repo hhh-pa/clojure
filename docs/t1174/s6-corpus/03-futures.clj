@@ -16,7 +16,7 @@
               (str "THROW " (.getName (class t)) ": " (.getMessage t))))))
 
 ;; --- future rows (future_rows) ---
-(p ":future-deref-1" #(@(future 1)))
+(p ":future-deref-1" #(do @(future 1)))
 (p ":future-multi-body" #(deref (future 1 2 3)))
 (p ":future-call-basic" #(deref (future-call (fn [] 41))))
 (p ":future-conveys" #(do (def ^:dynamic s6b-dx 1) (binding [s6b-dx 2] @(future s6b-dx))))

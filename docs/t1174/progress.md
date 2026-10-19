@@ -13,7 +13,7 @@
 | S3 values+collections | landed | (pre-S5 history) |
 | S4 evaluator | landed | (pre-S5 history) |
 | S5 namespaces/core | landed | `8115f1c7` (PR #6, 3-round review) |
-| S6 concurrency | active (plan) | — |
+| S6 concurrency | in-review (PR #7) | — |
 | S7 repl+cli | pending | — |
 | S8 llvm-aot | pending | — |
 | S9 hardening | pending | — |

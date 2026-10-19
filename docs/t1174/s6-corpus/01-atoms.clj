@@ -40,7 +40,7 @@
 
 ;; --- deref rows, atom/var parts (deref_rows; delay parts in 02) ---
 (p ":deref-atom" #(deref (atom 5)))
-(p ":deref-atom-reader" #(@(atom 5)))
+(p ":deref-atom-reader" #(do @(atom 5)))
 (p ":deref-var" #(do (def dx 7) (deref #'dx)))
 (p ":deref-var-dynamic" #(do (def ^:dynamic ddy 1) (binding [ddy 2] (deref #'ddy))))
 (p ":deref-var-unbound-class" #(str (class (do (declare dux) (deref #'dux)))))

@@ -55,6 +55,29 @@ TDD: stress/determinism tests first (spec §2.5).
 - Out: `set-agent-send-executor!` et al (unlisted), `pvalues`/
   `pcalls` (composites; follow-up if cheap, else S9).
 
+## S6D. Setters + locking + parallel composites
+
+- `set-error-handler!` (install/clear; fires on the next
+  failure) and `set-error-mode!` (`:continue`/`:fail`;
+  `:bogus`/nil behave as `:fail`) — key pins:
+  `:seth-fires`/`:seth-silent`,
+  `:setm-continue-clears`/`:setm-fail-latches`
+  (`set_error_handler_rows`, `set_error_mode_rows`).
+- `locking`: analyzer builtin over a single global
+  reentrant monitor (nil lockee → NPE with a port-fixed
+  message; the guard releases on every exit path,
+  including throws) — key pins: `:locking-mutex` (4
+  futures x 50 increments, exact 200),
+  `:locking-unlock-on-throw` (`locking_rows`,
+  `locking_mutual_exclusion`).
+- `pmap`/`pcalls`/`pvalues`: verbatim `core.clj` ports
+  over futures, except the lookahead's
+  `availableProcessors` is a fixed count (6; interop is
+  N1, timing-only) — key pins: `:pmap-chunk` (lookahead),
+  `:pvalues-sidefx` (normalized `[(1 2) 2]`) (`pmap_rows`,
+  `pcalls_rows`, `pvalues_rows`).
+- Corpus: `s6-corpus/05-locking-pmap.clj` (19 entries).
+
 ## Design (spike before S6B)
 
 D1. `Evaluator` across threads: `Send+Sync` VERIFIED (probe

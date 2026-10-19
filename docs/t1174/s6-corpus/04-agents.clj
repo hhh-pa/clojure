@@ -153,7 +153,9 @@
 (p ":star-bound-in-action" #(let [p (promise) a (agent 0)] (send a (fn [s] (deliver p (= *agent* a)) s)) @p))
 (p ":star-nested-own" #(let [p (promise) a (agent 0) b (agent 0)] (send a (fn [s] (send b (fn [t] (deliver p [(= *agent* b) (= *agent* a)]) t)) s)) @p))
 (p ":star-conveys" #(do (def ^:dynamic s6c-dx 1) (let [p (promise) a (agent 0)] (binding [s6c-dx 2] (send a (fn [s] (deliver p s6c-dx) s))) @p)))
-(p ":star-watcher-bare" #(let [p (promise) a (agent 0)] (add-watch a :k (fn [k r o n] (deliver p (nil? *agent*)))) (send a inc) @p))
+(p ":star-watcher-bound" #(let [p (promise) a (agent 0)] (add-watch a :k (fn [k r o n] (deliver p (nil? *agent*)))) (send a inc) @p))
+(p ":star-validator-bare" #(let [p (promise)] (agent 0 :validator (fn [x] (deliver p (nil? *agent*)) true)) @p))
+(p ":star-handler-bound" #(let [p (promise) a (agent 0 :error-mode :continue :error-handler (fn [ag ex] (deliver p (nil? *agent*))))] (send a (fn [s] (throw (ex-info "kh" {})))) (send a inc) [@p (await a) @a (agent-error a)]))
 ;; --- send shapes (agent_send_shapes) ---
 (p ":send-long" #(send 1 inc))
 (p ":sendoff-long" #(send-off 1 inc))
@@ -175,7 +177,7 @@
 
 ;; --- agent value shapes (agent_value_shapes) ---
 (p ":deref-agent" #(deref (agent 5)))
-(p ":deref-agent-reader" #(@(agent 5)))
+(p ":deref-agent-reader" #(do @(agent 5)))
 (p ":deref-agent-timeout" #(deref (agent 1) 50 :t))
 (p ":force-agent-eq" #(let [a (agent 1)] (= a (force a))))
 (p ":futureq-agent" #(future? (agent 1)))

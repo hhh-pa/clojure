@@ -27,6 +27,11 @@ shapes are exact JVM text (en_US/UTC).
 - `swap!` CAS-loops `(apply f old args*)`; `reset!` publishes
   directly; `compare-and-set!` returns bool (validates on
   match). Extra `swap!` args supported (P2).
+- The `swap!` publish and `compare-and-set!` compare with
+  `=` (PINNED DIVERGENCE: the JVM compares by reference
+  `==`; port values have no object identity, so an ABA
+  state change compares equal — unfixable without value
+  identity).
 
 ## Delay
 
@@ -71,12 +76,28 @@ shapes are exact JVM text (en_US/UTC).
   JVM returns at once and drains async; timing-only).
 - After shutdown, sends return the agent but their actions
   never run (like the JVM's swallowed executor rejection —
-  the queue wedges, `await-for` times out `false`, plain
-  `await` hangs on both runtimes). Submission failures
-  notify the error handler with a
+  the queue wedges, `await-for` times out `false`).
+  Submission failures notify the error handler with a
   `RejectedExecutionException` first, like the JVM's
   `execute` catch (the message is port-fixed: the JVM's
   embeds pool identity).
+- Post-shutdown `await` returns `nil` (DIVERGENCE: the
+  barrier head drops with the queue, so the latch
+  disconnects at once; the JVM's barrier wedges and plain
+  `await` hangs). Post-shutdown `future`/`future-call`
+  still spawns a thread (DIVERGENCE: the JVM's pool
+  rejects with `RejectedExecutionException`).
+
+## locking
+
+- Analyzer builtin (S6D): evaluates the lockee (`nil` →
+  the `NullPointerException`), then holds a single global
+  reentrant monitor for the body (PINNED DIVERGENCE: the
+  JVM locks per-object; the port serializes every
+  `locking` body on one monitor). Resolves as a macro;
+  `macroexpand-1` returns the form unchanged
+  (macroexpand-identity divergence, like the S5B
+  builtins).
 
 ## Threads (port rules)
 
@@ -92,3 +113,10 @@ shapes are exact JVM text (en_US/UTC).
   publishes) are atomic.
 - Print rendering of refs (`#object[...]`) is covered by
   existing `java_debug` conventions, not re-pinned here.
+
+## Known limitations
+
+- Self-referential cells leak: `(reset! a a)` pins an
+  `Arc` cycle the port never collects (the JVM GCs it).
+  No cycle collector exists; never store a ref in its own
+  state.
