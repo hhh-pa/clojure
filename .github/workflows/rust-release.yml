@@ -66,6 +66,12 @@ jobs:
           mkdir -p dist
           asset="dist/clojure-rs-$target.tar.gz"
           tar -czf "$asset" -C target/release "$(basename "$bin")"
+          # Packaging smoke (S7D): the shipped artifact itself must
+          # evaluate — extract to a scratch dir and run eval there.
+          smoke=$(mktemp -d)
+          tar -xzf "$asset" -C "$smoke"
+          test "$("$smoke/$(basename "$bin")" eval '(+ 1 2)')" = "3"
+          rm -rf "$smoke"
           echo "asset=$asset" >> "$GITHUB_OUTPUT"
           echo "target=$target" >> "$GITHUB_OUTPUT"
         id: package
