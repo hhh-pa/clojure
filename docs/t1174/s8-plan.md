@@ -98,6 +98,12 @@ naming the first unsupported form). TDD: subset corpus first
   (replay every corpus file); old stub asserts move
   out of `cli.rs`. Release packaging ships
   `libcljrt.a` / `cljrt.lib` per platform.
+  (As built: the smoke tests live in `cli.rs` — they
+  are hermetic CLI plumbing with no linking, so a
+  separate `build.rs` target buys nothing. The
+  unlinked test keeps its asserts but creates its
+  input file: the shared IO gate exits 3 on missing
+  input before the backend split.)
 - Spec §2.4 update in-slice: rooting strategy, `main`
   semantics, S8 limits (host-only, no debug info, no
   TCO, `*command-line-args*` unconveyed).

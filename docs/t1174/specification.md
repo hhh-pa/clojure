@@ -96,6 +96,8 @@ Feature: no JDK required
     Given a machine with no JDK and no Clojure jar
     When I download the release archive for my platform and extract it
     Then `clojure-rs eval '(+ 1 2)'` prints `3`
+    And `clojure-rs build hello.clj -o hello` compiles against the
+      shipped runtime archive, and `./hello` runs the program
 ```
 
 ### 1.4 CLI contract
@@ -112,9 +114,16 @@ Feature: no JDK required
 - `clojure-rs repl` starts the interactive REPL (see 1.5). Non-tty
   stdin degrades to streaming eval (one form per result, no line
   editing, no history write).
-- `clojure-rs build <file.clj> -o <out>` AOT-compiles the pure subset
-  (see 2.4). Exit non-zero with a diagnostic naming the first
-  unsupported form when the input leaves the subset.
+- `clojure-rs build <file.clj> -o <out> [--emit-ir <f.ll>]
+  [--emit-obj <f.o>] [--runtime-archive <lib>]` AOT-compiles the pure
+  subset (see 2.4). `-o` is required (also with the emit flags, which
+  skip linking). Exit 0 on success (silent); exit 1 with the compile
+  diagnostic verbatim when the input leaves the subset (or LLVM
+  fails); exit 2 on usage errors; exit 3 with a `build: ...` message
+  on I/O failures (missing/unreadable input — also without the
+  backend) and link failures. The runtime archive resolves from
+  `--runtime-archive`, else next to the `clojure-rs` binary (release
+  archives ship both files together).
 
 ### 1.5 REPL behavior
 
@@ -281,11 +290,23 @@ C8. CLI exit codes: 0 success; 1 evaluation/compile error; 2 usage
 Compilable: top-level `defn` of fixed-arity fns over Int/Double/
 Bool/Str/Vector value flow, `if`/`do`/`let`/`loop`-free straight
 code + direct self-recursion, calls to a closed primitive set
-(`+ - * quot < <= > >= = count nth get conj` on the value types).
-Everything else (vars, laziness, macros at runtime, concurrency,
-I/O beyond a `print` intrinsic) is a compile error naming the
-form. Linking uses the platform linker against the `clj-value`
-runtime archive. JIT is a follow-up, not this task.
+(`+ - * quot < <= > >= = count nth get conj` on the value types),
+`print` over the value flow. Everything else (vars, laziness,
+macros at runtime, concurrency, other I/O, `recur`/`loop`/`try`,
+multi-arity or pre/post `defn`, destructuring) is a compile error
+`path:line:col: unsupported form in AOT subset: form (hint)`
+naming the first offending form; reader/analyzer failures keep the
+interpreter's span style (direct file spans, no load-file wrapper).
+Runtime errors in the binary print `path:line:col: Class: message`
+with the true call-site span and exit 1 (stdout before the error is
+preserved). Linking uses the platform linker (`cc`/`link`) against
+the `clj-rt` runtime archive. `--emit-ir`/`--emit-obj` write the IR
+or object file and skip linking (hermetic, linker-less). `main`
+takes no arguments (`*command-line-args*` is unconveyed), drops
+every slot, and returns 0; the first runtime failure aborts with
+exit 1. Limits: host-only (no cross-compilation), no debug info,
+no tail-call optimization (deep self-recursion overflows the
+machine stack, as on the JVM). JIT is a follow-up, not this task.
 
 ### 2.5 Slices (bind the plan's steps 1–9)
 

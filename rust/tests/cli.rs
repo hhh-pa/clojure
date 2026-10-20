@@ -8,7 +8,9 @@
 
 //! CLI contract tests: help/version/usage codes (slice S1 shell) plus
 //! the S7A `eval`/`run` wiring (spec 1.3/1.4, pins P4/P5/P7).
-//! `repl` stays stubbed for S7B/C, `build` for S8.
+//! `repl` landed in S7B/C, `build` in S8. The `build` tests here
+//! stay hermetic (emit flags + error exits, no linking); the S8D
+//! corpus replay (`build_corpus.rs`) covers full link + execute.
 
 mod common;
 
@@ -366,20 +368,253 @@ fn repl_streaming_ignores_history_flags() {
     assert_eq!(stdout(&out), "3\n");
 }
 
+/// A scratch dir for one `build` CLI test (pid-suffixed, removed
+/// by the test).
+fn build_tmp(name: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!("clj-rs-cli-{}-{name}", std::process::id()))
+}
+
+/// `build` argv as uniform `OsStr`s (paths + literals mix).
+fn build_argv(args: &[&std::ffi::OsStr]) -> std::process::Output {
+    run(args.iter().copied())
+}
+
+#[test]
+fn build_missing_input_exits_3() {
+    // The IO gate runs on every configuration (linked or not).
+    use std::ffi::OsStr;
+    let dir = build_tmp("missing");
+    let missing = dir.join("nope.clj");
+    let out = build_argv(&[
+        OsStr::new("build"),
+        missing.as_os_str(),
+        OsStr::new("-o"),
+        OsStr::new("prog"),
+    ]);
+    assert_eq!(out.status.code(), Some(3));
+    let err = stderr(&out);
+    assert!(err.contains("build: no such file"), "{err}");
+}
+
+#[test]
+fn build_directory_input_exits_3() {
+    use std::ffi::OsStr;
+    let dir = build_tmp("dir");
+    std::fs::create_dir_all(&dir).expect("tmp dir");
+    let out = build_argv(&[
+        OsStr::new("build"),
+        dir.as_os_str(),
+        OsStr::new("-o"),
+        OsStr::new("prog"),
+    ]);
+    assert_eq!(out.status.code(), Some(3));
+    let err = stderr(&out);
+    assert!(err.contains("build: is a directory"), "{err}");
+    std::fs::remove_dir_all(&dir).expect("cleanup");
+}
+
+#[test]
+#[cfg(unix)]
+fn build_unreadable_input_exits_3() {
+    use std::ffi::OsStr;
+    use std::os::unix::fs::PermissionsExt;
+    let dir = build_tmp("unreadable");
+    std::fs::create_dir_all(&dir).expect("tmp dir");
+    let file = dir.join("dark.clj");
+    std::fs::write(&file, "(print :x)\n").expect("write source");
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+    let out = build_argv(&[
+        OsStr::new("build"),
+        file.as_os_str(),
+        OsStr::new("-o"),
+        OsStr::new("prog"),
+    ]);
+    assert_eq!(out.status.code(), Some(3));
+    let err = stderr(&out);
+    assert!(err.contains("build: cannot open"), "{err}");
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).expect("restore");
+    std::fs::remove_dir_all(&dir).expect("cleanup");
+}
+
 #[test]
 #[cfg(feature = "aot")]
-fn build_reports_linked_llvm() {
-    let out = run(["build", "f.clj", "-o", "f"]);
+fn build_emit_ir_writes_ir_without_linking() {
+    use std::ffi::OsStr;
+    let dir = build_tmp("emit-ir");
+    std::fs::create_dir_all(&dir).expect("tmp dir");
+    let file = dir.join("hello.clj");
+    std::fs::write(&file, "(print (+ 40 2))\n").expect("write source");
+    let ir = dir.join("hello.ll");
+    let prog = dir.join("prog");
+    let out = build_argv(&[
+        OsStr::new("build"),
+        file.as_os_str(),
+        OsStr::new("-o"),
+        prog.as_os_str(),
+        OsStr::new("--emit-ir"),
+        ir.as_os_str(),
+    ]);
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    let text = std::fs::read_to_string(&ir).expect("read ir");
+    assert!(text.contains("ModuleID"), "not LLVM IR:\n{text}");
+    assert!(!prog.exists(), "linking must be skipped");
+    std::fs::remove_dir_all(&dir).expect("cleanup");
+}
+
+#[test]
+#[cfg(feature = "aot")]
+fn build_emit_obj_writes_object_without_linking() {
+    use std::ffi::OsStr;
+    let dir = build_tmp("emit-obj");
+    std::fs::create_dir_all(&dir).expect("tmp dir");
+    let file = dir.join("hello.clj");
+    std::fs::write(&file, "(print (+ 40 2))\n").expect("write source");
+    let obj = dir.join("hello.o");
+    let prog = dir.join("prog");
+    let out = build_argv(&[
+        OsStr::new("build"),
+        file.as_os_str(),
+        OsStr::new("-o"),
+        prog.as_os_str(),
+        OsStr::new("--emit-obj"),
+        obj.as_os_str(),
+    ]);
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    assert!(
+        std::fs::metadata(&obj).expect("obj meta").len() > 0,
+        "empty object file"
+    );
+    assert!(!prog.exists(), "linking must be skipped");
+    std::fs::remove_dir_all(&dir).expect("cleanup");
+}
+
+#[test]
+#[cfg(feature = "aot")]
+fn build_plan_error_passes_the_diagnostic_through() {
+    // Plan failures print verbatim (no `build: ` prefix), exit 1.
+    use std::ffi::OsStr;
+    let dir = build_tmp("plan-err");
+    std::fs::create_dir_all(&dir).expect("tmp dir");
+    let file = dir.join("bad.clj");
+    std::fs::write(&file, "(def x 1)\n").expect("write source");
+    let prog = dir.join("prog");
+    let out = build_argv(&[
+        OsStr::new("build"),
+        file.as_os_str(),
+        OsStr::new("-o"),
+        prog.as_os_str(),
+    ]);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(
+        stderr(&out),
+        format!(
+            "{}:1:1: unsupported form in AOT subset: def (only defn defines in the AOT subset)\n",
+            file.display()
+        )
+    );
+    std::fs::remove_dir_all(&dir).expect("cleanup");
+}
+
+#[test]
+#[cfg(feature = "aot")]
+fn build_unwritable_emit_path_exits_3() {
+    // Emit writes are IO (exit 3), not compile failures.
+    use std::ffi::OsStr;
+    let dir = build_tmp("emit-io");
+    std::fs::create_dir_all(&dir).expect("tmp dir");
+    let file = dir.join("hello.clj");
+    std::fs::write(&file, "(print (+ 40 2))\n").expect("write source");
+    let blocker = dir.join("blocker");
+    std::fs::write(&blocker, "x").expect("write blocker");
+    let bad = blocker.join("hello.ll");
+    let prog = dir.join("prog");
+    let out = build_argv(&[
+        OsStr::new("build"),
+        file.as_os_str(),
+        OsStr::new("-o"),
+        prog.as_os_str(),
+        OsStr::new("--emit-ir"),
+        bad.as_os_str(),
+    ]);
+    assert_eq!(out.status.code(), Some(3));
+    let err = stderr(&out);
+    assert!(err.starts_with("build: "), "{err}");
+    std::fs::remove_dir_all(&dir).expect("cleanup");
+}
+
+#[test]
+#[cfg(feature = "aot")]
+fn build_missing_runtime_archive_exits_3() {
+    // A bogus `--runtime-archive` fails archive discovery (exit 3).
+    use std::ffi::OsStr;
+    let dir = build_tmp("archive");
+    std::fs::create_dir_all(&dir).expect("tmp dir");
+    let file = dir.join("hello.clj");
+    std::fs::write(&file, "(print (+ 40 2))\n").expect("write source");
+    let prog = dir.join("prog");
+    let missing = dir.join("nope.a");
+    let out = build_argv(&[
+        OsStr::new("build"),
+        file.as_os_str(),
+        OsStr::new("-o"),
+        prog.as_os_str(),
+        OsStr::new("--runtime-archive"),
+        missing.as_os_str(),
+    ]);
+    assert_eq!(out.status.code(), Some(3));
+    let err = stderr(&out);
+    assert!(err.starts_with("build: "), "{err}");
+    std::fs::remove_dir_all(&dir).expect("cleanup");
+}
+
+#[test]
+#[cfg(all(feature = "aot", unix))]
+fn build_temp_object_failure_exits_1() {
+    // The temp object cannot be written (missing TMPDIR): an LLVM
+    // emission failure, exit 1 with `build: ` (not an IO exit 3).
+    use std::ffi::OsStr;
+    let dir = build_tmp("tmpdir");
+    std::fs::create_dir_all(&dir).expect("tmp dir");
+    let file = dir.join("hello.clj");
+    std::fs::write(&file, "(print (+ 40 2))\n").expect("write source");
+    let prog = dir.join("prog");
+    let out = common::bin()
+        .args([
+            OsStr::new("build"),
+            file.as_os_str(),
+            OsStr::new("-o"),
+            prog.as_os_str(),
+        ])
+        .env(
+            "TMPDIR",
+            dir.join(format!("missing-{}", std::process::id())),
+        )
+        .output()
+        .expect("spawn clojure-rs");
     assert_eq!(out.status.code(), Some(1));
     let err = stderr(&out);
-    assert!(err.contains("not yet implemented"), "{err}");
-    assert!(err.contains("LLVM backend linked"), "{err}");
+    assert!(err.starts_with("build: "), "{err}");
+    std::fs::remove_dir_all(&dir).expect("cleanup");
 }
 
 #[test]
 #[cfg(not(feature = "aot"))]
 fn build_reports_unlinked_llvm() {
-    let out = run(["build", "f.clj", "-o", "f"]);
+    // Readable input reaches the backend report (the IO gate runs
+    // first, so a missing file would exit 3 instead).
+    use std::ffi::OsStr;
+    let dir = build_tmp("unlinked");
+    std::fs::create_dir_all(&dir).expect("tmp dir");
+    let file = dir.join("hello.clj");
+    std::fs::write(&file, "(print (+ 40 2))\n").expect("write source");
+    let prog = dir.join("prog");
+    let out = build_argv(&[
+        OsStr::new("build"),
+        file.as_os_str(),
+        OsStr::new("-o"),
+        prog.as_os_str(),
+    ]);
     assert_eq!(out.status.code(), Some(1));
     assert!(stderr(&out).contains("LLVM backend not linked"));
+    std::fs::remove_dir_all(&dir).expect("cleanup");
 }

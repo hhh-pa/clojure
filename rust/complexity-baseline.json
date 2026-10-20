@@ -161,6 +161,34 @@
    "cyclomatic": 16.0,
    "cognitive": 1.0,
    "justification": "one arm per IMeta-bearing variant; passthrough table stays exhaustive"
+  },
+  {
+   "file": "crates/clj-eval/src/aot_subset.rs",
+   "function": "Planner::classify_call",
+   "cyclomatic": 23.0,
+   "cognitive": 19.0,
+   "justification": "S8A: one arm per special form plus sibling/prim dispatch; the subset call classifier stays exhaustive"
+  },
+  {
+   "file": "crates/clj-eval/src/aot_subset.rs",
+   "function": "Planner::classify_expr",
+   "cyclomatic": 17.0,
+   "cognitive": 11.0,
+   "justification": "S8A: one arm per value form; delegates to per-form classifiers"
+  },
+  {
+   "file": "crates/clj-eval/src/aot_subset.rs",
+   "function": "Prim::resolve",
+   "cyclomatic": 17.0,
+   "cognitive": 2.0,
+   "justification": "S8A: one arm per closed primitive; the name table stays exhaustive"
+  },
+  {
+   "file": "crates/clj-eval/src/aot_subset.rs",
+   "function": "head_hint",
+   "cyclomatic": 16.0,
+   "cognitive": 1.0,
+   "justification": "S8A: one arm per unsupported head; the hint table stays exhaustive"
   }
  ]
 }

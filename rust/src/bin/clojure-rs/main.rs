@@ -9,7 +9,7 @@
 //! `clojure-rs`: native Clojure runtime, REPL, and LLVM AOT compiler.
 //!
 //! Slices S1+S7A: CLI shell plus `eval`/`run` wiring over the booted
-//! `clj-eval` core. `repl` lands in S7B/C, `build` in S8 (spec
+//! `clj-eval` core. `repl` landed in S7B/C, `build` in S8 (spec
 //! `docs/t1174/`).
 
 use clap::{Parser, Subcommand};
@@ -62,6 +62,15 @@ enum Command {
         /// The native binary to write.
         #[arg(short, long)]
         output: PathBuf,
+        /// Also write the LLVM IR to this file (skips linking).
+        #[arg(long)]
+        emit_ir: Option<PathBuf>,
+        /// Also write the native object file to this path (skips linking).
+        #[arg(long)]
+        emit_obj: Option<PathBuf>,
+        /// Link against this runtime archive instead of the autodetected one.
+        #[arg(long)]
+        runtime_archive: Option<PathBuf>,
     },
 }
 
@@ -76,15 +85,19 @@ fn main() -> ExitCode {
             history_file,
             no_history,
         } => cmd_repl(history_file, no_history),
-        Command::Build { file, output } => {
-            eprintln!(
-                "build: not yet implemented (lands in slice S8): {} -> {} [{}]",
-                file.display(),
-                output.display(),
-                llvm_backend(),
-            );
-            ExitCode::from(1)
-        }
+        Command::Build {
+            file,
+            output,
+            emit_ir,
+            emit_obj,
+            runtime_archive,
+        } => cmd_build(
+            &file,
+            &output,
+            emit_ir.as_deref(),
+            emit_obj.as_deref(),
+            runtime_archive.as_deref(),
+        ),
     }
 }
 
@@ -521,18 +534,94 @@ impl<'a> EvalScanner<'a> {
     }
 }
 
-#[cfg(feature = "aot")]
-fn llvm_backend() -> String {
-    // Touch the real backend so `build` reports linkage truthfully
-    // (and the `aot` feature stays a used dependency).
-    let ir = clj_aot::probe_ir();
-    debug_assert!(ir.contains("ModuleID"));
-    "LLVM backend linked".to_owned()
+/// `build`: AOT-compile the pure subset to a native binary (S8,
+/// spec §2.4). The IO gate runs on every configuration (missing
+/// input is exit 3 even unlinked); only compilation itself splits
+/// on the `aot` feature.
+fn cmd_build(
+    file: &Path,
+    output: &Path,
+    emit_ir: Option<&Path>,
+    emit_obj: Option<&Path>,
+    runtime_archive: Option<&Path>,
+) -> ExitCode {
+    if !file.exists() {
+        eprintln!("build: no such file: {}", file.display());
+        return ExitCode::from(3);
+    }
+    if file.is_dir() {
+        eprintln!("build: is a directory: {}", file.display());
+        return ExitCode::from(3);
+    }
+    let source = match std::fs::read_to_string(file) {
+        Ok(source) => source,
+        Err(e) => {
+            eprintln!("build: cannot open {}: {e}", file.display());
+            return ExitCode::from(3);
+        }
+    };
+    cmd_build_compile(file, &source, output, emit_ir, emit_obj, runtime_archive)
 }
 
+/// Linked `build`: plan → LLVM → link. Plan failures print the
+/// diagnostic verbatim (exit 1); LLVM failures print `build: ...`
+/// (exit 1); IO/link failures print `build: ...` (exit 3) — C8.
+#[cfg(feature = "aot")]
+fn cmd_build_compile(
+    file: &Path,
+    source: &str,
+    output: &Path,
+    emit_ir: Option<&Path>,
+    emit_obj: Option<&Path>,
+    runtime_archive: Option<&Path>,
+) -> ExitCode {
+    use clj_aot::{CompileError, EmitOptions, LinkOptions};
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(std::path::Path::to_path_buf))
+        .unwrap_or_default();
+    let path = file.to_string_lossy();
+    let emit = EmitOptions {
+        emit_ir: emit_ir.map(std::path::Path::to_path_buf),
+        emit_obj: emit_obj.map(std::path::Path::to_path_buf),
+    };
+    let link = LinkOptions {
+        runtime_archive: runtime_archive.map(std::path::Path::to_path_buf),
+        exe_dir,
+        linker: None,
+    };
+    match clj_aot::compile_str(source, &path, output, &emit, &link) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(CompileError::Plan(msg)) => {
+            eprintln!("{msg}");
+            ExitCode::from(1)
+        }
+        Err(CompileError::Target(msg) | CompileError::Emit(msg)) => {
+            eprintln!("build: {msg}");
+            ExitCode::from(1)
+        }
+        Err(e) => {
+            eprintln!("build: {e}");
+            ExitCode::from(3)
+        }
+    }
+}
+
+/// Unlinked `build`: the IO gate already ran, so any input reaching
+/// here is readable — report the missing backend (exit 1).
 #[cfg(not(feature = "aot"))]
-fn llvm_backend() -> String {
-    "LLVM backend not linked (built with --no-default-features)".to_owned()
+fn cmd_build_compile(
+    _file: &Path,
+    _source: &str,
+    _output: &Path,
+    _emit_ir: Option<&Path>,
+    _emit_obj: Option<&Path>,
+    _runtime_archive: Option<&Path>,
+) -> ExitCode {
+    eprintln!(
+        "build: LLVM backend not linked (built with --no-default-features; rebuild with default features to compile)"
+    );
+    ExitCode::from(1)
 }
 
 /// `repl`: tty stdin gets the banner + rustyline driver (history,
