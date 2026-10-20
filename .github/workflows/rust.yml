@@ -327,6 +327,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # Git bash prepends its own dirs (coreutils `link`) ahead of
+          # the MSVC toolchain msvc-dev-cmd put first: re-pin MSVC bin
+          # first so the AOT smoke's `link` is link.exe (else coreutils
+          # link fails with "extra operand").
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            export PATH="$(cygpath -u "$VCToolsInstallDir")bin/Hostx64/x64:$PATH"
+            case "$(command -v link)" in *usr/bin/*) echo "MSVC link shadowed by coreutils" >&2; exit 1;; esac
+          fi
           target=$(rustc -vV | sed -n 's/^host: //p')
           bin=target/release/clojure-rs
           archive=target/release/libcljrt.a
