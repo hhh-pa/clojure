@@ -36,7 +36,9 @@ WARNING: canonical coverage is not a superset of cargo's view (cargo 8/9 lines, 
 coverage for $WS: 88.89% lines (8/9, 2 files)
     0.00%     0/1     src/absurd.rs
   100.00%     8/8     src/a.rs
-+ $BIN/coverage-floor $REPORT/lcov.info 80
-coverage floor: 88.89% lines (8/9, 2 files) vs 80.00% floor ($REPORT/lcov.info)
-coverage floor: OK
-rust quality gates: all green for $WS
++ $BIN/coverage-floor $REPORT/lcov.info 100
+coverage floor: 88.89% lines (8/9, 2 files) vs 100.00% floor ($REPORT/lcov.info)
+per-file table (lowest first):
+    0.00%     0/1     $WS/src/absurd.rs
+  100.00%     8/8     $WS/src/a.rs
+FAIL: line coverage 88.89% is below the 100.00% floor

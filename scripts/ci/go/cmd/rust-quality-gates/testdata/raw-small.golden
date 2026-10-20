@@ -36,7 +36,7 @@ WARNING: $REPORT/lcov.info has absurd count 18446744073709551615 at src/absurd.r
 canonical coverage: cargo 8/9 lines -> canonical 4/4 (recovered 0 genuinely-executed lines)
 coverage for $WS: 100.00% lines (4/4, 1 files)
   100.00%     4/4     src/a.rs
-+ $BIN/coverage-floor $REPORT/lcov.info 80
-coverage floor: 100.00% lines (4/4, 1 files) vs 80.00% floor ($REPORT/lcov.info)
++ $BIN/coverage-floor $REPORT/lcov.info 100
+coverage floor: 100.00% lines (4/4, 1 files) vs 100.00% floor ($REPORT/lcov.info)
 coverage floor: OK
 rust quality gates: all green for $WS

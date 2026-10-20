@@ -13,7 +13,7 @@ import (
 	"github.com/hhh-pa/clojure/scripts/ci/go/internal/lcov"
 )
 
-const usage = "Usage: coverage-floor <lcov.info> [floor=80.0]\n"
+const usage = "Usage: coverage-floor <lcov.info> [floor=100.0]\n"
 
 type row struct {
 	pct float64
@@ -28,7 +28,7 @@ func run(argv []string) int {
 		return 2
 	}
 	path := argv[0]
-	floor := 80.0
+	floor := 100.0
 	if len(argv) > 1 {
 		parsed, err := strconv.ParseFloat(argv[1], 64)
 		if err != nil {

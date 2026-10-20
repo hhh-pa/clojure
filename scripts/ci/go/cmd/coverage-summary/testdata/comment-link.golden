@@ -1,6 +1,6 @@
 ## Coverage report: 51.98% (lines)
 
-Threshold 80%: **FAIL** (enforced by the quality gates).
+Threshold 100%: **FAIL** (enforced by the quality gates).
 
 | File | Lines | Hit | %% |
 | ---- | ----- | --- | - |

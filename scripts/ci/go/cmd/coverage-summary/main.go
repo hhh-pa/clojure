@@ -18,7 +18,7 @@ import (
 // Must match the floor enforced by rust-quality-gates (the
 // coverage-floor invocation): the gates fail the run, this only
 // reports the verdict.
-const threshold = 80.0
+const threshold = 100.0
 
 const usage = `Render an lcov.info coverage report as GitHub Markdown.
 
