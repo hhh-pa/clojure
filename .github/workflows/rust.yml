@@ -25,6 +25,15 @@ on:
       - ".github/workflows/rust.yml"
       - ".github/actions/**"
 
+# One run per branch at a time: a new push supersedes in-flight runs
+# (the same head would otherwise run twice — push + pull_request —
+# and rapid rounds pile up behind slow platform runners, starving
+# macOS). PR and push events share the group via head_ref/ref_name;
+# master serializes.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
 
