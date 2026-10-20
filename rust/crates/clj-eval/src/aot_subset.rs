@@ -859,11 +859,18 @@ mod tests {
         plan_source(text)
     }
 
-    fn subset(text: &str) -> SubsetError {
+    /// The diagnostic for `text`, or `None` when it plans (the 100%
+    /// line gate admits no `panic!` arms in tests, so failures pin
+    /// full strings instead of destructuring).
+    fn diagnostic_of(text: &str) -> Option<String> {
         match plan(text) {
-            Err(PlanError::Subset(e)) => e,
-            other => panic!("want subset error, got {other:?}"),
+            Ok(_) => None,
+            Err(e) => Some(e.diagnostic("f.clj")),
         }
+    }
+
+    fn diag(text: &str) -> String {
+        diagnostic_of(text).expect("want diagnostic")
     }
 
     #[test]
@@ -872,6 +879,7 @@ mod tests {
         assert!(prog.fns.is_empty());
         assert!(prog.main.is_empty());
         assert_eq!(prog.main_slots, 0);
+        assert_eq!(diagnostic_of("(print 1)"), None);
     }
 
     #[test]
@@ -925,25 +933,42 @@ mod tests {
     #[test]
     fn self_call_plans_to_index_zero() {
         let prog = plan("(defn f [n] (if (= n 0) 0 (f (+ n -1))))").expect("plans");
-        let SubsetExpr::Do(body) = &prog.fns[0].body else {
-            panic!("body shape: {:?}", prog.fns[0].body);
-        };
-        let SubsetExpr::If { els, .. } = &body[0] else {
-            panic!("if shape: {:?}", body[0]);
-        };
-        assert!(matches!(els.as_ref(), SubsetExpr::CallFn { index: 0, .. }));
+        assert_eq!(
+            prog.fns[0].body,
+            SubsetExpr::Do(vec![SubsetExpr::If {
+                test: Box::new(SubsetExpr::CallPrim {
+                    prim: Prim::Eq,
+                    args: vec![SubsetExpr::Local(0), SubsetExpr::Int(0)],
+                    span: Span::new(1, 17),
+                }),
+                then: Box::new(SubsetExpr::Int(0)),
+                els: Box::new(SubsetExpr::CallFn {
+                    index: 0,
+                    args: vec![SubsetExpr::CallPrim {
+                        prim: Prim::Add,
+                        args: vec![SubsetExpr::Local(0), SubsetExpr::Int(-1)],
+                        span: Span::new(1, 30),
+                    }],
+                    span: Span::new(1, 27),
+                }),
+            }])
+        );
     }
 
     #[test]
     fn if_without_else_is_nil() {
         let prog = plan("(print (if true 1))").expect("plans");
-        let SubsetExpr::Print { args, .. } = &prog.main[0] else {
-            panic!("print shape: {:?}", prog.main[0]);
-        };
-        assert!(matches!(
-            &args[0],
-            SubsetExpr::If { els, .. } if **els == SubsetExpr::Nil
-        ));
+        assert_eq!(
+            prog.main,
+            vec![SubsetExpr::Print {
+                args: vec![SubsetExpr::If {
+                    test: Box::new(SubsetExpr::Bool(true)),
+                    then: Box::new(SubsetExpr::Int(1)),
+                    els: Box::new(SubsetExpr::Nil),
+                }],
+                span: Span::new(1, 1),
+            }]
+        );
     }
 
     #[test]
@@ -957,38 +982,56 @@ mod tests {
     #[test]
     fn let_binds_flat_slots_with_shadowing() {
         let prog = plan("(let [x 1 y (+ x 1)] (* x y))").expect("plans");
-        let SubsetExpr::Let { bindings, .. } = &prog.main[0] else {
-            panic!("let shape: {:?}", prog.main[0]);
-        };
-        assert_eq!(bindings.len(), 2);
-        assert_eq!(bindings[0].0, 0);
-        assert_eq!(bindings[1].0, 1);
+        assert_eq!(
+            prog.main,
+            vec![SubsetExpr::Let {
+                bindings: vec![
+                    (0, SubsetExpr::Int(1)),
+                    (
+                        1,
+                        SubsetExpr::CallPrim {
+                            prim: Prim::Add,
+                            args: vec![SubsetExpr::Local(0), SubsetExpr::Int(1)],
+                            span: Span::new(1, 13),
+                        },
+                    ),
+                ],
+                body: vec![SubsetExpr::CallPrim {
+                    prim: Prim::Mul,
+                    args: vec![SubsetExpr::Local(0), SubsetExpr::Local(1)],
+                    span: Span::new(1, 22),
+                }],
+            }]
+        );
         assert_eq!(prog.main_slots, 2);
         let shadow = plan("(let [x 1] (let [x 2] x))").expect("plans");
         assert_eq!(shadow.main_slots, 2);
-        let SubsetExpr::Let { body, .. } = &shadow.main[0] else {
-            panic!("outer: {:?}", shadow.main[0]);
-        };
-        let SubsetExpr::Let { body: inner, .. } = &body[0] else {
-            panic!("inner: {:?}", body[0]);
-        };
-        assert_eq!(inner[0], SubsetExpr::Local(1));
+        assert_eq!(
+            shadow.main,
+            vec![SubsetExpr::Let {
+                bindings: vec![(0, SubsetExpr::Int(1))],
+                body: vec![SubsetExpr::Let {
+                    bindings: vec![(1, SubsetExpr::Int(2))],
+                    body: vec![SubsetExpr::Local(1)],
+                }],
+            }]
+        );
     }
 
     #[test]
     fn wrong_argc_is_a_runtime_arity_node() {
         let prog = plan("(defn f [a] a) (print (f 1 2))").expect("plans");
-        let SubsetExpr::Print { args, .. } = &prog.main[0] else {
-            panic!("print shape: {:?}", prog.main[0]);
-        };
         assert_eq!(
-            args[0],
-            SubsetExpr::ArityError {
-                display: "user/f".to_owned(),
-                expected: 1,
-                got: 2,
-                span: Span::new(1, 23),
-            }
+            prog.main,
+            vec![SubsetExpr::Print {
+                args: vec![SubsetExpr::ArityError {
+                    display: "user/f".to_owned(),
+                    expected: 1,
+                    got: 2,
+                    span: Span::new(1, 23),
+                }],
+                span: Span::new(1, 16),
+            }]
         );
     }
 
@@ -1016,179 +1059,219 @@ mod tests {
     #[test]
     fn let_shadowed_prim_is_a_local() {
         let prog = plan("(let [+ 5] +)").expect("plans");
-        let SubsetExpr::Let { body, .. } = &prog.main[0] else {
-            panic!("let shape: {:?}", prog.main[0]);
-        };
-        assert_eq!(body[0], SubsetExpr::Local(0));
+        assert_eq!(
+            prog.main,
+            vec![SubsetExpr::Let {
+                bindings: vec![(0, SubsetExpr::Int(5))],
+                body: vec![SubsetExpr::Local(0)],
+            }]
+        );
     }
 
     #[test]
     fn forward_reference_is_an_analyzer_error() {
-        match plan("(defn f [x] (g x))") {
-            Err(PlanError::Compile(e)) => {
-                assert!(
-                    e.message.contains("Unable to resolve symbol: g"),
-                    "{}",
-                    e.message
-                );
-                assert_eq!(e.span, Span::new(1, 13));
-            }
-            other => panic!("want compile error, got {other:?}"),
-        }
+        assert_eq!(
+            diag("(defn f [x] (g x))"),
+            "f.clj:1:13: Syntax error compiling: Unable to resolve symbol: g in this context"
+        );
     }
 
     #[test]
     fn reader_error_diagnostic() {
-        match plan(")") {
-            Err(e @ PlanError::Reader(_)) => {
-                assert_eq!(e.diagnostic("f.clj"), "f.clj:1:2: Unmatched delimiter: )");
-            }
-            other => panic!("want reader error, got {other:?}"),
-        }
+        assert_eq!(diag(")"), "f.clj:1:2: Unmatched delimiter: )");
     }
 
     #[test]
     fn analyzer_error_diagnostic() {
-        match plan("(if)") {
-            Err(e @ PlanError::Compile(_)) => {
-                assert_eq!(
-                    e.diagnostic("f.clj"),
-                    "f.clj:1:1: Syntax error compiling if: Too few arguments to if"
-                );
-            }
-            other => panic!("want compile error, got {other:?}"),
-        }
+        assert_eq!(
+            diag("(if)"),
+            "f.clj:1:1: Syntax error compiling if: Too few arguments to if"
+        );
     }
 
     #[test]
     fn bare_analyzer_failure_is_uncaught() {
-        match plan("(defn)") {
-            Err(e @ PlanError::Uncaught(_)) => {
-                let text = e.diagnostic("f.clj");
-                assert!(text.starts_with("f.clj:1:1: "), "{text}");
-            }
-            other => panic!("want uncaught error, got {other:?}"),
-        }
+        assert_eq!(
+            diag("(defn)"),
+            "f.clj:1:1: clojure.lang.ArityException: Wrong number of args (0) passed to: clojure.core/defn"
+        );
     }
 
     #[test]
     fn duplicate_defn_rejected() {
-        let e = subset("(defn f [a] a) (defn f [b] b)");
-        assert_eq!(e.form, "defn");
-        assert_eq!(e.span, Span::new(1, 16));
-        assert!(e.hint.contains("redefinition"), "{}", e.hint);
+        assert_eq!(
+            diag("(defn f [a] a) (defn f [b] b)"),
+            "f.clj:1:16: unsupported form in AOT subset: defn (redefinition; AOT resolves calls at compile time)"
+        );
     }
 
     #[test]
     fn nested_defn_rejected() {
-        let e = subset("(let [x 1] (defn f [a] a))");
-        assert_eq!(e.form, "defn");
-        assert_eq!(e.span, Span::new(1, 12));
-        assert!(e.hint.contains("top-level"), "{}", e.hint);
+        assert_eq!(
+            diag("(let [x 1] (defn f [a] a))"),
+            "f.clj:1:12: unsupported form in AOT subset: defn (defn is top-level only)"
+        );
     }
 
     #[test]
     fn rejection_table_names_forms() {
-        let cases: &[(&str, u32, u32, &str, &str)] = &[
-            ("(def x 1)", 1, 1, "def", "only defn defines"),
-            ("(print (loop [i 0] i))", 1, 8, "loop", "loop-free"),
-            ("(defn g [n] (recur n))", 1, 13, "recur", "by name"),
+        // Full diagnostics: span + form + hint, pinned exactly.
+        // (`@` reads as qualified `clojure.core/deref` with no span
+        // of its own — the interpreter's arity texts name it
+        // qualified too — so the outer span wins.)
+        let cases: &[(&str, &str)] = &[
+            (
+                "(def x 1)",
+                "f.clj:1:1: unsupported form in AOT subset: def (only defn defines in the AOT subset)",
+            ),
+            (
+                "(print (loop [i 0] i))",
+                "f.clj:1:8: unsupported form in AOT subset: loop (the AOT subset is loop-free; use direct self-recursion)",
+            ),
+            (
+                "(defn g [n] (recur n))",
+                "f.clj:1:13: unsupported form in AOT subset: recur (recur is outside the subset; call the function by name)",
+            ),
             (
                 "(print (try 1 (catch Exception e 2)))",
-                1,
-                8,
-                "try",
-                "error handling",
+                "f.clj:1:8: unsupported form in AOT subset: try (error handling is outside the AOT subset)",
             ),
-            ("(print (var print))", 1, 8, "var", "vars are outside"),
-            // `@` reads as qualified `clojure.core/deref` with no
-            // span of its own (the interpreter's arity texts name
-            // it qualified too), so the outer span wins.
+            (
+                "(print (var print))",
+                "f.clj:1:8: unsupported form in AOT subset: var (vars are outside the AOT subset)",
+            ),
             (
                 "(print @(future 7))",
-                1,
-                1,
-                "clojure.core/deref",
-                "concurrency",
+                "f.clj:1:1: unsupported form in AOT subset: clojure.core/deref (concurrency is outside the AOT subset)",
             ),
-            ("(print (take 2 [1 2]))", 1, 8, "take", "closed call set"),
-            ("(println :x)", 1, 1, "println", "only print"),
-            ("(ns foo)", 1, 1, "ns", "single-file"),
-            ("(when true 1)", 1, 1, "when", "not expanded"),
-            ("(defmacro m [x] x)", 1, 1, "defmacro", "runtime"),
+            (
+                "(print (take 2 [1 2]))",
+                "f.clj:1:8: unsupported form in AOT subset: take (not in the closed call set)",
+            ),
+            (
+                "(println :x)",
+                "f.clj:1:1: unsupported form in AOT subset: println (only print writes in the AOT subset)",
+            ),
+            (
+                "(ns foo)",
+                "f.clj:1:1: unsupported form in AOT subset: ns (AOT programs are single-file, without namespaces)",
+            ),
+            (
+                "(when true 1)",
+                "f.clj:1:1: unsupported form in AOT subset: when (macros are not expanded in the AOT subset)",
+            ),
+            (
+                "(defmacro m [x] x)",
+                "f.clj:1:1: unsupported form in AOT subset: defmacro (macros at runtime are outside the subset)",
+            ),
             (
                 "(print ((fn [x] x) 7))",
-                1,
-                9,
-                "fn",
-                "only defn defines functions",
+                "f.clj:1:9: unsupported form in AOT subset: fn (only defn defines functions in the AOT subset)",
             ),
-            ("(print (quote 5))", 1, 8, "quote", "value flow"),
-            ("(defn m ([a] a) ([a b] b))", 1, 1, "defn", "multi-arity"),
-            ("(defn v [a & b] a)", 1, 1, "defn", "variadic"),
-            ("(defn p [a] {:pre [true]} a)", 1, 1, "defn", "pre/post"),
-            ("(let [[a b] [1 2]] a)", 1, 1, "let", "destructuring"),
-            ("(print (map inc [1]))", 1, 8, "map", "closed call set"),
-            ("(print (future 1))", 1, 8, "future", "concurrency"),
-            ("(print (lazy-seq [1]))", 1, 8, "lazy-seq", "laziness"),
-            ("(letfn [(f [x] x)] (f 1))", 1, 1, "letfn", "top-level defn"),
-            ("(print (str 1))", 1, 8, "str", "closed call set"),
-            ("(do (def x 1) (print x))", 1, 5, "def", "only defn defines"),
+            (
+                "(print (quote 5))",
+                "f.clj:1:8: unsupported form in AOT subset: quote (quoted values are outside the value flow)",
+            ),
+            (
+                "(defn m ([a] a) ([a b] b))",
+                "f.clj:1:1: unsupported form in AOT subset: defn (multi-arity; use a single vector clause)",
+            ),
+            (
+                "(defn m ([a] a) ([a b] b) {:a 1})",
+                "f.clj:1:1: unsupported form in AOT subset: defn (multi-arity; use a single vector clause)",
+            ),
+            (
+                "(defn v [a & b] a)",
+                "f.clj:1:1: unsupported form in AOT subset: defn (variadic; use fixed params)",
+            ),
+            (
+                "(defn p [a] {:pre [true]} a)",
+                "f.clj:1:1: unsupported form in AOT subset: defn (pre/post conditions are runtime checks)",
+            ),
+            (
+                "(let [[a b] [1 2]] a)",
+                "f.clj:1:1: unsupported form in AOT subset: let (destructuring is outside the subset; bind plain symbols)",
+            ),
+            (
+                "(print (map inc [1]))",
+                "f.clj:1:8: unsupported form in AOT subset: map (not in the closed call set)",
+            ),
+            (
+                "(print (future 1))",
+                "f.clj:1:8: unsupported form in AOT subset: future (concurrency is outside the AOT subset)",
+            ),
+            (
+                "(print (lazy-seq [1]))",
+                "f.clj:1:8: unsupported form in AOT subset: lazy-seq (laziness is outside the AOT subset)",
+            ),
+            (
+                "(letfn [(f [x] x)] (f 1))",
+                "f.clj:1:1: unsupported form in AOT subset: letfn (use top-level defn instead)",
+            ),
+            (
+                "(print (str 1))",
+                "f.clj:1:8: unsupported form in AOT subset: str (not in the closed call set)",
+            ),
+            (
+                "(do (def x 1) (print x))",
+                "f.clj:1:5: unsupported form in AOT subset: def (only defn defines in the AOT subset)",
+            ),
             (
                 "(print (loop [i 0] i))\n(def x 1)",
-                1,
-                8,
-                "loop",
-                "loop-free",
+                "f.clj:1:8: unsupported form in AOT subset: loop (the AOT subset is loop-free; use direct self-recursion)",
             ),
         ];
-        for (input, line, col, form, hint) in cases {
-            let e = subset(input);
-            assert_eq!(e.span, Span::new(*line, *col), "{input}");
-            assert_eq!(e.form, *form, "{input}");
-            assert!(e.hint.contains(hint), "{input}: {}", e.hint);
-            let text = PlanError::Subset(e).diagnostic("f.clj");
-            assert!(
-                text.starts_with(&format!(
-                    "f.clj:{line}:{col}: unsupported form in AOT subset: "
-                )),
-                "{text}"
-            );
+        for (input, want) in cases {
+            assert_eq!(&diag(input), want, "{input}");
         }
     }
 
     #[test]
     fn value_literals_outside_the_flow() {
-        let e = subset("{:a 1}");
-        assert_eq!(e.form, "{:a 1}");
-        assert!(e.hint.contains("Int/Double/Bool/Str/Vector"), "{}", e.hint);
-        let e = subset(":kw");
-        assert_eq!(e.form, ":kw");
-        let e = subset("()");
-        assert_eq!(e.form, "()");
+        assert_eq!(
+            diag("{:a 1}"),
+            "f.clj:1:1: unsupported form in AOT subset: {:a 1} (only Int/Double/Bool/Str/Vector values flow)"
+        );
+        assert_eq!(
+            diag(":kw"),
+            "f.clj:1:1: unsupported form in AOT subset: :kw (only Int/Double/Bool/Str/Vector values flow)"
+        );
+        assert_eq!(
+            diag("()"),
+            "f.clj:1:1: unsupported form in AOT subset: () (lists are outside the value flow)"
+        );
     }
 
     #[test]
     fn bare_symbols_name_vars() {
-        let e = subset("(print map)");
-        assert_eq!(e.form, "map");
-        assert!(e.hint.contains("vars are outside"), "{}", e.hint);
-        let e = subset("(print clojure.core/map)");
-        assert_eq!(e.form, "clojure.core/map");
-        let e = subset("(defn f [a] a) (print f)");
-        assert_eq!(e.form, "f");
-        assert!(e.hint.contains("call it directly"), "{}", e.hint);
-        let e = subset("(defn f [a] a) (print user/f)");
-        assert_eq!(e.form, "user/f");
+        assert_eq!(
+            diag("(print map)"),
+            "f.clj:1:1: unsupported form in AOT subset: map (vars are outside the AOT subset)"
+        );
+        assert_eq!(
+            diag("(print clojure.core/map)"),
+            "f.clj:1:1: unsupported form in AOT subset: clojure.core/map (vars are outside the AOT subset)"
+        );
+        assert_eq!(
+            diag("(defn f [a] a) (print f)"),
+            "f.clj:1:16: unsupported form in AOT subset: f (function values are outside the subset; call it directly)"
+        );
+        assert_eq!(
+            diag("(defn f [a] a) (print user/f)"),
+            "f.clj:1:16: unsupported form in AOT subset: user/f (function values are outside the subset; call it directly)"
+        );
     }
 
     #[test]
     fn higher_order_calls_rejected() {
-        let e = subset("(let [f 1] (f 2))");
-        assert_eq!(e.form, "f");
-        let e = subset("([1 2] 0)");
-        assert_eq!(e.form, "[1 2]");
-        assert!(e.hint.contains("higher-order"), "{}", e.hint);
+        assert_eq!(
+            diag("(let [f 1] (f 2))"),
+            "f.clj:1:12: unsupported form in AOT subset: f (higher-order calls are outside the subset)"
+        );
+        assert_eq!(
+            diag("([1 2] 0)"),
+            "f.clj:1:1: unsupported form in AOT subset: [1 2] (higher-order calls are outside the subset)"
+        );
     }
 
     #[test]
@@ -1198,15 +1281,33 @@ mod tests {
         plan("(clojure.core/defn f [x] x)").expect("qualified defn");
         // A lone map body is a body form (rejected as a map
         // literal), not pre/post — which names `defn`.
-        let e = subset("(defn f [x] {:a 1})");
-        assert_eq!(e.form, "{:a 1}");
+        assert_eq!(
+            diag("(defn f [x] {:a 1})"),
+            "f.clj:1:1: unsupported form in AOT subset: {:a 1} (only Int/Double/Bool/Str/Vector values flow)"
+        );
+    }
+
+    #[test]
+    fn nested_do_sequences_in_expression_position() {
+        let body_ok = |program: &SubsetProgram| {
+            program.main.is_empty()
+                && program.fns.len() == 1
+                && program.fns[0].frame_slots == 1
+                && matches!(&program.fns[0].body, SubsetExpr::Do(outer)
+                    if matches!(outer.as_slice(), [SubsetExpr::Do(seq)] if seq.len() == 2))
+        };
+        assert!(matches!(plan("(defn f [x] (do (+ x 1) (* x 2)))"), Ok(p) if body_ok(&p)));
+        assert!(matches!(plan("(if true (do 1 2) 3)"), Ok(p)
+            if matches!(p.main.as_slice(), [SubsetExpr::If { then, .. }]
+                if matches!(**then, SubsetExpr::Do(_)))));
     }
 
     #[test]
     fn top_level_non_symbol_head_classifies_head_first() {
-        let e = subset("((fn [x] x) 1)");
-        assert_eq!(e.form, "fn");
-        assert_eq!(e.span, Span::new(1, 2));
+        assert_eq!(
+            diag("((fn [x] x) 1)"),
+            "f.clj:1:2: unsupported form in AOT subset: fn (only defn defines functions in the AOT subset)"
+        );
     }
 
     #[test]
@@ -1256,29 +1357,14 @@ mod tests {
 
     #[test]
     fn lift_and_diagnostic_cover_all_variants() {
-        match lift(SourceError::Internal("boom".to_owned())) {
-            PlanError::Internal(msg) => {
-                assert_eq!(
-                    PlanError::Internal(msg).diagnostic("f.clj"),
-                    "f.clj:1:1: internal error: boom"
-                );
-            }
-            other => panic!("want internal, got {other:?}"),
-        }
-        let mut eval = boot();
-        let Err(SourceError::Uncaught(t)) = eval.eval_source("(throw (ex-info \"x\" {}))") else {
-            panic!("want uncaught");
-        };
-        match lift(SourceError::Uncaught(t)) {
-            e @ PlanError::Uncaught(_) => {
-                assert!(
-                    e.diagnostic("f.clj").starts_with("f.clj:1:1: "),
-                    "{}",
-                    e.diagnostic("f.clj")
-                );
-            }
-            other => panic!("want uncaught, got {other:?}"),
-        }
+        assert!(matches!(
+            lift(SourceError::Internal("boom".to_owned())),
+            PlanError::Internal(_)
+        ));
+        assert_eq!(
+            PlanError::Internal("boom".to_owned()).diagnostic("f.clj"),
+            "f.clj:1:1: internal error: boom"
+        );
     }
 
     fn defn_items(parts: &[Value]) -> Vec<&Value> {
@@ -1352,15 +1438,11 @@ mod tests {
     fn classify_defn_rejects_non_list_and_malformed_directly() {
         let mut planner = Planner::new();
         let span = Span::new(3, 4);
-        match planner.classify_defn(&Value::Int(1), span) {
-            Err(PlanError::Subset(e)) => assert_eq!(e.span, span),
-            other => panic!("want subset, got {other:?}"),
-        }
+        let r = planner.classify_defn(&Value::Int(1), span);
+        assert!(matches!(&r, Err(PlanError::Subset(e)) if e.span == span));
         let form = Value::List(List::from_vec(vec![sym("defn"), Value::Int(1)]));
-        match planner.classify_defn(&form, span) {
-            Err(PlanError::Subset(e)) => assert_eq!(e.form, "defn"),
-            other => panic!("want subset, got {other:?}"),
-        }
+        let r = planner.classify_defn(&form, span);
+        assert!(matches!(&r, Err(PlanError::Subset(e)) if e.form == "defn"));
     }
 
     #[test]
@@ -1396,12 +1478,7 @@ mod tests {
         let qual = Value::Symbol(Symbol::new(Some("a"), "b"));
         let vec = Value::Vector(Vector::from_vec(vec![qual, Value::Int(1)]));
         let args = vec![&vec];
-        let e = planner
-            .classify_let(&args, &mut scope, &mut next, span)
-            .expect_err("qualified");
-        match e {
-            PlanError::Subset(e) => assert!(e.hint.contains("destructuring"), "{}", e.hint),
-            other => panic!("want subset, got {other:?}"),
-        }
+        let r = planner.classify_let(&args, &mut scope, &mut next, span);
+        assert!(matches!(&r, Err(PlanError::Subset(e)) if e.hint.contains("destructuring")));
     }
 }
