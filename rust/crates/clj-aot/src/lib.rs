@@ -26,6 +26,7 @@ pub mod lower;
 pub mod target;
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use clj_eval::plan_source;
 use inkwell::context::Context;
@@ -92,13 +93,18 @@ fn io_err(path: &Path, err: std::io::Error) -> CompileError {
     }
 }
 
-/// A unique temporary object path (removed after linking).
+/// A unique temporary object path (removed after linking). The
+/// counter — not the clock — makes it unique: parallel compiles
+/// in one process can share a timestamp tick on coarse clocks
+/// (macOS `build_exe` flake: one test linked another's `.o`).
 fn temp_obj_path() -> PathBuf {
+    static OBJ_SEQ: AtomicU64 = AtomicU64::new(0);
+    let seq = OBJ_SEQ.fetch_add(1, Ordering::Relaxed);
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    std::env::temp_dir().join(format!("clj-aot-{}-{nanos}.o", std::process::id()))
+    std::env::temp_dir().join(format!("clj-aot-{}-{seq}-{nanos}.o", std::process::id()))
 }
 
 /// Compile `source` (named `source_path` in spans) to the `out`
@@ -146,5 +152,25 @@ pub fn compile_file(
     match std::fs::read_to_string(path) {
         Ok(source) => compile_str(&source, &path.to_string_lossy(), out, emit, link),
         Err(e) => Err(io_err(path, e)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+    use std::thread;
+
+    use super::temp_obj_path;
+
+    #[test]
+    fn temp_obj_paths_are_unique_across_threads() {
+        let paths: Vec<_> = thread::scope(|s| {
+            (0..32)
+                .map(|_| s.spawn(temp_obj_path))
+                .map(|h| h.join().expect("thread panicked"))
+                .collect()
+        });
+        let uniq: HashSet<_> = paths.iter().collect();
+        assert_eq!(paths.len(), uniq.len(), "duplicate temp paths: {paths:?}");
     }
 }
