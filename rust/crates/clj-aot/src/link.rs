@@ -136,6 +136,13 @@ pub fn link_command(
                 "ws2_32.lib".to_owned(),
                 "bcrypt.lib".to_owned(),
                 "ntdll.lib".to_owned(),
+                // Static CRT trio (CI builds `+crt-static`, see
+                // setup-llvm): `memcpy`/`exit`/`mainCRTStartup`
+                // live in `libcmt`, the C++ EH + `__chkstk` in
+                // `libvcruntime`, the C library in `libucrt`.
+                "libcmt.lib".to_owned(),
+                "libvcruntime.lib".to_owned(),
+                "libucrt.lib".to_owned(),
             ],
         },
     }
@@ -313,6 +320,9 @@ mod tests {
                     "ws2_32.lib".to_owned(),
                     "bcrypt.lib".to_owned(),
                     "ntdll.lib".to_owned(),
+                    "libcmt.lib".to_owned(),
+                    "libvcruntime.lib".to_owned(),
+                    "libucrt.lib".to_owned(),
                 ],
             }
         );
