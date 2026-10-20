@@ -1,0 +1,1 @@
+docs/t1174/s8-corpus/08-err-count.clj:1:1: java.lang.UnsupportedOperationException: count not supported on this type: Long

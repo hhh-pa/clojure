@@ -1,0 +1,2 @@
+(ns foo)
+(print :n)

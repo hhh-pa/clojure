@@ -1,0 +1,8 @@
+(print "mark ")
+(print [(< 1 2 3) (<= 2 2 3) (> 3 2 1) (>= 3 3 2)])
+(print [(= 1 1) (= 1 1.0) (= "a" "a") (= [1 2] [1 2]) (= true true)])
+(print [(+ 1 0.5) (* 2 2.5) (quot 7.0 2.0) (= 0.1 0.1)])
+(print [(count "héllo") (count "a𝄞b") (count [1 2 3])])
+(print [(nth [10 20 30] 1) (get [10 20 30] 2) (get [1] 5 "nf")])
+(print [(conj [1 2] 3) (get [1] 5) (if (= 1 2) "x")])
+(print nil)

@@ -1,0 +1,6 @@
+(defn sq [x] (* x x))
+(defn sumsq [a b] (+ (sq a) (sq b)))
+(print "mark ")
+(print [(sumsq 3 4) (quot 7 3) (- 10 4 1)])
+(print (let [x 6] (do (+ x 1) (* x 2))))
+(print (if (= 1 2) "no" "yes"))

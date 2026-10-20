@@ -2,4 +2,5 @@
 # transcript suites assert exact stdout bytes, and CRLF checkouts on
 # Windows would otherwise break every comparison.
 docs/t1174/s7-corpus/** text eol=lf
+docs/t1174/s8-corpus/** text eol=lf
 rust/tests/fixtures/** text eol=lf
