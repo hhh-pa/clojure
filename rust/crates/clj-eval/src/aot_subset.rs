@@ -444,26 +444,7 @@ impl Planner {
             Value::Int(i) => Ok(SubsetExpr::Int(*i)),
             Value::Double(d) => Ok(SubsetExpr::Double(*d)),
             Value::Str(s) => Ok(SubsetExpr::Str(Arc::clone(s))),
-            Value::Symbol(sym) => {
-                let name = sym.name();
-                if let Some(slot) = scope.get(name) {
-                    return Ok(SubsetExpr::Local(slot));
-                }
-                if self.by_name.contains_key(name)
-                    && (sym.namespace().is_none() || sym.namespace() == Some("user"))
-                {
-                    return Err(PlanError::Subset(SubsetError {
-                        span: fallback,
-                        form: display_sym(sym),
-                        hint: "function values are outside the subset; call it directly".to_owned(),
-                    }));
-                }
-                Err(PlanError::Subset(SubsetError {
-                    span: fallback,
-                    form: display_sym(sym),
-                    hint: "vars are outside the AOT subset".to_owned(),
-                }))
-            }
+            Value::Symbol(sym) => self.classify_symbol(sym, scope, fallback),
             Value::List(list) => {
                 let span = span_of(form, fallback);
                 let items: Vec<&Value> = list.iter().collect();
@@ -500,6 +481,41 @@ impl Planner {
                 hint: "only Int/Double/Bool/Str/Vector values flow".to_owned(),
             })),
         }
+    }
+
+    /// Classify a bare symbol: a shadowing local (unqualified
+    /// reads only) flows its slot; a sibling name is a
+    /// function-value error; anything else names a var.
+    fn classify_symbol(
+        &self,
+        sym: &Symbol,
+        scope: &Scope,
+        fallback: Span,
+    ) -> Result<SubsetExpr, PlanError> {
+        let name = sym.name();
+        // Locals shadow unqualified symbols only (a qualified
+        // read is a var, never a local — R1 finding 3).
+        // (Match guard, not a let-chain: MSRV 1.85.)
+        match scope.get(name) {
+            Some(slot) if sym.namespace().is_none() => {
+                return Ok(SubsetExpr::Local(slot));
+            }
+            _ => {}
+        }
+        if self.by_name.contains_key(name)
+            && (sym.namespace().is_none() || sym.namespace() == Some("user"))
+        {
+            return Err(PlanError::Subset(SubsetError {
+                span: fallback,
+                form: display_sym(sym),
+                hint: "function values are outside the subset; call it directly".to_owned(),
+            }));
+        }
+        Err(PlanError::Subset(SubsetError {
+            span: fallback,
+            form: display_sym(sym),
+            hint: "vars are outside the AOT subset".to_owned(),
+        }))
     }
 
     /// Classify a list headed by a symbol.
@@ -1259,6 +1275,22 @@ mod tests {
         assert_eq!(
             diag("(defn f [a] a) (print user/f)"),
             "f.clj:1:16: unsupported form in AOT subset: user/f (function values are outside the subset; call it directly)"
+        );
+    }
+
+    #[test]
+    fn qualified_reads_ignore_shadowing_locals() {
+        // R1 finding 3: locals shadow unqualified symbols only —
+        // a qualified read under a same-named `let` is still the
+        // var, never the local (else `(let [+ 1] ...)` would
+        // silently miscompile `clojure.core/+` to `1`).
+        assert_eq!(
+            diag("(let [+ 1] (print clojure.core/+))"),
+            "f.clj:1:12: unsupported form in AOT subset: clojure.core/+ (vars are outside the AOT subset)"
+        );
+        assert_eq!(
+            diag("(defn v [a] a) (let [v 1] user/v)"),
+            "f.clj:1:16: unsupported form in AOT subset: user/v (function values are outside the subset; call it directly)"
         );
     }
 

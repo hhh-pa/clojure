@@ -416,13 +416,15 @@ fn build_directory_input_exits_3() {
 #[test]
 #[cfg(unix)]
 fn build_unreadable_input_exits_3() {
+    // A Unix socket exists and is not a dir, but can never be
+    // read — unlike chmod 000, this also holds for root (R1
+    // finding 5: CI containers run privileged).
     use std::ffi::OsStr;
-    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::net::UnixListener;
     let dir = build_tmp("unreadable");
     std::fs::create_dir_all(&dir).expect("tmp dir");
     let file = dir.join("dark.clj");
-    std::fs::write(&file, "(print :x)\n").expect("write source");
-    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+    let socket = UnixListener::bind(&file).expect("bind socket");
     let out = build_argv(&[
         OsStr::new("build"),
         file.as_os_str(),
@@ -432,7 +434,7 @@ fn build_unreadable_input_exits_3() {
     assert_eq!(out.status.code(), Some(3));
     let err = stderr(&out);
     assert!(err.contains("build: cannot open"), "{err}");
-    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).expect("restore");
+    drop(socket);
     std::fs::remove_dir_all(&dir).expect("cleanup");
 }
 

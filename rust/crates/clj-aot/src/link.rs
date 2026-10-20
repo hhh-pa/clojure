@@ -101,7 +101,10 @@ pub struct LinkCommand {
 }
 
 /// Build the link command (`cc` on Unix, `link` on Windows; the
-/// override names the linker program for tests).
+/// override names the linker program for tests). The Windows arm
+/// carries the system libs a Rust staticlib needs: `rustc` links
+/// these itself, but a raw `link` invocation does not (R1
+/// finding 4 — without them every `clj-rt` import is LNK2019).
 #[must_use]
 pub fn link_command(
     platform: Platform,
@@ -123,6 +126,13 @@ pub fn link_command(
                 exe(obj),
                 exe(archive),
                 format!("/OUT:{}", exe(out)),
+                "kernel32.lib".to_owned(),
+                "advapi32.lib".to_owned(),
+                "userenv.lib".to_owned(),
+                "ws2_32.lib".to_owned(),
+                "bcrypt.lib".to_owned(),
+                "bcryptprimitives.lib".to_owned(),
+                "ntdll.lib".to_owned(),
             ],
         },
     }
@@ -164,16 +174,24 @@ fn apply_macos_sdkroot(child: &mut Command) {
     }
 }
 
-/// Render a link failure: exit status plus the linker's stderr
-/// tail when it says anything (success stays silent, so build
-/// stderr pins clean).
+/// Render a link failure: exit status plus the linker's chatter
+/// when it says anything — stdout AND stderr, since MSVC `link`
+/// reports LNK errors on stdout while `cc` uses stderr (R1
+/// finding 7). Success stays silent, so build stderr pins clean.
 fn link_failure_text(linker: &str, out: &std::process::Output) -> String {
-    let trimmed = String::from_utf8_lossy(&out.stderr);
-    let trimmed = trimmed.trim();
-    if trimmed.is_empty() {
+    let mut chatter = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let stderr = stderr.trim();
+    if !stderr.is_empty() {
+        if !chatter.is_empty() {
+            chatter.push('\n');
+        }
+        chatter.push_str(stderr);
+    }
+    if chatter.is_empty() {
         format!("{linker} exited with {}", out.status)
     } else {
-        format!("{linker} exited with {}: {trimmed}", out.status)
+        format!("{linker} exited with {}: {chatter}", out.status)
     }
 }
 
@@ -285,7 +303,14 @@ mod tests {
                     "/NOLOGO".to_owned(),
                     "f.o".to_owned(),
                     "libcljrt.a".to_owned(),
-                    "/OUT:f".to_owned()
+                    "/OUT:f".to_owned(),
+                    "kernel32.lib".to_owned(),
+                    "advapi32.lib".to_owned(),
+                    "userenv.lib".to_owned(),
+                    "ws2_32.lib".to_owned(),
+                    "bcrypt.lib".to_owned(),
+                    "bcryptprimitives.lib".to_owned(),
+                    "ntdll.lib".to_owned(),
                 ],
             }
         );
@@ -352,6 +377,38 @@ mod tests {
         };
         let text = format!("{}", run_link(&noisy).expect_err("noisy linker"));
         assert!(text.contains("oops"), "{text}");
+        // Stdout chatter counts too (MSVC `link` reports there),
+        // alone and joined with stderr.
+        #[cfg(unix)]
+        let (out_only, both) = (
+            LinkCommand {
+                linker: "sh".to_owned(),
+                args: vec!["-c".to_owned(), "echo oops; exit 3".to_owned()],
+            },
+            LinkCommand {
+                linker: "sh".to_owned(),
+                args: vec!["-c".to_owned(), "echo out; echo err >&2; exit 3".to_owned()],
+            },
+        );
+        #[cfg(windows)]
+        let (out_only, both) = (
+            LinkCommand {
+                linker: "cmd".to_owned(),
+                args: vec!["/c".to_owned(), "echo oops & exit 3".to_owned()],
+            },
+            LinkCommand {
+                linker: "cmd".to_owned(),
+                args: vec![
+                    "/c".to_owned(),
+                    "echo out & echo err 1>&2 & exit 3".to_owned(),
+                ],
+            },
+        );
+        let text = format!("{}", run_link(&out_only).expect_err("stdout linker"));
+        assert!(text.contains("oops"), "{text}");
+        let text = format!("{}", run_link(&both).expect_err("both-stream linker"));
+        assert!(text.contains("out"), "{text}");
+        assert!(text.contains("err"), "{text}");
         let missing = LinkCommand {
             linker: "clj-aot-definitely-not-a-linker".to_owned(),
             args: Vec::new(),

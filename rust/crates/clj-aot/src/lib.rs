@@ -15,6 +15,12 @@
 //! linking (hermetic, linker-less); otherwise a temporary object
 //! links and is removed.
 
+// The FFI declarations assume 64-bit `usize` (R1 finding 8): a
+// 32-bit host would silently miscompile, so refuse to build one
+// (a compile-time gate costs no coverage lines).
+#[cfg(not(target_pointer_width = "64"))]
+compile_error!("clj-aot requires a 64-bit host (usize FFI widths)");
+
 pub mod link;
 pub mod lower;
 pub mod target;
@@ -25,15 +31,6 @@ use clj_eval::plan_source;
 use inkwell::context::Context;
 
 use link::{LinkError, current_platform, find_archive, link_command, run_link};
-
-/// Probe that the LLVM backend is linked: build an empty module and
-/// render its IR. The `llvm22-1` feature guarantees the LLVM major.
-#[must_use]
-pub fn probe_ir() -> String {
-    let context = Context::create();
-    let module = context.create_module("probe");
-    module.print_to_string().to_string()
-}
 
 /// Emit options: `--emit-ir` / `--emit-obj` paths (either one skips
 /// linking; both write and skip).
@@ -149,16 +146,5 @@ pub fn compile_file(
     match std::fs::read_to_string(path) {
         Ok(source) => compile_str(&source, &path.to_string_lossy(), out, emit, link),
         Err(e) => Err(io_err(path, e)),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::probe_ir;
-
-    #[test]
-    fn probe_renders_module_ir() {
-        let ir = probe_ir();
-        assert!(ir.contains("ModuleID"), "{ir}");
     }
 }

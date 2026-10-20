@@ -1,4 +1,4 @@
 {
-  "_comment": "cargo-geiger baseline (T1174): total unsafe items/expressions summed over workspace crates (used + unused). CI fails when the total grows; lower it when unsafe is removed.",
-  "unsafe_total": 88
+  "_comment": "cargo-geiger baseline (T1174): total unsafe items/expressions summed over workspace crates (used + unused). CI fails when the total grows; lower it when unsafe is removed. NOTE: cargo-geiger folds dependency unsafe into the binary package's entry, so the tool's total is clj-rt 77 + clj-aot 11 + clojure-rs rollup 88 = 176 (R1 finding 2); own-counts are unchanged.",
+  "unsafe_total": 176
 }

@@ -198,15 +198,16 @@ fn error_programs_pin_the_aot_abort() {
         let (run_out, run_err, run_code) = run_file(&path);
         assert_eq!(run_code, 1, "{stem}: run exit");
         assert_eq!(run_out, golden, "{stem}: run stdout vs golden");
-        // The `.runerr` golden pins the relative-path stderr shape;
-        // the replayed stderr differs only in the absolute path.
-        let run_shape = String::from_utf8_lossy(&run_err);
-        let golden_shape = String::from_utf8_lossy(&runerr);
-        assert_eq!(
-            run_shape.rsplit_once('/').map(|(_, tail)| tail),
-            golden_shape.rsplit_once('/').map(|(_, tail)| tail),
-            "{stem}: run stderr shape"
-        );
+        // The `.runerr` golden pins the class/message after its
+        // relative-path prefix; the replayed stderr carries the
+        // same text after the absolute replay path (split at the
+        // span, never at `/` — Windows paths are backslashed).
+        let golden_text = lossy(&runerr);
+        let (_, run_message) = golden_text
+            .split_once(":1:1: ")
+            .expect("runerr golden shape");
+        let want = format!("{}:1:1: {run_message}", path.display());
+        assert_eq!(lossy(&run_err), want, "{stem}: run stderr");
         let (build_code, build_err, exe_out, exe_err, exe_code) = build_and_run(stem, &path);
         assert_eq!(build_code, 0, "{stem}: build exit, stderr: {build_err:?}");
         assert_eq!(exe_code, 1, "{stem}: exe exit");

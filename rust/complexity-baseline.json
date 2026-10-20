@@ -171,13 +171,6 @@
   },
   {
    "file": "crates/clj-eval/src/aot_subset.rs",
-   "function": "Planner::classify_expr",
-   "cyclomatic": 17.0,
-   "cognitive": 11.0,
-   "justification": "S8A: one arm per value form; delegates to per-form classifiers"
-  },
-  {
-   "file": "crates/clj-eval/src/aot_subset.rs",
    "function": "Prim::resolve",
    "cyclomatic": 17.0,
    "cognitive": 2.0,

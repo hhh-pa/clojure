@@ -84,8 +84,13 @@ pub(crate) fn call_prim(index: usize, args: Vec<Value>) -> Result<Value, NativeE
 
 /// Run a native call, converting a panic (an internal bug — the
 /// subset natives return [`NativeError`], never panic) into a
-/// `java.lang.Error` so no unwinding ever crosses the FFI
+/// `java.lang.Error` so native unwinding never crosses the FFI
 /// boundary; the shim prints it and returns null like any error.
+/// (Two impossible-by-construction paths still could: a
+/// `LazyLock`-init panic on boot failure, or a `prims[index]`
+/// OOB panic on a bad codegen index. Both fail stop — boot is
+/// smoke-pinned, indices are macro literals — so no silent
+/// wrong-code hides behind them. R1 finding 9.)
 pub(crate) fn catch_panic(
     call: AssertUnwindSafe<impl FnOnce() -> Result<Value, NativeError>>,
 ) -> Result<Value, NativeError> {
