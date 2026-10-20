@@ -225,8 +225,18 @@ fn push_symbol_names<'a>(
 /// a repl). Read once at startup; later `def`s complete next time.
 /// (`keys` returns a lazy seq, so the query pours it into a vector
 /// first — the driver only collects strict lists/vectors.)
-pub fn core_names(eval: &mut clj_eval::Evaluator) -> Vec<String> {
+/// Push the symbol names carried by one vocabulary value (the fixed
+/// query yields a vector; a list would contribute its symbols too).
+fn push_value_names(names: &mut Vec<String>, value: &clj_value::Value) {
     use clj_value::Value;
+    match value {
+        Value::List(items) => push_symbol_names(names, items.iter()),
+        Value::Vector(items) => push_symbol_names(names, items.iter()),
+        _ => {}
+    }
+}
+
+pub fn core_names(eval: &mut clj_eval::Evaluator) -> Vec<String> {
     let mut names = vec![
         "*1".to_owned(),
         "*2".to_owned(),
@@ -236,11 +246,7 @@ pub fn core_names(eval: &mut clj_eval::Evaluator) -> Vec<String> {
     let listed = eval.eval_source("(into [] (keys (ns-publics 'clojure.core)))");
     if let Ok(values) = listed {
         for value in values {
-            match &value {
-                Value::List(items) => push_symbol_names(&mut names, items.iter()),
-                Value::Vector(items) => push_symbol_names(&mut names, items.iter()),
-                _ => {}
-            }
+            push_value_names(&mut names, &value);
         }
     }
     names.sort();
@@ -298,13 +304,22 @@ impl Hinter for ReplHelper {
 
 impl Highlighter for ReplHelper {}
 
+/// The validation verdict for a completeness probe (complete input
+/// submits; anything else continues the form).
+fn validation_outcome(complete: bool) -> ValidationResult {
+    if complete {
+        ValidationResult::Valid(None)
+    } else {
+        ValidationResult::Incomplete
+    }
+}
+
 impl Validator for ReplHelper {
     fn validate(&self, ctx: &mut ValidationContext) -> rustyline::Result<ValidationResult> {
-        if self.is_complete(ctx.input()) {
-            Ok(ValidationResult::Valid(None))
-        } else {
-            Ok(ValidationResult::Incomplete)
-        }
+        // `ValidationContext::new` is `pub(crate)` in rustyline, so no
+        // headless test can invoke this; the mapping above is pinned
+        // directly.
+        Ok(validation_outcome(self.is_complete(ctx.input())))
     }
 }
 
@@ -322,10 +337,8 @@ impl Helper for ReplHelper {}
 /// `USERPROFILE` on Windows; empty counts as missing).
 fn home_dir() -> Option<PathBuf> {
     let home = env::var_os("HOME").or_else(|| env::var_os("USERPROFILE"))?;
-    if home.is_empty() {
-        return None;
-    }
-    Some(PathBuf::from(home))
+    // An empty variable counts as missing.
+    (!home.is_empty()).then(|| PathBuf::from(home))
 }
 
 pub fn default_history_path() -> Option<PathBuf> {
@@ -341,10 +354,9 @@ fn expand_tilde(path: &Path) -> PathBuf {
     }
     let text = path.to_string_lossy();
     match text.strip_prefix("~/") {
-        Some(rest) => match home_dir() {
-            Some(home) => home.join(rest),
-            None => path.to_owned(),
-        },
+        Some(rest) => home_dir()
+            .map(|home| home.join(rest))
+            .unwrap_or_else(|| path.to_owned()),
         None => path.to_owned(),
     }
 }
@@ -439,14 +451,20 @@ impl RustyLineSource {
     }
 }
 
+/// Map a rustyline result to a [`ReadOutcome`] (EOF and interrupts
+/// are control; anything else is an input error).
+fn read_outcome(result: rustyline::Result<String>) -> ReadOutcome {
+    match result {
+        Ok(line) => ReadOutcome::Line(line),
+        Err(ReadlineError::Eof) => ReadOutcome::Eof,
+        Err(ReadlineError::Interrupted) => ReadOutcome::Interrupted,
+        Err(other) => ReadOutcome::Error(other.to_string()),
+    }
+}
+
 impl LineSource for RustyLineSource {
     fn readline(&mut self, prompt: &str) -> ReadOutcome {
-        match self.editor.readline(prompt) {
-            Ok(line) => ReadOutcome::Line(line),
-            Err(ReadlineError::Eof) => ReadOutcome::Eof,
-            Err(ReadlineError::Interrupted) => ReadOutcome::Interrupted,
-            Err(other) => ReadOutcome::Error(other.to_string()),
-        }
+        read_outcome(self.editor.readline(prompt))
     }
 
     fn is_complete(&self, input: &str) -> bool {
@@ -587,4 +605,62 @@ impl<S: LineSource> TtyEditor<S> {
 
 fn warn_history(what: &str, path: &Path, msg: &str) {
     eprintln!("clojure-rs: warning: {what} {}: {msg}", path.display());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn push_value_names_classifies_shapes() {
+        use clj_value::{List, Symbol, Value, Vector};
+        let mut names = Vec::new();
+        // Vectors contribute their symbols, skipping the rest.
+        push_value_names(
+            &mut names,
+            &Value::Vector(Vector::from_vec(vec![
+                Value::Symbol(Symbol::new(None, "a")),
+                Value::Int(1),
+            ])),
+        );
+        assert_eq!(names, vec!["a".to_owned()]);
+        // Lists contribute too.
+        push_value_names(
+            &mut names,
+            &Value::List(List::from_vec(vec![Value::Symbol(Symbol::new(None, "b"))])),
+        );
+        assert_eq!(names, vec!["a".to_owned(), "b".to_owned()]);
+        // Anything else contributes nothing.
+        push_value_names(&mut names, &Value::Int(1));
+        assert_eq!(names, vec!["a".to_owned(), "b".to_owned()]);
+    }
+
+    #[test]
+    fn read_outcome_maps_every_result() {
+        assert_eq!(
+            read_outcome(Ok("hi".to_owned())),
+            ReadOutcome::Line("hi".to_owned())
+        );
+        assert_eq!(read_outcome(Err(ReadlineError::Eof)), ReadOutcome::Eof);
+        assert_eq!(
+            read_outcome(Err(ReadlineError::Interrupted)),
+            ReadOutcome::Interrupted
+        );
+        assert_eq!(
+            read_outcome(Err(ReadlineError::Io(std::io::Error::other("boom")))),
+            ReadOutcome::Error("boom".to_owned())
+        );
+    }
+
+    #[test]
+    fn validation_outcome_splits_complete_and_partial() {
+        assert!(matches!(
+            validation_outcome(true),
+            ValidationResult::Valid(None)
+        ));
+        assert!(matches!(
+            validation_outcome(false),
+            ValidationResult::Incomplete
+        ));
+    }
 }

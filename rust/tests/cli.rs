@@ -620,3 +620,32 @@ fn build_reports_unlinked_llvm() {
     assert!(stderr(&out).contains("LLVM backend not linked"));
     std::fs::remove_dir_all(&dir).expect("cleanup");
 }
+
+#[test]
+fn eval_lazy_print_failure_reports_simply() {
+    // `map` is lazy, so eval succeeds and the divide-by-zero
+    // surfaces at print time with the SIMPLE class.
+    let out = run(["eval", "(map (fn [_] (/ 1 0)) [1])"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(stdout(&out), "");
+    assert_eq!(
+        stderr(&out),
+        "<eval>:1:1: ArithmeticException: Divide by zero\n"
+    );
+}
+
+#[test]
+fn eval_bad_print_binding_reports_cast() {
+    // A non-numeric `*print-length*` root fails option loading
+    // with the verbatim CCE text.
+    let out = run([
+        "eval",
+        "(alter-var-root #'*print-length* (constantly \"x\"))",
+    ]);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(stdout(&out), "");
+    assert_eq!(
+        stderr(&out),
+        "<eval>:1:1: ClassCastException: class java.lang.String cannot be cast to class java.lang.Number (java.lang.String and java.lang.Number are in module java.base of loader 'bootstrap')\n"
+    );
+}

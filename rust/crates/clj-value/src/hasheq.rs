@@ -713,6 +713,15 @@ mod tests {
     }
 
     #[test]
+    fn multichar_names_hash_murmur_pairs() {
+        // Multi-unit names run the pair loop in `hash_unencoded_chars`
+        // (oracled `(hash :ab)`, `(hash 'ab)`, `(hash :abc)`).
+        assert_eq!(hasheq(&kw(None, "ab")), -839573926);
+        assert_eq!(hasheq(&sym(None, "ab")), 800957601);
+        assert_eq!(hasheq(&kw(None, "abc")), -1232035677);
+    }
+
+    #[test]
     fn map_entry_hashes_as_ordered_pair() {
         // `AMapEntry extends APersistentVector`: `{:a 1}` mixes the
         // single entry vector `[k v]` through the unordered path.
@@ -783,13 +792,11 @@ mod tests {
         assert_eq!(hasheq(&throwable), 42);
         assert_eq!(hash_code(&throwable), 42);
 
-        let transient_ = Value::Transient(Transient::new(TransientKind::Vector(
-            TransientVector::new(),
-        )));
-        let Value::Transient(t) = &transient_ else {
-            unreachable!("just constructed");
-        };
+        // Bind before wrapping: no destructure, no dead fallback
+        // (100% line gate counts test lines too).
+        let t = Transient::new(TransientKind::Vector(TransientVector::new()));
         let id = t.id();
+        let transient_ = Value::Transient(t);
         let want = (id ^ (id >> 32)) as i32;
         assert_eq!(hasheq(&transient_), want);
         assert_eq!(hash_code(&transient_), want);
@@ -820,6 +827,20 @@ mod tests {
         let v = Value::Extension(Arc::new(Opaque));
         assert_eq!(hasheq(&v), UNREALIZED_EXTENSION_HASH);
         assert_eq!(hash_code(&v), UNREALIZED_EXTENSION_HASH);
+        // The stub's own trait methods (hashing only reaches `as_any`).
+        use crate::ExtensionValue;
+        let o = Opaque;
+        assert_eq!(o.class_name(), "Opaque");
+        assert_eq!(o.print(), "Opaque");
+        assert!(!o.dyn_eq(&o));
+        let mut h1 = std::collections::hash_map::DefaultHasher::new();
+        o.dyn_hash(&mut h1);
+        let mut h2 = std::collections::hash_map::DefaultHasher::new();
+        o.dyn_hash(&mut h2);
+        assert_eq!(
+            std::hash::Hasher::finish(&h1),
+            std::hash::Hasher::finish(&h2)
+        );
     }
 
     #[test]
@@ -830,5 +851,104 @@ mod tests {
         assert_eq!(str_hashcode("a\nb"), 0x16db9);
         assert_eq!(str_hashcode("é"), 0xe9);
         assert_eq!(str_hashcode("😀"), 0x1b_0d63);
+    }
+
+    #[test]
+    fn future_and_promise_hash_from_id() {
+        use crate::{Future, Promise};
+        let f = Future::new();
+        let want = (f.id() ^ (f.id() >> 32)) as i32;
+        let v = Value::Future(f);
+        assert_eq!(hasheq(&v), want);
+        assert_eq!(hash_code(&v), want);
+        let p = Promise::new();
+        let want = (p.id() ^ (p.id() >> 32)) as i32;
+        let v = Value::Promise(p);
+        assert_eq!(hasheq(&v), want);
+        assert_eq!(hash_code(&v), want);
+    }
+
+    #[test]
+    fn atom_delay_agent_hash_from_id() {
+        use crate::{Agent, Atom, Delay};
+        let a = Atom::new(int(0));
+        let want = (a.id() ^ (a.id() >> 32)) as i32;
+        let v = Value::Atom(a);
+        assert_eq!(hasheq(&v), want);
+        assert_eq!(hash_code(&v), want);
+        let d = Delay::new(int(0));
+        let want = (d.id() ^ (d.id() >> 32)) as i32;
+        let v = Value::Delay(d);
+        assert_eq!(hasheq(&v), want);
+        assert_eq!(hash_code(&v), want);
+        let g = Agent::new(int(0));
+        let want = (g.id() ^ (g.id() >> 32)) as i32;
+        let v = Value::Agent(g);
+        assert_eq!(hasheq(&v), want);
+        assert_eq!(hash_code(&v), want);
+    }
+
+    #[test]
+    fn seq_hash_unsupported_inside_sets() {
+        use crate::RepeatValue;
+        // Set members hash at insertion, so a set can only hold
+        // supported members: the traversal always answers false
+        // (an unbounded member would hang construction itself).
+        let rep = Value::Extension(Arc::new(RepeatValue::new(int(1), Some(2))));
+        assert!(!seq_hash_unsupported(&setv(vec![int(1), rep])));
+        assert!(!seq_hash_unsupported(&setv(vec![int(1), int(2)])));
+    }
+
+    #[test]
+    fn seq_hash_unsupported_ranges() {
+        use crate::{RangeNum, RangeValue};
+        let open = RangeValue::new(RangeNum::Int(0), None, RangeNum::Int(1), true, None);
+        assert!(seq_hash_unsupported(&Value::Extension(Arc::new(open))));
+        let zero_int = RangeValue::new(
+            RangeNum::Int(0),
+            Some(RangeNum::Int(10)),
+            RangeNum::Int(0),
+            true,
+            Some(3),
+        );
+        assert!(seq_hash_unsupported(&Value::Extension(Arc::new(zero_int))));
+        let zero_dbl = RangeValue::new(
+            RangeNum::Double(0.0),
+            Some(RangeNum::Double(1.0)),
+            RangeNum::Double(0.0),
+            false,
+            None,
+        );
+        assert!(seq_hash_unsupported(&Value::Extension(Arc::new(zero_dbl))));
+        let finite = RangeValue::new(
+            RangeNum::Int(0),
+            Some(RangeNum::Int(3)),
+            RangeNum::Int(1),
+            true,
+            Some(3),
+        );
+        assert!(!seq_hash_unsupported(&Value::Extension(Arc::new(finite))));
+    }
+
+    #[test]
+    fn subvector_hashes_as_sequential() {
+        use crate::SubVectorValue;
+        let backing = Vector::from_vec(vec![int(1), int(2), strv("x")]);
+        let sv = Value::Extension(Arc::new(SubVectorValue::new(backing, 1, 3)));
+        let expect = listv(vec![int(2), strv("x")]);
+        assert_eq!(hasheq(&sv), hasheq(&expect));
+        assert_eq!(hash_code(&sv), hash_code(&expect));
+    }
+
+    #[test]
+    fn empty_string_takes_hash_int_fast_path() {
+        assert_eq!(str_hashcode(""), 0);
+        assert_eq!(hasheq(&strv("")), 0);
+    }
+
+    #[test]
+    fn str_murmur_is_order_sensitive() {
+        assert_ne!(hasheq(&strv("ab")), hasheq(&strv("ba")));
+        assert_ne!(hasheq(&strv("abcd")), hasheq(&strv("abdc")));
     }
 }

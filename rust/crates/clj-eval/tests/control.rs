@@ -931,3 +931,187 @@ fn core_self_calls_survive_shadow() {
         ":else"
     );
 }
+
+#[test]
+fn core_r4_trampoline_callee() {
+    let mut eval = boot();
+    // nil callee: the stable port text (contract-pinned).
+    assert_eq!(
+        uncaught(&mut eval, "(trampoline nil)"),
+        "java.lang.NullPointerException | Cannot invoke nil as a function"
+    );
+    // Non-`IFn` callee: the `IFn` cast failure (oracle-agreeing).
+    assert_eq!(
+        uncaught(&mut eval, "(trampoline 5)"),
+        "java.lang.ClassCastException | class java.lang.Long cannot be cast to class clojure.lang.IFn (java.lang.Long is in module java.base of loader 'bootstrap'; clojure.lang.IFn is in unnamed module of loader 'app')"
+    );
+}
+
+#[test]
+fn core_r4_ex_info_rows() {
+    let mut eval = boot();
+    assert_eq!(
+        uncaught(&mut eval, "(ex-info \"m\")"),
+        "clojure.lang.ArityException | Wrong number of args (1) passed to: clojure.core/ex-info"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(ex-info 5 {})"),
+        "java.lang.ClassCastException | class java.lang.Long cannot be cast to class java.lang.String (java.lang.Long and java.lang.String are in module java.base of loader 'bootstrap')"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(ex-info \"m\" 5)"),
+        "java.lang.ClassCastException | class java.lang.Long cannot be cast to class clojure.lang.IPersistentMap (java.lang.Long is in module java.base of loader 'bootstrap'; clojure.lang.IPersistentMap is in unnamed module of loader 'app')"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(ex-cause (ex-info \"m\" {} nil))"),
+        "nil"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(ex-message (ex-cause (ex-info \"m\" {} (ex-info \"c\" {}))))"
+        ),
+        "\"c\""
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(ex-info \"m\" {} 5)"),
+        "java.lang.ClassCastException | class java.lang.Long cannot be cast to class java.lang.Throwable (java.lang.Long and java.lang.Throwable are in module java.base of loader 'bootstrap')"
+    );
+    // Non-throwables project to nil.
+    assert_eq!(run_last(&mut eval, "(ex-data nil)"), "nil");
+    assert_eq!(run_last(&mut eval, "(ex-message 5)"), "nil");
+    assert_eq!(run_last(&mut eval, "(ex-cause \"s\")"), "nil");
+}
+
+#[test]
+fn core_r4_trampoline_arity() {
+    let mut eval = boot();
+    assert_eq!(
+        uncaught(&mut eval, "(trampoline)"),
+        "clojure.lang.ArityException | Wrong number of args (0) passed to: clojure.core/trampoline"
+    );
+}
+
+#[test]
+fn core_r4_hash_post_realize_uoe() {
+    let mut eval = boot();
+    // The infinite hides behind a pending `map`: the pre-realize
+    // check passes, the post-realize check throws (oracle: bare UOE).
+    assert_eq!(
+        uncaught(&mut eval, "(hash (map identity [(repeat 1)]))"),
+        "java.lang.UnsupportedOperationException | "
+    );
+    // (`hash-code` is private — its identical post-check is pinned
+    // by the `hash_code_post_realize_uoe` unit test in core.rs.)
+}
+
+#[test]
+fn core_r4_clojure_version() {
+    let mut eval = boot();
+    // Port release literal (deliberately NOT the JVM version).
+    assert_eq!(run_last(&mut eval, "(clojure-version)"), "\"0.1.0\"");
+}
+
+#[test]
+fn ext_identity_eq_hash_rows() {
+    let mut eval = boot();
+    // Functions compare by identity.
+    assert_eq!(run_last(&mut eval, "(let [f (fn [x] x)] (= f f))"), "true");
+    assert_eq!(run_last(&mut eval, "(= (fn [x] x) (fn [x] x))"), "false");
+    assert_eq!(run_last(&mut eval, "(= (fn [x] x) *ns*)"), "false");
+    assert_eq!(run_last(&mut eval, "(= + +)"), "true");
+    assert_eq!(run_last(&mut eval, "(= + -)"), "false");
+    assert_eq!(run_last(&mut eval, "(= + (fn [x] x))"), "false");
+    // Namespaces compare by identity.
+    assert_eq!(run_last(&mut eval, "(= *ns* *ns*)"), "true");
+    assert_eq!(run_last(&mut eval, "(= *ns* (fn [x] x))"), "false");
+    // Hashing is identity-consistent (`hasheq` by id; the std
+    // `Hash` impl routes through `dyn_hash`, pinned by
+    // `ext_transient_keys_hash_by_id`).
+    assert_eq!(
+        run_last(&mut eval, "(let [f (fn [x] x)] (= (hash f) (hash f)))"),
+        "true"
+    );
+    assert_eq!(run_last(&mut eval, "(= (hash +) (hash +))"), "true");
+    assert_eq!(run_last(&mut eval, "(= (hash *ns*) (hash *ns*))"), "true");
+    assert_eq!(
+        run_last(&mut eval, "(let [f (fn [x] x)] (get {f 42} f))"),
+        "42"
+    );
+}
+
+#[test]
+fn ext_transient_keys_hash_by_id() {
+    let mut eval = boot();
+    // Transient maps std-hash their keys, routing extensions
+    // through `dyn_hash` (identity): round-trips hit.
+    assert_eq!(
+        run_last(&mut eval, "(get (assoc! (transient {}) + 1) +)"),
+        "1"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [f (fn [x] x)] (get (assoc! (transient {}) f 1) f))"
+        ),
+        "1"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(get (assoc! (transient {}) *ns* 1) *ns*)"),
+        "1"
+    );
+}
+
+#[test]
+fn case_hash_unbounded_seq_throws() {
+    let mut eval = boot();
+    // Hash dispatch over an open range is bare UOE (`nil`
+    // message ⟺ port `String::new()`).
+    assert_eq!(
+        uncaught(&mut eval, "(case (range) :a 1 :b)"),
+        "java.lang.UnsupportedOperationException | "
+    );
+    // ... nested in a realized collection too.
+    assert_eq!(
+        uncaught(&mut eval, "(case [(range)] :a 1 :b)"),
+        "java.lang.UnsupportedOperationException | "
+    );
+    // ... and behind a pending `map`, where only the
+    // post-realize check fires (the pre-realize check passes;
+    // `realize_deep` returns early via its hash guard instead
+    // of hanging).
+    assert_eq!(
+        uncaught(&mut eval, "(case (map identity [(repeat 1)]) :a 1 :b)"),
+        "java.lang.UnsupportedOperationException | "
+    );
+}
+
+#[test]
+fn case_star_shift_mask_dispatch() {
+    let mut eval = boot();
+    // The oracle's own emission for `(case x 1 :a :b :c :d)`,
+    // evaluated verbatim. Depends on `hasheq` parity with the
+    // JVM (pinned by the `hash` tests): `hash(1) & 1 == 1`,
+    // `hash(:b) & 1 == 0`.
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [G__181 1] (case* G__181 0 1 :d {0 [:b :c] 1 [1 :a]} :compact :hash-equiv nil))"
+        ),
+        ":a"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [G__181 :b] (case* G__181 0 1 :d {0 [:b :c] 1 [1 :a]} :compact :hash-equiv nil))"
+        ),
+        ":c"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [G__181 :zzz] (case* G__181 0 1 :d {0 [:b :c] 1 [1 :a]} :compact :hash-equiv nil))"
+        ),
+        ":d"
+    );
+}

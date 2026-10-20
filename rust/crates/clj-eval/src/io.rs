@@ -382,3 +382,42 @@ pub(crate) const IO_NATIVES: &[(&str, NativeFnPtr)] = &[
     ("spit", native_spit),
     ("read-string", native_read_string),
 ];
+
+#[cfg(test)]
+mod tests {
+    use std::io::Error;
+
+    use super::*;
+
+    #[test]
+    fn writer_contents_non_buffer_is_none() {
+        // Process writers carry no accumulated contents.
+        let stdout = Value::Extension(Arc::new(Writer {
+            id: 0,
+            kind: WriterKind::Stdout,
+        }));
+        assert_eq!(writer_contents(&stdout), None);
+        let stderr = Value::Extension(Arc::new(Writer {
+            id: 1,
+            kind: WriterKind::Stderr,
+        }));
+        assert_eq!(writer_contents(&stderr), None);
+    }
+
+    #[test]
+    fn io_err_carries_os_message() {
+        // Any IO failure formats as an IOException (a real failing
+        // stdout write is not inducible in-process, so the
+        // constructor is covered directly).
+        let err = io_err(Error::other("boom"));
+        assert_eq!(err.class, ThrowClass::IOException);
+        assert_eq!(err.message, "boom");
+    }
+
+    #[test]
+    fn strerror_keeps_suffixless_messages() {
+        // Custom errors carry no ` (os error N)` suffix to strip.
+        let custom = Error::other("custom");
+        assert_eq!(strerror(&custom), "custom");
+    }
+}

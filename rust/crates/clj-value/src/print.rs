@@ -967,4 +967,174 @@ mod tests {
         let v = Value::Vector(crate::Vector::from_vec(vec![Value::Int(1)]));
         assert_eq!(java_debug(&v), "[1]");
     }
+
+    #[test]
+    fn print_alias_matches_pr_to_string() {
+        use super::print;
+        let v = Value::Vector(crate::Vector::from_vec(vec![Value::Int(1)]));
+        assert_eq!(print(&v, &PrintOpts::pr()), pr(&v));
+        assert_eq!(print(&v, &PrintOpts::print()), print_to_string(&v));
+    }
+
+    #[test]
+    fn transient_prints_object_form() {
+        use crate::{Transient, TransientKind, TransientVector};
+        let t = Transient::new(TransientKind::Vector(TransientVector::new()));
+        let id = t.id();
+        let class = "clojure.lang.PersistentVector$TransientVector";
+        assert_eq!(
+            pr(&Value::Transient(t)),
+            format!("#object[{class} 0x{id:x} \"{class}@{id:x}\"]")
+        );
+    }
+
+    #[test]
+    fn throwable_without_messages_prints_nils() {
+        use crate::{ThrowClass, Throwable};
+        let t = Value::Throwable(Throwable {
+            id: 1,
+            class: ThrowClass::Exception,
+            message: None,
+            data: None,
+            cause: None,
+        });
+        assert_eq!(
+            pr(&t),
+            "#error {:cause nil :data nil :via [{:type java.lang.Exception :message nil}] :trace []}"
+        );
+        let inner = Throwable {
+            id: 2,
+            class: ThrowClass::RuntimeException,
+            message: None,
+            data: None,
+            cause: None,
+        };
+        let outer = Value::Throwable(Throwable {
+            id: 1,
+            class: ThrowClass::Exception,
+            message: Some(Arc::from("top")),
+            data: None,
+            cause: Some(Box::new(inner)),
+        });
+        assert_eq!(
+            pr(&outer),
+            "#error {:cause \"top\" :data nil :via [{:type java.lang.Exception :message \"top\"} {:type java.lang.RuntimeException :message nil}] :trace []}"
+        );
+    }
+
+    #[test]
+    fn future_and_promise_meta_prefix() {
+        use crate::{Future, Promise};
+        let meta =
+            crate::new_map().insert(Value::Keyword(Keyword::new(None, "k")), Value::Bool(true));
+        let opts = PrintOpts {
+            meta: true,
+            ..PrintOpts::pr()
+        };
+        let class = "clojure.core$future_call$reify";
+        let f = Future::new().with_meta(Some(meta.clone()));
+        let id = f.id();
+        assert_eq!(
+            pr_to_string(&Value::Future(f), &opts),
+            format!("^{{:k true}} #object[{class} 0x{id:x} \"{class}@{id:x}\"]")
+        );
+        let class = "clojure.core$promise$reify";
+        let p = Promise::new().with_meta(Some(meta));
+        let id = p.id();
+        assert_eq!(
+            pr_to_string(&Value::Promise(p), &opts),
+            format!("^{{:k true}} #object[{class} 0x{id:x} \"{class}@{id:x}\"]")
+        );
+    }
+
+    #[test]
+    fn empty_meta_prints_no_prefix() {
+        let v = Value::Vector(crate::Vector::from_vec(vec![Value::Int(1)]))
+            .with_meta(Some(crate::new_map()));
+        let opts = PrintOpts {
+            meta: true,
+            ..PrintOpts::pr()
+        };
+        assert_eq!(pr_to_string(&v, &opts), "[1]");
+    }
+
+    #[test]
+    fn map_level_truncation() {
+        let m = Value::Map(
+            crate::new_map().insert(Value::Keyword(Keyword::new(None, "a")), Value::Int(1)),
+        );
+        let top = PrintOpts {
+            level: Some(0),
+            ..PrintOpts::pr()
+        };
+        assert_eq!(pr_to_string(&m, &top), "#");
+    }
+
+    #[test]
+    fn map_length_truncation() {
+        let m = Value::Map(
+            crate::new_map()
+                .insert(Value::Keyword(Keyword::new(None, "a")), Value::Int(1))
+                .insert(Value::Keyword(Keyword::new(None, "b")), Value::Int(2)),
+        );
+        let one = PrintOpts {
+            length: Some(1),
+            ..PrintOpts::pr()
+        };
+        assert_eq!(pr_to_string(&m, &one), "{:a 1, ...}");
+        let none = PrintOpts {
+            length: Some(0),
+            ..PrintOpts::pr()
+        };
+        assert_eq!(pr_to_string(&m, &none), "{...}");
+    }
+
+    #[test]
+    fn java_debug_identities() {
+        use super::java_debug;
+        use crate::{
+            RangeNum, RangeValue, ThrowClass, Throwable, Transient, TransientKind, TransientVector,
+            Unbound, Var,
+        };
+        let var = Value::Var(Var {
+            id: 1,
+            sym: Symbol::new(Some("user"), "x"),
+        });
+        assert_eq!(java_debug(&var), "#'user/x");
+        let unb = Value::Unbound(Unbound {
+            sym: Symbol::new(None, "y"),
+            var_id: 2,
+        });
+        assert_eq!(java_debug(&unb), "Unbound: #'y");
+        let bare = Value::Throwable(Throwable {
+            id: 1,
+            class: ThrowClass::Exception,
+            message: None,
+            data: None,
+            cause: None,
+        });
+        assert_eq!(java_debug(&bare), "java.lang.Exception");
+        let msg = Value::Throwable(Throwable {
+            id: 1,
+            class: ThrowClass::RuntimeException,
+            message: Some(Arc::from("boom")),
+            data: None,
+            cause: None,
+        });
+        assert_eq!(java_debug(&msg), "java.lang.RuntimeException: boom");
+        let t = Transient::new(TransientKind::Vector(TransientVector::new()));
+        let id = t.id();
+        assert_eq!(
+            java_debug(&Value::Transient(t)),
+            format!("clojure.lang.PersistentVector$TransientVector@{id:x}")
+        );
+        let range = Value::Extension(Arc::new(RangeValue::new(
+            RangeNum::Int(0),
+            Some(RangeNum::Int(1)),
+            RangeNum::Int(1),
+            true,
+            Some(1),
+        )));
+        assert_eq!(java_debug(&range), "(...)");
+    }
 }

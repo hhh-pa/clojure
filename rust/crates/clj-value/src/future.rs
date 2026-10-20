@@ -219,3 +219,21 @@ impl Default for Future {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::Future;
+    use std::time::Duration;
+
+    #[test]
+    fn default_is_a_pending_future() {
+        let future = Future::default();
+        assert!(!future.is_done());
+    }
+
+    #[test]
+    fn zero_timeout_returns_none_at_once() {
+        let future = Future::new();
+        assert!(future.get_timeout(Duration::ZERO).is_none());
+    }
+}

@@ -840,3 +840,286 @@ fn shadowable_new_forms() {
         "java.lang.ClassCastException | Cannot cast java.lang.Long to clojure.lang.IFn"
     );
 }
+
+#[test]
+fn macroexpand_private_chain_is_bare() {
+    // Oracle O4: the JVM rethrows the private `IllegalStateException`
+    // bare when the expansion head is a private cross-namespace macro.
+    let mut eval = boot();
+    run_last(&mut eval, "(create-ns 'fx)");
+    run_last(&mut eval, "(ns fx)");
+    run_last(&mut eval, "(defmacro ^:private privm [x] (list 'quote x))");
+    run_last(&mut eval, "(ns user)");
+    run_last(&mut eval, "(defmacro moo2 [x] (list 'fx/privm x))");
+    assert_eq!(
+        uncaught(&mut eval, "(macroexpand '(moo2 5))"),
+        "java.lang.IllegalStateException | var: #'fx/privm is not public"
+    );
+}
+
+#[test]
+fn expansion_wrap_names_qualified_op() {
+    // Oracle O3: `{op}` is the operator as written, qualified included.
+    let mut eval = boot();
+    run_last(&mut eval, "(create-ns 'fx)");
+    run_last(&mut eval, "(ns fx)");
+    run_last(&mut eval, "(defmacro m2 [] (seq 5))");
+    run_last(&mut eval, "(ns user)");
+    assert_eq!(
+        uncaught(&mut eval, "(macroexpand-1 '(fx/m2))"),
+        "java.lang.IllegalArgumentException | Syntax error macroexpanding fx/m2 at (user:1:1).\njava.lang.IllegalArgumentException | Don't know how to create ISeq from: java.lang.Long"
+    );
+    assert_eq!(
+        compile_err(&mut eval, "(fx/m2)"),
+        vec![
+            "Syntax error macroexpanding fx/m2 at (user:1:1).".to_owned(),
+            "java.lang.IllegalArgumentException | Don't know how to create ISeq from: java.lang.Long"
+                .to_owned(),
+        ]
+    );
+}
+
+#[test]
+fn non_closure_macro_roots() {
+    // Oracle O5/O6/O7: a macro root need not be a closure — natives
+    // strip their own arity (name matches), anything else rethrows
+    // bare as-is.
+    let mut eval = boot();
+    // Native root: the strip-2 rule fires on the native's display.
+    run_last(&mut eval, "(alter-meta! (var gensym) assoc :macro true)");
+    assert_eq!(
+        uncaught(&mut eval, "(macroexpand-1 '(gensym 1 2 3))"),
+        "clojure.lang.ArityException | Wrong number of args (3) passed to: clojure.core/gensym"
+    );
+    // Map root (not an `Extension` at all): bare as-is.
+    run_last(&mut eval, "(def m {:a 1})");
+    run_last(&mut eval, "(alter-meta! (var m) assoc :macro true)");
+    assert_eq!(
+        uncaught(&mut eval, "(macroexpand-1 '(m 1 2))"),
+        "clojure.lang.ArityException | Wrong number of args (4) passed to: clojure.lang.PersistentArrayMap"
+    );
+    // Subvector root (`Extension`, neither closure nor native): bare as-is.
+    run_last(&mut eval, "(def sv (subvec [1 2 3] 0 2))");
+    run_last(&mut eval, "(alter-meta! (var sv) assoc :macro true)");
+    assert_eq!(
+        uncaught(&mut eval, "(macroexpand-1 '(sv 1 2))"),
+        "clojure.lang.ArityException | Wrong number of args (4) passed to: clojure.lang.APersistentVector/SubVector"
+    );
+}
+
+#[test]
+fn macroexpand_throw_compiler() {
+    let mut eval = boot();
+    run(&mut eval, "(defmacro mxcc [] (load-string \"(defn f [)\"))");
+    let err = uncaught(&mut eval, "(macroexpand-1 '(mxcc))");
+    assert!(err.contains("macroexpanding mxcc"), "wrap: {err}");
+    assert!(
+        err.contains(
+            "clojure.lang.Compiler$CompilerException | Syntax error reading source at (1:11)"
+        ),
+        "cause: {err}"
+    );
+}
+
+// Unix-only: `/tmp` is a directory (EISDIR → `IOException`); on Windows
+// the path is missing (`FileNotFoundException`). Coverage measures on
+// ubuntu, so the arm still closes.
+#[cfg(unix)]
+#[test]
+fn macroexpand_throw_io() {
+    let mut eval = boot();
+    run(&mut eval, "(defmacro mxio [] (slurp \"/tmp\"))");
+    let err = uncaught(&mut eval, "(macroexpand-1 '(mxio))");
+    assert!(err.contains("macroexpanding mxio"), "wrap: {err}");
+    assert!(err.contains("java.io.IOException | "), "cause: {err}");
+}
+
+#[test]
+fn macroexpand_throw_format_precision() {
+    let mut eval = boot();
+    run(&mut eval, "(defmacro mxfp [] (format \"%.3c\" \\A))");
+    let err = uncaught(&mut eval, "(macroexpand-1 '(mxfp))");
+    assert!(err.contains("macroexpanding mxfp"), "wrap: {err}");
+    assert!(
+        err.contains("java.util.IllegalFormatPrecisionException | 3"),
+        "cause: {err}"
+    );
+}
+
+#[test]
+fn macroexpand_throw_format_missing_arg() {
+    let mut eval = boot();
+    run(&mut eval, "(defmacro mxfma [] (format \"%s %s\" 1))");
+    let err = uncaught(&mut eval, "(macroexpand-1 '(mxfma))");
+    assert!(err.contains("macroexpanding mxfma"), "wrap: {err}");
+    assert!(
+        err.contains("java.util.MissingFormatArgumentException | Format specifier '%s'"),
+        "cause: {err}"
+    );
+}
+
+#[test]
+fn macroexpand_throw_format_unknown() {
+    let mut eval = boot();
+    run(&mut eval, "(defmacro mxfu [] (format \"%Q\" \"a\"))");
+    let err = uncaught(&mut eval, "(macroexpand-1 '(mxfu))");
+    assert!(err.contains("macroexpanding mxfu"), "wrap: {err}");
+    assert!(
+        err.contains("java.util.UnknownFormatConversionException | Conversion = 'Q'"),
+        "cause: {err}"
+    );
+}
+
+#[test]
+fn macroexpand_throw_format_conversion() {
+    let mut eval = boot();
+    run(&mut eval, "(defmacro mxfc [] (format \"%d\" \"s\"))");
+    let err = uncaught(&mut eval, "(macroexpand-1 '(mxfc))");
+    assert!(err.contains("macroexpanding mxfc"), "wrap: {err}");
+    assert!(
+        err.contains("java.util.IllegalFormatConversionException | d != java.lang.String"),
+        "cause: {err}"
+    );
+}
+
+#[test]
+fn macroexpand_throw_subs() {
+    let mut eval = boot();
+    run(&mut eval, "(defmacro mxso [] (subs \"ab\" 5))");
+    let err = uncaught(&mut eval, "(macroexpand-1 '(mxso))");
+    assert!(err.contains("macroexpanding mxso"), "wrap: {err}");
+    assert!(
+        err.contains(
+            "java.lang.StringIndexOutOfBoundsException | Range [5, 2) out of bounds for length 2"
+        ),
+        "cause: {err}"
+    );
+}
+
+#[test]
+fn macroexpand_throw_refer_private() {
+    let mut eval = boot();
+    run(
+        &mut eval,
+        "(defmacro mxrp [] (refer 'clojure.core :only '[*loaded-libs*]))",
+    );
+    let err = uncaught(&mut eval, "(macroexpand-1 '(mxrp))");
+    assert!(err.contains("macroexpanding mxrp"), "wrap: {err}");
+    assert!(
+        err.contains("java.lang.IllegalAccessError | *loaded-libs* is not public"),
+        "cause: {err}"
+    );
+}
+
+#[test]
+fn macroexpand_throw_rejected() {
+    let mut eval = boot();
+    run(&mut eval, "(def mxrs-stash (atom nil))");
+    run(
+        &mut eval,
+        "(def mxrs-a (agent 0 :error-handler (fn [ag t] (reset! mxrs-stash t))))",
+    );
+    run(&mut eval, "(shutdown-agents)");
+    run(&mut eval, "(send mxrs-a inc)");
+    run(&mut eval, "(defmacro mxrs [] (throw @mxrs-stash))");
+    let err = uncaught(&mut eval, "(macroexpand-1 '(mxrs))");
+    assert!(
+        err.contains("Unexpected error macroexpanding mxrs"),
+        "wrap: {err}"
+    );
+    assert!(
+        err.contains(
+            "java.util.concurrent.RejectedExecutionException | agent action rejected after shutdown"
+        ),
+        "cause: {err}"
+    );
+}
+
+#[test]
+fn macroexpand_throw_cancelled() {
+    let mut eval = boot();
+    run(
+        &mut eval,
+        "(defmacro mxcx [] (deref (let [p (promise) f (future @p)] (future-cancel f) (try f (finally (deliver p 0))))))",
+    );
+    let err = uncaught(&mut eval, "(macroexpand-1 '(mxcx))");
+    assert!(err.contains("macroexpanding mxcx"), "wrap: {err}");
+    assert!(
+        err.contains("java.util.concurrent.CancellationException | "),
+        "cause: {err}"
+    );
+}
+
+#[test]
+fn macroexpand_throw_execution() {
+    let mut eval = boot();
+    run(&mut eval, "(defmacro mxex [] (deref (future (/ 1 0))))");
+    let err = uncaught(&mut eval, "(macroexpand-1 '(mxex))");
+    assert!(err.contains("macroexpanding mxex"), "wrap: {err}");
+    assert!(
+        err.contains(
+            "java.util.concurrent.ExecutionException | java.lang.ArithmeticException: Divide by zero"
+        ),
+        "cause: {err}"
+    );
+}
+
+#[test]
+fn macroexpand_throw_slurp_missing() {
+    let mut eval = boot();
+    run(
+        &mut eval,
+        "(defmacro mxsm [] (slurp \"/nonexistent-xyz-36\"))",
+    );
+    let err = uncaught(&mut eval, "(macroexpand-1 '(mxsm))");
+    assert!(err.contains("macroexpanding mxsm"), "wrap: {err}");
+    assert!(
+        err.contains("java.io.FileNotFoundException | /nonexistent-xyz-36 ("),
+        "cause: {err}"
+    );
+}
+
+#[test]
+fn macroexpand_throw_ex_info() {
+    let mut eval = boot();
+    run(
+        &mut eval,
+        "(defmacro mxei [] (throw (ex-info \"boom\" {})))",
+    );
+    let err = uncaught(&mut eval, "(macroexpand-1 '(mxei))");
+    assert!(
+        err.contains("Syntax error macroexpanding mxei"),
+        "wrap: {err}"
+    );
+    assert!(
+        err.contains("clojure.lang.ExceptionInfo | boom"),
+        "cause: {err}"
+    );
+}
+
+#[test]
+fn macroexpand_throw_quot_zero() {
+    let mut eval = boot();
+    run(&mut eval, "(defmacro mxqz [] (quot 1 0))");
+    let err = uncaught(&mut eval, "(macroexpand-1 '(mxqz))");
+    assert!(
+        err.contains("Unexpected error macroexpanding mxqz"),
+        "wrap: {err}"
+    );
+    assert!(
+        err.contains("java.lang.ArithmeticException | / by zero"),
+        "cause: {err}"
+    );
+}
+
+#[test]
+fn macroexpand_throw_assoc_oob() {
+    let mut eval = boot();
+    run(&mut eval, "(defmacro mxao [] (assoc [1] 5 :x))");
+    let err = uncaught(&mut eval, "(macroexpand-1 '(mxao))");
+    assert!(err.contains("macroexpanding mxao"), "wrap: {err}");
+    assert!(
+        err.contains("java.lang.IndexOutOfBoundsException | "),
+        "cause: {err}"
+    );
+}

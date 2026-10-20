@@ -586,12 +586,9 @@ mod tests {
             ),
         ];
         for (class, catch, want) in cases {
-            assert_eq!(
-                class.matches(catch),
-                want,
-                "{:?} matches {catch}",
-                class.jvm_name()
-            );
+            // Hoisted: assert args only run on failure (100% line gate).
+            let name = format!("{:?}", class.jvm_name());
+            assert_eq!(class.matches(catch), want, "{name} matches {catch}");
         }
     }
 
@@ -817,5 +814,55 @@ mod tests {
         assert_eq!(err.message(), "Cannot compare test.Stub to Long");
         let err = compare(&Value::Int(1), &stub(3)).unwrap_err();
         assert_eq!(err.message(), "Cannot compare Long to test.Stub");
+    }
+
+    #[test]
+    fn throw_class_jvm_names_format_tail() {
+        let cases = [
+            (
+                ThrowClass::MissingFormatConversionException,
+                "java.util.MissingFormatConversionException",
+            ),
+            (
+                ThrowClass::IllegalFormatCodePointException,
+                "java.util.IllegalFormatCodePointException",
+            ),
+            (ThrowClass::IOException, "java.io.IOException"),
+        ];
+        for (class, want) in cases {
+            assert_eq!(class.jvm_name(), want);
+        }
+    }
+
+    #[test]
+    fn format_classes_match_through_format_parent() {
+        let class = ThrowClass::IllegalFormatConversionException;
+        assert!(class.matches("java.util.IllegalFormatConversionException"));
+        assert!(class.matches("java.util.IllegalFormatException"));
+        assert!(class.matches("java.lang.IllegalArgumentException"));
+        assert!(class.matches("java.lang.RuntimeException"));
+        assert!(class.matches("java.lang.Throwable"));
+        assert!(!class.matches("java.lang.Error"));
+        assert!(!class.matches("java.lang.NoSuchClass"));
+        assert!(
+            ThrowClass::MissingFormatWidthException.matches("java.util.IllegalFormatException")
+        );
+        assert!(ThrowClass::DuplicateFormatFlagsException.matches("java.lang.Throwable"));
+    }
+
+    #[test]
+    fn unknown_throw_parents_are_none() {
+        assert_eq!(super::throw_parent("java.lang.NoSuchClass"), None);
+        assert_eq!(super::throw_parent_format("java.lang.NoSuchClass"), None);
+    }
+
+    #[test]
+    fn other_extension_dispatches() {
+        let other = Value::Extension(Arc::new(OtherExt));
+        assert_eq!(pr(&other), "#test.Other");
+        assert_eq!(other, other.clone());
+        assert_eq!(hash_of(&other), hash_of(&other.clone()));
+        let err = compare(&other, &Value::Int(1)).unwrap_err();
+        assert_eq!(err.message(), "Cannot compare test.Other to Long");
     }
 }

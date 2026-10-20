@@ -100,10 +100,8 @@ pub(crate) fn repeat_count(v: &Value) -> Result<i64, NativeError> {
         Value::Double(d) => {
             if d.is_nan() {
                 Ok(0)
-            } else if *d >= i64::MAX as f64 {
-                Ok(i64::MAX)
-            } else if *d <= i64::MIN as f64 {
-                Ok(i64::MIN)
+            } else if *d > i64::MAX as f64 || *d < i64::MIN as f64 {
+                Err(out_of_range("long", Num::Double(*d)))
             } else {
                 Ok(*d as i64)
             }
@@ -148,11 +146,11 @@ pub(crate) fn int_cast_double(d: f64) -> Result<i32, NativeError> {
 /// `pos?`-check first, so nil/non-numbers are unreachable — but
 /// validated identically for totality.
 pub(crate) fn idrop_coerce(v: &Value) -> Result<i32, NativeError> {
-    match v {
-        Value::Int(i) => int_exact_long(*i),
-        Value::Double(d) => int_cast_double(d.ceil()),
-        Value::Nil => Err(npe_getclass()),
-        _ => Err(cce_err(v, "java.lang.Number")),
+    // `drop`/`nthrest` validate `n` first, so only numbers arrive;
+    // `as_num` keeps the identical failures total (arms covered).
+    match as_num(v)? {
+        Num::Int(i) => int_exact_long(i),
+        Num::Double(d) => int_cast_double(d.ceil()),
     }
 }
 
@@ -324,15 +322,12 @@ fn div(a: Num, b: Num) -> Result<Num, NativeError> {
     }
 }
 
-/// A left-associative variadic fold (`+`/`-`/`*`/`/`).
+/// A left-associative variadic fold (`+`/`-`/`*`/`/`; every caller
+/// rejects empty args first).
 fn fold(
-    display: &str,
     args: &[Value],
     op: fn(Num, Num) -> Result<Num, NativeError>,
 ) -> Result<Value, NativeError> {
-    if args.is_empty() {
-        return Err(NativeError::arity(display, 0));
-    }
     if args.len() == 1 {
         // Single args pass through unchecked (probe39 shapes).
         return Ok(args[0].clone());
@@ -348,7 +343,7 @@ fn native_add(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErro
     if args.is_empty() {
         return Ok(Value::Int(0));
     }
-    fold("clojure.core/+", args, add)
+    fold(args, add)
 }
 
 fn native_sub(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
@@ -361,14 +356,14 @@ fn native_sub(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErro
             Num::Double(x) => Ok(Value::Double(-x)),
         };
     }
-    fold("clojure.core/-", args, sub)
+    fold(args, sub)
 }
 
 fn native_mul(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     if args.is_empty() {
         return Ok(Value::Int(1));
     }
-    fold("clojure.core/*", args, mul)
+    fold(args, mul)
 }
 
 fn native_div(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
@@ -378,7 +373,7 @@ fn native_div(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErro
     if args.len() == 1 {
         return div(Num::Int(1), as_num(&args[0])?).map(num_value);
     }
-    fold("clojure.core//", args, div)
+    fold(args, div)
 }
 
 fn native_quot(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
@@ -561,25 +556,26 @@ fn native_min(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErro
 /// `=` as `Util.equiv` (sequential pairs walk pairwise with
 /// early exit, so finite-vs-infinite answers `false` instead of
 /// hanging; maps/sets recurse; the rest is `==`).
-fn native_eq(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+fn eq_bool(eval: &mut Evaluator, args: &[Value]) -> Result<bool, NativeError> {
     if args.is_empty() {
         return Err(NativeError::arity("clojure.core/=", 0));
     }
     let mut first = &args[0];
     for arg in &args[1..] {
         if !equiv_vals(eval, first, arg).map_err(signal_to_native)? {
-            return Ok(Value::Bool(false));
+            return Ok(false);
         }
         first = arg;
     }
-    Ok(Value::Bool(true))
+    Ok(true)
+}
+
+fn native_eq(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    Ok(Value::Bool(eq_bool(eval, args)?))
 }
 
 fn native_not_eq(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
-    match native_eq(eval, args)? {
-        Value::Bool(b) => Ok(Value::Bool(!b)),
-        _ => unreachable!("native_eq returns bools"),
-    }
+    Ok(Value::Bool(!eq_bool(eval, args)?))
 }
 
 /// Cross-category numeric equivalence (`(== 1 1.0)` is true;
@@ -1130,9 +1126,6 @@ fn lazy_seq_str(eval: &mut Evaluator, v: &Value) -> Result<String, NativeError> 
 fn str_of_realized(eval: &mut Evaluator, v: &Value) -> Result<String, NativeError> {
     let r = realize_deep(eval, v).map_err(signal_to_native)?;
     Ok(match &r {
-        Value::Nil => String::new(),
-        Value::Str(s) => s.to_string(),
-        Value::Char(c) => c.to_string(),
         // Atoms, delays, futures, promises, and agents render their
         // `toString` (`Class@hex`), never the `#object[…]` print form.
         Value::Atom(_)
@@ -1148,12 +1141,18 @@ fn str_of_realized(eval: &mut Evaluator, v: &Value) -> Result<String, NativeErro
 }
 
 /// `str`: concatenates the per-arg rendering (no spaces).
-pub(crate) fn native_str(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+/// `str` concatenated (shared by `str` and the `throw-*!` natives).
+fn str_concat(eval: &mut Evaluator, args: &[Value]) -> Result<String, NativeError> {
     let mut out = String::new();
     for arg in args {
         out.push_str(&str_of_one(eval, arg)?);
     }
-    Ok(Value::Str(Arc::from(out.as_str())))
+    Ok(out)
+}
+
+pub(crate) fn native_str(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    let s = str_concat(eval, args)?;
+    Ok(Value::Str(Arc::from(s.as_str())))
 }
 
 /// `subs` (char-indexed; the JVM's UTF-16 units agree on the BMP —
@@ -1175,15 +1174,7 @@ fn native_subs(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErr
                 format!("Cannot invoke \"{method}\" because \"s\" is null"),
             ));
         }
-        v => {
-            return Err(NativeError::new(
-                ThrowClass::IllegalArgumentException,
-                format!(
-                    "No matching method found: substring for class {}",
-                    jvm_class_of(v)
-                ),
-            ));
-        }
+        v => return Err(cce_err(v, "java.lang.String")),
     };
     let chars: Vec<char> = s.chars().collect();
     let len = chars.len() as i64;
@@ -1716,13 +1707,8 @@ fn native_hash_code(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nativ
 /// the exact JVM `IllegalArgumentException` class.
 fn native_throw_iae(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/throw-illegal-arg!", args, &[1])?;
-    let Value::Str(s) = native_str(eval, args)? else {
-        unreachable!("str always returns a string")
-    };
-    Err(NativeError::new(
-        ThrowClass::IllegalArgumentException,
-        s.to_string(),
-    ))
+    let s = str_concat(eval, args)?;
+    Err(NativeError::new(ThrowClass::IllegalArgumentException, s))
 }
 
 /// `throw-npe!` (PRIVATE, port-internal): `doseq`'s invalid-keyword
@@ -1730,13 +1716,8 @@ fn native_throw_iae(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nativ
 /// (a JVM bug the corpus pins — `doseq` never validates modifiers).
 fn native_throw_npe(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/throw-npe!", args, &[1])?;
-    let Value::Str(s) = native_str(eval, args)? else {
-        unreachable!("str always returns a string")
-    };
-    Err(NativeError::new(
-        ThrowClass::NullPointerException,
-        s.to_string(),
-    ))
+    let s = str_concat(eval, args)?;
+    Err(NativeError::new(ThrowClass::NullPointerException, s))
 }
 
 /// `odd?`/`even?`: the low bit of an `Int` (two's complement, so
@@ -1867,3 +1848,25 @@ pub(crate) const CORE_NATIVES: &[(&str, NativeFnPtr)] = &[
     ("even?", native_even),
     ("clojure-version", native_clojure_version),
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hash_code_post_realize_uoe() {
+        // `hash-code` is private (unreachable from user code): like
+        // `hash`, an infinite revealed by forcing throws bare UOE.
+        let mut eval = crate::boot();
+        let mut vs = eval
+            .eval_source("(map identity [(repeat 1)])")
+            .expect("shape evaluates");
+        let v = vs.pop().expect("one form");
+        let err = native_hash_code(&mut eval, &[v]).expect_err("post-check throws");
+        assert_eq!(
+            err.class,
+            clj_value::ThrowClass::UnsupportedOperationException
+        );
+        assert!(err.message.is_empty());
+    }
+}

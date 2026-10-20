@@ -98,6 +98,9 @@ mod tests {
 
         let qualified = Keyword::new(Some("user"), "id");
         assert_eq!(qualified.to_string(), ":user/id");
+
+        assert!(Keyword::new(None, "a") < Keyword::new(None, "b"));
+        assert!(Keyword::new(None, "b") > Keyword::new(None, "a"));
     }
 
     #[test]

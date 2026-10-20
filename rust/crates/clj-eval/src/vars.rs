@@ -14,7 +14,9 @@
 
 use std::sync::Arc;
 
-use clj_value::{Agent, Atom, Map, ThrowClass, Value, Var, new_map};
+use clj_value::{
+    Agent, Atom, Future, List, Map, Promise, Set, Symbol, ThrowClass, Value, Var, Vector, new_map,
+};
 
 use crate::error::NativeError;
 use crate::eval::Evaluator;
@@ -246,28 +248,42 @@ fn native_meta(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErro
     Ok(meta_of(eval, &args[0]).map_or(Value::Nil, Value::Map))
 }
 
-/// The `with-meta` receiver check, before meta validation (a
-/// both-bad call reports `IObj`; a nil object with bad meta is
-/// still the `withMeta` NPE).
-fn check_iobj(obj: &Value) -> Result<(), NativeError> {
+/// A `with-meta` receiver shape (validated before the meta arg, so
+/// a both-bad call still reports `IObj` and a nil object with bad
+/// meta is still the `withMeta` NPE).
+enum IObj<'v> {
+    Symbol(&'v Symbol),
+    List(&'v List),
+    Vector(&'v Vector),
+    Map(&'v Map),
+    Set(&'v Set),
+    Future(&'v Future),
+    Promise(&'v Promise),
+    Closure(&'v Closure),
+    Native(&'v NativeFn),
+}
+
+/// The `with-meta` receiver check, before meta validation (same
+/// errors as before: nil → the `withMeta` NPE, anything else
+/// non-`IObj` → the `IObj` cast).
+fn as_iobj(obj: &Value) -> Result<IObj<'_>, NativeError> {
     match obj {
         Value::Nil => Err(npe(NIL_WITHMETA_NPE)),
-        Value::Symbol(_)
-        | Value::List(_)
-        | Value::Vector(_)
-        | Value::Map(_)
-        | Value::Set(_)
-        | Value::Future(_)
-        | Value::Promise(_) => Ok(()),
-        Value::Extension(e) => {
-            let is_fn = e.as_any().downcast_ref::<Closure>().is_some()
-                || e.as_any().downcast_ref::<NativeFn>().is_some();
-            if is_fn {
-                Ok(())
-            } else {
-                Err(cast_err(obj, IOBJ_CLASS))
-            }
-        }
+        Value::Symbol(s) => Ok(IObj::Symbol(s)),
+        Value::List(l) => Ok(IObj::List(l)),
+        Value::Vector(x) => Ok(IObj::Vector(x)),
+        Value::Map(m) => Ok(IObj::Map(m)),
+        Value::Set(s) => Ok(IObj::Set(s)),
+        Value::Future(f) => Ok(IObj::Future(f)),
+        Value::Promise(p) => Ok(IObj::Promise(p)),
+        Value::Extension(e) => match (
+            e.as_any().downcast_ref::<Closure>(),
+            e.as_any().downcast_ref::<NativeFn>(),
+        ) {
+            (Some(c), _) => Ok(IObj::Closure(c)),
+            (None, Some(n)) => Ok(IObj::Native(n)),
+            (None, None) => Err(cast_err(obj, IOBJ_CLASS)),
+        },
         _ => Err(cast_err(obj, IOBJ_CLASS)),
     }
 }
@@ -275,46 +291,33 @@ fn check_iobj(obj: &Value) -> Result<(), NativeError> {
 /// Attach `meta` (a map or nil) to an `IObj` (the object checks
 /// before the meta arg, JVM receiver first).
 fn with_meta_val(obj: &Value, meta: &Value) -> Result<Value, NativeError> {
-    check_iobj(obj)?;
+    let shape = as_iobj(obj)?;
     let meta = match meta {
         Value::Nil => None,
         Value::Map(m) => Some(m.clone()),
         _ => return Err(cast_err(meta, IMAP_CLASS)),
     };
-    match obj {
-        Value::Nil => Err(npe(NIL_WITHMETA_NPE)),
-        Value::Symbol(s) => Ok(Value::Symbol(s.clone().with_meta(meta))),
-        Value::List(l) => Ok(Value::List(l.clone().with_meta(meta))),
-        Value::Vector(x) => Ok(Value::Vector(x.clone().with_meta(meta))),
-        Value::Map(m) => Ok(Value::Map(m.clone().with_meta(meta))),
-        Value::Set(s) => Ok(Value::Set(s.clone().with_meta(meta))),
+    match shape {
+        IObj::Symbol(s) => Ok(Value::Symbol(s.clone().with_meta(meta))),
+        IObj::List(l) => Ok(Value::List(l.clone().with_meta(meta))),
+        IObj::Vector(x) => Ok(Value::Vector(x.clone().with_meta(meta))),
+        IObj::Map(m) => Ok(Value::Map(m.clone().with_meta(meta))),
+        IObj::Set(s) => Ok(Value::Set(s.clone().with_meta(meta))),
         // New handles sharing the outcome/latch cell (the reify's
         // `withMeta` field copy — the original keeps its meta).
-        Value::Future(f) => Ok(Value::Future(f.with_meta(meta))),
-        Value::Promise(p) => Ok(Value::Promise(p.with_meta(meta))),
-        Value::Extension(e) => with_meta_extension(obj, e, meta),
-        _ => Err(cast_err(obj, IOBJ_CLASS)),
+        IObj::Future(f) => Ok(Value::Future(f.with_meta(meta))),
+        IObj::Promise(p) => Ok(Value::Promise(p.with_meta(meta))),
+        IObj::Closure(c) => {
+            let mut next = c.clone();
+            next.meta = meta;
+            Ok(Value::Extension(Arc::new(next)))
+        }
+        IObj::Native(n) => {
+            let mut next = n.clone();
+            next.meta = meta;
+            Ok(Value::Extension(Arc::new(next)))
+        }
     }
-}
-
-/// Attach `meta` to a function extension value (split from
-/// [`with_meta_val`] for the complexity budget).
-fn with_meta_extension(
-    obj: &Value,
-    e: &Arc<dyn clj_value::ExtensionValue>,
-    meta: Option<Map>,
-) -> Result<Value, NativeError> {
-    if let Some(c) = e.as_any().downcast_ref::<Closure>() {
-        let mut next = c.clone();
-        next.meta = meta;
-        return Ok(Value::Extension(Arc::new(next)));
-    }
-    if let Some(n) = e.as_any().downcast_ref::<NativeFn>() {
-        let mut next = n.clone();
-        next.meta = meta;
-        return Ok(Value::Extension(Arc::new(next)));
-    }
-    Err(cast_err(obj, IOBJ_CLASS))
 }
 
 fn native_with_meta(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {

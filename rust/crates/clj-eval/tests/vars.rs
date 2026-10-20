@@ -544,6 +544,7 @@ fn meta_reads() {
     assert_eq!(run_last(&mut eval, "(meta nil)"), "nil");
     assert_eq!(run_last(&mut eval, "(meta :k)"), "nil");
     assert_eq!(run_last(&mut eval, "(meta (fn [] 1))"), "nil");
+    assert_eq!(run_last(&mut eval, "(meta *out*)"), "nil");
     assert_eq!(
         uncaught(&mut eval, "(meta 1 2)"),
         "clojure.lang.ArityException | Wrong number of args (2) passed to: clojure.core/meta"
@@ -572,6 +573,11 @@ fn with_meta() {
     // Values keep their shape and type (print ignores meta).
     assert_eq!(run_last(&mut eval, "(with-meta [1] {:a 1})"), "[1]");
     assert_eq!(run_last(&mut eval, "(with-meta 's1 {:a 1})"), "s1");
+    assert_eq!(run_last(&mut eval, "(with-meta #{1} {:a 1})"), "#{1}");
+    assert_eq!(
+        run_last(&mut eval, "(meta (with-meta #{1} {:a 1}))"),
+        "{:a 1}"
+    );
     // Functions stay callable under new meta.
     assert_eq!(
         run_last(&mut eval, "((with-meta (fn [x] x) {:a 1}) 5)"),
@@ -673,6 +679,10 @@ fn alter_and_reset_meta() {
     assert_eq!(
         uncaught(&mut eval, "(reset-meta! [1] {})"),
         "java.lang.ClassCastException | Cannot cast clojure.lang.PersistentVector to clojure.lang.IReference"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(reset-meta! *out* nil)"),
+        "java.lang.ClassCastException | Cannot cast java.io.OutputStreamWriter to clojure.lang.IReference"
     );
 }
 

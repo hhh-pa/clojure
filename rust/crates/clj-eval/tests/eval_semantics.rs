@@ -888,6 +888,14 @@ fn invoke_table() {
             "java.lang.ClassCastException | Cannot cast java.lang.Long to java.lang.Throwable",
         ),
         (
+            "(throw (fn [x] x))",
+            "java.lang.ClassCastException | Cannot cast user$eval3$fn__2 to java.lang.Throwable",
+        ),
+        (
+            "(throw t-plus)",
+            "java.lang.ClassCastException | Cannot cast user$t_plus to java.lang.Throwable",
+        ),
+        (
             "(throw nil)",
             "java.lang.NullPointerException | Cannot throw exception because \"null\" is null",
         ),
@@ -914,6 +922,17 @@ fn object_prints() {
         run_last(&mut eval, "(fn foo [x] x)"),
         "#object[user$eval2$foo__2 0x2 \"user$eval2$foo__2@2\"]"
     );
+}
+
+#[test]
+fn native_prints() {
+    let (mut eval, _) = rigged();
+    // Natives print `#object[…]` with the munged display and id, like
+    // closures.
+    let pr = run_last(&mut eval, "t-plus");
+    assert!(pr.starts_with("#object[user$t_plus 0x"), "{pr}");
+    assert!(pr.contains("user$t_plus@"), "{pr}");
+    assert!(pr.ends_with("\"]"), "{pr}");
 }
 
 #[test]
@@ -961,4 +980,343 @@ fn top_do_splits_each_element() {
         ),
         other => panic!("expected a compile error, got {other}"),
     }
+}
+
+#[test]
+fn map_destructure_odd_trailing() {
+    let (mut eval, _) = rigged();
+    // 2-vector trailers assoc.
+    assert_eq!(
+        run_last(&mut eval, "(let [{a :a, b :b} '(:a 1 [:b 2])] [a b])"),
+        "[1 2]"
+    );
+    // Non-pair vector trailers are the pair IAE.
+    assert_eq!(
+        uncaught("(let [{a :a} '(:a 1 [:b])] a)"),
+        "java.lang.IllegalArgumentException | Vector arg to map conj must be a pair"
+    );
+    // `nil` trailers vanish.
+    assert_eq!(run_last(&mut eval, "(let [{a :a} '(:a 1 nil)] a)"), "1");
+    // Empty seqable trailers vanish.
+    assert_eq!(run_last(&mut eval, "(let [{a :a} '(:a 1 ())] a)"), "1");
+    // Non-empty seqable trailers cast the first element to an
+    // entry (short cast format like the other eval CCE pins).
+    assert_eq!(
+        uncaught("(let [{a :a} '(:a 1 (2))] a)"),
+        "java.lang.ClassCastException | Cannot cast java.lang.Long to java.util.Map$Entry"
+    );
+    assert_eq!(
+        uncaught("(let [{a :a} '(:a 1 #{2})] a)"),
+        "java.lang.ClassCastException | Cannot cast java.lang.Long to java.util.Map$Entry"
+    );
+    assert_eq!(
+        uncaught("(let [{a :a} '(:a 1 \"xy\")] a)"),
+        "java.lang.ClassCastException | Cannot cast java.lang.Character to java.util.Map$Entry"
+    );
+}
+
+#[test]
+fn map_destructure_single_seq_is_element() {
+    let (mut eval, _) = rigged();
+    // `(5)` converts to `5`; the key lookup misses.
+    assert_eq!(run_last(&mut eval, "(let [{:keys [a]} '(5)] a)"), "nil");
+}
+
+#[test]
+fn map_destructure_select_non_map() {
+    let (mut eval, _) = rigged();
+    // Non-map merge results select by lookup, absent keys skipped.
+    assert_eq!(
+        run_last(&mut eval, "(let [{:keys [a] :select s} [1 2]] s)"),
+        "{}"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [n (quote 5)] (let [{:keys [a] :select s} n] s))"
+        ),
+        "{}"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(let [{:keys [a], :select s} #{:a}] s)"),
+        "{:a :a}"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(let [{a 0, :select s} [10 20]] [a s])"),
+        "[10 {0 10}]"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(let [{c 0, :select s} \"xy\"] [c s])"),
+        "[\\x {0 \\x}]"
+    );
+}
+
+#[test]
+fn outlet_merge_conj_each() {
+    let (mut eval, _) = rigged();
+    // Long elems are the ISeq error.
+    assert_eq!(
+        uncaught("(let [{x :x, :or {x 1}, :select s} '((1 2))] s)"),
+        "java.lang.IllegalArgumentException | Don't know how to create ISeq from: java.lang.Long"
+    );
+    // Pair-vector elems assoc, then `:select` filters; `:all`
+    // shows the full merge.
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [{x :x, :or {x 1}, :select s} '(([:k :v]))] s)"
+        ),
+        "{:x 1}"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [{x :x, :or {x 1}, :all a} '(([:k :v]))] a)"
+        ),
+        "{:x 1, :k :v}"
+    );
+    // `nil` elems skip.
+    assert_eq!(
+        run_last(&mut eval, "(let [{x :x, :or {x 1}, :select s} '((nil))] s)"),
+        "{:x 1}"
+    );
+    // Empty-list elems contribute nothing.
+    assert_eq!(
+        run_last(&mut eval, "(let [{x :x, :or {x 1}, :select s} '((()))] s)"),
+        "{:x 1}"
+    );
+    // A seq elem's `nil` first is the entry-NPE, verbatim.
+    assert_eq!(
+        uncaught("(let [{x :x, :or {x 1}, :select s} '(((nil)))] s)"),
+        "java.lang.NullPointerException | Cannot invoke \"java.util.Map$Entry.getKey()\" because \"e\" is null"
+    );
+    // A seq elem's non-entry first is the entry CCE (short cast
+    // format).
+    assert_eq!(
+        uncaught("(let [{x :x, :or {x 1}, :select s} '(((2)))] s)"),
+        "java.lang.ClassCastException | Cannot cast java.lang.Long to java.util.Map$Entry"
+    );
+    // Map elems merge.
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [{x :x, :or {x 1}, :select s} '(({:k :v}))] s)"
+        ),
+        "{:x 1}"
+    );
+    // Non-pair vector elems are the pair IAE.
+    assert_eq!(
+        uncaught("(let [{x :x, :or {x 1}, :select s} '(([:b]))] s)"),
+        "java.lang.IllegalArgumentException | Vector arg to map conj must be a pair"
+    );
+    // The `:all` merge errors identically.
+    assert_eq!(
+        uncaught("(let [{x :x, :or {x 1}, :all a} '((1 2))] a)"),
+        "java.lang.IllegalArgumentException | Don't know how to create ISeq from: java.lang.Long"
+    );
+}
+
+#[test]
+fn outlet_merge_conj_entry_non_map() {
+    let (mut eval, _) = rigged();
+    // Entry conjed onto a vector appends the pair.
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [{{:keys [a] :or {a 1}} :m, :all all} [1 2]] all)"
+        ),
+        "[1 2 [:m {:a 1}]]"
+    );
+    // ... onto a list prepends.
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [{{:keys [a] :or {a 1}} :m, :all all} '((1 2))] all)"
+        ),
+        "([:m {:a 1}] 1 2)"
+    );
+    // ... onto a set inserts (port sets seq in insertion order,
+    // so the pr is deterministic).
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [{{:keys [a] :or {a 1}} :m, :all all} #{1}] all)"
+        ),
+        "#{1 [:m {:a 1}]}"
+    );
+    // ... onto a scalar is the collection CCE (short cast format).
+    assert_eq!(
+        uncaught("(let [{{:keys [a] :or {a 1}} :m, :all all} 5] all)"),
+        "java.lang.ClassCastException | Cannot cast java.lang.Long to clojure.lang.IPersistentCollection"
+    );
+    assert_eq!(
+        uncaught("(let [{{:keys [a] :or {a 1}} :m, :all all} \"xy\"] all)"),
+        "java.lang.ClassCastException | Cannot cast java.lang.String to clojure.lang.IPersistentCollection"
+    );
+}
+
+#[test]
+fn outlet_merge_empty_seq_from() {
+    let (mut eval, _) = rigged();
+    // An empty seq `from` adds nothing.
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [{x :x, :or {x 1}, :select s} '(())] [x s])"
+        ),
+        "[1 {:x 1}]"
+    );
+}
+
+#[test]
+fn map_destructure_excess_edges() {
+    let (mut eval, _) = rigged();
+    // A `nil` target has no excess base.
+    assert_eq!(
+        run_last(&mut eval, "(let [{:keys [a] :excess e} nil] [a e])"),
+        "[nil nil]"
+    );
+    // A non-map target is the map cast (short cast format).
+    assert_eq!(
+        uncaught("(let [{:keys [a] :excess e} [1 2]] [a e])"),
+        "java.lang.ClassCastException | Cannot cast clojure.lang.PersistentVector to clojure.lang.IPersistentMap"
+    );
+}
+
+#[test]
+fn map_destructure_select_absent() {
+    let (mut eval, _) = rigged();
+    // No defaults, `nil` target, no subs ⟹ `nil` select.
+    assert_eq!(
+        run_last(&mut eval, "(let [{:keys [a] :select s} nil] [a s])"),
+        "[nil nil]"
+    );
+}
+
+#[test]
+fn map_destructure_outlet_forcing_edges() {
+    let (mut eval, _) = rigged();
+    // A symbol local under an effective outlet forces nothing.
+    assert_eq!(
+        run_last(&mut eval, "(let [{a :a, :select s} {:a 1}] [a s])"),
+        "[1 {:a 1}]"
+    );
+    // A nested map requesting `:missing` under an effective
+    // `:missing` outlet.
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [{{:keys [b], :missing nm} :m, :missing m} {:m {}}] [m nm])"
+        ),
+        "[nil nil]"
+    );
+}
+
+#[test]
+fn lookup_collection_edges() {
+    let (mut eval, _) = rigged();
+    // Int keys index vectors/strings in map patterns.
+    assert_eq!(run_last(&mut eval, "(let [{a 0} [10 20]] a)"), "10");
+    assert_eq!(run_last(&mut eval, "(let [{c 0} \"xy\"] c)"), "\\x");
+    // Non-int keys miss on vectors/strings.
+    assert_eq!(run_last(&mut eval, "(:a [1 2])"), "nil");
+    assert_eq!(run_last(&mut eval, "(:k \"xy\")"), "nil");
+    // Keywords read sets by membership.
+    assert_eq!(run_last(&mut eval, "(:a #{:a :b})"), ":a");
+    assert_eq!(run_last(&mut eval, "('a '#{a b})"), "a");
+}
+
+#[test]
+fn seq_destructure_rest_shapes() {
+    let (mut eval, _) = rigged();
+    // `&` over lists, empty and not.
+    assert_eq!(
+        run_last(&mut eval, "(let [[a & r] '(1 2)] [a r])"),
+        "[1 (2)]"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(let [[a & r] '()] [a r])"),
+        "[nil nil]"
+    );
+    // `&` over a set / map.
+    assert_eq!(run_last(&mut eval, "(let [[a & r] #{1}] [a r])"), "[1 nil]");
+    assert_eq!(
+        run_last(&mut eval, "(let [[[k v] & r] {:a 1}] [k v r])"),
+        "[:a 1 nil]"
+    );
+    // `&` over empties ⟹ `nil` rest.
+    assert_eq!(run_last(&mut eval, "(let [[a & r] []] [a r])"), "[nil nil]");
+    assert_eq!(
+        run_last(&mut eval, "(let [[a & r] #{}] [a r])"),
+        "[nil nil]"
+    );
+    assert_eq!(run_last(&mut eval, "(let [[a & r] {}] [a r])"), "[nil nil]");
+}
+
+#[test]
+fn seq_destructure_nil_target() {
+    let (mut eval, _) = rigged();
+    // Positional destructuring over `nil` binds `nil`s.
+    assert_eq!(run_last(&mut eval, "(let [[a b] nil] [a b])"), "[nil nil]");
+}
+
+#[test]
+fn invoke_map_two_arity() {
+    let (mut eval, _) = rigged();
+    // Found and not-found.
+    assert_eq!(run_last(&mut eval, "({:a 1} :a :nf)"), "1");
+    assert_eq!(run_last(&mut eval, "({:a 1} :b :nf)"), ":nf");
+}
+
+#[test]
+fn invoke_symbol_arity() {
+    assert_eq!(
+        uncaught("('a 1 2 3)"),
+        "clojure.lang.ArityException | Wrong number of args (3) passed to: clojure.lang.Symbol"
+    );
+}
+
+#[test]
+fn try_handler_throw_finally_ok() {
+    let (mut eval, log) = rigged();
+    // The handler's error propagates when `finally` is quiet;
+    // `finally` still ran.
+    let err = match eval.eval_source(
+        "(try (throw (t-ex \"A\")) (catch Exception e (throw (t-ex \"H\"))) (finally (t-log :fin)))",
+    ) {
+        Err(SourceError::Uncaught(t)) => {
+            format!("{} | {}", t.class.jvm_name(), t.message.as_deref().unwrap_or(""))
+        }
+        Err(e) => panic!("expected uncaught throwable: {e}"),
+        Ok(vs) => panic!("expected a throw, got {vs:?}"),
+    };
+    assert_eq!(err, "clojure.lang.ExceptionInfo | H");
+    assert_eq!(*log.lock().unwrap(), vec![":fin".to_owned()]);
+}
+
+#[test]
+fn source_error_display_renders_all_variants() {
+    let (mut eval, _) = rigged();
+    // Reader errors delegate to the inner display.
+    let err = eval.read_forms("(def").unwrap_err();
+    let SourceError::Reader(inner) = &err else {
+        panic!("expected a reader error, got {err:?}")
+    };
+    assert_eq!(format!("{err}"), format!("{inner}"));
+    // Compile errors delegate to the inner display.
+    let forms = eval.read_forms("(def a 1 2)").unwrap();
+    let inner = eval.analyze(&forms[0]).unwrap_err();
+    let err = SourceError::Compile(inner);
+    let SourceError::Compile(inner) = &err else {
+        panic!("unreachable")
+    };
+    assert_eq!(format!("{err}"), format!("{inner}"));
+    // Uncaught throwables render `class | message`.
+    let err = eval.eval_source("(throw (t-ex \"boom\"))").unwrap_err();
+    assert_eq!(format!("{err}"), "clojure.lang.ExceptionInfo | boom");
+    // Internal errors render with the prefix.
+    assert_eq!(
+        format!("{}", SourceError::Internal("x".to_owned())),
+        "internal error: x"
+    );
 }

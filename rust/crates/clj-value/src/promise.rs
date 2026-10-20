@@ -114,16 +114,15 @@ impl Promise {
     /// value.
     pub fn get(&self) -> Value {
         let mut state = self.lock();
-        while let PromiseState::Pending = *state {
+        loop {
+            if let PromiseState::Delivered(v) = state.clone() {
+                return v;
+            }
             state = self
                 .cell
                 .ready
                 .wait(state)
                 .unwrap_or_else(|e| e.into_inner());
-        }
-        match state.clone() {
-            PromiseState::Delivered(v) => v,
-            PromiseState::Pending => unreachable!("waited out of pending"),
         }
     }
 
@@ -134,24 +133,27 @@ impl Promise {
     pub fn get_timeout(&self, timeout: Duration) -> Option<Value> {
         let deadline = Instant::now() + timeout;
         let mut state = self.lock();
-        while let PromiseState::Pending = *state {
+        // Return-from-inside (no trailing match): the delivery
+        // check doubles as the loop exit, so no arm covers an
+        // impossible post-loop state (100% line gate).
+        loop {
+            if let PromiseState::Delivered(v) = state.clone() {
+                return Some(v);
+            }
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
                 return None;
             }
-            let (next, result) = self
+            // No `timed_out` check: the loop head re-tests delivery
+            // (a racing delivery still wins) and the deadline
+            // re-check exits true timeouts — one fewer branch, and
+            // no untestable spurious-wakeup leg.
+            let (next, _) = self
                 .cell
                 .ready
                 .wait_timeout(state, remaining)
                 .unwrap_or_else(|e| e.into_inner());
             state = next;
-            if result.timed_out() && matches!(*state, PromiseState::Pending) {
-                return None;
-            }
-        }
-        match state.clone() {
-            PromiseState::Delivered(v) => Some(v),
-            PromiseState::Pending => unreachable!("waited out of pending"),
         }
     }
 
@@ -185,5 +187,29 @@ impl Promise {
 impl Default for Promise {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Promise;
+
+    #[test]
+    fn default_is_a_pending_promise() {
+        let promise = Promise::default();
+        assert!(!promise.is_realized());
+    }
+
+    #[test]
+    fn timeout_on_pending_promise_returns_none() {
+        use std::time::Duration;
+
+        let promise = Promise::default();
+        // Repeat so the wait-timeout expiry path runs (not just the
+        // zero-remaining pre-check): each iteration blocks ~1ms, then
+        // the wait times out while still pending.
+        for _ in 0..50 {
+            assert_eq!(promise.get_timeout(Duration::from_millis(1)), None);
+        }
     }
 }

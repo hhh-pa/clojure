@@ -33,6 +33,11 @@ clj-value = { path = "crates/clj-value" }
 default = ["aot"]
 aot = ["clj-aot"]
 
+# Test-only fd juggling (piped-stdin validator coverage): Unix-gated
+# so Windows builds never compile it.
+[target.'cfg(unix)'.dev-dependencies]
+rustix = { version = "1", features = ["pipe", "stdio"] }
+
 # Deny the `unused` lint group workspace-wide, on every platform and
 # profile: clippy's `-D warnings` only runs on Linux CI, so without
 # this, Windows/macOS-only dead code compiles with warnings no gate

@@ -238,38 +238,6 @@ impl Namespace {
     pub fn state_mut(&mut self, id: u64) -> Option<&mut VarState> {
         self.vars.get_mut(&id)
     }
-
-    /// The qualified symbol behind an id (for printing sentinels).
-    #[must_use]
-    pub fn symbol_of(&self, id: u64) -> Option<Symbol> {
-        self.ids
-            .iter()
-            .find_map(|(s, i)| (*i == id).then(|| s.clone()))
-    }
-
-    /// `Var.isBound` (minus thread bindings, which live in
-    /// [`Bindings`]): a root that is absent or ANY `Unbound`
-    /// sentinel counts as unbound (`Var.hasRoot`).
-    #[must_use]
-    pub fn has_root(&self, id: u64) -> bool {
-        match self.vars.get(&id).and_then(|s| s.root.as_ref()) {
-            None | Some(Value::Unbound(_)) => false,
-            Some(_) => true,
-        }
-    }
-
-    /// `Var.deref` (minus thread bindings): the root, or the var's
-    /// own `Unbound` sentinel when rootless. Never throws.
-    #[must_use]
-    pub fn root_or_unbound(&self, id: u64, sym: &Symbol) -> Value {
-        match self.vars.get(&id).and_then(|s| s.root.clone()) {
-            Some(v) => v,
-            None => Value::Unbound(Unbound {
-                sym: sym.clone(),
-                var_id: id,
-            }),
-        }
-    }
 }
 
 /// Find or create a namespace in `namespaces`, issuing a fresh
@@ -800,30 +768,13 @@ impl SharedRegistry {
         self.lock().registry.remove_ns(name)
     }
 
-    /// Qualify an unqualified symbol into the current namespace.
-    #[must_use]
-    pub fn qualify(&self, sym: &Symbol) -> Symbol {
-        self.lock().registry.qualify(sym)
-    }
-
-    /// [`qualify`](Self::qualify) against an explicit namespace.
+    /// Qualify an unqualified symbol against an explicit namespace.
     #[must_use]
     pub fn qualify_in(&self, ns_name: &str, sym: &Symbol) -> Symbol {
         self.lock().registry.qualify_in(ns_name, sym)
     }
 
-    /// The namespace a qualifier names (aliases win over real
-    /// namespaces).
-    #[must_use]
-    pub fn namespace_target(&self, part: &str) -> Option<String> {
-        self.lock()
-            .registry
-            .namespace_target(part)
-            .map(str::to_owned)
-    }
-
-    /// [`namespace_target`](Self::namespace_target) against an
-    /// explicit namespace.
+    /// The namespace a qualifier names, against an explicit namespace.
     #[must_use]
     pub fn namespace_target_in(&self, ns_name: &str, part: &str) -> Option<String> {
         self.lock()
@@ -832,13 +783,7 @@ impl SharedRegistry {
             .map(str::to_owned)
     }
 
-    /// Resolve a symbol to its qualified target.
-    #[must_use]
-    pub fn resolve(&self, sym: &Symbol) -> Option<Symbol> {
-        self.lock().registry.resolve(sym)
-    }
-
-    /// [`resolve`](Self::resolve) against an explicit namespace.
+    /// Resolve a symbol to its qualified target, against an explicit namespace.
     #[must_use]
     pub fn resolve_in(&self, ns_name: &str, sym: &Symbol) -> Option<Symbol> {
         self.lock().registry.resolve_in(ns_name, sym)
@@ -848,12 +793,6 @@ impl SharedRegistry {
     #[must_use]
     pub fn lookup(&self, sym: &Symbol) -> Option<u64> {
         self.lock().registry.lookup(sym)
-    }
-
-    /// [`lookup`](Self::lookup) against an explicit namespace.
-    #[must_use]
-    pub fn lookup_in(&self, ns_name: &str, sym: &Symbol) -> Option<u64> {
-        self.lock().registry.lookup_in(ns_name, sym)
     }
 
     /// Intern (find or create) a var (see
@@ -1088,9 +1027,10 @@ impl Env {
     /// Overwrite one slot (`letfn`/named-`fn` patching only; `recur`
     /// duplicates first).
     pub fn set(&self, idx: usize, value: Value) {
-        let Ok(mut slots) = self.slots.lock() else {
-            return;
-        };
+        // Poison is unreachable (nothing panics while holding a
+        // frame lock); recover like `SharedRegistry::lock` so a
+        // poisoned lock keeps the write instead of dropping it.
+        let mut slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(slot) = slots.get_mut(idx) {
             *slot = value;
         }
@@ -1193,5 +1133,39 @@ mod tests {
         let reg = rigged();
         assert_eq!(reg.qualify(&sym(None, "a")), sym(Some("user"), "a"));
         assert_eq!(reg.qualify(&sym(Some("lib"), "a")), sym(Some("lib"), "a"));
+    }
+
+    #[test]
+    fn lookup_qualifies_here_and_rejects_foreign() {
+        let reg = rigged();
+        // Unqualified resolves here; foreign qualifiers never do.
+        let lib = reg.get("lib").unwrap();
+        assert_eq!(
+            lib.lookup(&sym(None, "v")),
+            lib.lookup(&sym(Some("lib"), "v"))
+        );
+        assert!(lib.lookup(&sym(None, "v")).is_some());
+        assert_eq!(
+            reg.get("user").unwrap().lookup(&sym(Some("lib"), "v")),
+            None
+        );
+    }
+
+    #[test]
+    fn live_or_removed_mut_answers_tombstones() {
+        let mut reg = rigged();
+        assert!(reg.remove_ns("lib"));
+        // Live names take the live branch; removed ones fall to the
+        // tombstone.
+        assert!(reg.ns_live_or_removed_mut("user").is_some());
+        assert!(reg.ns_live_or_removed_mut("lib").is_some());
+        assert!(reg.ns_live_or_removed_mut("missing").is_none());
+    }
+
+    #[test]
+    fn env_empty_tracks_slots() {
+        let env = Env::new();
+        assert!(env.is_empty());
+        assert!(!env.extend(vec![Value::Nil]).is_empty());
     }
 }

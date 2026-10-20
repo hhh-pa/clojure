@@ -8,9 +8,9 @@
 
 //! S5C macroexpansion (`macroexpand-1`, `macroexpand`, `gensym`)
 //! plus the early list-building natives syntax-quote expansions
-//! call (`seq`, `concat`, `list`, `apply`, `vector`, `hash-map`,
-//! `hash-set` — S5D rows implemented eagerly here; S5D makes
-//! `seq`/`concat` lazy per C4). Oracle: probe38; rules:
+//! call (`list`, `apply`, `vector`, `hash-map`, `hash-set` —
+//! `seq`/`concat` live in `lazy`/`seqs` since S5D went lazy per
+//! C4). Oracle: probe38; rules:
 //! `docs/t1174/macros-contract.md`. The wrap partition is
 //! source-read from `Compiler.macroexpand1`.
 
@@ -19,7 +19,7 @@ use std::sync::Arc;
 use clj_reader::Span;
 use clj_value::{Keyword, List, Symbol, ThrowClass, Value, Vector, new_map, new_set};
 
-use crate::error::{CompileError, NativeError, Signal, Verb, jvm_class_of};
+use crate::error::{CompileError, NativeError, Signal, Verb, internal_throwable};
 use crate::eval::Evaluator;
 use crate::expr::is_special;
 use crate::ns::{NativeFnPtr, check_arity, signal_to_native, str_of, throw_class_for};
@@ -114,9 +114,11 @@ pub(crate) fn lookup_macro(eval: &Evaluator, op: &Value) -> Result<Option<MacroR
                 return Ok(None);
             };
             let home = target.namespace().unwrap_or(&cur);
-            let Some(id) = eval.registry.get(home).and_then(|ns| ns.lookup(&target)) else {
-                return Ok(None);
-            };
+            let id = eval
+                .registry
+                .get(home)
+                .and_then(|ns| ns.lookup(&target))
+                .expect("resolve_in guarantees the var id exists");
             (id, target)
         }
         Value::Var(v) => (v.id, v.sym.clone()),
@@ -255,8 +257,31 @@ pub(crate) fn expand1(
     let source = Arc::from(eval.source());
     match eval.call(root, &call_args) {
         Ok(v) => Ok(v),
-        Err(Signal::Throw(t)) => Err(wrap_expansion(&t, op, root, argc, span, &source)),
-        Err(Signal::Recur(_)) => unreachable!("recur cannot escape a macro call"),
+        Err(s) => Err(expansion_err(s, op, root, argc, span, &source)),
+    }
+}
+
+/// A macro-call failure as a compile error (an escaping `recur`
+/// is impossible — the call runs inside the expansion frame —
+/// and surfaces as an internal error, never a panic).
+fn expansion_err(
+    s: Signal,
+    op: &Value,
+    root: &Value,
+    call_argc: usize,
+    span: Span,
+    source: &Arc<str>,
+) -> CompileError {
+    match s {
+        Signal::Throw(t) => wrap_expansion(&t, op, root, call_argc, span, source),
+        Signal::Recur(_) => wrap_expansion(
+            &internal_throwable("recur escaped a macro call".to_owned()),
+            op,
+            root,
+            call_argc,
+            span,
+            source,
+        ),
     }
 }
 
@@ -374,50 +399,9 @@ fn native_gensym(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeEr
 }
 
 // ---------------------------------------------------------------------------
-// Early list natives (S5D rows, eager; S5D adds laziness per C4).
+// Early list natives (`list`, `apply`, `vector`, `hash-map`,
+// `hash-set`; `seq`/`concat` live in `lazy`/`seqs` since S5D).
 // ---------------------------------------------------------------------------
-
-/// `seq` a value into items (`None` = nil/empty): lists, vectors,
-/// maps (as `[k v]` vectors — the JVM yields `MapEntry`s, fence),
-/// sets, and strings (as chars); anything else is the `ISeq`
-/// error.
-/// A map entry as a `[k v]` vector (`seq` on maps).
-fn map_entry(k: &Value, val: &Value) -> Value {
-    Value::Vector(Vector::from_vec(vec![k.clone(), val.clone()]))
-}
-
-fn seq_items(v: &Value) -> Result<Option<Vec<Value>>, NativeError> {
-    let items: Vec<Value> = match v {
-        Value::Nil => return Ok(None),
-        Value::List(l) => l.iter().cloned().collect(),
-        Value::Vector(x) => x.iter().cloned().collect(),
-        Value::Map(m) => m.iter().map(|(k, val)| map_entry(k, val)).collect(),
-        Value::Set(s) => s.iter().cloned().collect(),
-        Value::Str(s) => s.chars().map(Value::Char).collect(),
-        _ => {
-            return Err(NativeError::new(
-                ThrowClass::IllegalArgumentException,
-                format!("Don't know how to create ISeq from: {}", jvm_class_of(v)),
-            ));
-        }
-    };
-    Ok((!items.is_empty()).then_some(items))
-}
-
-fn native_seq(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
-    check_arity("clojure.core/seq", args, &[1])?;
-    Ok(seq_items(&args[0])?.map_or(Value::Nil, |items| Value::List(List::from_vec(items))))
-}
-
-fn native_concat(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
-    let mut out = Vec::new();
-    for arg in args {
-        if let Some(items) = seq_items(arg)? {
-            out.extend(items);
-        }
-    }
-    Ok(Value::List(List::from_vec(out)))
-}
 
 fn native_list(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     Ok(Value::List(List::from_vec(args.to_vec())))
@@ -469,12 +453,32 @@ pub(crate) const MACRO_NATIVES: &[(&str, NativeFnPtr)] = &[
     ("macroexpand-1", native_macroexpand_1),
     ("macroexpand", native_macroexpand),
     ("gensym", native_gensym),
-    // Early (S5D rows): syntax-quote expansions call these.
-    ("seq", native_seq),
-    ("concat", native_concat),
+    // Early (S5C rows): syntax-quote expansions call these.
     ("list", native_list),
     ("apply", native_apply),
     ("vector", native_vector),
     ("hash-map", native_hash_map),
     ("hash-set", native_hash_set),
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn expansion_recur_is_internal() {
+        // Defense in depth: an escaping `recur` (impossible — the
+        // call runs inside the expansion frame) surfaces as an
+        // internal error.
+        let source: Arc<str> = Arc::from("NO_SOURCE_PATH");
+        let err = expansion_err(
+            Signal::Recur(vec![]),
+            &Value::Nil,
+            &Value::Nil,
+            2,
+            Span::new(1, 1),
+            &source,
+        );
+        assert!(err.message.contains("recur escaped a macro call"));
+    }
+}

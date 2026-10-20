@@ -305,3 +305,90 @@ impl Agent {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{Agent, AgentAction, AgentPool, QueuedAction};
+    use crate::{Map, ThrowClass, Throwable, Value};
+    use std::sync::Arc;
+
+    /// Minimal action that keeps the default `take_outbox`.
+    struct StubAction;
+
+    impl AgentAction for StubAction {
+        fn run(&mut self, state: &Value) -> Result<Value, Throwable> {
+            Ok(state.clone())
+        }
+
+        fn fire_watches(
+            &mut self,
+            _agent: &Value,
+            _old: &Value,
+            _new: &Value,
+            _watches: &Map,
+        ) -> Result<(), Throwable> {
+            Ok(())
+        }
+
+        fn handle_error(&mut self, _handler: &Value, _agent: &Value, _error: &Throwable) {}
+    }
+
+    fn stub_queued(pool: AgentPool) -> QueuedAction {
+        QueuedAction {
+            pool,
+            action: Box::new(StubAction),
+        }
+    }
+
+    fn failure() -> Throwable {
+        Throwable {
+            id: 7,
+            class: ThrowClass::RuntimeException,
+            message: Some(Arc::from("boom")),
+            data: None,
+            cause: None,
+        }
+    }
+
+    #[test]
+    fn default_take_outbox_is_empty() {
+        let mut action = StubAction;
+        assert!(action.take_outbox().is_empty());
+    }
+
+    #[test]
+    fn stub_action_runs_and_fires() {
+        let mut action = StubAction;
+        let state = Value::Int(1);
+        assert!(matches!(action.run(&state), Ok(Value::Int(1))));
+        assert!(
+            action
+                .fire_watches(&Value::Nil, &Value::Nil, &Value::Nil, &crate::new_map())
+                .is_ok()
+        );
+        action.handle_error(&Value::Nil, &Value::Nil, &failure());
+    }
+
+    #[test]
+    fn queued_action_debug_names_pool() {
+        assert_eq!(
+            format!("{:?}", stub_queued(AgentPool::Send)),
+            "QueuedAction { pool: Send, .. }"
+        );
+        assert_eq!(
+            format!("{:?}", stub_queued(AgentPool::SendOff)),
+            "QueuedAction { pool: SendOff, .. }"
+        );
+    }
+
+    #[test]
+    fn enqueue_on_failed_agent_rejects_with_latched_error() {
+        let agent = Agent::new(Value::Int(0));
+        agent.complete_failed(failure());
+        let err = agent
+            .enqueue(stub_queued(AgentPool::Send))
+            .expect_err("failed agent must reject sends");
+        assert_eq!(err.id, 7);
+        assert_eq!(err.class, ThrowClass::RuntimeException);
+    }
+}

@@ -1337,19 +1337,16 @@ mod tests {
 
     #[test]
     fn map_equiv_and_lookup() {
-        let m = Value::Map(
-            new_map()
-                .insert(Value::Int(1), Value::Str(Arc::from("a")))
-                .insert(Value::Keyword(Keyword::new(None, "k")), Value::Nil),
-        );
+        // Bind before wrapping: no destructure, no dead fallback
+        // (100% line gate counts test lines too).
+        let inner = new_map()
+            .insert(Value::Int(1), Value::Str(Arc::from("a")))
+            .insert(Value::Keyword(Keyword::new(None, "k")), Value::Nil);
+        let m = Value::Map(inner.clone());
         // Mixed numerics are distinct keys: cross-type lookup misses.
-        if let Value::Map(m) = &m {
-            assert_eq!(m.get(&Value::Double(1.0)), None);
-            assert_eq!(m.get(&Value::Int(1)), Some(&Value::Str(Arc::from("a"))));
-            assert_eq!(m.size(), 2);
-        } else {
-            panic!("expected map");
-        }
+        assert_eq!(inner.get(&Value::Double(1.0)), None);
+        assert_eq!(inner.get(&Value::Int(1)), Some(&Value::Str(Arc::from("a"))));
+        assert_eq!(inner.size(), 2);
         let swapped = Value::Map(
             new_map()
                 .insert(Value::Keyword(Keyword::new(None, "k")), Value::Nil)
@@ -1370,16 +1367,14 @@ mod tests {
 
     #[test]
     fn set_equiv() {
-        let a = Value::Set(new_set().insert(Value::Int(1)).insert(Value::Int(2)));
+        // Bind before wrapping (see map_equiv_and_lookup).
+        let inner = new_set().insert(Value::Int(1)).insert(Value::Int(2));
+        let a = Value::Set(inner.clone());
         let b = Value::Set(new_set().insert(Value::Int(2)).insert(Value::Int(1)));
         assert_hash_consistent(&a, &b);
-        if let Value::Set(s) = &a {
-            assert!(!s.contains(&Value::Double(1.0)));
-            assert!(s.contains(&Value::Int(1)));
-            assert!(!s.contains(&Value::Int(3)));
-        } else {
-            panic!("expected set");
-        }
+        assert!(!inner.contains(&Value::Double(1.0)));
+        assert!(inner.contains(&Value::Int(1)));
+        assert!(!inner.contains(&Value::Int(3)));
         // `#{1 1.0}` keeps both members.
         let mixed = new_set().insert(Value::Int(1)).insert(Value::Double(1.0));
         assert_eq!(mixed.size(), 2);
@@ -1581,14 +1576,8 @@ mod tests {
         );
         // Sets iterate in insertion order; re-inserting is a no-op.
         let s = super::Set::from_items_checked(vec![Value::Int(2), Value::Int(1)]).unwrap();
-        let items: Vec<i64> = s
-            .iter()
-            .map(|v| match v {
-                Value::Int(i) => *i,
-                _ => unreachable!(),
-            })
-            .collect();
-        assert_eq!(items, vec![2, 1]);
+        let items: Vec<Value> = s.iter().cloned().collect();
+        assert_eq!(items, vec![Value::Int(2), Value::Int(1)]);
         let s2 = s.insert(Value::Int(2));
         assert_eq!(s2.size(), 2);
         // Order-insensitive equality still holds across orders.
@@ -1613,5 +1602,230 @@ mod tests {
             super::Set::from_items_checked(vec![Value::Int(1), Value::Int(1)]),
             Err(Value::Int(1))
         );
+    }
+
+    #[derive(Debug)]
+    struct OpaqueExt;
+
+    impl crate::ExtensionValue for OpaqueExt {
+        fn class_name(&self) -> String {
+            "test.Opaque".to_owned()
+        }
+
+        fn print(&self) -> String {
+            "#test.Opaque".to_owned()
+        }
+
+        fn dyn_eq(&self, other: &dyn crate::ExtensionValue) -> bool {
+            other.as_any().downcast_ref::<Self>().is_some()
+        }
+
+        fn dyn_hash(&self, state: &mut dyn std::hash::Hasher) {
+            std::hash::Hasher::write_u8(state, 0x4f);
+        }
+
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+
+    #[test]
+    fn set_is_empty_and_list_eq() {
+        assert!(new_set().is_empty());
+        assert!(!new_set().insert(Value::Int(1)).is_empty());
+        let a = super::List::from_vec(vec![Value::Int(1)]);
+        assert_eq!(a, super::List::from_vec(vec![Value::Int(1)]));
+        assert_ne!(a, super::List::new_sync());
+    }
+
+    #[test]
+    fn with_meta_ignores_plain_values() {
+        let meta = new_map().insert(kw("k"), Value::Bool(true));
+        assert_eq!(Value::Int(1).with_meta(Some(meta.clone())), Value::Int(1));
+        assert_eq!(Value::Nil.with_meta(Some(meta)), Value::Nil);
+    }
+
+    #[test]
+    fn with_meta_ignores_opaque_extensions() {
+        let inner = Arc::new(OpaqueExt);
+        let v = Value::Extension(inner.clone());
+        let meta = new_map().insert(kw("k"), Value::Bool(true));
+        assert_eq!(v.clone().with_meta(Some(meta)), v);
+        assert_eq!(crate::ExtensionValue::class_name(&*inner), "test.Opaque");
+        assert_eq!(crate::ExtensionValue::print(&*inner), "#test.Opaque");
+        assert_eq!(hash_of(&v), hash_of(&v.clone()));
+    }
+
+    #[test]
+    fn realized_seq_equiv() {
+        use crate::{RealizedSeq, Seq};
+        let items = vec![Value::Int(1), Value::Int(2)];
+        let seq = Value::Extension(Arc::new(RealizedSeq::new(
+            Seq::eager(items.clone()).unwrap(),
+        )));
+        assert_eq!(seq, Value::List(super::List::from_vec(items.clone())));
+        assert_eq!(seq, Value::Vector(super::Vector::from_vec(items)));
+        assert_ne!(seq, Value::Int(1));
+    }
+
+    #[test]
+    fn walked_seq_equiv() {
+        use crate::{RangeNum, RangeValue, RepeatValue, SubVectorValue};
+        let range = Value::Extension(Arc::new(RangeValue::new(
+            RangeNum::Int(0),
+            Some(RangeNum::Int(2)),
+            RangeNum::Int(1),
+            true,
+            Some(2),
+        )));
+        let expect = Value::List(super::List::from_vec(vec![Value::Int(0), Value::Int(1)]));
+        assert_eq!(range, expect);
+        let repeat = Value::Extension(Arc::new(RepeatValue::new(Value::Int(7), Some(2))));
+        let expect = Value::Vector(super::Vector::from_vec(vec![Value::Int(7), Value::Int(7)]));
+        assert_eq!(repeat, expect);
+        let backing = super::Vector::from_vec(vec![Value::Int(1), Value::Int(2), Value::Int(3)]);
+        let sv = Value::Extension(Arc::new(SubVectorValue::new(backing, 1, 3)));
+        let expect = Value::List(super::List::from_vec(vec![Value::Int(2), Value::Int(3)]));
+        assert_eq!(sv, expect);
+    }
+
+    #[test]
+    fn transient_eq_is_shared_cell() {
+        use crate::{Transient, TransientKind, TransientVector};
+        let t = Value::Transient(Transient::new(
+            TransientKind::Vector(TransientVector::new()),
+        ));
+        assert_eq!(t, t.clone());
+        let u = Value::Transient(Transient::new(
+            TransientKind::Vector(TransientVector::new()),
+        ));
+        assert_ne!(t, u);
+        assert_ne!(t, Value::Int(1));
+    }
+
+    #[test]
+    fn identity_variants_hash() {
+        use crate::{
+            Agent, Atom, Delay, Future, Promise, Transient, TransientKind, TransientVector,
+        };
+        let vals = vec![
+            Value::Transient(Transient::new(
+                TransientKind::Vector(TransientVector::new()),
+            )),
+            Value::Atom(Atom::new(Value::Int(0))),
+            Value::Delay(Delay::new(Value::Int(0))),
+            Value::Future(Future::new()),
+            Value::Promise(Promise::new()),
+            Value::Agent(Agent::new(Value::Int(0))),
+        ];
+        for v in &vals {
+            assert_eq!(hash_of(v), hash_of(&v.clone()));
+        }
+    }
+
+    #[test]
+    fn seq_extension_hash_matches_sequential() {
+        use crate::{RangeNum, RangeValue, RealizedSeq, RepeatValue, Seq, SubVectorValue};
+        let items = vec![Value::Int(1), Value::Int(2)];
+        let list = Value::List(super::List::from_vec(items.clone()));
+        let seq = Value::Extension(Arc::new(RealizedSeq::new(
+            Seq::eager(items.clone()).unwrap(),
+        )));
+        assert_eq!(hash_of(&seq), hash_of(&list));
+        let range = Value::Extension(Arc::new(RangeValue::new(
+            RangeNum::Int(1),
+            Some(RangeNum::Int(3)),
+            RangeNum::Int(1),
+            true,
+            Some(2),
+        )));
+        assert_eq!(hash_of(&range), hash_of(&list));
+        let repeat = Value::Extension(Arc::new(RepeatValue::new(Value::Int(5), Some(2))));
+        let fives = Value::List(super::List::from_vec(vec![Value::Int(5), Value::Int(5)]));
+        assert_eq!(hash_of(&repeat), hash_of(&fives));
+        let backing = super::Vector::from_vec(vec![Value::Int(1), Value::Int(2), Value::Int(3)]);
+        let sv = Value::Extension(Arc::new(SubVectorValue::new(backing, 0, 2)));
+        assert_eq!(hash_of(&sv), hash_of(&list));
+    }
+
+    #[test]
+    fn coll_equiv_rejects_non_collections() {
+        assert!(!super::coll_equiv(&Value::Int(1), &Value::Int(1)));
+        assert!(!super::coll_equiv(
+            &Value::Int(1),
+            &Value::Str(Arc::from("x"))
+        ));
+    }
+
+    #[test]
+    fn tagged_identity_forms() {
+        use crate::{ThrowClass, Throwable, Unbound, Var};
+        let tl = |form| Value::TaggedLiteral {
+            tag: Symbol::new(None, "t"),
+            form: Box::new(form),
+        };
+        let var = |id| {
+            Value::Var(Var {
+                id,
+                sym: Symbol::new(None, "x"),
+            })
+        };
+        assert_eq!(tl(var(1)), tl(var(1)));
+        assert_ne!(tl(var(1)), tl(var(2)));
+        let unb = |var_id| {
+            Value::Unbound(Unbound {
+                sym: Symbol::new(None, "y"),
+                var_id,
+            })
+        };
+        assert_eq!(tl(unb(1)), tl(unb(1)));
+        assert_ne!(tl(unb(1)), tl(unb(2)));
+        let thr = |id| {
+            Value::Throwable(Throwable {
+                id,
+                class: ThrowClass::Exception,
+                message: None,
+                data: None,
+                cause: None,
+            })
+        };
+        assert_eq!(tl(thr(1)), tl(thr(1)));
+        assert_ne!(tl(thr(1)), tl(thr(2)));
+    }
+
+    #[test]
+    fn tagged_collection_forms() {
+        let tl = |form| Value::TaggedLiteral {
+            tag: Symbol::new(None, "t"),
+            form: Box::new(form),
+        };
+        let l1 = Value::List(super::List::from_vec(vec![Value::Int(1)]));
+        let v1 = Value::Vector(super::Vector::from_vec(vec![Value::Int(1)]));
+        let v2 = Value::Vector(super::Vector::from_vec(vec![Value::Int(2)]));
+        assert_eq!(tl(l1.clone()), tl(v1.clone()));
+        assert_eq!(tl(v1.clone()), tl(l1.clone()));
+        assert_ne!(tl(l1), tl(v2));
+        let m1 = Value::Map(new_map().insert(kw("a"), Value::Int(1)));
+        let m2 = Value::Map(new_map().insert(kw("a"), Value::Int(1)));
+        let m3 = Value::Map(new_map().insert(kw("a"), Value::Int(2)));
+        assert_eq!(tl(m1.clone()), tl(m2));
+        assert_ne!(tl(m1), tl(m3));
+        let s1 = Value::Set(new_set().insert(Value::Int(1)));
+        let s2 = Value::Set(new_set().insert(Value::Int(1)));
+        let s3 = Value::Set(new_set().insert(Value::Int(2)));
+        assert_eq!(tl(s1.clone()), tl(s2));
+        assert_ne!(tl(s1), tl(s3));
+    }
+
+    #[test]
+    fn tagged_extension_forms() {
+        let tl = |form| Value::TaggedLiteral {
+            tag: Symbol::new(None, "t"),
+            form: Box::new(form),
+        };
+        let e1 = Value::Extension(Arc::new(OpaqueExt));
+        let e2 = Value::Extension(Arc::new(OpaqueExt));
+        assert_eq!(tl(e1), tl(e2));
+        assert_ne!(tl(Value::Extension(Arc::new(OpaqueExt))), tl(Value::Int(1)));
     }
 }

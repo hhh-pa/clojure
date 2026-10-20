@@ -3134,3 +3134,159 @@ fn identity_meta_equality_rows() {
     assert_eq!(run_last(&mut eval, "(= (promise) (promise))"), "false");
     assert_eq!(run_last(&mut eval, "(= (agent 1) (agent 1))"), "false");
 }
+
+#[test]
+fn agent_shutdown_rejects() {
+    let mut eval = boot();
+    run(&mut eval, "(def s6x-done (promise))");
+    run(&mut eval, "(def s6x-seen2 (atom nil))");
+    run(&mut eval, "(def s6x-seen3 (atom nil))");
+    run(&mut eval, "(def s6x-a (agent 0))");
+    run(
+        &mut eval,
+        "(def s6x-a2 (agent 0 :error-handler (fn [ag t] (reset! s6x-seen2 t))))",
+    );
+    run(
+        &mut eval,
+        "(def s6x-a3 (agent 0 :error-handler (fn [ag t] (reset! s6x-seen3 t))))",
+    );
+    run(
+        &mut eval,
+        "(send s6x-a (fn [s] (shutdown-agents) (send s6x-a2 inc) (send-off s6x-a3 inc) (deliver s6x-done :ok) 5))",
+    );
+    run(&mut eval, "(send s6x-a inc)");
+    assert_eq!(run_last(&mut eval, "@s6x-done"), ":ok");
+    // The publish lands after the deliver; poll (bounded) for it.
+    // Once 5 is visible, the outbox release (both handlers) has run
+    // too — the release precedes the publish.
+    let start = std::time::Instant::now();
+    while run_last(&mut eval, "@s6x-a") != "5" {
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(10),
+            "action never published"
+        );
+    }
+    // The action published; everything queued or nested after the
+    // shutdown was rejected, never run.
+    assert_eq!(run_last(&mut eval, "@s6x-a2"), "0");
+    assert_eq!(run_last(&mut eval, "@s6x-a3"), "0");
+    // Both nested heads reached the handlers as rejections.
+    assert_eq!(
+        run_last(&mut eval, "(ex-message @s6x-seen2)"),
+        "\"agent action rejected after shutdown\""
+    );
+    assert_eq!(
+        class_of(&mut eval, "@s6x-seen2"),
+        "java.util.concurrent.RejectedExecutionException"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(ex-message @s6x-seen3)"),
+        "\"agent action rejected after shutdown\""
+    );
+    assert_eq!(
+        class_of(&mut eval, "@s6x-seen3"),
+        "java.util.concurrent.RejectedExecutionException"
+    );
+}
+
+#[test]
+fn agent_pump_drops_queued_after_shutdown() {
+    let mut eval = boot();
+    // The worker blocks on the gate, so the second send surely
+    // queues behind the running action (no timing assumption);
+    // the shutdown then strands it in the pump, which drops it.
+    run(&mut eval, "(def s6x-gate (promise))");
+    run(&mut eval, "(def s6x-pd (agent 0))");
+    run(
+        &mut eval,
+        "(send s6x-pd (fn [s] @s6x-gate (shutdown-agents) 5))",
+    );
+    run(&mut eval, "(send s6x-pd inc)");
+    run(&mut eval, "(deliver s6x-gate :go)");
+    // The release needs a heartbeat: the worker publishes after
+    // the deliver lands.
+    let start = std::time::Instant::now();
+    while run_last(&mut eval, "@s6x-pd") != "5" {
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(10),
+            "action never published"
+        );
+    }
+}
+
+#[test]
+fn agent_panic_foreign_payload() {
+    let mut eval = boot();
+    eval.install_native(
+        "user",
+        "s6x-panic-any",
+        std::sync::Arc::new(|_, _| std::panic::panic_any(42_i32)),
+    );
+    run(&mut eval, "(def s6x-pf (agent 0))");
+    run(&mut eval, "(send s6x-pf s6x-panic-any)");
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(try (await s6x-pf) (catch RuntimeException e :failed))"
+        ),
+        ":failed"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(ex-message (agent-error s6x-pf))"),
+        "\"agent action panicked\""
+    );
+    assert_eq!(
+        class_of(&mut eval, "(agent-error s6x-pf)"),
+        "java.lang.Error"
+    );
+}
+
+#[test]
+fn agent_panic_owned_payload() {
+    let mut eval = boot();
+    eval.install_native(
+        "user",
+        "s6x-panic-owned",
+        std::sync::Arc::new(|_, _| panic!("{}", "s6x-boom-owned")),
+    );
+    run(&mut eval, "(def s6x-po (agent 0))");
+    run(&mut eval, "(send s6x-po s6x-panic-owned)");
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(try (await s6x-po) (catch RuntimeException e :failed))"
+        ),
+        ":failed"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(ex-message (agent-error s6x-po))"),
+        "\"s6x-boom-owned\""
+    );
+    assert_eq!(
+        class_of(&mut eval, "(agent-error s6x-po)"),
+        "java.lang.Error"
+    );
+}
+
+#[test]
+fn future_panicking_native() {
+    let mut eval = boot();
+    eval.install_native(
+        "user",
+        "s6x-fpanic",
+        std::sync::Arc::new(|_, _| panic!("s6x-boom")),
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(deref (future (s6x-fpanic)))"),
+        "java.util.concurrent.ExecutionException | java.lang.Error: s6x-boom"
+    );
+}
+
+#[test]
+fn future_empty_message_cause() {
+    let mut eval = boot();
+    assert_eq!(
+        uncaught(&mut eval, "(deref (future (assoc! (transient [1]) -1 :x)))"),
+        "java.util.concurrent.ExecutionException | java.lang.IndexOutOfBoundsException"
+    );
+}

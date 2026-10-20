@@ -22,7 +22,7 @@ use clj_value::{
 };
 
 use crate::core::{cce_err, cce_message, is_counted, nth_index};
-use crate::error::{NativeError, jvm_class_of};
+use crate::error::{NativeError, jvm_class_of, simple_name_of};
 use crate::eval::Evaluator;
 use crate::lazy::{
     StepUnit, as_range, as_realized, as_repeat, as_subvector, collect_all, equiv_vals, first_value,
@@ -66,17 +66,10 @@ fn num_index(k: &Value) -> Option<i32> {
 }
 
 /// Java `getSimpleName` over a JVM binary name: strip the package,
-/// then a member-class owner (`$` + uppercase stays nested;
+/// then a member-class owner (`$` + uppercase strips to the inner;
 /// `$` + lowercase is a generated fn name and stays).
 fn java_simple_name(v: &Value) -> String {
-    let full = jvm_class_of(v);
-    let base = full.rsplit('.').next().unwrap_or(&full);
-    match base.rsplit_once('$') {
-        Some((_, simple)) if simple.starts_with(|c: char| c.is_ascii_uppercase()) => {
-            simple.to_owned()
-        }
-        _ => base.to_owned(),
-    }
+    simple_name_of(&jvm_class_of(v))
 }
 
 /// Present-or-missing lookup mirroring `RT.get` exactly (`Some`
@@ -221,7 +214,11 @@ enum MapConjPlan {
     Nil,
     Pair(Value, Value),
     Entries(Vec<(Value, Value)>),
-    SeqFirst(Value),
+    /// A seq-headed element (never conjs: the `Map$Entry` cast
+    /// fails). The error is computed in the unlocked plan phase —
+    /// resolving the head's class under the transient lock would
+    /// re-lock when the head aliases the transient.
+    SeqErr(NativeError),
 }
 
 fn map_conj_plan(eval: &mut Evaluator, x: &Value) -> Result<MapConjPlan, NativeError> {
@@ -250,7 +247,7 @@ fn map_conj_plan(eval: &mut Evaluator, x: &Value) -> Result<MapConjPlan, NativeE
                 return Ok(MapConjPlan::Nil);
             }
             let head = first_value(eval, &s).map_err(signal_to_native)?;
-            Ok(MapConjPlan::SeqFirst(head))
+            Ok(MapConjPlan::SeqErr(cce_err(&head, "java.util.Map$Entry")))
         }
     }
 }
@@ -275,7 +272,7 @@ fn conj_map(eval: &mut Evaluator, m: &Map, x: &Value) -> Result<Value, NativeErr
             }
             Ok(Value::Map(out))
         }
-        MapConjPlan::SeqFirst(head) => Err(cce_err(&head, "java.util.Map$Entry")),
+        MapConjPlan::SeqErr(e) => Err(e),
     }
 }
 
@@ -284,10 +281,8 @@ fn conj_map(eval: &mut Evaluator, m: &Map, x: &Value) -> Result<Value, NativeErr
 fn subvector_conj(sv: &SubVectorValue, x: Value) -> Value {
     let v = sv.vec();
     let backing = if sv.end() < v.len() {
-        match v.set_nth(sv.end(), x.clone()) {
-            Some(b) => b,
-            None => v.clone().push_back(x),
-        }
+        v.set_nth(sv.end(), x.clone())
+            .expect("subvector end is below the backing length")
     } else {
         v.clone().push_back(x)
     };
@@ -321,9 +316,8 @@ fn conj_one(eval: &mut Evaluator, coll: &Value, x: Value) -> Result<Value, Nativ
 fn assoc_vector(x: &Vector, i: i64, v: Value) -> Result<Value, NativeError> {
     if let Ok(n) = usize::try_from(i as i32) {
         if n < x.len() {
-            if let Some(out) = x.set_nth(n, v) {
-                return Ok(Value::Vector(out));
-            }
+            let out = x.set_nth(n, v).expect("index is below the length");
+            return Ok(Value::Vector(out));
         } else if n == x.len() {
             return Ok(Value::Vector(x.clone().push_back(v)));
         }
@@ -355,15 +349,15 @@ fn assoc_subvector(sv: &SubVectorValue, k: &Value, v: Value) -> Result<Value, Na
         return Ok(subvector_conj(sv, v));
     }
     let n = abs as usize;
-    if let Some(backing) = sv.vec().set_nth(n, v) {
-        return Ok(Value::Extension(Arc::new(
-            SubVectorValue::new(backing, sv.start(), sv.end()).with_meta(sv.meta().cloned()),
-        )));
-    }
-    Err(NativeError::new(
-        ThrowClass::IndexOutOfBoundsException,
-        String::new(),
-    ))
+    // `abs < end <= backing len` on every live subvector, so this
+    // `set_nth` cannot fail.
+    let backing = sv
+        .vec()
+        .set_nth(n, v)
+        .expect("window index is below the backing length");
+    Ok(Value::Extension(Arc::new(
+        SubVectorValue::new(backing, sv.start(), sv.end()).with_meta(sv.meta().cloned()),
+    )))
 }
 
 /// `RT.assoc` one triple (`assoc`/`update`/`merge-with` share this).
@@ -891,7 +885,8 @@ fn native_find(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErr
 
 /// `nth` over an indexed value (nil-`not_found` throws, like the
 /// 2-arity; vectors, subvectors, and transient vectors share this).
-/// `nth` over a transient (only transient vectors are indexed).
+/// `nth` over a transient (only transient vectors are indexed;
+/// maps/sets are `nth not supported`, like the JVM).
 fn nth_indexed_transient(t: &Transient, n: i32) -> Result<Option<Value>, NativeError> {
     let guard = t.lock();
     match &*guard {
@@ -899,7 +894,7 @@ fn nth_indexed_transient(t: &Transient, n: i32) -> Result<Option<Value>, NativeE
             Some(idx) => Ok(tv.nth(idx).map_err(transient_err)?.cloned()),
             None => Ok(None),
         },
-        _ => Ok(None),
+        kind => Err(nth_unsupported_class(kind.jvm_class())),
     }
 }
 
@@ -963,23 +958,6 @@ fn nth_walk(
     first_value(eval, &cur).map_err(signal_to_native)
 }
 
-/// `nth` over the indexed family (transient maps/sets are unsupported).
-fn nth_indexed_dispatch(
-    coll: &Value,
-    n: i32,
-    not_found: Option<&Value>,
-) -> Result<Value, NativeError> {
-    // Transient maps/sets fall through to `nth not supported`
-    // below; only transient vectors are indexed.
-    if let Value::Transient(t) = coll {
-        let is_vec = matches!(&*t.lock(), TransientKind::Vector(_));
-        if !is_vec {
-            return Err(nth_unsupported(coll));
-        }
-    }
-    nth_indexed(coll, n, not_found)
-}
-
 /// `nth` over a string (chars; `StringIndexOutOfBounds` without `not-found`).
 fn nth_str(s: &str, n: i32, not_found: Option<&Value>) -> Result<Value, NativeError> {
     let found = usize::try_from(n)
@@ -1019,7 +997,7 @@ pub(crate) fn native_nth(eval: &mut Evaluator, args: &[Value]) -> Result<Value, 
         || as_subvector(coll).is_some()
         || matches!(coll, Value::Transient(_))
     {
-        return nth_indexed_dispatch(coll, n, not_found);
+        return nth_indexed(coll, n, not_found);
     }
     if let Value::Str(s) = coll {
         return nth_str(s, n, not_found);
@@ -1032,9 +1010,15 @@ pub(crate) fn native_nth(eval: &mut Evaluator, args: &[Value]) -> Result<Value, 
 
 /// The `nth not supported` error (`getSimpleName` rule).
 fn nth_unsupported(coll: &Value) -> NativeError {
+    nth_unsupported_class(&jvm_class_of(coll))
+}
+
+/// `nth not supported` over a precomputed class (the transient
+/// path holds the buffer lock while reporting).
+fn nth_unsupported_class(class: &str) -> NativeError {
     NativeError::new(
         ThrowClass::UnsupportedOperationException,
-        format!("nth not supported on this type: {}", java_simple_name(coll)),
+        format!("nth not supported on this type: {}", simple_name_of(class)),
     )
 }
 
@@ -1236,7 +1220,7 @@ fn native_persistent(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nat
     }
 }
 
-/// The checked `conj!` map plan (computed unlocked: seqing the
+/// The `conj!` map plan (computed unlocked: seqing the
 /// element runs user code, and the head can be this transient
 /// itself — locking twice deadlocks).
 fn conj_bang_plan(
@@ -1244,14 +1228,16 @@ fn conj_bang_plan(
     t: &Transient,
     x: &Value,
 ) -> Result<Option<MapConjPlan>, NativeError> {
-    let plan = if matches!(&*t.lock(), TransientKind::Map(_)) {
+    // Bind the discriminant first: a `t.lock()` temporary in the
+    // `if` condition would live through the branches, holding the
+    // lock while `map_conj_plan` seqs (self-deadlock on `(conj! t
+    // t)`).
+    let is_map = matches!(&*t.lock(), TransientKind::Map(_));
+    let plan = if is_map {
         Some(map_conj_plan(eval, x)?)
     } else {
         None
     };
-    if let Some(MapConjPlan::SeqFirst(head)) = &plan {
-        return Err(cce_err(head, "java.util.Map$Entry"));
-    }
     Ok(plan)
 }
 
@@ -1270,8 +1256,8 @@ fn conj_bang_apply_map(
                 tm.assoc(k, v).map_err(transient_err)?;
             }
         }
-        Some(MapConjPlan::SeqFirst(_)) => {
-            unreachable!("SeqFirst returns before locking")
+        Some(MapConjPlan::SeqErr(e)) => {
+            return Err(e);
         }
     }
     Ok(())
@@ -1489,13 +1475,9 @@ fn pop_vector(x: &Vector) -> Result<Value, NativeError> {
             "Can't pop empty vector".to_owned(),
         ));
     }
-    match x.drop_last() {
-        Some(out) => Ok(Value::Vector(out)),
-        None => Err(NativeError::new(
-            ThrowClass::IllegalStateException,
-            "Can't pop empty vector".to_owned(),
-        )),
-    }
+    Ok(Value::Vector(
+        x.drop_last().expect("non-empty vector has a tail"),
+    ))
 }
 
 /// `pop` over anything else (subvectors shrink; the rest fail).
@@ -1504,16 +1486,12 @@ fn pop_fallback(arg: &Value) -> Result<Value, NativeError> {
         if sv.len() == 1 {
             return Ok(Value::Vector(Vector::from_vec(Vec::new())));
         }
-        if sv.len() > 1 {
-            return Ok(Value::Extension(Arc::new(
-                SubVectorValue::new(sv.vec().clone(), sv.start(), sv.end() - 1)
-                    .with_meta(sv.meta().cloned()),
-            )));
-        }
-        return Err(NativeError::new(
-            ThrowClass::IllegalStateException,
-            "Can't pop empty vector".to_owned(),
-        ));
+        // Empty subvectors never exist (`subvec` returns a plain
+        // vector when `start == end`), so `end >= 1` here.
+        let end = sv.end().checked_sub(1).expect("subvector is never empty");
+        return Ok(Value::Extension(Arc::new(
+            SubVectorValue::new(sv.vec().clone(), sv.start(), end).with_meta(sv.meta().cloned()),
+        )));
     }
     Err(cce_err(arg, "clojure.lang.IPersistentStack"))
 }

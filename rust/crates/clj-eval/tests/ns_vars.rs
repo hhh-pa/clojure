@@ -778,3 +778,199 @@ fn arity_names_are_qualified() {
         "clojure.lang.ArityException | Wrong number of args (1) passed to: clojure.core/ns-resolve"
     );
 }
+
+#[test]
+fn ns_unalias_via_symbol() {
+    let mut eval = boot();
+    run(&mut eval, "(alias 'axx 'clojure.core)");
+    assert_eq!(run_last(&mut eval, "(ns-unalias 'user 'axx)"), "nil");
+    assert_eq!(run_last(&mut eval, "(ns-aliases 'user)"), "{}");
+}
+
+#[test]
+fn ns_unalias_long() {
+    let mut eval = boot();
+    assert_eq!(
+        uncaught(&mut eval, "(ns-unalias 'user 42)"),
+        "java.lang.ClassCastException | Cannot cast java.lang.Long to clojure.lang.Symbol"
+    );
+}
+
+#[test]
+fn ns_unmap_long() {
+    let mut eval = boot();
+    assert_eq!(
+        uncaught(&mut eval, "(ns-unmap 'user 42)"),
+        "java.lang.ClassCastException | Cannot cast java.lang.Long to clojure.lang.Symbol"
+    );
+}
+
+#[test]
+fn ns_unmap_qualified() {
+    let mut eval = boot();
+    assert_eq!(
+        uncaught(&mut eval, "(ns-unmap 'user 'a/b)"),
+        "java.lang.IllegalArgumentException | Can't unintern namespace-qualified symbol"
+    );
+}
+
+#[test]
+fn ns_resolve_env_rows() {
+    let mut eval = boot();
+    assert_eq!(
+        run_last(&mut eval, "(ns-resolve 'user '#{map} 'map)"),
+        "nil"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(ns-resolve 'user '#{zzz} 'map)"),
+        "#'clojure.core/map"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(ns-resolve 'user nil 'map)"),
+        "#'clojure.core/map"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(ns-resolve 'user '{y 1} 'map)"),
+        "#'clojure.core/map"
+    );
+}
+
+#[test]
+fn intern_adopts_name_meta() {
+    let mut eval = boot();
+    run(&mut eval, "(create-ns 'px)");
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(get (meta (intern 'px (with-meta 'bar {:a 1}))) :a)"
+        ),
+        "1"
+    );
+    assert_eq!(run_last(&mut eval, "(ns-resolve 'px 'bar)"), "#'px/bar");
+}
+
+#[test]
+fn intern_long_name() {
+    let mut eval = boot();
+    assert_eq!(
+        uncaught(&mut eval, "(intern 'user 42)"),
+        "java.lang.ClassCastException | Cannot cast java.lang.Long to clojure.lang.Symbol"
+    );
+}
+
+#[test]
+fn refer_arity_zero() {
+    let mut eval = boot();
+    assert_eq!(
+        uncaught(&mut eval, "(refer)"),
+        "clojure.lang.ArityException | Wrong number of args (0) passed to: clojure.core/refer"
+    );
+}
+
+#[test]
+fn refer_rename_rows() {
+    let mut eval = boot();
+    run(
+        &mut eval,
+        "(do (create-ns 'rlib) (intern 'rlib 'a 1) (intern 'rlib 'b 2))",
+    );
+    // Map value non-symbol (586).
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(do (create-ns 'wrn) (in-ns 'wrn) (clojure.core/refer 'rlib :only '[a] :rename '{a 42}))"
+        ),
+        "java.lang.ClassCastException | Cannot cast java.lang.Long to clojure.lang.Symbol"
+    );
+    run(&mut eval, "(clojure.core/in-ns 'user)");
+    // Fn returning a symbol renames (590).
+    run(&mut eval, "(create-ns 'wrs)");
+    run(
+        &mut eval,
+        "(do (in-ns 'wrs) (clojure.core/refer 'rlib :only '[a] :rename (fn [s] 'zzz)) (clojure.core/in-ns 'user))",
+    );
+    assert_eq!(run_last(&mut eval, "(ns-refers 'wrs)"), "{zzz #'rlib/a}");
+    // Fn returning a non-symbol casts (591).
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(do (create-ns 'wrx) (in-ns 'wrx) (clojure.core/refer 'rlib :only '[a] :rename (fn [s] 42)))"
+        ),
+        "java.lang.ClassCastException | Cannot cast java.lang.Long to clojure.lang.Symbol"
+    );
+    run(&mut eval, "(clojure.core/in-ns 'user)");
+    // A throwing rename fn propagates (592).
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(do (create-ns 'wrt) (in-ns 'wrt) (clojure.core/refer 'rlib :only '[a] :rename (fn [s] (throw (clojure.core/ex-info \"boom\" {})))))"
+        ),
+        "clojure.lang.ExceptionInfo | boom"
+    );
+    run(&mut eval, "(clojure.core/in-ns 'user)");
+    // Qualified rename target rejected (596-599).
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(do (create-ns 'wrq) (in-ns 'wrq) (clojure.core/refer 'rlib :only '[a] :rename '{a b/c}))"
+        ),
+        "java.lang.IllegalArgumentException | Can't intern namespace-qualified symbol"
+    );
+    run(&mut eval, "(clojure.core/in-ns 'user)");
+}
+
+#[test]
+fn refer_only_nonsymbol() {
+    let mut eval = boot();
+    run(&mut eval, "(do (create-ns 'rlib) (intern 'rlib 'a 1))");
+    assert_eq!(
+        uncaught(&mut eval, "(refer 'rlib :only [42])"),
+        "java.lang.IllegalAccessError | 42 does not exist"
+    );
+}
+
+#[test]
+fn refer_only_list() {
+    let mut eval = boot();
+    run(
+        &mut eval,
+        "(do (create-ns 'rlib) (intern 'rlib 'a 1) (intern 'rlib 'b 2))",
+    );
+    run(&mut eval, "(create-ns 'wl)");
+    run(
+        &mut eval,
+        "(do (in-ns 'wl) (clojure.core/refer 'rlib :only '(a)) (clojure.core/in-ns 'user))",
+    );
+    assert_eq!(run_last(&mut eval, "(ns-refers 'wl)"), "{a #'rlib/a}");
+}
+
+#[test]
+fn ns_map_with_refers() {
+    let mut eval = boot();
+    run(&mut eval, "(do (create-ns 'fx) (intern 'fx 'pub 1))");
+    run(
+        &mut eval,
+        "(do (create-ns 'usefx) (in-ns 'usefx) (clojure.core/refer 'fx :only '[pub]) (clojure.core/in-ns 'user))",
+    );
+    assert_eq!(run_last(&mut eval, "(ns-map 'usefx)"), "{pub #'fx/pub}");
+}
+
+#[test]
+fn remove_ns_long() {
+    let mut eval = boot();
+    assert_eq!(
+        uncaught(&mut eval, "(remove-ns 42)"),
+        "java.lang.ClassCastException | Cannot cast java.lang.Long to clojure.lang.Symbol"
+    );
+}
+
+#[test]
+fn current_ns_falls_back_on_foreign_star_ns() {
+    let mut eval = boot();
+    // A non-namespace `*ns*` binding falls back to the
+    // registry current; the def still lands in `user`.
+    assert_eq!(
+        run_last(&mut eval, "(binding [*ns* 1] (def qqq268 1))"),
+        "#'user/qqq268"
+    );
+}

@@ -536,3 +536,35 @@ fn empty_lines_submit_but_skip_history() {
     assert_eq!(handler.lines, vec![String::new()]);
     assert!(editor.source().entries.is_empty());
 }
+
+#[test]
+fn helper_complete_delegates_to_names() {
+    let helper = ReplHelper::new(core_names(), always_complete);
+    let history = MemHistory::new();
+    let ctx = Context::new(&history);
+    let (start, candidates) = helper
+        .complete("(foo/ba", 7, &ctx)
+        .expect("completion cannot fail");
+    assert_eq!(start, 1);
+    assert_eq!(
+        candidates,
+        vec!["foo/bar".to_string(), "foo/baz".to_string()]
+    );
+}
+
+#[test]
+fn core_names_without_boot_yields_session_vars_only() {
+    // On a non-booted evaluator the vocabulary query cannot succeed
+    // (`into`/`keys`/`ns-publics` resolve nothing in the lone `user`
+    // ns), so only the four sorted seeds remain.
+    let mut eval = clj_eval::Evaluator::new("test");
+    assert_eq!(
+        clj_repl::core_names(&mut eval),
+        vec![
+            "*1".to_owned(),
+            "*2".to_owned(),
+            "*3".to_owned(),
+            "*e".to_owned()
+        ]
+    );
+}

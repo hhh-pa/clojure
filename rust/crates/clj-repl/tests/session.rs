@@ -12,7 +12,7 @@
 
 use std::io::{BufReader, Cursor};
 
-use clj_repl::{Session, core_var, is_incomplete_error};
+use clj_repl::{Session, core_var, is_incomplete_error, read_is_complete};
 use clj_value::{List, Value};
 
 /// Run one session transcript: `input` in, `(exit_code, transcript)`
@@ -352,4 +352,128 @@ fn incomplete_detection_per_variant() {
 /// Render a source error for assertion messages (never panics).
 fn snippet_message(err: &clj_eval::SourceError) -> String {
     format!("{err}")
+}
+
+/// A writer that always fails (IO-failure exit paths).
+struct FailWriter;
+
+impl std::io::Write for FailWriter {
+    fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+        Err(std::io::Error::other("boom"))
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Err(std::io::Error::other("boom"))
+    }
+}
+
+/// A reader that always fails.
+struct FailReader;
+
+impl std::io::Read for FailReader {
+    fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
+        Err(std::io::Error::other("boom"))
+    }
+}
+
+impl std::io::BufRead for FailReader {
+    fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
+        Err(std::io::Error::other("boom"))
+    }
+
+    fn consume(&mut self, _amt: usize) {}
+}
+
+#[test]
+fn prompt_write_failure_exits_one() {
+    let eval = clj_eval::boot();
+    let reader = BufReader::new(Cursor::new("(+ 1 2)\n".as_bytes().to_vec()));
+    let mut session = Session::new(eval, reader, FailWriter);
+    session.set_prompt(Some("{ns}=> ".to_owned()));
+    assert_eq!(session.run(), 1);
+}
+
+#[test]
+fn read_failure_exits_one() {
+    let eval = clj_eval::boot();
+    let mut session = Session::new(eval, FailReader, Vec::new());
+    assert_eq!(session.run(), 1);
+}
+
+#[test]
+fn print_write_failure_exits_one() {
+    // No prompt, so the failure lands in `emit` → `write_line`
+    // → `Done(1)`.
+    let eval = clj_eval::boot();
+    let reader = BufReader::new(Cursor::new("1\n".as_bytes().to_vec()));
+    let mut session = Session::new(eval, reader, FailWriter);
+    assert_eq!(session.run(), 1);
+}
+
+#[test]
+fn read_is_complete_splits_clean_and_partial() {
+    assert!(read_is_complete("(+ 1 2)"));
+    assert!(read_is_complete(""));
+    assert!(!read_is_complete("(+ 1"));
+    assert!(!read_is_complete("\"abc"));
+}
+
+#[test]
+fn evaluator_handles_expose_session_state() {
+    let eval = clj_eval::boot();
+    let reader = BufReader::new(Cursor::new(Vec::<u8>::new()));
+    let mut session = Session::new(eval, reader, Vec::new());
+    assert_eq!(session.evaluator().current_ns_name(), "user");
+    let vals = session
+        .evaluator_mut()
+        .eval_source("(+ 1 2)")
+        .expect("probe evals");
+    assert!(matches!(vals.as_slice(), [Value::Int(3)]));
+}
+
+#[test]
+fn render_prompt_tracks_ns_or_none() {
+    let eval = clj_eval::boot();
+    let reader = BufReader::new(Cursor::new(Vec::<u8>::new()));
+    let mut session = Session::new(eval, reader, Vec::new());
+    assert_eq!(session.render_prompt(), None);
+    session.set_prompt(Some("{ns}=> ".to_owned()));
+    assert_eq!(session.render_prompt(), Some("user=> ".to_owned()));
+}
+
+#[test]
+fn submit_complete_evals_or_reports() {
+    let eval = clj_eval::boot();
+    let reader = BufReader::new(Cursor::new(Vec::<u8>::new()));
+    let mut session = Session::new(eval, reader, Vec::new());
+    assert_eq!(session.submit_complete("(+ 1 2)"), 0);
+    assert_eq!(session.submit_complete("(+ 1"), 0);
+    let (_, _, out) = session.into_parts();
+    assert_eq!(
+        out,
+        b"3\n2:1: EOF while reading, starting at line 1\n".to_vec()
+    );
+}
+
+#[test]
+fn lazy_print_failure_binds_e_and_continues() {
+    assert_eq!(
+        run("(map (fn [_] (/ 1 0)) [1])\n(ex-message *e)\n", None),
+        (
+            0,
+            "ArithmeticException: Divide by zero\n\"Divide by zero\"\n".to_owned()
+        )
+    );
+}
+
+#[test]
+fn bad_print_binding_reports_cast_and_continues() {
+    assert_eq!(
+        run("(alter-var-root #'*print-length* (constantly \"x\"))\n", None),
+        (
+            0,
+            "ClassCastException: class java.lang.String cannot be cast to class java.lang.Number (java.lang.String and java.lang.Number are in module java.base of loader 'bootstrap')\n"
+                .to_owned()
+        )
+    );
 }

@@ -214,7 +214,7 @@ impl Seq {
             Some(Seq::Chunked { .. }) => false,
             Some(Seq::ChunkCons { chunk, pos, tail }) => *pos >= chunk.len() && tail.is_empty(),
             Some(Seq::Cons { .. }) => false,
-            Some(Seq::Lazy { .. }) => unreachable!("forced above"),
+            Some(l @ Seq::Lazy { .. }) => l.is_empty(),
         }
     }
 
@@ -226,7 +226,7 @@ impl Seq {
             Seq::Chunked { chunks, chunk, pos } => chunks.get(*chunk).and_then(|c| c.get(*pos)),
             Seq::ChunkCons { chunk, pos, tail } => chunk.get(*pos).or_else(|| tail.first()),
             Seq::Cons { head, .. } => Some(head),
-            Seq::Lazy { .. } => unreachable!("forced above"),
+            l @ Seq::Lazy { .. } => l.first(),
         }
     }
 
@@ -275,7 +275,7 @@ impl Seq {
                 }
             }
             Seq::Cons { tail, .. } => tail.clone().map(|t| *t),
-            Seq::Lazy { .. } => unreachable!("forced above"),
+            l @ Seq::Lazy { .. } => l.next(),
         }
     }
 
@@ -310,6 +310,9 @@ impl Seq {
                     tail.chunk_next()
                 }
             }
+            // A forced lazy is a nested lazy: force through (like
+            // `first`/`next` — the JVM forces recursively).
+            Seq::Lazy { .. } => self.forced()?.chunk_next(),
             _ => None,
         }
     }
@@ -1336,3 +1339,390 @@ entry_seq!(
     "clojure.lang.APersistentMap$ValSeq",
     "`clojure.lang.APersistentMap$ValSeq` (S5D): a strict view mapping entries to values."
 );
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        ConsValue, CycleValue, IterateValue, KeySeqValue, RangeNum, RangeValue, RealizedSeq,
+        RepeatValue, Seq, SeqKind, SubVectorValue, ValSeqValue,
+    };
+    use crate::{ExtensionValue, Value, Vector};
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    use std::sync::Arc;
+
+    fn int(i: i64) -> Value {
+        Value::Int(i)
+    }
+
+    fn hash_ext(e: &dyn ExtensionValue) -> u64 {
+        let mut h = DefaultHasher::new();
+        e.dyn_hash(&mut h);
+        h.finish()
+    }
+
+    fn hash_val(v: &Value) -> u64 {
+        let mut h = DefaultHasher::new();
+        v.hash(&mut h);
+        h.finish()
+    }
+
+    #[test]
+    fn seq_debug_names_shapes() {
+        assert_eq!(format!("{:?}", Seq::empty()), "Eager { len: 0, pos: 0 }");
+        let chunked = Seq::chunked(vec![int(1), int(2), int(3)]).expect("chunked");
+        assert_eq!(
+            format!("{:?}", chunked),
+            "Chunked { chunks: 1, chunk: 0, pos: 0 }"
+        );
+        let headed = Seq::chunk_cons(vec![int(1), int(2)], Seq::empty());
+        assert_eq!(format!("{:?}", headed), "ChunkCons { len: 2, pos: 0 }");
+        assert_eq!(format!("{:?}", Seq::cons(int(1), None)), "Cons(Int(1))");
+        let lazy = Seq::lazy(|| None::<Seq>);
+        assert_eq!(format!("{:?}", lazy), "Lazy(..)");
+    }
+
+    #[test]
+    fn seq_chunk_cons_empty_collapses() {
+        let tail = Seq::eager(vec![int(1)]).expect("tail");
+        let s = Seq::chunk_cons(Vec::new(), tail);
+        assert_eq!(s.first(), Some(&int(1)));
+        assert!(s.next().is_none());
+    }
+
+    #[test]
+    fn seq_lazy_none_is_empty() {
+        let s = Seq::lazy(|| None::<Seq>);
+        assert!(s.is_empty());
+        assert!(s.first().is_none());
+        assert!(s.next().is_none());
+        assert!(s.more().is_empty());
+    }
+
+    #[test]
+    fn seq_nested_lazy_forces() {
+        let inner = Seq::lazy(|| Seq::eager(vec![int(1), int(2)]));
+        let outer = Seq::lazy(move || Some(inner.clone()));
+        assert!(!outer.is_empty());
+        assert_eq!(outer.first(), Some(&int(1)));
+        let tail = outer.next().expect("tail");
+        assert_eq!(tail.first(), Some(&int(2)));
+        assert!(tail.next().is_none());
+        assert_eq!(outer.more().first(), Some(&int(2)));
+    }
+
+    #[test]
+    fn seq_chunk_next_nested_lazy_delegates() {
+        // `chunk_next` forces through a nested lazy (like
+        // `first`/`next` — the JVM forces recursively).
+        let items: Vec<Value> = (0i64..40).map(int).collect();
+        let chunked = Seq::chunked(items).expect("chunked");
+        let inner = Seq::lazy(move || Some(chunked.clone()));
+        let outer = Seq::lazy(move || Some(inner.clone()));
+        let (head, rest) = outer.chunk_next().expect("delegate");
+        assert_eq!(head.len(), 32);
+        assert_eq!(rest.first(), Some(&int(32)));
+    }
+
+    #[test]
+    fn seq_chunk_cons_first_next() {
+        let tail = Seq::eager(vec![int(3)]).expect("tail");
+        let s = Seq::chunk_cons(vec![int(1), int(2)], tail);
+        assert_eq!(s.first(), Some(&int(1)));
+        let mid = s.next().expect("mid");
+        assert_eq!(mid.first(), Some(&int(2)));
+        let rest = mid.next().expect("rest");
+        assert_eq!(rest.first(), Some(&int(3)));
+        assert!(rest.next().is_none());
+    }
+
+    #[test]
+    fn seq_next_crosses_chunks() {
+        let items: Vec<Value> = (0i64..33).map(int).collect();
+        let mut cur = Seq::chunked(items).expect("chunked");
+        for _ in 0..32 {
+            cur = cur.next().expect("step");
+        }
+        assert_eq!(cur.first(), Some(&int(32)));
+        assert!(cur.next().is_none());
+    }
+
+    #[test]
+    fn seq_chunk_next_exhausted_delegates() {
+        let items: Vec<Value> = (0i64..40).map(int).collect();
+        let tail = Seq::chunked(items).expect("tail");
+        let s = Seq::ChunkCons {
+            chunk: Arc::from(vec![int(1)]),
+            pos: 1,
+            tail: Box::new(tail),
+        };
+        let (head, rest) = s.chunk_next().expect("delegate");
+        assert_eq!(head.len(), 32);
+        assert_eq!(rest.first(), Some(&int(32)));
+    }
+
+    #[test]
+    fn seq_kind_jvm_names() {
+        assert_eq!(
+            SeqKind::Chunked.jvm_name(),
+            "clojure.lang.PersistentVector$ChunkedSeq"
+        );
+        assert_eq!(SeqKind::Array.jvm_name(), "clojure.lang.ArraySeq");
+        assert_eq!(SeqKind::Str.jvm_name(), "clojure.lang.StringSeq");
+        assert_eq!(
+            SeqKind::Map.jvm_name(),
+            "clojure.lang.PersistentArrayMap$Seq"
+        );
+        assert_eq!(
+            SeqKind::Key.jvm_name(),
+            "clojure.lang.APersistentMap$KeySeq"
+        );
+        assert_eq!(SeqKind::ChunkedCons.jvm_name(), "clojure.lang.ChunkedCons");
+        assert_eq!(SeqKind::Cons.jvm_name(), "clojure.lang.Cons");
+        assert_eq!(SeqKind::Lazy.jvm_name(), "clojure.lang.LazySeq");
+        assert_eq!(
+            SeqKind::Subvec.jvm_name(),
+            "clojure.lang.APersistentVector$Seq"
+        );
+    }
+
+    #[test]
+    fn seq_kind_of_shape() {
+        let chunked = Seq::chunked(vec![int(1)]).expect("chunked");
+        assert_eq!(RealizedSeq::new(chunked).kind(), SeqKind::Chunked);
+        assert_eq!(
+            RealizedSeq::new(Seq::chunk_cons(vec![int(1)], Seq::empty())).kind(),
+            SeqKind::Chunked
+        );
+        assert_eq!(
+            RealizedSeq::new(Seq::cons(int(1), None)).kind(),
+            SeqKind::Cons
+        );
+        assert_eq!(
+            RealizedSeq::new(Seq::lazy(|| None::<Seq>)).kind(),
+            SeqKind::Lazy
+        );
+        let eager = Seq::eager(vec![int(1)]).expect("eager");
+        assert_eq!(RealizedSeq::new(eager).kind(), SeqKind::Array);
+        assert_eq!(RealizedSeq::new(Seq::empty()).kind(), SeqKind::Array);
+    }
+
+    #[test]
+    fn realized_seq_fallbacks() {
+        let seq = RealizedSeq::new(Seq::eager(vec![int(1), int(2)]).expect("seq"));
+        assert_eq!(seq.print(), "(1 2)");
+        let same = RealizedSeq::new(Seq::eager(vec![int(1), int(2)]).expect("same"));
+        assert!(seq.dyn_eq(&same));
+        let diff = RealizedSeq::new(Seq::eager(vec![int(1)]).expect("diff"));
+        assert!(!seq.dyn_eq(&diff));
+        let range = RangeValue::new(
+            RangeNum::Int(0),
+            Some(RangeNum::Int(2)),
+            RangeNum::Int(1),
+            true,
+            Some(2),
+        );
+        assert!(!seq.dyn_eq(&range));
+        assert_eq!(hash_ext(&seq), hash_ext(&same));
+    }
+
+    #[test]
+    fn subvector_helpers_and_fallbacks() {
+        let backing = Vector::from_vec(vec![int(1), int(2), int(3)]);
+        assert!(SubVectorValue::new(backing.clone(), 1, 1).is_empty());
+        let sv = SubVectorValue::new(backing, 0, 2);
+        assert!(!sv.is_empty());
+        assert_eq!(sv.print(), "[1 2]");
+        let same = SubVectorValue::new(Vector::from_vec(vec![int(1), int(2)]), 0, 2);
+        assert!(sv.dyn_eq(&same));
+        let diff = SubVectorValue::new(Vector::from_vec(vec![int(1)]), 0, 1);
+        assert!(!sv.dyn_eq(&diff));
+        let seq = RealizedSeq::new(Seq::eager(vec![int(1), int(2)]).expect("seq"));
+        assert!(!sv.dyn_eq(&seq));
+        assert_eq!(hash_ext(&sv), hash_ext(&same));
+    }
+
+    #[test]
+    fn range_value_meta_done_overflow() {
+        let r = RangeValue::new(
+            RangeNum::Int(0),
+            Some(RangeNum::Int(2)),
+            RangeNum::Int(1),
+            true,
+            Some(2),
+        );
+        let v = Value::Extension(Arc::new(r));
+        assert!(v.meta().is_none());
+        let meta = crate::new_map();
+        let tagged = v.clone().with_meta(Some(meta.clone()));
+        assert_eq!(tagged.meta(), Some(&meta));
+        let open = RangeValue::new(RangeNum::Int(0), None, RangeNum::Int(1), false, None);
+        assert!(!open.done());
+        // Overflow break: the bounds are `f64`-distinct (so
+        // `done` is false) but `start + step` overflows `i64` (so
+        // the first advance ends the walk). Production builds the
+        // `long` path for this count — the shape is constructed
+        // directly to pin the break (oracled walk: 1 item).
+        let edge = RangeValue::new(
+            RangeNum::Int(9223372036854773807),
+            Some(RangeNum::Int(9223372036854775807)),
+            RangeNum::Int(3000),
+            false,
+            None,
+        );
+        assert_eq!(edge.walked_len(), 1);
+        let mut out = Vec::new();
+        edge.for_each(&mut |item| out.push(item.clone()));
+        assert_eq!(out, vec![int(9223372036854773807)]);
+    }
+
+    #[test]
+    fn range_value_fallbacks() {
+        let r = RangeValue::new(
+            RangeNum::Double(0.0),
+            Some(RangeNum::Double(1.5)),
+            RangeNum::Double(0.5),
+            false,
+            None,
+        );
+        assert_eq!(r.class_name(), "clojure.lang.Range");
+        let same = RangeValue::new(
+            RangeNum::Double(0.0),
+            Some(RangeNum::Double(1.5)),
+            RangeNum::Double(0.5),
+            false,
+            None,
+        );
+        assert!(r.dyn_eq(&same));
+        let diff = RangeValue::new(
+            RangeNum::Double(0.0),
+            Some(RangeNum::Double(1.5)),
+            RangeNum::Double(1.0),
+            false,
+            None,
+        );
+        assert!(!r.dyn_eq(&diff));
+        let rep = RepeatValue::new(int(1), Some(2));
+        assert!(!r.dyn_eq(&rep));
+        assert_eq!(hash_ext(&r), hash_ext(&same));
+    }
+
+    #[test]
+    fn repeat_value_gaps() {
+        let v = Value::Extension(Arc::new(RepeatValue::new(int(7), Some(3))));
+        assert!(v.meta().is_none());
+        let meta = crate::new_map();
+        let tagged = v.clone().with_meta(Some(meta.clone()));
+        assert_eq!(tagged.meta(), Some(&meta));
+        let r = RepeatValue::new(int(7), Some(3));
+        assert_eq!(r.class_name(), "clojure.lang.Repeat");
+        assert_eq!(r.print(), "(...)");
+        let same = RepeatValue::new(int(7), Some(3));
+        assert!(r.dyn_eq(&same));
+        let fewer = RepeatValue::new(int(7), Some(2));
+        assert!(!r.dyn_eq(&fewer));
+        let other = RepeatValue::new(int(8), Some(3));
+        assert!(!r.dyn_eq(&other));
+        assert_eq!(hash_ext(&r), hash_ext(&same));
+    }
+
+    #[test]
+    #[should_panic(expected = "stop after two")]
+    fn repeat_for_each_infinite_iterates() {
+        // The infinite arm never returns (matching the JVM, whose
+        // walks hang the same way): iterate twice, then stop with a
+        // panic so the loop mechanics genuinely run and the test ends.
+        let r = RepeatValue::new(int(1), None);
+        let mut count = 0;
+        r.for_each(&mut |_| {
+            count += 1;
+            assert!(count < 3, "stop after two iterations");
+        });
+    }
+
+    #[test]
+    fn repeat_walked_len_infinite_diverges() {
+        use std::thread;
+        use std::time::Duration;
+
+        // The infinite arm never returns and offers no injection
+        // point (its closure is internal): run it on a thread the
+        // test abandons, so the arm executes and the process still
+        // exits to flush counters. The arm is entered within
+        // microseconds of thread start; 50ms is pure margin.
+        let r = RepeatValue::new(int(1), None);
+        let _handle = thread::spawn(move || r.walked_len());
+        thread::sleep(Duration::from_millis(50));
+    }
+
+    #[test]
+    fn cycle_value_gaps() {
+        let v = Value::Extension(Arc::new(CycleValue::new(int(1), int(2))));
+        assert!(v.meta().is_none());
+        let meta = crate::new_map();
+        let tagged = v.clone().with_meta(Some(meta.clone()));
+        assert_eq!(tagged.meta(), Some(&meta));
+        let c = CycleValue::new(int(1), int(2));
+        assert_eq!(c.class_name(), "clojure.lang.Cycle");
+        assert_eq!(c.print(), "(...)");
+    }
+
+    #[test]
+    fn iterate_value_gaps() {
+        let v = Value::Extension(Arc::new(IterateValue::new(int(0), int(1))));
+        assert!(v.meta().is_none());
+        let meta = crate::new_map();
+        let tagged = v.clone().with_meta(Some(meta.clone()));
+        assert_eq!(tagged.meta(), Some(&meta));
+        let it = IterateValue::new(int(0), int(1));
+        let fresh = it.clone();
+        assert_eq!(fresh.seed_opt(), Some(int(1)));
+        it.store_seed(int(9));
+        let copied = it.clone();
+        assert_eq!(copied.seed_opt(), Some(int(9)));
+        let pending = IterateValue::deferred(int(0), int(1));
+        assert!(pending.clone().seed_opt().is_none());
+        assert_eq!(it.class_name(), "clojure.lang.Iterate");
+        assert_eq!(it.print(), "(...)");
+    }
+
+    #[test]
+    fn cons_value_gaps() {
+        let v = Value::Extension(Arc::new(ConsValue::new(int(1), int(2))));
+        assert!(v.meta().is_none());
+        let meta = crate::new_map();
+        let tagged = v.clone().with_meta(Some(meta.clone()));
+        assert_eq!(tagged.meta(), Some(&meta));
+        let c = ConsValue::new(int(1), int(2));
+        assert_eq!(c.print(), "(...)");
+        assert!(c.dyn_eq(&c));
+        let twin = ConsValue::new(int(1), int(2));
+        assert!(!c.dyn_eq(&twin));
+        let hashed = Value::Extension(Arc::new(c));
+        assert_eq!(hash_val(&hashed), hash_val(&hashed));
+    }
+
+    #[test]
+    fn entry_seq_gaps() {
+        let k = Value::Extension(Arc::new(KeySeqValue::new(int(1))));
+        assert!(k.meta().is_none());
+        let meta = crate::new_map();
+        assert_eq!(k.clone().with_meta(Some(meta.clone())).meta(), Some(&meta));
+        let key = KeySeqValue::new(int(1));
+        assert_eq!(key.class_name(), "clojure.lang.APersistentMap$KeySeq");
+        assert_eq!(key.print(), "(...)");
+        assert!(key.dyn_eq(&key));
+        let other_key = KeySeqValue::new(int(1));
+        assert!(!key.dyn_eq(&other_key));
+        assert_eq!(hash_val(&k), hash_val(&k));
+        let g = Value::Extension(Arc::new(ValSeqValue::new(int(1))));
+        assert_eq!(g.clone().with_meta(Some(meta.clone())).meta(), Some(&meta));
+        let val = ValSeqValue::new(int(1));
+        assert_eq!(val.class_name(), "clojure.lang.APersistentMap$ValSeq");
+        assert_eq!(val.print(), "(...)");
+        assert!(val.dyn_eq(&val));
+        let other_val = ValSeqValue::new(int(1));
+        assert!(!val.dyn_eq(&other_val));
+        assert_eq!(hash_val(&g), hash_val(&g));
+    }
+}

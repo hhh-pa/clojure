@@ -54,6 +54,26 @@ impl std::fmt::Display for SourceError {
 
 impl std::error::Error for SourceError {}
 
+/// An uncaught top-level signal (an escaping `recur` is
+/// impossible — every loop/fn frame catches its own — and
+/// surfaces as an internal error, never a panic).
+fn uncaught(s: Signal) -> SourceError {
+    match s {
+        Signal::Throw(t) => SourceError::Uncaught(t),
+        Signal::Recur(_) => SourceError::Internal("recur escaped its loop or fn".to_owned()),
+    }
+}
+
+/// The throwable of a signal leaving a `try` region (`None`
+/// for `recur`, which the analyzer fences from crossing `try`
+/// — expr.rs `no_recur` — so `try` bodies only ever throw).
+fn try_thrown(signal: Signal) -> Option<Throwable> {
+    match signal {
+        Signal::Throw(t) => Some(t),
+        Signal::Recur(_) => None,
+    }
+}
+
 /// The body of a top-level `do`-headed list (head unqualified,
 /// mirroring the analyzer's special-form check), `None` for any
 /// other form or a bare `(do)`. Shared with AOT planning, which
@@ -336,10 +356,7 @@ impl Evaluator {
         let expr = self.analyze(&expanded).map_err(|e| self.compile_err(e))?;
         match self.eval(&expr, &Env::new()) {
             Ok(v) => Ok(v),
-            Err(Signal::Throw(t)) => Err(SourceError::Uncaught(t)),
-            Err(Signal::Recur(_)) => Err(SourceError::Internal(
-                "recur escaped its loop or fn".to_owned(),
-            )),
+            Err(s) => Err(uncaught(s)),
         }
     }
 
@@ -767,12 +784,9 @@ impl Evaluator {
             None => format!("Assert failed: {form}"),
             Some(m) => {
                 let mv = self.eval(m, env)?;
-                let rendered = crate::core::native_str(self, std::slice::from_ref(&mv))
-                    .map_err(|e| self.throw(e))?;
-                let Value::Str(s) = rendered else {
-                    unreachable!("str always returns a string")
-                };
-                format!("Assert failed: {s}\n{form}")
+                // `native_str` of one arg is `str_of_one`.
+                let rendered = crate::core::str_of_one(self, &mv).map_err(|e| self.throw(e))?;
+                format!("Assert failed: {rendered}\n{form}")
             }
         };
         Err(self.throw(NativeError::new(ThrowClass::AssertionError, text)))
@@ -1224,7 +1238,10 @@ impl Evaluator {
                 self.eval_body(finally_body, env)?;
                 Ok(value)
             }
-            Err(Signal::Throw(thrown)) => {
+            Err(signal) => {
+                // `recur` cannot cross `try` (analyzer-fenced),
+                // so every error here is a throw.
+                let thrown = try_thrown(signal).expect("recur cannot cross try");
                 for catch in catches {
                     if thrown.class.matches(&catch.class) {
                         let env = env.extend(vec![Value::Throwable(thrown.clone())]);
@@ -1236,9 +1253,12 @@ impl Evaluator {
                                 self.eval_body(finally_body, &env)?;
                                 return Ok(value);
                             }
-                            Err(Signal::Throw(_)) => {
-                                // A throwing `finally` masks the
-                                // in-flight exception (probe29).
+                            // A failed handler always throws (`recur`
+                            // cannot cross `try`: the analyzer fences
+                            // it — expr.rs `no_recur`). A throwing
+                            // `finally` masks the in-flight exception
+                            // (probe29).
+                            Err(_) => {
                                 if let Err(signal @ Signal::Throw(_)) =
                                     self.eval_body(finally_body, &env)
                                 {
@@ -1246,7 +1266,6 @@ impl Evaluator {
                                 }
                                 return result;
                             }
-                            Err(signal) => return Err(signal),
                         }
                     }
                 }
@@ -1254,10 +1273,6 @@ impl Evaluator {
                     return Err(signal);
                 }
                 Err(Signal::Throw(thrown))
-            }
-            Err(signal) => {
-                let _ = self.eval_body(finally_body, env);
-                Err(signal)
             }
         }
     }
@@ -1585,12 +1600,9 @@ impl Evaluator {
         env: &Env,
         out: &mut Vec<Value>,
     ) -> Result<(), Signal> {
-        if pat.rest.is_none() {
-            for (i, fixed) in pat.fixed.iter().enumerate() {
-                let nth = nth_or_nil(value, i, self)?;
-                let _ = self.destructure(fixed, &nth, env, out, ForceSet::default())?;
-            }
-        } else {
+        // `Some` first: the binding proves the shape with no
+        // second discrimination.
+        if let Some(rest) = pat.rest.as_ref() {
             // `destvec*` binds `gseq` to `(seq gvec)`: the `&`
             // pattern gets a seq (`nil` when empty) and
             // non-seqables raise the `ISeq` error (§E12).
@@ -1600,8 +1612,11 @@ impl Evaluator {
                 let _ = self.destructure(fixed, &first, env, out, ForceSet::default())?;
                 current = crate::lazy::next_value(self, &current)?;
             }
-            if let Some(rest) = &pat.rest {
-                let _ = self.destructure(rest, &current, env, out, ForceSet::default())?;
+            let _ = self.destructure(rest, &current, env, out, ForceSet::default())?;
+        } else {
+            for (i, fixed) in pat.fixed.iter().enumerate() {
+                let nth = nth_or_nil(value, i, self)?;
+                let _ = self.destructure(fixed, &nth, env, out, ForceSet::default())?;
             }
         }
         if pat.as_sym.is_some() {
@@ -1821,16 +1836,17 @@ impl Evaluator {
         self.jvm_merge2(merged, z)
     }
 
-    /// `select-keys` over a merge result: maps select, anything else
-    /// is the `.entryAt` hint cast (`IPersistentMap`).
+    /// `select-keys` over a merge result: present keys read
+    /// (`lookup`: maps, int-keyed vectors/strings, sets),
+    /// absent keys skipped — non-map targets select `{}`.
     fn select_keys_general(&mut self, merged: &Value, sel: &[Value]) -> Result<Value, Signal> {
-        match merged {
-            Value::Map(m) => Ok(select_keys(m, sel)),
-            other => Err(self.throw(NativeError::cast(
-                &jvm_class_of(other),
-                "clojure.lang.IPersistentMap",
-            ))),
+        let mut out = new_map();
+        for key in sel {
+            if let Some(val) = lookup(merged, key) {
+                out = out.insert(key.clone(), val.clone());
+            }
         }
+        Ok(Value::Map(out))
     }
 
     /// A `dissoc` base: `nil` is absent, maps shed the selection
@@ -1852,10 +1868,12 @@ impl Evaluator {
         }
     }
 
-    /// `into1`: map targets cast `from`'s elements to entries
-    /// (real map entries assoc; anything else is the `Map$Entry`
-    /// cast error, `nil` the entry-NPE); other targets `conj` each
-    /// element. `nil` adds nothing; unseqables are the `ISeq` error.
+    /// `into1`: map `from`s conj each entry pair; seq `from`s
+    /// conj each element (real `merge`: `nil`s skip,
+    /// pair-vectors assoc, unseqables are the `ISeq` error).
+    /// `to` is always the `:or` map on the seq path (the second
+    /// merge arg is a map unless it is the converted target,
+    /// and then the first is `:or` defaults).
     fn into1(&mut self, to: Value, from: &Value) -> Result<Value, Signal> {
         if let Value::Map(m) = from {
             let mut out = to;
@@ -1864,24 +1882,15 @@ impl Evaluator {
             }
             return Ok(out);
         }
-        match self.seq_val(from)? {
-            Value::Nil => Ok(to),
-            Value::List(l) => {
-                if matches!(to, Value::Map(_)) {
-                    // Casts, not conjs: the first element always
-                    // fails (nothing representable is an entry).
-                    return match l.iter().next() {
-                        Some(first) => Err(self.throw(cast_entry(first))),
-                        None => Ok(to),
-                    };
-                }
+        match self.seq_opt(from)? {
+            None => Ok(to),
+            Some(l) => {
                 let mut out = to;
                 for elem in l.iter() {
                     out = self.conj_one(out, elem.clone())?;
                 }
                 Ok(out)
             }
-            _ => unreachable!("seq_val yields a list or nil"),
         }
     }
 
@@ -1900,8 +1909,9 @@ impl Evaluator {
     /// insert, maps take entries, `nil` starts a list, anything else
     /// is the `IPersistentCollection` cast error.
     fn conj_one(&mut self, coll: Value, elem: Value) -> Result<Value, Signal> {
+        // `nil` never reaches this conj (`into1` merge args are
+        // non-`nil`), so it falls into the cast error below.
         match coll {
-            Value::Nil => Ok(Value::List(List::from_vec(vec![elem]))),
             Value::Map(m) => self.conj_map(m, elem).map(Value::Map),
             Value::Vector(v) => Ok(Value::Vector(v.push_back(elem))),
             Value::List(l) => Ok(Value::List(l.push_front(elem))),
@@ -1935,13 +1945,12 @@ impl Evaluator {
                     ))),
                 }
             }
-            other => match self.seq_val(&other)? {
-                Value::Nil => Ok(map),
-                Value::List(l) => match l.iter().next() {
-                    Some(first) => Err(self.throw(cast_entry(first))),
-                    None => Ok(map),
-                },
-                _ => unreachable!("seq_val yields a list or nil"),
+            other => match self.seq_opt(&other)? {
+                None => Ok(map),
+                Some(l) => {
+                    let first = l.iter().next().expect("seq_opt lists are never empty");
+                    Err(self.throw(cast_entry(first)))
+                }
             },
         }
     }
@@ -2003,19 +2012,27 @@ impl Evaluator {
                 Ok(())
             }
             Value::Nil => Ok(()),
-            Value::List(_) | Value::Set(_) | Value::Str(_) => match seq_first(trailing) {
-                None => Ok(()),
-                Some(first) => Err(self.throw(NativeError::cast(
-                    &jvm_class_of(&first),
-                    "java.util.Map$Entry",
-                ))),
-            },
+            Value::List(l) => self.check_seqable_trailing(l.iter().next().cloned()),
+            Value::Set(s) => self.check_seqable_trailing(s.iter().next().cloned()),
+            Value::Str(s) => self.check_seqable_trailing(s.chars().next().map(Value::Char)),
             other => Err(self.throw(NativeError::new(
                 ThrowClass::IllegalArgumentException,
                 format!(
                     "Don't know how to create ISeq from: {}",
                     jvm_class_of(other)
                 ),
+            ))),
+        }
+    }
+
+    /// The odd-tail seqable rule: empties vanish, else the first
+    /// element must be an entry (nothing representable is).
+    fn check_seqable_trailing(&mut self, first: Option<Value>) -> Result<(), Signal> {
+        match first {
+            None => Ok(()),
+            Some(first) => Err(self.throw(NativeError::cast(
+                &jvm_class_of(&first),
+                "java.util.Map$Entry",
             ))),
         }
     }
@@ -2207,34 +2224,29 @@ impl Evaluator {
     /// `nil`; vectors/strings/sets to element lists; maps to
     /// entry lists; anything else is the `ISeq` error.
     fn seq_val(&mut self, value: &Value) -> Result<Value, Signal> {
+        Ok(self.seq_opt(value)?.map(Value::List).unwrap_or(Value::Nil))
+    }
+
+    /// `seq_val` as an option-list (`None` ⟺ `nil`/empty, so
+    /// match sites stay two-armed with no dead wildcard).
+    fn seq_opt(&mut self, value: &Value) -> Result<Option<List>, Signal> {
         match value {
-            Value::Nil => Ok(Value::Nil),
+            Value::Nil => Ok(None),
             Value::List(l) => {
                 if l.is_empty() {
-                    Ok(Value::Nil)
+                    Ok(None)
                 } else {
-                    Ok(value.clone())
+                    Ok(Some(l.clone()))
                 }
             }
-            Value::Vector(v) => {
-                let elems: Vec<Value> = v.iter().cloned().collect();
-                Ok(Self::seq_list(elems))
-            }
-            Value::Set(s) => {
-                let elems: Vec<Value> = s.iter().cloned().collect();
-                Ok(Self::seq_list(elems))
-            }
-            Value::Str(s) => {
-                let elems: Vec<Value> = s.chars().map(Value::Char).collect();
-                Ok(Self::seq_list(elems))
-            }
-            Value::Map(m) => {
-                let elems: Vec<Value> = m
-                    .iter()
+            Value::Vector(v) => Ok(Self::seq_list_opt(v.iter().cloned().collect())),
+            Value::Set(s) => Ok(Self::seq_list_opt(s.iter().cloned().collect())),
+            Value::Str(s) => Ok(Self::seq_list_opt(s.chars().map(Value::Char).collect())),
+            Value::Map(m) => Ok(Self::seq_list_opt(
+                m.iter()
                     .map(|(k, v)| Value::Vector(Vector::from_vec(vec![k.clone(), v.clone()])))
-                    .collect();
-                Ok(Self::seq_list(elems))
-            }
+                    .collect(),
+            )),
             other => Err(self.throw(NativeError::new(
                 ThrowClass::IllegalArgumentException,
                 format!(
@@ -2245,11 +2257,11 @@ impl Evaluator {
         }
     }
 
-    fn seq_list(elems: Vec<Value>) -> Value {
+    fn seq_list_opt(elems: Vec<Value>) -> Option<List> {
         if elems.is_empty() {
-            Value::Nil
+            None
         } else {
-            Value::List(List::from_vec(elems))
+            Some(List::from_vec(elems))
         }
     }
 }
@@ -2302,23 +2314,25 @@ fn or_mapped(pat: &MapPattern, defaults: &Map) -> Map {
     dm
 }
 
-/// `(select-keys m sel)` in selection order.
-fn select_keys(converted: &Map, sel: &[Value]) -> Value {
-    let mut out = new_map();
-    for key in sel {
-        if let Some(val) = converted.get(key) {
-            out = out.insert(key.clone(), val.clone());
-        }
-    }
-    Value::Map(out)
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-/// The first element of a seqable (`nil` when empty).
-fn seq_first(v: &Value) -> Option<Value> {
-    match v {
-        Value::List(l) => l.iter().next().cloned(),
-        Value::Set(s) => s.iter().next().cloned(),
-        Value::Str(s) => s.chars().next().map(Value::Char),
-        _ => None,
+    #[test]
+    fn uncaught_recur_is_internal() {
+        // Defense in depth: an escaping `recur` (impossible —
+        // every loop/fn frame catches its own) surfaces as an
+        // internal error.
+        assert!(matches!(
+            uncaught(Signal::Recur(vec![])),
+            SourceError::Internal(msg) if msg.contains("recur escaped its loop or fn")
+        ));
+    }
+
+    #[test]
+    fn try_thrown_none_for_recur() {
+        // The `try`-region impossible case: pins the helper's
+        // total contract (`try` bodies only ever throw).
+        assert!(try_thrown(Signal::Recur(vec![])).is_none());
     }
 }
