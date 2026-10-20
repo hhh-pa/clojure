@@ -5,6 +5,7 @@ members = [
     "crates/clj-eval",
     "crates/clj-reader",
     "crates/clj-repl",
+    "crates/clj-rt",
     "crates/clj-value",
 ]
 resolver = "2"

@@ -46,12 +46,14 @@ naming the first unsupported form). TDD: subset corpus first
   `nth`/`get`/`conj` edges, arity texts — all shared).
 - Ownership: args consumed, return owned; `rt_clone`
   borrows; `rt_drop` frees; locals are owned slots.
-  Single-threaded binaries; no shadow stack. Errors:
-  helpers print `path:line:col: Class: message` (spans
-  baked at the call site) and exit 1 — no unwinding
+  Single-threaded binaries; no shadow stack. Errors
+  (D7): helpers print `path:line:col: Class: message`
+  (spans baked at the call site) and return null — the
+  generated code null-checks and exits 1. No unwinding
   across FFI, every shim wrapped in `catch_unwind`.
   The one `unsafe` module is the audited FFI shim
-  (geiger delta recorded with justification).
+  (geiger 0→73: 11+1 unsafe fns, 53+8 unsafe exprs —
+  the whole `extern "C"` boundary, every line covered).
 - Unit tests call the `extern "C"` fns directly (no LLVM).
 
 ## S8C. Lowering + link (`clj-aot`, inkwell)
@@ -123,6 +125,21 @@ D6. Local LLVM loop (official tarball, NOT CI's brew):
     its libc++abi (never `-lunwind`: it hijacks Rust
     panics — observed SIGABRT in the concurrency suite).
     CI needs none of this (brew llvm@22).
+D7. Error channel is null-return, NOT exit-in-helper:
+    the helper prints `path:line:col: Class: message`
+    and returns null; S8C emits a null check after every
+    fallible call whose abort block calls libc `exit`
+    directly. Observable behavior matches the pins
+    exactly (message + exit 1), while the library stays
+    exit-free — every `clj-rt` line unit-coverable under
+    the 100% gate (an `exit` line could only be covered
+    by killing the test runner).
+D8. Locals clone on every use; all frame slots drop at
+    scope end. No move analysis: slots always hold valid
+    owned boxes (params `0..arity` plus `let` slots, never
+    reused), so the epilogue drops `frame_slots` boxes
+    unconditionally — leak-free by construction, at the
+    cost of one clone per local use (same spirit as D1).
 
 ## TDD order
 

@@ -194,6 +194,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "clj-rt"
+version = "0.1.0"
+dependencies = [
+ "clj-eval",
+ "clj-value",
+]
+
+[[package]]
 name = "clj-value"
 version = "0.1.0"
 dependencies = [

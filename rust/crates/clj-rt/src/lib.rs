@@ -1,0 +1,40 @@
+// Copyright (c) Rich Hickey. All rights reserved.
+// The use and distribution terms for this software are covered by the
+// Eclipse Public License 1.0 (http://opensource.org/licenses/eclipse-1.0.php)
+// which can be found in the file epl-v10.html at the root of this distribution.
+// By using this software in any fashion, you are agreeing to be bound by
+// the terms of this license.
+// You must not remove this notice, or any other, from this software.
+
+//! AOT runtime archive for compiled Clojure binaries (T1174 S8B).
+//!
+//! [`abi`] exposes the `extern "C"` helper ABI over opaque `*mut
+//! Value` boxes; [`runtime`] holds the process-global booted
+//! evaluator the primitive helpers delegate to. The crate links
+//! LLVM-free (`clj-eval + clj-value` only) so built binaries stay
+//! small and link anywhere.
+//!
+//! Ownership (S8 plan D7/D8): helper arguments are consumed, the
+//! return is owned, [`abi::rt_clone`] borrows, [`abi::rt_drop`]
+//! frees, and generated code clones locals on every use and drops
+//! all frame slots at scope end. Fallible helpers return null on
+//! error (after printing `path:line:col: Class: message`); the
+//! generated code null-checks and exits 1 — the library itself
+//! never exits, so every line stays unit-coverable.
+
+// The shims stay out of the libtest binary: their `#[no_mangle]`
+// names would collide with the rlib copies linked into the
+// integration binaries (same symbol, different compilation), and
+// llvm-cov drops the merged records as mismatched. Unit tests
+// never call shims (they pin `runtime` directly); integration
+// tests link the normal rlib, where the shims exist.
+#[cfg(not(test))]
+pub mod abi;
+pub(crate) mod runtime;
+
+#[cfg(not(test))]
+pub use abi::{
+    prim_symbol, rt_add, rt_arity_error, rt_bool, rt_clone, rt_conj, rt_count, rt_double, rt_drop,
+    rt_eq, rt_ge, rt_get, rt_gt, rt_int, rt_le, rt_lt, rt_mul, rt_nil, rt_nth, rt_print, rt_quot,
+    rt_str, rt_sub, rt_vec_new, rt_vec_push,
+};
