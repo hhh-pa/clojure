@@ -351,3 +351,24 @@ fn print_opts_rows() {
         "\"{:a/x 1, :a/y 2}\""
     );
 }
+
+#[test]
+fn core_r4_subs_nonstring() {
+    let mut eval = boot();
+    for src in ["(subs 5 0)", "(subs 5 0 1)"] {
+        assert_eq!(
+            uncaught(&mut eval, src),
+            "java.lang.ClassCastException | class java.lang.Long cannot be cast to class java.lang.String (java.lang.Long and java.lang.String are in module java.base of loader 'bootstrap')",
+            "{src}"
+        );
+    }
+}
+
+#[test]
+fn core_r4_print_limit_cce() {
+    let mut eval = boot();
+    assert_eq!(
+        uncaught(&mut eval, "(binding [*print-length* \"s\"] (pr-str [1]))"),
+        "java.lang.ClassCastException | class java.lang.String cannot be cast to class java.lang.Number (java.lang.String and java.lang.Number are in module java.base of loader 'bootstrap')"
+    );
+}

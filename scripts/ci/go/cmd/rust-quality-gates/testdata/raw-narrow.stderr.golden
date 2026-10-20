@@ -1,0 +1,1 @@
+rust quality gates: 1 failure(s); first: coverage: FAILED: $BIN/coverage-floor $REPORT/lcov.info 100 (exit 1)

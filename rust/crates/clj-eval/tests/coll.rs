@@ -1898,3 +1898,254 @@ fn disj_set_rows() {
         "java.lang.IllegalArgumentException | Don't know how to create ISeq from: java.lang.Long"
     );
 }
+
+#[test]
+fn gap2_transient_get_edge_rows() {
+    let mut eval = boot();
+    // A negative transient-vector index reads missing (coll.rs:124).
+    assert_eq!(run_last(&mut eval, "(get (transient [1 2]) -1)"), "nil");
+    // Transient sets read hit-or-miss (coll.rs:129-133).
+    assert_eq!(run_last(&mut eval, "(get (transient #{1 2}) 1)"), "1");
+    assert_eq!(run_last(&mut eval, "(get (transient #{1 2}) 9)"), "nil");
+}
+
+#[test]
+fn gap2_find_transient_subvec_rows() {
+    let mut eval = boot();
+    // Transient maps/vectors read entries (coll.rs:162-176).
+    assert_eq!(
+        run_last(&mut eval, "(find (transient {:a 1}) :a)"),
+        "[:a 1]"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(find (transient [10 20]) 1)"),
+        "[1 20]"
+    );
+    assert_eq!(run_last(&mut eval, "(find (transient [10 20]) :a)"), "nil");
+    assert_eq!(run_last(&mut eval, "(find (transient [10 20]) -1)"), "nil");
+    // Subvectors read entries too (coll.rs:188-192).
+    assert_eq!(
+        run_last(&mut eval, "(find (subvec [10 20 30] 1) 0)"),
+        "[0 20]"
+    );
+}
+
+#[test]
+fn gap2_map_conj_subvec_rows() {
+    let mut eval = boot();
+    // A 2-subvector conjs as a pair; any other length is the pair error.
+    assert_eq!(
+        run_last(&mut eval, "(get (conj {:a 1} (subvec [10 20 30] 0 2)) 10)"),
+        "20"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(conj {:a 1} (subvec [10 20 30] 0 1))"),
+        "java.lang.IllegalArgumentException | Vector arg to map conj must be a pair"
+    );
+}
+
+#[test]
+fn gap2_subvector_conj_clobber() {
+    let mut eval = boot();
+    // Conj inside the backing window clobbers the next slot (coll.rs:286-288).
+    assert_eq!(
+        run_last(&mut eval, "(conj (subvec [1 2 3] 0 2) 9)"),
+        "[1 2 9]"
+    );
+}
+
+#[test]
+fn gap2_assoc_edge_rows() {
+    let mut eval = boot();
+    // Past-the-end and non-integer keys (coll.rs:329, 341-344, 349-352).
+    assert_eq!(
+        uncaught(&mut eval, "(assoc [1 2] 5 :x)"),
+        "java.lang.IndexOutOfBoundsException | "
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(assoc (subvec [1 2] 0) :a 1)"),
+        "java.lang.IllegalArgumentException | Key must be integer"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(assoc (subvec [1 2 3] 1) 5 :x)"),
+        "java.lang.IndexOutOfBoundsException | "
+    );
+}
+
+#[test]
+fn gap2_count_transient_kind_rows() {
+    let mut eval = boot();
+    // Map/set buffers count like vectors (coll.rs:416-417).
+    assert_eq!(run_last(&mut eval, "(count (transient {:a 1 :b 2}))"), "2");
+    assert_eq!(run_last(&mut eval, "(count (transient #{1 2 3}))"), "3");
+}
+
+#[test]
+fn gap2_merge_with_tail_rows() {
+    let mut eval = boot();
+    // Subvector right-hand sides fold index pairs (coll.rs:543-547).
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(get (merge-with + {:a 1} (subvec [10 20] 0)) 1)"
+        ),
+        "20"
+    );
+    // An empty sequential right-hand side keeps the left map (coll.rs:569).
+    assert_eq!(run_last(&mut eval, "(merge-with + {:a 1} '())"), "{:a 1}");
+}
+
+#[test]
+fn gap2_contains_subvec_rows() {
+    let mut eval = boot();
+    // Integer keys probe the window (coll.rs:861-862).
+    assert_eq!(
+        run_last(&mut eval, "(contains? (subvec [1 2 3] 1) 0)"),
+        "true"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(contains? (subvec [1 2 3] 1) 9)"),
+        "false"
+    );
+}
+
+#[test]
+fn gap2_nth_edge_rows() {
+    let mut eval = boot();
+    // Negative transient indexes throw; negative + not-found returns it.
+    assert_eq!(
+        uncaught(&mut eval, "(nth (transient [1 2]) -1)"),
+        "java.lang.IndexOutOfBoundsException | "
+    );
+    assert_eq!(run_last(&mut eval, "(nth [1 2] -1 :nf)"), ":nf");
+}
+
+#[test]
+fn gap2_bang_nil_foreign_rows() {
+    let mut eval = boot();
+    // Nil and non-transient bang targets (coll.rs:1230-1234, 1327, 1393-1397, 1426-1433).
+    assert_eq!(
+        uncaught(&mut eval, "(persistent! nil)"),
+        "java.lang.NullPointerException | Cannot invoke \"clojure.lang.ITransientCollection.persistent()\" because \"coll\" is null"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(conj! [1] 2)"),
+        "java.lang.ClassCastException | class clojure.lang.PersistentVector cannot be cast to class clojure.lang.ITransientCollection (clojure.lang.PersistentVector and clojure.lang.ITransientCollection are in unnamed module of loader 'app')"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(dissoc! nil :a)"),
+        "java.lang.NullPointerException | Cannot invoke \"clojure.lang.ITransientMap.without(Object)\" because \"map\" is null"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(pop! nil)"),
+        "java.lang.NullPointerException | Cannot invoke \"clojure.lang.ITransientVector.pop()\" because \"coll\" is null"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(pop! [1])"),
+        "java.lang.ClassCastException | class clojure.lang.PersistentVector cannot be cast to class clojure.lang.ITransientVector (clojure.lang.PersistentVector and clojure.lang.ITransientVector are in unnamed module of loader 'app')"
+    );
+}
+
+#[test]
+fn gap2_conj_bang_map_rows() {
+    let mut eval = boot();
+    // Nil passes through; maps merge entry-wise (coll.rs:1264, 1268-1270).
+    assert_eq!(
+        run_last(&mut eval, "(persistent! (conj! (transient {:a 1}) nil))"),
+        "{:a 1}"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(get (persistent! (conj! (transient {:a 1}) {:b 2})) :b)"
+        ),
+        "2"
+    );
+}
+
+#[test]
+fn gap2_assoc_bang_extra_rows() {
+    let mut eval = boot();
+    // Extra triples fold; an odd tail assocs nil (coll.rs:1351-1353, 1360-1361, 1384).
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(persistent! (assoc! (transient [1 2 3]) 0 9 1 8))"
+        ),
+        "[9 8 3]"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(persistent! (assoc! (transient [1 2 3]) 0 9 1))"
+        ),
+        "[9 nil 3]"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(get (persistent! (assoc! (transient {:a 1}) :b 2 :c 3)) :c)"
+        ),
+        "3"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(assoc! (transient [1 2]) -1 :x)"),
+        "java.lang.IndexOutOfBoundsException | "
+    );
+}
+
+#[test]
+fn gap2_distinct_first_pair() {
+    let mut eval = boot();
+    // Equal first two short-circuit (coll.rs:1610).
+    assert_eq!(run_last(&mut eval, "(distinct? 1 1 2)"), "false");
+}
+
+#[test]
+fn strict_seq_class_rows() {
+    let mut eval = boot();
+    // Each producer reports the JVM class for the value it builds
+    // (covers the matching `class_name`/`jvm_name` arms in seq.rs).
+    assert_eq!(
+        class_of(&mut eval, "(seq [1 2])"),
+        "clojure.lang.PersistentVector$ChunkedSeq"
+    );
+    assert_eq!(class_of(&mut eval, "(sort [2 1])"), "clojure.lang.ArraySeq");
+    assert_eq!(
+        class_of(&mut eval, "(seq \"ab\")"),
+        "clojure.lang.StringSeq"
+    );
+    assert_eq!(
+        class_of(&mut eval, "(seq {:a 1})"),
+        "clojure.lang.PersistentArrayMap$Seq"
+    );
+    assert_eq!(
+        class_of(&mut eval, "(seq #{1})"),
+        "clojure.lang.APersistentMap$KeySeq"
+    );
+    assert_eq!(class_of(&mut eval, "(repeat 1)"), "clojure.lang.Repeat");
+    assert_eq!(class_of(&mut eval, "(cycle [1])"), "clojure.lang.Cycle");
+    assert_eq!(
+        class_of(&mut eval, "(iterate inc 0)"),
+        "clojure.lang.Iterate"
+    );
+    assert_eq!(class_of(&mut eval, "(range 1.5)"), "clojure.lang.Range");
+    assert_eq!(
+        class_of(&mut eval, "(keys {:a 1})"),
+        "clojure.lang.APersistentMap$KeySeq"
+    );
+    assert_eq!(
+        class_of(&mut eval, "(vals {:a 1})"),
+        "clojure.lang.APersistentMap$ValSeq"
+    );
+}
+
+#[test]
+fn subvec_invoke_out_of_bounds() {
+    let mut eval = boot();
+    // OOB invoke is the empty-message IOOBE.
+    assert_eq!(
+        uncaught(&mut eval, "((subvec [1 2 3] 0 2) 5)"),
+        "java.lang.IndexOutOfBoundsException | "
+    );
+}

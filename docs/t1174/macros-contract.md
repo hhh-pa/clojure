@@ -184,17 +184,15 @@ tx), probe37 `declare-*`/`ns-*`, corner probes `s5ccorner*`,
 
 - Syntax-quote expansions call `seq`/`concat`/`list`/`apply`/
   `vector`/`hash-map`/`hash-set` (shapes verified against the
-  JVM, corners `i-*`), so S5C implements all seven (eagerly;
-  S5D makes `seq`/`concat` lazy per C4 — unobservable until
-  infinite seqs exist): `seq` (nil/empty→nil, else eager list;
-  maps seq `[k v]` vectors — the JVM yields `MapEntry`s,
-  fence; non-seqables are the `ISeq` error), `concat` (0+,
-  nils skipped), `list`, `vector`, `hash-map`/`hash-set`
-  (odd `hash-map` args are `No value supplied for key:`,
-  like `array-map`), `apply` (2+, last arg spread, nil
-  spreads nothing). Pinned by probe39 `seq-first-rest`,
-  `vec-list-ctor`, `zipmap-ctor-distinct`, `concat-cycle`,
-  `apply-edges`.
+  JVM, corners `i-*`). S5C implemented all seven eagerly; S5D
+  moved `seq`/`concat` to the lazy `lazy`/`seqs` roots per C4
+  (the eager copies were deleted once shadowing was proven —
+  later installs overwrite both roots before any eval), leaving
+  `list`, `vector`, `hash-map`/`hash-set` (odd `hash-map` args
+  are `No value supplied for key:`, like `array-map`), `apply`
+  (2+, last arg spread, nil spreads nothing) here. Pinned by
+  probe39 `seq-first-rest`, `vec-list-ctor`,
+  `zipmap-ctor-distinct`, `concat-cycle`, `apply-edges`.
 
 ## Fences
 
@@ -205,6 +203,6 @@ tx), probe37 `declare-*`/`ns-*`, corner probes `s5ccorner*`,
   nested-`eval` compile errors inside macros (`Unexpected`,
   not bare); rootless-macro calls (the unbound-invoke error
   wrapped per partition); separate reader/`gensym` counters;
-  eager `seq`/`concat` (S5D: lazy); map seqs yield vectors
-  (S5D may add `MapEntry`); `String` syntax-quote has no
-  import (`user/String`, N1).
+  `seq`/`concat` went lazy in S5D (eager copies removed);
+  map seqs yield vectors (S5D may add `MapEntry`); `String`
+  syntax-quote has no import (`user/String`, N1).

@@ -207,3 +207,121 @@ fn collection_type_name(v: &Value) -> &'static str {
         _ => unreachable!("atoms handled above"),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{collection_type_name, compare, type_name};
+    use crate::{
+        Agent, Atom, Delay, Future, Promise, Symbol, Transient, TransientKind, TransientVector,
+        Value, Vector,
+    };
+    use std::cmp::Ordering;
+    use std::sync::Arc;
+
+    fn transient_value() -> Value {
+        Value::Transient(Transient::new(
+            TransientKind::Vector(TransientVector::new()),
+        ))
+    }
+
+    fn message_of(a: &Value, b: &Value) -> String {
+        compare(a, b).expect_err("expected incomparable").message()
+    }
+
+    #[test]
+    fn display_matches_message() {
+        let err = compare(&Value::Int(1), &Value::Str(Arc::from("s")))
+            .expect_err("expected incomparable");
+        assert_eq!(err.message(), "Cannot compare Long to String");
+        assert_eq!(err.to_string(), "Cannot compare Long to String");
+    }
+
+    #[test]
+    fn vectors_order_by_first_differing_element() {
+        let one = Value::Vector(Vector::from_vec(vec![Value::Int(1)]));
+        let two = Value::Vector(Vector::from_vec(vec![Value::Int(2)]));
+        assert_eq!(compare(&one, &two), Ok(Ordering::Less));
+        assert_eq!(compare(&two, &one), Ok(Ordering::Greater));
+    }
+
+    #[test]
+    fn scalar_type_names() {
+        let s = Value::Str(Arc::from("s"));
+        assert_eq!(
+            message_of(&Value::Double(1.0), &s),
+            "Cannot compare Double to String"
+        );
+        assert_eq!(
+            message_of(&s, &Value::Double(1.0)),
+            "Cannot compare String to Double"
+        );
+        assert_eq!(
+            message_of(&Value::Char('a'), &Value::Int(1)),
+            "Cannot compare Character to Long"
+        );
+    }
+
+    #[test]
+    fn ref_type_names() {
+        let n = Value::Int(1);
+        assert_eq!(
+            message_of(&transient_value(), &n),
+            "Cannot compare Transient to Long"
+        );
+        assert_eq!(
+            message_of(&Value::Atom(Atom::new(Value::Nil)), &n),
+            "Cannot compare Atom to Long"
+        );
+        assert_eq!(
+            message_of(&Value::Delay(Delay::new(Value::Nil)), &n),
+            "Cannot compare Delay to Long"
+        );
+        assert_eq!(
+            message_of(&Value::Future(Future::new()), &n),
+            "Cannot compare Future to Long"
+        );
+        assert_eq!(
+            message_of(&Value::Promise(Promise::new()), &n),
+            "Cannot compare Promise to Long"
+        );
+        assert_eq!(
+            message_of(&Value::Agent(Agent::new(Value::Nil)), &n),
+            "Cannot compare Agent to Long"
+        );
+    }
+
+    #[test]
+    fn reader_type_names() {
+        let n = Value::Int(1);
+        let tagged = Value::TaggedLiteral {
+            tag: Symbol::new(None, "t"),
+            form: Box::new(Value::Nil),
+        };
+        assert_eq!(
+            message_of(&tagged, &n),
+            "Cannot compare TaggedLiteral to Long"
+        );
+        let cond = Value::ReaderConditional {
+            form: Box::new(Value::Nil),
+            splicing: false,
+        };
+        assert_eq!(
+            message_of(&cond, &n),
+            "Cannot compare ReaderConditional to Long"
+        );
+    }
+
+    #[test]
+    fn defensive_names_coverable_directly() {
+        // `type_name(Nil)` never fires through `compare` (nil
+        // pairs decide early), and the collection wildcard is
+        // exhaustive-by-construction — both pinned directly.
+        assert_eq!(type_name(&Value::Nil), "nil");
+    }
+
+    #[test]
+    #[should_panic(expected = "atoms handled above")]
+    fn collection_wildcard_panics() {
+        let _ = collection_type_name(&Value::Int(1));
+    }
+}

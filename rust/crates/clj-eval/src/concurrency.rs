@@ -58,7 +58,7 @@ use clj_value::{
 };
 
 use crate::core::{cce_err, is_ifn};
-use crate::error::{NativeError, Signal};
+use crate::error::{NativeError, Signal, internal_throwable};
 use crate::eval::Evaluator;
 use crate::ext::NativeFn;
 use crate::lazy::as_pending;
@@ -161,7 +161,14 @@ fn validate_new(
     validator: &Value,
     candidate: &Value,
 ) -> Result<(), NativeError> {
-    match eval.call(validator, std::slice::from_ref(candidate)) {
+    validation_outcome(eval.call(validator, std::slice::from_ref(candidate)))
+}
+
+/// Map a validator call's outcome to its verdict (a falsy verdict
+/// vetoes; anything but a throw funnels through the shared signal
+/// mapping — `recur` cannot reach here, the analyzer cages it).
+fn validation_outcome(out: Result<Value, Signal>) -> Result<(), NativeError> {
+    match out {
         Ok(v) => {
             if v.is_truthy() {
                 Ok(())
@@ -457,7 +464,14 @@ fn take_delay_thunk(eval: &mut Evaluator, delay: &Delay) -> DelayTake {
 /// (throwing still realizes; the same failure rethrows on every
 /// later force, never re-running).
 fn finish_delay_force(eval: &mut Evaluator, delay: &Delay, thunk: Value) -> Result<Value, Signal> {
-    match eval.call(&thunk, &[]) {
+    delay_outcome(eval.call(&thunk, &[]), delay, thunk)
+}
+
+/// Cache a taken thunk's outcome — values AND failures (throwing
+/// still realizes; a `recur`, which the analyzer rejects, restores
+/// the thunk so a retry re-runs).
+fn delay_outcome(out: Result<Value, Signal>, delay: &Delay, thunk: Value) -> Result<Value, Signal> {
+    match out {
         Ok(v) => {
             *delay.lock() = DelayState::Realized(v.clone());
             delay.notify_settled();
@@ -469,8 +483,6 @@ fn finish_delay_force(eval: &mut Evaluator, delay: &Delay, thunk: Value) -> Resu
             Err(Signal::Throw(t))
         }
         Err(other) => {
-            // A `recur` escaped its frame (the analyzer rejects
-            // those — restore, so a retry re-runs).
             *delay.lock() = DelayState::Pending(thunk);
             delay.notify_settled();
             Err(other)
@@ -619,6 +631,16 @@ fn native_realized(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nativ
     }
 }
 
+/// A thread-spawn failure (the OS refused a new thread — the
+/// JVM's `unable to create native thread`, untriggerable under
+/// test; pinned by direct call).
+fn spawn_failed() -> NativeError {
+    NativeError::new(
+        ThrowClass::RuntimeException,
+        "unable to create native thread".to_owned(),
+    )
+}
+
 /// `future-call`: convey the calling thread's bindings onto a forked
 /// evaluator and spawn the zero-arg fn on its own thread. The fn is
 /// never validated eagerly (like the JVM's `binding-conveyor-fn`
@@ -634,12 +656,7 @@ fn native_future_call(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nat
     let handle = std::thread::Builder::new()
         .name(name)
         .spawn(move || run_future_body(child, f, cell))
-        .map_err(|_| {
-            NativeError::new(
-                ThrowClass::RuntimeException,
-                "unable to create native thread".to_owned(),
-            )
-        })?;
+        .map_err(|_| spawn_failed())?;
     eval.push_future_thread(handle);
     Ok(Value::Future(future))
 }
@@ -651,21 +668,33 @@ fn native_future_call(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nat
 /// analyzer cages every `recur` — but waiters must always settle,
 /// never hang).
 fn run_future_body(mut child: Evaluator, f: Value, future: Future) {
-    let outcome =
-        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| child.call(&f, &[]))) {
-            Ok(Ok(v)) => FutureOutcome::Value(v),
-            Ok(Err(Signal::Throw(t))) => FutureOutcome::Failed(t),
-            Ok(Err(Signal::Recur(_))) => {
-                FutureOutcome::Failed(error_throwable(&mut child, "recur escaped its loop or fn"))
-            }
-            Err(panicked) => FutureOutcome::Failed(error_throwable(
-                &mut child,
-                &panic_message(&panicked, "future body panicked"),
-            )),
-        };
+    let outcome = future_body_outcome(
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| child.call(&f, &[]))),
+        &mut child,
+    );
     // A cancellation wins over this late result (like `FutureTask`
     // after `cancel`).
     future.complete(outcome);
+}
+
+/// Map a caught future-body outcome to its published outcome (the
+/// `Recur` arm is defense in depth — the analyzer cages every
+/// `recur` inside its loop/fn).
+fn future_body_outcome(
+    out: Result<Result<Value, Signal>, Box<dyn std::any::Any + Send>>,
+    child: &mut Evaluator,
+) -> FutureOutcome {
+    match out {
+        Ok(Ok(v)) => FutureOutcome::Value(v),
+        Ok(Err(Signal::Throw(t))) => FutureOutcome::Failed(t),
+        Ok(Err(Signal::Recur(_))) => {
+            FutureOutcome::Failed(error_throwable(child, "recur escaped its loop or fn"))
+        }
+        Err(panicked) => FutureOutcome::Failed(error_throwable(
+            child,
+            &panic_message(&panicked, "future body panicked"),
+        )),
+    }
 }
 
 /// An `Error` throwable stamped from the shared identity sequence
@@ -809,12 +838,6 @@ impl AgentSystem {
     }
 }
 
-impl Default for AgentSystem {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 /// One submitted agent action: the agent plus its dequeued head (the
 /// head remembers its own pool, like the JVM's per-`Action` executor).
 struct AgentWork {
@@ -862,27 +885,10 @@ impl AgentPools {
         for i in 0..count {
             let worker_pools = Arc::clone(&pools);
             let worker_rx = Arc::clone(&send_rx);
-            match thread::Builder::new()
+            let spawned = thread::Builder::new()
                 .name(format!("clojure-agent-send-pool-{i}"))
-                .spawn(move || send_worker(&worker_pools, &worker_rx))
-            {
-                Ok(handle) => handles.push(handle),
-                Err(_) => {
-                    pools
-                        .inner
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .send_tx = None;
-                    drop(pools);
-                    for handle in handles {
-                        let _ = handle.join();
-                    }
-                    return Err(NativeError::new(
-                        ThrowClass::RuntimeException,
-                        "unable to create native thread".to_owned(),
-                    ));
-                }
-            }
+                .spawn(move || send_worker(&worker_pools, &worker_rx));
+            Self::install_worker(&pools, &mut handles, spawned)?;
         }
         pools
             .inner
@@ -890,6 +896,35 @@ impl AgentPools {
             .unwrap_or_else(|e| e.into_inner())
             .send_handles = handles;
         Ok(pools)
+    }
+
+    /// Install one spawned `send` worker: a spawn failure poisons
+    /// the pool's sender (late sends fail loudly instead of
+    /// hanging), joins the workers that did start, and reports the
+    /// failure (the caller's `Arc` releases on the ensuing return).
+    /// Takes the spawn `Result` so tests can drive the failure.
+    fn install_worker(
+        pools: &Self,
+        handles: &mut Vec<JoinHandle<()>>,
+        spawned: std::io::Result<JoinHandle<()>>,
+    ) -> Result<(), NativeError> {
+        match spawned {
+            Ok(handle) => {
+                handles.push(handle);
+                Ok(())
+            }
+            Err(_) => {
+                pools
+                    .inner
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .send_tx = None;
+                for handle in handles.drain(..) {
+                    let _ = handle.join();
+                }
+                Err(spawn_failed())
+            }
+        }
     }
 
     /// Whether shutdown dropped the `send` queue (dispatches and
@@ -971,11 +1006,9 @@ fn reject_head(agent: &Agent, mut head: QueuedAction) {
 /// its pool). Refused dispatches (shut down, queue gone, workers
 /// dead) drop the head after notifying the handler — never inline.
 fn pools_dispatch(pools: &Arc<AgentPools>, agent: &Agent, head: QueuedAction) {
-    if pools.is_shutdown() {
-        reject_head(agent, head);
-        return;
-    }
     if head.pool == AgentPool::Send {
+        // One under-lock read: `None` means shut down (the old
+        // pre-check raced the queue drop; both rejected alike).
         let tx = pools
             .inner
             .lock()
@@ -983,20 +1016,41 @@ fn pools_dispatch(pools: &Arc<AgentPools>, agent: &Agent, head: QueuedAction) {
             .send_tx
             .clone();
         match tx {
-            Some(tx) => match tx.send(AgentWork {
-                agent: agent.clone(),
-                head,
-            }) {
-                Ok(()) => {}
-                Err(returned) => {
-                    let work = returned.0;
-                    reject_head(&work.agent, work.head);
-                }
-            },
+            // The receiver outlives every sender clone (workers exit
+            // only once all senders drop), so this send cannot fail.
+            Some(tx) => {
+                let _ = tx.send(AgentWork {
+                    agent: agent.clone(),
+                    head,
+                });
+            }
             None => reject_head(agent, head),
         }
     } else {
         dispatch_sendoff(pools, agent, head);
+    }
+}
+
+/// Complete a `send-off` spawn: publish the handle and hand the
+/// head to the new thread — or reject the head when the spawn
+/// failed (like the JVM's `execute` catch). Takes the spawn
+/// `Result` so tests can drive the failure.
+fn complete_sendoff(
+    mut inner: std::sync::MutexGuard<'_, AgentPoolsInner>,
+    head_tx: mpsc::Sender<QueuedAction>,
+    agent: &Agent,
+    head: QueuedAction,
+    spawned: std::io::Result<JoinHandle<()>>,
+) {
+    match spawned {
+        Ok(handle) => {
+            inner.sendoff_handles.push(handle);
+            let _ = head_tx.send(head);
+        }
+        Err(_) => {
+            drop(inner);
+            reject_head(agent, head);
+        }
     }
 }
 
@@ -1020,27 +1074,19 @@ fn dispatch_sendoff(pools: &Arc<AgentPools>, agent: &Agent, head: QueuedAction) 
     // it silently inside the unborn closure.
     let (head_tx, head_rx) = mpsc::channel::<QueuedAction>();
     let name = format!("clojure-agent-send-off-pool-{seq}");
-    match thread::Builder::new().name(name).spawn(move || {
+    let spawned = thread::Builder::new().name(name).spawn(move || {
         if let Ok(head) = head_rx.recv() {
             pump_agent(&child_pools, &child_agent, head);
         }
-    }) {
-        Ok(handle) => {
-            inner.sendoff_handles.push(handle);
-            let _ = head_tx.send(head);
-        }
-        Err(_) => {
-            drop(inner);
-            reject_head(agent, head);
-        }
-    }
+    });
+    complete_sendoff(inner, head_tx, agent, head, spawned);
 }
 
 /// Run a head, then dispatch the next head to its pool — or drop it
 /// after shutdown (an explicit loop: the queue is unbounded, so
 /// recursion could overflow).
 fn pump_agent(pools: &Arc<AgentPools>, agent: &Agent, head: QueuedAction) {
-    if let Some(next) = execute_head(agent, head.action, Some(pools)) {
+    if let Some(next) = execute_head(agent, head.action, pools) {
         if pools.is_shutdown() {
             reject_head(agent, next);
         } else {
@@ -1052,13 +1098,10 @@ fn pump_agent(pools: &Arc<AgentPools>, agent: &Agent, head: QueuedAction) {
 /// Release buffered nested sends (the JVM's `releasePendingSends`):
 /// each enqueues unchecked and starts its runner when idle and
 /// clean; refused dispatches drop like any other submit failure.
-fn release_outbox(outbox: Vec<(Agent, QueuedAction)>, pools: Option<&Arc<AgentPools>>) {
+fn release_outbox(outbox: Vec<(Agent, QueuedAction)>, pools: &Arc<AgentPools>) {
     for (target, item) in outbox {
         if let Some(head) = target.enqueue_nested(item) {
-            match pools {
-                Some(pools) => pools_dispatch(pools, &target, head),
-                None => reject_head(&target, head),
-            }
+            pools_dispatch(pools, &target, head);
         }
     }
 }
@@ -1073,7 +1116,7 @@ fn release_outbox(outbox: Vec<(Agent, QueuedAction)>, pools: Option<&Arc<AgentPo
 fn execute_head(
     agent: &Agent,
     mut action: Box<dyn AgentAction>,
-    pools: Option<&Arc<AgentPools>>,
+    pools: &Arc<AgentPools>,
 ) -> Option<QueuedAction> {
     let state = agent.lock().value.clone();
     let agent_val = Value::Agent(agent.clone());
@@ -1219,7 +1262,20 @@ impl AgentAction for EvalAction {
 /// escaping `recur`s, and Rust panics — into a throwable (pool
 /// threads never die).
 fn child_call(child: &mut Evaluator, f: &Value, args: &[Value]) -> Result<Value, Throwable> {
-    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| child.call(f, args))) {
+    child_outcome(
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| child.call(f, args))),
+        child,
+    )
+}
+
+/// Map a caught child-call outcome to a value-or-throwable (the
+/// `Recur` arm is defense in depth — the analyzer cages every
+/// `recur` inside its loop/fn).
+fn child_outcome(
+    out: Result<Result<Value, Signal>, Box<dyn std::any::Any + Send>>,
+    child: &mut Evaluator,
+) -> Result<Value, Throwable> {
+    match out {
         Ok(Ok(v)) => Ok(v),
         Ok(Err(Signal::Throw(t))) => Err(t),
         Ok(Err(Signal::Recur(_))) => Err(error_throwable(child, "recur escaped its loop or fn")),
@@ -1255,9 +1311,16 @@ fn validate_action(
 /// Stamp a native error with an identity (the error latch stores
 /// throwables, like `agent-error` returns).
 fn stamp_native(child: &mut Evaluator, err: NativeError) -> Throwable {
-    match child.throw(err) {
+    unwrap_thrown(child.throw(err))
+}
+
+/// A constructed throw (the [`throw`](Evaluator::throw)
+/// constructor only builds `Throw`; a `Recur` here is a port bug
+/// and surfaces as an internal error, never a panic).
+fn unwrap_thrown(s: Signal) -> Throwable {
+    match s {
         Signal::Throw(t) => t,
-        Signal::Recur(_) => unreachable!("throw always throws"),
+        Signal::Recur(_) => internal_throwable("throw returned a recur signal".to_owned()),
     }
 }
 
@@ -1447,9 +1510,9 @@ fn send_action(
         outbox.push((agent.clone(), item));
         return Ok(Value::Agent(agent.clone()));
     }
-    if let Some(error) = agent.error() {
-        return Err(agent_failed(&error));
-    }
+    // No failed pre-check: `enqueue` rejects failed agents under its
+    // own lock with the same latched error (a restart racing the
+    // send linearizes as success either way).
     let pools = eval.agent_pools_for_send()?;
     match agent.enqueue(item) {
         Ok(Some(head)) => match pools.as_ref() {
@@ -1801,3 +1864,260 @@ pub(crate) const CONC_NATIVES: &[(&str, NativeFnPtr)] = &[
     ("set-error-handler!", native_set_error_handler),
     ("set-error-mode!", native_set_error_mode),
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unwrap_thrown_recur_is_internal() {
+        // Defense in depth: a `Recur` from the `throw`
+        // constructor (impossible — it only builds `Throw`)
+        // surfaces as an internal error.
+        let t = unwrap_thrown(Signal::Recur(vec![]));
+        assert_eq!(t.class, ThrowClass::Error);
+        assert!(
+            t.message
+                .as_deref()
+                .unwrap_or("")
+                .contains("throw returned a recur signal")
+        );
+    }
+
+    #[test]
+    fn locking_monitor_starts_unowned() {
+        let monitor = LockingMonitor::new();
+        let state = monitor.state.lock().expect("fresh monitor is unpoisoned");
+        assert!(state.owner.is_none());
+        assert_eq!(state.count, 0);
+    }
+
+    #[test]
+    fn bind_agent_without_var_is_idle() {
+        let mut eval = Evaluator::new_bare("user");
+        assert!(!bind_agent(&mut eval, &Value::Nil));
+    }
+
+    #[test]
+    #[should_panic(expected = "deref of an unsettled future")]
+    fn future_outcome_pending_panics() {
+        let _ = future_outcome(&FutureState::Pending);
+    }
+
+    #[test]
+    fn child_outcome_maps_every_caught_shape() {
+        let mut child = Evaluator::new_bare("user");
+        assert!(matches!(
+            child_outcome(Ok(Ok(Value::Int(1))), &mut child),
+            Ok(Value::Int(1))
+        ));
+        let thrown = Throwable {
+            id: 1,
+            class: ThrowClass::Exception,
+            message: Some(std::sync::Arc::from("boom")),
+            data: None,
+            cause: None,
+        };
+        assert!(child_outcome(Ok(Err(Signal::Throw(thrown))), &mut child).is_err());
+        // The analyzer-impossible case: pins the helper's total
+        // contract directly.
+        let err = child_outcome(Ok(Err(Signal::Recur(vec![]))), &mut child).unwrap_err();
+        assert_eq!(err.class, ThrowClass::Error);
+        assert_eq!(err.message.as_deref(), Some("recur escaped its loop or fn"));
+        let err = child_outcome(Err(Box::new("x")), &mut child).unwrap_err();
+        assert_eq!(err.class, ThrowClass::Error);
+        assert_eq!(err.message.as_deref(), Some("x"));
+    }
+
+    #[test]
+    fn future_body_outcome_maps_every_caught_shape() {
+        let mut child = Evaluator::new_bare("user");
+        assert!(matches!(
+            future_body_outcome(Ok(Ok(Value::Int(1))), &mut child),
+            FutureOutcome::Value(Value::Int(1))
+        ));
+        let thrown = Throwable {
+            id: 1,
+            class: ThrowClass::Exception,
+            message: Some(std::sync::Arc::from("boom")),
+            data: None,
+            cause: None,
+        };
+        assert!(matches!(
+            future_body_outcome(Ok(Err(Signal::Throw(thrown))), &mut child),
+            FutureOutcome::Failed(_)
+        ));
+        let out = future_body_outcome(Ok(Err(Signal::Recur(vec![]))), &mut child);
+        assert!(
+            matches!(out, FutureOutcome::Failed(t) if t.message.as_deref() == Some("recur escaped its loop or fn"))
+        );
+        let out = future_body_outcome(Err(Box::new("x")), &mut child);
+        assert!(matches!(out, FutureOutcome::Failed(t) if t.message.as_deref() == Some("x")));
+    }
+
+    #[test]
+    fn delay_outcome_caches_or_restores() {
+        let delay = Delay::new(Value::Int(0));
+        assert!(matches!(
+            delay_outcome(Ok(Value::Int(1)), &delay, Value::Int(0)),
+            Ok(Value::Int(1))
+        ));
+        assert!(matches!(*delay.lock(), DelayState::Realized(Value::Int(1))));
+        let delay = Delay::new(Value::Int(0));
+        let thrown = Throwable {
+            id: 1,
+            class: ThrowClass::Exception,
+            message: Some(std::sync::Arc::from("boom")),
+            data: None,
+            cause: None,
+        };
+        assert!(matches!(
+            delay_outcome(Err(Signal::Throw(thrown)), &delay, Value::Int(0)),
+            Err(Signal::Throw(_))
+        ));
+        assert!(matches!(*delay.lock(), DelayState::Failed(_)));
+        // The analyzer-impossible case: the thunk is restored, so a
+        // retry re-runs.
+        let delay = Delay::new(Value::Int(0));
+        assert!(matches!(
+            delay_outcome(Err(Signal::Recur(vec![])), &delay, Value::Int(7)),
+            Err(Signal::Recur(_))
+        ));
+        assert!(matches!(*delay.lock(), DelayState::Pending(Value::Int(7))));
+    }
+
+    #[test]
+    fn check_await_errors_reports_latched_failure() {
+        // Direct pin: a racing failure mid-wait is timing, but the
+        // check itself runs on any failed cell.
+        let failed = Agent::new(Value::Int(0));
+        failed.complete_failed(Throwable {
+            id: 1,
+            class: ThrowClass::RuntimeException,
+            message: Some(std::sync::Arc::from("boom")),
+            data: None,
+            cause: None,
+        });
+        assert!(check_await_errors(&[failed]).is_err());
+        let clean = Agent::new(Value::Int(0));
+        assert!(check_await_errors(&[clean]).is_ok());
+    }
+
+    #[test]
+    fn validation_outcome_maps_every_verdict() {
+        assert!(validation_outcome(Ok(Value::Bool(true))).is_ok());
+        assert!(validation_outcome(Ok(Value::Bool(false))).is_err());
+        let thrown = Throwable {
+            id: 1,
+            class: ThrowClass::Exception,
+            message: Some(std::sync::Arc::from("boom")),
+            data: None,
+            cause: None,
+        };
+        assert!(validation_outcome(Err(Signal::Throw(thrown))).is_err());
+        // The analyzer-impossible case: funnels through the shared
+        // signal mapping like any other non-throw.
+        assert!(validation_outcome(Err(Signal::Recur(vec![]))).is_err());
+    }
+
+    #[test]
+    fn spawn_failed_reports_native_thread_error() {
+        let err = spawn_failed();
+        assert_eq!(err.class, ThrowClass::RuntimeException);
+        assert_eq!(err.message, "unable to create native thread");
+    }
+
+    #[test]
+    fn install_worker_pushes_started_handle() {
+        let pools = AgentPools::create().expect("pool starts");
+        let mut handles = Vec::new();
+        let spawned = thread::spawn(|| {});
+        AgentPools::install_worker(&pools, &mut handles, Ok(spawned)).expect("install");
+        assert_eq!(handles.len(), 1);
+        for handle in handles.drain(..) {
+            let _ = handle.join();
+        }
+    }
+
+    #[test]
+    fn install_worker_spawn_failure_tears_down() {
+        let pools = AgentPools::create().expect("pool starts");
+        // A live handle proves the teardown joins what did start.
+        let mut handles = vec![thread::spawn(|| {})];
+        let err =
+            AgentPools::install_worker(&pools, &mut handles, Err(std::io::Error::other("boom")))
+                .expect_err("spawn failure errors");
+        assert_eq!(err.class, ThrowClass::RuntimeException);
+        assert_eq!(err.message, "unable to create native thread");
+        assert!(handles.is_empty());
+        assert!(
+            pools
+                .inner
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .send_tx
+                .is_none()
+        );
+    }
+
+    /// A rejection probe: records the handler invocation.
+    struct RecordReject {
+        fired: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl AgentAction for RecordReject {
+        fn run(&mut self, state: &Value) -> Result<Value, Throwable> {
+            Ok(state.clone())
+        }
+
+        fn fire_watches(
+            &mut self,
+            _agent: &Value,
+            _old: &Value,
+            _new: &Value,
+            _watches: &Map,
+        ) -> Result<(), Throwable> {
+            Ok(())
+        }
+
+        fn handle_error(&mut self, _handler: &Value, _agent: &Value, _error: &Throwable) {
+            self.fired.store(true, Ordering::Relaxed);
+        }
+    }
+
+    #[test]
+    fn record_reject_runs_and_fires() {
+        let fired = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut probe = RecordReject { fired };
+        let state = Value::Int(7);
+        let out = probe.run(&state).expect("run ok");
+        assert_eq!(out, state);
+        probe
+            .fire_watches(&Value::Nil, &Value::Nil, &Value::Nil, &new_map())
+            .expect("fires ok");
+    }
+
+    #[test]
+    fn complete_sendoff_spawn_failure_rejects_head() {
+        let pools = AgentPools::create().expect("pool starts");
+        let agent = Agent::new(Value::Int(0));
+        agent.lock().error_handler = Some(Value::Nil);
+        let inner = pools.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let (head_tx, _head_rx) = mpsc::channel::<QueuedAction>();
+        let fired = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let head = QueuedAction {
+            pool: AgentPool::SendOff,
+            action: Box::new(RecordReject {
+                fired: std::sync::Arc::clone(&fired),
+            }),
+        };
+        complete_sendoff(
+            inner,
+            head_tx,
+            &agent,
+            head,
+            Err(std::io::Error::other("boom")),
+        );
+        assert!(fired.load(Ordering::Relaxed));
+    }
+}

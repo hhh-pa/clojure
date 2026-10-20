@@ -367,16 +367,9 @@ fn is_time_suffix(c: char) -> bool {
 /// Canonical flag order (`-`, `#`, `+`, space, `0`, `,`, `(`):
 /// every flag-list message sorts by it.
 fn flag_rank(c: char) -> usize {
-    match c {
-        '-' => 0,
-        '#' => 1,
-        '+' => 2,
-        ' ' => 3,
-        '0' => 4,
-        ',' => 5,
-        '(' => 6,
-        _ => 7,
-    }
+    // Only the seven parsed flags ever reach here (anything else
+    // sorts last).
+    "-#+ 0,(".find(c).unwrap_or(7)
 }
 
 /// Flags in canonical order.
@@ -544,7 +537,6 @@ fn allowed_flags(conv: char) -> Option<&'static [char]> {
         'e' | 'E' | 'f' => &['-', '+', ' ', '#', '0', ',', '('],
         'g' | 'G' => &['-', '+', ' ', '0', ',', '('],
         'a' | 'A' => &['-', '+', ' ', '#', '0'],
-        'n' => return None,
         _ => return None,
     })
 }
@@ -978,9 +970,9 @@ fn round_half_up(digits: &[u8], keep: usize) -> (Vec<u8>, bool) {
         }
     }
     head.resize(keep, b'0');
-    if keep > 0 {
-        head[0] = b'1';
-    }
+    // `keep` is positive at every call site, so the head is
+    // non-empty here.
+    *head.first_mut().expect("rounded head is non-empty") = b'1';
     (head, true)
 }
 
@@ -1008,22 +1000,15 @@ fn render_f(digits: &[u8], exp: i32, prec: usize) -> String {
             out.push('0');
             written += 1;
         }
+        // The surviving digits exactly fill the rest (every caller
+        // rounds to `prec` first, or collapsed to zero above).
         for b in digits {
-            if written >= prec {
-                break;
-            }
             out.push(*b as char);
-            written += 1;
         }
     } else {
         for i in 0..prec {
             out.push(digits.get(exp as usize + i).copied().unwrap_or(b'0') as char);
         }
-        written = prec;
-    }
-    while written < prec {
-        out.push('0');
-        written += 1;
     }
     out
 }
@@ -1364,6 +1349,162 @@ fn days_from_civil(y: i32, m: u32, d: u32) -> i64 {
     era * 146_097 + doe as i64 - 719_468
 }
 
+/// The `%t` render inputs, precomputed once per call.
+struct TimeParts {
+    millis: i64,
+    year: i32,
+    month: u32,
+    day: u32,
+    hour: u32,
+    minute: u32,
+    second: u32,
+    ms: u32,
+    dow: usize,
+    doy: u32,
+    hour12: u32,
+}
+
+fn time_hour(p: &TimeParts) -> String {
+    format!("{:02}", p.hour)
+}
+fn time_hour12(p: &TimeParts) -> String {
+    format!("{:02}", p.hour12)
+}
+fn time_hour_unpadded(p: &TimeParts) -> String {
+    p.hour.to_string()
+}
+fn time_hour12_unpadded(p: &TimeParts) -> String {
+    p.hour12.to_string()
+}
+fn time_minute(p: &TimeParts) -> String {
+    format!("{:02}", p.minute)
+}
+fn time_second(p: &TimeParts) -> String {
+    format!("{:02}", p.second)
+}
+fn time_millis(p: &TimeParts) -> String {
+    format!("{:03}", p.ms)
+}
+fn time_nanos(p: &TimeParts) -> String {
+    format!("{:09}", p.ms * 1_000_000)
+}
+fn time_ampm(p: &TimeParts) -> String {
+    if p.hour < 12 {
+        "am".to_owned()
+    } else {
+        "pm".to_owned()
+    }
+}
+fn time_zone_offset(_: &TimeParts) -> String {
+    "+0000".to_owned()
+}
+fn time_zone_name(_: &TimeParts) -> String {
+    "UTC".to_owned()
+}
+fn time_epoch_secs(p: &TimeParts) -> String {
+    // Truncation toward zero (`%ts` of `-1` is `0`).
+    (p.millis / 1_000).to_string()
+}
+fn time_epoch_millis(p: &TimeParts) -> String {
+    p.millis.to_string()
+}
+fn time_month_full(p: &TimeParts) -> String {
+    MONTHS_FULL[p.month as usize - 1].to_owned()
+}
+fn time_month_abbr(p: &TimeParts) -> String {
+    MONTHS_ABBR[p.month as usize - 1].to_owned()
+}
+fn time_day_full(p: &TimeParts) -> String {
+    DAYS_FULL[p.dow].to_owned()
+}
+fn time_day_abbr(p: &TimeParts) -> String {
+    DAYS_ABBR[p.dow].to_owned()
+}
+fn time_century(p: &TimeParts) -> String {
+    format!("{:02}", p.year / 100)
+}
+fn time_year(p: &TimeParts) -> String {
+    format_time_year(p.year)
+}
+fn time_year2(p: &TimeParts) -> String {
+    format!("{:02}", p.year.rem_euclid(100))
+}
+fn time_day_of_year(p: &TimeParts) -> String {
+    format!("{:03}", p.doy)
+}
+fn time_month(p: &TimeParts) -> String {
+    format!("{:02}", p.month)
+}
+fn time_day(p: &TimeParts) -> String {
+    format!("{:02}", p.day)
+}
+fn time_day_unpadded(p: &TimeParts) -> String {
+    p.day.to_string()
+}
+fn time_hhmm(p: &TimeParts) -> String {
+    format!("{:02}:{:02}", p.hour, p.minute)
+}
+fn time_hhmmss(p: &TimeParts) -> String {
+    format!("{:02}:{:02}:{:02}", p.hour, p.minute, p.second)
+}
+fn time_us_date(p: &TimeParts) -> String {
+    format!("{:02}/{:02}/{:02}", p.month, p.day, p.year.rem_euclid(100))
+}
+fn time_iso_date(p: &TimeParts) -> String {
+    format!("{}-{:02}-{:02}", format_time_year(p.year), p.month, p.day)
+}
+fn time_ctime(p: &TimeParts) -> String {
+    format!(
+        "{} {} {:02} {:02}:{:02}:{:02} UTC {}",
+        DAYS_ABBR[p.dow],
+        MONTHS_ABBR[p.month as usize - 1],
+        p.day,
+        p.hour,
+        p.minute,
+        p.second,
+        format_time_year(p.year)
+    )
+}
+
+/// One validated `%t` suffix and its renderer.
+type TimeSuffixRender = (char, fn(&TimeParts) -> String);
+
+/// The validated suffix set (mirrors `is_time_suffix`; the parse
+/// rejects anything else, so the lookup in `format_time` cannot
+/// miss and needs no fallback arm).
+const TIME_SUFFIXES: &[TimeSuffixRender] = &[
+    ('H', time_hour),
+    ('I', time_hour12),
+    ('k', time_hour_unpadded),
+    ('l', time_hour12_unpadded),
+    ('M', time_minute),
+    ('S', time_second),
+    ('L', time_millis),
+    ('N', time_nanos),
+    ('p', time_ampm),
+    ('z', time_zone_offset),
+    ('Z', time_zone_name),
+    ('s', time_epoch_secs),
+    ('Q', time_epoch_millis),
+    ('B', time_month_full),
+    ('b', time_month_abbr),
+    ('h', time_month_abbr),
+    ('A', time_day_full),
+    ('a', time_day_abbr),
+    ('C', time_century),
+    ('Y', time_year),
+    ('y', time_year2),
+    ('j', time_day_of_year),
+    ('m', time_month),
+    ('d', time_day),
+    ('e', time_day_unpadded),
+    ('R', time_hhmm),
+    ('T', time_hhmmss),
+    ('D', time_us_date),
+    ('F', time_iso_date),
+    ('c', time_ctime),
+];
+
 /// `%t`/`%T` over epoch millis (UTC only).
 fn format_time(millis: i64, suffix: char) -> String {
     let days = millis.div_euclid(86_400_000);
@@ -1380,54 +1521,24 @@ fn format_time(millis: i64, suffix: char) -> String {
         0 => 12,
         h => h,
     };
-    match suffix {
-        'H' => format!("{hour:02}"),
-        'I' => format!("{hour12:02}"),
-        'k' => hour.to_string(),
-        'l' => hour12.to_string(),
-        'M' => format!("{minute:02}"),
-        'S' => format!("{second:02}"),
-        'L' => format!("{ms:03}"),
-        'N' => format!("{:09}", ms * 1_000_000),
-        'p' => {
-            if hour < 12 {
-                "am".to_owned()
-            } else {
-                "pm".to_owned()
-            }
-        }
-        'z' => "+0000".to_owned(),
-        'Z' => "UTC".to_owned(),
-        // Truncation toward zero (`%ts` of `-1` is `0`).
-        's' => (millis / 1_000).to_string(),
-        'Q' => millis.to_string(),
-        'B' => MONTHS_FULL[month as usize - 1].to_owned(),
-        'b' | 'h' => MONTHS_ABBR[month as usize - 1].to_owned(),
-        'A' => DAYS_FULL[dow].to_owned(),
-        'a' => DAYS_ABBR[dow].to_owned(),
-        'C' => format!("{:02}", year / 100),
-        'Y' => format_time_year(year),
-        'y' => format!("{:02}", year.rem_euclid(100)),
-        'j' => format!("{doy:03}"),
-        'm' => format!("{month:02}"),
-        'd' => format!("{day:02}"),
-        'e' => day.to_string(),
-        'R' => format!("{hour:02}:{minute:02}"),
-        'T' => format!("{hour:02}:{minute:02}:{second:02}"),
-        'D' => format!("{month:02}/{day:02}/{:02}", year.rem_euclid(100)),
-        'F' => format!("{}-{month:02}-{day:02}", format_time_year(year)),
-        'c' => format!(
-            "{} {} {:02} {:02}:{:02}:{:02} UTC {}",
-            DAYS_ABBR[dow],
-            MONTHS_ABBR[month as usize - 1],
-            day,
-            hour,
-            minute,
-            second,
-            format_time_year(year)
-        ),
-        _ => unreachable!("suffix validated at parse"),
-    }
+    let parts = TimeParts {
+        millis,
+        year,
+        month,
+        day,
+        hour,
+        minute,
+        second,
+        ms,
+        dow,
+        doy,
+        hour12,
+    };
+    let (_, render) = TIME_SUFFIXES
+        .iter()
+        .find(|(c, _)| *c == suffix)
+        .expect("suffix validated at parse");
+    render(&parts)
 }
 
 /// `%tY`/`%tF`/`%tc` year (>= 4 digits, zero-padded).

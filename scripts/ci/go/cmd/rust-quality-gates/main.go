@@ -63,7 +63,7 @@ and merges those records onto their canonical paths (pure test sources
 stay excluded), validated as a line-superset of cargo's view with a
 fallback to cargo's reports. The recovered lines are genuinely executed
 by the suite; without this the binary workspaces report ~10-66% for
-suites that actually cover >80%. Execution counts above 2**62 (llvm
+suites that actually cover 100%. Execution counts above 2**62 (llvm
 occasionally emits u64::MAX on async-block boundaries) are clamped to 0
 on every published LCOV — they crash the Coverage plugin's parser.
 
@@ -908,12 +908,13 @@ func coverageReports(env []string, workspace, reportDir string, covRunner []stri
 	if err := printLCOVSummary(lcovPath, workspace); err != nil {
 		return err
 	}
-	// The 80% status quo, enforced: attained coverage must never regress.
+	// The 100% bar, enforced: every line stays covered, no
+	// regressions, no uncovered tail.
 	floorBin, err := sibling("coverage-floor")
 	if err != nil {
 		return err
 	}
-	return run([]string{floorBin, lcovPath, "80"}, env, workspace)
+	return run([]string{floorBin, lcovPath, "100"}, env, workspace)
 }
 
 // provisionDeny installs cargo-deny: upstream ships only musl

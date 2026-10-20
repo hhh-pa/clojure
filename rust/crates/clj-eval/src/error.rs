@@ -193,6 +193,19 @@ pub enum Signal {
     Recur(Vec<Value>),
 }
 
+/// A synthetic VM-level throwable for impossible `recur` escapes
+/// (id 0 is never issued — the registry sequence starts at 1 —
+/// and the value is only ever reported, never compared).
+pub(crate) fn internal_throwable(message: String) -> Throwable {
+    Throwable {
+        id: 0,
+        class: ThrowClass::Error,
+        message: Some(Arc::from(message)),
+        data: None,
+        cause: None,
+    }
+}
+
 /// A runtime failure before identity assignment: native fns and
 /// helpers build these, and the evaluator stamps the `id` when
 /// converting to [`Signal::Throw`]. Boxed to stay small in
@@ -318,14 +331,26 @@ fn map_class_of(m: &clj_value::Map) -> &'static str {
     }
 }
 
+/// The simple name of a JVM class: strip the package, then a
+/// member-class owner (`$` + uppercase strips to the inner, like
+/// the JDK's `getSimpleName`; `$` + lowercase is a generated fn
+/// name and stays).
+pub(crate) fn simple_name_of(full: &str) -> String {
+    let base = full.rsplit('.').next().unwrap_or(full);
+    match base.rsplit_once('$') {
+        Some((_, simple)) if simple.starts_with(|c: char| c.is_ascii_uppercase()) => {
+            simple.to_owned()
+        }
+        _ => base.to_owned(),
+    }
+}
+
 /// The `nth not supported on this type: X` name: the JVM's
-/// `getSimpleName` rule — strip the package only (`$`-inners stay,
-/// so `PersistentList$EmptyList` and `core$map` survive; default
-/// packages like `user$eval$fn` have no dots to strip).
+/// `getSimpleName` rule (shared with the live `nth`/`count`
+/// paths in `coll.rs`).
 #[must_use]
 pub fn simple_class_of(v: &Value) -> String {
-    let full = jvm_class_of(v);
-    full.rsplit('.').next().unwrap_or(&full).to_owned()
+    simple_name_of(&jvm_class_of(v))
 }
 
 /// A form's span: `:line`/`:column` reader meta when present, else
@@ -346,5 +371,146 @@ fn meta_int(form: &Value, key: &str) -> Option<u32> {
     match meta.get(&probe) {
         Some(Value::Int(n)) if *n > 0 => u32::try_from(*n).ok(),
         _ => None,
+    }
+}
+
+/// The wrapper's head: `Syntax error compiling if` (`wrapper`
+/// always ends with one; the whole line is the fallback).
+#[must_use]
+pub fn compile_head(wrapper: &str) -> &str {
+    match wrapper.rfind(" at (") {
+        Some(i) => &wrapper[..i],
+        None => wrapper,
+    }
+}
+
+/// Render one analyzer failure as `file:line:col: message` (bare
+/// failures print `class: cause`; wrapped ones print the wrapper
+/// head + cause). Shared by `eval` and AOT planning so the texts
+/// cannot drift.
+#[must_use]
+pub fn compile_diagnostic(file: &str, e: &CompileError) -> String {
+    let line = e.span.line;
+    let col = e.span.col;
+    if e.bare {
+        format!("{file}:{line}:{col}: {}: {}", e.class, e.message)
+    } else {
+        let wrapper = e.wrapper();
+        let head = compile_head(&wrapper);
+        format!("{file}:{line}:{col}: {head}: {}", e.message)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn internal_throwable_is_synthetic_error() {
+        let t = internal_throwable("boom".to_owned());
+        assert_eq!(t.id, 0);
+        assert_eq!(t.class, ThrowClass::Error);
+        assert_eq!(t.message.as_deref(), Some("boom"));
+        assert!(t.data.is_none() && t.cause.is_none());
+    }
+
+    #[test]
+    fn compile_diagnostic_renders_bare_and_wrapped() {
+        let source: Arc<str> = Arc::from("NO_SOURCE_PATH");
+        let bare = CompileError::bare(
+            "java.lang.RuntimeException",
+            "boom".to_owned(),
+            Span::new(2, 3),
+            &source,
+        );
+        assert_eq!(
+            compile_diagnostic("user", &bare),
+            "user:2:3: java.lang.RuntimeException: boom"
+        );
+        let wrapped = CompileError::new(
+            "java.lang.RuntimeException",
+            "boom".to_owned(),
+            Span::new(1, 1),
+            &source,
+            Verb::Compiling,
+            Some("if".to_owned()),
+        );
+        assert_eq!(
+            compile_diagnostic("user", &wrapped),
+            "user:1:1: Syntax error compiling if: boom"
+        );
+    }
+
+    #[test]
+    fn compile_head_strips_site_or_passes_through() {
+        assert_eq!(
+            compile_head("Syntax error compiling if at (src:1:2)."),
+            "Syntax error compiling if"
+        );
+        // No ` at (` — returned unchanged (all in-repo callers pass
+        // wrapper text, which always carries a site).
+        assert_eq!(compile_head("no site here"), "no site here");
+    }
+
+    #[test]
+    fn span_of_falls_back_unless_line_and_column() {
+        use clj_value::{Keyword, List, new_map};
+
+        let fallback = Span::new(1, 1);
+        let form_with =
+            |meta: Option<clj_value::Map>| Value::List(List::from_vec(vec![]).with_meta(meta));
+        // No meta at all.
+        assert_eq!(span_of(&form_with(None), fallback), fallback);
+        // Meta without `:line`/`:column`.
+        let meta = new_map().insert(Value::Keyword(Keyword::new(None, "a")), Value::Int(1));
+        assert_eq!(span_of(&form_with(Some(meta)), fallback), fallback);
+        // Non-positive and non-integer coordinates.
+        for line in [Value::Int(0), Value::Str(Arc::from("x"))] {
+            let meta = new_map()
+                .insert(Value::Keyword(Keyword::new(None, "line")), line)
+                .insert(Value::Keyword(Keyword::new(None, "column")), Value::Int(2));
+            assert_eq!(span_of(&form_with(Some(meta)), fallback), fallback);
+        }
+        // Valid coordinates win.
+        let meta = new_map()
+            .insert(Value::Keyword(Keyword::new(None, "line")), Value::Int(3))
+            .insert(Value::Keyword(Keyword::new(None, "column")), Value::Int(4));
+        assert_eq!(span_of(&form_with(Some(meta)), fallback), Span::new(3, 4));
+    }
+
+    #[test]
+    fn simple_class_of_strips_the_package() {
+        // Oracle O2: `Pattern` and `Long` are the JVM's rendering.
+        assert_eq!(simple_class_of(&Value::Regex(Arc::from("x"))), "Pattern");
+        assert_eq!(simple_class_of(&Value::Int(5)), "Long");
+        // `$` + uppercase strips to the inner (oracled `(nth
+        // (transient {:a 1}) 0)` renders `TransientArrayMap`).
+        let transient_map = Value::Transient(clj_value::Transient::new(
+            clj_value::TransientKind::Map(clj_value::TransientMap::new()),
+        ));
+        assert_eq!(simple_class_of(&transient_map), "TransientArrayMap");
+    }
+
+    #[test]
+    fn jvm_class_of_reader_values() {
+        // Oracle O1.
+        assert_eq!(
+            jvm_class_of(&Value::Regex(Arc::from("x"))),
+            "java.util.regex.Pattern"
+        );
+        assert_eq!(
+            jvm_class_of(&Value::TaggedLiteral {
+                tag: clj_value::Symbol::new(None, "foo"),
+                form: Box::new(Value::Int(1)),
+            }),
+            "clojure.lang.TaggedLiteral"
+        );
+        assert_eq!(
+            jvm_class_of(&Value::ReaderConditional {
+                form: Box::new(Value::Int(1)),
+                splicing: false,
+            }),
+            "clojure.lang.ReaderConditional"
+        );
     }
 }

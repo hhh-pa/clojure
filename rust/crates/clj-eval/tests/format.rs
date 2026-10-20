@@ -161,6 +161,8 @@ fn format_d_rows() {
         ("(format \"%d\" 9223372036854775807)", "9223372036854775807"),
         ("(format \"%,d\" 5)", "5"),
         ("(format \"% ,d\" 5000)", " 5,000"),
+        ("(format \"%02d\" 12345)", "12345"),
+        ("(format \"%(02d\" 123)", "123"),
     ];
     for (src, want) in rows {
         assert_eq!(fmt(&mut eval, src), want, "{src}");
@@ -214,6 +216,17 @@ fn format_float_rows() {
         ("(format \"% e\" ##NaN)", "NaN"),
         ("(format \"%(f\" ##-Inf)", "(Infinity)"),
         ("(format \"%#e\" 5.0)", "5.000000e+00"),
+        ("(format \"%,.0g\" 123456789.0)", "1e+08"),
+        ("(format \"%,g\" 123456.0)", "123,456"),
+        ("(format \"%.1f\" 19.95)", "20.0"),
+        ("(format \"%.0f\" 9.5)", "10"),
+        ("(format \"%f\" 0.05)", "0.050000"),
+        ("(format \"%.1f\" 0.001)", "0.0"),
+        ("(format \"%.1f\" 0.05)", "0.1"),
+        ("(format \"%08.2f\" 123456.0)", "123456.00"),
+        ("(format \"%08.2f\" -1.5)", "-0001.50"),
+        ("(format \"%+08.2f\" 1.5)", "+0001.50"),
+        ("(format \"% 08.2f\" 1.5)", " 0001.50"),
     ];
     for (src, want) in rows {
         assert_eq!(fmt(&mut eval, src), want, "{src}");
@@ -242,6 +255,11 @@ fn format_hex_rows() {
         ("(format \"[%x]\" -1)", "[ffffffffffffffff]"),
         ("(format \"[%o]\" -8)", "[1777777777777777777770]"),
         ("(format \"%x\" -9223372036854775808)", "8000000000000000"),
+        ("(format \"%x\" nil)", "null"),
+        ("(format \"%#X\" 255)", "0XFF"),
+        ("(format \"%-8x\" 255)", "ff      "),
+        ("(format \"%08x\" 255)", "000000ff"),
+        ("(format \"%8x\" 255)", "      ff"),
     ];
     for (src, want) in rows {
         assert_eq!(fmt(&mut eval, src), want, "{src}");
@@ -340,6 +358,10 @@ fn format_a_rows() {
         ("(format \"% a\" 1.5)", " 0x1.8p0"),
         ("(format \"[%.0a]\" 0.1)", "[0x1.ap-4]"),
         ("(format \"[%.1a]\" 0.1)", "[0x1.ap-4]"),
+        ("(format \"%.15a\" 1.0)", "0x1.000000000000000p0"),
+        ("(format \"%.1a\" 1.96875)", "0x1.0p1"),
+        ("(format \"%.1a\" 1.55)", "0x1.9p0"),
+        ("(format \"%.1a\" 2.225073858507201e-308)", "0x1.0p-1022"),
     ];
     for (src, want) in rows {
         assert_eq!(fmt(&mut eval, src), want, "{src}");
@@ -386,6 +408,11 @@ fn format_t_rows() {
         ("(format \"[%tl]\" 5)", "[12]"),
         ("(format \"%8tY\" 5)", "    1970"),
         ("(format \"%ty\" nil)", "null"),
+        ("(format \"%tp\" 0)", "am"),
+        // DIVERGENCE (era rendering follow-up): the JVM renders BC
+        // years as year-of-era (`"0002"` here); the port's
+        // astronomical civil math yields `-1` and prints it bare.
+        ("(format \"%tY\" -62167584000000)", "-1"),
     ];
     for (src, want) in rows {
         assert_eq!(fmt(&mut eval, src), want, "{src}");
@@ -1139,6 +1166,10 @@ fn format_parse_errors() {
         (
             "(format nil)",
             "java.lang.NullPointerException: Cannot invoke \"String.length()\" because \"s\" is null",
+        ),
+        (
+            "(format 5)",
+            "java.lang.ClassCastException: class java.lang.Long cannot be cast to class java.lang.String (java.lang.Long and java.lang.String are in module java.base of loader 'bootstrap')",
         ),
     ];
     for (src, want) in rows {

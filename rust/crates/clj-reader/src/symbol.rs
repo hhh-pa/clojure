@@ -235,9 +235,15 @@ fn match_array_symbol_pat(s: &str) -> Option<(String, String)> {
 
 #[cfg(test)]
 mod tests {
-    use super::{interpret_token, is_whitespace};
+    use super::{after_first_char, interpret_token, is_whitespace};
     use crate::ReaderOpts;
     use clj_value::Value;
+
+    #[test]
+    fn after_first_char_handles_empty() {
+        assert_eq!(after_first_char(""), "");
+        assert_eq!(after_first_char("ab"), "b");
+    }
 
     #[test]
     fn whitespace_table() {

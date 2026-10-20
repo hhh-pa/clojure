@@ -20,7 +20,7 @@ use std::sync::Arc;
 
 use clj_reader::Span;
 use clj_value::{
-    Keyword, Map, PrintOpts, Symbol, Value, Vector, new_map, pr_to_string, print_to_string,
+    Keyword, List, Map, PrintOpts, Symbol, Value, Vector, new_map, pr_to_string, print_to_string,
 };
 
 use crate::error::{CompileError, NativeError, Signal, Verb, jvm_class_of, span_of};
@@ -474,41 +474,88 @@ fn pr_of(v: &Value) -> String {
     pr_to_string(v, &PrintOpts::pr())
 }
 
+/// A special-form operator (parsed once, at the dispatch guard).
+#[derive(Clone, Copy, Debug)]
+enum SpecialOp {
+    Def,
+    If,
+    Do,
+    Let,
+    LetStar,
+    Loop,
+    LoopStar,
+    LetFn,
+    Fn,
+    FnStar,
+    Recur,
+    Quote,
+    Var,
+    Throw,
+    Try,
+    Set,
+    Binding,
+    WithRedefs,
+    WithBindings,
+    BoundFn,
+    DefMacro,
+    Declare,
+    Ns,
+    Assert,
+    Time,
+    WithOutStr,
+    LazySeqStar,
+    DelayStar,
+    CaseStar,
+    Locking,
+}
+
+/// The special-form table: name → op (one row per form; names
+/// are unique so the linear scan is a pure dispatch).
+const SPECIAL_OPS: &[(&str, SpecialOp)] = &[
+    ("def", SpecialOp::Def),
+    ("if", SpecialOp::If),
+    ("do", SpecialOp::Do),
+    ("let", SpecialOp::Let),
+    ("let*", SpecialOp::LetStar),
+    ("loop", SpecialOp::Loop),
+    ("loop*", SpecialOp::LoopStar),
+    ("letfn", SpecialOp::LetFn),
+    ("fn", SpecialOp::Fn),
+    ("fn*", SpecialOp::FnStar),
+    ("recur", SpecialOp::Recur),
+    ("quote", SpecialOp::Quote),
+    ("var", SpecialOp::Var),
+    ("throw", SpecialOp::Throw),
+    ("try", SpecialOp::Try),
+    ("set!", SpecialOp::Set),
+    ("binding", SpecialOp::Binding),
+    ("with-redefs", SpecialOp::WithRedefs),
+    ("with-bindings", SpecialOp::WithBindings),
+    ("bound-fn", SpecialOp::BoundFn),
+    ("defmacro", SpecialOp::DefMacro),
+    ("declare", SpecialOp::Declare),
+    ("ns", SpecialOp::Ns),
+    ("assert", SpecialOp::Assert),
+    ("time", SpecialOp::Time),
+    ("with-out-str", SpecialOp::WithOutStr),
+    ("lazy-seq*", SpecialOp::LazySeqStar),
+    ("delay*", SpecialOp::DelayStar),
+    ("case*", SpecialOp::CaseStar),
+    ("locking", SpecialOp::Locking),
+];
+
+/// Parse a special-form operator (the single table behind
+/// [`is_special`] and dispatch).
+fn special_op(name: &str) -> Option<SpecialOp> {
+    SPECIAL_OPS
+        .iter()
+        .find(|(known, _)| *known == name)
+        .map(|(_, op)| *op)
+}
+
 /// Whether a symbol names a special form (unqualified only).
 pub(crate) fn is_special(name: &str) -> bool {
-    matches!(
-        name,
-        "def"
-            | "if"
-            | "do"
-            | "let"
-            | "let*"
-            | "loop"
-            | "loop*"
-            | "letfn"
-            | "fn"
-            | "fn*"
-            | "recur"
-            | "quote"
-            | "var"
-            | "throw"
-            | "try"
-            | "set!"
-            | "binding"
-            | "with-redefs"
-            | "with-bindings"
-            | "bound-fn"
-            | "defmacro"
-            | "declare"
-            | "ns"
-            | "assert"
-            | "time"
-            | "with-out-str"
-            | "lazy-seq*"
-            | "delay*"
-            | "case*"
-            | "locking"
-    )
+    special_op(name).is_some()
 }
 
 /// The macro-implemented specials: a local or global binding
@@ -620,17 +667,7 @@ impl<'a> Analyzer<'a> {
     ) -> Result<Expr, CompileError> {
         let items = match crate::lazy::collect_all(self.eval, form) {
             Ok(items) => items,
-            Err(Signal::Throw(t)) => {
-                return Err(CompileError::bare(
-                    t.class.jvm_name(),
-                    t.message.as_deref().unwrap_or("").to_owned(),
-                    span,
-                    &self.source,
-                ));
-            }
-            Err(Signal::Recur(_)) => {
-                unreachable!("recur cannot escape forcing a form")
-            }
+            Err(s) => return Err(form_force_err(&self.source, s, span)),
         };
         if items.is_empty() {
             // `EmptyExpr`: an empty form evaluates to itself.
@@ -710,26 +747,25 @@ impl<'a> Analyzer<'a> {
                 .eval
                 .registry
                 .get(home)
-                .and_then(|ns| ns.lookup(&target));
-            if let Some(id) = id {
-                if home != cur && crate::macros::is_private_var(self.eval, id) {
-                    return Err(self.err(
-                        class::ILLEGAL_STATE,
-                        format!("var: {sym} is not public"),
-                        span,
-                        Verb::Compiling,
-                        None,
-                    ));
-                }
-                if crate::macros::is_macro_var(self.eval, id) {
-                    return Err(self.err(
-                        class::RUNTIME,
-                        format!("Can't take value of a macro: #'{}", target),
-                        span,
-                        Verb::Compiling,
-                        None,
-                    ));
-                }
+                .and_then(|ns| ns.lookup(&target))
+                .expect("resolve_in guarantees the var id exists");
+            if home != cur && crate::macros::is_private_var(self.eval, id) {
+                return Err(self.err(
+                    class::ILLEGAL_STATE,
+                    format!("var: {sym} is not public"),
+                    span,
+                    Verb::Compiling,
+                    None,
+                ));
+            }
+            if crate::macros::is_macro_var(self.eval, id) {
+                return Err(self.err(
+                    class::RUNTIME,
+                    format!("Can't take value of a macro: #'{}", target),
+                    span,
+                    Verb::Compiling,
+                    None,
+                ));
             }
             return Ok(Expr::Global(target));
         }
@@ -829,20 +865,25 @@ impl<'a> Analyzer<'a> {
         // never do (probe31 `shadow-*`). The builtin's own
         // `clojure.core` macro var is the builtin, not a shadow
         // (only a non-macro re-`def` there shadows).
-        if sym.namespace().is_none() && is_special(sym.name()) {
-            let shadowed = is_shadowable_macro(sym.name())
-                && (self.local_idx(sym.name()).is_some() || self.global_shadows(sym));
-            if shadowed {
-                return Ok(None);
+        // MSRV 1.85: let-chains are 1.88+, so the nesting stays.
+        #[allow(clippy::collapsible_if)]
+        if sym.namespace().is_none() {
+            if let Some(op) = special_op(sym.name()) {
+                let shadowed = is_shadowable_macro(sym.name())
+                    && (self.local_idx(sym.name()).is_some() || self.global_shadows(sym));
+                if shadowed {
+                    return Ok(None);
+                }
+                let expr = self.analyze_special(op, items, span, tail)?;
+                return Ok(Some(expr));
             }
-            let expr = self.analyze_special(sym.name(), items, span, tail)?;
-            return Ok(Some(expr));
         }
         if sym.namespace() == Some("clojure.core")
             && is_shadowable_macro(sym.name())
             && self.core_macro_intact(sym)
         {
-            let expr = self.analyze_special(sym.name(), items, span, tail)?;
+            let op = special_op(sym.name()).expect("shadowable macros are special forms");
+            let expr = self.analyze_special(op, items, span, tail)?;
             return Ok(Some(expr));
         }
         Ok(None)
@@ -898,10 +939,8 @@ impl<'a> Analyzer<'a> {
             .eval
             .registry
             .get(home)
-            .and_then(|ns| ns.lookup(&target));
-        let Some(id) = id else {
-            return Ok(());
-        };
+            .and_then(|ns| ns.lookup(&target))
+            .expect("resolve_in guarantees the var id exists");
         if crate::macros::is_macro_var(self.eval, id) {
             return Ok(());
         }
@@ -973,63 +1012,70 @@ impl<'a> Analyzer<'a> {
         true
     }
 
-    /// Dispatch one special form (operator already matched).
+    /// Dispatch one special form (operator already parsed).
     fn analyze_special(
         &mut self,
-        op: &str,
+        op: SpecialOp,
         items: &[&Value],
         span: Span,
         tail: bool,
     ) -> Result<Expr, CompileError> {
-        // Unspec'd macros with no arguments fail arity, unwrapped
-        // (spec'd ones reach their spec/assert checks instead).
-        if items.len() == 1 {
-            self.check_bare_arity(op, span)?;
-        }
+        self.check_bare_arity(op, items, span)?;
         match op {
-            "def" => self.parse_def(items, span),
-            "if" => self.parse_if(items, span, tail),
-            "do" => Ok(Expr::Do(self.analyze_body(&items[1..], span, tail)?)),
-            "quote" => self.parse_quote(items, span),
-            "var" => self.parse_var(items, span),
-            "throw" => self.parse_throw(items, span),
-            "recur" => self.parse_recur(items, span, tail),
-            "set!" => self.parse_set(items, span),
-            "try" => self.parse_try(items, span, tail),
-            "let" | "let*" => self.parse_let(op, items, span, tail),
-            "loop" | "loop*" => self.parse_let(op, items, span, tail),
-            "letfn" => self.parse_letfn(op, items, span, tail),
-            "fn" => self.parse_fn(items, span),
-            "fn*" => self.parse_fn_star(items, span),
-            "binding" => self.parse_binding(items, span, tail),
-            "with-redefs" => self.parse_with_redefs(items, span, tail),
-            "with-bindings" => self.parse_with_bindings(items, span, tail),
-            "bound-fn" => self.parse_bound_fn(items, span),
-            "defmacro" => self.parse_defmacro(items, span),
-            "declare" => self.parse_declare(items, span),
-            "ns" => self.parse_ns(items, span),
-            "assert" => self.parse_assert(items, span),
-            "time" => self.parse_time(items, span),
-            "with-out-str" => self.parse_with_out_str(items, span),
-            "lazy-seq*" => self.parse_lazy_seq_star(items, span),
-            "delay*" => self.parse_delay_star(items, span),
-            "locking" => self.parse_locking(items, span, tail),
-            "case*" => self.parse_case_star(items, span, tail),
-            _ => unreachable!("dispatch covers every special form"),
+            SpecialOp::Def => self.parse_def(items, span),
+            SpecialOp::If => self.parse_if(items, span, tail),
+            SpecialOp::Do => Ok(Expr::Do(self.analyze_body(&items[1..], span, tail)?)),
+            SpecialOp::Quote => self.parse_quote(items, span),
+            SpecialOp::Var => self.parse_var(items, span),
+            SpecialOp::Throw => self.parse_throw(items, span),
+            SpecialOp::Recur => self.parse_recur(items, span, tail),
+            SpecialOp::Set => self.parse_set(items, span),
+            SpecialOp::Try => self.parse_try(items, span, tail),
+            SpecialOp::Let => self.parse_let("let", items, span, tail),
+            SpecialOp::LetStar => self.parse_let("let*", items, span, tail),
+            SpecialOp::Loop => self.parse_let("loop", items, span, tail),
+            SpecialOp::LoopStar => self.parse_let("loop*", items, span, tail),
+            SpecialOp::LetFn => self.parse_letfn("letfn", items, span, tail),
+            SpecialOp::Fn => self.parse_fn(items, span),
+            SpecialOp::FnStar => self.parse_fn_star(items, span),
+            SpecialOp::Binding => self.parse_binding(items, span, tail),
+            SpecialOp::WithRedefs => self.parse_with_redefs(items, span, tail),
+            SpecialOp::WithBindings => self.parse_with_bindings(items, span, tail),
+            SpecialOp::BoundFn => self.parse_bound_fn(items, span),
+            SpecialOp::DefMacro => self.parse_defmacro(items, span),
+            SpecialOp::Declare => self.parse_declare(items, span),
+            SpecialOp::Ns => self.parse_ns(items, span),
+            SpecialOp::Assert => self.parse_assert(items, span),
+            SpecialOp::Time => self.parse_time(items, span),
+            SpecialOp::WithOutStr => self.parse_with_out_str(items, span),
+            SpecialOp::LazySeqStar => self.parse_lazy_seq_star(items, span),
+            SpecialOp::DelayStar => self.parse_delay_star(items, span),
+            SpecialOp::Locking => self.parse_locking(items, span, tail),
+            SpecialOp::CaseStar => self.parse_case_star(items, span, tail),
         }
     }
 
     /// Bare `(loop)`/`(binding)`/`(letfn)`: the macro fn itself
-    /// rejects 0 args before any body runs (probe25).
-    fn check_bare_arity(&self, op: &str, span: Span) -> Result<(), CompileError> {
+    /// rejects 0 args before any body runs (probe25). Unspec'd
+    /// macros with no arguments fail arity, unwrapped (spec'd ones
+    /// reach their spec/assert checks instead); longer forms skip.
+    fn check_bare_arity(
+        &self,
+        op: SpecialOp,
+        items: &[&Value],
+        span: Span,
+    ) -> Result<(), CompileError> {
+        if items.len() != 1 {
+            return Ok(());
+        }
         let name = match op {
-            "loop" => "clojure.core/loop",
-            "binding" => "clojure.core/binding",
-            "letfn" => "clojure.core/letfn",
-            "with-redefs" => "clojure.core/with-redefs",
-            "with-bindings" => "clojure.core/with-bindings",
-            "defmacro" => "clojure.core/defmacro",
-            "locking" => "clojure.core/locking",
+            SpecialOp::Loop => "clojure.core/loop",
+            SpecialOp::Binding => "clojure.core/binding",
+            SpecialOp::LetFn => "clojure.core/letfn",
+            SpecialOp::WithRedefs => "clojure.core/with-redefs",
+            SpecialOp::WithBindings => "clojure.core/with-bindings",
+            SpecialOp::DefMacro => "clojure.core/defmacro",
+            SpecialOp::Locking => "clojure.core/locking",
             _ => return Ok(()),
         };
         Err(CompileError::macro_arity(name, span, &self.source))
@@ -1096,9 +1142,9 @@ impl<'a> Analyzer<'a> {
             0 => Err(self.def_error("Too few arguments to def", span)),
             1 => Ok((self.def_target(items[1], span)?, None, None)),
             2 => Ok((self.def_target(items[1], span)?, None, Some(items[2]))),
-            3 if matches!(items[2], Value::Str(_)) => {
+            3 => {
                 let Value::Str(doc) = items[2] else {
-                    unreachable!("guard matched Str")
+                    return Err(self.def_error("Too many arguments to def", span));
                 };
                 Ok((
                     self.def_target(items[1], span)?,
@@ -1442,7 +1488,7 @@ impl<'a> Analyzer<'a> {
         for form in &items[splits..] {
             let clause = as_clause(form);
             match clause {
-                Some("catch") => {
+                Some(("catch", list)) => {
                     if seen_finally {
                         return Err(self.err(
                             class::RUNTIME,
@@ -1452,9 +1498,9 @@ impl<'a> Analyzer<'a> {
                             Some("try".to_owned()),
                         ));
                     }
-                    catches.push(self.parse_catch(form, span)?);
+                    catches.push(self.parse_catch(list, span)?);
                 }
-                Some("finally") => {
+                Some(("finally", list)) => {
                     if seen_finally {
                         return Err(self.err(
                             class::RUNTIME,
@@ -1465,9 +1511,6 @@ impl<'a> Analyzer<'a> {
                         ));
                     }
                     seen_finally = true;
-                    let Value::List(list) = form else {
-                        unreachable!("clauses are lists")
-                    };
                     let parts: Vec<&Value> = list.iter().collect();
                     finally_body = self.analyze_body(&parts[1..], span, false)?;
                 }
@@ -1503,10 +1546,7 @@ impl<'a> Analyzer<'a> {
     /// `try` (the clause is parsed inline, without rebinding —
     /// probe25 `catch-nonsym`, probe32 `catch-*-nope`); only the
     /// clause body descends (via [`Analyzer::analyze`]).
-    fn parse_catch(&mut self, form: &Value, span: Span) -> Result<Catch, CompileError> {
-        let Value::List(list) = form else {
-            unreachable!("clauses are lists")
-        };
+    fn parse_catch(&mut self, list: &List, span: Span) -> Result<Catch, CompileError> {
         let parts: Vec<&Value> = list.iter().collect();
         let class = match parts.get(1) {
             None => {
@@ -1651,19 +1691,13 @@ impl<'a> Analyzer<'a> {
         span: Span,
         tail: bool,
     ) -> Result<Expr, CompileError> {
-        let op = match items[0] {
-            Value::Symbol(sym) => sym.name().to_owned(),
-            _ => unreachable!("dispatched on the operator symbol"),
-        };
-        let Some(bindings) = items.get(1) else {
-            return Err(self.err(
-                class::ILLEGAL_ARG,
-                "binding requires a vector for its binding".to_owned(),
-                span,
-                Verb::Macroexpanding,
-                Some(op),
-            ));
-        };
+        let op = as_symbol(items[0])
+            .expect("binding dispatches on the operator symbol")
+            .name()
+            .to_owned();
+        let bindings = items
+            .get(1)
+            .expect("bare binding fails arity before dispatch");
         let Value::Vector(vec) = bindings else {
             return Err(self.err(
                 class::ILLEGAL_ARG,
@@ -1723,10 +1757,10 @@ impl<'a> Analyzer<'a> {
         span: Span,
         tail: bool,
     ) -> Result<Expr, CompileError> {
-        let op = match items[0] {
-            Value::Symbol(sym) => sym.name().to_owned(),
-            _ => unreachable!("dispatched on the operator symbol"),
-        };
+        let op = as_symbol(items[0])
+            .expect("with-redefs dispatches on the operator symbol")
+            .name()
+            .to_owned();
         let bindings = items.get(1).copied().unwrap_or(&Value::Nil);
         let forms = self.with_redefs_forms(bindings, span, &op)?;
         let mut pairs = Vec::with_capacity(forms.len() / 2);
@@ -1804,9 +1838,9 @@ impl<'a> Analyzer<'a> {
         span: Span,
         tail: bool,
     ) -> Result<Expr, CompileError> {
-        let Some(map) = items.get(1) else {
-            unreachable!("bare with-bindings fails arity before dispatch");
-        };
+        let map = items
+            .get(1)
+            .expect("bare with-bindings fails arity before dispatch");
         Ok(Expr::WithBindings {
             map: Box::new(self.analyze(map, span, false)?),
             body: self.analyze_body(&items[2..], span, tail)?,
@@ -1818,17 +1852,9 @@ impl<'a> Analyzer<'a> {
     /// the named single-`letfn` shape, whose slot layout the
     /// evaluator replays with a conveyed closure.
     fn parse_bound_fn(&mut self, items: &[&Value], span: Span) -> Result<Expr, CompileError> {
-        match self.parse_fn(items, span)? {
-            Expr::Fn(fun) => Ok(Expr::BoundFn { name: None, fun }),
-            Expr::LetFn { mut fns, .. } if fns.len() == 1 => {
-                let (name, fun) = fns.remove(0);
-                Ok(Expr::BoundFn {
-                    name: Some(name),
-                    fun,
-                })
-            }
-            _ => unreachable!("parse_fn returns Fn or a single LetFn"),
-        }
+        let (name, raw) = self.parse_fn_front(&items[1..], span)?;
+        let (fun, _) = self.build_fun(name.clone(), &raw, span)?;
+        Ok(Expr::BoundFn { name, fun })
     }
 
     /// `(defmacro name doc? attr? fdecl)`: the name must be an
@@ -1868,9 +1894,9 @@ impl<'a> Analyzer<'a> {
 
     fn parse_defmacro(&mut self, items: &[&Value], span: Span) -> Result<Expr, CompileError> {
         let spec = || self.spec_error("clojure.core/defmacro", span);
-        let Some(name_value) = items.get(1) else {
-            return Err(spec());
-        };
+        let name_value = items
+            .get(1)
+            .expect("bare defmacro fails arity before dispatch");
         let Value::Symbol(name_sym) = name_value else {
             return Err(spec());
         };
@@ -1897,8 +1923,8 @@ impl<'a> Analyzer<'a> {
         // `&form`/`&env` consed onto every arglist *before*
         // analysis (like the JVM `defmacro`), so bodies resolve
         // user params at their shifted slots. The shape above
-        // guarantees no leading name symbol, so this always
-        // yields a plain `Fn`.
+        // guarantees no leading name symbol, so no self-recursion
+        // binding.
         let owned = self.collect_fn_clauses(rest, span)?;
         let slices: Vec<&[&Value]> = owned.iter().map(Vec::as_slice).collect();
         let mut raw = self.parse_clause_slices(&slices, span)?;
@@ -1908,10 +1934,7 @@ impl<'a> Analyzer<'a> {
             clause.fixed.insert(0, &ampenv);
             clause.fixed.insert(0, &ampform);
         }
-        let mut fun = match self.finish_fn(None, &raw, span)? {
-            Expr::Fn(fun) => fun,
-            _ => unreachable!("defmacro fdecl has no leading name"),
-        };
+        let (mut fun, _) = self.build_fun(None, &raw, span)?;
         let cur = self.current_ns();
         fun.display = format!("{cur}/{}", name_sym.name());
         let qualified =
@@ -2020,11 +2043,31 @@ fn is_clause(form: &Value) -> bool {
     as_clause(form).is_some()
 }
 
-fn as_clause(form: &Value) -> Option<&str> {
+/// A form-forcing failure as a compile error (an escaping
+/// `recur` is impossible — analyzed forms cage every one — and
+/// surfaces as an internal error, never a panic).
+fn form_force_err(source: &Arc<str>, s: Signal, span: Span) -> CompileError {
+    match s {
+        Signal::Throw(t) => CompileError::bare(
+            t.class.jvm_name(),
+            t.message.as_deref().unwrap_or("").to_owned(),
+            span,
+            source,
+        ),
+        Signal::Recur(_) => CompileError::bare(
+            class::RUNTIME,
+            "recur escaped forcing a form".to_owned(),
+            span,
+            source,
+        ),
+    }
+}
+
+fn as_clause(form: &Value) -> Option<(&str, &List)> {
     match form {
         Value::List(list) => match list.first() {
             Some(Value::Symbol(sym)) if sym.namespace().is_none() => match sym.name() {
-                "catch" | "finally" => Some(sym.name()),
+                "catch" | "finally" => Some((sym.name(), list)),
                 _ => None,
             },
             _ => None,
@@ -2033,41 +2076,32 @@ fn as_clause(form: &Value) -> Option<&str> {
     }
 }
 
-/// Map directives the spec accepts (`::map-special-binding` plus
-/// `::ns-keys`, spec lines 44-50): anything else in keyword position
-/// fails `let`/`fn` spec, or is `Unsupported map directive` on the
-/// `loop` path. Qualified names are keys/syms only (`:foo/strs` and
-/// `:foo/strs!` are not `::ns-keys`).
-fn is_known_directive(kw: &Keyword) -> bool {
-    if kw.namespace().is_some() {
-        return matches!(kw.name(), "keys" | "syms" | "keys!" | "syms!");
+/// A binding-pattern shape (spec- or star-validated before building).
+enum Pat<'v> {
+    Symbol(&'v Symbol),
+    Vector(&'v Vector),
+    Map(&'v Map),
+}
+
+/// The pattern shape of a form (`None` is not a pattern).
+fn as_pat(form: &Value) -> Option<Pat<'_>> {
+    match form {
+        Value::Symbol(sym) => Some(Pat::Symbol(sym)),
+        Value::Vector(v) => Some(Pat::Vector(v)),
+        Value::Map(m) => Some(Pat::Map(m)),
+        _ => None,
     }
-    matches!(
-        kw.name(),
-        "as" | "or"
-            | "keys"
-            | "syms"
-            | "strs"
-            | "keys!"
-            | "syms!"
-            | "strs!"
-            | "select"
-            | "excess"
-            | "missing"
-            | "defaults"
-            | "all"
-    )
 }
 
 /// The deep `::binding-form` spec mirror: plain symbol, sequential
 /// (`forms*` + optional `& rest` + optional `:as sym`), or map
 /// (binding entries + known directives with shaped values).
 fn spec_valid_binding(form: &Value) -> bool {
-    match form {
-        Value::Symbol(sym) => is_local_name(sym),
-        Value::Vector(v) => spec_valid_seq(&v.iter().collect::<Vec<_>>()),
-        Value::Map(m) => spec_valid_map(m),
-        _ => false,
+    match as_pat(form) {
+        Some(Pat::Symbol(sym)) => is_local_name(sym),
+        Some(Pat::Vector(v)) => spec_valid_seq(&v.iter().collect::<Vec<_>>()),
+        Some(Pat::Map(m)) => spec_valid_map(m),
+        None => false,
     }
 }
 
@@ -2131,13 +2165,15 @@ fn spec_valid_map(m: &Map) -> bool {
 /// One directive's value shape (`::as`/`::or`/`::keys-form`/…).
 /// Qualified `::ns-keys` take `::simple-syms-form` regardless of
 /// kind (simple symbols only — stricter than unqualified `:keys`
-/// idents or `:syms` symbols).
+/// idents or `:syms` symbols). Anything else in keyword position
+/// fails `let`/`fn` spec (spec lines 44-50), or is `Unsupported
+/// map directive` on the `loop` path. Qualified names are
+/// keys/syms only (`:foo/strs` and `:foo/strs!` are not
+/// `::ns-keys`).
 fn spec_valid_directive(kw: &Keyword, v: &Value) -> bool {
-    if !is_known_directive(kw) {
-        return false;
-    }
     if kw.namespace().is_some() {
-        return spec_valid_key_list(v, KeyKind::Strs);
+        return matches!(kw.name(), "keys" | "syms" | "keys!" | "syms!")
+            && spec_valid_key_list(v, KeyKind::Strs);
     }
     match kw.name() {
         "as" | "select" | "excess" | "missing" | "defaults" | "all" => {
@@ -2147,7 +2183,7 @@ fn spec_valid_directive(kw: &Keyword, v: &Value) -> bool {
         "keys" | "keys!" => spec_valid_key_list(v, KeyKind::Keys),
         "syms" | "syms!" => spec_valid_key_list(v, KeyKind::Syms),
         "strs" | "strs!" => spec_valid_key_list(v, KeyKind::Strs),
-        _ => unreachable!("directive set checked above"),
+        _ => false,
     }
 }
 
@@ -2893,7 +2929,8 @@ impl<'a> Analyzer<'a> {
         let mut bindings_out = Vec::with_capacity(pats.len());
         for i in (0..forms.len()).step_by(2) {
             let init = self.analyze(forms[i + 1], span, false)?;
-            let (pat, names) = self.build_pattern(forms[i], span)?;
+            let validated = as_pat(forms[i]).expect("patterns validated before building");
+            let (pat, names) = self.build_pattern(validated, span)?;
             self.locals.extend(names);
             bindings_out.push((pat, init));
         }
@@ -3095,17 +3132,16 @@ impl<'a> Analyzer<'a> {
     /// [`pattern_names`] order.
     fn build_pattern(
         &mut self,
-        form: &Value,
+        shape: Pat<'_>,
         span: Span,
     ) -> Result<(Pattern, Vec<String>), CompileError> {
-        let pat = match form {
-            Value::Symbol(sym) => Pattern::Symbol(sym.name().to_owned()),
-            Value::Vector(v) => {
+        let pat = match shape {
+            Pat::Symbol(sym) => Pattern::Symbol(sym.name().to_owned()),
+            Pat::Vector(v) => {
                 let forms: Vec<&Value> = v.iter().collect();
                 self.build_seq(&forms, span)?
             }
-            Value::Map(m) => self.build_map(m, span)?,
-            _ => unreachable!("patterns validated before building"),
+            Pat::Map(m) => self.build_map(m, span)?,
         };
         let names = pattern_names(&pat);
         Ok((pat, names))
@@ -3121,7 +3157,8 @@ impl<'a> Analyzer<'a> {
         while let Some((first, tail)) = rest.split_first() {
             if is_amp(first) {
                 let second = tail.first().copied().unwrap_or(&Value::Nil);
-                let (pat, _) = self.build_pattern(second, span)?;
+                let validated = as_pat(second).expect("patterns validated before building");
+                let (pat, _) = self.build_pattern(validated, span)?;
                 rest_pat = Some(Box::new(pat));
                 rest = tail.get(1..).unwrap_or(&[]);
             } else if is_as(first) {
@@ -3130,7 +3167,8 @@ impl<'a> Analyzer<'a> {
                 }
                 break;
             } else {
-                let (pat, _) = self.build_pattern(first, span)?;
+                let validated = as_pat(first).expect("patterns validated before building");
+                let (pat, _) = self.build_pattern(validated, span)?;
                 fixed.push(pat);
                 rest = tail;
             }
@@ -3179,7 +3217,8 @@ impl<'a> Analyzer<'a> {
             }
             return Ok(());
         }
-        let (pat, _) = self.build_pattern(k, span)?;
+        let validated = as_pat(k).expect("patterns validated before building");
+        let (pat, _) = self.build_pattern(validated, span)?;
         acc.entries.push((pat, v.clone()));
         Ok(())
     }
@@ -3305,7 +3344,18 @@ impl<'a> Analyzer<'a> {
     /// (20-count, parameter walk under the emitted `let`'s wrapper,
     /// body, dup checks; fixed-vs-variadic last).
     fn parse_fn(&mut self, items: &[&Value], span: Span) -> Result<Expr, CompileError> {
-        let mut rest = &items[1..];
+        let (name, raw) = self.parse_fn_front(&items[1..], span)?;
+        self.finish_fn(name, &raw, span)
+    }
+
+    /// `(fn …)`/`(bound-fn …)` front: the optional name plus the
+    /// analyzed clauses (callers wrap: `fn` in `Fn`/`LetFn`,
+    /// `bound-fn` in `BoundFn`).
+    fn parse_fn_front<'v>(
+        &mut self,
+        mut rest: &[&'v Value],
+        span: Span,
+    ) -> Result<(Option<String>, Vec<RawClause<'v>>), CompileError> {
         let mut name: Option<String> = None;
         match rest.split_first() {
             Some((Value::Symbol(sym), tail))
@@ -3324,7 +3374,7 @@ impl<'a> Analyzer<'a> {
         let owned = self.collect_fn_clauses(rest, span)?;
         let slices: Vec<&[&Value]> = owned.iter().map(Vec::as_slice).collect();
         let raw = self.parse_clause_slices(&slices, span)?;
-        self.finish_fn(name, &raw, span)
+        Ok((name, raw))
     }
 
     /// `(fn* name? params body* | name? (params body*)+)`: raw
@@ -3372,12 +3422,15 @@ impl<'a> Analyzer<'a> {
 
     /// Shared `fn`/`fn*` tail: display name, the self-recursion
     /// slot, per-clause analysis, the `LetFn` wrap for names.
-    fn finish_fn(
+    /// Shared `fn`/`fn*` tail: display name, the self-recursion
+    /// slot, and per-clause analysis. Returns the fun plus the
+    /// self-recursion binding (named callers wrap in `LetFn`).
+    fn build_fun(
         &mut self,
         name: Option<String>,
         raw: &[RawClause],
         span: Span,
-    ) -> Result<Expr, CompileError> {
+    ) -> Result<(FunExpr, Option<(String, usize)>), CompileError> {
         let seq = self.eval.next_fn_seq();
         let display = match &name {
             Some(n) => format!("user/eval{}/{}--{seq}", self.eval_seq, n),
@@ -3393,17 +3446,31 @@ impl<'a> Analyzer<'a> {
         let arities = self.analyze_arities(raw, span)?;
         self.locals.truncate(base);
         let fun = FunExpr { display, arities };
+        match (name, name_slot) {
+            (Some(n), Some(slot)) => Ok((fun, Some((n, slot)))),
+            _ => Ok((fun, None)),
+        }
+    }
+
+    /// Shared `fn`/`fn*` tail: the `LetFn` wrap for names.
+    fn finish_fn(
+        &mut self,
+        name: Option<String>,
+        raw: &[RawClause],
+        span: Span,
+    ) -> Result<Expr, CompileError> {
+        let (fun, bound) = self.build_fun(name, raw, span)?;
         // A named `fn` is a one-function `letfn`: the frame extends
         // first, the closure captures it, then the slot fills
         // (self-recursion). A `let` wrap would capture the
         // pre-extension frame instead.
-        match (name, name_slot) {
-            (Some(n), Some(slot)) => Ok(Expr::LetFn {
+        Ok(match bound {
+            Some((n, slot)) => Expr::LetFn {
                 fns: vec![(n, fun)],
                 body: vec![Expr::Local(slot)],
-            }),
-            _ => Ok(Expr::Fn(fun)),
-        }
+            },
+            None => Expr::Fn(fun),
+        })
     }
 
     /// One raw `fn*` clause per slice: the params vector plus the
@@ -3615,13 +3682,15 @@ impl<'a> Analyzer<'a> {
         let base = self.locals.len();
         let mut fixed = Vec::with_capacity(clause.fixed.len());
         for pat in &clause.fixed {
-            let (pattern, names) = self.build_pattern(pat, span)?;
+            let validated = as_pat(pat).expect("patterns validated before building");
+            let (pattern, names) = self.build_pattern(validated, span)?;
             self.locals.extend(names);
             fixed.push(pattern);
         }
         let mut rest_pat = None;
         if let Some(rest) = clause.rest {
-            let (pattern, names) = self.build_pattern(rest, span)?;
+            let validated = as_pat(rest).expect("patterns validated before building");
+            let (pattern, names) = self.build_pattern(validated, span)?;
             self.locals.extend(names);
             rest_pat = Some(pattern);
         }
@@ -3861,14 +3930,36 @@ impl<'a> Analyzer<'a> {
     }
 }
 
-/// Borrowed `seq` for pre/post conditions (maps yield entries).
+/// Borrowed `seq` for pre/post conditions (`nil` and maps are
+/// filtered by the caller; anything else seqable-but-unlisted
+/// yields no condition refs).
 fn seq_refs(v: &Value) -> Vec<&Value> {
     match v {
-        Value::Nil => Vec::new(),
         Value::List(l) => l.iter().collect(),
         Value::Vector(v) => v.iter().collect(),
-        Value::Map(m) => m.iter().flat_map(|(k, val)| [k, val]).collect(),
         Value::Set(s) => s.iter().collect(),
         _ => Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn seq_values_non_seqable_is_empty() {
+        // Defensive arm: non-seqables yield no key-list elements.
+        assert!(seq_values(&Value::Int(1)).is_empty());
+    }
+
+    #[test]
+    fn form_force_recur_is_internal() {
+        // Defense in depth: an escaping `recur` (impossible — the
+        // analyzer cages every one) surfaces as an internal error.
+        let source: Arc<str> = Arc::from("NO_SOURCE_PATH");
+        let err = form_force_err(&source, Signal::Recur(vec![]), Span::new(1, 1));
+        assert!(err.bare);
+        assert_eq!(err.class, super::class::RUNTIME);
+        assert!(err.message.contains("recur escaped forcing a form"));
     }
 }

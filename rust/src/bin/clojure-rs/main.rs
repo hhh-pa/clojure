@@ -9,11 +9,11 @@
 //! `clojure-rs`: native Clojure runtime, REPL, and LLVM AOT compiler.
 //!
 //! Slices S1+S7A: CLI shell plus `eval`/`run` wiring over the booted
-//! `clj-eval` core. `repl` lands in S7B/C, `build` in S8 (spec
+//! `clj-eval` core. `repl` landed in S7B/C, `build` in S8 (spec
 //! `docs/t1174/`).
 
 use clap::{Parser, Subcommand};
-use clj_eval::{Evaluator, SourceError, boot};
+use clj_eval::{Evaluator, SourceError, boot, compile_diagnostic, compile_head};
 use clj_value::Value;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -62,6 +62,15 @@ enum Command {
         /// The native binary to write.
         #[arg(short, long)]
         output: PathBuf,
+        /// Also write the LLVM IR to this file (skips linking).
+        #[arg(long)]
+        emit_ir: Option<PathBuf>,
+        /// Also write the native object file to this path (skips linking).
+        #[arg(long)]
+        emit_obj: Option<PathBuf>,
+        /// Link against this runtime archive instead of the autodetected one.
+        #[arg(long)]
+        runtime_archive: Option<PathBuf>,
     },
 }
 
@@ -76,15 +85,19 @@ fn main() -> ExitCode {
             history_file,
             no_history,
         } => cmd_repl(history_file, no_history),
-        Command::Build { file, output } => {
-            eprintln!(
-                "build: not yet implemented (lands in slice S8): {} -> {} [{}]",
-                file.display(),
-                output.display(),
-                llvm_backend(),
-            );
-            ExitCode::from(1)
-        }
+        Command::Build {
+            file,
+            output,
+            emit_ir,
+            emit_obj,
+            runtime_archive,
+        } => cmd_build(
+            &file,
+            &output,
+            emit_ir.as_deref(),
+            emit_obj.as_deref(),
+            runtime_archive.as_deref(),
+        ),
     }
 }
 
@@ -155,15 +168,22 @@ fn print_value(eval: &mut Evaluator, value: &Value) -> Result<String, String> {
     };
     let realized = match eval.realize_deep(value) {
         Ok(realized) => realized,
-        Err(clj_eval::Signal::Throw(t)) => {
-            let message = t.message.as_deref().unwrap_or("");
-            return Err(class_diagnostic(t.class, message));
-        }
-        Err(clj_eval::Signal::Recur(_)) => {
-            return Err("internal error: recur escaped its loop or fn".to_owned());
-        }
+        Err(signal) => return Err(print_failure(signal)),
     };
     Ok(clj_value::pr_to_string(&realized, &opts))
+}
+
+/// A print-time forcing failure as a one-line diagnostic (a `recur`
+/// cannot escape forcing — every loop/fn frame catches its own — so
+/// the `Recur` arm is defense in depth).
+fn print_failure(signal: clj_eval::Signal) -> String {
+    match signal {
+        clj_eval::Signal::Throw(t) => {
+            let message = t.message.as_deref().unwrap_or("");
+            class_diagnostic(t.class, message)
+        }
+        clj_eval::Signal::Recur(_) => "internal error: recur escaped its loop or fn".to_owned(),
+    }
 }
 
 /// The one-line `SimpleClass: message` diagnostic (bare class when
@@ -189,20 +209,7 @@ fn eval_diagnostic(e: &SourceError) -> String {
             let msg = e.message();
             format!("{EVAL_FILE}:{line}:{col}: {msg}")
         }
-        SourceError::Compile(e) => {
-            let line = e.span.line;
-            let col = e.span.col;
-            if e.bare {
-                let class = e.class;
-                let msg = &e.message;
-                format!("{EVAL_FILE}:{line}:{col}: {class}: {msg}")
-            } else {
-                let wrapper = e.wrapper();
-                let head = compile_head(&wrapper);
-                let msg = &e.message;
-                format!("{EVAL_FILE}:{line}:{col}: {head}: {msg}")
-            }
-        }
+        SourceError::Compile(e) => compile_diagnostic(EVAL_FILE, e),
         SourceError::Uncaught(t) => {
             let class = t.class.jvm_name();
             let msg = t.message.as_deref().unwrap_or("");
@@ -213,15 +220,6 @@ fn eval_diagnostic(e: &SourceError) -> String {
 }
 
 /// The wrapper line minus its ` at (site).` tail, e.g. `Syntax error
-/// compiling if` (`CompileError::wrapper` always ends with one; the
-/// whole line is the fallback).
-fn compile_head(wrapper: &str) -> &str {
-    match wrapper.rfind(" at (") {
-        Some(i) => &wrapper[..i],
-        None => wrapper,
-    }
-}
-
 fn cmd_run(file: &Path, args: &[String]) -> ExitCode {
     if !file.exists() {
         eprintln!("run: no such file: {}", file.display());
@@ -308,16 +306,14 @@ fn run_diagnostic(path: &str, e: &SourceError) -> String {
             format!("{path}:{}:{}: {msg}", span.line, span.col)
         }
         SourceError::Compile(e) => {
-            if e.bare {
-                let class = e.class;
-                let msg = &e.message;
-                format!("{path}:1:1: {class}: {msg}")
-            } else {
-                let wrapper = e.wrapper();
-                let head = compile_head(&wrapper);
-                let msg = &e.message;
-                format!("{path}:1:1: {head}: {msg}")
-            }
+            // `compile_err` converts every bare failure to `Uncaught`
+            // before `eval_source` returns, so `e.bare` is always
+            // false here (the single caller passes `eval_source`
+            // errors only).
+            let wrapper = e.wrapper();
+            let head = compile_head(&wrapper);
+            let msg = &e.message;
+            format!("{path}:1:1: {head}: {msg}")
         }
         SourceError::Uncaught(t) => {
             let outer = t.message.as_deref().unwrap_or("");
@@ -543,26 +539,144 @@ impl<'a> EvalScanner<'a> {
     }
 }
 
-#[cfg(feature = "aot")]
-fn llvm_backend() -> String {
-    // Touch the real backend so `build` reports linkage truthfully
-    // (and the `aot` feature stays a used dependency).
-    let ir = clj_aot::probe_ir();
-    debug_assert!(ir.contains("ModuleID"));
-    "LLVM backend linked".to_owned()
+/// `build`: AOT-compile the pure subset to a native binary (S8,
+/// spec §2.4). The IO gate runs on every configuration (missing
+/// input is exit 3 even unlinked); only compilation itself splits
+/// on the `aot` feature.
+fn cmd_build(
+    file: &Path,
+    output: &Path,
+    emit_ir: Option<&Path>,
+    emit_obj: Option<&Path>,
+    runtime_archive: Option<&Path>,
+) -> ExitCode {
+    if !file.exists() {
+        eprintln!("build: no such file: {}", file.display());
+        return ExitCode::from(3);
+    }
+    if file.is_dir() {
+        eprintln!("build: is a directory: {}", file.display());
+        return ExitCode::from(3);
+    }
+    let source = match std::fs::read_to_string(file) {
+        Ok(source) => source,
+        Err(e) => {
+            eprintln!("build: cannot open {}: {e}", file.display());
+            return ExitCode::from(3);
+        }
+    };
+    cmd_build_compile(file, &source, output, emit_ir, emit_obj, runtime_archive)
 }
 
+/// Linked `build`: plan → LLVM → link. Plan failures print the
+/// diagnostic verbatim (exit 1); LLVM failures print `build: ...`
+/// (exit 1); IO/link failures print `build: ...` (exit 3) — C8.
+#[cfg(feature = "aot")]
+fn cmd_build_compile(
+    file: &Path,
+    source: &str,
+    output: &Path,
+    emit_ir: Option<&Path>,
+    emit_obj: Option<&Path>,
+    runtime_archive: Option<&Path>,
+) -> ExitCode {
+    use clj_aot::{CompileError, EmitOptions, LinkOptions};
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(std::path::Path::to_path_buf))
+        .unwrap_or_default();
+    let path = file.to_string_lossy();
+    let emit = EmitOptions {
+        emit_ir: emit_ir.map(std::path::Path::to_path_buf),
+        emit_obj: emit_obj.map(std::path::Path::to_path_buf),
+    };
+    let link = LinkOptions {
+        runtime_archive: runtime_archive.map(std::path::Path::to_path_buf),
+        exe_dir,
+        linker: None,
+    };
+    match clj_aot::compile_str(source, &path, output, &emit, &link) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(CompileError::Plan(msg)) => {
+            eprintln!("{msg}");
+            ExitCode::from(1)
+        }
+        Err(CompileError::Target(msg) | CompileError::Emit(msg)) => {
+            eprintln!("build: {msg}");
+            ExitCode::from(1)
+        }
+        Err(e) => {
+            eprintln!("build: {e}");
+            ExitCode::from(3)
+        }
+    }
+}
+
+/// Unlinked `build`: the IO gate already ran, so any input reaching
+/// here is readable — report the missing backend (exit 1).
 #[cfg(not(feature = "aot"))]
-fn llvm_backend() -> String {
-    "LLVM backend not linked (built with --no-default-features)".to_owned()
+fn cmd_build_compile(
+    _file: &Path,
+    _source: &str,
+    _output: &Path,
+    _emit_ir: Option<&Path>,
+    _emit_obj: Option<&Path>,
+    _runtime_archive: Option<&Path>,
+) -> ExitCode {
+    eprintln!(
+        "build: LLVM backend not linked (built with --no-default-features; rebuild with default features to compile)"
+    );
+    ExitCode::from(1)
+}
+
+/// History persistence from the CLI flags (`--no-history` wins over
+/// `--history-file`).
+fn history_options(no_history: bool, history_file: Option<PathBuf>) -> clj_repl::HistoryOptions {
+    match (no_history, history_file) {
+        (true, _) => clj_repl::HistoryOptions::disabled(),
+        (false, Some(path)) => clj_repl::HistoryOptions::with_path(path),
+        (false, None) => clj_repl::HistoryOptions::default(),
+    }
+}
+
+/// A prompt closure cloning the shared prompt text on each read (so
+/// `in-ns` re-prompts at once).
+fn prompt_fn(text: std::rc::Rc<std::cell::RefCell<String>>) -> impl Fn() -> String {
+    move || text.borrow().clone()
 }
 
 /// `repl`: tty stdin gets the banner + rustyline driver (history,
 /// completion, multiline); anything else degrades to streaming eval
 /// with no banner and no prompts (pins P6 purity).
 fn cmd_repl(history_file: Option<PathBuf>, no_history: bool) -> ExitCode {
-    use std::io::{BufReader, IsTerminal};
-    if !std::io::stdin().is_terminal() {
+    use std::io::IsTerminal;
+    cmd_repl_with(
+        history_file,
+        no_history,
+        std::io::stdin().is_terminal(),
+        make_rustyline_source,
+    )
+}
+
+/// The production line backend (a named fn, not a closure, so the
+/// tty-driving test shares — and covers — this exact line).
+fn make_rustyline_source(
+    names: Vec<String>,
+    is_complete: fn(&str) -> bool,
+) -> Result<clj_repl::RustyLineSource, String> {
+    clj_repl::RustyLineSource::new(names, is_complete)
+}
+
+/// [`cmd_repl`] with its environment explicit (the tty probe and the
+/// line-backend constructor), so tests drive every path headless.
+fn cmd_repl_with(
+    history_file: Option<PathBuf>,
+    no_history: bool,
+    tty: bool,
+    make_source: impl FnOnce(Vec<String>, fn(&str) -> bool) -> Result<clj_repl::RustyLineSource, String>,
+) -> ExitCode {
+    use std::io::BufReader;
+    if !tty {
         let stdin = std::io::stdin();
         let stdout = std::io::stdout();
         let mut session =
@@ -574,7 +688,7 @@ fn cmd_repl(history_file: Option<PathBuf>, no_history: bool) -> ExitCode {
     let mut session = clj_repl::Session::new(boot(), std::io::empty(), stdout.lock());
     session.set_prompt(Some("{ns}=> ".to_owned()));
     let names = clj_repl::core_names(session.evaluator_mut());
-    let source = match clj_repl::RustyLineSource::new(names, clj_repl::read_is_complete) {
+    let source = match make_source(names, clj_repl::read_is_complete) {
         Ok(source) => source,
         Err(msg) => {
             // Terminal backend unavailable: degrade to streaming
@@ -587,24 +701,23 @@ fn cmd_repl(history_file: Option<PathBuf>, no_history: bool) -> ExitCode {
             return ExitCode::from(fallback.run() as u8);
         }
     };
-    let history = match (no_history, history_file) {
-        (true, _) => clj_repl::HistoryOptions::disabled(),
-        (false, Some(path)) => clj_repl::HistoryOptions::with_path(path),
-        (false, None) => clj_repl::HistoryOptions::default(),
-    };
+    let history = history_options(no_history, history_file);
+    cmd_repl_tty(session, source, history)
+}
+
+/// The tty editor loop over an explicit line source (generic so tests
+/// drive it with a stub; production passes the rustyline backend).
+fn cmd_repl_tty<W: std::io::Write, S: clj_repl::LineSource>(
+    session: clj_repl::Session<std::io::Empty, W>,
+    source: S,
+    history: clj_repl::HistoryOptions,
+) -> ExitCode {
     let mut editor = clj_repl::TtyEditor::with_history(source, history);
     let prompt_text = std::rc::Rc::new(std::cell::RefCell::new(
         session.render_prompt().unwrap_or_default(),
     ));
-    let prompt = {
-        let text = std::rc::Rc::clone(&prompt_text);
-        move || text.borrow().clone()
-    };
-    let mut handler = SessionHandler {
-        session,
-        prompt_text,
-        status: std::rc::Rc::new(std::cell::Cell::new(0)),
-    };
+    let prompt = prompt_fn(std::rc::Rc::clone(&prompt_text));
+    let mut handler = SessionHandler::new(session, prompt_text);
     let code = editor.run(&prompt, &mut handler);
     let status = handler.status.get();
     ExitCode::from(if code == 0 { status as u8 } else { code as u8 })
@@ -620,6 +733,21 @@ struct SessionHandler<W: std::io::Write> {
     status: std::rc::Rc<std::cell::Cell<i32>>,
 }
 
+impl<W: std::io::Write> SessionHandler<W> {
+    /// A handler over `session`, sharing `prompt_text` with the tty
+    /// prompt closure; the IO status starts clean.
+    fn new(
+        session: clj_repl::Session<std::io::Empty, W>,
+        prompt_text: std::rc::Rc<std::cell::RefCell<String>>,
+    ) -> Self {
+        Self {
+            session,
+            prompt_text,
+            status: std::rc::Rc::new(std::cell::Cell::new(0)),
+        }
+    }
+}
+
 impl<W: std::io::Write> clj_repl::LineHandler for SessionHandler<W> {
     fn handle_line(&mut self, line: &str) -> clj_repl::LoopAction {
         let status = self.session.submit_complete(line);
@@ -630,5 +758,362 @@ impl<W: std::io::Write> clj_repl::LineHandler for SessionHandler<W> {
             *self.prompt_text.borrow_mut() = rendered;
         }
         clj_repl::LoopAction::Continue
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Serializes the stdin-reading tests: only one may own fd 0.
+    static STDIN_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// A swapped fd 0, restored on drop (panic-safe).
+    #[cfg(unix)]
+    struct StdinSwap {
+        saved: Option<rustix::fd::OwnedFd>,
+    }
+
+    #[cfg(unix)]
+    impl StdinSwap {
+        /// Feed `feed` (write end already closed) as fd 0.
+        fn install(feed: rustix::fd::OwnedFd) -> Self {
+            let saved = rustix::io::dup(rustix::stdio::stdin()).expect("save stdin");
+            rustix::stdio::dup2_stdin(&feed).expect("swap stdin");
+            Self { saved: Some(saved) }
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for StdinSwap {
+        fn drop(&mut self) {
+            if let Some(saved) = self.saved.take() {
+                let _ = rustix::stdio::dup2_stdin(&saved);
+            }
+        }
+    }
+
+    #[test]
+    fn class_diagnostic_spells_both_shapes() {
+        assert_eq!(
+            class_diagnostic(clj_value::ThrowClass::ArithmeticException, ""),
+            "ArithmeticException"
+        );
+        assert_eq!(
+            class_diagnostic(clj_value::ThrowClass::ArithmeticException, "Divide by zero"),
+            "ArithmeticException: Divide by zero"
+        );
+    }
+
+    #[test]
+    fn eval_diagnostic_internal_blames_input_start() {
+        // `Internal` is unreachable via eval (only an escaping
+        // `recur` builds one, and the analyzer guarantees every
+        // `recur` a frame), so the error is synthesized.
+        let err = SourceError::Internal("boom".to_owned());
+        assert_eq!(eval_diagnostic(&err), "<eval>:1:1: internal error: boom");
+    }
+
+    #[test]
+    fn run_diagnostic_internal_blames_script_start() {
+        let err = SourceError::Internal("boom".to_owned());
+        assert_eq!(
+            run_diagnostic("script.clj", &err),
+            "script.clj:1:1: internal error: boom"
+        );
+    }
+
+    #[test]
+    fn run_diagnostic_reader_blames_script_span() {
+        // The `Reader` arm is defensive (`cmd_run`'s generated
+        // wrapper always reads clean), so a REAL reader error from
+        // the same `read_forms` exercises the formatting.
+        let err = boot()
+            .read_forms(")")
+            .expect_err("stray closer must not read");
+        assert!(matches!(&err, SourceError::Reader(_)));
+        assert_eq!(
+            run_diagnostic("script.clj", &err),
+            "script.clj:1:2: Unmatched delimiter: )"
+        );
+    }
+
+    #[test]
+    fn run_diagnostic_compile_blames_script_start() {
+        // The `Compile` arm is defensive (the wrapper always
+        // compiles), so a REAL analyzer error exercises it: `nope`
+        // fails resolve — never bare (bare is macro-arity/`declare`
+        // only).
+        let mut eval = boot();
+        let err = eval.eval_source("nope").expect_err("nope must not resolve");
+        assert!(matches!(&err, SourceError::Compile(_)));
+        assert_eq!(
+            run_diagnostic("script.clj", &err),
+            "script.clj:1:1: Syntax error compiling: Unable to resolve symbol: nope in this context"
+        );
+    }
+
+    #[test]
+    fn clj_string_escapes_every_special() {
+        assert_eq!(
+            clj_string("a\"b\\c\nd\re\tf\x01g\x7fh"),
+            "\"a\\\"b\\\\c\\nd\\re\\tf\\u0001g\\u007fh\""
+        );
+    }
+
+    #[test]
+    fn string_bodies_scan_as_code() {
+        let scan = EvalScanner::new("\"a\\b\"").run();
+        assert!(scan.has_code);
+        assert!(scan.edn_violation.is_none());
+    }
+
+    #[test]
+    fn unterminated_string_still_reaches_reader() {
+        // Entering a string counts as code.
+        let scan = EvalScanner::new("\"abc").run();
+        assert!(scan.has_code);
+        assert!(scan.edn_violation.is_none());
+    }
+
+    #[test]
+    fn char_tails_scan_as_code() {
+        for src in ["\\", "\\5", "\\a", "\\a ", "\\newline"] {
+            let scan = EvalScanner::new(src).run();
+            assert!(scan.has_code, "{src:?} holds code");
+            assert!(scan.edn_violation.is_none(), "{src:?} is edn-clean");
+        }
+    }
+
+    #[test]
+    fn quote_chars_flag_edn() {
+        let scan = EvalScanner::new("'a").run();
+        assert!(scan.has_code);
+        let v = scan.edn_violation.expect("quote flags edn");
+        assert_eq!((v.line, v.col), (1, 1));
+        assert_eq!(v.lexeme, "'");
+    }
+
+    #[test]
+    fn regex_dispatch_skips_body() {
+        let scan = EvalScanner::new("#\"a\"").run();
+        assert!(scan.has_code);
+        let v = scan.edn_violation.expect("regex flags edn");
+        assert_eq!((v.line, v.col), (1, 1));
+        assert_eq!(v.lexeme, "#\"");
+    }
+
+    #[test]
+    fn carriage_returns_normalize_to_newline() {
+        // The (2, 1) violation position PROVES one-newline
+        // normalization observationally.
+        for src in ["a\r\n'x", "a\r'x"] {
+            let scan = EvalScanner::new(src).run();
+            assert!(scan.has_code);
+            let v = scan.edn_violation.expect("quote flags edn");
+            assert_eq!((v.line, v.col), (2, 1));
+            assert_eq!(v.lexeme, "'");
+        }
+    }
+
+    #[test]
+    fn history_options_from_cli_flags() {
+        assert_eq!(
+            format!("{:?}", history_options(true, None)),
+            "HistoryOptions { path: None, enabled: false }"
+        );
+        assert_eq!(
+            format!(
+                "{:?}",
+                history_options(false, Some(PathBuf::from("/x/hist")))
+            ),
+            "HistoryOptions { path: Some(\"/x/hist\"), enabled: true }"
+        );
+        assert_eq!(
+            format!("{:?}", history_options(false, None)),
+            "HistoryOptions { path: None, enabled: true }"
+        );
+    }
+
+    #[test]
+    fn prompt_fn_clones_shared_text() {
+        let text = std::rc::Rc::new(std::cell::RefCell::new("user=> ".to_owned()));
+        let prompt = prompt_fn(std::rc::Rc::clone(&text));
+        assert_eq!(prompt(), "user=> ");
+        *text.borrow_mut() = "foo=> ".to_owned();
+        assert_eq!(prompt(), "foo=> ");
+    }
+
+    fn test_handler(prompt: Option<&str>) -> SessionHandler<Vec<u8>> {
+        let mut session = clj_repl::Session::new(boot(), std::io::empty(), Vec::new());
+        session.set_prompt(prompt.map(str::to_owned));
+        SessionHandler::new(
+            session,
+            std::rc::Rc::new(std::cell::RefCell::new(String::new())),
+        )
+    }
+
+    #[test]
+    fn handler_submits_and_reprompts() {
+        let mut handler = test_handler(Some("{ns}=> "));
+        let action = clj_repl::LineHandler::handle_line(&mut handler, "(+ 1 2)");
+        assert!(matches!(action, clj_repl::LoopAction::Continue));
+        assert_eq!(handler.prompt_text.borrow().as_str(), "user=> ");
+        assert_eq!(handler.status.get(), 0);
+        let SessionHandler { session, .. } = handler;
+        let (_, _, out) = session.into_parts();
+        assert_eq!(out, b"3\n".to_vec());
+    }
+
+    #[test]
+    fn handler_without_prompt_keeps_text() {
+        let mut handler = test_handler(None);
+        let action = clj_repl::LineHandler::handle_line(&mut handler, "(+ 1 2)");
+        assert!(matches!(action, clj_repl::LoopAction::Continue));
+        assert!(handler.prompt_text.borrow().is_empty());
+        let SessionHandler { session, .. } = handler;
+        let (_, _, out) = session.into_parts();
+        assert_eq!(out, b"3\n".to_vec());
+    }
+
+    struct FailWriter;
+
+    impl std::io::Write for FailWriter {
+        fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::other("boom"))
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Err(std::io::Error::other("boom"))
+        }
+    }
+
+    #[test]
+    fn print_failure_spells_both_signals() {
+        let thrown = clj_eval::Signal::Throw(clj_value::Throwable {
+            id: 1,
+            class: clj_value::ThrowClass::ArithmeticException,
+            message: Some(std::sync::Arc::from("Divide by zero")),
+            data: None,
+            cause: None,
+        });
+        assert_eq!(print_failure(thrown), "ArithmeticException: Divide by zero");
+        // The forcing-impossible case: pins the helper's total
+        // contract directly.
+        assert_eq!(
+            print_failure(clj_eval::Signal::Recur(vec![])),
+            "internal error: recur escaped its loop or fn"
+        );
+    }
+
+    /// A scripted line source (tty-loop tests without a terminal).
+    struct ScriptSource {
+        outcomes: std::collections::VecDeque<clj_repl::ReadOutcome>,
+    }
+
+    impl clj_repl::LineSource for ScriptSource {
+        fn readline(&mut self, _prompt: &str) -> clj_repl::ReadOutcome {
+            self.outcomes
+                .pop_front()
+                .unwrap_or(clj_repl::ReadOutcome::Eof)
+        }
+
+        fn is_complete(&self, _input: &str) -> bool {
+            true
+        }
+
+        fn load_history(&mut self, _path: &std::path::Path) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn append_history(&mut self, _path: &std::path::Path) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn add_history_entry(&mut self, _line: &str) {}
+    }
+
+    #[test]
+    fn tty_loop_runs_headless_with_stub_source() {
+        let mut session = clj_repl::Session::new(boot(), std::io::empty(), Vec::new());
+        session.set_prompt(Some("{ns}=> ".to_owned()));
+        let source = ScriptSource {
+            outcomes: [clj_repl::ReadOutcome::Line("(+ 1 2)".to_owned())]
+                .into_iter()
+                .collect(),
+        };
+        // Enabled history with an explicit (stub-ignored) path, so
+        // the load/append seam executes without touching home.
+        let hist = std::env::temp_dir().join("clj-tty-history-stub");
+        let code = cmd_repl_tty(session, source, clj_repl::HistoryOptions::with_path(hist));
+        assert_eq!(code, ExitCode::SUCCESS);
+    }
+
+    #[test]
+    fn tty_degradation_streams_when_backend_fails() {
+        use std::io::IsTerminal;
+        // The fallback reads inherited stdin: run only piped (CI
+        // always pipes); a live terminal skips silently. (`then`,
+        // not `if`, so the skip leaves no dead branch line.)
+        (!std::io::stdin().is_terminal()).then(|| {
+            let _serial = STDIN_SERIAL.lock().expect("stdin serial");
+            let code = cmd_repl_with(None, true, true, |_, _| Err("boom".to_owned()));
+            assert_eq!(code, ExitCode::SUCCESS);
+        });
+    }
+
+    #[test]
+    fn tty_loop_with_real_source_exits_on_eof_stdin() {
+        use std::io::IsTerminal;
+        // rustyline would block on a live terminal; CI pipes EOF.
+        (!std::io::stdin().is_terminal()).then(|| {
+            let _serial = STDIN_SERIAL.lock().expect("stdin serial");
+            let code = cmd_repl_with(None, true, true, make_rustyline_source);
+            assert_eq!(code, ExitCode::SUCCESS);
+        });
+    }
+
+    /// The validator runs over a piped line (covers
+    /// `ReplHelper::validate`, unreachable through any other
+    /// headless path — `ValidationContext::new` is `pub(crate)`):
+    /// fd 0 is swapped onto a one-line pipe for the call and
+    /// restored after (panic-safe via the guard). A live
+    /// terminal skips like its siblings.
+    #[cfg(unix)]
+    #[test]
+    fn tty_loop_with_real_source_validates_piped_line() {
+        use std::io::IsTerminal;
+        (!std::io::stdin().is_terminal()).then(|| {
+            let _serial = STDIN_SERIAL.lock().expect("stdin serial");
+            let (feed_read, feed_write) = rustix::pipe::pipe().expect("stdin pipe");
+            {
+                let mut feed = std::fs::File::from(feed_write);
+                use std::io::Write;
+                feed.write_all(b"(+ 1 2)\n").expect("feed stdin line");
+            }
+            let swap = StdinSwap::install(feed_read);
+            let code = cmd_repl_with(None, true, true, make_rustyline_source);
+            drop(swap);
+            assert_eq!(code, ExitCode::SUCCESS);
+        });
+    }
+
+    #[test]
+    fn handler_remembers_io_status() {
+        // `submit_complete` returns 1 when the write fails, so the
+        // handler records it.
+        let mut session = clj_repl::Session::new(boot(), std::io::empty(), FailWriter);
+        session.set_prompt(Some("{ns}=> ".to_owned()));
+        let mut handler = SessionHandler::new(
+            session,
+            std::rc::Rc::new(std::cell::RefCell::new(String::new())),
+        );
+        let action = clj_repl::LineHandler::handle_line(&mut handler, "(+ 1 2)");
+        assert!(matches!(action, clj_repl::LoopAction::Continue));
+        assert_eq!(handler.status.get(), 1);
+        assert_eq!(handler.prompt_text.borrow().as_str(), "user=> ");
+        let SessionHandler { session, .. } = handler;
+        let (_, _, mut out) = session.into_parts();
+        assert!(std::io::Write::flush(&mut out).is_err());
     }
 }

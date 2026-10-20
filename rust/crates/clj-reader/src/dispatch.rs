@@ -279,10 +279,13 @@ impl Reader {
         let prev = self.in_cond;
         self.in_cond = true;
         let result = if self.opts.read_cond == ReadCond::Preserve {
-            // The raw list (with line/col metas as usual).
-            let Some(form) = self.list_reader()? else {
-                unreachable!("the list reader always returns a form");
-            };
+            // The raw list (with line/col metas as usual). The
+            // list reader returns a form on every success path,
+            // so `expect` (whose line always executes) spells the
+            // invariant coverably (100% line gate).
+            let form = self
+                .list_reader()?
+                .expect("the list reader always returns a form");
             Ok(Some(Value::ReaderConditional {
                 form: Box::new(form),
                 splicing,
@@ -434,4 +437,92 @@ fn is_reserved_feature(f: &Value) -> bool {
 
 fn is_default(kw: &Keyword) -> bool {
     kw.namespace().is_none() && kw.name() == "default"
+}
+
+#[cfg(test)]
+mod tests {
+    use clj_value::Value;
+
+    use crate::{ReaderError, ReaderOpts, read_str};
+
+    fn opts() -> ReaderOpts {
+        ReaderOpts::default()
+    }
+
+    /// Assert a single-entry map holds one `Int(1)` pair keyed by a
+    /// symbol (structural match: no `Value` equality needed).
+    fn assert_single_sym_pair(v: Value, ns: Option<&str>, name: &str) {
+        let Value::Map(m) = v else {
+            panic!("expected a map, got {v:?}");
+        };
+        assert_eq!(m.size(), 1);
+        for (k, val) in m.iter() {
+            assert_eq!(val, &Value::Int(1));
+            assert!(matches!(k, Value::Symbol(s) if s.namespace() == ns && s.name() == name));
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "expected a map")]
+    fn assert_single_sym_pair_rejects_non_map() {
+        // The helper's failure contract (also covers its guard line).
+        assert_single_sym_pair(Value::Nil, None, "x");
+    }
+
+    #[test]
+    fn automap_ws_then_nonbrace_rejects_namespace() {
+        // `nsmap_head`, auto + whitespace: skip to `{`, else `NsMapNs`.
+        for input in ["#:: x {}", "#:: "] {
+            let err = read_str(input, &opts()).unwrap_err();
+            assert!(matches!(err, ReaderError::NsMapNs { .. }), "{input}");
+            assert_eq!(err.message(), "Namespaced map must specify a namespace");
+        }
+    }
+
+    #[test]
+    fn automap_non_symbol_ns_rejected() {
+        // `resolve_nsmap_ns`, auto + non-symbol head.
+        let err = read_str("#::1 {}", &opts()).unwrap_err();
+        assert!(matches!(err, ReaderError::NsMapValidNs { .. }));
+        assert_eq!(
+            err.message(),
+            "Namespaced map must specify a valid namespace: 1"
+        );
+    }
+
+    #[test]
+    fn cond_eof_where_feature_expected() {
+        // `cond_match_arm` head read hits EOF.
+        let err = read_str("#?(", &opts()).unwrap_err();
+        assert!(matches!(err, ReaderError::EofDelimited { .. }));
+        assert_eq!(err.message(), "EOF while reading, starting at line 1");
+    }
+
+    #[test]
+    fn cond_eof_where_value_expected() {
+        // Feature matched, then EOF where its value goes.
+        let err = read_str("#?(:clj", &opts()).unwrap_err();
+        assert!(matches!(err, ReaderError::EofDelimited { line: 1, .. }));
+    }
+
+    #[test]
+    fn cond_eof_in_discard_position() {
+        // Unmatched feature, then EOF where its discarded value goes.
+        let err = read_str("#?(:nothere", &opts()).unwrap_err();
+        assert!(matches!(err, ReaderError::EofDelimited { line: 1, .. }));
+    }
+
+    #[test]
+    fn nsmap_prefixes_unqualified_symbol_keys() {
+        // `nsmap_key` unqualified-symbol arm.
+        let v = read_str("#:foo{a 1}", &opts()).unwrap();
+        assert_single_sym_pair(v, Some("foo"), "a");
+    }
+
+    #[test]
+    fn nsmap_strips_underscore_symbol_ns() {
+        // `nsmap_key` `_`-ns symbol arm.
+        let v = read_str("#:foo{_/a 1}", &opts()).unwrap();
+        assert_single_sym_pair(v, None, "a");
+    }
 }

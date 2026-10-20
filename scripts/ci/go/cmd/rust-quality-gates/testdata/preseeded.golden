@@ -30,14 +30,14 @@ WARNING: $REPORT/lcov.info has absurd count 18446744073709551615 at src/absurd.r
 + cargo llvm-cov report --html --workspace --output-dir $REPORT
 + $SYS/lib/rustlib/x86_64-stub/bin/llvm-profdata merge -sparse ... (1 profraw) -o $WS/target/llvm-cov-target/canonical.profdata
 + $SYS/lib/rustlib/x86_64-stub/bin/llvm-cov export -instr-profile=$WS/target/llvm-cov-target/canonical.profdata --format=lcov ... (1 objects)
-WARNING: raw export has absurd count 18446744073709551615 at $WS/crates/app/tests/../src/tour.rs DA:2; clamped to 0
+WARNING: raw export has absurd count 18446744073709551615 at $WS/crates/app/tests/u.rs DA:1; clamped to 0
 + $SYS/lib/rustlib/x86_64-stub/bin/llvm-cov show -instr-profile=$WS/target/llvm-cov-target/canonical.profdata --format=html --output-dir=$REPORT/html.canonical -object ... (1 objects)
-canonical coverage: cargo 8/9 lines -> canonical 10/12 (recovered 2 genuinely-executed lines)
-coverage for $WS: 83.33% lines (10/12, 3 files)
-    0.00%     0/1     src/absurd.rs
-   50.00%     1/2     crates/app/src/tour.rs
+canonical coverage: cargo 8/9 lines -> canonical 12/12 (recovered 4 genuinely-executed lines)
+coverage for $WS: 100.00% lines (12/12, 3 files)
+  100.00%     1/1     src/absurd.rs
+  100.00%     2/2     crates/app/src/tour.rs
   100.00%     9/9     src/a.rs
-+ $BIN/coverage-floor $REPORT/lcov.info 80
-coverage floor: 83.33% lines (10/12, 3 files) vs 80.00% floor ($REPORT/lcov.info)
++ $BIN/coverage-floor $REPORT/lcov.info 100
+coverage floor: 100.00% lines (12/12, 3 files) vs 100.00% floor ($REPORT/lcov.info)
 coverage floor: OK
 rust quality gates: all green for $WS

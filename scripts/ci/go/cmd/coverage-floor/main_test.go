@@ -16,7 +16,8 @@ func TestGoldenPaths(t *testing.T) {
 		works string
 	}{
 		{"pass", []string{"floor.lcov", "50"}, 0, "testdata"},
-		{"fail", []string{"floor.lcov", "80"}, 1, "testdata"},
+		{"fail", []string{"floor.lcov", "100"}, 1, "testdata"},
+		{"default-floor", []string{"floor.lcov"}, 1, "testdata"},
 		{"usage", nil, 2, "testdata"},
 		{"badfloor", []string{"floor.lcov", "xx"}, 2, "testdata"},
 		{"missing", []string{"nope.lcov"}, 1, "testdata"},

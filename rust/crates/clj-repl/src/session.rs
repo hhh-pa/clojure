@@ -197,13 +197,11 @@ impl<R: BufRead, W: Write> Session<R, W> {
                         if buf.trim().is_empty() {
                             return 0;
                         }
-                        // EOF with a pending partial: one last step —
-                        // a complete form still evals; anything else
-                        // (including the incomplete tail) reports.
-                        return match self.step(&buf) {
-                            Step::Done(status) => status,
-                            Step::More(err) => self.fail(&err),
-                        };
+                        // EOF with a pending partial: submit it like the
+                        // tty driver does (the buffer stepped `More` on
+                        // the previous iteration and nothing ran since,
+                        // so the re-step reports the same diagnostic).
+                        return self.submit_complete(&buf);
                     }
                     Ok(_) => buf.push_str(&line),
                 }
@@ -312,18 +310,28 @@ impl<R: BufRead, W: Write> Session<R, W> {
         };
         let realized = match self.eval.realize_deep(value) {
             Ok(realized) => realized,
-            Err(Signal::Throw(t)) => {
-                let message = t.message.as_deref().unwrap_or("");
-                let diagnostic = Self::class_diagnostic(t.class, message);
-                return Err((Value::Throwable(t), diagnostic));
-            }
-            Err(Signal::Recur(_)) => {
-                let diagnostic = "internal error: recur escaped its loop or fn".to_owned();
-                let bound = self.throwable(ThrowClass::Exception, diagnostic.clone());
-                return Err((Value::Throwable(bound), diagnostic));
-            }
+            Err(signal) => return Err(self.print_failure(signal)),
         };
         Ok(pr_to_string(&realized, &opts))
+    }
+
+    /// A print-time forcing failure as its `*e` value plus
+    /// diagnostic (a `recur` cannot escape forcing — every loop/fn
+    /// frame catches its own — so the `Recur` arm is defense in
+    /// depth).
+    fn print_failure(&mut self, signal: Signal) -> (Value, String) {
+        match signal {
+            Signal::Throw(t) => {
+                let message = t.message.as_deref().unwrap_or("");
+                let diagnostic = Self::class_diagnostic(t.class, message);
+                (Value::Throwable(t), diagnostic)
+            }
+            Signal::Recur(_) => {
+                let diagnostic = "internal error: recur escaped its loop or fn".to_owned();
+                let bound = self.throwable(ThrowClass::Exception, diagnostic.clone());
+                (Value::Throwable(bound), diagnostic)
+            }
+        }
     }
 
     /// Shift the `*1`/`*2`/`*3` window for one successful value
@@ -427,7 +435,10 @@ impl<R: BufRead, W: Write> Session<R, W> {
 
 #[cfg(test)]
 mod tests {
-    use super::is_incomplete_message;
+    use super::{
+        NativeError, Session, Signal, SourceError, ThrowClass, Throwable, Value,
+        is_incomplete_message,
+    };
 
     #[test]
     fn each_incomplete_variant_continues() {
@@ -462,5 +473,64 @@ mod tests {
         ] {
             assert!(!is_incomplete_message(message), "{message:?} is hard");
         }
+    }
+
+    #[test]
+    fn internal_error_parts_report_plain_exception() {
+        // `Internal` is unreachable via eval, so the error is
+        // synthesized.
+        type T = Session<std::io::Empty, Vec<u8>>;
+        let mut s = T::new(clj_eval::boot(), std::io::empty(), Vec::new());
+        let (bound, diagnostic) = s.error_parts(&SourceError::Internal("boom".to_owned()));
+        assert_eq!(diagnostic, "internal error: boom");
+        assert!(matches!(bound, Value::Throwable(t)
+                if t.class == ThrowClass::Exception
+                    && t.message.as_deref() == Some("internal error: boom")));
+    }
+
+    #[test]
+    fn empty_messages_stamp_message_less_throwables() {
+        type T = Session<std::io::Empty, Vec<u8>>;
+        let mut s = T::new(clj_eval::boot(), std::io::empty(), Vec::new());
+        let t = s.throwable(ThrowClass::Exception, String::new());
+        assert!(t.message.is_none());
+        let bound = s.native_to_value(&NativeError::new(ThrowClass::Exception, String::new()));
+        assert!(matches!(bound, Value::Throwable(t) if t.message.is_none()));
+    }
+
+    #[test]
+    fn print_failure_spells_both_signals() {
+        type T = Session<std::io::Empty, Vec<u8>>;
+        let mut s = T::new(clj_eval::boot(), std::io::empty(), Vec::new());
+        let thrown = Signal::Throw(Throwable {
+            id: 1,
+            class: ThrowClass::ArithmeticException,
+            message: Some(std::sync::Arc::from("Divide by zero")),
+            data: None,
+            cause: None,
+        });
+        let (bound, diagnostic) = s.print_failure(thrown);
+        assert_eq!(diagnostic, "ArithmeticException: Divide by zero");
+        assert!(matches!(bound, Value::Throwable(_)));
+        // The forcing-impossible case: pins the helper's total
+        // contract directly.
+        let (bound, diagnostic) = s.print_failure(Signal::Recur(vec![]));
+        assert_eq!(diagnostic, "internal error: recur escaped its loop or fn");
+        assert!(matches!(bound, Value::Throwable(t)
+                if t.class == ThrowClass::Exception
+                    && t.message.as_deref() == Some("internal error: recur escaped its loop or fn")));
+    }
+
+    #[test]
+    fn class_diagnostic_is_bare_without_message() {
+        type T = Session<std::io::Empty, Vec<u8>>;
+        assert_eq!(
+            T::class_diagnostic(ThrowClass::ArithmeticException, ""),
+            "ArithmeticException"
+        );
+        assert_eq!(
+            T::class_diagnostic(ThrowClass::ArithmeticException, "Divide by zero"),
+            "ArithmeticException: Divide by zero"
+        );
     }
 }

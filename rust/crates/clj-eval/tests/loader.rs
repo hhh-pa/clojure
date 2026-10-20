@@ -609,3 +609,198 @@ fn clj_beats_cljc_across_dirs() {
     );
     assert_eq!(run_last(&mut eval, "xo/src"), ":clj");
 }
+
+#[test]
+fn load_string_long() {
+    let mut eval = boot();
+    assert_eq!(
+        uncaught(&mut eval, "(load-string 42)"),
+        "java.lang.ClassCastException | Cannot cast java.lang.Long to java.lang.String"
+    );
+}
+
+#[test]
+fn load_file_long() {
+    let mut eval = boot();
+    assert_eq!(
+        uncaught(&mut eval, "(load-file 42)"),
+        "java.lang.ClassCastException | Cannot cast java.lang.Long to java.lang.String"
+    );
+}
+
+#[test]
+fn load_file_relative() {
+    let name = format!("clj-relfile-{}-loadfilerel.clj", std::process::id());
+    std::fs::write(&name, "(def rlf *file*)\n").unwrap();
+    let mut eval = boot();
+    run(&mut eval, &format!("(load-file \"{name}\")"));
+    let star = run_last(&mut eval, "rlf");
+    std::fs::remove_file(&name).unwrap();
+    assert!(star.starts_with('"'), "not a string: {star}");
+    assert!(star.ends_with(&format!("{name}\"")), "not joined: {star}");
+    if !cfg!(windows) {
+        assert!(!star.contains('\\'), "separators pinned: {star}");
+    }
+}
+
+#[test]
+fn load_pending_paths_long() {
+    let mut eval = boot();
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(binding [clojure.core/*pending-paths* 42] (load \"/x\"))"
+        ),
+        "java.lang.ClassCastException | Cannot cast java.lang.Long to clojure.lang.IPersistentList"
+    );
+}
+
+#[test]
+fn load_star_ns_fallback() {
+    let mut eval = boot();
+    // An absolute path skips the `*ns*` read, so the load proceeds
+    // to the missing-file error whatever `*ns*` holds.
+    assert_eq!(
+        uncaught(&mut eval, "(binding [*ns* 42] (load \"/x\"))"),
+        "java.io.FileNotFoundException | Could not locate x__init.class, x.clj or x.cljc on classpath."
+    );
+    // The relative form reads `*ns*` (the absolute path skips
+    // the read entirely) and the JVM fails the `Symbol` cast
+    // instead of falling back (oracle REL42).
+    assert_eq!(
+        uncaught(&mut eval, "(binding [*ns* 42] (load \"x\"))"),
+        "java.lang.ClassCastException | class java.lang.Long cannot be cast to class clojure.lang.Symbol (java.lang.Long is in module java.base of loader 'bootstrap'; clojure.lang.Symbol is in unnamed module of loader 'app')"
+    );
+}
+
+#[test]
+fn load_long() {
+    let mut eval = boot();
+    assert_eq!(
+        uncaught(&mut eval, "(load 42)"),
+        "java.lang.ClassCastException | Cannot cast java.lang.Long to java.lang.String"
+    );
+}
+
+#[test]
+fn load_unreadable_bytes() {
+    let fx = Fixture::new("badbytes");
+    std::fs::write(fx.dir.join("badlib.clj"), [0xffu8, 0xfe, 0x00]).unwrap();
+    let mut eval = boot();
+    let err = uncaught(&mut eval, &fx.within("(require 'badlib)"));
+    assert!(
+        err.starts_with("java.io.FileNotFoundException | "),
+        "class: {err}"
+    );
+    assert!(
+        err.ends_with("(stream did not contain valid UTF-8)"),
+        "message: {err}"
+    );
+}
+
+#[test]
+fn load_path_entry_long() {
+    let mut eval = boot();
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(binding [clojure.core/*load-path* [42]] (load \"/x\"))"
+        ),
+        "java.lang.ClassCastException | Cannot cast java.lang.Long to java.lang.String"
+    );
+}
+
+#[test]
+fn require_vector_keyword() {
+    let mut eval = boot();
+    assert_eq!(
+        uncaught(&mut eval, "(require [:foo])"),
+        "java.lang.ClassCastException | Cannot cast clojure.lang.Keyword to clojure.lang.Symbol"
+    );
+}
+
+#[test]
+fn require_vector_string() {
+    let mut eval = boot();
+    assert_eq!(
+        uncaught(&mut eval, "(require [\"foo\"])"),
+        "java.lang.ClassCastException | Cannot cast java.lang.String to clojure.lang.Symbol"
+    );
+}
+
+#[test]
+fn loaded_libs_long() {
+    let mut eval = boot();
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(binding [clojure.core/*loaded-libs* 42] (require 'user))"
+        ),
+        "java.lang.ClassCastException | Cannot cast java.lang.Long to clojure.lang.IPersistentSet"
+    );
+}
+
+#[test]
+fn eval_bare_macro_arity() {
+    let mut eval = boot();
+    // Bare: no `CompilerException` wrapper, no cause.
+    assert_eq!(
+        uncaught_chain(&mut eval, "(eval '(when))"),
+        vec![
+            "clojure.lang.ArityException | Wrong number of args (0) passed to: clojure.core/when"
+                .to_owned()
+        ]
+    );
+}
+
+#[test]
+fn load_string_ratio_deferral() {
+    let mut eval = boot();
+    assert_eq!(
+        uncaught_chain(&mut eval, "(load-string \"1/2\")"),
+        vec![
+            "clojure.lang.Compiler$CompilerException | Syntax error reading source at (2:1)."
+                .to_owned(),
+            "java.lang.Exception | Ratio literals are not supported in this build (big-number follow-up N3): 1/2"
+                .to_owned(),
+        ]
+    );
+}
+
+#[test]
+fn load_string_macro_arity_is_bare() {
+    let mut eval = boot();
+    // Through `load`, a bare macro-arity failure escapes unwrapped
+    // (single, no `CompilerException` wrapper — like `eval`).
+    assert_eq!(
+        uncaught_chain(&mut eval, "(load-string \"(when)\")"),
+        vec![
+            "clojure.lang.ArityException | Wrong number of args (0) passed to: clojure.core/when"
+                .to_owned()
+        ]
+    );
+}
+
+#[test]
+fn load_relative_missing_reports_ns_root() {
+    let mut eval = boot();
+    // A relative load resolves against the current namespace's root
+    // directory (`user` here).
+    assert_eq!(
+        uncaught(&mut eval, "(load \"nonexistent_xyz\")"),
+        "java.io.FileNotFoundException | Could not locate nonexistent_xyz__init.class, nonexistent_xyz.clj or nonexistent_xyz.cljc on classpath. Please check that namespaces with dashes use underscores in the Clojure file name."
+    );
+}
+
+#[test]
+fn load_string_invalid_number() {
+    let mut eval = boot();
+    assert_eq!(
+        uncaught_chain(&mut eval, "(load-string \"08\")"),
+        vec![
+            "clojure.lang.Compiler$CompilerException | Syntax error reading source at (2:1)."
+                .to_owned(),
+            "java.lang.NumberFormatException | Invalid number: 08".to_owned(),
+        ]
+    );
+}

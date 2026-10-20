@@ -443,23 +443,20 @@ pub(crate) fn is_seqable(v: &Value) -> bool {
 fn force_pending(eval: &mut Evaluator, p: &PendingSeq) -> Result<Forced, Signal> {
     let thunk = {
         let mut state = p.state.lock().unwrap_or_else(|e| e.into_inner());
-        match &*state {
+        // A single match: every arm is live (matching twice would
+        // leave a dead fallback for the already-seen pending state).
+        // The memoized chunk is restored untouched.
+        match std::mem::replace(&mut *state, SeqState::Empty) {
             SeqState::Empty => return Ok(Forced::Empty),
             SeqState::Chunk { items, pos, tail } => {
-                return Ok(Forced::Chunk {
-                    items: Arc::from(&items[*pos..]),
+                let forced = Forced::Chunk {
+                    items: Arc::from(&items[pos..]),
                     tail: tail.clone(),
-                });
+                };
+                *state = SeqState::Chunk { items, pos, tail };
+                return Ok(forced);
             }
-            SeqState::Pending(_) => {}
-        }
-        match std::mem::replace(&mut *state, SeqState::Empty) {
             SeqState::Pending(t) => t,
-            // Unreachable: matched pending above (single-threaded).
-            other => {
-                *state = other;
-                return Ok(Forced::Empty);
-            }
         }
     };
     match step_thunk(eval, (*thunk).clone()) {
@@ -483,27 +480,21 @@ fn force_pending(eval: &mut Evaluator, p: &PendingSeq) -> Result<Forced, Signal>
     }
 }
 
-/// Step a pending seq (forcing one step; empty chunks fall through
-/// to the tail).
+/// Step a pending seq (forcing one step; forced chunks are
+/// non-empty by construction — see the no-empty-chunk proof in
+/// `docs/t1174/s8-coverage.md`).
 fn step_pending_unit(eval: &mut Evaluator, p: &PendingSeq) -> Result<StepUnit, Signal> {
     match force_pending(eval, p)? {
         Forced::Empty => Ok(StepUnit::Empty),
-        Forced::Chunk { items, tail } => {
-            if items.is_empty() {
-                step_unit(eval, &tail)
-            } else {
-                Ok(StepUnit::Chunk { items, tail })
-            }
-        }
+        Forced::Chunk { items, tail } => Ok(StepUnit::Chunk { items, tail }),
     }
 }
 
-/// Step a subvector view (eager).
+/// Step a subvector view (eager; subvectors are never empty —
+/// `subvec` answers a plain vector when `start == end`).
 fn step_subvector_unit(sv: &SubVectorValue) -> Result<StepUnit, Signal> {
-    step_realized(&sv.items(), false).map_or_else(
-        || Ok(StepUnit::Empty),
-        |s| step_seq(&s, true, false, SeqKind::Subvec, None),
-    )
+    let s = step_realized(&sv.items(), false).expect("subvectors are never empty");
+    step_seq(&s, true, false, SeqKind::Subvec, None)
 }
 
 /// Step the entry-view arms (keys take the `true` projection).
@@ -632,9 +623,8 @@ fn step_seq(
     meta: Option<&Map>,
 ) -> Result<StepUnit, Signal> {
     if let Some((chunk, rest)) = s.chunk_next() {
-        if chunk.is_empty() {
-            return step_seq(&rest, counted, idrop, kind, meta);
-        }
+        // `chunk_next` never yields empty chunks (`Seq::chunked`
+        // rejects empties; `next` keeps `pos < len`).
         let tail = Value::Extension(Arc::new(seq_tail(rest, counted, idrop, kind, meta)));
         return Ok(StepUnit::Chunk {
             items: Arc::from(chunk),
@@ -697,9 +687,9 @@ fn step_range_value(_eval: &mut Evaluator, r: &RangeValue) -> Result<StepUnit, S
             }
         }
     }
-    if items.is_empty() {
-        return Ok(StepUnit::Empty);
-    }
+    // Empty ranges never exist as values (`range` nil-puns), so
+    // stepping always yields at least one head.
+    debug_assert!(!items.is_empty(), "stepped ranges are non-empty");
     if cur.done() {
         tail = Value::Nil;
     }
@@ -736,9 +726,8 @@ fn step_cycle_value(eval: &mut Evaluator, c: &CycleValue) -> Result<StepUnit, Si
             tail: Value::Extension(Arc::new(next)),
         });
     }
-    if matches!(c.prev(), Value::Nil) {
-        return Ok(StepUnit::Empty);
-    }
+    // `prev` is never nil (seq'd non-nil at construction, preserved
+    // by tails, fields immutable).
     if let Some((head, tail)) = step_head(eval, c.prev())? {
         let next = CycleValue::new(c.prev().clone(), tail);
         return Ok(StepUnit::One {
@@ -838,20 +827,16 @@ fn keys_first(eval: &mut Evaluator, underlying: &Value, keys: bool) -> Result<Va
 /// An entry-view rest (advancing never casts, like
 /// `KeySeq.next`; spent underlyings rest to `()`).
 fn keys_rest(eval: &mut Evaluator, underlying: &Value, keys: bool) -> Result<Value, Signal> {
-    let mut cur = underlying.clone();
-    let tail = loop {
-        match step_unit(eval, &cur)? {
-            StepUnit::Empty => break None,
-            StepUnit::One { tail, .. } => break Some(tail),
-            StepUnit::Chunk { items, tail } => {
-                if items.len() > 1 {
-                    break Some(chain_tail(&items[1..], &tail));
-                }
-                if items.is_empty() {
-                    cur = tail;
-                } else {
-                    break Some(tail);
-                }
+    // Step chunks are never empty, so one step decides (no loop).
+    let tail = match step_unit(eval, underlying)? {
+        StepUnit::Empty => None,
+        StepUnit::One { tail, .. } => Some(tail),
+        StepUnit::Chunk { items, tail } => {
+            if items.len() > 1 {
+                Some(chain_tail(&items[1..], &tail))
+            } else {
+                // Single-item chunk.
+                Some(tail)
             }
         }
     };
@@ -947,19 +932,15 @@ fn step_value_forced(eval: &mut Evaluator, v: &Value) -> Result<Forced, Signal> 
 }
 
 /// Step one head plus its remainder (chunk remainders re-chain
-/// ahead of the tail; empty chunks fall through to the tail).
+/// ahead of the tail; step chunks are never empty).
 fn step_head(eval: &mut Evaluator, input: &Value) -> Result<Option<(Value, Value)>, Signal> {
-    let mut cur = input.clone();
-    loop {
-        match step_unit(eval, &cur)? {
-            StepUnit::Empty => return Ok(None),
-            StepUnit::One { head, tail } => return Ok(Some((head, tail))),
-            StepUnit::Chunk { items, tail } => match items.split_first() {
-                Some((head, rest)) => {
-                    return Ok(Some((head.clone(), chain_tail(rest, &tail))));
-                }
-                None => cur = tail,
-            },
+    // Step chunks are never empty, so one step decides (no loop).
+    match step_unit(eval, input)? {
+        StepUnit::Empty => Ok(None),
+        StepUnit::One { head, tail } => Ok(Some((head, tail))),
+        StepUnit::Chunk { items, tail } => {
+            let (head, rest) = items.split_first().expect("step chunks are non-empty");
+            Ok(Some((head.clone(), chain_tail(rest, &tail))))
         }
     }
 }
@@ -1016,24 +997,23 @@ fn idrop_shift_map(m: &Map, n: i32, n64: i64) -> Option<Value> {
 
 /// Eager `IDrop` shift of a long range (`None` past the end).
 fn idrop_shift_range(r: &RangeValue, n64: i64) -> Option<Value> {
-    if !r.is_long() {
-        return None;
-    }
-    let (RangeNum::Int(start), RangeNum::Int(step)) = (r.cur(), r.step()) else {
-        return None;
-    };
+    // Callers pre-check `is_idrop` (long-only for ranges), and long
+    // ranges always carry `Int` bounds, so only the past-end `_`
+    // arm is live.
     let count = r.count().unwrap_or(0);
-    if n64 >= count {
-        return None;
+    match (r.cur(), r.step(), n64 >= count) {
+        (RangeNum::Int(start), RangeNum::Int(step), false) => {
+            let shifted = RangeValue::new(
+                RangeNum::Int(start.wrapping_add(step.wrapping_mul(n64))),
+                r.end(),
+                RangeNum::Int(step),
+                true,
+                Some(count - n64),
+            );
+            Some(Value::Extension(Arc::new(shifted)))
+        }
+        _ => None,
     }
-    let shifted = RangeValue::new(
-        RangeNum::Int(start.wrapping_add(step.wrapping_mul(n64))),
-        r.end(),
-        RangeNum::Int(step),
-        true,
-        Some(count - n64),
-    );
-    Some(Value::Extension(Arc::new(shifted)))
 }
 
 /// Eager `IDrop` shift of a repeat (infinite drops return `this`,
@@ -1052,16 +1032,16 @@ fn idrop_shift_repeat(v: &Value, r: &RepeatValue, n64: i64) -> Option<Value> {
 /// Eager `IDrop` shift of a chunked/string/small-map realized seq
 /// (`None` past the end).
 fn idrop_shift_realized(s: &RealizedSeq, n64: i64) -> Option<Value> {
-    if !matches!(s.kind(), SeqKind::Chunked | SeqKind::Str | SeqKind::Map) {
-        return None;
-    }
+    // Callers pre-check `is_idrop` (kind-checked, and `SeqKind` is
+    // immutable on realized seqs).
     let mut cur = s.seq().clone();
     for _ in 0..n64 {
         cur = cur.next()?;
     }
-    if cur.is_empty() {
-        return None;
-    }
+    // `next` answers `None` exactly at the end (`eager`/`chunked`
+    // are the only constructed `Seq` shapes, and both yield `None`
+    // only at exhaustion), so a past-end drop returns above and
+    // `cur` is non-empty here.
     Some(Value::Extension(Arc::new(RealizedSeq::flagged(
         cur,
         s.is_counted(),
@@ -1073,16 +1053,16 @@ fn idrop_shift_realized(s: &RealizedSeq, n64: i64) -> Option<Value> {
 /// Eager `IDrop` shift of an extension value (`None` past the end
 /// or for non-`IDrop` extensions).
 fn idrop_shift_extension(v: &Value, n64: i64) -> Option<Value> {
+    // Callers only pass `IDrop` extensions (long ranges, repeats,
+    // idrop-kind realized seqs).
     if let Some(r) = as_range(v) {
-        return idrop_shift_range(r, n64);
+        idrop_shift_range(r, n64)
+    } else if let Some(r) = as_repeat(v) {
+        idrop_shift_repeat(v, r, n64)
+    } else {
+        let s = as_realized(v).expect("idrop extensions shift eagerly");
+        idrop_shift_realized(s, n64)
     }
-    if let Some(r) = as_repeat(v) {
-        return idrop_shift_repeat(v, r, n64);
-    }
-    if let Some(s) = as_realized(v) {
-        return idrop_shift_realized(s, n64);
-    }
-    None
 }
 
 /// Eager `IDrop` shift by a positive `i32` count (metadata always
@@ -1090,11 +1070,15 @@ fn idrop_shift_extension(v: &Value, n64: i64) -> Option<Value> {
 /// JVM's null). Callers only pass `IDrop` values.
 fn idrop_shift(v: &Value, n: i32) -> Option<Value> {
     let n64 = i64::from(n);
-    match v {
-        Value::Vector(x) => idrop_shift_vector(x, n, n64),
-        Value::Map(m) if !m.is_hashy() => idrop_shift_map(m, n, n64),
-        Value::Extension(_) => idrop_shift_extension(v, n64),
-        _ => None,
+    // Callers only pass `IDrop` values (vectors, small maps, idrop
+    // extensions).
+    if let Value::Vector(x) = v {
+        idrop_shift_vector(x, n, n64)
+    } else if let Value::Map(m) = v {
+        debug_assert!(!m.is_hashy(), "idrop maps are array maps");
+        idrop_shift_map(m, n, n64)
+    } else {
+        idrop_shift_extension(v, n64)
     }
 }
 
@@ -1184,10 +1168,9 @@ fn step_map(eval: &mut Evaluator, f: &Value, inputs: Vec<Value>) -> Result<Force
     if inputs.len() == 1 {
         return step_map_one(eval, f, inputs.into_iter().next().unwrap_or(Value::Nil));
     }
-    if inputs.is_empty() {
-        return Ok(Forced::Empty);
-    }
-    // Multi-input `map` is one call per step (the arities `cons`
+    // Multi-input `map` is one call per step (inputs are never
+    // empty: natives enforce min-arity 2 and tails preserve count;
+    // the arities `cons`
     // per item; only the single-input arity chunks).
     let mut heads = Vec::with_capacity(inputs.len());
     let mut tails = Vec::with_capacity(inputs.len());
@@ -1341,23 +1324,16 @@ fn step_concat(eval: &mut Evaluator, mut inputs: Vec<Value>) -> Result<Forced, S
 fn step_mapcat(eval: &mut Evaluator, outer: Value) -> Result<Forced, Signal> {
     let mut outer = outer;
     loop {
-        match step_unit(eval, &outer)? {
-            StepUnit::Empty => return Ok(Forced::Empty),
-            StepUnit::One { head, tail } => {
-                let s = seq_value(eval, &head)?;
-                if matches!(s, Value::Nil) {
-                    outer = tail;
-                } else {
-                    let cont = pending_value(Thunk::MapCat { outer: tail });
-                    return splice_first(eval, &s, cont);
-                }
-            }
-            StepUnit::Chunk { items, tail } => {
+        // `outer` is always a pending seq (`mapcat_thunk` builds it
+        // over the lazy map outer; both re-chains below are pending
+        // `Chain`/`MapCat` tails), so forcing answers empty or a
+        // chunk — never a `One` unit.
+        let pending = as_pending(&outer).expect("mapcat outer is always pending");
+        match force_pending(eval, pending)? {
+            Forced::Empty => return Ok(Forced::Empty),
+            Forced::Chunk { items, tail } => {
                 let mut it = items.iter();
-                let Some(head) = it.next() else {
-                    outer = tail;
-                    continue;
-                };
+                let head = it.next().expect("step chunks are non-empty");
                 let rest: Vec<Value> = it.cloned().collect();
                 let cont = pending_value(Thunk::Chain { head: rest, tail });
                 let s = seq_value(eval, head)?;
@@ -1429,9 +1405,8 @@ fn step_interleave(
             tail: PendingSeq::pending(Thunk::Interleave { queue, inputs }),
         });
     }
-    if inputs.is_empty() {
-        return Ok(Forced::Empty);
-    }
+    // Inputs are never empty (the native answers `()` for 0 args;
+    // tails preserve length).
     let mut heads = Vec::with_capacity(inputs.len());
     let mut next = Vec::with_capacity(inputs.len());
     for input in &inputs {
@@ -1442,9 +1417,7 @@ fn step_interleave(
         next.push(tail);
     }
     let mut rounds = heads.into_iter();
-    let Some(head) = rounds.next() else {
-        return Ok(Forced::Empty);
-    };
+    let head = rounds.next().expect("non-empty inputs yield a head");
     Ok(Forced::Chunk {
         items: Arc::from(vec![head]),
         tail: PendingSeq::pending(Thunk::Interleave {
@@ -1580,17 +1553,14 @@ fn partition_next(
     }
     if s_idrop {
         // The `.drop` count coercion on the RAW step (huge doubles
-        // fail the long range check, like `nthrest`).
-        match step {
-            Value::Int(i) => {
-                crate::core::int_exact_long(*i).map_err(|e| eval.throw(e))?;
-            }
-            Value::Double(d) => {
-                crate::core::int_cast_double(d.ceil()).map_err(|e| eval.throw(e))?;
-            }
-            // Unreachable: `take_count` above already rejected
-            // non-numbers.
-            _ => {}
+        // fail the long range check, like `nthrest`). `take_count`
+        // above already rejected non-numbers, so only Int/Double
+        // arrive here.
+        if let Value::Int(i) = step {
+            crate::core::int_exact_long(*i).map_err(|e| eval.throw(e))?;
+        }
+        if let Value::Double(d) = step {
+            crate::core::int_cast_double(d.ceil()).map_err(|e| eval.throw(e))?;
         }
     }
     let step_usize = step_count as usize;
@@ -1617,21 +1587,26 @@ fn lazy_window(eval: &mut Evaluator, items: Vec<Value>) -> Result<Value, Signal>
         head: items,
         tail: Value::Nil,
     });
-    let Some(p) = as_pending(&pending) else {
-        return Ok(pending);
-    };
+    let p = as_pending(&pending).expect("fresh pending cell");
     force_pending(eval, p)?;
     Ok(pending)
 }
 
 /// Whether a collected window counts as full: the JVM compares
-/// the RAW `n` with `=` (so `2.5` never fills, `3.0` does).
+/// `(= n (count p))`, and `Numbers.equal` requires one category —
+/// a `Double` width never fills an integral count (oracled: `(=
+/// 3.0 3)` is false, so `(partition 3.0 [1 2 3])` answers `()`).
 fn window_full(n: &Value, len: usize) -> bool {
-    match n {
-        Value::Int(i) => *i == len as i64,
-        Value::Double(d) => *d == len as f64,
-        _ => false,
+    // Callers validate `n` via `take_count` first, so only
+    // Int/Double arrive.
+    if let Value::Int(i) = n {
+        return *i == len as i64;
     }
+    debug_assert!(
+        matches!(n, Value::Double(_)),
+        "take_count admits only Int/Double"
+    );
+    false
 }
 
 /// `partition`: seq-check, collect one window, and advance
@@ -1967,9 +1942,8 @@ fn step_reductions(
 ) -> Result<Forced, Signal> {
     if !started {
         if has_init {
-            let Some(init) = acc.clone() else {
-                return Ok(Forced::Empty);
-            };
+            // `reductions_thunk` ties `has_init` to `acc.is_some()`.
+            let init = acc.clone().expect("has_init carries an acc");
             return Ok(Forced::Chunk {
                 items: Arc::from(vec![init]),
                 tail: PendingSeq::pending(Thunk::Reductions {
@@ -2004,24 +1978,25 @@ fn step_reductions(
             }
         }
     }
-    let Some((head, tail)) = step_head(eval, &input)? else {
-        return Ok(Forced::Empty);
-    };
-    crate::core::check_ifn(eval, f)?;
-    let Some(acc) = acc else {
-        return Ok(Forced::Empty);
-    };
-    let next = eval.call(f, &[acc, head])?;
-    Ok(Forced::Chunk {
-        items: Arc::from(vec![next.clone()]),
-        tail: PendingSeq::pending(Thunk::Reductions {
-            f: f.clone(),
-            acc: Some(next),
-            has_init,
-            input: tail,
-            started: true,
-        }),
-    })
+    // Started reductions always carry `Some` acc (all tails set or
+    // preserve it), so only the spent-input `_` arm is live.
+    match (step_head(eval, &input)?, acc) {
+        (Some((head, tail)), Some(acc)) => {
+            crate::core::check_ifn(eval, f)?;
+            let next = eval.call(f, &[acc, head])?;
+            Ok(Forced::Chunk {
+                items: Arc::from(vec![next.clone()]),
+                tail: PendingSeq::pending(Thunk::Reductions {
+                    f: f.clone(),
+                    acc: Some(next),
+                    has_init,
+                    input: tail,
+                    started: true,
+                }),
+            })
+        }
+        _ => Ok(Forced::Empty),
+    }
 }
 
 /// A `lazy-seq` body: evaluate, seq the result, and share its first
@@ -2059,23 +2034,29 @@ pub(crate) fn empty_list_value() -> Value {
 /// other strict seqs count as non-empty without forcing, like
 /// the JVM's `.seq()`, which never forces).
 fn keys_empty(u: &Value) -> bool {
-    match u {
-        Value::Nil => true,
-        Value::List(l) => l.is_empty(),
-        Value::Extension(_) => {
-            if let Some(s) = as_realized(u) {
-                return s.seq().is_empty();
-            }
-            if let Some(r) = as_range(u) {
-                return r.done();
-            }
-            if let Some(r) = as_repeat(u) {
-                return r.n().is_some_and(|n| n <= 0);
-            }
-            false
-        }
-        _ => false,
+    // Underlyings and step tails are always seq'd (Nil/List/Extension).
+    if let Value::Nil = u {
+        return true;
     }
+    if let Value::List(l) = u {
+        return l.is_empty();
+    }
+    keys_empty_extension(u)
+}
+
+/// Emptiness for extension underlyings (pending and other strict
+/// seqs count as non-empty without forcing).
+fn keys_empty_extension(u: &Value) -> bool {
+    if let Some(s) = as_realized(u) {
+        return s.seq().is_empty();
+    }
+    if let Some(r) = as_range(u) {
+        return r.done();
+    }
+    if let Some(r) = as_repeat(u) {
+        return r.n().is_some_and(|n| n <= 0);
+    }
+    false
 }
 
 /// `seq` of a pending seq (forcing one step; nil-punning).
@@ -2112,15 +2093,6 @@ fn seq_cycle(v: &Value, c: &CycleValue) -> Value {
     if empty { Value::Nil } else { v.clone() }
 }
 
-/// `seq` of an entry view (nil-punning spent underlyings).
-fn seq_key_view(v: &Value, underlying: &Value) -> Value {
-    if keys_empty(underlying) {
-        Value::Nil
-    } else {
-        v.clone()
-    }
-}
-
 /// `seq` of a subvector view (as a realized subvec seq).
 fn seq_subvector(sv: &SubVectorValue) -> Value {
     realized_value(sv.items(), false, true, false, SeqKind::Subvec)
@@ -2151,11 +2123,14 @@ fn seq_value_extension(eval: &mut Evaluator, v: &Value) -> Result<Value, Signal>
     if is_always_seq(v) {
         return Ok(v.clone());
     }
-    if let Some(k) = as_keys(v) {
-        return Ok(seq_key_view(v, k.underlying()));
+    // Entry views are always non-empty: every wrap guards
+    // `!keys_empty`, and emptiness is time-stable over immutable
+    // underlyings.
+    if as_keys(v).is_some() {
+        return Ok(v.clone());
     }
-    if let Some(k) = as_vals(v) {
-        return Ok(seq_key_view(v, k.underlying()));
+    if as_vals(v).is_some() {
+        return Ok(v.clone());
     }
     if let Some(sv) = as_subvector(v) {
         return Ok(seq_subvector(sv));
@@ -2289,9 +2264,8 @@ pub(crate) fn first_value(eval: &mut Evaluator, v: &Value) -> Result<Value, Sign
 /// A range shifted past its head (`()` when spent; metadata
 /// dropped, like `Range.next`/`LongRange.next`).
 fn range_rest(r: &RangeValue) -> Value {
-    if r.done() {
-        return empty_list_value();
-    }
+    // Callers seq first (`seq_range` nil-puns done ranges), and
+    // ranges are immutable, so the range is never done here.
     match r.advance() {
         None => empty_list_value(),
         Some(nxt) => {
@@ -2328,10 +2302,7 @@ fn rest_pending_chunk(
             LazyKind::ChunkedCons,
         ));
     }
-    if items.is_empty() {
-        let s = seq_value(eval, &tail)?;
-        return rest_of_seq(eval, &s);
-    }
+    // Single-item chunk (forced chunks are never empty).
     match seq_value(eval, &tail)? {
         Value::Nil => Ok(empty_list_value()),
         t => Ok(t),
@@ -2364,16 +2335,14 @@ fn rest_realized_seq(r: &RealizedSeq) -> Value {
 
 /// Map a stepped tail to its `rest` (nil/empty tails answer `()`).
 fn rest_tail_value(tail: Value) -> Value {
-    match &tail {
-        Value::Nil => empty_list_value(),
-        Value::List(l) if l.is_empty() => empty_list_value(),
-        _ => {
-            if as_realized(&tail).is_some_and(|r| r.seq().is_empty()) {
-                return empty_list_value();
-            }
-            tail
-        }
+    // Nil tails (cons over empty colls seqs to Nil).
+    if matches!(tail, Value::Nil) {
+        return empty_list_value();
     }
+    if matches!(&tail, Value::List(l) if l.is_empty()) {
+        return empty_list_value();
+    }
+    tail
 }
 
 /// `rest` of a one-step strict seq (stepping once, then mapping the
@@ -2387,9 +2356,8 @@ fn rest_stepped(eval: &mut Evaluator, s: &Value) -> Result<Value, Signal> {
 
 /// `rest` of a seqed extension value.
 fn rest_extension(eval: &mut Evaluator, s: &Value) -> Result<Value, Signal> {
-    if let Some(p) = as_pending(s) {
-        return rest_pending(eval, p);
-    }
+    // No pending arm: `rest_value` diverts pendings before seqing,
+    // and `seq` of anything else never yields a pending cell.
     if let Some(r) = as_realized(s) {
         return Ok(rest_realized_seq(r));
     }
@@ -2411,22 +2379,26 @@ fn rest_extension(eval: &mut Evaluator, s: &Value) -> Result<Value, Signal> {
 /// views advance without casting, and forced multi-item chunks
 /// rest to a `ChunkedCons` (like the JVM's `more`).
 fn rest_of_seq(eval: &mut Evaluator, s: &Value) -> Result<Value, Signal> {
-    match s {
-        Value::Nil => Ok(empty_list_value()),
-        Value::List(l) => Ok(l
+    // Inputs are always seq'd (`rest_value` seqs first).
+    if let Value::Nil = s {
+        return Ok(empty_list_value());
+    }
+    if let Value::List(l) = s {
+        return Ok(l
             .drop_first()
             .map(|t| Value::List(t.with_meta(None)))
-            .unwrap_or_else(empty_list_value)),
-        Value::Extension(_) => rest_extension(eval, s),
-        _ => {
-            let s = seq_value(eval, s)?;
-            rest_of_seq(eval, &s)
-        }
+            .unwrap_or_else(empty_list_value));
     }
+    rest_extension(eval, s)
 }
 
 /// `rest`: a seq value, never nil (empty lists print `()`).
 pub(crate) fn rest_value(eval: &mut Evaluator, v: &Value) -> Result<Value, Signal> {
+    // Pendings rest directly: `seq` would only force and re-wrap the
+    // same cell (memoized either way; empty and error paths agree).
+    if let Some(p) = as_pending(v) {
+        return rest_pending(eval, p);
+    }
     let s = seq_value(eval, v)?;
     rest_of_seq(eval, &s)
 }
@@ -2434,12 +2406,10 @@ pub(crate) fn rest_value(eval: &mut Evaluator, v: &Value) -> Result<Value, Signa
 /// `next`: like `rest` but nil at the end (forcing one step).
 pub(crate) fn next_value(eval: &mut Evaluator, v: &Value) -> Result<Value, Signal> {
     let rest = rest_value(eval, v)?;
+    // `rest` outputs are never empty-realized (all producers nil-pun).
     match &rest {
         Value::List(l) if l.is_empty() => Ok(Value::Nil),
         _ => {
-            if as_realized(&rest).is_some_and(|s| s.seq().is_empty()) {
-                return Ok(Value::Nil);
-            }
             if let Some(p) = as_pending(&rest)
                 && matches!(force_pending(eval, p)?, Forced::Empty)
             {
@@ -2513,19 +2483,10 @@ pub(crate) fn is_counted_seq(v: &Value) -> bool {
 /// Whether a half-walked side is spent (buffer drained, tail
 /// empty).
 fn equiv_drained(eval: &mut Evaluator, tail: &Value) -> Result<bool, Signal> {
-    let mut cur = tail.clone();
-    loop {
-        match step_unit(eval, &cur)? {
-            StepUnit::Empty => return Ok(true),
-            StepUnit::One { .. } => return Ok(false),
-            StepUnit::Chunk { items, tail } => {
-                if items.is_empty() {
-                    cur = tail;
-                } else {
-                    return Ok(false);
-                }
-            }
-        }
+    // Step chunks are never empty, so one step decides.
+    match step_unit(eval, tail)? {
+        StepUnit::Empty => Ok(true),
+        StepUnit::One { .. } | StepUnit::Chunk { .. } => Ok(false),
     }
 }
 
@@ -2535,23 +2496,18 @@ fn equiv_fill(
     buf: &mut Vec<Value>,
     tail: &mut Value,
 ) -> Result<bool, Signal> {
-    loop {
-        match step_unit(eval, tail)? {
-            StepUnit::Empty => return Ok(false),
-            StepUnit::One { head, tail: rest } => {
-                *buf = vec![head];
-                *tail = rest;
-                return Ok(true);
-            }
-            StepUnit::Chunk { items, tail: rest } => {
-                if items.is_empty() {
-                    *tail = rest;
-                } else {
-                    *buf = items.to_vec();
-                    *tail = rest;
-                    return Ok(true);
-                }
-            }
+    // Step chunks are never empty, so the first unit always fills.
+    match step_unit(eval, tail)? {
+        StepUnit::Empty => Ok(false),
+        StepUnit::One { head, tail: rest } => {
+            *buf = vec![head];
+            *tail = rest;
+            Ok(true)
+        }
+        StepUnit::Chunk { items, tail: rest } => {
+            *buf = items.to_vec();
+            *tail = rest;
+            Ok(true)
         }
     }
 }
@@ -2655,7 +2611,14 @@ pub(crate) fn equiv_vals(eval: &mut Evaluator, a: &Value, b: &Value) -> Result<b
 /// Deep-realize a pending seq into a realized one (metadata preserved).
 fn realize_pending_deep(eval: &mut Evaluator, v: &Value, p: &PendingSeq) -> Result<Value, Signal> {
     let items = collect_all(eval, v)?;
-    let mut seq = RealizedSeq::new(Seq::eager(items).unwrap_or_else(Seq::empty));
+    // Recurse like the realized path: collected items may hold
+    // nested pending seqs (partition/partition-by chunks), which
+    // must print realized, not `(...)`.
+    let mut realized = Vec::with_capacity(items.len());
+    for item in items {
+        realized.push(realize_deep(eval, &item)?);
+    }
+    let mut seq = RealizedSeq::new(Seq::eager(realized).unwrap_or_else(Seq::empty));
     seq = seq.with_meta(p.meta().cloned());
     Ok(Value::Extension(Arc::new(seq)))
 }
@@ -2765,6 +2728,13 @@ fn realize_deep_set(eval: &mut Evaluator, s: &Set) -> Result<Value, Signal> {
 /// `str`, and `=`); realized seqs rebuild with realized items and
 /// preserved metadata.
 pub(crate) fn realize_deep(eval: &mut Evaluator, v: &Value) -> Result<Value, Signal> {
+    // Unbounded seqs are preserved, never expanded: expanding them
+    // hangs, `hash`'s post-check (like the JVM's `hasheq` overrides)
+    // must SEE them to throw `UnsupportedOperationException`, and
+    // printing renders them `(...)` like top-level infinites.
+    if clj_value::seq_hash_unsupported(v) {
+        return Ok(v.clone());
+    }
     match v {
         Value::Extension(_) => realize_deep_extension(eval, v),
         Value::List(l) => realize_deep_list(eval, l),
@@ -2841,10 +2811,6 @@ pub(crate) fn concat_thunk(inputs: Vec<Value>) -> Value {
 }
 
 /// `int?` over our numbers (fixed-precision integers only).
-fn is_int_value(v: &Value) -> bool {
-    matches!(v, Value::Int(_))
-}
-
 /// A bound as a number pair (`Int`/`Int` compare exactly, anything
 /// else as `f64` — like `Numbers`). Bad sides fail x-first (nil is
 /// the numbers NPE, anything else the `Number` cast failure).
@@ -2896,11 +2862,16 @@ fn num_f64(n: Num) -> f64 {
 /// A numeric value as a range bound (only reached for numbers —
 /// the `create` checks reject the rest first).
 fn range_num(v: &Value) -> RangeNum {
-    match v {
-        Value::Int(i) => RangeNum::Int(*i),
-        Value::Double(d) => RangeNum::Double(*d),
-        _ => RangeNum::Int(0),
+    // Callers validate numbers first (the tower is `Int`/`Double`
+    // only); sequential tests keep every line live.
+    let mut out = RangeNum::Int(0);
+    if let Value::Int(i) = v {
+        out = RangeNum::Int(*i);
     }
+    if let Value::Double(d) = v {
+        out = RangeNum::Double(*d);
+    }
+    out
 }
 
 /// `LongRange.rangeCount` (checked; `None` overflows like the
@@ -2966,11 +2937,8 @@ fn double_range(start: Value, end: Value, step: Value) -> Result<Value, NativeEr
 /// `LongRange.create`, else `Range.create` (whose `isPos` errors
 /// on non-numbers).
 pub(crate) fn range1(end: Value) -> Result<Value, NativeError> {
-    if is_int_value(&end) {
-        let Value::Int(e) = end else {
-            unreachable!("checked int above");
-        };
-        return Ok(long_range(0, e, 1));
+    if let Value::Int(e) = &end {
+        return Ok(long_range(0, *e, 1));
     }
     if num_sign(&end, true)? {
         Ok(Value::Extension(Arc::new(RangeValue::new(
@@ -2987,22 +2955,16 @@ pub(crate) fn range1(end: Value) -> Result<Value, NativeError> {
 
 /// The 2-arity `(range start end)`.
 pub(crate) fn range2(start: Value, end: Value) -> Result<Value, NativeError> {
-    if is_int_value(&start) && is_int_value(&end) {
-        let (Value::Int(s), Value::Int(e)) = (start, end) else {
-            unreachable!("checked ints above");
-        };
-        return Ok(long_range(s, e, 1));
+    if let (Value::Int(s), Value::Int(e)) = (&start, &end) {
+        return Ok(long_range(*s, *e, 1));
     }
     double_range(start, end, Value::Int(1))
 }
 
 /// The 3-arity `(range start end step)`.
 pub(crate) fn range3(start: Value, end: Value, step: Value) -> Result<Value, NativeError> {
-    if is_int_value(&start) && is_int_value(&end) && is_int_value(&step) {
-        let (Value::Int(s), Value::Int(e), Value::Int(st)) = (start, end, step) else {
-            unreachable!("checked ints above");
-        };
-        return Ok(long_range(s, e, st));
+    if let (Value::Int(s), Value::Int(e), Value::Int(st)) = (&start, &end, &step) {
+        return Ok(long_range(*s, *e, *st));
     }
     double_range(start, end, step)
 }
@@ -3204,3 +3166,136 @@ pub(crate) const LAZY_NATIVES: &[(&str, NativeFnPtr)] = &[
     ("next", native_next),
     ("cons", native_cons),
 ];
+
+#[cfg(test)]
+mod tests {
+    use std::hash::Hasher;
+
+    use super::*;
+    use clj_value::new_map;
+
+    fn pending_seq(state: SeqState, kind: LazyKind) -> PendingSeq {
+        PendingSeq {
+            state: Mutex::new(state),
+            meta: None,
+            kind,
+        }
+    }
+
+    fn empty_chain() -> Thunk {
+        Thunk::Chain {
+            head: Vec::new(),
+            tail: Value::Nil,
+        }
+    }
+
+    #[test]
+    fn print_pending_and_empty() {
+        // Best-effort print contract (out-of-band: natives realize first).
+        let pending = pending_seq(
+            SeqState::Pending(Box::new(empty_chain())),
+            LazyKind::LazySeq,
+        );
+        assert_eq!(pending.print(), "(...)");
+        let empty = pending_seq(SeqState::Empty, LazyKind::LazySeq);
+        assert_eq!(empty.print(), "()");
+    }
+
+    #[test]
+    fn print_chunk_states() {
+        // A closed chunk prints its known items.
+        let closed = pending_seq(
+            SeqState::Chunk {
+                items: Arc::from(vec![Value::Int(1), Value::Int(2)]),
+                pos: 0,
+                tail: Value::Nil,
+            },
+            LazyKind::LazySeq,
+        );
+        assert_eq!(closed.print(), "(1 2)");
+        // A consumed chunk (empty remainder) prints open.
+        let consumed = pending_seq(
+            SeqState::Chunk {
+                items: Arc::from(vec![Value::Int(1)]),
+                pos: 1,
+                tail: Value::Nil,
+            },
+            LazyKind::LazySeq,
+        );
+        assert_eq!(consumed.print(), "(...)");
+        // A chunk with a live tail prints its prefix plus `...`.
+        let tail = PendingSeq::pending(empty_chain());
+        let open = pending_seq(
+            SeqState::Chunk {
+                items: Arc::from(vec![Value::Int(1)]),
+                pos: 0,
+                tail,
+            },
+            LazyKind::LazySeq,
+        );
+        assert_eq!(open.print(), "(1 ...)");
+    }
+
+    #[test]
+    fn print_poisoned_lock_is_open() {
+        let seq = pending_seq(SeqState::Empty, LazyKind::LazySeq);
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = seq.state.lock().unwrap();
+            panic!("poison the test lock");
+        }));
+        assert_eq!(seq.print(), "(...)");
+    }
+
+    #[test]
+    fn identity_eq_and_hash() {
+        // Pending seqs compare and hash by identity.
+        let a = pending_seq(SeqState::Empty, LazyKind::LazySeq);
+        let b = pending_seq(SeqState::Empty, LazyKind::LazySeq);
+        assert!(a.dyn_eq(&a));
+        assert!(!a.dyn_eq(&b));
+        let mut first = std::collections::hash_map::DefaultHasher::new();
+        a.dyn_hash(&mut first);
+        let mut second = std::collections::hash_map::DefaultHasher::new();
+        a.dyn_hash(&mut second);
+        assert_eq!(first.finish(), second.finish());
+    }
+
+    #[test]
+    fn with_meta_fresh_rebuilds_each_state() {
+        // Staged machinery: `with-meta` on seqs is not wired yet
+        // (`with_meta_val` still reports the IObj cast), so each
+        // state's rebuild is covered directly.
+        let meta = Some(new_map());
+        // Pending stays pending, carrying the new meta.
+        let pending = pending_seq(
+            SeqState::Pending(Box::new(empty_chain())),
+            LazyKind::LazySeq,
+        );
+        let rebuilt = pending.with_meta_fresh(meta.clone());
+        let back = as_pending(&rebuilt).unwrap();
+        // Single-line `matches!`: every test line must execute (line gate).
+        assert!(matches!(&*back.state.lock().unwrap(), SeqState::Pending(_)));
+        assert!(back.meta().is_some());
+        // A memoized chunk rechains its unconsumed items.
+        let chunk = pending_seq(
+            SeqState::Chunk {
+                items: Arc::from(vec![Value::Int(1), Value::Int(2)]),
+                pos: 1,
+                tail: Value::Nil,
+            },
+            LazyKind::ChunkedCons,
+        );
+        let rebuilt = chunk.with_meta_fresh(meta.clone());
+        let back = as_pending(&rebuilt).unwrap();
+        assert!(
+            matches!(&*back.state.lock().unwrap(), SeqState::Pending(t) if matches!(&**t, Thunk::Chain { head, .. } if head.as_slice() == [Value::Int(2)]))
+        );
+        assert_eq!(back.meta().unwrap().size(), 0);
+        // An exhausted seq stays empty.
+        let empty = pending_seq(SeqState::Empty, LazyKind::LazySeq);
+        let rebuilt = empty.with_meta_fresh(meta);
+        let back = as_pending(&rebuilt).unwrap();
+        assert!(matches!(&*back.state.lock().unwrap(), SeqState::Empty));
+        assert!(back.meta().is_some());
+    }
+}

@@ -11,7 +11,7 @@
 //! Single-line sources blame 1:1; one multi-line case pins real
 //! spans.
 
-use clj_eval::Evaluator;
+use clj_eval::{Evaluator, boot};
 use clj_reader::{ReaderOpts, read_str};
 
 fn chain_of(src: &str) -> Vec<String> {
@@ -44,6 +44,24 @@ fn check(src: &str, wrapper: &str, cause: &str) {
 
 fn check_bare(src: &str, cause: &str) {
     assert_eq!(chain_of(src), vec![cause.to_owned()], "{src}");
+}
+
+fn analyze_ok(src: &str) {
+    let mut eval = Evaluator::new("test");
+    for setup in [
+        "(def va251 7)",
+        "(def qnd251 1)",
+        "(def user/q251 1)",
+        "(def vfn251 (fn [x] x))",
+        "(def vu251)",
+    ] {
+        let form = read_str(setup, &ReaderOpts::default()).unwrap();
+        let _ = eval.analyze(&form);
+    }
+    let form = read_str(src, &ReaderOpts::default()).unwrap();
+    if let Err(e) = eval.analyze(&form) {
+        panic!("expected {src} to analyze: {}", e.cause());
+    }
 }
 
 #[test]
@@ -108,6 +126,11 @@ fn def_shapes() {
     );
     check(
         "(def m {:a 1} 2)",
+        "Syntax error compiling def at (test:1:1).",
+        "java.lang.RuntimeException | Too many arguments to def",
+    );
+    check(
+        "(def a 1 2 3)",
         "Syntax error compiling def at (test:1:1).",
         "java.lang.RuntimeException | Too many arguments to def",
     );
@@ -1199,4 +1222,245 @@ fn valid_shapes_pass() {
         .join(" ");
     let form = read_str(&format!("(fn [{params20}] 1)"), &ReaderOpts::default()).unwrap();
     assert!(eval.analyze(&form).is_ok());
+}
+
+#[test]
+fn gap2_catch_explicit_nil() {
+    // An explicit nil classname renders via value_of (expr.rs:465).
+    check(
+        "(try 1 (catch nil e 1))",
+        "Syntax error compiling try at (test:1:1).",
+        "java.lang.IllegalArgumentException | Unable to resolve classname: null",
+    );
+}
+
+#[test]
+fn gap2_unresolvable_core_builtin() {
+    // No clojure.core ns here, so the qualified builtin misses (expr.rs:873).
+    check(
+        "(clojure.core/let [x 1] x)",
+        "Syntax error compiling at (test:1:1).",
+        "java.lang.RuntimeException | No such namespace: clojure.core",
+    );
+}
+
+#[test]
+fn gap2_loop_walk_rows() {
+    // First-fault walk errors plus key-list seq shapes (expr.rs:2243, 2320, 2354-2406, 3270-3276).
+    check(
+        "(loop [{:foo bar} {:foo 1}] bar)",
+        "Syntax error macroexpanding loop at (test:1:1).",
+        "java.lang.Exception | Unsupported map directive: :foo",
+    );
+    check(
+        "(loop [{:or []} {}] 1)",
+        "Syntax error macroexpanding clojure.core/let at (test:1:1).",
+        "clojure.lang.ExceptionInfo | Call to clojure.core/let did not conform to spec.",
+    );
+    check(
+        "(loop [{:keys [a & &]} {}] a)",
+        "Syntax error macroexpanding loop at (test:1:1).",
+        "java.lang.IllegalArgumentException | & can only appear once in :keys",
+    );
+    check(
+        "(loop [{:keys [a & b]} {}] a)",
+        "Syntax error macroexpanding loop at (test:1:1).",
+        "java.lang.IllegalArgumentException | 'b' - binding symbols can only appear before '&', use keys after",
+    );
+    check(
+        "(loop [{:keys {:a 1}} {}] 1)",
+        "Unexpected error macroexpanding loop at (test:1:1).",
+        "java.lang.ClassCastException | Cannot cast clojure.lang.PersistentVector to clojure.lang.Named",
+    );
+    check(
+        "(loop [{:keys #{a}} {}] a)",
+        "Syntax error macroexpanding clojure.core/let at (test:1:1).",
+        "clojure.lang.ExceptionInfo | Call to clojure.core/let did not conform to spec.",
+    );
+    check(
+        "(loop [{:keys \"ab\"} {}] 1)",
+        "Unexpected error macroexpanding loop at (test:1:1).",
+        "java.lang.ClassCastException | Cannot cast java.lang.Character to clojure.lang.Named",
+    );
+}
+
+#[test]
+fn gap2_case_star_spec_rows() {
+    // Every malformed case* slot is the spec error (expr.rs:2764-2846).
+    let wrapper = "Syntax error macroexpanding clojure.core/case* at (test:1:1).";
+    let cause = "clojure.lang.ExceptionInfo | Call to clojure.core/case* did not conform to spec.";
+    for src in [
+        "(case* 1 :bad 0 1 {} :sparse :int)",
+        "(case* 1 0 0 1 :bad :sparse :int)",
+        "(case* 1 0 0 1 {} :bad :int)",
+        "(case* 1 0 0 1 {} :sparse :bad)",
+        "(case* 1 0 0 1 {} :sparse 5)",
+        "(case* 1 0 0 1 {} :sparse :int 5)",
+        "(case* 1 0 0 1 {} :sparse :int #{:a})",
+        "(case* 1 0 0 1 {:a [1 2]} :sparse :int)",
+        "(case* 1 0 0 1 {1 2} :sparse :int)",
+        "(case* 1 0 0 1 {1 [1]} :sparse :int)",
+    ] {
+        check(src, wrapper, cause);
+    }
+}
+
+#[test]
+fn gap2_case_star_skip_ok() {
+    // A valid skip set collects (expr.rs:2818).
+    analyze_ok("(case* 1 0 0 1 {} :sparse :int #{1})");
+}
+
+#[test]
+fn gap2_with_redefs_binding_rows() {
+    // Vector/nil/set/empty-map bindings pass; maps fail the Symbol cast (expr.rs:1770-1784).
+    analyze_ok("(with-redefs [va251 2] va251)");
+    analyze_ok("(with-redefs nil 1)");
+    analyze_ok("(with-redefs #{} 1)");
+    analyze_ok("(with-redefs {} 1)");
+    check(
+        "(with-redefs {:a 1} 1)",
+        "Syntax error compiling var at (test:1:1).",
+        "java.lang.ClassCastException | Cannot cast clojure.lang.MapEntry to clojure.lang.Symbol",
+    );
+}
+
+#[test]
+fn gap2_slash_class_ok() {
+    // Slash-qualified dotted classes run the FQN rule (expr.rs:1615, 1628).
+    analyze_ok("(try 1 (catch java.lang/Exception e 1))");
+}
+
+#[test]
+fn gap2_let_spec_tail_rows() {
+    // Mid-vector :as, bad rests, bad keys, non-vector key lists (expr.rs:2084-2165).
+    let wrapper = "Syntax error macroexpanding clojure.core/let at (test:1:1).";
+    let cause = "clojure.lang.ExceptionInfo | Call to clojure.core/let did not conform to spec.";
+    for src in [
+        "(let [[a :as] [1 2]] a)",
+        "(let [[x & 5] [1 2]] x)",
+        "(let [{5 :a} {}] 5)",
+        "(let [{:keys foo} {}] foo)",
+    ] {
+        check(src, wrapper, cause);
+    }
+}
+
+#[test]
+fn gap2_fn_param_spec_rows() {
+    // Keywords in params and non-vector arities (expr.rs:3286, 3295, 3801).
+    let wrapper = "Syntax error macroexpanding clojure.core/fn at (test:1:1).";
+    let cause = "clojure.lang.ExceptionInfo | Call to clojure.core/fn did not conform to spec.";
+    for src in ["(fn [a :k] a)", "(fn [a :k & r] a)", "(fn (5 1))"] {
+        check(src, wrapper, cause);
+    }
+}
+
+#[test]
+fn gap2_letfn_binding_rows() {
+    // Nil bindings, non-seqable bindings, nil fnspecs (expr.rs:3267, 3694-3705).
+    analyze_ok("(letfn nil 1)");
+    check(
+        "(letfn 5 1)",
+        "Syntax error macroexpanding letfn at (test:1:1).",
+        "java.lang.IllegalArgumentException | Don't know how to create ISeq from: java.lang.Long",
+    );
+    check(
+        "(letfn [nil] 1)",
+        "Syntax error compiling letfn* at (test:1:1).",
+        "java.lang.IllegalArgumentException | Bad binding form, expected symbol, got: null",
+    );
+}
+
+#[test]
+fn gap2_prepost_seq_rows() {
+    // List/set/string preconditions seq through (expr.rs:3868, 3871, 3872).
+    analyze_ok("(fn [x] {:pre (x)} x)");
+    analyze_ok("(fn [x] {:pre #{x}} x)");
+    analyze_ok("(fn [x] {:pre \"ab\"} x)");
+}
+
+#[test]
+fn gap2_ns_clause_head_row() {
+    // A non-keyword clause head is the ns spec error (expr.rs:2005).
+    check(
+        "(ns foo (require x))",
+        "Syntax error macroexpanding clojure.core/ns at (test:1:1).",
+        "clojure.lang.ExceptionInfo | Call to clojure.core/ns did not conform to spec.",
+    );
+}
+
+#[test]
+fn gap2_private_macro_direct_analyze() {
+    // Direct analysis (no eval_top_form pre-expansion) takes the bare arm (expr.rs:936-942).
+    let mut eval = boot();
+    eval.eval_source("(create-ns 'fx936)").unwrap();
+    eval.eval_source("(ns fx936)").unwrap();
+    eval.eval_source("(defmacro ^:private privm [x] (list 'quote x))")
+        .unwrap();
+    eval.eval_source("(ns user)").unwrap();
+    let form = read_str("(fx936/privm 1)", &ReaderOpts::default()).unwrap();
+    match eval.analyze(&form) {
+        Err(e) => assert_eq!(
+            e.chain(),
+            vec!["java.lang.IllegalStateException | var: #'fx936/privm is not public".to_owned()]
+        ),
+        Ok(_) => panic!("expected a bare private-macro error"),
+    }
+}
+
+#[test]
+fn gap2_shadowed_builtin_macro_invoke() {
+    // A local shadows the `let` builtin, so the inner form analyzes
+    // as an invocation of the local (expr.rs:906).
+    let mut eval = boot();
+    let form = read_str("(let [let 5] (let 1))", &ReaderOpts::default()).unwrap();
+    assert!(eval.analyze(&form).is_ok());
+}
+
+#[test]
+fn gap2_core_alias_shadow() {
+    // An alias named clojure.core redirects the builtin check (expr.rs:876).
+    let mut eval = boot();
+    eval.eval_source("(create-ns 'aa876)").unwrap();
+    eval.eval_source("(ns aa876)").unwrap();
+    eval.eval_source("(def let 42)").unwrap();
+    eval.eval_source("(in-ns 'user)").unwrap();
+    eval.eval_source("(alias 'clojure.core 'aa876)").unwrap();
+    let form = read_str("(clojure.core/let [1 2] 3)", &ReaderOpts::default()).unwrap();
+    assert!(eval.analyze(&form).is_ok());
+}
+
+#[test]
+fn gap2_def_outside_current_ns() {
+    // A qualified def onto an existing foreign var (expr.rs:1051).
+    let mut eval = boot();
+    let form = read_str("(def clojure.core/map 1)", &ReaderOpts::default()).unwrap();
+    match eval.analyze(&form) {
+        Err(e) => assert_eq!(
+            e.chain(),
+            vec![
+                "Syntax error compiling def at (user:1:1).".to_owned(),
+                "java.lang.RuntimeException | Can't create defs outside of current ns".to_owned(),
+            ]
+        ),
+        Ok(_) => panic!("expected a cross-ns def error"),
+    }
+}
+
+#[test]
+fn gap2_seq_form_force_throw() {
+    // Analyzing a seq value forces it; the throw escapes bare (expr.rs:623-629).
+    let mut eval = boot();
+    let mut vs = eval
+        .eval_source("(lazy-seq (throw (ex-info \"boom623\" {})))")
+        .unwrap();
+    let seq = vs.pop().unwrap();
+    match eval.analyze(&seq) {
+        Err(e) => assert_eq!(
+            e.chain(),
+            vec!["clojure.lang.ExceptionInfo | boom623".to_owned()]
+        ),
+        Ok(_) => panic!("expected the forced seq to throw"),
+    }
 }

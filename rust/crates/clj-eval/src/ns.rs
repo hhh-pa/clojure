@@ -21,6 +21,7 @@ use clj_value::{
     new_set, pr_to_string, seq_vec,
 };
 
+use crate::core::cce_err;
 use crate::env::{Namespace, SharedRegistry};
 use crate::error::{NativeError, Signal, jvm_class_of, site_of};
 use crate::eval::{Evaluator, SourceError};
@@ -284,7 +285,8 @@ fn native_the_ns(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeEr
     if as_ns(&args[0]).is_some() {
         return Ok(args[0].clone());
     }
-    let key = the_ns_name(&eval.registry, &args[0])?;
+    // Handles returned above; symbols take one live lookup.
+    let key = sym_str(strict_sym(&args[0])?);
     match eval.registry.ns_id(&key) {
         Some(id) => Ok(ns_value(&key, id)),
         None => Err(ex(format!("No namespace: {key} found"))),
@@ -423,10 +425,13 @@ fn native_alias(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErr
     // cast (core.clj `alias` evaluates `(the-ns ...)` before the
     // `addAlias` checkcast runs).
     let target = the_ns_name(&eval.registry, &args[1])?;
-    let target_id = match eval.registry.ns_live_or_removed(&target) {
-        Some(ns) => ns.id(),
-        None => return Err(ex(format!("No namespace: {target} found"))),
-    };
+    // The target is live (symbols passed `the-ns`) or tombstoned
+    // (handles); tombstones persist, so this lookup cannot miss.
+    let target_id = eval
+        .registry
+        .ns_live_or_removed(&target)
+        .expect("alias target is live or tombstoned")
+        .id();
     let alias_sym = match &args[0] {
         Value::Nil => return Err(npe("Expecting Symbol + Namespace")),
         Value::Symbol(s) => s,
@@ -490,13 +495,11 @@ fn check_sequential(v: &Value) -> Result<Vec<Value>, NativeError> {
 /// source's publics into the current namespace, subject to filters.
 /// A namespace's public vars, sorted by name: qualified symbol
 /// plus the id pinned for each refer.
-fn refer_publics(eval: &Evaluator, lib_key: &str) -> Vec<(Symbol, u64)> {
+fn refer_publics(eval: &Evaluator, home: &Namespace) -> Vec<(Symbol, u64)> {
     let mut publics = Vec::new();
-    if let Some(home) = eval.registry.get(lib_key) {
-        for (s, i) in home.interns() {
-            if is_public(&eval.registry, i) {
-                publics.push((s.clone(), i));
-            }
+    for (s, i) in home.interns() {
+        if is_public(&eval.registry, i) {
+            publics.push((s.clone(), i));
         }
     }
     publics.sort_by(|a, b| a.0.name().cmp(b.0.name()));
@@ -603,11 +606,11 @@ fn refer_renamed(
 
 fn refer_into(eval: &mut Evaluator, lib: &Value, filters: &[Value]) -> Result<Value, NativeError> {
     let lib_key = sym_str(strict_sym(lib)?);
-    if eval.registry.get(&lib_key).is_none() {
+    let Some(home) = eval.registry.get(&lib_key) else {
         return Err(ex(format!("No namespace: {lib_key}")));
-    }
+    };
     let pairs = opt_pairs(filters)?;
-    let publics = refer_publics(eval, &lib_key);
+    let publics = refer_publics(eval, &home);
     let public_names: Vec<Value> = publics
         .iter()
         .map(|(s, _)| Value::Symbol(Symbol::new(None, s.name())))
@@ -776,7 +779,12 @@ fn native_ns_unmap(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Native
     let simple = match &args[1] {
         Value::Nil => return Err(npe(NIL_SYM_NPE)),
         Value::Symbol(s) if s.namespace().is_none() => s.name().to_owned(),
-        Value::Symbol(_) => return Ok(Value::Nil),
+        Value::Symbol(_) => {
+            return Err(NativeError::new(
+                ThrowClass::IllegalArgumentException,
+                "Can't unintern namespace-qualified symbol".to_owned(),
+            ));
+        }
         v => return Err(cast_err(v, SYMBOL_CLASS)),
     };
     // Handles pin their generation (stale ones unmap the tombstone).
@@ -873,9 +881,10 @@ fn source_to_native(eval: &mut Evaluator, source: &str, e: SourceError) -> Nativ
             outer
         }
         SourceError::Compile(e) => {
-            if e.bare {
-                return NativeError::new(throw_class_for(e.class), e.message.clone());
-            }
+            // `compile_err` converts every bare failure to `Uncaught`
+            // before it escapes (`eval_top_form`/`load_source` map
+            // through it), so `e.bare` is always false here (all four
+            // callers pass converted errors only).
             let mut outer = NativeError::new(ThrowClass::CompilerException, e.wrapper());
             outer.cause = Some(Throwable {
                 id: eval.next_id(),
@@ -976,10 +985,7 @@ fn root_resource(lib_name: &str) -> String {
 /// `root-directory`): the resource minus its last segment.
 fn root_directory(ns_name: &str) -> String {
     let r = root_resource(ns_name);
-    match r.rfind('/') {
-        Some(i) => r[..i].to_owned(),
-        None => String::new(),
-    }
+    r.rfind('/').map_or(String::new(), |i| r[..i].to_owned())
 }
 
 /// The missing-file error, verbatim (`RT.load`: the three tried
@@ -1082,14 +1088,9 @@ fn push_ns_frame(eval: &mut Evaluator, depth: &mut Option<usize>) {
 }
 
 /// `load-one`: load a lib's root resource, check the namespace when
-/// `need_ns`, and mark when `require_` (core.clj `load-one` — the
-/// mark runs after the check, probe36 `req-mismatch-as`).
-fn load_one(
-    eval: &mut Evaluator,
-    lib: &Symbol,
-    need_ns: bool,
-    require_: bool,
-) -> Result<(), NativeError> {
+/// `need_ns`, then mark (core.clj `load-one` — the mark runs after
+/// the check, probe36 `req-mismatch-as`; callers always require).
+fn load_one(eval: &mut Evaluator, lib: &Symbol, need_ns: bool) -> Result<(), NativeError> {
     let root = root_resource(lib.name());
     load_paths(
         eval,
@@ -1102,35 +1103,25 @@ fn load_one(
             root
         )));
     }
-    if require_ {
-        mark_loaded(eval, lib)?;
-    }
+    mark_loaded(eval, lib)?;
     Ok(())
 }
 
 /// `load-all`: `load-one` against a blank `*loaded-libs*`, unioning
 /// whatever the load pulled in (core.clj `load-all` — the port's
 /// embedded set is flat, so this behaves as `:reload`).
-fn load_all(
-    eval: &mut Evaluator,
-    lib: &Symbol,
-    need_ns: bool,
-    require_: bool,
-) -> Result<(), NativeError> {
+fn load_all(eval: &mut Evaluator, lib: &Symbol, need_ns: bool) -> Result<(), NativeError> {
     let save = libs_set(eval)?;
-    let Some(id) = core_var(eval, "*loaded-libs*") else {
-        return load_one(eval, lib, need_ns, require_);
-    };
+    // `libs_set` just read this var as a set, so it exists.
+    let id = core_var(eval, "*loaded-libs*").expect("*loaded-libs* is bound during load");
     let depth = eval.push_binding(core_var_handle(id, "*loaded-libs*"), Value::Set(new_set()));
-    let out = load_one(eval, lib, need_ns, require_);
+    let out = load_one(eval, lib, need_ns);
     let new = libs_set(eval);
     eval.pop_bindings(depth);
     out?;
     let mut acc = save;
-    if let Ok(new) = new {
-        for m in new.iter() {
-            acc = acc.insert(m.clone());
-        }
+    for m in new.unwrap_or(new_set()).iter() {
+        acc = acc.insert(m.clone());
     }
     // The union lands in the caller's frame when a load-all
     // nests (an outer frame is still pushed), else the root.
@@ -1152,7 +1143,6 @@ enum LoadKind {
 struct LibOpts<'a> {
     as_: Option<&'a Value>,
     use_: bool,
-    require_: bool,
     reload: bool,
     reload_all: bool,
     verbose: bool,
@@ -1167,7 +1157,6 @@ fn lib_opts<'a>(pairs: &'a [(&'a Value, &'a Value)]) -> LibOpts<'a> {
     LibOpts {
         as_,
         use_,
-        require_: truthy("require"),
         reload: truthy("reload"),
         reload_all: truthy("reload-all"),
         verbose: truthy("verbose"),
@@ -1217,8 +1206,8 @@ fn load_lib_phase(
     let out = match load {
         Some(kind) => {
             let r = match kind {
-                LoadKind::One => load_one(eval, joined_sym, opts.need_ns, opts.require_),
-                LoadKind::All => load_all(eval, joined_sym, opts.need_ns, opts.require_),
+                LoadKind::One => load_one(eval, joined_sym, opts.need_ns),
+                LoadKind::All => load_all(eval, joined_sym, opts.need_ns),
                 LoadKind::Stub => {
                     eval.registry.ensure_ns(&sym_str(joined_sym));
                     Ok(())
@@ -1333,12 +1322,12 @@ fn expand_libspec(v: &Value, flag_opts: &[Value]) -> Result<Vec<Value>, NativeEr
 /// Split `require`/`use` args into top-level flags and libspecs,
 /// rejecting unknown flags and empty arg lists (core.clj
 /// `load-libs`).
-fn split_flags(args: &[Value]) -> Result<(Vec<&Value>, Vec<&Value>), NativeError> {
-    let mut flags: Vec<&Value> = Vec::new();
+fn split_flags(args: &[Value]) -> Result<(Vec<&Keyword>, Vec<&Value>), NativeError> {
+    let mut flags: Vec<&Keyword> = Vec::new();
     let mut rest: Vec<&Value> = Vec::new();
     for a in args {
-        if matches!(a, Value::Keyword(_)) {
-            flags.push(a);
+        if let Value::Keyword(kw) = a {
+            flags.push(kw);
         } else {
             rest.push(a);
         }
@@ -1354,12 +1343,10 @@ fn split_flags(args: &[Value]) -> Result<(Vec<&Value>, Vec<&Value>), NativeError
         "as-alias",
     ];
     let mut unsupported = Vec::new();
-    for f in &flags {
-        if let Value::Keyword(kw) = f {
-            let ok = kw.namespace().is_none() && SUPPORTED.contains(&kw.name());
-            if !ok {
-                unsupported.push(str_of(f));
-            }
+    for kw in &flags {
+        let ok = kw.namespace().is_none() && SUPPORTED.contains(&kw.name());
+        if !ok {
+            unsupported.push(str_of(&Value::Keyword((*kw).clone())));
         }
     }
     if !unsupported.is_empty() {
@@ -1380,12 +1367,12 @@ fn load_expanded(
     prefix: Option<String>,
     expanded: &[Value],
 ) -> Result<(), NativeError> {
-    let mut expanded = expanded.to_vec();
-    if expanded.is_empty() {
-        expanded.push(Value::Nil);
-    }
-    let lib = expanded[0].clone();
-    load_lib(eval, prefix, &lib, &expanded[1..])
+    // Both callers pass `expand_libspec` output, which always carries
+    // the injected flags — never empty.
+    let (lib, options) = expanded
+        .split_first()
+        .expect("load-libs always injects flags");
+    load_lib(eval, prefix, lib, options)
 }
 
 /// Load one prefix-list arg: the first item is the prefix, the rest
@@ -1417,8 +1404,8 @@ fn load_libs(
 ) -> Result<Value, NativeError> {
     let (flags, rest) = split_flags(args)?;
     let mut flag_opts: Vec<Value> = Vec::new();
-    for f in &flags {
-        flag_opts.push((*f).clone());
+    for kw in &flags {
+        flag_opts.push(Value::Keyword((*kw).clone()));
         flag_opts.push(Value::Bool(true));
     }
     for name in injected {
@@ -1518,7 +1505,22 @@ fn native_use(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError
 /// Resolve one `load` path: a leading slash is absolute, otherwise
 /// relative to the current namespace's root directory (core.clj
 /// `load`). Returns the full path and the visible pending stack.
-fn resolve_load_path(eval: &Evaluator, p: &Value) -> Result<(String, Vec<Value>), NativeError> {
+/// The relative-load root namespace: the `*ns*` handle's name,
+/// the registry current when `*ns*` is unbound (bare evaluators
+/// have no `*ns*` root), else the JVM's `ClassCastException`
+/// (oracle REL42: `(binding [*ns* 42] (load "x"))` fails the
+/// `Symbol` cast instead of falling back).
+fn load_ns_root(eval: &Evaluator, starred: &Value) -> Result<String, NativeError> {
+    if let Some(h) = as_ns(starred) {
+        return Ok(h.name.to_string());
+    }
+    if matches!(starred, Value::Nil) {
+        return Ok(eval.registry.current().to_owned());
+    }
+    Err(cce_err(starred, "clojure.lang.Symbol"))
+}
+
+fn resolve_load_path(eval: &Evaluator, p: &Value) -> Result<(String, List), NativeError> {
     let path = match p {
         Value::Str(s) => s.to_string(),
         _ => return Err(cast_err(p, "java.lang.String")),
@@ -1527,14 +1529,11 @@ fn resolve_load_path(eval: &Evaluator, p: &Value) -> Result<(String, Vec<Value>)
         path
     } else {
         let starred = deref_core(eval, "*ns*");
-        let ns_name = as_ns(&starred).map_or_else(
-            || eval.registry.current().to_owned(),
-            |h| h.name.to_string(),
-        );
+        let ns_name = load_ns_root(eval, &starred)?;
         format!("{}/{}", root_directory(&ns_name), path)
     };
     match deref_core(eval, "*pending-paths*") {
-        Value::List(l) => Ok((full, l.iter().cloned().collect())),
+        Value::List(l) => Ok((full, l)),
         v => Err(cast_err(&v, "clojure.lang.IPersistentList")),
     }
 }
@@ -1542,7 +1541,7 @@ fn resolve_load_path(eval: &Evaluator, p: &Value) -> Result<(String, Vec<Value>)
 /// The `*pending-paths*` cycle guard: a repeat below the top errors
 /// (`check-cyclic-dependency`), the top itself is exempt (self-load),
 /// anything else proceeds.
-fn cycle_action(pending: &[Value], full: &str) -> Result<bool, NativeError> {
+fn cycle_action(pending: &List, full: &str) -> Result<bool, NativeError> {
     let is_full = |x: &Value| matches!(x, Value::Str(s) if s.as_ref() == full);
     if pending.iter().skip(1).any(is_full) {
         let mut chain = vec![full.to_owned()];
@@ -1563,19 +1562,16 @@ fn cycle_action(pending: &[Value], full: &str) -> Result<bool, NativeError> {
 }
 
 /// Load, bind, and evaluate one resolved path.
-fn load_one_path(eval: &mut Evaluator, full: &str) -> Result<(), NativeError> {
+fn load_one_path(eval: &mut Evaluator, full: &str, pending: &List) -> Result<(), NativeError> {
     let root = full.strip_prefix('/').unwrap_or(full).to_owned();
     let (file_star, text) = resolve_source(eval, &root)?;
-    let pending_depth = match core_var(eval, "*pending-paths*") {
-        Some(id) => match deref_core(eval, "*pending-paths*") {
-            Value::List(l) => Some(eval.push_binding(
-                core_var_handle(id, "*pending-paths*"),
-                Value::List(l.push_front(Value::Str(Arc::from(full)))),
-            )),
-            v => return Err(cast_err(&v, "clojure.lang.IPersistentList")),
-        },
-        None => None,
-    };
+    // `resolve_load_path` just read this var as a list (no user code
+    // runs between), so the var exists and still holds a list.
+    let id = core_var(eval, "*pending-paths*").expect("*pending-paths* is bound during load");
+    let pending_depth = eval.push_binding(
+        core_var_handle(id, "*pending-paths*"),
+        Value::List(pending.clone().push_front(Value::Str(Arc::from(full)))),
+    );
     let out = run_loaded(
         eval,
         Value::Str(Arc::from(file_star.as_str())),
@@ -1583,9 +1579,7 @@ fn load_one_path(eval: &mut Evaluator, full: &str) -> Result<(), NativeError> {
         &text,
         true,
     );
-    if let Some(d) = pending_depth {
-        eval.pop_bindings(d);
-    }
+    eval.pop_bindings(pending_depth);
     match out {
         Ok(_) => Ok(()),
         Err(e) => Err(source_to_native(eval, &file_star, e)),
@@ -1596,7 +1590,7 @@ fn load_paths(eval: &mut Evaluator, paths: &[Value]) -> Result<(), NativeError> 
     for p in paths {
         let (full, pending) = resolve_load_path(eval, p)?;
         if cycle_action(&pending, &full)? {
-            load_one_path(eval, &full)?;
+            load_one_path(eval, &full, &pending)?;
         }
     }
     Ok(())
@@ -1613,10 +1607,13 @@ fn absolutize(path: &str) -> String {
     if std::path::Path::new(path).is_absolute() {
         return path.to_owned();
     }
-    match std::env::current_dir() {
-        Ok(cwd) => cwd.join(path).to_string_lossy().into_owned(),
-        Err(_) => path.to_owned(),
-    }
+    // `current_dir` fails only when the cwd was deleted under us;
+    // the empty path then joins back to the relative path itself.
+    std::env::current_dir()
+        .unwrap_or_default()
+        .join(path)
+        .to_string_lossy()
+        .into_owned()
 }
 
 fn native_load_file(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
@@ -2023,4 +2020,96 @@ fn boot_refer_user(eval: &mut Evaluator) {
             user.add_refer(&name, q, id);
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn signal_recur_to_native_is_internal() {
+        // Defense in depth: an escaping `recur` (impossible — the
+        // analyzer cages every one) surfaces as an internal error.
+        let err = signal_to_native(Signal::Recur(vec![]));
+        assert!(
+            err.into_inner()
+                .message
+                .contains("recur escaped its loop or fn")
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "boot form failed")]
+    fn boot_eval_panics_loudly() {
+        let mut eval = boot();
+        boot_eval(&mut eval, "(defn broken [)");
+    }
+
+    #[test]
+    fn source_to_native_internal_is_loud() {
+        // Direct total-function pin: the `Internal` arm renders loud
+        // (only an analyzer bug could produce it from source).
+        let mut eval = Evaluator::new_bare("user");
+        let err = source_to_native(&mut eval, "f", SourceError::Internal("boom".to_owned()));
+        assert_eq!(err.message, "internal error: boom");
+    }
+
+    #[test]
+    fn push_ns_frame_records_first_depth() {
+        let mut eval = Evaluator::new_bare("user");
+        let q = Symbol::new(Some("clojure.core"), "*ns*");
+        eval.registry.intern(&q);
+        let mut depth = None;
+        push_ns_frame(&mut eval, &mut depth);
+        assert!(depth.is_some());
+    }
+
+    #[test]
+    fn push_ns_frame_without_var_is_idle() {
+        let mut eval = Evaluator::new_bare("user");
+        let mut depth = None;
+        push_ns_frame(&mut eval, &mut depth);
+        assert!(depth.is_none());
+    }
+
+    #[test]
+    fn deref_core_missing_var_is_nil() {
+        let eval = Evaluator::new_bare("user");
+        assert_eq!(deref_core(&eval, "*ns*"), Value::Nil);
+    }
+
+    #[test]
+    fn throw_class_for_maps_unthrown_format_classes() {
+        // Direct total-table pin: no producer throws these two
+        // (the fmt paths that would are unimplemented), so only a
+        // direct call exercises their arms.
+        assert_eq!(
+            throw_class_for("MissingFormatConversionException"),
+            ThrowClass::MissingFormatConversionException
+        );
+        assert_eq!(
+            throw_class_for("IllegalFormatCodePointException"),
+            ThrowClass::IllegalFormatCodePointException
+        );
+    }
+
+    #[test]
+    fn resolve_load_path_falls_back_when_ns_unbound() {
+        // A bare evaluator has no `*ns*` root: the relative root
+        // falls back to the registry current. `*pending-paths*`
+        // is missing too, so the resolve fails after the fallback
+        // — the fallback is the pin.
+        let eval = Evaluator::new_bare("user");
+        assert!(resolve_load_path(&eval, &Value::Str(Arc::from("foo"))).is_err());
+    }
+
+    #[test]
+    fn set_ns_current_without_frame_sets_root() {
+        let mut eval = Evaluator::new_bare("user");
+        let star = Symbol::new(Some("clojure.core"), "*ns*");
+        let var_id = eval.registry.intern(&star);
+        let handle = ns_value("user", 1);
+        set_ns_current(&mut eval, var_id, handle.clone());
+        assert_eq!(eval.deref_var(var_id, &star), handle);
+    }
 }

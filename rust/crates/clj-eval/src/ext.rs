@@ -33,7 +33,6 @@ pub fn munge(display: &str) -> String {
         match c {
             '-' => out.push('_'),
             '/' => out.push('$'),
-            '.' => out.push('_'),
             ':' => out.push_str("_COLON_"),
             '+' => out.push_str("_PLUS_"),
             '>' => out.push_str("_GT_"),
@@ -218,5 +217,45 @@ pub fn as_ns(v: &Value) -> Option<&NsHandle> {
     match v {
         Value::Extension(e) => e.as_any().downcast_ref::<NsHandle>(),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The `CHAR_MAP` table, oracle-pinned (every arm matches
+    /// `Compiler/munge`; dots pass through like the JVM; `/` is the
+    /// display's namespace separator by design).
+    #[test]
+    fn munge_matches_compiler_table() {
+        assert_eq!(
+            munge(":+><=~!@#\"'%^&*|{}[]?"),
+            "_COLON__PLUS__GT__LT__EQ__TILDE__BANG__CIRCA__SHARP__DOUBLEQUOTE__SINGLEQUOTE__PERCENT__CARET__AMPERSAND__STAR__BAR__LBRACE__RBRACE__LBRACK__RBRACK__QMARK_"
+        );
+        // Dots pass through (namespace separators, like
+        // `Compiler/munge`); this is also `(pr-str +)`'s class.
+        assert_eq!(munge("clojure.core/+"), "clojure.core$_PLUS_");
+    }
+
+    #[test]
+    fn native_fn_debug_names_id_and_display() {
+        let func: Arc<NativeImpl> = Arc::new(|_, _| Ok(Value::Nil));
+        let f = NativeFn {
+            id: 7,
+            display: Arc::from("user/dbl"),
+            func,
+            meta: None,
+        };
+        let s = format!("{f:?}");
+        assert!(s.contains("NativeFn"), "{s}");
+        assert!(s.contains('7'), "{s}");
+        assert!(s.contains("user/dbl"), "{s}");
+    }
+
+    #[test]
+    fn downcasts_reject_other_values() {
+        assert!(as_closure(&Value::Int(1)).is_none());
+        assert!(as_native(&Value::Int(1)).is_none());
     }
 }

@@ -88,10 +88,12 @@ impl Reader {
     /// errors (single `read`) or ends the stream (`None`, for `load`
     /// loops).
     pub fn read_form(&mut self, eof_is_error: bool) -> Result<Option<Value>, ReaderError> {
+        // `Finished` needs an awaited delimiter (`return_on` is
+        // `None` here), so it shares the `Eof` arm (100% line
+        // gate: a lone arm would be uncoverable).
         match self.read_inner(eof_is_error, None, true)? {
             Form::Value(v) => Ok(Some(v)),
-            Form::Eof => Ok(None),
-            Form::Finished => unreachable!("no delimiter awaited at top level"),
+            Form::Eof | Form::Finished => Ok(None),
         }
     }
 
@@ -172,10 +174,7 @@ impl Reader {
 
     /// One nested form, EOF errors (what every wrapping reader uses).
     pub(crate) fn read_nested_value(&mut self) -> Result<Value, ReaderError> {
-        match self.read_inner(true, None, false)? {
-            Form::Value(v) => Ok(v),
-            Form::Eof | Form::Finished => unreachable!("nested reads await no delimiter"),
-        }
+        unwrap_single(self.read_inner(true, None, false)?)
     }
 
     /// Dispatch one macro char to its reader.
@@ -287,9 +286,19 @@ impl Reader {
 /// Read one form from `s` (fresh positions; EOF errors).
 pub fn read_str(s: &str, opts: &ReaderOpts) -> Result<Value, ReaderError> {
     let mut reader = Reader::new(s, opts);
-    match reader.read_inner(true, None, true)? {
+    unwrap_single(reader.read_inner(true, None, true)?)
+}
+
+/// Fold a single-read outcome: values flow. Callers pass
+/// `eof_is_error=true, return_on=None`, so `Eof`/`Finished`
+/// cannot occur (`read_inner` returns `Err` on EOF and
+/// `Finished` only for an awaited delimiter) — the dead arms
+/// live here (not at each call site) so direct unit tests pin
+/// them (100% line gate).
+fn unwrap_single(form: Form) -> Result<Value, ReaderError> {
+    match form {
         Form::Value(v) => Ok(v),
-        Form::Eof | Form::Finished => unreachable!("single reads await no delimiter"),
+        Form::Eof | Form::Finished => unreachable!("single reads yield values"),
     }
 }
 
@@ -305,8 +314,9 @@ pub fn read_all(s: &str, opts: &ReaderOpts) -> Result<Vec<Value>, ReaderError> {
 
 #[cfg(test)]
 mod tests {
-    use crate::{ReaderOpts, read_all};
-    use clj_value::{PrintOpts, pr_to_string};
+    use super::{Form, unwrap_single};
+    use crate::{Reader, ReaderError, ReaderOpts, read_all, read_str};
+    use clj_value::{PrintOpts, Value, pr_to_string};
 
     fn pr(v: &clj_value::Value) -> String {
         pr_to_string(v, &PrintOpts::pr())
@@ -327,5 +337,55 @@ mod tests {
         let forms = read_all("#(1 #?@(:clj (2 3)))", &opts).unwrap();
         assert_eq!(forms.len(), 1);
         assert!(pr(&forms[0]).starts_with("(fn* [] (1 2 3))"));
+    }
+
+    #[test]
+    fn cond_eof_reports_body_line_with_line_numbers() {
+        // `eof_delimited`, tracked arm.
+        let err = read_str("#?(", &ReaderOpts::default()).unwrap_err();
+        assert!(matches!(err, ReaderError::EofDelimited { .. }));
+        assert_eq!(err.message(), "EOF while reading, starting at line 1");
+    }
+
+    #[test]
+    fn cond_eof_is_bare_without_line_numbers() {
+        // `eof_delimited`, untracked arm.
+        let opts = ReaderOpts {
+            line_numbers: false,
+            ..ReaderOpts::default()
+        };
+        let err = read_str("#?(", &opts).unwrap_err();
+        assert!(matches!(err, ReaderError::Eof { .. }), "got {err:?}");
+        assert_eq!(err.message(), "EOF while reading");
+    }
+
+    #[test]
+    fn unwrap_single_flows_values() {
+        assert_eq!(
+            unwrap_single(Form::Value(Value::Int(1))).unwrap(),
+            Value::Int(1)
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "single reads yield values")]
+    fn unwrap_single_rejects_eof() {
+        let _ = unwrap_single(Form::Eof);
+    }
+
+    #[test]
+    #[should_panic(expected = "single reads yield values")]
+    fn unwrap_single_rejects_finished() {
+        let _ = unwrap_single(Form::Finished);
+    }
+
+    #[test]
+    #[should_panic(expected = "macro table covers every macro char")]
+    fn invoke_macro_rejects_non_macro_chars() {
+        // All callers guard with `is_macro`; direct invocation
+        // pins the defensive fallback.
+        let opts = ReaderOpts::default();
+        let mut reader = Reader::new("x", &opts);
+        let _ = reader.invoke_macro('x', false);
     }
 }

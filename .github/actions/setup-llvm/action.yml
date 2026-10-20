@@ -17,6 +17,21 @@ inputs:
 runs:
   using: composite
   steps:
+    # Windows only: the libxml2 from-source vcpkg build costs ~7 of
+    # the step's ~10 minutes, while Linux/macOS installs take under
+    # a minute (not worth caching). Cache just vcpkg's binary
+    # archives (tens of MB): on a hit the install restores in
+    # seconds. The installed tree is deliberately NOT cached — it
+    # rebuilds from the archives plus a fresh SDK transplant each
+    # run. No vcpkg baseline pin: on version drift vcpkg ignores
+    # stale archives and rebuilds (slow but correct).
+    - if: runner.os == 'Windows'
+      uses: actions/cache@v5
+      with:
+        path: ~/AppData/Local/vcpkg/archives
+        key: setup-llvm-vcpkg-${{ runner.os }}-${{ hashFiles('.github/actions/setup-llvm/action.yml') }}
+        restore-keys: |
+          setup-llvm-vcpkg-${{ runner.os }}-
     - if: runner.os == 'Linux'
       shell: bash
       run: |

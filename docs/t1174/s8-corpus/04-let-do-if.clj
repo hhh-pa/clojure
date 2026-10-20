@@ -1,0 +1,5 @@
+(let [x 1 y 2] (print [(+ x y) (let [x 10] (+ x y)) x]))
+(print [(if nil "t" "f") (if false "t" "f") (if 0 "t" "f")])
+(print [(if "" "t" "f") (if [] "t" "f") (if 0.0 "t" "f")])
+(print (do 1 2 3))
+(print (if (= 1 2) "x" "y"))

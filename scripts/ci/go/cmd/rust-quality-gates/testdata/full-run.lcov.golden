@@ -1,8 +1,8 @@
 SF:$WS/crates/app/src/tour.rs
 DA:1,2
-DA:2,0
+DA:2,3
 LF:2
-LH:1
+LH:2
 end_of_record
 SF:$WS/src/a.rs
 FN:1,main
@@ -26,7 +26,7 @@ LF:9
 LH:9
 end_of_record
 SF:$WS/src/absurd.rs
-DA:1,0
+DA:1,5
 LF:1
-LH:0
+LH:1
 end_of_record

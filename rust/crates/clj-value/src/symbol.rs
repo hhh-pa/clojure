@@ -145,6 +145,12 @@ mod tests {
     }
 
     #[test]
+    fn ordering_compares() {
+        assert!(Symbol::new(None, "a") < Symbol::new(None, "b"));
+        assert!(Symbol::new(None, "b") > Symbol::new(None, "a"));
+    }
+
+    #[test]
     fn slash_only_symbol() {
         // `/` alone is a valid symbol (division fn).
         assert_eq!(Symbol::new(None, "/").to_string(), "/");

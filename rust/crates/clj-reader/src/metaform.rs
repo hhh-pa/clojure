@@ -506,9 +506,9 @@ fn seq_concat_shape(items: Vec<Value>) -> Value {
 
 #[cfg(test)]
 mod tests {
-    use super::{has_inner_dot, is_special};
-    use crate::{ReaderOpts, read_str};
-    use clj_value::{Symbol, Value};
+    use super::{has_inner_dot, is_special, second};
+    use crate::{ReaderError, ReaderOpts, read_str};
+    use clj_value::{Keyword, Symbol, Value};
 
     fn read_quoted(input: &str, opts: &ReaderOpts) -> (Option<String>, String) {
         let v = read_str(input, opts).unwrap();
@@ -562,5 +562,55 @@ mod tests {
     fn specials_still_bypass_resolution() {
         assert!(is_special(&Symbol::new(None, "try")));
         assert!(!is_special(&Symbol::new(None, "fn")));
+    }
+
+    #[test]
+    fn bare_percent_outside_fn_can_be_an_invalid_token() {
+        // `arg_reader` outside `#()`: the token path rejects.
+        let err = read_str("%a:", &ReaderOpts::default()).unwrap_err();
+        assert!(matches!(err, ReaderError::InvalidToken { .. }));
+        assert_eq!(err.message(), "Invalid token: %a:");
+    }
+
+    #[test]
+    fn meta_line_column_already_present_are_kept() {
+        // `assoc_unless_present` keep arm: explicit
+        // `:line`/`:column` survive on a list target.
+        let v = read_str("^{:line 5 :column 7} (a)", &ReaderOpts::default()).unwrap();
+        let meta = v.meta().cloned().expect("list target carries meta");
+        let line = Value::Keyword(Keyword::new(None, "line"));
+        let column = Value::Keyword(Keyword::new(None, "column"));
+        let mut seen_line = false;
+        let mut seen_column = false;
+        for (k, val) in meta.iter() {
+            if k == &line {
+                assert_eq!(val, &Value::Int(5), ":line overwritten");
+                seen_line = true;
+            }
+            if k == &column {
+                assert_eq!(val, &Value::Int(7), ":column overwritten");
+                seen_column = true;
+            }
+        }
+        assert!(seen_line && seen_column);
+    }
+
+    #[test]
+    fn second_of_non_list_is_nil() {
+        // Direct pin: callers pre-guard with list checks, so the
+        // fallback never fires through behavior.
+        assert_eq!(second(&Value::Int(1)), Value::Nil);
+    }
+
+    #[test]
+    #[should_panic(expected = "expected (quote sym)")]
+    fn read_quoted_helper_rejects_non_lists() {
+        let _ = read_quoted("42", &ReaderOpts::default());
+    }
+
+    #[test]
+    #[should_panic(expected = "expected quoted symbol")]
+    fn read_quoted_helper_rejects_non_symbol_second() {
+        let _ = read_quoted("'(1 2)", &ReaderOpts::default());
     }
 }

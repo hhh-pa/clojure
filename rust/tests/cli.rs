@@ -8,7 +8,9 @@
 
 //! CLI contract tests: help/version/usage codes (slice S1 shell) plus
 //! the S7A `eval`/`run` wiring (spec 1.3/1.4, pins P4/P5/P7).
-//! `repl` stays stubbed for S7B/C, `build` for S8.
+//! `repl` landed in S7B/C, `build` in S8. The `build` tests here
+//! stay hermetic (emit flags + error exits, no linking); the S8D
+//! corpus replay (`build_corpus.rs`) covers full link + execute.
 
 mod common;
 
@@ -212,27 +214,15 @@ fn run_missing_file_is_io_error() {
 #[test]
 #[cfg(unix)]
 fn run_unreadable_file_is_io_error() {
-    // Read-time IO failures (chmod-000) exit 3 per C8 — not 1.
-    // Unix-only: Windows ACLs have no chmod-000 equivalent. The
-    // test self-calibrates: when the file stays readable after
-    // chmod (running as root, e.g. the quality-gates container),
-    // there is no IO failure to assert and the test passes
-    // vacuously.
-    use std::os::unix::fs::PermissionsExt;
+    // Read-time IO failures exit 3 per C8 — not 1. A Unix socket
+    // exists and is not a dir, but can never be opened — unlike
+    // chmod 000, this also holds for root (CI containers run
+    // privileged), so the probe arm stays covered there.
+    use std::os::unix::net::UnixListener;
     let path = std::env::temp_dir().join(format!("clojure-rs-noperm-{}.clj", std::process::id()));
-    std::fs::write(&path, "(println :nope)\n").expect("write probe file");
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000))
-        .expect("chmod probe file");
-    if std::fs::read(&path).is_ok() {
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
-            .expect("restore probe file");
-        std::fs::remove_file(&path).expect("remove probe file");
-        eprintln!("skipping: probe file readable despite chmod-000 (root?)");
-        return;
-    }
+    let socket = UnixListener::bind(&path).expect("bind socket");
     let out = run(["run", path.to_string_lossy().as_ref()]);
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
-        .expect("restore probe file");
+    drop(socket);
     std::fs::remove_file(&path).expect("remove probe file");
     assert_eq!(out.status.code(), Some(3));
     assert!(
@@ -366,20 +356,284 @@ fn repl_streaming_ignores_history_flags() {
     assert_eq!(stdout(&out), "3\n");
 }
 
+/// A scratch dir for one `build` CLI test (pid-suffixed, removed
+/// by the test).
+fn build_tmp(name: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!("clj-rs-cli-{}-{name}", std::process::id()))
+}
+
+/// `build` argv as uniform `OsStr`s (paths + literals mix).
+fn build_argv(args: &[&std::ffi::OsStr]) -> std::process::Output {
+    run(args.iter().copied())
+}
+
+#[test]
+fn build_missing_input_exits_3() {
+    // The IO gate runs on every configuration (linked or not).
+    use std::ffi::OsStr;
+    let dir = build_tmp("missing");
+    let missing = dir.join("nope.clj");
+    let out = build_argv(&[
+        OsStr::new("build"),
+        missing.as_os_str(),
+        OsStr::new("-o"),
+        OsStr::new("prog"),
+    ]);
+    assert_eq!(out.status.code(), Some(3));
+    let err = stderr(&out);
+    assert!(err.contains("build: no such file"), "{err}");
+}
+
+#[test]
+fn build_directory_input_exits_3() {
+    use std::ffi::OsStr;
+    let dir = build_tmp("dir");
+    std::fs::create_dir_all(&dir).expect("tmp dir");
+    let out = build_argv(&[
+        OsStr::new("build"),
+        dir.as_os_str(),
+        OsStr::new("-o"),
+        OsStr::new("prog"),
+    ]);
+    assert_eq!(out.status.code(), Some(3));
+    let err = stderr(&out);
+    assert!(err.contains("build: is a directory"), "{err}");
+    std::fs::remove_dir_all(&dir).expect("cleanup");
+}
+
+#[test]
+#[cfg(unix)]
+fn build_unreadable_input_exits_3() {
+    // A Unix socket exists and is not a dir, but can never be
+    // read — unlike chmod 000, this also holds for root (R1
+    // finding 5: CI containers run privileged).
+    use std::ffi::OsStr;
+    use std::os::unix::net::UnixListener;
+    let dir = build_tmp("unreadable");
+    std::fs::create_dir_all(&dir).expect("tmp dir");
+    let file = dir.join("dark.clj");
+    let socket = UnixListener::bind(&file).expect("bind socket");
+    let out = build_argv(&[
+        OsStr::new("build"),
+        file.as_os_str(),
+        OsStr::new("-o"),
+        OsStr::new("prog"),
+    ]);
+    assert_eq!(out.status.code(), Some(3));
+    let err = stderr(&out);
+    assert!(err.contains("build: cannot open"), "{err}");
+    drop(socket);
+    std::fs::remove_dir_all(&dir).expect("cleanup");
+}
+
 #[test]
 #[cfg(feature = "aot")]
-fn build_reports_linked_llvm() {
-    let out = run(["build", "f.clj", "-o", "f"]);
+fn build_emit_ir_writes_ir_without_linking() {
+    use std::ffi::OsStr;
+    let dir = build_tmp("emit-ir");
+    std::fs::create_dir_all(&dir).expect("tmp dir");
+    let file = dir.join("hello.clj");
+    std::fs::write(&file, "(print (+ 40 2))\n").expect("write source");
+    let ir = dir.join("hello.ll");
+    let prog = dir.join("prog");
+    let out = build_argv(&[
+        OsStr::new("build"),
+        file.as_os_str(),
+        OsStr::new("-o"),
+        prog.as_os_str(),
+        OsStr::new("--emit-ir"),
+        ir.as_os_str(),
+    ]);
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    let text = std::fs::read_to_string(&ir).expect("read ir");
+    assert!(text.contains("ModuleID"), "not LLVM IR:\n{text}");
+    assert!(!prog.exists(), "linking must be skipped");
+    std::fs::remove_dir_all(&dir).expect("cleanup");
+}
+
+#[test]
+#[cfg(feature = "aot")]
+fn build_emit_obj_writes_object_without_linking() {
+    use std::ffi::OsStr;
+    let dir = build_tmp("emit-obj");
+    std::fs::create_dir_all(&dir).expect("tmp dir");
+    let file = dir.join("hello.clj");
+    std::fs::write(&file, "(print (+ 40 2))\n").expect("write source");
+    let obj = dir.join("hello.o");
+    let prog = dir.join("prog");
+    let out = build_argv(&[
+        OsStr::new("build"),
+        file.as_os_str(),
+        OsStr::new("-o"),
+        prog.as_os_str(),
+        OsStr::new("--emit-obj"),
+        obj.as_os_str(),
+    ]);
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    assert!(
+        std::fs::metadata(&obj).expect("obj meta").len() > 0,
+        "empty object file"
+    );
+    assert!(!prog.exists(), "linking must be skipped");
+    std::fs::remove_dir_all(&dir).expect("cleanup");
+}
+
+#[test]
+#[cfg(feature = "aot")]
+fn build_plan_error_passes_the_diagnostic_through() {
+    // Plan failures print verbatim (no `build: ` prefix), exit 1.
+    use std::ffi::OsStr;
+    let dir = build_tmp("plan-err");
+    std::fs::create_dir_all(&dir).expect("tmp dir");
+    let file = dir.join("bad.clj");
+    std::fs::write(&file, "(def x 1)\n").expect("write source");
+    let prog = dir.join("prog");
+    let out = build_argv(&[
+        OsStr::new("build"),
+        file.as_os_str(),
+        OsStr::new("-o"),
+        prog.as_os_str(),
+    ]);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(
+        stderr(&out),
+        format!(
+            "{}:1:1: unsupported form in AOT subset: def (only defn defines in the AOT subset)\n",
+            file.display()
+        )
+    );
+    std::fs::remove_dir_all(&dir).expect("cleanup");
+}
+
+#[test]
+#[cfg(feature = "aot")]
+fn build_unwritable_emit_path_exits_3() {
+    // Emit writes are IO (exit 3), not compile failures.
+    use std::ffi::OsStr;
+    let dir = build_tmp("emit-io");
+    std::fs::create_dir_all(&dir).expect("tmp dir");
+    let file = dir.join("hello.clj");
+    std::fs::write(&file, "(print (+ 40 2))\n").expect("write source");
+    let blocker = dir.join("blocker");
+    std::fs::write(&blocker, "x").expect("write blocker");
+    let bad = blocker.join("hello.ll");
+    let prog = dir.join("prog");
+    let out = build_argv(&[
+        OsStr::new("build"),
+        file.as_os_str(),
+        OsStr::new("-o"),
+        prog.as_os_str(),
+        OsStr::new("--emit-ir"),
+        bad.as_os_str(),
+    ]);
+    assert_eq!(out.status.code(), Some(3));
+    let err = stderr(&out);
+    assert!(err.starts_with("build: "), "{err}");
+    std::fs::remove_dir_all(&dir).expect("cleanup");
+}
+
+#[test]
+#[cfg(feature = "aot")]
+fn build_missing_runtime_archive_exits_3() {
+    // A bogus `--runtime-archive` fails archive discovery (exit 3).
+    use std::ffi::OsStr;
+    let dir = build_tmp("archive");
+    std::fs::create_dir_all(&dir).expect("tmp dir");
+    let file = dir.join("hello.clj");
+    std::fs::write(&file, "(print (+ 40 2))\n").expect("write source");
+    let prog = dir.join("prog");
+    let missing = dir.join("nope.a");
+    let out = build_argv(&[
+        OsStr::new("build"),
+        file.as_os_str(),
+        OsStr::new("-o"),
+        prog.as_os_str(),
+        OsStr::new("--runtime-archive"),
+        missing.as_os_str(),
+    ]);
+    assert_eq!(out.status.code(), Some(3));
+    let err = stderr(&out);
+    assert!(err.starts_with("build: "), "{err}");
+    std::fs::remove_dir_all(&dir).expect("cleanup");
+}
+
+#[test]
+#[cfg(all(feature = "aot", unix))]
+fn build_temp_object_failure_exits_1() {
+    // The temp object cannot be written (missing TMPDIR): an LLVM
+    // emission failure, exit 1 with `build: ` (not an IO exit 3).
+    use std::ffi::OsStr;
+    let dir = build_tmp("tmpdir");
+    std::fs::create_dir_all(&dir).expect("tmp dir");
+    let file = dir.join("hello.clj");
+    std::fs::write(&file, "(print (+ 40 2))\n").expect("write source");
+    let prog = dir.join("prog");
+    let out = common::bin()
+        .args([
+            OsStr::new("build"),
+            file.as_os_str(),
+            OsStr::new("-o"),
+            prog.as_os_str(),
+        ])
+        .env(
+            "TMPDIR",
+            dir.join(format!("missing-{}", std::process::id())),
+        )
+        .output()
+        .expect("spawn clojure-rs");
     assert_eq!(out.status.code(), Some(1));
     let err = stderr(&out);
-    assert!(err.contains("not yet implemented"), "{err}");
-    assert!(err.contains("LLVM backend linked"), "{err}");
+    assert!(err.starts_with("build: "), "{err}");
+    std::fs::remove_dir_all(&dir).expect("cleanup");
 }
 
 #[test]
 #[cfg(not(feature = "aot"))]
 fn build_reports_unlinked_llvm() {
-    let out = run(["build", "f.clj", "-o", "f"]);
+    // Readable input reaches the backend report (the IO gate runs
+    // first, so a missing file would exit 3 instead).
+    use std::ffi::OsStr;
+    let dir = build_tmp("unlinked");
+    std::fs::create_dir_all(&dir).expect("tmp dir");
+    let file = dir.join("hello.clj");
+    std::fs::write(&file, "(print (+ 40 2))\n").expect("write source");
+    let prog = dir.join("prog");
+    let out = build_argv(&[
+        OsStr::new("build"),
+        file.as_os_str(),
+        OsStr::new("-o"),
+        prog.as_os_str(),
+    ]);
     assert_eq!(out.status.code(), Some(1));
     assert!(stderr(&out).contains("LLVM backend not linked"));
+    std::fs::remove_dir_all(&dir).expect("cleanup");
+}
+
+#[test]
+fn eval_lazy_print_failure_reports_simply() {
+    // `map` is lazy, so eval succeeds and the divide-by-zero
+    // surfaces at print time with the SIMPLE class.
+    let out = run(["eval", "(map (fn [_] (/ 1 0)) [1])"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(stdout(&out), "");
+    assert_eq!(
+        stderr(&out),
+        "<eval>:1:1: ArithmeticException: Divide by zero\n"
+    );
+}
+
+#[test]
+fn eval_bad_print_binding_reports_cast() {
+    // A non-numeric `*print-length*` root fails option loading
+    // with the verbatim CCE text.
+    let out = run([
+        "eval",
+        "(alter-var-root #'*print-length* (constantly \"x\"))",
+    ]);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(stdout(&out), "");
+    assert_eq!(
+        stderr(&out),
+        "<eval>:1:1: ClassCastException: class java.lang.String cannot be cast to class java.lang.Number (java.lang.String and java.lang.Number are in module java.base of loader 'bootstrap')\n"
+    );
 }

@@ -44,6 +44,10 @@ jobs:
           cache-key: runner-profile-${{ runner.os }}-${{ hashFiles('.github/actions/profile-runner/**', 'scripts/ci/go/go.mod', 'scripts/ci/go/cmd/runner-profile/**', 'scripts/ci/go/internal/executil/**') }}
       - uses: ./.github/actions/setup-llvm
       - uses: dtolnay/rust-toolchain@stable
+      # The AOT smoke shells to `link` on Windows: put the MSVC
+      # toolchain (link.exe + INCLUDE/LIB) on PATH first.
+      - uses: ilammy/msvc-dev-cmd@v1
+        if: runner.os == 'Windows'
       # Cargo registry + target/ cache: warm runs skip crate downloads
       # and reuse prior compilation. `save-if` forces a save on branch
       # runs too, so the second push already hits.
@@ -52,25 +56,47 @@ jobs:
           workspaces: rust
           save-if: 'true'
       - run: cargo build --release --locked
+      # Materialize the S8 runtime archive (dependency builds only
+      # emit the rlib; the staticlib ships next to the binary).
+      - run: cargo build --release --locked -p clj-rt
       - name: package binary
         run: |
           set -euo pipefail
+          # Git bash prepends its own dirs (coreutils `link`) ahead of
+          # the MSVC toolchain msvc-dev-cmd put first: re-pin MSVC bin
+          # first so the AOT smoke's `link` is link.exe (else coreutils
+          # link fails with "extra operand").
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            export PATH="$(cygpath -u "$VCToolsInstallDir")bin/Hostx64/x64:$PATH"
+            case "$(command -v link)" in *usr/bin/*) echo "MSVC link shadowed by coreutils" >&2; exit 1;; esac
+          fi
           target=$(rustc -vV | sed -n 's/^host: //p')
           bin=target/release/clojure-rs
+          archive=target/release/libcljrt.a
+          exesfx=""
           if [ "$RUNNER_OS" = "Windows" ]; then
             bin="$bin.exe"
+            archive=target/release/cljrt.lib
+            exesfx=".exe"
           fi
           test -x "$bin"
+          test -f "$archive"
           "$bin" --version | grep -q '^clojure-rs '
           "$bin" --help | grep -q 'Usage:'
           mkdir -p dist
           asset="dist/clojure-rs-$target.tar.gz"
-          tar -czf "$asset" -C target/release "$(basename "$bin")"
+          tar -czf "$asset" -C target/release "$(basename "$bin")" "$(basename "$archive")"
           # Packaging smoke (S7D): the shipped artifact itself must
           # evaluate — extract to a scratch dir and run eval there.
           smoke=$(mktemp -d)
           tar -xzf "$asset" -C "$smoke"
           test "$("$smoke/$(basename "$bin")" eval '(+ 1 2)')" = "3"
+          # AOT smoke (S8D): the shipped binary must compile AND run a
+          # hello program against the shipped archive next door (no
+          # flags — this exercises exe-dir autodiscovery end to end).
+          echo '(print (+ 40 2))' > "$smoke/hello.clj"
+          (cd "$smoke" && "./$(basename "$bin")" build hello.clj -o "hello$exesfx")
+          test "$("$smoke/hello$exesfx")" = "42"
           rm -rf "$smoke"
           echo "asset=$asset" >> "$GITHUB_OUTPUT"
           echo "target=$target" >> "$GITHUB_OUTPUT"

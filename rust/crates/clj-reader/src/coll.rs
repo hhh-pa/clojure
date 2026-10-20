@@ -120,3 +120,23 @@ pub(crate) fn pair_up(items: Vec<Value>) -> Vec<(Value, Value)> {
     }
     pairs
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::Reader;
+    use crate::ReaderOpts;
+    use crate::error::ReaderError;
+
+    #[test]
+    fn delimited_eof_is_bare_without_line_numbers() {
+        // `read-string` behavior: no `:line`, so EOF in a
+        // delimiter reports bare `Eof`, not `EofDelimited`.
+        let opts = ReaderOpts {
+            line_numbers: false,
+            ..ReaderOpts::default()
+        };
+        let mut reader = Reader::new("(", &opts);
+        let err = reader.read_delimited(')').expect_err("eof");
+        assert!(matches!(err, ReaderError::Eof { .. }), "{err:?}");
+    }
+}

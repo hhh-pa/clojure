@@ -219,3 +219,41 @@ impl Default for Future {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{Future, FutureOutcome, FutureState};
+    use crate::Value;
+    use std::time::Duration;
+
+    #[test]
+    fn default_is_a_pending_future() {
+        let future = Future::default();
+        assert!(!future.is_done());
+    }
+
+    #[test]
+    fn zero_timeout_returns_none_at_once() {
+        let future = Future::new();
+        assert!(future.get_timeout(Duration::ZERO).is_none());
+    }
+
+    #[test]
+    fn woken_wait_returns_delivery() {
+        // A blocked `get_timeout` woken by delivery returns the
+        // outcome (covers the wake-not-timeout back-edge; the
+        // deliverer sleeps so the wait always blocks first).
+        let future = Future::new();
+        let cell = future.clone();
+        let waker = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            assert!(cell.complete(FutureOutcome::Value(Value::Int(7))));
+        });
+        let out = future.get_timeout(Duration::from_secs(5));
+        waker.join().expect("waker joined");
+        assert!(matches!(
+            out,
+            Some(FutureState::Done(FutureOutcome::Value(_)))
+        ));
+    }
+}

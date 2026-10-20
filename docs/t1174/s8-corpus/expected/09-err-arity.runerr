@@ -1,0 +1,1 @@
+docs/t1174/s8-corpus/09-err-arity.clj:1:1: clojure.lang.ArityException: Wrong number of args (0) passed to: clojure.core/-

@@ -457,3 +457,207 @@ fn seq_direct_rows() {
     assert_eq!(run_last(&mut eval, "(rest [1 2])"), "(2)");
     assert_eq!(run_last(&mut eval, "(next [1])"), "nil");
 }
+
+#[test]
+fn core_r4_long_overflow() {
+    let mut eval = boot();
+    for src in [
+        "(+ 9223372036854775807 1)",
+        "(- -9223372036854775808 1)",
+        "(* 9223372036854775807 2)",
+        "(inc 9223372036854775807)",
+        "(dec -9223372036854775808)",
+        "(- -9223372036854775808)",
+    ] {
+        assert_eq!(
+            uncaught(&mut eval, src),
+            "java.lang.ArithmeticException | long overflow",
+            "{src}"
+        );
+    }
+}
+
+#[test]
+fn core_r4_mixed_arith() {
+    let mut eval = boot();
+    assert_eq!(run_last(&mut eval, "(+ 1 2.0)"), "3.0");
+    assert_eq!(run_last(&mut eval, "(+ 2.0 1)"), "3.0");
+    assert_eq!(run_last(&mut eval, "(+ 2.0 3.0)"), "5.0");
+    assert_eq!(run_last(&mut eval, "(- 1 2.0)"), "-1.0");
+    assert_eq!(run_last(&mut eval, "(- 2.0 1)"), "1.0");
+    assert_eq!(run_last(&mut eval, "(* 2 2.5)"), "5.0");
+    assert_eq!(run_last(&mut eval, "(* 2.5 2)"), "5.0");
+    assert_eq!(run_last(&mut eval, "(* 2.0 2.5)"), "5.0");
+    assert_eq!(run_last(&mut eval, "(/ 1 2.0)"), "0.5");
+    assert_eq!(run_last(&mut eval, "(/ 2.0 1)"), "2.0");
+}
+
+#[test]
+fn core_r4_scalar_gaps() {
+    let mut eval = boot();
+    assert_eq!(run_last(&mut eval, "(- 2.5)"), "-2.5");
+    assert_eq!(
+        uncaught(&mut eval, "(/)"),
+        "clojure.lang.ArityException | Wrong number of args (0) passed to: clojure.core//"
+    );
+    assert_eq!(run_last(&mut eval, "(inc 1.5)"), "2.5");
+    assert_eq!(run_last(&mut eval, "(inc' 1.5)"), "2.5");
+}
+
+#[test]
+fn core_r4_num_cmp_gaps() {
+    let mut eval = boot();
+    assert_eq!(run_last(&mut eval, "(== 1 1.0)"), "true");
+    assert_eq!(run_last(&mut eval, "(== 1 2)"), "false");
+    assert_eq!(run_last(&mut eval, "(< 1 1.5)"), "true");
+    assert_eq!(run_last(&mut eval, "(zero? 0.0)"), "true");
+}
+
+#[test]
+fn core_r4_compare_nils() {
+    let mut eval = boot();
+    // Nils sort first (691, 706-708).
+    assert_eq!(run_last(&mut eval, "(compare nil nil)"), "0");
+    assert_eq!(run_last(&mut eval, "(compare nil 1)"), "-1");
+    assert_eq!(run_last(&mut eval, "(compare 1 nil)"), "1");
+    // A numeric `x` against a non-numeric `y` fails `y` (722).
+    assert_eq!(
+        uncaught(&mut eval, "(compare 1 \"s\")"),
+        "java.lang.ClassCastException | class java.lang.String cannot be cast to class java.lang.Number (java.lang.String and java.lang.Number are in module java.base of loader 'bootstrap')"
+    );
+}
+
+#[test]
+fn core_r4_compare_order() {
+    let mut eval = boot();
+    // Same-type scalars (738/740/742 + 785-787 + 815-820).
+    assert_eq!(run_last(&mut eval, "(compare \"a\" \"b\")"), "-1");
+    assert_eq!(run_last(&mut eval, "(compare \"b\" \"a\")"), "1");
+    assert_eq!(run_last(&mut eval, "(compare true false)"), "1");
+    assert_eq!(run_last(&mut eval, "(compare false false)"), "0");
+    assert_eq!(run_last(&mut eval, "(compare 'a 'b)"), "-1");
+    // Lexicographic vectors (743, 749-767).
+    assert_eq!(run_last(&mut eval, "(compare [1] [1])"), "0");
+    assert_eq!(run_last(&mut eval, "(compare [1] [1 2])"), "-1");
+    assert_eq!(run_last(&mut eval, "(compare [1 2] [1])"), "1");
+    assert_eq!(run_last(&mut eval, "(compare [2] [1])"), "1");
+    assert_eq!(run_last(&mut eval, "(compare [] [])"), "0");
+}
+
+#[test]
+fn core_r4_compare_casts() {
+    let mut eval = boot();
+    for (src, target) in [
+        ("(compare \"a\" 1)", "java.lang.String"),
+        ("(compare \\a 1)", "java.lang.Character"),
+        ("(compare true 1)", "java.lang.Boolean"),
+        ("(compare :a 1)", "clojure.lang.Keyword"),
+        ("(compare 'a 1)", "clojure.lang.Symbol"),
+        ("(compare [1] 1)", "clojure.lang.IPersistentVector"),
+    ] {
+        let msg = if target.starts_with("java.") {
+            format!(
+                "class java.lang.Long cannot be cast to class {target} (java.lang.Long and {target} are in module java.base of loader 'bootstrap')"
+            )
+        } else {
+            format!(
+                "class java.lang.Long cannot be cast to class {target} (java.lang.Long is in module java.base of loader 'bootstrap'; {target} is in unnamed module of loader 'app')"
+            )
+        };
+        assert_eq!(
+            uncaught(&mut eval, src),
+            format!("java.lang.ClassCastException | {msg}"),
+            "{src}"
+        );
+    }
+}
+
+#[test]
+fn core_r4_ident_seqable() {
+    let mut eval = boot();
+    assert_eq!(run_last(&mut eval, "(qualified-ident? 'a/a)"), "true");
+    assert_eq!(run_last(&mut eval, "(simple-ident? 'a)"), "true");
+    assert_eq!(run_last(&mut eval, "(qualified-ident? 1)"), "false");
+    assert_eq!(run_last(&mut eval, "(seqable? (range 3))"), "true");
+}
+
+#[test]
+fn core_r4_keyword_symbol_name() {
+    let mut eval = boot();
+    // `/`-split (1240, shared by `keyword`/`symbol`).
+    assert_eq!(run_last(&mut eval, "(keyword \"a/b\")"), ":a/b");
+    assert_eq!(run_last(&mut eval, "(symbol \"a/b\")"), "a/b");
+    // Arities (1247, 1280).
+    assert_eq!(
+        uncaught(&mut eval, "(keyword 1 2 3)"),
+        "clojure.lang.ArityException | Wrong number of args (3) passed to: clojure.core/keyword"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(symbol 1 2 3)"),
+        "clojure.lang.ArityException | Wrong number of args (3) passed to: clojure.core/symbol"
+    );
+    // 2-arg casts (1252, 1256, 1285, 1289): non-strings fail to `String`.
+    for src in [
+        "(keyword 5 \"a\")",
+        "(keyword \"a\" 5)",
+        "(symbol 5 \"a\")",
+        "(symbol \"a\" 5)",
+    ] {
+        assert_eq!(
+            uncaught(&mut eval, src),
+            "java.lang.ClassCastException | class java.lang.Long cannot be cast to class java.lang.String (java.lang.Long and java.lang.String are in module java.base of loader 'bootstrap')",
+            "{src}"
+        );
+    }
+    // Symbol passthrough (1300).
+    assert_eq!(run_last(&mut eval, "(symbol 'a)"), "a");
+    // `Named` failures (1319, 1338).
+    for src in ["(name 5)", "(namespace 5)"] {
+        assert_eq!(
+            uncaught(&mut eval, src),
+            "java.lang.ClassCastException | class java.lang.Long cannot be cast to class clojure.lang.Named (java.lang.Long is in module java.base of loader 'bootstrap'; clojure.lang.Named is in unnamed module of loader 'app')",
+            "{src}"
+        );
+    }
+}
+
+#[test]
+fn core_r4_coercion_gaps() {
+    let mut eval = boot();
+    assert_eq!(run_last(&mut eval, "(long 5)"), "5");
+    assert_eq!(
+        uncaught(&mut eval, "(long \"5\")"),
+        "java.lang.ClassCastException | class java.lang.String cannot be cast to class java.lang.Number (java.lang.String and java.lang.Number are in module java.base of loader 'bootstrap')"
+    );
+    assert_eq!(run_last(&mut eval, "(double 2.5)"), "2.5");
+    assert_eq!(
+        uncaught(&mut eval, "(double nil)"),
+        "java.lang.NullPointerException | Cannot invoke \"java.lang.Number.doubleValue()\" because \"x\" is null"
+    );
+    for src in ["(float nil)", "(short nil)", "(byte nil)"] {
+        assert_eq!(
+            uncaught(&mut eval, src),
+            "java.lang.NullPointerException | Cannot invoke \"java.lang.Number.doubleValue()\" because \"x\" is null",
+            "{src}"
+        );
+    }
+    for src in ["(float \"s\")", "(short \"s\")", "(byte \"s\")"] {
+        assert_eq!(
+            uncaught(&mut eval, src),
+            "java.lang.ClassCastException | class java.lang.String cannot be cast to class java.lang.Number (java.lang.String and java.lang.Number are in module java.base of loader 'bootstrap')",
+            "{src}"
+        );
+    }
+    assert_eq!(run_last(&mut eval, "(byte 2.9)"), "2");
+    assert_eq!(run_last(&mut eval, "(byte \\a)"), "97");
+    // Surrogate double: port error (documented divergence, like the
+    // existing `(char 55296)` row; oracle returns the char).
+    assert_eq!(
+        uncaught(&mut eval, "(char 55296.0)"),
+        "java.lang.IllegalArgumentException | Value out of range for char: 55296.0"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(char :a)"),
+        "java.lang.ClassCastException | class clojure.lang.Keyword cannot be cast to class java.lang.Number (clojure.lang.Keyword is in unnamed module of loader 'app'; java.lang.Number is in module java.base of loader 'bootstrap')"
+    );
+}

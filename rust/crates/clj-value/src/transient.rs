@@ -483,3 +483,105 @@ impl Transient {
         self.lock().jvm_class()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        Transient, TransientError, TransientKind, TransientMap, TransientSet, TransientVector,
+    };
+    use crate::{Keyword, Value};
+
+    fn kw(name: &str) -> Value {
+        Value::Keyword(Keyword::new(None, name))
+    }
+
+    #[test]
+    fn error_display_matches_message() {
+        assert_eq!(
+            TransientError::UseAfterPersistent.to_string(),
+            "Transient used after persistent! call"
+        );
+        assert_eq!(
+            TransientError::EmptyPop.to_string(),
+            "Can't pop empty vector"
+        );
+        assert_eq!(TransientError::IndexOutOfBounds.to_string(), "");
+    }
+
+    #[test]
+    fn vector_is_empty_and_default() {
+        let mut t = TransientVector::default();
+        assert!(t.is_empty().unwrap());
+        t.conj(Value::Int(1)).unwrap();
+        assert!(!t.is_empty().unwrap());
+        assert_eq!(t.len().unwrap(), 1);
+    }
+
+    #[test]
+    fn map_assoc_grows_for_keyword_keys() {
+        let mut t = TransientMap::new();
+        for i in 0..8 {
+            t.assoc(kw(&format!("k{i}")), Value::Int(i)).unwrap();
+        }
+        assert!(!t.is_hashy());
+        t.assoc(kw("k8"), Value::Int(8)).unwrap();
+        assert!(!t.is_hashy());
+        assert_eq!(t.len().unwrap(), 9);
+        assert_eq!(t.get(&kw("k8")).unwrap(), Some(&Value::Int(8)));
+    }
+
+    #[test]
+    fn map_assoc_promotes_for_non_keyword_keys() {
+        let mut t = TransientMap::new();
+        for i in 0..8 {
+            t.assoc(kw(&format!("k{i}")), Value::Int(i)).unwrap();
+        }
+        assert!(!t.is_hashy());
+        t.assoc(Value::Int(99), Value::Int(99)).unwrap();
+        assert!(t.is_hashy());
+        assert_eq!(t.len().unwrap(), 9);
+        // Assoc past promotion skips the capacity check (the `!promoted` guard).
+        t.assoc(Value::Int(100), Value::Int(100)).unwrap();
+        assert_eq!(t.len().unwrap(), 10);
+        assert_eq!(t.get(&Value::Int(100)).unwrap(), Some(&Value::Int(100)));
+    }
+
+    #[test]
+    fn map_dissoc_moves_last_into_hole() {
+        let mut t = TransientMap::new();
+        t.assoc(kw("a"), Value::Int(1)).unwrap();
+        t.assoc(kw("b"), Value::Int(2)).unwrap();
+        t.assoc(kw("c"), Value::Int(3)).unwrap();
+        t.dissoc(&kw("a")).unwrap();
+        assert_eq!(t.len().unwrap(), 2);
+        assert_eq!(t.get(&kw("a")).unwrap(), None);
+        assert_eq!(t.get(&kw("b")).unwrap(), Some(&Value::Int(2)));
+        assert_eq!(t.get(&kw("c")).unwrap(), Some(&Value::Int(3)));
+        t.dissoc(&kw("missing")).unwrap();
+        assert_eq!(t.len().unwrap(), 2);
+    }
+
+    #[test]
+    fn map_is_empty_and_default() {
+        let mut t = TransientMap::default();
+        assert!(t.is_empty().unwrap());
+        t.assoc(kw("a"), Value::Int(1)).unwrap();
+        assert!(!t.is_empty().unwrap());
+    }
+
+    #[test]
+    fn set_is_empty_and_default() {
+        let mut t = TransientSet::default();
+        assert!(t.is_empty().unwrap());
+        t.conj(Value::Int(1)).unwrap();
+        assert!(!t.is_empty().unwrap());
+    }
+
+    #[test]
+    fn transient_same_cell() {
+        let t = Transient::new(TransientKind::Vector(TransientVector::new()));
+        assert!(t.same_cell(&t.clone()));
+        let u = Transient::new(TransientKind::Vector(TransientVector::new()));
+        assert!(!t.same_cell(&u));
+    }
+}

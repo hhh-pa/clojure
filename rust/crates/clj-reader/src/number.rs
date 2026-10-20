@@ -273,10 +273,13 @@ fn match_float(s: &str) -> Option<Result<NumLit, NumErr>> {
     if has_m {
         return Some(Ok(NumLit::BigDecimal));
     }
-    Some(match s.parse::<f64>() {
-        Ok(d) => Ok(NumLit::Double(d)),
-        Err(_) => Err(NumErr::InvalidNumber),
-    })
+    // `floatPat` matches a strict subset of the `f64` grammar
+    // (overflow saturates to inf, underflow to 0 — verified
+    // against `str::parse`), so parsing cannot fail: `expect`
+    // documents the invariant coverably (100% line gate).
+    Some(Ok(NumLit::Double(
+        s.parse::<f64>().expect("floatPat matches f64 grammar"),
+    )))
 }
 
 /// Split leading ASCII digits (≥1) from the rest.
@@ -309,7 +312,8 @@ fn is_ratio(s: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{NumErr, NumLit, match_number};
+    use super::{NumErr, NumLit, lit_value, match_number};
+    use clj_value::Value;
 
     fn num(s: &str) -> Result<NumLit, NumErr> {
         match_number(s)
@@ -440,5 +444,19 @@ mod tests {
         ] {
             assert_eq!(num(s), Err(NumErr::InvalidNumber), "{s}");
         }
+    }
+
+    #[test]
+    fn lit_value_converts_scalars() {
+        assert_eq!(lit_value(&NumLit::Int(-7)), Value::Int(-7));
+        assert_eq!(lit_value(&NumLit::Double(2.5)), Value::Double(2.5));
+    }
+
+    #[test]
+    #[should_panic(expected = "deferrals raise before conversion")]
+    fn lit_value_panics_on_deferrals() {
+        // The reader raises before converting, so direct
+        // invocation is the only trigger.
+        let _ = lit_value(&NumLit::Ratio);
     }
 }
