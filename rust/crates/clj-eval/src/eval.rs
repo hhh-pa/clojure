@@ -56,8 +56,9 @@ impl std::error::Error for SourceError {}
 
 /// The body of a top-level `do`-headed list (head unqualified,
 /// mirroring the analyzer's special-form check), `None` for any
-/// other form or a bare `(do)`.
-fn split_top_do(form: &Value) -> Option<Vec<&Value>> {
+/// other form or a bare `(do)`. Shared with AOT planning, which
+/// validates the same pipeline.
+pub(crate) fn split_top_do(form: &Value) -> Option<Vec<&Value>> {
     let Value::List(list) = form else {
         return None;
     };
@@ -345,8 +346,9 @@ impl Evaluator {
     /// A compile failure as a source error: bare causes escape
     /// like uncaught throwables of their own class (macro arities,
     /// `declare`'s cast, stripped macro arities); wrapped chains
-    /// stay compile errors.
-    fn compile_err(&mut self, e: CompileError) -> SourceError {
+    /// stay compile errors. Shared with AOT planning, which mirrors
+    /// `eval_top_form`'s failure mapping.
+    pub(crate) fn compile_err(&mut self, e: CompileError) -> SourceError {
         if e.bare {
             let id = self.next_id();
             SourceError::Uncaught(Throwable {

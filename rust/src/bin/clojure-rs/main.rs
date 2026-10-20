@@ -13,7 +13,7 @@
 //! `docs/t1174/`).
 
 use clap::{Parser, Subcommand};
-use clj_eval::{Evaluator, SourceError, boot};
+use clj_eval::{Evaluator, SourceError, boot, compile_diagnostic, compile_head};
 use clj_value::Value;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -189,20 +189,7 @@ fn eval_diagnostic(e: &SourceError) -> String {
             let msg = e.message();
             format!("{EVAL_FILE}:{line}:{col}: {msg}")
         }
-        SourceError::Compile(e) => {
-            let line = e.span.line;
-            let col = e.span.col;
-            if e.bare {
-                let class = e.class;
-                let msg = &e.message;
-                format!("{EVAL_FILE}:{line}:{col}: {class}: {msg}")
-            } else {
-                let wrapper = e.wrapper();
-                let head = compile_head(&wrapper);
-                let msg = &e.message;
-                format!("{EVAL_FILE}:{line}:{col}: {head}: {msg}")
-            }
-        }
+        SourceError::Compile(e) => compile_diagnostic(EVAL_FILE, e),
         SourceError::Uncaught(t) => {
             let class = t.class.jvm_name();
             let msg = t.message.as_deref().unwrap_or("");
@@ -213,15 +200,6 @@ fn eval_diagnostic(e: &SourceError) -> String {
 }
 
 /// The wrapper line minus its ` at (site).` tail, e.g. `Syntax error
-/// compiling if` (`CompileError::wrapper` always ends with one; the
-/// whole line is the fallback).
-fn compile_head(wrapper: &str) -> &str {
-    match wrapper.rfind(" at (") {
-        Some(i) => &wrapper[..i],
-        None => wrapper,
-    }
-}
-
 fn cmd_run(file: &Path, args: &[String]) -> ExitCode {
     if !file.exists() {
         eprintln!("run: no such file: {}", file.display());

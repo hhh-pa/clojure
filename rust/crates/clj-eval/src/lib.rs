@@ -12,6 +12,7 @@
 //! `docs/t1174/evaluator-contract.md` shape rules; [`Evaluator`]
 //! runs them. Single namespace (`user`), no prelude yet (S5).
 
+pub mod aot_subset;
 pub mod coll;
 pub mod concurrency;
 pub mod core;
@@ -28,8 +29,14 @@ pub mod ns;
 pub mod seqs;
 pub mod vars;
 
+pub use aot_subset::{
+    PlanError, Prim, SubsetError, SubsetExpr, SubsetFn, SubsetProgram, plan_source,
+};
 pub use env::{Bindings, Env, Namespace, NamespaceRegistry, SharedRegistry, VarState};
-pub use error::{CompileError, NativeError, Signal, Verb, jvm_class_of, simple_class_of, span_of};
+pub use error::{
+    CompileError, NativeError, Signal, Verb, compile_diagnostic, compile_head, jvm_class_of,
+    simple_class_of, span_of,
+};
 pub use eval::{Evaluator, SourceError};
 pub use expr::{
     Analyzer, Arity, Catch, Expr, FunExpr, KeyBinding, MapPattern, Pattern, VecPattern,

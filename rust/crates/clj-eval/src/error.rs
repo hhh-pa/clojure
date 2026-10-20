@@ -348,3 +348,30 @@ fn meta_int(form: &Value, key: &str) -> Option<u32> {
         _ => None,
     }
 }
+
+/// The wrapper's head: `Syntax error compiling if` (`wrapper`
+/// always ends with one; the whole line is the fallback).
+#[must_use]
+pub fn compile_head(wrapper: &str) -> &str {
+    match wrapper.rfind(" at (") {
+        Some(i) => &wrapper[..i],
+        None => wrapper,
+    }
+}
+
+/// Render one analyzer failure as `file:line:col: message` (bare
+/// failures print `class: cause`; wrapped ones print the wrapper
+/// head + cause). Shared by `eval` and AOT planning so the texts
+/// cannot drift.
+#[must_use]
+pub fn compile_diagnostic(file: &str, e: &CompileError) -> String {
+    let line = e.span.line;
+    let col = e.span.col;
+    if e.bare {
+        format!("{file}:{line}:{col}: {}: {}", e.class, e.message)
+    } else {
+        let wrapper = e.wrapper();
+        let head = compile_head(&wrapper);
+        format!("{file}:{line}:{col}: {head}: {}", e.message)
+    }
+}
