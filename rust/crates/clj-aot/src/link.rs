@@ -105,6 +105,10 @@ pub struct LinkCommand {
 /// carries the system libs a Rust staticlib needs: `rustc` links
 /// these itself, but a raw `link` invocation does not (R1
 /// finding 4 — without them every `clj-rt` import is LNK2019).
+/// `bcryptprimitives.lib` is deliberately absent: `link` cannot
+/// open it on CI images (LNK1181) and nothing in `clj-rt`
+/// references CNG primitives — `rustc` links the same staticlib
+/// on that runner without it.
 #[must_use]
 pub fn link_command(
     platform: Platform,
@@ -131,7 +135,6 @@ pub fn link_command(
                 "userenv.lib".to_owned(),
                 "ws2_32.lib".to_owned(),
                 "bcrypt.lib".to_owned(),
-                "bcryptprimitives.lib".to_owned(),
                 "ntdll.lib".to_owned(),
             ],
         },
@@ -309,7 +312,6 @@ mod tests {
                     "userenv.lib".to_owned(),
                     "ws2_32.lib".to_owned(),
                     "bcrypt.lib".to_owned(),
-                    "bcryptprimitives.lib".to_owned(),
                     "ntdll.lib".to_owned(),
                 ],
             }
