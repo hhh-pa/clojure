@@ -157,6 +157,8 @@ dependencies = [
 name = "clj-aot"
 version = "0.1.0"
 dependencies = [
+ "clj-eval",
+ "clj-rt",
  "inkwell",
 ]
 

@@ -63,7 +63,7 @@ naming the first unsupported form). TDD: subset corpus first
   `@main` drives tops, returns C8 codes) → object file
   via host `TargetMachine` (x86/aarch64 init only —
   never `target-all`) → platform link (`cc` on Unix,
-  `link.exe`/`clang` on Windows) against the `clj-rt`
+  `link` on Windows) against the `clj-rt`
   archive (exe-relative lookup + `--runtime-archive`
   override; release archives ship the archive next
   to the binary).
@@ -71,6 +71,13 @@ naming the first unsupported form). TDD: subset corpus first
   tests, linker-less machines). No debug info in S8;
   no cross-compilation; host-only.
 - IR snapshot tests (`contains`, not full goldens).
+- Linker runs quiet (chatter captured; failures carry
+  it); macOS sets `SDKROOT` via `xcrun --sdk macosx`
+  like rustc (skewed CLT/Xcode pairs otherwise link a
+  broken SDK). Divergence flag threads through `if`
+  joins (arity aborts never join; sealed orphans keep
+  the module verifiable). Geiger 73→88 (+4 `rt_is_truthy`,
+  +11 two audited GEP blocks in lowering).
 
 ## S8D. CLI + corpus + packaging
 

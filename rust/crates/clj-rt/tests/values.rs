@@ -14,7 +14,8 @@ mod support;
 
 use clj_value::Value;
 use cljrt::{
-    rt_bool, rt_clone, rt_double, rt_drop, rt_int, rt_nil, rt_str, rt_vec_new, rt_vec_push,
+    rt_bool, rt_clone, rt_double, rt_drop, rt_int, rt_is_truthy, rt_nil, rt_str, rt_vec_new,
+    rt_vec_push,
 };
 use support::{inbox, render};
 
@@ -57,6 +58,20 @@ fn vec_push_onto_non_vector_degrades_to_fresh() {
     let not_vec = inbox(Value::Int(9));
     let vec = unsafe { rt_vec_push(not_vec, inbox(Value::Int(1))) };
     assert_eq!(render(vec), "[1]");
+}
+
+#[test]
+fn truthiness_consumes() {
+    let cases = [
+        (Value::Nil, 0),
+        (Value::Bool(false), 0),
+        (Value::Bool(true), 1),
+        (Value::Int(0), 1),
+        (Value::Str("".into()), 1),
+    ];
+    for (value, want) in cases {
+        assert_eq!(unsafe { rt_is_truthy(inbox(value)) }, want);
+    }
 }
 
 #[test]

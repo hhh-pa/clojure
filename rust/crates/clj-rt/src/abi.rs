@@ -163,6 +163,17 @@ pub unsafe extern "C" fn rt_drop(value: *mut Value) {
     drop(unsafe { take(value) });
 }
 
+/// Consume the box and report Clojure truthiness: `0` for nil
+/// and false, `1` for everything else (the `if` test).
+///
+/// # Safety
+///
+/// `value` must be a valid box, consumed.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rt_is_truthy(value: *mut Value) -> u8 {
+    u8::from(unsafe { take(value) }.is_truthy())
+}
+
 /// The `print` intrinsic: consume the boxes, write the
 /// space-joined rendering with NO trailing newline, return nil.
 ///
