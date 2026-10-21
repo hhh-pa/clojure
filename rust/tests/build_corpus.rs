@@ -372,6 +372,30 @@ fn malformed_files_report_direct_spans() {
     assert_eq!(lossy(&build_err), want18, "18: exact text");
 }
 
+#[test]
+fn nesting_limit_reports_clean_diagnostic() {
+    // 19 (S9C/S9E): 41-deep input — one past the AOT build limit of
+    // 40 — still runs (exit 0, `.runout` stdout, empty stderr);
+    // `build` exits 1 with the verbatim nesting diagnostic (no
+    // `build: ` prefix), pinning the boundary instead of a machine
+    // stack overflow at compile time.
+    let corpus = corpus_dir();
+    let path = corpus.join("unsupported/19-nesting.clj");
+    let runout = std::fs::read(corpus.join("expected/unsupported/19-nesting.runout"))
+        .expect("runout golden");
+    let (run_out, run_err, run_code) = run_file(&path);
+    assert_eq!(run_code, 0, "19: run exit");
+    assert!(run_err.is_empty(), "19: run stderr: {run_err:?}");
+    assert_eq!(run_out, runout, "19: run stdout vs golden");
+    let (build_code, build_err, _, _, _) = build_and_run("19-nesting", &path);
+    assert_eq!(build_code, 1, "19: build exit");
+    let want = format!(
+        "{}:1:164: nesting depth 41 exceeds the AOT build limit (40)\n",
+        path.display()
+    );
+    assert_eq!(lossy(&build_err), want, "19: exact text");
+}
+
 /// Lossy text of captured bytes.
 fn lossy(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()

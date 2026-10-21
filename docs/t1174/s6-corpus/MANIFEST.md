@@ -1,9 +1,10 @@
 # S6 differential corpus MANIFEST
 
-5 files, `NN-topic.clj` + `expected/NN-topic.out` (golden stdout).
-491 entries total (128 + 51 + 105 + 188 + 19); every golden is
+6 files, `NN-topic.clj` + `expected/NN-topic.out` (golden stdout).
+498 entries total (128 + 51 + 105 + 188 + 19 + 7); every golden is
 byte-identical across re-runs (stability-verified).
-Truth source: `s6-pins.md` (P1–P6). Probe inputs live in
+Truth source: `s6-pins.md` (P1–P6); 06 sources `s9-plan.md` S9B (the
+s6-plan "follow-up if cheap" item). Probe inputs live in
 `/tmp/s6-probe*.clj` (not committed); corpus files are the durable,
 runnable record. The row tests in
 `rust/crates/clj-eval/tests/concurrency.rs` ARE the transcription —
@@ -102,6 +103,11 @@ check: entry tags in each `.clj` match `^:tag` lines in its `.out`).
   post-shutdown, restart-after-shutdown) LAST.
   Sources: pins P5/P6, s6-probe-a/b/c2/d/e1. Tests: all `agent_*`
   and `set_*` tests (see map).
+- `06-pvalues.clj` (7): `pcalls`/`pvalues` composites (vec/empty/
+  seq?, side-effect fan-out, ExecutionException propagation).
+  Sources: s9-plan S9B. Tests: `pcalls_rows`, `pvalues_rows`,
+  `pvalues_error_wraps_execution_exception` (see map; the same fns
+  also carry the 05 `:pcalls-basic`-family tags).
 
 ## Tag → test transcription map
 
@@ -379,6 +385,15 @@ shared by two tests). Test fns are in
   (`doall` + `sort`: the raw shape `[(2 1) 0]` is a
   laziness/race artifact — unrealized at counter read, order
   racy; normalized to `[(1 2) 2]`)
+### 06-pvalues.clj
+
+- `pcalls_rows` (3): `:pcalls-vec` `:pcalls-vec-empty`
+  `:pcalls-seq`
+- `pvalues_rows` (3): `:pvalues-vec` `:pvalues-vec-empty`
+  `:pvalues-inc3`
+- `pvalues_error_wraps_execution_exception` (1):
+  `:pvalues-throw` (golden prints `THROW <class>: <message>`;
+  the test asserts the `uncaught` `|`-joined same chain)
 
 ## Tests without corpus tags
 
@@ -440,7 +455,7 @@ shared by two tests). Test fns are in
 ## Open items
 
 - A jar rebuild may renumber the `reify__NNNN` counters; regen
-  all five goldens and expect diffs confined to the
+  all six goldens and expect diffs confined to the
   counter-bearing lines.
 - The locking-nil NPE carries a gensym
   (`locklocal__...__auto__...`); pinned raw on this JDK, shape

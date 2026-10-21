@@ -183,3 +183,50 @@ The concurrency code ships with argument-only validation today
   quoted 1k, `ClassCastException` at evaluated 1k (reads
   fine — probe artifact); our `run` keeps today's abort
   (SIGABRT, exit 134) since S9C guards `build` only.
+- S9D loom outcome-cell (`loom_future.rs`, 4 tests): blocking
+  `get` (missed notify would deadlock a schedule), complete/
+  cancel first-wins, racing-delivery first-wins, and the
+  `get_timeout` wake-not-timeout back-edge via linearization
+  tickets taken under the one cell lock — no atomics, no
+  spinning (loom has no clock, so expiry is a racing timer
+  thread setting a flag under the lock). The expiry-first
+  (pre-fix) waiter fails the model in 0.01s; the fixed
+  state-first waiter passes all schedules (~5s). Mirrors run
+  in-suite; the `loom-models` CI job (ubuntu, no LLVM setup)
+  is the explicit evidence. D4 resolution: the plan's
+  `cfg(loom)` gate is inapplicable — all three mirrors use
+  loom types directly, so no cfg exists or is needed.
+- S9D TLA+ (`docs/t1174/models/agent_queue`, 17 vars, 8
+  actions, 14 Safety conjuncts + Liveness + deadlock check):
+  the draft's per-send pool choice exploded (6.5M distinct
+  states in 60s, 1.1GB states dir, killed) while no property
+  reads the pool field — pools are now fixed per sender per
+  behavior via `Init` nondeterminism (a `.cfg` constant cannot
+  hold the function: TLC configs reject both `[t \in S |-> e]`
+  and `:>`/`@@`). Verified: 20.6M generated / 7.1M distinct,
+  depth 22, no error, ~2min on 10 workers. `tla` CI job pins
+  tla2tools v1.7.4 by SHA-256 (v1.8.0 does not exist —
+  resolved via the releases API), Temurin 21, cached jar,
+  15-minute budget; first CI run green. Spec dir added to the
+  workflow trigger paths.
+- S9E corpus: s6 `06-pvalues.clj` (7 rows, JVM-seeded golden,
+  stability-verified; authoring caught tag collisions with
+  05's `:pcalls-empty`/`:pvalues-sidefx` — renamed
+  `:pcalls-vec-empty`/`:pvalues-vec-empty`/`:pvalues-inc3`),
+  s5d `20-print-dup.clj` (2 rows; the `:dup-atom-true` golden
+  THROWs on the JVM while the port prints `true` — the pinned
+  divergence), s8 `unsupported/19-nesting.clj` (boundary 41:
+  `run` exit 0 prints `1`, matching the JVM; `build` exit 1
+  with the verbatim `:1:164:` diagnostic; its own replay test
+  since the shape differs from the 01–16 table). s6/s5d files
+  run on the JVM only — the port side stays the transcribing
+  row tests (no new tests; the corpus `(p)` wrapper uses Java
+  interop). Not corpus-observable, documented instead: the
+  MSRV leg (toolchain property, no behavior), the unlinked
+  `build` report (CLI-pinned, harness is aot-gated), the
+  `to_module` verify failure (hermetic-only, unreachable from
+  valid input). Contract gap closed: `pcalls`/`pvalues` added
+  to the concurrency contract (implemented S6D, never
+  written down); `*print-dup*` was already in s5d-contract.
+  Java-removal readiness checklist:
+  `docs/t1174/java-removal-checklist.md`.
