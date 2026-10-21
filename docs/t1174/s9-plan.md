@@ -125,3 +125,15 @@ The concurrency code ships with argument-only validation today
 - S9A own-code fallout from the 1.85 floor, all fixed: `as_chunks`
   → `chunks_exact` (io.rs), two let-chains → nested `if`s
   (expr.rs, lazy.rs) in coverage-neutral form.
+- S9B resolutions (D3): pvalues/pcalls behavior already ported
+  (S6D verbatim); added the ExecutionException error-propagation
+  pin. `:static` meta unmodeled globally (even `map`) — deferred
+  as a compile hint with no runtime semantics. `*print-dup*`
+  dispatch stays a catalogued divergence (atom witness pinned:
+  JVM throws under `true`, we print). set-agent-send-executor!
+  et al rejected (no custom executors); load-reader rejected
+  (N1-adjacent, needs java.io); data_readers.clj stays spec'd-Out
+  (no classpath); clojure.edn deferred (needs a value-producing
+  EDN reader entry; `--edn` covers interactive use). Absence
+  pinned for load-reader, the executor setters, and the
+  clojure.edn namespace.

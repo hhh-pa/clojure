@@ -420,6 +420,15 @@ fn ns_map_family() {
 }
 
 #[test]
+fn s9b_clojure_edn_stays_absent() {
+    // S9B D3: no `clojure.edn` namespace (that needs a
+    // value-producing EDN reader entry, which doesn't exist; the
+    // `--edn` CLI flag covers the interactive use).
+    let mut eval = boot();
+    assert_eq!(run_last(&mut eval, "(find-ns 'clojure.edn)"), "nil");
+}
+
+#[test]
 fn refer_and_use_filters() {
     // `binding [*ns* ...]` redirects installation too (the S5B
     // sync — see the `ns_star_binding_redirects_*` tests), but

@@ -3290,3 +3290,33 @@ fn future_empty_message_cause() {
         "java.util.concurrent.ExecutionException | java.lang.IndexOutOfBoundsException"
     );
 }
+
+#[test]
+fn pvalues_error_wraps_execution_exception() {
+    // S9B: a failing expr surfaces on realization as an
+    // ExecutionException wrapping the cause (oracle-verbatim).
+    let mut eval = boot();
+    assert_eq!(
+        uncaught(&mut eval, "(doall (pvalues 1 (/ 1 0) 3))"),
+        "java.util.concurrent.ExecutionException | java.lang.ArithmeticException: Divide by zero"
+    );
+}
+
+#[test]
+fn print_dup_flag_ignored_for_atoms() {
+    // DIVERGENCE (s5d-contract, S9B): `*print-dup*` is declared but
+    // ignored. The JVM prints the atom under `false` but THROWS
+    // IllegalArgumentException (no print-dup method for Atom) under
+    // `true`; we print the #object shape on both sides.
+    let mut eval = boot();
+    for flag in ["false", "true"] {
+        let pr = run_last(
+            &mut eval,
+            &format!("(binding [*print-dup* {flag}] (pr-str (atom 1)))"),
+        );
+        assert!(
+            pr.starts_with("\"#object[clojure.lang.Atom 0x"),
+            "no atom shape under {flag}: {pr}"
+        );
+    }
+}
