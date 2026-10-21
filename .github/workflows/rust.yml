@@ -313,6 +313,9 @@ jobs:
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: rust/target/llvm-cov/lcov.info
+          # Else the action also sweeps up go testdata fixtures and
+          # stray files (it found 10); only the explicit file counts.
+          disable_search: true
           fail_ci_if_error: false
       - name: upload test results to codecov
         if: ${{ !cancelled() && hashFiles('rust/target/nextest/default/junit.xml') != '' }}
@@ -321,6 +324,7 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: rust/target/nextest/default/junit.xml
           report_type: test_results
+          disable_search: true
           fail_ci_if_error: false
 
   go-tools-test:
