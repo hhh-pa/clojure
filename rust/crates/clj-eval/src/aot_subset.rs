@@ -518,6 +518,16 @@ fn push_children<'a>(stack: &mut Vec<(&'a Value, usize)>, value: &'a Value, dept
     }
 }
 
+/// Build the nesting diagnostic error (shared by the source
+/// pre-scan and the expanded-form rescan).
+fn depth_error(span: Span, depth: usize, expanded: bool) -> PlanError {
+    PlanError::Depth {
+        span,
+        depth,
+        expanded,
+    }
+}
+
 fn push_each<'a>(
     stack: &mut Vec<(&'a Value, usize)>,
     items: impl Iterator<Item = &'a Value>,
@@ -531,14 +541,10 @@ fn push_each<'a>(
 /// Plan `text` on a throwaway booted evaluator (planning interns
 /// vars as analysis runs, so the evaluator is never shared).
 pub fn plan_source(text: &str) -> Result<SubsetProgram, PlanError> {
-    if let Some((span, depth)) = DepthScan::scan(text) {
-        return Err(PlanError::Depth {
-            span,
-            depth,
-            expanded: false,
-        });
-    }
     let mut eval = boot();
+    if let Some((span, depth)) = DepthScan::scan(text) {
+        return Err(depth_error(span, depth, false));
+    }
     let forms = eval.read_forms(text).map_err(lift)?;
     let mut planner = Planner::new();
     for form in &forms {
@@ -615,11 +621,7 @@ impl Planner {
         // before analyze recurses on it.
         let expanded_depth = value_depth(&expanded);
         if expanded_depth > MAX_NESTING_DEPTH {
-            return Err(PlanError::Depth {
-                span: fallback,
-                depth: expanded_depth,
-                expanded: true,
-            });
+            return Err(depth_error(fallback, expanded_depth, true));
         }
         let fallback_parts = vec![&expanded];
         let parts = match crate::eval::split_top_do(&expanded) {
@@ -1909,6 +1911,7 @@ mod tests {
     #[test]
     fn nesting_skips_char_literals() {
         assert_eq!(DepthScan::scan("(= \\( x)"), None);
+        assert_eq!(DepthScan::scan("(f 1)\\"), None);
     }
 
     #[test]
@@ -1985,6 +1988,14 @@ mod tests {
         ]));
         assert_eq!(value_depth(&mixed), 3);
         assert_eq!(value_depth(&Value::Int(1)), 0);
+    }
+
+    #[test]
+    fn nesting_rejects_deep_source_at_plan() {
+        assert_eq!(
+            diag(&parens(41)),
+            "f.clj:1:41: nesting depth 41 exceeds the AOT build limit (40)"
+        );
     }
 
     #[test]
