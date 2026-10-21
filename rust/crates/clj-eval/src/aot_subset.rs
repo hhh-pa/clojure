@@ -549,6 +549,11 @@ fn push_each<'a>(
 /// vars as analysis runs, so the evaluator is never shared).
 pub fn plan_source(text: &str) -> Result<SubsetProgram, PlanError> {
     let mut eval = boot();
+    // Third guard (B1): analyze-time macroexpansion can deepen
+    // forms the rescan measured shallow, so the analyzer itself
+    // carries the budget on this throwaway evaluator (never unset:
+    // nothing else runs on it).
+    eval.analyze_depth_limit = Some(MAX_NESTING_DEPTH);
     if let Some((span, depth)) = DepthScan::scan(text) {
         return Err(depth_error(span, depth, false));
     }
@@ -628,6 +633,9 @@ impl Planner {
         // before analyze recurses on it.
         let expanded_depth = value_depth(&expanded);
         if expanded_depth > MAX_NESTING_DEPTH {
+            // B1 twin: dropping this output would recurse per level
+            // (see `analyze_list`); the build fails here either way.
+            std::mem::forget(expanded);
             return Err(depth_error(fallback, expanded_depth, true));
         }
         let fallback_parts = vec![&expanded];
@@ -637,7 +645,19 @@ impl Planner {
         };
         for part in parts {
             eval.registry.bump_eval_seq();
-            eval.analyze(part).map_err(|e| lift(eval.compile_err(e)))?;
+            if let Err(e) = eval.analyze(part) {
+                // Budget breach: expansion outgrew the limit mid-
+                // analyze — the Depth diagnostic, not a compile
+                // error (first crossing trips at limit + 1).
+                if e.class == crate::expr::class::STACK_OVERFLOW {
+                    return Err(depth_error(
+                        span_of(part, fallback),
+                        MAX_NESTING_DEPTH + 1,
+                        true,
+                    ));
+                }
+                return Err(lift(eval.compile_err(e)));
+            }
         }
         // Classify the ORIGINAL surface (never the expansion).
         self.classify_top(form, fallback)
@@ -2037,6 +2057,30 @@ mod tests {
             diag(&parens(41)),
             "f.clj:1:41: nesting depth 41 exceeds the AOT build limit (40)"
         );
+    }
+
+    #[test]
+    fn nesting_rejects_nested_macro_expansion() {
+        // B1: the rescan measures nested macro calls unexpanded, so
+        // only the analyze-time budget catches this (pre-fix: clean
+        // subset rejection at 300 steps, SIGABRT at 30000).
+        let cond_src = format!("(do (cond {}))", "true 1 ".repeat(300));
+        for (src, span) in [
+            (format!("(do (-> 0{}))", " (+ 1)".repeat(300)), "1:5"),
+            (format!("(defn f [] (-> 0{}))", " (+ 1)".repeat(300)), "1:1"),
+            (cond_src, "1:5"),
+            // Crash scale (SIGABRT pre-fix): the budget trips at 41
+            // regardless of how deep the expansion runs.
+            (format!("(do (-> 0{}))", " (+ 1)".repeat(30_000)), "1:5"),
+        ] {
+            assert_eq!(
+                diag(&src),
+                format!(
+                    "f.clj:{span}: nesting depth 41 after expansion exceeds the AOT build limit (40)"
+                ),
+                "{src:.40}"
+            );
+        }
     }
 
     #[test]
