@@ -914,7 +914,23 @@ func coverageReports(env []string, workspace, reportDir string, covRunner []stri
 	if err != nil {
 		return err
 	}
-	return run([]string{floorBin, lcovPath, "100"}, env, workspace)
+	if err := run([]string{floorBin, lcovPath, "100"}, env, workspace); err != nil {
+		return err
+	}
+	// S9A patch gate: added-lines coverage from the
+	// workflow-computed diff. PATCH_DIFF is unset outside CI, so
+	// the line floor alone applies there and the gates goldens
+	// stay byte-identical.
+	if patch := os.Getenv("PATCH_DIFF"); patch != "" {
+		patchBin, err := sibling("coverage-patch")
+		if err != nil {
+			return err
+		}
+		if err := run([]string{patchBin, lcovPath, patch, "100"}, env, workspace); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // provisionDeny installs cargo-deny: upstream ships only musl

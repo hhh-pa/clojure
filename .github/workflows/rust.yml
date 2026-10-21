@@ -209,7 +209,7 @@ jobs:
         run: |
           rm -rf ci-tools-bin && mkdir -p ci-tools-bin
           cd scripts/ci/go
-          for tool in coverage-floor coverage-summary geiger complexity rust-quality-gates; do
+          for tool in coverage-floor coverage-patch coverage-summary geiger complexity rust-quality-gates; do
             CGO_ENABLED=0 go build -o "$GITHUB_WORKSPACE/ci-tools-bin/$tool" ./cmd/$tool
           done
           ls "$GITHUB_WORKSPACE/ci-tools-bin"
@@ -219,8 +219,19 @@ jobs:
         with:
           path: ci-tools-bin
           key: ci-tools-${{ runner.os }}-${{ hashFiles('scripts/ci/go/**') }}
+      # Patch-coverage input for the S9A gate: a two-dot diff against
+      # the base tip needs no merge-base, so a depth-1 base fetch
+      # suffices (cheap, no history). `git diff` exits 1 when
+      # differences exist — only >1 is a failure. On master the diff
+      # is empty and the patch gate passes vacuously.
+      - name: compute patch diff
+        run: |
+          git fetch origin "${{ github.base_ref || 'master' }}" --depth=1 --quiet
+          git diff --unified=0 FETCH_HEAD HEAD -- rust/ > patch.diff; code=$?
+          if [ "$code" -gt 1 ]; then exit "$code"; fi
+          wc -l patch.diff
       - name: run quality gates
-        run: docker run --rm -v "${{ github.workspace }}:/work" -v "${{ github.workspace }}/ci-tools-bin:/tools" -w /work "$GATE_IMAGE:$GATE_KEY" /tools/rust-quality-gates rust rust/target/llvm-cov nextest --run-ignored all --no-fail-fast
+        run: docker run --rm -e PATCH_DIFF=/work/patch.diff -v "${{ github.workspace }}:/work" -v "${{ github.workspace }}/ci-tools-bin:/tools" -w /work "$GATE_IMAGE:$GATE_KEY" /tools/rust-quality-gates rust rust/target/llvm-cov nextest --run-ignored all --no-fail-fast
       # The container runs as root; hand the report back so later steps can
       # read it.
       - name: take ownership of coverage report
