@@ -31,13 +31,6 @@ fn corpus_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/corpus")
 }
 
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("..")
-        .join("..")
-}
-
 #[test]
 fn corpus_cases() {
     let dir = corpus_dir();
@@ -97,7 +90,10 @@ fn corpus_cases() {
 #[test]
 fn corpus_files() {
     let dir = corpus_dir();
-    let root = repo_root();
+    // Full-file inputs are vendored under tests/corpus/inputs/
+    // (mirroring the removed src/ + test/ layout); files.edn rels
+    // resolve there.
+    let inputs = dir.join("inputs");
     let entries = parse_files(&read_data_file(&dir.join("files.edn")));
     let resolver = parse_resolver(&read_data_file(&dir.join("expectations.edn")));
 
@@ -108,7 +104,7 @@ fn corpus_files() {
             eprintln!("skipping {} ({reason})", entry.path);
             continue;
         }
-        let text = std::fs::read_to_string(root.join(&entry.path)).unwrap();
+        let text = std::fs::read_to_string(inputs.join(&entry.path)).unwrap();
         let opts = clj_reader::ReaderOpts {
             current_ns: resolver.current_ns.clone(),
             aliases: resolver.aliases.clone(),
