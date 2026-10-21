@@ -17,6 +17,8 @@ on:
       # Local composite actions (profile-runner, setup-llvm) run in
       # every job; without this, edits to them never trigger CI.
       - ".github/actions/**"
+      # The tla job checks the specs; spec-only edits must trigger.
+      - "docs/t1174/models/**"
   pull_request:
     paths:
       - "rust/**"
@@ -24,6 +26,7 @@ on:
       - ".dockerignore"
       - ".github/workflows/rust.yml"
       - ".github/actions/**"
+      - "docs/t1174/models/**"
 
 # One run per branch at a time: a new push supersedes in-flight runs
 # (the same head would otherwise run twice — push + pull_request —
@@ -153,6 +156,76 @@ jobs:
           workspaces: rust
           save-if: 'true'
       - run: cargo test --locked --no-default-features -p clojure-rs
+
+  loom-models:
+    name: loom models
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read # checkout
+      actions: write # cargo cache
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      # No setup-llvm: clj-value is pure Rust, so the models run
+      # without the LLVM toolchain.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+          save-if: 'true'
+      # S9D: the loom mirrors explore every schedule in-process
+      # (loom types are used directly, so no cfg gate is needed) —
+      # this step is the explicit CI evidence, alongside the
+      # workspace suite above which runs the same targets.
+      - run: cargo test --locked -p clj-value --test loom_agent --test loom_delay --test loom_future
+
+  tla:
+    name: tla model check
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read # checkout
+      actions: write # tla2tools cache
+    defaults:
+      run:
+        working-directory: docs/t1174/models
+    steps:
+      - uses: actions/checkout@v5
+      - name: set up Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: restore tla2tools
+        id: tla-cache
+        uses: actions/cache/restore@v5
+        with:
+          path: /tmp/tla-tools/tla2tools.jar
+          key: tla2tools-v1.7.4-936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88
+      - name: download tla2tools
+        if: steps.tla-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/tla-tools
+          curl -fsSL -o /tmp/tla-tools/tla2tools.jar \
+            https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar
+          echo '936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88  /tmp/tla-tools/tla2tools.jar' | sha256sum --check -
+      - name: save tla2tools
+        if: steps.tla-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: /tmp/tla-tools/tla2tools.jar
+          key: tla2tools-v1.7.4-936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88
+      # S9D: model-check the agent-queue spec (7.1M distinct states at
+      # the pinned bounds; ~2-10 min depending on runners). TLC exits
+      # non-zero on any invariant/property/deadlock violation; on
+      # failure stdout carries the error trace.
+      - name: run TLC (agent queue)
+        run: |
+          java -Xmx2g -XX:+UseParallelGC -cp /tmp/tla-tools/tla2tools.jar tlc2.TLC \
+            -workers auto -cleanup -config agent_queue.cfg agent_queue.tla
 
   quality-gates:
     name: quality gates
