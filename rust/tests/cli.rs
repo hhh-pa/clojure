@@ -507,6 +507,35 @@ fn build_plan_error_passes_the_diagnostic_through() {
 
 #[test]
 #[cfg(feature = "aot")]
+fn build_nesting_depth_exits_1_with_diagnostic() {
+    // Depth failures print verbatim (no `build: ` prefix), exit 1.
+    use std::ffi::OsStr;
+    let dir = build_tmp("nest-err");
+    std::fs::create_dir_all(&dir).expect("tmp dir");
+    let file = dir.join("deep.clj");
+    let source = format!("{}1{}", "(".repeat(41), ")".repeat(41));
+    std::fs::write(&file, source).expect("write source");
+    let prog = dir.join("prog");
+    let out = build_argv(&[
+        OsStr::new("build"),
+        file.as_os_str(),
+        OsStr::new("-o"),
+        prog.as_os_str(),
+    ]);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(
+        stderr(&out),
+        format!(
+            "{}:1:41: nesting depth 41 exceeds the AOT build limit (40)\n",
+            file.display()
+        )
+    );
+    assert!(stdout(&out).is_empty(), "stdout must stay empty");
+    std::fs::remove_dir_all(&dir).expect("cleanup");
+}
+
+#[test]
+#[cfg(feature = "aot")]
 fn build_unwritable_emit_path_exits_3() {
     // Emit writes are IO (exit 3), not compile failures.
     use std::ffi::OsStr;

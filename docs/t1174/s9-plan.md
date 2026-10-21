@@ -156,3 +156,30 @@ The concurrency code ships with argument-only validation today
   the path list, so the path fix itself invalidated the old
   entry — and the fleet carries multiple vcpkg baselines at
   once, hence one slow rebuild per baseline before warm.
+- S9C verify: `to_module` returns `Result` and verifies before
+  return; rejection maps to the existing `CompileError::Emit`
+  (exit 1 `build: ...`, no CLI change). `LLVMString` must use
+  the inherent lossy `to_string` — its `Display` debug-quotes.
+  Hermetic pin builds an unterminated block directly.
+- S9C nesting limit is 40, not 1024: probed minimum overflow
+  is 161 levels on a 1 MB debug stack (out-of-subset 162,
+  in-subset 161; debug frames run ~6 KB/level), the limit
+  sits at a quarter of that, and the deepest corpus input
+  measures 16. Two guards, both in `clj-eval` (single owner,
+  zero CLI churn — depth failures reuse the `Plan` verbatim
+  path): a lexer-aware source pre-scan first in `plan_source`
+  (strings/comments/regex/chars inert, wrapper runs fold
+  into their level, over-approximates everywhere), plus an
+  iterative expanded-form rescan in `plan_top`. The rescan
+  is load-bearing: `(-> 0 (+ 1) x300)` nests 2 deep in
+  source yet expands 300 deep and aborts pre-guard, so a
+  source-only guard is provably insufficient. Core macros
+  unroll through `macroexpand_full`'s iterative loop (no
+  macro-fn self-recursion per element), user macros never
+  install (no evaluation in planning; pinned), and analyze
+  never recurses into metadata — so the two guards close
+  the build path completely. Oracle: JVM `StackOverflowError`
+  at 20k nesting (exit 1), `MethodTooLargeException` at
+  quoted 1k, `ClassCastException` at evaluated 1k (reads
+  fine — probe artifact); our `run` keeps today's abort
+  (SIGABRT, exit 134) since S9C guards `build` only.

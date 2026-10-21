@@ -615,24 +615,37 @@ impl<'ctx> Lower<'ctx> {
     }
 }
 
+/// Verify a lowered module, mapping LLVM's free-text rejection
+/// to an `Emit`-bound message. Uses the inherent lossy
+/// `to_string`: `LLVMString`'s `Display` impl debug-quotes the
+/// text.
+pub(crate) fn verify_module(module: &Module) -> Result<(), String> {
+    module
+        .verify()
+        .map_err(|e| format!("LLVM verification failed: {}", e.to_string().trim()))
+}
+
 /// Lower a planned program to an LLVM module (the source path is
-/// baked into every error span).
+/// baked into every error span). The module is verified before
+/// return: a rejection means a lowering bug, reported as `Err`
+/// instead of reaching emission.
 pub fn to_module<'ctx>(
     ctx: &'ctx Context,
     program: &SubsetProgram,
     source_path: &str,
-) -> Module<'ctx> {
+) -> Result<Module<'ctx>, String> {
     let mut lower = Lower::new(ctx, source_path);
     for (index, def) in program.fns.iter().enumerate() {
         lower.lower_defn(index, def);
     }
     lower.lower_main(&program.main, program.main_slots);
-    lower.module
+    verify_module(&lower.module)?;
+    Ok(lower.module)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{PRIM_ORDER, fn_symbol, to_module};
+    use super::{PRIM_ORDER, fn_symbol, to_module, verify_module};
     use clj_eval::{SubsetExpr, plan_source};
     use cljrt::prim_symbol;
     use inkwell::context::Context;
@@ -643,9 +656,20 @@ mod tests {
     fn compile_ir(source: &str) -> String {
         let program = plan_source(source).expect("plan");
         let ctx = Context::create();
-        let module = to_module(&ctx, &program, "snap.clj");
-        module.verify().expect("verify");
+        let module = to_module(&ctx, &program, "snap.clj").expect("verify");
         module.print_to_string().to_string()
+    }
+
+    #[test]
+    fn verify_module_maps_verifier_text() {
+        let ctx = Context::create();
+        let module = ctx.create_module("broken");
+        let ty = ctx.i32_type().fn_type(&[], false);
+        let func = module.add_function("no_terminator", ty, None);
+        let _entry = ctx.append_basic_block(func, "entry");
+        let err = verify_module(&module).unwrap_err();
+        assert!(err.starts_with("LLVM verification failed: "), "{err}");
+        assert!(err.contains("terminator"), "{err}");
     }
 
     #[test]

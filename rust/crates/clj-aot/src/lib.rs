@@ -118,7 +118,7 @@ pub fn compile_str(
 ) -> Result<(), CompileError> {
     let program = plan_source(source).map_err(|e| CompileError::Plan(e.diagnostic(source_path)))?;
     let ctx = Context::create();
-    let module = lower::to_module(&ctx, &program, source_path);
+    let module = lower::to_module(&ctx, &program, source_path).map_err(CompileError::Emit)?;
     if let Some(ir_path) = &emit.emit_ir {
         std::fs::write(ir_path, module.print_to_string().to_string())
             .map_err(|e| io_err(ir_path, e))?;
