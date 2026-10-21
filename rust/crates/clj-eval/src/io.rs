@@ -255,7 +255,9 @@ fn file_opts(opts: &[Value], want_append: bool) -> Result<bool, NativeError> {
         ));
     }
     let mut append = false;
-    for pair in opts.as_chunks::<2>().0 {
+    // (`chunks_exact`, not `as_chunks`: the latter is 1.88+,
+    // past the 1.85 MSRV floor.)
+    for pair in opts.chunks_exact(2) {
         let name = match &pair[0] {
             Value::Keyword(kw) if kw.namespace().is_none() => kw.name(),
             _ => continue,

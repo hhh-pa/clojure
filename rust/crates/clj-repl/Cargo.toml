@@ -13,4 +13,6 @@ workspace = true
 clj-eval = { path = "../clj-eval" }
 clj-reader = { path = "../clj-reader" }
 clj-value = { path = "../clj-value" }
-rustyline = "19.0.0"
+# Minimal features (S9A MSRV): `with-dirs` pulls `home 0.5.12`
+# (rustc 1.88+), which we never touch — file history only.
+rustyline = { version = "19.0.0", default-features = false, features = ["with-file-history"] }

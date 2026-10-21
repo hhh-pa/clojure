@@ -2841,17 +2841,18 @@ impl<'a> Analyzer<'a> {
     /// The optional `case*` skip set (absent or `nil` means empty).
     fn parse_case_star_skip(&self, items: &[&Value], span: Span) -> Result<Vec<i32>, CompileError> {
         let mut skip = Vec::new();
-        if let Some(s) = items.get(8).copied()
-            && !matches!(s, Value::Nil)
-        {
-            let Value::Set(set) = s else {
-                return Err(self.spec_error("clojure.core/case*", span));
-            };
-            for v in set.iter() {
-                let Some(k) = Self::case_star_int(v) else {
+        // (Nested `if`, not a let-chain: MSRV 1.85.)
+        if let Some(s) = items.get(8).copied() {
+            if !matches!(s, Value::Nil) {
+                let Value::Set(set) = s else {
                     return Err(self.spec_error("clojure.core/case*", span));
                 };
-                skip.push(k);
+                for v in set.iter() {
+                    let Some(k) = Self::case_star_int(v) else {
+                        return Err(self.spec_error("clojure.core/case*", span));
+                    };
+                    skip.push(k);
+                }
             }
         }
         Ok(skip)
