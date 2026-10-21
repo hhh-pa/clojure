@@ -145,4 +145,9 @@ The concurrency code ships with argument-only validation today
   commit, covers the built installed tree plus archives and
   downloads (msys2 tool + source tarballs), and skips the vcpkg
   install on an exact hit (guarded by an `xml2` presence check);
-  the SDK transplant still runs every time.
+  the SDK transplant still runs every time. Follow-up fix:
+  `VCPKG_INSTALLATION_ROOT` renders empty on GitHub runners
+  (verified in the log: cache held only the ~10 MB archives),
+  so the paths use the baseline step's resolved `dir` output;
+  warm run then skips vcpkg (cold 8.3 min → warm 317 ms even
+  before the skip engaged).
