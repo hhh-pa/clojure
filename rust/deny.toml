@@ -14,7 +14,9 @@ allow = [
     "Unlicense",
 ]
 # (S9A: BSD-3-Clause + Zlib allowances pruned — no longer
-# encountered after the rustyline 17 pin dropped that subtree.)
+# encountered after the rustyline 17 pin (lock diff: version
+# replacements only, and none of those crates remain in the new
+# lock).)
 [licenses.private]
 ignore = true
 [bans]
@@ -26,8 +28,9 @@ wildcards = "allow"
 # platforms): the rustyline 17 pin needs windows-sys ^0.60.2
 # directly while its fd-lock dependency caps windows-sys <0.60,
 # so both 0.59.0 and 0.60.2 must coexist; no fd-lock version
-# allows >= 0.60 and every rustyline >= 14 needs fd-lock. The
-# older side of each pair is skipped below.
+# allows >= 0.60 and every rustyline >= 14 needs fd-lock (with
+# default features, as used here). The older side of each pair is
+# skipped below.
 skip = [
     { name = "windows-sys", version-req = "=0.59.0", reason = "S9A MSRV split, Windows-only" },
     { name = "windows-targets", version-req = "=0.52.6", reason = "S9A MSRV split, Windows-only" },

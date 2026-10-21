@@ -14,6 +14,10 @@ resolver = "2"
 name = "clojure-rs"
 version = "0.1.0"
 edition = "2024"
+# MSRV floor for the direct workspace libs; the default `aot`
+# feature pulls clj-aot (inkwell, unproven MSRV), so a default
+# 1.85 build is not covered — the msrv CI leg excludes it
+# (s9-plan D2) and every clj-aot-free crate carries this key.
 rust-version = "1.85"
 description = "Native Clojure runtime, REPL, and LLVM AOT compiler"
 license = "EPL-1.0"
