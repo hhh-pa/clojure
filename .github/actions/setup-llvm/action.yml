@@ -23,12 +23,13 @@ runs:
     # plus the binary archives and downloads (msys2 tool + source
     # tarballs): an exact hit skips the vcpkg install entirely
     # (seconds); a partial hit still reuses whatever archives and
-    # downloads match. The key pins the vcpkg baseline commit:
-    # runner-image updates that drift the baseline (new ports or
-    # compiler) change the key, so stale archives can never poison
-    # the build — vcpkg rebuilds once under the new key and the
-    # fresh result is saved. (An exact hit never re-saves, so a key
-    # without the baseline goes stale forever after one drift.)
+    # downloads match. The key pins the vcpkg baseline commit plus
+    # the runner image (OS/arch/ImageVersion): either side changing
+    # rebuilds once under the new key and saves the fresh result.
+    # (An exact hit never re-saves, so a key without the baseline
+    # goes stale forever after one drift; without the image, a
+    # compiler/SDK-only runner update would reuse a tree vcpkg can
+    # no longer ABI-check.)
     # The SDK transplant below still runs every time (fast, local).
     # Paths use the resolved dir output, not
     # ${{ env.VCPKG_INSTALLATION_ROOT }}: that variable is unset on
@@ -57,7 +58,7 @@ runs:
           ${{ steps.vcpkg-baseline.outputs.dir }}/installed/x64-windows-static
           ~/AppData/Local/vcpkg/archives
           ${{ steps.vcpkg-baseline.outputs.dir }}/downloads
-        key: setup-llvm-win-vcpkg-${{ steps.vcpkg-baseline.outputs.sha }}-${{ hashFiles('.github/actions/setup-llvm/action.yml') }}
+        key: setup-llvm-win-vcpkg-${{ steps.vcpkg-baseline.outputs.sha }}-${{ runner.os }}-${{ runner.arch }}-${{ env.ImageVersion }}-${{ hashFiles('.github/actions/setup-llvm/action.yml') }}
         restore-keys: |
           setup-llvm-win-vcpkg-${{ steps.vcpkg-baseline.outputs.sha }}-
           setup-llvm-win-vcpkg-
