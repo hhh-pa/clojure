@@ -137,3 +137,12 @@ The concurrency code ships with argument-only validation today
   EDN reader entry; `--edn` covers interactive use). Absence
   pinned for load-reader, the executor setters, and the
   clojure.edn namespace.
+- S9 infra (Windows setup-llvm cache): the archives-only cache
+  keyed on `action.yml` alone went stale forever after one vcpkg
+  baseline drift (exact hits never re-save; vcpkg then reported
+  `Restored 0 package(s)` and rebuilt libxml2 from source, ~7
+  min, every run). The cache now keys on the vcpkg baseline
+  commit, covers the built installed tree plus archives and
+  downloads (msys2 tool + source tarballs), and skips the vcpkg
+  install on an exact hit (guarded by an `xml2` presence check);
+  the SDK transplant still runs every time.
