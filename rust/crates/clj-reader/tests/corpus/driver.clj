@@ -32,6 +32,9 @@
 ;; fully qualified) so live resolution matches the probes exactly.
 
 (def corpus-dir (.getParent (clojure.java.io/file *file*)))
+;; Regen inputs, vendored from the removed JVM tree (see inputs/).
+(def inputs-root
+  (clojure.java.io/file corpus-dir "inputs"))
 (def out-dir (or (System/getenv "OUT") "/tmp/t1174-corpus"))
 (.mkdirs (clojure.java.io/file out-dir))
 
@@ -162,8 +165,6 @@
 
 ;; ---------------------------------------------------------------- files
 
-(def repo-root (.getCanonicalPath (clojure.java.io/file corpus-dir "../../../../../")))
-
 (defn fnv1a [^String s]
   (let [bytes (.getBytes s "UTF-8")]
     (loop [i 0 h (unchecked-long 0xcbf29ce484222325)]
@@ -179,7 +180,7 @@
       (str/replace #"__\d+__auto__" "__N__auto__")))
 
 (defn run-file [rel]
-  (let [f (clojure.java.io/file repo-root rel)
+  (let [f (clojure.java.io/file inputs-root rel)
         s (slurp f)]
     (try
       (let [forms (read-all-forms s {:read-cond :allow})]
@@ -244,13 +245,16 @@
     (binding [*out* w] (prn @raw-dump)))
   (println "wrote raw-dump.edn"))
 
-;; Full files: every src/clj/**.clj plus test .clj/.cljc that the
-;; oracle reads (failures abort — mark :exclude by hand).
+;; Full files: every vendored src/clj/**.clj plus test .clj/.cljc
+;; that the oracle reads (failures abort — mark :exclude by hand).
+;; The inputs live under inputs/ (vendored from the removed JVM
+;; tree); rels keep their historical src/clj + test prefixes so
+;; files.edn stays byte-stable across the removal.
 (defn list-files [dir exts]
-  (->> (file-seq (clojure.java.io/file repo-root dir))
+  (->> (file-seq (clojure.java.io/file inputs-root dir))
        (filter #(.isFile ^java.io.File %))
        (map #(.getCanonicalPath ^java.io.File %))
-       (map #(str/replace % (str repo-root "/") ""))
+       (map #(str/replace % (str (.getCanonicalPath inputs-root) "/") ""))
        (filter (fn [p] (some #(.endsWith p %) exts)))
        (sort)))
 

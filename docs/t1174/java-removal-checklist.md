@@ -44,3 +44,29 @@ are the only workflows left.
 
 Land S9 first (review-loop to APPROVED), then remove in one commit:
 tree + workflows together, so no run ever sees a half-deleted JVM.
+
+## Executed
+
+S9 landed as `4d1179d6` (PR #10, 2-round review); removal followed
+on `T1174-remove-java` in one commit. Delete-set extensions beyond
+the S9E list (same rule — the file becomes false or useless without
+the JVM tree): all of `src/` (the S9E list named `jvm`+`clj` but
+`assembly`, `resources`, and `script` are upstream Maven-build
+parts too), `antsetup.sh` (ant-classpath writer), `readme.txt`
+(Maven build instructions), and `.github/PULL_REQUEST_TEMPLATE`
+(upstream "does not accept pull requests" boilerplate, false in
+this repo). Kept as still-true: `changes.md`, `CONTRIBUTING.md`,
+`doc/*.markdown` (design essays), `codecov.yml`, `.dockerignore`.
+Kept-file fixups in the same commit: the `rust-release.yml` name
+note, the `regen.sh` oracle-source comment, and the S9 progress
+row. No root README is written here (follow-up if wanted).
+
+Regen preservation: the S2 corpus driver enumerated `src/clj` +
+`test` at regen time, so deleting the tree would have silently
+emptied the next regen (Clojure `file-seq` on a missing dir yields
+no files; nothing aborts). The 138 enumerated `.clj`/`.cljc` files
+are vendored bit-identical under
+`rust/crates/clj-reader/tests/corpus/inputs/` (mirroring layout;
+LF-pinned), and the driver re-roots there while keeping `:path`
+rels byte-stable. Verified by running `./regen.sh` before and
+after and diffing `files.edn` + `expectations.edn` (identical).

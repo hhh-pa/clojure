@@ -3,7 +3,7 @@
 `#` landed · `>` active · `-` pending.
 
 ```
-[########>] 8/9 slices landed
+[#########] 9/9 slices landed
 ```
 
 | Slice | State | Landed as |
@@ -16,6 +16,6 @@
 | S6 concurrency | landed | `0c950c8f` (PR #7, 2-round review) |
 | S7 repl+cli | landed | `20707c38` (PR #8) |
 | S8 llvm-aot | landed | `a005c5bb` (PR #9, 2-round review) |
-| S9 hardening | active | — |
+| S9 hardening | landed | `4d1179d6` (PR #10, 2-round review) |
 
 End state (post-S9): remove the original Java implementation.

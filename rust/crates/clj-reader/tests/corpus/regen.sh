@@ -8,9 +8,13 @@
 # You must not remove this notice, or any other, from this software.
 # Regenerate the S2 differential corpus expectations with the JVM oracle.
 # Usage: ./regen.sh [outdir]  (default: /tmp/t1174-corpus)
-# Requires: target/clojure-1.13.0-master-SNAPSHOT.jar (do not rebuild
-#   unless missing) plus the spec/test.check jars (same classpath as
-#   docs/t1174/probes/probe.sh).
+# Requires: target/clojure-1.13.0-master-SNAPSHOT.jar plus the
+#   spec/test.check jars (same classpath as
+#   docs/t1174/probes/probe.sh). The jar is a local build artifact
+#   (gitignored) and can no longer be rebuilt from this repo — the
+#   JVM tree was removed; if it is missing, fetch org.clojure/clojure
+#   from Maven Central instead (see the oracle strategy in
+#   docs/t1174/java-removal-checklist.md).
 # Writes: expectations.edn + files.edn (checked in; :ours snapshots and
 #   :exclude marks carried forward), raw dumps + cross-check report
 #   under outdir.
