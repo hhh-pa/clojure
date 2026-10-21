@@ -314,6 +314,33 @@ fn nesting_keeps_deep_unsupported_clean_on_small_stack() {
 }
 
 #[test]
+fn nesting_rejects_backquote_runs_on_small_stack() {
+    // M2: five ticks read 121 deep (rescan phase), eight reject
+    // at the scan — both must diagnose, not overflow, on 1 MB.
+    for (source, want) in [
+        (
+            "`````x".to_owned(),
+            "f.clj:1:1: nesting depth 121 after expansion exceeds the AOT build limit (40)",
+        ),
+        (
+            "````````x".to_owned(),
+            "f.clj:1:6: nesting depth 48 exceeds the AOT build limit (40)",
+        ),
+    ] {
+        std::thread::Builder::new()
+            .stack_size(1 << 20)
+            .spawn(move || {
+                let err = compile_str(&source, "f.clj", &tmp("nope"), &no_emit(), &no_link())
+                    .expect_err("backquote run must diagnose");
+                assert_eq!(err, CompileError::Plan(want.to_owned()));
+            })
+            .expect("spawn")
+            .join()
+            .expect("worker panicked");
+    }
+}
+
+#[test]
 fn nesting_accepts_parens_in_strings() {
     let dir = tmp("nest-str");
     std::fs::create_dir_all(&dir).expect("tmp dir");

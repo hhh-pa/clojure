@@ -258,6 +258,14 @@ fn lift(e: SourceError) -> PlanError {
 /// minimum overflow is 161 levels on a 1 MB debug stack; the
 /// limit sits at a quarter of that (deepest corpus input: 16).
 const MAX_NESTING_DEPTH: usize = 40;
+/// A backtick costs 8: syntax-quote multiplies read-output depth
+/// ~3x per level (measured: 121/364/3280 deep at 5/6/8 ticks, and
+/// exactly 3x+1 over deep content), while every other wrapper is
+/// +1. At weight 8 at most 5 ticks pass the scan, bounding read
+/// output to ~648 deep (drop-safe on every stack, incl. 1 MB
+/// test threads); 6 ticks reject outright. Real code nests at
+/// most 1-2.
+const BACKQUOTE_WEIGHT: usize = 8;
 
 /// Lexer states for the source pre-scan.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -271,10 +279,12 @@ enum ScanMode {
 /// depth before `read_forms` runs, so pathological input fails
 /// with a diagnostic instead of overflowing the reader. Strings,
 /// comments, regex bodies, and char literals are inert; wrapper
-/// runs (`'`, `` ` ``, `~`, `@`, `^`, `#`-dispatch) fold into the
-/// level they prefix. Over-approximates everywhere (a `#` counts
-/// even where the reader takes one frame): near-limit inputs may
-/// reject, deep inputs never pass.
+/// runs (`'`, `~`, `@`, `^`, `#`-dispatch) fold into the level
+/// they prefix at +1 each, except backquote at
+/// [`BACKQUOTE_WEIGHT`] (syntax-quote multiplies read-output
+/// depth ~3x per level). Over-approximates everywhere (a `#`
+/// counts even where the reader takes one frame): near-limit
+/// inputs may reject, deep inputs never pass.
 struct DepthScan {
     mode: ScanMode,
     escaped: bool,
@@ -368,7 +378,8 @@ impl DepthScan {
                 None
             }
             '#' => self.step_hash(rest),
-            '\'' | '`' | '~' | '@' | '^' => self.bump_run(1),
+            '`' => self.bump_run(BACKQUOTE_WEIGHT),
+            '\'' | '~' | '@' | '^' => self.bump_run(1),
             '(' | '[' | '{' => self.open(),
             ')' | ']' | '}' => {
                 self.close();
@@ -2002,6 +2013,27 @@ mod tests {
         assert_eq!(
             DepthScan::scan(&"#::a ".repeat(21)),
             Some((Span::new(1, 104), 42))
+        );
+    }
+
+    #[test]
+    fn nesting_weights_backquote_eightfold() {
+        // M2: each backtick costs 8 (syntax-quote multiplies
+        // read-output depth ~3x per level). Five pass at the
+        // limit; the sixth rejects.
+        assert_eq!(DepthScan::scan("`````x"), None);
+        assert_eq!(DepthScan::scan("``````x"), Some((Span::new(1, 6), 48)));
+    }
+
+    #[test]
+    fn nesting_rejects_backquote_run_at_plan() {
+        // Eight ticks: the pre-scan rejects (no "after expansion"
+        // suffix). Pre-fix the scan passed and only the rescan
+        // caught it at 3280 deep — and ten ticks crashed the
+        // reader outright (see the 1 MB test in emit.rs).
+        assert_eq!(
+            diag("````````x"),
+            "f.clj:1:6: nesting depth 48 exceeds the AOT build limit (40)"
         );
     }
 
