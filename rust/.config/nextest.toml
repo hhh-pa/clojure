@@ -1,0 +1,7 @@
+# JUnit report for the Codecov test-results upload: the
+# quality-gates job uploads rust/target/nextest/default/junit.xml,
+# which cargo-nextest writes only when a junit profile section
+# exists. Default store dir (target/nextest/<profile>/) keeps the
+# stock path, so no workflow change is needed.
+[profile.default.junit]
+path = "junit.xml"
