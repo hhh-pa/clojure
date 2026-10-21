@@ -104,6 +104,56 @@ jobs:
           save-if: 'true'
       - run: cargo test --workspace --locked
 
+  msrv:
+    name: msrv (1.85)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read # checkout
+      actions: write # cargo cache
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.85.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+          save-if: 'true'
+      # S9A D2: LLVM-dependent compilation excluded (inkwell 0.10.0
+      # declares no MSRV); the binary builds --no-default-features
+      # so clj-aot never enters the unit graph.
+      - run: cargo test --locked -p clj-core -p clj-eval -p clj-reader -p clj-repl -p clj-rt -p clj-value
+      - run: cargo test --locked -p clojure-rs --no-default-features
+
+  test-no-default:
+    name: test unlinked (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read # checkout
+      actions: write # cargo cache
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      # Linker only (no setup-llvm): this leg proves the LLVM-free
+      # path, including the unlinked-backend report (R1 residual).
+      - uses: ilammy/msvc-dev-cmd@v1
+        if: runner.os == 'Windows'
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+          save-if: 'true'
+      - run: cargo test --locked --no-default-features -p clojure-rs
+
   quality-gates:
     name: quality gates
     runs-on: ubuntu-latest
