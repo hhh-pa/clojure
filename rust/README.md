@@ -1,8 +1,9 @@
 # clojure-rs: native Clojure in Rust
 
 Rust workspace for [T1174](../docs/t1174/specification.md): a native
-Clojure runtime, REPL, and LLVM AOT compiler. The JVM build at the
-repo root is untouched; this workspace is the native port.
+Clojure runtime, REPL, and LLVM AOT compiler. The JVM implementation
+was removed in PR #11; this workspace is now the sole implementation
+(see the [root README](../README.md)).
 
 ## Prerequisites
 
