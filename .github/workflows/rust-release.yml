@@ -1,9 +1,11 @@
 name: rust-release
 
-# Pushing a `v*` tag builds the `clojure-rs` release binary on Linux,
-# macOS, and Windows and attaches the archives to the GitHub release
-# of the same name (the download page). `workflow_dispatch` runs the
-# same builds without publishing, as a dry run.
+# Pushing a `v*` tag runs the test suite and builds the `clojure-rs`
+# release binary on Linux, macOS, and Windows, and attaches the
+# archives to the GitHub release of the same name (the download
+# page). `workflow_dispatch` runs the same tests+builds without
+# publishing, as a dry run (and as the on-demand macOS check —
+# ordinary CI in rust.yml skips macOS for host capacity).
 #
 # NOTE: this file keeps the longer `rust-release.yml` name for
 # continuity: `release.yml` used to run the Maven JVM release
@@ -23,6 +25,46 @@ permissions:
   contents: read
 
 jobs:
+  # The only macOS test coverage: ordinary CI (rust.yml) runs
+  # Linux/Windows only, so v* tags (and manual dispatches) run the
+  # full suite — workspace plus the LLVM-free unlinked leg — on all
+  # three OSes before anything publishes.
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read # checkout
+      actions: write # cargo cache
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/profile-runner
+        with:
+          cache-key: runner-profile-${{ runner.os }}-${{ hashFiles('.github/actions/profile-runner/**', 'scripts/ci/go/go.mod', 'scripts/ci/go/cmd/runner-profile/**', 'scripts/ci/go/internal/executil/**') }}
+      - uses: ./.github/actions/setup-llvm
+      - uses: dtolnay/rust-toolchain@stable
+      # S8 link tests shell to `link` on Windows: put the MSVC
+      # toolchain (link.exe + INCLUDE/LIB) on PATH first.
+      - uses: ilammy/msvc-dev-cmd@v1
+        if: runner.os == 'Windows'
+      # Cargo registry + target/ cache: warm runs skip crate downloads
+      # and reuse prior compilation. `save-if` forces a save on branch
+      # runs too, so the second push already hits.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+          save-if: 'true'
+      - run: cargo test --workspace --locked
+      # The rust.yml `test unlinked` leg, folded in so the LLVM-free
+      # path keeps its macOS coverage on tags too.
+      - run: cargo test --locked --no-default-features -p clojure-rs
+
   build:
     name: build (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -109,7 +151,7 @@ jobs:
 
   publish:
     name: publish to GitHub release
-    needs: build
+    needs: [build, test]
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     permissions:
