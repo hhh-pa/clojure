@@ -523,29 +523,6 @@ fn macro_shadowing() {
 }
 
 #[test]
-fn s9b_out_of_scope_vars_stay_unresolved() {
-    // S9B D3 resolutions: no custom executors exist, and
-    // `load-reader` needs java.io (N1-adjacent) — all stay unbound
-    // with the classic resolution shape.
-    for (src, name) in [
-        ("(load-reader 1)", "load-reader"),
-        ("(set-agent-send-executor! 1 2)", "set-agent-send-executor!"),
-        (
-            "(set-agent-send-off-executor! 1 2)",
-            "set-agent-send-off-executor!",
-        ),
-    ] {
-        check(
-            src,
-            "Syntax error compiling at (test:1:1).",
-            &format!(
-                "java.lang.RuntimeException | Unable to resolve symbol: {name} in this context"
-            ),
-        );
-    }
-}
-
-#[test]
 fn span_lists_only() {
     // Vectors and maps are span-transparent; only lists rebind the
     // span (probe31 `span-*`).

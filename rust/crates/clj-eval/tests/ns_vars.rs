@@ -983,3 +983,35 @@ fn current_ns_falls_back_on_foreign_star_ns() {
         "#'user/qqq268"
     );
 }
+
+#[test]
+fn s9b_out_of_scope_vars_stay_unresolved() {
+    // S9B: the executor setters + `load-reader` stay unbound. The
+    // absence pin runs under `boot()` (a bare harness would pass
+    // with everything unbound): `resolve` says nil for all three,
+    // and both use positions surface the compile-error shape.
+    let mut eval = boot();
+    for name in [
+        "set-agent-send-executor!",
+        "set-agent-send-off-executor!",
+        "load-reader",
+    ] {
+        assert_eq!(
+            run_last(&mut eval, &format!("(resolve '{name})")),
+            "nil",
+            "{name}"
+        );
+        for src in [format!("({name} 1)"), format!("(identity {name})")] {
+            let Err(SourceError::Compile(e)) = eval.eval_source(&src) else {
+                panic!("expected a compile error for {src}");
+            };
+            assert_eq!(
+                e.to_string(),
+                format!(
+                    "Syntax error compiling at (user:1:1).\njava.lang.RuntimeException | Unable to resolve symbol: {name} in this context"
+                ),
+                "{src}"
+            );
+        }
+    }
+}
