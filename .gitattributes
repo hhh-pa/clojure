@@ -4,3 +4,4 @@
 docs/t1174/s7-corpus/** text eol=lf
 docs/t1174/s8-corpus/** text eol=lf
 rust/tests/fixtures/** text eol=lf
+rust/crates/clj-reader/tests/corpus/inputs/** text eol=lf

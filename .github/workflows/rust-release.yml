@@ -5,9 +5,9 @@ name: rust-release
 # of the same name (the download page). `workflow_dispatch` runs the
 # same builds without publishing, as a dry run.
 #
-# NOTE: this file is `rust-release.yml`, not `release.yml`: that name
-# runs the Maven JVM release ("Release on demand") and must keep
-# working untouched.
+# NOTE: this file keeps the longer `rust-release.yml` name for
+# continuity: `release.yml` used to run the Maven JVM release
+# ("Release on demand"), removed with the JVM tree in T1174.
 on:
   push:
     tags:
