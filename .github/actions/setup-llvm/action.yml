@@ -11,7 +11,7 @@ inputs:
     required: false
     default: "22"
   patch:
-    description: Pinned exact LLVM version (Windows tarball asset).
+    description: Pinned exact LLVM version (Windows + brew-less macOS tarball assets).
     required: false
     default: "22.1.8"
 runs:
@@ -87,8 +87,32 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
-        HOMEBREW_NO_AUTO_UPDATE=1 brew install "llvm@${{ inputs.version }}"
-        dir="$(brew --prefix "llvm@${{ inputs.version }}")"
+        if command -v brew >/dev/null 2>&1; then
+          HOMEBREW_NO_AUTO_UPDATE=1 brew install "llvm@${{ inputs.version }}"
+          dir="$(brew --prefix "llvm@${{ inputs.version }}")"
+        else
+          # No Homebrew (self-hosted overflow runners): official
+          # upstream tarball, same pin, workspace-local like the
+          # Windows path (no admin). Upstream ships macOS binaries
+          # for ARM64 only; Intel without brew is unsupported.
+          V="${{ inputs.patch }}"
+          if [ "${{ runner.arch }}" != 'ARM64' ]; then
+            echo 'setup-llvm: no Homebrew and no upstream macOS tarball for this arch (ARM64-only); install Homebrew' >&2
+            exit 1
+          fi
+          asset="LLVM-$V-macOS-ARM64.tar.xz"
+          dir="$GITHUB_WORKSPACE/.llvm-cache/llvm-$V"
+          rm -rf "$dir"
+          mkdir -p "$dir"
+          curl -sSLf --retry 3 -o /tmp/llvm-macos.tar.xz \
+            "https://github.com/llvm/llvm-project/releases/download/llvmorg-$V/$asset"
+          test -s /tmp/llvm-macos.tar.xz
+          tar -xJf /tmp/llvm-macos.tar.xz -C "$dir" --strip-components=1
+          rm /tmp/llvm-macos.tar.xz
+          xattr -dr com.apple.quarantine "$dir" 2>/dev/null || true
+          echo "--- key tools:"; ls "$dir/bin" | grep -iE '^(llvm-config|clang|lld)' || true
+          test -x "$dir/bin/llvm-config"
+        fi
         "$dir/bin/llvm-config" --version | grep -q '^22\.1\.'
         echo "$dir/bin" >> "$GITHUB_PATH"
         echo "LLVM_SYS_221_PREFIX=$dir" >> "$GITHUB_ENV"
