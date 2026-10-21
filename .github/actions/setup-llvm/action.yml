@@ -34,7 +34,9 @@ runs:
     # ${{ env.VCPKG_INSTALLATION_ROOT }}: that variable is unset on
     # GitHub runners (only the run-vcpkg action defines it), so the
     # env form renders to a nonexistent absolute path and silently
-    # caches nothing.
+    # caches nothing. Entries are versioned by the path list itself:
+    # editing the paths below invalidates saved caches (one slow
+    # rebuild per fleet baseline, then warm again).
     - if: runner.os == 'Windows'
       id: vcpkg-baseline
       shell: bash

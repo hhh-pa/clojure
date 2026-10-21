@@ -149,5 +149,10 @@ The concurrency code ships with argument-only validation today
   `VCPKG_INSTALLATION_ROOT` renders empty on GitHub runners
   (verified in the log: cache held only the ~10 MB archives),
   so the paths use the baseline step's resolved `dir` output;
-  warm run then skips vcpkg (cold 8.3 min → warm 317 ms even
-  before the skip engaged).
+  verified by rerun: exact hit on the 77 MB full cache prints
+  `reusing cached vcpkg installed tree` and vcpkg never runs
+  (cold 6.9–8.3 min → warm ~0 s; even archives-only fallback
+  restores in 317 ms). Note: actions/cache versions entries by
+  the path list, so the path fix itself invalidated the old
+  entry — and the fleet carries multiple vcpkg baselines at
+  once, hence one slow rebuild per baseline before warm.
