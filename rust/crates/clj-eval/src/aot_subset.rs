@@ -39,6 +39,7 @@ use std::iter::Peekable;
 use std::str::Chars;
 use std::sync::Arc;
 
+use clj_reader::symbol::{is_terminating_macro, is_whitespace};
 use clj_reader::{ReaderError, Span};
 use clj_value::{PrintOpts, Symbol, Throwable, Value, pr_to_string};
 
@@ -426,9 +427,15 @@ impl DepthScan {
         }
     }
 
-    /// Consume a tag/alias letter-run (`#inst`, `#:person`).
+    /// Consume a tag/alias token exactly as the reader does:
+    /// until EOF, whitespace, or a terminating macro (the
+    /// `read_token` rule, same predicates, so the two can never
+    /// drift apart). The `step_hash` bump then survives to the
+    /// form for every spellable tag (`#a-1`, `#::alias`,
+    /// `#:a-1`); stopping early would reset the run on the first
+    /// non-alpha char and under-count stacked tags.
     fn skip_tag(&mut self, rest: &mut Peekable<Chars<'_>>) {
-        while matches!(rest.peek(), Some(ch) if ch.is_alphabetic()) {
+        while matches!(rest.peek(), Some(ch) if !is_whitespace(*ch) && !is_terminating_macro(*ch)) {
             rest.next();
             self.col += 1;
         }
@@ -1953,6 +1960,40 @@ mod tests {
     #[test]
     fn nesting_counts_namespaced_maps() {
         assert_eq!(DepthScan::scan("#:person{:name \"x\"}"), None);
+    }
+
+    #[test]
+    fn nesting_counts_stacked_hyphen_tags() {
+        // H1: the bump must survive `-` (the old letter-run skip
+        // reset on it, so stacked `#a-1` tags measured ~2 while the
+        // reader recursed per tag). Each tag costs 2: 20 pass at
+        // the limit, the 21st rejects.
+        assert_eq!(DepthScan::scan(&"#a-1 ".repeat(20)), None);
+        assert_eq!(
+            DepthScan::scan(&"#a-1 ".repeat(21)),
+            Some((Span::new(1, 104), 42))
+        );
+    }
+
+    #[test]
+    fn nesting_counts_double_colon_aliases() {
+        // The second `:` is tag-internal (reader token), not a reset.
+        assert_eq!(DepthScan::scan(&"#::a ".repeat(20)), None);
+        assert_eq!(
+            DepthScan::scan(&"#::a ".repeat(21)),
+            Some((Span::new(1, 104), 42))
+        );
+    }
+
+    #[test]
+    fn nesting_rejects_stacked_tags_at_plan() {
+        // 200 stacked tags: the pre-scan rejects (no "after
+        // expansion" suffix). Pre-fix the scan passed and only the
+        // rescan caught it — and 20000 crashed the reader outright.
+        assert_eq!(
+            diag(&"#a-1 ".repeat(200)),
+            "f.clj:1:104: nesting depth 42 exceeds the AOT build limit (40)"
+        );
     }
 
     #[test]
