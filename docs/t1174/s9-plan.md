@@ -116,4 +116,12 @@ The concurrency code ships with argument-only validation today
 
 ## Deltas (recorded as they land)
 
-- (none yet)
+- S9A rustyline pin: rustyline 19 needs rustc 1.88+
+  (`cfg_select`, `file_lock`, let-chains in its own sources) and
+  its minimal-feature builds don't compile, so `clj-repl` pins
+  `=17.0.2` (default features; keeps `home` 0.5.11-compatible).
+  All repl tests pass unmodified on 17. Revisit if rustyline
+  declares an MSRV.
+- S9A own-code fallout from the 1.85 floor, all fixed: `as_chunks`
+  → `chunks_exact` (io.rs), two let-chains → nested `if`s
+  (expr.rs, lazy.rs) in coverage-neutral form.

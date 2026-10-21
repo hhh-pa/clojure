@@ -13,6 +13,8 @@ workspace = true
 clj-eval = { path = "../clj-eval" }
 clj-reader = { path = "../clj-reader" }
 clj-value = { path = "../clj-value" }
-# Minimal features (S9A MSRV): `with-dirs` pulls `home 0.5.12`
-# (rustc 1.88+), which we never touch — file history only.
-rustyline = { version = "19.0.0", default-features = false, features = ["with-file-history"] }
+# Pinned to 17.x (S9A MSRV): rustyline 19 needs rustc 1.88+
+# (`cfg_select`, `file_lock`, let-chains in its own sources) and
+# its minimal-feature builds don't compile; 17 keeps `home`
+# 0.5.11-compatible too. Revisit if rustyline declares an MSRV.
+rustyline = "=17.0.2"
