@@ -9,12 +9,12 @@ allow = [
     "MIT",
     "Apache-2.0",
     "Apache-2.0 WITH LLVM-exception",
-    "BSD-3-Clause",
     "BSL-1.0",
     "Unicode-3.0",
     "Unlicense",
-    "Zlib",
 ]
+# (S9A: BSD-3-Clause + Zlib allowances pruned — no longer
+# encountered after the rustyline 17 pin dropped that subtree.)
 [licenses.private]
 ignore = true
 [bans]
@@ -22,7 +22,24 @@ multiple-versions = "deny"
 # wildcards = allow: duplicate versions (the costly half of bans)
 # are still denied above.
 wildcards = "allow"
-skip = []
+# S9A MSRV split (Windows-target-only, never compiled on other
+# platforms): the rustyline 17 pin needs windows-sys ^0.60.2
+# directly while its fd-lock dependency caps windows-sys <0.60,
+# so both 0.59.0 and 0.60.2 must coexist; no fd-lock version
+# allows >= 0.60 and every rustyline >= 14 needs fd-lock. The
+# older side of each pair is skipped below.
+skip = [
+    { name = "windows-sys", version-req = "=0.59.0", reason = "S9A MSRV split, Windows-only" },
+    { name = "windows-targets", version-req = "=0.52.6", reason = "S9A MSRV split, Windows-only" },
+    { name = "windows_aarch64_gnullvm", version-req = "=0.52.6", reason = "S9A MSRV split, Windows-only" },
+    { name = "windows_aarch64_msvc", version-req = "=0.52.6", reason = "S9A MSRV split, Windows-only" },
+    { name = "windows_i686_gnu", version-req = "=0.52.6", reason = "S9A MSRV split, Windows-only" },
+    { name = "windows_i686_gnullvm", version-req = "=0.52.6", reason = "S9A MSRV split, Windows-only" },
+    { name = "windows_i686_msvc", version-req = "=0.52.6", reason = "S9A MSRV split, Windows-only" },
+    { name = "windows_x86_64_gnu", version-req = "=0.52.6", reason = "S9A MSRV split, Windows-only" },
+    { name = "windows_x86_64_gnullvm", version-req = "=0.52.6", reason = "S9A MSRV split, Windows-only" },
+    { name = "windows_x86_64_msvc", version-req = "=0.52.6", reason = "S9A MSRV split, Windows-only" },
+]
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"
