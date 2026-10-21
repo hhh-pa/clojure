@@ -162,6 +162,7 @@ jobs:
       contents: read # checkout
       actions: write # coverage artifact + GHA image cache
       pull-requests: write # sticky coverage comment
+      id-token: write # codecov OIDC upload auth (no stored token)
     env:
       # Image repo for the cached gate image (public, so pulls stay
       # anonymous). Override with the GATE_IMAGE repo variable; pushes need
@@ -311,7 +312,10 @@ jobs:
         if: always() && hashFiles('rust/target/llvm-cov/lcov.info') != ''
         uses: codecov/codecov-action@v7
         with:
-          token: ${{ secrets.CODECOV_TOKEN }}
+          # OIDC, not a stored token: the only available token was a
+          # personal-account one that Codecov cannot map to this repo
+          # ("Repository not found"). Needs id-token: write above.
+          use_oidc: true
           files: rust/target/llvm-cov/lcov.info
           # Else the action also sweeps up go testdata fixtures and
           # stray files (it found 10); only the explicit file counts.
@@ -321,7 +325,7 @@ jobs:
         if: ${{ !cancelled() && hashFiles('rust/target/nextest/default/junit.xml') != '' }}
         uses: codecov/codecov-action@v7
         with:
-          token: ${{ secrets.CODECOV_TOKEN }}
+          use_oidc: true
           files: rust/target/nextest/default/junit.xml
           report_type: test_results
           disable_search: true
