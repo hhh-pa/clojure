@@ -8,7 +8,15 @@ on:
     - cron: "30 5 * * *"
   # Manual full runs (same unfiltered matrix as the schedule).
   workflow_dispatch:
+  # PR branches run via pull_request only: an unfiltered push trigger
+  # fires a twin run on every PR push, and the concurrency group then
+  # murders one twin — doubling queue pressure and leaving
+  # cancelled-duplicate (corpse) check rows beside every green row.
+  # Branches without a PR get no runs until one opens (dispatch
+  # covers branch-only validation); tags never trigger here
+  # (rust-release.yml owns v*).
   push:
+    branches: [master]
     paths:
       - "rust/**"
       - "scripts/ci/**"
@@ -29,10 +37,10 @@ on:
       - "docs/t1174/models/**"
 
 # One run per branch at a time: a new push supersedes in-flight runs
-# (the same head would otherwise run twice — push + pull_request —
-# and rapid rounds pile up behind slow platform runners, starving
-# macOS). PR and push events share the group via head_ref/ref_name;
-# master serializes.
+# (rapid rounds would otherwise pile up behind slow platform
+# runners, starving macOS). PR and push events share the group via
+# head_ref/ref_name; master serializes. (Push is master-only since
+# the trigger dedupe, so twin runs can no longer occur.)
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
   cancel-in-progress: true
