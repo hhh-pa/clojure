@@ -230,3 +230,16 @@ The concurrency code ships with argument-only validation today
   written down); `*print-dup*` was already in s5d-contract.
   Java-removal readiness checklist:
   `docs/t1174/java-removal-checklist.md`.
+- PR #10 R1 L1/L2/L6 (patch gate): coverage-patch fails closed on
+  a non-empty diff without `diff --git` headers (exit 1, `refusing
+  vacuous pass`) instead of blessing zero added lines, and prints
+  a `parsed N added lines in M files` count line on every run
+  (all goldens +1 line; headerless.diff/golden pin the refusal).
+  The rust-quality-gates stub harness now builds coverage-patch
+  and runs a `patch-pass` case end to end via a staged
+  `STUB_PATCH` diff; a patch-fail stub is unconstructible (the
+  100% floor runs first and every patch line sits in its
+  denominator), so the fail path stays pinned by
+  coverage-patch's own golden. `-U0`/git-format requirement
+  documented in the rust.yml patch step, the package doc, and
+  testdata/README.md.

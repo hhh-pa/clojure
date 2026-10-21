@@ -1,3 +1,4 @@
+coverage patch: parsed 5 added lines in 2 files
 coverage patch: 25.00% lines (1/4, 2 files) vs 100.00% floor (patch.lcov vs fail.diff)
 per-file table (lowest first):
     0.00%     0/1     rust/crates/clj-eval/src/b.rs

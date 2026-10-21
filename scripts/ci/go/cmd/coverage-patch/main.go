@@ -3,6 +3,12 @@
 // new/changed lines can never land dark). Added lines without a DA
 // record are not coverable (comments, blanks, decls) and stay out
 // of the denominator, like Codecov patch coverage.
+//
+// The diff must be git-format (`git diff --unified=0 ...`, as the
+// rust.yml patch step produces): a non-empty diff without `diff
+// --git` headers fails closed instead of passing vacuously, so a
+// future workflow change that alters the diff format can never
+// silently disable the gate.
 package main
 
 import (
@@ -154,8 +160,41 @@ func run(argv []string) int {
 		fmt.Printf("coverage patch: %s not found\n", diffPath)
 		return 1
 	}
+	diffString := string(diffText)
+	// Fail closed on headerless input (L1): without `diff --git`
+	// headers parseDiff yields zero added lines, which the vacuous-OK
+	// path below would bless. A blank diff stays a pass (the
+	// intentional no-rust-changes case); anything else must be a git
+	// unified diff. The prefix mirrors parseDiff exactly, so no input
+	// the parser accepts is rejected here.
+	headers := 0
+	for _, line := range strings.Split(diffString, "\n") {
+		if strings.HasPrefix(line, "diff --git ") {
+			headers++
+		}
+	}
+	if headers == 0 && strings.TrimSpace(diffString) != "" {
+		fmt.Printf("coverage patch: %s holds no `diff --git` headers; refusing vacuous pass (regenerate with `git diff --unified=0`; see the patch step in rust.yml)\n", diffPath)
+		return 1
+	}
 	files := lcov.ParseDA(string(lcovText))
-	added := parseDiff(string(diffText))
+	added := parseDiff(diffString)
+	nlines, nfiles := 0, 0
+	for _, lines := range added {
+		if len(lines) == 0 {
+			continue
+		}
+		nfiles++
+		nlines += len(lines)
+	}
+	lineWord, fileWord := "lines", "files"
+	if nlines == 1 {
+		lineWord = "line"
+	}
+	if nfiles == 1 {
+		fileWord = "file"
+	}
+	fmt.Printf("coverage patch: parsed %d added %s in %d %s\n", nlines, lineWord, nfiles, fileWord)
 	var rows []row
 	var dark []darkLine
 	hit, tot := 0, 0

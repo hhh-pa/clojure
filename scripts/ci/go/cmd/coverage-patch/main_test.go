@@ -19,6 +19,7 @@ func TestGoldenPaths(t *testing.T) {
 		{"fail", []string{"patch.lcov", "fail.diff", "100"}, 1, "testdata"},
 		{"default-floor", []string{"patch.lcov", "fail.diff"}, 1, "testdata"},
 		{"empty", []string{"patch.lcov", "empty.diff"}, 0, "testdata"},
+		{"headerless", []string{"patch.lcov", "headerless.diff"}, 1, "testdata"},
 		{"usage", nil, 2, "testdata"},
 		{"usage-many", []string{"a", "b", "c", "d"}, 2, "testdata"},
 		{"badfloor", []string{"patch.lcov", "pass.diff", "xx"}, 2, "testdata"},

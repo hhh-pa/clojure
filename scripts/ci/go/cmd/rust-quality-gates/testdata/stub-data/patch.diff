@@ -1,0 +1,6 @@
+diff --git a/src/a.rs b/src/a.rs
+--- a/src/a.rs
++++ b/src/a.rs
+@@ -1,0 +1,2 @@
++one
++two

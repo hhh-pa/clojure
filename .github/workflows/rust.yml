@@ -348,6 +348,11 @@ jobs:
       # suffices (cheap, no history). `git diff` exits 1 when
       # differences exist — only >1 is a failure. On master the diff
       # is empty and the patch gate passes vacuously.
+      # Keep the `git diff --unified=0` format: coverage-patch fails
+      # closed on a non-empty diff without `diff --git` headers
+      # (refusing a vacuous pass), so piping this through a filter
+      # that strips headers or switching to plain `diff -u` would
+      # red the gate rather than silently disable it.
       - name: compute patch diff
         run: |
           git fetch origin "${{ github.base_ref || 'master' }}" --depth=1 --quiet
