@@ -46,6 +46,29 @@ permissions:
   contents: read
 
 jobs:
+  # Overflow router for the macOS legs (test, test-no-default,
+  # build-release). Steady state is GitHub-hosted: with the repo
+  # variable MACOS_RUNS_ON unset, every leg resolves exactly as
+  # before. When hosted macOS is starved, set MACOS_RUNS_ON to a
+  # JSON label array — e.g. ["self-hosted","macOS","ARM64"] for the
+  # mini — with no commit, and delete the variable (or set
+  # ["macos-latest"]) when hosted recovers. needs+fromJSON in
+  # runs-on is the documented dynamic-labels pattern (`vars` cannot
+  # be read directly in runs-on).
+  router:
+    name: router
+    runs-on: ubuntu-latest
+    permissions: {}
+    outputs:
+      macos: ${{ steps.r.outputs.macos }}
+    steps:
+      - id: r
+        run: |
+          if [ -n "${{ vars.MACOS_RUNS_ON }}" ]; then
+            echo 'macos=${{ vars.MACOS_RUNS_ON }}' >> "$GITHUB_OUTPUT"
+          else
+            echo 'macos=["macos-latest"]' >> "$GITHUB_OUTPUT"
+          fi
   fmt-clippy:
     name: fmt + clippy
     runs-on: ubuntu-latest
@@ -76,7 +99,8 @@ jobs:
 
   test:
     name: test (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
+    needs: [router]
+    runs-on: ${{ matrix.os == 'macos-latest' && fromJSON(needs.router.outputs.macos) || matrix.os }}
     permissions:
       contents: read # checkout
       actions: write # cargo cache
@@ -133,7 +157,8 @@ jobs:
 
   test-no-default:
     name: test unlinked (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
+    needs: [router]
+    runs-on: ${{ matrix.os == 'macos-latest' && fromJSON(needs.router.outputs.macos) || matrix.os }}
     permissions:
       contents: read # checkout
       actions: write # cargo cache
@@ -443,7 +468,8 @@ jobs:
   # commit's build can be fetched without cutting a tag release.
   build-release:
     name: release (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
+    needs: [router]
+    runs-on: ${{ matrix.os == 'macos-latest' && fromJSON(needs.router.outputs.macos) || matrix.os }}
     permissions:
       contents: read # checkout
       actions: write # artifact upload
