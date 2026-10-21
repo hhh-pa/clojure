@@ -1,0 +1,11 @@
+diff --git a/rust/crates/clj-eval/src/a.rs b/rust/crates/clj-eval/src/a.rs
+--- a/rust/crates/clj-eval/src/a.rs
++++ b/rust/crates/clj-eval/src/a.rs
+@@ -2,1 +2,0 @@
+-two
+\ No newline at end of file
+diff --git a/rust/other/src/z.rs b/rust/other/src/z.rs
+--- a/rust/other/src/z.rs
++++ /dev/null
+@@ -1,2 +0,0 @@
+-gone

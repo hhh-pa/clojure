@@ -1,0 +1,14 @@
+diff --git a/rust/crates/clj-eval/src/a.rs b/rust/crates/clj-eval/src/a.rs
+--- a/rust/crates/clj-eval/src/a.rs
++++ b/rust/crates/clj-eval/src/a.rs
+@@ -0,0 +1,2 @@
++one
++two
+@@ -3,0 +4,2 @@
++four
++ninety-nine
+diff --git a/rust/crates/clj-eval/src/b.rs b/rust/crates/clj-eval/src/b.rs
+--- a/rust/crates/clj-eval/src/b.rs
++++ b/rust/crates/clj-eval/src/b.rs
+@@ -10,1 +11,1 @@
++eleven
