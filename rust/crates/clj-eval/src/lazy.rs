@@ -2410,10 +2410,11 @@ pub(crate) fn next_value(eval: &mut Evaluator, v: &Value) -> Result<Value, Signa
     match &rest {
         Value::List(l) if l.is_empty() => Ok(Value::Nil),
         _ => {
-            if let Some(p) = as_pending(&rest)
-                && matches!(force_pending(eval, p)?, Forced::Empty)
-            {
-                return Ok(Value::Nil);
+            // (Nested `if`, not a let-chain: MSRV 1.85.)
+            if let Some(p) = as_pending(&rest) {
+                if matches!(force_pending(eval, p)?, Forced::Empty) {
+                    return Ok(Value::Nil);
+                }
             }
             Ok(rest)
         }

@@ -286,7 +286,8 @@ pub enum Expr {
 }
 
 /// JVM classes used by analyzer causes.
-mod class {
+pub(crate) mod class {
+    pub const STACK_OVERFLOW: &str = "java.lang.StackOverflowError";
     pub const RUNTIME: &str = "java.lang.RuntimeException";
     pub const ILLEGAL_ARG: &str = "java.lang.IllegalArgumentException";
     pub const ILLEGAL_STATE: &str = "java.lang.IllegalStateException";
@@ -598,6 +599,11 @@ pub struct Analyzer<'a> {
     recur: Option<usize>,
     no_recur: bool,
     eval_seq: u64,
+    /// Current analyze nesting (siblings share levels via inc/dec).
+    depth: usize,
+    /// Plan-path recursion budget (`None` on the run path, which
+    /// keeps today's unbounded behavior).
+    limit: Option<usize>,
 }
 
 impl<'a> Analyzer<'a> {
@@ -605,6 +611,7 @@ impl<'a> Analyzer<'a> {
     /// (`eval_seq` numbers the form for anonymous-`fn` display
     /// names).
     pub fn new(source: &Arc<str>, eval: &'a mut Evaluator, eval_seq: u64) -> Self {
+        let limit = eval.analyze_depth_limit;
         Self {
             source: Arc::clone(source),
             eval,
@@ -612,6 +619,8 @@ impl<'a> Analyzer<'a> {
             recur: None,
             no_recur: false,
             eval_seq,
+            depth: 0,
+            limit,
         }
     }
 
@@ -634,8 +643,37 @@ impl<'a> Analyzer<'a> {
     }
 
     /// Analyze one form (`fallback` = enclosing span; `tail` = tail
-    /// position for `recur`).
+    /// position for `recur`). On the plan path (`limit` set) the
+    /// nesting trips before the machine stack does: analyze-time
+    /// macroexpansion can deepen forms the rescan measured
+    /// shallow, so the budget is enforced here, at every level.
     pub fn analyze(
+        &mut self,
+        form: &Value,
+        fallback: Span,
+        tail: bool,
+    ) -> Result<Expr, CompileError> {
+        // Refuse to descend past the limit (`depth` counts live
+        // ancestors: a 40-deep nest analyzes its leaf at depth 40,
+        // so `> limit` trips exactly where `value_depth` would).
+        if matches!(self.limit, Some(limit) if self.depth > limit) {
+            let span = analyze_span(form, fallback);
+            return Err(self.err(
+                class::STACK_OVERFLOW,
+                "maximum analyzer depth exceeded".to_owned(),
+                span,
+                Verb::Compiling,
+                None,
+            ));
+        }
+        self.depth += 1;
+        let out = self.analyze_inner(form, fallback, tail);
+        self.depth -= 1;
+        out
+    }
+
+    /// The analyze body (see [`Analyzer::analyze`] for the budget).
+    fn analyze_inner(
         &mut self,
         form: &Value,
         fallback: Span,
@@ -814,7 +852,18 @@ impl<'a> Analyzer<'a> {
         // Macro expansion (`analyzeSeq` order: specials, then
         // macros): an expanded form re-analyzes from the top.
         if let Some(expanded) = self.try_expand_macro(form, head, &items[1..], span)? {
-            return self.analyze(&expanded, span, tail);
+            let out = self.analyze(&expanded, span, tail);
+            // B1: macro outputs are the one unbounded-depth class
+            // (30k threading steps build 30k-deep output). Dropping
+            // one recurses per level and can overflow _during
+            // unwinding_ — after the budget already tripped. On the
+            // plan path the build fails right after this either
+            // way, so leak the output instead of dropping it; the
+            // run path is untouched (no budget, same as before).
+            if out.is_err() && self.limit.is_some() {
+                std::mem::forget(expanded);
+            }
+            return out;
         }
         // Private cross-namespace invocation (the `isInline`
         // analog): the wrapper names the operator as written, the
@@ -2841,17 +2890,18 @@ impl<'a> Analyzer<'a> {
     /// The optional `case*` skip set (absent or `nil` means empty).
     fn parse_case_star_skip(&self, items: &[&Value], span: Span) -> Result<Vec<i32>, CompileError> {
         let mut skip = Vec::new();
-        if let Some(s) = items.get(8).copied()
-            && !matches!(s, Value::Nil)
-        {
-            let Value::Set(set) = s else {
-                return Err(self.spec_error("clojure.core/case*", span));
-            };
-            for v in set.iter() {
-                let Some(k) = Self::case_star_int(v) else {
+        // (Nested `if`, not a let-chain: MSRV 1.85.)
+        if let Some(s) = items.get(8).copied() {
+            if !matches!(s, Value::Nil) {
+                let Value::Set(set) = s else {
                     return Err(self.spec_error("clojure.core/case*", span));
                 };
-                skip.push(k);
+                for v in set.iter() {
+                    let Some(k) = Self::case_star_int(v) else {
+                        return Err(self.spec_error("clojure.core/case*", span));
+                    };
+                    skip.push(k);
+                }
             }
         }
         Ok(skip)

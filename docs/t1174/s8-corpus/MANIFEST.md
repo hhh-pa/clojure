@@ -27,6 +27,12 @@ pins `s8-pins.md`). Truth source: `s8-pins.md` (P1–P5).
   reports the raw reader message (`{path}:1:2: Unmatched
   delimiter: )`) WITHOUT `run`'s load-file wrapper
   (`Syntax error reading source: ...`) — pinned divergence.
+- `unsupported/19-nesting` (S9C/S9E): 41-deep input — one past
+  the AOT build limit of 40. `run` still works (exit 0,
+  `.runout` stdout — the JVM prints the same `1`); `build`
+  exits 1 with the verbatim nesting diagnostic (no `build: `
+  prefix), pinning the boundary instead of overflowing the
+  machine stack at compile time.
 
 ## Oracle recipes
 
@@ -59,6 +65,9 @@ $B build NN-topic.clj -o /tmp/s8/NN && /tmp/s8/NN | diff - expected/NN-topic.out
   `.runout` stdout.
 - 17/18: exit 1 both paths; 17 byte-identical to `run`,
   18 modulo the load wrapper (above).
+- 19: `run` exit 0 with `.runout` stdout; `build` exit 1,
+  stderr exactly `{path}:1:164: nesting depth 41 exceeds the
+  AOT build limit (40)` (verbatim — no `build: ` prefix).
 
 ## Programs
 

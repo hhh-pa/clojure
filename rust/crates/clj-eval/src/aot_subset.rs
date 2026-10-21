@@ -35,8 +35,11 @@
 //! admits no dead arms).
 
 use std::collections::HashMap;
+use std::iter::Peekable;
+use std::str::Chars;
 use std::sync::Arc;
 
+use clj_reader::symbol::{is_terminating_macro, is_whitespace};
 use clj_reader::{ReaderError, Span};
 use clj_value::{PrintOpts, Symbol, Throwable, Value, pr_to_string};
 
@@ -195,6 +198,11 @@ pub enum PlanError {
     Uncaught(Throwable),
     Internal(String),
     Subset(SubsetError),
+    Depth {
+        span: Span,
+        depth: usize,
+        expanded: bool,
+    },
 }
 
 impl PlanError {
@@ -217,6 +225,17 @@ impl PlanError {
                 "{path}:{}:{}: unsupported form in AOT subset: {} ({})",
                 e.span.line, e.span.col, e.form, e.hint
             ),
+            Self::Depth {
+                span,
+                depth,
+                expanded,
+            } => {
+                let after = if *expanded { " after expansion" } else { "" };
+                format!(
+                    "{path}:{}:{}: nesting depth {depth}{after} exceeds the AOT build limit ({MAX_NESTING_DEPTH})",
+                    span.line, span.col
+                )
+            }
         }
     }
 }
@@ -233,10 +252,322 @@ fn lift(e: SourceError) -> PlanError {
     }
 }
 
+/// Max nesting depth accepted by `build` (S9C): the reader,
+/// analyzer, and lowering all recurse per nesting level on the
+/// calling thread, and Rust stack overflow aborts. Probed
+/// minimum overflow is 161 levels on a 1 MB debug stack; the
+/// limit sits at a quarter of that (deepest corpus input: 16).
+const MAX_NESTING_DEPTH: usize = 40;
+/// A backtick costs 8: syntax-quote multiplies read-output depth
+/// ~3x per level (measured: 121/364/3280 deep at 5/6/8 ticks, and
+/// exactly 3x+1 over deep content), while every other wrapper is
+/// +1. At weight 8 at most 5 ticks pass the scan, bounding read
+/// output to ~648 deep (drop-safe on every stack, incl. 1 MB
+/// test threads); 6 ticks reject outright. Real code nests at
+/// most 1-2.
+const BACKQUOTE_WEIGHT: usize = 8;
+
+/// Lexer states for the source pre-scan.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ScanMode {
+    Code,
+    Str,
+    Comment,
+}
+
+/// Lexer-aware source nesting scan (S9C): measures max delimiter
+/// depth before `read_forms` runs, so pathological input fails
+/// with a diagnostic instead of overflowing the reader. Strings,
+/// comments, regex bodies, and char literals are inert; wrapper
+/// runs (`'`, `~`, `@`, `^`, `#`-dispatch) fold into the level
+/// they prefix at +1 each, except backquote at
+/// [`BACKQUOTE_WEIGHT`] (syntax-quote multiplies read-output
+/// depth ~3x per level). Over-approximates everywhere (a `#`
+/// counts even where the reader takes one frame): near-limit
+/// inputs may reject, deep inputs never pass.
+struct DepthScan {
+    mode: ScanMode,
+    escaped: bool,
+    base: usize,
+    run: usize,
+    folds: Vec<usize>,
+    line: u32,
+    col: u32,
+}
+
+impl DepthScan {
+    /// Scan `text`, returning the crossing position and depth when
+    /// nesting exceeds [`MAX_NESTING_DEPTH`].
+    fn scan(text: &str) -> Option<(Span, usize)> {
+        let mut scan = Self {
+            mode: ScanMode::Code,
+            escaped: false,
+            base: 0,
+            run: 0,
+            folds: Vec::new(),
+            line: 1,
+            col: 1,
+        };
+        let mut chars = text.chars().peekable();
+        while let Some(ch) = chars.next() {
+            if let Some(hit) = scan.step(ch, &mut chars) {
+                return Some(hit);
+            }
+            scan.advance(ch);
+        }
+        None
+    }
+
+    fn span(&self) -> Span {
+        Span::new(self.line, self.col)
+    }
+
+    fn advance(&mut self, ch: char) {
+        if ch == '\n' {
+            self.line += 1;
+            self.col = 1;
+        } else {
+            self.col += 1;
+        }
+    }
+
+    fn step(&mut self, ch: char, rest: &mut Peekable<Chars<'_>>) -> Option<(Span, usize)> {
+        match self.mode {
+            ScanMode::Str => {
+                self.step_str(ch);
+                None
+            }
+            ScanMode::Comment => {
+                self.step_comment(ch);
+                None
+            }
+            ScanMode::Code => self.step_code(ch, rest),
+        }
+    }
+
+    fn step_str(&mut self, ch: char) {
+        if self.escaped {
+            self.escaped = false;
+        } else if ch == '\\' {
+            self.escaped = true;
+        } else if ch == '"' {
+            self.mode = ScanMode::Code;
+            self.run = 0;
+        }
+    }
+
+    fn step_comment(&mut self, ch: char) {
+        if ch == '\n' {
+            self.mode = ScanMode::Code;
+        }
+    }
+
+    fn step_code(&mut self, ch: char, rest: &mut Peekable<Chars<'_>>) -> Option<(Span, usize)> {
+        match ch {
+            '"' => {
+                self.mode = ScanMode::Str;
+                None
+            }
+            ';' => {
+                self.mode = ScanMode::Comment;
+                None
+            }
+            '\\' => {
+                self.skip_char(rest);
+                self.run = 0;
+                None
+            }
+            '#' => self.step_hash(rest),
+            '`' => self.bump_run(BACKQUOTE_WEIGHT),
+            '\'' | '~' | '@' | '^' => self.bump_run(1),
+            '(' | '[' | '{' => self.open(),
+            ')' | ']' | '}' => {
+                self.close();
+                None
+            }
+            _ if ch.is_whitespace() || ch == ',' => None,
+            _ => {
+                self.run = 0;
+                None
+            }
+        }
+    }
+
+    /// A char literal: exactly one char is consumed (a letter-run
+    /// like `newline` holds no delimiters, so skipping one
+    /// suffices).
+    fn skip_char(&mut self, rest: &mut Peekable<Chars<'_>>) {
+        if let Some(next) = rest.next() {
+            if next == '\n' {
+                self.line += 1;
+                self.col = 1;
+            } else {
+                self.col += 1;
+            }
+        }
+    }
+
+    /// A `#` dispatch: over-counted by up to a frame (safe
+    /// direction). A lone `#` (gensym `x#`, or reader-invalid) is
+    /// inert.
+    fn step_hash(&mut self, rest: &mut Peekable<Chars<'_>>) -> Option<(Span, usize)> {
+        match rest.peek() {
+            Some('"') => {
+                rest.next();
+                self.col += 1;
+                self.mode = ScanMode::Str;
+                self.bump_run(2)
+            }
+            Some('(') | Some('{') => self.bump_run(2),
+            Some('\'') | Some('_') | Some('?') => {
+                rest.next();
+                self.col += 1;
+                self.bump_run(2)
+            }
+            Some(':') => {
+                rest.next();
+                self.col += 1;
+                self.skip_tag(rest);
+                self.bump_run(2)
+            }
+            Some(ch) if ch.is_alphabetic() => {
+                self.skip_tag(rest);
+                self.bump_run(2)
+            }
+            _ => None,
+        }
+    }
+
+    /// Consume a tag/alias token exactly as the reader does:
+    /// until EOF, whitespace, or a terminating macro (the
+    /// `read_token` rule, same predicates, so the two can never
+    /// drift apart). The `step_hash` bump then survives to the
+    /// form for every spellable tag (`#a-1`, `#::alias`,
+    /// `#:a-1`); stopping early would reset the run on the first
+    /// non-alpha char and under-count stacked tags.
+    fn skip_tag(&mut self, rest: &mut Peekable<Chars<'_>>) {
+        while matches!(rest.peek(), Some(ch) if !is_whitespace(*ch) && !is_terminating_macro(*ch)) {
+            rest.next();
+            self.col += 1;
+        }
+    }
+
+    /// Add wrapper levels, bailing past the limit.
+    fn bump_run(&mut self, n: usize) -> Option<(Span, usize)> {
+        self.run += n;
+        let depth = self.base + self.run;
+        if depth > MAX_NESTING_DEPTH {
+            Some((self.span(), depth))
+        } else {
+            None
+        }
+    }
+
+    /// Open a level, folding the pending wrapper run into it (the
+    /// fold pops with the matching closer).
+    fn open(&mut self) -> Option<(Span, usize)> {
+        let depth = self.base + self.run + 1;
+        if depth > MAX_NESTING_DEPTH {
+            return Some((self.span(), depth));
+        }
+        self.folds.push(self.run);
+        self.base = depth;
+        self.run = 0;
+        None
+    }
+
+    /// Close a level, unfolding its wrapper run (an unmatched
+    /// closer is the reader's error; the scan leaves depth alone).
+    fn close(&mut self) {
+        self.run = 0;
+        if let Some(fold) = self.folds.pop() {
+            self.base = self.base.saturating_sub(1 + fold);
+        }
+    }
+}
+
+/// Max container nesting of an expanded form, walked iteratively
+/// (atoms score 0, each list/vector/map/set/tag/conditional adds
+/// a level). Metadata is never traversed: analyze only clones
+/// and propagates it.
+fn value_depth(value: &Value) -> usize {
+    let mut max = 0;
+    let mut stack = vec![(value, 0)];
+    while let Some((node, depth)) = stack.pop() {
+        if push_children(&mut stack, node, depth + 1) {
+            max = max.max(depth + 1);
+        }
+    }
+    max
+}
+
+/// Push a node's children at `depth`; true when the node is a
+/// container.
+fn push_children<'a>(stack: &mut Vec<(&'a Value, usize)>, value: &'a Value, depth: usize) -> bool {
+    match value {
+        Value::List(l) => {
+            push_each(stack, l.iter(), depth);
+            true
+        }
+        Value::Vector(v) => {
+            push_each(stack, v.iter(), depth);
+            true
+        }
+        Value::Set(s) => {
+            push_each(stack, s.iter(), depth);
+            true
+        }
+        Value::Map(m) => {
+            for (k, v) in m.iter() {
+                stack.push((k, depth));
+                stack.push((v, depth));
+            }
+            true
+        }
+        Value::TaggedLiteral { form, .. } => {
+            stack.push((&**form, depth));
+            true
+        }
+        Value::ReaderConditional { form, .. } => {
+            stack.push((&**form, depth));
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Build the nesting diagnostic error (shared by the source
+/// pre-scan and the expanded-form rescan).
+fn depth_error(span: Span, depth: usize, expanded: bool) -> PlanError {
+    PlanError::Depth {
+        span,
+        depth,
+        expanded,
+    }
+}
+
+fn push_each<'a>(
+    stack: &mut Vec<(&'a Value, usize)>,
+    items: impl Iterator<Item = &'a Value>,
+    depth: usize,
+) {
+    for item in items {
+        stack.push((item, depth));
+    }
+}
+
 /// Plan `text` on a throwaway booted evaluator (planning interns
 /// vars as analysis runs, so the evaluator is never shared).
 pub fn plan_source(text: &str) -> Result<SubsetProgram, PlanError> {
     let mut eval = boot();
+    // Third guard (B1): analyze-time macroexpansion can deepen
+    // forms the rescan measured shallow, so the analyzer itself
+    // carries the budget on this throwaway evaluator (never unset:
+    // nothing else runs on it).
+    eval.analyze_depth_limit = Some(MAX_NESTING_DEPTH);
+    if let Some((span, depth)) = DepthScan::scan(text) {
+        return Err(depth_error(span, depth, false));
+    }
     let forms = eval.read_forms(text).map_err(lift)?;
     let mut planner = Planner::new();
     for form in &forms {
@@ -308,6 +639,16 @@ impl Planner {
         // analyze in order, bare failures uncaught) minus evaluation.
         let expanded = crate::macros::macroexpand_full(eval, form, fallback, &source)
             .map_err(|e| lift(eval.compile_err(e)))?;
+        // Expansion can multiply depth (`->` with N steps nests N
+        // deep from a flat source), so re-budget the expanded form
+        // before analyze recurses on it.
+        let expanded_depth = value_depth(&expanded);
+        if expanded_depth > MAX_NESTING_DEPTH {
+            // B1 twin: dropping this output would recurse per level
+            // (see `analyze_list`); the build fails here either way.
+            std::mem::forget(expanded);
+            return Err(depth_error(fallback, expanded_depth, true));
+        }
         let fallback_parts = vec![&expanded];
         let parts = match crate::eval::split_top_do(&expanded) {
             Some(parts) => parts,
@@ -315,7 +656,19 @@ impl Planner {
         };
         for part in parts {
             eval.registry.bump_eval_seq();
-            eval.analyze(part).map_err(|e| lift(eval.compile_err(e)))?;
+            if let Err(e) = eval.analyze(part) {
+                // Budget breach: expansion outgrew the limit mid-
+                // analyze — the Depth diagnostic, not a compile
+                // error (first crossing trips at limit + 1).
+                if e.class == crate::expr::class::STACK_OVERFLOW {
+                    return Err(depth_error(
+                        span_of(part, fallback),
+                        MAX_NESTING_DEPTH + 1,
+                        true,
+                    ));
+                }
+                return Err(lift(eval.compile_err(e)));
+            }
         }
         // Classify the ORIGINAL surface (never the expansion).
         self.classify_top(form, fallback)
@@ -1512,5 +1865,286 @@ mod tests {
         let args = vec![&vec];
         let r = planner.classify_let(&args, &mut scope, &mut next, span);
         assert!(matches!(&r, Err(PlanError::Subset(e)) if e.hint.contains("destructuring")));
+    }
+
+    /// `depth` nested parens around `1`.
+    fn parens(depth: usize) -> String {
+        format!("{}1{}", "(".repeat(depth), ")".repeat(depth))
+    }
+
+    #[test]
+    fn nesting_accepts_shallow_source() {
+        assert_eq!(DepthScan::scan("(defn f [x] (+ x 1))"), None);
+        assert_eq!(DepthScan::scan("(do (f 1) (f 2))"), None);
+        assert_eq!(DepthScan::scan(""), None);
+    }
+
+    #[test]
+    fn nesting_rejects_forty_one_deep() {
+        assert_eq!(DepthScan::scan(&parens(41)), Some((Span::new(1, 41), 41)));
+    }
+
+    #[test]
+    fn nesting_accepts_exactly_forty() {
+        assert_eq!(DepthScan::scan(&parens(40)), None);
+    }
+
+    #[test]
+    fn nesting_rejects_unbalanced_deep() {
+        assert_eq!(
+            DepthScan::scan(&"(".repeat(50)),
+            Some((Span::new(1, 41), 41))
+        );
+    }
+
+    #[test]
+    fn nesting_ignores_unmatched_closers() {
+        assert_eq!(DepthScan::scan("()))"), None);
+    }
+
+    #[test]
+    fn nesting_counts_mixed_delimiters() {
+        assert_eq!(
+            DepthScan::scan(&"([{".repeat(14)),
+            Some((Span::new(1, 41), 41))
+        );
+    }
+
+    #[test]
+    fn nesting_counts_quote_runs() {
+        assert_eq!(
+            DepthScan::scan(&format!("{}x", "'".repeat(41))),
+            Some((Span::new(1, 41), 41))
+        );
+        assert_eq!(DepthScan::scan(&format!("{}@x", "^".repeat(39))), None);
+        assert_eq!(
+            DepthScan::scan(&format!("{}@@x", "^".repeat(39))),
+            Some((Span::new(1, 41), 41))
+        );
+    }
+
+    #[test]
+    fn nesting_folds_quotes_into_openers() {
+        assert_eq!(
+            DepthScan::scan(&format!("{}''1{}", "(".repeat(38), ")".repeat(38))),
+            None
+        );
+        assert_eq!(
+            DepthScan::scan(&format!("{}''1{}", "(".repeat(39), ")".repeat(39))),
+            Some((Span::new(1, 41), 41))
+        );
+    }
+
+    #[test]
+    fn nesting_ignores_parens_in_strings() {
+        assert_eq!(DepthScan::scan("(print \"(((\")"), None);
+        assert_eq!(DepthScan::scan("(f \"a\\\"(b\")"), None);
+    }
+
+    #[test]
+    fn nesting_ignores_parens_in_comments() {
+        assert_eq!(DepthScan::scan("; ((((\n(+ 1 1)"), None);
+    }
+
+    #[test]
+    fn nesting_skips_char_literals() {
+        assert_eq!(DepthScan::scan("(= \\( x)"), None);
+        assert_eq!(DepthScan::scan("(f 1)\\"), None);
+    }
+
+    #[test]
+    fn nesting_skips_backslash_newline() {
+        assert_eq!(DepthScan::scan("\\\n(+ 1 1)"), None);
+    }
+
+    #[test]
+    fn nesting_skips_regex_bodies() {
+        assert_eq!(DepthScan::scan("#\"(((\""), None);
+    }
+
+    #[test]
+    fn nesting_counts_fn_and_set_dispatch() {
+        assert_eq!(DepthScan::scan("(map #(+ % 1) xs)"), None);
+        assert_eq!(DepthScan::scan("#{:a #{:b}}"), None);
+    }
+
+    #[test]
+    fn nesting_counts_quote_discard_and_conditional() {
+        assert_eq!(DepthScan::scan("(def x #'foo)"), None);
+        assert_eq!(DepthScan::scan("(do #_ (ignored [x]) :kept)"), None);
+        assert_eq!(DepthScan::scan("(do #?@(:clj [1]))"), None);
+    }
+
+    #[test]
+    fn nesting_counts_discarded_forms() {
+        assert_eq!(
+            DepthScan::scan(&format!("#_{}", parens(41))),
+            Some((Span::new(1, 41), 41))
+        );
+    }
+
+    #[test]
+    fn nesting_counts_tagged_literals() {
+        assert_eq!(DepthScan::scan("#inst \"2020-01-01\""), None);
+    }
+
+    #[test]
+    fn nesting_counts_namespaced_maps() {
+        assert_eq!(DepthScan::scan("#:person{:name \"x\"}"), None);
+    }
+
+    #[test]
+    fn nesting_counts_stacked_hyphen_tags() {
+        // H1: the bump must survive `-` (the old letter-run skip
+        // reset on it, so stacked `#a-1` tags measured ~2 while the
+        // reader recursed per tag). Each tag costs 2: 20 pass at
+        // the limit, the 21st rejects.
+        assert_eq!(DepthScan::scan(&"#a-1 ".repeat(20)), None);
+        assert_eq!(
+            DepthScan::scan(&"#a-1 ".repeat(21)),
+            Some((Span::new(1, 104), 42))
+        );
+    }
+
+    #[test]
+    fn nesting_counts_double_colon_aliases() {
+        // The second `:` is tag-internal (reader token), not a reset.
+        assert_eq!(DepthScan::scan(&"#::a ".repeat(20)), None);
+        assert_eq!(
+            DepthScan::scan(&"#::a ".repeat(21)),
+            Some((Span::new(1, 104), 42))
+        );
+    }
+
+    #[test]
+    fn nesting_weights_backquote_eightfold() {
+        // M2: each backtick costs 8 (syntax-quote multiplies
+        // read-output depth ~3x per level). Five pass at the
+        // limit; the sixth rejects.
+        assert_eq!(DepthScan::scan("`````x"), None);
+        assert_eq!(DepthScan::scan("``````x"), Some((Span::new(1, 6), 48)));
+    }
+
+    #[test]
+    fn nesting_rejects_backquote_run_at_plan() {
+        // Eight ticks: the pre-scan rejects (no "after expansion"
+        // suffix). Pre-fix the scan passed and only the rescan
+        // caught it at 3280 deep — and ten ticks crashed the
+        // reader outright (see the 1 MB test in emit.rs).
+        assert_eq!(
+            diag("````````x"),
+            "f.clj:1:6: nesting depth 48 exceeds the AOT build limit (40)"
+        );
+    }
+
+    #[test]
+    fn nesting_rejects_stacked_tags_at_plan() {
+        // 200 stacked tags: the pre-scan rejects (no "after
+        // expansion" suffix). Pre-fix the scan passed and only the
+        // rescan caught it — and 20000 crashed the reader outright.
+        assert_eq!(
+            diag(&"#a-1 ".repeat(200)),
+            "f.clj:1:104: nesting depth 42 exceeds the AOT build limit (40)"
+        );
+    }
+
+    #[test]
+    fn nesting_ignores_lone_hash() {
+        assert_eq!(DepthScan::scan("(let [x# 1] x#)"), None);
+    }
+
+    #[test]
+    fn nesting_accepts_wide_shallow() {
+        assert_eq!(
+            DepthScan::scan(&format!("(do {} )", "(f 1) ".repeat(100))),
+            None
+        );
+    }
+
+    #[test]
+    fn value_depth_scores_nesting() {
+        let eval = boot();
+        let forms = eval.read_forms("([1] {:a 1} #{2})").expect("read");
+        let tagged = Value::TaggedLiteral {
+            tag: Symbol::new(None, "foo"),
+            form: Box::new(Value::Int(1)),
+        };
+        let cond = Value::ReaderConditional {
+            form: Box::new(Value::Int(2)),
+            splicing: true,
+        };
+        let mixed = Value::List(List::from_vec(vec![
+            forms[0].clone(),
+            tagged,
+            cond,
+            Value::Int(3),
+        ]));
+        assert_eq!(value_depth(&mixed), 3);
+        assert_eq!(value_depth(&Value::Int(1)), 0);
+    }
+
+    #[test]
+    fn nesting_rejects_deep_source_at_plan() {
+        assert_eq!(
+            diag(&parens(41)),
+            "f.clj:1:41: nesting depth 41 exceeds the AOT build limit (40)"
+        );
+    }
+
+    #[test]
+    fn nesting_rejects_nested_macro_expansion() {
+        // B1: the rescan measures nested macro calls unexpanded, so
+        // only the analyze-time budget catches this (pre-fix: clean
+        // subset rejection at 300 steps, SIGABRT at 30000).
+        let cond_src = format!("(do (cond {}))", "true 1 ".repeat(300));
+        for (src, span) in [
+            (format!("(do (-> 0{}))", " (+ 1)".repeat(300)), "1:5"),
+            (format!("(defn f [] (-> 0{}))", " (+ 1)".repeat(300)), "1:1"),
+            (cond_src, "1:5"),
+            // Crash scale (SIGABRT pre-fix): the budget trips at 41
+            // regardless of how deep the expansion runs.
+            (format!("(do (-> 0{}))", " (+ 1)".repeat(30_000)), "1:5"),
+        ] {
+            assert_eq!(
+                diag(&src),
+                format!(
+                    "f.clj:{span}: nesting depth 41 after expansion exceeds the AOT build limit (40)"
+                ),
+                "{src:.40}"
+            );
+        }
+    }
+
+    #[test]
+    fn nesting_rejects_deep_expansion() {
+        let threaded = format!("(-> 0{} )", " (+ 1)".repeat(300));
+        assert_eq!(
+            diag(&threaded),
+            "f.clj:1:1: nesting depth 300 after expansion exceeds the AOT build limit (40)"
+        );
+    }
+
+    #[test]
+    fn nesting_reports_threading_as_unsupported() {
+        assert_eq!(
+            diag("(-> 0 (+ 1) (+ 2))"),
+            "f.clj:1:1: unsupported form in AOT subset: -> (not in the closed call set)"
+        );
+    }
+
+    #[test]
+    fn nesting_reports_deep_unsupported_source() {
+        assert_eq!(
+            diag(&parens(40)),
+            "f.clj:1:40: unsupported form in AOT subset: 1 (higher-order calls are outside the subset)"
+        );
+    }
+
+    #[test]
+    fn nesting_backstops_user_macros() {
+        assert_eq!(
+            diag("(defmacro m [x] x)"),
+            "f.clj:1:1: unsupported form in AOT subset: defmacro (macros at runtime are outside the subset)"
+        );
     }
 }

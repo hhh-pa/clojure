@@ -128,6 +128,10 @@ pub struct Evaluator {
     /// thread-local `nested`): released on success, discarded on
     /// failure. `None` outside an action fn.
     pub(crate) agent_outbox: Option<Vec<(clj_value::Agent, clj_value::QueuedAction)>>,
+    /// Analyze recursion budget (`Some` on the AOT plan path only;
+    /// the run path stays unbounded). Set once on the throwaway
+    /// planning evaluator, read by every `Analyzer` it builds.
+    pub(crate) analyze_depth_limit: Option<usize>,
 }
 
 /// A `defmacro` definition's parts (bundles `eval_defmacro`'s
@@ -168,6 +172,7 @@ impl Evaluator {
             agent_system: Arc::new(crate::concurrency::AgentSystem::new()),
             native_call_span: None,
             agent_outbox: None,
+            analyze_depth_limit: None,
         }
     }
 
@@ -190,6 +195,9 @@ impl Evaluator {
             agent_system: Arc::clone(&self.agent_system),
             native_call_span: None,
             agent_outbox: None,
+            // Budgets never cross threads (limits are set on
+            // single-threaded planning evaluators, which never fork).
+            analyze_depth_limit: None,
         }
     }
 

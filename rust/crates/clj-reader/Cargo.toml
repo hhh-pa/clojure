@@ -2,6 +2,7 @@
 name = "clj-reader"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
 description = "Clojure/EDN reader and printer with source spans"
 license = "EPL-1.0"
 

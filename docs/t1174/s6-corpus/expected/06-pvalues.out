@@ -1,0 +1,7 @@
+:pcalls-vec  => [1 2 3]
+:pcalls-vec-empty  => []
+:pcalls-seq  => true
+:pvalues-vec  => [1 2 :a]
+:pvalues-vec-empty  => []
+:pvalues-inc3  => 3
+:pvalues-throw  => "THROW java.util.concurrent.ExecutionException: java.lang.ArithmeticException: Divide by zero"

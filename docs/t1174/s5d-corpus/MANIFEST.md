@@ -1,6 +1,6 @@
 # S5D differential corpus MANIFEST
 
-19 files, `NN-topic.clj` + `expected/NN-topic.out` (golden stdout).
+20 files, `NN-topic.clj` + `expected/NN-topic.out` (golden stdout).
 Truth source: `s5d-pins.md`. Probe inputs live in `/tmp/s5d-gaps*.clj`
 (not committed); corpus files are the durable, runnable record.
 
@@ -137,6 +137,12 @@ From `s5d-pins.md` (Corpus rules) plus established practice:
   hash (infinite-UOE vs finite), `=`/equiv cross-type rules and
   counter-verified early exit. Sources: pins 7i, 7i2–7i4, 7i6.
   05/09/11 hold the basics; only 7i-new cells here.
+- `20-print-dup.clj` (2): `*print-dup*` atom witness (S9B).
+  Sources: s9-plan S9B, s5d-contract divergence. Test:
+  `print_dup_flag_ignored_for_atoms` (concurrency.rs).
+  KNOWN DIVERGENCE: the golden's `:dup-atom-true` THROWs
+  IllegalArgumentException on the JVM; the port prints `true`
+  (flag ignored — see the test).
 
 ## Open items
 

@@ -168,3 +168,237 @@ fn display_covers_every_variant() {
         "l"
     );
 }
+
+/// `depth` nested parens around `1`.
+fn parens(depth: usize) -> String {
+    format!("{}1{}", "(".repeat(depth), ")".repeat(depth))
+}
+
+/// `depth` nested `(+ 1 ...)` calls (in-subset at any depth).
+fn plus_nest(depth: usize) -> String {
+    debug_assert!(depth > 0);
+    format!("{}(+ 1 1{}", "(+ 1 ".repeat(depth - 1), ")".repeat(depth))
+}
+
+fn no_emit() -> EmitOptions {
+    EmitOptions {
+        emit_ir: None,
+        emit_obj: None,
+    }
+}
+
+#[test]
+fn nesting_rejects_forty_one_deep() {
+    let err = compile_str(&parens(41), "f.clj", &tmp("nope"), &no_emit(), &no_link())
+        .expect_err("41 deep rejects");
+    assert_eq!(
+        err,
+        CompileError::Plan(
+            "f.clj:1:41: nesting depth 41 exceeds the AOT build limit (40)".to_owned()
+        )
+    );
+}
+
+#[test]
+fn nesting_rejects_mixed_delimiters() {
+    let source = "([{".repeat(14);
+    let err = compile_str(&source, "f.clj", &tmp("nope"), &no_emit(), &no_link())
+        .expect_err("mixed 42 rejects");
+    assert_eq!(
+        err,
+        CompileError::Plan(
+            "f.clj:1:41: nesting depth 41 exceeds the AOT build limit (40)".to_owned()
+        )
+    );
+}
+
+#[test]
+fn nesting_rejects_quote_runs() {
+    let source = format!("{}x", "'".repeat(41));
+    let err = compile_str(&source, "f.clj", &tmp("nope"), &no_emit(), &no_link())
+        .expect_err("41 quotes reject");
+    assert_eq!(
+        err,
+        CompileError::Plan(
+            "f.clj:1:41: nesting depth 41 exceeds the AOT build limit (40)".to_owned()
+        )
+    );
+}
+
+#[test]
+fn nesting_rejects_deep_expansion() {
+    let threaded = format!("(-> 0{} )", " (+ 1)".repeat(300));
+    let err = compile_str(&threaded, "f.clj", &tmp("nope"), &no_emit(), &no_link())
+        .expect_err("300-threaded rejects");
+    assert_eq!(
+        err,
+        CompileError::Plan(
+            "f.clj:1:1: nesting depth 300 after expansion exceeds the AOT build limit (40)"
+                .to_owned()
+        )
+    );
+}
+
+#[test]
+fn nesting_accepts_boundary_through_emit_ir() {
+    let dir = tmp("nest-ok");
+    std::fs::create_dir_all(&dir).expect("tmp dir");
+    let ir = dir.join("f.ll");
+    let out = dir.join("f");
+    compile_str(
+        &plus_nest(40),
+        "f.clj",
+        &out,
+        &EmitOptions {
+            emit_ir: Some(ir.clone()),
+            emit_obj: None,
+        },
+        &no_link(),
+    )
+    .expect("40 deep compiles");
+    let text = std::fs::read_to_string(&ir).expect("read ir");
+    assert!(text.contains("define i32 @main()"), "{text}");
+    std::fs::remove_dir_all(&dir).expect("cleanup");
+}
+
+#[test]
+fn nesting_accepts_boundary_on_small_stack() {
+    // The 1 MB thread models the smallest main-thread stack
+    // (Windows); the limit holds a 4x margin under the probed
+    // 161-level overflow.
+    let dir = tmp("nest-1mb");
+    std::fs::create_dir_all(&dir).expect("tmp dir");
+    let ir = dir.join("f.ll");
+    let out = dir.join("f");
+    let source = plus_nest(40);
+    std::thread::Builder::new()
+        .stack_size(1 << 20)
+        .spawn(move || {
+            compile_str(
+                &source,
+                "f.clj",
+                &out,
+                &EmitOptions {
+                    emit_ir: Some(ir.clone()),
+                    emit_obj: None,
+                },
+                &no_link(),
+            )
+            .expect("boundary compiles on a 1 MB stack");
+        })
+        .expect("spawn")
+        .join()
+        .expect("worker panicked");
+    std::fs::remove_dir_all(&dir).expect("cleanup");
+}
+
+#[test]
+fn nesting_keeps_deep_unsupported_clean_on_small_stack() {
+    let source = parens(40);
+    std::thread::Builder::new()
+        .stack_size(1 << 20)
+        .spawn(move || {
+            let err = compile_str(&source, "f.clj", &tmp("nope"), &no_emit(), &no_link())
+                .expect_err("unsupported, not overflow");
+            assert_eq!(
+                err,
+                CompileError::Plan(
+                    "f.clj:1:40: unsupported form in AOT subset: 1 (higher-order calls are outside the subset)"
+                        .to_owned()
+                )
+            );
+        })
+        .expect("spawn")
+        .join()
+        .expect("worker panicked");
+}
+
+#[test]
+fn nesting_rejects_backquote_runs_on_small_stack() {
+    // M2: five ticks read 121 deep (rescan phase), eight reject
+    // at the scan — both must diagnose, not overflow, on 1 MB.
+    for (source, want) in [
+        (
+            "`````x".to_owned(),
+            "f.clj:1:1: nesting depth 121 after expansion exceeds the AOT build limit (40)",
+        ),
+        (
+            "````````x".to_owned(),
+            "f.clj:1:6: nesting depth 48 exceeds the AOT build limit (40)",
+        ),
+    ] {
+        std::thread::Builder::new()
+            .stack_size(1 << 20)
+            .spawn(move || {
+                let err = compile_str(&source, "f.clj", &tmp("nope"), &no_emit(), &no_link())
+                    .expect_err("backquote run must diagnose");
+                assert_eq!(err, CompileError::Plan(want.to_owned()));
+            })
+            .expect("spawn")
+            .join()
+            .expect("worker panicked");
+    }
+}
+
+#[test]
+fn nesting_accepts_parens_in_strings() {
+    let dir = tmp("nest-str");
+    std::fs::create_dir_all(&dir).expect("tmp dir");
+    let source = format!("(print \"{}{}\")", "(".repeat(50), ")".repeat(50));
+    let ir = dir.join("f.ll");
+    let out = dir.join("f");
+    compile_str(
+        &source,
+        "f.clj",
+        &out,
+        &EmitOptions {
+            emit_ir: Some(ir.clone()),
+            emit_obj: None,
+        },
+        &no_link(),
+    )
+    .expect("string parens stay inert");
+    assert!(ir.exists(), "ir written");
+    std::fs::remove_dir_all(&dir).expect("cleanup");
+}
+
+#[test]
+fn nesting_accepts_wide_shallow() {
+    let dir = tmp("nest-wide");
+    std::fs::create_dir_all(&dir).expect("tmp dir");
+    let source = format!("(do {} )", "(print 1) ".repeat(100));
+    let ir = dir.join("f.ll");
+    let out = dir.join("f");
+    compile_str(
+        &source,
+        "f.clj",
+        &out,
+        &EmitOptions {
+            emit_ir: Some(ir.clone()),
+            emit_obj: None,
+        },
+        &no_link(),
+    )
+    .expect("wide but shallow compiles");
+    assert!(ir.exists(), "ir written");
+    std::fs::remove_dir_all(&dir).expect("cleanup");
+}
+
+#[test]
+fn nesting_backstops_user_macros() {
+    let err = compile_str(
+        "(defmacro m [x] x)",
+        "f.clj",
+        &tmp("nope"),
+        &no_emit(),
+        &no_link(),
+    )
+    .expect_err("defmacro rejects");
+    assert_eq!(
+        err,
+        CompileError::Plan(
+            "f.clj:1:1: unsupported form in AOT subset: defmacro (macros at runtime are outside the subset)"
+                .to_owned()
+        )
+    );
+}

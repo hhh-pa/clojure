@@ -7,3 +7,4 @@ maven-classpath
 maven-classpath.properties
 .idea/
 *.iml
+docs/t1174/models/states/

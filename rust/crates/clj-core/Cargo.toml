@@ -2,6 +2,7 @@
 name = "clj-core"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
 description = "Namespaces, vars, macros, and the Rust-backed clojure.core subset"
 license = "EPL-1.0"
 

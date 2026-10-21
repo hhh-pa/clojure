@@ -52,6 +52,11 @@ shapes are exact JVM text (en_US/UTC).
   `CancellationException`; `future-done?`/`realized?` true.
 - `promise`/`deliver`: first delivery wins (returns the
   promise), later → `nil`; pending `deref` blocks.
+- `pcalls`/`pvalues` (S6D, pinned S9B): each fn/expr runs on
+  the future pool; returns a lazy seq of the values in
+  order (`[]` when empty). A failing expr surfaces on
+  realization as `ExecutionException | <cause-class>:
+  <cause-msg>` (corpus 06).
 
 ## Agents
 

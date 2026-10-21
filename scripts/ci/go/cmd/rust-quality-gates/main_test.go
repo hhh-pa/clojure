@@ -60,6 +60,7 @@ func buildTools(t *testing.T) string {
 	bin := t.TempDir()
 	cmdtest.BuildTo(t, ".", filepath.Join(bin, "rust-quality-gates"))
 	cmdtest.BuildTo(t, "../coverage-floor", filepath.Join(bin, "coverage-floor"))
+	cmdtest.BuildTo(t, "../coverage-patch", filepath.Join(bin, "coverage-patch"))
 	cmdtest.BuildTo(t, "../geiger", filepath.Join(bin, "geiger"))
 	cmdtest.BuildTo(t, "../complexity", filepath.Join(bin, "complexity"))
 	return bin
@@ -107,6 +108,28 @@ func stubWorld(t *testing.T, extra []string) (string, string, []string) {
 		if err := os.WriteFile(filepath.Join(binDir, tool), blob, 0o755); err != nil {
 			t.Fatal(err)
 		}
+	}
+	for _, kv := range extra {
+		if kv != "STUB_PATCH=1" {
+			continue
+		}
+		// Stage a patch touching covered stub lines and point
+		// PATCH_DIFF at it, so the case below exercises the
+		// PATCH_DIFF-set wiring end to end (L2). A patch-fail
+		// stub is unconstructible: the floor runs first at 100%,
+		// and every patch line sits inside the floor
+		// denominator, so floor-pass plus patch-fail cannot
+		// co-occur; coverage-patch's own fail golden covers
+		// the fail path.
+		blob, err := os.ReadFile(filepath.Join(data, "patch.diff"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		patch := filepath.Join(ws, "patch.diff")
+		if err := os.WriteFile(patch, blob, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		extra = append(extra, "PATCH_DIFF="+patch)
 	}
 	env := []string{
 		"PATH=" + stubs + string(os.PathListSeparator) + os.Getenv("PATH"),
@@ -206,6 +229,7 @@ func TestStubGoldens(t *testing.T) {
 		{"audit-fail", []string{"STUB_AUDIT_FAIL=1"}, 1},
 		{"llvmcov-fail", []string{"STUB_LLVMCOV_FAIL=1"}, 1},
 		{"rustc-fail", []string{"STUB_RUSTC_FAIL=1"}, 0},
+		{"patch-pass", []string{"STUB_PATCH=1"}, 0},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

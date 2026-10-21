@@ -19,19 +19,49 @@ runs:
   steps:
     # Windows only: the libxml2 from-source vcpkg build costs ~7 of
     # the step's ~10 minutes, while Linux/macOS installs take under
-    # a minute (not worth caching). Cache just vcpkg's binary
-    # archives (tens of MB): on a hit the install restores in
-    # seconds. The installed tree is deliberately NOT cached — it
-    # rebuilds from the archives plus a fresh SDK transplant each
-    # run. No vcpkg baseline pin: on version drift vcpkg ignores
-    # stale archives and rebuilds (slow but correct).
+    # a minute (not worth caching). Cache the built installed tree
+    # plus the binary archives and downloads (msys2 tool + source
+    # tarballs): an exact hit skips the vcpkg install entirely
+    # (seconds); a partial hit still reuses whatever archives and
+    # downloads match. The key pins the vcpkg baseline commit plus
+    # the runner image (OS/arch/ImageVersion): either side changing
+    # rebuilds once under the new key and saves the fresh result.
+    # (An exact hit never re-saves, so a key without the baseline
+    # goes stale forever after one drift; without the image, a
+    # compiler/SDK-only runner update would reuse a tree vcpkg can
+    # no longer ABI-check.)
+    # The SDK transplant below still runs every time (fast, local).
+    # Paths use the resolved dir output, not
+    # ${{ env.VCPKG_INSTALLATION_ROOT }}: that variable is unset on
+    # GitHub runners (only the run-vcpkg action defines it), so the
+    # env form renders to a nonexistent absolute path and silently
+    # caches nothing. Entries are versioned by the path list itself:
+    # editing the paths below invalidates saved caches (one slow
+    # rebuild per fleet baseline, then warm again).
     - if: runner.os == 'Windows'
+      id: vcpkg-baseline
+      shell: bash
+      run: |
+        set -euo pipefail
+        VCPKG="${VCPKG_INSTALLATION_ROOT:-C:/vcpkg}"
+        echo "dir=$VCPKG" >> "$GITHUB_OUTPUT"
+        if base="$(git -C "$VCPKG" rev-parse HEAD 2>/dev/null)"; then
+          echo "sha=$base" >> "$GITHUB_OUTPUT"
+        else
+          echo "sha=$("$VCPKG/vcpkg.exe" --version | head -1 | tr -cs 'A-Za-z0-9' '-')" >> "$GITHUB_OUTPUT"
+        fi
+    - if: runner.os == 'Windows'
+      id: vcpkg-cache
       uses: actions/cache@v5
       with:
-        path: ~/AppData/Local/vcpkg/archives
-        key: setup-llvm-vcpkg-${{ runner.os }}-${{ hashFiles('.github/actions/setup-llvm/action.yml') }}
+        path: |
+          ${{ steps.vcpkg-baseline.outputs.dir }}/installed/x64-windows-static
+          ~/AppData/Local/vcpkg/archives
+          ${{ steps.vcpkg-baseline.outputs.dir }}/downloads
+        key: setup-llvm-win-vcpkg-${{ steps.vcpkg-baseline.outputs.sha }}-${{ runner.os }}-${{ runner.arch }}-${{ env.ImageVersion }}-${{ hashFiles('.github/actions/setup-llvm/action.yml') }}
         restore-keys: |
-          setup-llvm-vcpkg-${{ runner.os }}-
+          setup-llvm-win-vcpkg-${{ steps.vcpkg-baseline.outputs.sha }}-
+          setup-llvm-win-vcpkg-
     - if: runner.os == 'Linux'
       shell: bash
       run: |
@@ -89,10 +119,18 @@ runs:
         echo "LLVM_SYS_221_PREFIX=$dir" >> "$GITHUB_ENV"
         # Static linking needs xml2s.lib, which the tarball omits:
         # vcpkg's static libxml2 provides it (tolerating its sibling
-        # static names by copying to the expected file name).
+        # static names by copying to the expected file name). An
+        # exact cache hit restores the built tree, so the ~7 min
+        # from-source build is skipped; anything else runs vcpkg,
+        # which reuses whatever restored archives match by ABI hash
+        # and rebuilds the rest (slow but correct).
         VCPKG="${VCPKG_INSTALLATION_ROOT:-C:/vcpkg}"
-        "$VCPKG/vcpkg.exe" install libxml2:x64-windows-static --clean-after-build
         xmldir="$VCPKG/installed/x64-windows-static/lib"
+        if [ "${{ steps.vcpkg-cache.outputs.cache-hit }}" = 'true' ] && [ -n "$(ls "$xmldir" 2>/dev/null | grep -iE 'xml2' || true)" ]; then
+          echo 'setup-llvm: reusing cached vcpkg installed tree'
+        else
+          "$VCPKG/vcpkg.exe" install libxml2:x64-windows-static --clean-after-build
+        fi
         echo "--- xml libs:"; ls "$xmldir" | grep -i xml || true
         if [ ! -f "$xmldir/xml2s.lib" ]; then
           for cand in libxml2s.lib libxml2.lib xml2.lib; do

@@ -1,0 +1,1 @@
+Usage: coverage-patch <lcov.info> <patch.diff> [floor=100.0]

@@ -1,0 +1,3 @@
+:dup-atom-false  => true
+:dup-atom-true  => "THROW java.lang.IllegalArgumentException: No method in multimethod 'print-dup' for dispatch value: class clojure.lang.Atom"
+S5D-20 DONE

@@ -1,0 +1,3 @@
+coverage patch: parsed 3 added lines in 2 files
+coverage patch: 100.00% lines (3/3, 2 files) vs 100.00% floor (patch.lcov vs pass.diff)
+coverage patch: OK

@@ -2,6 +2,7 @@
 name = "clj-repl"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
 description = "Interactive REPL loop for clojure-rs"
 license = "EPL-1.0"
 
@@ -12,4 +13,8 @@ workspace = true
 clj-eval = { path = "../clj-eval" }
 clj-reader = { path = "../clj-reader" }
 clj-value = { path = "../clj-value" }
-rustyline = "19.0.0"
+# Pinned to 17.x (S9A MSRV): rustyline 19 needs rustc 1.88+
+# (`cfg_select`, `file_lock`, let-chains in its own sources) and
+# its minimal-feature builds don't compile; 17 keeps `home`
+# 0.5.11-compatible too. Revisit if rustyline declares an MSRV.
+rustyline = "=17.0.2"

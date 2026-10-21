@@ -1,0 +1,1 @@
+coverage patch: headerless.diff holds no `diff --git` headers; refusing vacuous pass (regenerate with `git diff --unified=0`; see the patch step in rust.yml)
