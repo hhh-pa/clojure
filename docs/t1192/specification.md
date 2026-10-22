@@ -30,6 +30,11 @@ G2. Every real `clojure.core` var resolves: the coverage file's
     and `core.async` are all in scope.
 G3. Newly covered surface is JVM-observable-conformant, verified by
     oracle probes plus differential corpus entries at 100%.
+G4. Short-term release: ship the Rust equivalent of Clojure 1.12.6
+    as a `v*` tag release (`clojure-rs` version tracks the Clojure
+    version it matches). After the release, catch up with the
+    commits behind `clojure/clojure:master`, in Rust, on master
+    (Phase 2; slices defined by the delta inventory).
 
 ### 1.2 Non-goals (explicit)
 
@@ -215,12 +220,12 @@ INVESTIGATE (probe, then FIX or STRUCTURAL in-slice):
   and the `'`-family go to FT1.
 - I-smapread: `sorted-map` "reads as `{}`" (D13; mechanism
   unclear) → FT6 (dies with sorted collections or pins).
-- I-hashinf: upgraded to FIX — the JVM does NOT hang: `(hash
-  (iterate inc 0))` throws `UnsupportedOperationException`
-  (null message) fast, contradicting D13's "(JVM-true)". FX1
-  finds the trigger boundary
-  (`range`/`repeat`/`cycle` probes + full trace) and mirrors
-  the fast failure.
+- I-hashinf: RESOLVED conformant — infinite seq types throw
+  `UnsupportedOperationException` from `hasheq()` by design
+  (`Iterate.java:97`), and the port already mirrors it on all
+  four unbounded types (`seq_hash_unsupported`; D13's "hangs"
+  is stale). FX1 adds pins only. Zero 1.12.6-vs-1.13.0 skew
+  on every re-probed FX1 item.
 
 STRUCTURAL (go to `divergences.md` with mechanism + pin):
 - S-identity: `swap!`/`compare-and-set!` compare with `=`
@@ -320,19 +325,29 @@ FT12 STM (F-stm). FT13 spec (F-spec). FT14 core.async (F-async).
 FT15 JIT (F-jit). FX5 phase gaps (D-phase). FX6 zones (D-zones).
 FX7 structural record (`divergences.md`) + coverage ratchet +
   README refresh (closes A3/A4).
+REL 1.12.6 release: version alignment (`clojure-rs 1.12.6`),
+  changelog entry, release PR + review, `v1.12.6` tag
+  (explicit go only) with 3-OS archives.
+M1 master-delta inventory: list `clojure/clojure:master`
+  commits past 1.12.6, triage each to port/skip/already-have;
+  seeds the Phase 2 catch-up slices (defined here, worked after
+  REL ships).
 
 Each slice lands as its own `T1192:` commit series + PR with
 `/review-loop` to acceptance; landing stays explicit-only.
 
 ### 2.4 TDD and oracle plan
 
-- Oracle: the root `clojure.jar`
-  (`1.13.0-master-SNAPSHOT`, same build as the T1174 pins;
-  untracked, local-only) driven by system `java` with
-  `-Duser.language=en -Duser.country=US -Duser.timezone=UTC`.
-  Fresh environments fall back to stock `org.clojure/clojure`
-  1.12.6 from Maven Central; the jar version is recorded in
-  every new pin, and disagreements resolve in-slice.
+- Oracle (primary): stock `org.clojure/clojure:1.12.6` from
+  Maven Central (sha1 `ea744fe01a09db46021b07c4aadf072698bf7a75`)
+  plus `spec.alpha:0.5.238` + `core.specs.alpha:0.4.74`, driven
+  by system `java` with `-Duser.language=en -Duser.country=US
+  -Duser.timezone=UTC`, `-e` form (never piped REPL: prompt
+  interleaving corrupts evidence). Cross-check: the root
+  `clojure.jar` (`1.13.0-master-SNAPSHOT`, untracked,
+  local-only). The jar version is recorded in every new pin;
+  disagreements resolve in-slice (1.12.6 wins: it is the
+  release target).
 - Per item: oracle probe first (new `docs/t1192/probes/`),
   failing test/corpus entry second, fix third, pin fourth.
   Property tests where the shape fits (tower laws, sorted
