@@ -263,6 +263,11 @@ epl-v10.html            license text
 - Concurrency is model-checked, not just tested: 18 loom
   schedule-exploration tests plus a TLA+ agent-queue model
   discharged by TLC in CI.
+- Merging to master requires one approving review
+  (`CODEOWNERS` auto-requests it) and verified signed
+  commits (SSH: `gpg.format=ssh`, `commit.gpgsign=true`,
+  key registered under GitHub Settings → SSH and GPG keys →
+  Signing keys).
 
 ## Further reading
 
