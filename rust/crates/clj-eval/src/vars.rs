@@ -15,7 +15,8 @@
 use std::sync::Arc;
 
 use clj_value::{
-    Agent, Atom, Future, List, Map, Promise, Set, Symbol, ThrowClass, Value, Var, Vector, new_map,
+    Agent, Atom, ExtensionValue, Future, List, Map, Promise, Set, Symbol, ThrowClass, Value, Var,
+    Vector, extension_supports_meta, extension_with_meta, new_map,
 };
 
 use crate::error::NativeError;
@@ -217,7 +218,10 @@ pub(crate) fn meta_of(eval: &Evaluator, v: &Value) -> Option<Map> {
         Value::Vector(x) => x.meta().cloned(),
         Value::Map(m) => m.meta().cloned(),
         Value::Set(s) => s.meta().cloned(),
-        Value::Extension(_) => extension_meta(eval, v),
+        // Sequence extensions read through `Value::meta`; closures,
+        // natives, and namespaces fall through to `extension_meta`
+        // (the two sets are disjoint by type).
+        Value::Extension(_) => v.meta().cloned().or_else(|| extension_meta(eval, v)),
         _ => None,
     }
 }
@@ -261,6 +265,7 @@ enum IObj<'v> {
     Promise(&'v Promise),
     Closure(&'v Closure),
     Native(&'v NativeFn),
+    SeqExt(&'v Arc<dyn ExtensionValue>),
 }
 
 /// The `with-meta` receiver check, before meta validation (same
@@ -282,7 +287,16 @@ fn as_iobj(obj: &Value) -> Result<IObj<'_>, NativeError> {
         ) {
             (Some(c), _) => Ok(IObj::Closure(c)),
             (None, Some(n)) => Ok(IObj::Native(n)),
-            (None, None) => Err(cast_err(obj, IOBJ_CLASS)),
+            // Sequence extensions (chunked seqs etc.) take metadata
+            // like the JVM's seqs (T1192 FX1); anything else keeps
+            // the `IObj` cast.
+            (None, None) => {
+                if extension_supports_meta(e) {
+                    Ok(IObj::SeqExt(e))
+                } else {
+                    Err(cast_err(obj, IOBJ_CLASS))
+                }
+            }
         },
         _ => Err(cast_err(obj, IOBJ_CLASS)),
     }
@@ -316,6 +330,10 @@ fn with_meta_val(obj: &Value, meta: &Value) -> Result<Value, NativeError> {
             let mut next = n.clone();
             next.meta = meta;
             Ok(Value::Extension(Arc::new(next)))
+        }
+        IObj::SeqExt(e) => {
+            let out = extension_with_meta(e, meta).expect("as_iobj accepted a supported extension");
+            Ok(Value::Extension(out))
         }
     }
 }

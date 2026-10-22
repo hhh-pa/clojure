@@ -932,6 +932,20 @@ fn empty_fn_rows() {
     assert_eq!(run_last(&mut eval, "(empty #{1})"), "#{}");
     assert_eq!(run_last(&mut eval, "(empty (range 5))"), "()");
     assert_eq!(run_last(&mut eval, "(empty (map inc [1]))"), "()");
+    // Seqs empty to a bare `()` with no meta (JVM `RT.empty`);
+    // strict kinds keep theirs (T1192 FX1).
+    assert_eq!(
+        run_last(&mut eval, "(empty (with-meta (seq [1 2]) {:a 1}))"),
+        "()"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(meta (empty (with-meta (seq [1 2]) {:a 1})))"),
+        "nil"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(meta (empty (with-meta [1] {:a 1})))"),
+        "{:a 1}"
+    );
     assert_eq!(run_last(&mut eval, "(empty (subvec [1 2 3] 0 2))"), "[]");
     // Non-collections (and transients) are nil.
     for form in [

@@ -578,6 +578,33 @@ fn with_meta() {
         run_last(&mut eval, "(meta (with-meta #{1} {:a 1}))"),
         "{:a 1}"
     );
+    // Seqs take metadata like the JVM's (T1192 FX1).
+    assert_eq!(
+        run_last(&mut eval, "(meta (with-meta (seq [1 2]) {:a 1}))"),
+        "{:a 1}"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(with-meta (seq [1 2]) {:a 1})"),
+        "(1 2)"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(meta (with-meta (range 3) {:a 1}))"),
+        "{:a 1}"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(meta (with-meta (with-meta (seq [1]) {:a 1}) nil))"
+        ),
+        "nil"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(meta (vary-meta (with-meta (seq [1]) {:a 1}) assoc :b 2))"
+        ),
+        "{:a 1, :b 2}"
+    );
     // Functions stay callable under new meta.
     assert_eq!(
         run_last(&mut eval, "((with-meta (fn [x] x) {:a 1}) 5)"),
