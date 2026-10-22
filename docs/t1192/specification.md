@@ -73,8 +73,9 @@ Feature: number tower
     Then stdout is `1/3` and `(+ 1/3 1/3 1/3)` prints `1`
 
   Scenario: big promotion
-    When I run `clojure-rs eval '(* 9223372036854775807 2)'`
-    Then stdout is the full bigint, not an overflow error
+    When I run `clojure-rs eval "(+' 9223372036854775807 1)"`
+    Then stdout is `9223372036854775808N` (plain `+` throws on
+    overflow, like the JVM — verified conformant, FX1 pins it)
 
 Feature: collections and seqs
   Scenario: sorted access
@@ -206,12 +207,20 @@ FIX:
   (investigate-first; may downgrade).
 
 INVESTIGATE (probe, then FIX or STRUCTURAL in-slice):
-- I-nthf64: `nth` with f64 past 2^53, unprobed → FX1.
-- I-huge: huge-long parse/print edges, untested → FX1.
+- I-nthf64: RESOLVED conformant (oracle: `1.0` indexes, past-2^53
+  throws `ArithmeticException: integer overflow` via
+  `toIntExact` — the port matches exactly). FX1 adds pins only.
+- I-huge: RESOLVED split — `(+ MAX 1)` throws `long overflow`
+  on the JVM too (conformant, FX1 pins); huge-literal reading
+  and the `'`-family go to FT1.
 - I-smapread: `sorted-map` "reads as `{}`" (D13; mechanism
   unclear) → FT6 (dies with sorted collections or pins).
-- I-hashinf: `hash` over infinite lazies hangs, marked
-  JVM-true → FX1 (confirm hang==JVM, then conformant).
+- I-hashinf: upgraded to FIX — the JVM does NOT hang: `(hash
+  (iterate inc 0))` throws `UnsupportedOperationException`
+  (null message) fast, contradicting D13's "(JVM-true)". FX1
+  finds the trigger boundary
+  (`range`/`repeat`/`cycle` probes + full trace) and mirrors
+  the fast failure.
 
 STRUCTURAL (go to `divergences.md` with mechanism + pin):
 - S-identity: `swap!`/`compare-and-set!` compare with `=`
@@ -245,9 +254,12 @@ STRUCTURAL (go to `divergences.md` with mechanism + pin):
 ### 2.2 Feature inventory (from `out-of-scope` rows)
 
 - F-tower: ratios, BigInt, BigDecimal (`bigint bigdec num
-  rationalize`), reader/arithmetic/promotion/printing. Touches
-  `=`, `compare`, `hash`, every arithmetic native: lands
-  before numeric divergence fixes close.
+  rationalize`), the promoting ops (`+'` `-'` `*'`), huge-literal
+  reading, reader/arithmetic/promotion/printing. Touches `=`,
+  `compare`, `hash`, every arithmetic native: lands before numeric
+  divergence fixes close. (Plain `+`/`-`/`*` throw on overflow on
+  the JVM too — oracle-verified, FX1 pins; only the `'`-family
+  promotes.)
 - F-reader: `#=` eval reader, `#inst`/`#uuid`, `data_readers.clj`.
 - F-in: `*in*`, `with-in-str`, `read`, `read-line`, `line-seq`
   (PushbackReader over stdin/strings).
