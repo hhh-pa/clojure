@@ -1,0 +1,4 @@
+# Every pull request auto-requests review from michael-h-hu (the
+# second account in the two-account review loop). Master branch
+# protection additionally requires one approving review before merge.
+* @michael-h-hu
