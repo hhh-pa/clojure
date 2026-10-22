@@ -577,9 +577,11 @@ fn declare_test() {
                 .to_owned(),
         ]
     );
+    // fx2-mapentry18.declare-5: non-symbols are the bare JDK
+    // `IObj` cast (finding 6).
     assert_eq!(
         uncaught(&mut eval, "(declare 5)"),
-        "java.lang.ClassCastException | Cannot cast java.lang.Long to clojure.lang.IObj"
+        "java.lang.ClassCastException | class java.lang.Long cannot be cast to class clojure.lang.IObj (java.lang.Long is in module java.base of loader 'bootstrap'; clojure.lang.IObj is in unnamed module of loader 'app')"
     );
 }
 

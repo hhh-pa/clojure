@@ -309,7 +309,7 @@ fn push_pop_get_bindings() {
         "java.lang.ClassCastException | Cannot cast java.lang.Long to clojure.lang.Associative"
     );
     // Vectors are `Associative`s of map entries: empty is a no-op,
-    // non-empty fails the first element's `IMapEntry` cast.
+    // vectors of entries bind, non-entry elements fail the `IMapEntry` cast.
     assert_eq!(run_last(&mut eval, "(push-thread-bindings [])"), "nil");
     assert_eq!(run_last(&mut eval, "(pop-thread-bindings)"), "nil");
     assert_eq!(

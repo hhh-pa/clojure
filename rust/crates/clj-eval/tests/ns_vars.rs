@@ -1015,3 +1015,97 @@ fn s9b_out_of_scope_vars_stay_unresolved() {
         }
     }
 }
+
+#[test]
+fn fx2_tree_walk_vars_stay_unresolved() {
+    // FX2 finding 11: `flatten`/`tree-seq`/`reversible?`/
+    // `chunk-first` stay unbound (the lazy tree-walk machinery
+    // is a follow-up slice; probe6 `flatten`/`reversible?`
+    // rows stand as the oracle pins). Same convention as
+    // `s9b_out_of_scope_vars_stay_unresolved`: under `boot()`,
+    // `resolve` says nil and both use positions surface the
+    // compile-error shape.
+    let mut eval = boot();
+    for name in ["flatten", "tree-seq", "reversible?", "chunk-first"] {
+        assert_eq!(
+            run_last(&mut eval, &format!("(resolve '{name})")),
+            "nil",
+            "{name}"
+        );
+        for src in [format!("({name} 1)"), format!("(identity {name})")] {
+            let Err(SourceError::Compile(e)) = eval.eval_source(&src) else {
+                panic!("expected a compile error for {src}");
+            };
+            assert_eq!(
+                e.to_string(),
+                format!(
+                    "Syntax error compiling at (user:1:1).\njava.lang.RuntimeException | Unable to resolve symbol: {name} in this context"
+                ),
+                "{src}"
+            );
+        }
+    }
+}
+
+#[test]
+fn refer_entry_valued_filters() {
+    // FX2 finding 14: an entry of symbols is a valid
+    // `:only`/`:refer` sequential (`ns.rs check_sequential`
+    // entry arm — both the `:refer` and `:only` call sites).
+    let mut eval = boot();
+    run(
+        &mut eval,
+        "(do (create-ns 'elib) (intern 'elib 'a 1) (intern 'elib 'b 2))",
+    );
+    run(&mut eval, "(create-ns 'ew1)");
+    run(
+        &mut eval,
+        "(do (in-ns 'ew1) (clojure.core/refer 'elib :only (clojure.core/first '{a b})) (clojure.core/in-ns 'user))",
+    );
+    assert_eq!(
+        run_last(&mut eval, "(ns-refers 'ew1)"),
+        "{a #'elib/a, b #'elib/b}"
+    );
+    run(&mut eval, "(create-ns 'ew2)");
+    run(
+        &mut eval,
+        "(do (in-ns 'ew2) (clojure.core/refer 'elib :refer (clojure.core/first '{a b})) (clojure.core/in-ns 'user))",
+    );
+    assert_eq!(
+        run_last(&mut eval, "(ns-refers 'ew2)"),
+        "{a #'elib/a, b #'elib/b}"
+    );
+    // Unknown names still fail item-wise.
+    assert_eq!(
+        uncaught(&mut eval, "(refer 'elib :only (first '{a missing-zz}))"),
+        "java.lang.IllegalAccessError | missing-zz does not exist"
+    );
+}
+
+#[test]
+fn require_entry_libspec() {
+    // FX2 finding 14: `is_libspec` takes an entry whose `val`
+    // is nil or a keyword down the libspec path (`ns.rs`
+    // `is_libspec` entry arm). The entry contributes its two
+    // items plus the injected `:require` flag, so the option
+    // tail is always odd.
+    let mut eval = boot();
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(require (first '{some-nonexistent-lib-xyz nil}))"
+        ),
+        "java.lang.IllegalArgumentException | No value supplied for key: true"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(require (first '{libxyz :reload}))"),
+        "java.lang.IllegalArgumentException | No value supplied for key: true"
+    );
+    // Control: a non-nil, non-keyword `val` is not a libspec
+    // (the prefix path seqs the entry and chokes on the
+    // scalar tail).
+    assert_eq!(
+        uncaught(&mut eval, "(require (first '{libxyz2 5}))"),
+        "java.lang.IllegalArgumentException | Don't know how to create ISeq from: java.lang.Long"
+    );
+}

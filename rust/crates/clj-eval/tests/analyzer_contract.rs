@@ -591,6 +591,9 @@ fn fn_spec_errors() {
         "(fn [{:keys [5]}] 1)",
         "(fn [{:foo/strs [a]}] a)",
         "(fn [{:foo/keys [b/c]}] a)",
+        // fx2-mapentry19.fn-empty: the JVM rejects the empty
+        // clause too (CompilerException, spec `:params`).
+        "(fn ())",
     ] {
         check(src, wrapper, cause);
     }

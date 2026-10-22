@@ -740,6 +740,17 @@ fn outlet_entry_rows() {
         uncaught(&mut eval, "(let [{x :x, :or {x 1}, :all a} [(list :k)]] a)"),
         "java.lang.ClassCastException | Cannot cast clojure.lang.Keyword to java.util.Map$Entry"
     );
+    // A multi-entry list `from`: the one-element `from` unwraps
+    // to `((e1 e2))`, so `into1` hands the entry list to
+    // `conj_map` as one element and the seq loop conjs each
+    // pair (`eval.rs conj_map` insert + `Ok` lines).
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [{x :x, :or {x 1}, :all a} (list (list (list (first {:k :v}) (first {:j :w}))))] a)"
+        ),
+        "{:x 1, :k :v, :j :w}"
+    );
 }
 
 #[test]
@@ -750,5 +761,229 @@ fn hash_infinite_entry() {
     assert_eq!(
         uncaught(&mut eval, "(hash (find {:a (repeat 1)} :a))"),
         "java.lang.UnsupportedOperationException | "
+    );
+}
+
+#[test]
+fn probe18_seqable() {
+    let mut eval = entry_eval();
+    // fx2-mapentry18.seqable-e/seqable-vec/seqable-num
+    // (finding 8): entries seq like their 2-vectors.
+    assert_eq!(run_last(&mut eval, "(seqable? e)"), "true");
+    assert_eq!(run_last(&mut eval, "(seqable? [1 2])"), "true");
+    assert_eq!(run_last(&mut eval, "(seqable? 5)"), "false");
+}
+
+#[test]
+fn probe18_nthnext_edges() {
+    let mut eval = entry_eval();
+    // fx2-mapentry18.nthnext-e0/nthnext-e2 (finding 9):
+    // `n = 0` seqs the whole entry, past-the-end is nil.
+    // (`nthnext-e1` is already pinned as `(nthnext e 1)` in
+    // `seq_fn_rows`.)
+    assert_eq!(run_last(&mut eval, "(nthnext e 0)"), "(:a 1)");
+    assert_eq!(run_last(&mut eval, "(nthnext e 2)"), "nil");
+    // fx2-mapentry18.nthnext-vec0/nthnext-vec5
+    assert_eq!(run_last(&mut eval, "(nthnext [1 2 3] 0)"), "(1 2 3)");
+    assert_eq!(run_last(&mut eval, "(nthnext [1 2 3] 5)"), "nil");
+    // fx2-mapentry18.nthnext-neg: negative `n` keeps the whole
+    // seq.
+    assert_eq!(run_last(&mut eval, "(nthnext [1 2 3] -1)"), "(1 2 3)");
+    // fx2-mapentry18.nthnext-nonn: a fractional `n` drops past
+    // the truncation (`RT.nth` semantics, not `int`).
+    assert_eq!(run_last(&mut eval, "(nthnext [1 2 3] 1.5)"), "(3)");
+    // fx2-mapentry18.nthnext-unseq: unseqables are the `ISeq`
+    // error.
+    assert_eq!(
+        uncaught(&mut eval, "(nthnext 5 1)"),
+        "java.lang.IllegalArgumentException | Don't know how to create ISeq from: java.lang.Long"
+    );
+}
+
+#[test]
+fn probe18_merge_with_seqs() {
+    let mut eval = entry_eval();
+    // fx2-mapentry18.merge-with-empty (finding 10): an empty
+    // seq arg merges nothing.
+    assert_eq!(
+        run_last(&mut eval, "(merge-with + {:a 1} (quote ()))"),
+        "{:a 1}"
+    );
+    // fx2-mapentry18.merge-with-seq: a multi-entry seq conjs
+    // each pair.
+    assert_eq!(
+        run_last(&mut eval, "(merge-with + {:a 1} (seq {:b 2 :c 3}))"),
+        "{:a 1, :b 2, :c 3}"
+    );
+}
+
+#[test]
+fn probe18_find_invoke_vals_sorted() {
+    let mut eval = entry_eval();
+    // fx2-mapentry18.find-e0 (finding 18): the `0` leg of the
+    // `coll.rs find_entry` entry arm (the `1`/miss legs are
+    // pinned in `find_rows`).
+    assert_eq!(run_last(&mut eval, "(find e 0)"), "[0 :a]");
+    // fx2-mapentry18.find-e1/find-ekw
+    assert_eq!(run_last(&mut eval, "(find e 1)"), "[1 1]");
+    assert_eq!(run_last(&mut eval, "(find e :kw)"), "nil");
+    // fx2-mapentry18.invoke-2/invoke-neg: two args is the
+    // `MapEntry` arity error, `-1` the bare IOOBE.
+    assert_eq!(
+        uncaught(&mut eval, "(e 0 1)"),
+        "clojure.lang.ArityException | Wrong number of args (2) passed to: clojure.lang.MapEntry"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(e -1)"),
+        "java.lang.IndexOutOfBoundsException | "
+    );
+    // fx2-mapentry18.vals-vec: `vals` over 2-vectors fails
+    // entrywise on realization (like `keys` in `key_and_val`).
+    assert_eq!(
+        uncaught(&mut eval, "(vals [[1 2]])"),
+        "java.lang.ClassCastException | class clojure.lang.PersistentVector cannot be cast to class java.util.Map$Entry (clojure.lang.PersistentVector is in unnamed module of loader 'app'; java.util.Map$Entry is in module java.base of loader 'bootstrap')"
+    );
+    // fx2-mapentry18.sorted-vec: vectors are not sorted. (The
+    // `sorted-map` row is oracle-true but the port has no
+    // sorted maps yet — FT6 owns it, so there is no
+    // port-false pin against the oracle-true row.)
+    assert_eq!(run_last(&mut eval, "(sorted? [1])"), "false");
+}
+
+#[test]
+fn probe18_entry_binding_forms() {
+    let mut eval = entry_eval();
+    // fx2-mapentry18.let-entry-kw (finding 7): an entry in the
+    // `let` bindings position analyzes as its 2-vector, so a
+    // keyword binding fails ...
+    assert_eq!(
+        uncaught(&mut eval, "(eval (list (quote let) (first {:x 1}) 1))"),
+        "clojure.lang.Compiler$CompilerException | Syntax error macroexpanding clojure.core/let at (user:1:1)."
+    );
+    // fx2-mapentry18.let-kw-vec: ... identically to the plain
+    // vector control (the failure is about `:x`, not entryness).
+    assert_eq!(
+        uncaught(&mut eval, "(eval (list (quote let) [(quote :x) 1] 1))"),
+        "clojure.lang.Compiler$CompilerException | Syntax error macroexpanding clojure.core/let at (user:1:1)."
+    );
+    // fx2-mapentry18.fn-entry-invoke/fn-entry-fnq: an entry
+    // params vector makes a real fn.
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [f (eval (list (quote fn) (first {(quote a) (quote b)}) (quote a)))] (f 10 20))"
+        ),
+        "10"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(fn? (eval (list (quote fn) (first {(quote a) (quote b)}) (quote a))))"
+        ),
+        "true"
+    );
+    // fx2-mapentry18.let-entry-pattern: an entry as a
+    // sequential destructuring pattern.
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(eval (list (quote let) [(first {(quote a) (quote b)}) [10 20]] (quote a)))"
+        ),
+        "10"
+    );
+    // fx2-mapentry18.let-entry-keys: an entry as the `:keys`
+    // binding vector.
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(eval (list (quote let) [{:keys (first {(quote a) (quote b)})} {:a 10 :b 20}] (quote a)))"
+        ),
+        "10"
+    );
+    // fx2-mapentry18.let-entry-bindings: an entry of valid
+    // bindings binds.
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(eval (list (quote let) (first {(quote x) 1}) (quote x)))"
+        ),
+        "1"
+    );
+}
+
+#[test]
+fn probe18_arity_errors() {
+    let mut eval = entry_eval();
+    // fx2-mapentry18.rseq-0/rseq-2/nthnext-1/nthnext-0/
+    // sorted-0/sorted-2 (finding 20): fixed-arity natives
+    // name the `clojure.core/F` display form (the
+    // `seqs.rs mapcat_rows` convention).
+    assert_eq!(
+        uncaught(&mut eval, "(rseq)"),
+        "clojure.lang.ArityException | Wrong number of args (0) passed to: clojure.core/rseq"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(rseq [1] [2])"),
+        "clojure.lang.ArityException | Wrong number of args (2) passed to: clojure.core/rseq"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(nthnext [1])"),
+        "clojure.lang.ArityException | Wrong number of args (1) passed to: clojure.core/nthnext"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(nthnext)"),
+        "clojure.lang.ArityException | Wrong number of args (0) passed to: clojure.core/nthnext"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(sorted?)"),
+        "clojure.lang.ArityException | Wrong number of args (0) passed to: clojure.core/sorted?"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(sorted? [1] [2])"),
+        "clojure.lang.ArityException | Wrong number of args (2) passed to: clojure.core/sorted?"
+    );
+}
+
+#[test]
+fn probe18_destructure_entry_keys() {
+    let mut eval = entry_eval();
+    // fx2-mapentry18.mapdest-0/mapdest-1: map destructuring
+    // reads entries by int key (`eval.rs lookup` entry legs).
+    assert_eq!(run_last(&mut eval, "(let [{x 0} (first {:a 1})] x)"), ":a");
+    assert_eq!(run_last(&mut eval, "(let [{x 1} (first {:a 1})] x)"), "1");
+    // fx2-mapentry19.mapdest-5/mapdest-neg: out-of-range int
+    // keys bind nil (the `eval.rs lookup` entry fallthrough).
+    assert_eq!(run_last(&mut eval, "(let [{x 5} (first {:a 1})] x)"), "nil");
+    assert_eq!(
+        run_last(&mut eval, "(let [{x -1} (first {:a 1})] x)"),
+        "nil"
+    );
+    // fx2-mapentry18.seqdest-missing: a missing sequential
+    // index binds nil (no `&`, so this routes through the
+    // `eval.rs nth_or_nil` entry fallthrough at `i >= 2`).
+    assert_eq!(
+        run_last(&mut eval, "(let [[a b c] (first {:x 1})] c)"),
+        "nil"
+    );
+}
+
+#[test]
+fn probe18_dead_rows() {
+    let mut eval = entry_eval();
+    // fx2-mapentry18.merge-with-entry-class (finding 16):
+    // re-probe of the probe11 row. The probe wraps the form
+    // in `class`, which is out of scope as a fn (see the
+    // module docs), so the pin asserts the inner throw
+    // directly — it fires before `class` runs on the JVM
+    // too (same text as `merge_rows`).
+    assert_eq!(
+        uncaught(&mut eval, "(merge-with + {:a 1} e)"),
+        "java.lang.ClassCastException | class clojure.lang.Keyword cannot be cast to class java.util.Map$Entry (clojure.lang.Keyword is in unnamed module of loader 'app'; java.util.Map$Entry is in module java.base of loader 'bootstrap')"
+    );
+    // fx2-mapentry18.rseq-str-class: re-probe of the probe7
+    // row (same text as `rseq_rows`).
+    assert_eq!(
+        uncaught(&mut eval, "(rseq \"ab\")"),
+        "java.lang.ClassCastException | class java.lang.String cannot be cast to class clojure.lang.Reversible (java.lang.String is in module java.base of loader 'bootstrap'; clojure.lang.Reversible is in unnamed module of loader 'app')"
     );
 }
