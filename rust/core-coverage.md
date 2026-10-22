@@ -227,8 +227,8 @@ machine-read — keep `| var | status | notes |` rows exact.
 | `into` | divergent | plain into only; xform arity out of scope |
 | `distinct?` | implemented | coll.rs distinct_rows |
 | `empty` | implemented | coll.rs empty_fn_rows (class-sticky, meta kept, seqs→(), else nil) |
-| `key` | divergent | no MapEntry: slot 0 via nth (control.rs key_val; CCE class differs) |
-| `val` | divergent | no MapEntry: slot 1 via nth (control.rs key_val; CCE class differs) |
+| `key` | implemented | T1192 FX2 entry-only (control.rs key_val + map_entry.rs key_and_val; non-entries fail the Map$Entry CCE) |
+| `val` | implemented | T1192 FX2 entry-only (control.rs key_val + map_entry.rs key_and_val; non-entries fail the Map$Entry CCE) |
 | `disj` | implemented | coll.rs disj_set_rows (passthrough, nil-pun, CCE→Set) |
 | `set` | implemented | coll.rs disj_set_rows (rebuild via seq; :set-5 seq IAE) |
 

@@ -126,9 +126,10 @@ tx), probe37 `declare-*`/`ns-*`, corner probes `s5ccorner*`,
   `declare-dynamic`, `declare-twice`). Qualified names fail
   through `def` (`Can't refer...`/`Can't create defs...` under
   `Syntax error compiling def`, probe37 `declare-qualified`);
-  non-symbols are the bare `IObj` cast (probe37 `declare-num` —
-  the JVM reaches it through `vary-meta` during expansion; the
-  port raises it in the parser, same shape).
+  non-symbols are the JDK `IObj` checkcast text (probe37
+  `declare-num`, fx2-mapentry18 `declare-5` — the JVM reaches it
+  through `vary-meta` during expansion; the port raises it in
+  the parser, same shape).
 - `(ns name doc? attr? clause*)` validates up front (anything
   misshapen — non-symbol or qualified name, misplaced
   docstring/attrmap, non-list or unknown-keyword clause — is

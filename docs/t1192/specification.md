@@ -179,8 +179,14 @@ FIX:
 - D-mapentry: FIXED (real `Value::MapEntry`: `key`/`val`
   project entries only, map seqs/`find` yield entries, entry
   conj/assoc/`=`/`hash`/`compare`/`rseq`/destructure match;
-  `rseq`/`sorted?`/`nthnext` land; with-meta/meta-value casts
-  report the JVM text; fx2-mapentry{,2..17} probes + pins).
+  `let`/`fn` binding forms accept entries (probe18
+  entry-binding rows); `rseq`/`nthnext` land and `sorted?`
+  lands as a constant-false placeholder owned by FT6;
+  `push-thread-bindings` binds vectors of entries (the
+  `IMapEntry` cast moved stable→JDK while the Var/
+  Associative casts keep the pinned §E8 text — mixed cast
+  state for FX7); with-meta/meta-value casts report the JVM
+  text; fx2-mapentry{,2..19} probes + pins).
 - D-prepost: `:pre`/`:post` silently ignored → FX3.
 - D-printdup: `*print-dup*` declared but ignored → FX4b.
 - D-streamprint: str realization up-front vs JVM in-flight
@@ -320,12 +326,17 @@ FX1 small deterministic fixes (D-tsneg/D-time/D-emptymeta/
   D-cce-shape/D-caseacc/D-postfuture/D-shutdrain/D-avaroot/
   D-argv + I-nthf64/I-huge/I-hashinf probes).
 FX2 MapEntry (D-mapentry). Follow-ups found in-slice (slice
-  TBD): `flatten`/`tree-seq` unimplemented (probe6 `flatten`
-  stands as the pin); `reversible?`/`chunk-*`/`instance?`/
-  `realized?` unimplemented; the invoke fallback and `declare`
-  keep the pinned §E8 cast text (oracle reports JDK — FX7
-  input); `seq_opt` rejects seq values on the outlet path
-  (custom paths only, no oracle).
+  TBD): `flatten`/`tree-seq`/`reversible?`/`chunk-*`
+  unimplemented, each with a non-resolution pin
+  (`ns_vars.rs fx2_tree_walk_vars_stay_unresolved`;
+  probe6 `flatten`/`reversible?` rows stand as the oracle
+  pins — oracle `reversible?` is true on entries);
+  `instance?` stays permanent N1 out-of-scope (not
+  a slice follow-up); the invoke fallback keeps the pinned
+  §E8 cast text (oracle reports JDK — FX7 input) while
+  `declare` is JDK-evidenced (probe18 declare-5) and
+  flipped to the JDK `IObj` text; `seq_opt` rejects seq
+  values on the outlet path (custom paths only, no oracle).
 FX3 pre/post validation (D-prepost).
 FX4 analyzer builtins as real macros (D-macroexpand: `let*`/
   `fn*`/`loop*` special forms + core macro defs + analyzer).

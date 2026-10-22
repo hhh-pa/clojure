@@ -50,8 +50,8 @@ that need to pass these values around.
   chunked paths; S5's core fns reuse the same primitives.
 - Map seqs yield real `MapEntry` values (T1192 FX2 closed the
   gap): `Value::MapEntry` has no meta slot, compares/hashes/
-  prints as its 2-vector, and answers `vector?`/`sequential?`/
-  `associative?`/`counted?`/`ifn?`.
+  prints as its 2-vector, and answers `coll?`/`vector?`/
+  `sequential?`/`associative?`/`counted?`/`ifn?`.
 
 ## §3 Equality and ordering (probe17, spec C2)
 
