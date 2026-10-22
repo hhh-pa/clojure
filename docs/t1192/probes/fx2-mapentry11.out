@@ -1,6 +1,3 @@
 merge-with-vec: {:a 1, 0 :b, 1 2}
 Execution error (ClassCastException) at user/eval120 (fx2-mapentry11.clj:4).
 class clojure.lang.Keyword cannot be cast to class java.util.Map$Entry (clojure.lang.Keyword is in unnamed module of loader 'app'; java.util.Map$Entry is in module java.base of loader 'bootstrap')
-
-Full report at:
-/var/folders/09/kksptpbn5951f150wkd2z5qh0000gn/T/clojure-4644666145034504085.edn

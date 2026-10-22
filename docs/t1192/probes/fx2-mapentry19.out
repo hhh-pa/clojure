@@ -1,0 +1,4 @@
+mapdest-5 nil
+mapdest-neg nil
+mapdest-missing nil
+fn-empty THROW clojure.lang.Compiler$CompilerException|"Syntax error macroexpanding clojure.core/fn at (/Users/hhu/workspace/clojure/docs/t1192/probes/fx2-mapentry19.clj:14:22)."
