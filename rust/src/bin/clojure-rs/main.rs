@@ -127,6 +127,16 @@ fn cmd_eval(form: &str, edn: bool) -> ExitCode {
         return ExitCode::SUCCESS;
     }
     let mut eval = boot();
+    let code = cmd_eval_forms(&mut eval, form);
+    // JVM parity: non-daemon pool/future threads keep the JVM alive
+    // past main; join them here (T1192 FX1).
+    eval.join_drainers();
+    code
+}
+
+/// Evaluate and print each form (split from `cmd_eval` so the exit
+/// join runs on every path, success and failure alike).
+fn cmd_eval_forms(eval: &mut Evaluator, form: &str) -> ExitCode {
     let forms = match eval.read_forms(form) {
         Ok(forms) => forms,
         Err(e) => {
@@ -147,7 +157,7 @@ fn cmd_eval(form: &str, edn: bool) -> ExitCode {
             // still prints them (pins P1).
             continue;
         }
-        match print_value(&mut eval, &value) {
+        match print_value(eval, &value) {
             Ok(text) => println!("{text}"),
             Err(diagnostic) => {
                 eprintln!("{EVAL_FILE}:1:1: {diagnostic}");
@@ -242,13 +252,17 @@ fn cmd_run(file: &Path, args: &[String]) -> ExitCode {
     let inits = args_expr(args);
     let target = clj_string(&path);
     let script = format!("(binding [*command-line-args* {inits}] (load-file {target}))");
-    match eval.eval_source(&script) {
+    let code = match eval.eval_source(&script) {
         Ok(_) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("{}", run_diagnostic(&path, &e));
             ExitCode::from(1)
         }
-    }
+    };
+    // Exit join (see `cmd_eval`): drained agents and futures print
+    // before the process goes away, like the JVM's non-daemon wait.
+    eval.join_drainers();
+    code
 }
 
 /// The `*command-line-args*` init (pins P4): nil without args, else a
@@ -681,7 +695,9 @@ fn cmd_repl_with(
         let stdout = std::io::stdout();
         let mut session =
             clj_repl::Session::new(boot(), BufReader::new(stdin.lock()), stdout.lock());
-        return ExitCode::from(session.run() as u8);
+        let code = session.run();
+        session.evaluator_mut().join_drainers();
+        return ExitCode::from(code as u8);
     }
     println!("clojure-rs {}", env!("CARGO_PKG_VERSION"));
     let stdout = std::io::stdout();
@@ -698,7 +714,9 @@ fn cmd_repl_with(
             let stdin = std::io::stdin();
             let (eval, _, _) = session.into_parts();
             let mut fallback = clj_repl::Session::new(eval, BufReader::new(stdin.lock()), stdout);
-            return ExitCode::from(fallback.run() as u8);
+            let code = fallback.run();
+            fallback.evaluator_mut().join_drainers();
+            return ExitCode::from(code as u8);
         }
     };
     let history = history_options(no_history, history_file);
@@ -719,6 +737,7 @@ fn cmd_repl_tty<W: std::io::Write, S: clj_repl::LineSource>(
     let prompt = prompt_fn(std::rc::Rc::clone(&prompt_text));
     let mut handler = SessionHandler::new(session, prompt_text);
     let code = editor.run(&prompt, &mut handler);
+    handler.session.evaluator_mut().join_drainers();
     let status = handler.status.get();
     ExitCode::from(if code == 0 { status as u8 } else { code as u8 })
 }

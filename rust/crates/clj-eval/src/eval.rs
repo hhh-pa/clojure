@@ -217,6 +217,12 @@ impl Evaluator {
             .push(handle);
     }
 
+    /// Whether `shutdown-agents` has latched (post-shutdown
+    /// futures reject instead of spawning).
+    pub(crate) fn agent_system_shutdown(&self) -> bool {
+        self.agent_system.is_shutdown()
+    }
+
     /// This lineage's agent pools, creating them on first use
     /// (`None` after [`shutdown_agents`](Self::shutdown_agents):
     /// dispatches drop like the JVM's rejected `execute`).
@@ -226,13 +232,23 @@ impl Evaluator {
         self.agent_system.pools_for_send()
     }
 
-    /// Stop the agent pools (running and queued actions complete; new
-    /// sends fail) and join the pool workers, the send-off threads,
-    /// and every spawned future thread — except the current thread's
-    /// own handle, so shutdown from inside a future body or agent
-    /// action returns at once instead of hanging on a self-join.
+    /// Stop the agent pools (running actions complete; queued
+    /// ones drop; new sends fail). Returns at once, like the
+    /// JVM — draining happens on the workers; the exit join (see
+    /// `join_drainers`) waits them out (T1192 FX1).
     pub(crate) fn shutdown_agents(&self) {
         self.agent_system.shutdown();
+    }
+
+    /// Latch the pools shut (idempotent — like `clojure.main`'s
+    /// exit-time `shutdown-agents`) and join every parked worker
+    /// and spawned future thread. The process-exit join: mirrors
+    /// the JVM, whose non-daemon pool threads keep the runtime
+    /// alive past main. The `run`, `eval`, and REPL drivers call
+    /// this before exiting (T1192 FX1).
+    pub fn join_drainers(&self) {
+        self.agent_system.shutdown();
+        self.agent_system.join_parked();
         let handles = std::mem::take(
             &mut *self
                 .future_threads

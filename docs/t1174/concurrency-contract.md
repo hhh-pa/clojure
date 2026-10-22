@@ -77,8 +77,10 @@ shapes are exact JVM text (en_US/UTC).
   unreleased `nested` buffer — never resurrected by a later
   restart without `:clear-actions`).
 - `*agent*` bound inside actions. `shutdown-agents` → `nil`,
-  joins pools + future threads (BLOCKING — DIVERGENCE: the
-  JVM returns at once and drains async; timing-only).
+  returns at once and drains async (T1192 FX1 — was BLOCKING).
+  Parked workers and future threads join at process exit
+  (`Evaluator::join_drainers`, called by the `run`/`eval`/REPL
+  drivers), mirroring the JVM's non-daemon wait.
 - After shutdown, sends return the agent but their actions
   never run (like the JVM's swallowed executor rejection —
   the queue wedges, `await-for` times out `false`).
@@ -90,8 +92,10 @@ shapes are exact JVM text (en_US/UTC).
   barrier head drops with the queue, so the latch
   disconnects at once; the JVM's barrier wedges and plain
   `await` hangs). Post-shutdown `future`/`future-call`
-  still spawns a thread (DIVERGENCE: the JVM's pool
-  rejects with `RejectedExecutionException`).
+  (and `pcalls`/`pvalues` through them) rejects with
+  `RejectedExecutionException` (T1192 FX1 — was: spawned;
+  the message is port-fixed, the JVM's embeds pool
+  identity).
 
 ## locking
 

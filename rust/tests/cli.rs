@@ -257,6 +257,27 @@ fn run_hello_script() {
 }
 
 #[test]
+fn run_joins_drainers_at_exit() {
+    // T1192 FX1: no `await` and no `shutdown-agents` anywhere —
+    // the driver latches + joins at exit (like `clojure.main`),
+    // so both lines print deterministically (JVM non-daemon
+    // parity). Order between threads is unspecified, so assert
+    // containment, not equality.
+    let fixture = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/drain.clj");
+    let out = run(["run", fixture]);
+    assert_eq!(out.status.code(), Some(0));
+    let text = stdout(&out);
+    assert!(
+        text.contains("agent-drained\n"),
+        "missing agent line:\n{text}"
+    );
+    assert!(
+        text.contains("future-drained\n"),
+        "missing future line:\n{text}"
+    );
+}
+
+#[test]
 fn run_binds_command_line_args() {
     // Pins P4: script args arrive as a seq `("a" "b")`.
     let fixture = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/args.clj");
