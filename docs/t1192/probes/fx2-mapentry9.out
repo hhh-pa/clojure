@@ -1,0 +1,16 @@
+conj-seq-entries: {:a 1, :b 2}
+conj-list-entry: {:a 1, :b 2}
+conj-multi: {:a 0, :b 2, :c 3}
+let-fixed: [:a 1]
+let-rest: [:a (1)]
+eval-entry: [:a 1]
+eval-entry-class: clojure.lang.PersistentVector
+rseq-entry-class: clojure.lang.APersistentVector$RSeq
+rseq-entry-empty: nil
+subvec-empty-class: clojure.lang.PersistentVector
+chunk-first-rseq: THROW java.lang.ClassCastException|"class clojure.lang.APersistentVector$RSeq cannot be cast to class clojure.lang.IChunkedSeq (clojure.lang.APersistentVector$RSeq and clojure.lang.IChunkedSeq are in unnamed module of loader 'app')"
+drop-rseq-class: clojure.lang.LazySeq
+seq?-rseq: true
+nth-rseq: 3
+rseq-subvec: (2 1)
+rseq-subvec-class: clojure.lang.APersistentVector$RSeq

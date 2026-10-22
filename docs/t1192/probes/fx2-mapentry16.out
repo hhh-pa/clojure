@@ -1,0 +1,9 @@
+compare-vec-entry: 0
+compare-entry-entry: 0
+set-member: true
+map-lookup: :v
+pcth-eq: true
+find-miss-entry: nil
+conj-empty-seq: {:a 1}
+transient-conj-entry: {:a 1, :b 2}
+merge-with-seq: {:a 1, :b 2}

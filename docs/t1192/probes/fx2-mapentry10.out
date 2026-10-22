@@ -1,0 +1,5 @@
+mapdest-plain: :a
+mapdest-or: [:a :dflt]
+mapdest-keys: nil
+mapdest-str: "x"
+mapdest-vec-or: [:x :dflt]

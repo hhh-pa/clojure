@@ -1,0 +1,4 @@
+push-vec-scalar: THROW java.lang.ClassCastException|"class java.lang.Long cannot be cast to class clojure.lang.IMapEntry (java.lang.Long is in module java.base of loader 'bootstrap'; clojure.lang.IMapEntry is in unnamed module of loader 'app')"
+case-miss: :miss
+get-in-nested: 1
+update-entry: ["a" 1]

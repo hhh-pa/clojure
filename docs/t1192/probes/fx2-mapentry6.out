@@ -1,0 +1,17 @@
+val-nil "class java.lang.NullPointerException::Cannot invoke \"java.util.Map$Entry.getValue()\" because \"e\" is null"
+transient-entry "class java.lang.ClassCastException::class clojure.lang.MapEntry cannot be cast to class clojure.lang.IEditableCollection (clojure.lang.MapEntry and clojure.lang.IEditableCollection are in unnamed module of loader 'app')"
+lazy-val-entry [:a (2)]
+drop-class clojure.lang.LazySeq
+drop-vec-class clojure.lang.PersistentVector$ChunkedSeq
+replace-entry [:a 1]
+replace-entry-class clojure.lang.MapEntry
+reversible? true
+nthnext (1)
+split-at ([:a] [1])
+flatten (:a 1)
+reduce-entry ":a1"
+last-entry 1
+butlast (:a)
+take (:a)
+cycle-take (:a 1 :a)
+interpose (:a :x 1)
