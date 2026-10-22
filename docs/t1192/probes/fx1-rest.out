@@ -1,0 +1,11 @@
+tsneg: "0" "-1" "-1"
+cce-update-transient: CCE|msg="class clojure.lang.PersistentArrayMap$TransientArrayMap cannot be cast to class clojure.lang.Associative (clojure.lang.PersistentArrayMap$TransientArrayMap and clojure.lang.Associative are in unnamed module of loader 'app')"
+cce-keys-vec: CCE|msg="class java.lang.Long cannot be cast to class java.util.Map$Entry (java.lang.Long and java.util.Map$Entry are in module java.base of loader 'bootstrap')"
+cce-keys-next-first: CCE|msg="class java.lang.Long cannot be cast to class java.util.Map$Entry (java.lang.Long and java.util.Map$Entry are in module java.base of loader 'bootstrap')"
+cce-keys-rest-first: CCE|msg="class java.lang.Long cannot be cast to class java.util.Map$Entry (java.lang.Long and java.util.Map$Entry are in module java.base of loader 'bootstrap')"
+cce-keys-str: CCE|msg="class java.lang.String cannot be cast to class java.util.Map$Entry (java.lang.String and java.util.Map$Entry are in module java.base of loader 'bootstrap')"
+cce-update-vec: [2 2]
+nth-1.0: 2
+nth-huge-f64: AE|msg="integer overflow"
+plus-overflow: AE|msg="long overflow"
+hash-repeat: UOE|msg=nil

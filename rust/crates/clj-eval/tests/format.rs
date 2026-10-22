@@ -399,8 +399,11 @@ fn format_t_rows() {
         ("(format \"%TB\" T)", "FEBRUARY"),
         ("(format \"%Tp\" T)", "PM"),
         ("(format \"%tY\" -1)", "1969"),
+        // `%ts` truncates toward zero (T1192 FX1 fx1-rest probe).
         ("(format \"%ts\" -1)", "0"),
         ("(format \"%ts\" -1500)", "-1"),
+        ("(format \"%ts\" -1001)", "-1"),
+        ("(format \"%ts\" -1000)", "-1"),
         ("(format \"%tj\" T)", "044"),
         ("(format \"%tC\" T)", "20"),
         ("(format \"[%te]\" 5)", "[1]"),

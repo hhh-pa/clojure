@@ -302,9 +302,14 @@ with the true call-site span and exit 1 (stdout before the error is
 preserved). Linking uses the platform linker (`cc`/`link`) against
 the `clj-rt` runtime archive. `--emit-ir`/`--emit-obj` write the IR
 or object file and skip linking (hermetic, linker-less). `main`
-takes no arguments (`*command-line-args*` is unconveyed), drops
-every slot, and returns 0; the first runtime failure aborts with
-exit 1. Limits: host-only (no cross-compilation), no debug info,
+takes C `argc`/`argv`, drops every slot, and returns 0; the
+first runtime failure aborts with exit 1. A top-level
+`(defn -main [args] ...)` (exactly one parameter) is the entry
+point: the tops run first in load order, then `-main` is
+invoked with the argv list (nil without args) and its return is
+discarded (T1192 FX1 D-argv; a subset adaptation — the JVM
+applies the args, which needs rest-args). Limits: host-only
+(no cross-compilation), no debug info,
 no tail-call optimization (deep self-recursion overflows the
 machine stack, as on the JVM). JIT is a follow-up, not this task.
 

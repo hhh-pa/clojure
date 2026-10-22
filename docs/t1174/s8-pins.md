@@ -102,7 +102,8 @@ order; every file below exits 0 under `run`/`eval`:
 - Host-only compilation; no cross-compilation, no debug
   info, no TCO guarantee (deep self-calls behave like
   the interpreter: plain calls).
-- `*command-line-args*` unconveyed to built binaries
-  (no arg surface in S8; document).
+- `*command-line-args*` reaches built binaries only through
+  the arity-1 `-main` entry (T1192 FX1 D-argv); there is no
+  other arg surface (no var reads in the subset).
 - No unboxing fast paths (D1); release archives grow by
   one runtime archive per platform.

@@ -46,7 +46,7 @@ fn emit_ir_writes_module_and_skips_link() {
     .expect("emit ir");
     let text = std::fs::read_to_string(&ir).expect("read ir");
     assert!(text.contains("define ptr @cljfn_f_0"), "{text}");
-    assert!(text.contains("define i32 @main()"), "{text}");
+    assert!(text.contains("define i32 @main(i32"), "{text}");
     assert!(!out.exists(), "linking must be skipped");
     std::fs::remove_dir_all(&dir).expect("cleanup");
 }
@@ -257,7 +257,7 @@ fn nesting_accepts_boundary_through_emit_ir() {
     )
     .expect("40 deep compiles");
     let text = std::fs::read_to_string(&ir).expect("read ir");
-    assert!(text.contains("define i32 @main()"), "{text}");
+    assert!(text.contains("define i32 @main(i32"), "{text}");
     std::fs::remove_dir_all(&dir).expect("cleanup");
 }
 

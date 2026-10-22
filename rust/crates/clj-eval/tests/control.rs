@@ -210,7 +210,8 @@ fn hash_values() {
     assert_eq!(run_last(&mut eval, "(hash (repeat 0 :x))"), "-2017569654");
     assert_eq!(run_last(&mut eval, "(hash nil)"), "0");
     assert_eq!(run_last(&mut eval, "(= (hash [1]) (hash '(1)))"), "true");
-    // Unbounded seqs: bare UOE, top-level, nested, and after forcing.
+    // Unbounded seqs: bare UOE, top-level, nested, and after forcing
+    // (T1192 FX1 fx1-rest probe: the JVM message is nil too).
     for src in [
         "(hash (cycle [1]))",
         "(hash (iterate inc 0))",
@@ -619,7 +620,8 @@ fn case_star_shape() {
         "(def ck (macroexpand-1 '(case :a :a 1 :b 2 :d)))",
     );
     assert_eq!(run_last(&mut eval, "(nth (nth ck 2) 7)"), ":hash-identity");
-    // Malformed `case*` is the spec error (no other shape exists).
+    // Short `case*` keeps the spec error (the JVM's IOOBE is an
+    // accident — frozen wedge, T1192 FX1).
     assert_eq!(
         compile_err(&mut eval, "(case* 1)"),
         vec![
@@ -627,6 +629,12 @@ fn case_star_shape() {
             "clojure.lang.ExceptionInfo | Call to clojure.core/case* did not conform to spec."
                 .to_owned(),
         ]
+    );
+    // Empty cases evaluate (the JVM NPEs here — a hand-written-only
+    // accident, frozen wedge).
+    assert_eq!(
+        run_last(&mut eval, "(case* 1 0 0 :dflt {} :sparse :int)"),
+        ":dflt"
     );
 }
 

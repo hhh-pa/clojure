@@ -47,4 +47,7 @@ pub use symbol::Symbol;
 pub use transient::{
     Transient, TransientError, TransientKind, TransientMap, TransientSet, TransientVector,
 };
-pub use value::{FxBuildHasher, List, Map, Set, Value, Vector, new_map, new_set};
+pub use value::{
+    FxBuildHasher, List, Map, Set, Value, Vector, extension_supports_meta, extension_with_meta,
+    new_map, new_set,
+};

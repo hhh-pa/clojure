@@ -13,7 +13,7 @@
 
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 
 use clj_value::{Keyword, Map, Symbol, Unbound, Value, Var, new_map};
 
@@ -642,6 +642,41 @@ struct SharedInner {
     fn_seq: u64,
     gensym: u64,
     eval_seq: u64,
+    alter_locks: HashMap<u64, Arc<VarAlterLock>>,
+}
+
+/// Per-var reentrant alter lock (T1192 FX1): mirrors the JVM's
+/// per-var monitor for `alter-var-root` — read-f-install runs
+/// under exclusion, same-thread reentry nests. Textbook
+/// mutex+condvar reentrant lock; the loom mirror
+/// (`clj-eval/tests/loom_var_lock.rs`) explores every schedule.
+#[derive(Debug)]
+struct VarAlterLock {
+    state: Mutex<AlterOwner>,
+    cvar: Condvar,
+}
+
+#[derive(Debug)]
+struct AlterOwner {
+    owner: Option<std::thread::ThreadId>,
+    depth: u32,
+}
+
+/// RAII release for [`SharedRegistry::lock_var_for_alter`].
+#[derive(Debug)]
+pub(crate) struct VarAlterGuard {
+    lock: Arc<VarAlterLock>,
+}
+
+impl Drop for VarAlterGuard {
+    fn drop(&mut self) {
+        let mut owner = self.lock.state.lock().unwrap_or_else(|e| e.into_inner());
+        owner.depth -= 1;
+        if owner.depth == 0 {
+            owner.owner = None;
+            self.lock.cvar.notify_one();
+        }
+    }
 }
 
 impl Default for SharedRegistry {
@@ -654,6 +689,7 @@ impl Default for SharedRegistry {
                 fn_seq: 0,
                 gensym: 1,
                 eval_seq: 0,
+                alter_locks: HashMap::new(),
             })),
         }
     }
@@ -837,6 +873,47 @@ impl SharedRegistry {
     #[must_use]
     pub fn root_or_unbound(&self, id: u64, sym: &Symbol) -> Value {
         self.lock().registry.root_or_unbound(id, sym)
+    }
+
+    /// Acquire a var's alter lock (reentrant exclusion for
+    /// `alter-var-root`'s read-f-install, like the JVM's var
+    /// monitor). Blocks while another thread alters the same var;
+    /// same-thread reentry nests. The table lookup holds the
+    /// lineage lock only briefly — never across the wait.
+    pub(crate) fn lock_var_for_alter(&self, id: u64) -> VarAlterGuard {
+        let lock = {
+            let mut inner = self.lock();
+            inner
+                .alter_locks
+                .entry(id)
+                .or_insert_with(|| {
+                    Arc::new(VarAlterLock {
+                        state: Mutex::new(AlterOwner {
+                            owner: None,
+                            depth: 0,
+                        }),
+                        cvar: Condvar::new(),
+                    })
+                })
+                .clone()
+        };
+        let current = std::thread::current().id();
+        let mut owner = lock.state.lock().unwrap_or_else(|e| e.into_inner());
+        loop {
+            if matches!(&owner.owner, Some(held) if held == &current) {
+                owner.depth += 1;
+                break;
+            }
+            if owner.owner.is_some() {
+                owner = lock.cvar.wait(owner).unwrap_or_else(|e| e.into_inner());
+            } else {
+                owner.owner = Some(current);
+                owner.depth = 1;
+                break;
+            }
+        }
+        drop(owner);
+        VarAlterGuard { lock }
     }
 
     /// Run `f` over a var's state (`None` when uninterned). The

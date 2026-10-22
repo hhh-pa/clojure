@@ -14,7 +14,10 @@ are new. `clone-thread-bindings` does not exist on the JVM
   `Unbound` object, not a throw (`avr-unbound-arg`); a throwing `f`
   leaves the root untouched (`avr-fail-keeps`). Non-var first arg
   is the `Var` cast, non-callable `f` the `IFn` cast (`avr-non-var`,
-  `avr-non-fn`).
+  `avr-non-fn`). Concurrent alters of one var serialize on the
+  var monitor while unrelated vars proceed in parallel;
+  same-thread nesting re-enters and the outer install wins
+  (`fx1-alter` probes, T1192 FX1).
 - `var-get` is thread-local-or-root and never throws: unbound
   reads the `Unbound` object (`vget-unbound`) — like `deref`
   (`vget-vs-deref`). Non-var is the `Var` cast (`vget-non-var`).

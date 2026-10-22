@@ -176,6 +176,7 @@ version = "0.1.0"
 dependencies = [
  "clj-reader",
  "clj-value",
+ "loom",
 ]
 
 [[package]]

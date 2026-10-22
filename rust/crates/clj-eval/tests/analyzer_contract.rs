@@ -1286,20 +1286,59 @@ fn gap2_loop_walk_rows() {
 
 #[test]
 fn gap2_case_star_spec_rows() {
-    // Every malformed case* slot is the spec error (expr.rs:2764-2846).
+    // Accident-shaped slots keep the spec error (T1192 FX1): the
+    // JVM answers these with NPE/IOOBE accidents or
+    // compiler-internal casts (frozen wedge), or they are
+    // macro-unreachable (out-of-range ints route to hash mode).
     let wrapper = "Syntax error macroexpanding clojure.core/case* at (test:1:1).";
     let cause = "clojure.lang.ExceptionInfo | Call to clojure.core/case* did not conform to spec.";
     for src in [
-        "(case* 1 :bad 0 1 {} :sparse :int)",
-        "(case* 1 0 0 1 :bad :sparse :int)",
         "(case* 1 0 0 1 {} :bad :int)",
         "(case* 1 0 0 1 {} :sparse :bad)",
-        "(case* 1 0 0 1 {} :sparse 5)",
-        "(case* 1 0 0 1 {} :sparse :int 5)",
         "(case* 1 0 0 1 {} :sparse :int #{:a})",
-        "(case* 1 0 0 1 {:a [1 2]} :sparse :int)",
         "(case* 1 0 0 1 {1 2} :sparse :int)",
         "(case* 1 0 0 1 {1 [1]} :sparse :int)",
+        "(case* 1 4294967296 0 1 {} :sparse :int)",
+        "(case* 1 0 0 1 {4294967296 [1 2]} :sparse :int)",
+    ] {
+        check(src, wrapper, cause);
+    }
+}
+
+#[test]
+fn t1192_case_star_cast_rows() {
+    // Wrong-typed slots are the JVM's deterministic casts (T1192
+    // FX1 probes): `Syntax error compiling case*` + E8 cast text.
+    let wrapper = "Syntax error compiling case* at (test:1:1).";
+    for (src, cause) in [
+        (
+            "(case* 1 :bad 0 1 {} :sparse :int)",
+            "java.lang.ClassCastException | Cannot cast clojure.lang.Keyword to java.lang.Number",
+        ),
+        (
+            "(case* 1 0 \"m\" 1 {} :sparse :int)",
+            "java.lang.ClassCastException | Cannot cast java.lang.String to java.lang.Number",
+        ),
+        (
+            "(case* 1 0 0 1 :bad :sparse :int)",
+            "java.lang.ClassCastException | Cannot cast clojure.lang.Keyword to java.util.Map",
+        ),
+        (
+            "(case* 1 0 0 1 {} 5 :int)",
+            "java.lang.ClassCastException | Cannot cast java.lang.Long to clojure.lang.Keyword",
+        ),
+        (
+            "(case* 1 0 0 1 {} :sparse 5)",
+            "java.lang.ClassCastException | Cannot cast java.lang.Long to clojure.lang.Keyword",
+        ),
+        (
+            "(case* 1 0 0 1 {} :sparse :int 5)",
+            "java.lang.ClassCastException | Cannot cast java.lang.Long to java.util.Set",
+        ),
+        (
+            "(case* 1 0 0 1 {:a [1 2]} :sparse :int)",
+            "java.lang.ClassCastException | Cannot cast clojure.lang.Keyword to java.lang.Number",
+        ),
     ] {
         check(src, wrapper, cause);
     }

@@ -217,6 +217,12 @@ impl Evaluator {
             .push(handle);
     }
 
+    /// Whether `shutdown-agents` has latched (post-shutdown
+    /// futures reject instead of spawning).
+    pub(crate) fn agent_system_shutdown(&self) -> bool {
+        self.agent_system.is_shutdown()
+    }
+
     /// This lineage's agent pools, creating them on first use
     /// (`None` after [`shutdown_agents`](Self::shutdown_agents):
     /// dispatches drop like the JVM's rejected `execute`).
@@ -226,13 +232,23 @@ impl Evaluator {
         self.agent_system.pools_for_send()
     }
 
-    /// Stop the agent pools (running and queued actions complete; new
-    /// sends fail) and join the pool workers, the send-off threads,
-    /// and every spawned future thread — except the current thread's
-    /// own handle, so shutdown from inside a future body or agent
-    /// action returns at once instead of hanging on a self-join.
+    /// Stop the agent pools (running actions complete; queued
+    /// ones drop; new sends fail). Returns at once, like the
+    /// JVM — draining happens on the workers; the exit join (see
+    /// `join_drainers`) waits them out (T1192 FX1).
     pub(crate) fn shutdown_agents(&self) {
         self.agent_system.shutdown();
+    }
+
+    /// Latch the pools shut (idempotent — like `clojure.main`'s
+    /// exit-time `shutdown-agents`) and join every parked worker
+    /// and spawned future thread. The process-exit join: mirrors
+    /// the JVM, whose non-daemon pool threads keep the runtime
+    /// alive past main. The `run`, `eval`, and REPL drivers call
+    /// this before exiting (T1192 FX1).
+    pub fn join_drainers(&self) {
+        self.agent_system.shutdown();
+        self.agent_system.join_parked();
         let handles = std::mem::take(
             &mut *self
                 .future_threads
@@ -806,11 +822,19 @@ impl Evaluator {
     fn eval_time(&mut self, expr: &Expr, env: &Env) -> Result<Value, Signal> {
         let start = std::time::Instant::now();
         let v = self.eval(expr, env)?;
-        let millis = start.elapsed().as_nanos() as f64 / 1_000_000.0;
-        let dstr = clj_value::pr_to_string(&Value::Double(millis), &clj_value::PrintOpts::print());
-        let line = format!("Elapsed time: {dstr} msecs");
+        let line = Self::format_elapsed_millis(start.elapsed().as_nanos());
         crate::io::prn_str(self, &line).map_err(|e| self.throw(e))?;
         Ok(v)
+    }
+
+    /// The `time` line for a fixed nanosecond count: `nanos/1e6`
+    /// as an f64, printed like the JVM's `Double/toString`
+    /// (T1192 FX1 fx1-time probe pins the digits; the live path
+    /// passes `Instant::elapsed` here).
+    fn format_elapsed_millis(nanos: u128) -> String {
+        let millis = nanos as f64 / 1_000_000.0;
+        let dstr = clj_value::pr_to_string(&Value::Double(millis), &clj_value::PrintOpts::print());
+        format!("Elapsed time: {dstr} msecs")
     }
 
     /// `(with-out-str body…)`: bind `*out*` to a fresh string writer
@@ -2325,6 +2349,32 @@ fn or_mapped(pat: &MapPattern, defaults: &Map) -> Map {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn elapsed_millis_digits_match_jvm() {
+        // Fixed-nanos digit table (T1192 FX1 fx1-time probe):
+        // `nanos/1e6` prints exactly like the JVM macro.
+        for (nanos, millis) in [
+            (0u128, "0.0"),
+            (1, "1.0E-6"),
+            (10, "1.0E-5"),
+            (100, "1.0E-4"),
+            (999, "9.99E-4"),
+            (1000, "0.001"),
+            (1234, "0.001234"),
+            (2341699, "2.341699"),
+            (123456789, "123.456789"),
+            (999999500000000, "9.999995E8"),
+            (9007199254740993, "9.007199254740992E9"),
+            (123456789012345678, "1.2345678901234567E11"),
+        ] {
+            assert_eq!(
+                Evaluator::format_elapsed_millis(nanos),
+                format!("Elapsed time: {millis} msecs"),
+                "{nanos}"
+            );
+        }
+    }
 
     #[test]
     fn uncaught_recur_is_internal() {

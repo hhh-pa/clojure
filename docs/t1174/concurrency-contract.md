@@ -77,8 +77,10 @@ shapes are exact JVM text (en_US/UTC).
   unreleased `nested` buffer — never resurrected by a later
   restart without `:clear-actions`).
 - `*agent*` bound inside actions. `shutdown-agents` → `nil`,
-  joins pools + future threads (BLOCKING — DIVERGENCE: the
-  JVM returns at once and drains async; timing-only).
+  returns at once and drains async (T1192 FX1 — was BLOCKING).
+  Parked workers and future threads join at process exit
+  (`Evaluator::join_drainers`, called by the `run`/`eval`/REPL
+  drivers), mirroring the JVM's non-daemon wait.
 - After shutdown, sends return the agent but their actions
   never run (like the JVM's swallowed executor rejection —
   the queue wedges, `await-for` times out `false`).
@@ -90,8 +92,10 @@ shapes are exact JVM text (en_US/UTC).
   barrier head drops with the queue, so the latch
   disconnects at once; the JVM's barrier wedges and plain
   `await` hangs). Post-shutdown `future`/`future-call`
-  still spawns a thread (DIVERGENCE: the JVM's pool
-  rejects with `RejectedExecutionException`).
+  (and `pcalls`/`pvalues` through them) rejects with
+  `RejectedExecutionException` (T1192 FX1 — was: spawned;
+  the message is port-fixed, the JVM's embeds pool
+  identity).
 
 ## locking
 
@@ -110,11 +114,12 @@ shapes are exact JVM text (en_US/UTC).
   `std::thread` sets over `mpsc` queues (no new crates).
 - Per-thread `Evaluator` over shared state (D1 spike picks
   the sharing shape; `Value` is already `Send+Sync`).
-- `alter-var-root`'s read-call-install is NOT atomic across
-  threads (PINNED DIVERGENCE: the JVM serializes per-var; the
-  port cannot hold its non-reentrant `Mutex` across the
-  evaluating call, so concurrent alters of one root may lose
-  an update). Single publishes (`intern`, atom/agent
+- `alter-var-root`'s read-call-install serializes per var
+  (the JVM var monitor; same-thread nesting re-enters and
+  the outer install wins; `fx1-alter` probes, T1192 FX1):
+  the port holds a per-var reentrant lock across the
+  evaluating call. Unrelated vars proceed in parallel.
+  Single publishes (`intern`, atom/agent
   publishes) are atomic.
 - Print rendering of refs (`#object[...]`) is covered by
   existing `java_debug` conventions, not re-pinned here.

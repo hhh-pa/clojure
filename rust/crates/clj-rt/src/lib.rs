@@ -39,7 +39,7 @@ pub(crate) mod runtime;
 
 #[cfg(not(test))]
 pub use abi::{
-    prim_symbol, rt_add, rt_arity_error, rt_bool, rt_clone, rt_conj, rt_count, rt_double, rt_drop,
-    rt_eq, rt_ge, rt_get, rt_gt, rt_int, rt_is_truthy, rt_le, rt_lt, rt_mul, rt_nil, rt_nth,
-    rt_print, rt_quot, rt_str, rt_sub, rt_vec_new, rt_vec_push,
+    prim_symbol, rt_add, rt_argv, rt_arity_error, rt_bool, rt_clone, rt_conj, rt_count, rt_double,
+    rt_drop, rt_eq, rt_ge, rt_get, rt_gt, rt_int, rt_is_truthy, rt_le, rt_lt, rt_mul, rt_nil,
+    rt_nth, rt_print, rt_quot, rt_str, rt_sub, rt_vec_new, rt_vec_push,
 };

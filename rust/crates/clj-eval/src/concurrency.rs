@@ -648,6 +648,15 @@ fn spawn_failed() -> NativeError {
 /// future's cached failure).
 fn native_future_call(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/future-call", args, &[1])?;
+    // Post-shutdown submits reject like the JVM's pool `execute`
+    // (T1192 FX1); the message is port-fixed — the JVM's embeds
+    // pool identity.
+    if eval.agent_system_shutdown() {
+        return Err(NativeError::new(
+            ThrowClass::RejectedExecutionException,
+            "future rejected after shutdown".to_owned(),
+        ));
+    }
     let future = Future::new();
     let cell = future.clone();
     let child = eval.fork_for_thread(eval.clone_bindings());
@@ -776,8 +785,9 @@ fn native_force(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErr
 /// The lineage's agent system: lazily built pools plus the
 /// shutdown latch (shared by every forked evaluator, like the
 /// future-thread list). Sends create the pools on first use;
-/// `shutdown-agents` latches shutdown (later sends fail) and joins
-/// the workers.
+/// `shutdown-agents` latches shutdown (later sends fail) and
+/// parks the worker handles for the exit join — the call itself
+/// never blocks (T1192 FX1).
 pub struct AgentSystem {
     inner: Mutex<AgentSystemInner>,
 }
@@ -785,6 +795,7 @@ pub struct AgentSystem {
 struct AgentSystemInner {
     pools: Option<Arc<AgentPools>>,
     shutdown: bool,
+    parked: Vec<std::thread::JoinHandle<()>>,
 }
 
 impl AgentSystem {
@@ -794,8 +805,18 @@ impl AgentSystem {
             inner: Mutex::new(AgentSystemInner {
                 pools: None,
                 shutdown: false,
+                parked: Vec::new(),
             }),
         }
+    }
+
+    /// Whether `shutdown-agents` has latched (post-shutdown sends
+    /// drop; post-shutdown futures reject).
+    pub(crate) fn is_shutdown(&self) -> bool {
+        self.inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .shutdown
     }
 
     /// The pools for a send, creating them on first use. `None`
@@ -818,23 +839,38 @@ impl AgentSystem {
         }
     }
 
-    /// Stop the pools and join every pool worker and send-off thread
-    /// (in-flight heads finish; queued-but-unstarted heads drop like
-    /// the JVM's rejected `execute`; later sends enqueue-then-drop).
-    /// BLOCKING except from inside a future body or agent action,
-    /// where the current thread's own handle is skipped (DIVERGENCE:
-    /// the JVM's `shutdown` returns at once and drains async; the
-    /// port joins so tests observe a settled system — pinned by the
-    /// shutdown-from-future/action regression tests).
+    /// Latch shutdown and park the worker handles for the exit
+    /// join (in-flight heads finish; queued-but-unstarted heads
+    /// drop like the JVM's rejected `execute`; later sends
+    /// enqueue-then-drop). Returns at once, like the JVM's
+    /// `shutdown` — draining happens on the workers themselves,
+    /// which exit once the dropped queue runs dry (T1192 FX1).
     pub(crate) fn shutdown(&self) {
+        // Take the pools under this lock, then release it before
+        // touching the pools lock (workers lock the other way
+        // around on nested sends — never nest).
         let pools = {
             let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
             inner.shutdown = true;
             inner.pools.take()
         };
         if let Some(pools) = pools {
-            pools.shutdown();
+            let handles = pools.begin_shutdown();
+            self.inner
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .parked
+                .extend(handles);
         }
+    }
+
+    /// Join every parked worker handle (the process-exit join —
+    /// mirrors the JVM, whose non-daemon pool threads keep the
+    /// runtime alive past main). Idempotent.
+    pub(crate) fn join_parked(&self) {
+        let parked =
+            std::mem::take(&mut self.inner.lock().unwrap_or_else(|e| e.into_inner()).parked);
+        join_all(parked);
     }
 }
 
@@ -939,25 +975,22 @@ impl AgentPools {
 
     /// Stop the pools and join every thread (the `send` workers drain
     /// first; send-off threads drain their agent inline).
-    fn shutdown(&self) {
-        let (send_handles, sendoff_handles) = {
-            let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-            inner.send_tx = None;
-            (
-                std::mem::take(&mut inner.send_handles),
-                std::mem::take(&mut inner.sendoff_handles),
-            )
-        };
-        join_all(send_handles);
-        join_all(sendoff_handles);
+    /// Drop the `send` queue (workers exit after draining) and
+    /// hand over every worker handle for the exit join. Never
+    /// blocks — the join happens in `join_parked` (T1192 FX1).
+    fn begin_shutdown(&self) -> Vec<std::thread::JoinHandle<()>> {
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        inner.send_tx = None;
+        let mut handles = std::mem::take(&mut inner.send_handles);
+        handles.extend(std::mem::take(&mut inner.sendoff_handles));
+        handles
     }
 }
 
-/// Join every handle except the current thread's own: shutdown
-/// from inside a future body or agent action must return at once
-/// (like the JVM's, which never joins its workers) instead of
-/// joining the current thread and hanging. A skipped handle
-/// detaches — its thread runs on and publishes normally.
+/// Join every handle except the current thread's own (defense in
+/// depth for joins requested off the main thread — the exit join
+/// normally runs there). A skipped handle detaches — its thread
+/// runs on and publishes normally.
 pub(crate) fn join_all(handles: Vec<JoinHandle<()>>) {
     let me = thread::current().id();
     for handle in handles {
@@ -1868,6 +1901,25 @@ pub(crate) const CONC_NATIVES: &[(&str, NativeFnPtr)] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn join_all_skips_the_calling_thread() {
+        // T1192 FX1: the exit join normally runs on main, but a
+        // join requested off-thread must skip its own handle
+        // instead of hanging on itself. The worker receives its
+        // own handle over a channel (its spawner owns it first).
+        let (send_handle, recv_handle) = std::sync::mpsc::channel();
+        let (send_done, recv_done) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let own = recv_handle.recv().expect("own handle");
+            join_all(vec![own]);
+            send_done.send(()).expect("done");
+        });
+        send_handle.send(worker).expect("hand over");
+        recv_done
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("join_all returned");
+    }
 
     #[test]
     fn unwrap_thrown_recur_is_internal() {

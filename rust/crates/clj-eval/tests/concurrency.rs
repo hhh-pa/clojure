@@ -2289,16 +2289,21 @@ fn agent_watch_rows() {
         "[2 false]"
     );
     // The barrier's own publish fires watches too (like the JVM's
-    // `count-down`): `shutdown-agents` joins the pool, so the full
-    // log is deterministic here (a bare `await` would race the
-    // barrier's fire). Last: shutdown poisons this evaluator.
-    assert_eq!(
-        run_last(
-            &mut eval,
-            "(let [log (atom []) a (agent 5)] (add-watch a :k (fn [k r o n] (swap! log conj [o n]))) (send a inc) (await a) (shutdown-agents) @log)"
-        ),
-        "[[5 6] [6 6]]"
+    // `count-down`): shutdown no longer joins (T1192 FX1), so poll
+    // for the full log instead of reading it once (a single read
+    // would race the barrier's fire). Last: shutdown poisons this
+    // evaluator.
+    run(
+        &mut eval,
+        "(def shw-log (atom [])) (def shw-a (agent 5)) (add-watch shw-a :k (fn [k r o n] (swap! shw-log conj [o n]))) (send shw-a inc) (await shw-a) (shutdown-agents)",
     );
+    let start = std::time::Instant::now();
+    while run_last(&mut eval, "@shw-log") != "[[5 6] [6 6]]" {
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(10),
+            "barrier fire never logged"
+        );
+    }
 }
 
 #[test]
@@ -2658,25 +2663,76 @@ fn agent_restart_resumed_after_shutdown() {
 }
 
 #[test]
-fn agent_shutdown_joins() {
+fn agent_shutdown_async() {
     let mut eval = boot();
-    // Running actions complete across shutdown (the join waits out
-    // the gated action on both pools).
+    // `shutdown-agents` returns at once (T1192 FX1): rendezvous
+    // explicitly while healthy, then shut down and read.
     assert_eq!(
         run_last(
             &mut eval,
-            "(let [p (promise) q (promise) a (agent 0) b (agent 0)] (send a (fn [s] @p 1)) (send-off b (fn [s] @q 2)) (deliver p :go) (deliver q :go) (shutdown-agents) [@a @b])"
+            "(let [p (promise) q (promise) a (agent 0) b (agent 0)] (send a (fn [s] @p 1)) (send-off b (fn [s] @q 2)) (deliver p :go) (deliver q :go) (await a) (await b) (shutdown-agents) [@a @b])"
         ),
         "[1 2]"
     );
-    // ... and future threads join too (done without deref).
+    // Futures are unaffected by the shutdown itself: deref
+    // rendezvouses, then the cell reads done (fresh evaluator —
+    // the first half's shutdown poisoned its lineage).
+    let mut eval2 = boot();
     assert_eq!(
         run_last(
-            &mut eval,
-            "(let [p (promise) f (future @p :done)] (deliver p :go) (shutdown-agents) (future-done? f))"
+            &mut eval2,
+            "(let [p (promise) f (future @p :done)] (deliver p :go) (shutdown-agents) [(deref f 8000 :t) (future-done? f)])"
         ),
-        "true"
+        "[:done true]"
     );
+}
+
+#[test]
+fn agent_shutdown_returns_while_blocked() {
+    let mut eval = boot();
+    // The action starts (started-gate), then shutdown returns at
+    // once while it stays blocked — no join (T1192 FX1).
+    run(
+        &mut eval,
+        "(def sh-g (promise)) (def sh-a (agent 0)) (def sh-started (promise))",
+    );
+    run(
+        &mut eval,
+        "(send sh-a (fn [s] (deliver sh-started :yes) @sh-g 1))",
+    );
+    assert_eq!(run_last(&mut eval, "(deref sh-started 8000 :t)"), ":yes");
+    assert_eq!(run_last(&mut eval, "(shutdown-agents)"), "nil");
+    // Draining still completes: release the gate and the worker
+    // publishes (heartbeat — post-shutdown `await` returns nil by
+    // the kept divergence, so poll instead).
+    run(&mut eval, "(deliver sh-g :go)");
+    let start = std::time::Instant::now();
+    while run_last(&mut eval, "@sh-a") != "1" {
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(10),
+            "drain never published"
+        );
+    }
+}
+
+#[test]
+fn future_rejected_after_shutdown() {
+    let mut eval = boot();
+    assert_eq!(run_last(&mut eval, "(shutdown-agents)"), "nil");
+    // Like the JVM's pool `execute` rejection (T1192 FX1); the
+    // message is port-fixed — the JVM's embeds pool identity.
+    for form in [
+        "(future 1)",
+        "(future-call (fn [] 1))",
+        "(doall (pcalls (fn [] 1)))",
+        "(doall (pvalues 1))",
+    ] {
+        assert_eq!(
+            uncaught(&mut eval, form),
+            "java.util.concurrent.RejectedExecutionException | future rejected after shutdown",
+            "{form}"
+        );
+    }
 }
 
 #[test]
@@ -2992,9 +3048,8 @@ fn pvalues_rows() {
 #[test]
 fn shutdown_agents_from_future_body() {
     let mut eval = boot();
-    // `shutdown-agents` inside a future body returns at once (the
-    // body's own thread is skipped, like the JVM's join-free
-    // shutdown) instead of self-joining and hanging.
+    // `shutdown-agents` inside a future body returns at once
+    // (draining is async — nothing joins, T1192 FX1).
     assert_eq!(
         run_last(
             &mut eval,
@@ -3007,9 +3062,10 @@ fn shutdown_agents_from_future_body() {
 #[test]
 fn shutdown_agents_from_agent_action() {
     let mut eval = boot();
-    // `shutdown-agents` inside an action skips the worker's own
-    // handle: the action completes, and `await-for` still
-    // rendezvouses (the dropped barrier ends the wait).
+    // `shutdown-agents` inside an action returns at once
+    // (async drain, T1192 FX1): the action completes, and
+    // `await-for` still rendezvouses (the dropped barrier ends
+    // the wait).
     assert_eq!(
         run_last(
             &mut eval,

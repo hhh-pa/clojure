@@ -10,9 +10,11 @@
 //!
 //! Every value is an opaque `ptr` to an owned box. One LLVM
 //! function per `defn` (`extern` runtime helpers per primitive
-//! call); `@main` drives the tops and returns 0. Locals clone on
-//! every use; all frame slots drop at scope end; fallible calls
-//! null-check into an abort block that calls libc `exit(1)`.
+//! call); `@main` takes C `argc`/`argv`, drives the tops,
+//! invokes `-main` with the argv list when defined, and returns
+//! 0. Locals clone on every use; all frame slots drop at scope
+//! end; fallible calls null-check into an abort block that
+//! calls libc `exit(1)`.
 //!
 //! Builder calls use `.expect()`: the IR is correct by
 //! construction (verified by every snapshot test), so a builder
@@ -72,6 +74,7 @@ struct Decls<'ctx> {
     vec_push: FunctionValue<'ctx>,
     clone: FunctionValue<'ctx>,
     drop_: FunctionValue<'ctx>,
+    argv: FunctionValue<'ctx>,
     print: FunctionValue<'ctx>,
     arity_error: FunctionValue<'ctx>,
     is_truthy: FunctionValue<'ctx>,
@@ -141,6 +144,11 @@ impl<'ctx> Lower<'ctx> {
             ),
             clone: module.add_function("rt_clone", ptr.fn_type(&[ptr.into()], false), None),
             drop_: module.add_function("rt_drop", voidt.fn_type(&[ptr.into()], false), None),
+            argv: module.add_function(
+                "rt_argv",
+                ptr.fn_type(&[ptr.into(), i32t.into()], false),
+                None,
+            ),
             print: module.add_function(
                 "rt_print",
                 ptr.fn_type(&[ptr.into(), i64t.into()], false),
@@ -590,8 +598,14 @@ impl<'ctx> Lower<'ctx> {
 
     /// Lower the `main` statements (values discarded, slots
     /// dropped, exit 0 — abnormal exits happen in abort blocks).
-    fn lower_main(&mut self, main: &[SubsetExpr], main_slots: usize) {
-        let ty = self.i32t.fn_type(&[], false);
+    /// `main` takes C `argc`/`argv`; when the program defines
+    /// `-main`, the tops run first (load order, like namespace
+    /// load), then `-main` is invoked with the argv list (nil
+    /// without args) and its return is discarded, like the JVM.
+    fn lower_main(&mut self, main: &[SubsetExpr], main_slots: usize, main_fn: Option<usize>) {
+        let ty = self
+            .i32t
+            .fn_type(&[self.i32t.into(), self.ptr.into()], false);
         let func = self.module.add_function("main", ty, None);
         let entry = self.ctx.append_basic_block(func, "entry");
         self.builder.position_at_end(entry);
@@ -607,6 +621,13 @@ impl<'ctx> Lower<'ctx> {
         for stmt in main {
             let value = self.lower_expr(func, &slots, stmt);
             self.call_drop(value);
+        }
+        if let Some(index) = main_fn {
+            let argc = func.get_nth_param(0).expect("argc");
+            let argv = func.get_nth_param(1).expect("argv");
+            let args = self.call_ptr(self.decls.argv, &[argv.into(), argc.into()]);
+            let ret = self.call_ptr(self.fns[index], &[args.into()]);
+            self.call_drop(ret);
         }
         self.drop_slots(&slots);
         self.builder
@@ -638,7 +659,7 @@ pub fn to_module<'ctx>(
     for (index, def) in program.fns.iter().enumerate() {
         lower.lower_defn(index, def);
     }
-    lower.lower_main(&program.main, program.main_slots);
+    lower.lower_main(&program.main, program.main_slots, program.main_fn);
     verify_module(&lower.module)?;
     Ok(lower.module)
 }
@@ -708,7 +729,7 @@ mod tests {
             );
         }
         assert!(ir.contains("call void @exit(i32 1)"), "{ir}");
-        assert!(ir.contains("define i32 @main()"), "{ir}");
+        assert!(ir.contains("define i32 @main(i32"), "{ir}");
     }
 
     #[test]
@@ -753,8 +774,20 @@ mod tests {
         let ir = compile_ir("(do)");
         assert!(ir.contains("call ptr @rt_nil"), "{ir}");
         let ir = compile_ir("(defn f [x] x)");
-        assert!(ir.contains("define i32 @main()"), "{ir}");
+        assert!(ir.contains("define i32 @main(i32"), "{ir}");
         assert!(ir.contains("ret i32 0"), "{ir}");
+    }
+
+    #[test]
+    fn dash_main_receives_argv_after_tops() {
+        // T1192 FX1 D-argv: `main` builds the argv list and calls
+        // `-main` after the tops; without `-main` no argv call.
+        let ir = compile_ir("(print 1) (defn -main [args] (print args))");
+        assert!(ir.contains("define ptr @cljfn__main_0"), "{ir}");
+        assert!(ir.contains("call ptr @rt_argv"), "{ir}");
+        assert!(ir.contains("call ptr @cljfn__main_0"), "{ir}");
+        let ir = compile_ir("(print 1) (defn f [x] x)");
+        assert!(!ir.contains("call ptr @rt_argv"), "{ir}");
     }
 
     #[test]

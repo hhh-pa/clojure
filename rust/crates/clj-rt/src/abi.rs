@@ -22,11 +22,12 @@
 //! Every shim is `#[unsafe(no_mangle)]` so the platform link finds the
 //! plain `rt_*` symbols in the static archive.
 
+use std::ffi::{CStr, c_char};
 use std::ptr;
 use std::sync::Arc;
 
 use clj_eval::{NativeError, Prim};
-use clj_value::{Value, Vector};
+use clj_value::{List, Value, Vector};
 
 use crate::runtime::{call_prim, error_line, print_join};
 
@@ -140,6 +141,34 @@ pub unsafe extern "C" fn rt_vec_push(vec: *mut Value, elem: *mut Value) -> *mut 
         _ => Value::Vector(Vector::from_vec(vec![elem])),
     };
     vec
+}
+
+/// The `*command-line-args*` value from C `argc`/`argv` (T1192
+/// FX1 D-argv): `argv[0]` (the program name) is skipped; no
+/// remaining args is nil, else a list of strings — the JVM
+/// shape (fx1-argv probe). Bytes decode lossy (like the JVM's
+/// platform decode).
+///
+/// # Safety
+///
+/// `argv` must be valid for `argc` entries (`argc >= 0`), each a
+/// valid NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rt_argv(argv: *const *const c_char, argc: i32) -> *mut Value {
+    let mut items = Vec::new();
+    // Safety: the caller guarantees validity (see module docs).
+    for i in 1..argc {
+        let entry = unsafe { *argv.offset(i as isize) };
+        let text = unsafe { CStr::from_ptr(entry) }
+            .to_string_lossy()
+            .into_owned();
+        items.push(Value::Str(Arc::from(text.as_str())));
+    }
+    if items.is_empty() {
+        give(Value::Nil)
+    } else {
+        give(Value::List(List::from_vec(items)))
+    }
 }
 
 /// Clone the borrowed box into a fresh owned box.

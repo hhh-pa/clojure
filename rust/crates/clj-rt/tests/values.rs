@@ -14,8 +14,8 @@ mod support;
 
 use clj_value::Value;
 use cljrt::{
-    rt_bool, rt_clone, rt_double, rt_drop, rt_int, rt_is_truthy, rt_nil, rt_str, rt_vec_new,
-    rt_vec_push,
+    rt_argv, rt_bool, rt_clone, rt_double, rt_drop, rt_int, rt_is_truthy, rt_nil, rt_str,
+    rt_vec_new, rt_vec_push,
 };
 use support::{inbox, render};
 
@@ -51,6 +51,26 @@ fn vectors_build_in_order() {
     let vec = unsafe { rt_vec_push(vec, inbox(Value::Int(1))) };
     let vec = unsafe { rt_vec_push(vec, inbox(Value::Str("s".into()))) };
     assert_eq!(render(vec), "[1 s]");
+}
+
+#[test]
+fn argv_skips_program_name_and_nils_when_empty() {
+    use std::ffi::CString;
+    let prog = CString::new("prog").unwrap();
+    // `argv[0]`-only (and the degenerate `argc = 0`) is nil.
+    let argv = [prog.as_ptr()];
+    assert_eq!(render(unsafe { rt_argv(argv.as_ptr(), 1) }), "nil");
+    let empty: [*const std::ffi::c_char; 0] = [];
+    assert_eq!(render(unsafe { rt_argv(empty.as_ptr(), 0) }), "nil");
+    // Args arrive as a list of strings (the JVM shape, T1192
+    // FX1 fx1-argv probe); bytes decode lossy.
+    let a = CString::new("a").unwrap();
+    let b = CString::new("b").unwrap();
+    let argv = [prog.as_ptr(), a.as_ptr(), b.as_ptr()];
+    assert_eq!(render(unsafe { rt_argv(argv.as_ptr(), 3) }), "(a b)");
+    let bad = CString::new(b"a\xffb".to_vec()).unwrap();
+    let argv = [prog.as_ptr(), bad.as_ptr()];
+    assert_eq!(render(unsafe { rt_argv(argv.as_ptr(), 2) }), "(a�b)");
 }
 
 #[test]

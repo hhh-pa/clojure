@@ -1,4 +1,4 @@
 {
-  "_comment": "cargo-geiger baseline (T1174): total unsafe items/expressions summed over workspace crates (used + unused). CI fails when the total grows; lower it when unsafe is removed. NOTE: cargo-geiger folds dependency unsafe into the binary package's entry, so the tool's total is clj-rt 77 + clj-aot 11 + clojure-rs rollup 88 = 176 (R1 finding 2); own-counts are unchanged.",
-  "unsafe_total": 176
+  "_comment": "cargo-geiger baseline (T1174): total unsafe items/expressions summed over workspace crates (used + unused). CI fails when the total grows; lower it when unsafe is removed. NOTE: cargo-geiger folds dependency unsafe into the binary package's entry, so the tool's total is clj-rt 98 + clj-aot 11 + clojure-rs rollup 109 = 218 (R1 finding 2); own-counts are unchanged. T1192 D-argv adds the clj-rt +21 (rt_argv shim + its FFI-boundary tests; the rollup folds the same +21).",
+  "unsafe_total": 218
 }

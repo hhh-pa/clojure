@@ -623,6 +623,92 @@ pub enum Value {
     Extension(Arc<dyn ExtensionValue>),
 }
 
+/// Read metadata off a sequence extension value (borrowed).
+/// Single source for the sequence-type list shared with the
+/// rebuild helper below.
+fn seq_ext_meta(e: &Arc<dyn ExtensionValue>) -> Option<&Map> {
+    let any = e.as_any();
+    any.downcast_ref::<crate::RealizedSeq>()
+        .and_then(crate::RealizedSeq::meta)
+        .or_else(|| {
+            any.downcast_ref::<crate::RangeValue>()
+                .and_then(crate::RangeValue::meta)
+        })
+        .or_else(|| {
+            any.downcast_ref::<crate::RepeatValue>()
+                .and_then(crate::RepeatValue::meta)
+        })
+        .or_else(|| {
+            any.downcast_ref::<crate::CycleValue>()
+                .and_then(crate::CycleValue::meta)
+        })
+        .or_else(|| {
+            any.downcast_ref::<crate::IterateValue>()
+                .and_then(crate::IterateValue::meta)
+        })
+        .or_else(|| {
+            any.downcast_ref::<crate::ConsValue>()
+                .and_then(crate::ConsValue::meta)
+        })
+        .or_else(|| {
+            any.downcast_ref::<crate::KeySeqValue>()
+                .and_then(crate::KeySeqValue::meta)
+        })
+        .or_else(|| {
+            any.downcast_ref::<crate::ValSeqValue>()
+                .and_then(crate::ValSeqValue::meta)
+        })
+        .or_else(|| {
+            any.downcast_ref::<crate::SubVectorValue>()
+                .and_then(crate::SubVectorValue::meta)
+        })
+}
+
+/// Rebuild a sequence extension value with new metadata (`None`
+/// for non-sequence extensions).
+fn seq_ext_with_meta(
+    e: &Arc<dyn ExtensionValue>,
+    meta: Option<Map>,
+) -> Option<Arc<dyn ExtensionValue>> {
+    let any = e.as_any();
+    macro_rules! retag {
+        ($t:ty) => {
+            if let Some(v) = any.downcast_ref::<$t>() {
+                let rebuilt: Arc<dyn ExtensionValue> = Arc::new(v.clone().with_meta(meta));
+                return Some(rebuilt);
+            }
+        };
+    }
+    retag!(crate::RealizedSeq);
+    retag!(crate::RangeValue);
+    retag!(crate::RepeatValue);
+    retag!(crate::CycleValue);
+    retag!(crate::IterateValue);
+    retag!(crate::ConsValue);
+    retag!(crate::KeySeqValue);
+    retag!(crate::ValSeqValue);
+    retag!(crate::SubVectorValue);
+    None
+}
+
+/// Whether an extension value supports metadata (the sequence
+/// types). A rebuild probe, so the type list lives in the
+/// rebuild helper alone.
+#[must_use]
+pub fn extension_supports_meta(e: &Arc<dyn ExtensionValue>) -> bool {
+    seq_ext_with_meta(e, None).is_some()
+}
+
+/// Attach metadata to a supported extension value (`None` when
+/// unsupported — check `extension_supports_meta` first).
+#[must_use]
+pub fn extension_with_meta(
+    e: &Arc<dyn ExtensionValue>,
+    meta: Option<Map>,
+) -> Option<Arc<dyn ExtensionValue>> {
+    seq_ext_with_meta(e, meta)
+}
+
 impl Value {
     /// Clojure truthiness: only `nil` and `false` are false.
     #[must_use]
@@ -640,43 +726,7 @@ impl Value {
             Value::Vector(v) => v.meta(),
             Value::Map(m) => m.meta(),
             Value::Set(s) => s.meta(),
-            Value::Extension(e) => {
-                let any = e.as_any();
-                any.downcast_ref::<crate::RealizedSeq>()
-                    .and_then(crate::RealizedSeq::meta)
-                    .or_else(|| {
-                        any.downcast_ref::<crate::RangeValue>()
-                            .and_then(crate::RangeValue::meta)
-                    })
-                    .or_else(|| {
-                        any.downcast_ref::<crate::RepeatValue>()
-                            .and_then(crate::RepeatValue::meta)
-                    })
-                    .or_else(|| {
-                        any.downcast_ref::<crate::CycleValue>()
-                            .and_then(crate::CycleValue::meta)
-                    })
-                    .or_else(|| {
-                        any.downcast_ref::<crate::IterateValue>()
-                            .and_then(crate::IterateValue::meta)
-                    })
-                    .or_else(|| {
-                        any.downcast_ref::<crate::ConsValue>()
-                            .and_then(crate::ConsValue::meta)
-                    })
-                    .or_else(|| {
-                        any.downcast_ref::<crate::KeySeqValue>()
-                            .and_then(crate::KeySeqValue::meta)
-                    })
-                    .or_else(|| {
-                        any.downcast_ref::<crate::ValSeqValue>()
-                            .and_then(crate::ValSeqValue::meta)
-                    })
-                    .or_else(|| {
-                        any.downcast_ref::<crate::SubVectorValue>()
-                            .and_then(crate::SubVectorValue::meta)
-                    })
-            }
+            Value::Extension(e) => seq_ext_meta(e),
             _ => None,
         }
     }
@@ -691,28 +741,9 @@ impl Value {
             Value::Vector(v) => Value::Vector(v.with_meta(meta)),
             Value::Map(m) => Value::Map(m.with_meta(meta)),
             Value::Set(s) => Value::Set(s.with_meta(meta)),
-            Value::Extension(e) => {
-                let any = e.as_any();
-                macro_rules! retag {
-                    ($t:ty) => {
-                        if let Some(v) = any.downcast_ref::<$t>() {
-                            return Value::Extension(std::sync::Arc::new(
-                                v.clone().with_meta(meta),
-                            ));
-                        }
-                    };
-                }
-                retag!(crate::RealizedSeq);
-                retag!(crate::RangeValue);
-                retag!(crate::RepeatValue);
-                retag!(crate::CycleValue);
-                retag!(crate::IterateValue);
-                retag!(crate::ConsValue);
-                retag!(crate::KeySeqValue);
-                retag!(crate::ValSeqValue);
-                retag!(crate::SubVectorValue);
-                Value::Extension(e)
-            }
+            Value::Extension(e) => seq_ext_with_meta(&e, meta)
+                .map(Value::Extension)
+                .unwrap_or_else(|| Value::Extension(e)),
             other => other,
         }
     }
@@ -1654,6 +1685,28 @@ mod tests {
         assert_eq!(crate::ExtensionValue::class_name(&*inner), "test.Opaque");
         assert_eq!(crate::ExtensionValue::print(&*inner), "#test.Opaque");
         assert_eq!(hash_of(&v), hash_of(&v.clone()));
+    }
+
+    #[test]
+    fn seq_ext_meta_helpers() {
+        use super::{extension_supports_meta, extension_with_meta};
+        use crate::{RealizedSeq, Seq, SubVectorValue, Vector};
+        // First and last types in the chain (the last walks every
+        // downcast arm); opaque extensions are unsupported.
+        let first: Arc<dyn crate::ExtensionValue> = Arc::new(RealizedSeq::new(Seq::empty()));
+        let last: Arc<dyn crate::ExtensionValue> =
+            Arc::new(SubVectorValue::new(Vector::new_sync(), 0, 0));
+        let opaque: Arc<dyn crate::ExtensionValue> = Arc::new(OpaqueExt);
+        assert!(extension_supports_meta(&first));
+        assert!(extension_supports_meta(&last));
+        assert!(!extension_supports_meta(&opaque));
+        assert!(extension_with_meta(&opaque, None).is_none());
+        // Roundtrip through `Value::{meta, with_meta}`.
+        let meta = new_map().insert(kw("a"), Value::Int(1));
+        let tagged = Value::Extension(first).with_meta(Some(meta.clone()));
+        assert_eq!(tagged.meta(), Some(&meta));
+        assert_eq!(tagged.clone().with_meta(None).meta(), None);
+        assert!(extension_with_meta(&last, Some(meta)).is_some());
     }
 
     #[test]
