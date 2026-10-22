@@ -135,6 +135,59 @@ fn alter_var_root() {
 }
 
 #[test]
+fn alter_var_root_serializes() {
+    let mut eval = boot();
+    // f1 reads the root, then blocks inside `f` (r1 proves the
+    // read happened under the held lock).
+    run(
+        &mut eval,
+        "(def avr-c 0) (def avr-g (promise)) (def avr-r1 (promise)) (def avr-r2 (promise))",
+    );
+    run(
+        &mut eval,
+        "(def avr-f1 (future (alter-var-root #'avr-c (fn [x] (deliver avr-r1 :r) @avr-g (inc x)))))",
+    );
+    assert_eq!(run_last(&mut eval, "(deref avr-r1 8000 :t)"), ":r");
+    run(
+        &mut eval,
+        "(def avr-f2 (future (alter-var-root #'avr-c (fn [x] (deliver avr-r2 :r) (inc x)))))",
+    );
+    // f2 is still blocked in alter entry: the serialization proof
+    // (T1192 FX1 — the JVM's var monitor behaves the same).
+    assert_eq!(run_last(&mut eval, "(deref avr-r2 100 :t)"), ":t");
+    run(&mut eval, "(deliver avr-g :go)");
+    assert_eq!(run_last(&mut eval, "[@avr-f1 @avr-f2 avr-c]"), "[1 2 2]");
+}
+
+#[test]
+fn alter_var_root_reentry_nests() {
+    let mut eval = boot();
+    // Same-thread nested alter nests instead of deadlocking (JVM
+    // monitor reentrancy, T1192 FX1); the outer install wins, like
+    // the JVM (probe fx1-alter). The deref timeout turns a
+    // regression-deadlock into a plain failure.
+    run(&mut eval, "(def avr-r0 0)");
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(deref (future (alter-var-root #'avr-r0 (fn [x] (alter-var-root #'avr-r0 (fn [y] 10)) 20))) 8000 :t)"
+        ),
+        "20"
+    );
+    assert_eq!(run_last(&mut eval, "avr-r0"), "20");
+    // Cross-var nesting installs both.
+    run(&mut eval, "(def avr-a0 0) (def avr-b0 0)");
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(alter-var-root #'avr-a0 (fn [_] (alter-var-root #'avr-b0 (fn [_] 2)) 1))"
+        ),
+        "1"
+    );
+    assert_eq!(run_last(&mut eval, "[avr-a0 avr-b0]"), "[1 2]");
+}
+
+#[test]
 fn bound_predicates() {
     let mut eval = boot();
     run(&mut eval, "(def p1 1) (def u1) (def ^:dynamic d1 :root)");

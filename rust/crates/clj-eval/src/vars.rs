@@ -69,6 +69,11 @@ fn is_bound(eval: &Evaluator, id: u64) -> bool {
 fn native_alter_var_root(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_min_arity("clojure.core/alter-var-root", args, 2)?;
     let var = as_var(&args[0])?.clone();
+    // Per-var reentrant exclusion across read-f-install (T1192
+    // FX1), like the JVM's var monitor: concurrent alters
+    // serialize (no lost update), same-thread reentry nests.
+    // The root is read after acquiring (linearized).
+    let _guard = eval.registry.lock_var_for_alter(var.id);
     let current = eval.registry.root_or_unbound(var.id, &var.sym);
     let mut f_args = Vec::with_capacity(args.len() - 1);
     f_args.push(current);

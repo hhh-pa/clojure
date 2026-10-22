@@ -12,3 +12,6 @@ clj-value = { path = "../clj-value" }
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+loom = "0.7"

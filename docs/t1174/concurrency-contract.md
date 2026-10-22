@@ -114,11 +114,12 @@ shapes are exact JVM text (en_US/UTC).
   `std::thread` sets over `mpsc` queues (no new crates).
 - Per-thread `Evaluator` over shared state (D1 spike picks
   the sharing shape; `Value` is already `Send+Sync`).
-- `alter-var-root`'s read-call-install is NOT atomic across
-  threads (PINNED DIVERGENCE: the JVM serializes per-var; the
-  port cannot hold its non-reentrant `Mutex` across the
-  evaluating call, so concurrent alters of one root may lose
-  an update). Single publishes (`intern`, atom/agent
+- `alter-var-root`'s read-call-install serializes per var
+  (the JVM var monitor; same-thread nesting re-enters and
+  the outer install wins; `fx1-alter` probes, T1192 FX1):
+  the port holds a per-var reentrant lock across the
+  evaluating call. Unrelated vars proceed in parallel.
+  Single publishes (`intern`, atom/agent
   publishes) are atomic.
 - Print rendering of refs (`#object[...]`) is covered by
   existing `java_debug` conventions, not re-pinned here.

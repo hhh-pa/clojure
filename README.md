@@ -158,9 +158,9 @@ each entry asserts its exact behavior, so drift fails CI:
   `IllegalStateException` (the JVM recurses to
   `StackOverflowError`, which would abort a Rust process);
   `locking` holds one global reentrant monitor (the JVM locks
-  per-object); concurrent `alter-var-root` calls on one var may
-  lose an update (the port cannot hold its non-reentrant mutex
-  across the evaluating call).
+  per-object). `alter-var-root` serializes per var like the
+  JVM (same-thread nesting re-enters; the outer install
+  wins).
 - **Namespaces.** `ns-imports` is always `{}` (no host classes);
   `*loaded-libs*` is a plain set, not a ref.
 
