@@ -1903,6 +1903,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn join_all_skips_the_calling_thread() {
+        // T1192 FX1: the exit join normally runs on main, but a
+        // join requested off-thread must skip its own handle
+        // instead of hanging on itself. The worker receives its
+        // own handle over a channel (its spawner owns it first).
+        let (send_handle, recv_handle) = std::sync::mpsc::channel();
+        let (send_done, recv_done) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let own = recv_handle.recv().expect("own handle");
+            join_all(vec![own]);
+            send_done.send(()).expect("done");
+        });
+        send_handle.send(worker).expect("hand over");
+        recv_done
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("join_all returned");
+    }
+
+    #[test]
     fn unwrap_thrown_recur_is_internal() {
         // Defense in depth: a `Recur` from the `throw`
         // constructor (impossible — it only builds `Throw`)
