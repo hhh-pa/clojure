@@ -30,11 +30,13 @@ G2. Every real `clojure.core` var resolves: the coverage file's
     and `core.async` are all in scope.
 G3. Newly covered surface is JVM-observable-conformant, verified by
     oracle probes plus differential corpus entries at 100%.
-G4. Short-term release: ship the Rust equivalent of Clojure 1.12.6
-    as a `v*` tag release (`clojure-rs` version tracks the Clojure
-    version it matches). After the release, catch up with the
-    commits behind `clojure/clojure:master`, in Rust, on master
-    (Phase 2; slices defined by the delta inventory).
+G4. Short-term release: ship the Rust equivalent of Clojure
+    1.13.0-alpha9 as a `v*` tag release (`clojure-rs` version
+    tracks the Clojure version it matches). After the release,
+    catch up with the commits behind `clojure/clojure:master`,
+    in Rust, on master (Phase 2; slices defined by the delta
+    inventory), and keep syncing with the 1.13.0 line (later
+    alphas, then final) via small delta slices.
 
 ### 1.2 Non-goals (explicit)
 
@@ -224,8 +226,11 @@ INVESTIGATE (probe, then FIX or STRUCTURAL in-slice):
   `UnsupportedOperationException` from `hasheq()` by design
   (`Iterate.java:97`), and the port already mirrors it on all
   four unbounded types (`seq_hash_unsupported`; D13's "hangs"
-  is stale). FX1 adds pins only. Zero 1.12.6-vs-1.13.0 skew
-  on every re-probed FX1 item.
+  is stale). FX1 adds pins only. Every FX1 probe was
+  re-captured on the 1.13.0-alpha9 oracle with zero behavioral
+  skew vs the earlier 1.12.6 captures (emptymeta/case
+  byte-identical modulo header; shutdown identical modulo
+  object hashes and the `fn__NNNN` counter).
 
 STRUCTURAL (go to `divergences.md` with mechanism + pin):
 - S-identity: `swap!`/`compare-and-set!` compare with `=`
@@ -325,28 +330,39 @@ FT12 STM (F-stm). FT13 spec (F-spec). FT14 core.async (F-async).
 FT15 JIT (F-jit). FX5 phase gaps (D-phase). FX6 zones (D-zones).
 FX7 structural record (`divergences.md`) + coverage ratchet +
   README refresh (closes A3/A4).
-REL 1.12.6 release: version alignment (`clojure-rs 1.12.6`),
-  changelog entry, release PR + review, `v1.12.6` tag
-  (explicit go only) with 3-OS archives.
+FX8 alpha9 delta: port the 7 new `core` vars (`merge-deep`,
+  `merge-deep-with`, `req!`, `selector` + private
+  `selector-impl`, `some-vals`, `tap->`) and review the ~16
+  changed `core` forms against the existing pins (only the
+  ones overlapping the ported surface; `supers` and the
+  array definlines are N1).
+REL 1.13.0-alpha9 release: version alignment
+  (`clojure-rs 1.13.0-alpha9`), changelog entry, release PR +
+  review, `v1.13.0-alpha9` tag (explicit go only) with 3-OS
+  archives.
 M1 master-delta inventory: list `clojure/clojure:master`
-  commits past 1.12.6, triage each to port/skip/already-have;
-  seeds the Phase 2 catch-up slices (defined here, worked after
-  REL ships).
+  commits past 1.13.0-alpha9, triage each to port/skip/
+  already-have; seeds the Phase 2 catch-up slices (defined
+  here, worked after REL ships).
 
 Each slice lands as its own `T1192:` commit series + PR with
 `/review-loop` to acceptance; landing stays explicit-only.
 
 ### 2.4 TDD and oracle plan
 
-- Oracle (primary): stock `org.clojure/clojure:1.12.6` from
-  Maven Central (sha1 `ea744fe01a09db46021b07c4aadf072698bf7a75`)
-  plus `spec.alpha:0.5.238` + `core.specs.alpha:0.4.74`, driven
-  by system `java` with `-Duser.language=en -Duser.country=US
+- Oracle (primary): stock `org.clojure/clojure:1.13.0-alpha9`
+  from Maven Central (sha1
+  `a98efc5f0c10c446425c6af4b4a18925558842e3`) plus
+  `spec.alpha:0.6.249` (sha1
+  `adc033378b9f8b8760c4b239e15ac46ec2cdf803`) +
+  `core.specs.alpha:0.6.133-alpha10` (sha1
+  `afda4b40ae64e3f3b84c581a385db30a68dd853a`), driven by
+  system `java` with `-Duser.language=en -Duser.country=US
   -Duser.timezone=UTC`, `-e` form (never piped REPL: prompt
   interleaving corrupts evidence). Cross-check: the root
   `clojure.jar` (`1.13.0-master-SNAPSHOT`, untracked,
   local-only). The jar version is recorded in every new pin;
-  disagreements resolve in-slice (1.12.6 wins: it is the
+  disagreements resolve in-slice (alpha9 wins: it is the
   release target).
 - Per item: oracle probe first (new `docs/t1192/probes/`),
   failing test/corpus entry second, fix third, pin fourth.

@@ -1,4 +1,4 @@
-;; T1192 FX1 case* probes (oracle: stock Clojure 1.12.6). Each form run via -e.
+;; T1192 FX1 case* probes (oracle: stock Clojure 1.13.0-alpha9). Each form run via -e; clojure.main report-path stanzas stripped (random /tmp paths).
 == (case* 1 "s" 0 nil {} :sparse :int)
 Syntax error (ClassCastException) compiling case* at (REPL:1:1).
 class java.lang.String cannot be cast to class java.lang.Number (java.lang.String and java.lang.Number are in module java.base of loader 'bootstrap')

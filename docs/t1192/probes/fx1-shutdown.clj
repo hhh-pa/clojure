@@ -1,6 +1,6 @@
-;; T1192 FX1 shutdown probes (oracle: stock Clojure 1.12.6).
+;; T1192 FX1 shutdown probes (oracle: stock Clojure 1.13.0-alpha9).
 ;; Run: java -Duser.language=en -Duser.country=US -Duser.timezone=UTC \
-;;        -cp <1.12.6 jars> clojure.main fx1-shutdown.clj
+;;        -cp <1.13.0-alpha9 jars> clojure.main fx1-shutdown.clj
 (println (shutdown-agents))
 (try (future 1)
   (catch java.util.concurrent.RejectedExecutionException e

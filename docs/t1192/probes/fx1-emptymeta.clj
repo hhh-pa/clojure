@@ -1,6 +1,6 @@
-;; T1192 FX1 emptymeta probes (oracle: stock Clojure 1.12.6).
+;; T1192 FX1 emptymeta probes (oracle: stock Clojure 1.13.0-alpha9).
 ;; Run: java -Duser.language=en -Duser.country=US -Duser.timezone=UTC \
-;;        -cp <1.12.6 jars> clojure.main fx1-emptymeta.clj
+;;        -cp <1.13.0-alpha9 jars> clojure.main fx1-emptymeta.clj
 (println (meta (with-meta (seq [1 2]) {:a 1})))
 (println (with-meta (seq [1 2]) {:a 1}))
 (println (meta (with-meta (range 3) {:a 1})))
