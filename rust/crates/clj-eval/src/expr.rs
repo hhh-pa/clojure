@@ -688,6 +688,13 @@ impl<'a> Analyzer<'a> {
             }
             form if crate::lazy::is_seq_value(form) => self.analyze_seq_form(form, span, tail),
             Value::Vector(v) => self.analyze_vec_lit(v, span),
+            // Entries in code (syntax-quote can embed them) analyze
+            // like vector literals, answering plain vectors (Oracle
+            // FX2 `eval-entry-class`).
+            Value::MapEntry { key, val } => {
+                let tmp = clj_value::Vector::from_vec(vec![(**key).clone(), (**val).clone()]);
+                self.analyze_vec_lit(&tmp, span)
+            }
             Value::Map(m) => self.analyze_map_lit(m, span),
             Value::Set(s) => self.analyze_set_lit(s, span),
             _ => Ok(Expr::Literal(form.clone())),

@@ -342,6 +342,10 @@ pub enum SeqKind {
     /// `APersistentVector$Seq` (subvector seqs and their tails:
     /// counted but never `IDrop`).
     Subvec,
+    /// `APersistentVector$RSeq` (`rseq` results: counted, never
+    /// chunked, never `IDrop` — FX2 probes `rseq-vec-class`,
+    /// `chunk-first-rseq`, `drop-rseq-class`).
+    RSeq,
 }
 
 impl SeqKind {
@@ -358,6 +362,7 @@ impl SeqKind {
             SeqKind::Cons => "clojure.lang.Cons",
             SeqKind::Lazy => "clojure.lang.LazySeq",
             SeqKind::Subvec => "clojure.lang.APersistentVector$Seq",
+            SeqKind::RSeq => "clojure.lang.APersistentVector$RSeq",
         }
     }
 

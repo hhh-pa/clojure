@@ -567,6 +567,16 @@ pub fn new_set() -> Set {
     }
 }
 
+/// A map entry from a key and a value (FX2: `find`, map seqs, and
+/// entry conj all build real `MapEntry` values, never 2-vectors).
+#[must_use]
+pub fn map_entry(key: Value, val: Value) -> Value {
+    Value::MapEntry {
+        key: Box::new(key),
+        val: Box::new(val),
+    }
+}
+
 /// A Clojure runtime value (S2 foundation; S3+ adds functions, vars,
 /// refs, and the concurrency primitives as new variants).
 #[derive(Clone, Debug)]
@@ -591,6 +601,11 @@ pub enum Value {
     List(List),
     /// Persistent vector.
     Vector(Vector),
+    /// A map entry (`clojure.lang.MapEntry`, FX2): a 2-element
+    /// `APersistentVector` — vector-like (`nth`, `conj`, `=`,
+    /// `hash`) but never an `IObj` (no metadata slot by
+    /// construction) and never an `IPersistentMap`.
+    MapEntry { key: Box<Value>, val: Box<Value> },
     /// Persistent map.
     Map(Map),
     /// Persistent set.
@@ -900,6 +915,15 @@ impl Hash for Value {
                 state.write_u8(8);
                 v.hash(state);
             }
+            // A map entry hashes exactly like its 2-vector (they
+            // are `=`, so the `Eq`/`Hash` contract requires it;
+            // Oracle FX2 `hash-eq`, `distinct`, `frequencies`).
+            Value::MapEntry { key, val } => {
+                state.write_u8(8);
+                state.write_usize(2);
+                key.hash(state);
+                val.hash(state);
+            }
             // Order-insensitive: sums commute, so iteration order
             // cannot leak into the hash.
             Value::Map(m) => {
@@ -1195,6 +1219,9 @@ fn seq_items(v: &Value) -> Option<Vec<Value>> {
     match v {
         Value::List(l) => Some(l.iter().cloned().collect()),
         Value::Vector(v) => Some(v.iter().cloned().collect()),
+        // A map entry compares sequentially as its 2-vector
+        // (Oracle FX2 `eq`, `entry-vs-list`, `entry-vs-seq`).
+        Value::MapEntry { key, val } => Some(vec![(**key).clone(), (**val).clone()]),
         Value::Extension(e) => {
             if let Some(s) = e.as_any().downcast_ref::<crate::RealizedSeq>() {
                 return Some(s.items());
@@ -1299,6 +1326,25 @@ mod tests {
     fn assert_hash_consistent(a: &Value, b: &Value) {
         assert_eq!(a, b, "{a:?} should equal {b:?}");
         assert_eq!(hash_of(a), hash_of(b), "equal values must hash equally");
+    }
+
+    #[test]
+    fn map_entry_sequential_contract() {
+        // Oracle T1192 FX2 `eq`, `hash-eq`, `distinct`,
+        // `frequencies`: an entry equals its 2-vector (and 2-list)
+        // and hashes with it.
+        let e = super::map_entry(Value::Keyword(Keyword::new(None, "a")), Value::Int(1));
+        let v = Value::Vector(crate::Vector::from_vec(vec![
+            Value::Keyword(Keyword::new(None, "a")),
+            Value::Int(1),
+        ]));
+        assert_hash_consistent(&e, &v);
+        let l = Value::List(crate::List::from_vec(vec![
+            Value::Keyword(Keyword::new(None, "a")),
+            Value::Int(1),
+        ]));
+        assert_hash_consistent(&e, &l);
+        assert_ne!(e, Value::Int(1));
     }
 
     #[test]

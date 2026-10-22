@@ -291,8 +291,15 @@ fn nthrest_rows() {
 #[test]
 fn key_val() {
     let mut eval = boot();
-    assert_eq!(run_last(&mut eval, "(key [:a 1])"), ":a");
-    assert_eq!(run_last(&mut eval, "(val [:a 1])"), "1");
+    // T1192 FX2: only real entries answer (`key-vec` oracle row).
+    assert_eq!(
+        uncaught(&mut eval, "(key [:a 1])"),
+        "java.lang.ClassCastException | class clojure.lang.PersistentVector cannot be cast to class java.util.Map$Entry (clojure.lang.PersistentVector is in unnamed module of loader 'app'; java.util.Map$Entry is in module java.base of loader 'bootstrap')"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(val [:a 1])"),
+        "java.lang.ClassCastException | class clojure.lang.PersistentVector cannot be cast to class java.util.Map$Entry (clojure.lang.PersistentVector is in unnamed module of loader 'app'; java.util.Map$Entry is in module java.base of loader 'bootstrap')"
+    );
     assert_eq!(run_last(&mut eval, "(key (first {:a 1}))"), ":a");
     assert_eq!(run_last(&mut eval, "(val (first {:a 1}))"), "1");
     assert_eq!(

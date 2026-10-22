@@ -186,6 +186,7 @@ pub(crate) fn is_ifn(v: &Value) -> bool {
         Value::Keyword(_)
         | Value::Symbol(_)
         | Value::Vector(_)
+        | Value::MapEntry { .. }
         | Value::Map(_)
         | Value::Set(_)
         | Value::Var(_)
@@ -737,6 +738,21 @@ fn compare_same_type(x: &Value, y: &Value) -> Result<Option<std::cmp::Ordering>,
         (Value::Keyword(a), Value::Keyword(b)) => Ok(Some(compare_named(a, b))),
         (Value::Symbol(a), Value::Symbol(b)) => Ok(Some(compare_named(a, b))),
         (Value::Vector(a), Value::Vector(b)) => Ok(Some(compare_vectors(a, b)?)),
+        // Entries order exactly like their 2-vectors (Oracle FX2
+        // `compare`, `sort-entries`, `maxkey`).
+        (Value::MapEntry { key, val }, Value::Vector(b)) => {
+            let tmp = clj_value::Vector::from_vec(vec![(**key).clone(), (**val).clone()]);
+            Ok(Some(compare_vectors(&tmp, b)?))
+        }
+        (Value::Vector(a), Value::MapEntry { key, val }) => {
+            let tmp = clj_value::Vector::from_vec(vec![(**key).clone(), (**val).clone()]);
+            Ok(Some(compare_vectors(a, &tmp)?))
+        }
+        (Value::MapEntry { key: k1, val: v1 }, Value::MapEntry { key: k2, val: v2 }) => {
+            let a = clj_value::Vector::from_vec(vec![(**k1).clone(), (**v1).clone()]);
+            let b = clj_value::Vector::from_vec(vec![(**k2).clone(), (**v2).clone()]);
+            Ok(Some(compare_vectors(&a, &b)?))
+        }
         _ => Ok(None),
     }
 }
@@ -771,7 +787,7 @@ fn compare_cast_err(x: &Value, y: &Value) -> NativeError {
         Value::Bool(_) => "java.lang.Boolean",
         Value::Keyword(_) => "clojure.lang.Keyword",
         Value::Symbol(_) => "clojure.lang.Symbol",
-        Value::Vector(_) => "clojure.lang.IPersistentVector",
+        Value::Vector(_) | Value::MapEntry { .. } => "clojure.lang.IPersistentVector",
         _ => return cce_err(x, "java.lang.Comparable"),
     };
     cce_err(y, target)
@@ -909,20 +925,23 @@ fn is_simple_symbol(v: &Value) -> bool {
 fn is_coll(v: &Value) -> bool {
     matches!(
         v,
-        Value::List(_) | Value::Vector(_) | Value::Map(_) | Value::Set(_)
+        Value::List(_) | Value::Vector(_) | Value::MapEntry { .. } | Value::Map(_) | Value::Set(_)
     ) || as_subvector(v).is_some()
         || is_seq_value(v)
 }
 fn is_sequential(v: &Value) -> bool {
-    matches!(v, Value::Vector(_)) || as_subvector(v).is_some() || is_seq_value(v)
+    matches!(v, Value::Vector(_) | Value::MapEntry { .. })
+        || as_subvector(v).is_some()
+        || is_seq_value(v)
 }
 fn is_associative(v: &Value) -> bool {
-    matches!(v, Value::Map(_) | Value::Vector(_)) || as_subvector(v).is_some()
+    matches!(v, Value::Map(_) | Value::Vector(_) | Value::MapEntry { .. })
+        || as_subvector(v).is_some()
 }
 pub(crate) fn is_counted(v: &Value) -> bool {
     matches!(
         v,
-        Value::List(_) | Value::Vector(_) | Value::Map(_) | Value::Set(_)
+        Value::List(_) | Value::Vector(_) | Value::MapEntry { .. } | Value::Map(_) | Value::Set(_)
     ) || crate::coll::is_transient(v)
         || as_subvector(v).is_some()
         || is_counted_seq(v)
@@ -931,13 +950,19 @@ fn is_list(v: &Value) -> bool {
     matches!(v, Value::List(_))
 }
 fn is_vector(v: &Value) -> bool {
-    matches!(v, Value::Vector(_)) || as_subvector(v).is_some()
+    matches!(v, Value::Vector(_) | Value::MapEntry { .. }) || as_subvector(v).is_some()
 }
 fn is_map(v: &Value) -> bool {
     matches!(v, Value::Map(_))
 }
 fn is_set(v: &Value) -> bool {
     matches!(v, Value::Set(_))
+}
+// No sorted collections exist yet (sorted-map/set arrive with the
+// sorted slice, which extends this); every value answers false
+// today, matching the oracle for all constructible inputs.
+fn is_sorted(_v: &Value) -> bool {
+    false
 }
 fn is_var(v: &Value) -> bool {
     matches!(v, Value::Var(_))
@@ -949,6 +974,7 @@ fn is_seqable(v: &Value) -> bool {
             | Value::Str(_)
             | Value::List(_)
             | Value::Vector(_)
+            | Value::MapEntry { .. }
             | Value::Map(_)
             | Value::Set(_)
     ) || as_subvector(v).is_some()
@@ -1021,6 +1047,7 @@ pred1!(native_listp, "clojure.core/list?", is_list);
 pred1!(native_vectorp, "clojure.core/vector?", is_vector);
 pred1!(native_mapp, "clojure.core/map?", is_map);
 pred1!(native_setp, "clojure.core/set?", is_set);
+pred1!(native_sortedp, "clojure.core/sorted?", is_sorted);
 pred1!(native_fnp, "clojure.core/fn?", is_fn_val);
 pred1!(native_ifnp, "clojure.core/ifn?", is_ifn);
 pred1!(native_varp, "clojure.core/var?", is_var);
@@ -1811,6 +1838,7 @@ pub(crate) const CORE_NATIVES: &[(&str, NativeFnPtr)] = &[
     ("vector?", native_vectorp),
     ("map?", native_mapp),
     ("set?", native_setp),
+    ("sorted?", native_sortedp),
     ("fn?", native_fnp),
     ("ifn?", native_ifnp),
     ("var?", native_varp),

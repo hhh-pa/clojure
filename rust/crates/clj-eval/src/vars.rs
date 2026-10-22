@@ -19,6 +19,7 @@ use clj_value::{
     Vector, extension_supports_meta, extension_with_meta, new_map,
 };
 
+use crate::core::cce_err;
 use crate::error::NativeError;
 use crate::eval::Evaluator;
 use crate::ext::{Closure, NativeFn, as_closure, as_native, as_ns};
@@ -145,25 +146,23 @@ pub(crate) fn push_entries(
         Value::Map(m) => {
             let mut entries = Vec::with_capacity(m.size());
             for (k, v) in m.iter() {
-                let var = as_var(k)?.clone();
-                let dynamic = eval.registry.state(var.id).is_some_and(|s| s.dynamic);
-                if !dynamic {
-                    return Err(NativeError::new(
-                        ThrowClass::IllegalStateException,
-                        format!(
-                            "Can't dynamically bind non-dynamic var: {}",
-                            sym_str(&var.sym)
-                        ),
-                    ));
-                }
-                entries.push((var, v.clone()));
+                push_checked_entry(eval, &mut entries, k, v.clone())?;
             }
             Ok(entries)
         }
-        Value::Vector(x) => match x.iter().next() {
-            None => Ok(Vec::new()),
-            Some(first) => Err(cast_err(first, IENTRY_CLASS)),
-        },
+        Value::Vector(x) => {
+            // One binding pair per entry (Oracle FX2
+            // `push-vec-entry`); non-entry elements fail the
+            // entry cast.
+            let mut entries = Vec::with_capacity(x.len());
+            for item in x.iter() {
+                let Value::MapEntry { key, val } = item else {
+                    return Err(cce_err(item, IENTRY_CLASS));
+                };
+                push_checked_entry(eval, &mut entries, key, (**val).clone())?;
+            }
+            Ok(entries)
+        }
         _ => Err(cast_err(bindings, ASSOC_CLASS)),
     }
 }
@@ -299,11 +298,14 @@ fn as_iobj(obj: &Value) -> Result<IObj<'_>, NativeError> {
                 if extension_supports_meta(e) {
                     Ok(IObj::SeqExt(e))
                 } else {
-                    Err(cast_err(obj, IOBJ_CLASS))
+                    Err(cce_err(obj, IOBJ_CLASS))
                 }
             }
         },
-        _ => Err(cast_err(obj, IOBJ_CLASS)),
+        // Non-`IObj` receivers fail with the JVM's cast text, not
+        // the analyzer's stable text (Oracle FX2 `with-meta-e`,
+        // `vary-meta-e`).
+        _ => Err(cce_err(obj, IOBJ_CLASS)),
     }
 }
 
@@ -314,7 +316,7 @@ fn with_meta_val(obj: &Value, meta: &Value) -> Result<Value, NativeError> {
     let meta = match meta {
         Value::Nil => None,
         Value::Map(m) => Some(m.clone()),
-        _ => return Err(cast_err(meta, IMAP_CLASS)),
+        _ => return Err(cce_err(meta, IMAP_CLASS)),
     };
     match shape {
         IObj::Symbol(s) => Ok(Value::Symbol(s.clone().with_meta(meta))),
@@ -413,13 +415,37 @@ fn ref_meta(eval: &Evaluator, target: &RefTarget) -> Option<Map> {
     }
 }
 
-/// A meta value (a map or nil) for `alter-meta!`/`reset-meta!`.
+/// A meta value (a map or nil) for `alter-meta!`/`reset-meta!`
+/// (the JVM's cast text — Oracle FX2 `alter-meta-ret`,
+/// `reset-meta-nonmap`).
 fn as_meta_value(meta: &Value) -> Result<Option<Map>, NativeError> {
     match meta {
         Value::Nil => Ok(None),
         Value::Map(m) => Ok(Some(m.clone())),
-        _ => Err(cast_err(meta, IMAP_CLASS)),
+        _ => Err(cce_err(meta, IMAP_CLASS)),
     }
+}
+
+/// One checked binding pair (a var key over a dynamic var).
+fn push_checked_entry(
+    eval: &Evaluator,
+    entries: &mut Vec<(Var, Value)>,
+    k: &Value,
+    v: Value,
+) -> Result<(), NativeError> {
+    let var = as_var(k)?.clone();
+    let dynamic = eval.registry.state(var.id).is_some_and(|s| s.dynamic);
+    if !dynamic {
+        return Err(NativeError::new(
+            ThrowClass::IllegalStateException,
+            format!(
+                "Can't dynamically bind non-dynamic var: {}",
+                sym_str(&var.sym)
+            ),
+        ));
+    }
+    entries.push((var, v));
+    Ok(())
 }
 
 fn native_alter_meta(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {

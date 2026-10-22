@@ -418,6 +418,7 @@ pub(crate) fn is_seqable(v: &Value) -> bool {
         Value::Nil
         | Value::List(_)
         | Value::Vector(_)
+        | Value::MapEntry { .. }
         | Value::Map(_)
         | Value::Set(_)
         | Value::Str(_) => true,
@@ -569,7 +570,7 @@ fn step_vector_unit(x: &Vector) -> Result<StepUnit, Signal> {
 fn step_map_unit(m: &Map) -> Result<StepUnit, Signal> {
     let entries: Vec<Value> = m
         .iter()
-        .map(|(k, val)| Value::Vector(Vector::from_vec(vec![k.clone(), val.clone()])))
+        .map(|(k, val)| clj_value::map_entry(k.clone(), val.clone()))
         .collect();
     let small = !m.is_hashy();
     let kind = if small { SeqKind::Map } else { SeqKind::Key };
@@ -604,6 +605,11 @@ pub(crate) fn step_unit(eval: &mut Evaluator, v: &Value) -> Result<StepUnit, Sig
         Value::Extension(_) => step_unit_extension(eval, v),
         Value::List(l) => step_list_unit(l),
         Value::Vector(x) => step_vector_unit(x),
+        // Entries step exactly like their 2-vector (chunked).
+        Value::MapEntry { key, val } => {
+            let tmp = Vector::from_vec(vec![(**key).clone(), (**val).clone()]);
+            step_vector_unit(&tmp)
+        }
         Value::Map(m) => step_map_unit(m),
         Value::Set(s) => step_set_unit(s),
         Value::Str(s) => step_str_unit(s),
@@ -780,14 +786,17 @@ fn step_cons_value(_eval: &mut Evaluator, c: &ConsValue) -> Result<StepUnit, Sig
     })
 }
 
-/// Extract one entry projection (keys take index 0, vals index 1).
-/// Map entries read as 2-vectors; anything else fails like the
-/// JVM's `Map.Entry` cast.
+/// Extract one entry projection (keys take the key, vals the val).
+/// Only real entries project; 2-vectors fail like the JVM's
+/// `Map.Entry` cast (Oracle FX2 `keys-of-vec` CCE).
 fn entry_of(item: &Value, keys: bool) -> Result<Value, NativeError> {
     match item {
-        Value::Vector(v) if v.len() == 2 => {
-            let idx = usize::from(!keys);
-            Ok(v.iter().nth(idx).cloned().unwrap_or(Value::Nil))
+        Value::MapEntry { key, val } => {
+            if keys {
+                Ok((**key).clone())
+            } else {
+                Ok((**val).clone())
+            }
         }
         _ => Err(crate::core::cce_err(item, "java.util.Map$Entry")),
     }
@@ -981,7 +990,7 @@ fn idrop_shift_vector(x: &Vector, n: i32, n64: i64) -> Option<Value> {
 fn idrop_shift_map(m: &Map, n: i32, n64: i64) -> Option<Value> {
     let entries: Vec<Value> = m
         .iter()
-        .map(|(k, val)| Value::Vector(Vector::from_vec(vec![k.clone(), val.clone()])))
+        .map(|(k, val)| clj_value::map_entry(k.clone(), val.clone()))
         .collect();
     if n64 < 0 || n64 >= entries.len() as i64 {
         return None;
@@ -2155,7 +2164,7 @@ fn seq_map(m: &Map) -> Value {
     let kind = if small { SeqKind::Map } else { SeqKind::Key };
     realized_value(
         m.iter()
-            .map(|(k, val)| Value::Vector(Vector::from_vec(vec![k.clone(), val.clone()])))
+            .map(|(k, val)| clj_value::map_entry(k.clone(), val.clone()))
             .collect::<Vec<_>>(),
         false,
         small,
@@ -2197,6 +2206,10 @@ pub(crate) fn seq_value(eval: &mut Evaluator, v: &Value) -> Result<Value, Signal
         Value::Extension(_) => seq_value_extension(eval, v),
         Value::List(l) => Ok(if l.is_empty() { Value::Nil } else { v.clone() }),
         Value::Vector(x) => Ok(seq_vector(x)),
+        Value::MapEntry { key, val } => {
+            let tmp = Vector::from_vec(vec![(**key).clone(), (**val).clone()]);
+            Ok(seq_vector(&tmp))
+        }
         Value::Map(m) => Ok(seq_map(m)),
         Value::Set(s) => Ok(seq_set(s)),
         Value::Str(s) => Ok(seq_str(s)),
@@ -2210,10 +2223,11 @@ fn first_direct(v: &Value) -> Option<Value> {
     match v {
         Value::List(l) => Some(l.first().cloned().unwrap_or(Value::Nil)),
         Value::Vector(x) => Some(x.iter().next().cloned().unwrap_or(Value::Nil)),
+        Value::MapEntry { key, .. } => Some((**key).clone()),
         Value::Map(m) => Some(
             m.iter()
                 .next()
-                .map(|(k, val)| Value::Vector(Vector::from_vec(vec![k.clone(), val.clone()])))
+                .map(|(k, val)| clj_value::map_entry(k.clone(), val.clone()))
                 .unwrap_or(Value::Nil),
         ),
         Value::Set(s) => Some(s.iter().next().cloned().unwrap_or(Value::Nil)),
@@ -2460,7 +2474,9 @@ fn uoe() -> NativeError {
 /// Whether `=` walks the value pairwise (lists, vectors, and every
 /// seq object — like `Sequential`).
 fn is_sequential(v: &Value) -> bool {
-    matches!(v, Value::Vector(_)) || as_subvector(v).is_some() || is_seq_value(v)
+    matches!(v, Value::Vector(_) | Value::MapEntry { .. })
+        || as_subvector(v).is_some()
+        || is_seq_value(v)
 }
 
 /// Whether a seq value is `Counted` (probed): long ranges, conses,
@@ -2703,6 +2719,15 @@ fn realize_deep_vector(eval: &mut Evaluator, x: &Vector) -> Result<Value, Signal
     ))
 }
 
+/// Deep-realize a map entry (key and value realized, the entry
+/// rebuilt — Oracle FX2 `lazy-val-entry`).
+fn realize_deep_entry(eval: &mut Evaluator, key: &Value, val: &Value) -> Result<Value, Signal> {
+    Ok(clj_value::map_entry(
+        realize_deep(eval, key)?,
+        realize_deep(eval, val)?,
+    ))
+}
+
 /// Deep-realize a map (metadata preserved).
 fn realize_deep_map(eval: &mut Evaluator, m: &Map) -> Result<Value, Signal> {
     let mut pairs = Vec::with_capacity(m.size());
@@ -2740,6 +2765,7 @@ pub(crate) fn realize_deep(eval: &mut Evaluator, v: &Value) -> Result<Value, Sig
         Value::Extension(_) => realize_deep_extension(eval, v),
         Value::List(l) => realize_deep_list(eval, l),
         Value::Vector(x) => realize_deep_vector(eval, x),
+        Value::MapEntry { key, val } => realize_deep_entry(eval, key, val),
         Value::Map(m) => realize_deep_map(eval, m),
         Value::Set(s) => realize_deep_set(eval, s),
         _ => Ok(v.clone()),

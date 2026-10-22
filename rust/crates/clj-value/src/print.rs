@@ -130,6 +130,19 @@ fn print_into(v: &Value, opts: &PrintOpts, level: Option<i64>, out: &mut String)
                 out,
             );
         }
+        // Entries print exactly like their 2-vector (Oracle FX2
+        // `pr-e`, `str-e`, `entry-pr`).
+        Value::MapEntry { key, val } => {
+            print_sequential(
+                "[",
+                vec![key.as_ref(), val.as_ref()],
+                "]",
+                " ",
+                opts,
+                level,
+                out,
+            );
+        }
         Value::Set(s) => {
             print_sequential(
                 "#{",
@@ -533,6 +546,7 @@ pub fn java_debug(v: &Value) -> String {
         Value::Extension(e) => e.print(),
         Value::List(_)
         | Value::Vector(_)
+        | Value::MapEntry { .. }
         | Value::Map(_)
         | Value::Set(_)
         | Value::TaggedLiteral { .. }
@@ -966,6 +980,9 @@ mod tests {
         assert_eq!(java_debug(&Value::Regex(std::sync::Arc::from("a+"))), "a+");
         let v = Value::Vector(crate::Vector::from_vec(vec![Value::Int(1)]));
         assert_eq!(java_debug(&v), "[1]");
+        // Oracle T1192 FX2 `pr-e`: entries render as their 2-vector.
+        let e = crate::map_entry(Value::Keyword(Keyword::new(None, "a")), Value::Int(1));
+        assert_eq!(java_debug(&e), "[:a 1]");
     }
 
     #[test]

@@ -49,5 +49,5 @@ pub use transient::{
 };
 pub use value::{
     FxBuildHasher, List, Map, Set, Value, Vector, extension_supports_meta, extension_with_meta,
-    new_map, new_set,
+    map_entry, new_map, new_set,
 };

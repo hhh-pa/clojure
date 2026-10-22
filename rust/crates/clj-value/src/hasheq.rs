@@ -92,6 +92,11 @@ pub fn hasheq(v: &Value) -> i32 {
         Value::Keyword(k) => keyword_hasheq(k),
         Value::List(l) => hash_ordered(l.iter().map(hasheq)),
         Value::Vector(v) => hash_ordered(v.iter().map(hasheq)),
+        // A map entry hashes exactly like its 2-vector (Oracle FX2
+        // `hash-eq`: `(hash e)` ≡ `(hash [:a 1])`).
+        Value::MapEntry { key, val } => {
+            hash_ordered([key.as_ref(), val.as_ref()].into_iter().map(hasheq))
+        }
         Value::Map(m) => hash_unordered(m.iter().map(|(k, v)| map_entry_hasheq(k, v))),
         Value::Set(s) => hash_unordered(s.iter().map(hasheq)),
         // Deterministic stand-in (JVM: identity) — see module docs.
@@ -133,6 +138,12 @@ pub fn hash_code(v: &Value) -> i32 {
         Value::Keyword(k) => keyword_hash_code(k),
         Value::List(l) => list_hash_code(l.iter().map(hash_code)),
         Value::Vector(v) => list_hash_code(v.iter().map(hash_code)),
+        // `APersistentVector.hashCode` is inherited, so `.hashCode`
+        // matches the 2-vector exactly (Oracle FX2 `pr-e`/`str-e`
+        // print shape plus `hash-eq`).
+        Value::MapEntry { key, val } => {
+            list_hash_code([key.as_ref(), val.as_ref()].into_iter().map(hash_code))
+        }
         Value::Map(m) => {
             let mut sum: i32 = 0;
             for (k, val) in m.iter() {
@@ -284,6 +295,7 @@ pub fn seq_hash_unsupported(v: &Value) -> bool {
     match v {
         Value::List(l) => l.iter().any(seq_hash_unsupported),
         Value::Vector(v) => v.iter().any(seq_hash_unsupported),
+        Value::MapEntry { key, val } => seq_hash_unsupported(key) || seq_hash_unsupported(val),
         Value::Map(m) => m
             .iter()
             .any(|(k, v)| seq_hash_unsupported(k) || seq_hash_unsupported(v)),
@@ -504,6 +516,29 @@ mod tests {
     /// exactly like `Integer.toHexString`.
     fn hex_of(code: i32) -> String {
         format!("{:x}", code as u32)
+    }
+
+    #[test]
+    fn oracle_fx2_entry_hash() {
+        // `docs/t1192/probes/fx2-mapentry3.out` (`entry-hash`,
+        // `vec-hash`): an entry hashes exactly like its 2-vector.
+        let k = kw(None, "a");
+        assert_eq!(hasheq(&crate::map_entry(k.clone(), int(1))), -1_809_393_901);
+        assert_eq!(
+            hasheq(&crate::map_entry(k.clone(), int(1))),
+            hasheq(&vecv(vec![k, int(1)]))
+        );
+    }
+
+    #[test]
+    fn oracle_fx2_entry_percent_h() {
+        // `docs/t1192/probes/fx2-mapentry16.out` (`pcth-eq`):
+        // `.hashCode` matches the 2-vector exactly.
+        let k = kw(None, "a");
+        assert_eq!(
+            hash_code(&crate::map_entry(k.clone(), int(1))),
+            hash_code(&vecv(vec![k, int(1)]))
+        );
     }
 
     #[test]
