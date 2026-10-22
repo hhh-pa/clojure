@@ -644,6 +644,22 @@ fn with_meta() {
         run_last(&mut eval, "(meta (with-meta (range 3) {:a 1}))"),
         "{:a 1}"
     );
+    // Every remaining seq extension round-trips (PR #19 R1).
+    for form in [
+        "(repeat 1)",
+        "(cycle [1])",
+        "(iterate inc 0)",
+        "(cons 1 [2])",
+        "(keys {:a 1})",
+        "(vals {:a 1})",
+        "(subvec [1 2 3] 0 2)",
+    ] {
+        assert_eq!(
+            run_last(&mut eval, &format!("(meta (with-meta {form} {{:a 1}}))")),
+            "{:a 1}",
+            "{form}"
+        );
+    }
     assert_eq!(
         run_last(
             &mut eval,
