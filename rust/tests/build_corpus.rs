@@ -110,6 +110,15 @@ fn run_file(path: &std::path::Path) -> (Vec<u8>, Vec<u8>, i32) {
 /// `build` a corpus file, then run the binary:
 /// (build code, build stderr, exe stdout, exe stderr, exe code).
 fn build_and_run(name: &str, path: &std::path::Path) -> (i32, Vec<u8>, Vec<u8>, Vec<u8>, i32) {
+    build_and_run_with(name, path, &[])
+}
+
+/// `build_and_run` with argv for the binary (T1192 FX1 D-argv).
+fn build_and_run_with(
+    name: &str,
+    path: &std::path::Path,
+    args: &[&str],
+) -> (i32, Vec<u8>, Vec<u8>, Vec<u8>, i32) {
     let dir = tmp(name);
     std::fs::create_dir_all(&dir).expect("tmp dir");
     let prog = dir.join(format!("prog{}", exe_suffix()));
@@ -128,7 +137,7 @@ fn build_and_run(name: &str, path: &std::path::Path) -> (i32, Vec<u8>, Vec<u8>, 
     let build_code = built.status.code().expect("build exit code");
     let build_err = built.stderr;
     let (exe_out, exe_err, exe_code) = if build_code == 0 {
-        let ran = Command::new(&prog).output().expect("run binary");
+        let ran = Command::new(&prog).args(args).output().expect("run binary");
         (
             ran.stdout,
             ran.stderr,
@@ -167,6 +176,43 @@ fn supported_files_match_run_byte_for_byte() {
         assert_eq!(exe_code, 0, "{stem}: exe exit");
         assert!(exe_err.is_empty(), "{stem}: exe stderr: {exe_err:?}");
         assert_eq!(exe_out, golden, "{stem}: exe stdout vs golden");
+    }
+}
+
+#[test]
+fn dash_main_receives_argv_after_tops() {
+    // 10-argv (T1192 FX1 D-argv): `run` never invokes `-main`
+    // (script mode); the binary runs the tops, then `-main`
+    // with nil (no args) or the argv list.
+    let corpus = corpus_dir();
+    let path = corpus.join("10-argv.clj");
+    let (run_out, run_err, run_code) = run_file(&path);
+    assert_eq!(run_code, 0, "run exit");
+    assert!(run_err.is_empty(), "run stderr: {run_err:?}");
+    assert_eq!(
+        run_out,
+        std::fs::read(corpus.join("expected/10-argv.runout")).expect("runout golden"),
+        "run stdout"
+    );
+    for (name, args, golden) in [
+        ("argv-noargs", &[][..], "expected/10-argv.exe-noargs.out"),
+        (
+            "argv-args",
+            &["a", "b"][..],
+            "expected/10-argv.exe-args.out",
+        ),
+    ] {
+        let (build_code, build_err, exe_out, exe_err, exe_code) =
+            build_and_run_with(name, &path, args);
+        assert_eq!(build_code, 0, "{name}: build exit, stderr: {build_err:?}");
+        assert!(build_err.is_empty(), "{name}: build stderr: {build_err:?}");
+        assert_eq!(exe_code, 0, "{name}: exe exit");
+        assert!(exe_err.is_empty(), "{name}: exe stderr: {exe_err:?}");
+        assert_eq!(
+            exe_out,
+            std::fs::read(corpus.join(golden)).expect("exe golden"),
+            "{name}: exe stdout"
+        );
     }
 }
 

@@ -200,9 +200,9 @@ FIX:
 - D-shutdrain: FIXED (`shutdown-agents` returns at once,
   drains async; fx1-shutdown).
 - D-avaroot: FIXED (per-var reentrant lock; fx1-alter).
-- D-argv: OPEN — AOT `main` drops `*command-line-args*`
-  (design: arity-1 `-main` entry + argv seq; the lowering
-  needs LLVM verification, unavailable on this box).
+- D-argv: FIXED (`main` takes C `argc`/`argv`; arity-1
+  `-main` invoked with the argv list after the tops;
+  s8-corpus 10-argv; fx1-argv probe).
 - D-charf: `float` returns exact doubles (JVM rounds via f32)
   → FT1 (with the tower's coercions).
 - D-pctpop: `%c` rejects integers (JVM accepts int-range via

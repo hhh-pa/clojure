@@ -175,6 +175,10 @@ pub struct SubsetProgram {
     pub main: Vec<SubsetExpr>,
     /// `main` frame slot count.
     pub main_slots: usize,
+    /// Index into [`fns`](Self::fns) of the arity-1 `-main`
+    /// entry, if any (T1192 FX1 D-argv: the binary invokes it
+    /// with the argv list after the tops run).
+    pub main_fn: Option<usize>,
 }
 
 /// The first unsupported form: its span (nearest enclosing list),
@@ -624,6 +628,7 @@ impl Planner {
 
     fn finish(self) -> SubsetProgram {
         SubsetProgram {
+            main_fn: self.by_name.get("-main").copied(),
             fns: self.fns,
             main: self.main,
             main_slots: self.main_next,
@@ -750,6 +755,17 @@ impl Planner {
                 span,
                 form: "defn".to_owned(),
                 hint: "redefinition; AOT resolves calls at compile time".to_owned(),
+            }));
+        }
+        // The `-main` entry takes exactly `[args]` (T1192 FX1
+        // D-argv): the binary passes the whole argv list as one
+        // argument (a subset adaptation — the JVM applies the
+        // args, which needs rest-args the subset lacks).
+        if name == "-main" && params.len() != 1 {
+            return Err(PlanError::Subset(SubsetError {
+                span,
+                form: "-main".to_owned(),
+                hint: "`-main` takes exactly one parameter ([args]) in the subset".to_owned(),
             }));
         }
         // Register before the body: direct self-calls resolve
@@ -1249,6 +1265,23 @@ mod tests {
         assert!(prog.main.is_empty());
         assert_eq!(prog.main_slots, 0);
         assert_eq!(diagnostic_of("(print 1)"), None);
+    }
+
+    #[test]
+    fn main_fn_tracks_arity_1_dash_main() {
+        // T1192 FX1 D-argv: the binary invokes `-main` with argv.
+        let prog = plan("(defn f [x] x) (defn -main [args] args)").expect("plans");
+        assert_eq!(prog.main_fn, Some(1));
+        let prog = plan("(defn f [x] x) (print 1)").expect("plans");
+        assert_eq!(prog.main_fn, None);
+        assert_eq!(
+            diag("(defn -main [] 1)"),
+            "f.clj:1:1: unsupported form in AOT subset: -main (`-main` takes exactly one parameter ([args]) in the subset)"
+        );
+        assert_eq!(
+            diag("(defn -main [a b] 1)"),
+            "f.clj:1:1: unsupported form in AOT subset: -main (`-main` takes exactly one parameter ([args]) in the subset)"
+        );
     }
 
     #[test]

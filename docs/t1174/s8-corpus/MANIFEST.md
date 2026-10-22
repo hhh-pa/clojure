@@ -16,6 +16,13 @@ pins `s8-pins.md`). Truth source: `s8-pins.md` (P1–P5).
   the `run` diagnostic (`{path}:1:1: ...`, synthesized
   span). AOT pins TRUE call-site spans instead (ours-pinned
   stderr, exit 1).
+- `10-argv`: the `-main` entry point (T1192 FX1 D-argv). Not
+  part of the byte-identical replay: `run` never invokes
+  `-main` (script mode, like the JVM — `.runout`), while the
+  binary runs the tops then `-main` with argv
+  (`.exe-noargs.out` with no args, `.exe-args.out` with
+  `a b`). No JVM golden for the exe paths (the subset
+  arity-1 `-main` convention has no `-m` equivalent).
 - `unsupported/01`–`16`: out-of-subset forms. `.runout` =
   `run` stdout (exit 0 — the BDD "still work under `run`"
   clause; absent `.runerr` = empty stderr). `build` must
