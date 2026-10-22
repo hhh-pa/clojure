@@ -2812,9 +2812,11 @@ impl<'a> Analyzer<'a> {
     }
 
     /// `(case* ge shift mask default imap switch-type test-type
-    /// skip?)`: the `case` macro's expansion shape (anything else is
-    /// the spec error — hand-written `case*` beyond the macro shape
-    /// is a port-level error). `default`/`then`s inherit tail
+    /// skip?)`: the `case` macro's expansion shape. Wrong-typed
+    /// fields are the JVM's deterministic casts (`case_star_cast`);
+    /// missing/extra fields, NPE-accident shapes, and
+    /// macro-unreachable out-of-range ints keep the spec error
+    /// (frozen wedge, T1192 FX1). `default`/`then`s inherit tail
     /// position; `test`s analyze as exprs (evaluated on a hash hit,
     /// like the JVM `test.emit`); `skip` defaults to empty.
     fn parse_case_star(
@@ -2850,6 +2852,20 @@ impl<'a> Analyzer<'a> {
         }
     }
 
+    /// A `case*` wrong-type field: the JVM's deterministic cast
+    /// (T1192 FX1 probes), not the spec error. Missing/extra fields
+    /// and NPE-accident shapes keep the spec error (frozen wedge).
+    fn case_star_cast(&self, v: &Value, to: &'static str, span: Span) -> CompileError {
+        let message = NativeError::cast(&jvm_class_of(v), to).into_inner().message;
+        self.err(
+            class::CLASS_CAST,
+            message,
+            span,
+            Verb::Compiling,
+            Some("case*".to_owned()),
+        )
+    }
+
     /// The `case*` header: shift, mask, the case map, the test kind,
     /// and the switch-kind check (all spec errors).
     fn parse_case_star_head<'v>(
@@ -2860,12 +2876,26 @@ impl<'a> Analyzer<'a> {
         let (Some(shift), Some(mask)) =
             (Self::case_star_int(items[2]), Self::case_star_int(items[3]))
         else {
-            return Err(self.spec_error("clojure.core/case*", span));
+            // Wrong-typed (non-`Int`) fields are the JVM's `Number`
+            // cast; out-of-range `Int`s are macro-unreachable (the
+            // macro routes big constants to hash mode) and keep the
+            // spec error — the JVM shape there is unknowable (every
+            // probe crashes elsewhere first).
+            let bad = [items[2], items[3]]
+                .into_iter()
+                .find(|v| !matches!(v, Value::Int(_)));
+            match bad {
+                Some(v) => return Err(self.case_star_cast(v, "java.lang.Number", span)),
+                None => return Err(self.spec_error("clojure.core/case*", span)),
+            }
         };
         let Value::Map(imap) = items[5] else {
-            return Err(self.spec_error("clojure.core/case*", span));
+            return Err(self.case_star_cast(items[5], "java.util.Map", span));
         };
         let test = self.parse_case_star_test(items[7], span)?;
+        if !matches!(items[6], Value::Keyword(_)) {
+            return Err(self.case_star_cast(items[6], "clojure.lang.Keyword", span));
+        }
         if !matches!(items[6], Value::Keyword(kw) if kw.namespace().is_none() && matches!(kw.name(), "sparse" | "compact"))
         {
             return Err(self.spec_error("clojure.core/case*", span));
@@ -2883,7 +2913,7 @@ impl<'a> Analyzer<'a> {
                 "hash-identity" => Ok(CaseTest::HashIdentity),
                 _ => Err(self.spec_error("clojure.core/case*", span)),
             },
-            _ => Err(self.spec_error("clojure.core/case*", span)),
+            _ => Err(self.case_star_cast(v, "clojure.lang.Keyword", span)),
         }
     }
 
@@ -2894,7 +2924,7 @@ impl<'a> Analyzer<'a> {
         if let Some(s) = items.get(8).copied() {
             if !matches!(s, Value::Nil) {
                 let Value::Set(set) = s else {
-                    return Err(self.spec_error("clojure.core/case*", span));
+                    return Err(self.case_star_cast(s, "java.util.Set", span));
                 };
                 for v in set.iter() {
                     let Some(k) = Self::case_star_int(v) else {
@@ -2920,7 +2950,14 @@ impl<'a> Analyzer<'a> {
         let mut cases = Vec::new();
         for (k, v) in imap.iter() {
             let Some(key) = Self::case_star_int(k) else {
-                return Err(self.spec_error("clojure.core/case*", span));
+                // Wrong-typed keys are the JVM's `Number` cast;
+                // out-of-range `Int` keys are macro-unreachable (big
+                // constants route to hash mode) and keep the spec
+                // error.
+                if matches!(k, Value::Int(_)) {
+                    return Err(self.spec_error("clojure.core/case*", span));
+                }
+                return Err(self.case_star_cast(k, "java.lang.Number", span));
             };
             let Value::Vector(pair) = v else {
                 return Err(self.spec_error("clojure.core/case*", span));
