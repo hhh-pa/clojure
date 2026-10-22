@@ -176,8 +176,11 @@ FIX:
   JVM `(macroexpand-1 '(let [a 1] a))` is `(let* [a 1] a)`.
 - D-xform: 7 seq-fn transducer arities + `into` plain-only →
   FT7 (needs the transducer protocol).
-- D-mapentry: no `MapEntry` (`key`/`val` via `nth`, map seqs
-  and `find` yield vectors, conj-over-pairs CCE) → FX2.
+- D-mapentry: FIXED (real `Value::MapEntry`: `key`/`val`
+  project entries only, map seqs/`find` yield entries, entry
+  conj/assoc/`=`/`hash`/`compare`/`rseq`/destructure match;
+  `rseq`/`sorted?`/`nthnext` land; with-meta/meta-value casts
+  report the JVM text; fx2-mapentry{,2..17} probes + pins).
 - D-prepost: `:pre`/`:post` silently ignored → FX3.
 - D-printdup: `*print-dup*` declared but ignored → FX4b.
 - D-streamprint: str realization up-front vs JVM in-flight
@@ -191,8 +194,9 @@ FIX:
 - D-emptymeta: FIXED (seq `empty` keeps meta; fx1-emptymeta).
 - D-cce-shape: RESOLVED conformant (single-shot JVM throws
   the same full checkcast text; "bare" was HotSpot
-  fast-throw elision — fx1-rest/fx1-fastthrow probes; the
-  entries-are-vectors half of `:keys-vecpairs` waits on FX2).
+  fast-throw elision — fx1-rest/fx1-fastthrow probes; FX2
+  closed the entries-are-vectors half (`:keys-vecpairs`
+  conformant)).
 - D-caseacc: FIXED (wrong-typed `case*` fields mirror the
   JVM casts; fx1-case).
 - D-postfuture: FIXED (post-shutdown `future` rejects;
@@ -315,7 +319,13 @@ FX0 spec (this file) + oracle smoke (done: jar + probe work).
 FX1 small deterministic fixes (D-tsneg/D-time/D-emptymeta/
   D-cce-shape/D-caseacc/D-postfuture/D-shutdrain/D-avaroot/
   D-argv + I-nthf64/I-huge/I-hashinf probes).
-FX2 MapEntry (D-mapentry).
+FX2 MapEntry (D-mapentry). Follow-ups found in-slice (slice
+  TBD): `flatten`/`tree-seq` unimplemented (probe6 `flatten`
+  stands as the pin); `reversible?`/`chunk-*`/`instance?`/
+  `realized?` unimplemented; the invoke fallback and `declare`
+  keep the pinned §E8 cast text (oracle reports JDK — FX7
+  input); `seq_opt` rejects seq values on the outlet path
+  (custom paths only, no oracle).
 FX3 pre/post validation (D-prepost).
 FX4 analyzer builtins as real macros (D-macroexpand: `let*`/
   `fn*`/`loop*` special forms + core macro defs + analyzer).

@@ -151,6 +151,7 @@ machine-read — keep `| var | status | notes |` rows exact.
 | `vector?` | implemented | `counted_pred_rows` + `nthrest_rows` + defn assert-args |
 | `map?` | implemented | `counted_pred_rows` + defn sig-parse |
 | `set?` | implemented | arith.rs pred_backlog_rows |
+| `sorted?` | implemented | T1192 FX2 map_entry.rs class_and_predicates (always false; FT6 extends) |
 | `fn?` | implemented | arith.rs pred_backlog_rows (incl. natives) |
 | `ifn?` | implemented | `counted_pred_rows` |
 | `var?` | implemented | arith.rs pred_backlog_rows |
@@ -255,6 +256,7 @@ machine-read — keep `| var | status | notes |` rows exact.
 | `iterate` | implemented | rust control::hash_values + corpus 02/04/18; lazy more (pins 7i) |
 | `range` | implemented | rust coll::count_rows + corpus 02/03/16; LongRange/Range dispatch (pins) |
 | `reverse` | implemented | corpus 02/05/10; eager reversed list |
+| `rseq` | implemented | T1192 FX2 map_entry.rs rseq_rows (RSeq kind, Reversible cast, rev NPE) |
 | `sort` | implemented | rust str::str_seq_contents + corpus 02/10; ArraySeq, AFunction.compare (pins) |
 | `sort-by` | implemented | corpus 02/10; direct (comp (kf x) (kf y)) (pins) |
 | `mapcat` | implemented | corpus 02/08; concat-of-map composite |
@@ -280,6 +282,7 @@ machine-read — keep `| var | status | notes |` rows exact.
 | `max-key` | implemented | corpus 10; >= keeps later ties |
 | `min-key` | implemented | corpus 10; <= keeps later ties |
 | `nthrest` | implemented | control.rs nthrest_rows (0/neg→coll itself, ceil rule) |
+| `nthnext` | implemented | T1192 FX2 map_entry.rs seq_fn_rows (`(seq (nthrest coll n))`) |
 | `reduced` | implemented | tests/seqs.rs reduced_rows (early-exit wrap) |
 | `reduced?` | implemented | tests/seqs.rs reduced_rows |
 
