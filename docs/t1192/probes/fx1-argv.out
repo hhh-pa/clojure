@@ -1,0 +1,4 @@
+== no args:
+argv: nil seq? false
+== two args:
+argv: ("hello" "world") seq? true

@@ -332,8 +332,9 @@ batches; `tests/format.rs`, corpus 12/13/14.)
   `%c` takes Characters only (integers rejected — no 32-bit
   ints exist here).
 - Documented divergences: astral `%s` precision counts scalars,
-  not UTF-16 units; lone surrogates are unrepresentable; `%ts`
-  negatives truncate; zones are UTC-only.
+  not UTF-16 units; lone surrogates are unrepresentable;
+  zones are UTC-only. (`%ts` negatives truncate toward zero
+  on the JVM too — conformant, T1192 FX1.)
 
 ## D8. `ex-info` family (`core.rs`)
 
@@ -423,13 +424,17 @@ batches; `tests/format.rs`, corpus 12/13/14.)
 
 - `format`: astral `%s` precision (scalars vs UTF-16 units),
   lone surrogates unrepresentable, `%c` rejects integers,
-  `%ts` negatives truncate, zones UTC-only.
+  zones UTC-only. (`%ts` negatives truncate toward zero on
+  the JVM too — resolved conformant, T1192 FX1 fx1-rest.)
 - `key`/`val`: no `MapEntry` (slot reads via `nth`; the CCE
-  class differs). `update` on transients and `keys` of
-  non-maps: JVM bare/checkcast CCEs asserted as port
-  full-CCEs. `into` 3-arg takes the port ArityException (the
-  JVM takes the xform path). Arity texts strip the `--NNNN`
-  impl suffix (`clojure.core/assoc`, not `assoc--5596`).
+  class differs). (`update` on transients and `keys` of
+  non-maps: single-shot JVM throws the same full checkcast
+  text the port asserts — resolved conformant, T1192 FX1
+  fx1-rest/fx1-fastthrow; the "bare" record was HotSpot
+  fast-throw elision.) `into` 3-arg takes the port
+  ArityException (the JVM takes the xform path). Arity texts
+  strip the `--NNNN` impl suffix (`clojure.core/assoc`, not
+  `assoc--5596`).
 - `char` rejects surrogates (JVM: unprintable but accepted);
   `float` returns exact doubles (no `f32` rounding);
   `int`/`short`/`byte` stay `Long`.
@@ -437,7 +442,8 @@ batches; `tests/format.rs`, corpus 12/13/14.)
   past 2^53 unprobed; `case*` hand-written shapes are port
   spec errors (JVM NPE/IAE out of scope).
 - `:pre`/`:post` silently ignored; `sorted-map` reads as
-  `{}`; huge longs untested; `time` millis digits
-  approximate; seq `empty` drops meta (inferred from
-  `RT.empty`); `(count (eval …))`-style phase gaps assert the
+  `{}`; huge longs untested; seq `empty` drops meta (fixed,
+  T1192 FX1); `(count (eval …))`-style phase gaps assert the
   port runtime error instead of the JVM compile error.
+  (`time` millis digits match the JVM `Double/toString`
+  exactly — resolved conformant, T1192 FX1 fx1-time.)

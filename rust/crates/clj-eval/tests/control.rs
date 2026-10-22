@@ -210,7 +210,8 @@ fn hash_values() {
     assert_eq!(run_last(&mut eval, "(hash (repeat 0 :x))"), "-2017569654");
     assert_eq!(run_last(&mut eval, "(hash nil)"), "0");
     assert_eq!(run_last(&mut eval, "(= (hash [1]) (hash '(1)))"), "true");
-    // Unbounded seqs: bare UOE, top-level, nested, and after forcing.
+    // Unbounded seqs: bare UOE, top-level, nested, and after forcing
+    // (T1192 FX1 fx1-rest probe: the JVM message is nil too).
     for src in [
         "(hash (cycle [1]))",
         "(hash (iterate inc 0))",

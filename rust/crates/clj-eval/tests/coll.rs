@@ -418,6 +418,13 @@ fn nth_rows() {
         uncaught(&mut eval, "(nth [1 2 3] 1e300)"),
         "java.lang.IllegalArgumentException | Value out of range for long: 1.0E300"
     );
+    // f64 indexes truncate (T1192 FX1 fx1-rest probe); past-2^53
+    // doubles fail `toIntExact` like the JVM.
+    assert_eq!(run_last(&mut eval, "(nth [1 2 3] 1.0)"), "2");
+    assert_eq!(
+        uncaught(&mut eval, "(nth [1] 9.007199254740992E15)"),
+        "java.lang.ArithmeticException | integer overflow"
+    );
 }
 
 #[test]
@@ -1009,24 +1016,32 @@ fn empty_fn_rows() {
 #[test]
 fn corpus_p1_divergences() {
     let mut eval = boot();
-    // :update-tmap — DIVERGENCE: JVM bare CCE (empty msg); port full CCE TransientArrayMap->Associative; JVM java.lang.ClassCastException: (empty)
+    // :update-tmap — CONFORMANT (T1192 FX1): single-shot JVM throws the full
+    // checkcast text below, byte-identical (fx1-rest probe); the old "bare CCE"
+    // record was HotSpot OmitStackTraceInFastThrow after ~1k hot throws
+    // (fx1-fastthrow probe), which the port does not mirror (N3).
     assert_eq!(
         uncaught(&mut eval, "(update (transient {:a 1}) :a inc)"),
         "java.lang.ClassCastException | class clojure.lang.PersistentArrayMap$TransientArrayMap cannot be cast to class clojure.lang.Associative (clojure.lang.PersistentArrayMap$TransientArrayMap and clojure.lang.Associative are in unnamed module of loader 'app')"
     );
-    // :kv-next-first — DIVERGENCE: JVM bare CCE; port full CCE Long->Map$Entry; JVM java.lang.ClassCastException: (empty)
+    // :kv-next-first — CONFORMANT (T1192 FX1): single-shot JVM throws the
+    // full Long->Map$Entry text below (fx1-rest probe); "bare" was fast-throw
+    // elision (fx1-fastthrow probe), not mirrored (N3).
     assert_eq!(
         uncaught(&mut eval, "(first (next (keys [1 2])))"),
         "java.lang.ClassCastException | class java.lang.Long cannot be cast to class java.util.Map$Entry (java.lang.Long and java.util.Map$Entry are in module java.base of loader 'bootstrap')"
     );
-    // :kv-rest-first — DIVERGENCE: JVM bare CCE; port full CCE Long->Map$Entry; JVM java.lang.ClassCastException: (empty)
+    // :kv-rest-first — CONFORMANT (T1192 FX1): same as :kv-next-first
+    // (fx1-rest + fx1-fastthrow probes).
     assert_eq!(
         uncaught(&mut eval, "(first (rest (keys [1 2])))"),
         "java.lang.ClassCastException | class java.lang.Long cannot be cast to class java.util.Map$Entry (java.lang.Long and java.util.Map$Entry are in module java.base of loader 'bootstrap')"
     );
-    // :keys-vecpairs — DIVERGENCE: JVM throws bare CCE; port treats [1 2] as an entry (entries-are-vectors + key-on-vector, cf. control.rs key_val); JVM "THROW java.lang.ClassCastException: "
+    // :keys-vecpairs — DIVERGENCE: JVM throws the (single-shot full) CCE; port treats [1 2] as an entry (entries-are-vectors + key-on-vector, cf. control.rs key_val). The behavioral half waits on FX2 MapEntry (T1192 FX1: "bare" was fast-throw elision, fx1-fastthrow probe).
     assert_eq!(run_last(&mut eval, "(vec (keys [[1 2]]))"), "[1]");
-    // :keys-strpairs — DIVERGENCE: JVM bare CCE; port full CCE String->Map$Entry; JVM java.lang.ClassCastException: (empty)
+    // :keys-strpairs — CONFORMANT (T1192 FX1): single-shot JVM throws the
+    // full String->Map$Entry text below (fx1-rest probe); "bare" was
+    // fast-throw elision (fx1-fastthrow probe), not mirrored (N3).
     assert_eq!(
         uncaught(&mut eval, "(vec (keys [\"ab\"]))"),
         "java.lang.ClassCastException | class java.lang.String cannot be cast to class java.util.Map$Entry (java.lang.String and java.util.Map$Entry are in module java.base of loader 'bootstrap')"

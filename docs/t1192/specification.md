@@ -184,23 +184,25 @@ FIX:
   interleaving → FX4b.
 - D-astral-fmt: `%s` precision counts scalars, JVM counts
   UTF-16 units → FX4b.
-- D-tsneg: `%ts` negatives truncate → FX1.
-- D-time: `time` millis digits approximate → FX1.
-- D-emptymeta: seq `empty` drops meta (inferred) → FX1
-  (oracle-confirm first).
-- D-cce-shape: `update`-on-transient / `keys`-of-non-map JVM
-  bare/checkcast CCEs asserted as port full-CCEs → FX1.
-- D-caseacc: hand-written `case*` shapes are port spec errors
-  where the JVM raises deterministic IAEs → FX1 (NPE accidents
-  stay structural, below).
-- D-postfuture: post-shutdown `future` spawns (JVM rejects
-  with `RejectedExecutionException`) → FX1 (shutdown flag).
-- D-shutdrain: `shutdown-agents` blocks (JVM returns at once,
-  drains async) → FX1 (async drain).
-- D-avaroot: concurrent `alter-var-root` on one var may lose
-  an update → FX1 (reentrant/sequence protocol).
-- D-argv: AOT `main` drops `*command-line-args*` → FX1 (argv
-  conveyance + spec update).
+- D-tsneg: RESOLVED conformant (`%ts` truncates toward zero
+  on the JVM too; fx1-rest probe + pins).
+- D-time: RESOLVED conformant (millis digits match
+  `Double/toString` exactly; fx1-time probe + digit table).
+- D-emptymeta: FIXED (seq `empty` keeps meta; fx1-emptymeta).
+- D-cce-shape: RESOLVED conformant (single-shot JVM throws
+  the same full checkcast text; "bare" was HotSpot
+  fast-throw elision — fx1-rest/fx1-fastthrow probes; the
+  entries-are-vectors half of `:keys-vecpairs` waits on FX2).
+- D-caseacc: FIXED (wrong-typed `case*` fields mirror the
+  JVM casts; fx1-case).
+- D-postfuture: FIXED (post-shutdown `future` rejects;
+  fx1-shutdown).
+- D-shutdrain: FIXED (`shutdown-agents` returns at once,
+  drains async; fx1-shutdown).
+- D-avaroot: FIXED (per-var reentrant lock; fx1-alter).
+- D-argv: OPEN — AOT `main` drops `*command-line-args*`
+  (design: arity-1 `-main` entry + argv seq; the lowering
+  needs LLVM verification, unavailable on this box).
 - D-charf: `float` returns exact doubles (JVM rounds via f32)
   → FT1 (with the tower's coercions).
 - D-pctpop: `%c` rejects integers (JVM accepts int-range via
