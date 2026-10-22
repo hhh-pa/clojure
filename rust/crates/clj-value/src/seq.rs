@@ -26,7 +26,7 @@ pub const CHUNK_SIZE: usize = 32;
 
 /// `seq` a value into items (`None` is unseqable — callers raise
 /// the ISeq coercion error). `nil` seqs to empty, strings to chars,
-/// maps to `[k v]` entries, like the JVM.
+/// maps to `MapEntry` values, entries to their 2 items, like the JVM.
 #[must_use]
 pub fn seq_vec(v: &Value) -> Option<Vec<Value>> {
     match v {
@@ -34,9 +34,10 @@ pub fn seq_vec(v: &Value) -> Option<Vec<Value>> {
         Value::Str(s) => Some(s.chars().map(Value::Char).collect()),
         Value::List(l) => Some(l.iter().cloned().collect()),
         Value::Vector(v) => Some(v.iter().cloned().collect()),
+        Value::MapEntry { key, val } => Some(vec![(**key).clone(), (**val).clone()]),
         Value::Map(m) => Some(
             m.iter()
-                .map(|(k, v)| Value::Vector(Vector::from_vec(vec![k.clone(), v.clone()])))
+                .map(|(k, v)| crate::map_entry(k.clone(), v.clone()))
                 .collect(),
         ),
         Value::Set(s) => Some(s.iter().cloned().collect()),
@@ -181,12 +182,12 @@ impl Seq {
         Self::chunked(v.iter().cloned().collect())
     }
 
-    /// Seq over a map's entries as `[k v]` vectors, in seq order.
+    /// Seq over a map's entries as `MapEntry` values, in seq order.
     #[must_use]
     pub fn from_map(m: &Map) -> Option<Self> {
         Self::eager(
             m.iter()
-                .map(|(k, v)| Value::Vector(Vector::from_vec(vec![k.clone(), v.clone()])))
+                .map(|(k, v)| crate::map_entry(k.clone(), v.clone()))
                 .collect(),
         )
     }

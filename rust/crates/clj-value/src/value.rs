@@ -1108,7 +1108,8 @@ fn equal_key(a: &Value, b: &Value) -> bool {
 /// - Collections compare through `pcequiv` (`ASeq.equiv` /
 ///   `doEquiv` / `APersistentMap.equiv` / `APersistentSet.equiv`),
 ///   recursing with full `equiv` — sequential comparison crosses
-///   `List`/`Vector` in both orders, at every nesting level.
+///   `List`/`Vector`/`MapEntry` in every order, at every nesting
+///   level (an entry is its 2-vector).
 /// - Anything else falls back to Java `.equals` ([`plain_equals`]).
 fn jvm_equiv(a: &Value, b: &Value) -> bool {
     match (a, b) {
@@ -1136,7 +1137,7 @@ fn jvm_equiv(a: &Value, b: &Value) -> bool {
 fn is_collection(v: &Value) -> bool {
     matches!(
         v,
-        Value::List(_) | Value::Vector(_) | Value::Map(_) | Value::Set(_)
+        Value::List(_) | Value::Vector(_) | Value::MapEntry { .. } | Value::Map(_) | Value::Set(_)
     )
 }
 
@@ -1171,19 +1172,58 @@ fn seq_plain_equals<'a>(
 }
 
 /// `pcequiv` with `c` the collection side: sequential `equiv` crosses
-/// `List`/`Vector`; maps match same-size with equiv keys and values;
-/// sets match same-size with every member of the OTHER side
-/// equiv-contained (`APersistentSet.equiv` iterates its argument).
+/// `List`/`Vector`/`MapEntry` (an entry is its 2-vector); maps match
+/// same-size with equiv keys and values; sets match same-size with
+/// every member of the OTHER side equiv-contained
+/// (`APersistentSet.equiv` iterates its argument).
 fn coll_equiv(c: &Value, x: &Value) -> bool {
     match c {
         Value::List(items) => match x {
             Value::List(o) => seq_eq(items.len(), items.iter(), o.len(), o.iter(), jvm_equiv),
             Value::Vector(o) => seq_eq(items.len(), items.iter(), o.len(), o.iter(), jvm_equiv),
+            Value::MapEntry { key, val } => seq_eq(
+                items.len(),
+                items.iter(),
+                2,
+                [key.as_ref(), val.as_ref()].into_iter(),
+                jvm_equiv,
+            ),
             _ => false,
         },
         Value::Vector(items) => match x {
             Value::List(o) => seq_eq(items.len(), items.iter(), o.len(), o.iter(), jvm_equiv),
             Value::Vector(o) => seq_eq(items.len(), items.iter(), o.len(), o.iter(), jvm_equiv),
+            Value::MapEntry { key, val } => seq_eq(
+                items.len(),
+                items.iter(),
+                2,
+                [key.as_ref(), val.as_ref()].into_iter(),
+                jvm_equiv,
+            ),
+            _ => false,
+        },
+        Value::MapEntry { key, val } => match x {
+            Value::List(o) => seq_eq(
+                2,
+                [key.as_ref(), val.as_ref()].into_iter(),
+                o.len(),
+                o.iter(),
+                jvm_equiv,
+            ),
+            Value::Vector(o) => seq_eq(
+                2,
+                [key.as_ref(), val.as_ref()].into_iter(),
+                o.len(),
+                o.iter(),
+                jvm_equiv,
+            ),
+            Value::MapEntry { key: k2, val: v2 } => seq_eq(
+                2,
+                [key.as_ref(), val.as_ref()].into_iter(),
+                2,
+                [k2.as_ref(), v2.as_ref()].into_iter(),
+                jvm_equiv,
+            ),
             _ => false,
         },
         Value::Map(m) => {
@@ -1281,7 +1321,8 @@ fn plain_equals(a: &Value, b: &Value) -> bool {
         (Value::Throwable(a), Value::Throwable(b)) => a.id == b.id,
         (Value::Extension(a), Value::Extension(b)) => a.dyn_eq(&**b),
         // `.equals` is loose across List/Vector too (`doEquals` takes
-        // the `java.util.List` branch; `ASeq.equals` accepts `List`).
+        // the `java.util.List` branch; `ASeq.equals` accepts `List`;
+        // an entry is its 2-vector).
         (Value::List(items), Value::List(o)) => {
             seq_plain_equals(items.len(), items.iter(), o.len(), o.iter())
         }
@@ -1294,6 +1335,36 @@ fn plain_equals(a: &Value, b: &Value) -> bool {
         (Value::Vector(items), Value::Vector(o)) => {
             seq_plain_equals(items.len(), items.iter(), o.len(), o.iter())
         }
+        (Value::List(items), Value::MapEntry { key, val }) => seq_plain_equals(
+            items.len(),
+            items.iter(),
+            2,
+            [key.as_ref(), val.as_ref()].into_iter(),
+        ),
+        (Value::MapEntry { key, val }, Value::List(o)) => seq_plain_equals(
+            2,
+            [key.as_ref(), val.as_ref()].into_iter(),
+            o.len(),
+            o.iter(),
+        ),
+        (Value::Vector(items), Value::MapEntry { key, val }) => seq_plain_equals(
+            items.len(),
+            items.iter(),
+            2,
+            [key.as_ref(), val.as_ref()].into_iter(),
+        ),
+        (Value::MapEntry { key, val }, Value::Vector(o)) => seq_plain_equals(
+            2,
+            [key.as_ref(), val.as_ref()].into_iter(),
+            o.len(),
+            o.iter(),
+        ),
+        (Value::MapEntry { key, val }, Value::MapEntry { key: k2, val: v2 }) => seq_plain_equals(
+            2,
+            [key.as_ref(), val.as_ref()].into_iter(),
+            2,
+            [k2.as_ref(), v2.as_ref()].into_iter(),
+        ),
         (Value::Map(m), Value::Map(o)) => {
             m.size() == o.size()
                 && m.iter().all(|(k, v)| {
