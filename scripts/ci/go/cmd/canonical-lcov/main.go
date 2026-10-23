@@ -216,11 +216,19 @@ func addCount(record map[int]int64, lineno int, count uint64) {
 	if count >= clamp {
 		count = 0
 	}
+	// ParseUint yields a uint64. The clamp leaves the value below
+	// 2^62, which fits in int64, but CodeQL only accepts a constant
+	// bound before the narrower conversion.
+	if count > uint64(math.MaxInt64) {
+		record[lineno] = saturate
+		return
+	}
+	hits := int64(count)
 	prev := record[lineno]
-	if count > uint64(saturate-prev) {
+	if uint64(hits) > uint64(saturate-prev) {
 		record[lineno] = saturate
 	} else {
-		record[lineno] = prev + int64(count)
+		record[lineno] = prev + hits
 	}
 }
 
