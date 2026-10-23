@@ -79,36 +79,50 @@ fn lookup_present(coll: &Value, key: &Value) -> Result<Option<Value>, NativeErro
     match coll {
         Value::Nil => Ok(None),
         Value::Map(m) => Ok(m.get(key).cloned()),
-        Value::Vector(x) => Ok(int_key(key).and_then(|i| {
+        Value::Vector(x) => Ok(lookup_vector_slot(x, key)),
+        Value::MapEntry { key: ek, val: ev } => Ok(lookup_entry_slot(ek, ev, key)),
+        Value::Set(s) => Ok(s.get(key).cloned()),
+        Value::Str(s) => Ok(lookup_str_slot(s, key)),
+        Value::Transient(t) => transient_get(t, key),
+        other => lookup_present_fallback(other, key),
+    }
+}
+
+fn lookup_vector_slot(x: &Vector, key: &Value) -> Option<Value> {
+    int_key(key).and_then(|i| {
+        usize::try_from(i as i32)
+            .ok()
+            .and_then(|idx| x.iter().nth(idx).cloned())
+    })
+}
+
+fn lookup_entry_slot(ek: &Value, ev: &Value, key: &Value) -> Option<Value> {
+    int_key(key).and_then(|i| {
+        usize::try_from(i as i32).ok().and_then(|idx| match idx {
+            0 => Some(ek.clone()),
+            1 => Some(ev.clone()),
+            _ => None,
+        })
+    })
+}
+
+fn lookup_str_slot(s: &str, key: &Value) -> Option<Value> {
+    num_index(key).and_then(|i| {
+        usize::try_from(i)
+            .ok()
+            .and_then(|idx| s.chars().nth(idx).map(Value::Char))
+    })
+}
+
+fn lookup_present_fallback(coll: &Value, key: &Value) -> Result<Option<Value>, NativeError> {
+    if let Some(sv) = as_subvector(coll) {
+        return Ok(int_key(key).and_then(|i| {
             usize::try_from(i as i32)
                 .ok()
-                .and_then(|idx| x.iter().nth(idx).cloned())
-        })),
-        Value::MapEntry { key: ek, val: ev } => Ok(int_key(key).and_then(|i| {
-            usize::try_from(i as i32).ok().and_then(|idx| match idx {
-                0 => Some((**ek).clone()),
-                1 => Some((**ev).clone()),
-                _ => None,
-            })
-        })),
-        Value::Set(s) => Ok(s.get(key).cloned()),
-        Value::Str(s) => Ok(num_index(key).and_then(|i| {
-            usize::try_from(i)
-                .ok()
-                .and_then(|idx| s.chars().nth(idx).map(Value::Char))
-        })),
-        Value::Transient(t) => transient_get(t, key),
-        _ => {
-            if let Some(sv) = as_subvector(coll) {
-                return Ok(int_key(key).and_then(|i| {
-                    usize::try_from(i as i32)
-                        .ok()
-                        .and_then(|idx| sv.nth(idx).cloned())
-                }));
-            }
-            Ok(None)
-        }
+                .and_then(|idx| sv.nth(idx).cloned())
+        }));
     }
+    Ok(None)
 }
 
 /// Read a transient (`get`/`contains?` share this; use after

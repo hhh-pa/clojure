@@ -372,9 +372,16 @@ CX complexity-zero (standing program, user directive):
   dedicated refactor slices (split dispatch tables and hot
   helpers under the cyclomatic/cognitive caps). Until then,
   new or worsened entries need a recorded justification and
-  count as debt against this goal; FX2 added 2 entries
-  (`lookup_present`, `lookup`) and worsened 8 dispatch
-  tables — first candidates for the CX pass.
+  count as debt against this goal. CX1 removes the 10 FX2
+  debt entries (`lookup_present`, `lookup`, and the eight
+  dispatch tables FX2 worsened: `jvm_class_of`,
+  `Evaluator::invoke`, `print_into`, `Value::hash`,
+  `coll_equiv`, `plain_equals`, `hash_code`, `hasheq`).
+  The remaining baseline entries are still debt. CX2 removes
+  `ReaderError::message`, `ThrowClass::jvm_name`, `munge`,
+  `step_thunk`, `java_debug`, `java_double_string`, `canon`,
+  `lift_ns`, and `Value::eq`; the other baseline entries remain
+  debt.
 
 Each slice lands as its own `T1192:` commit series + PR with
 `/review-loop` to acceptance; landing stays explicit-only.

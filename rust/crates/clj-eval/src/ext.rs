@@ -30,34 +30,46 @@ use crate::expr::Arity;
 pub fn munge(display: &str) -> String {
     let mut out = String::with_capacity(display.len());
     for c in display.chars() {
-        match c {
-            '-' => out.push('_'),
-            '/' => out.push('$'),
-            ':' => out.push_str("_COLON_"),
-            '+' => out.push_str("_PLUS_"),
-            '>' => out.push_str("_GT_"),
-            '<' => out.push_str("_LT_"),
-            '=' => out.push_str("_EQ_"),
-            '~' => out.push_str("_TILDE_"),
-            '!' => out.push_str("_BANG_"),
-            '@' => out.push_str("_CIRCA_"),
-            '#' => out.push_str("_SHARP_"),
-            '\'' => out.push_str("_SINGLEQUOTE_"),
-            '"' => out.push_str("_DOUBLEQUOTE_"),
-            '%' => out.push_str("_PERCENT_"),
-            '^' => out.push_str("_CARET_"),
-            '&' => out.push_str("_AMPERSAND_"),
-            '*' => out.push_str("_STAR_"),
-            '|' => out.push_str("_BAR_"),
-            '{' => out.push_str("_LBRACE_"),
-            '}' => out.push_str("_RBRACE_"),
-            '[' => out.push_str("_LBRACK_"),
-            ']' => out.push_str("_RBRACK_"),
-            '?' => out.push_str("_QMARK_"),
-            _ => out.push(c),
-        }
+        munge_char(c, &mut out);
     }
     out
+}
+
+/// First half of the `Compiler.munge` char table.
+fn munge_char(c: char, out: &mut String) {
+    match c {
+        '-' => out.push('_'),
+        '/' => out.push('$'),
+        ':' => out.push_str("_COLON_"),
+        '+' => out.push_str("_PLUS_"),
+        '>' => out.push_str("_GT_"),
+        '<' => out.push_str("_LT_"),
+        '=' => out.push_str("_EQ_"),
+        '~' => out.push_str("_TILDE_"),
+        '!' => out.push_str("_BANG_"),
+        '@' => out.push_str("_CIRCA_"),
+        '#' => out.push_str("_SHARP_"),
+        '\'' => out.push_str("_SINGLEQUOTE_"),
+        other => munge_char_rest(other, out),
+    }
+}
+
+/// Rest of the `Compiler.munge` char table. Unlisted chars pass through.
+fn munge_char_rest(c: char, out: &mut String) {
+    match c {
+        '"' => out.push_str("_DOUBLEQUOTE_"),
+        '%' => out.push_str("_PERCENT_"),
+        '^' => out.push_str("_CARET_"),
+        '&' => out.push_str("_AMPERSAND_"),
+        '*' => out.push_str("_STAR_"),
+        '|' => out.push_str("_BAR_"),
+        '{' => out.push_str("_LBRACE_"),
+        '}' => out.push_str("_RBRACE_"),
+        '[' => out.push_str("_LBRACK_"),
+        ']' => out.push_str("_RBRACK_"),
+        '?' => out.push_str("_QMARK_"),
+        _ => out.push(c),
+    }
 }
 
 /// An interpreted function value: display name, arities, captured
