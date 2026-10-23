@@ -104,31 +104,42 @@ fn dest_vec_walk(
                 "Unsupported binding form, only :as can follow & parameter".to_owned(),
             ));
         }
-        dest_vec_elem(eval, ret, item, gvec, gseq, gfirst, has_rest, n)?;
+        dest_vec_elem(
+            eval,
+            ret,
+            item,
+            &VecNames { gvec, gseq, gfirst },
+            has_rest,
+            n,
+        )?;
         n += 1;
         i += 1;
     }
     Ok(())
 }
 
+struct VecNames<'a> {
+    gvec: &'a Symbol,
+    gseq: &'a Symbol,
+    gfirst: &'a Symbol,
+}
+
 fn dest_vec_elem(
     eval: &mut Evaluator,
     ret: &mut Vec<Value>,
     pat: &Value,
-    gvec: &Symbol,
-    gseq: &Symbol,
-    gfirst: &Symbol,
+    names: &VecNames<'_>,
     has_rest: bool,
     n: i64,
 ) -> Result<(), NativeError> {
     if has_rest {
-        ret.push(symv(gfirst));
-        ret.push(qcall("first", vec![symv(gseq)]));
-        ret.push(symv(gseq));
-        ret.push(qcall("next", vec![symv(gseq)]));
-        return bind_one(eval, ret, pat, &symv(gfirst));
+        ret.push(symv(names.gfirst));
+        ret.push(qcall("first", vec![symv(names.gseq)]));
+        ret.push(symv(names.gseq));
+        ret.push(qcall("next", vec![symv(names.gseq)]));
+        return bind_one(eval, ret, pat, &symv(names.gfirst));
     }
-    let nth = qcall("nth", vec![symv(gvec), Value::Int(n), Value::Nil]);
+    let nth = qcall("nth", vec![symv(names.gvec), Value::Int(n), Value::Nil]);
     bind_one(eval, ret, pat, &nth)
 }
 
@@ -385,15 +396,18 @@ fn walk_directive(
     let items = seq_data(bk)?;
     let mut preamp = true;
     for item in &items {
+        let dir_val = Value::Keyword(dir.clone());
         preamp = directive_item(
             eval,
             ret,
             cx,
             walk,
-            &Value::Keyword(dir.clone()),
-            &kind,
-            item,
-            preamp,
+            &DirStep {
+                dir: &dir_val,
+                kind: &kind,
+                item,
+                preamp,
+            },
         )?;
     }
     Ok(())
@@ -417,27 +431,31 @@ fn directive_kind(dir: &clj_value::Keyword) -> Result<Dir, NativeError> {
     })
 }
 
+struct DirStep<'a> {
+    dir: &'a Value,
+    kind: &'a Dir,
+    item: &'a Value,
+    preamp: bool,
+}
+
 fn directive_item(
     eval: &mut Evaluator,
     ret: &mut Vec<Value>,
     cx: &MapCx,
     walk: &mut Walk,
-    dir: &Value,
-    kind: &Dir,
-    item: &Value,
-    preamp: bool,
+    step: &DirStep<'_>,
 ) -> Result<bool, NativeError> {
-    if is_amp(item) {
-        return amp_step(dir, preamp);
+    if is_amp(step.item) {
+        return amp_step(step.dir, step.preamp);
     }
-    if !preamp {
-        post_amp(eval, ret, cx, walk, kind, item)?;
+    if !step.preamp {
+        post_amp(eval, ret, cx, walk, step.kind, step.item)?;
         return Ok(false);
     }
-    let key = translate(kind, item)?;
-    push1(eval, ret, cx, walk, item, &key, kind.required)?;
+    let key = translate(step.kind, step.item)?;
+    push1(eval, ret, cx, walk, step.item, &key, step.kind.required)?;
     sel_add(&mut walk.sel, key.clone());
-    btok_put(&mut walk.btok, localize(item), key);
+    btok_put(&mut walk.btok, localize(step.item), key);
     Ok(true)
 }
 

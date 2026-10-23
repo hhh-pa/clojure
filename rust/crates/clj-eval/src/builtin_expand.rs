@@ -24,10 +24,10 @@ use crate::fx4_form::{
 };
 use crate::lazy::is_seq_value;
 
+type Fx4Expand = fn(&mut Evaluator, &[Value]) -> Result<Value, NativeError>;
+
 /// The macro native for one of the nine heads, if `name` is one.
-pub(crate) fn fx4_macro_fn(
-    name: &str,
-) -> Option<fn(&mut Evaluator, &[Value]) -> Result<Value, NativeError>> {
+pub(crate) fn fx4_macro_fn(name: &str) -> Option<Fx4Expand> {
     Some(match name {
         "let" => expand_let,
         "loop" => expand_loop,
