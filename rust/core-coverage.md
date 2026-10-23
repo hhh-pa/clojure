@@ -152,6 +152,7 @@ machine-read — keep `| var | status | notes |` rows exact.
 | `map?` | implemented | `counted_pred_rows` + defn sig-parse |
 | `set?` | implemented | arith.rs pred_backlog_rows |
 | `sorted?` | implemented | T1192 FX2 map_entry.rs class_and_predicates (always false; FT6 extends) |
+| `reversible?` | implemented | T1192 FX2b map_entry.rs reversible_pred_rows (vectors, subvecs, entries; not seqs or transients; FT6 sorted colls extend) |
 | `fn?` | implemented | arith.rs pred_backlog_rows (incl. natives) |
 | `ifn?` | implemented | `counted_pred_rows` |
 | `var?` | implemented | arith.rs pred_backlog_rows |

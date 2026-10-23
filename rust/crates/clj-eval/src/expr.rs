@@ -10,10 +10,10 @@
 //! expressions, enforcing every §E2–E6/E11 shape rule with
 //! oracle-verbatim classes, messages, spans, and wrappers.
 //!
-//! There are no macros in S4: `let`/`loop`/`letfn`/`fn` analyze
-//! directly, replicating the macro layers' observable routing
-//! (spec-check then body, `loop`'s emit-then-revalidate, `fn`
-//! params through the `clojure.core/let` wrapper) per probes 20–25.
+//! `eval` macroexpands the nine FX4 heads (`let`/`loop`/`fn`/
+//! `binding`/`letfn`/`with-redefs`/`with-bindings`/`bound-fn`/
+//! `locking`) before analyze. Direct [`Analyzer`] calls still
+//! parse those unexpanded specials (spec-check then body).
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -781,6 +781,9 @@ impl<'a> Analyzer<'a> {
         {
             return Ok(Expr::Local(idx));
         }
+        if let Some(empty) = crate::fx4_host::pam_empty(sym) {
+            return Ok(Expr::Literal(empty));
+        }
         let cur = self.current_ns();
         if let Some(target) = self.eval.registry.resolve_in(&cur, sym) {
             // Value-position checks (`analyzeSymbol` order: private
@@ -854,6 +857,9 @@ impl<'a> Analyzer<'a> {
         tail: bool,
     ) -> Result<Expr, CompileError> {
         let head = items[0];
+        if let Some(expr) = self.try_fx4_host(items, span, tail)? {
+            return Ok(expr);
+        }
         if let Some(expr) = self.intercept_head(head, items, span, tail)? {
             return Ok(expr);
         }
@@ -4048,6 +4054,192 @@ impl<'a> Analyzer<'a> {
                 Some("fn*".to_owned()),
             )),
         }
+    }
+
+    /// Rewrite an expansion call (`instance?`/`identical?`/`new`/
+    /// array-map/`monitor-*`/`letfn*`) before specials.
+    fn try_fx4_host(
+        &mut self,
+        items: &[&Value],
+        span: Span,
+        tail: bool,
+    ) -> Result<Option<Expr>, CompileError> {
+        let op = crate::fx4_host::classify(items, |name| self.local_idx(name).is_some());
+        self.lower_host(op, items, span, tail)
+    }
+
+    fn lower_host(
+        &mut self,
+        op: crate::fx4_host::HostOp<'_>,
+        items: &[&Value],
+        span: Span,
+        tail: bool,
+    ) -> Result<Option<Expr>, CompileError> {
+        match op {
+            crate::fx4_host::HostOp::None => Ok(None),
+            crate::fx4_host::HostOp::SeqQ(arg) => Ok(Some(self.host_call("seq?", &[arg], span)?)),
+            crate::fx4_host::HostOp::Identical(a, b) => {
+                Ok(Some(self.host_call("=", &[a, b], span)?))
+            }
+            crate::fx4_host::HostOp::NewObject => Ok(Some(self.fresh_object())),
+            crate::fx4_host::HostOp::Pam(inner) => {
+                Ok(Some(self.host_call("fx4-pam-create", &[inner], span)?))
+            }
+            crate::fx4_host::HostOp::MonitorEnter(arg) => {
+                Ok(Some(self.host_call("fx4-monitor-enter", &[arg], span)?))
+            }
+            crate::fx4_host::HostOp::MonitorExit(arg) => {
+                Ok(Some(self.host_call("fx4-monitor-exit", &[arg], span)?))
+            }
+            crate::fx4_host::HostOp::LetFnStar => {
+                Ok(Some(self.parse_letfn_star(items, span, tail)?))
+            }
+        }
+    }
+
+    fn fresh_object(&self) -> Expr {
+        Expr::Literal(Value::Extension(Arc::new(
+            crate::fx4_host::Fx4Object::fresh(),
+        )))
+    }
+
+    /// Invoke a core var by qualified symbol (skips the private check).
+    fn host_call(&mut self, name: &str, args: &[&Value], span: Span) -> Result<Expr, CompileError> {
+        let head = Expr::Global(Symbol::new(Some("clojure.core"), name));
+        let mut analyzed = Vec::with_capacity(args.len());
+        for arg in args {
+            analyzed.push(self.analyze(arg, span, false)?);
+        }
+        Ok(Expr::Invoke {
+            head: Box::new(head),
+            args: analyzed,
+            span,
+        })
+    }
+
+    /// `(letfn* [name (fn name …) …] body…)`, lowered to [`Expr::LetFn`].
+    fn parse_letfn_star(
+        &mut self,
+        items: &[&Value],
+        span: Span,
+        tail: bool,
+    ) -> Result<Expr, CompileError> {
+        let bindings = items.get(1).copied().unwrap_or(&Value::Nil);
+        let pairs = self.letfn_star_pairs(bindings, span)?;
+        let base = self.locals.len();
+        for (name, _) in &pairs {
+            self.locals.push(name.clone());
+        }
+        let fns = self.letfn_star_fns(&pairs, span)?;
+        let body = self.analyze_body(&items[2..], span, tail)?;
+        self.locals.truncate(base);
+        Ok(Expr::LetFn { fns, body })
+    }
+
+    fn letfn_star_pairs(
+        &self,
+        bindings: &Value,
+        span: Span,
+    ) -> Result<Vec<(String, Value)>, CompileError> {
+        let forms = self.letfn_star_vec(bindings, span)?;
+        if forms.len() % 2 != 0 {
+            return Err(self.letfn_star_err(
+                class::ILLEGAL_ARG,
+                "letfn* requires an even number of forms in binding vector",
+                span,
+            ));
+        }
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i + 1 < forms.len() {
+            out.push((self.letfn_star_name(forms[i], span)?, forms[i + 1].clone()));
+            i += 2;
+        }
+        Ok(out)
+    }
+
+    fn letfn_star_vec<'v>(
+        &self,
+        bindings: &'v Value,
+        span: Span,
+    ) -> Result<Vec<&'v Value>, CompileError> {
+        vector_shape_items(bindings).ok_or_else(|| {
+            self.letfn_star_err(
+                class::ILLEGAL_ARG,
+                "letfn* requires a vector for its binding",
+                span,
+            )
+        })
+    }
+
+    fn letfn_star_name(&self, v: &Value, span: Span) -> Result<String, CompileError> {
+        let Value::Symbol(sym) = v else {
+            return Err(self.letfn_star_err(
+                class::ILLEGAL_ARG,
+                &format!("Bad binding form, expected symbol, got: {}", value_of(v)),
+                span,
+            ));
+        };
+        if sym.namespace().is_some() {
+            return Err(self.letfn_star_err(
+                class::RUNTIME,
+                &format!("Can't let qualified name: {sym}"),
+                span,
+            ));
+        }
+        Ok(sym.name().to_owned())
+    }
+
+    fn letfn_star_err(&self, class: &'static str, message: &str, span: Span) -> CompileError {
+        self.err(
+            class,
+            message.to_owned(),
+            span,
+            Verb::Compiling,
+            Some("letfn*".to_owned()),
+        )
+    }
+
+    fn letfn_star_fns(
+        &mut self,
+        pairs: &[(String, Value)],
+        span: Span,
+    ) -> Result<Vec<(String, FunExpr)>, CompileError> {
+        let mut fns = Vec::with_capacity(pairs.len());
+        for (name, form) in pairs {
+            fns.push((name.clone(), self.letfn_star_fun(form, span)?));
+        }
+        Ok(fns)
+    }
+
+    fn letfn_star_fun(&mut self, form: &Value, span: Span) -> Result<FunExpr, CompileError> {
+        let items = fn_form_items(form);
+        let rest = strip_fn_head(&items);
+        let refs: Vec<&Value> = rest.iter().collect();
+        let (name, raw) = self.parse_fn_front(&refs, span)?;
+        let (mut fun, _) = self.build_fun(None, &raw, span)?;
+        if let Some(n) = name {
+            fun.display = fun.display.replacen("/fn--", &format!("/{n}--"), 1);
+        }
+        Ok(fun)
+    }
+}
+
+fn fn_form_items(form: &Value) -> Vec<Value> {
+    match form {
+        Value::List(list) => list.iter().cloned().collect(),
+        other => vec![other.clone()],
+    }
+}
+
+fn strip_fn_head(items: &[Value]) -> &[Value] {
+    match items.first() {
+        Some(Value::Symbol(s))
+            if s.name() == "fn" && s.namespace().is_none_or(|ns| ns == "clojure.core") =>
+        {
+            &items[1..]
+        }
+        _ => items,
     }
 }
 

@@ -231,13 +231,7 @@ impl ReaderError {
             Self::InvalidToken { token, .. } => format!("Invalid token: {token}"),
             Self::InvalidNumber { token, .. } => format!("Invalid number: {token}"),
             Self::RadixRange { .. } => "Radix out of range".to_owned(),
-            Self::RadixDigit { digits, radix, .. } => {
-                if *radix == 10 {
-                    format!("For input string: \"{digits}\"")
-                } else {
-                    format!("For input string: \"{digits}\" under radix {radix}")
-                }
-            }
+            Self::RadixDigit { digits, radix, .. } => radix_digit_message(digits, *radix),
             Self::InvalidChar { token, .. } => format!("Unsupported character: \\{token}"),
             Self::InvalidCharConst { hex, .. } => {
                 format!("Invalid character constant: \\u{hex}")
@@ -245,83 +239,7 @@ impl ReaderError {
             Self::BadUnicodeChar { token, .. } => {
                 format!("Invalid unicode character: \\{token}")
             }
-            Self::BadDigit { c, .. } => format!("Invalid digit: {c}"),
-            Self::BadOctalLen { len, .. } => {
-                format!("Invalid octal escape sequence length: {len}")
-            }
-            Self::OctalRange { .. } => {
-                "Octal escape sequence must be in range [0, 377].".to_owned()
-            }
-            Self::BadEscape { c, .. } => format!("Unsupported escape character: \\{c}"),
-            Self::BadUnicodeEscape { c, .. } => format!("Invalid unicode escape: \\u{c}"),
-            Self::BadUnicodeLen { got, want, .. } => {
-                format!("Invalid character length: {got}, should be: {want}")
-            }
-            Self::UnmatchedDelim { c, .. } => format!("Unmatched delimiter: {c}"),
-            Self::MapOdd { .. } => "Map literal must contain an even number of forms".to_owned(),
-            Self::DupKey { key, .. } => format!("Duplicate key: {key}"),
-            Self::BadMeta { .. } => {
-                "Metadata must be Symbol,Keyword,String,Vector or Map".to_owned()
-            }
-            Self::MetaTarget { .. } => "Metadata can only be applied to IMetas".to_owned(),
-            Self::NestedFn { .. } => "Nested #()s are not allowed".to_owned(),
-            Self::BadArg { .. } => "arg literal must be %, %& or %integer".to_owned(),
-            Self::SpliceTop { .. } => "splice not in list".to_owned(),
-            Self::UnknownSymbolic { sym, .. } => format!("Unknown symbolic value: ##{sym}"),
-            Self::BadSymbolic { dbg, .. } => format!("Invalid token: ##{dbg}"),
-            Self::TagNotSymbol { .. } => "Reader tag must be a symbol".to_owned(),
-            Self::UnknownTag { tag, .. } => format!("No reader function for tag {tag}"),
-            Self::Unreadable { .. } => "Unreadable form".to_owned(),
-            Self::CondNotAllowed { .. } => "Conditional read not allowed".to_owned(),
-            Self::CondBody { .. } => "read-cond body must be a list".to_owned(),
-            Self::ReservedFeature { kw, .. } => format!("Feature name {kw} is reserved."),
-            Self::BadFeature { dbg, .. } => format!("Feature should be a keyword: {dbg}"),
-            Self::CondEven { line, .. } => match line {
-                Some(l) => {
-                    format!("read-cond starting on line {l} requires an even number of forms")
-                }
-                None => "read-cond requires an even number of forms.".to_owned(),
-            },
-            Self::SpliceType { .. } => {
-                "Spliced form list in read-cond-splicing must implement java.util.List".to_owned()
-            }
-            Self::SpliceTopLevel { .. } => {
-                "Reader conditional splicing not allowed at the top level.".to_owned()
-            }
-            Self::NsMapNs { .. } => "Namespaced map must specify a namespace".to_owned(),
-            Self::NsMapMap { .. } => "Namespaced map must specify a map".to_owned(),
-            Self::NsMapValidNs { dbg, .. } => {
-                format!("Namespaced map must specify a valid namespace: {dbg}")
-            }
-            Self::NsMapAlias { sym, .. } => {
-                format!("Unknown auto-resolved namespace alias: {sym}")
-            }
-            Self::NsMapOdd { .. } => {
-                "Namespaced map literal must contain an even number of forms".to_owned()
-            }
-            Self::ArgNumber { token, .. } => format!("For input string: \"{token}\""),
-            Self::Ratio { token, .. } => format!(
-                "Ratio literals are not supported in this build (big-number follow-up N3): {token}"
-            ),
-            Self::BigInt { token, .. } => format!(
-                "BigInt literals are not supported in this build (big-number follow-up N3): {token}"
-            ),
-            Self::BigDecimal { token, .. } => format!(
-                "BigDecimal literals are not supported in this build (big-number follow-up N3): {token}"
-            ),
-            Self::ReadEval { .. } => {
-                "Eval reader #= is not supported in this build (data-reader follow-up N5)"
-                    .to_owned()
-            }
-            Self::DataReader { tag, .. } => format!(
-                "Reader for tag {tag} is not supported in this build (data-reader follow-up N5)"
-            ),
-            Self::Record { tag, .. } => {
-                format!("Record construction is not supported in this build (S5): #{tag}")
-            }
-            Self::LoneSurrogate { hex, .. } => {
-                format!("Lone surrogate \\u{hex} in string escape is not representable in str")
-            }
+            other => message_escape(other),
         }
     }
 
@@ -357,6 +275,171 @@ impl ReaderError {
     }
 }
 
+/// Escape and delimiter messages. Chained so each match stays under
+/// the complexity gate.
+fn message_escape(err: &ReaderError) -> String {
+    match err {
+        ReaderError::BadDigit { c, .. } => format!("Invalid digit: {c}"),
+        ReaderError::BadOctalLen { len, .. } => {
+            format!("Invalid octal escape sequence length: {len}")
+        }
+        ReaderError::OctalRange { .. } => {
+            "Octal escape sequence must be in range [0, 377].".to_owned()
+        }
+        ReaderError::BadEscape { c, .. } => format!("Unsupported escape character: \\{c}"),
+        ReaderError::BadUnicodeEscape { c, .. } => format!("Invalid unicode escape: \\u{c}"),
+        ReaderError::BadUnicodeLen { got, want, .. } => {
+            format!("Invalid character length: {got}, should be: {want}")
+        }
+        ReaderError::UnmatchedDelim { c, .. } => format!("Unmatched delimiter: {c}"),
+        ReaderError::MapOdd { .. } => "Map literal must contain an even number of forms".to_owned(),
+        ReaderError::DupKey { key, .. } => format!("Duplicate key: {key}"),
+        ReaderError::BadMeta { .. } => {
+            "Metadata must be Symbol,Keyword,String,Vector or Map".to_owned()
+        }
+        ReaderError::MetaTarget { .. } => "Metadata can only be applied to IMetas".to_owned(),
+        ReaderError::NestedFn { .. } => "Nested #()s are not allowed".to_owned(),
+        other => message_cond(other),
+    }
+}
+
+/// Reader-conditional and symbolic-value messages.
+fn message_cond(err: &ReaderError) -> String {
+    match err {
+        ReaderError::BadArg { .. } => "arg literal must be %, %& or %integer".to_owned(),
+        ReaderError::SpliceTop { .. } => "splice not in list".to_owned(),
+        ReaderError::UnknownSymbolic { sym, .. } => format!("Unknown symbolic value: ##{sym}"),
+        ReaderError::BadSymbolic { dbg, .. } => format!("Invalid token: ##{dbg}"),
+        ReaderError::TagNotSymbol { .. } => "Reader tag must be a symbol".to_owned(),
+        ReaderError::UnknownTag { tag, .. } => format!("No reader function for tag {tag}"),
+        ReaderError::Unreadable { .. } => "Unreadable form".to_owned(),
+        ReaderError::CondNotAllowed { .. } => "Conditional read not allowed".to_owned(),
+        ReaderError::CondBody { .. } => "read-cond body must be a list".to_owned(),
+        ReaderError::ReservedFeature { kw, .. } => format!("Feature name {kw} is reserved."),
+        ReaderError::BadFeature { dbg, .. } => format!("Feature should be a keyword: {dbg}"),
+        ReaderError::CondEven { line, .. } => cond_even_message(*line),
+        other => message_ns(other),
+    }
+}
+
+/// Namespaced-map and big-number deferral messages.
+fn message_ns(err: &ReaderError) -> String {
+    match err {
+        ReaderError::SpliceType { .. } => {
+            "Spliced form list in read-cond-splicing must implement java.util.List".to_owned()
+        }
+        ReaderError::SpliceTopLevel { .. } => {
+            "Reader conditional splicing not allowed at the top level.".to_owned()
+        }
+        ReaderError::NsMapNs { .. } => "Namespaced map must specify a namespace".to_owned(),
+        ReaderError::NsMapMap { .. } => "Namespaced map must specify a map".to_owned(),
+        ReaderError::NsMapValidNs { dbg, .. } => {
+            format!("Namespaced map must specify a valid namespace: {dbg}")
+        }
+        ReaderError::NsMapAlias { sym, .. } => {
+            format!("Unknown auto-resolved namespace alias: {sym}")
+        }
+        ReaderError::NsMapOdd { .. } => {
+            "Namespaced map literal must contain an even number of forms".to_owned()
+        }
+        ReaderError::ArgNumber { token, .. } => format!("For input string: \"{token}\""),
+        ReaderError::Ratio { token, .. } => format!(
+            "Ratio literals are not supported in this build (big-number follow-up N3): {token}"
+        ),
+        ReaderError::BigInt { token, .. } => format!(
+            "BigInt literals are not supported in this build (big-number follow-up N3): {token}"
+        ),
+        ReaderError::BigDecimal { token, .. } => format!(
+            "BigDecimal literals are not supported in this build (big-number follow-up N3): {token}"
+        ),
+        ReaderError::ReadEval { .. } => {
+            "Eval reader #= is not supported in this build (data-reader follow-up N5)".to_owned()
+        }
+        other => message_defer(other),
+    }
+}
+
+/// Data-reader and record deferrals.
+fn message_defer(err: &ReaderError) -> String {
+    match err {
+        ReaderError::DataReader { tag, .. } => format!(
+            "Reader for tag {tag} is not supported in this build (data-reader follow-up N5)"
+        ),
+        ReaderError::Record { tag, .. } => {
+            format!("Record construction is not supported in this build (S5): #{tag}")
+        }
+        ReaderError::LoneSurrogate { hex, .. } => {
+            format!("Lone surrogate \\u{hex} in string escape is not representable in str")
+        }
+        // Handled upstream; re-enter so the chain stays exhaustive.
+        ReaderError::Eof { .. }
+        | ReaderError::EofDelimited { .. }
+        | ReaderError::EofChar { .. }
+        | ReaderError::EofString { .. }
+        | ReaderError::EofRegex { .. }
+        | ReaderError::InvalidToken { .. }
+        | ReaderError::InvalidNumber { .. }
+        | ReaderError::RadixRange { .. }
+        | ReaderError::RadixDigit { .. }
+        | ReaderError::InvalidChar { .. }
+        | ReaderError::InvalidCharConst { .. }
+        | ReaderError::BadUnicodeChar { .. }
+        | ReaderError::BadDigit { .. }
+        | ReaderError::BadOctalLen { .. }
+        | ReaderError::OctalRange { .. }
+        | ReaderError::BadEscape { .. }
+        | ReaderError::BadUnicodeEscape { .. }
+        | ReaderError::BadUnicodeLen { .. }
+        | ReaderError::UnmatchedDelim { .. }
+        | ReaderError::MapOdd { .. }
+        | ReaderError::DupKey { .. }
+        | ReaderError::BadMeta { .. }
+        | ReaderError::MetaTarget { .. }
+        | ReaderError::NestedFn { .. }
+        | ReaderError::BadArg { .. }
+        | ReaderError::SpliceTop { .. }
+        | ReaderError::UnknownSymbolic { .. }
+        | ReaderError::BadSymbolic { .. }
+        | ReaderError::TagNotSymbol { .. }
+        | ReaderError::UnknownTag { .. }
+        | ReaderError::Unreadable { .. }
+        | ReaderError::CondNotAllowed { .. }
+        | ReaderError::CondBody { .. }
+        | ReaderError::ReservedFeature { .. }
+        | ReaderError::BadFeature { .. }
+        | ReaderError::CondEven { .. }
+        | ReaderError::SpliceType { .. }
+        | ReaderError::SpliceTopLevel { .. }
+        | ReaderError::NsMapNs { .. }
+        | ReaderError::NsMapMap { .. }
+        | ReaderError::NsMapValidNs { .. }
+        | ReaderError::NsMapAlias { .. }
+        | ReaderError::NsMapOdd { .. }
+        | ReaderError::ArgNumber { .. }
+        | ReaderError::Ratio { .. }
+        | ReaderError::BigInt { .. }
+        | ReaderError::BigDecimal { .. }
+        | ReaderError::ReadEval { .. } => err.message(),
+    }
+}
+
+/// Radix-10 omits the `under radix` suffix (a JDK `BigInteger` quirk).
+fn radix_digit_message(digits: &str, radix: u32) -> String {
+    if radix == 10 {
+        format!("For input string: \"{digits}\"")
+    } else {
+        format!("For input string: \"{digits}\" under radix {radix}")
+    }
+}
+
+/// `read-cond` even-forms text, with the body's first line when tracked.
+fn cond_even_message(line: Option<u32>) -> String {
+    match line {
+        Some(l) => format!("read-cond starting on line {l} requires an even number of forms"),
+        None => "read-cond requires an even number of forms.".to_owned(),
+    }
+}
+
 impl fmt::Display for ReaderError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}: {}", self.span(), self.message())
@@ -367,7 +450,7 @@ impl std::error::Error for ReaderError {}
 
 #[cfg(test)]
 mod tests {
-    use super::{ReaderError, Span};
+    use super::{ReaderError, Span, message_defer};
 
     #[test]
     fn messages_and_classes() {
@@ -458,5 +541,15 @@ mod tests {
             assert_eq!(err.jvm_class(), class);
             assert_eq!(err.span(), span);
         }
+    }
+
+    #[test]
+    fn message_defer_reenters() {
+        // The defer match lists earlier variants only so the split
+        // stays exhaustive. That arm re-enters `message`.
+        let err = ReaderError::Eof {
+            span: Span::new(1, 1),
+        };
+        assert_eq!(message_defer(&err), "EOF while reading");
     }
 }

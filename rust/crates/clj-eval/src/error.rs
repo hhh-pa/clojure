@@ -299,18 +299,33 @@ pub fn jvm_class_of(v: &Value) -> String {
         Value::Char(_) => "java.lang.Character".to_owned(),
         Value::Symbol(_) => "clojure.lang.Symbol".to_owned(),
         Value::Keyword(_) => "clojure.lang.Keyword".to_owned(),
-        Value::List(l) if l.is_empty() => "clojure.lang.PersistentList$EmptyList".to_owned(),
-        Value::List(_) => "clojure.lang.PersistentList".to_owned(),
         Value::Vector(_) => "clojure.lang.PersistentVector".to_owned(),
         Value::MapEntry { .. } => "clojure.lang.MapEntry".to_owned(),
         Value::Map(m) => map_class_of(m).to_owned(),
         Value::Set(_) => "clojure.lang.PersistentHashSet".to_owned(),
+        other => jvm_class_of_ref(other),
+    }
+}
+
+/// Lists, reader forms, and vars. Chained so each match stays under
+/// the complexity gate.
+fn jvm_class_of_ref(v: &Value) -> String {
+    match v {
+        Value::List(l) if l.is_empty() => "clojure.lang.PersistentList$EmptyList".to_owned(),
+        Value::List(_) => "clojure.lang.PersistentList".to_owned(),
         Value::Regex(_) => "java.util.regex.Pattern".to_owned(),
         Value::TaggedLiteral { .. } => "clojure.lang.TaggedLiteral".to_owned(),
         Value::ReaderConditional { .. } => "clojure.lang.ReaderConditional".to_owned(),
         Value::Var(_) => "clojure.lang.Var".to_owned(),
         Value::Unbound(_) => "clojure.lang.Var$Unbound".to_owned(),
         Value::Throwable(t) => t.class.jvm_name().to_owned(),
+        other => jvm_class_of_host(other),
+    }
+}
+
+/// Host and reference objects.
+fn jvm_class_of_host(v: &Value) -> String {
+    match v {
         Value::Transient(t) => t.jvm_class().to_owned(),
         Value::Atom(a) => a.jvm_class().to_owned(),
         Value::Delay(d) => d.jvm_class().to_owned(),
@@ -318,6 +333,26 @@ pub fn jvm_class_of(v: &Value) -> String {
         Value::Promise(p) => p.jvm_class().to_owned(),
         Value::Agent(a) => a.jvm_class().to_owned(),
         Value::Extension(e) => e.class_name(),
+        // Handled upstream; re-enter so the chain stays exhaustive.
+        Value::Nil
+        | Value::Bool(_)
+        | Value::Int(_)
+        | Value::Double(_)
+        | Value::Str(_)
+        | Value::Char(_)
+        | Value::Symbol(_)
+        | Value::Keyword(_)
+        | Value::Vector(_)
+        | Value::MapEntry { .. }
+        | Value::Map(_)
+        | Value::Set(_)
+        | Value::List(_)
+        | Value::Regex(_)
+        | Value::TaggedLiteral { .. }
+        | Value::ReaderConditional { .. }
+        | Value::Var(_)
+        | Value::Unbound(_)
+        | Value::Throwable(_) => jvm_class_of(v),
     }
 }
 
@@ -490,6 +525,13 @@ mod tests {
             clj_value::TransientKind::Map(clj_value::TransientMap::new()),
         ));
         assert_eq!(simple_class_of(&transient_map), "TransientArrayMap");
+    }
+
+    #[test]
+    fn jvm_class_of_host_reenters_scalars() {
+        // The host match lists scalars only so the split stays
+        // exhaustive. That arm re-enters the public function.
+        assert_eq!(jvm_class_of_host(&Value::Nil), "null");
     }
 
     #[test]

@@ -346,20 +346,38 @@ pub fn our_err(e: &clj_reader::ReaderError) -> Outcome {
 /// namespace-map lifting, and the `^meta` prefix rules.
 pub fn canon(v: &Value, print_meta: bool) -> String {
     let mut out = String::new();
-    let meta_to_print = if print_meta {
-        v.meta().filter(|m| !m.is_empty())
+    append_canon_meta(&mut out, v, print_meta);
+    append_canon_body(&mut out, v, print_meta);
+    out
+}
+
+fn canon_meta(v: &Value, print_meta: bool) -> Option<&clj_value::Map> {
+    if print_meta {
+        v.meta().filter(map_nonempty)
     } else {
         None
-    };
-    if let Some(m) = meta_to_print {
-        let tag_key = Value::Keyword(Keyword::new(None, "tag"));
-        out.push('^');
-        match m.get(&tag_key) {
-            Some(tag) if m.size() == 1 && tag.is_truthy() => out.push_str(&canon(tag, print_meta)),
-            _ => out.push_str(&canon_map(m, print_meta)),
-        }
-        out.push(' ');
     }
+}
+
+fn map_nonempty(m: &&clj_value::Map) -> bool {
+    !m.is_empty()
+}
+
+/// `^meta` prefix: a lone truthy `:tag` prints bare, otherwise the map.
+fn append_canon_meta(out: &mut String, v: &Value, print_meta: bool) {
+    let Some(m) = canon_meta(v, print_meta) else {
+        return;
+    };
+    let tag_key = Value::Keyword(Keyword::new(None, "tag"));
+    out.push('^');
+    match m.get(&tag_key) {
+        Some(tag) if m.size() == 1 && tag.is_truthy() => out.push_str(&canon(tag, print_meta)),
+        _ => out.push_str(&canon_map(m, print_meta)),
+    }
+    out.push(' ');
+}
+
+fn append_canon_body(out: &mut String, v: &Value, print_meta: bool) {
     match v {
         Value::Nil
         | Value::Bool(_)
@@ -384,22 +402,16 @@ pub fn canon(v: &Value, print_meta: bool) -> String {
         | Value::Extension(_) => out.push_str(&pr_to_string(v, &PrintOpts::pr())),
         Value::List(l) => {
             out.push('(');
-            join_canon(&mut out, l.iter(), " ", print_meta);
+            join_canon(out, l.iter(), " ", print_meta);
             out.push(')');
         }
         Value::Vector(items) => {
             out.push('[');
-            join_canon(&mut out, items.iter(), " ", print_meta);
+            join_canon(out, items.iter(), " ", print_meta);
             out.push(']');
         }
         Value::Map(m) => out.push_str(&canon_map(m, print_meta)),
-        Value::Set(s) => {
-            let mut members: Vec<String> = s.iter().map(|m| canon(m, print_meta)).collect();
-            members.sort();
-            out.push_str("#{");
-            out.push_str(&members.join(" "));
-            out.push('}');
-        }
+        Value::Set(s) => append_canon_set(out, s, print_meta),
         Value::TaggedLiteral { tag, form } => {
             out.push('#');
             out.push_str(&tag.to_string());
@@ -407,11 +419,22 @@ pub fn canon(v: &Value, print_meta: bool) -> String {
             out.push_str(&canon(form, print_meta));
         }
         Value::ReaderConditional { form, splicing } => {
-            out.push_str(if *splicing { "#?@" } else { "#?" });
+            out.push_str(reader_cond_prefix(*splicing));
             out.push_str(&canon(form, print_meta));
         }
     }
-    out
+}
+
+fn reader_cond_prefix(splicing: bool) -> &'static str {
+    if splicing { "#?@" } else { "#?" }
+}
+
+fn append_canon_set(out: &mut String, s: &clj_value::Set, print_meta: bool) {
+    let mut members: Vec<String> = s.iter().map(|m| canon(m, print_meta)).collect();
+    members.sort();
+    out.push_str("#{");
+    out.push_str(&members.join(" "));
+    out.push('}');
 }
 
 fn join_canon<'a>(
@@ -455,36 +478,48 @@ fn sorted_entries(entries: &[(&Value, &Value)], print_meta: bool) -> Vec<String>
 
 /// Mirror `lift-ns`: all keys qualified with one namespace.
 fn lift_ns(entries: &[(&Value, &Value)]) -> Option<(String, Vec<(Value, Value)>)> {
+    let ns = shared_ns(entries)?;
+    Some((ns.to_owned(), lift_stripped(entries)))
+}
+
+fn shared_ns<'a>(entries: &'a [(&'a Value, &'a Value)]) -> Option<&'a str> {
     if entries.is_empty() {
         return None;
     }
     let mut ns: Option<&str> = None;
     for (k, _) in entries {
-        let key_ns = match k {
-            Value::Keyword(k) => k.namespace(),
-            Value::Symbol(s) => s.namespace(),
-            _ => None,
-        };
-        let key_ns = key_ns?;
-        match ns {
-            None => ns = Some(key_ns),
-            Some(n) if n == key_ns => {}
+        let key_ns = key_namespace(k)?;
+        ns = match ns {
+            None => Some(key_ns),
+            Some(n) if n == key_ns => Some(n),
             Some(_) => return None,
-        }
+        };
     }
-    let ns = ns?;
-    let stripped = entries
-        .iter()
-        .map(|(k, v)| {
-            let bare = match k {
-                Value::Keyword(k) => Value::Keyword(Keyword::new(None, k.name())),
-                Value::Symbol(s) => Value::Symbol(Symbol::new(None, s.name())),
-                _ => (*k).clone(),
-            };
-            (bare, (*v).clone())
-        })
-        .collect();
-    Some((ns.to_owned(), stripped))
+    ns
+}
+
+fn key_namespace(k: &Value) -> Option<&str> {
+    match k {
+        Value::Keyword(k) => k.namespace(),
+        Value::Symbol(s) => s.namespace(),
+        _ => None,
+    }
+}
+
+fn lift_stripped(entries: &[(&Value, &Value)]) -> Vec<(Value, Value)> {
+    let mut stripped = Vec::with_capacity(entries.len());
+    for (k, v) in entries {
+        stripped.push((strip_ns_key(k), (*v).clone()));
+    }
+    stripped
+}
+
+fn strip_ns_key(k: &Value) -> Value {
+    match k {
+        Value::Keyword(k) => Value::Keyword(Keyword::new(None, k.name())),
+        Value::Symbol(s) => Value::Symbol(Symbol::new(None, s.name())),
+        _ => k.clone(),
+    }
 }
 
 // ---------------------------------------------------------------- normalization + hashing

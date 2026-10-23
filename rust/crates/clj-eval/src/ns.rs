@@ -1890,28 +1890,18 @@ fn boot_install_natives(eval: &mut Evaluator) {
         .chain(crate::coll::COLL_NATIVES.iter())
         .chain(crate::io::IO_NATIVES.iter())
         .chain(crate::concurrency::CONC_NATIVES.iter())
+        .chain(crate::fx4_host::FX4_NATIVES.iter())
     {
         let func: Arc<crate::ext::NativeImpl> = Arc::new(*f);
         eval.install_native("clojure.core", name, func);
     }
 }
 
-/// Builtin-macro vars (`let`, `defmacro`, `declare`, `ns`, …):
-/// the analyzer intercepts the forms, so the roots are
-/// placeholders that fail LOUDLY on direct invocation.
+/// Builtin-macro vars. The FX4 nine run real expanders; the
+/// fence six stay placeholders that fail on direct invocation.
 fn boot_install_builtin_macros(eval: &mut Evaluator) {
     for name in crate::macros::BUILTIN_MACROS {
-        let display = format!("clojure.core/{name}");
-        eval.install_native(
-            "clojure.core",
-            name,
-            Arc::new(move |_, _| {
-                Err(NativeError::new(
-                    ThrowClass::IllegalStateException,
-                    format!("Can't invoke builtin macro: {display}"),
-                ))
-            }),
-        );
+        eval.install_native("clojure.core", name, builtin_macro_root(name));
         let q = Symbol::new(Some("clojure.core"), name);
         let id = eval.registry.intern(&q);
         eval.registry.with_state_mut(id, |st| {
@@ -1924,11 +1914,29 @@ fn boot_install_builtin_macros(eval: &mut Evaluator) {
     }
 }
 
+/// The nine FX4 heads are real macro fns. The fence six stay
+/// placeholders (direct invocation fails loudly).
+fn builtin_macro_root(name: &str) -> Arc<crate::ext::NativeImpl> {
+    if let Some(f) = crate::builtin_expand::fx4_macro_fn(name) {
+        return Arc::new(f);
+    }
+    let display = format!("clojure.core/{name}");
+    Arc::new(move |_, _| {
+        Err(NativeError::new(
+            ThrowClass::IllegalStateException,
+            format!("Can't invoke builtin macro: {display}"),
+        ))
+    })
+}
+
 /// Port-internal natives (macro-expansion errors, `case` dispatch
-/// hashing): usable but never referred into `user` (the refers
-/// filter on `is_public`).
+/// hashing, FX4 host helpers): usable but never referred into
+/// `user` (the refers filter on `is_public`).
 fn boot_mark_private(eval: &mut Evaluator) {
-    for name in ["throw-illegal-arg!", "throw-npe!", "hash-code"] {
+    for name in ["throw-illegal-arg!", "throw-npe!", "hash-code"]
+        .into_iter()
+        .chain(crate::fx4_host::FX4_PRIVATE.iter().copied())
+    {
         let q = Symbol::new(Some("clojure.core"), name);
         let id = eval.registry.intern(&q);
         eval.registry.with_state_mut(id, |st| {
@@ -1976,6 +1984,7 @@ fn boot_refer_user(eval: &mut Evaluator) {
         .chain(crate::coll::COLL_NATIVES.iter())
         .chain(crate::io::IO_NATIVES.iter())
         .chain(crate::concurrency::CONC_NATIVES.iter())
+        .chain(crate::fx4_host::FX4_NATIVES.iter())
         .map(|(n, _)| (*n).to_owned())
         .collect();
     names.extend(
