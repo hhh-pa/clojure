@@ -73,8 +73,9 @@ sources. Locale `en_US`, zone `UTC`.
 
 ## `peek`/`pop` (`RT.peek`/`RT.pop`)
 
-- Both nil-pun (`nil` → `nil`); only lists/vectors/subvectors
-  are stacks — every seq value (`LazySeq`, `Cons`, ranges,
+- Both nil-pun (`nil` → `nil`); only lists/vectors/subvectors/
+  entries are stacks (`peek` reads the val, `pop` answers the
+  1-vector — T1192 FX2) — every seq value (`LazySeq`, `Cons`, ranges,
   repeats, cycles, iterates, chunked/string/entry seqs),
   strings, maps, sets, and transients are `CCE
   →IPersistentStack`.

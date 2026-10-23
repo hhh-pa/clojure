@@ -98,7 +98,7 @@ unbounded, `:fail` / `:continue` error modes, `await` / `await-for`,
 `restart-agent`, `shutdown-agents`), `locking`, `add-watch` /
 `remove-watch`, `realized?`.
 
-**Core vars: 329 implemented, 21 divergent, 65 out of scope**
+**Core vars: 334 implemented, 19 divergent, 65 out of scope**
 ([`rust/core-coverage.md`](rust/core-coverage.md) is normative and
 CI-enforced: listed vars must resolve, excluded ones must not).
 
@@ -139,9 +139,6 @@ each entry asserts its exact behavior, so drift fails CI:
   `*print-length*` / `*print-level*` truncate with `...`
   (`*print-dup*` is declared but ignored). Errors render as
   `file:line:col:` diagnostic chains, not JVM stack dumps.
-- **No `MapEntry`.** Map seqs yield plain 2-vectors; `key` /
-  `val` read slots 0/1 via `nth` (exception classes differ from
-  the JVM accordingly).
 - **Analyzer builtins.** `let loop fn binding letfn with-redefs
   with-bindings bound-fn locking` resolve as macros but
   `macroexpand-1` returns them unchanged (documented identity).
@@ -263,6 +260,11 @@ epl-v10.html            license text
 - Concurrency is model-checked, not just tested: 18 loom
   schedule-exploration tests plus a TLA+ agent-queue model
   discharged by TLC in CI.
+- Merging to master requires one approving review
+  (`CODEOWNERS` auto-requests it) and verified signed
+  commits (SSH: `gpg.format=ssh`, `commit.gpgsign=true`,
+  key registered under GitHub Settings → SSH and GPG keys →
+  Signing keys).
 
 ## Further reading
 

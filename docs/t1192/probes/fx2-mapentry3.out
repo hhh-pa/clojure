@@ -1,0 +1,13 @@
+vec-vs-list true
+entry-vs-vec true
+vec-vs-entry true
+entry-vs-list true
+list-vs-entry true
+entry-vs-seq true
+entry-vs-entry true
+entry-class clojure.lang.MapEntry
+vec-class clojure.lang.PersistentVector
+entry-hash -1809393901
+vec-hash -1809393901
+entry-str "[:a 1]"
+entry-pr [:a 1]

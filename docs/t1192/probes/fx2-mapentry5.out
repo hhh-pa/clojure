@@ -1,0 +1,13 @@
+merge-entry [:a 1 [:b 2]]
+merge-vec [:a 1 [:b 2]]
+vec-of-entry [:a 1]
+vec-of-entry-class clojure.lang.PersistentVector
+set-of-entry #{1 :a}
+sort-entries ([:a 1] [:b 2])
+liststar (:a 1)
+apply-vec [:a 1]
+into-vec [:a 1]
+mapv-entry [:a 1]
+distinct ([:a 1])
+frequencies {[:a 1] 2}
+maxkey [:a 1]

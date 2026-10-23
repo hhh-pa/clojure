@@ -23,6 +23,7 @@ use clj_value::{
     Keyword, List, Map, PrintOpts, Symbol, Value, Vector, new_map, pr_to_string, print_to_string,
 };
 
+use crate::core::cce_message;
 use crate::error::{CompileError, NativeError, Signal, Verb, jvm_class_of, span_of};
 use crate::eval::Evaluator;
 
@@ -688,6 +689,13 @@ impl<'a> Analyzer<'a> {
             }
             form if crate::lazy::is_seq_value(form) => self.analyze_seq_form(form, span, tail),
             Value::Vector(v) => self.analyze_vec_lit(v, span),
+            // Entries in code (syntax-quote can embed them) analyze
+            // like vector literals, answering plain vectors (Oracle
+            // FX2 `eval-entry-class`).
+            Value::MapEntry { key, val } => {
+                let tmp = clj_value::Vector::from_vec(vec![(**key).clone(), (**val).clone()]);
+                self.analyze_vec_lit(&tmp, span)
+            }
             Value::Map(m) => self.analyze_map_lit(m, span),
             Value::Set(s) => self.analyze_set_lit(s, span),
             _ => Ok(Expr::Literal(form.clone())),
@@ -1747,7 +1755,7 @@ impl<'a> Analyzer<'a> {
         let bindings = items
             .get(1)
             .expect("bare binding fails arity before dispatch");
-        let Value::Vector(vec) = bindings else {
+        let Some(forms) = vector_shape_items(bindings) else {
             return Err(self.err(
                 class::ILLEGAL_ARG,
                 "binding requires a vector for its binding".to_owned(),
@@ -1756,7 +1764,6 @@ impl<'a> Analyzer<'a> {
                 Some(op),
             ));
         };
-        let forms: Vec<&Value> = vec.iter().collect();
         // MSRV 1.85: `usize::is_multiple_of` is 1.87+.
         #[allow(clippy::manual_is_multiple_of)]
         if forms.len() % 2 != 0 {
@@ -1851,7 +1858,9 @@ impl<'a> Analyzer<'a> {
         op: &str,
     ) -> Result<Vec<&'v Value>, CompileError> {
         match bindings {
-            Value::Vector(v) => Ok(v.iter().collect()),
+            v @ (Value::Vector(_) | Value::MapEntry { .. }) => {
+                Ok(vector_shape_items(v).expect("vector shape checked"))
+            }
             Value::List(l) => Ok(l.iter().collect()),
             Value::Nil => Ok(Vec::new()),
             Value::Set(s) => Ok(s.iter().collect()),
@@ -1921,14 +1930,14 @@ impl<'a> Analyzer<'a> {
     fn defmacro_arglists(&self, rest: &[&Value], span: Span) -> Result<Vec<Value>, CompileError> {
         let spec = || self.spec_error("clojure.core/defmacro", span);
         match rest[0] {
-            Value::Vector(v) => Ok(vec![Value::Vector(v.clone())]),
+            v if vector_shape_items(v).is_some() => Ok(vec![v.clone()]),
             Value::List(_) => {
                 let mut out = Vec::with_capacity(rest.len());
                 for clause in rest.iter().copied() {
                     match clause {
                         Value::List(l) => match l.first() {
-                            Some(Value::Vector(argv)) => {
-                                out.push(Value::Vector(argv.clone()));
+                            Some(v) if vector_shape_items(v).is_some() => {
+                                out.push(v.clone());
                             }
                             _ => return Err(spec()),
                         },
@@ -2000,18 +2009,17 @@ impl<'a> Analyzer<'a> {
     }
 
     /// `(declare name…)`: every name must be a symbol (else the
-    /// bare `IObj` cast — the JVM reaches it through `vary-meta`
-    /// during expansion, probe37 `declare-num`) and pass the
-    /// `def` target rules (probe37 `declare-qualified`).
+    /// JDK `IObj` checkcast text — the JVM reaches it through
+    /// `vary-meta` during expansion, probe37 `declare-num`,
+    /// fx2-mapentry18 `declare-5`) and pass the `def` target
+    /// rules (probe37 `declare-qualified`).
     fn parse_declare(&mut self, items: &[&Value], span: Span) -> Result<Expr, CompileError> {
         let mut syms = Vec::with_capacity(items.len().saturating_sub(1));
         for form in items[1..].iter().copied() {
             let Value::Symbol(sym) = form else {
                 return Err(CompileError::bare(
                     class::CLASS_CAST,
-                    NativeError::cast(&jvm_class_of(form), "clojure.lang.IObj")
-                        .into_inner()
-                        .message,
+                    cce_message(&jvm_class_of(form), "clojure.lang.IObj"),
                     span,
                     &self.source,
                 ));
@@ -2128,17 +2136,28 @@ fn as_clause(form: &Value) -> Option<(&str, &List)> {
 /// A binding-pattern shape (spec- or star-validated before building).
 enum Pat<'v> {
     Symbol(&'v Symbol),
-    Vector(&'v Vector),
+    Vector(Vec<&'v Value>),
     Map(&'v Map),
+}
+
+/// The items of a vector-shape form: a vector's elements, or an
+/// entry's key and value (`MapEntry extends APersistentVector`, so
+/// every binding/param/pattern position that takes a vector takes
+/// an entry too). `None` for anything else.
+fn vector_shape_items(v: &Value) -> Option<Vec<&Value>> {
+    match v {
+        Value::Vector(vec) => Some(vec.iter().collect()),
+        Value::MapEntry { key, val } => Some(vec![key.as_ref(), val.as_ref()]),
+        _ => None,
+    }
 }
 
 /// The pattern shape of a form (`None` is not a pattern).
 fn as_pat(form: &Value) -> Option<Pat<'_>> {
     match form {
         Value::Symbol(sym) => Some(Pat::Symbol(sym)),
-        Value::Vector(v) => Some(Pat::Vector(v)),
         Value::Map(m) => Some(Pat::Map(m)),
-        _ => None,
+        _ => vector_shape_items(form).map(Pat::Vector),
     }
 }
 
@@ -2148,7 +2167,7 @@ fn as_pat(form: &Value) -> Option<Pat<'_>> {
 fn spec_valid_binding(form: &Value) -> bool {
     match as_pat(form) {
         Some(Pat::Symbol(sym)) => is_local_name(sym),
-        Some(Pat::Vector(v)) => spec_valid_seq(&v.iter().collect::<Vec<_>>()),
+        Some(Pat::Vector(forms)) => spec_valid_seq(&forms),
         Some(Pat::Map(m)) => spec_valid_map(m),
         None => false,
     }
@@ -2246,10 +2265,9 @@ enum KeyKind {
 /// `::keys-form`: idents, then an optional `&` tail of anything
 /// (dangling `&` is fine, probe25).
 fn spec_valid_key_list(v: &Value, kind: KeyKind) -> bool {
-    let Value::Vector(list) = v else {
+    let Some(forms) = vector_shape_items(v) else {
         return false;
     };
-    let forms: Vec<&Value> = list.iter().collect();
     let tail = match forms.iter().position(
         |f| matches!(f, Value::Symbol(sym) if sym.namespace().is_none() && sym.name() == "&"),
     ) {
@@ -2297,6 +2315,7 @@ fn is_seqable(v: &Value) -> bool {
         Value::Nil
             | Value::List(_)
             | Value::Vector(_)
+            | Value::MapEntry { .. }
             | Value::Map(_)
             | Value::Set(_)
             | Value::Str(_)
@@ -2340,9 +2359,11 @@ fn as_key_directive(kw: &Keyword) -> Option<KeyDirective> {
 fn walk_binding(form: &Value) -> Result<(), WalkError> {
     match form {
         Value::Symbol(_) => Ok(()),
-        Value::Vector(v) => walk_seq(&v.iter().collect::<Vec<_>>()),
         Value::Map(m) => walk_map(m),
-        _ => Err(WalkError::unsupported(form)),
+        _ => match vector_shape_items(form) {
+            Some(items) => walk_seq(&items),
+            None => Err(WalkError::unsupported(form)),
+        },
     }
 }
 
@@ -2499,7 +2520,9 @@ fn walk_key_list(
         // downstream (probe33 `strs-shape-*`). The `sel` push is
         // unobservable (the spec always fails after), so only
         // validation runs.
-        if matches!(dir.kind, KeyKind::Strs) && matches!(form, Value::Vector(_) | Value::Map(_)) {
+        if matches!(dir.kind, KeyKind::Strs)
+            && (matches!(form, Value::Map(_)) || vector_shape_items(form).is_some())
+        {
             walk_binding(form)?;
             continue;
         }
@@ -3060,13 +3083,12 @@ impl<'a> Analyzer<'a> {
         let is_loop = op == "loop" || op == "loop*";
         let is_star = matches!(op, "let*" | "loop*");
         let bindings = items.get(1).copied().unwrap_or(&Value::Nil);
-        let Value::Vector(vec) = bindings else {
+        let Some(forms) = vector_shape_items(bindings) else {
             if is_star {
                 return Err(self.star_shape_error(op, "expected vector", span));
             }
             return Err(self.shape_error(is_loop, "a vector for its binding", span, op));
         };
-        let forms: Vec<&Value> = vec.iter().collect();
         // MSRV 1.85: `usize::is_multiple_of` is 1.87+.
         #[allow(clippy::manual_is_multiple_of)]
         if forms.len() % 2 != 0 {
@@ -3224,10 +3246,7 @@ impl<'a> Analyzer<'a> {
     ) -> Result<(Pattern, Vec<String>), CompileError> {
         let pat = match shape {
             Pat::Symbol(sym) => Pattern::Symbol(sym.name().to_owned()),
-            Pat::Vector(v) => {
-                let forms: Vec<&Value> = v.iter().collect();
-                self.build_seq(&forms, span)?
-            }
+            Pat::Vector(forms) => self.build_seq(&forms, span)?,
             Pat::Map(m) => self.build_map(m, span)?,
         };
         let names = pattern_names(&pat);
@@ -3392,7 +3411,11 @@ fn seq_values(v: &Value) -> Vec<Value> {
     match v {
         Value::Nil => Vec::new(),
         Value::List(l) => l.iter().cloned().collect(),
-        Value::Vector(v) => v.iter().cloned().collect(),
+        v @ (Value::Vector(_) | Value::MapEntry { .. }) => vector_shape_items(v)
+            .expect("vector shape checked")
+            .into_iter()
+            .cloned()
+            .collect(),
         Value::Map(m) => m
             .iter()
             .map(|(k, v)| Value::Vector(clj_value::Vector::from_vec(vec![k.clone(), v.clone()])))
@@ -3446,9 +3469,9 @@ impl<'a> Analyzer<'a> {
         let mut name: Option<String> = None;
         match rest.split_first() {
             Some((Value::Symbol(sym), tail))
-                if tail
-                    .first()
-                    .is_some_and(|f| matches!(f, Value::Vector(_) | Value::List(_))) =>
+                if tail.first().is_some_and(|f| {
+                    matches!(f, Value::List(_)) || vector_shape_items(f).is_some()
+                }) =>
             {
                 if !is_fn_name(sym) {
                     return Err(self.spec_error("clojure.core/fn", span));
@@ -3481,7 +3504,10 @@ impl<'a> Analyzer<'a> {
         }
         let owned: Vec<Vec<&Value>> = if rest.is_empty() {
             Vec::new()
-        } else if matches!(rest.first(), Some(Value::Vector(_))) {
+        } else if rest
+            .first()
+            .is_some_and(|f| vector_shape_items(f).is_some())
+        {
             vec![rest.to_vec()]
         } else {
             let mut out = Vec::with_capacity(rest.len());
@@ -3578,7 +3604,7 @@ impl<'a> Analyzer<'a> {
                     span,
                 ));
             };
-            let Value::Vector(vec) = params else {
+            let Some(param_forms) = vector_shape_items(params) else {
                 return Err(self.fn_star_error(
                     class::CLASS_CAST,
                     &NativeError::cast(&jvm_class_of(params), "clojure.lang.IPersistentVector")
@@ -3586,7 +3612,6 @@ impl<'a> Analyzer<'a> {
                     span,
                 ));
             };
-            let param_forms: Vec<&Value> = vec.iter().collect();
             let (fixed, rest) = self.star_params(&param_forms, span)?;
             raw.push(RawClause {
                 fixed,
@@ -3677,7 +3702,10 @@ impl<'a> Analyzer<'a> {
         rest: &[&'v Value],
         span: Span,
     ) -> Result<Vec<Vec<&'v Value>>, CompileError> {
-        if matches!(rest.first(), Some(Value::Vector(_))) {
+        if rest
+            .first()
+            .is_some_and(|f| vector_shape_items(f).is_some())
+        {
             return Ok(vec![rest.to_vec()]);
         }
         let mut out = Vec::with_capacity(rest.len());
@@ -3846,7 +3874,11 @@ impl<'a> Analyzer<'a> {
     ) -> Result<Expr, CompileError> {
         let bindings = items.get(1).copied().unwrap_or(&Value::Nil);
         let specs: Vec<Value> = match bindings {
-            Value::Vector(v) => v.iter().cloned().collect(),
+            v @ (Value::Vector(_) | Value::MapEntry { .. }) => vector_shape_items(v)
+                .expect("vector shape checked")
+                .into_iter()
+                .cloned()
+                .collect(),
             Value::Nil => Vec::new(),
             other => {
                 return Err(self.err(
@@ -3953,10 +3985,12 @@ impl<'a> Analyzer<'a> {
     ) -> Result<Vec<RawClause<'v>>, CompileError> {
         let mut raw = Vec::with_capacity(clauses.len());
         for clause in clauses {
-            let Some((Value::Vector(params), body)) = clause.split_first() else {
+            let Some((params, body)) = clause.split_first() else {
                 return Err(self.spec_error("clojure.core/fn", span));
             };
-            let param_forms: Vec<&Value> = params.iter().collect();
+            let Some(param_forms) = vector_shape_items(params) else {
+                return Err(self.spec_error("clojure.core/fn", span));
+            };
             let Some((fixed, rest_pat)) = split_params(&param_forms) else {
                 return Err(self.spec_error("clojure.core/fn", span));
             };
@@ -4023,7 +4057,9 @@ impl<'a> Analyzer<'a> {
 fn seq_refs(v: &Value) -> Vec<&Value> {
     match v {
         Value::List(l) => l.iter().collect(),
-        Value::Vector(v) => v.iter().collect(),
+        v @ (Value::Vector(_) | Value::MapEntry { .. }) => {
+            vector_shape_items(v).expect("vector shape checked")
+        }
         Value::Set(s) => s.iter().collect(),
         _ => Vec::new(),
     }

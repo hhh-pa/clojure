@@ -1037,8 +1037,11 @@ fn corpus_p1_divergences() {
         uncaught(&mut eval, "(first (rest (keys [1 2])))"),
         "java.lang.ClassCastException | class java.lang.Long cannot be cast to class java.util.Map$Entry (java.lang.Long and java.util.Map$Entry are in module java.base of loader 'bootstrap')"
     );
-    // :keys-vecpairs — DIVERGENCE: JVM throws the (single-shot full) CCE; port treats [1 2] as an entry (entries-are-vectors + key-on-vector, cf. control.rs key_val). The behavioral half waits on FX2 MapEntry (T1192 FX1: "bare" was fast-throw elision, fx1-fastthrow probe).
-    assert_eq!(run_last(&mut eval, "(vec (keys [[1 2]]))"), "[1]");
+    // :keys-vecpairs — CONFORMANT (T1192 FX2): only real entries project.
+    assert_eq!(
+        uncaught(&mut eval, "(vec (keys [[1 2]]))"),
+        "java.lang.ClassCastException | class clojure.lang.PersistentVector cannot be cast to class java.util.Map$Entry (clojure.lang.PersistentVector is in unnamed module of loader 'app'; java.util.Map$Entry is in module java.base of loader 'bootstrap')"
+    );
     // :keys-strpairs — CONFORMANT (T1192 FX1): single-shot JVM throws the
     // full String->Map$Entry text below (fx1-rest probe); "bare" was
     // fast-throw elision (fx1-fastthrow probe), not mirrored (N3).
@@ -1051,10 +1054,10 @@ fn corpus_p1_divergences() {
         uncaught(&mut eval, "(eval (list 'count))"),
         "clojure.lang.ArityException | Wrong number of args (0) passed to: clojure.core/count"
     );
-    // :entry-class — DIVERGENCE: JVM clojure.lang.MapEntry; port has no MapEntry (entries are vectors, s5d-coll-pins)
+    // :entry-class — CONFORMANT (T1192 FX2): real `MapEntry` values.
     assert_eq!(
         class_of(&mut eval, "(first {:a 1})"),
-        "clojure.lang.PersistentVector"
+        "clojure.lang.MapEntry"
     );
     // :entry-vec
     assert_eq!(run_last(&mut eval, "(vector? (first {:a 1}))"), "true");

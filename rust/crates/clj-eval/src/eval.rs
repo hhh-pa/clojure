@@ -1388,6 +1388,7 @@ impl Evaluator {
                 _ => Err(self.throw(NativeError::arity("clojure.lang.Symbol", args.len()))),
             },
             Value::Vector(v) => self.invoke_vector(v, args),
+            Value::MapEntry { key, val } => self.invoke_mapentry(key, val, args),
             Value::Map(_) => {
                 let name = jvm_class_of(callee);
                 match args {
@@ -1465,6 +1466,38 @@ impl Evaluator {
             )));
         };
         match usize::try_from(*n).ok().and_then(|i| v.iter().nth(i)) {
+            Some(elem) => Ok(elem.clone()),
+            None => Err(self.throw(NativeError::new(
+                ThrowClass::IndexOutOfBoundsException,
+                String::new(),
+            ))),
+        }
+    }
+
+    /// Invoke a map entry: exactly one integer key (the arity error
+    /// names `clojure.lang.MapEntry`, like the JVM — Oracle FX2
+    /// `invoke`, `invoke-0`, `invoke-2`, `invoke-kw`).
+    fn invoke_mapentry(
+        &mut self,
+        key: &Value,
+        val: &Value,
+        args: &[Value],
+    ) -> Result<Value, Signal> {
+        if args.len() != 1 {
+            return Err(self.throw(NativeError::arity("clojure.lang.MapEntry", args.len())));
+        }
+        let Value::Int(n) = &args[0] else {
+            return Err(self.throw(NativeError::new(
+                ThrowClass::IllegalArgumentException,
+                "Key must be integer".to_owned(),
+            )));
+        };
+        let found = match usize::try_from(*n).ok() {
+            Some(0) => Some(key),
+            Some(1) => Some(val),
+            _ => None,
+        };
+        match found {
             Some(elem) => Ok(elem.clone()),
             None => Err(self.throw(NativeError::new(
                 ThrowClass::IndexOutOfBoundsException,
@@ -1933,7 +1966,7 @@ impl Evaluator {
         if let Value::Map(m) = coll {
             return Ok(Value::Map(m.insert(k, v)));
         }
-        let entry = Value::Vector(Vector::from_vec(vec![k, v]));
+        let entry = clj_value::map_entry(k, v);
         self.conj_one(coll, entry)
     }
 
@@ -1946,6 +1979,10 @@ impl Evaluator {
         match coll {
             Value::Map(m) => self.conj_map(m, elem).map(Value::Map),
             Value::Vector(v) => Ok(Value::Vector(v.push_back(elem))),
+            Value::MapEntry { key, val } => {
+                let tmp = Vector::from_vec(vec![*key, *val]);
+                Ok(Value::Vector(tmp.push_back(elem)))
+            }
             Value::List(l) => Ok(Value::List(l.push_front(elem))),
             Value::Set(s) => Ok(Value::Set(s.insert(elem))),
             other => Err(self.throw(NativeError::cast(
@@ -1977,11 +2014,20 @@ impl Evaluator {
                     ))),
                 }
             }
+            Value::MapEntry { key, val } => Ok(map.insert(*key, *val)),
             other => match self.seq_opt(&other)? {
                 None => Ok(map),
                 Some(l) => {
-                    let first = l.iter().next().expect("seq_opt lists are never empty");
-                    Err(self.throw(cast_entry(first)))
+                    // One pair per entry (Oracle FX2
+                    // `conj-seq-entries`); the first non-entry is
+                    // the `Map$Entry` cast error.
+                    for head in l.iter() {
+                        let Value::MapEntry { key, val } = head else {
+                            return Err(self.throw(cast_entry(head)));
+                        };
+                        map = map.insert((**key).clone(), (**val).clone());
+                    }
+                    Ok(map)
                 }
             },
         }
@@ -2044,9 +2090,15 @@ impl Evaluator {
                 Ok(())
             }
             Value::Nil => Ok(()),
-            Value::List(l) => self.check_seqable_trailing(l.iter().next().cloned()),
-            Value::Set(s) => self.check_seqable_trailing(s.iter().next().cloned()),
-            Value::Str(s) => self.check_seqable_trailing(s.chars().next().map(Value::Char)),
+            // An entry trailer conjs as its pair (Oracle FX2
+            // `trailer-entry`).
+            Value::MapEntry { key, val } => {
+                *map = std::mem::replace(map, new_map()).insert((**key).clone(), (**val).clone());
+                Ok(())
+            }
+            Value::List(l) => self.check_seqable_trailing(map, l.iter().next().cloned()),
+            Value::Set(s) => self.check_seqable_trailing(map, s.iter().next().cloned()),
+            Value::Str(s) => self.check_seqable_trailing(map, s.chars().next().map(Value::Char)),
             other => Err(self.throw(NativeError::new(
                 ThrowClass::IllegalArgumentException,
                 format!(
@@ -2057,11 +2109,20 @@ impl Evaluator {
         }
     }
 
-    /// The odd-tail seqable rule: empties vanish, else the first
-    /// element must be an entry (nothing representable is).
-    fn check_seqable_trailing(&mut self, first: Option<Value>) -> Result<(), Signal> {
+    /// The odd-tail seqable rule: empties vanish, a leading entry
+    /// conjs as its pair (Oracle FX2 `trailer-listentry`), else the
+    /// first element is the entry-cast error.
+    fn check_seqable_trailing(
+        &mut self,
+        map: &mut Map,
+        first: Option<Value>,
+    ) -> Result<(), Signal> {
         match first {
             None => Ok(()),
+            Some(Value::MapEntry { key, val }) => {
+                *map = std::mem::replace(map, new_map()).insert(*key, *val);
+                Ok(())
+            }
             Some(first) => Err(self.throw(NativeError::cast(
                 &jvm_class_of(&first),
                 "java.util.Map$Entry",
@@ -2180,7 +2241,8 @@ fn emit_outlet(out: &mut Vec<Value>, slot: &mut Option<Value>, requested: bool, 
 }
 
 /// Cast one element to `Map$Entry` (`nil` is the entry-NPE;
-/// nothing representable is an entry).
+/// anything else fails — entries are real `MapEntry` values since
+/// FX2, so callers check for them first).
 fn cast_entry(entry: &Value) -> NativeError {
     match entry {
         Value::Nil => NativeError::new(
@@ -2200,6 +2262,16 @@ fn lookup(coll: &Value, key: &Value) -> Option<Value> {
             Value::Int(n) => usize::try_from(*n)
                 .ok()
                 .and_then(|i| v.iter().nth(i).cloned()),
+            _ => None,
+        },
+        // Entries read like their 2-vector (map destructuring
+        // passes integer keys — Oracle FX2 `mapdest-plain`).
+        Value::MapEntry { key: ek, val: ev } => match key {
+            Value::Int(n) => match usize::try_from(*n).ok() {
+                Some(0) => Some((**ek).clone()),
+                Some(1) => Some((**ev).clone()),
+                _ => None,
+            },
             _ => None,
         },
         Value::Str(s) => match key {
@@ -2242,6 +2314,11 @@ fn nth_or_nil(coll: &Value, i: usize, eval: &mut Evaluator) -> Result<Value, Sig
     match coll {
         Value::Nil => Ok(Value::Nil),
         Value::Vector(v) => Ok(v.iter().nth(i).cloned().unwrap_or(Value::Nil)),
+        Value::MapEntry { key, val } => Ok(match i {
+            0 => (**key).clone(),
+            1 => (**val).clone(),
+            _ => Value::Nil,
+        }),
         Value::List(l) => Ok(l.iter().nth(i).cloned().unwrap_or(Value::Nil)),
         Value::Str(s) => Ok(s.chars().nth(i).map(Value::Char).unwrap_or(Value::Nil)),
         other => {
@@ -2276,9 +2353,12 @@ impl Evaluator {
             Value::Str(s) => Ok(Self::seq_list_opt(s.chars().map(Value::Char).collect())),
             Value::Map(m) => Ok(Self::seq_list_opt(
                 m.iter()
-                    .map(|(k, v)| Value::Vector(Vector::from_vec(vec![k.clone(), v.clone()])))
+                    .map(|(k, v)| clj_value::map_entry(k.clone(), v.clone()))
                     .collect(),
             )),
+            Value::MapEntry { key, val } => {
+                Ok(Self::seq_list_opt(vec![(**key).clone(), (**val).clone()]))
+            }
             other => Err(self.throw(NativeError::new(
                 ThrowClass::IllegalArgumentException,
                 format!(

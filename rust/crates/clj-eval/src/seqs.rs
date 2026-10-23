@@ -18,14 +18,14 @@
 use std::cmp::Ordering;
 use std::sync::Arc;
 
-use clj_value::{List, Value, Vector, new_map};
+use clj_value::{List, ThrowClass, Value, Vector, new_map};
 
 use crate::core::{as_reduced, cce_err, check_ifn, jvm_compare, repeat_count, take_count};
 use crate::error::NativeError;
 use crate::eval::Evaluator;
 use crate::ext::{NativeFn, NativeImpl};
 use crate::lazy::{
-    collect_all, concat_thunk, cycle_thunk, dedupe_thunk, distinct_thunk, drop_value,
+    as_subvector, collect_all, concat_thunk, cycle_thunk, dedupe_thunk, distinct_thunk, drop_value,
     drop_while_thunk, empty_list_value, filter_thunk, first_value, interleave_thunk,
     interpose_thunk, iterate_thunk, keep_indexed_thunk, keep_thunk, keys_thunk, map_indexed_thunk,
     map_thunk, mapcat_thunk, next_value, nthrest_value, partition_all_thunk, partition_by_thunk,
@@ -384,6 +384,43 @@ fn native_reverse(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeE
     let mut items = collect_all(eval, &args[0]).map_err(signal_to_native)?;
     items.reverse();
     Ok(Value::List(List::from_vec(items)))
+}
+
+/// `rseq`: vectors, subvectors, and entries answer their `RSeq`
+/// (empty answers nil); nil is the `rev` NPE, anything else the
+/// `Reversible` cast (Oracle FX2 `rsub`, `rseq-vec`,
+/// `rseq-entry-class`, `rseq-subvec`, `rseq-list`, `rseq-map`,
+/// `rseq-nil`, `rseq-empty`).
+fn native_rseq(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.core/rseq", args, &[1])?;
+    match &args[0] {
+        Value::Nil => Err(NativeError::new(
+            ThrowClass::NullPointerException,
+            "Cannot invoke \"clojure.lang.Reversible.rseq()\" because \"rev\" is null".to_owned(),
+        )),
+        Value::Vector(x) => Ok(rseq_of(x.iter().cloned().collect())),
+        Value::MapEntry { key, val } => Ok(rseq_of(vec![(**key).clone(), (**val).clone()])),
+        other => {
+            if let Some(sv) = as_subvector(other) {
+                return Ok(rseq_of(sv.iter().cloned().collect()));
+            }
+            Err(cce_err(other, "clojure.lang.Reversible"))
+        }
+    }
+}
+
+/// An `RSeq` over reversed items (counted, never chunked, never
+/// `IDrop`; empty answers nil via `realized_value`).
+fn rseq_of(mut items: Vec<Value>) -> Value {
+    items.reverse();
+    realized_value(items, false, true, false, clj_value::SeqKind::RSeq)
+}
+
+/// `nthnext`: `(seq (nthrest coll n))` (Oracle FX2 `nthnext`).
+fn native_nthnext(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.core/nthnext", args, &[2])?;
+    let rest = nthrest_value(eval, args[0].clone(), &args[1]).map_err(signal_to_native)?;
+    seq_value(eval, &rest).map_err(signal_to_native)
 }
 
 /// Interpret a sort-comparator result the way `AFunction.compare`
@@ -927,6 +964,7 @@ pub(crate) const SEQS_NATIVES: &[(&str, NativeFnPtr)] = &[
     ("take", native_take),
     ("drop", native_drop),
     ("nthrest", native_nthrest),
+    ("nthnext", native_nthnext),
     ("take-while", native_take_while),
     ("drop-while", native_drop_while),
     ("take-last", native_take_last),
@@ -957,6 +995,7 @@ pub(crate) const SEQS_NATIVES: &[(&str, NativeFnPtr)] = &[
     ("vals", native_vals),
     ("reduce", native_reduce),
     ("reverse", native_reverse),
+    ("rseq", native_rseq),
     ("sort", native_sort),
     ("sort-by", native_sort_by),
     ("dorun", native_dorun),

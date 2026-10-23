@@ -928,19 +928,19 @@ fn meta_rows() {
         "nil"
     );
     // Atoms are not `IObj` (but are `IReference`); delays are neither.
-    // (The `IObj` path keeps the S5B cast shape, without the JDK module
-    // verbiage — pre-existing, like `IReference` below.)
+    // (T1192 FX2: the `IObj` path reports the JVM's cast text;
+    // `IReference` keeps the S5B shape below.)
     assert_eq!(
         uncaught(&mut eval, "(with-meta (atom 1) {:a 1})"),
-        "java.lang.ClassCastException | Cannot cast clojure.lang.Atom to clojure.lang.IObj"
+        "java.lang.ClassCastException | class clojure.lang.Atom cannot be cast to class clojure.lang.IObj (clojure.lang.Atom and clojure.lang.IObj are in unnamed module of loader 'app')"
     );
     assert_eq!(
         uncaught(&mut eval, "(vary-meta (atom 1) assoc :a 1)"),
-        "java.lang.ClassCastException | Cannot cast clojure.lang.Atom to clojure.lang.IObj"
+        "java.lang.ClassCastException | class clojure.lang.Atom cannot be cast to class clojure.lang.IObj (clojure.lang.Atom and clojure.lang.IObj are in unnamed module of loader 'app')"
     );
     assert_eq!(
         uncaught(&mut eval, "(with-meta (delay 1) {:a 1})"),
-        "java.lang.ClassCastException | Cannot cast clojure.lang.Delay to clojure.lang.IObj"
+        "java.lang.ClassCastException | class clojure.lang.Delay cannot be cast to class clojure.lang.IObj (clojure.lang.Delay and clojure.lang.IObj are in unnamed module of loader 'app')"
     );
     assert_eq!(run_last(&mut eval, "(meta (delay 1))"), "nil");
     assert_eq!(
@@ -2524,11 +2524,11 @@ fn agent_value_shapes() {
     );
     assert_eq!(
         uncaught(&mut eval, "(with-meta (agent 1) {:a 1})"),
-        "java.lang.ClassCastException | Cannot cast clojure.lang.Agent to clojure.lang.IObj"
+        "java.lang.ClassCastException | class clojure.lang.Agent cannot be cast to class clojure.lang.IObj (clojure.lang.Agent and clojure.lang.IObj are in unnamed module of loader 'app')"
     );
     assert_eq!(
         uncaught(&mut eval, "(vary-meta (agent 1) assoc :a 1)"),
-        "java.lang.ClassCastException | Cannot cast clojure.lang.Agent to clojure.lang.IObj"
+        "java.lang.ClassCastException | class clojure.lang.Agent cannot be cast to class clojure.lang.IObj (clojure.lang.Agent and clojure.lang.IObj are in unnamed module of loader 'app')"
     );
     let with_meta = run_last(
         &mut eval,

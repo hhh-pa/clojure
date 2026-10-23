@@ -1,0 +1,19 @@
+rseq (1 :a)
+empty nil
+empty? false
+count 2
+type clojure.lang.MapEntry
+contains0 true
+contains2 false
+get0 :a
+get5 :dflt
+nth2 :dflt
+invoke5 "class java.lang.IndexOutOfBoundsException::"
+assoc [:b 1]
+pop [:a]
+dissoc "class java.lang.ClassCastException::class clojure.lang.MapEntry cannot be cast to class clojure.lang.IPersistentMap (clojure.lang.MapEntry and clojure.lang.IPersistentMap are in unnamed module of loader 'app')"
+selectkeys {0 :a}
+find1 [1 1]
+find1class clojure.lang.MapEntry
+Execution error (ClassCastException) at user/eval39 (fx2-mapentry4.clj:19).
+class clojure.lang.PersistentVector cannot be cast to class java.util.Map$Entry (clojure.lang.PersistentVector is in unnamed module of loader 'app'; java.util.Map$Entry is in module java.base of loader 'bootstrap')

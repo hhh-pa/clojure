@@ -12,7 +12,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use clj_value::{List, Map, Seq, Set, Value, Vector, seq_vec};
+use clj_value::{List, Map, Seq, Set, Value, Vector, map_entry, seq_vec};
 
 fn int(i: i64) -> Value {
     Value::Int(i)
@@ -137,15 +137,44 @@ fn seq_constructors_and_nil_punning() {
     assert!(lseq.chunk_next().is_none());
     assert_eq!(vseq.first(), Some(&int(0)));
     assert_eq!(lseq.first(), Some(&int(0)));
-    // Map seqs yield [k v] vectors in seq order.
+    // Map seqs yield MapEntry values in seq order (T1192 FX2).
     let m = Map::from_kvs_checked(vec![(int(1), int(2)), (int(3), int(4))]).unwrap();
     let got = take_seq(10, &Seq::from_map(&m).unwrap());
     assert_eq!(got.len(), 2);
-    assert!(matches!(&got[0], Value::Vector(_)));
+    assert!(matches!(
+        &got[0],
+        Value::MapEntry { key, val } if **key == int(1) && **val == int(2)
+    ));
+    assert!(matches!(
+        &got[1],
+        Value::MapEntry { key, val } if **key == int(3) && **val == int(4)
+    ));
     // Set seqs yield members in insertion order.
     let s = Set::from_items_checked(vec![int(5), int(6)]).unwrap();
     let got = take_seq(10, &Seq::from_set(&s).unwrap());
     assert_eq!(got, vec![int(5), int(6)]);
+}
+
+#[test]
+fn seq_vec_map_and_entry_rows() {
+    // T1192 FX2 finding 14: seq_vec over a map yields MapEntry
+    // values (never 2-vectors), in seq order.
+    let map = Value::Map(Map::from_kvs_checked(vec![(int(1), int(2)), (int(3), int(4))]).unwrap());
+    let got = seq_vec(&map).unwrap();
+    assert_eq!(got.len(), 2);
+    assert!(matches!(
+        &got[0],
+        Value::MapEntry { key, val } if **key == int(1) && **val == int(2)
+    ));
+    assert!(matches!(
+        &got[1],
+        Value::MapEntry { key, val } if **key == int(3) && **val == int(4)
+    ));
+    // seq_vec over an entry yields its 2 items.
+    assert_eq!(
+        seq_vec(&map_entry(int(1), int(2))),
+        Some(vec![int(1), int(2)])
+    );
 }
 
 #[test]
@@ -290,10 +319,7 @@ fn seq_vec_coerces_seqables() {
     let map = Value::Map(Map::from_kvs_checked(vec![(Value::Int(1), Value::Int(2))]).unwrap());
     assert_eq!(
         seq_vec(&map),
-        Some(vec![Value::Vector(Vector::from_vec(vec![
-            Value::Int(1),
-            Value::Int(2)
-        ]))])
+        Some(vec![map_entry(Value::Int(1), Value::Int(2))])
     );
     let set = Value::Set(Set::from_items_checked(vec![Value::Int(3)]).unwrap());
     assert_eq!(seq_vec(&set), Some(vec![Value::Int(3)]));

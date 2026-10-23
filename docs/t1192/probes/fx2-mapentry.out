@@ -1,0 +1,36 @@
+class-e: clojure.lang.MapEntry
+class-f: clojure.lang.MapEntry
+class-fv: clojure.lang.MapEntry
+type-e: clojure.lang.MapEntry
+preds: [false true false false true true true true true]
+pr-e: "[:a 1]"
+count: 2
+nth: [:a 1]
+nth-2: THROW java.lang.IndexOutOfBoundsException|nil
+nth-neg: THROW java.lang.IndexOutOfBoundsException|nil
+seqs: [:a [1] [:a 1]]
+get: [:a 1 nil nil :dflt]
+invoke: [:a 1]
+invoke-2: THROW java.lang.IndexOutOfBoundsException|nil
+invoke-kw: THROW java.lang.IllegalArgumentException|"Key must be integer"
+invoke-0: THROW clojure.lang.ArityException|"Wrong number of args (0) passed to: clojure.lang.MapEntry"
+conj: ["[:a 1 :x]" "class clojure.lang.PersistentVector"]
+assoc0: ["[:b 1]" "class clojure.lang.PersistentVector"]
+assoc2: [:a 1 :x]
+assoc-kw: THROW java.lang.IllegalArgumentException|"Key must be integer"
+empty: "nil"
+eq: [true true true]
+hash-eq: true
+compare: 0
+keyval: [:a 1]
+key-vec: THROW java.lang.ClassCastException|"class clojure.lang.PersistentVector cannot be cast to class java.util.Map$Entry (clojure.lang.PersistentVector is in unnamed module of loader 'app'; java.util.Map$Entry is in module java.base of loader 'bootstrap')"
+val-kw: THROW java.lang.ClassCastException|"class clojure.lang.Keyword cannot be cast to class java.util.Map$Entry (clojure.lang.Keyword is in unnamed module of loader 'app'; java.util.Map$Entry is in module java.base of loader 'bootstrap')"
+key-nil: THROW java.lang.NullPointerException|"Cannot invoke \"java.util.Map$Entry.getKey()\" because \"e\" is null"
+find-num: THROW java.lang.IllegalArgumentException|"find not supported on type: java.lang.Long"
+find-miss: nil
+conj-pair: {:a 1, :b 2}
+conj-kw: THROW java.lang.IllegalArgumentException|"Don't know how to create ISeq from: clojure.lang.Keyword"
+conj-entry: {:a 1}
+seq-first-class: "class clojure.lang.MapEntry"
+with-meta-e: THROW java.lang.ClassCastException|"class clojure.lang.MapEntry cannot be cast to class clojure.lang.IObj (clojure.lang.MapEntry and clojure.lang.IObj are in unnamed module of loader 'app')"
+contains: [true true false false]

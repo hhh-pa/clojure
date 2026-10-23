@@ -479,12 +479,14 @@ fn opt_get<'a>(pairs: &[(&'a Value, &'a Value)], name: &str) -> Option<&'a Value
         .map(|(_, v)| *v)
 }
 
-/// The `:only`/`:refer` sequential check (lists and vectors only —
-/// strings, maps, and sets fail like the JVM's `Sequential` test).
+/// The `:only`/`:refer` sequential check (lists, vectors, and
+/// entries — strings, maps, and sets fail like the JVM's
+/// `Sequential` test).
 fn check_sequential(v: &Value) -> Result<Vec<Value>, NativeError> {
     match v {
         Value::List(l) => Ok(l.iter().cloned().collect()),
         Value::Vector(x) => Ok(x.iter().cloned().collect()),
+        Value::MapEntry { key, val } => Ok(vec![(**key).clone(), (**val).clone()]),
         _ => Err(ex(
             ":only/:refer value must be a sequential collection of symbols".to_owned(),
         )),
@@ -1292,9 +1294,10 @@ fn load_lib(
     load_lib_finish(eval, &joined_sym, &pairs, &opts)
 }
 
-/// A libspec: a symbol, or a vector whose second item is nil or a
-/// keyword (core.clj `libspec?` — lists and strings take the prefix
-/// path, probe36 `req-string`).
+/// A libspec: a symbol, or a vector (or entry — `vector?` on
+/// the JVM) whose second item is nil or a keyword (core.clj
+/// `libspec?` — lists and strings take the prefix path, probe36
+/// `req-string`).
 fn is_libspec(v: &Value) -> bool {
     match v {
         Value::Symbol(_) => true,
@@ -1302,6 +1305,9 @@ fn is_libspec(v: &Value) -> bool {
             x.iter().nth(1),
             None | Some(Value::Nil) | Some(Value::Keyword(_))
         ),
+        Value::MapEntry { val, .. } => {
+            matches!(val.as_ref(), Value::Nil | Value::Keyword(_))
+        }
         _ => false,
     }
 }

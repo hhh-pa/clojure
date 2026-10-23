@@ -449,13 +449,13 @@ fn expansion_wraps() {
     run_last(&mut eval, "(defmacro mCCE [] (with-meta 1 {}))");
     assert_eq!(
         uncaught(&mut eval, "(macroexpand-1 '(mCCE))"),
-        "java.lang.ClassCastException | Unexpected error macroexpanding mCCE at (user:1:1).\njava.lang.ClassCastException | Cannot cast java.lang.Long to clojure.lang.IObj"
+        "java.lang.ClassCastException | Unexpected error macroexpanding mCCE at (user:1:1).\njava.lang.ClassCastException | class java.lang.Long cannot be cast to class clojure.lang.IObj (java.lang.Long is in module java.base of loader 'bootstrap'; clojure.lang.IObj is in unnamed module of loader 'app')"
     );
     assert_eq!(
         compile_err(&mut eval, "(mCCE)"),
         vec![
             "Unexpected error macroexpanding mCCE at (user:1:1).".to_owned(),
-            "java.lang.ClassCastException | Cannot cast java.lang.Long to clojure.lang.IObj"
+            "java.lang.ClassCastException | class java.lang.Long cannot be cast to class clojure.lang.IObj (java.lang.Long is in module java.base of loader 'bootstrap'; clojure.lang.IObj is in unnamed module of loader 'app')"
                 .to_owned(),
         ]
     );
@@ -577,9 +577,11 @@ fn declare_test() {
                 .to_owned(),
         ]
     );
+    // fx2-mapentry18.declare-5: non-symbols are the bare JDK
+    // `IObj` cast (finding 6).
     assert_eq!(
         uncaught(&mut eval, "(declare 5)"),
-        "java.lang.ClassCastException | Cannot cast java.lang.Long to clojure.lang.IObj"
+        "java.lang.ClassCastException | class java.lang.Long cannot be cast to class clojure.lang.IObj (java.lang.Long is in module java.base of loader 'bootstrap'; clojure.lang.IObj is in unnamed module of loader 'app')"
     );
 }
 

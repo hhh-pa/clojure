@@ -1,0 +1,10 @@
+(def e (first {:a 1}))
+(defn show [label v] (println label (pr-str v)))
+(defn throwof [label form]
+  (println label (try (eval form)
+                      (catch Throwable t (str "THROW " (.getName (class t)) "|" (pr-str (.getMessage t)))))))
+(show "mapdest-plain:" (let [{a 0} e] a))
+(show "mapdest-or:" (let [{a 0, zz :missing, :or {zz :dflt}} e] [a zz]))
+(show "mapdest-keys:" (let [{:keys [k]} e] k))
+(show "mapdest-str:" (let [{s 0} ["x" "y"]] s))
+(show "mapdest-vec-or:" (let [{a 0, zz :m, :or {zz :dflt}} [:x :y]] [a zz]))

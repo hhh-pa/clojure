@@ -302,6 +302,7 @@ pub fn jvm_class_of(v: &Value) -> String {
         Value::List(l) if l.is_empty() => "clojure.lang.PersistentList$EmptyList".to_owned(),
         Value::List(_) => "clojure.lang.PersistentList".to_owned(),
         Value::Vector(_) => "clojure.lang.PersistentVector".to_owned(),
+        Value::MapEntry { .. } => "clojure.lang.MapEntry".to_owned(),
         Value::Map(m) => map_class_of(m).to_owned(),
         Value::Set(_) => "clojure.lang.PersistentHashSet".to_owned(),
         Value::Regex(_) => "java.util.regex.Pattern".to_owned(),

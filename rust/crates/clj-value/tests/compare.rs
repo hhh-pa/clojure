@@ -12,10 +12,18 @@
 use std::cmp::Ordering;
 use std::sync::Arc;
 
-use clj_value::{Keyword, List, Map, Set, Symbol, Value, Vector, compare};
+use clj_value::{Keyword, List, Map, Set, Symbol, Value, Vector, compare, map_entry};
 
 fn int(i: i64) -> Value {
     Value::Int(i)
+}
+
+fn entry(k: Value, v: Value) -> Value {
+    map_entry(k, v)
+}
+
+fn vec_of(items: Vec<Value>) -> Value {
+    Value::Vector(Vector::from_vec(items))
 }
 
 fn dbl(d: f64) -> Value {
@@ -176,4 +184,57 @@ fn lists_maps_sets_regexes_never_compare() {
     assert!(compare(&set, &set).is_err());
     let re = Value::Regex(Arc::from("a"));
     assert!(compare(&re, &re).is_err());
+}
+
+#[test]
+fn map_entries_compare_as_two_vectors() {
+    // T1192 FX2 finding 13: an entry is its [k v] items.
+    let e12 = entry(int(1), int(2));
+    assert_eq!(ord(&e12, &entry(int(1), int(2))), Ordering::Equal);
+    assert_eq!(ord(&e12, &entry(int(1), int(3))), Ordering::Less);
+    assert_eq!(ord(&entry(int(1), int(3)), &e12), Ordering::Greater);
+    assert_eq!(ord(&e12, &entry(int(2), int(0))), Ordering::Less);
+    // entry<->2-vector, both orders, plus the length rule.
+    let v12 = vec_of(vec![int(1), int(2)]);
+    assert_eq!(ord(&e12, &v12), Ordering::Equal);
+    assert_eq!(ord(&v12, &e12), Ordering::Equal);
+    let v123 = vec_of(vec![int(1), int(2), int(3)]);
+    assert_eq!(ord(&e12, &v123), Ordering::Less);
+    assert_eq!(ord(&v123, &e12), Ordering::Greater);
+    // Element errors propagate through entries.
+    let bad = entry(Value::Keyword(Keyword::new(None, "a")), int(2));
+    assert!(compare(&e12, &bad).is_err());
+    assert!(compare(&bad, &e12).is_err());
+    // nil orders first against entries too.
+    assert_eq!(ord(&e12, &Value::Nil), Ordering::Greater);
+    assert_eq!(ord(&Value::Nil, &e12), Ordering::Less);
+}
+
+#[test]
+fn map_entry_cross_type_compares_fail_without_panicking() {
+    // T1192 FX2 finding 13: entry<->list and entry<->int are
+    // incomparable — Err, never the old `unreachable!` panic.
+    // Entries name as Vector in the stable message.
+    let e12 = entry(int(1), int(2));
+    let list = Value::List(List::from_vec(vec![int(1), int(2)]));
+    assert!(compare(&e12, &list).is_err());
+    assert!(compare(&list, &e12).is_err());
+    assert_eq!(
+        compare(&e12, &list).unwrap_err().message(),
+        "Cannot compare Vector to List"
+    );
+    assert_eq!(
+        compare(&list, &e12).unwrap_err().message(),
+        "Cannot compare List to Vector"
+    );
+    assert!(compare(&e12, &int(1)).is_err());
+    assert!(compare(&int(1), &e12).is_err());
+    assert_eq!(
+        compare(&e12, &int(1)).unwrap_err().message(),
+        "Cannot compare Vector to Long"
+    );
+    assert_eq!(
+        compare(&int(1), &e12).unwrap_err().message(),
+        "Cannot compare Long to Vector"
+    );
 }

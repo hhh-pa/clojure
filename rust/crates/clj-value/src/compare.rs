@@ -134,10 +134,12 @@ fn utf16_cmp(a: &str, b: &str) -> Ordering {
 
 /// Lexicographic element compare (element errors propagate, like the
 /// JVM's recursive `compareTo`).
-/// The items when `v` is a vector or subvector (`None` otherwise).
+/// The items when `v` is a vector, subvector, or map entry (an
+/// entry is its 2 items — `None` otherwise).
 fn vector_items(v: &Value) -> Option<Vec<Value>> {
     match v {
         Value::Vector(x) => Some(x.iter().cloned().collect()),
+        Value::MapEntry { key, val } => Some(vec![(**key).clone(), (**val).clone()]),
         Value::Extension(e) => e
             .as_any()
             .downcast_ref::<SubVectorValue>()
@@ -198,7 +200,8 @@ fn extension_type_name(e: &std::sync::Arc<dyn crate::ExtensionValue>) -> &'stati
 fn collection_type_name(v: &Value) -> &'static str {
     match v {
         Value::List(_) => "List",
-        Value::Vector(_) => "Vector",
+        // Entries compare (and name) as vectors.
+        Value::Vector(_) | Value::MapEntry { .. } => "Vector",
         Value::Map(_) => "Map",
         Value::Set(_) => "Set",
         Value::Regex(_) => "Regex",

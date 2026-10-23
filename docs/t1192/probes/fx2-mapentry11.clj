@@ -1,0 +1,7 @@
+(def e (first {:a 1}))
+(defn show [label v] (println label (pr-str v)))
+(show "merge-with-vec:" (merge-with + {:a 1} [:b 2]))
+(show "merge-with-entry:" (merge-with + {:a 1} e))
+(show "merge-with-entry-left:" (merge-with + e {:b 2}))
+(show "merge-with-entry-class:" (class (merge-with + {:a 1} e)))
+(println "with-meta-nonmap" (pr-str (try (with-meta [1] 5) (catch Exception ex (str (class ex) "::" (.getMessage ex))))))

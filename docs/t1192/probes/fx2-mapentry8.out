@@ -1,0 +1,12 @@
+rseq-list: THROW java.lang.ClassCastException|"class clojure.lang.PersistentList cannot be cast to class clojure.lang.Reversible (clojure.lang.PersistentList and clojure.lang.Reversible are in unnamed module of loader 'app')"
+rseq-map: THROW java.lang.ClassCastException|"class clojure.lang.PersistentArrayMap cannot be cast to class clojure.lang.Reversible (clojure.lang.PersistentArrayMap and clojure.lang.Reversible are in unnamed module of loader 'app')"
+rseq-nil: THROW java.lang.NullPointerException|"Cannot invoke \"clojure.lang.Reversible.rseq()\" because \"rev\" is null"
+rseq-empty: nil
+rseq-empty-class: nil
+rseq-counted: true
+rseq-count: 2
+rseq-first: 1
+case-entry: :hit
+compare-vec-list: THROW java.lang.ClassCastException|"class clojure.lang.PersistentList cannot be cast to class clojure.lang.IPersistentVector (clojure.lang.PersistentList and clojure.lang.IPersistentVector are in unnamed module of loader 'app')"
+compare-entry-list: THROW java.lang.ClassCastException|"class clojure.lang.PersistentList cannot be cast to class clojure.lang.IPersistentVector (clojure.lang.PersistentList and clojure.lang.IPersistentVector are in unnamed module of loader 'app')"
+compare-entry-str: "CCE|class java.lang.String cannot be cast to class clojure.lang.IPersistentVector (java.lang.String is in module java.base of loader 'bootstrap'; clojure.lang.IPersistentVector is in unnamed module of loader 'app')"

@@ -84,6 +84,13 @@ fn lookup_present(coll: &Value, key: &Value) -> Result<Option<Value>, NativeErro
                 .ok()
                 .and_then(|idx| x.iter().nth(idx).cloned())
         })),
+        Value::MapEntry { key: ek, val: ev } => Ok(int_key(key).and_then(|i| {
+            usize::try_from(i as i32).ok().and_then(|idx| match idx {
+                0 => Some((**ek).clone()),
+                1 => Some((**ev).clone()),
+                _ => None,
+            })
+        })),
         Value::Set(s) => Ok(s.get(key).cloned()),
         Value::Str(s) => Ok(num_index(key).and_then(|i| {
             usize::try_from(i)
@@ -192,6 +199,13 @@ pub(crate) fn find_entry(coll: &Value, key: &Value) -> Result<Option<(Value, Val
         Value::Nil => Ok(None),
         Value::Map(m) => Ok(m.get(key).map(|v| (key.clone(), v.clone()))),
         Value::Vector(x) => Ok(find_entry_vector(x, key)),
+        Value::MapEntry { key: ek, val: ev } => Ok(int_key(key).and_then(|i| {
+            usize::try_from(i as i32).ok().and_then(|idx| match idx {
+                0 => Some((key.clone(), (**ek).clone())),
+                1 => Some((key.clone(), (**ev).clone())),
+                _ => None,
+            })
+        })),
         Value::Transient(t) => find_entry_transient(coll, t, key),
         _ => find_entry_fallback(coll, key),
     }
@@ -207,18 +221,15 @@ fn find_unsupported(coll: &Value) -> NativeError {
 
 /// How one value conjs onto a map (persistent and transient share
 /// this): nil passes through, pairs assoc, maps merge entry-wise,
-/// anything else seqs and casts its first element to `Map.Entry`
-/// (always a `CCE` here — entries read as vectors, per the values
-/// contract).
+/// anything else seqs into one pair per entry (the first non-entry
+/// element is the `Map$Entry` cast error — computed in the
+/// unlocked plan phase, since resolving the head's class under the
+/// transient lock would re-lock when the head aliases the
+/// transient).
 enum MapConjPlan {
     Nil,
     Pair(Value, Value),
     Entries(Vec<(Value, Value)>),
-    /// A seq-headed element (never conjs: the `Map$Entry` cast
-    /// fails). The error is computed in the unlocked plan phase —
-    /// resolving the head's class under the transient lock would
-    /// re-lock when the head aliases the transient.
-    SeqErr(NativeError),
 }
 
 fn map_conj_plan(eval: &mut Evaluator, x: &Value) -> Result<MapConjPlan, NativeError> {
@@ -234,6 +245,7 @@ fn map_conj_plan(eval: &mut Evaluator, x: &Value) -> Result<MapConjPlan, NativeE
             }
             Ok(MapConjPlan::Pair(items[0].clone(), items[1].clone()))
         }
+        Value::MapEntry { key, val } => Ok(MapConjPlan::Pair((**key).clone(), (**val).clone())),
         _ => {
             if let Some(sv) = as_subvector(x) {
                 if sv.len() != 2 {
@@ -242,12 +254,24 @@ fn map_conj_plan(eval: &mut Evaluator, x: &Value) -> Result<MapConjPlan, NativeE
                 let items = sv.items();
                 return Ok(MapConjPlan::Pair(items[0].clone(), items[1].clone()));
             }
-            let s = seq_value(eval, x).map_err(signal_to_native)?;
-            if matches!(s, Value::Nil) {
-                return Ok(MapConjPlan::Nil);
+            // A sequential arg contributes one pair per entry
+            // (Oracle FX2 `conj-seq-entries`, `conj-list-entry`,
+            // `conj-multi`); the first non-entry element is the
+            // `Map$Entry` cast error (`conj-listpair`,
+            // `conj-vec-in-list`, `conj-nest1`, `conj-str`).
+            let mut pairs = Vec::new();
+            let mut cur = seq_value(eval, x).map_err(signal_to_native)?;
+            loop {
+                if matches!(cur, Value::Nil) {
+                    return Ok(MapConjPlan::Entries(pairs));
+                }
+                let head = first_value(eval, &cur).map_err(signal_to_native)?;
+                let Value::MapEntry { key, val } = head else {
+                    return Err(cce_err(&head, "java.util.Map$Entry"));
+                };
+                pairs.push(((*key).clone(), (*val).clone()));
+                cur = next_value(eval, &cur).map_err(signal_to_native)?;
             }
-            let head = first_value(eval, &s).map_err(signal_to_native)?;
-            Ok(MapConjPlan::SeqErr(cce_err(&head, "java.util.Map$Entry")))
         }
     }
 }
@@ -272,7 +296,6 @@ fn conj_map(eval: &mut Evaluator, m: &Map, x: &Value) -> Result<Value, NativeErr
             }
             Ok(Value::Map(out))
         }
-        MapConjPlan::SeqErr(e) => Err(e),
     }
 }
 
@@ -297,6 +320,12 @@ fn conj_one(eval: &mut Evaluator, coll: &Value, x: Value) -> Result<Value, Nativ
         Value::Nil => Ok(Value::List(List::from_vec(vec![x]))),
         Value::List(l) => Ok(Value::List(l.clone().push_front(x))),
         Value::Vector(v) => Ok(Value::Vector(v.clone().push_back(x))),
+        // Conj onto an entry appends like its 2-vector (Oracle FX2
+        // `conj`, `merge-entry`).
+        Value::MapEntry { key, val } => {
+            let tmp = Vector::from_vec(vec![(**key).clone(), (**val).clone()]);
+            Ok(Value::Vector(tmp.push_back(x)))
+        }
         Value::Map(m) => conj_map(eval, m, &x),
         Value::Set(s) => Ok(Value::Set(s.clone().insert(x))),
         _ => {
@@ -374,6 +403,18 @@ fn assoc3(coll: &Value, k: &Value, v: Value) -> Result<Value, NativeError> {
             };
             assoc_vector(x, i, v)
         }
+        // `assoc` on an entry answers a plain vector (Oracle FX2
+        // `assoc0`, `assoc1`, `assoc2`).
+        Value::MapEntry { key, val } => {
+            let Some(i) = int_key(k) else {
+                return Err(NativeError::new(
+                    ThrowClass::IllegalArgumentException,
+                    "Key must be integer".to_owned(),
+                ));
+            };
+            let tmp = Vector::from_vec(vec![(**key).clone(), (**val).clone()]);
+            assoc_vector(&tmp, i, v)
+        }
         _ => {
             if let Some(sv) = as_subvector(coll) {
                 return assoc_subvector(sv, k, v);
@@ -445,6 +486,7 @@ fn count_of(eval: &mut Evaluator, v: &Value) -> Result<i64, NativeError> {
         Value::Str(s) => Ok(s.encode_utf16().count() as i64),
         Value::List(l) => Ok(l.len() as i64),
         Value::Vector(x) => Ok(x.len() as i64),
+        Value::MapEntry { .. } => Ok(2),
         Value::Map(m) => Ok(m.size() as i64),
         Value::Set(s) => Ok(s.size() as i64),
         Value::Transient(t) => count_transient(t),
@@ -557,13 +599,28 @@ fn merge_with3_fold_pairs(
 }
 
 /// `merge-with` over a sequential right-hand side (seqs and casts).
-fn merge_with3_seq_tail(eval: &mut Evaluator, x: &Value, y: &Value) -> Result<Value, NativeError> {
-    let s = seq_value(eval, y).map_err(signal_to_native)?;
-    if matches!(s, Value::Nil) {
-        return Ok(x.clone());
+fn merge_with3_seq_tail(
+    eval: &mut Evaluator,
+    f: &Value,
+    x: &Value,
+    y: &Value,
+) -> Result<Value, NativeError> {
+    // A sequential right-hand side contributes one pair per entry
+    // (Oracle FX2 `conj-seq-entries`, `merge-with-entry` CCEs on
+    // the `:a` head — entries are real `MapEntry` values now).
+    let mut m = x.clone();
+    let mut cur = seq_value(eval, y).map_err(signal_to_native)?;
+    loop {
+        if matches!(cur, Value::Nil) {
+            return Ok(m);
+        }
+        let head = first_value(eval, &cur).map_err(signal_to_native)?;
+        let Value::MapEntry { key, val } = head else {
+            return Err(cce_err(&head, "java.util.Map$Entry"));
+        };
+        m = merge_kv(eval, &m, (*key).clone(), (*val).clone(), f)?;
+        cur = next_value(eval, &cur).map_err(signal_to_native)?;
     }
-    let head = first_value(eval, &s).map_err(signal_to_native)?;
-    Err(cce_err(&head, "java.util.Map$Entry"))
 }
 
 fn merge_with3(
@@ -581,7 +638,7 @@ fn merge_with3(
     if let Some(pairs) = merge_with3_indexed_pairs(y) {
         return merge_with3_fold_pairs(eval, f, x, pairs);
     }
-    merge_with3_seq_tail(eval, x, y)
+    merge_with3_seq_tail(eval, f, x, y)
 }
 
 /// Split a keyseq into its head key and tail (`update-in` /
@@ -868,6 +925,12 @@ fn native_contains(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nativ
         Value::Nil => Ok(Value::Bool(false)),
         Value::Map(m) => Ok(Value::Bool(m.contains_key(key))),
         Value::Vector(x) => Ok(Value::Bool(contains_vector(x, key))),
+        // Entries contain integer keys 0 and 1 (Oracle FX2 `contains`).
+        Value::MapEntry { .. } => {
+            Ok(Value::Bool(int_key(key).is_some_and(|i| {
+                usize::try_from(i as i32).is_ok_and(|idx| idx < 2)
+            })))
+        }
         Value::Set(s) => Ok(Value::Bool(s.contains(key))),
         Value::Str(s) => contains_str(s, coll, key),
         Value::Transient(t) => Ok(Value::Bool(transient_get(t, key)?.is_some())),
@@ -878,7 +941,9 @@ fn native_contains(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nativ
 fn native_find(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/find", args, &[2])?;
     match find_entry(&args[0], &args[1])? {
-        Some((k, v)) => Ok(Value::Vector(Vector::from_vec(vec![k, v]))),
+        // `find` answers real entries (Oracle FX2 `find1class`,
+        // `class-f`, `class-fv`).
+        Some((k, v)) => Ok(clj_value::map_entry(k, v)),
         None => Ok(Value::Nil),
     }
 }
@@ -920,6 +985,11 @@ fn nth_indexed(coll: &Value, n: i32, not_found: Option<&Value>) -> Result<Value,
         Value::Vector(x) => usize::try_from(n)
             .ok()
             .and_then(|idx| x.iter().nth(idx).cloned()),
+        Value::MapEntry { key, val } => usize::try_from(n).ok().and_then(|idx| match idx {
+            0 => Some((**key).clone()),
+            1 => Some((**val).clone()),
+            _ => None,
+        }),
         Value::Transient(t) => nth_indexed_transient(t, n)?,
         _ => as_subvector(coll)
             .and_then(|sv| usize::try_from(n).ok().and_then(|idx| sv.nth(idx).cloned())),
@@ -993,7 +1063,7 @@ pub(crate) fn native_nth(eval: &mut Evaluator, args: &[Value]) -> Result<Value, 
     if not_found.is_some() && n < 0 {
         return Ok(not_found.cloned().unwrap_or(Value::Nil));
     }
-    if matches!(coll, Value::Vector(_))
+    if matches!(coll, Value::Vector(_) | Value::MapEntry { .. })
         || as_subvector(coll).is_some()
         || matches!(coll, Value::Transient(_))
     {
@@ -1256,9 +1326,6 @@ fn conj_bang_apply_map(
                 tm.assoc(k, v).map_err(transient_err)?;
             }
         }
-        Some(MapConjPlan::SeqErr(e)) => {
-            return Err(e);
-        }
     }
     Ok(())
 }
@@ -1444,6 +1511,7 @@ fn native_peek(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErr
         Value::Nil => Ok(Value::Nil),
         Value::List(l) => Ok(l.first().cloned().unwrap_or(Value::Nil)),
         Value::Vector(x) => Ok(x.iter().last().cloned().unwrap_or(Value::Nil)),
+        Value::MapEntry { val, .. } => Ok((**val).clone()),
         _ => {
             if let Some(sv) = as_subvector(&args[0]) {
                 return Ok(sv.iter().last().cloned().unwrap_or(Value::Nil));
@@ -1502,6 +1570,9 @@ fn native_pop(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErro
         Value::Nil => Ok(Value::Nil),
         Value::List(l) => pop_list(l),
         Value::Vector(x) => pop_vector(x),
+        // Popping an entry answers its 1-vector (Oracle FX2
+        // `peek-pop`, `pop-class`).
+        Value::MapEntry { key, .. } => Ok(Value::Vector(Vector::from_vec(vec![(**key).clone()]))),
         _ => pop_fallback(&args[0]),
     }
 }
@@ -1510,6 +1581,11 @@ fn native_pop(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErro
 fn subvec3(v: &Value, start_v: &Value, end_v: &Value) -> Result<Value, NativeError> {
     let (backing, base, len) = match v {
         Value::Vector(x) => (x.clone(), 0, x.len()),
+        Value::MapEntry { key, val } => (
+            Vector::from_vec(vec![(**key).clone(), (**val).clone()]),
+            0,
+            2,
+        ),
         _ => match as_subvector(v) {
             Some(sv) => (sv.vec().clone(), sv.start(), sv.len()),
             None => return Err(cce_err(v, "clojure.lang.IPersistentVector")),
@@ -1545,11 +1621,13 @@ fn native_subvec(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeEr
 fn native_replace(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/replace", args, &[2])?;
     let (smap, coll) = (&args[0], &args[1]);
-    if !(matches!(coll, Value::Vector(_)) || as_subvector(coll).is_some()) {
+    if !(matches!(coll, Value::Vector(_) | Value::MapEntry { .. }) || as_subvector(coll).is_some())
+    {
         return Ok(replace_thunk(smap.clone(), coll.clone()));
     }
     let n = match coll {
         Value::Vector(x) => x.len(),
+        Value::MapEntry { .. } => 2,
         _ => as_subvector(coll).map(|sv| sv.len()).unwrap_or(0),
     };
     let mut acc = coll.clone();
@@ -1604,14 +1682,30 @@ fn native_distinctp(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nativ
 /// entry-shaped inputs work, anything else fails exactly like the
 /// same `nth`. (On the JVM, non-entries fail the `Map$Entry` cast
 /// instead — the one observable edge of the missing type.)
-fn native_key(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+fn native_key(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/key", args, &[1])?;
-    native_nth(eval, &[args[0].clone(), Value::Int(0)])
+    // Only real entries answer (`key-vec`, `key-nil`): 2-vectors
+    // are NOT entries on the JVM.
+    match &args[0] {
+        Value::MapEntry { key, .. } => Ok((**key).clone()),
+        Value::Nil => Err(NativeError::new(
+            ThrowClass::NullPointerException,
+            "Cannot invoke \"java.util.Map$Entry.getKey()\" because \"e\" is null".to_owned(),
+        )),
+        other => Err(cce_err(other, "java.util.Map$Entry")),
+    }
 }
 
-fn native_val(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+fn native_val(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/val", args, &[1])?;
-    native_nth(eval, &[args[0].clone(), Value::Int(1)])
+    match &args[0] {
+        Value::MapEntry { val, .. } => Ok((**val).clone()),
+        Value::Nil => Err(NativeError::new(
+            ThrowClass::NullPointerException,
+            "Cannot invoke \"java.util.Map$Entry.getValue()\" because \"e\" is null".to_owned(),
+        )),
+        other => Err(cce_err(other, "java.util.Map$Entry")),
+    }
 }
 
 /// The S5D collection natives installed into `clojure.core` by

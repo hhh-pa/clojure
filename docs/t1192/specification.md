@@ -176,8 +176,17 @@ FIX:
   JVM `(macroexpand-1 '(let [a 1] a))` is `(let* [a 1] a)`.
 - D-xform: 7 seq-fn transducer arities + `into` plain-only →
   FT7 (needs the transducer protocol).
-- D-mapentry: no `MapEntry` (`key`/`val` via `nth`, map seqs
-  and `find` yield vectors, conj-over-pairs CCE) → FX2.
+- D-mapentry: FIXED (real `Value::MapEntry`: `key`/`val`
+  project entries only, map seqs/`find` yield entries, entry
+  conj/assoc/`=`/`hash`/`compare`/`rseq`/destructure match;
+  `let`/`fn` binding forms accept entries (probe18
+  entry-binding rows); `rseq`/`nthnext` land and `sorted?`
+  lands as a constant-false placeholder owned by FT6;
+  `push-thread-bindings` binds vectors of entries (the
+  `IMapEntry` cast moved stable→JDK while the Var/
+  Associative casts keep the pinned §E8 text — mixed cast
+  state for FX7); with-meta/meta-value casts report the JVM
+  text; fx2-mapentry{,2..19} probes + pins).
 - D-prepost: `:pre`/`:post` silently ignored → FX3.
 - D-printdup: `*print-dup*` declared but ignored → FX4b.
 - D-streamprint: str realization up-front vs JVM in-flight
@@ -191,8 +200,9 @@ FIX:
 - D-emptymeta: FIXED (seq `empty` keeps meta; fx1-emptymeta).
 - D-cce-shape: RESOLVED conformant (single-shot JVM throws
   the same full checkcast text; "bare" was HotSpot
-  fast-throw elision — fx1-rest/fx1-fastthrow probes; the
-  entries-are-vectors half of `:keys-vecpairs` waits on FX2).
+  fast-throw elision — fx1-rest/fx1-fastthrow probes; FX2
+  closed the entries-are-vectors half (`:keys-vecpairs`
+  conformant)).
 - D-caseacc: FIXED (wrong-typed `case*` fields mirror the
   JVM casts; fx1-case).
 - D-postfuture: FIXED (post-shutdown `future` rejects;
@@ -315,7 +325,18 @@ FX0 spec (this file) + oracle smoke (done: jar + probe work).
 FX1 small deterministic fixes (D-tsneg/D-time/D-emptymeta/
   D-cce-shape/D-caseacc/D-postfuture/D-shutdrain/D-avaroot/
   D-argv + I-nthf64/I-huge/I-hashinf probes).
-FX2 MapEntry (D-mapentry).
+FX2 MapEntry (D-mapentry). Follow-ups found in-slice (slice
+  TBD): `flatten`/`tree-seq`/`reversible?`/`chunk-*`
+  unimplemented, each with a non-resolution pin
+  (`ns_vars.rs fx2_tree_walk_vars_stay_unresolved`;
+  probe6 `flatten`/`reversible?` rows stand as the oracle
+  pins — oracle `reversible?` is true on entries);
+  `instance?` stays permanent N1 out-of-scope (not
+  a slice follow-up); the invoke fallback keeps the pinned
+  §E8 cast text (oracle reports JDK — FX7 input) while
+  `declare` is JDK-evidenced (probe18 declare-5) and
+  flipped to the JDK `IObj` text; `seq_opt` rejects seq
+  values on the outlet path (custom paths only, no oracle).
 FX3 pre/post validation (D-prepost).
 FX4 analyzer builtins as real macros (D-macroexpand: `let*`/
   `fn*`/`loop*` special forms + core macro defs + analyzer).
@@ -346,6 +367,14 @@ M1 master-delta inventory: list `clojure/clojure:master`
   commits past 1.13.0-alpha9, triage each to port/skip/
   already-have; seeds the Phase 2 catch-up slices (defined
   here, worked after REL ships).
+CX complexity-zero (standing program, user directive):
+  drive `rust/complexity-baseline.json` to zero entries in
+  dedicated refactor slices (split dispatch tables and hot
+  helpers under the cyclomatic/cognitive caps). Until then,
+  new or worsened entries need a recorded justification and
+  count as debt against this goal; FX2 added 2 entries
+  (`lookup_present`, `lookup`) and worsened 8 dispatch
+  tables — first candidates for the CX pass.
 
 Each slice lands as its own `T1192:` commit series + PR with
 `/review-loop` to acceptance; landing stays explicit-only.

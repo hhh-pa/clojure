@@ -309,12 +309,12 @@ fn push_pop_get_bindings() {
         "java.lang.ClassCastException | Cannot cast java.lang.Long to clojure.lang.Associative"
     );
     // Vectors are `Associative`s of map entries: empty is a no-op,
-    // non-empty fails the first element's `IMapEntry` cast.
+    // vectors of entries bind, non-entry elements fail the `IMapEntry` cast.
     assert_eq!(run_last(&mut eval, "(push-thread-bindings [])"), "nil");
     assert_eq!(run_last(&mut eval, "(pop-thread-bindings)"), "nil");
     assert_eq!(
         uncaught(&mut eval, "(push-thread-bindings [#'pb1 :p])"),
-        "java.lang.ClassCastException | Cannot cast clojure.lang.Var to clojure.lang.IMapEntry"
+        "java.lang.ClassCastException | class clojure.lang.Var cannot be cast to class clojure.lang.IMapEntry (clojure.lang.Var and clojure.lang.IMapEntry are in unnamed module of loader 'app')"
     );
     // The snapshot folds oldest-first (boot's `*ns*` base first).
     assert_eq!(
@@ -684,7 +684,7 @@ fn with_meta() {
     // until `deref` lands in S5D).
     assert_eq!(
         uncaught(&mut eval, "(with-meta 1 {:a 1})"),
-        "java.lang.ClassCastException | Cannot cast java.lang.Long to clojure.lang.IObj"
+        "java.lang.ClassCastException | class java.lang.Long cannot be cast to class clojure.lang.IObj (java.lang.Long is in module java.base of loader 'bootstrap'; clojure.lang.IObj is in unnamed module of loader 'app')"
     );
     assert_eq!(
         uncaught(&mut eval, "(with-meta nil {:a 1})"),
@@ -692,15 +692,15 @@ fn with_meta() {
     );
     assert_eq!(
         uncaught(&mut eval, "(with-meta #'wm1 {:a 1})"),
-        "java.lang.ClassCastException | Cannot cast clojure.lang.Var to clojure.lang.IObj"
+        "java.lang.ClassCastException | class clojure.lang.Var cannot be cast to class clojure.lang.IObj (clojure.lang.Var and clojure.lang.IObj are in unnamed module of loader 'app')"
     );
     assert_eq!(
         uncaught(&mut eval, "(with-meta (the-ns 'user) {:a 1})"),
-        "java.lang.ClassCastException | Cannot cast clojure.lang.Namespace to clojure.lang.IObj"
+        "java.lang.ClassCastException | class clojure.lang.Namespace cannot be cast to class clojure.lang.IObj (clojure.lang.Namespace and clojure.lang.IObj are in unnamed module of loader 'app')"
     );
     assert_eq!(
         uncaught(&mut eval, "(with-meta [1] 5)"),
-        "java.lang.ClassCastException | Cannot cast java.lang.Long to clojure.lang.IPersistentMap"
+        "java.lang.ClassCastException | class java.lang.Long cannot be cast to class clojure.lang.IPersistentMap (java.lang.Long is in module java.base of loader 'bootstrap'; clojure.lang.IPersistentMap is in unnamed module of loader 'app')"
     );
 }
 
@@ -726,11 +726,11 @@ fn vary_meta() {
     // A non-map result is the `IPersistentMap` cast.
     assert_eq!(
         uncaught(&mut eval, "(vary-meta [1] (fn [m] 5))"),
-        "java.lang.ClassCastException | Cannot cast java.lang.Long to clojure.lang.IPersistentMap"
+        "java.lang.ClassCastException | class java.lang.Long cannot be cast to class clojure.lang.IPersistentMap (java.lang.Long is in module java.base of loader 'bootstrap'; clojure.lang.IPersistentMap is in unnamed module of loader 'app')"
     );
     assert_eq!(
         uncaught(&mut eval, "(vary-meta 1 (fn [m] m))"),
-        "java.lang.ClassCastException | Cannot cast java.lang.Long to clojure.lang.IObj"
+        "java.lang.ClassCastException | class java.lang.Long cannot be cast to class clojure.lang.IObj (java.lang.Long is in module java.base of loader 'bootstrap'; clojure.lang.IObj is in unnamed module of loader 'app')"
     );
 }
 
@@ -770,7 +770,7 @@ fn alter_and_reset_meta() {
     assert_eq!(run_last(&mut eval, "(meta #'rm1)"), "nil");
     assert_eq!(
         uncaught(&mut eval, "(reset-meta! #'rm1 5)"),
-        "java.lang.ClassCastException | Cannot cast java.lang.Long to clojure.lang.IPersistentMap"
+        "java.lang.ClassCastException | class java.lang.Long cannot be cast to class clojure.lang.IPersistentMap (java.lang.Long is in module java.base of loader 'bootstrap'; clojure.lang.IPersistentMap is in unnamed module of loader 'app')"
     );
     assert_eq!(
         uncaught(&mut eval, "(reset-meta! [1] {})"),
@@ -790,7 +790,7 @@ fn with_meta_receiver_first() {
     let mut eval = boot();
     assert_eq!(
         uncaught(&mut eval, "(with-meta 1 5)"),
-        "java.lang.ClassCastException | Cannot cast java.lang.Long to clojure.lang.IObj"
+        "java.lang.ClassCastException | class java.lang.Long cannot be cast to class clojure.lang.IObj (java.lang.Long is in module java.base of loader 'bootstrap'; clojure.lang.IObj is in unnamed module of loader 'app')"
     );
     assert_eq!(
         uncaught(&mut eval, "(with-meta nil 5)"),
@@ -800,6 +800,6 @@ fn with_meta_receiver_first() {
     // order holds there too.
     assert_eq!(
         uncaught(&mut eval, "(vary-meta 1 (fn [m] 5))"),
-        "java.lang.ClassCastException | Cannot cast java.lang.Long to clojure.lang.IObj"
+        "java.lang.ClassCastException | class java.lang.Long cannot be cast to class clojure.lang.IObj (java.lang.Long is in module java.base of loader 'bootstrap'; clojure.lang.IObj is in unnamed module of loader 'app')"
     );
 }

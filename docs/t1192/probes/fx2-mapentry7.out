@@ -1,0 +1,6 @@
+replace-changed [:x 1]
+replace-changed-class clojure.lang.PersistentVector
+rseq-vec (1 :a)
+rseq-vec-class clojure.lang.APersistentVector$RSeq
+Execution error (ClassCastException) at user/eval9 (fx2-mapentry7.clj:6).
+class java.lang.String cannot be cast to class clojure.lang.Reversible (java.lang.String is in module java.base of loader 'bootstrap'; clojure.lang.Reversible is in unnamed module of loader 'app')
