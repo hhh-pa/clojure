@@ -92,12 +92,18 @@ pub fn hasheq(v: &Value) -> i32 {
         Value::Keyword(k) => keyword_hasheq(k),
         Value::List(l) => hash_ordered(l.iter().map(hasheq)),
         Value::Vector(v) => hash_ordered(v.iter().map(hasheq)),
+        other => hasheq_mid(other),
+    }
+}
+
+fn hasheq_mid(v: &Value) -> i32 {
+    match v {
         // A map entry hashes exactly like its 2-vector (Oracle FX2
         // `hash-eq`: `(hash e)` ≡ `(hash [:a 1])`).
         Value::MapEntry { key, val } => {
             hash_ordered([key.as_ref(), val.as_ref()].into_iter().map(hasheq))
         }
-        Value::Map(m) => hash_unordered(m.iter().map(|(k, v)| map_entry_hasheq(k, v))),
+        Value::Map(m) => hasheq_map(m),
         Value::Set(s) => hash_unordered(s.iter().map(hasheq)),
         // Deterministic stand-in (JVM: identity) — see module docs.
         Value::Regex(source) => hash_int(str_hashcode(source)),
@@ -110,14 +116,50 @@ pub fn hasheq(v: &Value) -> i32 {
         Value::Throwable(t) => id_hash(t.id),
         Value::Transient(t) => id_hash(t.id()),
         Value::Atom(a) => id_hash(a.id()),
+        other => hasheq_rest(other),
+    }
+}
+
+fn hasheq_rest(v: &Value) -> i32 {
+    match v {
         Value::Delay(d) => id_hash(d.id()),
         Value::Future(f) => id_hash(f.id()),
         Value::Promise(p) => id_hash(p.id()),
         Value::Agent(a) => id_hash(a.id()),
-        Value::Extension(ext) => match realized_items(&**ext) {
-            Some(items) => hash_ordered(items.iter().map(hasheq)),
-            None => UNREALIZED_EXTENSION_HASH,
-        },
+        Value::Extension(ext) => hasheq_extension(&**ext),
+        // Handled upstream; re-enter so the chain stays exhaustive.
+        Value::Nil
+        | Value::Bool(_)
+        | Value::Int(_)
+        | Value::Double(_)
+        | Value::Str(_)
+        | Value::Char(_)
+        | Value::Symbol(_)
+        | Value::Keyword(_)
+        | Value::List(_)
+        | Value::Vector(_)
+        | Value::MapEntry { .. }
+        | Value::Map(_)
+        | Value::Set(_)
+        | Value::Regex(_)
+        | Value::TaggedLiteral { .. }
+        | Value::ReaderConditional { .. }
+        | Value::Var(_)
+        | Value::Unbound(_)
+        | Value::Throwable(_)
+        | Value::Transient(_)
+        | Value::Atom(_) => hasheq(v),
+    }
+}
+
+fn hasheq_map(m: &crate::Map) -> i32 {
+    hash_unordered(m.iter().map(|(k, v)| map_entry_hasheq(k, v)))
+}
+
+fn hasheq_extension(ext: &dyn ExtensionValue) -> i32 {
+    match realized_items(ext) {
+        Some(items) => hash_ordered(items.iter().map(hasheq)),
+        None => UNREALIZED_EXTENSION_HASH,
     }
 }
 
@@ -138,26 +180,20 @@ pub fn hash_code(v: &Value) -> i32 {
         Value::Keyword(k) => keyword_hash_code(k),
         Value::List(l) => list_hash_code(l.iter().map(hash_code)),
         Value::Vector(v) => list_hash_code(v.iter().map(hash_code)),
+        other => hash_code_mid(other),
+    }
+}
+
+fn hash_code_mid(v: &Value) -> i32 {
+    match v {
         // `APersistentVector.hashCode` is inherited, so `.hashCode`
         // matches the 2-vector exactly (Oracle FX2 `pr-e`/`str-e`
         // print shape plus `hash-eq`).
         Value::MapEntry { key, val } => {
             list_hash_code([key.as_ref(), val.as_ref()].into_iter().map(hash_code))
         }
-        Value::Map(m) => {
-            let mut sum: i32 = 0;
-            for (k, val) in m.iter() {
-                sum = sum.wrapping_add(hash_code(k) ^ hash_code(val));
-            }
-            sum
-        }
-        Value::Set(s) => {
-            let mut sum: i32 = 0;
-            for x in s.iter() {
-                sum = sum.wrapping_add(hash_code(x));
-            }
-            sum
-        }
+        Value::Map(m) => hash_code_map(m),
+        Value::Set(s) => hash_code_set(s),
         // Deterministic stand-in (JVM: identity) — see module docs.
         Value::Regex(source) => str_hashcode(source),
         // `TaggedLiteral.hashCode`: `31 * hash(tag) + hash(form)`.
@@ -173,15 +209,62 @@ pub fn hash_code(v: &Value) -> i32 {
         Value::Unbound(u) => id_hash(u.var_id),
         Value::Throwable(t) => id_hash(t.id),
         Value::Transient(t) => id_hash(t.id()),
+        other => hash_code_rest(other),
+    }
+}
+
+fn hash_code_rest(v: &Value) -> i32 {
+    match v {
         Value::Atom(a) => id_hash(a.id()),
         Value::Delay(d) => id_hash(d.id()),
         Value::Future(f) => id_hash(f.id()),
         Value::Promise(p) => id_hash(p.id()),
         Value::Agent(a) => id_hash(a.id()),
-        Value::Extension(ext) => match realized_items(&**ext) {
-            Some(items) => list_hash_code(items.iter().map(hash_code)),
-            None => UNREALIZED_EXTENSION_HASH,
-        },
+        Value::Extension(ext) => hash_code_extension(&**ext),
+        // Handled upstream; re-enter so the chain stays exhaustive.
+        Value::Nil
+        | Value::Bool(_)
+        | Value::Int(_)
+        | Value::Double(_)
+        | Value::Str(_)
+        | Value::Char(_)
+        | Value::Symbol(_)
+        | Value::Keyword(_)
+        | Value::List(_)
+        | Value::Vector(_)
+        | Value::MapEntry { .. }
+        | Value::Map(_)
+        | Value::Set(_)
+        | Value::Regex(_)
+        | Value::TaggedLiteral { .. }
+        | Value::ReaderConditional { .. }
+        | Value::Var(_)
+        | Value::Unbound(_)
+        | Value::Throwable(_)
+        | Value::Transient(_) => hash_code(v),
+    }
+}
+
+fn hash_code_map(m: &crate::Map) -> i32 {
+    let mut sum: i32 = 0;
+    for (k, val) in m.iter() {
+        sum = sum.wrapping_add(hash_code(k) ^ hash_code(val));
+    }
+    sum
+}
+
+fn hash_code_set(s: &crate::Set) -> i32 {
+    let mut sum: i32 = 0;
+    for x in s.iter() {
+        sum = sum.wrapping_add(hash_code(x));
+    }
+    sum
+}
+
+fn hash_code_extension(ext: &dyn ExtensionValue) -> i32 {
+    match realized_items(ext) {
+        Some(items) => list_hash_code(items.iter().map(hash_code)),
+        None => UNREALIZED_EXTENSION_HASH,
     }
 }
 

@@ -97,6 +97,10 @@ pub fn print(v: &Value, opts: &PrintOpts) -> String {
 /// `#` when the budget goes negative.
 fn print_into(v: &Value, opts: &PrintOpts, level: Option<i64>, out: &mut String) {
     print_meta_prefix(v, opts, level, out);
+    print_scalars(v, opts, level, out);
+}
+
+fn print_scalars(v: &Value, opts: &PrintOpts, level: Option<i64>, out: &mut String) {
     match v {
         Value::Nil => out.push_str("nil"),
         Value::Bool(true) => out.push_str("true"),
@@ -130,6 +134,12 @@ fn print_into(v: &Value, opts: &PrintOpts, level: Option<i64>, out: &mut String)
                 out,
             );
         }
+        other => print_more(other, opts, level, out),
+    }
+}
+
+fn print_more(v: &Value, opts: &PrintOpts, level: Option<i64>, out: &mut String) {
+    match v {
         // Entries print exactly like their 2-vector (Oracle FX2
         // `pr-e`, `str-e`, `entry-pr`).
         Value::MapEntry { key, val } => {
@@ -154,26 +164,9 @@ fn print_into(v: &Value, opts: &PrintOpts, level: Option<i64>, out: &mut String)
                 out,
             );
         }
-        Value::Map(m) => {
-            let entries: Vec<(&Value, &Value)> = m.iter().collect();
-            let lifted = if opts.namespace_maps {
-                lift_ns(&entries)
-            } else {
-                None
-            };
-            if let Some((ns, lifted)) = lifted {
-                let flat: Vec<(&Value, &Value)> = lifted.iter().map(|(k, v)| (k, v)).collect();
-                print_map_entries(&format!("#:{ns}"), &flat, opts, level, out);
-            } else {
-                print_map_entries("", &entries, opts, level, out);
-            }
-        }
+        Value::Map(m) => print_map_body(m, opts, level, out),
         Value::TaggedLiteral { tag, form } => {
             write!(out, "#{tag} ").unwrap();
-            print_into(form, opts, level, out);
-        }
-        Value::ReaderConditional { form, splicing } => {
-            out.push_str(if *splicing { "#?@" } else { "#?" });
             print_into(form, opts, level, out);
         }
         Value::Var(v) => {
@@ -217,6 +210,16 @@ fn print_into(v: &Value, opts: &PrintOpts, level: Option<i64>, out: &mut String)
             let id = p.id();
             write!(out, "#object[{class} 0x{id:x} \"{class}@{id:x}\"]").unwrap();
         }
+        other => print_rest(other, opts, level, out),
+    }
+}
+
+fn print_rest(v: &Value, opts: &PrintOpts, level: Option<i64>, out: &mut String) {
+    match v {
+        Value::ReaderConditional { form, splicing } => {
+            out.push_str(if *splicing { "#?@" } else { "#?" });
+            print_into(form, opts, level, out);
+        }
         Value::Agent(a) => {
             let id = a.id();
             write!(
@@ -225,22 +228,68 @@ fn print_into(v: &Value, opts: &PrintOpts, level: Option<i64>, out: &mut String)
             )
             .unwrap();
         }
-        Value::Extension(e) => {
-            // Realized seqs print as lists with ambient options
-            // (length/level truncation applies, like the JVM);
-            // every other extension prints its fixed rendering.
-            if let Some(s) = e.as_any().downcast_ref::<crate::RealizedSeq>() {
-                let items = s.items();
-                let refs: Vec<&Value> = items.iter().collect();
-                print_sequential("(", refs, ")", " ", opts, level, out);
-            } else if let Some(sv) = e.as_any().downcast_ref::<crate::SubVectorValue>() {
-                let items = sv.items();
-                let refs: Vec<&Value> = items.iter().collect();
-                print_sequential("[", refs, "]", " ", opts, level, out);
-            } else {
-                out.push_str(&e.print());
-            }
-        }
+        Value::Extension(e) => print_extension_body(e.as_ref(), opts, level, out),
+        // Handled upstream; re-enter so the chain stays exhaustive.
+        Value::Nil
+        | Value::Bool(_)
+        | Value::Int(_)
+        | Value::Double(_)
+        | Value::Str(_)
+        | Value::Char(_)
+        | Value::Symbol(_)
+        | Value::Keyword(_)
+        | Value::Regex(_)
+        | Value::List(_)
+        | Value::Vector(_)
+        | Value::MapEntry { .. }
+        | Value::Set(_)
+        | Value::Map(_)
+        | Value::TaggedLiteral { .. }
+        | Value::Var(_)
+        | Value::Unbound(_)
+        | Value::Throwable(_)
+        | Value::Transient(_)
+        | Value::Atom(_)
+        | Value::Delay(_)
+        | Value::Future(_)
+        | Value::Promise(_) => print_scalars(v, opts, level, out),
+    }
+}
+
+fn print_map_body(m: &crate::Map, opts: &PrintOpts, level: Option<i64>, out: &mut String) {
+    let entries: Vec<(&Value, &Value)> = m.iter().collect();
+    let lifted = if opts.namespace_maps {
+        lift_ns(&entries)
+    } else {
+        None
+    };
+    if let Some((ns, lifted)) = lifted {
+        let flat: Vec<(&Value, &Value)> = lifted.iter().map(|(k, v)| (k, v)).collect();
+        print_map_entries(&format!("#:{ns}"), &flat, opts, level, out);
+    } else {
+        print_map_entries("", &entries, opts, level, out);
+    }
+}
+
+fn print_extension_body(
+    e: &dyn crate::ExtensionValue,
+    opts: &PrintOpts,
+    level: Option<i64>,
+    out: &mut String,
+) {
+    // Realized seqs print as lists with ambient options
+    // (length/level truncation applies, like the JVM);
+    // every other extension prints its fixed rendering.
+    if let Some(s) = e.as_any().downcast_ref::<crate::RealizedSeq>() {
+        let items = s.items();
+        let refs: Vec<&Value> = items.iter().collect();
+        print_sequential("(", refs, ")", " ", opts, level, out);
+    } else if let Some(sv) = e.as_any().downcast_ref::<crate::SubVectorValue>() {
+        let items = sv.items();
+        let refs: Vec<&Value> = items.iter().collect();
+        print_sequential("[", refs, "]", " ", opts, level, out);
+    } else {
+        out.push_str(&e.print());
     }
 }
 
