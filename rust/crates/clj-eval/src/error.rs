@@ -528,6 +528,13 @@ mod tests {
     }
 
     #[test]
+    fn jvm_class_of_host_reenters_scalars() {
+        // The host match lists scalars only so the split stays
+        // exhaustive. That arm re-enters the public function.
+        assert_eq!(jvm_class_of_host(&Value::Nil), "null");
+    }
+
+    #[test]
     fn jvm_class_of_reader_values() {
         // Oracle O1.
         assert_eq!(

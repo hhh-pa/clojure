@@ -450,7 +450,7 @@ impl std::error::Error for ReaderError {}
 
 #[cfg(test)]
 mod tests {
-    use super::{ReaderError, Span};
+    use super::{ReaderError, Span, message_defer};
 
     #[test]
     fn messages_and_classes() {
@@ -541,5 +541,15 @@ mod tests {
             assert_eq!(err.jvm_class(), class);
             assert_eq!(err.span(), span);
         }
+    }
+
+    #[test]
+    fn message_defer_reenters() {
+        // The defer match lists earlier variants only so the split
+        // stays exhaustive. That arm re-enters `message`.
+        let err = ReaderError::Eof {
+            span: Span::new(1, 1),
+        };
+        assert_eq!(message_defer(&err), "EOF while reading");
     }
 }
