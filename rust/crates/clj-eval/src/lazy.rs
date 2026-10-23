@@ -882,21 +882,20 @@ fn step_thunk(eval: &mut Evaluator, thunk: Thunk) -> Result<Forced, Signal> {
         Thunk::Take { n, input } => step_take(eval, &n, input),
         Thunk::Concat { inputs } => step_concat(eval, inputs),
         Thunk::MapCat { outer } => step_mapcat(eval, outer),
-        Thunk::Chain { head, tail } => {
-            if head.is_empty() {
-                step_value_forced(eval, &tail)
-            } else {
-                Ok(Forced::Chunk {
-                    items: Arc::from(head),
-                    tail,
-                })
-            }
-        }
+        Thunk::Chain { head, tail } => step_chain(eval, head, tail),
         Thunk::Thunk0 { body, env } => step_thunk0(eval, &body, &env),
         Thunk::Repeatedly { f } => step_repeatedly(eval, &f),
         Thunk::Interleave { queue, inputs } => step_interleave(eval, queue, inputs),
         Thunk::Interpose { sep, input, first } => step_interpose(eval, sep, input, first),
         Thunk::TakeWhile { f, input } => step_take_while(eval, &f, input),
+        other => step_thunk_mid(eval, other),
+    }
+}
+
+/// Drop, partition, and keep thunks. Chained so each match stays
+/// under the complexity gate.
+fn step_thunk_mid(eval: &mut Evaluator, thunk: Thunk) -> Result<Forced, Signal> {
+    match thunk {
         Thunk::DropWhile { f, input } => step_drop_while(eval, &f, input),
         Thunk::Drop { n, input } => step_drop(eval, &n, input),
         Thunk::TakeNth { n, input } => step_take_nth(eval, &n, input),
@@ -916,6 +915,13 @@ fn step_thunk(eval: &mut Evaluator, thunk: Thunk) -> Result<Forced, Signal> {
         Thunk::Dedupe { last, input } => step_dedupe(eval, last, input),
         Thunk::Keep { f, input } => step_keep(eval, &f, input),
         Thunk::KeepIndexed { f, input, idx } => step_keep_indexed(eval, &f, input, idx),
+        other => step_thunk_rest(eval, other),
+    }
+}
+
+/// Indexed and reduction thunks.
+fn step_thunk_rest(eval: &mut Evaluator, thunk: Thunk) -> Result<Forced, Signal> {
+    match thunk {
         Thunk::MapIndexed { f, input, idx } => step_map_indexed(eval, &f, input, idx),
         Thunk::Reductions {
             f,
@@ -925,6 +931,44 @@ fn step_thunk(eval: &mut Evaluator, thunk: Thunk) -> Result<Forced, Signal> {
             started,
         } => step_reductions(eval, &f, acc, has_init, input, started),
         Thunk::Replace { smap, input } => step_replace(eval, &smap, input),
+        // Handled upstream; re-enter so the chain stays exhaustive.
+        handled @ (Thunk::Map { .. }
+        | Thunk::Filter { .. }
+        | Thunk::Remove { .. }
+        | Thunk::Take { .. }
+        | Thunk::Concat { .. }
+        | Thunk::MapCat { .. }
+        | Thunk::Chain { .. }
+        | Thunk::Thunk0 { .. }
+        | Thunk::Repeatedly { .. }
+        | Thunk::Interleave { .. }
+        | Thunk::Interpose { .. }
+        | Thunk::TakeWhile { .. }
+        | Thunk::DropWhile { .. }
+        | Thunk::Drop { .. }
+        | Thunk::TakeNth { .. }
+        | Thunk::Partition { .. }
+        | Thunk::PartitionAll { .. }
+        | Thunk::PartitionBy { .. }
+        | Thunk::PartitionByAdvance { .. }
+        | Thunk::PartitionRun { .. }
+        | Thunk::Distinct { .. }
+        | Thunk::Dedupe { .. }
+        | Thunk::Keep { .. }
+        | Thunk::KeepIndexed { .. }) => step_thunk(eval, handled),
+    }
+}
+
+/// A prebuilt chain: an empty head forces the tail, otherwise the
+/// head is the whole chunk.
+fn step_chain(eval: &mut Evaluator, head: Vec<Value>, tail: Value) -> Result<Forced, Signal> {
+    if head.is_empty() {
+        step_value_forced(eval, &tail)
+    } else {
+        Ok(Forced::Chunk {
+            items: Arc::from(head),
+            tail,
+        })
     }
 }
 

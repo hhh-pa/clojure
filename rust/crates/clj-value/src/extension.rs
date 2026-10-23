@@ -92,6 +92,14 @@ impl ThrowClass {
             Self::ClassCastException => "java.lang.ClassCastException",
             Self::IndexOutOfBoundsException => "java.lang.IndexOutOfBoundsException",
             Self::ArithmeticException => "java.lang.ArithmeticException",
+            other => other.jvm_name_mid(),
+        }
+    }
+
+    /// Format and I/O throw classes. Chained so each match stays under
+    /// the complexity gate.
+    fn jvm_name_mid(&self) -> &'static str {
+        match self {
             Self::ExceptionInfo => "clojure.lang.ExceptionInfo",
             Self::FileNotFoundException => "java.io.FileNotFoundException",
             Self::IllegalAccessError => "java.lang.IllegalAccessError",
@@ -106,6 +114,13 @@ impl ThrowClass {
             Self::FormatFlagsConversionMismatchException => {
                 "java.util.FormatFlagsConversionMismatchException"
             }
+            other => other.jvm_name_rest(),
+        }
+    }
+
+    /// Remaining throw classes.
+    fn jvm_name_rest(&self) -> &'static str {
+        match self {
             Self::DuplicateFormatFlagsException => "java.util.DuplicateFormatFlagsException",
             Self::IllegalFormatFlagsException => "java.util.IllegalFormatFlagsException",
             Self::IllegalFormatWidthException => "java.util.IllegalFormatWidthException",
@@ -118,6 +133,31 @@ impl ThrowClass {
             Self::ExecutionException => "java.util.concurrent.ExecutionException",
             Self::CancellationException => "java.util.concurrent.CancellationException",
             Self::RejectedExecutionException => "java.util.concurrent.RejectedExecutionException",
+            // Handled upstream; re-enter so the chain stays exhaustive.
+            Self::Exception
+            | Self::Error
+            | Self::RuntimeException
+            | Self::IllegalArgumentException
+            | Self::IllegalStateException
+            | Self::UnsupportedOperationException
+            | Self::AssertionError
+            | Self::ArityException
+            | Self::NullPointerException
+            | Self::ClassCastException
+            | Self::IndexOutOfBoundsException
+            | Self::ArithmeticException
+            | Self::ExceptionInfo
+            | Self::FileNotFoundException
+            | Self::IllegalAccessError
+            | Self::NumberFormatException
+            | Self::StringIndexOutOfBoundsException
+            | Self::IllegalFormatConversionException
+            | Self::UnknownFormatConversionException
+            | Self::MissingFormatConversionException
+            | Self::MissingFormatArgumentException
+            | Self::IllegalFormatPrecisionException
+            | Self::IllegalFormatCodePointException
+            | Self::FormatFlagsConversionMismatchException => self.jvm_name(),
         }
     }
 

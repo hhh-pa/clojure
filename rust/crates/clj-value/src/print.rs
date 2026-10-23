@@ -582,10 +582,15 @@ pub fn java_debug(v: &Value) -> String {
         Value::Regex(pattern) => pattern.to_string(),
         Value::Var(v) => format!("#'{}", v.sym),
         Value::Unbound(u) => format!("Unbound: #'{}", u.sym),
-        Value::Throwable(t) => match &t.message {
-            None => t.class.jvm_name().to_owned(),
-            Some(m) => format!("{}: {}", t.class.jvm_name(), m),
-        },
+        Value::Throwable(t) => java_debug_throwable(t),
+        other => java_debug_rest(other),
+    }
+}
+
+/// Host objects and readable collections. Chained so each match stays
+/// under the complexity gate.
+fn java_debug_rest(v: &Value) -> String {
+    match v {
         Value::Transient(t) => format!("{}@{:x}", t.jvm_class(), t.id()),
         Value::Atom(a) => format!("clojure.lang.Atom@{:x}", a.id()),
         Value::Delay(d) => format!("clojure.lang.Delay@{:x}", d.id()),
@@ -600,6 +605,27 @@ pub fn java_debug(v: &Value) -> String {
         | Value::Set(_)
         | Value::TaggedLiteral { .. }
         | Value::ReaderConditional { .. } => pr_to_string(v, &PrintOpts::pr()),
+        // Handled upstream; re-enter so the chain stays exhaustive.
+        Value::Nil
+        | Value::Bool(_)
+        | Value::Int(_)
+        | Value::Double(_)
+        | Value::Str(_)
+        | Value::Char(_)
+        | Value::Symbol(_)
+        | Value::Keyword(_)
+        | Value::Regex(_)
+        | Value::Var(_)
+        | Value::Unbound(_)
+        | Value::Throwable(_) => java_debug(v),
+    }
+}
+
+/// `Throwable.toString`: class name, plus `: message` when present.
+fn java_debug_throwable(t: &crate::Throwable) -> String {
+    match &t.message {
+        None => t.class.jvm_name().to_owned(),
+        Some(m) => format!("{}: {}", t.class.jvm_name(), m),
     }
 }
 
@@ -664,67 +690,98 @@ pub fn java_double_string(d: f64) -> String {
         return "NaN".to_owned();
     }
     if d.is_infinite() {
-        return if d.is_sign_positive() {
-            "Infinity".to_owned()
-        } else {
-            "-Infinity".to_owned()
-        };
+        return java_infinite_string(d);
     }
     if d == 0.0 {
-        return if d.is_sign_negative() {
-            "-0.0".to_owned()
-        } else {
-            "0.0".to_owned()
-        };
+        return java_zero_string(d);
     }
     if let Some(patched) = dtoa_subnormal_patch(d.to_bits() & 0x7FFF_FFFF_FFFF_FFFF) {
-        if d.is_sign_negative() {
-            return format!("-{patched}");
-        }
-        return patched.to_owned();
+        return java_patched_string(d, patched);
     }
     let (neg, digits, exp10) = ryu_parts(d);
+    java_finite_digits(neg, &digits, exp10)
+}
+
+fn java_infinite_string(d: f64) -> String {
+    if d.is_sign_positive() {
+        "Infinity".to_owned()
+    } else {
+        "-Infinity".to_owned()
+    }
+}
+
+fn java_zero_string(d: f64) -> String {
+    if d.is_sign_negative() {
+        "-0.0".to_owned()
+    } else {
+        "0.0".to_owned()
+    }
+}
+
+fn java_patched_string(d: f64, patched: &str) -> String {
+    if d.is_sign_negative() {
+        format!("-{patched}")
+    } else {
+        patched.to_owned()
+    }
+}
+
+/// Finite `Double.toString` layout: plain in `[1e-3, 1e7)` (`exp10`
+/// in `[-3, 6]`), scientific otherwise. Digits are `d1.d2..dn` with
+/// `d1 != 0`.
+fn java_finite_digits(neg: bool, digits: &str, exp10: i32) -> String {
     debug_assert!(!digits.is_empty() && !digits.starts_with('0'));
     let mut out = String::new();
     if neg {
         out.push('-');
     }
-    // Plain in [1e-3, 1e7): exp10 in [-3, 6].
     if (-3..=6).contains(&exp10) {
-        if exp10 >= 0 {
-            let int_len = exp10 as usize + 1;
-            if digits.len() >= int_len {
-                out.push_str(&digits[..int_len]);
-                out.push('.');
-                let frac = &digits[int_len..];
-                if frac.is_empty() {
-                    out.push('0');
-                } else {
-                    out.push_str(frac);
-                }
-            } else {
-                out.push_str(&digits);
-                out.push_str(&"0".repeat(int_len - digits.len()));
-                out.push_str(".0");
-            }
-        } else {
-            out.push_str("0.");
-            out.push_str(&"0".repeat((-exp10 - 1) as usize));
-            out.push_str(&digits);
-        }
+        push_plain_digits(&mut out, digits, exp10);
     } else {
-        let (d1, rest) = digits.split_at(1);
-        out.push_str(d1);
-        out.push('.');
-        if rest.is_empty() {
-            out.push('0');
-        } else {
-            out.push_str(rest);
-        }
-        out.push('E');
-        write!(out, "{exp10}").unwrap();
+        push_scientific_digits(&mut out, digits, exp10);
     }
     out
+}
+
+fn push_plain_digits(out: &mut String, digits: &str, exp10: i32) {
+    if exp10 >= 0 {
+        push_plain_nonneg(out, digits, exp10);
+    } else {
+        out.push_str("0.");
+        out.push_str(&"0".repeat((-exp10 - 1) as usize));
+        out.push_str(digits);
+    }
+}
+
+fn push_plain_nonneg(out: &mut String, digits: &str, exp10: i32) {
+    let int_len = exp10 as usize + 1;
+    if digits.len() >= int_len {
+        out.push_str(&digits[..int_len]);
+        out.push('.');
+        let frac = &digits[int_len..];
+        if frac.is_empty() {
+            out.push('0');
+        } else {
+            out.push_str(frac);
+        }
+    } else {
+        out.push_str(digits);
+        out.push_str(&"0".repeat(int_len - digits.len()));
+        out.push_str(".0");
+    }
+}
+
+fn push_scientific_digits(out: &mut String, digits: &str, exp10: i32) {
+    let (d1, rest) = digits.split_at(1);
+    out.push_str(d1);
+    out.push('.');
+    if rest.is_empty() {
+        out.push('0');
+    } else {
+        out.push_str(rest);
+    }
+    out.push('E');
+    write!(out, "{exp10}").unwrap();
 }
 
 #[cfg(test)]

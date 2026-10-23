@@ -795,62 +795,91 @@ impl PartialEq for Value {
             // Realized seqs compare sequentially against
             // List/Vector/realized seqs (never maps, sets, or
             // pending seqs, which `=` realizes first).
-            (a, b) if seq_items(a).is_some() || seq_items(b).is_some() => {
-                match (seq_items(a), seq_items(b)) {
-                    (Some(x), Some(y)) => x == y,
-                    _ => false,
-                }
-            }
-            (Value::Map(a), Value::Map(b)) => {
-                a.size() == b.size() && a.iter().all(|(k, v)| b.get(k) == Some(v))
-            }
-            (Value::Set(a), Value::Set(b)) => {
-                a.size() == b.size() && a.iter().all(|v| b.contains(v))
-            }
-            // Identity semantics like java.util.regex.Pattern.
-            (Value::Regex(a), Value::Regex(b)) => Arc::ptr_eq(a, b),
-            // `TaggedLiteral.equals`/`ReaderConditional.equals`
-            // delegate to the form's `.equals` (doubles by bits, so
-            // `[0.0]` ≠ `[-0.0]` but `[##NaN]` ≡ `[##NaN]`); `=`
-            // reaches them through the `Util.equiv` `.equals`
-            // fallback. The `Hash` impl stays `equiv`-based: bits-equal
-            // forms hash equally, so the `Eq`/`Hash` contract holds.
-            (
-                Value::TaggedLiteral { tag: t1, form: f1 },
-                Value::TaggedLiteral { tag: t2, form: f2 },
-            ) => t1 == t2 && plain_equals(f1, f2),
-            (
-                Value::ReaderConditional {
-                    form: f1,
-                    splicing: s1,
-                },
-                Value::ReaderConditional {
-                    form: f2,
-                    splicing: s2,
-                },
-            ) => s1 == s2 && plain_equals(f1, f2),
-            // S4 identity semantics, mirroring `=`: ids only, never
-            // payloads; extensions dispatch through the trait.
-            (Value::Var(a), Value::Var(b)) => a.id == b.id,
-            (Value::Unbound(a), Value::Unbound(b)) => a.var_id == b.var_id,
-            (Value::Throwable(a), Value::Throwable(b)) => a.id == b.id,
-            (Value::Transient(a), Value::Transient(b)) => a.same_cell(b),
-            // Shared cell AND equal meta: a `with-meta` copy shares
-            // the cell but compares unequal (delays carry no meta,
-            // so the cell alone decides there).
-            (Value::Atom(a), Value::Atom(b)) => cell_meta_eq(a.same_cell(b), a.meta(), b.meta()),
-            (Value::Delay(a), Value::Delay(b)) => a.same_cell(b),
-            (Value::Future(a), Value::Future(b)) => {
-                cell_meta_eq(a.same_cell(b), a.meta(), b.meta())
-            }
-            (Value::Promise(a), Value::Promise(b)) => {
-                cell_meta_eq(a.same_cell(b), a.meta(), b.meta())
-            }
-            (Value::Agent(a), Value::Agent(b)) => cell_meta_eq(a.same_cell(b), a.meta(), b.meta()),
-            (Value::Extension(a), Value::Extension(b)) => a.dyn_eq(&**b),
-            _ => false,
+            (a, b) if either_seq(a, b) => seq_items_eq(a, b),
+            pair => value_eq_mid(pair.0, pair.1),
         }
     }
+}
+
+/// At least one side is sequential (`seq_items`).
+fn either_seq(a: &Value, b: &Value) -> bool {
+    seq_items(a).is_some() || seq_items(b).is_some()
+}
+
+fn seq_items_eq(a: &Value, b: &Value) -> bool {
+    match (seq_items(a), seq_items(b)) {
+        (Some(x), Some(y)) => x == y,
+        _ => false,
+    }
+}
+
+/// Maps, sets, reader forms, and identity values. Chained so each
+/// match stays under the complexity gate.
+fn value_eq_mid(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Map(a), Value::Map(b)) => map_value_eq(a, b),
+        (Value::Set(a), Value::Set(b)) => set_value_eq(a, b),
+        // Identity semantics like java.util.regex.Pattern.
+        (Value::Regex(a), Value::Regex(b)) => Arc::ptr_eq(a, b),
+        // `TaggedLiteral.equals`/`ReaderConditional.equals`
+        // delegate to the form's `.equals` (doubles by bits, so
+        // `[0.0]` ≠ `[-0.0]` but `[##NaN]` ≡ `[##NaN]`); `=`
+        // reaches them through the `Util.equiv` `.equals`
+        // fallback. The `Hash` impl stays `equiv`-based: bits-equal
+        // forms hash equally, so the `Eq`/`Hash` contract holds.
+        (
+            Value::TaggedLiteral { tag: t1, form: f1 },
+            Value::TaggedLiteral { tag: t2, form: f2 },
+        ) => tagged_literal_eq(t1, f1, t2, f2),
+        (
+            Value::ReaderConditional {
+                form: f1,
+                splicing: s1,
+            },
+            Value::ReaderConditional {
+                form: f2,
+                splicing: s2,
+            },
+        ) => reader_cond_eq(*s1, f1, *s2, f2),
+        // S4 identity semantics, mirroring `=`: ids only, never
+        // payloads; extensions dispatch through the trait.
+        (Value::Var(a), Value::Var(b)) => a.id == b.id,
+        (Value::Unbound(a), Value::Unbound(b)) => a.var_id == b.var_id,
+        (Value::Throwable(a), Value::Throwable(b)) => a.id == b.id,
+        (Value::Transient(a), Value::Transient(b)) => a.same_cell(b),
+        // Shared cell AND equal meta: a `with-meta` copy shares
+        // the cell but compares unequal (delays carry no meta,
+        // so the cell alone decides there).
+        (Value::Atom(a), Value::Atom(b)) => cell_meta_eq(a.same_cell(b), a.meta(), b.meta()),
+        (Value::Delay(a), Value::Delay(b)) => a.same_cell(b),
+        (Value::Future(a), Value::Future(b)) => cell_meta_eq(a.same_cell(b), a.meta(), b.meta()),
+        pair => value_eq_rest(pair.0, pair.1),
+    }
+}
+
+fn value_eq_rest(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Promise(a), Value::Promise(b)) => cell_meta_eq(a.same_cell(b), a.meta(), b.meta()),
+        (Value::Agent(a), Value::Agent(b)) => cell_meta_eq(a.same_cell(b), a.meta(), b.meta()),
+        (Value::Extension(a), Value::Extension(b)) => a.dyn_eq(&**b),
+        _ => false,
+    }
+}
+
+fn map_value_eq(a: &Map, b: &Map) -> bool {
+    a.size() == b.size() && a.iter().all(|(k, v)| b.get(k) == Some(v))
+}
+
+fn set_value_eq(a: &Set, b: &Set) -> bool {
+    a.size() == b.size() && a.iter().all(|v| b.contains(v))
+}
+
+fn tagged_literal_eq(t1: &Symbol, f1: &Value, t2: &Symbol, f2: &Value) -> bool {
+    t1 == t2 && plain_equals(f1, f2)
+}
+
+fn reader_cond_eq(s1: bool, f1: &Value, s2: bool, f2: &Value) -> bool {
+    s1 == s2 && plain_equals(f1, f2)
 }
 
 // `Eq`'s reflexivity technically fails for NaN (never `=` to itself,
