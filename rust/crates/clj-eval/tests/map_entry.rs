@@ -735,10 +735,12 @@ fn outlet_entry_rows() {
         ),
         "java.lang.IllegalArgumentException | Don't know how to create ISeq from: clojure.lang.Keyword"
     );
-    // Non-entry elements keep the outlet path's stable cast text.
+    // A vector is not an `ISeq`, so `:all` is `merge` of the vector.
+    // `merge` reports the JDK cast (the unexpanded analyzer outlet
+    // used the short `Cannot cast` text).
     assert_eq!(
         uncaught(&mut eval, "(let [{x :x, :or {x 1}, :all a} [(list :k)]] a)"),
-        "java.lang.ClassCastException | Cannot cast clojure.lang.Keyword to java.util.Map$Entry"
+        "java.lang.ClassCastException | class clojure.lang.Keyword cannot be cast to class java.util.Map$Entry (clojure.lang.Keyword is in unnamed module of loader 'app'; java.util.Map$Entry is in module java.base of loader 'bootstrap')"
     );
     // A multi-entry list `from`: the one-element `from` unwraps
     // to `((e1 e2))`, so `into1` hands the entry list to
@@ -858,13 +860,13 @@ fn probe18_entry_binding_forms() {
     // keyword binding fails ...
     assert_eq!(
         uncaught(&mut eval, "(eval (list (quote let) (first {:x 1}) 1))"),
-        "clojure.lang.Compiler$CompilerException | Syntax error macroexpanding clojure.core/let at (user:1:1)."
+        "clojure.lang.Compiler$CompilerException | Syntax error macroexpanding let at (user:1:1)."
     );
     // fx2-mapentry18.let-kw-vec: ... identically to the plain
     // vector control (the failure is about `:x`, not entryness).
     assert_eq!(
         uncaught(&mut eval, "(eval (list (quote let) [(quote :x) 1] 1))"),
-        "clojure.lang.Compiler$CompilerException | Syntax error macroexpanding clojure.core/let at (user:1:1)."
+        "clojure.lang.Compiler$CompilerException | Syntax error macroexpanding let at (user:1:1)."
     );
     // fx2-mapentry18.fn-entry-invoke/fn-entry-fnq: an entry
     // params vector makes a real fn.

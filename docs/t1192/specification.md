@@ -170,10 +170,15 @@ FIX (slice id), STRUCTURAL (forcing mechanism), INVESTIGATE
 (probe first, verdict in-slice).
 
 FIX:
-- D-macroexpand: 9 analyzer builtins with `macroexpand-1`
-  identity (`let loop fn binding letfn with-redefs
-  with-bindings bound-fn locking`) → FX4. Oracle smoke done:
-  JVM `(macroexpand-1 '(let [a 1] a))` is `(let* [a 1] a)`.
+- D-macroexpand: FIXED for the nine analyzer builtins
+  (`let` `loop` `fn` `binding` `letfn` `with-redefs`
+  `with-bindings` `bound-fn` `locking` expand in
+  `macroexpand-1`; probe `fx4-macroexpand`). `defmacro`
+  `declare` `ns` `assert` `time` `with-out-str` stay the
+  identity fence. No spec instrumentation: the macro body
+  raises its own arity / binding errors (the JVM's spec
+  message still fires first on those shapes). `analyze()`
+  on an unbooted evaluator still sees the specials.
 - D-xform: 7 seq-fn transducer arities + `into` plain-only →
   FT7 (needs the transducer protocol).
 - D-mapentry: FIXED (real `Value::MapEntry`: `key`/`val`
@@ -338,8 +343,10 @@ FX2 MapEntry (D-mapentry). Follow-ups found in-slice (slice
   flipped to the JDK `IObj` text; `seq_opt` rejects seq
   values on the outlet path (custom paths only, no oracle).
 FX3 pre/post validation (D-prepost).
-FX4 analyzer builtins as real macros (D-macroexpand: `let*`/
-  `fn*`/`loop*` special forms + core macro defs + analyzer).
+FX4 analyzer builtins as real macros (D-macroexpand: the
+  nine heads expand to `let*`/`fn*`/`loop*` and the qualified
+  helper calls; the six fence macros stay identity). Done.
+  FX4b is not this slice.
 FX4b printer/writer (D-printdup/D-streamprint/D-astral-fmt).
 FT1 number tower (F-tower; closes D-div; D-charf/D-pctpop
   land here; S-intlong documented).
