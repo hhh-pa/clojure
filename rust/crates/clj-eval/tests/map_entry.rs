@@ -692,6 +692,9 @@ fn seq_fn_rows() {
         run_last(&mut eval, "(map vec (split-at 1 e))"),
         "([:a] [1])"
     );
+    // fx2-mapentry6.reversible?: entries implement Reversible
+    // (fx2b-reversible `entry`).
+    assert_eq!(run_last(&mut eval, "(reversible? e)"), "true");
     // No `flatten` row: `flatten` needs lazy tree-walk machinery the
     // port lacks (`tree-seq` is unimplemented) — the probe6
     // `flatten` row stands as the oracle pin for that slice.
@@ -942,6 +945,84 @@ fn probe18_arity_errors() {
         uncaught(&mut eval, "(sorted? [1] [2])"),
         "clojure.lang.ArityException | Wrong number of args (2) passed to: clojure.core/sorted?"
     );
+    assert_eq!(
+        uncaught(&mut eval, "(reversible?)"),
+        "clojure.lang.ArityException | Wrong number of args (0) passed to: clojure.core/reversible?"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(reversible? [1] [2])"),
+        "clojure.lang.ArityException | Wrong number of args (2) passed to: clojure.core/reversible?"
+    );
+}
+
+#[test]
+fn reversible_pred_rows() {
+    let mut eval = boot();
+    // fx2b-reversible: true on `IPersistentVector` only among
+    // constructible values (vectors, entries, subvectors).
+    // Sorted maps/sets and `vector-of` are oracle-true but not
+    // constructible (FT6 / no gvec) — no port-false pin against
+    // those rows. Queues and records are oracle-false and also
+    // not constructible. Ratios do not read (N3).
+    for (form, want) in [
+        ("(reversible? nil)", "false"),
+        ("(reversible? 1)", "false"),
+        ("(reversible? 1.0)", "false"),
+        ("(reversible? true)", "false"),
+        ("(reversible? \\a)", "false"),
+        ("(reversible? \"ab\")", "false"),
+        ("(reversible? \"\")", "false"),
+        ("(reversible? :a)", "false"),
+        ("(reversible? 'a)", "false"),
+        ("(reversible? ())", "false"),
+        ("(reversible? '(1 2))", "false"),
+        ("(reversible? [])", "true"),
+        ("(reversible? [1 2 3])", "true"),
+        ("(reversible? (with-meta [1] {:m 1}))", "true"),
+        ("(reversible? (first {:a 1}))", "true"),
+        ("(reversible? (find {:a 1} :a))", "true"),
+        ("(reversible? (first (hash-map :a 1)))", "true"),
+        ("(reversible? {:a 1})", "false"),
+        ("(reversible? {})", "false"),
+        ("(reversible? (hash-map :a 1))", "false"),
+        ("(reversible? (apply hash-map (range 40)))", "false"),
+        ("(reversible? #{})", "false"),
+        ("(reversible? #{1 2})", "false"),
+        ("(reversible? (subvec [1 2 3 4] 1 3))", "true"),
+        ("(reversible? (subvec [1 2 3] 3))", "true"),
+        (
+            "(reversible? (with-meta (subvec [1 2 3] 0) {:m 1}))",
+            "true",
+        ),
+        ("(reversible? (cons 1 nil))", "false"),
+        ("(reversible? (cons 1 [2 3]))", "false"),
+        ("(reversible? (lazy-seq [1 2]))", "false"),
+        ("(reversible? (lazy-seq nil))", "false"),
+        ("(reversible? (range 3))", "false"),
+        ("(reversible? (range))", "false"),
+        ("(reversible? (repeat 3 :x))", "false"),
+        ("(reversible? (cycle [1]))", "false"),
+        ("(reversible? (iterate inc 0))", "false"),
+        ("(reversible? (seq [1 2 3]))", "false"),
+        ("(reversible? (seq (subvec [1 2 3] 0 2)))", "false"),
+        ("(reversible? (seq \"ab\"))", "false"),
+        ("(reversible? (seq {:a 1}))", "false"),
+        ("(reversible? (transient [1 2]))", "false"),
+        ("(reversible? (transient []))", "false"),
+        ("(reversible? (transient {:a 1}))", "false"),
+        ("(reversible? (transient {}))", "false"),
+        ("(reversible? (transient #{1}))", "false"),
+        ("(reversible? (rseq [1 2 3]))", "false"),
+        ("(reversible? (rseq []))", "false"),
+        ("(reversible? (rseq (first {:a 1})))", "false"),
+        ("(reversible? (rseq (subvec [1 2 3] 0 2)))", "false"),
+        ("(reversible? (fn [x] x))", "false"),
+        ("(reversible? (var inc))", "false"),
+        ("(reversible? (atom 1))", "false"),
+        ("(reversible? #\"a\")", "false"),
+    ] {
+        assert_eq!(run_last(&mut eval, form), want, "{form}");
+    }
 }
 
 #[test]
