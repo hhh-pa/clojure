@@ -367,6 +367,14 @@ M1 master-delta inventory: list `clojure/clojure:master`
   commits past 1.13.0-alpha9, triage each to port/skip/
   already-have; seeds the Phase 2 catch-up slices (defined
   here, worked after REL ships).
+CX complexity-zero (standing program, user directive):
+  drive `rust/complexity-baseline.json` to zero entries in
+  dedicated refactor slices (split dispatch tables and hot
+  helpers under the cyclomatic/cognitive caps). Until then,
+  new or worsened entries need a recorded justification and
+  count as debt against this goal; FX2 added 2 entries
+  (`lookup_present`, `lookup`) and worsened 8 dispatch
+  tables — first candidates for the CX pass.
 
 Each slice lands as its own `T1192:` commit series + PR with
 `/review-loop` to acceptance; landing stays explicit-only.
