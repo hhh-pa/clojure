@@ -325,12 +325,14 @@ FX0 spec (this file) + oracle smoke (done: jar + probe work).
 FX1 small deterministic fixes (D-tsneg/D-time/D-emptymeta/
   D-cce-shape/D-caseacc/D-postfuture/D-shutdrain/D-avaroot/
   D-argv + I-nthf64/I-huge/I-hashinf probes).
-FX2 MapEntry (D-mapentry). Follow-ups found in-slice (slice
-  TBD): `flatten`/`tree-seq`/`reversible?`/`chunk-*`
-  unimplemented, each with a non-resolution pin
-  (`ns_vars.rs fx2_tree_walk_vars_stay_unresolved`;
-  probe6 `flatten`/`reversible?` rows stand as the oracle
-  pins — oracle `reversible?` is true on entries);
+FX2 MapEntry (D-mapentry). Follow-ups found in-slice:
+  `reversible?` landed in this slice (Reversible values;
+  oracle true on vectors, subvectors, map entries, sorted
+  colls, and `vector-of` — port matches the constructible
+  ones, `docs/t1192/probes/fx2b-reversible`); `flatten`/`tree-seq`/
+  `chunk-*` stay unimplemented, each with a non-resolution
+  pin (`ns_vars.rs fx2_tree_walk_vars_stay_unresolved`;
+  probe6 `flatten` rows stand as the oracle pins);
   `instance?` stays permanent N1 out-of-scope (not
   a slice follow-up); the invoke fallback keeps the pinned
   §E8 cast text (oracle reports JDK — FX7 input) while

@@ -98,7 +98,7 @@ unbounded, `:fail` / `:continue` error modes, `await` / `await-for`,
 `restart-agent`, `shutdown-agents`), `locking`, `add-watch` /
 `remove-watch`, `realized?`.
 
-**Core vars: 334 implemented, 19 divergent, 65 out of scope**
+**Core vars: 335 implemented, 19 divergent, 65 out of scope**
 ([`rust/core-coverage.md`](rust/core-coverage.md) is normative and
 CI-enforced: listed vars must resolve, excluded ones must not).
 

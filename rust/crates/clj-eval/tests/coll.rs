@@ -920,6 +920,11 @@ fn counted_pred_rows() {
     assert_eq!(run_last(&mut eval, "(counted? (subvec [1] 0))"), "true");
     assert_eq!(run_last(&mut eval, "(counted? (transient [1]))"), "true");
     assert_eq!(run_last(&mut eval, "(vector? (subvec [1] 0))"), "true");
+    assert_eq!(run_last(&mut eval, "(reversible? (subvec [1] 0))"), "true");
+    assert_eq!(
+        run_last(&mut eval, "(reversible? (transient [1]))"),
+        "false"
+    );
     assert_eq!(run_last(&mut eval, "(sequential? (subvec [1] 0))"), "true");
     assert_eq!(run_last(&mut eval, "(associative? (subvec [1] 0))"), "true");
     assert_eq!(run_last(&mut eval, "(coll? (subvec [1] 0))"), "true");

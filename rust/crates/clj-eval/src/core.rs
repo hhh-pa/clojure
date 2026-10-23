@@ -964,6 +964,14 @@ fn is_set(v: &Value) -> bool {
 fn is_sorted(_v: &Value) -> bool {
     false
 }
+// `IPersistentVector` (vectors, map entries, subvectors) implements
+// `clojure.lang.Reversible`. Sorted maps and sets do too on the JVM
+// but are not constructible yet (FT6 extends this). Lists, hash
+// maps, hash sets, queues, seqs (including `rseq`), and transients
+// do not (`docs/t1192/probes/fx2b-reversible`).
+fn is_reversible(v: &Value) -> bool {
+    matches!(v, Value::Vector(_) | Value::MapEntry { .. }) || as_subvector(v).is_some()
+}
 fn is_var(v: &Value) -> bool {
     matches!(v, Value::Var(_))
 }
@@ -1048,6 +1056,11 @@ pred1!(native_vectorp, "clojure.core/vector?", is_vector);
 pred1!(native_mapp, "clojure.core/map?", is_map);
 pred1!(native_setp, "clojure.core/set?", is_set);
 pred1!(native_sortedp, "clojure.core/sorted?", is_sorted);
+pred1!(
+    native_reversiblep,
+    "clojure.core/reversible?",
+    is_reversible
+);
 pred1!(native_fnp, "clojure.core/fn?", is_fn_val);
 pred1!(native_ifnp, "clojure.core/ifn?", is_ifn);
 pred1!(native_varp, "clojure.core/var?", is_var);
@@ -1839,6 +1852,7 @@ pub(crate) const CORE_NATIVES: &[(&str, NativeFnPtr)] = &[
     ("map?", native_mapp),
     ("set?", native_setp),
     ("sorted?", native_sortedp),
+    ("reversible?", native_reversiblep),
     ("fn?", native_fnp),
     ("ifn?", native_ifnp),
     ("var?", native_varp),
