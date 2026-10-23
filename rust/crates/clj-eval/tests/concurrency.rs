@@ -2945,10 +2945,14 @@ fn locking_rows() {
         uncaught(&mut eval, "(locking)"),
         "clojure.lang.ArityException | Wrong number of args (0) passed to: clojure.core/locking"
     );
-    // A builtin: `macroexpand-1` is identity.
-    assert_eq!(
-        run_last(&mut eval, "(macroexpand-1 '(locking x 1))"),
-        "(locking x 1)"
+    // `locking` expands (gensym ids depend on earlier evals).
+    let expanded = run_last(&mut eval, "(macroexpand-1 '(locking x 1))");
+    assert!(
+        expanded.starts_with("(clojure.core/let [lockee__")
+            && expanded.contains("monitor-enter")
+            && expanded.contains("monitor-exit")
+            && !expanded.contains("(locking"),
+        "{expanded}"
     );
 }
 

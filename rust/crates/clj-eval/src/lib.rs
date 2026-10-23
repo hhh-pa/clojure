@@ -13,15 +13,19 @@
 //! runs them. Single namespace (`user`), no prelude yet (S5).
 
 pub mod aot_subset;
+pub mod builtin_expand;
 pub mod coll;
 pub mod concurrency;
 pub mod core;
+pub mod destructure_expand;
 pub mod env;
 pub mod error;
 pub mod eval;
 pub mod expr;
 pub mod ext;
 pub mod fmt;
+pub mod fx4_form;
+pub mod fx4_host;
 pub mod io;
 pub mod lazy;
 pub mod macros;

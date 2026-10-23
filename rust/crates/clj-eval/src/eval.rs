@@ -2040,7 +2040,7 @@ impl Evaluator {
     /// `seq-to-map-for-destructuring`: only lists convert (S4 has no
     /// other `ISeq`s). Empty is `{}`, one element is the element,
     /// longer reads pairs plus the trailing rule (§E12).
-    fn seq_to_map(&mut self, value: &Value) -> Result<Value, Signal> {
+    pub(crate) fn seq_to_map(&mut self, value: &Value) -> Result<Value, Signal> {
         let Value::List(list) = value else {
             return Ok(value.clone());
         };

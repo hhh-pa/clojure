@@ -74,29 +74,54 @@ pub(crate) fn is_private_var(eval: &Evaluator, id: u64) -> bool {
     })
 }
 
-/// Whether a symbol names a builtin-macro var.
-fn is_builtin_sym(sym: &Symbol) -> bool {
-    sym.namespace() == Some("clojure.core") && BUILTIN_MACROS.contains(&sym.name())
+/// Fence macros that stay identity (real macros on the JVM; the
+/// port still analyzes them). The FX4 nine expand.
+const FENCE_MACROS: &[&str] = &[
+    "defmacro",
+    "declare",
+    "ns",
+    "assert",
+    "time",
+    "with-out-str",
+];
+
+fn is_expand_macro(name: &str) -> bool {
+    matches!(
+        name,
+        "let"
+            | "loop"
+            | "fn"
+            | "binding"
+            | "letfn"
+            | "with-redefs"
+            | "with-bindings"
+            | "bound-fn"
+            | "locking"
+    )
 }
 
-/// Heads `macroexpand-1` leaves alone: specials (bare or
-/// `clojure.core`-qualified) and builtin-macro vars (the
-/// documented identity fence — the JVM expands the real
-/// `let`/`declare`/`ns`/… macros; the port's placeholder roots
-/// cannot run, so user-macro expansions headed by a builtin
-/// stop there instead of failing).
+fn is_fence_sym(sym: &Symbol) -> bool {
+    sym.namespace() == Some("clojure.core") && FENCE_MACROS.contains(&sym.name())
+}
+
+/// Heads `macroexpand-1` leaves alone: real specials (bare or
+/// `clojure.core`-qualified) and the six fence-macro vars. The
+/// nine FX4 heads are specials too, but they expand.
 fn is_identity_head(eval: &Evaluator, op: &Value) -> bool {
     match op {
         Value::Symbol(sym) => {
-            if sym.namespace().is_none_or(|ns| ns == "clojure.core") && is_special(sym.name()) {
+            if sym.namespace().is_none_or(|ns| ns == "clojure.core")
+                && is_special(sym.name())
+                && !is_expand_macro(sym.name())
+            {
                 return true;
             }
             let cur = eval.current_ns_name();
             eval.registry
                 .resolve_in(&cur, sym)
-                .is_some_and(|target| is_builtin_sym(&target))
+                .is_some_and(|target| is_fence_sym(&target))
         }
-        Value::Var(v) => is_builtin_sym(&v.sym),
+        Value::Var(v) => is_fence_sym(&v.sym),
         _ => false,
     }
 }

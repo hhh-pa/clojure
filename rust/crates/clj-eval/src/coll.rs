@@ -75,7 +75,7 @@ fn java_simple_name(v: &Value) -> String {
 /// Present-or-missing lookup mirroring `RT.get` exactly (`Some`
 /// even for present-nil; `None` ⟺ `not-found`). Vector-family keys
 /// truncate through `i32` (`intValue` wraps, like the JVM).
-fn lookup_present(coll: &Value, key: &Value) -> Result<Option<Value>, NativeError> {
+pub(crate) fn lookup_present(coll: &Value, key: &Value) -> Result<Option<Value>, NativeError> {
     match coll {
         Value::Nil => Ok(None),
         Value::Map(m) => Ok(m.get(key).cloned()),
