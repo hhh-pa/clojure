@@ -48,11 +48,20 @@
 //! - [`Value::Regex`] is a deliberate deterministic stand-in: the JVM
 //!   hashes patterns by identity, but here a regex hashes as its source
 //!   string. Do not assert it against JVM output either.
-//! - Numerics are [`Value::Int`]/[`Value::Double`] only: this crate has
-//!   no Ratio/BigInt/BigDec (the reader defers them; follow-up N3).
+//! - Tower numerics ([`Value::BigInt`]/[`Value::BigDec`]/
+//!   [`Value::Ratio`]) hash equiv-consistently but NOT to JVM-magic
+//!   values: `BigInt` in `long` range hashes exactly like `Int`,
+//!   decimals mix the trailing-zero-stripped pair, rationals mix
+//!   numerator and denominator. `=`-equal tower values always hash
+//!   equally (map/set lookups agree with the JVM); the bare `hash`
+//!   integers may differ from JVM output — do not assert them
+//!   against JVM output, only consistency (`equal ⇒ same hash`)
+//!   and the in-range `BigInt`-`Int` agreement.
 //! - `(format "%h" nil)` rendering `"null"` is `format`-level behavior
 //!   (Java renders a null `%h` argument as `"null"`); [`hash_code`] of
 //!   nil is `0`, for use inside collections.
+
+use num_traits::{ToPrimitive, Zero};
 
 use crate::{
     CycleValue, ExtensionValue, IterateValue, Keyword, RangeNum, RangeValue, RealizedSeq,
@@ -92,6 +101,24 @@ pub fn hasheq(v: &Value) -> i32 {
         Value::Keyword(k) => keyword_hasheq(k),
         Value::List(l) => hash_ordered(l.iter().map(hasheq)),
         Value::Vector(v) => hash_ordered(v.iter().map(hasheq)),
+        // Tower (equiv-consistent, structural otherwise — the JVM
+        // magic values are not mirrored, see module docs):
+        // `BigInt` in `long` range hashes exactly like `Int`
+        // (`{5N :a}` looks up by `5`); wider ones mix their
+        // bytes; decimals mix the stripped pair (so `5.0M` ≡
+        // `5.00M`); rationals mix numerator and denominator.
+        Value::BigInt(n) => match n.to_i64() {
+            Some(i) => hash_long(i),
+            None => hash_ordered(n.to_signed_bytes_be().into_iter().map(i32::from)),
+        },
+        Value::BigDec(d) => {
+            let (unscaled, scale) = d.stripped();
+            hash_combine(hasheq(&Value::BigInt(unscaled)), hash_long(scale))
+        }
+        Value::Ratio(r) => hash_combine(
+            hasheq(&Value::BigInt(r.numer().clone())),
+            hasheq(&Value::BigInt(r.denom().clone())),
+        ),
         other => hasheq_mid(other),
     }
 }
@@ -201,6 +228,20 @@ fn hash_code_rest(v: &Value) -> i32 {
         Value::Future(f) => id_hash(f.id()),
         Value::Promise(p) => id_hash(p.id()),
         Value::Agent(a) => id_hash(a.id()),
+        // Deterministic stand-ins (the `BigInteger`/`BigDecimal`
+        // word formulas are not mirrored — see module docs).
+        Value::BigInt(n) => hash_ordered(n.to_signed_bytes_be().into_iter().map(i32::from)),
+        Value::BigDec(d) => {
+            let (unscaled, scale) = d.stripped();
+            hash_combine(
+                hash_code(&Value::BigInt(unscaled)),
+                long_hash_code(scale as u64),
+            )
+        }
+        Value::Ratio(r) => hash_combine(
+            hash_code(&Value::BigInt(r.numer().clone())),
+            hash_code(&Value::BigInt(r.denom().clone())),
+        ),
         Value::Extension(ext) => hash_code_extension(&**ext),
         // All other variants are handled upstream (the single
         // caller partitions the variants).
@@ -370,15 +411,20 @@ fn extension_hash_unsupported(ext: &dyn ExtensionValue) -> bool {
 }
 
 /// Whether hashing a range throws (open-ended, or a zero step that
-/// never reaches its end).
+/// never reaches its end). A `BigDec`/ratio step with no exact
+/// decimal is *not* unsupported: callers realize first, and the
+/// realize step raises the JVM `ArithmeticException` (oracle
+/// `range-mixed`).
 fn range_hash_unsupported(r: &RangeValue) -> bool {
     if r.end().is_none() {
         return true;
     }
     match r.step() {
-        RangeNum::Int(0) => true,
+        RangeNum::Int(n) => n == 0,
         RangeNum::Double(x) => x == 0.0,
-        _ => false,
+        RangeNum::BigInt(n) => n.is_zero(),
+        RangeNum::Ratio(r) => r.is_zero(),
+        RangeNum::BigDec(d) => d.is_zero(),
     }
 }
 
@@ -1025,6 +1071,28 @@ mod tests {
     fn empty_string_takes_hash_int_fast_path() {
         assert_eq!(str_hashcode(""), 0);
         assert_eq!(hasheq(&strv("")), 0);
+    }
+
+    /// `hash_code` walks every tower arm (Java word formulas are
+    /// stand-ins — see module docs — so the pins are determinism
+    /// and scattering, not magic numbers).
+    #[test]
+    fn hash_code_tower_arms() {
+        use num_bigint::BigInt;
+        let big = |n: i32| Value::BigInt(BigInt::from(n));
+        let dec = |n: i32| Value::BigDec(crate::BigDec::from_bigint(BigInt::from(n)));
+        let rat = |n: i32, d: i32| {
+            Value::Ratio(num_rational::BigRational::new(
+                BigInt::from(n),
+                BigInt::from(d),
+            ))
+        };
+        for v in [big(5), dec(5), rat(1, 2)] {
+            assert_eq!(hash_code(&v), hash_code(&v));
+        }
+        assert_ne!(hash_code(&big(5)), hash_code(&big(6)));
+        assert_ne!(hash_code(&dec(5)), hash_code(&dec(6)));
+        assert_ne!(hash_code(&rat(1, 2)), hash_code(&rat(1, 3)));
     }
 
     #[test]

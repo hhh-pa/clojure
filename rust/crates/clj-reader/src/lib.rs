@@ -232,17 +232,20 @@ impl Reader {
         }
     }
 
-    /// `readNumber` plus `matchNumber` (deferrals raise; S3's
-    /// `Integer(i32)` split hooks into the `NumLit::Int` arm here).
+    /// `readNumber` plus `matchNumber` (tower literals read
+    /// since S-rng-tower; only a zero denominator still raises).
     fn read_number_value(&mut self, initch: char) -> Result<Value, ReaderError> {
         let token = number::read_number_token(&mut self.stream, initch);
         let span = self.span();
         match number::match_number(&token) {
             Ok(NumLit::Int(i)) => Ok(Value::Int(i)),
             Ok(NumLit::Double(d)) => Ok(Value::Double(d)),
-            Ok(NumLit::BigInt) => Err(E::BigInt { span, token }),
-            Ok(NumLit::BigDecimal) => Err(E::BigDecimal { span, token }),
-            Ok(NumLit::Ratio) => Err(E::Ratio { span, token }),
+            Ok(NumLit::BigInt) => Ok(number::bigint_token_value(&token)),
+            Ok(NumLit::BigDecimal) => Ok(number::bigdec_token_value(&token)),
+            Ok(NumLit::Ratio) => match number::ratio_token_value(&token) {
+                number::RatioToken::Value(v) => Ok(v),
+                number::RatioToken::ZeroDenominator => Err(E::RatioZeroDiv { span }),
+            },
             Err(NumErr::InvalidNumber) => Err(E::InvalidNumber { span, token }),
             Err(NumErr::RadixRange) => Err(E::RadixRange { span }),
             Err(NumErr::RadixDigit { digits, radix }) => Err(E::RadixDigit {

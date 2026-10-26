@@ -4,7 +4,7 @@ The complete inventory of `clojure.core` in this port: every var,
 its conformance state, and — for exclusions — why it is excluded.
 If a var is not listed here, that is a file bug, not a silent gap.
 
-- **422 vars: 368 implemented, 2 divergent, 52 out of scope,
+- **422 vars: 380 implemented, 2 divergent, 40 out of scope,
   0 planned.** The port reports Clojure `1.13.0-alpha9`
   (`clojure-version`).
 - **Status meanings.** `implemented` — resolves in the booted core
@@ -336,7 +336,7 @@ Lazy sequence operations (chunked like the JVM); transducer arities implemented 
 | `preserving-reduced` | implemented | private (not referred); tests/seqs.rs reduced_helpers_rows (T1200; probes xform.out) |
 | `halt-when` | implemented | tests/seqs.rs halt_when_rows (T1200; `::halt` contract; probes xform.out) |
 | `cat` | implemented | tests/seqs.rs xform_builders_composite_rows (T1200; probes xform.out) |
-| `random-sample` | out-of-scope | needs RNG slice (builders compose `filter` over `rand`) |
+| `random-sample` | implemented | `core.clj` defn over `filter` + `rand` (zero Rust); re_rng.rs random_sample_rows |
 
 ## Higher-order (S5D)
 
@@ -468,9 +468,9 @@ Significant vars with no port slice, grouped below by area with the reason. (Two
 | `sorted-set-by` | implemented | custom comparator set; coll.rs sorted_construction_rows |
 | `subseq` | implemented | `core.clj` bound walks over entry keys (3-arg + start/end 5-arg); coll.rs sorted_subseq_rows |
 | `rsubseq` | implemented | descending-from-end `seqFrom` walk, head-dropped once by the end test and bounded by the start test (5-arg); coll.rs sorted_subseq_rows + sorted_gap_rows |
-| `rand` | out-of-scope | RNG: no slice |
-| `rand-int` | out-of-scope | RNG: no slice |
-| `shuffle` | out-of-scope | RNG: no slice |
+| `rand` | implemented | rng.rs natives mirroring `Math/random` formulas; re_rng.rs rand_rows |
+| `rand-int` | implemented | rng.rs `randomToLong` path; re_rng.rs rand_int_rows |
+| `shuffle` | implemented | Fisher-Yates over seqables (lazies realized); re_rng.rs shuffle_rows |
 | `instance?` | out-of-scope | interop (N1) |
 | `type` | out-of-scope | class-based; no slice |
 | `class` | out-of-scope | interop (N1) |
@@ -564,12 +564,12 @@ Significant vars with no port slice, grouped below by area with the reason. (Two
 | var | status | notes |
 | --- | --- | --- |
 | `identical?` | out-of-scope | reference identity: no slice (values clone) |
-| `re-find` | out-of-scope | regex matching: no slice (reader keeps #"...") |
-| `re-matches` | out-of-scope | regex matching: no slice |
-| `re-seq` | out-of-scope | regex matching: no slice |
-| `re-pattern` | out-of-scope | regex matching: no slice |
-| `bigint` | out-of-scope | tower past Long/Double: no slice |
-| `bigdec` | out-of-scope | tower past Long/Double: no slice |
-| `num` | out-of-scope | tower past Long/Double: no slice |
-| `rationalize` | out-of-scope | tower past Long/Double: no slice |
+| `re-find` | implemented | re.rs over the `regex` crate (String patterns fail the `String` cast); re_rng.rs re_find_rows |
+| `re-matches` | implemented | re.rs full-match; re_rng.rs re_matches_rows |
+| `re-seq` | implemented | re.rs lazy match seq; re_rng.rs re_seq_rows |
+| `re-pattern` | implemented | re.rs (`Pattern` passes through, else the `String` cast); re_rng.rs re_pattern_rows |
+| `bigint` | implemented | tower `BigInt` coercion (`BigInteger` semantics); tower.rs tower_bigint_rows |
+| `bigdec` | implemented | tower `BigDec` coercion (`BigDecimal` semantics); tower.rs tower_bigdec_rows |
+| `num` | implemented | tower passthrough (nil is nil); tower.rs tower_num_rationalize_rows |
+| `rationalize` | implemented | tower via `BigDecimal.valueOf` (`(rationalize 0.1)` is `1/10`); tower.rs tower_num_rationalize_rows |
 | `pprint` | out-of-scope | clojure.pprint namespace, not core |

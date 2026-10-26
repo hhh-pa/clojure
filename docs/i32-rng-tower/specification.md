@@ -48,8 +48,16 @@ Three stages, each test-first against committed oracle probes:
    JVM promotion lattice (Double > BigDec > Ratio > BigInt >
    Int) for `+ - * / inc dec quot rem mod`, with the
    Int/Double-only wedges byte-identical (checked-overflow
-   errors, inexact `/` → Double); `long`/`int`/`double`/
-   `float` accept tower (truncate/wrap per JVM);
+   errors); inexact `Int`/`Int` `/` is a reduced ratio (`(/ 1 2)`
+   → `1/2`, oracle `promo-mul` — not a Double); `int`/`nth` take
+   the `RT.intCast` shape (truncate, `long` check with exact
+   digits, then `toIntExact`; decimals narrow through `double`
+   first — oracles `nth-*`, `conv-hugeint`, `conv-hugedecint`);
+   `long` of decimals narrows through `double` too (oracle
+   `conv-declong`); counts (`take`/`drop`/`repeat`) follow the
+   `double` path (`ceil` for take/drop, truncation for repeat —
+   oracles `index-*`, `seq-tower`); ranges step exactly with
+   `Numbers.add` and compare exactly (oracles `range-*`);
    `number?`/`integer?`/`decimal?` extended;
    `bigint`/`bigdec`/`num`/`rationalize` coercion tables
    verbatim from the oracles (nil NPEs, `Long`-to-`IFn`-style
@@ -127,8 +135,8 @@ Three stages, each test-first against committed oracle probes:
   `(+ 1/2 5N)` → `11/2`, `(+ 1/2 5M)` → `5.5M`,
   `(+ 5N 5M)` → `10M`, `(+ 5N 5)` → `10N`,
   `(+ 5M 0.5)` → `5.5` (Double), `(+ 1/2 0.5)` → `1.0`,
-  `(/ 5N 2)` → `5/2`, `(/ 1 2)` → Double (wedge! Int/Int
-  keeps the existing inexact-`/`-to-Double behavior),
+  `(/ 5N 2)` → `5/2`, `(/ 1 2)` → `1/2` (inexact `Int`
+  division is a reduced ratio, oracle `promo-mul`),
   `(quot 7N 2)` → `3N`, `(quot 7 2N)` → `3N`,
   `(quot 5M 2)` → `2M`, `(quot 1/2 1)` → `0N`.
 - Port shape: `re.rs`/`rng.rs` natives + tables chained in

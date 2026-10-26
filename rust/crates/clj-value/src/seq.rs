@@ -676,32 +676,150 @@ impl crate::ExtensionValue for SubVectorValue {
 }
 
 /// A range bound: all-`Int` ranges walk exactly, any `Double`
-/// promotes the walk to `f64` (the start still yields verbatim).
-#[derive(Clone, Copy, Debug, PartialEq)]
+/// promotes the walk to `f64`, tower bounds walk exactly (the
+/// start still yields verbatim).
+#[derive(Clone, Debug, PartialEq)]
 pub enum RangeNum {
     /// An exact integer bound.
     Int(i64),
     /// An inexact floating bound.
     Double(f64),
+    /// An exact bigint bound.
+    BigInt(num_bigint::BigInt),
+    /// An exact ratio bound.
+    Ratio(num_rational::BigRational),
+    /// An exact decimal bound.
+    BigDec(crate::BigDec),
 }
 
 impl RangeNum {
     /// The bound as a value (verbatim, never promoted).
     #[must_use]
-    pub fn value(self) -> Value {
+    pub fn value(&self) -> Value {
         match self {
-            RangeNum::Int(i) => Value::Int(i),
-            RangeNum::Double(d) => Value::Double(d),
+            RangeNum::Int(i) => Value::Int(*i),
+            RangeNum::Double(d) => Value::Double(*d),
+            RangeNum::BigInt(n) => Value::BigInt(n.clone()),
+            RangeNum::Ratio(r) => Value::Ratio(r.clone()),
+            RangeNum::BigDec(d) => Value::BigDec(d.clone()),
         }
     }
 
-    /// The bound as `f64` (double walks).
+    /// The bound as `f64` (double walks; tower narrows).
     #[must_use]
-    pub fn to_f64(self) -> f64 {
+    pub fn to_f64(&self) -> f64 {
+        use num_traits::ToPrimitive;
         match self {
-            RangeNum::Int(i) => i as f64,
-            RangeNum::Double(d) => d,
+            RangeNum::Int(i) => *i as f64,
+            RangeNum::Double(d) => *d,
+            RangeNum::BigInt(n) => n.to_f64().unwrap_or(f64::NAN),
+            RangeNum::Ratio(r) => r.to_f64().unwrap_or(f64::NAN),
+            RangeNum::BigDec(d) => d.to_f64(),
         }
+    }
+
+    /// Whether this bound is inexact (drives the `f64` walk).
+    fn is_double(&self) -> bool {
+        matches!(self, RangeNum::Double(_))
+    }
+}
+
+/// An exact rational for a non-`Double` bound (`Int` and tower;
+/// decimals are exact rationals, ratios as-is).
+fn range_rational(n: &RangeNum) -> num_rational::BigRational {
+    match n {
+        RangeNum::Int(i) => num_rational::BigRational::from_integer(num_bigint::BigInt::from(*i)),
+        RangeNum::BigInt(n) => num_rational::BigRational::from_integer(n.clone()),
+        RangeNum::Ratio(r) => r.clone(),
+        RangeNum::BigDec(d) => d.to_rational(),
+        RangeNum::Double(_) => unreachable!("doubles take the f64 walk, never the exact one"),
+    }
+}
+
+/// The sign of a non-`Double` step as `-1`/`0`/`1` (exact, via
+/// the rational numerator).
+fn range_step_sign(step: &RangeNum) -> i32 {
+    match range_rational(step).numer().sign() {
+        num_bigint::Sign::Minus => -1,
+        num_bigint::Sign::NoSign => 0,
+        num_bigint::Sign::Plus => 1,
+    }
+}
+
+/// One exact step (`cur + step`, no `Double` involved): `BigDec`
+/// wins, else ratios add (integral sums fold to `BigInt`, like
+/// `Numbers.add`), else big integers add. `Int`+`Int` stays
+/// checked (`None` overflows, like `forceChunk` landing out of
+/// bounds). A `BigDec`/ratio pair with no exact decimal is `None`
+/// — callers check [`RangeValue::step_inexact`] first and raise
+/// the JVM `ArithmeticException` there.
+/// Never inlined: the steppers are cold paths, and out-of-line
+/// bodies keep their coverage regions on their own lines.
+#[inline(never)]
+fn range_add_exact(cur: &RangeNum, step: &RangeNum) -> Option<RangeNum> {
+    if is_bigdec_num(cur) || is_bigdec_num(step) {
+        return range_add_bigdec(cur, step);
+    }
+    if is_ratio_num(cur) || is_ratio_num(step) {
+        return Some(range_add_ratio(cur, step));
+    }
+    range_add_int(cur, step)
+}
+
+/// Whether a bound is a decimal step.
+fn is_bigdec_num(n: &RangeNum) -> bool {
+    matches!(n, RangeNum::BigDec(_))
+}
+
+/// Whether a bound is a ratio step.
+fn is_ratio_num(n: &RangeNum) -> bool {
+    matches!(n, RangeNum::Ratio(_))
+}
+
+/// A `BigDec`-winning step (`None` for a ratio with no exact
+/// decimal — see [`RangeValue::step_inexact`]).
+#[inline(never)]
+fn range_add_bigdec(cur: &RangeNum, step: &RangeNum) -> Option<RangeNum> {
+    let (x, y) = (range_bigdec(cur)?, range_bigdec(step)?);
+    Some(RangeNum::BigDec(x.add(&y)))
+}
+
+/// A ratio-winning step (integral sums fold to `BigInt`).
+#[inline(never)]
+fn range_add_ratio(cur: &RangeNum, step: &RangeNum) -> RangeNum {
+    let sum = range_rational(cur) + range_rational(step);
+    if sum.denom() == &num_bigint::BigInt::from(1) {
+        RangeNum::BigInt(sum.numer().clone())
+    } else {
+        RangeNum::Ratio(sum)
+    }
+}
+
+/// An integer step (`None` on `Int`+`Int` overflow).
+#[inline(never)]
+fn range_add_int(cur: &RangeNum, step: &RangeNum) -> Option<RangeNum> {
+    match (cur, step) {
+        (RangeNum::Int(c), RangeNum::Int(s)) => c.checked_add(*s).map(RangeNum::Int),
+        (RangeNum::Int(c), RangeNum::BigInt(s)) => {
+            Some(RangeNum::BigInt(num_bigint::BigInt::from(*c) + s))
+        }
+        (RangeNum::BigInt(c), RangeNum::Int(s)) => {
+            Some(RangeNum::BigInt(c + num_bigint::BigInt::from(*s)))
+        }
+        (RangeNum::BigInt(c), RangeNum::BigInt(s)) => Some(RangeNum::BigInt(c + s)),
+        _ => unreachable!("doubles and mixed exact kinds are handled above"),
+    }
+}
+
+/// An exact `BigDec` for a `BigDec`-winning step (`None` for a
+/// ratio with no exact decimal — see [`range_add_exact`]).
+fn range_bigdec(n: &RangeNum) -> Option<crate::BigDec> {
+    match n {
+        RangeNum::Int(i) => Some(crate::BigDec::from_bigint(num_bigint::BigInt::from(*i))),
+        RangeNum::BigInt(n) => Some(crate::BigDec::from_bigint(n.clone())),
+        RangeNum::BigDec(d) => Some(d.clone()),
+        RangeNum::Ratio(r) => crate::BigDec::from_rational_exact(r).ok(),
+        RangeNum::Double(_) => unreachable!("doubles take the f64 walk, never the exact one"),
     }
 }
 
@@ -745,19 +863,19 @@ impl RangeValue {
     /// The current bound (yields verbatim).
     #[must_use]
     pub fn cur(&self) -> RangeNum {
-        self.cur
+        self.cur.clone()
     }
 
     /// The exclusive end bound, if any.
     #[must_use]
     pub fn end(&self) -> Option<RangeNum> {
-        self.end
+        self.end.clone()
     }
 
     /// The step bound.
     #[must_use]
     pub fn step(&self) -> RangeNum {
-        self.step
+        self.step.clone()
     }
 
     /// Whether this is a `LongRange` (`Counted` + `IDrop`).
@@ -787,33 +905,66 @@ impl RangeValue {
 
     /// Whether the walk is done: `LongRange` is count-bounded
     /// (exact, overflow-proof, like `LongRange.next`); double
-    /// ranges bound-compare (`NaN` ends never finish, like the
-    /// JVM's bounds check).
+    /// walks bound-compare in `f64` (`NaN` ends never finish, like
+    /// the JVM's bounds check); exact walks compare exactly (tower
+    /// bounds never narrow).
     #[must_use]
     pub fn done(&self) -> bool {
         if self.long {
             return self.count.is_none_or(|c| c <= 0);
         }
-        match (self.cur, self.end, self.step) {
+        match (&self.cur, &self.end, &self.step) {
             (_, None, _) => false,
-            (cur, Some(end), step) => {
+            (cur, Some(end), step) if cur.is_double() || end.is_double() || step.is_double() => {
                 let (c, x, s) = (cur.to_f64(), end.to_f64(), step.to_f64());
                 if s >= 0.0 { c >= x } else { c <= x }
             }
+            (cur, Some(end), step) => {
+                let (c, x) = (range_rational(cur), range_rational(end));
+                match range_step_sign(step) {
+                    s if s > 0 => c >= x,
+                    s if s < 0 => c <= x,
+                    _ => false,
+                }
+            }
+        }
+    }
+
+    /// Whether the next [`RangeValue::advance`] would add `BigDec`
+    /// to a ratio with no exact decimal (the JVM throws
+    /// `ArithmeticException` there — oracle `range-mixed`).
+    /// Steppers with an error channel check this first and raise;
+    /// channel-less walks treat such ranges as unsupported (see
+    /// `seq_hash_unsupported`).
+    #[must_use]
+    pub fn step_inexact(&self) -> bool {
+        match (&self.cur, &self.step) {
+            (RangeNum::BigDec(_), RangeNum::Ratio(r))
+            | (RangeNum::Ratio(r), RangeNum::BigDec(_)) => {
+                crate::BigDec::from_rational_exact(r).is_err()
+            }
+            _ => false,
         }
     }
 
     /// Advance one step: `LongRange` adds unchecked (wrapping, like
     /// `LongRange.next` — the count bounds the walk); double walks
     /// check `Int`+`Int` (`None` ends the walk, like `forceChunk`
-    /// landing out of bounds) and promote anything else to `f64`.
+    /// landing out of bounds) and promote anything else to `f64`;
+    /// exact walks add exactly (see [`range_add_exact` — a
+    /// `BigDec`/ratio pair with no exact decimal is `None`, and
+    /// callers raise via [`RangeValue::step_inexact`] instead]).
     pub fn advance(&self) -> Option<RangeNum> {
-        match (self.cur, self.step) {
+        match (&self.cur, &self.step) {
             (RangeNum::Int(c), RangeNum::Int(s)) if self.long => {
-                Some(RangeNum::Int(c.wrapping_add(s)))
+                Some(RangeNum::Int(c.wrapping_add(*s)))
             }
-            (RangeNum::Int(c), RangeNum::Int(s)) => c.checked_add(s).map(RangeNum::Int),
-            (c, s) => Some(RangeNum::Double(c.to_f64() + s.to_f64())),
+            (c, s) if c.is_double() || s.is_double() => {
+                Some(RangeNum::Double(c.to_f64() + s.to_f64()))
+            }
+            // Non-`long` `Int`+`Int` stays checked (`None`
+            // overflows) via [`range_add_int` below.
+            (c, s) => range_add_exact(c, s),
         }
     }
 
@@ -829,8 +980,8 @@ impl RangeValue {
         // whose fresh objects carry none).
         let next = self.advance().map(|nxt| RangeValue {
             cur: nxt,
-            end: self.end,
-            step: self.step,
+            end: self.end.clone(),
+            step: self.step.clone(),
             long: self.long,
             count: self.count.map(|c| c - 1),
             meta: None,
@@ -1350,7 +1501,8 @@ entry_seq!(
 mod tests {
     use super::{
         ConsValue, CycleValue, IterateValue, KeySeqValue, RangeNum, RangeValue, RealizedSeq,
-        RepeatValue, Seq, SeqKind, SubVectorValue, ValSeqValue,
+        RepeatValue, Seq, SeqKind, SubVectorValue, ValSeqValue, range_add_int, range_bigdec,
+        range_rational,
     };
     use crate::{ExtensionValue, Value, Vector};
     use std::collections::hash_map::DefaultHasher;
@@ -1440,6 +1592,44 @@ mod tests {
         let rest = mid.next().expect("rest");
         assert_eq!(rest.first(), Some(&int(3)));
         assert!(rest.next().is_none());
+    }
+
+    /// The exact range helpers reject `Double` (the walk
+    /// dispatches on `is_double` first — the panic is the
+    /// contract).
+    #[test]
+    #[should_panic(expected = "doubles take the f64 walk, never the exact one")]
+    fn range_rational_rejects_double() {
+        let _ = range_rational(&RangeNum::Double(0.5));
+    }
+
+    /// See [`range_rational_rejects_double`].
+    #[test]
+    #[should_panic(expected = "doubles take the f64 walk, never the exact one")]
+    fn range_bigdec_rejects_double() {
+        let _ = range_bigdec(&RangeNum::Double(0.5));
+    }
+
+    /// See [`range_rational_rejects_double`].
+    #[test]
+    #[should_panic(expected = "doubles and mixed exact kinds are handled above")]
+    fn range_add_int_rejects_double() {
+        let _ = range_add_int(&RangeNum::Double(0.5), &RangeNum::Double(0.5));
+    }
+
+    /// A zero step never finishes (exact walks only see nonzero
+    /// steps from `range` — zero steps repeat instead — so the
+    /// pin documents the walk, exercising both `done` arms).
+    #[test]
+    fn zero_step_exact_walk_never_done() {
+        let r = RangeValue::new(
+            RangeNum::Int(0),
+            Some(RangeNum::Int(5)),
+            RangeNum::BigInt(num_bigint::BigInt::from(0)),
+            false,
+            None,
+        );
+        assert!(!r.done());
     }
 
     #[test]

@@ -519,6 +519,12 @@ fn count_fallback(eval: &mut Evaluator, v: &Value) -> Result<i64, NativeError> {
         return Ok(sv.len() as i64);
     }
     if let Some(r) = as_range(v) {
+        // A `BigDec`/ratio step with no exact decimal raises on
+        // the first advance (oracle `range-mixed`), so `count`
+        // raises instead of walking short.
+        if r.step_inexact() {
+            return Err(crate::core::arithmetic(clj_value::NON_TERMINATING));
+        }
         return Ok(r.walked_len() as i64);
     }
     if let Some(s) = as_realized(v) {

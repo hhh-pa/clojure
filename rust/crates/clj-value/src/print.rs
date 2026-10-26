@@ -107,6 +107,22 @@ fn print_scalars(v: &Value, opts: &PrintOpts, level: Option<i64>, out: &mut Stri
         Value::Bool(false) => out.push_str("false"),
         Value::Int(i) => write!(out, "{i}").unwrap(),
         Value::Double(d) => out.push_str(&print_double(*d)),
+        // Readable tower suffixes (`5N`, `5.0M`); `str`/`print`
+        // use the plain `toString` (`5`, `5.0`). Ratios print
+        // `n/d` either way.
+        Value::BigInt(n) => {
+            write!(out, "{n}").unwrap();
+            if opts.readably {
+                out.push('N');
+            }
+        }
+        Value::BigDec(d) => {
+            out.push_str(&d.to_bigdec_string());
+            if opts.readably {
+                out.push('M');
+            }
+        }
+        Value::Ratio(r) => write!(out, "{}/{}", r.numer(), r.denom()).unwrap(),
         Value::Str(s) => print_string(s, opts.readably, out),
         Value::Char(c) => print_char(*c, opts.readably, out),
         Value::Symbol(s) => write!(out, "{s}").unwrap(),

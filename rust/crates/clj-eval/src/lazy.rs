@@ -20,6 +20,8 @@
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
+use num_traits::ToPrimitive;
+
 use clj_value::{
     CHUNK_SIZE, ConsValue, CycleValue, ExtensionValue, IterateValue, KeySeqValue, List, Map,
     RangeNum, RangeValue, RealizedSeq, RepeatValue, Seq, SeqKind, Set, SubVectorValue, ThrowClass,
@@ -684,8 +686,10 @@ fn step_realized(items: &[Value], chunked: bool) -> Option<Seq> {
 /// Step a range: up to [`CHUNK_SIZE`] verbatim heads plus the
 /// shifted range (nil tail when done). An `Int`+`Int` overflow
 /// ends the walk (like `Range.forceChunk`, whose promoting
-/// `Numbers.addP` always lands out of bounds past `i64`).
-fn step_range_value(_eval: &mut Evaluator, r: &RangeValue) -> Result<StepUnit, Signal> {
+/// `Numbers.addP` always lands out of bounds past `i64`); a
+/// `BigDec`/ratio step with no exact decimal raises the JVM
+/// `ArithmeticException` (oracle `range-mixed`).
+fn step_range_value(eval: &mut Evaluator, r: &RangeValue) -> Result<StepUnit, Signal> {
     let mut items = Vec::new();
     let mut cur = r.clone();
     let mut tail = Value::Nil;
@@ -700,6 +704,9 @@ fn step_range_value(_eval: &mut Evaluator, r: &RangeValue) -> Result<StepUnit, S
                 cur = nxt;
             }
             None => {
+                if cur.step_inexact() {
+                    return Err(eval.throw(range_step_error()));
+                }
                 tail = Value::Nil;
                 break;
             }
@@ -1641,16 +1648,12 @@ fn lazy_window(eval: &mut Evaluator, items: Vec<Value>) -> Result<Value, Signal>
 /// a `Double` width never fills an integral count (oracled: `(=
 /// 3.0 3)` is false, so `(partition 3.0 [1 2 3])` answers `()`).
 fn window_full(n: &Value, len: usize) -> bool {
-    // Callers validate `n` via `take_count` first, so only
-    // Int/Double arrive.
-    if let Value::Int(i) = n {
-        return *i == len as i64;
-    }
-    debug_assert!(
-        matches!(n, Value::Double(_)),
-        "take_count admits only Int/Double"
-    );
-    false
+    // The JVM compares `(= n (count p))` with `Numbers.equal`
+    // category rules (oracled: `(= 3.0 3)` is false, so
+    // `(partition 3.0 [1 2 3])` answers `()`); `==` implements
+    // exactly those, tower included (`(partition 3N [1 2 3])`
+    // fills).
+    *n == Value::Int(len as i64)
 }
 
 /// `partition`: seq-check, collect one window, and advance
@@ -2423,12 +2426,16 @@ pub(crate) fn first_value(eval: &mut Evaluator, v: &Value) -> Result<Value, Sign
 }
 
 /// A range shifted past its head (`()` when spent; metadata
-/// dropped, like `Range.next`/`LongRange.next`).
-fn range_rest(r: &RangeValue) -> Value {
+/// dropped, like `Range.next`/`LongRange.next`). A `BigDec`/ratio
+/// step with no exact decimal raises (oracle `range-mixed`).
+fn range_rest(eval: &mut Evaluator, r: &RangeValue) -> Result<Value, Signal> {
     // Callers seq first (`seq_range` nil-puns done ranges), and
     // ranges are immutable, so the range is never done here.
+    if r.step_inexact() {
+        return Err(eval.throw(range_step_error()));
+    }
     match r.advance() {
-        None => empty_list_value(),
+        None => Ok(empty_list_value()),
         Some(nxt) => {
             let shifted = RangeValue::new(
                 nxt,
@@ -2438,12 +2445,22 @@ fn range_rest(r: &RangeValue) -> Value {
                 r.count().map(|c| c - 1),
             );
             if shifted.done() {
-                empty_list_value()
+                Ok(empty_list_value())
             } else {
-                Value::Extension(Arc::new(shifted))
+                Ok(Value::Extension(Arc::new(shifted)))
             }
         }
     }
+}
+
+/// The JVM `ArithmeticException` for a range step that adds
+/// `BigDec` to a ratio with no exact decimal (oracle
+/// `range-mixed`).
+fn range_step_error() -> NativeError {
+    NativeError::new(
+        ThrowClass::ArithmeticException,
+        clj_value::NON_TERMINATING.to_owned(),
+    )
 }
 
 /// `rest` of a forced pending chunk: multi-item chunks rest to a
@@ -2523,7 +2540,7 @@ fn rest_extension(eval: &mut Evaluator, s: &Value) -> Result<Value, Signal> {
         return Ok(rest_realized_seq(r));
     }
     if let Some(r) = as_range(s) {
-        return Ok(range_rest(r));
+        return range_rest(eval, r);
     }
     if let Some(k) = as_keys(s) {
         return keys_rest(eval, k.underlying(), true);
@@ -2992,60 +3009,100 @@ fn num_pair(a: &Value, b: &Value) -> Result<(Num, Num), NativeError> {
     Ok((crate::core::as_num(a)?, crate::core::as_num(b)?))
 }
 
-/// `Numbers.gt` over our numbers.
+/// `Numbers.gt` over our numbers (`Int`/`Int` exact, `Double`
+/// pairs as `f64`, tower pairs exactly).
 fn num_gt(a: &Value, b: &Value) -> Result<bool, NativeError> {
     match num_pair(a, b)? {
         (Num::Int(x), Num::Int(y)) => Ok(x > y),
-        (x, y) => Ok(num_f64(x) > num_f64(y)),
+        (x, y) if is_double_num(&x) || is_double_num(&y) => Ok(num_f64(x) > num_f64(y)),
+        (x, y) => Ok(num_rational(&x) > num_rational(&y)),
     }
 }
 
 /// `Numbers.equiv` over our numbers (`NaN` never, cross-type by
-/// value — like `Range.create`'s emptiness check).
+/// value — like `Range.create`'s emptiness check; tower pairs
+/// use the `==` rules, exactly).
 fn num_equiv(a: &Value, b: &Value) -> Result<bool, NativeError> {
     match num_pair(a, b)? {
         (Num::Int(x), Num::Int(y)) => Ok(x == y),
-        (x, y) => Ok(num_f64(x) == num_f64(y)),
+        (x, y) if is_double_num(&x) || is_double_num(&y) => Ok(num_f64(x) == num_f64(y)),
+        (x, y) => Ok(num_rational(&x) == num_rational(&y)),
     }
 }
 
-/// `Numbers.isPos`/`isNeg` over our numbers (`sign > 0` / `< 0`).
+/// `Numbers.isPos`/`isNeg` over our numbers (`sign > 0` / `< 0`,
+/// tower exactly).
 fn num_sign(v: &Value, positive: bool) -> Result<bool, NativeError> {
     match crate::core::as_num(v)? {
         Num::Int(i) => Ok(if positive { i > 0 } else { i < 0 }),
         Num::Double(d) => Ok(if positive { d > 0.0 } else { d < 0.0 }),
+        n => Ok(num_signum(&n) == (if positive { 1 } else { -1 })),
     }
 }
 
-/// `Numbers.isZero` over our numbers.
+/// `Numbers.isZero` over our numbers (tower exactly).
 fn num_is_zero(v: &Value) -> Result<bool, NativeError> {
     match crate::core::as_num(v)? {
         Num::Int(i) => Ok(i == 0),
         Num::Double(d) => Ok(d == 0.0),
+        n => Ok(num_signum(&n) == 0),
     }
 }
 
-/// A `Num` as `f64`.
+/// A `Num` as `f64` (tower narrows approximately).
 fn num_f64(n: Num) -> f64 {
     match n {
         Num::Int(i) => i as f64,
+        Num::BigInt(n) => n.to_f64().unwrap_or(f64::NAN),
+        Num::Ratio(r) => r.to_f64().unwrap_or(f64::NAN),
+        Num::BigDec(d) => d.to_f64(),
         Num::Double(d) => d,
     }
 }
 
+/// Whether a range `Num` is a `Double` (the approximate path).
+fn is_double_num(n: &Num) -> bool {
+    matches!(n, Num::Double(_))
+}
+
+/// The sign of a range `Num` as `-1`/`0`/`1` (tower exactly via
+/// the rational numerator; the denominator stays positive).
+fn num_signum(n: &Num) -> i32 {
+    match num_rational(n).numer().sign() {
+        num_bigint::Sign::Minus => -1,
+        num_bigint::Sign::NoSign => 0,
+        num_bigint::Sign::Plus => 1,
+    }
+}
+
+/// An exact rational for a range `Num` (`Double` never reaches
+/// here — doubles always take the `f64` path above).
+fn num_rational(n: &Num) -> num_rational::BigRational {
+    match n {
+        Num::Int(i) => num_rational::BigRational::from_integer(num_bigint::BigInt::from(*i)),
+        Num::BigInt(n) => num_rational::BigRational::from_integer(n.clone()),
+        Num::Ratio(r) => r.clone(),
+        Num::BigDec(d) => d.to_rational(),
+        Num::Double(_) => {
+            unreachable!("doubles take the f64 path, never the exact one")
+        }
+    }
+}
+
 /// A numeric value as a range bound (only reached for numbers —
-/// the `create` checks reject the rest first).
+/// the `create` checks reject the rest first; tower bounds walk
+/// exactly).
 fn range_num(v: &Value) -> RangeNum {
-    // Callers validate numbers first (the tower is `Int`/`Double`
-    // only); sequential tests keep every line live.
-    let mut out = RangeNum::Int(0);
-    if let Value::Int(i) = v {
-        out = RangeNum::Int(*i);
+    // Callers validate numbers first; sequential tests keep every
+    // line live.
+    match v {
+        Value::Int(i) => RangeNum::Int(*i),
+        Value::Double(d) => RangeNum::Double(*d),
+        Value::BigInt(n) => RangeNum::BigInt(n.clone()),
+        Value::Ratio(r) => RangeNum::Ratio(r.clone()),
+        Value::BigDec(d) => RangeNum::BigDec(d.clone()),
+        _ => RangeNum::Int(0),
     }
-    if let Value::Double(d) = v {
-        out = RangeNum::Double(*d);
-    }
-    out
 }
 
 /// `LongRange.rangeCount` (checked; `None` overflows like the
@@ -3367,6 +3424,22 @@ mod tests {
             head: Vec::new(),
             tail: Value::Nil,
         }
+    }
+
+    /// Non-numbers fall back to an exact zero bound (callers
+    /// validate numbers first — the pin keeps the totality).
+    #[test]
+    fn range_num_falls_back_for_non_numbers() {
+        assert_eq!(range_num(&Value::Nil), RangeNum::Int(0));
+    }
+
+    /// The exact range rational rejects `Double` (bound checks
+    /// dispatch on `is_double_num` first — the panic is the
+    /// contract).
+    #[test]
+    #[should_panic(expected = "doubles take the f64 path, never the exact one")]
+    fn range_num_rational_rejects_double() {
+        let _ = num_rational(&crate::core::Num::Double(0.5));
     }
 
     #[test]

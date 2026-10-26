@@ -14,6 +14,8 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use num_traits::{ToPrimitive, Zero};
+
 use clj_value::{
     ExtensionValue, Keyword, PrintOpts, Symbol, ThrowClass, Throwable, Value, pr_to_string,
 };
@@ -75,19 +77,29 @@ pub(crate) fn cce_err(v: &Value, to_jvm: &str) -> NativeError {
 pub(crate) fn take_count(v: &Value) -> Result<i64, NativeError> {
     match v {
         Value::Int(i) => Ok(*i),
-        Value::Double(d) => {
-            if d.is_nan() {
-                Ok(0)
-            } else if *d >= i64::MAX as f64 {
-                Ok(i64::MAX)
-            } else if *d <= i64::MIN as f64 {
-                Ok(i64::MIN)
-            } else {
-                Ok(d.ceil() as i64)
-            }
-        }
+        Value::Double(d) => Ok(take_double(*d)),
+        // Tower counts like `double` counts (the JVM `pos?`/`dec`
+        // loop behaves as `ceil`: oracle `index-tower`,
+        // `index-big` with its `1.0E20` rendering).
+        Value::BigInt(n) => Ok(take_double(n.to_f64().unwrap_or(f64::NAN))),
+        Value::Ratio(r) => Ok(take_double(r.to_f64().unwrap_or(f64::NAN))),
+        Value::BigDec(d) => Ok(take_double(d.to_f64())),
         Value::Nil => Err(npe_getclass()),
         _ => Err(cce_err(v, "java.lang.Number")),
+    }
+}
+
+/// A `take`/`drop` count from a `double`: `NaN` takes nothing,
+/// infinities saturate, the rest rounds up.
+fn take_double(d: f64) -> i64 {
+    if d.is_nan() {
+        0
+    } else if d >= i64::MAX as f64 {
+        i64::MAX
+    } else if d <= i64::MIN as f64 {
+        i64::MIN
+    } else {
+        d.ceil() as i64
     }
 }
 
@@ -97,20 +109,29 @@ pub(crate) fn take_count(v: &Value) -> Result<i64, NativeError> {
 pub(crate) fn repeat_count(v: &Value) -> Result<i64, NativeError> {
     match v {
         Value::Int(i) => Ok(*i),
-        Value::Double(d) => {
-            if d.is_nan() {
-                Ok(0)
-            } else if *d > i64::MAX as f64 || *d < i64::MIN as f64 {
-                Err(out_of_range("long", Num::Double(*d)))
-            } else {
-                Ok(*d as i64)
-            }
-        }
+        Value::Double(d) => repeat_double(*d),
+        // Tower truncates like `intValue`, through the same
+        // range check (the drop-path `double` rendering stays).
+        Value::BigInt(n) => repeat_double(n.to_f64().unwrap_or(f64::NAN)),
+        Value::Ratio(r) => repeat_double(r.to_f64().unwrap_or(f64::NAN)),
+        Value::BigDec(d) => repeat_double(d.to_f64()),
         Value::Nil => Err(NativeError::new(
             ThrowClass::NullPointerException,
             "Cannot invoke \"java.lang.Number.doubleValue()\" because \"x\" is null".to_owned(),
         )),
         _ => Err(cce_err(v, "java.lang.Number")),
+    }
+}
+
+/// A `repeat` count from a `double`: `intValue` truncation
+/// (`NaN` is zero, past-`i64` fails `out of range for long`).
+fn repeat_double(d: f64) -> Result<i64, NativeError> {
+    if d.is_nan() {
+        Ok(0)
+    } else if d > i64::MAX as f64 || d < i64::MIN as f64 {
+        Err(out_of_range("long", Num::Double(d)))
+    } else {
+        Ok(d as i64)
     }
 }
 
@@ -148,9 +169,15 @@ pub(crate) fn int_cast_double(d: f64) -> Result<i32, NativeError> {
 pub(crate) fn idrop_coerce(v: &Value) -> Result<i32, NativeError> {
     // `drop`/`nthrest` validate `n` first, so only numbers arrive;
     // `as_num` keeps the identical failures total (arms covered).
+    // Tower counts like `double` counts (the JVM `pos?`/`dec`
+    // loop behaves as `ceil`, and huge counts render `1.0E20`:
+    // oracle `index-tower`, `index-big`).
     match as_num(v)? {
         Num::Int(i) => int_exact_long(i),
         Num::Double(d) => int_cast_double(d.ceil()),
+        Num::BigInt(n) => int_cast_double(n.to_f64().unwrap_or(f64::NAN).ceil()),
+        Num::Ratio(r) => int_cast_double(r.to_f64().unwrap_or(f64::NAN).ceil()),
+        Num::BigDec(d) => int_cast_double(d.to_f64().ceil()),
     }
 }
 
@@ -169,7 +196,46 @@ pub(crate) fn nth_index(v: &Value) -> Result<i32, NativeError> {
     match v {
         Value::Int(i) => int_exact_long(*i),
         Value::Double(d) => int_cast_double(*d),
+        // `nth` truncates toward zero first, then takes the `long`
+        // range check (exact digits) and `toIntExact` (oracle
+        // `nth-trunc2`, `nth-big`, `nth-intrange`); decimals
+        // narrow through `double` first (like `int`).
+        Value::BigInt(n) => tower_intcast(n),
+        Value::Ratio(r) => tower_intcast(&trunc_ratio(r)),
+        Value::BigDec(d) => bigdec_intcast(d),
         _ => Err(cce_err(v, "java.lang.Number")),
+    }
+}
+
+/// An `RT.intCast` index from a truncated tower integer:
+/// past-`i64` fails `Value out of range for long` with the exact
+/// digits, past-`i32` fails `integer overflow` (oracles
+/// `nth-big`, `nth-intrange`, `conv-hugeint` — shared by `int`,
+/// `nth`, and `subvec`).
+fn tower_intcast(n: &num_bigint::BigInt) -> Result<i32, NativeError> {
+    let l = n
+        .to_i64()
+        .ok_or_else(|| out_of_range("long", Num::BigInt(n.clone())))?;
+    int_exact_long(l)
+}
+
+/// An `RT.intCast` index from a decimal: through the `long`
+/// range check first (double rendering), then `toIntExact`
+/// (oracle `conv-hugedecint`).
+fn bigdec_intcast(d: &clj_value::BigDec) -> Result<i32, NativeError> {
+    int_exact_long(double_long(d.to_f64())?)
+}
+
+/// A `long` from a `double`: `NaN` is zero, past-`i64` fails
+/// `Value out of range for long` (double rendering), else
+/// truncation toward zero.
+fn double_long(d: f64) -> Result<i64, NativeError> {
+    if d.is_nan() {
+        Ok(0)
+    } else if d >= 9223372036854775808.0 || d < -9223372036854775808.0 {
+        Err(out_of_range("long", Num::Double(d)))
+    } else {
+        Ok(d.trunc() as i64)
     }
 }
 
@@ -226,16 +292,25 @@ pub(crate) fn check_ifn(eval: &mut Evaluator, f: &Value) -> Result<(), crate::er
 }
 
 /// A numeric operand (nil is the numbers NPE, anything else
-/// non-numeric the `Number` cast failure).
-#[derive(Clone, Copy)]
+/// non-numeric the `Number` cast failure). Tower ranks for
+/// promotion: `Int` < `BigInt` < `Ratio` < `BigDec` < `Double`
+/// (oracle-pinned: `(+ 1/2 5N)` is a `Ratio`, `(+ 5N 5M)` a
+/// `BigDec`, `(+ 5M 0.5)` a `Double`).
+#[derive(Clone)]
 pub(crate) enum Num {
     Int(i64),
+    BigInt(num_bigint::BigInt),
+    Ratio(num_rational::BigRational),
+    BigDec(clj_value::BigDec),
     Double(f64),
 }
 
 pub(crate) fn as_num(v: &Value) -> Result<Num, NativeError> {
     match v {
         Value::Int(i) => Ok(Num::Int(*i)),
+        Value::BigInt(n) => Ok(Num::BigInt(n.clone())),
+        Value::Ratio(r) => Ok(Num::Ratio(r.clone())),
+        Value::BigDec(d) => Ok(Num::BigDec(d.clone())),
         Value::Double(d) => Ok(Num::Double(*d)),
         Value::Nil => Err(npe_getclass()),
         _ => Err(cce_err(v, "java.lang.Number")),
@@ -245,7 +320,31 @@ pub(crate) fn as_num(v: &Value) -> Result<Num, NativeError> {
 fn num_value(n: Num) -> Value {
     match n {
         Num::Int(i) => Value::Int(i),
+        Num::BigInt(n) => Value::BigInt(n),
+        Num::Ratio(r) => normalize_rational(r),
+        Num::BigDec(d) => Value::BigDec(d),
         Num::Double(d) => Value::Double(d),
+    }
+}
+
+/// A rational with denominator 1 is a `BigInt` (the reader and
+/// `/` rely on this as well as the ops below).
+fn normalize_rational(r: num_rational::BigRational) -> Value {
+    if r.denom() == &num_bigint::BigInt::from(1) {
+        Value::BigInt(r.numer().clone())
+    } else {
+        Value::Ratio(r)
+    }
+}
+
+/// Promotion rank (`Double` > `BigDec` > `Ratio` > `BigInt` > `Int`).
+fn num_rank(n: &Num) -> u8 {
+    match n {
+        Num::Int(_) => 0,
+        Num::BigInt(_) => 1,
+        Num::Ratio(_) => 2,
+        Num::BigDec(_) => 3,
+        Num::Double(_) => 4,
     }
 }
 
@@ -276,50 +375,76 @@ fn infinite_or_nan() -> NativeError {
     )
 }
 
+/// Promoted `+`: `Int`/`Int` keeps the checked errors;
+/// otherwise the top rank present computes (`Double` > `BigDec` >
+/// `Ratio` > `BigInt`, oracle `promo1`).
 fn add(a: Num, b: Num) -> Result<Num, NativeError> {
-    match (a, b) {
-        (Num::Int(x), Num::Int(y)) => x.checked_add(y).map(Num::Int).ok_or_else(overflow),
-        (Num::Int(x), Num::Double(y)) => Ok(Num::Double(x as f64 + y)),
-        (Num::Double(x), Num::Int(y)) => Ok(Num::Double(x + y as f64)),
-        (Num::Double(x), Num::Double(y)) => Ok(Num::Double(x + y)),
+    match (&a, &b) {
+        (Num::Int(x), Num::Int(y)) => x.checked_add(*y).map(Num::Int).ok_or_else(overflow),
+        _ if either_double(&a, &b) => Ok(Num::Double(to_f64(a) + to_f64(b))),
+        _ if num_rank(&a).max(num_rank(&b)) == 3 => {
+            Ok(Num::BigDec(num_bigdec(&a)?.add(&num_bigdec(&b)?)))
+        }
+        _ => Ok(num_ratio(num_rational(&a) + num_rational(&b))),
     }
 }
 
+/// Promoted `-` (same lattice as [`add`]).
 fn sub(a: Num, b: Num) -> Result<Num, NativeError> {
-    match (a, b) {
-        (Num::Int(x), Num::Int(y)) => x.checked_sub(y).map(Num::Int).ok_or_else(overflow),
-        (Num::Int(x), Num::Double(y)) => Ok(Num::Double(x as f64 - y)),
-        (Num::Double(x), Num::Int(y)) => Ok(Num::Double(x - y as f64)),
-        (Num::Double(x), Num::Double(y)) => Ok(Num::Double(x - y)),
+    match (&a, &b) {
+        (Num::Int(x), Num::Int(y)) => x.checked_sub(*y).map(Num::Int).ok_or_else(overflow),
+        _ if either_double(&a, &b) => Ok(Num::Double(to_f64(a) - to_f64(b))),
+        _ if num_rank(&a).max(num_rank(&b)) == 3 => {
+            Ok(Num::BigDec(num_bigdec(&a)?.sub(&num_bigdec(&b)?)))
+        }
+        _ => Ok(num_ratio(num_rational(&a) - num_rational(&b))),
     }
 }
 
+/// Promoted `*` (same lattice as [`add`]).
 fn mul(a: Num, b: Num) -> Result<Num, NativeError> {
-    match (a, b) {
-        (Num::Int(x), Num::Int(y)) => x.checked_mul(y).map(Num::Int).ok_or_else(overflow),
-        (Num::Int(x), Num::Double(y)) => Ok(Num::Double(x as f64 * y)),
-        (Num::Double(x), Num::Int(y)) => Ok(Num::Double(x * y as f64)),
-        (Num::Double(x), Num::Double(y)) => Ok(Num::Double(x * y)),
+    match (&a, &b) {
+        (Num::Int(x), Num::Int(y)) => x.checked_mul(*y).map(Num::Int).ok_or_else(overflow),
+        _ if either_double(&a, &b) => Ok(Num::Double(to_f64(a) * to_f64(b))),
+        _ if num_rank(&a).max(num_rank(&b)) == 3 => {
+            Ok(Num::BigDec(num_bigdec(&a)?.mul(&num_bigdec(&b)?)))
+        }
+        _ => Ok(num_ratio(num_rational(&a) * num_rational(&b))),
     }
 }
 
-/// `/` on two numbers: exact only when divisible (C1 documents the
-/// ratio deviation — the port divides doubles instead).
+/// Promoted `/`: `Int`/`Int` keeps the wedge (exact when divisible,
+/// else the `Double` division — C1 documents the ratio
+/// deviation); tower division is exact (`(/ 5N 2)` → `5/2`, a
+/// non-terminating decimal fails like `(bigdec 1/3)`).
 fn div(a: Num, b: Num) -> Result<Num, NativeError> {
-    match (a, b) {
+    match (&a, &b) {
         (Num::Int(x), Num::Int(y)) => {
-            if y == 0 {
+            if *y == 0 {
                 return Err(divide_by_zero());
             }
             if x % y == 0 {
-                x.checked_div(y).map(Num::Int).ok_or_else(overflow)
+                x.checked_div(*y).map(Num::Int).ok_or_else(overflow)
             } else {
-                Ok(Num::Double(x as f64 / y as f64))
+                // Inexact `Int` division is a reduced ratio, never a
+                // `Double` (oracle `promo-mul`: `(/ 1 2)` is `1/2`).
+                Ok(num_ratio(num_rational(&a) / num_rational(&b)))
             }
         }
-        (Num::Int(x), Num::Double(y)) => Ok(Num::Double(x as f64 / y)),
-        (Num::Double(x), Num::Int(y)) => Ok(Num::Double(x / y as f64)),
-        (Num::Double(x), Num::Double(y)) => Ok(Num::Double(x / y)),
+        _ if either_double(&a, &b) => Ok(Num::Double(to_f64(a) / to_f64(b))),
+        _ if num_rank(&a).max(num_rank(&b)) == 3 => num_bigdec(&a)?
+            .div_exact(&num_bigdec(&b)?)
+            .map(Num::BigDec)
+            .map_err(|m| {
+                NativeError::new(clj_value::ThrowClass::ArithmeticException, m.to_owned())
+            }),
+        _ => {
+            let (x, y) = (num_rational(&a), num_rational(&b));
+            if y.numer().is_zero() {
+                return Err(divide_by_zero());
+            }
+            Ok(num_ratio(x / y))
+        }
     }
 }
 
@@ -354,6 +479,9 @@ fn native_sub(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErro
     if args.len() == 1 {
         return match as_num(&args[0])? {
             Num::Int(x) => x.checked_neg().map(Value::Int).ok_or_else(overflow),
+            Num::BigInt(x) => Ok(Value::BigInt(-x)),
+            Num::Ratio(x) => Ok(num_value(num_ratio(-x))),
+            Num::BigDec(x) => Ok(Value::BigDec(x.neg())),
             Num::Double(x) => Ok(Value::Double(-x)),
         };
     }
@@ -379,15 +507,16 @@ fn native_div(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErro
 
 fn native_quot(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/quot", args, &[2])?;
-    match (as_num(&args[0])?, as_num(&args[1])?) {
+    let (a, b) = (as_num(&args[0])?, as_num(&args[1])?);
+    match (&a, &b) {
         (Num::Int(x), Num::Int(y)) => {
-            if y == 0 {
+            if *y == 0 {
                 return Err(slash_by_zero());
             }
-            x.checked_div(y).map(Value::Int).ok_or_else(overflow)
+            x.checked_div(*y).map(Value::Int).ok_or_else(overflow)
         }
-        (x, y) => {
-            let (x, y) = (to_f64(x), to_f64(y));
+        _ if either_double(&a, &b) => {
+            let (x, y) = (to_f64(a), to_f64(b));
             // Zero first (even over `NaN`, `:quot-nan-0`), then
             // finiteness (either side, `:quot-nan-div`), then the
             // quotient's own finiteness (`:quot-ovf`); `-0.0`
@@ -404,21 +533,46 @@ fn native_quot(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErr
             }
             Ok(Value::Double(if q == 0.0 { 0.0 } else { q }))
         }
+        // Tower truncating division (oracle `quotrem`/`quotmix`/
+        // `quotdec`): any tower zero divisor is `Divide by zero`
+        // (unlike the `Int` `/ by zero` wedge, which stays).
+        _ => {
+            if num_rational(&b).numer().is_zero() {
+                return Err(divide_by_zero());
+            }
+            if num_rank(&a).max(num_rank(&b)) == 3 {
+                Ok(Value::BigDec(num_bigdec(&a)?.quot_trunc(&num_bigdec(&b)?)))
+            } else {
+                let (x, y) = (num_rational(&a), num_rational(&b));
+                Ok(num_value(num_ratio(trunc_div(&x, &y))))
+            }
+        }
     }
+}
+
+/// Truncating rational division toward zero (the `quot` rule for
+/// `BigInt`/`Ratio` operands).
+fn trunc_div(
+    x: &num_rational::BigRational,
+    y: &num_rational::BigRational,
+) -> num_rational::BigRational {
+    let q = x.numer() * y.denom() / (x.denom() * y.numer());
+    num_rational::BigRational::from_integer(q)
 }
 
 fn native_rem(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/rem", args, &[2])?;
-    match (as_num(&args[0])?, as_num(&args[1])?) {
+    let (a, b) = (as_num(&args[0])?, as_num(&args[1])?);
+    match (&a, &b) {
         (Num::Int(x), Num::Int(y)) => {
-            if y == 0 {
+            if *y == 0 {
                 return Err(slash_by_zero());
             }
             // `MIN % -1` is the only overflow (0, but checked).
-            x.checked_rem(y).map(Value::Int).ok_or_else(overflow)
+            x.checked_rem(*y).map(Value::Int).ok_or_else(overflow)
         }
-        (x, y) => {
-            let (x, y) = (to_f64(x), to_f64(y));
+        _ if either_double(&a, &b) => {
+            let (x, y) = (to_f64(a), to_f64(b));
             // Zero first (`:rem-nan-0`), then finiteness
             // (`:rem-nan-num`); an infinite divisor is `NaN`, NOT
             // `x` (`:rem-num-inf`, `:rem-num-neginf`).
@@ -433,25 +587,41 @@ fn native_rem(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErro
             }
             Ok(Value::Double(x % y))
         }
+        // Tower remainder (oracle `dec-each`): exact, in the
+        // dividend's kind (`(rem 5M 2)` → `1M`, `(rem 1/2 1)` →
+        // `1/2`).
+        _ => {
+            if num_rational(&b).numer().is_zero() {
+                return Err(divide_by_zero());
+            }
+            if num_rank(&a).max(num_rank(&b)) == 3 {
+                Ok(Value::BigDec(num_bigdec(&a)?.rem(&num_bigdec(&b)?)))
+            } else {
+                let (x, y) = (num_rational(&a), num_rational(&b));
+                let q = trunc_div(&x, &y);
+                Ok(num_value(num_ratio(x - q * y)))
+            }
+        }
     }
 }
 
 fn native_mod(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/mod", args, &[2])?;
-    match (as_num(&args[0])?, as_num(&args[1])?) {
+    let (a, b) = (as_num(&args[0])?, as_num(&args[1])?);
+    match (&a, &b) {
         (Num::Int(x), Num::Int(y)) => {
-            if y == 0 {
+            if *y == 0 {
                 return Err(divide_by_zero());
             }
-            let r = x.checked_rem(y).ok_or_else(overflow)?;
-            Ok(Value::Int(if r == 0 || (r > 0) == (y > 0) {
+            let r = x.checked_rem(*y).ok_or_else(overflow)?;
+            Ok(Value::Int(if r == 0 || (r > 0) == (*y > 0) {
                 r
             } else {
-                r.checked_add(y).ok_or_else(overflow)?
+                r.checked_add(*y).ok_or_else(overflow)?
             }))
         }
-        (x, y) => {
-            let (x, y) = (to_f64(x), to_f64(y));
+        _ if either_double(&a, &b) => {
+            let (x, y) = (to_f64(a), to_f64(b));
             // Zero first (`:mod-nan-0`), then finiteness
             // (`:mod-nan-num`); an infinite divisor falls out of
             // the formula as `NaN` (`:mod-num-inf`).
@@ -463,43 +633,165 @@ fn native_mod(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErro
             }
             Ok(Value::Double(((x % y) + y) % y))
         }
+        // Tower modulus (oracle `dec-each`): the remainder
+        // adjusted to the divisor's sign, in the dividend's kind.
+        _ => {
+            if num_rational(&b).numer().is_zero() {
+                return Err(divide_by_zero());
+            }
+            if num_rank(&a).max(num_rank(&b)) == 3 {
+                let (x, y) = (num_bigdec(&a)?, num_bigdec(&b)?);
+                Ok(Value::BigDec(bigdec_mod(&x, &y)))
+            } else {
+                let (x, y) = (num_rational(&a), num_rational(&b));
+                let q = trunc_div(&x, &y);
+                let y_sign = y.numer().sign();
+                let r = x - q * y.clone();
+                Ok(num_value(num_ratio(
+                    if r.numer().is_zero() || r.numer().sign() == y_sign {
+                        r
+                    } else {
+                        r + y
+                    },
+                )))
+            }
+        }
     }
 }
 
-/// A number as `f64` (mixed/double paths).
+/// `BigDec` modulus: the remainder adjusted to the divisor's
+/// sign (mirrors the `Int` formula above).
+fn bigdec_mod(x: &clj_value::BigDec, y: &clj_value::BigDec) -> clj_value::BigDec {
+    let r = x.rem(y);
+    if r.is_zero() || r.sign() == y.sign() {
+        r
+    } else {
+        r.add(y)
+    }
+}
+
+/// A number as `f64` (mixed/double paths; tower narrows
+/// approximately, infinities included).
 fn to_f64(n: Num) -> f64 {
     match n {
         Num::Int(i) => i as f64,
+        Num::BigInt(n) => n.to_f64().unwrap_or(f64::NAN),
+        Num::Ratio(r) => r.to_f64().unwrap_or(f64::NAN),
+        Num::BigDec(d) => d.to_f64(),
         Num::Double(d) => d,
+    }
+}
+
+/// An exact rational for a number. `Double` never reaches here
+/// (doubles always take the `f64` path); the `expect` documents
+/// that invariant coverably.
+fn num_rational(n: &Num) -> num_rational::BigRational {
+    match n {
+        Num::Int(i) => num_rational::BigRational::from_integer(num_bigint::BigInt::from(*i)),
+        Num::BigInt(n) => num_rational::BigRational::from_integer(n.clone()),
+        Num::Ratio(r) => r.clone(),
+        Num::BigDec(d) => d.to_rational(),
+        Num::Double(_) => {
+            unreachable!("doubles take the f64 path, never the exact one")
+        }
+    }
+}
+
+/// An exact `BigDec` for a non-`Double` number (a `Ratio` with no
+/// terminating expansion fails like `(bigdec 1/3)`).
+fn num_bigdec(n: &Num) -> Result<clj_value::BigDec, NativeError> {
+    match n {
+        Num::Int(i) => Ok(clj_value::BigDec::from_bigint(num_bigint::BigInt::from(*i))),
+        Num::BigInt(n) => Ok(clj_value::BigDec::from_bigint(n.clone())),
+        Num::BigDec(d) => Ok(d.clone()),
+        Num::Ratio(r) => clj_value::BigDec::from_rational_exact(r).map_err(|m| {
+            NativeError::new(clj_value::ThrowClass::ArithmeticException, m.to_owned())
+        }),
+        Num::Double(_) => {
+            unreachable!("rank dispatch keeps doubles out of BigDec ops")
+        }
+    }
+}
+
+/// A rational as a `Num` (denominator 1 folds to `BigInt`).
+fn num_ratio(r: num_rational::BigRational) -> Num {
+    if r.denom() == &num_bigint::BigInt::from(1) {
+        Num::BigInt(r.numer().clone())
+    } else {
+        Num::Ratio(r)
+    }
+}
+
+/// An `Ordering` as the `f64` pair the chained comparisons take
+/// (`<`/`>`/`<=`/`>=` all read correctly off `(ord, 0.0)`).
+fn ord_num(ord: std::cmp::Ordering) -> f64 {
+    match ord {
+        std::cmp::Ordering::Less => -1.0,
+        std::cmp::Ordering::Equal => 0.0,
+        std::cmp::Ordering::Greater => 1.0,
+    }
+}
+
+/// The sign of a number (tower via the exact rational, whose
+/// denominator is always positive; `Double` keeps its own arms
+/// at the call sites).
+fn num_sign(n: &Num) -> num_bigint::Sign {
+    num_rational(n).numer().sign()
+}
+
+/// Whether either side is a `Double` (the approximate path).
+fn either_double(a: &Num, b: &Num) -> bool {
+    matches!(a, Num::Double(_)) || matches!(b, Num::Double(_))
+}
+
+/// The rational `1` (tower steps).
+fn rat_unit() -> num_rational::BigRational {
+    num_rational::BigRational::from_integer(num_bigint::BigInt::from(1))
+}
+
+/// One step (tower kinds keep their kind: `(inc 5M)` → `6M`,
+/// `(inc 1/2)` → `3/2`; `Int` still overflows — the wedge).
+fn inc_one(n: Num) -> Result<Value, NativeError> {
+    match n {
+        Num::Int(x) => x.checked_add(1).map(Value::Int).ok_or_else(overflow),
+        Num::BigInt(x) => Ok(Value::BigInt(x + 1)),
+        Num::Ratio(x) => Ok(num_value(num_ratio(x + rat_unit()))),
+        Num::BigDec(x) => Ok(Value::BigDec(
+            x.add(&clj_value::BigDec::from_bigint(num_bigint::BigInt::from(1))),
+        )),
+        Num::Double(x) => Ok(Value::Double(x + 1.0)),
+    }
+}
+
+/// One step down (mirror of [`inc_one`]).
+fn dec_one(n: Num) -> Result<Value, NativeError> {
+    match n {
+        Num::Int(x) => x.checked_sub(1).map(Value::Int).ok_or_else(overflow),
+        Num::BigInt(x) => Ok(Value::BigInt(x - 1)),
+        Num::Ratio(x) => Ok(num_value(num_ratio(x - rat_unit()))),
+        Num::BigDec(x) => Ok(Value::BigDec(
+            x.sub(&clj_value::BigDec::from_bigint(num_bigint::BigInt::from(1))),
+        )),
+        Num::Double(x) => Ok(Value::Double(x - 1.0)),
     }
 }
 
 fn native_inc(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/inc", args, &[1])?;
-    match as_num(&args[0])? {
-        Num::Int(x) => x.checked_add(1).map(Value::Int).ok_or_else(overflow),
-        Num::Double(x) => Ok(Value::Double(x + 1.0)),
-    }
+    inc_one(as_num(&args[0])?)
 }
 
 fn native_dec(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/dec", args, &[1])?;
-    match as_num(&args[0])? {
-        Num::Int(x) => x.checked_sub(1).map(Value::Int).ok_or_else(overflow),
-        Num::Double(x) => Ok(Value::Double(x - 1.0)),
-    }
+    dec_one(as_num(&args[0])?)
 }
 
 /// `inc'`: auto-promoting increment — identical to `inc` here
-/// (our `Int` has no `BigInt` to promote to, so the top end
-/// overflows instead of growing; `(range)` only needs small
-/// steps).
+/// (`Int` still overflows instead of growing to `BigInt`; the
+/// wedge stays, tower kinds pass through like `inc`).
 fn native_inc_prime(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/inc'", args, &[1])?;
-    match as_num(&args[0])? {
-        Num::Int(x) => x.checked_add(1).map(Value::Int).ok_or_else(overflow),
-        Num::Double(x) => Ok(Value::Double(x + 1.0)),
-    }
+    inc_one(as_num(&args[0])?)
 }
 
 /// `max`/`min`: ties keep the LATTER (`(max 1 1.0)` → `1.0`),
@@ -519,8 +811,9 @@ fn minmax(display: &str, args: &[Value], want_max: bool) -> Result<Value, Native
         // The incumbent survives only on a strict win; anything
         // else (a tie, or a latter-side `NaN` since every `NaN`
         // comparison is false) takes the latter — except a `NaN`
-        // incumbent, which always survives (`:max-nan1`).
-        let keep = match (acc, n) {
+        // incumbent, which always survives (`:max-nan1`). Tower
+        // pairs without a `Double` compare exactly.
+        let keep = match (&acc, &n) {
             (Num::Int(a), Num::Int(b)) => {
                 if want_max {
                     a > b
@@ -528,14 +821,22 @@ fn minmax(display: &str, args: &[Value], want_max: bool) -> Result<Value, Native
                     a < b
                 }
             }
-            _ => {
-                let (a, b) = (to_f64(acc), to_f64(n));
+            _ if either_double(&acc, &n) => {
+                let (a, b) = (to_f64(acc.clone()), to_f64(n.clone()));
                 if a.is_nan() {
                     true
                 } else if want_max {
                     a > b
                 } else {
                     a < b
+                }
+            }
+            _ => {
+                let ord = num_rational(&acc).cmp(&num_rational(&n));
+                if want_max {
+                    ord == std::cmp::Ordering::Greater
+                } else {
+                    ord == std::cmp::Ordering::Less
                 }
             }
         };
@@ -593,9 +894,12 @@ fn native_num_eq(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeE
     let mut prev = as_num(&args[0])?;
     for arg in &args[1..] {
         let n = as_num(arg)?;
-        let same = match (prev, n) {
+        // `Int`/`Int` is exact; `Double` pairs compare as `f64`
+        // (`NaN` never is); tower pairs compare exactly.
+        let same = match (&prev, &n) {
             (Num::Int(a), Num::Int(b)) => a == b,
-            _ => to_f64(prev) == to_f64(n),
+            _ if either_double(&prev, &n) => to_f64(prev.clone()) == to_f64(n.clone()),
+            _ => num_rational(&prev) == num_rational(&n),
         };
         if !same {
             return Ok(Value::Bool(false));
@@ -624,9 +928,13 @@ fn chain_cmp(
     let mut prev = as_num(&args[0])?;
     for arg in &args[1..] {
         let n = as_num(arg)?;
-        let holds = match (prev, n) {
-            (Num::Int(a), Num::Int(b)) => int_op(a, b),
-            _ => op(to_f64(prev), to_f64(n)),
+        // `Int`/`Int` uses the integer predicate; `Double` pairs
+        // use the `f64` one (`NaN` orders false everywhere);
+        // tower pairs compare exactly, read off `(ord, 0.0)`.
+        let holds = match (&prev, &n) {
+            (Num::Int(a), Num::Int(b)) => int_op(*a, *b),
+            _ if either_double(&prev, &n) => op(to_f64(prev.clone()), to_f64(n.clone())),
+            _ => op(ord_num(num_rational(&prev).cmp(&num_rational(&n))), 0.0),
         };
         if !holds {
             return Ok(Value::Bool(false));
@@ -652,11 +960,18 @@ fn native_gte(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErro
     chain_cmp("clojure.core/>=", args, |a, b| a >= b, |a, b| a >= b)
 }
 
+/// The sign of a tower number as a `zero?`/`pos?`/`neg?`
+/// answer (`Double` keeps its historic arms above).
+fn tower_sign(n: &Num, want: num_bigint::Sign) -> bool {
+    num_sign(n) == want
+}
+
 fn native_zero(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/zero?", args, &[1])?;
     Ok(Value::Bool(match as_num(&args[0])? {
         Num::Int(x) => x == 0,
         Num::Double(x) => x == 0.0,
+        n => tower_sign(&n, num_bigint::Sign::NoSign),
     }))
 }
 
@@ -665,6 +980,7 @@ fn native_pos(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErro
     Ok(Value::Bool(match as_num(&args[0])? {
         Num::Int(x) => x > 0,
         Num::Double(x) => x > 0.0,
+        n => tower_sign(&n, num_bigint::Sign::Plus),
     }))
 }
 
@@ -673,6 +989,7 @@ fn native_neg(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErro
     Ok(Value::Bool(match as_num(&args[0])? {
         Num::Int(x) => x < 0,
         Num::Double(x) => x < 0.0,
+        n => tower_sign(&n, num_bigint::Sign::Minus),
     }))
 }
 
@@ -712,21 +1029,27 @@ fn compare_nil(x: &Value, y: &Value) -> Option<std::cmp::Ordering> {
 /// fails `y` to `Number`).
 fn compare_numbers(x: &Value, y: &Value) -> Result<Option<std::cmp::Ordering>, NativeError> {
     use std::cmp::Ordering;
-    if !matches!(x, Value::Int(_) | Value::Double(_)) {
+    if !is_number(x) {
         return Ok(None);
     }
-    if !matches!(y, Value::Int(_) | Value::Double(_)) {
+    if !is_number(y) {
         return Err(cce_err(y, "java.lang.Number"));
     }
-    let (a, b) = (to_f64(as_num(x)?), to_f64(as_num(y)?));
-    // The `<`/`>` pair (never `total_cmp`): `NaN` ties.
-    if a < b {
-        return Ok(Some(Ordering::Less));
+    let (a, b) = (as_num(x)?, as_num(y)?);
+    // `Double` pairs compare as `f64` (the `<`/`>` pair, never
+    // `total_cmp`: `NaN` ties); every other numeric pairing
+    // compares exactly (oracle `cmpd`, `sort-mixed2`).
+    if either_double(&a, &b) {
+        let (a, b) = (to_f64(a), to_f64(b));
+        if a < b {
+            return Ok(Some(Ordering::Less));
+        }
+        if a > b {
+            return Ok(Some(Ordering::Greater));
+        }
+        return Ok(Some(Ordering::Equal));
     }
-    if a > b {
-        return Ok(Some(Ordering::Greater));
-    }
-    Ok(Some(Ordering::Equal))
+    Ok(Some(num_rational(&a).cmp(&num_rational(&b))))
 }
 
 /// Same-type scalars and vectors (`None` when the types differ).
@@ -874,13 +1197,21 @@ fn is_boolean(v: &Value) -> bool {
     matches!(v, Value::Bool(_))
 }
 fn is_integer(v: &Value) -> bool {
+    matches!(v, Value::Int(_) | Value::BigInt(_))
+}
+/// `int?` stays `Int`-only (oracle: `(int? 5N)` is false — the
+/// pinned `(int? 1)` wedge for `Long` stays too).
+fn is_int(v: &Value) -> bool {
     matches!(v, Value::Int(_))
 }
 fn is_double(v: &Value) -> bool {
     matches!(v, Value::Double(_))
 }
 fn is_number(v: &Value) -> bool {
-    matches!(v, Value::Int(_) | Value::Double(_))
+    matches!(
+        v,
+        Value::Int(_) | Value::Double(_) | Value::BigInt(_) | Value::BigDec(_) | Value::Ratio(_)
+    )
 }
 fn is_string(v: &Value) -> bool {
     matches!(v, Value::Str(_))
@@ -1004,7 +1335,7 @@ pred1!(native_truep, "clojure.core/true?", is_true);
 pred1!(native_falsep, "clojure.core/false?", is_false);
 pred1!(native_booleanp, "clojure.core/boolean?", is_boolean);
 pred1!(native_integerp, "clojure.core/integer?", is_integer);
-pred1!(native_intp, "clojure.core/int?", is_integer);
+pred1!(native_intp, "clojure.core/int?", is_int);
 pred1!(native_floatp, "clojure.core/float?", is_double);
 pred1!(native_doublep, "clojure.core/double?", is_double);
 pred1!(native_numberp, "clojure.core/number?", is_number);
@@ -1383,6 +1714,20 @@ fn npe_char_value() -> NativeError {
     )
 }
 
+/// A `Ratio` truncated toward zero (`int`/`long` narrow from
+/// there, like the JVM's `intValue`/`longValue`).
+fn trunc_ratio(r: &num_rational::BigRational) -> num_bigint::BigInt {
+    r.numer() / r.denom()
+}
+
+/// A truncated tower integer as a `long`: out-of-`i64` fails
+/// `Value out of range for long` with the exact digits (oracle
+/// `l1`/`l2` — no wrap, unlike `longValue`).
+fn bigint_long(n: &num_bigint::BigInt) -> Result<i64, NativeError> {
+    n.to_i64()
+        .ok_or_else(|| out_of_range("long", Num::BigInt(n.clone())))
+}
+
 /// The `doubleValue` NPE (`long`/`double`/`float`/`short`/`byte`
 /// of nil).
 fn npe_double_value() -> NativeError {
@@ -1401,11 +1746,15 @@ fn npe_long_value() -> NativeError {
 }
 
 /// `IAE | Value out of range for {kind}: {x}` — doubles render
-/// via `Double.toString`, ints raw (fixprobe10 `:int-huge`).
+/// via `Double.toString`, ints raw (fixprobe10 `:int-huge`),
+/// tower values exactly.
 fn out_of_range(kind: &str, n: Num) -> NativeError {
     let x = match n {
         Num::Int(i) => i.to_string(),
         Num::Double(d) => clj_value::java_double_string(d),
+        Num::BigInt(n) => n.to_string(),
+        Num::Ratio(r) => format!("{r}"),
+        Num::BigDec(d) => d.to_bigdec_string(),
     };
     NativeError::new(
         ThrowClass::IllegalArgumentException,
@@ -1432,6 +1781,13 @@ fn native_int(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErro
             }
         }
         Value::Char(c) => *c as i64,
+        // Tower integers take the `long` range check (exact
+        // digits) then `toIntExact` (oracles `conv-i1`,
+        // `conv-hugeint`); decimals narrow through `double`
+        // first (oracle `conv-hugedecint`: `1.0E30`).
+        Value::BigInt(n) => tower_intcast(n).map(i64::from)?,
+        Value::Ratio(r) => tower_intcast(&trunc_ratio(r)).map(i64::from)?,
+        Value::BigDec(d) => bigdec_intcast(d).map(i64::from)?,
         Value::Nil => return Err(npe_char_value()),
         v => return Err(cce_err(v, "java.lang.Character")),
     }))
@@ -1441,16 +1797,13 @@ fn native_long(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErr
     check_arity("clojure.core/long", args, &[1])?;
     Ok(Value::Int(match &args[0] {
         Value::Int(i) => *i,
-        Value::Double(d) => {
-            if d.is_nan() {
-                0
-            } else if *d >= 9223372036854775808.0 || *d < -9223372036854775808.0 {
-                return Err(out_of_range("long", Num::Double(*d)));
-            } else {
-                d.trunc() as i64
-            }
-        }
+        Value::Double(d) => double_long(*d)?,
         Value::Char(c) => *c as i64,
+        Value::BigInt(n) => bigint_long(n)?,
+        Value::Ratio(r) => bigint_long(&trunc_ratio(r))?,
+        // Decimals narrow through `double` (oracle `conv-declong`:
+        // `(long 1E+30M)` fails `1.0E30`).
+        Value::BigDec(d) => double_long(d.to_f64())?,
         Value::Nil => return Err(npe_double_value()),
         v => return Err(cce_err(v, "java.lang.Number")),
     }))
@@ -1461,10 +1814,135 @@ fn native_double(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeE
     Ok(Value::Double(match &args[0] {
         Value::Int(i) => *i as f64,
         Value::Double(d) => *d,
+        Value::BigInt(n) => n.to_f64().unwrap_or(f64::NAN),
+        Value::Ratio(r) => r.to_f64().unwrap_or(f64::NAN),
+        Value::BigDec(d) => d.to_f64(),
         Value::Nil => return Err(npe_double_value()),
         // Characters rejected (fixprobe11 `:dbl-ch`).
         v => return Err(cce_err(v, "java.lang.Number")),
     }))
+}
+
+/// `bigint`: `BigInt` passes through; `Int` widens; `Double`
+/// and `BigDec` truncate toward zero through the canonical
+/// decimal (`NaN`/`Inf` fail like `valueOf`); `Ratio` truncates;
+/// strings parse like `BigInteger(String)`; nil trips the
+/// `String.length` NPE; anything else is the `No matching ctor`
+/// `IllegalArgumentException` (all oracle-verbatim).
+fn native_bigint(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.core/bigint", args, &[1])?;
+    match &args[0] {
+        Value::BigInt(n) => Ok(Value::BigInt(n.clone())),
+        Value::Int(i) => Ok(Value::BigInt(num_bigint::BigInt::from(*i))),
+        Value::Double(d) => {
+            let dec = clj_value::BigDec::value_of_f64(*d).map_err(number_format)?;
+            Ok(Value::BigInt(dec.to_bigint_trunc()))
+        }
+        Value::BigDec(d) => Ok(Value::BigInt(d.to_bigint_trunc())),
+        Value::Ratio(r) => Ok(Value::BigInt(r.numer() / r.denom())),
+        Value::Str(s) => clj_value::bigint_parse(s)
+            .map(Value::BigInt)
+            .map_err(number_format),
+        Value::Nil => Err(NativeError::new(
+            ThrowClass::NullPointerException,
+            "Cannot invoke \"String.length()\" because \"val\" is null".to_owned(),
+        )),
+        _ => Err(NativeError::new(
+            ThrowClass::IllegalArgumentException,
+            "No matching ctor found for class java.math.BigInteger".to_owned(),
+        )),
+    }
+}
+
+/// `bigdec`: `BigDec` passes through; `Int`/`Double` go through
+/// `valueOf` (so `(bigdec 5)` is `5.0M`); `BigInt` widens;
+/// `Ratio` must terminate exactly; strings parse like
+/// `BigDecimal(String)`; nil trips the `toCharArray` NPE;
+/// anything else is the `No matching ctor`
+/// `IllegalArgumentException` (all oracle-verbatim).
+fn native_bigdec(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.core/bigdec", args, &[1])?;
+    match &args[0] {
+        Value::BigDec(d) => Ok(Value::BigDec(d.clone())),
+        Value::Int(i) => Ok(Value::BigDec(
+            clj_value::BigDec::value_of_f64(*i as f64).map_err(number_format)?,
+        )),
+        Value::Double(d) => Ok(Value::BigDec(
+            clj_value::BigDec::value_of_f64(*d).map_err(number_format)?,
+        )),
+        Value::BigInt(n) => Ok(Value::BigDec(clj_value::BigDec::from_bigint(n.clone()))),
+        Value::Ratio(r) => clj_value::BigDec::from_rational_exact(r)
+            .map(Value::BigDec)
+            .map_err(arithmetic),
+        Value::Str(s) => clj_value::BigDec::parse(s)
+            .map(Value::BigDec)
+            .map_err(number_format),
+        Value::Nil => Err(NativeError::new(
+            ThrowClass::NullPointerException,
+            "Cannot invoke \"String.toCharArray()\" because \"val\" is null".to_owned(),
+        )),
+        _ => Err(NativeError::new(
+            ThrowClass::IllegalArgumentException,
+            "No matching ctor found for class java.math.BigDecimal".to_owned(),
+        )),
+    }
+}
+
+/// `num`: numbers (tower included) pass through, nil is nil,
+/// anything else fails the `Number` cast (oracle `num-str`).
+fn native_num(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.core/num", args, &[1])?;
+    match &args[0] {
+        Value::Nil => Ok(Value::Nil),
+        Value::Int(_)
+        | Value::Double(_)
+        | Value::BigInt(_)
+        | Value::BigDec(_)
+        | Value::Ratio(_) => Ok(args[0].clone()),
+        other => Err(cce_err(other, "java.lang.Number")),
+    }
+}
+
+/// `rationalize`: integers pass through, nil is nil, doubles go
+/// through `BigDecimal.valueOf` first (`(rationalize 0.1)` is
+/// `1/10`, `(rationalize 1e100)` is exact `10N^100`;
+/// `NaN`/`Inf` fail), integer-valued decimals fold to `BigInt`
+/// (`(rationalize 5.0M)` → `5N`), anything else fails the
+/// `Number` cast (all oracle-verbatim).
+fn native_rationalize(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.core/rationalize", args, &[1])?;
+    match &args[0] {
+        Value::Nil => Ok(Value::Nil),
+        Value::Int(_) | Value::BigInt(_) | Value::Ratio(_) => Ok(args[0].clone()),
+        Value::Double(d) => {
+            let dec = clj_value::BigDec::value_of_f64(*d).map_err(number_format)?;
+            let r = dec.to_rational();
+            if r.denom() == &num_bigint::BigInt::from(1) {
+                Ok(Value::BigInt(r.numer().clone()))
+            } else {
+                Ok(Value::Ratio(r))
+            }
+        }
+        Value::BigDec(d) => {
+            let r = d.to_rational();
+            if r.denom() == &num_bigint::BigInt::from(1) {
+                Ok(Value::BigInt(r.numer().clone()))
+            } else {
+                Ok(Value::Ratio(r))
+            }
+        }
+        other => Err(cce_err(other, "java.lang.Number")),
+    }
+}
+
+/// A `NumberFormatException` for a message.
+fn number_format(message: impl Into<String>) -> NativeError {
+    NativeError::new(ThrowClass::NumberFormatException, message.into())
+}
+
+/// An `ArithmeticException` for a message.
+pub(crate) fn arithmetic(message: impl Into<String>) -> NativeError {
+    NativeError::new(ThrowClass::ArithmeticException, message.into())
 }
 
 fn native_float(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
@@ -1480,6 +1958,29 @@ fn native_float(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeEr
                 return Err(out_of_range("float", Num::Double(*d)));
             }
             *d
+        }
+        // Tower narrows like `double`, then takes the same
+        // range check (the class/precision gap is documented).
+        Value::BigInt(n) => {
+            let f = n.to_f64().unwrap_or(f64::NAN);
+            if f > f64::from(f32::MAX) || f < -f64::from(f32::MAX) {
+                return Err(out_of_range("float", Num::BigInt(n.clone())));
+            }
+            f
+        }
+        Value::Ratio(r) => {
+            let f = r.to_f64().unwrap_or(f64::NAN);
+            if f > f64::from(f32::MAX) || f < -f64::from(f32::MAX) {
+                return Err(out_of_range("float", Num::Ratio(r.clone())));
+            }
+            f
+        }
+        Value::BigDec(d) => {
+            let f = d.to_f64();
+            if f > f64::from(f32::MAX) || f < -f64::from(f32::MAX) {
+                return Err(out_of_range("float", Num::BigDec(d.clone())));
+            }
+            f
         }
         Value::Nil => return Err(npe_double_value()),
         v => return Err(cce_err(v, "java.lang.Number")),
@@ -1875,6 +2376,10 @@ pub(crate) const CORE_NATIVES: &[(&str, NativeFnPtr)] = &[
     ("long", native_long),
     ("double", native_double),
     ("float", native_float),
+    ("bigint", native_bigint),
+    ("bigdec", native_bigdec),
+    ("num", native_num),
+    ("rationalize", native_rationalize),
     ("short", native_short),
     ("byte", native_byte),
     ("char", native_char),
@@ -1898,6 +2403,44 @@ pub(crate) const CORE_NATIVES: &[(&str, NativeFnPtr)] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `num_rank` still orders `Double` top (only called past the
+    /// `either_double` guards, so user code never reaches this
+    /// arm — the pin keeps the promotion lattice total).
+    #[test]
+    fn num_rank_orders_double_top() {
+        assert_eq!(num_rank(&Num::Double(0.5)), 4);
+        assert_eq!(num_rank(&Num::Int(1)), 0);
+    }
+
+    /// The exact paths reject `Double` (callers dispatch on
+    /// `either_double` first — the panic is the contract).
+    #[test]
+    #[should_panic(expected = "doubles take the f64 path, never the exact one")]
+    fn num_rational_rejects_double() {
+        let _ = num_rational(&Num::Double(0.5));
+    }
+
+    /// See [`num_rational_rejects_double`].
+    #[test]
+    #[should_panic(expected = "rank dispatch keeps doubles out of BigDec ops")]
+    fn num_bigdec_rejects_double() {
+        let _ = num_bigdec(&Num::Double(0.5));
+    }
+
+    /// A denominator-1 rational folds to `BigInt` (user code only
+    /// builds reduced ratios, so this arm is the safety net).
+    #[test]
+    fn num_value_folds_unit_denominator() {
+        let unreduced = num_rational::BigRational::new(
+            num_bigint::BigInt::from(2),
+            num_bigint::BigInt::from(2),
+        );
+        assert_eq!(
+            num_value(Num::Ratio(unreduced)),
+            Value::BigInt(num_bigint::BigInt::from(1))
+        );
+    }
 
     #[test]
     fn hash_code_post_realize_uoe() {

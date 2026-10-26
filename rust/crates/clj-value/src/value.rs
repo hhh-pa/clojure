@@ -35,6 +35,8 @@
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
+use num_traits::ToPrimitive;
+
 use crate::{
     Agent, Atom, Delay, ExtensionValue, Future, Keyword, Promise, Symbol, Throwable, Transient,
     Unbound, Var,
@@ -709,6 +711,12 @@ pub enum Value {
     Int(i64),
     /// IEEE-754 double.
     Double(f64),
+    /// Arbitrary-precision integer (`clojure.lang.BigInt`).
+    BigInt(num_bigint::BigInt),
+    /// Arbitrary-precision decimal (`java.math.BigDecimal`).
+    BigDec(crate::BigDec),
+    /// Exact rational (`clojure.lang.Ratio`, always normalized).
+    Ratio(num_rational::BigRational),
     /// String.
     Str(Arc<str>),
     /// Character.
@@ -978,10 +986,34 @@ fn value_eq_mid(a: &Value, b: &Value) -> bool {
 }
 
 fn value_eq_rest(a: &Value, b: &Value) -> bool {
+    if is_tower(a) || is_tower(b) {
+        return tower_equiv(a, b);
+    }
     match (a, b) {
         (Value::Promise(a), Value::Promise(b)) => cell_meta_eq(a.same_cell(b), a.meta(), b.meta()),
         (Value::Agent(a), Value::Agent(b)) => cell_meta_eq(a.same_cell(b), a.meta(), b.meta()),
         (Value::Extension(a), Value::Extension(b)) => a.dyn_eq(&**b),
+        _ => false,
+    }
+}
+
+/// Either side is a tower numeric (`BigInt`/`BigDec`/`Ratio`).
+fn is_tower(v: &Value) -> bool {
+    matches!(v, Value::BigInt(_) | Value::BigDec(_) | Value::Ratio(_))
+}
+
+/// Tower `=` (oracle-pinned), shared by `==` (`PartialEq`) and
+/// `Util.equiv` (`jvm_equiv`): `BigInt` equivs `Int` by value and
+/// itself; `BigDec` equivs itself by `compareTo`
+/// (scale-insensitive); `Ratio` equivs itself; every other cross
+/// pairing is false.
+fn tower_equiv(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::BigInt(x), Value::BigInt(y)) => x == y,
+        (Value::BigInt(x), Value::Int(y)) => x.to_i64().is_some_and(|i| i == *y),
+        (Value::Int(x), Value::BigInt(y)) => y.to_i64().is_some_and(|i| i == *x),
+        (Value::BigDec(x), Value::BigDec(y)) => x.compare(y) == std::cmp::Ordering::Equal,
+        (Value::Ratio(x), Value::Ratio(y)) => x == y,
         _ => false,
     }
 }
@@ -1039,6 +1071,31 @@ impl Hash for Value {
                 state.write_u8(3);
                 state.write_u64(double_hash_bits(*d));
             }
+            // A `BigInt` that fits is exactly its `Int` (they are
+            // `=`); wider ones hash by magnitude bytes.
+            Value::BigInt(n) => {
+                if let Some(i) = n.to_i64() {
+                    state.write_u8(2);
+                    state.write_i64(i);
+                } else {
+                    state.write_u8(23);
+                    hash_bigint_bytes(n, state);
+                }
+            }
+            // Stripped decimals hash equally exactly when
+            // `compareTo` says so (the `=` rule below).
+            Value::BigDec(d) => {
+                state.write_u8(24);
+                let (unscaled, scale) = d.stripped();
+                hash_bigint_bytes(&unscaled, state);
+                state.write_i64(scale);
+            }
+            // Rationals are always normalized, so the pair is unique.
+            Value::Ratio(r) => {
+                state.write_u8(25);
+                hash_bigint_bytes(r.numer(), state);
+                hash_bigint_bytes(r.denom(), state);
+            }
             Value::Str(s) => {
                 state.write_u8(4);
                 s.hash(state);
@@ -1067,6 +1124,14 @@ impl Hash for Value {
             other => hash_value_mid(other, state),
         }
     }
+}
+
+/// Length-prefixed magnitude bytes (ambiguity-free across
+/// adjacent fields).
+fn hash_bigint_bytes<H: Hasher>(n: &num_bigint::BigInt, state: &mut H) {
+    let bytes = n.to_signed_bytes_be();
+    state.write_usize(bytes.len());
+    state.write(&bytes);
 }
 
 fn hash_value_mid<H: Hasher>(v: &Value, state: &mut H) {
@@ -1288,6 +1353,8 @@ fn jvm_equiv(a: &Value, b: &Value) -> bool {
         }
         (Value::Int(x), Value::Int(y)) => x == y,
         (Value::Int(_), Value::Double(_)) | (Value::Double(_), Value::Int(_)) => false,
+        // Tower rules live in `tower_equiv` (shared with `==`).
+        (a, b) if is_tower(a) || is_tower(b) => tower_equiv(a, b),
         _ => {
             if is_collection(a) {
                 coll_equiv(a, b)
@@ -1557,6 +1624,14 @@ mod tests {
     fn assert_hash_consistent(a: &Value, b: &Value) {
         assert_eq!(a, b, "{a:?} should equal {b:?}");
         assert_eq!(hash_of(a), hash_of(b), "equal values must hash equally");
+    }
+
+    /// Past-`i64` big integers hash by magnitude bytes (the
+    /// `hasheq` contract: equal values hash equally).
+    #[test]
+    fn wide_bigint_hashes_by_magnitude() {
+        let wide = || Value::BigInt(num_bigint::BigInt::from(2).pow(100));
+        assert_hash_consistent(&wide(), &wide());
     }
 
     #[test]

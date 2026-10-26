@@ -1,0 +1,67 @@
+;; S-rng-tower oracle probes (oracle: alpha10 jars, issue #32).
+;; Run from repo root (/Users/hhu/workspace/clojure):
+;; CP=/Users/hhu/.m2/repository/org/clojure/clojure/1.13.0-alpha10/clojure-1.13.0-alpha10.jar:/Users/hhu/.m2/repository/org/clojure/spec.alpha/0.6.249/spec.alpha-0.6.249.jar:/Users/hhu/.m2/repository/org/clojure/core.specs.alpha/0.6.148-alpha12/core.specs.alpha-0.6.148-alpha12.jar; java -Duser.language=en -Duser.country=US -Duser.timezone=UTC -cp $CP clojure.main docs/i32-rng-tower/probes/re_rng.clj > docs/i32-rng-tower/probes/re_rng.out
+(defn throwof [label form]
+  (try
+    (let [v (eval form)]
+      (println (str label " " (pr-str v))))
+    (catch Throwable t
+      (println (str label " THROW " (.getName (class t)) "|" (pr-str (.getMessage t)))))))
+;; re-find shapes
+(throwof "refind-num" '(re-find #"\d+" "a1b22"))
+(throwof "refind-groups" '(re-find #"a(x?)" "ax"))
+(throwof "refind-nil-group" '(re-find #"a(x)?" "a"))
+(throwof "refind-none" '(re-find #"x" "abc"))
+(throwof "refind-empty" '(re-find #"a*" "b"))
+;; re-matches shapes (full-match anchor)
+(throwof "rematches-full" '(re-matches #"\d+" "123"))
+(throwof "rematches-partial" '(re-matches #"\d+" "12a"))
+(throwof "rematches-groups" '(re-matches #"a(x)" "ax"))
+(throwof "rematches-star" '(re-matches #"a*" "b"))
+;; re-seq shapes
+(throwof "reseq-nums" '(re-seq #"\d+" "a1b22"))
+(throwof "reseq-star" '(re-seq #"a*" "b"))
+(throwof "reseq-none" '(re-seq #"x" "abc"))
+(throwof "reseq-groups" '(re-seq #"a(b)?" "ab"))
+(throwof "reseq-type" '(type (re-seq #"\d+" "a1b22")))
+;; re-pattern
+(throwof "repattern-passthrough" '(let [p #"a+"] (= p (re-pattern p))))
+(throwof "repattern-str" '(re-pattern "a+"))
+(throwof "repattern-bad" '(re-pattern "(a"))
+(throwof "repattern-long" '(re-pattern 1))
+;; re arg errors
+(throwof "refind-strpat" '(re-find "a" "a"))
+(throwof "refind-nil-s" '(re-find #"a" nil))
+(throwof "refind-long-s" '(re-find #"a" 1))
+(throwof "rematches-strpat" '(re-matches "a" "a"))
+(throwof "rematches-nil-s" '(re-matches #"a" nil))
+(throwof "reseq-strpat" '(re-seq "a" "a"))
+(throwof "reseq-nil-s" '(re-seq #"a" nil))
+(throwof "refind-arity" '(re-find #"a"))
+;; rand shapes (ranges, never exact draws)
+(throwof "rand-zero" '(let [x (rand)] (and (number? x) (<= 0.0 x) (< x 1.0))))
+(throwof "rand-one" '(let [x (rand 10)] (and (number? x) (<= 0.0 x) (< x 10.0))))
+(throwof "rand-str" '(rand "a"))
+(throwof "rand-nil" '(rand nil))
+(throwof "rand-arity" '(rand 1 2))
+(throwof "randint" '(let [x (rand-int 10)] (and (integer? x) (<= 0 x) (<= x 9))))
+(throwof "randint-neg1" '(rand-int -1))
+(throwof "randint-str" '(rand-int "a"))
+(throwof "randint-nil" '(rand-int nil))
+;; shuffle (order-free pins)
+(throwof "shuffle-sorted" '(sort (shuffle [3 1 2])))
+(throwof "shuffle-set" '(sort (shuffle #{3 1 2})))
+(throwof "shuffle-count" '(count (shuffle [1 2 3])))
+(throwof "shuffle-nil" '(shuffle nil))
+(throwof "shuffle-str" '(shuffle "ab"))
+(throwof "shuffle-map" '(shuffle {:a 1}))
+(throwof "shuffle-arity" '(shuffle))
+;; random-sample (deterministic edges)
+(throwof "sample-all" '(doall (random-sample 1.0 [1 2])))
+(throwof "sample-none" '(doall (random-sample 0.0 [1 2])))
+(throwof "sample-count-all" '(count (random-sample 1.0 [1 2 3])))
+(throwof "sample-count-none" '(count (random-sample 0.0 [1 2 3])))
+;; review corrections (parent): non-String re-pattern, seq shuffles
+(throwof "repat-long" '(re-pattern 1))
+(throwof "shuffle-lazy" '(sort (shuffle (map inc [1 2]))))
+(throwof "shuffle-list" '(sort (shuffle (quote (3 1 2)))))

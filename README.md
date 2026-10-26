@@ -100,7 +100,7 @@ unbounded, `:fail` / `:continue` error modes, `await` / `await-for`,
 `restart-agent`, `shutdown-agents`), `locking`, `add-watch` /
 `remove-watch`, `realized?`.
 
-**Core vars: 336 implemented, 19 divergent, 65 out of scope**
+**Core vars: 380 implemented, 2 divergent, 40 out of scope**
 ([`rust/core-coverage.md`](rust/core-coverage.md) is normative and
 CI-enforced: listed vars must resolve, excluded ones must not).
 
@@ -144,10 +144,6 @@ each entry asserts its exact behavior, so drift fails CI:
 - **Analyzer builtins.** `let loop fn binding letfn with-redefs
   with-bindings bound-fn locking` resolve as macros but
   `macroexpand-1` returns them unchanged (documented identity).
-- **Seq fns, seq arities only.** `map filter remove keep
-  keep-indexed distinct dedupe` (and plain-`into`) have no
-  transducer arities — the 1-arg/0-arg forms raise
-  `ArityException`.
 - **Agents.** `send-via` routes to the `send-off` pool (no custom
   executors); `await` on a failed agent throws instead of hanging;
   `shutdown-agents` blocks until drained (the JVM returns at
@@ -175,13 +171,7 @@ out of scope, not silently missing:
   `extend-type`, `extend-protocol`, `satisfies?`, `extends?`;
   hence `with-open`).
 - Multimethods (`defmulti defmethod prefer-method get-method
-  methods remove-method`), transducers (`transduce sequence
-  eduction completing ...` + all xform arities), sorted
-  collections (`sorted-map sorted-set ...`, `subseq rsubseq`).
-- RNG (`rand rand-int shuffle`), regex matching (`re-find
-  re-matches re-seq re-pattern` — the reader still reads
-  `#"..."`), the big-number tower (`bigint bigdec num
-  rationalize`, ratios).
+  methods remove-method`).
 - STM (`ref dosync alter commute ensure ref-set`) — never;
   `*in*` machinery (`read read-line line-seq with-in-str`).
 - Reader: `#=` eval reader, `#inst` / `#uuid` data readers,
@@ -195,7 +185,8 @@ There is no tracing garbage collector. Values are immutable and
 `Send + Sync`, shared by `Arc`; persistence plus reference
 counting reclaims storage on drop:
 
-- `Value` is one enum (`Nil Bool Int(i64) Double(f64) Str Char
+- `Value` is one enum (`Nil Bool Int(i64) Double(f64) BigInt
+  BigDec Ratio Str Char
   Symbol Keyword List Vector Map Set Regex TaggedLiteral
   ReaderConditional Var Unbound Throwable Transient Atom Delay
   Future Promise Agent Extension`). Heap payloads — strings,

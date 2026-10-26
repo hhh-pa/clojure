@@ -183,6 +183,9 @@ dependencies = [
  "clj-reader",
  "clj-value",
  "loom",
+ "num-bigint",
+ "num-rational",
+ "num-traits",
  "rand",
  "regex",
 ]
@@ -192,6 +195,9 @@ name = "clj-reader"
 version = "1.13.0-alpha9"
 dependencies = [
  "clj-value",
+ "num-bigint",
+ "num-rational",
+ "num-traits",
 ]
 
 [[package]]
@@ -219,6 +225,7 @@ dependencies = [
  "loom",
  "num-bigint",
  "num-rational",
+ "num-traits",
  "rpds",
  "rustc-hash",
  "ryu",
