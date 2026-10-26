@@ -302,7 +302,12 @@ pub fn jvm_class_of(v: &Value) -> String {
         Value::Vector(_) => "clojure.lang.PersistentVector".to_owned(),
         Value::MapEntry { .. } => "clojure.lang.MapEntry".to_owned(),
         Value::Map(m) => map_class_of(m).to_owned(),
-        Value::Set(_) => "clojure.lang.PersistentHashSet".to_owned(),
+        Value::Set(s) => if s.is_sorted() {
+            "clojure.lang.PersistentTreeSet"
+        } else {
+            "clojure.lang.PersistentHashSet"
+        }
+        .to_owned(),
         other => jvm_class_of_ref(other),
     }
 }
@@ -360,7 +365,9 @@ fn jvm_class_of_host(v: &Value) -> String {
 /// one-way and history-dependent — `dissoc` never demotes and
 /// `array-map` forces array at any size).
 fn map_class_of(m: &clj_value::Map) -> &'static str {
-    if m.is_hashy() {
+    if m.is_sorted() {
+        "clojure.lang.PersistentTreeMap"
+    } else if m.is_hashy() {
         "clojure.lang.PersistentHashMap"
     } else {
         "clojure.lang.PersistentArrayMap"

@@ -1,0 +1,65 @@
+sorted-map {:a 1, :b 2}
+sorted-set #{1 2 3}
+sorted-set-by #{3 2 1}
+sorted-map-by-bad THROW java.lang.ClassCastException|"class clojure.lang.Keyword cannot be cast to class java.lang.Number (clojure.lang.Keyword is in unnamed module of loader 'app'; java.lang.Number is in module java.base of loader 'bootstrap')"
+subseq-ge ([:b 2] [:c 3])
+subseq-gt ([:c 3])
+rsubseq-le ([:b 2] [:a 1])
+rsubseq-set-ge (3 2)
+subseq-set-lt (1 2)
+subseq-past-end nil
+subseq-unsorted THROW java.lang.ClassCastException|"class clojure.lang.PersistentVector cannot be cast to class clojure.lang.Sorted (clojure.lang.PersistentVector and clojure.lang.Sorted are in unnamed module of loader 'app')"
+sorted-assoc {:a 1, :b 2}
+sorted-dissoc {:b 2}
+sorted-conj #{1 2}
+sorted-pred-t true
+sorted-pred-f false
+sorted-empty {}
+sorted-count 2
+sorted-comparator #object[clojure.core$comparator$fn__6174 0x4201a617 "clojure.core$comparator$fn__6174@4201a617"]
+sorted-empty-p true
+sorted-eq true
+sorted-rseq ([:b 2] [:a 1])
+sorted-dup {:a 2}
+subseq-5 ([:b 2])
+rsubseq-5 ([:b 2])
+sorted-nth THROW java.lang.UnsupportedOperationException|"nth not supported on this type: PersistentTreeMap"
+sorted-disj #{2}
+sorted-kw #{:a :b}
+sorted-odd THROW java.lang.IllegalArgumentException|"No value supplied for key: :a"
+subseq-eq ()
+sorted-keys (:a :b)
+sorted-vals (1 2)
+sorted-set-nth THROW java.lang.UnsupportedOperationException|"nth not supported on this type: PersistentTreeSet"
+sorted-set-rseq (2 1)
+sorted-set-eq true
+sorted-meta {:x 1}
+trans-sorted THROW java.lang.ClassCastException|"class clojure.lang.PersistentTreeMap cannot be cast to class clojure.lang.IEditableCollection (clojure.lang.PersistentTreeMap and clojure.lang.IEditableCollection are in unnamed module of loader 'app')"
+sorted-keyobj ({:id 1})
+s-conj-map {:a 1, :b 2, :c 3}
+s-get 1
+s-get-miss nil
+s-contains [true false]
+s-find [:a 1]
+s-update {:a 2}
+s-merge {:a 1, :b 2, :c 3}
+s-empty-set true
+s-rseq-empty nil
+s-subseq-by (2 1)
+s-into {:a 1, :b 2}
+conj-map-nil {:a 1}
+conj-map-map {:a 1, :b 2}
+conj-nil #{nil 1 2}
+trans-set THROW java.lang.ClassCastException|"class clojure.lang.PersistentTreeSet cannot be cast to class clojure.lang.IEditableCollection (clojure.lang.PersistentTreeSet and clojure.lang.IEditableCollection are in unnamed module of loader 'app')"
+dissoc-miss {:a 1}
+disj-miss #{1 2}
+set-contains [true false]
+set-get [2 nil]
+set-find THROW java.lang.IllegalArgumentException|"find not supported on type: clojure.lang.PersistentTreeSet"
+subseq-drop nil
+subseq5e nil
+rsubseq-empty ()
+rsubseq-below nil
+rsubseq-5b ([:b 2] [:a 1])
+rsubseq-5set (2 1)
+rsubseq-5keep ([:c 3] [:b 2])

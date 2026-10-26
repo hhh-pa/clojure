@@ -4,7 +4,7 @@ The complete inventory of `clojure.core` in this port: every var,
 its conformance state, and — for exclusions — why it is excluded.
 If a var is not listed here, that is a file bug, not a silent gap.
 
-- **422 vars: 362 implemented, 2 divergent, 58 out of scope,
+- **422 vars: 368 implemented, 2 divergent, 52 out of scope,
   0 planned.** The port reports Clojure `1.13.0-alpha9`
   (`clojure-version`).
 - **Status meanings.** `implemented` — resolves in the booted core
@@ -182,8 +182,8 @@ Type and shape predicates.
 | `vector?` | implemented | `counted_pred_rows` + `nthrest_rows` + defn assert-args |
 | `map?` | implemented | `counted_pred_rows` + defn sig-parse |
 | `set?` | implemented | arith.rs pred_backlog_rows |
-| `sorted?` | implemented | T1192 FX2 map_entry.rs class_and_predicates (always false; FT6 extends) |
-| `reversible?` | implemented | T1192 FX2b map_entry.rs reversible_pred_rows (vectors, subvecs, entries; not seqs or transients; FT6 sorted colls extend) |
+| `sorted?` | implemented | true on sorted maps/sets (FT6 sort sidecar); coll.rs sorted_sticky_rows |
+| `reversible?` | implemented | vectors, subvecs, entries, and sorted colls (FT6); coll.rs sorted_sticky_rows |
 | `fn?` | implemented | arith.rs pred_backlog_rows (incl. natives) |
 | `ifn?` | implemented | `counted_pred_rows` |
 | `var?` | implemented | arith.rs pred_backlog_rows |
@@ -462,12 +462,12 @@ Significant vars with no port slice, grouped below by area with the reason. (Two
 | var | status | notes |
 | --- | --- | --- |
 | `clone-thread-bindings` | out-of-scope | does not exist on the JVM (probe37 `clone-missing`) |
-| `sorted-map` | out-of-scope | sorted collections: no slice |
-| `sorted-set` | out-of-scope | sorted collections: no slice |
-| `sorted-map-by` | out-of-scope | sorted collections: no slice |
-| `sorted-set-by` | out-of-scope | sorted collections: no slice |
-| `subseq` | out-of-scope | sorted collections: no slice |
-| `rsubseq` | out-of-scope | sorted collections: no slice |
+| `sorted-map` | implemented | ordered sidecar on `Map` (natural `jvm_compare`); coll.rs sorted_construction_rows |
+| `sorted-set` | implemented | ordered sidecar on `Set`; coll.rs sorted_construction_rows |
+| `sorted-map-by` | implemented | custom comparator calls `(cmp a b)` (`sort-by` semantics); coll.rs sorted_construction_rows |
+| `sorted-set-by` | implemented | custom comparator set; coll.rs sorted_construction_rows |
+| `subseq` | implemented | `core.clj` bound walks over entry keys (3-arg + start/end 5-arg); coll.rs sorted_subseq_rows |
+| `rsubseq` | implemented | descending-from-end `seqFrom` walk, head-dropped once by the end test and bounded by the start test (5-arg); coll.rs sorted_subseq_rows + sorted_gap_rows |
 | `rand` | out-of-scope | RNG: no slice |
 | `rand-int` | out-of-scope | RNG: no slice |
 | `shuffle` | out-of-scope | RNG: no slice |

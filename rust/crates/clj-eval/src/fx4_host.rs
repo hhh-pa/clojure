@@ -183,9 +183,8 @@ pub(crate) fn pam_empty(sym: &Symbol) -> Option<Value> {
 }
 
 fn native_req(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
-    let _ = eval;
     check_arity("clojure.core/req!", args, &[2])?;
-    match lookup_present(&args[0], &args[1])? {
+    match lookup_present(eval, &args[0], &args[1])? {
         Some(v) => Ok(v),
         None => Err(iae(format!("Missing required key: {}", str_of(&args[1])))),
     }

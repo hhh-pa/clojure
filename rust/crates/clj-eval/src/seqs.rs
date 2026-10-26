@@ -487,6 +487,12 @@ fn native_rseq(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErr
         )),
         Value::Vector(x) => Ok(rseq_of(x.iter().cloned().collect())),
         Value::MapEntry { key, val } => Ok(rseq_of(vec![(**key).clone(), (**val).clone()])),
+        Value::Map(m) if m.is_sorted() => Ok(rseq_of(
+            m.iter()
+                .map(|(k, v)| clj_value::map_entry(k.clone(), v.clone()))
+                .collect(),
+        )),
+        Value::Set(s) if s.is_sorted() => Ok(rseq_of(s.iter().cloned().collect())),
         other => {
             if let Some(sv) = as_subvector(other) {
                 return Ok(rseq_of(sv.iter().cloned().collect()));
@@ -514,7 +520,7 @@ fn native_nthnext(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeE
 /// does: booleans order (false consults the reversed call),
 /// numbers truncate to their sign, anything else fails to
 /// `Number`.
-fn afunction_order(
+pub(crate) fn afunction_order(
     r: Value,
     rev: impl FnOnce() -> Result<Value, NativeError>,
 ) -> Result<Ordering, NativeError> {

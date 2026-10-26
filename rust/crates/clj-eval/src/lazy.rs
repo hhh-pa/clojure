@@ -2952,7 +2952,7 @@ fn step_replace(eval: &mut Evaluator, smap: &Value, input: Value) -> Result<Forc
     };
     let mut out = Vec::with_capacity(items.len());
     for item in &items {
-        let found = crate::coll::find_entry(smap, item).map_err(|e| eval.throw(e))?;
+        let found = crate::coll::find_entry(eval, smap, item).map_err(|e| eval.throw(e))?;
         out.push(found.map_or_else(|| item.clone(), |(_, v)| v));
     }
     Ok(Forced::Chunk {

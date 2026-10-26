@@ -48,6 +48,6 @@ pub use transient::{
     Transient, TransientError, TransientKind, TransientMap, TransientSet, TransientVector,
 };
 pub use value::{
-    FxBuildHasher, List, Map, Set, Value, Vector, extension_supports_meta, extension_with_meta,
-    map_entry, new_map, new_set,
+    FxBuildHasher, List, Map, Set, SortSpec, Value, Vector, extension_supports_meta,
+    extension_with_meta, map_entry, new_map, new_set,
 };

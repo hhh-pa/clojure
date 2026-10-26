@@ -2222,3 +2222,321 @@ fn subvec_invoke_out_of_bounds() {
         "java.lang.IndexOutOfBoundsException | "
     );
 }
+
+/// Issue #31 (F-sorted, red first): sorted collections. Oracle
+/// `docs/i31-sorted/probes/sorted.out` (alpha10 jars).
+#[test]
+fn sorted_construction_rows() {
+    let mut eval = boot();
+    // Constructors order by key/comparator.
+    assert_eq!(
+        run_last(&mut eval, "(sorted-map :b 2 :a 1)"),
+        "{:a 1, :b 2}"
+    );
+    assert_eq!(run_last(&mut eval, "(sorted-set 3 1 2)"), "#{1 2 3}");
+    assert_eq!(run_last(&mut eval, "(sorted-set-by > 3 1 2)"), "#{3 2 1}");
+    assert_eq!(run_last(&mut eval, "(sorted-set :b :a)"), "#{:a :b}");
+    // Duplicate (compare-0) keys collapse like repeated assoc.
+    assert_eq!(run_last(&mut eval, "(sorted-map :a 1 :a 2)"), "{:a 2}");
+    // Odd arg count is the JVM IAE.
+    assert_eq!(
+        uncaught(&mut eval, "(sorted-map :a)"),
+        "java.lang.IllegalArgumentException | No value supplied for key: :a"
+    );
+    // A throwing comparator surfaces the call's own error (the
+    // port's `>` raises the full JVM CCE text verbatim).
+    assert_eq!(
+        uncaught(&mut eval, "(sorted-map-by > :b 2 :a 1)"),
+        "java.lang.ClassCastException | class clojure.lang.Keyword cannot be cast to class java.lang.Number (clojure.lang.Keyword is in unnamed module of loader 'app'; java.lang.Number is in module java.base of loader 'bootstrap')"
+    );
+    assert_eq!(run_last(&mut eval, "(count (sorted-map :a 1 :b 2))"), "2");
+    assert_eq!(
+        run_last(&mut eval, "(keys (sorted-map :b 2 :a 1))"),
+        "(:a :b)"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(vals (sorted-map :b 2 :a 1))"),
+        "(1 2)"
+    );
+}
+
+/// Issue #31 (F-sorted, red first): sortedness is sticky and
+/// observable. Oracle `docs/i31-sorted/probes/sorted.out`.
+#[test]
+fn sorted_sticky_rows() {
+    let mut eval = boot();
+    assert_eq!(
+        run_last(&mut eval, "(assoc (sorted-map :a 1) :b 2)"),
+        "{:a 1, :b 2}"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(dissoc (sorted-map :a 1 :b 2) :a)"),
+        "{:b 2}"
+    );
+    assert_eq!(run_last(&mut eval, "(conj (sorted-set 1) 2 1)"), "#{1 2}");
+    assert_eq!(run_last(&mut eval, "(disj (sorted-set 1 2) 1)"), "#{2}");
+    assert_eq!(run_last(&mut eval, "(sorted? (sorted-map :a 1))"), "true");
+    assert_eq!(run_last(&mut eval, "(sorted? {:a 1})"), "false");
+    assert_eq!(
+        run_last(&mut eval, "(sorted? (empty (sorted-map :a 1)))"),
+        "true"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(reversible? (sorted-map :a 1))"),
+        "true"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(rseq (sorted-map :a 1 :b 2))"),
+        "([:b 2] [:a 1])"
+    );
+    assert_eq!(run_last(&mut eval, "(rseq (sorted-set 1 2))"), "(2 1)");
+    // Content equality (and hash) with plain collections.
+    assert_eq!(run_last(&mut eval, "(= (sorted-map :a 1) {:a 1})"), "true");
+    assert_eq!(run_last(&mut eval, "(= (sorted-set 1 2) #{1 2})"), "true");
+    assert_eq!(
+        run_last(&mut eval, "(meta (with-meta (sorted-map :a 1) {:x 1}))"),
+        "{:x 1}"
+    );
+    // `nth` is unsupported on sorted colls, like the JVM.
+    assert_eq!(
+        uncaught(&mut eval, "(nth (sorted-map :a 1 :b 2) 0)"),
+        "java.lang.UnsupportedOperationException | nth not supported on this type: PersistentTreeMap"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(nth (sorted-set 1 2) 0)"),
+        "java.lang.UnsupportedOperationException | nth not supported on this type: PersistentTreeSet"
+    );
+    // Sorted maps are not editable (probe `trans-sorted`).
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(persistent! (assoc! (transient (sorted-map :a 1)) :b 2))"
+        ),
+        "java.lang.ClassCastException | class clojure.lang.PersistentTreeMap cannot be cast to class clojure.lang.IEditableCollection (clojure.lang.PersistentTreeMap and clojure.lang.IEditableCollection are in unnamed module of loader 'app')"
+    );
+    // A compare-0 assoc replaces the value but keeps the original
+    // key object (probe `sorted-keyobj`).
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [m (sorted-map-by (fn [a b] (compare (:id a) (:id b))) {:id 1} :a)] (keys (assoc m {:id 1 :x 0} :b)))"
+        ),
+        "({:id 1})"
+    );
+    // Read/update paths route through the comparator (probes
+    // `s-get`, `s-get-miss`, `s-contains`, `s-find`, `s-update`,
+    // `s-merge`, `s-conj-map`, `s-into`).
+    assert_eq!(
+        run_last(&mut eval, "(conj (sorted-map :b 2 :a 1) [:c 3])"),
+        "{:a 1, :b 2, :c 3}"
+    );
+    assert_eq!(run_last(&mut eval, "(get (sorted-map :a 1) :a)"), "1");
+    assert_eq!(run_last(&mut eval, "(get (sorted-map :a 1) :z)"), "nil");
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "[(contains? (sorted-map :a 1) :a) (contains? (sorted-map :a 1) :z)]"
+        ),
+        "[true false]"
+    );
+    assert_eq!(run_last(&mut eval, "(find (sorted-map :a 1) :a)"), "[:a 1]");
+    assert_eq!(
+        run_last(&mut eval, "(update (sorted-map :a 1) :a inc)"),
+        "{:a 2}"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(merge (sorted-map :a 1) {:b 2} (sorted-map :c 3))"
+        ),
+        "{:a 1, :b 2, :c 3}"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(into {} (sorted-map :b 2 :a 1))"),
+        "{:a 1, :b 2}"
+    );
+    // Empty sets stay sorted; `rseq` of empty is nil (probes
+    // `s-empty-set`, `s-rseq-empty`).
+    assert_eq!(
+        run_last(&mut eval, "(sorted? (empty (sorted-set 1)))"),
+        "true"
+    );
+    assert_eq!(run_last(&mut eval, "(rseq (sorted-set))"), "nil");
+    // Bounds under a custom comparator (probe `s-subseq-by`).
+    assert_eq!(
+        run_last(&mut eval, "(subseq (sorted-set-by > 3 1 2) >= 2)"),
+        "(2 1)"
+    );
+}
+
+/// Issue #31 (F-sorted, red first): `subseq`/`rsubseq` bound
+/// walks. Oracle `docs/i31-sorted/probes/sorted.out`.
+#[test]
+fn sorted_subseq_rows() {
+    let mut eval = boot();
+    assert_eq!(
+        run_last(&mut eval, "(subseq (sorted-map :a 1 :b 2 :c 3) >= :b)"),
+        "([:b 2] [:c 3])"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(subseq (sorted-map :a 1 :b 2 :c 3) > :b)"),
+        "([:c 3])"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(rsubseq (sorted-map :a 1 :b 2 :c 3) <= :b)"),
+        "([:b 2] [:a 1])"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(rsubseq (sorted-set 1 2 3) >= 2)"),
+        "(3 2)"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(subseq (sorted-set 1 2 3) < 3)"),
+        "(1 2)"
+    );
+    // Start+end bounds, both directions.
+    assert_eq!(
+        run_last(&mut eval, "(subseq (sorted-map :a 1 :b 2 :c 3) > :a < :c)"),
+        "([:b 2])"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(rsubseq (sorted-map :a 1 :b 2 :c 3) > :a < :c)"),
+        "([:b 2])"
+    );
+    // A non-start test scans from the head, so `=` matches nothing.
+    assert_eq!(
+        run_last(&mut eval, "(subseq (sorted-map :a 1 :b 2) = :b)"),
+        "()"
+    );
+    // Past the end is `nil`.
+    assert_eq!(
+        run_last(&mut eval, "(subseq (sorted-map :a 1) >= :z)"),
+        "nil"
+    );
+    // Unsorted sources take the `Sorted` cast (probe
+    // `subseq-unsorted`, full JVM text verbatim).
+    assert_eq!(
+        uncaught(&mut eval, "(subseq [] >= 1)"),
+        "java.lang.ClassCastException | class clojure.lang.PersistentVector cannot be cast to class clojure.lang.Sorted (clojure.lang.PersistentVector and clojure.lang.Sorted are in unnamed module of loader 'app')"
+    );
+}
+
+/// Issue #31 (F-sorted): patch-gate pins for the sorted `conj`
+/// nil/entries arms, transient-set rejection, `dissoc`/`disj`
+/// misses, set `contains?`/`get`, the `subseq` drop-to-nil and
+/// `rsubseq` descending/empty/nil paths, and non-symbol bound
+/// tests. Oracles `docs/i31-sorted/probes/sorted.out` (`conj-map-nil`,
+/// `conj-map-map`, `dissoc-miss`, `disj-miss`, `subseq-drop`,
+/// `subseq5e`, `rsubseq-empty`, `rsubseq-5b`, `rsubseq-below`,
+/// `rsubseq-5set`, `rsubseq-5keep`, `trans-set`, `set-find`,
+/// `conj-nil`) and `/tmp/sorted9.clj` (`set-get`, `set-contains`).
+#[test]
+fn sorted_gap_rows() {
+    let mut eval = boot();
+    // `conj` nil onto a sorted map is a no-op (probe
+    // `conj-map-nil`).
+    assert_eq!(
+        run_last(&mut eval, "(conj (sorted-map :a 1) nil)"),
+        "{:a 1}"
+    );
+    // `conj` a map onto a sorted map merges entry-wise (probe
+    // `conj-map-map`).
+    assert_eq!(
+        run_last(&mut eval, "(conj (sorted-map :a 1) {:b 2})"),
+        "{:a 1, :b 2}"
+    );
+    // `conj` nil onto a sorted set stores nil first (probe
+    // `conj-nil`).
+    assert_eq!(
+        run_last(&mut eval, "(= (conj (sorted-set 1 2) nil) #{1 2 nil})"),
+        "true"
+    );
+    // Sorted sets are not editable either (probe `trans-set`, full
+    // JVM text verbatim).
+    assert_eq!(
+        uncaught(&mut eval, "(transient (sorted-set 1))"),
+        "java.lang.ClassCastException | class clojure.lang.PersistentTreeSet cannot be cast to class clojure.lang.IEditableCollection (clojure.lang.PersistentTreeSet and clojure.lang.IEditableCollection are in unnamed module of loader 'app')"
+    );
+    // Missing keys leave sorted collections alone (probes
+    // `dissoc-miss`, `disj-miss`).
+    assert_eq!(
+        run_last(&mut eval, "(dissoc (sorted-map :a 1) :z)"),
+        "{:a 1}"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(= (disj (sorted-set 1 2) 9) #{1 2})"),
+        "true"
+    );
+    // Set `contains?`/`get` route through the comparator (probe
+    // `set-contains`, `set-get`).
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "[(contains? (sorted-set 1 2) 2) (contains? (sorted-set 1 2) 9)]"
+        ),
+        "[true false]"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "[(get (sorted-set 1 2) 2) (get (sorted-set 1 2) 9)]"
+        ),
+        "[2 nil]"
+    );
+    // `find` stays unsupported on sorted sets, like the JVM (probe
+    // `set-find`, JVM text verbatim).
+    assert_eq!(
+        uncaught(&mut eval, "(find (sorted-set 1 2) 2)"),
+        "java.lang.IllegalArgumentException | find not supported on type: clojure.lang.PersistentTreeSet"
+    );
+    // A head dropped past the end is nil (probe `subseq-drop`).
+    assert_eq!(
+        run_last(&mut eval, "(subseq (sorted-map :a 1) > :a)"),
+        "nil"
+    );
+    // An empty start scan is nil (probe `subseq5e`).
+    assert_eq!(
+        run_last(&mut eval, "(subseq (sorted-map :a 1 :b 2) > :z < :zz)"),
+        "nil"
+    );
+    // The 5-arg `rsubseq` walks end-first, descending (probes
+    // `rsubseq-5b`, `rsubseq-5set`, `rsubseq-5keep`).
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(rsubseq (sorted-map :a 1 :b 2 :c 3) >= :a < :c)"
+        ),
+        "([:b 2] [:a 1])"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(rsubseq (sorted-set 1 2 3) >= 1 < 3)"),
+        "(2 1)"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(rsubseq (sorted-map :a 1 :b 2 :c 3) > :a <= :c)"
+        ),
+        "([:c 3] [:b 2])"
+    );
+    // A dropped-to-empty head is `()` (probe `rsubseq-empty`), while
+    // an empty end scan is nil (probe `rsubseq-below`).
+    assert_eq!(
+        run_last(&mut eval, "(rsubseq (sorted-map :a 1 :b 2 :c 3) > :z < :a)"),
+        "()"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(rsubseq (sorted-map :a 1 :b 2) > :a < :0)"),
+        "nil"
+    );
+    // A non-symbol bound test is not callable (JVM: `Long` to `IFn`
+    // cast error).
+    assert!(
+        uncaught(&mut eval, "(subseq (sorted-map :a 1) 42 :a)")
+            .starts_with("java.lang.ClassCastException")
+    );
+    assert!(
+        uncaught(&mut eval, "(rsubseq (sorted-map :a 1) 42 :a)")
+            .starts_with("java.lang.ClassCastException")
+    );
+}
