@@ -9,6 +9,8 @@ license = "EPL-1.0"
 [dependencies]
 clj-reader = { path = "../clj-reader" }
 clj-value = { path = "../clj-value" }
+rand = "0.9"
+regex = "1"
 
 [lints]
 workspace = true
