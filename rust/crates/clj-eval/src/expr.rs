@@ -4397,13 +4397,13 @@ mod tests {
             Value::Keyword(Keyword::new(None, "req!")),
             Value::Vector(Vector::from_vec(vec![])),
         );
-        match analyzer
+        let pat = analyzer
             .build_map(&m, Span::new(1, 1))
-            .expect("vacuous :req! builds")
-        {
-            Pattern::Map(mp) => assert!(mp.entries.is_empty()),
-            _ => panic!("map pattern"),
-        }
+            .expect("vacuous :req! builds");
+        assert!(
+            matches!(pat, Pattern::Map(ref mp) if mp.entries.is_empty()),
+            "vacuous :req! builds no entries"
+        );
     }
 
     #[test]
