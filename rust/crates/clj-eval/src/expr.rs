@@ -3453,6 +3453,7 @@ impl<'a> Analyzer<'a> {
                 let (pat, _) = self.build_pattern(validated, span)?;
                 push_entry(&mut acc.entries, pat, key.clone(), true);
             }
+            return Ok(());
         }
         Ok(())
     }
