@@ -1119,10 +1119,13 @@ fn corpus_p1_divergences() {
     assert_eq!(run_last(&mut eval, "(conj (first {:a 1}) :x)"), "[:a 1 :x]");
     // :entry-call
     assert_eq!(run_last(&mut eval, "((first {:a 1}) 0)"), ":a");
-    // :into-extra — DIVERGENCE: JVM takes xform path (IAE Key must be integer); port has no 3-arg into -> ArityException(3); JVM java.lang.IllegalArgumentException: Key must be integer
+    // :into-extra — T1200 D1: 3-arg `into` transduces now, and the
+    // old DIVERGENCE is gone: vectors are `IFn`, so applying `[1]`
+    // as the transducer looks up a fn key — IAE "Key must be
+    // integer", JVM-verbatim.
     assert_eq!(
         uncaught(&mut eval, "(into [] [1] [2])"),
-        "clojure.lang.ArityException | Wrong number of args (3) passed to: clojure.core/into"
+        "java.lang.IllegalArgumentException | Key must be integer"
     );
 }
 

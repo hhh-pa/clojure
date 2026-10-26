@@ -10,10 +10,8 @@
 //! [`crate::lazy`] thunks, eager consumers, and the fn-returning
 //! combinators (built as [`NativeFn`] closures).
 //!
-//! Transducer (`xform`) arities are out of scope: single-argument
-//! `map`/`filter`/etc. raise arity errors (their JVM selves
-//! return transducer fns), asserted as divergences by the
-//! differential corpus.
+//! Transducer (`xform`) arities live in [`crate::xform`] (T1200):
+//! single-argument `map`/`filter`/etc. return transducer fns.
 
 use std::cmp::Ordering;
 use std::sync::Arc;
@@ -21,7 +19,7 @@ use std::sync::Arc;
 use clj_value::{List, ThrowClass, Value, Vector, new_map};
 
 use crate::core::{as_reduced, cce_err, check_ifn, jvm_compare, repeat_count, take_count};
-use crate::error::NativeError;
+use crate::error::{NativeError, jvm_class_of};
 use crate::eval::Evaluator;
 use crate::ext::{NativeFn, NativeImpl};
 use crate::lazy::{
@@ -38,7 +36,11 @@ use crate::vars::check_min_arity;
 /// Call a user fn with the `IFn` check first (bad callees fail
 /// with the JVM `checkcast` text, matching what the JVM's call
 /// sites raise).
-fn call_checked(eval: &mut Evaluator, f: &Value, args: &[Value]) -> Result<Value, NativeError> {
+pub(crate) fn call_checked(
+    eval: &mut Evaluator,
+    f: &Value,
+    args: &[Value],
+) -> Result<Value, NativeError> {
     check_ifn(eval, f).map_err(signal_to_native)?;
     eval.call(f, args).map_err(signal_to_native)
 }
@@ -93,28 +95,53 @@ fn force_n(eval: &mut Evaluator, coll: &Value, n: i64) -> Result<(), NativeError
     Ok(())
 }
 
-fn native_map(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+fn native_map(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    if args.len() == 1 {
+        return Ok(crate::xform::map_xf(eval, args[0].clone()));
+    }
     check_min_arity("clojure.core/map", args, 2)?;
     Ok(map_thunk(args[0].clone(), args[1..].to_vec()))
 }
 
-fn native_filter(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
-    check_arity("clojure.core/filter", args, &[2])?;
+fn native_filter(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.core/filter", args, &[1, 2])?;
+    if args.len() == 1 {
+        return Ok(crate::xform::filter_xf(
+            eval,
+            "clojure.core/filter$fn",
+            args[0].clone(),
+            false,
+        ));
+    }
     Ok(filter_thunk(args[0].clone(), args[1].clone(), false))
 }
 
-fn native_remove(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
-    check_arity("clojure.core/remove", args, &[2])?;
+fn native_remove(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.core/remove", args, &[1, 2])?;
+    if args.len() == 1 {
+        return Ok(crate::xform::filter_xf(
+            eval,
+            "clojure.core/remove$fn",
+            args[0].clone(),
+            true,
+        ));
+    }
     Ok(filter_thunk(args[0].clone(), args[1].clone(), true))
 }
 
-fn native_take(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
-    check_arity("clojure.core/take", args, &[2])?;
+fn native_take(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.core/take", args, &[1, 2])?;
+    if args.len() == 1 {
+        return crate::xform::take_xf(eval, args[0].clone());
+    }
     Ok(take_thunk(args[0].clone(), args[1].clone()))
 }
 
 fn native_drop(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
-    check_arity("clojure.core/drop", args, &[2])?;
+    check_arity("clojure.core/drop", args, &[1, 2])?;
+    if args.len() == 1 {
+        return crate::xform::drop_xf(eval, args[0].clone());
+    }
     drop_value(eval, &args[0], args[1].clone()).map_err(signal_to_native)
 }
 
@@ -123,13 +150,19 @@ fn native_nthrest(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeE
     nthrest_value(eval, args[0].clone(), &args[1]).map_err(signal_to_native)
 }
 
-fn native_take_while(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
-    check_arity("clojure.core/take-while", args, &[2])?;
+fn native_take_while(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.core/take-while", args, &[1, 2])?;
+    if args.len() == 1 {
+        return Ok(crate::xform::take_while_xf(eval, args[0].clone()));
+    }
     Ok(take_while_thunk(args[0].clone(), args[1].clone()))
 }
 
-fn native_drop_while(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
-    check_arity("clojure.core/drop-while", args, &[2])?;
+fn native_drop_while(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.core/drop-while", args, &[1, 2])?;
+    if args.len() == 1 {
+        return Ok(crate::xform::drop_while_xf(eval, args[0].clone()));
+    }
     Ok(drop_while_thunk(args[0].clone(), args[1].clone()))
 }
 
@@ -149,8 +182,11 @@ fn native_interleave(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nat
     Ok(interleave_thunk(args.to_vec()))
 }
 
-fn native_interpose(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
-    check_arity("clojure.core/interpose", args, &[2])?;
+fn native_interpose(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.core/interpose", args, &[1, 2])?;
+    if args.len() == 1 {
+        return Ok(crate::xform::interpose_xf(eval, args[0].clone()));
+    }
     Ok(interpose_thunk(args[0].clone(), args[1].clone()))
 }
 
@@ -197,33 +233,61 @@ fn native_range(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErr
     }
 }
 
-fn native_mapcat(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+fn native_mapcat(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    if args.len() == 1 {
+        return Ok(crate::xform::mapcat_xf(eval, args[0].clone()));
+    }
     check_min_arity("clojure.core/mapcat", args, 2)?;
     Ok(mapcat_thunk(args[0].clone(), args[1..].to_vec()))
 }
 
-fn native_keep(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
-    check_arity("clojure.core/keep", args, &[2])?;
+fn native_keep(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.core/keep", args, &[1, 2])?;
+    if args.len() == 1 {
+        return Ok(crate::xform::keep_xf(
+            eval,
+            "clojure.core/keep$fn",
+            args[0].clone(),
+            false,
+        ));
+    }
     Ok(keep_thunk(args[0].clone(), args[1].clone()))
 }
 
-fn native_keep_indexed(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
-    check_arity("clojure.core/keep-indexed", args, &[2])?;
+fn native_keep_indexed(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.core/keep-indexed", args, &[1, 2])?;
+    if args.len() == 1 {
+        return Ok(crate::xform::keep_xf(
+            eval,
+            "clojure.core/keep-indexed$fn",
+            args[0].clone(),
+            true,
+        ));
+    }
     Ok(keep_indexed_thunk(args[0].clone(), args[1].clone()))
 }
 
-fn native_map_indexed(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
-    check_arity("clojure.core/map-indexed", args, &[2])?;
+fn native_map_indexed(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.core/map-indexed", args, &[1, 2])?;
+    if args.len() == 1 {
+        return Ok(crate::xform::map_indexed_xf(eval, args[0].clone()));
+    }
     Ok(map_indexed_thunk(args[0].clone(), args[1].clone()))
 }
 
-fn native_distinct(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
-    check_arity("clojure.core/distinct", args, &[1])?;
+fn native_distinct(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.core/distinct", args, &[0, 1])?;
+    if args.is_empty() {
+        return Ok(crate::xform::distinct_xf(eval));
+    }
     Ok(distinct_thunk(args[0].clone()))
 }
 
-fn native_dedupe(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
-    check_arity("clojure.core/dedupe", args, &[1])?;
+fn native_dedupe(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.core/dedupe", args, &[0, 1])?;
+    if args.is_empty() {
+        return Ok(crate::xform::dedupe_xf(eval));
+    }
     Ok(dedupe_thunk(args[0].clone()))
 }
 
@@ -256,8 +320,11 @@ fn native_partition_by(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, N
     Ok(partition_by_thunk(args[0].clone(), args[1].clone()))
 }
 
-fn native_take_nth(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
-    check_arity("clojure.core/take-nth", args, &[2])?;
+fn native_take_nth(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.core/take-nth", args, &[1, 2])?;
+    if args.len() == 1 {
+        return crate::xform::take_nth_xf(eval, args[0].clone());
+    }
     Ok(take_nth_thunk(args[0].clone(), args[1].clone()))
 }
 
@@ -296,6 +363,26 @@ fn native_split_with(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nat
 fn native_reduce(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/reduce", args, &[2, 3])?;
     let f = args[0].clone();
+    // Eductions reduce without `IReduce` (2-arg takes the JVM cast)
+    // and complete through `(completing f)` in 3-arg (oracle
+    // `eduction-reduce*`, `core.clj` source).
+    let coll = if args.len() == 2 { &args[1] } else { &args[2] };
+    if let Some((xform, ecoll)) = crate::xform::Eduction::parts(coll) {
+        if args.len() == 2 {
+            return Err(NativeError::cast(
+                &jvm_class_of(coll),
+                "clojure.lang.IReduce",
+            ));
+        }
+        let completing = crate::xform::completing_fn(eval, f.clone(), None);
+        return crate::xform::transduce_into(
+            eval,
+            &xform.clone(),
+            &completing,
+            args[1].clone(),
+            &ecoll.clone(),
+        );
+    }
     let (mut acc, has_acc, coll) = if args.len() == 3 {
         (args[1].clone(), true, &args[2])
     } else {

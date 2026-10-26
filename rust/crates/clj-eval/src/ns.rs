@@ -1885,6 +1885,7 @@ fn boot_install_natives(eval: &mut Evaluator) {
         .chain(crate::macros::MACRO_NATIVES.iter())
         .chain(crate::lazy::LAZY_NATIVES.iter())
         .chain(crate::core::CORE_NATIVES.iter())
+        .chain(crate::xform::XFORM_NATIVES.iter())
         .chain(crate::seqs::SEQS_NATIVES.iter())
         .chain(crate::coll::COLL_NATIVES.iter())
         .chain(crate::io::IO_NATIVES.iter())
@@ -1935,6 +1936,7 @@ fn boot_mark_private(eval: &mut Evaluator) {
     for name in ["throw-illegal-arg!", "throw-npe!", "hash-code"]
         .into_iter()
         .chain(crate::fx4_host::FX4_PRIVATE.iter().copied())
+        .chain(crate::xform::XFORM_PRIVATE.iter().copied())
     {
         let q = Symbol::new(Some("clojure.core"), name);
         let id = eval.registry.intern(&q);
