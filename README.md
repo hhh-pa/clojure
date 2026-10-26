@@ -1,7 +1,9 @@
 # clojure-rs — native Clojure in Rust
 
 A self-contained native Clojure runtime, REPL, and LLVM AOT compiler
-with no JDK required. This repository **is** the port: the original
+with no JDK required, tracking upstream Clojure `1.13.0-alpha9`
+(`clojure-version` reports the ported release; tagged `v*` releases
+ship per-platform binaries). This repository **is** the port: the original
 Java implementation (sources, `pom.xml`, Maven workflows) was removed
 in PR #11 once the port completed its specification; the Rust
 workspace below is the sole implementation.
@@ -98,7 +100,7 @@ unbounded, `:fail` / `:continue` error modes, `await` / `await-for`,
 `restart-agent`, `shutdown-agents`), `locking`, `add-watch` /
 `remove-watch`, `realized?`.
 
-**Core vars: 335 implemented, 19 divergent, 65 out of scope**
+**Core vars: 336 implemented, 19 divergent, 65 out of scope**
 ([`rust/core-coverage.md`](rust/core-coverage.md) is normative and
 CI-enforced: listed vars must resolve, excluded ones must not).
 

@@ -1,18 +1,33 @@
 # Core coverage (A5, normative)
 
-Every `clojure.core` var the port implements, with its conformance
-state. Anything absent is out of scope, not silently missing; the
-explicit `out-of-scope` rows below record the significant exclusions
-with their reasons.
+The complete inventory of `clojure.core` in this port: every var,
+its conformance state, and — for exclusions — why it is excluded.
+If a var is not listed here, that is a file bug, not a silent gap.
 
-Status: `planned` (lands in S5) → `implemented` (resolved + pinned) |
-`divergent` (resolves, fenced behavior) | `out-of-scope` (must not
-resolve). The S5 coverage-matrix test (`clj-core/tests/`) parses this
-file: `planned`/`implemented`/`divergent` rows must resolve in the
-booted core, `out-of-scope` rows must not. Table shape is
-machine-read — keep `| var | status | notes |` rows exact.
+- **420 vars: 336 implemented, 19 divergent, 65 out of scope,
+  0 planned.** The port reports Clojure `1.13.0-alpha9`
+  (`clojure-version`).
+- **Status meanings.** `implemented` — resolves in the booted core
+  and behaves like the JVM (pinned by tests named in `notes`).
+  `divergent` — resolves, but fenced behavior differs deliberately
+  (each difference is pinned by the differential corpus, so drift
+  fails CI). `out-of-scope` — must *not* resolve; the port has no
+  slice for it. `planned` — accepted future work, resolves once it
+  lands (none right now).
+- **How to read a row.** `var` is the `clojure.core` name; `notes`
+  names the tests or probes that pin it plus slice tags (`S5A`…,
+  `T1192`, `M2`…). Section headers group vars by area; the blurbs
+  under them say what each area covers.
+- **Machine-read shape.** The S5 coverage-matrix test
+  (`clj-core/tests/`) parses this file: `planned`/`implemented`/
+  `divergent` rows must resolve in the booted core, `out-of-scope`
+  rows must not. Keep every table row exactly `| var | status |
+  notes |` with the var backticked — prose outside tables is free,
+  rows are not.
 
 ## Namespaces (S5A)
+
+Creating, finding, and wiring namespaces; loading code into them.
 
 | var | status | notes |
 | `ns` | implemented | validated upfront, then in-ns/refer/require/use/mark-loaded |
@@ -53,6 +68,8 @@ machine-read — keep `| var | status | notes |` rows exact.
 
 ## Vars (S5B)
 
+Var roots, thread-local bindings, and metadata.
+
 | var | status | notes |
 | `alter-var-root` | implemented | atomic root swap |
 | `with-redefs` | divergent | analyzer builtin (S5B); resolves as macro; `macroexpand-1` identity (documented) |
@@ -74,6 +91,8 @@ machine-read — keep `| var | status | notes |` rows exact.
 
 ## Macros (S5C)
 
+Defining macros and expanding them.
+
 | var | status | notes |
 | `defmacro` | implemented | def of the `&form`/`&env`-prepended fn; `:macro` + user `:arglists` |
 | `macroexpand-1` | implemented | one head step; call-site spans; builtins identity (documented) |
@@ -81,6 +100,8 @@ machine-read — keep `| var | status | notes |` rows exact.
 | `gensym` | implemented | Rust-backed counter |
 
 ## Arithmetic (S5D, checked per C1)
+
+Checked i64 arithmetic (overflow raises, never wraps) plus exact numeric coercions.
 
 | var | status | notes |
 | `+` | implemented | `control.rs time_rows`; C1, probe39 arith-plus-star-zero |
@@ -104,6 +125,8 @@ machine-read — keep `| var | status | notes |` rows exact.
 
 ## Comparison (S5D, per C2)
 
+Same-category equality and JVM-consistent ordering.
+
 | var | status | notes |
 | `=` | implemented | `hash_values`, `assert_rows`, `condp_rows`, `str_lazy_content_hash`; same-category, `s5d-pins.md:492`, probe39 cmp-eq-* |
 | `==` | implemented | `case_hashes` prep; C2; 1-arg passes unchecked (arith.rs comparison_single_rows) |
@@ -118,6 +141,8 @@ machine-read — keep `| var | status | notes |` rows exact.
 | `compare` | implemented | arith.rs pred_backlog_rows (C2, NaN ties) |
 
 ## Predicates (S5D)
+
+Type and shape predicates.
 
 | var | status | notes |
 | `nil?` | implemented | `core_loads`, `boot_dynamics` (true+false paths) |
@@ -164,6 +189,8 @@ machine-read — keep `| var | status | notes |` rows exact.
 
 ## Strings (S5D)
 
+String building, conversion, and formatting.
+
 | var | status | notes |
 | `str` | implemented | variadic; LazySeq prints @content-hash, seqs/colls readably |
 | `keyword` | implemented | arith.rs str_fn_rows (nil else-arm, fixprobe8) |
@@ -176,6 +203,8 @@ machine-read — keep `| var | status | notes |` rows exact.
 | `format` | implemented | Formatter subset, oracle-pinned (`fmt.rs`, 15/15 `format.rs`) |
 
 ## Collections (S5D)
+
+Persistent collections: lookup, update, transients, sets, maps.
 
 | var | status | notes |
 | `count` | implemented | coll.rs count_rows (UTF-16, transients, subvec, walk, UOE) |
@@ -236,6 +265,8 @@ machine-read — keep `| var | status | notes |` rows exact.
 
 ## Seqs (S5D, chunked-lazy per C4)
 
+Lazy sequence operations (chunked like the JVM); transducer arities are out of scope.
+
 | var | status | notes |
 | `map` | divergent | seq arities (corpus 02); 1-arg raises ArityException, xform OUT (D13) |
 | `filter` | divergent | seq arities (corpus 02); 1-arg raises ArityException, xform OUT (D13) |
@@ -290,6 +321,8 @@ machine-read — keep `| var | status | notes |` rows exact.
 
 ## Higher-order (S5D)
 
+Function combinators and application.
+
 | var | status | notes |
 | `apply` | implemented | early for syntax-quote (S5C) |
 | `comp` | implemented | corpus 15; 0→identity, 1→self, right-nested apply |
@@ -305,6 +338,8 @@ machine-read — keep `| var | status | notes |` rows exact.
 | `not-every?` | implemented | corpus 02 |
 
 ## Control (S5D, embedded `.clj` composites)
+
+Branching, binding, and iteration macros, mostly real `core.clj` ports.
 
 | var | status | notes |
 | `and` | implemented | core.clj real; control.rs core_loads |
@@ -340,6 +375,8 @@ machine-read — keep `| var | status | notes |` rows exact.
 
 ## Exceptions (S5D)
 
+Exception info carriers.
+
 | var | status | notes |
 | `ex-info` | implemented | native real; str.rs str_lazy_content_hash (ExceptionInfo/boom) + control.rs with_out_str_rows |
 | `ex-data` | implemented | control.rs ex_data_trampoline_rows |
@@ -347,6 +384,8 @@ machine-read — keep `| var | status | notes |` rows exact.
 | `ex-cause` | implemented | native real; control.rs eval_chains_and_catch |
 
 ## IO (S5D)
+
+Printing, reading, files, and print dynamic vars.
 
 | var | status | notes |
 | `print` | implemented | native real; control.rs with_out_str_rows + composites_smoke + str.rs |
@@ -369,6 +408,8 @@ machine-read — keep `| var | status | notes |` rows exact.
 
 ## Misc (S5D)
 
+Evaluation, trampolines, compiler flags, hashing.
+
 | var | status | notes |
 | `eval` | implemented | eval one form in the current ns |
 | `trampoline` | implemented | control.rs ex_data_trampoline_rows (bounce to :done) |
@@ -380,6 +421,8 @@ machine-read — keep `| var | status | notes |` rows exact.
 
 ## Special-form macros (S4 builtins, S5C vars)
 
+Special forms exposed as macros; `macroexpand-1` is the documented identity.
+
 | var | status | notes |
 | `let` | divergent | analyzer builtin; resolves as macro; `macroexpand-1` returns the form unchanged (documented) |
 | `loop` | divergent | analyzer builtin; resolves as macro; `macroexpand-1` returns the form unchanged (documented) |
@@ -388,6 +431,8 @@ machine-read — keep `| var | status | notes |` rows exact.
 | `letfn` | divergent | analyzer builtin; resolves as macro; `macroexpand-1` returns the form unchanged (documented) |
 
 ## Out of scope (significant exclusions)
+
+Significant vars with no port slice, grouped below by area with the reason. (Two implemented groups live at the end of this section — concurrency and the REPL/CLI environment — because they were inventoried with the exclusions around them.)
 
 | var | status | notes |
 | `clone-thread-bindings` | out-of-scope | does not exist on the JVM (probe37 `clone-missing`) |
@@ -439,6 +484,10 @@ machine-read — keep `| var | status | notes |` rows exact.
 | `extend-protocol` | out-of-scope | protocols: no slice |
 | `satisfies?` | out-of-scope | protocols: no slice |
 | `extends?` | out-of-scope | protocols: no slice |
+
+### Concurrency (implemented — atoms, futures, agents; STM excluded above)
+
+| var | status | notes |
 | `atom` | implemented | concurrency.rs atom_ctor_rows (validator/meta options, odd-opts IAE) |
 | `swap!` | implemented | concurrency.rs swap_rows (CAS loop, extra args, unconditional watch fire) |
 | `reset!` | implemented | concurrency.rs reset_rows (validates, fires) |
@@ -478,13 +527,21 @@ machine-read — keep `| var | status | notes |` rows exact.
 | `ensure` | out-of-scope | STM (N4): never |
 | `alter` | out-of-scope | STM (N4): never |
 | `ref-set` | out-of-scope | STM (N4): never |
+
+### REPL and CLI environment (implemented)
+
+| var | status | notes |
 | `*1` | implemented | S7 REPL: dynamic nil root; session window (P1) |
 | `*2` | implemented | S7 REPL: dynamic nil root; session window (P1) |
 | `*3` | implemented | S7 REPL: dynamic nil root; session window (P1) |
 | `*e` | implemented | S7 REPL: dynamic nil root; last throwable (P2) |
 | `*command-line-args*` | implemented | S7 CLI: dynamic nil root; run binds the arg seq (P4) |
-| `clojure-version` | implemented | S7 environment: port release literal "0.1.0" (P3) |
+| `clojure-version` | implemented | S7 environment: port release literal "1.13.0-alpha9" (P3) |
 | `*clojure-version*` | implemented | S7 environment: plain root version map (P3) |
+
+### Still excluded (reasons inline)
+
+| var | status | notes |
 | `identical?` | out-of-scope | reference identity: no slice (values clone) |
 | `re-find` | out-of-scope | regex matching: no slice (reader keeps #"...") |
 | `re-matches` | out-of-scope | regex matching: no slice |
