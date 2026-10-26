@@ -310,6 +310,39 @@ fn get_rows() {
 }
 
 #[test]
+fn req_rows() {
+    // M2 `req!` (probes `req-present`, `req-absent`, `req-nilval`,
+    // `req-vec`, `req-vec-miss`, `req-str`, `req-nil`, `req-arity3`,
+    // `req-arity1` on alpha10): arity-2 `get` that throws when the
+    // key is absent.
+    let mut eval = boot();
+    assert_eq!(run_last(&mut eval, "(req! {:a 1} :a)"), "1");
+    assert_eq!(run_last(&mut eval, "(req! {:a nil} :a)"), "nil");
+    assert_eq!(run_last(&mut eval, "(req! [1 2] 1)"), "2");
+    assert_eq!(run_last(&mut eval, "(req! \"ab\" 1)"), "\\b");
+    assert_eq!(
+        uncaught(&mut eval, "(req! {} :a)"),
+        "java.lang.IllegalArgumentException | Missing required key: :a"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(req! [1 2] 5)"),
+        "java.lang.IllegalArgumentException | Missing required key: 5"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(req! nil :a)"),
+        "java.lang.IllegalArgumentException | Missing required key: :a"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(req! {:a 1} :a :nf)"),
+        "clojure.lang.ArityException | Wrong number of args (3) passed to: clojure.core/req!"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(req! {:a 1})"),
+        "clojure.lang.ArityException | Wrong number of args (1) passed to: clojure.core/req!"
+    );
+}
+
+#[test]
 fn contains_rows() {
     let mut eval = boot();
     assert_eq!(run_last(&mut eval, "(contains? {:a 1} :a)"), "true");

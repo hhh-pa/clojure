@@ -366,10 +366,61 @@ fn walk_entry(
     bk: &Value,
 ) -> Result<(), NativeError> {
     if let Value::Keyword(kw) = bb {
+        if kw.namespace().is_none() && kw.name() == "req!" {
+            return walk_req(eval, ret, cx, walk, bk);
+        }
         walk_directive(eval, ret, cx, walk, kw, bk)
     } else {
         walk_plain(eval, ret, cx, walk, bb, bk)
     }
+}
+
+/// `:req!` maps required locals to their keys (`{:req! {a :long-a}}`).
+/// Upstream splices the value back into the binding loop with
+/// required semantics: map entries bind with their raw keys (no
+/// `translate`). Anything else runs the expansion-stage errors the
+/// JVM hits — non-seqables the `ISeq` error, other shapes the
+/// first element's `Map$Entry` cast (probe `loop-req-num`,
+/// `loop-req-bad-full`).
+fn walk_req(
+    eval: &mut Evaluator,
+    ret: &mut Vec<Value>,
+    cx: &MapCx,
+    walk: &mut Walk,
+    bk: &Value,
+) -> Result<(), NativeError> {
+    if let Value::Map(req) = bk {
+        for (local, key) in req.iter() {
+            walk_req_entry(eval, ret, cx, walk, local, key)?;
+        }
+        return Ok(());
+    }
+    // A seqable non-map fails on `(key %)` of its first element —
+    // only real map entries pass, and the reader builds no map-entry
+    // literals, so every reachable shape takes the cast.
+    match seq_data(bk)?.into_iter().next() {
+        Some(first) => Err(NativeError::cast(
+            &jvm_class_of(&first),
+            "java.util.Map$Entry",
+        )),
+        None => Ok(()),
+    }
+}
+
+fn walk_req_entry(
+    eval: &mut Evaluator,
+    ret: &mut Vec<Value>,
+    cx: &MapCx,
+    walk: &mut Walk,
+    local: &Value,
+    key: &Value,
+) -> Result<(), NativeError> {
+    let bb = inject_all(eval, cx, walk, local, key)?;
+    if is_symbol_val(&bb) {
+        btok_put(&mut walk.btok, bb.clone(), key.clone());
+    }
+    sel_add(&mut walk.sel, key.clone());
+    push1(eval, ret, cx, walk, &bb, key, true)
 }
 
 enum DirKind {
@@ -480,19 +531,35 @@ fn post_amp(
             str_of(item)
         )));
     }
-    sel_add(&mut walk.sel, item.clone());
+    // Upstream `xfk`: under a namespaced `:keys`/`:keys!` directive an
+    // unqualified post-`&` key takes the directive namespace, a
+    // qualified one keeps its own; anything else passes through.
+    let key = post_key(kind, item);
+    sel_add(&mut walk.sel, key.clone());
     if kind.required {
-        push1(eval, ret, cx, walk, &symv(&cx.gtemp), item, true)?;
+        push1(eval, ret, cx, walk, &symv(&cx.gtemp), &key, true)?;
     }
     Ok(())
+}
+
+fn post_key(kind: &Dir, item: &Value) -> Value {
+    match item {
+        Value::Keyword(k) if matches!(kind.kind, DirKind::Keys) && kind.ns.is_some() => {
+            let ns = k.namespace().map(str::to_owned).or_else(|| kind.ns.clone());
+            Value::Keyword(clj_value::Keyword::new(ns.as_deref(), k.name()))
+        }
+        _ => item.clone(),
+    }
 }
 
 fn translate(kind: &Dir, item: &Value) -> Result<Value, NativeError> {
     if matches!(kind.kind, DirKind::Strs) {
         return Ok(Value::Str(str_of(item).into()));
     }
-    let (elem_ns, name) = named_parts(item, kind.ns.is_some())?;
-    let ns = kind.ns.clone().or(elem_ns);
+    let (elem_ns, name) = named_parts(item)?;
+    // Upstream `xf`: the element's own namespace wins over the
+    // directive namespace.
+    let ns = elem_ns.or(kind.ns.clone());
     // `Strs` returns early above, so only `Keys`/`Syms` arrive here.
     Ok(if matches!(kind.kind, DirKind::Keys) {
         Value::Keyword(clj_value::Keyword::new(ns.as_deref(), &name))
@@ -504,12 +571,14 @@ fn translate(kind: &Dir, item: &Value) -> Result<Value, NativeError> {
     })
 }
 
-fn named_parts(v: &Value, have_ns: bool) -> Result<(Option<String>, String), NativeError> {
+// Upstream `(namespace %)`: `nil` always takes the `getNamespace`
+// NPE — the directive namespace no longer short-circuits the call
+// (M2, upstream 4610bb46).
+fn named_parts(v: &Value) -> Result<(Option<String>, String), NativeError> {
     if matches!(v, Value::Nil) {
-        let method = if have_ns { "getName" } else { "getNamespace" };
-        return Err(npe(format!(
-            "Cannot invoke \"clojure.lang.Named.{method}()\" because \"x\" is null"
-        )));
+        return Err(npe(
+            "Cannot invoke \"clojure.lang.Named.getNamespace()\" because \"x\" is null".to_owned(),
+        ));
     }
     match v {
         Value::Symbol(s) => Ok((s.namespace().map(str::to_owned), s.name().to_owned())),
@@ -872,5 +941,103 @@ fn pair_map(pairs: &[(Value, Value)]) -> Value {
         Value::Nil
     } else {
         Value::Map(map_of(pairs.to_vec()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ns::boot;
+
+    fn keys_ns_dir() -> Dir {
+        Dir {
+            kind: DirKind::Keys,
+            ns: Some("foo".to_owned()),
+            required: false,
+        }
+    }
+
+    fn unqualified_bb() -> Value {
+        Value::Keyword(clj_value::Keyword::new(None, "bb"))
+    }
+
+    #[test]
+    fn post_key_qualifies_under_ns_directive() {
+        // Upstream `xfk` (M2): unqualified takes the directive ns,
+        // qualified keeps its own, anything else passes through.
+        let dir = keys_ns_dir();
+        assert_eq!(
+            post_key(&dir, &unqualified_bb()),
+            Value::Keyword(clj_value::Keyword::new(Some("foo"), "bb"))
+        );
+        assert_eq!(
+            post_key(
+                &dir,
+                &Value::Keyword(clj_value::Keyword::new(Some("other"), "bb"))
+            ),
+            Value::Keyword(clj_value::Keyword::new(Some("other"), "bb"))
+        );
+        let syms = Dir {
+            kind: DirKind::Syms,
+            ns: Some("foo".to_owned()),
+            required: false,
+        };
+        assert_eq!(post_key(&syms, &unqualified_bb()), unqualified_bb());
+        let plain = Dir {
+            kind: DirKind::Keys,
+            ns: None,
+            required: false,
+        };
+        assert_eq!(post_key(&plain, &unqualified_bb()), unqualified_bb());
+    }
+
+    /// One binding pair `[pattern init]` with a `:req!` pattern.
+    fn req_bindings(req_val: Value) -> Value {
+        let pat = Value::Map(map_of(vec![(kw("req!"), req_val)]));
+        vecv(vec![pat, Value::Nil])
+    }
+
+    #[test]
+    fn walk_req_map_binds_required_raw() {
+        // Upstream splice: map entries bind required with raw keys —
+        // the expansion fetches through `req!`.
+        let mut eval = boot();
+        let req = Value::Map(map_of(vec![(sym("a"), kw("long-a"))]));
+        let out = destructure(&mut eval, &req_bindings(req)).expect("map :req! expands");
+        let printed = pr_of(&out);
+        assert!(
+            printed.contains("req!"),
+            "expansion fetches through req!: {printed}"
+        );
+        assert!(printed.contains(":long-a"), "raw key kept: {printed}");
+    }
+
+    #[test]
+    fn walk_req_non_map_takes_entry_cast() {
+        // Upstream `(key %)`: only map entries pass (probe
+        // `loop-req-bad-full` on alpha10).
+        let mut eval = boot();
+        let err = destructure(&mut eval, &req_bindings(vecv(vec![sym("a")])))
+            .expect_err("vector :req! fails");
+        assert_eq!(err.class, clj_value::ThrowClass::ClassCastException);
+        assert!(err.message.contains("Map$Entry"), "cast: {}", err.message);
+    }
+
+    #[test]
+    fn walk_req_non_seqable_is_iseq() {
+        // Upstream `(map ...)` over a non-seqable (probe
+        // `loop-req-num` on alpha10).
+        let mut eval = boot();
+        let err =
+            destructure(&mut eval, &req_bindings(Value::Int(5))).expect_err("scalar :req! fails");
+        assert_eq!(err.class, clj_value::ThrowClass::IllegalArgumentException);
+    }
+
+    #[test]
+    fn walk_req_vacuous_splices_nothing() {
+        // An empty `:req!` splices nothing (downstream spec rejects
+        // it for `let`, like the upstream inner-`let` spec).
+        let mut eval = boot();
+        destructure(&mut eval, &req_bindings(vecv(vec![]))).expect("empty :req! expands");
     }
 }

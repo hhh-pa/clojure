@@ -1,0 +1,20 @@
+req-vec THROW clojure.lang.Compiler$CompilerException|"Syntax error macroexpanding clojure.core/let at (/Users/hhu/workspace/clojure/docs/t1199/probes/m2-errors.clj:12:21)."
+req-num THROW clojure.lang.Compiler$CompilerException|"Syntax error macroexpanding clojure.core/let at (/Users/hhu/workspace/clojure/docs/t1199/probes/m2-errors.clj:13:21)."
+req-nested-bad THROW clojure.lang.Compiler$CompilerException|"Syntax error macroexpanding clojure.core/let at (/Users/hhu/workspace/clojure/docs/t1199/probes/m2-errors.clj:14:28)."
+loop-req-bad-full THROW clojure.lang.Compiler$CompilerException|"Unexpected error macroexpanding loop at (/Users/hhu/workspace/clojure/docs/t1199/probes/m2-errors.clj:16:31)."
+loop-req-num THROW clojure.lang.Compiler$CompilerException|"Syntax error macroexpanding loop at (/Users/hhu/workspace/clojure/docs/t1199/probes/m2-errors.clj:17:26)."
+loop-req-empty-vec THROW clojure.lang.Compiler$CompilerException|"Syntax error macroexpanding clojure.core/let at (/Users/hhu/workspace/clojure/docs/t1199/probes/m2-errors.clj:19:32)."
+loop-req-empty-map 42
+let-req-empty-map 42
+loop-req-nil THROW clojure.lang.Compiler$CompilerException|"Syntax error macroexpanding clojure.core/let at (/Users/hhu/workspace/clojure/docs/t1199/probes/m2-errors.clj:22:26)."
+fn-req 1
+fn-req-nested 3
+fn-req-missing THROW java.lang.IllegalArgumentException|"Missing required key: :long-a"
+fn-req-or THROW clojure.lang.Compiler$CompilerException|"Syntax error macroexpanding clojure.core/let at (/Users/hhu/workspace/clojure/docs/t1199/probes/m2-errors.clj:27:24)."
+fn-req-missingsel {:long-a nil}
+fn-req-bad THROW clojure.lang.Compiler$CompilerException|"Syntax error macroexpanding clojure.core/fn at (/Users/hhu/workspace/clojure/docs/t1199/probes/m2-errors.clj:29:25)."
+str-unqual THROW clojure.lang.Compiler$CompilerException|"Syntax error macroexpanding clojure.core/let at (/Users/hhu/workspace/clojure/docs/t1199/probes/m2-errors.clj:31:24)."
+str-qual THROW clojure.lang.Compiler$CompilerException|"Syntax error macroexpanding clojure.core/let at (/Users/hhu/workspace/clojure/docs/t1199/probes/m2-errors.clj:32:22)."
+num-qual THROW clojure.lang.Compiler$CompilerException|"Syntax error macroexpanding clojure.core/let at (/Users/hhu/workspace/clojure/docs/t1199/probes/m2-errors.clj:33:22)."
+post-qual {:other/b 2, :foo/a 1}
+post-qual-req {:foo/aa 1, :other/bb 2}

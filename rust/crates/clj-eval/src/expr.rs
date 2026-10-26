@@ -46,8 +46,9 @@ pub struct KeyBinding {
 /// A map-destructure pattern (`destmap*`, incl. the 1.13 directives).
 #[derive(Clone, Debug)]
 pub struct MapPattern {
-    /// `(local-pattern, lookup-key)` entries.
-    pub entries: Vec<(Pattern, Value)>,
+    /// `(local-pattern, lookup-key, required?)` entries (`:req!`
+    /// locals bind required, like `:keys!` elements).
+    pub entries: Vec<(Pattern, Value, bool)>,
     /// `:keys`/`:strs`/`:syms` (and `!`) bindings.
     pub keys: Vec<KeyBinding>,
     /// Post-`&` key-list keys (selection only, never bound).
@@ -1499,7 +1500,7 @@ pub(crate) fn pattern_names(pat: &Pattern) -> Vec<String> {
         }
         Pattern::Map(m) => {
             let mut out = Vec::new();
-            for (local, _) in &m.entries {
+            for (local, _, _) in &m.entries {
                 out.extend(pattern_names(local));
             }
             for key in &m.keys {
@@ -2257,8 +2258,22 @@ fn spec_valid_directive(kw: &Keyword, v: &Value) -> bool {
         "keys" | "keys!" => spec_valid_key_list(v, KeyKind::Keys),
         "syms" | "syms!" => spec_valid_key_list(v, KeyKind::Syms),
         "strs" | "strs!" => spec_valid_key_list(v, KeyKind::Strs),
+        "req!" => spec_valid_req(v),
         _ => false,
     }
+}
+
+/// `::req-bindings` (M2, upstream `core.specs.alpha`): a map of
+/// local-name (or nested map form) to any key.
+fn spec_valid_req(v: &Value) -> bool {
+    let Value::Map(m) = v else {
+        return false;
+    };
+    m.iter().all(|(local, _)| match local {
+        Value::Symbol(sym) => is_local_name(sym),
+        Value::Map(nested) => spec_valid_map(nested),
+        _ => false,
+    })
 }
 
 #[derive(Clone, Copy)]
@@ -2462,6 +2477,9 @@ fn walk_map_pair(
         if is_outlet_directive(kw) {
             return Ok(());
         }
+        if kw.namespace().is_none() && kw.name() == "req!" {
+            return walk_req_list(v, or_map, sel, bound_keys);
+        }
         let Some(dir) = as_key_directive(kw) else {
             return Err(WalkError {
                 class: class::EXCEPTION,
@@ -2540,11 +2558,69 @@ fn walk_key_list(
     Ok(())
 }
 
+/// One `:req!` map (M2): locals validate as binding forms with
+/// required `:or` semantics; keys join the selection, mirroring
+/// the upstream splice back into the binding loop. Upstream shapes
+/// are local-names or nested map forms (`::req-bindings`); anything
+/// else is `Unsupported binding form`. Non-maps take the
+/// expansion-stage errors the JVM hits: non-seqables the `ISeq`
+/// error, other shapes the first element's `Map$Entry` cast (probe
+/// `loop-req-num`, `loop-req-bad-full` on alpha10).
+fn walk_req_list(
+    v: &Value,
+    or_map: Option<&Map>,
+    sel: &mut Vec<Value>,
+    bound_keys: &mut HashMap<String, Value>,
+) -> Result<(), WalkError> {
+    if !is_seqable(v) {
+        return Err(WalkError::iseq(&jvm_class_of(v)));
+    }
+    if let Value::Map(m) = v {
+        for (local, key) in m.iter() {
+            walk_req_entry(local, key, or_map, sel, bound_keys)?;
+        }
+        return Ok(());
+    }
+    // A seqable non-map fails on `(key %)` of its first element —
+    // only real map entries pass, and the reader builds no map-entry
+    // literals, so every reachable shape takes the cast.
+    match seq_values(v).into_iter().next() {
+        Some(first) => Err(WalkError {
+            class: class::CLASS_CAST,
+            message: NativeError::cast(&jvm_class_of(&first), "java.util.Map$Entry")
+                .into_inner()
+                .message,
+        }),
+        None => Ok(()),
+    }
+}
+
+fn walk_req_entry(
+    local: &Value,
+    key: &Value,
+    or_map: Option<&Map>,
+    sel: &mut Vec<Value>,
+    bound_keys: &mut HashMap<String, Value>,
+) -> Result<(), WalkError> {
+    match local {
+        Value::Symbol(sym) => {
+            bound_keys.insert(sym.name().to_owned(), key.clone());
+            check_or_pair(or_map, sym.name(), key, true)?;
+        }
+        Value::Map(nested) => walk_map(nested)?,
+        _ => return Err(WalkError::unsupported(local)),
+    }
+    sel.push(key.clone());
+    Ok(())
+}
+
 /// `(tr bb)`: the lookup key plus the bound local for one
 /// pre-`&` element. Only idents pass (probe32): keywords ride
 /// the fast path untouched, and the local is the plain name.
 /// Anything else takes the `(namespace x)` cast — except under
-/// `:strs`, which never casts (see `key_cast_err`).
+/// `:strs`, which never casts (see `key_cast_err`). The element's
+/// own namespace wins over the directive namespace (upstream `xf`,
+/// M2).
 fn key_for(dir: &KeyDirective, form: &Value) -> Result<(Value, String), WalkError> {
     let (elem_ns, name) = match form {
         Value::Symbol(s) => (s.namespace().map(str::to_owned), s.name().to_owned()),
@@ -2553,11 +2629,11 @@ fn key_for(dir: &KeyDirective, form: &Value) -> Result<(Value, String), WalkErro
     };
     let key = match dir.kind {
         KeyKind::Keys => {
-            let ns = dir.ns.clone().or(elem_ns);
+            let ns = elem_ns.or(dir.ns.clone());
             Value::Keyword(Keyword::new(ns.as_deref(), &name))
         }
         KeyKind::Syms => {
-            let ns = dir.ns.clone().or(elem_ns);
+            let ns = elem_ns.or(dir.ns.clone());
             Value::Symbol(Symbol::new(ns.as_deref(), &name))
         }
         KeyKind::Strs => Value::Str(Arc::from(name.as_str())),
@@ -2565,33 +2641,38 @@ fn key_for(dir: &KeyDirective, form: &Value) -> Result<(Value, String), WalkErro
     Ok((key, name))
 }
 
+/// Upstream `xfk` (M2): the post-`&` key for one key-list element.
+/// Under a namespaced `:keys`/`:keys!` directive a keyword takes
+/// the directive namespace unless already qualified; anything else
+/// passes through untouched.
+fn post_amp_key(dir: &KeyDirective, form: &Value) -> Value {
+    match form {
+        Value::Keyword(k) if matches!(dir.kind, KeyKind::Keys) && dir.ns.is_some() => {
+            let ns = k.namespace().map(str::to_owned).or(dir.ns.clone());
+            Value::Keyword(Keyword::new(ns.as_deref(), k.name()))
+        }
+        _ => form.clone(),
+    }
+}
+
 /// The `(tr bb)` cast for a non-ident key-list element
 /// (probe32): `ClassCastException … to clojure.lang.Named`,
 /// the helpful-NPE text for `nil` — but `:strs` never casts
 /// and reports `Unsupported binding form` (str-rendered)
-/// instead, and qualified directives short-circuit the
-/// namespace call (`core.clj:4554` `(or mkns (namespace %))`):
-/// only `(name %)` runs, so strings fall into `push1`/`pb`
-/// (`Unsupported`) and `nil` takes the `getName` NPE text
-/// (probe33 `qual-cast-*`).
+/// instead. `(namespace %)` always runs now (M2, upstream
+/// 4610bb46 flipped `(or mkns (namespace %))` to `(or
+/// (namespace %) mkns)`), so strings under a qualified directive
+/// take the cast and `nil` always takes the `getNamespace` NPE
+/// text (probe `s`, `nil` on alpha10).
 fn key_cast_err(dir: &KeyDirective, form: &Value) -> WalkError {
     if matches!(dir.kind, KeyKind::Strs) {
         return WalkError::unsupported(form);
     }
-    if dir.ns.is_some() && matches!(form, Value::Str(_)) {
-        return WalkError::unsupported(form);
-    }
     if matches!(form, Value::Nil) {
-        let method = if dir.ns.is_some() {
-            "getName"
-        } else {
-            "getNamespace"
-        };
         return WalkError {
             class: class::NULL_POINTER,
-            message: format!(
-                "Cannot invoke \"clojure.lang.Named.{method}()\" because \"x\" is null"
-            ),
+            message: "Cannot invoke \"clojure.lang.Named.getNamespace()\" because \"x\" is null"
+                .to_owned(),
         };
     }
     WalkError {
@@ -3322,6 +3403,16 @@ impl<'a> Analyzer<'a> {
         acc: &mut MapAcc,
     ) -> Result<(), CompileError> {
         if let Value::Keyword(kw) = k {
+            // `:req!` (M2): each entry binds required with its raw
+            // key, exactly like the upstream splice back into the
+            // binding loop (validation ran already, so only maps
+            // reach the builder; anything else never does). Hoisted
+            // ahead of the chain so the chain keeps its master shape;
+            // every non-`req!` keyword takes the false edge past the
+            // block, keeping its brace attributed.
+            if kw.namespace().is_none() && kw.name() == "req!" {
+                return self.build_req_entries(v, span, acc);
+            }
             if is_outlet_directive(kw) {
                 set_outlet(kw, v, acc);
             } else if let Some(dir) = as_key_directive(kw) {
@@ -3331,7 +3422,7 @@ impl<'a> Analyzer<'a> {
         }
         let validated = as_pat(k).expect("patterns validated before building");
         let (pat, _) = self.build_pattern(validated, span)?;
-        acc.entries.push((pat, v.clone()));
+        push_entry(&mut acc.entries, pat, v.clone(), false);
         Ok(())
     }
 
@@ -3347,10 +3438,35 @@ impl<'a> Analyzer<'a> {
     }
 }
 
+/// Push one `(pattern, key, required?)` entry.
+fn push_entry(acc: &mut Vec<(Pattern, Value, bool)>, pat: Pattern, key: Value, required: bool) {
+    acc.push((pat, key, required));
+}
+
+impl<'a> Analyzer<'a> {
+    /// Build one `:req!` map into required entries (M2).
+    fn build_req_entries(
+        &mut self,
+        v: &Value,
+        span: Span,
+        acc: &mut MapAcc,
+    ) -> Result<(), CompileError> {
+        if let Value::Map(req) = v {
+            for (local, key) in req.iter() {
+                let validated = as_pat(local).expect("patterns validated before building");
+                let (pat, _) = self.build_pattern(validated, span)?;
+                push_entry(&mut acc.entries, pat, key.clone(), true);
+            }
+            return Ok(());
+        }
+        Ok(())
+    }
+}
+
 /// A map pattern under construction.
 #[derive(Default)]
 struct MapAcc {
-    entries: Vec<(Pattern, Value)>,
+    entries: Vec<(Pattern, Value, bool)>,
     keys: Vec<KeyBinding>,
     extra_keys: Vec<Value>,
     as_sym: Option<String>,
@@ -3398,7 +3514,10 @@ fn build_keys(
             continue;
         }
         if !preamp {
-            extra_keys.push(form);
+            // Upstream `xfk` (M2): under a namespaced `:keys`/`:keys!`
+            // directive an unqualified post-`&` key takes the directive
+            // namespace, a qualified one keeps its own.
+            extra_keys.push(post_amp_key(dir, &form));
             continue;
         }
         if let Ok((key, local)) = key_for(dir, &form) {
@@ -4265,6 +4384,64 @@ mod tests {
     fn seq_values_non_seqable_is_empty() {
         // Defensive arm: non-seqables yield no key-list elements.
         assert!(seq_values(&Value::Int(1)).is_empty());
+    }
+
+    fn unqualified_bb() -> Value {
+        Value::Keyword(Keyword::new(None, "bb"))
+    }
+
+    #[test]
+    fn build_req_entries_ignores_vacuous_non_map() {
+        // Defensive: validation rejects non-map `:req!` first, so
+        // only maps reach the builder; a vacuous value still builds
+        // clean (covers the skip path).
+        let source: Arc<str> = Arc::from("NO_SOURCE_PATH");
+        let mut eval = crate::ns::boot();
+        let mut analyzer = Analyzer::new(&source, &mut eval, 0);
+        let m = new_map().insert(
+            Value::Keyword(Keyword::new(None, "req!")),
+            Value::Vector(Vector::from_vec(vec![])),
+        );
+        let pat = analyzer
+            .build_map(&m, Span::new(1, 1))
+            .expect("vacuous :req! builds");
+        assert!(
+            matches!(pat, Pattern::Map(ref mp) if mp.entries.is_empty()),
+            "vacuous :req! builds no entries"
+        );
+    }
+
+    #[test]
+    fn post_amp_key_qualifies_under_ns_keys() {
+        // Upstream `xfk` (M2): under a namespaced `:keys`/`:keys!`
+        // directive an unqualified post-`&` key takes the directive
+        // namespace, a qualified one keeps its own; anything else
+        // passes through untouched.
+        let dir = KeyDirective {
+            kind: KeyKind::Keys,
+            ns: Some("foo".to_owned()),
+            required: false,
+        };
+        assert_eq!(
+            post_amp_key(&dir, &unqualified_bb()),
+            Value::Keyword(Keyword::new(Some("foo"), "bb"))
+        );
+        assert_eq!(
+            post_amp_key(&dir, &Value::Keyword(Keyword::new(Some("other"), "bb"))),
+            Value::Keyword(Keyword::new(Some("other"), "bb"))
+        );
+        let syms = KeyDirective {
+            kind: KeyKind::Syms,
+            ns: Some("foo".to_owned()),
+            required: false,
+        };
+        assert_eq!(post_amp_key(&syms, &unqualified_bb()), unqualified_bb());
+        let plain = KeyDirective {
+            kind: KeyKind::Keys,
+            ns: None,
+            required: false,
+        };
+        assert_eq!(post_amp_key(&plain, &unqualified_bb()), unqualified_bb());
     }
 
     #[test]

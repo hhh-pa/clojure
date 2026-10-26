@@ -1759,7 +1759,7 @@ impl Evaluator {
         subs: &mut SubMaps,
         out: &mut Vec<Value>,
     ) -> Result<(), Signal> {
-        for (local, key) in &ctx.pat.entries {
+        for (local, key, required) in &ctx.pat.entries {
             // `:or` is keyed by the binding local first, then the
             // lookup key (`destmap*` `push1`); nested locals have no
             // `Value` form, so only symbols get the local lookup.
@@ -1767,7 +1767,7 @@ impl Evaluator {
                 Pattern::Symbol(name) => Some(Value::Symbol(Symbol::new(None, name))),
                 _ => None,
             };
-            let val = self.map_binding(ctx, local_val.as_ref(), key, false, missing)?;
+            let val = self.map_binding(ctx, local_val.as_ref(), key, *required, missing)?;
             // Forcing (`destmap*` gensym outlets): an effective
             // outlet the nested map lacks is still computed, for
             // `subs` (never bound).
@@ -2399,7 +2399,7 @@ impl Evaluator {
 /// set, §E12 documents the divergence).
 fn selection(pat: &MapPattern) -> Vec<Value> {
     let mut sel = Vec::new();
-    for (_, key) in &pat.entries {
+    for (_, key, _) in &pat.entries {
         if !sel.contains(key) {
             sel.push(key.clone());
         }
@@ -2421,7 +2421,7 @@ fn selection(pat: &MapPattern) -> Vec<Value> {
 /// local→key map; strict-validated under `:select`/`:all`).
 fn or_mapped(pat: &MapPattern, defaults: &Map) -> Map {
     let mut b_to_k: std::collections::HashMap<&str, &Value> = std::collections::HashMap::new();
-    for (local, key) in &pat.entries {
+    for (local, key, _) in &pat.entries {
         if let Pattern::Symbol(name) = local {
             b_to_k.insert(name.as_str(), key);
         }

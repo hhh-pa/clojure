@@ -556,6 +556,61 @@ fn destructure_values() {
             "(let [{:keys [a & :c] :select s} {:a 1 :c 3 :d 4}] s)",
             "{:a 1, :c 3}",
         ),
+        // M2 `:req!` (probe `req-*`, upstream 9e51d6dc).
+        ("(let [{:req! {a :long-a}} {:long-a 1, :b 2}] a)", "1"),
+        (
+            "(let [{:keys! [b], :keys [d], :req! {a :long-a}} {:long-a 1, :b 2}] [a b d])",
+            "[1 2 nil]",
+        ),
+        (
+            "(let [{:keys! [b], :keys [d], :req! {a :long-a}, :or {d 42}} {:long-a 1, :b 2}] [a b d])",
+            "[1 2 42]",
+        ),
+        (
+            "(let [{:req! {{:keys! [c]} :nested}} {:nested {:c 3}}] c)",
+            "3",
+        ),
+        (
+            "(let [{:req! {a :long-a}, :missing miss} {}] miss)",
+            "{:long-a nil}",
+        ),
+        ("(loop [{:req! {a :long-a}} {:long-a 1}] a)", "1"),
+        // M2 `:req!` through the analyzer engine (`fn` params,
+        // probes `fn-req`, `fn-req-nested`, `fn-req-missingsel`).
+        ("((fn [{:req! {a :long-a}}] a) {:long-a 1})", "1"),
+        (
+            "((fn [{:req! {{:keys [c]} :nested}}] c) {:nested {:c 3}})",
+            "3",
+        ),
+        (
+            "((fn [{:req! {a :long-a}, :missing miss}] miss) {})",
+            "{:long-a nil}",
+        ),
+        // M2 post-`&` qualification through `fn` (analyzer engine).
+        (
+            "((fn [{:foo/keys [aa & :bb], :select sel}] sel) {:foo/aa 1, :bb 2, :foo/bb 3})",
+            "#:foo{:aa 1, :bb 3}",
+        ),
+        // M2 post-`&` qualification (probe `ns-postamp*`, 4610bb46).
+        (
+            "(let [{:keys! [aa & :bb], :select sel} {:aa 1, :bb 2}] sel)",
+            "{:aa 1, :bb 2}",
+        ),
+        (
+            "(let [{:foo/keys! [aa & :bb], :select sel} {:foo/aa 1, :bb 2, :foo/bb 3}] sel)",
+            "#:foo{:aa 1, :bb 3}",
+        ),
+        // Qualified post-`&` keys keep their own namespace
+        // (probes `post-qual`, `post-qual-req`; selection order is
+        // source order here, hash order on the JVM).
+        (
+            "(let [{:foo/keys [a & :other/b], :select s} {:foo/a 1, :other/b 2}] s)",
+            "{:foo/a 1, :other/b 2}",
+        ),
+        (
+            "((fn [{:foo/keys [a & :other/b], :select s}] s) {:foo/a 1, :other/b 2})",
+            "{:foo/a 1, :other/b 2}",
+        ),
         ("(let [{a :a} '(:a 1)] a)", "1"),
         ("(let [{a :a} '(:a 1 {:a 9 :b 8})] [a])", "[9]"),
         (
@@ -613,6 +668,16 @@ fn destructure_values() {
     assert_eq!(
         uncaught("(let [{:keys! [a]} {}] a)"),
         "java.lang.IllegalArgumentException | Missing required key: :a"
+    );
+    // M2 `:req!` missing keys throw at runtime (probe `req-missing`).
+    // Expansion-time `:req!` errors live in `fx4_macroexpand`.
+    assert_eq!(
+        uncaught("(let [{:req! {a :long-a}} {}] a)"),
+        "java.lang.IllegalArgumentException | Missing required key: :long-a"
+    );
+    assert_eq!(
+        uncaught("((fn [{:req! {a :long-a}}] a) {})"),
+        "java.lang.IllegalArgumentException | Missing required key: :long-a"
     );
     assert_eq!(
         uncaught("(let [{a :a} '(:a 1 :b)] a)"),
