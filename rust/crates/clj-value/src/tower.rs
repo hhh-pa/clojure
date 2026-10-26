@@ -101,9 +101,15 @@ fn parse_exp(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> Result<i64
     if exp_digits.is_empty() {
         return Err(String::new());
     }
-    let mut exp = exp_digits
-        .parse::<i64>()
-        .map_err(|_| "Too many nonzero exponent digits.".to_owned())?;
+    // The JDK counts nonzero exponent digits: eleven digits fail
+    // even when the value would fit (`1e99999999999`), while
+    // zero-padded ones parse (`1e00000000001` is `1E+1M`).
+    let significant = exp_digits.trim_start_matches('0');
+    if significant.len() > 10 {
+        return Err("Too many nonzero exponent digits.".to_owned());
+    }
+    // Ten digits always fit `i64`; the mapping only satisfies the type.
+    let mut exp = significant.parse::<i64>().unwrap_or(0);
     if exp_neg {
         exp = -exp;
     }
@@ -113,7 +119,12 @@ fn parse_exp(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> Result<i64
 /// Assemble the mantissa digits and exponent into the
 /// `(unscaled, scale)` pair. Chained so each parse fn stays
 /// under the complexity gate.
-fn finish_parse(int_digits: String, frac_digits: &str, exp: i64, neg: bool) -> BigDec {
+fn finish_parse(
+    int_digits: String,
+    frac_digits: &str,
+    exp: i64,
+    neg: bool,
+) -> Result<BigDec, String> {
     let mut digits = int_digits;
     digits.push_str(frac_digits);
     let stripped = digits.trim_start_matches('0');
@@ -123,10 +134,13 @@ fn finish_parse(int_digits: String, frac_digits: &str, exp: i64, neg: bool) -> B
         BigInt::parse_bytes(stripped.as_bytes(), 10).unwrap_or(BigInt::ZERO)
     };
     let unscaled = if neg { -unscaled } else { unscaled };
-    BigDec {
-        unscaled,
-        scale: frac_digits.len() as i64 - exp,
+    let scale = frac_digits.len() as i64 - exp;
+    // The scale is an `int` on the JVM: past it the parse fails
+    // with `Exponent overflow` (oracles `tower-r2`).
+    if scale > i64::from(i32::MAX) || scale < i64::from(i32::MIN) {
+        return Err("Exponent overflow.".to_owned());
     }
+    Ok(BigDec { unscaled, scale })
 }
 
 impl BigDec {
@@ -175,12 +189,7 @@ impl BigDec {
                 return Err(bad_decimal_char(c));
             }
         }
-        Ok(finish_parse(
-            int_digits,
-            &frac_digits,
-            exp,
-            s.starts_with('-'),
-        ))
+        finish_parse(int_digits, &frac_digits, exp, s.starts_with('-'))
     }
 
     /// `BigDecimal.toString`: plain while the scale is
@@ -225,28 +234,58 @@ impl BigDec {
         out
     }
 
-    /// `compareTo`: exact, scale-insensitive.
+    /// `compareTo`: exact, scale-insensitive. Differing signs
+    /// (including zero) decide without expansion — this also
+    /// keeps astronomical scales cheap, like the JDK's signum
+    /// short-circuit. Same-sign pairs compare decimal magnitudes
+    /// first; tied magnitudes expand exactly.
     #[must_use]
     pub fn compare(&self, other: &Self) -> Ordering {
         if self.scale == other.scale {
             return self.unscaled.cmp(&other.unscaled);
         }
+        let (s, o) = (self.sign(), other.sign());
+        if s != o {
+            return s.cmp(&o);
+        }
+        if s == Ordering::Equal {
+            return Ordering::Equal;
+        }
+        let (ms, mo) = (self.magnitude(), other.magnitude());
+        if ms != mo {
+            return if s == Ordering::Greater {
+                ms.cmp(&mo)
+            } else {
+                mo.cmp(&ms)
+            };
+        }
         if self.scale > other.scale {
-            let factor = pow10((self.scale - other.scale) as u32);
+            let factor = pow10(gap_u32(self.scale, other.scale));
             self.unscaled.cmp(&(other.unscaled.clone() * factor))
         } else {
-            let factor = pow10((other.scale - self.scale) as u32);
+            let factor = pow10(gap_u32(other.scale, self.scale));
             (self.unscaled.clone() * factor).cmp(&other.unscaled)
         }
     }
 
+    /// Decimal magnitude (`digits - scale`): exact ordering for
+    /// same-sign pairs, with no expansion.
+    fn magnitude(&self) -> i64 {
+        self.unscaled.abs().to_string().len() as i64 - self.scale
+    }
+
     /// Trailing-zero-stripped form (hashing: equiv decimals strip
-    /// to the same pair).
+    /// to the same pair — zeros canonicalize to `(0, 0)`, and
+    /// trailing zeros strip at any scale sign, like
+    /// `stripTrailingZeros`; oracle `tower-r2`).
     #[must_use]
     pub fn stripped(&self) -> (BigInt, i64) {
+        if self.unscaled.is_zero() {
+            return (BigInt::ZERO, 0);
+        }
         let mut unscaled = self.unscaled.clone();
         let mut scale = self.scale;
-        while scale > 0 && (&unscaled % 10) == BigInt::ZERO {
+        while (&unscaled % 10) == BigInt::ZERO {
             unscaled /= 10;
             scale -= 1;
         }
@@ -281,9 +320,9 @@ impl BigDec {
     #[must_use]
     pub fn to_rational(&self) -> BigRational {
         if self.scale >= 0 {
-            BigRational::new(self.unscaled.clone(), pow10(self.scale as u32))
+            BigRational::new(self.unscaled.clone(), pow10(gap_u32(self.scale, 0)))
         } else {
-            BigRational::from_integer(self.unscaled.clone() * pow10((-self.scale) as u32))
+            BigRational::from_integer(self.unscaled.clone() * pow10(gap_u32(0, self.scale)))
         }
     }
 
@@ -319,28 +358,44 @@ impl BigDec {
     #[must_use]
     pub fn to_bigint_trunc(&self) -> BigInt {
         if self.scale >= 0 {
-            self.unscaled.clone() / pow10(self.scale as u32)
+            self.unscaled.clone() / pow10(gap_u32(self.scale, 0))
         } else {
-            self.unscaled.clone() * pow10((-self.scale) as u32)
+            self.unscaled.clone() * pow10(gap_u32(0, self.scale))
         }
     }
 
     /// Approximate `f64` (overflows to infinity, like the JVM).
+    /// Astronomical scales never expand: past `10^1000` the value
+    /// is overflow (`±inf`) or underflow (`±0.0`) by inspection.
     #[must_use]
     pub fn to_f64(&self) -> f64 {
+        if !self.unscaled.is_zero() {
+            let neg = self.sign() == Ordering::Less;
+            if self.scale < -1000 {
+                return if neg {
+                    f64::NEG_INFINITY
+                } else {
+                    f64::INFINITY
+                };
+            }
+            let digits = self.unscaled.abs().to_string().len() as i64;
+            if self.scale - digits > 1000 {
+                return if neg { -0.0 } else { 0.0 };
+            }
+        }
         self.to_rational().to_f64().unwrap_or(f64::NAN)
     }
 
     fn aligned(&self, other: &Self) -> (BigInt, BigInt, i64) {
         if self.scale >= other.scale {
-            let factor = pow10((self.scale - other.scale) as u32);
+            let factor = pow10(gap_u32(self.scale, other.scale));
             (
                 self.unscaled.clone(),
                 other.unscaled.clone() * factor,
                 self.scale,
             )
         } else {
-            let factor = pow10((other.scale - self.scale) as u32);
+            let factor = pow10(gap_u32(other.scale, self.scale));
             (
                 self.unscaled.clone() * factor,
                 other.unscaled.clone(),
@@ -407,14 +462,33 @@ impl BigDec {
     }
 }
 
+/// A scale gap as `u32` for exact `pow10` expansion. Gaps past
+/// `u32::MAX` need multi-GB digit counts (only reachable through
+/// arithmetic-grown scales — literals cap at `i32`), where the
+/// JVM exhausts memory too, so expansion panics loud instead of
+/// wrapping silently.
+fn gap_u32(hi: i64, lo: i64) -> u32 {
+    match u32::try_from(hi.saturating_sub(lo)) {
+        Ok(g) => g,
+        Err(_) => panic!("BigDec scale gap exceeds u32::MAX; exact expansion infeasible"),
+    }
+}
+
 /// `BigInteger(String)`: decimal with a leading sign, JVM message.
 /// Leading zeros are skipped first (like the JDK), so
 /// `(bigint "0x10")` fails naming `"x10"` (oracle
 /// `bigint-hexstr`); an all-zero remainder is zero, while a bare
 /// sign (or nothing) fails with `Zero length BigInteger`
-/// (oracle `tower-gap`).
+/// (oracle `tower-gap`). Only one leading sign is stripped: a
+/// second one fails with `Illegal embedded sign character`
+/// (oracle `tower-r2`).
 pub fn bigint_parse(s: &str) -> Result<BigInt, String> {
-    let signed = s.trim_start_matches(['+', '-']);
+    // One leading sign at most (`+`/`-` are one byte, so the
+    // split is always on a boundary).
+    let signed = match s.as_bytes().first() {
+        Some(b'+') | Some(b'-') => &s[1..],
+        _ => s,
+    };
     let digits = signed.trim_start_matches('0');
     if digits.is_empty() {
         // All zeros is zero — but a bare sign (or nothing) is the
@@ -423,6 +497,9 @@ pub fn bigint_parse(s: &str) -> Result<BigInt, String> {
             return Ok(BigInt::ZERO);
         }
         return Err("Zero length BigInteger".to_owned());
+    }
+    if signed.bytes().any(|b| b == b'+' || b == b'-') {
+        return Err("Illegal embedded sign character".to_owned());
     }
     if !digits.bytes().all(|b| b.is_ascii_digit()) {
         return Err(format!("For input string: \"{digits}\""));
@@ -490,5 +567,31 @@ mod tests {
         assert_eq!(BigDec::parse("0.0").unwrap().sign(), Ordering::Equal);
         assert_eq!(BigDec::parse("-2.5").unwrap().sign(), Ordering::Less);
         assert_eq!(BigDec::parse("3").unwrap().sign(), Ordering::Greater);
+    }
+
+    /// Arithmetic-grown scales (literals cap at `i32`, products do
+    /// not): exact expansion past `u32` panics loud instead of
+    /// wrapping silently (the JVM exhausts memory there).
+    fn monster() -> BigDec {
+        let e2 = BigDec::parse("1E+2000000000").unwrap();
+        e2.mul(&e2).mul(&e2)
+    }
+
+    #[test]
+    #[should_panic(expected = "scale gap")]
+    fn monster_add_panics_loud() {
+        let _ = monster().add(&BigDec::parse("1").unwrap());
+    }
+
+    #[test]
+    #[should_panic(expected = "scale gap")]
+    fn monster_to_rational_panics_loud() {
+        let _ = monster().to_rational();
+    }
+
+    #[test]
+    #[should_panic(expected = "scale gap")]
+    fn monster_to_bigint_trunc_panics_loud() {
+        let _ = monster().to_bigint_trunc();
     }
 }

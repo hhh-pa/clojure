@@ -229,13 +229,116 @@ fn bigdec_intcast(d: &clj_value::BigDec) -> Result<i32, NativeError> {
 /// A `long` from a `double`: `NaN` is zero, past-`i64` fails
 /// `Value out of range for long` (double rendering), else
 /// truncation toward zero.
-fn double_long(d: f64) -> Result<i64, NativeError> {
+pub(crate) fn double_long(d: f64) -> Result<i64, NativeError> {
     if d.is_nan() {
         Ok(0)
     } else if d >= 9223372036854775808.0 || d < -9223372036854775808.0 {
         Err(out_of_range("long", Num::Double(d)))
     } else {
         Ok(d.trunc() as i64)
+    }
+}
+
+/// A `long` from a tower integer: past-`i64` fails `Value out of
+/// range for long` with the exact digits (`short`/`byte` narrow
+/// through here, so `(short 2^63N)` names `long`; oracle
+/// `tower-r2e`).
+/// Narrow a `long` into a smaller-width coercion target.
+fn narrow_range(l: i64, lo: i64, hi: i64, kind: &'static str) -> Result<i64, NativeError> {
+    if l < lo || l > hi {
+        Err(out_of_range(kind, Num::Int(l)))
+    } else {
+        Ok(l)
+    }
+}
+
+/// Narrow any number into a smaller-width coercion target:
+/// doubles range-check directly (double rendering), unbounded
+/// integers go through the `long` stop first, decimals through
+/// `double` like `int` (oracles `tower-r2e`, `tower-r2f`).
+fn narrow_num(n: &Num, lo: i64, hi: i64, kind: &'static str) -> Result<i64, NativeError> {
+    match n {
+        Num::Double(d) => {
+            if d.is_nan() || *d > hi as f64 || *d < lo as f64 {
+                return Err(out_of_range(kind, Num::Double(*d)));
+            }
+            Ok(d.trunc() as i64)
+        }
+        Num::Int(i) => narrow_range(*i, lo, hi, kind),
+        Num::BigInt(n) => narrow_range(bigint_long(n)?, lo, hi, kind),
+        Num::Ratio(r) => narrow_range(bigint_long(&trunc_ratio(r))?, lo, hi, kind),
+        Num::BigDec(d) => narrow_range(double_long(d.to_f64())?, lo, hi, kind),
+    }
+}
+
+/// Java `intValue`: low 32 bits, sign-extended (`BigDecimal`
+/// `(char 1E300M)` needs the NUL, not a range error; oracle
+/// `tower-r2f`).
+fn bigint_int_value(n: &num_bigint::BigInt) -> i32 {
+    let mut le = n.to_signed_bytes_le();
+    le.resize(
+        4,
+        if n.sign() == num_bigint::Sign::Minus {
+            0xFF
+        } else {
+            0
+        },
+    );
+    i32::from_le_bytes([le[0], le[1], le[2], le[3]])
+}
+
+/// A `char` from an unbounded integer: the full value
+/// range-checks (never the `long` stop — oracle `tower-r2g`),
+/// then UTF-32 narrows (surrogates stay the documented
+/// divergence).
+fn char_from_bigint(n: &num_bigint::BigInt) -> Result<char, NativeError> {
+    match n
+        .to_u32()
+        .filter(|&u| u <= 1114111)
+        .and_then(char::from_u32)
+    {
+        Some(c) => Ok(c),
+        None => Err(out_of_range("char", Num::BigInt(n.clone()))),
+    }
+}
+
+/// A `char` from a decimal: `BigDecimal.intValue` first, then the
+/// `char` range check.
+fn char_from_bigdec(d: &clj_value::BigDec) -> Result<char, NativeError> {
+    let i = bigint_int_value(&d.to_bigint_trunc());
+    if !(0..=1114111).contains(&i) {
+        return Err(out_of_range("char", Num::Int(i64::from(i))));
+    }
+    match char::from_u32(i as u32) {
+        Some(c) => Ok(c),
+        None => Err(out_of_range("char", Num::Int(i64::from(i)))),
+    }
+}
+
+/// A `char` from any number: unbounded integers range-check
+/// whole (never the `long` stop), ratios truncate first,
+/// decimals go through `BigDecimal.intValue` (oracles
+/// `tower-r2f`, `tower-r2g`).
+fn char_of_num(n: &Num) -> Result<char, NativeError> {
+    match n {
+        Num::Int(i) => match char::from_u32(u32::try_from(*i).unwrap_or(u32::MAX)) {
+            // Surrogates are unrepresentable (documented
+            // divergence — the JVM accepts them, unprintably).
+            Some(c) => Ok(c),
+            None => Err(out_of_range("char", Num::Int(*i))),
+        },
+        Num::Double(d) => {
+            if d.is_nan() || *d > 1114111.0 || *d < 0.0 {
+                return Err(out_of_range("char", Num::Double(*d)));
+            }
+            match char::from_u32(d.trunc() as u32) {
+                Some(c) => Ok(c),
+                None => Err(out_of_range("char", Num::Double(*d))),
+            }
+        }
+        Num::BigInt(n) => char_from_bigint(n),
+        Num::Ratio(r) => char_from_bigint(&trunc_ratio(r)),
+        Num::BigDec(d) => char_from_bigdec(d),
     }
 }
 
@@ -718,6 +821,21 @@ fn num_rational(n: &Num) -> num_rational::BigRational {
     }
 }
 
+/// Exact ordering without needless expansion: `BigDec` against
+/// `BigDec`/`Int`/`BigInt` decides by sign and magnitude first
+/// (astronomical scales never expand — `compareTo` parity);
+/// everything else keeps the rational path.
+fn compare_exact(a: &Num, b: &Num) -> std::cmp::Ordering {
+    match (a, b) {
+        (Num::BigDec(d), Num::BigDec(e)) => d.compare(e),
+        (Num::BigDec(d), Num::Int(i)) => d.compare(&clj_value::BigDec::from_bigint((*i).into())),
+        (Num::Int(i), Num::BigDec(e)) => clj_value::BigDec::from_bigint((*i).into()).compare(e),
+        (Num::BigDec(d), Num::BigInt(n)) => d.compare(&clj_value::BigDec::from_bigint(n.clone())),
+        (Num::BigInt(n), Num::BigDec(d)) => clj_value::BigDec::from_bigint(n.clone()).compare(d),
+        _ => num_rational(a).cmp(&num_rational(b)),
+    }
+}
+
 /// An exact `BigDec` for a non-`Double` number (a `Ratio` with no
 /// terminating expansion fails like `(bigdec 1/3)`).
 fn num_bigdec(n: &Num) -> Result<clj_value::BigDec, NativeError> {
@@ -853,7 +971,7 @@ fn minmax(display: &str, args: &[Value], want_max: bool) -> Result<Value, Native
                 }
             }
             _ => {
-                let ord = num_rational(&acc).cmp(&num_rational(&n));
+                let ord = compare_exact(&acc, &n);
                 if want_max {
                     ord == std::cmp::Ordering::Greater
                 } else {
@@ -955,7 +1073,7 @@ fn chain_cmp(
         let holds = match (&prev, &n) {
             (Num::Int(a), Num::Int(b)) => int_op(*a, *b),
             _ if either_double(&prev, &n) => op(to_f64(prev.clone()), to_f64(n.clone())),
-            _ => op(ord_num(num_rational(&prev).cmp(&num_rational(&n))), 0.0),
+            _ => op(ord_num(compare_exact(&prev, &n)), 0.0),
         };
         if !holds {
             return Ok(Value::Bool(false));
@@ -1070,7 +1188,7 @@ fn compare_numbers(x: &Value, y: &Value) -> Result<Option<std::cmp::Ordering>, N
         }
         return Ok(Some(Ordering::Equal));
     }
-    Ok(Some(num_rational(&a).cmp(&num_rational(&b))))
+    Ok(Some(compare_exact(&a, &b)))
 }
 
 /// Same-type scalars and vectors (`None` when the types differ).
@@ -2004,42 +2122,23 @@ fn float_checked(f: f64, err: Num) -> Result<f64, NativeError> {
 fn native_short(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/short", args, &[1])?;
     Ok(Value::Int(match &args[0] {
-        Value::Int(i) => {
-            if *i > 32767 || *i < -32768 {
-                return Err(out_of_range("short", Num::Int(*i)));
-            }
-            *i
-        }
-        Value::Double(d) => {
-            if d.is_nan() || *d > 32767.0 || *d < -32768.0 {
-                return Err(out_of_range("short", Num::Double(*d)));
-            }
-            d.trunc() as i64
-        }
         Value::Char(c) => *c as i64,
         Value::Nil => return Err(npe_double_value()),
-        v => return Err(cce_err(v, "java.lang.Number")),
+        // Numbers narrow through `narrow_num` (doubles check
+        // directly, tower through the `long` stop — oracles
+        // `tower-r2e`, `tower-r2f`).
+        v => narrow_num(&as_num(v)?, -32768, 32767, "short")?,
     }))
 }
 
 fn native_byte(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/byte", args, &[1])?;
     Ok(Value::Int(match &args[0] {
-        Value::Int(i) => {
-            if *i > 127 || *i < -128 {
-                return Err(out_of_range("byte", Num::Int(*i)));
-            }
-            *i
-        }
-        Value::Double(d) => {
-            if d.is_nan() || *d > 127.0 || *d < -128.0 {
-                return Err(out_of_range("byte", Num::Double(*d)));
-            }
-            d.trunc() as i64
-        }
         Value::Char(c) => *c as i64,
         Value::Nil => return Err(npe_double_value()),
-        v => return Err(cce_err(v, "java.lang.Number")),
+        // Numbers narrow through `narrow_num` (oracles `tower-r2e`,
+        // `tower-r2f`).
+        v => narrow_num(&as_num(v)?, -128, 127, "byte")?,
     }))
 }
 
@@ -2047,23 +2146,10 @@ fn native_char(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErr
     check_arity("clojure.core/char", args, &[1])?;
     Ok(Value::Char(match &args[0] {
         Value::Char(c) => *c,
-        Value::Int(i) => match char::from_u32(u32::try_from(*i).unwrap_or(u32::MAX)) {
-            // Surrogates are unrepresentable (documented
-            // divergence — the JVM accepts them, unprintably).
-            Some(c) => c,
-            None => return Err(out_of_range("char", Num::Int(*i))),
-        },
-        Value::Double(d) => {
-            if d.is_nan() || *d > 1114111.0 || *d < 0.0 {
-                return Err(out_of_range("char", Num::Double(*d)));
-            }
-            match char::from_u32(d.trunc() as u32) {
-                Some(c) => c,
-                None => return Err(out_of_range("char", Num::Double(*d))),
-            }
-        }
         Value::Nil => return Err(npe_long_value()),
-        v => return Err(cce_err(v, "java.lang.Number")),
+        // Numbers narrow through `char_of_num` (oracles
+        // `tower-r2f`, `tower-r2g`).
+        v => char_of_num(&as_num(v)?)?,
     }))
 }
 

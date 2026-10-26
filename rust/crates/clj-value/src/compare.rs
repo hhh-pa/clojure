@@ -99,6 +99,23 @@ fn compare_numbers(a: &Value, b: &Value) -> Option<Ordering> {
     }
     match (a, b) {
         (Value::Int(x), Value::Int(y)) => Some(x.cmp(y)),
+        // `BigDec` against `BigDec`/`Int`/`BigInt` decides by sign
+        // and magnitude first — astronomical scales never expand
+        // (`compareTo` parity; `compare_exact` mirrors this for
+        // `Num`).
+        (Value::BigDec(d), Value::BigDec(e)) => Some(d.compare(e)),
+        (Value::BigDec(d), Value::Int(i)) => {
+            Some(d.compare(&crate::BigDec::from_bigint((*i).into())))
+        }
+        (Value::Int(i), Value::BigDec(e)) => {
+            Some(crate::BigDec::from_bigint((*i).into()).compare(e))
+        }
+        (Value::BigDec(d), Value::BigInt(n)) => {
+            Some(d.compare(&crate::BigDec::from_bigint(n.clone())))
+        }
+        (Value::BigInt(n), Value::BigDec(e)) => {
+            Some(crate::BigDec::from_bigint(n.clone()).compare(e))
+        }
         _ => {
             let (x, y) = (to_rational_value(a)?, to_rational_value(b)?);
             Some(x.cmp(&y))
@@ -300,6 +317,29 @@ mod tests {
         assert_eq!(compare(&Value::Double(0.5), &big), Ok(Ordering::Less));
         assert_eq!(compare(&dec, &Value::Double(5.0)), Ok(Ordering::Greater));
         assert_eq!(compare(&half, &Value::Double(1.0)), Ok(Ordering::Less));
+    }
+
+    /// `BigDec` pairings decide by sign and magnitude first:
+    /// astronomical scales never expand (the `1E+2147483648`
+    /// literal parses — scale `i32` — but comparing it must not
+    /// build a two-billion-digit `pow10`).
+    #[test]
+    fn bigdec_pairs_skip_expansion() {
+        let huge = Value::BigDec(crate::BigDec::parse("1E+2147483648").unwrap());
+        let zero = Value::BigDec(crate::BigDec::parse("0").unwrap());
+        let one = Value::BigDec(crate::BigDec::parse("1.5").unwrap());
+        assert_eq!(compare(&huge, &zero), Ok(Ordering::Greater));
+        assert_eq!(compare(&zero, &huge), Ok(Ordering::Less));
+        assert_eq!(compare(&one, &Value::Int(1)), Ok(Ordering::Greater));
+        assert_eq!(compare(&Value::Int(2), &one), Ok(Ordering::Greater));
+        assert_eq!(
+            compare(&one, &Value::BigInt(num_bigint::BigInt::from(2))),
+            Ok(Ordering::Less)
+        );
+        assert_eq!(
+            compare(&Value::BigInt(num_bigint::BigInt::from(1)), &one),
+            Ok(Ordering::Less)
+        );
     }
 
     /// Tower type names surface in the incomparable error.

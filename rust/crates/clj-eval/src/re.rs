@@ -109,9 +109,14 @@ fn native_re_pattern(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nat
 }
 
 /// `re-find`: the next match (`re-groups` shape, nil on no
-/// match).
+/// match). The 1-arity takes a `Matcher` (excluded, spec §1.2),
+/// so any argument fails the `Matcher` cast exactly like the JVM
+/// (oracles `refind-arity`, `re-r2b`).
 fn native_re_find(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
-    check_arity("clojure.core/re-find", args, &[2])?;
+    check_arity("clojure.core/re-find", args, &[1, 2])?;
+    if args.len() == 1 {
+        return Err(cce_err(&args[0], "java.util.regex.Matcher"));
+    }
     let re = compile_source(pattern_source(&args[0])?)?;
     let text = match_text(&args[1])?;
     Ok(match re.captures(text) {

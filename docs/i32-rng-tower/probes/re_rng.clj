@@ -65,3 +65,7 @@
 (throwof "repat-long" '(re-pattern 1))
 (throwof "shuffle-lazy" '(sort (shuffle (map inc [1 2]))))
 (throwof "shuffle-list" '(sort (shuffle (quote (3 1 2)))))
+;; round-2 review findings: 1-arity CCE shape, lookahead divergence, rand-int huge, shuffle mapentry
+(throwof "re-r2" '[(try (re-find "a") (catch Throwable e [(str (type e)) (.getMessage e)])) (re-find #"(?=a)a" "a") (rand-int 1e300) (try (shuffle (first {:a 1})) (catch Throwable e [(str (type e)) (.getMessage e)]))])
+;; round-2b: 1-arity string CCE, lookahead success, shuffle mapentry
+(throwof "re-r2b" '[(try (re-find "a") (catch Throwable e [(str (type e)) (.getMessage e)])) (re-find #"(?=a)a" "a") (try (shuffle (first {:a 1})) (catch Throwable e [(str (type e)) (.getMessage e)]))])

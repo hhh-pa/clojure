@@ -100,6 +100,12 @@ fn tower_bigint_rows() {
             "{form}"
         );
     }
+    // Only one leading sign strips; a second fails embedded
+    // (oracle `tower-r2`).
+    assert_eq!(
+        uncaught(&mut eval, "(bigint \"--5\")"),
+        "java.lang.NumberFormatException | Illegal embedded sign character"
+    );
     assert_eq!(
         run_last(&mut eval, "(bigint \"123456789012345678901234567890\")"),
         "123456789012345678901234567890N"
@@ -339,6 +345,15 @@ fn tower_eq_rows() {
     assert_eq!(run_last(&mut eval, "(= (hash 5N) (hash 5))"), "true");
     assert_eq!(run_last(&mut eval, "(= (hash 5.0M) (hash 5.00M))"), "true");
     assert_eq!(run_last(&mut eval, "(= (hash 1/2) (hash 1/2))"), "true");
+    // Negative-scale zeros and trailing-zero decimals hash with
+    // their equiv class (oracle `tower-r2`).
+    assert_eq!(run_last(&mut eval, "(= 0E+3M 0M)"), "true");
+    assert_eq!(run_last(&mut eval, "(= (hash 0E+3M) (hash 0M))"), "true");
+    assert_eq!(run_last(&mut eval, "(= 10E+4M 1E+5M)"), "true");
+    assert_eq!(
+        run_last(&mut eval, "(= (hash 10E+4M) (hash 1E+5M))"),
+        "true"
+    );
     assert_eq!(
         run_last(
             &mut eval,
@@ -388,6 +403,30 @@ fn tower_print_rows() {
     assert_eq!(run_last(&mut eval, "(bigdec 1/4)"), "0.25M");
     assert_eq!(run_last(&mut eval, "(bigdec 1/5)"), "0.2M");
     assert_eq!(run_last(&mut eval, "(bigdec 3/20)"), "0.15M");
+    // The scale is an `int`: past it the parse fails, while
+    // zero-padded exponents still parse (oracles `tower-r2`,
+    // `tower-r2d`, `tower-r2e`).
+    for form in [
+        "(bigdec \"1e-3000000000\")",
+        "(bigdec \"1e-2147483648\")",
+        "(bigdec \"1e9999999999\")",
+    ] {
+        assert_eq!(
+            uncaught(&mut eval, form),
+            "java.lang.NumberFormatException | Exponent overflow.",
+            "{form}"
+        );
+    }
+    assert_eq!(
+        run_last(&mut eval, "(bigdec \"1e2147483647\")"),
+        "1E+2147483647M"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(bigdec \"1e2147483648\")"),
+        "1E+2147483648M"
+    );
+    assert_eq!(run_last(&mut eval, "(bigdec \"1e00000000001\")"), "1E+1M");
+    assert_eq!(run_last(&mut eval, "(bigdec \"1e000\")"), "1M");
     assert_eq!(run_last(&mut eval, "(pr-str 1/2)"), "\"1/2\"");
 }
 
@@ -435,6 +474,22 @@ fn tower_compare_rows() {
         run_last(&mut eval, "[(= 5.00M 5.0M) (= 1.5M 1.25M)]"),
         "[true false]"
     );
+    // Astronomical scales never expand: signs decide first, then
+    // magnitudes (oracles `tower-r2`, `tower-r2d` — the product
+    // grows its scale past `i32`, no literal can).
+    assert_eq!(run_last(&mut eval, "(compare 1E+2147483648M 0M)"), "1");
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(compare (* 1E+2000000000M 1E+2000000000M 1E+2000000000M) 1M)"
+        ),
+        "1"
+    );
+    // Negative pairs decide magnitudes reversed; `BigDec` against
+    // `Int` converts exactly (no expansion either way).
+    assert_eq!(run_last(&mut eval, "(compare -1E+2000000000M -1M)"), "-1");
+    assert_eq!(run_last(&mut eval, "[(compare 5M 1) (compare 1 5M)]"), "[1 -1]");
+    assert_eq!(run_last(&mut eval, "(= 0E+3M 0M)"), "true");
     assert_eq!(
         run_last(
             &mut eval,
@@ -480,6 +535,22 @@ fn tower_lattice_rows() {
     assert_eq!(run_last(&mut eval, "(compare 2.0 1.0)"), "1");
     assert_eq!(run_last(&mut eval, "(double 5.5M)"), "5.5");
     assert_eq!(run_last(&mut eval, "(bigdec 5N)"), "5M");
+    // Astronomical scales never expand into `double`: overflow is
+    // `±Infinity`, underflow `±0.0`, exactly like the JVM.
+    assert_eq!(
+        run_last(&mut eval, "(str (double 1E+2000000000M))"),
+        "\"##Inf\""
+    );
+    assert_eq!(
+        run_last(&mut eval, "(str (double -1E+2000000000M))"),
+        "\"##-Inf\""
+    );
+    assert_eq!(run_last(&mut eval, "(double 0M)"), "0.0");
+    assert_eq!(run_last(&mut eval, "(str (double 1E-2000000M))"), "\"0.0\"");
+    assert_eq!(
+        run_last(&mut eval, "(str (double -1E-2000000M))"),
+        "\"-0.0\""
+    );
     // Tower zero divisors fail `Divide by zero` through `/` too
     // (oracle `div-tower0`).
     for form in ["(/ 5M 0M)", "(/ 1 0N)"] {
@@ -657,6 +728,71 @@ fn tower_conv_rows() {
     );
 }
 
+/// Issue #32: `short`/`byte`/`char` tower narrowings (oracles
+/// `tower-r2`, `tower-r2d`, `tower-r2e`, `tower-r2f`,
+/// `tower-r2g`).
+#[test]
+fn tower_short_byte_char_rows() {
+    let mut eval = boot();
+    // `short`/`byte` narrow through the `long` stop (a `BigInt`
+    // past `i64` names `long`; decimals go through `double`).
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "[(short 5N) (short 7/2) (byte 5M) (byte 7/2) (byte 5N)]"
+        ),
+        "[5 3 5 3 5]"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(short (bigint \"9223372036854775808\"))"),
+        "java.lang.IllegalArgumentException | Value out of range for long: 9223372036854775808"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(short 1E300M)"),
+        "java.lang.IllegalArgumentException | Value out of range for long: 1.0E300"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(short 40000)"),
+        "java.lang.IllegalArgumentException | Value out of range for short: 40000"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(byte -129)"),
+        "java.lang.IllegalArgumentException | Value out of range for byte: -129"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(byte 1E300M)"),
+        "java.lang.IllegalArgumentException | Value out of range for long: 1.0E300"
+    );
+    // `char`: unbounded integers check whole, ratios truncate
+    // first, decimals go through `BigDecimal.intValue` (so
+    // `(char 1E300M)` is NUL, not a range error).
+    assert_eq!(
+        run_last(&mut eval, "[(char 65N) (char 65.0) (char 66M) (char 7/2)]"),
+        "[\\A \\A \\B \\\u{3}]"
+    );
+    assert_eq!(run_last(&mut eval, "(char 1E300M)"), "\\\u{0}");
+    assert_eq!(
+        uncaught(&mut eval, "(char (bigint \"4294967296\"))"),
+        "java.lang.IllegalArgumentException | Value out of range for char: 4294967296"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(char (bigint \"9223372036854775808\"))"),
+        "java.lang.IllegalArgumentException | Value out of range for char: 9223372036854775808"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(char -5.9M)"),
+        "java.lang.IllegalArgumentException | Value out of range for char: -5"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(char 55296M)"),
+        "java.lang.IllegalArgumentException | Value out of range for char: 55296"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(char 2000000000M)"),
+        "java.lang.IllegalArgumentException | Value out of range for char: 2000000000"
+    );
+}
+
 /// Issue #32: `nth`/`subvec` truncate tower indices toward zero,
 /// then range-check (oracles `nth-trunc2`, `nth-big`,
 /// `nth-intrange*`, `subvec-tower`).
@@ -695,6 +831,14 @@ fn tower_nth_rows() {
             "{form}"
         );
     }
+    // A `2^63` double saturates to `i64::MAX`, so the bounds check
+    // reports `integer overflow` exactly like the JVM (oracle
+    // `tower-r2`): failing the `long` stop first would wrongly
+    // report `out of range for long`.
+    assert_eq!(
+        uncaught(&mut eval, "(nth [1 2 3] 9.223372036854776E18)"),
+        "java.lang.ArithmeticException | integer overflow"
+    );
     assert_eq!(
         run_last(&mut eval, "[(subvec [1 2 3] 1N) (subvec [1 2 3] 1/2 2N)]"),
         "[[2 3] [1 2]]"
@@ -725,6 +869,21 @@ fn tower_seq_rows() {
     assert_eq!(run_last(&mut eval, "(drop 1.5M [1 2 3])"), "(3)");
     assert_eq!(run_last(&mut eval, "(take 1.5M [1 2 3])"), "(1 2)");
     assert_eq!(run_last(&mut eval, "(take 5.9M [1 2 3])"), "(1 2 3)");
+    // `2^63` doubles saturate, never throw, on the lazy paths —
+    // `repeat` keeps the huge count and `take` just takes (oracles
+    // `tower-r2`); `drop` int-casts and reports `integer overflow`.
+    assert_eq!(
+        run_last(&mut eval, "(take 2 (repeat 9.223372036854776E18 \"x\"))"),
+        "(\"x\" \"x\")"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(take 9.223372036854776E18 [1 2 3])"),
+        "(1 2 3)"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(drop 9.223372036854776E18 [1 2 3])"),
+        "java.lang.ArithmeticException | integer overflow"
+    );
     assert_eq!(run_last(&mut eval, "(count (repeat 5.9M \"x\"))"), "5");
     assert_eq!(run_last(&mut eval, "(count (repeat 7/2 \"x\"))"), "3");
     // A plain-`Int` index past `i32` fails `integer overflow`.

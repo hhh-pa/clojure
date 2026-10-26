@@ -61,13 +61,14 @@ fn native_rand(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErr
     Ok(Value::Double(bound_f64(as_num(&args[0])?) * draw))
 }
 
-/// `rand-int`: `(int (* n (rand)))` — the Rust `as` cast
-/// truncates toward zero exactly like the JVM's `intValue`
-/// (`(rand-int -1)` is `0`, never `-1`).
+/// `rand-int`: `(int (* n (rand)))` — truncation through the
+/// same `long` stop as `int`, so a huge product fails `Value out
+/// of range for long` exactly like the JVM (oracle `re-r2`:
+/// `(rand-int 1e300)`); (`(rand-int -1)` is `0`, never `-1`).
 fn native_rand_int(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/rand-int", args, &[1])?;
     let scaled = bound_f64(as_num(&args[0])?) * unit_random();
-    Ok(Value::Int(scaled as i64))
+    Ok(Value::Int(crate::core::double_long(scaled)?))
 }
 
 /// `shuffle`: Fisher-Yates over the seqable items (nil trips

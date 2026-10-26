@@ -58,7 +58,9 @@ Three stages, each test-first against committed oracle probes:
    `double` path (`ceil` for take/drop, truncation for repeat —
    oracles `index-*`, `seq-tower`); ranges step exactly with
    `Numbers.add` and compare exactly (oracles `range-*`);
-   `number?`/`integer?`/`decimal?` extended;
+   `number?`/`integer?` extended (`decimal?` does not exist —
+   review round 1 correction); `short`/`byte`/`char` grow tower
+   arms (review round 2);
    `bigint`/`bigdec`/`num`/`rationalize` coercion tables
    verbatim from the oracles (nil NPEs, `Long`-to-`IFn`-style
    CCEs, `No matching ctor` IAE, `Infinite or NaN` NFE,

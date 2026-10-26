@@ -188,10 +188,30 @@ fn re_arg_errors() {
         uncaught(&mut eval, "(re-find #\"a\" 1)"),
         "java.lang.ClassCastException | class java.lang.Long cannot be cast to class java.lang.CharSequence (java.lang.Long and java.lang.CharSequence are in module java.base of loader 'bootstrap')"
     );
+    // The 1-arity takes a `Matcher` (excluded): any argument fails
+    // the `Matcher` cast exactly like the JVM (oracles
+    // `refind-arity`, `re-r2b`).
     assert_eq!(
         uncaught(&mut eval, "(re-find #\"a\")"),
-        "clojure.lang.ArityException | Wrong number of args (1) passed to: clojure.core/re-find"
+        "java.lang.ClassCastException | class java.util.regex.Pattern cannot be cast to class java.util.regex.Matcher (java.util.regex.Pattern and java.util.regex.Matcher are in module java.base of loader 'bootstrap')"
     );
+    assert_eq!(
+        uncaught(&mut eval, "(re-find \"a\")"),
+        "java.lang.ClassCastException | class java.lang.String cannot be cast to class java.util.regex.Matcher (java.lang.String and java.util.regex.Matcher are in module java.base of loader 'bootstrap')"
+    );
+    // Look-around is the documented `regex`-crate divergence: the
+    // JVM matches, we fail `PatternSyntax` (oracle `re-r2b`).
+    assert_eq!(
+        uncaught(&mut eval, "(re-find #\"(?=a)a\" \"a\")"),
+        "java.util.regex.PatternSyntaxException | regex parse error:\n    (?=a)a\n    ^^^\nerror: look-around, including look-ahead and look-behind, is not supported"
+    );
+    // A `MapEntry` shuffles like the JVM (oracle `re-r2b` — the
+    // order is random, so the test checks the set and count).
+    assert_eq!(
+        run_last(&mut eval, "(= (set (shuffle (first {:a 1}))) #{1 :a})"),
+        "true"
+    );
+    assert_eq!(run_last(&mut eval, "(count (shuffle (first {:a 1})))"), "2");
 }
 
 #[test]
@@ -272,6 +292,13 @@ fn rand_int_rows() {
     assert_eq!(
         uncaught(&mut eval, "(rand-int nil)"),
         "java.lang.NullPointerException | Cannot invoke \"Object.getClass()\" because \"x\" is null"
+    );
+    // A huge product fails the `long` stop (the exact product is
+    // random, so only the class and prefix pin; oracle `re-r2`).
+    let err = uncaught(&mut eval, "(rand-int 1e300)");
+    assert!(
+        err.starts_with("java.lang.IllegalArgumentException | Value out of range for long: "),
+        "{err}"
     );
 }
 
