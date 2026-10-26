@@ -250,7 +250,8 @@ impl<R: BufRead, W: Write> Session<R, W> {
         self.shift(value.clone());
         let text = match self.print_value(&value) {
             Ok(text) => text,
-            Err((bound, diagnostic)) => {
+            Err(boxed) => {
+                let (bound, diagnostic) = *boxed;
                 self.bind_e(bound);
                 return self.write_line(&diagnostic);
             }
@@ -299,18 +300,18 @@ impl<R: BufRead, W: Write> Session<R, W> {
     /// Render one value exactly like `prn`: bound `*print-*` opts,
     /// deep-realized. Failures (a bad limit binding, a throwing
     /// lazy seq) come back as their `*e` value plus diagnostic.
-    fn print_value(&mut self, value: &Value) -> Result<String, (Value, String)> {
+    fn print_value(&mut self, value: &Value) -> Result<String, Box<(Value, String)>> {
         let opts = match clj_eval::core::print_opts(&self.eval, None) {
             Ok(opts) => opts,
             Err(err) => {
                 let diagnostic = Self::class_diagnostic(err.class, &err.message);
                 let bound = self.native_to_value(&err);
-                return Err((bound, diagnostic));
+                return Err(Box::new((bound, diagnostic)));
             }
         };
         let realized = match self.eval.realize_deep(value) {
             Ok(realized) => realized,
-            Err(signal) => return Err(self.print_failure(signal)),
+            Err(signal) => return Err(Box::new(self.print_failure(signal))),
         };
         Ok(pr_to_string(&realized, &opts))
     }
