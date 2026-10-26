@@ -2646,13 +2646,13 @@ fn key_for(dir: &KeyDirective, form: &Value) -> Result<(Value, String), WalkErro
 /// the directive namespace unless already qualified; anything else
 /// passes through untouched.
 fn post_amp_key(dir: &KeyDirective, form: &Value) -> Value {
-    if matches!(dir.kind, KeyKind::Keys) && dir.ns.is_some() {
-        if let Value::Keyword(k) = form {
+    match form {
+        Value::Keyword(k) if matches!(dir.kind, KeyKind::Keys) && dir.ns.is_some() => {
             let ns = k.namespace().map(str::to_owned).or(dir.ns.clone());
-            return Value::Keyword(Keyword::new(ns.as_deref(), k.name()));
+            Value::Keyword(Keyword::new(ns.as_deref(), k.name()))
         }
+        _ => form.clone(),
     }
-    form.clone()
 }
 
 /// The `(tr bb)` cast for a non-ident key-list element
@@ -3416,7 +3416,7 @@ impl<'a> Analyzer<'a> {
                     for (local, key) in req.iter() {
                         let validated = as_pat(local).expect("patterns validated before building");
                         let (pat, _) = self.build_pattern(validated, span)?;
-                        acc.entries.push((pat, key.clone(), true));
+                        push_entry(&mut acc.entries, pat, key.clone(), true);
                     }
                 }
             }
@@ -3424,7 +3424,7 @@ impl<'a> Analyzer<'a> {
         }
         let validated = as_pat(k).expect("patterns validated before building");
         let (pat, _) = self.build_pattern(validated, span)?;
-        acc.entries.push((pat, v.clone(), false));
+        push_entry(&mut acc.entries, pat, v.clone(), false);
         Ok(())
     }
 
@@ -3438,6 +3438,11 @@ impl<'a> Analyzer<'a> {
         }
         Ok(or)
     }
+}
+
+/// Push one `(pattern, key, required?)` entry.
+fn push_entry(acc: &mut Vec<(Pattern, Value, bool)>, pat: Pattern, key: Value, required: bool) {
+    acc.push((pat, key, required));
 }
 
 /// A map pattern under construction.
@@ -4361,6 +4366,43 @@ mod tests {
     fn seq_values_non_seqable_is_empty() {
         // Defensive arm: non-seqables yield no key-list elements.
         assert!(seq_values(&Value::Int(1)).is_empty());
+    }
+
+    fn unqualified_bb() -> Value {
+        Value::Keyword(Keyword::new(None, "bb"))
+    }
+
+    #[test]
+    fn post_amp_key_qualifies_under_ns_keys() {
+        // Upstream `xfk` (M2): under a namespaced `:keys`/`:keys!`
+        // directive an unqualified post-`&` key takes the directive
+        // namespace, a qualified one keeps its own; anything else
+        // passes through untouched.
+        let dir = KeyDirective {
+            kind: KeyKind::Keys,
+            ns: Some("foo".to_owned()),
+            required: false,
+        };
+        assert_eq!(
+            post_amp_key(&dir, &unqualified_bb()),
+            Value::Keyword(Keyword::new(Some("foo"), "bb"))
+        );
+        assert_eq!(
+            post_amp_key(&dir, &Value::Keyword(Keyword::new(Some("other"), "bb"))),
+            Value::Keyword(Keyword::new(Some("other"), "bb"))
+        );
+        let syms = KeyDirective {
+            kind: KeyKind::Syms,
+            ns: Some("foo".to_owned()),
+            required: false,
+        };
+        assert_eq!(post_amp_key(&syms, &unqualified_bb()), unqualified_bb());
+        let plain = KeyDirective {
+            kind: KeyKind::Keys,
+            ns: None,
+            required: false,
+        };
+        assert_eq!(post_amp_key(&plain, &unqualified_bb()), unqualified_bb());
     }
 
     #[test]

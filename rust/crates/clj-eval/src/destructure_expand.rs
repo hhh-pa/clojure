@@ -543,13 +543,13 @@ fn post_amp(
 }
 
 fn post_key(kind: &Dir, item: &Value) -> Value {
-    if matches!(kind.kind, DirKind::Keys) && kind.ns.is_some() {
-        if let Value::Keyword(k) = item {
+    match item {
+        Value::Keyword(k) if matches!(kind.kind, DirKind::Keys) && kind.ns.is_some() => {
             let ns = k.namespace().map(str::to_owned).or_else(|| kind.ns.clone());
-            return Value::Keyword(clj_value::Keyword::new(ns.as_deref(), k.name()));
+            Value::Keyword(clj_value::Keyword::new(ns.as_deref(), k.name()))
         }
+        _ => item.clone(),
     }
-    item.clone()
 }
 
 fn translate(kind: &Dir, item: &Value) -> Result<Value, NativeError> {
@@ -941,5 +941,103 @@ fn pair_map(pairs: &[(Value, Value)]) -> Value {
         Value::Nil
     } else {
         Value::Map(map_of(pairs.to_vec()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ns::boot;
+
+    fn keys_ns_dir() -> Dir {
+        Dir {
+            kind: DirKind::Keys,
+            ns: Some("foo".to_owned()),
+            required: false,
+        }
+    }
+
+    fn unqualified_bb() -> Value {
+        Value::Keyword(clj_value::Keyword::new(None, "bb"))
+    }
+
+    #[test]
+    fn post_key_qualifies_under_ns_directive() {
+        // Upstream `xfk` (M2): unqualified takes the directive ns,
+        // qualified keeps its own, anything else passes through.
+        let dir = keys_ns_dir();
+        assert_eq!(
+            post_key(&dir, &unqualified_bb()),
+            Value::Keyword(clj_value::Keyword::new(Some("foo"), "bb"))
+        );
+        assert_eq!(
+            post_key(
+                &dir,
+                &Value::Keyword(clj_value::Keyword::new(Some("other"), "bb"))
+            ),
+            Value::Keyword(clj_value::Keyword::new(Some("other"), "bb"))
+        );
+        let syms = Dir {
+            kind: DirKind::Syms,
+            ns: Some("foo".to_owned()),
+            required: false,
+        };
+        assert_eq!(post_key(&syms, &unqualified_bb()), unqualified_bb());
+        let plain = Dir {
+            kind: DirKind::Keys,
+            ns: None,
+            required: false,
+        };
+        assert_eq!(post_key(&plain, &unqualified_bb()), unqualified_bb());
+    }
+
+    /// One binding pair `[pattern init]` with a `:req!` pattern.
+    fn req_bindings(req_val: Value) -> Value {
+        let pat = Value::Map(map_of(vec![(kw("req!"), req_val)]));
+        vecv(vec![pat, Value::Nil])
+    }
+
+    #[test]
+    fn walk_req_map_binds_required_raw() {
+        // Upstream splice: map entries bind required with raw keys —
+        // the expansion fetches through `req!`.
+        let mut eval = boot();
+        let req = Value::Map(map_of(vec![(sym("a"), kw("long-a"))]));
+        let out = destructure(&mut eval, &req_bindings(req)).expect("map :req! expands");
+        let printed = pr_of(&out);
+        assert!(
+            printed.contains("req!"),
+            "expansion fetches through req!: {printed}"
+        );
+        assert!(printed.contains(":long-a"), "raw key kept: {printed}");
+    }
+
+    #[test]
+    fn walk_req_non_map_takes_entry_cast() {
+        // Upstream `(key %)`: only map entries pass (probe
+        // `loop-req-bad-full` on alpha10).
+        let mut eval = boot();
+        let err = destructure(&mut eval, &req_bindings(vecv(vec![sym("a")])))
+            .expect_err("vector :req! fails");
+        assert_eq!(err.class, clj_value::ThrowClass::ClassCastException);
+        assert!(err.message.contains("Map$Entry"), "cast: {}", err.message);
+    }
+
+    #[test]
+    fn walk_req_non_seqable_is_iseq() {
+        // Upstream `(map ...)` over a non-seqable (probe
+        // `loop-req-num` on alpha10).
+        let mut eval = boot();
+        let err =
+            destructure(&mut eval, &req_bindings(Value::Int(5))).expect_err("scalar :req! fails");
+        assert_eq!(err.class, clj_value::ThrowClass::IllegalArgumentException);
+    }
+
+    #[test]
+    fn walk_req_vacuous_splices_nothing() {
+        // An empty `:req!` splices nothing (downstream spec rejects
+        // it for `let`, like the upstream inner-`let` spec).
+        let mut eval = boot();
+        destructure(&mut eval, &req_bindings(vecv(vec![]))).expect("empty :req! expands");
     }
 }
