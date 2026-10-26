@@ -1656,12 +1656,16 @@ fn native_replace(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, Native
 }
 
 fn native_into(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
-    check_arity("clojure.core/into", args, &[0, 1, 2])?;
+    check_arity("clojure.core/into", args, &[0, 1, 2, 3])?;
     if args.is_empty() {
         return Ok(Value::Vector(Vector::from_vec(Vec::new())));
     }
     if args.len() == 1 {
         return Ok(args[0].clone());
+    }
+    if args.len() == 3 {
+        // `(into to xform from)` (T1200 D1, oracle `into-*`).
+        return crate::xform::into_xform(eval, args[0].clone(), &args[1], &args[2]);
     }
     into_inner(eval, &args[0], &args[1])
 }

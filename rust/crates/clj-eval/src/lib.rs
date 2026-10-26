@@ -32,6 +32,7 @@ pub mod macros;
 pub mod ns;
 pub mod seqs;
 pub mod vars;
+pub mod xform;
 
 pub use aot_subset::{
     PlanError, Prim, SubsetError, SubsetExpr, SubsetFn, SubsetProgram, plan_source,

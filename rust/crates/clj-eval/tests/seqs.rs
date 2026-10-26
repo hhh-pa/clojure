@@ -36,6 +36,16 @@ fn uncaught(eval: &mut Evaluator, src: &str) -> String {
     }
 }
 
+/// Compile-time failure chain (private-var and unresolvable refs
+/// fail in the analyzer, like `analyzer_contract.rs` `check`).
+fn compile_chain(eval: &mut Evaluator, src: &str) -> Vec<String> {
+    match eval.eval_source(src) {
+        Err(SourceError::Compile(e)) => e.chain(),
+        Err(other) => panic!("expected a compile error for {src}, got {other:?}"),
+        Ok(vs) => panic!("expected a compile error for {src}, got {vs:?}"),
+    }
+}
+
 #[test]
 fn reduced_rows() {
     let mut eval = boot();
@@ -75,11 +85,8 @@ fn mapcat_rows() {
         uncaught(&mut eval, "(doall (mapcat (fn [x] x) [1]))"),
         "java.lang.IllegalArgumentException | Don't know how to create ISeq from: java.lang.Long"
     );
-    // One arg is the (out-of-scope) transducer arity.
-    assert_eq!(
-        uncaught(&mut eval, "(mapcat list)"),
-        "clojure.lang.ArityException | Wrong number of args (1) passed to: clojure.core/mapcat"
-    );
+    // One arg is the transducer arity (T1200 D1).
+    assert_eq!(run_last(&mut eval, "(((mapcat list) conj) [] 1)"), "[1]");
 }
 
 #[test]
@@ -96,27 +103,19 @@ fn while_rows() {
 #[test]
 fn xform_divergence_rows() {
     let mut eval = boot();
-    // The 1-arg transducer arities are out of scope: arity errors
-    // naming the `clojure.core/F` display form.
-    for f in ["map", "filter", "remove", "keep", "keep-indexed"] {
-        let src = format!("({f} list)");
-        assert_eq!(
-            uncaught(&mut eval, &src),
-            format!(
-                "clojure.lang.ArityException | Wrong number of args (1) passed to: clojure.core/{f}"
-            ),
-            "{src}"
-        );
-    }
-    for f in ["distinct", "dedupe"] {
-        let src = format!("({f})");
-        assert_eq!(
-            uncaught(&mut eval, &src),
-            format!(
-                "clojure.lang.ArityException | Wrong number of args (0) passed to: clojure.core/{f}"
-            ),
-            "{src}"
-        );
+    // T1200 D1: the transducer arities now return stepping-fn
+    // builders instead of raising (D13 retired). Each builder takes
+    // `rf` and answers the init call.
+    for (src, want) in [
+        ("((map list) conj)", "[]"),
+        ("((filter list?) conj)", "[]"),
+        ("((remove list?) conj)", "[]"),
+        ("((keep list) conj)", "[]"),
+        ("((keep-indexed list) conj)", "[]"),
+        ("((distinct) conj)", "[]"),
+        ("((dedupe) conj)", "[]"),
+    ] {
+        assert_eq!(run_last(&mut eval, &format!("({src})")), want, "{src}");
     }
 }
 
@@ -680,13 +679,17 @@ fn xform_builders_stateful_rows() {
         "true"
     );
     assert_eq!(
-        run_last(&mut eval, "(unreduced (let [t ((take 2) +)] (t (t 0 5) 6)))"),
-        "6"
+        run_last(
+            &mut eval,
+            "(unreduced (let [t ((take 2) +)] (t (t 0 5) 6)))"
+        ),
+        "11"
     );
-    // `drop`: skipped inputs leave the result alone.
+    // `drop`: skipped inputs leave the result alone (3-deep reaches
+    // the pass-through transition).
     assert_eq!(run_last(&mut eval, "(let [d ((drop 2) +)] (d 0 5))"), "0");
     assert_eq!(
-        run_last(&mut eval, "(let [d ((drop 2) +)] (d (d 0 5) 7))"),
+        run_last(&mut eval, "(let [d ((drop 2) +)] (d (d (d 0 5) 6) 7))"),
         "7"
     );
     // `take-while`: trip wraps `Reduced`.
@@ -695,7 +698,10 @@ fn xform_builders_stateful_rows() {
         "5"
     );
     assert_eq!(
-        run_last(&mut eval, "(reduced? (let [t ((take-while odd?) +)] (t 0 4)))"),
+        run_last(
+            &mut eval,
+            "(reduced? (let [t ((take-while odd?) +)] (t 0 4)))"
+        ),
         "true"
     );
     // `drop-while`: dropping keeps the result, passing reduces.
@@ -718,11 +724,17 @@ fn xform_builders_stateful_rows() {
     );
     // `distinct`/`dedupe` share the oracle's call pattern verbatim.
     assert_eq!(
-        run_last(&mut eval, "(let [d ((distinct) +)] [(d 0 5) (d 0 5) (d 0 7)])"),
+        run_last(
+            &mut eval,
+            "(let [d ((distinct) +)] [(d 0 5) (d 0 5) (d 0 7)])"
+        ),
         "[5 0 7]"
     );
     assert_eq!(
-        run_last(&mut eval, "(let [d ((dedupe) +)] [(d 0 5) (d 0 5) (d 0 7)])"),
+        run_last(
+            &mut eval,
+            "(let [d ((dedupe) +)] [(d 0 5) (d 0 5) (d 0 7)])"
+        ),
         "[5 0 7]"
     );
 }
@@ -735,6 +747,49 @@ fn completing_rows() {
     assert_eq!(run_last(&mut eval, "((completing +) 5)"), "5");
     assert_eq!(run_last(&mut eval, "((completing +) 5 6)"), "11");
     assert_eq!(run_last(&mut eval, "((completing + str) 5)"), "\"5\"");
+    // Only `map` takes extra step inputs; every other stepping fn
+    // rejects them (only `map` has the N-ary arm in `core.clj`).
+    for (src, display) in [
+        ("(((filter odd?) +) 0 1 2)", "filter"),
+        ("(((remove odd?) +) 0 1 2)", "remove"),
+        ("(((keep identity) +) 0 1 2)", "keep"),
+        ("(((keep-indexed vector) +) 0 1 2)", "keep-indexed"),
+        ("(((map-indexed vector) +) 0 1 2)", "map-indexed"),
+        ("(((take 2) +) 0 1 2)", "take"),
+        ("(((drop 2) +) 0 1 2)", "drop"),
+        ("(((take-while odd?) +) 0 1 2)", "take-while"),
+        ("(((drop-while odd?) +) 0 1 2)", "drop-while"),
+        ("(((take-nth 2) +) 0 1 2)", "take-nth"),
+        ("(((distinct) +) 0 1 2)", "distinct"),
+        ("(((dedupe) +) 0 1 2)", "dedupe"),
+        ("(((interpose \\,) +) 0 1 2)", "interpose"),
+        ("(((halt-when odd?) +) 0 1 2)", "halt-when"),
+        ("((completing +) 1 2 3)", "completing"),
+        ("((cat +) 0 [1] :extra)", "cat"),
+    ] {
+        assert_eq!(
+            uncaught(&mut eval, src),
+            format!(
+                "clojure.lang.ArityException | Wrong number of args (3) passed to: clojure.core/{display}$fn"
+            ),
+            "{src}"
+        );
+    }
+    // Public-arity errors keep the public display (oracle
+    // `sequence-0`, `transduce-2arg`, `cat-0arg`).
+    for (src, want, n) in [
+        ("(sequence)", "clojure.core/sequence", 0),
+        ("(transduce + [1])", "clojure.core/transduce", 2),
+        ("(cat)", "clojure.core/cat", 0),
+        ("(halt-when)", "clojure.core/halt-when", 0),
+        ("(completing)", "clojure.core/completing", 0),
+    ] {
+        assert_eq!(
+            uncaught(&mut eval, src),
+            format!("clojure.lang.ArityException | Wrong number of args ({n}) passed to: {want}"),
+            "{src}"
+        );
+    }
 }
 
 /// T1200 D1 (red first): `transduce` (`sum*`, `err-*`).
@@ -742,7 +797,10 @@ fn completing_rows() {
 fn transduce_rows() {
     let mut eval = boot();
     assert_eq!(
-        run_last(&mut eval, "(transduce (comp (map inc) (filter odd?)) + (range 10))"),
+        run_last(
+            &mut eval,
+            "(transduce (comp (map inc) (filter odd?)) + (range 10))"
+        ),
         "25"
     );
     assert_eq!(
@@ -750,10 +808,11 @@ fn transduce_rows() {
         "109"
     );
     assert_eq!(run_last(&mut eval, "(transduce (map inc) + [1 2 3])"), "9");
-    // Bad xform callee: the call-site cast (`err-bad-xform`).
+    // Bad xform callee: the call-site cast, JVM-verbatim through
+    // `call_checked` (`err-bad-xform`).
     assert_eq!(
         uncaught(&mut eval, "(transduce 5 + [1 2 3])"),
-        "java.lang.ClassCastException | Cannot cast java.lang.Long to clojure.lang.IFn"
+        "java.lang.ClassCastException | class java.lang.Long cannot be cast to class clojure.lang.IFn (java.lang.Long is in module java.base of loader 'bootstrap'; clojure.lang.IFn is in unnamed module of loader 'app')"
     );
     // Non-seqable input: the ISeq error (`err-noncoll`).
     assert_eq!(
@@ -763,6 +822,9 @@ fn transduce_rows() {
     // A bad reducing fn only surfaces if the reduction calls it
     // (`err-completing-badf` never calls `f`).
     assert_eq!(run_last(&mut eval, "(transduce (completing 5) + [1])"), "1");
+    // Empty input skips the walk and completes the init.
+    assert_eq!(run_last(&mut eval, "(transduce (map inc) + [])"), "0");
+    assert_eq!(run_last(&mut eval, "(into [] (map inc) [])"), "[]");
 }
 
 /// T1200 D1 (red first): `halt-when` (`halt*`).
@@ -770,7 +832,10 @@ fn transduce_rows() {
 fn halt_when_rows() {
     let mut eval = boot();
     assert_eq!(
-        run_last(&mut eval, "(transduce (halt-when #(> % 5)) conj [] (range))"),
+        run_last(
+            &mut eval,
+            "(transduce (halt-when #(> % 5)) conj [] (range))"
+        ),
         "6"
     );
     assert_eq!(
@@ -784,10 +849,21 @@ fn halt_when_rows() {
         run_last(&mut eval, "(transduce (halt-when #(> % 5)) + 0 (range))"),
         "6"
     );
-    // Step trips with `{::halt input}` (`halt-step`).
-    assert_eq!(run_last(&mut eval, "(let [h ((halt-when odd?) +)] (h 0 4))"), "4");
+    // Init delegates to `rf`.
     assert_eq!(
-        run_last(&mut eval, "(reduced? (let [h ((halt-when odd?) +)] (h 0 5)))"),
+        run_last(&mut eval, "(let [h ((halt-when odd?) +)] (h))"),
+        "0"
+    );
+    // Step trips with `{::halt input}` (`halt-step`).
+    assert_eq!(
+        run_last(&mut eval, "(let [h ((halt-when odd?) +)] (h 0 4))"),
+        "4"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(reduced? (let [h ((halt-when odd?) +)] (h 0 5)))"
+        ),
         "true"
     );
     assert_eq!(
@@ -795,11 +871,14 @@ fn halt_when_rows() {
             &mut eval,
             "(unreduced (let [h ((halt-when odd?) +)] (h 0 5)))"
         ),
-        "{:clojure.core/halt 5}"
+        "#:clojure.core{:halt 5}"
     );
     // Completion unwraps user maps carrying `::halt`
     // (`halt-complete-plain`, `halt-complete-usermap`).
-    assert_eq!(run_last(&mut eval, "(let [h ((halt-when odd?) +)] (h 7))"), "7");
+    assert_eq!(
+        run_last(&mut eval, "(let [h ((halt-when odd?) +)] (h 7))"),
+        "7"
+    );
     assert_eq!(
         run_last(
             &mut eval,
@@ -817,27 +896,32 @@ fn halt_when_rows() {
 #[test]
 fn reduced_helpers_rows() {
     let mut eval = boot();
-    assert_eq!(
-        run_last(&mut eval, "(reduced? (ensure-reduced 5))"),
-        "true"
-    );
-    assert_eq!(
-        run_last(&mut eval, "(unreduced (ensure-reduced 5))"),
-        "5"
-    );
+    assert_eq!(run_last(&mut eval, "(reduced? (ensure-reduced 5))"), "true");
+    assert_eq!(run_last(&mut eval, "(unreduced (ensure-reduced 5))"), "5");
     assert_eq!(run_last(&mut eval, "(unreduced 5)"), "5");
     assert_eq!(run_last(&mut eval, "(resolve 'preserving-reduced)"), "nil");
     assert_eq!(
-        run_last(&mut eval, "(some? (resolve 'clojure.core/preserving-reduced))"),
+        run_last(
+            &mut eval,
+            "(some? (resolve 'clojure.core/preserving-reduced))"
+        ),
         "true"
     );
     assert_eq!(
-        uncaught(&mut eval, "(preserving-reduced +)"),
-        "java.lang.RuntimeException | Unable to resolve symbol: preserving-reduced in this context"
+        compile_chain(&mut eval, "(preserving-reduced +)"),
+        vec![
+            "Syntax error compiling at (user:1:1).".to_owned(),
+            "java.lang.RuntimeException | Unable to resolve symbol: preserving-reduced in this context"
+                .to_owned(),
+        ]
     );
     assert_eq!(
-        uncaught(&mut eval, "((clojure.core/preserving-reduced +) 5 6)"),
-        "java.lang.IllegalStateException | var: #'clojure.core/preserving-reduced is not public"
+        compile_chain(&mut eval, "((clojure.core/preserving-reduced +) 5 6)"),
+        vec![
+            "Syntax error compiling clojure.core/preserving-reduced at (user:1:2).".to_owned(),
+            "java.lang.IllegalStateException | var: #'clojure.core/preserving-reduced is not public"
+                .to_owned(),
+        ]
     );
 }
 
@@ -847,7 +931,22 @@ fn reduced_helpers_rows() {
 #[test]
 fn sequence_eduction_rows() {
     let mut eval = boot();
-    assert_eq!(run_last(&mut eval, "(into [] (map inc) [1 2 3])"), "[2 3 4]");
+    assert_eq!(
+        run_last(&mut eval, "(into [] (map inc) [1 2 3])"),
+        "[2 3 4]"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(into [] (halt-when odd?) [1 2 3])"),
+        "1"
+    );
+    // Transient-of-transient takes the pre-existing transient cast
+    // (oracle `into-to-transient`; the JVM targets
+    // `IPersistentCollection` there — the difference lives in the
+    // shared transient cast, out of D1 scope).
+    assert_eq!(
+        uncaught(&mut eval, "(into (transient []) (map inc) [1 2])"),
+        "java.lang.ClassCastException | class clojure.lang.PersistentVector$TransientVector cannot be cast to class clojure.lang.IEditableCollection (clojure.lang.PersistentVector$TransientVector and clojure.lang.IEditableCollection are in unnamed module of loader 'app')"
+    );
     assert_eq!(
         run_last(&mut eval, "(reduce + 0 (eduction (map inc) [1 2 3]))"),
         "9"
@@ -864,7 +963,54 @@ fn sequence_eduction_rows() {
     );
     assert_eq!(
         run_last(&mut eval, "(take 3 (sequence (map inc) (range)))"),
-        "(2 3 4)"
+        "(1 2 3)"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(sequence (map +) [1 2] [3 4])"),
+        "(4 6)"
+    );
+    // Every `check_seqable` arm, behaviorally (lazy, range,
+    // repeat, cycle, iterate, keys/vals views, subvec, eduction;
+    // fns and `Reduced` take the eager ISeq error).
+    assert_eq!(
+        run_last(&mut eval, "(sequence (map inc) (map inc [1 2]))"),
+        "(3 4)"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(sequence (map inc) (repeat 2 5))"),
+        "(6 6)"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(take 2 (sequence (map inc) (cycle [7])))"),
+        "(8 8)"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(take 2 (sequence (map inc) (iterate inc 1)))"),
+        "(2 3)"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(sequence (map identity) (keys {:a 1}))"),
+        "(:a)"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(sequence (map identity) (vals {:a 1}))"),
+        "(1)"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(sequence (map inc) (subvec [1 2 3] 1))"),
+        "(3 4)"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(sequence (map inc) (eduction (map inc) [1]))"),
+        "(3)"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(sequence (map inc) +)"),
+        "java.lang.IllegalArgumentException | Don't know how to create ISeq from: clojure.core$_PLUS_"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(sequence (map inc) (reduced [1]))"),
+        "java.lang.IllegalArgumentException | Don't know how to create ISeq from: clojure.lang.Reduced"
     );
     assert_eq!(
         uncaught(&mut eval, "(into [] (map inc) 5)"),
@@ -873,5 +1019,41 @@ fn sequence_eduction_rows() {
     assert_eq!(
         uncaught(&mut eval, "(sequence (map inc) 5)"),
         "java.lang.IllegalArgumentException | Don't know how to create ISeq from: java.lang.Long"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(seq (eduction (map inc) 5))"),
+        "java.lang.IllegalArgumentException | Don't know how to create ISeq from: java.lang.Long"
+    );
+    // One-arg `sequence` nil-puns; transducers stop the walk.
+    assert_eq!(run_last(&mut eval, "(sequence nil)"), "()");
+    assert_eq!(run_last(&mut eval, "(sequence [1 2])"), "(1 2)");
+    assert_eq!(run_last(&mut eval, "(sequence (take 2) [1 2 3])"), "(1 2)");
+    assert_eq!(
+        run_last(&mut eval, "(sequence (halt-when odd?) [1 2 3])"),
+        "()"
+    );
+    // Eduction values: opaque print (identity, like `Reduced`),
+    // identity equality, usable as map keys.
+    assert!(run_last(&mut eval, "(eduction (map inc) [1])").contains("clojure.core.Eduction@"),);
+    assert_eq!(
+        run_last(&mut eval, "(let [e (eduction (map inc) [1])] (= e e))"),
+        "true"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [e (eduction (map inc) [1])] (get {e 1} e))"
+        ),
+        "1"
+    );
+    // Zero-arg `eduction` is a valid (empty) value.
+    assert_eq!(run_last(&mut eval, "(some? (eduction))"), "true");
+    // Editable `to` reduces through `conj!`/`persistent!` (the
+    // transient-of-transient throw above proves the `(transient
+    // to)` call runs even for transient input, like the JVM).
+    assert_eq!(run_last(&mut eval, "(into [1] (map inc) [2])"), "[1 3]");
+    assert_eq!(
+        run_last(&mut eval, "(into {} (map (fn [[k v]] [k (inc v)])) {:a 1})"),
+        "{:a 2}"
     );
 }

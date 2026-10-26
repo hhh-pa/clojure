@@ -196,6 +196,12 @@ pub(crate) enum Thunk {
         smap: Value,
         input: Value,
     },
+    /// T1200 D1: a transducer stepping fn over lockstep sources
+    /// (the `TransformerIterator` role for `sequence`/eduction seq).
+    Sequence {
+        step: Value,
+        srcs: Vec<Value>,
+    },
 }
 
 /// A forced step: empty, or a chunk plus its tail value.
@@ -537,6 +543,12 @@ fn step_unit_extension(eval: &mut Evaluator, v: &Value) -> Result<StepUnit, Sign
     }
     if let Some(sv) = as_subvector(v) {
         return step_subvector_unit(sv);
+    }
+    // T1200 D1: walking an eduction steps its lazy transform (same
+    // hook as `seq`, which see for the arm coupling).
+    if let Some((xform, coll)) = crate::xform::Eduction::parts(v) {
+        let s = seq_eduction(eval, xform, coll)?;
+        return step_unit(eval, &s);
     }
     Err(eval.throw(iseq_err(v)))
 }
@@ -931,6 +943,7 @@ fn step_thunk_rest(eval: &mut Evaluator, thunk: Thunk) -> Result<Forced, Signal>
             started,
         } => step_reductions(eval, &f, acc, has_init, input, started),
         Thunk::Replace { smap, input } => step_replace(eval, &smap, input),
+        Thunk::Sequence { step, srcs } => step_sequence(eval, &step, srcs),
         // All other variants are handled by `step_thunk`/`step_thunk_mid`
         // (the single caller partitions the variants).
         _ => unreachable!("thunk partition"),
@@ -1870,6 +1883,69 @@ fn step_dedupe(
     }
 }
 
+/// T1200 D1 `sequence`: pull lockstep heads through the stepping
+/// fn into `CHUNK_SIZE` chunks (the `TransformerIterator` role for
+/// `sequence` and eduction seq). Each item steps against a fresh
+/// empty vector, so every item of the returned vector is a new
+/// output (0 for dropped inputs, 2 for `interpose`, N for
+/// `mapcat`). A `Reduced` step stops the walk: vector inners adopt
+/// their items (the `take` boundary item), anything else (the
+/// `halt-when` sentinel) ends silently.
+fn step_sequence(
+    eval: &mut Evaluator,
+    step: &Value,
+    mut srcs: Vec<Value>,
+) -> Result<Forced, Signal> {
+    let mut out = Vec::new();
+    let mut stopped = false;
+    while out.len() < CHUNK_SIZE && !stopped {
+        let mut call = Vec::with_capacity(srcs.len() + 1);
+        call.push(Value::Vector(Vector::from_vec(Vec::new())));
+        let mut tails = Vec::with_capacity(srcs.len());
+        let mut exhausted = false;
+        for src in &srcs {
+            match step_head(eval, src)? {
+                Some((head, tail)) => {
+                    call.push(head);
+                    tails.push(tail);
+                }
+                None => {
+                    exhausted = true;
+                    break;
+                }
+            }
+        }
+        if exhausted {
+            break;
+        }
+        srcs = tails;
+        let stepped = eval.call(step, &call)?;
+        if let Some(inner) = crate::core::as_reduced(&stepped).cloned() {
+            stopped = true;
+            if let Value::Vector(v) = &inner {
+                out.extend(v.iter().cloned());
+            }
+        } else if let Value::Vector(v) = &stepped {
+            out.extend(v.iter().cloned());
+        }
+    }
+    if out.is_empty() {
+        return Ok(Forced::Empty);
+    }
+    let tail = if stopped {
+        empty_list_value()
+    } else {
+        PendingSeq::pending(Thunk::Sequence {
+            step: step.clone(),
+            srcs,
+        })
+    };
+    Ok(Forced::Chunk {
+        items: Arc::from(out),
+        tail,
+    })
+}
+
 /// `keep`: whole units, dropping nil results.
 fn step_keep(eval: &mut Evaluator, f: &Value, mut input: Value) -> Result<Forced, Signal> {
     loop {
@@ -2165,6 +2241,55 @@ fn seq_value_extension(eval: &mut Evaluator, v: &Value) -> Result<Value, Signal>
     }
     if let Some(sv) = as_subvector(v) {
         return Ok(seq_subvector(sv));
+    }
+    // T1200 D1: eductions seq through the stepping fn per use (like
+    // `sequence`; bad collections take the ISeq error via the walk).
+    if let Some((xform, coll)) = crate::xform::Eduction::parts(v) {
+        return seq_eduction(eval, xform, coll);
+    }
+    Err(eval.throw(iseq_err(v)))
+}
+
+/// `seq` of an eduction value: the lazy transform over its
+/// collection (fresh application per `seq`, like the JVM's
+/// `TransformerIterator`).
+fn seq_eduction(eval: &mut Evaluator, xform: &Value, coll: &Value) -> Result<Value, Signal> {
+    check_seqable(eval, coll)?;
+    let step = crate::xform::apply_xf(eval, xform, crate::ns::deref_core(eval, "conj"))
+        .map_err(|e| eval.throw(e))?;
+    Ok(sequence_thunk(step, vec![coll.clone()]))
+}
+
+/// Whether a value can back a lazy transform *without forcing it*:
+/// the strict seqables plus every lazy/extension shape
+/// `seq_value_extension` accepts (the JVM's `RT.iter` validates
+/// eagerly, before any realization — oracle `err-seq-nonseq`).
+/// Kept next to that dispatch so new arms update both.
+pub(crate) fn check_seqable(eval: &mut Evaluator, v: &Value) -> Result<(), Signal> {
+    let ok = match v {
+        Value::Nil
+        | Value::List(_)
+        | Value::Vector(_)
+        | Value::MapEntry { .. }
+        | Value::Map(_)
+        | Value::Set(_)
+        | Value::Str(_) => true,
+        Value::Extension(_) => {
+            as_pending(v).is_some()
+                || as_realized(v).is_some()
+                || as_range(v).is_some()
+                || as_repeat(v).is_some()
+                || as_cycle(v).is_some()
+                || is_always_seq(v)
+                || as_keys(v).is_some()
+                || as_vals(v).is_some()
+                || as_subvector(v).is_some()
+                || crate::xform::Eduction::parts(v).is_some()
+        }
+        _ => false,
+    };
+    if ok {
+        return Ok(());
     }
     Err(eval.throw(iseq_err(v)))
 }
@@ -3138,6 +3263,12 @@ pub(crate) fn distinct_thunk(input: Value) -> Value {
 /// A `Thunk::Dedupe` tail value (no last item yet).
 pub(crate) fn dedupe_thunk(input: Value) -> Value {
     pending_value(Thunk::Dedupe { last: None, input })
+}
+
+/// T1200 D1: a `Thunk::Sequence` tail value (stepping fn over
+/// lockstep sources, for `sequence` and eduction seq).
+pub(crate) fn sequence_thunk(step: Value, srcs: Vec<Value>) -> Value {
+    pending_value(Thunk::Sequence { step, srcs })
 }
 
 /// A `Thunk::Keep` tail value.

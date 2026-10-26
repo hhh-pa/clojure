@@ -4,7 +4,7 @@ The complete inventory of `clojure.core` in this port: every var,
 its conformance state, and — for exclusions — why it is excluded.
 If a var is not listed here, that is a file bug, not a silent gap.
 
-- **420 vars: 336 implemented, 19 divergent, 65 out of scope,
+- **422 vars: 353 implemented, 11 divergent, 58 out of scope,
   0 planned.** The port reports Clojure `1.13.0-alpha9`
   (`clojure-version`).
 - **Status meanings.** `implemented` — resolves in the booted core
@@ -263,7 +263,7 @@ Persistent collections: lookup, update, transients, sets, maps.
 | `pop` | implemented | coll.rs peek_pop_rows; subvec 2→1 stays SubVector per APersistentVector.java pop() |
 | `subvec` | implemented | coll.rs subvec_rows (s==e→EMPTY, nesting, invoke arity) |
 | `replace` | implemented | coll.rs replace_rows (vector/subvec stay, else LazySeq) |
-| `into` | divergent | plain into only; xform arity out of scope |
+| `into` | implemented | coll.rs into_rows + 3-arg xform (T1200 transduce_rows; probes xform.out) |
 | `distinct?` | implemented | coll.rs distinct_rows |
 | `empty` | implemented | coll.rs empty_fn_rows (class-sticky, meta kept, seqs→(), else nil) |
 | `key` | implemented | T1192 FX2 entry-only (control.rs key_val + map_entry.rs key_and_val; non-entries fail the Map$Entry CCE) |
@@ -273,18 +273,18 @@ Persistent collections: lookup, update, transients, sets, maps.
 
 ## Seqs (S5D, chunked-lazy per C4)
 
-Lazy sequence operations (chunked like the JVM); transducer arities are out of scope.
+Lazy sequence operations (chunked like the JVM); transducer arities implemented (T1200).
 
 | var | status | notes |
 | --- | --- | --- |
-| `map` | divergent | seq arities (corpus 02); 1-arg raises ArityException, xform OUT (D13) |
-| `filter` | divergent | seq arities (corpus 02); 1-arg raises ArityException, xform OUT (D13) |
-| `remove` | divergent | seq arities (corpus 02); 1-arg raises ArityException, xform OUT (D13) |
-| `reduce` | implemented | corpus 02/08; reduced short-circuit, f/0 empty rule |
-| `take` | implemented | rust str::str_lazy_content_hash + corpus 02/17 (ceil rule) |
-| `drop` | implemented | rust control::hash_values + corpus 17; IDrop eager per pins 7i |
-| `take-while` | implemented | tests/seqs.rs while_rows (prefix shape) |
-| `drop-while` | implemented | tests/seqs.rs while_rows (suffix shape) |
+| `map` | implemented | seq arities (corpus 02) + 1-arg transducer (T1200 xform_rows; probes xform.out) |
+| `filter` | implemented | seq arities (corpus 02) + 1-arg transducer (T1200 xform_rows; probes xform.out) |
+| `remove` | implemented | seq arities (corpus 02) + 1-arg transducer (T1200 xform_rows; probes xform.out) |
+| `reduce` | implemented | corpus 02/08; reduced short-circuit, f/0 empty rule + eductions (T1200; 2-arg CCE) |
+| `take` | implemented | rust str::str_lazy_content_hash + corpus 02/17 (ceil rule) + 1-arg transducer (T1200) |
+| `drop` | implemented | rust control::hash_values + corpus 17; IDrop eager per pins 7i + 1-arg transducer (T1200) |
+| `take-while` | implemented | tests/seqs.rs while_rows (prefix shape) + 1-arg transducer (T1200) |
+| `drop-while` | implemented | tests/seqs.rs while_rows (suffix shape) + 1-arg transducer (T1200) |
 | `take-last` | implemented | corpus 02/05/19; kind-preserving, eager n (pins 7i) |
 | `drop-last` | implemented | rust str::str_lazy_content_hash + corpus 02/05/19; map-thunk shape |
 | `split-at` | implemented | corpus 02; [take_thunk, drop_value] pair |
@@ -292,7 +292,7 @@ Lazy sequence operations (chunked like the JVM); transducer arities are out of s
 | `concat` | implemented | eager (S5D makes it lazy); variadic |
 | `cycle` | implemented | rust control::hash_values + corpus 02/04; Cycle class |
 | `interleave` | implemented | corpus 02/04/18; () on 0-arg (pins 7i) |
-| `interpose` | implemented | corpus 02/04 |
+| `interpose` | implemented | corpus 02/04 + 1-arg transducer (T1200) |
 | `repeat` | implemented | rust coll::count_rows + corpus 02/03; strict n, Repeat IDrop (pins) |
 | `repeatedly` | implemented | corpus 02/03; (take n (repeatedly f)), lazy n ceil (pins) |
 | `iterate` | implemented | rust control::hash_values + corpus 02/04/18; lazy more (pins 7i) |
@@ -301,16 +301,16 @@ Lazy sequence operations (chunked like the JVM); transducer arities are out of s
 | `rseq` | implemented | T1192 FX2 map_entry.rs rseq_rows (RSeq kind, Reversible cast, rev NPE) |
 | `sort` | implemented | rust str::str_seq_contents + corpus 02/10; ArraySeq, AFunction.compare (pins) |
 | `sort-by` | implemented | corpus 02/10; direct (comp (kf x) (kf y)) (pins) |
-| `mapcat` | implemented | corpus 02/08; concat-of-map composite |
-| `keep` | divergent | seq arities (corpus 02); 1-arg raises ArityException, xform OUT (D13) |
-| `keep-indexed` | divergent | seq arities (corpus 02); 1-arg raises ArityException, xform OUT (D13) |
-| `map-indexed` | implemented | corpus 02 |
-| `distinct` | divergent | seq arities (corpus 02); 0-arg raises ArityException, xform OUT (D13) |
-| `dedupe` | divergent | seq arities (corpus 02); 0-arg raises ArityException, xform OUT (D13) |
+| `mapcat` | implemented | corpus 02/08; concat-of-map composite + 1-arg transducer (T1200) |
+| `keep` | implemented | seq arities (corpus 02) + 1-arg transducer (T1200 xform_rows; probes xform.out) |
+| `keep-indexed` | implemented | seq arities (corpus 02) + 1-arg transducer (T1200 xform_rows; probes xform.out) |
+| `map-indexed` | implemented | corpus 02 + 1-arg transducer (T1200) |
+| `distinct` | implemented | seq arities (corpus 02) + 0-arg transducer (T1200 xform_rows; probes xform.out) |
+| `dedupe` | implemented | seq arities (corpus 02) + 0-arg transducer (T1200 xform_rows; probes xform.out) |
 | `partition` | implemented | corpus 02/06/18; eager step validate per window (pins 7i-partition) |
 | `partition-all` | implemented | corpus 06/18; trailing partial kept |
 | `partition-by` | implemented | corpus 02/06; cons+take-while-tail runs |
-| `take-nth` | implemented | corpus 02/06; seq+first+(drop n s) per force, 0 replays (pins) |
+| `take-nth` | implemented | corpus 02/06; seq+first+(drop n s) per force, 0 replays (pins) + 1-arg transducer (T1200) |
 | `butlast` | implemented | corpus 02/05; eager ChunkedSeq-or-nil (pins 7i) |
 | `dorun` | implemented | corpus 02; force_n walk, nil |
 | `doall` | implemented | rust str::str_lazy_content_hash + corpus 02; returns input |
@@ -327,6 +327,16 @@ Lazy sequence operations (chunked like the JVM); transducer arities are out of s
 | `nthnext` | implemented | T1192 FX2 map_entry.rs seq_fn_rows (`(seq (nthrest coll n))`) |
 | `reduced` | implemented | tests/seqs.rs reduced_rows (early-exit wrap) |
 | `reduced?` | implemented | tests/seqs.rs reduced_rows |
+| `sequence` | implemented | tests/seqs.rs sequence_eduction_rows (T1200; probes xform.out) |
+| `transduce` | implemented | tests/seqs.rs transduce_rows (T1200; probes xform.out) |
+| `eduction` | implemented | tests/seqs.rs sequence_eduction_rows (T1200; Eduction value; probes xform.out) |
+| `completing` | implemented | tests/seqs.rs completing_rows (T1200; probes xform.out) |
+| `ensure-reduced` | implemented | tests/seqs.rs reduced_helpers_rows (T1200) |
+| `unreduced` | implemented | tests/seqs.rs reduced_helpers_rows (T1200) |
+| `preserving-reduced` | implemented | private (not referred); tests/seqs.rs reduced_helpers_rows (T1200; probes xform.out) |
+| `halt-when` | implemented | tests/seqs.rs halt_when_rows (T1200; `::halt` contract; probes xform.out) |
+| `cat` | implemented | tests/seqs.rs xform_builders_composite_rows (T1200; probes xform.out) |
+| `random-sample` | out-of-scope | needs RNG slice (builders compose `filter` over `rand`) |
 
 ## Higher-order (S5D)
 
@@ -452,14 +462,6 @@ Significant vars with no port slice, grouped below by area with the reason. (Two
 | var | status | notes |
 | --- | --- | --- |
 | `clone-thread-bindings` | out-of-scope | does not exist on the JVM (probe37 `clone-missing`) |
-| `sequence` | out-of-scope | transducers: no slice |
-| `transduce` | out-of-scope | transducers: no slice |
-| `eduction` | out-of-scope | transducers: no slice |
-| `completing` | out-of-scope | transducers: no slice |
-| `ensure-reduced` | out-of-scope | transducers: no slice |
-| `unreduced` | out-of-scope | transducers: no slice |
-| `preserving-reduced` | out-of-scope | transducers: no slice |
-| `halt-when` | out-of-scope | transducers: no slice |
 | `sorted-map` | out-of-scope | sorted collections: no slice |
 | `sorted-set` | out-of-scope | sorted collections: no slice |
 | `sorted-map-by` | out-of-scope | sorted collections: no slice |

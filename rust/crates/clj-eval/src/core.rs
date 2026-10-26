@@ -1560,7 +1560,7 @@ pub struct Reduced {
 static REDUCED_ID: AtomicU64 = AtomicU64::new(1);
 
 impl Reduced {
-    fn wrap(value: Value) -> Value {
+    pub(crate) fn wrap(value: Value) -> Value {
         Value::Extension(Arc::new(Self {
             id: REDUCED_ID.fetch_add(1, Ordering::Relaxed),
             value,
