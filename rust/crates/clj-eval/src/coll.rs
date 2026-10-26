@@ -13,22 +13,26 @@
 //! transient fast paths are plain loops (same values and errors —
 //! transients never escape).
 
+use std::cmp::Ordering;
 use std::collections::HashSet;
 use std::sync::Arc;
 
 use clj_value::{
-    ConsValue, List, Map, SubVectorValue, ThrowClass, Transient, TransientError, TransientKind,
-    TransientMap, TransientSet, TransientVector, Value, Vector, new_map, new_set,
+    ConsValue, List, Map, Set, SortSpec, SubVectorValue, ThrowClass, Transient, TransientError,
+    TransientKind, TransientMap, TransientSet, TransientVector, Value, Vector, new_map, new_set,
 };
 
-use crate::core::{cce_err, cce_message, is_counted, nth_index};
+use crate::core::{cce_err, cce_message, is_counted, jvm_compare, nth_index};
 use crate::error::{NativeError, jvm_class_of, simple_name_of};
 use crate::eval::Evaluator;
+use crate::ext::as_native;
 use crate::lazy::{
-    StepUnit, as_range, as_realized, as_repeat, as_subvector, collect_all, equiv_vals, first_value,
-    is_seq_value, is_seqable, next_value, replace_thunk, seq_value, step_unit,
+    StepUnit, as_range, as_realized, as_repeat, as_subvector, collect_all, empty_list_value,
+    equiv_vals, first_value, is_seq_value, is_seqable, next_value, realized_value, replace_thunk,
+    seq_value, step_unit,
 };
 use crate::ns::{NativeFnPtr, check_arity, signal_to_native, str_of};
+use crate::seqs::{afunction_order, call_checked};
 use crate::vars::check_min_arity;
 
 /// Whether the value is a transient buffer.
@@ -75,12 +79,18 @@ fn java_simple_name(v: &Value) -> String {
 /// Present-or-missing lookup mirroring `RT.get` exactly (`Some`
 /// even for present-nil; `None` ⟺ `not-found`). Vector-family keys
 /// truncate through `i32` (`intValue` wraps, like the JVM).
-pub(crate) fn lookup_present(coll: &Value, key: &Value) -> Result<Option<Value>, NativeError> {
+pub(crate) fn lookup_present(
+    eval: &mut Evaluator,
+    coll: &Value,
+    key: &Value,
+) -> Result<Option<Value>, NativeError> {
     match coll {
         Value::Nil => Ok(None),
+        Value::Map(m) if m.is_sorted() => sorted_lookup_map(eval, m, key),
         Value::Map(m) => Ok(m.get(key).cloned()),
         Value::Vector(x) => Ok(lookup_vector_slot(x, key)),
         Value::MapEntry { key: ek, val: ev } => Ok(lookup_entry_slot(ek, ev, key)),
+        Value::Set(s) if s.is_sorted() => Ok(sorted_lookup_set(eval, s, key)?),
         Value::Set(s) => Ok(s.get(key).cloned()),
         Value::Str(s) => Ok(lookup_str_slot(s, key)),
         Value::Transient(t) => transient_get(t, key),
@@ -208,9 +218,16 @@ fn find_entry_fallback(coll: &Value, key: &Value) -> Result<Option<(Value, Value
     Err(find_unsupported(coll))
 }
 
-pub(crate) fn find_entry(coll: &Value, key: &Value) -> Result<Option<(Value, Value)>, NativeError> {
+pub(crate) fn find_entry(
+    eval: &mut Evaluator,
+    coll: &Value,
+    key: &Value,
+) -> Result<Option<(Value, Value)>, NativeError> {
     match coll {
         Value::Nil => Ok(None),
+        Value::Map(m) if m.is_sorted() => {
+            Ok(sorted_lookup_map(eval, m, key)?.map(|v| (key.clone(), v)))
+        }
         Value::Map(m) => Ok(m.get(key).map(|v| (key.clone(), v.clone()))),
         Value::Vector(x) => Ok(find_entry_vector(x, key)),
         Value::MapEntry { key: ek, val: ev } => Ok(int_key(key).and_then(|i| {
@@ -300,6 +317,19 @@ fn pair_err() -> NativeError {
 
 /// Conj onto a persistent map (`APersistentMap.cons`).
 fn conj_map(eval: &mut Evaluator, m: &Map, x: &Value) -> Result<Value, NativeError> {
+    if m.is_sorted() {
+        return match map_conj_plan(eval, x)? {
+            MapConjPlan::Nil => Ok(Value::Map(m.clone())),
+            MapConjPlan::Pair(k, v) => Ok(Value::Map(sorted_assoc_map(eval, m, k, v)?)),
+            MapConjPlan::Entries(entries) => {
+                let mut out = m.clone();
+                for (k, v) in entries {
+                    out = sorted_assoc_map(eval, &out, k, v)?;
+                }
+                Ok(Value::Map(out))
+            }
+        };
+    }
     match map_conj_plan(eval, x)? {
         MapConjPlan::Nil => Ok(Value::Map(m.clone())),
         MapConjPlan::Pair(k, v) => Ok(Value::Map(m.clone().insert(k, v))),
@@ -341,6 +371,7 @@ fn conj_one(eval: &mut Evaluator, coll: &Value, x: Value) -> Result<Value, Nativ
             Ok(Value::Vector(tmp.push_back(x)))
         }
         Value::Map(m) => conj_map(eval, m, &x),
+        Value::Set(s) if s.is_sorted() => Ok(Value::Set(sorted_conj_set(eval, s, x)?)),
         Value::Set(s) => Ok(Value::Set(s.clone().insert(x))),
         _ => {
             if let Some(sv) = as_subvector(coll) {
@@ -403,10 +434,12 @@ fn assoc_subvector(sv: &SubVectorValue, k: &Value, v: Value) -> Result<Value, Na
     )))
 }
 
-/// `RT.assoc` one triple (`assoc`/`update`/`merge-with` share this).
-fn assoc3(coll: &Value, k: &Value, v: Value) -> Result<Value, NativeError> {
+/// `RT.assoc` one triple (`assoc`/`update`/`merge-with` share this;
+/// sorted maps position by comparator, FT6).
+fn assoc3(eval: &mut Evaluator, coll: &Value, k: &Value, v: Value) -> Result<Value, NativeError> {
     match coll {
         Value::Nil => Ok(Value::Map(new_map().insert(k.clone(), v))),
+        Value::Map(m) if m.is_sorted() => Ok(Value::Map(sorted_assoc_map(eval, m, k.clone(), v)?)),
         Value::Map(m) => Ok(Value::Map(m.clone().insert(k.clone(), v))),
         Value::Vector(x) => {
             let Some(i) = int_key(k) else {
@@ -543,12 +576,12 @@ fn merge_kv(
     v: Value,
     f: &Value,
 ) -> Result<Value, NativeError> {
-    match lookup_present(m, &k)? {
+    match lookup_present(eval, m, &k)? {
         Some(mv) => {
             let combined = eval.call(f, &[mv, v]).map_err(signal_to_native)?;
-            assoc3(m, &k, combined)
+            assoc3(eval, m, &k, combined)
         }
-        None => assoc3(m, &k, v),
+        None => assoc3(eval, m, &k, v),
     }
 }
 
@@ -677,17 +710,17 @@ fn update_in_up(
     args: &[Value],
 ) -> Result<Value, NativeError> {
     if !matches!(ks, Value::Nil) {
-        let inner = lookup_present(m, k)?.unwrap_or(Value::Nil);
+        let inner = lookup_present(eval, m, k)?.unwrap_or(Value::Nil);
         let (k2, ks2) = seq_first_next(eval, ks)?;
         let updated = update_in_up(eval, &inner, &k2, &ks2, f, args)?;
-        assoc3(m, k, updated)
+        assoc3(eval, m, k, updated)
     } else {
-        let old = lookup_present(m, k)?.unwrap_or(Value::Nil);
+        let old = lookup_present(eval, m, k)?.unwrap_or(Value::Nil);
         let mut call_args = Vec::with_capacity(args.len() + 1);
         call_args.push(old);
         call_args.extend(args.iter().cloned());
         let new = eval.call(f, &call_args).map_err(signal_to_native)?;
-        assoc3(m, k, new)
+        assoc3(eval, m, k, new)
     }
 }
 
@@ -700,12 +733,12 @@ fn assoc_in_up(
     v: &Value,
 ) -> Result<Value, NativeError> {
     if !matches!(ks, Value::Nil) {
-        let inner = lookup_present(m, k)?.unwrap_or(Value::Nil);
+        let inner = lookup_present(eval, m, k)?.unwrap_or(Value::Nil);
         let (k2, ks2) = seq_first_next(eval, ks)?;
         let updated = assoc_in_up(eval, &inner, &k2, &ks2, v)?;
-        assoc3(m, k, updated)
+        assoc3(eval, m, k, updated)
     } else {
-        assoc3(m, k, v.clone())
+        assoc3(eval, m, k, v.clone())
     }
 }
 
@@ -745,10 +778,15 @@ fn native_empty(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeEr
         Value::Map(m) => Value::Map(
             new_map()
                 .with_hashy(m.is_hashy())
-                .with_meta(m.meta().cloned()),
+                .with_meta(m.meta().cloned())
+                .with_sort(m.sort_spec().cloned()),
         ),
         Value::Vector(v) => Value::Vector(Vector::new_sync().with_meta(v.meta().cloned())),
-        Value::Set(s) => Value::Set(new_set().with_meta(s.meta().cloned())),
+        Value::Set(s) => Value::Set(
+            new_set()
+                .with_meta(s.meta().cloned())
+                .with_sort(s.sort_spec().cloned()),
+        ),
         v if as_subvector(v).is_some() => {
             let meta = as_subvector(v).and_then(|sv| sv.meta().cloned());
             Value::Vector(Vector::new_sync().with_meta(meta))
@@ -758,7 +796,7 @@ fn native_empty(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeEr
     })
 }
 
-fn native_disj(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+fn native_disj(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     if args.is_empty() {
         return Err(NativeError::arity("clojure.core/disj", 0));
     }
@@ -767,6 +805,13 @@ fn native_disj(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErr
     }
     match &args[0] {
         Value::Nil => Ok(Value::Nil),
+        Value::Set(s) if s.is_sorted() => {
+            let mut out = s.clone();
+            for k in &args[1..] {
+                out = sorted_without_set(eval, &out, k)?;
+            }
+            Ok(Value::Set(out))
+        }
         Value::Set(s) => {
             let mut out = s.clone();
             for k in &args[1..] {
@@ -859,9 +904,9 @@ fn native_conj(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErro
     Ok(acc)
 }
 
-fn native_assoc(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+fn native_assoc(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_min_arity("clojure.core/assoc", args, 3)?;
-    let mut acc = assoc3(&args[0], &args[1], args[2].clone())?;
+    let mut acc = assoc3(eval, &args[0], &args[1], args[2].clone())?;
     for pair in args[3..].chunks(2) {
         if pair.len() != 2 {
             return Err(NativeError::new(
@@ -870,12 +915,12 @@ fn native_assoc(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeEr
                     .to_owned(),
             ));
         }
-        acc = assoc3(&acc, &pair[0], pair[1].clone())?;
+        acc = assoc3(eval, &acc, &pair[0], pair[1].clone())?;
     }
     Ok(acc)
 }
 
-fn native_dissoc(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+fn native_dissoc(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_min_arity("clojure.core/dissoc", args, 1)?;
     if args.len() == 1 {
         return Ok(args[0].clone());
@@ -886,6 +931,13 @@ fn native_dissoc(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeE
     let Value::Map(m) = &args[0] else {
         return Err(cce_err(&args[0], "clojure.lang.IPersistentMap"));
     };
+    if m.is_sorted() {
+        let mut out = m.clone();
+        for k in &args[1..] {
+            out = sorted_without_map(eval, &out, k)?;
+        }
+        return Ok(Value::Map(out));
+    }
     let mut out = m.clone();
     for k in &args[1..] {
         out = out.without(k);
@@ -893,9 +945,9 @@ fn native_dissoc(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeE
     Ok(Value::Map(out))
 }
 
-fn native_get(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+fn native_get(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/get", args, &[2, 3])?;
-    let found = lookup_present(&args[0], &args[1])?;
+    let found = lookup_present(eval, &args[0], &args[1])?;
     match found {
         Some(v) => Ok(v),
         None => Ok(args.get(2).cloned().unwrap_or(Value::Nil)),
@@ -932,11 +984,14 @@ fn contains_fallback(coll: &Value, key: &Value) -> Result<Value, NativeError> {
     ))
 }
 
-fn native_contains(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+fn native_contains(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/contains?", args, &[2])?;
     let (coll, key) = (&args[0], &args[1]);
     match coll {
         Value::Nil => Ok(Value::Bool(false)),
+        Value::Map(m) if m.is_sorted() => {
+            Ok(Value::Bool(sorted_lookup_map(eval, m, key)?.is_some()))
+        }
         Value::Map(m) => Ok(Value::Bool(m.contains_key(key))),
         Value::Vector(x) => Ok(Value::Bool(contains_vector(x, key))),
         // Entries contain integer keys 0 and 1 (Oracle FX2 `contains`).
@@ -945,6 +1000,7 @@ fn native_contains(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nativ
                 usize::try_from(i as i32).is_ok_and(|idx| idx < 2)
             })))
         }
+        Value::Set(s) if s.is_sorted() => Ok(Value::Bool(sorted_contains_set(eval, s, key)?)),
         Value::Set(s) => Ok(Value::Bool(s.contains(key))),
         Value::Str(s) => contains_str(s, coll, key),
         Value::Transient(t) => Ok(Value::Bool(transient_get(t, key)?.is_some())),
@@ -952,9 +1008,9 @@ fn native_contains(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nativ
     }
 }
 
-fn native_find(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+fn native_find(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/find", args, &[2])?;
-    match find_entry(&args[0], &args[1])? {
+    match find_entry(eval, &args[0], &args[1])? {
         // `find` answers real entries (Oracle FX2 `find1class`,
         // `class-f`, `class-fv`).
         Some((k, v)) => Ok(clj_value::map_entry(k, v)),
@@ -1164,7 +1220,7 @@ fn native_select_keys(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nat
             break;
         }
         let k = first_value(eval, &cur).map_err(signal_to_native)?;
-        if let Some(v) = lookup_present(&args[0], &k)? {
+        if let Some(v) = lookup_present(eval, &args[0], &k)? {
             ret = ret.insert(k, v);
         }
         cur = next_value(eval, &cur).map_err(signal_to_native)?;
@@ -1177,12 +1233,12 @@ fn native_select_keys(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nat
 
 fn native_update(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_min_arity("clojure.core/update", args, 3)?;
-    let old = lookup_present(&args[0], &args[1])?.unwrap_or(Value::Nil);
+    let old = lookup_present(eval, &args[0], &args[1])?.unwrap_or(Value::Nil);
     let mut call_args = Vec::with_capacity(args.len() - 2);
     call_args.push(old);
     call_args.extend(args[3..].iter().cloned());
     let new = eval.call(&args[2], &call_args).map_err(signal_to_native)?;
-    assoc3(&args[0], &args[1], new)
+    assoc3(eval, &args[0], &args[1], new)
 }
 
 fn native_update_in(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
@@ -1206,7 +1262,7 @@ fn native_get_in(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeEr
             return Ok(cur);
         }
         let k = first_value(eval, &ks).map_err(signal_to_native)?;
-        match lookup_present(&cur, &k)? {
+        match lookup_present(eval, &cur, &k)? {
             Some(v) => cur = v,
             None => {
                 return Ok(args.get(2).cloned().unwrap_or(Value::Nil));
@@ -1260,10 +1316,18 @@ fn native_transient(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nati
             TransientKind::Vector(TransientVector::from_vector(x)),
             x.meta().cloned(),
         ))),
+        // Sorted maps/sets are not editable on the JVM either
+        // (probe `trans-sorted`).
+        Value::Map(m) if m.is_sorted() => {
+            Err(cce_err(&args[0], "clojure.lang.IEditableCollection"))
+        }
         Value::Map(m) => Ok(Value::Transient(Transient::with_meta(
             TransientKind::Map(TransientMap::from_map(m)),
             m.meta().cloned(),
         ))),
+        Value::Set(s) if s.is_sorted() => {
+            Err(cce_err(&args[0], "clojure.lang.IEditableCollection"))
+        }
         Value::Set(s) => Ok(Value::Transient(Transient::with_meta(
             TransientKind::Set(TransientSet::from_set(s)),
             s.meta().cloned(),
@@ -1632,7 +1696,7 @@ fn native_subvec(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeEr
     subvec3(&args[0], &args[1], &args[2])
 }
 
-fn native_replace(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+fn native_replace(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/replace", args, &[2])?;
     let (smap, coll) = (&args[0], &args[1]);
     if !(matches!(coll, Value::Vector(_) | Value::MapEntry { .. }) || as_subvector(coll).is_some())
@@ -1647,9 +1711,9 @@ fn native_replace(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, Native
     let mut acc = coll.clone();
     for i in 0..n {
         let k = Value::Int(i as i64);
-        let x = lookup_present(&acc, &k)?.unwrap_or(Value::Nil);
-        if let Some((_, v)) = find_entry(smap, &x)? {
-            acc = assoc3(&acc, &k, v)?;
+        let x = lookup_present(eval, &acc, &k)?.unwrap_or(Value::Nil);
+        if let Some((_, v)) = find_entry(eval, smap, &x)? {
+            acc = assoc3(eval, &acc, &k, v)?;
         }
     }
     Ok(acc)
@@ -1728,6 +1792,453 @@ fn native_val(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErro
 
 /// The S5D collection natives installed into `clojure.core` by
 /// [`boot`](crate::ns::boot).
+/// Sorted collections (FT6, issue #31): maps and sets carry
+/// their order in the `keys`/`members` sidecar (`SortSpec` on the
+/// value), so printing, seqs, equality, hashing, count, and
+/// metadata need no sorted branch. Only order-sensitive
+/// operations position through the helpers below.
+/// Compare two keys under a sort order: natural order is
+/// `jvm_compare`; a custom comparator is called as `(cmp a b)`
+/// with `sort-by` number/boolean semantics.
+fn compare_sort_keys(
+    eval: &mut Evaluator,
+    spec: &SortSpec,
+    a: &Value,
+    b: &Value,
+) -> Result<Ordering, NativeError> {
+    match spec {
+        SortSpec::Natural => jvm_compare(a, b),
+        SortSpec::Custom(f) => {
+            let r = call_checked(eval, f, &[a.clone(), b.clone()])?;
+            afunction_order(r, || call_checked(eval, f, &[b.clone(), a.clone()]))
+        }
+    }
+}
+
+/// Position of `k` in sorted `keys`: the found index, or the
+/// insertion point that keeps the order.
+enum SortPos {
+    Found(usize),
+    Insert(usize),
+}
+
+fn sort_position(
+    eval: &mut Evaluator,
+    spec: &SortSpec,
+    keys: &[Value],
+    k: &Value,
+) -> Result<SortPos, NativeError> {
+    let mut lo = 0usize;
+    let mut hi = keys.len();
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        match compare_sort_keys(eval, spec, &keys[mid], k)? {
+            Ordering::Less => lo = mid + 1,
+            Ordering::Greater => hi = mid,
+            Ordering::Equal => return Ok(SortPos::Found(mid)),
+        }
+    }
+    Ok(SortPos::Insert(lo))
+}
+
+/// Sorted `assoc`: a compare-0 hit replaces the value but keeps
+/// the original key object (probe `sorted-keyobj`); a miss
+/// inserts at the sort position.
+fn sorted_assoc_map(eval: &mut Evaluator, m: &Map, k: Value, v: Value) -> Result<Map, NativeError> {
+    let spec = m
+        .sort_spec()
+        .cloned()
+        .expect("sorted assoc needs a sort order");
+    let mut entries: Vec<(Value, Value)> = m.iter().map(|(a, b)| (a.clone(), b.clone())).collect();
+    match sort_position(eval, &spec, m.ordered_keys(), &k)? {
+        SortPos::Found(i) => entries[i].1 = v,
+        SortPos::Insert(i) => entries.insert(i, (k, v)),
+    }
+    Ok(m.clone().with_ordered_entries(entries))
+}
+
+/// Sorted `dissoc`: the found stored key drives the removal, so
+/// compare-0-but-unequal keys still drop.
+fn sorted_without_map(eval: &mut Evaluator, m: &Map, k: &Value) -> Result<Map, NativeError> {
+    let spec = m
+        .sort_spec()
+        .cloned()
+        .expect("sorted dissoc needs a sort order");
+    match sort_position(eval, &spec, m.ordered_keys(), k)? {
+        SortPos::Found(i) => {
+            let found = m.ordered_keys()[i].clone();
+            Ok(m.clone().without(&found))
+        }
+        SortPos::Insert(_) => Ok(m.clone()),
+    }
+}
+
+/// Sorted `get`: compare-0 search, then the stored entry.
+fn sorted_lookup_map(
+    eval: &mut Evaluator,
+    m: &Map,
+    k: &Value,
+) -> Result<Option<Value>, NativeError> {
+    let spec = m
+        .sort_spec()
+        .cloned()
+        .expect("sorted get needs a sort order");
+    match sort_position(eval, &spec, m.ordered_keys(), k)? {
+        SortPos::Found(i) => Ok(m.get(&m.ordered_keys()[i]).cloned()),
+        SortPos::Insert(_) => Ok(None),
+    }
+}
+
+/// Sorted `conj`: a compare-0 hit is a no-op (the member stays).
+fn sorted_conj_set(eval: &mut Evaluator, s: &Set, v: Value) -> Result<Set, NativeError> {
+    let spec = s
+        .sort_spec()
+        .cloned()
+        .expect("sorted conj needs a sort order");
+    match sort_position(eval, &spec, s.ordered_members(), &v)? {
+        SortPos::Found(_) => Ok(s.clone()),
+        SortPos::Insert(i) => {
+            let mut members = s.ordered_members().to_vec();
+            members.insert(i, v);
+            Ok(s.clone().with_ordered_members(members))
+        }
+    }
+}
+
+/// Sorted `disj` / `contains?` through the stored member.
+fn sorted_without_set(eval: &mut Evaluator, s: &Set, v: &Value) -> Result<Set, NativeError> {
+    let spec = s
+        .sort_spec()
+        .cloned()
+        .expect("sorted disj needs a sort order");
+    match sort_position(eval, &spec, s.ordered_members(), v)? {
+        SortPos::Found(i) => {
+            let found = s.ordered_members()[i].clone();
+            Ok(s.clone().without(&found))
+        }
+        SortPos::Insert(_) => Ok(s.clone()),
+    }
+}
+
+fn sorted_contains_set(eval: &mut Evaluator, s: &Set, v: &Value) -> Result<bool, NativeError> {
+    let spec = s
+        .sort_spec()
+        .cloned()
+        .expect("sorted contains needs a sort order");
+    match sort_position(eval, &spec, s.ordered_members(), v)? {
+        SortPos::Found(_) => Ok(true),
+        SortPos::Insert(_) => Ok(false),
+    }
+}
+
+/// Sorted `get` on sets: the stored member, like `Set::get`.
+fn sorted_lookup_set(
+    eval: &mut Evaluator,
+    s: &Set,
+    v: &Value,
+) -> Result<Option<Value>, NativeError> {
+    let spec = s
+        .sort_spec()
+        .cloned()
+        .expect("sorted set get needs a sort order");
+    match sort_position(eval, &spec, s.ordered_members(), v)? {
+        SortPos::Found(i) => Ok(Some(s.ordered_members()[i].clone())),
+        SortPos::Insert(_) => Ok(None),
+    }
+}
+
+/// The odd-argument error for map constructors (JVM `RT.map` text).
+fn odd_keyvals_err(last: &Value) -> NativeError {
+    NativeError::new(
+        ThrowClass::IllegalArgumentException,
+        format!("No value supplied for key: {}", str_of(last)),
+    )
+}
+
+/// Build a sorted map from pairs under `spec` (duplicates collapse
+/// like repeated `assoc`).
+fn sorted_map_from(
+    eval: &mut Evaluator,
+    spec: SortSpec,
+    kvs: &[Value],
+) -> Result<Value, NativeError> {
+    if kvs.len() % 2 == 1 {
+        let last = kvs.last().unwrap_or(&Value::Nil);
+        return Err(odd_keyvals_err(last));
+    }
+    let mut out = new_map().with_sort(Some(spec));
+    for pair in kvs.chunks(2) {
+        out = sorted_assoc_map(eval, &out, pair[0].clone(), pair[1].clone())?;
+    }
+    Ok(Value::Map(out))
+}
+
+/// Build a sorted set from members under `spec`.
+fn sorted_set_from(
+    eval: &mut Evaluator,
+    spec: SortSpec,
+    members: &[Value],
+) -> Result<Value, NativeError> {
+    let mut out = new_set().with_sort(Some(spec));
+    for v in members {
+        out = sorted_conj_set(eval, &out, v.clone())?;
+    }
+    Ok(Value::Set(out))
+}
+
+fn native_sorted_map(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    sorted_map_from(eval, SortSpec::Natural, args)
+}
+
+fn native_sorted_map_by(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_min_arity("clojure.core/sorted-map-by", args, 1)?;
+    let spec = SortSpec::Custom(Box::new(args[0].clone()));
+    sorted_map_from(eval, spec, &args[1..])
+}
+
+fn native_sorted_set(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    sorted_set_from(eval, SortSpec::Natural, args)
+}
+
+fn native_sorted_set_by(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_min_arity("clojure.core/sorted-set-by", args, 1)?;
+    let spec = SortSpec::Custom(Box::new(args[0].clone()));
+    sorted_set_from(eval, spec, &args[1..])
+}
+
+/// A `subseq`/`rsubseq` source: ascending entry keys with their
+/// seq items (map entries for maps, members for sets).
+fn sorted_subseq_source(coll: &Value) -> Result<(Vec<Value>, Vec<Value>), NativeError> {
+    match coll {
+        Value::Map(m) if m.is_sorted() => {
+            let mut keys = Vec::with_capacity(m.ordered_keys().len());
+            let mut items = Vec::with_capacity(m.ordered_keys().len());
+            for (k, v) in m.iter() {
+                keys.push(k.clone());
+                items.push(clj_value::map_entry(k.clone(), v.clone()));
+            }
+            Ok((keys, items))
+        }
+        Value::Set(s) if s.is_sorted() => {
+            let members = s.ordered_members().to_vec();
+            Ok((members.clone(), members))
+        }
+        other => Err(cce_err(other, "clojure.lang.Sorted")),
+    }
+}
+
+/// Whether `test` is one of the two named core fns (identity, like
+/// the JVM's `#{> >=}` / `#{< <=}` sets — a lookalike never is).
+fn is_named_test(test: &Value, a: &str, b: &str) -> bool {
+    as_native(test).is_some_and(|n| n.display.as_ref() == a || n.display.as_ref() == b)
+}
+
+/// `mk-bound-fn`: `(test (compare entry-key bound) 0)`.
+fn bound_include(
+    eval: &mut Evaluator,
+    spec: &SortSpec,
+    test: &Value,
+    bound: &Value,
+    entry_key: &Value,
+) -> Result<bool, NativeError> {
+    let cmp = compare_sort_keys(eval, spec, entry_key, bound)?;
+    let n = match cmp {
+        Ordering::Less => -1,
+        Ordering::Equal => 0,
+        Ordering::Greater => 1,
+    };
+    Ok(call_checked(eval, test, &[Value::Int(n.into()), Value::Int(0)])?.is_truthy())
+}
+
+/// Take matching items from the head (`take-while include`).
+fn bound_take_while(
+    eval: &mut Evaluator,
+    spec: &SortSpec,
+    test: &Value,
+    bound: &Value,
+    keys: &[Value],
+    items: &[Value],
+) -> Result<Vec<Value>, NativeError> {
+    let mut out = Vec::new();
+    for (k, item) in keys.iter().zip(items.iter()) {
+        if !bound_include(eval, spec, test, bound, k)? {
+            break;
+        }
+        out.push(item.clone());
+    }
+    Ok(out)
+}
+
+/// `seqFrom`: the first index with `compare(entry, key) >= 0`
+/// (ascending) or `<= 0` (descending).
+fn seq_from(
+    eval: &mut Evaluator,
+    spec: &SortSpec,
+    keys: &[Value],
+    key: &Value,
+    ascending: bool,
+) -> Result<usize, NativeError> {
+    for (i, k) in keys.iter().enumerate() {
+        let cmp = compare_sort_keys(eval, spec, k, key)?;
+        let hit = if ascending {
+            cmp != Ordering::Less
+        } else {
+            cmp != Ordering::Greater
+        };
+        if hit {
+            return Ok(i);
+        }
+    }
+    Ok(keys.len())
+}
+
+fn seq_items(items: Vec<Value>) -> Value {
+    if items.is_empty() {
+        empty_list_value()
+    } else {
+        realized_value(items, false, true, false, clj_value::SeqKind::Array)
+    }
+}
+
+fn seq_items_or_nil(items: Vec<Value>) -> Value {
+    if items.is_empty() {
+        Value::Nil
+    } else {
+        realized_value(items, false, true, false, clj_value::SeqKind::Array)
+    }
+}
+
+/// One `subseq`/`rsubseq` bound walk over ascending `keys`/`items`
+/// (`core.clj` formulas verbatim).
+#[allow(clippy::too_many_arguments)]
+fn subseq_walk(
+    eval: &mut Evaluator,
+    spec: &SortSpec,
+    test: &Value,
+    bound: &Value,
+    end_test: Option<(&Value, &Value)>,
+    keys: &[Value],
+    items: &[Value],
+    descending: bool,
+    start_high: bool,
+) -> Result<Value, NativeError> {
+    let order: Vec<usize> = if descending {
+        (0..keys.len()).rev().collect()
+    } else {
+        (0..keys.len()).collect()
+    };
+    let ordered_keys: Vec<Value> = order.iter().map(|&i| keys[i].clone()).collect();
+    let ordered_items: Vec<Value> = order.iter().map(|&i| items[i].clone()).collect();
+    if start_high {
+        // `seqFrom` + head-drop unless included.
+        let start = seq_from(eval, spec, &ordered_keys, bound, !descending)?;
+        if start >= ordered_keys.len() {
+            return Ok(Value::Nil);
+        }
+        let mut from = start;
+        if !bound_include(eval, spec, test, bound, &ordered_keys[from])? {
+            from += 1;
+            if from >= ordered_keys.len() {
+                return Ok(Value::Nil);
+            }
+        }
+        let rest_keys = &ordered_keys[from..];
+        let rest_items = &ordered_items[from..];
+        match end_test {
+            None => Ok(seq_items_or_nil(rest_items.to_vec())),
+            Some((end_t, end_b)) => Ok(seq_items(bound_take_while(
+                eval, spec, end_t, end_b, rest_keys, rest_items,
+            )?)),
+        }
+    } else {
+        // `take-while include` over the whole direction (3-arg
+        // only — 5-arg always starts from `seqFrom` above, so
+        // `end_test` is always `None` here).
+        debug_assert!(end_test.is_none());
+        let taken = bound_take_while(eval, spec, test, bound, &ordered_keys, &ordered_items)?;
+        Ok(seq_items(taken))
+    }
+}
+
+fn native_subseq(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.core/subseq", args, &[3, 5])?;
+    let (keys, items) = sorted_subseq_source(&args[0])?;
+    let spec = match &args[0] {
+        Value::Map(m) => m.sort_spec().cloned(),
+        Value::Set(s) => s.sort_spec().cloned(),
+        _ => None,
+    }
+    .expect("sorted source carries a sort order");
+    let (test, bound) = (&args[1], &args[2]);
+    let end_test = if args.len() == 5 {
+        Some((&args[3], &args[4]))
+    } else {
+        None
+    };
+    // 5-arg always starts from `seqFrom`.
+    let start_high = args.len() == 5 || is_named_test(test, "clojure.core/>", "clojure.core/>=");
+    subseq_walk(
+        eval, &spec, test, bound, end_test, &keys, &items, false, start_high,
+    )
+}
+
+fn native_rsubseq(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.core/rsubseq", args, &[3, 5])?;
+    let (keys, items) = sorted_subseq_source(&args[0])?;
+    let spec = match &args[0] {
+        Value::Map(m) => m.sort_spec().cloned(),
+        Value::Set(s) => s.sort_spec().cloned(),
+        _ => None,
+    }
+    .expect("sorted source carries a sort order");
+    let (test, bound) = (&args[1], &args[2]);
+    let end_test = if args.len() == 5 {
+        Some((&args[3], &args[4]))
+    } else {
+        None
+    };
+    let start_high = is_named_test(test, "clojure.core/<", "clojure.core/<=");
+    if args.len() == 5 {
+        // `(seq-from (rseq (seqFrom end-key desc)) start-test
+        // start-key)` then `take-while` end (`core.clj`
+        // `rsubseq` verbatim): the descending-from-end walk
+        // reversed to ascending, head-dropped, end-bounded.
+        let (end_t, end_b) = end_test.expect("rsubseq 5-arg carries an end test");
+        // `seqFrom` end-key descending is the compare-`<=` entries
+        // in descending order; `rseq` flips them ascending, which
+        // is exactly the ascending scan below.
+        let mut from_end: Vec<usize> = Vec::new();
+        for (i, k) in keys.iter().enumerate() {
+            if compare_sort_keys(eval, &spec, k, end_b)? != Ordering::Greater {
+                from_end.push(i);
+            }
+        }
+        let asc_keys: Vec<Value> = from_end.iter().map(|&i| keys[i].clone()).collect();
+        let asc_items: Vec<Value> = from_end.iter().map(|&i| items[i].clone()).collect();
+        if asc_keys.is_empty() {
+            return Ok(Value::Nil);
+        }
+        let mut from = 0usize;
+        if !bound_include(eval, &spec, test, bound, &asc_keys[from])? {
+            from += 1;
+            if from >= asc_keys.len() {
+                return Ok(Value::Nil);
+            }
+        }
+        return Ok(seq_items(bound_take_while(
+            eval,
+            &spec,
+            end_t,
+            end_b,
+            &asc_keys[from..],
+            &asc_items[from..],
+        )?));
+    }
+    subseq_walk(
+        eval, &spec, test, bound, None, &keys, &items, true, start_high,
+    )
+}
+
 pub(crate) const COLL_NATIVES: &[(&str, NativeFnPtr)] = &[
     ("count", native_count),
     ("empty?", native_emptyp),
@@ -1760,6 +2271,12 @@ pub(crate) const COLL_NATIVES: &[(&str, NativeFnPtr)] = &[
     ("get-in", native_get_in),
     ("zipmap", native_zipmap),
     ("array-map", native_array_map),
+    ("sorted-map", native_sorted_map),
+    ("sorted-map-by", native_sorted_map_by),
+    ("sorted-set", native_sorted_set),
+    ("sorted-set-by", native_sorted_set_by),
+    ("subseq", native_subseq),
+    ("rsubseq", native_rsubseq),
     ("transient", native_transient),
     ("persistent!", native_persistent),
     ("conj!", native_conj_bang),

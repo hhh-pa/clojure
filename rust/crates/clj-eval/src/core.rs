@@ -958,19 +958,23 @@ fn is_map(v: &Value) -> bool {
 fn is_set(v: &Value) -> bool {
     matches!(v, Value::Set(_))
 }
-// No sorted collections exist yet (sorted-map/set arrive with the
-// sorted slice, which extends this); every value answers false
-// today, matching the oracle for all constructible inputs.
-fn is_sorted(_v: &Value) -> bool {
-    false
+// Sorted maps and sets answer true (FT6); everything else answers
+// false, matching the oracle for all constructible inputs.
+fn is_sorted(v: &Value) -> bool {
+    match v {
+        Value::Map(m) => m.is_sorted(),
+        Value::Set(s) => s.is_sorted(),
+        _ => false,
+    }
 }
 // `IPersistentVector` (vectors, map entries, subvectors) implements
-// `clojure.lang.Reversible`. Sorted maps and sets do too on the JVM
-// but are not constructible yet (FT6 extends this). Lists, hash
-// maps, hash sets, queues, seqs (including `rseq`), and transients
-// do not (`docs/t1192/probes/fx2b-reversible`).
+// `clojure.lang.Reversible`, as do sorted maps and sets (FT6).
+// Lists, hash maps, hash sets, queues, seqs (including `rseq`),
+// and transients do not (`docs/t1192/probes/fx2b-reversible`).
 fn is_reversible(v: &Value) -> bool {
-    matches!(v, Value::Vector(_) | Value::MapEntry { .. }) || as_subvector(v).is_some()
+    matches!(v, Value::Vector(_) | Value::MapEntry { .. })
+        || as_subvector(v).is_some()
+        || is_sorted(v)
 }
 fn is_var(v: &Value) -> bool {
     matches!(v, Value::Var(_))

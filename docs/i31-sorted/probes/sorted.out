@@ -17,3 +17,22 @@ sorted-pred-f false
 sorted-empty {}
 sorted-count 2
 sorted-comparator #object[clojure.core$comparator$fn__6174 0x4201a617 "clojure.core$comparator$fn__6174@4201a617"]
+sorted-empty-p true
+sorted-eq true
+sorted-rseq ([:b 2] [:a 1])
+sorted-dup {:a 2}
+subseq-5 ([:b 2])
+rsubseq-5 ([:b 2])
+sorted-nth THROW java.lang.UnsupportedOperationException|"nth not supported on this type: PersistentTreeMap"
+sorted-disj #{2}
+sorted-kw #{:a :b}
+sorted-odd THROW java.lang.IllegalArgumentException|"No value supplied for key: :a"
+subseq-eq ()
+sorted-keys (:a :b)
+sorted-vals (1 2)
+sorted-set-nth THROW java.lang.UnsupportedOperationException|"nth not supported on this type: PersistentTreeSet"
+sorted-set-rseq (2 1)
+sorted-set-eq true
+sorted-meta {:x 1}
+trans-sorted THROW java.lang.ClassCastException|"class clojure.lang.PersistentTreeMap cannot be cast to class clojure.lang.IEditableCollection (clojure.lang.PersistentTreeMap and clojure.lang.IEditableCollection are in unnamed module of loader 'app')"
+sorted-keyobj ({:id 1})

@@ -84,23 +84,47 @@ pub struct Vector {
 /// `PersistentArrayMap`: promotion is one-way and history-dependent
 /// (content alone cannot decide — `dissoc` never demotes and
 /// `array-map` forces array), so it is stored, not derived.
+///
+/// `sort` carries the FT6 sorted-map order: `None` is an ordinary
+/// map; `Some` keeps `keys` in comparator order instead of
+/// insertion order (compare-0 duplicates collapse at insertion,
+/// like repeated `assoc`). The inner trie stays content-exact, so
+/// equality, hashing, printing, and seqs need no sorted branch —
+/// only order-sensitive writers (`assoc` position) and readers
+/// (`get`/`dissoc` by compare-0 key, `jvm_class_of`, `nth`,
+/// `sorted?`) consult it.
 #[derive(Clone, Debug)]
 pub struct Map {
     inner: RpdsMap,
     meta: Option<Arc<Map>>,
     keys: Vec<Value>,
     hashy: bool,
+    sort: Option<SortSpec>,
+}
+
+/// The sort order of a sorted map or set (FT6): natural
+/// (`Util.compare`, nil-first) or a custom comparator fn called as
+/// `(cmp a b)` with `sort-by` number/boolean semantics.
+#[derive(Clone, Debug)]
+pub enum SortSpec {
+    /// Natural key order.
+    Natural,
+    /// A custom comparator value (called per comparison).
+    Custom(Box<Value>),
 }
 
 /// A persistent set of values (thread-safe rpds hash-trie set) with
 /// optional metadata. See [`List`]. `members` is the insertion-order
 /// sidecar (small JVM sets seq in insertion order); re-inserting a
-/// member is a no-op, like `conj`.
+/// member is a no-op, like `conj`. `sort` is the FT6 sorted-set
+/// order (same contract as [`Map`]'s): `members` stays in
+/// comparator order and compare-0 duplicates collapse.
 #[derive(Clone, Debug)]
 pub struct Set {
     inner: RpdsSet,
     meta: Option<Arc<Map>>,
     members: Vec<Value>,
+    sort: Option<SortSpec>,
 }
 
 impl List {
@@ -288,6 +312,7 @@ impl Map {
                 meta: self.meta,
                 keys: self.keys,
                 hashy: self.hashy,
+                sort: self.sort,
             };
         }
         let size = self.inner.size();
@@ -299,6 +324,7 @@ impl Map {
             meta: self.meta,
             keys,
             hashy: self.hashy || promote,
+            sort: self.sort,
         }
     }
 
@@ -317,6 +343,7 @@ impl Map {
             meta: self.meta,
             keys: self.keys,
             hashy: self.hashy,
+            sort: self.sort,
         }
     }
 
@@ -332,6 +359,52 @@ impl Map {
     pub fn with_hashy(mut self, hashy: bool) -> Self {
         self.hashy = hashy;
         self
+    }
+
+    /// Whether this is a sorted map (FT6 `sorted-map` family).
+    #[must_use]
+    pub fn is_sorted(&self) -> bool {
+        self.sort.is_some()
+    }
+
+    /// The sort order, if sorted.
+    #[must_use]
+    pub fn sort_spec(&self) -> Option<&SortSpec> {
+        self.sort.as_ref()
+    }
+
+    /// Mark this map sorted (or clear the order), preserving entries.
+    /// Callers maintain `keys` in comparator order alongside.
+    #[must_use]
+    pub fn with_sort(mut self, sort: Option<SortSpec>) -> Self {
+        self.sort = sort;
+        self
+    }
+
+    /// Keys in iteration order (insertion order, or comparator
+    /// order when sorted).
+    #[must_use]
+    pub fn ordered_keys(&self) -> &[Value] {
+        &self.keys
+    }
+
+    /// Rebuild from explicitly ordered entries, preserving metadata
+    /// and the sort order (sorted `assoc` positions through here).
+    #[must_use]
+    pub fn with_ordered_entries(self, entries: Vec<(Value, Value)>) -> Self {
+        let mut inner = RpdsMap::new_with_hasher_and_ptr_kind(FxBuildHasher::default());
+        let mut keys = Vec::with_capacity(entries.len());
+        for (k, v) in entries {
+            keys.push(k.clone());
+            inner = inner.insert(k, v);
+        }
+        Self {
+            inner,
+            meta: self.meta,
+            keys,
+            hashy: self.hashy,
+            sort: self.sort,
+        }
     }
 
     /// Look up a key.
@@ -407,6 +480,7 @@ impl Set {
                 inner: self.inner.insert(v),
                 meta: self.meta,
                 members,
+                sort: self.sort,
             }
         }
     }
@@ -437,6 +511,7 @@ impl Set {
             inner: self.inner.remove(v),
             meta: self.meta,
             members: self.members,
+            sort: self.sort,
         }
     }
 
@@ -456,6 +531,49 @@ impl Set {
     /// order; see the `members` sidecar).
     pub fn iter(&self) -> impl Iterator<Item = &Value> {
         self.members.iter()
+    }
+
+    /// Whether this is a sorted set (FT6 `sorted-set` family).
+    #[must_use]
+    pub fn is_sorted(&self) -> bool {
+        self.sort.is_some()
+    }
+
+    /// The sort order, if sorted.
+    #[must_use]
+    pub fn sort_spec(&self) -> Option<&SortSpec> {
+        self.sort.as_ref()
+    }
+
+    /// Mark this set sorted (or clear the order), preserving members.
+    /// Callers maintain `members` in comparator order alongside.
+    #[must_use]
+    pub fn with_sort(mut self, sort: Option<SortSpec>) -> Self {
+        self.sort = sort;
+        self
+    }
+
+    /// Members in iteration order (insertion order, or comparator
+    /// order when sorted).
+    #[must_use]
+    pub fn ordered_members(&self) -> &[Value] {
+        &self.members
+    }
+
+    /// Rebuild from explicitly ordered members, preserving metadata
+    /// and the sort order (sorted `conj` positions through here).
+    #[must_use]
+    pub fn with_ordered_members(self, members: Vec<Value>) -> Self {
+        let mut inner = RpdsSet::new_with_hasher_with_ptr_kind(FxBuildHasher::default());
+        for v in &members {
+            inner = inner.insert(v.clone());
+        }
+        Self {
+            inner,
+            meta: self.meta,
+            members,
+            sort: self.sort,
+        }
     }
 
     /// The metadata map, if any.
@@ -554,6 +672,7 @@ pub fn new_map() -> Map {
         meta: None,
         keys: Vec::new(),
         hashy: false,
+        sort: None,
     }
 }
 
@@ -564,6 +683,7 @@ pub fn new_set() -> Set {
         inner: RpdsSet::new_with_hasher_with_ptr_kind(FxBuildHasher::default()),
         meta: None,
         members: Vec::new(),
+        sort: None,
     }
 }
 
