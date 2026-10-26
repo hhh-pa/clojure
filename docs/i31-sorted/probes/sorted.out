@@ -36,3 +36,30 @@ sorted-set-eq true
 sorted-meta {:x 1}
 trans-sorted THROW java.lang.ClassCastException|"class clojure.lang.PersistentTreeMap cannot be cast to class clojure.lang.IEditableCollection (clojure.lang.PersistentTreeMap and clojure.lang.IEditableCollection are in unnamed module of loader 'app')"
 sorted-keyobj ({:id 1})
+s-conj-map {:a 1, :b 2, :c 3}
+s-get 1
+s-get-miss nil
+s-contains [true false]
+s-find [:a 1]
+s-update {:a 2}
+s-merge {:a 1, :b 2, :c 3}
+s-empty-set true
+s-rseq-empty nil
+s-subseq-by (2 1)
+s-into {:a 1, :b 2}
+conj-map-nil {:a 1}
+conj-map-map {:a 1, :b 2}
+conj-nil #{nil 1 2}
+trans-set THROW java.lang.ClassCastException|"class clojure.lang.PersistentTreeSet cannot be cast to class clojure.lang.IEditableCollection (clojure.lang.PersistentTreeSet and clojure.lang.IEditableCollection are in unnamed module of loader 'app')"
+dissoc-miss {:a 1}
+disj-miss #{1 2}
+set-contains [true false]
+set-get [2 nil]
+set-find THROW java.lang.IllegalArgumentException|"find not supported on type: clojure.lang.PersistentTreeSet"
+subseq-drop nil
+subseq5e nil
+rsubseq-empty ()
+rsubseq-below nil
+rsubseq-5b ([:b 2] [:a 1])
+rsubseq-5set (2 1)
+rsubseq-5keep ([:c 3] [:b 2])

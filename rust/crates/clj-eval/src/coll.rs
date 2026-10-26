@@ -2007,8 +2007,9 @@ fn native_sorted_set_by(eval: &mut Evaluator, args: &[Value]) -> Result<Value, N
 }
 
 /// A `subseq`/`rsubseq` source: ascending entry keys with their
-/// seq items (map entries for maps, members for sets).
-fn sorted_subseq_source(coll: &Value) -> Result<(Vec<Value>, Vec<Value>), NativeError> {
+/// seq items (map entries for maps, members for sets) plus the
+/// sort order (so callers never re-match the collection).
+fn sorted_subseq_source(coll: &Value) -> Result<(Vec<Value>, Vec<Value>, SortSpec), NativeError> {
     match coll {
         Value::Map(m) if m.is_sorted() => {
             let mut keys = Vec::with_capacity(m.ordered_keys().len());
@@ -2017,11 +2018,19 @@ fn sorted_subseq_source(coll: &Value) -> Result<(Vec<Value>, Vec<Value>), Native
                 keys.push(k.clone());
                 items.push(clj_value::map_entry(k.clone(), v.clone()));
             }
-            Ok((keys, items))
+            let spec = m
+                .sort_spec()
+                .cloned()
+                .expect("sorted map carries a sort order");
+            Ok((keys, items, spec))
         }
         Value::Set(s) if s.is_sorted() => {
             let members = s.ordered_members().to_vec();
-            Ok((members.clone(), members))
+            let spec = s
+                .sort_spec()
+                .cloned()
+                .expect("sorted set carries a sort order");
+            Ok((members.clone(), members, spec))
         }
         other => Err(cce_err(other, "clojure.lang.Sorted")),
     }
@@ -2100,14 +2109,6 @@ fn seq_items(items: Vec<Value>) -> Value {
     }
 }
 
-fn seq_items_or_nil(items: Vec<Value>) -> Value {
-    if items.is_empty() {
-        Value::Nil
-    } else {
-        realized_value(items, false, true, false, clj_value::SeqKind::Array)
-    }
-}
-
 /// One `subseq`/`rsubseq` bound walk over ascending `keys`/`items`
 /// (`core.clj` formulas verbatim).
 #[allow(clippy::too_many_arguments)]
@@ -2145,10 +2146,22 @@ fn subseq_walk(
         let rest_keys = &ordered_keys[from..];
         let rest_items = &ordered_items[from..];
         match end_test {
-            None => Ok(seq_items_or_nil(rest_items.to_vec())),
-            Some((end_t, end_b)) => Ok(seq_items(bound_take_while(
-                eval, spec, end_t, end_b, rest_keys, rest_items,
-            )?)),
+            // `from` always lands inside (the empty start returned
+            // above), so the rest is a non-empty seq.
+            None => {
+                debug_assert!(!rest_items.is_empty());
+                Ok(realized_value(
+                    rest_items.to_vec(),
+                    false,
+                    true,
+                    false,
+                    clj_value::SeqKind::Array,
+                ))
+            }
+            Some((end_t, end_b)) => {
+                let taken = bound_take_while(eval, spec, end_t, end_b, rest_keys, rest_items)?;
+                Ok(seq_items(taken))
+            }
         }
     } else {
         // `take-while include` over the whole direction (3-arg
@@ -2162,13 +2175,7 @@ fn subseq_walk(
 
 fn native_subseq(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/subseq", args, &[3, 5])?;
-    let (keys, items) = sorted_subseq_source(&args[0])?;
-    let spec = match &args[0] {
-        Value::Map(m) => m.sort_spec().cloned(),
-        Value::Set(s) => s.sort_spec().cloned(),
-        _ => None,
-    }
-    .expect("sorted source carries a sort order");
+    let (keys, items, spec) = sorted_subseq_source(&args[0])?;
     let (test, bound) = (&args[1], &args[2]);
     let end_test = if args.len() == 5 {
         Some((&args[3], &args[4]))
@@ -2184,13 +2191,7 @@ fn native_subseq(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeEr
 
 fn native_rsubseq(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/rsubseq", args, &[3, 5])?;
-    let (keys, items) = sorted_subseq_source(&args[0])?;
-    let spec = match &args[0] {
-        Value::Map(m) => m.sort_spec().cloned(),
-        Value::Set(s) => s.sort_spec().cloned(),
-        _ => None,
-    }
-    .expect("sorted source carries a sort order");
+    let (keys, items, spec) = sorted_subseq_source(&args[0])?;
     let (test, bound) = (&args[1], &args[2]);
     let end_test = if args.len() == 5 {
         Some((&args[3], &args[4]))
@@ -2199,40 +2200,31 @@ fn native_rsubseq(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeE
     };
     let start_high = is_named_test(test, "clojure.core/<", "clojure.core/<=");
     if args.len() == 5 {
-        // `(seq-from (rseq (seqFrom end-key desc)) start-test
-        // start-key)` then `take-while` end (`core.clj`
-        // `rsubseq` verbatim): the descending-from-end walk
-        // reversed to ascending, head-dropped, end-bounded.
+        // `(when-let [[e :as s] (seqFrom end-key false)]
+        // (take-while start-include (if (end-include e) s (next
+        // s))))` (`core.clj` `rsubseq` verbatim): the
+        // descending-from-end walk, head-dropped once by the END
+        // test, bounded by the START test.
         let (end_t, end_b) = end_test.expect("rsubseq 5-arg carries an end test");
-        // `seqFrom` end-key descending is the compare-`<=` entries
-        // in descending order; `rseq` flips them ascending, which
-        // is exactly the ascending scan below.
-        let mut from_end: Vec<usize> = Vec::new();
-        for (i, k) in keys.iter().enumerate() {
+        let mut desc: Vec<usize> = Vec::new();
+        for (i, k) in keys.iter().enumerate().rev() {
             if compare_sort_keys(eval, &spec, k, end_b)? != Ordering::Greater {
-                from_end.push(i);
+                desc.push(i);
             }
         }
-        let asc_keys: Vec<Value> = from_end.iter().map(|&i| keys[i].clone()).collect();
-        let asc_items: Vec<Value> = from_end.iter().map(|&i| items[i].clone()).collect();
-        if asc_keys.is_empty() {
+        if desc.is_empty() {
             return Ok(Value::Nil);
         }
         let mut from = 0usize;
-        if !bound_include(eval, &spec, test, bound, &asc_keys[from])? {
+        if !bound_include(eval, &spec, end_t, end_b, &keys[desc[from]])? {
             from += 1;
-            if from >= asc_keys.len() {
-                return Ok(Value::Nil);
-            }
         }
-        return Ok(seq_items(bound_take_while(
-            eval,
-            &spec,
-            end_t,
-            end_b,
-            &asc_keys[from..],
-            &asc_items[from..],
-        )?));
+        // A dropped-to-empty head takes `take-while` over nil,
+        // which is `()`, not nil (probe `rsubseq-empty`).
+        let rest_keys: Vec<Value> = desc[from..].iter().map(|&i| keys[i].clone()).collect();
+        let rest_items: Vec<Value> = desc[from..].iter().map(|&i| items[i].clone()).collect();
+        let taken = bound_take_while(eval, &spec, test, bound, &rest_keys, &rest_items)?;
+        return Ok(seq_items(taken));
     }
     subseq_walk(
         eval, &spec, test, bound, None, &keys, &items, true, start_high,

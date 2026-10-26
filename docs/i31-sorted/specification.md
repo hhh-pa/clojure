@@ -92,6 +92,15 @@ empty) plus the map/set ops (`assoc`/`dissoc`/`conj`/`disj`/
   `rsubseq` mirrors descending; entry *keys* drive map bounds;
   `empty` keeps the comparator; `comparator` returns the fn or
   `nil` for natural order.
+- Round-four correction: 5-arg `rsubseq` is NOT an ascending
+  scan — it is `(when-let [[e :as s] (seqFrom end-key false)]
+  (take-while start-include (if (end-include e) s (next s))))`,
+  i.e. a descending-from-end walk, head-dropped once by the END
+  test, bounded by the START test. Consequences pinned by
+  probes: descending answer order (`rsubseq-5b`,
+  `rsubseq-5set`, `rsubseq-5keep`), drop-to-empty is `()`
+  (`take-while` over nil, probe `rsubseq-empty`), empty end
+  scan is nil (`when-let`, probe `rsubseq-below`).
 - Error shapes (probe-pinned): non-`Sorted` source → CCE to
   `clojure.lang.Sorted`; bad comparator application → the
   call's own error (probe `sorted-map-by-bad`).
