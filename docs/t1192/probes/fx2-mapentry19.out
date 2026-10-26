@@ -2,3 +2,13 @@ mapdest-5 nil
 mapdest-neg nil
 mapdest-missing nil
 fn-empty THROW clojure.lang.Compiler$CompilerException|"Syntax error macroexpanding clojure.core/fn at (/Users/hhu/workspace/clojure/docs/t1192/probes/fx2-mapentry19.clj:14:22)."
+get-entry-0 :a
+get-entry-1 1
+get-entry-5 nil
+conj-entry-coll [:a 1 :b]
+conj-entry-elem {:x 0, :a 1}
+conj-entry-seq {:x 0, :a 1, :b 2}
+merge-entry-left [:a 1 [:b 2]]
+merge-entry-seq [:a 1 :b]
+seq-entry (:a 1)
+into-entry [:a 1]

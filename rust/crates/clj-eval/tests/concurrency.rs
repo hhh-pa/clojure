@@ -2940,6 +2940,12 @@ fn locking_rows() {
         uncaught(&mut eval, "(locking nil 1)"),
         "java.lang.NullPointerException | Cannot enter synchronized block because \"lock\" is null"
     );
+    // A nil lockee nested in a `fn` body takes the analyzer path
+    // to the same NPE (the JVM embeds a gensym'd local instead).
+    assert_eq!(
+        uncaught(&mut eval, "((fn [] (locking nil 1)))"),
+        "java.lang.NullPointerException | Cannot enter synchronized block because \"lock\" is null"
+    );
     // Bare arity matches the macro's.
     assert_eq!(
         uncaught(&mut eval, "(locking)"),

@@ -824,3 +824,90 @@ fn host_natives_and_rewrites() {
         "java.lang.NullPointerException | Cannot enter synchronized block because \"lock\" is null"
     );
 }
+
+#[test]
+fn coverage_top_up_rows() {
+    let mut eval = boot();
+    // builtin_expand.rs:116 — a plain symbol beside a destructured
+    // `loop` binding (oracle `ev-loop-mixed`).
+    assert_eq!(run_last(&mut eval, "(loop [x 1 [a] [2]] [x a])"), "[1 2]");
+    // builtin_expand.rs:228 — multi-body `fn` whose first form is not
+    // a condition map (oracle `fn-multi-body`).
+    assert_eq!(
+        run_last(&mut eval, "(macroexpand-1 '(fn [x] x x))"),
+        "(fn* ([x] x x))"
+    );
+    // builtin_expand.rs:257 — `:post` over a multi-body `fn`
+    // (oracle `ev-fn-post-multi`). The assertion below pins the
+    // evaluated value (analyzer path); the expansion shape pins
+    // the `do`-wrap arm.
+    assert_eq!(
+        run_last(&mut eval, "((fn [x] {:post [(pos? x)]} (inc x) x) 2)"),
+        "2"
+    );
+    assert_eq!(
+        fresh("(macroexpand-1 '(fn [x] {:post [(pos? x)]} (inc x) x))"),
+        "(fn* ([x] (clojure.core/let [% (do (inc x) x)] (clojure.core/assert (pos? x)) %)))"
+    );
+    // builtin_expand.rs:298 — a plain symbol beside a destructured
+    // `fn` param (oracle `ev-fn-mixed`; value via the analyzer,
+    // shape via the expander).
+    assert_eq!(
+        run_last(&mut eval, "((fn [x [a b]] [x a b]) 1 [2 3])"),
+        "[1 2 3]"
+    );
+    assert_eq!(
+        fresh("(macroexpand-1 '(fn [x [a b]] [x a b]))"),
+        "(fn* ([x p__1] (clojure.core/let [[a b] p__1] [x a b])))"
+    );
+    // destructure_expand.rs:114 — the `?` error path out of a vector
+    // element (same arm as the `(let [1 2] 1)` pin; oracle `let-bad-vec`
+    // shows the JVM rejects this shape too).
+    assert_eq!(
+        compile_err(&mut eval, "(let [[1] [1]] 1)"),
+        vec![
+            "Syntax error macroexpanding let at (user:1:1).".to_owned(),
+            "java.lang.Exception | Unsupported binding form: 1".to_owned(),
+        ]
+    );
+    // destructure_expand.rs:515+706 — keyword items in `:keys`
+    // (oracle `ev-keys-kw`).
+    assert_eq!(run_last(&mut eval, "(let [{:keys [:a]} {:a 1}] a)"), "1");
+    // destructure_expand.rs:696 — `:keys!` without `:missing`
+    // (oracle `ev-keys-bang` + `ev-keys-bang-missing`).
+    assert_eq!(run_last(&mut eval, "(let [{:keys! [a]} {:a 1}] a)"), "1");
+    assert_eq!(
+        uncaught(&mut eval, "(let [{:keys! [a]} {}] a)"),
+        "java.lang.IllegalArgumentException | Missing required key: :a"
+    );
+    // destructure_expand.rs:719 — a duplicate `:keys` entry updates
+    // the binding token (oracle `ev-keys-dup`).
+    assert_eq!(run_last(&mut eval, "(let [{:keys [a a]} {:a 1}] a)"), "1");
+    // destructure_expand.rs:578/579/589 — a nested `:select` outlet
+    // reuses the existing symbol (oracle `ev-select-nested`).
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [{{:keys [x] :select t} :p :select s} {:p {:x 1}}] [x t s])"
+        ),
+        "[1 {:x 1} {:p {:x 1}}]"
+    );
+    // fx4_form.rs:155/163 — nil/set `:keys` lists seq like the
+    // analyzer's `seq` (the JVM rejects both at spec time, which
+    // FX4 deliberately does not instrument; the expansion below is
+    // the port's documented behavior).
+    assert_eq!(
+        fresh("(macroexpand-1 '(let [{:keys nil} {:a 1}] 42))"),
+        "(let* [map__1 {:a 1} map__1 (if (clojure.core/instance? clojure.lang.ISeq map__1) (if (clojure.core/next map__1) (clojure.lang.PersistentArrayMap/createAsIfByAssoc (clojure.core/to-array map__1)) (if (clojure.core/seq map__1) (clojure.core/first map__1) clojure.lang.PersistentArrayMap/EMPTY)) map__1)] 42)"
+    );
+    assert_eq!(
+        fresh("(macroexpand-1 '(let [{:keys #{a}} {:a 1}] a))"),
+        "(let* [map__1 {:a 1} map__1 (if (clojure.core/instance? clojure.lang.ISeq map__1) (if (clojure.core/next map__1) (clojure.lang.PersistentArrayMap/createAsIfByAssoc (clojure.core/to-array map__1)) (if (clojure.core/seq map__1) (clojure.core/first map__1) clojure.lang.PersistentArrayMap/EMPTY)) map__1) a (clojure.core/get map__1 :a)] a)"
+    );
+    // fx4_host.rs:65-67 — `class_name` surfaces through `nth`
+    // (oracle `ev-nth-object`).
+    assert_eq!(
+        uncaught(&mut eval, "(nth (new Object) 0)"),
+        "java.lang.UnsupportedOperationException | nth not supported on this type: Object"
+    );
+}

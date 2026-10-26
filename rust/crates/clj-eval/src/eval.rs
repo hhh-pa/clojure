@@ -2489,4 +2489,26 @@ mod tests {
         // total contract (`try` bodies only ever throw).
         assert!(try_thrown(Signal::Recur(vec![])).is_none());
     }
+
+    #[test]
+    fn locking_nil_lockee_is_npe() {
+        // Direct analyze+evaluate (bypasses macroexpansion, which
+        // lowers `locking` to `monitor-enter`): the analyzer's
+        // `Locking` arm with a nil lockee is the JVM's
+        // synchronized-block NPE (port-fixed lock name, P6).
+        let mut eval = Evaluator::new("test");
+        let form = Value::List(List::from_vec(vec![
+            Value::Symbol(Symbol::new(None, "locking")),
+            Value::Nil,
+            Value::Int(1),
+        ]));
+        let expr = eval.analyze(&form).expect("analyze locking");
+        let err = eval.eval(&expr, &Env::new()).expect_err("nil lockee");
+        let t = try_thrown(err).expect("locking nil throws");
+        assert_eq!(t.class, ThrowClass::NullPointerException);
+        assert_eq!(
+            t.message.as_deref(),
+            Some("Cannot enter synchronized block because \"lock\" is null")
+        );
+    }
 }

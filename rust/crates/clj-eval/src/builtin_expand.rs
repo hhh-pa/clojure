@@ -372,7 +372,7 @@ fn zip_vars(items: &[Value]) -> Value {
         pairs.push((ucall("var", vec![items[i].clone()]), items[i + 1].clone()));
         i += 2;
     }
-    crate::fx4_form::map_of(pairs)
+    Value::Map(crate::fx4_form::map_of(pairs))
 }
 
 fn fn_body(body: &[Value]) -> Value {
@@ -416,4 +416,16 @@ fn locking_inner(lockee: &Value, locklocal: &Value, body: &[Value]) -> Value {
         &[locklocal.clone(), lockee.clone()],
         &[ucall("monitor-enter", vec![locklocal.clone()]), lst(tried)],
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn map_key_ignores_non_maps() {
+        // Defensive fallback: both `conds` producers guarantee a map,
+        // so only a direct call reaches the wildcard.
+        assert_eq!(map_key(&Value::Int(1), "pre"), None);
+    }
 }

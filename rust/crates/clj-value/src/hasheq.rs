@@ -127,28 +127,9 @@ fn hasheq_rest(v: &Value) -> i32 {
         Value::Promise(p) => id_hash(p.id()),
         Value::Agent(a) => id_hash(a.id()),
         Value::Extension(ext) => hasheq_extension(&**ext),
-        // Handled upstream; re-enter so the chain stays exhaustive.
-        Value::Nil
-        | Value::Bool(_)
-        | Value::Int(_)
-        | Value::Double(_)
-        | Value::Str(_)
-        | Value::Char(_)
-        | Value::Symbol(_)
-        | Value::Keyword(_)
-        | Value::List(_)
-        | Value::Vector(_)
-        | Value::MapEntry { .. }
-        | Value::Map(_)
-        | Value::Set(_)
-        | Value::Regex(_)
-        | Value::TaggedLiteral { .. }
-        | Value::ReaderConditional { .. }
-        | Value::Var(_)
-        | Value::Unbound(_)
-        | Value::Throwable(_)
-        | Value::Transient(_)
-        | Value::Atom(_) => hasheq(v),
+        // All other variants are handled by `hasheq`/`hasheq_mid`
+        // (the single caller partitions the variants).
+        _ => unreachable!("hasheq partition"),
     }
 }
 
@@ -221,27 +202,9 @@ fn hash_code_rest(v: &Value) -> i32 {
         Value::Promise(p) => id_hash(p.id()),
         Value::Agent(a) => id_hash(a.id()),
         Value::Extension(ext) => hash_code_extension(&**ext),
-        // Handled upstream; re-enter so the chain stays exhaustive.
-        Value::Nil
-        | Value::Bool(_)
-        | Value::Int(_)
-        | Value::Double(_)
-        | Value::Str(_)
-        | Value::Char(_)
-        | Value::Symbol(_)
-        | Value::Keyword(_)
-        | Value::List(_)
-        | Value::Vector(_)
-        | Value::MapEntry { .. }
-        | Value::Map(_)
-        | Value::Set(_)
-        | Value::Regex(_)
-        | Value::TaggedLiteral { .. }
-        | Value::ReaderConditional { .. }
-        | Value::Var(_)
-        | Value::Unbound(_)
-        | Value::Throwable(_)
-        | Value::Transient(_) => hash_code(v),
+        // All other variants are handled upstream (the single
+        // caller partitions the variants).
+        _ => unreachable!("hash_code partition"),
     }
 }
 
@@ -1068,5 +1031,21 @@ mod tests {
     fn str_murmur_is_order_sensitive() {
         assert_ne!(hasheq(&strv("ab")), hasheq(&strv("ba")));
         assert_ne!(hasheq(&strv("abcd")), hasheq(&strv("abdc")));
+    }
+
+    #[test]
+    #[should_panic(expected = "hasheq partition")]
+    fn hasheq_rest_rejects_upstream_variants() {
+        // Defensive arm: the single caller partitions the variants,
+        // so scalars never arrive here (only a dispatch bug could).
+        let _ = super::hasheq_rest(&Value::Nil);
+    }
+
+    #[test]
+    #[should_panic(expected = "hash_code partition")]
+    fn hash_code_rest_rejects_upstream_variants() {
+        // Defensive arm: the single caller partitions the variants,
+        // so scalars never arrive here (only a dispatch bug could).
+        let _ = super::hash_code_rest(&Value::Nil);
     }
 }

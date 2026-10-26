@@ -931,31 +931,9 @@ fn step_thunk_rest(eval: &mut Evaluator, thunk: Thunk) -> Result<Forced, Signal>
             started,
         } => step_reductions(eval, &f, acc, has_init, input, started),
         Thunk::Replace { smap, input } => step_replace(eval, &smap, input),
-        // Handled upstream; re-enter so the chain stays exhaustive.
-        handled @ (Thunk::Map { .. }
-        | Thunk::Filter { .. }
-        | Thunk::Remove { .. }
-        | Thunk::Take { .. }
-        | Thunk::Concat { .. }
-        | Thunk::MapCat { .. }
-        | Thunk::Chain { .. }
-        | Thunk::Thunk0 { .. }
-        | Thunk::Repeatedly { .. }
-        | Thunk::Interleave { .. }
-        | Thunk::Interpose { .. }
-        | Thunk::TakeWhile { .. }
-        | Thunk::DropWhile { .. }
-        | Thunk::Drop { .. }
-        | Thunk::TakeNth { .. }
-        | Thunk::Partition { .. }
-        | Thunk::PartitionAll { .. }
-        | Thunk::PartitionBy { .. }
-        | Thunk::PartitionByAdvance { .. }
-        | Thunk::PartitionRun { .. }
-        | Thunk::Distinct { .. }
-        | Thunk::Dedupe { .. }
-        | Thunk::Keep { .. }
-        | Thunk::KeepIndexed { .. }) => step_thunk(eval, handled),
+        // All other variants are handled by `step_thunk`/`step_thunk_mid`
+        // (the single caller partitions the variants).
+        _ => unreachable!("thunk partition"),
     }
 }
 
@@ -3368,5 +3346,19 @@ mod tests {
         let back = as_pending(&rebuilt).unwrap();
         assert!(matches!(&*back.state.lock().unwrap(), SeqState::Empty));
         assert!(back.meta().is_some());
+    }
+
+    #[test]
+    #[should_panic(expected = "thunk partition")]
+    fn step_thunk_rest_rejects_upstream_variants() {
+        // Defensive arm: the single caller partitions the variants,
+        // so `step_thunk`-handled thunks never arrive here (only a
+        // dispatch bug could).
+        let mut eval = crate::eval::Evaluator::new_bare("user");
+        let thunk = Thunk::Map {
+            f: Value::Nil,
+            inputs: Vec::new(),
+        };
+        let _ = super::step_thunk_rest(&mut eval, thunk);
     }
 }

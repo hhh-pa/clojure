@@ -493,13 +493,14 @@ fn translate(kind: &Dir, item: &Value) -> Result<Value, NativeError> {
     }
     let (elem_ns, name) = named_parts(item, kind.ns.is_some())?;
     let ns = kind.ns.clone().or(elem_ns);
-    Ok(match kind.kind {
-        DirKind::Keys => Value::Keyword(clj_value::Keyword::new(ns.as_deref(), &name)),
-        DirKind::Syms => lst(vec![
+    // `Strs` returns early above, so only `Keys`/`Syms` arrive here.
+    Ok(if matches!(kind.kind, DirKind::Keys) {
+        Value::Keyword(clj_value::Keyword::new(ns.as_deref(), &name))
+    } else {
+        lst(vec![
             sym("quote"),
             Value::Symbol(clj_value::Symbol::new(ns.as_deref(), &name)),
-        ]),
-        DirKind::Strs => Value::Str(name.into()),
+        ])
     })
 }
 
@@ -754,11 +755,9 @@ fn or_dm(cx: &MapCx, walk: &Walk) -> Result<Option<Value>, NativeError> {
     }
     let built = map_of(pairs);
     if strict {
-        if let Value::Map(map) = &built {
-            keys_only_in_or(map, &walk.sel, cx.gdefaults.len())?;
-        }
+        keys_only_in_or(&built, &walk.sel, cx.gdefaults.len())?;
     }
-    Ok(Some(built))
+    Ok(Some(Value::Map(built)))
 }
 
 fn map_or_key(key: &Value, btok: &[(Value, Value)], strict: bool) -> Result<Value, NativeError> {
@@ -872,6 +871,6 @@ fn pair_map(pairs: &[(Value, Value)]) -> Value {
     if pairs.is_empty() {
         Value::Nil
     } else {
-        map_of(pairs.to_vec())
+        Value::Map(map_of(pairs.to_vec()))
     }
 }

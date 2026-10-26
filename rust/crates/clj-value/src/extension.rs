@@ -133,31 +133,9 @@ impl ThrowClass {
             Self::ExecutionException => "java.util.concurrent.ExecutionException",
             Self::CancellationException => "java.util.concurrent.CancellationException",
             Self::RejectedExecutionException => "java.util.concurrent.RejectedExecutionException",
-            // Handled upstream; re-enter so the chain stays exhaustive.
-            Self::Exception
-            | Self::Error
-            | Self::RuntimeException
-            | Self::IllegalArgumentException
-            | Self::IllegalStateException
-            | Self::UnsupportedOperationException
-            | Self::AssertionError
-            | Self::ArityException
-            | Self::NullPointerException
-            | Self::ClassCastException
-            | Self::IndexOutOfBoundsException
-            | Self::ArithmeticException
-            | Self::ExceptionInfo
-            | Self::FileNotFoundException
-            | Self::IllegalAccessError
-            | Self::NumberFormatException
-            | Self::StringIndexOutOfBoundsException
-            | Self::IllegalFormatConversionException
-            | Self::UnknownFormatConversionException
-            | Self::MissingFormatConversionException
-            | Self::MissingFormatArgumentException
-            | Self::IllegalFormatPrecisionException
-            | Self::IllegalFormatCodePointException
-            | Self::FormatFlagsConversionMismatchException => self.jvm_name(),
+            // All other variants are handled by `jvm_name`/`jvm_name_mid`
+            // (the single caller partitions the variants).
+            _ => unreachable!("throw-class partition"),
         }
     }
 
@@ -904,5 +882,14 @@ mod tests {
         assert_eq!(hash_of(&other), hash_of(&other.clone()));
         let err = compare(&other, &Value::Int(1)).unwrap_err();
         assert_eq!(err.message(), "Cannot compare test.Other to Long");
+    }
+
+    #[test]
+    #[should_panic(expected = "throw-class partition")]
+    fn jvm_name_rest_rejects_upstream_variants() {
+        // Defensive arm: the single caller partitions the variants,
+        // so `jvm_name`-handled classes never arrive here (only a
+        // dispatch bug could).
+        let _ = ThrowClass::ExceptionInfo.jvm_name_rest();
     }
 }

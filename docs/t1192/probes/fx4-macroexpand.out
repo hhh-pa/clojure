@@ -66,3 +66,22 @@ ev-pre ERR java.lang.AssertionError | Assert failed: (pos? x)
 ev-loop => 0
 ev-letfn => 0
 ev-lock => 1
+---- coverage top-up (PR #22) ----
+fn-multi-body => (fn* ([x] x x))
+ev-loop-mixed => [1 2]
+ev-fn-post-multi => 2
+ev-fn-mixed => [1 2 3]
+let-bad-vec ERR clojure.lang.Compiler$CompilerException | Syntax error macroexpanding clojure.core/let at (/Users/hhu/workspace/clojure/docs/t1192/probes/fx4-macroexpand.clj:114:1). ;; clojure.lang.ExceptionInfo | Call to clojure.core/let did not conform to spec.
+ev-keys-kw => 1
+ev-keys-nil ERR clojure.lang.Compiler$CompilerException | Syntax error macroexpanding clojure.core/let at (/Users/hhu/workspace/clojure/docs/t1192/probes/fx4-macroexpand.clj:116:27).
+ev-keys-set ERR clojure.lang.Compiler$CompilerException | Syntax error macroexpanding clojure.core/let at (/Users/hhu/workspace/clojure/docs/t1192/probes/fx4-macroexpand.clj:117:27).
+ev-keys-dup => 1
+ev-select-nested => [1 {:x 1} {:p {:x 1}}]
+ev-keys-bang => 1
+ev-keys-bang-missing ERR java.lang.IllegalArgumentException | Missing required key: :a
+ev-nth-object ERR java.lang.UnsupportedOperationException | nth not supported on this type: Object
+ev-wrd-nested => 2
+ev-wrd-list => 2
+ev-lock-nil ERR java.lang.NullPointerException | Cannot enter synchronized block because "locklocal__5902__auto__428" is null
+ev-invoke-entry-kw => nil
+ev-seq-rest => [:a (1)]

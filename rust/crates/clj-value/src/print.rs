@@ -229,30 +229,9 @@ fn print_rest(v: &Value, opts: &PrintOpts, level: Option<i64>, out: &mut String)
             .unwrap();
         }
         Value::Extension(e) => print_extension_body(e.as_ref(), opts, level, out),
-        // Handled upstream; re-enter so the chain stays exhaustive.
-        Value::Nil
-        | Value::Bool(_)
-        | Value::Int(_)
-        | Value::Double(_)
-        | Value::Str(_)
-        | Value::Char(_)
-        | Value::Symbol(_)
-        | Value::Keyword(_)
-        | Value::Regex(_)
-        | Value::List(_)
-        | Value::Vector(_)
-        | Value::MapEntry { .. }
-        | Value::Set(_)
-        | Value::Map(_)
-        | Value::TaggedLiteral { .. }
-        | Value::Var(_)
-        | Value::Unbound(_)
-        | Value::Throwable(_)
-        | Value::Transient(_)
-        | Value::Atom(_)
-        | Value::Delay(_)
-        | Value::Future(_)
-        | Value::Promise(_) => print_scalars(v, opts, level, out),
+        // All other variants are handled by `print_scalars`/`print_more`
+        // (the single caller partitions the variants).
+        _ => unreachable!("print partition"),
     }
 }
 
@@ -605,19 +584,9 @@ fn java_debug_rest(v: &Value) -> String {
         | Value::Set(_)
         | Value::TaggedLiteral { .. }
         | Value::ReaderConditional { .. } => pr_to_string(v, &PrintOpts::pr()),
-        // Handled upstream; re-enter so the chain stays exhaustive.
-        Value::Nil
-        | Value::Bool(_)
-        | Value::Int(_)
-        | Value::Double(_)
-        | Value::Str(_)
-        | Value::Char(_)
-        | Value::Symbol(_)
-        | Value::Keyword(_)
-        | Value::Regex(_)
-        | Value::Var(_)
-        | Value::Unbound(_)
-        | Value::Throwable(_) => java_debug(v),
+        // All other variants are handled by `java_debug` (the
+        // single caller partitions the variants).
+        _ => unreachable!("java_debug partition"),
     }
 }
 
@@ -1259,5 +1228,22 @@ mod tests {
             Some(1),
         )));
         assert_eq!(java_debug(&range), "(...)");
+    }
+
+    #[test]
+    #[should_panic(expected = "print partition")]
+    fn print_rest_rejects_upstream_variants() {
+        // Defensive arm: the single caller partitions the variants,
+        // so scalars never arrive here (only a dispatch bug could).
+        let mut out = String::new();
+        super::print_rest(&Value::Nil, &PrintOpts::pr(), None, &mut out);
+    }
+
+    #[test]
+    #[should_panic(expected = "java_debug partition")]
+    fn java_debug_rest_rejects_upstream_variants() {
+        // Defensive arm: the single caller partitions the variants,
+        // so scalars never arrive here (only a dispatch bug could).
+        let _ = super::java_debug_rest(&Value::Nil);
     }
 }

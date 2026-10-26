@@ -1029,27 +1029,9 @@ fn hash_value_rest<H: Hasher>(v: &Value, state: &mut H) {
             state.write_u64(a.id());
         }
         Value::Extension(e) => hash_extension(e, state),
-        // Handled upstream; re-enter so the chain stays exhaustive.
-        Value::Nil
-        | Value::Bool(_)
-        | Value::Int(_)
-        | Value::Double(_)
-        | Value::Str(_)
-        | Value::Char(_)
-        | Value::Symbol(_)
-        | Value::Keyword(_)
-        | Value::List(_)
-        | Value::Vector(_)
-        | Value::MapEntry { .. }
-        | Value::Map(_)
-        | Value::Set(_)
-        | Value::Regex(_)
-        | Value::TaggedLiteral { .. }
-        | Value::ReaderConditional { .. }
-        | Value::Var(_)
-        | Value::Unbound(_)
-        | Value::Throwable(_)
-        | Value::Transient(_) => v.hash(state),
+        // All other variants are handled upstream (the single
+        // caller partitions the variants).
+        _ => unreachable!("hash partition"),
     }
 }
 
@@ -2032,17 +2014,21 @@ mod tests {
         let v2 = Value::Vector(super::Vector::from_vec(vec![Value::Int(2)]));
         assert_eq!(tl(l1.clone()), tl(v1.clone()));
         assert_eq!(tl(v1.clone()), tl(l1.clone()));
-        assert_ne!(tl(l1), tl(v2));
+        assert_ne!(tl(l1.clone()), tl(v2));
         let m1 = Value::Map(new_map().insert(kw("a"), Value::Int(1)));
         let m2 = Value::Map(new_map().insert(kw("a"), Value::Int(1)));
         let m3 = Value::Map(new_map().insert(kw("a"), Value::Int(2)));
         assert_eq!(tl(m1.clone()), tl(m2));
-        assert_ne!(tl(m1), tl(m3));
+        assert_ne!(tl(m1.clone()), tl(m3));
         let s1 = Value::Set(new_set().insert(Value::Int(1)));
         let s2 = Value::Set(new_set().insert(Value::Int(1)));
         let s3 = Value::Set(new_set().insert(Value::Int(2)));
         assert_eq!(tl(s1.clone()), tl(s2));
         assert_ne!(tl(s1), tl(s3));
+        // A sequential form against a scalar (or map) form is never
+        // equal: the `plain_equals_seq` fallback.
+        assert_ne!(tl(l1.clone()), tl(Value::Int(1)));
+        assert_ne!(tl(l1), tl(m1.clone()));
     }
 
     #[test]
@@ -2055,5 +2041,14 @@ mod tests {
         let e2 = Value::Extension(Arc::new(OpaqueExt));
         assert_eq!(tl(e1), tl(e2));
         assert_ne!(tl(Value::Extension(Arc::new(OpaqueExt))), tl(Value::Int(1)));
+    }
+
+    #[test]
+    #[should_panic(expected = "hash partition")]
+    fn hash_value_rest_rejects_upstream_variants() {
+        // Defensive arm: the single caller partitions the variants,
+        // so scalars never arrive here (only a dispatch bug could).
+        let mut h = DefaultHasher::new();
+        super::hash_value_rest(&Value::Nil, &mut h);
     }
 }

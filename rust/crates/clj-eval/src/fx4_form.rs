@@ -185,14 +185,32 @@ pub(crate) fn with_form_meta(expanded: Value, form: &Value) -> Value {
     expanded.with_meta(form.meta().cloned())
 }
 
-pub(crate) fn map_of(pairs: Vec<(Value, Value)>) -> Value {
+pub(crate) fn map_of(pairs: Vec<(Value, Value)>) -> Map {
     let mut map = new_map();
     for (k, v) in pairs {
         map = map.insert(k, v);
     }
-    Value::Map(map)
+    map
 }
 
 pub(crate) fn kw_get<'a>(m: &'a Map, name: &str) -> Option<&'a Value> {
     m.get(&kw(name))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn seq_items_falls_back_to_empty() {
+        // Defensive fallback: callers pre-filter with `is_seqable_data`,
+        // so only a direct call reaches the wildcard.
+        assert!(seq_items(&Value::Int(1)).is_empty());
+    }
+
+    #[test]
+    fn form_head_falls_back_to_nil() {
+        // Only list forms carry a head; anything else reads nil.
+        assert_eq!(form_head(&Value::Int(1)), Value::Nil);
+    }
 }
