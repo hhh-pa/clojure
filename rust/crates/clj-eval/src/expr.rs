@@ -3412,7 +3412,9 @@ impl<'a> Analyzer<'a> {
                 // key, exactly like the upstream splice back into the
                 // binding loop (validation ran already, so only maps
                 // reach the builder; anything else never does).
-                self.build_req_entries(v, span, acc)?;
+                // `return` (not `?`) keeps the arm-closing brace in an
+                // attributed region, as in `walk_req_list`.
+                return self.build_req_entries(v, span, acc);
             }
             return Ok(());
         }
