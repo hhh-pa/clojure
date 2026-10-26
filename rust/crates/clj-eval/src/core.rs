@@ -1792,7 +1792,7 @@ fn native_even(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErr
 /// `clj-repl` tests pin the semver shape).
 fn native_clojure_version(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/clojure-version", args, &[0])?;
-    Ok(Value::Str(Arc::from("0.1.0")))
+    Ok(Value::Str(Arc::from("1.13.0-alpha9")))
 }
 
 /// The S5D scalar natives installed into `clojure.core`.

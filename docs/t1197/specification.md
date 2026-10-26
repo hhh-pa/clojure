@@ -10,7 +10,8 @@
 
 1. The port reports the tracked language version: `*clojure-version*`
    (and `clojure-version`) reflect 1.13.0-alpha9 exactly as the JVM
-   oracle does (keys, qualifier spelling, interim flag).
+   oracle does (exact key set — no `:interim` — plus qualifier
+   spelling).
 2. Crate versions and a changelog name the 1.13.0-alpha9 equivalent:
    one consistent version across the workspace plus a root changelog
    entry describing what the release contains and what it diverges on.
@@ -62,7 +63,8 @@
 
 - `rust/crates/clj-eval/src/ns.rs` `clojure_version_map`
   (currently `{:major 0, :minor 1, :incremental 0, :qualifier
-  nil, :interim true}`) → oracle values; check `core.rs`
+  nil, :interim true}`) → oracle values (the `:interim` key
+  goes away, matching the JVM map); check `core.rs`
   `native_clojure_version` renders from the same source.
 - `rust/Cargo.toml` + `rust/crates/*/Cargo.toml` versions →
   the release version (single value, workspace-wide).
