@@ -3403,18 +3403,20 @@ impl<'a> Analyzer<'a> {
         acc: &mut MapAcc,
     ) -> Result<(), CompileError> {
         if let Value::Keyword(kw) = k {
+            // `:req!` (M2): each entry binds required with its raw
+            // key, exactly like the upstream splice back into the
+            // binding loop (validation ran already, so only maps
+            // reach the builder; anything else never does). Hoisted
+            // ahead of the chain so the chain keeps its master shape;
+            // every non-`req!` keyword takes the false edge past the
+            // block, keeping its brace attributed.
+            if kw.namespace().is_none() && kw.name() == "req!" {
+                return self.build_req_entries(v, span, acc);
+            }
             if is_outlet_directive(kw) {
                 set_outlet(kw, v, acc);
             } else if let Some(dir) = as_key_directive(kw) {
                 build_keys(v, &dir, &mut acc.keys, &mut acc.extra_keys);
-            } else if kw.namespace().is_none() && kw.name() == "req!" {
-                // `:req!` (M2): each entry binds required with its raw
-                // key, exactly like the upstream splice back into the
-                // binding loop (validation ran already, so only maps
-                // reach the builder; anything else never does).
-                // `return` (not `?`) keeps the arm-closing brace in an
-                // attributed region, as in `walk_req_list`.
-                return self.build_req_entries(v, span, acc);
             }
             return Ok(());
         }
