@@ -1888,6 +1888,8 @@ fn boot_install_natives(eval: &mut Evaluator) {
         .chain(crate::xform::XFORM_NATIVES.iter())
         .chain(crate::seqs::SEQS_NATIVES.iter())
         .chain(crate::coll::COLL_NATIVES.iter())
+        .chain(crate::re::RE_NATIVES.iter())
+        .chain(crate::rng::RNG_NATIVES.iter())
         .chain(crate::io::IO_NATIVES.iter())
         .chain(crate::concurrency::CONC_NATIVES.iter())
         .chain(crate::fx4_host::FX4_NATIVES.iter())
@@ -1983,6 +1985,8 @@ fn boot_refer_user(eval: &mut Evaluator) {
         .chain(crate::core::CORE_NATIVES.iter())
         .chain(crate::seqs::SEQS_NATIVES.iter())
         .chain(crate::coll::COLL_NATIVES.iter())
+        .chain(crate::re::RE_NATIVES.iter())
+        .chain(crate::rng::RNG_NATIVES.iter())
         .chain(crate::io::IO_NATIVES.iter())
         .chain(crate::concurrency::CONC_NATIVES.iter())
         .chain(crate::fx4_host::FX4_NATIVES.iter())
@@ -2041,6 +2045,16 @@ fn boot_refer_user(eval: &mut Evaluator) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Unmapped class names fall back to `Exception` (user code
+    /// only produces mapped classes — the pin keeps the totality).
+    #[test]
+    fn throw_class_for_falls_back_to_exception() {
+        assert_eq!(
+            throw_class_for("NoSuchClass"),
+            clj_value::ThrowClass::Exception
+        );
+    }
 
     #[test]
     fn signal_recur_to_native_is_internal() {

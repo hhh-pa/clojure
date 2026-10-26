@@ -306,8 +306,8 @@ fn pred_backlog_rows() {
     let mut eval = boot();
     // `/` normals.
     assert_eq!(run_last(&mut eval, "(/ 6 3)"), "2");
-    assert_eq!(run_last(&mut eval, "(/ 7 2)"), "3.5");
-    assert_eq!(run_last(&mut eval, "(/ 2)"), "0.5");
+    assert_eq!(run_last(&mut eval, "(/ 7 2)"), "7/2");
+    assert_eq!(run_last(&mut eval, "(/ 2)"), "1/2");
     // `dec`.
     assert_eq!(run_last(&mut eval, "(dec 1)"), "0");
     assert_eq!(run_last(&mut eval, "(dec 1.5)"), "0.5");

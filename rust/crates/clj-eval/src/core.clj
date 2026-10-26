@@ -913,3 +913,9 @@
           :identity
           (let [[shift mask imap switch-type skip-check] (prep-hashes ge default tests thens)]
             `(let [~ge ~e] (case* ~ge ~shift ~mask ~default ~imap ~switch-type :hash-identity ~skip-check))))))))
+
+;; --- `random-sample` (S-rng-tower): verbatim composition over
+;; `filter` + `rand` (zero Rust — the lazy semantics ride free).
+(defn random-sample
+  ([prob] (filter (fn [_] (< (rand) prob))))
+  ([prob coll] (filter (fn [_] (< (rand) prob)) coll)))

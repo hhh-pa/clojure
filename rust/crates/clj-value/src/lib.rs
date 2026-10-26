@@ -24,6 +24,7 @@ mod print;
 mod promise;
 mod seq;
 mod symbol;
+mod tower;
 mod transient;
 mod value;
 
@@ -44,6 +45,7 @@ pub use seq::{
     RealizedSeq, RepeatValue, Seq, SeqKind, SubVectorValue, ValSeqValue, seq_vec,
 };
 pub use symbol::Symbol;
+pub use tower::{BigDec, NON_TERMINATING, bigint_parse};
 pub use transient::{
     Transient, TransientError, TransientKind, TransientMap, TransientSet, TransientVector,
 };

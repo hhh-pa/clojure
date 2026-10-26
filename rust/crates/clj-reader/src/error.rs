@@ -140,12 +140,10 @@ pub enum ReaderError {
     /// `Integer.parseInt` overflow on a `%digits` arg (beyond §22:
     /// `For input string: "{token}"`, class `NumberFormatException`).
     ArgNumber { span: Span, token: String },
-    /// Ratio deferral (big-number follow-up N3).
-    Ratio { span: Span, token: String },
-    /// BigInt deferral (big-number follow-up N3).
-    BigInt { span: Span, token: String },
-    /// BigDecimal deferral (big-number follow-up N3).
-    BigDecimal { span: Span, token: String },
+    /// Zero-denominator ratio (`1/0` reads like the JVM
+    /// `ArithmeticException`, but the eval wraps reader errors —
+    /// see the `loader` tower test).
+    RatioZeroDiv { span: Span },
     /// `#=` deferral (data-reader follow-up N5).
     ReadEval { span: Span },
     /// `#inst`/`#uuid` deferral (data-reader follow-up N5).
@@ -207,9 +205,7 @@ impl ReaderError {
             | Self::NsMapValidNs { span, .. }
             | Self::NsMapAlias { span, .. }
             | Self::ArgNumber { span, .. }
-            | Self::Ratio { span, .. }
-            | Self::BigInt { span, .. }
-            | Self::BigDecimal { span, .. }
+            | Self::RatioZeroDiv { span, .. }
             | Self::DataReader { span, .. }
             | Self::Record { span, .. }
             | Self::LoneSurrogate { span, .. } => span,
@@ -263,13 +259,11 @@ impl ReaderError {
             Self::NestedFn { .. } | Self::BadArg { .. } | Self::SpliceTop { .. } => {
                 "IllegalStateException"
             }
-            Self::Ratio { .. }
-            | Self::BigInt { .. }
-            | Self::BigDecimal { .. }
-            | Self::ReadEval { .. }
+            Self::ReadEval { .. }
             | Self::DataReader { .. }
             | Self::Record { .. }
             | Self::LoneSurrogate { .. } => "ReaderError",
+            Self::RatioZeroDiv { .. } => "ArithmeticException",
             _ => "RuntimeException",
         }
     }
@@ -343,15 +337,7 @@ fn message_ns(err: &ReaderError) -> String {
             "Namespaced map literal must contain an even number of forms".to_owned()
         }
         ReaderError::ArgNumber { token, .. } => format!("For input string: \"{token}\""),
-        ReaderError::Ratio { token, .. } => format!(
-            "Ratio literals are not supported in this build (big-number follow-up N3): {token}"
-        ),
-        ReaderError::BigInt { token, .. } => format!(
-            "BigInt literals are not supported in this build (big-number follow-up N3): {token}"
-        ),
-        ReaderError::BigDecimal { token, .. } => format!(
-            "BigDecimal literals are not supported in this build (big-number follow-up N3): {token}"
-        ),
+        ReaderError::RatioZeroDiv { .. } => "Divide by zero".to_owned(),
         ReaderError::ReadEval { .. } => {
             "Eval reader #= is not supported in this build (data-reader follow-up N5)".to_owned()
         }
@@ -416,9 +402,7 @@ fn message_defer(err: &ReaderError) -> String {
         | ReaderError::NsMapAlias { .. }
         | ReaderError::NsMapOdd { .. }
         | ReaderError::ArgNumber { .. }
-        | ReaderError::Ratio { .. }
-        | ReaderError::BigInt { .. }
-        | ReaderError::BigDecimal { .. }
+        | ReaderError::RatioZeroDiv { .. }
         | ReaderError::ReadEval { .. } => err.message(),
     }
 }
@@ -520,12 +504,9 @@ mod tests {
                 "RuntimeException",
             ),
             (
-                ReaderError::Ratio {
-                    span,
-                    token: "1/2".to_owned(),
-                },
-                "Ratio literals are not supported in this build (big-number follow-up N3): 1/2",
-                "ReaderError",
+                ReaderError::RatioZeroDiv { span },
+                "Divide by zero",
+                "ArithmeticException",
             ),
             (
                 ReaderError::LoneSurrogate {

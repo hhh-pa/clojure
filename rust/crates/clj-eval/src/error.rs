@@ -295,6 +295,7 @@ pub fn jvm_class_of(v: &Value) -> String {
         Value::Bool(_) => "java.lang.Boolean".to_owned(),
         Value::Int(_) => "java.lang.Long".to_owned(),
         Value::Double(_) => "java.lang.Double".to_owned(),
+        Value::BigInt(_) | Value::BigDec(_) | Value::Ratio(_) => tower_class_of(v),
         Value::Str(_) => "java.lang.String".to_owned(),
         Value::Char(_) => "java.lang.Character".to_owned(),
         Value::Symbol(_) => "clojure.lang.Symbol".to_owned(),
@@ -302,13 +303,27 @@ pub fn jvm_class_of(v: &Value) -> String {
         Value::Vector(_) => "clojure.lang.PersistentVector".to_owned(),
         Value::MapEntry { .. } => "clojure.lang.MapEntry".to_owned(),
         Value::Map(m) => map_class_of(m).to_owned(),
-        Value::Set(s) => if s.is_sorted() {
-            "clojure.lang.PersistentTreeSet"
-        } else {
-            "clojure.lang.PersistentHashSet"
-        }
-        .to_owned(),
+        Value::Set(s) => set_class_of(s).to_owned(),
         other => jvm_class_of_ref(other),
+    }
+}
+
+/// Tower class names. Chained so each match stays under the
+/// complexity gate.
+fn tower_class_of(v: &Value) -> String {
+    match v {
+        Value::BigInt(_) => "clojure.lang.BigInt".to_owned(),
+        Value::BigDec(_) => "java.math.BigDecimal".to_owned(),
+        _ => "clojure.lang.Ratio".to_owned(),
+    }
+}
+
+/// Sorted sets print as tree sets, the rest as hash sets.
+fn set_class_of(s: &clj_value::Set) -> &'static str {
+    if s.is_sorted() {
+        "clojure.lang.PersistentTreeSet"
+    } else {
+        "clojure.lang.PersistentHashSet"
     }
 }
 
@@ -343,6 +358,9 @@ fn jvm_class_of_host(v: &Value) -> String {
         | Value::Bool(_)
         | Value::Int(_)
         | Value::Double(_)
+        | Value::BigInt(_)
+        | Value::BigDec(_)
+        | Value::Ratio(_)
         | Value::Str(_)
         | Value::Char(_)
         | Value::Symbol(_)

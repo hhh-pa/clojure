@@ -19,6 +19,10 @@
 use std::cmp::Ordering;
 use std::fmt;
 
+use num_bigint::BigInt;
+use num_rational::BigRational;
+use num_traits::ToPrimitive;
+
 use crate::{SubVectorValue, Value};
 
 /// A failed comparison: the JVM throws `ClassCastException` here.
@@ -86,13 +90,59 @@ pub fn compare(a: &Value, b: &Value) -> Result<Ordering, CompareError> {
 
 /// `Numbers.compare` over our numeric pairs (`None` unless both are
 /// numbers). `Int`/`Int` stays exact; anything touching `Double`
-/// compares as `f64`, like the combined ops.
+/// compares as `f64`, like the combined ops; every other tower
+/// pairing compares exactly over `BigRational`.
 fn compare_numbers(a: &Value, b: &Value) -> Option<Ordering> {
+    if matches!(a, Value::Double(_)) || matches!(b, Value::Double(_)) {
+        let (x, y) = (to_f64_value(a)?, to_f64_value(b)?);
+        return Some(num_cmp(x, y));
+    }
     match (a, b) {
         (Value::Int(x), Value::Int(y)) => Some(x.cmp(y)),
-        (Value::Int(x), Value::Double(y)) => Some(num_cmp(*x as f64, *y)),
-        (Value::Double(x), Value::Int(y)) => Some(num_cmp(*x, *y as f64)),
-        (Value::Double(x), Value::Double(y)) => Some(num_cmp(*x, *y)),
+        // `BigDec` against `BigDec`/`Int`/`BigInt` decides by sign
+        // and magnitude first — astronomical scales never expand
+        // (`compareTo` parity; `compare_exact` mirrors this for
+        // `Num`).
+        (Value::BigDec(d), Value::BigDec(e)) => Some(d.compare(e)),
+        (Value::BigDec(d), Value::Int(i)) => {
+            Some(d.compare(&crate::BigDec::from_bigint((*i).into())))
+        }
+        (Value::Int(i), Value::BigDec(e)) => {
+            Some(crate::BigDec::from_bigint((*i).into()).compare(e))
+        }
+        (Value::BigDec(d), Value::BigInt(n)) => {
+            Some(d.compare(&crate::BigDec::from_bigint(n.clone())))
+        }
+        (Value::BigInt(n), Value::BigDec(e)) => {
+            Some(crate::BigDec::from_bigint(n.clone()).compare(e))
+        }
+        _ => {
+            let (x, y) = (to_rational_value(a)?, to_rational_value(b)?);
+            Some(x.cmp(&y))
+        }
+    }
+}
+
+/// An exact rational for a non-`Double` number (`None` for
+/// non-numbers).
+fn to_rational_value(v: &Value) -> Option<BigRational> {
+    match v {
+        Value::Int(i) => Some(BigRational::from_integer(BigInt::from(*i))),
+        Value::BigInt(n) => Some(BigRational::from_integer(n.clone())),
+        Value::BigDec(d) => Some(d.to_rational()),
+        Value::Ratio(r) => Some(r.clone()),
+        _ => None,
+    }
+}
+
+/// An `f64` for any number (`None` for non-numbers).
+fn to_f64_value(v: &Value) -> Option<f64> {
+    match v {
+        Value::Int(i) => Some(*i as f64),
+        Value::Double(d) => Some(*d),
+        Value::BigInt(n) => n.to_f64(),
+        Value::BigDec(d) => Some(d.to_f64()),
+        Value::Ratio(r) => r.to_f64(),
         _ => None,
     }
 }
@@ -164,6 +214,9 @@ fn type_name(v: &Value) -> &'static str {
         Value::Bool(_) => "Boolean",
         Value::Int(_) => "Long",
         Value::Double(_) => "Double",
+        Value::BigInt(_) => "BigInt",
+        Value::BigDec(_) => "BigDecimal",
+        Value::Ratio(_) => "Ratio",
         Value::Str(_) => "String",
         Value::Char(_) => "Character",
         Value::Symbol(_) => "Symbol",
@@ -245,6 +298,63 @@ mod tests {
         let two = Value::Vector(Vector::from_vec(vec![Value::Int(2)]));
         assert_eq!(compare(&one, &two), Ok(Ordering::Less));
         assert_eq!(compare(&two, &one), Ok(Ordering::Greater));
+    }
+
+    /// Tower pairs compare exactly (no `Double` involved) or as
+    /// `f64` (a `Double` present) — every `to_rational_value` /
+    /// `to_f64_value` tower arm walks here.
+    #[test]
+    fn tower_pairs_compare() {
+        let big = Value::BigInt(num_bigint::BigInt::from(5));
+        let dec = Value::BigDec(crate::BigDec::parse("5.5").unwrap());
+        let half = Value::Ratio(num_rational::BigRational::new(
+            num_bigint::BigInt::from(1),
+            num_bigint::BigInt::from(2),
+        ));
+        assert_eq!(compare(&big, &Value::Int(3)), Ok(Ordering::Greater));
+        assert_eq!(compare(&dec, &big), Ok(Ordering::Greater));
+        assert_eq!(compare(&half, &Value::Int(1)), Ok(Ordering::Less));
+        assert_eq!(compare(&Value::Double(0.5), &big), Ok(Ordering::Less));
+        assert_eq!(compare(&dec, &Value::Double(5.0)), Ok(Ordering::Greater));
+        assert_eq!(compare(&half, &Value::Double(1.0)), Ok(Ordering::Less));
+    }
+
+    /// `BigDec` pairings decide by sign and magnitude first:
+    /// astronomical scales never expand (the `1E+2147483648`
+    /// literal parses — scale `i32` — but comparing it must not
+    /// build a two-billion-digit `pow10`).
+    #[test]
+    fn bigdec_pairs_skip_expansion() {
+        let huge = Value::BigDec(crate::BigDec::parse("1E+2147483648").unwrap());
+        let zero = Value::BigDec(crate::BigDec::parse("0").unwrap());
+        let one = Value::BigDec(crate::BigDec::parse("1.5").unwrap());
+        assert_eq!(compare(&huge, &zero), Ok(Ordering::Greater));
+        assert_eq!(compare(&zero, &huge), Ok(Ordering::Less));
+        assert_eq!(compare(&one, &Value::Int(1)), Ok(Ordering::Greater));
+        assert_eq!(compare(&Value::Int(2), &one), Ok(Ordering::Greater));
+        assert_eq!(
+            compare(&one, &Value::BigInt(num_bigint::BigInt::from(2))),
+            Ok(Ordering::Less)
+        );
+        assert_eq!(
+            compare(&Value::BigInt(num_bigint::BigInt::from(1)), &one),
+            Ok(Ordering::Less)
+        );
+    }
+
+    /// Tower type names surface in the incomparable error.
+    #[test]
+    fn tower_type_names() {
+        let s = Value::Str(Arc::from("s"));
+        let big = Value::BigInt(num_bigint::BigInt::from(5));
+        let dec = Value::BigDec(crate::BigDec::parse("5.5").unwrap());
+        let half = Value::Ratio(num_rational::BigRational::new(
+            num_bigint::BigInt::from(1),
+            num_bigint::BigInt::from(2),
+        ));
+        assert_eq!(message_of(&big, &s), "Cannot compare BigInt to String");
+        assert_eq!(message_of(&dec, &s), "Cannot compare BigDecimal to String");
+        assert_eq!(message_of(&half, &s), "Cannot compare Ratio to String");
     }
 
     #[test]

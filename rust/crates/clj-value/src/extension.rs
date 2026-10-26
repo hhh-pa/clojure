@@ -73,6 +73,7 @@ pub enum ThrowClass {
     ExecutionException,
     CancellationException,
     RejectedExecutionException,
+    PatternSyntaxException,
 }
 
 impl ThrowClass {
@@ -105,6 +106,7 @@ impl ThrowClass {
             Self::IllegalAccessError => "java.lang.IllegalAccessError",
             Self::NumberFormatException => "java.lang.NumberFormatException",
             Self::StringIndexOutOfBoundsException => "java.lang.StringIndexOutOfBoundsException",
+            Self::PatternSyntaxException => "java.util.regex.PatternSyntaxException",
             Self::IllegalFormatConversionException => "java.util.IllegalFormatConversionException",
             Self::UnknownFormatConversionException => "java.util.UnknownFormatConversionException",
             Self::MissingFormatConversionException => "java.util.MissingFormatConversionException",
@@ -208,6 +210,7 @@ fn throw_parent_format(jvm_name: &str) -> Option<&'static str> {
             Some("java.util.IllegalFormatException")
         }
         "java.util.IllegalFormatException" => Some("java.lang.IllegalArgumentException"),
+        "java.util.regex.PatternSyntaxException" => Some("java.lang.IllegalArgumentException"),
         _ => None,
     }
 }
@@ -416,11 +419,15 @@ mod tests {
                 ThrowClass::RejectedExecutionException,
                 "java.util.concurrent.RejectedExecutionException",
             ),
+            (
+                ThrowClass::PatternSyntaxException,
+                "java.util.regex.PatternSyntaxException",
+            ),
         ];
         for (class, want) in cases {
             assert_eq!(class.jvm_name(), want);
         }
-        assert_eq!(cases.len(), 20);
+        assert_eq!(cases.len(), 21);
     }
 
     #[test]

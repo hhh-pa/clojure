@@ -107,6 +107,7 @@ fn print_scalars(v: &Value, opts: &PrintOpts, level: Option<i64>, out: &mut Stri
         Value::Bool(false) => out.push_str("false"),
         Value::Int(i) => write!(out, "{i}").unwrap(),
         Value::Double(d) => out.push_str(&print_double(*d)),
+        Value::BigInt(_) | Value::BigDec(_) | Value::Ratio(_) => print_tower(v, opts, out),
         Value::Str(s) => print_string(s, opts.readably, out),
         Value::Char(c) => print_char(*c, opts.readably, out),
         Value::Symbol(s) => write!(out, "{s}").unwrap(),
@@ -135,6 +136,31 @@ fn print_scalars(v: &Value, opts: &PrintOpts, level: Option<i64>, out: &mut Stri
             );
         }
         other => print_more(other, opts, level, out),
+    }
+}
+
+/// Readable tower suffixes (`5N`, `5.0M`); `str`/`print` use
+/// the plain `toString` (`5`, `5.0`). Ratios print `n/d` either
+/// way. Chained so each match stays under the complexity gate.
+fn print_tower(v: &Value, opts: &PrintOpts, out: &mut String) {
+    match v {
+        Value::BigInt(n) => {
+            write!(out, "{n}").unwrap();
+            if opts.readably {
+                out.push('N');
+            }
+        }
+        Value::BigDec(d) => {
+            out.push_str(&d.to_bigdec_string());
+            if opts.readably {
+                out.push('M');
+            }
+        }
+        _ => {
+            if let Value::Ratio(r) = v {
+                write!(out, "{}/{}", r.numer(), r.denom()).unwrap();
+            }
+        }
     }
 }
 

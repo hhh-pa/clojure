@@ -754,15 +754,21 @@ fn eval_bare_macro_arity() {
 }
 
 #[test]
-fn load_string_ratio_deferral() {
+fn load_string_ratio_reads() {
+    // Tower literals read since S-rng-tower (issue #32): `1/2` is
+    // a value now, `1/0` keeps the JVM class AND message
+    // (`ArithmeticException | Divide by zero`).
     let mut eval = boot();
     assert_eq!(
-        uncaught_chain(&mut eval, "(load-string \"1/2\")"),
+        run_last(&mut eval, "[1/2 5N 5M 1E+3M]"),
+        "[1/2 5N 5M 1E+3M]"
+    );
+    assert_eq!(
+        uncaught_chain(&mut eval, "(load-string \"1/0\")"),
         vec![
             "clojure.lang.Compiler$CompilerException | Syntax error reading source at (2:1)."
                 .to_owned(),
-            "java.lang.Exception | Ratio literals are not supported in this build (big-number follow-up N3): 1/2"
-                .to_owned(),
+            "java.lang.ArithmeticException | Divide by zero".to_owned(),
         ]
     );
 }

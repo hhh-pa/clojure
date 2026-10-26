@@ -22,6 +22,7 @@
 //! probe17 — so no `Integer` split exists).
 
 use clj_value::Value;
+use num_traits::{ToPrimitive, Zero};
 
 use crate::stream::CharStream;
 use crate::symbol::{is_macro, is_whitespace};
@@ -94,6 +95,89 @@ pub fn lit_value(lit: &NumLit) -> Value {
             unreachable!("deferrals raise before conversion")
         }
     }
+}
+
+/// A `BigInt`-accepted token as a value. Shapes are pre-validated
+/// by [`match_number`] (decimal/`N`, hex, octal, radix, sign), so
+/// parsing cannot fail: `expect` documents the invariant
+/// coverably (the `floatPat` precedent above).
+#[must_use]
+pub fn bigint_token_value(token: &str) -> Value {
+    let (neg, rest) = match token.strip_prefix('-') {
+        Some(r) => (true, r),
+        None => (false, token.strip_prefix('+').unwrap_or(token)),
+    };
+    let body = rest.strip_suffix('N').unwrap_or(rest);
+    let magnitude: num_bigint::BigInt =
+        if let Some(hex) = body.strip_prefix("0x").or_else(|| body.strip_prefix("0X")) {
+            parse_radix(hex, 16)
+        } else if let Some(oct) = body.strip_prefix('0') {
+            if oct.is_empty() {
+                num_bigint::BigInt::ZERO
+            } else {
+                parse_radix(oct, 8)
+            }
+        } else if let Some(i) = body.find(['r', 'R']) {
+            let radix: u32 = body[..i]
+                .parse()
+                .expect("radix already validated by match_number");
+            parse_radix(&body[i + 1..], radix)
+        } else {
+            parse_radix(body, 10)
+        };
+    Value::BigInt(if neg { -magnitude } else { magnitude })
+}
+
+fn parse_radix(digits: &str, radix: u32) -> num_bigint::BigInt {
+    num_bigint::BigInt::parse_bytes(digits.as_bytes(), radix)
+        .expect("digits already validated by match_number")
+}
+
+/// A `BigDecimal`-accepted token as a value (the `M` suffix is
+/// stripped; the grammar is pre-validated, same coverability
+/// argument as above).
+#[must_use]
+pub fn bigdec_token_value(token: &str) -> Value {
+    let body = token.strip_suffix('M').unwrap_or(token);
+    Value::BigDec(
+        clj_value::BigDec::parse(body).expect("grammar already validated by match_number"),
+    )
+}
+
+/// A ratio token: divisible ratios reduce to `Int`/`BigInt`
+/// (oracle `4/2` → `2`), a zero denominator is the reader
+/// `Divide by zero`.
+pub enum RatioToken {
+    Value(Value),
+    ZeroDenominator,
+}
+
+/// A `ratioPat`-accepted token as a value (`is_ratio`
+/// pre-validated the digit shapes).
+#[must_use]
+pub fn ratio_token_value(token: &str) -> RatioToken {
+    let rest = token.strip_prefix(['+', '-']).unwrap_or(token);
+    let slash = rest
+        .find('/')
+        .expect("slash already validated by match_number");
+    let (num, den) = (&rest[..slash], &rest[slash + 1..]);
+    let numer = num_bigint::BigInt::parse_bytes(num.as_bytes(), 10)
+        .expect("numerator already validated by match_number");
+    let denom = num_bigint::BigInt::parse_bytes(den.as_bytes(), 10)
+        .expect("denominator already validated by match_number");
+    if denom.is_zero() {
+        return RatioToken::ZeroDenominator;
+    }
+    let neg = token.starts_with('-');
+    let (numer, denom) = if neg { (-numer, denom) } else { (numer, denom) };
+    if numer.clone() % denom.clone() == num_bigint::BigInt::ZERO {
+        let q = numer / denom;
+        return RatioToken::Value(match q.to_i64() {
+            Some(i) => Value::Int(i),
+            None => Value::BigInt(q),
+        });
+    }
+    RatioToken::Value(Value::Ratio(num_rational::BigRational::new(numer, denom)))
 }
 
 fn strip_sign(s: &str) -> (bool, &str) {
