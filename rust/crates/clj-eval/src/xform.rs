@@ -227,6 +227,41 @@ fn halt_unwrap(result: &Value) -> Option<Value> {
     }
 }
 
+/// One `halt-when` step outside the closure so `native_halt_when`
+/// stays under the complexity ratchet (oracle `halt*`,
+/// `core.clj` source).
+fn halt_step(
+    eval: &mut Evaluator,
+    pred: &Value,
+    retf: &Option<Value>,
+    rf: &Value,
+    args: &[Value],
+) -> Result<Value, NativeError> {
+    match args.len() {
+        0 => call_checked(eval, rf, &[]),
+        1 => match halt_unwrap(&args[0]) {
+            Some(halt) => Ok(halt),
+            None => call_checked(eval, rf, std::slice::from_ref(&args[0])),
+        },
+        2 => {
+            let (result, input) = (args[0].clone(), args[1].clone());
+            if call_checked(eval, pred, std::slice::from_ref(&input))?.is_truthy() {
+                let halted = match retf {
+                    Some(retf) => {
+                        let completed = call_checked(eval, rf, &[result])?;
+                        call_checked(eval, retf, &[completed, input])?
+                    }
+                    None => input,
+                };
+                let held = new_map().insert(halt_key(), halted);
+                return Ok(Reduced::wrap(Value::Map(held)));
+            }
+            call_checked(eval, rf, &[result, input])
+        }
+        n => Err(NativeError::arity("clojure.core/halt-when$fn", n)),
+    }
+}
+
 fn native_halt_when(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/halt-when", args, &[1, 2])?;
     let pred = args[0].clone();
@@ -247,30 +282,7 @@ fn native_halt_when(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nativ
                 "clojure.core/halt-when$fn",
                 move |eval, args| {
                     let (pred, retf, rf) = (pred.clone(), retf.clone(), rf.clone());
-                    match args.len() {
-                        0 => call_checked(eval, &rf, &[]),
-                        1 => match halt_unwrap(&args[0]) {
-                            Some(halt) => Ok(halt),
-                            None => call_checked(eval, &rf, std::slice::from_ref(&args[0])),
-                        },
-                        2 => {
-                            let (result, input) = (args[0].clone(), args[1].clone());
-                            if call_checked(eval, &pred, std::slice::from_ref(&input))?.is_truthy()
-                            {
-                                let halted = match &retf {
-                                    Some(retf) => {
-                                        let completed = call_checked(eval, &rf, &[result])?;
-                                        call_checked(eval, retf, &[completed, input])?
-                                    }
-                                    None => input,
-                                };
-                                let held = new_map().insert(halt_key(), halted);
-                                return Ok(Reduced::wrap(Value::Map(held)));
-                            }
-                            call_checked(eval, &rf, &[result, input])
-                        }
-                        n => Err(NativeError::arity("clojure.core/halt-when$fn", n)),
-                    }
+                    halt_step(eval, &pred, &retf, &rf, args)
                 },
             ))
         },
