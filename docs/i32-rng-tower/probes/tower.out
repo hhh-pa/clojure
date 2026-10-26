@@ -121,3 +121,5 @@ conv-hugedecint ["class java.lang.IllegalArgumentException" "Value out of range 
 conv-hugedecfloat ["class java.lang.IllegalArgumentException" "Value out of range for float: 1E+300"]
 range-ratd [(1/2 3/2) (0 1/2 1N 3/2 2N)]
 range-mixstep [(0M 1M) 5.5]
+bigdec-exp [1E+3M ["class java.lang.NumberFormatException" "Too many nonzero exponent digits."]]
+bigdec-expe [nil nil]

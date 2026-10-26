@@ -155,3 +155,7 @@
 (throwof "range-ratd" '[(range 1/2 2.5) (range 0 2.5 1/2)])
 ;; bigdec-start/int-end/bigint-step kinds
 (throwof "range-mixstep" '[(range 0M 2 1N) (float 5.5M)])
+;; huge/plus exponents
+(throwof "bigdec-exp" '[(bigdec "1e+3") (try (bigdec "1e99999999999999999999999") (catch Throwable e [(str (type e)) (.getMessage e)]))])
+;; empty exponent tail
+(throwof "bigdec-expe" '[(try (bigdec "1e") (catch Throwable e (.getMessage e))) (try (bigdec "1e-") (catch Throwable e (.getMessage e)))])

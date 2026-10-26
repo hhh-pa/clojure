@@ -101,12 +101,19 @@ pub fn hasheq(v: &Value) -> i32 {
         Value::Keyword(k) => keyword_hasheq(k),
         Value::List(l) => hash_ordered(l.iter().map(hasheq)),
         Value::Vector(v) => hash_ordered(v.iter().map(hasheq)),
-        // Tower (equiv-consistent, structural otherwise — the JVM
-        // magic values are not mirrored, see module docs):
-        // `BigInt` in `long` range hashes exactly like `Int`
-        // (`{5N :a}` looks up by `5`); wider ones mix their
-        // bytes; decimals mix the stripped pair (so `5.0M` ≡
-        // `5.00M`); rationals mix numerator and denominator.
+        Value::BigInt(_) | Value::BigDec(_) | Value::Ratio(_) => hasheq_tower(v),
+        other => hasheq_mid(other),
+    }
+}
+
+/// Tower `hasheq` (equiv-consistent, structural otherwise — the
+/// JVM magic values are not mirrored, see module docs):
+/// `BigInt` in `long` range hashes exactly like `Int` (`{5N :a}`
+/// looks up by `5`); wider ones mix their bytes; decimals mix
+/// the stripped pair (so `5.0M` ≡ `5.00M`); rationals mix
+/// numerator and denominator.
+fn hasheq_tower(v: &Value) -> i32 {
+    match v {
         Value::BigInt(n) => match n.to_i64() {
             Some(i) => hash_long(i),
             None => hash_ordered(n.to_signed_bytes_be().into_iter().map(i32::from)),
@@ -119,7 +126,7 @@ pub fn hasheq(v: &Value) -> i32 {
             hasheq(&Value::BigInt(r.numer().clone())),
             hasheq(&Value::BigInt(r.denom().clone())),
         ),
-        other => hasheq_mid(other),
+        _ => unreachable!("caller passes tower values only"),
     }
 }
 
@@ -1071,6 +1078,14 @@ mod tests {
     fn empty_string_takes_hash_int_fast_path() {
         assert_eq!(str_hashcode(""), 0);
         assert_eq!(hasheq(&strv("")), 0);
+    }
+
+    /// `hasheq_tower` rejects non-tower values (the caller
+    /// dispatches on kind first — the panic is the contract).
+    #[test]
+    #[should_panic(expected = "caller passes tower values only")]
+    fn hasheq_tower_rejects_non_tower() {
+        let _ = super::hasheq_tower(&Value::Nil);
     }
 
     /// `hash_code` walks every tower arm (Java word formulas are

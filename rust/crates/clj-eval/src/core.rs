@@ -515,38 +515,42 @@ fn native_quot(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErr
             }
             x.checked_div(*y).map(Value::Int).ok_or_else(overflow)
         }
-        _ if either_double(&a, &b) => {
-            let (x, y) = (to_f64(a), to_f64(b));
-            // Zero first (even over `NaN`, `:quot-nan-0`), then
-            // finiteness (either side, `:quot-nan-div`), then the
-            // quotient's own finiteness (`:quot-ovf`); `-0.0`
-            // normalizes to `+0.0` (`:quot-negfrac`, `:quot-2-neginf`).
-            if y == 0.0 {
-                return Err(divide_by_zero());
-            }
-            if !x.is_finite() || y.is_nan() {
-                return Err(infinite_or_nan());
-            }
-            let q = (x / y).trunc();
-            if !q.is_finite() {
-                return Err(infinite_or_nan());
-            }
-            Ok(Value::Double(if q == 0.0 { 0.0 } else { q }))
-        }
+        _ if either_double(&a, &b) => quot_double(to_f64(a), to_f64(b)),
         // Tower truncating division (oracle `quotrem`/`quotmix`/
         // `quotdec`): any tower zero divisor is `Divide by zero`
         // (unlike the `Int` `/ by zero` wedge, which stays).
-        _ => {
-            if num_rational(&b).numer().is_zero() {
-                return Err(divide_by_zero());
-            }
-            if num_rank(&a).max(num_rank(&b)) == 3 {
-                Ok(Value::BigDec(num_bigdec(&a)?.quot_trunc(&num_bigdec(&b)?)))
-            } else {
-                let (x, y) = (num_rational(&a), num_rational(&b));
-                Ok(num_value(num_ratio(trunc_div(&x, &y))))
-            }
-        }
+        _ => quot_tower(&a, &b),
+    }
+}
+
+/// `quot` over a `Double` pair: zero first (even over `NaN`,
+/// `:quot-nan-0`), then finiteness (either side, `:quot-nan-div`),
+/// then the quotient's own finiteness (`:quot-ovf`); `-0.0`
+/// normalizes to `+0.0` (`:quot-negfrac`, `:quot-2-neginf`).
+fn quot_double(x: f64, y: f64) -> Result<Value, NativeError> {
+    if y == 0.0 {
+        return Err(divide_by_zero());
+    }
+    if !x.is_finite() || y.is_nan() {
+        return Err(infinite_or_nan());
+    }
+    let q = (x / y).trunc();
+    if !q.is_finite() {
+        return Err(infinite_or_nan());
+    }
+    Ok(Value::Double(if q == 0.0 { 0.0 } else { q }))
+}
+
+/// `quot` over tower kinds: exact truncating division.
+fn quot_tower(a: &Num, b: &Num) -> Result<Value, NativeError> {
+    if num_rational(b).numer().is_zero() {
+        return Err(divide_by_zero());
+    }
+    if num_rank(a).max(num_rank(b)) == 3 {
+        Ok(Value::BigDec(num_bigdec(a)?.quot_trunc(&num_bigdec(b)?)))
+    } else {
+        let (x, y) = (num_rational(a), num_rational(b));
+        Ok(num_value(num_ratio(trunc_div(&x, &y))))
     }
 }
 
@@ -571,37 +575,41 @@ fn native_rem(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErro
             // `MIN % -1` is the only overflow (0, but checked).
             x.checked_rem(*y).map(Value::Int).ok_or_else(overflow)
         }
-        _ if either_double(&a, &b) => {
-            let (x, y) = (to_f64(a), to_f64(b));
-            // Zero first (`:rem-nan-0`), then finiteness
-            // (`:rem-nan-num`); an infinite divisor is `NaN`, NOT
-            // `x` (`:rem-num-inf`, `:rem-num-neginf`).
-            if y == 0.0 {
-                return Err(divide_by_zero());
-            }
-            if !x.is_finite() || y.is_nan() {
-                return Err(infinite_or_nan());
-            }
-            if !y.is_finite() {
-                return Ok(Value::Double(f64::NAN));
-            }
-            Ok(Value::Double(x % y))
-        }
+        _ if either_double(&a, &b) => rem_double(to_f64(a), to_f64(b)),
         // Tower remainder (oracle `dec-each`): exact, in the
         // dividend's kind (`(rem 5M 2)` → `1M`, `(rem 1/2 1)` →
         // `1/2`).
-        _ => {
-            if num_rational(&b).numer().is_zero() {
-                return Err(divide_by_zero());
-            }
-            if num_rank(&a).max(num_rank(&b)) == 3 {
-                Ok(Value::BigDec(num_bigdec(&a)?.rem(&num_bigdec(&b)?)))
-            } else {
-                let (x, y) = (num_rational(&a), num_rational(&b));
-                let q = trunc_div(&x, &y);
-                Ok(num_value(num_ratio(x - q * y)))
-            }
-        }
+        _ => rem_tower(&a, &b),
+    }
+}
+
+/// `rem` over a `Double` pair: zero first (`:rem-nan-0`), then
+/// finiteness (`:rem-nan-num`); an infinite divisor is `NaN`, NOT
+/// `x` (`:rem-num-inf`, `:rem-num-neginf`).
+fn rem_double(x: f64, y: f64) -> Result<Value, NativeError> {
+    if y == 0.0 {
+        return Err(divide_by_zero());
+    }
+    if !x.is_finite() || y.is_nan() {
+        return Err(infinite_or_nan());
+    }
+    if !y.is_finite() {
+        return Ok(Value::Double(f64::NAN));
+    }
+    Ok(Value::Double(x % y))
+}
+
+/// `rem` over tower kinds: exact, in the dividend's kind.
+fn rem_tower(a: &Num, b: &Num) -> Result<Value, NativeError> {
+    if num_rational(b).numer().is_zero() {
+        return Err(divide_by_zero());
+    }
+    if num_rank(a).max(num_rank(b)) == 3 {
+        Ok(Value::BigDec(num_bigdec(a)?.rem(&num_bigdec(b)?)))
+    } else {
+        let (x, y) = (num_rational(a), num_rational(b));
+        let q = trunc_div(&x, &y);
+        Ok(num_value(num_ratio(x - q * y)))
     }
 }
 
@@ -620,43 +628,56 @@ fn native_mod(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErro
                 r.checked_add(*y).ok_or_else(overflow)?
             }))
         }
-        _ if either_double(&a, &b) => {
-            let (x, y) = (to_f64(a), to_f64(b));
-            // Zero first (`:mod-nan-0`), then finiteness
-            // (`:mod-nan-num`); an infinite divisor falls out of
-            // the formula as `NaN` (`:mod-num-inf`).
-            if y == 0.0 {
-                return Err(divide_by_zero());
-            }
-            if !x.is_finite() || y.is_nan() {
-                return Err(infinite_or_nan());
-            }
-            Ok(Value::Double(((x % y) + y) % y))
-        }
+        _ if either_double(&a, &b) => mod_double(to_f64(a), to_f64(b)),
         // Tower modulus (oracle `dec-each`): the remainder
         // adjusted to the divisor's sign, in the dividend's kind.
-        _ => {
-            if num_rational(&b).numer().is_zero() {
-                return Err(divide_by_zero());
-            }
-            if num_rank(&a).max(num_rank(&b)) == 3 {
-                let (x, y) = (num_bigdec(&a)?, num_bigdec(&b)?);
-                Ok(Value::BigDec(bigdec_mod(&x, &y)))
-            } else {
-                let (x, y) = (num_rational(&a), num_rational(&b));
-                let q = trunc_div(&x, &y);
-                let y_sign = y.numer().sign();
-                let r = x - q * y.clone();
-                Ok(num_value(num_ratio(
-                    if r.numer().is_zero() || r.numer().sign() == y_sign {
-                        r
-                    } else {
-                        r + y
-                    },
-                )))
-            }
-        }
+        _ => mod_tower(&a, &b),
     }
+}
+
+/// `mod` over a `Double` pair: zero first (`:mod-nan-0`), then
+/// finiteness (`:mod-nan-num`); an infinite divisor falls out of
+/// the formula as `NaN` (`:mod-num-inf`).
+fn mod_double(x: f64, y: f64) -> Result<Value, NativeError> {
+    if y == 0.0 {
+        return Err(divide_by_zero());
+    }
+    if !x.is_finite() || y.is_nan() {
+        return Err(infinite_or_nan());
+    }
+    Ok(Value::Double(((x % y) + y) % y))
+}
+
+/// `mod` over tower kinds: the remainder adjusted to the
+/// divisor's sign, in the dividend's kind.
+fn mod_tower(a: &Num, b: &Num) -> Result<Value, NativeError> {
+    if num_rational(b).numer().is_zero() {
+        return Err(divide_by_zero());
+    }
+    if num_rank(a).max(num_rank(b)) == 3 {
+        let (x, y) = (num_bigdec(a)?, num_bigdec(b)?);
+        Ok(Value::BigDec(bigdec_mod(&x, &y)))
+    } else {
+        mod_rational(&num_rational(a), &num_rational(b))
+    }
+}
+
+/// `mod` over two exact rationals (sign-adjusted remainder,
+/// folded).
+fn mod_rational(
+    x: &num_rational::BigRational,
+    y: &num_rational::BigRational,
+) -> Result<Value, NativeError> {
+    let q = trunc_div(x, y);
+    let y_sign = y.numer().sign();
+    let r = x - q * y.clone();
+    Ok(num_value(num_ratio(
+        if r.numer().is_zero() || r.numer().sign() == y_sign {
+            r
+        } else {
+            r + y.clone()
+        },
+    )))
 }
 
 /// `BigDec` modulus: the remainder adjusted to the divisor's
@@ -1771,15 +1792,7 @@ fn native_int(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErro
     // and characters convert (fixprobe10/11).
     Ok(Value::Int(match &args[0] {
         Value::Int(i) => int_exact_long(*i).map(i64::from)?,
-        Value::Double(d) => {
-            if d.is_nan() {
-                0
-            } else if *d > f64::from(i32::MAX) || *d < f64::from(i32::MIN) {
-                return Err(out_of_range("int", Num::Double(*d)));
-            } else {
-                d.trunc() as i64
-            }
-        }
+        Value::Double(d) => double_int(*d)?,
         Value::Char(c) => *c as i64,
         // Tower integers take the `long` range check (exact
         // digits) then `toIntExact` (oracles `conv-i1`,
@@ -1791,6 +1804,19 @@ fn native_int(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErro
         Value::Nil => return Err(npe_char_value()),
         v => return Err(cce_err(v, "java.lang.Character")),
     }))
+}
+
+/// An `int` from a `double`: `NaN` is 0, past-`i32` fails `Value
+/// out of range for int` (checked BEFORE truncating), else
+/// truncation toward zero.
+fn double_int(d: f64) -> Result<i64, NativeError> {
+    if d.is_nan() {
+        Ok(0)
+    } else if d > f64::from(i32::MAX) || d < f64::from(i32::MIN) {
+        Err(out_of_range("int", Num::Double(d)))
+    } else {
+        Ok(d.trunc() as i64)
+    }
 }
 
 fn native_long(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
@@ -1952,39 +1978,27 @@ fn native_float(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeEr
     // simple values match; the class/precision gap is documented).
     Ok(Value::Double(match &args[0] {
         Value::Int(i) => *i as f64,
-        Value::Double(d) => {
-            // `NaN` falls through (all comparisons false).
-            if *d > f64::from(f32::MAX) || *d < -f64::from(f32::MAX) {
-                return Err(out_of_range("float", Num::Double(*d)));
-            }
-            *d
-        }
+        // `NaN` falls through (all comparisons false).
+        Value::Double(d) => float_checked(*d, Num::Double(*d))?,
         // Tower narrows like `double`, then takes the same
         // range check (the class/precision gap is documented).
-        Value::BigInt(n) => {
-            let f = n.to_f64().unwrap_or(f64::NAN);
-            if f > f64::from(f32::MAX) || f < -f64::from(f32::MAX) {
-                return Err(out_of_range("float", Num::BigInt(n.clone())));
-            }
-            f
-        }
-        Value::Ratio(r) => {
-            let f = r.to_f64().unwrap_or(f64::NAN);
-            if f > f64::from(f32::MAX) || f < -f64::from(f32::MAX) {
-                return Err(out_of_range("float", Num::Ratio(r.clone())));
-            }
-            f
-        }
-        Value::BigDec(d) => {
-            let f = d.to_f64();
-            if f > f64::from(f32::MAX) || f < -f64::from(f32::MAX) {
-                return Err(out_of_range("float", Num::BigDec(d.clone())));
-            }
-            f
-        }
+        Value::BigInt(n) => float_checked(n.to_f64().unwrap_or(f64::NAN), Num::BigInt(n.clone()))?,
+        Value::Ratio(r) => float_checked(r.to_f64().unwrap_or(f64::NAN), Num::Ratio(r.clone()))?,
+        Value::BigDec(d) => float_checked(d.to_f64(), Num::BigDec(d.clone()))?,
         Value::Nil => return Err(npe_double_value()),
         v => return Err(cce_err(v, "java.lang.Number")),
     }))
+}
+
+/// A `float` from a narrowed `f64` with its error rendering: past
+/// the `f32` range fails `Value out of range for float`, else the
+/// exact `double` (no `f32` rounding).
+fn float_checked(f: f64, err: Num) -> Result<f64, NativeError> {
+    if f > f64::from(f32::MAX) || f < -f64::from(f32::MAX) {
+        Err(out_of_range("float", err))
+    } else {
+        Ok(f)
+    }
 }
 
 fn native_short(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {

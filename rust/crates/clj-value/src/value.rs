@@ -1053,6 +1053,39 @@ fn double_hash_bits(d: f64) -> u64 {
     }
 }
 
+/// Tower `Hash` arms. Chained so each match stays under the
+/// complexity gate: a `BigInt` that fits is exactly its `Int`
+/// (they are `=`); wider ones hash by magnitude bytes; stripped
+/// decimals hash equally exactly when `compareTo` says so (the
+/// `=` rule); rationals are always normalized, so the pair is
+/// unique.
+fn hash_tower_value<H: Hasher>(v: &Value, state: &mut H) {
+    match v {
+        Value::BigInt(n) => {
+            if let Some(i) = n.to_i64() {
+                state.write_u8(2);
+                state.write_i64(i);
+            } else {
+                state.write_u8(23);
+                hash_bigint_bytes(n, state);
+            }
+        }
+        Value::BigDec(d) => {
+            state.write_u8(24);
+            let (unscaled, scale) = d.stripped();
+            hash_bigint_bytes(&unscaled, state);
+            state.write_i64(scale);
+        }
+        _ => {
+            if let Value::Ratio(r) = v {
+                state.write_u8(25);
+                hash_bigint_bytes(r.numer(), state);
+                hash_bigint_bytes(r.denom(), state);
+            }
+        }
+    }
+}
+
 impl Hash for Value {
     fn hash<H: Hasher>(&self, state: &mut H) {
         // Family markers keep unequal types apart (`Int` and
@@ -1071,30 +1104,8 @@ impl Hash for Value {
                 state.write_u8(3);
                 state.write_u64(double_hash_bits(*d));
             }
-            // A `BigInt` that fits is exactly its `Int` (they are
-            // `=`); wider ones hash by magnitude bytes.
-            Value::BigInt(n) => {
-                if let Some(i) = n.to_i64() {
-                    state.write_u8(2);
-                    state.write_i64(i);
-                } else {
-                    state.write_u8(23);
-                    hash_bigint_bytes(n, state);
-                }
-            }
-            // Stripped decimals hash equally exactly when
-            // `compareTo` says so (the `=` rule below).
-            Value::BigDec(d) => {
-                state.write_u8(24);
-                let (unscaled, scale) = d.stripped();
-                hash_bigint_bytes(&unscaled, state);
-                state.write_i64(scale);
-            }
-            // Rationals are always normalized, so the pair is unique.
-            Value::Ratio(r) => {
-                state.write_u8(25);
-                hash_bigint_bytes(r.numer(), state);
-                hash_bigint_bytes(r.denom(), state);
+            Value::BigInt(_) | Value::BigDec(_) | Value::Ratio(_) => {
+                hash_tower_value(self, state);
             }
             Value::Str(s) => {
                 state.write_u8(4);
@@ -1112,15 +1123,6 @@ impl Hash for Value {
                 state.write_u8(7);
                 k.hash(state);
             }
-            // Sequential hash ignores List-vs-Vector (they can be `=`).
-            Value::List(l) => {
-                state.write_u8(8);
-                l.hash(state);
-            }
-            Value::Vector(v) => {
-                state.write_u8(8);
-                v.hash(state);
-            }
             other => hash_value_mid(other, state),
         }
     }
@@ -1136,6 +1138,15 @@ fn hash_bigint_bytes<H: Hasher>(n: &num_bigint::BigInt, state: &mut H) {
 
 fn hash_value_mid<H: Hasher>(v: &Value, state: &mut H) {
     match v {
+        // Sequential hash ignores List-vs-Vector (they can be `=`).
+        Value::List(l) => {
+            state.write_u8(8);
+            l.hash(state);
+        }
+        Value::Vector(v) => {
+            state.write_u8(8);
+            v.hash(state);
+        }
         // A map entry hashes exactly like its 2-vector (they
         // are `=`, so the `Eq`/`Hash` contract requires it;
         // Oracle FX2 `hash-eq`, `distinct`, `frequencies`).

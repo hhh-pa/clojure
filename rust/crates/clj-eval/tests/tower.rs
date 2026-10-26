@@ -131,6 +131,20 @@ fn tower_bigdec_rows() {
     assert_eq!(run_last(&mut eval, "(bigdec 5.0M)"), "5.0M");
     assert_eq!(run_last(&mut eval, "(bigdec \"1e3\")"), "1E+3M");
     assert_eq!(run_last(&mut eval, "(bigdec \"1.5e-3\")"), "0.0015M");
+    // Explicit exponent signs, and the exponent message shapes
+    // (oracles `bigdec-exp`, `bigdec-expe`).
+    assert_eq!(run_last(&mut eval, "(bigdec \"1e+3\")"), "1E+3M");
+    assert_eq!(
+        uncaught(&mut eval, "(bigdec \"1e99999999999999999999999\")"),
+        "java.lang.NumberFormatException | Too many nonzero exponent digits."
+    );
+    for form in ["(bigdec \"1e\")", "(bigdec \"1e-\")"] {
+        assert_eq!(
+            uncaught(&mut eval, form),
+            "java.lang.NumberFormatException | ",
+            "{form}"
+        );
+    }
     assert_eq!(
         run_last(
             &mut eval,
@@ -330,6 +344,21 @@ fn tower_print_rows() {
     assert_eq!(
         run_last(&mut eval, "[(pr-str 5.0M) (pr-str 5.00M)]"),
         "[\"5.0M\" \"5.00M\"]"
+    );
+    // Adjusted-exponent rendering with a non-empty coefficient
+    // tail, and exponent/mantissa error shapes (same `bad`
+    // message the oracle pins for `(bigdec "x")`).
+    assert_eq!(
+        run_last(&mut eval, "(str (bigdec \"1.5e5\"))"),
+        "\"1.5E+5\""
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(bigdec \"1eX\")"),
+        "java.lang.NumberFormatException | Character X is neither a decimal digit number, decimal point, nor \"e\" notation exponential mark."
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(bigdec \"12q\")"),
+        "java.lang.NumberFormatException | Character q is neither a decimal digit number, decimal point, nor \"e\" notation exponential mark."
     );
     assert_eq!(run_last(&mut eval, "(pr-str 1/2)"), "\"1/2\"");
 }

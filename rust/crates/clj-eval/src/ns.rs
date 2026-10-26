@@ -2046,6 +2046,16 @@ fn boot_refer_user(eval: &mut Evaluator) {
 mod tests {
     use super::*;
 
+    /// Unmapped class names fall back to `Exception` (user code
+    /// only produces mapped classes — the pin keeps the totality).
+    #[test]
+    fn throw_class_for_falls_back_to_exception() {
+        assert_eq!(
+            throw_class_for("NoSuchClass"),
+            clj_value::ThrowClass::Exception
+        );
+    }
+
     #[test]
     fn signal_recur_to_native_is_internal() {
         // Defense in depth: an escaping `recur` (impossible — the

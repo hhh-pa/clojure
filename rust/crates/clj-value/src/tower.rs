@@ -40,23 +40,97 @@ fn pow10(exp: u32) -> BigInt {
     BigInt::from(10).pow(exp)
 }
 
+/// The `BigDecimal(String)` failure for a bad character.
+/// Chained so each parse fn stays under the complexity gate.
+fn bad_decimal_char(c: char) -> String {
+    format!(
+        "Character {c} is neither a decimal digit number, decimal point, nor \"e\" notation exponential mark."
+    )
+}
+
+/// Digits with at most one point: `(int, frac, seen-any-digit)`.
+/// Chained so each parse fn stays under the complexity gate.
+fn parse_mantissa(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> (String, String, bool) {
+    let mut int_digits = String::new();
+    let mut frac_digits = String::new();
+    let mut seen_point = false;
+    let mut seen_digit = false;
+    while let Some(&c) = chars.peek() {
+        if c.is_ascii_digit() {
+            seen_digit = true;
+            if seen_point {
+                frac_digits.push(c);
+            } else {
+                int_digits.push(c);
+            }
+            chars.next();
+        } else if c == '.' && !seen_point {
+            seen_point = true;
+            chars.next();
+        } else {
+            break;
+        }
+    }
+    (int_digits, frac_digits, seen_digit)
+}
+
+/// An `e`/`E` exponent tail (the `e` already consumed): optional
+/// sign, then digits. A bare `e` fails with no message and an
+/// overflowing one with `Too many nonzero exponent digits`
+/// (oracles `bigdec-expe`, `bigdec-exp`). Chained so each parse
+/// fn stays under the complexity gate.
+fn parse_exp(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> Result<i64, String> {
+    let mut exp_neg = false;
+    match chars.peek() {
+        Some('+') => {
+            chars.next();
+        }
+        Some('-') => {
+            exp_neg = true;
+            chars.next();
+        }
+        _ => {}
+    }
+    let mut exp_digits = String::new();
+    while let Some(&d) = chars.peek() {
+        if !d.is_ascii_digit() {
+            return Err(bad_decimal_char(d));
+        }
+        exp_digits.push(d);
+        chars.next();
+    }
+    if exp_digits.is_empty() {
+        return Err(String::new());
+    }
+    let mut exp = exp_digits
+        .parse::<i64>()
+        .map_err(|_| "Too many nonzero exponent digits.".to_owned())?;
+    if exp_neg {
+        exp = -exp;
+    }
+    Ok(exp)
+}
+
+/// Assemble the mantissa digits and exponent into the
+/// `(unscaled, scale)` pair. Chained so each parse fn stays
+/// under the complexity gate.
+fn finish_parse(int_digits: String, frac_digits: &str, exp: i64, neg: bool) -> BigDec {
+    let mut digits = int_digits;
+    digits.push_str(frac_digits);
+    let stripped = digits.trim_start_matches('0');
+    let unscaled = if stripped.is_empty() {
+        BigInt::ZERO
+    } else {
+        BigInt::parse_bytes(stripped.as_bytes(), 10).unwrap_or(BigInt::ZERO)
+    };
+    let unscaled = if neg { -unscaled } else { unscaled };
+    BigDec {
+        unscaled,
+        scale: frac_digits.len() as i64 - exp,
+    }
+}
+
 impl BigDec {
-    /// `(unscaled, scale)` without validation (both sides already exact).
-    #[must_use]
-    pub fn new(unscaled: BigInt, scale: i64) -> Self {
-        Self { unscaled, scale }
-    }
-
-    #[must_use]
-    pub fn unscaled(&self) -> &BigInt {
-        &self.unscaled
-    }
-
-    #[must_use]
-    pub fn scale(&self) -> i64 {
-        self.scale
-    }
-
     /// `BigDecimal(long)` / `BigDecimal(BigInteger)`: integer scale.
     #[must_use]
     pub fn from_bigint(n: BigInt) -> Self {
@@ -79,11 +153,6 @@ impl BigDec {
     /// point, at most one `e`/`E` exponent. Failures carry the
     /// `BigDecimal(String)` message shape.
     pub fn parse(s: &str) -> Result<Self, String> {
-        let bad = |c: char| {
-            format!(
-                "Character {c} is neither a decimal digit number, decimal point, nor \"e\" notation exponential mark."
-            )
-        };
         let mut chars = s.chars().peekable();
         match chars.peek() {
             Some('+') | Some('-') => {
@@ -91,83 +160,28 @@ impl BigDec {
             }
             _ => {}
         }
-        let mut int_digits = String::new();
-        let mut frac_digits = String::new();
-        let mut seen_point = false;
-        let mut seen_digit = false;
-        let mut exp: i64 = 0;
-        while let Some(&c) = chars.peek() {
-            if c.is_ascii_digit() {
-                seen_digit = true;
-                if seen_point {
-                    frac_digits.push(c);
-                } else {
-                    int_digits.push(c);
-                }
-                chars.next();
-            } else if c == '.' && !seen_point {
-                seen_point = true;
-                chars.next();
-            } else {
-                break;
-            }
-        }
+        let (int_digits, frac_digits, seen_digit) = parse_mantissa(&mut chars);
         if !seen_digit {
             return Err(match s.chars().find(|c| !matches!(c, '+' | '-')) {
-                Some(c) => bad(c),
+                Some(c) => bad_decimal_char(c),
                 None => "Zero-length BigDecimal".to_owned(),
             });
         }
+        let mut exp: i64 = 0;
         if let Some(&c) = chars.peek() {
             if c == 'e' || c == 'E' {
                 chars.next();
-                let mut exp_neg = false;
-                match chars.peek() {
-                    Some('+') => {
-                        chars.next();
-                    }
-                    Some('-') => {
-                        exp_neg = true;
-                        chars.next();
-                    }
-                    _ => {}
-                }
-                let mut exp_digits = String::new();
-                while let Some(&d) = chars.peek() {
-                    if !d.is_ascii_digit() {
-                        return Err(bad(d));
-                    }
-                    exp_digits.push(d);
-                    chars.next();
-                }
-                if exp_digits.is_empty() {
-                    return Err(bad('e'));
-                }
-                exp = exp_digits.parse::<i64>().map_err(|_| bad('e'))?;
-                if exp_neg {
-                    exp = -exp;
-                }
+                exp = parse_exp(&mut chars)?;
             } else {
-                return Err(bad(c));
+                return Err(bad_decimal_char(c));
             }
         }
-        let mut digits = int_digits;
-        digits.push_str(&frac_digits);
-        let stripped = digits.trim_start_matches('0');
-        let unscaled = if stripped.is_empty() {
-            BigInt::ZERO
-        } else {
-            BigInt::parse_bytes(stripped.as_bytes(), 10).unwrap_or(BigInt::ZERO)
-        };
-        let unscaled = if s.starts_with('-') {
-            -unscaled
-        } else {
-            unscaled
-        };
-        Ok(Self {
-            unscaled,
-            scale: frac_digits.len() as i64 - exp,
-        })
+        Ok(finish_parse(
+            int_digits,
+            &frac_digits,
+            exp,
+            s.starts_with('-'),
+        ))
     }
 
     /// `BigDecimal.toString`: plain while the scale is
