@@ -1,0 +1,11 @@
+req-kw 1
+req-missing THROW java.lang.IllegalArgumentException|"Missing required key: :long-a"
+req-mix [1 2 nil]
+req-or [1 2 42]
+req-or-same THROW clojure.lang.Compiler$CompilerException|"Syntax error macroexpanding let at (/Users/hhu/workspace/clojure/docs/t1199/probes/m2-deltas.clj:17:38)."
+req-nested 3
+req-missingsel {:long-a nil}
+ns-postamp #:foo{:aa 1, :bb 3}
+ns-postamp-plain {:aa 1, :bb 2}
+ns-elem-kw THROW clojure.lang.Compiler$CompilerException|"Syntax error macroexpanding clojure.core/let at (/Users/hhu/workspace/clojure/docs/t1199/probes/m2-deltas.clj:23:24)."
+ns-dir-only 42
