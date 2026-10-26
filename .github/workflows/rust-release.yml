@@ -78,7 +78,6 @@ jobs:
     defaults:
       run:
         working-directory: rust
-        shell: bash
     steps:
       - uses: actions/checkout@v5
       - uses: ./.github/actions/profile-runner
@@ -102,6 +101,7 @@ jobs:
       # emit the rlib; the staticlib ships next to the binary).
       - run: cargo build --release --locked -p clj-rt
       - name: package binary
+        shell: bash
         run: |
           set -euo pipefail
           # Git bash prepends its own dirs (coreutils `link`) ahead of
