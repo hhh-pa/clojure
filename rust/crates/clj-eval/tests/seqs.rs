@@ -1107,6 +1107,47 @@ fn sequence_eduction_rows() {
     // A single collection educes through `identity` (oracle
     // `edu-1arg`).
     assert_eq!(run_last(&mut eval, "(seq (eduction [1 2]))"), "(1 2)");
+    // `take` uses `ensure-reduced`: an already-`Reduced` inner
+    // result (a nested tripper below, window spent) propagates
+    // single-wrapped (oracles `take1-inner1`,
+    // `seq-take1-inner1`, `take2-inner1`, `seq-take2-inner1`,
+    // `seq-cat-take1`, `seq-cat-take1b`).
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(transduce (comp (take 1) (mapcat range) (take 1)) + [5 6])"
+        ),
+        "0"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(sequence (comp (take 1) (mapcat range) (take 1)) [5 6])"
+        ),
+        "(0)"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(transduce (comp (take 2) (mapcat range) (take 1)) + [5 6])"
+        ),
+        "0"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(sequence (comp (take 2) (mapcat range) (take 1)) [5 6])"
+        ),
+        "(0)"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(sequence (comp (mapcat range) (take 1)) [5 6])"),
+        "(0)"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(sequence (comp (take 1) (mapcat range)) [5 6])"),
+        "(0 1 2 3 4)"
+    );
     assert_eq!(
         run_last(&mut eval, "(take 3 (sequence (map inc) (range)))"),
         "(1 2 3)"

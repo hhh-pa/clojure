@@ -557,6 +557,13 @@ pub(crate) fn take_xf(eval: &mut Evaluator, n: Value) -> Result<Value, NativeErr
                             args[0].clone()
                         };
                         if spent <= 0 {
+                            // `(ensure-reduced result)`, not an
+                            // unconditional wrap: a nested tripper
+                            // below may hand back `Reduced` already
+                            // (`core.clj` `take` source).
+                            if as_reduced(&result).is_some() {
+                                return Ok(result);
+                            }
                             return Ok(Reduced::wrap(result));
                         }
                         Ok(result)

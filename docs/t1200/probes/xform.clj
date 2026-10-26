@@ -82,6 +82,15 @@
 (throwof "edu-reuse" '(let [e (eduction (take 1) [1 2])] [(reduce + 0 e) (reduce + 0 e)]))
 (throwof "edu-seq2" '(let [e (eduction (take 1) [1 2])] [(seq e) (seq e)]))
 (throwof "into-edu" '(into [] (map inc) (eduction (take 2) [1 2 3])))
+;; R2 review: `take` is `(ensure-reduced result)`, so a nested
+;; tripper's `Reduced` propagates single-wrapped
+;; (`sequence_eduction_rows`, `xform_builders_composite_rows`).
+(throwof "take1-inner1" '(transduce (comp (take 1) (mapcat range) (take 1)) + [5 6]))
+(throwof "seq-take1-inner1" '(sequence (comp (take 1) (mapcat range) (take 1)) [5 6]))
+(throwof "take2-inner1" '(transduce (comp (take 2) (mapcat range) (take 1)) + [5 6]))
+(throwof "seq-take2-inner1" '(sequence (comp (take 2) (mapcat range) (take 1)) [5 6]))
+(throwof "seq-cat-take1" '(sequence (comp (mapcat range) (take 1)) [5 6]))
+(throwof "seq-cat-take1b" '(sequence (comp (take 1) (mapcat range)) [5 6]))
 ;; error shapes
 (throwof "err-bad-xform" '(transduce 5 + [1 2 3]))
 (throwof "err-noncoll" '(transduce (map inc) + 5))
