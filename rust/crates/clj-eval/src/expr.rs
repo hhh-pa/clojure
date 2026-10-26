@@ -3412,13 +3412,7 @@ impl<'a> Analyzer<'a> {
                 // key, exactly like the upstream splice back into the
                 // binding loop (validation ran already, so only maps
                 // reach the builder; anything else never does).
-                if let Value::Map(req) = v {
-                    for (local, key) in req.iter() {
-                        let validated = as_pat(local).expect("patterns validated before building");
-                        let (pat, _) = self.build_pattern(validated, span)?;
-                        push_entry(&mut acc.entries, pat, key.clone(), true);
-                    }
-                }
+                self.build_req_entries(v, span, acc)?;
             }
             return Ok(());
         }
@@ -3443,6 +3437,25 @@ impl<'a> Analyzer<'a> {
 /// Push one `(pattern, key, required?)` entry.
 fn push_entry(acc: &mut Vec<(Pattern, Value, bool)>, pat: Pattern, key: Value, required: bool) {
     acc.push((pat, key, required));
+}
+
+impl<'a> Analyzer<'a> {
+    /// Build one `:req!` map into required entries (M2).
+    fn build_req_entries(
+        &mut self,
+        v: &Value,
+        span: Span,
+        acc: &mut MapAcc,
+    ) -> Result<(), CompileError> {
+        if let Value::Map(req) = v {
+            for (local, key) in req.iter() {
+                let validated = as_pat(local).expect("patterns validated before building");
+                let (pat, _) = self.build_pattern(validated, span)?;
+                push_entry(&mut acc.entries, pat, key.clone(), true);
+            }
+        }
+        Ok(())
+    }
 }
 
 /// A map pattern under construction.
@@ -4370,6 +4383,27 @@ mod tests {
 
     fn unqualified_bb() -> Value {
         Value::Keyword(Keyword::new(None, "bb"))
+    }
+
+    #[test]
+    fn build_req_entries_ignores_vacuous_non_map() {
+        // Defensive: validation rejects non-map `:req!` first, so
+        // only maps reach the builder; a vacuous value still builds
+        // clean (covers the skip path).
+        let source: Arc<str> = Arc::from("NO_SOURCE_PATH");
+        let mut eval = crate::ns::boot();
+        let mut analyzer = Analyzer::new(&source, &mut eval, 0);
+        let m = new_map().insert(
+            Value::Keyword(Keyword::new(None, "req!")),
+            Value::Vector(Vector::from_vec(vec![])),
+        );
+        match analyzer
+            .build_map(&m, Span::new(1, 1))
+            .expect("vacuous :req! builds")
+        {
+            Pattern::Map(mp) => assert!(mp.entries.is_empty()),
+            _ => panic!("map pattern"),
+        }
     }
 
     #[test]
