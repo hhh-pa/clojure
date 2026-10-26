@@ -24,7 +24,6 @@ use clj_value::{
 use crate::core::{cce_err, cce_message, is_counted, nth_index};
 use crate::error::{NativeError, jvm_class_of, simple_name_of};
 use crate::eval::Evaluator;
-use crate::fx4_form::pr_of;
 use crate::lazy::{
     StepUnit, as_range, as_realized, as_repeat, as_subvector, collect_all, equiv_vals, first_value,
     is_seq_value, is_seqable, next_value, replace_thunk, seq_value, step_unit,
@@ -903,20 +902,6 @@ fn native_get(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErro
     }
 }
 
-/// `req!` (M2, upstream 9e51d6dc, `:added "1.13"`): like arity-2
-/// `get`, but throws when the key is absent — including on `nil`
-/// targets. Present-with-`nil` answers `nil`.
-fn native_req(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
-    check_arity("clojure.core/req!", args, &[2])?;
-    match lookup_present(&args[0], &args[1])? {
-        Some(v) => Ok(v),
-        None => Err(NativeError::new(
-            ThrowClass::IllegalArgumentException,
-            format!("Missing required key: {}", pr_of(&args[1])),
-        )),
-    }
-}
-
 /// `contains?` over a vector (integer keys in range).
 fn contains_vector(x: &Vector, key: &Value) -> bool {
     int_key(key).is_some_and(|i| usize::try_from(i as i32).is_ok_and(|idx| idx < x.len()))
@@ -1756,7 +1741,6 @@ pub(crate) const COLL_NATIVES: &[(&str, NativeFnPtr)] = &[
     ("assoc", native_assoc),
     ("dissoc", native_dissoc),
     ("get", native_get),
-    ("req!", native_req),
     ("contains?", native_contains),
     ("find", native_find),
     ("nth", native_nth),
