@@ -218,6 +218,19 @@ fn find_entry_fallback(coll: &Value, key: &Value) -> Result<Option<(Value, Value
     Err(find_unsupported(coll))
 }
 
+/// `find` on maps (sorted maps resolve through the comparator).
+fn find_entry_map(
+    eval: &mut Evaluator,
+    m: &Map,
+    key: &Value,
+) -> Result<Option<(Value, Value)>, NativeError> {
+    if m.is_sorted() {
+        Ok(sorted_lookup_map(eval, m, key)?.map(|v| (key.clone(), v)))
+    } else {
+        Ok(m.get(key).map(|v| (key.clone(), v.clone())))
+    }
+}
+
 pub(crate) fn find_entry(
     eval: &mut Evaluator,
     coll: &Value,
@@ -225,10 +238,7 @@ pub(crate) fn find_entry(
 ) -> Result<Option<(Value, Value)>, NativeError> {
     match coll {
         Value::Nil => Ok(None),
-        Value::Map(m) if m.is_sorted() => {
-            Ok(sorted_lookup_map(eval, m, key)?.map(|v| (key.clone(), v)))
-        }
-        Value::Map(m) => Ok(m.get(key).map(|v| (key.clone(), v.clone()))),
+        Value::Map(m) => find_entry_map(eval, m, key),
         Value::Vector(x) => Ok(find_entry_vector(x, key)),
         Value::MapEntry { key: ek, val: ev } => Ok(int_key(key).and_then(|i| {
             usize::try_from(i as i32).ok().and_then(|idx| match idx {
@@ -984,15 +994,30 @@ fn contains_fallback(coll: &Value, key: &Value) -> Result<Value, NativeError> {
     ))
 }
 
+/// `contains?` on maps (sorted maps resolve through the comparator).
+fn contains_map(eval: &mut Evaluator, m: &Map, key: &Value) -> Result<Value, NativeError> {
+    if m.is_sorted() {
+        Ok(Value::Bool(sorted_lookup_map(eval, m, key)?.is_some()))
+    } else {
+        Ok(Value::Bool(m.contains_key(key)))
+    }
+}
+
+/// `contains?` on sets (sorted sets resolve through the comparator).
+fn contains_set(eval: &mut Evaluator, s: &Set, key: &Value) -> Result<Value, NativeError> {
+    if s.is_sorted() {
+        Ok(Value::Bool(sorted_contains_set(eval, s, key)?))
+    } else {
+        Ok(Value::Bool(s.contains(key)))
+    }
+}
+
 fn native_contains(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/contains?", args, &[2])?;
     let (coll, key) = (&args[0], &args[1]);
     match coll {
         Value::Nil => Ok(Value::Bool(false)),
-        Value::Map(m) if m.is_sorted() => {
-            Ok(Value::Bool(sorted_lookup_map(eval, m, key)?.is_some()))
-        }
-        Value::Map(m) => Ok(Value::Bool(m.contains_key(key))),
+        Value::Map(m) => contains_map(eval, m, key),
         Value::Vector(x) => Ok(Value::Bool(contains_vector(x, key))),
         // Entries contain integer keys 0 and 1 (Oracle FX2 `contains`).
         Value::MapEntry { .. } => {
@@ -1000,8 +1025,7 @@ fn native_contains(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Native
                 usize::try_from(i as i32).is_ok_and(|idx| idx < 2)
             })))
         }
-        Value::Set(s) if s.is_sorted() => Ok(Value::Bool(sorted_contains_set(eval, s, key)?)),
-        Value::Set(s) => Ok(Value::Bool(s.contains(key))),
+        Value::Set(s) => contains_set(eval, s, key),
         Value::Str(s) => contains_str(s, coll, key),
         Value::Transient(t) => Ok(Value::Bool(transient_get(t, key)?.is_some())),
         _ => contains_fallback(coll, key),
