@@ -4064,7 +4064,7 @@ impl<'a> Analyzer<'a> {
         span: Span,
         tail: bool,
     ) -> Result<Option<Expr>, CompileError> {
-        let op = crate::fx4_host::classify(items, |name| self.local_idx(name).is_some());
+        let op = crate::fx4_host::classify(items);
         self.lower_host(op, items, span, tail)
     }
 

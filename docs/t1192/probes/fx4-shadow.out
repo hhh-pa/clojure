@@ -1,0 +1,5 @@
+shadow-new-object "#object[java.lang.Object 0x29d2d081 \"java.lang.Object@29d2d081\"]"
+plain-new-object "#object[java.lang.Object 0x1bc53649 \"java.lang.Object@1bc53649\"]"
+shadow-monitor 1
+plain-monitor 1
+shadow-letfn THROW clojure.lang.Compiler$CompilerException|"Syntax error compiling letfn* at (/Users/hhu/workspace/clojure/docs/t1192/probes/fx4-shadow.clj:18:51)."

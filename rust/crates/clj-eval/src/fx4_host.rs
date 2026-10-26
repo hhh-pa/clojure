@@ -98,15 +98,15 @@ pub(crate) enum HostOp<'a> {
     LetFnStar,
 }
 
-/// Classify a call the expansions emit. A local shadowing the
-/// unqualified head skips the rewrite.
-pub(crate) fn classify<'a>(items: &[&'a Value], is_local: impl Fn(&str) -> bool) -> HostOp<'a> {
+/// Classify a call the expansions emit. Operator position never
+/// defers to locals here: `new`/`letfn*` are real specials and the
+/// `monitor-*` macros beat shadowing bindings too (Oracle FX4
+/// `shadow-new/monitor/letfn`), matching the analyzer's
+/// `is_shadowable_macro` set, which excludes all these heads.
+pub(crate) fn classify<'a>(items: &[&'a Value]) -> HostOp<'a> {
     let Some(Value::Symbol(sym)) = items.first().copied() else {
         return HostOp::None;
     };
-    if sym.namespace().is_none() && is_local(sym.name()) {
-        return HostOp::None;
-    }
     match (sym.namespace(), sym.name()) {
         (Some("clojure.core"), "instance?") => classify_instance(items),
         (Some("clojure.core"), "identical?") => classify_identical(items),

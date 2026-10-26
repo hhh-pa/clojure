@@ -739,18 +739,33 @@ fn host_natives_and_rewrites() {
     }
     let called = uncaught(&mut eval, "(1)");
     assert!(called.contains("ClassCastException"), "{called}");
-    assert_eq!(run_last(&mut eval, "(let [new (fn [x] x)] (new 5))"), "5");
-    assert_eq!(
-        run_last(
-            &mut eval,
-            "(let [monitor-enter (fn [x] x)] (monitor-enter 5))"
-        ),
-        "5"
+    // Operator position never defers to locals for these heads
+    // (oracle `fx4-shadow`): a shadowed `new` still constructs,
+    // a shadowed `monitor-enter` still expands (matching the
+    // unshadowed `(monitor-enter 5)`), and a shadowed `letfn*`
+    // still reports the binding error.
+    let shadow_obj = run_last(&mut eval, "(let [new (fn [x] x)] (pr-str (new Object)))");
+    assert!(
+        shadow_obj.starts_with("\"#object[java.lang.Object "),
+        "{shadow_obj}"
     );
+    // Balanced `locking` (enter + finally-exit) so later monitor
+    // asserts see clean state; the expansion still routes through
+    // the shadowed `monitor-enter` head. Oracle agrees on the value
+    // (`shadow-monitor`/`plain-monitor` both `1`).
     assert_eq!(
-        run_last(&mut eval, "(let [letfn* (fn [x] x)] (letfn* 5))"),
-        "5"
+        run_last(&mut eval, "(let [monitor-enter (fn [x] x)] (locking 5 1))"),
+        run_last(&mut eval, "(locking 5 1)")
     );
+    // Same diagnostic as the unshadowed form (only the span moves
+    // to the inner call site).
+    let shadowed = compile_err(&mut eval, "(let [letfn* (fn [x] x)] (letfn* 5))");
+    let plain = compile_err(&mut eval, "(letfn* 5)");
+    assert!(
+        shadowed[0].starts_with("Syntax error compiling letfn*"),
+        "{shadowed:?}"
+    );
+    assert_eq!(shadowed[1..], plain[1..]);
     assert_eq!(
         compile_err(&mut eval, "(letfn*)"),
         vec![
