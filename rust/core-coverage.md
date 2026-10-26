@@ -30,6 +30,7 @@ If a var is not listed here, that is a file bug, not a silent gap.
 Creating, finding, and wiring namespaces; loading code into them.
 
 | var | status | notes |
+| --- | --- | --- |
 | `ns` | implemented | validated upfront, then in-ns/refer/require/use/mark-loaded |
 | `in-ns` | implemented | |
 | `create-ns` | implemented | |
@@ -71,6 +72,7 @@ Creating, finding, and wiring namespaces; loading code into them.
 Var roots, thread-local bindings, and metadata.
 
 | var | status | notes |
+| --- | --- | --- |
 | `alter-var-root` | implemented | atomic root swap |
 | `with-redefs` | divergent | analyzer builtin (S5B); resolves as macro; `macroexpand-1` identity (documented) |
 | `bound?` | implemented | |
@@ -94,6 +96,7 @@ Var roots, thread-local bindings, and metadata.
 Defining macros and expanding them.
 
 | var | status | notes |
+| --- | --- | --- |
 | `defmacro` | implemented | def of the `&form`/`&env`-prepended fn; `:macro` + user `:arglists` |
 | `macroexpand-1` | implemented | one head step; call-site spans; builtins identity (documented) |
 | `macroexpand` | implemented | head loop; builtins identity (documented) |
@@ -104,6 +107,7 @@ Defining macros and expanding them.
 Checked i64 arithmetic (overflow raises, never wraps) plus exact numeric coercions.
 
 | var | status | notes |
+| --- | --- | --- |
 | `+` | implemented | `control.rs time_rows`; C1, probe39 arith-plus-star-zero |
 | `-` | implemented | `time_rows` + dotimes-emitted (`composites_smoke`); C1, probe39 arith-variadic-exotic |
 | `*` | implemented | `composites_smoke` (`(f 21)`); C1, probe39 arith-plus-star-zero |
@@ -128,6 +132,7 @@ Checked i64 arithmetic (overflow raises, never wraps) plus exact numeric coercio
 Same-category equality and JVM-consistent ordering.
 
 | var | status | notes |
+| --- | --- | --- |
 | `=` | implemented | `hash_values`, `assert_rows`, `condp_rows`, `str_lazy_content_hash`; same-category, `s5d-pins.md:492`, probe39 cmp-eq-* |
 | `==` | implemented | `case_hashes` prep; C2; 1-arg passes unchecked (arith.rs comparison_single_rows) |
 | `not=` | implemented | arith.rs pred_backlog_rows (negates =) |
@@ -145,6 +150,7 @@ Same-category equality and JVM-consistent ordering.
 Type and shape predicates.
 
 | var | status | notes |
+| --- | --- | --- |
 | `nil?` | implemented | `core_loads`, `boot_dynamics` (true+false paths) |
 | `not` | implemented | arith.rs not_rows (truthiness, was is-nil) |
 | `boolean` | implemented | `boot_dynamics` |
@@ -192,6 +198,7 @@ Type and shape predicates.
 String building, conversion, and formatting.
 
 | var | status | notes |
+| --- | --- | --- |
 | `str` | implemented | variadic; LazySeq prints @content-hash, seqs/colls readably |
 | `keyword` | implemented | arith.rs str_fn_rows (nil else-arm, fixprobe8) |
 | `symbol` | implemented | arith.rs str_fn_rows (no-conversion IAE) |
@@ -207,6 +214,7 @@ String building, conversion, and formatting.
 Persistent collections: lookup, update, transients, sets, maps.
 
 | var | status | notes |
+| --- | --- | --- |
 | `count` | implemented | coll.rs count_rows (UTF-16, transients, subvec, walk, UOE) |
 | `empty?` | implemented | coll.rs empty_rows (nil/str/transient, IAE on 5) |
 | `not-empty` | implemented | coll.rs empty_rows |
@@ -268,6 +276,7 @@ Persistent collections: lookup, update, transients, sets, maps.
 Lazy sequence operations (chunked like the JVM); transducer arities are out of scope.
 
 | var | status | notes |
+| --- | --- | --- |
 | `map` | divergent | seq arities (corpus 02); 1-arg raises ArityException, xform OUT (D13) |
 | `filter` | divergent | seq arities (corpus 02); 1-arg raises ArityException, xform OUT (D13) |
 | `remove` | divergent | seq arities (corpus 02); 1-arg raises ArityException, xform OUT (D13) |
@@ -324,6 +333,7 @@ Lazy sequence operations (chunked like the JVM); transducer arities are out of s
 Function combinators and application.
 
 | var | status | notes |
+| --- | --- | --- |
 | `apply` | implemented | early for syntax-quote (S5C) |
 | `comp` | implemented | corpus 15; 0→identity, 1→self, right-nested apply |
 | `partial` | implemented | corpus 15; 1-arg→self |
@@ -342,6 +352,7 @@ Function combinators and application.
 Branching, binding, and iteration macros, mostly real `core.clj` ports.
 
 | var | status | notes |
+| --- | --- | --- |
 | `and` | implemented | core.clj real; control.rs core_loads |
 | `or` | implemented | control.rs control_backlog_rows |
 | `when` | implemented | core.clj real; control.rs composites_smoke (nested, "13") |
@@ -378,6 +389,7 @@ Branching, binding, and iteration macros, mostly real `core.clj` ports.
 Exception info carriers.
 
 | var | status | notes |
+| --- | --- | --- |
 | `ex-info` | implemented | native real; str.rs str_lazy_content_hash (ExceptionInfo/boom) + control.rs with_out_str_rows |
 | `ex-data` | implemented | control.rs ex_data_trampoline_rows |
 | `ex-message` | implemented | native real; control.rs eval_chains_and_catch |
@@ -388,6 +400,7 @@ Exception info carriers.
 Printing, reading, files, and print dynamic vars.
 
 | var | status | notes |
+| --- | --- | --- |
 | `print` | implemented | native real; control.rs with_out_str_rows + composites_smoke + str.rs |
 | `println` | implemented | tests/io.rs io_smoke_rows (with-out-str capture) |
 | `pr` | implemented | tests/io.rs io_smoke_rows |
@@ -411,6 +424,7 @@ Printing, reading, files, and print dynamic vars.
 Evaluation, trampolines, compiler flags, hashing.
 
 | var | status | notes |
+| --- | --- | --- |
 | `eval` | implemented | eval one form in the current ns |
 | `trampoline` | implemented | control.rs ex_data_trampoline_rows (bounce to :done) |
 | `*assert*` | implemented | root true, no meta, binds; control.rs boot_dynamics + assert_disabled |
@@ -424,6 +438,7 @@ Evaluation, trampolines, compiler flags, hashing.
 Special forms exposed as macros; `macroexpand-1` is the documented identity.
 
 | var | status | notes |
+| --- | --- | --- |
 | `let` | divergent | analyzer builtin; resolves as macro; `macroexpand-1` returns the form unchanged (documented) |
 | `loop` | divergent | analyzer builtin; resolves as macro; `macroexpand-1` returns the form unchanged (documented) |
 | `fn` | divergent | analyzer builtin; resolves as macro; `macroexpand-1` returns the form unchanged (documented) |
@@ -435,6 +450,7 @@ Special forms exposed as macros; `macroexpand-1` is the documented identity.
 Significant vars with no port slice, grouped below by area with the reason. (Two implemented groups live at the end of this section — concurrency and the REPL/CLI environment — because they were inventoried with the exclusions around them.)
 
 | var | status | notes |
+| --- | --- | --- |
 | `clone-thread-bindings` | out-of-scope | does not exist on the JVM (probe37 `clone-missing`) |
 | `sequence` | out-of-scope | transducers: no slice |
 | `transduce` | out-of-scope | transducers: no slice |
@@ -488,6 +504,7 @@ Significant vars with no port slice, grouped below by area with the reason. (Two
 ### Concurrency (implemented — atoms, futures, agents; STM excluded above)
 
 | var | status | notes |
+| --- | --- | --- |
 | `atom` | implemented | concurrency.rs atom_ctor_rows (validator/meta options, odd-opts IAE) |
 | `swap!` | implemented | concurrency.rs swap_rows (CAS loop, extra args, unconditional watch fire) |
 | `reset!` | implemented | concurrency.rs reset_rows (validates, fires) |
@@ -531,6 +548,7 @@ Significant vars with no port slice, grouped below by area with the reason. (Two
 ### REPL and CLI environment (implemented)
 
 | var | status | notes |
+| --- | --- | --- |
 | `*1` | implemented | S7 REPL: dynamic nil root; session window (P1) |
 | `*2` | implemented | S7 REPL: dynamic nil root; session window (P1) |
 | `*3` | implemented | S7 REPL: dynamic nil root; session window (P1) |
@@ -542,6 +560,7 @@ Significant vars with no port slice, grouped below by area with the reason. (Two
 ### Still excluded (reasons inline)
 
 | var | status | notes |
+| --- | --- | --- |
 | `identical?` | out-of-scope | reference identity: no slice (values clone) |
 | `re-find` | out-of-scope | regex matching: no slice (reader keeps #"...") |
 | `re-matches` | out-of-scope | regex matching: no slice |
