@@ -1,6 +1,6 @@
 [package]
 name = "clj-core"
-version = "0.1.0"
+version = "1.13.0-alpha9"
 edition = "2024"
 rust-version = "1.85"
 description = "Namespaces, vars, macros, and the Rust-backed clojure.core subset"

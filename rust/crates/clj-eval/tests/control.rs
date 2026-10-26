@@ -1024,7 +1024,10 @@ fn core_r4_hash_post_realize_uoe() {
 fn core_r4_clojure_version() {
     let mut eval = boot();
     // Port release literal (deliberately NOT the JVM version).
-    assert_eq!(run_last(&mut eval, "(clojure-version)"), "\"0.1.0\"");
+    assert_eq!(
+        run_last(&mut eval, "(clojure-version)"),
+        "\"1.13.0-alpha9\""
+    );
 }
 
 #[test]

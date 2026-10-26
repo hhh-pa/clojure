@@ -1,6 +1,6 @@
 [package]
 name = "clj-aot"
-version = "0.1.0"
+version = "1.13.0-alpha9"
 edition = "2024"
 # No rust-version key: inkwell 0.10.0 declares no MSRV, so the 1.85
 # floor is unproven for this crate (S9A D2: the MSRV leg excludes

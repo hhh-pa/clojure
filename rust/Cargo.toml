@@ -12,7 +12,7 @@ resolver = "2"
 
 [package]
 name = "clojure-rs"
-version = "0.1.0"
+version = "1.13.0-alpha9"
 edition = "2024"
 # MSRV floor for the direct workspace libs; the default `aot`
 # feature pulls clj-aot (inkwell, unproven MSRV), so a default
