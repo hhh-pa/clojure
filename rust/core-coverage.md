@@ -467,7 +467,7 @@ Significant vars with no port slice, grouped below by area with the reason. (Two
 | `sorted-map-by` | implemented | custom comparator calls `(cmp a b)` (`sort-by` semantics); coll.rs sorted_construction_rows |
 | `sorted-set-by` | implemented | custom comparator set; coll.rs sorted_construction_rows |
 | `subseq` | implemented | `core.clj` bound walks over entry keys (3-arg + start/end 5-arg); coll.rs sorted_subseq_rows |
-| `rsubseq` | implemented | descending mirror incl. the `rseq`-of-`seqFrom` 5-arg shape; coll.rs sorted_subseq_rows |
+| `rsubseq` | implemented | descending-from-end `seqFrom` walk, head-dropped once by the end test and bounded by the start test (5-arg); coll.rs sorted_subseq_rows + sorted_gap_rows |
 | `rand` | out-of-scope | RNG: no slice |
 | `rand-int` | out-of-scope | RNG: no slice |
 | `shuffle` | out-of-scope | RNG: no slice |
