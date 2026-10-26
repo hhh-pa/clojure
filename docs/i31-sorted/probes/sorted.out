@@ -1,0 +1,19 @@
+sorted-map {:a 1, :b 2}
+sorted-set #{1 2 3}
+sorted-set-by #{3 2 1}
+sorted-map-by-bad THROW java.lang.ClassCastException|"class clojure.lang.Keyword cannot be cast to class java.lang.Number (clojure.lang.Keyword is in unnamed module of loader 'app'; java.lang.Number is in module java.base of loader 'bootstrap')"
+subseq-ge ([:b 2] [:c 3])
+subseq-gt ([:c 3])
+rsubseq-le ([:b 2] [:a 1])
+rsubseq-set-ge (3 2)
+subseq-set-lt (1 2)
+subseq-past-end nil
+subseq-unsorted THROW java.lang.ClassCastException|"class clojure.lang.PersistentVector cannot be cast to class clojure.lang.Sorted (clojure.lang.PersistentVector and clojure.lang.Sorted are in unnamed module of loader 'app')"
+sorted-assoc {:a 1, :b 2}
+sorted-dissoc {:b 2}
+sorted-conj #{1 2}
+sorted-pred-t true
+sorted-pred-f false
+sorted-empty {}
+sorted-count 2
+sorted-comparator #object[clojure.core$comparator$fn__6174 0x4201a617 "clojure.core$comparator$fn__6174@4201a617"]
