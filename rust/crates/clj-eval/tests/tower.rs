@@ -89,6 +89,17 @@ fn tower_bigint_rows() {
     assert_eq!(run_last(&mut eval, "(bigint 1/2)"), "0N");
     assert_eq!(run_last(&mut eval, "(bigint 5.9M)"), "5N");
     assert_eq!(run_last(&mut eval, "(bigint 5N)"), "5N");
+    // All-zero strings are zero; a bare sign (or nothing) is the
+    // JDK's zero-length failure (oracle `tower-gap`).
+    assert_eq!(run_last(&mut eval, "(bigint \"0\")"), "0N");
+    assert_eq!(run_last(&mut eval, "(bigint \"000\")"), "0N");
+    for form in ["(bigint \"\")", "(bigint \"+\")"] {
+        assert_eq!(
+            uncaught(&mut eval, form),
+            "java.lang.NumberFormatException | Zero length BigInteger",
+            "{form}"
+        );
+    }
     assert_eq!(
         run_last(&mut eval, "(bigint \"123456789012345678901234567890\")"),
         "123456789012345678901234567890N"
@@ -212,6 +223,17 @@ fn tower_num_rationalize_rows() {
     assert_eq!(run_last(&mut eval, "(rationalize 2.5)"), "5/2");
     assert_eq!(run_last(&mut eval, "(rationalize -0.5)"), "-1/2");
     assert_eq!(run_last(&mut eval, "(rationalize -2.5)"), "-5/2");
+    // Edges (oracle `tower-gap`): zero folds to `BigInt`, huge
+    // magnitudes stay exact, subnormal doubles go through
+    // `BigDecimal.valueOf` (`49/10^325`, not the binary `1/2^1074`).
+    assert_eq!(run_last(&mut eval, "(rationalize 0.0)"), "0N");
+    assert_eq!(
+        run_last(&mut eval, "(rationalize 1.0E16)"),
+        "10000000000000000N"
+    );
+    let mut subnormal = String::from("49/1");
+    subnormal.push_str(&"0".repeat(325));
+    assert_eq!(run_last(&mut eval, "(rationalize 5e-324)"), subnormal);
     assert_eq!(run_last(&mut eval, "(rationalize 0.0)"), "0N");
     // Doubles go through `BigDecimal.valueOf`, not the exact
     // binary expansion (oracle `rat-01`).
@@ -360,6 +382,12 @@ fn tower_print_rows() {
         uncaught(&mut eval, "(bigdec \"12q\")"),
         "java.lang.NumberFormatException | Character q is neither a decimal digit number, decimal point, nor \"e\" notation exponential mark."
     );
+    // Ratios with terminating decimals convert (oracles `tower-gap`,
+    // `tower-gap2` — the factor-5 denominators pin the second loop).
+    assert_eq!(run_last(&mut eval, "(bigdec 1/2)"), "0.5M");
+    assert_eq!(run_last(&mut eval, "(bigdec 1/4)"), "0.25M");
+    assert_eq!(run_last(&mut eval, "(bigdec 1/5)"), "0.2M");
+    assert_eq!(run_last(&mut eval, "(bigdec 3/20)"), "0.15M");
     assert_eq!(run_last(&mut eval, "(pr-str 1/2)"), "\"1/2\"");
 }
 
@@ -398,6 +426,14 @@ fn tower_compare_rows() {
             "[(compare 1/2 0.5) (compare 0.5 1/2) (compare 5M 5.0) (compare 0.1 1/10) (compare 5N 5.0) (compare 5M 5N)]"
         ),
         "[0 0 0 0 0 0]"
+    );
+    // `BigDec` pairs compare scale-insensitively in both orders
+    // (`=` is `compareTo`-equiv, so `(= 5.00M 5.0M)` is true while
+    // `(= 5.00M 5.0)` is false — `5.0` is a `Double`;
+    // oracle `tower-gap2`).
+    assert_eq!(
+        run_last(&mut eval, "[(= 5.00M 5.0M) (= 1.5M 1.25M)]"),
+        "[true false]"
     );
     assert_eq!(
         run_last(

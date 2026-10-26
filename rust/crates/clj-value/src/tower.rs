@@ -18,7 +18,6 @@
 //! exponent, leading sign).
 
 use std::cmp::Ordering;
-use std::fmt;
 
 use num_bigint::BigInt;
 use num_rational::BigRational;
@@ -316,15 +315,6 @@ impl BigDec {
         Ok(Self { unscaled, scale })
     }
 
-    /// Truncate toward zero to an integer decimal.
-    #[must_use]
-    pub fn trunc(&self) -> Self {
-        Self {
-            unscaled: self.to_bigint_trunc(),
-            scale: 0,
-        }
-    }
-
     /// `toBigInteger`: fraction discarded toward zero.
     #[must_use]
     pub fn to_bigint_trunc(&self) -> BigInt {
@@ -417,66 +407,22 @@ impl BigDec {
     }
 }
 
-impl fmt::Display for BigDec {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.to_bigdec_string())
-    }
-}
-
-/// Exact `BigRational` for a finite `f64` (binary expansion —
-/// `rationalize` semantics, never the short decimal).
-#[must_use]
-pub fn f64_to_rational_exact(d: f64) -> Option<BigRational> {
-    if !d.is_finite() {
-        return None;
-    }
-    if d == 0.0 {
-        return Some(BigRational::ZERO);
-    }
-    let bits = d.to_bits();
-    let neg = bits >> 63 != 0;
-    let raw_exp = ((bits >> 52) & 0x7ff) as i64;
-    let mut mant = bits & 0xfffffffffffff;
-    let (mut numer, denom_exp): (BigInt, i64);
-    if raw_exp == 0 {
-        // Subnormal: value = mant * 2^-1074.
-        numer = BigInt::from(mant);
-        denom_exp = 1074;
-    } else {
-        // Normal: value = (2^52 + mant) * 2^(raw-1023-52).
-        mant |= 1 << 52;
-        numer = BigInt::from(mant);
-        denom_exp = 52 - (raw_exp - 1023);
-    }
-    if neg {
-        numer = -numer;
-    }
-    if denom_exp >= 0 {
-        Some(BigRational::new(
-            numer,
-            BigInt::from(2).pow(denom_exp as u32),
-        ))
-    } else {
-        Some(BigRational::from_integer(
-            numer * BigInt::from(2).pow((-denom_exp) as u32),
-        ))
-    }
-}
-
 /// `BigInteger(String)`: decimal with a leading sign, JVM message.
 /// Leading zeros are skipped first (like the JDK), so
 /// `(bigint "0x10")` fails naming `"x10"` (oracle
-/// `bigint-hexstr`); an all-zero remainder is zero.
+/// `bigint-hexstr`); an all-zero remainder is zero, while a bare
+/// sign (or nothing) fails with `Zero length BigInteger`
+/// (oracle `tower-gap`).
 pub fn bigint_parse(s: &str) -> Result<BigInt, String> {
     let signed = s.trim_start_matches(['+', '-']);
     let digits = signed.trim_start_matches('0');
     if digits.is_empty() {
-        // All zeros is zero — but a bare sign (or nothing) keeps
-        // the historical failure.
+        // All zeros is zero — but a bare sign (or nothing) is the
+        // JDK's zero-length failure.
         if !signed.is_empty() {
             return Ok(BigInt::ZERO);
         }
-        return Err(format!("For input string: \"{s}\""));
+        return Err("Zero length BigInteger".to_owned());
     }
     if !digits.bytes().all(|b| b.is_ascii_digit()) {
         return Err(format!("For input string: \"{digits}\""));
@@ -537,9 +483,12 @@ mod tests {
     }
 
     #[test]
-    fn f64_exact_binary_expansion() {
-        let r = f64_to_rational_exact(0.5).unwrap();
-        assert_eq!(r, BigRational::new(BigInt::from(1), BigInt::from(2)));
-        assert!(f64_to_rational_exact(f64::NAN).is_none());
+    fn bigdec_sign_pins_zero() {
+        // `BigDecimal.signum`: zero (any scale) is `Equal`
+        // (oracle `tower-gap`); the nonzero arms ride the
+        // `bigdec_mod` suite.
+        assert_eq!(BigDec::parse("0.0").unwrap().sign(), Ordering::Equal);
+        assert_eq!(BigDec::parse("-2.5").unwrap().sign(), Ordering::Less);
+        assert_eq!(BigDec::parse("3").unwrap().sign(), Ordering::Greater);
     }
 }

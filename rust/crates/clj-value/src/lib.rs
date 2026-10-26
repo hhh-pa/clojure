@@ -45,7 +45,7 @@ pub use seq::{
     RealizedSeq, RepeatValue, Seq, SeqKind, SubVectorValue, ValSeqValue, seq_vec,
 };
 pub use symbol::Symbol;
-pub use tower::{BigDec, NON_TERMINATING, bigint_parse, f64_to_rational_exact};
+pub use tower::{BigDec, NON_TERMINATING, bigint_parse};
 pub use transient::{
     Transient, TransientError, TransientKind, TransientMap, TransientSet, TransientVector,
 };

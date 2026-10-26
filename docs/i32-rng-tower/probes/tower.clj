@@ -159,3 +159,7 @@
 (throwof "bigdec-exp" '[(bigdec "1e+3") (try (bigdec "1e99999999999999999999999") (catch Throwable e [(str (type e)) (.getMessage e)]))])
 ;; empty exponent tail
 (throwof "bigdec-expe" '[(try (bigdec "1e") (catch Throwable e (.getMessage e))) (try (bigdec "1e-") (catch Throwable e (.getMessage e)))])
+;; floor-gap pins: bigdec-of-ratio, rationalize edges, bigint zero/empty, BigDec compare orders, signum
+(throwof "tower-gap" '[(bigdec 1/2) (bigdec 1/4) (rationalize 0.0) (rationalize 5e-324) (rationalize 1.0E16) (bigint "0") (bigint "000") (try (bigint "") (catch Throwable e [(str (type e)) (.getMessage e)])) (try (bigint "+") (catch Throwable e [(str (type e)) (.getMessage e)])) (= 5.00M 5.0) (= 1.25M 1.5M) (.signum (java.math.BigDecimal. "0.0")) (.signum (java.math.BigDecimal. "-2.5"))])
+;; factor-5 denominators + BigDec compare order
+(throwof "tower-gap2" '[(bigdec 1/5) (bigdec 3/20) (= 5.00M 5.0M) (= 1.5M 1.25M)])
