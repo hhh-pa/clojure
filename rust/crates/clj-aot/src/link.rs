@@ -121,7 +121,19 @@ pub fn link_command(
     match platform {
         Platform::Unix => LinkCommand {
             linker: linker_override.unwrap_or("cc").to_owned(),
-            args: vec![exe(obj), exe(archive), "-o".to_owned(), exe(out)],
+            // `libm`: the runtime archive links `num-bigint` /
+            // `num-integer` (big-number tower), whose `Roots` and
+            // radix conversions reference `log` / `exp` / `log2` —
+            // `rustc` links libm itself, but a raw `cc`
+            // invocation does not (on macOS `-lm` resolves inside
+            // libSystem, harmless).
+            args: vec![
+                exe(obj),
+                exe(archive),
+                "-o".to_owned(),
+                exe(out),
+                "-lm".to_owned(),
+            ],
         },
         Platform::Windows => LinkCommand {
             linker: linker_override.unwrap_or("link").to_owned(),
@@ -301,7 +313,8 @@ mod tests {
                     "f.o".to_owned(),
                     "libcljrt.a".to_owned(),
                     "-o".to_owned(),
-                    "f".to_owned()
+                    "f".to_owned(),
+                    "-lm".to_owned()
                 ],
             }
         );

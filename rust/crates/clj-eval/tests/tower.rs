@@ -739,7 +739,10 @@ fn tower_seq_rows() {
     // Ratios narrow for `double` bound checks and walks (oracle
     // `range-ratd`).
     assert_eq!(run_last(&mut eval, "(range 1/2 2.5)"), "(1/2 3/2)");
-    assert_eq!(run_last(&mut eval, "(range 0 2.5 1/2)"), "(0 1/2 1N 3/2 2N)");
+    assert_eq!(
+        run_last(&mut eval, "(range 0 2.5 1/2)"),
+        "(0 1/2 1N 3/2 2N)"
+    );
     // A negative tower step walks down; a zero tower step
     // repeats the start.
     assert_eq!(run_last(&mut eval, "(range 5N 0 -1N)"), "(5N 4N 3N 2N 1N)");
