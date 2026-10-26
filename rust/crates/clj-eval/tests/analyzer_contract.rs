@@ -738,10 +738,10 @@ fn keys_element_cast_matrix() {
             "(loop [{:syms [#{a}]} {}] a)",
             "java.lang.ClassCastException | Cannot cast clojure.lang.PersistentHashSet to clojure.lang.Named",
         ),
-        // Qualified directives short-circuit `(namespace %)`: only
-        // `(name %)` runs, so vectors/numbers keep the same CCE
-        // text but nil takes the `getName` NPE (probe33
-        // `qual-cast-*`).
+        // M2: `(namespace %)` always runs now (upstream 4610bb46
+        // flipped the `or`), so qualified shapes take the same
+        // cast/NPE as unqualified ones — strings the `Named` CCE,
+        // `nil` the `getNamespace` NPE (probes `s`, `nil`).
         (
             "(loop [{:foo/keys [[a]]} {}] a)",
             "java.lang.ClassCastException | Cannot cast clojure.lang.PersistentVector to clojure.lang.Named",
@@ -751,8 +751,16 @@ fn keys_element_cast_matrix() {
             "java.lang.ClassCastException | Cannot cast java.lang.Long to clojure.lang.Named",
         ),
         (
+            "(loop [{:foo/keys [\"a\"]} {}] a)",
+            "java.lang.ClassCastException | Cannot cast java.lang.String to clojure.lang.Named",
+        ),
+        (
+            "(loop [{:foo/syms [\"a\"]} {}] a)",
+            "java.lang.ClassCastException | Cannot cast java.lang.String to clojure.lang.Named",
+        ),
+        (
             "(loop [{:foo/keys [nil]} {}] a)",
-            "java.lang.NullPointerException | Cannot invoke \"clojure.lang.Named.getName()\" because \"x\" is null",
+            "java.lang.NullPointerException | Cannot invoke \"clojure.lang.Named.getNamespace()\" because \"x\" is null",
         ),
     ] {
         check(src, unexp, cause);
@@ -770,16 +778,6 @@ fn keys_element_cast_matrix() {
         (
             "(loop [{:strs [nil]} {}] a)",
             "java.lang.Exception | Unsupported binding form: ",
-        ),
-        // Qualified strings skip the cast into `push1`/`pb`
-        // (probe33 `qual-cast-str`, `qual-cast-syms-str`).
-        (
-            "(loop [{:foo/keys [\"a\"]} {}] a)",
-            "java.lang.Exception | Unsupported binding form: a",
-        ),
-        (
-            "(loop [{:foo/syms [\"a\"]} {}] a)",
-            "java.lang.Exception | Unsupported binding form: a",
         ),
         // Shapes under `:strs` walk as nested patterns: malformed
         // content still throws (probe33 `strs-shape-nested`,
@@ -1296,6 +1294,57 @@ fn gap2_loop_walk_rows() {
         "(loop [{:keys \"ab\"} {}] 1)",
         "Unexpected error macroexpanding loop at (test:1:1).",
         "java.lang.ClassCastException | Cannot cast java.lang.Character to clojure.lang.Named",
+    );
+}
+
+#[test]
+fn m2_req_walk_rows() {
+    // M2 `:req!` validation (`chain_of` analyzes directly, so
+    // `loop` pins hit the walk first; `let`/`loop` through
+    // `eval_source` fail earlier in expansion with the same
+    // errors, pinned in `fx4_macroexpand`). `fn` params are
+    // spec-checked first (probes `fn-req-bad`, `loop-req-num`,
+    // `loop-req-bad-full`, `loop-req-empty-vec` on alpha10).
+    let fn_spec = "Syntax error macroexpanding clojure.core/fn at (test:1:2).";
+    let fn_cause = "clojure.lang.ExceptionInfo | Call to clojure.core/fn did not conform to spec.";
+    for src in [
+        "((fn [{:req! [a]}] a) {:a 1})",
+        "((fn [{:req! 5}] a) {:a 1})",
+        "((fn [{:req! {5 :a}}] a) {:a 1})",
+        "((fn [{:req! []}] a) {:a 1})",
+    ] {
+        check(src, fn_spec, fn_cause);
+    }
+    // A default for a required local passes the `fn` spec, then
+    // fails the walk like `:keys!` (probe `fn-req-or` fails too,
+    // attributed to the inner `let` upstream as well).
+    check(
+        "((fn [{:req! {b :b}, :or {b 42}}] b) {})",
+        "Syntax error macroexpanding clojure.core/let at (test:1:2).",
+        "java.lang.Exception | Can't supply default value for required key: :b",
+    );
+    // `loop` walks before it specs: non-maps take the
+    // expansion-stage errors, bad locals are `Unsupported binding
+    // form`, vacuous shapes fall to the inner-`let` spec.
+    check(
+        "(loop [{:req! [a]} {:a 1}] a)",
+        "Unexpected error macroexpanding loop at (test:1:1).",
+        "java.lang.ClassCastException | Cannot cast clojure.lang.Symbol to java.util.Map$Entry",
+    );
+    check(
+        "(loop [{:req! 5} {:a 1}] a)",
+        "Syntax error macroexpanding loop at (test:1:1).",
+        "java.lang.IllegalArgumentException | Don't know how to create ISeq from: java.lang.Long",
+    );
+    check(
+        "(loop [{:req! {5 :a}} {:a 1}] a)",
+        "Syntax error macroexpanding loop at (test:1:1).",
+        "java.lang.Exception | Unsupported binding form: 5",
+    );
+    check(
+        "(loop [{:req! []} {:a 1}] 42)",
+        "Syntax error macroexpanding clojure.core/let at (test:1:1).",
+        "clojure.lang.ExceptionInfo | Call to clojure.core/let did not conform to spec.",
     );
 }
 

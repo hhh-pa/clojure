@@ -5,7 +5,16 @@ req-or [1 2 42]
 req-or-same THROW clojure.lang.Compiler$CompilerException|"Syntax error macroexpanding let at (/Users/hhu/workspace/clojure/docs/t1199/probes/m2-deltas.clj:17:38)."
 req-nested 3
 req-missingsel {:long-a nil}
+req-present 1
+req-absent THROW java.lang.IllegalArgumentException|"Missing required key: :a"
+req-nilval nil
+req-vec 2
+req-vec-miss THROW java.lang.IllegalArgumentException|"Missing required key: 5"
+req-str \b
+req-nil THROW java.lang.IllegalArgumentException|"Missing required key: :a"
+req-arity3 THROW clojure.lang.ArityException|"Wrong number of args (3) passed to: clojure.core/req!"
+req-arity1 THROW clojure.lang.ArityException|"Wrong number of args (1) passed to: clojure.core/req!"
 ns-postamp #:foo{:aa 1, :bb 3}
 ns-postamp-plain {:aa 1, :bb 2}
-ns-elem-kw THROW clojure.lang.Compiler$CompilerException|"Syntax error macroexpanding clojure.core/let at (/Users/hhu/workspace/clojure/docs/t1199/probes/m2-deltas.clj:23:24)."
+ns-elem-kw THROW clojure.lang.Compiler$CompilerException|"Syntax error macroexpanding clojure.core/let at (/Users/hhu/workspace/clojure/docs/t1199/probes/m2-deltas.clj:33:24)."
 ns-dir-only 42

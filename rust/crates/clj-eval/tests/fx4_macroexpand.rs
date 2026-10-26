@@ -427,6 +427,39 @@ fn expand_errors() {
             "java.lang.Exception | Can't supply default value for required key: :a".to_owned(),
         ]
     );
+    // M2 `:req!` (probes `req-or-same`, `loop-req-bad-full`,
+    // `loop-req-num` on alpha10): a default for a required local
+    // fails expansion; a non-map value fails on `(key %)` with the
+    // `Map$Entry` cast, a non-seqable with the `ISeq` error. Note
+    // the `let` + vector pin below documents a known divergence:
+    // upstream `let` spec-asserts first (`Syntax error
+    // macroexpanding clojure.core/let`), while this port expands
+    // first, so the expansion cast surfaces (`Unexpected error
+    // macroexpanding let`). `loop` matches upstream exactly (both
+    // expand first).
+    assert_eq!(
+        compile_err(&mut eval, "(let [{:req! {b :b}, :or {b 42}} {}] b)"),
+        vec![
+            "Syntax error macroexpanding let at (user:1:1).".to_owned(),
+            "java.lang.Exception | Can't supply default value for required key: :b".to_owned(),
+        ]
+    );
+    assert_eq!(
+        compile_err(&mut eval, "(let [{:req! [a]} {:a 1}] a)"),
+        vec![
+            "Unexpected error macroexpanding let at (user:1:1).".to_owned(),
+            "java.lang.ClassCastException | Cannot cast clojure.lang.Symbol to java.util.Map$Entry"
+                .to_owned(),
+        ]
+    );
+    assert_eq!(
+        compile_err(&mut eval, "(let [{:req! 5} {:a 1}] a)"),
+        vec![
+            "Syntax error macroexpanding let at (user:1:1).".to_owned(),
+            "java.lang.IllegalArgumentException | Don't know how to create ISeq from: java.lang.Long"
+                .to_owned(),
+        ]
+    );
     assert_eq!(
         compile_err(&mut eval, "(let [{:keys [a] :or {b 1} :select s} {}] s)"),
         vec![
@@ -485,11 +518,13 @@ fn expand_errors() {
                 .to_owned(),
         ]
     );
+    // M2: `(namespace %)` always runs now, so qualified `nil`
+    // takes the `getNamespace` NPE too (probe `nil` on alpha10).
     assert_eq!(
         compile_err(&mut eval, "(let [{:foo/keys [nil]} {}] a)"),
         vec![
             "Unexpected error macroexpanding let at (user:1:1).".to_owned(),
-            "java.lang.NullPointerException | Cannot invoke \"clojure.lang.Named.getName()\" because \"x\" is null"
+            "java.lang.NullPointerException | Cannot invoke \"clojure.lang.Named.getNamespace()\" because \"x\" is null"
                 .to_owned(),
         ]
     );

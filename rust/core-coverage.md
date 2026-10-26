@@ -195,6 +195,7 @@ machine-read — keep `| var | status | notes |` rows exact.
 | `assoc` | implemented | coll.rs assoc_rows (Key-must-be-int, odd-arity IAE, subvec class) |
 | `dissoc` | implemented | coll.rs dissoc_rows (nil/1-arity passthrough, transient CCE) |
 | `get` | implemented | coll.rs get_rows (nil-pun, strings, transients, subvec) |
+| `req!` | implemented | M2 9e51d6dc (`:added 1.13`): arity-2 get that throws `Missing required key` when absent; coll.rs req_rows |
 | `contains?` | implemented | coll.rs contains_rows (incl. string non-Number IAE) |
 | `find` | implemented | coll.rs find_rows ([k v] vectors, 2-arity only) |
 | `keys` | implemented | str.rs str_seq_contents + str_lazy_content_hash + coll.rs counted_pred_rows; entry-CCE per 7i pins (lazy.rs entry_of) |
