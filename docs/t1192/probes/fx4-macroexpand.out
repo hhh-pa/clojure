@@ -1,0 +1,87 @@
+---- expand-1 ----
+let => (let* [a 1] a)
+loop => (loop* [a 1] (if (pos? a) (recur (dec a)) a))
+fn1 => (fn* ([a] a))
+fn-multi => (fn* ([a] a) ([a b] b))
+fn-name => (fn* f ([a] a))
+binding => (clojure.core/let [] (clojure.core/push-thread-bindings (clojure.core/hash-map (var *out*) *out*)) (try 1 (finally (clojure.core/pop-thread-bindings))))
+letfn => (letfn* [f (clojure.core/fn f [a] a)] (f 1))
+with-redefs => (clojure.core/with-redefs-fn {(var *out*) *out*} (clojure.core/fn [] 1))
+with-bindings => (clojure.core/with-bindings* {(var *out*) *out*} (clojure.core/fn [] 1))
+bound-fn => (clojure.core/bound-fn* (clojure.core/fn [x] x))
+locking => (clojure.core/let [lockee__5901__auto__ *out*] (try (clojure.core/let [locklocal__5902__auto__ lockee__5901__auto__] (monitor-enter locklocal__5902__auto__) (try 1 (finally (monitor-exit locklocal__5902__auto__))))))
+qlet => (let* [a 1] a)
+declare => (do (def a))
+ns => (do (clojure.core/in-ns (quote foo)) (clojure.core/with-loading-context (clojure.core/refer (quote clojure.core))) (if (.equals (quote foo) (quote clojure.core)) nil (do (clojure.core/dosync (clojure.core/commute (clojure.core/deref (var clojure.core/*loaded-libs*)) clojure.core/conj (quote foo))) nil)))
+defmacro => (do (clojure.core/defn m ([&form &env x] x)) (. (var m) (setMacro)) (var m))
+assert => (clojure.core/when-not true (throw (new java.lang.AssertionError (clojure.core/str "Assert failed: " (clojure.core/pr-str (quote true))))))
+time => (clojure.core/let [start__6328__auto__ (. java.lang.System (clojure.core/nanoTime)) ret__6329__auto__ 1] (clojure.core/prn (clojure.core/str "Elapsed time: " (clojure.core// (clojure.core/double (clojure.core/- (. java.lang.System (clojure.core/nanoTime)) start__6328__auto__)) 1000000.0) " msecs")) ret__6329__auto__)
+wos => (clojure.core/let [s__6580__auto__ (new java.io.StringWriter)] (clojure.core/binding [clojure.core/*out* s__6580__auto__] 1 (clojure.core/str s__6580__auto__)))
+---- destructure let ----
+let-vec => (let* [vec__165 v a (clojure.core/nth vec__165 0 nil) b (clojure.core/nth vec__165 1 nil)] a)
+let-amp => (let* [vec__168 v seq__169 (clojure.core/seq vec__168) first__170 (clojure.core/first seq__169) seq__169 (clojure.core/next seq__169) a first__170 r seq__169] a)
+let-map => (let* [default__173 1 map__171 v map__171 (if (clojure.core/instance? clojure.lang.ISeq map__171) (if (clojure.core/next ^clojure.lang.ISeq map__171) (clojure.lang.PersistentArrayMap/createAsIfByAssoc (clojure.core/to-array ^clojure.lang.ISeq map__171)) (if (clojure.core/seq ^clojure.lang.ISeq map__171) (clojure.core/first ^clojure.lang.ISeq map__171) clojure.lang.PersistentArrayMap/EMPTY)) map__171) m map__171 a (clojure.core/get map__171 :a default__173)] a)
+let-keys! => (let* [map__175 v map__175 (if (clojure.core/instance? clojure.lang.ISeq map__175) (if (clojure.core/next ^clojure.lang.ISeq map__175) (clojure.lang.PersistentArrayMap/createAsIfByAssoc (clojure.core/to-array ^clojure.lang.ISeq map__175)) (if (clojure.core/seq ^clojure.lang.ISeq map__175) (clojure.core/first ^clojure.lang.ISeq map__175) clojure.lang.PersistentArrayMap/EMPTY)) map__175) m nil notfound__177 (new Object) temp__176 (clojure.core/get map__175 :a notfound__177) notfound?__178 (clojure.core/identical? temp__176 notfound__177) m (if notfound?__178 (clojure.core/assoc m :a nil) m) a (clojure.core/when-not notfound?__178 temp__176) m (clojure.core/merge m (clojure.core/some-vals nil))] a)
+fn-dest => ^{:line 60, :column 20} (fn* ([p__179] (clojure.core/let [[a b] p__179] a)))
+fn-pre => ^{:line 61, :column 19} (fn* ([x] (clojure.core/assert ^{:line 61, :column 34} (pos? x)) (clojure.core/let [% x] (clojure.core/assert ^{:line 61, :column 51} (number? %)) %)))
+fn-meta => ^{:line 62, :column 20} (fn* ([a] a))
+---- loop destructure ----
+loop-vec => (clojure.core/let [G__187 v [a b] G__187] (loop* [G__187 G__187] (clojure.core/let [[a b] G__187] a)))
+loop-map => (clojure.core/let [G__192 v {:keys [a]} G__192] (loop* [G__192 G__192] (clojure.core/let [{:keys [a]} G__192] a)))
+---- arity / shape ----
+let0 ERR clojure.lang.Compiler$CompilerException | Syntax error macroexpanding clojure.core/let at (/Users/hhu/.grok/worktrees/workspace-clojure/subagent-01a168d5-4696-7320-8956-1d45514f9777/docs/t1192/probes/fx4-macroexpand.clj:69:1). ;; clojure.lang.ExceptionInfo | Call to clojure.core/let did not conform to spec.
+let-novec ERR clojure.lang.Compiler$CompilerException | Syntax error macroexpanding clojure.core/let at (/Users/hhu/.grok/worktrees/workspace-clojure/subagent-01a168d5-4696-7320-8956-1d45514f9777/docs/t1192/probes/fx4-macroexpand.clj:70:1). ;; clojure.lang.ExceptionInfo | Call to clojure.core/let did not conform to spec.
+let-odd ERR clojure.lang.Compiler$CompilerException | Syntax error macroexpanding clojure.core/let at (/Users/hhu/.grok/worktrees/workspace-clojure/subagent-01a168d5-4696-7320-8956-1d45514f9777/docs/t1192/probes/fx4-macroexpand.clj:71:1). ;; clojure.lang.ExceptionInfo | Call to clojure.core/let did not conform to spec.
+let-bad ERR clojure.lang.Compiler$CompilerException | Syntax error macroexpanding clojure.core/let at (/Users/hhu/.grok/worktrees/workspace-clojure/subagent-01a168d5-4696-7320-8956-1d45514f9777/docs/t1192/probes/fx4-macroexpand.clj:72:1). ;; clojure.lang.ExceptionInfo | Call to clojure.core/let did not conform to spec.
+loop0 ERR clojure.lang.ArityException | Wrong number of args (0) passed to: clojure.core/loop
+binding0 ERR clojure.lang.ArityException | Wrong number of args (0) passed to: clojure.core/binding
+letfn0 ERR clojure.lang.ArityException | Wrong number of args (0) passed to: clojure.core/letfn
+letfn-bad ERR clojure.lang.Compiler$CompilerException | Syntax error macroexpanding letfn at (/Users/hhu/.grok/worktrees/workspace-clojure/subagent-01a168d5-4696-7320-8956-1d45514f9777/docs/t1192/probes/fx4-macroexpand.clj:76:1). ;; java.lang.IllegalArgumentException | Don't know how to create ISeq from: java.lang.Long
+wrd0 ERR clojure.lang.ArityException | Wrong number of args (0) passed to: clojure.core/with-redefs
+wrd-long ERR clojure.lang.Compiler$CompilerException | Syntax error macroexpanding with-redefs at (/Users/hhu/.grok/worktrees/workspace-clojure/subagent-01a168d5-4696-7320-8956-1d45514f9777/docs/t1192/probes/fx4-macroexpand.clj:78:1). ;; java.lang.IllegalArgumentException | Don't know how to create ISeq from: java.lang.Long
+wb0 ERR clojure.lang.ArityException | Wrong number of args (0) passed to: clojure.core/with-bindings
+lock0 ERR clojure.lang.ArityException | Wrong number of args (0) passed to: clojure.core/locking
+fn0 ERR clojure.lang.Compiler$CompilerException | Syntax error macroexpanding clojure.core/fn at (/Users/hhu/.grok/worktrees/workspace-clojure/subagent-01a168d5-4696-7320-8956-1d45514f9777/docs/t1192/probes/fx4-macroexpand.clj:81:1). ;; clojure.lang.ExceptionInfo | Call to clojure.core/fn did not conform to spec.
+fn5 ERR clojure.lang.Compiler$CompilerException | Syntax error macroexpanding clojure.core/fn at (/Users/hhu/.grok/worktrees/workspace-clojure/subagent-01a168d5-4696-7320-8956-1d45514f9777/docs/t1192/probes/fx4-macroexpand.clj:82:1). ;; clojure.lang.ExceptionInfo | Call to clojure.core/fn did not conform to spec.
+fn-nil ERR clojure.lang.Compiler$CompilerException | Syntax error macroexpanding clojure.core/fn at (/Users/hhu/.grok/worktrees/workspace-clojure/subagent-01a168d5-4696-7320-8956-1d45514f9777/docs/t1192/probes/fx4-macroexpand.clj:83:1). ;; clojure.lang.ExceptionInfo | Call to clojure.core/fn did not conform to spec.
+fn-sig ERR clojure.lang.Compiler$CompilerException | Syntax error macroexpanding clojure.core/fn at (/Users/hhu/.grok/worktrees/workspace-clojure/subagent-01a168d5-4696-7320-8956-1d45514f9777/docs/t1192/probes/fx4-macroexpand.clj:84:1). ;; clojure.lang.ExceptionInfo | Call to clojure.core/fn did not conform to spec.
+amp-bad ERR clojure.lang.Compiler$CompilerException | Syntax error macroexpanding clojure.core/let at (/Users/hhu/.grok/worktrees/workspace-clojure/subagent-01a168d5-4696-7320-8956-1d45514f9777/docs/t1192/probes/fx4-macroexpand.clj:85:1). ;; clojure.lang.ExceptionInfo | Call to clojure.core/let did not conform to spec.
+dir-bad ERR clojure.lang.Compiler$CompilerException | Syntax error macroexpanding clojure.core/let at (/Users/hhu/.grok/worktrees/workspace-clojure/subagent-01a168d5-4696-7320-8956-1d45514f9777/docs/t1192/probes/fx4-macroexpand.clj:86:1). ;; clojure.lang.ExceptionInfo | Call to clojure.core/let did not conform to spec.
+amp2 ERR clojure.lang.Compiler$CompilerException | Syntax error macroexpanding let at (/Users/hhu/.grok/worktrees/workspace-clojure/subagent-01a168d5-4696-7320-8956-1d45514f9777/docs/t1192/probes/fx4-macroexpand.clj:87:1). ;; java.lang.IllegalArgumentException | 'b' - binding symbols can only appear before '&', use keys after
+amp-sym ERR clojure.lang.Compiler$CompilerException | Syntax error macroexpanding let at (/Users/hhu/.grok/worktrees/workspace-clojure/subagent-01a168d5-4696-7320-8956-1d45514f9777/docs/t1192/probes/fx4-macroexpand.clj:88:1). ;; java.lang.IllegalArgumentException | 'b' - binding symbols can only appear before '&', use keys after
+or-both ERR clojure.lang.Compiler$CompilerException | Syntax error macroexpanding let at (/Users/hhu/.grok/worktrees/workspace-clojure/subagent-01a168d5-4696-7320-8956-1d45514f9777/docs/t1192/probes/fx4-macroexpand.clj:89:1). ;; java.lang.Exception | Multiple :or defaults for same key: a 'a'
+or-req ERR clojure.lang.Compiler$CompilerException | Syntax error macroexpanding let at (/Users/hhu/.grok/worktrees/workspace-clojure/subagent-01a168d5-4696-7320-8956-1d45514f9777/docs/t1192/probes/fx4-macroexpand.clj:90:1). ;; java.lang.Exception | Can't supply default value for required key: :a
+or-sym ERR clojure.lang.Compiler$CompilerException | Syntax error macroexpanding let at (/Users/hhu/.grok/worktrees/workspace-clojure/subagent-01a168d5-4696-7320-8956-1d45514f9777/docs/t1192/probes/fx4-macroexpand.clj:91:1). ;; java.lang.IllegalArgumentException | symbol b in :or does not refer to a binding
+or-only ERR clojure.lang.Compiler$CompilerException | Syntax error macroexpanding let at (/Users/hhu/.grok/worktrees/workspace-clojure/subagent-01a168d5-4696-7320-8956-1d45514f9777/docs/t1192/probes/fx4-macroexpand.clj:92:1). ;; java.lang.IllegalArgumentException | keys #{:z} appear only in :or
+direct-let ERR clojure.lang.ArityException | Wrong number of args (1) passed to: clojure.core/let
+direct-declare ERR clojure.lang.ArityException | Wrong number of args (1) passed to: clojure.core/declare
+---- req ----
+req ERR java.lang.IllegalArgumentException | Missing required key: :a
+---- eval smoke ----
+ev-let => 1
+ev-vec => [1 2]
+ev-keys => 5
+ev-fn => 3
+ev-pre ERR java.lang.AssertionError | Assert failed: (pos? x)
+ev-loop => 0
+ev-letfn => 0
+ev-lock => 1
+---- coverage top-up (PR #22) ----
+fn-multi-body => (fn* ([x] x x))
+ev-loop-mixed => [1 2]
+ev-fn-post-multi => 2
+ev-fn-mixed => [1 2 3]
+let-bad-vec ERR clojure.lang.Compiler$CompilerException | Syntax error macroexpanding clojure.core/let at (/Users/hhu/workspace/clojure/docs/t1192/probes/fx4-macroexpand.clj:114:1). ;; clojure.lang.ExceptionInfo | Call to clojure.core/let did not conform to spec.
+ev-keys-kw => 1
+ev-keys-nil ERR clojure.lang.Compiler$CompilerException | Syntax error macroexpanding clojure.core/let at (/Users/hhu/workspace/clojure/docs/t1192/probes/fx4-macroexpand.clj:116:27).
+ev-keys-set ERR clojure.lang.Compiler$CompilerException | Syntax error macroexpanding clojure.core/let at (/Users/hhu/workspace/clojure/docs/t1192/probes/fx4-macroexpand.clj:117:27).
+ev-keys-dup => 1
+ev-select-nested => [1 {:x 1} {:p {:x 1}}]
+ev-keys-bang => 1
+ev-keys-bang-missing ERR java.lang.IllegalArgumentException | Missing required key: :a
+ev-nth-object ERR java.lang.UnsupportedOperationException | nth not supported on this type: Object
+ev-wrd-nested => 2
+ev-wrd-list => 2
+ev-lock-nil ERR java.lang.NullPointerException | Cannot enter synchronized block because "locklocal__5902__auto__428" is null
+ev-invoke-entry-kw => nil
+ev-seq-rest => [:a (1)]

@@ -80,10 +80,13 @@ tx), probe37 `declare-*`/`ns-*`, corner probes `s5ccorner*`,
   `()`, weird operators, quoted/special forms (including
   `clojure.core/do`), and unresolvable operators return
   unchanged (probe38 `10-me1-nonmacro-seq` … `18-me1-special`,
-  `81-me1-weird-ops`, `87-unresolvable-qualified`); builtin
-  forms (`let`, `declare`, `ns`, …) return unchanged (the port's
-  documented `macroexpand-1` identity — the JVM expands the
-  real `declare`/`ns`/`fn`/`let` macros, fence); non-macro
+  `81-me1-weird-ops`, `87-unresolvable-qualified`); the nine
+  analyzer builtins (`let`, `loop`, `fn`, `binding`, `letfn`,
+  `with-redefs`, `with-bindings`, `bound-fn`, `locking`) expand
+  one step to the alpha9 shapes (`let*`/`fn*`/`loop*` and the
+  qualified helper calls; probe `fx4-macroexpand`); `defmacro`,
+  `declare`, `ns`, `assert`, `time`, and `with-out-str` stay
+  the identity fence (the JVM expands them); non-macro
   `Var` operators return unchanged (corner `k-me1-varinc`).
   `&env` is nil (the native has no locals); the wrap blames the
   call site (probed: a nested call reports the call's position,
@@ -150,17 +153,26 @@ tx), probe37 `declare-*`/`ns-*`, corner probes `s5ccorner*`,
   (N1: no host classes — loud, never silently skipped; the
   JVM's `:import` destructure accidents are bare `ClassCastException`s — fence).
 
-## Builtin-macro vars (divergent)
+## Builtin-macro vars
 
-- `let`, `loop`, `fn`, `binding`, `letfn`, `defmacro`,
-  `declare`, `ns`, `with-redefs`, `with-bindings`, `bound-fn`
-  resolve as vars with `:macro true` (on the JVM only the real
-  macros exist; `let`/`loop`/`fn` are vars but expand to
-  `fn*`/`let*`, probe38 `89-fn-let-macros`). Their roots are
-  placeholder natives: direct invocation is
+- `let`, `loop`, `fn`, `binding`, `letfn`, `with-redefs`,
+  `with-bindings`, `bound-fn`, and `locking` are real macro
+  fns (`:macro true`). `macroexpand-1` matches alpha9 one step
+  (gensym ids are the port counter — `prefixn` / `prefix__n__auto__`
+  — not the JVM's boot id). Direct invocation is that fn: a
+  short call is `ArityException` on `clojure.core/{name}` with
+  the raw count (no `&form`/`&env` strip). Destructuring
+  `let`/`loop`/`fn` rewrites through `destructure` before
+  analyze. There is no spec instrumentation, so shapes the JVM
+  rejects in spec raise the macro body's own
+  `IllegalArgumentException` / `Exception` under `Syntax error
+  macroexpanding {op-as-written}`. `(let)` with no args is the
+  arity error (the JVM's spec message fires first).
+- `defmacro`, `declare`, `ns`, `assert`, `time`, and
+  `with-out-str` stay placeholder natives: direct invocation is
   `IllegalStateException | Can't invoke builtin macro:
-  clojure.core/{name}`. `macroexpand-1` on these forms is the
-  identity (documented).
+  clojure.core/{name}`, and `macroexpand-1` is the identity
+  (the JVM expands these).
 - Top-level `do` splitting macroexpands first (full,
   `Compiler.eval`): a `do`-headed expansion splits and each
   element re-enters `eval` (macros defining macros before
@@ -197,7 +209,9 @@ tx), probe37 `declare-*`/`ns-*`, corner probes `s5ccorner*`,
 
 ## Fences
 
-- `macroexpand-1` identity on builtin forms (above); `defmacro`
+- `macroexpand-1` identity on `defmacro`/`declare`/`ns`/
+  `assert`/`time`/`with-out-str` (the other nine analyzer
+  builtins expand; above); `defmacro`
   validation attribution (`clojure.core/defmacro` top-level,
   `clojure.core/fn` for clause contents; the JVM says `defn`
   throughout); `&env` values (`true`, not `LocalBinding`s);

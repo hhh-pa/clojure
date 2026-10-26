@@ -1,0 +1,11 @@
+nest-mapdest-0 :a
+nest-mapdest-1 1
+nest-mapdest-5 nil
+nest-mapdest-neg nil
+nest-mapdest-kw nil
+nest-vec-3rd nil
+nest-vec-rest [:a (1)]
+nest-all-entry [:m {:a 5} [:m {:a 1}]]
+nest-all-vec {:w 0, :a 1}
+invoke-kw-entry nil
+fnbody-mapdest-0 :a

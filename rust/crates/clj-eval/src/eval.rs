@@ -1372,41 +1372,12 @@ impl Evaluator {
                 "Cannot invoke nil as a function".to_owned(),
             ))),
             Value::Extension(_) => self.invoke_extension(callee, args),
-            Value::Keyword(kw) => {
-                let name = kw.to_string();
-                match args {
-                    [coll] => Ok(lookup(coll, callee).unwrap_or(Value::Nil)),
-                    [coll, not_found] => {
-                        Ok(lookup(coll, callee).unwrap_or_else(|| not_found.clone()))
-                    }
-                    _ => Err(self.throw(NativeError::arity(&name, args.len()))),
-                }
-            }
-            Value::Symbol(_) => match args {
-                [coll] => Ok(lookup(coll, callee).unwrap_or(Value::Nil)),
-                [coll, not_found] => Ok(lookup(coll, callee).unwrap_or_else(|| not_found.clone())),
-                _ => Err(self.throw(NativeError::arity("clojure.lang.Symbol", args.len()))),
-            },
+            Value::Keyword(kw) => self.invoke_keyed(callee, &kw.to_string(), args),
+            Value::Symbol(_) => self.invoke_keyed(callee, "clojure.lang.Symbol", args),
             Value::Vector(v) => self.invoke_vector(v, args),
             Value::MapEntry { key, val } => self.invoke_mapentry(key, val, args),
-            Value::Map(_) => {
-                let name = jvm_class_of(callee);
-                match args {
-                    [key] => Ok(lookup(callee, key).unwrap_or(Value::Nil)),
-                    [key, not_found] => {
-                        Ok(lookup(callee, key).unwrap_or_else(|| not_found.clone()))
-                    }
-                    _ => Err(self.throw(NativeError::arity(&name, args.len()))),
-                }
-            }
-            Value::Set(s) => match args {
-                [key] => Ok(member(s, key).unwrap_or(Value::Nil)),
-                [key, not_found] => Ok(member(s, key).unwrap_or_else(|| not_found.clone())),
-                _ => Err(self.throw(NativeError::arity(
-                    "clojure.lang.PersistentHashSet",
-                    args.len(),
-                ))),
-            },
+            Value::Map(_) => self.invoke_map(callee, args),
+            Value::Set(s) => self.invoke_set(s, args),
             Value::Var(v) => self.invoke_var(v, args),
             Value::Unbound(u) => Err(self.throw(NativeError::new(
                 ThrowClass::IllegalStateException,
@@ -1414,6 +1385,39 @@ impl Evaluator {
             ))),
             Value::Promise(p) => self.invoke_promise(p, args),
             _ => Err(self.throw(NativeError::cast(&jvm_class_of(callee), "clojure.lang.IFn"))),
+        }
+    }
+
+    fn invoke_keyed(
+        &mut self,
+        callee: &Value,
+        name: &str,
+        args: &[Value],
+    ) -> Result<Value, Signal> {
+        match args {
+            [coll] => Ok(lookup(coll, callee).unwrap_or(Value::Nil)),
+            [coll, not_found] => Ok(lookup(coll, callee).unwrap_or_else(|| not_found.clone())),
+            _ => Err(self.throw(NativeError::arity(name, args.len()))),
+        }
+    }
+
+    fn invoke_map(&mut self, callee: &Value, args: &[Value]) -> Result<Value, Signal> {
+        let name = jvm_class_of(callee);
+        match args {
+            [key] => Ok(lookup(callee, key).unwrap_or(Value::Nil)),
+            [key, not_found] => Ok(lookup(callee, key).unwrap_or_else(|| not_found.clone())),
+            _ => Err(self.throw(NativeError::arity(&name, args.len()))),
+        }
+    }
+
+    fn invoke_set(&mut self, s: &clj_value::Set, args: &[Value]) -> Result<Value, Signal> {
+        match args {
+            [key] => Ok(member(s, key).unwrap_or(Value::Nil)),
+            [key, not_found] => Ok(member(s, key).unwrap_or_else(|| not_found.clone())),
+            _ => Err(self.throw(NativeError::arity(
+                "clojure.lang.PersistentHashSet",
+                args.len(),
+            ))),
         }
     }
 
@@ -2036,7 +2040,7 @@ impl Evaluator {
     /// `seq-to-map-for-destructuring`: only lists convert (S4 has no
     /// other `ISeq`s). Empty is `{}`, one element is the element,
     /// longer reads pairs plus the trailing rule (§E12).
-    fn seq_to_map(&mut self, value: &Value) -> Result<Value, Signal> {
+    pub(crate) fn seq_to_map(&mut self, value: &Value) -> Result<Value, Signal> {
         let Value::List(list) = value else {
             return Ok(value.clone());
         };
@@ -2258,30 +2262,42 @@ fn cast_entry(entry: &Value) -> NativeError {
 fn lookup(coll: &Value, key: &Value) -> Option<Value> {
     match coll {
         Value::Map(m) => m.get(key).cloned(),
-        Value::Vector(v) => match key {
-            Value::Int(n) => usize::try_from(*n)
-                .ok()
-                .and_then(|i| v.iter().nth(i).cloned()),
-            _ => None,
-        },
+        Value::Vector(v) => lookup_vector(v, key),
         // Entries read like their 2-vector (map destructuring
         // passes integer keys — Oracle FX2 `mapdest-plain`).
-        Value::MapEntry { key: ek, val: ev } => match key {
-            Value::Int(n) => match usize::try_from(*n).ok() {
-                Some(0) => Some((**ek).clone()),
-                Some(1) => Some((**ev).clone()),
-                _ => None,
-            },
-            _ => None,
-        },
-        Value::Str(s) => match key {
-            Value::Int(n) => usize::try_from(*n)
-                .ok()
-                .and_then(|i| s.chars().nth(i))
-                .map(Value::Char),
-            _ => None,
-        },
+        Value::MapEntry { key: ek, val: ev } => lookup_entry(ek, ev, key),
+        Value::Str(s) => lookup_string(s, key),
         Value::Set(s) => member(s, key),
+        _ => None,
+    }
+}
+
+fn lookup_vector(v: &Vector, key: &Value) -> Option<Value> {
+    match key {
+        Value::Int(n) => usize::try_from(*n)
+            .ok()
+            .and_then(|i| v.iter().nth(i).cloned()),
+        _ => None,
+    }
+}
+
+fn lookup_entry(key: &Value, val: &Value, index: &Value) -> Option<Value> {
+    match index {
+        Value::Int(n) => match usize::try_from(*n).ok() {
+            Some(0) => Some(key.clone()),
+            Some(1) => Some(val.clone()),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn lookup_string(s: &str, key: &Value) -> Option<Value> {
+    match key {
+        Value::Int(n) => usize::try_from(*n)
+            .ok()
+            .and_then(|i| s.chars().nth(i))
+            .map(Value::Char),
         _ => None,
     }
 }
@@ -2472,5 +2488,27 @@ mod tests {
         // The `try`-region impossible case: pins the helper's
         // total contract (`try` bodies only ever throw).
         assert!(try_thrown(Signal::Recur(vec![])).is_none());
+    }
+
+    #[test]
+    fn locking_nil_lockee_is_npe() {
+        // Direct analyze+evaluate (bypasses macroexpansion, which
+        // lowers `locking` to `monitor-enter`): the analyzer's
+        // `Locking` arm with a nil lockee is the JVM's
+        // synchronized-block NPE (port-fixed lock name, P6).
+        let mut eval = Evaluator::new("test");
+        let form = Value::List(List::from_vec(vec![
+            Value::Symbol(Symbol::new(None, "locking")),
+            Value::Nil,
+            Value::Int(1),
+        ]));
+        let expr = eval.analyze(&form).expect("analyze locking");
+        let err = eval.eval(&expr, &Env::new()).expect_err("nil lockee");
+        let t = try_thrown(err).expect("locking nil throws");
+        assert_eq!(t.class, ThrowClass::NullPointerException);
+        assert_eq!(
+            t.message.as_deref(),
+            Some("Cannot enter synchronized block because \"lock\" is null")
+        );
     }
 }

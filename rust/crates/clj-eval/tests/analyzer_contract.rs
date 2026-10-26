@@ -1168,6 +1168,18 @@ fn bare_macro_arity() {
         "(letfn)",
         "clojure.lang.ArityException | Wrong number of args (0) passed to: clojure.core/letfn",
     );
+    check_bare(
+        "((fn [] (with-redefs)))",
+        "clojure.lang.ArityException | Wrong number of args (0) passed to: clojure.core/with-redefs",
+    );
+    check_bare(
+        "((fn [] (with-bindings)))",
+        "clojure.lang.ArityException | Wrong number of args (0) passed to: clojure.core/with-bindings",
+    );
+    check_bare(
+        "((fn [] (locking)))",
+        "clojure.lang.ArityException | Wrong number of args (0) passed to: clojure.core/locking",
+    );
 }
 
 #[test]
@@ -1364,6 +1376,20 @@ fn gap2_with_redefs_binding_rows() {
         "(with-redefs {:a 1} 1)",
         "Syntax error compiling var at (test:1:1).",
         "java.lang.ClassCastException | Cannot cast clojure.lang.MapEntry to clojure.lang.Symbol",
+    );
+    // A non-symbol var is the `Symbol` cast (expr.rs `parse_with_redefs`).
+    check(
+        "((fn [] (with-redefs [1 2] :b)))",
+        "Syntax error compiling var at (test:1:9).",
+        "java.lang.ClassCastException | Cannot cast java.lang.Long to clojure.lang.Symbol",
+    );
+    // A list bindings form is seqable (JVM `with-redefs` seqs it).
+    analyze_ok("((fn [] (with-redefs (va251 2) va251)))");
+    // A scalar bindings form is the ISeq error.
+    check(
+        "((fn [] (with-redefs 5 :b)))",
+        "Syntax error macroexpanding with-redefs at (test:1:9).",
+        "java.lang.IllegalArgumentException | Don't know how to create ISeq from: java.lang.Long",
     );
 }
 

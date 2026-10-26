@@ -795,62 +795,91 @@ impl PartialEq for Value {
             // Realized seqs compare sequentially against
             // List/Vector/realized seqs (never maps, sets, or
             // pending seqs, which `=` realizes first).
-            (a, b) if seq_items(a).is_some() || seq_items(b).is_some() => {
-                match (seq_items(a), seq_items(b)) {
-                    (Some(x), Some(y)) => x == y,
-                    _ => false,
-                }
-            }
-            (Value::Map(a), Value::Map(b)) => {
-                a.size() == b.size() && a.iter().all(|(k, v)| b.get(k) == Some(v))
-            }
-            (Value::Set(a), Value::Set(b)) => {
-                a.size() == b.size() && a.iter().all(|v| b.contains(v))
-            }
-            // Identity semantics like java.util.regex.Pattern.
-            (Value::Regex(a), Value::Regex(b)) => Arc::ptr_eq(a, b),
-            // `TaggedLiteral.equals`/`ReaderConditional.equals`
-            // delegate to the form's `.equals` (doubles by bits, so
-            // `[0.0]` ≠ `[-0.0]` but `[##NaN]` ≡ `[##NaN]`); `=`
-            // reaches them through the `Util.equiv` `.equals`
-            // fallback. The `Hash` impl stays `equiv`-based: bits-equal
-            // forms hash equally, so the `Eq`/`Hash` contract holds.
-            (
-                Value::TaggedLiteral { tag: t1, form: f1 },
-                Value::TaggedLiteral { tag: t2, form: f2 },
-            ) => t1 == t2 && plain_equals(f1, f2),
-            (
-                Value::ReaderConditional {
-                    form: f1,
-                    splicing: s1,
-                },
-                Value::ReaderConditional {
-                    form: f2,
-                    splicing: s2,
-                },
-            ) => s1 == s2 && plain_equals(f1, f2),
-            // S4 identity semantics, mirroring `=`: ids only, never
-            // payloads; extensions dispatch through the trait.
-            (Value::Var(a), Value::Var(b)) => a.id == b.id,
-            (Value::Unbound(a), Value::Unbound(b)) => a.var_id == b.var_id,
-            (Value::Throwable(a), Value::Throwable(b)) => a.id == b.id,
-            (Value::Transient(a), Value::Transient(b)) => a.same_cell(b),
-            // Shared cell AND equal meta: a `with-meta` copy shares
-            // the cell but compares unequal (delays carry no meta,
-            // so the cell alone decides there).
-            (Value::Atom(a), Value::Atom(b)) => cell_meta_eq(a.same_cell(b), a.meta(), b.meta()),
-            (Value::Delay(a), Value::Delay(b)) => a.same_cell(b),
-            (Value::Future(a), Value::Future(b)) => {
-                cell_meta_eq(a.same_cell(b), a.meta(), b.meta())
-            }
-            (Value::Promise(a), Value::Promise(b)) => {
-                cell_meta_eq(a.same_cell(b), a.meta(), b.meta())
-            }
-            (Value::Agent(a), Value::Agent(b)) => cell_meta_eq(a.same_cell(b), a.meta(), b.meta()),
-            (Value::Extension(a), Value::Extension(b)) => a.dyn_eq(&**b),
-            _ => false,
+            (a, b) if either_seq(a, b) => seq_items_eq(a, b),
+            pair => value_eq_mid(pair.0, pair.1),
         }
     }
+}
+
+/// At least one side is sequential (`seq_items`).
+fn either_seq(a: &Value, b: &Value) -> bool {
+    seq_items(a).is_some() || seq_items(b).is_some()
+}
+
+fn seq_items_eq(a: &Value, b: &Value) -> bool {
+    match (seq_items(a), seq_items(b)) {
+        (Some(x), Some(y)) => x == y,
+        _ => false,
+    }
+}
+
+/// Maps, sets, reader forms, and identity values. Chained so each
+/// match stays under the complexity gate.
+fn value_eq_mid(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Map(a), Value::Map(b)) => map_value_eq(a, b),
+        (Value::Set(a), Value::Set(b)) => set_value_eq(a, b),
+        // Identity semantics like java.util.regex.Pattern.
+        (Value::Regex(a), Value::Regex(b)) => Arc::ptr_eq(a, b),
+        // `TaggedLiteral.equals`/`ReaderConditional.equals`
+        // delegate to the form's `.equals` (doubles by bits, so
+        // `[0.0]` ≠ `[-0.0]` but `[##NaN]` ≡ `[##NaN]`); `=`
+        // reaches them through the `Util.equiv` `.equals`
+        // fallback. The `Hash` impl stays `equiv`-based: bits-equal
+        // forms hash equally, so the `Eq`/`Hash` contract holds.
+        (
+            Value::TaggedLiteral { tag: t1, form: f1 },
+            Value::TaggedLiteral { tag: t2, form: f2 },
+        ) => tagged_literal_eq(t1, f1, t2, f2),
+        (
+            Value::ReaderConditional {
+                form: f1,
+                splicing: s1,
+            },
+            Value::ReaderConditional {
+                form: f2,
+                splicing: s2,
+            },
+        ) => reader_cond_eq(*s1, f1, *s2, f2),
+        // S4 identity semantics, mirroring `=`: ids only, never
+        // payloads; extensions dispatch through the trait.
+        (Value::Var(a), Value::Var(b)) => a.id == b.id,
+        (Value::Unbound(a), Value::Unbound(b)) => a.var_id == b.var_id,
+        (Value::Throwable(a), Value::Throwable(b)) => a.id == b.id,
+        (Value::Transient(a), Value::Transient(b)) => a.same_cell(b),
+        // Shared cell AND equal meta: a `with-meta` copy shares
+        // the cell but compares unequal (delays carry no meta,
+        // so the cell alone decides there).
+        (Value::Atom(a), Value::Atom(b)) => cell_meta_eq(a.same_cell(b), a.meta(), b.meta()),
+        (Value::Delay(a), Value::Delay(b)) => a.same_cell(b),
+        (Value::Future(a), Value::Future(b)) => cell_meta_eq(a.same_cell(b), a.meta(), b.meta()),
+        pair => value_eq_rest(pair.0, pair.1),
+    }
+}
+
+fn value_eq_rest(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Promise(a), Value::Promise(b)) => cell_meta_eq(a.same_cell(b), a.meta(), b.meta()),
+        (Value::Agent(a), Value::Agent(b)) => cell_meta_eq(a.same_cell(b), a.meta(), b.meta()),
+        (Value::Extension(a), Value::Extension(b)) => a.dyn_eq(&**b),
+        _ => false,
+    }
+}
+
+fn map_value_eq(a: &Map, b: &Map) -> bool {
+    a.size() == b.size() && a.iter().all(|(k, v)| b.get(k) == Some(v))
+}
+
+fn set_value_eq(a: &Set, b: &Set) -> bool {
+    a.size() == b.size() && a.iter().all(|v| b.contains(v))
+}
+
+fn tagged_literal_eq(t1: &Symbol, f1: &Value, t2: &Symbol, f2: &Value) -> bool {
+    t1 == t2 && plain_equals(f1, f2)
+}
+
+fn reader_cond_eq(s1: bool, f1: &Value, s2: bool, f2: &Value) -> bool {
+    s1 == s2 && plain_equals(f1, f2)
 }
 
 // `Eq`'s reflexivity technically fails for NaN (never `=` to itself,
@@ -915,108 +944,125 @@ impl Hash for Value {
                 state.write_u8(8);
                 v.hash(state);
             }
-            // A map entry hashes exactly like its 2-vector (they
-            // are `=`, so the `Eq`/`Hash` contract requires it;
-            // Oracle FX2 `hash-eq`, `distinct`, `frequencies`).
-            Value::MapEntry { key, val } => {
-                state.write_u8(8);
-                state.write_usize(2);
-                key.hash(state);
-                val.hash(state);
-            }
-            // Order-insensitive: sums commute, so iteration order
-            // cannot leak into the hash.
-            Value::Map(m) => {
-                state.write_u8(9);
-                m.hash(state);
-            }
-            Value::Set(s) => {
-                state.write_u8(10);
-                s.hash(state);
-            }
-            // Same-pointer values share the pattern string, so the
-            // string hash is consistent with pointer equality.
-            Value::Regex(pattern) => {
-                state.write_u8(11);
-                pattern.hash(state);
-            }
-            Value::TaggedLiteral { tag, form } => {
-                state.write_u8(12);
-                tag.hash(state);
-                form.hash(state);
-            }
-            Value::ReaderConditional { form, splicing } => {
-                state.write_u8(13);
-                splicing.hash(state);
-                form.hash(state);
-            }
-            Value::Var(v) => {
-                state.write_u8(14);
-                state.write_u64(v.id);
-            }
-            Value::Unbound(u) => {
-                state.write_u8(15);
-                state.write_u64(u.var_id);
-            }
-            Value::Throwable(t) => {
-                state.write_u8(16);
-                state.write_u64(t.id);
-            }
-            Value::Transient(t) => {
-                state.write_u8(17);
-                state.write_u64(t.id());
-            }
-            Value::Atom(a) => {
-                state.write_u8(18);
-                state.write_u64(a.id());
-            }
-            Value::Delay(d) => {
-                state.write_u8(19);
-                state.write_u64(d.id());
-            }
-            Value::Future(f) => {
-                state.write_u8(20);
-                state.write_u64(f.id());
-            }
-            Value::Promise(p) => {
-                state.write_u8(21);
-                state.write_u64(p.id());
-            }
-            Value::Agent(a) => {
-                state.write_u8(22);
-                state.write_u64(a.id());
-            }
-            Value::Extension(e) => {
-                // Realized seqs hash as sequential family (marker 8
-                // plus length-prefixed elements — identical writes
-                // to `List`, so sequential equals hash equally).
-                if let Some(s) = e.as_any().downcast_ref::<crate::RealizedSeq>() {
-                    state.write_u8(8);
-                    let items = s.items();
-                    items.len().hash(state);
-                    for item in &items {
-                        item.hash(state);
-                    }
-                } else if let Some(r) = e.as_any().downcast_ref::<crate::RangeValue>() {
-                    state.write_u8(8);
-                    r.walked_len().hash(state);
-                    r.for_each(&mut |v| v.hash(state));
-                } else if let Some(r) = e.as_any().downcast_ref::<crate::RepeatValue>() {
-                    state.write_u8(8);
-                    r.walked_len().hash(state);
-                    r.for_each(&mut |v| v.hash(state));
-                } else if let Some(sv) = e.as_any().downcast_ref::<crate::SubVectorValue>() {
-                    state.write_u8(8);
-                    sv.len().hash(state);
-                    for item in sv.iter() {
-                        item.hash(state);
-                    }
-                } else {
-                    state.write_u8(17);
-                    e.dyn_hash(state);
-                }
-            }
+            other => hash_value_mid(other, state),
         }
+    }
+}
+
+fn hash_value_mid<H: Hasher>(v: &Value, state: &mut H) {
+    match v {
+        // A map entry hashes exactly like its 2-vector (they
+        // are `=`, so the `Eq`/`Hash` contract requires it;
+        // Oracle FX2 `hash-eq`, `distinct`, `frequencies`).
+        Value::MapEntry { key, val } => {
+            state.write_u8(8);
+            state.write_usize(2);
+            key.hash(state);
+            val.hash(state);
+        }
+        // Order-insensitive: sums commute, so iteration order
+        // cannot leak into the hash.
+        Value::Map(m) => {
+            state.write_u8(9);
+            m.hash(state);
+        }
+        Value::Set(s) => {
+            state.write_u8(10);
+            s.hash(state);
+        }
+        // Same-pointer values share the pattern string, so the
+        // string hash is consistent with pointer equality.
+        Value::Regex(pattern) => {
+            state.write_u8(11);
+            pattern.hash(state);
+        }
+        Value::TaggedLiteral { tag, form } => {
+            state.write_u8(12);
+            tag.hash(state);
+            form.hash(state);
+        }
+        Value::ReaderConditional { form, splicing } => {
+            state.write_u8(13);
+            splicing.hash(state);
+            form.hash(state);
+        }
+        Value::Var(v) => {
+            state.write_u8(14);
+            state.write_u64(v.id);
+        }
+        Value::Unbound(u) => {
+            state.write_u8(15);
+            state.write_u64(u.var_id);
+        }
+        Value::Throwable(t) => {
+            state.write_u8(16);
+            state.write_u64(t.id);
+        }
+        Value::Transient(t) => {
+            state.write_u8(17);
+            state.write_u64(t.id());
+        }
+        other => hash_value_rest(other, state),
+    }
+}
+
+fn hash_value_rest<H: Hasher>(v: &Value, state: &mut H) {
+    match v {
+        Value::Atom(a) => {
+            state.write_u8(18);
+            state.write_u64(a.id());
+        }
+        Value::Delay(d) => {
+            state.write_u8(19);
+            state.write_u64(d.id());
+        }
+        Value::Future(f) => {
+            state.write_u8(20);
+            state.write_u64(f.id());
+        }
+        Value::Promise(p) => {
+            state.write_u8(21);
+            state.write_u64(p.id());
+        }
+        Value::Agent(a) => {
+            state.write_u8(22);
+            state.write_u64(a.id());
+        }
+        Value::Extension(e) => hash_extension(e, state),
+        // All other variants are handled upstream (the single
+        // caller partitions the variants).
+        _ => unreachable!("hash partition"),
+    }
+}
+
+fn hash_extension<H: Hasher>(e: &Arc<dyn ExtensionValue>, state: &mut H) {
+    // Realized seqs hash as sequential family (marker 8
+    // plus length-prefixed elements — identical writes
+    // to `List`, so sequential equals hash equally).
+    if let Some(s) = e.as_any().downcast_ref::<crate::RealizedSeq>() {
+        state.write_u8(8);
+        let items = s.items();
+        items.len().hash(state);
+        for item in &items {
+            item.hash(state);
+        }
+    } else if let Some(r) = e.as_any().downcast_ref::<crate::RangeValue>() {
+        state.write_u8(8);
+        r.walked_len().hash(state);
+        r.for_each(&mut |v| v.hash(state));
+    } else if let Some(r) = e.as_any().downcast_ref::<crate::RepeatValue>() {
+        state.write_u8(8);
+        r.walked_len().hash(state);
+        r.for_each(&mut |v| v.hash(state));
+    } else if let Some(sv) = e.as_any().downcast_ref::<crate::SubVectorValue>() {
+        state.write_u8(8);
+        sv.len().hash(state);
+        for item in sv.iter() {
+            item.hash(state);
+        }
+    } else {
+        state.write_u8(17);
+        e.dyn_hash(state);
     }
 }
 
@@ -1178,77 +1224,53 @@ fn seq_plain_equals<'a>(
 /// (`APersistentSet.equiv` iterates its argument).
 fn coll_equiv(c: &Value, x: &Value) -> bool {
     match c {
-        Value::List(items) => match x {
-            Value::List(o) => seq_eq(items.len(), items.iter(), o.len(), o.iter(), jvm_equiv),
-            Value::Vector(o) => seq_eq(items.len(), items.iter(), o.len(), o.iter(), jvm_equiv),
-            Value::MapEntry { key, val } => seq_eq(
-                items.len(),
-                items.iter(),
-                2,
-                [key.as_ref(), val.as_ref()].into_iter(),
-                jvm_equiv,
-            ),
-            _ => false,
-        },
-        Value::Vector(items) => match x {
-            Value::List(o) => seq_eq(items.len(), items.iter(), o.len(), o.iter(), jvm_equiv),
-            Value::Vector(o) => seq_eq(items.len(), items.iter(), o.len(), o.iter(), jvm_equiv),
-            Value::MapEntry { key, val } => seq_eq(
-                items.len(),
-                items.iter(),
-                2,
-                [key.as_ref(), val.as_ref()].into_iter(),
-                jvm_equiv,
-            ),
-            _ => false,
-        },
-        Value::MapEntry { key, val } => match x {
-            Value::List(o) => seq_eq(
-                2,
-                [key.as_ref(), val.as_ref()].into_iter(),
-                o.len(),
-                o.iter(),
-                jvm_equiv,
-            ),
-            Value::Vector(o) => seq_eq(
-                2,
-                [key.as_ref(), val.as_ref()].into_iter(),
-                o.len(),
-                o.iter(),
-                jvm_equiv,
-            ),
-            Value::MapEntry { key: k2, val: v2 } => seq_eq(
-                2,
-                [key.as_ref(), val.as_ref()].into_iter(),
-                2,
-                [k2.as_ref(), v2.as_ref()].into_iter(),
-                jvm_equiv,
-            ),
-            _ => false,
-        },
-        Value::Map(m) => {
-            let Value::Map(o) = x else {
-                return false;
-            };
-            if m.size() != o.size() {
-                return false;
-            }
-            // `containsKey` + equiv value per entry: hash lookup
-            // finds exactly the equiv keys, so scan linearly.
-            m.iter().all(|(k, v)| {
-                o.iter()
-                    .find(|(k2, _)| jvm_equiv(k, k2))
-                    .is_some_and(|(_, v2)| jvm_equiv(v, v2))
-            })
+        Value::List(items) => seq_coll_equiv(items.len(), items.iter(), x),
+        Value::Vector(items) => seq_coll_equiv(items.len(), items.iter(), x),
+        Value::MapEntry { key, val } => {
+            seq_coll_equiv(2, [key.as_ref(), val.as_ref()].into_iter(), x)
         }
-        Value::Set(s) => {
-            let Value::Set(o) = x else {
-                return false;
-            };
-            s.size() == o.size() && o.iter().all(|y| s.iter().any(|z| jvm_equiv(z, y)))
-        }
+        Value::Map(m) => map_coll_equiv(m, x),
+        Value::Set(s) => set_coll_equiv(s, x),
         _ => false,
     }
+}
+
+fn seq_coll_equiv<'a>(len: usize, items: impl Iterator<Item = &'a Value>, x: &'a Value) -> bool {
+    match x {
+        Value::List(o) => seq_eq(len, items, o.len(), o.iter(), jvm_equiv),
+        Value::Vector(o) => seq_eq(len, items, o.len(), o.iter(), jvm_equiv),
+        Value::MapEntry { key, val } => seq_eq(
+            len,
+            items,
+            2,
+            [key.as_ref(), val.as_ref()].into_iter(),
+            jvm_equiv,
+        ),
+        _ => false,
+    }
+}
+
+fn map_coll_equiv(m: &Map, x: &Value) -> bool {
+    let Value::Map(o) = x else {
+        return false;
+    };
+    if m.size() != o.size() {
+        return false;
+    }
+    // `containsKey` + equiv value per entry: hash lookup
+    // finds exactly the equiv keys, so scan linearly.
+    m.iter().all(|(k, v)| {
+        o.iter()
+            .find(|(k2, _)| jvm_equiv(k, k2))
+            .is_some_and(|(_, v2)| jvm_equiv(v, v2))
+    })
+}
+
+fn set_coll_equiv(s: &Set, x: &Value) -> bool {
+    let Value::Set(o) = x else {
+        return false;
+    };
+    s.size() == o.size() && o.iter().all(|y| s.iter().any(|z| jvm_equiv(z, y)))
 }
 
 /// Port of Java `.equals` (`Util.equals` + the collection
@@ -1302,6 +1324,15 @@ fn plain_equals(a: &Value, b: &Value) -> bool {
         (Value::Symbol(x), Value::Symbol(y)) => x == y,
         (Value::Keyword(x), Value::Keyword(y)) => x == y,
         (Value::Regex(x), Value::Regex(y)) => Arc::ptr_eq(x, y),
+        (Value::Var(a), Value::Var(b)) => a.id == b.id,
+        (Value::Unbound(a), Value::Unbound(b)) => a.var_id == b.var_id,
+        (Value::Throwable(a), Value::Throwable(b)) => a.id == b.id,
+        other => plain_equals_rest(other.0, other.1),
+    }
+}
+
+fn plain_equals_rest(a: &Value, b: &Value) -> bool {
+    match (a, b) {
         (
             Value::TaggedLiteral { tag: t1, form: f1 },
             Value::TaggedLiteral { tag: t2, form: f2 },
@@ -1316,13 +1347,20 @@ fn plain_equals(a: &Value, b: &Value) -> bool {
                 splicing: s2,
             },
         ) => s1 == s2 && plain_equals(f1, f2),
-        (Value::Var(a), Value::Var(b)) => a.id == b.id,
-        (Value::Unbound(a), Value::Unbound(b)) => a.var_id == b.var_id,
-        (Value::Throwable(a), Value::Throwable(b)) => a.id == b.id,
         (Value::Extension(a), Value::Extension(b)) => a.dyn_eq(&**b),
+        (Value::Map(m), Value::Map(o)) => plain_equals_maps(m, o),
+        (Value::Set(s), Value::Set(o)) => plain_equals_sets(s, o),
         // `.equals` is loose across List/Vector too (`doEquals` takes
         // the `java.util.List` branch; `ASeq.equals` accepts `List`;
         // an entry is its 2-vector).
+        (Value::List(_) | Value::Vector(_) | Value::MapEntry { .. }, _)
+        | (_, Value::List(_) | Value::Vector(_) | Value::MapEntry { .. }) => plain_equals_seq(a, b),
+        _ => false,
+    }
+}
+
+fn plain_equals_seq(a: &Value, b: &Value) -> bool {
+    match (a, b) {
         (Value::List(items), Value::List(o)) => {
             seq_plain_equals(items.len(), items.iter(), o.len(), o.iter())
         }
@@ -1365,19 +1403,21 @@ fn plain_equals(a: &Value, b: &Value) -> bool {
             2,
             [k2.as_ref(), v2.as_ref()].into_iter(),
         ),
-        (Value::Map(m), Value::Map(o)) => {
-            m.size() == o.size()
-                && m.iter().all(|(k, v)| {
-                    o.iter()
-                        .find(|(k2, _)| plain_equals(k, k2))
-                        .is_some_and(|(_, v2)| plain_equals(v, v2))
-                })
-        }
-        (Value::Set(s), Value::Set(o)) => {
-            s.size() == o.size() && o.iter().all(|y| s.iter().any(|z| plain_equals(z, y)))
-        }
         _ => false,
     }
+}
+
+fn plain_equals_maps(m: &Map, o: &Map) -> bool {
+    m.size() == o.size()
+        && m.iter().all(|(k, v)| {
+            o.iter()
+                .find(|(k2, _)| plain_equals(k, k2))
+                .is_some_and(|(_, v2)| plain_equals(v, v2))
+        })
+}
+
+fn plain_equals_sets(s: &Set, o: &Set) -> bool {
+    s.size() == o.size() && o.iter().all(|y| s.iter().any(|z| plain_equals(z, y)))
 }
 
 #[cfg(test)]
@@ -1974,17 +2014,21 @@ mod tests {
         let v2 = Value::Vector(super::Vector::from_vec(vec![Value::Int(2)]));
         assert_eq!(tl(l1.clone()), tl(v1.clone()));
         assert_eq!(tl(v1.clone()), tl(l1.clone()));
-        assert_ne!(tl(l1), tl(v2));
+        assert_ne!(tl(l1.clone()), tl(v2));
         let m1 = Value::Map(new_map().insert(kw("a"), Value::Int(1)));
         let m2 = Value::Map(new_map().insert(kw("a"), Value::Int(1)));
         let m3 = Value::Map(new_map().insert(kw("a"), Value::Int(2)));
         assert_eq!(tl(m1.clone()), tl(m2));
-        assert_ne!(tl(m1), tl(m3));
+        assert_ne!(tl(m1.clone()), tl(m3));
         let s1 = Value::Set(new_set().insert(Value::Int(1)));
         let s2 = Value::Set(new_set().insert(Value::Int(1)));
         let s3 = Value::Set(new_set().insert(Value::Int(2)));
         assert_eq!(tl(s1.clone()), tl(s2));
         assert_ne!(tl(s1), tl(s3));
+        // A sequential form against a scalar (or map) form is never
+        // equal: the `plain_equals_seq` fallback.
+        assert_ne!(tl(l1.clone()), tl(Value::Int(1)));
+        assert_ne!(tl(l1), tl(m1.clone()));
     }
 
     #[test]
@@ -1997,5 +2041,14 @@ mod tests {
         let e2 = Value::Extension(Arc::new(OpaqueExt));
         assert_eq!(tl(e1), tl(e2));
         assert_ne!(tl(Value::Extension(Arc::new(OpaqueExt))), tl(Value::Int(1)));
+    }
+
+    #[test]
+    #[should_panic(expected = "hash partition")]
+    fn hash_value_rest_rejects_upstream_variants() {
+        // Defensive arm: the single caller partitions the variants,
+        // so scalars never arrive here (only a dispatch bug could).
+        let mut h = DefaultHasher::new();
+        super::hash_value_rest(&Value::Nil, &mut h);
     }
 }

@@ -92,6 +92,14 @@ impl ThrowClass {
             Self::ClassCastException => "java.lang.ClassCastException",
             Self::IndexOutOfBoundsException => "java.lang.IndexOutOfBoundsException",
             Self::ArithmeticException => "java.lang.ArithmeticException",
+            other => other.jvm_name_mid(),
+        }
+    }
+
+    /// Format and I/O throw classes. Chained so each match stays under
+    /// the complexity gate.
+    fn jvm_name_mid(&self) -> &'static str {
+        match self {
             Self::ExceptionInfo => "clojure.lang.ExceptionInfo",
             Self::FileNotFoundException => "java.io.FileNotFoundException",
             Self::IllegalAccessError => "java.lang.IllegalAccessError",
@@ -106,6 +114,13 @@ impl ThrowClass {
             Self::FormatFlagsConversionMismatchException => {
                 "java.util.FormatFlagsConversionMismatchException"
             }
+            other => other.jvm_name_rest(),
+        }
+    }
+
+    /// Remaining throw classes.
+    fn jvm_name_rest(&self) -> &'static str {
+        match self {
             Self::DuplicateFormatFlagsException => "java.util.DuplicateFormatFlagsException",
             Self::IllegalFormatFlagsException => "java.util.IllegalFormatFlagsException",
             Self::IllegalFormatWidthException => "java.util.IllegalFormatWidthException",
@@ -118,6 +133,9 @@ impl ThrowClass {
             Self::ExecutionException => "java.util.concurrent.ExecutionException",
             Self::CancellationException => "java.util.concurrent.CancellationException",
             Self::RejectedExecutionException => "java.util.concurrent.RejectedExecutionException",
+            // All other variants are handled by `jvm_name`/`jvm_name_mid`
+            // (the single caller partitions the variants).
+            _ => unreachable!("throw-class partition"),
         }
     }
 
@@ -864,5 +882,14 @@ mod tests {
         assert_eq!(hash_of(&other), hash_of(&other.clone()));
         let err = compare(&other, &Value::Int(1)).unwrap_err();
         assert_eq!(err.message(), "Cannot compare test.Other to Long");
+    }
+
+    #[test]
+    #[should_panic(expected = "throw-class partition")]
+    fn jvm_name_rest_rejects_upstream_variants() {
+        // Defensive arm: the single caller partitions the variants,
+        // so `jvm_name`-handled classes never arrive here (only a
+        // dispatch bug could).
+        let _ = ThrowClass::ExceptionInfo.jvm_name_rest();
     }
 }

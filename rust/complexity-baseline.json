@@ -2,181 +2,6 @@
  "_comment": "rust-code-analysis baseline (T1174): named functions with cyclomatic>15 or cognitive>20. CI fails on NEW violations or worsened ones; prune entries that no longer violate.",
  "violations": [
   {
-   "file": "crates/clj-eval/src/error.rs",
-   "function": "jvm_class_of",
-   "cyclomatic": 29.0,
-   "cognitive": 1.0,
-   "justification": "one arm per Value variant; JVM class table stays exhaustive S5D adds the Transient arm. S6A adds the Atom/Delay arms. S6B adds the Future/Promise arms. S6C adds the Agent arm. T1192 FX2 adds the MapEntry arm."
-  },
-  {
-   "file": "crates/clj-eval/src/eval.rs",
-   "function": "Evaluator::eval",
-   "cyclomatic": 43.0,
-   "cognitive": 8.0,
-   "justification": "one arm per Expr variant; arms delegate to small-step helpers. S5B adds the WithRedefs/WithBindings/BoundFn arms; S5C the DefMacro/Declare/Ns arms. S5D adds the Assert/CaseStar/LazySeqStar/Time/WithOutStr arms. S6A adds the DelayStar arm. S6D adds the Locking arm."
-  },
-  {
-   "file": "crates/clj-eval/src/eval.rs",
-   "function": "Evaluator::invoke",
-   "cyclomatic": 29.0,
-   "cognitive": 9.0,
-   "justification": "one arm per callee type; the E7 IFn table stays exhaustive S6B adds the Promise callee arm. T1192 FX2 adds the MapEntry arm."
-  },
-  {
-   "file": "crates/clj-eval/src/coll.rs",
-   "function": "lookup_present",
-   "cyclomatic": 21.0,
-   "cognitive": 7.0,
-   "justification": "one arm per Value variant; T1192 FX2 adds the MapEntry arm."
-  },
-  {
-   "file": "crates/clj-eval/src/eval.rs",
-   "function": "lookup",
-   "cyclomatic": 18.0,
-   "cognitive": 10.0,
-   "justification": "one arm per Value variant; T1192 FX2 adds the MapEntry arm."
-  },
-  {
-   "file": "crates/clj-eval/src/expr.rs",
-   "function": "Analyzer<'a>::analyze_special",
-   "cyclomatic": 33.0,
-   "cognitive": 2.0,
-   "justification": "one arm per special form; dispatch to per-form parsers. S5B adds the with-redefs/with-bindings/bound-fn arms; S5C the defmacro/declare/ns arms. S5D adds the assert/time/with-out-str/lazy-seq*/case* arms. S6A adds the delay* arm. S6D adds the locking arm."
-  },
-  {
-   "file": "crates/clj-eval/src/ext.rs",
-   "function": "munge",
-   "cyclomatic": 27.0,
-   "cognitive": 3.0,
-   "justification": "char-escape table port of clojure.lang.Compiler/munge; one arm per char"
-  },
-  {
-   "file": "crates/clj-reader/src/error.rs",
-   "function": "ReaderError::message",
-   "cyclomatic": 55.0,
-   "cognitive": 6.0,
-   "justification": "one arm per ReaderError variant; exact JVM messages stay inline and exhaustive"
-  },
-  {
-   "file": "crates/clj-reader/src/lib.rs",
-   "function": "Reader::invoke_macro",
-   "cyclomatic": 16.0,
-   "cognitive": 1.0,
-   "justification": "pure macro-char dispatch table, one arm per char"
-  },
-  {
-   "file": "crates/clj-reader/tests/harness.rs",
-   "function": "canon",
-   "cyclomatic": 17.0,
-   "cognitive": 10.0,
-   "justification": "test-only canonical renderer; per-variant match stays exhaustive over Value"
-  },
-  {
-   "file": "crates/clj-reader/tests/harness.rs",
-   "function": "lift_ns",
-   "cyclomatic": 16.0,
-   "cognitive": 8.0,
-   "justification": "test-only ns-lift mirror; per-key-type matches over Keyword/Symbol"
-  },
-  {
-   "file": "crates/clj-value/src/print.rs",
-   "function": "java_debug",
-   "cyclomatic": 23.0,
-   "cognitive": 3.0,
-   "justification": "one arm per Value variant; JVM toString mirror stays exhaustive S5D adds the Transient/Throwable arms. S6A adds the Atom/Delay arms. S6B adds the Future/Promise arms. S6C adds the Agent arm."
-  },
-  {
-   "file": "crates/clj-value/src/print.rs",
-   "function": "java_double_string",
-   "cyclomatic": 14.0,
-   "cognitive": 30.0,
-   "justification": "Java Double.toString algorithm port; branches follow the JDK structure"
-  },
-  {
-   "file": "crates/clj-value/src/print.rs",
-   "function": "print_into",
-   "cyclomatic": 34.0,
-   "cognitive": 14.0,
-   "justification": "one arm per Value variant; printer stays exhaustive S5D adds the Transient/Throwable/Extension branches. S6A adds the Atom/Delay arms. S6B adds the Future/Promise arms. S6C adds the Agent arm. T1192 FX2 adds the MapEntry arm."
-  },
-  {
-   "file": "crates/clj-value/src/value.rs",
-   "function": "Value::eq",
-   "cyclomatic": 39.0,
-   "cognitive": 5.0,
-   "justification": "per-variant-pair equality table incl. numeric cross-type (spec C2) S5D adds the Transient/Throwable/Extension pairs. S6A adds the Atom/Delay arms. S6B adds the Future/Promise arms. S6C adds the Agent arm."
-  },
-  {
-   "file": "crates/clj-value/src/value.rs",
-   "function": "Value::hash",
-   "cyclomatic": 35.0,
-   "cognitive": 13.0,
-   "justification": "one arm per Value variant; mirrors eq S5D adds the Transient/Throwable/Extension arms. S6A adds the Atom/Delay arms. S6B adds the Future/Promise arms. S6C adds the Agent arm. T1192 FX2 adds the MapEntry arm."
-  },
-  {
-   "file": "crates/clj-value/src/value.rs",
-   "function": "coll_equiv",
-   "cyclomatic": 26.0,
-   "cognitive": 12.0,
-   "justification": "sequential/map/set equivalence matrix; per-shape arms T1192 FX2 adds the MapEntry arms."
-  },
-  {
-   "file": "crates/clj-value/src/value.rs",
-   "function": "plain_equals",
-   "cyclomatic": 37.0,
-   "cognitive": 4.0,
-   "justification": "duplicate-key plain-form equality; per-variant-pair table T1192 FX2 adds the MapEntry arms."
-  },
-  {
-   "file": "crates/clj-eval/src/ns.rs",
-   "function": "throw_class_for",
-   "cyclomatic": 30.0,
-   "cognitive": 1.0,
-   "justification": "one arm per class name; load-error class table stays exhaustive. S5D extends the table with the core/format throw-site classes (ArithmeticException, format exceptions, IO, IllegalState, FileNotFound). S6B adds ExecutionException/CancellationException. S6C adds RejectedExecutionException."
-  },
-  {
-   "file": "crates/clj-eval/src/fmt.rs",
-   "function": "format_time",
-   "cyclomatic": 34.0,
-   "cognitive": 5.0,
-   "justification": "one arm per %t verb; JVM time-conversion table stays exhaustive"
-  },
-  {
-   "file": "crates/clj-eval/src/lazy.rs",
-   "function": "step_thunk",
-   "cyclomatic": 29.0,
-   "cognitive": 4.0,
-   "justification": "one arm per ThunkKind; arms delegate to per-kind step helpers"
-  },
-  {
-   "file": "crates/clj-value/src/extension.rs",
-   "function": "ThrowClass::jvm_name",
-   "cyclomatic": 35.0,
-   "cognitive": 1.0,
-   "justification": "one arm per throw class; JVM binary-name table stays exhaustive (renamed from free fn jvm_name) S6B adds ExecutionException/CancellationException. S6C adds RejectedExecutionException."
-  },
-  {
-   "file": "crates/clj-value/src/hasheq.rs",
-   "function": "hash_code",
-   "cyclomatic": 31.0,
-   "cognitive": 7.0,
-   "justification": "one arm per Value variant; mirrors hasheq per spec C2 S6A adds the Atom/Delay arms. S6B adds the Future/Promise arms. S6C adds the Agent arm. T1192 FX2 adds the MapEntry arm."
-  },
-  {
-   "file": "crates/clj-value/src/hasheq.rs",
-   "function": "hasheq",
-   "cyclomatic": 29.0,
-   "cognitive": 3.0,
-   "justification": "one arm per Value variant incl. numeric cross-type (spec C2) S6A adds the Atom/Delay arms. S6B adds the Future/Promise arms. S6C adds the Agent arm. T1192 FX2 adds the MapEntry arm."
-  },
-  {
-   "file": "crates/clj-value/src/value.rs",
-   "function": "Value::meta",
-   "cyclomatic": 16.0,
-   "cognitive": 1.0,
-   "justification": "one arm per IMeta-bearing variant; passthrough table stays exhaustive"
-  },
-  {
    "file": "crates/clj-eval/src/aot_subset.rs",
    "function": "Planner::classify_call",
    "cyclomatic": 23.0,
@@ -196,6 +21,34 @@
    "cyclomatic": 16.0,
    "cognitive": 1.0,
    "justification": "S8A: one arm per unsupported head; the hint table stays exhaustive"
+  },
+  {
+   "file": "crates/clj-eval/src/eval.rs",
+   "function": "Evaluator::eval",
+   "cyclomatic": 43.0,
+   "cognitive": 8.0,
+   "justification": "one arm per Expr variant; arms delegate to small-step helpers. S5B adds the WithRedefs/WithBindings/BoundFn arms; S5C the DefMacro/Declare/Ns arms. S5D adds the Assert/CaseStar/LazySeqStar/Time/WithOutStr arms. S6A adds the DelayStar arm. S6D adds the Locking arm."
+  },
+  {
+   "file": "crates/clj-eval/src/expr.rs",
+   "function": "Analyzer<'a>::analyze_special",
+   "cyclomatic": 33.0,
+   "cognitive": 1.0,
+   "justification": "one arm per special form; dispatch to per-form parsers. S5B adds the with-redefs/with-bindings/bound-fn arms; S5C the defmacro/declare/ns arms. S5D adds the assert/time/with-out-str/lazy-seq*/case* arms. S6A adds the delay* arm. S6D adds the locking arm."
+  },
+  {
+   "file": "crates/clj-eval/src/ns.rs",
+   "function": "throw_class_for",
+   "cyclomatic": 30.0,
+   "cognitive": 1.0,
+   "justification": "one arm per class name; load-error class table stays exhaustive. S5D extends the table with the core/format throw-site classes (ArithmeticException, format exceptions, IO, IllegalState, FileNotFound). S6B adds ExecutionException/CancellationException. S6C adds RejectedExecutionException."
+  },
+  {
+   "file": "crates/clj-reader/src/lib.rs",
+   "function": "Reader::invoke_macro",
+   "cyclomatic": 16.0,
+   "cognitive": 1.0,
+   "justification": "pure macro-char dispatch table, one arm per char"
   }
  ]
 }

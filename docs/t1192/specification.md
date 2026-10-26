@@ -170,10 +170,15 @@ FIX (slice id), STRUCTURAL (forcing mechanism), INVESTIGATE
 (probe first, verdict in-slice).
 
 FIX:
-- D-macroexpand: 9 analyzer builtins with `macroexpand-1`
-  identity (`let loop fn binding letfn with-redefs
-  with-bindings bound-fn locking`) → FX4. Oracle smoke done:
-  JVM `(macroexpand-1 '(let [a 1] a))` is `(let* [a 1] a)`.
+- D-macroexpand: FIXED for the nine analyzer builtins
+  (`let` `loop` `fn` `binding` `letfn` `with-redefs`
+  `with-bindings` `bound-fn` `locking` expand in
+  `macroexpand-1`; probe `fx4-macroexpand`). `defmacro`
+  `declare` `ns` `assert` `time` `with-out-str` stay the
+  identity fence. No spec instrumentation: the macro body
+  raises its own arity / binding errors (the JVM's spec
+  message still fires first on those shapes). `analyze()`
+  on an unbooted evaluator still sees the specials.
 - D-xform: 7 seq-fn transducer arities + `into` plain-only →
   FT7 (needs the transducer protocol).
 - D-mapentry: FIXED (real `Value::MapEntry`: `key`/`val`
@@ -325,12 +330,14 @@ FX0 spec (this file) + oracle smoke (done: jar + probe work).
 FX1 small deterministic fixes (D-tsneg/D-time/D-emptymeta/
   D-cce-shape/D-caseacc/D-postfuture/D-shutdrain/D-avaroot/
   D-argv + I-nthf64/I-huge/I-hashinf probes).
-FX2 MapEntry (D-mapentry). Follow-ups found in-slice (slice
-  TBD): `flatten`/`tree-seq`/`reversible?`/`chunk-*`
-  unimplemented, each with a non-resolution pin
-  (`ns_vars.rs fx2_tree_walk_vars_stay_unresolved`;
-  probe6 `flatten`/`reversible?` rows stand as the oracle
-  pins — oracle `reversible?` is true on entries);
+FX2 MapEntry (D-mapentry). Follow-ups found in-slice:
+  `reversible?` landed in this slice (Reversible values;
+  oracle true on vectors, subvectors, map entries, sorted
+  colls, and `vector-of` — port matches the constructible
+  ones, `docs/t1192/probes/fx2b-reversible`); `flatten`/`tree-seq`/
+  `chunk-*` stay unimplemented, each with a non-resolution
+  pin (`ns_vars.rs fx2_tree_walk_vars_stay_unresolved`;
+  probe6 `flatten` rows stand as the oracle pins);
   `instance?` stays permanent N1 out-of-scope (not
   a slice follow-up); the invoke fallback keeps the pinned
   §E8 cast text (oracle reports JDK — FX7 input) while
@@ -338,8 +345,10 @@ FX2 MapEntry (D-mapentry). Follow-ups found in-slice (slice
   flipped to the JDK `IObj` text; `seq_opt` rejects seq
   values on the outlet path (custom paths only, no oracle).
 FX3 pre/post validation (D-prepost).
-FX4 analyzer builtins as real macros (D-macroexpand: `let*`/
-  `fn*`/`loop*` special forms + core macro defs + analyzer).
+FX4 analyzer builtins as real macros (D-macroexpand: the
+  nine heads expand to `let*`/`fn*`/`loop*` and the qualified
+  helper calls; the six fence macros stay identity). Done.
+  FX4b is not this slice.
 FX4b printer/writer (D-printdup/D-streamprint/D-astral-fmt).
 FT1 number tower (F-tower; closes D-div; D-charf/D-pctpop
   land here; S-intlong documented).
@@ -372,9 +381,16 @@ CX complexity-zero (standing program, user directive):
   dedicated refactor slices (split dispatch tables and hot
   helpers under the cyclomatic/cognitive caps). Until then,
   new or worsened entries need a recorded justification and
-  count as debt against this goal; FX2 added 2 entries
-  (`lookup_present`, `lookup`) and worsened 8 dispatch
-  tables — first candidates for the CX pass.
+  count as debt against this goal. CX1 removes the 10 FX2
+  debt entries (`lookup_present`, `lookup`, and the eight
+  dispatch tables FX2 worsened: `jvm_class_of`,
+  `Evaluator::invoke`, `print_into`, `Value::hash`,
+  `coll_equiv`, `plain_equals`, `hash_code`, `hasheq`).
+  The remaining baseline entries are still debt. CX2 removes
+  `ReaderError::message`, `ThrowClass::jvm_name`, `munge`,
+  `step_thunk`, `java_debug`, `java_double_string`, `canon`,
+  `lift_ns`, and `Value::eq`; the other baseline entries remain
+  debt.
 
 Each slice lands as its own `T1192:` commit series + PR with
 `/review-loop` to acceptance; landing stays explicit-only.

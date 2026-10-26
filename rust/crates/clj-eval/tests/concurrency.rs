@@ -2940,15 +2940,25 @@ fn locking_rows() {
         uncaught(&mut eval, "(locking nil 1)"),
         "java.lang.NullPointerException | Cannot enter synchronized block because \"lock\" is null"
     );
+    // A nil lockee nested in a `fn` body takes the analyzer path
+    // to the same NPE (the JVM embeds a gensym'd local instead).
+    assert_eq!(
+        uncaught(&mut eval, "((fn [] (locking nil 1)))"),
+        "java.lang.NullPointerException | Cannot enter synchronized block because \"lock\" is null"
+    );
     // Bare arity matches the macro's.
     assert_eq!(
         uncaught(&mut eval, "(locking)"),
         "clojure.lang.ArityException | Wrong number of args (0) passed to: clojure.core/locking"
     );
-    // A builtin: `macroexpand-1` is identity.
-    assert_eq!(
-        run_last(&mut eval, "(macroexpand-1 '(locking x 1))"),
-        "(locking x 1)"
+    // `locking` expands (gensym ids depend on earlier evals).
+    let expanded = run_last(&mut eval, "(macroexpand-1 '(locking x 1))");
+    assert!(
+        expanded.starts_with("(clojure.core/let [lockee__")
+            && expanded.contains("monitor-enter")
+            && expanded.contains("monitor-exit")
+            && !expanded.contains("(locking"),
+        "{expanded}"
     );
 }
 

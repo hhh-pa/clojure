@@ -296,11 +296,11 @@ fn macroexpand_one() {
         run_last(&mut eval, "(macroexpand-1 '(clojure.core/do 1 2))"),
         "(clojure.core/do 1 2)"
     );
-    // Builtin forms are the identity (the JVM expands the real
-    // `declare`/`ns`/`fn`/`let` macros — fence).
+    // `let` / `with-redefs` expand (FX4). `declare` / `ns` stay
+    // the identity fence.
     assert_eq!(
         run_last(&mut eval, "(macroexpand-1 '(let [a 1] a))"),
-        "(let [a 1] a)"
+        "(let* [a 1] a)"
     );
     assert_eq!(
         run_last(&mut eval, "(macroexpand-1 '(declare a))"),
@@ -309,7 +309,7 @@ fn macroexpand_one() {
     assert_eq!(run_last(&mut eval, "(macroexpand-1 '(ns foo))"), "(ns foo)");
     assert_eq!(
         run_last(&mut eval, "(macroexpand-1 '(with-redefs [a 1] a))"),
-        "(with-redefs [a 1] a)"
+        "(clojure.core/with-redefs-fn {(var a) 1} (clojure.core/fn [] a))"
     );
     // `Var` operators expand when macro, else unchanged.
     assert_eq!(
@@ -711,11 +711,16 @@ fn builtin_macro_vars() {
             "{name}"
         );
     }
-    // Direct invocation fails loudly (the analyzer intercepts
-    // every real form).
+    // Direct invocation of `let` is the macro fn (one user arg
+    // is short of `&form`/`&env`/bindings). The fence macros
+    // stay the placeholder.
     assert_eq!(
         uncaught(&mut eval, "((var-get (var let)) 1)"),
-        "java.lang.IllegalStateException | Can't invoke builtin macro: clojure.core/let"
+        "clojure.lang.ArityException | Wrong number of args (1) passed to: clojure.core/let"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "((var-get (var declare)) 1)"),
+        "java.lang.IllegalStateException | Can't invoke builtin macro: clojure.core/declare"
     );
     // .. and the names have no value.
     assert_eq!(

@@ -692,6 +692,9 @@ fn seq_fn_rows() {
         run_last(&mut eval, "(map vec (split-at 1 e))"),
         "([:a] [1])"
     );
+    // fx2-mapentry6.reversible?: entries implement Reversible
+    // (fx2b-reversible `entry`).
+    assert_eq!(run_last(&mut eval, "(reversible? e)"), "true");
     // No `flatten` row: `flatten` needs lazy tree-walk machinery the
     // port lacks (`tree-seq` is unimplemented) — the probe6
     // `flatten` row stands as the oracle pin for that slice.
@@ -735,10 +738,12 @@ fn outlet_entry_rows() {
         ),
         "java.lang.IllegalArgumentException | Don't know how to create ISeq from: clojure.lang.Keyword"
     );
-    // Non-entry elements keep the outlet path's stable cast text.
+    // A vector is not an `ISeq`, so `:all` is `merge` of the vector.
+    // `merge` reports the JDK cast (the unexpanded analyzer outlet
+    // used the short `Cannot cast` text).
     assert_eq!(
         uncaught(&mut eval, "(let [{x :x, :or {x 1}, :all a} [(list :k)]] a)"),
-        "java.lang.ClassCastException | Cannot cast clojure.lang.Keyword to java.util.Map$Entry"
+        "java.lang.ClassCastException | class clojure.lang.Keyword cannot be cast to class java.util.Map$Entry (clojure.lang.Keyword is in unnamed module of loader 'app'; java.util.Map$Entry is in module java.base of loader 'bootstrap')"
     );
     // A multi-entry list `from`: the one-element `from` unwraps
     // to `((e1 e2))`, so `into1` hands the entry list to
@@ -858,13 +863,13 @@ fn probe18_entry_binding_forms() {
     // keyword binding fails ...
     assert_eq!(
         uncaught(&mut eval, "(eval (list (quote let) (first {:x 1}) 1))"),
-        "clojure.lang.Compiler$CompilerException | Syntax error macroexpanding clojure.core/let at (user:1:1)."
+        "clojure.lang.Compiler$CompilerException | Syntax error macroexpanding let at (user:1:1)."
     );
     // fx2-mapentry18.let-kw-vec: ... identically to the plain
     // vector control (the failure is about `:x`, not entryness).
     assert_eq!(
         uncaught(&mut eval, "(eval (list (quote let) [(quote :x) 1] 1))"),
-        "clojure.lang.Compiler$CompilerException | Syntax error macroexpanding clojure.core/let at (user:1:1)."
+        "clojure.lang.Compiler$CompilerException | Syntax error macroexpanding let at (user:1:1)."
     );
     // fx2-mapentry18.fn-entry-invoke/fn-entry-fnq: an entry
     // params vector makes a real fn.
@@ -942,6 +947,84 @@ fn probe18_arity_errors() {
         uncaught(&mut eval, "(sorted? [1] [2])"),
         "clojure.lang.ArityException | Wrong number of args (2) passed to: clojure.core/sorted?"
     );
+    assert_eq!(
+        uncaught(&mut eval, "(reversible?)"),
+        "clojure.lang.ArityException | Wrong number of args (0) passed to: clojure.core/reversible?"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(reversible? [1] [2])"),
+        "clojure.lang.ArityException | Wrong number of args (2) passed to: clojure.core/reversible?"
+    );
+}
+
+#[test]
+fn reversible_pred_rows() {
+    let mut eval = boot();
+    // fx2b-reversible: true on `IPersistentVector` only among
+    // constructible values (vectors, entries, subvectors).
+    // Sorted maps/sets and `vector-of` are oracle-true but not
+    // constructible (FT6 / no gvec) — no port-false pin against
+    // those rows. Queues and records are oracle-false and also
+    // not constructible. Ratios do not read (N3).
+    for (form, want) in [
+        ("(reversible? nil)", "false"),
+        ("(reversible? 1)", "false"),
+        ("(reversible? 1.0)", "false"),
+        ("(reversible? true)", "false"),
+        ("(reversible? \\a)", "false"),
+        ("(reversible? \"ab\")", "false"),
+        ("(reversible? \"\")", "false"),
+        ("(reversible? :a)", "false"),
+        ("(reversible? 'a)", "false"),
+        ("(reversible? ())", "false"),
+        ("(reversible? '(1 2))", "false"),
+        ("(reversible? [])", "true"),
+        ("(reversible? [1 2 3])", "true"),
+        ("(reversible? (with-meta [1] {:m 1}))", "true"),
+        ("(reversible? (first {:a 1}))", "true"),
+        ("(reversible? (find {:a 1} :a))", "true"),
+        ("(reversible? (first (hash-map :a 1)))", "true"),
+        ("(reversible? {:a 1})", "false"),
+        ("(reversible? {})", "false"),
+        ("(reversible? (hash-map :a 1))", "false"),
+        ("(reversible? (apply hash-map (range 40)))", "false"),
+        ("(reversible? #{})", "false"),
+        ("(reversible? #{1 2})", "false"),
+        ("(reversible? (subvec [1 2 3 4] 1 3))", "true"),
+        ("(reversible? (subvec [1 2 3] 3))", "true"),
+        (
+            "(reversible? (with-meta (subvec [1 2 3] 0) {:m 1}))",
+            "true",
+        ),
+        ("(reversible? (cons 1 nil))", "false"),
+        ("(reversible? (cons 1 [2 3]))", "false"),
+        ("(reversible? (lazy-seq [1 2]))", "false"),
+        ("(reversible? (lazy-seq nil))", "false"),
+        ("(reversible? (range 3))", "false"),
+        ("(reversible? (range))", "false"),
+        ("(reversible? (repeat 3 :x))", "false"),
+        ("(reversible? (cycle [1]))", "false"),
+        ("(reversible? (iterate inc 0))", "false"),
+        ("(reversible? (seq [1 2 3]))", "false"),
+        ("(reversible? (seq (subvec [1 2 3] 0 2)))", "false"),
+        ("(reversible? (seq \"ab\"))", "false"),
+        ("(reversible? (seq {:a 1}))", "false"),
+        ("(reversible? (transient [1 2]))", "false"),
+        ("(reversible? (transient []))", "false"),
+        ("(reversible? (transient {:a 1}))", "false"),
+        ("(reversible? (transient {}))", "false"),
+        ("(reversible? (transient #{1}))", "false"),
+        ("(reversible? (rseq [1 2 3]))", "false"),
+        ("(reversible? (rseq []))", "false"),
+        ("(reversible? (rseq (first {:a 1})))", "false"),
+        ("(reversible? (rseq (subvec [1 2 3] 0 2)))", "false"),
+        ("(reversible? (fn [x] x))", "false"),
+        ("(reversible? (var inc))", "false"),
+        ("(reversible? (atom 1))", "false"),
+        ("(reversible? #\"a\")", "false"),
+    ] {
+        assert_eq!(run_last(&mut eval, form), want, "{form}");
+    }
 }
 
 #[test]
@@ -985,5 +1068,130 @@ fn probe18_dead_rows() {
     assert_eq!(
         uncaught(&mut eval, "(rseq \"ab\")"),
         "java.lang.ClassCastException | class java.lang.String cannot be cast to class clojure.lang.Reversible (java.lang.String is in module java.base of loader 'bootstrap'; clojure.lang.Reversible is in unnamed module of loader 'app')"
+    );
+}
+
+#[test]
+fn coverage_top_up_entry_paths() {
+    let mut eval = entry_eval();
+    // eval.rs `conj_one` over a map-entry coll (entry `:all` merge).
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [{{:keys [a] :or {a 1}} :m, :all all} (first {:m {:a 5}})] all)"
+        ),
+        "[:m {:a 5} [:m {:a 1}]]"
+    );
+    // eval.rs `conj_map` over an all-entry seq (entry `:all` merge).
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [{w :w, :or {w 0}, :all a} [(first {:a 1})]] a)"
+        ),
+        "{:w 0, :a 1}"
+    );
+    // eval.rs `lookup` over a map entry: int keys read the pair
+    // (oracle `mapdest-0/1/5`), anything else misses.
+    assert_eq!(run_last(&mut eval, "(let [{a 0} (first {:a 1})] a)"), ":a");
+    assert_eq!(run_last(&mut eval, "(let [{a 1} (first {:a 1})] a)"), "1");
+    assert_eq!(run_last(&mut eval, "(let [{a 5} (first {:a 1})] a)"), "nil");
+    assert_eq!(
+        run_last(&mut eval, "(let [{a :k} (first {:a 1})] a)"),
+        "nil"
+    );
+    assert_eq!(run_last(&mut eval, "(:a (first {:a 1}))"), "nil");
+    // eval.rs `nth_or_nil` over a map entry: index 2+ binds nil.
+    assert_eq!(
+        run_last(&mut eval, "(let [[a b c] (first {:x 1})] c)"),
+        "nil"
+    );
+    // eval.rs `seq_opt` over a map entry: `&` seqs the pair
+    // (oracle `ev-seq-rest`).
+    assert_eq!(
+        run_last(&mut eval, "(let [[a & r] (first {:a 1})] [a r])"),
+        "[:a (1)]"
+    );
+}
+
+#[test]
+fn nested_let_entry_arms() {
+    // A nested `let` bypasses the destructure macro (the analyzer
+    // intercepts specials before macros), so entry destructuring
+    // runs the native `eval.rs` arms. Values agree with the
+    // top-level spellings (oracle `fx2-mapentry20`).
+    let mut eval = entry_eval();
+    // `lookup_entry` int legs (oracle `nest-mapdest-0/1/5/neg/kw`).
+    assert_eq!(
+        run_last(&mut eval, "(let [e (first {:a 1})] (let [{x 0} e] x))"),
+        ":a"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(let [e (first {:a 1})] (let [{x 1} e] x))"),
+        "1"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(let [e (first {:a 1})] (let [{x 5} e] x))"),
+        "nil"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(let [e (first {:a 1})] (let [{x -1} e] x))"),
+        "nil"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(let [e (first {:a 1})] (let [{x :k} e] x))"),
+        "nil"
+    );
+    // `nth_or_nil` entry fallthrough (oracle `nest-vec-3rd`).
+    assert_eq!(
+        run_last(&mut eval, "(let [e (first {:x 1})] (let [[a b c] e] c))"),
+        "nil"
+    );
+    // `seq_opt` entry leg (oracle `nest-vec-rest`).
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [e (first {:a 1})] (let [[a & r] e] [a r]))"
+        ),
+        "[:a (1)]"
+    );
+    // `conj_one`/`conj_map` entry legs via `:all`
+    // (oracle `nest-all-entry`).
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [e (first {:m {:a 5}})] (let [{{:keys [a] :or {a 1}} :m, :all all} e] all))"
+        ),
+        "[:m {:a 5} [:m {:a 1}]]"
+    );
+    // `conj_map` over an all-entry seq (oracle `nest-all-vec`).
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [e [(first {:a 1})]] (let [{w :w, :or {w 0}, :all a} e] a))"
+        ),
+        "{:w 0, :a 1}"
+    );
+    // A fn body nests too (oracle `fnbody-mapdest-0`).
+    assert_eq!(
+        run_last(&mut eval, "((fn [e] (let [{x 0} e] x)) (first {:a 1}))"),
+        ":a"
+    );
+    // `conj_map` seq leg: merging a list-valued entry element
+    // (oracle `seq-elem-all`).
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [e (first {:m (list 1 2)})] (let [{{:keys [a] :or {a 1}} :m, :all all} e] all))"
+        ),
+        "[:m (1 2) [:m {:a 1}]]"
+    );
+    // `conj_map` seq-of-entries leg: a vector holding a list of
+    // entries merges pairwise (oracle `seq-in-vec-all`).
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [e [(list (first {:a 1}))]] (let [{w :w, :or {w 0}, :all a} e] a))"
+        ),
+        "{:w 0, :a 1}"
     );
 }
