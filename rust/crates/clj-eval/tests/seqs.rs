@@ -1072,6 +1072,28 @@ fn sequence_eduction_rows() {
         run_last(&mut eval, "(reduce + 0 (eduction (map inc) [1 2 3]))"),
         "9"
     );
+    // Every use re-applies the transducer, so stateful xforms start
+    // fresh per use (oracles `edu-reuse`, `edu-seq2`).
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [e (eduction (take 1) [1 2])] [(reduce + 0 e) (reduce + 0 e)])"
+        ),
+        "[1 1]"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [e (eduction (take 1) [1 2])] [(seq e) (seq e)])"
+        ),
+        "[(1) (1)]"
+    );
+    // `into` reduces an eduction source through the plain seq path
+    // (oracle `into-edu`).
+    assert_eq!(
+        run_last(&mut eval, "(into [] (map inc) (eduction (take 2) [1 2 3]))"),
+        "[2 3]"
+    );
     // 2-arg `reduce` over an eduction takes the `Map$Entry`-style
     // cast the JVM hits (`eduction-reduce2`).
     assert_eq!(
@@ -1088,6 +1110,13 @@ fn sequence_eduction_rows() {
     assert_eq!(
         run_last(&mut eval, "(take 3 (sequence (map inc) (range)))"),
         "(1 2 3)"
+    );
+    // Stateful transducers keep one instance across the 32-item
+    // chunk boundary (oracle `seq-take40`: a per-chunk reset would
+    // realize all 100).
+    assert_eq!(
+        run_last(&mut eval, "(count (sequence (take 40) (range 100)))"),
+        "40"
     );
     assert_eq!(
         run_last(&mut eval, "(sequence (map +) [1 2] [3 4])"),

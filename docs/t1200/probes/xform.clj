@@ -76,6 +76,12 @@
 (throwof "edu-1arg" '(seq (eduction [1 2])))
 (throwof "ipo-take" '(let [t ((take 1) +) i ((interpose \,) t)] [(reduced? (i 0 5)) (reduced? (i 0 6))]))
 (throwof "dw-multi" '(let [d ((drop-while odd?) +)] [(d 0 5) (d 0 4) (d 0 6)]))
+;; R1 review: state persistence across chunks and per-use
+;; re-application (`sequence_eduction_rows`).
+(throwof "seq-take40" '(count (sequence (take 40) (range 100))))
+(throwof "edu-reuse" '(let [e (eduction (take 1) [1 2])] [(reduce + 0 e) (reduce + 0 e)]))
+(throwof "edu-seq2" '(let [e (eduction (take 1) [1 2])] [(seq e) (seq e)]))
+(throwof "into-edu" '(into [] (map inc) (eduction (take 2) [1 2 3])))
 ;; error shapes
 (throwof "err-bad-xform" '(transduce 5 + [1 2 3]))
 (throwof "err-noncoll" '(transduce (map inc) + 5))
