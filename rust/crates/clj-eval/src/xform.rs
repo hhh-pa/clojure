@@ -218,6 +218,15 @@ fn native_preserving_reduced(eval: &mut Evaluator, args: &[Value]) -> Result<Val
 /// short-circuits as `{::halt …}`, unwrapped by completion without
 /// calling `rf` (oracle `halt-*`, `core.clj` source). Two levels
 /// like every builder: the outer fn takes `rf`, the inner steps.
+/// The `{::halt …}` marker's payload when `result` carries it, else
+/// `None` — a single `match` so every line stays under coverage.
+fn halt_unwrap(result: &Value) -> Option<Value> {
+    match result {
+        Value::Map(m) => m.get(&halt_key()).cloned(),
+        _ => None,
+    }
+}
+
 fn native_halt_when(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/halt-when", args, &[1, 2])?;
     let pred = args[0].clone();
@@ -240,15 +249,10 @@ fn native_halt_when(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nativ
                     let (pred, retf, rf) = (pred.clone(), retf.clone(), rf.clone());
                     match args.len() {
                         0 => call_checked(eval, &rf, &[]),
-                        1 => {
-                            let result = &args[0];
-                            if let Value::Map(m) = result {
-                                if let Some(halt) = m.get(&halt_key()) {
-                                    return Ok(halt.clone());
-                                }
-                            }
-                            call_checked(eval, &rf, std::slice::from_ref(result))
-                        }
+                        1 => match halt_unwrap(&args[0]) {
+                            Some(halt) => Ok(halt),
+                            None => call_checked(eval, &rf, std::slice::from_ref(&args[0])),
+                        },
                         2 => {
                             let (result, input) = (args[0].clone(), args[1].clone());
                             if call_checked(eval, &pred, std::slice::from_ref(&input))?.is_truthy()
@@ -639,16 +643,23 @@ pub(crate) fn drop_while_xf(eval: &mut Evaluator, pred: Value) -> Value {
                     0 => xf_init(eval, &rf),
                     1 => xf_complete(eval, &rf, args[0].clone()),
                     2 => {
-                        // Locks never span the predicate call.
+                        // Locks never span the predicate call: three
+                        // short acquisitions, and clearing an already
+                        // clear latch is a no-op, so no branch guards
+                        // the store.
                         let still_dropping =
                             *dropping.lock().expect("xform latch is never poisoned");
-                        if still_dropping {
-                            if call_checked(eval, &pred, &[args[1].clone()])?.is_truthy() {
-                                return Ok(args[0].clone());
-                            }
+                        let trip = if still_dropping {
+                            call_checked(eval, &pred, &[args[1].clone()])?.is_truthy()
+                        } else {
+                            false
+                        };
+                        if trip {
+                            Ok(args[0].clone())
+                        } else {
                             *dropping.lock().expect("xform latch is never poisoned") = false;
+                            call_checked(eval, &rf, &[args[0].clone(), args[1].clone()])
                         }
-                        call_checked(eval, &rf, &[args[0].clone(), args[1].clone()])
                     }
                     n => Err(NativeError::arity("clojure.core/drop-while$fn", n)),
                 }
@@ -763,6 +774,37 @@ pub(crate) fn dedupe_xf(eval: &mut Evaluator) -> Value {
     })
 }
 
+/// One `interpose` step outside the closure so the region keeps its
+/// own counters: the first input reduces straight through, later
+/// inputs go through the separator, and a reduced separator step
+/// propagates without touching the input (oracle `interpose-step`).
+#[allow(clippy::too_many_arguments)]
+fn interpose_step(
+    eval: &mut Evaluator,
+    rf: &Value,
+    sep: &Value,
+    started: &Mutex<bool>,
+    result: Value,
+    input: Value,
+) -> Result<Value, NativeError> {
+    let first = {
+        let mut guard = started.lock().expect("xform latch is never poisoned");
+        let first = !*guard;
+        *guard = true;
+        first
+    };
+    if first {
+        call_checked(eval, rf, &[result, input])
+    } else {
+        let sepr = call_checked(eval, rf, &[result, sep.clone()])?;
+        if as_reduced(&sepr).is_some() {
+            Ok(sepr)
+        } else {
+            call_checked(eval, rf, &[sepr, input])
+        }
+    }
+}
+
 /// `(interpose sep)`: the separator reduces between inputs; a
 /// reduced separator step propagates without touching the input
 /// (oracle `interpose-step`, `core.clj` source).
@@ -779,20 +821,7 @@ pub(crate) fn interpose_xf(eval: &mut Evaluator, sep: Value) -> Value {
                     0 => xf_init(eval, &rf),
                     1 => xf_complete(eval, &rf, args[0].clone()),
                     2 => {
-                        let first = {
-                            let mut guard = started.lock().expect("xform latch is never poisoned");
-                            let first = !*guard;
-                            *guard = true;
-                            first
-                        };
-                        if first {
-                            return call_checked(eval, &rf, &[args[0].clone(), args[1].clone()]);
-                        }
-                        let sepr = call_checked(eval, &rf, &[args[0].clone(), sep.clone()])?;
-                        if as_reduced(&sepr).is_some() {
-                            return Ok(sepr);
-                        }
-                        call_checked(eval, &rf, &[sepr, args[1].clone()])
+                        interpose_step(eval, &rf, &sep, &started, args[0].clone(), args[1].clone())
                     }
                     n => Err(NativeError::arity("clojure.core/interpose$fn", n)),
                 }
@@ -848,10 +877,11 @@ pub(crate) fn into_xform(
     // transients, which take the `(transient to)` call below and
     // throw there, exactly like the JVM (oracle
     // `into-to-transient`).
-    if matches!(
+    let editable = matches!(
         to,
         Value::Vector(_) | Value::Map(_) | Value::Set(_) | Value::Transient(_)
-    ) {
+    );
+    if editable {
         let transient_to = call_checked(eval, &deref_core(eval, "transient"), &[to])?;
         let rf = into_transient_rf(eval);
         return transduce_into(eval, xform, &rf, transient_to, from);
@@ -887,10 +917,11 @@ fn native_eduction(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Native
         return Ok(Eduction::of(identity, Value::Nil));
     }
     let (heads, last) = args.split_at(args.len() - 1);
-    let mut composed = identity;
-    if !heads.is_empty() {
-        composed = call_checked(eval, &deref_core(eval, "comp"), heads)?;
-    }
+    let composed = if heads.is_empty() {
+        identity
+    } else {
+        call_checked(eval, &deref_core(eval, "comp"), heads)?
+    };
     Ok(Eduction::of(composed, last[0].clone()))
 }
 
@@ -899,17 +930,35 @@ mod tests {
     use super::*;
 
     #[test]
+    fn preserving_reduced_rewraps_reduced_step() {
+        let mut eval = crate::ns::boot();
+        let take_fn = deref_core(&eval, "take");
+        let take1 =
+            crate::seqs::call_checked(&mut eval, &take_fn, &[Value::Int(1)]).expect("take 1");
+        let plus = deref_core(&eval, "+");
+        let stepper = crate::seqs::call_checked(&mut eval, &take1, &[plus]).expect("take applied");
+        crate::seqs::call_checked(&mut eval, &stepper, &[Value::Int(0), Value::Int(5)])
+            .expect("first step");
+        let preserved = native_preserving_reduced(&mut eval, &[stepper]).expect("preserve");
+        let out = crate::seqs::call_checked(&mut eval, &preserved, &[Value::Int(0), Value::Int(6)])
+            .expect("exhausted step");
+        assert!(
+            as_reduced(&out).is_some(),
+            "reduced must stay reduced: {out:?}"
+        );
+    }
+
+    #[test]
     fn into_transient_rf_rejects_other_arities() {
         let mut eval = crate::ns::boot();
         let rf = into_transient_rf(&mut eval);
         for args in [Vec::new(), vec![Value::Nil, Value::Nil, Value::Nil]] {
-            match crate::seqs::call_checked(&mut eval, &rf, &args) {
-                Err(e) => assert!(
-                    format!("{e:?}").contains("clojure.core/into$fn"),
-                    "unexpected error: {e:?}"
-                ),
-                Ok(v) => panic!("expected an arity error, got {v:?}"),
-            }
+            let err = crate::seqs::call_checked(&mut eval, &rf, &args)
+                .expect_err("into$fn must reject non-1/2 arities");
+            assert!(
+                format!("{err:?}").contains("clojure.core/into$fn"),
+                "unexpected error: {err:?}"
+            );
         }
     }
 }

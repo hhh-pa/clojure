@@ -654,6 +654,15 @@ fn xform_builders_composite_rows() {
         run_last(&mut eval, "(let [i ((interpose \\,) conj)] (i [] 5))"),
         "[5]"
     );
+    // The second call on the same instance steps through the
+    // separator (oracle `interpose-step`).
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [i ((interpose \\,) conj)] [(i [] 5) (i [] 6)])"
+        ),
+        "[[5] [\\, 6]]"
+    );
     assert_eq!(
         run_last(&mut eval, "(((mapcat range) conj) [] 3)"),
         "[0 1 2]"
@@ -661,6 +670,33 @@ fn xform_builders_composite_rows() {
     assert_eq!(run_last(&mut eval, "((cat +))"), "0");
     assert_eq!(run_last(&mut eval, "((cat +) 0)"), "0");
     assert_eq!(run_last(&mut eval, "((cat +) 0 [1 2])"), "3");
+    // A downstream `Reduced` stops the inner walk (oracle
+    // `cat-take1`: `(take 1)` short-circuits the first range).
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(transduce (comp (take 1) (mapcat range)) + [5 6])"
+        ),
+        "10"
+    );
+    // The other order trips inside the walked collection (oracle
+    // `cat-take1b`).
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(transduce (comp (mapcat range) (take 1)) + [5 6])"
+        ),
+        "0"
+    );
+    // A `Reduced` separator step propagates untouched (oracle
+    // `ipo-take`: the shared `(take 1)` window is spent).
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [t ((take 1) +) i ((interpose \\,) t)] [(reduced? (i 0 5)) (reduced? (i 0 6))])"
+        ),
+        "[true true]"
+    );
 }
 
 /// T1200 D1 (red first): stateful builders, one fresh instance per
@@ -684,6 +720,17 @@ fn xform_builders_stateful_rows() {
             "(unreduced (let [t ((take 2) +)] (t (t 0 5) 6)))"
         ),
         "11"
+    );
+    // An exhausted window returns the result untouched (still
+    // `Reduced` through the spent check; oracle `take-step`'s
+    // third call returns the accumulator as-is).
+    assert_eq!(
+        run_last(&mut eval, "(reduced? (let [t ((take 0) +)] (t 99 5)))"),
+        "true"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(unreduced (let [t ((take 0) +)] (t 99 5)))"),
+        "99"
     );
     // `drop`: skipped inputs leave the result alone (3-deep reaches
     // the pass-through transition).
@@ -713,6 +760,15 @@ fn xform_builders_stateful_rows() {
         run_last(&mut eval, "(let [d ((drop-while odd?) +)] (d 0 4))"),
         "4"
     );
+    // One instance across the transition: drop, trip, then pass
+    // with the latch already clear (oracle `dw-multi`).
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [d ((drop-while odd?) +)] [(d 0 5) (d 0 4) (d 0 6)])"
+        ),
+        "[0 4 6]"
+    );
     // `take-nth`: every nth input reduces.
     assert_eq!(
         run_last(&mut eval, "(let [t ((take-nth 2) +)] (t 0 5))"),
@@ -737,6 +793,54 @@ fn xform_builders_stateful_rows() {
         ),
         "[5 0 7]"
     );
+}
+
+/// T1200 D1: every builder's init (`(xf +)` → `(+)` → `0`) and
+/// completion (`(xf 0)` → `(+ 0)` → `0`) arms, one fresh instance
+/// per row. `map`/`cat` init+complete already live in their own
+/// rows; `halt-when` init calls `(rf)`, completion without a
+/// `::halt` marker calls `(rf result)`.
+#[test]
+fn xform_init_complete_rows() {
+    let mut eval = boot();
+    for src in [
+        "(((filter odd?) +))",
+        "(((remove odd?) +))",
+        "(((keep identity) +))",
+        "(((keep-indexed vector) +))",
+        "(((map-indexed vector) +))",
+        "(((take 2) +))",
+        "(((drop 2) +))",
+        "(((take-while odd?) +))",
+        "(((drop-while odd?) +))",
+        "(((take-nth 2) +))",
+        "(((distinct) +))",
+        "(((dedupe) +))",
+        "(((interpose \\,) +))",
+        "(((mapcat range) +))",
+        "(((halt-when odd?) +))",
+    ] {
+        assert_eq!(run_last(&mut eval, src), "0", "{src}");
+    }
+    for src in [
+        "(((filter odd?) +) 0)",
+        "(((remove odd?) +) 0)",
+        "(((keep identity) +) 0)",
+        "(((keep-indexed vector) +) 0)",
+        "(((map-indexed vector) +) 0)",
+        "(((take 2) +) 0)",
+        "(((drop 2) +) 0)",
+        "(((take-while odd?) +) 0)",
+        "(((drop-while odd?) +) 0)",
+        "(((take-nth 2) +) 0)",
+        "(((distinct) +) 0)",
+        "(((dedupe) +) 0)",
+        "(((interpose \\,) +) 0)",
+        "(((mapcat range) +) 0)",
+        "(((halt-when odd?) +) 0)",
+    ] {
+        assert_eq!(run_last(&mut eval, src), "0", "{src}");
+    }
 }
 
 /// T1200 D1 (red first): `completing` 1/2-arg (`completing-*`).
@@ -886,6 +990,14 @@ fn halt_when_rows() {
         ),
         "9"
     );
+    // A map without `::halt` completes through `rf` untouched.
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [h ((halt-when odd?) conj)] (h {:other 1}))"
+        ),
+        "{:other 1}"
+    );
 }
 
 /// T1200 D1 (red first): reduced helpers (`ensure*`, `unreduced`).
@@ -899,6 +1011,12 @@ fn reduced_helpers_rows() {
     assert_eq!(run_last(&mut eval, "(reduced? (ensure-reduced 5))"), "true");
     assert_eq!(run_last(&mut eval, "(unreduced (ensure-reduced 5))"), "5");
     assert_eq!(run_last(&mut eval, "(unreduced 5)"), "5");
+    // An already-`Reduced` value passes through untouched (oracle
+    // `ensure-r2`).
+    assert_eq!(
+        run_last(&mut eval, "(unreduced (ensure-reduced (reduced 5)))"),
+        "5"
+    );
     assert_eq!(run_last(&mut eval, "(resolve 'preserving-reduced)"), "nil");
     assert_eq!(
         run_last(
@@ -939,6 +1057,9 @@ fn sequence_eduction_rows() {
         run_last(&mut eval, "(into [] (halt-when odd?) [1 2 3])"),
         "1"
     );
+    // A non-editable target reduces with plain `conj` (oracle
+    // `into-list`: conj prepends onto a list).
+    assert_eq!(run_last(&mut eval, "(into () (map inc) [1 2])"), "(3 2)");
     // Transient-of-transient takes the pre-existing transient cast
     // (oracle `into-to-transient`; the JVM targets
     // `IPersistentCollection` there — the difference lives in the
@@ -961,6 +1082,9 @@ fn sequence_eduction_rows() {
         run_last(&mut eval, "(seq (eduction (map inc) [1 2 3]))"),
         "(2 3 4)"
     );
+    // A single collection educes through `identity` (oracle
+    // `edu-1arg`).
+    assert_eq!(run_last(&mut eval, "(seq (eduction [1 2]))"), "(1 2)");
     assert_eq!(
         run_last(&mut eval, "(take 3 (sequence (map inc) (range)))"),
         "(1 2 3)"

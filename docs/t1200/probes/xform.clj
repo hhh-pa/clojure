@@ -66,6 +66,16 @@
 ;; missing rows audit
 (throwof "resolve-cat" '(resolve 'cat))
 (throwof "resolve-random-sample" '(resolve 'random-sample))
+;; D1 coverage close-out: exact forms pinned by the added tests
+;; (`xform_builders_composite_rows`, `xform_builders_stateful_rows`,
+;; `sequence_eduction_rows`, `reduced_helpers_rows`).
+(throwof "cat-take1" '(transduce (comp (take 1) (mapcat range)) + [5 6]))
+(throwof "cat-take1b" '(transduce (comp (mapcat range) (take 1)) + [5 6]))
+(throwof "into-list" '(into () (map inc) [1 2]))
+(throwof "ensure-r2" '(unreduced (ensure-reduced (reduced 5))))
+(throwof "edu-1arg" '(seq (eduction [1 2])))
+(throwof "ipo-take" '(let [t ((take 1) +) i ((interpose \,) t)] [(reduced? (i 0 5)) (reduced? (i 0 6))]))
+(throwof "dw-multi" '(let [d ((drop-while odd?) +)] [(d 0 5) (d 0 4) (d 0 6)]))
 ;; error shapes
 (throwof "err-bad-xform" '(transduce 5 + [1 2 3]))
 (throwof "err-noncoll" '(transduce (map inc) + 5))
