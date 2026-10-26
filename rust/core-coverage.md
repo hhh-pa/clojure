@@ -4,7 +4,7 @@ The complete inventory of `clojure.core` in this port: every var,
 its conformance state, and — for exclusions — why it is excluded.
 If a var is not listed here, that is a file bug, not a silent gap.
 
-- **422 vars: 353 implemented, 11 divergent, 58 out of scope,
+- **422 vars: 362 implemented, 2 divergent, 58 out of scope,
   0 planned.** The port reports Clojure `1.13.0-alpha9`
   (`clojure-version`).
 - **Status meanings.** `implemented` — resolves in the booted core
@@ -74,7 +74,7 @@ Var roots, thread-local bindings, and metadata.
 | var | status | notes |
 | --- | --- | --- |
 | `alter-var-root` | implemented | atomic root swap |
-| `with-redefs` | divergent | analyzer builtin (S5B); resolves as macro; `macroexpand-1` identity (documented) |
+| `with-redefs` | implemented | expands to `with-redefs-fn` (builtin_expand.rs expand_with_redefs); fx4_macroexpand.rs expand_nine_heads |
 | `bound?` | implemented | |
 | `thread-bound?` | implemented | |
 | `var-get` | implemented | |
@@ -83,8 +83,8 @@ Var roots, thread-local bindings, and metadata.
 | `pop-thread-bindings` | implemented | |
 | `get-thread-bindings` | implemented | |
 | `with-bindings*` | implemented | |
-| `with-bindings` | divergent | analyzer builtin (S5B); resolves as macro; `macroexpand-1` identity (documented) |
-| `bound-fn` | divergent | analyzer builtin (S5B); resolves as macro; `macroexpand-1` identity (documented); conveyance primitive (S6 builds on it) |
+| `with-bindings` | implemented | expands to `with-bindings*` (builtin_expand.rs expand_with_bindings); fx4_macroexpand.rs expand_nine_heads |
+| `bound-fn` | implemented | expands to `bound-fn*` (builtin_expand.rs expand_bound_fn); fx4_macroexpand.rs expand_nine_heads; conveyance primitive (S6 builds on it) |
 | `meta` | implemented | |
 | `with-meta` | implemented | |
 | `vary-meta` | implemented | |
@@ -98,8 +98,8 @@ Defining macros and expanding them.
 | var | status | notes |
 | --- | --- | --- |
 | `defmacro` | implemented | def of the `&form`/`&env`-prepended fn; `:macro` + user `:arglists` |
-| `macroexpand-1` | implemented | one head step; call-site spans; builtins identity (documented) |
-| `macroexpand` | implemented | head loop; builtins identity (documented) |
+| `macroexpand-1` | implemented | one head step; call-site spans; the nine analyzer builtins expand (FX4); real specials + fence macros are identity |
+| `macroexpand` | implemented | head loop; the nine analyzer builtins expand (FX4); real specials + fence macros are identity |
 | `gensym` | implemented | Rust-backed counter |
 
 ## Arithmetic (S5D, checked per C1)
@@ -445,15 +445,15 @@ Evaluation, trampolines, compiler flags, hashing.
 
 ## Special-form macros (S4 builtins, S5C vars)
 
-Special forms exposed as macros; `macroexpand-1` is the documented identity.
+Special forms exposed as macros; `macroexpand-1` expands them (only real specials and fence macros are identity).
 
 | var | status | notes |
 | --- | --- | --- |
-| `let` | divergent | analyzer builtin; resolves as macro; `macroexpand-1` returns the form unchanged (documented) |
-| `loop` | divergent | analyzer builtin; resolves as macro; `macroexpand-1` returns the form unchanged (documented) |
-| `fn` | divergent | analyzer builtin; resolves as macro; `macroexpand-1` returns the form unchanged (documented) |
-| `binding` | divergent | analyzer builtin; resolves as macro; `macroexpand-1` returns the form unchanged (documented) |
-| `letfn` | divergent | analyzer builtin; resolves as macro; `macroexpand-1` returns the form unchanged (documented) |
+| `let` | implemented | expands to `let*` + destructured bindings (builtin_expand.rs expand_let); fx4_macroexpand.rs expand_nine_heads |
+| `loop` | implemented | expands to `loop*` (+ loop dance for destructuring); fx4_macroexpand.rs expand_nine_heads |
+| `fn` | implemented | expands to `fn*` (builtin_expand.rs expand_fn); fx4_macroexpand.rs expand_nine_heads |
+| `binding` | implemented | expands to the push-thread-bindings form; fx4_macroexpand.rs expand_nine_heads |
+| `letfn` | implemented | expands to `letfn*` (builtin_expand.rs expand_letfn); fx4_macroexpand.rs expand_nine_heads |
 
 ## Out of scope (significant exclusions)
 
@@ -535,7 +535,7 @@ Significant vars with no port slice, grouped below by area with the reason. (Two
 | `set-error-mode!` | implemented | concurrency.rs set_error_mode_rows (void→nil; :bogus/nil behave as :fail) |
 | `add-watch` | implemented | concurrency.rs watch_rows (returns ref, [k ref old new]) |
 | `remove-watch` | implemented | concurrency.rs watch_rows (returns ref, missing keys no-op) |
-| `locking` | divergent | analyzer builtin (S6D); single global reentrant monitor; resolves as macro; `macroexpand-1` identity (documented) |
+| `locking` | implemented | expands to the monitor-enter/exit form (builtin_expand.rs expand_locking); single global reentrant monitor (S6D); fx4_macroexpand.rs expand_locking_and_destructure_gensyms |
 | `pvalues` | implemented | concurrency.rs pvalues_rows (core.clj port over pcalls) |
 | `pcalls` | implemented | concurrency.rs pcalls_rows (core.clj port over pmap) |
 | `pmap` | implemented | concurrency.rs pmap_rows (core.clj port; fixed lookahead 6; lazy) |
