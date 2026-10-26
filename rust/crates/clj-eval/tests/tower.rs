@@ -488,7 +488,10 @@ fn tower_compare_rows() {
     // Negative pairs decide magnitudes reversed; `BigDec` against
     // `Int` converts exactly (no expansion either way).
     assert_eq!(run_last(&mut eval, "(compare -1E+2000000000M -1M)"), "-1");
-    assert_eq!(run_last(&mut eval, "[(compare 5M 1) (compare 1 5M)]"), "[1 -1]");
+    assert_eq!(
+        run_last(&mut eval, "[(compare 5M 1) (compare 1 5M)]"),
+        "[1 -1]"
+    );
     assert_eq!(run_last(&mut eval, "(= 0E+3M 0M)"), "true");
     assert_eq!(
         run_last(
