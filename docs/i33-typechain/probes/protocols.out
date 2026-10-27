@@ -1,0 +1,33 @@
+a-map true
+a-sigs (":greet" ":greet2")
+a-on "user.Greet"
+a-doc nil
+a-proto-doc "greets things"
+a-fnclass "class user$eval139$fn__140$G__128__145"
+b-dt ["pd:1" [2]]
+b-rec "pr:5"
+b-sat-dt true
+b-sat-rec true
+b-sat-no false
+b-sat-nil false
+b-ext-t true
+b-ext-no false
+c-str ["s:hi" 9]
+c-nil "nil!"
+c-long 6
+c-map [1 2 3]
+d-map "dbl"
+d-sat true
+e-noimpl THROW java.lang.IllegalArgumentException|"No implementation of method: :greet of protocol: #'user/Greet found for class: clojure.lang.Keyword"
+e-arity THROW java.lang.IllegalArgumentException|"No single method: greet of interface: user.Greet found for function: greet of protocol: Greet"
+e-ext-nonproto THROW java.lang.IllegalArgumentException|":notaproto is not a protocol"
+e-extend-nonproto THROW java.lang.IllegalArgumentException|":notaproto is not a protocol"
+f-dt-inline "q:7"
+f-rec-inline "qr:8"
+f-reify-inline "reified"
+f-sat-inline true
+g-close [:closed]
+g-value :ret
+g-exc [:closed]
+g-multi [:b :a]
+g-nonclose THROW java.lang.IllegalArgumentException|"No matching field found: close for class java.lang.Long"
