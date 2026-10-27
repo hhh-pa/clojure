@@ -1,0 +1,22 @@
+f-auth-space THROW java.net.URISyntaxException|"Illegal character in authority at index 8: http://h x/y"
+f-ipv6-nfe THROW java.net.URISyntaxException|"IPv6 hexadecimal digit sequence too long at index 10: http://[::12345678901234567890]/x"
+f-empty-user ["http" "@h" "" "h" -1 "/x" nil nil false "//@h/x"]
+f-empty-user-eq false
+f-empty-frag-eq false
+f-empty-query-eq false
+f-empty-scope THROW java.net.URISyntaxException|"scope id expected: http://[::1%]/x"
+f-y0-eq true
+f-y0-leap -62162294400000
+f-y0-jan -62135769600000
+f-y0-pr-leap "#inst \"0001-02-29T00:00:00.000-00:00\""
+f-y0-date-ctor "#inst \"0001-06-15T00:00:00.000-00:00\""
+f-y0-str-ctor "Tue Jun 15 00:00:00 UTC 1"
+f-y0-jun15-y1 -62121513600000
+f-sw-jan02 -62167305600000
+f-sw-feb01 -62164713600000
+f-sw-feb28 -62162380800000
+f-sw-mar01 -62162208000000
+f-sw-mar02 -62162121600000
+f-sw-dec31 -62135856000000
+f-sw-y1feb28 -62130758400000
+f-sw-y1mar01 -62130672000000
