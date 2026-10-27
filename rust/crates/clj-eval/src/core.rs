@@ -3475,6 +3475,142 @@ fn native_ex_cause(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nativ
     })
 }
 
+/// S20 oddballs (#55): one cause-chain link's emulated frame line —
+/// the link ex-data's `:clojure.error/line` when it is an `Int`
+/// (reader diagnostics ride there), else `-1` (the JVM unknown-line
+/// convention).
+fn s20_frame_line(link: &Throwable) -> i64 {
+    if let Some(Value::Map(m)) = link.data.as_deref() {
+        let key = Value::Keyword(Keyword::new(Some("clojure.error"), "line"));
+        if let Some(Value::Int(n)) = m.get(&key) {
+            return *n;
+        }
+    }
+    -1
+}
+
+/// S20: one chain link's emulated `[class method file line]` frame.
+/// The class is the link's JVM name as a symbol; the method is the
+/// stable symbol `unknown` (no method names exist in port
+/// diagnostics — N3 stable-form); the file is nil (a JVM-legal
+/// nullable slot). Slot classes stay JVM-shaped: symbol, symbol,
+/// string-or-nil, int (probes `a-via0-at`, `e-ste`).
+fn s20_frame(link: &Throwable) -> Value {
+    Value::Vector(Vector::from_vec(vec![
+        Value::Symbol(Symbol::new(None, link.class.jvm_name())),
+        Value::Symbol(Symbol::new(None, "unknown")),
+        Value::Nil,
+        Value::Int(s20_frame_line(link)),
+    ]))
+}
+
+/// S20: an `ExceptionInfo` link's `:data` value — the alpha10
+/// `ex-info` nil→`{}` normalization (probe `l-raw-data`), applied at
+/// the projection because the port's `ex-info` still stores nil.
+fn s20_link_data(link: &Throwable) -> Value {
+    link.data
+        .as_deref()
+        .cloned()
+        .unwrap_or_else(|| Value::Map(new_map()))
+}
+
+/// S20: one `:via` entry for a chain link (`:type`/`:at` always,
+/// `:message` iff non-nil, `:data` iff `ExceptionInfo`).
+fn s20_via_entry(link: &Throwable) -> Value {
+    let mut entry = new_map();
+    entry = entry.insert(
+        Value::Keyword(Keyword::new(None, "type")),
+        Value::Symbol(Symbol::new(None, link.class.jvm_name())),
+    );
+    entry = entry.insert(Value::Keyword(Keyword::new(None, "at")), s20_frame(link));
+    if let Some(message) = link.message.as_ref() {
+        entry = entry.insert(
+            Value::Keyword(Keyword::new(None, "message")),
+            Value::Str(Arc::clone(message)),
+        );
+    }
+    if link.class == ThrowClass::ExceptionInfo {
+        entry = entry.insert(
+            Value::Keyword(Keyword::new(None, "data")),
+            s20_link_data(link),
+        );
+    }
+    Value::Map(entry)
+}
+
+/// S20 `Throwable->map`: `{:cause :data :via :trace}` over the cause
+/// chain. Top `:cause`/`:data` are conditional keys (root message
+/// iff non-nil; root ex-data iff the root is an `ExceptionInfo`);
+/// `:trace` runs the per-link `:at` frames root-first, so its first
+/// frame is the root link's `:at` (probes `errors*.out` pin every
+/// rule, including the root-stack `:trace` identity).
+fn native_throwable_map(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.core/Throwable->map", args, &[1])?;
+    let Value::Throwable(outer) = &args[0] else {
+        if matches!(args[0], Value::Nil) {
+            return Err(NativeError::new(
+                ThrowClass::NullPointerException,
+                "Cannot invoke \"java.lang.Throwable.getStackTrace()\" because the return value of \"clojure.core$identity.invokeStatic(Object)\" is null"
+                    .to_owned(),
+            ));
+        }
+        return Err(cce_err(&args[0], "java.lang.Throwable"));
+    };
+    let mut chain: Vec<&Throwable> = Vec::new();
+    let mut cursor = Some(outer);
+    while let Some(link) = cursor {
+        chain.push(link);
+        cursor = link.cause.as_deref();
+    }
+    let mut root = outer;
+    while let Some(cause) = root.cause.as_deref() {
+        root = cause;
+    }
+    let via: Vec<Value> = chain.iter().map(|link| s20_via_entry(link)).collect();
+    let trace: Vec<Value> = chain.iter().rev().map(|link| s20_frame(link)).collect();
+    let mut top = new_map();
+    top = top.insert(
+        Value::Keyword(Keyword::new(None, "via")),
+        Value::Vector(Vector::from_vec(via)),
+    );
+    top = top.insert(
+        Value::Keyword(Keyword::new(None, "trace")),
+        Value::Vector(Vector::from_vec(trace)),
+    );
+    if let Some(message) = root.message.as_ref() {
+        top = top.insert(
+            Value::Keyword(Keyword::new(None, "cause")),
+            Value::Str(Arc::clone(message)),
+        );
+    }
+    if root.class == ThrowClass::ExceptionInfo {
+        top = top.insert(
+            Value::Keyword(Keyword::new(None, "data")),
+            s20_link_data(root),
+        );
+    }
+    Ok(Value::Map(top))
+}
+
+/// S20 `StackTraceElement->vec`: the argument throwable's emulated
+/// `:at` frame. The port has no `StackTraceElement` values, so the
+/// domain widens to throwables (the documented emulation — spec);
+/// errors still mirror the JVM hints.
+fn native_ste_vec(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.core/StackTraceElement->vec", args, &[1])?;
+    let Value::Throwable(t) = &args[0] else {
+        if matches!(args[0], Value::Nil) {
+            return Err(NativeError::new(
+                ThrowClass::NullPointerException,
+                "Cannot invoke \"java.lang.StackTraceElement.getClassName()\" because \"o\" is null"
+                    .to_owned(),
+            ));
+        }
+        return Err(cce_err(&args[0], "java.lang.StackTraceElement"));
+    };
+    Ok(s20_frame(t))
+}
+
 /// `trampoline`: call, then bounce zero-arg while the result is a
 /// `fn?` (the initial call takes arguments; anything non-`IFn` is
 /// the `IFn` cast failure).
@@ -4439,6 +4575,8 @@ pub(crate) const CORE_NATIVES: &[(&str, NativeFnPtr)] = &[
     ("ex-data", native_ex_data),
     ("ex-message", native_ex_message),
     ("ex-cause", native_ex_cause),
+    ("Throwable->map", native_throwable_map),
+    ("StackTraceElement->vec", native_ste_vec),
     ("trampoline", native_trampoline),
     ("hash", native_hash),
     ("hash-code", native_hash_code),

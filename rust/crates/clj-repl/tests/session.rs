@@ -537,3 +537,23 @@ fn repl_echo_print_dup_root_with_plain_fallback() {
         "{text:?}"
     );
 }
+
+/// S20 oddballs (#55): `*repl*` reads true inside a session (its
+/// false root is pinned in `clj-eval` `oddballs.rs`
+/// `repl_root_and_meta`).
+#[test]
+fn s20_repl_true_in_session() {
+    assert_eq!(run("*repl*\n", None), (0, "true\n".to_owned()));
+}
+
+/// S20: a non-booted evaluator skips the `*repl*` push like the
+/// other session handles (construction must not fail).
+#[test]
+fn s20_repl_skips_non_booted() {
+    let eval = clj_eval::Evaluator::new_bare("user");
+    let reader = BufReader::new(Cursor::new(Vec::<u8>::new()));
+    let mut session = Session::new(eval, reader, Vec::new());
+    assert_eq!(session.run(), 0);
+    let (_, _, out) = session.into_parts();
+    assert!(out.is_empty());
+}

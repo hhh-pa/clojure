@@ -4,13 +4,14 @@ The complete inventory of `clojure.core` in this port: every var,
 its conformance state, and — for exclusions — why it is excluded.
 If a var is not listed here, that is a file bug, not a silent gap.
 
-- **692 vars: 652 implemented, 1 divergent, 39 out of scope,
+- **690 vars: 655 implemented, 1 divergent, 34 out of scope,
   0 planned.** The port reports Clojure `1.13.0-alpha9`
   (`clojure-version`).
-- **Universe.** 692 rows = 685 JVM publics + 7 extra-universe rows: 4 port-visible JVM privates
+- **Universe.** 690 rows = 685 JVM publics + 5 extra-universe rows: 4 port-visible JVM privates
   (`*loaded-libs*`, `*loading-verbosely*`, `*pending-paths*`,
-  `preserving-reduced`), 1 port-only var (`*load-path*`), 2 guard
-  rows (`clone-thread-bindings`, `pprint`).
+  `preserving-reduced`), 1 port-only var (`*load-path*`). (S20, #55:
+  the `clone-thread-bindings`/`pprint` guard rows are removed —
+  neither exists in `clojure.core`.)
 - **Merged `planned` rows must resolve** — the matrix fails on any
   unresolved `planned` row, so add none unresolved (accepted
   future work lands as `out-of-scope` with a `future:` note).
@@ -468,7 +469,6 @@ Significant vars with no port slice, grouped below by area with the reason. (Thr
 
 | var | status | notes |
 | --- | --- | --- |
-| `clone-thread-bindings` | out-of-scope | does not exist on the JVM (probe37 `clone-missing`) |
 | `sorted-map` | implemented | ordered sidecar on `Map` (natural `jvm_compare`); coll.rs sorted_construction_rows |
 | `sorted-set` | implemented | ordered sidecar on `Set`; coll.rs sorted_construction_rows |
 | `sorted-map-by` | implemented | custom comparator calls `(cmp a b)` (`sort-by` semantics); coll.rs sorted_construction_rows |
@@ -580,7 +580,6 @@ Significant vars with no port slice, grouped below by area with the reason. (Thr
 | `bigdec` | implemented | tower `BigDec` coercion (`BigDecimal` semantics); tower.rs tower_bigdec_rows |
 | `num` | implemented | tower passthrough (nil is nil); tower.rs tower_num_rationalize_rows |
 | `rationalize` | implemented | tower via `BigDecimal.valueOf` (`(rationalize 0.1)` is `1/10`); tower.rs tower_num_rationalize_rows |
-| `pprint` | out-of-scope | clojure.pprint namespace, not core |
 
 ### Previously unlisted — resolves today
 
@@ -671,7 +670,7 @@ No slice on this branch: hard-never reasons stand alone, design-blocked rows nam
 | `*math-context*` | implemented | ns.rs `RT.java`-style dynamic root (nil); `MathContextVal` extension; zero_oos_s2_tower.rs s2_math_context_rows |
 | `*read-eval*` | implemented | true root; false/nil gates `#=`, `:unknown` refuses every read, loads force true; zero_oos_s7_readgates.rs (S7, #50) |
 | `*reader-resolver*` | implemented | nil root; 2-arity fn protocol (current-ns/resolve-alias/resolve-class/resolve-var consults for `::`/syntax-quote); non-fn entry cast; zero_oos_s7_readgates.rs (S7, #50) |
-| `*repl*` | out-of-scope | pending design: *repl* root + session wiring; see #40 |
+| `*repl*` | implemented | S20 dynamic (root false); session binds true; oddballs.rs repl_root_and_meta + repl_binding_conveys, clj-repl session.rs s20_repl_* |
 | `*source-path*` | out-of-scope | Bytecode compiler/classpath surface; port AOT (clj-aot) is separate |
 | `*suppress-read*` | implemented | nil root; gates only `#tag` (unknown tags preserved; `#inst`/`#uuid` also preserved — the suppress check sits above the S6 consult); zero_oos_s7_readgates.rs (S7, #50) |
 | `*use-context-classloader*` | out-of-scope | Bytecode compiler/classpath surface; port AOT (clj-aot) is separate |
@@ -688,8 +687,8 @@ No slice on this branch: hard-never reasons stand alone, design-blocked rows nam
 | `EMPTY-NODE` | implemented | S14 `(->VecNode nil <32 nils>)` def; typeinternals.rs vecnode_one_arity_and_empty_node (S14, #58) |
 | `Inst` | implemented | S9 defprotocol + java.util.Date extension (hidden __inst_millis* millis reader); scalarkinds.rs inst_protocol_shape, inst_user_extension |
 | `PrintWriter-on` | out-of-scope | java.io.PrintWriter adapter ctor; port Writer kind is separate |
-| `StackTraceElement->vec` | out-of-scope | pending design: error-data shape; see #40 |
-| `Throwable->map` | out-of-scope | pending design: error-data shape; see #40 |
+| `StackTraceElement->vec` | implemented | S20 core.rs native over Throwables (the emulated top frame; no STE values exist on the port); oddballs.rs ste_vec_frame + ste_vec_errors |
+| `Throwable->map` | implemented | S20 core.rs native over the cause chain (conditional top `:cause`/`:data`, root-first `:trace`, per-link `:via`); oddballs.rs throwable_map_* |
 | `accessor` | implemented | tests/collmisc.rs structmap_rows (basis-key reader; non-struct CCE) |
 | `aclone` | implemented | S15 arrays (#59): arrays.rs native_aclone (shallow: fresh id, shared inners); tests/arrays.rs alen_clone (probes g-clone-*) |
 | `add-classpath` | out-of-scope | Deprecated on JVM, no replacement named; classpath URLs have no slice |

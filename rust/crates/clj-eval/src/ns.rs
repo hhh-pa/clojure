@@ -1990,6 +1990,9 @@ fn core_vars(user_ns: Value) -> Vec<(String, Value, bool, bool)> {
         ("*2".to_owned(), Value::Nil, true, false),
         ("*3".to_owned(), Value::Nil, true, false),
         ("*e".to_owned(), Value::Nil, true, false),
+        // S20 oddballs (#55, probes `r-*`): false root; sessions
+        // bind it true (`^:dynamic`, like the window above).
+        ("*repl*".to_owned(), Value::Bool(false), true, false),
         // S7 CLI (P4): nil root; `run` binds the arg seq.
         ("*command-line-args*".to_owned(), Value::Nil, true, false),
         // S6 data readers: the tag table (empty root) and the

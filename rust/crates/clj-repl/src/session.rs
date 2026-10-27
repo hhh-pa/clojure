@@ -105,9 +105,10 @@ pub struct Session<R, W> {
 impl<R: BufRead, W: Write> Session<R, W> {
     /// A session over `evaluator`/`reader`/`writer` with prompts OFF
     /// (streaming purity). Resolves `*1`/`*2`/`*3`/`*e` and pushes
-    /// the session binding frame (nil entries); the frame lives as
-    /// long as the session. Missing handles (a non-booted
-    /// evaluator) skip their updates rather than failing.
+    /// the session binding frame (nil entries), plus `*repl*`
+    /// bound true (S20); the frame lives as long as the session.
+    /// Missing handles (a non-booted evaluator) skip their
+    /// updates rather than failing.
     #[must_use]
     pub fn new(mut evaluator: Evaluator, reader: R, writer: W) -> Self {
         let star1 = core_var(&evaluator, "*1");
@@ -116,6 +117,11 @@ impl<R: BufRead, W: Write> Session<R, W> {
         let star_e = core_var(&evaluator, "*e");
         for var in [&star1, &star2, &star3, &star_e].into_iter().flatten() {
             evaluator.push_binding((*var).clone(), Value::Nil);
+        }
+        // S20 oddballs (#55): `*repl*` stays true for the session
+        // lifetime (never shifted — only pushed here).
+        if let Some(var) = core_var(&evaluator, "*repl*") {
+            evaluator.push_binding(var, Value::Bool(true));
         }
         Self {
             eval: evaluator,
