@@ -1665,6 +1665,45 @@ fn native_dissoc_bang(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, Na
     Ok(Value::Transient(t.clone()))
 }
 
+fn native_disj_bang(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_min_arity("clojure.core/disj!", args, 1)?;
+    // The 1-arity is the identity over ANY value (the JVM decl
+    // carries no hint there — S5, oracle `e-arity1`).
+    if args.len() == 1 {
+        return Ok(args[0].clone());
+    }
+    let Value::Transient(t) = &args[0] else {
+        if matches!(args[0], Value::Nil) {
+            return Err(NativeError::new(
+                ThrowClass::NullPointerException,
+                "Cannot invoke \"clojure.lang.ITransientSet.disjoin(Object)\" because \"set\" is null"
+                    .to_owned(),
+            ));
+        }
+        return Err(cce_err(&args[0], "clojure.lang.ITransientSet"));
+    };
+    // Read the class before locking (`jvm_class_of` locks
+    // transients itself — locking twice deadlocks).
+    let from = jvm_class_of(&args[0]);
+    {
+        let mut guard = t.lock();
+        match &mut *guard {
+            TransientKind::Set(ts) => {
+                for k in &args[1..] {
+                    ts.disj(k).map_err(transient_err)?;
+                }
+            }
+            _ => {
+                return Err(NativeError::new(
+                    ThrowClass::ClassCastException,
+                    cce_message(&from, "clojure.lang.ITransientSet"),
+                ));
+            }
+        }
+    }
+    Ok(Value::Transient(t.clone()))
+}
+
 fn native_pop_bang(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/pop!", args, &[1])?;
     let Value::Transient(t) = &args[0] else {
@@ -2388,6 +2427,7 @@ pub(crate) const COLL_NATIVES: &[(&str, NativeFnPtr)] = &[
     ("conj!", native_conj_bang),
     ("assoc!", native_assoc_bang),
     ("dissoc!", native_dissoc_bang),
+    ("disj!", native_disj_bang),
     ("pop!", native_pop_bang),
     ("peek", native_peek),
     ("pop", native_pop),

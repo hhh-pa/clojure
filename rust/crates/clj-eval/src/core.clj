@@ -1457,3 +1457,31 @@
   {:added "1.0"
    :static true}
   [x] (first (first x)))
+
+;; --- Deprecated aliases (S5 state introspection): verbatim ports,
+;; meta included (oracle `j-*` pins value- and meta-equivalence
+;; with the replacements).
+(defn agent-errors
+  "DEPRECATED: Use 'agent-error' instead.
+  Returns a sequence of the exceptions thrown during asynchronous
+  actions of the agent."
+  {:added "1.0"
+   :deprecated "1.2"}
+  [a]
+  (when-let [e (agent-error a)]
+    (list e)))
+
+(defn clear-agent-errors
+  "DEPRECATED: Use 'restart-agent' instead.
+  Clears any exceptions thrown during asynchronous actions of the
+  agent, allowing subsequent actions to occur."
+  {:added "1.0"
+   :deprecated "1.2"}
+  [a] (restart-agent a @a))
+
+(defn replicate
+  "DEPRECATED: Use 'repeat' instead.
+   Returns a lazy seq of n xs."
+  {:added "1.0"
+   :deprecated "1.3"}
+  [n x] (take n (repeat x)))

@@ -147,6 +147,14 @@ impl Future {
         !matches!(*self.lock(), FutureState::Pending)
     }
 
+    /// Whether the future was cancelled (like `Future.isCancelled`,
+    /// which `future-cancelled?` reports — non-blocking, unlike
+    /// [`get`](Self::get)).
+    #[must_use]
+    pub fn is_cancelled(&self) -> bool {
+        matches!(*self.lock(), FutureState::Cancelled)
+    }
+
     /// Block until the outcome or cancellation arrives, returning
     /// the settled state (never [`FutureState::Pending`]).
     pub fn get(&self) -> FutureState {

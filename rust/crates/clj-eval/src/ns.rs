@@ -765,7 +765,7 @@ fn native_ns_resolve(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nati
 }
 
 fn native_resolve(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
-    check_arity("clojure.core/resolve", args, &[1, 2])?;
+    check_arity("clojure.core/resolve", args, &[1])?;
     let cur = eval.current_ns_name();
     let (env, sym_v) = if args.len() == 2 {
         (Some(&args[0]), &args[1])
@@ -773,6 +773,65 @@ fn native_resolve(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeE
         (None, &args[0])
     };
     do_resolve(eval, &cur, None, env, sym_v)
+}
+
+/// `find-var`: the interned var named by a namespace-qualified
+/// symbol, or nil when the namespace exists but the var does not
+/// (S5; oracle `f-*`). Refers are blind (interns only, like
+/// `Var.find`); a missing namespace and an unqualified symbol
+/// throw `IllegalArgumentException`, like the JVM.
+fn native_find_var(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.core/find-var", args, &[1])?;
+    let sym = match &args[0] {
+        Value::Nil => {
+            return Err(npe(
+                "Cannot read field \"ns\" because \"nsQualifiedSym\" is null",
+            ));
+        }
+        Value::Symbol(s) => s,
+        other => return Err(cce_err(other, SYMBOL_CLASS)),
+    };
+    let Some(ns_part) = sym.namespace() else {
+        return Err(NativeError::new(
+            ThrowClass::IllegalArgumentException,
+            "Symbol must be namespace-qualified".to_owned(),
+        ));
+    };
+    let Some(home) = eval.registry.get(ns_part) else {
+        return Err(NativeError::new(
+            ThrowClass::IllegalArgumentException,
+            format!("No such namespace: {ns_part}"),
+        ));
+    };
+    match home.lookup(sym) {
+        Some(id) => Ok(var_value(id, sym)),
+        None => Ok(Value::Nil),
+    }
+}
+
+/// `requiring-resolve`: resolve a namespace-qualified symbol in
+/// the current ns, requiring its namespace first when the initial
+/// resolve misses (S5; oracle `g-*`). Loader failures propagate
+/// in port shapes.
+fn native_requiring_resolve(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.core/requiring-resolve", args, &[1])?;
+    let ns_part = match &args[0] {
+        Value::Symbol(s) if s.namespace().is_some() => s.namespace().unwrap_or("").to_owned(),
+        _ => {
+            return Err(NativeError::new(
+                ThrowClass::IllegalArgumentException,
+                format!("Not a qualified symbol: {}", str_of(&args[0])),
+            ));
+        }
+    };
+    let cur = eval.current_ns_name();
+    let first = do_resolve(eval, &cur, None, None, &args[0])?;
+    if !matches!(first, Value::Nil) {
+        return Ok(first);
+    }
+    let lib = Value::Symbol(Symbol::new(None, &ns_part));
+    load_libs(eval, &["require"], std::slice::from_ref(&lib))?;
+    do_resolve(eval, &cur, None, None, &args[0])
 }
 
 fn native_ns_unmap(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
@@ -1700,6 +1759,8 @@ const NATIVES: &[(&str, NativeFnPtr)] = &[
     ("intern", native_intern),
     ("ns-resolve", native_ns_resolve),
     ("resolve", native_resolve),
+    ("find-var", native_find_var),
+    ("requiring-resolve", native_requiring_resolve),
     ("ns-unmap", native_ns_unmap),
     ("ns-unalias", native_ns_unalias),
     ("require", native_require),
