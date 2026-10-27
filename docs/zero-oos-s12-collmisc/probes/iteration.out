@@ -1,0 +1,18 @@
+it-basic "(1 2 3)"
+it-take-inf "(1 2 3)"
+it-empty true
+it-reduce-empty 7
+it-reduce 6
+it-reduced 1
+it-vf "([0] [1] [2])"
+it-kf-stop "(3 2 1 0)"
+it-somef "(1 2)"
+it-somef-skips [1]
+it-seqable true
+it-reducible true
+it-cq false
+it-step-once [true 1]
+it-take-count ["(1 2)" 2]
+it-twice ["nil" "nil" 2]
+it-reduce-count 3
+it-unknown-opt "(1)"

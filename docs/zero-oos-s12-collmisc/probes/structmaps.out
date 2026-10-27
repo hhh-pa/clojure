@@ -1,0 +1,39 @@
+sm-basis-class "class clojure.lang.PersistentStructMap$Def"
+sm-basis-print "#object[clojure.lang.PersistentStructMap$Def 0xH \"clojure.lang.PersistentStructMap$Def@L\"]"
+sm-defstruct-expand "(def person2 (clojure.core/create-struct :x :y))"
+sm-defstruct-class "class clojure.lang.PersistentStructMap$Def"
+sm-basis-eq false
+sm-make-print "{:name \"Ada\", :age 36}"
+sm-make-class "class clojure.lang.PersistentStructMap"
+sm-map? true
+sm-eq-map true
+sm-hash-eq true
+sm-keys "(:name :age)"
+sm-vals "(\"Ada\" nil)"
+sm-seq "([:name \"Ada\"] [:age nil])"
+sm-count 2
+sm-get-basis nil
+sm-contains true
+sm-extra "{:name \"Ada\", :age nil, :zzz 9}"
+sm-empty "{:name nil, :age nil}"
+sm-cross-basis true
+sm-struct-print "{:name \"Ada\", :age 36}"
+sm-struct-short "{:name \"Ada\", :age nil}"
+sm-struct-extra THROW java.lang.IllegalArgumentException|"Too many arguments to struct constructor"
+sm-assoc-print "{:name \"Ada\", :age 37}"
+sm-assoc-class "class clojure.lang.PersistentStructMap"
+sm-assoc-extra "{:name \"Ada\", :age nil, :zzz 1}"
+sm-dissoc-basis THROW java.lang.RuntimeException|"Can't remove struct key"
+sm-dissoc-extra "{:name \"Ada\", :age nil}"
+sm-accessor "Ada"
+sm-accessor-miss THROW java.lang.IllegalArgumentException|"Not a key of struct"
+sm-accessor-plain THROW java.lang.ClassCastException|"class clojure.lang.PersistentArrayMap cannot be cast to class clojure.lang.PersistentStructMap (clojure.lang.PersistentArrayMap and clojure.lang.PersistentStructMap are in unnamed module of loader 'app')"
+sm-accessor-fn? false
+sm-accessor-class "class clojure.lang.PersistentStructMap$1"
+sm-accessor-print "#object[clojure.lang.PersistentStructMap$1 0xH \"clojure.lang.PersistentStructMap$1@L\"]"
+sm-assoc-extra-class "class clojure.lang.PersistentStructMap"
+sm-dissoc-extra-class "class clojure.lang.PersistentStructMap"
+sm-empty-basis THROW java.lang.IllegalArgumentException|"Must supply keys"
+sm-map-nonbasis THROW java.lang.ClassCastException|"class clojure.lang.PersistentArrayMap cannot be cast to class clojure.lang.PersistentStructMap$Def (clojure.lang.PersistentArrayMap and clojure.lang.PersistentStructMap$Def are in unnamed module of loader 'app')"
+sm-struct-nonbasis THROW java.lang.ClassCastException|"class java.lang.String cannot be cast to class clojure.lang.PersistentStructMap$Def (java.lang.String is in module java.base of loader 'bootstrap'; clojure.lang.PersistentStructMap$Def is in unnamed module of loader 'app')"
+sm-accessor-nonbasis THROW java.lang.ClassCastException|"class clojure.lang.PersistentArrayMap cannot be cast to class clojure.lang.PersistentStructMap$Def (clojure.lang.PersistentArrayMap and clojure.lang.PersistentStructMap$Def are in unnamed module of loader 'app')"
