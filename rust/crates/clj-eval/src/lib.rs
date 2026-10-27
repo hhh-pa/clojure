@@ -30,6 +30,7 @@ pub mod io;
 pub mod lazy;
 pub mod macros;
 pub mod ns;
+pub mod protocol;
 pub mod re;
 pub mod rng;
 pub mod seqs;

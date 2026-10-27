@@ -4,7 +4,7 @@ The complete inventory of `clojure.core` in this port: every var,
 its conformance state, and — for exclusions — why it is excluded.
 If a var is not listed here, that is a file bug, not a silent gap.
 
-- **422 vars: 387 implemented, 2 divergent, 33 out of scope,
+- **423 vars: 394 implemented, 2 divergent, 27 out of scope,
   0 planned.** The port reports Clojure `1.13.0-alpha9`
   (`clojure-version`).
 - **Status meanings.** `implemented` — resolves in the booted core
@@ -496,12 +496,13 @@ Significant vars with no port slice, grouped below by area with the reason. (Two
 | `definterface` | implemented | types.rs iface_*; S-typechain stage 1 (#33): signature descriptors |
 | `import` | out-of-scope | interop (N1) |
 | `..` | out-of-scope | interop (N1) |
-| `with-open` | out-of-scope | needs Closeable/protocol: no slice |
-| `extend` | out-of-scope | protocols: no slice |
-| `extend-type` | out-of-scope | protocols: no slice |
-| `extend-protocol` | out-of-scope | protocols: no slice |
-| `satisfies?` | out-of-scope | protocols: no slice |
-| `extends?` | out-of-scope | protocols: no slice |
+| `defprotocol` | implemented | protocols.rs proto_*; S-typechain stage 2 (#33): map descriptors (:on/:sigs/:impls/:interface), variadic dispatch fns |
+| `with-open` | implemented | protocols.rs with_open_*; S-typechain stage 2 (#33): Closeable contract, reverse-order finally closes |
+| `extend` | implemented | protocols.rs extend_*; S-typechain stage 2 (#33): map-form extends, bare-fn per-arity merge |
+| `extend-type` | implemented | protocols.rs extend_*; S-typechain stage 2 (#33): named-type extensions under the var-alter lock |
+| `extend-protocol` | implemented | protocols.rs extend_*; S-typechain stage 2 (#33): host-class/null/IPersistentMap extensions |
+| `satisfies?` | implemented | protocols.rs satisfies_*; S-typechain stage 2 (#33): registry + inline claims; descriptors never satisfy |
+| `extends?` | implemented | protocols.rs extends_*; S-typechain stage 2 (#33): descriptor names, class-name strings, IPM fallback |
 
 ### Concurrency (implemented — atoms, futures, agents; STM excluded above)
 

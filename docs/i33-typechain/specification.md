@@ -160,14 +160,50 @@ type system; multimethods dispatch over both):
   failures use the port's stable analyzer-cast text (the
   oracle's `DynamicClassLoader` clause is unreachable with one
   loader — documented in-test).
-- **Stage 2** (`protocol.rs` + `PROTOCOL_NATIVES`,
-  `Value::ProtocolFn`, registry on evaluator state):
-  `defprotocol` helper, `extend`/`extend-type`/`extend-protocol`
-  (inline + map impl forms), `satisfies?`/`extends?`, method
-  invocation in the invoke path, built-in `Closeable` protocol,
-  `with-open` in `builtin_expand.rs` with `finally` close.
-  Registry mutations are loom-covered (concurrent extend +
-  dispatch must linearize).
+- **Stage 2** (`protocol.rs` + `PROTOCOL_NATIVES`, `core.clj`
+  macros, no new `Value` variant): `defprotocol` emits a
+  `definterface` var plus a protocol-map var (`:on` the interface
+  name, `:sigs` keyword → `{:arglists}` with `this` included,
+  `:impls` class-name → method → argc → fn, `:interface` the
+  descriptor) plus one variadic dispatch fn per method (every call
+  reaches `__protocol_invoke*`, so its oracle arity error fires,
+  never the fn's own `ArityException`); `extend`/`extend-type`/
+  `extend-protocol` merge into `:impls` under the port's var-alter
+  lock (read-modify-install, no lost update); `satisfies?`/
+  `extends?` read the registry plus inline claims; inline
+  `deftype`/`defrecord`/`reify`/`proxy` bodies resolve protocols
+  through the shared interface path (the `:interface` descriptor
+  carries the `:on` claim and past-`this` sigs, so no new check
+  or registration path was needed) and dispatch through the
+  instance's own method table; `Closeable` is a built-in
+  interface descriptor (not a protocol); `with-open` is a
+  `core.clj` macro nesting `let`/`try`/`finally` (reverse-order
+  closes); `String`/`Long`/`Double`/`Boolean`/`Object` resolve as
+  class-name strings (the port has no class literals). Dispatch
+  keys types by `jvm_class_of` (port types and host classes share
+  one space; `nil` is `null`); the only interface fallback is
+  `IPersistentMap` for maps/records (oracle `c-map`); descriptors
+  never dispatch or satisfy (like the JVM's classes). The write
+  path reuses the loom-modelled var-alter lock (`loom_var_lock.rs`
+  covers the primitive; the merge is pure under it).
+- **Stage-2 implementation deltas** (found while building; all
+  pinned in `rust/crates/clj-eval/tests/protocols.rs`, 41 tests):
+  `:arglists` are lists (JVM shape), not vectors; the `extend`
+  map form stores bare fns (one per method — each covers every
+  declared arity, dispatching itself) with keyword keys (macros
+  emit string keys with argc maps); `extend-protocol` accepts
+  `nil` group targets (null extensions) and passes keywords
+  through to the native's `is not a protocol` error (oracle
+  `e-ext-nonproto`); dotted symbols (`clojure.lang.IPersistentMap`)
+  ride as-is instead of gaining a `java.lang.` prefix; a bound
+  string in type position names its class (the core class-name
+  vars); class-name vars moved one stage-1 rejection from
+  unresolvable to the accurate `Not an interface` (a bound
+  non-descriptor IS a type); a later `extend-type` replaces the
+  inline impl (JVM order — registry reads before the instance
+  table); multi-argvec sigs (`(m [this] [this x])`) parse to all
+  leading vectors; `class` stays out of scope (oracle `a-fnclass`
+  untestable until type reflection lands).
 - **Stage 3** (`multi.rs` + `MULTI_NATIVES`,
   `Value::MultiFn`): `defmulti` (dispatch fn, default, hierarchy
   slot reserved), `defmethod` (arities incl. multi-arity),

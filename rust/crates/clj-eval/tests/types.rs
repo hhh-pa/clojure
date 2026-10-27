@@ -226,11 +226,14 @@ fn dtor_non_interface() {
 
 #[test]
 fn dtor_host_super_unresolvable() {
-    // Host classes are interop (N1): they do not resolve as vars.
+    // Host classes are interop (N1): since stage 2 `String` resolves
+    // (as its class-name string, for `extends?`), naming it as an
+    // interface is the accurate `Not an interface` error — still a
+    // rejection, one step closer to the JVM.
     let mut eval = boot();
     assert_eq!(
         uncaught(&mut eval, "(deftype P [a] String (s [this] 1))"),
-        "java.lang.RuntimeException | Unable to resolve symbol: String in this context"
+        "java.lang.IllegalArgumentException | Not an interface: String"
     );
 }
 

@@ -78,6 +78,17 @@ them (map ops, `hash` formula, metadata); methods dispatch
 through per-type tables with `Object` fallbacks (`toString`,
 record `hashCode`).
 
+**Protocols.** `defprotocol` (map descriptors with `:on` / `:sigs`
+/ `:impls`, variadic dispatch fns), `extend` / `extend-type` /
+`extend-protocol` (named types, host classes, `nil`, and the
+`IPersistentMap` fallback for maps/records, merged under the
+var-alter lock), `satisfies?` / `extends?` (registry plus inline
+claims; descriptors never satisfy), inline bodies on
+`deftype` / `defrecord` / `reify` / `proxy`, the `Closeable`
+contract, and `with-open` (reverse-order `finally` closes).
+`String Long Double Boolean Object` resolve as class-name
+strings (the port has no class literals).
+
 **Language core.** Special forms `def if do let letfn loop recur fn
 fn* quote var throw try/catch/finally set!` (`set!` on dynamic vars
 only); destructuring; `defn defmacro defonce comment assert`;
@@ -108,7 +119,7 @@ unbounded, `:fail` / `:continue` error modes, `await` / `await-for`,
 `restart-agent`, `shutdown-agents`), `locking`, `add-watch` /
 `remove-watch`, `realized?`.
 
-**Core vars: 387 implemented, 2 divergent, 33 out of scope**
+**Core vars: 394 implemented, 2 divergent, 27 out of scope**
 ([`rust/core-coverage.md`](rust/core-coverage.md) is normative and
 CI-enforced: listed vars must resolve, excluded ones must not).
 
@@ -174,8 +185,6 @@ out of scope, not silently missing:
 
 - JVM interop (`new`, dotted access, `import`, `instance?`,
   `class`, `..`, `clojure.java.*`, `clojure.reflect`).
-- Protocols (`extend`, `extend-type`, `extend-protocol`,
-  `satisfies?`, `extends?`; hence `with-open`).
 - Multimethods (`defmulti defmethod prefer-method get-method
   methods remove-method`).
 - STM (`ref dosync alter commute ensure ref-set`) — never;

@@ -143,7 +143,20 @@ fn not_a_type(sym: &Symbol) -> NativeError {
 /// Resolve a symbol to an interface descriptor (for `reify` /
 /// `proxy` / definition interface lists).
 fn resolve_iface(eval: &Evaluator, sym: &Symbol) -> Result<Arc<HostDef>, NativeError> {
-    let d = resolve_def(eval, sym)?;
+    // A bound non-descriptor (like the core `String` class-name
+    // string) IS a type, just not an interface; missing names stay
+    // unresolvable (`IAE` marks the former — `def_of_root`'s
+    // signal — while the latter is a `RuntimeException`).
+    let d = match resolve_def(eval, sym) {
+        Ok(d) => d,
+        Err(e) if e.class == ThrowClass::IllegalArgumentException => {
+            return Err(NativeError::new(
+                ThrowClass::IllegalArgumentException,
+                format!("Not an interface: {sym}"),
+            ));
+        }
+        Err(e) => return Err(e),
+    };
     if d.kind != HostKind::Interface {
         return Err(NativeError::new(
             ThrowClass::IllegalArgumentException,
@@ -153,14 +166,45 @@ fn resolve_iface(eval: &Evaluator, sym: &Symbol) -> Result<Arc<HostDef>, NativeE
     Ok(d)
 }
 
+/// The `java.io.Closeable` contract as an interface descriptor
+/// (split for budget): the only host interface inline bodies and
+/// `with-open` may name — `close/0`, no interop import needed.
+fn closeable_def() -> Arc<HostDef> {
+    let mut sigs = HashMap::new();
+    sigs.insert(Arc::from("close"), vec![0usize]);
+    Arc::new(HostDef {
+        name: Arc::from("java.io.Closeable"),
+        kind: HostKind::Interface,
+        fields: Vec::new(),
+        methods: HashMap::new(),
+        interfaces: Vec::new(),
+        prefix: None,
+        impl_ns: None,
+        sigs,
+        takes_this: true,
+    })
+}
+
 /// An interface-list entry: bare `Object` names the fence
 /// superclass (skipped — its methods are the `object_method` set,
 /// so `(defrecord R [x] Object (toString …))` keeps working);
+/// `Closeable` (bare or `java.io`-qualified) is the close contract;
+/// a protocol contributes its `:interface` descriptor (whose name
+/// is the `:on` claim and whose sigs check the inline methods);
 /// anything else must resolve to an interface.
 fn resolve_iface_sym(eval: &mut Evaluator, s: &Value) -> Result<Option<Arc<HostDef>>, NativeError> {
     let sym = sym_arg(s)?;
     if sym.namespace().is_none() && sym.name() == "Object" {
         return Ok(None);
+    }
+    if sym.namespace().is_none() && sym.name() == "Closeable"
+        || sym.namespace().is_none() && sym.name() == "java.io.Closeable"
+        || sym.namespace().is_some_and(|n| n == "java.io") && sym.name() == "Closeable"
+    {
+        return Ok(Some(closeable_def()));
+    }
+    if let Some(p) = crate::protocol::proto_of(eval, &sym) {
+        return Ok(Some(crate::protocol::proto_interface(&p.map)));
     }
     resolve_iface(eval, &sym).map(Some)
 }
@@ -524,8 +568,9 @@ fn no_method(method: &str, argc: usize, class: &str) -> NativeError {
     )
 }
 
-/// Call a method closure with the instance as `this`.
-fn call_method(
+/// Call a method closure with the instance as `this` (shared
+/// with protocol inline dispatch).
+pub(crate) fn call_method(
     eval: &mut Evaluator,
     func: &Value,
     this: Value,

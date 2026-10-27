@@ -1146,3 +1146,132 @@
                         grouped))
               (list 'str (list 'ns-name '*ns*))
               (list 'quote (vec implements)))))))))
+
+(defn- parse-protocol-sigs [sigs]
+  (map (fn [s]
+         (when-not (and (seq? s) (symbol? (first s)) (seq (rest s)))
+           (throw-illegal-arg! (str "Invalid protocol signature: " (pr-str s))))
+         (let [m (first s)
+               body (rest s)
+               [arglists doc] (if (vector? (first body))
+                                [(apply list (take-while vector? body))
+                                 (let [d (first (drop-while vector? body))]
+                                   (when (string? d) d))]
+                                [(apply list (map first body)) nil])]
+           (doseq [a arglists]
+             (when-not (and (vector? a) (seq a))
+               (throw-illegal-arg! (str "Invalid protocol signature: " (pr-str s)))))
+           {:m m :arglists arglists :doc doc}))
+       sigs))
+
+(defmacro defprotocol [name & args]
+  (check-type-name "defprotocol" name)
+  (let [[doc args] (if (string? (first args)) [(first args) (rest args)] [nil args])
+        parsed (parse-protocol-sigs args)
+        iface-sym (symbol (str name "-interface"))
+        ns-str (list 'str (list 'ns-name '*ns*))
+        iface-sigs (apply list 'clojure.core/hash-map
+                     (mapcat (fn [{:keys [m arglists]}]
+                               (list (str m) (vec (map (fn [a] (dec (count a))) arglists))))
+                             parsed))
+        proto-sigs (apply list 'clojure.core/hash-map
+                     (mapcat (fn [{:keys [m arglists]}]
+                               (list (keyword m)
+                                     (list 'clojure.core/hash-map
+                                       :arglists (list 'quote arglists))))
+                             parsed))
+        ;; One variadic arity per method: every call reaches
+        ;; `__protocol_invoke*`, so its oracle arity error (not the
+        ;; fn's own `ArityException`) fires on bad counts.
+        fns (map (fn [{:keys [m doc]}]
+                   (apply list 'clojure.core/defn m
+                     (concat (when doc [doc])
+                             (list (list '[this & args]
+                                     (list 'clojure.core/__protocol_invoke*
+                                       (list 'var name) (str m)
+                                       (list 'clojure.core/into '[this] 'args)))))))
+                 parsed)]
+    (list 'do
+      (list 'def iface-sym
+        (list 'clojure.core/__interface* ns-str (str name) iface-sigs))
+      (if doc
+        (list 'def name doc
+          (list 'clojure.core/__protocol* proto-sigs (list 'var iface-sym)))
+        (list 'def name
+          (list 'clojure.core/__protocol* proto-sigs (list 'var iface-sym))))
+      (apply list 'do fns)
+      name)))
+
+(defn- group-extend-specs [kind specs]
+  ;; Group starts are symbols — plus `nil` (null extensions) and
+  ;; keywords (which fall through to the native's `is not a
+  ;; protocol` / `not a type` errors, like the oracle).
+  (loop [ss specs, cur nil, started false, groups []]
+    (if (empty? ss)
+      groups
+      (let [s (first ss)]
+        (cond (or (symbol? s) (keyword? s) (nil? s))
+              (recur (rest ss) s true (conj groups [s []]))
+              (seq? s)
+              (do (when-not started
+                    (throw-illegal-arg! (str "Can't define method not in interfaces: " (first s))))
+                  (let [g (peek groups)]
+                    (recur (rest ss) cur true
+                      (conj (pop groups) [(first g) (conj (second g) s)]))))
+              :else
+              (throw-illegal-arg! (str "Invalid " kind " spec: " (pr-str s))))))))
+
+(defn- emit-extend-calls [kind proto-of type-of groups]
+  (apply list 'do
+    (map (fn [[target methods]]
+           (let [triples (mapcat (fn [m] (method-triples kind (first m) (rest m))) methods)
+                 mmap (emit-type-methods kind triples)]
+             (list 'clojure.core/__extend* (proto-of target) (type-of target) mmap)))
+         groups)))
+
+(defmacro extend-type [t & specs]
+  (emit-extend-calls "extend-type"
+    (fn [p] (if (symbol? p) (list 'var p) (list 'quote p)))
+    (fn [_] (list 'quote t))
+    (group-extend-specs "extend-type" specs)))
+
+(defmacro extend-protocol [p & specs]
+  (emit-extend-calls "extend-protocol"
+    (fn [_] (list 'var p))
+    (fn [t] (list 'quote t))
+    (group-extend-specs "extend-protocol" specs)))
+
+(defmacro extend [t & proto+mmaps]
+  (when (odd? (count proto+mmaps))
+    (throw-illegal-arg! "extend requires an even number of proto/method-map forms"))
+  (apply list 'do
+    (map (fn [[p mmap]]
+           (when-not (or (symbol? p) (keyword? p))
+             (throw-illegal-arg! (str "extend protocol must be a symbol: " (pr-str p))))
+           (list 'clojure.core/__extend*
+             (if (symbol? p) (list 'var p) (list 'quote p))
+             (list 'quote t) mmap))
+         (partition 2 proto+mmaps))))
+
+;; Host class names as values (the port has no class literals):
+;; `String` in value position is its name string, so `extends?` /
+;; `satisfies?` take classes the way the pins write them.
+(def String "java.lang.String")
+(def Long "java.lang.Long")
+(def Double "java.lang.Double")
+(def Boolean "java.lang.Boolean")
+(def Object "java.lang.Object")
+
+(defmacro with-open [bindings & body]
+  (when-not (vector? bindings)
+    (throw-illegal-arg! "with-open bindings must be a vector"))
+  (when (odd? (count bindings))
+    (throw-illegal-arg! "with-open requires an even number of bindings"))
+  (let [inner (apply list 'do body)]
+    (loop [pairs (reverse (partition 2 bindings)), form inner]
+      (if (empty? pairs)
+        form
+        (let [[n init] (first pairs)]
+          (recur (rest pairs)
+            (list 'let [n init]
+              (list 'try form (list 'finally (list (symbol ".close") n))))))))))
