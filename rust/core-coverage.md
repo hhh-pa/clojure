@@ -4,7 +4,7 @@ The complete inventory of `clojure.core` in this port: every var,
 its conformance state, and — for exclusions — why it is excluded.
 If a var is not listed here, that is a file bug, not a silent gap.
 
-- **422 vars: 380 implemented, 2 divergent, 40 out of scope,
+- **422 vars: 387 implemented, 2 divergent, 33 out of scope,
   0 planned.** The port reports Clojure `1.13.0-alpha9`
   (`clojure-version`).
 - **Status meanings.** `implemented` — resolves in the booted core
@@ -487,13 +487,13 @@ Significant vars with no port slice, grouped below by area with the reason. (Two
 | `read-line` | out-of-scope | needs `*in*` machinery: no slice |
 | `line-seq` | out-of-scope | needs `*in*` machinery: no slice |
 | `*in*` | out-of-scope | needs `*in*` machinery: no slice |
-| `deftype` | out-of-scope | no type-system slice |
-| `defrecord` | out-of-scope | no type-system slice |
-| `reify` | out-of-scope | no type-system slice |
-| `proxy` | out-of-scope | no type-system slice |
-| `gen-class` | out-of-scope | no type-system slice |
-| `gen-interface` | out-of-scope | no type-system slice |
-| `definterface` | out-of-scope | no type-system slice |
+| `deftype` | implemented | types.rs dtor_*; S-typechain stage 1 (#33): namespace-registry types, namespace-qualified construction, dot interop |
+| `defrecord` | implemented | types.rs rec_*; S-typechain stage 1 (#33): content-map records, ->/map-> factories, record hash formula |
+| `reify` | implemented | types.rs reify_*; S-typechain stage 1 (#33): anonymous instances over interfaces |
+| `proxy` | implemented | types.rs proxy_*; S-typechain stage 1 (#33): Object-only superclass, this-less bodies |
+| `gen-class` | implemented | types.rs genclass_*; S-typechain stage 1 (#33): runtime-constructable (documented divergence), prefix-fn forwarding |
+| `gen-interface` | implemented | types.rs geniface_*; S-typechain stage 1 (#33): signature descriptors |
+| `definterface` | implemented | types.rs iface_*; S-typechain stage 1 (#33): signature descriptors |
 | `import` | out-of-scope | interop (N1) |
 | `..` | out-of-scope | interop (N1) |
 | `with-open` | out-of-scope | needs Closeable/protocol: no slice |

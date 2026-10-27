@@ -137,6 +137,29 @@ type system; multimethods dispatch over both):
   constructable on the JVM (oracle `genclass`
   ClassNotFoundException), so the port's constructable
   descriptor is a documented divergence.
+- **Stage-1 implementation deltas** (found while building; all
+  pinned in `rust/crates/clj-eval/tests/types.rs`, 80 tests):
+  `parse-type-specs` kept the interface list across method specs
+  (the recur slot was `triples`, wiping ifaces); proxy fns run
+  without `this` (`HostDef::takes_this == false`, honored by both
+  `native_meth` and `host_str`); proxy arities count the full
+  argv (no phantom `this`); factories are named closures
+  (`user/evalN/->Point--M`, oracle `rec-arity` shape);
+  `map->` accepts the captured descriptor value, not just a
+  symbol; `with-meta`/`meta` work on records (deftypes stay
+  non-`IObj`); `empty` on records is `UnsupportedOperationException`
+  (oracle `h-empty`); default `toString`/`hashCode` resolve with
+  no interface entry (oracle `j-tostring-dt`,
+  `l-rec-hashcode`); `gen-class`/`gen-interface` `:methods`
+  entries may be vectors (as the oracle writes them); `first`
+  and stepping seq records through content entries; `..` is a
+  pre-existing gap (no port macro, out of stage scope), as are
+  `.toString`/`.hashCode` on non-host values, bare dotted
+  references (constructors resolve; `str` of one does not), and
+  `hash-code` (private; probes use `.hashCode`). Invoke-as-fn
+  failures use the port's stable analyzer-cast text (the
+  oracle's `DynamicClassLoader` clause is unreachable with one
+  loader — documented in-test).
 - **Stage 2** (`protocol.rs` + `PROTOCOL_NATIVES`,
   `Value::ProtocolFn`, registry on evaluator state):
   `defprotocol` helper, `extend`/`extend-type`/`extend-protocol`

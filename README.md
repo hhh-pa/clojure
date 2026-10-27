@@ -70,6 +70,14 @@ macros (`#{`, `#"`, `#(`, `#'`, `#_`, `#?` reader conditionals with
 `:cljr` features — `.cljc` never loads JVM branches). Every form
 carries a span for diagnostics.
 
+**Types (no bytecode).** `deftype defrecord reify proxy
+definterface gen-interface gen-class` over a namespace registry
+(`Type.` construction, `.-field` / `.method` interop, `->Type` /
+`map->Type` factories); records are maps with the type name on
+them (map ops, `hash` formula, metadata); methods dispatch
+through per-type tables with `Object` fallbacks (`toString`,
+record `hashCode`).
+
 **Language core.** Special forms `def if do let letfn loop recur fn
 fn* quote var throw try/catch/finally set!` (`set!` on dynamic vars
 only); destructuring; `defn defmacro defonce comment assert`;
@@ -100,7 +108,7 @@ unbounded, `:fail` / `:continue` error modes, `await` / `await-for`,
 `restart-agent`, `shutdown-agents`), `locking`, `add-watch` /
 `remove-watch`, `realized?`.
 
-**Core vars: 380 implemented, 2 divergent, 40 out of scope**
+**Core vars: 387 implemented, 2 divergent, 33 out of scope**
 ([`rust/core-coverage.md`](rust/core-coverage.md) is normative and
 CI-enforced: listed vars must resolve, excluded ones must not).
 
@@ -166,10 +174,8 @@ out of scope, not silently missing:
 
 - JVM interop (`new`, dotted access, `import`, `instance?`,
   `class`, `..`, `clojure.java.*`, `clojure.reflect`).
-- The type system (`deftype defrecord reify proxy gen-class
-  gen-interface definterface`) and protocols (`extend`,
-  `extend-type`, `extend-protocol`, `satisfies?`, `extends?`;
-  hence `with-open`).
+- Protocols (`extend`, `extend-type`, `extend-protocol`,
+  `satisfies?`, `extends?`; hence `with-open`).
 - Multimethods (`defmulti defmethod prefer-method get-method
   methods remove-method`).
 - STM (`ref dosync alter commute ensure ref-set`) — never;
