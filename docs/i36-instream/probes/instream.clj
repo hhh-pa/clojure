@@ -61,6 +61,10 @@
 (throwof "r-opts-eofnil" '(with-in-str "" (read {:eof nil} *in*)))
 (throwcause "r-opts-noeof" '(with-in-str "" (read {} *in*)))
 (throwof "r-opts-unknown" '(with-in-str "1" (read {:bogus 1} *in*)))
+(throwof "r-opts-nonmap" '(with-in-str "1" (read :foo *in*)))
+(throwof "r-opts-nil" '(with-in-str "1" (read nil *in*)))
+(throwcause "r-eoferr-truthy" '(with-in-str "" (read *in* 0 :eof)))
+(throwof "r-eoferr-nil" '(with-in-str "" (read *in* nil :eof)))
 (throwof "r-readcond-allow" '(with-in-str "#?(:clj 1 :default 2)" (read {:read-cond :allow} *in*)))
 (throwof "r-readcond-preserve" '(with-in-str "#?(:clj 1 :default 2)" (read {:read-cond :preserve} *in*)))
 (throwof "r-features" '(with-in-str "#?(:foo 1 :default 2)" (read {:read-cond :allow :features #{:foo}} *in*)))
@@ -112,6 +116,7 @@
 (throwof "wis-restore" '(let [out *in*] (with-in-str "x" :y) (identical? out *in*)))
 (throwof "wis-nested" '(with-in-str "a" [(read-line) (with-in-str "b" (read-line)) (read-line)]))
 (throwof "wis-read" '(with-in-str "1 2" [(read) (read)]))
+(throwcause "wis-num" '(with-in-str 1 :x))
 ;; ---- G: drive-by oracle questions on implemented vars ----
 (throwcause "rs-empty" '(read-string ""))
 (throwcause "rs-trunc" '(read-string "(a"))

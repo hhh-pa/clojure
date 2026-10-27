@@ -3,7 +3,7 @@
 - Status: ready (research complete: `io.rs` Writer survey,
   `with-out-str` analyzer path, CharStream/Reader streaming design,
   JVM `core.clj` arity survey, repo-history `LispReader`/`LNPR`
-  mechanics, 78 alpha10 oracle pins).
+  mechanics, 83 alpha10 oracle pins).
 - Parent: out-of-scope reduction. Issue: #36. Branch: `36-instream`.
   Probes: `docs/i36-instream/probes/instream.{clj,out}`
   (to be written; exit 0 required).
@@ -185,8 +185,12 @@ Two stages, each test-first against committed oracle probes:
   `{:clojure.error/line, :clojure.error/column}` from the error span
   (`r-exdata*`, `r-baddelim-exdata`); opts-map `:eof` presence rule
   (present, even nil, → value at EOF; absent → throw); unknown opt
-  keys ignored (`r-opts-unknown`).
-- TDD plan: oracle probe files first (alpha10 jars, 78 pins; stdin
+  keys ignored (`r-opts-unknown`); nil opts mean defaults
+  (`r-opts-nil`), non-map non-nil opts are a CCE to
+  `clojure.lang.IPersistentMap` (`r-opts-nonmap`);
+  `eof-error?`/`recursive?` follow truthiness (`r-eoferr-truthy`,
+  `r-eoferr-nil`).
+- TDD plan: oracle probe files first (alpha10 jars, 83 pins; stdin
   behaviors probed through `StringReader`-backed equivalents plus one
   piped-stdin script run, never interactively), stage tests red
   (unresolvable vars), then stage 1 (readers + `read-line`), then

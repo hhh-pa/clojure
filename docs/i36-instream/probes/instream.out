@@ -30,6 +30,10 @@ r-opts-eof :x
 r-opts-eofnil nil
 r-opts-noeof THROW java.lang.RuntimeException|"EOF while reading"
 r-opts-unknown 1
+r-opts-nonmap THROW java.lang.ClassCastException|"class clojure.lang.Keyword cannot be cast to class clojure.lang.IPersistentMap (clojure.lang.Keyword and clojure.lang.IPersistentMap are in unnamed module of loader 'app')"
+r-opts-nil 1
+r-eoferr-truthy THROW java.lang.RuntimeException|"EOF while reading"
+r-eoferr-nil :eof
 r-readcond-allow 1
 r-readcond-preserve #?(:clj 1 :default 2)
 r-features 1
@@ -73,6 +77,7 @@ wis-val :body
 wis-restore true
 wis-nested ["a" "b" nil]
 wis-read [1 2]
+wis-num THROW java.lang.ClassCastException|"class java.lang.Long cannot be cast to class java.lang.String (java.lang.Long and java.lang.String are in module java.base of loader 'bootstrap')"
 rs-empty THROW java.lang.RuntimeException|"EOF while reading"
 rs-trunc THROW java.lang.RuntimeException|"EOF while reading"
 rs-cond THROW java.lang.RuntimeException|"Conditional read not allowed"
