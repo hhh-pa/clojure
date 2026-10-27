@@ -131,7 +131,7 @@ unbounded, `:fail` / `:continue` error modes, `await` / `await-for`,
 `restart-agent`, `shutdown-agents`), `locking`, `add-watch` /
 `remove-watch`, `realized?`.
 
-**Core vars: 400 implemented, 2 divergent, 21 out of scope**
+**Core vars: 405 implemented, 2 divergent, 16 out of scope**
 ([`rust/core-coverage.md`](rust/core-coverage.md) is normative and
 CI-enforced: listed vars must resolve, excluded ones must not).
 
@@ -197,8 +197,7 @@ out of scope, not silently missing:
 
 - JVM interop (`new`, dotted access, `import`, `instance?`,
   `class`, `..`, `clojure.java.*`, `clojure.reflect`).
-- STM (`ref dosync alter commute ensure ref-set`) — never;
-  `*in*` machinery (`read read-line line-seq with-in-str`).
+- STM (`ref dosync alter commute ensure ref-set`) — never.
 - Reader: `#=` eval reader, `#inst` / `#uuid` data readers,
   custom `data_readers.clj`.
 - LLVM JIT, `clojure.spec`, `core.async`, and binary

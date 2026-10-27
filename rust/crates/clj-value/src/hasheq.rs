@@ -255,9 +255,6 @@ fn hash_code_mid(v: &Value) -> i32 {
     }
 }
 
-/// `(.hashCode record)` (split from [`hash_code_mid`] for the
-/// complexity budget): exactly the content map's hash (oracle
-/// `l-rec-hashcode`); anything else mixes deterministically.
 /// `(hash multifn)` (split from [`hasheq_mid`] for the complexity
 /// budget): the name symbol's hash.
 fn hasheq_multifn(m: &crate::MultiFn) -> i32 {
@@ -270,6 +267,9 @@ fn hash_code_multifn(m: &crate::MultiFn) -> i32 {
     str_hashcode(&m.name)
 }
 
+/// `(.hashCode record)` (split from [`hash_code_mid`] for the
+/// complexity budget): exactly the content map's hash (oracle
+/// `l-rec-hashcode`); anything else mixes deterministically.
 fn hash_code_host(h: &crate::HostVal) -> i32 {
     match h {
         crate::HostVal::Inst(i) if i.def.kind == crate::HostKind::Record => {
