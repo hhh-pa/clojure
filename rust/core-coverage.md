@@ -494,12 +494,6 @@ Significant vars with no port slice, grouped below by area with the reason. (Two
 | `read-line` | implemented | 0-arity over *in* (nil at EOF); tests/io.rs instream_read_line_rows |
 | `line-seq` | implemented | core.clj eager-head Cons + lazy tail (accepts StreamReader by design); tests/io.rs instream_line_seq_rows |
 | `*in*` | implemented | dynamic root (stdin reader); tests/io.rs instream_in_shape_rows |
-| `*read-eval*` | implemented | true root; false/nil gates `#=`, `:unknown` refuses every read, loads force true; zero_oos_s7_readgates.rs (S7, #50) |
-| `*reader-resolver*` | implemented | nil root; 2-arity fn protocol (current-ns/resolve-alias/resolve-class/resolve-var consults for `::`/syntax-quote); non-fn entry cast; zero_oos_s7_readgates.rs (S7, #50) |
-| `*suppress-read*` | implemented | nil root; gates only `#tag` (unknown tags preserved; `#inst`/`#uuid` also preserved — the suppress check sits above the S6 consult); zero_oos_s7_readgates.rs (S7, #50) |
-| `load-reader` | implemented | 1-arity over any reader (last value, nil when empty); `*file*` nil, `*ns*` isolated, forces `*read-eval*` true, `Compiler.load`-style wraps; reads all forms before evaluating (pre-existing load loop); zero_oos_s7_readgates.rs (S7, #50) |
-| `read+string` | implemented | `[form string]` over StreamReader (0/1/3/4-arity plus the opts arity; LNPR wrap rule); zero_oos_s7_readgates.rs (S7, #50) |
-| `with-loading-context` | implemented | `core.clj` immediately-invoked-fn macro (no classloader to bind on the port); the native `*pending-paths*` cycle guard still applies; zero_oos_s7_readgates.rs (S7, #50) |
 | `import` | out-of-scope | interop (N1) |
 | `..` | out-of-scope | interop (N1) |
 | `defprotocol` | implemented | protocols.rs proto_*; S-typechain stage 2 (#33): map descriptors (:on/:sigs/:impls/:interface), variadic dispatch fns |
@@ -591,15 +585,24 @@ slices' rows into this table).
 | --- | --- | --- |
 | `*data-readers*` | implemented | S6 dynamic (root `{}`); zero_oos_s6_datareaders.rs data_reader_vars, table_reads_invoke_per_occurrence, table_precedence_and_errors |
 | `*default-data-reader-fn*` | implemented | S6 dynamic (root nil); zero_oos_s6_datareaders.rs data_reader_vars, default_fn_fallback |
+| `*math-context*` | implemented | ns.rs `RT.java`-style dynamic root (nil); `MathContextVal` extension; zero_oos_s2_tower.rs s2_math_context_rows |
+| `*read-eval*` | implemented | true root; false/nil gates `#=`, `:unknown` refuses every read, loads force true; zero_oos_s7_readgates.rs (S7, #50) |
+| `*reader-resolver*` | implemented | nil root; 2-arity fn protocol (current-ns/resolve-alias/resolve-class/resolve-var consults for `::`/syntax-quote); non-fn entry cast; zero_oos_s7_readgates.rs (S7, #50) |
+| `*suppress-read*` | implemented | nil root; gates only `#tag` (unknown tags preserved; `#inst`/`#uuid` also preserved — the suppress check sits above the S6 consult); zero_oos_s7_readgates.rs (S7, #50) |
 | `NaN?` | implemented | core.rs native_nanp (`Double` payload; other numbers false; nil NPE; else CCE `Number`); predicates.rs nan_rows |
 | `abs` | implemented | core.rs native_abs (exact all kinds; `BigDec` rounds under ctx); zero_oos_s2_tower.rs s2_abs_rows |
+| `agent-errors` | implemented | S5: core.clj `(when-let [e (agent-error a)] (list e))` + `:deprecated "1.2"`; zero_oos_s5_state.rs deprecated_trio_rows |
 | `any?` | implemented | core.rs pred1 constantly true; predicates.rs any_rows |
+| `await1` | implemented | S5: concurrency.rs await-iff-queued answering the agent; zero_oos_s5_state.rs await1_rows |
 | `biginteger` | implemented | core.rs native_biginteger (`Value::BigInteger`, bare print); zero_oos_s2_tower.rs s2_biginteger_rows |
 | `bounded-count` | implemented | core.clj port; tests/zero_oos_s3_seqs.rs bounded_count_rows (counted fast path, early exit over infinite; probes `bc-*`) |
+| `clear-agent-errors` | implemented | S5: core.clj `(restart-agent a @a)` + `:deprecated "1.2"`; zero_oos_s5_state.rs deprecated_trio_rows |
 | `decimal?` | implemented | core.rs pred1 over `Value::BigDec`; zero_oos_s2_tower.rs s2_predicate_rows |
 | `default-data-readers` | implemented | S6 map var (`inst`/`uuid` natives); zero_oos_s6_datareaders.rs default_data_readers_table, default_readers_direct_calls |
+| `definline` | implemented | core.clj macro (eval-built specimen; `:inline` recorded, never honored — the port is an interpreter); tests/zero_oos_s4b_macros.rs s4b_definline_rows |
 | `delay?` | implemented | core.rs pred1 over `Value::Delay`; predicates.rs delay_rows |
 | `denominator` | implemented | core.rs ratio_part (`BigInteger`; `Ratio` CCE); zero_oos_s2_tower.rs s2_numerator_denominator_rows |
+| `destructure` | implemented | destructure_expand.rs destructure_public (partition/drop-odd/all-symbols passthrough + shared bind_one; entries as vectors); tests/zero_oos_s4b_macros.rs s4b_destructure_rows |
 | `disj!` | implemented | S5: coll.rs native_disj_bang (1-arity identity; `ITransientSet` cast); zero_oos_s5_state.rs disj_bang_rows |
 | `error-handler` | implemented | S5: concurrency.rs cell read (fn or nil); zero_oos_s5_state.rs error_handler_rows |
 | `error-mode` | implemented | S5: concurrency.rs cell read (`:fail`/`:continue`); zero_oos_s5_state.rs error_handler_rows |
@@ -611,9 +614,12 @@ slices' rows into this table).
 | `get-validator` | implemented | S5: concurrency.rs IRef read (atoms + agents); zero_oos_s5_state.rs validator_rows |
 | `indexed?` | implemented | core.rs pred1 over vectors/entries/subvectors; predicates.rs indexed_rows |
 | `infinite?` | implemented | core.rs native_infinitep (`Double` payload; other numbers false; nil NPE; else CCE `Number`); predicates.rs infinite_rows |
+| `load-reader` | implemented | 1-arity over any reader (last value, nil when empty); `*file*` nil, `*ns*` isolated, forces `*read-eval*` true, `Compiler.load`-style wraps; reads all forms before evaluating (pre-existing load loop); zero_oos_s7_readgates.rs (S7, #50) |
 | `map-entry?` | implemented | core.rs pred1 over `Value::MapEntry` (never 2-vectors); predicates.rs map_entry_rows |
 | `merge-deep` | implemented | core.clj port over merge-with (1.13); tests/zero_oos_s3_seqs.rs merge_deep_rows (probes `md-*`) |
 | `merge-deep-with` | implemented | core.clj port over merge-with (1.13); tests/zero_oos_s3_seqs.rs merge_deep_with_rows (probes `mdw-*`) |
+| `munge` | implemented | core.rs native over ext.rs compiler_munge (true Compiler table; symbol-preserving); tests/zero_oos_s4b_macros.rs s4b_munge_rows |
+| `namespace-munge` | implemented | core.rs native (`str` + `-`→`_`); tests/zero_oos_s4b_macros.rs s4b_namespace_munge_rows |
 | `nat-int?` | implemented | core.rs pred1 over `Int` >= 0; predicates.rs nat_int_rows |
 | `neg-int?` | implemented | core.rs pred1 over `Int` < 0; predicates.rs neg_int_rows |
 | `numerator` | implemented | core.rs ratio_part (`BigInteger`; `Ratio` CCE); zero_oos_s2_tower.rs s2_numerator_denominator_rows |
@@ -629,12 +635,17 @@ slices' rows into this table).
 | `rand-nth` | implemented | zero_oos_s4a_corelib.rs rand_nth_rows (S4a #46; probes corelib.out rn-*) |
 | `ratio?` | implemented | core.rs pred1 over `Value::Ratio`; zero_oos_s2_tower.rs s2_predicate_rows |
 | `rational?` | implemented | core.rs pred1 over `Int`/`BigInt`/`BigInteger`/`Ratio`/`BigDec`; zero_oos_s2_tower.rs s2_predicate_rows |
+| `read+string` | implemented | `[form string]` over StreamReader (0/1/3/4-arity plus the opts arity; LNPR wrap rule); zero_oos_s7_readgates.rs (S7, #50) |
 | `reader-conditional` | implemented | S6 2-arity ctor; zero_oos_s6_datareaders.rs reader_conditional_ctors |
 | `reader-conditional?` | implemented | S6 `pred1!`; zero_oos_s6_datareaders.rs reader_conditional_predicate |
 | `reduce-kv` | implemented | core.clj port: nil arm, vector index loop with reduced unwrap, entry slow path; tests/zero_oos_s3_seqs.rs reduce_kv_rows (probes `rk-*`) |
+| `release-pending-sends` | implemented | S5: concurrency.rs outbox drain answering the count (0 outside actions); zero_oos_s5_state.rs release_pending_sends_rows |
+| `replicate` | implemented | S5: core.clj `(take n (repeat x))` + `:deprecated "1.3"`; zero_oos_s5_state.rs deprecated_trio_rows |
 | `requiring-resolve` | implemented | S5: ns.rs resolve-else-require; zero_oos_s5_state.rs requiring_resolve_rows |
 | `reset-vals!` | implemented | S5: concurrency.rs `reset!` answering `[old new]`; zero_oos_s5_state.rs vals_rows |
 | `run!` | implemented | core.clj port over reduce; tests/zero_oos_s3_seqs.rs run_bang_rows (nil answer; reduced short-circuit; probes `run-*`) |
+| `selector` | implemented | core.clj macro over private selector-impl (rides the destructuring outlets); tests/zero_oos_s4b_macros.rs s4b_selector_rows |
+| `seq-to-map-for-destructuring` | implemented | destructure_expand.rs (assoc pairs; 1-elem first as-is; odd 3+ complex-path tail conj); tests/zero_oos_s4b_macros.rs s4b_seq_to_map_rows |
 | `set-validator!` | implemented | S5: concurrency.rs IRef write (validates current; nil clears); zero_oos_s5_state.rs validator_rows |
 | `some->` | implemented | zero_oos_s4a_corelib.rs some_thread_first_rows (S4a #46; probes corelib.out st-*) |
 | `some->>` | implemented | zero_oos_s4a_corelib.rs some_thread_last_rows (S4a #46; probes corelib.out stt-*) |
@@ -645,49 +656,12 @@ slices' rows into this table).
 | `tagged-literal?` | implemented | S6 `pred1!`; zero_oos_s6_datareaders.rs tagged_literal_predicate |
 | `test` | implemented | zero_oos_s4a_corelib.rs test_var_rows (S4a #46; probes corelib.out tst-*) |
 | `tree-seq` | implemented | core.clj port; tests/zero_oos_s3_seqs.rs tree_seq_rows (lazy; children gated on branch?; probes `ts-*`) |
+| `unquote` | implemented | core.clj bare unbound def (syntax-quote support surface; expansion still reader/analyzer-owned); tests/zero_oos_s4b_macros.rs s4b_unquote_rows |
+| `unquote-splicing` | implemented | core.clj bare unbound def (syntax-quote support surface; expansion still reader/analyzer-owned); tests/zero_oos_s4b_macros.rs s4b_unquote_rows |
 | `update-keys` | implemented | core.clj port over reduce-kv (1.11); tests/zero_oos_s3_seqs.rs update_keys_rows (vectors become maps; probes `uk-*`) |
 | `update-vals` | implemented | core.clj port over reduce-kv (1.11); clj editability test (sorted/record/entry take the {} route); tests/zero_oos_s3_seqs.rs update_vals_rows (probes `uv-*`) |
 | `when-first` | implemented | zero_oos_s4a_corelib.rs when_first_rows (S4a #46; probes corelib.out wf-*) |
 | `while` | implemented | zero_oos_s4a_corelib.rs while_rows (S4a #46; probes corelib.out wh-*) |
-
-### Previously unlisted — no slice yet (S5 rows)
-
-S5's rows at their PR #41 mirrored positions, flipped straight
-to `implemented` (the #41 land unions the remaining slices'
-rows into this table).
-
-| var | status | notes |
-| --- | --- | --- |
-| `agent-errors` | implemented | S5: core.clj `(when-let [e (agent-error a)] (list e))` + `:deprecated "1.2"`; zero_oos_s5_state.rs deprecated_trio_rows |
-| `await1` | implemented | S5: concurrency.rs await-iff-queued answering the agent; zero_oos_s5_state.rs await1_rows |
-| `clear-agent-errors` | implemented | S5: core.clj `(restart-agent a @a)` + `:deprecated "1.2"`; zero_oos_s5_state.rs deprecated_trio_rows |
-| `release-pending-sends` | implemented | S5: concurrency.rs outbox drain answering the count (0 outside actions); zero_oos_s5_state.rs release_pending_sends_rows |
-| `replicate` | implemented | S5: core.clj `(take n (repeat x))` + `:deprecated "1.3"`; zero_oos_s5_state.rs deprecated_trio_rows |
-
-### Previously unlisted — landed by zero-oos S4b (#47)
-
-Zero-oos wave-1 rows in PR #41 order (mirroring `Previously unlisted — no slice yet`); the #41 land unions them there.
-
-| var | status | notes |
-| --- | --- | --- |
-| `definline` | implemented | core.clj macro (eval-built specimen; `:inline` recorded, never honored — the port is an interpreter); tests/zero_oos_s4b_macros.rs s4b_definline_rows |
-| `destructure` | implemented | destructure_expand.rs destructure_public (partition/drop-odd/all-symbols passthrough + shared bind_one; entries as vectors); tests/zero_oos_s4b_macros.rs s4b_destructure_rows |
-| `munge` | implemented | core.rs native over ext.rs compiler_munge (true Compiler table; symbol-preserving); tests/zero_oos_s4b_macros.rs s4b_munge_rows |
-| `namespace-munge` | implemented | core.rs native (`str` + `-`→`_`); tests/zero_oos_s4b_macros.rs s4b_namespace_munge_rows |
-| `selector` | implemented | core.clj macro over private selector-impl (rides the destructuring outlets); tests/zero_oos_s4b_macros.rs s4b_selector_rows |
-| `seq-to-map-for-destructuring` | implemented | destructure_expand.rs (assoc pairs; 1-elem first as-is; odd 3+ complex-path tail conj); tests/zero_oos_s4b_macros.rs s4b_seq_to_map_rows |
-| `unquote` | implemented | core.clj bare unbound def (syntax-quote support surface; expansion still reader/analyzer-owned); tests/zero_oos_s4b_macros.rs s4b_unquote_rows |
-| `unquote-splicing` | implemented | core.clj bare unbound def (syntax-quote support surface; expansion still reader/analyzer-owned); tests/zero_oos_s4b_macros.rs s4b_unquote_rows |
+| `with-loading-context` | implemented | `core.clj` immediately-invoked-fn macro (no classloader to bind on the port); the native `*pending-paths*` cycle guard still applies; zero_oos_s7_readgates.rs (S7, #50) |
 | `with-local-vars` | implemented | core.clj macro over `__local-var*` anonymous dynamic vars (interop-free expansion; bindings pop on return and throw); tests/zero_oos_s4b_macros.rs s4b_with_local_vars_rows |
-
-### Previously unlisted — no slice yet (S2 rows)
-
-S2's precision-context rows at their PR #41 mirrored positions,
-flipped straight to `implemented` (the #41 land unions the
-remaining slices' rows into this table).
-
-| var | status | notes |
-| --- | --- | --- |
-| `*math-context*` | implemented | ns.rs `RT.java`-style dynamic root (nil); `MathContextVal` extension; zero_oos_s2_tower.rs s2_math_context_rows |
 | `with-precision` | implemented | core.clj defmacro over `binding` + `math-context` ctor; `+ - * / quot inc dec` consult; zero_oos_s2_tower.rs s2_precision_* |
-
