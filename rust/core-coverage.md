@@ -4,7 +4,7 @@ The complete inventory of `clojure.core` in this port: every var,
 its conformance state, and — for exclusions — why it is excluded.
 If a var is not listed here, that is a file bug, not a silent gap.
 
-- **423 vars: 394 implemented, 2 divergent, 27 out of scope,
+- **423 vars: 400 implemented, 2 divergent, 21 out of scope,
   0 planned.** The port reports Clojure `1.13.0-alpha9`
   (`clojure-version`).
 - **Status meanings.** `implemented` — resolves in the booted core
@@ -476,12 +476,12 @@ Significant vars with no port slice, grouped below by area with the reason. (Two
 | `class` | out-of-scope | interop (N1) |
 | `bases` | out-of-scope | interop (N1) |
 | `supers` | out-of-scope | interop (N1) |
-| `defmulti` | out-of-scope | multimethods: no slice |
-| `defmethod` | out-of-scope | multimethods: no slice |
-| `prefer-method` | out-of-scope | multimethods: no slice |
-| `get-method` | out-of-scope | multimethods: no slice |
-| `methods` | out-of-scope | multimethods: no slice |
-| `remove-method` | out-of-scope | multimethods: no slice |
+| `defmulti` | implemented | multimethods.rs multi_dispatch_* + multi_var_shape + multi_custom_default + multi_options_rejected + multi_no_method + multi_bad_dispatch + multi_class_dispatch_analog + multi_value_semantics + multi_native_arity_guards + multi_multifn_native_guards; S-typechain stage 3 (#33): dispatch fn + docstring/attr head, :default option only, exact-plus-default invoke |
+| `defmethod` | implemented | multimethods.rs multi_arity_methods + multi_defmethod_returns_multifn + multi_defmethod_guards + multi_defmethod_missing; S-typechain stage 3 (#33): single/multi-arity tails, answers the multifn |
+| `prefer-method` | implemented | multimethods.rs multi_prefer_method; S-typechain stage 3 (#33): edges stored, never consulted (hierarchy fenced) |
+| `get-method` | implemented | multimethods.rs multi_get_method + multi_value_guards; S-typechain stage 3 (#33): exact entry else default entry else nil |
+| `methods` | implemented | multimethods.rs multi_methods_view + multi_value_guards; S-typechain stage 3 (#33): whole table incl the :default entry |
+| `remove-method` | implemented | multimethods.rs multi_remove_method + multi_value_guards; S-typechain stage 3 (#33): missing entry no-op, answers the multifn |
 | `with-in-str` | out-of-scope | needs `*in*` machinery: no slice |
 | `read` | out-of-scope | needs `*in*` machinery: no slice |
 | `read-line` | out-of-scope | needs `*in*` machinery: no slice |

@@ -29,6 +29,7 @@ pub mod fx4_host;
 pub mod io;
 pub mod lazy;
 pub mod macros;
+pub mod multi;
 pub mod ns;
 pub mod protocol;
 pub mod re;

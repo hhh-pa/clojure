@@ -360,6 +360,7 @@ pub(crate) fn is_ifn(v: &Value) -> bool {
         | Value::Set(_)
         | Value::Var(_)
         | Value::Promise(_)
+        | Value::MultiFn(_)
         | Value::Unbound(_) => true,
         _ => false,
     }
@@ -1652,6 +1653,9 @@ fn str_of_realized(eval: &mut Evaluator, v: &Value) -> Result<String, NativeErro
         // defined, else the `Name@hex` fallback (oracle `reify-str`,
         // `j-str-rec`); descriptors render their name.
         Value::HostType(h) => crate::types::host_str(eval, h, r.clone())?,
+        // Multimethods render the `toString` fallback (no methods
+        // run for them, oracle `d-prefer`).
+        Value::MultiFn(m) => clj_value::multifn_str(&m.name),
         // Atoms, delays, futures, promises, and agents render their
         // `toString` (`Class@hex`), never the `#object[…]` print form.
         Value::Atom(_)

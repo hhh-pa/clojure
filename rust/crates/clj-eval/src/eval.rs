@@ -1384,6 +1384,7 @@ impl Evaluator {
                 format!("Attempting to call unbound fn: #'{}", u.sym),
             ))),
             Value::Promise(p) => self.invoke_promise(p, args),
+            Value::MultiFn(m) => crate::multi::invoke_multifn(self, m, args),
             _ => Err(self.throw(NativeError::cast(&jvm_class_of(callee), "clojure.lang.IFn"))),
         }
     }

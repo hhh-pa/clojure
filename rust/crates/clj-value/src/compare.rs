@@ -222,8 +222,19 @@ fn type_name(v: &Value) -> &'static str {
         Value::Symbol(_) => "Symbol",
         Value::Keyword(_) => "Keyword",
         Value::Extension(e) => extension_type_name(e),
-        Value::HostType(h) => host_type_name(h),
-        _ => ref_or_collection_type_name(v),
+        _ => port_type_name(v).unwrap_or_else(|| ref_or_collection_type_name(v)),
+    }
+}
+
+/// Port-defined type names (split from `type_name` for the
+/// complexity budget): host classes leak their per-value name;
+/// multifns report the JVM class (static — no per-value name
+/// leaks here); anything else is `None` for the caller.
+fn port_type_name(v: &Value) -> Option<&'static str> {
+    match v {
+        Value::HostType(h) => Some(host_type_name(h)),
+        Value::MultiFn(_) => Some("clojure.lang.MultiFn"),
+        _ => None,
     }
 }
 
@@ -444,6 +455,25 @@ mod tests {
     #[should_panic(expected = "atoms handled above")]
     fn collection_wildcard_panics() {
         let _ = collection_type_name(&Value::Int(1));
+    }
+
+    #[test]
+    fn multifn_names_its_class() {
+        // Multimethods report the JVM class in compare errors
+        // (unreachable from Clojure — `sort` uses its own
+        // comparator — so pinned directly).
+        let mf = Value::MultiFn(Arc::new(crate::MultiFn {
+            name: Arc::from("m"),
+            dispatch: Value::Nil,
+            default: Value::Nil,
+            methods: crate::new_map(),
+            prefers: crate::new_map(),
+        }));
+        assert_eq!(type_name(&mf), "clojure.lang.MultiFn");
+        assert_eq!(
+            message_of(&mf, &Value::Int(1)),
+            "Cannot compare clojure.lang.MultiFn to Long"
+        );
     }
 
     #[test]

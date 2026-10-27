@@ -1,10 +1,10 @@
 # Issue #33: S-typechain slice — Specification
 
-- Status: stage-1 probes committed (`types.clj/out`, 53 pins,
-  stable); implementation next. Stages 2–3 probes not yet written.
+- Status: stages 1–3 implemented (probes committed, 138/33/23
+  pins, all exit 0 and rerun-stable; 84/54/20 tests).
 - Parent: out-of-scope reduction. Issue: #33. Branch: `33-typechain`.
   Probes: `docs/i33-typechain/probes/{types,protocols,multimethods}.{clj,out}`
-  (to be written; exit 0 required).
+  (exit 0 required, verified by rerun).
 
 ## Problem
 
@@ -48,10 +48,12 @@ type system; multimethods dispatch over both):
    `get-method`, `methods`, `remove-method` — 6 rows):
    `Value::MultiFn` (dispatch fn, default, method table,
    preference table) with exact-value plus `:default` dispatch,
-   ambiguity detection, and the table-query natives. Hierarchy
+   preference recording, and the table-query natives. Hierarchy
    derivation (`derive`, `isa?`) is fenced as a follow-up
-   (non-goal): no hierarchy rows exist yet, and dispatch without
-   derivation is the faithful subset.
+   (non-goal): no hierarchy rows exist yet, dispatch without
+   derivation is the faithful subset, and ambiguity detection
+   rides with that follow-up (ambiguity is unreachable without
+   ancestors — preferences record only).
 
 ## Part 1 — User/functional specification
 
@@ -68,9 +70,9 @@ type system; multimethods dispatch over both):
 - `(with-open [w (proxy-closeable)] …)` closes on normal exit and
   on unwind (exception still propagates).
 - `(defmulti area :shape)` + `(defmethod area :square [m] …)`
-  dispatches; ambiguous parents fail loudly until `prefer-method`;
-  `(get-method m v)`, `(methods m)`, `(remove-method m v)` manage
-  the table verbatim.
+  dispatches; `(get-method m v)`, `(methods m)`, `(remove-method m
+  v)` manage the table verbatim; `prefer-method` records edges
+  (ambiguity resolution needs hierarchies — follow-up).
 
 ### 1.2 Non-goals (explicit)
 
@@ -106,9 +108,9 @@ type system; multimethods dispatch over both):
 - Given `with-open` over a closeable, when the body throws, then
   close still runs and the original throw propagates.
 - Given a multifn with two methods and a `prefer-method`, when
-  dispatched on an ambiguous value, then the preferred method
-  wins; without it, then an ambiguity `IllegalArgumentException`
-  names the competing dispatches (oracle text).
+  dispatched, then exact-or-default wins and the preference is
+  recorded (ambiguity resolution needs hierarchies — the
+  ambiguity-error scenario rides with that follow-up).
 
 ## Part 2 — Technical specification
 
@@ -221,8 +223,37 @@ type system; multimethods dispatch over both):
   `Value::MultiFn`): `defmulti` (dispatch fn, default, hierarchy
   slot reserved), `defmethod` (arities incl. multi-arity),
   `prefer-method` (dominance), `get-method`/`methods`/
-  `remove-method` (table views). Ambiguity errors name both
-  sides (oracle text).
+  `remove-method` (table views). Ambiguity errors arrive with
+  the hierarchy follow-up (unreachable without ancestors).
+- **Stage-3 implementation deltas** (found while building; all
+  pinned in `rust/crates/clj-eval/tests/multimethods.rs`, 20 tests):
+  table updates install a new var root under the var-alter lock
+  (read-modify-install, no lost update), so captured values keep
+  old tables — a documented divergence from the JVM's mutated
+  object; mutating natives take a var or a call-time-resolved
+  symbol, anything else failing the `MultiFn` cast (oracle
+  `e-prefer-nonmulti`), and multifn-valued non-symbol expressions
+  are rejected there too (a bare value has no var to install to
+  — documented divergence); dispatch is exact entry else default
+  entry (`method_for`), prefers stored but never consulted, so
+  ambiguity errors are unreachable; misses name the unqualified
+  multifn and the dispatch value's print form (oracle
+  `e-nomethod`); `get-method` falls back to the default entry
+  before nil (`b-get-miss`); `methods` includes the `:default`
+  entry (`b-default-entry`); `remove-method` on a missing entry
+  is a no-op (`c-remove-miss`); all three mutating forms answer
+  the updated multifn; multifns compare by identity, print the
+  `#object[clojure.lang.MultiFn …]` shape with name-derived
+  stable hex, and are never maps; `defmulti` reuses
+  `finish-type-def` (docstring/attr onto the var — the attr map
+  now evaluates, like the JVM, fixing the shared helper for the
+  stage-1 definers too), accepts only `:default` (`:hierarchy`
+  rejected), and answers the var; `defmethod` validates tails
+  (`defmethod requires a function tail`, `Invalid defmethod
+  arity`) and resolves symbol targets through `(var …)`, so
+  missing multifns fail in the analyzer; `class` stays out of
+  scope (the `f-*` pins are oracle-only — the class-name vars
+  ride as dispatch keys instead).
 
 ### TDD plan
 

@@ -1895,6 +1895,7 @@ fn boot_install_natives(eval: &mut Evaluator) {
         .chain(crate::fx4_host::FX4_NATIVES.iter())
         .chain(crate::types::TYPES_NATIVES.iter())
         .chain(crate::protocol::PROTOCOL_NATIVES.iter())
+        .chain(crate::multi::MULTI_NATIVES.iter())
     {
         let func: Arc<crate::ext::NativeImpl> = Arc::new(*f);
         eval.install_native("clojure.core", name, func);

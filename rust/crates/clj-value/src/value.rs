@@ -38,8 +38,8 @@ use std::sync::Arc;
 use num_traits::ToPrimitive;
 
 use crate::{
-    Agent, Atom, Delay, ExtensionValue, Future, HostInst, HostVal, Keyword, Promise, Symbol,
-    Throwable, Transient, Unbound, Var, host_eq,
+    Agent, Atom, Delay, ExtensionValue, Future, HostInst, HostVal, Keyword, MultiFn, Promise,
+    Symbol, Throwable, Transient, Unbound, Var, host_eq,
 };
 
 /// Deterministic Fx hasher for maps/sets (rpds's default RandomState
@@ -768,6 +768,9 @@ pub enum Value {
     /// `deftype` / `defrecord` / `reify` / `proxy` / `gen-class`
     /// values and `definterface` / `gen-interface` descriptors.
     HostType(Arc<HostVal>),
+    /// A multimethod (S-typechain stage 3): the `defmulti` value,
+    /// invoked like a function.
+    MultiFn(Arc<MultiFn>),
 }
 
 /// Read metadata off a sequence extension value (borrowed).
@@ -913,6 +916,19 @@ fn host_pair_eq(a: &Arc<HostVal>, b: &Arc<HostVal>) -> bool {
     Arc::ptr_eq(a, b) || host_eq(a, b)
 }
 
+/// Port-defined pair equality (split from `value_eq_mid` and
+/// `plain_equals` for the complexity budget): host pairs follow
+/// `host_pair_eq`, multifn pairs compare by identity (like the
+/// JVM, which never overrides `equals` on them); anything else is
+/// `None` for the caller's fallthrough.
+fn port_pair_eq(a: &Value, b: &Value) -> Option<bool> {
+    match (a, b) {
+        (Value::HostType(x), Value::HostType(y)) => Some(host_pair_eq(x, y)),
+        (Value::MultiFn(x), Value::MultiFn(y)) => Some(Arc::ptr_eq(x, y)),
+        _ => None,
+    }
+}
+
 /// Shared-cell identity plus equal metadata (a `with-meta` copy
 /// shares the cell but compares unequal — split out so
 /// [`Value::eq`] stays within the complexity budget).
@@ -1002,11 +1018,9 @@ fn value_eq_mid(a: &Value, b: &Value) -> bool {
         (Value::Atom(a), Value::Atom(b)) => cell_meta_eq(a.same_cell(b), a.meta(), b.meta()),
         (Value::Delay(a), Value::Delay(b)) => a.same_cell(b),
         (Value::Future(a), Value::Future(b)) => cell_meta_eq(a.same_cell(b), a.meta(), b.meta()),
-        // Port-defined types: identical `Arc`s are `=` (so `(= p
-        // p)` holds); otherwise descriptors are never `=`, and
-        // records need the same type plus content (`host_eq`).
-        (Value::HostType(a), Value::HostType(b)) => host_pair_eq(a, b),
-        pair => value_eq_rest(pair.0, pair.1),
+        // Port-defined pairs compare structurally (host content,
+        // multifn identity); anything else falls through.
+        pair => port_pair_eq(pair.0, pair.1).unwrap_or_else(|| value_eq_rest(pair.0, pair.1)),
     }
 }
 
@@ -1260,6 +1274,12 @@ fn hash_value_rest<H: Hasher>(v: &Value, state: &mut H) {
                 i.content.hash(state);
             }
         }
+        // Multimethods hash their name (identity equality, so
+        // identical `Arc`s hash equally by construction).
+        Value::MultiFn(m) => {
+            state.write_u8(26);
+            m.name.hash(state);
+        }
         // All other variants are handled upstream (the single
         // caller partitions the variants).
         _ => unreachable!("hash partition"),
@@ -1403,6 +1423,8 @@ fn jvm_equiv(a: &Value, b: &Value) -> bool {
         (a, b) if is_tower(a) || is_tower(b) => tower_equiv(a, b),
         // Port-defined types `equiv` exactly like `=`.
         (Value::HostType(a), Value::HostType(b)) => host_pair_eq(a, b),
+        // Multimethods `equiv` by identity (like `=`).
+        (Value::MultiFn(a), Value::MultiFn(b)) => Arc::ptr_eq(a, b),
         _ => {
             if is_collection(a) {
                 coll_equiv(a, b)
@@ -1562,8 +1584,9 @@ fn plain_equals(a: &Value, b: &Value) -> bool {
         (Value::Var(a), Value::Var(b)) => a.id == b.id,
         (Value::Unbound(a), Value::Unbound(b)) => a.var_id == b.var_id,
         (Value::Throwable(a), Value::Throwable(b)) => a.id == b.id,
-        (Value::HostType(a), Value::HostType(b)) => host_pair_eq(a, b),
-        other => plain_equals_rest(other.0, other.1),
+        other => {
+            port_pair_eq(other.0, other.1).unwrap_or_else(|| plain_equals_rest(other.0, other.1))
+        }
     }
 }
 
@@ -2341,6 +2364,36 @@ mod tests {
         assert_eq!(find_set_dup(&[host_inst(&typ), host_inst(&rec)]), None);
         let items = [host_inst(&rec), host_inst(&rec)];
         assert_eq!(find_set_dup(&items), Some(&items[1]));
+    }
+
+    fn test_multifn() -> Value {
+        Value::MultiFn(Arc::new(crate::MultiFn {
+            name: Arc::from("m"),
+            dispatch: Value::Nil,
+            default: Value::Keyword(Keyword::new(None, "default")),
+            methods: new_map(),
+            prefers: new_map(),
+        }))
+    }
+
+    #[test]
+    fn set_dup_check_compares_multifns() {
+        // Duplicate checks compare multifns by identity (only
+        // reachable with hand-built values — literals never carry
+        // them — so pinned directly).
+        let mf = test_multifn();
+        assert_eq!(find_set_dup(&[mf.clone(), test_multifn()]), None);
+        let items = [mf.clone(), mf.clone()];
+        assert_eq!(find_set_dup(&items), Some(&items[1]));
+    }
+
+    #[test]
+    fn plain_equals_on_multifn_pairs() {
+        // `.equals` follows identity too (reachable only through
+        // tagged-literal forms, so pinned directly).
+        let mf = test_multifn();
+        assert!(plain_equals(&mf, &mf));
+        assert!(!plain_equals(&mf, &test_multifn()));
     }
 
     #[test]

@@ -974,10 +974,12 @@
             (group-by first triples))))
 
 (defn- finish-type-def [name doc attr init]
+  ;; The attr map evaluates at runtime (like the JVM — computed
+  ;; entries resolve there, not as quoted forms).
   (let [defform (if doc (list 'def name doc init) (list 'def name init))]
     (if (seq attr)
       (list 'do defform
-        (list 'alter-meta! (list 'var name) 'merge (list 'quote attr))
+        (list 'alter-meta! (list 'var name) 'merge attr)
         name)
       (list 'do defform name))))
 
@@ -1275,3 +1277,74 @@
           (recur (rest pairs)
             (list 'let [n init]
               (list 'try form (list 'finally (list (symbol ".close") n))))))))))
+
+;; --- Multimethods (S-typechain stage 3): `defmulti` / `defmethod`
+;; / `prefer-method` / `remove-method` expand to the hidden
+;; `__multifn*` et al natives (`get-method` / `methods` are plain
+;; natives on values). Dispatch values are evaluated (keywords,
+;; vectors, and the class-name vars all ride through); method fns
+;; are ordinary fns over the call args. Table updates install a new
+;; var root, so the mutating forms take a var (a symbol is read as
+;; one; anything else falls through to the native's cast error,
+;; like `extend`).
+
+(defn- parse-multi-head [name args]
+  (check-type-name "defmulti" name)
+  (let [[doc args] (if (string? (first args)) [(first args) (rest args)] [nil args])
+        [attr args] (if (map? (first args)) [(first args) (rest args)] [nil args])]
+    (when (empty? args)
+      (throw-illegal-arg! "defmulti requires a dispatch fn"))
+    {:doc doc :attr attr :dispatch (first args) :options (rest args)}))
+
+(defn- parse-multi-options [options]
+  ;; Only `:default` is supported (`:hierarchy` is a follow-up
+  ;; slice — `derive` / `isa?` do not exist yet); option values
+  ;; are emitted for runtime evaluation.
+  (when (odd? (count options))
+    (throw-illegal-arg! "defmulti options must be key/value pairs"))
+  (loop [opts options, default :default]
+    (if (empty? opts)
+      default
+      (let [[k v] opts]
+        (when-not (= :default k)
+          (throw-illegal-arg! (str "Unsupported defmulti option: " k)))
+        (recur (drop 2 opts) v)))))
+
+(defmacro defmulti [name & args]
+  ;; Answers the var (like the JVM's `def`-family shape), not the
+  ;; value — the shared tail evaluates `name`, so re-read the var.
+  (let [{:keys [doc attr dispatch options]} (parse-multi-head name args)
+        default (parse-multi-options options)]
+    (list 'do
+      (finish-type-def name doc attr
+        (list 'clojure.core/__multifn* (str name) dispatch default))
+      (list 'var name))))
+
+(defn- normalize-defmethod-tail [fn-tail]
+  ;; A single `([argv] body...)` or several — every arity opens
+  ;; with a vector (methods are plain fns over the call args).
+  (when (empty? fn-tail)
+    (throw-illegal-arg! "defmethod requires a function tail"))
+  (if (vector? (first fn-tail))
+    fn-tail
+    (do (doseq [b fn-tail]
+          (when-not (and (seq? b) (vector? (first b)))
+            (throw-illegal-arg! (str "Invalid defmethod arity: " (pr-str b)))))
+        fn-tail)))
+
+(defmacro defmethod [m dispatch-val & fn-tail]
+  (normalize-defmethod-tail fn-tail)
+  (list 'clojure.core/__defmethod*
+    (if (symbol? m) (list 'var m) (list 'quote m))
+    dispatch-val
+    (apply list 'fn fn-tail)))
+
+(defmacro remove-method [m dispatch-val]
+  (list 'clojure.core/__remove_method*
+    (if (symbol? m) (list 'var m) (list 'quote m))
+    dispatch-val))
+
+(defmacro prefer-method [m preferred other]
+  (list 'clojure.core/__prefer_method*
+    (if (symbol? m) (list 'var m) (list 'quote m))
+    preferred other))

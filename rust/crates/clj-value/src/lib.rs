@@ -21,6 +21,7 @@ mod future;
 pub mod hasheq;
 mod host;
 mod keyword;
+mod multifn;
 mod print;
 mod promise;
 mod seq;
@@ -41,6 +42,7 @@ pub use host::{
     host_eq, identity_hex, inst_hasheq, is_field, munge_ns, record_hasheq,
 };
 pub use keyword::Keyword;
+pub use multifn::{MultiFn, method_for, multifn_hex, multifn_str};
 pub use print::{
     java_debug, java_double_string, pr_to_string, print, print_opts::PrintOpts, print_to_string,
 };
