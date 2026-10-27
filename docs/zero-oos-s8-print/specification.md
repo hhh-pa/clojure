@@ -255,6 +255,20 @@ via `IPersistentList`).
   driver throws before ever asking — no production pure path
   passes `dup: true`, since `str`/`format`/interpolation keep
   `PrintOpts::pr()`/`print()`).
+- REPL echo carve-out (the one exception to that claim):
+  `Session::print_value`
+  (`rust/crates/clj-repl/src/session.rs`) builds its opts via
+  `print_opts(eval, None)` — so `dup: true` under a true
+  `*print-dup*` root — then renders engine-direct with
+  `pr_to_string` (no `pr_on` driver, so the `No method` throw
+  is unreachable). Effect: echo honors `*print-dup*` for
+  dupable kinds (ctor shapes, convergent with `pr-str`) but
+  renders the plain fallback for undupable kinds (`(atom 1)`
+  echoes `#object[clojure.lang.Atom ...]`, where `pr-str`
+  throws). The echo deliberately does NOT force `dup: false`:
+  the JVM REPL honors `*print-dup*` too. Pinned by
+  `repl_echo_print_dup_root_with_plain_fallback`
+  (`clj-repl/tests/session.rs`).
 
 ### 1e. Char maps
 
@@ -552,8 +566,10 @@ over port kinds, verified cell by cell against `m-table-*`.
 - User methods that `pr` the same value recurse until the
   stack gives out (JVM: `StackOverflowError`) — no guard on
   either side; acceptable parity.
-- `realize_deep`-before-print keeps the port's pre-existing
-  infinite-lazy hang (`(pr (range))`); in-flight streaming
+- `realize_deep`-before-print preserves unbounded strict seqs,
+  which print the fixed `(...)` shape (`(pr-str (range))`,
+  pinned in `dup_policy_rows`); infinite *pending* (lazy) seqs
+  still hang in collection. In-flight streaming
   (`D-streamprint`) stays a follow-up.
 - A user redefinition of the `print-method`/`print-dup` var
   roots to non-multifns breaks `pr` on both sides; the port's

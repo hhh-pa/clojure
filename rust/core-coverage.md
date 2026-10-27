@@ -431,7 +431,7 @@ Printing, reading, files, and print dynamic vars.
 | `read-string` | implemented | tests/io.rs io_smoke_rows (S2, 1 form); denies reader conditionals (S-instream, instream_read_string_deny_row); 2-arity opts (F-read-opts, read_string_opts_rows; probes rs-opts-*) |
 | `*print-length*` | implemented | dyn var, root+meta; control.rs boot_dynamics |
 | `*print-level*` | implemented | dyn var, root+meta; control.rs boot_dynamics |
-| `*print-dup*` | implemented | honored per kind (dup shapes / `No method` throw); see #51 |
+| `*print-dup*` | implemented | dup routing on pr paths; undupable kinds throw (S8: printsys.rs dup_rows; probes d-*/p-*; corpus 20 converges) |
 | `*print-meta*` | implemented | ^meta prefix honored (str.rs print_opts_rows) |
 | `*print-readably*` | implemented | honored via pr/print natives (str.rs print_opts_rows) |
 | `*print-namespace-maps*` | implemented | root true; gates #:ns lift (str.rs print_opts_rows) |
@@ -666,7 +666,7 @@ No slice on this branch: hard-never reasons stand alone, design-blocked rows nam
 | `*compiler-options*` | out-of-scope | Bytecode compiler/classpath surface; port AOT (clj-aot) is separate |
 | `*data-readers*` | out-of-scope | pending design: data-reader tag table; see #40 |
 | `*default-data-reader-fn*` | out-of-scope | pending design: data-reader tag table; see #40 |
-| `*flush-on-newline*` | implemented | newline flush gate for `prn`/`println`; see #51 |
+| `*flush-on-newline*` | implemented | dyn var root true; prn/println flush iff true (S8: printsys.rs flush_rows; probes f-*) |
 | `*fn-loader*` | out-of-scope | Bytecode compiler/classpath surface; port AOT (clj-aot) is separate |
 | `*math-context*` | out-of-scope | pending design: BigDec precision context; see #40 |
 | `*read-eval*` | out-of-scope | pending design: read/eval gate trio; see #40 |
@@ -729,8 +729,8 @@ No slice on this branch: hard-never reasons stand alone, design-blocked rows nam
 | `bytes?` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
 | `cast` | out-of-scope | Host reflection/interop/beans/method-fns (N1) |
 | `char-array` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
-| `char-escape-string` | implemented | escape table var; see #51 |
-| `char-name-string` | implemented | name table var; see #51 |
+| `char-escape-string` | implemented | 7-entry map; single-source w/ printer tables (S8: printsys.rs charmaps_rows; probes c-*) |
+| `char-name-string` | implemented | 6-entry map; single-source w/ printer tables (S8: printsys.rs charmaps_rows; probes c-*) |
 | `chars` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
 | `chunk` | out-of-scope | Chunked-seq + custom-type hashing impl details; port seqs/hash are separate |
 | `chunk-append` | out-of-scope | Chunked-seq + custom-type hashing impl details; port seqs/hash are separate |
@@ -792,10 +792,10 @@ No slice on this branch: hard-never reasons stand alone, design-blocked rows nam
 | `parse-uuid` | out-of-scope | pending design: UUID value kind; see #40 |
 | `prefers` | out-of-scope | pending design: hierarchy maps (coordinate with 33-typechain); see #40 |
 | `primitives-classnames` | out-of-scope | Bytecode compiler/classpath surface; port AOT (clj-aot) is separate |
-| `print-ctor` | implemented | `#=` writer (`o`, `print-args`, `w`); see #51 |
-| `print-dup` | implemented | dup multi (token dispatch); see #51 |
-| `print-method` | implemented | print multi (`:type`-or-token dispatch); see #51 |
-| `print-simple` | implemented | prefix + `(str o)` writer (`o`, `w`); see #51 |
+| `print-ctor` | implemented | [o print-args w] #= writer (S8: printsys.rs simple_ctor_rows; probes t-*) |
+| `print-dup` | implemented | booted multifn, token dispatch, no :default (S8: printsys.rs dispatch_rows + dup_rows; probes m-*/d-*/p-*) |
+| `print-method` | implemented | booted multifn, :type-or-token dispatch, chaining :default (S8: printsys.rs dispatch_rows; probes m-*) |
+| `print-simple` | implemented | [o w] meta+str writer (S8: printsys.rs simple_ctor_rows; probes s-*/s2-*) |
 | `proxy-call-with-super` | out-of-scope | No type-system slice on this branch: proxies/deftype factories/method internals |
 | `proxy-mappings` | out-of-scope | No type-system slice on this branch: proxies/deftype factories/method internals |
 | `proxy-name` | out-of-scope | No type-system slice on this branch: proxies/deftype factories/method internals |

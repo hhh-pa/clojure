@@ -193,7 +193,7 @@ FIX:
   state for FX7); with-meta/meta-value casts report the JVM
   text; fx2-mapentry{,2..19} probes + pins).
 - D-prepost: `:pre`/`:post` silently ignored → FX3.
-- D-printdup: RESOLVED converged (zero-oos S8 #51: dup honored
+- D-printdup: RESOLVED conformant (zero-oos S8 #51: dup honored
   per kind; D-streamprint/D-astral-fmt stay).
 - D-streamprint: str realization up-front vs JVM in-flight
   interleaving → FX4b.

@@ -481,3 +481,37 @@ fn bad_print_binding_reports_cast_and_continues() {
         )
     );
 }
+
+#[test]
+fn repl_echo_print_dup_root_with_plain_fallback() {
+    // S8/issue #51 §1d carve-out: the echo path composes
+    // `print_opts` (`dup: true` under a true `*print-dup*` root)
+    // with engine-direct `pr_to_string` (no `pr_on` driver). A
+    // dupable kind echoes its dup shape (convergent with
+    // `pr-str`); an undupable kind echoes the plain fallback
+    // instead of the `No method` throw (pinned divergence — the
+    // JVM REPL honors dup too, so the echo never forces
+    // `dup: false`).
+    assert_eq!(
+        run(
+            "(alter-var-root #'*print-dup* (constantly true))\n{:a 1}\n",
+            None
+        ),
+        (
+            0,
+            "true\n#=(clojure.lang.PersistentArrayMap/create {:a 1})\n".to_owned()
+        )
+    );
+    // The atom identity hash is allocator-shaped, so the
+    // undupable pin is a prefix plus the no-throw fact.
+    let (code, text) = run(
+        "(alter-var-root #'*print-dup* (constantly true))\n(atom 1)\n",
+        None,
+    );
+    assert_eq!(code, 0);
+    assert!(
+        text.starts_with("true\n#object[clojure.lang.Atom 0x"),
+        "{text:?}"
+    );
+    assert!(!text.contains("No method"), "{text:?}");
+}
