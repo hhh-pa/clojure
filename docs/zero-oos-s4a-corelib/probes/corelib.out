@@ -1,0 +1,138 @@
+st-basic 42
+st-nil-first nil
+st-nil-mid nil
+st-none 7
+st-bare 3
+st-thread 1
+st-short [5 [:a]]
+st-skips [nil []]
+st-exp "(clojure.core/let [G__N x G__N (if (clojure.core/nil? G__N) nil (clojure.core/-> G__N (f 1)))] (if (clojure.core/nil? G__N) nil (clojure.core/-> G__N g)))"
+stt-basic [3]
+stt-nil-first nil
+stt-nil-mid nil
+stt-none 7
+stt-bare 3
+stt-exp "(clojure.core/let [G__N x G__N (if (clojure.core/nil? G__N) nil (clojure.core/->> G__N (f 1)))] (if (clojure.core/nil? G__N) nil (clojure.core/->> G__N (g))))"
+wf-basic 1
+wf-empty nil
+wf-nil nil
+wf-str \a
+wf-once [7 1]
+wf-badbind THROW java.lang.IllegalArgumentException|"when-first requires a vector for its binding in user:50"
+wf-badcount1 THROW java.lang.IllegalArgumentException|"when-first requires exactly 2 forms in binding vector in user:51"
+wf-badcount3 THROW java.lang.IllegalArgumentException|"when-first requires exactly 2 forms in binding vector in user:52"
+wf-exp "(clojure.core/when-let [xs__N__auto__ (clojure.core/seq xs)] (clojure.core/let [x (clojure.core/first xs__N__auto__)] body))"
+wh-loop [nil [3 2 1]]
+wh-false [nil false]
+wh-nil nil
+wh-exp "(clojure.core/loop [] (clojure.core/when t b1 b2 (recur)))"
+pb-true true
+pb-false false
+pb-case nil
+pb-upper nil
+pb-empty nil
+pb-pad nil
+pb-junk nil
+pb-nil THROW java.lang.IllegalArgumentException|"Expected string, got nil"
+pb-int THROW java.lang.IllegalArgumentException|"Expected string, got java.lang.Long"
+pb-bool THROW java.lang.IllegalArgumentException|"Expected string, got java.lang.Boolean"
+pb-kw THROW java.lang.IllegalArgumentException|"Expected string, got clojure.lang.Keyword"
+pb-vec THROW java.lang.IllegalArgumentException|"Expected string, got clojure.lang.PersistentVector"
+pl-dec 42
+pl-neg -42
+pl-plus 42
+pl-zero 0
+pl-negzero 0
+pl-max 9223372036854775807
+pl-maxover nil
+pl-min -9223372036854775808
+pl-minover nil
+pl-empty nil
+pl-plusonly nil
+pl-negonly nil
+pl-pad nil
+pl-trail nil
+pl-hex nil
+pl-float nil
+pl-under nil
+pl-exp nil
+pl-arabic 123
+pl-fullwidth 123
+pl-nil THROW java.lang.IllegalArgumentException|"Expected string, got nil"
+pl-int THROW java.lang.IllegalArgumentException|"Expected string, got java.lang.Long"
+pd-dec 1.5
+pd-negzero -0.0
+pd-nan ##NaN
+pd-pnan ##NaN
+pd-nnan ##NaN
+pd-nanlow nil
+pd-nanup nil
+pd-inf ##Inf
+pd-pinf ##Inf
+pd-ninf ##-Inf
+pd-inflow nil
+pd-infcap nil
+pd-exp 1000.0
+pd-expneg 0.001
+pd-pad 1.5
+pd-empty nil
+pd-blank nil
+pd-junk nil
+pd-sufd 1.0
+pd-sufD 1.0
+pd-suff 1.0
+pd-sufF 1.0
+pd-dot nil
+pd-trail 5.0
+pd-lead 0.5
+pd-hex 8.0
+pd-hexf 3.0
+pd-hexsuf 8.0
+pd-nansuf nil
+pd-infsuf nil
+pd-over ##Inf
+pd-overneg ##-Inf
+pd-under 0.0
+pd-nbsp nil
+pd-tab 1.5
+pd-pluslead 0.5
+pd-trailexp 5000.0
+pd-hexup 8.0
+pd-nanpad ##NaN
+pd-hexnop nil
+pd-hexempty nil
+pd-hexexpjunk nil
+pd-hexbigexp ##Inf
+pd-hexemptysig nil
+pd-hexnegexp 0.125
+pd-hexneg -8.0
+pd-hexplusexp 8.0
+pd-hexjunk nil
+pd-hexdots nil
+pd-arabic nil
+pd-fullwidth nil
+pl-uminus nil
+pd-nil THROW java.lang.IllegalArgumentException|"Expected string, got nil"
+pd-dbl THROW java.lang.IllegalArgumentException|"Expected string, got java.lang.Double"
+pd-bool THROW java.lang.IllegalArgumentException|"Expected string, got java.lang.Boolean"
+pf-basic "a=1"
+pf-none "hi"
+pf-nl "a\n"
+pf-ret "1"
+pf-percent "100%"
+pls-basic "1 nil x\n"
+pls-empty "\n"
+pls-str "a b\n"
+prs-basic "1 nil \"x\"\n"
+prs-empty "\n"
+prs-vec "[1 \"a\" :k]\n"
+rn-member true
+rn-class java.lang.Long
+rn-str [java.lang.Character true]
+rn-nil nil
+rn-empty THROW java.lang.IndexOutOfBoundsException|"<nil>"
+rn-emptystr THROW java.lang.StringIndexOutOfBoundsException|"Index 0 out of bounds for length 0"
+tst-ok :ok
+tst-missing :no-test
+tst-map :no-test
+tst-throws THROW java.lang.Exception|"boom"
