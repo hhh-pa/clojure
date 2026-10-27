@@ -32,6 +32,10 @@
 (throwof "e-str-before" '(str #inst "1582-10-04"))
 (throwof "e-str-millis" '(str #inst "2024-01-01T00:00:00.123Z"))
 (throwof "e-print-year1" '(print-str #inst "0001-01-01"))
+;; ---- B2: fromString subtleties (lenient slow path) ----
+(throwof "e-uuid-plus" '(str (parse-uuid "+550e840-e29b-41d4-a716-44665544000")))
+(throwof "e-uuid-overflow" '(java.util.UUID/fromString "ffffffffffffffffff-1-1-1-1"))
+(throwof "e-uuid-overflow5" '(java.util.UUID/fromString "1-1-1-1-fffffffffffffffff"))
 ;; ---- C: let-bound uuid round-trip ----
 (throwof "e-uuid-roundtrip" '(let [u (random-uuid)] (= u (parse-uuid (str u)))))
 (throwof "e-uuid-ver4" '(let [u (str (random-uuid))] [(nth u 14) (contains? #{\8 \9 \a \b} (nth u 19))]))

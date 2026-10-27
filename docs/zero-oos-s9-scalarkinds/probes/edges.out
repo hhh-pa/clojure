@@ -21,6 +21,9 @@ e-str-gap "Wed Oct 20 00:00:00 UTC 1582"
 e-str-before "Thu Oct 04 00:00:00 UTC 1582"
 e-str-millis "Mon Jan 01 00:00:00 UTC 2024"
 e-print-year1 "#inst \"0001-01-01T00:00:00.000-00:00\""
+e-uuid-plus "0550e840-e29b-41d4-a716-044665544000"
+e-uuid-overflow THROW java.lang.NumberFormatException|"Error at index 15 in: \"ffffffffffffffffff\""
+e-uuid-overflow5 THROW java.lang.NumberFormatException|"Error at index 15 in: \"fffffffffffffffff\""
 e-uuid-roundtrip true
 e-uuid-ver4 [\4 true]
 e-uri-regcase false
@@ -62,13 +65,13 @@ e-valid-escape "http://h/a%2Fb?c=%20#d"
 e-bad-space THROW java.net.URISyntaxException|"Illegal character in path at index 10: http://h/a b"
 e-bad-quote THROW java.net.URISyntaxException|"Illegal character in path at index 9: http://h/\"a\""
 e-bad-scheme THROW java.net.URISyntaxException|"Illegal character in scheme name at index 0: 1x:y"
-e-bad-port #object[java.net.URI 0x5d10455d "http://h:8x/x"]
-e-bad-negport #object[java.net.URI 0x6759f091 "http://h:-1/x"]
-e-bad-hugeport #object[java.net.URI 0x55b5e331 "http://h:99999999999/x"]
+e-bad-port #object[java.net.URI 0x46b695ec "http://h:8x/x"]
+e-bad-negport #object[java.net.URI 0x5aa6202e "http://h:-1/x"]
+e-bad-hugeport #object[java.net.URI 0x6826c41e "http://h:99999999999/x"]
 e-bad-ipv6 THROW java.net.URISyntaxException|"Expected closing bracket for IPv6 address at index 11: http://[::1/x"
 e-bad-ipv6char THROW java.net.URISyntaxException|"Malformed IPv6 address at index 8: http://[gg]/x"
 e-bad-escape THROW java.net.URISyntaxException|"Malformed escape pair at index 10: http://h/a%zz"
 e-bad-escape-short THROW java.net.URISyntaxException|"Malformed escape pair at index 10: http://h/a%2"
-e-bad-nonascii #object[java.net.URI 0x6826c41e "http://h/é"]
+e-bad-nonascii #object[java.net.URI 0x77e80a5e "http://h/é"]
 e-bad-ctl THROW java.net.URISyntaxException|"Illegal character in path at index 10: http://h/ab"
-e-bad-relpath #object[java.net.URI 0x78d39a69 "http:a"]
+e-bad-relpath #object[java.net.URI 0x4a325eb9 "http:a"]

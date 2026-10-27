@@ -153,7 +153,10 @@ test updates in the same commit):
 2. `default_uuid_reader`: after `validate_uuid`, return
    `uuid_from_str`, mapping the residual `i64`-overflow failure
    (S6-valid, `fromString`-invalid) to the NFE
-   `For input string: "<group>" under radix 16`.
+   `Error at index <i> in: "<group>"` (`e-uuid-overflow*`).
+   Note `validate_uuid` is also stricter than `fromString` on
+   `+`-led groups (`e-uuid-plus` parses); the flip inherits that
+   S6 validation gap unchanged.
 3. The read-side `dispatch.rs` valid-payload arms stay
    `TaggedLiteral` (the reader cannot construct values); the
    eval walk resolves them through the flipped defaults.
