@@ -1405,6 +1405,7 @@ impl Evaluator {
                 format!("Attempting to call unbound fn: #'{}", u.sym),
             ))),
             Value::Promise(p) => self.invoke_promise(p, args),
+            Value::MultiFn(m) => crate::multi::invoke_multifn(self, m, args),
             _ => Err(self.throw(NativeError::cast(&jvm_class_of(callee), "clojure.lang.IFn"))),
         }
     }
@@ -2281,6 +2282,11 @@ fn cast_entry(entry: &Value) -> NativeError {
 /// `get` without the not-found: maps, int-keyed vectors/strings
 /// (in range), sets (membership), else `None` (§E12). Never throws.
 fn lookup(coll: &Value, key: &Value) -> Option<Value> {
+    // Records read their content map (oracle `h-destructure`
+    // rides this path); every other host value misses.
+    if let Some(i) = crate::types::record_inst(coll) {
+        return i.content.get(key).cloned();
+    }
     match coll {
         Value::Map(m) => m.get(key).cloned(),
         Value::Vector(v) => lookup_vector(v, key),

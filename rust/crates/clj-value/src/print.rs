@@ -236,8 +236,60 @@ fn print_more(v: &Value, opts: &PrintOpts, level: Option<i64>, out: &mut String)
             let id = p.id();
             write!(out, "#object[{class} 0x{id:x} \"{class}@{id:x}\"]").unwrap();
         }
+        other => print_port_or_rest(other, opts, level, out),
+    }
+}
+
+/// Port-defined values (split from `print_more` for the complexity
+/// budget): host types and multifns print here; anything else falls
+/// through to `print_rest` unchanged.
+fn print_port_or_rest(v: &Value, opts: &PrintOpts, level: Option<i64>, out: &mut String) {
+    match v {
+        Value::HostType(h) => print_host(h.as_ref(), opts, level, out),
+        Value::MultiFn(m) => print_multifn(m, out),
         other => print_rest(other, opts, level, out),
     }
+}
+
+/// Port-defined types (S-typechain): records print `#Name{entries}`
+/// in both modes (oracle `j-pr-rec`, `j-print-rec`; length and level
+/// behave exactly like maps — the shared path); descriptors
+/// print their name (`interface ` prefixed for interfaces, oracle
+/// `rec-iface`); anything else prints the default
+/// `#object[Name 0xH fallback]` shape (oracle `m-pr-dt` — the JVM
+/// embeds the live `toString` there, but print is pure here, so the
+/// fallback renders instead; a custom `toString` still runs through
+/// `str`).
+fn print_host(h: &crate::HostVal, opts: &PrintOpts, level: Option<i64>, out: &mut String) {
+    match h {
+        crate::HostVal::Def(d) if d.kind == crate::HostKind::Interface => {
+            out.push_str("interface ");
+            out.push_str(&d.name);
+        }
+        crate::HostVal::Def(d) => out.push_str(&d.name),
+        crate::HostVal::Inst(i) if i.def.kind == crate::HostKind::Record => {
+            let entries: Vec<(&Value, &Value)> = i.content.iter().collect();
+            print_map_entries(&format!("#{}", i.def.name), &entries, opts, level, out);
+        }
+        other => {
+            let name = other.type_name();
+            let hex = crate::identity_hex(other);
+            write!(out, "#object[{name} 0x{hex} \"{name}@{hex}\"]").unwrap();
+        }
+    }
+}
+
+/// Multimethods (S-typechain stage 3): the default
+/// `#object[clojure.lang.MultiFn 0xH fallback]` shape (oracle
+/// `d-prefer` — the JVM embeds the live identity hash; stable
+/// digits here, derived from the name).
+fn print_multifn(m: &crate::MultiFn, out: &mut String) {
+    let hex = crate::multifn_hex(&m.name);
+    write!(
+        out,
+        "#object[clojure.lang.MultiFn 0x{hex} \"clojure.lang.MultiFn@{hex}\"]"
+    )
+    .unwrap();
 }
 
 fn print_rest(v: &Value, opts: &PrintOpts, level: Option<i64>, out: &mut String) {
@@ -594,6 +646,18 @@ pub fn java_debug(v: &Value) -> String {
 
 /// Host objects and readable collections. Chained so each match stays
 /// under the complexity gate.
+/// Port-defined type rendering for `java_debug` (split from
+/// `java_debug_rest` for the complexity budget).
+fn host_java_debug(h: &crate::HostVal) -> String {
+    match h {
+        crate::HostVal::Def(d) if d.kind == crate::HostKind::Interface => {
+            format!("interface {}", d.name)
+        }
+        crate::HostVal::Def(d) => d.name.to_string(),
+        h => crate::fallback_str(h),
+    }
+}
+
 fn java_debug_rest(v: &Value) -> String {
     match v {
         Value::Transient(t) => format!("{}@{:x}", t.jvm_class(), t.id()),
@@ -603,6 +667,13 @@ fn java_debug_rest(v: &Value) -> String {
         Value::Promise(p) => format!("{}@{:x}", p.jvm_class(), p.id()),
         Value::Agent(a) => format!("clojure.lang.Agent@{:x}", a.id()),
         Value::Extension(e) => e.print(),
+        // Port-defined types: descriptors render their name;
+        // instances render the `toString` fallback (pure — a custom
+        // `toString` method only runs through `str` in `clj-eval`).
+        Value::HostType(h) => host_java_debug(h.as_ref()),
+        // Multimethods render the `toString` fallback (like the
+        // JVM, which never overrides it with the name).
+        Value::MultiFn(m) => crate::multifn_str(&m.name),
         Value::List(_)
         | Value::Vector(_)
         | Value::MapEntry { .. }
@@ -1084,6 +1155,63 @@ mod tests {
         // Oracle T1192 FX2 `pr-e`: entries render as their 2-vector.
         let e = crate::map_entry(Value::Keyword(Keyword::new(None, "a")), Value::Int(1));
         assert_eq!(java_debug(&e), "[:a 1]");
+    }
+
+    #[test]
+    fn java_debug_host_values() {
+        // Port-defined types: descriptors render their name
+        // (`interface ` prefixed for interfaces); instances render
+        // the `toString` fallback.
+        use super::java_debug;
+        fn def(kind: crate::HostKind) -> std::sync::Arc<crate::HostDef> {
+            Arc::new(crate::HostDef {
+                name: Arc::from("user.T"),
+                kind,
+                fields: Vec::new(),
+                methods: std::collections::HashMap::new(),
+                interfaces: Vec::new(),
+                prefix: None,
+                impl_ns: None,
+                sigs: std::collections::HashMap::new(),
+                takes_this: true,
+            })
+        }
+        let d = def(crate::HostKind::Type);
+        assert_eq!(
+            java_debug(&Value::HostType(Arc::new(crate::HostVal::Def(d.clone())))),
+            "user.T"
+        );
+        let i = def(crate::HostKind::Interface);
+        assert_eq!(
+            java_debug(&Value::HostType(Arc::new(crate::HostVal::Def(i)))),
+            "interface user.T"
+        );
+        let inst = Value::HostType(Arc::new(crate::HostVal::Inst(crate::HostInst {
+            def: d,
+            content: crate::new_map(),
+            meta: None,
+        })));
+        let s = java_debug(&inst);
+        assert!(
+            s.starts_with("user.T@") && s.len() > "user.T@".len(),
+            "instance fallback shape, got {s}"
+        );
+    }
+
+    #[test]
+    fn java_debug_multifn() {
+        // Multimethods render the `toString` fallback (unreachable
+        // from Clojure — `str`/`pr` take their own arms — so pinned
+        // directly).
+        use super::java_debug;
+        let mf = Value::MultiFn(Arc::new(crate::MultiFn {
+            name: Arc::from("m"),
+            dispatch: Value::Nil,
+            default: Value::Nil,
+            methods: crate::new_map(),
+            prefers: crate::new_map(),
+        }));
+        assert_eq!(java_debug(&mf), crate::multifn_str("m"));
     }
 
     #[test]

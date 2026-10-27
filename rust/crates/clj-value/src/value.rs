@@ -38,8 +38,8 @@ use std::sync::Arc;
 use num_traits::ToPrimitive;
 
 use crate::{
-    Agent, Atom, Delay, ExtensionValue, Future, Keyword, Promise, Symbol, Throwable, Transient,
-    Unbound, Var,
+    Agent, Atom, Delay, ExtensionValue, Future, HostInst, HostVal, Keyword, MultiFn, Promise,
+    Symbol, Throwable, Transient, Unbound, Var, host_eq,
 };
 
 /// Deterministic Fx hasher for maps/sets (rpds's default RandomState
@@ -764,6 +764,13 @@ pub enum Value {
     Agent(Agent),
     /// A host-defined value behind the [`ExtensionValue`] trait (S4).
     Extension(Arc<dyn ExtensionValue>),
+    /// A port-defined type descriptor or instance (S-typechain):
+    /// `deftype` / `defrecord` / `reify` / `proxy` / `gen-class`
+    /// values and `definterface` / `gen-interface` descriptors.
+    HostType(Arc<HostVal>),
+    /// A multimethod (S-typechain stage 3): the `defmulti` value,
+    /// invoked like a function.
+    MultiFn(Arc<MultiFn>),
 }
 
 /// Read metadata off a sequence extension value (borrowed).
@@ -870,6 +877,7 @@ impl Value {
             Value::Map(m) => m.meta(),
             Value::Set(s) => s.meta(),
             Value::Extension(e) => seq_ext_meta(e),
+            Value::HostType(h) => h.as_inst().and_then(|i| i.meta.as_ref()),
             _ => None,
         }
     }
@@ -887,8 +895,37 @@ impl Value {
             Value::Extension(e) => seq_ext_with_meta(&e, meta)
                 .map(Value::Extension)
                 .unwrap_or_else(|| Value::Extension(e)),
+            Value::HostType(h) => match h.as_ref() {
+                HostVal::Inst(i) => Value::HostType(Arc::new(HostVal::Inst(HostInst {
+                    def: i.def.clone(),
+                    content: i.content.clone(),
+                    meta,
+                }))),
+                HostVal::Def(_) => Value::HostType(h.clone()),
+            },
             other => other,
         }
+    }
+}
+
+/// Port-defined-type pair equality (split for the complexity
+/// budget): identical `Arc`s are `=` (so `(= p p)` holds);
+/// otherwise descriptors are never `=`, and records need the same
+/// type plus content ([`host_eq`]).
+fn host_pair_eq(a: &Arc<HostVal>, b: &Arc<HostVal>) -> bool {
+    Arc::ptr_eq(a, b) || host_eq(a, b)
+}
+
+/// Port-defined pair equality (split from `value_eq_mid` and
+/// `plain_equals` for the complexity budget): host pairs follow
+/// `host_pair_eq`, multifn pairs compare by identity (like the
+/// JVM, which never overrides `equals` on them); anything else is
+/// `None` for the caller's fallthrough.
+fn port_pair_eq(a: &Value, b: &Value) -> Option<bool> {
+    match (a, b) {
+        (Value::HostType(x), Value::HostType(y)) => Some(host_pair_eq(x, y)),
+        (Value::MultiFn(x), Value::MultiFn(y)) => Some(Arc::ptr_eq(x, y)),
+        _ => None,
     }
 }
 
@@ -981,7 +1018,9 @@ fn value_eq_mid(a: &Value, b: &Value) -> bool {
         (Value::Atom(a), Value::Atom(b)) => cell_meta_eq(a.same_cell(b), a.meta(), b.meta()),
         (Value::Delay(a), Value::Delay(b)) => a.same_cell(b),
         (Value::Future(a), Value::Future(b)) => cell_meta_eq(a.same_cell(b), a.meta(), b.meta()),
-        pair => value_eq_rest(pair.0, pair.1),
+        // Port-defined pairs compare structurally (host content,
+        // multifn identity); anything else falls through.
+        pair => port_pair_eq(pair.0, pair.1).unwrap_or_else(|| value_eq_rest(pair.0, pair.1)),
     }
 }
 
@@ -1225,6 +1264,22 @@ fn hash_value_rest<H: Hasher>(v: &Value, state: &mut H) {
             state.write_u64(a.id());
         }
         Value::Extension(e) => hash_extension(e, state),
+        // Port-defined types: the class name plus the content map
+        // (order-insensitive, like `Map`, so equal records hash
+        // equally whatever the extension order).
+        Value::HostType(h) => {
+            state.write_u8(23);
+            h.type_name().hash(state);
+            if let Some(i) = h.as_inst() {
+                i.content.hash(state);
+            }
+        }
+        // Multimethods hash their name (identity equality, so
+        // identical `Arc`s hash equally by construction).
+        Value::MultiFn(m) => {
+            state.write_u8(26);
+            m.name.hash(state);
+        }
         // All other variants are handled upstream (the single
         // caller partitions the variants).
         _ => unreachable!("hash partition"),
@@ -1366,6 +1421,10 @@ fn jvm_equiv(a: &Value, b: &Value) -> bool {
         (Value::Int(_), Value::Double(_)) | (Value::Double(_), Value::Int(_)) => false,
         // Tower rules live in `tower_equiv` (shared with `==`).
         (a, b) if is_tower(a) || is_tower(b) => tower_equiv(a, b),
+        // Port-defined types `equiv` exactly like `=`.
+        (Value::HostType(a), Value::HostType(b)) => host_pair_eq(a, b),
+        // Multimethods `equiv` by identity (like `=`).
+        (Value::MultiFn(a), Value::MultiFn(b)) => Arc::ptr_eq(a, b),
         _ => {
             if is_collection(a) {
                 coll_equiv(a, b)
@@ -1525,7 +1584,9 @@ fn plain_equals(a: &Value, b: &Value) -> bool {
         (Value::Var(a), Value::Var(b)) => a.id == b.id,
         (Value::Unbound(a), Value::Unbound(b)) => a.var_id == b.var_id,
         (Value::Throwable(a), Value::Throwable(b)) => a.id == b.id,
-        other => plain_equals_rest(other.0, other.1),
+        other => {
+            port_pair_eq(other.0, other.1).unwrap_or_else(|| plain_equals_rest(other.0, other.1))
+        }
     }
 }
 
@@ -1620,8 +1681,8 @@ fn plain_equals_sets(s: &Set, o: &Set) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{Value, find_map_dup, find_set_dup, new_map, new_set};
-    use crate::{Keyword, Symbol};
+    use super::{Value, find_map_dup, find_set_dup, new_map, new_set, plain_equals};
+    use crate::{HostDef, HostInst, HostKind, HostVal, Keyword, Symbol};
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
     use std::sync::Arc;
@@ -2256,5 +2317,94 @@ mod tests {
         // so scalars never arrive here (only a dispatch bug could).
         let mut h = DefaultHasher::new();
         super::hash_value_rest(&Value::Nil, &mut h);
+    }
+
+    fn host_def(kind: HostKind) -> Arc<HostDef> {
+        Arc::new(HostDef {
+            name: Arc::from("user.T"),
+            kind,
+            fields: Vec::new(),
+            methods: std::collections::HashMap::new(),
+            interfaces: Vec::new(),
+            prefix: None,
+            impl_ns: None,
+            sigs: std::collections::HashMap::new(),
+            takes_this: true,
+        })
+    }
+
+    fn host_inst(def: &Arc<HostDef>) -> Value {
+        Value::HostType(Arc::new(HostVal::Inst(HostInst {
+            def: def.clone(),
+            content: new_map(),
+            meta: None,
+        })))
+    }
+
+    #[test]
+    fn with_meta_on_host_values() {
+        // Instances take (or clear) metadata; descriptors ignore it
+        // (no caller passes host values today — pinned directly).
+        let def = host_def(HostKind::Record);
+        let meta = new_map();
+        let out = host_inst(&def).with_meta(Some(meta.clone()));
+        assert_eq!(out.meta(), Some(&meta));
+        let desc = Value::HostType(Arc::new(HostVal::Def(def)));
+        assert_eq!(desc.with_meta(Some(meta)).meta(), None);
+    }
+
+    #[test]
+    fn set_dup_check_compares_host_values() {
+        // Duplicate checks compare host values by `equiv`:
+        // distinct instances pass, equal records report (only
+        // reachable with hand-built values — literals never carry
+        // host values — so pinned directly).
+        let typ = host_def(HostKind::Type);
+        let rec = host_def(HostKind::Record);
+        assert_eq!(find_set_dup(&[host_inst(&typ), host_inst(&rec)]), None);
+        let items = [host_inst(&rec), host_inst(&rec)];
+        assert_eq!(find_set_dup(&items), Some(&items[1]));
+    }
+
+    fn test_multifn() -> Value {
+        Value::MultiFn(Arc::new(crate::MultiFn {
+            name: Arc::from("m"),
+            dispatch: Value::Nil,
+            default: Value::Keyword(Keyword::new(None, "default")),
+            methods: new_map(),
+            prefers: new_map(),
+        }))
+    }
+
+    #[test]
+    fn set_dup_check_compares_multifns() {
+        // Duplicate checks compare multifns by identity (only
+        // reachable with hand-built values — literals never carry
+        // them — so pinned directly).
+        let mf = test_multifn();
+        assert_eq!(find_set_dup(&[mf.clone(), test_multifn()]), None);
+        let items = [mf.clone(), mf.clone()];
+        assert_eq!(find_set_dup(&items), Some(&items[1]));
+    }
+
+    #[test]
+    fn plain_equals_on_multifn_pairs() {
+        // `.equals` follows identity too (reachable only through
+        // tagged-literal forms, so pinned directly).
+        let mf = test_multifn();
+        assert!(plain_equals(&mf, &mf));
+        assert!(!plain_equals(&mf, &test_multifn()));
+    }
+
+    #[test]
+    fn plain_equals_on_host_pairs() {
+        // `.equals` follows `host_pair_eq`: same-type records with
+        // equal content hold; distinct non-records never do (only
+        // reachable through tagged-literal forms, so pinned
+        // directly).
+        let rec = host_def(HostKind::Record);
+        assert!(plain_equals(&host_inst(&rec), &host_inst(&rec)));
+        let typ = host_def(HostKind::Type);
+        assert!(!plain_equals(&host_inst(&typ), &host_inst(&typ)));
     }
 }

@@ -1,0 +1,138 @@
+dtor-class user.Pair
+dtor-field 10
+dtor-kw nil
+dtor-get :dflt
+dtor-count THROW java.lang.UnsupportedOperationException|"count not supported on this type: Pair"
+dtor-eq false
+dtor-record? false
+dtor-map? false
+dtor-mapinst false
+dtor-arity1 THROW java.lang.IllegalArgumentException|"No matching ctor found for class user.Pair"
+dtor-arity0 THROW java.lang.IllegalArgumentException|"No matching ctor found for class user.Pair"
+dtor-meth 6
+dtor-m1 [:one 1]
+dtor-m2 [:two 1 2]
+dtor-supers ("class java.lang.Object" "interface clojure.lang.IType")
+rec-pos 1
+rec-mapf 2
+rec-mapf-extra 3
+rec-ctor 1
+rec-record? true
+rec-map? true
+rec-count 2
+rec-keys (:x :y)
+rec-vals (1 2)
+rec-seq ([:x 1] [:y 2])
+rec-get :dflt
+rec-contains true
+rec-find [:x 1]
+rec-kw-dflt :dflt
+rec-assoc-type user.Point
+rec-assoc-count 3
+rec-assoc-val 3
+rec-dissoc-type clojure.lang.PersistentArrayMap
+rec-dissoc-count 1
+rec-eq true
+rec-eq-map false
+rec-eq-diff false
+rec-merge-type user.Point
+rec-into {:x 1, :y 2}
+rec-select {:y 2}
+rec-arity THROW clojure.lang.ArityException|"Wrong number of args (1) passed to: user/evalN/->Point--N"
+rec-supers ("class java.lang.Object" "interface clojure.lang.Associative" "interface clojure.lang.Counted" "interface clojure.lang.IHashEq" "interface clojure.lang.IKeywordLookup" "interface clojure.lang.ILookup" "interface clojure.lang.IMeta" "interface clojure.lang.IObj" "interface clojure.lang.IPersistentCollection" "interface clojure.lang.IPersistentMap" "interface clojure.lang.IRecord" "interface clojure.lang.Seqable" "interface java.io.Serializable" "interface java.lang.Iterable" "interface java.util.Map")
+rec-iface "interface user.Adder"
+reify-str "hi!"
+reify-meth 12
+reify-self-eq true
+reify-distinct false
+reify-objinst true
+proxy-str "prox"
+proxy-objinst true
+proxy-iface 6
+g-coll-rec true
+g-coll-dt false
+g-assoc-rec true
+g-assoc-dt false
+g-counted-rec true
+g-counted-dt false
+g-seqable-rec true
+g-seqable-dt false
+g-sequential-rec false
+g-sequential-dt false
+g-set-rec false
+g-set-dt false
+g-vector-rec false
+g-vector-dt false
+g-list-rec false
+g-list-dt false
+g-ifn-rec false
+g-ifn-dt false
+g-fn-rec false
+g-fn-dt false
+h-empty THROW java.lang.UnsupportedOperationException|"Can't create empty: user.Point"
+h-empty-type THROW java.lang.UnsupportedOperationException|"Can't create empty: user.Point"
+h-empty? false
+h-conj-vec #user.Point{:x 1, :y 2, :z 3}
+h-conj-vec-type user.Point
+h-conj-map-type user.Point
+h-dissoc-missing-type user.Point
+h-assoc-existing #user.Point{:x 9, :y 2}
+h-nth THROW java.lang.UnsupportedOperationException|"nth not supported on this type: Point"
+h-contains-missing false
+h-mapnil #user.Point{:x nil, :y nil}
+h-mapempty #user.Point{:x nil, :y nil}
+h-invoke-hit THROW java.lang.ClassCastException|"class user.Point cannot be cast to class clojure.lang.IFn (user.Point is in unnamed module of loader clojure.lang.DynamicClassLoader @L; clojure.lang.IFn is in unnamed module of loader 'app')"
+h-invoke-miss THROW java.lang.ClassCastException|"class user.Point cannot be cast to class clojure.lang.IFn (user.Point is in unnamed module of loader clojure.lang.DynamicClassLoader @L; clojure.lang.IFn is in unnamed module of loader 'app')"
+h-invoke-arity THROW java.lang.ClassCastException|"class user.Point cannot be cast to class clojure.lang.IFn (user.Point is in unnamed module of loader clojure.lang.DynamicClassLoader @L; clojure.lang.IFn is in unnamed module of loader 'app')"
+h-transient-type THROW java.lang.ClassCastException|"class user.Point cannot be cast to class clojure.lang.IEditableCollection (user.Point is in unnamed module of loader clojure.lang.DynamicClassLoader @L; clojure.lang.IEditableCollection is in unnamed module of loader 'app')"
+h-update-type user.Point
+h-getin 1
+h-destructure 1
+i-assoc THROW java.lang.ClassCastException|"class user.Pair cannot be cast to class clojure.lang.Associative (user.Pair is in unnamed module of loader clojure.lang.DynamicClassLoader @L; clojure.lang.Associative is in unnamed module of loader 'app')"
+i-dissoc THROW java.lang.ClassCastException|"class user.Pair cannot be cast to class clojure.lang.IPersistentMap (user.Pair is in unnamed module of loader clojure.lang.DynamicClassLoader @L; clojure.lang.IPersistentMap is in unnamed module of loader 'app')"
+i-conj THROW java.lang.ClassCastException|"class user.Pair cannot be cast to class clojure.lang.IPersistentCollection (user.Pair is in unnamed module of loader clojure.lang.DynamicClassLoader @L; clojure.lang.IPersistentCollection is in unnamed module of loader 'app')"
+i-keys THROW java.lang.IllegalArgumentException|"Don't know how to create ISeq from: user.Pair"
+i-seq THROW java.lang.IllegalArgumentException|"Don't know how to create ISeq from: user.Pair"
+i-contains THROW java.lang.IllegalArgumentException|"contains? not supported on type: user.Pair"
+i-find THROW java.lang.IllegalArgumentException|"find not supported on type: user.Pair"
+i-nth THROW java.lang.UnsupportedOperationException|"nth not supported on this type: Pair"
+i-empty nil
+i-invoke THROW java.lang.ClassCastException|"class user.Pair cannot be cast to class clojure.lang.IFn (user.Pair is in unnamed module of loader clojure.lang.DynamicClassLoader @L; clojure.lang.IFn is in unnamed module of loader 'app')"
+i-ctor-extra THROW java.lang.IllegalArgumentException|"No matching ctor found for class user.Pair"
+j-str-rec "user.Point@H"
+j-pr-rec "#user.Point{:x 1, :y 2}"
+j-print-rec "#user.Point{:x 1, :y 2}"
+j-str-dt "user.Pair@H"
+j-str-proxy "prox"
+j-tostring-dt "user.Pair@H"
+j-str-reifybare "user$evalN$reify__N@H"
+k-meth-arity THROW java.lang.IllegalArgumentException|"No matching method add found taking 1 args for class user.P2"
+k-meth-nosuch THROW java.lang.IllegalArgumentException|"No matching field found: nosuch for class user.P2"
+k-meth-wrongtype THROW java.lang.IllegalArgumentException|"No matching method add found taking 2 args for class user.Pair"
+k-field-nosuch THROW java.lang.IllegalArgumentException|"No matching field found: nosuch for class user.Pair"
+l-hash-rec -445655453
+l-hash-map -133480779
+l-rec-hashcode 2027824014
+l-map-hashcode 2027824014
+l-hash-p13 -977466775
+l-hash-m13 -656809281
+l-hash-strname 1912907433
+l-hash-symname 493152470
+l-hash-swapped 151370679
+l-hash-ext -126088769
+l-hash-seq 1890997198
+m-pr-dt #object[user.Pair 0xH "user.Pair@H"]
+m-print-dt "#object[user.Pair 0xH user.Pair@H]"
+m-pr-reify #object[user$evalN$reify__N 0xH "hi!"]
+m-print-reify "#object[user$evalN$reify__N 0xH hi!]"
+n-hash-dashed -760237083
+n-map-x1 461195660
+n-sym-underscore 1783825782
+n-sym-dash -908920215
+n-compare THROW java.lang.ClassCastException|"class user.Point cannot be cast to class java.lang.Comparable (user.Point is in unnamed module of loader clojure.lang.DynamicClassLoader @L; java.lang.Comparable is in module java.base of loader 'bootstrap')"
+n-rseq THROW java.lang.ClassCastException|"class user.Point cannot be cast to class clojure.lang.Reversible (user.Point is in unnamed module of loader clojure.lang.DynamicClassLoader @L; clojure.lang.Reversible is in unnamed module of loader 'app')"
+n-pr-dashed "#user.my-rec{:x 1}"
+n-meta {:a 1}
+n-pr-meta "^{:a 1} #user.Point{:x 1, :y 2}"
+geniface user.Greetable
+genclass THROW java.lang.ClassNotFoundException|"user.Klass"

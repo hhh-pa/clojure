@@ -72,6 +72,37 @@ macros (`#{`, `#"`, `#(`, `#'`, `#_`, `#?` reader conditionals with
 `:cljr` features — `.cljc` never loads JVM branches). Every form
 carries a span for diagnostics.
 
+**Types (no bytecode).** `deftype defrecord reify proxy
+definterface gen-interface gen-class` over a namespace registry
+(`Type.` construction, `.-field` / `.method` interop, `->Type` /
+`map->Type` factories); records are maps with the type name on
+them (map ops, `hash` formula, metadata); methods dispatch
+through per-type tables with `Object` fallbacks (`toString`,
+record `hashCode`).
+
+**Protocols.** `defprotocol` (map descriptors with `:on` / `:sigs`
+/ `:impls`, variadic dispatch fns), `extend` / `extend-type` /
+`extend-protocol` (named types, host classes, `nil`, and the
+`IPersistentMap` fallback for maps/records, merged under the
+var-alter lock), `satisfies?` / `extends?` (registry plus inline
+claims; descriptors never satisfy), inline bodies on
+`deftype` / `defrecord` / `reify` / `proxy`, the `Closeable`
+contract, and `with-open` (reverse-order `finally` closes).
+`String Long Double Boolean Object` resolve as class-name
+strings (the port has no class literals).
+
+**Multimethods.** `defmulti` (dispatch fn, docstring/attr head,
+`:default` option only — `:hierarchy` is rejected until the
+`derive` / `isa?` follow-up), `defmethod` (single- and
+multi-arity tails), `prefer-method` (edges stored, never
+consulted), `get-method` / `methods` / `remove-method` (exact
+entry else default entry, whole-table view, missing-entry
+no-op). Dispatch is exact-value plus the default entry; misses
+fail with `No method in multimethod 'name' for dispatch value:
+<pr>`; table updates install a new var root under the var-alter
+lock, so values captured before an update keep their old table
+(the JVM mutates the one object).
+
 **Language core.** Special forms `def if do let letfn loop recur fn
 fn* quote var throw try/catch/finally set!` (`set!` on dynamic vars
 only); destructuring; `defn defmacro defonce comment assert`;
@@ -102,7 +133,7 @@ unbounded, `:fail` / `:continue` error modes, `await` / `await-for`,
 `restart-agent`, `shutdown-agents`), `locking`, `add-watch` /
 `remove-watch`, `realized?`.
 
-**Core vars: 380 implemented, 2 divergent, 40 out of scope**
+**Core vars: 405 implemented, 2 divergent, 16 out of scope**
 ([`rust/core-coverage.md`](rust/core-coverage.md) is normative and
 CI-enforced: listed vars must resolve, excluded ones must not).
 
@@ -168,14 +199,7 @@ out of scope, not silently missing:
 
 - JVM interop (`new`, dotted access, `import`, `instance?`,
   `class`, `..`, `clojure.java.*`, `clojure.reflect`).
-- The type system (`deftype defrecord reify proxy gen-class
-  gen-interface definterface`) and protocols (`extend`,
-  `extend-type`, `extend-protocol`, `satisfies?`, `extends?`;
-  hence `with-open`).
-- Multimethods (`defmulti defmethod prefer-method get-method
-  methods remove-method`).
-- STM (`ref dosync alter commute ensure ref-set`) — never;
-  `*in*` machinery (`read read-line line-seq with-in-str`).
+- STM (`ref dosync alter commute ensure ref-set`) — never.
 - Reader: `#=` eval reader, `#inst` / `#uuid` data readers,
   custom `data_readers.clj`.
 - LLVM JIT, `clojure.spec`, `core.async`, and binary

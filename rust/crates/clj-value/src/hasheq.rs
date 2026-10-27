@@ -150,6 +150,14 @@ fn hasheq_mid(v: &Value) -> i32 {
         Value::Throwable(t) => id_hash(t.id),
         Value::Transient(t) => id_hash(t.id()),
         Value::Atom(a) => id_hash(a.id()),
+        // Port-defined types: records use the solved content-XOR
+        // formula (oracle `l-hash-rec`); anything else mixes its
+        // content deterministically (the JVM uses identity here).
+        Value::HostType(h) => hasheq_host(h.as_ref()),
+        // Multimethods hash their name symbol (identity equality,
+        // so identical `Arc`s hash equally by construction; the JVM
+        // uses identity here).
+        Value::MultiFn(m) => hasheq_multifn(m),
         other => hasheq_rest(other),
     }
 }
@@ -169,6 +177,18 @@ fn hasheq_rest(v: &Value) -> i32 {
 
 fn hasheq_map(m: &crate::Map) -> i32 {
     hash_unordered(m.iter().map(|(k, v)| map_entry_hasheq(k, v)))
+}
+
+/// `(hash record)` (split from [`hasheq_mid`] for the complexity
+/// budget): the content-map hash XOR the munged-class-name symbol
+/// hash (oracle `l-hash-rec`); anything else mixes deterministically.
+fn hasheq_host(h: &crate::HostVal) -> i32 {
+    match h {
+        crate::HostVal::Inst(i) if i.def.kind == crate::HostKind::Record => {
+            crate::record_hasheq(&i.content, &i.def.name)
+        }
+        other => crate::inst_hasheq(other),
+    }
 }
 
 fn hasheq_extension(ext: &dyn ExtensionValue) -> i32 {
@@ -224,7 +244,42 @@ fn hash_code_mid(v: &Value) -> i32 {
         Value::Unbound(u) => id_hash(u.var_id),
         Value::Throwable(t) => id_hash(t.id),
         Value::Transient(t) => id_hash(t.id()),
+        // Port-defined types: records hash exactly like their
+        // content map (oracle `l-rec-hashcode`); anything else
+        // mixes deterministically (the JVM uses identity here).
+        Value::HostType(h) => hash_code_host(h.as_ref()),
+        // Multimethods hash their name (deterministic stand-in for
+        // the JVM's identity hash).
+        Value::MultiFn(m) => hash_code_multifn(m),
         other => hash_code_rest(other),
+    }
+}
+
+/// `(hash multifn)` (split from [`hasheq_mid`] for the complexity
+/// budget): the name symbol's hash.
+fn hasheq_multifn(m: &crate::MultiFn) -> i32 {
+    hasheq(&Value::Symbol(Symbol::new(None, &m.name)))
+}
+
+/// `(.hashCode multifn)` (split from [`hash_code_mid`] for the
+/// complexity budget): the name's Java hash.
+fn hash_code_multifn(m: &crate::MultiFn) -> i32 {
+    str_hashcode(&m.name)
+}
+
+/// `(.hashCode record)` (split from [`hash_code_mid`] for the
+/// complexity budget): exactly the content map's hash (oracle
+/// `l-rec-hashcode`); anything else mixes deterministically.
+fn hash_code_host(h: &crate::HostVal) -> i32 {
+    match h {
+        crate::HostVal::Inst(i) if i.def.kind == crate::HostKind::Record => {
+            hash_code_map(&i.content)
+        }
+        crate::HostVal::Inst(i) => hash_combine(
+            str_hashcode(&i.def.name),
+            hash_ordered(i.content.iter().map(|(_, v)| hash_code(v))),
+        ),
+        crate::HostVal::Def(d) => str_hashcode(&d.name),
     }
 }
 
@@ -985,6 +1040,22 @@ mod tests {
         assert_eq!(str_hashcode("a\nb"), 0x16db9);
         assert_eq!(str_hashcode("é"), 0xe9);
         assert_eq!(str_hashcode("😀"), 0x1b_0d63);
+    }
+
+    #[test]
+    fn hash_code_multifn_uses_name() {
+        // `(.hashCode multifn)` is the name's Java hash
+        // (unreachable from Clojure — `.hashCode` has no
+        // non-host fallback and `hash-code` is private — so
+        // pinned directly; `'m'` hashes to 109).
+        let mf = Value::MultiFn(std::sync::Arc::new(crate::MultiFn {
+            name: std::sync::Arc::from("m"),
+            dispatch: Value::Nil,
+            default: Value::Nil,
+            methods: crate::new_map(),
+            prefers: crate::new_map(),
+        }));
+        assert_eq!(hash_code(&mf), 109);
     }
 
     #[test]

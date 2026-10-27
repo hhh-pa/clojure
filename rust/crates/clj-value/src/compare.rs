@@ -222,7 +222,19 @@ fn type_name(v: &Value) -> &'static str {
         Value::Symbol(_) => "Symbol",
         Value::Keyword(_) => "Keyword",
         Value::Extension(e) => extension_type_name(e),
-        _ => ref_or_collection_type_name(v),
+        _ => port_type_name(v).unwrap_or_else(|| ref_or_collection_type_name(v)),
+    }
+}
+
+/// Port-defined type names (split from `type_name` for the
+/// complexity budget): host classes leak their per-value name;
+/// multifns report the JVM class (static — no per-value name
+/// leaks here); anything else is `None` for the caller.
+fn port_type_name(v: &Value) -> Option<&'static str> {
+    match v {
+        Value::HostType(h) => Some(host_type_name(h)),
+        Value::MultiFn(_) => Some("clojure.lang.MultiFn"),
+        _ => None,
     }
 }
 
@@ -248,6 +260,13 @@ fn ref_or_collection_type_name(v: &Value) -> &'static str {
 /// exceptional, never hot-loop values.
 fn extension_type_name(e: &std::sync::Arc<dyn crate::ExtensionValue>) -> &'static str {
     Box::leak(e.class_name().into_boxed_str())
+}
+
+/// The host type's class name. [`CompareError`] borrows its names,
+/// so the owned name is leaked — compare errors are exceptional,
+/// never hot-loop values (same contract as [`extension_type_name`]).
+fn host_type_name(h: &std::sync::Arc<crate::HostVal>) -> &'static str {
+    Box::leak(h.type_name().to_owned().into_boxed_str())
 }
 
 fn collection_type_name(v: &Value) -> &'static str {
@@ -436,5 +455,51 @@ mod tests {
     #[should_panic(expected = "atoms handled above")]
     fn collection_wildcard_panics() {
         let _ = collection_type_name(&Value::Int(1));
+    }
+
+    #[test]
+    fn multifn_names_its_class() {
+        // Multimethods report the JVM class in compare errors
+        // (unreachable from Clojure — `sort` uses its own
+        // comparator — so pinned directly).
+        let mf = Value::MultiFn(Arc::new(crate::MultiFn {
+            name: Arc::from("m"),
+            dispatch: Value::Nil,
+            default: Value::Nil,
+            methods: crate::new_map(),
+            prefers: crate::new_map(),
+        }));
+        assert_eq!(type_name(&mf), "clojure.lang.MultiFn");
+        assert_eq!(
+            message_of(&mf, &Value::Int(1)),
+            "Cannot compare clojure.lang.MultiFn to Long"
+        );
+    }
+
+    #[test]
+    fn host_values_name_their_class() {
+        // Port-defined types report their class name in compare
+        // errors (like the JVM's `ClassCastException` operands).
+        let def = Arc::new(crate::HostDef {
+            name: Arc::from("user.T"),
+            kind: crate::HostKind::Type,
+            fields: Vec::new(),
+            methods: std::collections::HashMap::new(),
+            interfaces: Vec::new(),
+            prefix: None,
+            impl_ns: None,
+            sigs: std::collections::HashMap::new(),
+            takes_this: true,
+        });
+        let v = Value::HostType(Arc::new(crate::HostVal::Inst(crate::HostInst {
+            def,
+            content: crate::new_map(),
+            meta: None,
+        })));
+        assert_eq!(type_name(&v), "user.T");
+        assert_eq!(
+            message_of(&v, &Value::Int(1)),
+            "Cannot compare user.T to Long"
+        );
     }
 }
