@@ -1,0 +1,15 @@
+f-root true
+f-dynamic true
+f-sep "\n"
+f-newline [0 "\n"]
+f-newline-false [0 "\n"]
+f-prn [1 "1\n"]
+f-prn-false [0 "1\n"]
+f-println [1 "1\n"]
+f-println-false [0 "1\n"]
+f-pr [0 "1"]
+f-print [0 "1"]
+f-prn-empty [1 "\n"]
+f-multi [1 "1 2\n"]
+f-newline-then-prn [1 "\n1\n"]
+S8-flush DONE

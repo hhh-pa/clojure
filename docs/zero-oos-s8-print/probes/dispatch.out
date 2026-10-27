@@ -1,0 +1,24 @@
+m-shape ["clojure.lang.MultiFn" "clojure.lang.MultiFn"]
+m-has-default [true false]
+m-table-method ("" ":clojure.core/Vec" ":clojure.core/VecSeq" ":default" "clojure.core.Eduction" "clojure.lang.BigInt" "clojure.lang.IDeref" "clojure.lang.IPersistentMap" "clojure.lang.IPersistentSet" "clojure.lang.IPersistentVector" "clojure.lang.IRecord" "clojure.lang.ISeq" "clojure.lang.Keyword" "clojure.lang.ReaderConditional" "clojure.lang.Symbol" "clojure.lang.TaggedLiteral" "clojure.lang.Var" "java.lang.Boolean" "java.lang.Character" "java.lang.Class" "java.lang.Double" "java.lang.Float" "java.lang.Number" "java.lang.Object" "java.lang.StackTraceElement" "java.lang.String" "java.lang.Throwable" "java.math.BigDecimal" "java.sql.Timestamp" "java.util.Calendar" "java.util.Date" "java.util.List" "java.util.Map" "java.util.RandomAccess" "java.util.Set" "java.util.UUID" "java.util.regex.Pattern")
+m-table-dup ("" "clojure.lang.BigInt" "clojure.lang.Fn" "clojure.lang.IPersistentCollection" "clojure.lang.IPersistentList" "clojure.lang.IPersistentMap" "clojure.lang.IRecord" "clojure.lang.ISeq" "clojure.lang.Keyword" "clojure.lang.LazilyPersistentVector" "clojure.lang.Namespace" "clojure.lang.PersistentHashMap" "clojure.lang.PersistentHashSet" "clojure.lang.PersistentVector" "clojure.lang.Ratio" "clojure.lang.Symbol" "clojure.lang.TaggedLiteral" "clojure.lang.Var" "java.lang.Boolean" "java.lang.Character" "java.lang.Class" "java.lang.Double" "java.lang.Long" "java.lang.Number" "java.lang.String" "java.math.BigDecimal" "java.sql.Timestamp" "java.util.Calendar" "java.util.Collection" "java.util.Date" "java.util.Map" "java.util.UUID" "java.util.regex.Pattern")
+m-getmethod [true true]
+m-user "DT1"
+m-user-nested "[DT1 2]"
+m-user-spaces "DT1 DT2"
+m-user-newline "DT1\n"
+m-writer-id "SAME"
+m-str-unaffected "user.DT@L"
+m-type-kw "NTYPE"
+m-type-nonstr "[1]"
+m-type-unknown-kw "[1]"
+m-type-atom-ctor "clojure.lang.Atom@L"
+m-dup-delegates "X!"
+m-dup-nodelegates "^#=(clojure.lang.PersistentArrayMap/create {:type :user/xatom}) #=(clojure.lang.PersistentArrayMap/create {:a 1})"
+m-remove "#object[user.DT 0xH \"user.DT@L\"]"
+m-dup-user ["DUP!" "#object[user.DD 0xH \"user.DD@L\"]"]
+m-dup-remove THROW java.lang.IllegalArgumentException|"No method in multimethod 'print-dup' for dispatch value: class user.DD"
+m-type-strip-visible "[1]"
+m-type-nonstr-meta "^{:type \"nope\"} [1]"
+m-iface ["NUM" "5"]
+m-str-override [[4 2] true]
