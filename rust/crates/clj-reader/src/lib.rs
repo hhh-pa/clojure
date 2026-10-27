@@ -426,7 +426,9 @@ pub fn read_str_fired(
     hook: &mut dyn ReadHooks,
 ) -> (Result<Value, ReaderError>, Vec<FiredTag>) {
     let mut reader = Reader::new(s, opts);
-    let out = reader.read_inner(true, None, true, hook).and_then(unwrap_single);
+    let out = reader
+        .read_inner(true, None, true, hook)
+        .and_then(unwrap_single);
     let fired = reader.take_fired();
     (out, fired)
 }

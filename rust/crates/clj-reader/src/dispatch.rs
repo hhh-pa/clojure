@@ -634,10 +634,11 @@ mod tests {
         opts: &ReaderOpts,
     ) -> (Result<Vec<Value>, ReaderError>, Vec<FiredTag>) {
         let mut reader = Reader::new(input, opts);
+        let mut hooks = NoHooks;
         let mut forms = Vec::new();
         let mut failure: Option<ReaderError> = None;
         while failure.is_none() {
-            match reader.read_form(false) {
+            match reader.read_form(false, &mut hooks) {
                 Ok(Some(v)) => forms.push(v),
                 Ok(None) => break,
                 Err(e) => failure = Some(e),
@@ -889,7 +890,7 @@ mod tests {
             ..defer_opts(&[], false)
         };
         for input in ["#foo 1", "#inst \"2024-01-01\""] {
-            let err = read_str(input, &opts).unwrap_err();
+            let err = read_str(input, &opts, &mut NoHooks).unwrap_err();
             assert!(matches!(err, ReaderError::TableCce { .. }), "{input}");
             assert_eq!(err.jvm_class(), "ClassCastException");
             assert_eq!(
@@ -905,7 +906,7 @@ mod tests {
         // `[tag form]`); without it the same read throws.
         let (forms, _) = read_defer("#foo 1", &defer_opts(&[], true));
         assert_tagged(forms.unwrap()[0].clone(), "foo", &Value::Int(1));
-        let err = read_str("#foo 1", &defer_opts(&[], false)).unwrap_err();
+        let err = read_str("#foo 1", &defer_opts(&[], false), &mut NoHooks).unwrap_err();
         assert!(matches!(err, ReaderError::UnknownTag { .. }));
         assert_eq!(err.message(), "No reader function for tag foo");
         // The token read consumes EOF (the line bump), so the throw
@@ -916,7 +917,12 @@ mod tests {
     #[test]
     fn defer_dotted_tag_keeps_record_error() {
         // Dotted tags never consult (even with keys and the flag).
-        let err = read_str("#foo.bar [1]", &defer_opts(&[("", "foo.bar")], true)).unwrap_err();
+        let err = read_str(
+            "#foo.bar [1]",
+            &defer_opts(&[("", "foo.bar")], true),
+            &mut NoHooks,
+        )
+        .unwrap_err();
         assert!(matches!(err, ReaderError::Record { .. }), "got {err:?}");
     }
 
@@ -930,7 +936,7 @@ mod tests {
         let (forms, fired) = read_defer("#_ #inst \"2024-01-01\" :kept", &opts);
         assert_eq!(forms.unwrap().len(), 1);
         assert!(fired.is_empty());
-        let err = read_str("#inst \"bogus\"", &opts).unwrap_err();
+        let err = read_str("#inst \"bogus\"", &opts, &mut NoHooks).unwrap_err();
         assert!(matches!(err, ReaderError::TagInvoke { .. }), "got {err:?}");
         assert_eq!(err.jvm_class(), "RuntimeException");
         assert_eq!(err.message(), "Unrecognized date/time syntax: bogus");
@@ -948,7 +954,7 @@ mod tests {
             &Value::Str("550e8400-e29b-41d4-a716-446655440000".into()),
         );
         assert!(fired.is_empty());
-        let err = read_str("#uuid \"bogus\"", &opts).unwrap_err();
+        let err = read_str("#uuid \"bogus\"", &opts, &mut NoHooks).unwrap_err();
         assert!(matches!(err, ReaderError::TagInvoke { .. }), "got {err:?}");
         assert_eq!(err.jvm_class(), "IllegalArgumentException");
         assert_eq!(err.message(), "Invalid UUID string: bogus");
@@ -1003,7 +1009,7 @@ mod tests {
         // The tag read and form read precede the consult (like the
         // frozen path).
         let opts = defer_opts(&[("", "foo")], true);
-        let err = read_str("#123 1", &opts).unwrap_err();
+        let err = read_str("#123 1", &opts, &mut NoHooks).unwrap_err();
         assert!(matches!(err, ReaderError::TagNotSymbol { .. }));
         // ...through the multi-form helper too: nothing fired
         // before the failure, and the failure surfaces as `Err`.
@@ -1023,11 +1029,12 @@ mod tests {
         // drains after every read, so the clear is a no-op there).
         let opts = defer_opts(&[("", "foo")], false);
         let mut reader = Reader::new("#_ #foo 1 :kept", &opts);
-        assert!(reader.read_form(false).unwrap().is_some());
+        let mut hooks = NoHooks;
+        assert!(reader.read_form(false, &mut hooks).unwrap().is_some());
         assert_eq!(reader.take_fired().len(), 1);
         assert!(reader.take_fired().is_empty());
         reader.extend(" #_ #foo 2");
-        assert!(reader.read_form(false).unwrap().is_none());
+        assert!(reader.read_form(false, &mut hooks).unwrap().is_none());
         reader.set_opts(&opts);
         assert!(reader.take_fired().is_empty());
     }
@@ -1038,14 +1045,15 @@ mod tests {
         // read on the same reader defers without logging.
         let opts = defer_opts(&[("", "foo")], false);
         let mut reader = Reader::new("#_ (unclosed", &opts);
-        let err = reader.read_form(false).unwrap_err();
+        let mut hooks = NoHooks;
+        let err = reader.read_form(false, &mut hooks).unwrap_err();
         assert!(
             matches!(err, ReaderError::EofDelimited { .. }),
             "got {err:?}"
         );
         assert!(reader.take_fired().is_empty());
         reader.extend(" #foo 1");
-        let form = reader.read_form(false).unwrap().unwrap();
+        let form = reader.read_form(false, &mut hooks).unwrap().unwrap();
         assert_tagged(form.clone(), "foo", &Value::Int(1));
         assert!(reader.take_fired().is_empty());
     }

@@ -2013,11 +2013,19 @@ fn map_needs(m: &Map) -> bool {
 /// order, skipping `ReaderConditional` subtrees and never
 /// re-descending into fn results (probe `e-no-redescent`).
 /// Metadata resolves too (tags inside meta maps invoke — probe
-/// `e-meta-inner`).
+/// `e-meta-inner`). Suppressed reads skip entirely (S7): every tag
+/// preserved, so nothing deferred (probes `e-tag-sup`, `p-sup-tag`,
+/// `m-load-sup`).
 pub(crate) fn resolve_data_readers(
     eval: &mut Evaluator,
     form: Value,
 ) -> Result<Value, NativeError> {
+    // The binding is live here: resolve always runs synchronously
+    // inside the read, before any pop, so the current value is the
+    // read's entry value.
+    if deref_core(eval, "*suppress-read*").is_truthy() {
+        return Ok(form);
+    }
     if !needs_resolution(&form) {
         return Ok(form);
     }

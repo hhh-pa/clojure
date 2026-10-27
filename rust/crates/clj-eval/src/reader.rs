@@ -770,6 +770,8 @@ fn wrap_resolution_error(
         cause: inner.cause.map(Box::new),
     });
     outer
+}
+
 /// The S7 `read+string` capture (empty unless asked).
 fn capture_text(parser: &Reader, mark: usize, capture: bool) -> String {
     if capture {
@@ -798,12 +800,15 @@ pub(crate) fn restore_parser(reader: &StreamReader, parser: Reader) {
     lock_state(reader).parser = parser;
 }
 
-/// Run one `read`: fresh options per call, stdin fed line by line
-/// while the parser reports EOF, clean EOF honoring `eof-error?`
-/// (the synthesized error sits at the live tracker position,
-/// probe `r-exdata-eof`). A truncated head survives retries: the
-/// parser is snapshotted before each attempt while more input may
-/// arrive, then restored and extended with the next line (`Eof*`
+/// Feed one line after an EOF (S7): the pre-attempt head returns
+/// first (a truncated head survives retries), then the chunk.
+fn feed_chunk(state: &mut StreamState, snapshot: Option<Reader>, chunk: &str) {
+    if let Some(parser) = snapshot {
+        state.parser = parser;
+    }
+    state.parser.extend(chunk);
+}
+
 /// Run one `read`: fresh options per call, stdin fed line by line
 /// while the parser reports EOF, clean EOF honoring `eof-error?`
 /// (the synthesized error sits at the live tracker position,
@@ -841,10 +846,7 @@ fn run_read(
                 let text = capture_text(&parser, mark, capture);
                 restore_parser(reader, parser);
                 let mut state = lock_state(reader);
-                let at = Span::new(state.parser.line(), state.parser.col());
-                drain_locked(eval, &mut state, at, recursive)?;
-                let form = crate::core::resolve_data_readers(eval, v)
-                    .map_err(|e| wrap_resolution_error(eval, e, at, recursive))?;
+                let form = finish_some(eval, &mut state, v, recursive)?;
                 return Ok((form, text));
             }
             Ok(None) => {
@@ -853,14 +855,10 @@ fn run_read(
                 match next_chunk(&mut state)? {
                     Some(chunk) => state.parser.extend(&chunk),
                     None => {
-                        let at = Span::new(state.parser.line(), state.parser.col());
-                        drain_locked(eval, &mut state, at, recursive)?;
-                        if eof_error {
-                            let clean = ReaderError::Eof { span: at };
-                            return Err(map_reader_error(eval, &clean, recursive));
-                        }
+                        let out =
+                            finish_clean_eof(eval, &mut state, eof_error, &eof_value, recursive)?;
                         let text = capture_text(&state.parser, mark, capture);
-                        return Ok((eof_value.clone(), text));
+                        return Ok((out, text));
                     }
                 }
             }
@@ -868,40 +866,13 @@ fn run_read(
                 if !is_eof_error(&e) {
                     restore_parser(reader, parser);
                     let mut state = lock_state(reader);
-                    let at = Span::new(state.parser.line(), state.parser.col());
-                    drain_locked(eval, &mut state, at, recursive)?;
-                    return Err(map_reader_error(eval, &e, recursive));
+                    return Err(finish_read_error(eval, &mut state, &e, recursive));
                 }
                 let mut state = lock_state(reader);
                 state.parser = parser;
                 match next_chunk(&mut state)? {
-                    Some(chunk) => {
-                        if let Some(parser) = snapshot {
-                            state.parser = parser;
-                        }
-                        state.parser.extend(&chunk);
-                    }
-                    None => {
-                        let at = Span::new(state.parser.line(), state.parser.col());
-                        drain_locked(eval, &mut state, at, recursive)?;
-                        return Err(map_reader_error(eval, &e, recursive));
-                    }
-                }
-            }
-        }
-    }
-}
-                }
-                let mut state = lock_state(reader);
-                state.parser = parser;
-                match next_chunk(&mut state)? {
-                    Some(chunk) => {
-                        if let Some(parser) = snapshot {
-                            state.parser = parser;
-                        }
-                        state.parser.extend(&chunk);
-                    }
-                    None => return finish_read_error(eval, &mut state, &e, recursive),
+                    Some(chunk) => feed_chunk(&mut state, snapshot, &chunk),
+                    None => return Err(finish_read_error(eval, &mut state, &e, recursive)),
                 }
             }
         }
@@ -940,16 +911,20 @@ fn finish_clean_eof(
     Ok(eof_value.clone())
 }
 
-/// A terminal read error: drain first (effects precede), then map.
+/// A terminal read error: drain first (effects precede), then map
+/// (always an error — the `read+string` capture has no `Ok` shape
+/// for it, so this returns the error itself).
 fn finish_read_error(
     eval: &mut Evaluator,
     state: &mut StreamState,
     err: &ReaderError,
     recursive: bool,
-) -> Result<Value, NativeError> {
+) -> NativeError {
     let at = Span::new(state.parser.line(), state.parser.col());
-    drain_locked(eval, state, at, recursive)?;
-    Err(map_reader_error(eval, err, recursive))
+    if let Err(e) = drain_locked(eval, state, at, recursive) {
+        return e;
+    }
+    map_reader_error(eval, err, recursive)
 }
 
 /// `read`: all five JVM arities over the bound reader (probes

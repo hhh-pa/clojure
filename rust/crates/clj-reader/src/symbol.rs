@@ -147,16 +147,7 @@ pub fn match_symbol(
             return Ok(None);
         }
         if let Some(rest) = s.strip_prefix("::") {
-            let ks = Symbol::intern(rest);
-            if opts.resolver_bound {
-                return resolve_auto(&ks, hook);
-            }
-            let resolved = match ks.namespace() {
-                // A qualified name looks its head up as an ALIAS.
-                Some(alias) => opts.aliases.get(alias).cloned(),
-                None => Some(opts.current_ns.clone()),
-            };
-            return Ok(resolved.map(|ns| Value::Keyword(Keyword::new(Some(&ns), ks.name()))));
+            return match_auto_keyword(rest, opts, hook);
         }
         let is_keyword = s.starts_with(':');
         let sym = Symbol::intern(if is_keyword { &s[1..] } else { s });
@@ -174,6 +165,25 @@ pub fn match_symbol(
             None => Ok(None),
         }
     }
+}
+
+/// `::` auto-resolution (probes `f-*`): a bound `*reader-resolver*`
+/// answers instead of the maps (see [`resolve_auto`]).
+fn match_auto_keyword(
+    rest: &str,
+    opts: &ReaderOpts,
+    hook: &mut dyn ReadHooks,
+) -> Result<Option<Value>, EvalReadError> {
+    let ks = Symbol::intern(rest);
+    if opts.resolver_bound {
+        return resolve_auto(&ks, hook);
+    }
+    let resolved = match ks.namespace() {
+        // A qualified name looks its head up as an ALIAS.
+        Some(alias) => opts.aliases.get(alias).cloned(),
+        None => Some(opts.current_ns.clone()),
+    };
+    Ok(resolved.map(|ns| Value::Keyword(Keyword::new(Some(&ns), ks.name()))))
 }
 
 /// `::` auto-resolution through a bound `*reader-resolver*`:

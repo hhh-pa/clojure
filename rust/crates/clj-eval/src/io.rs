@@ -15,7 +15,7 @@
 use std::io::Write;
 use std::sync::{Arc, Mutex};
 
-use clj_reader::{EvalReadError, ReadCond, Reader, ReaderError, ReaderOpts};
+use clj_reader::{EvalReadError, ReadCond, ReaderError, ReaderOpts};
 use clj_value::{ExtensionValue, ThrowClass, Value, pr_to_string};
 
 use crate::core::{cce_err, cce_message, print_opts};

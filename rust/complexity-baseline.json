@@ -39,9 +39,9 @@
   {
    "file": "crates/clj-eval/src/ns.rs",
    "function": "throw_class_for",
-   "cyclomatic": 31.0,
+   "cyclomatic": 32.0,
    "cognitive": 1.0,
-   "justification": "one arm per class name; load-error class table stays exhaustive. S5D extends the table with the core/format throw-site classes (ArithmeticException, format exceptions, IO, IllegalState, FileNotFound). S6B adds ExecutionException/CancellationException. S6C adds RejectedExecutionException. S-instream adds the ReaderException spellings."
+   "justification": "one arm per class name; load-error class table stays exhaustive. S5D extends the table with the core/format throw-site classes (ArithmeticException, format exceptions, IO, IllegalState, FileNotFound). S6B adds ExecutionException/CancellationException. S6C adds RejectedExecutionException. S-instream adds the ReaderException spellings. S7 adds ClassNotFoundException."
   },
   {
    "file": "crates/clj-reader/src/lib.rs",
@@ -49,6 +49,13 @@
    "cyclomatic": 16.0,
    "cognitive": 1.0,
    "justification": "pure macro-char dispatch table, one arm per char"
+  },
+  {
+   "file": "crates/clj-value/src/extension.rs",
+   "function": "throw_parent",
+   "cyclomatic": 17.0,
+   "cognitive": 1.0,
+   "justification": "S7: one arm per JVM parent link; the catch-chain table stays exhaustive (ClassNotFoundException/ReflectiveOperationException links)"
   }
  ]
 }

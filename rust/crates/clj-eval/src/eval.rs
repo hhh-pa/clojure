@@ -430,10 +430,7 @@ impl Evaluator {
     /// the current namespace maps plus the seeded read gates (the
     /// prologue installs them on the reader; the per-form loops
     /// re-snapshot the data-reader fields from this base).
-    fn read_forms_opts(
-        eval: &mut Evaluator,
-        seed: &crate::reader::ReadGateSeed,
-    ) -> ReaderOpts {
+    fn read_forms_opts(eval: &mut Evaluator, seed: &crate::reader::ReadGateSeed) -> ReaderOpts {
         let cur = eval.current_ns_name();
         let mut opts = ReaderOpts {
             current_ns: cur.clone(),
@@ -493,7 +490,6 @@ impl Evaluator {
     fn resolve_data_readers(&mut self, form: Value) -> Result<Value, SourceError> {
         crate::core::resolve_data_readers(self, form)
             .map_err(|e| SourceError::Uncaught(self.throwable(e)))
-    }
     }
 
     /// Read every form in `text` (default `:read-cond :allow`
