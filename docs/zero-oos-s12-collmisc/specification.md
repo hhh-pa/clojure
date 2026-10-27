@@ -381,8 +381,9 @@ keeps them or renames consistently.
   for those). Print `#object[…$1 …]`, CCE target
   `…PersistentStructMap` on non-struct input.
 - D3 (Chunk emulation): `ChunkBufferValue { slots,
-  taken }`, `ChunkValue { slots, count }` with shared `Arc`
-  slots. `chunk` flips `taken`; append-after-chunk and
+  taken }`, `ChunkValue { slots, count }`; `chunk` copies
+  the slots (observationally identical to shared `Arc`
+  slots — the buffer is dead after the take). `chunk` flips `taken`; append-after-chunk and
   count/nth on a degenerate 2nd chunk throw the two pinned
   NPE texts. `nth` indexes raw slots (nil holes, AIOOBE at
   capacity). `jvm_class_of`: `…ArrayChunk` /
@@ -391,9 +392,12 @@ keeps them or renames consistently.
 - D4 (chunked cons): reuse `SeqKind::ChunkedCons` (empty chunks
   already collapse to the tail, matching ch-cons-empty).
   No new seq shape.
-- D5 (hash natives): two new `pub` fns in `hasheq.rs` only —
-  a `hash_combine(seed: i32, y: &Value)` using `hash_code`
-  for `y`, and a `mix_coll_hash(h: i32, n: i32)` wrapper.
+- D5 (hash natives): `pub` on the two existing `hasheq.rs`
+  fns only — `hash_combine(seed: i32, hash: i32)` and
+  `mix_coll_hash(h: i32, n: i32)` (no new `hash_combine`
+  overload: Rust has no overloading, and renaming would
+  touch S10-owned call sites). The native composes
+  `hash_combine(seed, hash_code(y))` — behavior-identical,
   Seed/capacity int-checking throws ArithmeticException
   `"integer overflow"`; doubles truncate; non-numbers take
   the existing cast errors. Disjoint from S10's
@@ -406,8 +410,9 @@ keeps them or renames consistently.
   the int-cast error.
 - D7 (iteration): `ExtensionValue` holding step + resolved
   opts; seq path via the lazy-cons machinery (first step
-  eager); reduce path as an explicit loop honoring
-  `reduced`.
+  eager); reduce path via seq citizenship (`walk_seq` —
+  observably identical to an explicit loop, including
+  `reduced` short-circuit per it-reduced/it-reduce-count).
 - D8 (matcher handle): `ExtensionValue` holding the
   compiled `regex::Regex`, the subject text, the next
   offset, and the last `Captures` (or none). Find uses
