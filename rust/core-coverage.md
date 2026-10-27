@@ -4,7 +4,7 @@ The complete inventory of `clojure.core` in this port: every var,
 its conformance state, and — for exclusions — why it is excluded.
 If a var is not listed here, that is a file bug, not a silent gap.
 
-- **692 vars: 644 implemented, 1 divergent, 47 out of scope,
+- **692 vars: 652 implemented, 1 divergent, 39 out of scope,
   0 planned.** The port reports Clojure `1.13.0-alpha9`
   (`clojure-version`).
 - **Universe.** 692 rows = 685 JVM publics + 7 extra-universe rows: 4 port-visible JVM privates
@@ -755,9 +755,9 @@ No slice on this branch: hard-never reasons stand alone, design-blocked rows nam
 | `destructure` | implemented | destructure_expand.rs destructure_public (partition/drop-odd/all-symbols passthrough + shared bind_one; entries as vectors); tests/zero_oos_s4b_macros.rs s4b_destructure_rows |
 | `double-array` | implemented | S15 arrays (#59): arrays.rs ctor_array (Numbers rules); tests/arrays.rs ctors_zero, ctors_seq, ctors_init, ctors_sizes (probes a-double-*, b-double-*) |
 | `doubles` | implemented | S15 arrays (#59): arrays.rs cast_array (exact [D checkcast); tests/arrays.rs casts_bytesq (probes d-doubles-*) |
-| `enumeration-seq` | out-of-scope | JDK collection/stream adapters (N1) |
+| `enumeration-seq` | implemented | S17 strict spine (RealizedSeq; empty nil; realized? CCE); jdkio.rs enumeration_seq_rows (S17, #61) |
 | `extenders` | implemented | S14 `(keys (:impls p))` as class-name strings (total; nil when empty); typeinternals.rs extenders_rows (S14, #58) |
-| `file-seq` | implemented | tests/collmisc.rs fileseq_rows (string walk; classes/File unrepresentable) |
+| `file-seq` | implemented | jdkio.rs dispatch native (S17, #61): string roots walk as paths (tests/collmisc.rs fileseq_rows), File-handle roots as files (jdkio.rs file_seq_rows, file_seq_unreadable_rows); S12 union — strings stay valid roots, no CCE-on-string |
 | `find-protocol-impl` | implemented | S14 class walk over `:impls` (inline answers x; normalized `{kw → fn}`); typeinternals.rs find_protocol_impl_rows, find_protocol_errors (S14, #58) |
 | `find-protocol-method` | implemented | S14 `(get (find-protocol-impl p x) methodk)`; typeinternals.rs find_protocol_method_walk, find_protocol_method_edges, find_protocol_errors, find_multi_arity_and_pref, nil_extension_row (S14, #58) |
 | `float-array` | implemented | S15 arrays (#59): arrays.rs ctor_array (Numbers rules; D3 exact f64); tests/arrays.rs ctors_zero, ctors_seq, ctors_init, descriptors (probes a-float-*, b-float-*, b-float-inf) |
@@ -776,7 +776,7 @@ No slice on this branch: hard-never reasons stand alone, design-blocked rows nam
 | `io!` | out-of-scope | STM refs/transactions (N4): never |
 | `isa?` | implemented | hierarchy.rs hier_isa_basics, hier_isa_arm_order, hier_interfaces, hier_global_arities (S13, #57; probes h-*, n-*) |
 | `iteration` | implemented | tests/collmisc.rs iteration_rows (eager-first-step; re-seqable) |
-| `iterator-seq` | out-of-scope | JDK collection/stream adapters (N1) |
+| `iterator-seq` | implemented | S17 lazy chunked-32 PendingSeq (empty nil); jdkio.rs iterator_seq_rows (S17, #61) |
 | `load-reader` | implemented | 1-arity over any reader (last value, nil when empty); `*file*` nil, `*ns*` isolated, forces `*read-eval*` true, `Compiler.load`-style wraps; reads all forms before evaluating (pre-existing load loop); zero_oos_s7_readgates.rs (S7, #50) |
 | `long-array` | implemented | S15 arrays (#59): arrays.rs ctor_array (Numbers rules); tests/arrays.rs ctors_zero, ctors_seq, ctors_init, ctors_sizes (probes a-long-*, b-long-*, b-long-*) |
 | `longs` | implemented | S15 arrays (#59): arrays.rs cast_array (exact [J checkcast); tests/arrays.rs casts_bytesq (probes d-longs-*) |
@@ -813,7 +813,7 @@ No slice on this branch: hard-never reasons stand alone, design-blocked rows nam
 | `remove-all-methods` | implemented | hierarchy.rs hier_remove_all (S13, #57; probes x-rmall*) |
 | `remove-tap` | implemented | cellstaps.rs tap_returns + tap_set_semantics (disj by =; never starts the loop) |
 | `replicate` | implemented | S5: core.clj `(take n (repeat x))` + `:deprecated "1.3"`; zero_oos_s5_state.rs deprecated_trio_rows |
-| `resultset-seq` | out-of-scope | JDBC ResultSet adapter; never |
+| `resultset-seq` | implemented | S17 eager Cons head + lazy row tail (dup labels Exception); jdkio.rs resultset_seq_rows (S17, #61) |
 | `selector` | implemented | core.clj macro over private selector-impl (rides the destructuring outlets); tests/zero_oos_s4b_macros.rs s4b_selector_rows |
 | `seq-to-map-for-destructuring` | implemented | destructure_expand.rs (assoc pairs; 1-elem first as-is; odd 3+ complex-path tail conj); tests/zero_oos_s4b_macros.rs s4b_seq_to_map_rows |
 | `seque` | implemented | tests/collmisc.rs seque_rows (feeder+queue; int-cast capacities) |
@@ -821,10 +821,10 @@ No slice on this branch: hard-never reasons stand alone, design-blocked rows nam
 | `set-agent-send-off-executor!` | implemented | cellstaps.rs exec_record_send_off (accept-and-record mirror of the send slot; fixed send-off pool) |
 | `short-array` | implemented | S15 arrays (#59): arrays.rs ctor_array (Numbers rules); tests/arrays.rs ctors_zero, ctors_seq, ctors_init, ctors_sizes (probes a-short-*, b-short-*, e-short-*) |
 | `shorts` | implemented | S15 arrays (#59): arrays.rs cast_array (exact [S checkcast); tests/arrays.rs casts_bytesq (probes d-shorts-*) |
-| `stream-into!` | out-of-scope | JDK collection/stream adapters (N1) |
-| `stream-reduce!` | out-of-scope | JDK collection/stream adapters (N1) |
-| `stream-seq!` | out-of-scope | JDK collection/stream adapters (N1) |
-| `stream-transduce!` | out-of-scope | JDK collection/stream adapters (N1) |
+| `stream-into!` | implemented | S17 into_xform editable dispatch over stream pulls; jdkio.rs stream_into_rows (S17, #61) |
+| `stream-reduce!` | implemented | S17 iterator-reduce! port (reduced unwrap); jdkio.rs stream_reduce_rows (S17, #61) |
+| `stream-seq!` | implemented | S17 terminal latching iterator-seq; jdkio.rs stream_seq_rows (S17, #61) |
+| `stream-transduce!` | implemented | S17 xform over stream pulls + completion; jdkio.rs stream_transduce_rows (S17, #61) |
 | `struct` | implemented | tests/collmisc.rs structmap_rows (positional; too-many IAE) |
 | `struct-map` | implemented | tests/collmisc.rs structmap_rows (basis-first order; extras) |
 | `sync` | out-of-scope | STM refs/transactions (N4): never |
@@ -870,4 +870,4 @@ No slice on this branch: hard-never reasons stand alone, design-blocked rows nam
 | `with-loading-context` | implemented | `core.clj` immediately-invoked-fn macro (no classloader to bind on the port); the native `*pending-paths*` cycle guard still applies; zero_oos_s7_readgates.rs (S7, #50) |
 | `with-local-vars` | implemented | core.clj macro over `__local-var*` anonymous dynamic vars (interop-free expansion; bindings pop on return and throw); tests/zero_oos_s4b_macros.rs s4b_with_local_vars_rows |
 | `with-precision` | implemented | core.clj defmacro over `binding` + `math-context` ctor; `+ - * / quot inc dec` consult; zero_oos_s2_tower.rs s2_precision_* |
-| `xml-seq` | out-of-scope | XML element walk; XML has no slice |
+| `xml-seq` | implemented | S17 core.clj verbatim port over tree-seq (string leaves); jdkio.rs xml_seq_rows (S17, #61) |
