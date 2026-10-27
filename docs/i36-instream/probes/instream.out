@@ -93,3 +93,4 @@ r-arity5 THROW clojure.lang.ArityException|"Wrong number of args (5) passed to: 
 r-opts-mapentry THROW java.lang.ClassCastException|"class clojure.lang.MapEntry cannot be cast to class clojure.lang.IPersistentMap (clojure.lang.MapEntry and clojure.lang.IPersistentMap are in unnamed module of loader 'app')"
 rl-arity1 THROW clojure.lang.ArityException|"Wrong number of args (1) passed to: clojure.core/read-line"
 wis-arity0 THROW clojure.lang.ArityException|"Wrong number of args (0) passed to: clojure.core/with-in-str"
+r-preserve-fail-then-tag THROW clojure.lang.LispReader$ReaderException|"java.lang.RuntimeException: No reader function for tag foo"

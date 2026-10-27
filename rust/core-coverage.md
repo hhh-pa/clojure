@@ -483,7 +483,7 @@ Significant vars with no port slice, grouped below by area with the reason. (Two
 | `methods` | out-of-scope | multimethods: no slice |
 | `remove-method` | out-of-scope | multimethods: no slice |
 | `with-in-str` | implemented | analyzer builtin (body value); tests/io.rs instream_with_in_str_rows |
-| `read` | implemented | 5 arities over StreamReader (opts map, ReaderException wrap); tests/io.rs instream_read_*_rows + instream_catch_rows |
+| `read` | implemented | 5 arities over StreamReader (opts map, ReaderException wrap); tests/io.rs instream_read_value_rows, instream_read_eof_rows, instream_read_error_rows, instream_read_opts_edge_rows, instream_recursive_unwrap_rows, instream_catch_rows |
 | `read-line` | implemented | 0-arity over *in* (nil at EOF); tests/io.rs instream_read_line_rows |
 | `line-seq` | implemented | core.clj eager-head Cons + lazy tail (accepts StreamReader by design); tests/io.rs instream_line_seq_rows |
 | `*in*` | implemented | dynamic root (stdin reader); tests/io.rs instream_in_shape_rows |

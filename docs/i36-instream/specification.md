@@ -3,10 +3,10 @@
 - Status: ready (research complete: `io.rs` Writer survey,
   `with-out-str` analyzer path, CharStream/Reader streaming design,
   JVM `core.clj` arity survey, repo-history `LispReader`/`LNPR`
-  mechanics, 95 alpha10 oracle pins).
+  mechanics, 96 alpha10 oracle pins).
 - Parent: out-of-scope reduction. Issue: #36. Branch: `36-instream`.
   Probes: `docs/i36-instream/probes/instream.{clj,out}`
-  (to be written; exit 0 required).
+  (committed, 96 pins; exit 0).
 
 ## Problem
 
@@ -17,7 +17,7 @@ symbol`); `read`-driven loops and `line-seq` pipelines cannot be expressed.
 
 ## Solution
 
-Two stages, each test-first against committed oracle probes:
+Three stages, each test-first against committed oracle probes:
 
 1. **Readers** (`reader.rs` + `READER_NATIVES`, `*in*` root): a
    `StreamReader` ExtensionValue mirroring `Writer` (sequence id,
@@ -116,7 +116,8 @@ Two stages, each test-first against committed oracle probes:
 - Given `(with-in-str "" (read *in* false :eof))`, when the stream is
   empty at a form boundary, then the result is `:eof` (no throw).
 - Given `(with-in-str "(a" (read *in* false :eof))`, when the form is
-  truncated, then an `EOFException` naming the start line is thrown.
+  truncated, then a `ReaderException` over the `RuntimeException`
+  root naming the start line is thrown.
 - Given `(with-in-str "x\ny" (doall (line-seq *in*)))`, when the seq
   realizes, then the result is `("x" "y")` and `*in*` still binds the
   same (exhausted, unclosed) reader.
@@ -188,8 +189,12 @@ Two stages, each test-first against committed oracle probes:
   (`r-opts-nil`), non-map non-nil opts are a CCE to
   `clojure.lang.IPersistentMap` (`r-opts-nonmap`);
   `eof-error?`/`recursive?` follow truthiness (`r-eoferr-truthy`,
-  `r-eoferr-nil`).
-- TDD plan: oracle probe files first (alpha10 jars, 95 pins; stdin
+  `r-eoferr-nil`); `(line-seq nil)` message text differs by design
+  (the JVM throws its direct-`.readLine` NPE, `because "rdr" is
+  null` per `ls-nil`, while the port's `binding`-based `line-seq`
+  throws the `rl-nil-in` text — the test pins `:threw-at-call`
+  only).
+- TDD plan: oracle probe files first (alpha10 jars, 96 pins; stdin
   behaviors probed through `StringReader`-backed equivalents plus one
   piped-stdin script run, never interactively), stage tests red
   (unresolvable vars), then stage 1 (readers + `read-line`), then

@@ -47,7 +47,8 @@ impl std::fmt::Debug for StreamReader {
 }
 
 /// The shared read position: one persistent parser plus the live
-/// stdin source (`None` for string readers and exhausted stdin).
+/// stdin source (`None` for string readers; stdin stays `Some`
+/// and EOF is detected per-read).
 struct StreamState {
     parser: Reader,
     stdin: Option<BufReader<Stdin>>,

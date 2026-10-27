@@ -134,3 +134,4 @@
 (throwof "r-opts-mapentry" '(with-in-str "1" (read (find {:a 1} :a) *in*)))
 (throwof "rl-arity1" '(with-in-str "x" (read-line 1)))
 (throwof "wis-arity0" '(with-in-str))
+(throwof "r-preserve-fail-then-tag" '(with-in-str "#?(a b] #foo \"x\"" [(try (read {:read-cond :preserve} *in*) :no-throw (catch Throwable t :caught)) (read {:read-cond :preserve} *in*)]))

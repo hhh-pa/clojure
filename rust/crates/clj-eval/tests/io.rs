@@ -670,6 +670,16 @@ fn instream_read_error_rows() {
         ),
         "[:threw (clojure.core/deref (:clj [1]))]"
     );
+    // A failed preserve read must not stick the conditional flag:
+    // the next tag read on the same reader still throws (probe
+    // `r-preserve-fail-then-tag`).
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(with-in-str \"#?(a b] #foo \\\"x\\\"\" [(try (read {:read-cond :preserve} *in*) :no-throw (catch Throwable t :caught)) (read {:read-cond :preserve} *in*)])"
+        ),
+        "clojure.lang.LispReader$ReaderException | java.lang.RuntimeException: No reader function for tag foo"
+    );
     // Ex-data and cause pins (probes `r-exdata`, `r-excause`).
     assert_eq!(
         run_last(
