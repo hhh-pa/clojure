@@ -422,6 +422,11 @@ fn iseq_err(v: &Value) -> NativeError {
 /// are not seqable). Staged for `seqable?` (S5D).
 #[allow(dead_code)]
 pub(crate) fn is_seqable(v: &Value) -> bool {
+    // Records seq (oracle `g-seqable-rec`); anything else host
+    // does not (oracle `g-seqable-dt`).
+    if crate::types::is_host_record(v) {
+        return true;
+    }
     match v {
         Value::Nil
         | Value::List(_)
@@ -627,6 +632,12 @@ pub(crate) fn step_unit(eval: &mut Evaluator, v: &Value) -> Result<StepUnit, Sig
         Value::Map(m) => step_map_unit(m),
         Value::Set(s) => step_set_unit(s),
         Value::Str(s) => step_str_unit(s),
+        // Records step their content entries (like `seq_value`;
+        // anything else host has no seq).
+        Value::HostType(_) => match crate::types::record_inst(v) {
+            Some(i) => step_map_unit(&i.content),
+            None => Err(eval.throw(iseq_err(v))),
+        },
         _ => Err(eval.throw(iseq_err(v))),
     }
 }
@@ -2363,6 +2374,12 @@ pub(crate) fn seq_value(eval: &mut Evaluator, v: &Value) -> Result<Value, Signal
         Value::Map(m) => Ok(seq_map(m)),
         Value::Set(s) => Ok(seq_set(s)),
         Value::Str(s) => Ok(seq_str(s)),
+        // Records seq their content entries (oracle `rec-seq`);
+        // anything else host has no seq (oracle `i-seq`).
+        Value::HostType(_) => match crate::types::record_inst(v) {
+            Some(i) => Ok(seq_map(&i.content)),
+            None => Err(eval.throw(iseq_err(v))),
+        },
         _ => Err(eval.throw(iseq_err(v))),
     }
 }
@@ -2382,6 +2399,15 @@ fn first_direct(v: &Value) -> Option<Value> {
         ),
         Value::Set(s) => Some(s.iter().next().cloned().unwrap_or(Value::Nil)),
         Value::Str(s) => Some(s.chars().next().map(Value::Char).unwrap_or(Value::Nil)),
+        // Records read their first content entry (empty reads nil,
+        // like `{}`); other host values keep the `ISeq` error.
+        Value::HostType(_) => crate::types::record_inst(v).map(|i| {
+            i.content
+                .iter()
+                .next()
+                .map(|(k, val)| clj_value::map_entry(k.clone(), val.clone()))
+                .unwrap_or(Value::Nil)
+        }),
         Value::Extension(_) => {
             as_subvector(v).map(|sv| sv.iter().next().cloned().unwrap_or(Value::Nil))
         }
@@ -2924,6 +2950,20 @@ pub(crate) fn realize_deep(eval: &mut Evaluator, v: &Value) -> Result<Value, Sig
     // printing renders them `(...)` like top-level infinites.
     if clj_value::seq_hash_unsupported(v) {
         return Ok(v.clone());
+    }
+    // Records realize their content like maps (a lazy field
+    // value forces before `hash`/`pr` walks it); other host values
+    // hold no realizable spine.
+    if let Some(i) = crate::types::record_inst(v) {
+        let mut pairs = Vec::with_capacity(i.content.size());
+        for (k, val) in i.content.iter() {
+            pairs.push((realize_deep(eval, k)?, realize_deep(eval, val)?));
+        }
+        let mut out = clj_value::new_map();
+        for (k, val) in pairs {
+            out = out.insert(k, val);
+        }
+        return Ok(crate::types::rewrap_record(i, out));
     }
     match v {
         Value::Extension(_) => realize_deep_extension(eval, v),

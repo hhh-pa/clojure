@@ -19,7 +19,9 @@ mod delay;
 mod extension;
 mod future;
 pub mod hasheq;
+mod host;
 mod keyword;
+mod multifn;
 mod print;
 mod promise;
 mod seq;
@@ -35,7 +37,12 @@ pub use delay::{Delay, DelayState};
 pub use extension::{ExtensionValue, ThrowClass, Throwable, Unbound, Var};
 pub use future::{Future, FutureOutcome, FutureState};
 pub use hasheq::{hash_code, hasheq, seq_hash_unsupported};
+pub use host::{
+    HostDef, HostInst, HostKind, HostMethod, HostVal, class_name, fallback_str, find_method,
+    host_eq, identity_hex, inst_hasheq, is_field, munge_ns, record_hasheq,
+};
 pub use keyword::Keyword;
+pub use multifn::{MultiFn, method_for, multifn_hex, multifn_str};
 pub use print::{
     java_debug, java_double_string, pr_to_string, print, print_opts::PrintOpts, print_to_string,
 };

@@ -1,0 +1,23 @@
+a-exact :run-away
+a-flip :eat
+a-default :ignore
+a-kw 9
+a-circle 12
+b-methods (":default" "[\"Bunny\" \"Lion\"]" "[\"Lion\" \"Bunny\"]")
+b-get :run-away
+b-get-miss #object[user$eval141$fn__142 0x38d5b107 "user$eval141$fn__142@38d5b107"]
+b-default-entry true
+c-remove THROW java.lang.IllegalArgumentException|"No method in multimethod 'tmpm' for dispatch value: 1"
+c-remove-miss :one
+d-prefer #object[clojure.lang.MultiFn 0xH "clojure.lang.MultiFn@L"]
+e-prefer-nonmulti THROW java.lang.ClassCastException|"class clojure.lang.Keyword cannot be cast to class clojure.lang.MultiFn (clojure.lang.Keyword and clojure.lang.MultiFn are in unnamed module of loader 'app')"
+e-nomethod THROW java.lang.IllegalArgumentException|"No method in multimethod 'strictm' for dispatch value: 2"
+e-nomulti THROW clojure.lang.Compiler$CompilerException|"Syntax error compiling at (/Users/hhu/workspace/clojure/docs/i33-typechain/probes/multimethods.clj:56:23)."
+e-bad-dispatch THROW java.lang.ClassCastException|"class java.lang.Long cannot be cast to class clojure.lang.IFn (java.lang.Long is in module java.base of loader 'bootstrap'; clojure.lang.IFn is in unnamed module of loader 'app')"
+f-string :string
+f-long :long
+f-miss THROW java.lang.IllegalArgumentException|"No method in multimethod 'foo' for dispatch value: class clojure.lang.Keyword"
+g-zero :zero
+g-one [:one 9]
+h-map false
+h-doc "eats things"
