@@ -30,9 +30,15 @@ G5. The JVM build (`pom.xml`, Maven workflows) keeps working untouched.
 
 ### 1.2 Non-goals (explicit)
 
-N1. JVM interop: dotted method/field access, `new`, `definterface`,
-    `genclass`, `proxy`, `reify` host members, `clojure.java.*`,
-    `clojure.reflect`, `import` of JVM classes.
+N1. JVM/host interop (permanent non-goal, owner-declared #64):
+    dotted method/field access, `new`, `import` of JVM classes,
+    and reflection over host classes (`class`, `instance?`,
+    `bases`, `supers`, `type`'s class fallback, `bean`, `cast`,
+    `class?`, `memfn`, `..`), plus `clojure.java.*` and
+    `clojure.reflect`. Port-native types/protocols/multimethods
+    (`deftype`, `defrecord`, `reify`, `proxy`, `definterface`,
+    `gen-class`, `defprotocol`, ...) are NOT
+    N1: they carry no host classes (see #33).
 N2. Full `core.clj` compatibility. `core.clj` is JVM-coupled; the port
     ships a Rust-backed core subset with a published coverage list.
 N3. Big-number tower in this task: ratios, BigInt, BigDecimal are a

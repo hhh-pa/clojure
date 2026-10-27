@@ -478,11 +478,11 @@ Significant vars with no port slice, grouped below by area with the reason. (Thr
 | `rand` | implemented | rng.rs natives mirroring `Math/random` formulas; re_rng.rs rand_rows |
 | `rand-int` | implemented | rng.rs `randomToLong` path; re_rng.rs rand_int_rows |
 | `shuffle` | implemented | Fisher-Yates over seqables (lazies realized); re_rng.rs shuffle_rows |
-| `instance?` | out-of-scope | interop (N1) |
-| `type` | out-of-scope | class-based; no slice |
-| `class` | out-of-scope | interop (N1) |
-| `bases` | out-of-scope | interop (N1) |
-| `supers` | out-of-scope | interop (N1) |
+| `instance?` | out-of-scope | Class membership test (N1, permanent #64): never |
+| `type` | out-of-scope | metadata :type lookup with class fallback (N1, permanent #64): never |
+| `class` | out-of-scope | returns the host Class (N1, permanent #64): never |
+| `bases` | out-of-scope | immediate host superclasses (N1, permanent #64): never |
+| `supers` | out-of-scope | transitive host supers (N1, permanent #64): never |
 | `defmulti` | implemented | multimethods.rs multi_dispatch_* + multi_var_shape + multi_custom_default + multi_options_rejected + multi_no_method + multi_bad_dispatch + multi_class_dispatch_analog + multi_value_semantics + multi_native_arity_guards + multi_multifn_native_guards; S-typechain stage 3 (#33): dispatch fn + docstring/attr head, :default option only, exact-plus-default invoke |
 | `defmethod` | implemented | multimethods.rs multi_arity_methods + multi_defmethod_returns_multifn + multi_defmethod_guards + multi_defmethod_missing; S-typechain stage 3 (#33): single/multi-arity tails, answers the multifn |
 | `prefer-method` | implemented | multimethods.rs multi_prefer_method; S-typechain stage 3 (#33): edges stored, never consulted (hierarchy fenced) |
@@ -501,8 +501,8 @@ Significant vars with no port slice, grouped below by area with the reason. (Thr
 | `read-line` | implemented | 0-arity over *in* (nil at EOF); tests/io.rs instream_read_line_rows |
 | `line-seq` | implemented | core.clj eager-head Cons + lazy tail (accepts StreamReader by design); tests/io.rs instream_line_seq_rows |
 | `*in*` | implemented | dynamic root (stdin reader); tests/io.rs instream_in_shape_rows |
-| `import` | out-of-scope | interop (N1) |
-| `..` | out-of-scope | interop (N1) |
+| `import` | out-of-scope | JVM class import; ns-imports stays {} (N1, permanent #64): never |
+| `..` | out-of-scope | chained host calls; no `.` syntax (N1, permanent #64): never |
 | `defprotocol` | implemented | protocols.rs proto_*; S-typechain stage 2 (#33): map descriptors (:on/:sigs/:impls/:interface), variadic dispatch fns |
 | `with-open` | implemented | protocols.rs with_open_*; S-typechain stage 2 (#33): Closeable contract, reverse-order finally closes |
 | `extend` | implemented | protocols.rs extend_*; S-typechain stage 2 (#33): map-form extends, bare-fn per-arity merge |
@@ -710,7 +710,7 @@ No slice on this branch: hard-never reasons stand alone, design-blocked rows nam
 | `aset-long` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
 | `aset-short` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
 | `await1` | out-of-scope | Public [a] await returning the agent; implemented await is [& agents] returning nil |
-| `bean` | out-of-scope | Host reflection/interop/beans/method-fns (N1) |
+| `bean` | out-of-scope | host bean reflection (N1, permanent #64): never |
 | `bit-and` | out-of-scope | pending design: bitwise lattice over tower; see #40 |
 | `bit-and-not` | out-of-scope | pending design: bitwise lattice over tower; see #40 |
 | `bit-clear` | out-of-scope | pending design: bitwise lattice over tower; see #40 |
@@ -727,7 +727,7 @@ No slice on this branch: hard-never reasons stand alone, design-blocked rows nam
 | `byte-array` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
 | `bytes` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
 | `bytes?` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
-| `cast` | out-of-scope | Host reflection/interop/beans/method-fns (N1) |
+| `cast` | out-of-scope | host class cast (N1, permanent #64): never |
 | `char-array` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
 | `char-escape-string` | out-of-scope | pending design: print dispatch (defmultis + tables); see #40 |
 | `char-name-string` | out-of-scope | pending design: print dispatch (defmultis + tables); see #40 |
@@ -740,7 +740,7 @@ No slice on this branch: hard-never reasons stand alone, design-blocked rows nam
 | `chunk-next` | out-of-scope | Chunked-seq + custom-type hashing impl details; port seqs/hash are separate |
 | `chunk-rest` | out-of-scope | Chunked-seq + custom-type hashing impl details; port seqs/hash are separate |
 | `chunked-seq?` | out-of-scope | Chunked-seq + custom-type hashing impl details; port seqs/hash are separate |
-| `class?` | out-of-scope | Host reflection/interop/beans/method-fns (N1) |
+| `class?` | out-of-scope | host Class test (N1, permanent #64): never |
 | `clear-agent-errors` | out-of-scope | Deprecated on JVM; replacement implemented |
 | `comparator` | out-of-scope | pending design: comparator wrapper; see #40 |
 | `compile` | out-of-scope | Bytecode compiler/classpath surface; port AOT (clj-aot) is separate |
@@ -782,7 +782,7 @@ No slice on this branch: hard-never reasons stand alone, design-blocked rows nam
 | `longs` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
 | `make-array` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
 | `make-hierarchy` | out-of-scope | pending design: hierarchy maps (coordinate with 33-typechain); see #40 |
-| `memfn` | out-of-scope | Host reflection/interop/beans/method-fns (N1) |
+| `memfn` | out-of-scope | host method fn (N1, permanent #64): never |
 | `method-sig` | out-of-scope | No type-system slice on this branch: proxies/deftype factories/method internals |
 | `mix-collection-hash` | out-of-scope | Chunked-seq + custom-type hashing impl details; port seqs/hash are separate |
 | `munge` | out-of-scope | pending design: JVM munger escaping adoption; see #40 |
