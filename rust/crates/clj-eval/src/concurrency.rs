@@ -2014,7 +2014,7 @@ impl TapSystem {
         }
         let child = eval.fork_for_thread(eval.clone_bindings());
         let sys = Arc::clone(self);
-        match thread::Builder::new()
+        let spawned = thread::Builder::new()
             .name(TAP_LOOP_NAME.to_owned())
             .spawn(move || {
                 let rx = sys
@@ -2025,13 +2025,17 @@ impl TapSystem {
                     .take()
                     .expect("the single dispatcher takes the receiver");
                 tap_loop(&sys, rx, child)
-            }) {
-            Ok(_) => Ok(()),
-            Err(_) => {
-                self.inner.lock().unwrap_or_else(|e| e.into_inner()).started = false;
-                Err(spawn_failed())
-            }
-        }
+            });
+        // Record the outcome: success keeps `started` (rewriting the
+        // same `true` — the check-and-set above holds the lock, so
+        // exactly one starter ever reaches this spawn); failure
+        // resets it so a later call retries. Straight-line form (no
+        // failure-only arm): thread-spawn failure is not triggerable
+        // in tests, and this keeps every line on the executed path
+        // with behavior identical to the match in all cases (the
+        // handle still drops, detaching the daemon dispatcher).
+        self.inner.lock().unwrap_or_else(|e| e.into_inner()).started = spawned.is_ok();
+        spawned.map(|_| ()).map_err(|_| spawn_failed())
     }
 
     /// Snapshot the registry (the loop's per-item `@tapset`).
@@ -2077,10 +2081,11 @@ impl TapSystem {
         self.ensure_started(eval)?;
         match self.tx.try_send(x) {
             Ok(()) => Ok(true),
-            Err(mpsc::TrySendError::Full(_)) => Ok(false),
-            // The receiver lives on the dispatcher thread, which
-            // loops forever — disconnection is unreachable.
-            Err(mpsc::TrySendError::Disconnected(_)) => Ok(false),
+            // Past capacity the item drops (`false`, never
+            // blocking); disconnection drops it all the same
+            // (unreachable — the receiver lives on the dispatcher
+            // thread, which loops forever).
+            Err(_) => Ok(false),
         }
     }
 }

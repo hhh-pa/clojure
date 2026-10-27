@@ -20,7 +20,9 @@
 //!   `c-vswap-nonfn`, `c-vswap-nonvol`), `volatile_vswap_shape`
 //!   (`c-shape*`, `c-double-eval`), `volatile_identity_meta`
 //!   (`c-eq-same`, `c-eq-distinct`, `c-identical`, `c-meta`,
-//!   `c-ifn`, `c-counted`).
+//!   `c-ifn`, `c-counted`), plus port-side pins with no oracle
+//!   rows: `volatile_hash_identity`, `volatile_map_key`,
+//!   `volatile_str`, `volatile_compare_name`.
 //! - taps (17): `tap_returns` (`t-no-taps`, `t-add-ret`,
 //!   `t-add-nonfn-ret`, `t-remove-ret`, `t-remove-never`),
 //!   `tap_deliver` (`t-deliver`, `t-tap-ret-with-tap`),
@@ -56,7 +58,7 @@
 use std::sync::{Arc, Mutex};
 
 use clj_eval::{Evaluator, SourceError, boot};
-use clj_value::{PrintOpts, Value, pr_to_string};
+use clj_value::{PrintOpts, Value, Volatile, pr_to_string};
 
 fn pr(v: &Value) -> String {
     pr_to_string(v, &PrintOpts::pr())
@@ -309,6 +311,80 @@ fn volatile_identity_meta() {
     assert_eq!(run_last(&mut eval, "(meta (volatile! 1))"), "nil");
     assert_eq!(run_last(&mut eval, "(ifn? (volatile! 1))"), "false");
     assert_eq!(run_last(&mut eval, "(counted? (volatile! 1))"), "false");
+}
+
+#[test]
+fn volatile_hash_identity() {
+    // Port-side pin (no oracle rows): volatiles hash by identity
+    // (the per-process cell id) under both `hash` (`hasheq`) and
+    // the private `hash-code` (Java `.hashCode`, called from
+    // `clojure.core` like `control.rs hash_code_spots`). Identity
+    // hashes are never exact values — consistency only.
+    let mut eval = boot();
+    assert_eq!(
+        run_last(&mut eval, "(let [v (volatile! 1)] (= (hash v) (hash v)))"),
+        "true"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(integer? (hash (volatile! nil)))"),
+        "true"
+    );
+    run(&mut eval, "(in-ns 'clojure.core)");
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [v (volatile! 1)] (= (hash-code v) (hash-code v)))"
+        ),
+        "true"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(integer? (hash-code (volatile! nil)))"),
+        "true"
+    );
+}
+
+#[test]
+fn volatile_map_key() {
+    // Port-side pin (no oracle rows): volatiles hash (std `Hash`)
+    // by identity, so they serve as map keys and set members with
+    // cell-identity semantics — the same cell hits, a distinct
+    // equal-valued cell misses.
+    let mut eval = boot();
+    assert_eq!(
+        run_last(&mut eval, "(let [v (volatile! 1)] (get {v :found} v))"),
+        ":found"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(let [v (volatile! 1)] (contains? #{v} v))"),
+        "true"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(get {(volatile! 1) :a} (volatile! 1) :miss)"),
+        ":miss"
+    );
+}
+
+#[test]
+fn volatile_str() {
+    // Port-side pin (no oracle rows): `str` renders the `toString`
+    // (`Class@hex`), never the `#object[…]` print form (mirrors
+    // the `concurrency.rs` atom `str` rows).
+    let mut eval = boot();
+    let s = run_last(&mut eval, "(str (volatile! 1))");
+    assert!(
+        s.starts_with("\"clojure.lang.Volatile@") && s.len() > "\"clojure.lang.Volatile@\"".len(),
+        "bad volatile str: {s}"
+    );
+}
+
+#[test]
+fn volatile_compare_name() {
+    // Port-side pin (no oracle rows): `clj_value::compare` (not the
+    // `compare` native, which routes through `jvm_compare`)
+    // reports the `Volatile` type name on incomparable pairs.
+    let v = Value::Volatile(Volatile::new(Value::Int(1)));
+    let err = clj_value::compare(&v, &Value::Int(1)).expect_err("volatile is incomparable");
+    assert_eq!(err.message(), "Cannot compare Volatile to Long");
 }
 
 // ---- taps ----
