@@ -2,7 +2,8 @@
 
 - Status: ready (research complete: `io.rs` Writer survey,
   `with-out-str` analyzer path, CharStream/Reader streaming design,
-  JVM `core.clj` arity survey).
+  JVM `core.clj` arity survey, repo-history `LispReader`/`LNPR`
+  mechanics, 78 alpha10 oracle pins).
 - Parent: out-of-scope reduction. Issue: #36. Branch: `36-instream`.
   Probes: `docs/i36-instream/probes/instream.{clj,out}`
   (to be written; exit 0 required).
@@ -29,13 +30,20 @@ Two stages, each test-first against committed oracle probes:
    one JVM-`readLine` line (nil at EOF).
 2. **Forms** (`read`, `line-seq`, `with-in-str`): `read` serves all five
    JVM arities over the bound reader (opts map `:read-cond`/`:features`
-   onto `ReaderOpts`; stdin grows the buffer line by line until a form
-   completes or EOF; `Eof*` reader errors retry on live stdin but throw
-   `EOFException` on strings or exhausted stdin); `line-seq` is a
-   `core.clj` defn over `binding` + `read-line` + `lazy-seq` (zero Rust,
-   like `random-sample`); `with-in-str` is an analyzer builtin mirroring
+   onto `ReaderOpts`, default deny; stdin grows the buffer line by line
+   until a form completes or EOF; every read failure surfaces the
+   `RuntimeException` root — wrapped in `ReaderException` with ex-data
+   line/column unless `recursive?` is true). `line-seq` is a `core.clj`
+   defn with an eager first pull plus a lazy tail (zero Rust, like
+   `random-sample`); it consumes the port's readable by design (the
+   JVM's BufferedReader-only gate is unrepresentable without host
+   classes — probes `ls-basic`–`ls-empty` document the JVM side).
+   `with-in-str` is an analyzer builtin mirroring
    `parse_with_out_str`/`Expr::WithOutStr` (body non-tail, returns the
    body's value).
+3. **Drive-by** (one line + one test): `read-string` passes
+   `ReadCond::Deny` — oracle `rs-cond` proves the JVM rejects
+   reader conditionals there, and the port currently allows them.
 
 ## Part 1 — User/functional specification
 
@@ -53,6 +61,14 @@ Two stages, each test-first against committed oracle probes:
    `with-open` stays out of scope).
 6. `with-in-str` binds a fresh string reader, runs the body, returns the
    body's value; the outer `*in*` is untouched afterwards.
+7. `read` failures match the JVM wrapper rule (history
+   `LispReader.java:310-317`, probes `r-*-outer`): non-recursive reads
+   throw `ReaderException` (message `{cause}: {root}`, ex-data
+   `:clojure.error/line` + `:clojure.error/column` from the error span,
+   root cause attached); `recursive?` reads rethrow the raw root.
+8. `read` and `read-string` reject reader conditionals unless the opts
+   map opts in (`r-cond-plain`, `rs-cond`); `:eof` present (even nil)
+   means no-throw, absent means throw (`r-opts-eofnil`).
 
 ### 1.2 Non-goals (explicit)
 
@@ -68,6 +84,9 @@ Two stages, each test-first against committed oracle probes:
   data readers).
 - REPL interplay: `read`/`read-line` on the stdin root block on
   process stdin like the JVM; no rustyline integration.
+- `read-string`'s JVM 2-arity (`[opts s]`): still missing after this
+  slice (only the deny-default drive-by lands here) — follow-up, not
+  fixed here.
 
 ### 1.3 Acceptance criteria
 
@@ -77,8 +96,12 @@ Two stages, each test-first against committed oracle probes:
 - `read`/`read-line` interleave on one stream with a shared position:
   `(with-in-str "a\n(b)" (read-line) (read))` → `"a"`, `(b)`.
 - Truncated input throws even with `eof-error?` false: `(with-in-str
-  "(a" (read *in* false :eof))` → `EOFException` (the JVM returns
-  eof-value only at clean form boundaries).
+  "(a" (read *in* false :eof))` → `ReaderException` over a
+  `RuntimeException` root (the JVM returns eof-value only at clean
+  form boundaries).
+- `line-seq` pulls eagerly: `(line-seq nil)` throws at call time, no
+  `doall` needed (`ls-eager`, `ls-str-eager`); values are `Cons` with
+  a lazy tail (`ls-class2`, `ls-lazy2`).
 - No changes under `docs/i33-typechain/` or typechain code paths
   (parallel-agent fence).
 
@@ -99,6 +122,14 @@ Two stages, each test-first against committed oracle probes:
   same (exhausted, unclosed) reader.
 - Given `(with-in-str "1 2" (read) (read-line))`, when a form read is
   followed by a line read, then the results are `1` and `" 2"`.
+- Given `(with-in-str "(a" (read))`, when the form is truncated, then
+  a `ReaderException` is caught by both `(catch ReaderException …)`
+  and `(catch RuntimeException …)`, its message is
+  `"java.lang.RuntimeException: EOF while reading, starting at line
+  1"`, and its ex-data is `{:clojure.error/line 2,
+  :clojure.error/column 1}`.
+- Given `(line-seq nil)`, when it is called without forcing, then it
+  still throws (the first pull is eager, like the JVM).
 
 ## Part 2 — Technical specification
 
@@ -110,19 +141,30 @@ Two stages, each test-first against committed oracle probes:
 - Port shape: new `rust/crates/clj-eval/src/reader.rs` (`StreamReader`
   extension + `stdin_reader`/`string_reader` constructors +
   `READER_NATIVES`, chained in `ns.rs` beside `IO_NATIVES`);
-  `ThrowClass::EOFException` in `clj-value/src/extension.rs`
-  (`java.io.EOFException`, mirroring #32's `PatternSyntaxException`);
-  `*in*` dynamic root in `ns.rs` beside `*out*`/`*err*`; `line-seq`
-  appended to `core.clj` as `(defn line-seq [rdr] (lazy-seq (binding
-  [*in* rdr] (when-let [line (read-line)] (cons line (line-seq
-  rdr))))))`; `Expr::WithInStr` analyzer builtin in `expr.rs`/`eval.rs`
-  mirroring `WithOutStr` plus the leading `s` expression; AOT arms
+  `ThrowClass::ReaderException` in `clj-value/src/extension.rs`
+  (`clojure.lang.LispReader$ReaderException`, parent
+  `java.lang.RuntimeException` in `throw_parent`, catch-name arms in
+  `throw_class_for`, mirroring #32's `PatternSyntaxException`);
+  `*in*` dynamic root in `ns.rs` beside `*out*`/`*err*` (plus the
+  `boot_refer_user` entry); `line-seq` appended to `core.clj` as
+  `(defn line-seq [rdr] ((fn step [] (binding [*in* rdr]
+  (when-let [line (read-line)] (cons line (lazy-seq (step))))))))`
+  (eager first pull, lazy tail — no `doall` needed to throw);
+  `Expr::WithInStr` analyzer builtin in `expr.rs`/`eval.rs`
+  mirroring `WithOutStr` (variant + `SpecialOp` + table row +
+  shadowable arm + dispatch + non-tail body) plus the leading `s`
+  expression, returning the body's value; AOT arms
   (`read`/`read-line`/`line-seq` join the "only print writes" hint,
-  `with-in-str` joins "macros are not expanded").
+  `with-in-str` joins "macros are not expanded"); `read-string`
+  drive-by: `read_cond: ReadCond::Deny` in `native_read_string`.
 - clj-reader additions (small, unit-tested there): `CharStream::extend`
   (append normalized chars, coalescing a `\r\n` split across chunks),
-  `CharStream::read_line` (JVM terminators in normalized space),
-  `Reader::set_opts` (fresh ns/aliases per `read`, like `read-string`).
+  `CharStream::read_line` (one `\n`-split line via repeated `read()`,
+  so tracking rides free; `None` at EOF), `Reader::set_opts` (fresh
+  ns/aliases per `read`, like `read-string`), plus a `Send + Sync`
+  compile-assert on `Reader` (it lives behind the stream `Mutex`).
+  Verify `ReadCond::Deny` already reports `Conditional read not
+  allowed`, else fix it there.
 - Stream state: `Arc<Mutex<StreamState>>` holding one persistent
   `clj_reader::Reader` plus an optional `BufReader<Stdin>`; `read` and
   `read-line` share the position, so interleaving matches the JVM.
@@ -132,16 +174,24 @@ Two stages, each test-first against committed oracle probes:
   `clojure.lang.LineNumberingPushbackReader` (the JVM class of the
   `*in*` root and the `with-in-str` binding alike); the id is
   port-owned like `Writer`'s (fenced equivalence, probe-shaped).
-- Error texts oracle-pinned: nil/non-reader `*in*` for `read-line`
-  (NPE/CCE), non-reader stream arg for `read` (CCE to
-  `java.io.PushbackReader`), opts-map `:eof` presence rule (present →
-  value at EOF, absent → throw), unknown opt keys ignored.
-- TDD plan: oracle probe files first (alpha10 jars; stdin behaviors
-  probed through `StringReader`-backed equivalents plus one piped-stdin
-  script run, never interactively), stage tests red (unresolvable
-  vars), then stage 1 (readers + `read-line`), then stage 2
-  (`read`/`line-seq`/`with-in-str`), then row flips +
-  `coverage_matrix`.
+- Error texts oracle-pinned (`instream.out`): nil `*in*` for
+  `read-line` is the verbatim Var-`get()` NPE (`rl-nil-in`); nil
+  stream arg for `read` is the verbatim `Reader.read()` NPE
+  (`r-nil-stream`); non-readers are stable-shape CCEs via
+  `cce_message` (JVM texts carry module-loader suffixes, so the
+  probes document them while the port stays stable, like `read-string`
+  already does); `ReaderException` message is
+  `{cause-jvm-class}: {root-message}` with ex-data
+  `{:clojure.error/line, :clojure.error/column}` from the error span
+  (`r-exdata*`, `r-baddelim-exdata`); opts-map `:eof` presence rule
+  (present, even nil, → value at EOF; absent → throw); unknown opt
+  keys ignored (`r-opts-unknown`).
+- TDD plan: oracle probe files first (alpha10 jars, 78 pins; stdin
+  behaviors probed through `StringReader`-backed equivalents plus one
+  piped-stdin script run, never interactively), stage tests red
+  (unresolvable vars), then stage 1 (readers + `read-line`), then
+  stage 2 (`read`/`line-seq`/`with-in-str` + `read-string` drive-by),
+  then row flips + `coverage_matrix`.
 - CI impact: new Rust code under `rust/**`, no new dependencies (std
   only); full gate suite applies (fmt, clippy `-D warnings`, 100%
   line+patch floors, complexity ratchet ≤15). No workflow changes
