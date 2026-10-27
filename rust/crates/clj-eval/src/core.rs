@@ -1334,8 +1334,35 @@ fn compare_same_type(x: &Value, y: &Value) -> Result<Option<std::cmp::Ordering>,
         (Value::Keyword(a), Value::Keyword(b)) => Ok(Some(compare_named(a, b))),
         (Value::Symbol(a), Value::Symbol(b)) => Ok(Some(compare_named(a, b))),
         (Value::Vector(a), Value::Vector(b)) => Ok(Some(compare_vectors(a, b)?)),
+        // S9 scalars order within their kind (the port takes the
+        // sign; the JVM returns raw `compareTo` ints).
+        (Value::Uuid(_), Value::Uuid(_))
+        | (Value::Instant(_), Value::Instant(_))
+        | (Value::Uri(_), Value::Uri(_)) => Ok(Some(compare_scalar_pair(x, y))),
         // Entries order exactly like their 2-vectors (Oracle FX2
         // `compare`, `sort-entries`, `maxkey`).
+        (Value::MapEntry { .. }, Value::Vector(_))
+        | (Value::Vector(_), Value::MapEntry { .. })
+        | (Value::MapEntry { .. }, Value::MapEntry { .. }) => compare_entry_pair(x, y),
+        _ => Ok(None),
+    }
+}
+
+/// S9 scalar order within one kind (split from
+/// `compare_same_type` for the complexity budget).
+fn compare_scalar_pair(x: &Value, y: &Value) -> std::cmp::Ordering {
+    match (x, y) {
+        (Value::Uuid(a), Value::Uuid(b)) => a.cmp_uuid(b),
+        (Value::Instant(a), Value::Instant(b)) => a.cmp_instant(b),
+        (Value::Uri(a), Value::Uri(b)) => a.compare_uri(b).cmp(&0),
+        _ => unreachable!("scalar gate"),
+    }
+}
+
+/// Entry pairs order as their 2-vectors (split from
+/// `compare_same_type` for the complexity budget).
+fn compare_entry_pair(x: &Value, y: &Value) -> Result<Option<std::cmp::Ordering>, NativeError> {
+    match (x, y) {
         (Value::MapEntry { key, val }, Value::Vector(b)) => {
             let tmp = clj_value::Vector::from_vec(vec![(**key).clone(), (**val).clone()]);
             Ok(Some(compare_vectors(&tmp, b)?))
@@ -1349,7 +1376,7 @@ fn compare_same_type(x: &Value, y: &Value) -> Result<Option<std::cmp::Ordering>,
             let b = clj_value::Vector::from_vec(vec![(**k2).clone(), (**v2).clone()]);
             Ok(Some(compare_vectors(&a, &b)?))
         }
-        _ => Ok(None),
+        _ => unreachable!("entry gate"),
     }
 }
 
@@ -1383,6 +1410,11 @@ fn compare_cast_err(x: &Value, y: &Value) -> NativeError {
         Value::Bool(_) => "java.lang.Boolean",
         Value::Keyword(_) => "clojure.lang.Keyword",
         Value::Symbol(_) => "clojure.lang.Symbol",
+        // S9 scalars are `Comparable` (oracles `u-cmp-str`,
+        // `i-cmp-str`, `r-cmp-str` pin the texts).
+        Value::Uuid(_) => "java.util.UUID",
+        Value::Instant(_) => "java.util.Date",
+        Value::Uri(_) => "java.net.URI",
         Value::Vector(_) | Value::MapEntry { .. } => "clojure.lang.IPersistentVector",
         _ => return cce_err(x, "java.lang.Comparable"),
     };
@@ -2306,6 +2338,10 @@ fn str_of_realized(eval: &mut Evaluator, v: &Value) -> Result<String, NativeErro
         Value::List(_) | Value::Vector(_) | Value::Map(_) | Value::Set(_) => {
             clj_value::pr_to_string(&r, &clj_value::PrintOpts::pr())
         }
+        // S9 scalars answer `toString` (bare UUID/URI,
+        // `Date.toString` instants) — `print` stays tagged while
+        // `str` goes bare.
+        Value::Uuid(_) | Value::Instant(_) | Value::Uri(_) => clj_value::java_debug(&r),
         // Extensions with a `str` display (only `MathContext`,
         // S2 oracle `wp-str`) render it; the rest print
         // readably.

@@ -104,7 +104,21 @@ pub fn hasheq(v: &Value) -> i32 {
         Value::BigInt(_) | Value::BigInteger(_) | Value::BigDec(_) | Value::Ratio(_) => {
             hasheq_tower(v)
         }
+        // S9 scalars are not `IHashEq`, so `Util.hasheq` falls
+        // back to `.hashCode` (the `TaggedLiteral` rule below).
+        Value::Uuid(_) | Value::Instant(_) | Value::Uri(_) => scalar_hash(v),
         other => hasheq_mid(other),
+    }
+}
+
+/// S9 scalar hashing (split for the budget): the JDK `.hashCode`
+/// of each kind.
+fn scalar_hash(v: &Value) -> i32 {
+    match v {
+        Value::Uuid(u) => u.hash_code(),
+        Value::Instant(i) => i.hash_code(),
+        Value::Uri(u) => u.hash_code(),
+        _ => unreachable!("caller passes scalars only"),
     }
 }
 
@@ -221,6 +235,7 @@ pub fn hash_code(v: &Value) -> i32 {
         Value::Keyword(k) => keyword_hash_code(k),
         Value::List(l) => list_hash_code(l.iter().map(hash_code)),
         Value::Vector(v) => list_hash_code(v.iter().map(hash_code)),
+        Value::Uuid(_) | Value::Instant(_) | Value::Uri(_) => scalar_hash(v),
         other => hash_code_mid(other),
     }
 }

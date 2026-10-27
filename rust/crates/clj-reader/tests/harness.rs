@@ -400,6 +400,10 @@ fn append_canon_body(out: &mut String, v: &Value, print_meta: bool) {
         | Value::Symbol(_)
         | Value::Keyword(_)
         | Value::Regex(_)
+        // S9 scalars print canonically (tagged `#inst`/`#uuid`/bare URI).
+        | Value::Uuid(_)
+        | Value::Instant(_)
+        | Value::Uri(_)
         // Evaluator-only values (the reader never emits them).
         | Value::HostType(_)
         | Value::MultiFn(_)

@@ -304,9 +304,9 @@ fn print_scalars(v: &Value, opts: &PrintOpts, level: Option<i64>, out: &mut Stri
         }
         Value::Str(s) => print_string(s, opts.readably, out),
         Value::Char(c) => print_char(*c, opts.readably, out),
-        Value::Symbol(s) => write!(out, "{s}").unwrap(),
-        Value::Keyword(k) => write!(out, "{k}").unwrap(),
+        Value::Symbol(_) | Value::Keyword(_) => print_named(v, out),
         Value::Regex(pattern) => print_regex(pattern, out),
+        Value::Uuid(_) | Value::Instant(_) | Value::Uri(_) => print_scalar(v, opts, out),
         Value::List(l) => {
             print_sequential(
                 "(",
@@ -330,6 +330,16 @@ fn print_scalars(v: &Value, opts: &PrintOpts, level: Option<i64>, out: &mut Stri
             );
         }
         other => print_more(other, opts, level, out),
+    }
+}
+
+/// Symbols and keywords print bare. Chained so each match stays
+/// under the complexity gate.
+fn print_named(v: &Value, out: &mut String) {
+    match v {
+        Value::Symbol(s) => write!(out, "{s}").unwrap(),
+        Value::Keyword(k) => write!(out, "{k}").unwrap(),
+        _ => unreachable!("named gate"),
     }
 }
 
@@ -360,6 +370,31 @@ fn print_tower(v: &Value, opts: &PrintOpts, out: &mut String) {
                 write!(out, "{}/{}", r.numer(), r.denom()).unwrap();
             }
         }
+    }
+}
+
+/// Print an S9 scalar (both `readably` modes — the JVM
+/// print-methods are unconditional): `#uuid "<canon>"`,
+/// `#inst "<UTC>-00:00"`, `#object[java.net.URI 0x<id> "<text>"]`
+/// (quoted under `pr`, bare under `print`).
+fn print_scalar(v: &Value, opts: &PrintOpts, out: &mut String) {
+    match v {
+        Value::Uuid(u) => {
+            out.push_str("#uuid \"");
+            out.push_str(&u.to_canonical());
+            out.push('"');
+        }
+        Value::Instant(i) => {
+            out.push_str("#inst \"");
+            out.push_str(&i.to_rfc3339());
+            out.push_str("-00:00\"");
+        }
+        Value::Uri(u) => {
+            write!(out, "#object[java.net.URI 0x{:x} ", u.id()).unwrap();
+            print_string(u.text(), opts.readably, out);
+            out.push(']');
+        }
+        _ => unreachable!("caller passes scalars only"),
     }
 }
 
@@ -972,10 +1007,23 @@ pub fn java_debug(v: &Value) -> String {
         Value::Symbol(s) => s.to_string(),
         Value::Keyword(k) => k.to_string(),
         Value::Regex(pattern) => pattern.to_string(),
+        // S9 `toString`s: UUID/URI bare, instants as `Date.toString`.
+        Value::Uuid(_) | Value::Instant(_) | Value::Uri(_) => scalar_debug(v),
         Value::Var(v) => format!("#'{}", v.sym),
         Value::Unbound(u) => format!("Unbound: #'{}", u.sym),
         Value::Throwable(t) => java_debug_throwable(t),
         other => java_debug_rest(other),
+    }
+}
+
+/// S9 scalar `toString`s (split from [`java_debug`] for the
+/// complexity budget).
+fn scalar_debug(v: &Value) -> String {
+    match v {
+        Value::Uuid(u) => u.to_canonical(),
+        Value::Instant(i) => i.to_date_string(),
+        Value::Uri(u) => u.text().to_owned(),
+        _ => unreachable!("caller passes scalars only"),
     }
 }
 

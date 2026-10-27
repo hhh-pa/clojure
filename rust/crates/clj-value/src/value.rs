@@ -745,6 +745,15 @@ pub enum Value {
     Set(Set),
     /// Regex pattern source (matching arrives with `re-*` in S5).
     Regex(Arc<str>),
+    /// A UUID (S9): 128 bits, `java.util.UUID` semantics.
+    Uuid(crate::Uuid),
+    /// An instant (S9): millis since the epoch, `java.util.Date`
+    /// semantics.
+    Instant(crate::Instant),
+    /// A URI (S9): validated string plus raw parts, `java.net.URI`
+    /// semantics. Boxed: the parsed parts are larger than the rest
+    /// of the payload, and `Value` travels in `Result` errors.
+    Uri(Box<crate::Uri>),
     /// `#tag form` under `:read-cond :preserve` (or suppressed reads).
     TaggedLiteral { tag: Symbol, form: Box<Value> },
     /// `#?` / `#?@` under `:read-cond :preserve`.
@@ -1078,6 +1087,11 @@ fn value_eq_rest(a: &Value, b: &Value) -> bool {
         (Value::Agent(a), Value::Agent(b)) => cell_meta_eq(a.same_cell(b), a.meta(), b.meta()),
         (Value::Volatile(a), Value::Volatile(b)) => a.same_cell(b),
         (Value::Extension(a), Value::Extension(b)) => a.dyn_eq(&**b),
+        // S9 scalars: UUID by bits, instants by millis, URIs by
+        // the JDK `equals` (content only — never the print id).
+        (Value::Uuid(a), Value::Uuid(b)) => a == b,
+        (Value::Instant(a), Value::Instant(b)) => a == b,
+        (Value::Uri(a), Value::Uri(b)) => a.uri_eq(b),
         _ => false,
     }
 }
@@ -1347,6 +1361,21 @@ fn hash_value_rest<H: Hasher>(v: &Value, state: &mut H) {
         Value::MultiFn(m) => {
             state.write_u8(26);
             m.name.hash(state);
+        }
+        // S9 scalars: UUID by bits, instants by millis, URIs by
+        // normalized content (consistent with `uri_eq`).
+        Value::Uuid(u) => {
+            state.write_u8(27);
+            state.write_u64(u.hi);
+            state.write_u64(u.lo);
+        }
+        Value::Instant(i) => {
+            state.write_u8(28);
+            state.write_i64(i.millis);
+        }
+        Value::Uri(u) => {
+            state.write_u8(29);
+            u.hash_content(state);
         }
         // All other variants are handled upstream (the single
         // caller partitions the variants).
@@ -1681,6 +1710,10 @@ fn plain_equals_rest(a: &Value, b: &Value) -> bool {
         (Value::Extension(a), Value::Extension(b)) => a.dyn_eq(&**b),
         (Value::Map(m), Value::Map(o)) => plain_equals_maps(m, o),
         (Value::Set(s), Value::Set(o)) => plain_equals_sets(s, o),
+        // S9 scalars: `.equals` is the `=` rule here too.
+        (Value::Uuid(a), Value::Uuid(b)) => a == b,
+        (Value::Instant(a), Value::Instant(b)) => a == b,
+        (Value::Uri(a), Value::Uri(b)) => a.uri_eq(b),
         // `.equals` is loose across List/Vector too (`doEquals` takes
         // the `java.util.List` branch; `ASeq.equals` accepts `List`;
         // an entry is its 2-vector).

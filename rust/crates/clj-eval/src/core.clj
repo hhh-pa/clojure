@@ -1350,6 +1350,26 @@
              (list 'quote t) mmap))
          (partition 2 proto+mmaps))))
 
+;; S9 scalar kinds (issue #52): `Inst` over the `Instant` kind.
+;; The `java.util.Date` extension reads millis through the hidden
+;; `__inst_millis*` native; user types extend `Inst` through the
+;; ordinary machinery.
+(defprotocol Inst
+  (inst-ms* [inst]))
+(extend-protocol Inst
+  java.util.Date
+  (inst-ms* [inst] (clojure.core/__inst_millis* inst)))
+(defn inst-ms
+  "Return the number of milliseconds since January 1, 1970, 00:00:00 GMT"
+  {:added "1.9"}
+  [inst]
+  (inst-ms* inst))
+(defn inst?
+  "Return true if x satisfies Inst"
+  {:added "1.9"}
+  [x]
+  (satisfies? Inst x))
+
 ;; Host class names as values (the port has no class literals):
 ;; `String` in value position is its name string, so `extends?` /
 ;; `satisfies?` take classes the way the pins write them.

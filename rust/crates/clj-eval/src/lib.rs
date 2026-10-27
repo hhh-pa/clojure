@@ -37,6 +37,7 @@ pub mod protocol;
 pub mod re;
 pub mod reader;
 pub mod rng;
+pub mod scalars;
 pub mod seqs;
 pub mod types;
 pub mod vars;

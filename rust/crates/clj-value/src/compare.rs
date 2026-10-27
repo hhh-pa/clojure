@@ -81,6 +81,11 @@ pub fn compare(a: &Value, b: &Value) -> Result<Ordering, CompareError> {
             y.namespace(),
             y.name(),
         )),
+        // S9 scalars order within their kind (signed UUID words,
+        // instant millis, the JDK URI order's sign).
+        (Value::Uuid(x), Value::Uuid(y)) => Ok(x.cmp_uuid(y)),
+        (Value::Instant(x), Value::Instant(y)) => Ok(x.cmp_instant(y)),
+        (Value::Uri(x), Value::Uri(y)) => Ok(x.compare_uri(y).cmp(&0)),
         _ => Err(CompareError {
             left: type_name(a),
             right: type_name(b),
@@ -220,16 +225,20 @@ fn type_name(v: &Value) -> &'static str {
         Value::Char(_) => "Character",
         Value::Symbol(_) => "Symbol",
         Value::Keyword(_) => "Keyword",
+        Value::Uuid(_) | Value::Instant(_) | Value::Uri(_) => scalar_type_name(v),
         Value::Extension(e) => extension_type_name(e),
         _ => port_type_name(v).unwrap_or_else(|| ref_or_collection_type_name(v)),
     }
 }
 
-/// Scalar number type names (split from `type_name` for the
-/// complexity budget).
+/// Scalar number and S9 type names (split from `type_name` for
+/// the complexity budget).
 fn scalar_type_name(v: &Value) -> &'static str {
     match v {
         Value::Int(_) => "Long",
+        Value::Uuid(_) => "UUID",
+        Value::Instant(_) => "Instant",
+        Value::Uri(_) => "URI",
         _ => "Double",
     }
 }

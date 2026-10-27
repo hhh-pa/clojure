@@ -4,7 +4,7 @@ The complete inventory of `clojure.core` in this port: every var,
 its conformance state, and — for exclusions — why it is excluded.
 If a var is not listed here, that is a file bug, not a silent gap.
 
-- **692 vars: 533 implemented, 1 divergent, 158 out of scope,
+- **692 vars: 541 implemented, 1 divergent, 150 out of scope,
   0 planned.** The port reports Clojure `1.13.0-alpha9`
   (`clojure-version`).
 - **Universe.** 692 rows = 685 JVM publics + 7 extra-universe rows: 4 port-visible JVM privates
@@ -686,7 +686,7 @@ No slice on this branch: hard-never reasons stand alone, design-blocked rows nam
 | `-cache-protocol-fn` | out-of-scope | No protocol slice on this branch (protocol track owns design) |
 | `-reset-methods` | out-of-scope | No protocol slice on this branch (protocol track owns design) |
 | `EMPTY-NODE` | out-of-scope | No type-system slice on this branch: proxies/deftype factories/method internals |
-| `Inst` | out-of-scope | pending design: date/time value kind + #inst tag; see #40 |
+| `Inst` | implemented | S9 defprotocol + java.util.Date extension (hidden __inst_millis* millis reader); scalarkinds.rs inst_protocol_shape, inst_user_extension |
 | `PrintWriter-on` | out-of-scope | java.io.PrintWriter adapter ctor; port Writer kind is separate |
 | `StackTraceElement->vec` | out-of-scope | pending design: error-data shape; see #40 |
 | `Throwable->map` | out-of-scope | pending design: error-data shape; see #40 |
@@ -767,9 +767,9 @@ No slice on this branch: hard-never reasons stand alone, design-blocked rows nam
 | `hash-ordered-coll` | implemented | cellstaps.rs hash_ordered_values + hash_ordered_errors (Murmur3 ordered mix; maps iterate entries; nil NPE + non-Iterable CCE) |
 | `hash-unordered-coll` | implemented | cellstaps.rs hash_unordered_values (Murmur3 unordered mix; vec-order-insensitive; entry = ordered [k v]; nil NPE) |
 | `init-proxy` | out-of-scope | No type-system slice on this branch: proxies/deftype factories/method internals |
-| `inst-ms` | out-of-scope | pending design: date/time value kind + #inst tag; see #40 |
-| `inst-ms*` | out-of-scope | pending design: date/time value kind + #inst tag; see #40 |
-| `inst?` | out-of-scope | pending design: date/time value kind + #inst tag; see #40 |
+| `inst-ms` | implemented | S9 core.clj over inst-ms* (cutover-calendar millis); scalarkinds.rs inst_ms_failures; scalars.rs inst_ms_over_instants |
+| `inst-ms*` | implemented | S9 protocol method (macro-generated dispatch fn); scalarkinds.rs inst_user_extension |
+| `inst?` | implemented | S9 satisfies? over Inst; scalarkinds.rs inst_predicate_matches_satisfies; scalars.rs inst_pred_over_instant |
 | `int-array` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
 | `into-array` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
 | `ints` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
@@ -789,7 +789,7 @@ No slice on this branch: hard-never reasons stand alone, design-blocked rows nam
 | `namespace-munge` | implemented | core.rs native (`str` + `-`→`_`); tests/zero_oos_s4b_macros.rs s4b_namespace_munge_rows |
 | `object-array` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
 | `parents` | out-of-scope | pending design: hierarchy maps (coordinate with 33-typechain); see #40 |
-| `parse-uuid` | out-of-scope | pending design: UUID value kind; see #40 |
+| `parse-uuid` | implemented | S9 native (fromString both paths; invalid nil; nil NPE; non-String CCE); scalarkinds.rs parse_uuid_shapes, parse_uuid_failures_answer_nil, parse_uuid_input_classes |
 | `prefers` | out-of-scope | pending design: hierarchy maps (coordinate with 33-typechain); see #40 |
 | `primitives-classnames` | out-of-scope | Bytecode compiler/classpath surface; port AOT (clj-aot) is separate |
 | `print-ctor` | implemented | [o print-args w] #= writer (S8: printsys.rs simple_ctor_rows; probes t-*) |
@@ -800,7 +800,7 @@ No slice on this branch: hard-never reasons stand alone, design-blocked rows nam
 | `proxy-mappings` | out-of-scope | No type-system slice on this branch: proxies/deftype factories/method internals |
 | `proxy-name` | out-of-scope | No type-system slice on this branch: proxies/deftype factories/method internals |
 | `proxy-super` | out-of-scope | No type-system slice on this branch: proxies/deftype factories/method internals |
-| `random-uuid` | out-of-scope | pending design: UUID value kind; see #40 |
+| `random-uuid` | implemented | S9 v4 over the rng.rs source (version/variant stamping); scalarkinds.rs random_uuid_bits |
 | `re-groups` | implemented | tests/collmisc.rs rematcher_rows (ISE w/o match; non-handle CCE) |
 | `re-matcher` | implemented | tests/collmisc.rs rematcher_rows (stateful handle; re-find companion) |
 | `read+string` | implemented | `[form string]` over StreamReader (0/1/3/4-arity plus the opts arity; LNPR wrap rule); zero_oos_s7_readgates.rs (S7, #50) |
@@ -860,8 +860,8 @@ No slice on this branch: hard-never reasons stand alone, design-blocked rows nam
 | `unquote-splicing` | implemented | core.clj bare unbound def (syntax-quote support surface; expansion still reader/analyzer-owned); tests/zero_oos_s4b_macros.rs s4b_unquote_rows |
 | `unsigned-bit-shift-right` | out-of-scope | pending design: bitwise lattice over tower; see #40 |
 | `update-proxy` | out-of-scope | No type-system slice on this branch: proxies/deftype factories/method internals |
-| `uri?` | out-of-scope | pending design: URI value kind; see #40 |
-| `uuid?` | out-of-scope | pending design: UUID value kind; see #40 |
+| `uri?` | implemented | S9 pred1 over Value::Uri (false battery; kind arms unit-tested in scalar.rs); scalarkinds.rs uri_predicate_battery |
+| `uuid?` | implemented | S9 pred1 over Value::Uuid; scalarkinds.rs uuid_predicate_battery |
 | `vector-of` | out-of-scope | pending design: primitive-vector kind; see #40 |
 | `volatile!` | implemented | cellstaps.rs volatile_ctor_print (fresh Volatile cell; transient #object print — pinned divergence from the JVM {:status :ready} rendering) |
 | `volatile?` | implemented | cellstaps.rs volatile_pred (true on Volatile cells only) |

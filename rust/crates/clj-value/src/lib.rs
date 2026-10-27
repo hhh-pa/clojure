@@ -25,6 +25,7 @@ mod keyword;
 mod multifn;
 mod print;
 mod promise;
+mod scalar;
 mod seq;
 mod symbol;
 mod tower;
@@ -54,6 +55,7 @@ pub use print::{
     print_opts::PrintOpts, print_to_string,
 };
 pub use promise::{Promise, PromiseState};
+pub use scalar::{Instant, Uri, UriError, Uuid};
 pub use seq::{
     CHUNK_SIZE, ConsValue, CycleValue, IterateValue, KeySeqValue, RangeNum, RangeValue,
     RealizedSeq, RepeatValue, Seq, SeqKind, SubVectorValue, ValSeqValue, seq_vec,
