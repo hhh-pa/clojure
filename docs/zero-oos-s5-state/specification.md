@@ -71,6 +71,10 @@ later.
   and watches) through the nested-release path and returns
   the dispatched count; outside an action returns 0
   (`h-outside`, `h-inside` is `[1 11]`, `h-ctrl` is `11`).
+  An empty outbox in-action answers 0 and stays armed;
+  post-shutdown the count still answers while released heads
+  drop through the rejection path (port-only pins, no JVM
+  analog).
 - `await1` — 1-arity: `(when (pos? queue-count) (await a))`
   returning the agent (new `Agent::queue_count`: queued plus
   running — the count INCLUDES the running head, per

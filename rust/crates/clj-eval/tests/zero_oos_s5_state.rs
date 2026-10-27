@@ -598,6 +598,22 @@ fn release_pending_sends_rows() {
         ),
         "11"
     );
+    // Inside an action with nothing buffered: 0, outbox stays armed.
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [a (agent 0) b (agent 10) r (promise)] (send a (fn [s] (deliver r [(release-pending-sends) (do (send b inc) (release-pending-sends))]) s)) (await a) (await b) [(deref r) @b])"
+        ),
+        "[[0 1] 11]"
+    );
+    // Post-shutdown the count still answers; the head drops.
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [a (agent 0) b (agent 10) gate (promise) hold (promise) r (promise)] (send a (fn [s] (send b inc) (deliver gate :ready) (deref hold) (deliver r (release-pending-sends)) s)) (deref gate) (shutdown-agents) (deliver hold :go) [(deref r) @b])"
+        ),
+        "[1 10]"
+    );
     assert_eq!(
         uncaught(&mut eval, "(release-pending-sends 1)"),
         "clojure.lang.ArityException | Wrong number of args (1) passed to: clojure.core/release-pending-sends"
