@@ -568,3 +568,52 @@ fn extend_merges_without_clobber() {
         "[:second :g2]"
     );
 }
+
+#[test]
+fn handbuilt_maps_are_not_protocols() {
+    // A map with `:on`/`:sigs` but not the full constructor shape
+    // (`:impls` plus the `:interface` descriptor) is `not a
+    // protocol` on every path — never a dispatch panic (round-1
+    // review H1).
+    let mut eval = boot();
+    assert_eq!(
+        uncaught(&mut eval, "(satisfies? {:on \"X\" :sigs {}} 1)"),
+        "java.lang.IllegalArgumentException | {:on \"X\", :sigs {}} is not a protocol"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(extends? {:on \"X\" :sigs {}} String)"),
+        "java.lang.IllegalArgumentException | {:on \"X\", :sigs {}} is not a protocol"
+    );
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(do (def P {:on \"X\" :sigs {:m {:arglists '([this])}}}) (clojure.core/__protocol_invoke* (var P) \"m\" [1]))"
+        ),
+        "java.lang.IllegalArgumentException | {:on \"X\", :sigs {:m {:arglists ([this])}}} is not a protocol"
+    );
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(do (def P {:on \"X\" :sigs {:m {:arglists '([this])}}}) (clojure.core/__extend* (var P) String {:m (fn [this] 1)}))"
+        ),
+        "java.lang.IllegalArgumentException | {:on \"X\", :sigs {:m {:arglists ([this])}}} is not a protocol"
+    );
+    // A near-complete shape (with `:impls`, without `:interface`)
+    // still is not one — so `deftype` over it is the interface
+    // error, never a panic; likewise a non-descriptor
+    // `:interface`.
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(do (def P {:on \"X\" :sigs {:m {:arglists '([this])}} :impls {}}) (deftype T [x] P (m [this] 1)))"
+        ),
+        "java.lang.IllegalArgumentException | Not an interface: P"
+    );
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(do (def Q {:on \"X\" :sigs {} :impls {} :interface 5}) (deftype T [x] Q (m [this] 1)))"
+        ),
+        "java.lang.IllegalArgumentException | Not an interface: Q"
+    );
+}

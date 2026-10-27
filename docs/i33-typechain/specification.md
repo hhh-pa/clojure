@@ -79,9 +79,11 @@ type system; multimethods dispatch over both):
 - `proxy` of any host class but `Object` (interop N1 owns the rest).
 - Hierarchy derivation (`derive`, `isa?`, `:hierarchy` args to
   `defmulti`) — follow-up slice, not this one.
-- Interop method calls (`.close`, `.foo`) — N1 owns them;
-  `with-open` calls the `close` protocol fn instead (documented
-  divergence for host objects).
+- Interop method calls (`.close`, `.foo`) — N1 owns them for
+  host classes; `with-open` emits dot-close (`(.close x)`), which
+  dispatches over inline `close` methods on port types (a registry
+  protocol extension alone does not satisfy it — documented
+  divergence).
 - `defprotocol` claims no matrix row (unlisted helper).
 
 ### 1.3 Acceptance criteria

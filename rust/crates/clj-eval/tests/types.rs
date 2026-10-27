@@ -1385,6 +1385,37 @@ fn stage1_descriptor_level() {
 }
 
 #[test]
+fn stage1_descriptor_defined_methods_miss() {
+    // Defined methods do not resolve on descriptors either: the
+    // call misses with the field/method error, never invokes with
+    // the descriptor as `this` (round-1 review M1).
+    let mut eval = boot();
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(definterface I (m []) (n [x])) (deftype T [x] I (m [this] :called) (n [this y] y)) (.m T)"
+        ),
+        "java.lang.IllegalArgumentException | No matching field found: m for class user.T"
+    );
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(definterface I (m []) (n [x])) (deftype T [x] I (m [this] :called) (n [this y] y)) (.n T 1)"
+        ),
+        "java.lang.IllegalArgumentException | No matching method n found taking 1 args for class user.T"
+    );
+    // Gen-class descriptors miss the same way (no prefix-fn
+    // forwarding off a descriptor, even when the fn exists).
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(gen-class :name user.Klass :prefix \"klass-\" :methods [[hello [] String]]) (defn klass-hello [this] \"yo\") (.hello Klass)"
+        ),
+        "java.lang.IllegalArgumentException | No matching field found: hello for class user.Klass"
+    );
+}
+
+#[test]
 fn stage1_symbol_named_calls() {
     // Field/method names also travel as symbols (the macros emit
     // strings, so only direct calls exercise this).

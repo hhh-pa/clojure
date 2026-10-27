@@ -61,12 +61,24 @@ fn iface_key() -> Value {
     Value::Keyword(Keyword::new(None, "interface"))
 }
 
-/// Whether a value is a protocol map (an `:on` string plus a
-/// `:sigs` map — anything else is `Not a protocol`).
+/// Whether a value is a protocol map (an `:on` string, a `:sigs`
+/// map, an `:impls` map, and the `:interface` descriptor — the
+/// full constructor shape, so dispatch never unwraps a missing
+/// key; anything else is `Not a protocol`).
 pub(crate) fn as_protocol_map(v: &Value) -> Option<&Map> {
     match v {
-        Value::Map(m) => match (m.get(&on_key()), m.get(&sigs_key())) {
-            (Some(Value::Str(_)), Some(Value::Map(_))) => Some(m),
+        Value::Map(m) => match (
+            m.get(&on_key()),
+            m.get(&sigs_key()),
+            m.get(&impls_key()),
+            m.get(&iface_key()),
+        ) {
+            (
+                Some(Value::Str(_)),
+                Some(Value::Map(_)),
+                Some(Value::Map(_)),
+                Some(Value::HostType(h)),
+            ) if matches!(h.as_ref(), clj_value::HostVal::Def(_)) => Some(m),
             _ => None,
         },
         _ => None,

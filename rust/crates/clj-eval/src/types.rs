@@ -97,26 +97,31 @@ fn int_arg(v: &Value) -> Result<usize, NativeError> {
     }
 }
 
-/// Resolve a symbol to a type descriptor value (`None` details in
-/// the error: unresolvable vs bound-to-something-else). A dotted
+/// The current root of a name (`None` is unresolvable): a dotted
 /// name with no namespace (`user.Point`) resolves as namespace
 /// `user` plus name `Point` (split at the last dot), so JVM-style
 /// fully-qualified construction works without an import table;
 /// slash-qualified symbols (`user/Point`) ride `resolve_in`
-/// (aliases included).
-fn resolve_def(eval: &Evaluator, sym: &Symbol) -> Result<Arc<HostDef>, NativeError> {
+/// (aliases included). Shared by [`resolve_def`] and the
+/// interface-position check.
+fn lookup_root(eval: &Evaluator, sym: &Symbol) -> Option<Value> {
     if sym.namespace().is_none() {
         if let Some((ns_part, name_part)) = sym.name().rsplit_once('.') {
             let simple = Symbol::new(None, name_part);
-            let root = eval
+            return eval
                 .registry
                 .resolve_in(ns_part, &simple)
                 .and_then(|q| eval.registry.lookup(&q).map(|id| (id, q)))
                 .map(|(id, q)| eval.deref_var(id, &q));
-            return def_of_root(root, sym);
         }
     }
-    def_of_root(var_root(eval, sym), sym)
+    var_root(eval, sym)
+}
+
+/// Resolve a symbol to a type descriptor value (`None` details in
+/// the error: unresolvable vs bound-to-something-else).
+fn resolve_def(eval: &Evaluator, sym: &Symbol) -> Result<Arc<HostDef>, NativeError> {
+    def_of_root(lookup_root(eval, sym), sym)
 }
 
 /// A resolved root must be a descriptor (an instance or any other
@@ -141,15 +146,17 @@ fn not_a_type(sym: &Symbol) -> NativeError {
 }
 
 /// Resolve a symbol to an interface descriptor (for `reify` /
-/// `proxy` / definition interface lists).
+/// `proxy` / definition interface lists). An instance root is not
+/// a type at all (its `Not a type` stands); any other bound
+/// non-descriptor (like the core `String` class-name string) IS a
+/// type, just not an interface; missing names stay unresolvable.
 fn resolve_iface(eval: &Evaluator, sym: &Symbol) -> Result<Arc<HostDef>, NativeError> {
-    // A bound non-descriptor (like the core `String` class-name
-    // string) IS a type, just not an interface; missing names stay
-    // unresolvable (`IAE` marks the former — `def_of_root`'s
-    // signal — while the latter is a `RuntimeException`).
     let d = match resolve_def(eval, sym) {
         Ok(d) => d,
         Err(e) if e.class == ThrowClass::IllegalArgumentException => {
+            if root_is_instance(eval, sym) {
+                return Err(e);
+            }
             return Err(NativeError::new(
                 ThrowClass::IllegalArgumentException,
                 format!("Not an interface: {sym}"),
@@ -164,6 +171,13 @@ fn resolve_iface(eval: &Evaluator, sym: &Symbol) -> Result<Arc<HostDef>, NativeE
         ));
     }
     Ok(d)
+}
+
+/// Whether a name resolves to an instance (split from
+/// [`resolve_iface`] for the complexity budget): instances are not
+/// types, so the `Not a type` error stands in interface position.
+fn root_is_instance(eval: &Evaluator, sym: &Symbol) -> bool {
+    matches!(lookup_root(eval, sym), Some(Value::HostType(h)) if matches!(h.as_ref(), HostVal::Inst(_)))
 }
 
 /// The `java.io.Closeable` contract as an interface descriptor
@@ -559,6 +573,18 @@ fn no_field(field: &str, class: &str) -> NativeError {
     )
 }
 
+/// A method call on a descriptor (split from [`native_meth`] for
+/// the complexity budget): zero-arg calls read the field error
+/// (the reflector reads fields first), longer calls the method
+/// error — descriptors never dispatch.
+fn desc_miss(class: &str, method: &str, argc: usize) -> Result<Value, NativeError> {
+    Err(if argc == 0 {
+        no_field(method, class)
+    } else {
+        no_method(method, argc, class)
+    })
+}
+
 /// The oracle's missing-method error (the count always reads
 /// `{n} args`, even for one — oracle `k-meth-arity`).
 fn no_method(method: &str, argc: usize, class: &str) -> NativeError {
@@ -608,10 +634,7 @@ fn native_meth(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErro
         _ => None,
     };
     match host {
-        Some((d, _)) if d.kind == HostKind::GenClass => {
-            genclass_call(eval, &d, &method, target.clone(), rest)
-        }
-        Some((d, h)) => meth_on_host(eval, &d, h, target.clone(), &method, rest),
+        Some((d, h)) => meth_on_def(eval, &d, h, target.clone(), &method, rest),
         None => {
             let class = jvm_class_of(target);
             if rest.is_empty() {
@@ -621,6 +644,28 @@ fn native_meth(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErro
             }
         }
     }
+}
+
+/// Method dispatch on a host target (split from [`native_meth`]
+/// for the complexity budget): descriptors miss (they carry no
+/// instance methods, like the JVM's classes — never an invoke with
+/// the descriptor as `this`); gen-class instances forward to their
+/// prefix fns; anything else dispatches on the instance.
+fn meth_on_def(
+    eval: &mut Evaluator,
+    d: &Arc<HostDef>,
+    h: &Arc<HostVal>,
+    target: Value,
+    method: &str,
+    rest: &[Value],
+) -> Result<Value, NativeError> {
+    if matches!(h.as_ref(), HostVal::Def(_)) {
+        return desc_miss(&d.name, method, rest.len());
+    }
+    if d.kind == HostKind::GenClass {
+        return genclass_call(eval, d, method, target, rest);
+    }
+    meth_on_host(eval, d, h.as_ref(), target, method, rest)
 }
 
 /// Instance method/field dispatch (split from [`native_meth`] for
@@ -665,8 +710,8 @@ fn meth_on_host(
 
 /// Zero-arg field read (split from [`meth_on_host`] for the
 /// complexity budget): the declared field value when the target is
-/// an instance; descriptors (and other names) fall through to the
-/// method lookup — there is no instance to read.
+/// an instance; descriptors never reach here (`native_meth` misses
+/// first — the arm keeps the match total).
 fn field_hit(d: &Arc<HostDef>, h: &HostVal, method: &str) -> Option<Value> {
     if !is_field(d, method) {
         return None;
