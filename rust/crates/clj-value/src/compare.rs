@@ -525,6 +525,7 @@ mod tests {
             default: Value::Nil,
             methods: crate::new_map(),
             prefers: crate::new_map(),
+            hierarchy: None,
         }));
         assert_eq!(type_name(&mf), "clojure.lang.MultiFn");
         assert_eq!(

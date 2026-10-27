@@ -2506,6 +2506,7 @@ mod tests {
             default: Value::Keyword(Keyword::new(None, "default")),
             methods: new_map(),
             prefers: new_map(),
+            hierarchy: None,
         }))
     }
 

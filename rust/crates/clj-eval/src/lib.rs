@@ -27,6 +27,7 @@ pub mod ext;
 pub mod fmt;
 pub mod fx4_form;
 pub mod fx4_host;
+pub mod hierarchy;
 pub mod io;
 pub mod lazy;
 pub mod macros;

@@ -4,7 +4,7 @@ The complete inventory of `clojure.core` in this port: every var,
 its conformance state, and — for exclusions — why it is excluded.
 If a var is not listed here, that is a file bug, not a silent gap.
 
-- **692 vars: 578 implemented, 1 divergent, 113 out of scope,
+- **692 vars: 587 implemented, 1 divergent, 104 out of scope,
   0 planned.** The port reports Clojure `1.13.0-alpha9`
   (`clojure-version`).
 - **Universe.** 692 rows = 685 JVM publics + 7 extra-universe rows: 4 port-visible JVM privates
@@ -485,7 +485,7 @@ Significant vars with no port slice, grouped below by area with the reason. (Thr
 | `supers` | out-of-scope | interop (N1) |
 | `defmulti` | implemented | multimethods.rs multi_dispatch_* + multi_var_shape + multi_custom_default + multi_options_rejected + multi_no_method + multi_bad_dispatch + multi_class_dispatch_analog + multi_value_semantics + multi_native_arity_guards + multi_multifn_native_guards; S-typechain stage 3 (#33): dispatch fn + docstring/attr head, :default option only, exact-plus-default invoke |
 | `defmethod` | implemented | multimethods.rs multi_arity_methods + multi_defmethod_returns_multifn + multi_defmethod_guards + multi_defmethod_missing; S-typechain stage 3 (#33): single/multi-arity tails, answers the multifn |
-| `prefer-method` | implemented | multimethods.rs multi_prefer_method; S-typechain stage 3 (#33): edges stored, never consulted (hierarchy fenced) |
+| `prefer-method` | implemented | multimethods.rs multi_prefer_method; hierarchy.rs hier_prefer_dispatch (S13, #57): edges consulted at dispatch, direct reverse edges conflict |
 | `get-method` | implemented | multimethods.rs multi_get_method + multi_value_guards; S-typechain stage 3 (#33): exact entry else default entry else nil |
 | `methods` | implemented | multimethods.rs multi_methods_view + multi_value_guards; S-typechain stage 3 (#33): whole table incl the :default entry |
 | `remove-method` | implemented | multimethods.rs multi_remove_method + multi_value_guards; S-typechain stage 3 (#33): missing entry no-op, answers the multifn |
@@ -698,7 +698,7 @@ No slice on this branch: hard-never reasons stand alone, design-blocked rows nam
 | `aget` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
 | `alength` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
 | `amap` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
-| `ancestors` | out-of-scope | pending design: hierarchy maps (coordinate with 33-typechain); see #40 |
+| `ancestors` | implemented | hierarchy.rs hier_class_views, hier_lattice_ancestors, hier_global_arities (S13, #57; probes h-*, n-*) |
 | `areduce` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
 | `aset` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
 | `aset-boolean` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
@@ -750,8 +750,8 @@ No slice on this branch: hard-never reasons stand alone, design-blocked rows nam
 | `default-data-readers` | implemented | S6 map var (`inst`/`uuid` natives); zero_oos_s6_datareaders.rs default_data_readers_table, default_readers_direct_calls |
 | `definline` | implemented | core.clj macro (eval-built specimen; `:inline` recorded, never honored — the port is an interpreter); tests/zero_oos_s4b_macros.rs s4b_definline_rows |
 | `defstruct` | implemented | tests/collmisc.rs structmap_rows (macro; expansion shape) |
-| `derive` | out-of-scope | pending design: hierarchy maps (coordinate with 33-typechain); see #40 |
-| `descendants` | out-of-scope | pending design: hierarchy maps (coordinate with 33-typechain); see #40 |
+| `derive` | implemented | hierarchy.rs hier_make_and_explicit_derive, hier_derive_errors, hier_derive_tag_shapes, hier_derive_relation_errors, hier_global_arities (S13, #57; probes h-*, n-*) |
+| `descendants` | implemented | hierarchy.rs hier_class_views, hier_lattice_parents, hier_global_arities, hier_unknown_class_names (S13, #57; probes h-*, n-*) |
 | `destructure` | implemented | destructure_expand.rs destructure_public (partition/drop-odd/all-symbols passthrough + shared bind_one; entries as vectors); tests/zero_oos_s4b_macros.rs s4b_destructure_rows |
 | `double-array` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
 | `doubles` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
@@ -774,23 +774,23 @@ No slice on this branch: hard-never reasons stand alone, design-blocked rows nam
 | `into-array` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
 | `ints` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
 | `io!` | out-of-scope | STM refs/transactions (N4): never |
-| `isa?` | out-of-scope | pending design: hierarchy maps (coordinate with 33-typechain); see #40 |
+| `isa?` | implemented | hierarchy.rs hier_isa_basics, hier_isa_arm_order, hier_interfaces, hier_global_arities (S13, #57; probes h-*, n-*) |
 | `iteration` | implemented | tests/collmisc.rs iteration_rows (eager-first-step; re-seqable) |
 | `iterator-seq` | out-of-scope | JDK collection/stream adapters (N1) |
 | `load-reader` | implemented | 1-arity over any reader (last value, nil when empty); `*file*` nil, `*ns*` isolated, forces `*read-eval*` true, `Compiler.load`-style wraps; reads all forms before evaluating (pre-existing load loop); zero_oos_s7_readgates.rs (S7, #50) |
 | `long-array` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
 | `longs` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
 | `make-array` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
-| `make-hierarchy` | out-of-scope | pending design: hierarchy maps (coordinate with 33-typechain); see #40 |
+| `make-hierarchy` | implemented | hierarchy.rs hier_make_and_explicit_derive (S13, #57; probes h-make) |
 | `memfn` | out-of-scope | Host reflection/interop/beans/method-fns (N1) |
 | `method-sig` | out-of-scope | No type-system slice on this branch: proxies/deftype factories/method internals |
 | `mix-collection-hash` | implemented | tests/collmisc.rs mixhash_rows (int-checked longs) |
 | `munge` | implemented | core.rs native over ext.rs compiler_munge (true Compiler table; symbol-preserving); tests/zero_oos_s4b_macros.rs s4b_munge_rows |
 | `namespace-munge` | implemented | core.rs native (`str` + `-`→`_`); tests/zero_oos_s4b_macros.rs s4b_namespace_munge_rows |
 | `object-array` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
-| `parents` | out-of-scope | pending design: hierarchy maps (coordinate with 33-typechain); see #40 |
+| `parents` | implemented | hierarchy.rs hier_class_views, hier_lattice_parents, hier_global_arities (S13, #57; probes h-*, n-*) |
 | `parse-uuid` | implemented | S9 native (fromString both paths; invalid nil; nil NPE; non-String CCE); scalarkinds.rs parse_uuid_shapes, parse_uuid_failures_answer_nil, parse_uuid_input_classes |
-| `prefers` | out-of-scope | pending design: hierarchy maps (coordinate with 33-typechain); see #40 |
+| `prefers` | implemented | hierarchy.rs hier_prefer_dispatch, hier_remove_all (S13, #57; probes x-prefers-view, x-rmall) |
 | `primitives-classnames` | out-of-scope | Bytecode compiler/classpath surface; port AOT (clj-aot) is separate |
 | `print-ctor` | implemented | [o print-args w] #= writer (S8: printsys.rs simple_ctor_rows; probes t-*) |
 | `print-dup` | implemented | booted multifn, token dispatch, no :default (S8: printsys.rs dispatch_rows + dup_rows; probes m-*/d-*/p-*) |
@@ -810,7 +810,7 @@ No slice on this branch: hard-never reasons stand alone, design-blocked rows nam
 | `ref-max-history` | out-of-scope | STM refs/transactions (N4): never |
 | `ref-min-history` | out-of-scope | STM refs/transactions (N4): never |
 | `release-pending-sends` | implemented | S5: concurrency.rs outbox drain answering the count (0 outside actions); zero_oos_s5_state.rs release_pending_sends_rows |
-| `remove-all-methods` | out-of-scope | pending design: multimethod dispatch seam ([multifn]; coordinate with 33-typechain); see #40 |
+| `remove-all-methods` | implemented | hierarchy.rs hier_remove_all (S13, #57; probes x-rmall*) |
 | `remove-tap` | implemented | cellstaps.rs tap_returns + tap_set_semantics (disj by =; never starts the loop) |
 | `replicate` | implemented | S5: core.clj `(take n (repeat x))` + `:deprecated "1.3"`; zero_oos_s5_state.rs deprecated_trio_rows |
 | `resultset-seq` | out-of-scope | JDBC ResultSet adapter; never |
@@ -855,7 +855,7 @@ No slice on this branch: hard-never reasons stand alone, design-blocked rows nam
 | `unchecked-short` | implemented | core.rs truncating `shortValue`; tests/extarith.rs s11_unchecked_coercion_rows (S11, #56; probes `ucs-*`, `g-shortrat*`, `xc-sinf`) |
 | `unchecked-subtract` | implemented | core.rs wrapping-`Int` tower fold; tests/extarith.rs s11_unchecked_long_rows (S11, #56; probes `us-*`) |
 | `unchecked-subtract-int` | implemented | core.rs checked-intcast wrapping `i32` op; tests/extarith.rs s11_unchecked_int_rows (S11, #56; probes `usi-*`) |
-| `underive` | out-of-scope | pending design: hierarchy maps (coordinate with 33-typechain); see #40 |
+| `underive` | implemented | hierarchy.rs hier_underive, hier_global_arities (S13, #57; probes h-under*, n-under-partial) |
 | `unquote` | implemented | core.clj bare unbound def (syntax-quote support surface; expansion still reader/analyzer-owned); tests/zero_oos_s4b_macros.rs s4b_unquote_rows |
 | `unquote-splicing` | implemented | core.clj bare unbound def (syntax-quote support surface; expansion still reader/analyzer-owned); tests/zero_oos_s4b_macros.rs s4b_unquote_rows |
 | `unsigned-bit-shift-right` | implemented | core.rs 2-arity Java `>>>` (count masked); tests/extarith.rs s11_bit_shift_rows (S11, #56; probes `ubs-*`, `ev-ubs`) |

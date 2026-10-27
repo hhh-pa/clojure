@@ -1622,6 +1622,7 @@ mod tests {
             default: Value::Nil,
             methods: crate::new_map(),
             prefers: crate::new_map(),
+            hierarchy: None,
         }));
         assert_eq!(java_debug(&mf), crate::multifn_str("m"));
     }

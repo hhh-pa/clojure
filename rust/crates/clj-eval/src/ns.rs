@@ -2141,6 +2141,7 @@ fn boot_install_natives(eval: &mut Evaluator) {
         .chain(crate::types::TYPES_NATIVES.iter())
         .chain(crate::protocol::PROTOCOL_NATIVES.iter())
         .chain(crate::multi::MULTI_NATIVES.iter())
+        .chain(crate::hierarchy::HIERARCHY_NATIVES.iter())
         .chain(crate::core::TOWER_NATIVES.iter())
         .chain(crate::collmisc::COLLMISC_NATIVES.iter())
         .chain(crate::printsys::PRINTSYS_NATIVES.iter())

@@ -20,6 +20,7 @@ mod delay;
 mod extension;
 mod future;
 pub mod hasheq;
+mod hierarchy;
 mod host;
 mod keyword;
 mod multifn;
@@ -43,6 +44,11 @@ pub use future::{Future, FutureOutcome, FutureState};
 pub use hasheq::{
     hash_code, hash_combine, hash_ordered, hash_unordered, hasheq, mix_coll_hash,
     seq_hash_unsupported,
+};
+pub use hierarchy::{
+    HierError, HierMessage, LatticeEntry, LookupFail, MethodLookup, ancestors_in,
+    assert_global_edge, best_method, derive_in, descendants_in, is_class_value, isa_in,
+    make_hierarchy_map, parents_in, underive_in,
 };
 pub use host::{
     HostDef, HostInst, HostKind, HostMethod, HostVal, class_name, fallback_str, find_method,

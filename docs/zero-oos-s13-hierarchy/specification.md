@@ -145,18 +145,19 @@ multifn, rejects non-multifns with the sibling cast
 (`x-rmall-bad`), and the multifn stays usable after
 (`x-rmall-reuse`, `x-rmall-call`).
 
-`defmulti :hierarchy` evaluates its value: `nil` (or
-absent) is the live global hierarchy; a var, atom, or
-agent holding a hierarchy map is dereferenced live at
-dispatch (`x-atom-miss`, `x-atom-live`, `x-hier-var`,
-`x-hier-iso`); anything else is the verbatim
-`clojure.lang.IRef` cast (`x-hier-map`, `x-hier-5` —
-decision D2: JVM-exact, bare maps rejected). A `nil`
-hierarchy reference NPEs when dereferenced
-(`x-hier-nil` → the house deref-nil NPE); a
-non-hierarchy value behaves like garbage `h` (exact
-hits still work, `x-hier-badval`; hierarchy consults
-NPE, `n-badval-miss`).
+`defmulti :hierarchy` evaluates its value: absent is the
+live global hierarchy; a var, atom, or agent holding a
+hierarchy map is dereferenced live at dispatch
+(`x-atom-miss`, `x-atom-live`, `x-hier-var`, `x-hier-iso`);
+anything else is the verbatim `clojure.lang.IRef` cast
+(`x-hier-map`, `x-hier-5` — decision D2: JVM-exact, bare
+maps rejected). An explicit `nil` stores nil and NPEs
+when dereferenced (`x-hier-nil` → the house deref-nil
+NPE; the macro threads a presence flag so absent-nil
+and explicit-nil stay distinct); a non-hierarchy value
+behaves like garbage `h` (exact hits still work,
+`x-hier-badval`; hierarchy consults NPE,
+`n-badval-miss`).
 
 ### The class lattice
 
@@ -183,13 +184,25 @@ transitive supers, or interface child with parent
 answers supers (each unioned with map relations).
 Names outside the table are not classes (spec seam
 for S16 — unknown-name pins use never-real names
-only). `HostDef` children: `deftype` / `record` /
+only). Interfaces observed only as parents are bare
+rows (no ancestry — the `isa?`-to-`Object` rule still
+holds). `HostDef` children: `deftype` / `record` /
 `gen-class` descriptors claim their interface names
 plus `Object`; interface descriptors claim their name
 only (no `Object` — interfaces have no superclass);
-clause 4 walks the claimed interfaces. `derive`
+clause 4 walks the claimed interfaces. Hierarchy keys
+identify classes by name: descriptors fold to their
+name string at the boundary, so a type derived by
+descriptor is found by name and vice versa. `derive`
 accepts class tags (tabled names, `HostDef`s) and
-rejects class parents, like the JVM asserts.
+rejects class parents, like the JVM asserts. Map
+entries count as 2-vectors for `isa?` (a `MapEntry`
+is an `APersistentVector`, probe `l-mapentry`).
+Non-set relation values are garbage-in: `isa?`
+membership reads them as absent (`contains?` rule);
+build and view paths fail the `IPersistentSet` cast.
+`n-nilret-call` / `n-ancnil-call` stay oracle-only
+(general nil-invocation keeps its house text).
 
 ### Global hierarchy
 
@@ -210,6 +223,7 @@ var-alter lock; default multifns dereference it live.
 | derive tag | `AssertionError` | `Assert failed: (or (class? tag) (instance? clojure.lang.Named tag))` | `h-tagstr` |
 | derive parent | `AssertionError` | `Assert failed: (instance? clojure.lang.Named parent)` | `h-parent-str` |
 | global parent | `AssertionError` | `Assert failed: (namespace parent)` | `h-gparent-plain` |
+| global parent non-`Named` | `ClassCastException` / `NullPointerException` | the port's `namespace` texts (`Named` cast; nil NPE) — the JVM asserts over hinted `namespace` | derived from the `namespace` def |
 | global tag | `AssertionError` | `Assert failed: (or (class? tag) (and (instance? clojure.lang.Named tag) (namespace tag)))` | `h-gtag-plain` |
 | already ancestor | `Exception` | `TAG already has PARENT as ancestor` (print rendering) | `h-already` |
 | cyclic | `Exception` | `Cyclic derivation: PARENT has TAG as ancestor` | `h-cycle` |
