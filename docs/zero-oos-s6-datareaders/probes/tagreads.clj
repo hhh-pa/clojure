@@ -68,3 +68,29 @@
 (throwof "g-allow-nomatch-instbad" '(read {:read-cond :allow} (rd "#?(:cljs #inst \"bogus\") :kept")))
 (throwof "e-nonmap-inst" '(binding [*data-readers* 42] (read-string "#inst \"2024-01-01\"")))
 (throwof "e-discard-eof" '(do (def eof-calls (atom [])) (binding [*data-readers* {'foo (fn [x] (swap! eof-calls conj x) :v)}] (try [(read-string "#_ #foo 1")] (catch Throwable t [(str (class t)) (str (.getMessage t)) @eof-calls])))))
+;; ---- H: read wrap behavior (ReaderException iff line-numbering?) ----
+(defn lnpr [s] (clojure.lang.LineNumberingPushbackReader. (java.io.StringReader. s)))
+;; throwchain: pin the outer shape plus the cause shape (named fns only: no eval counters).
+(defn throwchain [label form]
+  (try
+    (let [v (eval form)]
+      (println (str label " " (pr-str v))))
+    (catch Throwable t
+      (let [c (.getCause ^Throwable t)]
+        (println (str label " THROW " (.getName (class t)) "|" (pr-str (.getMessage t)) "|" (pr-str (ex-data t))
+                      (when c (str " CAUSE " (.getName (class c)) "|" (pr-str (.getMessage c)) "|" (pr-str (ex-data c))))))))))
+(defn hboom [x] (throw (ex-info "hboom" {:hk 7})))
+(defn harity [a b] :h)
+(throwdata "h-lnpr-wrap" '(read (lnpr "#foo 1")))
+(throwdata "h-lnpr-multiline" '(read (lnpr "#foo\n1")))
+(throwdata "h-lnpr-recursive" '(read (lnpr "#foo 1") true :eofval true))
+(throwdata "h-lnpr-opts" '(read {} (lnpr "#foo 1")))
+(throwdata "h-wis" '(with-in-str "#foo \"x\"" (read {:read-cond :preserve} *in*)))
+(throwdata "h-lnpr-instbad" '(read (lnpr "#inst \"bogus\"")))
+(throwchain "h-lnpr-fnthrows" '(binding [*data-readers* {'foo hboom}] (read (lnpr "#foo 1"))))
+(throwchain "h-lnpr-fnarity" '(binding [*data-readers* {'foo harity}] (read (lnpr "#foo 1"))))
+(throwchain "h-str-fnthrows" '(binding [*data-readers* {'foo hboom}] (read-string "#foo 1")))
+(throwdata "h-lnpr-discard-throw" '(read (lnpr "#_ #bogus 1 :kept")))
+(throwof "e-meta-vec" '(binding [*data-readers* {'foo (fn [x] [:ok x])}] (let [v (read-string "^:k #foo 1")] [(meta v) v])))
+(throwof "e-meta-scalar" '(binding [*data-readers* {'foo (fn [x] 42)}] (let [v (read-string "^:k #foo 1")] [(meta v) v])))
+(throwof "e-meta-inner" '(binding [*data-readers* {'foo (fn [x] [:ok x])}] (meta (read-string "^{:t #foo 1} []"))))

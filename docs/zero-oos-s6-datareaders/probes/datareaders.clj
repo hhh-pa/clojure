@@ -139,3 +139,4 @@
 (throwof "d-inst-yearzone" '(read-string "#inst \"2024Z\""))
 (throwof "d-inst-monthzone" '(read-string "#inst \"2024-01Z\""))
 (throwof "d-inst-dayzone" '(read-string "#inst \"2024-01-01+02:00\""))
+(throwof "d-inst-leapsec" '(read-string "#inst \"2024-01-01T00:59:60\""))

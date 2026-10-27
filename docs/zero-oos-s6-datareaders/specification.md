@@ -38,35 +38,48 @@ actual at land). The #41 land unions them later.
 - `reader-conditional?` — `pred1!` over
   `Value::ReaderConditional` only (battery `c-p-*`).
 
-Read path (two-phase: `clj-reader` cannot invoke fns, so
-tags defer read-side and resolve eval-side):
+Read path (two-phase: the consult runs read-side with
+span, invocation stays eval-side — `clj-reader` cannot
+call fns):
 
 1. Eval read entry points (`read-string`, `read`,
    `read_forms` — hence load and the REPL) enable defer
-   mode in `ReaderOpts`: every non-suppressed tag reads
-   to `TaggedLiteral`, and tags read under `#_` are
-   additionally recorded as fired-discards (the JVM
-   invokes readers under `#_` — probes `e-discard-fires`,
+   mode in `ReaderOpts`, snapshotting the live table
+   keys (or the borked-table class) plus the
+   default-fn flag per form.
+2. The ctor path consults read-side: dotted record tags
+   keep the record deferral (not S6); a borked table
+   fails the `ILookup` cast; table hits defer to
+   `TaggedLiteral` for eval-side invocation (overrides
+   skip default validation); `inst`/`uuid` string
+   payloads validate inline (valid ⇒ the final
+   `TaggedLiteral`; invalid ⇒ the spanful validator
+   error); non-string defaults defer for the eval-side
+   type dispatch; the default-fn flag defers the rest;
+   else the `UnknownTag` throw lands exactly where the
+   non-defer path throws. Tags read under `#_` are
+   additionally logged as fired (the JVM invokes
+   readers under `#_` — probes `e-discard-fires`,
    `e-discard-order` — but never under suppression or
    preservation, probes `g-allow-nomatch-instbad`,
    `g-preserve-instbad`).
-2. Eval drains fired-discards in read order (before each
-   form, plus at end — probe `e-multiform-order`), then
+3. Eval drains fired-discards in read order (before each
+   form, plus at end — probe `e-multiform-order`,
+   including ahead of EOF and read errors), then
    post-walks each form bottom-up, skipping
    `ReaderConditional` subtrees and never re-descending
-   into fn results (probe `e-no-redescent`).
-3. Each tag resolves table → defaults → default-fn →
-   throw (probes `e-*`, `f-*`): the table lookup is
-   `RT.get` semantics (nil table, nil entry, and vector
-   tables miss; anything else non-map fails the
-   `ILookup` cast — probes `e-nonmap*`, `e-nilentry`,
-   `e-vectable`); unqualified `inst`/`uuid` validate
-   (below); the default fn runs with `[tag form]`; else
-   `RuntimeException "No reader function for tag {tag}"`
-   with no ex-data, recursive or not (probes
-   `e-unknown-data`, `e-stream-*`).
+   into fn results (probe `e-no-redescent`). Each tag
+   resolves table → defaults → default-fn → throw
+   (probes `e-*`, `f-*`), with `RT.get` table semantics
+   (nil table, nil entry, and vector tables miss;
+   anything else non-map fails the cast).
 4. `read` honors no `:readers`/`:default` opts (probes
    `g-opts-*`): the vars alone feed the table.
+5. Errors follow the reader (probes `h-*`): `read-string`
+   reports bare (no wrap, nil ex-data); `read` wraps in
+   `ReaderException` with line/column ex-data (the
+   port's readers are line-numbering), recursive reads
+   rethrow raw, and fn-failure causes keep their data.
 
 S6 boundary (no new value kinds): validated `inst`/`uuid`
 payloads read back as `TaggedLiteral` — a readable
@@ -82,9 +95,13 @@ iff minutes is 59). `str` on either kind stays the
 port's readable print (probes `b-str`, `c-str` record
 the JVM `@hex` `toString`; print dispatch is not S6).
 
+A `^meta` directly on a tagged form errors `MetaTarget`
+(the reader attaches before the walk resolves; the JVM
+attaches to the fn result — probe `e-meta-vec`).
+
 All natives carry the house arity guard. Constructor
 guards, precedence, and every error text replay the
-178 oracle pins (`probes/*.out`).
+192 oracle pins (`probes/*.out`).
 
 ## BDD scenarios
 
@@ -95,7 +112,8 @@ guards, precedence, and every error text replay the
   precedence, each layer wins in order (including the
   `inst` override skipping validation).
 - Given an unknown tag with no fallback, reads throw
-  `RuntimeException` verbatim with nil ex-data.
+  the oracle's error verbatim (`read-string` bare with
+  nil ex-data, `read` wrapped with line/column).
 - Given invalid `inst`/`uuid` payloads, reads throw the
   oracle's validation error; valid ones round-trip
   readably.

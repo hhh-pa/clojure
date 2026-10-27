@@ -126,3 +126,4 @@ d-inst-nopad THROW java.lang.RuntimeException|"Unrecognized date/time syntax: 20
 d-inst-yearzone #inst "2024-01-01T00:00:00.000-00:00"
 d-inst-monthzone #inst "2024-01-01T00:00:00.000-00:00"
 d-inst-dayzone #inst "2023-12-31T22:00:00.000-00:00"
+d-inst-leapsec #inst "2024-01-01T01:00:00.000-00:00"
