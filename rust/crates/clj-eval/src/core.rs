@@ -1474,6 +1474,71 @@ fn is_seqable(v: &Value) -> bool {
 fn is_record(v: &Value) -> bool {
     crate::types::is_host_record(v)
 }
+// `any?` (S1): constantly true (probe `p-any-*`).
+fn is_any(_v: &Value) -> bool {
+    true
+}
+// `delay?` (S1): delays only — futures, promises, and atoms
+// answer false (probes `p-delay-*`).
+fn is_delay(v: &Value) -> bool {
+    matches!(v, Value::Delay(_))
+}
+// `map-entry?` (S1): map entries only, never 2-vectors
+// (probes `p-mapseq-*`).
+fn is_map_entry(v: &Value) -> bool {
+    matches!(v, Value::MapEntry { .. })
+}
+// `indexed?` (S1): vectors, map entries, and subvectors;
+// strings, seqs, maps, sets, and arrays answer false
+// (probes `p-indexed-*`).
+fn is_indexed(v: &Value) -> bool {
+    matches!(v, Value::Vector(_) | Value::MapEntry { .. }) || as_subvector(v).is_some()
+}
+// `nat-int?` / `neg-int?` / `pos-int?` (S1): composed over the
+// port's `int?` (`Int`-only — BigInts answer false exactly like
+// the oracle, probes `p-nat-*` / `p-neg-*` / `p-pos-*`).
+fn is_nat_int(v: &Value) -> bool {
+    matches!(v, Value::Int(n) if *n >= 0)
+}
+fn is_neg_int(v: &Value) -> bool {
+    matches!(v, Value::Int(n) if *n < 0)
+}
+fn is_pos_int(v: &Value) -> bool {
+    matches!(v, Value::Int(n) if *n > 0)
+}
+// `special-symbol?` (S1): the oracle's 23-member set (probes
+// `p-special-*`); qualified symbols never qualify.
+fn is_special_symbol(v: &Value) -> bool {
+    match v {
+        Value::Symbol(s) if s.namespace().is_none() => matches!(
+            s.name(),
+            "def"
+                | "if"
+                | "do"
+                | "quote"
+                | "var"
+                | "fn*"
+                | "loop*"
+                | "recur"
+                | "throw"
+                | "try"
+                | "catch"
+                | "finally"
+                | "monitor-enter"
+                | "monitor-exit"
+                | "."
+                | "new"
+                | "set!"
+                | "&"
+                | "let*"
+                | "case*"
+                | "deftype*"
+                | "reify*"
+                | "letfn*"
+        ),
+        _ => false,
+    }
+}
 
 pred1!(native_nil, "clojure.core/nil?", is_nil);
 pred1!(native_not, "clojure.core/not", is_falsy_val);
@@ -1550,6 +1615,41 @@ pred1!(native_varp, "clojure.core/var?", is_var);
 pred1!(native_seqp, "clojure.core/seq?", is_seq_value);
 pred1!(native_seqablep, "clojure.core/seqable?", is_seqable);
 pred1!(native_recordp, "clojure.core/record?", is_record);
+pred1!(native_anyp, "clojure.core/any?", is_any);
+pred1!(native_delayp, "clojure.core/delay?", is_delay);
+pred1!(native_indexedp, "clojure.core/indexed?", is_indexed);
+pred1!(native_map_entryp, "clojure.core/map-entry?", is_map_entry);
+pred1!(native_nat_intp, "clojure.core/nat-int?", is_nat_int);
+pred1!(native_neg_intp, "clojure.core/neg-int?", is_neg_int);
+pred1!(native_pos_intp, "clojure.core/pos-int?", is_pos_int);
+pred1!(
+    native_special_symbolp,
+    "clojure.core/special-symbol?",
+    is_special_symbol
+);
+
+/// `NaN?` / `infinite?` over the tower (S1): a `Double` tests
+/// its payload, the other numbers answer false, nil is the
+/// `doubleValue` NPE, anything else CCEs to `Number` (probes
+/// `p-nan-*` / `p-inf-*`).
+fn double_predicate(v: &Value, test: fn(f64) -> bool) -> Result<bool, NativeError> {
+    match v {
+        Value::Double(d) => Ok(test(*d)),
+        Value::Int(_) | Value::BigInt(_) | Value::Ratio(_) | Value::BigDec(_) => Ok(false),
+        Value::Nil => Err(npe_double_value()),
+        _ => Err(cce_err(v, "java.lang.Number")),
+    }
+}
+
+fn native_nanp(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.core/NaN?", args, &[1])?;
+    Ok(Value::Bool(double_predicate(&args[0], f64::is_nan)?))
+}
+
+fn native_infinitep(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.core/infinite?", args, &[1])?;
+    Ok(Value::Bool(double_predicate(&args[0], f64::is_infinite)?))
+}
 
 /// Printer options from the bound `*print-*` vars (`readably`
 /// overrides the binding when given — `print` binds false, `pr`
@@ -1823,6 +1923,49 @@ fn native_symbol(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeE
             ThrowClass::IllegalArgumentException,
             "no conversion to symbol".to_owned(),
         )),
+    }
+}
+
+/// `find-keyword` (S1): the port never interns keywords (value
+/// equality, `keyword.rs`), so a well-shaped lookup builds the
+/// keyword — only the JVM's nil shapes stay nil (nil and
+/// anything-else 1-arity; probes `p-findkw-*`). The 2-arity
+/// casts to `String` like `keyword`, with a nil namespace
+/// meaning no namespace (probe `p-findkw-2nilns`) and a nil
+/// name the `hashCode` NPE (probe `p-findkw-2nilname`).
+fn native_find_keyword(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    if args.len() > 2 {
+        return Err(NativeError::arity("clojure.core/find-keyword", args.len()));
+    }
+    if args.len() == 2 {
+        let ns = match &args[0] {
+            Value::Nil => None,
+            Value::Str(s) => Some(s.to_string()),
+            v => return Err(cce_err(v, "java.lang.String")),
+        };
+        let name = match &args[1] {
+            Value::Str(s) => s.to_string(),
+            Value::Nil => {
+                return Err(NativeError::new(
+                    ThrowClass::NullPointerException,
+                    "Cannot invoke \"String.hashCode()\" because \"this.name\" is null".to_owned(),
+                ));
+            }
+            v => return Err(cce_err(v, "java.lang.String")),
+        };
+        return Ok(Value::Keyword(Keyword::new(ns.as_deref(), name.as_str())));
+    }
+    check_arity("clojure.core/find-keyword", args, &[1])?;
+    match &args[0] {
+        Value::Nil => Ok(Value::Nil),
+        Value::Keyword(k) => Ok(Value::Keyword(k.clone())),
+        Value::Symbol(s) => Ok(Value::Keyword(Keyword::new(s.namespace(), s.name()))),
+        Value::Str(s) => {
+            let (ns, name) = split_ns_name(s);
+            Ok(Value::Keyword(Keyword::new(ns, name)))
+        }
+        // Anything else is nil (like `keyword`'s 1-arity).
+        _ => Ok(Value::Nil),
     }
 }
 
@@ -2480,6 +2623,17 @@ pub(crate) const CORE_NATIVES: &[(&str, NativeFnPtr)] = &[
     ("seq?", native_seqp),
     ("seqable?", native_seqablep),
     ("record?", native_recordp),
+    ("any?", native_anyp),
+    ("delay?", native_delayp),
+    ("indexed?", native_indexedp),
+    ("map-entry?", native_map_entryp),
+    ("nat-int?", native_nat_intp),
+    ("neg-int?", native_neg_intp),
+    ("pos-int?", native_pos_intp),
+    ("special-symbol?", native_special_symbolp),
+    ("NaN?", native_nanp),
+    ("infinite?", native_infinitep),
+    ("find-keyword", native_find_keyword),
     ("str", native_str),
     ("subs", native_subs),
     ("pr-str", native_pr_str),

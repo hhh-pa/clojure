@@ -1355,3 +1355,10 @@
 ;; the JVM instead rejects non-`BufferedReader`s (probes
 ;; `ls-basic`..`ls-empty` document the JVM side).
 (defn line-seq [rdr] ((fn step [] (binding [*in* rdr] (when-let [line (read-line)] (cons line (lazy-seq (step))))))))
+
+;; --- `ffirst` (S1): the stock composite (probes `p-ffirst-*`).
+(defn ffirst
+  "Same as (first (first x))"
+  {:added "1.0"
+   :static true}
+  [x] (first (first x)))

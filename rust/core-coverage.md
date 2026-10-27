@@ -4,7 +4,7 @@ The complete inventory of `clojure.core` in this port: every var,
 its conformance state, and — for exclusions — why it is excluded.
 If a var is not listed here, that is a file bug, not a silent gap.
 
-- **423 vars: 405 implemented, 2 divergent, 16 out of scope,
+- **435 vars: 417 implemented, 2 divergent, 16 out of scope,
   0 planned.** The port reports Clojure `1.13.0-alpha9`
   (`clojure-version`).
 - **Status meanings.** `implemented` — resolves in the booted core
@@ -574,3 +574,24 @@ Significant vars with no port slice, grouped below by area with the reason. (Two
 | `num` | implemented | tower passthrough (nil is nil); tower.rs tower_num_rationalize_rows |
 | `rationalize` | implemented | tower via `BigDecimal.valueOf` (`(rationalize 0.1)` is `1/10`); tower.rs tower_num_rationalize_rows |
 | `pprint` | out-of-scope | clojure.pprint namespace, not core |
+
+### Previously unlisted — accepted future work
+
+S1's rows at their PR #41 mirrored positions, flipped straight
+to `implemented` (the #41 land unions the remaining slices'
+rows into this table).
+
+| var | status | notes |
+| --- | --- | --- |
+| `NaN?` | implemented | core.rs native_nanp (`Double` payload; other numbers false; nil NPE; else CCE `Number`); predicates.rs nan_rows |
+| `any?` | implemented | core.rs pred1 constantly true; predicates.rs any_rows |
+| `delay?` | implemented | core.rs pred1 over `Value::Delay`; predicates.rs delay_rows |
+| `ffirst` | implemented | core.clj `(first (first x))`; predicates.rs ffirst_rows |
+| `find-keyword` | implemented | core.rs 1-or-2-arity native (no table — well-shaped lookups build); predicates.rs find_keyword_rows |
+| `indexed?` | implemented | core.rs pred1 over vectors/entries/subvectors; predicates.rs indexed_rows |
+| `infinite?` | implemented | core.rs native_infinitep (`Double` payload; other numbers false; nil NPE; else CCE `Number`); predicates.rs infinite_rows |
+| `map-entry?` | implemented | core.rs pred1 over `Value::MapEntry` (never 2-vectors); predicates.rs map_entry_rows |
+| `nat-int?` | implemented | core.rs pred1 over `Int` >= 0; predicates.rs nat_int_rows |
+| `neg-int?` | implemented | core.rs pred1 over `Int` < 0; predicates.rs neg_int_rows |
+| `pos-int?` | implemented | core.rs pred1 over `Int` > 0; predicates.rs pos_int_rows |
+| `special-symbol?` | implemented | core.rs pred1 over the oracle 23-member set; predicates.rs special_symbol_rows |
