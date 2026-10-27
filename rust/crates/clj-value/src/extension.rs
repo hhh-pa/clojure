@@ -161,6 +161,33 @@ impl ThrowClass {
     }
 }
 
+/// A JVM `ClassCastException` text with JDK module verbiage: same
+/// modules combine (`A and B are in M`), different modules split
+/// (`A is in M1; B is in M2`) — byte-pinned by probe39. Shared home
+/// (moved from `clj-eval` for S6): the reader's spanful `TableCce`
+/// and the tag validators format through this too.
+#[must_use]
+pub fn cce_message(from_jvm: &str, to_jvm: &str) -> String {
+    fn module_of(cls: &str) -> &'static str {
+        if cls.starts_with("java.") {
+            "module java.base of loader 'bootstrap'"
+        } else {
+            "unnamed module of loader 'app'"
+        }
+    }
+    let from_mod = module_of(from_jvm);
+    let to_mod = module_of(to_jvm);
+    if from_mod == to_mod {
+        format!(
+            "class {from_jvm} cannot be cast to class {to_jvm} ({from_jvm} and {to_jvm} are in {from_mod})"
+        )
+    } else {
+        format!(
+            "class {from_jvm} cannot be cast to class {to_jvm} ({from_jvm} is in {from_mod}; {to_jvm} is in {to_mod})"
+        )
+    }
+}
+
 /// The superclass of a [`ThrowClass::jvm_name`], or `None` for
 /// `java.lang.Throwable` itself. Unknown names have no parent (they
 /// never appear on the chain — `matches` only walks names produced

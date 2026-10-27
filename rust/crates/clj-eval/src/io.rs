@@ -15,14 +15,14 @@
 use std::io::Write;
 use std::sync::{Arc, Mutex};
 
-use clj_reader::{ReadCond, ReaderOpts, read_str};
+use clj_reader::{ReadCond, Reader, ReaderError, ReaderOpts};
 use clj_value::{ExtensionValue, ThrowClass, Value, pr_to_string};
 
 use crate::core::{cce_err, cce_message, print_opts};
 use crate::error::{NativeError, jvm_class_of};
 use crate::eval::Evaluator;
 use crate::lazy::realize_deep;
-use crate::ns::{NativeFnPtr, check_arity, deref_core, signal_to_native, str_of};
+use crate::ns::{NativeFnPtr, check_arity, deref_core, signal_to_native, str_of, throw_class_for};
 
 /// A `*out*`-bindable writer: process stdout/stderr or an
 /// in-memory buffer. Identity is the sequence `id`.
@@ -369,8 +369,34 @@ fn native_read_string(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nat
         opts.aliases = ns.alias_map();
         opts.refers = ns.refer_map();
     }
+    crate::core::snapshot_data_readers(eval, &mut opts);
     let text: &str = s;
-    read_str(text, &opts).map_err(|e| NativeError::new(ThrowClass::RuntimeException, e.message()))
+    let mut reader = Reader::new(text, &opts);
+    let outcome = reader.read_form(false);
+    // Effects precede every outcome (fired tags ran during the read
+    // — probe `e-discard-eof` fires before the EOF), so drain first.
+    crate::core::drain_fired_tags(eval, reader.take_fired())?;
+    match outcome {
+        Ok(Some(v)) => crate::core::resolve_data_readers(eval, v),
+        Ok(None) => Err(NativeError::new(
+            ThrowClass::RuntimeException,
+            "EOF while reading".to_owned(),
+        )),
+        Err(e) => Err(map_read_string_error(&e)),
+    }
+}
+
+/// A `read-string` failure: the S6 consult errors keep their JVM
+/// classes (a broken table is a `ClassCastException`, invalid
+/// payloads throw the validator's class); everything else stays the
+/// bare `RuntimeException` the JVM reports without line numbers.
+fn map_read_string_error(e: &ReaderError) -> NativeError {
+    match e {
+        ReaderError::TableCce { .. } | ReaderError::TagInvoke { .. } => {
+            NativeError::new(throw_class_for(e.jvm_class()), e.message())
+        }
+        _ => NativeError::new(ThrowClass::RuntimeException, e.message()),
+    }
 }
 
 /// The S5D IO natives installed into `clojure.core`.

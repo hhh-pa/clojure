@@ -1825,6 +1825,21 @@ fn core_vars(user_ns: Value) -> Vec<(String, Value, bool, bool)> {
         ("*e".to_owned(), Value::Nil, true, false),
         // S7 CLI (P4): nil root; `run` binds the arg seq.
         ("*command-line-args*".to_owned(), Value::Nil, true, false),
+        // S6 data readers: the tag table (empty root) and the
+        // default-fn fallback (nil root); both `^:dynamic` with
+        // `:dynamic` meta (probes `a-roots`, `a-meta`).
+        (
+            "*data-readers*".to_owned(),
+            Value::Map(new_map()),
+            true,
+            false,
+        ),
+        (
+            "*default-data-reader-fn*".to_owned(),
+            Value::Nil,
+            true,
+            false,
+        ),
         // S7 environment (P3): a plain (non-dynamic) root map over
         // the workspace release version.
         (
@@ -2045,6 +2060,10 @@ fn boot_core_vars(eval: &mut Evaluator, user_handle: Value) {
     // root, bound by `with-precision` (S2; no `:dynamic` meta —
     // oracle `mc-meta`).
     def_dynamic_root(eval, "*math-context*", Value::Nil);
+    // S6: the default tag table (a plain map var — neither dynamic
+    // nor private, probe `a-ddr-meta`).
+    let defaults = crate::core::default_data_readers_map(eval);
+    def_var(eval, "default-data-readers", defaults, false, false);
 }
 
 /// Refer every public install into `user` (JVM boot refers
@@ -2100,6 +2119,9 @@ fn boot_refer_user(eval: &mut Evaluator) {
             "*e",
             "*command-line-args*",
             "*clojure-version*",
+            "*data-readers*",
+            "*default-data-reader-fn*",
+            "default-data-readers",
         ]
         .iter()
         .map(|s| (*s).to_owned()),

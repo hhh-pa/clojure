@@ -2111,7 +2111,7 @@ mod tests {
 
     #[test]
     fn value_depth_scores_nesting() {
-        let eval = boot();
+        let mut eval = boot();
         let forms = eval.read_forms("([1] {:a 1} #{2})").expect("read");
         let tagged = Value::TaggedLiteral {
             tag: Symbol::new(None, "foo"),

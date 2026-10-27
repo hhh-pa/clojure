@@ -55,13 +55,26 @@ pub(crate) enum Form {
     Finished,
 }
 
+/// A tag occurrence read under `#_` in defer mode (S6): the JVM
+/// invokes data readers for discarded forms (side effects happen,
+/// throws propagate), so the evaluator drains these in read order
+/// before resolving each form.
+#[derive(Clone, Debug)]
+pub struct FiredTag {
+    /// The tag symbol.
+    pub tag: Symbol,
+    /// The read (still unresolved) form.
+    pub form: Value,
+}
+
 /// A reader over one input: the §1 tracker, the shared pending queue
 /// (reader-conditional splices), normalized options, and the fn-arg,
 /// gensym, suppression, and read-cond environments.
 ///
 /// `Clone` snapshots the read position (issue #36: stdin `read`
 /// retries a truncated form over the restored head plus the next
-/// line).
+/// line — the fired-discards log rolls back with it, so retries
+/// re-record).
 #[derive(Clone)]
 pub struct Reader {
     pub(crate) stream: CharStream,
@@ -71,6 +84,8 @@ pub struct Reader {
     pub(crate) gensym_env: Option<HashMap<Symbol, Symbol>>,
     pub(crate) suppress: bool,
     pub(crate) in_cond: bool,
+    pub(crate) discarding: usize,
+    pub(crate) fired: Vec<FiredTag>,
 }
 
 impl Reader {
@@ -86,12 +101,25 @@ impl Reader {
             gensym_env: None,
             suppress: false,
             in_cond: false,
+            discarding: 0,
+            fired: Vec::new(),
         }
     }
 
+    /// Take the fired-discards log (S6): tags read under `#_` in
+    /// defer mode, oldest first. The evaluator drains this before
+    /// resolving each form (invoking for effect, in read order).
+    #[must_use]
+    pub fn take_fired(&mut self) -> Vec<FiredTag> {
+        std::mem::take(&mut self.fired)
+    }
+
     /// Replace the options (cloned and normalized like [`new`](Self::new)).
+    /// A fresh generation clears the fired-discards log (S6): the
+    /// evaluator drains it after every read, so nothing survives.
     pub fn set_opts(&mut self, opts: &ReaderOpts) {
         self.opts = opts.clone().normalized();
+        self.fired.clear();
     }
 
     /// Append `chunk` to the input (stdin growth; same

@@ -11,8 +11,11 @@
 //! - `;`/`#!`: to end of line, sentinel. `#_`: discard one form.
 //! - `#tag`: the ctor path (unread, read tag — non-symbol rejects —
 //!   read form, then preserve/suppress ⇒ `TaggedLiteral`, dotted
-//!   name ⇒ record deferral, `inst`/`uuid` ⇒ data-reader deferral,
-//!   else unknown tag).
+//!   name ⇒ record deferral, defer mode (S6) ⇒ the consult (table
+//!   keys, then `inst`/`uuid` validation, then the default-fn
+//!   flag, else unknown tag — hits defer to `TaggedLiteral`, with
+//!   the fired-discards log under `#_`), `inst`/`uuid` ⇒
+//!   data-reader deferral, else unknown tag).
 //! - `#=`: immediate deferral without consuming the form. `#<`:
 //!   unreadable.
 //! - `#:`: namespaced maps (auto/current-ns/alias resolution, key
@@ -25,7 +28,7 @@
 //!   splices prepend list/vector items to the shared pending queue;
 //!   top-level splicing rejected unless nothing matched).
 
-use clj_value::{Keyword, List, Symbol, Value, java_debug};
+use clj_value::{Keyword, List, Symbol, Value, java_debug, validate_inst, validate_uuid};
 
 use crate::Reader;
 use crate::error::ReaderError;
@@ -71,8 +74,15 @@ impl Reader {
     }
 
     /// `DiscardReader`: read one form, drop it, return the sentinel.
+    /// The depth flag marks tags for the fired-discards log (S6: the
+    /// JVM invokes data readers for discarded forms). No `?` before
+    /// the restore (like `cond_discard`): a failed discard must not
+    /// stick the depth for the next read.
     pub(crate) fn discard_reader(&mut self) -> Result<Option<Value>, ReaderError> {
-        self.read_nested_value()?;
+        self.discarding += 1;
+        let out = self.read_nested_value();
+        self.discarding -= 1;
+        out?;
         Ok(None)
     }
 
@@ -93,6 +103,7 @@ impl Reader {
         let Value::Symbol(sym) = tag else {
             return Err(ReaderError::TagNotSymbol { span: self.span() });
         };
+        let checkpoint = self.fired.len();
         let form = self.read_nested_value()?;
         // Suppressed reads (the cond discard loop) and preserved
         // conds produce `TaggedLiteral` without invoking anything.
@@ -102,12 +113,16 @@ impl Reader {
                 form: Box::new(form),
             }));
         }
-        // The dotted check is on the tag NAME, not the namespace.
+        // The dotted check is on the tag NAME, not the namespace
+        // (both modes: record tags never consult the table).
         if sym.name().contains('.') {
             return Err(ReaderError::Record {
                 span: self.span(),
                 tag: sym.to_string(),
             });
+        }
+        if self.opts.data_readers {
+            return self.consult_data_readers(&sym, form, checkpoint);
         }
         if sym.namespace().is_none() && (sym.name() == "inst" || sym.name() == "uuid") {
             return Err(ReaderError::DataReader {
@@ -119,6 +134,92 @@ impl Reader {
             span: self.span(),
             tag: sym.to_string(),
         })
+    }
+
+    /// Defer-mode tag consult (S6): the table, then the `inst`/`uuid`
+    /// defaults, then the default-fn flag, else the `UnknownTag`
+    /// throw — all with span, exactly where the non-defer path
+    /// throws. Invocation stays eval-side: table hits and
+    /// default-fn tags defer to `TaggedLiteral` for the eval walk.
+    fn consult_data_readers(
+        &mut self,
+        sym: &Symbol,
+        form: Value,
+        checkpoint: usize,
+    ) -> Result<Option<Value>, ReaderError> {
+        // The borked table fails before any lookup (probe
+        // `e-nonmap-inst`).
+        if let Some(from_jvm) = self.opts.data_readers_borked.clone() {
+            return Err(ReaderError::TableCce {
+                span: self.span(),
+                from_jvm,
+            });
+        }
+        // Table hits defer for eval-side invocation (overrides skip
+        // default validation — probe `e-override-novalid`).
+        if self.opts.data_reader_keys.contains(sym) {
+            return self.deferred_tag(sym, form, checkpoint);
+        }
+        if sym.namespace().is_none() && matches!(sym.name(), "inst" | "uuid") {
+            // String payloads validate inline (spanful); anything
+            // else defers for the eval-side type dispatch (nil is
+            // the NPE, the rest fail the `CharSequence` cast —
+            // except `uuid`, whose non-strings fail as
+            // `IllegalArgumentException`).
+            if let Value::Str(s) = &form {
+                let failure = if sym.name() == "inst" {
+                    validate_inst(s).err()
+                } else {
+                    validate_uuid(s).err()
+                };
+                if let Some(e) = failure {
+                    return Err(ReaderError::TagInvoke {
+                        span: self.span(),
+                        class: e.class,
+                        message: e.message,
+                    });
+                }
+                // Validated: this `TaggedLiteral` is the readable
+                // value (the eval walk re-validates it uniformly —
+                // idempotent — and invokes nothing for it).
+                return Ok(Some(Value::TaggedLiteral {
+                    tag: sym.clone(),
+                    form: Box::new(form),
+                }));
+            }
+            return self.deferred_tag(sym, form, checkpoint);
+        }
+        if self.opts.default_reader_fn {
+            return self.deferred_tag(sym, form, checkpoint);
+        }
+        Err(ReaderError::UnknownTag {
+            span: self.span(),
+            tag: sym.to_string(),
+        })
+    }
+
+    /// Defer one tag for eval-side invocation. Under `#_` the
+    /// occurrence is also logged as fired (the evaluator invokes it
+    /// for effect); entries logged while reading this form belong to
+    /// nested tags, which the drain re-invokes through this entry's
+    /// form — truncate them so each tag fires exactly once.
+    fn deferred_tag(
+        &mut self,
+        sym: &Symbol,
+        form: Value,
+        checkpoint: usize,
+    ) -> Result<Option<Value>, ReaderError> {
+        if self.discarding > 0 {
+            self.fired.truncate(checkpoint);
+            self.fired.push(crate::FiredTag {
+                tag: sym.clone(),
+                form: form.clone(),
+            });
+        }
+        Ok(Some(Value::TaggedLiteral {
+            tag: sym.clone(),
+            form: Box::new(form),
+        }))
     }
 
     /// `NamespaceMapReader` (see module docs).
@@ -442,12 +543,62 @@ fn is_default(kw: &Keyword) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use clj_value::Value;
+    use std::collections::HashSet;
 
-    use crate::{ReadCond, Reader, ReaderError, ReaderOpts, read_str};
+    use clj_value::{Symbol, Value};
+
+    use crate::{FiredTag, ReadCond, Reader, ReaderError, ReaderOpts, read_str};
 
     fn opts() -> ReaderOpts {
         ReaderOpts::default()
+    }
+
+    /// Defer-mode options: table keys plus the default-fn flag.
+    fn defer_opts(keys: &[(&str, &str)], default_fn: bool) -> ReaderOpts {
+        ReaderOpts {
+            data_readers: true,
+            data_reader_keys: keys
+                .iter()
+                .map(|(ns, name)| {
+                    let ns = (!ns.is_empty()).then_some(*ns);
+                    Symbol::new(ns, name)
+                })
+                .collect::<HashSet<_>>(),
+            default_reader_fn: default_fn,
+            ..ReaderOpts::default()
+        }
+    }
+
+    /// Read every form plus the fired-discards log (S6 consult tests).
+    fn read_defer(
+        input: &str,
+        opts: &ReaderOpts,
+    ) -> (Result<Vec<Value>, ReaderError>, Vec<FiredTag>) {
+        let mut reader = Reader::new(input, opts);
+        let mut forms = Vec::new();
+        let mut failure: Option<ReaderError> = None;
+        while failure.is_none() {
+            match reader.read_form(false) {
+                Ok(Some(v)) => forms.push(v),
+                Ok(None) => break,
+                Err(e) => failure = Some(e),
+            }
+        }
+        let out = match failure {
+            Some(e) => Err(e),
+            None => Ok(forms),
+        };
+        let fired = reader.take_fired();
+        (out, fired)
+    }
+
+    /// Assert a value is the tagged literal `#tag form` (tag printed).
+    fn assert_tagged(v: Value, tag: &str, form: &Value) {
+        let Value::TaggedLiteral { tag: t, form: f } = &v else {
+            panic!("expected a tagged literal, got {v:?}");
+        };
+        assert_eq!(t.to_string(), tag);
+        assert_eq!(f.as_ref(), form);
     }
 
     /// Assert a single-entry map holds one `Int(1)` pair keyed by a
@@ -468,6 +619,13 @@ mod tests {
     fn assert_single_sym_pair_rejects_non_map() {
         // The helper's failure contract (also covers its guard line).
         assert_single_sym_pair(Value::Nil, None, "x");
+    }
+
+    #[test]
+    #[should_panic(expected = "expected a tagged literal")]
+    fn assert_tagged_rejects_plain_values() {
+        // The helper's failure contract (also covers its guard line).
+        assert_tagged(Value::Int(1), "foo", &Value::Int(1));
     }
 
     #[test]
@@ -544,5 +702,218 @@ mod tests {
         // `nsmap_key` `_`-ns symbol arm.
         let v = read_str("#:foo{_/a 1}", &opts()).unwrap();
         assert_single_sym_pair(v, None, "a");
+    }
+
+    #[test]
+    fn defer_table_hit_defers_without_firing() {
+        // Keys membership defers to `TaggedLiteral` (the eval walk
+        // invokes); a plain read logs nothing.
+        let (forms, fired) = read_defer("#foo 1", &defer_opts(&[("", "foo")], false));
+        let forms = forms.unwrap();
+        assert_eq!(forms.len(), 1);
+        assert_tagged(forms[0].clone(), "foo", &Value::Int(1));
+        assert!(fired.is_empty());
+    }
+
+    #[test]
+    fn defer_discard_logs_fired_once_in_order() {
+        // `#_` logs each occurrence oldest-first (probes
+        // `e-discard-fires`, `e-discard-order`).
+        let (forms, fired) =
+            read_defer("#_ #a 1 #b 2", &defer_opts(&[("", "a"), ("", "b")], false));
+        let forms = forms.unwrap();
+        assert_eq!(forms.len(), 1);
+        assert_tagged(forms[0].clone(), "b", &Value::Int(2));
+        assert_eq!(fired.len(), 1);
+        assert_eq!(fired[0].tag.to_string(), "a");
+        assert_eq!(fired[0].form, Value::Int(1));
+    }
+
+    #[test]
+    fn defer_nested_discard_truncates_inner() {
+        // The outer entry's form still holds the inner tag, which
+        // the drain re-invokes — one log entry total.
+        let (forms, fired) = read_defer(
+            "#_ #foo #bar 1 :kept",
+            &defer_opts(&[("", "foo"), ("", "bar")], false),
+        );
+        let forms = forms.unwrap();
+        assert_eq!(
+            forms,
+            vec![Value::Keyword(clj_value::Keyword::new(None, "kept"))]
+        );
+        assert_eq!(fired.len(), 1);
+        assert_eq!(fired[0].tag.to_string(), "foo");
+        assert_tagged(fired[0].form.clone(), "bar", &Value::Int(1));
+    }
+
+    #[test]
+    fn defer_borked_table_fails_the_cast() {
+        // Any tag over a non-lookupable table fails `ILookup`
+        // (probes `e-nonmap`, `e-nonmap-inst`).
+        let opts = ReaderOpts {
+            data_readers_borked: Some("java.lang.Long".to_owned()),
+            ..defer_opts(&[], false)
+        };
+        for input in ["#foo 1", "#inst \"2024-01-01\""] {
+            let err = read_str(input, &opts).unwrap_err();
+            assert!(matches!(err, ReaderError::TableCce { .. }), "{input}");
+            assert_eq!(err.jvm_class(), "ClassCastException");
+            assert_eq!(
+                err.message(),
+                "class java.lang.Long cannot be cast to class clojure.lang.ILookup (java.lang.Long is in module java.base of loader 'bootstrap'; clojure.lang.ILookup is in unnamed module of loader 'app')"
+            );
+        }
+    }
+
+    #[test]
+    fn defer_default_fn_flag_defers() {
+        // The flag defers unknown tags (the eval walk calls
+        // `[tag form]`); without it the same read throws.
+        let (forms, _) = read_defer("#foo 1", &defer_opts(&[], true));
+        assert_tagged(forms.unwrap()[0].clone(), "foo", &Value::Int(1));
+        let err = read_str("#foo 1", &defer_opts(&[], false)).unwrap_err();
+        assert!(matches!(err, ReaderError::UnknownTag { .. }));
+        assert_eq!(err.message(), "No reader function for tag foo");
+        // The token read consumes EOF (the line bump), so the throw
+        // site matches the JVM wrap position (probe `h-lnpr-wrap`).
+        assert_eq!(err.span(), crate::Span::new(2, 1));
+    }
+
+    #[test]
+    fn defer_dotted_tag_keeps_record_error() {
+        // Dotted tags never consult (even with keys and the flag).
+        let err = read_str("#foo.bar [1]", &defer_opts(&[("", "foo.bar")], true)).unwrap_err();
+        assert!(matches!(err, ReaderError::Record { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn defer_validates_inst_payloads() {
+        // Valid strings read to the final literal (no fired entry
+        // even under `#_` — nothing to invoke); invalid ones throw
+        // the spanful validator error (probes `d-inst`,
+        // `d-inst-bad`, `g-discard-inst-bad`).
+        let opts = defer_opts(&[], false);
+        let (forms, fired) = read_defer("#_ #inst \"2024-01-01\" :kept", &opts);
+        assert_eq!(forms.unwrap().len(), 1);
+        assert!(fired.is_empty());
+        let err = read_str("#inst \"bogus\"", &opts).unwrap_err();
+        assert!(matches!(err, ReaderError::TagInvoke { .. }), "got {err:?}");
+        assert_eq!(err.jvm_class(), "RuntimeException");
+        assert_eq!(err.message(), "Unrecognized date/time syntax: bogus");
+        assert_eq!(err.span(), crate::Span::new(1, 14));
+    }
+
+    #[test]
+    fn defer_validates_uuid_payloads() {
+        // Same split for `uuid` (probes `d-uuid`, `d-uuid-bad`).
+        let opts = defer_opts(&[], false);
+        let (forms, fired) = read_defer("#uuid \"550e8400-e29b-41d4-a716-446655440000\"", &opts);
+        assert_tagged(
+            forms.unwrap()[0].clone(),
+            "uuid",
+            &Value::Str("550e8400-e29b-41d4-a716-446655440000".into()),
+        );
+        assert!(fired.is_empty());
+        let err = read_str("#uuid \"bogus\"", &opts).unwrap_err();
+        assert!(matches!(err, ReaderError::TagInvoke { .. }), "got {err:?}");
+        assert_eq!(err.jvm_class(), "IllegalArgumentException");
+        assert_eq!(err.message(), "Invalid UUID string: bogus");
+    }
+
+    #[test]
+    fn defer_non_string_defaults_defer() {
+        // Non-string `inst`/`uuid` payloads defer for the eval-side
+        // type dispatch (nil is the NPE, the rest fail the
+        // `CharSequence` cast — except `uuid`, whose non-strings
+        // fail as `IllegalArgumentException`).
+        let (forms, fired) = read_defer("#inst 42", &defer_opts(&[], false));
+        assert_tagged(forms.unwrap()[0].clone(), "inst", &Value::Int(42));
+        assert!(fired.is_empty());
+        let (forms, _) = read_defer("#uuid nil", &defer_opts(&[], false));
+        assert_tagged(forms.unwrap()[0].clone(), "uuid", &Value::Nil);
+    }
+
+    #[test]
+    fn defer_table_override_skips_validation() {
+        // Keys win over the defaults without validating (probe
+        // `e-override-novalid`).
+        let (forms, fired) = read_defer("#inst \"bogus\"", &defer_opts(&[("", "inst")], false));
+        assert_tagged(
+            forms.unwrap()[0].clone(),
+            "inst",
+            &Value::Str("bogus".into()),
+        );
+        assert!(fired.is_empty());
+    }
+
+    #[test]
+    fn defer_skips_consult_when_suppressed_or_preserved() {
+        // Suppressed arms and preserved conds never consult (a
+        // borked table stays silent — probes
+        // `g-allow-nomatch-instbad`, `g-preserve-instbad`).
+        let mut opts = defer_opts(&[], false);
+        opts.data_readers_borked = Some("java.lang.Long".to_owned());
+        let (forms, fired) = read_defer("#?(:cljs #foo 1) :kept", &opts);
+        assert_eq!(forms.unwrap().len(), 1);
+        assert!(fired.is_empty());
+        opts.read_cond = ReadCond::Preserve;
+        let (forms, fired) = read_defer("#?(:a #foo 1)", &opts);
+        let forms = forms.unwrap();
+        assert_eq!(forms.len(), 1);
+        assert!(matches!(forms[0], Value::ReaderConditional { .. }));
+        assert!(fired.is_empty());
+    }
+
+    #[test]
+    fn defer_rejects_non_symbol_tags_and_eof_first() {
+        // The tag read and form read precede the consult (like the
+        // frozen path).
+        let opts = defer_opts(&[("", "foo")], true);
+        let err = read_str("#123 1", &opts).unwrap_err();
+        assert!(matches!(err, ReaderError::TagNotSymbol { .. }));
+        // ...through the multi-form helper too: nothing fired
+        // before the failure, and the failure surfaces as `Err`.
+        let (out, fired) = read_defer("#foo (unclosed", &opts);
+        let err = out.unwrap_err();
+        assert!(fired.is_empty());
+        assert!(
+            matches!(err, ReaderError::EofDelimited { .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn fired_log_drains_and_clears() {
+        // `take_fired` empties the log; `set_opts` starts a fresh
+        // generation even with entries pending (the evaluator
+        // drains after every read, so the clear is a no-op there).
+        let opts = defer_opts(&[("", "foo")], false);
+        let mut reader = Reader::new("#_ #foo 1 :kept", &opts);
+        assert!(reader.read_form(false).unwrap().is_some());
+        assert_eq!(reader.take_fired().len(), 1);
+        assert!(reader.take_fired().is_empty());
+        reader.extend(" #_ #foo 2");
+        assert!(reader.read_form(false).unwrap().is_none());
+        reader.set_opts(&opts);
+        assert!(reader.take_fired().is_empty());
+    }
+
+    #[test]
+    fn discard_failure_restores_depth() {
+        // A failed discard must not stick the depth: the next tag
+        // read on the same reader defers without logging.
+        let opts = defer_opts(&[("", "foo")], false);
+        let mut reader = Reader::new("#_ (unclosed", &opts);
+        let err = reader.read_form(false).unwrap_err();
+        assert!(
+            matches!(err, ReaderError::EofDelimited { .. }),
+            "got {err:?}"
+        );
+        assert!(reader.take_fired().is_empty());
+        reader.extend(" #foo 1");
+        let form = reader.read_form(false).unwrap().unwrap();
+        assert_tagged(form.clone(), "foo", &Value::Int(1));
+        assert!(reader.take_fired().is_empty());
     }
 }

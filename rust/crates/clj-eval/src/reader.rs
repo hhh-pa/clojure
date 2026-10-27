@@ -213,6 +213,18 @@ fn is_eof_error(e: &ReaderError) -> bool {
     )
 }
 
+/// The `ReaderException` ex-data map for a span (line/column under
+/// `clojure.error`).
+fn reader_ex_data(span: Span) -> Value {
+    let line_key = Value::Keyword(Keyword::new(Some("clojure.error"), "line"));
+    let col_key = Value::Keyword(Keyword::new(Some("clojure.error"), "column"));
+    Value::Map(
+        new_map()
+            .insert(line_key, Value::Int(i64::from(span.line)))
+            .insert(col_key, Value::Int(i64::from(span.col))),
+    )
+}
+
 /// A read failure as a native error: `recursive?` rethrows the raw
 /// root (probe `r-recursive-outer`); otherwise a `ReaderException`
 /// (`{root-class}: {root-message}`, ex-data line/column from the
@@ -228,12 +240,7 @@ fn map_reader_error(eval: &mut Evaluator, e: &ReaderError, recursive: bool) -> N
         ThrowClass::ReaderException,
         format!("{}: {message}", class.jvm_name()),
     );
-    let line_key = Value::Keyword(Keyword::new(Some("clojure.error"), "line"));
-    let col_key = Value::Keyword(Keyword::new(Some("clojure.error"), "column"));
-    let data = new_map()
-        .insert(line_key, Value::Int(i64::from(span.line)))
-        .insert(col_key, Value::Int(i64::from(span.col)));
-    outer.data = Some(Value::Map(data));
+    outer.data = Some(reader_ex_data(span));
     outer.cause = Some(Throwable {
         id: eval.next_id(),
         class,
@@ -358,13 +365,62 @@ fn sync_reader_ns(eval: &Evaluator, opts: &mut ReaderOpts) {
     }
 }
 
+/// Drain one `read`'s fired discards ahead of its outcome (S6):
+/// effects precede every exit (a fired tag ran during the read).
+fn drain_locked(
+    eval: &mut Evaluator,
+    state: &mut StreamState,
+    span: Span,
+    recursive: bool,
+) -> Result<(), NativeError> {
+    let fired = state.parser.take_fired();
+    crate::core::drain_fired_tags(eval, fired)
+        .map_err(|e| wrap_resolution_error(eval, e, span, recursive))
+}
+
+/// A resolution failure as a `read` failure (S6): raw when
+/// `recursive?`, else the `ReaderException` wrap at the live tracker
+/// span (the port's readers are line-numbering, so `read` wraps —
+/// probes `h-lnpr-*`; the cause keeps its data — probe
+/// `h-lnpr-fnthrows`).
+fn wrap_resolution_error(
+    eval: &mut Evaluator,
+    err: NativeError,
+    span: Span,
+    recursive: bool,
+) -> NativeError {
+    if recursive {
+        return err;
+    }
+    let inner = err.into_inner();
+    let mut outer = NativeError::new(
+        ThrowClass::ReaderException,
+        format!("{}: {}", inner.class.jvm_name(), inner.message),
+    );
+    outer.data = Some(reader_ex_data(span));
+    outer.cause = Some(Throwable {
+        id: eval.next_id(),
+        class: inner.class,
+        message: if inner.message.is_empty() {
+            None
+        } else {
+            Some(Arc::from(inner.message.as_str()))
+        },
+        data: inner.data.map(Box::new),
+        cause: inner.cause.map(Box::new),
+    });
+    outer
+}
+
 /// Run one `read`: fresh options per call, stdin fed line by line
 /// while the parser reports EOF, clean EOF honoring `eof-error?`
 /// (the synthesized error sits at the live tracker position,
 /// probe `r-exdata-eof`). A truncated head survives retries: the
 /// parser is snapshotted before each attempt while more input may
 /// arrive, then restored and extended with the next line (`Eof*`
-/// only — anything else throws without feeding).
+/// only — anything else throws without feeding). Data readers
+/// resolve per call (S6): fired discards drain ahead of every
+/// terminal exit, then the form resolves.
 fn run_read(
     eval: &mut Evaluator,
     reader: &StreamReader,
@@ -380,21 +436,16 @@ fn run_read(
         // readers never grow, so they never pay for the clone).
         let snapshot = may_grow(&state).then(|| state.parser.clone());
         match state.parser.read_form(false) {
-            Ok(Some(v)) => return Ok(v),
+            Ok(Some(v)) => return finish_some(eval, &mut state, v, recursive),
             Ok(None) => match next_chunk(&mut state)? {
                 Some(chunk) => state.parser.extend(&chunk),
                 None => {
-                    if eof_error {
-                        let at = Span::new(state.parser.line(), state.parser.col());
-                        let clean = ReaderError::Eof { span: at };
-                        return Err(map_reader_error(eval, &clean, recursive));
-                    }
-                    return Ok(eof_value.clone());
+                    return finish_clean_eof(eval, &mut state, eof_error, &eof_value, recursive);
                 }
             },
             Err(e) => {
                 if !is_eof_error(&e) {
-                    return Err(map_reader_error(eval, &e, recursive));
+                    return finish_read_error(eval, &mut state, &e, recursive);
                 }
                 match next_chunk(&mut state)? {
                     Some(chunk) => {
@@ -403,11 +454,55 @@ fn run_read(
                         }
                         state.parser.extend(&chunk);
                     }
-                    None => return Err(map_reader_error(eval, &e, recursive)),
+                    None => return finish_read_error(eval, &mut state, &e, recursive),
                 }
             }
         }
     }
+}
+
+/// A read form: drain first, then resolve (S6).
+fn finish_some(
+    eval: &mut Evaluator,
+    state: &mut StreamState,
+    form: Value,
+    recursive: bool,
+) -> Result<Value, NativeError> {
+    let at = Span::new(state.parser.line(), state.parser.col());
+    drain_locked(eval, state, at, recursive)?;
+    crate::core::resolve_data_readers(eval, form)
+        .map_err(|e| wrap_resolution_error(eval, e, at, recursive))
+}
+
+/// A clean EOF: drain first, then honor `eof-error?` (the
+/// synthesized error sits at the live tracker position, probe
+/// `r-exdata-eof`).
+fn finish_clean_eof(
+    eval: &mut Evaluator,
+    state: &mut StreamState,
+    eof_error: bool,
+    eof_value: &Value,
+    recursive: bool,
+) -> Result<Value, NativeError> {
+    let at = Span::new(state.parser.line(), state.parser.col());
+    drain_locked(eval, state, at, recursive)?;
+    if eof_error {
+        let clean = ReaderError::Eof { span: at };
+        return Err(map_reader_error(eval, &clean, recursive));
+    }
+    Ok(eof_value.clone())
+}
+
+/// A terminal read error: drain first (effects precede), then map.
+fn finish_read_error(
+    eval: &mut Evaluator,
+    state: &mut StreamState,
+    err: &ReaderError,
+    recursive: bool,
+) -> Result<Value, NativeError> {
+    let at = Span::new(state.parser.line(), state.parser.col());
+    drain_locked(eval, state, at, recursive)?;
+    Err(map_reader_error(eval, err, recursive))
 }
 
 /// `read`: all five JVM arities over the bound reader (probes
@@ -423,6 +518,7 @@ fn native_read(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErro
     };
     let (eof_error, eof_value, recursive) = parse_read_tail(args, &mut opts)?;
     sync_reader_ns(eval, &mut opts);
+    crate::core::snapshot_data_readers(eval, &mut opts);
     if matches!(stream_value, Value::Nil) {
         return Err(NativeError::new(
             ThrowClass::NullPointerException,

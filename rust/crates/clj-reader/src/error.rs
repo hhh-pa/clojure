@@ -18,6 +18,8 @@
 
 use std::fmt;
 
+use clj_value::cce_message;
+
 /// A 1-based `(line, column)` position; column 0 is observable after
 /// `unread('\n')` (see [`CharStream`](crate::stream::CharStream)).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -148,6 +150,18 @@ pub enum ReaderError {
     ReadEval { span: Span },
     /// `#inst`/`#uuid` deferral (data-reader follow-up N5).
     DataReader { span: Span, tag: String },
+    /// Defer-mode tag consult over a non-lookupable
+    /// `*data-readers*` value (S6): the JVM's `RT.get` fails the
+    /// `ILookup` cast (`from_jvm` is the table's JVM class).
+    TableCce { span: Span, from_jvm: String },
+    /// Defer-mode `inst`/`uuid` payload validation failure (S6):
+    /// the validator's simple class name plus its verbatim
+    /// message.
+    TagInvoke {
+        span: Span,
+        class: &'static str,
+        message: String,
+    },
     /// Record-tag deferral (S5).
     Record { span: Span, tag: String },
     /// Lone surrogate in a string `\u` escape (JVM accepts; `str`
@@ -207,6 +221,8 @@ impl ReaderError {
             | Self::ArgNumber { span, .. }
             | Self::RatioZeroDiv { span, .. }
             | Self::DataReader { span, .. }
+            | Self::TableCce { span, .. }
+            | Self::TagInvoke { span, .. }
             | Self::Record { span, .. }
             | Self::LoneSurrogate { span, .. } => span,
         }
@@ -241,8 +257,8 @@ impl ReaderError {
 
     /// The root-cause simple class name (`RuntimeException`,
     /// `NumberFormatException`, `IllegalArgumentException`,
-    /// `IllegalStateException`; deferrals report `ReaderError`, which
-    /// has no JVM counterpart).
+    /// `IllegalStateException`, `ClassCastException`; deferrals
+    /// report `ReaderError`, which has no JVM counterpart).
     #[must_use]
     pub fn jvm_class(&self) -> &'static str {
         match self {
@@ -250,6 +266,8 @@ impl ReaderError {
             | Self::RadixRange { .. }
             | Self::RadixDigit { .. }
             | Self::ArgNumber { .. } => "NumberFormatException",
+            Self::TableCce { .. } => "ClassCastException",
+            Self::TagInvoke { class, .. } => class,
             Self::BadUnicodeChar { .. }
             | Self::BadDigit { .. }
             | Self::BadUnicodeLen { .. }
@@ -348,6 +366,8 @@ fn message_ns(err: &ReaderError) -> String {
 /// Data-reader and record deferrals.
 fn message_defer(err: &ReaderError) -> String {
     match err {
+        ReaderError::TableCce { from_jvm, .. } => cce_message(from_jvm, "clojure.lang.ILookup"),
+        ReaderError::TagInvoke { message, .. } => message.clone(),
         ReaderError::DataReader { tag, .. } => format!(
             "Reader for tag {tag} is not supported in this build (data-reader follow-up N5)"
         ),
@@ -515,6 +535,23 @@ mod tests {
                 },
                 "Lone surrogate \\ud800 in string escape is not representable in str",
                 "ReaderError",
+            ),
+            (
+                ReaderError::TableCce {
+                    span,
+                    from_jvm: "java.lang.Long".to_owned(),
+                },
+                "class java.lang.Long cannot be cast to class clojure.lang.ILookup (java.lang.Long is in module java.base of loader 'bootstrap'; clojure.lang.ILookup is in unnamed module of loader 'app')",
+                "ClassCastException",
+            ),
+            (
+                ReaderError::TagInvoke {
+                    span,
+                    class: "RuntimeException",
+                    message: "No reader function for tag foo".to_owned(),
+                },
+                "No reader function for tag foo",
+                "RuntimeException",
             ),
         ];
         for (err, message, class) in cases {

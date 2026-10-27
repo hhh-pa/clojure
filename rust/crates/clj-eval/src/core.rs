@@ -12,6 +12,7 @@
 //! `docs/t1174/s5d-contract.md`.
 
 use std::any::Any;
+use std::collections::HashSet;
 use std::hash::Hasher;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -19,16 +20,18 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use num_traits::{Signed, ToPrimitive, Zero};
 
 use clj_value::{
-    ExtensionValue, Keyword, PrintOpts, Symbol, ThrowClass, Throwable, Value, pr_to_string,
+    ExtensionValue, Keyword, List, Map, PrintOpts, Set, Symbol, TagError, ThrowClass, Throwable,
+    Value, Vector, new_map, new_set, pr_to_string, validate_inst, validate_uuid,
 };
 
 use crate::error::{NativeError, jvm_class_of};
 use crate::eval::Evaluator;
+use crate::ext::NativeFn;
 use crate::lazy::{
     as_pending, as_realized, as_subvector, collect_all, equiv_vals, is_counted_seq, is_seq_value,
     realize_deep,
 };
-use crate::ns::{NativeFnPtr, check_arity, deref_core, signal_to_native};
+use crate::ns::{NativeFnPtr, check_arity, deref_core, signal_to_native, throw_class_for};
 
 /// `Cannot invoke "Object.getClass()" because "x" is null`: the
 /// numbers-`nil` failure (every arithmetic/comparison op probes it).
@@ -39,29 +42,10 @@ pub(crate) fn npe_getclass() -> NativeError {
     )
 }
 
-/// A JVM `ClassCastException` text with JDK module verbiage: same
-/// modules combine (`A and B are in M`), different modules split
-/// (`A is in M1; B is in M2`) — byte-pinned by probe39.
-pub(crate) fn cce_message(from_jvm: &str, to_jvm: &str) -> String {
-    fn module_of(cls: &str) -> &'static str {
-        if cls.starts_with("java.") {
-            "module java.base of loader 'bootstrap'"
-        } else {
-            "unnamed module of loader 'app'"
-        }
-    }
-    let from_mod = module_of(from_jvm);
-    let to_mod = module_of(to_jvm);
-    if from_mod == to_mod {
-        format!(
-            "class {from_jvm} cannot be cast to class {to_jvm} ({from_jvm} and {to_jvm} are in {from_mod})"
-        )
-    } else {
-        format!(
-            "class {from_jvm} cannot be cast to class {to_jvm} ({from_jvm} is in {from_mod}; {to_jvm} is in {to_mod})"
-        )
-    }
-}
+/// The JVM cast text (S6 moved the shared home to `clj-value` for
+/// the reader's spanful `TableCce`; this re-export keeps every
+/// `crate::core::cce_message` caller working).
+pub(crate) use clj_value::cce_message;
 
 /// A cast failure to `to_jvm` (NPEs never reach here — nils fail
 /// loudly at each call site instead).
@@ -1704,6 +1688,13 @@ fn is_special_symbol(v: &Value) -> bool {
     }
 }
 
+fn is_tagged_literal(v: &Value) -> bool {
+    matches!(v, Value::TaggedLiteral { .. })
+}
+fn is_reader_conditional(v: &Value) -> bool {
+    matches!(v, Value::ReaderConditional { .. })
+}
+
 pred1!(native_nil, "clojure.core/nil?", is_nil);
 pred1!(native_not, "clojure.core/not", is_falsy_val);
 pred1!(native_boolean, "clojure.core/boolean", is_truthy_val);
@@ -1820,6 +1811,357 @@ fn native_nanp(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErr
 fn native_infinitep(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/infinite?", args, &[1])?;
     Ok(Value::Bool(double_predicate(&args[0], f64::is_infinite)?))
+}
+pred1!(
+    native_tagged_literalp,
+    "clojure.core/tagged-literal?",
+    is_tagged_literal
+);
+pred1!(
+    native_reader_conditionalp,
+    "clojure.core/reader-conditional?",
+    is_reader_conditional
+);
+
+/// `tagged-literal`: 2-arity `[tag form]` (probe `b-ctor`); nil tags
+/// coerce to `nil` (probe `b-niltag-vs-nilsym`), other non-symbols
+/// fail the `Symbol` cast (probes `b-ctor-strtag`, `b-ctor-kwtag`).
+fn native_tagged_literal(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.core/tagged-literal", args, &[2])?;
+    let tag = match &args[0] {
+        Value::Symbol(sym) => sym.clone(),
+        Value::Nil => Symbol::new(None, "nil"),
+        other => return Err(cce_err(other, "clojure.lang.Symbol")),
+    };
+    Ok(Value::TaggedLiteral {
+        tag,
+        form: Box::new(args[1].clone()),
+    })
+}
+
+/// `reader-conditional`: 2-arity `[form splicing?]` (probe `c-ctor`);
+/// the form is unguarded (probes `c-badform*`), splicing takes
+/// `Boolean` only (nil is the verbatim NPE, probe
+/// `c-badsplice-nil`).
+fn native_reader_conditional(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.core/reader-conditional", args, &[2])?;
+    let Value::Bool(splicing) = &args[1] else {
+        if matches!(args[1], Value::Nil) {
+            return Err(NativeError::new(
+                ThrowClass::NullPointerException,
+                "Cannot invoke \"java.lang.Boolean.booleanValue()\" because \"splicing_QMARK_\" is null"
+                    .to_owned(),
+            ));
+        }
+        return Err(cce_err(&args[1], "java.lang.Boolean"));
+    };
+    Ok(Value::ReaderConditional {
+        form: Box::new(args[0].clone()),
+        splicing: *splicing,
+    })
+}
+
+/// A validator failure as a native error (the validator reports JVM
+/// simple class names).
+fn tag_native(err: TagError) -> NativeError {
+    NativeError::new(throw_class_for(err.class), err.message)
+}
+
+/// The `inst` default reader (shared by the `default-data-readers`
+/// table and the eval walk): nil is the verbatim NPE (probe
+/// `d-inst-nil`), strings validate (probes `d-inst-*`), anything
+/// else fails the `CharSequence` cast (probes `d-inst-nonstr`,
+/// `d-inst-vec`). Valid payloads read back as `TaggedLiteral`
+/// until the date/time value-kind slice lands.
+fn default_inst_reader(form: &Value) -> Result<Value, NativeError> {
+    if matches!(form, Value::Nil) {
+        return Err(NativeError::new(
+            ThrowClass::NullPointerException,
+            "Cannot invoke \"java.lang.CharSequence.length()\" because \"this.text\" is null"
+                .to_owned(),
+        ));
+    }
+    let Value::Str(s) = form else {
+        return Err(cce_err(form, "java.lang.CharSequence"));
+    };
+    validate_inst(s).map_err(tag_native)?;
+    Ok(Value::TaggedLiteral {
+        tag: Symbol::new(None, "inst"),
+        form: Box::new(form.clone()),
+    })
+}
+
+/// The `uuid` default reader (shared like `inst`): non-strings
+/// (nil included) fail as `IllegalArgumentException` (probes
+/// `d-uuid-nonstr`, `d-uuid-nil`), strings validate (probes
+/// `d-uuid-*`).
+fn default_uuid_reader(form: &Value) -> Result<Value, NativeError> {
+    let Value::Str(s) = form else {
+        return Err(NativeError::new(
+            ThrowClass::IllegalArgumentException,
+            "#uuid data reader expected string".to_owned(),
+        ));
+    };
+    validate_uuid(s).map_err(tag_native)?;
+    Ok(Value::TaggedLiteral {
+        tag: Symbol::new(None, "uuid"),
+        form: Box::new(form.clone()),
+    })
+}
+
+/// One default-table entry: a 1-arity native fn value (the arity
+/// error names the JVM var — probes `d-direct-arity0`,
+/// `d-direct-uuid-arity0`).
+fn default_reader_fn(
+    eval: &mut Evaluator,
+    display: &'static str,
+    reader: fn(&Value) -> Result<Value, NativeError>,
+) -> Value {
+    Value::Extension(Arc::new(NativeFn {
+        id: eval.next_id(),
+        display: Arc::from(display),
+        func: Arc::new(move |_, args| {
+            check_arity(display, args, &[1])?;
+            reader(&args[0])
+        }),
+        meta: None,
+    }))
+}
+
+/// The `default-data-readers` root (S6): `{inst, uuid}` over the
+/// 1-arity default natives (probes `a-defaults*`, `a-ddr-*`).
+pub(crate) fn default_data_readers_map(eval: &mut Evaluator) -> Value {
+    let inst = default_reader_fn(
+        eval,
+        "clojure.instant/read-instant-date",
+        default_inst_reader,
+    );
+    let uuid = default_reader_fn(
+        eval,
+        "clojure.uuid/default-uuid-reader",
+        default_uuid_reader,
+    );
+    Value::Map(
+        new_map()
+            .insert(Value::Symbol(Symbol::new(None, "inst")), inst)
+            .insert(Value::Symbol(Symbol::new(None, "uuid")), uuid),
+    )
+}
+
+/// The table's symbol keys for the read-side consult, plus the
+/// borked-table class when the value is neither nil nor a
+/// lookupable (nil, vectors, entries, and records consult without
+/// failing — probes `e-nonmap-nil`, `e-vectable`).
+fn table_snapshot(table: &Value) -> (HashSet<Symbol>, Option<String>) {
+    if let Some(inst) = crate::types::record_inst(table) {
+        return (symbol_keys(&inst.content), None);
+    }
+    match table {
+        Value::Nil | Value::Vector(_) | Value::MapEntry { .. } => (HashSet::new(), None),
+        Value::Map(m) => (symbol_keys(m), None),
+        _ => (HashSet::new(), Some(jvm_class_of(table))),
+    }
+}
+
+/// A map's symbol keys (the read-side membership set ignores
+/// non-symbol keys, which never match a tag — probe `e-strkey`).
+fn symbol_keys(m: &Map) -> HashSet<Symbol> {
+    m.iter()
+        .filter_map(|(k, _)| match k {
+            Value::Symbol(sym) => Some(sym.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Snapshot the live tag consult into `opts` (S6): defer mode on,
+/// the table keys (or the borked class), and the default-fn flag.
+/// Read paths re-snapshot per form (user code runs between forms,
+/// so the consult stays fresh like the JVM's per-tag deref).
+pub(crate) fn snapshot_data_readers(eval: &Evaluator, opts: &mut clj_reader::ReaderOpts) {
+    let (keys, borked) = table_snapshot(&deref_core(eval, "*data-readers*"));
+    opts.data_readers = true;
+    opts.data_reader_keys = keys;
+    opts.data_readers_borked = borked;
+    opts.default_reader_fn = !matches!(deref_core(eval, "*default-data-reader-fn*"), Value::Nil);
+}
+
+/// Whether any tag still needs resolution (the walk's fast path:
+/// tag-free forms return untouched, so S6 is a no-op for them).
+/// Tags nested in preserved conditionals need nothing (the walk
+/// skips those subtrees — probe `g-preserve-usertag`).
+fn needs_resolution(v: &Value) -> bool {
+    match v {
+        Value::TaggedLiteral { .. } => true,
+        Value::Symbol(s) => s.meta().is_some_and(map_needs),
+        Value::List(l) => l.iter().any(needs_resolution) || l.meta().is_some_and(map_needs),
+        Value::Vector(v) => v.iter().any(needs_resolution) || v.meta().is_some_and(map_needs),
+        Value::Map(m) => map_needs(m),
+        Value::Set(s) => s.iter().any(needs_resolution) || s.meta().is_some_and(map_needs),
+        _ => false,
+    }
+}
+
+/// Whether a map holds (or is meta-wrapped with) a tag.
+fn map_needs(m: &Map) -> bool {
+    m.iter()
+        .any(|(k, v)| needs_resolution(k) || needs_resolution(v))
+        || m.meta().is_some_and(map_needs)
+}
+
+/// Resolve deferred tags in one read form (S6): bottom-up in read
+/// order, skipping `ReaderConditional` subtrees and never
+/// re-descending into fn results (probe `e-no-redescent`).
+/// Metadata resolves too (tags inside meta maps invoke — probe
+/// `e-meta-inner`).
+pub(crate) fn resolve_data_readers(
+    eval: &mut Evaluator,
+    form: Value,
+) -> Result<Value, NativeError> {
+    if !needs_resolution(&form) {
+        return Ok(form);
+    }
+    resolve_inner(eval, form)
+}
+
+/// One resolved metadata map (`None` stays `None`).
+fn resolve_opt_meta(eval: &mut Evaluator, meta: Option<Map>) -> Result<Option<Map>, NativeError> {
+    match meta {
+        Some(m) => Ok(Some(resolve_map(eval, m)?)),
+        None => Ok(None),
+    }
+}
+
+/// One resolved map: keys and values in insertion order (the JVM
+/// builds from resolved entries too), plus the meta.
+fn resolve_map(eval: &mut Evaluator, m: Map) -> Result<Map, NativeError> {
+    let mut out = new_map();
+    for (k, v) in m.iter() {
+        let key = resolve_inner(eval, k.clone())?;
+        let val = resolve_inner(eval, v.clone())?;
+        out = out.insert(key, val);
+    }
+    Ok(out.with_meta(resolve_opt_meta(eval, m.meta().cloned())?))
+}
+
+/// The resolving walk (the fast path already confirmed tags).
+fn resolve_inner(eval: &mut Evaluator, form: Value) -> Result<Value, NativeError> {
+    match form {
+        Value::TaggedLiteral { tag, form } => {
+            let inner = resolve_inner(eval, *form)?;
+            resolve_tag(eval, &tag, inner)
+        }
+        Value::Symbol(s) => resolve_symbol(eval, s),
+        Value::List(l) => resolve_list(eval, l),
+        Value::Vector(v) => resolve_vector(eval, v),
+        Value::Map(m) => Ok(Value::Map(resolve_map(eval, m)?)),
+        Value::Set(s) => resolve_set(eval, s),
+        // Preserved conditionals stay data (probe
+        // `g-preserve-usertag`); scalars, entries, and host values
+        // never hold unresolved tags (the reader yields none).
+        other => Ok(other),
+    }
+}
+
+/// One resolved symbol (meta only).
+fn resolve_symbol(eval: &mut Evaluator, s: Symbol) -> Result<Value, NativeError> {
+    let meta = resolve_opt_meta(eval, s.meta().cloned())?;
+    Ok(Value::Symbol(s.with_meta(meta)))
+}
+
+/// One resolved list (items in order, plus the meta).
+fn resolve_list(eval: &mut Evaluator, l: List) -> Result<Value, NativeError> {
+    let mut items = Vec::with_capacity(l.len());
+    for v in l.iter() {
+        items.push(resolve_inner(eval, v.clone())?);
+    }
+    let meta = resolve_opt_meta(eval, l.meta().cloned())?;
+    Ok(Value::List(List::from_vec(items).with_meta(meta)))
+}
+
+/// One resolved vector (items in order, plus the meta).
+fn resolve_vector(eval: &mut Evaluator, v: Vector) -> Result<Value, NativeError> {
+    let mut items = Vec::with_capacity(v.len());
+    for item in v.iter() {
+        items.push(resolve_inner(eval, item.clone())?);
+    }
+    let meta = resolve_opt_meta(eval, v.meta().cloned())?;
+    Ok(Value::Vector(Vector::from_vec(items).with_meta(meta)))
+}
+
+/// One resolved set (members in insertion order, plus the meta).
+fn resolve_set(eval: &mut Evaluator, s: Set) -> Result<Value, NativeError> {
+    let mut out = new_set();
+    for v in s.iter() {
+        out = out.insert(resolve_inner(eval, v.clone())?);
+    }
+    let meta = resolve_opt_meta(eval, s.meta().cloned())?;
+    Ok(Value::Set(out.with_meta(meta)))
+}
+
+/// The table lookup: `RT.get` semantics (nil entries miss — probe
+/// `e-nilentry); anything but nil and the lookupables fails the
+/// `ILookup` cast (probe `e-nonmap`).
+fn table_lookup(table: &Value, tag: &Symbol) -> Result<Option<Value>, NativeError> {
+    if let Some(inst) = crate::types::record_inst(table) {
+        return Ok(table_entry(&inst.content, tag));
+    }
+    match table {
+        Value::Nil | Value::Vector(_) | Value::MapEntry { .. } => Ok(None),
+        Value::Map(m) => Ok(table_entry(m, tag)),
+        _ => Err(cce_err(table, "clojure.lang.ILookup")),
+    }
+}
+
+/// One table entry (a nil entry misses like a missing one).
+fn table_entry(m: &Map, tag: &Symbol) -> Option<Value> {
+    m.get(&Value::Symbol(tag.clone()))
+        .cloned()
+        .filter(|v| !matches!(v, Value::Nil))
+}
+
+/// Resolve one tag: the table (fresh deref per tag — user code runs
+/// between tags), then the unqualified `inst`/`uuid` defaults, then
+/// the default fn with `[tag form]`, else the `RuntimeException`
+/// (probes `e-*`, `f-*`). The throw stays reachable when the table
+/// mutates mid-walk (the reader consults the pre-read snapshot).
+fn resolve_tag(eval: &mut Evaluator, tag: &Symbol, form: Value) -> Result<Value, NativeError> {
+    if let Some(f) = table_lookup(&deref_core(eval, "*data-readers*"), tag)? {
+        return eval.call(&f, &[form]).map_err(signal_to_native);
+    }
+    if tag.namespace().is_none() {
+        if tag.name() == "inst" {
+            return default_inst_reader(&form);
+        }
+        if tag.name() == "uuid" {
+            return default_uuid_reader(&form);
+        }
+    }
+    let default_fn = deref_core(eval, "*default-data-reader-fn*");
+    if !matches!(default_fn, Value::Nil) {
+        let tagv = Value::Symbol(tag.clone());
+        return eval
+            .call(&default_fn, &[tagv, form])
+            .map_err(signal_to_native);
+    }
+    Err(NativeError::new(
+        ThrowClass::RuntimeException,
+        format!("No reader function for tag {tag}"),
+    ))
+}
+
+/// Drain fired-discards in read order (S6): each entry's form
+/// resolves first (nested tags fire through it), then the outer tag
+/// invokes for effect (the result drops — `#_` discards).
+pub(crate) fn drain_fired_tags(
+    eval: &mut Evaluator,
+    fired: Vec<clj_reader::FiredTag>,
+) -> Result<(), NativeError> {
+    for entry in fired {
+        let form = resolve_data_readers(eval, entry.form)?;
+        resolve_tag(eval, &entry.tag, form)?;
+    }
+    Ok(())
 }
 
 /// Printer options from the bound `*print-*` vars (`readably`
@@ -3225,6 +3567,10 @@ pub(crate) const CORE_NATIVES: &[(&str, NativeFnPtr)] = &[
     ("NaN?", native_nanp),
     ("infinite?", native_infinitep),
     ("find-keyword", native_find_keyword),
+    ("tagged-literal", native_tagged_literal),
+    ("tagged-literal?", native_tagged_literalp),
+    ("reader-conditional", native_reader_conditional),
+    ("reader-conditional?", native_reader_conditionalp),
     ("str", native_str),
     ("subs", native_subs),
     ("pr-str", native_pr_str),

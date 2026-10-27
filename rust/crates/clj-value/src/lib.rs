@@ -15,6 +15,7 @@
 mod agent;
 mod atom;
 mod compare;
+mod datareaders;
 mod delay;
 mod extension;
 mod future;
@@ -33,8 +34,9 @@ mod value;
 pub use agent::{Agent, AgentAction, AgentInner, AgentPool, ErrorMode, QueuedAction};
 pub use atom::{Atom, AtomState};
 pub use compare::{CompareError, compare};
+pub use datareaders::{TagError, validate_inst, validate_uuid};
 pub use delay::{Delay, DelayState};
-pub use extension::{ExtensionValue, ThrowClass, Throwable, Unbound, Var};
+pub use extension::{ExtensionValue, ThrowClass, Throwable, Unbound, Var, cce_message};
 pub use future::{Future, FutureOutcome, FutureState};
 pub use hasheq::{hash_code, hasheq, seq_hash_unsupported};
 pub use host::{

@@ -15,7 +15,7 @@
 
 use std::sync::Arc;
 
-use clj_reader::{ReaderOpts, Span, read_all};
+use clj_reader::{Reader, ReaderOpts, Span};
 use clj_value::{
     Delay, Keyword, List, Map, Promise, Symbol, ThrowClass, Throwable, Value, Var, Vector, new_map,
 };
@@ -324,8 +324,11 @@ impl Evaluator {
     /// namespace (syntax-quote and `::` resolve read-time, like the
     /// JVM). S7 drivers use this + [`eval_top_form`](Self::eval_top_form)
     /// to iterate per-form (print/shift each value, stop at the
-    /// first error).
-    pub fn read_forms(&self, text: &str) -> Result<Vec<Value>, SourceError> {
+    /// first error). Data readers resolve per form (S6): the consult
+    /// re-snapshots every iteration (user code runs between forms),
+    /// fired discards drain before each form resolves, and
+    /// resolution failures surface as uncaught throwables.
+    pub fn read_forms(&mut self, text: &str) -> Result<Vec<Value>, SourceError> {
         let cur = self.current_ns_name();
         let mut opts = ReaderOpts {
             current_ns: cur.clone(),
@@ -335,7 +338,43 @@ impl Evaluator {
             opts.aliases = ns.alias_map();
             opts.refers = ns.refer_map();
         }
-        read_all(text, &opts).map_err(SourceError::Reader)
+        let mut reader = Reader::new(text, &opts);
+        let mut forms = Vec::new();
+        loop {
+            crate::core::snapshot_data_readers(self, &mut opts);
+            reader.set_opts(&opts);
+            match reader.read_form(false) {
+                Ok(Some(v)) => {
+                    self.drain_data_readers(&mut reader)?;
+                    forms.push(self.resolve_data_readers(v)?);
+                }
+                Ok(None) => {
+                    self.drain_data_readers(&mut reader)?;
+                    return Ok(forms);
+                }
+                Err(e) => {
+                    // Effects precede the failure (fired tags ran
+                    // during the read), so drain first.
+                    self.drain_data_readers(&mut reader)?;
+                    return Err(SourceError::Reader(e));
+                }
+            }
+        }
+    }
+
+    /// Drain one read's fired discards (S6), reporting failures as
+    /// uncaught throwables.
+    fn drain_data_readers(&mut self, reader: &mut Reader) -> Result<(), SourceError> {
+        let fired = reader.take_fired();
+        crate::core::drain_fired_tags(self, fired)
+            .map_err(|e| SourceError::Uncaught(self.throwable(e)))
+    }
+
+    /// Resolve one read form's deferred tags (S6), reporting
+    /// failures as uncaught throwables.
+    fn resolve_data_readers(&mut self, form: Value) -> Result<Value, SourceError> {
+        crate::core::resolve_data_readers(self, form)
+            .map_err(|e| SourceError::Uncaught(self.throwable(e)))
     }
 
     /// Read every form in `text` (default `:read-cond :allow`
@@ -498,6 +537,12 @@ impl Evaluator {
 
     /// Stamp a runtime failure with an identity and throw it.
     pub(crate) fn throw(&mut self, err: NativeError) -> Signal {
+        Signal::Throw(self.throwable(err))
+    }
+
+    /// Stamp a runtime failure with an identity (S6: read paths
+    /// report data-reader failures as uncaught throwables).
+    pub(crate) fn throwable(&mut self, err: NativeError) -> Throwable {
         let inner = err.into_inner();
         // A missing message stays missing (the JVM's no-arg
         // `CancellationException` reports a nil message, and
@@ -507,13 +552,13 @@ impl Evaluator {
         } else {
             Some(Arc::from(inner.message.as_str()))
         };
-        Signal::Throw(Throwable {
+        Throwable {
             id: self.next_id(),
             class: inner.class,
             message,
             data: inner.data.map(Box::new),
             cause: inner.cause.map(Box::new),
-        })
+        }
     }
 
     /// The visible value of a var: thread binding, else root (or
