@@ -223,7 +223,10 @@ impl<R: BufRead, W: Write> Session<R, W> {
     /// first error — or the incomplete verdict when the reader
     /// wants more lines.
     fn step(&mut self, buf: &str) -> Step {
-        let forms = match self.eval.read_forms(buf, &mut clj_reader::NoHooks) {
+        // Live hooks (S7): the session evaluates `#=` during the
+        // read, like `-e` and `eval_source` (the completeness probe
+        // above stays hookless — it never evaluates).
+        let forms = match self.eval.read_forms_live(buf) {
             Ok(forms) => forms,
             Err(err) => {
                 if is_incomplete_error(&err) {
