@@ -1,0 +1,74 @@
+e-cut-before -12219379200000
+e-cut-after -12219292800000
+e-cut-gap -12218860800000
+e-cut-gap5 -12219292800000
+e-cut-gap14 -12218515200000
+e-cut-pr-gap "#inst \"1582-10-20T00:00:00.000-00:00\""
+e-cut-1500 -14830992000000
+e-cut-1500leap THROW java.lang.RuntimeException|"failed: (<= 1 days (days-in-month months (leap-year? years)))"
+e-cut-1200leap -24293174400000
+e-cut-1000 -30609792000000
+e-cut-year0 -62121513600000
+e-cut-pr-year0 "#inst \"0001-06-15T00:00:00.000-00:00\""
+e-cut-pr-1500 "#inst \"1500-06-15T00:00:00.000-00:00\""
+e-cut-proleptic "#inst \"0001-01-03T00:00:00.000-00:00\""
+e-cut-roundtrip true
+e-str-year1 "Sat Jan 01 00:00:00 UTC 1"
+e-str-year99 "Sat Jun 15 00:00:00 UTC 99"
+e-str-year0 "Wed Jun 15 00:00:00 UTC 1"
+e-str-1500 "Mon Jun 15 00:00:00 UTC 1500"
+e-str-gap "Wed Oct 20 00:00:00 UTC 1582"
+e-str-before "Thu Oct 04 00:00:00 UTC 1582"
+e-str-millis "Mon Jan 01 00:00:00 UTC 2024"
+e-print-year1 "#inst \"0001-01-01T00:00:00.000-00:00\""
+e-uuid-roundtrip true
+e-uuid-ver4 [\4 true]
+e-uri-regcase false
+e-uri-regsame true
+e-uri-ipv6case true
+e-uri-escape true
+e-uri-escapediff false
+e-uri-queryescape true
+e-uri-auth-none-vs-empty true
+e-uri-emptyport "http://h:/x"
+e-uri-hash-escape 1342198872
+e-uri-hash-reg 2002189286
+e-uri-hash-userport 424978148
+e-uri-hash-opaquefrag 1561868420
+e-uri-hash-relquery 293526
+e-uri-hash-empty 0
+e-cmp-host-vs-path 1
+e-cmp-frag-vs-path 25
+e-cmp-query-vs-path 25
+e-cmp-port-vs-path 8
+e-cmp-user-vs-host 25
+e-cmp-ssp-vs-frag 25
+e-cmp-query-vs-none -1
+e-cmp-user-vs-none -1
+e-cmp-usercase -31
+e-cmp-pathcase -32
+e-cmp-auth-vs-none -1
+e-cmp-reg 1
+e-cmp-escape 0
+e-valid-empty ""
+e-valid-query "?q"
+e-valid-frag "#f"
+e-valid-rel "a/b/c"
+e-valid-scheme "s+1.x-2:y"
+e-valid-upper "HTTP://H/X"
+e-valid-ipv6 "http://[::1]:8080/x"
+e-valid-bigport "http://h:99999/x"
+e-valid-escape "http://h/a%2Fb?c=%20#d"
+e-bad-space THROW java.net.URISyntaxException|"Illegal character in path at index 10: http://h/a b"
+e-bad-quote THROW java.net.URISyntaxException|"Illegal character in path at index 9: http://h/\"a\""
+e-bad-scheme THROW java.net.URISyntaxException|"Illegal character in scheme name at index 0: 1x:y"
+e-bad-port #object[java.net.URI 0x5d10455d "http://h:8x/x"]
+e-bad-negport #object[java.net.URI 0x6759f091 "http://h:-1/x"]
+e-bad-hugeport #object[java.net.URI 0x55b5e331 "http://h:99999999999/x"]
+e-bad-ipv6 THROW java.net.URISyntaxException|"Expected closing bracket for IPv6 address at index 11: http://[::1/x"
+e-bad-ipv6char THROW java.net.URISyntaxException|"Malformed IPv6 address at index 8: http://[gg]/x"
+e-bad-escape THROW java.net.URISyntaxException|"Malformed escape pair at index 10: http://h/a%zz"
+e-bad-escape-short THROW java.net.URISyntaxException|"Malformed escape pair at index 10: http://h/a%2"
+e-bad-nonascii #object[java.net.URI 0x6826c41e "http://h/é"]
+e-bad-ctl THROW java.net.URISyntaxException|"Illegal character in path at index 10: http://h/ab"
+e-bad-relpath #object[java.net.URI 0x78d39a69 "http:a"]
