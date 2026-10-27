@@ -1,0 +1,8 @@
+a2-mulnil THROW java.lang.NullPointerException|"Cannot invoke \"java.lang.Class.getName()\" because the return value of \"clojure.lang.IFn.invoke(Object)\" is null"
+a2-addchar THROW java.lang.ClassCastException|"Cannot cast java.lang.Character to java.lang.Number"
+a2-mulchar THROW java.lang.ClassCastException|"Cannot cast java.lang.Character to java.lang.Number"
+a2-addtrue THROW java.lang.ClassCastException|"Cannot cast java.lang.Boolean to java.lang.Number"
+a2-multrue THROW java.lang.ClassCastException|"Cannot cast java.lang.Boolean to java.lang.Number"
+a2-addrat 1/2 <clojure.lang.Ratio>
+a2-muldec 5M <java.math.BigDecimal>
+a2-subchar THROW java.lang.ClassCastException|"class java.lang.Character cannot be cast to class java.lang.Number (java.lang.Character and java.lang.Number are in module java.base of loader 'bootstrap')"

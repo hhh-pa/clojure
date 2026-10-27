@@ -1,0 +1,95 @@
+ua-plain 3 <java.lang.Long>
+ua-wrap -9223372036854775808 <java.lang.Long>
+ua-wrapneg 9223372036854775807 <java.lang.Long>
+ua-dbl 3.5 <java.lang.Double>
+ua-dbl2 3.5 <java.lang.Double>
+ua-big 3N <clojure.lang.BigInt>
+ua-rat 3/2 <clojure.lang.Ratio>
+ua-dec 2M <java.math.BigDecimal>
+ua-nil THROW java.lang.NullPointerException|"Cannot invoke \"Object.getClass()\" because \"x\" is null"
+ua-str THROW java.lang.ClassCastException|"class java.lang.String cannot be cast to class java.lang.Number (java.lang.String and java.lang.Number are in module java.base of loader 'bootstrap')"
+ua-ar1 THROW clojure.lang.Compiler$CompilerException|"Syntax error compiling unchecked-add at (/Users/hhu/workspace/clojure/.muse/worktrees/subagent-v2-01a17cea-a1d1-73c2-b863-91fc98e8705c-01a17f53-7da6-78d1-a101-c3685abbfdb8/docs/zero-oos-s11-arith/probes/unchecked.clj:27:20)."
+ua-ar3 THROW clojure.lang.Compiler$CompilerException|"Syntax error compiling unchecked-add at (/Users/hhu/workspace/clojure/.muse/worktrees/subagent-v2-01a17cea-a1d1-73c2-b863-91fc98e8705c-01a17f53-7da6-78d1-a101-c3685abbfdb8/docs/zero-oos-s11-arith/probes/unchecked.clj:28:20)."
+uai-plain 3 <java.lang.Integer>
+uai-wrap -2147483648 <java.lang.Integer>
+uai-dbl 3 <java.lang.Integer>
+uai-big 3 <java.lang.Integer>
+uai-long THROW java.lang.ArithmeticException|"integer overflow"
+uai-nil THROW java.lang.NullPointerException|"Cannot invoke \"java.lang.Character.charValue()\" because \"x\" is null"
+uai-str THROW java.lang.ClassCastException|"class java.lang.String cannot be cast to class java.lang.Number (java.lang.String and java.lang.Number are in module java.base of loader 'bootstrap')"
+us-plain 2 <java.lang.Long>
+us-wrap 9223372036854775807 <java.lang.Long>
+us-dbl -0.5 <java.lang.Double>
+us-big -1N <clojure.lang.BigInt>
+us-rat -1/2 <clojure.lang.Ratio>
+us-dec 0M <java.math.BigDecimal>
+us-nil THROW java.lang.NullPointerException|"Cannot invoke \"Object.getClass()\" because \"x\" is null"
+us-str THROW java.lang.ClassCastException|"class java.lang.String cannot be cast to class java.lang.Number (java.lang.String and java.lang.Number are in module java.base of loader 'bootstrap')"
+usi-plain 2 <java.lang.Integer>
+usi-wrap 2147483647 <java.lang.Integer>
+usi-dbl -1 <java.lang.Integer>
+usi-big -1 <java.lang.Integer>
+um-plain 42 <java.lang.Long>
+um-wrap -2 <java.lang.Long>
+um-minneg -9223372036854775808 <java.lang.Long>
+um-dbl 3.0 <java.lang.Double>
+um-big 2N <clojure.lang.BigInt>
+um-rat 1N <clojure.lang.BigInt>
+um-dec 2M <java.math.BigDecimal>
+um-nil THROW java.lang.NullPointerException|"Cannot invoke \"Object.getClass()\" because \"x\" is null"
+um-str THROW java.lang.ClassCastException|"class java.lang.String cannot be cast to class java.lang.Number (java.lang.String and java.lang.Number are in module java.base of loader 'bootstrap')"
+umi-plain 42 <java.lang.Integer>
+umi-wrap -2 <java.lang.Integer>
+umi-dbl 2 <java.lang.Integer>
+umi-big 2 <java.lang.Integer>
+ui-plain 6 <java.lang.Long>
+ui-wrap -9223372036854775808 <java.lang.Long>
+ui-dbl 2.5 <java.lang.Double>
+ui-big 6N <clojure.lang.BigInt>
+ui-rat 3/2 <clojure.lang.Ratio>
+ui-dec 6M <java.math.BigDecimal>
+ui-nil THROW java.lang.NullPointerException|"Cannot invoke \"Object.getClass()\" because \"x\" is null"
+ui-str THROW java.lang.ClassCastException|"class java.lang.String cannot be cast to class java.lang.Number (java.lang.String and java.lang.Number are in module java.base of loader 'bootstrap')"
+ui-ar2 THROW clojure.lang.Compiler$CompilerException|"Syntax error compiling unchecked-inc at (/Users/hhu/workspace/clojure/.muse/worktrees/subagent-v2-01a17cea-a1d1-73c2-b863-91fc98e8705c-01a17f53-7da6-78d1-a101-c3685abbfdb8/docs/zero-oos-s11-arith/probes/unchecked.clj:72:20)."
+uii-plain 6 <java.lang.Integer>
+uii-wrap -2147483648 <java.lang.Integer>
+uii-dbl 2 <java.lang.Integer>
+uii-big 6 <java.lang.Integer>
+ud-plain 4 <java.lang.Long>
+ud-wrap 9223372036854775807 <java.lang.Long>
+ud-dbl 0.5 <java.lang.Double>
+ud-big 4N <clojure.lang.BigInt>
+ud-rat -1/2 <clojure.lang.Ratio>
+ud-dec 4M <java.math.BigDecimal>
+ud-nil THROW java.lang.NullPointerException|"Cannot invoke \"Object.getClass()\" because \"x\" is null"
+udi-plain 4 <java.lang.Integer>
+udi-wrap 2147483647 <java.lang.Integer>
+udi-dbl 0 <java.lang.Integer>
+udi-big 4 <java.lang.Integer>
+un-plain -5 <java.lang.Long>
+un-min -9223372036854775808 <java.lang.Long>
+un-dbl -1.5 <java.lang.Double>
+un-big -5N <clojure.lang.BigInt>
+un-rat -1/2 <clojure.lang.Ratio>
+un-dec -5M <java.math.BigDecimal>
+un-nil THROW java.lang.NullPointerException|"Cannot invoke \"Object.getClass()\" because \"x\" is null"
+un-str THROW java.lang.ClassCastException|"class java.lang.String cannot be cast to class java.lang.Number (java.lang.String and java.lang.Number are in module java.base of loader 'bootstrap')"
+uni-plain -5 <java.lang.Integer>
+uni-min -2147483648 <java.lang.Integer>
+uni-dbl -1 <java.lang.Integer>
+uni-big -5 <java.lang.Integer>
+udv-plain 3 <java.lang.Integer>
+udv-neg -3 <java.lang.Integer>
+udv-minneg -2147483648 <java.lang.Integer>
+udv-zero THROW java.lang.ArithmeticException|"/ by zero"
+udv-zero2 THROW java.lang.ArithmeticException|"/ by zero"
+udv-dbl 3 <java.lang.Integer>
+udv-big 3 <java.lang.Integer>
+udv-nil THROW java.lang.NullPointerException|"Cannot invoke \"java.lang.Character.charValue()\" because \"x\" is null"
+udv-str THROW java.lang.ClassCastException|"class java.lang.String cannot be cast to class java.lang.Number (java.lang.String and java.lang.Number are in module java.base of loader 'bootstrap')"
+urm-plain 1 <java.lang.Integer>
+urm-neg -1 <java.lang.Integer>
+urm-zero THROW java.lang.ArithmeticException|"/ by zero"
+urm-dbl 1 <java.lang.Integer>
+urm-big 1 <java.lang.Integer>
+urm-nil THROW java.lang.NullPointerException|"Cannot invoke \"java.lang.Character.charValue()\" because \"x\" is null"
