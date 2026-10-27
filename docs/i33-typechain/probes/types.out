@@ -1,0 +1,53 @@
+dtor-class user.Pair
+dtor-field 10
+dtor-kw nil
+dtor-get :dflt
+dtor-count THROW java.lang.UnsupportedOperationException|"count not supported on this type: Pair"
+dtor-eq false
+dtor-record? false
+dtor-map? false
+dtor-mapinst false
+dtor-arity1 THROW java.lang.IllegalArgumentException|"No matching ctor found for class user.Pair"
+dtor-arity0 THROW java.lang.IllegalArgumentException|"No matching ctor found for class user.Pair"
+dtor-meth 6
+dtor-m1 [:one 1]
+dtor-m2 [:two 1 2]
+dtor-supers ("class java.lang.Object" "interface clojure.lang.IType")
+rec-pos 1
+rec-mapf 2
+rec-mapf-extra 3
+rec-ctor 1
+rec-record? true
+rec-map? true
+rec-count 2
+rec-keys (:x :y)
+rec-vals (1 2)
+rec-seq ([:x 1] [:y 2])
+rec-get :dflt
+rec-contains true
+rec-find [:x 1]
+rec-kw-dflt :dflt
+rec-assoc-type user.Point
+rec-assoc-count 3
+rec-assoc-val 3
+rec-dissoc-type clojure.lang.PersistentArrayMap
+rec-dissoc-count 1
+rec-eq true
+rec-eq-map false
+rec-eq-diff false
+rec-merge-type user.Point
+rec-into {:x 1, :y 2}
+rec-select {:y 2}
+rec-arity THROW clojure.lang.ArityException|"Wrong number of args (1) passed to: user/evalN/->Point--N"
+rec-supers ("class java.lang.Object" "interface clojure.lang.Associative" "interface clojure.lang.Counted" "interface clojure.lang.IHashEq" "interface clojure.lang.IKeywordLookup" "interface clojure.lang.ILookup" "interface clojure.lang.IMeta" "interface clojure.lang.IObj" "interface clojure.lang.IPersistentCollection" "interface clojure.lang.IPersistentMap" "interface clojure.lang.IRecord" "interface clojure.lang.Seqable" "interface java.io.Serializable" "interface java.lang.Iterable" "interface java.util.Map")
+rec-iface "interface user.Adder"
+reify-str "hi!"
+reify-meth 12
+reify-self-eq true
+reify-distinct false
+reify-objinst true
+proxy-str "prox"
+proxy-objinst true
+proxy-iface 6
+geniface user.Greetable
+genclass THROW java.lang.ClassNotFoundException|"user.Klass"
