@@ -1,0 +1,17 @@
+t-no-taps true
+t-add-ret nil
+t-add-nonfn-ret nil
+t-remove-ret [nil nil]
+t-remove-never nil
+t-deliver :x
+t-tap-ret-with-tap true
+t-thread "clojure.core/tap-loop"
+t-nil [:got nil]
+t-add-twice 1
+t-removed-misses :TIMEOUT
+t-throw-safe :after-boom
+t-tap->-ret 5
+t-tap->-delivers [:threaded :threaded]
+t-tap->-nil [nil [:got nil]]
+t-tap->-false [false [:got false]]
+t-full [1024 476]
