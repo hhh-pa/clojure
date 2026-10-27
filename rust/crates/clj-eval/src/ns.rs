@@ -1959,6 +1959,7 @@ fn boot_install_natives(eval: &mut Evaluator) {
         .chain(crate::types::TYPES_NATIVES.iter())
         .chain(crate::protocol::PROTOCOL_NATIVES.iter())
         .chain(crate::multi::MULTI_NATIVES.iter())
+        .chain(crate::core::TOWER_NATIVES.iter())
     {
         let func: Arc<crate::ext::NativeImpl> = Arc::new(*f);
         eval.install_native("clojure.core", name, func);
@@ -2040,6 +2041,10 @@ fn boot_core_vars(eval: &mut Evaluator, user_handle: Value) {
     // `RT.java`: `*agent*` is a dynamic slot with a nil root (bound
     // to the agent inside each action by `send`).
     def_dynamic_root(eval, "*agent*", Value::Nil);
+    // `RT.java`: `*math-context*` is a dynamic slot with a nil
+    // root, bound by `with-precision` (S2; no `:dynamic` meta —
+    // oracle `mc-meta`).
+    def_dynamic_root(eval, "*math-context*", Value::Nil);
 }
 
 /// Refer every public install into `user` (JVM boot refers
@@ -2085,6 +2090,7 @@ fn boot_refer_user(eval: &mut Evaluator) {
             "*print-readably*",
             "*print-dup*",
             "*agent*",
+            "*math-context*",
             "*print-length*",
             "*print-level*",
             "*print-namespace-maps*",

@@ -249,6 +249,13 @@ pub trait ExtensionValue: std::fmt::Debug + Send + Sync {
 
     /// Downcasting support for [`dyn_eq`](ExtensionValue::dyn_eq).
     fn as_any(&self) -> &dyn Any;
+
+    /// The `str`/`print` display (used when not `readably`):
+    /// `None` keeps [`print`](ExtensionValue::print) (the default
+    /// — only `MathContext` overrides it, S2 oracle `wp-str`).
+    fn print_str(&self) -> Option<String> {
+        None
+    }
 }
 
 #[cfg(test)]

@@ -384,6 +384,7 @@ fn append_canon_body(out: &mut String, v: &Value, print_meta: bool) {
         | Value::Int(_)
         | Value::Double(_)
         | Value::BigInt(_)
+        | Value::BigInteger(_)
         | Value::BigDec(_)
         | Value::Ratio(_)
         | Value::Str(_)

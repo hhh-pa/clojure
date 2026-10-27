@@ -4,7 +4,7 @@ The complete inventory of `clojure.core` in this port: every var,
 its conformance state, and — for exclusions — why it is excluded.
 If a var is not listed here, that is a file bug, not a silent gap.
 
-- **483 vars: 465 implemented, 2 divergent, 16 out of scope,
+- **492 vars: 474 implemented, 2 divergent, 16 out of scope,
   0 planned.** The port reports Clojure `1.13.0-alpha9`
   (`clojure-version`).
 - **Status meanings.** `implemented` — resolves in the booted core
@@ -584,9 +584,13 @@ slices' rows into this table).
 | var | status | notes |
 | --- | --- | --- |
 | `NaN?` | implemented | core.rs native_nanp (`Double` payload; other numbers false; nil NPE; else CCE `Number`); predicates.rs nan_rows |
+| `abs` | implemented | core.rs native_abs (exact all kinds; `BigDec` rounds under ctx); zero_oos_s2_tower.rs s2_abs_rows |
 | `any?` | implemented | core.rs pred1 constantly true; predicates.rs any_rows |
+| `biginteger` | implemented | core.rs native_biginteger (`Value::BigInteger`, bare print); zero_oos_s2_tower.rs s2_biginteger_rows |
 | `bounded-count` | implemented | core.clj port; tests/zero_oos_s3_seqs.rs bounded_count_rows (counted fast path, early exit over infinite; probes `bc-*`) |
+| `decimal?` | implemented | core.rs pred1 over `Value::BigDec`; zero_oos_s2_tower.rs s2_predicate_rows |
 | `delay?` | implemented | core.rs pred1 over `Value::Delay`; predicates.rs delay_rows |
+| `denominator` | implemented | core.rs ratio_part (`BigInteger`; `Ratio` CCE); zero_oos_s2_tower.rs s2_numerator_denominator_rows |
 | `disj!` | implemented | S5: coll.rs native_disj_bang (1-arity identity; `ITransientSet` cast); zero_oos_s5_state.rs disj_bang_rows |
 | `error-handler` | implemented | S5: concurrency.rs cell read (fn or nil); zero_oos_s5_state.rs error_handler_rows |
 | `error-mode` | implemented | S5: concurrency.rs cell read (`:fail`/`:continue`); zero_oos_s5_state.rs error_handler_rows |
@@ -603,6 +607,7 @@ slices' rows into this table).
 | `merge-deep-with` | implemented | core.clj port over merge-with (1.13); tests/zero_oos_s3_seqs.rs merge_deep_with_rows (probes `mdw-*`) |
 | `nat-int?` | implemented | core.rs pred1 over `Int` >= 0; predicates.rs nat_int_rows |
 | `neg-int?` | implemented | core.rs pred1 over `Int` < 0; predicates.rs neg_int_rows |
+| `numerator` | implemented | core.rs ratio_part (`BigInteger`; `Ratio` CCE); zero_oos_s2_tower.rs s2_numerator_denominator_rows |
 | `parse-boolean` | implemented | zero_oos_s4a_corelib.rs parse_boolean_rows (S4a #46; probes corelib.out pb-*) |
 | `parse-double` | implemented | zero_oos_s4a_corelib.rs parse_double_rows (S4a #46; probes corelib.out pd-*) |
 | `parse-long` | implemented | zero_oos_s4a_corelib.rs parse_long_rows (S4a #46; probes corelib.out pl-*) |
@@ -613,6 +618,8 @@ slices' rows into this table).
 | `println-str` | implemented | zero_oos_s4a_corelib.rs println_str_rows (S4a #46; probes corelib.out pls-*) |
 | `prn-str` | implemented | zero_oos_s4a_corelib.rs prn_str_rows (S4a #46; probes corelib.out prs-*) |
 | `rand-nth` | implemented | zero_oos_s4a_corelib.rs rand_nth_rows (S4a #46; probes corelib.out rn-*) |
+| `ratio?` | implemented | core.rs pred1 over `Value::Ratio`; zero_oos_s2_tower.rs s2_predicate_rows |
+| `rational?` | implemented | core.rs pred1 over `Int`/`BigInt`/`BigInteger`/`Ratio`/`BigDec`; zero_oos_s2_tower.rs s2_predicate_rows |
 | `reduce-kv` | implemented | core.clj port: nil arm, vector index loop with reduced unwrap, entry slow path; tests/zero_oos_s3_seqs.rs reduce_kv_rows (probes `rk-*`) |
 | `requiring-resolve` | implemented | S5: ns.rs resolve-else-require; zero_oos_s5_state.rs requiring_resolve_rows |
 | `reset-vals!` | implemented | S5: concurrency.rs `reset!` answering `[old new]`; zero_oos_s5_state.rs vals_rows |
@@ -659,3 +666,14 @@ Zero-oos wave-1 rows in PR #41 order (mirroring `Previously unlisted — no slic
 | `unquote` | implemented | core.clj bare unbound def (syntax-quote support surface; expansion still reader/analyzer-owned); tests/zero_oos_s4b_macros.rs s4b_unquote_rows |
 | `unquote-splicing` | implemented | core.clj bare unbound def (syntax-quote support surface; expansion still reader/analyzer-owned); tests/zero_oos_s4b_macros.rs s4b_unquote_rows |
 | `with-local-vars` | implemented | core.clj macro over `__local-var*` anonymous dynamic vars (interop-free expansion; bindings pop on return and throw); tests/zero_oos_s4b_macros.rs s4b_with_local_vars_rows |
+
+### Previously unlisted — no slice yet (S2 rows)
+
+S2's precision-context rows at their PR #41 mirrored positions,
+flipped straight to `implemented` (the #41 land unions the
+remaining slices' rows into this table).
+
+| var | status | notes |
+| --- | --- | --- |
+| `*math-context*` | implemented | ns.rs `RT.java`-style dynamic root (nil); `MathContextVal` extension; zero_oos_s2_tower.rs s2_math_context_rows |
+| `with-precision` | implemented | core.clj defmacro over `binding` + `math-context` ctor; `+ - * / quot inc dec` consult; zero_oos_s2_tower.rs s2_precision_* |

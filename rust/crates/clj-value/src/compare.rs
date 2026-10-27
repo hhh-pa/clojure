@@ -110,10 +110,10 @@ fn compare_numbers(a: &Value, b: &Value) -> Option<Ordering> {
         (Value::Int(i), Value::BigDec(e)) => {
             Some(crate::BigDec::from_bigint((*i).into()).compare(e))
         }
-        (Value::BigDec(d), Value::BigInt(n)) => {
+        (Value::BigDec(d), Value::BigInt(n) | Value::BigInteger(n)) => {
             Some(d.compare(&crate::BigDec::from_bigint(n.clone())))
         }
-        (Value::BigInt(n), Value::BigDec(e)) => {
+        (Value::BigInt(n) | Value::BigInteger(n), Value::BigDec(e)) => {
             Some(crate::BigDec::from_bigint(n.clone()).compare(e))
         }
         _ => {
@@ -128,7 +128,7 @@ fn compare_numbers(a: &Value, b: &Value) -> Option<Ordering> {
 fn to_rational_value(v: &Value) -> Option<BigRational> {
     match v {
         Value::Int(i) => Some(BigRational::from_integer(BigInt::from(*i))),
-        Value::BigInt(n) => Some(BigRational::from_integer(n.clone())),
+        Value::BigInt(n) | Value::BigInteger(n) => Some(BigRational::from_integer(n.clone())),
         Value::BigDec(d) => Some(d.to_rational()),
         Value::Ratio(r) => Some(r.clone()),
         _ => None,
@@ -140,7 +140,7 @@ fn to_f64_value(v: &Value) -> Option<f64> {
     match v {
         Value::Int(i) => Some(*i as f64),
         Value::Double(d) => Some(*d),
-        Value::BigInt(n) => n.to_f64(),
+        Value::BigInt(n) | Value::BigInteger(n) => n.to_f64(),
         Value::BigDec(d) => Some(d.to_f64()),
         Value::Ratio(r) => r.to_f64(),
         _ => None,
@@ -212,17 +212,36 @@ fn type_name(v: &Value) -> &'static str {
     match v {
         Value::Nil => "nil",
         Value::Bool(_) => "Boolean",
-        Value::Int(_) => "Long",
-        Value::Double(_) => "Double",
-        Value::BigInt(_) => "BigInt",
-        Value::BigDec(_) => "BigDecimal",
-        Value::Ratio(_) => "Ratio",
+        Value::Int(_) | Value::Double(_) => scalar_type_name(v),
+        Value::BigInt(_) | Value::BigInteger(_) | Value::BigDec(_) | Value::Ratio(_) => {
+            tower_type_name(v)
+        }
         Value::Str(_) => "String",
         Value::Char(_) => "Character",
         Value::Symbol(_) => "Symbol",
         Value::Keyword(_) => "Keyword",
         Value::Extension(e) => extension_type_name(e),
         _ => port_type_name(v).unwrap_or_else(|| ref_or_collection_type_name(v)),
+    }
+}
+
+/// Scalar number type names (split from `type_name` for the
+/// complexity budget).
+fn scalar_type_name(v: &Value) -> &'static str {
+    match v {
+        Value::Int(_) => "Long",
+        _ => "Double",
+    }
+}
+
+/// Tower number type names (split from `type_name` for the
+/// complexity budget).
+fn tower_type_name(v: &Value) -> &'static str {
+    match v {
+        Value::BigInt(_) => "BigInt",
+        Value::BigInteger(_) => "BigInteger",
+        Value::BigDec(_) => "BigDecimal",
+        _ => "Ratio",
     }
 }
 
@@ -301,6 +320,34 @@ mod tests {
 
     fn message_of(a: &Value, b: &Value) -> String {
         compare(a, b).expect_err("expected incomparable").message()
+    }
+
+    /// Numeric type names, incl the S2 `BigInteger` kind.
+    #[test]
+    fn numeric_type_names() {
+        use num_bigint::BigInt;
+        assert_eq!(type_name(&Value::Int(1)), "Long");
+        assert_eq!(type_name(&Value::Double(1.0)), "Double");
+        assert_eq!(type_name(&Value::BigInt(BigInt::from(1))), "BigInt");
+        assert_eq!(type_name(&Value::BigInteger(BigInt::from(1))), "BigInteger");
+        assert_eq!(
+            type_name(&Value::BigDec(crate::BigDec::from_bigint(BigInt::from(1)))),
+            "BigDecimal"
+        );
+        assert_eq!(
+            type_name(&Value::Ratio(num_rational::BigRational::new(
+                BigInt::from(1),
+                BigInt::from(2)
+            ))),
+            "Ratio"
+        );
+        assert_eq!(
+            message_of(
+                &Value::BigInteger(BigInt::from(1)),
+                &Value::Str(Arc::from("s"))
+            ),
+            "Cannot compare BigInteger to String"
+        );
     }
 
     #[test]

@@ -1451,6 +1451,18 @@
 ;; `ls-basic`..`ls-empty` document the JVM side).
 (defn line-seq [rdr] ((fn step [] (binding [*in* rdr] (when-let [line (read-line)] (cons line (lazy-seq (step))))))))
 
+;; --- `with-precision` (zero-oos S2): upstream shape over
+;; `binding`, except the `MathContext` comes from the port-only
+;; `clojure.core/math-context` ctor (installed, never referred
+;; — no interop here) and the `:rounding` mode splices quoted
+;; (upstream resolves it as a static field at compile time).
+(defmacro with-precision [precision & exprs]
+  (let [[body rm] (if (= (first exprs) :rounding)
+                    [(next (next exprs)) (list (second exprs))]
+                    [exprs nil])]
+    `(binding [*math-context* (clojure.core/math-context ~precision ~@(map (fn [m] (list 'quote m)) rm))]
+       ~@body)))
+
 ;; --- `ffirst` (S1): the stock composite (probes `p-ffirst-*`).
 (defn ffirst
   "Same as (first (first x))"

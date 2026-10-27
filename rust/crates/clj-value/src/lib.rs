@@ -52,7 +52,10 @@ pub use seq::{
     RealizedSeq, RepeatValue, Seq, SeqKind, SubVectorValue, ValSeqValue, seq_vec,
 };
 pub use symbol::Symbol;
-pub use tower::{BigDec, NON_TERMINATING, bigint_parse};
+pub use tower::{
+    BAD_CTX_FORMAT, BigDec, DIGITS_LT_0, MathContext, NON_TERMINATING, ROUNDING_NECESSARY,
+    RoundingMode, bigint_parse,
+};
 pub use transient::{
     Transient, TransientError, TransientKind, TransientMap, TransientSet, TransientVector,
 };

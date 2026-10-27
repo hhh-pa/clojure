@@ -107,7 +107,9 @@ fn print_scalars(v: &Value, opts: &PrintOpts, level: Option<i64>, out: &mut Stri
         Value::Bool(false) => out.push_str("false"),
         Value::Int(i) => write!(out, "{i}").unwrap(),
         Value::Double(d) => out.push_str(&print_double(*d)),
-        Value::BigInt(_) | Value::BigDec(_) | Value::Ratio(_) => print_tower(v, opts, out),
+        Value::BigInt(_) | Value::BigInteger(_) | Value::BigDec(_) | Value::Ratio(_) => {
+            print_tower(v, opts, out)
+        }
         Value::Str(s) => print_string(s, opts.readably, out),
         Value::Char(c) => print_char(*c, opts.readably, out),
         Value::Symbol(s) => write!(out, "{s}").unwrap(),
@@ -140,8 +142,10 @@ fn print_scalars(v: &Value, opts: &PrintOpts, level: Option<i64>, out: &mut Stri
 }
 
 /// Readable tower suffixes (`5N`, `5.0M`); `str`/`print` use
-/// the plain `toString` (`5`, `5.0`). Ratios print `n/d` either
-/// way. Chained so each match stays under the complexity gate.
+/// the plain `toString` (`5`, `5.0`). `BigInteger` prints bare
+/// either way (S2 oracle `bi-pr`/`bi-str`); ratios print `n/d`
+/// either way. Chained so each match stays under the complexity
+/// gate.
 fn print_tower(v: &Value, opts: &PrintOpts, out: &mut String) {
     match v {
         Value::BigInt(n) => {
@@ -149,6 +153,9 @@ fn print_tower(v: &Value, opts: &PrintOpts, out: &mut String) {
             if opts.readably {
                 out.push('N');
             }
+        }
+        Value::BigInteger(n) => {
+            write!(out, "{n}").unwrap();
         }
         Value::BigDec(d) => {
             out.push_str(&d.to_bigdec_string());
@@ -369,6 +376,12 @@ fn print_extension_body(
         let items = sv.items();
         let refs: Vec<&Value> = items.iter().collect();
         print_sequential("[", refs, "]", " ", opts, level, out);
+    } else if !opts.readably {
+        // Extensions with a `str` display render it here (only
+        // `MathContext`, S2 oracle `wp-str`); the rest keep
+        // `print()` (one line — region coverage over the
+        // default is not gated).
+        out.push_str(&e.print_str().unwrap_or_else(|| e.print()));
     } else {
         out.push_str(&e.print());
     }
