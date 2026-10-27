@@ -33,7 +33,7 @@ Throwable->map	1.7	fn	needs-design	Error-data shape; port ThrowClass/ex-data exi
 abs	1.11	fn	planned	Tower (BigInt/BigDec/Ratio) coercion/predicate/accessor; tower implemented
 accessor	1.0	fn	needs-design	Legacy structmaps; pure-map design possible
 aclone	1.0	fn	out-of-scope	Java array ctor/cast/read/write; no array values (N1)
-add-classpath	1.0	fn	out-of-scope	Deprecated on JVM; replacement implemented
+add-classpath	1.0	fn	out-of-scope	Deprecated on JVM, no replacement named; classpath URLs have no slice
 add-tap	1.10	fn	needs-design	Tap set + queue; blocking/dropping policy
 agent-errors	1.0	fn	out-of-scope	Deprecated on JVM; replacement implemented
 aget	1.0	fn	out-of-scope	Java array ctor/cast/read/write; no array values (N1)
@@ -51,7 +51,7 @@ aset-float	1.0	fn	out-of-scope	Java array ctor/cast/read/write; no array values 
 aset-int	1.0	fn	out-of-scope	Java array ctor/cast/read/write; no array values (N1)
 aset-long	1.0	fn	out-of-scope	Java array ctor/cast/read/write; no array values (N1)
 aset-short	1.0	fn	out-of-scope	Java array ctor/cast/read/write; no array values (N1)
-await1	?	fn	out-of-scope	Await internal covered by implemented await
+await1	?	fn	out-of-scope	Public [a] await returning the agent; implemented await is [& agents] returning nil
 bean	1.0	fn	out-of-scope	Host reflection/interop/beans/method-fns (N1)
 biginteger	1.0	fn	planned	Tower (BigInt/BigDec/Ratio) coercion/predicate/accessor; tower implemented
 bit-and	1.0	fn	needs-design	Bitwise lattice over tower; S-rng-tower left tower bit-ops a non-goal
@@ -106,8 +106,8 @@ disj!	1.1	fn	planned	Transient/atom gap-fill; transient family + atoms implement
 double-array	1.0	fn	out-of-scope	Java array ctor/cast/read/write; no array values (N1)
 doubles	1.0	fn	out-of-scope	Java array ctor/cast/read/write; no array values (N1)
 enumeration-seq	1.0	fn	out-of-scope	JDK collection/stream adapters (N1)
-error-handler	1.2	fn	planned	Agent/future field read; agent ctor + futures implemented
-error-mode	1.2	fn	planned	Agent/future field read; agent ctor + futures implemented
+error-handler	1.2	fn	planned	Agent error-handler read (1-arity [a]); agent ctor implemented
+error-mode	1.2	fn	planned	Agent error-mode read (1-arity [a]); agent ctor implemented
 extenders	1.2	fn	needs-design	Protocol surface; no protocol slice on this branch, protocol track owns design
 ffirst	1.0	fn	planned	Trivial const/predicate/lookup over existing kinds
 file-seq	1.0	fn	needs-design	Lazy dir walk; slurp/spit exist
@@ -120,7 +120,7 @@ float-array	1.0	fn	out-of-scope	Java array ctor/cast/read/write; no array values
 floats	1.0	fn	out-of-scope	Java array ctor/cast/read/write; no array values (N1)
 future-cancelled?	1.1	fn	planned	Agent/future field read; agent ctor + futures implemented
 get-proxy-class	1.0	fn	out-of-scope	No type-system slice on this branch: proxies/deftype factories/method internals
-get-validator	1.0	fn	planned	Agent/future field read; agent ctor + futures implemented
+get-validator	1.0	fn	planned	IRef validator read ([iref]); futures rejected
 hash-combine	?	fn	out-of-scope	Chunked-seq + custom-type hashing impl details; port seqs/hash are separate
 hash-ordered-coll	1.6	fn	needs-design	Public hash helpers over port colls; hash implemented
 hash-unordered-coll	1.6	fn	needs-design	Public hash helpers over port colls; hash implemented
@@ -190,7 +190,7 @@ ref-history-count	1.1	fn	out-of-scope	STM refs/transactions (N4): never
 ref-max-history	1.1	fn	out-of-scope	STM refs/transactions (N4): never
 ref-min-history	1.1	fn	out-of-scope	STM refs/transactions (N4): never
 release-pending-sends	1.0	fn	needs-design	Nested-action queue; agent pools implemented
-remove-all-methods	1.2	fn	needs-design	Hierarchy maps (pure); coordinate with multimethod track (33-typechain)
+remove-all-methods	1.2	fn	needs-design	Multimethod dispatch seam ([multifn]); coordinate with multimethod track (33-typechain)
 remove-tap	1.10	fn	needs-design	Tap set + queue; blocking/dropping policy
 replicate	1.0	fn	out-of-scope	Deprecated on JVM; replacement implemented
 requiring-resolve	1.10	fn	planned	Loader/var introspection over existing ns machinery
@@ -202,7 +202,7 @@ seq-to-map-for-destructuring	1.11	fn	needs-design	Macro-expansion helpers; decid
 seque	1.0	fn	needs-design	Queued (blocking) seq on lazy seq; queue design
 set-agent-send-executor!	1.5	fn	out-of-scope	ExecutorService injection; port agent pools are fixed
 set-agent-send-off-executor!	1.5	fn	out-of-scope	ExecutorService injection; port agent pools are fixed
-set-validator!	1.0	fn	planned	Agent/future field read; agent ctor + futures implemented
+set-validator!	1.0	fn	planned	IRef validator write ([iref validator-fn])
 short-array	1.1	fn	out-of-scope	Java array ctor/cast/read/write; no array values (N1)
 shorts	1.1	fn	out-of-scope	Java array ctor/cast/read/write; no array values (N1)
 some->	1.5	macro	planned	core.clj control macro like implemented cond->/when

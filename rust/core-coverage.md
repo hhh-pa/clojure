@@ -465,7 +465,7 @@ Special forms exposed as macros; `macroexpand-1` expands them (only real special
 
 ## Out of scope (significant exclusions)
 
-Significant vars with no port slice, grouped below by area with the reason. (Two implemented groups live at the end of this section — concurrency and the REPL/CLI environment — because they were inventoried with the exclusions around them.)
+Significant vars with no port slice, grouped below by area with the reason. (Three implemented groups live at the end of this section — concurrency, the REPL/CLI environment, and previously unlisted vars that resolve today — because they were inventoried with the exclusions around them.)
 
 | var | status | notes |
 | --- | --- | --- |
@@ -609,14 +609,14 @@ Ready slices, `out-of-scope` today only because the matrix fails on unresolved `
 | `delay?` | out-of-scope | future: trivial const/predicate/lookup over existing kinds |
 | `denominator` | out-of-scope | future: tower (BigInt/BigDec/Ratio) coercion/predicate/accessor |
 | `disj!` | out-of-scope | future: transient/atom gap-fill |
-| `error-handler` | out-of-scope | future: agent/future field read |
-| `error-mode` | out-of-scope | future: agent/future field read |
+| `error-handler` | out-of-scope | future: agent error-handler read (1-arity [a]) |
+| `error-mode` | out-of-scope | future: agent error-mode read (1-arity [a]) |
 | `ffirst` | out-of-scope | future: trivial const/predicate/lookup over existing kinds |
 | `find-keyword` | out-of-scope | future: trivial const/predicate/lookup over existing kinds |
 | `find-var` | out-of-scope | future: loader/var introspection over existing ns machinery |
 | `flatten` | out-of-scope | future: pure seq/coll walk over existing machinery |
 | `future-cancelled?` | out-of-scope | future: agent/future field read |
-| `get-validator` | out-of-scope | future: agent/future field read |
+| `get-validator` | out-of-scope | future: IRef validator read ([iref]; futures rejected) |
 | `indexed?` | out-of-scope | future: trivial const/predicate/lookup over existing kinds |
 | `infinite?` | out-of-scope | future: double/int predicate over Value kinds |
 | `map-entry?` | out-of-scope | future: trivial const/predicate/lookup over existing kinds |
@@ -641,7 +641,7 @@ Ready slices, `out-of-scope` today only because the matrix fails on unresolved `
 | `requiring-resolve` | out-of-scope | future: loader/var introspection over existing ns machinery |
 | `reset-vals!` | out-of-scope | future: transient/atom gap-fill |
 | `run!` | out-of-scope | future: pure seq/coll walk over existing machinery |
-| `set-validator!` | out-of-scope | future: agent/future field read |
+| `set-validator!` | out-of-scope | future: IRef validator write ([iref validator-fn]) |
 | `some->` | out-of-scope | future: core.clj control macro like implemented cond->/when |
 | `some->>` | out-of-scope | future: core.clj control macro like implemented cond->/when |
 | `special-symbol?` | out-of-scope | future: trivial const/predicate/lookup over existing kinds |
@@ -692,7 +692,7 @@ No slice on this branch: hard-never reasons stand alone, design-blocked rows nam
 | `Throwable->map` | out-of-scope | pending design: error-data shape; see #40 |
 | `accessor` | out-of-scope | pending design: legacy structmaps as pure maps; see #40 |
 | `aclone` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
-| `add-classpath` | out-of-scope | Deprecated on JVM; replacement implemented |
+| `add-classpath` | out-of-scope | Deprecated on JVM, no replacement named; classpath URLs have no slice |
 | `add-tap` | out-of-scope | pending design: tap set + queue policy; see #40 |
 | `agent-errors` | out-of-scope | Deprecated on JVM; replacement implemented |
 | `aget` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
@@ -709,7 +709,7 @@ No slice on this branch: hard-never reasons stand alone, design-blocked rows nam
 | `aset-int` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
 | `aset-long` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
 | `aset-short` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
-| `await1` | out-of-scope | Await internal covered by implemented await |
+| `await1` | out-of-scope | Public [a] await returning the agent; implemented await is [& agents] returning nil |
 | `bean` | out-of-scope | Host reflection/interop/beans/method-fns (N1) |
 | `bit-and` | out-of-scope | pending design: bitwise lattice over tower; see #40 |
 | `bit-and-not` | out-of-scope | pending design: bitwise lattice over tower; see #40 |
@@ -810,7 +810,7 @@ No slice on this branch: hard-never reasons stand alone, design-blocked rows nam
 | `ref-max-history` | out-of-scope | STM refs/transactions (N4): never |
 | `ref-min-history` | out-of-scope | STM refs/transactions (N4): never |
 | `release-pending-sends` | out-of-scope | pending design: nested-action queue; see #40 |
-| `remove-all-methods` | out-of-scope | pending design: hierarchy maps (coordinate with 33-typechain); see #40 |
+| `remove-all-methods` | out-of-scope | pending design: multimethod dispatch seam ([multifn]; coordinate with 33-typechain); see #40 |
 | `remove-tap` | out-of-scope | pending design: tap set + queue policy; see #40 |
 | `replicate` | out-of-scope | Deprecated on JVM; replacement implemented |
 | `resultset-seq` | out-of-scope | JDBC ResultSet adapter; never |
