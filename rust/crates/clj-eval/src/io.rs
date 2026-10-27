@@ -15,7 +15,7 @@
 use std::io::Write;
 use std::sync::{Arc, Mutex};
 
-use clj_reader::{ReadCond, ReaderOpts, read_str};
+use clj_reader::{ReadCond, Reader, ReaderOpts};
 use clj_value::{ExtensionValue, ThrowClass, Value, pr_to_string};
 
 use crate::core::{cce_err, cce_message, print_opts};
@@ -344,16 +344,26 @@ fn native_spit(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErr
 }
 
 /// `read-string`: read one form (no line numbers, like the JVM).
+/// The 2-arity reuses the `read` opts parser (issue #40: every
+/// `rs-opts-*` oracle row agrees with the `r-opts-*`/`r-feat-*`/
+/// `r-rc-*` pins), except the string validates FIRST (probes
+/// `rs-opts-order`, `rs-opts-order-nil`) and nil fails with the
+/// `String.length` NPE (probe `rs-opts-nilstr`), not the 1-arity
+/// bare NPE. Errors stay bare `RuntimeException`s (no
+/// `ReaderException` wrapper — every `rs-opts-*` throw row).
 fn native_read_string(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
-    check_arity("clojure.core/read-string", args, &[1])?;
-    if matches!(args[0], Value::Nil) {
-        return Err(NativeError::new(
-            ThrowClass::NullPointerException,
-            String::new(),
-        ));
+    check_arity("clojure.core/read-string", args, &[1, 2])?;
+    let s_arg = args.last().expect("arity 1..=2 has a last arg");
+    if matches!(s_arg, Value::Nil) {
+        let message = if args.len() == 2 {
+            "Cannot invoke \"String.length()\" because \"s\" is null".to_owned()
+        } else {
+            String::new()
+        };
+        return Err(NativeError::new(ThrowClass::NullPointerException, message));
     }
-    let Value::Str(s) = &args[0] else {
-        return Err(cce_err(&args[0], "java.lang.String"));
+    let Value::Str(s) = s_arg else {
+        return Err(cce_err(s_arg, "java.lang.String"));
     };
     // Syntax-quote and `::` resolve against the synced current
     // namespace (read-time, like the JVM); `line_numbers: false`
@@ -365,12 +375,35 @@ fn native_read_string(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nat
         read_cond: ReadCond::Deny,
         ..Default::default()
     };
+    // The 1-arity keeps deny-everything defaults (probe
+    // `rs-opts-none`); the 2-arity parses the opts map (the
+    // `recursive` tail is `read`-only — there is no wrapper to
+    // skip here).
+    let (eof_error, eof_value) = if args.len() == 2 {
+        let (eof_error, eof_value, _) = crate::reader::parse_read_opts(&args[0], &mut opts)?;
+        (eof_error, eof_value)
+    } else {
+        (true, Value::Nil)
+    };
     if let Some(ns) = eval.registry.get(&cur) {
         opts.aliases = ns.alias_map();
         opts.refers = ns.refer_map();
     }
+    // `read_form(false)` separates clean EOF (`None` → the `:eof`
+    // value, probes `rs-opts-eof*`) from truncated input (`Err` →
+    // always throws, probes `rs-opts-eof-trunc*`); `read_str`
+    // cannot (both are bare `Eof` without line numbers).
     let text: &str = s;
-    read_str(text, &opts).map_err(|e| NativeError::new(ThrowClass::RuntimeException, e.message()))
+    let mut reader = Reader::new(text, &opts);
+    match reader.read_form(false) {
+        Ok(Some(v)) => Ok(v),
+        Ok(None) if !eof_error => Ok(eof_value),
+        Ok(None) => Err(NativeError::new(
+            ThrowClass::RuntimeException,
+            "EOF while reading".to_owned(),
+        )),
+        Err(e) => Err(NativeError::new(ThrowClass::RuntimeException, e.message())),
+    }
 }
 
 /// The S5D IO natives installed into `clojure.core`.

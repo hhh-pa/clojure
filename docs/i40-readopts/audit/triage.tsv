@@ -1,0 +1,270 @@
+*'	1.0	fn	needs-design	Auto-promote arith; tower exists but overflow-promotion spec deferred (wedge stays)
+*agent*	1.0	var	implemented	Resolves in booted core today (probe-verified); absent row is a file bug
+*compile-files*	1.0	var	out-of-scope	Bytecode compiler/classpath surface; port AOT (clj-aot) is separate
+*compile-path*	1.0	var	out-of-scope	Bytecode compiler/classpath surface; port AOT (clj-aot) is separate
+*compiler-options*	1.4	var	out-of-scope	Bytecode compiler/classpath surface; port AOT (clj-aot) is separate
+*data-readers*	1.4	var	needs-design	#40-ADJACENT: data-reader tag table; port reader has no tag support
+*default-data-reader-fn*	1.5	var	needs-design	#40-ADJACENT: data-reader tag table; port reader has no tag support
+*flush-on-newline*	1.0	var	needs-design	Printer newline-flush policy; flush implemented
+*fn-loader*	?	var	out-of-scope	Bytecode compiler/classpath surface; port AOT (clj-aot) is separate
+*math-context*	?	var	needs-design	BigDec precision context; tower BigDec exists
+*read-eval*	1.0	var	needs-design	#40 CORE: read/eval gate trio; port read denies read-cond, has no eval-reader
+*reader-resolver*	?	var	needs-design	#40-ADJACENT: reader plug-points/flags; pin JVM role from oracle first
+*repl*	1.12	var	needs-design	Bind true in clj-repl sessions; decide root + wiring
+*source-path*	?	var	out-of-scope	Bytecode compiler/classpath surface; port AOT (clj-aot) is separate
+*suppress-read*	?	var	needs-design	#40-ADJACENT: reader plug-points/flags; pin JVM role from oracle first
+*use-context-classloader*	?	var	out-of-scope	Bytecode compiler/classpath surface; port AOT (clj-aot) is separate
+*verbose-defrecords*	?	var	out-of-scope	Bytecode compiler/classpath surface; port AOT (clj-aot) is separate
++'	1.0	fn	needs-design	Auto-promote arith; tower exists but overflow-promotion spec deferred (wedge stays)
+-'	1.0	fn	needs-design	Auto-promote arith; tower exists but overflow-promotion spec deferred (wedge stays)
+->ArrayChunk	?	fn	out-of-scope	No type-system slice on this branch: proxies/deftype factories/method internals
+->Eduction	?	fn	out-of-scope	No type-system slice on this branch: proxies/deftype factories/method internals
+->Vec	?	fn	out-of-scope	No type-system slice on this branch: proxies/deftype factories/method internals
+->VecNode	?	fn	out-of-scope	No type-system slice on this branch: proxies/deftype factories/method internals
+->VecSeq	?	fn	out-of-scope	No type-system slice on this branch: proxies/deftype factories/method internals
+-cache-protocol-fn	?	fn	out-of-scope	No protocol slice on this branch (protocol track owns design)
+-reset-methods	?	fn	out-of-scope	No protocol slice on this branch (protocol track owns design)
+EMPTY-NODE	?	var	out-of-scope	No type-system slice on this branch: proxies/deftype factories/method internals
+Inst	?	var	needs-design	Date/time value kind + #inst tag together
+NaN?	1.11	fn	planned	Double/int predicate over Value kinds; int?/integer? implemented
+PrintWriter-on	1.10	fn	out-of-scope	java.io.PrintWriter adapter ctor; port Writer kind is separate
+StackTraceElement->vec	1.9	fn	needs-design	Error-data shape; port ThrowClass/ex-data exists
+Throwable->map	1.7	fn	needs-design	Error-data shape; port ThrowClass/ex-data exists
+abs	1.11	fn	planned	Tower (BigInt/BigDec/Ratio) coercion/predicate/accessor; tower implemented
+accessor	1.0	fn	needs-design	Legacy structmaps; pure-map design possible
+aclone	1.0	fn	out-of-scope	Java array ctor/cast/read/write; no array values (N1)
+add-classpath	1.0	fn	out-of-scope	Deprecated on JVM, no replacement named; classpath URLs have no slice
+add-tap	1.10	fn	needs-design	Tap set + queue; blocking/dropping policy
+agent-errors	1.0	fn	out-of-scope	Deprecated on JVM; replacement implemented
+aget	1.0	fn	out-of-scope	Java array ctor/cast/read/write; no array values (N1)
+alength	1.0	fn	out-of-scope	Java array ctor/cast/read/write; no array values (N1)
+amap	1.0	macro	out-of-scope	Java array ctor/cast/read/write; no array values (N1)
+ancestors	1.0	fn	needs-design	Hierarchy maps (pure); coordinate with multimethod track (33-typechain)
+any?	1.9	fn	planned	Trivial const/predicate/lookup over existing kinds
+areduce	1.0	macro	out-of-scope	Java array ctor/cast/read/write; no array values (N1)
+aset	1.0	fn	out-of-scope	Java array ctor/cast/read/write; no array values (N1)
+aset-boolean	1.0	fn	out-of-scope	Java array ctor/cast/read/write; no array values (N1)
+aset-byte	1.0	fn	out-of-scope	Java array ctor/cast/read/write; no array values (N1)
+aset-char	1.0	fn	out-of-scope	Java array ctor/cast/read/write; no array values (N1)
+aset-double	1.0	fn	out-of-scope	Java array ctor/cast/read/write; no array values (N1)
+aset-float	1.0	fn	out-of-scope	Java array ctor/cast/read/write; no array values (N1)
+aset-int	1.0	fn	out-of-scope	Java array ctor/cast/read/write; no array values (N1)
+aset-long	1.0	fn	out-of-scope	Java array ctor/cast/read/write; no array values (N1)
+aset-short	1.0	fn	out-of-scope	Java array ctor/cast/read/write; no array values (N1)
+await1	?	fn	out-of-scope	Public [a] await returning the agent; implemented await is [& agents] returning nil
+bean	1.0	fn	out-of-scope	Host reflection/interop/beans/method-fns (N1)
+biginteger	1.0	fn	planned	Tower (BigInt/BigDec/Ratio) coercion/predicate/accessor; tower implemented
+bit-and	1.0	fn	needs-design	Bitwise lattice over tower; S-rng-tower left tower bit-ops a non-goal
+bit-and-not	1.0	fn	needs-design	Bitwise lattice over tower; S-rng-tower left tower bit-ops a non-goal
+bit-clear	1.0	fn	needs-design	Bitwise lattice over tower; S-rng-tower left tower bit-ops a non-goal
+bit-flip	1.0	fn	needs-design	Bitwise lattice over tower; S-rng-tower left tower bit-ops a non-goal
+bit-not	1.0	fn	needs-design	Bitwise lattice over tower; S-rng-tower left tower bit-ops a non-goal
+bit-or	1.0	fn	needs-design	Bitwise lattice over tower; S-rng-tower left tower bit-ops a non-goal
+bit-set	1.0	fn	needs-design	Bitwise lattice over tower; S-rng-tower left tower bit-ops a non-goal
+bit-shift-left	1.0	fn	needs-design	Bitwise lattice over tower; S-rng-tower left tower bit-ops a non-goal
+bit-shift-right	1.0	fn	needs-design	Bitwise lattice over tower; S-rng-tower left tower bit-ops a non-goal
+bit-test	1.0	fn	needs-design	Bitwise lattice over tower; S-rng-tower left tower bit-ops a non-goal
+bit-xor	1.0	fn	needs-design	Bitwise lattice over tower; S-rng-tower left tower bit-ops a non-goal
+boolean-array	1.1	fn	out-of-scope	Java array ctor/cast/read/write; no array values (N1)
+booleans	1.1	fn	out-of-scope	Java array ctor/cast/read/write; no array values (N1)
+bound-fn*	1.1	fn	implemented	Resolves in booted core today (probe-verified); absent row is a file bug
+bounded-count	1.9	fn	planned	Pure seq/coll walk over existing machinery
+byte-array	1.1	fn	out-of-scope	Java array ctor/cast/read/write; no array values (N1)
+bytes	1.1	fn	out-of-scope	Java array ctor/cast/read/write; no array values (N1)
+bytes?	1.9	fn	out-of-scope	Java array ctor/cast/read/write; no array values (N1)
+cast	1.0	fn	out-of-scope	Host reflection/interop/beans/method-fns (N1)
+char-array	1.1	fn	out-of-scope	Java array ctor/cast/read/write; no array values (N1)
+char-escape-string	1.0	var	needs-design	Print dispatch (defmultis + tables); no multimethod slice on this branch
+char-name-string	1.0	var	needs-design	Print dispatch (defmultis + tables); no multimethod slice on this branch
+chars	1.1	fn	out-of-scope	Java array ctor/cast/read/write; no array values (N1)
+chunk	?	fn	out-of-scope	Chunked-seq + custom-type hashing impl details; port seqs/hash are separate
+chunk-append	?	fn	out-of-scope	Chunked-seq + custom-type hashing impl details; port seqs/hash are separate
+chunk-buffer	?	fn	out-of-scope	Chunked-seq + custom-type hashing impl details; port seqs/hash are separate
+chunk-cons	?	fn	out-of-scope	Chunked-seq + custom-type hashing impl details; port seqs/hash are separate
+chunk-first	?	fn	out-of-scope	Chunked-seq + custom-type hashing impl details; port seqs/hash are separate
+chunk-next	?	fn	out-of-scope	Chunked-seq + custom-type hashing impl details; port seqs/hash are separate
+chunk-rest	?	fn	out-of-scope	Chunked-seq + custom-type hashing impl details; port seqs/hash are separate
+chunked-seq?	?	fn	out-of-scope	Chunked-seq + custom-type hashing impl details; port seqs/hash are separate
+class?	1.0	fn	out-of-scope	Host reflection/interop/beans/method-fns (N1)
+clear-agent-errors	1.0	fn	out-of-scope	Deprecated on JVM; replacement implemented
+comparator	1.0	fn	needs-design	Comparator wrapper; sorted-map-by takes fns directly
+compile	1.0	fn	out-of-scope	Bytecode compiler/classpath surface; port AOT (clj-aot) is separate
+construct-proxy	1.0	fn	out-of-scope	No type-system slice on this branch: proxies/deftype factories/method internals
+create-struct	1.0	fn	needs-design	Legacy structmaps; pure-map design possible
+dec'	1.0	fn	needs-design	Auto-promote arith; tower exists but overflow-promotion spec deferred (wedge stays)
+decimal?	1.0	fn	planned	Tower (BigInt/BigDec/Ratio) coercion/predicate/accessor; tower implemented
+default-data-readers	1.4	var	needs-design	#40-ADJACENT: data-reader tag table; port reader has no tag support
+definline	1.0	macro	needs-design	Inline-expansion hook; likely out-of-scope (evaluator, no compiler) but decide
+defprotocol	1.2	macro	needs-design	Protocol surface; no protocol slice on this branch, protocol track owns design
+defstruct	1.0	macro	needs-design	Legacy structmaps; pure-map design possible
+delay?	1.0	fn	planned	Trivial const/predicate/lookup over existing kinds
+denominator	1.2	fn	planned	Tower (BigInt/BigDec/Ratio) coercion/predicate/accessor; tower implemented
+derive	1.0	fn	needs-design	Hierarchy maps (pure); coordinate with multimethod track (33-typechain)
+descendants	1.0	fn	needs-design	Hierarchy maps (pure); coordinate with multimethod track (33-typechain)
+destructure	?	fn	needs-design	Macro-expansion helpers; decide whether Rust expander exposes runtime vars
+disj!	1.1	fn	planned	Transient/atom gap-fill; transient family + atoms implemented
+double-array	1.0	fn	out-of-scope	Java array ctor/cast/read/write; no array values (N1)
+doubles	1.0	fn	out-of-scope	Java array ctor/cast/read/write; no array values (N1)
+enumeration-seq	1.0	fn	out-of-scope	JDK collection/stream adapters (N1)
+error-handler	1.2	fn	planned	Agent error-handler read (1-arity [a]); agent ctor implemented
+error-mode	1.2	fn	planned	Agent error-mode read (1-arity [a]); agent ctor implemented
+extenders	1.2	fn	needs-design	Protocol surface; no protocol slice on this branch, protocol track owns design
+ffirst	1.0	fn	planned	Trivial const/predicate/lookup over existing kinds
+file-seq	1.0	fn	needs-design	Lazy dir walk; slurp/spit exist
+find-keyword	1.3	fn	planned	Trivial const/predicate/lookup over existing kinds
+find-protocol-impl	?	fn	out-of-scope	No protocol slice on this branch (protocol track owns design)
+find-protocol-method	?	fn	out-of-scope	No protocol slice on this branch (protocol track owns design)
+find-var	1.0	fn	planned	Loader/var introspection over existing ns machinery
+flatten	1.2	fn	planned	Pure seq/coll walk over existing machinery
+float-array	1.0	fn	out-of-scope	Java array ctor/cast/read/write; no array values (N1)
+floats	1.0	fn	out-of-scope	Java array ctor/cast/read/write; no array values (N1)
+future-cancelled?	1.1	fn	planned	Agent/future field read; agent ctor + futures implemented
+get-proxy-class	1.0	fn	out-of-scope	No type-system slice on this branch: proxies/deftype factories/method internals
+get-validator	1.0	fn	planned	IRef validator read ([iref]); futures rejected
+hash-combine	?	fn	out-of-scope	Chunked-seq + custom-type hashing impl details; port seqs/hash are separate
+hash-ordered-coll	1.6	fn	needs-design	Public hash helpers over port colls; hash implemented
+hash-unordered-coll	1.6	fn	needs-design	Public hash helpers over port colls; hash implemented
+inc'	1.0	fn	implemented	Resolves in booted core today (probe-verified); absent row is a file bug
+indexed?	1.9	fn	planned	Trivial const/predicate/lookup over existing kinds
+infinite?	1.11	fn	planned	Double/int predicate over Value kinds; int?/integer? implemented
+init-proxy	1.0	fn	out-of-scope	No type-system slice on this branch: proxies/deftype factories/method internals
+inst-ms	1.9	fn	needs-design	Date/time value kind + #inst tag together
+inst-ms*	?	fn	needs-design	Date/time value kind + #inst tag together
+inst?	1.9	fn	needs-design	Date/time value kind + #inst tag together
+int-array	1.0	fn	out-of-scope	Java array ctor/cast/read/write; no array values (N1)
+into-array	1.0	fn	out-of-scope	Java array ctor/cast/read/write; no array values (N1)
+ints	1.0	fn	out-of-scope	Java array ctor/cast/read/write; no array values (N1)
+io!	1.0	macro	out-of-scope	STM refs/transactions (N4): never
+isa?	1.0	fn	needs-design	Hierarchy maps (pure); coordinate with multimethod track (33-typechain)
+iteration	1.11	fn	needs-design	Step-fn seqable+reducible; check Seq machinery fit
+iterator-seq	1.0	fn	out-of-scope	JDK collection/stream adapters (N1)
+load-reader	1.0	fn	needs-design	#40 CORE: read/eval gate trio; port read denies read-cond, has no eval-reader
+long-array	1.0	fn	out-of-scope	Java array ctor/cast/read/write; no array values (N1)
+longs	1.0	fn	out-of-scope	Java array ctor/cast/read/write; no array values (N1)
+make-array	1.0	fn	out-of-scope	Java array ctor/cast/read/write; no array values (N1)
+make-hierarchy	1.0	fn	needs-design	Hierarchy maps (pure); coordinate with multimethod track (33-typechain)
+map-entry?	1.8	fn	planned	Trivial const/predicate/lookup over existing kinds
+memfn	1.0	macro	out-of-scope	Host reflection/interop/beans/method-fns (N1)
+merge-deep	1.13	fn	planned	Pure seq/coll walk over existing machinery
+merge-deep-with	1.13	fn	planned	Pure seq/coll walk over existing machinery
+method-sig	?	fn	out-of-scope	No type-system slice on this branch: proxies/deftype factories/method internals
+mix-collection-hash	1.6	fn	out-of-scope	Chunked-seq + custom-type hashing impl details; port seqs/hash are separate
+munge	?	fn	needs-design	Munger string fns are pure; decide whether port adopts JVM escaping
+namespace-munge	1.2	fn	needs-design	Munger string fns are pure; decide whether port adopts JVM escaping
+nat-int?	1.9	fn	planned	Double/int predicate over Value kinds; int?/integer? implemented
+neg-int?	1.9	fn	planned	Double/int predicate over Value kinds; int?/integer? implemented
+numerator	1.2	fn	planned	Tower (BigInt/BigDec/Ratio) coercion/predicate/accessor; tower implemented
+object-array	1.2	fn	out-of-scope	Java array ctor/cast/read/write; no array values (N1)
+parents	1.0	fn	needs-design	Hierarchy maps (pure); coordinate with multimethod track (33-typechain)
+parse-boolean	1.11	fn	planned	Pure string parse; tower/double coercion rules pinned
+parse-double	1.11	fn	planned	Pure string parse; tower/double coercion rules pinned
+parse-long	1.11	fn	planned	Pure string parse; tower/double coercion rules pinned
+parse-uuid	1.11	fn	needs-design	UUID value kind; predicates trivial after
+partitionv	1.12	fn	planned	Pure seq/coll walk over existing machinery
+partitionv-all	1.12	fn	planned	Pure seq/coll walk over existing machinery
+pos-int?	1.9	fn	planned	Double/int predicate over Value kinds; int?/integer? implemented
+prefers	1.0	fn	needs-design	Hierarchy maps (pure); coordinate with multimethod track (33-typechain)
+primitives-classnames	?	var	out-of-scope	Bytecode compiler/classpath surface; port AOT (clj-aot) is separate
+print-ctor	?	fn	needs-design	Print dispatch (defmultis + tables); no multimethod slice on this branch
+print-dup	?	var	needs-design	Print dispatch (defmultis + tables); no multimethod slice on this branch
+print-method	?	var	needs-design	Print dispatch (defmultis + tables); no multimethod slice on this branch
+print-simple	?	fn	needs-design	Print dispatch (defmultis + tables); no multimethod slice on this branch
+printf	1.0	fn	planned	Printer/output one-liner over implemented format/pr/with-out-str
+println-str	1.0	fn	planned	Printer/output one-liner over implemented format/pr/with-out-str
+prn-str	1.0	fn	planned	Printer/output one-liner over implemented format/pr/with-out-str
+proxy-call-with-super	?	fn	out-of-scope	No type-system slice on this branch: proxies/deftype factories/method internals
+proxy-mappings	1.0	fn	out-of-scope	No type-system slice on this branch: proxies/deftype factories/method internals
+proxy-name	?	fn	out-of-scope	No type-system slice on this branch: proxies/deftype factories/method internals
+proxy-super	1.0	macro	out-of-scope	No type-system slice on this branch: proxies/deftype factories/method internals
+rand-nth	1.2	fn	planned	RNG-backed pick; rand/shuffle implemented
+random-uuid	1.11	fn	needs-design	UUID value kind; predicates trivial after
+ratio?	1.0	fn	planned	Tower (BigInt/BigDec/Ratio) coercion/predicate/accessor; tower implemented
+rational?	1.0	fn	planned	Tower (BigInt/BigDec/Ratio) coercion/predicate/accessor; tower implemented
+re-groups	1.0	fn	needs-design	Stateful matcher handle over regex crate (or out-of-scope if unrepresentable)
+re-matcher	1.0	fn	needs-design	Stateful matcher handle over regex crate (or out-of-scope if unrepresentable)
+read+string	1.10	fn	needs-design	#40 CORE: read/eval gate trio; port read denies read-cond, has no eval-reader
+reader-conditional	1.7	fn	needs-design	#40-ADJACENT: data-reader tag table; port reader has no tag support
+reader-conditional?	1.7	fn	needs-design	#40-ADJACENT: data-reader tag table; port reader has no tag support
+reduce-kv	1.4	fn	planned	Pure seq/coll walk over existing machinery
+ref-history-count	1.1	fn	out-of-scope	STM refs/transactions (N4): never
+ref-max-history	1.1	fn	out-of-scope	STM refs/transactions (N4): never
+ref-min-history	1.1	fn	out-of-scope	STM refs/transactions (N4): never
+release-pending-sends	1.0	fn	needs-design	Nested-action queue; agent pools implemented
+remove-all-methods	1.2	fn	needs-design	Multimethod dispatch seam ([multifn]); coordinate with multimethod track (33-typechain)
+remove-tap	1.10	fn	needs-design	Tap set + queue; blocking/dropping policy
+replicate	1.0	fn	out-of-scope	Deprecated on JVM; replacement implemented
+requiring-resolve	1.10	fn	planned	Loader/var introspection over existing ns machinery
+reset-vals!	1.9	fn	planned	Transient/atom gap-fill; transient family + atoms implemented
+resultset-seq	1.0	fn	out-of-scope	JDBC ResultSet adapter; never
+run!	1.7	fn	planned	Pure seq/coll walk over existing machinery
+selector	1.13	macro	needs-design	New-in-1.13 map-destructuring selector macro; spec from alpha10 oracle
+seq-to-map-for-destructuring	1.11	fn	needs-design	Macro-expansion helpers; decide whether Rust expander exposes runtime vars
+seque	1.0	fn	needs-design	Queued (blocking) seq on lazy seq; queue design
+set-agent-send-executor!	1.5	fn	out-of-scope	ExecutorService injection; port agent pools are fixed
+set-agent-send-off-executor!	1.5	fn	out-of-scope	ExecutorService injection; port agent pools are fixed
+set-validator!	1.0	fn	planned	IRef validator write ([iref validator-fn])
+short-array	1.1	fn	out-of-scope	Java array ctor/cast/read/write; no array values (N1)
+shorts	1.1	fn	out-of-scope	Java array ctor/cast/read/write; no array values (N1)
+some->	1.5	macro	planned	core.clj control macro like implemented cond->/when
+some->>	1.5	macro	planned	core.clj control macro like implemented cond->/when
+some-vals	1.13	fn	implemented	Resolves in booted core today (probe-verified); absent row is a file bug
+special-symbol?	1.0	fn	planned	Trivial const/predicate/lookup over existing kinds
+splitv-at	1.12	fn	planned	Pure seq/coll walk over existing machinery
+stream-into!	1.12	fn	out-of-scope	JDK collection/stream adapters (N1)
+stream-reduce!	1.12	fn	out-of-scope	JDK collection/stream adapters (N1)
+stream-seq!	1.12	fn	out-of-scope	JDK collection/stream adapters (N1)
+stream-transduce!	1.12	fn	out-of-scope	JDK collection/stream adapters (N1)
+struct	1.0	fn	needs-design	Legacy structmaps; pure-map design possible
+struct-map	1.0	fn	needs-design	Legacy structmaps; pure-map design possible
+swap-vals!	1.9	fn	planned	Transient/atom gap-fill; transient family + atoms implemented
+sync	1.0	macro	out-of-scope	STM refs/transactions (N4): never
+tagged-literal	1.7	fn	needs-design	#40-ADJACENT: data-reader tag table; port reader has no tag support
+tagged-literal?	1.7	fn	needs-design	#40-ADJACENT: data-reader tag table; port reader has no tag support
+tap->	1.13	fn	needs-design	Tap set + queue; blocking/dropping policy
+tap>	1.10	fn	needs-design	Tap set + queue; blocking/dropping policy
+test	1.0	fn	planned	Runs :test metadata fn; vars + meta exist
+to-array	1.0	fn	out-of-scope	Java array ctor/cast/read/write; no array values (N1)
+to-array-2d	1.0	fn	out-of-scope	Java array ctor/cast/read/write; no array values (N1)
+tree-seq	1.0	fn	planned	Pure seq/coll walk over existing machinery
+unchecked-add	1.0	fn	needs-design	Explicit wrapping arith (21 fns); decide wrapping vs tower-checking per fn
+unchecked-add-int	1.0	fn	needs-design	Explicit wrapping arith (21 fns); decide wrapping vs tower-checking per fn
+unchecked-byte	1.3	fn	needs-design	Explicit wrapping arith (21 fns); decide wrapping vs tower-checking per fn
+unchecked-char	1.3	fn	needs-design	Explicit wrapping arith (21 fns); decide wrapping vs tower-checking per fn
+unchecked-dec	1.0	fn	needs-design	Explicit wrapping arith (21 fns); decide wrapping vs tower-checking per fn
+unchecked-dec-int	1.0	fn	needs-design	Explicit wrapping arith (21 fns); decide wrapping vs tower-checking per fn
+unchecked-divide-int	1.0	fn	needs-design	Explicit wrapping arith (21 fns); decide wrapping vs tower-checking per fn
+unchecked-double	1.3	fn	needs-design	Explicit wrapping arith (21 fns); decide wrapping vs tower-checking per fn
+unchecked-float	1.3	fn	needs-design	Explicit wrapping arith (21 fns); decide wrapping vs tower-checking per fn
+unchecked-inc	1.0	fn	needs-design	Explicit wrapping arith (21 fns); decide wrapping vs tower-checking per fn
+unchecked-inc-int	1.0	fn	needs-design	Explicit wrapping arith (21 fns); decide wrapping vs tower-checking per fn
+unchecked-int	1.3	fn	needs-design	Explicit wrapping arith (21 fns); decide wrapping vs tower-checking per fn
+unchecked-long	1.3	fn	needs-design	Explicit wrapping arith (21 fns); decide wrapping vs tower-checking per fn
+unchecked-multiply	1.0	fn	needs-design	Explicit wrapping arith (21 fns); decide wrapping vs tower-checking per fn
+unchecked-multiply-int	1.0	fn	needs-design	Explicit wrapping arith (21 fns); decide wrapping vs tower-checking per fn
+unchecked-negate	1.0	fn	needs-design	Explicit wrapping arith (21 fns); decide wrapping vs tower-checking per fn
+unchecked-negate-int	1.0	fn	needs-design	Explicit wrapping arith (21 fns); decide wrapping vs tower-checking per fn
+unchecked-remainder-int	1.0	fn	needs-design	Explicit wrapping arith (21 fns); decide wrapping vs tower-checking per fn
+unchecked-short	1.3	fn	needs-design	Explicit wrapping arith (21 fns); decide wrapping vs tower-checking per fn
+unchecked-subtract	1.0	fn	needs-design	Explicit wrapping arith (21 fns); decide wrapping vs tower-checking per fn
+unchecked-subtract-int	1.0	fn	needs-design	Explicit wrapping arith (21 fns); decide wrapping vs tower-checking per fn
+underive	1.0	fn	needs-design	Hierarchy maps (pure); coordinate with multimethod track (33-typechain)
+unquote	?	var	needs-design	Syntax-quote support vars; decide reader/expander surface
+unquote-splicing	?	var	needs-design	Syntax-quote support vars; decide reader/expander surface
+unsigned-bit-shift-right	1.6	fn	needs-design	Bitwise lattice over tower; S-rng-tower left tower bit-ops a non-goal
+update-keys	1.11	fn	planned	Pure seq/coll walk over existing machinery
+update-proxy	1.0	fn	out-of-scope	No type-system slice on this branch: proxies/deftype factories/method internals
+update-vals	1.11	fn	planned	Pure seq/coll walk over existing machinery
+uri?	1.9	fn	needs-design	URI value kind (or out-of-scope if no host-class values)
+uuid?	1.9	fn	needs-design	UUID value kind; predicates trivial after
+vector-of	1.2	fn	needs-design	Primitive-vector kind (or out-of-scope: untyped vectors only)
+volatile!	1.7	fn	needs-design	Volatile cell kind; single-threaded, simpler than atoms
+volatile?	1.7	fn	needs-design	Volatile cell kind; single-threaded, simpler than atoms
+vreset!	1.7	fn	needs-design	Volatile cell kind; single-threaded, simpler than atoms
+vswap!	1.7	macro	needs-design	Volatile cell kind; single-threaded, simpler than atoms
+when-first	1.0	macro	planned	core.clj control macro like implemented cond->/when
+while	1.0	macro	planned	core.clj control macro like implemented cond->/when
+with-loading-context	?	macro	out-of-scope	Load-context macro inlined by port load (*pending-paths* guard implemented)
+with-local-vars	1.0	macro	needs-design	Var-frame macro; binding frames exist (push/pop-thread-bindings)
+with-precision	1.0	macro	needs-design	BigDec precision context; tower BigDec exists
+with-redefs-fn	1.3	fn	implemented	Resolves in booted core today (probe-verified); absent row is a file bug
+xml-seq	1.0	fn	out-of-scope	XML element walk; XML has no slice

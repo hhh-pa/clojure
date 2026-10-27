@@ -1,0 +1,270 @@
+*'	1.0	fn	Returns the product of nums. (*') returns 1. Supports arbitrary precision.
+*agent*	1.0	var	The agent currently running an action on this thread, else nil
+*compile-files*	1.0	var	Set to true when compiling files, false otherwise.
+*compile-path*	1.0	var	Specifies the directory where 'compile' will write out .class
+*compiler-options*	1.4	var	A map of keys to options.
+*data-readers*	1.4	var	Map from reader tag symbols to data reader Vars.
+*default-data-reader-fn*	1.5	var	When no data reader is found for a tag and *default-data-reader-fn*
+*flush-on-newline*	1.0	var	When set to true, output will be flushed whenever a newline is printed.
+*fn-loader*	?	var	
+*math-context*	?	var	
+*read-eval*	1.0	var	Defaults to true (or value specified by system property, see below)
+*reader-resolver*	?	var	
+*repl*	1.12	var	Bound to true in a repl thread
+*source-path*	?	var	
+*suppress-read*	?	var	
+*use-context-classloader*	?	var	
+*verbose-defrecords*	?	var	
++'	1.0	fn	Returns the sum of nums. (+') returns 0. Supports arbitrary precision.
+-'	1.0	fn	If no ys are supplied, returns the negation of x, else subtracts
+->ArrayChunk	?	fn	Positional factory function for class clojure.core.ArrayChunk.
+->Eduction	?	fn	Positional factory function for class clojure.core.Eduction.
+->Vec	?	fn	Positional factory function for class clojure.core.Vec.
+->VecNode	?	fn	Positional factory function for class clojure.core.VecNode.
+->VecSeq	?	fn	Positional factory function for class clojure.core.VecSeq.
+-cache-protocol-fn	?	fn	
+-reset-methods	?	fn	
+EMPTY-NODE	?	var	
+Inst	?	var	
+NaN?	1.11	fn	Returns true if num is NaN, else false
+PrintWriter-on	1.10	fn	implements java.io.PrintWriter given flush-fn, which will be called
+StackTraceElement->vec	1.9	fn	Constructs a data representation for a StackTraceElement: [class method file line]
+Throwable->map	1.7	fn	Constructs a data representation for a Throwable with keys:
+abs	1.11	fn	Returns the absolute value of a.
+accessor	1.0	fn	Returns a fn that, given an instance of a structmap with the basis,
+aclone	1.0	fn	Returns a clone of the Java array. Works on arrays of known
+add-classpath	1.0	fn	DEPRECATED
+add-tap	1.10	fn	adds f, a fn of one argument, to the tap set. This function will be called with anything sent via tap>.
+agent-errors	1.0	fn	DEPRECATED: Use 'agent-error' instead.
+aget	1.0	fn	Returns the value at the index/indices. Works on Java arrays of all
+alength	1.0	fn	Returns the length of the Java array. Works on arrays of all
+amap	1.0	macro	Maps an expression across an array a, using an index named idx, and
+ancestors	1.0	fn	Returns the immediate and indirect parents of tag, either via a Java type
+any?	1.9	fn	Returns true given any argument.
+areduce	1.0	macro	Reduces an expression across an array a, using an index named idx,
+aset	1.0	fn	Sets the value at the index/indices. Works on Java arrays of
+aset-boolean	1.0	fn	Sets the value at the index/indices. Works on arrays of boolean. Returns val.
+aset-byte	1.0	fn	Sets the value at the index/indices. Works on arrays of byte. Returns val.
+aset-char	1.0	fn	Sets the value at the index/indices. Works on arrays of char. Returns val.
+aset-double	1.0	fn	Sets the value at the index/indices. Works on arrays of double. Returns val.
+aset-float	1.0	fn	Sets the value at the index/indices. Works on arrays of float. Returns val.
+aset-int	1.0	fn	Sets the value at the index/indices. Works on arrays of int. Returns val.
+aset-long	1.0	fn	Sets the value at the index/indices. Works on arrays of long. Returns val.
+aset-short	1.0	fn	Sets the value at the index/indices. Works on arrays of short. Returns val.
+await1	?	fn	
+bean	1.0	fn	Takes a Java object and returns a read-only implementation of the
+biginteger	1.0	fn	Coerce to BigInteger
+bit-and	1.0	fn	Bitwise and
+bit-and-not	1.0	fn	Bitwise and with complement
+bit-clear	1.0	fn	Clear bit at index n
+bit-flip	1.0	fn	Flip bit at index n
+bit-not	1.0	fn	Bitwise complement
+bit-or	1.0	fn	Bitwise or
+bit-set	1.0	fn	Set bit at index n
+bit-shift-left	1.0	fn	Bitwise shift left
+bit-shift-right	1.0	fn	Bitwise shift right
+bit-test	1.0	fn	Test bit at index n
+bit-xor	1.0	fn	Bitwise exclusive or
+boolean-array	1.1	fn	Creates an array of booleans
+booleans	1.1	fn	Casts to boolean[]
+bound-fn*	1.1	fn	Returns a function, which will install the same bindings in effect as in
+bounded-count	1.9	fn	If coll is counted? returns its count, else will count at most the first n
+byte-array	1.1	fn	Creates an array of bytes
+bytes	1.1	fn	Casts to byte[]
+bytes?	1.9	fn	Return true if x is a byte array
+cast	1.0	fn	Throws a ClassCastException if x is not a c, else returns x.
+char-array	1.1	fn	Creates an array of chars
+char-escape-string	1.0	var	Returns escape string for char or nil if none
+char-name-string	1.0	var	Returns name string for char or nil if none
+chars	1.1	fn	Casts to char[]
+chunk	?	fn	
+chunk-append	?	fn	
+chunk-buffer	?	fn	
+chunk-cons	?	fn	
+chunk-first	?	fn	
+chunk-next	?	fn	
+chunk-rest	?	fn	
+chunked-seq?	?	fn	
+class?	1.0	fn	Returns true if x is an instance of Class
+clear-agent-errors	1.0	fn	DEPRECATED: Use 'restart-agent' instead.
+comparator	1.0	fn	Returns an implementation of java.util.Comparator based upon pred.
+compile	1.0	fn	Compiles the namespace named by the symbol lib into a set of
+construct-proxy	1.0	fn	Takes a proxy class and any arguments for its superclass ctor and
+create-struct	1.0	fn	Returns a structure basis object.
+dec'	1.0	fn	Returns a number one less than num. Supports arbitrary precision.
+decimal?	1.0	fn	Returns true if n is a BigDecimal
+default-data-readers	1.4	var	Default map of data reader functions provided by Clojure. May be
+definline	1.0	macro	Experimental - like defmacro, except defines a named function whose
+defprotocol	1.2	macro	A protocol is a named set of named methods and their signatures:
+defstruct	1.0	macro	Same as (def name (create-struct keys...))
+delay?	1.0	fn	returns true if x is a Delay created with delay
+denominator	1.2	fn	Returns the denominator part of a Ratio.
+derive	1.0	fn	Establishes a parent/child relationship between parent and
+descendants	1.0	fn	Returns the immediate and indirect children of tag, through a
+destructure	?	fn	
+disj!	1.1	fn	disj[oin]. Returns a transient set of the same (hashed/sorted) type, that
+double-array	1.0	fn	Creates an array of doubles
+doubles	1.0	fn	Casts to double[]
+enumeration-seq	1.0	fn	Returns a seq on a java.util.Enumeration
+error-handler	1.2	fn	Returns the error-handler of agent a, or nil if there is none.
+error-mode	1.2	fn	Returns the error-mode of agent a.  See set-error-mode!
+extenders	1.2	fn	Returns a collection of the types explicitly extending protocol
+ffirst	1.0	fn	Same as (first (first x))
+file-seq	1.0	fn	A tree seq on java.io.Files
+find-keyword	1.3	fn	Returns a Keyword with the given namespace and name if one already
+find-protocol-impl	?	fn	
+find-protocol-method	?	fn	
+find-var	1.0	fn	Returns the global var named by the namespace-qualified symbol, or
+flatten	1.2	fn	Takes any nested combination of sequential things (lists, vectors,
+float-array	1.0	fn	Creates an array of floats
+floats	1.0	fn	Casts to float[]
+future-cancelled?	1.1	fn	Returns true if future f is cancelled
+get-proxy-class	1.0	fn	Takes an optional single class followed by zero or more
+get-validator	1.0	fn	Gets the validator-fn for a var/ref/agent/atom.
+hash-combine	?	fn	
+hash-ordered-coll	1.6	fn	Returns the hash code, consistent with =, for an external ordered
+hash-unordered-coll	1.6	fn	Returns the hash code, consistent with =, for an external unordered
+inc'	1.0	fn	Returns a number one greater than num. Supports arbitrary precision.
+indexed?	1.9	fn	Return true if coll implements Indexed, indicating efficient lookup by index
+infinite?	1.11	fn	Returns true if num is negative or positive infinity, else false
+init-proxy	1.0	fn	Takes a proxy instance and a map of strings (which must
+inst-ms	1.9	fn	Return the number of milliseconds since January 1, 1970, 00:00:00 GMT
+inst-ms*	?	fn	
+inst?	1.9	fn	Return true if x satisfies Inst
+int-array	1.0	fn	Creates an array of ints
+into-array	1.0	fn	Returns an array with components set to the values in aseq. The array's
+ints	1.0	fn	Casts to int[]
+io!	1.0	macro	If an io! block occurs in a transaction, throws an
+isa?	1.0	fn	Returns true if (= child parent), or child is directly or indirectly derived from
+iteration	1.11	fn	Creates a seqable/reducible via repeated calls to step,
+iterator-seq	1.0	fn	Returns a seq on a java.util.Iterator. Note that most collections
+load-reader	1.0	fn	Sequentially read and evaluate the set of forms contained in the
+long-array	1.0	fn	Creates an array of longs
+longs	1.0	fn	Casts to long[]
+make-array	1.0	fn	Creates and returns an array of instances of the specified class of
+make-hierarchy	1.0	fn	Creates a hierarchy object for use with derive, isa? etc.
+map-entry?	1.8	fn	Return true if x is a map entry
+memfn	1.0	macro	Expands into code that creates a fn that expects to be passed an
+merge-deep	1.13	fn	Returns a map that consists of the rest of the maps conj-ed onto
+merge-deep-with	1.13	fn	Returns a map that consists of the rest of the maps conj-ed onto
+method-sig	?	fn	
+mix-collection-hash	1.6	fn	Mix final collection hash for ordered or unordered collections.
+munge	?	fn	
+namespace-munge	1.2	fn	Convert a Clojure namespace name to a legal Java package name.
+nat-int?	1.9	fn	Return true if x is a non-negative fixed precision integer
+neg-int?	1.9	fn	Return true if x is a negative fixed precision integer
+numerator	1.2	fn	Returns the numerator part of a Ratio.
+object-array	1.2	fn	Creates an array of objects
+parents	1.0	fn	Returns the immediate parents of tag, either via a Java type
+parse-boolean	1.11	fn	Parse strings "true" or "false" and return a boolean, or nil if invalid
+parse-double	1.11	fn	Parse string with floating point components and return a Double value,
+parse-long	1.11	fn	Parse string of decimal digits with optional leading -/+ and return a
+parse-uuid	1.11	fn	Parse a string representing a UUID and return a java.util.UUID instance,
+partitionv	1.12	fn	Returns a lazy sequence of vectors of n items each, at offsets step
+partitionv-all	1.12	fn	Returns a lazy sequence of vector partitions, but may include
+pos-int?	1.9	fn	Return true if x is a positive fixed precision integer
+prefers	1.0	fn	Given a multimethod, returns a map of preferred value -> set of other values
+primitives-classnames	?	var	
+print-ctor	?	fn	
+print-dup	?	var	
+print-method	?	var	
+print-simple	?	fn	
+printf	1.0	fn	Prints formatted output, as per format
+println-str	1.0	fn	println to a string, returning it
+prn-str	1.0	fn	prn to a string, returning it
+proxy-call-with-super	?	fn	
+proxy-mappings	1.0	fn	Takes a proxy instance and returns the proxy's fn map.
+proxy-name	?	fn	
+proxy-super	1.0	macro	Use to call a superclass method in the body of a proxy method.
+rand-nth	1.2	fn	Return a random element of the (sequential) collection. Will have
+random-uuid	1.11	fn	Returns a pseudo-randomly generated java.util.UUID instance (i.e. type 4).
+ratio?	1.0	fn	Returns true if n is a Ratio
+rational?	1.0	fn	Returns true if n is a rational number
+re-groups	1.0	fn	Returns the groups from the most recent match/find. If there are no
+re-matcher	1.0	fn	Returns an instance of java.util.regex.Matcher, for use, e.g. in
+read+string	1.10	fn	Like read, and taking the same args. stream must be a LineNumberingPushbackReader.
+reader-conditional	1.7	fn	Construct a data representation of a reader conditional.
+reader-conditional?	1.7	fn	Return true if the value is the data representation of a reader conditional
+reduce-kv	1.4	fn	Reduces an associative collection. f should be a function of 3
+ref-history-count	1.1	fn	Returns the history count of a ref
+ref-max-history	1.1	fn	Gets the max-history of a ref, or sets it and returns the ref
+ref-min-history	1.1	fn	Gets the min-history of a ref, or sets it and returns the ref
+release-pending-sends	1.0	fn	Normally, actions sent directly or indirectly during another action
+remove-all-methods	1.2	fn	Removes all of the methods of multimethod.
+remove-tap	1.10	fn	Remove f from the tap set.
+replicate	1.0	fn	DEPRECATED: Use 'repeat' instead.
+requiring-resolve	1.10	fn	Resolves namespace-qualified sym per 'resolve'. If initial resolve
+reset-vals!	1.9	fn	Sets the value of atom to newval. Returns [old new], the value of the
+resultset-seq	1.0	fn	Creates and returns a lazy sequence of structmaps corresponding to
+run!	1.7	fn	Runs the supplied procedure (via reduce), for purposes of side
+selector	1.13	macro	Builds a selecting-fn from m, a map destructuring form that must
+seq-to-map-for-destructuring	1.11	fn	Builds a map from a seq as described in
+seque	1.0	fn	Creates a queued seq on another (presumably lazy) seq s. The queued
+set-agent-send-executor!	1.5	fn	Sets the ExecutorService to be used by send
+set-agent-send-off-executor!	1.5	fn	Sets the ExecutorService to be used by send-off
+set-validator!	1.0	fn	Sets the validator-fn for a var/ref/agent/atom. validator-fn must be nil or a
+short-array	1.1	fn	Creates an array of shorts
+shorts	1.1	fn	Casts to short[]
+some->	1.5	macro	When expr is not nil, threads it into the first form (via ->),
+some->>	1.5	macro	When expr is not nil, threads it into the first form (via ->>),
+some-vals	1.13	fn	Returns a map with only the non-nil values of map m. Returns nil if
+special-symbol?	1.0	fn	Returns true if s names a special form
+splitv-at	1.12	fn	Returns a vector of [(into [] (take n) coll) (drop n coll)]
+stream-into!	1.12	fn	Returns a new coll consisting of coll with all of the items of the
+stream-reduce!	1.12	fn	Works like reduce but takes a java.util.stream.BaseStream as its source.
+stream-seq!	1.12	fn	Takes a java.util.stream.BaseStream instance s and returns a seq of its
+stream-transduce!	1.12	fn	Works like transduce but takes a java.util.stream.BaseStream as its source.
+struct	1.0	fn	Returns a new structmap instance with the keys of the
+struct-map	1.0	fn	Returns a new structmap instance with the keys of the
+swap-vals!	1.9	fn	Atomically swaps the value of atom to be:
+sync	1.0	macro	transaction-flags => TBD, pass nil for now
+tagged-literal	1.7	fn	Construct a data representation of a tagged literal from a
+tagged-literal?	1.7	fn	Return true if the value is the data representation of a tagged literal
+tap->	1.13	fn	Sends x to any taps, drops if tap queue is full, returns x.
+tap>	1.10	fn	sends x to any taps. Will not block. Returns true if there was room in the queue,
+test	1.0	fn	test [v] finds fn at key :test in var metadata and calls it,
+to-array	1.0	fn	Returns an array of Objects containing the contents of coll, which
+to-array-2d	1.0	fn	Returns a (potentially-ragged) 2-dimensional array of Objects
+tree-seq	1.0	fn	Returns a lazy sequence of the nodes in a tree, via a depth-first walk.
+unchecked-add	1.0	fn	Returns the sum of x and y, both long.
+unchecked-add-int	1.0	fn	Returns the sum of x and y, both int.
+unchecked-byte	1.3	fn	Coerce to byte. Subject to rounding or truncation.
+unchecked-char	1.3	fn	Coerce to char. Subject to rounding or truncation.
+unchecked-dec	1.0	fn	Returns a number one less than x, a long.
+unchecked-dec-int	1.0	fn	Returns a number one less than x, an int.
+unchecked-divide-int	1.0	fn	Returns the division of x by y, both int.
+unchecked-double	1.3	fn	Coerce to double. Subject to rounding.
+unchecked-float	1.3	fn	Coerce to float. Subject to rounding.
+unchecked-inc	1.0	fn	Returns a number one greater than x, a long.
+unchecked-inc-int	1.0	fn	Returns a number one greater than x, an int.
+unchecked-int	1.3	fn	Coerce to int. Subject to rounding or truncation.
+unchecked-long	1.3	fn	Coerce to long. Subject to rounding or truncation.
+unchecked-multiply	1.0	fn	Returns the product of x and y, both long.
+unchecked-multiply-int	1.0	fn	Returns the product of x and y, both int.
+unchecked-negate	1.0	fn	Returns the negation of x, a long.
+unchecked-negate-int	1.0	fn	Returns the negation of x, an int.
+unchecked-remainder-int	1.0	fn	Returns the remainder of division of x by y, both int.
+unchecked-short	1.3	fn	Coerce to short. Subject to rounding or truncation.
+unchecked-subtract	1.0	fn	Returns the difference of x and y, both long.
+unchecked-subtract-int	1.0	fn	Returns the difference of x and y, both int.
+underive	1.0	fn	Removes a parent/child relationship between parent and
+unquote	?	var	
+unquote-splicing	?	var	
+unsigned-bit-shift-right	1.6	fn	Bitwise shift right, without sign-extension.
+update-keys	1.11	fn	m f => {(f k) v ...}
+update-proxy	1.0	fn	Takes a proxy instance and a map of strings (which must
+update-vals	1.11	fn	m f => {k (f v) ...}
+uri?	1.9	fn	Return true if x is a java.net.URI
+uuid?	1.9	fn	Return true if x is a java.util.UUID
+vector-of	1.2	fn	Creates a new vector of a single primitive type t, where t is one
+volatile!	1.7	fn	Creates and returns a Volatile with an initial value of val.
+volatile?	1.7	fn	Returns true if x is a volatile.
+vreset!	1.7	fn	Sets the value of volatile to newval without regard for the
+vswap!	1.7	macro	Non-atomically swaps the value of the volatile as if:
+when-first	1.0	macro	bindings => x xs
+while	1.0	macro	Repeatedly executes body while test expression is true. Presumes
+with-loading-context	?	macro	
+with-local-vars	1.0	macro	varbinding=> symbol init-expr
+with-precision	1.0	macro	Sets the precision and rounding mode to be used for BigDecimal operations.
+with-redefs-fn	1.3	fn	Temporarily redefines Vars during a call to func.  Each val of
+xml-seq	1.0	fn	A tree seq on the xml elements as per xml/parse

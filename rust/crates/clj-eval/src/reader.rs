@@ -288,8 +288,9 @@ fn apply_features(m: &Map, opts: &mut ReaderOpts) -> Result<(), NativeError> {
 /// reader options, `:eof` presence (even nil) selecting the
 /// no-throw value (probes `r-opts-*`). Nil opts mean defaults;
 /// non-map opts fail the `IPersistentMap` cast (probe
-/// `r-opts-nonmap`).
-fn parse_read_opts(
+/// `r-opts-nonmap`). Shared with `read-string` 2-arity (issue
+/// #40: every `rs-opts-*` row agrees with the `read` pins).
+pub(crate) fn parse_read_opts(
     opts_arg: &Value,
     opts: &mut ReaderOpts,
 ) -> Result<(bool, Value, bool), NativeError> {

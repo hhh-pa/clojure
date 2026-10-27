@@ -4,9 +4,16 @@ The complete inventory of `clojure.core` in this port: every var,
 its conformance state, and — for exclusions — why it is excluded.
 If a var is not listed here, that is a file bug, not a silent gap.
 
-- **423 vars: 405 implemented, 2 divergent, 16 out of scope,
+- **692 vars: 410 implemented, 2 divergent, 280 out of scope,
   0 planned.** The port reports Clojure `1.13.0-alpha9`
   (`clojure-version`).
+- **Universe.** 692 rows = 685 JVM publics + 7 extra-universe rows: 4 port-visible JVM privates
+  (`*loaded-libs*`, `*loading-verbosely*`, `*pending-paths*`,
+  `preserving-reduced`), 1 port-only var (`*load-path*`), 2 guard
+  rows (`clone-thread-bindings`, `pprint`).
+- **Merged `planned` rows must resolve** — the matrix fails on any
+  unresolved `planned` row, so add none unresolved (accepted
+  future work lands as `out-of-scope` with a `future:` note).
 - **Status meanings.** `implemented` — resolves in the booted core
   and behaves like the JVM (pinned by tests named in `notes`).
   `divergent` — resolves, but fenced behavior differs deliberately
@@ -421,7 +428,7 @@ Printing, reading, files, and print dynamic vars.
 | `*err*` | implemented | dynamic root; control.rs boot_dynamics (root + referred) |
 | `slurp` | implemented | tests/io.rs io_smoke_rows (roundtrip) |
 | `spit` | implemented | tests/io.rs io_smoke_rows (:append) |
-| `read-string` | implemented | tests/io.rs io_smoke_rows (S2, 1 form); denies reader conditionals (S-instream, instream_read_string_deny_row) |
+| `read-string` | implemented | tests/io.rs io_smoke_rows (S2, 1 form); denies reader conditionals (S-instream, instream_read_string_deny_row); 2-arity opts (F-read-opts, read_string_opts_rows; probes rs-opts-*) |
 | `*print-length*` | implemented | dyn var, root+meta; control.rs boot_dynamics |
 | `*print-level*` | implemented | dyn var, root+meta; control.rs boot_dynamics |
 | `*print-dup*` | divergent | declared; ignored by the printer |
@@ -457,7 +464,7 @@ Special forms exposed as macros; `macroexpand-1` expands them (only real special
 
 ## Out of scope (significant exclusions)
 
-Significant vars with no port slice, grouped below by area with the reason. (Two implemented groups live at the end of this section — concurrency and the REPL/CLI environment — because they were inventoried with the exclusions around them.)
+Significant vars with no port slice, grouped below by area with the reason. (Three implemented groups live at the end of this section — concurrency, the REPL/CLI environment, and previously unlisted vars that resolve today — because they were inventoried with the exclusions around them.)
 
 | var | status | notes |
 | --- | --- | --- |
@@ -574,3 +581,293 @@ Significant vars with no port slice, grouped below by area with the reason. (Two
 | `num` | implemented | tower passthrough (nil is nil); tower.rs tower_num_rationalize_rows |
 | `rationalize` | implemented | tower via `BigDecimal.valueOf` (`(rationalize 0.1)` is `1/10`); tower.rs tower_num_rationalize_rows |
 | `pprint` | out-of-scope | clojure.pprint namespace, not core |
+
+### Previously unlisted — resolves today
+
+JVM publics that already resolve in the booted core; the missing rows were file bugs (#40 audit).
+
+| var | status | notes |
+| --- | --- | --- |
+| `*agent*` | implemented | dynamic nil root, bound over actions (ns.rs def_dynamic_root; concurrency.rs agent_star_rows) |
+| `bound-fn*` | implemented | fx4_host.rs native_bound_fn (conveyed bindings; fx4_macroexpand.rs host_natives_and_rewrites) |
+| `inc'` | implemented | core.rs native_inc_prime (= inc on the tower; arith.rs core_r4_scalar_gaps) |
+| `some-vals` | implemented | fx4_host.rs native_some_vals (drops nil vals; fx4_macroexpand.rs host_natives_and_rewrites) |
+| `with-redefs-fn` | implemented | fx4_host.rs native_with_redefs_fn (root swap/restore; fx4_macroexpand.rs host_natives_and_rewrites) |
+
+### Previously unlisted — accepted future work
+
+Ready slices, `out-of-scope` today only because the matrix fails on unresolved `planned` rows; each note names the future work.
+
+| var | status | notes |
+| --- | --- | --- |
+| `NaN?` | out-of-scope | future: double/int predicate over Value kinds |
+| `abs` | out-of-scope | future: tower (BigInt/BigDec/Ratio) coercion/predicate/accessor |
+| `any?` | out-of-scope | future: trivial const/predicate/lookup over existing kinds |
+| `biginteger` | out-of-scope | future: tower (BigInt/BigDec/Ratio) coercion/predicate/accessor |
+| `bounded-count` | out-of-scope | future: pure seq/coll walk over existing machinery |
+| `decimal?` | out-of-scope | future: tower (BigInt/BigDec/Ratio) coercion/predicate/accessor |
+| `delay?` | out-of-scope | future: trivial const/predicate/lookup over existing kinds |
+| `denominator` | out-of-scope | future: tower (BigInt/BigDec/Ratio) coercion/predicate/accessor |
+| `disj!` | out-of-scope | future: transient/atom gap-fill |
+| `error-handler` | out-of-scope | future: agent error-handler read (1-arity [a]) |
+| `error-mode` | out-of-scope | future: agent error-mode read (1-arity [a]) |
+| `ffirst` | out-of-scope | future: trivial const/predicate/lookup over existing kinds |
+| `find-keyword` | out-of-scope | future: trivial const/predicate/lookup over existing kinds |
+| `find-var` | out-of-scope | future: loader/var introspection over existing ns machinery |
+| `flatten` | out-of-scope | future: pure seq/coll walk over existing machinery |
+| `future-cancelled?` | out-of-scope | future: agent/future field read |
+| `get-validator` | out-of-scope | future: IRef validator read ([iref]; futures rejected) |
+| `indexed?` | out-of-scope | future: trivial const/predicate/lookup over existing kinds |
+| `infinite?` | out-of-scope | future: double/int predicate over Value kinds |
+| `map-entry?` | out-of-scope | future: trivial const/predicate/lookup over existing kinds |
+| `merge-deep` | out-of-scope | future: pure seq/coll walk over existing machinery |
+| `merge-deep-with` | out-of-scope | future: pure seq/coll walk over existing machinery |
+| `nat-int?` | out-of-scope | future: double/int predicate over Value kinds |
+| `neg-int?` | out-of-scope | future: double/int predicate over Value kinds |
+| `numerator` | out-of-scope | future: tower (BigInt/BigDec/Ratio) coercion/predicate/accessor |
+| `parse-boolean` | out-of-scope | future: pure string parse |
+| `parse-double` | out-of-scope | future: pure string parse |
+| `parse-long` | out-of-scope | future: pure string parse |
+| `partitionv` | out-of-scope | future: pure seq/coll walk over existing machinery |
+| `partitionv-all` | out-of-scope | future: pure seq/coll walk over existing machinery |
+| `pos-int?` | out-of-scope | future: double/int predicate over Value kinds |
+| `printf` | out-of-scope | future: printer/output one-liner over format/pr/with-out-str |
+| `println-str` | out-of-scope | future: printer/output one-liner over format/pr/with-out-str |
+| `prn-str` | out-of-scope | future: printer/output one-liner over format/pr/with-out-str |
+| `rand-nth` | out-of-scope | future: RNG-backed pick over rand/shuffle |
+| `ratio?` | out-of-scope | future: tower (BigInt/BigDec/Ratio) coercion/predicate/accessor |
+| `rational?` | out-of-scope | future: tower (BigInt/BigDec/Ratio) coercion/predicate/accessor |
+| `reduce-kv` | out-of-scope | future: pure seq/coll walk over existing machinery |
+| `requiring-resolve` | out-of-scope | future: loader/var introspection over existing ns machinery |
+| `reset-vals!` | out-of-scope | future: transient/atom gap-fill |
+| `run!` | out-of-scope | future: pure seq/coll walk over existing machinery |
+| `set-validator!` | out-of-scope | future: IRef validator write ([iref validator-fn]) |
+| `some->` | out-of-scope | future: core.clj control macro like implemented cond->/when |
+| `some->>` | out-of-scope | future: core.clj control macro like implemented cond->/when |
+| `special-symbol?` | out-of-scope | future: trivial const/predicate/lookup over existing kinds |
+| `splitv-at` | out-of-scope | future: pure seq/coll walk over existing machinery |
+| `swap-vals!` | out-of-scope | future: transient/atom gap-fill |
+| `test` | out-of-scope | future: run :test metadata fn |
+| `tree-seq` | out-of-scope | future: pure seq/coll walk over existing machinery |
+| `update-keys` | out-of-scope | future: pure seq/coll walk over existing machinery |
+| `update-vals` | out-of-scope | future: pure seq/coll walk over existing machinery |
+| `when-first` | out-of-scope | future: core.clj control macro like implemented cond->/when |
+| `while` | out-of-scope | future: core.clj control macro like implemented cond->/when |
+
+### Previously unlisted — no slice yet
+
+No slice on this branch: hard-never reasons stand alone, design-blocked rows name their seam.
+
+| var | status | notes |
+| --- | --- | --- |
+| `*'` | out-of-scope | pending design: auto-promote arith overflow-promotion spec; see #40 |
+| `*compile-files*` | out-of-scope | Bytecode compiler/classpath surface; port AOT (clj-aot) is separate |
+| `*compile-path*` | out-of-scope | Bytecode compiler/classpath surface; port AOT (clj-aot) is separate |
+| `*compiler-options*` | out-of-scope | Bytecode compiler/classpath surface; port AOT (clj-aot) is separate |
+| `*data-readers*` | out-of-scope | pending design: data-reader tag table; see #40 |
+| `*default-data-reader-fn*` | out-of-scope | pending design: data-reader tag table; see #40 |
+| `*flush-on-newline*` | out-of-scope | pending design: printer newline-flush policy; see #40 |
+| `*fn-loader*` | out-of-scope | Bytecode compiler/classpath surface; port AOT (clj-aot) is separate |
+| `*math-context*` | out-of-scope | pending design: BigDec precision context; see #40 |
+| `*read-eval*` | out-of-scope | pending design: read/eval gate trio; see #40 |
+| `*reader-resolver*` | out-of-scope | pending design: reader plug-points/flags; see #40 |
+| `*repl*` | out-of-scope | pending design: *repl* root + session wiring; see #40 |
+| `*source-path*` | out-of-scope | Bytecode compiler/classpath surface; port AOT (clj-aot) is separate |
+| `*suppress-read*` | out-of-scope | pending design: reader plug-points/flags; see #40 |
+| `*use-context-classloader*` | out-of-scope | Bytecode compiler/classpath surface; port AOT (clj-aot) is separate |
+| `*verbose-defrecords*` | out-of-scope | Bytecode compiler/classpath surface; port AOT (clj-aot) is separate |
+| `+'` | out-of-scope | pending design: auto-promote arith overflow-promotion spec; see #40 |
+| `-'` | out-of-scope | pending design: auto-promote arith overflow-promotion spec; see #40 |
+| `->ArrayChunk` | out-of-scope | No type-system slice on this branch: proxies/deftype factories/method internals |
+| `->Eduction` | out-of-scope | No type-system slice on this branch: proxies/deftype factories/method internals |
+| `->Vec` | out-of-scope | No type-system slice on this branch: proxies/deftype factories/method internals |
+| `->VecNode` | out-of-scope | No type-system slice on this branch: proxies/deftype factories/method internals |
+| `->VecSeq` | out-of-scope | No type-system slice on this branch: proxies/deftype factories/method internals |
+| `-cache-protocol-fn` | out-of-scope | No protocol slice on this branch (protocol track owns design) |
+| `-reset-methods` | out-of-scope | No protocol slice on this branch (protocol track owns design) |
+| `EMPTY-NODE` | out-of-scope | No type-system slice on this branch: proxies/deftype factories/method internals |
+| `Inst` | out-of-scope | pending design: date/time value kind + #inst tag; see #40 |
+| `PrintWriter-on` | out-of-scope | java.io.PrintWriter adapter ctor; port Writer kind is separate |
+| `StackTraceElement->vec` | out-of-scope | pending design: error-data shape; see #40 |
+| `Throwable->map` | out-of-scope | pending design: error-data shape; see #40 |
+| `accessor` | out-of-scope | pending design: legacy structmaps as pure maps; see #40 |
+| `aclone` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
+| `add-classpath` | out-of-scope | Deprecated on JVM, no replacement named; classpath URLs have no slice |
+| `add-tap` | out-of-scope | pending design: tap set + queue policy; see #40 |
+| `agent-errors` | out-of-scope | Deprecated on JVM; replacement implemented |
+| `aget` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
+| `alength` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
+| `amap` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
+| `ancestors` | out-of-scope | pending design: hierarchy maps (coordinate with 33-typechain); see #40 |
+| `areduce` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
+| `aset` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
+| `aset-boolean` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
+| `aset-byte` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
+| `aset-char` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
+| `aset-double` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
+| `aset-float` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
+| `aset-int` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
+| `aset-long` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
+| `aset-short` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
+| `await1` | out-of-scope | Public [a] await returning the agent; implemented await is [& agents] returning nil |
+| `bean` | out-of-scope | Host reflection/interop/beans/method-fns (N1) |
+| `bit-and` | out-of-scope | pending design: bitwise lattice over tower; see #40 |
+| `bit-and-not` | out-of-scope | pending design: bitwise lattice over tower; see #40 |
+| `bit-clear` | out-of-scope | pending design: bitwise lattice over tower; see #40 |
+| `bit-flip` | out-of-scope | pending design: bitwise lattice over tower; see #40 |
+| `bit-not` | out-of-scope | pending design: bitwise lattice over tower; see #40 |
+| `bit-or` | out-of-scope | pending design: bitwise lattice over tower; see #40 |
+| `bit-set` | out-of-scope | pending design: bitwise lattice over tower; see #40 |
+| `bit-shift-left` | out-of-scope | pending design: bitwise lattice over tower; see #40 |
+| `bit-shift-right` | out-of-scope | pending design: bitwise lattice over tower; see #40 |
+| `bit-test` | out-of-scope | pending design: bitwise lattice over tower; see #40 |
+| `bit-xor` | out-of-scope | pending design: bitwise lattice over tower; see #40 |
+| `boolean-array` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
+| `booleans` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
+| `byte-array` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
+| `bytes` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
+| `bytes?` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
+| `cast` | out-of-scope | Host reflection/interop/beans/method-fns (N1) |
+| `char-array` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
+| `char-escape-string` | out-of-scope | pending design: print dispatch (defmultis + tables); see #40 |
+| `char-name-string` | out-of-scope | pending design: print dispatch (defmultis + tables); see #40 |
+| `chars` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
+| `chunk` | out-of-scope | Chunked-seq + custom-type hashing impl details; port seqs/hash are separate |
+| `chunk-append` | out-of-scope | Chunked-seq + custom-type hashing impl details; port seqs/hash are separate |
+| `chunk-buffer` | out-of-scope | Chunked-seq + custom-type hashing impl details; port seqs/hash are separate |
+| `chunk-cons` | out-of-scope | Chunked-seq + custom-type hashing impl details; port seqs/hash are separate |
+| `chunk-first` | out-of-scope | Chunked-seq + custom-type hashing impl details; port seqs/hash are separate |
+| `chunk-next` | out-of-scope | Chunked-seq + custom-type hashing impl details; port seqs/hash are separate |
+| `chunk-rest` | out-of-scope | Chunked-seq + custom-type hashing impl details; port seqs/hash are separate |
+| `chunked-seq?` | out-of-scope | Chunked-seq + custom-type hashing impl details; port seqs/hash are separate |
+| `class?` | out-of-scope | Host reflection/interop/beans/method-fns (N1) |
+| `clear-agent-errors` | out-of-scope | Deprecated on JVM; replacement implemented |
+| `comparator` | out-of-scope | pending design: comparator wrapper; see #40 |
+| `compile` | out-of-scope | Bytecode compiler/classpath surface; port AOT (clj-aot) is separate |
+| `construct-proxy` | out-of-scope | No type-system slice on this branch: proxies/deftype factories/method internals |
+| `create-struct` | out-of-scope | pending design: legacy structmaps as pure maps; see #40 |
+| `dec'` | out-of-scope | pending design: auto-promote arith overflow-promotion spec; see #40 |
+| `default-data-readers` | out-of-scope | pending design: data-reader tag table; see #40 |
+| `definline` | out-of-scope | pending design: inline-expansion hook; see #40 |
+| `defstruct` | out-of-scope | pending design: legacy structmaps as pure maps; see #40 |
+| `derive` | out-of-scope | pending design: hierarchy maps (coordinate with 33-typechain); see #40 |
+| `descendants` | out-of-scope | pending design: hierarchy maps (coordinate with 33-typechain); see #40 |
+| `destructure` | out-of-scope | pending design: macro-expansion helper surface; see #40 |
+| `double-array` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
+| `doubles` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
+| `enumeration-seq` | out-of-scope | JDK collection/stream adapters (N1) |
+| `extenders` | out-of-scope | pending design: protocol surface (protocol track owns design); see #40 |
+| `file-seq` | out-of-scope | pending design: lazy dir walk; see #40 |
+| `find-protocol-impl` | out-of-scope | No protocol slice on this branch (protocol track owns design) |
+| `find-protocol-method` | out-of-scope | No protocol slice on this branch (protocol track owns design) |
+| `float-array` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
+| `floats` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
+| `get-proxy-class` | out-of-scope | No type-system slice on this branch: proxies/deftype factories/method internals |
+| `hash-combine` | out-of-scope | Chunked-seq + custom-type hashing impl details; port seqs/hash are separate |
+| `hash-ordered-coll` | out-of-scope | pending design: public hash helpers over port colls; see #40 |
+| `hash-unordered-coll` | out-of-scope | pending design: public hash helpers over port colls; see #40 |
+| `init-proxy` | out-of-scope | No type-system slice on this branch: proxies/deftype factories/method internals |
+| `inst-ms` | out-of-scope | pending design: date/time value kind + #inst tag; see #40 |
+| `inst-ms*` | out-of-scope | pending design: date/time value kind + #inst tag; see #40 |
+| `inst?` | out-of-scope | pending design: date/time value kind + #inst tag; see #40 |
+| `int-array` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
+| `into-array` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
+| `ints` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
+| `io!` | out-of-scope | STM refs/transactions (N4): never |
+| `isa?` | out-of-scope | pending design: hierarchy maps (coordinate with 33-typechain); see #40 |
+| `iteration` | out-of-scope | pending design: step-fn seqable+reducible; see #40 |
+| `iterator-seq` | out-of-scope | JDK collection/stream adapters (N1) |
+| `load-reader` | out-of-scope | pending design: read/eval gate trio; see #40 |
+| `long-array` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
+| `longs` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
+| `make-array` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
+| `make-hierarchy` | out-of-scope | pending design: hierarchy maps (coordinate with 33-typechain); see #40 |
+| `memfn` | out-of-scope | Host reflection/interop/beans/method-fns (N1) |
+| `method-sig` | out-of-scope | No type-system slice on this branch: proxies/deftype factories/method internals |
+| `mix-collection-hash` | out-of-scope | Chunked-seq + custom-type hashing impl details; port seqs/hash are separate |
+| `munge` | out-of-scope | pending design: JVM munger escaping adoption; see #40 |
+| `namespace-munge` | out-of-scope | pending design: JVM munger escaping adoption; see #40 |
+| `object-array` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
+| `parents` | out-of-scope | pending design: hierarchy maps (coordinate with 33-typechain); see #40 |
+| `parse-uuid` | out-of-scope | pending design: UUID value kind; see #40 |
+| `prefers` | out-of-scope | pending design: hierarchy maps (coordinate with 33-typechain); see #40 |
+| `primitives-classnames` | out-of-scope | Bytecode compiler/classpath surface; port AOT (clj-aot) is separate |
+| `print-ctor` | out-of-scope | pending design: print dispatch (defmultis + tables); see #40 |
+| `print-dup` | out-of-scope | pending design: print dispatch (defmultis + tables); see #40 |
+| `print-method` | out-of-scope | pending design: print dispatch (defmultis + tables); see #40 |
+| `print-simple` | out-of-scope | pending design: print dispatch (defmultis + tables); see #40 |
+| `proxy-call-with-super` | out-of-scope | No type-system slice on this branch: proxies/deftype factories/method internals |
+| `proxy-mappings` | out-of-scope | No type-system slice on this branch: proxies/deftype factories/method internals |
+| `proxy-name` | out-of-scope | No type-system slice on this branch: proxies/deftype factories/method internals |
+| `proxy-super` | out-of-scope | No type-system slice on this branch: proxies/deftype factories/method internals |
+| `random-uuid` | out-of-scope | pending design: UUID value kind; see #40 |
+| `re-groups` | out-of-scope | pending design: stateful matcher handle over regex crate; see #40 |
+| `re-matcher` | out-of-scope | pending design: stateful matcher handle over regex crate; see #40 |
+| `read+string` | out-of-scope | pending design: read/eval gate trio; see #40 |
+| `reader-conditional` | out-of-scope | pending design: data-reader tag table; see #40 |
+| `reader-conditional?` | out-of-scope | pending design: data-reader tag table; see #40 |
+| `ref-history-count` | out-of-scope | STM refs/transactions (N4): never |
+| `ref-max-history` | out-of-scope | STM refs/transactions (N4): never |
+| `ref-min-history` | out-of-scope | STM refs/transactions (N4): never |
+| `release-pending-sends` | out-of-scope | pending design: nested-action queue; see #40 |
+| `remove-all-methods` | out-of-scope | pending design: multimethod dispatch seam ([multifn]; coordinate with 33-typechain); see #40 |
+| `remove-tap` | out-of-scope | pending design: tap set + queue policy; see #40 |
+| `replicate` | out-of-scope | Deprecated on JVM; replacement implemented |
+| `resultset-seq` | out-of-scope | JDBC ResultSet adapter; never |
+| `selector` | out-of-scope | pending design: 1.13 map-destructuring selector macro; see #40 |
+| `seq-to-map-for-destructuring` | out-of-scope | pending design: macro-expansion helper surface; see #40 |
+| `seque` | out-of-scope | pending design: queued (blocking) seq; see #40 |
+| `set-agent-send-executor!` | out-of-scope | ExecutorService injection; port agent pools are fixed |
+| `set-agent-send-off-executor!` | out-of-scope | ExecutorService injection; port agent pools are fixed |
+| `short-array` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
+| `shorts` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
+| `stream-into!` | out-of-scope | JDK collection/stream adapters (N1) |
+| `stream-reduce!` | out-of-scope | JDK collection/stream adapters (N1) |
+| `stream-seq!` | out-of-scope | JDK collection/stream adapters (N1) |
+| `stream-transduce!` | out-of-scope | JDK collection/stream adapters (N1) |
+| `struct` | out-of-scope | pending design: legacy structmaps as pure maps; see #40 |
+| `struct-map` | out-of-scope | pending design: legacy structmaps as pure maps; see #40 |
+| `sync` | out-of-scope | STM refs/transactions (N4): never |
+| `tagged-literal` | out-of-scope | pending design: data-reader tag table; see #40 |
+| `tagged-literal?` | out-of-scope | pending design: data-reader tag table; see #40 |
+| `tap->` | out-of-scope | pending design: tap set + queue policy; see #40 |
+| `tap>` | out-of-scope | pending design: tap set + queue policy; see #40 |
+| `to-array` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
+| `to-array-2d` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
+| `unchecked-add` | out-of-scope | pending design: wrapping vs tower-checking per fn; see #40 |
+| `unchecked-add-int` | out-of-scope | pending design: wrapping vs tower-checking per fn; see #40 |
+| `unchecked-byte` | out-of-scope | pending design: wrapping vs tower-checking per fn; see #40 |
+| `unchecked-char` | out-of-scope | pending design: wrapping vs tower-checking per fn; see #40 |
+| `unchecked-dec` | out-of-scope | pending design: wrapping vs tower-checking per fn; see #40 |
+| `unchecked-dec-int` | out-of-scope | pending design: wrapping vs tower-checking per fn; see #40 |
+| `unchecked-divide-int` | out-of-scope | pending design: wrapping vs tower-checking per fn; see #40 |
+| `unchecked-double` | out-of-scope | pending design: wrapping vs tower-checking per fn; see #40 |
+| `unchecked-float` | out-of-scope | pending design: wrapping vs tower-checking per fn; see #40 |
+| `unchecked-inc` | out-of-scope | pending design: wrapping vs tower-checking per fn; see #40 |
+| `unchecked-inc-int` | out-of-scope | pending design: wrapping vs tower-checking per fn; see #40 |
+| `unchecked-int` | out-of-scope | pending design: wrapping vs tower-checking per fn; see #40 |
+| `unchecked-long` | out-of-scope | pending design: wrapping vs tower-checking per fn; see #40 |
+| `unchecked-multiply` | out-of-scope | pending design: wrapping vs tower-checking per fn; see #40 |
+| `unchecked-multiply-int` | out-of-scope | pending design: wrapping vs tower-checking per fn; see #40 |
+| `unchecked-negate` | out-of-scope | pending design: wrapping vs tower-checking per fn; see #40 |
+| `unchecked-negate-int` | out-of-scope | pending design: wrapping vs tower-checking per fn; see #40 |
+| `unchecked-remainder-int` | out-of-scope | pending design: wrapping vs tower-checking per fn; see #40 |
+| `unchecked-short` | out-of-scope | pending design: wrapping vs tower-checking per fn; see #40 |
+| `unchecked-subtract` | out-of-scope | pending design: wrapping vs tower-checking per fn; see #40 |
+| `unchecked-subtract-int` | out-of-scope | pending design: wrapping vs tower-checking per fn; see #40 |
+| `underive` | out-of-scope | pending design: hierarchy maps (coordinate with 33-typechain); see #40 |
+| `unquote` | out-of-scope | pending design: syntax-quote support surface; see #40 |
+| `unquote-splicing` | out-of-scope | pending design: syntax-quote support surface; see #40 |
+| `unsigned-bit-shift-right` | out-of-scope | pending design: bitwise lattice over tower; see #40 |
+| `update-proxy` | out-of-scope | No type-system slice on this branch: proxies/deftype factories/method internals |
+| `uri?` | out-of-scope | pending design: URI value kind; see #40 |
+| `uuid?` | out-of-scope | pending design: UUID value kind; see #40 |
+| `vector-of` | out-of-scope | pending design: primitive-vector kind; see #40 |
+| `volatile!` | out-of-scope | pending design: volatile cell kind; see #40 |
+| `volatile?` | out-of-scope | pending design: volatile cell kind; see #40 |
+| `vreset!` | out-of-scope | pending design: volatile cell kind; see #40 |
+| `vswap!` | out-of-scope | pending design: volatile cell kind; see #40 |
+| `with-loading-context` | out-of-scope | Load-context macro inlined by port load (*pending-paths* guard implemented) |
+| `with-local-vars` | out-of-scope | pending design: var-frame macro over binding frames; see #40 |
+| `with-precision` | out-of-scope | pending design: BigDec precision context; see #40 |
+| `xml-seq` | out-of-scope | XML element walk; XML has no slice |
