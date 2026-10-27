@@ -29,6 +29,7 @@ mod symbol;
 mod tower;
 mod transient;
 mod value;
+mod volatile;
 
 pub use agent::{Agent, AgentAction, AgentInner, AgentPool, ErrorMode, QueuedAction};
 pub use atom::{Atom, AtomState};
@@ -36,7 +37,7 @@ pub use compare::{CompareError, compare};
 pub use delay::{Delay, DelayState};
 pub use extension::{ExtensionValue, ThrowClass, Throwable, Unbound, Var};
 pub use future::{Future, FutureOutcome, FutureState};
-pub use hasheq::{hash_code, hasheq, seq_hash_unsupported};
+pub use hasheq::{hash_code, hash_ordered, hash_unordered, hasheq, seq_hash_unsupported};
 pub use host::{
     HostDef, HostInst, HostKind, HostMethod, HostVal, class_name, fallback_str, find_method,
     host_eq, identity_hex, inst_hasheq, is_field, munge_ns, record_hasheq,
@@ -60,3 +61,4 @@ pub use value::{
     FxBuildHasher, List, Map, Set, SortSpec, Value, Vector, extension_supports_meta,
     extension_with_meta, map_entry, new_map, new_set,
 };
+pub use volatile::Volatile;
