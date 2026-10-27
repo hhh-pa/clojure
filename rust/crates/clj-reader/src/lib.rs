@@ -68,6 +68,12 @@ pub struct Reader {
     pub(crate) in_cond: bool,
 }
 
+// `Reader` lives behind a `Mutex` in the `clj-eval` streams.
+const _: fn() = || {
+    fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<Reader>();
+};
+
 impl Reader {
     /// Start reading `input` (fresh line 1, column 1; options
     /// normalized with `:clj` installed).
@@ -82,6 +88,11 @@ impl Reader {
             suppress: false,
             in_cond: false,
         }
+    }
+
+    /// Replace the options (cloned and normalized like [`new`](Self::new)).
+    pub fn set_opts(&mut self, opts: &ReaderOpts) {
+        self.opts = opts.clone().normalized();
     }
 
     /// Read one top-level form: `eof_is_error` decides whether EOF
@@ -317,9 +328,11 @@ pub fn read_all(s: &str, opts: &ReaderOpts) -> Result<Vec<Value>, ReaderError> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use super::{Form, unwrap_single};
-    use crate::{Reader, ReaderError, ReaderOpts, read_all, read_str};
-    use clj_value::{PrintOpts, Value, pr_to_string};
+    use crate::{ReadCond, Reader, ReaderError, ReaderOpts, read_all, read_str};
+    use clj_value::{Keyword, PrintOpts, Value, pr_to_string};
 
     fn pr(v: &clj_value::Value) -> String {
         pr_to_string(v, &PrintOpts::pr())
@@ -390,5 +403,45 @@ mod tests {
         let opts = ReaderOpts::default();
         let mut reader = Reader::new("x", &opts);
         let _ = reader.invoke_macro('x', false);
+    }
+
+    #[test]
+    fn set_opts_takes_effect_on_next_read() {
+        let mut reader = Reader::new("#?(:clj 1 :default 2)", &ReaderOpts::default());
+        reader.set_opts(&ReaderOpts {
+            read_cond: ReadCond::Deny,
+            ..ReaderOpts::default()
+        });
+        let err = reader.read_form(true).unwrap_err();
+        assert!(
+            matches!(err, ReaderError::CondNotAllowed { .. }),
+            "got {err:?}"
+        );
+        assert_eq!(err.message(), "Conditional read not allowed");
+    }
+
+    #[test]
+    fn set_opts_normalizes_like_new() {
+        let mut reader = Reader::new("1", &ReaderOpts::default());
+        reader.set_opts(&ReaderOpts {
+            features: HashSet::new(),
+            ..ReaderOpts::default()
+        });
+        assert!(reader.opts.features.contains(&Keyword::new(None, "clj")));
+    }
+
+    #[test]
+    fn eof_delimited_span_for_truncated_list() {
+        // Oracle `r-exdata`: the message names first-line 1 while the
+        // span (ex-data source) sits at the bumped EOF position 2:1.
+        let err = read_str("(a", &ReaderOpts::default()).unwrap_err();
+        assert_eq!(err.message(), "EOF while reading, starting at line 1");
+        match err {
+            ReaderError::EofDelimited { span, line } => {
+                assert_eq!(line, 1);
+                assert_eq!((span.line, span.col), (2, 1));
+            }
+            other => panic!("got {other:?}"),
+        }
     }
 }
