@@ -102,6 +102,7 @@
 (throwof "f-sq-qual-bothnil" '(binding [*reader-resolver* (reify clojure.lang.LispReader$Resolver (currentNS [_] (symbol "cur-ns")) (resolveClass [_ s] nil) (resolveAlias [_ s] nil) (resolveVar [_ s] nil))] (read-string "`alias/foo")))
 (throwof "f-sq-dotclass" '(binding [*reader-resolver* (reify clojure.lang.LispReader$Resolver (currentNS [_] (symbol "cur-ns")) (resolveClass [_ s] (symbol "R" "S")) (resolveAlias [_ s] nil) (resolveVar [_ s] nil))] (read-string "`String.")))
 (throwof "f-sq-dotclass-nil" '(binding [*reader-resolver* (reify clojure.lang.LispReader$Resolver (currentNS [_] (symbol "cur-ns")) (resolveClass [_ s] nil) (resolveAlias [_ s] nil) (resolveVar [_ s] nil))] (read-string "`String.")))
+(throwof "f-sq-currentnil" '(binding [*reader-resolver* (reify clojure.lang.LispReader$Resolver (currentNS [_] nil) (resolveClass [_ s] nil) (resolveAlias [_ s] nil) (resolveVar [_ s] nil))] (read-string "`x")))
 (println (str "f-sq-gensym " (clojure.string/replace (pr-str (binding [*reader-resolver* (reify clojure.lang.LispReader$Resolver (currentNS [_] (symbol "cur-ns")) (resolveClass [_ s] (symbol "R" "S")) (resolveAlias [_ s] (symbol "X" "Y")) (resolveVar [_ s] (symbol "V" "W")))] (read-string "`x#"))) #"__\d+__auto__" "__N__auto__")))
 (throwof "f-nonresolver" '(binding [*reader-resolver* 42] (read-string "::foo")))
 (throwof "f-nonresolver-plain" '(binding [*reader-resolver* 42] (read-string "1")))
