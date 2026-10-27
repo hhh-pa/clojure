@@ -4,7 +4,7 @@ The complete inventory of `clojure.core` in this port: every var,
 its conformance state, and — for exclusions — why it is excluded.
 If a var is not listed here, that is a file bug, not a silent gap.
 
-- **692 vars: 541 implemented, 1 divergent, 150 out of scope,
+- **692 vars: 578 implemented, 1 divergent, 113 out of scope,
   0 planned.** The port reports Clojure `1.13.0-alpha9`
   (`clojure-version`).
 - **Universe.** 692 rows = 685 JVM publics + 7 extra-universe rows: 4 port-visible JVM privates
@@ -660,7 +660,7 @@ No slice on this branch: hard-never reasons stand alone, design-blocked rows nam
 
 | var | status | notes |
 | --- | --- | --- |
-| `*'` | out-of-scope | pending design: auto-promote arith overflow-promotion spec; see #40 |
+| `*'` | implemented | core.rs native_mul_prime (promoting fold; 1-arity `Number` cast); tests/extarith.rs s11_mul_prime_rows (S11, #56; probes `mp-*`, `a2-mul*`, `g-mulnil`) |
 | `*compile-files*` | out-of-scope | Bytecode compiler/classpath surface; port AOT (clj-aot) is separate |
 | `*compile-path*` | out-of-scope | Bytecode compiler/classpath surface; port AOT (clj-aot) is separate |
 | `*compiler-options*` | out-of-scope | Bytecode compiler/classpath surface; port AOT (clj-aot) is separate |
@@ -676,8 +676,8 @@ No slice on this branch: hard-never reasons stand alone, design-blocked rows nam
 | `*suppress-read*` | implemented | nil root; gates only `#tag` (unknown tags preserved; `#inst`/`#uuid` also preserved — the suppress check sits above the S6 consult); zero_oos_s7_readgates.rs (S7, #50) |
 | `*use-context-classloader*` | out-of-scope | Bytecode compiler/classpath surface; port AOT (clj-aot) is separate |
 | `*verbose-defrecords*` | out-of-scope | Bytecode compiler/classpath surface; port AOT (clj-aot) is separate |
-| `+'` | out-of-scope | pending design: auto-promote arith overflow-promotion spec; see #40 |
-| `-'` | out-of-scope | pending design: auto-promote arith overflow-promotion spec; see #40 |
+| `+'` | implemented | core.rs native_add_prime (promoting fold; 1-arity `Number` cast); tests/extarith.rs s11_add_prime_rows (S11, #56; probes `ap-*`, `a2-add*`) |
+| `-'` | implemented | core.rs native_sub_prime (promoting fold/negate); tests/extarith.rs s11_sub_prime_rows (S11, #56; probes `sp-*`, `a2-subchar`) |
 | `->ArrayChunk` | out-of-scope | No type-system slice on this branch: proxies/deftype factories/method internals |
 | `->Eduction` | out-of-scope | No type-system slice on this branch: proxies/deftype factories/method internals |
 | `->Vec` | out-of-scope | No type-system slice on this branch: proxies/deftype factories/method internals |
@@ -711,17 +711,17 @@ No slice on this branch: hard-never reasons stand alone, design-blocked rows nam
 | `aset-short` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
 | `await1` | implemented | S5: concurrency.rs await-iff-queued answering the agent; zero_oos_s5_state.rs await1_rows |
 | `bean` | out-of-scope | Host reflection/interop/beans/method-fns (N1) |
-| `bit-and` | out-of-scope | pending design: bitwise lattice over tower; see #40 |
-| `bit-and-not` | out-of-scope | pending design: bitwise lattice over tower; see #40 |
-| `bit-clear` | out-of-scope | pending design: bitwise lattice over tower; see #40 |
-| `bit-flip` | out-of-scope | pending design: bitwise lattice over tower; see #40 |
-| `bit-not` | out-of-scope | pending design: bitwise lattice over tower; see #40 |
-| `bit-or` | out-of-scope | pending design: bitwise lattice over tower; see #40 |
-| `bit-set` | out-of-scope | pending design: bitwise lattice over tower; see #40 |
-| `bit-shift-left` | out-of-scope | pending design: bitwise lattice over tower; see #40 |
-| `bit-shift-right` | out-of-scope | pending design: bitwise lattice over tower; see #40 |
-| `bit-test` | out-of-scope | pending design: bitwise lattice over tower; see #40 |
-| `bit-xor` | out-of-scope | pending design: bitwise lattice over tower; see #40 |
+| `bit-and` | implemented | core.rs variadic Long-only fold; tests/extarith.rs s11_bitwise_fold_rows (S11, #56; probes `ba-*`, `va-and*`, `ao-*`, `g-order*`) |
+| `bit-and-not` | implemented | core.rs variadic Long-only fold (`x & ~y`); tests/extarith.rs s11_bitwise_fold_rows (S11, #56; probes `ban-*`, `fx-andnot3`, `g-andnot*`) |
+| `bit-clear` | implemented | core.rs 2-arity (`x & ~(1<<n)`, masked); tests/extarith.rs s11_bit_index_rows (S11, #56; probes `bcl-*`) |
+| `bit-flip` | implemented | core.rs 2-arity (`x ^ (1<<n)`, masked); tests/extarith.rs s11_bit_index_rows (S11, #56; probes `bfl-*`) |
+| `bit-not` | implemented | core.rs 1-arity complement; tests/extarith.rs s11_bit_not_rows (S11, #56; probes `bn-*`) |
+| `bit-or` | implemented | core.rs variadic Long-only fold; tests/extarith.rs s11_bitwise_fold_rows (S11, #56; probes `bo-*`, `va-or*`) |
+| `bit-set` | implemented | core.rs 2-arity (bitwise OR with `(1<<n)`, masked); tests/extarith.rs s11_bit_index_rows (S11, #56; probes `bst-*`) |
+| `bit-shift-left` | implemented | core.rs 2-arity Java `<<` (count masked); tests/extarith.rs s11_bit_shift_rows (S11, #56; probes `bsl-*`, `ev-hugesh`) |
+| `bit-shift-right` | implemented | core.rs 2-arity Java `>>` (count masked); tests/extarith.rs s11_bit_shift_rows (S11, #56; probes `bsr-*`) |
+| `bit-test` | implemented | core.rs 2-arity boolean; tests/extarith.rs s11_bit_index_rows (S11, #56; probes `btt-*`, `fx-test*`) |
+| `bit-xor` | implemented | core.rs variadic Long-only fold; tests/extarith.rs s11_bitwise_fold_rows (S11, #56; probes `bx-*`, `va-xor*`) |
 | `boolean-array` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
 | `booleans` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
 | `byte-array` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
@@ -746,7 +746,7 @@ No slice on this branch: hard-never reasons stand alone, design-blocked rows nam
 | `compile` | out-of-scope | Bytecode compiler/classpath surface; port AOT (clj-aot) is separate |
 | `construct-proxy` | out-of-scope | No type-system slice on this branch: proxies/deftype factories/method internals |
 | `create-struct` | implemented | tests/collmisc.rs structmap_rows |
-| `dec'` | out-of-scope | pending design: auto-promote arith overflow-promotion spec; see #40 |
+| `dec'` | implemented | core.rs native_dec_prime (promoting step; `inc'` retargeted at the promoting step — in-slice fix); tests/extarith.rs s11_prime_steps_rows (S11, #56; probes `dp-*`, `ip-*`) |
 | `default-data-readers` | implemented | S6 map var (`inst`/`uuid` natives); zero_oos_s6_datareaders.rs default_data_readers_table, default_readers_direct_calls |
 | `definline` | implemented | core.clj macro (eval-built specimen; `:inline` recorded, never honored — the port is an interpreter); tests/zero_oos_s4b_macros.rs s4b_definline_rows |
 | `defstruct` | implemented | tests/collmisc.rs structmap_rows (macro; expansion shape) |
@@ -834,31 +834,31 @@ No slice on this branch: hard-never reasons stand alone, design-blocked rows nam
 | `tap>` | implemented | cellstaps.rs tap_returns + tap_deliver + tap_nil + tap_full (non-blocking offer; true with room, false past 1024) |
 | `to-array` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
 | `to-array-2d` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
-| `unchecked-add` | out-of-scope | pending design: wrapping vs tower-checking per fn; see #40 |
-| `unchecked-add-int` | out-of-scope | pending design: wrapping vs tower-checking per fn; see #40 |
-| `unchecked-byte` | out-of-scope | pending design: wrapping vs tower-checking per fn; see #40 |
-| `unchecked-char` | out-of-scope | pending design: wrapping vs tower-checking per fn; see #40 |
-| `unchecked-dec` | out-of-scope | pending design: wrapping vs tower-checking per fn; see #40 |
-| `unchecked-dec-int` | out-of-scope | pending design: wrapping vs tower-checking per fn; see #40 |
-| `unchecked-divide-int` | out-of-scope | pending design: wrapping vs tower-checking per fn; see #40 |
-| `unchecked-double` | out-of-scope | pending design: wrapping vs tower-checking per fn; see #40 |
-| `unchecked-float` | out-of-scope | pending design: wrapping vs tower-checking per fn; see #40 |
-| `unchecked-inc` | out-of-scope | pending design: wrapping vs tower-checking per fn; see #40 |
-| `unchecked-inc-int` | out-of-scope | pending design: wrapping vs tower-checking per fn; see #40 |
-| `unchecked-int` | out-of-scope | pending design: wrapping vs tower-checking per fn; see #40 |
-| `unchecked-long` | out-of-scope | pending design: wrapping vs tower-checking per fn; see #40 |
-| `unchecked-multiply` | out-of-scope | pending design: wrapping vs tower-checking per fn; see #40 |
-| `unchecked-multiply-int` | out-of-scope | pending design: wrapping vs tower-checking per fn; see #40 |
-| `unchecked-negate` | out-of-scope | pending design: wrapping vs tower-checking per fn; see #40 |
-| `unchecked-negate-int` | out-of-scope | pending design: wrapping vs tower-checking per fn; see #40 |
-| `unchecked-remainder-int` | out-of-scope | pending design: wrapping vs tower-checking per fn; see #40 |
-| `unchecked-short` | out-of-scope | pending design: wrapping vs tower-checking per fn; see #40 |
-| `unchecked-subtract` | out-of-scope | pending design: wrapping vs tower-checking per fn; see #40 |
-| `unchecked-subtract-int` | out-of-scope | pending design: wrapping vs tower-checking per fn; see #40 |
+| `unchecked-add` | implemented | core.rs wrapping-`Int` tower fold; tests/extarith.rs s11_unchecked_long_rows (S11, #56; probes `ua-*`) |
+| `unchecked-add-int` | implemented | core.rs checked-intcast wrapping `i32` op; tests/extarith.rs s11_unchecked_int_rows (S11, #56; probes `uai-*`, `xi-*`, `g-int*`) |
+| `unchecked-byte` | implemented | core.rs truncating `byteValue`; tests/extarith.rs s11_unchecked_coercion_rows (S11, #56; probes `ucb-*`, `g-byterat`, `xc-binf`) |
+| `unchecked-char` | implemented | core.rs `(char)longValue` (surrogates share the `char` divergence); tests/extarith.rs s11_unchecked_coercion_rows (S11, #56; probes `ucc-*`, `xr-char`, `xc-char*`) |
+| `unchecked-dec` | implemented | core.rs wrapping-`Int` tower step; tests/extarith.rs s11_unchecked_long_rows (S11, #56; probes `ud-*`) |
+| `unchecked-dec-int` | implemented | core.rs checked-intcast wrapping `i32` step; tests/extarith.rs s11_unchecked_int_rows (S11, #56; probes `udi-*`) |
+| `unchecked-divide-int` | implemented | core.rs checked-intcast `i32` `/` (`/ by zero`); tests/extarith.rs s11_unchecked_int_rows (S11, #56; probes `udv-*`, `xd-*`) |
+| `unchecked-double` | implemented | core.rs extensionally `double`; tests/extarith.rs s11_unchecked_coercion_rows (S11, #56; probes `ucd-*`, `xc-dchar`) |
+| `unchecked-float` | implemented | core.rs exact-`Double` (no `Float` kind — documented); tests/extarith.rs s11_unchecked_coercion_rows (S11, #56; probes `ucf-*`, `xc-fchar`) |
+| `unchecked-inc` | implemented | core.rs wrapping-`Int` tower step; tests/extarith.rs s11_unchecked_long_rows (S11, #56; probes `ui-*`) |
+| `unchecked-inc-int` | implemented | core.rs checked-intcast wrapping `i32` step; tests/extarith.rs s11_unchecked_int_rows (S11, #56; probes `uii-*`) |
+| `unchecked-int` | implemented | core.rs truncating `intValue` (ratios saturate via `double`); tests/extarith.rs s11_unchecked_coercion_rows (S11, #56; probes `uci-*`, `xr-int*`, `xc-intbool`) |
+| `unchecked-long` | implemented | core.rs truncating `longValue`; tests/extarith.rs s11_unchecked_coercion_rows (S11, #56; probes `ucl-*`, `xr-long*`) |
+| `unchecked-multiply` | implemented | core.rs wrapping-`Int` tower fold; tests/extarith.rs s11_unchecked_long_rows (S11, #56; probes `um-*`) |
+| `unchecked-multiply-int` | implemented | core.rs checked-intcast wrapping `i32` op; tests/extarith.rs s11_unchecked_int_rows (S11, #56; probes `umi-*`) |
+| `unchecked-negate` | implemented | core.rs wrapping-`Int` tower negate; tests/extarith.rs s11_unchecked_long_rows (S11, #56; probes `un-*`) |
+| `unchecked-negate-int` | implemented | core.rs checked-intcast wrapping `i32` negate; tests/extarith.rs s11_unchecked_int_rows (S11, #56; probes `uni-*`) |
+| `unchecked-remainder-int` | implemented | core.rs checked-intcast `i32` `%` (`/ by zero`); tests/extarith.rs s11_unchecked_int_rows (S11, #56; probes `urm-*`) |
+| `unchecked-short` | implemented | core.rs truncating `shortValue`; tests/extarith.rs s11_unchecked_coercion_rows (S11, #56; probes `ucs-*`, `g-shortrat*`, `xc-sinf`) |
+| `unchecked-subtract` | implemented | core.rs wrapping-`Int` tower fold; tests/extarith.rs s11_unchecked_long_rows (S11, #56; probes `us-*`) |
+| `unchecked-subtract-int` | implemented | core.rs checked-intcast wrapping `i32` op; tests/extarith.rs s11_unchecked_int_rows (S11, #56; probes `usi-*`) |
 | `underive` | out-of-scope | pending design: hierarchy maps (coordinate with 33-typechain); see #40 |
 | `unquote` | implemented | core.clj bare unbound def (syntax-quote support surface; expansion still reader/analyzer-owned); tests/zero_oos_s4b_macros.rs s4b_unquote_rows |
 | `unquote-splicing` | implemented | core.clj bare unbound def (syntax-quote support surface; expansion still reader/analyzer-owned); tests/zero_oos_s4b_macros.rs s4b_unquote_rows |
-| `unsigned-bit-shift-right` | out-of-scope | pending design: bitwise lattice over tower; see #40 |
+| `unsigned-bit-shift-right` | implemented | core.rs 2-arity Java `>>>` (count masked); tests/extarith.rs s11_bit_shift_rows (S11, #56; probes `ubs-*`, `ev-ubs`) |
 | `update-proxy` | out-of-scope | No type-system slice on this branch: proxies/deftype factories/method internals |
 | `uri?` | implemented | S9 pred1 over Value::Uri (false battery; kind arms unit-tested in scalar.rs); scalarkinds.rs uri_predicate_battery |
 | `uuid?` | implemented | S9 pred1 over Value::Uuid; scalarkinds.rs uuid_predicate_battery |
