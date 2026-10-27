@@ -1,0 +1,66 @@
+p-arglists ([] [stream] [stream eof-error? eof-value] [stream eof-error? eof-value recursive?] [opts stream])
+p-basic [42 "42"]
+p-ws [42 "42"]
+p-tabs [42 "42"]
+p-second [[42 "42"] [43 "43"]]
+p-0arity [42 "42"]
+p-3arity [42 "42"]
+p-eof THROW clojure.lang.LispReader$ReaderException|"java.lang.RuntimeException: EOF while reading"
+p-eofval [:eof ""]
+p-wseof [:eof ""]
+p-opts [:eof ""]
+p-newline [42 "42"]
+p-comment [42 "; hi\n42"]
+p-err THROW clojure.lang.LispReader$ReaderException|"java.lang.RuntimeException: EOF while reading, starting at line 1"
+p-recursive THROW java.lang.RuntimeException|"EOF while reading, starting at line 1"
+p-gate THROW clojure.lang.LispReader$ReaderException|"java.lang.RuntimeException: EvalReader not allowed when *read-eval* is false."
+p-sup-tag [#foo [1] "#foo [1]"]
+p-strarg THROW java.lang.ClassCastException|"class java.lang.String cannot be cast to class clojure.lang.LineNumberingPushbackReader (java.lang.String is in module java.base of loader 'bootstrap'; clojure.lang.LineNumberingPushbackReader is in unnamed module of loader 'app')"
+p-nilarg THROW java.lang.NullPointerException|"Cannot invoke \"clojure.lang.LineNumberingPushbackReader.getString()\" because \"stream\" is null"
+p-plainpushback THROW java.lang.ClassCastException|"class java.io.PushbackReader cannot be cast to class clojure.lang.LineNumberingPushbackReader (java.io.PushbackReader is in module java.base of loader 'bootstrap'; clojure.lang.LineNumberingPushbackReader is in unnamed module of loader 'app')"
+p-nil-badopts THROW java.lang.NullPointerException|"Cannot invoke \"clojure.lang.LineNumberingPushbackReader.getString()\" because \"stream\" is null"
+p-str-badopts THROW java.lang.ClassCastException|"class java.lang.String cannot be cast to class clojure.lang.LineNumberingPushbackReader (java.lang.String is in module java.base of loader 'bootstrap'; clojure.lang.LineNumberingPushbackReader is in unnamed module of loader 'app')"
+p-opts-badstream THROW java.lang.ClassCastException|"class java.lang.String cannot be cast to class clojure.lang.LineNumberingPushbackReader (java.lang.String is in module java.base of loader 'bootstrap'; clojure.lang.LineNumberingPushbackReader is in unnamed module of loader 'app')"
+p-arity5 THROW clojure.lang.ArityException|"Wrong number of args (5) passed to: clojure.core/read+string"
+p-nil-in THROW java.lang.NullPointerException|"Cannot invoke \"clojure.lang.LineNumberingPushbackReader.getString()\" because \"stream\" is null"
+p-unknown THROW java.lang.RuntimeException|"Reading disallowed - *read-eval* bound to :unknown"
+l-arglists ([rdr])
+l-basic :lr-ret
+l-defined 1
+l-empty nil
+l-file nil
+l-nsescape user
+l-ns user
+l-pending ()
+l-readeval-visible true
+l-midstream 2
+l-gate 3
+l-err-eval THROW clojure.lang.Compiler$CompilerException|"Syntax error reading source at (1:20)."
+l-err-read THROW clojure.lang.Compiler$CompilerException|"Syntax error reading source at (1:16)."
+l-err-read-defined 1
+l-err-trunc THROW clojure.lang.Compiler$CompilerException|"Syntax error reading source at (2:1)."
+l-err-trunc-defined 1
+l-strarg THROW java.lang.ClassCastException|"class java.lang.String cannot be cast to class java.io.Reader (java.lang.String and java.io.Reader are in module java.base of loader 'bootstrap')"
+l-nilarg THROW java.lang.NullPointerException|nil
+l-0args THROW clojure.lang.ArityException|"Wrong number of args (0) passed to: clojure.core/load-reader"
+l-2args THROW clojure.lang.ArityException|"Wrong number of args (2) passed to: clojure.core/load-reader"
+l-plainpushback 7
+l-stringreader 9
+l-order THROW java.lang.NullPointerException|nil
+l-resolver-mid THROW clojure.lang.Compiler$CompilerException|"Syntax error executing at (1:3)."
+m-loadstring-false 3
+m-loadstring-unknown #'user/evu
+m-u-defined 1
+m-loadstring-visible true
+m-loadstring-err THROW clojure.lang.Compiler$CompilerException|"Syntax error reading source at (1:19)."
+m-loadstring-nofn THROW clojure.lang.Compiler$CompilerException|"Syntax error reading source at (1:27)."
+m-loadstring-unsupported THROW clojure.lang.Compiler$CompilerException|"Syntax error reading source at (1:14)."
+m-loadstring-trunc THROW clojure.lang.Compiler$CompilerException|"Syntax error reading source at (2:1)."
+m-loadstring-trunc-defined 1
+m-load-sup #foo [1]
+m-load-resolver THROW clojure.lang.Compiler$CompilerException|"Syntax error executing at (1:1)."
+w-arglists ([& body])
+w-macro true
+w-basic 3
+w-empty nil
+w-expand ((clojure.core/fn loading__N__auto__ [] (. clojure.lang.Var (clojure.core/pushThreadBindings #:clojure.lang.Compiler{LOADER (.getClassLoader (.getClass loading__N__auto__))})) (try (load "a") (load "b") (finally (. clojure.lang.Var (clojure.core/popThreadBindings))))))

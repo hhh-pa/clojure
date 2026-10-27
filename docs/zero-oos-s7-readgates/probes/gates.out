@@ -1,0 +1,100 @@
+a-readeval-root true
+a-readeval-meta {:added "1.0"}
+a-suppress-root nil
+a-suppress-meta {}
+a-resolver-root nil
+a-resolver-meta {}
+a-resolver-resolves #'clojure.core/*reader-resolver*
+b-eval 3
+b-false THROW java.lang.RuntimeException|"EvalReader not allowed when *read-eval* is false."
+b-nil THROW java.lang.RuntimeException|"EvalReader not allowed when *read-eval* is false."
+b-unknown-plain THROW java.lang.RuntimeException|"Reading disallowed - *read-eval* bound to :unknown"
+b-unknown-eval THROW java.lang.RuntimeException|"Reading disallowed - *read-eval* bound to :unknown"
+b-read-false THROW java.lang.RuntimeException|"EvalReader not allowed when *read-eval* is false."
+b-read-unknown THROW java.lang.RuntimeException|"Reading disallowed - *read-eval* bound to :unknown"
+b-opts-ignored 3
+c-rawlist "(+ 1 2)"
+c-map (nil nil)
+c-nested THROW java.lang.ClassCastException|"class clojure.lang.PersistentList cannot be cast to class java.lang.Number (clojure.lang.PersistentList is in unnamed module of loader 'app'; java.lang.Number is in module java.base of loader 'bootstrap')"
+c-quote (quote 3)
+c-sq 3
+c-if THROW java.lang.RuntimeException|"Can't resolve if"
+c-quotehead THROW java.lang.RuntimeException|"Can't resolve quote"
+c-empty THROW java.lang.NullPointerException|"Cannot invoke \"clojure.lang.Symbol.equals(Object)\" because \"fs\" is null"
+c-nofn THROW java.lang.RuntimeException|"Can't resolve nosuchfn_xyz"
+c-qq 3
+c-qq-miss THROW java.lang.RuntimeException|"Can't resolve clojure.core/nosuchfn"
+c-qualmiss THROW java.lang.ClassNotFoundException|"nosuchqual"
+c-listhead THROW java.lang.ClassCastException|"class clojure.lang.PersistentList cannot be cast to class clojure.lang.Symbol (clojure.lang.PersistentList and clojure.lang.Symbol are in unnamed module of loader 'app')"
+c-numhead THROW java.lang.ClassCastException|"class java.lang.Long cannot be cast to class clojure.lang.Symbol (java.lang.Long is in module java.base of loader 'bootstrap'; clojure.lang.Symbol is in unnamed module of loader 'app')"
+c-macrohead THROW java.lang.IllegalArgumentException|"Parameter declaration missing"
+c-nonfn THROW java.lang.ClassCastException|"class java.lang.Long cannot be cast to class clojure.lang.IFn (java.lang.Long is in module java.base of loader 'bootstrap'; clojure.lang.IFn is in unnamed module of loader 'app')"
+c-classhead THROW java.lang.RuntimeException|"Can't resolve String"
+c-num THROW java.lang.IllegalArgumentException|"Unsupported #= form"
+c-kw THROW java.lang.IllegalArgumentException|"Unsupported #= form"
+c-eof THROW java.lang.RuntimeException|"EOF while reading"
+c-div-rs THROW java.lang.ArithmeticException|"Divide by zero"
+c-div-read THROW java.lang.ArithmeticException|"Divide by zero"
+c-unsupported-read THROW java.lang.IllegalArgumentException|"Unsupported #= form"
+c-nofn-read THROW java.lang.RuntimeException|"Can't resolve nosuchfn_xyz"
+c-preserve 3
+c-nsctx-hit 2
+c-nsctx-miss THROW java.lang.RuntimeException|"Can't resolve evfn"
+c-alias-head "1, 2"
+d-class-miss THROW java.lang.ClassNotFoundException|"nosuchclass_xyz"
+d-class-full java.lang.String
+d-varq #'clojure.core/map
+d-var-unqual THROW java.lang.NullPointerException|"Cannot invoke \"String.hashCode()\" because \"this.name\" is null"
+d-var-nosec THROW java.lang.NullPointerException|"Cannot read field \"ns\" because \"vs\" is null"
+d-var-nonsym THROW java.lang.ClassCastException|"class java.lang.Long cannot be cast to class clojure.lang.Symbol (java.lang.Long is in module java.base of loader 'bootstrap'; clojure.lang.Symbol is in unnamed module of loader 'app')"
+d-var-miss #'nosuchns_xyz/nosuchv_xyz
+d-var-miss-ns "nosuchns_xyz"
+d-var-new #'user/nosuchv_xyz2
+d-var-new-bound false
+d-varhead-q THROW java.lang.RuntimeException|"Can't resolve clojure.core/var"
+d-ctor THROW java.lang.ClassNotFoundException|"String"
+d-static-miss THROW java.lang.ClassNotFoundException|"nosuch.Klass"
+d-discard THROW java.lang.ArithmeticException|"Divide by zero"
+e-basic 42
+e-consume [42 43]
+e-trunc THROW java.lang.RuntimeException|"EOF while reading"
+e-readeval 3
+e-readeval-false THROW java.lang.RuntimeException|"EvalReader not allowed when *read-eval* is false."
+e-nonnil 42
+e-tag THROW java.lang.RuntimeException|"No reader function for tag foo"
+e-tag-sup #foo [1 2]
+e-tag-sup-truthy #foo [1 2]
+e-inst #inst "2020-01-01T00:00:00.000-00:00"
+e-inst-sup #inst "2020-01-01T00:00:00.000-00:00"
+e-eval-sup-tag THROW java.lang.RuntimeException|"Can't resolve quote"
+f-alias :aliased-ns/foo
+f-current :cur-ns/foo
+f-nilalias THROW java.lang.RuntimeException|"Invalid token: ::str/foo"
+f-alias-2part :B/foo
+f-current-nil THROW java.lang.RuntimeException|"Invalid token: ::foo"
+f-sq-var (quote vvar/vname)
+f-sq-unqual-class (quote C/D)
+f-sq-unqual-allnil (quote cur-ns/x)
+f-sq-qual-class (quote S/foo)
+f-sq-qual-alias (quote Y/foo)
+f-sq-qual-bothnil (quote alias/foo)
+f-sq-dotclass (quote S.)
+f-sq-dotclass-nil (quote String.)
+f-sq-gensym (quote x__N__auto__)
+f-nonresolver THROW java.lang.ClassCastException|"class java.lang.Long cannot be cast to class clojure.lang.LispReader$Resolver (java.lang.Long is in module java.base of loader 'bootstrap'; clojure.lang.LispReader$Resolver is in unnamed module of loader 'app')"
+f-nonresolver-plain THROW java.lang.ClassCastException|"class java.lang.Long cannot be cast to class clojure.lang.LispReader$Resolver (java.lang.Long is in module java.base of loader 'bootstrap'; clojure.lang.LispReader$Resolver is in unnamed module of loader 'app')"
+f-sq-baseline (quote java.lang.String/foo)
+f-throws "exinfo:rx:{:k 1}"
+g-read-nil THROW java.lang.RuntimeException|"Reading disallowed - *read-eval* bound to :unknown"
+g-read-1nil THROW java.lang.RuntimeException|"Reading disallowed - *read-eval* bound to :unknown"
+g-read-badopts THROW java.lang.RuntimeException|"Reading disallowed - *read-eval* bound to :unknown"
+g-read-badstream THROW java.lang.ClassCastException|"class java.lang.String cannot be cast to class java.io.PushbackReader (java.lang.String and java.io.PushbackReader are in module java.base of loader 'bootstrap')"
+g-rs-nil THROW java.lang.NullPointerException|nil
+g-rs-nonstring THROW java.lang.ClassCastException|"class java.lang.Long cannot be cast to class java.lang.String (java.lang.Long and java.lang.String are in module java.base of loader 'bootstrap')"
+h-div-lnpr READEREX "java.lang.ArithmeticException: Divide by zero" exdata=#:clojure.error{:line 1, :column 10} cause=java.lang.ArithmeticException
+h-gate-lnpr READEREX "java.lang.RuntimeException: EvalReader not allowed when *read-eval* is false." exdata=#:clojure.error{:line 1, :column 3} cause=java.lang.RuntimeException
+h-unknown-lnpr THROW java.lang.RuntimeException|"Reading disallowed - *read-eval* bound to :unknown"
+h-resolver-lnpr THROW java.lang.ClassCastException|"class java.lang.Long cannot be cast to class clojure.lang.LispReader$Resolver (java.lang.Long is in module java.base of loader 'bootstrap'; clojure.lang.LispReader$Resolver is in unnamed module of loader 'app')"
+h-order THROW java.lang.ClassCastException|"class java.lang.Long cannot be cast to class clojure.lang.LispReader$Resolver (java.lang.Long is in module java.base of loader 'bootstrap'; clojure.lang.LispReader$Resolver is in unnamed module of loader 'app')"
+h-order2 THROW java.lang.ClassCastException|"class java.lang.String cannot be cast to class java.io.PushbackReader (java.lang.String and java.io.PushbackReader are in module java.base of loader 'bootstrap')"
+h-order3 THROW java.lang.ClassCastException|"class java.lang.Long cannot be cast to class clojure.lang.LispReader$Resolver (java.lang.Long is in module java.base of loader 'bootstrap'; clojure.lang.LispReader$Resolver is in unnamed module of loader 'app')"
