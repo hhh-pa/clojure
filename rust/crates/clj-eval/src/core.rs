@@ -2312,6 +2312,187 @@ fn native_char(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErr
     }))
 }
 
+/// Upstream `parsing-err` (S4a): `Expected string, got nil` for
+/// nil, else the value's JVM class name (oracle `pb-nil`…).
+fn parsing_err(v: &Value) -> NativeError {
+    let got = if matches!(v, Value::Nil) {
+        "nil".to_owned()
+    } else {
+        jvm_class_of(v)
+    };
+    NativeError::new(
+        ThrowClass::IllegalArgumentException,
+        format!("Expected string, got {got}"),
+    )
+}
+
+/// Every Unicode decimal-digit block start: each Nd run is exactly
+/// 10 code points valued 0–9, so the value is `cp - start`
+/// (`Long.parseLong` accepts them all — oracle `pl-arabic`,
+/// `pl-fullwidth`; enumerated from the Unicode database).
+const ND_STARTS: &[u32] = &[
+    0x30, 0x660, 0x6F0, 0x7C0, 0x966, 0x9E6, 0xA66, 0xAE6, 0xB66, 0xBE6, 0xC66, 0xCE6, 0xD66,
+    0xDE6, 0xE50, 0xED0, 0xF20, 0x1040, 0x1090, 0x17E0, 0x1810, 0x1946, 0x19D0, 0x1A80, 0x1A90,
+    0x1B50, 0x1BB0, 0x1C40, 0x1C50, 0xA620, 0xA8D0, 0xA900, 0xA9D0, 0xA9F0, 0xAA50, 0xABF0, 0xFF10,
+    0x104A0, 0x10D30, 0x11066, 0x110F0, 0x11136, 0x111D0, 0x112F0, 0x11450, 0x114D0, 0x11650,
+    0x116C0, 0x11730, 0x118E0, 0x11950, 0x11C50, 0x11D50, 0x11DA0, 0x16A60, 0x16B50, 0x1D7CE,
+    0x1D7D8, 0x1D7E2, 0x1D7EC, 0x1D7F6, 0x1E140, 0x1E2F0, 0x1E950, 0x1FBF0,
+];
+
+/// `Character.digit(c, 10)`: the decimal value of any Nd char.
+fn decimal_value(c: char) -> Option<u32> {
+    let cp = c as u32;
+    let i = ND_STARTS.partition_point(|&s| s <= cp).checked_sub(1)?;
+    let d = cp.checked_sub(ND_STARTS[i])?;
+    (d < 10).then_some(d)
+}
+
+/// `Long.parseLong`: one ASCII sign, 1+ decimal digits (any
+/// script), overflow → `None` (the caller answers nil).
+fn parse_long_str(s: &str) -> Option<i64> {
+    let (neg, digits) = match s.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, s.strip_prefix('+').unwrap_or(s)),
+    };
+    if digits.is_empty() {
+        return None;
+    }
+    let mut acc: u64 = 0;
+    for c in digits.chars() {
+        acc = acc
+            .checked_mul(10)?
+            .checked_add(u64::from(decimal_value(c)?))?;
+    }
+    if neg {
+        (acc <= i64::MAX as u64 + 1).then_some((acc as i64).wrapping_neg())
+    } else {
+        (acc <= i64::MAX as u64).then_some(acc as i64)
+    }
+}
+
+/// A signed `NaN`/`Infinity` spelling (exact case, like the JVM).
+fn signed_special(t: &str) -> Option<f64> {
+    let (neg, body) = match t.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, t.strip_prefix('+').unwrap_or(t)),
+    };
+    match body {
+        "NaN" => Some(f64::NAN),
+        "Infinity" if neg => Some(f64::NEG_INFINITY),
+        "Infinity" => Some(f64::INFINITY),
+        _ => None,
+    }
+}
+
+/// One trailing `d`/`f` suffix (never on an empty core).
+fn strip_float_suffix(t: &str) -> &str {
+    match t.strip_suffix(['d', 'D', 'f', 'F']) {
+        Some(core) if !core.is_empty() => core,
+        _ => t,
+    }
+}
+
+/// A `p`-exponent: ASCII sign plus 1+ digits, clamped past the
+/// f64 range (huge exponents are ±Inf/0 either way).
+fn parse_hex_exp(exp: &str) -> Option<i32> {
+    let digits = exp.strip_prefix(['+', '-']).unwrap_or(exp);
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let mut acc: i32 = 0;
+    for b in digits.bytes() {
+        acc = acc.saturating_mul(10).saturating_add(i32::from(b - b'0'));
+        if acc > 10_000 {
+            break;
+        }
+    }
+    Some(if exp.starts_with('-') { -acc } else { acc })
+}
+
+/// A hex significand digit (ASCII only, like `FloatingDecimal`).
+fn hex_val(c: char) -> Option<u32> {
+    c.to_digit(16)
+}
+
+/// A `0x` float: hex significand, mandatory `p` exponent
+/// (Horner accumulation — exact through 13 significand digits).
+fn parse_hex_float(neg: bool, h: &str) -> Option<f64> {
+    let p = h.find(['p', 'P'])?;
+    let (sig, exp) = (&h[..p], &h[p + 1..]);
+    let exp = parse_hex_exp(exp)?;
+    let (int_part, frac_part) = sig.split_once('.').unwrap_or((sig, ""));
+    if int_part.is_empty() && frac_part.is_empty() {
+        return None;
+    }
+    let mut int_val: f64 = 0.0;
+    for c in int_part.chars() {
+        int_val = int_val.mul_add(16.0, f64::from(hex_val(c)?));
+    }
+    let mut frac_val: f64 = 0.0;
+    for c in frac_part.chars().rev() {
+        frac_val = (frac_val + f64::from(hex_val(c)?)) / 16.0;
+    }
+    let v = (int_val + frac_val) * 2f64.powi(exp);
+    Some(if neg { -v } else { v })
+}
+
+/// `Double.valueOf`: Java-`trim`, exact `NaN`/`Infinity`, decimal
+/// via the host parser (overflow → ±Inf like the JVM), hex
+/// floats manual, one `d`/`f` suffix — never on a bare
+/// `NaN`/`Infinity` (oracle `pd-nansuf`/`pd-infsuf`).
+/// Rejects the `nan`/`inf` spellings the host parser takes but
+/// the JVM refuses, and all non-ASCII digits (oracle
+/// `pd-arabic`/`pd-fullwidth`).
+fn parse_double_str(s: &str) -> Option<f64> {
+    let t = s.trim_matches(|c: char| c <= ' ');
+    if t.is_empty() {
+        return None;
+    }
+    if let Some(v) = signed_special(t) {
+        return Some(v);
+    }
+    let core = strip_float_suffix(t);
+    if signed_special(core).is_some() {
+        return None;
+    }
+    let body = core.strip_prefix(['+', '-']).unwrap_or(core);
+    if body.len() >= 2 && (body.starts_with("0x") || body.starts_with("0X")) {
+        return parse_hex_float(core.starts_with('-'), &body[2..]);
+    }
+    if ["nan", "inf", "infinity"].contains(&body.to_ascii_lowercase().as_str()) {
+        return None;
+    }
+    core.parse::<f64>().ok()
+}
+
+fn native_parse_boolean(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.core/parse-boolean", args, &[1])?;
+    match &args[0] {
+        Value::Str(s) => match s.as_ref() {
+            "true" => Ok(Value::Bool(true)),
+            "false" => Ok(Value::Bool(false)),
+            _ => Ok(Value::Nil),
+        },
+        other => Err(parsing_err(other)),
+    }
+}
+
+fn native_parse_long(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.core/parse-long", args, &[1])?;
+    match &args[0] {
+        Value::Str(s) => Ok(parse_long_str(s).map(Value::Int).unwrap_or(Value::Nil)),
+        other => Err(parsing_err(other)),
+    }
+}
+
+fn native_parse_double(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.core/parse-double", args, &[1])?;
+    match &args[0] {
+        Value::Str(s) => Ok(parse_double_str(s).map(Value::Double).unwrap_or(Value::Nil)),
+        other => Err(parsing_err(other)),
+    }
+}
+
 /// A `reduced` wrapper: `reduce` unwraps it for early exit.
 /// Identity equality (the JVM never overrides `equals` here).
 #[derive(Debug)]
@@ -2653,6 +2834,9 @@ pub(crate) const CORE_NATIVES: &[(&str, NativeFnPtr)] = &[
     ("short", native_short),
     ("byte", native_byte),
     ("char", native_char),
+    ("parse-boolean", native_parse_boolean),
+    ("parse-double", native_parse_double),
+    ("parse-long", native_parse_long),
     ("format", crate::fmt::native_format),
     ("reduced", native_reduced),
     ("reduced?", native_reducedp),

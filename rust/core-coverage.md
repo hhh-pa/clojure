@@ -4,7 +4,7 @@ The complete inventory of `clojure.core` in this port: every var,
 its conformance state, and — for exclusions — why it is excluded.
 If a var is not listed here, that is a file bug, not a silent gap.
 
-- **435 vars: 417 implemented, 2 divergent, 16 out of scope,
+- **447 vars: 429 implemented, 2 divergent, 16 out of scope,
   0 planned.** The port reports Clojure `1.13.0-alpha9`
   (`clojure-version`).
 - **Status meanings.** `implemented` — resolves in the booted core
@@ -577,9 +577,9 @@ Significant vars with no port slice, grouped below by area with the reason. (Two
 
 ### Previously unlisted — accepted future work
 
-S1's rows at their PR #41 mirrored positions, flipped straight
-to `implemented` (the #41 land unions the remaining slices'
-rows into this table).
+Landed ready slices at their PR #41 mirrored positions, flipped
+straight to `implemented` (the #41 land unions the remaining
+slices' rows into this table).
 
 | var | status | notes |
 | --- | --- | --- |
@@ -593,5 +593,17 @@ rows into this table).
 | `map-entry?` | implemented | core.rs pred1 over `Value::MapEntry` (never 2-vectors); predicates.rs map_entry_rows |
 | `nat-int?` | implemented | core.rs pred1 over `Int` >= 0; predicates.rs nat_int_rows |
 | `neg-int?` | implemented | core.rs pred1 over `Int` < 0; predicates.rs neg_int_rows |
+| `parse-boolean` | implemented | zero_oos_s4a_corelib.rs parse_boolean_rows (S4a #46; probes corelib.out pb-*) |
+| `parse-double` | implemented | zero_oos_s4a_corelib.rs parse_double_rows (S4a #46; probes corelib.out pd-*) |
+| `parse-long` | implemented | zero_oos_s4a_corelib.rs parse_long_rows (S4a #46; probes corelib.out pl-*) |
 | `pos-int?` | implemented | core.rs pred1 over `Int` > 0; predicates.rs pos_int_rows |
+| `printf` | implemented | zero_oos_s4a_corelib.rs printf_rows (S4a #46; probes corelib.out pf-*) |
+| `println-str` | implemented | zero_oos_s4a_corelib.rs println_str_rows (S4a #46; probes corelib.out pls-*) |
+| `prn-str` | implemented | zero_oos_s4a_corelib.rs prn_str_rows (S4a #46; probes corelib.out prs-*) |
+| `rand-nth` | implemented | zero_oos_s4a_corelib.rs rand_nth_rows (S4a #46; probes corelib.out rn-*) |
+| `some->` | implemented | zero_oos_s4a_corelib.rs some_thread_first_rows (S4a #46; probes corelib.out st-*) |
+| `some->>` | implemented | zero_oos_s4a_corelib.rs some_thread_last_rows (S4a #46; probes corelib.out stt-*) |
 | `special-symbol?` | implemented | core.rs pred1 over the oracle 23-member set; predicates.rs special_symbol_rows |
+| `test` | implemented | zero_oos_s4a_corelib.rs test_var_rows (S4a #46; probes corelib.out tst-*) |
+| `when-first` | implemented | zero_oos_s4a_corelib.rs when_first_rows (S4a #46; probes corelib.out wf-*) |
+| `while` | implemented | zero_oos_s4a_corelib.rs while_rows (S4a #46; probes corelib.out wh-*) |

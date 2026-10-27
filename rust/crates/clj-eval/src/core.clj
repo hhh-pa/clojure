@@ -920,6 +920,101 @@
   ([prob] (filter (fn [_] (< (rand) prob))))
   ([prob coll] (filter (fn [_] (< (rand) prob)) coll)))
 
+;; --- Corelib small vars (zero-oos S4a, #46): control macros,
+;; printer one-liners, `rand-nth`, and `test` — verbatim ports
+;; over implemented vars (the three `parse-*` fns are `core.rs`
+;; natives for JVM parse parity, not here). Owned by S4a: no
+;; other slice edits inside this block.
+(defmacro some->
+  "When expr is not nil, threads it into the first form (via ->),
+  and when that result is not nil, through the next etc"
+  {:added "1.5"}
+  [expr & forms]
+  (let [g (gensym)
+        steps (map (fn [step] `(~'if (nil? ~g) nil (-> ~g ~step)))
+                   forms)]
+    `(let [~g ~expr
+           ~@(interleave (repeat g) (butlast steps))]
+       ~(if (empty? steps)
+          g
+          (last steps)))))
+
+(defmacro some->>
+  "When expr is not nil, threads it into the first form (via ->>),
+  and when that result is not nil, through the next etc"
+  {:added "1.5"}
+  [expr & forms]
+  (let [g (gensym)
+        steps (map (fn [step] `(~'if (nil? ~g) nil (->> ~g ~step)))
+                   forms)]
+    `(let [~g ~expr
+           ~@(interleave (repeat g) (butlast steps))]
+       ~(if (empty? steps)
+          g
+          (last steps)))))
+
+(defmacro when-first
+  "bindings => x xs
+
+  Roughly the same as (when (seq xs) (let [x (first xs)] body)) but xs is evaluated only once"
+  {:added "1.0"}
+  [bindings & body]
+  (assert-args
+     (vector? bindings) "a vector for its binding"
+     (= 2 (count bindings)) "exactly 2 forms in binding vector")
+  (let [[x xs] bindings]
+    `(when-let [xs# (seq ~xs)]
+       (let [~x (first xs#)]
+         ~@body))))
+
+(defmacro while
+  "Repeatedly executes body while test expression is true. Presumes
+  some side-effect will cause test to become false/nil. Returns nil"
+  {:added "1.0"}
+  [test & body]
+  `(loop []
+     (when ~test
+       ~@body
+       (~'recur))))
+
+(defn printf
+  "Prints formatted output, as per format"
+  {:added "1.0"}
+  [fmt & args]
+  (print (apply format fmt args)))
+
+(defn println-str
+  "println to a string, returning it"
+  {:added "1.0"}
+  [& xs]
+  (with-out-str
+    (apply println xs)))
+
+(defn prn-str
+  "prn to a string, returning it"
+  {:added "1.0"}
+  [& xs]
+  (with-out-str
+    (apply prn xs)))
+
+(defn rand-nth
+  "Return a random element of the (sequential) collection. Will have
+  the same performance characteristics as nth for the given
+  collection."
+  {:added "1.2"}
+  [coll]
+  (nth coll (rand-int (count coll))))
+
+(defn test
+  "test [v] finds fn at key :test in var metadata and calls it,
+  presuming failure will throw exception"
+  {:added "1.0"}
+  [v]
+  (let [f (:test (meta v))]
+    (if f
+      (do (f) :ok)
+      :no-test)))
+
 ;; --- Types (S-typechain stage 1): `deftype` / `defrecord` / `reify` /
 ;; `proxy` / `gen-class` / `gen-interface` / `definterface` expand to
 ;; the hidden `__deftype*` et al natives (methods become `(fn [this
