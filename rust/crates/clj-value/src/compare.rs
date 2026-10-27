@@ -222,6 +222,7 @@ fn type_name(v: &Value) -> &'static str {
         Value::Symbol(_) => "Symbol",
         Value::Keyword(_) => "Keyword",
         Value::Extension(e) => extension_type_name(e),
+        Value::HostType(h) => host_type_name(h),
         _ => ref_or_collection_type_name(v),
     }
 }
@@ -248,6 +249,13 @@ fn ref_or_collection_type_name(v: &Value) -> &'static str {
 /// exceptional, never hot-loop values.
 fn extension_type_name(e: &std::sync::Arc<dyn crate::ExtensionValue>) -> &'static str {
     Box::leak(e.class_name().into_boxed_str())
+}
+
+/// The host type's class name. [`CompareError`] borrows its names,
+/// so the owned name is leaked — compare errors are exceptional,
+/// never hot-loop values (same contract as [`extension_type_name`]).
+fn host_type_name(h: &std::sync::Arc<crate::HostVal>) -> &'static str {
+    Box::leak(h.type_name().to_owned().into_boxed_str())
 }
 
 fn collection_type_name(v: &Value) -> &'static str {

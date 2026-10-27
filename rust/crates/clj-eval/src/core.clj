@@ -919,3 +919,230 @@
 (defn random-sample
   ([prob] (filter (fn [_] (< (rand) prob))))
   ([prob coll] (filter (fn [_] (< (rand) prob)) coll)))
+
+;; --- Types (S-typechain stage 1): `deftype` / `defrecord` / `reify` /
+;; `proxy` / `gen-class` / `gen-interface` / `definterface` expand to
+;; the hidden `__deftype*` et al natives (methods become `(fn [this
+;; …] …)` closures; the namespace is the registry, so constructors
+;; resolve through ordinary vars). `definterface` sigs exclude
+;; `this` (it would be a phantom parameter); `proxy` bodies exclude
+;; it too; `deftype` / `reify` bodies include it (oracle pins).
+
+(defn- check-type-name [kind name]
+  (when-not (symbol? name)
+    (throw-illegal-arg! (str "First argument to " kind " must be a symbol")))
+  (when (or (namespace name) (some #{\.} (str name)))
+    (throw-illegal-arg! (str kind " names must be simple symbols")))
+  name)
+
+(defn- check-type-fields [kind fields]
+  (when-not (and (vector? fields)
+                 (every? (fn [f] (and (symbol? f) (nil? (namespace f)))) fields))
+    (throw-illegal-arg! (str kind " fields must be a vector of simple symbols")))
+  (mapv (fn [f] (symbol (name f))) fields))
+
+(defn- type-method-argc [kind argv m]
+  (when-not (vector? argv)
+    (throw-illegal-arg! (str "Invalid method argv: " (pr-str argv))))
+  ;; `proxy` bodies exclude `this` (oracle `proxy-str`); every other
+  ;; kind counts past it.
+  (let [args (if (= kind "proxy") (seq argv) (rest argv))]
+    (when (some #{'&} args)
+      (throw-illegal-arg! (str "Can't define variadic method: " m)))
+    (count args)))
+
+(defn- method-triples [kind mname bodies]
+  (when-not (and (symbol? mname) (seq bodies))
+    (throw-illegal-arg! (str "Invalid " kind " method: " (pr-str (apply list mname bodies)))))
+  (if (vector? (first bodies))
+    (do (type-method-argc kind (first bodies) mname)
+        [[mname (first bodies) (rest bodies)]])
+    (do (doseq [b bodies]
+          (when-not (and (seq? b) (vector? (first b)))
+            (throw-illegal-arg! (str "Invalid " kind " method: " (pr-str (apply list mname bodies))))))
+        (map (fn [b] [mname (first b) (rest b)]) bodies))))
+
+(defn- emit-type-methods [kind triples]
+  (apply list 'clojure.core/hash-map
+    (mapcat (fn [[m entries]]
+              (list (str m)
+                    (apply list 'clojure.core/hash-map
+                      (mapcat (fn [[_ argv body]]
+                                (list (type-method-argc kind argv m)
+                                      (apply list 'fn argv body)))
+                              entries))))
+            (group-by first triples))))
+
+(defn- finish-type-def [name doc attr init]
+  (let [defform (if doc (list 'def name doc init) (list 'def name init))]
+    (if (seq attr)
+      (list 'do defform
+        (list 'alter-meta! (list 'var name) 'merge (list 'quote attr))
+        name)
+      (list 'do defform name))))
+
+(defn- parse-type-head [kind name args]
+  (check-type-name kind name)
+  (let [[doc args] (if (string? (first args)) [(first args) (rest args)] [nil args])
+        [attr args] (if (map? (first args)) [(first args) (rest args)] [nil args])]
+    {:doc doc :attr attr
+     :fields (check-type-fields kind (first args))
+     :specs (rest args)}))
+
+(defn- parse-iface-head [kind name args]
+  (check-type-name kind name)
+  (let [[doc args] (if (string? (first args)) [(first args) (rest args)] [nil args])
+        [attr args] (if (map? (first args)) [(first args) (rest args)] [nil args])]
+    {:doc doc :attr attr :sigs args}))
+
+(defn- parse-type-specs [kind specs]
+  (loop [ss specs, cur nil, ifaces [], triples []]
+    (if (empty? ss)
+      {:ifaces ifaces :triples triples}
+      (let [s (first ss)]
+        (cond (symbol? s)
+              (recur (rest ss) s (conj ifaces s) triples)
+              (keyword? s)
+              (throw-illegal-arg! (str "Unsupported " kind " option: " s))
+              (seq? s)
+              (do (when (nil? cur)
+                    (throw-illegal-arg! (str "Can't define method not in interfaces: " (first s))))
+                  (recur (rest ss) cur ifaces
+                    (into triples (method-triples kind (first s) (rest s)))))
+              :else
+              (throw-illegal-arg! (str "Invalid " kind " spec: " (pr-str s))))))))
+
+(defmacro deftype [name & args]
+  (let [{:keys [doc attr fields specs]} (parse-type-head "deftype" name args)
+        {:keys [ifaces triples]} (parse-type-specs "deftype" specs)]
+    (finish-type-def name doc attr
+      (list 'clojure.core/__deftype*
+        (list 'str (list 'ns-name '*ns*))
+        (str name)
+        (list 'quote fields)
+        (emit-type-methods "deftype" triples)
+        (list 'quote (vec ifaces))))))
+
+(defmacro defrecord [name & args]
+  (let [{:keys [doc attr fields specs]} (parse-type-head "defrecord" name args)
+        {:keys [ifaces triples]} (parse-type-specs "defrecord" specs)
+        arrow (symbol (str "->" name))
+        map-arrow (symbol (str "map->" name))]
+    (list 'do
+      (finish-type-def name doc attr
+        (list 'clojure.core/__record*
+          (list 'str (list 'ns-name '*ns*))
+          (str name)
+          (list 'quote fields)
+          (emit-type-methods "defrecord" triples)
+          (list 'quote (vec ifaces))))
+      (list 'def arrow
+        (list 'let ['t name]
+          (list 'fn arrow fields
+            (apply list 'clojure.core/__new* 't fields))))
+      (list 'def map-arrow
+        (list 'let ['t name]
+          (list 'fn map-arrow '[m]
+            (list 'clojure.core/__record_map* 't 'm))))
+      name)))
+
+(defmacro reify [& specs]
+  (let [[things methods] (split-with symbol? specs)
+        triples (mapcat (fn [m] (method-triples "reify" (first m) (rest m))) methods)]
+    (list 'clojure.core/__reify*
+      (list 'quote (vec things))
+      (emit-type-methods "reify" triples))))
+
+(defmacro proxy [super args & methods]
+  (when-not (and (vector? super) (seq super) (every? symbol? super))
+    (throw-illegal-arg! "proxy superclass must be a nonempty vector of symbols"))
+  (when-not (vector? args)
+    (throw-illegal-arg! "proxy args must be a vector"))
+  (let [triples (mapcat (fn [m] (method-triples "proxy" (first m) (rest m))) methods)]
+    (list 'clojure.core/__proxy*
+      (list 'quote (first super))
+      (list 'quote (vec (rest super)))
+      args
+      (emit-type-methods "proxy" triples))))
+
+(defmacro definterface [name & args]
+  (let [{:keys [doc attr sigs]} (parse-iface-head "definterface" name args)]
+    (doseq [s sigs]
+      (when-not (and (seq? s) (= 2 (count s)) (symbol? (first s)) (vector? (second s)))
+        (throw-illegal-arg! (str "Invalid interface signature: " (pr-str s)))))
+    (let [grouped (group-by first sigs)]
+      (finish-type-def name doc attr
+        (list 'clojure.core/__interface*
+          (list 'str (list 'ns-name '*ns*))
+          (str name)
+          (apply list 'clojure.core/hash-map
+            (mapcat (fn [[m entries]]
+                      (list (str m) (vec (map (fn [e] (count (second e))) entries))))
+                    grouped)))))))
+
+(defn- simple-class-name [raw]
+  (apply str (reverse (take-while (fn [c] (not= c \.)) (reverse (seq raw))))))
+
+(defmacro gen-interface [& opts]
+  (let [m (apply hash-map opts)]
+    (when-not (contains? m :name)
+      (throw-illegal-arg! "Must supply :name to gen-interface"))
+    (doseq [k (keys m)]
+      (when-not (#{:name :methods} k)
+        (throw-illegal-arg! (str "Unsupported gen-interface option: " k))))
+    (when-not (or (symbol? (:name m)) (string? (:name m)))
+      (throw-illegal-arg! "gen-interface :name must be a symbol or string"))
+    (let [raw (str (:name m))
+          methods (get m :methods [])]
+      (doseq [e methods]
+        (when-not (and (or (seq? e) (vector? e)) (= 3 (count e)) (symbol? (first e)) (vector? (second e)))
+          (throw-illegal-arg! (str "Invalid gen-interface method: " (pr-str e)))))
+      (let [grouped (group-by first methods)
+            simple (symbol (simple-class-name raw))]
+        (finish-type-def simple nil nil
+          (list 'clojure.core/__interface*
+            (list 'str (list 'ns-name '*ns*))
+            raw
+            (apply list 'clojure.core/hash-map
+              (mapcat (fn [[n entries]]
+                        (list (str n) (vec (map (fn [e] (count (second e))) entries))))
+                      grouped))))))))
+
+(defmacro gen-class [& opts]
+  (let [m (apply hash-map opts)]
+    (when-not (contains? m :name)
+      (throw-illegal-arg! "Must supply :name to gen-class"))
+    (doseq [k (keys m)]
+      (when-not (#{:name :prefix :methods :implements :extends} k)
+        (throw-illegal-arg! (str "Unsupported gen-class option: " k))))
+    (when-not (or (symbol? (:name m)) (string? (:name m)))
+      (throw-illegal-arg! "gen-class :name must be a symbol or string"))
+    (let [raw (str (:name m))
+          simple (simple-class-name raw)
+          prefix (get m :prefix (str simple "-"))]
+      (when-not (string? prefix)
+        (throw-illegal-arg! "gen-class :prefix must be a string"))
+      (let [methods (get m :methods [])
+            implements (get m :implements [])]
+        (doseq [e methods]
+          (when-not (and (or (seq? e) (vector? e)) (= 3 (count e)) (symbol? (first e)) (vector? (second e)))
+            (throw-illegal-arg! (str "Invalid gen-class method: " (pr-str e)))))
+        (doseq [i implements]
+          (when-not (symbol? i)
+            (throw-illegal-arg! (str "Invalid gen-class interface: " (pr-str i)))))
+        (when (and (contains? m :extends) (not= 'Object (:extends m)))
+          (throw-illegal-arg! (str "Cannot extend " (:extends m) ": gen-class supports Object only")))
+        (let [grouped (group-by first methods)
+              class-expr (if (some #{\.} (seq raw))
+                           raw
+                           (list 'str (list 'ns-name '*ns*) "." simple))]
+          (finish-type-def (symbol simple) nil nil
+            (list 'clojure.core/__genclass*
+              class-expr
+              prefix
+              (apply list 'clojure.core/hash-map
+                (mapcat (fn [[n entries]]
+                          (list (str n) (vec (map (fn [e] (count (second e))) entries))))
+                        grouped))
+              (list 'str (list 'ns-name '*ns*))
+              (list 'quote (vec implements)))))))))

@@ -38,8 +38,8 @@ use std::sync::Arc;
 use num_traits::ToPrimitive;
 
 use crate::{
-    Agent, Atom, Delay, ExtensionValue, Future, Keyword, Promise, Symbol, Throwable, Transient,
-    Unbound, Var,
+    Agent, Atom, Delay, ExtensionValue, Future, HostInst, HostVal, Keyword, Promise, Symbol,
+    Throwable, Transient, Unbound, Var, host_eq,
 };
 
 /// Deterministic Fx hasher for maps/sets (rpds's default RandomState
@@ -764,6 +764,10 @@ pub enum Value {
     Agent(Agent),
     /// A host-defined value behind the [`ExtensionValue`] trait (S4).
     Extension(Arc<dyn ExtensionValue>),
+    /// A port-defined type descriptor or instance (S-typechain):
+    /// `deftype` / `defrecord` / `reify` / `proxy` / `gen-class`
+    /// values and `definterface` / `gen-interface` descriptors.
+    HostType(Arc<HostVal>),
 }
 
 /// Read metadata off a sequence extension value (borrowed).
@@ -870,6 +874,7 @@ impl Value {
             Value::Map(m) => m.meta(),
             Value::Set(s) => s.meta(),
             Value::Extension(e) => seq_ext_meta(e),
+            Value::HostType(h) => h.as_inst().and_then(|i| i.meta.as_ref()),
             _ => None,
         }
     }
@@ -887,9 +892,25 @@ impl Value {
             Value::Extension(e) => seq_ext_with_meta(&e, meta)
                 .map(Value::Extension)
                 .unwrap_or_else(|| Value::Extension(e)),
+            Value::HostType(h) => match h.as_ref() {
+                HostVal::Inst(i) => Value::HostType(Arc::new(HostVal::Inst(HostInst {
+                    def: i.def.clone(),
+                    content: i.content.clone(),
+                    meta,
+                }))),
+                HostVal::Def(_) => Value::HostType(h.clone()),
+            },
             other => other,
         }
     }
+}
+
+/// Port-defined-type pair equality (split for the complexity
+/// budget): identical `Arc`s are `=` (so `(= p p)` holds);
+/// otherwise descriptors are never `=`, and records need the same
+/// type plus content ([`host_eq`]).
+fn host_pair_eq(a: &Arc<HostVal>, b: &Arc<HostVal>) -> bool {
+    Arc::ptr_eq(a, b) || host_eq(a, b)
 }
 
 /// Shared-cell identity plus equal metadata (a `with-meta` copy
@@ -981,6 +1002,10 @@ fn value_eq_mid(a: &Value, b: &Value) -> bool {
         (Value::Atom(a), Value::Atom(b)) => cell_meta_eq(a.same_cell(b), a.meta(), b.meta()),
         (Value::Delay(a), Value::Delay(b)) => a.same_cell(b),
         (Value::Future(a), Value::Future(b)) => cell_meta_eq(a.same_cell(b), a.meta(), b.meta()),
+        // Port-defined types: identical `Arc`s are `=` (so `(= p
+        // p)` holds); otherwise descriptors are never `=`, and
+        // records need the same type plus content (`host_eq`).
+        (Value::HostType(a), Value::HostType(b)) => host_pair_eq(a, b),
         pair => value_eq_rest(pair.0, pair.1),
     }
 }
@@ -1225,6 +1250,16 @@ fn hash_value_rest<H: Hasher>(v: &Value, state: &mut H) {
             state.write_u64(a.id());
         }
         Value::Extension(e) => hash_extension(e, state),
+        // Port-defined types: the class name plus the content map
+        // (order-insensitive, like `Map`, so equal records hash
+        // equally whatever the extension order).
+        Value::HostType(h) => {
+            state.write_u8(23);
+            h.type_name().hash(state);
+            if let Some(i) = h.as_inst() {
+                i.content.hash(state);
+            }
+        }
         // All other variants are handled upstream (the single
         // caller partitions the variants).
         _ => unreachable!("hash partition"),
@@ -1366,6 +1401,8 @@ fn jvm_equiv(a: &Value, b: &Value) -> bool {
         (Value::Int(_), Value::Double(_)) | (Value::Double(_), Value::Int(_)) => false,
         // Tower rules live in `tower_equiv` (shared with `==`).
         (a, b) if is_tower(a) || is_tower(b) => tower_equiv(a, b),
+        // Port-defined types `equiv` exactly like `=`.
+        (Value::HostType(a), Value::HostType(b)) => host_pair_eq(a, b),
         _ => {
             if is_collection(a) {
                 coll_equiv(a, b)
@@ -1525,6 +1562,7 @@ fn plain_equals(a: &Value, b: &Value) -> bool {
         (Value::Var(a), Value::Var(b)) => a.id == b.id,
         (Value::Unbound(a), Value::Unbound(b)) => a.var_id == b.var_id,
         (Value::Throwable(a), Value::Throwable(b)) => a.id == b.id,
+        (Value::HostType(a), Value::HostType(b)) => host_pair_eq(a, b),
         other => plain_equals_rest(other.0, other.1),
     }
 }

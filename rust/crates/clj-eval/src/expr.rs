@@ -858,10 +858,7 @@ impl<'a> Analyzer<'a> {
         tail: bool,
     ) -> Result<Expr, CompileError> {
         let head = items[0];
-        if let Some(expr) = self.try_fx4_host(items, span, tail)? {
-            return Ok(expr);
-        }
-        if let Some(expr) = self.intercept_head(head, items, span, tail)? {
+        if let Some(expr) = self.try_head_intercept(head, items, span, tail)? {
             return Ok(expr);
         }
         // Macro expansion (`analyzeSeq` order: specials, then
@@ -904,6 +901,103 @@ impl<'a> Analyzer<'a> {
         Ok(Expr::Invoke {
             head: Box::new(head_expr),
             args,
+            span,
+        })
+    }
+
+    /// Head interceptions before macro expansion (split from
+    /// [`analyze_list`] for the complexity budget): FX conditionals,
+    /// then dot forms, then special/builtin heads.
+    fn try_head_intercept(
+        &mut self,
+        head: &Value,
+        items: &[&Value],
+        span: Span,
+        tail: bool,
+    ) -> Result<Option<Expr>, CompileError> {
+        if let Some(expr) = self.try_fx4_host(items, span, tail)? {
+            return Ok(Some(expr));
+        }
+        if let Some(expr) = self.try_dot_form(items, span)? {
+            return Ok(Some(expr));
+        }
+        self.intercept_head(head, items, span, tail)
+    }
+
+    /// Intercept dot heads (S-typechain fence): `(Type. args…)` is a
+    /// port-type constructor, `(.-field x)` a positional field read,
+    /// `(.method x args…)` a method-table call. Each rewrites to an
+    /// `Expr::Invoke` of the hidden native with the name quoted, so
+    /// no new `Expr` variant is needed; resolution (and its errors)
+    /// happens at call time through ordinary vars. `..` is the
+    /// threading macro (expanded later) and bare `.` keeps its
+    /// unresolvable error, so neither is intercepted. `Some` when a
+    /// form parsed, `None` to continue to specials.
+    fn try_dot_form(&mut self, items: &[&Value], span: Span) -> Result<Option<Expr>, CompileError> {
+        let Value::Symbol(sym) = items[0] else {
+            return Ok(None);
+        };
+        let name = sym.name();
+        if name.len() < 2 || name == ".." {
+            return Ok(None);
+        }
+        if let Some(base) = name.strip_suffix('.') {
+            let quoted = Symbol::new(sym.namespace(), base);
+            return Ok(Some(self.dot_call("__new*", quoted, &items[1..], span)?));
+        }
+        if !name.starts_with('.') {
+            return Ok(None);
+        }
+        if let Some(field) = name.strip_prefix(".-") {
+            if !field.is_empty() && items.len() == 2 {
+                let expr = self.dot_call_str("__field*", field, &items[1..], span)?;
+                return Ok(Some(expr));
+            }
+            return Ok(None);
+        }
+        let expr = self.dot_call_str("__meth*", &name[1..], &items[1..], span)?;
+        Ok(Some(expr))
+    }
+
+    /// Synthesize `(__op* 'Sym args…)` over an already-analyzed tail.
+    fn dot_call(
+        &mut self,
+        op: &str,
+        sym: Symbol,
+        args: &[&Value],
+        span: Span,
+    ) -> Result<Expr, CompileError> {
+        let head = Expr::Global(Symbol::new(Some("clojure.core"), op));
+        let mut out = Vec::with_capacity(args.len() + 1);
+        out.push(Expr::Quote(Value::Symbol(sym)));
+        for arg in args {
+            out.push(self.analyze(arg, span, false)?);
+        }
+        Ok(Expr::Invoke {
+            head: Box::new(head),
+            args: out,
+            span,
+        })
+    }
+
+    /// Synthesize `(__op* "name" args…)` (field/method names travel
+    /// as strings).
+    fn dot_call_str(
+        &mut self,
+        op: &str,
+        name: &str,
+        args: &[&Value],
+        span: Span,
+    ) -> Result<Expr, CompileError> {
+        let head = Expr::Global(Symbol::new(Some("clojure.core"), op));
+        let mut out = Vec::with_capacity(args.len() + 1);
+        out.push(Expr::Quote(Value::Str(Arc::from(name))));
+        for arg in args {
+            out.push(self.analyze(arg, span, false)?);
+        }
+        Ok(Expr::Invoke {
+            head: Box::new(head),
+            args: out,
             span,
         })
     }

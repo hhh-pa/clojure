@@ -150,6 +150,10 @@ fn hasheq_mid(v: &Value) -> i32 {
         Value::Throwable(t) => id_hash(t.id),
         Value::Transient(t) => id_hash(t.id()),
         Value::Atom(a) => id_hash(a.id()),
+        // Port-defined types: records use the solved content-XOR
+        // formula (oracle `l-hash-rec`); anything else mixes its
+        // content deterministically (the JVM uses identity here).
+        Value::HostType(h) => hasheq_host(h.as_ref()),
         other => hasheq_rest(other),
     }
 }
@@ -169,6 +173,18 @@ fn hasheq_rest(v: &Value) -> i32 {
 
 fn hasheq_map(m: &crate::Map) -> i32 {
     hash_unordered(m.iter().map(|(k, v)| map_entry_hasheq(k, v)))
+}
+
+/// `(hash record)` (split from [`hasheq_mid`] for the complexity
+/// budget): the content-map hash XOR the munged-class-name symbol
+/// hash (oracle `l-hash-rec`); anything else mixes deterministically.
+fn hasheq_host(h: &crate::HostVal) -> i32 {
+    match h {
+        crate::HostVal::Inst(i) if i.def.kind == crate::HostKind::Record => {
+            crate::record_hasheq(&i.content, &i.def.name)
+        }
+        other => crate::inst_hasheq(other),
+    }
 }
 
 fn hasheq_extension(ext: &dyn ExtensionValue) -> i32 {
@@ -224,7 +240,27 @@ fn hash_code_mid(v: &Value) -> i32 {
         Value::Unbound(u) => id_hash(u.var_id),
         Value::Throwable(t) => id_hash(t.id),
         Value::Transient(t) => id_hash(t.id()),
+        // Port-defined types: records hash exactly like their
+        // content map (oracle `l-rec-hashcode`); anything else
+        // mixes deterministically (the JVM uses identity here).
+        Value::HostType(h) => hash_code_host(h.as_ref()),
         other => hash_code_rest(other),
+    }
+}
+
+/// `(.hashCode record)` (split from [`hash_code_mid`] for the
+/// complexity budget): exactly the content map's hash (oracle
+/// `l-rec-hashcode`); anything else mixes deterministically.
+fn hash_code_host(h: &crate::HostVal) -> i32 {
+    match h {
+        crate::HostVal::Inst(i) if i.def.kind == crate::HostKind::Record => {
+            hash_code_map(&i.content)
+        }
+        crate::HostVal::Inst(i) => hash_combine(
+            str_hashcode(&i.def.name),
+            hash_ordered(i.content.iter().map(|(_, v)| hash_code(v))),
+        ),
+        crate::HostVal::Def(d) => str_hashcode(&d.name),
     }
 }
 

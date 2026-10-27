@@ -1398,6 +1398,7 @@ fn is_coll(v: &Value) -> bool {
         Value::List(_) | Value::Vector(_) | Value::MapEntry { .. } | Value::Map(_) | Value::Set(_)
     ) || as_subvector(v).is_some()
         || is_seq_value(v)
+        || crate::types::is_host_record(v)
 }
 fn is_sequential(v: &Value) -> bool {
     matches!(v, Value::Vector(_) | Value::MapEntry { .. })
@@ -1407,6 +1408,7 @@ fn is_sequential(v: &Value) -> bool {
 fn is_associative(v: &Value) -> bool {
     matches!(v, Value::Map(_) | Value::Vector(_) | Value::MapEntry { .. })
         || as_subvector(v).is_some()
+        || crate::types::is_host_record(v)
 }
 pub(crate) fn is_counted(v: &Value) -> bool {
     matches!(
@@ -1415,6 +1417,7 @@ pub(crate) fn is_counted(v: &Value) -> bool {
     ) || crate::coll::is_transient(v)
         || as_subvector(v).is_some()
         || is_counted_seq(v)
+        || crate::types::is_host_record(v)
 }
 fn is_list(v: &Value) -> bool {
     matches!(v, Value::List(_))
@@ -1423,7 +1426,7 @@ fn is_vector(v: &Value) -> bool {
     matches!(v, Value::Vector(_) | Value::MapEntry { .. }) || as_subvector(v).is_some()
 }
 fn is_map(v: &Value) -> bool {
-    matches!(v, Value::Map(_))
+    matches!(v, Value::Map(_)) || crate::types::is_host_record(v)
 }
 fn is_set(v: &Value) -> bool {
     matches!(v, Value::Set(_))
@@ -1461,9 +1464,14 @@ fn is_seqable(v: &Value) -> bool {
             | Value::Set(_)
     ) || as_subvector(v).is_some()
         || is_seq_value(v)
+        || crate::types::is_host_record(v)
 }
-fn is_record(_v: &Value) -> bool {
-    false
+// `record?` (S-typechain stage 1): true for record instances —
+// including records with extension entries — and nothing else
+// (deftype instances, descriptors, and plain maps all answer
+// false).
+fn is_record(v: &Value) -> bool {
+    crate::types::is_host_record(v)
 }
 
 pred1!(native_nil, "clojure.core/nil?", is_nil);
@@ -1640,6 +1648,10 @@ fn lazy_seq_str(eval: &mut Evaluator, v: &Value) -> Result<String, NativeError> 
 fn str_of_realized(eval: &mut Evaluator, v: &Value) -> Result<String, NativeError> {
     let r = realize_deep(eval, v).map_err(signal_to_native)?;
     Ok(match &r {
+        // Port-defined types run a zero-arg `toString` method when
+        // defined, else the `Name@hex` fallback (oracle `reify-str`,
+        // `j-str-rec`); descriptors render their name.
+        Value::HostType(h) => crate::types::host_str(eval, h, r.clone())?,
         // Atoms, delays, futures, promises, and agents render their
         // `toString` (`Class@hex`), never the `#object[…]` print form.
         Value::Atom(_)

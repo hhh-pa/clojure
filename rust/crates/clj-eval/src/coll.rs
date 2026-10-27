@@ -84,6 +84,12 @@ pub(crate) fn lookup_present(
     coll: &Value,
     key: &Value,
 ) -> Result<Option<Value>, NativeError> {
+    // Records read their content map (oracle `rec-pos`,
+    // `rec-get`); every other host value misses (oracle
+    // `dtor-get`).
+    if let Some(i) = crate::types::record_inst(coll) {
+        return Ok(i.content.get(key).cloned());
+    }
     match coll {
         Value::Nil => Ok(None),
         Value::Map(m) if m.is_sorted() => sorted_lookup_map(eval, m, key),
@@ -236,6 +242,12 @@ pub(crate) fn find_entry(
     coll: &Value,
     key: &Value,
 ) -> Result<Option<(Value, Value)>, NativeError> {
+    // Records find through their content (oracle `rec-find`);
+    // anything else host takes the unsupported path (oracle
+    // `i-find`).
+    if let Some(i) = crate::types::record_inst(coll) {
+        return find_entry_map(eval, &i.content, key);
+    }
     match coll {
         Value::Nil => Ok(None),
         Value::Map(m) => find_entry_map(eval, m, key),
@@ -327,28 +339,34 @@ fn pair_err() -> NativeError {
 
 /// Conj onto a persistent map (`APersistentMap.cons`).
 fn conj_map(eval: &mut Evaluator, m: &Map, x: &Value) -> Result<Value, NativeError> {
+    Ok(Value::Map(conj_map_into(eval, m, x)?))
+}
+
+/// Conj onto a persistent map, answering the map (records rewrap
+/// the answer around their content).
+pub(crate) fn conj_map_into(eval: &mut Evaluator, m: &Map, x: &Value) -> Result<Map, NativeError> {
     if m.is_sorted() {
         return match map_conj_plan(eval, x)? {
-            MapConjPlan::Nil => Ok(Value::Map(m.clone())),
-            MapConjPlan::Pair(k, v) => Ok(Value::Map(sorted_assoc_map(eval, m, k, v)?)),
+            MapConjPlan::Nil => Ok(m.clone()),
+            MapConjPlan::Pair(k, v) => Ok(sorted_assoc_map(eval, m, k, v)?),
             MapConjPlan::Entries(entries) => {
                 let mut out = m.clone();
                 for (k, v) in entries {
                     out = sorted_assoc_map(eval, &out, k, v)?;
                 }
-                Ok(Value::Map(out))
+                Ok(out)
             }
         };
     }
     match map_conj_plan(eval, x)? {
-        MapConjPlan::Nil => Ok(Value::Map(m.clone())),
-        MapConjPlan::Pair(k, v) => Ok(Value::Map(m.clone().insert(k, v))),
+        MapConjPlan::Nil => Ok(m.clone()),
+        MapConjPlan::Pair(k, v) => Ok(m.clone().insert(k, v)),
         MapConjPlan::Entries(entries) => {
             let mut out = m.clone();
             for (k, v) in entries {
                 out = out.insert(k, v);
             }
-            Ok(Value::Map(out))
+            Ok(out)
         }
     }
 }
@@ -381,6 +399,10 @@ fn conj_one(eval: &mut Evaluator, coll: &Value, x: Value) -> Result<Value, Nativ
             Ok(Value::Vector(tmp.push_back(x)))
         }
         Value::Map(m) => conj_map(eval, m, &x),
+        // Records conj through their content map and stay records
+        // (oracle `h-conj-vec`, `h-conj-map-type`); anything else
+        // host falls to the collection cast (oracle `i-conj`).
+        Value::HostType(_) => conj_record(eval, coll, &x),
         Value::Set(s) if s.is_sorted() => Ok(Value::Set(sorted_conj_set(eval, s, x)?)),
         Value::Set(s) => Ok(Value::Set(s.clone().insert(x))),
         _ => {
@@ -392,6 +414,19 @@ fn conj_one(eval: &mut Evaluator, coll: &Value, x: Value) -> Result<Value, Nativ
             }
             Err(cce_err(coll, "clojure.lang.IPersistentCollection"))
         }
+    }
+}
+
+/// Conj onto a record (split from [`conj_one`] for the complexity
+/// budget): through the content map, rewrapped so the answer stays
+/// a record; non-records take the collection cast.
+fn conj_record(eval: &mut Evaluator, coll: &Value, x: &Value) -> Result<Value, NativeError> {
+    match crate::types::record_inst(coll) {
+        Some(i) => Ok(crate::types::rewrap_record(
+            i,
+            conj_map_into(eval, &i.content, x)?,
+        )),
+        None => Err(cce_err(coll, "clojure.lang.IPersistentCollection")),
     }
 }
 
@@ -472,6 +507,16 @@ fn assoc3(eval: &mut Evaluator, coll: &Value, k: &Value, v: Value) -> Result<Val
             let tmp = Vector::from_vec(vec![(**key).clone(), (**val).clone()]);
             assoc_vector(&tmp, i, v)
         }
+        // Records assoc through their content map and stay records
+        // (oracle `rec-assoc-type`, `h-assoc-existing`); anything
+        // else host is not associative (oracle `i-assoc`).
+        Value::HostType(_) => match crate::types::record_inst(coll) {
+            Some(i) => Ok(crate::types::rewrap_record(
+                i,
+                i.content.clone().insert(k.clone(), v),
+            )),
+            None => Err(cce_err(coll, "clojure.lang.Associative")),
+        },
         _ => {
             if let Some(sv) = as_subvector(coll) {
                 return assoc_subvector(sv, k, v);
@@ -544,6 +589,11 @@ fn count_fallback(eval: &mut Evaluator, v: &Value) -> Result<i64, NativeError> {
 
 /// `RT.count` as an `i64` (`count`/`empty?`/arities share this).
 fn count_of(eval: &mut Evaluator, v: &Value) -> Result<i64, NativeError> {
+    // Records count their content (oracle `rec-count`); anything
+    // else host takes the unsupported path (oracle `dtor-count`).
+    if let Some(i) = crate::types::record_inst(v) {
+        return Ok(i.content.size() as i64);
+    }
     match v {
         Value::Nil => Ok(0),
         Value::Str(s) => Ok(s.encode_utf16().count() as i64),
@@ -789,7 +839,15 @@ fn native_empty(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeEr
     // stays hash), subvectors fall back to plain vectors, every
     // seq empties to a bare `()`, and anything else (nil, strings,
     // scalars, transients) is nil; metadata is kept on the strict
-    // kinds (fixprobe `:empty-*`, corpus 08 `:empty-*`).
+    // kinds (fixprobe `:empty-*`, corpus 08 `:empty-*`). Records
+    // have no empty (oracle `h-empty`); anything else host is nil
+    // (oracle `i-empty`).
+    if let Some(i) = crate::types::record_inst(&args[0]) {
+        return Err(NativeError::new(
+            ThrowClass::UnsupportedOperationException,
+            format!("Can't create empty: {}", i.def.name),
+        ));
+    }
     Ok(match &args[0] {
         Value::Map(m) => Value::Map(
             new_map()
@@ -944,6 +1002,26 @@ fn native_dissoc(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeEr
     if matches!(args[0], Value::Nil) {
         return Ok(Value::Nil);
     }
+    // Records dissoc through their content map: dropping a declared
+    // field loses recordness (a plain map, oracle `rec-dissoc-type`);
+    // anything else stays a record (oracle `h-dissoc-missing-type`).
+    // Metadata travels in both cases (ad-hoc `dissoc-meta`).
+    if let Some(i) = crate::types::record_inst(&args[0]) {
+        let drops_field = args[1..].iter().any(|k| {
+            i.def
+                .fields
+                .iter()
+                .any(|f| crate::types::is_field_key(f, k))
+        });
+        let mut out = i.content.clone();
+        for k in &args[1..] {
+            out = out.without(k);
+        }
+        if drops_field {
+            return Ok(Value::Map(out.with_meta(i.meta.clone())));
+        }
+        return Ok(crate::types::rewrap_record(i, out));
+    }
     let Value::Map(m) = &args[0] else {
         return Err(cce_err(&args[0], "clojure.lang.IPersistentMap"));
     };
@@ -1021,6 +1099,12 @@ fn contains_set(eval: &mut Evaluator, s: &Set, key: &Value) -> Result<Value, Nat
 fn native_contains(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/contains?", args, &[2])?;
     let (coll, key) = (&args[0], &args[1]);
+    // Records contain through their content (oracle `rec-contains`,
+    // `h-contains-missing`); anything else host takes the
+    // unsupported path (oracle `i-contains`).
+    if let Some(i) = crate::types::record_inst(coll) {
+        return contains_map(eval, &i.content, key);
+    }
     match coll {
         Value::Nil => Ok(Value::Bool(false)),
         Value::Map(m) => contains_map(eval, m, key),
@@ -1978,7 +2062,7 @@ fn sorted_lookup_set(
 }
 
 /// The odd-argument error for map constructors (JVM `RT.map` text).
-fn odd_keyvals_err(last: &Value) -> NativeError {
+pub(crate) fn odd_keyvals_err(last: &Value) -> NativeError {
     NativeError::new(
         ThrowClass::IllegalArgumentException,
         format!("No value supplied for key: {}", str_of(last)),

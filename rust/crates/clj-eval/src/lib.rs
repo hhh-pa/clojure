@@ -33,6 +33,7 @@ pub mod ns;
 pub mod re;
 pub mod rng;
 pub mod seqs;
+pub mod types;
 pub mod vars;
 pub mod xform;
 

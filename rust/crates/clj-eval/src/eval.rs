@@ -2260,6 +2260,11 @@ fn cast_entry(entry: &Value) -> NativeError {
 /// `get` without the not-found: maps, int-keyed vectors/strings
 /// (in range), sets (membership), else `None` (§E12). Never throws.
 fn lookup(coll: &Value, key: &Value) -> Option<Value> {
+    // Records read their content map (oracle `h-destructure`
+    // rides this path); every other host value misses.
+    if let Some(i) = crate::types::record_inst(coll) {
+        return i.content.get(key).cloned();
+    }
     match coll {
         Value::Map(m) => m.get(key).cloned(),
         Value::Vector(v) => lookup_vector(v, key),

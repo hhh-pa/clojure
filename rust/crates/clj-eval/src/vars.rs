@@ -15,8 +15,8 @@
 use std::sync::Arc;
 
 use clj_value::{
-    Agent, Atom, ExtensionValue, Future, List, Map, Promise, Set, Symbol, ThrowClass, Value, Var,
-    Vector, extension_supports_meta, extension_with_meta, new_map,
+    Agent, Atom, ExtensionValue, Future, HostInst, List, Map, Promise, Set, Symbol, ThrowClass,
+    Value, Var, Vector, extension_supports_meta, extension_with_meta, new_map,
 };
 
 use crate::core::cce_err;
@@ -217,17 +217,23 @@ pub(crate) fn meta_of(eval: &Evaluator, v: &Value) -> Option<Map> {
         Value::Agent(a) => a.meta(),
         Value::Future(f) => f.meta(),
         Value::Promise(p) => p.meta(),
-        Value::Symbol(s) => s.meta().cloned(),
-        Value::List(l) => l.meta().cloned(),
-        Value::Vector(x) => x.meta().cloned(),
-        Value::Map(m) => m.meta().cloned(),
-        Value::Set(s) => s.meta().cloned(),
         // Sequence extensions read through `Value::meta`; closures,
         // natives, and namespaces fall through to `extension_meta`
         // (the two sets are disjoint by type).
         Value::Extension(_) => v.meta().cloned().or_else(|| extension_meta(eval, v)),
-        _ => None,
+        // Records carry metadata (deftype instances do not — the
+        // JVM's `meta` returns nil for them).
+        Value::HostType(_) => record_meta(v),
+        // Symbols, lists, vectors, maps, and sets share
+        // `Value::meta`; anything else reads nil.
+        _ => v.meta().cloned(),
     }
+}
+
+/// A record's metadata (split from [`meta_of`] for the complexity
+/// budget); anything else host reads nil.
+fn record_meta(v: &Value) -> Option<Map> {
+    crate::types::record_inst(v).and_then(|i| i.meta.clone())
 }
 
 /// An extension value's metadata (split from [`meta_of`] for the
@@ -270,6 +276,7 @@ enum IObj<'v> {
     Closure(&'v Closure),
     Native(&'v NativeFn),
     SeqExt(&'v Arc<dyn ExtensionValue>),
+    Record(&'v HostInst),
 }
 
 /// The `with-meta` receiver check, before meta validation (same
@@ -285,27 +292,56 @@ fn as_iobj(obj: &Value) -> Result<IObj<'_>, NativeError> {
         Value::Set(s) => Ok(IObj::Set(s)),
         Value::Future(f) => Ok(IObj::Future(f)),
         Value::Promise(p) => Ok(IObj::Promise(p)),
-        Value::Extension(e) => match (
-            e.as_any().downcast_ref::<Closure>(),
-            e.as_any().downcast_ref::<NativeFn>(),
-        ) {
-            (Some(c), _) => Ok(IObj::Closure(c)),
-            (None, Some(n)) => Ok(IObj::Native(n)),
-            // Sequence extensions (chunked seqs etc.) take metadata
-            // like the JVM's seqs (T1192 FX1); anything else keeps
-            // the `IObj` cast.
-            (None, None) => {
-                if extension_supports_meta(e) {
-                    Ok(IObj::SeqExt(e))
-                } else {
-                    Err(cce_err(obj, IOBJ_CLASS))
-                }
-            }
-        },
-        // Non-`IObj` receivers fail with the JVM's cast text, not
-        // the analyzer's stable text (Oracle FX2 `with-meta-e`,
-        // `vary-meta-e`).
+        Value::Extension(e) => extension_iobj(obj, e),
+        // Records are `IObj`; deftype instances are not (the JVM's
+        // `with-meta` cast fails for them). Non-`IObj` receivers
+        // fail with the JVM's cast text, not the analyzer's stable
+        // text (Oracle FX2 `with-meta-e`, `vary-meta-e`).
+        Value::HostType(_) => record_iobj(obj),
         _ => Err(cce_err(obj, IOBJ_CLASS)),
+    }
+}
+
+/// An extension receiver (split from [`as_iobj`] for the complexity
+/// budget): closures and natives carry metadata directly; sequence
+/// extensions (chunked seqs etc.) take metadata like the JVM's seqs
+/// (T1192 FX1); anything else keeps the `IObj` cast.
+fn extension_iobj<'v>(
+    obj: &Value,
+    e: &'v Arc<dyn ExtensionValue>,
+) -> Result<IObj<'v>, NativeError> {
+    match (
+        e.as_any().downcast_ref::<Closure>(),
+        e.as_any().downcast_ref::<NativeFn>(),
+    ) {
+        (Some(c), _) => Ok(IObj::Closure(c)),
+        (None, Some(n)) => Ok(IObj::Native(n)),
+        (None, None) => {
+            if extension_supports_meta(e) {
+                Ok(IObj::SeqExt(e))
+            } else {
+                Err(cce_err(obj, IOBJ_CLASS))
+            }
+        }
+    }
+}
+
+/// A record receiver (split from [`as_iobj`] for the complexity
+/// budget): records are `IObj`, other host values take the cast.
+fn record_iobj(obj: &Value) -> Result<IObj<'_>, NativeError> {
+    match crate::types::record_inst(obj) {
+        Some(i) => Ok(IObj::Record(i)),
+        None => Err(cce_err(obj, IOBJ_CLASS)),
+    }
+}
+
+/// A `with-meta` meta arg (split from [`with_meta_val`] for the
+/// complexity budget): a map or nil, anything else is the map cast.
+fn parse_meta_arg(meta: &Value) -> Result<Option<Map>, NativeError> {
+    match meta {
+        Value::Nil => Ok(None),
+        Value::Map(m) => Ok(Some(m.clone())),
+        _ => Err(cce_err(meta, IMAP_CLASS)),
     }
 }
 
@@ -313,11 +349,7 @@ fn as_iobj(obj: &Value) -> Result<IObj<'_>, NativeError> {
 /// before the meta arg, JVM receiver first).
 fn with_meta_val(obj: &Value, meta: &Value) -> Result<Value, NativeError> {
     let shape = as_iobj(obj)?;
-    let meta = match meta {
-        Value::Nil => None,
-        Value::Map(m) => Some(m.clone()),
-        _ => return Err(cce_err(meta, IMAP_CLASS)),
-    };
+    let meta = parse_meta_arg(meta)?;
     match shape {
         IObj::Symbol(s) => Ok(Value::Symbol(s.clone().with_meta(meta))),
         IObj::List(l) => Ok(Value::List(l.clone().with_meta(meta))),
@@ -342,6 +374,13 @@ fn with_meta_val(obj: &Value, meta: &Value) -> Result<Value, NativeError> {
             let out = extension_with_meta(e, meta).expect("as_iobj accepted a supported extension");
             Ok(Value::Extension(out))
         }
+        // Metadata is replaced on the rewrapped record (oracle
+        // `n-meta`); the original keeps its meta.
+        IObj::Record(i) => Ok(crate::types::rewrap_record_with_meta(
+            i,
+            i.content.clone(),
+            meta,
+        )),
     }
 }
 

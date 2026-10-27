@@ -236,7 +236,36 @@ fn print_more(v: &Value, opts: &PrintOpts, level: Option<i64>, out: &mut String)
             let id = p.id();
             write!(out, "#object[{class} 0x{id:x} \"{class}@{id:x}\"]").unwrap();
         }
+        Value::HostType(h) => print_host(h.as_ref(), opts, level, out),
         other => print_rest(other, opts, level, out),
+    }
+}
+
+/// Port-defined types (S-typechain): records print `#Name{entries}`
+/// in both modes (oracle `j-pr-rec`, `j-print-rec`; length and level
+/// behave exactly like maps — the shared path); descriptors
+/// print their name (`interface ` prefixed for interfaces, oracle
+/// `rec-iface`); anything else prints the default
+/// `#object[Name 0xH fallback]` shape (oracle `m-pr-dt` — the JVM
+/// embeds the live `toString` there, but print is pure here, so the
+/// fallback renders instead; a custom `toString` still runs through
+/// `str`).
+fn print_host(h: &crate::HostVal, opts: &PrintOpts, level: Option<i64>, out: &mut String) {
+    match h {
+        crate::HostVal::Def(d) if d.kind == crate::HostKind::Interface => {
+            out.push_str("interface ");
+            out.push_str(&d.name);
+        }
+        crate::HostVal::Def(d) => out.push_str(&d.name),
+        crate::HostVal::Inst(i) if i.def.kind == crate::HostKind::Record => {
+            let entries: Vec<(&Value, &Value)> = i.content.iter().collect();
+            print_map_entries(&format!("#{}", i.def.name), &entries, opts, level, out);
+        }
+        other => {
+            let name = other.type_name();
+            let hex = crate::identity_hex(other);
+            write!(out, "#object[{name} 0x{hex} \"{name}@{hex}\"]").unwrap();
+        }
     }
 }
 
@@ -603,6 +632,16 @@ fn java_debug_rest(v: &Value) -> String {
         Value::Promise(p) => format!("{}@{:x}", p.jvm_class(), p.id()),
         Value::Agent(a) => format!("clojure.lang.Agent@{:x}", a.id()),
         Value::Extension(e) => e.print(),
+        // Port-defined types: descriptors render their name;
+        // instances render the `toString` fallback (pure — a custom
+        // `toString` method only runs through `str` in `clj-eval`).
+        Value::HostType(h) => match h.as_ref() {
+            crate::HostVal::Def(d) if d.kind == crate::HostKind::Interface => {
+                format!("interface {}", d.name)
+            }
+            crate::HostVal::Def(d) => d.name.to_string(),
+            h => crate::fallback_str(h),
+        },
         Value::List(_)
         | Value::Vector(_)
         | Value::MapEntry { .. }
