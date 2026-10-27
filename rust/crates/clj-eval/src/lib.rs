@@ -33,6 +33,7 @@ pub mod multi;
 pub mod ns;
 pub mod protocol;
 pub mod re;
+pub mod reader;
 pub mod rng;
 pub mod seqs;
 pub mod types;

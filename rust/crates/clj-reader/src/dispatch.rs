@@ -278,18 +278,19 @@ impl Reader {
         }
         let prev = self.in_cond;
         self.in_cond = true;
+        // No `?` before the restore (like `cond_discard`): a failed
+        // preserve read must not stick `in_cond` for the next read.
         let result = if self.opts.read_cond == ReadCond::Preserve {
             // The raw list (with line/col metas as usual). The
             // list reader returns a form on every success path,
             // so `expect` (whose line always executes) spells the
             // invariant coverably (100% line gate).
-            let form = self
-                .list_reader()?
-                .expect("the list reader always returns a form");
-            Ok(Some(Value::ReaderConditional {
-                form: Box::new(form),
-                splicing,
-            }))
+            self.list_reader().map(|form| {
+                Some(Value::ReaderConditional {
+                    form: Box::new(form.expect("the list reader always returns a form")),
+                    splicing,
+                })
+            })
         } else {
             self.read_cond_delimited(splicing, top)
         };
@@ -443,7 +444,7 @@ fn is_default(kw: &Keyword) -> bool {
 mod tests {
     use clj_value::Value;
 
-    use crate::{ReaderError, ReaderOpts, read_str};
+    use crate::{ReadCond, Reader, ReaderError, ReaderOpts, read_str};
 
     fn opts() -> ReaderOpts {
         ReaderOpts::default()
@@ -510,6 +511,25 @@ mod tests {
         // Unmatched feature, then EOF where its discarded value goes.
         let err = read_str("#?(:nothere", &opts()).unwrap_err();
         assert!(matches!(err, ReaderError::EofDelimited { line: 1, .. }));
+    }
+
+    #[test]
+    fn preserve_cond_failure_restores_in_cond() {
+        // One reused `Reader`: a failed preserve read must not
+        // stick `in_cond`, else the next tag read returns
+        // `TaggedLiteral` instead of the `DataReader` error.
+        let opts = ReaderOpts {
+            read_cond: ReadCond::Preserve,
+            ..ReaderOpts::default()
+        };
+        let mut reader = Reader::new("#?(a b] #inst \"x\"", &opts);
+        let err = reader.read_form(true).unwrap_err();
+        assert!(
+            matches!(err, ReaderError::UnmatchedDelim { .. }),
+            "got {err:?}"
+        );
+        let err = reader.read_form(true).unwrap_err();
+        assert!(matches!(err, ReaderError::DataReader { .. }), "got {err:?}");
     }
 
     #[test]

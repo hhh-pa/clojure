@@ -854,6 +854,7 @@ pub(crate) fn throw_class_for(name: &str) -> ThrowClass {
         "IllegalFormatCodePointException" => ThrowClass::IllegalFormatCodePointException,
         "IOException" => ThrowClass::IOException,
         "Compiler$CompilerException" => ThrowClass::CompilerException,
+        "LispReader$ReaderException" | "ReaderException" => ThrowClass::ReaderException,
         _ => ThrowClass::Exception,
     }
 }
@@ -1891,6 +1892,7 @@ fn boot_install_natives(eval: &mut Evaluator) {
         .chain(crate::re::RE_NATIVES.iter())
         .chain(crate::rng::RNG_NATIVES.iter())
         .chain(crate::io::IO_NATIVES.iter())
+        .chain(crate::reader::READER_NATIVES.iter())
         .chain(crate::concurrency::CONC_NATIVES.iter())
         .chain(crate::fx4_host::FX4_NATIVES.iter())
         .chain(crate::types::TYPES_NATIVES.iter())
@@ -1903,7 +1905,7 @@ fn boot_install_natives(eval: &mut Evaluator) {
 }
 
 /// Builtin-macro vars. The FX4 nine run real expanders; the
-/// fence six stay placeholders that fail on direct invocation.
+/// fence seven stay placeholders that fail on direct invocation.
 fn boot_install_builtin_macros(eval: &mut Evaluator) {
     for name in crate::macros::BUILTIN_MACROS {
         eval.install_native("clojure.core", name, builtin_macro_root(name));
@@ -1919,7 +1921,7 @@ fn boot_install_builtin_macros(eval: &mut Evaluator) {
     }
 }
 
-/// The nine FX4 heads are real macro fns. The fence six stay
+/// The nine FX4 heads are real macro fns. The fence seven stay
 /// placeholders (direct invocation fails loudly).
 fn builtin_macro_root(name: &str) -> Arc<crate::ext::NativeImpl> {
     if let Some(f) = crate::builtin_expand::fx4_macro_fn(name) {
@@ -1963,8 +1965,10 @@ fn boot_core_vars(eval: &mut Evaluator, user_handle: Value) {
     }
     let stdout = crate::io::stdout_writer(eval);
     let stderr = crate::io::stderr_writer(eval);
+    let stdin = crate::reader::stdin_reader(eval);
     def_dynamic_root(eval, "*out*", stdout);
     def_dynamic_root(eval, "*err*", stderr);
+    def_dynamic_root(eval, "*in*", stdin);
     def_dynamic_root(eval, "*assert*", Value::Bool(true));
     def_dynamic_root(eval, "*unchecked-math*", Value::Bool(false));
     def_dynamic_root(eval, "*warn-on-reflection*", Value::Bool(false));
@@ -1991,6 +1995,7 @@ fn boot_refer_user(eval: &mut Evaluator) {
         .chain(crate::re::RE_NATIVES.iter())
         .chain(crate::rng::RNG_NATIVES.iter())
         .chain(crate::io::IO_NATIVES.iter())
+        .chain(crate::reader::READER_NATIVES.iter())
         .chain(crate::concurrency::CONC_NATIVES.iter())
         .chain(crate::fx4_host::FX4_NATIVES.iter())
         .map(|(n, _)| (*n).to_owned())
@@ -2010,6 +2015,7 @@ fn boot_refer_user(eval: &mut Evaluator) {
             "*load-path*",
             "*out*",
             "*err*",
+            "*in*",
             "*assert*",
             "*unchecked-math*",
             "*warn-on-reflection*",
@@ -2123,6 +2129,20 @@ mod tests {
         assert_eq!(
             throw_class_for("IllegalFormatCodePointException"),
             ThrowClass::IllegalFormatCodePointException
+        );
+    }
+
+    #[test]
+    fn throw_class_for_maps_reader_exception_spellings() {
+        // Both the FQN and the simple name resolve (the
+        // `catch`-name spellings, issue #36).
+        assert_eq!(
+            throw_class_for("clojure.lang.LispReader$ReaderException"),
+            ThrowClass::ReaderException
+        );
+        assert_eq!(
+            throw_class_for("ReaderException"),
+            ThrowClass::ReaderException
         );
     }
 

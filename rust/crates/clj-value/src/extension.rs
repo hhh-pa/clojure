@@ -74,6 +74,7 @@ pub enum ThrowClass {
     CancellationException,
     RejectedExecutionException,
     PatternSyntaxException,
+    ReaderException,
 }
 
 impl ThrowClass {
@@ -135,6 +136,7 @@ impl ThrowClass {
             Self::ExecutionException => "java.util.concurrent.ExecutionException",
             Self::CancellationException => "java.util.concurrent.CancellationException",
             Self::RejectedExecutionException => "java.util.concurrent.RejectedExecutionException",
+            Self::ReaderException => "clojure.lang.LispReader$ReaderException",
             // All other variants are handled by `jvm_name`/`jvm_name_mid`
             // (the single caller partitions the variants).
             _ => unreachable!("throw-class partition"),
@@ -186,7 +188,8 @@ fn throw_parent(jvm_name: &str) -> Option<&'static str> {
         | "java.lang.ArithmeticException"
         | "clojure.lang.ArityException"
         | "clojure.lang.ExceptionInfo"
-        | "clojure.lang.Compiler$CompilerException" => Some("java.lang.RuntimeException"),
+        | "clojure.lang.Compiler$CompilerException"
+        | "clojure.lang.LispReader$ReaderException" => Some("java.lang.RuntimeException"),
         _ => throw_parent_format(jvm_name),
     }
 }

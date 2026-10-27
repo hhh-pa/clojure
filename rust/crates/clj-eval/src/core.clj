@@ -1348,3 +1348,10 @@
   (list 'clojure.core/__prefer_method*
     (if (symbol? m) (list 'var m) (list 'quote m))
     preferred other))
+
+;; --- `line-seq` (S-instream): eager first pull plus a lazy tail
+;; (zero Rust, like `random-sample`). The port has one readable
+;; kind, so this consumes the port's `StreamReader` by design —
+;; the JVM instead rejects non-`BufferedReader`s (probes
+;; `ls-basic`..`ls-empty` document the JVM side).
+(defn line-seq [rdr] ((fn step [] (binding [*in* rdr] (when-let [line (read-line)] (cons line (lazy-seq (step))))))))

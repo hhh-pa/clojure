@@ -28,36 +28,79 @@ pub struct CharStream {
     col: u32,
     bumpable: bool,
     pushback: Option<char>,
+    pending_cr: bool,
 }
 
 impl CharStream {
     /// Normalize `input` (`\r\n` and lone `\r` become `\n`) and start
-    /// at line 1, column 1.
+    /// at line 1, column 1. Normalization runs through [`Self::extend`],
+    /// so a trailing `\r` stages exactly like any chunk boundary.
     #[must_use]
     pub fn new(input: &str) -> Self {
-        let mut chars = Vec::with_capacity(input.len());
-        let mut iter = input.chars().peekable();
-        while let Some(c) = iter.next() {
-            if c == '\r' {
-                if iter.peek() == Some(&'\n') {
-                    iter.next();
-                }
-                chars.push('\n');
-            } else {
-                chars.push(c);
-            }
-        }
-        Self {
-            chars,
+        let mut this = Self {
+            chars: Vec::with_capacity(input.len()),
             pos: 0,
             line: 1,
             col: 1,
             bumpable: false,
             pushback: None,
+            pending_cr: false,
+        };
+        this.extend(input);
+        this
+    }
+
+    /// Append `chunk` with the same normalization as [`Self::new`].
+    /// A chunk-trailing `\r` stages instead of pushing (a later leading
+    /// `\n` completes the split `\r\n`); empty chunks preserve the flag.
+    pub fn extend(&mut self, chunk: &str) {
+        if chunk.is_empty() {
+            return;
+        }
+        let mut iter = chunk.chars().peekable();
+        if self.pending_cr {
+            self.pending_cr = false;
+            self.chars.push('\n');
+            if iter.peek() == Some(&'\n') {
+                iter.next();
+            }
+        }
+        while let Some(c) = iter.next() {
+            if c == '\r' {
+                if iter.peek() == Some(&'\n') {
+                    iter.next();
+                    self.chars.push('\n');
+                } else if iter.peek().is_none() {
+                    self.pending_cr = true;
+                } else {
+                    self.chars.push('\n');
+                }
+            } else {
+                self.chars.push(c);
+            }
+        }
+    }
+
+    /// Read one `\n`-split line (`\n` consumed and stripped); `None`
+    /// at EOF, the tail when EOF lands mid-line.
+    pub fn read_line(&mut self) -> Option<String> {
+        let mut line = String::new();
+        loop {
+            match self.read() {
+                Some('\n') => return Some(line),
+                Some(c) => line.push(c),
+                None => {
+                    if line.is_empty() {
+                        return None;
+                    }
+                    return Some(line);
+                }
+            }
         }
     }
 
     /// Read one char, or `None` at EOF (with the EOF line-bump rule).
+    /// A staged chunk-trailing `\r` materializes first, past pushback.
     pub fn read(&mut self) -> Option<char> {
         if let Some(c) = self.pushback.take() {
             // Re-reads from the pushback buffer move the column but
@@ -68,6 +111,10 @@ impl CharStream {
                 self.col += 1;
             }
             return Some(c);
+        }
+        if self.pending_cr {
+            self.pending_cr = false;
+            self.chars.push('\n');
         }
         let Some(&c) = self.chars.get(self.pos) else {
             self.col = 1;
@@ -222,5 +269,152 @@ mod tests {
                 (None, 2, 1),
             ]
         );
+    }
+
+    #[test]
+    fn extend_coalesces_split_crlf() {
+        let mut s = CharStream::new("a");
+        s.extend("\r");
+        s.extend("\nb");
+        assert_eq!(s.read(), Some('a'));
+        assert_eq!((s.line(), s.col()), (1, 2));
+        assert_eq!(s.read(), Some('\n'));
+        assert_eq!((s.line(), s.col()), (2, 1));
+        assert_eq!(s.read(), Some('b'));
+        assert_eq!((s.line(), s.col()), (2, 2));
+        assert_eq!(s.read(), None);
+        assert_eq!((s.line(), s.col()), (3, 1));
+    }
+
+    #[test]
+    fn extend_empty_chunk_preserves_staged_cr() {
+        let mut s = CharStream::new("");
+        s.extend("\r");
+        s.extend("");
+        s.extend("\n");
+        assert_eq!(s.read(), Some('\n'));
+        assert_eq!((s.line(), s.col()), (2, 1));
+        assert_eq!(s.read(), None);
+        assert_eq!((s.line(), s.col()), (2, 1));
+        // Empty chunks without a staged `\r` are plain no-ops.
+        let mut t = CharStream::new("a");
+        t.extend("");
+        assert_eq!(t.read(), Some('a'));
+        assert_eq!(t.read(), None);
+    }
+
+    #[test]
+    fn extend_staged_cr_before_plain_chunk_is_lone_cr() {
+        let mut s = CharStream::new("");
+        s.extend("a\r");
+        s.extend("b");
+        assert_eq!(s.read(), Some('a'));
+        assert_eq!(s.read(), Some('\n'));
+        assert_eq!(s.read(), Some('b'));
+        assert_eq!(s.read(), None);
+        // A chunk-final `\r\n` never stages: same reads, no flag.
+        let mut t = CharStream::new("");
+        t.extend("a\r\n");
+        t.extend("b");
+        assert_eq!(t.read(), Some('a'));
+        assert_eq!(t.read(), Some('\n'));
+        assert_eq!(t.read(), Some('b'));
+        assert_eq!(t.read(), None);
+    }
+
+    #[test]
+    fn read_flushes_staged_cr_past_pushback() {
+        let mut s = CharStream::new("a");
+        s.extend("b\r");
+        assert_eq!(s.read(), Some('a'));
+        s.unread('a');
+        // Pushback drains first, then buffered chars, then the flush.
+        assert_eq!(s.read(), Some('a'));
+        assert_eq!(s.read(), Some('b'));
+        assert_eq!(s.read(), Some('\n'));
+        assert_eq!((s.line(), s.col()), (2, 1));
+        assert_eq!(s.read(), None);
+        // The flush cleared the flag, so `extend` appends plainly.
+        s.extend("c");
+        assert_eq!(s.read(), Some('c'));
+    }
+
+    #[test]
+    fn read_line_splits_newlines() {
+        let mut s = CharStream::new("a\nb");
+        assert_eq!(s.read_line(), Some("a".to_owned()));
+        assert_eq!((s.line(), s.col()), (2, 1));
+        assert_eq!(s.read_line(), Some("b".to_owned()));
+        assert_eq!((s.line(), s.col()), (3, 1));
+        assert_eq!(s.read_line(), None);
+        // A second call at EOF stays `None`.
+        assert_eq!(s.read_line(), None);
+    }
+
+    #[test]
+    fn read_line_normalizes_crlf_and_cr() {
+        let mut s = CharStream::new("a\r\nb");
+        assert_eq!(s.read_line(), Some("a".to_owned()));
+        assert_eq!(s.read_line(), Some("b".to_owned()));
+        assert_eq!(s.read_line(), None);
+        let mut s = CharStream::new("a\rb");
+        assert_eq!(s.read_line(), Some("a".to_owned()));
+        assert_eq!(s.read_line(), Some("b".to_owned()));
+        assert_eq!(s.read_line(), None);
+    }
+
+    #[test]
+    fn read_line_lone_cr_runs_and_empty_lines() {
+        // Lone-`\r` runs split like `\n` runs (oracle `rl-mixed` shape).
+        let mut s = CharStream::new("a\r\rb");
+        assert_eq!(s.read_line(), Some("a".to_owned()));
+        assert_eq!(s.read_line(), Some(String::new()));
+        assert_eq!(s.read_line(), Some("b".to_owned()));
+        assert_eq!(s.read_line(), None);
+        // Empty lines and a trailing newline.
+        let mut s = CharStream::new("a\n\nb");
+        assert_eq!(s.read_line(), Some("a".to_owned()));
+        assert_eq!(s.read_line(), Some(String::new()));
+        assert_eq!(s.read_line(), Some("b".to_owned()));
+        assert_eq!(s.read_line(), None);
+        let mut s = CharStream::new("a\n");
+        assert_eq!(s.read_line(), Some("a".to_owned()));
+        assert_eq!(s.read_line(), None);
+        let mut s = CharStream::new("");
+        assert_eq!(s.read_line(), None);
+    }
+
+    #[test]
+    fn new_with_trailing_cr_extends_cleanly() {
+        // `new` stages a trailing `\r` exactly like `extend` (no
+        // double newline when the next chunk opens with `\n`).
+        let mut s = CharStream::new("a\r");
+        s.extend("\nb");
+        assert_eq!(s.read(), Some('a'));
+        assert_eq!(s.read(), Some('\n'));
+        assert_eq!(s.read(), Some('b'));
+        assert_eq!(s.read(), None);
+        // Reads without any extend are unchanged.
+        let mut t = CharStream::new("a\r");
+        assert_eq!(t.read(), Some('a'));
+        assert_eq!(t.read(), Some('\n'));
+        assert_eq!(t.read(), None);
+    }
+
+    #[test]
+    fn read_line_consumes_pushback() {
+        let mut s = CharStream::new("ab");
+        assert_eq!(s.read(), Some('a'));
+        s.unread('a');
+        assert_eq!(s.read_line(), Some("ab".to_owned()));
+        assert_eq!(s.read_line(), None);
+        // An unread `\n` ends the line immediately.
+        let mut s = CharStream::new("a\nb");
+        assert_eq!(s.read(), Some('a'));
+        assert_eq!(s.read(), Some('\n'));
+        s.unread('\n');
+        assert_eq!(s.read_line(), Some(String::new()));
+        assert_eq!(s.read_line(), Some("b".to_owned()));
+        assert_eq!(s.read_line(), None);
     }
 }

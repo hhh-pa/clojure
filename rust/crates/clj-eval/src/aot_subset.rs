@@ -1215,15 +1215,14 @@ fn head_hint(name: &str) -> &'static str {
         | "compare-and-set!" | "send" | "send-off" | "await" | "agent" | "deref" | "add-watch"
         | "locking" | "pmap" | "pcalls" => "concurrency is outside the AOT subset",
         "lazy-seq" => "laziness is outside the AOT subset",
-        "println" | "pr" | "prn" | "newline" | "read-string" | "slurp" | "spit" | "format" => {
-            "only print writes in the AOT subset"
-        }
+        "println" | "pr" | "prn" | "newline" | "read-string" | "read" | "read-line"
+        | "line-seq" | "slurp" | "spit" | "format" => "only print writes in the AOT subset",
         "ns" | "in-ns" | "require" | "use" | "refer" | "load" | "load-file" | "load-string" => {
             "AOT programs are single-file, without namespaces"
         }
-        "comment" | "assert" | "time" | "with-out-str" | "cond" | "when" | "when-not"
-        | "if-let" | "when-let" | "if-some" | "when-some" | "condp" | "case" | "and" | "or"
-        | "for" | "doseq" | "dotimes" | "while" | "defn-" => {
+        "comment" | "assert" | "time" | "with-out-str" | "with-in-str" | "cond" | "when"
+        | "when-not" | "if-let" | "when-let" | "if-some" | "when-some" | "condp" | "case"
+        | "and" | "or" | "for" | "doseq" | "dotimes" | "while" | "defn-" => {
             "macros are not expanded in the AOT subset"
         }
         "quote" => "quoted values are outside the value flow",
@@ -1553,6 +1552,22 @@ mod tests {
             (
                 "(println :x)",
                 "f.clj:1:1: unsupported form in AOT subset: println (only print writes in the AOT subset)",
+            ),
+            (
+                "(print (read))",
+                "f.clj:1:8: unsupported form in AOT subset: read (only print writes in the AOT subset)",
+            ),
+            (
+                "(print (read-line))",
+                "f.clj:1:8: unsupported form in AOT subset: read-line (only print writes in the AOT subset)",
+            ),
+            (
+                "(print (line-seq *in*))",
+                "f.clj:1:8: unsupported form in AOT subset: line-seq (only print writes in the AOT subset)",
+            ),
+            (
+                "(with-in-str \"x\" 1)",
+                "f.clj:1:1: unsupported form in AOT subset: with-in-str (macros are not expanded in the AOT subset)",
             ),
             (
                 "(ns foo)",
