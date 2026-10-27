@@ -98,8 +98,12 @@ rendering (§2f), same rationale as atoms.
 | `t-tap->-delivers/nil/false` | `tap->` returns x AND delivers it (`[:threaded :threaded]`, `[nil [:got nil]]`, `[false [:got false]]`) |
 | `t-full` | full-queue offer counts: 1500 offers against a blocked consumer → `[1024 476]` (capacity 1024; `false` past it) |
 
-**Dispatcher threading model (in-spec):** one global
-daemon dispatcher thread named `clojure.core/tap-loop`,
+**Dispatcher threading model (in-spec):** one daemon
+dispatcher thread named `clojure.core/tap-loop` per evaluator
+lineage (the `AgentSystem` precedent: one runtime is one
+lineage; forked evaluators share the system, separate
+runtimes do not — the JVM's single loop is per classloader,
+and the port has no shared-global equivalent),
 started lazily on the first `add-tap`/`tap>` (the
 `force tap-loop` analog); one global bounded FIFO
 queue of capacity **1024**; one global registry set
@@ -307,8 +311,8 @@ catch-all (a throwing tap neither kills the loop nor
 starves later taps). `t-tap->-ret`/`-delivers` pin
 `tap->` as deliver-then-return-x, matching the
 verbatim `(doto x tap>)` one-liner at
-`core.clj:8357–8361`. The port therefore builds one
-global daemon dispatcher, one bounded FIFO (1024),
+`core.clj:8357–8361`. The port therefore builds one daemon dispatcher per
+lineage, one bounded FIFO (1024) per lineage,
 one registry set — the faithful reading, not the
 per-tap loop (§2h).
 
