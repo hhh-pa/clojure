@@ -132,6 +132,13 @@ pub struct Evaluator {
     /// the run path stays unbounded). Set once on the throwaway
     /// planning evaluator, read by every `Analyzer` it builds.
     pub(crate) analyze_depth_limit: Option<usize>,
+    /// `*out*` flushes served (the `*flush-on-newline*` test hook:
+    /// fresh evaluators read 0; per-evaluator, so parallel-safe).
+    flush_count: u64,
+    /// The print driver renders through the booted defaults only
+    /// (user table entries bypassed) while set — `print-simple`'s
+    /// object half. Save/restore around the region, never nested.
+    pub(crate) print_defaults_only: bool,
 }
 
 /// A `defmacro` definition's parts (bundles `eval_defmacro`'s
@@ -173,6 +180,8 @@ impl Evaluator {
             native_call_span: None,
             agent_outbox: None,
             analyze_depth_limit: None,
+            flush_count: 0,
+            print_defaults_only: false,
         }
     }
 
@@ -198,6 +207,10 @@ impl Evaluator {
             // Budgets never cross threads (limits are set on
             // single-threaded planning evaluators, which never fork).
             analyze_depth_limit: None,
+            // Flushes are counted per evaluator (fresh forks read 0);
+            // defaults-only mode never crosses threads either.
+            flush_count: 0,
+            print_defaults_only: false,
         }
     }
 
@@ -310,6 +323,17 @@ impl Evaluator {
     /// read errors — with these, like [`throw`](Self::throw)).
     pub fn next_id(&mut self) -> u64 {
         self.registry.next_id()
+    }
+
+    /// `*out*` flushes served by this evaluator (the
+    /// `*flush-on-newline*` test hook; fresh evaluators read 0).
+    pub fn flush_count(&self) -> u64 {
+        self.flush_count
+    }
+
+    /// Record one served `*out*` flush.
+    pub(crate) fn bump_flush_count(&mut self) {
+        self.flush_count += 1;
     }
 
     /// Analyze one form against the current namespace (tests use
@@ -445,6 +469,12 @@ impl Evaluator {
     /// returned).
     pub fn pop_bindings(&mut self, depth: usize) {
         self.bindings.truncate(depth);
+    }
+
+    /// The current thread-binding stack depth (natives pushing
+    /// several frames pop back to this).
+    pub(crate) fn bindings_depth(&self) -> usize {
+        self.bindings.depth()
     }
 
     /// `set!` on the topmost frame for a var (false when no frame

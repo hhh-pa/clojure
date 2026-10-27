@@ -4,7 +4,7 @@ The complete inventory of `clojure.core` in this port: every var,
 its conformance state, and — for exclusions — why it is excluded.
 If a var is not listed here, that is a file bug, not a silent gap.
 
-- **692 vars: 410 implemented, 2 divergent, 280 out of scope,
+- **692 vars: 418 implemented, 1 divergent, 273 out of scope,
   0 planned.** The port reports Clojure `1.13.0-alpha9`
   (`clojure-version`).
 - **Universe.** 692 rows = 685 JVM publics + 7 extra-universe rows: 4 port-visible JVM privates
@@ -431,7 +431,7 @@ Printing, reading, files, and print dynamic vars.
 | `read-string` | implemented | tests/io.rs io_smoke_rows (S2, 1 form); denies reader conditionals (S-instream, instream_read_string_deny_row); 2-arity opts (F-read-opts, read_string_opts_rows; probes rs-opts-*) |
 | `*print-length*` | implemented | dyn var, root+meta; control.rs boot_dynamics |
 | `*print-level*` | implemented | dyn var, root+meta; control.rs boot_dynamics |
-| `*print-dup*` | divergent | declared; ignored by the printer |
+| `*print-dup*` | implemented | honored per kind (dup shapes / `No method` throw); see #51 |
 | `*print-meta*` | implemented | ^meta prefix honored (str.rs print_opts_rows) |
 | `*print-readably*` | implemented | honored via pr/print natives (str.rs print_opts_rows) |
 | `*print-namespace-maps*` | implemented | root true; gates #:ns lift (str.rs print_opts_rows) |
@@ -666,7 +666,7 @@ No slice on this branch: hard-never reasons stand alone, design-blocked rows nam
 | `*compiler-options*` | out-of-scope | Bytecode compiler/classpath surface; port AOT (clj-aot) is separate |
 | `*data-readers*` | out-of-scope | pending design: data-reader tag table; see #40 |
 | `*default-data-reader-fn*` | out-of-scope | pending design: data-reader tag table; see #40 |
-| `*flush-on-newline*` | out-of-scope | pending design: printer newline-flush policy; see #40 |
+| `*flush-on-newline*` | implemented | newline flush gate for `prn`/`println`; see #51 |
 | `*fn-loader*` | out-of-scope | Bytecode compiler/classpath surface; port AOT (clj-aot) is separate |
 | `*math-context*` | out-of-scope | pending design: BigDec precision context; see #40 |
 | `*read-eval*` | out-of-scope | pending design: read/eval gate trio; see #40 |
@@ -729,8 +729,8 @@ No slice on this branch: hard-never reasons stand alone, design-blocked rows nam
 | `bytes?` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
 | `cast` | out-of-scope | Host reflection/interop/beans/method-fns (N1) |
 | `char-array` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
-| `char-escape-string` | out-of-scope | pending design: print dispatch (defmultis + tables); see #40 |
-| `char-name-string` | out-of-scope | pending design: print dispatch (defmultis + tables); see #40 |
+| `char-escape-string` | implemented | escape table var; see #51 |
+| `char-name-string` | implemented | name table var; see #51 |
 | `chars` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
 | `chunk` | out-of-scope | Chunked-seq + custom-type hashing impl details; port seqs/hash are separate |
 | `chunk-append` | out-of-scope | Chunked-seq + custom-type hashing impl details; port seqs/hash are separate |
@@ -792,10 +792,10 @@ No slice on this branch: hard-never reasons stand alone, design-blocked rows nam
 | `parse-uuid` | out-of-scope | pending design: UUID value kind; see #40 |
 | `prefers` | out-of-scope | pending design: hierarchy maps (coordinate with 33-typechain); see #40 |
 | `primitives-classnames` | out-of-scope | Bytecode compiler/classpath surface; port AOT (clj-aot) is separate |
-| `print-ctor` | out-of-scope | pending design: print dispatch (defmultis + tables); see #40 |
-| `print-dup` | out-of-scope | pending design: print dispatch (defmultis + tables); see #40 |
-| `print-method` | out-of-scope | pending design: print dispatch (defmultis + tables); see #40 |
-| `print-simple` | out-of-scope | pending design: print dispatch (defmultis + tables); see #40 |
+| `print-ctor` | implemented | `#=` writer (`o`, `print-args`, `w`); see #51 |
+| `print-dup` | implemented | dup multi (token dispatch); see #51 |
+| `print-method` | implemented | print multi (`:type`-or-token dispatch); see #51 |
+| `print-simple` | implemented | prefix + `(str o)` writer (`o`, `w`); see #51 |
 | `proxy-call-with-super` | out-of-scope | No type-system slice on this branch: proxies/deftype factories/method internals |
 | `proxy-mappings` | out-of-scope | No type-system slice on this branch: proxies/deftype factories/method internals |
 | `proxy-name` | out-of-scope | No type-system slice on this branch: proxies/deftype factories/method internals |

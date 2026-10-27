@@ -319,7 +319,8 @@ fn tower_class_of(v: &Value) -> String {
 }
 
 /// Sorted sets print as tree sets, the rest as hash sets.
-fn set_class_of(s: &clj_value::Set) -> &'static str {
+/// Shared with the print driver's dispatch tokens (single source).
+pub(crate) fn set_class_of(s: &clj_value::Set) -> &'static str {
     if s.is_sorted() {
         "clojure.lang.PersistentTreeSet"
     } else {
@@ -385,8 +386,9 @@ fn jvm_class_of_host(v: &Value) -> String {
 
 /// The reported map class: stored, never derived (promotion is
 /// one-way and history-dependent — `dissoc` never demotes and
-/// `array-map` forces array at any size).
-fn map_class_of(m: &clj_value::Map) -> &'static str {
+/// `array-map` forces array at any size). Shared with the print
+/// driver's dispatch tokens (single source).
+pub(crate) fn map_class_of(m: &clj_value::Map) -> &'static str {
     if m.is_sorted() {
         "clojure.lang.PersistentTreeMap"
     } else if m.is_hashy() {

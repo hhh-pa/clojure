@@ -16,7 +16,7 @@ use std::io::Write;
 use std::sync::{Arc, Mutex};
 
 use clj_reader::{ReadCond, Reader, ReaderOpts};
-use clj_value::{ExtensionValue, ThrowClass, Value, pr_to_string};
+use clj_value::{ExtensionValue, ThrowClass, Value};
 
 use crate::core::{cce_err, cce_message, print_opts};
 use crate::error::{NativeError, jvm_class_of};
@@ -134,16 +134,23 @@ fn io_err(e: std::io::Error) -> NativeError {
 /// Write a string to the bound `*out*` writer.
 pub(crate) fn write_out(eval: &mut Evaluator, s: &str) -> Result<(), NativeError> {
     let out = deref_core(eval, "*out*");
-    if matches!(out, Value::Nil) {
+    write_to_writer(&out, s)
+}
+
+/// Write a string to a writer value (nil → the `write` NPE,
+/// non-writer → the `Writer` CCE — shared by `write_out`,
+/// `print-simple`, `print-ctor`, and the print driver).
+pub(crate) fn write_to_writer(w: &Value, s: &str) -> Result<(), NativeError> {
+    if matches!(w, Value::Nil) {
         return Err(NativeError::new(
             ThrowClass::NullPointerException,
             "Cannot invoke \"java.io.Writer.write(String)\" because \"w\" is null".to_owned(),
         ));
     }
-    let Some(w) = as_writer(&out) else {
+    let Some(w) = as_writer(w) else {
         return Err(NativeError::new(
             ThrowClass::ClassCastException,
-            cce_message(&jvm_class_of(&out), "java.io.Writer"),
+            cce_message(&jvm_class_of(w), "java.io.Writer"),
         ));
     };
     match &w.kind {
@@ -162,30 +169,91 @@ pub(crate) fn write_out(eval: &mut Evaluator, s: &str) -> Result<(), NativeError
     }
 }
 
+/// A writer value's validity without writing (nil → the `write`
+/// NPE, non-writer → the `Writer` CCE — the upfront `*out*`
+/// validation and the `print-simple`/`print-ctor` writer checks).
+pub(crate) fn check_writer(w: &Value) -> Result<(), NativeError> {
+    if matches!(w, Value::Nil) {
+        return Err(NativeError::new(
+            ThrowClass::NullPointerException,
+            "Cannot invoke \"java.io.Writer.write(String)\" because \"w\" is null".to_owned(),
+        ));
+    }
+    if as_writer(w).is_none() {
+        return Err(NativeError::new(
+            ThrowClass::ClassCastException,
+            cce_message(&jvm_class_of(w), "java.io.Writer"),
+        ));
+    }
+    Ok(())
+}
+
+/// Flush `*out*` (stdout flushes, anything else is a no-op) and
+/// count the flush for the `*flush-on-newline*` test hook.
+pub(crate) fn flush_out(eval: &mut Evaluator) -> Result<(), NativeError> {
+    eval.bump_flush_count();
+    if as_writer(&deref_core(eval, "*out*")).is_some_and(|w| matches!(w.kind, WriterKind::Stdout)) {
+        std::io::stdout().lock().flush().map_err(io_err)?;
+    }
+    Ok(())
+}
+
 /// `print`/`println`/`pr`/`prn`: space-joined (no trailing space);
 /// `ln` appends a newline. `readably` overrides the binding when
-/// given (`print` binds false, `pr` honors).
+/// given (`print` binds false, `pr` honors). Every arg renders
+/// through the `pr-on` driver (user `print-method`/`print-dup`
+/// entries fire); `*out*` re-reads per arg, and the `ln` newline
+/// flushes iff `*flush-on-newline*` is truthy.
 fn print_impl(
     eval: &mut Evaluator,
     args: &[Value],
     readably: Option<bool>,
     ln: bool,
 ) -> Result<Value, NativeError> {
-    let opts = print_opts(eval, readably)?;
-    let mut parts = Vec::with_capacity(args.len());
+    // Eager validation first (limits CCE before anything realizes
+    // or writes, as before).
+    print_opts(eval, readably)?;
+    let mut vals = Vec::with_capacity(args.len());
     for arg in args {
-        let v = realize_deep(eval, arg).map_err(signal_to_native)?;
-        parts.push(pr_to_string(&v, &opts));
+        vals.push(realize_deep(eval, arg).map_err(signal_to_native)?);
     }
-    let mut out = parts.join(" ");
-    if ln {
-        out.push('\n');
+    // The `readably` override binds like the JVM's `print` (the
+    // driver defaults read the binding back).
+    let depth = crate::printsys::maybe_bind_print_readably(eval, readably);
+    // Upfront `*out*` validation (stock NPE/CCE) whenever output
+    // follows; bare `pr`/`print` write nothing (not even a check).
+    if !vals.is_empty() || ln {
+        let out = deref_core(eval, "*out*");
+        if let Err(e) = check_writer(&out) {
+            eval.pop_bindings(depth);
+            return Err(e);
+        }
     }
-    // Bare `print` writes nothing (not even an empty write).
-    if !out.is_empty() {
-        write_out(eval, &out)?;
+    let result = print_args(eval, &vals, ln);
+    eval.pop_bindings(depth);
+    result?;
+    if ln && deref_core(eval, "*flush-on-newline*").is_truthy() {
+        flush_out(eval)?;
     }
     Ok(Value::Nil)
+}
+
+/// One `pr-on` per arg (separators between, `*out*` re-read per
+/// arg) plus the `ln` newline on the current `*out*`.
+fn print_args(eval: &mut Evaluator, vals: &[Value], ln: bool) -> Result<(), NativeError> {
+    for (i, v) in vals.iter().enumerate() {
+        let out = deref_core(eval, "*out*");
+        check_writer(&out)?;
+        if i > 0 {
+            write_to_writer(&out, " ")?;
+        }
+        crate::printsys::pr_on(eval, v, &out).map_err(signal_to_native)?;
+    }
+    if ln {
+        let out = deref_core(eval, "*out*");
+        write_to_writer(&out, "\n")?;
+    }
+    Ok(())
 }
 
 fn native_print(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
@@ -226,9 +294,7 @@ fn native_newline(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeE
 /// `flush`: flushes stdout when `*out*` is stdout, else a no-op.
 fn native_flush(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/flush", args, &[0])?;
-    if as_writer(&deref_core(eval, "*out*")).is_some_and(|w| matches!(w.kind, WriterKind::Stdout)) {
-        std::io::stdout().lock().flush().map_err(io_err)?;
-    }
+    flush_out(eval)?;
     Ok(Value::Nil)
 }
 

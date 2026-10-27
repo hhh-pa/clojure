@@ -1597,14 +1597,16 @@ pub fn print_opts(
         namespace_maps: deref_core(eval, "*print-namespace-maps*").is_truthy(),
         readably: readably.unwrap_or_else(|| deref_core(eval, "*print-readably*").is_truthy()),
         meta: deref_core(eval, "*print-meta*").is_truthy(),
+        dup: deref_core(eval, "*print-dup*").is_truthy(),
     })
 }
 
 /// Whether the value is a JVM `LazySeq` (whose `toString` never
 /// prints contents): a pending seq reporting the `LazySeq` class
 /// (forced or not — memoizing never changes the class), or a
-/// realized seq explicitly kinded `LazySeq`.
-fn is_lazy_seq_str(v: &Value) -> bool {
+/// realized seq explicitly kinded `LazySeq`. Shared with
+/// `print-simple`'s object half (single source).
+pub(crate) fn is_lazy_seq_str(v: &Value) -> bool {
     if as_pending(v).is_some() {
         return jvm_class_of(v) == "clojure.lang.LazySeq";
     }
@@ -1730,18 +1732,45 @@ fn native_subs(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErr
 }
 
 /// `pr-str`/`print-str`: space-joined (nothing for zero args).
+/// Like the JVM's `with-out-str` + `pr`/`print`: `*out*` binds to
+/// a fresh string writer (so user methods see it) and every arg
+/// renders through the `pr-on` driver.
 fn pr_print_str(
     eval: &mut Evaluator,
     args: &[Value],
     readably: Option<bool>,
 ) -> Result<Value, NativeError> {
-    let opts = print_opts(eval, readably)?;
-    let mut parts = Vec::with_capacity(args.len());
+    // Eager validation first (limits CCE before anything realizes,
+    // as before).
+    print_opts(eval, readably)?;
+    let mut vals = Vec::with_capacity(args.len());
     for arg in args {
-        let v = realize_deep(eval, arg).map_err(signal_to_native)?;
-        parts.push(clj_value::pr_to_string(&v, &opts));
+        vals.push(realize_deep(eval, arg).map_err(signal_to_native)?);
     }
-    Ok(Value::Str(Arc::from(parts.join(" ").as_str())))
+    let sw = crate::io::string_writer(eval);
+    let depth = eval.bindings_depth();
+    crate::printsys::bind_core_var(eval, "*out*", sw.clone());
+    crate::printsys::maybe_bind_print_readably(eval, readably);
+    let result = pr_str_args(eval, &vals);
+    eval.pop_bindings(depth);
+    result?;
+    let contents = crate::io::writer_contents(&sw).unwrap_or_default();
+    Ok(Value::Str(Arc::from(contents.as_str())))
+}
+
+/// One `pr-on` per arg into the bound string writer (separators
+/// between, `*out*` re-read per arg like the `pr` path).
+fn pr_str_args(eval: &mut Evaluator, vals: &[Value]) -> Result<(), NativeError> {
+    use crate::ns::deref_core;
+    for (i, v) in vals.iter().enumerate() {
+        let out = deref_core(eval, "*out*");
+        crate::io::check_writer(&out)?;
+        if i > 0 {
+            crate::io::write_to_writer(&out, " ")?;
+        }
+        crate::printsys::pr_on(eval, v, &out).map_err(signal_to_native)?;
+    }
+    Ok(())
 }
 
 fn native_pr_str(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {

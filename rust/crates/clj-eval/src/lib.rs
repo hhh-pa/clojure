@@ -31,6 +31,7 @@ pub mod lazy;
 pub mod macros;
 pub mod multi;
 pub mod ns;
+pub mod printsys;
 pub mod protocol;
 pub mod re;
 pub mod reader;

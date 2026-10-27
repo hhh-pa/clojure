@@ -2928,6 +2928,11 @@ fn realize_deep_map(eval: &mut Evaluator, m: &Map) -> Result<Value, Signal> {
     for (k, val) in pairs {
         out = out.insert(k, val);
     }
+    // Realization preserves the map class (sorted stays sorted,
+    // hashy stays hashy — the print driver dispatches on it).
+    let out = out
+        .with_sort(m.sort_spec().cloned())
+        .with_hashy(m.is_hashy());
     Ok(Value::Map(out.with_meta(m.meta().cloned())))
 }
 
@@ -2937,6 +2942,9 @@ fn realize_deep_set(eval: &mut Evaluator, s: &Set) -> Result<Value, Signal> {
     for item in s.iter() {
         out = out.insert(realize_deep(eval, item)?);
     }
+    // Realization preserves the set class (sorted stays sorted —
+    // the print driver dispatches on it).
+    let out = out.with_sort(s.sort_spec().cloned());
     Ok(Value::Set(out.with_meta(s.meta().cloned())))
 }
 

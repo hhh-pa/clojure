@@ -249,6 +249,15 @@ pub trait ExtensionValue: std::fmt::Debug + Send + Sync {
 
     /// Downcasting support for [`dyn_eq`](ExtensionValue::dyn_eq).
     fn as_any(&self) -> &dyn Any;
+
+    /// The `*print-dup*` constructor shape, when this extension has
+    /// one (`None` renders the plain [`print`](ExtensionValue::print)
+    /// fallback — the driver throws for undupable kinds before the
+    /// engine ever asks). Only closures, native fns (`#=(munged. )`)
+    /// and namespaces (`#=(find-ns name)`) override this.
+    fn dup_shape(&self) -> Option<String> {
+        None
+    }
 }
 
 #[cfg(test)]
