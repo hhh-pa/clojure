@@ -3,7 +3,7 @@
 - Status: ready (research complete: `io.rs` Writer survey,
   `with-out-str` analyzer path, CharStream/Reader streaming design,
   JVM `core.clj` arity survey, repo-history `LispReader`/`LNPR`
-  mechanics, 83 alpha10 oracle pins).
+  mechanics, 95 alpha10 oracle pins).
 - Parent: out-of-scope reduction. Issue: #36. Branch: `36-instream`.
   Probes: `docs/i36-instream/probes/instream.{clj,out}`
   (to be written; exit 0 required).
@@ -177,10 +177,9 @@ Two stages, each test-first against committed oracle probes:
 - Error texts oracle-pinned (`instream.out`): nil `*in*` for
   `read-line` is the verbatim Var-`get()` NPE (`rl-nil-in`); nil
   stream arg for `read` is the verbatim `Reader.read()` NPE
-  (`r-nil-stream`); non-readers are stable-shape CCEs via
-  `cce_message` (JVM texts carry module-loader suffixes, so the
-  probes document them while the port stays stable, like `read-string`
-  already does); `ReaderException` message is
+  (`r-nil-stream`); non-readers are CCEs via `cce_message`,
+  which reproduces the JVM module-loader suffixes verbatim (as
+  the pins show); `ReaderException` message is
   `{cause-jvm-class}: {root-message}` with ex-data
   `{:clojure.error/line, :clojure.error/column}` from the error span
   (`r-exdata*`, `r-baddelim-exdata`); opts-map `:eof` presence rule
@@ -190,7 +189,7 @@ Two stages, each test-first against committed oracle probes:
   `clojure.lang.IPersistentMap` (`r-opts-nonmap`);
   `eof-error?`/`recursive?` follow truthiness (`r-eoferr-truthy`,
   `r-eoferr-nil`).
-- TDD plan: oracle probe files first (alpha10 jars, 83 pins; stdin
+- TDD plan: oracle probe files first (alpha10 jars, 95 pins; stdin
   behaviors probed through `StringReader`-backed equivalents plus one
   piped-stdin script run, never interactively), stage tests red
   (unresolvable vars), then stage 1 (readers + `read-line`), then
