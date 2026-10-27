@@ -1,0 +1,7 @@
+r7-strmode THROW java.lang.ClassCastException|"class java.lang.String cannot be cast to class java.lang.Number (java.lang.String and java.lang.Number are in module java.base of loader 'bootstrap')"
+r7-quotmix 0.000M
+r7-quotmix0 THROW java.lang.ArithmeticException|"Non-terminating decimal expansion; no exact representable decimal result."
+r7-quotread THROW java.lang.ClassCastException|"class java.lang.Long cannot be cast to class java.math.MathContext (java.lang.Long and java.math.MathContext are in module java.base of loader 'bootstrap')"
+r7-remread THROW java.lang.ClassCastException|"class java.lang.Long cannot be cast to class java.math.MathContext (java.lang.Long and java.math.MathContext are in module java.base of loader 'bootstrap')"
+r7-remmix 0.333M
+r7-remmix0 THROW java.lang.ArithmeticException|"Non-terminating decimal expansion; no exact representable decimal result."

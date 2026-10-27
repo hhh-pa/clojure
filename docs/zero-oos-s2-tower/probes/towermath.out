@@ -1,0 +1,149 @@
+pred-dec-t true
+pred-dec-f-i false
+pred-dec-f-d false
+pred-dec-f-n false
+pred-dec-f-r false
+pred-dec-f-nil false
+pred-dec-f-s false
+pred-ratio-t true
+pred-ratio-f-i false
+pred-ratio-f-d false
+pred-ratio-f-n false
+pred-ratio-f-m false
+pred-ratio-f-nil false
+pred-rat-i true
+pred-rat-n true
+pred-rat-r true
+pred-rat-m true
+pred-rat-d false
+pred-rat-nil false
+pred-rat-s false
+pred-rat-b false
+pred-rat-v false
+pred-rat-fn false
+pred-int-n true
+pred-int-m false
+bi-int 5
+bi-neg -5
+bi-dbl 5
+bi-negdbl -5
+bi-big 5
+bi-dec 5
+bi-negdec -5
+bi-ratio 3
+bi-negratio -3
+bi-str 42
+bi-zerostr 0
+bi-emptystr THROW java.lang.NumberFormatException|"Zero length BigInteger"
+bi-badstr THROW java.lang.NumberFormatException|"For input string: \"x\""
+bi-hexstr THROW java.lang.NumberFormatException|"For input string: \"x10\""
+bi-nil THROW java.lang.NullPointerException|"Cannot invoke \"String.length()\" because \"val\" is null"
+bi-bool THROW java.lang.IllegalArgumentException|"No matching ctor found for class java.math.BigInteger"
+bi-char THROW java.lang.IllegalArgumentException|"No matching ctor found for class java.math.BigInteger"
+bi-nan THROW java.lang.NumberFormatException|"Infinite or NaN"
+bi-inf THROW java.lang.NumberFormatException|"Infinite or NaN"
+bi-pr "5"
+bi-str "5"
+bi-eq true
+bi-type java.math.BigInteger
+bi-type2 clojure.lang.BigInt
+bi-pr2 "5N"
+nd-lit 2
+nd-num 3
+nd-den 4
+nd-negn -3
+nd-negd 4
+nd-half 1
+nd-halfd 2
+nd-prn "3"
+nd-prd "4"
+nd-type java.math.BigInteger
+nd-int THROW java.lang.ClassCastException|"class java.lang.Long cannot be cast to class clojure.lang.Ratio (java.lang.Long is in module java.base of loader 'bootstrap'; clojure.lang.Ratio is in unnamed module of loader 'app')"
+nd-bigi THROW java.lang.ClassCastException|"class clojure.lang.BigInt cannot be cast to class clojure.lang.Ratio (clojure.lang.BigInt and clojure.lang.Ratio are in unnamed module of loader 'app')"
+nd-dec THROW java.lang.ClassCastException|"class java.math.BigDecimal cannot be cast to class clojure.lang.Ratio (java.math.BigDecimal is in module java.base of loader 'bootstrap'; clojure.lang.Ratio is in unnamed module of loader 'app')"
+nd-nil THROW java.lang.NullPointerException|"Cannot read field \"numerator\" because \"r\" is null"
+nd-str THROW java.lang.ClassCastException|"class java.lang.String cannot be cast to class clojure.lang.Ratio (java.lang.String is in module java.base of loader 'bootstrap'; clojure.lang.Ratio is in unnamed module of loader 'app')"
+abs-i 5
+abs-neg 5
+abs-zero 0
+abs-min -9223372036854775808
+abs-d 5.5
+abs-negzero 0.0
+abs-poszero 0.0
+abs-nan ##NaN
+abs-inf ##Inf
+abs-neginf ##Inf
+abs-n 5N
+abs-m 5.9M
+abs-r 7/2
+abs-nil THROW java.lang.NullPointerException|"Cannot invoke \"Object.getClass()\" because \"x\" is null"
+abs-str THROW java.lang.ClassCastException|"class java.lang.String cannot be cast to class java.lang.Number (java.lang.String and java.lang.Number are in module java.base of loader 'bootstrap')"
+abs-bool THROW java.lang.ClassCastException|"class java.lang.Boolean cannot be cast to class java.lang.Number (java.lang.Boolean and java.lang.Number are in module java.base of loader 'bootstrap')"
+abs-char THROW java.lang.ClassCastException|"class java.lang.Character cannot be cast to class java.lang.Number (java.lang.Character and java.lang.Number are in module java.base of loader 'bootstrap')"
+mc-root nil
+mc-bound true
+mc-thread true
+mc-meta {:ns #object[clojure.lang.Namespace 0x66eb985d "clojure.core"], :name *math-context*, :tag java.math.MathContext}
+mc-ns clojure.core
+wp-mc #object[java.math.MathContext 0xH "precision=10 roundingMode=HALF_UP"]
+wp-mc-floor #object[java.math.MathContext 0xH "precision=10 roundingMode=FLOOR"]
+wp-str "precision=10 roundingMode=HALF_UP"
+wp-eq true
+wp-eq2 true
+wp-eq3 false
+wp-add 6.91M
+wp-sub 4.45M
+wp-mul 7.01M
+wp-div 0.333M
+wp-divexact 0.5M
+wp-mix1 2M
+wp-mix2 2M
+wp-mixdiv 0.333M
+wp-mixratio 1.33M
+wp-nomixratio THROW java.lang.ArithmeticException|"Non-terminating decimal expansion; no exact representable decimal result."
+wp-int 300
+wp-dbl 0.30000000000000004
+wp-ratio 1/3
+wp-quot 2M
+wp-rem 1.678M
+wp-mod 1.678M
+wp-inc 11M
+wp-dec 9.0M
+wp-neg -10M
+wp-abs 1E+1M
+wp-bigdec 0.333M
+wp-bigdec-d 5.5M
+wp-bigdec-i 5.0M
+wp-prec0 THROW java.lang.ArithmeticException|"Non-terminating decimal expansion; no exact representable decimal result."
+wp-empty nil
+wp-multi 2
+wp-nest 0.33333M
+wp-restore [:caught nil]
+wp-halfup 0.13M
+wp-halfdown 0.12M
+wp-halfeven 0.12M
+wp-down 0.12M
+wp-up 0.13M
+wp-floor 0.12M
+wp-ceil 0.13M
+wp-negfloor -0.13M
+wp-negceil -0.12M
+wp-negdown -0.12M
+wp-negup -0.13M
+wp-unnec-exact 0.5M
+wp-unnec-inex THROW java.lang.ArithmeticException|"Rounding necessary"
+wp-negprec THROW java.lang.IllegalArgumentException|"Digits < 0"
+wp-fracprec THROW java.lang.IllegalArgumentException|"No matching ctor found for class java.math.MathContext"
+wp-strprec THROW java.lang.IllegalArgumentException|"bad string format"
+wp-nilprec THROW java.lang.NullPointerException|"null String"
+wp-bigprec THROW java.lang.IllegalArgumentException|"No matching ctor found for class java.math.MathContext"
+wp-badmode THROW clojure.lang.Compiler$CompilerException|"Syntax error compiling . at (/Users/hhu/workspace/clojure/.muse/worktrees/subagent-v2-01a17cea-a1d1-73c2-b863-91fc98e8705c-01a17e7d-f763-79a0-8b99-747585eb0b7b/docs/zero-oos-s2-tower/probes/towermath.clj:166:24)."
+wp-lowmode THROW clojure.lang.Compiler$CompilerException|"Syntax error compiling . at (/Users/hhu/workspace/clojure/.muse/worktrees/subagent-v2-01a17cea-a1d1-73c2-b863-91fc98e8705c-01a17e7d-f763-79a0-8b99-747585eb0b7b/docs/zero-oos-s2-tower/probes/towermath.clj:167:24)."
+ar-abs0 THROW clojure.lang.ArityException|"Wrong number of args (0) passed to: clojure.core/abs"
+ar-abs2 THROW clojure.lang.ArityException|"Wrong number of args (2) passed to: clojure.core/abs"
+ar-bi0 THROW clojure.lang.ArityException|"Wrong number of args (0) passed to: clojure.core/biginteger"
+ar-num0 THROW clojure.lang.ArityException|"Wrong number of args (0) passed to: clojure.core/numerator"
+ar-den2 THROW clojure.lang.ArityException|"Wrong number of args (2) passed to: clojure.core/denominator"
+ar-decp0 THROW clojure.lang.ArityException|"Wrong number of args (0) passed to: clojure.core/decimal?"
+ar-ratp2 THROW clojure.lang.ArityException|"Wrong number of args (2) passed to: clojure.core/ratio?"
+ar-ratl2 THROW clojure.lang.ArityException|"Wrong number of args (2) passed to: clojure.core/rational?"

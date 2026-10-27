@@ -1,0 +1,23 @@
+mc-thread2 true
+mc-gtb ("#'clojure.core/*1" "#'clojure.core/*2" "#'clojure.core/*3" "#'clojure.core/*assert*" "#'clojure.core/*command-line-args*" "#'clojure.core/*compile-path*" "#'clojure.core/*data-readers*" "#'clojure.core/*default-data-reader-fn*" "#'clojure.core/*e" "#'clojure.core/*file*" "#'clojure.core/*math-context*" "#'clojure.core/*ns*" "#'clojure.core/*print-length*" "#'clojure.core/*print-level*" "#'clojure.core/*print-meta*" "#'clojure.core/*print-namespace-maps*" "#'clojure.core/*read-eval*" "#'clojure.core/*source-path*" "#'clojure.core/*unchecked-math*" "#'clojure.core/*warn-on-reflection*" "#'clojure.spec.alpha/*explain-out*" "#<Var: --unnamed-->" "#<Var: --unnamed-->" "#<Var: --unnamed-->" "#<Var: --unnamed-->" "#<Var: --unnamed-->" "#<Var: --unnamed-->" "#<Var: --unnamed-->" "#<Var: --unnamed-->" "#<Var: --unnamed-->" "#<Var: --unnamed-->" "#<Var: --unnamed-->")
+mc-gtbv nil
+r2-add 5M
+r2-sub -4.45M
+r2-sub3 0.5M
+r2-mul 2M
+r2-subfold 4.45M
+r2-quot 5E+1M
+r2-ratrat 1/2
+r2-mulmix 0.666M
+r2-eqrm false
+r2-eqrm2 true
+r2-den-nil THROW java.lang.NullPointerException|"Cannot read field \"denominator\" because \"r\" is null"
+r2-strctx 0.333M
+r2-strctx2 "precision=3 roundingMode=FLOOR"
+r2-strshort THROW java.lang.IllegalArgumentException|"bad string format"
+r2-strbadp THROW java.lang.IllegalArgumentException|"bad string format"
+r2-strbadm THROW java.lang.IllegalArgumentException|"bad string format"
+r2-strneg THROW java.lang.IllegalArgumentException|"Digits < 0"
+r2-strempty THROW java.lang.IllegalArgumentException|"bad string format"
+r2-hugeprec THROW java.lang.ArithmeticException|"integer overflow"
+r2-badmode-cause THROW java.lang.NoSuchFieldException|"FOO"
