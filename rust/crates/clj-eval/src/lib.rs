@@ -31,6 +31,7 @@ pub mod lazy;
 pub mod macros;
 pub mod ns;
 pub mod re;
+pub mod reader;
 pub mod rng;
 pub mod seqs;
 pub mod vars;

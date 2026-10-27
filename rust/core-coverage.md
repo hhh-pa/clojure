@@ -4,7 +4,7 @@ The complete inventory of `clojure.core` in this port: every var,
 its conformance state, and — for exclusions — why it is excluded.
 If a var is not listed here, that is a file bug, not a silent gap.
 
-- **422 vars: 380 implemented, 2 divergent, 40 out of scope,
+- **422 vars: 385 implemented, 2 divergent, 35 out of scope,
   0 planned.** The port reports Clojure `1.13.0-alpha9`
   (`clojure-version`).
 - **Status meanings.** `implemented` — resolves in the booted core
@@ -421,7 +421,7 @@ Printing, reading, files, and print dynamic vars.
 | `*err*` | implemented | dynamic root; control.rs boot_dynamics (root + referred) |
 | `slurp` | implemented | tests/io.rs io_smoke_rows (roundtrip) |
 | `spit` | implemented | tests/io.rs io_smoke_rows (:append) |
-| `read-string` | implemented | tests/io.rs io_smoke_rows (S2, 1 form) |
+| `read-string` | implemented | tests/io.rs io_smoke_rows (S2, 1 form); denies reader conditionals (S-instream, instream_read_string_deny_row) |
 | `*print-length*` | implemented | dyn var, root+meta; control.rs boot_dynamics |
 | `*print-level*` | implemented | dyn var, root+meta; control.rs boot_dynamics |
 | `*print-dup*` | divergent | declared; ignored by the printer |
@@ -482,11 +482,11 @@ Significant vars with no port slice, grouped below by area with the reason. (Two
 | `get-method` | out-of-scope | multimethods: no slice |
 | `methods` | out-of-scope | multimethods: no slice |
 | `remove-method` | out-of-scope | multimethods: no slice |
-| `with-in-str` | out-of-scope | needs `*in*` machinery: no slice |
-| `read` | out-of-scope | needs `*in*` machinery: no slice |
-| `read-line` | out-of-scope | needs `*in*` machinery: no slice |
-| `line-seq` | out-of-scope | needs `*in*` machinery: no slice |
-| `*in*` | out-of-scope | needs `*in*` machinery: no slice |
+| `with-in-str` | implemented | analyzer builtin (body value); tests/io.rs instream_with_in_str_rows |
+| `read` | implemented | 5 arities over StreamReader (opts map, ReaderException wrap); tests/io.rs instream_read_*_rows + instream_catch_rows |
+| `read-line` | implemented | 0-arity over *in* (nil at EOF); tests/io.rs instream_read_line_rows |
+| `line-seq` | implemented | core.clj eager-head Cons + lazy tail (accepts StreamReader by design); tests/io.rs instream_line_seq_rows |
+| `*in*` | implemented | dynamic root (stdin reader); tests/io.rs instream_in_shape_rows |
 | `deftype` | out-of-scope | no type-system slice |
 | `defrecord` | out-of-scope | no type-system slice |
 | `reify` | out-of-scope | no type-system slice |

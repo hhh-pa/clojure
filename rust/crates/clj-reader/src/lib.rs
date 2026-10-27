@@ -58,6 +58,11 @@ pub(crate) enum Form {
 /// A reader over one input: the §1 tracker, the shared pending queue
 /// (reader-conditional splices), normalized options, and the fn-arg,
 /// gensym, suppression, and read-cond environments.
+///
+/// `Clone` snapshots the read position (issue #36: stdin `read`
+/// retries a truncated form over the restored head plus the next
+/// line).
+#[derive(Clone)]
 pub struct Reader {
     pub(crate) stream: CharStream,
     pub(crate) pending: VecDeque<Value>,
@@ -93,6 +98,31 @@ impl Reader {
     /// Replace the options (cloned and normalized like [`new`](Self::new)).
     pub fn set_opts(&mut self, opts: &ReaderOpts) {
         self.opts = opts.clone().normalized();
+    }
+
+    /// Append `chunk` to the input (stdin growth; same
+    /// normalization as construction, so a split `\r\n`
+    /// coalesces).
+    pub fn extend(&mut self, chunk: &str) {
+        self.stream.extend(chunk);
+    }
+
+    /// Read one `\n`-split line (`\n` consumed and stripped);
+    /// `None` at EOF, the tail when EOF lands mid-line.
+    pub fn read_line(&mut self) -> Option<String> {
+        self.stream.read_line()
+    }
+
+    /// Current 1-based line (live tracker position).
+    #[must_use]
+    pub fn line(&self) -> u32 {
+        self.stream.line()
+    }
+
+    /// Current column (live tracker position).
+    #[must_use]
+    pub fn col(&self) -> u32 {
+        self.stream.col()
     }
 
     /// Read one top-level form: `eof_is_error` decides whether EOF
@@ -428,6 +458,22 @@ mod tests {
             ..ReaderOpts::default()
         });
         assert!(reader.opts.features.contains(&Keyword::new(None, "clj")));
+    }
+
+    #[test]
+    fn stream_passthroughs_share_one_position() {
+        // `extend`/`read_line`/`line`/`col` ride the same tracker
+        // `read_form` uses (the `clj-eval` streams interleave all
+        // three, issue #36).
+        let mut reader = Reader::new("a\n", &ReaderOpts::default());
+        assert_eq!((reader.line(), reader.col()), (1, 1));
+        assert_eq!(reader.read_line(), Some("a".to_owned()));
+        assert_eq!((reader.line(), reader.col()), (2, 1));
+        assert_eq!(reader.read_line(), None);
+        reader.extend("(b)");
+        let form = reader.read_form(true).unwrap().expect("extended form");
+        assert_eq!(pr(&form), "(b)");
+        assert_eq!((reader.line(), reader.col()), (2, 4));
     }
 
     #[test]
