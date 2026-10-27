@@ -23,7 +23,7 @@
 
 use std::collections::HashMap;
 
-use clj_reader::{ReadCond, ReaderOpts, read_all};
+use clj_reader::{NoHooks, ReadCond, ReaderOpts, read_all};
 use clj_value::{Keyword, PrintOpts, Symbol, Value, pr_to_string};
 
 /// A corpus case (from `cases.edn`).
@@ -121,7 +121,7 @@ fn parse_keyword(v: &Value) -> Keyword {
 pub fn read_data_file(path: &std::path::Path) -> Value {
     let text = std::fs::read_to_string(path).unwrap();
     let opts = ReaderOpts::default();
-    let forms = read_all(&text, &opts).unwrap();
+    let forms = read_all(&text, &opts, &mut NoHooks).unwrap();
     assert_eq!(forms.len(), 1, "{} must hold one form", path.display());
     forms.into_iter().next().unwrap()
 }
@@ -313,10 +313,10 @@ pub fn case_opts(case: &Case, resolver: &Resolver) -> ReaderOpts {
 pub fn run_ours(input: &str, opts: &ReaderOpts) -> Result<Vec<Value>, clj_reader::ReaderError> {
     let mut reader = clj_reader::Reader::new(input, opts);
     let mut forms = Vec::new();
-    if let Some(first) = reader.read_form(true)? {
+    if let Some(first) = reader.read_form(true, &mut NoHooks)? {
         forms.push(first);
     }
-    while let Some(v) = reader.read_form(false)? {
+    while let Some(v) = reader.read_form(false, &mut NoHooks)? {
         forms.push(v);
     }
     Ok(forms)

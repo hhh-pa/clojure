@@ -72,6 +72,15 @@ pub struct ReaderOpts {
     /// `*default-data-reader-fn*` is bound (S6): tags matching
     /// nothing else defer for the eval-side `[tag form]` call.
     pub default_reader_fn: bool,
+    /// `*read-eval*`: `#=` applies when true, throws the gate text
+    /// when false (S7; load entries force true).
+    pub read_eval: bool,
+    /// `*suppress-read*`: seeds the tag-suppression flag (S7; only
+    /// `#tag` reads consult it, and only the entry binding seeds).
+    pub suppress_read: bool,
+    /// `*reader-resolver*` is bound: `::` and syntax-quote consult
+    /// the hook instead of the maps (S7).
+    pub resolver_bound: bool,
 }
 
 impl Default for ReaderOpts {
@@ -88,6 +97,9 @@ impl Default for ReaderOpts {
             data_reader_keys: HashSet::new(),
             data_readers_borked: None,
             default_reader_fn: false,
+            read_eval: true,
+            suppress_read: false,
+            resolver_bound: false,
         }
     }
 }

@@ -15,14 +15,17 @@
 use std::io::Write;
 use std::sync::{Arc, Mutex};
 
-use clj_reader::{ReadCond, Reader, ReaderError, ReaderOpts};
+use clj_reader::{EvalReadError, ReadCond, Reader, ReaderError, ReaderOpts};
 use clj_value::{ExtensionValue, ThrowClass, Value, pr_to_string};
 
 use crate::core::{cce_err, cce_message, print_opts};
 use crate::error::{NativeError, jvm_class_of};
 use crate::eval::Evaluator;
 use crate::lazy::realize_deep;
-use crate::ns::{NativeFnPtr, check_arity, deref_core, signal_to_native, str_of, throw_class_for};
+use crate::ns::{
+    NativeFnPtr, check_arity, deref_core, signal_to_native, str_of, throw_class_for,
+    throwable_to_native,
+};
 
 /// A `*out*`-bindable writer: process stdout/stderr or an
 /// in-memory buffer. Identity is the sequence `id`.
@@ -344,6 +347,7 @@ fn native_spit(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErr
 }
 
 /// `read-string`: read one form (no line numbers, like the JVM).
+/// S7 gates run after the string checks (probes `g-rs-*`).
 fn native_read_string(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/read-string", args, &[1])?;
     if matches!(args[0], Value::Nil) {
@@ -355,6 +359,7 @@ fn native_read_string(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nat
     let Value::Str(s) = &args[0] else {
         return Err(cce_err(&args[0], "java.lang.String"));
     };
+    let seed = crate::reader::seed_read_gates(eval)?;
     // Syntax-quote and `::` resolve against the synced current
     // namespace (read-time, like the JVM); `line_numbers: false`
     // gives `read-string` behavior (bare EOF errors, no meta).
@@ -370,27 +375,38 @@ fn native_read_string(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nat
         opts.refers = ns.refer_map();
     }
     crate::core::snapshot_data_readers(eval, &mut opts);
+    opts.read_eval = seed.read_eval;
+    opts.suppress_read = seed.suppress_read;
+    opts.resolver_bound = seed.resolver_bound;
     let text: &str = s;
-    let mut reader = Reader::new(text, &opts);
-    let outcome = reader.read_form(false);
+    let (outcome, fired) = {
+        let mut hooks = crate::reader::LiveReadHooks::new(eval);
+        clj_reader::read_str_fired(text, &opts, &mut hooks)
+    };
     // Effects precede every outcome (fired tags ran during the read
     // — probe `e-discard-eof` fires before the EOF), so drain first.
-    crate::core::drain_fired_tags(eval, reader.take_fired())?;
+    crate::core::drain_fired_tags(eval, fired)?;
     match outcome {
-        Ok(Some(v)) => crate::core::resolve_data_readers(eval, v),
-        Ok(None) => Err(NativeError::new(
-            ThrowClass::RuntimeException,
-            "EOF while reading".to_owned(),
-        )),
-        Err(e) => Err(map_read_string_error(&e)),
+        Ok(v) => crate::core::resolve_data_readers(eval, v),
+        Err(e) => Err(land_read_string_error(e)),
     }
 }
 
-/// A `read-string` failure: the S6 consult errors keep their JVM
-/// classes (a broken table is a `ClassCastException`, invalid
-/// payloads throw the validator's class); everything else stays the
-/// bare `RuntimeException` the JVM reports without line numbers.
-fn map_read_string_error(e: &ReaderError) -> NativeError {
+/// A `read-string` failure as a native error: a `#=` or resolver
+/// throwable surfaces raw — class, message, data, and cause intact
+/// (S7 probes `c-*`, `d-*`, `f-sq-currentnil`); S6 consult errors
+/// keep their JVM classes (a broken table is a `ClassCastException`,
+/// invalid payloads throw the validator's class); everything else
+/// stays the bare `RuntimeException` the JVM reports without line
+/// numbers (S7 probes `e-trunc`, `c-eof`, `f-nilalias`).
+fn land_read_string_error(e: ReaderError) -> NativeError {
+    if let ReaderError::EvalFailed {
+        error: EvalReadError::Failed(t),
+        ..
+    } = &e
+    {
+        return throwable_to_native(t);
+    }
     match e {
         ReaderError::TableCce { .. } | ReaderError::TagInvoke { .. } => {
             NativeError::new(throw_class_for(e.jvm_class()), e.message())

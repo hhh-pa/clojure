@@ -16,6 +16,7 @@
 
 use std::sync::Arc;
 
+use clj_reader::ReaderError;
 use clj_value::{
     Keyword, List, Map, PrintOpts, Set, Symbol, ThrowClass, Throwable, Value, Var, Vector, new_map,
     new_set, pr_to_string, seq_vec,
@@ -221,7 +222,7 @@ fn iseq_err(v: &Value) -> NativeError {
 
 /// A `throw` signal as a native error (the class, message, data, and
 /// cause survive; the evaluator stamps a fresh identity).
-fn throwable_to_native(t: &Throwable) -> NativeError {
+pub(crate) fn throwable_to_native(t: &Throwable) -> NativeError {
     let mut err = NativeError::new(t.class, t.message.as_deref().unwrap_or("").to_owned());
     err.data = t.data.clone().map(|b| *b);
     err.cause = t.cause.clone().map(|b| *b);
@@ -658,7 +659,7 @@ fn native_refer_clojure(eval: &mut Evaluator, args: &[Value]) -> Result<Value, N
 /// Route an `intern` through a handle pin (stale handles land in
 /// the tombstone, which becomes the var's home) or by name (live
 /// first). Returns the var id and the home namespace id.
-fn intern_routed(
+pub(crate) fn intern_routed(
     eval: &mut Evaluator,
     ns_name: &str,
     pinned: Option<u64>,
@@ -719,7 +720,7 @@ fn native_intern(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeEr
 /// `ns-resolve`/`resolve` through an explicit home (the env check
 /// runs before symbol validation, like the `when-not` in
 /// `ns-resolve`).
-fn do_resolve(
+pub(crate) fn do_resolve(
     eval: &Evaluator,
     ns_name: &str,
     pinned: Option<u64>,
@@ -895,6 +896,7 @@ pub(crate) fn throw_class_for(name: &str) -> ThrowClass {
         "ArityException" => ThrowClass::ArityException,
         "NullPointerException" => ThrowClass::NullPointerException,
         "ClassCastException" => ThrowClass::ClassCastException,
+        "ClassNotFoundException" => ThrowClass::ClassNotFoundException,
         "IndexOutOfBoundsException" => ThrowClass::IndexOutOfBoundsException,
         "ArithmeticException" => ThrowClass::ArithmeticException,
         "ExceptionInfo" => ThrowClass::ExceptionInfo,
@@ -933,12 +935,21 @@ fn source_to_native(eval: &mut Evaluator, source: &str, e: SourceError) -> Nativ
                     site_of(source, span)
                 ),
             );
-            outer.cause = Some(Throwable {
-                id: eval.next_id(),
-                class: throw_class_for(e.jvm_class()),
-                message: Some(Arc::from(e.message().as_str())),
-                data: None,
-                cause: None,
+            // S7: a `#=`/resolver throwable rides as the cause
+            // intact (its `ex-data` and cause chain survive the
+            // wrap, like the JVM).
+            outer.cause = Some(match e {
+                ReaderError::EvalFailed {
+                    error: clj_reader::EvalReadError::Failed(t),
+                    ..
+                } => t.clone(),
+                _ => Throwable {
+                    id: eval.next_id(),
+                    class: throw_class_for(e.jvm_class()),
+                    message: Some(Arc::from(e.message().as_str())),
+                    data: None,
+                    cause: None,
+                },
             });
             outer
         }
@@ -972,7 +983,7 @@ fn core_var_handle(id: u64, name: &str) -> Var {
     }
 }
 
-fn core_var(eval: &Evaluator, name: &str) -> Option<u64> {
+pub(crate) fn core_var(eval: &Evaluator, name: &str) -> Option<u64> {
     id_of(&eval.registry, &Symbol::new(Some("clojure.core"), name))
 }
 
@@ -1128,6 +1139,13 @@ fn run_loaded(
     }
     if isolate_ns {
         push_ns_frame(eval, &mut depth);
+    }
+    // S7: load forces `*read-eval*` true, visibly (probes `l-gate`,
+    // `m-*` — `Compiler.load` binds it the same way). The push rides
+    // the `depth` pop below (`*file*` is installed whenever this is,
+    // so a depth always exists here).
+    if let Some(id) = core_var(eval, "*read-eval*") {
+        eval.push_binding(core_var_handle(id, "*read-eval*"), Value::Bool(true));
     }
     let out = eval.load_source(spans, text);
     eval.registry.set_current(&cur);
@@ -1721,6 +1739,101 @@ fn native_load_string(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nat
     }
 }
 
+/// `load-reader`: read every form from a reader and evaluate
+/// them, returning the last value (nil when empty — S7; probes
+/// `l-*`). `*file*` is nil, `*ns*` is isolated, `*read-eval*` is
+/// forced true (visibly), and `*pending-paths*` is untouched.
+fn native_load_reader(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.core/load-reader", args, &[1])?;
+    let reader = match &args[0] {
+        Value::Nil => {
+            return Err(NativeError::new(
+                ThrowClass::NullPointerException,
+                String::new(),
+            ));
+        }
+        v => match crate::reader::as_reader(v) {
+            Some(r) => r,
+            None => return Err(cce_err(v, "java.io.Reader")),
+        },
+    };
+    // `Compiler.load` consumes leading whitespace before its entry
+    // checks, so entry failures blame the post-skip position; the
+    // parser stays out of its lock for the whole read phase (the
+    // hook runs user code, which may read the same reader again).
+    let mut opts = clj_reader::ReaderOpts {
+        read_cond: clj_reader::ReadCond::Allow,
+        ..clj_reader::ReaderOpts::default()
+    };
+    let (mut parser, _) = crate::reader::take_parser(reader, &opts);
+    parser.consume_whitespaces();
+    let (line, col) = (parser.line(), parser.col());
+    let seed = match crate::reader::seed_load_gates(eval) {
+        Ok(seed) => seed,
+        Err(cce) => {
+            let wrap =
+                crate::reader::executing_wrap(line, col, &cce, eval.next_id(), eval.next_id());
+            crate::reader::restore_parser(reader, parser);
+            return Err(source_to_native(eval, "", wrap));
+        }
+    };
+    crate::reader::sync_reader_ns(eval, &mut opts);
+    opts.read_eval = seed.read_eval;
+    opts.suppress_read = seed.suppress_read;
+    opts.resolver_bound = seed.resolver_bound;
+    parser.set_opts(&opts);
+    let mut forms = Vec::new();
+    loop {
+        let outcome = {
+            let mut hooks = crate::reader::LiveReadHooks::new(&mut *eval);
+            parser.read_form(false, &mut hooks)
+        };
+        match outcome {
+            Ok(Some(form)) => forms.push(form),
+            Ok(None) => break,
+            Err(e) => {
+                crate::reader::restore_parser(reader, parser);
+                return Err(source_to_native(eval, "", SourceError::Reader(e)));
+            }
+        }
+    }
+    crate::reader::restore_parser(reader, parser);
+    run_loaded_values(eval, forms)
+}
+
+/// Evaluate loaded forms under the `load-reader` frame (`*file*`
+/// nil, `*ns*` isolated, `*read-eval*` forced true) and return the
+/// last value (nil when empty).
+fn run_loaded_values(eval: &mut Evaluator, forms: Vec<Value>) -> Result<Value, NativeError> {
+    let cur = eval.registry.current().to_owned();
+    let mut depth = None;
+    if let Some(id) = core_var(eval, "*file*") {
+        depth = Some(eval.push_binding(core_var_handle(id, "*file*"), Value::Nil));
+    }
+    push_ns_frame(eval, &mut depth);
+    if let Some(id) = core_var(eval, "*read-eval*") {
+        eval.push_binding(core_var_handle(id, "*read-eval*"), Value::Bool(true));
+    }
+    let mut out = Value::Nil;
+    for form in &forms {
+        match eval.eval_top_form(form) {
+            Ok(v) => out = v,
+            Err(e) => {
+                eval.registry.set_current(&cur);
+                if let Some(d) = depth {
+                    eval.pop_bindings(d);
+                }
+                return Err(source_to_native(eval, "", e));
+            }
+        }
+    }
+    eval.registry.set_current(&cur);
+    if let Some(d) = depth {
+        eval.pop_bindings(d);
+    }
+    Ok(out)
+}
+
 fn native_loaded_libs(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/loaded-libs", args, &[0])?;
     Ok(Value::Set(libs_set(eval)?))
@@ -1768,6 +1881,7 @@ const NATIVES: &[(&str, NativeFnPtr)] = &[
     ("load", native_load),
     ("load-string", native_load_string),
     ("load-file", native_load_file),
+    ("load-reader", native_load_reader),
     ("loaded-libs", native_loaded_libs),
     ("eval", native_eval),
 ];
@@ -2053,6 +2167,11 @@ fn boot_core_vars(eval: &mut Evaluator, user_handle: Value) {
     def_dynamic_root(eval, "*print-meta*", Value::Bool(false));
     def_dynamic_root(eval, "*print-readably*", Value::Bool(true));
     def_dynamic_root(eval, "*print-dup*", Value::Bool(false));
+    // S7 read gates (issue #50; probes `a-*`): the roots the JVM
+    // interns them with (no `:dynamic` meta, like the others here).
+    def_dynamic_root(eval, "*read-eval*", Value::Bool(true));
+    def_dynamic_root(eval, "*suppress-read*", Value::Nil);
+    def_dynamic_root(eval, "*reader-resolver*", Value::Nil);
     // `RT.java`: `*agent*` is a dynamic slot with a nil root (bound
     // to the agent inside each action by `send`).
     def_dynamic_root(eval, "*agent*", Value::Nil);
@@ -2108,6 +2227,9 @@ fn boot_refer_user(eval: &mut Evaluator) {
             "*print-meta*",
             "*print-readably*",
             "*print-dup*",
+            "*read-eval*",
+            "*suppress-read*",
+            "*reader-resolver*",
             "*agent*",
             "*math-context*",
             "*print-length*",

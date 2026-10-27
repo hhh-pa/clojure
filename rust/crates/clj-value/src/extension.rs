@@ -75,6 +75,7 @@ pub enum ThrowClass {
     RejectedExecutionException,
     PatternSyntaxException,
     ReaderException,
+    ClassNotFoundException,
 }
 
 impl ThrowClass {
@@ -137,6 +138,7 @@ impl ThrowClass {
             Self::CancellationException => "java.util.concurrent.CancellationException",
             Self::RejectedExecutionException => "java.util.concurrent.RejectedExecutionException",
             Self::ReaderException => "clojure.lang.LispReader$ReaderException",
+            Self::ClassNotFoundException => "java.lang.ClassNotFoundException",
             // All other variants are handled by `jvm_name`/`jvm_name_mid`
             // (the single caller partitions the variants).
             _ => unreachable!("throw-class partition"),
@@ -203,6 +205,8 @@ fn throw_parent(jvm_name: &str) -> Option<&'static str> {
         "java.lang.NumberFormatException" => Some("java.lang.IllegalArgumentException"),
         "java.io.FileNotFoundException" => Some("java.io.IOException"),
         "java.io.IOException" => Some("java.lang.Exception"),
+        "java.lang.ClassNotFoundException" => Some("java.lang.ReflectiveOperationException"),
+        "java.lang.ReflectiveOperationException" => Some("java.lang.Exception"),
         "java.lang.AssertionError" => Some("java.lang.Error"),
         "java.lang.IllegalAccessError" => Some("java.lang.LinkageError"),
         "java.lang.LinkageError" => Some("java.lang.Error"),
@@ -926,6 +930,20 @@ mod tests {
         assert_eq!(hash_of(&other), hash_of(&other.clone()));
         let err = compare(&other, &Value::Int(1)).unwrap_err();
         assert_eq!(err.message(), "Cannot compare test.Other to Long");
+    }
+
+    #[test]
+    fn class_not_found_names_and_catches() {
+        // S7 `#=` symbol/class heads (probes `d-class-miss`,
+        // `c-qualmiss`): the JVM binary name and the
+        // `ReflectiveOperationException` catch chain.
+        let class = ThrowClass::ClassNotFoundException;
+        assert_eq!(class.jvm_name(), "java.lang.ClassNotFoundException");
+        assert!(class.matches("java.lang.ClassNotFoundException"));
+        assert!(class.matches("java.lang.ReflectiveOperationException"));
+        assert!(class.matches("java.lang.Exception"));
+        assert!(class.matches("java.lang.Throwable"));
+        assert!(!class.matches("java.lang.RuntimeException"));
     }
 
     #[test]

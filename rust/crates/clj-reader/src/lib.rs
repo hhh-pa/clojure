@@ -19,6 +19,7 @@
 pub mod coll;
 pub mod dispatch;
 pub mod error;
+pub mod hooks;
 pub mod metaform;
 pub mod number;
 pub mod opts;
@@ -27,6 +28,7 @@ pub mod symbol;
 pub mod text;
 
 pub use error::{ReaderError, Span};
+pub use hooks::{EvalReadError, NoHooks, ReadHooks, ResolverOp};
 pub use opts::{ReadCond, ReaderOpts};
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
@@ -90,16 +92,19 @@ pub struct Reader {
 
 impl Reader {
     /// Start reading `input` (fresh line 1, column 1; options
-    /// normalized with `:clj` installed).
+    /// normalized with `:clj` installed; the suppression flag seeds
+    /// from the entry `*suppress-read*` binding).
     #[must_use]
     pub fn new(input: &str, opts: &ReaderOpts) -> Self {
+        let opts = opts.clone().normalized();
+        let suppress = opts.suppress_read;
         Self {
             stream: CharStream::new(input),
             pending: VecDeque::new(),
-            opts: opts.clone().normalized(),
+            opts,
             arg_env: None,
             gensym_env: None,
-            suppress: false,
+            suppress,
             in_cond: false,
             discarding: 0,
             fired: Vec::new(),
@@ -117,9 +122,36 @@ impl Reader {
     /// Replace the options (cloned and normalized like [`new`](Self::new)).
     /// A fresh generation clears the fired-discards log (S6): the
     /// evaluator drains it after every read, so nothing survives.
+    /// Re-seeds suppression from the new entry binding (S7: callers only
+    /// swap options between forms, never mid-discard).
     pub fn set_opts(&mut self, opts: &ReaderOpts) {
         self.opts = opts.clone().normalized();
         self.fired.clear();
+        self.suppress = self.opts.suppress_read;
+    }
+
+    /// The S7 `read+string` capture mark (see [`CharStream`]).
+    #[must_use]
+    pub fn capture_mark(&self) -> usize {
+        self.stream.capture_mark()
+    }
+
+    /// The S7 `read+string` text consumed since `mark`.
+    #[must_use]
+    pub fn captured_since(&self, mark: usize) -> String {
+        self.stream.captured_since(mark)
+    }
+
+    /// Consume leading whitespace (S7 loads): `Compiler.load`
+    /// skips trivia before its entry checks, so entry failures
+    /// blame the post-skip position (probe `l-resolver-mid`).
+    pub fn consume_whitespaces(&mut self) {
+        while let Some(ch) = self.stream.read() {
+            if !is_whitespace(ch) {
+                self.stream.unread(ch);
+                return;
+            }
+        }
     }
 
     /// Append `chunk` to the input (stdin growth; same
@@ -149,12 +181,16 @@ impl Reader {
 
     /// Read one top-level form: `eof_is_error` decides whether EOF
     /// errors (single `read`) or ends the stream (`None`, for `load`
-    /// loops).
-    pub fn read_form(&mut self, eof_is_error: bool) -> Result<Option<Value>, ReaderError> {
+    /// loops). The hook applies `#=` and consults the resolver.
+    pub fn read_form(
+        &mut self,
+        eof_is_error: bool,
+        hook: &mut dyn ReadHooks,
+    ) -> Result<Option<Value>, ReaderError> {
         // `Finished` needs an awaited delimiter (`return_on` is
         // `None` here), so it shares the `Eof` arm (100% line
         // gate: a lone arm would be uncoverable).
-        match self.read_inner(eof_is_error, None, true)? {
+        match self.read_inner(eof_is_error, None, true, hook)? {
             Form::Value(v) => Ok(Some(v)),
             Form::Eof | Form::Finished => Ok(None),
         }
@@ -170,6 +206,7 @@ impl Reader {
         eof_is_error: bool,
         return_on: Option<char>,
         top: bool,
+        hook: &mut dyn ReadHooks,
     ) -> Result<Form, ReaderError> {
         // A fresh top-level `read()` starts with a null (= empty)
         // pending list on the JVM; nested frames share the parent's.
@@ -196,7 +233,7 @@ impl Reader {
             if return_on == Some(ch) {
                 return Ok(Form::Finished);
             }
-            if let Some(form) = self.dispatch_char(ch, top)? {
+            if let Some(form) = self.dispatch_char(ch, top, hook)? {
                 return Ok(form);
             }
         }
@@ -205,12 +242,17 @@ impl Reader {
     /// Dispatch one non-whitespace char: the number path, macros
     /// (sentinel ⇒ `None`, the loop recurs), `+`/`-`-then-digit,
     /// else a token.
-    fn dispatch_char(&mut self, ch: char, top: bool) -> Result<Option<Form>, ReaderError> {
+    fn dispatch_char(
+        &mut self,
+        ch: char,
+        top: bool,
+        hook: &mut dyn ReadHooks,
+    ) -> Result<Option<Form>, ReaderError> {
         if is_digit_start(ch) {
             return Ok(Some(Form::Value(self.read_number_value(ch)?)));
         }
         if is_macro(ch) {
-            return match self.invoke_macro(ch, top)? {
+            return match self.invoke_macro(ch, top, hook)? {
                 Some(v) => Ok(Some(Form::Value(v))),
                 None => Ok(None),
             };
@@ -226,47 +268,63 @@ impl Reader {
             }
         }
         let token = read_token(&mut self.stream, ch);
-        match interpret_token(&token, &self.opts) {
-            Some(v) => Ok(Some(Form::Value(v))),
-            None => Err(E::InvalidToken {
+        match interpret_token(&token, &self.opts, hook) {
+            Ok(Some(v)) => Ok(Some(Form::Value(v))),
+            Ok(None) => Err(E::InvalidToken {
                 span: self.span(),
                 token,
+            }),
+            Err(error) => Err(E::EvalFailed {
+                span: self.span(),
+                error,
             }),
         }
     }
 
     /// One nested form, EOF errors (what every wrapping reader uses).
-    pub(crate) fn read_nested_value(&mut self) -> Result<Value, ReaderError> {
-        unwrap_single(self.read_inner(true, None, false)?)
+    pub(crate) fn read_nested_value(
+        &mut self,
+        hook: &mut dyn ReadHooks,
+    ) -> Result<Value, ReaderError> {
+        unwrap_single(self.read_inner(true, None, false, hook)?)
     }
 
     /// Dispatch one macro char to its reader.
-    fn invoke_macro(&mut self, ch: char, top: bool) -> Result<Option<Value>, ReaderError> {
+    fn invoke_macro(
+        &mut self,
+        ch: char,
+        top: bool,
+        hook: &mut dyn ReadHooks,
+    ) -> Result<Option<Value>, ReaderError> {
         match ch {
             '"' => self.string_reader(),
             ';' => self.comment_reader(),
-            '\'' => self.wrapping_reader(Symbol::new(None, "quote")),
-            '@' => self.wrapping_reader(Symbol::new(Some("clojure.core"), "deref")),
-            '^' => self.meta_reader(),
-            '`' => self.syntax_quote_reader(),
-            '~' => self.unquote_reader(),
-            '(' => self.list_reader(),
+            '\'' => self.wrapping_reader(Symbol::new(None, "quote"), hook),
+            '@' => self.wrapping_reader(Symbol::new(Some("clojure.core"), "deref"), hook),
+            '^' => self.meta_reader(hook),
+            '`' => self.syntax_quote_reader(hook),
+            '~' => self.unquote_reader(hook),
+            '(' => self.list_reader(hook),
             ')' | ']' | '}' => Err(E::UnmatchedDelim {
                 span: self.span(),
                 c: ch,
             }),
-            '[' => self.vector_reader(),
-            '{' => self.map_reader(),
+            '[' => self.vector_reader(hook),
+            '{' => self.map_reader(hook),
             '\\' => self.char_reader(),
-            '%' => self.arg_reader(),
-            '#' => self.dispatch_reader(top),
+            '%' => self.arg_reader(hook),
+            '#' => self.dispatch_reader(top, hook),
             _ => unreachable!("macro table covers every macro char"),
         }
     }
 
     /// `WrappingReader`: one nested form wrapped in `(sym X)`.
-    fn wrapping_reader(&mut self, sym: Symbol) -> Result<Option<Value>, ReaderError> {
-        let form = self.read_nested_value()?;
+    fn wrapping_reader(
+        &mut self,
+        sym: Symbol,
+        hook: &mut dyn ReadHooks,
+    ) -> Result<Option<Value>, ReaderError> {
+        let form = self.read_nested_value(hook)?;
         Ok(Some(Value::List(List::from_vec(vec![
             Value::Symbol(sym),
             form,
@@ -275,19 +333,19 @@ impl Reader {
 
     /// `UnquoteReader`: `~@X` splicing, else `~X` (bare `~` at EOF is
     /// `EofChar`; `~@` at EOF reads a form, so `Eof`).
-    fn unquote_reader(&mut self) -> Result<Option<Value>, ReaderError> {
+    fn unquote_reader(&mut self, hook: &mut dyn ReadHooks) -> Result<Option<Value>, ReaderError> {
         let Some(ch) = self.stream.read() else {
             return Err(E::EofChar { span: self.span() });
         };
         if ch == '@' {
-            let form = self.read_nested_value()?;
+            let form = self.read_nested_value(hook)?;
             Ok(Some(Value::List(List::from_vec(vec![
                 Value::Symbol(Symbol::new(Some("clojure.core"), "unquote-splicing")),
                 form,
             ]))))
         } else {
             self.stream.unread(ch);
-            let form = self.read_nested_value()?;
+            let form = self.read_nested_value(hook)?;
             Ok(Some(Value::List(List::from_vec(vec![
                 Value::Symbol(Symbol::new(Some("clojure.core"), "unquote")),
                 form,
@@ -349,10 +407,28 @@ impl Reader {
     }
 }
 
-/// Read one form from `s` (fresh positions; EOF errors).
-pub fn read_str(s: &str, opts: &ReaderOpts) -> Result<Value, ReaderError> {
+/// Read one form from `s` (fresh positions; EOF errors). The hook
+/// applies `#=` and consults the resolver.
+pub fn read_str(
+    s: &str,
+    opts: &ReaderOpts,
+    hook: &mut dyn ReadHooks,
+) -> Result<Value, ReaderError> {
+    read_str_fired(s, opts, hook).0
+}
+
+/// [`read_str`] plus the fired-discards log (eval-side consult
+/// drains it before the outcome; S6+S7 merge — the log would
+/// otherwise die with the internal reader).
+pub fn read_str_fired(
+    s: &str,
+    opts: &ReaderOpts,
+    hook: &mut dyn ReadHooks,
+) -> (Result<Value, ReaderError>, Vec<FiredTag>) {
     let mut reader = Reader::new(s, opts);
-    unwrap_single(reader.read_inner(true, None, true)?)
+    let out = reader.read_inner(true, None, true, hook).and_then(unwrap_single);
+    let fired = reader.take_fired();
+    (out, fired)
 }
 
 /// Fold a single-read outcome: values flow. Callers pass
@@ -369,10 +445,14 @@ fn unwrap_single(form: Form) -> Result<Value, ReaderError> {
 }
 
 /// Read every form from `s` (fresh positions; errors abort the read).
-pub fn read_all(s: &str, opts: &ReaderOpts) -> Result<Vec<Value>, ReaderError> {
+pub fn read_all(
+    s: &str,
+    opts: &ReaderOpts,
+    hook: &mut dyn ReadHooks,
+) -> Result<Vec<Value>, ReaderError> {
     let mut reader = Reader::new(s, opts);
     let mut forms = Vec::new();
-    while let Some(v) = reader.read_form(false)? {
+    while let Some(v) = reader.read_form(false, hook)? {
         forms.push(v);
     }
     Ok(forms)
@@ -383,7 +463,7 @@ mod tests {
     use std::collections::HashSet;
 
     use super::{Form, unwrap_single};
-    use crate::{ReadCond, Reader, ReaderError, ReaderOpts, read_all, read_str};
+    use crate::{NoHooks, ReadCond, Reader, ReaderError, ReaderOpts, read_all, read_str};
     use clj_value::{Keyword, PrintOpts, Value, pr_to_string};
 
     fn pr(v: &clj_value::Value) -> String {
@@ -395,14 +475,14 @@ mod tests {
         // probe16: the quote consumes only the first spliced item; the
         // leftover is dropped, not returned as the next form.
         let opts = ReaderOpts::default();
-        let forms = read_all("'#?@(:clj (1 2)) X", &opts).unwrap();
+        let forms = read_all("'#?@(:clj (1 2)) X", &opts, &mut NoHooks).unwrap();
         assert_eq!(forms.len(), 2);
         assert_eq!(pr(&forms[0]), "(quote 1)");
         assert_eq!(pr(&forms[1]), "X");
-        let forms = read_all("'#?@(:clj (1 2))", &opts).unwrap();
+        let forms = read_all("'#?@(:clj (1 2))", &opts, &mut NoHooks).unwrap();
         assert_eq!(forms.len(), 1);
         assert_eq!(pr(&forms[0]), "(quote 1)");
-        let forms = read_all("#(1 #?@(:clj (2 3)))", &opts).unwrap();
+        let forms = read_all("#(1 #?@(:clj (2 3)))", &opts, &mut NoHooks).unwrap();
         assert_eq!(forms.len(), 1);
         assert!(pr(&forms[0]).starts_with("(fn* [] (1 2 3))"));
     }
@@ -410,7 +490,7 @@ mod tests {
     #[test]
     fn cond_eof_reports_body_line_with_line_numbers() {
         // `eof_delimited`, tracked arm.
-        let err = read_str("#?(", &ReaderOpts::default()).unwrap_err();
+        let err = read_str("#?(", &ReaderOpts::default(), &mut NoHooks).unwrap_err();
         assert!(matches!(err, ReaderError::EofDelimited { .. }));
         assert_eq!(err.message(), "EOF while reading, starting at line 1");
     }
@@ -422,7 +502,7 @@ mod tests {
             line_numbers: false,
             ..ReaderOpts::default()
         };
-        let err = read_str("#?(", &opts).unwrap_err();
+        let err = read_str("#?(", &opts, &mut NoHooks).unwrap_err();
         assert!(matches!(err, ReaderError::Eof { .. }), "got {err:?}");
         assert_eq!(err.message(), "EOF while reading");
     }
@@ -454,7 +534,7 @@ mod tests {
         // pins the defensive fallback.
         let opts = ReaderOpts::default();
         let mut reader = Reader::new("x", &opts);
-        let _ = reader.invoke_macro('x', false);
+        let _ = reader.invoke_macro('x', false, &mut NoHooks);
     }
 
     #[test]
@@ -464,7 +544,7 @@ mod tests {
             read_cond: ReadCond::Deny,
             ..ReaderOpts::default()
         });
-        let err = reader.read_form(true).unwrap_err();
+        let err = reader.read_form(true, &mut NoHooks).unwrap_err();
         assert!(
             matches!(err, ReaderError::CondNotAllowed { .. }),
             "got {err:?}"
@@ -493,7 +573,10 @@ mod tests {
         assert_eq!((reader.line(), reader.col()), (2, 1));
         assert_eq!(reader.read_line(), None);
         reader.extend("(b)");
-        let form = reader.read_form(true).unwrap().expect("extended form");
+        let form = reader
+            .read_form(true, &mut NoHooks)
+            .unwrap()
+            .expect("extended form");
         assert_eq!(pr(&form), "(b)");
         assert_eq!((reader.line(), reader.col()), (2, 4));
     }
@@ -508,10 +591,66 @@ mod tests {
     }
 
     #[test]
+    fn suppress_seeds_from_opts() {
+        // S7 `*suppress-read*` (probe `e-tag-sup`): a seeded reader
+        // preserves unknown tags; `set_opts` re-seeds between forms.
+        let opts = ReaderOpts {
+            suppress_read: true,
+            ..ReaderOpts::default()
+        };
+        let mut reader = Reader::new("#foo [1 2]", &opts);
+        let form = reader
+            .read_form(false, &mut NoHooks)
+            .unwrap()
+            .expect("tagged form");
+        assert_eq!(pr(&form), "#foo [1 2]");
+        reader.set_opts(&ReaderOpts::default());
+        let mut plain = Reader::new("#foo [1 2]", &ReaderOpts::default());
+        plain.set_opts(&opts);
+        let form = plain
+            .read_form(false, &mut NoHooks)
+            .unwrap()
+            .expect("tagged form");
+        assert_eq!(pr(&form), "#foo [1 2]");
+        let err = read_str("#foo [1 2]", &ReaderOpts::default(), &mut NoHooks).unwrap_err();
+        assert!(matches!(err, ReaderError::UnknownTag { .. }));
+    }
+
+    #[test]
+    fn consume_whitespaces_stops_at_forms() {
+        // S7 loads: trivia goes, the first form char stays (ws-only
+        // input drains to EOF).
+        let mut reader = Reader::new("  \n42", &ReaderOpts::default());
+        reader.consume_whitespaces();
+        assert_eq!((reader.line(), reader.col()), (2, 1));
+        let form = reader
+            .read_form(false, &mut NoHooks)
+            .unwrap()
+            .expect("form");
+        assert_eq!(pr(&form), "42");
+        let mut reader = Reader::new("  ", &ReaderOpts::default());
+        reader.consume_whitespaces();
+        assert!(reader.read_form(false, &mut NoHooks).unwrap().is_none());
+    }
+
+    #[test]
+    fn capture_passthroughs_bracket_the_form() {
+        // S7 `read+string`: the mark/excluded-terminator bracketing.
+        let mut reader = Reader::new("42 43", &ReaderOpts::default());
+        let mark = reader.capture_mark();
+        let form = reader
+            .read_form(false, &mut NoHooks)
+            .unwrap()
+            .expect("form");
+        assert_eq!(pr(&form), "42");
+        assert_eq!(reader.captured_since(mark), "42");
+    }
+
+    #[test]
     fn eof_delimited_span_for_truncated_list() {
         // Oracle `r-exdata`: the message names first-line 1 while the
         // span (ex-data source) sits at the bumped EOF position 2:1.
-        let err = read_str("(a", &ReaderOpts::default()).unwrap_err();
+        let err = read_str("(a", &ReaderOpts::default(), &mut NoHooks).unwrap_err();
         assert_eq!(err.message(), "EOF while reading, starting at line 1");
         assert!(matches!(err, ReaderError::EofDelimited { .. }));
         let span = err.span();

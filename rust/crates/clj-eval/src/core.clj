@@ -1804,3 +1804,8 @@
                         (transient {})
                         m))]
     (with-meta ret (meta m))))
+;; --- `with-loading-context` (S7 read gates): the JVM binds the
+;; loader around the body (probe `w-expand`); the port has no
+;; classloaders, so the macro keeps the immediate-invocation shape
+;; and the cycle guard stays native (never forked here).
+(defmacro with-loading-context [& body] `((fn ~(gensym "loading") [] ~@body)))

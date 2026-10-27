@@ -105,13 +105,18 @@ Tag-table dispatch (`DataReader` arm — S6), `*data-readers*`
   with entry span for the gate (`(1,3)`) and post-operand
   span for applications (`(1,10)`); entry checks
   (`:unknown`, resolver cast) stay raw (`h-unknown-lnpr`,
-  `h-resolver-lnpr`). `read-string` keeps its landed
-  `RuntimeException`-message wrap (exact for
-  `RuntimeException`-classed outcomes, same flattening as
-  the pre-existing `NumberFormatException` case otherwise).
-  Load wraps read-phase outcomes in `Syntax error reading
-  source` (`l-err-*`, `m-loadstring-*`) and entry-cast
-  failures in `Syntax error executing` (`m-load-resolver`,
+  `h-resolver-lnpr`). `read-string` surfaces `#=`/resolver
+  throwables raw — class, message, data, and cause intact
+  (`c-*`, `d-*`, `f-sq-currentnil`, `f-throws`) — and wraps
+  only genuine reader errors in a message-only
+  `RuntimeException` (`e-trunc`, `c-eof`, `f-nilalias`).
+  (The plain-`PushbackReader` raw side —
+  `c-div-read`, `c-unsupported-read`, `c-nofn-read` — has
+  no port counterpart: port readers are always
+  line-numbered, so `read` always wraps.) Load wraps
+  read-phase outcomes in `Syntax error reading source`
+  (`l-err-*`, `m-loadstring-*`) and entry-cast failures in
+  `Syntax error executing` (`m-load-resolver`,
   `l-resolver-mid`).
 - `read+string` captures the consumed text (leading trivia
   included) and Java-trims it (`p-comment`, `p-tabs`); nil
@@ -125,6 +130,11 @@ Tag-table dispatch (`DataReader` arm — S6), `*data-readers*`
 - Known port divergences (out of fence): load reads all
   forms before evaluating (the JVM interleaves:
   `l-err-read-defined`, `m-loadstring-trunc-defined`),
-  `#inst` under suppression, non-`RuntimeException` `#=`
-  classes under `read-string`, `:added`/`:doc` metas on
-  boot vars, `#=` host heads (classes/ctors/statics).
+  `#inst` under suppression, `:added`/`:doc` metas on
+  boot vars, `#=` host heads (classes/ctors/statics),
+  `#=(String 1)` (the port refers an import-stub
+  `clojure.core/String` var, so the head resolves and
+  fails the `IFn` cast; the JVM reports "Can't resolve"),
+  promise 0-arity calls through `#=` (the port's promise
+  reify lacks it port-wide; `#=` dispatches faithfully),
+  and the plain-reader raw side above.

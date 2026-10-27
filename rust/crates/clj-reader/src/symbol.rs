@@ -18,6 +18,7 @@
 use clj_value::{Keyword, Symbol, Value};
 
 use crate::ReaderOpts;
+use crate::hooks::{EvalReadError, ReadHooks, ResolverOp};
 use crate::stream::CharStream;
 
 /// `isWhitespace`: `Character.isWhitespace` plus `,`, as an explicit
@@ -112,19 +113,30 @@ pub fn read_token(stream: &mut CharStream, initch: char) -> String {
 }
 
 /// `interpretToken`: `nil`/`true`/`false`, else `matchSymbol`
-/// (numbers never come through here); `None` means `Invalid token`.
-#[must_use]
-pub fn interpret_token(s: &str, opts: &ReaderOpts) -> Option<Value> {
+/// (numbers never come through here); `Ok(None)` means `Invalid
+/// token`, `Err` a failed resolver consult.
+pub fn interpret_token(
+    s: &str,
+    opts: &ReaderOpts,
+    hook: &mut dyn ReadHooks,
+) -> Result<Option<Value>, EvalReadError> {
     match s {
-        "nil" => Some(Value::Nil),
-        "true" => Some(Value::Bool(true)),
-        "false" => Some(Value::Bool(false)),
-        _ => match_symbol(s, opts),
+        "nil" => Ok(Some(Value::Nil)),
+        "true" => Ok(Some(Value::Bool(true))),
+        "false" => Ok(Some(Value::Bool(false))),
+        _ => match_symbol(s, opts, hook),
     }
 }
 
-/// `matchSymbol`: `None` means `Invalid token`.
-pub fn match_symbol(s: &str, opts: &ReaderOpts) -> Option<Value> {
+/// `matchSymbol`: `Ok(None)` means `Invalid token`. A bound
+/// `*reader-resolver*` answers `::` auto-resolution instead of the
+/// maps (the answer's NAME becomes the keyword ns — probes
+/// `f-alias`, `f-current`, `f-alias-2part`, `f-nilalias`).
+pub fn match_symbol(
+    s: &str,
+    opts: &ReaderOpts,
+    hook: &mut dyn ReadHooks,
+) -> Result<Option<Value>, EvalReadError> {
     if let Some((ns, name)) = match_symbol_pat(s) {
         // Validation first: a match that fails here returns null
         // WITHOUT trying `arraySymbolPat`.
@@ -132,28 +144,51 @@ pub fn match_symbol(s: &str, opts: &ReaderOpts) -> Option<Value> {
             || name.ends_with(':')
             || after_first_char(s).contains("::")
         {
-            return None;
+            return Ok(None);
         }
         if let Some(rest) = s.strip_prefix("::") {
             let ks = Symbol::intern(rest);
+            if opts.resolver_bound {
+                return resolve_auto(&ks, hook);
+            }
             let resolved = match ks.namespace() {
                 // A qualified name looks its head up as an ALIAS.
                 Some(alias) => opts.aliases.get(alias).cloned(),
                 None => Some(opts.current_ns.clone()),
             };
-            return resolved.map(|ns| Value::Keyword(Keyword::new(Some(&ns), ks.name())));
+            return Ok(resolved.map(|ns| Value::Keyword(Keyword::new(Some(&ns), ks.name()))));
         }
         let is_keyword = s.starts_with(':');
         let sym = Symbol::intern(if is_keyword { &s[1..] } else { s });
         if is_keyword {
-            Some(Value::Keyword(Keyword::new(sym.namespace(), sym.name())))
+            Ok(Some(Value::Keyword(Keyword::new(
+                sym.namespace(),
+                sym.name(),
+            ))))
         } else {
-            Some(Value::Symbol(sym))
+            Ok(Some(Value::Symbol(sym)))
         }
     } else {
-        let (ns, name) = match_array_symbol_pat(s)?;
-        Some(Value::Symbol(Symbol::new(Some(&ns), &name)))
+        match match_array_symbol_pat(s) {
+            Some((ns, name)) => Ok(Some(Value::Symbol(Symbol::new(Some(&ns), &name)))),
+            None => Ok(None),
+        }
     }
+}
+
+/// `::` auto-resolution through a bound `*reader-resolver*`:
+/// qualified heads consult `resolveAlias`, bare names consult
+/// `currentNS`; either way the answer's NAME becomes the keyword
+/// namespace and nil means `Invalid token`.
+fn resolve_auto(ks: &Symbol, hook: &mut dyn ReadHooks) -> Result<Option<Value>, EvalReadError> {
+    let resolved = match ks.namespace() {
+        Some(alias) => {
+            let head = Symbol::new(None, alias);
+            hook.resolve(ResolverOp::ResolveAlias, Some(&head))?
+        }
+        None => hook.resolve(ResolverOp::CurrentNs, None)?,
+    };
+    Ok(resolved.map(|r| Value::Keyword(Keyword::new(Some(r.name()), ks.name()))))
 }
 
 /// Everything after the first char (for the `indexOf("::", 1)` rule;
@@ -236,7 +271,7 @@ fn match_array_symbol_pat(s: &str) -> Option<(String, String)> {
 #[cfg(test)]
 mod tests {
     use super::{after_first_char, interpret_token, is_whitespace};
-    use crate::ReaderOpts;
+    use crate::{NoHooks, ReaderOpts};
     use clj_value::Value;
 
     #[test]
@@ -267,9 +302,18 @@ mod tests {
     #[test]
     fn literals_and_symbols() {
         let opts = ReaderOpts::default();
-        assert_eq!(interpret_token("nil", &opts), Some(Value::Nil));
-        assert_eq!(interpret_token("true", &opts), Some(Value::Bool(true)));
-        assert_eq!(interpret_token("false", &opts), Some(Value::Bool(false)));
+        assert_eq!(
+            interpret_token("nil", &opts, &mut NoHooks),
+            Ok(Some(Value::Nil))
+        );
+        assert_eq!(
+            interpret_token("true", &opts, &mut NoHooks),
+            Ok(Some(Value::Bool(true)))
+        );
+        assert_eq!(
+            interpret_token("false", &opts, &mut NoHooks),
+            Ok(Some(Value::Bool(false)))
+        );
         // Non-terminating macro chars join tokens.
         for (input, want) in [
             ("a'b", "a'b"),
@@ -286,7 +330,7 @@ mod tests {
             ("+a", "+a"),
             ("--", "--"),
         ] {
-            let got = interpret_token(input, &opts);
+            let got = interpret_token(input, &opts, &mut NoHooks).unwrap();
             assert_eq!(
                 got.map(|v| clj_value::java_debug(&v)),
                 Some(want.to_owned()),
@@ -295,12 +339,16 @@ mod tests {
         }
         // Digit-led names are legal keywords.
         assert_eq!(
-            interpret_token(":1", &opts).map(|v| clj_value::java_debug(&v)),
+            interpret_token(":1", &opts, &mut NoHooks)
+                .unwrap()
+                .map(|v| clj_value::java_debug(&v)),
             Some(":1".to_owned())
         );
         // Array symbols.
         assert_eq!(
-            interpret_token("a/1", &opts).map(|v| clj_value::java_debug(&v)),
+            interpret_token("a/1", &opts, &mut NoHooks)
+                .unwrap()
+                .map(|v| clj_value::java_debug(&v)),
             Some("a/1".to_owned())
         );
     }
@@ -312,11 +360,18 @@ mod tests {
             "foo:/bar", ":a::b", "//", "a/", "/a", "/1", "ab/12", "::", ":::", ":", "a:", ":a:",
             "a::b", "a/b/", ":a/", "1:2", "/.5",
         ] {
-            assert_eq!(interpret_token(input, &opts), None, "{input}");
+            assert_eq!(
+                interpret_token(input, &opts, &mut NoHooks),
+                Ok(None),
+                "{input}"
+            );
         }
         // Unknown alias, and a qualified name looked up as an alias.
-        assert_eq!(interpret_token("::nope/x", &opts), None);
-        assert_eq!(interpret_token("::clojure.string/foo", &opts), None);
+        assert_eq!(interpret_token("::nope/x", &opts, &mut NoHooks), Ok(None));
+        assert_eq!(
+            interpret_token("::clojure.string/foo", &opts, &mut NoHooks),
+            Ok(None)
+        );
     }
 
     #[test]
@@ -325,12 +380,69 @@ mod tests {
         opts.aliases
             .insert("str".to_owned(), "clojure.string".to_owned());
         assert_eq!(
-            interpret_token("::foo", &opts).map(|v| clj_value::java_debug(&v)),
+            interpret_token("::foo", &opts, &mut NoHooks)
+                .unwrap()
+                .map(|v| clj_value::java_debug(&v)),
             Some(":user/foo".to_owned())
         );
         assert_eq!(
-            interpret_token("::str/foo", &opts).map(|v| clj_value::java_debug(&v)),
+            interpret_token("::str/foo", &opts, &mut NoHooks)
+                .unwrap()
+                .map(|v| clj_value::java_debug(&v)),
             Some(":clojure.string/foo".to_owned())
+        );
+    }
+
+    #[test]
+    fn auto_resolve_through_the_hook() {
+        // S7 `*reader-resolver*` (probes `f-alias`, `f-current`,
+        // `f-alias-2part`, `f-nilalias`, `f-current-nil`): qualified
+        // heads consult `resolveAlias`, bare names `currentNS`; the
+        // answer's NAME becomes the keyword ns; nil is invalid.
+        use crate::hooks::{ResolverOp, ScriptedHooks};
+        use clj_value::Symbol;
+
+        let opts = ReaderOpts {
+            resolver_bound: true,
+            ..ReaderOpts::default()
+        };
+        let aliased = Symbol::new(Some("A"), "B");
+        let mut hooks =
+            ScriptedHooks::new(Err(crate::EvalReadError::NoHook), vec![Ok(Some(aliased))]);
+        let got = interpret_token("::str/foo", &opts, &mut hooks).unwrap();
+        assert_eq!(
+            got.map(|v| clj_value::java_debug(&v)),
+            Some(":B/foo".to_owned())
+        );
+        assert_eq!(
+            hooks.calls,
+            vec![(ResolverOp::ResolveAlias, Some(Symbol::new(None, "str")))]
+        );
+        let current = Symbol::new(None, "cur-ns");
+        let mut hooks =
+            ScriptedHooks::new(Err(crate::EvalReadError::NoHook), vec![Ok(Some(current))]);
+        let got = interpret_token("::foo", &opts, &mut hooks).unwrap();
+        assert_eq!(
+            got.map(|v| clj_value::java_debug(&v)),
+            Some(":cur-ns/foo".to_owned())
+        );
+        assert_eq!(hooks.calls, vec![(ResolverOp::CurrentNs, None)]);
+        // Nil answers are invalid tokens.
+        let mut hooks = ScriptedHooks::new(Err(crate::EvalReadError::NoHook), vec![Ok(None)]);
+        assert_eq!(
+            interpret_token("::str/foo", &opts, &mut hooks).unwrap(),
+            None
+        );
+        let mut hooks = ScriptedHooks::new(Err(crate::EvalReadError::NoHook), vec![Ok(None)]);
+        assert_eq!(interpret_token("::foo", &opts, &mut hooks).unwrap(), None);
+        // Hook failures propagate.
+        let mut hooks = ScriptedHooks::new(
+            Err(crate::EvalReadError::NoHook),
+            vec![Err(crate::EvalReadError::NoHook)],
+        );
+        assert_eq!(
+            interpret_token("::foo", &opts, &mut hooks).unwrap_err(),
+            crate::EvalReadError::NoHook
         );
     }
 }

@@ -324,38 +324,135 @@ impl Evaluator {
     /// namespace (syntax-quote and `::` resolve read-time, like the
     /// JVM). S7 drivers use this + [`eval_top_form`](Self::eval_top_form)
     /// to iterate per-form (print/shift each value, stop at the
-    /// first error). Data readers resolve per form (S6): the consult
+    /// first error). Like `Compiler.load`, leading whitespace is
+    /// consumed before the zero-oos-S7 entry checks (which blame
+    /// the post-skip position), and `*read-eval*` is forced true.
+    /// The hook applies `#=` and consults the resolver (hookless
+    /// callers pass `NoHooks`, which reports `#=` unevaluated).
+    /// Data readers resolve per form (S6): the consult
     /// re-snapshots every iteration (user code runs between forms),
     /// fired discards drain before each form resolves, and
     /// resolution failures surface as uncaught throwables.
-    pub fn read_forms(&mut self, text: &str) -> Result<Vec<Value>, SourceError> {
-        let cur = self.current_ns_name();
+    pub fn read_forms(
+        &mut self,
+        text: &str,
+        hook: &mut dyn clj_reader::ReadHooks,
+    ) -> Result<Vec<Value>, SourceError> {
+        match Self::read_forms_pre(self, text) {
+            Ok((mut reader, mut opts)) => Self::read_forms_loop(self, &mut reader, hook, &mut opts),
+            Err((reader, cce)) => Err(crate::reader::executing_wrap(
+                reader.line(),
+                reader.col(),
+                &cce,
+                hook.fresh_id(),
+                hook.fresh_id(),
+            )),
+        }
+    }
+
+    /// [`read_forms`](Self::read_forms) with the live evaluator
+    /// hooks (what `eval`/`load` use). The loop is inlined (not
+    /// shared with `read_forms_loop`): the live hooks borrow the
+    /// evaluator, which the per-form consult also needs mutably,
+    /// so each attempt scopes its own hooks.
+    pub fn read_forms_live(&mut self, text: &str) -> Result<Vec<Value>, SourceError> {
+        match Self::read_forms_pre(self, text) {
+            Ok((mut reader, mut opts)) => {
+                let mut forms = Vec::new();
+                loop {
+                    crate::core::snapshot_data_readers(self, &mut opts);
+                    reader.set_opts(&opts);
+                    let outcome = {
+                        let mut hooks = crate::reader::LiveReadHooks::new(self);
+                        reader.read_form(false, &mut hooks)
+                    };
+                    match outcome {
+                        Ok(Some(v)) => {
+                            Self::drain_data_readers(self, &mut reader)?;
+                            forms.push(Self::resolve_data_readers(self, v)?);
+                        }
+                        Ok(None) => {
+                            Self::drain_data_readers(self, &mut reader)?;
+                            return Ok(forms);
+                        }
+                        Err(e) => {
+                            // Effects precede the failure (fired tags ran
+                            // during the read), so drain first.
+                            Self::drain_data_readers(self, &mut reader)?;
+                            return Err(SourceError::Reader(e));
+                        }
+                    }
+                }
+            }
+            Err((reader, cce)) => {
+                let outer = self.next_id();
+                let cause = self.next_id();
+                Err(crate::reader::executing_wrap(
+                    reader.line(),
+                    reader.col(),
+                    &cce,
+                    outer,
+                    cause,
+                ))
+            }
+        }
+    }
+
+    /// The shared read prologue: synced options, leading
+    /// whitespace consumed, gates seeded (entry failures keep the
+    /// post-skip reader, so callers blame the position like
+    /// `Compiler.load`).
+    fn read_forms_pre(
+        eval: &mut Evaluator,
+        text: &str,
+    ) -> Result<(clj_reader::Reader, ReaderOpts), (clj_reader::Reader, NativeError)> {
+        let cur = eval.current_ns_name();
         let mut opts = ReaderOpts {
             current_ns: cur.clone(),
             ..Default::default()
         };
-        if let Some(ns) = self.registry.get(&cur) {
+        if let Some(ns) = eval.registry.get(&cur) {
             opts.aliases = ns.alias_map();
             opts.refers = ns.refer_map();
         }
-        let mut reader = Reader::new(text, &opts);
+        let mut reader = clj_reader::Reader::new(text, &opts);
+        reader.consume_whitespaces();
+        let seed = match crate::reader::seed_load_gates(eval) {
+            Ok(seed) => seed,
+            Err(cce) => return Err((reader, cce)),
+        };
+        opts.read_eval = seed.read_eval;
+        opts.suppress_read = seed.suppress_read;
+        opts.resolver_bound = seed.resolver_bound;
+        reader.set_opts(&opts);
+        Ok((reader, opts))
+    }
+
+    /// Read every form from a primed reader, resolving data
+    /// readers per form (S6 consult inside the S7 hook loop).
+    fn read_forms_loop(
+        eval: &mut Evaluator,
+        reader: &mut clj_reader::Reader,
+        hook: &mut dyn clj_reader::ReadHooks,
+        opts: &mut ReaderOpts,
+    ) -> Result<Vec<Value>, SourceError> {
         let mut forms = Vec::new();
         loop {
-            crate::core::snapshot_data_readers(self, &mut opts);
-            reader.set_opts(&opts);
-            match reader.read_form(false) {
+            crate::core::snapshot_data_readers(eval, opts);
+            reader.set_opts(opts);
+            match reader.read_form(false, hook) {
                 Ok(Some(v)) => {
-                    self.drain_data_readers(&mut reader)?;
-                    forms.push(self.resolve_data_readers(v)?);
+                    Self::drain_data_readers(eval, reader)?;
+                    forms.push(Self::resolve_data_readers(eval, v)?);
                 }
                 Ok(None) => {
-                    self.drain_data_readers(&mut reader)?;
+                    Self::drain_data_readers(eval, reader)?;
                     return Ok(forms);
                 }
                 Err(e) => {
                     // Effects precede the failure (fired tags ran
                     // during the read), so drain first.
-                    self.drain_data_readers(&mut reader)?;
+                    Self::drain_data_readers(eval, reader)?;
                     return Err(SourceError::Reader(e));
                 }
             }
@@ -376,13 +473,14 @@ impl Evaluator {
         crate::core::resolve_data_readers(self, form)
             .map_err(|e| SourceError::Uncaught(self.throwable(e)))
     }
+    }
 
     /// Read every form in `text` (default `:read-cond :allow`
     /// options) and evaluate each in turn, collecting one value per
     /// read form. Uncaught throwables (including bare macro-arity
     /// failures) abort the load.
     pub fn eval_source(&mut self, text: &str) -> Result<Vec<Value>, SourceError> {
-        let forms = self.read_forms(text)?;
+        let forms = self.read_forms_live(text)?;
         let mut out = Vec::with_capacity(forms.len());
         for form in &forms {
             out.push(self.eval_top_form(form)?);

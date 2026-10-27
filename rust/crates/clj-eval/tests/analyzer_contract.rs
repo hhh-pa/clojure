@@ -12,7 +12,7 @@
 //! spans.
 
 use clj_eval::{Evaluator, boot};
-use clj_reader::{ReaderOpts, read_str};
+use clj_reader::{NoHooks, ReaderOpts, read_str};
 
 fn chain_of(src: &str) -> Vec<String> {
     let mut eval = Evaluator::new("test");
@@ -24,10 +24,10 @@ fn chain_of(src: &str) -> Vec<String> {
         "(def vfn251 (fn [x] x))",
         "(def vu251)",
     ] {
-        let form = read_str(setup, &ReaderOpts::default()).unwrap();
+        let form = read_str(setup, &ReaderOpts::default(), &mut NoHooks).unwrap();
         let _ = eval.analyze(&form);
     }
-    let form = read_str(src, &ReaderOpts::default()).unwrap();
+    let form = read_str(src, &ReaderOpts::default(), &mut NoHooks).unwrap();
     match eval.analyze(&form) {
         Ok(_) => panic!("expected an error for {src}"),
         Err(e) => e.chain(),
@@ -55,10 +55,10 @@ fn analyze_ok(src: &str) {
         "(def vfn251 (fn [x] x))",
         "(def vu251)",
     ] {
-        let form = read_str(setup, &ReaderOpts::default()).unwrap();
+        let form = read_str(setup, &ReaderOpts::default(), &mut NoHooks).unwrap();
         let _ = eval.analyze(&form);
     }
-    let form = read_str(src, &ReaderOpts::default()).unwrap();
+    let form = read_str(src, &ReaderOpts::default(), &mut NoHooks).unwrap();
     if let Err(e) = eval.analyze(&form) {
         panic!("expected {src} to analyze: {}", e.cause());
     }
@@ -449,7 +449,7 @@ fn catch_class_table() {
     assert_eq!(names.len(), 44);
     for class in names {
         let src = format!("(try 1 (catch {class} e 1))");
-        let form = read_str(&src, &ReaderOpts::default()).unwrap();
+        let form = read_str(&src, &ReaderOpts::default(), &mut NoHooks).unwrap();
         Evaluator::new("test").analyze(&form).unwrap();
     }
     check(
@@ -510,9 +510,9 @@ fn macro_shadowing() {
     }
     // A user-ns global shadows too (probe31 `shadow-global`).
     let mut eval = Evaluator::new("test");
-    let setup = read_str("(def loop 5)", &ReaderOpts::default()).unwrap();
+    let setup = read_str("(def loop 5)", &ReaderOpts::default(), &mut NoHooks).unwrap();
     let _ = eval.analyze(&setup);
-    let form = read_str("(loop [x 1] x)", &ReaderOpts::default()).unwrap();
+    let form = read_str("(loop [x 1] x)", &ReaderOpts::default(), &mut NoHooks).unwrap();
     assert_eq!(
         eval.analyze(&form).unwrap_err().chain(),
         vec![
@@ -1193,7 +1193,7 @@ fn nested_span() {
 fn valid_shapes_pass() {
     let mut eval = Evaluator::new("test");
     for setup in ["(def va251 7)", "(def user/q251 1)"] {
-        let form = read_str(setup, &ReaderOpts::default()).unwrap();
+        let form = read_str(setup, &ReaderOpts::default(), &mut NoHooks).unwrap();
         let _ = eval.analyze(&form);
     }
     for src in [
@@ -1223,7 +1223,7 @@ fn valid_shapes_pass() {
         "(if 1 2)",
         "(if 1 2 3)",
     ] {
-        let form = read_str(src, &ReaderOpts::default()).unwrap();
+        let form = read_str(src, &ReaderOpts::default(), &mut NoHooks).unwrap();
         if let Err(e) = eval.analyze(&form) {
             panic!("expected {src} to analyze: {}", e.cause());
         }
@@ -1233,7 +1233,12 @@ fn valid_shapes_pass() {
         .map(|n| format!("p{n}"))
         .collect::<Vec<_>>()
         .join(" ");
-    let form = read_str(&format!("(fn [{params20}] 1)"), &ReaderOpts::default()).unwrap();
+    let form = read_str(
+        &format!("(fn [{params20}] 1)"),
+        &ReaderOpts::default(),
+        &mut NoHooks,
+    )
+    .unwrap();
     assert!(eval.analyze(&form).is_ok());
 }
 
@@ -1516,7 +1521,7 @@ fn gap2_private_macro_direct_analyze() {
     eval.eval_source("(defmacro ^:private privm [x] (list 'quote x))")
         .unwrap();
     eval.eval_source("(ns user)").unwrap();
-    let form = read_str("(fx936/privm 1)", &ReaderOpts::default()).unwrap();
+    let form = read_str("(fx936/privm 1)", &ReaderOpts::default(), &mut NoHooks).unwrap();
     match eval.analyze(&form) {
         Err(e) => assert_eq!(
             e.chain(),
@@ -1531,7 +1536,12 @@ fn gap2_shadowed_builtin_macro_invoke() {
     // A local shadows the `let` builtin, so the inner form analyzes
     // as an invocation of the local (expr.rs:906).
     let mut eval = boot();
-    let form = read_str("(let [let 5] (let 1))", &ReaderOpts::default()).unwrap();
+    let form = read_str(
+        "(let [let 5] (let 1))",
+        &ReaderOpts::default(),
+        &mut NoHooks,
+    )
+    .unwrap();
     assert!(eval.analyze(&form).is_ok());
 }
 
@@ -1544,7 +1554,12 @@ fn gap2_core_alias_shadow() {
     eval.eval_source("(def let 42)").unwrap();
     eval.eval_source("(in-ns 'user)").unwrap();
     eval.eval_source("(alias 'clojure.core 'aa876)").unwrap();
-    let form = read_str("(clojure.core/let [1 2] 3)", &ReaderOpts::default()).unwrap();
+    let form = read_str(
+        "(clojure.core/let [1 2] 3)",
+        &ReaderOpts::default(),
+        &mut NoHooks,
+    )
+    .unwrap();
     assert!(eval.analyze(&form).is_ok());
 }
 
@@ -1552,7 +1567,12 @@ fn gap2_core_alias_shadow() {
 fn gap2_def_outside_current_ns() {
     // A qualified def onto an existing foreign var (expr.rs:1051).
     let mut eval = boot();
-    let form = read_str("(def clojure.core/map 1)", &ReaderOpts::default()).unwrap();
+    let form = read_str(
+        "(def clojure.core/map 1)",
+        &ReaderOpts::default(),
+        &mut NoHooks,
+    )
+    .unwrap();
     match eval.analyze(&form) {
         Err(e) => assert_eq!(
             e.chain(),

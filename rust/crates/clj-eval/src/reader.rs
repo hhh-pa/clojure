@@ -21,13 +21,18 @@ use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Stdin};
 use std::sync::{Arc, Mutex};
 
-use clj_reader::{ReadCond, Reader, ReaderError, ReaderOpts, Span};
-use clj_value::{ExtensionValue, Keyword, Map, ThrowClass, Throwable, Value, new_map};
+use clj_reader::{
+    EvalReadError, ReadCond, ReadHooks, Reader, ReaderError, ReaderOpts, ResolverOp, Span,
+};
+use clj_value::{ExtensionValue, Keyword, Map, Symbol, ThrowClass, Throwable, Value, new_map};
 
 use crate::core::cce_err;
 use crate::error::NativeError;
 use crate::eval::Evaluator;
-use crate::ns::{NativeFnPtr, check_arity, deref_core, throw_class_for};
+use crate::ns::{
+    NativeFnPtr, check_arity, core_var, deref_core, do_resolve, intern_routed, signal_to_native,
+    sym_str, throw_class_for, var_value,
+};
 
 /// The JVM class of both the `*in*` root and the `with-in-str`
 /// bindings (probes `in-class`, `wis-class`).
@@ -87,7 +92,7 @@ impl ExtensionValue for StreamReader {
 }
 
 /// Downcast a value to a stream reader, if it is one.
-fn as_reader(v: &Value) -> Option<&StreamReader> {
+pub(crate) fn as_reader(v: &Value) -> Option<&StreamReader> {
     match v {
         Value::Extension(e) => e.as_any().downcast_ref::<StreamReader>(),
         _ => None,
@@ -241,14 +246,369 @@ fn map_reader_error(eval: &mut Evaluator, e: &ReaderError, recursive: bool) -> N
         format!("{}: {message}", class.jvm_name()),
     );
     outer.data = Some(reader_ex_data(span));
-    outer.cause = Some(Throwable {
-        id: eval.next_id(),
-        class,
-        message: Some(Arc::from(message.as_str())),
-        data: None,
-        cause: None,
+    // S7: a `#=`/resolver throwable rides as the cause intact (its
+    // `ex-data` and cause chain survive the wrap, like the JVM).
+    outer.cause = Some(match e {
+        ReaderError::EvalFailed {
+            error: EvalReadError::Failed(t),
+            ..
+        } => t.clone(),
+        _ => Throwable {
+            id: eval.next_id(),
+            class,
+            message: Some(Arc::from(message.as_str())),
+            data: None,
+            cause: None,
+        },
     });
     outer
+}
+
+/// S7 read gates (issue #50): the `*reader-resolver*` protocol
+/// is a 2-arity fn; anything else bound fails this cast (probes
+/// `f-nonresolver*`).
+const RESOLVER_CLASS: &str = "clojure.lang.LispReader$Resolver";
+
+/// The seeded gate state for one read call.
+pub(crate) struct ReadGateSeed {
+    /// `*read-eval*` (load entries force true).
+    pub read_eval: bool,
+    /// `*suppress-read*` (live entry binding).
+    pub suppress_read: bool,
+    /// `*reader-resolver*` is bound to a fn.
+    pub resolver_bound: bool,
+}
+
+/// Whether a bound `*reader-resolver*` can take consults: fns
+/// (closures/natives ride `Extension`), vars (derefed), multifns.
+fn is_resolver_fn(v: &Value) -> bool {
+    matches!(v, Value::Extension(_) | Value::Var(_) | Value::MultiFn(_))
+}
+
+/// The resolver entry cast (S7): nil is unbound, fns pass,
+/// anything else fails the `Resolver` cast — raw, like the JVM
+/// entry check (probes `f-nonresolver*`, `h-*`).
+fn check_resolver(eval: &Evaluator) -> Result<bool, NativeError> {
+    match deref_core(eval, "*reader-resolver*") {
+        Value::Nil => Ok(false),
+        v if is_resolver_fn(&v) => Ok(true),
+        v => Err(cce_err(&v, RESOLVER_CLASS)),
+    }
+}
+
+/// Seed the gates from the entry bindings (S7; probes `g-*`,
+/// `h-order*`): the resolver cast first, then the `:unknown`
+/// refusal. A missing `*read-eval*` (bare evaluators) allows,
+/// matching the true root.
+pub(crate) fn seed_read_gates(eval: &Evaluator) -> Result<ReadGateSeed, NativeError> {
+    let resolver_bound = check_resolver(eval)?;
+    let suppress_read = deref_core(eval, "*suppress-read*").is_truthy();
+    let Some(_) = core_var(eval, "*read-eval*") else {
+        return Ok(ReadGateSeed {
+            read_eval: true,
+            suppress_read,
+            resolver_bound,
+        });
+    };
+    let read_eval = deref_core(eval, "*read-eval*");
+    if read_eval == Value::Keyword(Keyword::new(None, "unknown")) {
+        return Err(NativeError::new(
+            ThrowClass::RuntimeException,
+            "Reading disallowed - *read-eval* bound to :unknown".to_owned(),
+        ));
+    }
+    Ok(ReadGateSeed {
+        read_eval: read_eval.is_truthy(),
+        suppress_read,
+        resolver_bound,
+    })
+}
+
+/// Seed the gates for a load (S7; probes `m-*`): `*read-eval*` is
+/// forced true (the binding is pushed separately, visibly);
+/// suppression still seeds live. The resolver cast stays raw here —
+/// callers report it `Compiler.load`-style (see [`executing_wrap`]).
+pub(crate) fn seed_load_gates(eval: &Evaluator) -> Result<ReadGateSeed, NativeError> {
+    Ok(ReadGateSeed {
+        read_eval: true,
+        suppress_read: deref_core(eval, "*suppress-read*").is_truthy(),
+        resolver_bound: check_resolver(eval)?,
+    })
+}
+
+/// A load-path resolver cast as `Compiler.load` reports it (S7;
+/// probes `m-load-resolver`, `l-resolver-mid`): `Syntax error
+/// executing at (line:col)`, caused by the cast.
+pub(crate) fn executing_wrap(
+    line: u32,
+    col: u32,
+    cce: &NativeError,
+    outer_id: u64,
+    cause_id: u64,
+) -> crate::eval::SourceError {
+    crate::eval::SourceError::Uncaught(Throwable {
+        id: outer_id,
+        class: ThrowClass::CompilerException,
+        message: Some(Arc::from(format!(
+            "Syntax error executing at ({line}:{col})."
+        ))),
+        data: None,
+        cause: Some(Box::new(Throwable {
+            id: cause_id,
+            class: cce.class.clone(),
+            message: Some(Arc::from(cce.message.as_str())),
+            data: cce.data.clone().map(Box::new),
+            cause: None,
+        })),
+    })
+}
+
+/// The live S7 hooks: `#=` application plus resolver consults,
+/// backed by the calling evaluator.
+pub(crate) struct LiveReadHooks<'a> {
+    eval: &'a mut Evaluator,
+}
+
+impl<'a> LiveReadHooks<'a> {
+    /// Borrow the calling evaluator for one read call.
+    pub(crate) fn new(eval: &'a mut Evaluator) -> Self {
+        Self { eval }
+    }
+
+    /// Lift a native error into a traveling `#=`/resolver failure
+    /// (message, class, data, and cause all survive).
+    fn lift(&mut self, e: NativeError) -> EvalReadError {
+        EvalReadError::Failed(Throwable {
+            id: self.eval.next_id(),
+            class: e.class.clone(),
+            message: Some(Arc::from(e.message.as_str())),
+            data: e.data.clone().map(Box::new),
+            cause: e.cause.clone().map(Box::new),
+        })
+    }
+
+    /// One `#=` operand (JVM `EvalReader`, probes `c-*`/`d-*`):
+    /// symbols name classes (the port has none), lists apply a
+    /// resolved head to the raw operand forms, anything else is
+    /// unsupported.
+    fn apply_eval_read(&mut self, form: &Value) -> Result<Value, NativeError> {
+        match form {
+            Value::Symbol(s) => Err(class_not_found(&sym_str(s))),
+            Value::List(l) => self.apply_eval_list(l),
+            _ => Err(NativeError::new(
+                ThrowClass::IllegalArgumentException,
+                "Unsupported #= form".to_owned(),
+            )),
+        }
+    }
+
+    /// Apply a `#=(head args*)` list: bare `var` interns, `C.`
+    /// heads need host classes, unknown qualified heads fail the
+    /// class lookup, and resolved vars apply to the raw args.
+    fn apply_eval_list(&mut self, l: &clj_value::List) -> Result<Value, NativeError> {
+        let mut items = l.iter();
+        let Some(head) = items.next() else {
+            return Err(npe(
+                "Cannot invoke \"clojure.lang.Symbol.equals(Object)\" because \"fs\" is null",
+            ));
+        };
+        let Value::Symbol(hs) = head else {
+            return Err(cce_err(head, "clojure.lang.Symbol"));
+        };
+        if hs.namespace().is_none() && hs.name() == "var" {
+            return self.apply_eval_var(items.next());
+        }
+        if hs.name().ends_with('.') {
+            let base = &hs.name()[..hs.name().len() - 1];
+            return Err(class_not_found(base));
+        }
+        let rest: Vec<Value> = items.cloned().collect();
+        if let Some(ns_part) = hs.namespace() {
+            // `namesStaticMember`: a head outside every known
+            // namespace/alias fails the class lookup (probes
+            // `c-qualmiss`, `d-static-miss`).
+            if !self.ns_or_alias_known(ns_part) {
+                return Err(class_not_found(ns_part));
+            }
+            let target = self.resolve_ns_target(ns_part);
+            let bare = Symbol::new(None, hs.name());
+            let resolved = do_resolve(self.eval, &target, None, None, &Value::Symbol(bare))?;
+            return self.apply_eval_resolved(resolved, hs, rest);
+        }
+        let cur = self.eval.current_ns_name();
+        let resolved = do_resolve(self.eval, &cur, None, None, &Value::Symbol(hs.clone()))?;
+        self.apply_eval_resolved(resolved, hs, rest)
+    }
+
+    /// Apply a resolved `#=` head: vars call with the raw args, and
+    /// anything else is unresolvable (the JVM's non-`Var` arm —
+    /// probes `c-nofn`, `c-if`, `c-classhead`).
+    fn apply_eval_resolved(
+        &mut self,
+        resolved: Value,
+        hs: &Symbol,
+        rest: Vec<Value>,
+    ) -> Result<Value, NativeError> {
+        match resolved {
+            Value::Var(v) => self.apply_eval_call(v, rest),
+            _ => Err(cant_resolve(hs)),
+        }
+    }
+
+    /// Apply a resolved `#=` head var to the raw operand forms: the
+    /// root must be invokable (probe `c-nonfn` pins the module-text
+    /// cast); throws propagate (probes `c-div-*`, `d-discard`).
+    fn apply_eval_call(
+        &mut self,
+        var: clj_value::Var,
+        rest: Vec<Value>,
+    ) -> Result<Value, NativeError> {
+        let root = self.eval.deref_var(var.id, &var.sym);
+        if !is_invokable(&root) {
+            return Err(cce_err(&root, "clojure.lang.IFn"));
+        }
+        let callee = Value::Var(var);
+        self.eval.call(&callee, &rest).map_err(signal_to_native)
+    }
+
+    /// Apply `#=(var s)`: intern (creating) and return the var
+    /// (probes `d-var*`); unqualified and missing seconds NPE like
+    /// the JVM (`RT.var` interning accidents).
+    fn apply_eval_var(&mut self, second: Option<&Value>) -> Result<Value, NativeError> {
+        let Some(second) = second else {
+            return Err(npe("Cannot read field \"ns\" because \"vs\" is null"));
+        };
+        let Value::Symbol(s) = second else {
+            return Err(cce_err(second, "clojure.lang.Symbol"));
+        };
+        let Some(ns_part) = s.namespace() else {
+            return Err(npe(
+                "Cannot invoke \"String.hashCode()\" because \"this.name\" is null",
+            ));
+        };
+        let name = s.name().to_owned();
+        self.eval.registry.ensure_ns(ns_part);
+        let target = Symbol::new(Some(ns_part), &name);
+        let (id, _) = intern_routed(self.eval, ns_part, None, &target)?;
+        Ok(var_value(id, &target))
+    }
+
+    /// `Compiler.namespaceFor`: a namespace that exists or is
+    /// aliased in the current namespace (probes `c-qq`,
+    /// `c-alias-head`).
+    fn ns_or_alias_known(&self, ns_part: &str) -> bool {
+        if self.eval.registry.get(ns_part).is_some() {
+            return true;
+        }
+        let cur = self.eval.current_ns_name();
+        self.eval
+            .registry
+            .get(&cur)
+            .is_some_and(|home| home.aliases().any(|(alias, _, _)| alias == ns_part))
+    }
+
+    /// Resolve a qualifier to its namespace (aliases first).
+    fn resolve_ns_target(&self, ns_part: &str) -> String {
+        let cur = self.eval.current_ns_name();
+        if let Some(home) = self.eval.registry.get(&cur) {
+            for (alias, ns, _) in home.aliases() {
+                if alias == ns_part {
+                    return ns.to_owned();
+                }
+            }
+        }
+        ns_part.to_owned()
+    }
+}
+
+impl ReadHooks for LiveReadHooks<'_> {
+    fn eval_read(&mut self, form: &Value) -> Result<Value, EvalReadError> {
+        self.apply_eval_read(form).map_err(|e| self.lift(e))
+    }
+
+    fn resolve(
+        &mut self,
+        op: ResolverOp,
+        sym: Option<&Symbol>,
+    ) -> Result<Option<Symbol>, EvalReadError> {
+        // The seed cast runs at entry, so only fns arrive here (nil
+        // is the unbound no-consult, like the JVM null resolver).
+        let bound = deref_core(self.eval, "*reader-resolver*");
+        let resolver = match &bound {
+            Value::Nil => return Ok(None),
+            v if is_resolver_fn(v) => v.clone(),
+            v => return Err(self.lift(cce_err(v, RESOLVER_CLASS))),
+        };
+        let op_name = match op {
+            ResolverOp::CurrentNs => "current-ns",
+            ResolverOp::ResolveAlias => "resolve-alias",
+            ResolverOp::ResolveClass => "resolve-class",
+            ResolverOp::ResolveVar => "resolve-var",
+        };
+        let op_kw = Value::Keyword(Keyword::new(None, op_name));
+        let sym_arg = sym.map_or(Value::Nil, |s| Value::Symbol(s.clone()));
+        let out = self
+            .eval
+            .call(&resolver, &[op_kw, sym_arg])
+            .map_err(signal_to_native)
+            .map_err(|e| self.lift(e))?;
+        match out {
+            Value::Nil => Ok(None),
+            Value::Symbol(s) => Ok(Some(s)),
+            other => Err(self.lift(cce_err(&other, "clojure.lang.Symbol"))),
+        }
+    }
+
+    fn fresh_id(&mut self) -> u64 {
+        self.eval.next_id()
+    }
+}
+
+/// Roots `invoke` dispatches (mirroring its arms): fns,
+/// lookupables, vars/promises/multifns, plus nil (the nil-call NPE)
+/// and unbound (the unbound-call error); anything else fails the
+/// `IFn` cast with module text (probe `c-nonfn`).
+fn is_invokable(root: &Value) -> bool {
+    matches!(
+        root,
+        Value::Extension(_)
+            | Value::Keyword(_)
+            | Value::Symbol(_)
+            | Value::Vector(_)
+            | Value::MapEntry { .. }
+            | Value::Map(_)
+            | Value::Set(_)
+            | Value::Var(_)
+            | Value::Unbound(_)
+            | Value::Nil
+            | Value::Promise(_)
+            | Value::MultiFn(_)
+    )
+}
+
+/// An unresolvable `#=` head (probes `c-nofn`, `c-qq-miss`,
+/// `c-if`, `c-classhead`, `e-eval-sup-tag`).
+fn cant_resolve(hs: &Symbol) -> NativeError {
+    NativeError::new(ThrowClass::RuntimeException, format!("Can't resolve {hs}"))
+}
+
+/// A `#=` class lookup (the port has no classes, so every one
+/// fails — probes `d-class-miss`, `c-qualmiss`, `d-ctor`,
+/// `d-static-miss`).
+fn class_not_found(name: &str) -> NativeError {
+    NativeError::new(ThrowClass::ClassNotFoundException, name.to_owned())
+}
+
+/// A null-receiver failure with verbatim JDK text (probes
+/// `d-var-unqual`, `d-var-nosec`, `c-empty`).
+fn npe(message: &str) -> NativeError {
+    NativeError::new(ThrowClass::NullPointerException, message.to_owned())
+}
+
+/// `String.trim` (S7 `read+string`): strip leading/trailing chars
+/// at or below U+0020 (probes `p-ws`, `p-tabs`).
+fn java_trim(s: &str) -> String {
+    s.trim_matches(|c: char| c <= ' ').to_owned()
 }
 
 /// The `:read-cond` option: `:allow`/`:preserve` opt in, anything
@@ -356,7 +716,7 @@ fn parse_read_tail(
 /// Syntax-quote and `::` resolve against the synced current
 /// namespace (read-time, like the JVM), mirroring
 /// `native_read_string`.
-fn sync_reader_ns(eval: &Evaluator, opts: &mut ReaderOpts) {
+pub(crate) fn sync_reader_ns(eval: &Evaluator, opts: &mut ReaderOpts) {
     let cur = eval.current_ns_name();
     opts.current_ns = cur.clone();
     if let Some(ns) = eval.registry.get(&cur) {
@@ -410,6 +770,32 @@ fn wrap_resolution_error(
         cause: inner.cause.map(Box::new),
     });
     outer
+/// The S7 `read+string` capture (empty unless asked).
+fn capture_text(parser: &Reader, mark: usize, capture: bool) -> String {
+    if capture {
+        parser.captured_since(mark)
+    } else {
+        String::new()
+    }
+}
+
+/// Take the live parser out of its lock (S7): the hook runs user
+/// code during the read, which may read the same reader again —
+/// holding the (non-reentrant) lock across the read would
+/// deadlock. The dummy left behind is never observed: every path
+/// restores the advanced parser before returning, retrying, or
+/// feeding. Returns whether the stream may grow (stdin).
+pub(crate) fn take_parser(reader: &StreamReader, opts: &ReaderOpts) -> (Reader, bool) {
+    let mut state = lock_state(reader);
+    let grow = may_grow(&state);
+    let mut parser = std::mem::replace(&mut state.parser, Reader::new("", opts));
+    parser.set_opts(opts);
+    (parser, grow)
+}
+
+/// Restore a taken parser (see [`take_parser`]).
+pub(crate) fn restore_parser(reader: &StreamReader, parser: Reader) {
+    lock_state(reader).parser = parser;
 }
 
 /// Run one `read`: fresh options per call, stdin fed line by line
@@ -418,9 +804,19 @@ fn wrap_resolution_error(
 /// probe `r-exdata-eof`). A truncated head survives retries: the
 /// parser is snapshotted before each attempt while more input may
 /// arrive, then restored and extended with the next line (`Eof*`
-/// only — anything else throws without feeding). Data readers
-/// resolve per call (S6): fired discards drain ahead of every
-/// terminal exit, then the form resolves.
+/// Run one `read`: fresh options per call, stdin fed line by line
+/// while the parser reports EOF, clean EOF honoring `eof-error?`
+/// (the synthesized error sits at the live tracker position,
+/// probe `r-exdata-eof`). A truncated head survives retries: the
+/// parser is snapshotted before each attempt while more input may
+/// arrive, then restored and extended with the next line (`Eof*`
+/// only — anything else throws without feeding). The S7 hook rides
+/// each attempt with the parser taken out of its lock (the hook
+/// runs user code, which may read the same reader again);
+/// `capture` brackets the consumed text for `read+string`.
+/// Data readers resolve per call (S6): fired discards drain ahead
+/// of every terminal exit, then the form resolves.
+#[allow(clippy::too_many_arguments)]
 fn run_read(
     eval: &mut Evaluator,
     reader: &StreamReader,
@@ -428,25 +824,76 @@ fn run_read(
     eof_value: Value,
     recursive: bool,
     opts: &ReaderOpts,
-) -> Result<Value, NativeError> {
-    let mut state = lock_state(reader);
-    state.parser.set_opts(opts);
+    capture: bool,
+) -> Result<(Value, String), NativeError> {
+    let mark = lock_state(reader).parser.capture_mark();
     loop {
+        let (mut parser, grow) = take_parser(reader, opts);
         // Snapshot before the attempt consumes the head (string
         // readers never grow, so they never pay for the clone).
-        let snapshot = may_grow(&state).then(|| state.parser.clone());
-        match state.parser.read_form(false) {
-            Ok(Some(v)) => return finish_some(eval, &mut state, v, recursive),
-            Ok(None) => match next_chunk(&mut state)? {
-                Some(chunk) => state.parser.extend(&chunk),
-                None => {
-                    return finish_clean_eof(eval, &mut state, eof_error, &eof_value, recursive);
+        let snapshot = grow.then(|| parser.clone());
+        let outcome = {
+            let mut hooks = LiveReadHooks::new(&mut *eval);
+            parser.read_form(false, &mut hooks)
+        };
+        match outcome {
+            Ok(Some(v)) => {
+                let text = capture_text(&parser, mark, capture);
+                restore_parser(reader, parser);
+                let mut state = lock_state(reader);
+                let at = Span::new(state.parser.line(), state.parser.col());
+                drain_locked(eval, &mut state, at, recursive)?;
+                let form = crate::core::resolve_data_readers(eval, v)
+                    .map_err(|e| wrap_resolution_error(eval, e, at, recursive))?;
+                return Ok((form, text));
+            }
+            Ok(None) => {
+                let mut state = lock_state(reader);
+                state.parser = parser;
+                match next_chunk(&mut state)? {
+                    Some(chunk) => state.parser.extend(&chunk),
+                    None => {
+                        let at = Span::new(state.parser.line(), state.parser.col());
+                        drain_locked(eval, &mut state, at, recursive)?;
+                        if eof_error {
+                            let clean = ReaderError::Eof { span: at };
+                            return Err(map_reader_error(eval, &clean, recursive));
+                        }
+                        let text = capture_text(&state.parser, mark, capture);
+                        return Ok((eof_value.clone(), text));
+                    }
                 }
-            },
+            }
             Err(e) => {
                 if !is_eof_error(&e) {
-                    return finish_read_error(eval, &mut state, &e, recursive);
+                    restore_parser(reader, parser);
+                    let mut state = lock_state(reader);
+                    let at = Span::new(state.parser.line(), state.parser.col());
+                    drain_locked(eval, &mut state, at, recursive)?;
+                    return Err(map_reader_error(eval, &e, recursive));
                 }
+                let mut state = lock_state(reader);
+                state.parser = parser;
+                match next_chunk(&mut state)? {
+                    Some(chunk) => {
+                        if let Some(parser) = snapshot {
+                            state.parser = parser;
+                        }
+                        state.parser.extend(&chunk);
+                    }
+                    None => {
+                        let at = Span::new(state.parser.line(), state.parser.col());
+                        drain_locked(eval, &mut state, at, recursive)?;
+                        return Err(map_reader_error(eval, &e, recursive));
+                    }
+                }
+            }
+        }
+    }
+}
+                }
+                let mut state = lock_state(reader);
+                state.parser = parser;
                 match next_chunk(&mut state)? {
                     Some(chunk) => {
                         if let Some(parser) = snapshot {
@@ -512,6 +959,9 @@ fn native_read(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErro
     check_arity("clojure.core/read", args, &[0, 1, 2, 3, 4])?;
     let stream_value = pick_stream(eval, args);
     check_stream_type(&stream_value)?;
+    // S7 gates (probes `g-*`, `h-order*`): the resolver cast,
+    // then `:unknown`, then opts parsing.
+    let seed = seed_read_gates(eval)?;
     let mut opts = ReaderOpts {
         read_cond: ReadCond::Deny,
         ..ReaderOpts::default()
@@ -519,6 +969,9 @@ fn native_read(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErro
     let (eof_error, eof_value, recursive) = parse_read_tail(args, &mut opts)?;
     sync_reader_ns(eval, &mut opts);
     crate::core::snapshot_data_readers(eval, &mut opts);
+    opts.read_eval = seed.read_eval;
+    opts.suppress_read = seed.suppress_read;
+    opts.resolver_bound = seed.resolver_bound;
     if matches!(stream_value, Value::Nil) {
         return Err(NativeError::new(
             ThrowClass::NullPointerException,
@@ -526,7 +979,53 @@ fn native_read(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErro
         ));
     }
     let reader = as_reader(&stream_value).expect("nil and non-readers fail above");
-    run_read(eval, reader, eof_error, eof_value, recursive, &opts)
+    let (v, _) = run_read(eval, reader, eof_error, eof_value, recursive, &opts, false)?;
+    Ok(v)
+}
+
+/// The `read+string` hint cast (S7; probe `p-strarg`): the
+/// parameter type is `LineNumberingPushbackReader`, checked at
+/// entry (nil slips through to the `getString` NPE below).
+fn check_plus_stream_type(stream_value: &Value) -> Result<(), NativeError> {
+    if as_reader(stream_value).is_none() {
+        return Err(cce_err(stream_value, READER_CLASS));
+    }
+    Ok(())
+}
+
+/// `read+string`: `read` plus the consumed text (S7; probes
+/// `p-*`): the same five arities, the hint cast at entry, the
+/// nil-`getString` NPE ahead of opts parsing (probe
+/// `p-nil-badopts`), and the Java-trimmed capture as the second
+/// element.
+fn native_read_plus_string(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.core/read+string", args, &[0, 1, 2, 3, 4])?;
+    let stream_value = pick_stream(eval, args);
+    if !matches!(stream_value, Value::Nil) {
+        check_plus_stream_type(&stream_value)?;
+    }
+    if matches!(stream_value, Value::Nil) {
+        return Err(NativeError::new(
+            ThrowClass::NullPointerException,
+            "Cannot invoke \"clojure.lang.LineNumberingPushbackReader.getString()\" because \"stream\" is null".to_owned(),
+        ));
+    }
+    let seed = seed_read_gates(eval)?;
+    let mut opts = ReaderOpts {
+        read_cond: ReadCond::Deny,
+        ..ReaderOpts::default()
+    };
+    let (eof_error, eof_value, recursive) = parse_read_tail(args, &mut opts)?;
+    sync_reader_ns(eval, &mut opts);
+    opts.read_eval = seed.read_eval;
+    opts.suppress_read = seed.suppress_read;
+    opts.resolver_bound = seed.resolver_bound;
+    let reader = as_reader(&stream_value).expect("nil and non-readers fail above");
+    let (v, text) = run_read(eval, reader, eof_error, eof_value, recursive, &opts, true)?;
+    Ok(Value::Vector(clj_value::Vector::from_vec(vec![
+        v,
+        Value::Str(Arc::from(java_trim(&text).as_str())),
+    ])))
 }
 
 /// `read-line`: one line from `*in*` (nil at EOF). Nil `*in*` is
@@ -560,8 +1059,11 @@ fn native_read_line(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nativ
 }
 
 /// The S-instream natives installed into `clojure.core`.
-pub(crate) const READER_NATIVES: &[(&str, NativeFnPtr)] =
-    &[("read", native_read), ("read-line", native_read_line)];
+pub(crate) const READER_NATIVES: &[(&str, NativeFnPtr)] = &[
+    ("read", native_read),
+    ("read-line", native_read_line),
+    ("read+string", native_read_plus_string),
+];
 
 #[cfg(test)]
 mod tests {
@@ -598,7 +1100,7 @@ mod tests {
             read_cond: ReadCond::Deny,
             ..ReaderOpts::default()
         };
-        run_read(eval, reader, true, Value::Nil, false, &opts)
+        run_read(eval, reader, true, Value::Nil, false, &opts, false).map(|(v, _)| v)
     }
 
     #[test]

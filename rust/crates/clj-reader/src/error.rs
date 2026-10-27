@@ -146,8 +146,16 @@ pub enum ReaderError {
     /// `ArithmeticException`, but the eval wraps reader errors —
     /// see the `loader` tower test).
     RatioZeroDiv { span: Span },
-    /// `#=` deferral (data-reader follow-up N5).
+    /// `#=` without an evaluator hook (pure-reader contexts only;
+    /// every `clj-eval` entry installs the hook).
     ReadEval { span: Span },
+    /// A `#=`/resolver outcome (S7): the gate denial or an
+    /// application throwable, traveling intact (message and class
+    /// are the throwable's own; wraps treat it like any read).
+    EvalFailed {
+        span: Span,
+        error: crate::hooks::EvalReadError,
+    },
     /// `#inst`/`#uuid` deferral (data-reader follow-up N5).
     DataReader { span: Span, tag: String },
     /// Defer-mode tag consult over a non-lookupable
@@ -224,6 +232,7 @@ impl ReaderError {
             | Self::TableCce { span, .. }
             | Self::TagInvoke { span, .. }
             | Self::Record { span, .. }
+            | Self::EvalFailed { span, .. }
             | Self::LoneSurrogate { span, .. } => span,
         }
     }
@@ -281,6 +290,10 @@ impl ReaderError {
             | Self::DataReader { .. }
             | Self::Record { .. }
             | Self::LoneSurrogate { .. } => "ReaderError",
+            Self::EvalFailed { error, .. } => match error {
+                crate::hooks::EvalReadError::Failed(t) => t.class.jvm_name(),
+                crate::hooks::EvalReadError::NoHook => "ReaderError",
+            },
             Self::RatioZeroDiv { .. } => "ArithmeticException",
             _ => "RuntimeException",
         }
@@ -356,9 +369,8 @@ fn message_ns(err: &ReaderError) -> String {
         }
         ReaderError::ArgNumber { token, .. } => format!("For input string: \"{token}\""),
         ReaderError::RatioZeroDiv { .. } => "Divide by zero".to_owned(),
-        ReaderError::ReadEval { .. } => {
-            "Eval reader #= is not supported in this build (data-reader follow-up N5)".to_owned()
-        }
+        ReaderError::ReadEval { .. } => "Eval reader #= requires an evaluator hook".to_owned(),
+        ReaderError::EvalFailed { error, .. } => eval_failed_message(error),
         other => message_defer(other),
     }
 }
@@ -423,7 +435,20 @@ fn message_defer(err: &ReaderError) -> String {
         | ReaderError::NsMapOdd { .. }
         | ReaderError::ArgNumber { .. }
         | ReaderError::RatioZeroDiv { .. }
-        | ReaderError::ReadEval { .. } => err.message(),
+        | ReaderError::ReadEval { .. }
+        | ReaderError::EvalFailed { .. } => err.message(),
+    }
+}
+
+/// A `#=`/resolver outcome message: the throwable's own message
+/// (empty when it has none); the hookless defensive case renders
+/// the hook error text.
+fn eval_failed_message(error: &crate::hooks::EvalReadError) -> String {
+    match error {
+        crate::hooks::EvalReadError::Failed(t) => t.message.as_deref().unwrap_or("").to_owned(),
+        crate::hooks::EvalReadError::NoHook => {
+            "Eval reader #= requires an evaluator hook".to_owned()
+        }
     }
 }
 
@@ -455,6 +480,8 @@ impl std::error::Error for ReaderError {}
 #[cfg(test)]
 mod tests {
     use super::{ReaderError, Span, message_defer};
+    use crate::hooks::EvalReadError;
+    use clj_value::{ThrowClass, Throwable};
 
     #[test]
     fn messages_and_classes() {
@@ -559,6 +586,52 @@ mod tests {
             assert_eq!(err.jvm_class(), class);
             assert_eq!(err.span(), span);
         }
+    }
+
+    #[test]
+    fn eval_failed_reports_the_throwable() {
+        // S7: message and class are the throwable's own (the wraps
+        // treat it like any read); the hookless defensive case
+        // renders the hook text.
+        let span = Span::new(1, 3);
+        let failed = ReaderError::EvalFailed {
+            span,
+            error: EvalReadError::Failed(Throwable {
+                id: 9,
+                class: ThrowClass::ArithmeticException,
+                message: Some(std::sync::Arc::from("Divide by zero")),
+                data: None,
+                cause: None,
+            }),
+        };
+        assert_eq!(failed.message(), "Divide by zero");
+        assert_eq!(failed.jvm_class(), "java.lang.ArithmeticException");
+        assert_eq!(failed.span(), span);
+        let messageless = ReaderError::EvalFailed {
+            span,
+            error: EvalReadError::Failed(Throwable {
+                id: 10,
+                class: ThrowClass::NullPointerException,
+                message: None,
+                data: None,
+                cause: None,
+            }),
+        };
+        assert_eq!(messageless.message(), "");
+        assert_eq!(messageless.jvm_class(), "java.lang.NullPointerException");
+        let hookless = ReaderError::EvalFailed {
+            span,
+            error: EvalReadError::NoHook,
+        };
+        assert_eq!(
+            hookless.message(),
+            "Eval reader #= requires an evaluator hook"
+        );
+        assert_eq!(hookless.jvm_class(), "ReaderError");
+        assert_eq!(
+            ReaderError::ReadEval { span }.message(),
+            "Eval reader #= requires an evaluator hook"
+        );
     }
 
     #[test]

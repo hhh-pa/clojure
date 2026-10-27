@@ -32,33 +32,69 @@ use clj_value::{Keyword, List, Symbol, Value, java_debug, validate_inst, validat
 
 use crate::Reader;
 use crate::error::ReaderError;
+use crate::hooks::{EvalReadError, ReadHooks};
 use crate::opts::ReadCond;
 use crate::symbol::is_whitespace;
 
 impl Reader {
     /// `DispatchReader`: `#` plus one char (EOF ⇒ `EofChar`); unknown
     /// chars (including non-ASCII) unread into the ctor path.
-    pub(crate) fn dispatch_reader(&mut self, top: bool) -> Result<Option<Value>, ReaderError> {
+    pub(crate) fn dispatch_reader(
+        &mut self,
+        top: bool,
+        hook: &mut dyn ReadHooks,
+    ) -> Result<Option<Value>, ReaderError> {
         let Some(ch) = self.stream.read() else {
             return Err(ReaderError::EofChar { span: self.span() });
         };
         match ch {
-            '^' => self.meta_reader(),
-            '#' => self.symbolic_reader(),
-            '\'' => self.var_reader(),
+            '^' => self.meta_reader(hook),
+            '#' => self.symbolic_reader(hook),
+            '\'' => self.var_reader(hook),
             '"' => self.regex_reader(),
-            '(' => self.fn_reader(),
-            '{' => self.set_reader(),
-            '=' => Err(ReaderError::ReadEval { span: self.span() }),
+            '(' => self.fn_reader(hook),
+            '{' => self.set_reader(hook),
+            '=' => self.eval_reader(hook),
             '!' => self.comment_reader(),
             '<' => Err(ReaderError::Unreadable { span: self.span() }),
-            '_' => self.discard_reader(),
-            '?' => self.conditional_reader(top),
-            ':' => self.nsmap_reader(),
+            '_' => self.discard_reader(hook),
+            '?' => self.conditional_reader(top, hook),
+            ':' => self.nsmap_reader(hook),
             _ => {
                 self.stream.unread(ch);
-                self.ctor_reader()
+                self.ctor_reader(hook)
             }
+        }
+    }
+
+    /// `EvalReader` (S7): the `*read-eval*` gate first (entry span,
+    /// probe `h-gate-lnpr`), then the operand, then the hook
+    /// application (post-operand span, probe `h-div-lnpr`).
+    /// Suppression never stops `#=` (probe `d-discard`).
+    fn eval_reader(&mut self, hook: &mut dyn ReadHooks) -> Result<Option<Value>, ReaderError> {
+        if !self.opts.read_eval {
+            return Err(ReaderError::EvalFailed {
+                span: self.span(),
+                error: EvalReadError::Failed(clj_value::Throwable {
+                    id: hook.fresh_id(),
+                    class: clj_value::ThrowClass::RuntimeException,
+                    message: Some(std::sync::Arc::from(
+                        "EvalReader not allowed when *read-eval* is false.",
+                    )),
+                    data: None,
+                    cause: None,
+                }),
+            });
+        }
+        let form = self.read_nested_value(hook)?;
+        let at = self.span();
+        match hook.eval_read(&form) {
+            Ok(v) => Ok(Some(v)),
+            Err(EvalReadError::NoHook) => Err(ReaderError::ReadEval { span: at }),
+            Err(failed) => Err(ReaderError::EvalFailed {
+                span: at,
+                error: failed,
+            }),
         }
     }
 
@@ -74,21 +110,25 @@ impl Reader {
     }
 
     /// `DiscardReader`: read one form, drop it, return the sentinel.
+    /// `DiscardReader`: read one form, drop it, return the sentinel.
     /// The depth flag marks tags for the fired-discards log (S6: the
     /// JVM invokes data readers for discarded forms). No `?` before
     /// the restore (like `cond_discard`): a failed discard must not
     /// stick the depth for the next read.
-    pub(crate) fn discard_reader(&mut self) -> Result<Option<Value>, ReaderError> {
+    pub(crate) fn discard_reader(
+        &mut self,
+        hook: &mut dyn ReadHooks,
+    ) -> Result<Option<Value>, ReaderError> {
         self.discarding += 1;
-        let out = self.read_nested_value();
+        let out = self.read_nested_value(hook);
         self.discarding -= 1;
         out?;
         Ok(None)
     }
 
     /// `VarReader`: `#'X` ⇒ `(var X)`.
-    fn var_reader(&mut self) -> Result<Option<Value>, ReaderError> {
-        let form = self.read_nested_value()?;
+    fn var_reader(&mut self, hook: &mut dyn ReadHooks) -> Result<Option<Value>, ReaderError> {
+        let form = self.read_nested_value(hook)?;
         Ok(Some(Value::List(List::from_vec(vec![
             Value::Symbol(Symbol::new(None, "var")),
             form,
@@ -98,13 +138,13 @@ impl Reader {
     /// `CtorReader`: `#tag form` (see module docs). The tag read is
     /// `eofIsError`; a non-symbol tag rejects before the form is read;
     /// the form reads before any tag lookup (EOF there wins).
-    fn ctor_reader(&mut self) -> Result<Option<Value>, ReaderError> {
-        let tag = self.read_nested_value()?;
+    fn ctor_reader(&mut self, hook: &mut dyn ReadHooks) -> Result<Option<Value>, ReaderError> {
+        let tag = self.read_nested_value(hook)?;
         let Value::Symbol(sym) = tag else {
             return Err(ReaderError::TagNotSymbol { span: self.span() });
         };
         let checkpoint = self.fired.len();
-        let form = self.read_nested_value()?;
+        let form = self.read_nested_value(hook)?;
         // Suppressed reads (the cond discard loop) and preserved
         // conds produce `TaggedLiteral` without invoking anything.
         if self.suppress || (self.in_cond && self.opts.read_cond == ReadCond::Preserve) {
@@ -223,7 +263,7 @@ impl Reader {
     }
 
     /// `NamespaceMapReader` (see module docs).
-    fn nsmap_reader(&mut self) -> Result<Option<Value>, ReaderError> {
+    fn nsmap_reader(&mut self, hook: &mut dyn ReadHooks) -> Result<Option<Value>, ReaderError> {
         let auto = match self.stream.read() {
             Some(':') => true,
             Some(c) => {
@@ -234,14 +274,14 @@ impl Reader {
             // so the symbol read below reports `Eof`.
             None => false,
         };
-        let (sym, next) = self.nsmap_head(auto)?;
+        let (sym, next) = self.nsmap_head(auto, hook)?;
         // EOF here (including right after the symbol) means "must
         // specify a map", not `Eof`.
         if next != Some('{') {
             return Err(ReaderError::NsMapMap { span: self.span() });
         }
         let ns = self.resolve_nsmap_ns(auto, sym)?;
-        self.nsmap_assemble(&ns)
+        self.nsmap_assemble(&ns, hook)
     }
 
     /// Skip whitespace chars, returning the first non-ws char (or EOF).
@@ -254,7 +294,11 @@ impl Reader {
 
     /// Scan the ns-map head: optional alias symbol plus the char that
     /// follows it (whitespace skipped). A bad namespace errors here.
-    fn nsmap_head(&mut self, auto: bool) -> Result<(Option<Value>, Option<char>), ReaderError> {
+    fn nsmap_head(
+        &mut self,
+        auto: bool,
+        hook: &mut dyn ReadHooks,
+    ) -> Result<(Option<Value>, Option<char>), ReaderError> {
         let mut sym: Option<Value> = None;
         let mut next = self.stream.read();
         if next.is_some_and(is_whitespace) {
@@ -277,7 +321,7 @@ impl Reader {
             if let Some(c) = next {
                 self.stream.unread(c);
             }
-            sym = Some(self.read_nested_value()?);
+            sym = Some(self.read_nested_value(hook)?);
             let head = self.stream.read();
             next = self.skip_ws(head);
         }
@@ -286,8 +330,12 @@ impl Reader {
 
     /// Assemble the ns-map body: read `{...}`, check evenness, rewrite
     /// keys, build the checked map.
-    fn nsmap_assemble(&mut self, ns: &str) -> Result<Option<Value>, ReaderError> {
-        let items = self.read_delimited('}')?;
+    fn nsmap_assemble(
+        &mut self,
+        ns: &str,
+        hook: &mut dyn ReadHooks,
+    ) -> Result<Option<Value>, ReaderError> {
+        let items = self.read_delimited('}', hook)?;
         if items.len() % 2 == 1 {
             return Err(ReaderError::NsMapOdd { span: self.span() });
         }
@@ -336,8 +384,8 @@ impl Reader {
 
     /// `SymbolicValueReader`: one recursive form; non-symbols and
     /// unknown names reject with `##`-prefixed messages.
-    fn symbolic_reader(&mut self) -> Result<Option<Value>, ReaderError> {
-        let form = self.read_nested_value()?;
+    fn symbolic_reader(&mut self, hook: &mut dyn ReadHooks) -> Result<Option<Value>, ReaderError> {
+        let form = self.read_nested_value(hook)?;
         if let Value::Symbol(sym) = &form {
             return match (sym.namespace(), sym.name()) {
                 (None, "Inf") => Ok(Some(Value::Double(f64::INFINITY))),
@@ -358,7 +406,11 @@ impl Reader {
     /// `ConditionalReader`: allow-list first (before touching the
     /// body), optional `@`, whitespace, `(`, then preserve (read the
     /// list raw) or the delimited loop — all under `in_cond`.
-    fn conditional_reader(&mut self, top: bool) -> Result<Option<Value>, ReaderError> {
+    fn conditional_reader(
+        &mut self,
+        top: bool,
+        hook: &mut dyn ReadHooks,
+    ) -> Result<Option<Value>, ReaderError> {
         if !matches!(self.opts.read_cond, ReadCond::Allow | ReadCond::Preserve) {
             return Err(ReaderError::CondNotAllowed { span: self.span() });
         }
@@ -386,14 +438,14 @@ impl Reader {
             // list reader returns a form on every success path,
             // so `expect` (whose line always executes) spells the
             // invariant coverably (100% line gate).
-            self.list_reader().map(|form| {
+            self.list_reader(hook).map(|form| {
                 Some(Value::ReaderConditional {
                     form: Box::new(form.expect("the list reader always returns a form")),
                     splicing,
                 })
             })
         } else {
-            self.read_cond_delimited(splicing, top)
+            self.read_cond_delimited(splicing, top, hook)
         };
         self.in_cond = prev;
         result
@@ -405,15 +457,16 @@ impl Reader {
         &mut self,
         splicing: bool,
         top: bool,
+        hook: &mut dyn ReadHooks,
     ) -> Result<Option<Value>, ReaderError> {
         let firstline = self.firstline();
         let mut result: Option<Value> = None;
         loop {
-            if result.is_none() && self.cond_match_arm(&mut result, firstline)? {
+            if result.is_none() && self.cond_match_arm(&mut result, firstline, hook)? {
                 break;
             }
             // The discard runs ALWAYS — even right after a match.
-            if self.cond_discard(firstline)? {
+            if self.cond_discard(firstline, hook)? {
                 break;
             }
         }
@@ -427,8 +480,9 @@ impl Reader {
         &mut self,
         result: &mut Option<Value>,
         firstline: Option<u32>,
+        hook: &mut dyn ReadHooks,
     ) -> Result<bool, ReaderError> {
-        match self.read_inner(false, Some(')'), false)? {
+        match self.read_inner(false, Some(')'), false, hook)? {
             crate::Form::Eof => Err(self.eof_delimited(firstline)),
             crate::Form::Finished => Ok(true),
             crate::Form::Value(f) => {
@@ -445,7 +499,7 @@ impl Reader {
                     });
                 };
                 if is_default(kw) || self.opts.features.contains(kw) {
-                    match self.read_inner(false, Some(')'), false)? {
+                    match self.read_inner(false, Some(')'), false, hook)? {
                         crate::Form::Eof => Err(self.eof_delimited(firstline)),
                         crate::Form::Finished => Err(ReaderError::CondEven {
                             span: self.span(),
@@ -465,10 +519,14 @@ impl Reader {
 
     /// The ALWAYS-run suppressed discard of the cond loop. True
     /// finishes the loop.
-    fn cond_discard(&mut self, firstline: Option<u32>) -> Result<bool, ReaderError> {
+    fn cond_discard(
+        &mut self,
+        firstline: Option<u32>,
+        hook: &mut dyn ReadHooks,
+    ) -> Result<bool, ReaderError> {
         let prev = self.suppress;
         self.suppress = true;
-        let discarded = self.read_inner(false, Some(')'), false);
+        let discarded = self.read_inner(false, Some(')'), false, hook);
         self.suppress = prev;
         match discarded? {
             crate::Form::Eof => Err(self.eof_delimited(firstline)),
@@ -545,9 +603,10 @@ fn is_default(kw: &Keyword) -> bool {
 mod tests {
     use std::collections::HashSet;
 
-    use clj_value::{Symbol, Value};
+    use clj_value::{Symbol, ThrowClass, Throwable, Value};
 
-    use crate::{FiredTag, ReadCond, Reader, ReaderError, ReaderOpts, read_str};
+    use crate::hooks::ScriptedHooks;
+    use crate::{FiredTag, NoHooks, ReadCond, Reader, ReaderError, ReaderOpts, read_str};
 
     fn opts() -> ReaderOpts {
         ReaderOpts::default()
@@ -621,6 +680,80 @@ mod tests {
         assert_single_sym_pair(Value::Nil, None, "x");
     }
 
+    /// A scripted application throwable (S7 unit pins).
+    fn failed(id: u64, class: ThrowClass, message: &str) -> crate::EvalReadError {
+        crate::EvalReadError::Failed(Throwable {
+            id,
+            class,
+            message: Some(std::sync::Arc::from(message)),
+            data: None,
+            cause: None,
+        })
+    }
+
+    #[test]
+    fn eval_reader_denies_before_reading() {
+        // S7 gate (probe `b-false`): the denial fires before the
+        // operand is touched (even `#=`-at-EOF reports the gate),
+        // at the entry span (probe `h-gate-lnpr`).
+        for input in ["#=(+ 1 2)", "#="] {
+            let opts = ReaderOpts {
+                read_eval: false,
+                ..ReaderOpts::default()
+            };
+            let err = read_str(input, &opts, &mut NoHooks).unwrap_err();
+            assert!(
+                matches!(err, ReaderError::EvalFailed { .. }),
+                "{input}: {err:?}"
+            );
+            assert_eq!(
+                err.message(),
+                "EvalReader not allowed when *read-eval* is false."
+            );
+            assert_eq!(err.jvm_class(), "java.lang.RuntimeException");
+            let span = err.span();
+            assert_eq!((span.line, span.col), (1, 3), "{input}");
+        }
+    }
+
+    #[test]
+    fn eval_reader_applies_through_the_hook() {
+        // S7 application: the hook answer becomes the form (the
+        // operand reads first, so nested reads still run).
+        let mut hooks = ScriptedHooks::new(Ok(Value::Int(42)), Vec::new());
+        let v = read_str("#=(+ 1 2)", &opts(), &mut hooks).unwrap();
+        assert_eq!(v, Value::Int(42));
+    }
+
+    #[test]
+    fn eval_reader_reports_hook_failures_post_operand() {
+        // S7 failures surface with the post-operand span (probe
+        // `h-div-lnpr`); suppression never stops `#=` (probe
+        // `d-discard`).
+        let opts = ReaderOpts {
+            suppress_read: true,
+            ..ReaderOpts::default()
+        };
+        let mut hooks = ScriptedHooks::new(
+            Err(failed(7, ThrowClass::ArithmeticException, "Divide by zero")),
+            Vec::new(),
+        );
+        let err = read_str("#=(/ 1 0)", &opts, &mut hooks).unwrap_err();
+        assert!(matches!(err, ReaderError::EvalFailed { .. }));
+        assert_eq!(err.message(), "Divide by zero");
+        assert_eq!(err.jvm_class(), "java.lang.ArithmeticException");
+        let span = err.span();
+        assert_eq!((span.line, span.col), (1, 10));
+    }
+
+    #[test]
+    fn eval_reader_hookless_reports_read_eval() {
+        // S7 pure-reader `#=`: allowed by the gate but nobody home.
+        let err = read_str("#=1", &opts(), &mut NoHooks).unwrap_err();
+        assert!(matches!(err, ReaderError::ReadEval { .. }));
+        assert_eq!(err.message(), "Eval reader #= requires an evaluator hook");
+    }
+
     #[test]
     #[should_panic(expected = "expected a tagged literal")]
     fn assert_tagged_rejects_plain_values() {
@@ -632,7 +765,7 @@ mod tests {
     fn automap_ws_then_nonbrace_rejects_namespace() {
         // `nsmap_head`, auto + whitespace: skip to `{`, else `NsMapNs`.
         for input in ["#:: x {}", "#:: "] {
-            let err = read_str(input, &opts()).unwrap_err();
+            let err = read_str(input, &opts(), &mut NoHooks).unwrap_err();
             assert!(matches!(err, ReaderError::NsMapNs { .. }), "{input}");
             assert_eq!(err.message(), "Namespaced map must specify a namespace");
         }
@@ -641,7 +774,7 @@ mod tests {
     #[test]
     fn automap_non_symbol_ns_rejected() {
         // `resolve_nsmap_ns`, auto + non-symbol head.
-        let err = read_str("#::1 {}", &opts()).unwrap_err();
+        let err = read_str("#::1 {}", &opts(), &mut NoHooks).unwrap_err();
         assert!(matches!(err, ReaderError::NsMapValidNs { .. }));
         assert_eq!(
             err.message(),
@@ -652,7 +785,7 @@ mod tests {
     #[test]
     fn cond_eof_where_feature_expected() {
         // `cond_match_arm` head read hits EOF.
-        let err = read_str("#?(", &opts()).unwrap_err();
+        let err = read_str("#?(", &opts(), &mut NoHooks).unwrap_err();
         assert!(matches!(err, ReaderError::EofDelimited { .. }));
         assert_eq!(err.message(), "EOF while reading, starting at line 1");
     }
@@ -660,14 +793,14 @@ mod tests {
     #[test]
     fn cond_eof_where_value_expected() {
         // Feature matched, then EOF where its value goes.
-        let err = read_str("#?(:clj", &opts()).unwrap_err();
+        let err = read_str("#?(:clj", &opts(), &mut NoHooks).unwrap_err();
         assert!(matches!(err, ReaderError::EofDelimited { line: 1, .. }));
     }
 
     #[test]
     fn cond_eof_in_discard_position() {
         // Unmatched feature, then EOF where its discarded value goes.
-        let err = read_str("#?(:nothere", &opts()).unwrap_err();
+        let err = read_str("#?(:nothere", &opts(), &mut NoHooks).unwrap_err();
         assert!(matches!(err, ReaderError::EofDelimited { line: 1, .. }));
     }
 
@@ -681,26 +814,26 @@ mod tests {
             ..ReaderOpts::default()
         };
         let mut reader = Reader::new("#?(a b] #inst \"x\"", &opts);
-        let err = reader.read_form(true).unwrap_err();
+        let err = reader.read_form(true, &mut NoHooks).unwrap_err();
         assert!(
             matches!(err, ReaderError::UnmatchedDelim { .. }),
             "got {err:?}"
         );
-        let err = reader.read_form(true).unwrap_err();
+        let err = reader.read_form(true, &mut NoHooks).unwrap_err();
         assert!(matches!(err, ReaderError::DataReader { .. }), "got {err:?}");
     }
 
     #[test]
     fn nsmap_prefixes_unqualified_symbol_keys() {
         // `nsmap_key` unqualified-symbol arm.
-        let v = read_str("#:foo{a 1}", &opts()).unwrap();
+        let v = read_str("#:foo{a 1}", &opts(), &mut NoHooks).unwrap();
         assert_single_sym_pair(v, Some("foo"), "a");
     }
 
     #[test]
     fn nsmap_strips_underscore_symbol_ns() {
         // `nsmap_key` `_`-ns symbol arm.
-        let v = read_str("#:foo{_/a 1}", &opts()).unwrap();
+        let v = read_str("#:foo{_/a 1}", &opts(), &mut NoHooks).unwrap();
         assert_single_sym_pair(v, None, "a");
     }
 
