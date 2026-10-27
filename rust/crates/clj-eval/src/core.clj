@@ -1485,3 +1485,85 @@
   {:added "1.0"
    :deprecated "1.3"}
   [n x] (take n (repeat x)))
+
+;; --- S4b macro machinery (zero-oos #47): the expansion-helper
+;; surface, JVM name munging (natives), and the var-frame
+;; macros. `definline` records `:inline` without honoring it
+;; (the port is an interpreter; calls run the specimen body).
+;; `selector` rides the destructuring outlets. `unquote` /
+;; `unquote-splicing` are bare unbounds (upstream core.clj
+;; lines 13-14) so reader-emitted `~` symbols resolve.
+;; `with-local-vars` expands interop-free over the private
+;; `__local-var*` (anonymous dynamic vars).
+
+(def unquote)
+
+(def unquote-splicing)
+
+(defmacro definline
+  "Experimental - like defmacro, except defines a named function whose
+  body is the expansion, calls to which may be expanded inline as if
+  it were a macro. Cannot be used with variadic (&) args."
+  {:added "1.0"}
+  [name & decl]
+  (let [[pre-args [args expr]] (split-with (comp not vector?) decl)]
+    `(do
+       (defn ~name ~@pre-args ~args ~(apply (eval (list `fn args expr)) args))
+       (alter-meta! (var ~name) assoc :inline (fn ~name ~args ~expr))
+       (var ~name))))
+
+(defn- selector-impl [m]
+  (let [dirs [:select :excess :missing :all]
+        names (zipmap (filter m dirs) (repeatedly gensym))]
+    (if (empty? names)
+      (throw-illegal-arg! "form must contain at least one of :select :excess :missing :all")
+      `(fn ~(gensym "selector")
+         [map#]
+         (let [~(merge m names) map#]
+           ~(if (= 1 (count names))
+              (-> names first val)
+              (list `some-vals names)))))))
+
+(defmacro selector
+  "Builds a selecting-fn from m, a map destructuring form that must
+  include one or more of the :select, :all, :missing, and :excess
+  directives. The return function takes a collection, destructures it
+  per m, and returns a map of the result(s).
+
+  If m has exactly one directive, the result is the value that
+  directive would yield. If m has more than one directive, then it
+  returns a map of directives to values.
+
+  As in destructuring, :missing controls whether missing required keys
+  throw or are collected.
+
+  While a map destructuring form may and sometimes must include
+  bindings, selector doesn't produce bindings, thus ignoring the
+  associated directive names.
+
+  Throws an exception if the argument is not a map."
+  {:added "1.13"}
+  [m]
+  (when (not (map? m))
+    (throw-illegal-arg! "expected a map"))
+  (selector-impl m))
+
+(defmacro with-local-vars
+  "varbinding=> symbol init-expr
+
+  Executes the exprs in a context in which the symbols are bound to
+  vars with per-thread bindings to the init-exprs.  The symbols refer
+  to the var objects themselves, and must be accessed with var-get and
+  var-set"
+  {:added "1.0"}
+  [name-vals-vec & body]
+  (assert-args
+     (vector? name-vals-vec) "a vector for its binding"
+     (even? (count name-vals-vec)) "an even number of forms in binding vector")
+  `(let [~@(interleave (take-nth 2 name-vals-vec)
+                       (repeat (list 'clojure.core/__local-var*)))]
+     (clojure.core/push-thread-bindings (hash-map ~@name-vals-vec))
+     ;; The `finally` clause is a concrete list (syntax-quote
+     ;; would leave a seq, which the `try` clause matcher
+     ;; rejects); it prints exactly like the upstream shape.
+     (try ~@body ~(list 'finally (list 'clojure.core/pop-thread-bindings)))))

@@ -164,6 +164,37 @@ fn print_tower(v: &Value, opts: &PrintOpts, out: &mut String) {
     }
 }
 
+/// Whether a var handle is anonymous (S4b `with-local-vars`):
+/// no namespace plus the JVM `--unnamed--` marker name
+/// (unqualified-but-named handles keep the `#'` print).
+fn is_anon_var(sym: &crate::Symbol) -> bool {
+    sym.namespace().is_none() && sym.name() == "--unnamed--"
+}
+
+/// Print a var. Anonymous vars render the JVM
+/// `#<Var: --unnamed-->` (oracle `wv-pr`).
+fn print_var(v: &crate::Var, out: &mut String) {
+    if is_anon_var(&v.sym) {
+        out.push_str("#<Var: --unnamed-->");
+    } else {
+        out.push_str("#'");
+        write!(out, "{}", v.sym).unwrap();
+    }
+}
+
+/// Print an unbound sentinel. Anonymous vars label through
+/// their own print (oracle `wv-unbound`).
+fn print_unbound(u: &crate::Unbound, out: &mut String) {
+    write!(out, "#object[clojure.lang.Var$Unbound 0x{:x} ", u.var_id).unwrap();
+    let label = if is_anon_var(&u.sym) {
+        "Unbound: #<Var: --unnamed-->".to_owned()
+    } else {
+        format!("Unbound: #'{}", u.sym)
+    };
+    print_string(&label, true, out);
+    out.push(']');
+}
+
 fn print_more(v: &Value, opts: &PrintOpts, level: Option<i64>, out: &mut String) {
     match v {
         // Entries print exactly like their 2-vector (Oracle FX2
@@ -195,15 +226,8 @@ fn print_more(v: &Value, opts: &PrintOpts, level: Option<i64>, out: &mut String)
             write!(out, "#{tag} ").unwrap();
             print_into(form, opts, level, out);
         }
-        Value::Var(v) => {
-            out.push_str("#'");
-            write!(out, "{}", v.sym).unwrap();
-        }
-        Value::Unbound(u) => {
-            write!(out, "#object[clojure.lang.Var$Unbound 0x{:x} ", u.var_id).unwrap();
-            print_string(&format!("Unbound: #'{}", u.sym), true, out);
-            out.push(']');
-        }
+        Value::Var(v) => print_var(v, out),
+        Value::Unbound(u) => print_unbound(u, out),
         Value::Throwable(t) => print_throwable(t, opts, level, out),
         Value::Transient(t) => {
             let class = t.jvm_class();
@@ -876,6 +900,33 @@ mod tests {
         assert_eq!(pr(&Value::Keyword(Keyword::new(None, "k"))), ":k");
         assert_eq!(pr(&Value::Keyword(Keyword::new(Some("u"), "id"))), ":u/id");
         assert_eq!(pr(&Value::Regex(Arc::from("a+"))), "#\"a+\"");
+    }
+
+    #[test]
+    fn anon_var_prints() {
+        // Anonymous vars (S4b `with-local-vars`) carry no
+        // namespace: the JVM `#<Var: --unnamed-->` print, and
+        // unbounds label through it (oracle `wv-pr`,
+        // `wv-unbound`).
+        use crate::{Unbound, Var};
+        let var = Value::Var(Var {
+            id: 7,
+            sym: Symbol::new(None, "--unnamed--"),
+        });
+        assert_eq!(pr(&var), "#<Var: --unnamed-->");
+        let named = Value::Var(Var {
+            id: 8,
+            sym: Symbol::new(Some("user"), "x"),
+        });
+        assert_eq!(pr(&named), "#'user/x");
+        let unb = Value::Unbound(Unbound {
+            sym: Symbol::new(None, "--unnamed--"),
+            var_id: 9,
+        });
+        assert_eq!(
+            pr(&unb),
+            "#object[clojure.lang.Var$Unbound 0x9 \"Unbound: #<Var: --unnamed-->\"]"
+        );
     }
 
     #[test]

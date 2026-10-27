@@ -2740,6 +2740,52 @@ fn native_clojure_version(_eval: &mut Evaluator, args: &[Value]) -> Result<Value
     Ok(Value::Str(Arc::from("1.13.0-alpha9")))
 }
 
+/// `destructure` (S4b): the public expansion helper over
+/// `destructure_expand::destructure_public` (oracle `dt-*`).
+fn native_destructure(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.core/destructure", args, &[1])?;
+    crate::destructure_expand::destructure_public(eval, &args[0])
+}
+
+/// `seq-to-map-for-destructuring` (S4b, oracle `sm-*`).
+fn native_seq_to_map(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.core/seq-to-map-for-destructuring", args, &[1])?;
+    crate::destructure_expand::seq_to_map_for_destructuring(eval, &args[0])
+}
+
+/// `munge` (S4b): `(str s)` through `Compiler/munge`
+/// (`ext::compiler_munge`), symbol-preserving (oracle
+/// `mg-*`). The munged text never contains `/`, so the
+/// rebuilt symbol is always unqualified (like the JVM's).
+fn native_munge(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.core/munge", args, &[1])?;
+    let s = str_concat(eval, args)?;
+    let munged = crate::ext::compiler_munge(&s);
+    if matches!(args[0], Value::Symbol(_)) {
+        Ok(Value::Symbol(Symbol::intern(&munged)))
+    } else {
+        Ok(Value::Str(Arc::from(munged.as_str())))
+    }
+}
+
+/// `namespace-munge` (S4b): `(str ns)` with `-` → `_`,
+/// nothing else (oracle `nm-*`).
+fn native_namespace_munge(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.core/namespace-munge", args, &[1])?;
+    let s = str_concat(eval, args)?;
+    Ok(Value::Str(Arc::from(s.replace('-', "_").as_str())))
+}
+
+/// `__local-var*` (S4b): the `with-local-vars` helper — a
+/// fresh anonymous dynamic var (see
+/// `Registry::fresh_anonymous`; unlisted, `__multifn*`
+/// precedent).
+fn native_fresh_local_var(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.core/__local-var*", args, &[0])?;
+    let id = eval.registry.fresh_anonymous();
+    Ok(crate::ns::var_value(id, &Symbol::new(None, "--unnamed--")))
+}
+
 /// The S5D scalar natives installed into `clojure.core`.
 pub(crate) const CORE_NATIVES: &[(&str, NativeFnPtr)] = &[
     ("+", native_add),
@@ -2852,6 +2898,11 @@ pub(crate) const CORE_NATIVES: &[(&str, NativeFnPtr)] = &[
     ("odd?", native_odd),
     ("even?", native_even),
     ("clojure-version", native_clojure_version),
+    ("destructure", native_destructure),
+    ("seq-to-map-for-destructuring", native_seq_to_map),
+    ("munge", native_munge),
+    ("namespace-munge", native_namespace_munge),
+    ("__local-var*", native_fresh_local_var),
 ];
 
 #[cfg(test)]

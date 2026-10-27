@@ -72,6 +72,60 @@ fn munge_char_rest(c: char, out: &mut String) {
     }
 }
 
+/// The true `Compiler/munge` for the `munge` var (S4b, oracle
+/// `mg-*` in `docs/zero-oos-s4b-macros/probes/macros.out`).
+/// Same table as the display [`munge`] except `/` (which is
+/// `_SLASH_` here, `$` for display names) and `\`
+/// (`_BSLASH_` here, passthrough for display).
+#[must_use]
+pub fn compiler_munge(display: &str) -> String {
+    let mut out = String::with_capacity(display.len());
+    for c in display.chars() {
+        compiler_munge_char(c, &mut out);
+    }
+    out
+}
+
+/// First half of the `Compiler/munge` char table.
+fn compiler_munge_char(c: char, out: &mut String) {
+    match c {
+        '-' => out.push('_'),
+        '/' => out.push_str("_SLASH_"),
+        '\\' => out.push_str("_BSLASH_"),
+        ':' => out.push_str("_COLON_"),
+        '+' => out.push_str("_PLUS_"),
+        '>' => out.push_str("_GT_"),
+        '<' => out.push_str("_LT_"),
+        '=' => out.push_str("_EQ_"),
+        '~' => out.push_str("_TILDE_"),
+        '!' => out.push_str("_BANG_"),
+        '@' => out.push_str("_CIRCA_"),
+        '#' => out.push_str("_SHARP_"),
+        '\'' => out.push_str("_SINGLEQUOTE_"),
+        other => compiler_munge_char_rest(other, out),
+    }
+}
+
+/// Rest of the `Compiler/munge` char table. Unlisted chars
+/// (letters, digits, `.`, `,`, `;`, parens, `$`, whitespace,
+/// non-ASCII) pass through.
+fn compiler_munge_char_rest(c: char, out: &mut String) {
+    match c {
+        '"' => out.push_str("_DOUBLEQUOTE_"),
+        '%' => out.push_str("_PERCENT_"),
+        '^' => out.push_str("_CARET_"),
+        '&' => out.push_str("_AMPERSAND_"),
+        '*' => out.push_str("_STAR_"),
+        '|' => out.push_str("_BAR_"),
+        '{' => out.push_str("_LBRACE_"),
+        '}' => out.push_str("_RBRACE_"),
+        '[' => out.push_str("_LBRACK_"),
+        ']' => out.push_str("_RBRACK_"),
+        '?' => out.push_str("_QMARK_"),
+        _ => out.push(c),
+    }
+}
+
 /// An interpreted function value: display name, arities, captured
 /// frame, optional metadata (`with-meta`), and optional conveyed
 /// thread bindings (`bound-fn` snapshots these at creation and
