@@ -23,7 +23,9 @@ docstrings and `:added` metadata are ported verbatim.
 There is no JVM to hand the port an `Enumeration`, so each
 handle is an opaque `ExtensionValue` (the `io.rs` `Writer`
 pattern: `class_name` / `print` / `dyn_eq` / `dyn_hash` /
-`as_any`, identity by per-evaluator sequence id) built only
+`as_any`; identity by per-evaluator sequence id, except
+`File`, which compares by path like `java.io.File.equals`)
+built only
 by embedding Rust code through `pub` constructors in the new
 `clj-eval` module `jdkio.rs`. No new vars construct handles
 (the matrix forbids unlisted resolving vars); Clojure code
@@ -137,9 +139,14 @@ casts to: `java.util.Enumeration`, `java.util.Iterator`,
   when it is a file or missing (probes `d-file-arg`,
   `d-missing`). Errors are LAZY like `tree-seq`: a bad
   root constructs an unforced seq and throws on first
-  force — CCE to `java.io.File` (probes `n-file-unforced`,
-  `n-file-vec-force`, `g-file-argerr`), NPE naming `f`
-  for nil (probes `n-file-nil-unforced`, `n-file-nil`).
+  force — NPE naming `f` for nil (probes
+  `n-file-nil-unforced`, `n-file-nil`). Wave-2 union
+  with S12 (`fs-str-arg`, §1.7): string roots walk as
+  paths (strings in and out), so the oracle
+  CCE-on-string (`n-file-unforced`, `n-file-vec-force`,
+  `g-file-argerr`) has no live call site; non-string,
+  non-File, non-nil roots keep S12's eager slurp-shaped
+  IAE.
   Unreadable directories contribute no children (mirrors
   `(seq (. d (listFiles)))` over a null return — the JVM
   never surfaces an IO error from this walk, so the
@@ -154,9 +161,11 @@ casts to: `java.util.Enumeration`, `java.util.Iterator`,
   c "tail"]`); `(xml-seq nil)` is `(nil)` (probe `e-nil`).
   Laziness and chunking ride `tree-seq` untouched.
 
-All nine natives carry the house arity guard; arity misses
-throw the house arity text naming `clojure.core/<name>`
-(probes `g-*-arity*`, all pinned).
+The eight natives carry the house arity guard; arity
+misses throw the house arity text naming
+`clojure.core/<name>` (probes `g-*-arity*`, all pinned).
+`xml-seq` is a `core.clj` closure, so its arity misses name
+the eval site (prefix-pinned — the S3/S4a convention).
 
 ## BDD scenarios
 
@@ -172,8 +181,9 @@ throw the house arity text naming `clojure.core/<name>`
   column labels".
 - Given `(file-seq (file tmp))` over a `root/{mid/deep,
   top}` tree, names answer the 4-member set in preorder;
-  `(vec (file-seq "x"))` throws CCE to `java.io.File`
-  while `(file-seq "x")` alone constructs.
+  `(vec (file-seq "x"))` walks `["x"]` (wave-2 union with
+  S12: strings walk as paths) while `(file-seq "x")`
+  alone constructs lazily.
 - Given `(xml-seq {:tag :a :content [...]})`, the walk
   answers root-first depth order including string leaves.
 - Given `(iterator-seq 1)`, the call throws CCE to

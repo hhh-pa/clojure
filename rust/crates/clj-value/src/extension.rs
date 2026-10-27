@@ -193,9 +193,13 @@ impl ThrowClass {
 #[must_use]
 pub fn cce_message(from_jvm: &str, to_jvm: &str) -> String {
     fn module_of(cls: &str) -> &'static str {
-        // Array descriptors (`[I`, …) live in `java.base` too (S15
-        // oracle `d-ints-wrong`).
-        if cls.starts_with("java.") || cls.starts_with('[') {
+        // S17: `java.sql` ships in its own module (oracle
+        // `g-rs-argerr`).
+        if cls.starts_with("java.sql.") {
+            "module java.sql of loader 'platform'"
+        } else if cls.starts_with("java.") || cls.starts_with('[') {
+            // Array descriptors (`[I`, …) live in `java.base` too
+            // (S15 oracle `d-ints-wrong`).
             "module java.base of loader 'bootstrap'"
         } else {
             "unnamed module of loader 'app'"

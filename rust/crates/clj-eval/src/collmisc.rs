@@ -49,7 +49,9 @@ pub(crate) const COLLMISC_NATIVES: &[(&str, NativeFnPtr)] = &[
     ("mix-collection-hash", native_mix_collection_hash),
     ("seque", native_seque),
     ("iteration", native_iteration),
-    ("file-seq", native_file_seq),
+    // `file-seq` lives in `jdkio.rs` since the S17 wave-2
+    // union (one dispatch native: strings walk as paths,
+    // File handles as files).
     ("re-matcher", native_re_matcher),
     ("re-groups", native_re_groups),
 ];
@@ -962,27 +964,6 @@ pub(crate) fn seq_iteration(eval: &mut Evaluator, it: &IterationValue) -> Result
             tail,
         })),
     }
-}
-
-// ---------------------------------------------------------------------------
-// File-seq
-// ---------------------------------------------------------------------------
-
-/// `file-seq`: a lazy seq of path strings (root first; non-dir
-/// and missing roots walk a singleton). The port takes and
-/// yields strings — the JVM takes and yields `java.io.File`
-/// (documented divergence, §1.7).
-fn native_file_seq(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
-    check_arity("clojure.core/file-seq", args, &[1])?;
-    let Value::Str(path) = &args[0] else {
-        return Err(NativeError::new(
-            ThrowClass::IllegalArgumentException,
-            format!("Cannot open <{}> as a directory.", str_of(&args[0])),
-        ));
-    };
-    Ok(pending_value(Thunk::FileSeq {
-        stack: vec![path.to_string()],
-    }))
 }
 
 // ---------------------------------------------------------------------------

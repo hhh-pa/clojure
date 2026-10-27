@@ -2137,6 +2137,7 @@ fn boot_install_natives(eval: &mut Evaluator) {
         .chain(crate::re::RE_NATIVES.iter())
         .chain(crate::rng::RNG_NATIVES.iter())
         .chain(crate::io::IO_NATIVES.iter())
+        .chain(crate::jdkio::JDKIO_NATIVES.iter())
         .chain(crate::reader::READER_NATIVES.iter())
         .chain(crate::concurrency::CONC_NATIVES.iter())
         .chain(crate::fx4_host::FX4_NATIVES.iter())

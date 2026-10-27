@@ -30,6 +30,7 @@ pub mod fx4_form;
 pub mod fx4_host;
 pub mod hierarchy;
 pub mod io;
+pub mod jdkio;
 pub mod lazy;
 pub mod macros;
 pub mod multi;

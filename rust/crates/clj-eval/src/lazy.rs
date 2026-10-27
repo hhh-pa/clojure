@@ -33,6 +33,7 @@ use crate::env::Env;
 use crate::error::{NativeError, Signal, jvm_class_of};
 use crate::eval::Evaluator;
 use crate::expr::Expr;
+use crate::jdkio::JdkCursor;
 use crate::ns::{NativeFnPtr, check_arity, signal_to_native};
 
 /// Which lazy class a [`PendingSeq`] reports: almost everything is
@@ -231,6 +232,14 @@ pub(crate) enum Thunk {
     ChunkHead {
         chunk: crate::collmisc::ChunkValue,
         tail: Value,
+    },
+    /// S17: pulls through a shared JDK-handle cursor (up to
+    /// [`CHUNK_SIZE`] items per step when `chunked`, one
+    /// otherwise) for `iterator-seq`/`stream-seq!`/
+    /// `resultset-seq` tails/`file-seq`.
+    JdkPull {
+        cursor: JdkCursor,
+        chunked: bool,
     },
 }
 
@@ -1022,6 +1031,7 @@ fn step_thunk_rest(eval: &mut Evaluator, thunk: Thunk) -> Result<Forced, Signal>
         } => step_reductions(eval, &f, acc, has_init, input, started),
         Thunk::Replace { smap, input } => step_replace(eval, &smap, input),
         Thunk::Sequence { step, srcs } => step_sequence(eval, &step, srcs),
+        Thunk::JdkPull { cursor, chunked } => step_jdk_pull(eval, &cursor, chunked),
         other => step_thunk_s12(eval, other),
     }
 }
@@ -1112,6 +1122,26 @@ fn step_fileseq(stack: &[String]) -> Forced {
         items: Arc::from(vec![Value::Str(Arc::from(path.as_str()))]),
         tail: pending_value(Thunk::FileSeq { stack }),
     }
+}
+
+/// S17: one pull through a JDK-handle cursor (a chunk when
+/// `chunked`, one item otherwise); the tail re-pulls through
+/// the same shared cursor.
+fn step_jdk_pull(
+    eval: &mut Evaluator,
+    cursor: &JdkCursor,
+    chunked: bool,
+) -> Result<Forced, Signal> {
+    let mut cursor = cursor.clone();
+    let n = if chunked { CHUNK_SIZE } else { 1 };
+    let items = crate::jdkio::pull_cursor(eval, &mut cursor, n).map_err(|e| eval.throw(e))?;
+    if items.is_empty() {
+        return Ok(Forced::Empty);
+    }
+    Ok(Forced::Chunk {
+        items: Arc::from(items),
+        tail: pending_value(Thunk::JdkPull { cursor, chunked }),
+    })
 }
 
 /// A prebuilt chain: an empty head forces the tail, otherwise the

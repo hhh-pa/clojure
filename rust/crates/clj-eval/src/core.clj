@@ -1919,3 +1919,18 @@
        (if (< ~idx l#)
          (~'recur (inc ~idx) ~expr)
          ~ret))))
+
+;; --- `xml-seq` (zero-oos S17 JDK/IO adapters, issue #61):
+;; verbatim port of alpha10 `clojure/core.clj` (`:static`
+;; dropped — nothing compiles statically). Strings are leaf
+;; nodes, not skipped (oracle `e-walk`); laziness rides
+;; `tree-seq`. Oracle:
+;; `docs/zero-oos-s17-jdkio/probes/jdkio.{clj,out}`.
+(defn xml-seq
+  "A tree seq on the xml elements as per xml/parse"
+  {:added "1.0"}
+  [root]
+    (tree-seq
+     (complement string?)
+     (comp seq :content)
+     root))
