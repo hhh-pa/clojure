@@ -26,7 +26,7 @@ use crate::lazy::{
     as_pending, as_realized, as_subvector, collect_all, equiv_vals, is_counted_seq, is_seq_value,
     realize_deep,
 };
-use crate::ns::{NativeFnPtr, check_arity, signal_to_native};
+use crate::ns::{NativeFnPtr, check_arity, npe, signal_to_native};
 
 /// `Cannot invoke "Object.getClass()" because "x" is null`: the
 /// numbers-`nil` failure (every arithmetic/comparison op probes it).
@@ -1656,13 +1656,15 @@ fn str_of_realized(eval: &mut Evaluator, v: &Value) -> Result<String, NativeErro
         // Multimethods render the `toString` fallback (no methods
         // run for them, oracle `d-prefer`).
         Value::MultiFn(m) => clj_value::multifn_str(&m.name),
-        // Atoms, delays, futures, promises, and agents render their
-        // `toString` (`Class@hex`), never the `#object[…]` print form.
+        // Atoms, delays, futures, promises, agents, and volatiles
+        // render their `toString` (`Class@hex`), never the
+        // `#object[…]` print form.
         Value::Atom(_)
         | Value::Delay(_)
         | Value::Future(_)
         | Value::Promise(_)
-        | Value::Agent(_) => clj_value::java_debug(&r),
+        | Value::Agent(_)
+        | Value::Volatile(_) => clj_value::java_debug(&r),
         Value::List(_) | Value::Vector(_) | Value::Map(_) | Value::Set(_) | Value::Extension(_) => {
             clj_value::pr_to_string(&r, &clj_value::PrintOpts::pr())
         }
@@ -2323,20 +2325,82 @@ fn native_trampoline(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nati
 /// like the JVM.
 fn native_hash(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/hash", args, &[1])?;
-    if clj_value::seq_hash_unsupported(&args[0]) {
-        return Err(NativeError::new(
-            ThrowClass::UnsupportedOperationException,
-            String::new(),
-        ));
+    Ok(Value::Int(i64::from(hasheq_one(eval, &args[0])?)))
+}
+
+/// One value's `hasheq`: unhashable infinites (top-level, nested, or
+/// revealed by forcing) throw bare `UnsupportedOperationException`;
+/// anything else hashes after a full realize (like the JVM walk).
+fn hasheq_one(eval: &mut Evaluator, v: &Value) -> Result<i32, NativeError> {
+    if clj_value::seq_hash_unsupported(v) {
+        return Err(hash_unsupported());
     }
-    let v = realize_deep(eval, &args[0]).map_err(signal_to_native)?;
-    if clj_value::seq_hash_unsupported(&v) {
-        return Err(NativeError::new(
-            ThrowClass::UnsupportedOperationException,
-            String::new(),
-        ));
+    let realized = realize_deep(eval, v).map_err(signal_to_native)?;
+    if clj_value::seq_hash_unsupported(&realized) {
+        return Err(hash_unsupported());
     }
-    Ok(Value::Int(i64::from(clj_value::hasheq(&v))))
+    Ok(clj_value::hasheq(&realized))
+}
+
+/// The bare `UnsupportedOperationException` for unhashable infinite
+/// seqs (the JVM `hasheq` overrides throw with an empty message).
+fn hash_unsupported() -> NativeError {
+    NativeError::new(ThrowClass::UnsupportedOperationException, String::new())
+}
+
+/// The `hash-*-coll` nil NPE (`Iterable.iterator` on a null `xs`).
+const ITERABLE_NIL: &str = "Cannot invoke \"java.lang.Iterable.iterator()\" because \"xs\" is null";
+
+/// Whether the port seqs the value (the `Iterable` analog): the
+/// `seq` walk's accepted set — `is_seqable` plus subvectors and
+/// eductions, which `step_unit` walks but `is_seqable` omits.
+fn is_port_iterable(v: &Value) -> bool {
+    crate::lazy::is_seqable(v)
+        || as_subvector(v).is_some()
+        || crate::xform::Eduction::parts(v).is_some()
+}
+
+/// A `hash-*-coll` argument's items: nil trips the `Iterable` NPE;
+/// strings fail the `Iterable` cast (seqable here, not `Iterable`
+/// on the JVM); anything else the port cannot seq fails the cast
+/// too; the rest walks like `seq` (maps yield entries, entries
+/// their pair).
+fn hash_coll_items(eval: &mut Evaluator, v: &Value) -> Result<Vec<Value>, NativeError> {
+    match v {
+        Value::Nil => Err(npe(ITERABLE_NIL)),
+        Value::Str(_) => Err(cce_err(v, "java.lang.Iterable")),
+        _ if !is_port_iterable(v) => Err(cce_err(v, "java.lang.Iterable")),
+        _ => collect_all(eval, v).map_err(signal_to_native),
+    }
+}
+
+/// `hash-ordered-coll`: the Murmur3 ordered mix over the arg's
+/// items, each hashed exactly like `(hash item)` (map entries hash
+/// as their `[k v]` pair, like `(hash entry)`).
+fn native_hash_ordered_coll(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.core/hash-ordered-coll", args, &[1])?;
+    let items = hash_coll_items(eval, &args[0])?;
+    let mut hashes = Vec::with_capacity(items.len());
+    for item in &items {
+        hashes.push(hasheq_one(eval, item)?);
+    }
+    Ok(Value::Int(i64::from(clj_value::hash_ordered(
+        hashes.into_iter(),
+    ))))
+}
+
+/// `hash-unordered-coll`: the Murmur3 unordered mix over the arg's
+/// items, each hashed exactly like `(hash item)`.
+fn native_hash_unordered_coll(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.core/hash-unordered-coll", args, &[1])?;
+    let items = hash_coll_items(eval, &args[0])?;
+    let mut hashes = Vec::with_capacity(items.len());
+    for item in &items {
+        hashes.push(hasheq_one(eval, item)?);
+    }
+    Ok(Value::Int(i64::from(clj_value::hash_unordered(
+        hashes.into_iter(),
+    ))))
 }
 
 /// `hash-code` (PRIVATE, port-internal): Java `.hashCode` for the
@@ -2509,6 +2573,8 @@ pub(crate) const CORE_NATIVES: &[(&str, NativeFnPtr)] = &[
     ("trampoline", native_trampoline),
     ("hash", native_hash),
     ("hash-code", native_hash_code),
+    ("hash-ordered-coll", native_hash_ordered_coll),
+    ("hash-unordered-coll", native_hash_unordered_coll),
     ("throw-illegal-arg!", native_throw_iae),
     ("throw-npe!", native_throw_npe),
     ("odd?", native_odd),

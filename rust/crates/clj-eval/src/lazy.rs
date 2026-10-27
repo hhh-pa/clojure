@@ -419,8 +419,9 @@ fn iseq_err(v: &Value) -> NativeError {
 
 /// Whether `seq` accepts the value without forcing it (mirrors
 /// `RT.canSeq` over our value types; transients and throwables
-/// are not seqable). Staged for `seqable?` (S5D).
-#[allow(dead_code)]
+/// are not seqable). Staged for `seqable?` (S5D); S10's
+/// `hash-*-coll` starts from this set (plus the subvector and
+/// eduction views `step_unit` walks).
 pub(crate) fn is_seqable(v: &Value) -> bool {
     // Records seq (oracle `g-seqable-rec`); anything else host
     // does not (oracle `g-seqable-dt`).

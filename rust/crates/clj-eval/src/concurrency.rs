@@ -34,6 +34,14 @@
 //! monitor (one global reentrant lock; oracles: `/tmp/s6d-probe*.clj`;
 //! pins P6).
 //!
+//! S10 adds volatile cells (`volatile!`, `volatile?`, `vreset!` —
+//! `vswap!` is a builtin macro in `builtin_expand.rs`), taps
+//! (`add-tap`/`remove-tap`/`tap>` over one daemon dispatcher —
+//! `tap->` is a `core.clj` one-liner), and the executor vars
+//! (`set-agent-send-executor!`/`set-agent-send-off-executor!`,
+//! accept-and-record). Oracle:
+//! `docs/zero-oos-s10-cells/probes/`; rules: the S10 specification.
+//!
 //! Publish discipline: validators run BEFORE publishing (vetoes and
 //! `f` failures leave the state untouched and fire no watches);
 //! watches fire AFTER publishing, lock-free, even when the value is
@@ -54,7 +62,7 @@ use std::time::{Duration, Instant};
 use clj_value::{
     Agent, AgentAction, AgentPool, Atom, Delay, DelayState, ErrorMode, Future, FutureOutcome,
     FutureState, Keyword, Map, PrintOpts, Promise, QueuedAction, Symbol, ThrowClass, Throwable,
-    Value, Var, new_map, pr_to_string,
+    Value, Var, Volatile, new_map, pr_to_string,
 };
 
 use crate::core::{cce_err, is_ifn};
@@ -507,6 +515,7 @@ fn native_deref(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErr
     match &args[0] {
         Value::Atom(a) => Ok(a.lock().value.clone()),
         Value::Agent(a) => Ok(a.lock().value.clone()),
+        Value::Volatile(v) => Ok(v.lock().clone()),
         Value::Delay(d) => force_delay(eval, d).map_err(signal_to_native),
         Value::Future(f) => future_outcome(&f.get()),
         Value::Promise(p) => Ok(p.get()),
@@ -796,6 +805,12 @@ struct AgentSystemInner {
     pools: Option<Arc<AgentPools>>,
     shutdown: bool,
     parked: Vec<std::thread::JoinHandle<()>>,
+    /// The recorded `send` executor (S10 accept-and-record: stored
+    /// and returned, never consulted — dispatch always uses the
+    /// fixed pools).
+    send_executor: Option<Value>,
+    /// The recorded `send-off` executor (same contract).
+    send_off_executor: Option<Value>,
 }
 
 impl AgentSystem {
@@ -806,8 +821,46 @@ impl AgentSystem {
                 pools: None,
                 shutdown: false,
                 parked: Vec::new(),
+                send_executor: None,
+                send_off_executor: None,
             }),
         }
+    }
+
+    /// Record the `send` executor (any value, including nil —
+    /// never validated, never consulted).
+    pub fn set_send_executor(&self, executor: Value) {
+        self.inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .send_executor = Some(executor);
+    }
+
+    /// The recorded `send` executor, if set.
+    pub fn send_executor(&self) -> Option<Value> {
+        self.inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .send_executor
+            .clone()
+    }
+
+    /// Record the `send-off` executor (any value, including nil —
+    /// never validated, never consulted).
+    pub fn set_send_off_executor(&self, executor: Value) {
+        self.inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .send_off_executor = Some(executor);
+    }
+
+    /// The recorded `send-off` executor, if set.
+    pub fn send_off_executor(&self) -> Option<Value> {
+        self.inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .send_off_executor
+            .clone()
     }
 
     /// Whether `shutdown-agents` has latched (post-shutdown sends
@@ -1867,7 +1920,214 @@ pub(crate) fn locking_acquire() -> LockingGuard {
     }
 }
 
-/// The S6A/S6B/S6C natives installed into `clojure.core` by
+/// The `vreset!` nil-volatile NPE (`Volatile.reset` on a null `vol`).
+const VRESET_NIL: &str =
+    "Cannot invoke \"clojure.lang.Volatile.reset(Object)\" because \"vol\" is null";
+
+/// A `Volatile` receiver: nil trips the `reset` NPE, anything else
+/// non-volatile the `Volatile` cast (also the `vswap!` gate — the
+/// macro expands through `vreset!`, which is where the JVM's
+/// `^Volatile` checkcast lands).
+fn as_volatile(v: &Value) -> Result<Volatile, NativeError> {
+    match v {
+        Value::Volatile(cell) => Ok(cell.clone()),
+        Value::Nil => Err(npe(VRESET_NIL)),
+        other => Err(cce_err(other, "clojure.lang.Volatile")),
+    }
+}
+
+fn native_volatile(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.core/volatile!", args, &[1])?;
+    Ok(Value::Volatile(Volatile::new(args[0].clone())))
+}
+
+fn native_volatile_pred(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.core/volatile?", args, &[1])?;
+    Ok(Value::Bool(matches!(args[0], Value::Volatile(_))))
+}
+
+fn native_vreset(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.core/vreset!", args, &[2])?;
+    let cell = as_volatile(&args[0])?;
+    *cell.lock() = args[1].clone();
+    Ok(args[1].clone())
+}
+
+/// The tap queue capacity (the JVM's `ArrayBlockingQueue(1024)`).
+const TAP_QUEUE_CAPACITY: usize = 1024;
+
+/// The tap dispatcher thread name (exactly, like the JVM).
+const TAP_LOOP_NAME: &str = "clojure.core/tap-loop";
+
+/// The lineage's tap system (S10): one registry set plus one bounded
+/// FIFO queue, served by a single lazily started daemon dispatcher —
+/// the JVM's `tapset` atom + `tapq` + `tap-loop` thread
+/// (`docs/zero-oos-s10-cells/specification.md` §1b). Per-lineage like
+/// [`AgentSystem`] (one runtime is one lineage here); forked
+/// evaluators share the system. The dispatcher thread is detached
+/// (daemon), so tap tests never block suite exit.
+pub struct TapSystem {
+    inner: Mutex<TapInner>,
+    tx: mpsc::SyncSender<Value>,
+}
+
+struct TapInner {
+    /// The registry set (`=` dedup — fns compare by identity, like
+    /// the JVM's set over `.equals`-less fns).
+    taps: Vec<Value>,
+    /// The queue's receiver (taken by the dispatcher thread once it
+    /// starts).
+    rx: Option<mpsc::Receiver<Value>>,
+    /// Whether the dispatcher is spawned (flipped before the spawn,
+    /// so concurrent starters spawn exactly one thread; reset when
+    /// the spawn fails, so a later call retries).
+    started: bool,
+}
+
+impl TapSystem {
+    /// An unstarted system (the dispatcher spawns on the first
+    /// `add-tap`/`tap>`, like the JVM's forced `tap-loop` delay).
+    pub(crate) fn new() -> Self {
+        let (tx, rx) = mpsc::sync_channel(TAP_QUEUE_CAPACITY);
+        Self {
+            inner: Mutex::new(TapInner {
+                taps: Vec::new(),
+                rx: Some(rx),
+                started: false,
+            }),
+            tx,
+        }
+    }
+
+    /// Start the dispatcher if it is not running (the `force
+    /// tap-loop` analog): one daemon thread over a forked evaluator
+    /// (bindings conveyed at start, like a future body). The loop
+    /// holds a cloned handle, so it only ever reads the registry
+    /// through the shared system.
+    pub(crate) fn ensure_started(self: &Arc<Self>, eval: &Evaluator) -> Result<(), NativeError> {
+        {
+            let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            if inner.started {
+                return Ok(());
+            }
+            inner.started = true;
+        }
+        let child = eval.fork_for_thread(eval.clone_bindings());
+        let sys = Arc::clone(self);
+        match thread::Builder::new()
+            .name(TAP_LOOP_NAME.to_owned())
+            .spawn(move || {
+                let rx = sys
+                    .inner
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .rx
+                    .take()
+                    .expect("the single dispatcher takes the receiver");
+                tap_loop(&sys, rx, child)
+            }) {
+            Ok(_) => Ok(()),
+            Err(_) => {
+                self.inner.lock().unwrap_or_else(|e| e.into_inner()).started = false;
+                Err(spawn_failed())
+            }
+        }
+    }
+
+    /// Snapshot the registry (the loop's per-item `@tapset`).
+    fn snapshot(&self) -> Vec<Value> {
+        self.inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .taps
+            .clone()
+    }
+
+    /// Conj a tap (starting the loop first, like the JVM's
+    /// `add-tap`); duplicates are set-absorbed. Returns nil.
+    pub(crate) fn add_tap(
+        self: &Arc<Self>,
+        eval: &Evaluator,
+        f: Value,
+    ) -> Result<Value, NativeError> {
+        self.ensure_started(eval)?;
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if !inner.taps.contains(&f) {
+            inner.taps.push(f);
+        }
+        Ok(Value::Nil)
+    }
+
+    /// Disj a tap (no loop start, like the JVM's `remove-tap`).
+    /// Returns nil.
+    pub(crate) fn remove_tap(&self, f: &Value) -> Value {
+        self.inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .taps
+            .retain(|t| t != f);
+        Value::Nil
+    }
+
+    /// Offer one item (starting the loop first, like the JVM's
+    /// `tap>`): `true` with room, `false` past capacity (dropped,
+    /// never blocking). No nil sentinel is needed (`Value::Nil` is
+    /// a first-class queue item).
+    pub(crate) fn offer(self: &Arc<Self>, eval: &Evaluator, x: Value) -> Result<bool, NativeError> {
+        self.ensure_started(eval)?;
+        match self.tx.try_send(x) {
+            Ok(()) => Ok(true),
+            Err(mpsc::TrySendError::Full(_)) => Ok(false),
+            // The receiver lives on the dispatcher thread, which
+            // loops forever — disconnection is unreachable.
+            Err(mpsc::TrySendError::Disconnected(_)) => Ok(false),
+        }
+    }
+}
+
+/// Run the dispatcher loop: take one item, snapshot the registry,
+/// and call each tap inside a per-tap catch-all (the JVM's empty
+/// `catch Throwable` — a throwing tap neither kills the loop nor
+/// starves later taps).
+fn tap_loop(sys: &Arc<TapSystem>, rx: mpsc::Receiver<Value>, mut child: Evaluator) {
+    for item in rx {
+        for tap in sys.snapshot() {
+            let _ = child_call(&mut child, &tap, std::slice::from_ref(&item));
+        }
+    }
+}
+
+fn native_add_tap(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.core/add-tap", args, &[1])?;
+    eval.tap_system().add_tap(eval, args[0].clone())
+}
+
+fn native_remove_tap(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.core/remove-tap", args, &[1])?;
+    Ok(eval.tap_system().remove_tap(&args[0]))
+}
+
+fn native_tap(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.core/tap>", args, &[1])?;
+    Ok(Value::Bool(eval.tap_system().offer(eval, args[0].clone())?))
+}
+
+fn native_set_send_executor(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.core/set-agent-send-executor!", args, &[1])?;
+    eval.set_send_executor(args[0].clone());
+    Ok(args[0].clone())
+}
+
+fn native_set_send_off_executor(
+    eval: &mut Evaluator,
+    args: &[Value],
+) -> Result<Value, NativeError> {
+    check_arity("clojure.core/set-agent-send-off-executor!", args, &[1])?;
+    eval.set_send_off_executor(args[0].clone());
+    Ok(args[0].clone())
+}
+
+/// The S6A/S6B/S6C/S10 natives installed into `clojure.core` by
 /// [`boot`](crate::ns::boot).
 pub(crate) const CONC_NATIVES: &[(&str, NativeFnPtr)] = &[
     ("atom", native_atom),
@@ -1896,11 +2156,37 @@ pub(crate) const CONC_NATIVES: &[(&str, NativeFnPtr)] = &[
     ("shutdown-agents", native_shutdown_agents),
     ("set-error-handler!", native_set_error_handler),
     ("set-error-mode!", native_set_error_mode),
+    ("volatile!", native_volatile),
+    ("volatile?", native_volatile_pred),
+    ("vreset!", native_vreset),
+    ("add-tap", native_add_tap),
+    ("remove-tap", native_remove_tap),
+    ("tap>", native_tap),
+    ("set-agent-send-executor!", native_set_send_executor),
+    ("set-agent-send-off-executor!", native_set_send_off_executor),
 ];
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn executor_slots_record_any_value() {
+        // S10 accept-and-record: each setter stores its arg
+        // (including nil) for a future reader; dispatch never
+        // consults the slots (pinned by `cellstaps.rs exec_record`
+        // completions, not here).
+        let sys = AgentSystem::new();
+        assert_eq!(sys.send_executor(), None);
+        assert_eq!(sys.send_off_executor(), None);
+        sys.set_send_executor(Value::Keyword(Keyword::new(None, "kw")));
+        sys.set_send_off_executor(Value::Nil);
+        assert_eq!(
+            sys.send_executor(),
+            Some(Value::Keyword(Keyword::new(None, "kw")))
+        );
+        assert_eq!(sys.send_off_executor(), Some(Value::Nil));
+    }
 
     #[test]
     fn join_all_skips_the_calling_thread() {

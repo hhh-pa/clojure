@@ -352,6 +352,7 @@ fn jvm_class_of_host(v: &Value) -> String {
         Value::Future(f) => f.jvm_class().to_owned(),
         Value::Promise(p) => p.jvm_class().to_owned(),
         Value::Agent(a) => a.jvm_class().to_owned(),
+        Value::Volatile(v) => v.jvm_class().to_owned(),
         Value::Extension(e) => e.class_name(),
         // Port-defined types report their class name (S-typechain).
         Value::HostType(h) => h.type_name().to_owned(),
