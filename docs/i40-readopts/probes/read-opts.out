@@ -1,0 +1,42 @@
+rs-opts-none 1
+rs-opts-none-eof THROW java.lang.RuntimeException|"EOF while reading"
+rs-opts-none-trunc THROW java.lang.RuntimeException|"EOF while reading"
+rs-opts-none-cond THROW java.lang.RuntimeException|"Conditional read not allowed"
+rs-opts-empty 1
+rs-opts-empty-eof THROW java.lang.RuntimeException|"EOF while reading"
+rs-opts-cond-allow 1
+rs-opts-cond-deny THROW java.lang.RuntimeException|"Conditional read not allowed"
+rs-opts-cond-absent THROW java.lang.RuntimeException|"Conditional read not allowed"
+rs-opts-cond-preserve #?(:clj 1 :default 2)
+rs-opts-cond-true THROW java.lang.RuntimeException|"Conditional read not allowed"
+rs-opts-cond-splice-top THROW java.lang.RuntimeException|"Reader conditional splicing not allowed at the top level."
+rs-opts-cond-splice-nested (1 2 3)
+rs-opts-features 1
+rs-opts-features-unknown 2
+rs-opts-features-nil 2
+rs-opts-features-vec THROW java.lang.ClassCastException|"class clojure.lang.PersistentVector cannot be cast to class clojure.lang.IPersistentSet (clojure.lang.PersistentVector and clojure.lang.IPersistentSet are in unnamed module of loader 'app')"
+rs-opts-features-set-nonkw 1
+rs-opts-eof :x
+rs-opts-eof-blank :x
+rs-opts-eof-comment :x
+rs-opts-eof-nil nil
+rs-opts-eof-false false
+rs-opts-eof-trunc THROW java.lang.RuntimeException|"EOF while reading"
+rs-opts-eof-trunc-str THROW java.lang.RuntimeException|"EOF while reading string"
+rs-opts-eof-value 1
+rs-opts-oneform 1
+rs-opts-unknown-key 1
+rs-opts-unknown-key-eof THROW java.lang.RuntimeException|"EOF while reading"
+rs-opts-nil 1
+rs-opts-nil-eof THROW java.lang.RuntimeException|"EOF while reading"
+rs-opts-nonmap THROW java.lang.ClassCastException|"class clojure.lang.Keyword cannot be cast to class clojure.lang.IPersistentMap (clojure.lang.Keyword and clojure.lang.IPersistentMap are in unnamed module of loader 'app')"
+rs-opts-nonmap-vec THROW java.lang.ClassCastException|"class clojure.lang.PersistentVector cannot be cast to class clojure.lang.IPersistentMap (clojure.lang.PersistentVector and clojure.lang.IPersistentMap are in unnamed module of loader 'app')"
+rs-opts-mapentry THROW java.lang.ClassCastException|"class clojure.lang.MapEntry cannot be cast to class clojure.lang.IPersistentMap (clojure.lang.MapEntry and clojure.lang.IPersistentMap are in unnamed module of loader 'app')"
+rs-opts-badcond THROW java.lang.RuntimeException|"Conditional read not allowed"
+rs-opts-cond-nil THROW java.lang.RuntimeException|"Conditional read not allowed"
+rs-opts-nilstr THROW java.lang.NullPointerException|"Cannot invoke \"String.length()\" because \"s\" is null"
+rs-opts-numstr THROW java.lang.ClassCastException|"class java.lang.Long cannot be cast to class java.lang.String (java.lang.Long and java.lang.String are in module java.base of loader 'bootstrap')"
+rs-opts-order THROW java.lang.ClassCastException|"class java.lang.Long cannot be cast to class java.lang.String (java.lang.Long and java.lang.String are in module java.base of loader 'bootstrap')"
+rs-opts-order-nil THROW java.lang.NullPointerException|"Cannot invoke \"String.length()\" because \"s\" is null"
+rs-opts-arity0 THROW clojure.lang.ArityException|"Wrong number of args (0) passed to: clojure.core/read-string"
+rs-opts-arity3 THROW clojure.lang.ArityException|"Wrong number of args (3) passed to: clojure.core/read-string"

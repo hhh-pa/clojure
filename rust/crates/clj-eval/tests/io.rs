@@ -1005,3 +1005,185 @@ fn instream_read_string_deny_row() {
         "java.lang.RuntimeException | EOF while reading"
     );
 }
+
+// ---- F-read-opts (issue #40): `read-string` opts arity. Every
+// assert cites the `docs/i40-readopts/probes/read-opts.out` row it
+// pins; errors are bare `RuntimeException`s (no `ReaderException`
+// wrapper anywhere in the oracle).
+
+#[test]
+fn read_string_opts_rows() {
+    let mut eval = boot();
+    // Empty opts behave as 1-arity (probes `rs-opts-empty`,
+    // `rs-opts-empty-eof`); one form only (probe `rs-opts-oneform`).
+    assert_eq!(run_last(&mut eval, "(read-string {} \"1 2\")"), "1");
+    assert_eq!(
+        uncaught(&mut eval, "(read-string {} \"\")"),
+        "java.lang.RuntimeException | EOF while reading"
+    );
+    assert_eq!(run_last(&mut eval, "(read-string {:eof :x} \"1 2\")"), "1");
+    // `:read-cond` (probes `rs-opts-cond-allow`, `rs-opts-cond-deny`,
+    // `rs-opts-cond-absent`, `rs-opts-cond-preserve`,
+    // `rs-opts-cond-true`, `rs-opts-cond-splice-top`,
+    // `rs-opts-cond-splice-nested`, `rs-opts-badcond`,
+    // `rs-opts-cond-nil`): only `:allow`/`:preserve` opt in.
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(read-string {:read-cond :allow} \"#?(:clj 1 :default 2)\")"
+        ),
+        "1"
+    );
+    for src in [
+        "(read-string {:read-cond false} \"#?(:clj 1 :default 2)\")",
+        "(read-string {:eof :x} \"#?(:clj 1 :default 2)\")",
+        "(read-string {:read-cond true} \"#?(:clj 1 :default 2)\")",
+        "(read-string {:read-cond :bogus} \"#?(:clj 1 :default 2)\")",
+        "(read-string {:read-cond nil} \"#?(:clj 1 :default 2)\")",
+    ] {
+        assert_eq!(
+            uncaught(&mut eval, src),
+            "java.lang.RuntimeException | Conditional read not allowed",
+            "{src}"
+        );
+    }
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(read-string {:read-cond :preserve} \"#?(:clj 1 :default 2)\")"
+        ),
+        "#?(:clj 1 :default 2)"
+    );
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(read-string {:read-cond :allow} \"#?@(:clj [1 2])\")"
+        ),
+        "java.lang.RuntimeException | Reader conditional splicing not allowed at the top level."
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(read-string {:read-cond :allow} \"(1 #?@(:clj [2 3]))\")"
+        ),
+        "(1 2 3)"
+    );
+    // `:features` (probes `rs-opts-features`,
+    // `rs-opts-features-unknown`, `rs-opts-features-nil`,
+    // `rs-opts-features-vec`, `rs-opts-features-set-nonkw`).
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(read-string {:read-cond :allow :features #{:foo}} \"#?(:foo 1 :bar 2 :default 3)\")"
+        ),
+        "1"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(read-string {:read-cond :allow :features #{:nope}} \"#?(:foo 1 :default 2)\")"
+        ),
+        "2"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(read-string {:read-cond :allow :features nil} \"#?(:foo 1 :default 2)\")"
+        ),
+        "2"
+    );
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(read-string {:read-cond :allow :features [:foo]} \"1\")"
+        ),
+        "java.lang.ClassCastException | class clojure.lang.PersistentVector cannot be cast to class clojure.lang.IPersistentSet (clojure.lang.PersistentVector and clojure.lang.IPersistentSet are in unnamed module of loader 'app')"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(read-string {:read-cond :allow :features #{1}} \"1\")"
+        ),
+        "1"
+    );
+    // `:eof` (probes `rs-opts-eof`, `rs-opts-eof-blank`,
+    // `rs-opts-eof-comment`, `rs-opts-eof-nil`, `rs-opts-eof-false`,
+    // `rs-opts-eof-trunc`, `rs-opts-eof-trunc-str`,
+    // `rs-opts-eof-value`): clean EOF returns it, truncated input
+    // still throws.
+    assert_eq!(run_last(&mut eval, "(read-string {:eof :x} \"\")"), ":x");
+    assert_eq!(run_last(&mut eval, "(read-string {:eof :x} \"  \")"), ":x");
+    assert_eq!(run_last(&mut eval, "(read-string {:eof :x} \"; c\")"), ":x");
+    assert_eq!(run_last(&mut eval, "(read-string {:eof nil} \"\")"), "nil");
+    assert_eq!(
+        run_last(&mut eval, "(read-string {:eof false} \"\")"),
+        "false"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(read-string {:eof :x} \"(a\")"),
+        "java.lang.RuntimeException | EOF while reading"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(read-string {:eof :x} \"\\\"abc\")"),
+        "java.lang.RuntimeException | EOF while reading string"
+    );
+    assert_eq!(run_last(&mut eval, "(read-string {:eof :x} \"1\")"), "1");
+    // Unknown keys are ignored but do not imply `:eof` (probes
+    // `rs-opts-unknown-key`, `rs-opts-unknown-key-eof`).
+    assert_eq!(run_last(&mut eval, "(read-string {:bogus 1} \"1\")"), "1");
+    assert_eq!(
+        uncaught(&mut eval, "(read-string {:bogus 1} \"\")"),
+        "java.lang.RuntimeException | EOF while reading"
+    );
+    // Nil opts mean defaults (probes `rs-opts-nil`,
+    // `rs-opts-nil-eof`).
+    assert_eq!(run_last(&mut eval, "(read-string nil \"1\")"), "1");
+    assert_eq!(
+        uncaught(&mut eval, "(read-string nil \"\")"),
+        "java.lang.RuntimeException | EOF while reading"
+    );
+    // Non-map opts fail the `IPersistentMap` cast (probes
+    // `rs-opts-nonmap`, `rs-opts-nonmap-vec`, `rs-opts-mapentry`).
+    assert_eq!(
+        uncaught(&mut eval, "(read-string :foo \"1\")"),
+        "java.lang.ClassCastException | class clojure.lang.Keyword cannot be cast to class clojure.lang.IPersistentMap (clojure.lang.Keyword and clojure.lang.IPersistentMap are in unnamed module of loader 'app')"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(read-string [1] \"1\")"),
+        "java.lang.ClassCastException | class clojure.lang.PersistentVector cannot be cast to class clojure.lang.IPersistentMap (clojure.lang.PersistentVector and clojure.lang.IPersistentMap are in unnamed module of loader 'app')"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(read-string (find {:a 1} :a) \"1\")"),
+        "java.lang.ClassCastException | class clojure.lang.MapEntry cannot be cast to class clojure.lang.IPersistentMap (clojure.lang.MapEntry and clojure.lang.IPersistentMap are in unnamed module of loader 'app')"
+    );
+    // The string validates FIRST (probes `rs-opts-order`,
+    // `rs-opts-order-nil`): bad opts never get a say. Non-strings
+    // fail the `String` cast (probe `rs-opts-numstr`, same text as
+    // 1-arity); nil fails with the `String.length` NPE (probe
+    // `rs-opts-nilstr`), not the 1-arity bare NPE.
+    assert_eq!(
+        uncaught(&mut eval, "(read-string {} 1)"),
+        "java.lang.ClassCastException | class java.lang.Long cannot be cast to class java.lang.String (java.lang.Long and java.lang.String are in module java.base of loader 'bootstrap')"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(read-string {} nil)"),
+        "java.lang.NullPointerException | Cannot invoke \"String.length()\" because \"s\" is null"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(read-string :foo 1)"),
+        "java.lang.ClassCastException | class java.lang.Long cannot be cast to class java.lang.String (java.lang.Long and java.lang.String are in module java.base of loader 'bootstrap')"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(read-string :foo nil)"),
+        "java.lang.NullPointerException | Cannot invoke \"String.length()\" because \"s\" is null"
+    );
+    // Arities (probes `rs-opts-arity0`, `rs-opts-arity3`).
+    assert_eq!(
+        uncaught(&mut eval, "(read-string)"),
+        "clojure.lang.ArityException | Wrong number of args (0) passed to: clojure.core/read-string"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(read-string {} \"1\" :x)"),
+        "clojure.lang.ArityException | Wrong number of args (3) passed to: clojure.core/read-string"
+    );
+}
