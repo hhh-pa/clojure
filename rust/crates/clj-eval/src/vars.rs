@@ -222,18 +222,20 @@ pub(crate) fn meta_of(eval: &Evaluator, v: &Value) -> Option<Map> {
         // (the two sets are disjoint by type).
         Value::Extension(_) => v.meta().cloned().or_else(|| extension_meta(eval, v)),
         // Records carry metadata (deftype instances do not — the
-        // JVM's `meta` returns nil for them).
-        Value::HostType(_) => record_meta(v),
+        // JVM's `meta` returns nil for them); structs likewise
+        // (S12).
+        Value::HostType(_) => maplike_meta(v),
         // Symbols, lists, vectors, maps, and sets share
         // `Value::meta`; anything else reads nil.
         _ => v.meta().cloned(),
     }
 }
 
-/// A record's metadata (split from [`meta_of`] for the complexity
-/// budget); anything else host reads nil.
-fn record_meta(v: &Value) -> Option<Map> {
-    crate::types::record_inst(v).and_then(|i| i.meta.clone())
+/// A map-like host value's metadata (split from [`meta_of`] for
+/// the complexity budget): records and structs (S12) carry it;
+/// anything else host reads nil.
+fn maplike_meta(v: &Value) -> Option<Map> {
+    crate::types::maplike_inst(v).and_then(|i| i.meta.clone())
 }
 
 /// An extension value's metadata (split from [`meta_of`] for the
@@ -294,10 +296,11 @@ fn as_iobj(obj: &Value) -> Result<IObj<'_>, NativeError> {
         Value::Promise(p) => Ok(IObj::Promise(p)),
         Value::Extension(e) => extension_iobj(obj, e),
         // Records are `IObj`; deftype instances are not (the JVM's
-        // `with-meta` cast fails for them). Non-`IObj` receivers
-        // fail with the JVM's cast text, not the analyzer's stable
-        // text (Oracle FX2 `with-meta-e`, `vary-meta-e`).
-        Value::HostType(_) => record_iobj(obj),
+        // `with-meta` cast fails for them); structs are (S12).
+        // Non-`IObj` receivers fail with the JVM's cast text, not
+        // the analyzer's stable text (Oracle FX2 `with-meta-e`,
+        // `vary-meta-e`).
+        Value::HostType(_) => maplike_iobj(obj),
         _ => Err(cce_err(obj, IOBJ_CLASS)),
     }
 }
@@ -326,10 +329,11 @@ fn extension_iobj<'v>(
     }
 }
 
-/// A record receiver (split from [`as_iobj`] for the complexity
-/// budget): records are `IObj`, other host values take the cast.
-fn record_iobj(obj: &Value) -> Result<IObj<'_>, NativeError> {
-    match crate::types::record_inst(obj) {
+/// A map-like host receiver (split from [`as_iobj`] for the
+/// complexity budget): records and structs (S12) are `IObj`,
+/// other host values take the cast.
+fn maplike_iobj(obj: &Value) -> Result<IObj<'_>, NativeError> {
+    match crate::types::maplike_inst(obj) {
         Some(i) => Ok(IObj::Record(i)),
         None => Err(cce_err(obj, IOBJ_CLASS)),
     }
@@ -375,8 +379,8 @@ fn with_meta_val(obj: &Value, meta: &Value) -> Result<Value, NativeError> {
             Ok(Value::Extension(out))
         }
         // Metadata is replaced on the rewrapped record (oracle
-        // `n-meta`); the original keeps its meta.
-        IObj::Record(i) => Ok(crate::types::rewrap_record_with_meta(
+        // `n-meta`) or struct (S12); the original keeps its meta.
+        IObj::Record(i) => Ok(crate::types::rewrap_maplike_with_meta(
             i,
             i.content.clone(),
             meta,

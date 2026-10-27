@@ -32,6 +32,11 @@ pub enum HostKind {
     Type,
     /// `defrecord`: a map with the type name on it.
     Record,
+    /// `create-struct`: a legacy structmap basis (S12). The
+    /// instance is map-identical in print, `=`, and `hash`;
+    /// only the basis keys (nil-defaulted, dissoc-guarded) make
+    /// it a struct.
+    Struct,
     /// `definterface` / `gen-interface`: method signatures only.
     Interface,
     /// `gen-class`: constructable, methods forward to `prefix` fns.
@@ -73,6 +78,11 @@ pub struct HostDef {
     /// Method fns take the instance as `this` (everything but
     /// `proxy`, whose bodies exclude it — oracle `proxy-str`).
     pub takes_this: bool,
+    /// Struct basis keys, in order (S12; empty for every other
+    /// kind). Instances carry these nil-defaulted ahead of any
+    /// extras; `dissoc` of one throws, `accessor` checks
+    /// membership here.
+    pub struct_keys: Vec<Value>,
 }
 
 /// A live instance: descriptor plus content (declared fields first,
@@ -162,15 +172,21 @@ pub fn class_name(ns: &str, name: &str) -> String {
 
 /// Host `=`: descriptors compare by identity (a re-`def` mints a new
 /// type, like the JVM's new class); records compare same-type plus
-/// content; every other instance compares by identity, so two
-/// separately constructed values are never `=` (oracle `dtor-eq`).
-/// Records never equal plain maps (oracle `rec-eq-map`). Callers
-/// check `Arc::ptr_eq` first, so `(= p p)` stays true.
+/// content; struct instances compare by content alone (even across
+/// bases — oracle `sm-cross-basis`); every other instance compares
+/// by identity, so two separately constructed values are never `=`
+/// (oracle `dtor-eq`). Records never equal plain maps (oracle
+/// `rec-eq-map`); structs do (oracle `sm-eq-map`), via the
+/// struct/map arms in `value.rs` (host pairs only meet here).
+/// Callers check `Arc::ptr_eq` first, so `(= p p)` stays true.
 #[must_use]
 pub fn host_eq(a: &HostVal, b: &HostVal) -> bool {
     match (a, b) {
         (HostVal::Def(x), HostVal::Def(y)) => Arc::ptr_eq(x, y),
         (HostVal::Inst(x), HostVal::Inst(y)) => {
+            if x.def.kind == HostKind::Struct && y.def.kind == HostKind::Struct {
+                return x.content == y.content;
+            }
             Arc::ptr_eq(&x.def, &y.def)
                 && x.def.kind == HostKind::Record
                 && y.def.kind == HostKind::Record

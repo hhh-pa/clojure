@@ -1461,7 +1461,7 @@ impl Evaluator {
     }
 
     /// Invoke an extension value: closures apply, natives run,
-    /// anything else is the `IFn` cast error.
+    /// struct accessors read, anything else is the `IFn` cast error.
     fn invoke_extension(&mut self, callee: &Value, args: &[Value]) -> Result<Value, Signal> {
         if let Some(closure) = as_closure(callee) {
             return self.apply_closure(closure, args);
@@ -1473,7 +1473,40 @@ impl Evaluator {
         if let Some(sv) = crate::lazy::as_subvector(callee) {
             return self.invoke_subvector(sv, args);
         }
+        if let Some(accessor) = crate::collmisc::as_accessor(callee) {
+            return self.invoke_accessor(accessor, args);
+        }
         Err(self.throw(NativeError::cast(&jvm_class_of(callee), "clojure.lang.IFn")))
+    }
+
+    /// Invoke a struct accessor (S12): exactly one struct argument,
+    /// answered with the basis key's value (any struct answers —
+    /// a missing key reads nil, like `get`).
+    fn invoke_accessor(
+        &mut self,
+        accessor: &crate::collmisc::AccessorValue,
+        args: &[Value],
+    ) -> Result<Value, Signal> {
+        if args.len() != 1 {
+            return Err(self.throw(NativeError::arity(
+                "clojure.lang.PersistentStructMap$1",
+                args.len(),
+            )));
+        }
+        if matches!(&args[0], Value::Nil) {
+            return Err(self.throw(NativeError::new(
+                ThrowClass::NullPointerException,
+                "Cannot invoke \"clojure.lang.ILookup.valAt(Object)\" because \"m\" is null"
+                    .to_owned(),
+            )));
+        }
+        match crate::types::struct_inst(&args[0]) {
+            Some(i) => Ok(i.content.get(accessor.key()).cloned().unwrap_or(Value::Nil)),
+            None => Err(self.throw(crate::core::cce_err(
+                &args[0],
+                "clojure.lang.PersistentStructMap",
+            ))),
+        }
     }
 
     /// Invoke a vector: exactly one integer key (arity, key-type,
@@ -2283,8 +2316,9 @@ fn cast_entry(entry: &Value) -> NativeError {
 /// (in range), sets (membership), else `None` (§E12). Never throws.
 fn lookup(coll: &Value, key: &Value) -> Option<Value> {
     // Records read their content map (oracle `h-destructure`
-    // rides this path); every other host value misses.
-    if let Some(i) = crate::types::record_inst(coll) {
+    // rides this path); structs likewise (S12); every other host
+    // value misses.
+    if let Some(i) = crate::types::maplike_inst(coll) {
         return i.content.get(key).cloned();
     }
     match coll {

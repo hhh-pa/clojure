@@ -181,12 +181,15 @@ fn hasheq_map(m: &crate::Map) -> i32 {
 
 /// `(hash record)` (split from [`hasheq_mid`] for the complexity
 /// budget): the content-map hash XOR the munged-class-name symbol
-/// hash (oracle `l-hash-rec`); anything else mixes deterministically.
+/// hash (oracle `l-hash-rec`); struct instances hash exactly like
+/// their content map (S12 oracle `sm-hash-eq`); anything else mixes
+/// deterministically.
 fn hasheq_host(h: &crate::HostVal) -> i32 {
     match h {
         crate::HostVal::Inst(i) if i.def.kind == crate::HostKind::Record => {
             crate::record_hasheq(&i.content, &i.def.name)
         }
+        crate::HostVal::Inst(i) if i.def.kind == crate::HostKind::Struct => hasheq_map(&i.content),
         other => crate::inst_hasheq(other),
     }
 }
@@ -269,10 +272,14 @@ fn hash_code_multifn(m: &crate::MultiFn) -> i32 {
 
 /// `(.hashCode record)` (split from [`hash_code_mid`] for the
 /// complexity budget): exactly the content map's hash (oracle
-/// `l-rec-hashcode`); anything else mixes deterministically.
+/// `l-rec-hashcode`); struct instances likewise (S12 — map-identical
+/// in both hashes); anything else mixes deterministically.
 fn hash_code_host(h: &crate::HostVal) -> i32 {
     match h {
         crate::HostVal::Inst(i) if i.def.kind == crate::HostKind::Record => {
+            hash_code_map(&i.content)
+        }
+        crate::HostVal::Inst(i) if i.def.kind == crate::HostKind::Struct => {
             hash_code_map(&i.content)
         }
         crate::HostVal::Inst(i) => hash_combine(
@@ -353,8 +360,11 @@ fn bool_hash(b: bool) -> i32 {
 }
 
 /// `Util.hashCombine`: `seed ^= hash + 0x9e3779b9 + (seed << 6) + (seed >> 2)`
-/// (all wrapping; `>>` arithmetic, like Java).
-fn hash_combine(seed: i32, hash: i32) -> i32 {
+/// (all wrapping; `>>` arithmetic, like Java). Public for the S12
+/// `hash-combine` native, which composes it over `hash_code(y)`
+/// (never murmur — oracle `mh-util-spot`).
+#[must_use]
+pub fn hash_combine(seed: i32, hash: i32) -> i32 {
     seed ^ hash
         .wrapping_add(GOLDEN)
         .wrapping_add(seed << 6)
@@ -587,8 +597,11 @@ fn hash_long(v: i64) -> i32 {
     fmix(h, 8)
 }
 
-/// `Murmur3.mixCollHash`.
-fn mix_coll_hash(hash: i32, count: i32) -> i32 {
+/// `Murmur3.mixCollHash`. Public for the S12
+/// `mix-collection-hash` native (int-checked longs in, like the
+/// JVM wrapper).
+#[must_use]
+pub fn mix_coll_hash(hash: i32, count: i32) -> i32 {
     fmix(mix_h1(0, mix_k1(hash)), count)
 }
 

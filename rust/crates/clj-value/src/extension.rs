@@ -50,6 +50,8 @@ pub enum ThrowClass {
     NullPointerException,
     ClassCastException,
     IndexOutOfBoundsException,
+    ArrayIndexOutOfBoundsException,
+    NegativeArraySizeException,
     ArithmeticException,
     ExceptionInfo,
     FileNotFoundException,
@@ -93,6 +95,8 @@ impl ThrowClass {
             Self::NullPointerException => "java.lang.NullPointerException",
             Self::ClassCastException => "java.lang.ClassCastException",
             Self::IndexOutOfBoundsException => "java.lang.IndexOutOfBoundsException",
+            Self::ArrayIndexOutOfBoundsException => "java.lang.ArrayIndexOutOfBoundsException",
+            Self::NegativeArraySizeException => "java.lang.NegativeArraySizeException",
             Self::ArithmeticException => "java.lang.ArithmeticException",
             other => other.jvm_name_mid(),
         }
@@ -179,12 +183,14 @@ fn throw_parent(jvm_name: &str) -> Option<&'static str> {
         "java.lang.AssertionError" => Some("java.lang.Error"),
         "java.lang.IllegalAccessError" => Some("java.lang.LinkageError"),
         "java.lang.LinkageError" => Some("java.lang.Error"),
+        "java.lang.ArrayIndexOutOfBoundsException" => Some("java.lang.IndexOutOfBoundsException"),
         "java.lang.IllegalArgumentException"
         | "java.lang.IllegalStateException"
         | "java.lang.UnsupportedOperationException"
         | "java.lang.NullPointerException"
         | "java.lang.ClassCastException"
         | "java.lang.IndexOutOfBoundsException"
+        | "java.lang.NegativeArraySizeException"
         | "java.lang.ArithmeticException"
         | "clojure.lang.ArityException"
         | "clojure.lang.ExceptionInfo"
@@ -390,6 +396,14 @@ mod tests {
                 "java.lang.IndexOutOfBoundsException",
             ),
             (
+                ThrowClass::ArrayIndexOutOfBoundsException,
+                "java.lang.ArrayIndexOutOfBoundsException",
+            ),
+            (
+                ThrowClass::NegativeArraySizeException,
+                "java.lang.NegativeArraySizeException",
+            ),
+            (
                 ThrowClass::ArithmeticException,
                 "java.lang.ArithmeticException",
             ),
@@ -430,7 +444,7 @@ mod tests {
         for (class, want) in cases {
             assert_eq!(class.jvm_name(), want);
         }
-        assert_eq!(cases.len(), 21);
+        assert_eq!(cases.len(), 23);
     }
 
     #[test]
@@ -634,6 +648,8 @@ mod tests {
             ThrowClass::NullPointerException,
             ThrowClass::ClassCastException,
             ThrowClass::IndexOutOfBoundsException,
+            ThrowClass::ArrayIndexOutOfBoundsException,
+            ThrowClass::NegativeArraySizeException,
             ThrowClass::ArithmeticException,
             ThrowClass::ExceptionInfo,
             ThrowClass::FileNotFoundException,
@@ -659,6 +675,13 @@ mod tests {
         assert!(ThrowClass::NumberFormatException.matches("java.lang.RuntimeException"));
         assert!(ThrowClass::NumberFormatException.matches("java.lang.Exception"));
         assert!(!ThrowClass::NumberFormatException.matches("java.lang.Error"));
+        assert!(
+            ThrowClass::ArrayIndexOutOfBoundsException
+                .matches("java.lang.IndexOutOfBoundsException")
+        );
+        assert!(ThrowClass::ArrayIndexOutOfBoundsException.matches("java.lang.RuntimeException"));
+        assert!(ThrowClass::NegativeArraySizeException.matches("java.lang.RuntimeException"));
+        assert!(!ThrowClass::NegativeArraySizeException.matches("java.lang.Error"));
     }
 
     fn throwable(id: u64, message: &str) -> Value {

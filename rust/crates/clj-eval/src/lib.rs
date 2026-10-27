@@ -15,6 +15,7 @@
 pub mod aot_subset;
 pub mod builtin_expand;
 pub mod coll;
+pub mod collmisc;
 pub mod concurrency;
 pub mod core;
 pub mod destructure_expand;

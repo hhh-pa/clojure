@@ -85,9 +85,9 @@ pub(crate) fn lookup_present(
     key: &Value,
 ) -> Result<Option<Value>, NativeError> {
     // Records read their content map (oracle `rec-pos`,
-    // `rec-get`); every other host value misses (oracle
-    // `dtor-get`).
-    if let Some(i) = crate::types::record_inst(coll) {
+    // `rec-get`); structs likewise (S12 oracle `sm-get-basis`);
+    // every other host value misses (oracle `dtor-get`).
+    if let Some(i) = crate::types::maplike_inst(coll) {
         return Ok(i.content.get(key).cloned());
     }
     match coll {
@@ -243,9 +243,9 @@ pub(crate) fn find_entry(
     key: &Value,
 ) -> Result<Option<(Value, Value)>, NativeError> {
     // Records find through their content (oracle `rec-find`);
-    // anything else host takes the unsupported path (oracle
-    // `i-find`).
-    if let Some(i) = crate::types::record_inst(coll) {
+    // structs likewise (S12); anything else host takes the
+    // unsupported path (oracle `i-find`).
+    if let Some(i) = crate::types::maplike_inst(coll) {
         return find_entry_map(eval, &i.content, key);
     }
     match coll {
@@ -400,9 +400,10 @@ fn conj_one(eval: &mut Evaluator, coll: &Value, x: Value) -> Result<Value, Nativ
         }
         Value::Map(m) => conj_map(eval, m, &x),
         // Records conj through their content map and stay records
-        // (oracle `h-conj-vec`, `h-conj-map-type`); anything else
-        // host falls to the collection cast (oracle `i-conj`).
-        Value::HostType(_) => conj_record(eval, coll, &x),
+        // (oracle `h-conj-vec`, `h-conj-map-type`); structs
+        // likewise (S12); anything else host falls to the
+        // collection cast (oracle `i-conj`).
+        Value::HostType(_) => conj_maplike(eval, coll, &x),
         Value::Set(s) if s.is_sorted() => Ok(Value::Set(sorted_conj_set(eval, s, x)?)),
         Value::Set(s) => Ok(Value::Set(s.clone().insert(x))),
         _ => {
@@ -417,12 +418,13 @@ fn conj_one(eval: &mut Evaluator, coll: &Value, x: Value) -> Result<Value, Nativ
     }
 }
 
-/// Conj onto a record (split from [`conj_one`] for the complexity
-/// budget): through the content map, rewrapped so the answer stays
-/// a record; non-records take the collection cast.
-fn conj_record(eval: &mut Evaluator, coll: &Value, x: &Value) -> Result<Value, NativeError> {
-    match crate::types::record_inst(coll) {
-        Some(i) => Ok(crate::types::rewrap_record(
+/// Conj onto a map-like host value (split from [`conj_one`] for
+/// the complexity budget): through the content map, rewrapped so
+/// the answer stays a record (or a struct, S12); anything else
+/// host takes the collection cast.
+fn conj_maplike(eval: &mut Evaluator, coll: &Value, x: &Value) -> Result<Value, NativeError> {
+    match crate::types::maplike_inst(coll) {
+        Some(i) => Ok(crate::types::rewrap_maplike(
             i,
             conj_map_into(eval, &i.content, x)?,
         )),
@@ -508,10 +510,12 @@ fn assoc3(eval: &mut Evaluator, coll: &Value, k: &Value, v: Value) -> Result<Val
             assoc_vector(&tmp, i, v)
         }
         // Records assoc through their content map and stay records
-        // (oracle `rec-assoc-type`, `h-assoc-existing`); anything
-        // else host is not associative (oracle `i-assoc`).
-        Value::HostType(_) => match crate::types::record_inst(coll) {
-            Some(i) => Ok(crate::types::rewrap_record(
+        // (oracle `rec-assoc-type`, `h-assoc-existing`); structs
+        // always stay structs (S12 oracles `sm-assoc-class`,
+        // `sm-assoc-extra-class`); anything else host is not
+        // associative (oracle `i-assoc`).
+        Value::HostType(_) => match crate::types::maplike_inst(coll) {
+            Some(i) => Ok(crate::types::rewrap_maplike(
                 i,
                 i.content.clone().insert(k.clone(), v),
             )),
@@ -589,10 +593,15 @@ fn count_fallback(eval: &mut Evaluator, v: &Value) -> Result<i64, NativeError> {
 
 /// `RT.count` as an `i64` (`count`/`empty?`/arities share this).
 fn count_of(eval: &mut Evaluator, v: &Value) -> Result<i64, NativeError> {
-    // Records count their content (oracle `rec-count`); anything
-    // else host takes the unsupported path (oracle `dtor-count`).
-    if let Some(i) = crate::types::record_inst(v) {
+    // Records count their content (oracle `rec-count`); structs
+    // likewise (S12 oracle `sm-count`); chunks count their
+    // appended items (S12 oracle `ch-build`); anything else host
+    // takes the unsupported path (oracle `dtor-count`).
+    if let Some(i) = crate::types::maplike_inst(v) {
         return Ok(i.content.size() as i64);
+    }
+    if let Some(c) = crate::collmisc::as_chunk(v) {
+        return crate::collmisc::chunk_count(c);
     }
     match v {
         Value::Nil => Ok(0),
@@ -1002,6 +1011,22 @@ fn native_dissoc(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeEr
     if matches!(args[0], Value::Nil) {
         return Ok(Value::Nil);
     }
+    // Structs dissoc extras and stay structs, but dropping a basis
+    // key throws (S12 oracles `sm-dissoc-basis`,
+    // `sm-dissoc-extra*`).
+    if let Some(i) = crate::types::struct_inst(&args[0]) {
+        if args[1..].iter().any(|k| crate::types::is_struct_key(i, k)) {
+            return Err(NativeError::new(
+                ThrowClass::RuntimeException,
+                "Can't remove struct key".to_owned(),
+            ));
+        }
+        let mut out = i.content.clone();
+        for k in &args[1..] {
+            out = out.without(k);
+        }
+        return Ok(crate::types::rewrap_maplike(i, out));
+    }
     // Records dissoc through their content map: dropping a declared
     // field loses recordness (a plain map, oracle `rec-dissoc-type`);
     // anything else stays a record (oracle `h-dissoc-missing-type`).
@@ -1100,9 +1125,10 @@ fn native_contains(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Native
     check_arity("clojure.core/contains?", args, &[2])?;
     let (coll, key) = (&args[0], &args[1]);
     // Records contain through their content (oracle `rec-contains`,
-    // `h-contains-missing`); anything else host takes the
-    // unsupported path (oracle `i-contains`).
-    if let Some(i) = crate::types::record_inst(coll) {
+    // `h-contains-missing`); structs likewise (S12 oracle
+    // `sm-contains`); anything else host takes the unsupported
+    // path (oracle `i-contains`).
+    if let Some(i) = crate::types::maplike_inst(coll) {
         return contains_map(eval, &i.content, key);
     }
     match coll {
@@ -1246,6 +1272,11 @@ pub(crate) fn native_nth(eval: &mut Evaluator, args: &[Value]) -> Result<Value, 
     }
     if not_found.is_some() && n < 0 {
         return Ok(not_found.cloned().unwrap_or(Value::Nil));
+    }
+    // Chunks read their raw slots (nil holes below capacity, S12
+    // oracles `ch-nth-oob`, `ch-nth-cap`).
+    if let Some(c) = crate::collmisc::as_chunk(coll) {
+        return crate::collmisc::chunk_nth(c, n, not_found);
     }
     if matches!(coll, Value::Vector(_) | Value::MapEntry { .. })
         || as_subvector(coll).is_some()

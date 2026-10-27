@@ -36,7 +36,7 @@ pub use compare::{CompareError, compare};
 pub use delay::{Delay, DelayState};
 pub use extension::{ExtensionValue, ThrowClass, Throwable, Unbound, Var};
 pub use future::{Future, FutureOutcome, FutureState};
-pub use hasheq::{hash_code, hasheq, seq_hash_unsupported};
+pub use hasheq::{hash_code, hash_combine, hasheq, mix_coll_hash, seq_hash_unsupported};
 pub use host::{
     HostDef, HostInst, HostKind, HostMethod, HostVal, class_name, fallback_str, find_method,
     host_eq, identity_hex, inst_hasheq, is_field, munge_ns, record_hasheq,

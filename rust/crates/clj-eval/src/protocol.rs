@@ -692,6 +692,7 @@ mod tests {
             impl_ns: None,
             sigs: std::collections::HashMap::new(),
             takes_this: true,
+            struct_keys: Vec::new(),
         });
         let inst = Value::HostType(Arc::new(clj_value::HostVal::Inst(clj_value::HostInst {
             def,

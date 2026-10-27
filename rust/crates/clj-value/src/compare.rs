@@ -490,6 +490,7 @@ mod tests {
             impl_ns: None,
             sigs: std::collections::HashMap::new(),
             takes_this: true,
+            struct_keys: Vec::new(),
         });
         let v = Value::HostType(Arc::new(crate::HostVal::Inst(crate::HostInst {
             def,

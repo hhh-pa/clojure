@@ -1018,15 +1018,16 @@ fn s9b_out_of_scope_vars_stay_unresolved() {
 
 #[test]
 fn fx2_tree_walk_vars_stay_unresolved() {
-    // FX2 finding 11: `flatten`/`tree-seq`/`chunk-first` stay
-    // unbound (`reversible?` landed in FX2b). The lazy tree-walk
+    // FX2 finding 11: `flatten`/`tree-seq` stay unbound
+    // (`reversible?` landed in FX2b; `chunk-first` landed in S12
+    // — issue #54 — so it resolves now). The lazy tree-walk
     // machinery is a follow-up slice; probe6 `flatten` rows
     // stand as the oracle pins. Same convention as
     // `s9b_out_of_scope_vars_stay_unresolved`: under `boot()`,
     // `resolve` says nil and both use positions surface the
     // compile-error shape.
     let mut eval = boot();
-    for name in ["flatten", "tree-seq", "chunk-first"] {
+    for name in ["flatten", "tree-seq"] {
         assert_eq!(
             run_last(&mut eval, &format!("(resolve '{name})")),
             "nil",
