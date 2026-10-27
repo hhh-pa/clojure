@@ -42,6 +42,7 @@ pub(crate) const BUILTIN_MACROS: &[&str] = &[
     "assert",
     "time",
     "with-out-str",
+    "with-in-str",
     "locking",
 ];
 
@@ -83,6 +84,7 @@ const FENCE_MACROS: &[&str] = &[
     "assert",
     "time",
     "with-out-str",
+    "with-in-str",
 ];
 
 fn is_expand_macro(name: &str) -> bool {
@@ -105,7 +107,7 @@ fn is_fence_sym(sym: &Symbol) -> bool {
 }
 
 /// Heads `macroexpand-1` leaves alone: real specials (bare or
-/// `clojure.core`-qualified) and the six fence-macro vars. The
+/// `clojure.core`-qualified) and the seven fence-macro vars. The
 /// nine FX4 heads are specials too, but they expand.
 fn is_identity_head(eval: &Evaluator, op: &Value) -> bool {
     match op {

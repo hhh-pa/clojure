@@ -15,7 +15,7 @@
 use std::io::Write;
 use std::sync::{Arc, Mutex};
 
-use clj_reader::{ReaderOpts, read_str};
+use clj_reader::{ReadCond, ReaderOpts, read_str};
 use clj_value::{ExtensionValue, ThrowClass, Value, pr_to_string};
 
 use crate::core::{cce_err, cce_message, print_opts};
@@ -362,6 +362,7 @@ fn native_read_string(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nat
     let mut opts = ReaderOpts {
         current_ns: cur.clone(),
         line_numbers: false,
+        read_cond: ReadCond::Deny,
         ..Default::default()
     };
     if let Some(ns) = eval.registry.get(&cur) {

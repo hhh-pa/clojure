@@ -58,6 +58,11 @@ pub(crate) enum Form {
 /// A reader over one input: the §1 tracker, the shared pending queue
 /// (reader-conditional splices), normalized options, and the fn-arg,
 /// gensym, suppression, and read-cond environments.
+///
+/// `Clone` snapshots the read position (issue #36: stdin `read`
+/// retries a truncated form over the restored head plus the next
+/// line).
+#[derive(Clone)]
 pub struct Reader {
     pub(crate) stream: CharStream,
     pub(crate) pending: VecDeque<Value>,
@@ -82,6 +87,36 @@ impl Reader {
             suppress: false,
             in_cond: false,
         }
+    }
+
+    /// Replace the options (cloned and normalized like [`new`](Self::new)).
+    pub fn set_opts(&mut self, opts: &ReaderOpts) {
+        self.opts = opts.clone().normalized();
+    }
+
+    /// Append `chunk` to the input (stdin growth; same
+    /// normalization as construction, so a split `\r\n`
+    /// coalesces).
+    pub fn extend(&mut self, chunk: &str) {
+        self.stream.extend(chunk);
+    }
+
+    /// Read one `\n`-split line (`\n` consumed and stripped);
+    /// `None` at EOF, the tail when EOF lands mid-line.
+    pub fn read_line(&mut self) -> Option<String> {
+        self.stream.read_line()
+    }
+
+    /// Current 1-based line (live tracker position).
+    #[must_use]
+    pub fn line(&self) -> u32 {
+        self.stream.line()
+    }
+
+    /// Current column (live tracker position).
+    #[must_use]
+    pub fn col(&self) -> u32 {
+        self.stream.col()
     }
 
     /// Read one top-level form: `eof_is_error` decides whether EOF
@@ -317,9 +352,11 @@ pub fn read_all(s: &str, opts: &ReaderOpts) -> Result<Vec<Value>, ReaderError> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use super::{Form, unwrap_single};
-    use crate::{Reader, ReaderError, ReaderOpts, read_all, read_str};
-    use clj_value::{PrintOpts, Value, pr_to_string};
+    use crate::{ReadCond, Reader, ReaderError, ReaderOpts, read_all, read_str};
+    use clj_value::{Keyword, PrintOpts, Value, pr_to_string};
 
     fn pr(v: &clj_value::Value) -> String {
         pr_to_string(v, &PrintOpts::pr())
@@ -390,5 +427,66 @@ mod tests {
         let opts = ReaderOpts::default();
         let mut reader = Reader::new("x", &opts);
         let _ = reader.invoke_macro('x', false);
+    }
+
+    #[test]
+    fn set_opts_takes_effect_on_next_read() {
+        let mut reader = Reader::new("#?(:clj 1 :default 2)", &ReaderOpts::default());
+        reader.set_opts(&ReaderOpts {
+            read_cond: ReadCond::Deny,
+            ..ReaderOpts::default()
+        });
+        let err = reader.read_form(true).unwrap_err();
+        assert!(
+            matches!(err, ReaderError::CondNotAllowed { .. }),
+            "got {err:?}"
+        );
+        assert_eq!(err.message(), "Conditional read not allowed");
+    }
+
+    #[test]
+    fn set_opts_normalizes_like_new() {
+        let mut reader = Reader::new("1", &ReaderOpts::default());
+        reader.set_opts(&ReaderOpts {
+            features: HashSet::new(),
+            ..ReaderOpts::default()
+        });
+        assert!(reader.opts.features.contains(&Keyword::new(None, "clj")));
+    }
+
+    #[test]
+    fn stream_passthroughs_share_one_position() {
+        // `extend`/`read_line`/`line`/`col` ride the same tracker
+        // `read_form` uses (the `clj-eval` streams interleave all
+        // three, issue #36).
+        let mut reader = Reader::new("a\n", &ReaderOpts::default());
+        assert_eq!((reader.line(), reader.col()), (1, 1));
+        assert_eq!(reader.read_line(), Some("a".to_owned()));
+        assert_eq!((reader.line(), reader.col()), (2, 1));
+        assert_eq!(reader.read_line(), None);
+        reader.extend("(b)");
+        let form = reader.read_form(true).unwrap().expect("extended form");
+        assert_eq!(pr(&form), "(b)");
+        assert_eq!((reader.line(), reader.col()), (2, 4));
+    }
+
+    #[test]
+    fn reader_is_send_sync() {
+        // `Reader` lives behind a `Mutex` in the `clj-eval` streams.
+        // A test, not a const assert: const bodies never execute, so
+        // they cannot satisfy the 100% line gate.
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<Reader>();
+    }
+
+    #[test]
+    fn eof_delimited_span_for_truncated_list() {
+        // Oracle `r-exdata`: the message names first-line 1 while the
+        // span (ex-data source) sits at the bumped EOF position 2:1.
+        let err = read_str("(a", &ReaderOpts::default()).unwrap_err();
+        assert_eq!(err.message(), "EOF while reading, starting at line 1");
+        assert!(matches!(err, ReaderError::EofDelimited { .. }));
+        let span = err.span();
+        assert_eq!((span.line, span.col), (2, 1));
     }
 }

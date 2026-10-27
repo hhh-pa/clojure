@@ -624,6 +624,7 @@ impl Evaluator {
             } => self.eval_assert(test, message.as_deref(), form, env),
             Expr::Time { expr } => self.eval_time(expr, env),
             Expr::WithOutStr { out, body } => self.eval_with_out_str(out, body, env),
+            Expr::WithInStr { input, s, body } => self.eval_with_in_str(input, s, body, env),
             Expr::LazySeqStar { body } => Ok(crate::lazy::thunk0_value(
                 Arc::new(body.clone()),
                 env.clone(),
@@ -851,6 +852,26 @@ impl Evaluator {
         self.eval_binding(&pairs, body, env)?;
         let contents = crate::io::writer_contents(&writer).unwrap_or_default();
         Ok(Value::Str(Arc::from(contents.as_str())))
+    }
+
+    /// `(with-in-str s body…)`: bind `*in*` to a fresh string
+    /// reader (the `binding` push/pop discipline, so throws still
+    /// pop) and return the body's value. A non-string `s` fails
+    /// the `String` cast (probe `wis-num`).
+    fn eval_with_in_str(
+        &mut self,
+        input: &Symbol,
+        s: &Expr,
+        body: &[Expr],
+        env: &Env,
+    ) -> Result<Value, Signal> {
+        let v = self.eval(s, env)?;
+        let Value::Str(text) = &v else {
+            return Err(self.throw(crate::core::cce_err(&v, "java.lang.String")));
+        };
+        let reader = crate::reader::string_reader(self, text);
+        let pairs = vec![(input.clone(), Expr::Literal(reader))];
+        self.eval_binding(&pairs, body, env)
     }
 
     /// `(case* …)`: the interpreter's `CaseExpr.doEmit` on the boxed

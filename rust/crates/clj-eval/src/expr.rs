@@ -245,6 +245,15 @@ pub enum Expr {
         out: Symbol,
         body: Vec<Expr>,
     },
+    /// `(with-in-str s body…)` (S-instream analyzer builtin):
+    /// `input` is the `*in*` binding target (resolved like
+    /// `binding`, so user shadows apply), `s` the string
+    /// expression, and the body returns its value.
+    WithInStr {
+        input: Symbol,
+        s: Box<Expr>,
+        body: Vec<Expr>,
+    },
     /// `(lazy-seq* body…)` (S5D analyzer form — the JVM has no such
     /// var; `lazy-seq` expands to this).
     LazySeqStar {
@@ -448,6 +457,7 @@ fn is_curated_fqn(fqn: &str) -> bool {
             | "java.util.concurrent.RejectedExecutionException"
             | "java.lang.reflect.InvocationTargetException"
             | "clojure.lang.Compiler$CompilerException"
+            | "clojure.lang.LispReader$ReaderException"
     )
 }
 
@@ -506,6 +516,7 @@ enum SpecialOp {
     Assert,
     Time,
     WithOutStr,
+    WithInStr,
     LazySeqStar,
     DelayStar,
     CaseStar,
@@ -541,6 +552,7 @@ const SPECIAL_OPS: &[(&str, SpecialOp)] = &[
     ("assert", SpecialOp::Assert),
     ("time", SpecialOp::Time),
     ("with-out-str", SpecialOp::WithOutStr),
+    ("with-in-str", SpecialOp::WithInStr),
     ("lazy-seq*", SpecialOp::LazySeqStar),
     ("delay*", SpecialOp::DelayStar),
     ("case*", SpecialOp::CaseStar),
@@ -584,6 +596,7 @@ fn is_shadowable_macro(name: &str) -> bool {
             | "assert"
             | "time"
             | "with-out-str"
+            | "with-in-str"
             | "lazy-seq*"
             | "delay*"
             | "locking"
@@ -1112,6 +1125,7 @@ impl<'a> Analyzer<'a> {
             SpecialOp::Assert => self.parse_assert(items, span),
             SpecialOp::Time => self.parse_time(items, span),
             SpecialOp::WithOutStr => self.parse_with_out_str(items, span),
+            SpecialOp::WithInStr => self.parse_with_in_str(items, span),
             SpecialOp::LazySeqStar => self.parse_lazy_seq_star(items, span),
             SpecialOp::DelayStar => self.parse_delay_star(items, span),
             SpecialOp::Locking => self.parse_locking(items, span, tail),
@@ -1676,7 +1690,8 @@ impl<'a> Analyzer<'a> {
     /// Resolve a `catch` class: default-import shorts (`java.lang`
     /// throwables, the real-but-unthrowable names — which resolve
     /// and never match, the JVM `VerifyError`s those instead — plus
-    /// clojure's `ExceptionInfo` short), and dotted FQNs (curated
+    /// clojure's `ExceptionInfo` short and the `ReaderException`
+    /// short), and dotted FQNs (curated
     /// throwables, `java.lang.*` shorts, the two `clojure.lang.*`
     /// throwables). Unknown shorts are `Unable to resolve
     /// classname`; unknown dotted names are `ClassNotFoundException`
@@ -1696,6 +1711,13 @@ impl<'a> Analyzer<'a> {
                     Some(jvm) => Ok(jvm.to_owned()),
                     None if sym.name() == "ExceptionInfo" => {
                         Ok("clojure.lang.ExceptionInfo".to_owned())
+                    }
+                    // The short `ReaderException` is a port
+                    // extension (the JVM only resolves the FQN —
+                    // `clojure.core` never imports it — but the
+                    // S-instream spec pins the short spelling).
+                    None if sym.name() == "ReaderException" => {
+                        Ok("clojure.lang.LispReader$ReaderException".to_owned())
                     }
                     None => Err(self.err(
                         class::ILLEGAL_ARG,
@@ -2864,6 +2886,22 @@ impl<'a> Analyzer<'a> {
         Ok(Expr::WithOutStr {
             out: Symbol::new(None, "*out*"),
             body,
+        })
+    }
+
+    /// `(with-in-str s body…)`: `s` plus a body (the JVM macro
+    /// takes `[s & body]`); the body never runs in tail position
+    /// (the expansion ends in the `binding` pop). `*in*` resolves
+    /// like a `binding` target, so user shadows apply.
+    fn parse_with_in_str(&mut self, items: &[&Value], span: Span) -> Result<Expr, CompileError> {
+        let argc = items.len() - 1;
+        if argc < 1 {
+            return Err(self.builtin_arity("clojure.core/with-in-str", argc, span));
+        }
+        Ok(Expr::WithInStr {
+            input: Symbol::new(None, "*in*"),
+            s: Box::new(self.analyze(items[1], span, false)?),
+            body: self.analyze_body(&items[2..], span, false)?,
         })
     }
 
