@@ -4,7 +4,7 @@ The complete inventory of `clojure.core` in this port: every var,
 its conformance state, and — for exclusions — why it is excluded.
 If a var is not listed here, that is a file bug, not a silent gap.
 
-- **471 vars: 453 implemented, 2 divergent, 16 out of scope,
+- **483 vars: 465 implemented, 2 divergent, 16 out of scope,
   0 planned.** The port reports Clojure `1.13.0-alpha9`
   (`clojure-version`).
 - **Status meanings.** `implemented` — resolves in the booted core
@@ -585,6 +585,7 @@ slices' rows into this table).
 | --- | --- | --- |
 | `NaN?` | implemented | core.rs native_nanp (`Double` payload; other numbers false; nil NPE; else CCE `Number`); predicates.rs nan_rows |
 | `any?` | implemented | core.rs pred1 constantly true; predicates.rs any_rows |
+| `bounded-count` | implemented | core.clj port; tests/zero_oos_s3_seqs.rs bounded_count_rows (counted fast path, early exit over infinite; probes `bc-*`) |
 | `delay?` | implemented | core.rs pred1 over `Value::Delay`; predicates.rs delay_rows |
 | `disj!` | implemented | S5: coll.rs native_disj_bang (1-arity identity; `ITransientSet` cast); zero_oos_s5_state.rs disj_bang_rows |
 | `error-handler` | implemented | S5: concurrency.rs cell read (fn or nil); zero_oos_s5_state.rs error_handler_rows |
@@ -592,29 +593,40 @@ slices' rows into this table).
 | `ffirst` | implemented | core.clj `(first (first x))`; predicates.rs ffirst_rows |
 | `find-keyword` | implemented | core.rs 1-or-2-arity native (no table — well-shaped lookups build); predicates.rs find_keyword_rows |
 | `find-var` | implemented | S5: ns.rs interned-only lookup (live nss; IAE on missing ns/unqualified); zero_oos_s5_state.rs find_var_rows |
+| `flatten` | implemented | core.clj port over tree-seq; tests/zero_oos_s3_seqs.rs flatten_rows (lazy; strings/maps kept whole; probes `fl-*`) |
 | `future-cancelled?` | implemented | S5: concurrency.rs over `FutureState::Cancelled`; zero_oos_s5_state.rs future_cancelled_rows |
 | `get-validator` | implemented | S5: concurrency.rs IRef read (atoms + agents); zero_oos_s5_state.rs validator_rows |
 | `indexed?` | implemented | core.rs pred1 over vectors/entries/subvectors; predicates.rs indexed_rows |
 | `infinite?` | implemented | core.rs native_infinitep (`Double` payload; other numbers false; nil NPE; else CCE `Number`); predicates.rs infinite_rows |
 | `map-entry?` | implemented | core.rs pred1 over `Value::MapEntry` (never 2-vectors); predicates.rs map_entry_rows |
+| `merge-deep` | implemented | core.clj port over merge-with (1.13); tests/zero_oos_s3_seqs.rs merge_deep_rows (probes `md-*`) |
+| `merge-deep-with` | implemented | core.clj port over merge-with (1.13); tests/zero_oos_s3_seqs.rs merge_deep_with_rows (probes `mdw-*`) |
 | `nat-int?` | implemented | core.rs pred1 over `Int` >= 0; predicates.rs nat_int_rows |
 | `neg-int?` | implemented | core.rs pred1 over `Int` < 0; predicates.rs neg_int_rows |
 | `parse-boolean` | implemented | zero_oos_s4a_corelib.rs parse_boolean_rows (S4a #46; probes corelib.out pb-*) |
 | `parse-double` | implemented | zero_oos_s4a_corelib.rs parse_double_rows (S4a #46; probes corelib.out pd-*) |
 | `parse-long` | implemented | zero_oos_s4a_corelib.rs parse_long_rows (S4a #46; probes corelib.out pl-*) |
+| `partitionv` | implemented | core.clj port, into+take-xf steps (1.12); tests/zero_oos_s3_seqs.rs partitionv_rows (lazy; pad; probes `pv-*`) |
+| `partitionv-all` | implemented | core.clj port (1.12); 1-arity inlines the stateful xf (atom buffer); tests/zero_oos_s3_seqs.rs partitionv_all_rows (probes `pva-*`) |
 | `pos-int?` | implemented | core.rs pred1 over `Int` > 0; predicates.rs pos_int_rows |
 | `printf` | implemented | zero_oos_s4a_corelib.rs printf_rows (S4a #46; probes corelib.out pf-*) |
 | `println-str` | implemented | zero_oos_s4a_corelib.rs println_str_rows (S4a #46; probes corelib.out pls-*) |
 | `prn-str` | implemented | zero_oos_s4a_corelib.rs prn_str_rows (S4a #46; probes corelib.out prs-*) |
 | `rand-nth` | implemented | zero_oos_s4a_corelib.rs rand_nth_rows (S4a #46; probes corelib.out rn-*) |
+| `reduce-kv` | implemented | core.clj port: nil arm, vector index loop with reduced unwrap, entry slow path; tests/zero_oos_s3_seqs.rs reduce_kv_rows (probes `rk-*`) |
 | `requiring-resolve` | implemented | S5: ns.rs resolve-else-require; zero_oos_s5_state.rs requiring_resolve_rows |
 | `reset-vals!` | implemented | S5: concurrency.rs `reset!` answering `[old new]`; zero_oos_s5_state.rs vals_rows |
+| `run!` | implemented | core.clj port over reduce; tests/zero_oos_s3_seqs.rs run_bang_rows (nil answer; reduced short-circuit; probes `run-*`) |
 | `set-validator!` | implemented | S5: concurrency.rs IRef write (validates current; nil clears); zero_oos_s5_state.rs validator_rows |
 | `some->` | implemented | zero_oos_s4a_corelib.rs some_thread_first_rows (S4a #46; probes corelib.out st-*) |
 | `some->>` | implemented | zero_oos_s4a_corelib.rs some_thread_last_rows (S4a #46; probes corelib.out stt-*) |
 | `special-symbol?` | implemented | core.rs pred1 over the oracle 23-member set; predicates.rs special_symbol_rows |
+| `splitv-at` | implemented | core.clj port, into+take-xf head (1.12); tests/zero_oos_s3_seqs.rs splitv_at_rows (probes `sv-*`) |
 | `swap-vals!` | implemented | S5: concurrency.rs `swap!` answering `[old new]`; zero_oos_s5_state.rs vals_rows |
 | `test` | implemented | zero_oos_s4a_corelib.rs test_var_rows (S4a #46; probes corelib.out tst-*) |
+| `tree-seq` | implemented | core.clj port; tests/zero_oos_s3_seqs.rs tree_seq_rows (lazy; children gated on branch?; probes `ts-*`) |
+| `update-keys` | implemented | core.clj port over reduce-kv (1.11); tests/zero_oos_s3_seqs.rs update_keys_rows (vectors become maps; probes `uk-*`) |
+| `update-vals` | implemented | core.clj port over reduce-kv (1.11); clj editability test (sorted/record/entry take the {} route); tests/zero_oos_s3_seqs.rs update_vals_rows (probes `uv-*`) |
 | `when-first` | implemented | zero_oos_s4a_corelib.rs when_first_rows (S4a #46; probes corelib.out wf-*) |
 | `while` | implemented | zero_oos_s4a_corelib.rs while_rows (S4a #46; probes corelib.out wh-*) |
 

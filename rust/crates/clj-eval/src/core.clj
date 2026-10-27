@@ -1567,3 +1567,228 @@
      ;; would leave a seq, which the `try` clause matcher
      ;; rejects); it prints exactly like the upstream shape.
      (try ~@body ~(list 'finally (list 'clojure.core/pop-thread-bindings)))))
+
+;; --- Zero-oos S3 seq/coll walks (issue #45): `tree-seq` /
+;; `flatten` / `reduce-kv` / `merge-deep` / `merge-deep-with` /
+;; `bounded-count` / `run!` / `splitv-at` / `partitionv` /
+;; `partitionv-all` / `update-vals` / `update-keys`, ported from
+;; alpha10 `clojure/core.clj` (docstrings and `:added` kept;
+;; `:static` dropped — nothing compiles statically). Oracle:
+;; `docs/zero-oos-s3-seqs/probes/seqwalks.{clj,out}`.
+;;
+;; Port deltas from upstream (each probed):
+;; - `reduce-kv` dispatches in clj (no `IKVReduce` exists):
+;;   nil answers init, vectors take an index loop (`reduced?`
+;;   unwraps via `unreduced`, like `kvreduce`), everything
+;;   else reduces over entries with `key`/`val` (the `Object`
+;;   slow path). Bare map entries ride the slow path too
+;;   (entries are vectors but not `IKVReduce` on the JVM):
+;;   `s3-entry?` probes with `key`, the only discriminator
+;;   either runtime exposes.
+;; - `update-vals` tests editability in clj (`instance?` is
+;;   N1): maps/vectors/sets except sorted ones (not
+;;   editable on the JVM either), records (the port cannot
+;;   transient a `HostType`; the JVM drops record-ness
+;;   through the round-trip anyway), and bare entries.
+;; - `partitionv-all` 1-arity inlines the stateful
+;;   transducer in clj (an atom buffer for the `ArrayList`;
+;;   the port's `partition-all` has no 1-arity).
+;; - `merge-deep`/`merge-deep-with` self-recurse by name,
+;;   so they are declared first.
+(declare merge-deep merge-deep-with)
+
+(defn- s3-entry? [x]
+  (try (do (key x) true)
+       (catch ClassCastException _ false)))
+
+(defn- s3-editable? [m]
+  (and (or (map? m) (vector? m) (set? m))
+       (not (sorted? m))
+       (not (record? m))
+       (not (s3-entry? m))))
+
+(defn tree-seq
+  "Returns a lazy sequence of the nodes in a tree, via a depth-first walk.
+   branch? must be a fn of one arg that returns true if passed a node
+   that can have children (but may not).  children must be a fn of one
+   arg that returns a sequence of the children. Will only be called on
+   nodes for which branch? returns true. Root is the root node of the
+  tree."
+  {:added "1.0"}
+  [branch? children root]
+  (let [walk (fn walk [node]
+               (lazy-seq
+                (cons node
+                 (when (branch? node)
+                   (mapcat walk (children node))))))]
+    (walk root)))
+
+(defn flatten
+  "Takes any nested combination of sequential things (lists, vectors,
+  etc.) and returns their contents as a single, flat lazy sequence.
+  (flatten nil) returns an empty sequence."
+  {:added "1.2"}
+  [x]
+  (filter (complement sequential?)
+          (rest (tree-seq sequential? seq x))))
+
+(defn reduce-kv
+  "Reduces an associative collection. f should be a function of 3
+  arguments. Returns the result of applying f to init, the first key
+  and the first value in coll, then applying f to that result and the
+  2nd key and value, etc. If coll contains no entries, returns init
+  and f is not called. Note that reduce-kv is supported on vectors,
+  where the keys will be the ordinals."
+  {:added "1.4"}
+  [f init coll]
+  (cond
+    (nil? coll) init
+    (and (vector? coll) (not (s3-entry? coll)))
+    (let [n (count coll)]
+      (loop [i 0
+             acc init]
+        (if (< i n)
+          (let [ret (f acc i (nth coll i))]
+            (if (reduced? ret)
+              (unreduced ret)
+              (recur (inc i) ret)))
+          acc)))
+    :else (reduce (fn [acc e] (f acc (key e) (val e))) init coll)))
+
+(defn merge-deep
+  "Returns a map that consists of the rest of the maps conj-ed onto
+  the first. For each pairwise merge, when a key occurs in both maps,
+  if both values are maps, then recursively merge-deep, else use the
+  latter (left-to-right) value."
+  {:added "1.13"}
+  [& maps]
+  (apply merge-with
+    (fn [x y]
+      (if (and (map? x) (map? y))
+        (merge-deep x y)
+        y))
+    maps))
+
+(defn merge-deep-with
+  "Returns a map that consists of the rest of the maps conj-ed onto
+  the first. For each pairwise merge, when a key occurs in both maps,
+  if both values are maps, then recursively merge-deep-with, else use
+  the result of (f val-in-prior val-in-latter)."
+  {:added "1.13"}
+  [f & maps]
+  (apply merge-with
+    (fn [x y]
+      (if (and (map? x) (map? y))
+        (merge-deep-with f x y)
+        (f x y)))
+    maps))
+
+(defn bounded-count
+  "If coll is counted? returns its count, else will count at most the first n
+  elements of coll using its seq"
+  {:added "1.9"}
+  [n coll]
+  (if (counted? coll)
+    (count coll)
+    (loop [i 0 s (seq coll)]
+      (if (and s (< i n))
+        (recur (inc i) (next s))
+        i))))
+
+(defn run!
+  "Runs the supplied procedure (via reduce), for purposes of side
+  effects, on successive items in the collection. Returns nil"
+  {:added "1.7"}
+  [proc coll]
+  (reduce #(proc %2) nil coll)
+  nil)
+
+(defn splitv-at
+  "Returns a vector of [(into [] (take n) coll) (drop n coll)]"
+  {:added "1.12"}
+  [n coll]
+  [(into [] (take n) coll) (drop n coll)])
+
+(defn partitionv
+  "Returns a lazy sequence of vectors of n items each, at offsets step
+  apart. If step is not supplied, defaults to n, i.e. the partitions
+  do not overlap. If a pad collection is supplied, use its elements as
+  necessary to complete last partition upto n items. In case there are
+  not enough padding elements, return a partition with less than n items."
+  {:added "1.12"}
+  ([n coll]
+   (partitionv n n coll))
+  ([n step coll]
+   (lazy-seq
+     (when-let [s (seq coll)]
+       (let [p (into [] (take n) s)]
+         (when (= n (count p))
+           (cons p (partitionv n step (nthrest s step))))))))
+  ([n step pad coll]
+   (lazy-seq
+     (when-let [s (seq coll)]
+       (let [p (into [] (take n) s)]
+         (if (= n (count p))
+           (cons p (partitionv n step pad (nthrest s step)))
+           (list (into [] (take n) (concat p pad)))))))))
+
+(defn partitionv-all
+  "Returns a lazy sequence of vector partitions, but may include
+  partitions with fewer than n items at the end.
+  Returns a stateful transducer when no collection is provided."
+  {:added "1.12"}
+  ([n]
+   (fn [rf]
+     (let [a (atom [])]
+       (fn
+         ([] (rf))
+         ([result]
+          (let [result (if (empty? @a)
+                         result
+                         (let [v @a]
+                           (reset! a [])
+                           (unreduced (rf result v))))]
+            (rf result)))
+         ([result input]
+          (let [v (swap! a conj input)]
+            (if (= n (count v))
+              (do (reset! a [])
+                  (rf result v))
+              result)))))))
+  ([n coll]
+   (partitionv-all n n coll))
+  ([n step coll]
+   (lazy-seq
+     (when-let [s (seq coll)]
+       (let [seg (into [] (take n) coll)]
+         (cons seg (partitionv-all n step (drop step s))))))))
+
+(defn update-vals
+  "m f => {k (f v) ...}
+
+  Given a map m and a function f of 1-argument, returns a new map where the keys of m
+  are mapped to result of applying f to the corresponding values of m."
+  {:added "1.11"}
+  [m f]
+  (persistent!
+   (reduce-kv
+    (fn [acc k v] (assoc! acc k (f v)))
+    (transient
+     (if (s3-editable? m) m
+         (with-meta {} (meta m))))
+    m)))
+
+(defn update-keys
+  "m f => {(f k) v ...}
+
+  Given a map m and a function f of 1-argument, returns a new map whose
+  keys are the result of applying f to the keys of m, mapped to the
+  corresponding values of m.
+  f must return a unique key for each key of m, else the behavior is undefined."
+  {:added "1.11"}
+  [m f]
+  (let [ret (persistent!
+             (reduce-kv (fn [acc k v] (assoc! acc (f k) v))
+                        (transient {})
+                        m))]
+    (with-meta ret (meta m))))
