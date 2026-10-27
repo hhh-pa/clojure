@@ -2,3 +2,5 @@
 # gate scripts are COPYd; keep everything bulky out of the context.
 .git/
 **/target/
+
+# CI trigger touch (PR #67 opened/synchronize wedged like #37; no-op line).
