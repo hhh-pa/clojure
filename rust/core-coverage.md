@@ -4,7 +4,7 @@ The complete inventory of `clojure.core` in this port: every var,
 its conformance state, and — for exclusions — why it is excluded.
 If a var is not listed here, that is a file bug, not a silent gap.
 
-- **499 vars: 481 implemented, 2 divergent, 16 out of scope,
+- **505 vars: 487 implemented, 2 divergent, 16 out of scope,
   0 planned.** The port reports Clojure `1.13.0-alpha9`
   (`clojure-version`).
 - **Status meanings.** `implemented` — resolves in the booted core
@@ -494,6 +494,12 @@ Significant vars with no port slice, grouped below by area with the reason. (Two
 | `read-line` | implemented | 0-arity over *in* (nil at EOF); tests/io.rs instream_read_line_rows |
 | `line-seq` | implemented | core.clj eager-head Cons + lazy tail (accepts StreamReader by design); tests/io.rs instream_line_seq_rows |
 | `*in*` | implemented | dynamic root (stdin reader); tests/io.rs instream_in_shape_rows |
+| `*read-eval*` | implemented | true root; false/nil gates `#=`, `:unknown` refuses every read, loads force true; zero_oos_s7_readgates.rs (S7, #50) |
+| `*reader-resolver*` | implemented | nil root; 2-arity fn protocol (current-ns/resolve-alias/resolve-class/resolve-var consults for `::`/syntax-quote); non-fn entry cast; zero_oos_s7_readgates.rs (S7, #50) |
+| `*suppress-read*` | implemented | nil root; gates only `#tag` (unknown tags preserved; `#inst`/`#uuid` also preserved — the suppress check sits above the S6 consult); zero_oos_s7_readgates.rs (S7, #50) |
+| `load-reader` | implemented | 1-arity over any reader (last value, nil when empty); `*file*` nil, `*ns*` isolated, forces `*read-eval*` true, `Compiler.load`-style wraps; reads all forms before evaluating (pre-existing load loop); zero_oos_s7_readgates.rs (S7, #50) |
+| `read+string` | implemented | `[form string]` over StreamReader (0/1/3/4-arity plus the opts arity; LNPR wrap rule); zero_oos_s7_readgates.rs (S7, #50) |
+| `with-loading-context` | implemented | `core.clj` immediately-invoked-fn macro (no classloader to bind on the port); the native `*pending-paths*` cycle guard still applies; zero_oos_s7_readgates.rs (S7, #50) |
 | `import` | out-of-scope | interop (N1) |
 | `..` | out-of-scope | interop (N1) |
 | `defprotocol` | implemented | protocols.rs proto_*; S-typechain stage 2 (#33): map descriptors (:on/:sigs/:impls/:interface), variadic dispatch fns |
