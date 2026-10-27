@@ -141,10 +141,11 @@ casts to: `java.util.Enumeration`, `java.util.Iterator`,
   `n-file-vec-force`, `g-file-argerr`), NPE naming `f`
   for nil (probes `n-file-nil-unforced`, `n-file-nil`).
   Unreadable directories contribute no children (mirrors
-  `(seq (. d (listFiles)))` over a null return); IO
-  failures opening the root's own listing reuse the
-  `io.rs` `file_err` shapes (`FileNotFoundException`
-  naming the path). Child order follows `read_dir`
+  `(seq (. d (listFiles)))` over a null return — the JVM
+  never surfaces an IO error from this walk, so the
+  issue's `file_err` seam has no live call site; no
+  `slurp`/`spit` behavior changes). Child order follows
+  `read_dir`
   (OS-defined, like `listFiles`).
 - `xml-seq` — verbatim `core.clj` port over `tree-seq`:
   `(tree-seq (complement string?) (comp seq :content)
