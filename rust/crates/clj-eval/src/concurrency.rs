@@ -1858,39 +1858,38 @@ fn native_get_validator(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, 
     Ok(validator.unwrap_or(Value::Nil))
 }
 
-/// `set-validator!`: install (or clear, with nil) the IRef's
-/// validator, validating the current value first — a veto keeps
-/// the old validator (S5; oracle `c-set-*`, `k-set-*`). The
-/// checkcasts run in JVM order: the receiver to `IRef` (nil
-/// passes through), then the fn to `IFn` (nil clears), and only
-/// then does the null receiver trip the call-shape NPE.
-fn native_set_validator(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
-    check_arity("clojure.core/set-validator!", args, &[2])?;
-    let target = match &args[0] {
-        Value::Atom(a) => Some(WatchedRef::Atom(a.clone())),
-        Value::Agent(a) => Some(WatchedRef::Agent(a.clone())),
-        Value::Nil => None,
-        other => return Err(cce_err(other, "clojure.lang.IRef")),
-    };
-    if !matches!(&args[1], Value::Nil) && !is_ifn(&args[1]) {
-        return Err(cce_err(&args[1], "clojure.lang.IFn"));
+/// Receiver checkcast for `set-validator!` (S5): atoms and
+/// agents answer `Some`, nil passes through (the NPE trips only
+/// after the fn check, per JVM order), anything else CCEs.
+fn watched_or_nil(v: &Value) -> Result<Option<WatchedRef>, NativeError> {
+    match v {
+        Value::Atom(a) => Ok(Some(WatchedRef::Atom(a.clone()))),
+        Value::Agent(a) => Ok(Some(WatchedRef::Agent(a.clone()))),
+        Value::Nil => Ok(None),
+        other => Err(cce_err(other, "clojure.lang.IRef")),
     }
-    let Some(target) = target else {
-        return Err(npe(
-            "Cannot invoke \"clojure.lang.IRef.setValidator(clojure.lang.IFn)\" because \"iref\" is null",
-        ));
-    };
-    let next = match &args[1] {
-        Value::Nil => None,
-        vf => Some(vf.clone()),
-    };
-    if let Some(vf) = &next {
-        let current = match &target {
-            WatchedRef::Atom(a) => a.lock().value.clone(),
-            WatchedRef::Agent(a) => a.lock().value.clone(),
-        };
-        validate_new(eval, vf, &current)?;
+}
+
+/// Validator-fn checkcast for `set-validator!` (S5): nil clears
+/// (`None`), IFns install, anything else CCEs to `IFn`.
+fn check_validator_fn(v: &Value) -> Result<Option<Value>, NativeError> {
+    match v {
+        Value::Nil => Ok(None),
+        vf if is_ifn(vf) => Ok(Some(vf.clone())),
+        other => Err(cce_err(other, "clojure.lang.IFn")),
     }
+}
+
+/// Current value behind a watched ref (S5): one lock, one clone.
+fn iref_current(target: &WatchedRef) -> Value {
+    match target {
+        WatchedRef::Atom(a) => a.lock().value.clone(),
+        WatchedRef::Agent(a) => a.lock().value.clone(),
+    }
+}
+
+/// Install (or clear) the validator behind a watched ref (S5).
+fn store_validator(target: WatchedRef, next: Option<Value>) {
     match target {
         WatchedRef::Atom(a) => {
             a.lock().validator = next;
@@ -1899,6 +1898,27 @@ fn native_set_validator(eval: &mut Evaluator, args: &[Value]) -> Result<Value, N
             a.lock().validator = next;
         }
     }
+}
+
+/// `set-validator!`: install (or clear, with nil) the IRef's
+/// validator, validating the current value first — a veto keeps
+/// the old validator (S5; oracle `c-set-*`, `k-set-*`). The
+/// checkcasts run in JVM order: the receiver to `IRef` (nil
+/// passes through), then the fn to `IFn` (nil clears), and only
+/// then does the null receiver trip the call-shape NPE.
+fn native_set_validator(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.core/set-validator!", args, &[2])?;
+    let target = watched_or_nil(&args[0])?;
+    let next = check_validator_fn(&args[1])?;
+    let Some(target) = target else {
+        return Err(npe(
+            "Cannot invoke \"clojure.lang.IRef.setValidator(clojure.lang.IFn)\" because \"iref\" is null",
+        ));
+    };
+    if let Some(vf) = &next {
+        validate_new(eval, vf, &iref_current(&target))?;
+    }
+    store_validator(target, next);
     Ok(Value::Nil)
 }
 
