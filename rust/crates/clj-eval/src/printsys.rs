@@ -273,7 +273,9 @@ fn is_jvm_iobj(v: &Value) -> bool {
 }
 
 /// `IObj` extensions: fns plus the nine sequence types (subvectors
-/// included; pending seqs excluded — see [`is_jvm_iobj`]).
+/// included; pending seqs excluded — see [`is_jvm_iobj`]). The fn
+/// arms only matter past a removed `Fn` default or once fn meta
+/// turns visible (§2d F7) — retained, not dead code.
 fn ext_is_iobj(e: &Arc<dyn ExtensionValue>) -> bool {
     let any = e.as_any();
     any.downcast_ref::<Closure>().is_some()
@@ -288,7 +290,10 @@ fn type_key() -> Value {
 
 /// Strip `:type` from a value's meta for `:default` chaining
 /// (empty-after-strip clears the meta; fns rebuild directly —
-/// their meta lives outside `Value::meta`).
+/// their meta lives outside `Value::meta`). The fn arms are
+/// currently unreachable in non-degenerate flows (fn meta is
+/// invisible to dispatch — §2d F7) and retained for when it
+/// turns visible.
 fn strip_type_meta(v: &Value) -> Value {
     if let Value::Extension(e) = v {
         let any = e.as_any();
@@ -346,8 +351,8 @@ fn method_dispatch_value(v: &Value) -> Value {
 
 /// The `pr-on` driver: `print-dup` under `*print-dup*`, else
 /// `print-method` — through the live multis, or the booted
-/// defaults only in [`print-simple`](native_print_simple)'s object
-/// half. Answers nil (like the JVM's `pr-on`).
+/// defaults only in [`print-simple`](native_print_simple)'s
+/// non-collection arm. Answers nil (like the JVM's `pr-on`).
 pub(crate) fn pr_on(eval: &mut Evaluator, v: &Value, w: &Value) -> Result<Value, Signal> {
     if deref_core(eval, "*print-dup*").is_truthy() {
         pr_on_dup(eval, v, w)
@@ -1068,8 +1073,9 @@ fn dup_fn(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     Ok(Value::Nil)
 }
 
-/// Dup records (`#Name[v1, v2]` — field-order vals, always
-/// non-verbose).
+/// Dup records (`#Name[v1, v2, ...]` — `(vals r)`: fields in
+/// definition order, then extmap entries in content-iteration
+/// order; always non-verbose).
 fn dup_record(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     let head = dup_head(eval, args)?;
     let fields = match &head.o {
@@ -1093,10 +1099,13 @@ fn dup_record(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError
     write_to_writer(&head.w, "#")?;
     write_to_writer(&head.w, &name)?;
     write_to_writer(&head.w, "[")?;
+    let field_keys: Vec<Value> = fields
+        .iter()
+        .map(|f| Value::Keyword(Keyword::new(None, f)))
+        .collect();
     let mut first = true;
-    for field in &fields {
-        let key = Value::Keyword(Keyword::new(None, field));
-        let Some(val) = content.get(&key) else {
+    for key in &field_keys {
+        let Some(val) = content.get(key) else {
             continue;
         };
         if !first {
@@ -1104,6 +1113,18 @@ fn dup_record(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError
         }
         first = false;
         pr_on(eval, val, &head.w).map_err(signal_to_native)?;
+    }
+    // The extension map: content entries past the field keys, in
+    // content-iteration order (the second half of `(vals r)`).
+    for (k, v) in content.iter() {
+        if field_keys.contains(k) {
+            continue;
+        }
+        if !first {
+            write_to_writer(&head.w, ", ")?;
+        }
+        first = false;
+        pr_on(eval, v, &head.w).map_err(signal_to_native)?;
     }
     write_to_writer(&head.w, "]")?;
     Ok(Value::Nil)
@@ -1255,8 +1276,9 @@ fn static_dup_fn(dv: &Value) -> Option<NativeFnPtr> {
 }
 
 /// `(print-simple o w)`: the `print-meta` prefix plus the §1f-`str`
-/// rendering, both written to `w`. Never consults user methods
-/// (defaults-only mode).
+/// rendering, both written to `w`. Non-collections bypass user
+/// methods (defaults-only mode); collections render through the
+/// live driver, like the JVM's `RT.print`.
 fn native_print_simple(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/print-simple", args, &[2])?;
     let (o, w) = (&args[0], &args[1]);
@@ -1284,15 +1306,20 @@ fn print_simple_body(
     print_simple_str(eval, o, w)
 }
 
-/// The §1f-`str` rendering: collection-likes through the driver in
-/// defaults-only mode (ambient bindings, user entries bypassed);
-/// everything else through the existing native `str` arms
-/// (frozen behavior — raw strings, lazy content-hashes, `toString`
-/// fallbacks).
+/// The §1f-`str` rendering: collection-likes through the LIVE
+/// driver (JVM collection `toString` routes through `RT.print` —
+/// user methods fire, nested and top-level); everything else
+/// through the existing native `str` arms (frozen behavior —
+/// raw strings, lazy content-hashes, `toString` fallbacks —
+/// which never consult the multis).
 fn print_simple_str(eval: &mut Evaluator, o: &Value, w: &Value) -> Result<(), NativeError> {
     if is_simple_collection(o) {
         let r = realize_deep(eval, o).map_err(signal_to_native)?;
-        pr_on(eval, &r, w).map_err(signal_to_native)?;
+        let saved = eval.print_defaults_only;
+        eval.print_defaults_only = false;
+        let result = pr_on(eval, &r, w).map_err(signal_to_native);
+        eval.print_defaults_only = saved;
+        result?;
         return Ok(());
     }
     let s = str_of_one(eval, o)?;

@@ -11,6 +11,8 @@ s2-cons "(1 2)"
 s2-range "(0 1 2)"
 s2-lazyseq "clojure.lang.LazySeq@L"
 s2-simple-usermethod "user.ST@L"
+s2-str-nested-usermethod "[DT!]"
+s2-simple-nested-usermethod "[DT!]"
 s2-seqlength "(1 ...)"
 s2-mapentry-str "[\"a\" 1]"
 S8-str-semantics DONE

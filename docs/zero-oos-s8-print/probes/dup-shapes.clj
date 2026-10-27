@@ -82,6 +82,8 @@
 ;; ---- records, classes ----
 (dupof "d-record" '(binding [*print-dup* true] (pr-str (->RP 1 2))))
 (dupof "d-record-str" '(binding [*print-dup* true] (pr-str (->RP 1 "a"))))
+(dupof "d-record-ext" '(binding [*print-dup* true] (pr-str (assoc (->RP 1 2) :z 9))))
+(dupof "d-record-ext2" '(binding [*print-dup* true] (pr-str (assoc (->RP 1 2) :z 8 :w 9))))
 (dupof "d-class" '(binding [*print-dup* true] (pr-str String)))
 (dupof "d-class-iface" '(binding [*print-dup* true] (pr-str java.util.Map)))
 (dupof "d-class-prim" '(binding [*print-dup* true] (pr-str Integer/TYPE)))

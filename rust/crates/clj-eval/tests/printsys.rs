@@ -109,6 +109,9 @@ fn dispatch_rows() {
         &mut eval,
         "(defmethod print-method ::xatom [o w] (print-simple \"X!\" w))",
     );
+    // A `:type`-carrying host instance (records take `with-meta`;
+    // port deftypes reject it with a CCE).
+    run(&mut eval, "(defrecord DT [x])");
     // User `print-dup` hangs on the token (dup ignores `:type`).
     run(
         &mut eval,
@@ -156,10 +159,13 @@ fn dispatch_rows() {
         ),
         "[\"true\" \"false\" \"hi\"]"
     );
-    // `m-str-unaffected`: `str` never consults `print-method`.
-    assert_eq!(
-        run_last(&mut eval, "(str (with-meta [1] {:type ::dt}))"),
-        "\"[1]\""
+    // `m-str-unaffected`: top-level `str` never consults
+    // `print-method` (oracle-faithful: the oracle row is a
+    // top-level deftype; transcribed with a `:type`-tagged
+    // record — also a non-collection leaf taking the `toString`
+    // arm).
+    assert!(
+        run_last(&mut eval, "(str (with-meta (->DT 1) {:type ::dt}))").starts_with("\"user.DT@")
     );
     // `m-type-kw`, `m-type-nonstr`: keyword `:type` dispatches,
     // anything else falls to the token.
@@ -449,8 +455,8 @@ fn dup_rows() {
             && named.ends_with(". )\""),
         "{named}"
     );
-    // Records, classes: `d-record`, `d-record-str`, `d-class`,
-    // `d-class-iface`.
+    // Records, classes: `d-record`, `d-record-str`,
+    // `d-record-ext`, `d-record-ext2`, `d-class`, `d-class-iface`.
     assert_eq!(
         run_last(
             &mut eval,
@@ -464,6 +470,22 @@ fn dup_rows() {
             "(binding [*print-dup* true] (pr-str (->RP 1 \"a\")))"
         ),
         "\"#user.RP[1, \\\"a\\\"]\""
+    );
+    // `d-record-ext`, `d-record-ext2`: dup prints `(vals r)` —
+    // fields, then extmap entries in insertion order.
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(binding [*print-dup* true] (pr-str (assoc (->RP 1 2) :z 9)))"
+        ),
+        "\"#user.RP[1, 2, 9]\""
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(binding [*print-dup* true] (pr-str (assoc (->RP 1 2) :z 8 :w 9)))"
+        ),
+        "\"#user.RP[1, 2, 8, 9]\""
     );
     assert_eq!(
         run_last(&mut eval, "(binding [*print-dup* true] (pr-str DT))"),
@@ -1043,28 +1065,9 @@ fn simple_ctor_rows() {
         )
         .starts_with("\"clojure.lang.LazySeq@")
     );
-    // `s2-simple-usermethod`: `print-simple` bypasses user methods
-    // (both `:type` and token entries).
-    run(
-        &mut eval,
-        "(defmethod print-method ::st [o w] (print-simple \"SHOULD-NOT-APPEAR\" w))",
-    );
-    assert_eq!(
-        run_last(
-            &mut eval,
-            "(with-out-str (print-simple (with-meta [1] {:type ::st}) *out*))"
-        ),
-        "\"[1]\""
-    );
-    run(
-        &mut eval,
-        "(defmethod print-method \"java.lang.String\" [s w] (print-simple \"SHOULD-NOT-APPEAR\" w))",
-    );
-    assert_eq!(
-        run_last(&mut eval, "(with-out-str (print-simple \"hi\" *out*))"),
-        "\"hi\""
-    );
-    // `s2-seqlength`, `s2-mapentry-str`.
+    // `s2-seqlength`, `s2-mapentry-str` (ahead of the user-method
+    // installs: under the live collection arm a `String` method
+    // would fire nested in the entry).
     assert_eq!(
         run_last(
             &mut eval,
@@ -1078,6 +1081,65 @@ fn simple_ctor_rows() {
             "(with-out-str (print-simple (first {\"a\" 1}) *out*))"
         ),
         "\"[\\\"a\\\" 1]\""
+    );
+    // `s2-simple-nested-usermethod`: collections route through the
+    // LIVE multi, so nested user methods fire. (Port deftypes
+    // can't carry `:type` — `with-meta` is a CCE — so the
+    // oracle's class-hung fixture is transcribed with a
+    // `:type`-tagged record, also a non-collection leaf.)
+    run(&mut eval, "(defrecord DT [x])");
+    run(
+        &mut eval,
+        "(defmethod print-method ::dt [o w] (print-simple \"DT!\" w))",
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(with-out-str (print-simple [(with-meta (->DT 1) {:type ::dt})] *out*))"
+        ),
+        "\"[DT!]\""
+    );
+    // `s2-str-nested-usermethod` (DIVERGENT, frozen per §2d F6):
+    // JVM `str` consults nested methods (`"[DT!]"`); native
+    // `str` is behavior-frozen and renders the default shape.
+    assert_eq!(
+        run_last(&mut eval, "(str [(with-meta (->DT 1) {:type ::dt})])"),
+        "\"[#user.DT{:x 1}]\""
+    );
+    // `s2-simple-usermethod`: top-level NON-collections still
+    // bypass (the oracle row is a top-level deftype; same record
+    // transcription — the `toString` arm, never the multi).
+    assert!(
+        run_last(
+            &mut eval,
+            "(with-out-str (print-simple (with-meta (->DT 1) {:type ::dt}) *out*))"
+        )
+        .starts_with("\"user.DT@")
+    );
+    // Top-level `:type` on a collection dispatches live too (same
+    // arm — the JVM consults the multi for the top-level
+    // collection, not just nested values).
+    run(
+        &mut eval,
+        "(defmethod print-method ::st [o w] (print-simple \"ST!\" w))",
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(with-out-str (print-simple (with-meta [1] {:type ::st}) *out*))"
+        ),
+        "\"ST!\""
+    );
+    // The `String` override stays LAST (it rewrites string
+    // printing in this evaluator — and under the live arm it
+    // would fire nested in every later collection row).
+    run(
+        &mut eval,
+        "(defmethod print-method \"java.lang.String\" [s w] (print-simple \"SHOULD-NOT-APPEAR\" w))",
+    );
+    assert_eq!(
+        run_last(&mut eval, "(with-out-str (print-simple \"hi\" *out*))"),
+        "\"hi\""
     );
 }
 

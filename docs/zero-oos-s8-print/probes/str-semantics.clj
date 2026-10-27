@@ -32,6 +32,11 @@
 (deftype ST [x])
 (defmethod print-method ST [o w] (.write ^java.io.Writer w "SHOULD-NOT-APPEAR"))
 (sof "s2-simple-usermethod" '(let [sw (java.io.StringWriter.)] (print-simple (ST. 1) sw) (str sw)))
+;; Nested user methods fire through collection toString (RT.print is live).
+(deftype DT [x])
+(defmethod print-method DT [o w] (.write ^java.io.Writer w "DT!"))
+(sof "s2-str-nested-usermethod" '(str [(DT. 1)]))
+(sof "s2-simple-nested-usermethod" '(let [sw (java.io.StringWriter.)] (print-simple [(DT. 1)] sw) (str sw)))
 (sof "s2-seqlength" '(binding [*print-length* 1] (str (cons 1 [2 3]))))
 (sof "s2-mapentry-str" '(str (first {"a" 1})))
 (println "S8-str-semantics DONE")

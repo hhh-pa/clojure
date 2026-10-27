@@ -598,16 +598,23 @@ fn print_dup_seq_ctor(
     out.push_str("])");
 }
 
-/// `#Name[v1, v2]`: dup records print field-order vals (always
-/// non-verbose — `*verbose-defrecords*` is out of scope).
+/// `#Name[v1, v2, ...]`: dup records print `(vals r)` — fields
+/// in definition order, then extmap entries in
+/// content-iteration order (always non-verbose —
+/// `*verbose-defrecords*` is out of scope).
 fn print_dup_record(i: &crate::HostInst, opts: &PrintOpts, level: Option<i64>, out: &mut String) {
     out.push('#');
     out.push_str(&i.def.name);
     out.push('[');
+    let field_keys: Vec<Value> = i
+        .def
+        .fields
+        .iter()
+        .map(|f| Value::Keyword(crate::Keyword::new(None, f)))
+        .collect();
     let mut first = true;
-    for field in &i.def.fields {
-        let key = Value::Keyword(crate::Keyword::new(None, field));
-        let Some(val) = i.content.get(&key) else {
+    for key in &field_keys {
+        let Some(val) = i.content.get(key) else {
             continue;
         };
         if !first {
@@ -615,6 +622,18 @@ fn print_dup_record(i: &crate::HostInst, opts: &PrintOpts, level: Option<i64>, o
         }
         first = false;
         print_into(val, opts, level, out);
+    }
+    // The extension map: content entries past the field keys, in
+    // content-iteration order (the second half of `(vals r)`).
+    for (k, v) in i.content.iter() {
+        if field_keys.contains(k) {
+            continue;
+        }
+        if !first {
+            out.push_str(", ");
+        }
+        first = false;
+        print_into(v, opts, level, out);
     }
     out.push(']');
 }
@@ -1886,6 +1905,43 @@ mod tests {
             meta: None,
         })));
         assert_eq!(dup(&rec), "#user.RP[1, 2]");
+    }
+
+    #[test]
+    fn dup_record_appends_extmap_in_content_order() {
+        // `(vals r)`: fields in definition order, then extmap
+        // entries in content-iteration order (oracle
+        // `d-record-ext`, `d-record-ext2`).
+        let rdef = Arc::new(crate::HostDef {
+            name: Arc::from("user.RP"),
+            kind: crate::HostKind::Record,
+            fields: vec![Arc::from("x"), Arc::from("y")],
+            methods: std::collections::HashMap::new(),
+            interfaces: Vec::new(),
+            prefix: None,
+            impl_ns: None,
+            sigs: std::collections::HashMap::new(),
+            takes_this: true,
+        });
+        let one = Value::HostType(Arc::new(crate::HostVal::Inst(crate::HostInst {
+            def: rdef.clone(),
+            content: crate::new_map()
+                .insert(Value::Keyword(Keyword::new(None, "x")), Value::Int(1))
+                .insert(Value::Keyword(Keyword::new(None, "y")), Value::Int(2))
+                .insert(Value::Keyword(Keyword::new(None, "z")), Value::Int(9)),
+            meta: None,
+        })));
+        assert_eq!(dup(&one), "#user.RP[1, 2, 9]");
+        let two = Value::HostType(Arc::new(crate::HostVal::Inst(crate::HostInst {
+            def: rdef,
+            content: crate::new_map()
+                .insert(Value::Keyword(Keyword::new(None, "x")), Value::Int(1))
+                .insert(Value::Keyword(Keyword::new(None, "y")), Value::Int(2))
+                .insert(Value::Keyword(Keyword::new(None, "z")), Value::Int(8))
+                .insert(Value::Keyword(Keyword::new(None, "w")), Value::Int(9)),
+            meta: None,
+        })));
+        assert_eq!(dup(&two), "#user.RP[1, 2, 8, 9]");
     }
 
     #[test]

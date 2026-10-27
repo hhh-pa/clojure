@@ -4,7 +4,7 @@
   review. No source edits, no commits.
 - Issue: #51. Branch: `zero-oos-s8-print`.
 - Probes: `docs/zero-oos-s8-print/probes/*.{clj,out}` (7 files,
-  178 pins, every file exit 0 and rerun-stable; oracle: alpha10
+  182 pins, every file exit 0 and rerun-stable; oracle: alpha10
   jars per each file's header).
 - Scope: 8 vars — `*flush-on-newline*`,
   `char-escape-string`, `char-name-string`, `print-ctor`,
@@ -86,7 +86,9 @@ defaults; it is not a second print path for pr-family output.
 | `m-user`, `m-user-nested`, `m-dup-user` | user `print-method`/`print-dup` fire on `pr-str`, recursively; dup methods gated by `*print-dup*` |
 | `m-user-spaces`, `m-user-newline` | separators/newline interleave with user output |
 | `m-writer-id` | nested values receive the live `*out*` (`identical?`) |
-| `m-str-unaffected`, `m-str-override`, `s2-simple-usermethod` | `str`/`print-simple` never consult user methods |
+| `m-str-unaffected`, `m-str-override` | top-level `str` never consults user methods (the frozen port `str` bypasses everywhere — §2d F6) |
+| `s2-simple-usermethod` | top-level non-collection `print-simple` bypasses user methods |
+| `s2-str-nested-usermethod`, `s2-simple-nested-usermethod` | nested user methods fire through collection `toString` (live `RT.print`) — `print-simple` converges, frozen `str` diverges (§2d F6) |
 | `m-dup-delegates`, `m-dup-nodelegates` | dup→method delegation goes through the LIVE `print-method` multi (user methods apply under dup); array-map does not delegate |
 | `d-queue` | `IPersistentList` dup delegates to `print-method` (informational: the port has no queue kind) |
 
@@ -94,8 +96,9 @@ defaults; it is not a second print path for pr-family output.
   `pr`/`print` write separators between args, no trailing
   space; `prn`/`println` append `\n` (see §1g for the flush).
   Bare `(pr)`/`(print)` write nothing (existing behavior kept).
-- `print-simple`'s `(str o)` half and native `str` use
-  defaults-only rendering (§1f), never the live tables.
+- Native `str` never consults the live tables (§2d F6). Of
+  `print-simple`'s halves (§1f), only the non-collection arm
+  bypasses; the collection arm renders through the live multi.
 
 ### 1b. Dispatch tokens (the port's dispatch domain)
 
@@ -206,7 +209,7 @@ apply — probe `m-dup-delegates`):
 | `d-var-user`, `d-var-core`, `p-var-meta` | var | `#=(var ns/name)`; no meta prefix (the method skips `print-meta`) |
 | `d-ns` | namespace | `#=(find-ns name)` |
 | `d-anonfn`, `d-namedfn` | closures + natives | `#=(<munged-display>. )` (via `print-ctor` with empty args; note the `. ` — same shape for port-native fns by analogy) |
-| `d-record`, `d-record-str`, `p-record-meta` | record inst | `#Name[v1, v2]` — vals in **field order** (`def.fields`, not content iteration), `", "`-joined, via `pr_on`; print-meta prefix when meta is non-empty; always non-verbose (`*verbose-defrecords*` is out of scope) |
+| `d-record`, `d-record-str`, `d-record-ext`, `d-record-ext2`, `p-record-meta` | record inst | `#Name[v1, v2, ...]` — `(vals r)`: fields in definition order, then extmap entries in content-iteration order (field keys skipped), `", "`-joined, via `pr_on`; print-meta prefix when meta is non-empty; always non-verbose (`*verbose-defrecords*` is out of scope) |
 | `d-class`, `d-class-iface` | type descriptors | `#=<name>` |
 | `d-object`, `d-deftype`, `d-reify`, `d-atom`, `d-delay`, `d-future`, `d-promise`, `d-agent`, `d-volatile`, `d-reduced`, `d-transient`, `d-throwable`, `d-readercond`, `d-multifn`, `d-writer`, `d-reader`, `d-eduction` | no JVM dup shape | **no table entry**: miss throws `IllegalArgumentException` via the stock #37 `No method` error, naming the §1b token: `No method in multimethod 'print-dup' for dispatch value: "<token>"` (quoted — the token is a string) |
 | (source-derived, no oracle row) | `Unbound` | no entry → same throw (`Var$Unbound` has no JVM dup shape; the value is unconstructible from Clojure surface, so no probe) |
@@ -312,7 +315,8 @@ via `IPersistentList`).
 | `t-nilo` | nil `o` → NPE (port message per below; JVM message names `core$class` internals) |
 | `s2-meta`, `s2-dup-map`, `s2-dup-vec`, `s2-length`, `s2-level`, `s2-seqlength` | JVM `str` honors ambient meta/dup/length/level for collections — this is what `print-simple`'s `(str o)` half replicates |
 | `s2-str-raw`, `s2-dup-str`, `s2-atom`, `s2-cons`, `s2-range`, `s2-lazyseq`, `s2-mapentry-str`, `s2-readably` | non-collections are binding-insensitive (raw strings, `toString`); seq partition (lazy → content-hash, others → contents); entry strings quoted; ambient readably (not forced) |
-| `s2-simple-usermethod` | `print-simple` bypasses user methods |
+| `s2-simple-usermethod` | top-level non-collection `print-simple` bypasses user methods |
+| `s2-str-nested-usermethod`, `s2-simple-nested-usermethod` | nested user methods fire through collection `toString` (live `RT.print`) — `print-simple` converges, frozen `str` diverges (§2d F6) |
 
 - `(print-simple o w)`: `print-meta` prefix per the rule
   above, then the §1f-`str` rendering of `o`, both written to
@@ -328,13 +332,13 @@ via `IPersistentList`).
 - The §1f-`str` rendering (print-simple's object half ONLY —
   native `str` is untouched, §2d F6): nil→`""`, strings/chars
   raw, lazy seqs → content-hash, references/hostvals via the
-  existing native arms; **all collection-likes
-  (`List`/`Vector`/`Map`/`Set`/`MapEntry`/seq extensions/
-  `SubVector`) render through the driver in defaults-only
-  mode** (booted defaults, ambient bindings, user entries
-  bypassed — a static kind→default dispatch, not the live
-  tables). This yields the double-prefix rows and `s2-*`
-  parity by construction.
+  existing native arms (all bypassing, like `toString`);
+  **all collection-likes (`List`/`Vector`/`Map`/`Set`/
+  `MapEntry`/seq extensions/`SubVector`) render through the
+  LIVE driver** (live multis, ambient bindings — user methods
+  fire nested and top-level, like JVM `RT.print`). This
+  yields the double-prefix rows and `s2-*` parity by
+  construction.
 - Both fns are plain natives (`install_native`, not dynamic).
 
 ### 1g. `*flush-on-newline*`
@@ -474,7 +478,7 @@ place. Header counts become **692 vars: 418 implemented,
 
 ### 2a. Derivation story
 
-The oracle is behavioral (178 rows), but the design also rests
+The oracle is behavioral (182 rows), but the design also rests
 on source reads: alpha10 `core_print.clj` (all `print-method`/
 `print-dup` bodies, `print-sequential`'s dup exemptions,
 `print-ctor`, the char maps) and `core.clj` (the `defmulti`
@@ -494,7 +498,7 @@ over port kinds, verified cell by cell against `m-table-*`.
 - Per-kind dup shapes incl. `#=` ctors → §1c table + `d-*`.
 - Char map equality → §1e (single-source tables).
 - `print-simple`/`print-ctor` arities + writer behavior →
-  §1f (incl. the defaults-only `str` half, `s2-*`).
+  §1f (incl. the §1f-`str` half, `s2-*`).
 - Flush root + timing → §1g (+ the §2c correction).
 - Default-vs-user dispatch order → §1a/§1c (`m-*`).
 - Re-probe rule → §1h. Flush hook → §1g. Matrix edits → §1j.
@@ -551,11 +555,24 @@ over port kinds, verified cell by cell against `m-table-*`.
 - **F5. `*verbose-defrecords*`.** Out of scope (no slice);
   record dup is always non-verbose (`#Name[v, ...]`).
 - **F6. Native `str` binding-awareness.** JVM `str` honors
-  ambient meta/dup/length/level for collections (`s2-*`)
-  and quotes entry strings (`s2-mapentry-str` — the port's
-  `MapEntry` arm does not); the port's native `str` is
-  behavior-frozen for S8 and `print-simple` carries its own
-  defaults-only rendering instead.
+  ambient meta/dup/length/level for collections (`s2-*`),
+  consults user `print-method`s nested in collections
+  (`s2-str-nested-usermethod` — the port bypasses, pinned
+  divergence), and quotes entry strings (`s2-mapentry-str` —
+  the port's `MapEntry` arm does not); the port's native
+  `str` is behavior-frozen for S8 and `print-simple` carries
+  its own rendering instead (live for collections per §1f,
+  bypassing only for non-collections).
+- **F7. Fn meta invisible to the printer.** JVM prints the
+  `^meta` prefix for fns (`(binding [*print-meta* true]
+  (pr-str (with-meta (fn [x] x) {:a 1})))` → `"^{:a 1}
+  #object[...]"`); the port drops it — `Value::meta` can't
+  see `Closure`/`NativeFn` meta, so `value_meta`,
+  `method_dispatch_value`, and `write_meta_prefix` are all
+  blind to it (pre-existing engine gap; `(meta ...)` works,
+  only printing drops it). The `Closure`/`NativeFn` arms in
+  `is_jvm_iobj`/`strip_type_meta` are unreachable in
+  non-degenerate flows for the same reason.
 
 ### 2e. Open design risks
 
