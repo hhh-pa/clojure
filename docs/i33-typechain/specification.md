@@ -1,7 +1,7 @@
 # Issue #33: S-typechain slice — Specification
 
-- Status: draft (research: issue #33; branch just created; oracle
-  probes not yet written — TDD requires them before implementation).
+- Status: stage-1 probes committed (`types.clj/out`, 53 pins,
+  stable); implementation next. Stages 2–3 probes not yet written.
 - Parent: out-of-scope reduction. Issue: #33. Branch: `33-typechain`.
   Probes: `docs/i33-typechain/probes/{types,protocols,multimethods}.{clj,out}`
   (to be written; exit 0 required).
@@ -119,7 +119,24 @@ type system; multimethods dispatch over both):
   `HostType`), `proxy` (fenced superclass check + method table),
   `gen-class` (name/constructors/methods descriptor +
   constructor fn), `gen-interface`/`definterface` (method-signature
-  descriptors usable by `proxy` and dispatch).
+  descriptors usable by `proxy` and dispatch). Plus a **fenced
+  port-type call surface** using faithful JVM syntax, dispatching
+  only on port-registered types (host interop stays N1):
+  `(TypeName. args)` positional constructors (wrong count →
+  `No matching ctor found for class <name>`, oracle
+  `dtor-arity1`), `(.-field inst)` positional field reads
+  (oracle `dtor-field`), `(.method inst args)` method-table
+  dispatch (oracle `dtor-meth`, `reify-meth`, `proxy-iface`).
+  Anything else in `.`/`new` position keeps the existing
+  unresolved error. Oracle findings baked in: `definterface`
+  sigs exclude `this` (it would become a phantom parameter)
+  with one arglist per entry (repeat the name for overloads);
+  `deftype`/`reify` bodies include `this`; `proxy` bodies
+  exclude `this`; record `=` is same-type-only (oracle
+  `rec-eq-map` is false); runtime top-level `gen-class` is not
+  constructable on the JVM (oracle `genclass`
+  ClassNotFoundException), so the port's constructable
+  descriptor is a documented divergence.
 - **Stage 2** (`protocol.rs` + `PROTOCOL_NATIVES`,
   `Value::ProtocolFn`, registry on evaluator state):
   `defprotocol` helper, `extend`/`extend-type`/`extend-protocol`
