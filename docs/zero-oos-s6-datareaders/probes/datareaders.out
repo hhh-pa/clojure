@@ -1,0 +1,128 @@
+a-roots "{} nil"
+a-meta "true true"
+a-ns "clojure.core clojure.core"
+a-defaults ("inst" "uuid")
+a-defaults-fn true
+a-defaults-count 2
+a-defaults-arity nil
+a-ddr-meta "[nil nil]"
+a-ddr-str "[\"#'clojure.instant/read-instant-date\" \"#'clojure.uuid/default-uuid-reader\"]"
+a-ddr-keytype "(\"class clojure.lang.Symbol\" \"class clojure.lang.Symbol\")"
+b-ctor #foo 1
+b-ctor-nested #a [1 {:b 2}]
+b-ctor-nstag #foo/bar 1
+b-ctor-strtag THROW java.lang.ClassCastException|"class java.lang.String cannot be cast to class clojure.lang.Symbol (java.lang.String is in module java.base of loader 'bootstrap'; clojure.lang.Symbol is in unnamed module of loader 'app')"
+b-ctor-kwtag THROW java.lang.ClassCastException|"class clojure.lang.Keyword cannot be cast to class clojure.lang.Symbol (clojure.lang.Keyword and clojure.lang.Symbol are in unnamed module of loader 'app')"
+b-ctor-niltag #nil 1
+b-arity1 THROW clojure.lang.ArityException|"Wrong number of args (1) passed to: clojure.core/tagged-literal"
+b-arity0 THROW clojure.lang.ArityException|"Wrong number of args (0) passed to: clojure.core/tagged-literal"
+b-arity3 THROW clojure.lang.ArityException|"Wrong number of args (3) passed to: clojure.core/tagged-literal"
+b-eq true
+b-ne-tag false
+b-ne-form false
+b-str "clojure.lang.TaggedLiteral@28babb91"
+b-p-t true
+b-p-nil false
+b-p-bool false
+b-p-int false
+b-p-str false
+b-p-sym false
+b-p-kw false
+b-p-vec false
+b-p-map false
+b-p-list false
+b-p-fn false
+b-p-atom false
+b-p-cond false
+b-p-arity0 THROW clojure.lang.ArityException|"Wrong number of args (0) passed to: clojure.core/tagged-literal?"
+b-p-arity2 THROW clojure.lang.ArityException|"Wrong number of args (2) passed to: clojure.core/tagged-literal?"
+c-ctor #?(:clj 1 :cljs 2)
+c-ctor-splice #?@(1 2)
+c-arity1 THROW clojure.lang.ArityException|"Wrong number of args (1) passed to: clojure.core/reader-conditional"
+c-arity0 THROW clojure.lang.ArityException|"Wrong number of args (0) passed to: clojure.core/reader-conditional"
+c-arity3 THROW clojure.lang.ArityException|"Wrong number of args (3) passed to: clojure.core/reader-conditional"
+c-badform #?1
+c-badform-vec #?[1]
+c-badform-nil #?nil
+c-badsplice-kw THROW java.lang.ClassCastException|"class clojure.lang.Keyword cannot be cast to class java.lang.Boolean (clojure.lang.Keyword is in unnamed module of loader 'app'; java.lang.Boolean is in module java.base of loader 'bootstrap')"
+c-badsplice-nil THROW java.lang.NullPointerException|"Cannot invoke \"java.lang.Boolean.booleanValue()\" because \"splicing_QMARK_\" is null"
+c-badsplice-int THROW java.lang.ClassCastException|"class java.lang.Long cannot be cast to class java.lang.Boolean (java.lang.Long and java.lang.Boolean are in module java.base of loader 'bootstrap')"
+c-eq true
+c-ne-splice false
+c-str "clojure.lang.ReaderConditional@8b5"
+c-str-splice "clojure.lang.ReaderConditional@8af"
+c-p-t true
+c-p-ts true
+c-p-nil false
+c-p-int false
+c-p-str false
+c-p-list false
+c-p-tagged false
+c-p-fn false
+c-p-arity0 THROW clojure.lang.ArityException|"Wrong number of args (0) passed to: clojure.core/reader-conditional?"
+c-p-arity2 THROW clojure.lang.ArityException|"Wrong number of args (2) passed to: clojure.core/reader-conditional?"
+d-inst #inst "2024-01-01T00:00:00.000-00:00"
+d-inst-type "class java.util.Date"
+d-inst-offset #inst "2024-01-01T08:00:00.000-00:00"
+d-inst-bad THROW java.lang.RuntimeException|"Unrecognized date/time syntax: bogus"
+d-inst-badday THROW java.lang.RuntimeException|"failed: (<= 1 months 12)"
+d-inst-nonstr THROW java.lang.ClassCastException|"class java.lang.Long cannot be cast to class java.lang.CharSequence (java.lang.Long and java.lang.CharSequence are in module java.base of loader 'bootstrap')"
+d-inst-nil THROW java.lang.NullPointerException|"Cannot invoke \"java.lang.CharSequence.length()\" because \"this.text\" is null"
+d-inst-vec THROW java.lang.ClassCastException|"class clojure.lang.PersistentVector cannot be cast to class java.lang.CharSequence (clojure.lang.PersistentVector is in unnamed module of loader 'app'; java.lang.CharSequence is in module java.base of loader 'bootstrap')"
+d-uuid #uuid "550e8400-e29b-41d4-a716-446655440000"
+d-uuid-upper #uuid "550e8400-e29b-41d4-a716-446655440000"
+d-uuid-type "class java.util.UUID"
+d-uuid-bad THROW java.lang.IllegalArgumentException|"Invalid UUID string: bogus"
+d-uuid-short THROW java.lang.IllegalArgumentException|"Invalid UUID string: 550e8400-e29b-41d4-a716"
+d-uuid-nonstr THROW java.lang.IllegalArgumentException|"#uuid data reader expected string"
+d-qinst THROW java.lang.RuntimeException|"No reader function for tag foo/inst"
+d-quuid THROW java.lang.RuntimeException|"No reader function for tag foo/uuid"
+d-direct-inst #inst "2024-01-01T00:00:00.000-00:00"
+d-direct-uuid #uuid "550e8400-e29b-41d4-a716-446655440000"
+d-direct-bad THROW java.lang.RuntimeException|"Unrecognized date/time syntax: bogus"
+d-direct-arity0 THROW clojure.lang.ArityException|"Wrong number of args (0) passed to: clojure.instant/read-instant-date"
+d-direct-arity2 THROW clojure.lang.ArityException|"Wrong number of args (2) passed to: clojure.instant/read-instant-date"
+b-niltag-eq true
+b-niltag-vs-nilsym true
+d-inst-day45 THROW java.lang.RuntimeException|"failed: (<= 1 days (days-in-month months (leap-year? years)))"
+d-inst-hour25 THROW java.lang.RuntimeException|"failed: (<= 0 hours 23)"
+d-inst-feb29 THROW java.lang.RuntimeException|"failed: (<= 1 days (days-in-month months (leap-year? years)))"
+d-inst-trail THROW java.lang.RuntimeException|"Unrecognized date/time syntax: 2024-01-01xyz"
+d-inst-empty THROW java.lang.RuntimeException|"Unrecognized date/time syntax: "
+d-inst-nozone #inst "2024-01-01T00:00:00.000-00:00"
+d-inst-ym #inst "2024-01-01T00:00:00.000-00:00"
+d-inst-frac7 #inst "2024-01-01T00:00:00.123-00:00"
+d-uuid-braces THROW java.lang.IllegalArgumentException|"UUID string too large"
+d-uuid-urn THROW java.lang.IllegalArgumentException|"UUID string too large"
+d-uuid-nil THROW java.lang.IllegalArgumentException|"#uuid data reader expected string"
+d-uuid-empty THROW java.lang.IllegalArgumentException|"Invalid UUID string: "
+d-inst-min60 THROW java.lang.RuntimeException|"failed: (<= 0 minutes 59)"
+d-inst-sec61 THROW java.lang.RuntimeException|"failed: (<= 0 seconds (if (= minutes 59) 60 59))"
+d-inst-month00 THROW java.lang.RuntimeException|"failed: (<= 1 months 12)"
+d-inst-day00 THROW java.lang.RuntimeException|"failed: (<= 1 days (days-in-month months (leap-year? years)))"
+d-inst-nosecs #inst "2024-01-01T00:00:00.000-00:00"
+d-inst-dotnofrac THROW java.lang.RuntimeException|"Unrecognized date/time syntax: 2024-01-01T00:00:00."
+d-inst-zonez #inst "2024-01-01T00:00:00.000-00:00"
+d-inst-zonenocolon THROW java.lang.RuntimeException|"Unrecognized date/time syntax: 2024-01-01T00:00:00+0200"
+d-uuid-nonhex THROW java.lang.NumberFormatException|"Error at index 11 in: \"44665544000g\""
+d-uuid-nodash THROW java.lang.IllegalArgumentException|"Invalid UUID string: 550e8400e29b41d4a716446655440000"
+d-uuid-36nodash THROW java.lang.IllegalArgumentException|"Invalid UUID string: 550e8400e29b41d4a71644665544000000"
+d-direct-uuid-arity0 THROW clojure.lang.ArityException|"Wrong number of args (0) passed to: clojure.uuid/default-uuid-reader"
+d-uuid-badidx0 THROW java.lang.NumberFormatException|"Error at index 0 in: \"g50e8400\""
+d-uuid-emptypart THROW java.lang.NumberFormatException|"For input string: \"\" under radix 16"
+d-uuid-shortgroup #uuid "0550e840-e29b-41d4-a716-446655440000"
+d-uuid-shortmid #uuid "550e8400-e29b-041d-a716-446655440000"
+d-uuid-longshort #uuid "23456789-0123-1234-1234-123456789012"
+d-uuid-badthenempty THROW java.lang.NumberFormatException|"Error at index 0 in: \"g50e8400\""
+d-uuid-traildash THROW java.lang.NumberFormatException|"For input string: \"\" under radix 16"
+d-uuid-dashes THROW java.lang.NumberFormatException|"For input string: \"\" under radix 16"
+d-inst-year #inst "2024-01-01T00:00:00.000-00:00"
+d-inst-lower-t THROW java.lang.RuntimeException|"Unrecognized date/time syntax: 2024-01-01t00:00:00z"
+d-inst-lower-z THROW java.lang.RuntimeException|"Unrecognized date/time syntax: 2024-01-01T00:00:00z"
+d-inst-space THROW java.lang.RuntimeException|"Unrecognized date/time syntax: 2024-01-01 00:00:00"
+d-inst-zone25 THROW java.lang.RuntimeException|"failed: (<= 0 offset-hours 23)"
+d-inst-zone60 THROW java.lang.RuntimeException|"failed: (<= 0 offset-minutes 59)"
+d-inst-nopad THROW java.lang.RuntimeException|"Unrecognized date/time syntax: 2024-1-1"
+d-inst-yearzone #inst "2024-01-01T00:00:00.000-00:00"
+d-inst-monthzone #inst "2024-01-01T00:00:00.000-00:00"
+d-inst-dayzone #inst "2023-12-31T22:00:00.000-00:00"
