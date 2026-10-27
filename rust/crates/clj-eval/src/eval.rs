@@ -338,9 +338,14 @@ impl Evaluator {
         text: &str,
         hook: &mut dyn clj_reader::ReadHooks,
     ) -> Result<Vec<Value>, SourceError> {
-        match Self::read_forms_pre(self, text) {
-            Ok((mut reader, mut opts)) => Self::read_forms_loop(self, &mut reader, hook, &mut opts),
-            Err((reader, cce)) => Err(crate::reader::executing_wrap(
+        let (reader, seed) = Self::read_forms_pre(self, text);
+        match seed {
+            Ok(seed) => {
+                let mut reader = reader;
+                let mut opts = Self::read_forms_opts(self, &seed);
+                Self::read_forms_loop(self, &mut reader, hook, &mut opts)
+            }
+            Err(cce) => Err(crate::reader::executing_wrap(
                 reader.line(),
                 reader.col(),
                 &cce,
@@ -356,8 +361,11 @@ impl Evaluator {
     /// evaluator, which the per-form consult also needs mutably,
     /// so each attempt scopes its own hooks.
     pub fn read_forms_live(&mut self, text: &str) -> Result<Vec<Value>, SourceError> {
-        match Self::read_forms_pre(self, text) {
-            Ok((mut reader, mut opts)) => {
+        let (reader, seed) = Self::read_forms_pre(self, text);
+        match seed {
+            Ok(seed) => {
+                let mut reader = reader;
+                let mut opts = Self::read_forms_opts(self, &seed);
                 let mut forms = Vec::new();
                 loop {
                     crate::core::snapshot_data_readers(self, &mut opts);
@@ -384,7 +392,7 @@ impl Evaluator {
                     }
                 }
             }
-            Err((reader, cce)) => {
+            Err(cce) => {
                 let outer = self.next_id();
                 let cause = self.next_id();
                 Err(crate::reader::executing_wrap(
@@ -405,7 +413,27 @@ impl Evaluator {
     fn read_forms_pre(
         eval: &mut Evaluator,
         text: &str,
-    ) -> Result<(clj_reader::Reader, ReaderOpts), (clj_reader::Reader, NativeError)> {
+    ) -> (
+        clj_reader::Reader,
+        Result<crate::reader::ReadGateSeed, NativeError>,
+    ) {
+        let mut reader = clj_reader::Reader::new(text, &ReaderOpts::default());
+        reader.consume_whitespaces();
+        let seed = crate::reader::seed_load_gates(eval);
+        if let Ok(seed) = &seed {
+            reader.set_opts(&Self::read_forms_opts(eval, seed));
+        }
+        (reader, seed)
+    }
+
+    /// The synced base options for [`read_forms`](Self::read_forms):
+    /// the current namespace maps plus the seeded read gates (the
+    /// prologue installs them on the reader; the per-form loops
+    /// re-snapshot the data-reader fields from this base).
+    fn read_forms_opts(
+        eval: &mut Evaluator,
+        seed: &crate::reader::ReadGateSeed,
+    ) -> ReaderOpts {
         let cur = eval.current_ns_name();
         let mut opts = ReaderOpts {
             current_ns: cur.clone(),
@@ -415,17 +443,10 @@ impl Evaluator {
             opts.aliases = ns.alias_map();
             opts.refers = ns.refer_map();
         }
-        let mut reader = clj_reader::Reader::new(text, &opts);
-        reader.consume_whitespaces();
-        let seed = match crate::reader::seed_load_gates(eval) {
-            Ok(seed) => seed,
-            Err(cce) => return Err((reader, cce)),
-        };
         opts.read_eval = seed.read_eval;
         opts.suppress_read = seed.suppress_read;
         opts.resolver_bound = seed.resolver_bound;
-        reader.set_opts(&opts);
-        Ok((reader, opts))
+        opts
     }
 
     /// Read every form from a primed reader, resolving data

@@ -355,7 +355,7 @@ pub(crate) fn executing_wrap(
         data: None,
         cause: Some(Box::new(Throwable {
             id: cause_id,
-            class: cce.class.clone(),
+            class: cce.class,
             message: Some(Arc::from(cce.message.as_str())),
             data: cce.data.clone().map(Box::new),
             cause: None,
@@ -380,7 +380,7 @@ impl<'a> LiveReadHooks<'a> {
     fn lift(&mut self, e: NativeError) -> EvalReadError {
         EvalReadError::Failed(Throwable {
             id: self.eval.next_id(),
-            class: e.class.clone(),
+            class: e.class,
             message: Some(Arc::from(e.message.as_str())),
             data: e.data.clone().map(Box::new),
             cause: e.cause.clone().map(Box::new),
