@@ -51,8 +51,12 @@
 //!   `e-off-routes`, `e-cross`, `e-restored`).
 //!
 //! Each test boots its own evaluator (a fresh tap system and fresh
-//! agent pools per test), so deliveries never cross tests. The tap
-//! dispatcher is daemon (detached); agent tests end with
+//! agent pools per test), so deliveries never cross tests; the one
+//! test that offers before any tap exists (`tap_thread_first`) boots
+//! per assert, so queued items never cross forms either (the queue
+//! is FIFO and the dispatcher snapshots the registry at consumption
+//! time — a stale item would otherwise reach a later form's tap).
+//! The tap dispatcher is daemon (detached); agent tests end with
 //! `join_drainers`, so the suite exits cleanly.
 
 use std::sync::{Arc, Mutex};
@@ -521,9 +525,18 @@ fn tap_throw_safe() {
 #[test]
 fn tap_thread_first() {
     // t-tap->-ret, t-tap->-delivers, t-tap->-nil, t-tap->-false:
-    // `tap->` returns x AND delivers it.
+    // `tap->` returns x AND delivers it. Each assert boots a FRESH
+    // evaluator (a fresh tap system): the queue is FIFO and the
+    // dispatcher snapshots the registry at consumption time, so an
+    // item a form offers with no taps yet (the bare `(tap-> 5)`)
+    // could otherwise still be queued when a later form registers
+    // its tap — delivering the stale item to the wrong promise
+    // (`[:threaded 5]`, the Windows CI flake). The JVM races the
+    // same way (queue + take-then-`@tapset`); per-form isolation
+    // keeps the race out of the asserts.
     let mut eval = boot();
     assert_eq!(run_last(&mut eval, "(tap-> 5)"), "5");
+    let mut eval = boot();
     assert_eq!(
         run_last(
             &mut eval,
@@ -531,6 +544,7 @@ fn tap_thread_first() {
         ),
         "[:threaded :threaded]"
     );
+    let mut eval = boot();
     assert_eq!(
         run_last(
             &mut eval,
@@ -538,6 +552,7 @@ fn tap_thread_first() {
         ),
         "[nil [:got nil]]"
     );
+    let mut eval = boot();
     assert_eq!(
         run_last(
             &mut eval,
