@@ -178,7 +178,10 @@ miss to the `No method` throw (probe `m-has-default`:
   `m-type-unknown-kw`, `m-type-strip-visible`,
   `m-type-nonstr-meta`, `m-type-atom-ctor` (atom ctors carry
   meta without `IObj`, so the atom corner takes the
-  `print-simple` arm and prints `toString`).
+  `print-simple` arm and prints `toString`). `PendingSeq` is
+  excluded from the set even though it is a seq: it is
+  meta-invisible and unrebuildable, so strip-and-reinvoke
+  would loop — the `print-simple` arm terminates instead.
 - `Eduction` and the `IDeref` kinds delegate to the engine
   (known-fidelity follow-ups F1/F2, §2d — the defaults are
   still installed and user-overridable).
@@ -557,3 +560,8 @@ over port kinds, verified cell by cell against `m-table-*`.
   exact error is implementer latitude (degenerate, unpinned).
 - `*print-dup*` bound to non-booleans follows port truthiness
   (universal behavior, unpinned).
+- User methods on kinds nested inside scalar payloads
+  (tagged-literal forms, throwable data) do not fire: only
+  collection shapes recurse through `pr_on`; scalars render
+  whole through the engine. JVM-finer behavior, unpinned,
+  follow-up (documented in `printsys.rs`).

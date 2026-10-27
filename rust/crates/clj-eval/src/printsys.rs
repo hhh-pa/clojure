@@ -84,9 +84,11 @@ pub(crate) const TOK_IRECORD: &str = "clojure.lang.IRecord";
 pub(crate) const TOK_OBJECT: &str = "java.lang.Object";
 pub(crate) const TOK_MULTIFN: &str = "clojure.lang.MultiFn";
 
-/// The dispatch token for a value (`None` = the `nil` token).
-/// Exact per-kind strings (§1b) — coarse where JVM shapes unify
-/// (all lists, all throwables, all transients, every seq kind).
+/// The dispatch token for a value (`None` = actual nil only;
+/// unknown kinds fall through to `Object` per §1b's total
+/// fallthrough row). Exact per-kind strings (§1b) — coarse where
+/// JVM shapes unify (all lists, all throwables, all transients,
+/// every seq kind).
 pub(crate) fn token_of(v: &Value) -> Option<&'static str> {
     match v {
         Value::Nil => None,
@@ -94,9 +96,15 @@ pub(crate) fn token_of(v: &Value) -> Option<&'static str> {
         Value::HostType(h) => Some(host_token(h)),
         Value::Map(m) => Some(map_class_of(m)),
         Value::Set(s) => Some(set_class_of(s)),
-        _ => num_str_token(v)
-            .or_else(|| sym_coll_token(v))
-            .or_else(|| ref_token(v)),
+        // Total: future `Value` variants (S10's `Volatile`, S15's
+        // `Array`, ...) dispatch `Object`, whose default renders
+        // today's engine shape — never the nil method.
+        _ => Some(
+            num_str_token(v)
+                .or_else(|| sym_coll_token(v))
+                .or_else(|| ref_token(v))
+                .unwrap_or(TOK_OBJECT),
+        ),
     }
 }
 
