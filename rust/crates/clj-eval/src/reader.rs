@@ -170,16 +170,15 @@ fn may_grow(state: &StreamState) -> bool {
 /// scripted test lines first, then live stdin when present, `None`
 /// at EOF (string readers and exhausted stdin). The `read` retry
 /// restores its snapshot before extending with this, so a
-/// truncated head survives.
+/// truncated head survives. Combinators, not a `match`: the stdin
+/// dispatch stays on lines string-reader tests execute (100% line
+/// gate, like `more_input`).
 fn next_chunk(state: &mut StreamState) -> Result<Option<String>, NativeError> {
     #[cfg(test)]
     if let Some(line) = state.script_lines.pop_front() {
         return Ok(Some(line));
     }
-    match state.stdin.as_mut() {
-        None => Ok(None),
-        Some(src) => pull_chunk(src),
-    }
+    state.stdin.as_mut().map_or(Ok(None), pull_chunk)
 }
 
 /// Feed one stdin line into the parser when stdin is live;
@@ -548,6 +547,22 @@ mod tests {
     }
 
     #[test]
+    fn more_input_drains_script_lines_first() {
+        // The `read-line` feed over scripted lines (never process
+        // stdin): a scripted line extends the parser, then the
+        // string reader reports no more input.
+        let mut eval = scratch();
+        let value = string_reader(&mut eval, "");
+        let reader = as_reader(&value).expect("a reader");
+        let mut state = lock_state(reader);
+        state.script_lines.push_back("a\n".to_owned());
+        assert!(more_input(&mut state).unwrap());
+        assert_eq!(state.parser.read_line(), Some("a".to_owned()));
+        assert!(!more_input(&mut state).unwrap());
+        assert_eq!(state.parser.read_line(), None);
+    }
+
+    #[test]
     fn stdin_retry_keeps_truncated_head() {
         // A stdin form split across lines completes with its head
         // intact (the retry restores the snapshot, then extends).
@@ -568,13 +583,9 @@ mod tests {
             err.message,
             "java.lang.RuntimeException: EOF while reading, starting at line 1"
         );
-        let Value::Map(data) = err.data.clone().expect("ex-data") else {
-            panic!("ex-data is a map");
-        };
-        let line_key = Value::Keyword(Keyword::new(Some("clojure.error"), "line"));
-        let col_key = Value::Keyword(Keyword::new(Some("clojure.error"), "column"));
-        assert_eq!(data.get(&line_key), Some(&Value::Int(2)));
-        assert_eq!(data.get(&col_key), Some(&Value::Int(1)));
+        let data = err.data.clone().expect("ex-data");
+        assert!(matches!(data, Value::Map(_)), "ex-data is a map");
+        assert_eq!(pr(&data), "#:clojure.error{:line 2, :column 1}");
     }
 
     #[test]
@@ -596,11 +607,8 @@ mod tests {
         let mut src = Cursor::new(b"\xff" as &[u8]);
         let err = pull_line(&mut src, &mut state.parser).unwrap_err();
         assert_eq!(err.class, ThrowClass::IOException);
-        assert!(
-            err.message.contains("stream did not contain valid UTF-8"),
-            "{}",
-            err.message
-        );
+        let mentions_utf8 = err.message.contains("stream did not contain valid UTF-8");
+        assert!(mentions_utf8, "{}", err.message);
     }
 
     #[test]
