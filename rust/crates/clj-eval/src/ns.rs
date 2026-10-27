@@ -765,7 +765,7 @@ fn native_ns_resolve(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nati
 }
 
 fn native_resolve(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
-    check_arity("clojure.core/resolve", args, &[1])?;
+    check_arity("clojure.core/resolve", args, &[1, 2])?;
     let cur = eval.current_ns_name();
     let (env, sym_v) = if args.len() == 2 {
         (Some(&args[0]), &args[1])
