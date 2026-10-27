@@ -1,0 +1,169 @@
+mg-dash "a_b"
+mg-slash "a_SLASH_b"
+mg-dot "a.b"
+mg-colon "a_COLON_b"
+mg-plus "a_PLUS_b"
+mg-gt "a_GT_b"
+mg-lt "a_LT_b"
+mg-eq "a_EQ_b"
+mg-tilde "a_TILDE_b"
+mg-bang "a_BANG_b"
+mg-at "a_CIRCA_b"
+mg-hash "a_SHARP_b"
+mg-squote "a_SINGLEQUOTE_b"
+mg-dquote "a_DOUBLEQUOTE_b"
+mg-pct "a_PERCENT_b"
+mg-caret "a_CARET_b"
+mg-amp "a_AMPERSAND_b"
+mg-star "a_STAR_b"
+mg-bar "a_BAR_b"
+mg-lbrace "a_LBRACE_b"
+mg-rbrace "a_RBRACE_b"
+mg-lbrack "a_LBRACK_b"
+mg-rbrack "a_RBRACK_b"
+mg-qmark "a_QMARK_b"
+mg-bslash "a_BSLASH_b"
+mg-comma "a,b"
+mg-semi "a;b"
+mg-lparen "a(b"
+mg-rparen "a)b"
+mg-dollar "a$b"
+mg-under "a_b"
+mg-space "a b"
+mg-nl "a\nb"
+mg-backtick "a`b"
+mg-empty ""
+mg-plain "abcXYZ019"
+mg-multi "___SLASH__SLASH_.."
+mg-uni "aéb中😀"
+mg-nil ""
+mg-num "123"
+mg-kw "_COLON_a_SLASH_b"
+mg-sym a_SLASH_b
+mg-symtype true
+mg-strtype true
+mg-vec "_LBRACK_1 2_RBRACK_"
+mg-char "c"
+mg-ar0 THROW clojure.lang.ArityException|"Wrong number of args (0) passed to: clojure.core/munge"
+mg-ar2 THROW clojure.lang.ArityException|"Wrong number of args (2) passed to: clojure.core/munge"
+nm-basic "my.ns_name"
+nm-nodash "plain"
+nm-multi "a_b_c"
+nm-other "a/b:c+d"
+nm-empty ""
+nm-nil ""
+nm-sym "my_ns"
+nm-kw ":my_kw"
+nm-num "42"
+nm-type true
+nm-ar0 THROW clojure.lang.ArityException|"Wrong number of args (0) passed to: clojure.core/namespace-munge"
+nm-ar2 THROW clojure.lang.ArityException|"Wrong number of args (2) passed to: clojure.core/namespace-munge"
+dt-plain [a 1 b 2]
+dt-empty []
+dt-single [a]
+dt-odd [a 1 b]
+dt-vec [vec__386 1 a (clojure.core/nth vec__386 0 nil)]
+dt-map [map__393 m map__393 (if (clojure.core/instance? clojure.lang.ISeq map__393) (if (clojure.core/next map__393) (clojure.lang.PersistentArrayMap/createAsIfByAssoc (clojure.core/to-array map__393)) (if (clojure.core/seq map__393) (clojure.core/first map__393) clojure.lang.PersistentArrayMap/EMPTY)) map__393) a (clojure.core/get map__393 :x)]
+dt-keys [map__399 m map__399 (if (clojure.core/instance? clojure.lang.ISeq map__399) (if (clojure.core/next map__399) (clojure.lang.PersistentArrayMap/createAsIfByAssoc (clojure.core/to-array map__399)) (if (clojure.core/seq map__399) (clojure.core/first map__399) clojure.lang.PersistentArrayMap/EMPTY)) map__399) a (clojure.core/get map__399 :a)]
+dt-rest [vec__405 v seq__406 (clojure.core/seq vec__405) first__407 (clojure.core/first seq__406) seq__406 (clojure.core/next seq__406) a first__407 r seq__406]
+dt-as [vec__412 v a (clojure.core/nth vec__412 0 nil) all vec__412]
+dt-nested [vec__419 1 a (clojure.core/nth vec__419 0 nil) vec__422 (clojure.core/nth vec__419 1 nil) b (clojure.core/nth vec__422 0 nil)]
+dt-list-plain (a 1)
+dt-list-vec THROW java.lang.Exception|"Unsupported binding form: (a)"
+dt-nil nil
+dt-map-in {:a 1}
+dt-map-in2 THROW java.lang.Exception|"Unsupported binding form: :a"
+dt-entry-pat THROW java.lang.Exception|"Unsupported binding form: :a"
+dt-entry-syms [vec__459 5 a (clojure.core/nth vec__459 0 nil) b (clojure.core/nth vec__459 1 nil)]
+dt-str-in THROW java.lang.Exception|"Unsupported binding form: a"
+dt-kw-in THROW java.lang.IllegalArgumentException|"Don't know how to create ISeq from: clojure.lang.Keyword"
+dt-num-in THROW java.lang.IllegalArgumentException|"Don't know how to create ISeq from: java.lang.Long"
+dt-badform THROW java.lang.Exception|"Unsupported binding form: 5"
+dt-ar0 THROW clojure.lang.ArityException|"Wrong number of args (0) passed to: clojure.core/destructure"
+dt-ar2 THROW clojure.lang.ArityException|"Wrong number of args (2) passed to: clojure.core/destructure"
+sm-empty {}
+sm-nil {}
+sm-one-int 5
+sm-one-str "a"
+sm-one-map {:a 1}
+sm-one-kw :a
+sm-pair {"a" 1}
+sm-two {"a" 1, "b" 2}
+sm-dup {"a" 2}
+sm-list {:a 1}
+sm-str {\a \b}
+sm-set1 1
+sm-map {[:a 1] [:b 2]}
+sm-odd THROW java.lang.IllegalArgumentException|"Don't know how to create ISeq from: java.lang.Long"
+sm-odd-vec {1 2, :a 3}
+sm-odd-map {1 2, :a 3}
+sm-odd-entry {1 2, :a 3}
+sm-odd-nil {1 2}
+sm-even-vecs {[:a 1] [:b 2]}
+sm-one-vec [:a 1]
+sm-odd5 {1 2, 3 4, :k 9}
+sm-odd-elems {1 2, :a 3}
+sm-odd-vec3 THROW java.lang.IllegalArgumentException|"Vector arg to map conj must be a pair"
+sm-odd-vec1 THROW java.lang.IllegalArgumentException|"Vector arg to map conj must be a pair"
+sm-odd-str THROW java.lang.ClassCastException|"class java.lang.Character cannot be cast to class java.util.Map$Entry (java.lang.Character and java.util.Map$Entry are in module java.base of loader 'bootstrap')"
+sm-odd-kw THROW java.lang.IllegalArgumentException|"Don't know how to create ISeq from: clojure.lang.Keyword"
+sm-kw THROW java.lang.IllegalArgumentException|"Don't know how to create ISeq from: clojure.lang.Keyword"
+sm-num THROW java.lang.IllegalArgumentException|"Don't know how to create ISeq from: java.lang.Long"
+sm-ar0 THROW clojure.lang.ArityException|"Wrong number of args (0) passed to: clojure.core/seq-to-map-for-destructuring"
+sm-ar2 THROW clojure.lang.ArityException|"Wrong number of args (2) passed to: clojure.core/seq-to-map-for-destructuring"
+di-expand (do (clojure.core/defn foo [x] (clojure.core/inc x)) (clojure.core/alter-meta! (var foo) clojure.core/assoc :inline (clojure.core/fn foo [x] (clojure.core/seq (clojure.core/concat (clojure.core/list (quote clojure.core/inc)) (clojure.core/list x))))) (var foo))
+di-call 6
+di-inline-fn true
+di-inline-apply (clojure.core/inc 5)
+di-arglists ([x])
+di-ret true
+di-docstr "doc"
+di-malformed THROW clojure.lang.ExceptionInfo|"Call to clojure.core/fn did not conform to spec."
+di-nontemplate THROW java.lang.ClassCastException|"class clojure.lang.Symbol cannot be cast to class java.lang.Number (clojure.lang.Symbol is in unnamed module of loader 'app'; java.lang.Number is in module java.base of loader 'bootstrap')"
+di-ar0 THROW clojure.lang.ArityException|"Wrong number of args (0) passed to: clojure.core/definline"
+di-meta true
+di-marglists ([name & decl])
+se-expand1 (clojure.core/fn selector699 [map__9222__auto__] (clojure.core/let [{:select G__697} map__9222__auto__] G__697))
+se-expand2 (clojure.core/fn selector707 [map__9222__auto__] (clojure.core/let [{:select G__704, :missing G__705} map__9222__auto__] (clojure.core/some-vals {:select G__704, :missing G__705})))
+se-fn true
+se-select {:a 1}
+se-all {:a 1, :b 2}
+se-excess {:b 2}
+se-multi {:select {:a 1}, :excess {:b 2}}
+se-bareselect {}
+se-missing nil
+se-nonmap THROW java.lang.IllegalArgumentException|"expected a map"
+se-nodirs THROW java.lang.IllegalArgumentException|"form must contain at least one of :select :excess :missing :all"
+se-ar0 THROW clojure.lang.ArityException|"Wrong number of args (0) passed to: clojure.core/selector"
+se-meta true
+se-marglists ([m])
+uq-resolve #'clojure.core/unquote
+uq-resolve-s #'clojure.core/unquote-splicing
+uq-bound false
+uq-bound-s false
+uq-name {:name unquote}
+uq-nodecl true
+uq-varget #object[clojure.lang.Var$Unbound 0x5b5c0057 "Unbound: #'clojure.core/unquote"]
+uq-eval THROW java.lang.IllegalStateException|"Attempting to call unbound fn: #'clojure.core/unquote"
+wv-expand (clojure.core/let [a (.. clojure.lang.Var create setDynamic)] (. clojure.lang.Var (clojure.core/pushThreadBindings (clojure.core/hash-map a 1))) (try (var-get a) (finally (. clojure.lang.Var (clojure.core/popThreadBindings)))))
+wv-scope [1 2 true]
+wv-set 5
+wv-body :done
+wv-empty 42
+wv-nested [1 2 1]
+wv-seq [9 1]
+wv-pop false
+wv-noleak nil
+wv-throw :caught
+wv-throwpop false
+wv-unbound #object[clojure.lang.Var$Unbound 0x659a2455 "Unbound: #<Var: --unnamed-->"]
+wv-meta {:ns nil, :name nil}
+wv-str "#<Var: --unnamed-->"
+wv-pr "#<Var: --unnamed-->"
+wv-preds [true true]
+wv-altermeta :x
+wv-init-order :never
+wv-nonvec THROW java.lang.IllegalArgumentException|"with-local-vars requires a vector for its binding in user:L"
+wv-odd THROW java.lang.IllegalArgumentException|"with-local-vars requires an even number of forms in binding vector in user:L"
+wv-meta-m true
+wv-marglists ([name-vals-vec & body])
