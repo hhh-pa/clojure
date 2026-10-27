@@ -445,4 +445,31 @@ mod tests {
     fn collection_wildcard_panics() {
         let _ = collection_type_name(&Value::Int(1));
     }
+
+    #[test]
+    fn host_values_name_their_class() {
+        // Port-defined types report their class name in compare
+        // errors (like the JVM's `ClassCastException` operands).
+        let def = Arc::new(crate::HostDef {
+            name: Arc::from("user.T"),
+            kind: crate::HostKind::Type,
+            fields: Vec::new(),
+            methods: std::collections::HashMap::new(),
+            interfaces: Vec::new(),
+            prefix: None,
+            impl_ns: None,
+            sigs: std::collections::HashMap::new(),
+            takes_this: true,
+        });
+        let v = Value::HostType(Arc::new(crate::HostVal::Inst(crate::HostInst {
+            def,
+            content: crate::new_map(),
+            meta: None,
+        })));
+        assert_eq!(type_name(&v), "user.T");
+        assert_eq!(
+            message_of(&v, &Value::Int(1)),
+            "Cannot compare user.T to Long"
+        );
+    }
 }

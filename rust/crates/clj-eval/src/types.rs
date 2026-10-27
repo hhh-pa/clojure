@@ -990,3 +990,39 @@ fn native_proxy(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErr
         meta: None,
     }))))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_def() -> Arc<HostDef> {
+        Arc::new(HostDef {
+            name: Arc::from("user.T"),
+            kind: HostKind::Type,
+            fields: vec![Arc::from("x")],
+            methods: HashMap::new(),
+            interfaces: Vec::new(),
+            prefix: None,
+            impl_ns: None,
+            sigs: HashMap::new(),
+            takes_this: true,
+        })
+    }
+
+    #[test]
+    fn field_hit_on_descriptor_is_none() {
+        // Descriptors never reach `field_hit` (`native_meth`
+        // misses first); the arm keeps the match total.
+        let def = test_def();
+        assert_eq!(field_hit(&def, &HostVal::Def(def.clone()), "x"), None);
+    }
+
+    #[test]
+    fn object_fallback_on_descriptor_misses() {
+        // Likewise, the descriptor arm of `object_fallback` is
+        // total-only — `native_meth` pre-empts it.
+        let def = test_def();
+        let err = object_fallback(&HostVal::Def(def), "m", "user.T").unwrap_err();
+        assert_eq!(err.class, ThrowClass::IllegalArgumentException);
+    }
+}

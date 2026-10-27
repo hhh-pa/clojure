@@ -130,14 +130,13 @@ fn proto_ref(eval: &mut Evaluator, v: &Value) -> Result<(u64, Symbol, Map), Nati
 }
 
 /// Resolve a symbol to its var id plus current root (missing is the
-/// stock unresolvable error).
+/// stock unresolvable error). A single `lookup_in` (not
+/// resolve-then-lookup) so a concurrent unmap cannot strand the
+/// second step.
 fn resolve_root(eval: &mut Evaluator, sym: &Symbol) -> Result<(u64, Value), NativeError> {
     let cur = eval.current_ns_name();
-    match eval.registry.resolve_in(&cur, sym) {
-        Some(q) => match eval.registry.lookup(&q) {
-            Some(id) => Ok((id, eval.deref_var(id, sym))),
-            None => Err(unresolvable(sym)),
-        },
+    match eval.registry.lookup_in(&cur, sym) {
+        Some(id) => Ok((id, eval.deref_var(id, sym))),
         None => Err(unresolvable(sym)),
     }
 }
@@ -211,10 +210,11 @@ fn extend_target(eval: &mut Evaluator, v: &Value) -> Result<String, NativeError>
 /// Resolve an unqualified extension symbol (split from
 /// [`extend_target`] for the complexity budget): a port descriptor
 /// names itself; a string names its class (the core `String` /
-/// `Long` / … vars); any other bound non-type is not a class; an
-/// unresolvable name is taken as a host class (`String` — unless
-/// already dotted, like `clojure.lang.IPersistentMap` or `user.PD`,
-/// which rides as-is).
+/// `Long` / … vars); any other bound non-type is not a class; a
+/// dotted name rides as-is (like `clojure.lang.IPersistentMap` or
+/// `user.PD`); any other unresolvable name stays unresolvable (a
+/// typo must fail, not extend a phantom `java.lang` class — the
+/// bound class-name vars cover the host values that exist).
 fn extend_sym(eval: &mut Evaluator, sym: &Symbol, v: &Value) -> Result<String, NativeError> {
     match resolve_root(eval, sym) {
         Ok((_, Value::HostType(h))) => match h.as_ref() {
@@ -223,11 +223,11 @@ fn extend_sym(eval: &mut Evaluator, sym: &Symbol, v: &Value) -> Result<String, N
         },
         Ok((_, Value::Str(s))) => Ok(s.to_string()),
         Ok(_) => Err(not_a_type(v)),
-        Err(_) => {
+        Err(e) => {
             if sym.name().contains('.') {
                 Ok(sym.name().to_owned())
             } else {
-                Ok(format!("java.lang.{}", sym.name()))
+                Err(e)
             }
         }
     }
@@ -310,9 +310,8 @@ fn native_extend(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeEr
     };
     let (id, sym, _) = proto_ref(eval, &args[0])?;
     let type_name = extend_target(eval, &args[1])?;
-    Ok(Value::Map(install_impls(
-        eval, id, &sym, &type_name, &methods,
-    )?))
+    let next = install_impls(eval, id, &sym, &type_name, &methods)?;
+    Ok(Value::Map(next))
 }
 
 /// Read one impl cell of a type entry (split for budget): total
@@ -624,4 +623,109 @@ pub(crate) fn install_impls(
         st.root = Some(Value::Map(next.clone()));
     });
     Ok(next)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn map_with(pairs: Vec<(Value, Value)>) -> Map {
+        let mut m = new_map();
+        for (k, v) in pairs {
+            m = m.insert(k, v);
+        }
+        m
+    }
+
+    #[test]
+    #[should_panic(expected = "protocols always carry sigs")]
+    fn proto_parts_without_sigs_panics() {
+        let m = map_with(vec![
+            (on_key(), Value::Str(Arc::from("X"))),
+            (impls_key(), Value::Map(new_map())),
+        ]);
+        let _ = proto_parts(&m);
+    }
+
+    #[test]
+    #[should_panic(expected = "protocols always carry impls")]
+    fn proto_parts_without_impls_panics() {
+        let m = map_with(vec![
+            (on_key(), Value::Str(Arc::from("X"))),
+            (sigs_key(), Value::Map(new_map())),
+        ]);
+        let _ = proto_parts(&m);
+    }
+
+    #[test]
+    #[should_panic(expected = "protocols always carry on")]
+    fn proto_parts_without_on_panics() {
+        let m = map_with(vec![
+            (sigs_key(), Value::Map(new_map())),
+            (impls_key(), Value::Map(new_map())),
+        ]);
+        let _ = proto_parts(&m);
+    }
+
+    #[test]
+    #[should_panic(expected = "protocols always carry on")]
+    fn proto_on_without_on_panics() {
+        let _ = proto_on(&new_map());
+    }
+
+    #[test]
+    #[should_panic(expected = "protocols always carry interface")]
+    fn proto_interface_without_key_panics() {
+        let _ = proto_interface(&new_map());
+    }
+
+    #[test]
+    #[should_panic(expected = "protocols always carry interface")]
+    fn proto_interface_with_instance_panics() {
+        let def = Arc::new(clj_value::HostDef {
+            name: Arc::from("user.T"),
+            kind: clj_value::HostKind::Type,
+            fields: Vec::new(),
+            methods: std::collections::HashMap::new(),
+            interfaces: Vec::new(),
+            prefix: None,
+            impl_ns: None,
+            sigs: std::collections::HashMap::new(),
+            takes_this: true,
+        });
+        let inst = Value::HostType(Arc::new(clj_value::HostVal::Inst(clj_value::HostInst {
+            def,
+            content: new_map(),
+            meta: None,
+        })));
+        let m = map_with(vec![(iface_key(), inst)]);
+        let _ = proto_interface(&m);
+    }
+
+    #[test]
+    fn merge_impls_defaults_missing_tables() {
+        // A shape-violating map still merges (defensive totals —
+        // `install_impls` only passes validated shapes, so
+        // integration tests never reach these arms).
+        let merged = merge_impls(&new_map(), "C", &new_map());
+        let s = pr_of(&Value::Map(merged));
+        assert!(s.contains("\"C\""), "merged entry present: {s}");
+    }
+
+    #[test]
+    fn install_impls_rejects_non_protocol_root() {
+        // The under-lock re-validation: a var whose root is not a
+        // protocol errors instead of installing (covers the TOCTOU
+        // arm without threads — no interleaving can be forced
+        // single-threaded through `__extend*`).
+        let mut eval = crate::boot();
+        eval.eval_source("(def P 5)").unwrap();
+        let sym = Symbol::new(None, "P");
+        let cur = eval.current_ns_name();
+        let q = eval.registry.resolve_in(&cur, &sym).unwrap();
+        let id = eval.registry.lookup(&q).unwrap();
+        let err = install_impls(&mut eval, id, &sym, "C", &new_map()).unwrap_err();
+        assert_eq!(err.class, ThrowClass::IllegalArgumentException);
+        assert_eq!(err.message, "5 is not a protocol");
+    }
 }

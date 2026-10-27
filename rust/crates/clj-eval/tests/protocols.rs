@@ -617,3 +617,299 @@ fn handbuilt_maps_are_not_protocols() {
         "java.lang.IllegalArgumentException | Not an interface: Q"
     );
 }
+
+#[test]
+fn extend_by_symbol_reference() {
+    // `__extend*` also takes a quoted protocol symbol (resolved at
+    // call time); resolving to a non-protocol (or nothing) is the
+    // stock error.
+    let mut eval = boot();
+    prelude(&mut eval);
+    assert_eq!(
+        run(
+            &mut eval,
+            "(do (clojure.core/__extend* 'Greet 'String {:greet (fn [this] :sym)}) (greet \"x\"))"
+        ),
+        ":sym"
+    );
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(clojure.core/__extend* 'PD 'String {:greet (fn [this] 1)})"
+        ),
+        "java.lang.IllegalArgumentException | PD is not a protocol"
+    );
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(clojure.core/__extend* 'Nope 'String {:greet (fn [this] 1)})"
+        ),
+        "java.lang.RuntimeException | Unable to resolve symbol: Nope in this context"
+    );
+    // A qualified name through an unknown namespace misses the
+    // same way.
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(clojure.core/__extend* 'foo/Nope 'String {:greet (fn [this] 1)})"
+        ),
+        "java.lang.RuntimeException | Unable to resolve symbol: foo/Nope in this context"
+    );
+}
+
+#[test]
+fn protocol_native_guards() {
+    // Direct `__protocol*` misuse fails the casts, and only an
+    // interface var builds a protocol.
+    let mut eval = boot();
+    prelude(&mut eval);
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(clojure.core/__protocol* 5 (var Greet-interface))"
+        ),
+        "java.lang.ClassCastException | class java.lang.Long cannot be cast to class clojure.lang.IPersistentMap (java.lang.Long is in module java.base of loader 'bootstrap'; clojure.lang.IPersistentMap is in unnamed module of loader 'app')"
+    );
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(do (def p (PD. 1)) (clojure.core/__protocol* {} (var p)))"
+        ),
+        "java.lang.IllegalArgumentException | Not an interface: user/p"
+    );
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(do (def n 5) (clojure.core/__protocol* {} (var n)))"
+        ),
+        "java.lang.IllegalArgumentException | Not an interface: user/n"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(clojure.core/__protocol* {} 5)"),
+        "java.lang.ClassCastException | class java.lang.Long cannot be cast to class clojure.lang.Var (java.lang.Long is in module java.base of loader 'bootstrap'; clojure.lang.Var is in unnamed module of loader 'app')"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(clojure.core/__protocol* {} (var PD))"),
+        "java.lang.IllegalArgumentException | Not an interface: user.PD"
+    );
+}
+
+#[test]
+fn extend_target_shapes() {
+    // Extension targets beyond plain symbols: slash-qualified
+    // names, descriptor values, and the `not a type` rejections.
+    let mut eval = boot();
+    prelude(&mut eval);
+    assert_eq!(
+        run(
+            &mut eval,
+            "(do (clojure.core/__extend* 'Greet 'user/PD {:greet (fn [this] :ns)}) (greet (PD. 1)))"
+        ),
+        ":ns"
+    );
+    assert_eq!(
+        run(
+            &mut eval,
+            "(do (clojure.core/__extend* 'Greet PD {:greet (fn [this] :dv)}) (greet (PD. 2)))"
+        ),
+        ":dv"
+    );
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(clojure.core/__extend* 'Greet 5 {:greet (fn [this] 1)})"
+        ),
+        "java.lang.IllegalArgumentException | Not a type: 5"
+    );
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(do (def p (PD. 1)) (clojure.core/__extend* 'Greet 'p {:greet (fn [this] 1)}))"
+        ),
+        "java.lang.IllegalArgumentException | Not a type: p"
+    );
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(do (def n 5) (clojure.core/__extend* 'Greet 'n {:greet (fn [this] 1)}))"
+        ),
+        "java.lang.IllegalArgumentException | Not a type: n"
+    );
+    // An unresolvable type name stays unresolvable (a typo must
+    // fail, not extend a phantom `java.lang` class).
+    assert_eq!(
+        uncaught(&mut eval, "(extend-type NoSuchType Greet (greet [this] 1))"),
+        "java.lang.RuntimeException | Unable to resolve symbol: NoSuchType in this context"
+    );
+}
+
+#[test]
+fn extend_native_guards() {
+    // Non-method keys in the methods map are skipped, and the
+    // methods arg must be a map.
+    let mut eval = boot();
+    prelude(&mut eval);
+    assert_eq!(
+        run(
+            &mut eval,
+            "(map? (clojure.core/__extend* 'Greet 'String {5 6}))"
+        ),
+        "true"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(clojure.core/__extend* 'Greet 'String 5)"),
+        "java.lang.ClassCastException | class java.lang.Long cannot be cast to class clojure.lang.IPersistentMap (java.lang.Long is in module java.base of loader 'bootstrap'; clojure.lang.IPersistentMap is in unnamed module of loader 'app')"
+    );
+}
+
+#[test]
+fn extend_instance_value_is_not_a_type() {
+    // An instance *value* in type position names no class (its
+    // print form carries the deterministic identity digits).
+    let mut eval = boot();
+    prelude(&mut eval);
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(clojure.core/__extend* 'Greet (PD. 1) {:greet (fn [this] 1)})"
+        ),
+        "java.lang.IllegalArgumentException | Not a type: #object[user.PD 0xf0ca55f6 \"user.PD@f0ca55f6\"]"
+    );
+}
+
+#[test]
+fn partial_extension_misses() {
+    // Declared-but-unextended methods miss to the no-impl error:
+    // both the missing-method and the missing-arity shapes.
+    let mut eval = boot();
+    prelude(&mut eval);
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(do (extend-protocol Greet Long (greet [this] :g)) (greet2 1 2))"
+        ),
+        "java.lang.IllegalArgumentException | No implementation of method: :greet2 of protocol: #'user/Greet found for class: java.lang.Long"
+    );
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(do (defprotocol P2 (m [this] [this x])) (extend-type Long P2 (m [this] :zero)) (m 1 2))"
+        ),
+        "java.lang.IllegalArgumentException | No implementation of method: :m of protocol: #'user/P2 found for class: java.lang.Long"
+    );
+}
+
+#[test]
+fn vector_and_broken_arglists() {
+    // `:arglists` tolerate vectors (JVM shape is lists); broken
+    // shapes degrade to the arity error, never a panic.
+    let mut eval = boot();
+    prelude(&mut eval);
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(do (def PV (clojure.core/__protocol* '{:m {:arglists [[this]]}} (var Greet-interface))) (clojure.core/__protocol_invoke* (var PV) \"m\" [1]))"
+        ),
+        "java.lang.IllegalArgumentException | No implementation of method: :m of protocol: #'user/PV found for class: java.lang.Long"
+    );
+    for sigs in ["'{:m {:arglists 5}}", "'{:m 5}", "'{:m {:arglists (5)}}"] {
+        assert_eq!(
+            uncaught(
+                &mut eval,
+                &format!(
+                    "(do (def PB (clojure.core/__protocol* {sigs} (var Greet-interface))) (clojure.core/__protocol_invoke* (var PB) \"m\" [1]))"
+                )
+            ),
+            "java.lang.IllegalArgumentException | No single method: m of interface: user.Greet found for function: m of protocol: PB"
+        );
+    }
+}
+
+#[test]
+fn protocol_invoke_guards() {
+    // Direct `__protocol_invoke*` misuse fails the casts, and an
+    // empty call vector fails arity.
+    let mut eval = boot();
+    prelude(&mut eval);
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(clojure.core/__protocol_invoke* (var Greet) 5 [\"x\"])"
+        ),
+        "java.lang.ClassCastException | class java.lang.Long cannot be cast to class java.lang.String (java.lang.Long and java.lang.String are in module java.base of loader 'bootstrap')"
+    );
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(clojure.core/__protocol_invoke* (var Greet) \"greet\" \"x\")"
+        ),
+        "java.lang.ClassCastException | class java.lang.String cannot be cast to class clojure.lang.IPersistentVector (java.lang.String is in module java.base of loader 'bootstrap'; clojure.lang.IPersistentVector is in unnamed module of loader 'app')"
+    );
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(clojure.core/__protocol_invoke* (var Greet) \"greet\" [])"
+        ),
+        "clojure.lang.ArityException | Wrong number of args (0) passed to: clojure.core/__protocol_invoke*"
+    );
+}
+
+#[test]
+fn proxy_inline_protocol_dispatch() {
+    // A proxy claiming a protocol dispatches from its own table
+    // (bodies exclude `this`, like every proxy call).
+    let mut eval = boot();
+    prelude(&mut eval);
+    assert_eq!(
+        run(
+            &mut eval,
+            "(do (defprotocol PP (pm [this])) (def px (proxy [Object PP] [] (pm [] :px))) (pm px))"
+        ),
+        ":px"
+    );
+}
+
+#[test]
+fn extends_guards() {
+    // `extends?` takes a class: instances and scalars fail the cast.
+    let mut eval = boot();
+    prelude(&mut eval);
+    assert_eq!(
+        uncaught(&mut eval, "(extends? Greet (PD. 1))"),
+        "java.lang.ClassCastException | class user.PD cannot be cast to class java.lang.Class (user.PD is in unnamed module of loader 'app'; java.lang.Class is in module java.base of loader 'bootstrap')"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(extends? Greet 5)"),
+        "java.lang.ClassCastException | class java.lang.Long cannot be cast to class java.lang.Class (java.lang.Long and java.lang.Class are in module java.base of loader 'bootstrap')"
+    );
+}
+
+#[test]
+fn extends_ipm_fallback_for_records() {
+    // A record descriptor answers through the `IPersistentMap`
+    // entry when it has no direct extension.
+    let mut eval = boot();
+    prelude(&mut eval);
+    assert_eq!(
+        run(
+            &mut eval,
+            "(do (extend-protocol Adder2 clojure.lang.IPersistentMap (add2 [this x y] 0)) (extends? Adder2 PR))"
+        ),
+        "true"
+    );
+}
+
+#[test]
+fn invoke_on_unclaimed_instance() {
+    // An instance whose type claims nothing misses to the no-impl
+    // error naming its class.
+    let mut eval = boot();
+    prelude(&mut eval);
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(do (deftype Q2 [a]) (extend-protocol Greet Long (greet [this] :g)) (greet (Q2. 1)))"
+        ),
+        "java.lang.IllegalArgumentException | No implementation of method: :greet of protocol: #'user/Greet found for class: user.Q2"
+    );
+}

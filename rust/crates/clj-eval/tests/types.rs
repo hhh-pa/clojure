@@ -724,6 +724,65 @@ fn rec_hash_code_matches_map() {
 }
 
 #[test]
+fn rec_hash_code_with_host_fields() {
+    // A record field holding a host value hashes through the
+    // value's own `hashCode` (instance, nested record, and
+    // descriptor shapes — deterministic ints, pinned exactly).
+    let mut eval = boot();
+    assert_eq!(
+        run(
+            &mut eval,
+            "(do (defrecord R [x]) (deftype P [a]) (.hashCode (R. (P. 1))))"
+        ),
+        "1521678668"
+    );
+    assert_eq!(
+        run(
+            &mut eval,
+            "(do (defrecord R [x]) (defrecord P [a]) (.hashCode (R. (P. 1))))"
+        ),
+        "7488"
+    );
+    assert_eq!(
+        run(
+            &mut eval,
+            "(do (defrecord R [x]) (deftype P [a]) (.hashCode (R. P)))"
+        ),
+        "-230409339"
+    );
+}
+
+#[test]
+fn host_values_in_sets() {
+    // Duplicate checks compare host values by `equiv`: distinct
+    // instances coexist, while equal records collapse (like the
+    // JVM's value semantics).
+    let mut eval = boot();
+    assert_eq!(
+        run(
+            &mut eval,
+            "(do (deftype P [a]) (deftype Q [b]) (count (hash-set (P. 1) (Q. 2))))"
+        ),
+        "2"
+    );
+    assert_eq!(
+        run(
+            &mut eval,
+            "(do (defrecord R [x]) (count (hash-set (R. 1) (R. 1))))"
+        ),
+        "1"
+    );
+    // Set literals duplicate-check through `equiv` too.
+    assert_eq!(
+        run(
+            &mut eval,
+            "(do (deftype P [a]) (deftype Q [b]) (count #{(P. 1) (Q. 2)}))"
+        ),
+        "2"
+    );
+}
+
+#[test]
 fn rec_hash_symbol_vectors() {
     // The formula's symbol half answers the oracle's ints
     // (`l-hash-strname`, `l-hash-symname` — equal by `=`).
@@ -1297,6 +1356,17 @@ fn stage1_define_type_guards() {
     assert_eq!(
         uncaught(&mut eval, "(definterface Adder (add [x y])) (Adder.)"),
         "java.lang.IllegalArgumentException | No matching ctor found for class user.Adder"
+    );
+}
+
+#[test]
+fn stage1_unresolvable_interface() {
+    // An unresolvable interface name stays unresolvable (not a
+    // type-shape error).
+    let mut eval = boot();
+    assert_eq!(
+        uncaught(&mut eval, "(deftype T [] NoSuchIface (m [this] 1))"),
+        "java.lang.RuntimeException | Unable to resolve symbol: NoSuchIface in this context"
     );
 }
 

@@ -1658,8 +1658,8 @@ fn plain_equals_sets(s: &Set, o: &Set) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{Value, find_map_dup, find_set_dup, new_map, new_set};
-    use crate::{Keyword, Symbol};
+    use super::{Value, find_map_dup, find_set_dup, new_map, new_set, plain_equals};
+    use crate::{HostDef, HostInst, HostKind, HostVal, Keyword, Symbol};
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
     use std::sync::Arc;
@@ -2294,5 +2294,64 @@ mod tests {
         // so scalars never arrive here (only a dispatch bug could).
         let mut h = DefaultHasher::new();
         super::hash_value_rest(&Value::Nil, &mut h);
+    }
+
+    fn host_def(kind: HostKind) -> Arc<HostDef> {
+        Arc::new(HostDef {
+            name: Arc::from("user.T"),
+            kind,
+            fields: Vec::new(),
+            methods: std::collections::HashMap::new(),
+            interfaces: Vec::new(),
+            prefix: None,
+            impl_ns: None,
+            sigs: std::collections::HashMap::new(),
+            takes_this: true,
+        })
+    }
+
+    fn host_inst(def: &Arc<HostDef>) -> Value {
+        Value::HostType(Arc::new(HostVal::Inst(HostInst {
+            def: def.clone(),
+            content: new_map(),
+            meta: None,
+        })))
+    }
+
+    #[test]
+    fn with_meta_on_host_values() {
+        // Instances take (or clear) metadata; descriptors ignore it
+        // (no caller passes host values today — pinned directly).
+        let def = host_def(HostKind::Record);
+        let meta = new_map();
+        let out = host_inst(&def).with_meta(Some(meta.clone()));
+        assert_eq!(out.meta(), Some(&meta));
+        let desc = Value::HostType(Arc::new(HostVal::Def(def)));
+        assert_eq!(desc.with_meta(Some(meta)).meta(), None);
+    }
+
+    #[test]
+    fn set_dup_check_compares_host_values() {
+        // Duplicate checks compare host values by `equiv`:
+        // distinct instances pass, equal records report (only
+        // reachable with hand-built values — literals never carry
+        // host values — so pinned directly).
+        let typ = host_def(HostKind::Type);
+        let rec = host_def(HostKind::Record);
+        assert_eq!(find_set_dup(&[host_inst(&typ), host_inst(&rec)]), None);
+        let items = [host_inst(&rec), host_inst(&rec)];
+        assert_eq!(find_set_dup(&items), Some(&items[1]));
+    }
+
+    #[test]
+    fn plain_equals_on_host_pairs() {
+        // `.equals` follows `host_pair_eq`: same-type records with
+        // equal content hold; distinct non-records never do (only
+        // reachable through tagged-literal forms, so pinned
+        // directly).
+        let rec = host_def(HostKind::Record);
+        assert!(plain_equals(&host_inst(&rec), &host_inst(&rec)));
+        let typ = host_def(HostKind::Type);
+        assert!(!plain_equals(&host_inst(&typ), &host_inst(&typ)));
     }
 }

@@ -1126,6 +1126,47 @@ mod tests {
     }
 
     #[test]
+    fn java_debug_host_values() {
+        // Port-defined types: descriptors render their name
+        // (`interface ` prefixed for interfaces); instances render
+        // the `toString` fallback.
+        use super::java_debug;
+        fn def(kind: crate::HostKind) -> std::sync::Arc<crate::HostDef> {
+            Arc::new(crate::HostDef {
+                name: Arc::from("user.T"),
+                kind,
+                fields: Vec::new(),
+                methods: std::collections::HashMap::new(),
+                interfaces: Vec::new(),
+                prefix: None,
+                impl_ns: None,
+                sigs: std::collections::HashMap::new(),
+                takes_this: true,
+            })
+        }
+        let d = def(crate::HostKind::Type);
+        assert_eq!(
+            java_debug(&Value::HostType(Arc::new(crate::HostVal::Def(d.clone())))),
+            "user.T"
+        );
+        let i = def(crate::HostKind::Interface);
+        assert_eq!(
+            java_debug(&Value::HostType(Arc::new(crate::HostVal::Def(i)))),
+            "interface user.T"
+        );
+        let inst = Value::HostType(Arc::new(crate::HostVal::Inst(crate::HostInst {
+            def: d,
+            content: crate::new_map(),
+            meta: None,
+        })));
+        let s = java_debug(&inst);
+        assert!(
+            s.starts_with("user.T@") && s.len() > "user.T@".len(),
+            "instance fallback shape, got {s}"
+        );
+    }
+
+    #[test]
     fn print_alias_matches_pr_to_string() {
         use super::print;
         let v = Value::Vector(crate::Vector::from_vec(vec![Value::Int(1)]));

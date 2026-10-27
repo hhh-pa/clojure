@@ -831,6 +831,13 @@ impl SharedRegistry {
         self.lock().registry.lookup(sym)
     }
 
+    /// [`lookup`](Self::lookup) against an explicit namespace (the
+    /// analyzer passes the `*ns*`-synced name).
+    #[must_use]
+    pub fn lookup_in(&self, ns_name: &str, sym: &Symbol) -> Option<u64> {
+        self.lock().registry.lookup_in(ns_name, sym)
+    }
+
     /// Intern (find or create) a var (see
     /// [`NamespaceRegistry::intern`]).
     pub fn intern(&self, sym: &Symbol) -> u64 {

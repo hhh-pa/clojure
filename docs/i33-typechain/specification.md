@@ -140,7 +140,7 @@ type system; multimethods dispatch over both):
   ClassNotFoundException), so the port's constructable
   descriptor is a documented divergence.
 - **Stage-1 implementation deltas** (found while building; all
-  pinned in `rust/crates/clj-eval/tests/types.rs`, 80 tests):
+  pinned in `rust/crates/clj-eval/tests/types.rs`, 84 tests):
   `parse-type-specs` kept the interface list across method specs
   (the recur slot was `triples`, wiping ifaces); proxy fns run
   without `this` (`HostDef::takes_this == false`, honored by both
@@ -189,7 +189,7 @@ type system; multimethods dispatch over both):
   path reuses the loom-modelled var-alter lock (`loom_var_lock.rs`
   covers the primitive; the merge is pure under it).
 - **Stage-2 implementation deltas** (found while building; all
-  pinned in `rust/crates/clj-eval/tests/protocols.rs`, 41 tests):
+  pinned in `rust/crates/clj-eval/tests/protocols.rs`, 54 tests):
   `:arglists` are lists (JVM shape), not vectors; the `extend`
   map form stores bare fns (one per method — each covers every
   declared arity, dispatching itself) with keyword keys (macros
@@ -201,11 +201,22 @@ type system; multimethods dispatch over both):
   string in type position names its class (the core class-name
   vars); class-name vars moved one stage-1 rejection from
   unresolvable to the accurate `Not an interface` (a bound
-  non-descriptor IS a type); a later `extend-type` replaces the
-  inline impl (JVM order — registry reads before the instance
-  table); multi-argvec sigs (`(m [this] [this x])`) parse to all
-  leading vectors; `class` stays out of scope (oracle `a-fnclass`
-  untestable until type reflection lands).
+  non-descriptor IS a type — except instances, which are not
+  types at all and keep `Not a type`); a later `extend-type`
+  replaces the inline impl (JVM order — registry reads before
+  the instance table); multi-argvec sigs (`(m [this] [this x])`)
+  parse to all leading vectors; `class` stays out of scope
+  (oracle `a-fnclass` untestable until type reflection lands).
+- **Review-driven deltas (rounds 1–2)** (all pinned alongside
+  the above): a
+  protocol map is only valid with the full constructor shape
+  (`:on`, `:sigs`, `:impls`, and the `:interface` descriptor —
+  partial hand-built maps are `not a protocol`, never a dispatch
+  panic); dot-method calls on descriptors miss with the
+  field/method error (descriptors carry no instance methods);
+  unresolvable non-dotted type names stay unresolvable (no
+  phantom `java.lang` extension — the bound class-name vars
+  cover the host values that exist).
 - **Stage 3** (`multi.rs` + `MULTI_NATIVES`,
   `Value::MultiFn`): `defmulti` (dispatch fn, default, hierarchy
   slot reserved), `defmethod` (arities incl. multi-arity),
