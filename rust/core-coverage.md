@@ -4,7 +4,7 @@ The complete inventory of `clojure.core` in this port: every var,
 its conformance state, and — for exclusions — why it is excluded.
 If a var is not listed here, that is a file bug, not a silent gap.
 
-- **447 vars: 429 implemented, 2 divergent, 16 out of scope,
+- **462 vars: 444 implemented, 2 divergent, 16 out of scope,
   0 planned.** The port reports Clojure `1.13.0-alpha9`
   (`clojure-version`).
 - **Status meanings.** `implemented` — resolves in the booted core
@@ -586,8 +586,14 @@ slices' rows into this table).
 | `NaN?` | implemented | core.rs native_nanp (`Double` payload; other numbers false; nil NPE; else CCE `Number`); predicates.rs nan_rows |
 | `any?` | implemented | core.rs pred1 constantly true; predicates.rs any_rows |
 | `delay?` | implemented | core.rs pred1 over `Value::Delay`; predicates.rs delay_rows |
+| `disj!` | implemented | S5: coll.rs native_disj_bang (1-arity identity; `ITransientSet` cast); zero_oos_s5_state.rs disj_bang_rows |
+| `error-handler` | implemented | S5: concurrency.rs cell read (fn or nil); zero_oos_s5_state.rs error_handler_rows |
+| `error-mode` | implemented | S5: concurrency.rs cell read (`:fail`/`:continue`); zero_oos_s5_state.rs error_handler_rows |
 | `ffirst` | implemented | core.clj `(first (first x))`; predicates.rs ffirst_rows |
 | `find-keyword` | implemented | core.rs 1-or-2-arity native (no table — well-shaped lookups build); predicates.rs find_keyword_rows |
+| `find-var` | implemented | S5: ns.rs interned-only lookup (live nss; IAE on missing ns/unqualified); zero_oos_s5_state.rs find_var_rows |
+| `future-cancelled?` | implemented | S5: concurrency.rs over `FutureState::Cancelled`; zero_oos_s5_state.rs future_cancelled_rows |
+| `get-validator` | implemented | S5: concurrency.rs IRef read (atoms + agents); zero_oos_s5_state.rs validator_rows |
 | `indexed?` | implemented | core.rs pred1 over vectors/entries/subvectors; predicates.rs indexed_rows |
 | `infinite?` | implemented | core.rs native_infinitep (`Double` payload; other numbers false; nil NPE; else CCE `Number`); predicates.rs infinite_rows |
 | `map-entry?` | implemented | core.rs pred1 over `Value::MapEntry` (never 2-vectors); predicates.rs map_entry_rows |
@@ -601,9 +607,27 @@ slices' rows into this table).
 | `println-str` | implemented | zero_oos_s4a_corelib.rs println_str_rows (S4a #46; probes corelib.out pls-*) |
 | `prn-str` | implemented | zero_oos_s4a_corelib.rs prn_str_rows (S4a #46; probes corelib.out prs-*) |
 | `rand-nth` | implemented | zero_oos_s4a_corelib.rs rand_nth_rows (S4a #46; probes corelib.out rn-*) |
+| `requiring-resolve` | implemented | S5: ns.rs resolve-else-require; zero_oos_s5_state.rs requiring_resolve_rows |
+| `reset-vals!` | implemented | S5: concurrency.rs `reset!` answering `[old new]`; zero_oos_s5_state.rs vals_rows |
+| `set-validator!` | implemented | S5: concurrency.rs IRef write (validates current; nil clears); zero_oos_s5_state.rs validator_rows |
 | `some->` | implemented | zero_oos_s4a_corelib.rs some_thread_first_rows (S4a #46; probes corelib.out st-*) |
 | `some->>` | implemented | zero_oos_s4a_corelib.rs some_thread_last_rows (S4a #46; probes corelib.out stt-*) |
 | `special-symbol?` | implemented | core.rs pred1 over the oracle 23-member set; predicates.rs special_symbol_rows |
+| `swap-vals!` | implemented | S5: concurrency.rs `swap!` answering `[old new]`; zero_oos_s5_state.rs vals_rows |
 | `test` | implemented | zero_oos_s4a_corelib.rs test_var_rows (S4a #46; probes corelib.out tst-*) |
 | `when-first` | implemented | zero_oos_s4a_corelib.rs when_first_rows (S4a #46; probes corelib.out wf-*) |
 | `while` | implemented | zero_oos_s4a_corelib.rs while_rows (S4a #46; probes corelib.out wh-*) |
+
+### Previously unlisted — no slice yet (S5 rows)
+
+S5's rows at their PR #41 mirrored positions, flipped straight
+to `implemented` (the #41 land unions the remaining slices'
+rows into this table).
+
+| var | status | notes |
+| --- | --- | --- |
+| `agent-errors` | implemented | S5: core.clj `(when-let [e (agent-error a)] (list e))` + `:deprecated "1.2"`; zero_oos_s5_state.rs deprecated_trio_rows |
+| `await1` | implemented | S5: concurrency.rs await-iff-queued answering the agent; zero_oos_s5_state.rs await1_rows |
+| `clear-agent-errors` | implemented | S5: core.clj `(restart-agent a @a)` + `:deprecated "1.2"`; zero_oos_s5_state.rs deprecated_trio_rows |
+| `release-pending-sends` | implemented | S5: concurrency.rs outbox drain answering the count (0 outside actions); zero_oos_s5_state.rs release_pending_sends_rows |
+| `replicate` | implemented | S5: core.clj `(take n (repeat x))` + `:deprecated "1.3"`; zero_oos_s5_state.rs deprecated_trio_rows |
