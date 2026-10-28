@@ -170,6 +170,7 @@ fn native_struct_map(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nat
         def,
         content,
         meta: None,
+        proxy_map: None,
     }))))
 }
 
@@ -195,6 +196,7 @@ fn native_struct(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeE
         def,
         content,
         meta: None,
+        proxy_map: None,
     }))))
 }
 

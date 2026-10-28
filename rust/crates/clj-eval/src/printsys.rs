@@ -1716,6 +1716,7 @@ mod tests {
             def: def.clone(),
             content: new_map(),
             meta: None,
+            proxy_map: None,
         })));
         let descriptor = Value::HostType(Arc::new(HostVal::Def(def)));
         for (name, f, v) in [

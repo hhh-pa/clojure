@@ -2039,6 +2039,7 @@ mod tests {
             def: rdef,
             content,
             meta: None,
+            proxy_map: None,
         })));
         assert_eq!(dup(&rec), "#user.RP[1, 2]");
     }
@@ -2067,6 +2068,7 @@ mod tests {
                 .insert(Value::Keyword(Keyword::new(None, "y")), Value::Int(2))
                 .insert(Value::Keyword(Keyword::new(None, "z")), Value::Int(9)),
             meta: None,
+            proxy_map: None,
         })));
         assert_eq!(dup(&one), "#user.RP[1, 2, 9]");
         let two = Value::HostType(Arc::new(crate::HostVal::Inst(crate::HostInst {
@@ -2077,6 +2079,7 @@ mod tests {
                 .insert(Value::Keyword(Keyword::new(None, "z")), Value::Int(8))
                 .insert(Value::Keyword(Keyword::new(None, "w")), Value::Int(9)),
             meta: None,
+            proxy_map: None,
         })));
         assert_eq!(dup(&two), "#user.RP[1, 2, 8, 9]");
     }
@@ -2118,6 +2121,7 @@ mod tests {
             def,
             content: crate::new_map(),
             meta: None,
+            proxy_map: None,
         })));
         assert_eq!(pr_to_string(&inst, &dup_opts), pr_to_string(&inst, &plain));
         // A dupable collection holding an undupable child: the child
@@ -2215,6 +2219,7 @@ mod tests {
             def,
             content: crate::new_map(),
             meta: None,
+            proxy_map: None,
         })));
         let mut out = String::new();
         assert!(!super::print_dup_shape(
@@ -2248,6 +2253,7 @@ mod tests {
             content: crate::new_map()
                 .insert(Value::Keyword(Keyword::new(None, "x")), Value::Int(1)),
             meta: None,
+            proxy_map: None,
         })));
         assert_eq!(dup(&rec), "#user.RP[1]");
     }

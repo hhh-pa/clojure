@@ -885,6 +885,7 @@ pub(crate) fn rewrap_maplike(inst: &HostInst, content: Map) -> Value {
         def: inst.def.clone(),
         content,
         meta: inst.meta.clone(),
+        proxy_map: inst.proxy_map.clone(),
     })))
 }
 
@@ -901,6 +902,7 @@ pub(crate) fn empty_struct(inst: &HostInst) -> Value {
         def: inst.def.clone(),
         content,
         meta: None,
+        proxy_map: None,
     })))
 }
 

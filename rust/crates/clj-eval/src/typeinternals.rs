@@ -81,6 +81,7 @@ fn handle_def(name: &'static str, fields: &[&'static str]) -> HostDef {
         impl_ns: None,
         sigs: HashMap::new(),
         takes_this: true,
+        struct_keys: Vec::new(),
     }
 }
 
@@ -468,6 +469,7 @@ fn native_construct_proxy(eval: &mut Evaluator, args: &[Value]) -> Result<Value,
         impl_ns: None,
         sigs: HashMap::new(),
         takes_this: false,
+        struct_keys: Vec::new(),
     };
     Ok(Value::HostType(Arc::new(HostVal::Inst(HostInst {
         def: Arc::new(def),

@@ -2362,6 +2362,7 @@ mod tests {
             def,
             content: content.clone(),
             meta: None,
+            proxy_map: None,
         })));
         assert!(super::coll_equiv(&sm, &Value::Map(content)));
         assert!(!super::coll_equiv(&sm, &Value::Int(1)));
