@@ -1479,9 +1479,10 @@ impl Evaluator {
         Err(self.throw(NativeError::cast(&jvm_class_of(callee), "clojure.lang.IFn")))
     }
 
-    /// Invoke a struct accessor (S12): exactly one struct argument,
-    /// answered with the basis key's value (any struct answers —
-    /// a missing key reads nil, like `get`).
+    /// Invoke a struct accessor (S12): exactly one struct argument
+    /// of the accessor's own basis, answered with the basis key's
+    /// value (oracles `sm-accessor-arity0`, `sm-accessor-arity2`,
+    /// `sm-accessor-nil`, `sm-accessor-mismatch`).
     fn invoke_accessor(
         &mut self,
         accessor: &crate::collmisc::AccessorValue,
@@ -1489,19 +1490,24 @@ impl Evaluator {
     ) -> Result<Value, Signal> {
         if args.len() != 1 {
             return Err(self.throw(NativeError::arity(
-                "clojure.lang.PersistentStructMap$1",
+                "clojure.lang.PersistentStructMap/1",
                 args.len(),
             )));
         }
         if matches!(&args[0], Value::Nil) {
             return Err(self.throw(NativeError::new(
                 ThrowClass::NullPointerException,
-                "Cannot invoke \"clojure.lang.ILookup.valAt(Object)\" because \"m\" is null"
-                    .to_owned(),
+                "Cannot read field \"def\" because \"m\" is null".to_owned(),
             )));
         }
         match crate::types::struct_inst(&args[0]) {
-            Some(i) => Ok(i.content.get(accessor.key()).cloned().unwrap_or(Value::Nil)),
+            Some(i) if Arc::ptr_eq(accessor.def(), &i.def) => {
+                Ok(i.content.get(accessor.key()).cloned().unwrap_or(Value::Nil))
+            }
+            Some(_) => Err(self.throw(NativeError::new(
+                ThrowClass::RuntimeException,
+                "Accessor/struct mismatch".to_owned(),
+            ))),
             None => Err(self.throw(crate::core::cce_err(
                 &args[0],
                 "clojure.lang.PersistentStructMap",

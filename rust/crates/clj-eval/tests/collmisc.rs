@@ -10,7 +10,7 @@
 //! structmap surface, the chunk machinery, `hash-combine` /
 //! `mix-collection-hash`, `seque`, `iteration`, `file-seq`, and
 //! the `re-matcher` / `re-groups` handle pair (see
-//! `docs/zero-oos-s12-collmisc/probes/*.{clj,out}` — 199 pins).
+//! `docs/zero-oos-s12-collmisc/probes/*.{clj,out}` — 203 pins).
 //! Every `sm-*`/`ch-*`/`mh-*`/`sq-*`/`it-*`/`fs-*`/`rm-*` label
 //! below names its oracle row; `(derived)` marks a port-test
 //! assertion derived from an oracle pin rather than quoted by it.
@@ -181,8 +181,10 @@ fn structmap_rows() {
         ),
         "\"(def person2 (clojure.core/create-struct :x :y))\""
     );
-    // sm-defstruct-class (derived: basis answers the `$Def` CCE
-    // from-name through `chunk-first`, and prints `$Def`).
+    // sm-defstruct-class (derived: the `defstruct` value answers
+    // the `$Def` CCE from-name through `chunk-first`; the
+    // `#object[…$Def …]` print shape itself is pinned for
+    // `create-struct` values by sm-basis-print).
     assert_eq!(
         uncaught(&mut eval, "(chunk-first person)"),
         cce(DEF, "clojure.lang.IChunkedSeq")
@@ -407,6 +409,272 @@ fn structmap_rows() {
     assert_eq!(
         uncaught(&mut eval, "(accessor {:a 0} :a)"),
         cce("clojure.lang.PersistentArrayMap", DEF)
+    );
+    // sm-accessor-arity0
+    assert_eq!(
+        uncaught(&mut eval, "((accessor person :name))"),
+        "clojure.lang.ArityException | Wrong number of args (0) passed to: clojure.lang.PersistentStructMap/1"
+    );
+    // sm-accessor-arity2
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "((accessor person :name) (struct-map person :name \"Ada\") (struct-map person :name \"Bo\"))"
+        ),
+        "clojure.lang.ArityException | Wrong number of args (2) passed to: clojure.lang.PersistentStructMap/1"
+    );
+    // sm-accessor-nil
+    assert_eq!(
+        uncaught(&mut eval, "((accessor person :name) nil)"),
+        "java.lang.NullPointerException | Cannot read field \"def\" because \"m\" is null"
+    );
+    // sm-accessor-mismatch
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "((accessor person :name) (struct-map other :name \"X\" :age 1))"
+        ),
+        "java.lang.RuntimeException | Accessor/struct mismatch"
+    );
+    // Coverage pins (JVM-verified in the R1 fixup round; no oracle
+    // rows): odd inits fail the key supply, a struct instance is
+    // not a basis.
+    assert_eq!(
+        uncaught(&mut eval, "(struct-map person :name)"),
+        "java.lang.IllegalArgumentException | No value supplied for key: :name"
+    );
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(struct-map (struct-map person :name \"A\") :a 1)"
+        ),
+        cce(STRUCT, DEF)
+    );
+    // Coverage pins (no oracle rows): structs work as map keys
+    // and set members, interchangeable with equal plain maps
+    // (JVM-verified).
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(get {(struct-map person :name \"Ada\") :f} {:name \"Ada\" :age nil})"
+        ),
+        ":f"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(get {(struct-map person :name \"Ada\") :f} (struct-map person :name \"Ada\" :age nil))"
+        ),
+        ":f"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(get {(struct-map person :name \"Ada\") :f} [:not :map])"
+        ),
+        "nil"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(contains? #{(struct-map person :name \"Ada\")} {:name \"Ada\" :age nil})"
+        ),
+        "true"
+    );
+    // Coverage pins (no oracle rows): a struct never `=` a
+    // non-map collection, in either order (JVM-verified).
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(= (struct-map person :name \"Ada\") [:not :map])"
+        ),
+        "false"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(= [:not :map] (struct-map person :name \"Ada\"))"
+        ),
+        "false"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(= (struct-map person :name \"Ada\") 1)"),
+        "false"
+    );
+    // Coverage pins (no oracle rows): accessors, buffers, and
+    // chunks compare by identity (like their JVM objects).
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(= (accessor person :name) (accessor person :name))"
+        ),
+        "false"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(integer? (hash (accessor person :name)))"),
+        "true"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(chunk-first (accessor person :name))"),
+        cce(
+            "clojure.lang.PersistentStructMap$1",
+            "clojure.lang.IChunkedSeq"
+        )
+    );
+    assert_eq!(
+        run_last(&mut eval, "(= (chunk-buffer 4) (chunk-buffer 4))"),
+        "false"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(integer? (hash (chunk-buffer 4)))"),
+        "true"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [a (chunk-buffer 4) b (chunk-buffer 4)] (= (chunk a) (chunk b)))"
+        ),
+        "false"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [b (chunk-buffer 4)] (chunk-append b 1) (let [c1 (chunk b) c2 (chunk b) c3 (chunk b)] [(= c2 c3) (= c1 c2) (integer? (hash c1)) (integer? (hash c2))]))"
+        ),
+        "[false false true true]"
+    );
+    // Coverage pins (no oracle rows): extension values hash by
+    // identity, so distinct objects are distinct map keys
+    // (JVM-verified).
+    for (src, want) in [
+        (
+            "(count {(accessor person :name) 1, (accessor person :age) 2})",
+            "2",
+        ),
+        ("(count {(chunk-buffer 4) 1, (chunk-buffer 5) 2})", "2"),
+        (
+            "(let [a (chunk-buffer 4)] (chunk-append a 1) (let [x (chunk-buffer 4)] (count {(chunk a) 1, (chunk x) 2})))",
+            "2",
+        ),
+        (
+            "(let [a (chunk-buffer 4)] (chunk-append a 1) (count {(chunk a) 1, (chunk (do a)) 2}))",
+            "2",
+        ),
+        ("(count {(iteration inc) 1, (iteration dec) 2})", "2"),
+        (
+            "(count {(re-matcher #\"a\" \"a\") 1, (re-matcher #\"b\" \"b\") 2})",
+            "2",
+        ),
+    ] {
+        assert_eq!(run_last(&mut eval, src), want, "{src}");
+    }
+    // R1 walk-path regressions (JVM-verified in the fixup round;
+    // no oracle rows): seq-stepping fns walk struct content.
+    run(
+        &mut eval,
+        "(def sm9 (struct-map person :name \"Ada\" :age 36 :zzz 9))",
+    );
+    for (src, want) in [
+        ("(pr-str (last sm9))", "\"[:zzz 9]\""),
+        (
+            "(pr-str (reverse sm9))",
+            "\"([:zzz 9] [:age 36] [:name \\\"Ada\\\"])\"",
+        ),
+        (
+            "(pr-str (butlast sm9))",
+            "\"([:name \\\"Ada\\\"] [:age 36])\"",
+        ),
+        ("(pr-str (map first sm9))", "\"(:name :age :zzz)\""),
+        ("(pr-str (take 1 sm9))", "\"([:name \\\"Ada\\\"])\""),
+        ("(pr-str (drop 1 sm9))", "\"([:age 36] [:zzz 9])\""),
+        (
+            "(pr-str (sort sm9))",
+            "\"([:age 36] [:name \\\"Ada\\\"] [:zzz 9])\"",
+        ),
+        (
+            "(pr-str (apply list sm9))",
+            "\"([:name \\\"Ada\\\"] [:age 36] [:zzz 9])\"",
+        ),
+        (
+            "(pr-str (vec sm9))",
+            "\"[[:name \\\"Ada\\\"] [:age 36] [:zzz 9]]\"",
+        ),
+    ] {
+        assert_eq!(run_last(&mut eval, src), want, "{src}");
+    }
+    // R1 `(empty struct)` regressions (JVM-verified; no oracle
+    // rows): same basis nil-defaulted, extras dropped, meta
+    // dropped, still dissoc-guarded.
+    assert_eq!(
+        run_last(&mut eval, "(pr-str (empty sm9))"),
+        "\"{:name nil, :age nil}\""
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(chunk-first (empty sm9))"),
+        cce(STRUCT, "clojure.lang.IChunkedSeq")
+    );
+    assert_eq!(run_last(&mut eval, "(count (empty sm9))"), "2");
+    assert_eq!(
+        run_last(&mut eval, "(= (empty sm9) {:name nil :age nil})"),
+        "true"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(pr-str (meta (empty (with-meta sm9 {:a 1}))))"),
+        "\"nil\""
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(dissoc (empty sm9) :age)"),
+        "java.lang.RuntimeException | Can't remove struct key"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(pr-str (dissoc (empty sm9) :zzz))"),
+        "\"{:name nil, :age nil}\""
+    );
+    // R1 interop regressions (JVM-verified; no oracle rows):
+    // `hashCode` is the content map's Java hash, `toString` is
+    // the readable map print (which single-arg `str` shares).
+    // The JVM pins the same int for the plain map
+    // (`w-hashcode-eq-map`); `.hashCode` on non-host values is a
+    // pre-existing gap (see `rec_hash_code_matches_map`), so the
+    // map half is not re-proven here.
+    assert_eq!(run_last(&mut eval, "(.hashCode sm9)"), "-1023392294");
+    assert_eq!(
+        run_last(&mut eval, "(= (.toString sm9) (pr-str sm9))"),
+        "true"
+    );
+    assert_eq!(run_last(&mut eval, "(= (str sm9) (.toString sm9))"), "true");
+    // R1 protocol regressions (JVM-verified; no oracle rows):
+    // structs dispatch through the `IPersistentMap` entry and
+    // satisfy there; the struct class still answers `extends?`
+    // false; a direct class extension hits.
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(do (defprotocol SMP (smp-foo [x])) (extend-protocol SMP clojure.lang.IPersistentMap (smp-foo [x] :map-impl)) (smp-foo (struct-map person :name \"Ada\")))"
+        ),
+        ":map-impl"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(satisfies? SMP (struct-map person :name \"Ada\"))"
+        ),
+        "true"
+    );
+    assert_eq!(run_last(&mut eval, "(extends? SMP person)"), "false");
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(extends? SMP \"clojure.lang.PersistentStructMap\")"
+        ),
+        "false"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(do (defprotocol SMQ (smq-foo [x])) (extend-protocol SMQ clojure.lang.PersistentStructMap (smq-foo [x] :struct-impl)) (smq-foo (struct-map person :name \"Ada\")))"
+        ),
+        ":struct-impl"
     );
     // (derived) `(seq basis)` throws the ISeq error naming `$Def`.
     assert_eq!(
@@ -702,19 +970,105 @@ fn chunk_rows() {
     ] {
         assert_eq!(run_last(&mut eval, src), want, "{src}");
     }
+    // Coverage pins (JVM-verified in the R1 fixup round; no oracle
+    // rows): wrong-type args take the cast errors.
+    assert_eq!(
+        uncaught(&mut eval, "(chunk-append 1 2)"),
+        cce("java.lang.Long", CHUNK_BUF)
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(chunk 1)"),
+        cce("java.lang.Long", CHUNK_BUF)
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(chunk-cons [1 2] '(3))"),
+        cce("clojure.lang.PersistentVector", "clojure.lang.IChunk")
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(chunk-rest 1)"),
+        cce("java.lang.Long", ICHUNKEDSEQ)
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(chunk-next 1)"),
+        cce("java.lang.Long", ICHUNKEDSEQ)
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(chunk-first (map inc [1 2]))"),
+        cce("clojure.lang.LazySeq", ICHUNKEDSEQ)
+    );
+    // Coverage pins (no oracle rows): 3-arity `nth` reads hits
+    // and answers not-found past the count or below zero.
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [b (chunk-buffer 32)] (chunk-append b 1) (let [c (chunk b)] [(nth c 0 :nf) (nth c 99 :nf) (nth c -1 :nf)]))"
+        ),
+        "[1 :nf :nf]"
+    );
+    // Coverage pins (no oracle rows): `nth` on a degenerate chunk
+    // raises the same array-load NPE `count` does.
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(let [b (chunk-buffer 32)] (chunk-append b 1) (chunk b) (nth (chunk b) 0))"
+        ),
+        "java.lang.NullPointerException | Cannot load from object array because \"this.array\" is null"
+    );
+    // Coverage pins (no oracle rows): projectors over bounded
+    // ranges (head chunk, rest walk, end, overflow cut, inexact
+    // step error).
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [c (chunk-first (range 100))] [(count c) (nth c 0) (nth c 31)])"
+        ),
+        "[32 0 31]"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(pr-str (take 3 (chunk-rest (range 100))))"),
+        "\"(32 33 34)\""
+    );
+    assert_eq!(run_last(&mut eval, "(nil? (chunk-next (range 3)))"), "true");
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [c (chunk-first (range 5 9223372036854775807 9223372036854775807))] [(count c) (nth c 0)])"
+        ),
+        "[1 5]"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(chunk-first (range 0M 1M 1/3))"),
+        "java.lang.ArithmeticException | Non-terminating decimal expansion; no exact representable decimal result."
+    );
+    // Coverage pins (no oracle rows): projectors over forced
+    // chunk-cons states (rest chain, forced head).
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [b (chunk-buffer 32)] (chunk-append b 1) (chunk-append b 2) (let [s (chunk-cons (chunk b) '(3))] (first s) (let [c (chunk-first (rest s))] [(count c) (nth c 0)])))"
+        ),
+        "[1 2]"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [b (chunk-buffer 32)] (chunk-append b 1) (chunk-append b 2) (let [s (chunk-cons (chunk b) '(3))] (first s) (let [c (chunk-first s)] [(count c) (nth c 0)])))"
+        ),
+        "[2 1]"
+    );
 }
 
 #[test]
 fn mixhash_rows() {
     let mut eval = boot();
-    // mh-mix-1-0 .. mh-mix-big
+    // mh-mix-* value rows.
     for (src, want) in [
-        ("(mix-collection-hash 1 0)", "-2017569654"),
-        ("(mix-collection-hash 0 0)", "-15128758"),
-        ("(mix-collection-hash 1 1)", "1978132887"),
-        ("(mix-collection-hash 1 2)", "1734656966"),
-        ("(mix-collection-hash -1 3)", "-196466786"),
-        ("(mix-collection-hash 123456789 10)", "1485565228"),
+        ("(mix-collection-hash 1 0)", "-2017569654"), // mh-mix-1-0
+        ("(mix-collection-hash 0 0)", "-15128758"),   // mh-mix-0-0
+        ("(mix-collection-hash 1 1)", "1978132887"),  // mh-mix-1-1
+        ("(mix-collection-hash 1 2)", "1734656966"),  // mh-mix-1-2
+        ("(mix-collection-hash -1 3)", "-196466786"), // mh-mix-neg
+        ("(mix-collection-hash 123456789 10)", "1485565228"), // mh-mix-big
     ] {
         assert_eq!(run_last(&mut eval, src), want, "{src}");
     }
@@ -747,6 +1101,20 @@ fn mixhash_rows() {
     assert_eq!(
         run_last(&mut eval, "(mix-collection-hash 1.9 1)"),
         "1978132887"
+    );
+    // Coverage pins (JVM-verified in the R1 fixup round; no oracle
+    // rows): tower seeds narrow checked, nil trips the
+    // `doubleValue` NPE.
+    for (src, want) in [
+        ("(mix-collection-hash 5N 1)", "1398391747"),
+        ("(mix-collection-hash 1/2 1)", "-1684229222"),
+        ("(mix-collection-hash 1.5M 1)", "1978132887"),
+    ] {
+        assert_eq!(run_last(&mut eval, src), want, "{src}");
+    }
+    assert_eq!(
+        uncaught(&mut eval, "(mix-collection-hash nil 1)"),
+        "java.lang.NullPointerException | Cannot invoke \"java.lang.Number.doubleValue()\" because \"x\" is null"
     );
     // mh-comb-formula (derived): the port has no `Util/` fns, so
     // the formula is pinned by its hand-verified literal —
@@ -816,6 +1184,28 @@ fn mixhash_rows() {
     assert_eq!(
         uncaught(&mut eval, "(hash-combine 1)"),
         "clojure.lang.ArityException | Wrong number of args (1) passed to: clojure.core/hash-combine"
+    );
+    // Coverage pins (no oracle rows): unbounded inputs take the
+    // same bare UOE `hash` does (pre-, and post-realize behind a
+    // pending `map`).
+    for src in [
+        "(hash-combine 0 (range))",
+        "(hash-combine 0 (map identity [(repeat 1)]))",
+    ] {
+        assert_eq!(
+            uncaught(&mut eval, src),
+            "java.lang.UnsupportedOperationException | ",
+            "{src}"
+        );
+    }
+    // Coverage pins (no oracle rows): a struct combines exactly
+    // like its content map (JVM-verified).
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(do (defstruct hcb :name :age) (= (hash-combine 0 (struct-map hcb :name \"Ada\")) (hash-combine 0 {:name \"Ada\" :age nil})))"
+        ),
+        "true"
     );
 }
 
@@ -891,6 +1281,22 @@ fn seque_rows() {
     assert_eq!(
         run_last(&mut eval, "(pr-str (doall (seque 2.9 (range 5))))"),
         "\"(0 1 2 3 4)\""
+    );
+    // Coverage pins (JVM-verified in the R1 fixup round; no oracle
+    // rows): an unseqable input, a first-step failure, and an
+    // inexact range (whose `seq` succeeds but whose first step
+    // raises) all drain to end-of-stream (the producer drops).
+    assert_eq!(run_last(&mut eval, "(nil? (seq (seque 42)))"), "true");
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(pr-str (seq (seque (map (fn [x] (/ 1 0)) '(1)))))"
+        ),
+        "\"nil\""
+    );
+    assert_eq!(
+        run_last(&mut eval, "(pr-str (seq (seque (range 0M 1M 1/3))))"),
+        "\"nil\""
     );
 }
 
@@ -1042,6 +1448,54 @@ fn iteration_rows() {
         ),
         "\"(1)\""
     );
+    // Coverage pins (JVM-verified in the R1 fixup round; no oracle
+    // rows): non-keyword and namespaced opt keys are ignored like
+    // unknown keywords.
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(pr-str (take 1 (iteration inc \"x\" 1 :initk 0)))"
+        ),
+        "\"(1)\""
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(pr-str (take 1 (iteration inc :foo/bar 1 :initk 0)))"
+        ),
+        "\"(1)\""
+    );
+    // Coverage pins (no oracle rows): odd opt tails follow `&
+    // {:keys}` — a lone key is ignored, a longer odd tail seqs
+    // its last key.
+    assert_eq!(
+        run_last(&mut eval, "(pr-str (take 1 (iteration (fn [_] 7) :initk)))"),
+        "\"(7)\""
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(take 1 (iteration inc :initk 0 :vf))"),
+        "java.lang.IllegalArgumentException | Don't know how to create ISeq from: clojure.lang.Keyword"
+    );
+    // Coverage pins (no oracle rows): iterations compare by
+    // identity (like the JVM's reify object).
+    assert_eq!(
+        run_last(&mut eval, "(= (iteration inc) (iteration inc))"),
+        "false"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(integer? (hash (iteration inc)))"),
+        "true"
+    );
+    // Coverage pins (no oracle rows): the port-stable print and
+    // class-name shapes (the JVM names a reify class).
+    assert_eq!(
+        norm_hex(&run_last(&mut eval, "(pr-str (iteration inc))")),
+        prs("#object[clojure.core$iteration 0xH \"clojure.core$iteration@L\"]")
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(chunk-first (iteration inc))"),
+        cce("clojure.core$iteration", ICHUNKEDSEQ)
+    );
 }
 
 const MATCHER: &str = "java.util.regex.Matcher";
@@ -1153,6 +1607,26 @@ fn rematcher_rows() {
         ),
         "[\"\" \"\" nil]"
     );
+    // Coverage pins (no oracle rows): handles compare by identity
+    // (like the JVM's `Matcher`).
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(= (re-matcher #\"a\" \"a\") (re-matcher #\"a\" \"a\"))"
+        ),
+        "false"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(integer? (hash (re-matcher #\"a\" \"a\")))"),
+        "true"
+    );
+    // Coverage pins (no oracle rows): an uncompilable pattern
+    // reports `PatternSyntaxException` with the crate message
+    // (same shape as `re-pattern`).
+    assert_eq!(
+        uncaught(&mut eval, "(re-matcher #\"(a\" \"x\")"),
+        "java.util.regex.PatternSyntaxException | regex parse error:\n    (a\n    ^\nerror: unclosed group"
+    );
 }
 
 /// A Rust string as a Clojure string literal.
@@ -1211,12 +1685,14 @@ fn fileseq_rows() {
         run_last(&mut eval, &format!("(count (file-seq {lit}))")),
         "7"
     );
-    // fs-names (leaf names through `re-seq`, like `.getName`).
+    // fs-names (leaf names through `re-seq`, like `.getName`;
+    // the class splits on both separators — `file-seq` yields
+    // platform-native paths, so `/`-only breaks on Windows).
     assert_eq!(
         run_last(
             &mut eval,
             &format!(
-                "(pr-str (sort (map (fn [p] (last (re-seq #\"[^/]+\" p))) (file-seq {lit}))))"
+                "(pr-str (sort (map (fn [p] (last (re-seq #\"[^/\\\\]+\" p))) (file-seq {lit}))))"
             )
         ),
         prs(&format!(

@@ -1535,11 +1535,9 @@ fn coll_equiv(c: &Value, x: &Value) -> bool {
         Value::Map(m) => map_coll_equiv(m, x),
         Value::Set(s) => set_coll_equiv(s, x),
         // Struct instances equiv as their content map (S12; the
-        // only host value `is_collection` admits).
-        Value::HostType(h) => match host_struct_content(h) {
-            Some(m) => map_coll_equiv(m, x),
-            None => false,
-        },
+        // only host value `is_collection` admits, so the `None`
+        // arm is unreachable — `is_some_and` keeps it branchless).
+        Value::HostType(h) => host_struct_content(h).is_some_and(|m| map_coll_equiv(m, x)),
         _ => false,
     }
 }
@@ -2284,6 +2282,33 @@ mod tests {
             &Value::Int(1),
             &Value::Str(Arc::from("x"))
         ));
+    }
+
+    /// A struct instance equivs as its content map on the
+    /// collection side (S12; duplicate-key policy stays the
+    /// constructor's business).
+    #[test]
+    fn coll_equiv_struct_reads_content_map() {
+        let def = Arc::new(HostDef {
+            name: Arc::from("clojure.lang.PersistentStructMap"),
+            kind: HostKind::Struct,
+            fields: Vec::new(),
+            methods: std::collections::HashMap::new(),
+            interfaces: Vec::new(),
+            prefix: None,
+            impl_ns: None,
+            sigs: std::collections::HashMap::new(),
+            takes_this: true,
+            struct_keys: Vec::new(),
+        });
+        let content = new_map().insert(Value::Keyword(Keyword::new(None, "a")), Value::Int(1));
+        let sm = Value::HostType(Arc::new(HostVal::Inst(HostInst {
+            def,
+            content: content.clone(),
+            meta: None,
+        })));
+        assert!(super::coll_equiv(&sm, &Value::Map(content)));
+        assert!(!super::coll_equiv(&sm, &Value::Int(1)));
     }
 
     #[test]

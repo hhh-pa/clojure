@@ -25,7 +25,8 @@
 //! and host classes (`java.lang.String`, `null`) share one space.
 //! There is no hierarchy walk (fenced with `derive`/`isa?`): the
 //! only interface fallback is `clojure.lang.IPersistentMap` for
-//! maps and records (oracle `c-map`).
+//! maps and map-like hosts (records per oracle `c-map`, S12
+//! structs per the JVM).
 
 use std::sync::Arc;
 
@@ -327,8 +328,8 @@ fn impl_at<'a>(entry: &'a Map, method: &str, argc: usize) -> Option<&'a Value> {
 }
 
 /// The impl entry for a value's type (split for budget): exact
-/// class key, else the `IPersistentMap` entry for maps and records
-/// (oracle `c-map`; no general hierarchy walk).
+/// class key, else the `IPersistentMap` entry for maps and
+/// map-like hosts (oracle `c-map`; no general hierarchy walk).
 fn type_entry<'a>(impls: &'a Map, v: &Value) -> Option<&'a Value> {
     let key = Value::Str(Arc::from(jvm_class_of(v).as_str()));
     match impls.get(&key) {
@@ -344,9 +345,10 @@ fn type_entry<'a>(impls: &'a Map, v: &Value) -> Option<&'a Value> {
 }
 
 /// Whether a value counts as map-like for the `IPersistentMap`
-/// fallback: plain maps and record instances (records are maps).
+/// fallback: plain maps and map-like host instances (records
+/// are maps; S12 structs dispatch there too, per the JVM).
 fn is_map_like(v: &Value) -> bool {
-    matches!(v, Value::Map(_)) || crate::types::is_host_record(v)
+    matches!(v, Value::Map(_)) || crate::types::maplike_inst(v).is_some()
 }
 
 /// Find the impl fn for a call (split for budget): descriptors
@@ -509,8 +511,10 @@ fn native_satisfies(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nati
 
 /// Whether a class implements a protocol (split for budget):
 /// descriptors by name (records also answer through the
-/// `IPersistentMap` entry); class-name strings work too, since host
-/// classes have no values to pass.
+/// `IPersistentMap` entry; struct bases do not — the JVM's
+/// `extends?` is false for the struct class there);
+/// class-name strings work too, since host classes have no values
+/// to pass.
 fn native_extends(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/extends?", args, &[2])?;
     let proto = match as_protocol_map(&args[0]) {

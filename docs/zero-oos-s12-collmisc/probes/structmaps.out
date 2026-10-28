@@ -31,6 +31,10 @@ sm-accessor-plain THROW java.lang.ClassCastException|"class clojure.lang.Persist
 sm-accessor-fn? false
 sm-accessor-class "class clojure.lang.PersistentStructMap$1"
 sm-accessor-print "#object[clojure.lang.PersistentStructMap$1 0xH \"clojure.lang.PersistentStructMap$1@L\"]"
+sm-accessor-arity0 THROW clojure.lang.ArityException|"Wrong number of args (0) passed to: clojure.lang.PersistentStructMap/1"
+sm-accessor-arity2 THROW clojure.lang.ArityException|"Wrong number of args (2) passed to: clojure.lang.PersistentStructMap/1"
+sm-accessor-nil THROW java.lang.NullPointerException|"Cannot read field \"def\" because \"m\" is null"
+sm-accessor-mismatch THROW java.lang.RuntimeException|"Accessor/struct mismatch"
 sm-assoc-extra-class "class clojure.lang.PersistentStructMap"
 sm-dissoc-extra-class "class clojure.lang.PersistentStructMap"
 sm-empty-basis THROW java.lang.IllegalArgumentException|"Must supply keys"

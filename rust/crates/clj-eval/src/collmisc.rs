@@ -9,7 +9,7 @@
 //! Zero-oos S12 collections misc (issue #54): structmaps, chunks,
 //! `hash-combine`/`mix-collection-hash`, `seque`, `iteration`,
 //! `file-seq`, and the `re-matcher`/`re-groups` handle pair.
-//! Oracle: `docs/zero-oos-s12-collmisc/probes/*.out` (199 pins).
+//! Oracle: `docs/zero-oos-s12-collmisc/probes/*.out` (203 pins).
 
 use std::collections::HashMap;
 use std::hash::Hasher;
@@ -205,19 +205,28 @@ fn native_accessor(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nativ
         ));
     }
     Ok(Value::Extension(Arc::new(AccessorValue {
+        def,
         key: args[1].clone(),
     })))
 }
 
-/// A struct accessor: the basis key it reads. Callable (`IFn`)
-/// but not `fn?`, like the JVM's `PersistentStructMap$1`
-/// (oracles `sm-accessor`, `sm-accessor-fn?`).
+/// A struct accessor: the basis it belongs to plus the basis key
+/// it reads. Callable (`IFn`) but not `fn?`, like the JVM's
+/// `PersistentStructMap$1` (oracles `sm-accessor`,
+/// `sm-accessor-fn?`).
 #[derive(Clone, Debug)]
 pub struct AccessorValue {
+    def: Arc<HostDef>,
     key: Value,
 }
 
 impl AccessorValue {
+    /// The basis this accessor belongs to (applying it to any
+    /// other def's struct is the JVM's mismatch error).
+    pub(crate) fn def(&self) -> &Arc<HostDef> {
+        &self.def
+    }
+
     /// The basis key this accessor reads.
     pub(crate) fn key(&self) -> &Value {
         &self.key
@@ -733,12 +742,27 @@ struct IterationOpts {
     initk: Option<Value>,
 }
 
+/// The ISeq coercion error (per-module shape, like `ns.rs`).
+fn iseq_err(v: &Value) -> NativeError {
+    NativeError::new(
+        ThrowClass::IllegalArgumentException,
+        format!(
+            "Don't know how to create ISeq from: {}",
+            crate::error::jvm_class_of(v)
+        ),
+    )
+}
+
 /// Collect `iteration` opts from flat keyvals (a nil `:somef` /
-/// `:vf` / `:kf` takes the default, like `:or`).
+/// `:vf` / `:kf` takes the default, like `:or`). Odd tails follow
+/// the JVM's `& {:keys}` destructuring over the rest seq: a lone
+/// key is ignored (all defaults), a longer odd tail seqs its last
+/// key (JVM-verified in the R1 fixup round — the port's own fn
+/// destructuring agrees).
 fn iteration_opts(opts: &[Value]) -> Result<IterationOpts, NativeError> {
-    if opts.len() % 2 == 1 {
+    if opts.len() % 2 == 1 && opts.len() > 1 {
         let last = opts.last().expect("odd opts have a last item");
-        return Err(crate::coll::odd_keyvals_err(last));
+        return Err(iseq_err(last));
     }
     let mut out = IterationOpts {
         somef: None,
@@ -1031,4 +1055,64 @@ fn native_re_groups(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nati
 /// `Matcher` cast).
 pub(crate) fn match_handle_find(v: &Value) -> Option<Result<Value, NativeError>> {
     as_matcher(v).map(MatcherHandle::find_next)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Downcast `None` arms (callers only pass extensions, so these
+    /// miss behaviorally — pinned directly, like `ext.rs`).
+    #[test]
+    fn downcast_helpers_reject_non_extensions() {
+        assert!(as_accessor(&Value::Int(1)).is_none());
+        assert!(as_chunk(&Value::Int(1)).is_none());
+        assert!(as_chunk_buffer(&Value::Int(1)).is_none());
+        assert!(as_iteration(&Value::Int(1)).is_none());
+        assert!(as_matcher(&Value::Int(1)).is_none());
+    }
+
+    /// A thread-spawn failure (untriggerable under test — pinned
+    /// by direct call, like `concurrency.rs`).
+    #[test]
+    fn spawn_failed_reports_native_thread_error() {
+        let err = spawn_failed();
+        assert_eq!(err.class, ThrowClass::RuntimeException);
+        assert_eq!(err.message, "unable to create native thread");
+    }
+
+    /// The `SequeRx` debug shape (out-of-band only).
+    #[test]
+    fn seque_rx_debug_shape() {
+        let (_tx, rx) = mpsc::sync_channel(1);
+        assert_eq!(format!("{:?}", SequeRx::new(rx)), "SequeRx(..)");
+    }
+
+    /// A degenerate chunk's items (empty — `chunk-cons`
+    /// count-guards, so this misses behaviorally).
+    #[test]
+    fn degenerate_chunk_items_are_empty() {
+        let c = ChunkValue {
+            slots: None,
+            count: 0,
+        };
+        assert!(c.items_arc().is_empty());
+    }
+
+    /// A producer failure drops the sender mid-stream (the drain
+    /// reads the prefix, then end-of-stream — the documented
+    /// drop-semantics; user-visible error truncation stays
+    /// unpinned by design, R2).
+    #[test]
+    fn seque_feeder_drops_sender_on_step_error() {
+        let child = Evaluator::new_bare("user");
+        let input = pending_value(Thunk::Chain {
+            head: vec![Value::Int(1)],
+            tail: Value::Int(42),
+        });
+        let (tx, rx) = mpsc::sync_channel(8);
+        seque_feeder(child, input, tx);
+        assert_eq!(rx.recv().unwrap(), Some(Value::Int(1)));
+        assert!(rx.recv().is_err());
+    }
 }

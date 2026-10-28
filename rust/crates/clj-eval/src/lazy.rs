@@ -458,14 +458,15 @@ fn iseq_err(v: &Value) -> NativeError {
     )
 }
 
-/// Whether `seq` accepts the value without forcing it (mirrors
-/// `RT.canSeq` over our value types; transients and throwables
-/// are not seqable). Staged for `seqable?` (S5D).
-#[allow(dead_code)]
+/// Whether `vec` accepts the value (mirrors `RT.canSeq` over
+/// our value types: transients and throwables are not seqable,
+/// so `vec` fails them with the conversion error, not the seq
+/// error). `seqable?` keeps its own predicate in `core.rs`.
 pub(crate) fn is_seqable(v: &Value) -> bool {
-    // Records seq (oracle `g-seqable-rec`); anything else host
-    // does not (oracle `g-seqable-dt`).
-    if crate::types::is_host_record(v) {
+    // Map-like hosts seq (oracles `g-seqable-rec`, S12
+    // `sm-seq`); anything else host does not (oracle
+    // `g-seqable-dt`).
+    if crate::types::maplike_inst(v).is_some() {
         return true;
     }
     match v {
@@ -679,9 +680,9 @@ pub(crate) fn step_unit(eval: &mut Evaluator, v: &Value) -> Result<StepUnit, Sig
         Value::Map(m) => step_map_unit(m),
         Value::Set(s) => step_set_unit(s),
         Value::Str(s) => step_str_unit(s),
-        // Records step their content entries (like `seq_value`;
-        // anything else host has no seq).
-        Value::HostType(_) => match crate::types::record_inst(v) {
+        // Map-like hosts step their content entries (like
+        // `seq_value`; anything else host has no seq).
+        Value::HostType(_) => match crate::types::maplike_inst(v) {
             Some(i) => step_map_unit(&i.content),
             None => Err(eval.throw(iseq_err(v))),
         },
@@ -1087,10 +1088,12 @@ fn step_fileseq(stack: &[String]) -> Forced {
         return Forced::Empty;
     };
     if std::fs::metadata(&path).is_ok_and(|m| m.is_dir()) {
-        if let Ok(entries) = std::fs::read_dir(&path) {
-            for entry in entries.flatten() {
-                stack.push(entry.path().to_string_lossy().into_owned());
-            }
+        // Unreadable directories read as leaves (like the JVM's
+        // null `listFiles`): `read_dir` failure pushes nothing
+        // (the iterator chain keeps this branchless — an `if let`
+        // `Err` arm is untestable without chmod).
+        for entry in std::fs::read_dir(&path).into_iter().flatten().flatten() {
+            stack.push(entry.path().to_string_lossy().into_owned());
         }
     }
     Forced::Chunk {
@@ -3931,5 +3934,84 @@ mod tests {
             inputs: Vec::new(),
         };
         let _ = super::step_thunk_rest(&mut eval, thunk);
+    }
+
+    #[test]
+    fn chunked_parts_rejects_unbounded_range() {
+        // Only `chunked-seq?` on unbounded ranges is pinned
+        // behaviorally; the projector `None` is structural (the
+        // CCE from-name stays the range slice's business).
+        let mut eval = crate::eval::Evaluator::new_bare("user");
+        let r = RangeValue::new(RangeNum::Int(0), None, RangeNum::Int(1), true, None);
+        let v = Value::Extension(Arc::new(r));
+        assert!(super::chunked_parts(&mut eval, &v).unwrap().is_none());
+    }
+
+    #[test]
+    fn chunked_pending_parts_forces_foreign_thunk_to_empty() {
+        // Defensive: only `ChunkHead`/`Chain` thunks sit under a
+        // `ChunkedCons` kind in production; anything else forces
+        // one step (empty here, so gone).
+        let mut eval = crate::eval::Evaluator::new_bare("user");
+        let v = PendingSeq::pending_chunked_cons(Thunk::FileSeq { stack: Vec::new() });
+        let p = as_pending(&v).expect("chunked cons builds a pending");
+        assert!(
+            super::chunked_pending_parts(&mut eval, p)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn chunked_pending_parts_reads_forced_foreign_thunk() {
+        // Defensive, forcing to a chunk: items plus the seq tail
+        // (a missing path walks a singleton leaf — no fixture).
+        let mut eval = crate::eval::Evaluator::new_bare("user");
+        let v = PendingSeq::pending_chunked_cons(Thunk::FileSeq {
+            stack: vec!["/definitely/not/an/s12/dir".to_owned()],
+        });
+        let p = as_pending(&v).expect("chunked cons builds a pending");
+        let (chunk, tail) = super::chunked_pending_parts(&mut eval, p)
+            .unwrap()
+            .expect("forced chunk reads");
+        assert_eq!(chunk.items_arc().len(), 1);
+        assert!(tail.is_none());
+    }
+
+    #[test]
+    fn chunked_pending_parts_empty_is_gone() {
+        // Defensive: `ChunkedCons` cells never empty in production
+        // (heads are never empty); an empty one reads as gone.
+        let mut eval = crate::eval::Evaluator::new_bare("user");
+        let p = pending_seq(SeqState::Empty, LazyKind::ChunkedCons);
+        assert!(
+            super::chunked_pending_parts(&mut eval, &p)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn chunked_realized_parts_empty_shape_is_gone() {
+        // Defensive: no constructor flags an empty shape chunked;
+        // such a seq reads as gone.
+        let s = RealizedSeq::flagged(Seq::empty(), true, true, SeqKind::Chunked);
+        assert!(super::chunked_realized_parts(&s).is_none());
+    }
+
+    #[test]
+    fn chunked_realized_parts_splits_eager_shape() {
+        // Defensive: no constructor flags an eager shape chunked;
+        // projectors split the first 32 items off instead.
+        let items: Vec<Value> = (0..40).map(Value::Int).collect();
+        let s = RealizedSeq::flagged(
+            Seq::eager(items).expect("non-empty"),
+            true,
+            true,
+            SeqKind::Chunked,
+        );
+        let (chunk, tail) = super::chunked_realized_parts(&s).expect("non-empty splits");
+        assert_eq!(chunk.items_arc().len(), 32);
+        assert!(tail.is_some());
     }
 }

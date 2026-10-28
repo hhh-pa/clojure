@@ -6,7 +6,7 @@
   Branch: `zero-oos-s12-collmisc`.
 - Probes: `docs/zero-oos-s12-collmisc/probes/`
   `{structmaps,chunks,mixhash,seque,iteration,fileseq,rematcher}.{clj,out}`
-  (199 pins, every file exit 0 and rerun-stable; one redundant dissoc-class probe dropped at owner review).
+  (203 pins, every file exit 0 and rerun-stable; one redundant dissoc-class probe dropped at owner review).
 
 ## Problem
 
@@ -87,6 +87,10 @@ is map-identical in print, `=`, and `hash`.
 | sm-accessor-fn? | accessor answers false to `fn?` (custom IFn) |
 | sm-accessor-class | accessor class is `PersistentStructMap$1` |
 | sm-accessor-print | accessor prints `#object[…$1 0xH "…$1@L"]` |
+| sm-accessor-arity0 | THROW ArityException `(0)` passed to `…PersistentStructMap/1` |
+| sm-accessor-arity2 | THROW ArityException `(2)` passed to `…PersistentStructMap/1` |
+| sm-accessor-nil | THROW NPE `"Cannot read field \"def\" because \"m\" is null"` |
+| sm-accessor-mismatch | THROW RuntimeException `"Accessor/struct mismatch"` (def identity, not key-set: same-keys other-basis throws) |
 | sm-empty-basis | THROW IAE `"Must supply keys"` (zero keys) |
 | sm-map-nonbasis | THROW CCE ArrayMap → `$Def` |
 | sm-struct-nonbasis | THROW CCE String → `$Def` (cross-module shape) |
@@ -379,7 +383,11 @@ keeps them or renames consistently.
 - D2 (accessor): dedicated `ExtensionValue` + IFn arms
   (callable, `fn?` false). Not a `NativeFn` (`fn?` is true
   for those). Print `#object[…$1 …]`, CCE target
-  `…PersistentStructMap` on non-struct input.
+  `…PersistentStructMap` on non-struct input. The accessor
+  carries its basis def: applying it to a struct of any
+  other def (even same keys) throws `Accessor/struct
+  mismatch`; arity ≠ 1 names `…PersistentStructMap/1`
+  (slash, per the JVM); nil input throws the pinned NPE.
 - D3 (Chunk emulation): `ChunkBufferValue { slots,
   taken }`, `ChunkValue { slots, count }`; `chunk` copies
   the slots (observationally identical to shared `Arc`

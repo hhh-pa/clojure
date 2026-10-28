@@ -849,13 +849,17 @@ fn native_empty(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeEr
     // seq empties to a bare `()`, and anything else (nil, strings,
     // scalars, transients) is nil; metadata is kept on the strict
     // kinds (fixprobe `:empty-*`, corpus 08 `:empty-*`). Records
-    // have no empty (oracle `h-empty`); anything else host is nil
-    // (oracle `i-empty`).
+    // have no empty (oracle `h-empty`); structs empty to the same
+    // basis nil-defaulted with extras dropped (S12); anything else
+    // host is nil (oracle `i-empty`).
     if let Some(i) = crate::types::record_inst(&args[0]) {
         return Err(NativeError::new(
             ThrowClass::UnsupportedOperationException,
             format!("Can't create empty: {}", i.def.name),
         ));
+    }
+    if let Some(i) = crate::types::struct_inst(&args[0]) {
+        return Ok(crate::types::empty_struct(i));
     }
     Ok(match &args[0] {
         Value::Map(m) => Value::Map(
