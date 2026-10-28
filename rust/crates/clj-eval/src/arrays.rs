@@ -1824,6 +1824,14 @@ mod tests {
         let _ = aset_direct(&mut eval, &a, 0, &Value::Int(5));
     }
 
+    /// `zero_store_wide` only takes wide types (`zero_store` keeps
+    /// the narrow arms) — the catch-all panics by contract.
+    #[test]
+    #[should_panic(expected = "narrow types stay in zero_store")]
+    fn zero_store_wide_rejects_narrow() {
+        let _ = zero_store_wide(BaseType::Int, 1);
+    }
+
     /// See [`direct_store_shape_mismatch_panics`].
     #[test]
     #[should_panic(expected = "ref store shape")]

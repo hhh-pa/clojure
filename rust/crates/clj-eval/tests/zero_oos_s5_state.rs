@@ -678,9 +678,19 @@ fn await1_rows() {
     // k-await1-busy-in-action (`i-static` unpinned per Non-goals;
     // `k-await1-busy-in-action` blocks on gate/hold promises, not
     // `Thread/sleep`).
+    // `i-basic` reformulated for determinism: the bare
+    // `(send a inc) (await1 a)` races pool scheduling (inc may
+    // finish before await1 observes the queue). The gate/hold form
+    // below pins the same observable (await1 waits, @a answers 1)
+    // with a provably-nonempty queue: the blocked head plus the
+    // queued `inc` behind it; agent b releases the head
+    // asynchronously so no sleep is needed.
     let mut eval = boot();
     assert_eq!(
-        run_last(&mut eval, "(let [a (agent 0)] (send a inc) (await1 a) @a)"),
+        run_last(
+            &mut eval,
+            "(let [a (agent 0) b (agent 0) gate (promise) hold (promise)] (send a (fn [s] (deliver gate :started) (deref hold) s)) (send a inc) (deref gate) (send b (fn [s] (deliver hold :go) s)) (await1 a) @a)"
+        ),
         "1"
     );
     assert_eq!(
