@@ -387,6 +387,11 @@ fn jvm_class_of_host(v: &Value) -> String {
         },
         // Multimethods report the JVM class (S-typechain stage 3).
         Value::MultiFn(_) => "clojure.lang.MultiFn".to_owned(),
+        // Arrays report their descriptor (S15: `[I`, `[[I`,
+        // `[Ljava.lang.Object;`, …).
+        Value::Array(a) => a.descriptor(),
+        // Primitive vectors report the JVM class (S15).
+        Value::PrimitiveVector(_) => "clojure.core.Vec".to_owned(),
         // Handled upstream; re-enter so the chain stays exhaustive.
         Value::Nil
         | Value::Bool(_)

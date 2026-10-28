@@ -18,8 +18,9 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use clj_value::{
-    ConsValue, List, Map, Set, SortSpec, SubVectorValue, ThrowClass, Transient, TransientError,
-    TransientKind, TransientMap, TransientSet, TransientVector, Value, Vector, new_map, new_set,
+    ConsValue, List, Map, PrimitiveVector, Set, SortSpec, SubVectorValue, ThrowClass, Transient,
+    TransientError, TransientKind, TransientMap, TransientSet, TransientVector, Value, Vector,
+    new_map, new_set,
 };
 
 use crate::core::{cce_err, cce_message, is_counted, jvm_compare, nth_index};
@@ -96,6 +97,19 @@ pub(crate) fn lookup_present(
         Value::Map(m) => Ok(m.get(key).cloned()),
         Value::Vector(x) => Ok(lookup_vector_slot(x, key)),
         Value::MapEntry { key: ek, val: ev } => Ok(lookup_entry_slot(ek, ev, key)),
+        // Arrays narrow any `Number` key (`intValue`, lenient —
+        // OOB/non-`Number`/nil miss; S15 oracles `b-get`,
+        // `f-get-*`, `e-get-*`).
+        Value::Array(a) => Ok(crate::arrays::array_intvalue_key(key).and_then(|i| {
+            usize::try_from(i).ok().and_then(|idx| {
+                if idx < a.len() {
+                    Some(crate::arrays::array_read(a, idx))
+                } else {
+                    None
+                }
+            })
+        })),
+        Value::PrimitiveVector(p) => Ok(lookup_pv_slot(p, key)),
         Value::Set(s) if s.is_sorted() => Ok(sorted_lookup_set(eval, s, key)?),
         Value::Set(s) => Ok(s.get(key).cloned()),
         Value::Str(s) => Ok(lookup_str_slot(s, key)),
@@ -119,6 +133,14 @@ fn lookup_entry_slot(ek: &Value, ev: &Value, key: &Value) -> Option<Value> {
             1 => Some(ev.clone()),
             _ => None,
         })
+    })
+}
+
+fn lookup_pv_slot(p: &PrimitiveVector, key: &Value) -> Option<Value> {
+    int_key(key).and_then(|i| {
+        usize::try_from(i as i32)
+            .ok()
+            .and_then(|idx| p.get(idx).cloned())
     })
 }
 
@@ -175,6 +197,15 @@ fn find_entry_vector(x: &Vector, key: &Value) -> Option<(Value, Value)> {
         usize::try_from(i as i32)
             .ok()
             .and_then(|idx| x.iter().nth(idx).map(|v| (key.clone(), v.clone())))
+    })
+}
+
+/// `RT.find` over a primitive vector (like vectors).
+fn find_entry_pv(p: &PrimitiveVector, key: &Value) -> Option<(Value, Value)> {
+    int_key(key).and_then(|i| {
+        usize::try_from(i as i32)
+            .ok()
+            .and_then(|idx| p.get(idx).map(|v| (key.clone(), v.clone())))
     })
 }
 
@@ -252,6 +283,7 @@ pub(crate) fn find_entry(
         Value::Nil => Ok(None),
         Value::Map(m) => find_entry_map(eval, m, key),
         Value::Vector(x) => Ok(find_entry_vector(x, key)),
+        Value::PrimitiveVector(p) => Ok(find_entry_pv(p, key)),
         Value::MapEntry { key: ek, val: ev } => Ok(int_key(key).and_then(|i| {
             usize::try_from(i as i32).ok().and_then(|idx| match idx {
                 0 => Some((key.clone(), (**ek).clone())),
@@ -392,6 +424,12 @@ fn conj_one(eval: &mut Evaluator, coll: &Value, x: Value) -> Result<Value, Nativ
         Value::Nil => Ok(Value::List(List::from_vec(vec![x]))),
         Value::List(l) => Ok(Value::List(l.clone().push_front(x))),
         Value::Vector(v) => Ok(Value::Vector(v.clone().push_back(x))),
+        // Primitive vectors coerce through the type (the
+        // `ArrayManager` rule — S15 oracles `f-conj-bad`,
+        // `j-byte-vec`, `j-bool-num`, `j-conj-nil`).
+        Value::PrimitiveVector(p) => Ok(Value::PrimitiveVector(
+            p.push_back(crate::arrays::vector_coerce(eval, p.elem(), &x)?),
+        )),
         // Conj onto an entry appends like its 2-vector (Oracle FX2
         // `conj`, `merge-entry`).
         Value::MapEntry { key, val } => {
@@ -449,6 +487,29 @@ fn assoc_vector(x: &Vector, i: i64, v: Value) -> Result<Value, NativeError> {
     ))
 }
 
+/// `assoc` on a primitive vector (bounds first, then the coerce
+/// — `Vec.assocN`; at-count appends; OOB is the empty `IOOBE`).
+fn assoc_pv(
+    eval: &mut Evaluator,
+    p: &PrimitiveVector,
+    i: i64,
+    v: Value,
+) -> Result<Value, NativeError> {
+    let Ok(n) = usize::try_from(i as i32) else {
+        return Err(ioobe());
+    };
+    if n > p.len() {
+        return Err(ioobe());
+    }
+    let co = crate::arrays::vector_coerce(eval, p.elem(), &v)?;
+    if n == p.len() {
+        return Ok(Value::PrimitiveVector(p.push_back(co)));
+    }
+    Ok(Value::PrimitiveVector(
+        p.set_nth(n, co).expect("index is below the length"),
+    ))
+}
+
 /// `assoc` on a subvector (stays a subvector; writes at the absolute
 /// index — even before the window, like the JVM).
 fn assoc_subvector(sv: &SubVectorValue, k: &Value, v: Value) -> Result<Value, NativeError> {
@@ -496,6 +557,15 @@ fn assoc3(eval: &mut Evaluator, coll: &Value, k: &Value, v: Value) -> Result<Val
                 ));
             };
             assoc_vector(x, i, v)
+        }
+        Value::PrimitiveVector(p) => {
+            let Some(i) = int_key(k) else {
+                return Err(NativeError::new(
+                    ThrowClass::IllegalArgumentException,
+                    "Key must be integer".to_owned(),
+                ));
+            };
+            assoc_pv(eval, p, i, v)
         }
         // `assoc` on an entry answers a plain vector (Oracle FX2
         // `assoc0`, `assoc1`, `assoc2`).
@@ -613,6 +683,8 @@ fn count_of(eval: &mut Evaluator, v: &Value) -> Result<i64, NativeError> {
         Value::Str(s) => Ok(s.encode_utf16().count() as i64),
         Value::List(l) => Ok(l.len() as i64),
         Value::Vector(x) => Ok(x.len() as i64),
+        Value::PrimitiveVector(p) => Ok(p.len() as i64),
+        Value::Array(a) => Ok(a.len() as i64),
         Value::MapEntry { .. } => Ok(2),
         Value::Map(m) => Ok(m.size() as i64),
         Value::Set(s) => Ok(s.size() as i64),
@@ -698,6 +770,12 @@ fn merge_with3_indexed_pairs(y: &Value) -> Option<Vec<(Value, Value)>> {
     match y {
         Value::Vector(yv) => Some(
             yv.iter()
+                .enumerate()
+                .map(|(i, v)| (Value::Int(i as i64), v.clone()))
+                .collect(),
+        ),
+        Value::PrimitiveVector(p) => Some(
+            p.iter()
                 .enumerate()
                 .map(|(i, v)| (Value::Int(i as i64), v.clone()))
                 .collect(),
@@ -874,6 +952,12 @@ fn native_empty(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeEr
                 .with_sort(m.sort_spec().cloned()),
         ),
         Value::Vector(v) => Value::Vector(Vector::new_sync().with_meta(v.meta().cloned())),
+        // `empty` stays typed (S15 oracles `j-empty-cls`,
+        // `j-empty-conj`); arrays fall through to nil (oracle
+        // `b-empty`).
+        Value::PrimitiveVector(p) => {
+            Value::PrimitiveVector(PrimitiveVector::empty(p.elem()).with_meta(p.meta().cloned()))
+        }
         Value::Set(s) => Value::Set(
             new_set()
                 .with_meta(s.meta().cloned())
@@ -1092,6 +1176,11 @@ fn contains_vector(x: &Vector, key: &Value) -> bool {
     int_key(key).is_some_and(|i| usize::try_from(i as i32).is_ok_and(|idx| idx < x.len()))
 }
 
+/// `contains?` over a primitive vector (like vectors).
+fn contains_pv(p: &PrimitiveVector, key: &Value) -> bool {
+    int_key(key).is_some_and(|i| usize::try_from(i as i32).is_ok_and(|idx| idx < p.len()))
+}
+
 /// `contains?` over a string (any numeric index in UTF-16 range).
 fn contains_str(s: &str, coll: &Value, key: &Value) -> Result<Value, NativeError> {
     let Some(i) = num_index(key) else {
@@ -1158,6 +1247,21 @@ fn native_contains(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Native
         Value::Set(s) => contains_set(eval, s, key),
         Value::Str(s) => contains_str(s, coll, key),
         Value::Transient(t) => Ok(Value::Bool(transient_get(t, key)?.is_some())),
+        // Arrays: `Number` keys narrow (`intValue`) to a bounds
+        // check, anything else is unsupported (S15 oracles
+        // `b-contains`, `f-contains-*`, `e-contains-nil`).
+        Value::Array(a) => {
+            let Some(i) = crate::arrays::array_intvalue_key(key) else {
+                return Err(NativeError::new(
+                    ThrowClass::IllegalArgumentException,
+                    format!("contains? not supported on type: {}", jvm_class_of(coll)),
+                ));
+            };
+            Ok(Value::Bool(
+                usize::try_from(i).is_ok_and(|idx| idx < a.len()),
+            ))
+        }
+        Value::PrimitiveVector(p) => Ok(Value::Bool(contains_pv(p, key))),
         _ => contains_fallback(coll, key),
     }
 }
@@ -1209,6 +1313,7 @@ fn nth_indexed(coll: &Value, n: i32, not_found: Option<&Value>) -> Result<Value,
         Value::Vector(x) => usize::try_from(n)
             .ok()
             .and_then(|idx| x.iter().nth(idx).cloned()),
+        Value::PrimitiveVector(p) => usize::try_from(n).ok().and_then(|idx| p.get(idx).cloned()),
         Value::MapEntry { key, val } => usize::try_from(n).ok().and_then(|idx| match idx {
             0 => Some((**key).clone()),
             1 => Some((**val).clone()),
@@ -1292,11 +1397,33 @@ pub(crate) fn native_nth(eval: &mut Evaluator, args: &[Value]) -> Result<Value, 
     if let Some(c) = crate::collmisc::as_chunk(coll) {
         return crate::collmisc::chunk_nth(c, n, not_found);
     }
-    if matches!(coll, Value::Vector(_) | Value::MapEntry { .. })
-        || as_subvector(coll).is_some()
+    if matches!(
+        coll,
+        Value::Vector(_) | Value::MapEntry { .. } | Value::PrimitiveVector(_)
+    ) || as_subvector(coll).is_some()
         || matches!(coll, Value::Transient(_))
     {
         return nth_indexed(coll, n, not_found);
+    }
+    // Arrays: `not-found` on OOB, else the empty `AIOOBE` (S15
+    // oracles `a-nth`, `a-nth-nf`, `a-nth-oob`, `e-nth-float`,
+    // `n-arr-str`, `n-arr-nil`).
+    if let Value::Array(a) = coll {
+        let found = usize::try_from(n).ok().and_then(|idx| {
+            if idx < a.len() {
+                Some(crate::arrays::array_read(a, idx))
+            } else {
+                None
+            }
+        });
+        return match (found, not_found) {
+            (Some(v), _) => Ok(v),
+            (None, Some(nf)) => Ok(nf.clone()),
+            (None, None) => Err(NativeError::new(
+                ThrowClass::ArrayIndexOutOfBoundsException,
+                String::new(),
+            )),
+        };
     }
     if let Value::Str(s) = coll {
         return nth_str(s, n, not_found);
@@ -1787,6 +1914,7 @@ fn native_peek(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErr
         Value::Nil => Ok(Value::Nil),
         Value::List(l) => Ok(l.first().cloned().unwrap_or(Value::Nil)),
         Value::Vector(x) => Ok(x.iter().last().cloned().unwrap_or(Value::Nil)),
+        Value::PrimitiveVector(p) => Ok(p.iter().last().cloned().unwrap_or(Value::Nil)),
         Value::MapEntry { val, .. } => Ok((**val).clone()),
         _ => {
             if let Some(sv) = as_subvector(&args[0]) {
@@ -1824,6 +1952,20 @@ fn pop_vector(x: &Vector) -> Result<Value, NativeError> {
     ))
 }
 
+/// `pop` over a primitive vector (stays typed; empty pops throw
+/// like vectors).
+fn pop_pv(p: &PrimitiveVector) -> Result<Value, NativeError> {
+    if p.is_empty() {
+        return Err(NativeError::new(
+            ThrowClass::IllegalStateException,
+            "Can't pop empty vector".to_owned(),
+        ));
+    }
+    Ok(Value::PrimitiveVector(
+        p.drop_last().expect("non-empty vector has a tail"),
+    ))
+}
+
 /// `pop` over anything else (subvectors shrink; the rest fail).
 fn pop_fallback(arg: &Value) -> Result<Value, NativeError> {
     if let Some(sv) = as_subvector(arg) {
@@ -1846,6 +1988,7 @@ fn native_pop(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErro
         Value::Nil => Ok(Value::Nil),
         Value::List(l) => pop_list(l),
         Value::Vector(x) => pop_vector(x),
+        Value::PrimitiveVector(p) => pop_pv(p),
         // Popping an entry answers its 1-vector (Oracle FX2
         // `peek-pop`, `pop-class`).
         Value::MapEntry { key, .. } => Ok(Value::Vector(Vector::from_vec(vec![(**key).clone()]))),
@@ -1857,6 +2000,9 @@ fn native_pop(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErro
 fn subvec3(v: &Value, start_v: &Value, end_v: &Value) -> Result<Value, NativeError> {
     let (backing, base, len) = match v {
         Value::Vector(x) => (x.clone(), 0, x.len()),
+        // `subvec` of a primitive vector is a plain subvector
+        // (S15 oracle `j-subvec-cls`).
+        Value::PrimitiveVector(p) => (Vector::from_vec(p.items()), 0, p.len()),
         Value::MapEntry { key, val } => (
             Vector::from_vec(vec![(**key).clone(), (**val).clone()]),
             0,
@@ -1897,13 +2043,17 @@ fn native_subvec(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeEr
 fn native_replace(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/replace", args, &[2])?;
     let (smap, coll) = (&args[0], &args[1]);
-    if !(matches!(coll, Value::Vector(_) | Value::MapEntry { .. }) || as_subvector(coll).is_some())
+    if !(matches!(
+        coll,
+        Value::Vector(_) | Value::MapEntry { .. } | Value::PrimitiveVector(_)
+    ) || as_subvector(coll).is_some())
     {
         return Ok(replace_thunk(smap.clone(), coll.clone()));
     }
     let n = match coll {
         Value::Vector(x) => x.len(),
         Value::MapEntry { .. } => 2,
+        Value::PrimitiveVector(p) => p.len(),
         _ => as_subvector(coll).map(|sv| sv.len()).unwrap_or(0),
     };
     let mut acc = coll.clone();

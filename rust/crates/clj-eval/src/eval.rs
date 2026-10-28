@@ -17,7 +17,8 @@ use std::sync::Arc;
 
 use clj_reader::{Reader, ReaderOpts, Span};
 use clj_value::{
-    Delay, Keyword, List, Map, Promise, Symbol, ThrowClass, Throwable, Value, Var, Vector, new_map,
+    Delay, Keyword, List, Map, PrimitiveVector, Promise, Symbol, ThrowClass, Throwable, Value, Var,
+    Vector, new_map,
 };
 
 use crate::coll::native_nth;
@@ -1624,6 +1625,7 @@ impl Evaluator {
             Value::Keyword(kw) => self.invoke_keyed(callee, &kw.to_string(), args),
             Value::Symbol(_) => self.invoke_keyed(callee, "clojure.lang.Symbol", args),
             Value::Vector(v) => self.invoke_vector(v, args),
+            Value::PrimitiveVector(p) => self.invoke_pv(p, args),
             Value::MapEntry { key, val } => self.invoke_mapentry(key, val, args),
             Value::Map(_) => self.invoke_map(callee, args),
             Value::Set(s) => self.invoke_set(s, args),
@@ -1759,6 +1761,45 @@ impl Evaluator {
             )));
         };
         match usize::try_from(*n).ok().and_then(|i| v.iter().nth(i)) {
+            Some(elem) => Ok(elem.clone()),
+            None => Err(self.throw(NativeError::new(
+                ThrowClass::IndexOutOfBoundsException,
+                String::new(),
+            ))),
+        }
+    }
+
+    /// Invoke a primitive vector: exactly one `isInteger` key
+    /// (`Int`/`BigInt`/`BigInteger` — `Short`/`Double`/nil and the
+    /// rest fail `Key must be integer`, OOB is the empty `IOOBE`,
+    /// any other arity is the `ArityException` naming
+    /// `clojure.core.Vec` — the JVM throws `AbstractMethodError`
+    /// for the missing overloads, which the port pins as
+    /// `ArityException`, promise precedent; S15 oracles `f-invoke`,
+    /// `f-invoke-2`, `f-invoke-bad`, `f-invoke-oob`).
+    fn invoke_pv(&mut self, p: &PrimitiveVector, args: &[Value]) -> Result<Value, Signal> {
+        if args.len() != 1 {
+            return Err(self.throw(NativeError::arity("clojure.core.Vec", args.len())));
+        }
+        // The `isInteger` gate passes `Int`/`BigInt`/`BigInteger`
+        // only; the key then coerces through core-`int` (huge
+        // `BigInt` fails the `long` stop with exact digits —
+        // oracle `g-vo-hugekey`).
+        if !matches!(
+            &args[0],
+            Value::Int(_) | Value::BigInt(_) | Value::BigInteger(_)
+        ) {
+            return Err(self.throw(NativeError::new(
+                ThrowClass::IllegalArgumentException,
+                "Key must be integer".to_owned(),
+            )));
+        }
+        let coerced = crate::core::native_int(self, &args[0..1]).map_err(|e| self.throw(e))?;
+        let Value::Int(i) = coerced else {
+            unreachable!("int answers Int")
+        };
+        // Core-`int` range-checks, so the `i64` always fits `i32`.
+        match usize::try_from(i as i32).ok().and_then(|idx| p.get(idx)) {
             Some(elem) => Ok(elem.clone()),
             None => Err(self.throw(NativeError::new(
                 ThrowClass::IndexOutOfBoundsException,
@@ -2272,6 +2313,11 @@ impl Evaluator {
         match coll {
             Value::Map(m) => self.conj_map(m, elem).map(Value::Map),
             Value::Vector(v) => Ok(Value::Vector(v.push_back(elem))),
+            Value::PrimitiveVector(p) => {
+                let co = crate::arrays::vector_coerce(self, p.elem(), &elem)
+                    .map_err(|e| self.throw(e))?;
+                Ok(Value::PrimitiveVector(p.push_back(co)))
+            }
             Value::MapEntry { key, val } => {
                 let tmp = Vector::from_vec(vec![*key, *val]);
                 Ok(Value::Vector(tmp.push_back(elem)))
@@ -2307,6 +2353,14 @@ impl Evaluator {
                     ))),
                 }
             }
+            // `Vec` is an `IPersistentVector`: pairs assoc like vectors.
+            Value::PrimitiveVector(p) => match p.items().as_slice() {
+                [k, val] => Ok(map.insert(k.clone(), val.clone())),
+                _ => Err(self.throw(NativeError::new(
+                    ThrowClass::IllegalArgumentException,
+                    "Vector arg to map conj must be a pair".to_owned(),
+                ))),
+            },
             Value::MapEntry { key, val } => Ok(map.insert(*key, *val)),
             other => match self.seq_opt(&other)? {
                 None => Ok(map),
@@ -2382,6 +2436,18 @@ impl Evaluator {
                 *map = std::mem::replace(map, new_map()).insert(items[0].clone(), items[1].clone());
                 Ok(())
             }
+            // `Vec` is an `IPersistentVector`: pairs assoc like vectors.
+            Value::PrimitiveVector(p) => {
+                let items = p.items();
+                if items.len() != 2 {
+                    return Err(self.throw(NativeError::new(
+                        ThrowClass::IllegalArgumentException,
+                        "Vector arg to map conj must be a pair".to_owned(),
+                    )));
+                }
+                *map = std::mem::replace(map, new_map()).insert(items[0].clone(), items[1].clone());
+                Ok(())
+            }
             Value::Nil => Ok(()),
             // An entry trailer conjs as its pair (Oracle FX2
             // `trailer-entry`).
@@ -2391,6 +2457,10 @@ impl Evaluator {
             }
             Value::List(l) => {
                 let elems: Vec<Value> = l.iter().cloned().collect();
+                self.fold_seqable_trailing(map, elems)
+            }
+            Value::Array(a) => {
+                let elems: Vec<Value> = a.snapshot();
                 self.fold_seqable_trailing(map, elems)
             }
             Value::Set(s) => {
@@ -2669,6 +2739,8 @@ impl Evaluator {
                 }
             }
             Value::Vector(v) => Ok(Self::seq_list_opt(v.iter().cloned().collect())),
+            Value::PrimitiveVector(p) => Ok(Self::seq_list_opt(p.items())),
+            Value::Array(a) => Ok(Self::seq_list_opt(a.snapshot())),
             Value::Set(s) => Ok(Self::seq_list_opt(s.iter().cloned().collect())),
             Value::Str(s) => Ok(Self::seq_list_opt(s.chars().map(Value::Char).collect())),
             Value::Map(m) => Ok(Self::seq_list_opt(

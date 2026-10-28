@@ -1886,3 +1886,36 @@
   {:added "1.13"}
   [x]
   (doto x tap>))
+
+;; --- `amap` / `areduce` (S15): verbatim ports of the alpha10
+;; `core.clj` macros except `unchecked-inc`/`unchecked-inc-int`
+;; become `inc` (those vars do not exist in the port; the port's
+;; own `dotimes` substitutes `inc` the same way). Oracles:
+;; `docs/zero-oos-s15-arrays/probes/interop.{clj,out}` (`e-amap*`,
+;; `e-areduce*`, `e-expand-*`).
+(defmacro amap
+  "Maps an expression across an array a, using an index named idx, and
+  return value named ret, initialized to a clone of a, then setting
+  each element of ret to the evaluation of expr, returning the new
+  array ret."
+  {:added "1.0"}
+  [a idx ret expr]
+  `(let [a# ~a l# (alength a#)
+         ~ret (aclone a#)]
+     (loop [~idx 0]
+       (if (< ~idx l#)
+         (do
+           (aset ~ret ~idx ~expr)
+           (~'recur (inc ~idx)))
+         ~ret))))
+(defmacro areduce
+  "Reduces an expression across an array a, using an index named idx,
+  and return value named ret, initialized to init, setting ret to the
+  evaluation of expr at each step, returning ret."
+  {:added "1.0"}
+  [a idx ret init expr]
+  `(let [a# ~a l# (alength a#)]
+     (loop [~idx 0 ~ret ~init]
+       (if (< ~idx l#)
+         (~'recur (inc ~idx) ~expr)
+         ~ret))))

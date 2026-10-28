@@ -198,7 +198,7 @@ pub(crate) fn nth_index(v: &Value) -> Result<i32, NativeError> {
 /// digits, past-`i32` fails `integer overflow` (oracles
 /// `nth-big`, `nth-intrange`, `conv-hugeint` — shared by `int`,
 /// `nth`, and `subvec`).
-fn tower_intcast(n: &num_bigint::BigInt) -> Result<i32, NativeError> {
+pub(crate) fn tower_intcast(n: &num_bigint::BigInt) -> Result<i32, NativeError> {
     let l = n
         .to_i64()
         .ok_or_else(|| out_of_range("long", Num::BigInt(n.clone())))?;
@@ -260,7 +260,7 @@ fn narrow_num(n: &Num, lo: i64, hi: i64, kind: &'static str) -> Result<i64, Nati
 /// Java `intValue`: low 32 bits, sign-extended (`BigDecimal`
 /// `(char 1E300M)` needs the NUL, not a range error; oracle
 /// `tower-r2f`).
-fn bigint_int_value(n: &num_bigint::BigInt) -> i32 {
+pub(crate) fn bigint_int_value(n: &num_bigint::BigInt) -> i32 {
     let mut le = n.to_signed_bytes_le();
     le.resize(
         4,
@@ -353,6 +353,7 @@ pub(crate) fn is_ifn(v: &Value) -> bool {
         | Value::Var(_)
         | Value::Promise(_)
         | Value::MultiFn(_)
+        | Value::PrimitiveVector(_)
         | Value::Unbound(_) => true,
         // Struct instances only (records and bases miss — S12
         // oracle `sm-ifn`; records stay pinned non-`IFn` by
@@ -1585,27 +1586,41 @@ fn is_simple_symbol(v: &Value) -> bool {
 fn is_coll(v: &Value) -> bool {
     matches!(
         v,
-        Value::List(_) | Value::Vector(_) | Value::MapEntry { .. } | Value::Map(_) | Value::Set(_)
+        Value::List(_)
+            | Value::Vector(_)
+            | Value::MapEntry { .. }
+            | Value::Map(_)
+            | Value::Set(_)
+            | Value::PrimitiveVector(_)
     ) || as_subvector(v).is_some()
         || is_seq_value(v)
         || crate::types::is_host_record(v)
         || crate::types::is_host_struct(v)
 }
 fn is_sequential(v: &Value) -> bool {
-    matches!(v, Value::Vector(_) | Value::MapEntry { .. })
-        || as_subvector(v).is_some()
+    matches!(
+        v,
+        Value::Vector(_) | Value::MapEntry { .. } | Value::PrimitiveVector(_)
+    ) || as_subvector(v).is_some()
         || is_seq_value(v)
 }
 fn is_associative(v: &Value) -> bool {
-    matches!(v, Value::Map(_) | Value::Vector(_) | Value::MapEntry { .. })
-        || as_subvector(v).is_some()
+    matches!(
+        v,
+        Value::Map(_) | Value::Vector(_) | Value::MapEntry { .. } | Value::PrimitiveVector(_)
+    ) || as_subvector(v).is_some()
         || crate::types::is_host_record(v)
         || crate::types::is_host_struct(v)
 }
 pub(crate) fn is_counted(v: &Value) -> bool {
     matches!(
         v,
-        Value::List(_) | Value::Vector(_) | Value::MapEntry { .. } | Value::Map(_) | Value::Set(_)
+        Value::List(_)
+            | Value::Vector(_)
+            | Value::MapEntry { .. }
+            | Value::Map(_)
+            | Value::Set(_)
+            | Value::PrimitiveVector(_)
     ) || crate::coll::is_transient(v)
         || as_subvector(v).is_some()
         || is_counted_seq(v)
@@ -1617,7 +1632,10 @@ fn is_list(v: &Value) -> bool {
     matches!(v, Value::List(_))
 }
 fn is_vector(v: &Value) -> bool {
-    matches!(v, Value::Vector(_) | Value::MapEntry { .. }) || as_subvector(v).is_some()
+    matches!(
+        v,
+        Value::Vector(_) | Value::MapEntry { .. } | Value::PrimitiveVector(_)
+    ) || as_subvector(v).is_some()
 }
 fn is_map(v: &Value) -> bool {
     matches!(v, Value::Map(_)) || crate::types::is_host_record(v) || crate::types::is_host_struct(v)
@@ -1639,8 +1657,10 @@ fn is_sorted(v: &Value) -> bool {
 // Lists, hash maps, hash sets, queues, seqs (including `rseq`),
 // and transients do not (`docs/t1192/probes/fx2b-reversible`).
 fn is_reversible(v: &Value) -> bool {
-    matches!(v, Value::Vector(_) | Value::MapEntry { .. })
-        || as_subvector(v).is_some()
+    matches!(
+        v,
+        Value::Vector(_) | Value::MapEntry { .. } | Value::PrimitiveVector(_)
+    ) || as_subvector(v).is_some()
         || is_sorted(v)
 }
 fn is_var(v: &Value) -> bool {
@@ -1656,6 +1676,8 @@ fn is_seqable(v: &Value) -> bool {
             | Value::MapEntry { .. }
             | Value::Map(_)
             | Value::Set(_)
+            | Value::Array(_)
+            | Value::PrimitiveVector(_)
     ) || as_subvector(v).is_some()
         || is_seq_value(v)
         || crate::types::is_host_record(v)
@@ -1686,7 +1708,10 @@ fn is_map_entry(v: &Value) -> bool {
 // strings, seqs, maps, sets, and arrays answer false
 // (probes `p-indexed-*`).
 fn is_indexed(v: &Value) -> bool {
-    matches!(v, Value::Vector(_) | Value::MapEntry { .. }) || as_subvector(v).is_some()
+    matches!(
+        v,
+        Value::Vector(_) | Value::MapEntry { .. } | Value::PrimitiveVector(_)
+    ) || as_subvector(v).is_some()
 }
 // `nat-int?` / `neg-int?` / `pos-int?` (S1): composed over the
 // port's `int?` (`Int`-only — BigInts answer false exactly like
@@ -2334,7 +2359,10 @@ fn str_of_realized(eval: &mut Evaluator, v: &Value) -> Result<String, NativeErro
         | Value::Future(_)
         | Value::Promise(_)
         | Value::Agent(_)
-        | Value::Volatile(_) => clj_value::java_debug(&r),
+        | Value::Volatile(_)
+        // Arrays render `toString` too (`{desc}@{id}` — S15 oracle
+        // `d-str-int`).
+        | Value::Array(_) => clj_value::java_debug(&r),
         Value::List(_) | Value::Vector(_) | Value::Map(_) | Value::Set(_) => {
             clj_value::pr_to_string(&r, &clj_value::PrintOpts::pr())
         }
@@ -2615,7 +2643,7 @@ fn native_namespace(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nati
 
 /// The `charValue` NPE (`int` of nil — `int` falls back to the
 /// `Character` cast, fixprobe10 `:int-nil`).
-fn npe_char_value() -> NativeError {
+pub(crate) fn npe_char_value() -> NativeError {
     NativeError::new(
         ThrowClass::NullPointerException,
         "Cannot invoke \"java.lang.Character.charValue()\" because \"x\" is null".to_owned(),
@@ -2638,7 +2666,7 @@ fn bigint_long(n: &num_bigint::BigInt) -> Result<i64, NativeError> {
 
 /// The `doubleValue` NPE (`long`/`double`/`float`/`short`/`byte`
 /// of nil).
-fn npe_double_value() -> NativeError {
+pub(crate) fn npe_double_value() -> NativeError {
     NativeError::new(
         ThrowClass::NullPointerException,
         "Cannot invoke \"java.lang.Number.doubleValue()\" because \"x\" is null".to_owned(),
@@ -2646,7 +2674,7 @@ fn npe_double_value() -> NativeError {
 }
 
 /// The `longValue` NPE (`char` of nil).
-fn npe_long_value() -> NativeError {
+pub(crate) fn npe_long_value() -> NativeError {
     NativeError::new(
         ThrowClass::NullPointerException,
         "Cannot invoke \"java.lang.Number.longValue()\" because \"x\" is null".to_owned(),
@@ -2656,7 +2684,7 @@ fn npe_long_value() -> NativeError {
 /// `IAE | Value out of range for {kind}: {x}` — doubles render
 /// via `Double.toString`, ints raw (fixprobe10 `:int-huge`),
 /// tower values exactly.
-fn out_of_range(kind: &str, n: Num) -> NativeError {
+pub(crate) fn out_of_range(kind: &str, n: Num) -> NativeError {
     let x = match n {
         Num::Int(i) => i.to_string(),
         Num::Double(d) => clj_value::java_double_string(d),
@@ -2712,7 +2740,7 @@ pub(crate) fn number_int_cast(v: &Value) -> Result<i32, NativeError> {
     }
 }
 
-fn native_int(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+pub(crate) fn native_int(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/int", args, &[1])?;
     // `int` keeps the value a `Long` (no 32-bit ints exist), but
     // checks the int range exactly: longs past it are `AE |
@@ -2735,7 +2763,7 @@ fn double_int(d: f64) -> Result<i64, NativeError> {
     }
 }
 
-fn native_long(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+pub(crate) fn native_long(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/long", args, &[1])?;
     Ok(Value::Int(match &args[0] {
         Value::Int(i) => *i,
@@ -2751,7 +2779,7 @@ fn native_long(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErr
     }))
 }
 
-fn native_double(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+pub(crate) fn native_double(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/double", args, &[1])?;
     Ok(Value::Double(match &args[0] {
         Value::Int(i) => *i as f64,
@@ -3069,7 +3097,7 @@ pub(crate) fn arithmetic(message: impl Into<String>) -> NativeError {
     NativeError::new(ThrowClass::ArithmeticException, message.into())
 }
 
-fn native_float(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+pub(crate) fn native_float(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/float", args, &[1])?;
     // No `Float` exists: the float range is checked, then the
     // EXACT double is returned (no `f32` rounding — printing and
@@ -3101,7 +3129,7 @@ fn float_checked(f: f64, err: Num) -> Result<f64, NativeError> {
     }
 }
 
-fn native_short(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+pub(crate) fn native_short(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/short", args, &[1])?;
     Ok(Value::Int(match &args[0] {
         Value::Char(c) => *c as i64,
@@ -3113,7 +3141,7 @@ fn native_short(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeEr
     }))
 }
 
-fn native_byte(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+pub(crate) fn native_byte(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/byte", args, &[1])?;
     Ok(Value::Int(match &args[0] {
         Value::Char(c) => *c as i64,
@@ -3124,7 +3152,7 @@ fn native_byte(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErr
     }))
 }
 
-fn native_char(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+pub(crate) fn native_char(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/char", args, &[1])?;
     Ok(Value::Char(match &args[0] {
         Value::Char(c) => *c,

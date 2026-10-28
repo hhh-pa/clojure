@@ -15,8 +15,8 @@
 use std::sync::Arc;
 
 use clj_value::{
-    Agent, Atom, ExtensionValue, Future, HostInst, List, Map, Promise, Set, Symbol, ThrowClass,
-    Value, Var, Vector, extension_supports_meta, extension_with_meta, new_map,
+    Agent, Atom, ExtensionValue, Future, HostInst, List, Map, PrimitiveVector, Promise, Set,
+    Symbol, ThrowClass, Value, Var, Vector, extension_supports_meta, extension_with_meta, new_map,
 };
 
 use crate::core::cce_err;
@@ -271,6 +271,7 @@ enum IObj<'v> {
     Symbol(&'v Symbol),
     List(&'v List),
     Vector(&'v Vector),
+    PrimitiveVector(&'v PrimitiveVector),
     Map(&'v Map),
     Set(&'v Set),
     Future(&'v Future),
@@ -290,6 +291,7 @@ fn as_iobj(obj: &Value) -> Result<IObj<'_>, NativeError> {
         Value::Symbol(s) => Ok(IObj::Symbol(s)),
         Value::List(l) => Ok(IObj::List(l)),
         Value::Vector(x) => Ok(IObj::Vector(x)),
+        Value::PrimitiveVector(p) => Ok(IObj::PrimitiveVector(p)),
         Value::Map(m) => Ok(IObj::Map(m)),
         Value::Set(s) => Ok(IObj::Set(s)),
         Value::Future(f) => Ok(IObj::Future(f)),
@@ -358,6 +360,7 @@ fn with_meta_val(obj: &Value, meta: &Value) -> Result<Value, NativeError> {
         IObj::Symbol(s) => Ok(Value::Symbol(s.clone().with_meta(meta))),
         IObj::List(l) => Ok(Value::List(l.clone().with_meta(meta))),
         IObj::Vector(x) => Ok(Value::Vector(x.clone().with_meta(meta))),
+        IObj::PrimitiveVector(p) => Ok(Value::PrimitiveVector(p.clone().with_meta(meta))),
         IObj::Map(m) => Ok(Value::Map(m.clone().with_meta(meta))),
         IObj::Set(s) => Ok(Value::Set(s.clone().with_meta(meta))),
         // New handles sharing the outcome/latch cell (the reify's
