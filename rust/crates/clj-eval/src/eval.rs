@@ -2219,9 +2219,18 @@ impl Evaluator {
                 *map = std::mem::replace(map, new_map()).insert((**key).clone(), (**val).clone());
                 Ok(())
             }
-            Value::List(l) => self.check_seqable_trailing(map, l.iter().next().cloned()),
-            Value::Set(s) => self.check_seqable_trailing(map, s.iter().next().cloned()),
-            Value::Str(s) => self.check_seqable_trailing(map, s.chars().next().map(Value::Char)),
+            Value::List(l) => {
+                let elems: Vec<Value> = l.iter().cloned().collect();
+                self.fold_seqable_trailing(map, elems)
+            }
+            Value::Set(s) => {
+                let elems: Vec<Value> = s.iter().cloned().collect();
+                self.fold_seqable_trailing(map, elems)
+            }
+            Value::Str(s) => {
+                let elems: Vec<Value> = s.chars().map(Value::Char).collect();
+                self.fold_seqable_trailing(map, elems)
+            }
             other => Err(self.throw(NativeError::new(
                 ThrowClass::IllegalArgumentException,
                 format!(
@@ -2232,25 +2241,25 @@ impl Evaluator {
         }
     }
 
-    /// The odd-tail seqable rule: empties vanish, a leading entry
-    /// conjs as its pair (Oracle FX2 `trailer-listentry`), else the
-    /// first element is the entry-cast error.
-    fn check_seqable_trailing(
-        &mut self,
-        map: &mut Map,
-        first: Option<Value>,
-    ) -> Result<(), Signal> {
-        match first {
-            None => Ok(()),
-            Some(Value::MapEntry { key, val }) => {
-                *map = std::mem::replace(map, new_map()).insert(*key, *val);
-                Ok(())
+    /// The odd-tail seqable rule: empties vanish, every entry
+    /// conjs as its pair (Oracle FX2 `trailer-listentry`), and the
+    /// first non-entry is the entry-cast error (issue #70: the JVM
+    /// `APersistentMap.cons` loop folds EVERY seqed element).
+    fn fold_seqable_trailing(&mut self, map: &mut Map, elems: Vec<Value>) -> Result<(), Signal> {
+        for elem in elems {
+            match elem {
+                Value::MapEntry { key, val } => {
+                    *map = std::mem::replace(map, new_map()).insert(*key, *val);
+                }
+                other => {
+                    return Err(self.throw(NativeError::cast(
+                        &jvm_class_of(&other),
+                        "java.util.Map$Entry",
+                    )));
+                }
             }
-            Some(first) => Err(self.throw(NativeError::cast(
-                &jvm_class_of(&first),
-                "java.util.Map$Entry",
-            ))),
         }
+        Ok(())
     }
 }
 

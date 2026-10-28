@@ -406,9 +406,17 @@ Mirrors `destvec*`/`destmap*` (`core.clj`), including the 1.13 directives.
   wins duplicates (probe27 `trailing-wins`/`trailing-order`):
   trailing map merges, trailing
   2-vector assocs (other lengths → `IllegalArgumentException | Vector arg
-  to map conj must be a pair`), trailing `nil` is a no-op, trailing
-  sequential contributors must be map entries (ours never are — 2-vectors
-  included — so `ClassCastException` X→`java.util.Map$Entry`), anything
+  to map conj must be a pair`), trailing `nil` is a no-op, a trailing
+  entry conjs as its pair (Oracle FX2 `trailer-entry`), and every other
+  seqable trailer folds element-by-element like `conj`: each element
+  must be a map entry (probe25 `odd-trailing-two`), the first non-entry
+  — a 2-vector included — being `ClassCastException`
+  X→`java.util.Map$Entry` (probe25 `odd-trailing-entries` /
+  `odd-trailing-entrybad`). Issue #70: the JVM `APersistentMap.cons`
+  loop folds EVERY seqed element; the port folded only the first. The
+  CCE keeps the stable E8 text (S12's `iteration` opts path uses the
+  full-verbiage JVM text instead — a per-surface choice; the S4
+  `eval_semantics` pins predate it and stay on E8). Anything
   else → `IllegalArgumentException | Don't know how to create ISeq from:
   CLASS`.
 - `:or` maps binding-local-or-key → default expression. Defaults are

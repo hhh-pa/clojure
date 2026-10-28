@@ -14,7 +14,7 @@
 use std::sync::{Arc, Mutex};
 
 use clj_eval::{Evaluator, NativeError, SourceError};
-use clj_value::{PrintOpts, Symbol, ThrowClass, Throwable, Value, pr_to_string};
+use clj_value::{Keyword, List, PrintOpts, Symbol, ThrowClass, Throwable, Value, pr_to_string};
 
 fn pr(v: &Value) -> String {
     pr_to_string(v, &PrintOpts::pr())
@@ -1078,6 +1078,62 @@ fn map_destructure_odd_trailing() {
         uncaught("(let [{a :a} '(:a 1 \"xy\")] a)"),
         "java.lang.ClassCastException | Cannot cast java.lang.Character to java.util.Map$Entry"
     );
+}
+
+#[test]
+fn map_destructure_multi_entry_trailer() {
+    // Issue #70: a seqable trailer folds EVERY element (the JVM
+    // `APersistentMap.cons` loop), not just the first. S4 ships no
+    // prelude, so natives build the entry trailers (probe25
+    // `odd-trailing-two` / `odd-trailing-entrybad`).
+    fn entry(k: &str, v: i64) -> Value {
+        Value::MapEntry {
+            key: Box::new(Value::Keyword(Keyword::new(None, k))),
+            val: Box::new(Value::Int(v)),
+        }
+    }
+    fn target(tail: Vec<Value>) -> Value {
+        Value::List(List::from_vec(vec![
+            Value::Keyword(Keyword::new(None, "a")),
+            Value::Int(1),
+            Value::List(List::from_vec(tail)),
+        ]))
+    }
+    let (mut eval, _) = rigged();
+    eval.install_native(
+        "user",
+        "t-two",
+        Arc::new(|_, args| match args {
+            [] => Ok(target(vec![entry("b", 2), entry("c", 3)])),
+            _ => Err(NativeError::arity("test/t-two", args.len())),
+        }),
+    );
+    eval.install_native(
+        "user",
+        "t-entrybad",
+        Arc::new(|_, args| match args {
+            [] => Ok(target(vec![entry("b", 2), Value::Int(42)])),
+            _ => Err(NativeError::arity("test/t-entrybad", args.len())),
+        }),
+    );
+    assert_eq!(
+        run_last(&mut eval, "(let [{a :a, b :b, c :c} (t-two)] [a b c])"),
+        "[1 2 3]"
+    );
+    // A bad second element throws the entry CCE (stable E8 text,
+    // like the single-element pins above).
+    match eval.eval_source("(let [{a :a, b :b} (t-entrybad)] [a b])") {
+        Err(SourceError::Uncaught(t)) => assert_eq!(
+            format!(
+                "{} | {}",
+                t.class.jvm_name(),
+                t.message.as_deref().unwrap_or("")
+            ),
+            "java.lang.ClassCastException | Cannot cast java.lang.Long to java.util.Map$Entry"
+        ),
+        Err(other) => panic!("expected an uncaught throw, got {other}"),
+        Ok(_) => panic!("expected (t-entrybad) to throw"),
+    }
 }
 
 #[test]
