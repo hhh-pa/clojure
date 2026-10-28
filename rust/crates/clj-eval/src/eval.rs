@@ -123,6 +123,7 @@ pub struct Evaluator {
     source: Arc<str>,
     future_threads: Arc<std::sync::Mutex<Vec<std::thread::JoinHandle<()>>>>,
     agent_system: Arc<crate::concurrency::AgentSystem>,
+    tap_system: Arc<crate::concurrency::TapSystem>,
     native_call_span: Option<Span>,
     /// Sends buffered while an agent action fn runs (the JVM's
     /// thread-local `nested`): released on success, discarded on
@@ -177,6 +178,7 @@ impl Evaluator {
             source: Arc::from(source),
             future_threads: Arc::new(std::sync::Mutex::new(Vec::new())),
             agent_system: Arc::new(crate::concurrency::AgentSystem::new()),
+            tap_system: Arc::new(crate::concurrency::TapSystem::new()),
             native_call_span: None,
             agent_outbox: None,
             analyze_depth_limit: None,
@@ -202,6 +204,7 @@ impl Evaluator {
             source: Arc::clone(&self.source),
             future_threads: Arc::clone(&self.future_threads),
             agent_system: Arc::clone(&self.agent_system),
+            tap_system: Arc::clone(&self.tap_system),
             native_call_span: None,
             agent_outbox: None,
             // Budgets never cross threads (limits are set on
@@ -234,6 +237,23 @@ impl Evaluator {
     /// futures reject instead of spawning).
     pub(crate) fn agent_system_shutdown(&self) -> bool {
         self.agent_system.is_shutdown()
+    }
+
+    /// This lineage's tap system (shared by every forked evaluator,
+    /// like the agent system).
+    pub(crate) fn tap_system(&self) -> &Arc<crate::concurrency::TapSystem> {
+        &self.tap_system
+    }
+
+    /// Record the `send` executor (S10 accept-and-record: stored and
+    /// returned by the setter, never consulted by dispatch).
+    pub(crate) fn set_send_executor(&self, executor: Value) {
+        self.agent_system.set_send_executor(executor);
+    }
+
+    /// Record the `send-off` executor (same contract).
+    pub(crate) fn set_send_off_executor(&self, executor: Value) {
+        self.agent_system.set_send_off_executor(executor);
     }
 
     /// This lineage's agent pools, creating them on first use

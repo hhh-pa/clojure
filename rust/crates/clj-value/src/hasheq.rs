@@ -38,7 +38,7 @@
 //!   natives MUST realize seqs before calling either function.
 //! - Never assert exact values for identity hashes: [`Value::Transient`],
 //!   [`Value::Atom`], [`Value::Delay`], [`Value::Future`],
-//!   [`Value::Promise`], [`Value::Agent`], [`Value::Var`],
+//!   [`Value::Promise`], [`Value::Agent`], [`Value::Volatile`], [`Value::Var`],
 //!   [`Value::Unbound`], [`Value::Throwable`], and unrecognized
 //!   extensions have NO stable JVM hash (identity hashCode). Here
 //!   they hash from the per-process `id` (or a fixed tag), so values
@@ -168,6 +168,7 @@ fn hasheq_rest(v: &Value) -> i32 {
         Value::Future(f) => id_hash(f.id()),
         Value::Promise(p) => id_hash(p.id()),
         Value::Agent(a) => id_hash(a.id()),
+        Value::Volatile(v) => id_hash(v.id()),
         Value::Extension(ext) => hasheq_extension(&**ext),
         // All other variants are handled by `hasheq`/`hasheq_mid`
         // (the single caller partitions the variants).
@@ -290,6 +291,7 @@ fn hash_code_rest(v: &Value) -> i32 {
         Value::Future(f) => id_hash(f.id()),
         Value::Promise(p) => id_hash(p.id()),
         Value::Agent(a) => id_hash(a.id()),
+        Value::Volatile(v) => id_hash(v.id()),
         // Deterministic stand-ins (the `BigInteger`/`BigDecimal`
         // word formulas are not mirrored — see module docs).
         Value::BigInt(n) => hash_ordered(n.to_signed_bytes_be().into_iter().map(i32::from)),
@@ -422,10 +424,9 @@ fn double_hasheq(d: f64) -> i32 {
 }
 
 /// Identity-typed values (`Var`, `Unbound`, `Throwable`, `Transient`,
-/// `Atom`, `Delay`, `Future`, `Promise`): the JVM uses identity
-/// hashCode; here the
-/// per-process `id` mixed as a long. Stable within one process only —
-/// see the module docs.
+/// `Atom`, `Delay`, `Future`, `Promise`, `Agent`, `Volatile`): the JVM
+/// uses identity hashCode; here the per-process `id` mixed as a long.
+/// Stable within one process only — see the module docs.
 fn id_hash(id: u64) -> i32 {
     long_hash_code(id)
 }
@@ -504,7 +505,7 @@ fn realized_items(ext: &dyn ExtensionValue) -> Option<Vec<Value>> {
 
 /// `Murmur3.hashOrdered`: `31`-chain from `1` over element hasheqs,
 /// then `mixCollHash(hash, count)`.
-fn hash_ordered<I>(hashes: I) -> i32
+pub fn hash_ordered<I>(hashes: I) -> i32
 where
     I: Iterator<Item = i32>,
 {
@@ -519,7 +520,7 @@ where
 
 /// `Murmur3.hashUnordered`: sum of element hasheqs, then
 /// `mixCollHash(sum, count)`.
-fn hash_unordered<I>(hashes: I) -> i32
+pub fn hash_unordered<I>(hashes: I) -> i32
 where
     I: Iterator<Item = i32>,
 {

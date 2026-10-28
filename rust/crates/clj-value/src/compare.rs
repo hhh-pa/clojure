@@ -251,6 +251,7 @@ fn ref_or_collection_type_name(v: &Value) -> &'static str {
         Value::Future(_) => "Future",
         Value::Promise(_) => "Promise",
         Value::Agent(_) => "Agent",
+        Value::Volatile(_) => "Volatile",
         _ => collection_type_name(v),
     }
 }

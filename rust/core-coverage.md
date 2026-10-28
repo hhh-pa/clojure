@@ -4,7 +4,7 @@ The complete inventory of `clojure.core` in this port: every var,
 its conformance state, and — for exclusions — why it is excluded.
 If a var is not listed here, that is a file bug, not a silent gap.
 
-- **692 vars: 418 implemented, 1 divergent, 273 out of scope,
+- **692 vars: 431 implemented, 1 divergent, 260 out of scope,
   0 planned.** The port reports Clojure `1.13.0-alpha9`
   (`clojure-version`).
 - **Universe.** 692 rows = 685 JVM publics + 7 extra-universe rows: 4 port-visible JVM privates
@@ -693,7 +693,7 @@ No slice on this branch: hard-never reasons stand alone, design-blocked rows nam
 | `accessor` | out-of-scope | pending design: legacy structmaps as pure maps; see #40 |
 | `aclone` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
 | `add-classpath` | out-of-scope | Deprecated on JVM, no replacement named; classpath URLs have no slice |
-| `add-tap` | out-of-scope | pending design: tap set + queue policy; see #40 |
+| `add-tap` | implemented | cellstaps.rs tap_returns + tap_deliver (conj; lazily starts the clojure.core/tap-loop dispatcher; single 1024 FIFO; per-tap catch) |
 | `agent-errors` | out-of-scope | Deprecated on JVM; replacement implemented |
 | `aget` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
 | `alength` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
@@ -742,7 +742,7 @@ No slice on this branch: hard-never reasons stand alone, design-blocked rows nam
 | `chunked-seq?` | out-of-scope | Chunked-seq + custom-type hashing impl details; port seqs/hash are separate |
 | `class?` | out-of-scope | Host reflection/interop/beans/method-fns (N1) |
 | `clear-agent-errors` | out-of-scope | Deprecated on JVM; replacement implemented |
-| `comparator` | out-of-scope | pending design: comparator wrapper; see #40 |
+| `comparator` | implemented | cellstaps.rs comparator_calls + comparator_sort + comparator_errors (verbatim core.clj body; cond keeps truthy preds ordering; sort/sorted-map-by interop) |
 | `compile` | out-of-scope | Bytecode compiler/classpath surface; port AOT (clj-aot) is separate |
 | `construct-proxy` | out-of-scope | No type-system slice on this branch: proxies/deftype factories/method internals |
 | `create-struct` | out-of-scope | pending design: legacy structmaps as pure maps; see #40 |
@@ -764,8 +764,8 @@ No slice on this branch: hard-never reasons stand alone, design-blocked rows nam
 | `floats` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
 | `get-proxy-class` | out-of-scope | No type-system slice on this branch: proxies/deftype factories/method internals |
 | `hash-combine` | out-of-scope | Chunked-seq + custom-type hashing impl details; port seqs/hash are separate |
-| `hash-ordered-coll` | out-of-scope | pending design: public hash helpers over port colls; see #40 |
-| `hash-unordered-coll` | out-of-scope | pending design: public hash helpers over port colls; see #40 |
+| `hash-ordered-coll` | implemented | cellstaps.rs hash_ordered_values + hash_ordered_errors (Murmur3 ordered mix; maps iterate entries; nil NPE + non-Iterable CCE) |
+| `hash-unordered-coll` | implemented | cellstaps.rs hash_unordered_values (Murmur3 unordered mix; vec-order-insensitive; entry = ordered [k v]; nil NPE) |
 | `init-proxy` | out-of-scope | No type-system slice on this branch: proxies/deftype factories/method internals |
 | `inst-ms` | out-of-scope | pending design: date/time value kind + #inst tag; see #40 |
 | `inst-ms*` | out-of-scope | pending design: date/time value kind + #inst tag; see #40 |
@@ -811,14 +811,14 @@ No slice on this branch: hard-never reasons stand alone, design-blocked rows nam
 | `ref-min-history` | out-of-scope | STM refs/transactions (N4): never |
 | `release-pending-sends` | out-of-scope | pending design: nested-action queue; see #40 |
 | `remove-all-methods` | out-of-scope | pending design: multimethod dispatch seam ([multifn]; coordinate with 33-typechain); see #40 |
-| `remove-tap` | out-of-scope | pending design: tap set + queue policy; see #40 |
+| `remove-tap` | implemented | cellstaps.rs tap_returns + tap_set_semantics (disj by =; never starts the loop) |
 | `replicate` | out-of-scope | Deprecated on JVM; replacement implemented |
 | `resultset-seq` | out-of-scope | JDBC ResultSet adapter; never |
 | `selector` | out-of-scope | pending design: 1.13 map-destructuring selector macro; see #40 |
 | `seq-to-map-for-destructuring` | out-of-scope | pending design: macro-expansion helper surface; see #40 |
 | `seque` | out-of-scope | pending design: queued (blocking) seq; see #40 |
-| `set-agent-send-executor!` | out-of-scope | ExecutorService injection; port agent pools are fixed |
-| `set-agent-send-off-executor!` | out-of-scope | ExecutorService injection; port agent pools are fixed |
+| `set-agent-send-executor!` | implemented | cellstaps.rs exec_record_send (accept-and-record: any value stored + returned; dispatch stays on the fixed send pool — pinned divergences from e-routes/e-nil-send/e-non-exec) |
+| `set-agent-send-off-executor!` | implemented | cellstaps.rs exec_record_send_off (accept-and-record mirror of the send slot; fixed send-off pool) |
 | `short-array` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
 | `shorts` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
 | `stream-into!` | out-of-scope | JDK collection/stream adapters (N1) |
@@ -830,8 +830,8 @@ No slice on this branch: hard-never reasons stand alone, design-blocked rows nam
 | `sync` | out-of-scope | STM refs/transactions (N4): never |
 | `tagged-literal` | out-of-scope | pending design: data-reader tag table; see #40 |
 | `tagged-literal?` | out-of-scope | pending design: data-reader tag table; see #40 |
-| `tap->` | out-of-scope | pending design: tap set + queue policy; see #40 |
-| `tap>` | out-of-scope | pending design: tap set + queue policy; see #40 |
+| `tap->` | implemented | cellstaps.rs tap_thread_first (verbatim core.clj one-liner: returns x and delivers it) |
+| `tap>` | implemented | cellstaps.rs tap_returns + tap_deliver + tap_nil + tap_full (non-blocking offer; true with room, false past 1024) |
 | `to-array` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
 | `to-array-2d` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
 | `unchecked-add` | out-of-scope | pending design: wrapping vs tower-checking per fn; see #40 |
@@ -863,10 +863,10 @@ No slice on this branch: hard-never reasons stand alone, design-blocked rows nam
 | `uri?` | out-of-scope | pending design: URI value kind; see #40 |
 | `uuid?` | out-of-scope | pending design: UUID value kind; see #40 |
 | `vector-of` | out-of-scope | pending design: primitive-vector kind; see #40 |
-| `volatile!` | out-of-scope | pending design: volatile cell kind; see #40 |
-| `volatile?` | out-of-scope | pending design: volatile cell kind; see #40 |
-| `vreset!` | out-of-scope | pending design: volatile cell kind; see #40 |
-| `vswap!` | out-of-scope | pending design: volatile cell kind; see #40 |
+| `volatile!` | implemented | cellstaps.rs volatile_ctor_print (fresh Volatile cell; transient #object print — pinned divergence from the JVM {:status :ready} rendering) |
+| `volatile?` | implemented | cellstaps.rs volatile_pred (true on Volatile cells only) |
+| `vreset!` | implemented | cellstaps.rs volatile_vreset + volatile_vswap_shape (stores + returns newval; nil NPE + non-volatile CCE; the vswap! checkcast gate) |
+| `vswap!` | implemented | cellstaps.rs volatile_vswap + volatile_vswap_shape (builtin macro: (vreset! v (f (deref v) …)); deliberate double-eval of vol) |
 | `with-loading-context` | out-of-scope | Load-context macro inlined by port load (*pending-paths* guard implemented) |
 | `with-local-vars` | out-of-scope | pending design: var-frame macro over binding frames; see #40 |
 | `with-precision` | out-of-scope | pending design: BigDec precision context; see #40 |
