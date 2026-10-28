@@ -51,7 +51,9 @@ pub enum ThrowClass {
     ClassCastException,
     IndexOutOfBoundsException,
     ArrayIndexOutOfBoundsException,
+    ArrayStoreException,
     NegativeArraySizeException,
+    OutOfMemoryError,
     ArithmeticException,
     ExceptionInfo,
     FileNotFoundException,
@@ -146,8 +148,21 @@ impl ThrowClass {
             Self::RejectedExecutionException => "java.util.concurrent.RejectedExecutionException",
             Self::ReaderException => "clojure.lang.LispReader$ReaderException",
             Self::ClassNotFoundException => "java.lang.ClassNotFoundException",
-            // All other variants are handled by `jvm_name`/`jvm_name_mid`
-            // (the single caller partitions the variants).
+            other => other.jvm_name_array(),
+        }
+    }
+
+    /// Array exceptions plus the error class that arrived with
+    /// the array slice (S15). Chained so each match stays under
+    /// the complexity gate.
+    fn jvm_name_array(&self) -> &'static str {
+        match self {
+            Self::ArrayIndexOutOfBoundsException => "java.lang.ArrayIndexOutOfBoundsException",
+            Self::ArrayStoreException => "java.lang.ArrayStoreException",
+            Self::NegativeArraySizeException => "java.lang.NegativeArraySizeException",
+            Self::OutOfMemoryError => "java.lang.OutOfMemoryError",
+            // All other variants are handled upstream (the single
+            // caller partitions the variants).
             _ => unreachable!("throw-class partition"),
         }
     }
@@ -178,7 +193,9 @@ impl ThrowClass {
 #[must_use]
 pub fn cce_message(from_jvm: &str, to_jvm: &str) -> String {
     fn module_of(cls: &str) -> &'static str {
-        if cls.starts_with("java.") {
+        // Array descriptors (`[I`, …) live in `java.base` too (S15
+        // oracle `d-ints-wrong`).
+        if cls.starts_with("java.") || cls.starts_with('[') {
             "module java.base of loader 'bootstrap'"
         } else {
             "unnamed module of loader 'app'"
@@ -262,6 +279,21 @@ fn throw_parent_format(jvm_name: &str) -> Option<&'static str> {
         }
         "java.util.IllegalFormatException" => Some("java.lang.IllegalArgumentException"),
         "java.util.regex.PatternSyntaxException" => Some("java.lang.IllegalArgumentException"),
+        _ => throw_parent_array(jvm_name),
+    }
+}
+
+/// The array/error branch of [`throw_parent`] (S15, split for the
+/// complexity budget): `AIOOBE` under `IOOBE`, store/size under
+/// `RuntimeException`, `OOM` through `VirtualMachineError`.
+fn throw_parent_array(jvm_name: &str) -> Option<&'static str> {
+    match jvm_name {
+        "java.lang.ArrayIndexOutOfBoundsException" => Some("java.lang.IndexOutOfBoundsException"),
+        "java.lang.ArrayStoreException" | "java.lang.NegativeArraySizeException" => {
+            Some("java.lang.RuntimeException")
+        }
+        "java.lang.OutOfMemoryError" => Some("java.lang.VirtualMachineError"),
+        "java.lang.VirtualMachineError" => Some("java.lang.Error"),
         _ => None,
     }
 }

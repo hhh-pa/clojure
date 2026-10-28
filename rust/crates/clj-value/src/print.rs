@@ -583,9 +583,33 @@ fn print_rest(v: &Value, opts: &PrintOpts, level: Option<i64>, out: &mut String)
             .unwrap();
         }
         Value::Extension(e) => print_extension_body(e.as_ref(), opts, level, out),
+        // Primitive vectors print exactly like vectors (S15 oracle
+        // `f-ctor` — length/level/meta ride the shared path).
+        Value::PrimitiveVector(p) => {
+            let items = p.items();
+            let refs: Vec<&Value> = items.iter().collect();
+            print_sequential("[", refs, "]", " ", opts, level, out);
+        }
+        // Arrays print the unreadable `#object` shape with the
+        // descriptor quoted in pr mode only (S15 oracles `d-pr-*`,
+        // `d-print-str-obj`).
+        Value::Array(a) => print_array(a, opts.readably, out),
         // All other variants are handled by `print_scalars`/`print_more`
         // (the single caller partitions the variants).
         _ => unreachable!("print partition"),
+    }
+}
+
+/// The unreadable array shape: `#object["{desc}" 0x{id} "{desc}@{id}"]`
+/// readably (tag and rep both quoted — S15 oracle `d-pr-int`),
+/// both fields bare otherwise (oracle `d-print-str-obj`).
+fn print_array(a: &crate::Array, readably: bool, out: &mut String) {
+    let desc = a.descriptor();
+    let id = a.id();
+    if readably {
+        write!(out, "#object[\"{desc}\" 0x{id:x} \"{desc}@{id:x}\"]").unwrap();
+    } else {
+        write!(out, "#object[{desc} 0x{id:x} {desc}@{id:x}]").unwrap();
     }
 }
 
@@ -1058,8 +1082,12 @@ fn java_debug_rest(v: &Value) -> String {
         // Multimethods render the `toString` fallback (like the
         // JVM, which never overrides it with the name).
         Value::MultiFn(m) => crate::multifn_str(&m.name),
+        // Arrays render `toString` (`{desc}@{id}` — S15 oracle
+        // `d-str-int`).
+        Value::Array(a) => format!("{}@{:x}", a.descriptor(), a.id()),
         Value::List(_)
         | Value::Vector(_)
+        | Value::PrimitiveVector(_)
         | Value::MapEntry { .. }
         | Value::Map(_)
         | Value::Set(_)

@@ -13,6 +13,7 @@
 //! [`value`](crate::value)); printing lives in [`print`](crate::print).
 
 mod agent;
+mod array;
 mod atom;
 mod compare;
 mod datareaders;
@@ -26,6 +27,7 @@ mod keyword;
 mod multifn;
 mod print;
 mod promise;
+mod pvec;
 mod scalar;
 mod seq;
 mod symbol;
@@ -35,6 +37,7 @@ mod value;
 mod volatile;
 
 pub use agent::{Agent, AgentAction, AgentInner, AgentPool, ErrorMode, QueuedAction};
+pub use array::{Array, ArrayDesc, ArrayStore, BaseType, MAX_ARRAY_BYTES};
 pub use atom::{Atom, AtomState};
 pub use compare::{CompareError, compare};
 pub use datareaders::{TagError, validate_inst, validate_uuid};
@@ -61,6 +64,7 @@ pub use print::{
     print_opts::PrintOpts, print_to_string,
 };
 pub use promise::{Promise, PromiseState};
+pub use pvec::{Elem8, PrimitiveVector};
 pub use scalar::{Instant, Uri, UriError, Uuid};
 pub use seq::{
     CHUNK_SIZE, ConsValue, CycleValue, IterateValue, KeySeqValue, RangeNum, RangeValue,

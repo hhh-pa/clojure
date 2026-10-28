@@ -101,6 +101,9 @@ pub fn hasheq(v: &Value) -> i32 {
         Value::Keyword(k) => keyword_hasheq(k),
         Value::List(l) => hash_ordered(l.iter().map(hasheq)),
         Value::Vector(v) => hash_ordered(v.iter().map(hasheq)),
+        // Primitive vectors hash exactly like their item vector
+        // (they are `=` to it — S15 oracle `f-hash-eq`).
+        Value::PrimitiveVector(p) => hash_ordered(p.iter().map(hasheq)),
         Value::BigInt(_) | Value::BigInteger(_) | Value::BigDec(_) | Value::Ratio(_) => {
             hasheq_tower(v)
         }
@@ -166,6 +169,9 @@ fn hasheq_mid(v: &Value) -> i32 {
         Value::Throwable(t) => id_hash(t.id),
         Value::Transient(t) => id_hash(t.id()),
         Value::Atom(a) => id_hash(a.id()),
+        // Arrays hash their identity (the JVM uses
+        // `identityHashCode` — S15 oracles `c-hash-*`).
+        Value::Array(a) => id_hash(a.id()),
         // Port-defined types: records use the solved content-XOR
         // formula (oracle `l-hash-rec`); anything else mixes its
         // content deterministically (the JVM uses identity here).
@@ -236,6 +242,7 @@ pub fn hash_code(v: &Value) -> i32 {
         Value::List(l) => list_hash_code(l.iter().map(hash_code)),
         Value::Vector(v) => list_hash_code(v.iter().map(hash_code)),
         Value::Uuid(_) | Value::Instant(_) | Value::Uri(_) => scalar_hash(v),
+        Value::PrimitiveVector(p) => list_hash_code(p.iter().map(hash_code)),
         other => hash_code_mid(other),
     }
 }
@@ -265,6 +272,7 @@ fn hash_code_mid(v: &Value) -> i32 {
         Value::Unbound(u) => id_hash(u.var_id),
         Value::Throwable(t) => id_hash(t.id),
         Value::Transient(t) => id_hash(t.id()),
+        Value::Array(a) => id_hash(a.id()),
         // Port-defined types: records hash exactly like their
         // content map (oracle `l-rec-hashcode`); anything else
         // mixes deterministically (the JVM uses identity here).
