@@ -37,6 +37,17 @@
 (defmethod print-method DT [o w] (.write ^java.io.Writer w "DT!"))
 (sof "s2-str-nested-usermethod" '(str [(DT. 1)]))
 (sof "s2-simple-nested-usermethod" '(let [sw (java.io.StringWriter.)] (print-simple [(DT. 1)] sw) (str sw)))
+;; print-simple's explicit prefix is live (print-meta renders through pr-on).
+(deftype DA [x])
+(defmethod print-method DA [o w] (.write ^java.io.Writer w "A!"))
+(sof "s2-simple-meta-tag-live" '(binding [*print-meta* true] (let [sw (java.io.StringWriter.)] (print-simple (with-meta [1] {:tag (DA. 1)}) sw) (str sw))))
+(sof "s2-simple-meta-map-live" '(binding [*print-meta* true] (let [sw (java.io.StringWriter.)] (print-simple (with-meta [1] {:a (DA. 1)}) sw) (str sw))))
+;; Top-level :type dispatch through collection toString (str and print-simple).
+(defmethod print-method ::st [o w] (.write ^java.io.Writer w "ST!"))
+(sof "s2-str-type-vec" '(str (with-meta [1] {:type ::st})))
+(sof "s2-simple-type-vec" '(let [sw (java.io.StringWriter.)] (print-simple (with-meta [1] {:type ::st}) sw) (str sw)))
+(sof "s2-str-type-map" '(str (with-meta {:a 1} {:type ::st})))
+(sof "s2-simple-type-map" '(let [sw (java.io.StringWriter.)] (print-simple (with-meta {:a 1} {:type ::st}) sw) (str sw)))
 (sof "s2-seqlength" '(binding [*print-length* 1] (str (cons 1 [2 3]))))
 (sof "s2-mapentry-str" '(str (first {"a" 1})))
 (println "S8-str-semantics DONE")

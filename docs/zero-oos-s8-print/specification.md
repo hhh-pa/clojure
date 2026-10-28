@@ -4,7 +4,7 @@
   review. No source edits, no commits.
 - Issue: #51. Branch: `zero-oos-s8-print`.
 - Probes: `docs/zero-oos-s8-print/probes/*.{clj,out}` (7 files,
-  182 pins, every file exit 0 and rerun-stable; oracle: alpha10
+  188 pins, every file exit 0 and rerun-stable; oracle: alpha10
   jars per each file's header).
 - Scope: 8 vars — `*flush-on-newline*`,
   `char-escape-string`, `char-name-string`, `print-ctor`,
@@ -89,6 +89,8 @@ defaults; it is not a second print path for pr-family output.
 | `m-str-unaffected`, `m-str-override` | top-level `str` never consults user methods (the frozen port `str` bypasses everywhere — §2d F6) |
 | `s2-simple-usermethod` | top-level non-collection `print-simple` bypasses user methods |
 | `s2-str-nested-usermethod`, `s2-simple-nested-usermethod` | nested user methods fire through collection `toString` (live `RT.print`) — `print-simple` converges, frozen `str` diverges (§2d F6) |
+| `s2-simple-meta-tag-live`, `s2-simple-meta-map-live` | `print-simple`'s explicit meta prefix renders through the live multi (both `^tag` and `^{...}` shapes — both prefixes live) |
+| `s2-str-type-vec`, `s2-simple-type-vec`, `s2-str-type-map`, `s2-simple-type-map` | top-level `:type` dispatch through collection `toString` — `print-simple` converges, frozen `str` diverges (§2d F6) |
 | `m-dup-delegates`, `m-dup-nodelegates` | dup→method delegation goes through the LIVE `print-method` multi (user methods apply under dup); array-map does not delegate |
 | `d-queue` | `IPersistentList` dup delegates to `print-method` (informational: the port has no queue kind) |
 
@@ -97,8 +99,9 @@ defaults; it is not a second print path for pr-family output.
   space; `prn`/`println` append `\n` (see §1g for the flush).
   Bare `(pr)`/`(print)` write nothing (existing behavior kept).
 - Native `str` never consults the live tables (§2d F6). Of
-  `print-simple`'s halves (§1f), only the non-collection arm
-  bypasses; the collection arm renders through the live multi.
+  `print-simple`'s halves (§1f), only the non-collection arm's
+  object half bypasses (engine-direct `str`); the explicit meta
+  prefix and the collection arm render through the live multi.
 
 ### 1b. Dispatch tokens (the port's dispatch domain)
 
@@ -317,11 +320,15 @@ via `IPersistentList`).
 | `s2-str-raw`, `s2-dup-str`, `s2-atom`, `s2-cons`, `s2-range`, `s2-lazyseq`, `s2-mapentry-str`, `s2-readably` | non-collections are binding-insensitive (raw strings, `toString`); seq partition (lazy → content-hash, others → contents); entry strings quoted; ambient readably (not forced) |
 | `s2-simple-usermethod` | top-level non-collection `print-simple` bypasses user methods |
 | `s2-str-nested-usermethod`, `s2-simple-nested-usermethod` | nested user methods fire through collection `toString` (live `RT.print`) — `print-simple` converges, frozen `str` diverges (§2d F6) |
+| `s2-simple-meta-tag-live`, `s2-simple-meta-map-live` | the explicit prefix renders through the live multi (both `^tag` and `^{...}` shapes — the double prefix, both halves live) |
+| `s2-str-type-vec`, `s2-simple-type-vec`, `s2-str-type-map`, `s2-simple-type-map` | top-level `:type` dispatch through collection `toString` — `print-simple` converges, frozen `str` diverges (§2d F6) |
 
 - `(print-simple o w)`: `print-meta` prefix per the rule
-  above, then the §1f-`str` rendering of `o`, both written to
-  the `Writer` value `w` (validated like `write_out`: nil →
-  NPE, non-writer → `cce_err(v, "java.io.Writer")`).
+  above (live — rendered through the driver, so user methods
+  fire in it, like the JVM's `print-meta`), then the §1f-`str`
+  rendering of `o`, both written to the `Writer` value `w`
+  (validated like `write_out`: nil → NPE, non-writer →
+  `cce_err(v, "java.io.Writer")`).
 - `(print-ctor o print-args w)`: writes `#=(`,
   `jvm_class_of(o)`, `. `, then invokes `print-args` with
   `[o w]` (a normal `eval.call`, so user closures work), then
@@ -556,13 +563,15 @@ over port kinds, verified cell by cell against `m-table-*`.
   record dup is always non-verbose (`#Name[v, ...]`).
 - **F6. Native `str` binding-awareness.** JVM `str` honors
   ambient meta/dup/length/level for collections (`s2-*`),
-  consults user `print-method`s nested in collections
-  (`s2-str-nested-usermethod` — the port bypasses, pinned
-  divergence), and quotes entry strings (`s2-mapentry-str` —
-  the port's `MapEntry` arm does not); the port's native
-  `str` is behavior-frozen for S8 and `print-simple` carries
-  its own rendering instead (live for collections per §1f,
-  bypassing only for non-collections).
+  consults user `print-method`s nested in or `:type`-dispatched
+  by collections (`s2-str-nested-usermethod`,
+  `s2-str-type-vec`, `s2-str-type-map` — the port bypasses,
+  pinned divergences), and quotes entry strings
+  (`s2-mapentry-str` — the port's `MapEntry` arm does not);
+  the port's native `str` is behavior-frozen for S8 and
+  `print-simple` carries its own rendering instead (live for
+  collections and the meta prefix per §1f, bypassing only for
+  non-collection object halves).
 - **F7. Fn meta invisible to the printer.** JVM prints the
   `^meta` prefix for fns (`(binding [*print-meta* true]
   (pr-str (with-meta (fn [x] x) {:a 1})))` → `"^{:a 1}

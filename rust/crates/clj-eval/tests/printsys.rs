@@ -1116,9 +1116,9 @@ fn simple_ctor_rows() {
         )
         .starts_with("\"user.DT@")
     );
-    // Top-level `:type` on a collection dispatches live too (same
-    // arm — the JVM consults the multi for the top-level
-    // collection, not just nested values).
+    // `s2-simple-type-vec`: top-level `:type` on a collection
+    // dispatches live too (same arm — the JVM consults the multi
+    // for the top-level collection, not just nested values).
     run(
         &mut eval,
         "(defmethod print-method ::st [o w] (print-simple \"ST!\" w))",
@@ -1129,6 +1129,49 @@ fn simple_ctor_rows() {
             "(with-out-str (print-simple (with-meta [1] {:type ::st}) *out*))"
         ),
         "\"ST!\""
+    );
+    // `s2-str-type-vec` (DIVERGENT, frozen per §2d F6): JVM `str`
+    // consults the top-level `:type` method (`"ST!"`); native
+    // `str` is behavior-frozen and renders the default shape.
+    assert_eq!(
+        run_last(&mut eval, "(str (with-meta [1] {:type ::st}))"),
+        "\"[1]\""
+    );
+    // `s2-simple-type-map` / `s2-str-type-map`: the same split on
+    // maps — `print-simple` converges, frozen `str` diverges.
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(with-out-str (print-simple (with-meta {:a 1} {:type ::st}) *out*))"
+        ),
+        "\"ST!\""
+    );
+    assert_eq!(
+        run_last(&mut eval, "(str (with-meta {:a 1} {:type ::st}))"),
+        "\"{:a 1}\""
+    );
+    // `s2-simple-meta-tag-live`, `s2-simple-meta-map-live`: the
+    // explicit prefix renders through the LIVE multi (like the
+    // JVM's `print-meta`), so user methods fire in both prefixes
+    // (the `^tag` and the `^{...}` shapes).
+    run(&mut eval, "(defrecord DA [x])");
+    run(
+        &mut eval,
+        "(defmethod print-method ::da [o w] (print-simple \"A!\" w))",
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(binding [*print-meta* true] (with-out-str (print-simple (with-meta [1] {:tag (with-meta (->DA 1) {:type ::da})}) *out*)))"
+        ),
+        "\"^A! ^A! [1]\""
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(binding [*print-meta* true] (with-out-str (print-simple (with-meta [1] {:a (with-meta (->DA 1) {:type ::da})}) *out*)))"
+        ),
+        "\"^{:a A!} ^{:a A!} [1]\""
     );
     // The `String` override stays LAST (it rewrites string
     // printing in this evaluator — and under the live arm it

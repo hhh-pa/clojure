@@ -351,8 +351,10 @@ fn method_dispatch_value(v: &Value) -> Value {
 
 /// The `pr-on` driver: `print-dup` under `*print-dup*`, else
 /// `print-method` — through the live multis, or the booted
-/// defaults only in [`print-simple`](native_print_simple)'s
-/// non-collection arm. Answers nil (like the JVM's `pr-on`).
+/// defaults when `print_defaults_only` is set (no `print-simple`
+/// path sets it: the non-collection arm bypasses via engine-direct
+/// `str`, and the meta prefix renders live like the JVM's).
+/// Answers nil (like the JVM's `pr-on`).
 pub(crate) fn pr_on(eval: &mut Evaluator, v: &Value, w: &Value) -> Result<Value, Signal> {
     if deref_core(eval, "*print-dup*").is_truthy() {
         pr_on_dup(eval, v, w)
@@ -1276,34 +1278,21 @@ fn static_dup_fn(dv: &Value) -> Option<NativeFnPtr> {
 }
 
 /// `(print-simple o w)`: the `print-meta` prefix plus the §1f-`str`
-/// rendering, both written to `w`. Non-collections bypass user
-/// methods (defaults-only mode); collections render through the
-/// live driver, like the JVM's `RT.print`.
+/// rendering, both written to `w`. The prefix and the collection
+/// arm render through the live driver, like the JVM's `RT.print`;
+/// only non-collection object halves bypass (engine-direct `str`,
+/// which never consults the multis).
 fn native_print_simple(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/print-simple", args, &[2])?;
     let (o, w) = (&args[0], &args[1]);
     check_writer(w)?;
     let opts = print_opts(eval, None)?;
-    let saved = eval.print_defaults_only;
-    eval.print_defaults_only = true;
-    let result = print_simple_body(eval, o, w, &opts);
-    eval.print_defaults_only = saved;
-    result?;
+    // The explicit prefix (live, like the JVM's `print-meta` — the
+    // `str` half adds its own, the JVM's double prefix, since `str`
+    // honors ambient bindings).
+    write_meta_prefix(eval, o, w, &opts)?;
+    print_simple_str(eval, o, w)?;
     Ok(Value::Nil)
-}
-
-/// The print-simple body under defaults-only mode (split so the
-/// save/restore stays a plain call).
-fn print_simple_body(
-    eval: &mut Evaluator,
-    o: &Value,
-    w: &Value,
-    opts: &PrintOpts,
-) -> Result<(), NativeError> {
-    // The explicit prefix (the `str` half adds its own — the JVM's
-    // double prefix, since `str` honors ambient bindings).
-    write_meta_prefix(eval, o, w, opts)?;
-    print_simple_str(eval, o, w)
 }
 
 /// The §1f-`str` rendering: collection-likes through the LIVE
@@ -1315,6 +1304,8 @@ fn print_simple_body(
 fn print_simple_str(eval: &mut Evaluator, o: &Value, w: &Value) -> Result<(), NativeError> {
     if is_simple_collection(o) {
         let r = realize_deep(eval, o).map_err(signal_to_native)?;
+        // Liveness guard (a no-op now that no caller sets
+        // defaults-only — kept so the arm stays live by construction).
         let saved = eval.print_defaults_only;
         eval.print_defaults_only = false;
         let result = pr_on(eval, &r, w).map_err(signal_to_native);
