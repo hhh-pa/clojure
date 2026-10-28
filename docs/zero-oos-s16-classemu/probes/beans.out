@@ -1,0 +1,41 @@
+b-str-keys (":blank" ":bytes" ":class" ":empty")
+b-str-empty false
+b-str-class java.lang.String
+b-str-bytes byte/1
+b-long-keys (":class")
+b-long-class java.lang.Long
+b-vec-keys (":class" ":empty" ":first" ":last")
+b-map-keys (":class" ":empty")
+b-kw-keys (":class" ":name" ":namespace")
+b-bool-keys (":class")
+b-count 4
+b-contains true
+b-get-missing nil
+b-get-default :dflt
+b-seq-first [:blank false]
+b-bean-class clojure.core.proxy$clojure.lang.APersistentMap$ff19274a
+b-nil THROW java.lang.NullPointerException|"Cannot invoke \"Object.getClass()\" because \"x\" is null"
+b-sym-keys (":class" ":name" ":namespace")
+b-str-blank false
+b-str-blank2 true
+b-vec-first 1
+b-vec-last 2
+b-vec-empty true
+b-map-empty false
+b-kw-name "b"
+b-kw-ns "a"
+b-sym-name "b"
+b-sym-ns "a"
+w-basic ["hi"]
+w-empty-flush []
+w-close-flushes ["hi"]
+w-close-fn [[:f "hi"] [:c]]
+w-close-noflushfn-call [:closed]
+w-accumulate ["ab"]
+w-class java.io.PrintWriter
+w-write-offlen ["ell"]
+w-autoflush []
+w-autoflush-then ["a\nb"]
+w-noautoflush []
+w-arity1 THROW clojure.lang.ArityException|"Wrong number of args (1) passed to: clojure.core/PrintWriter-on"
+w-print-binding ["x"]

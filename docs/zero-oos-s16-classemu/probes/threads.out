@@ -1,0 +1,32 @@
+x-doc (.. (. System (getProperties)) (get "os.name"))
+x-single (. "a" (toString))
+x-bare (. "a" toString)
+x-three (.. (. x a) b c)
+x-arity1 THROW clojure.lang.ArityException|"Wrong number of args (3) passed to: clojure.core/-DOT--DOT-"
+d-tostring "a"
+d-long-tostring "1"
+d-vec-tostring "[1 2]"
+d-map-tostring "{:a 1}"
+d-keyword-tostring ":k"
+d-getclass java.lang.String
+d-hashcode-str 97
+d-hashcode-long 1
+d-hashcode-bool 1231
+d-equals-t true
+d-equals-f false
+d-equals-numtower false
+d-chain "abc"
+d-nil THROW java.lang.NullPointerException|"Cannot invoke \"Object.getClass()\" because \"target\" is null"
+d-missing0 THROW java.lang.IllegalArgumentException|"No matching method noSuchMethod found taking 0 args for class java.lang.String"
+d-missing1 THROW java.lang.IllegalArgumentException|"No matching method noSuchMethod found taking 2 args for class java.lang.String"
+d-bare-missing THROW java.lang.IllegalArgumentException|"No matching field found: noSuchField for class java.lang.String"
+d-length 3
+d-substring "b"
+m-plain (clojure.core/fn [target227] (. target227 (toString)))
+m-args (clojure.core/fn [target232 0 1] (. target232 (substring 0 1)))
+m-arity0 THROW clojure.lang.ArityException|"Wrong number of args (0) passed to: clojure.core/memfn"
+f-tostring "5"
+f-map ("1" "2")
+f-length (1 2)
+f-substring "a"
+f-missing THROW java.lang.IllegalArgumentException|"No matching method noSuchMethod found taking 0 args for class java.lang.String"

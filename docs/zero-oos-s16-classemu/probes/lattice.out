@@ -1,0 +1,411 @@
+c-long java.lang.Long
+c-double java.lang.Double
+c-bigint clojure.lang.BigInt
+c-bigdec java.math.BigDecimal
+c-ratio clojure.lang.Ratio
+c-bool java.lang.Boolean
+c-char java.lang.Character
+c-string java.lang.String
+c-nil nil
+c-keyword clojure.lang.Keyword
+c-symbol clojure.lang.Symbol
+c-vec clojure.lang.PersistentVector
+c-mapentry clojure.lang.MapEntry
+c-pam clojure.lang.PersistentArrayMap
+c-phm clojure.lang.PersistentHashMap
+c-ptm clojure.lang.PersistentTreeMap
+c-phs clojure.lang.PersistentHashSet
+c-pts clojure.lang.PersistentTreeSet
+c-elist clojure.lang.PersistentList$EmptyList
+c-list clojure.lang.PersistentList
+c-pattern java.util.regex.Pattern
+c-var clojure.lang.Var
+c-atom clojure.lang.Atom
+c-delay clojure.lang.Delay
+c-future clojure.core$future_call$reify__8785
+c-promise clojure.core$promise$reify__8832
+c-agent clojure.lang.Agent
+c-volatile clojure.lang.Volatile
+c-fn user$eval247$fn__248
+c-ns clojure.lang.Namespace
+c-lazyseq clojure.lang.LazySeq
+c-cons clojure.lang.Cons
+c-rangeseq clojure.lang.LongRange
+c-strseq clojure.lang.StringSeq
+c-vecseq clojure.lang.PersistentVector$ChunkedSeq
+c-class java.lang.Class
+c-class2 java.lang.Class
+c-multifn clojure.lang.MultiFn
+c-exinfo clojure.lang.ExceptionInfo
+c-throwable java.lang.RuntimeException
+t-long java.lang.Long
+t-nil nil
+t-meta-class java.lang.String
+t-meta-kw :kw
+t-meta-str "s"
+t-meta-list java.lang.Integer
+i-str true
+i-obj true
+i-num true
+i-long-exact true
+i-int-miss false
+i-charseq true
+i-comparable true
+i-ifn true
+i-seqable true
+i-nil-target false
+i-nil-class THROW java.lang.NullPointerException|"Cannot invoke \"java.lang.Class.isInstance(Object)\" because \"c\" is null"
+i-str-class THROW java.lang.ClassCastException|"class java.lang.String cannot be cast to class java.lang.Class (java.lang.String and java.lang.Class are in module java.base of loader 'bootstrap')"
+i-num-class THROW java.lang.ClassCastException|"class java.lang.Long cannot be cast to class java.lang.Class (java.lang.Long and java.lang.Class are in module java.base of loader 'bootstrap')"
+i-class-of-class true
+i-class-miss false
+i-vec-ipm false
+i-map-ipm true
+k-string true
+k-str false
+k-nil false
+k-class true
+x-ok "a"
+x-nil nil
+x-fail THROW java.lang.ClassCastException|"Cannot cast java.lang.Long to java.lang.String"
+x-fail2 THROW java.lang.ClassCastException|"Cannot cast java.lang.String to java.lang.Integer"
+x-nilclass THROW java.lang.NullPointerException|"Cannot invoke \"java.lang.Class.cast(Object)\" because \"c\" is null"
+x-nonclass THROW java.lang.ClassCastException|"class java.lang.String cannot be cast to class java.lang.Class (java.lang.String and java.lang.Class are in module java.base of loader 'bootstrap')"
+p-pr "java.lang.String"
+p-print "java.lang.String"
+p-str "class java.lang.String"
+p-str-iface "interface java.lang.Comparable"
+p-pr-class "java.lang.Long"
+p-eq true
+p-eq2 false
+p-eq3 true
+p-ident true
+p-name "java.lang.String"
+p-tostring "class java.lang.String"
+p-simple "String"
+p-iface-tostring "interface java.lang.Comparable"
+p-printdup "#=java.lang.String"
+p-printdup-long "#=java.lang.Long"
+q-nil true
+q-small-long true
+q-big-long false
+q-str-lit true
+q-str-built false
+q-vec false
+q-kw true
+q-bool true
+q-sym false
+q-mixed false
+lb-object ()
+lb-string ("java.lang.Object" "java.io.Serializable" "java.lang.Comparable" "java.lang.CharSequence" "java.lang.constant.Constable" "java.lang.constant.ConstantDesc")
+lb-number ("java.lang.Object" "java.io.Serializable")
+lb-boolean ("java.lang.Object" "java.io.Serializable" "java.lang.Comparable" "java.lang.constant.Constable")
+lb-character ("java.lang.Object" "java.io.Serializable" "java.lang.Comparable" "java.lang.constant.Constable")
+lb-byte ("java.lang.Number" "java.lang.Comparable" "java.lang.constant.Constable")
+lb-short ("java.lang.Number" "java.lang.Comparable" "java.lang.constant.Constable")
+lb-integer ("java.lang.Number" "java.lang.Comparable" "java.lang.constant.Constable" "java.lang.constant.ConstantDesc")
+lb-long ("java.lang.Number" "java.lang.Comparable" "java.lang.constant.Constable" "java.lang.constant.ConstantDesc")
+lb-float ("java.lang.Number" "java.lang.Comparable" "java.lang.constant.Constable" "java.lang.constant.ConstantDesc")
+lb-double ("java.lang.Number" "java.lang.Comparable" "java.lang.constant.Constable" "java.lang.constant.ConstantDesc")
+lb-void ("java.lang.Object")
+lb-class ("java.lang.Object" "java.io.Serializable" "java.lang.reflect.GenericDeclaration" "java.lang.reflect.Type" "java.lang.reflect.AnnotatedElement" "java.lang.invoke.TypeDescriptor$OfField" "java.lang.constant.Constable")
+lb-thread ("java.lang.Object" "java.lang.Runnable")
+lb-enum ("java.lang.Object" "java.lang.constant.Constable" "java.lang.Comparable" "java.io.Serializable")
+lb-comparable ()
+lb-charseq ()
+lb-iterable ()
+lb-serializable ()
+lb-bigdec ("java.lang.Number" "java.lang.Comparable")
+lb-bigint ("java.lang.Number" "clojure.lang.IHashEq")
+lb-ratio ("java.lang.Number" "java.lang.Comparable")
+lb-symbol ("clojure.lang.AFn" "clojure.lang.IObj" "java.lang.Comparable" "clojure.lang.Named" "java.io.Serializable" "clojure.lang.IHashEq")
+lb-keyword ("java.lang.Object" "clojure.lang.IFn" "java.lang.Comparable" "clojure.lang.Named" "java.io.Serializable" "clojure.lang.IHashEq")
+lb-pvec ("clojure.lang.APersistentVector" "clojure.lang.IObj" "clojure.lang.IEditableCollection" "clojure.lang.IReduce" "clojure.lang.IKVReduce" "clojure.lang.IDrop")
+lb-mapentry ("clojure.lang.AMapEntry")
+lb-pam ("clojure.lang.APersistentMap" "clojure.lang.IObj" "clojure.lang.IEditableCollection" "clojure.lang.IMapIterable" "clojure.lang.IKVReduce" "clojure.lang.IDrop")
+lb-phm ("clojure.lang.APersistentMap" "clojure.lang.IEditableCollection" "clojure.lang.IObj" "clojure.lang.IMapIterable" "clojure.lang.IKVReduce")
+lb-ptm ("clojure.lang.APersistentMap" "clojure.lang.IObj" "clojure.lang.Reversible" "clojure.lang.Sorted" "clojure.lang.IKVReduce")
+lb-phs ("clojure.lang.APersistentSet" "clojure.lang.IObj" "clojure.lang.IEditableCollection")
+lb-pts ("clojure.lang.APersistentSet" "clojure.lang.IObj" "clojure.lang.Reversible" "clojure.lang.Sorted")
+lb-plist ("clojure.lang.ASeq" "clojure.lang.IPersistentList" "clojure.lang.IReduce" "java.util.List" "clojure.lang.Counted")
+lb-empty ("clojure.lang.Obj" "clojure.lang.IPersistentList" "java.util.List" "clojure.lang.ISeq" "clojure.lang.Counted" "clojure.lang.IHashEq")
+lb-tagged ("java.lang.Object" "clojure.lang.ILookup")
+lb-rcond ("java.lang.Object" "clojure.lang.ILookup")
+lb-var ("clojure.lang.ARef" "clojure.lang.IFn" "clojure.lang.IRef" "clojure.lang.Settable" "java.io.Serializable")
+lb-unbound ("clojure.lang.AFn")
+lb-multifn ("clojure.lang.AFn")
+lb-afn ("java.lang.Object" "clojure.lang.IFn")
+lb-afunction ("clojure.lang.AFn" "clojure.lang.IObj" "java.util.Comparator" "clojure.lang.Fn" "java.io.Serializable")
+lb-ifn ("java.util.concurrent.Callable" "java.lang.Runnable")
+lb-atom ("clojure.lang.ARef" "clojure.lang.IAtom2")
+lb-delay ("java.lang.Object" "clojure.lang.IDeref" "clojure.lang.IPending")
+lb-agent ("clojure.lang.ARef")
+lb-ns ("clojure.lang.AReference" "java.io.Serializable")
+lb-reduced ("java.lang.Object" "clojure.lang.IDeref")
+lb-irecord ()
+lb-seqable ()
+lb-iseq ("clojure.lang.IPersistentCollection")
+lb-aseq ("clojure.lang.Obj" "clojure.lang.ISeq" "clojure.lang.Sequential" "java.util.List" "java.io.Serializable" "clojure.lang.IHashEq")
+lb-sequential ()
+lb-ipcoll ("clojure.lang.Seqable")
+lb-ipvec ("clojure.lang.Associative" "clojure.lang.Sequential" "clojure.lang.IPersistentStack" "clojure.lang.Reversible" "clojure.lang.Indexed")
+lb-ipstack ("clojure.lang.IPersistentCollection")
+lb-assoc ("clojure.lang.IPersistentCollection" "clojure.lang.ILookup")
+lb-ipmap ("java.lang.Iterable" "clojure.lang.Associative" "clojure.lang.Counted")
+lb-ipset ("clojure.lang.IPersistentCollection" "clojure.lang.Counted" "clojure.lang.ILookup")
+lb-apvec ("clojure.lang.AFn" "clojure.lang.IPersistentVector" "java.lang.Iterable" "java.util.List" "java.util.RandomAccess" "java.lang.Comparable" "java.io.Serializable" "clojure.lang.IHashEq")
+lb-apmap ("clojure.lang.AFn" "clojure.lang.IPersistentMap" "java.util.Map" "java.lang.Iterable" "java.io.Serializable" "clojure.lang.MapEquivalence" "clojure.lang.IHashEq")
+lb-apset ("clojure.lang.AFn" "clojure.lang.IPersistentSet" "java.util.Collection" "java.util.Set" "java.io.Serializable" "clojure.lang.IHashEq")
+lb-iobj ("clojure.lang.IMeta")
+lb-imeta ()
+lb-ihasheq ()
+lb-ideref ("java.util.function.Supplier" "java.util.function.BooleanSupplier" "java.util.function.IntSupplier" "java.util.function.LongSupplier" "java.util.function.DoubleSupplier")
+lb-iref ("clojure.lang.IDeref")
+lb-counted ()
+lb-indexed ("clojure.lang.Counted")
+lb-reversible ()
+lb-sorted ()
+lb-ilookup ()
+lb-ireduce ("clojure.lang.IReduceInit")
+lb-ikvreduce ()
+lb-ireduceinit ()
+lb-lazyseq ("clojure.lang.Obj" "clojure.lang.ISeq" "clojure.lang.Sequential" "java.util.List" "clojure.lang.IPending" "clojure.lang.IHashEq")
+lb-cons ("clojure.lang.ASeq" "java.io.Serializable")
+lb-repeat ("clojure.lang.ASeq" "clojure.lang.IReduce" "clojure.lang.IDrop")
+lb-cycle ("clojure.lang.ASeq" "clojure.lang.IReduce" "clojure.lang.IPending")
+lb-iterate ("clojure.lang.ASeq" "clojure.lang.IReduce" "clojure.lang.IPending")
+lb-longrange ("clojure.lang.ASeq" "clojure.lang.Counted" "clojure.lang.IChunkedSeq" "clojure.lang.IReduce" "clojure.lang.IDrop")
+lb-arrayseq ("clojure.lang.ASeq" "clojure.lang.IndexedSeq" "clojure.lang.IReduce")
+lb-stringseq ("clojure.lang.ASeq" "clojure.lang.IndexedSeq" "clojure.lang.IDrop" "clojure.lang.IReduceInit")
+lb-chunkedseq ("clojure.lang.ASeq" "clojure.lang.IChunkedSeq" "clojure.lang.Counted" "clojure.lang.IReduce" "clojure.lang.IDrop")
+lb-chunkedcons ("clojure.lang.ASeq" "clojure.lang.IChunkedSeq")
+lb-subvec ("clojure.lang.APersistentVector" "clojure.lang.IObj" "clojure.lang.IKVReduce")
+lb-vecseq ("clojure.lang.ASeq" "clojure.lang.IndexedSeq" "clojure.lang.IReduce")
+lb-rseq ("clojure.lang.ASeq" "clojure.lang.IndexedSeq" "clojure.lang.Counted")
+lb-pamseq ("clojure.lang.ASeq" "clojure.lang.Counted" "clojure.lang.IReduce" "clojure.lang.IDrop")
+lb-keyseq ("clojure.lang.ASeq")
+lb-valseq ("clojure.lang.ASeq")
+lb-pattern ("java.lang.Object" "java.io.Serializable")
+lb-patternsyntax ("java.lang.IllegalArgumentException")
+lb-throwable ("java.lang.Object" "java.io.Serializable")
+lb-exception ("java.lang.Throwable")
+lb-runtimeex ("java.lang.Exception")
+lb-error ("java.lang.Throwable")
+lb-iae ("java.lang.RuntimeException")
+lb-ise ("java.lang.RuntimeException")
+lb-uoe ("java.lang.RuntimeException")
+lb-assert ("java.lang.Error")
+lb-npe ("java.lang.RuntimeException")
+lb-cce ("java.lang.RuntimeException")
+lb-ioobe ("java.lang.RuntimeException")
+lb-aioobe ("java.lang.IndexOutOfBoundsException")
+lb-nase ("java.lang.RuntimeException")
+lb-arith ("java.lang.RuntimeException")
+lb-exinfo ("java.lang.RuntimeException" "clojure.lang.IExceptionInfo")
+lb-fnf ("java.io.IOException")
+lb-illegalaccess ("java.lang.IncompatibleClassChangeError")
+lb-numformat ("java.lang.IllegalArgumentException")
+lb-strioobe ("java.lang.IndexOutOfBoundsException")
+lb-ioex ("java.lang.Exception")
+lb-eof ("java.io.IOException")
+lb-uncheckedio ("java.lang.RuntimeException")
+lb-compilerex ("java.lang.RuntimeException" "clojure.lang.IExceptionInfo")
+lb-readerex ("java.lang.RuntimeException" "clojure.lang.IExceptionInfo")
+lb-exec ("java.lang.Exception")
+lb-cancel ("java.lang.IllegalStateException")
+lb-reject ("java.lang.RuntimeException")
+lb-illegalformat ("java.util.IllegalFormatException")
+lb-unknownformat ("java.util.IllegalFormatException")
+lb-missingformat ("java.util.IllegalFormatException")
+lb-printwriter ("java.io.Writer")
+lb-writer ("java.lang.Object" "java.lang.Appendable" "java.io.Closeable" "java.io.Flushable")
+lb-stringwriter ("java.io.Writer")
+lb-oswriter ("java.io.Writer")
+lb-bufferedwriter ("java.io.Writer")
+lb-closeable ("java.lang.AutoCloseable")
+lb-autocloseable ()
+lb-flushable ()
+lb-appendable ()
+lb-date ("java.lang.Object" "java.io.Serializable" "java.lang.Cloneable" "java.lang.Comparable")
+lb-nosuchelement ("java.lang.RuntimeException")
+lb-invocationtarget ("java.lang.ReflectiveOperationException")
+lb-cnfe ("java.lang.ReflectiveOperationException")
+lb-nil nil
+lb-nonclass THROW java.lang.ClassCastException|"class clojure.lang.Keyword cannot be cast to class java.lang.Class (clojure.lang.Keyword is in unnamed module of loader 'app'; java.lang.Class is in module java.base of loader 'bootstrap')"
+lb-nonclass2 THROW java.lang.ClassCastException|"class java.lang.String cannot be cast to class java.lang.Class (java.lang.String and java.lang.Class are in module java.base of loader 'bootstrap')"
+ls-string ("java.io.Serializable" "java.lang.CharSequence" "java.lang.Comparable" "java.lang.Object" "java.lang.constant.Constable" "java.lang.constant.ConstantDesc")
+ls-long ("java.io.Serializable" "java.lang.Comparable" "java.lang.Number" "java.lang.Object" "java.lang.constant.Constable" "java.lang.constant.ConstantDesc")
+ls-object nil
+ls-nil nil
+ls-pvec ("clojure.lang.AFn" "clojure.lang.APersistentVector" "clojure.lang.Associative" "clojure.lang.Counted" "clojure.lang.IDrop" "clojure.lang.IEditableCollection" "clojure.lang.IFn" "clojure.lang.IHashEq" "clojure.lang.IKVReduce" "clojure.lang.ILookup" "clojure.lang.IMeta" "clojure.lang.IObj" "clojure.lang.IPersistentCollection" "clojure.lang.IPersistentStack" "clojure.lang.IPersistentVector" "clojure.lang.IReduce" "clojure.lang.IReduceInit" "clojure.lang.Indexed" "clojure.lang.Reversible" "clojure.lang.Seqable" "clojure.lang.Sequential" "java.io.Serializable" "java.lang.Comparable" "java.lang.Iterable" "java.lang.Object" "java.lang.Runnable" "java.util.Collection" "java.util.List" "java.util.RandomAccess" "java.util.SequencedCollection" "java.util.concurrent.Callable")
+ls-ipmap ("clojure.lang.Associative" "clojure.lang.Counted" "clojure.lang.ILookup" "clojure.lang.IPersistentCollection" "clojure.lang.Seqable" "java.lang.Iterable")
+ls-phm ("clojure.lang.AFn" "clojure.lang.APersistentMap" "clojure.lang.Associative" "clojure.lang.Counted" "clojure.lang.IEditableCollection" "clojure.lang.IFn" "clojure.lang.IHashEq" "clojure.lang.IKVReduce" "clojure.lang.ILookup" "clojure.lang.IMapIterable" "clojure.lang.IMeta" "clojure.lang.IObj" "clojure.lang.IPersistentCollection" "clojure.lang.IPersistentMap" "clojure.lang.MapEquivalence" "clojure.lang.Seqable" "java.io.Serializable" "java.lang.Iterable" "java.lang.Object" "java.lang.Runnable" "java.util.Map" "java.util.concurrent.Callable")
+ls-lazyseq ("clojure.lang.IHashEq" "clojure.lang.IMeta" "clojure.lang.IObj" "clojure.lang.IPending" "clojure.lang.IPersistentCollection" "clojure.lang.ISeq" "clojure.lang.Obj" "clojure.lang.Seqable" "clojure.lang.Sequential" "java.io.Serializable" "java.lang.Iterable" "java.lang.Object" "java.util.Collection" "java.util.List" "java.util.SequencedCollection")
+ls-var ("clojure.lang.ARef" "clojure.lang.AReference" "clojure.lang.IDeref" "clojure.lang.IFn" "clojure.lang.IMeta" "clojure.lang.IRef" "clojure.lang.IReference" "clojure.lang.Settable" "java.io.Serializable" "java.lang.Object" "java.lang.Runnable" "java.util.concurrent.Callable" "java.util.function.BooleanSupplier" "java.util.function.DoubleSupplier" "java.util.function.IntSupplier" "java.util.function.LongSupplier" "java.util.function.Supplier")
+ls-exinfo ("clojure.lang.IExceptionInfo" "java.io.Serializable" "java.lang.Exception" "java.lang.Object" "java.lang.RuntimeException" "java.lang.Throwable")
+ls-printwriter ("java.io.Closeable" "java.io.Flushable" "java.io.Writer" "java.lang.Appendable" "java.lang.AutoCloseable" "java.lang.Object")
+ls-serializable nil
+ls-multifn ("clojure.lang.AFn" "clojure.lang.IFn" "java.lang.Object" "java.lang.Runnable" "java.util.concurrent.Callable")
+ls-bigint ("clojure.lang.IHashEq" "java.io.Serializable" "java.lang.Number" "java.lang.Object")
+ls-ratio ("java.io.Serializable" "java.lang.Comparable" "java.lang.Number" "java.lang.Object")
+ls-bigdec ("java.io.Serializable" "java.lang.Comparable" "java.lang.Number" "java.lang.Object")
+ls-pattern ("java.io.Serializable" "java.lang.Object")
+ls-keyword ("clojure.lang.IFn" "clojure.lang.IHashEq" "clojure.lang.Named" "java.io.Serializable" "java.lang.Comparable" "java.lang.Object" "java.lang.Runnable" "java.util.concurrent.Callable")
+ls-symbol ("clojure.lang.AFn" "clojure.lang.IFn" "clojure.lang.IHashEq" "clojure.lang.IMeta" "clojure.lang.IObj" "clojure.lang.Named" "java.io.Serializable" "java.lang.Comparable" "java.lang.Object" "java.lang.Runnable" "java.util.concurrent.Callable")
+ls-nonclass THROW java.lang.ClassCastException|"class clojure.lang.Keyword cannot be cast to class java.lang.Class (clojure.lang.Keyword is in unnamed module of loader 'app'; java.lang.Class is in module java.base of loader 'bootstrap')"
+lc-amapentry ("clojure.lang.APersistentVector" "clojure.lang.IMapEntry")
+lc-aref ("clojure.lang.AReference" "clojure.lang.IRef")
+lc-areference ("java.lang.Object" "clojure.lang.IReference")
+lc-fn ()
+lc-iatom2 ("clojure.lang.IAtom")
+lc-ichunkedseq ("clojure.lang.ISeq" "clojure.lang.Sequential")
+lc-idrop ()
+lc-ieditable ()
+lc-iexceptioninfo ()
+lc-imapiterable ()
+lc-ipending ()
+lc-iplist ("clojure.lang.Sequential" "clojure.lang.IPersistentStack")
+lc-ireference ("clojure.lang.IMeta")
+lc-indexedseq ("clojure.lang.ISeq" "clojure.lang.Sequential" "clojure.lang.Counted")
+lc-mapequiv ()
+lc-named ()
+lc-obj ("java.lang.Object" "clojure.lang.IObj" "java.io.Serializable")
+lc-settable ()
+lc-cloneable ()
+lc-incompat ("java.lang.LinkageError")
+lc-reflectiveop ("java.lang.Exception")
+lc-runnable ()
+lc-constable ()
+lc-constantdesc ()
+lc-of-field ("java.lang.invoke.TypeDescriptor")
+lc-annotated ()
+lc-genericdecl ("java.lang.reflect.AnnotatedElement")
+lc-type ()
+lc-collection ("java.lang.Iterable")
+lc-comparator ()
+lc-illegalformat ("java.lang.IllegalArgumentException")
+lc-list ("java.util.SequencedCollection")
+lc-map ()
+lc-randomaccess ()
+lc-sequencedcoll ("java.util.Collection")
+lc-set ("java.util.Collection")
+lc-callable ()
+lc-boolsup ()
+lc-doublesup ()
+lc-intsup ()
+lc-longsup ()
+lc-supplier ()
+lc-blockingderef ()
+lc-sequencedmap ("java.util.Map")
+lc-sortedmap ("java.util.SequencedMap")
+lc-navigablemap ("java.util.SortedMap")
+lc-sortedset ("java.util.Set" "java.util.SequencedSet")
+lc-navigableset ("java.util.SortedSet")
+lc-sequencedset ("java.util.SequencedCollection" "java.util.Set")
+lj-volatile ("java.lang.Object" "clojure.lang.IDeref")
+lj-tvec ("clojure.lang.AFn" "clojure.lang.ITransientVector" "clojure.lang.ITransientAssociative2" "clojure.lang.Counted")
+lj-thm ("clojure.lang.ATransientMap")
+lj-tam ("clojure.lang.ATransientMap")
+lj-ths ("clojure.lang.ATransientSet")
+lj-itransientvec ("clojure.lang.ITransientAssociative" "clojure.lang.Indexed")
+lj-itransientmap ("clojure.lang.ITransientAssociative" "clojure.lang.Counted")
+lj-itransientcoll ()
+lj-itransientset ("clojure.lang.ITransientCollection" "clojure.lang.Counted" "clojure.lang.ILookup")
+lj-itransientassociative ("clojure.lang.ITransientCollection" "clojure.lang.ILookup")
+lj-lnpr ("java.io.PushbackReader")
+lj-matcher ("java.lang.Object" "java.util.regex.MatchResult")
+lj-arraychunk ("java.lang.Object" "clojure.lang.IChunk" "java.io.Serializable")
+lj-chunkbuffer ("java.lang.Object" "clojure.lang.Counted")
+lj-ichunk ("clojure.lang.Indexed")
+lk-atransientmap ("clojure.lang.AFn" "clojure.lang.ITransientMap" "clojure.lang.ITransientAssociative2")
+lk-atransientset ("clojure.lang.AFn" "clojure.lang.ITransientSet")
+lk-iatom ()
+lk-imapentry ("java.util.Map$Entry")
+lk-itransientassoc2 ()
+lk-pushbackreader ("java.io.FilterReader")
+lk-linkageerror ("java.lang.Error")
+lk-typedescriptor ()
+lk-matchresult ()
+lk-filterreader ("java.io.Reader")
+lk-mapentry-iface ()
+lk-reader ("java.lang.Object" "java.lang.Readable" "java.io.Closeable")
+lk-readable ()
+lm-arityexception ("java.lang.IllegalArgumentException")
+lm-compiler ("java.lang.Object" "clojure.asm.Opcodes")
+lm-abstractmethoderror ("java.lang.IncompatibleClassChangeError")
+lm-arraystoreexception ("java.lang.RuntimeException")
+lm-bootstrapmethoderror ("java.lang.LinkageError")
+lm-classcircularityerror ("java.lang.LinkageError")
+lm-classformaterror ("java.lang.LinkageError")
+lm-classloader ("java.lang.Object")
+lm-classvalue ("java.lang.Object")
+lm-clonenotsupportedexception ("java.lang.Exception")
+lm-deprecated ("java.lang.annotation.Annotation")
+lm-enumconstantnotpresentexception ("java.lang.RuntimeException")
+lm-exceptionininitializererror ("java.lang.LinkageError")
+lm-illegalaccessexception ("java.lang.ReflectiveOperationException")
+lm-illegalcallerexception ("java.lang.RuntimeException")
+lm-illegalmonitorstateexception ("java.lang.RuntimeException")
+lm-illegalthreadstateexception ("java.lang.IllegalArgumentException")
+lm-inheritablethreadlocal ("java.lang.ThreadLocal")
+lm-instantiationerror ("java.lang.IncompatibleClassChangeError")
+lm-instantiationexception ("java.lang.ReflectiveOperationException")
+lm-internalerror ("java.lang.VirtualMachineError")
+lm-interruptedexception ("java.lang.Exception")
+lm-layerinstantiationexception ("java.lang.RuntimeException")
+lm-math ("java.lang.Object")
+lm-modulelayer ("java.lang.Object")
+lm-noclassdeffounderror ("java.lang.LinkageError")
+lm-nosuchfielderror ("java.lang.IncompatibleClassChangeError")
+lm-nosuchfieldexception ("java.lang.ReflectiveOperationException")
+lm-nosuchmethoderror ("java.lang.IncompatibleClassChangeError")
+lm-nosuchmethodexception ("java.lang.ReflectiveOperationException")
+lm-outofmemoryerror ("java.lang.VirtualMachineError")
+lm-override ("java.lang.annotation.Annotation")
+lm-package ("java.lang.NamedPackage" "java.lang.reflect.AnnotatedElement")
+lm-process ("java.lang.Object" "java.io.Closeable")
+lm-processbuilder ("java.lang.Object")
+lm-processhandle ("java.lang.Comparable")
+lm-runtime ("java.lang.Object")
+lm-runtimepermission ("java.security.BasicPermission")
+lm-securityexception ("java.lang.RuntimeException")
+lm-securitymanager ("java.lang.Object")
+lm-stackoverflowerror ("java.lang.VirtualMachineError")
+lm-stacktraceelement ("java.lang.Object" "java.io.Serializable")
+lm-stackwalker ("java.lang.Object")
+lm-strictmath ("java.lang.Object")
+lm-stringbuffer ("java.lang.AbstractStringBuilder" "java.lang.Appendable" "java.io.Serializable" "java.lang.Comparable" "java.lang.CharSequence")
+lm-stringbuilder ("java.lang.AbstractStringBuilder" "java.lang.Appendable" "java.io.Serializable" "java.lang.Comparable" "java.lang.CharSequence")
+lm-suppresswarnings ("java.lang.annotation.Annotation")
+lm-system ("java.lang.Object")
+lm-thread-state ("java.lang.Enum")
+lm-thread-uncaughtexceptionhandler ()
+lm-threaddeath ("java.lang.Error")
+lm-threadgroup ("java.lang.Object" "java.lang.Thread$UncaughtExceptionHandler")
+lm-threadlocal ("java.lang.Object")
+lm-typenotpresentexception ("java.lang.RuntimeException")
+lm-unknownerror ("java.lang.VirtualMachineError")
+lm-unsatisfiedlinkerror ("java.lang.LinkageError")
+lm-unsupportedclassversionerror ("java.lang.ClassFormatError")
+lm-verifyerror ("java.lang.LinkageError")
+lm-virtualmachineerror ("java.lang.Error")
+lm-biginteger ("java.lang.Number" "java.lang.Comparable")
+lm-calendar ("java.lang.Object" "java.io.Serializable" "java.lang.Cloneable" "java.lang.Comparable")
+lm-duplicateformatflagsexception ("java.util.IllegalFormatException")
+lm-formatflagsconversionmismatchexception ("java.util.IllegalFormatException")
+lm-illegalformatargumentindexexception ("java.util.IllegalFormatException")
+lm-illegalformatcodepointexception ("java.util.IllegalFormatException")
+lm-illegalformatflagsexception ("java.util.IllegalFormatException")
+lm-illegalformatprecisionexception ("java.util.IllegalFormatException")
+lm-illegalformatwidthexception ("java.util.IllegalFormatException")
+lm-missingformatwidthexception ("java.util.IllegalFormatException")
+li-all (["clojure.lang.AFn" false] ["clojure.lang.AFunction" false] ["clojure.lang.AMapEntry" false] ["clojure.lang.APersistentMap" false] ["clojure.lang.APersistentMap$KeySeq" false] ["clojure.lang.APersistentMap$ValSeq" false] ["clojure.lang.APersistentSet" false] ["clojure.lang.APersistentVector" false] ["clojure.lang.APersistentVector$RSeq" false] ["clojure.lang.APersistentVector$Seq" false] ["clojure.lang.APersistentVector$SubVector" false] ["clojure.lang.ARef" false] ["clojure.lang.AReference" false] ["clojure.lang.ASeq" false] ["clojure.lang.ATransientMap" false] ["clojure.lang.ATransientSet" false] ["clojure.lang.Agent" false] ["clojure.lang.ArityException" false] ["clojure.lang.ArrayChunk" false] ["clojure.lang.ArraySeq" false] ["clojure.lang.Associative" true] ["clojure.lang.Atom" false] ["clojure.lang.BigInt" false] ["clojure.lang.ChunkBuffer" false] ["clojure.lang.ChunkedCons" false] ["clojure.lang.Compiler" false] ["clojure.lang.Compiler$CompilerException" false] ["clojure.lang.Cons" false] ["clojure.lang.Counted" true] ["clojure.lang.Cycle" false] ["clojure.lang.Delay" false] ["clojure.lang.ExceptionInfo" false] ["clojure.lang.Fn" true] ["clojure.lang.IAtom" true] ["clojure.lang.IAtom2" true] ["clojure.lang.IBlockingDeref" true] ["clojure.lang.IChunk" true] ["clojure.lang.IChunkedSeq" true] ["clojure.lang.IDeref" true] ["clojure.lang.IDrop" true] ["clojure.lang.IEditableCollection" true] ["clojure.lang.IExceptionInfo" true] ["clojure.lang.IFn" true] ["clojure.lang.IHashEq" true] ["clojure.lang.IKVReduce" true] ["clojure.lang.ILookup" true] ["clojure.lang.IMapEntry" true] ["clojure.lang.IMapIterable" true] ["clojure.lang.IMeta" true] ["clojure.lang.IObj" true] ["clojure.lang.IPending" true] ["clojure.lang.IPersistentCollection" true] ["clojure.lang.IPersistentList" true] ["clojure.lang.IPersistentMap" true] ["clojure.lang.IPersistentSet" true] ["clojure.lang.IPersistentStack" true] ["clojure.lang.IPersistentVector" true] ["clojure.lang.IRecord" true] ["clojure.lang.IReduce" true] ["clojure.lang.IReduceInit" true] ["clojure.lang.IRef" true] ["clojure.lang.IReference" true] ["clojure.lang.ISeq" true] ["clojure.lang.ITransientAssociative" true] ["clojure.lang.ITransientAssociative2" true] ["clojure.lang.ITransientCollection" true] ["clojure.lang.ITransientMap" true] ["clojure.lang.ITransientSet" true] ["clojure.lang.ITransientVector" true] ["clojure.lang.Indexed" true] ["clojure.lang.IndexedSeq" true] ["clojure.lang.Iterate" false] ["clojure.lang.Keyword" false] ["clojure.lang.LazySeq" false] ["clojure.lang.LineNumberingPushbackReader" false] ["clojure.lang.LispReader$ReaderException" false] ["clojure.lang.LongRange" false] ["clojure.lang.MapEntry" false] ["clojure.lang.MapEquivalence" true] ["clojure.lang.MultiFn" false] ["clojure.lang.Named" true] ["clojure.lang.Namespace" false] ["clojure.lang.Obj" false] ["clojure.lang.PersistentArrayMap" false] ["clojure.lang.PersistentArrayMap$Seq" false] ["clojure.lang.PersistentArrayMap$TransientArrayMap" false] ["clojure.lang.PersistentHashMap" false] ["clojure.lang.PersistentHashMap$TransientHashMap" false] ["clojure.lang.PersistentHashSet" false] ["clojure.lang.PersistentHashSet$TransientHashSet" false] ["clojure.lang.PersistentList" false] ["clojure.lang.PersistentList$EmptyList" false] ["clojure.lang.PersistentTreeMap" false] ["clojure.lang.PersistentTreeSet" false] ["clojure.lang.PersistentVector" false] ["clojure.lang.PersistentVector$ChunkedSeq" false] ["clojure.lang.PersistentVector$TransientVector" false] ["clojure.lang.Ratio" false] ["clojure.lang.ReaderConditional" false] ["clojure.lang.Reduced" false] ["clojure.lang.Repeat" false] ["clojure.lang.Reversible" true] ["clojure.lang.Seqable" true] ["clojure.lang.Sequential" true] ["clojure.lang.Settable" true] ["clojure.lang.Sorted" true] ["clojure.lang.StringSeq" false] ["clojure.lang.Symbol" false] ["clojure.lang.TaggedLiteral" false] ["clojure.lang.Var" false] ["clojure.lang.Var$Unbound" false] ["clojure.lang.Volatile" false] ["java.io.BufferedWriter" false] ["java.io.Closeable" true] ["java.io.EOFException" false] ["java.io.FileNotFoundException" false] ["java.io.FilterReader" false] ["java.io.Flushable" true] ["java.io.IOException" false] ["java.io.OutputStreamWriter" false] ["java.io.PrintWriter" false] ["java.io.PushbackReader" false] ["java.io.Reader" false] ["java.io.Serializable" true] ["java.io.StringWriter" false] ["java.io.UncheckedIOException" false] ["java.io.Writer" false] ["java.lang.AbstractMethodError" false] ["java.lang.Appendable" true] ["java.lang.ArithmeticException" false] ["java.lang.ArrayIndexOutOfBoundsException" false] ["java.lang.ArrayStoreException" false] ["java.lang.AssertionError" false] ["java.lang.AutoCloseable" true] ["java.lang.Boolean" false] ["java.lang.BootstrapMethodError" false] ["java.lang.Byte" false] ["java.lang.CharSequence" true] ["java.lang.Character" false] ["java.lang.Class" false] ["java.lang.ClassCastException" false] ["java.lang.ClassCircularityError" false] ["java.lang.ClassFormatError" false] ["java.lang.ClassLoader" false] ["java.lang.ClassNotFoundException" false] ["java.lang.ClassValue" false] ["java.lang.CloneNotSupportedException" false] ["java.lang.Cloneable" true] ["java.lang.Comparable" true] ["java.lang.Deprecated" true] ["java.lang.Double" false] ["java.lang.Enum" false] ["java.lang.EnumConstantNotPresentException" false] ["java.lang.Error" false] ["java.lang.Exception" false] ["java.lang.ExceptionInInitializerError" false] ["java.lang.Float" false] ["java.lang.IllegalAccessError" false] ["java.lang.IllegalAccessException" false] ["java.lang.IllegalArgumentException" false] ["java.lang.IllegalCallerException" false] ["java.lang.IllegalMonitorStateException" false] ["java.lang.IllegalStateException" false] ["java.lang.IllegalThreadStateException" false] ["java.lang.IncompatibleClassChangeError" false] ["java.lang.IndexOutOfBoundsException" false] ["java.lang.InheritableThreadLocal" false] ["java.lang.InstantiationError" false] ["java.lang.InstantiationException" false] ["java.lang.Integer" false] ["java.lang.InternalError" false] ["java.lang.InterruptedException" false] ["java.lang.Iterable" true] ["java.lang.LayerInstantiationException" false] ["java.lang.LinkageError" false] ["java.lang.Long" false] ["java.lang.Math" false] ["java.lang.ModuleLayer" false] ["java.lang.NegativeArraySizeException" false] ["java.lang.NoClassDefFoundError" false] ["java.lang.NoSuchFieldError" false] ["java.lang.NoSuchFieldException" false] ["java.lang.NoSuchMethodError" false] ["java.lang.NoSuchMethodException" false] ["java.lang.NullPointerException" false] ["java.lang.Number" false] ["java.lang.NumberFormatException" false] ["java.lang.Object" false] ["java.lang.OutOfMemoryError" false] ["java.lang.Override" true] ["java.lang.Package" false] ["java.lang.Process" false] ["java.lang.ProcessBuilder" false] ["java.lang.ProcessHandle" true] ["java.lang.Readable" true] ["java.lang.ReflectiveOperationException" false] ["java.lang.Runnable" true] ["java.lang.Runtime" false] ["java.lang.RuntimeException" false] ["java.lang.RuntimePermission" false] ["java.lang.SecurityException" false] ["java.lang.SecurityManager" false] ["java.lang.Short" false] ["java.lang.StackOverflowError" false] ["java.lang.StackTraceElement" false] ["java.lang.StackWalker" false] ["java.lang.StrictMath" false] ["java.lang.String" false] ["java.lang.StringBuffer" false] ["java.lang.StringBuilder" false] ["java.lang.StringIndexOutOfBoundsException" false] ["java.lang.SuppressWarnings" true] ["java.lang.System" false] ["java.lang.Thread" false] ["java.lang.Thread$State" false] ["java.lang.Thread$UncaughtExceptionHandler" true] ["java.lang.ThreadDeath" false] ["java.lang.ThreadGroup" false] ["java.lang.ThreadLocal" false] ["java.lang.Throwable" false] ["java.lang.TypeNotPresentException" false] ["java.lang.UnknownError" false] ["java.lang.UnsatisfiedLinkError" false] ["java.lang.UnsupportedClassVersionError" false] ["java.lang.UnsupportedOperationException" false] ["java.lang.VerifyError" false] ["java.lang.VirtualMachineError" false] ["java.lang.Void" false] ["java.lang.constant.Constable" true] ["java.lang.constant.ConstantDesc" true] ["java.lang.invoke.TypeDescriptor" true] ["java.lang.invoke.TypeDescriptor$OfField" true] ["java.lang.reflect.AnnotatedElement" true] ["java.lang.reflect.GenericDeclaration" true] ["java.lang.reflect.InvocationTargetException" false] ["java.lang.reflect.Type" true] ["java.math.BigDecimal" false] ["java.math.BigInteger" false] ["java.util.Calendar" false] ["java.util.Collection" true] ["java.util.Comparator" true] ["java.util.Date" false] ["java.util.DuplicateFormatFlagsException" false] ["java.util.FormatFlagsConversionMismatchException" false] ["java.util.IllegalFormatArgumentIndexException" false] ["java.util.IllegalFormatCodePointException" false] ["java.util.IllegalFormatConversionException" false] ["java.util.IllegalFormatException" false] ["java.util.IllegalFormatFlagsException" false] ["java.util.IllegalFormatPrecisionException" false] ["java.util.IllegalFormatWidthException" false] ["java.util.List" true] ["java.util.Map" true] ["java.util.Map$Entry" true] ["java.util.MissingFormatArgumentException" false] ["java.util.MissingFormatWidthException" false] ["java.util.NavigableMap" true] ["java.util.NavigableSet" true] ["java.util.NoSuchElementException" false] ["java.util.RandomAccess" true] ["java.util.SequencedCollection" true] ["java.util.SequencedMap" true] ["java.util.SequencedSet" true] ["java.util.Set" true] ["java.util.SortedMap" true] ["java.util.SortedSet" true] ["java.util.UnknownFormatConversionException" false] ["java.util.concurrent.Callable" true] ["java.util.concurrent.CancellationException" false] ["java.util.concurrent.ExecutionException" false] ["java.util.concurrent.RejectedExecutionException" false] ["java.util.function.BooleanSupplier" true] ["java.util.function.DoubleSupplier" true] ["java.util.function.IntSupplier" true] ["java.util.function.LongSupplier" true] ["java.util.function.Supplier" true] ["java.util.regex.MatchResult" true] ["java.util.regex.Matcher" false] ["java.util.regex.Pattern" false] ["java.util.regex.PatternSyntaxException" false])
+lm-opcodes ()
+lm-abstractstringbuilder ("java.lang.Object" "java.lang.Appendable" "java.lang.CharSequence")
+lm-namedpackage ("java.lang.Object")
+lm-annotation ()
+lm-basicpermission ("java.security.Permission" "java.io.Serializable")
+li-all2 (["clojure.asm.Opcodes" true] ["java.lang.AbstractStringBuilder" false] ["java.lang.NamedPackage" false] ["java.lang.annotation.Annotation" true] ["java.security.BasicPermission" false])
+lm-permission ("java.lang.Object" "java.security.Guard" "java.io.Serializable")
+li-all3 (["java.security.Permission" false])
+lm-guard ()
