@@ -1,0 +1,54 @@
+i-expand-quote (do (clojure.core/import* "java.util.Date"))
+i-expand-bare (do (clojure.core/import* "java.util.Date"))
+i-expand-list (do (clojure.core/import* "java.util.Date") (clojure.core/import* "java.util.Calendar"))
+i-expand-list-bare (do (clojure.core/import* "java.util.Date"))
+i-expand-multi (do (clojure.core/import* "java.lang.Long") (clojure.core/import* "java.util.Date") (clojure.core/import* "java.util.Calendar"))
+i-expand-str THROW clojure.lang.ExceptionInfo|"Call to clojure.core/import did not conform to spec."
+i-import*-resolve nil
+i-import*-resolve-q nil
+i-ret java.util.Date
+i-ns-imports ("AbstractMethodError" "Appendable" "ArithmeticException" "ArrayIndexOutOfBoundsException" "ArrayStoreException" "AssertionError" "AutoCloseable" "BigDecimal" "BigInteger" "Boolean" "BootstrapMethodError" "Byte" "Callable" "CharSequence" "Character" "Class" "ClassCastException" "ClassCircularityError" "ClassFormatError" "ClassLoader" "ClassNotFoundException" "ClassValue" "CloneNotSupportedException" "Cloneable" "Comparable" "Compiler" "Date" "Deprecated" "Double" "Enum" "EnumConstantNotPresentException" "Error" "Exception" "ExceptionInInitializerError" "ExceptionInfo" "Float" "IllegalAccessError" "IllegalAccessException" "IllegalArgumentException" "IllegalCallerException" "IllegalMonitorStateException" "IllegalStateException" "IllegalThreadStateException" "IncompatibleClassChangeError" "IndexOutOfBoundsException" "InheritableThreadLocal" "InstantiationError" "InstantiationException" "Integer" "InternalError" "InterruptedException" "Iterable" "LayerInstantiationException" "LinkageError" "Long" "Math" "ModuleLayer" "NegativeArraySizeException" "NoClassDefFoundError" "NoSuchFieldError" "NoSuchFieldException" "NoSuchMethodError" "NoSuchMethodException" "NullPointerException" "Number" "NumberFormatException" "Object" "OutOfMemoryError" "Override" "Package" "Process" "ProcessBuilder" "ProcessHandle" "Readable" "ReflectiveOperationException" "Runnable" "Runtime" "RuntimeException" "RuntimePermission" "SecurityException" "SecurityManager" "Short" "StackOverflowError" "StackTraceElement" "StackWalker" "StrictMath" "String" "StringBuffer" "StringBuilder" "StringIndexOutOfBoundsException" "SuppressWarnings" "System" "Thread" "Thread$State" "Thread$UncaughtExceptionHandler" "ThreadDeath" "ThreadGroup" "ThreadLocal" "Throwable" "TypeNotPresentException" "UnknownError" "UnsatisfiedLinkError" "UnsupportedClassVersionError" "UnsupportedOperationException" "VerifyError" "VirtualMachineError" "Void")
+i-ns-imports-val java.util.Date
+i-resolve java.util.Date
+i-ns-resolve java.util.Date
+i-value-pos java.util.Date
+i-construct #inst "1970-01-01T00:00:00.000-00:00"
+i-dup java.util.Date
+i-conflict-class THROW java.lang.IllegalStateException|"Date already refers to: class java.util.Date in namespace: imp2"
+i-conflict-def THROW java.lang.ClassCastException|"class clojure.lang.Var cannot be cast to class java.lang.Class (clojure.lang.Var is in unnamed module of loader 'app'; java.lang.Class is in module java.base of loader 'bootstrap')"
+i-def-over-import THROW java.lang.RuntimeException|"Expecting var, but Date is mapped to class java.util.Date"
+i-def-over-import-after [java.util.Date nil]
+i-intern-over-import [#'imp5/Date nil "WARNING: Date already refers to: class java.util.Date in namespace: imp5, being replaced by: #'imp5/Date\n"]
+i-unknown THROW java.lang.ClassNotFoundException|"foo.bar.Baz"
+i-unknown-list THROW java.lang.ClassNotFoundException|"foo.bar.Baz"
+i-unmap [nil false]
+i-ns-map java.util.Date
+i-ns-publics false
+i-ns-interns false
+i-import-over-refer THROW java.lang.ClassCastException|"class clojure.lang.Var cannot be cast to class java.lang.Class (clojure.lang.Var is in unnamed module of loader 'app'; java.lang.Class is in module java.base of loader 'bootstrap')"
+i-refer-over-import #'impc/Date
+i-refer-warn "WARNING: Date already refers to: class java.util.Date in namespace: impf, being replaced by: #'impe/Date\n"
+i-refer-removes-import [#'impg/Date nil]
+i-deftype-import user.ImpPoint
+i-deftype-construct "user.ImpPoint"
+i-fqn-eval java.lang.String
+i-defaults ("AbstractMethodError" "Appendable" "ArithmeticException" "ArrayIndexOutOfBoundsException" "ArrayStoreException" "AssertionError" "AutoCloseable" "BigDecimal" "BigInteger" "Boolean" "BootstrapMethodError" "Byte" "Callable" "CharSequence" "Character" "Class" "ClassCastException" "ClassCircularityError" "ClassFormatError" "ClassLoader" "ClassNotFoundException" "ClassValue" "CloneNotSupportedException" "Cloneable" "Comparable" "Compiler" "Deprecated" "Double" "Enum" "EnumConstantNotPresentException" "Error" "Exception" "ExceptionInInitializerError" "ExceptionInfo" "Float" "IllegalAccessError" "IllegalAccessException" "IllegalArgumentException" "IllegalCallerException" "IllegalMonitorStateException" "IllegalStateException" "IllegalThreadStateException" "IncompatibleClassChangeError" "IndexOutOfBoundsException" "InheritableThreadLocal" "InstantiationError" "InstantiationException" "Integer" "InternalError" "InterruptedException" "Iterable" "LayerInstantiationException" "LinkageError" "Long" "Math" "ModuleLayer" "NegativeArraySizeException" "NoClassDefFoundError" "NoSuchFieldError" "NoSuchFieldException" "NoSuchMethodError" "NoSuchMethodException" "NullPointerException" "Number" "NumberFormatException" "Object" "OutOfMemoryError" "Override" "Package" "Process" "ProcessBuilder" "ProcessHandle" "Readable" "ReflectiveOperationException" "Runnable" "Runtime" "RuntimeException" "RuntimePermission" "SecurityException" "SecurityManager" "Short" "StackOverflowError" "StackTraceElement" "StackWalker" "StrictMath" "String" "StringBuffer" "StringBuilder" "StringIndexOutOfBoundsException" "SuppressWarnings" "System" "Thread" "Thread$State" "Thread$UncaughtExceptionHandler" "ThreadDeath" "ThreadGroup" "ThreadLocal" "Throwable" "TypeNotPresentException" "UnknownError" "UnsatisfiedLinkError" "UnsupportedClassVersionError" "UnsupportedOperationException" "VerifyError" "VirtualMachineError" "Void")
+i-ns-imports-nsobj java.util.Date
+i-ns-imports-str THROW java.lang.ClassCastException|"class java.lang.String cannot be cast to class clojure.lang.Symbol (java.lang.String is in module java.base of loader 'bootstrap'; clojure.lang.Symbol is in unnamed module of loader 'app')"
+i-ns-imports-nil THROW java.lang.NullPointerException|"Cannot invoke \"Object.hashCode()\" because \"key\" is null"
+i-ns-imports-missing THROW java.lang.Exception|"No namespace: nosuchnsxyz found"
+i-ns-clause java.util.Date
+i-import-nil THROW clojure.lang.ExceptionInfo|"Call to clojure.core/import did not conform to spec."
+i-import-empty THROW clojure.lang.ExceptionInfo|"Call to clojure.core/import did not conform to spec."
+i-import-package THROW java.lang.ClassNotFoundException|"java.util"
+i-import-slash THROW clojure.lang.ExceptionInfo|"Call to clojure.core/import did not conform to spec."
+i-import-multi-ret java.util.Calendar
+i-import-num THROW clojure.lang.ExceptionInfo|"Call to clojure.core/import did not conform to spec."
+i-import-badlist THROW clojure.lang.ExceptionInfo|"Call to clojure.core/import did not conform to spec."
+i-import-lonely THROW clojure.lang.ExceptionInfo|"Call to clojure.core/import did not conform to spec."
+i-import-qual-pkg THROW clojure.lang.ExceptionInfo|"Call to clojure.core/import did not conform to spec."
+i-import-qual-cls THROW clojure.lang.ExceptionInfo|"Call to clojure.core/import did not conform to spec."
+i-import-list-str THROW clojure.lang.ExceptionInfo|"Call to clojure.core/import did not conform to spec."
+i-import-exdata ["Call to clojure.core/import did not conform to spec." (":clojure.spec.alpha/args" ":clojure.spec.alpha/problems" ":clojure.spec.alpha/spec" ":clojure.spec.alpha/value")]
+i-static-field 2147483647
+i-static-call 42

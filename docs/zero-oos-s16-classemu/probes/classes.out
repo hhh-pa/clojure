@@ -1,0 +1,155 @@
+c-class-str java.lang.String
+c-class-nil nil
+c-class-int java.lang.Long
+c-class-bool java.lang.Boolean
+c-class-char java.lang.Character
+c-class-kw clojure.lang.Keyword
+c-class-sym clojure.lang.Symbol
+c-class-vec clojure.lang.PersistentVector
+c-class-map clojure.lang.PersistentArrayMap
+c-class-set clojure.lang.PersistentHashSet
+c-class-list clojure.lang.PersistentList
+c-class-fn "user$evalN$fn__N"
+c-class-var clojure.lang.Var
+c-class-regex java.util.regex.Pattern
+c-class-ns clojure.lang.Namespace
+c-class-bigint clojure.lang.BigInt
+c-class-bigdec java.math.BigDecimal
+c-class-ratio clojure.lang.Ratio
+c-class-double java.lang.Double
+c-class-lazy clojure.lang.LazySeq
+c-class-cons-nil clojure.lang.PersistentList
+c-class-cons clojure.lang.Cons
+c-class-range clojure.lang.LongRange
+c-class-subvec clojure.lang.APersistentVector$SubVector
+c-class-entry clojure.lang.MapEntry
+c-class-delay clojure.lang.Delay
+c-class-atom clojure.lang.Atom
+c-class-agent clojure.lang.Agent
+c-class-volatile clojure.lang.Volatile
+c-class-exinfo clojure.lang.ExceptionInfo
+c-class-arith java.lang.ArithmeticException
+c-class-out java.io.OutputStreamWriter
+c-class-err java.io.PrintWriter
+c-class-class java.lang.Class
+c-class-multifn clojure.lang.MultiFn
+c-name-eduction "clojure.core.Eduction"
+c-name-reduced "clojure.lang.Reduced"
+c-name-future "clojure.core$future_call$reify__N"
+c-name-promise "clojure.core$promise$reify__N"
+c-name-iteration "clojure.core$iteration$reify__N"
+c-name-reader "clojure.lang.LineNumberingPushbackReader"
+c-name-chunk "clojure.lang.ArrayChunk"
+c-name-chunkbuf "clojure.lang.ChunkBuffer"
+c-name-matcher "java.util.regex.Matcher"
+c-name-struct ["clojure.lang.PersistentStructMap" "clojure.lang.PersistentStructMap$Def" "clojure.lang.PersistentStructMap$1"]
+c-name-thash "clojure.lang.PersistentHashMap$TransientHashMap"
+c-name-tvec "clojure.lang.PersistentVector$TransientVector"
+c-name-tarr "clojure.lang.PersistentArrayMap$TransientArrayMap"
+c-name-tset "clojure.lang.PersistentHashSet$TransientHashSet"
+c-name-seq-bigmap-oo "clojure.lang.PersistentHashMap$ArrayNode$Seq"
+c-name-seq-sortedmap-oo "clojure.lang.PersistentTreeMap$Seq"
+c-name-seq-smallmap "clojure.lang.PersistentArrayMap$Seq"
+c-name-seq-set "clojure.lang.APersistentMap$KeySeq"
+c-name-seq-sortedset "clojure.lang.APersistentMap$KeySeq"
+c-name-keys "clojure.lang.APersistentMap$KeySeq"
+c-name-keys-big "clojure.lang.APersistentMap$KeySeq"
+c-name-vals "clojure.lang.APersistentMap$ValSeq"
+c-name-rseq "clojure.lang.APersistentVector$RSeq"
+c-name-subvec-seq "clojure.lang.APersistentVector$Seq"
+c-name-sort "clojure.lang.ArraySeq"
+c-name-str-seq "clojure.lang.StringSeq"
+c-name-vec-seq "clojure.lang.PersistentVector$ChunkedSeq"
+c-class-sortedmap clojure.lang.PersistentTreeMap
+c-class-sortedset clojure.lang.PersistentTreeSet
+c-class-tagged clojure.lang.TaggedLiteral
+c-class-readercond clojure.lang.ReaderConditional
+c-class-emptylist clojure.lang.PersistentList$EmptyList
+c-class-object java.lang.Object
+c-name-native "clojure.core$map"
+c-name-native-fixed "clojure.core$first__N"
+c-rec-bases ["java.lang.Object" "clojure.lang.IRecord" "clojure.lang.IHashEq" "clojure.lang.IObj" "clojure.lang.ILookup" "clojure.lang.IKeywordLookup" "clojure.lang.IPersistentMap" "java.util.Map" "java.io.Serializable"]
+c-rec-supers ["clojure.lang.Associative" "clojure.lang.Counted" "clojure.lang.IHashEq" "clojure.lang.IKeywordLookup" "clojure.lang.ILookup" "clojure.lang.IMeta" "clojure.lang.IObj" "clojure.lang.IPersistentCollection" "clojure.lang.IPersistentMap" "clojure.lang.IRecord" "clojure.lang.Seqable" "java.io.Serializable" "java.lang.Iterable" "java.lang.Object" "java.util.Map"]
+c-rec-claimed ["java.lang.Object" "java.io.Closeable" "clojure.lang.IRecord" "clojure.lang.IHashEq" "clojure.lang.IObj" "clojure.lang.ILookup" "clojure.lang.IKeywordLookup" "clojure.lang.IPersistentMap" "java.util.Map" "java.io.Serializable"]
+c-det-bases ["java.lang.Object" "clojure.lang.IType"]
+c-det-claimed ["java.lang.Object" "clojure.lang.ISeq" "clojure.lang.IType"]
+c-type-plain java.lang.String
+c-type-nil nil
+c-type-meta :foo
+c-type-meta-str "bar"
+c-type-meta-nil clojure.lang.PersistentVector
+c-type-meta-false clojure.lang.PersistentVector
+c-type-nometa java.lang.Long
+c-type-sym-meta :t
+c-type-class java.lang.Class
+c-inst-basic-t true
+c-inst-basic-f false
+c-inst-iseq-t true
+c-inst-iseq-f false
+c-inst-object true
+c-inst-object-nil false
+c-inst-nil-x false
+c-inst-nil-class THROW java.lang.NullPointerException|"Cannot invoke \"java.lang.Class.isInstance(Object)\" because \"c\" is null"
+c-inst-nonclass THROW java.lang.ClassCastException|"class java.lang.Long cannot be cast to class java.lang.Class (java.lang.Long and java.lang.Class are in module java.base of loader 'bootstrap')"
+c-inst-iface true
+c-inst-serial true
+c-inst-num true
+c-inst-comparable true
+c-inst-class true
+c-inst-arity1 THROW clojure.lang.ArityException|"Wrong number of args (1) passed to: clojure.core/instance?--N"
+c-inst-arity3 THROW clojure.lang.ArityException|"Wrong number of args (3) passed to: clojure.core/instance?--N"
+c-inst-macroexpand (instance? String "a")
+c-inst-resolve #'clojure.core/instance?
+c-inst-order [true [:c :x]]
+c-inst-var-class "clojure.core$instance_QMARK___N"
+c-inst-var-apply true
+c-inst-var-apply-f false
+c-inst-var-arity THROW clojure.lang.ArityException|"Wrong number of args (1) passed to: clojure.core/instance?--N"
+c-inst-ho (true true)
+c-class?-t true
+c-class?-f-str false
+c-class?-f-nil false
+c-class?-f-iface true
+c-class?-arity0 THROW clojure.lang.ArityException|"Wrong number of args (0) passed to: clojure.core/class?"
+c-class?-arity2 THROW clojure.lang.ArityException|"Wrong number of args (2) passed to: clojure.core/class?"
+c-cast-ok "a"
+c-cast-nil-x nil
+c-cast-miss THROW java.lang.ClassCastException|"Cannot cast java.lang.Long to java.lang.String"
+c-cast-nil-c THROW java.lang.NullPointerException|"Cannot invoke \"java.lang.Class.cast(Object)\" because \"c\" is null"
+c-cast-nonclass-c THROW java.lang.ClassCastException|"class java.lang.String cannot be cast to class java.lang.Class (java.lang.String and java.lang.Class are in module java.base of loader 'bootstrap')"
+c-cast-iface 1
+c-cast-class java.lang.String
+c-cast-arity1 THROW clojure.lang.ArityException|"Wrong number of args (1) passed to: clojure.core/cast"
+c-cast-order ["a" [:c :x]]
+c-pr-str "java.lang.String"
+c-print-str "java.lang.String"
+c-str-class "class java.lang.String"
+c-tostring "class java.lang.String"
+c-print-iface "java.lang.Comparable"
+c-str-iface "interface java.lang.Comparable"
+c-tostring-iface "interface java.lang.Comparable"
+c-with-out-str "java.lang.String"
+c-eq-tt true
+c-eq-tf false
+c-meta nil
+c-with-meta THROW java.lang.ClassCastException|"class java.lang.Class cannot be cast to class clojure.lang.IObj (java.lang.Class is in module java.base of loader 'bootstrap'; clojure.lang.IObj is in unnamed module of loader 'app')"
+c-seq-err THROW java.lang.IllegalArgumentException|"Don't know how to create ISeq from: java.lang.Class"
+c-ifn? false
+c-fn? false
+c-bases-nil nil
+c-bases-nonclass THROW java.lang.ClassCastException|"class java.lang.String cannot be cast to class java.lang.Class (java.lang.String and java.lang.Class are in module java.base of loader 'bootstrap')"
+c-supers-nil nil
+c-supers-nonclass THROW java.lang.ClassCastException|"class java.lang.Long cannot be cast to class java.lang.Class (java.lang.Long and java.lang.Class are in module java.base of loader 'bootstrap')"
+c-bases-shape [true 6 ("java.lang.Object" "java.io.Serializable" "java.lang.Comparable" "java.lang.CharSequence" "java.lang.constant.Constable" "java.lang.constant.ConstantDesc")]
+c-supers-shape [true 6]
+c-bases-object nil
+c-supers-object nil
+c-bases-iface nil
+c-supers-iface nil
+c-bases-arity0 THROW clojure.lang.ArityException|"Wrong number of args (0) passed to: clojure.core/bases"
+c-bases-arity2 THROW clojure.lang.ArityException|"Wrong number of args (2) passed to: clojure.core/bases"
+c-supers-arity0 THROW clojure.lang.ArityException|"Wrong number of args (0) passed to: clojure.core/supers"
+c-class-arity0 THROW clojure.lang.ArityException|"Wrong number of args (0) passed to: clojure.core/class"
+c-class-arity2 THROW clojure.lang.ArityException|"Wrong number of args (2) passed to: clojure.core/class"
+c-type-arity0 THROW clojure.lang.ArityException|"Wrong number of args (0) passed to: clojure.core/type"
+c-type-arity2 THROW clojure.lang.ArityException|"Wrong number of args (2) passed to: clojure.core/type"
