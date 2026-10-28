@@ -158,6 +158,10 @@ fn hasheq_mid(v: &Value) -> i32 {
         // so identical `Arc`s hash equally by construction; the JVM
         // uses identity here).
         Value::MultiFn(m) => hasheq_multifn(m),
+        // Classes hash their name's string hash (deterministic
+        // stand-in — the JVM uses identity here; `=`-equal classes
+        // share buckets either way).
+        Value::Class(c) => hash_int(str_hashcode(c.name())),
         other => hasheq_rest(other),
     }
 }
@@ -255,6 +259,9 @@ fn hash_code_mid(v: &Value) -> i32 {
         // Multimethods hash their name (deterministic stand-in for
         // the JVM's identity hash).
         Value::MultiFn(m) => hash_code_multifn(m),
+        // Classes hash their name's `String.hashCode` (deterministic
+        // stand-in — the JVM uses identity here).
+        Value::Class(c) => str_hashcode(c.name()),
         other => hash_code_rest(other),
     }
 }

@@ -240,6 +240,12 @@ fn print_dup_shape(v: &Value, opts: &PrintOpts, level: Option<i64>, out: &mut St
             write!(out, "#=(var {})", v.sym).unwrap();
             true
         }
+        // Classes dup as `#=name` (the JVM's `print-dup` on `Class`).
+        Value::Class(c) => {
+            out.push_str("#=");
+            out.push_str(c.name());
+            true
+        }
         Value::HostType(h) => print_host_dup_shape(h, opts, level, out),
         Value::Extension(e) => print_ext_dup_shape(e, opts, level, out),
         _ => false,
@@ -441,12 +447,15 @@ fn print_more(v: &Value, opts: &PrintOpts, level: Option<i64>, out: &mut String)
 }
 
 /// Port-defined values (split from `print_more` for the complexity
-/// budget): host types and multifns print here; anything else falls
-/// through to `print_rest` unchanged.
+/// budget): host types, multifns, and classes print here; anything
+/// else falls through to `print_rest` unchanged.
 fn print_port_or_rest(v: &Value, opts: &PrintOpts, level: Option<i64>, out: &mut String) {
     match v {
         Value::HostType(h) => print_host(h.as_ref(), opts, level, out),
         Value::MultiFn(m) => print_multifn(m, out),
+        // Classes print their bare binary name in both modes —
+        // interfaces too (S16 oracle `c-print-iface`).
+        Value::Class(c) => out.push_str(c.name()),
         other => print_rest(other, opts, level, out),
     }
 }
@@ -973,6 +982,8 @@ fn java_debug_rest(v: &Value) -> String {
         // Multimethods render the `toString` fallback (like the
         // JVM, which never overrides it with the name).
         Value::MultiFn(m) => crate::multifn_str(&m.name),
+        // `Class.toString`: `class ` (or `interface `) plus the name.
+        Value::Class(c) => class_java_debug(c),
         Value::List(_)
         | Value::Vector(_)
         | Value::MapEntry { .. }
@@ -984,6 +995,18 @@ fn java_debug_rest(v: &Value) -> String {
         // single caller partitions the variants).
         _ => unreachable!("java_debug partition"),
     }
+}
+
+/// `Class.toString` (S16): `class ` (or `interface `) plus the
+/// binary name. Shared with `str` in `clj-eval` so the two cannot
+/// drift.
+#[must_use]
+pub fn class_java_debug(c: &crate::ClassVal) -> String {
+    format!(
+        "{} {}",
+        if c.is_iface() { "interface" } else { "class" },
+        c.name()
+    )
 }
 
 /// `Throwable.toString`: class name, plus `: message` when present.
@@ -1454,6 +1477,23 @@ mod tests {
         // Oracle T1192 FX2 `pr-e`: entries render as their 2-vector.
         let e = crate::map_entry(Value::Keyword(Keyword::new(None, "a")), Value::Int(1));
         assert_eq!(java_debug(&e), "[:a 1]");
+        // Classes render `Class.toString` (the totality arm —
+        // production `str` calls `class_java_debug` directly).
+        let class = |name: &str, iface: bool| {
+            Value::Class(Arc::new(crate::ClassVal::new(
+                Arc::from(name),
+                iface,
+                Arc::from([]),
+            )))
+        };
+        assert_eq!(
+            java_debug(&class("java.lang.String", false)),
+            "class java.lang.String"
+        );
+        assert_eq!(
+            java_debug(&class("java.io.Serializable", true)),
+            "interface java.io.Serializable"
+        );
     }
 
     #[test]
@@ -1965,6 +2005,22 @@ mod tests {
             meta: None,
         })));
         assert_eq!(dup(&two), "#user.RP[1, 2, 8, 9]");
+    }
+
+    #[test]
+    fn dup_class_writes_name_shape() {
+        // The pure dup path (production print-dup renders through
+        // the multis instead): classes dup as `#=` plus the name
+        // (JVM-verified: `(binding [*print-dup* true] (prn String))`
+        // prints `#=java.lang.String`).
+        let class = || {
+            Value::Class(Arc::new(crate::ClassVal::new(
+                Arc::from("java.lang.String"),
+                false,
+                Arc::from([]),
+            )))
+        };
+        assert_eq!(dup(&class()), "#=java.lang.String");
     }
 
     #[test]

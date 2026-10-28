@@ -234,6 +234,9 @@ fn port_type_name(v: &Value) -> Option<&'static str> {
     match v {
         Value::HostType(h) => Some(host_type_name(h)),
         Value::MultiFn(_) => Some("clojure.lang.MultiFn"),
+        // Classes are never comparable (the JVM's `Class` is not
+        // `Comparable` either); the name feeds the error alone.
+        Value::Class(_) => Some("Class"),
         _ => None,
     }
 }
@@ -310,6 +313,23 @@ mod tests {
             .expect_err("expected incomparable");
         assert_eq!(err.message(), "Cannot compare Long to String");
         assert_eq!(err.to_string(), "Cannot compare Long to String");
+    }
+
+    #[test]
+    fn classes_are_never_comparable() {
+        // The JVM's `Class` is not `Comparable` either; the name
+        // feeds the error alone.
+        let class = || {
+            Value::Class(Arc::new(crate::ClassVal::new(
+                Arc::from("java.lang.String"),
+                false,
+                Arc::from([]),
+            )))
+        };
+        assert_eq!(
+            message_of(&class(), &class()),
+            "Cannot compare Class to Class"
+        );
     }
 
     #[test]

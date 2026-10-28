@@ -14,6 +14,7 @@
 
 mod agent;
 mod atom;
+mod class;
 mod compare;
 mod delay;
 mod extension;
@@ -33,6 +34,7 @@ mod volatile;
 
 pub use agent::{Agent, AgentAction, AgentInner, AgentPool, ErrorMode, QueuedAction};
 pub use atom::{Atom, AtomState};
+pub use class::ClassVal;
 pub use compare::{CompareError, compare};
 pub use delay::{Delay, DelayState};
 pub use extension::{ExtensionValue, ThrowClass, Throwable, Unbound, Var};
@@ -48,8 +50,8 @@ pub use host::{
 pub use keyword::Keyword;
 pub use multifn::{MultiFn, method_for, multifn_hex, multifn_str};
 pub use print::{
-    CHAR_ESCAPES, CHAR_NAMES, java_debug, java_double_string, lift_ns, pr_to_string, print,
-    print_opts::PrintOpts, print_to_string,
+    CHAR_ESCAPES, CHAR_NAMES, class_java_debug, java_debug, java_double_string, lift_ns,
+    pr_to_string, print, print_opts::PrintOpts, print_to_string,
 };
 pub use promise::{Promise, PromiseState};
 pub use seq::{
