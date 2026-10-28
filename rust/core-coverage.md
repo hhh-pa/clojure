@@ -4,7 +4,7 @@ The complete inventory of `clojure.core` in this port: every var,
 its conformance state, and — for exclusions — why it is excluded.
 If a var is not listed here, that is a file bug, not a silent gap.
 
-- **692 vars: 423 implemented, 2 divergent, 267 out of scope,
+- **692 vars: 443 implemented, 2 divergent, 247 out of scope,
   0 planned.** The port reports Clojure `1.13.0-alpha9`
   (`clojure-version`).
 - **Universe.** 692 rows = 685 JVM publics + 7 extra-universe rows: 4 port-visible JVM privates
@@ -690,7 +690,7 @@ No slice on this branch: hard-never reasons stand alone, design-blocked rows nam
 | `PrintWriter-on` | out-of-scope | java.io.PrintWriter adapter ctor; port Writer kind is separate |
 | `StackTraceElement->vec` | out-of-scope | pending design: error-data shape; see #40 |
 | `Throwable->map` | out-of-scope | pending design: error-data shape; see #40 |
-| `accessor` | out-of-scope | pending design: legacy structmaps as pure maps; see #40 |
+| `accessor` | implemented | tests/collmisc.rs structmap_rows (basis-key reader; non-struct CCE) |
 | `aclone` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
 | `add-classpath` | out-of-scope | Deprecated on JVM, no replacement named; classpath URLs have no slice |
 | `add-tap` | implemented | cellstaps.rs tap_returns + tap_deliver (conj; lazily starts the clojure.core/tap-loop dispatcher; single 1024 FIFO; per-tap catch) |
@@ -732,24 +732,24 @@ No slice on this branch: hard-never reasons stand alone, design-blocked rows nam
 | `char-escape-string` | out-of-scope | pending design: print dispatch (defmultis + tables); see #40 |
 | `char-name-string` | out-of-scope | pending design: print dispatch (defmultis + tables); see #40 |
 | `chars` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
-| `chunk` | out-of-scope | Chunked-seq + custom-type hashing impl details; port seqs/hash are separate |
-| `chunk-append` | out-of-scope | Chunked-seq + custom-type hashing impl details; port seqs/hash are separate |
-| `chunk-buffer` | out-of-scope | Chunked-seq + custom-type hashing impl details; port seqs/hash are separate |
-| `chunk-cons` | out-of-scope | Chunked-seq + custom-type hashing impl details; port seqs/hash are separate |
-| `chunk-first` | out-of-scope | Chunked-seq + custom-type hashing impl details; port seqs/hash are separate |
-| `chunk-next` | out-of-scope | Chunked-seq + custom-type hashing impl details; port seqs/hash are separate |
-| `chunk-rest` | out-of-scope | Chunked-seq + custom-type hashing impl details; port seqs/hash are separate |
-| `chunked-seq?` | out-of-scope | Chunked-seq + custom-type hashing impl details; port seqs/hash are separate |
+| `chunk` | implemented | tests/collmisc.rs chunk_rows (single-use; degenerate on second take) |
+| `chunk-append` | implemented | tests/collmisc.rs chunk_rows (AIOOBE/store-NPE texts) |
+| `chunk-buffer` | implemented | tests/collmisc.rs chunk_rows (NegativeArraySizeException) |
+| `chunk-cons` | implemented | tests/collmisc.rs chunk_rows (ChunkedCons; empty collapses) |
+| `chunk-first` | implemented | tests/collmisc.rs chunk_rows (ranges/realized/emulated) |
+| `chunk-next` | implemented | tests/collmisc.rs chunk_rows (nil at end) |
+| `chunk-rest` | implemented | tests/collmisc.rs chunk_rows (() at end) |
+| `chunked-seq?` | implemented | tests/collmisc.rs chunk_rows (29-row battery) |
 | `class?` | out-of-scope | Host reflection/interop/beans/method-fns (N1) |
 | `clear-agent-errors` | out-of-scope | Deprecated on JVM; replacement implemented |
 | `comparator` | implemented | cellstaps.rs comparator_calls + comparator_sort + comparator_errors (verbatim core.clj body; cond keeps truthy preds ordering; sort/sorted-map-by interop) |
 | `compile` | out-of-scope | Bytecode compiler/classpath surface; port AOT (clj-aot) is separate |
 | `construct-proxy` | out-of-scope | No type-system slice on this branch: proxies/deftype factories/method internals |
-| `create-struct` | out-of-scope | pending design: legacy structmaps as pure maps; see #40 |
+| `create-struct` | implemented | tests/collmisc.rs structmap_rows |
 | `dec'` | out-of-scope | pending design: auto-promote arith overflow-promotion spec; see #40 |
 | `default-data-readers` | out-of-scope | pending design: data-reader tag table; see #40 |
 | `definline` | out-of-scope | pending design: inline-expansion hook; see #40 |
-| `defstruct` | out-of-scope | pending design: legacy structmaps as pure maps; see #40 |
+| `defstruct` | implemented | tests/collmisc.rs structmap_rows (macro; expansion shape) |
 | `derive` | out-of-scope | pending design: hierarchy maps (coordinate with 33-typechain); see #40 |
 | `descendants` | out-of-scope | pending design: hierarchy maps (coordinate with 33-typechain); see #40 |
 | `destructure` | out-of-scope | pending design: macro-expansion helper surface; see #40 |
@@ -757,13 +757,13 @@ No slice on this branch: hard-never reasons stand alone, design-blocked rows nam
 | `doubles` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
 | `enumeration-seq` | out-of-scope | JDK collection/stream adapters (N1) |
 | `extenders` | out-of-scope | pending design: protocol surface (protocol track owns design); see #40 |
-| `file-seq` | out-of-scope | pending design: lazy dir walk; see #40 |
+| `file-seq` | implemented | tests/collmisc.rs fileseq_rows (string walk; classes/File unrepresentable) |
 | `find-protocol-impl` | out-of-scope | No protocol slice on this branch (protocol track owns design) |
 | `find-protocol-method` | out-of-scope | No protocol slice on this branch (protocol track owns design) |
 | `float-array` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
 | `floats` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
 | `get-proxy-class` | out-of-scope | No type-system slice on this branch: proxies/deftype factories/method internals |
-| `hash-combine` | out-of-scope | Chunked-seq + custom-type hashing impl details; port seqs/hash are separate |
+| `hash-combine` | implemented | tests/collmisc.rs mixhash_rows (Util/hash path; tower y structural, §2.4) |
 | `hash-ordered-coll` | implemented | cellstaps.rs hash_ordered_values + hash_ordered_errors (Murmur3 ordered mix; maps iterate entries; nil NPE + non-Iterable CCE) |
 | `hash-unordered-coll` | implemented | cellstaps.rs hash_unordered_values (Murmur3 unordered mix; vec-order-insensitive; entry = ordered [k v]; nil NPE) |
 | `init-proxy` | out-of-scope | No type-system slice on this branch: proxies/deftype factories/method internals |
@@ -775,7 +775,7 @@ No slice on this branch: hard-never reasons stand alone, design-blocked rows nam
 | `ints` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
 | `io!` | out-of-scope | STM refs/transactions (N4): never |
 | `isa?` | out-of-scope | pending design: hierarchy maps (coordinate with 33-typechain); see #40 |
-| `iteration` | out-of-scope | pending design: step-fn seqable+reducible; see #40 |
+| `iteration` | implemented | tests/collmisc.rs iteration_rows (eager-first-step; re-seqable) |
 | `iterator-seq` | out-of-scope | JDK collection/stream adapters (N1) |
 | `load-reader` | out-of-scope | pending design: read/eval gate trio; see #40 |
 | `long-array` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
@@ -784,7 +784,7 @@ No slice on this branch: hard-never reasons stand alone, design-blocked rows nam
 | `make-hierarchy` | out-of-scope | pending design: hierarchy maps (coordinate with 33-typechain); see #40 |
 | `memfn` | out-of-scope | Host reflection/interop/beans/method-fns (N1) |
 | `method-sig` | out-of-scope | No type-system slice on this branch: proxies/deftype factories/method internals |
-| `mix-collection-hash` | out-of-scope | Chunked-seq + custom-type hashing impl details; port seqs/hash are separate |
+| `mix-collection-hash` | implemented | tests/collmisc.rs mixhash_rows (int-checked longs) |
 | `munge` | out-of-scope | pending design: JVM munger escaping adoption; see #40 |
 | `namespace-munge` | out-of-scope | pending design: JVM munger escaping adoption; see #40 |
 | `object-array` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
@@ -801,8 +801,8 @@ No slice on this branch: hard-never reasons stand alone, design-blocked rows nam
 | `proxy-name` | out-of-scope | No type-system slice on this branch: proxies/deftype factories/method internals |
 | `proxy-super` | out-of-scope | No type-system slice on this branch: proxies/deftype factories/method internals |
 | `random-uuid` | out-of-scope | pending design: UUID value kind; see #40 |
-| `re-groups` | out-of-scope | pending design: stateful matcher handle over regex crate; see #40 |
-| `re-matcher` | out-of-scope | pending design: stateful matcher handle over regex crate; see #40 |
+| `re-groups` | implemented | tests/collmisc.rs rematcher_rows (ISE w/o match; non-handle CCE) |
+| `re-matcher` | implemented | tests/collmisc.rs rematcher_rows (stateful handle; re-find companion) |
 | `read+string` | out-of-scope | pending design: read/eval gate trio; see #40 |
 | `reader-conditional` | out-of-scope | pending design: data-reader tag table; see #40 |
 | `reader-conditional?` | out-of-scope | pending design: data-reader tag table; see #40 |
@@ -816,7 +816,7 @@ No slice on this branch: hard-never reasons stand alone, design-blocked rows nam
 | `resultset-seq` | out-of-scope | JDBC ResultSet adapter; never |
 | `selector` | out-of-scope | pending design: 1.13 map-destructuring selector macro; see #40 |
 | `seq-to-map-for-destructuring` | out-of-scope | pending design: macro-expansion helper surface; see #40 |
-| `seque` | out-of-scope | pending design: queued (blocking) seq; see #40 |
+| `seque` | implemented | tests/collmisc.rs seque_rows (feeder+queue; int-cast capacities) |
 | `set-agent-send-executor!` | implemented | cellstaps.rs exec_record_send (accept-and-record: any value stored + returned; dispatch stays on the fixed send pool — pinned divergences from e-routes/e-nil-send/e-non-exec) |
 | `set-agent-send-off-executor!` | implemented | cellstaps.rs exec_record_send_off (accept-and-record mirror of the send slot; fixed send-off pool) |
 | `short-array` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
@@ -825,8 +825,8 @@ No slice on this branch: hard-never reasons stand alone, design-blocked rows nam
 | `stream-reduce!` | out-of-scope | JDK collection/stream adapters (N1) |
 | `stream-seq!` | out-of-scope | JDK collection/stream adapters (N1) |
 | `stream-transduce!` | out-of-scope | JDK collection/stream adapters (N1) |
-| `struct` | out-of-scope | pending design: legacy structmaps as pure maps; see #40 |
-| `struct-map` | out-of-scope | pending design: legacy structmaps as pure maps; see #40 |
+| `struct` | implemented | tests/collmisc.rs structmap_rows (positional; too-many IAE) |
+| `struct-map` | implemented | tests/collmisc.rs structmap_rows (basis-first order; extras) |
 | `sync` | out-of-scope | STM refs/transactions (N4): never |
 | `tagged-literal` | out-of-scope | pending design: data-reader tag table; see #40 |
 | `tagged-literal?` | out-of-scope | pending design: data-reader tag table; see #40 |

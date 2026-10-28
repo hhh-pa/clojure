@@ -1,0 +1,16 @@
+sq-basic "(1 2 3)"
+sq-class "class clojure.lang.LazySeq"
+sq-cq false
+sq-nil-elems "(1 nil 3)"
+sq-empty "()"
+sq-empty-seq true
+sq-nil-input "()"
+sq-cap "(0 1 2 3 4 5 6 7 8 9)"
+sq-queue "(0 1 2 3 4)"
+sq-zero-cap THROW java.lang.IllegalArgumentException|""
+sq-take "(0 1 2)"
+sq-count 50
+sq-inf "(1 2 3 4 5)"
+sq-neg-cap THROW java.lang.IllegalArgumentException|""
+sq-cap-str THROW java.lang.ClassCastException|"class java.lang.String cannot be cast to class java.lang.Character (java.lang.String and java.lang.Character are in module java.base of loader 'bootstrap')"
+sq-cap-float "(0 1 2 3 4)"

@@ -50,6 +50,8 @@ pub enum ThrowClass {
     NullPointerException,
     ClassCastException,
     IndexOutOfBoundsException,
+    ArrayIndexOutOfBoundsException,
+    NegativeArraySizeException,
     ArithmeticException,
     ExceptionInfo,
     FileNotFoundException,
@@ -93,7 +95,11 @@ impl ThrowClass {
             Self::NullPointerException => "java.lang.NullPointerException",
             Self::ClassCastException => "java.lang.ClassCastException",
             Self::IndexOutOfBoundsException => "java.lang.IndexOutOfBoundsException",
-            Self::ArithmeticException => "java.lang.ArithmeticException",
+            Self::ArrayIndexOutOfBoundsException => "java.lang.ArrayIndexOutOfBoundsException",
+            Self::NegativeArraySizeException => "java.lang.NegativeArraySizeException",
+            // `ArithmeticException` lives in `jvm_name_rest` (which
+            // has budget); the chain still matches every variant
+            // exactly once.
             other => other.jvm_name_mid(),
         }
     }
@@ -124,6 +130,7 @@ impl ThrowClass {
     /// Remaining throw classes.
     fn jvm_name_rest(&self) -> &'static str {
         match self {
+            Self::ArithmeticException => "java.lang.ArithmeticException",
             Self::DuplicateFormatFlagsException => "java.util.DuplicateFormatFlagsException",
             Self::IllegalFormatFlagsException => "java.util.IllegalFormatFlagsException",
             Self::IllegalFormatWidthException => "java.util.IllegalFormatWidthException",
@@ -178,18 +185,28 @@ fn throw_parent(jvm_name: &str) -> Option<&'static str> {
         "java.io.IOException" => Some("java.lang.Exception"),
         "java.lang.AssertionError" => Some("java.lang.Error"),
         "java.lang.IllegalAccessError" => Some("java.lang.LinkageError"),
-        "java.lang.LinkageError" => Some("java.lang.Error"),
+        "java.lang.ArrayIndexOutOfBoundsException" => Some("java.lang.IndexOutOfBoundsException"),
         "java.lang.IllegalArgumentException"
         | "java.lang.IllegalStateException"
         | "java.lang.UnsupportedOperationException"
         | "java.lang.NullPointerException"
         | "java.lang.ClassCastException"
         | "java.lang.IndexOutOfBoundsException"
+        | "java.lang.NegativeArraySizeException"
         | "java.lang.ArithmeticException"
         | "clojure.lang.ArityException"
         | "clojure.lang.ExceptionInfo"
         | "clojure.lang.Compiler$CompilerException"
         | "clojure.lang.LispReader$ReaderException" => Some("java.lang.RuntimeException"),
+        _ => throw_parent_rest(jvm_name),
+    }
+}
+
+/// The linkage-error branch of [`throw_parent`] (split for the
+/// complexity budget; chains into [`throw_parent_format`]).
+fn throw_parent_rest(jvm_name: &str) -> Option<&'static str> {
+    match jvm_name {
+        "java.lang.LinkageError" => Some("java.lang.Error"),
         _ => throw_parent_format(jvm_name),
     }
 }
@@ -390,6 +407,14 @@ mod tests {
                 "java.lang.IndexOutOfBoundsException",
             ),
             (
+                ThrowClass::ArrayIndexOutOfBoundsException,
+                "java.lang.ArrayIndexOutOfBoundsException",
+            ),
+            (
+                ThrowClass::NegativeArraySizeException,
+                "java.lang.NegativeArraySizeException",
+            ),
+            (
                 ThrowClass::ArithmeticException,
                 "java.lang.ArithmeticException",
             ),
@@ -430,7 +455,7 @@ mod tests {
         for (class, want) in cases {
             assert_eq!(class.jvm_name(), want);
         }
-        assert_eq!(cases.len(), 21);
+        assert_eq!(cases.len(), 23);
     }
 
     #[test]
@@ -634,6 +659,8 @@ mod tests {
             ThrowClass::NullPointerException,
             ThrowClass::ClassCastException,
             ThrowClass::IndexOutOfBoundsException,
+            ThrowClass::ArrayIndexOutOfBoundsException,
+            ThrowClass::NegativeArraySizeException,
             ThrowClass::ArithmeticException,
             ThrowClass::ExceptionInfo,
             ThrowClass::FileNotFoundException,
@@ -659,6 +686,13 @@ mod tests {
         assert!(ThrowClass::NumberFormatException.matches("java.lang.RuntimeException"));
         assert!(ThrowClass::NumberFormatException.matches("java.lang.Exception"));
         assert!(!ThrowClass::NumberFormatException.matches("java.lang.Error"));
+        assert!(
+            ThrowClass::ArrayIndexOutOfBoundsException
+                .matches("java.lang.IndexOutOfBoundsException")
+        );
+        assert!(ThrowClass::ArrayIndexOutOfBoundsException.matches("java.lang.RuntimeException"));
+        assert!(ThrowClass::NegativeArraySizeException.matches("java.lang.RuntimeException"));
+        assert!(!ThrowClass::NegativeArraySizeException.matches("java.lang.Error"));
     }
 
     fn throwable(id: u64, message: &str) -> Value {

@@ -109,12 +109,16 @@ fn native_re_pattern(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nat
 }
 
 /// `re-find`: the next match (`re-groups` shape, nil on no
-/// match). The 1-arity takes a `Matcher` (excluded, spec §1.2),
-/// so any argument fails the `Matcher` cast exactly like the JVM
-/// (oracles `refind-arity`, `re-r2b`).
+/// match). The 1-arity takes a `Matcher`: an S12 handle advances
+/// (owner-ACKED companion arm, issue #54); every other argument
+/// fails the `Matcher` cast exactly like the JVM (oracles
+/// `refind-arity`, `re-r2b`).
 fn native_re_find(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/re-find", args, &[1, 2])?;
     if args.len() == 1 {
+        if let Some(found) = crate::collmisc::match_handle_find(&args[0]) {
+            return found;
+        }
         return Err(cce_err(&args[0], "java.util.regex.Matcher"));
     }
     let re = compile_source(pattern_source(&args[0])?)?;

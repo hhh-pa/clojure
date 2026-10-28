@@ -354,8 +354,14 @@ fn jvm_class_of_host(v: &Value) -> String {
         Value::Agent(a) => a.jvm_class().to_owned(),
         Value::Volatile(v) => v.jvm_class().to_owned(),
         Value::Extension(e) => e.class_name(),
-        // Port-defined types report their class name (S-typechain).
-        Value::HostType(h) => h.type_name().to_owned(),
+        // Port-defined types report their class name (S-typechain);
+        // struct bases report the `$Def` member class (S12).
+        Value::HostType(h) => match h.as_ref() {
+            clj_value::HostVal::Def(d) if d.kind == clj_value::HostKind::Struct => {
+                format!("{}$Def", d.name)
+            }
+            _ => h.type_name().to_owned(),
+        },
         // Multimethods report the JVM class (S-typechain stage 3).
         Value::MultiFn(_) => "clojure.lang.MultiFn".to_owned(),
         // Handled upstream; re-enter so the chain stays exhaustive.

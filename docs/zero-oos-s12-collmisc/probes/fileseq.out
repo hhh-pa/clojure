@@ -1,0 +1,11 @@
+fs-classes "(\"java.io.File\")"
+fs-one "#object[java.io.File 0xH \"<ROOT>\"]"
+fs-count 7
+fs-names "(\"a.txt\" \"b.txt\" \"c.txt\" \"deep\" \"empty\" \"s12-fileseq\" \"sub\")"
+fs-root-first true
+fs-cq false
+fs-str-arg THROW java.lang.ClassCastException|"class java.lang.String cannot be cast to class java.io.File (java.lang.String and java.io.File are in module java.base of loader 'bootstrap')"
+fs-missing 1
+fs-file-root 1
+fs-empty-dir 1
+fs-seq? true
