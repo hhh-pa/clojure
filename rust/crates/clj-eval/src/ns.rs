@@ -2077,8 +2077,8 @@ fn core_vars(user_ns: Value) -> Vec<(String, Value, bool, bool)> {
             true,
             false,
         ),
-        // S18 compiler knob (`core_print.clj` `def ^:dynamic`:
-        // slot AND `:dynamic` meta, like the print trio above).
+        // S18 compiler knob (`def ^:dynamic` shape: slot AND
+        // `:dynamic` meta, like the print vars above).
         (
             "*verbose-defrecords*".to_owned(),
             Value::Bool(false),

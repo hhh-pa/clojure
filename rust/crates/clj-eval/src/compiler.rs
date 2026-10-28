@@ -146,8 +146,8 @@ pub trait CompileDriver: Send + Sync {
     ) -> Result<(), DriveError>;
 }
 
-/// The installed driver (the linking binary installs the real one at
-/// startup; unset by default, including every local build).
+/// The installed driver (unset until the linking binary installs
+/// the real one at startup).
 static DRIVER: RwLock<Option<&'static dyn CompileDriver>> = RwLock::new(None);
 
 /// Install the emission driver (`None` restores the unset hook —
@@ -311,6 +311,10 @@ fn obj_path_for(dir: &str, root: &str) -> PathBuf {
 /// unqualified `ns` head; anything else (including read failures,
 /// which planning surfaces as T6a) plans the text as-is. Evaluation
 /// always runs the full unstripped text.
+///
+/// (`ReaderOpts::default()` matches the planner's options wherever
+/// head detection can observe: only aliases/refers differ, and those
+/// affect just `::` and syntax-quote, never a plain `ns` head.)
 fn strip_leading_ns(text: &str) -> String {
     let mut reader = Reader::new(text, &ReaderOpts::default());
     let form = match reader.read_form(false) {
