@@ -55,6 +55,8 @@
 (tx "odd-trailing-vec3" #(eval '(let [{a251 :a251} (quote (:a251 1 [:b251 2 3]))] a251)))
 (tx "odd-trailing-nil" #(eval '(let [{a251 :a251} (quote (:a251 1 nil))] a251)))
 (tx "odd-trailing-entries" #(eval '(let [{a251 :a251 b251 :b251} (quote (:a251 1 ([:b251 2])))] [a251 b251])))
+(tx "odd-trailing-two" #(eval '(let [{a251 :a251 b251 :b251 c251 :c251} (list :a251 1 (list (first {:b251 2}) (first {:c251 3})))] [a251 b251 c251])))
+(tx "odd-trailing-entrybad" #(eval '(let [{a251 :a251 b251 :b251} (list :a251 1 (list (first {:b251 2}) 42))] [a251 b251])))
 (tx "or-eager-log" #(let [log (atom [])] [(let [{a251 :x251 :or {a251 (do (swap! log conj :d) 1)}} {:x251 5}] a251) @log]))
 (tx "keys-only-in-or" #(eval '(let [{a251 :x251 :select s251 :or {:y251 1}} {:x251 5}] s251)))
 (tx "let-rest-nil" #(eval '(let [[a251 & r251] [1]] [a251 r251])))
