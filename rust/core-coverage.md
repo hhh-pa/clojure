@@ -4,7 +4,7 @@ The complete inventory of `clojure.core` in this port: every var,
 its conformance state, and — for exclusions — why it is excluded.
 If a var is not listed here, that is a file bug, not a silent gap.
 
-- **690 vars: 669 implemented, 0 divergent, 21 out of scope,
+- **690 vars: 679 implemented, 0 divergent, 11 out of scope,
   0 planned.** The port reports Clojure `1.13.0-alpha9`
   (`clojure-version`).
 - **Universe.** 690 rows = 685 JVM publics + 5 extra-universe rows: 4 port-visible JVM privates
@@ -660,21 +660,21 @@ No slice on this branch: hard-never reasons stand alone, design-blocked rows nam
 | var | status | notes |
 | --- | --- | --- |
 | `*'` | implemented | core.rs native_mul_prime (promoting fold; 1-arity `Number` cast); tests/extarith.rs s11_mul_prime_rows (S11, #56; probes `mp-*`, `a2-mul*`, `g-mulnil`) |
-| `*compile-files*` | out-of-scope | Bytecode compiler/classpath surface; port AOT (clj-aot) is separate |
-| `*compile-path*` | out-of-scope | Bytecode compiler/classpath surface; port AOT (clj-aot) is separate |
-| `*compiler-options*` | out-of-scope | Bytecode compiler/classpath surface; port AOT (clj-aot) is separate |
+| `*compile-files*` | implemented | tests/compiler.rs root_false_and_slot_only, false_skips_plan_and_emit, true_load_emits_fake (S18: falsy skips plan+emit; truthy plans+emits; probes k-compile-files, c-false-files, c-true-load) |
+| `*compile-path*` | implemented | tests/compiler.rs root_classes_and_slot_only, bound_path_drives_emit_fake (S18: root "classes" folded; drives emit; probes k-compile-path, c-nil-path, c-bad-path) |
+| `*compiler-options*` | implemented | tests/compiler.rs root_nil_slot_only_and_binds, bound_map_tolerated_fake (S18: data-only; bound maps tolerated; probes k-compiler-options, c-options-bound) |
 | `*data-readers*` | implemented | S6 dynamic (root `{}`); zero_oos_s6_datareaders.rs data_reader_vars, table_reads_invoke_per_occurrence, table_precedence_and_errors |
 | `*default-data-reader-fn*` | implemented | S6 dynamic (root nil); zero_oos_s6_datareaders.rs data_reader_vars, default_fn_fallback |
 | `*flush-on-newline*` | implemented | dyn var root true; prn/println flush iff true (S8: printsys.rs flush_rows; probes f-*) |
-| `*fn-loader*` | out-of-scope | Bytecode compiler/classpath surface; port AOT (clj-aot) is separate |
+| `*fn-loader*` | implemented | tests/compiler.rs root_nil_slot_only_and_binds, nil_during_load_and_compile (S18: data-only nil; probes k-root-fn-loader, c-fn-loader-load) |
 | `*math-context*` | implemented | ns.rs `RT.java`-style dynamic root (nil); `MathContextVal` extension; zero_oos_s2_tower.rs s2_math_context_rows |
 | `*read-eval*` | implemented | true root; false/nil gates `#=`, `:unknown` refuses every read, loads force true; zero_oos_s7_readgates.rs (S7, #50) |
 | `*reader-resolver*` | implemented | nil root; 2-arity fn protocol (current-ns/resolve-alias/resolve-class/resolve-var consults for `::`/syntax-quote); non-fn entry cast; zero_oos_s7_readgates.rs (S7, #50) |
 | `*repl*` | implemented | S20 dynamic (root false); session binds true; oddballs.rs repl_root_and_meta + repl_binding_conveys, clj-repl session.rs s20_repl_* |
-| `*source-path*` | out-of-scope | Bytecode compiler/classpath surface; port AOT (clj-aot) is separate |
+| `*source-path*` | implemented | tests/compiler.rs root_no_source_file_slot_only, load_binds_basename, loadfile_binds_basename, loadstring_binds_no_source_file (S18: loads bind basename; probes k-source-path, c-load-captured, c-loadfile-source, c-loadstring-source) |
 | `*suppress-read*` | implemented | nil root; gates only `#tag` (unknown tags preserved; `#inst`/`#uuid` also preserved — the suppress check sits above the S6 consult); zero_oos_s7_readgates.rs (S7, #50) |
-| `*use-context-classloader*` | out-of-scope | Bytecode compiler/classpath surface; port AOT (clj-aot) is separate |
-| `*verbose-defrecords*` | out-of-scope | Bytecode compiler/classpath surface; port AOT (clj-aot) is separate |
+| `*use-context-classloader*` | implemented | tests/compiler.rs root_true_slot_only_and_binds, loads_succeed_under_both (S18: data-only; probes k-use-context, a-use-true, c-use-true) |
+| `*verbose-defrecords*` | implemented | tests/compiler.rs root_false_dynamic_and_binds, dup_record_both_shapes (S18: core dynamic; dup #Name{map} when set; probes k-verbose, k-dup-false) |
 | `+'` | implemented | core.rs native_add_prime (promoting fold; 1-arity `Number` cast); tests/extarith.rs s11_add_prime_rows (S11, #56; probes `ap-*`, `a2-add*`) |
 | `-'` | implemented | core.rs native_sub_prime (promoting fold/negate); tests/extarith.rs s11_sub_prime_rows (S11, #56; probes `sp-*`, `a2-subchar`) |
 | `->ArrayChunk` | implemented | S14 opaque `Handle` (`[am arr off end]`, `.-field` reads); typeinternals.rs factory_print_shapes, factory_arities, factory_fields (S14, #58) |
@@ -691,7 +691,7 @@ No slice on this branch: hard-never reasons stand alone, design-blocked rows nam
 | `Throwable->map` | implemented | S20 core.rs native over the cause chain (conditional top `:cause`/`:data`, root-first `:trace`, per-link `:via`); oddballs.rs throwable_map_* |
 | `accessor` | implemented | tests/collmisc.rs structmap_rows (basis-key reader; non-struct CCE) |
 | `aclone` | implemented | S15 arrays (#59): arrays.rs native_aclone (shallow: fresh id, shared inners); tests/arrays.rs alen_clone (probes g-clone-*) |
-| `add-classpath` | out-of-scope | Deprecated on JVM, no replacement named; classpath URLs have no slice |
+| `add-classpath` | implemented | tests/compiler.rs warns_and_returns_nil, appends_first_wins, dup_is_noop (S18: WARNING + append to *load-path*; probes a-warning, a-urls, a-order, a-dup-urls) |
 | `add-tap` | implemented | cellstaps.rs tap_returns + tap_deliver (conj; lazily starts the clojure.core/tap-loop dispatcher; single 1024 FIFO; per-tap catch) |
 | `agent-errors` | implemented | S5: core.clj `(when-let [e (agent-error a)] (list e))` + `:deprecated "1.2"`; zero_oos_s5_state.rs deprecated_trio_rows |
 | `aget` | implemented | S15 arrays (#59): arrays.rs native_aget (direct inline rule + intcast walks + raw Array.get tails); tests/arrays.rs aget_access, mi3d_walk_and_order (probes a-*, c-aget-*, b-aget-*, mi-3d m4-*, m3-*, ix-*, apply-*) |
@@ -742,7 +742,7 @@ No slice on this branch: hard-never reasons stand alone, design-blocked rows nam
 | `class?` | implemented | true/false table, interfaces, arities (classemu.rs classq_queries) |
 | `clear-agent-errors` | implemented | S5: core.clj `(restart-agent a @a)` + `:deprecated "1.2"`; zero_oos_s5_state.rs deprecated_trio_rows |
 | `comparator` | implemented | cellstaps.rs comparator_calls + comparator_sort + comparator_errors (verbatim core.clj body; cond keeps truthy preds ordering; sort/sorted-map-by interop) |
-| `compile` | out-of-scope | Bytecode compiler/classpath surface; port AOT (clj-aot) is separate |
+| `compile` | implemented | tests/compiler.rs returns_lib_symbol, binds_files_true, always_reloads (S18: bind-true + load-one + one root .o; probes c-ret, c-twice, c-str, c-mismatch); rust/tests/compile_aot.rs emits_object_layout (real driver) |
 | `construct-proxy` | implemented | S14 proxy instance of the named class (nil fn map; no ctor args); typeinternals.rs construct_proxy_rows, construct_proxy_errors (S14, #58) |
 | `create-struct` | implemented | tests/collmisc.rs structmap_rows |
 | `dec'` | implemented | core.rs native_dec_prime (promoting step; `inc'` retargeted at the promoting step — in-slice fix); tests/extarith.rs s11_prime_steps_rows (S11, #56; probes `dp-*`, `ip-*`) |
@@ -790,7 +790,7 @@ No slice on this branch: hard-never reasons stand alone, design-blocked rows nam
 | `parents` | implemented | hierarchy.rs hier_class_views, hier_lattice_parents, hier_global_arities (S13, #57; probes h-*, n-*) |
 | `parse-uuid` | implemented | S9 native (fromString both paths; invalid nil; nil NPE; non-String CCE); scalarkinds.rs parse_uuid_shapes, parse_uuid_failures_answer_nil, parse_uuid_input_classes |
 | `prefers` | implemented | hierarchy.rs hier_prefer_dispatch, hier_remove_all (S13, #57; probes x-prefers-view, x-rmall) |
-| `primitives-classnames` | out-of-scope | Bytecode compiler/classpath surface; port AOT (clj-aot) is separate |
+| `primitives-classnames` | implemented | tests/compiler.rs shape_count_vals_keys, miss_is_nil (S18: 8 pairs over class-name strings; probes k-prims-count, k-prims-vals, k-prims-keys, k-prims-lookup, k-prims-miss) |
 | `print-ctor` | implemented | [o print-args w] #= writer (S8: printsys.rs simple_ctor_rows; probes t-*) |
 | `print-dup` | implemented | booted multifn, token dispatch, no :default (S8: printsys.rs dispatch_rows + dup_rows; probes m-*/d-*/p-*) |
 | `print-method` | implemented | booted multifn, :type-or-token dispatch, chaining :default (S8: printsys.rs dispatch_rows; probes m-*) |
