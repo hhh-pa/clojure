@@ -869,7 +869,8 @@ fn strip_fallback_empty_and_broken_first() {
     assert_eq!(run_last(&mut eval, "(loaded-libs)"), "#{}");
     assert_eq!(fake_calls().len(), 1);
     let mut eval = boot();
-    eval.eval_source(&fx.within("(load \"/my/empty\")")).unwrap();
+    eval.eval_source(&fx.within("(load \"/my/empty\")"))
+        .unwrap();
     assert_eq!(run_last(&mut eval, "(loaded-libs)"), "#{}");
     assert_eq!(
         uncaught_chain(&mut eval, &fx.within("(load \"/my/fb\")")),
