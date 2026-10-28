@@ -591,20 +591,19 @@ fn nonseq_root_warns_then_casts() {
 }
 
 /// `compile` answers the lib symbol (a symbol — the port has no
-/// `class` surface, so `symbol?` is the `c-ret-class` pin), plans
-/// one fn, and emits one object under the bound dir (`c-ret`,
-/// `c-ret-class`, `c-files`, `c-ns-loaded`, `c-loaded-libs`).
+/// `class` surface, so `symbol?` on the bound answer is the
+/// `c-ret-class` pin), plans one fn, and emits one object under
+/// the bound dir (`c-ret`, `c-ret-class`, `c-files`,
+/// `c-ns-loaded`, `c-loaded-libs`).
 #[test]
 fn returns_lib_symbol() {
     let fx = Fixture::new("ret");
     fx.write("my/ret.clj", "(ns my.ret)\n(defn answer [] 41)\n");
     let _lock = use_fake(FakeMode::Record);
     let mut eval = boot();
-    assert_eq!(
-        run_last(&mut eval, &fx.within("(compile 'my.ret)")),
-        "my.ret"
-    );
-    assert_eq!(run_last(&mut eval, "(symbol? 'my.ret)"), "true");
+    run_last(&mut eval, &fx.within("(def retr (compile 'my.ret))"));
+    assert_eq!(run_last(&mut eval, "retr"), "my.ret");
+    assert_eq!(run_last(&mut eval, "(symbol? retr)"), "true");
     assert!(run_last(&mut eval, "(find-ns 'my.ret)").contains("my.ret"));
     assert_eq!(run_last(&mut eval, "(loaded-libs)"), "#{my.ret}");
     let calls = fake_calls();
@@ -1407,9 +1406,9 @@ fn truthy_one_emits_fake() {
     assert_eq!(fake_calls().len(), 1);
 }
 
-/// Non-root loads never emit, even under a true flag: `load-file`
-/// and `load-string` have no load root to derive the path from
-/// (§1.4 D6 — evaluation still runs).
+/// Non-root loads never emit, even under a true flag: `load-file`,
+/// `load-string`, and `load-reader` have no load root to derive
+/// the path from (§1.4 D6 — evaluation still runs).
 #[test]
 fn nonroot_loads_never_emit() {
     let fx = Fixture::new("nonroot");
@@ -1439,6 +1438,18 @@ fn nonroot_loads_never_emit() {
         "nil"
     );
     assert_eq!(run_last(&mut eval, "@#'my.ls/lsm"), "7");
+    // `load-reader` likewise evaluates without emitting — and binds
+    // `*source-path*` to the root even under an outer binding
+    // (never "leave", §2.2).
+    assert_eq!(
+        run_last(
+            &mut eval,
+            &fx.within("(binding [*compile-files* true *source-path* \"X\"] (with-in-str \"(ns my.lr) (def lrm 9) (def lr-sp *source-path*) :lr-done\" (load-reader *in*)))")
+        ),
+        ":lr-done"
+    );
+    assert_eq!(run_last(&mut eval, "@#'my.lr/lrm"), "9");
+    assert_eq!(run_last(&mut eval, "@#'my.lr/lr-sp"), "\"NO_SOURCE_FILE\"");
     assert!(fake_calls().is_empty());
 }
 
@@ -1587,9 +1598,10 @@ fn nil_during_load_and_compile() {
     assert_eq!(run_last(&mut eval, "*fn-loader*"), "nil");
 }
 
-/// The context-classloader flag is data-only: every loader entry
-/// succeeds identically under both values (`a-use-true/false`,
-/// `c-use-true/false`).
+/// The context-classloader flag is data-only: `load`, `compile`,
+/// and `require` succeed identically under both values (the flag
+/// is never consulted, so the remaining entries cannot observe it;
+/// `a-use-true/false`, `c-use-true/false`).
 #[test]
 fn loads_succeed_under_both() {
     let fx = Fixture::new("usectx");

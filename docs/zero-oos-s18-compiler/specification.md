@@ -183,9 +183,9 @@ string entries — `load_dirs`).
   whole compile with its plan diagnostic (subset-transitivity
   limitation, §2.4).
 - Root-loads only: `load`/`require`/`compile` paths emit;
-  `load-file`/`load-string` never emit even when the flag holds
-  (no load root to derive the path from — documented narrowing,
-  §2.4).
+  `load-file`/`load-string`/`load-reader` never emit even when
+  the flag holds (no load root to derive the path from —
+  documented narrowing, §2.4).
 - `gen-class` types need no artifact: #33 descriptors are
   in-memory, so "survival across a compile round-trip" means
   the descriptor still resolves, constructs, and forwards
@@ -303,7 +303,7 @@ in `core_print.clj`, like the port's `core_vars` dynamics).
 | `*compile-path*` | `"classes"` (folded session binding; JVM root is nil, `k-root-compile-path`, with the launcher binding `"classes"`, `k-compile-path`) | nil (`k-dyn-compile-path`) | output dir, observed as bound (`c-captured`); nil/non-string → T7/T8 | slot-only dynamic; read once per flag-true root (§1.2); doc `:added "1.0"` not pinned (port natives carry no `:added` meta) |
 | `*compile-files*` | false (`k-root-compile-files`) | nil (`k-dyn-compile-files`) | bound `true` by `compile`; gates plan+emit per root, truthy (`c-flag-truthy`); false skips exactly plan+emit (`c-false-files`/`c-false-eval`) | slot-only dynamic; `load_one_path` checks `is_truthy()`; flag-false path byte-identical to today |
 | `*compiler-options*` | nil (`k-root-compiler-options`) | nil (`k-dyn-compiler-options`) | observed unrebound; tolerated when bound (`c-options-bound`); JVM keys (`:elide-meta`, `:disable-locals-clearing`, `:direct-linking`, `k-doc-compiler-options`) have no subset meaning | data-only: bindable, never consulted (binding replaces — the doc's merge note is JVM guidance) |
-| `*source-path*` | `"NO_SOURCE_FILE"` (`k-root-source-path`) | nil (`k-dyn-source-path`) | bound per load: basename of the loaded file (`c-captured`, `c-loadfile-source`); `"NO_SOURCE_FILE"` for `load-string` (`c-loadstring-source`); plain `eval` inherits, never rebinds (`k-eval-source`) | slot-only dynamic; `run_loaded` binds in all four paths (root loads: last segment of `root.ext`; `load-file`: last segment of the path; `load-string`: `"NO_SOURCE_FILE"`); `eval_top_form` untouched |
+| `*source-path*` | `"NO_SOURCE_FILE"` (`k-root-source-path`) | nil (`k-dyn-source-path`) | bound per load: basename of the loaded file (`c-captured`, `c-loadfile-source`); `"NO_SOURCE_FILE"` for `load-string` (`c-loadstring-source`); plain `eval` inherits, never rebinds (`k-eval-source`) | slot-only dynamic; `run_loaded` binds in all three paths (root loads: last segment of `root.ext`; `load-file`: last segment of the path; `load-string`: `"NO_SOURCE_FILE"`); `load-reader` binds the root through `run_loaded_values` (its `*file*` is nil); `eval_top_form` untouched |
 | `*fn-loader*` | nil (`k-root-fn-loader`) | nil (`k-dyn-fn-loader`) | nil in every load/compile context probed (`c-captured`, `c-load-captured`, `c-loadfile-source`, `k-eval-fnloader`) | data-only: root nil, never bound (no loader kind exists; single-loader runtime — the #33 one-loader note) |
 | `*use-context-classloader*` | true (`k-root-use-context`) | nil (`k-dyn-use-context`) | unrebound; no observed effect on load/require/resource/compile in alpha10 (`c-use-true/false`, `a-use-true/false`, `a-res-true/false`, §2.2) | data-only: root true, never consulted |
 | `*verbose-defrecords*` | false (`k-root-verbose`) | true (`k-dyn-verbose`) | false, unrebound (`c-captured`); role is print-dup over records: false → `#user.Rec[1]`, true → `#user.Rec{:x 1}` (`k-verbose-false/true/default`) | `core_vars` dynamic; honored in `dup_record` (port shapes derived: `#Name[v1, ...]` stays, `#Name{map}` added — §2.1 D11, S8-owner ack) |
@@ -349,8 +349,10 @@ shape). Answers nil (`a-ret`).
 
 ### 1.10 The ten rows + covering-test plan (no matrix edits yet)
 
-All tests live in `rust/crates/clj-eval/tests/compiler.rs`
-(fence-owned). Fixture sources live under per-test temp
+LOCAL tests live in `rust/crates/clj-eval/tests/compiler.rs`
+(fence-owned); row-1c CI tests live in `rust/tests/compile_aot.rs`
+(the `clj-aot → clj-eval` cycle of §1.6 forbids the real driver
+from `clj-eval/tests`). Fixture sources live under per-test temp
 dirs the tests create (never the source tree, §1.11). LOCAL
 tests run on any host; CI tests need the LLVM legs. The matrix
 flips ride the implementation PR — mirrored from CURRENT
@@ -500,8 +502,9 @@ load-one + emit `<root>.o`; probes c-ret, c-files)``.
   doubles as the `load-string` value (`c-loadstring-source`);
   every file load binds the basename (even `k-source-path`'s
   own script path shows the bare name). `run_loaded` must bind
-  explicitly in all four paths (never "leave", which would leak
-  an outer binding under `load-string`).
+  explicitly in all three paths, plus `load-reader` through
+  `run_loaded_values` (never "leave", which would leak an outer
+  binding under `load-string`/`load-reader`).
 - JVM creates no directories (`c-no-mkdirs` — raw IOException);
   the port creates none either. JVM `compile` of a broken lib
   leaves partial artifacts and the mark (`c-broken-files`,
@@ -567,7 +570,7 @@ load-one + emit `<root>.o`; probes c-ret, c-files)``.
   host-interop shapes answer plan diagnostics, never
   artifacts (`c-record-files`; T6c). Transitivity is a
   stated limitation.
-- `load-file`/`load-string` never emit (narrowing, §1.4 D6).
+- `load-file`/`load-string`/`load-reader` never emit (narrowing, §1.4 D6).
 - `*compile-path*` root `"classes"` folds the launcher
   session binding (JVM root nil — N1-invisible, §2.2).
 - T7 fires at plan time (before side effects) vs JVM

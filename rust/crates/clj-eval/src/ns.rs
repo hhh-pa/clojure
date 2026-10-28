@@ -1932,6 +1932,18 @@ fn run_loaded_values(eval: &mut Evaluator, forms: Vec<Value>) -> Result<Value, N
     if let Some(id) = core_var(eval, "*file*") {
         depth = Some(eval.push_binding(core_var_handle(id, "*file*"), Value::Nil));
     }
+    // S18: `load-reader` binds `*source-path*` to the root (its
+    // `*file*` is nil — the `load-string` shape, never "leave",
+    // §2.2).
+    if let Some(id) = core_var(eval, "*source-path*") {
+        let d = eval.push_binding(
+            core_var_handle(id, "*source-path*"),
+            source_path_value(&Value::Nil),
+        );
+        if depth.is_none() {
+            depth = Some(d);
+        }
+    }
     push_ns_frame(eval, &mut depth);
     if let Some(id) = core_var(eval, "*read-eval*") {
         eval.push_binding(core_var_handle(id, "*read-eval*"), Value::Bool(true));
