@@ -570,6 +570,26 @@ fn list_root_conj_semantics() {
     assert_eq!(run_last(&mut eval, "*load-path*"), "(\"b\" \"a\")");
 }
 
+/// A non-seqable `*load-path*` root warns, then fails the
+/// `IPersistentVector` cast (the `load_dirs` shape — `add-classpath`
+/// reuses its exact error).
+#[test]
+fn nonseq_root_warns_then_casts() {
+    let mut eval = boot();
+    run_last(&mut eval, "(alter-var-root #'*load-path* (fn [_] 7))");
+    assert_eq!(
+        uncaught(&mut eval, "(add-classpath \"b\")"),
+        "java.lang.ClassCastException | Cannot cast java.lang.Long to clojure.lang.IPersistentVector"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(with-out-str (try (add-classpath \"b\") (catch Exception _ :caught)))"
+        ),
+        "\"WARNING: add-classpath is deprecated\\n\""
+    );
+}
+
 /// `compile` answers the lib symbol (a symbol — the port has no
 /// `class` surface, so `symbol?` is the `c-ret-class` pin), plans
 /// one fn, and emits one object under the bound dir (`c-ret`,
@@ -1197,6 +1217,44 @@ fn strip_handles_crlf() {
         chain[0].contains(":5:1: unsupported form in AOT subset: defrecord"),
         "unexpected chain: {chain:?}"
     );
+    assert!(fake_calls().is_empty());
+}
+
+/// A leading `ns` carrying `#inst`/`#uuid` still strips: the strip
+/// reads with `data_readers: true` like the planner, so the tagged
+/// literal resolves instead of failing the read (which would skip
+/// the strip and die on a spurious `ns` subset diagnostic).
+#[test]
+fn strip_handles_inst_metadata() {
+    let fx = Fixture::new("instmeta");
+    fx.write(
+        "my/im.clj",
+        "(ns my.im {:built #inst \"2024-01-01\"})\n(defn f [] 1)\n",
+    );
+    let _lock = use_fake(FakeMode::Record);
+    let mut eval = boot();
+    assert_eq!(run_last(&mut eval, &fx.within("(compile 'my.im)")), "my.im");
+    assert_eq!(fake_calls().len(), 1);
+}
+
+/// Non-ASCII text keeps plan spans: multibyte chars blank 1:1, so a
+/// later subset violation still blames its true line and column.
+#[test]
+fn strip_handles_unicode() {
+    let fx = Fixture::new("unicode");
+    fx.write(
+        "my/un.clj",
+        "; ünïcode comment —–\n(ns my.un) ; trailing ünï\n(defn ok [] 1)\n(defrecord R [x])\n",
+    );
+    let _lock = use_fake(FakeMode::Record);
+    let mut eval = boot();
+    let chain = uncaught_chain(&mut eval, &fx.within("(compile 'my.un)"));
+    assert_eq!(chain.len(), 1);
+    assert!(
+        chain[0].contains(":4:1: unsupported form in AOT subset: defrecord"),
+        "unexpected chain: {chain:?}"
+    );
+    assert_eq!(run_last(&mut eval, "(loaded-libs)"), "#{}");
     assert!(fake_calls().is_empty());
 }
 

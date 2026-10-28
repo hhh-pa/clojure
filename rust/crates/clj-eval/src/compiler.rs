@@ -310,15 +310,23 @@ fn obj_path_for(dir: &str, root: &str) -> PathBuf {
 /// which planning surfaces as T6a) plans the text as-is. Evaluation
 /// always runs the full unstripped text.
 ///
-/// (`ReaderOpts::default()` agrees with the planner's
-/// `read_forms_opts` wherever head detection can observe: the fields
-/// that can differ (current ns, aliases, refers, read-eval,
-/// suppress-read, resolver, data-reader keys) only steer `#`
-/// dispatch, `::`, and syntax-quote — never a bare `ns` symbol. A
-/// misread fails closed either way: no strip means the planner
-/// reports the subset diagnostic itself.)
+/// (The options mirror the planner's: `data_readers: true` matches
+/// the per-form `snapshot_data_readers` (which always sets it), so
+/// `#inst`/`#uuid` read successfully in both and a leading `ns`
+/// carrying them still strips. The fields that can still differ
+/// (current ns, aliases, refers, read-eval, suppress-read, resolver,
+/// data-reader keys) only steer `#` dispatch, `::`, and
+/// syntax-quote — never a bare `ns` symbol. A misread fails closed
+/// either way: no strip means the planner reports the subset
+/// diagnostic itself.)
 fn strip_leading_ns(text: &str) -> String {
-    let mut reader = Reader::new(text, &ReaderOpts::default());
+    let mut reader = Reader::new(
+        text,
+        &ReaderOpts {
+            data_readers: true,
+            ..Default::default()
+        },
+    );
     // `NoHooks`: only a plain `ns` head is ever detected here, so
     // `#=`/resolver hooks never fire; anything exotic fails the
     // read and plans as-is per the contract above.

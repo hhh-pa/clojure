@@ -176,7 +176,7 @@ string entries — `load_dirs`).
 - No `mkdirs` (`c-no-mkdirs`): missing parent directories fail
   the write, surfacing as `Io` → `build: ...` (§1.7 T10).
   Tests bind `*compile-path*` to existing absolute
-  `target/`-area directories they create first (§1.11).
+  per-test temp directories they create first (§1.11).
 - Transitive: every root loaded during the compile (nested
   `require`s) independently plans and emits its own `.o`
   (JVM-like transitive AOT). A non-subset nested dep fails the
@@ -350,7 +350,7 @@ shape). Answers nil (`a-ret`).
 ### 1.10 The ten rows + covering-test plan (no matrix edits yet)
 
 All tests live in `rust/crates/clj-eval/tests/compiler.rs`
-(fence-owned). Fixture sources live under `target/`-area temp
+(fence-owned). Fixture sources live under per-test temp
 dirs the tests create (never the source tree, §1.11). LOCAL
 tests run on any host; CI tests need the LLVM legs. The matrix
 flips ride the implementation PR — mirrored from CURRENT
@@ -379,7 +379,7 @@ load-one + emit `<root>.o`; probes c-ret, c-files)``.
 
 ### 1.11 Seams and constraints
 
-- Emitted artifacts go under `target/`-area temp dirs in tests
+- Emitted artifacts go under per-test temp dirs in tests
   (created per test, absolute paths bound to `*compile-path*`),
   NEVER into the source tree. No test writes relative to CWD.
 - Hermetic/offline: `compile` links nothing (§1.4); where

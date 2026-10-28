@@ -2541,6 +2541,15 @@ mod tests {
     }
 
     #[test]
+    fn last_segment_splits_either_separator() {
+        // S18 `*source-path*`: root loads pin `/` in `*file*`, but
+        // `load-file` binds the path as opened.
+        assert_eq!(last_segment("my/ctx.clj"), "ctx.clj");
+        assert_eq!(last_segment("ctx.clj"), "ctx.clj");
+        assert_eq!(last_segment("C:\\my\\ctx.clj"), "ctx.clj");
+    }
+
+    #[test]
     fn set_ns_current_without_frame_sets_root() {
         let mut eval = Evaluator::new_bare("user");
         let star = Symbol::new(Some("clojure.core"), "*ns*");
