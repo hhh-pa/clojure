@@ -3005,19 +3005,9 @@ pub(crate) fn rest_value(eval: &mut Evaluator, v: &Value) -> Result<Value, Signa
 /// `next`: like `rest` but nil at the end (forcing one step).
 pub(crate) fn next_value(eval: &mut Evaluator, v: &Value) -> Result<Value, Signal> {
     let rest = rest_value(eval, v)?;
-    // `rest` outputs are never empty-realized (all producers nil-pun).
-    match &rest {
-        Value::List(l) if l.is_empty() => Ok(Value::Nil),
-        _ => {
-            // (Nested `if`, not a let-chain: MSRV 1.85.)
-            if let Some(p) = as_pending(&rest) {
-                if matches!(force_pending(eval, p)?, Forced::Empty) {
-                    return Ok(Value::Nil);
-                }
-            }
-            Ok(rest)
-        }
-    }
+    // `next` nil-puns empty tails (spent repeats, done ranges —
+    // like the JVM's `next.seq()`).
+    seq_value(eval, &rest)
 }
 
 /// Realize every item (for `apply` spreads, `vec`, `sort`,
