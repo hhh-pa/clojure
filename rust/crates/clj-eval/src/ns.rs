@@ -1745,7 +1745,7 @@ fn native_load_file(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nativ
     };
     let abs = absolutize(&path);
     // `Compiler.loadFile`: no `*ns*` isolation, no cycle guard —
-    // only `*file*`.
+    // only `*file*`. Returns the last value (nil when empty).
     match run_loaded(
         eval,
         Value::Str(Arc::from(abs.as_str())),
@@ -1753,7 +1753,7 @@ fn native_load_file(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nativ
         &text,
         false,
     ) {
-        Ok(_) => Ok(Value::Nil),
+        Ok(vals) => Ok(vals.last().cloned().unwrap_or(Value::Nil)),
         Err(e) => Err(source_to_native(eval, &abs, e)),
     }
 }
@@ -1765,9 +1765,10 @@ fn native_load_string(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nat
         v => return Err(cast_err(v, "java.lang.String")),
     };
     // `*file*` is nil and spans blame the empty source (probe36
-    // `file-loadstring`, `loadstring-errspan`).
+    // `file-loadstring`, `loadstring-errspan`). Returns the last
+    // value (nil when empty).
     match run_loaded(eval, Value::Nil, "", &text, false) {
-        Ok(_) => Ok(Value::Nil),
+        Ok(vals) => Ok(vals.last().cloned().unwrap_or(Value::Nil)),
         Err(e) => Err(source_to_native(eval, "", e)),
     }
 }
