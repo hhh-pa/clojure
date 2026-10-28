@@ -810,7 +810,7 @@ impl<'a> Analyzer<'a> {
             let id = self
                 .eval
                 .registry
-                .get(home)
+                .ns_live_or_removed(home)
                 .and_then(|ns| ns.lookup(&target))
                 .expect("resolve_in guarantees the var id exists");
             if home != cur && crate::macros::is_private_var(self.eval, id) {
@@ -1110,7 +1110,7 @@ impl<'a> Analyzer<'a> {
         let id = self
             .eval
             .registry
-            .get(home)
+            .ns_live_or_removed(home)
             .and_then(|ns| ns.lookup(&target))
             .expect("resolve_in guarantees the var id exists");
         if crate::macros::is_macro_var(self.eval, id) {

@@ -386,9 +386,10 @@ impl NamespaceRegistry {
 
     /// Drop a namespace (aliases pointing at it dangle, like the
     /// JVM; var ids are never reused). The namespace survives as
-    /// a tombstone, so stale handles and captured vars keep
-    /// reading their frozen state; only resolution treats the
-    /// name as gone.
+    /// a tombstone, so stale handles, captured vars, and the
+    /// removed current namespace's own unqualified resolution keep
+    /// reading their frozen state; only qualified resolution
+    /// treats the name as gone.
     pub fn remove_ns(&mut self, name: &str) -> bool {
         let Some(ns) = self.namespaces.remove(name) else {
             return false;
@@ -428,8 +429,7 @@ impl NamespaceRegistry {
     /// namespace argument, not the current one).
     #[must_use]
     pub fn namespace_target_in<'a>(&'a self, ns_name: &str, part: &'a str) -> Option<&'a str> {
-        self.namespaces
-            .get(ns_name)
+        self.ns_live_or_removed(ns_name)
             .and_then(|ns| ns.aliases.get(part))
             .map(|(target, _)| target.as_str())
             .or_else(|| self.namespaces.contains_key(part).then_some(part))
@@ -455,7 +455,10 @@ impl NamespaceRegistry {
                 ns.ids.contains_key(&q).then_some(q)
             }
             None => {
-                let home = self.namespaces.get(ns_name)?;
+                // A removed current namespace still resolves its own
+                // mappings (like the JVM's detached object — the
+                // `*ns*` handle outlives the name).
+                let home = self.ns_live_or_removed(ns_name)?;
                 let q = Symbol::new(Some(ns_name), sym.name());
                 if home.ids.contains_key(&q) {
                     return Some(q);
@@ -488,7 +491,7 @@ impl NamespaceRegistry {
     #[must_use]
     pub fn lookup_in(&self, ns_name: &str, sym: &Symbol) -> Option<u64> {
         let target = self.resolve_in(ns_name, sym)?;
-        let ns = self.namespaces.get(target.namespace()?)?;
+        let ns = self.ns_live_or_removed(target.namespace()?)?;
         ns.ids.get(&target).copied()
     }
 

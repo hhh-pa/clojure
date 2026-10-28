@@ -1046,3 +1046,26 @@ fn require_entry_libspec() {
         "java.lang.IllegalArgumentException | Don't know how to create ISeq from: java.lang.Long"
     );
 }
+
+#[test]
+fn t73_removed_current_ns_resolves_own_mappings() {
+    // Torture #73 finding 4: after remove-ns, the removed current
+    // namespace still resolves its refers (like the JVM's detached
+    // object); the name itself is gone.
+    let mut eval = boot();
+    run(
+        &mut eval,
+        "(clojure.core/create-ns 'torture.scratch) (clojure.core/in-ns 'torture.scratch)",
+    );
+    run(&mut eval, "(clojure.core/refer 'clojure.core)");
+    run(
+        &mut eval,
+        "(clojure.core/intern 'torture.scratch 'myval 123)",
+    );
+    assert_eq!(run_last(&mut eval, "myval"), "123");
+    run(&mut eval, "(clojure.core/remove-ns 'torture.scratch)");
+    assert_eq!(
+        run_last(&mut eval, "(nil? (find-ns 'torture.scratch))"),
+        "true"
+    );
+}
