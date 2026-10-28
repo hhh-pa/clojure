@@ -73,7 +73,9 @@ pub(crate) fn prims_map() -> Value {
 /// (CCE `String` — the port takes path strings only), then a
 /// value-membership guarded `conj` onto the root (nil normalizes to
 /// `[]` first, preserving the append invariant; non-vector colls get
-/// `conj` semantics). Answers nil.
+/// `conj` semantics). Answers nil. The `conj` lands on the root,
+/// so a thread-local `*load-path*` binding shadows the add until
+/// it pops (spec §1.9).
 pub(crate) fn native_add_classpath(
     eval: &mut Evaluator,
     args: &[Value],
