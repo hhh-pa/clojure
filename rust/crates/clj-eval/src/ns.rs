@@ -2564,6 +2564,16 @@ mod tests {
     }
 
     #[test]
+    fn run_loaded_values_without_vars_is_idle() {
+        // S18 `load-reader`: a bare evaluator binds nothing and
+        // answers nil for empty input (the missing-var arms are the
+        // pin — every `if let` here must tolerate absence).
+        let mut eval = Evaluator::new_bare("user");
+        let out = run_loaded_values(&mut eval, Vec::new()).expect("bare empty load-reader");
+        assert_eq!(out, Value::Nil);
+    }
+
+    #[test]
     fn set_ns_current_without_frame_sets_root() {
         let mut eval = Evaluator::new_bare("user");
         let star = Symbol::new(Some("clojure.core"), "*ns*");
