@@ -169,12 +169,10 @@ fn current_driver() -> Option<&'static dyn CompileDriver> {
 pub(crate) fn native_compile(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/compile", args, &[1])?;
     let name = name_of(&args[0])?;
-    let depth = core_var(eval, "*compile-files*")
-        .map(|id| eval.push_binding(core_var_handle(id, "*compile-files*"), Value::Bool(true)));
+    let id = core_var(eval, "*compile-files*").expect("boot installs *compile-files*");
+    let depth = eval.push_binding(core_var_handle(id, "*compile-files*"), Value::Bool(true));
     let out = compile_load(eval, &args[0], &name);
-    if let Some(d) = depth {
-        eval.pop_bindings(d);
-    }
+    eval.pop_bindings(depth);
     out?;
     Ok(args[0].clone())
 }
@@ -312,9 +310,13 @@ fn obj_path_for(dir: &str, root: &str) -> PathBuf {
 /// which planning surfaces as T6a) plans the text as-is. Evaluation
 /// always runs the full unstripped text.
 ///
-/// (`ReaderOpts::default()` matches the planner's options wherever
-/// head detection can observe: only aliases/refers differ, and those
-/// affect just `::` and syntax-quote, never a plain `ns` head.)
+/// (`ReaderOpts::default()` agrees with the planner's
+/// `read_forms_opts` wherever head detection can observe: the fields
+/// that can differ (current ns, aliases, refers, read-eval,
+/// suppress-read, resolver, data-reader keys) only steer `#`
+/// dispatch, `::`, and syntax-quote — never a bare `ns` symbol. A
+/// misread fails closed either way: no strip means the planner
+/// reports the subset diagnostic itself.)
 fn strip_leading_ns(text: &str) -> String {
     let mut reader = Reader::new(text, &ReaderOpts::default());
     // `NoHooks`: only a plain `ns` head is ever detected here, so

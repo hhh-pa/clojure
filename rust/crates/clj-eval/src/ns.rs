@@ -1212,8 +1212,8 @@ fn run_loaded(
     }
     // S7: load forces `*read-eval*` true, visibly (probes `l-gate`,
     // `m-*` — `Compiler.load` binds it the same way). The push rides
-    // the `depth` pop below (`*file*` is installed whenever this is,
-    // so a depth always exists here).
+    // the `depth` pop below (captured up front, so the pop restores
+    // exactly this frame's pushes).
     if let Some(id) = core_var(eval, "*read-eval*") {
         eval.push_binding(core_var_handle(id, "*read-eval*"), Value::Bool(true));
     }
