@@ -1472,6 +1472,7 @@ pub(crate) fn boot_print_system(eval: &mut Evaluator) {
             default: default_key,
             methods,
             prefers: new_map(),
+            hierarchy: None,
         })),
     );
     let mut dup_methods = new_map();
@@ -1492,6 +1493,7 @@ pub(crate) fn boot_print_system(eval: &mut Evaluator) {
             default: Value::Keyword(Keyword::new(None, "default")),
             methods: dup_methods,
             prefers: new_map(),
+            hierarchy: None,
         })),
     );
     install_plain_root(eval, "char-escape-string", char_map_value(CHAR_ESCAPES));
