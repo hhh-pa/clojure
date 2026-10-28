@@ -412,6 +412,7 @@ fn append_canon_body(out: &mut String, v: &Value, print_meta: bool) {
         | Value::Future(_)
         | Value::Promise(_)
         | Value::Agent(_)
+        | Value::Volatile(_)
         | Value::MapEntry { .. }
         | Value::Extension(_) => out.push_str(&pr_to_string(v, &PrintOpts::pr())),
         Value::List(l) => {

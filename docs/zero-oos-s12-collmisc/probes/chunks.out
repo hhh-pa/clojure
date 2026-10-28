@@ -1,0 +1,65 @@
+ch-buf-class "class clojure.lang.ChunkBuffer"
+ch-buf-print "#object[clojure.lang.ChunkBuffer 0xH \"clojure.lang.ChunkBuffer@L\"]"
+ch-chunk-class "class clojure.lang.ArrayChunk"
+ch-build [2 :a :b]
+ch-print "#object[clojure.lang.ArrayChunk 0xH \"clojure.lang.ArrayChunk@L\"]"
+ch-empty-count 0
+ch-nil [1 true]
+ch-overflow THROW java.lang.ArrayIndexOutOfBoundsException|"Index 2 out of bounds for length 2"
+ch-bigcap 40
+ch-zero-cap 0
+ch-zero-append THROW java.lang.ArrayIndexOutOfBoundsException|"Index 0 out of bounds for length 0"
+ch-neg-cap THROW java.lang.NegativeArraySizeException|"-1"
+ch-seq THROW java.lang.IllegalArgumentException|"Don't know how to create ISeq from: clojure.lang.ArrayChunk"
+ch-nth-oob nil
+ch-nth-cap true
+ch-nth-cap-oob THROW java.lang.ArrayIndexOutOfBoundsException|"Index 32 out of bounds for length 32"
+ch-use-once THROW java.lang.NullPointerException|"Cannot store to object array because \"this.buffer\" is null"
+ch-chunk-twice THROW java.lang.NullPointerException|"Cannot load from object array because \"this.array\" is null"
+ch-append-ret [true 1]
+ch-buf-count-fresh 0
+ch-buf-count-used 1
+ch-buf-count-dead 1
+ch-buf-count-dead0 0
+ch-buf-empty true
+ch-buf-counted true
+ch-cons-empty true
+ch-cons-print "(1 2 3)"
+ch-cons-class "class clojure.lang.ChunkedCons"
+ch-cons-nil-print "(1)"
+ch-first-vec 32
+ch-first-small [3 1 3]
+ch-rest-vec "(32 33 34 35 36 37 38 39)"
+ch-next-vec "(32 33 34 35 36 37 38 39)"
+ch-rest-end ["()" false]
+ch-next-end true
+ch-first-list THROW java.lang.ClassCastException|"class clojure.lang.PersistentList cannot be cast to class clojure.lang.IChunkedSeq (clojure.lang.PersistentList and clojure.lang.IChunkedSeq are in unnamed module of loader 'app')"
+ch-first-str THROW java.lang.ClassCastException|"class clojure.lang.StringSeq cannot be cast to class clojure.lang.IChunkedSeq (clojure.lang.StringSeq and clojure.lang.IChunkedSeq are in unnamed module of loader 'app')"
+ch-rest-cons "(2 3)"
+ch-next-cons-end true
+ch-first-cons [1 7]
+ch-cq-vec true
+ch-cq-list false
+ch-cq-map false
+ch-cq-set false
+ch-cq-str false
+ch-cq-range true
+ch-cq-repeat false
+ch-cq-cycle false
+ch-cq-iterate false
+ch-cq-lazy false
+ch-cq-cons false
+ch-cq-concat false
+ch-cq-mapfn false
+ch-cq-nil false
+ch-cq-vecval false
+ch-cq-cons-chunk true
+ch-cq-takelast true
+ch-cq-drop true
+ch-cq-rseq false
+ch-cq-subvec false
+ch-cq-reseq false
+ch-cq-treeseq false
+ch-cq-range-inf false
+ch-cq-repeat-n false
+ch-cq-eduction false

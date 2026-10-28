@@ -1,11 +1,10 @@
-;; S5D differential corpus 20: *print-dup* atom witness (S9B divergence).
+;; S5D differential corpus 20: *print-dup* atom witness (converged zero-oos S8 #51).
 ;; Oracle: java -Duser.language=en -Duser.country=US -Duser.timezone=UTC -cp clojure.jar clojure.main
-;; Sources: s9-plan.md S9B (reader-contract §24 item 11), s5d-contract
-;; (*print-dup* divergence), concurrency.rs
-;; print_dup_flag_ignored_for_atoms.
-;; DIVERGENCE: the JVM prints the atom under *print-dup* false but
+;; Sources: s9-plan.md S9B (reader-contract §24 item 11), s5d-contract,
+;; concurrency.rs print_dup_atom_throws_per_flag.
+;; CONVERGED: the JVM prints the atom under *print-dup* false and
 ;; THROWS IllegalArgumentException under true (no print-dup method
-;; for Atom); the port prints the #object shape on both sides.
+;; for Atom); the port matches both sides since zero-oos S8 (#51).
 ;; Golden = JVM truth. StartsWith booleans keep the 0x address out
 ;; of the golden.
 (defn p [tag thunk]

@@ -38,8 +38,8 @@ use std::sync::Arc;
 use num_traits::ToPrimitive;
 
 use crate::{
-    Agent, Atom, Delay, ExtensionValue, Future, HostInst, HostVal, Keyword, MultiFn, Promise,
-    Symbol, Throwable, Transient, Unbound, Var, host_eq,
+    Agent, Atom, Delay, ExtensionValue, Future, HostInst, HostKind, HostVal, Keyword, MultiFn,
+    Promise, Symbol, Throwable, Transient, Unbound, Var, Volatile, host_eq,
 };
 
 /// Deterministic Fx hasher for maps/sets (rpds's default RandomState
@@ -767,6 +767,8 @@ pub enum Value {
     Promise(Promise),
     /// An agent (S6C): identity equality (shared cell, equal meta).
     Agent(Agent),
+    /// A volatile (S10): identity equality (shared cell — no meta).
+    Volatile(Volatile),
     /// A host-defined value behind the [`ExtensionValue`] trait (S4).
     Extension(Arc<dyn ExtensionValue>),
     /// A port-defined type descriptor or instance (S-typechain):
@@ -921,6 +923,33 @@ fn host_pair_eq(a: &Arc<HostVal>, b: &Arc<HostVal>) -> bool {
     Arc::ptr_eq(a, b) || host_eq(a, b)
 }
 
+/// The content map of a struct instance (S12; `None` for every
+/// other value, including record instances — records never equal
+/// plain maps).
+fn host_struct_content(h: &HostVal) -> Option<&Map> {
+    match h {
+        HostVal::Inst(i) if i.def.kind == HostKind::Struct => Some(&i.content),
+        _ => None,
+    }
+}
+
+/// The content map when `v` is a struct instance (S12).
+fn struct_content(v: &Value) -> Option<&Map> {
+    match v {
+        Value::HostType(h) => host_struct_content(h),
+        _ => None,
+    }
+}
+
+/// The map behind a value: plain maps read directly, struct
+/// instances read their content (S12); anything else is `None`.
+fn map_or_struct_content(v: &Value) -> Option<&Map> {
+    match v {
+        Value::Map(m) => Some(m),
+        other => struct_content(other),
+    }
+}
+
 /// Port-defined pair equality (split from `value_eq_mid` and
 /// `plain_equals` for the complexity budget): host pairs follow
 /// `host_pair_eq`, multifn pairs compare by identity (like the
@@ -930,6 +959,17 @@ fn port_pair_eq(a: &Value, b: &Value) -> Option<bool> {
     match (a, b) {
         (Value::HostType(x), Value::HostType(y)) => Some(host_pair_eq(x, y)),
         (Value::MultiFn(x), Value::MultiFn(y)) => Some(Arc::ptr_eq(x, y)),
+        // Struct instances compare as their content map: to plain
+        // maps and across bases alike (S12 oracles `sm-eq-map`,
+        // `sm-cross-basis`); against anything else they miss.
+        // (Struct pairs land in the `HostType` arm above, which
+        // compares content too.)
+        (a, b) if struct_content(a).is_some() || struct_content(b).is_some() => {
+            Some(match (map_or_struct_content(a), map_or_struct_content(b)) {
+                (Some(x), Some(y)) => map_value_eq(x, y),
+                _ => false,
+            })
+        }
         _ => None,
     }
 }
@@ -1036,6 +1076,7 @@ fn value_eq_rest(a: &Value, b: &Value) -> bool {
     match (a, b) {
         (Value::Promise(a), Value::Promise(b)) => cell_meta_eq(a.same_cell(b), a.meta(), b.meta()),
         (Value::Agent(a), Value::Agent(b)) => cell_meta_eq(a.same_cell(b), a.meta(), b.meta()),
+        (Value::Volatile(a), Value::Volatile(b)) => a.same_cell(b),
         (Value::Extension(a), Value::Extension(b)) => a.dyn_eq(&**b),
         _ => false,
     }
@@ -1278,15 +1319,27 @@ fn hash_value_rest<H: Hasher>(v: &Value, state: &mut H) {
             state.write_u8(22);
             state.write_u64(a.id());
         }
+        Value::Volatile(v) => {
+            state.write_u8(27);
+            state.write_u64(v.id());
+        }
         Value::Extension(e) => hash_extension(e, state),
         // Port-defined types: the class name plus the content map
         // (order-insensitive, like `Map`, so equal records hash
-        // equally whatever the extension order).
+        // equally whatever the extension order). Struct instances
+        // hash EXACTLY like their content map (they are `=` to
+        // plain maps — oracle `sm-eq-map` — so the `Eq`/`Hash`
+        // contract requires identical writes to `Map`).
         Value::HostType(h) => {
-            state.write_u8(23);
-            h.type_name().hash(state);
-            if let Some(i) = h.as_inst() {
-                i.content.hash(state);
+            if let Some(content) = host_struct_content(h) {
+                state.write_u8(9);
+                content.hash(state);
+            } else {
+                state.write_u8(23);
+                h.type_name().hash(state);
+                if let Some(i) = h.as_inst() {
+                    i.content.hash(state);
+                }
             }
         }
         // Multimethods hash their name (identity equality, so
@@ -1456,7 +1509,7 @@ fn is_collection(v: &Value) -> bool {
     matches!(
         v,
         Value::List(_) | Value::Vector(_) | Value::MapEntry { .. } | Value::Map(_) | Value::Set(_)
-    )
+    ) || struct_content(v).is_some()
 }
 
 /// Same length plus pairwise comparison (either comparator).
@@ -1503,6 +1556,10 @@ fn coll_equiv(c: &Value, x: &Value) -> bool {
         }
         Value::Map(m) => map_coll_equiv(m, x),
         Value::Set(s) => set_coll_equiv(s, x),
+        // Struct instances equiv as their content map (S12; the
+        // only host value `is_collection` admits, so the `None`
+        // arm is unreachable — `is_some_and` keeps it branchless).
+        Value::HostType(h) => host_struct_content(h).is_some_and(|m| map_coll_equiv(m, x)),
         _ => false,
     }
 }
@@ -1523,7 +1580,7 @@ fn seq_coll_equiv<'a>(len: usize, items: impl Iterator<Item = &'a Value>, x: &'a
 }
 
 fn map_coll_equiv(m: &Map, x: &Value) -> bool {
-    let Value::Map(o) = x else {
+    let Some(o) = map_or_struct_content(x) else {
         return false;
     };
     if m.size() != o.size() {
@@ -2249,6 +2306,33 @@ mod tests {
         ));
     }
 
+    /// A struct instance equivs as its content map on the
+    /// collection side (S12; duplicate-key policy stays the
+    /// constructor's business).
+    #[test]
+    fn coll_equiv_struct_reads_content_map() {
+        let def = Arc::new(HostDef {
+            name: Arc::from("clojure.lang.PersistentStructMap"),
+            kind: HostKind::Struct,
+            fields: Vec::new(),
+            methods: std::collections::HashMap::new(),
+            interfaces: Vec::new(),
+            prefix: None,
+            impl_ns: None,
+            sigs: std::collections::HashMap::new(),
+            takes_this: true,
+            struct_keys: Vec::new(),
+        });
+        let content = new_map().insert(Value::Keyword(Keyword::new(None, "a")), Value::Int(1));
+        let sm = Value::HostType(Arc::new(HostVal::Inst(HostInst {
+            def,
+            content: content.clone(),
+            meta: None,
+        })));
+        assert!(super::coll_equiv(&sm, &Value::Map(content)));
+        assert!(!super::coll_equiv(&sm, &Value::Int(1)));
+    }
+
     #[test]
     fn tagged_identity_forms() {
         use crate::{ThrowClass, Throwable, Unbound, Var};
@@ -2345,6 +2429,7 @@ mod tests {
             impl_ns: None,
             sigs: std::collections::HashMap::new(),
             takes_this: true,
+            struct_keys: Vec::new(),
         })
     }
 

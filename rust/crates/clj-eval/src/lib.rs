@@ -15,6 +15,7 @@
 pub mod aot_subset;
 pub mod builtin_expand;
 pub mod coll;
+pub mod collmisc;
 pub mod concurrency;
 pub mod core;
 pub mod destructure_expand;
@@ -31,6 +32,7 @@ pub mod lazy;
 pub mod macros;
 pub mod multi;
 pub mod ns;
+pub(crate) mod printsys;
 pub mod protocol;
 pub mod re;
 pub mod reader;

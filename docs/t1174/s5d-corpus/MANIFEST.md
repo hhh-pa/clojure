@@ -138,11 +138,11 @@ From `s5d-pins.md` (Corpus rules) plus established practice:
   counter-verified early exit. Sources: pins 7i, 7i2–7i4, 7i6.
   05/09/11 hold the basics; only 7i-new cells here.
 - `20-print-dup.clj` (2): `*print-dup*` atom witness (S9B).
-  Sources: s9-plan S9B, s5d-contract divergence. Test:
-  `print_dup_flag_ignored_for_atoms` (concurrency.rs).
-  KNOWN DIVERGENCE: the golden's `:dup-atom-true` THROWs
-  IllegalArgumentException on the JVM; the port prints `true`
-  (flag ignored — see the test).
+  Sources: s9-plan S9B, s5d-contract. Test:
+  `print_dup_atom_throws_per_flag` (concurrency.rs).
+  CONVERGED (zero-oos S8 #51): the golden's `:dup-atom-true`
+  THROWs IllegalArgumentException on the JVM and the port
+  matches (dup honored per kind — see the test).
 
 ## Open items
 

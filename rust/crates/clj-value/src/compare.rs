@@ -270,6 +270,7 @@ fn ref_or_collection_type_name(v: &Value) -> &'static str {
         Value::Future(_) => "Future",
         Value::Promise(_) => "Promise",
         Value::Agent(_) => "Agent",
+        Value::Volatile(_) => "Volatile",
         _ => collection_type_name(v),
     }
 }
@@ -537,6 +538,7 @@ mod tests {
             impl_ns: None,
             sigs: std::collections::HashMap::new(),
             takes_this: true,
+            struct_keys: Vec::new(),
         });
         let v = Value::HostType(Arc::new(crate::HostVal::Inst(crate::HostInst {
             def,

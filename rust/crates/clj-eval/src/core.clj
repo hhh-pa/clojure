@@ -1809,3 +1809,28 @@
 ;; classloaders, so the macro keeps the immediate-invocation shape
 ;; and the cycle guard stays native (never forked here).
 (defmacro with-loading-context [& body] `((fn ~(gensym "loading") [] ~@body)))
+
+;; --- `defstruct` (S12): the legacy structmap basis macro (oracle
+;; `sm-defstruct-expand` pins the expansion shape).
+(defmacro defstruct
+  [name & keys]
+  (list 'def name (cons 'clojure.core/create-struct keys)))
+
+;; --- S10: `comparator` (verbatim JVM body) and `tap->`
+;; (verbatim JVM one-liner). The `cond` (not `if`) matters —
+;; truthy non-bool pred results order (probes `k-truthy-lt`,
+;; `k-truthy-eq`). The call convention `(cmp a b)` is already
+;; what `SortSpec::Custom` consumes, so `sort`, `sort-by`, and
+;; `sorted-map-by` interoperate with no `coll.rs` change.
+(defn comparator
+  "Returns an implementation of java.util.Comparator based upon pred."
+  {:added "1.0"}
+  [pred]
+  (fn [x y]
+    (cond (pred x y) -1 (pred y x) 1 :else 0)))
+
+(defn tap->
+  "Sends x to any taps, drops if tap queue is full, returns x."
+  {:added "1.13"}
+  [x]
+  (doto x tap>))

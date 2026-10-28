@@ -898,6 +898,8 @@ pub(crate) fn throw_class_for(name: &str) -> ThrowClass {
         "ClassCastException" => ThrowClass::ClassCastException,
         "ClassNotFoundException" => ThrowClass::ClassNotFoundException,
         "IndexOutOfBoundsException" => ThrowClass::IndexOutOfBoundsException,
+        "ArrayIndexOutOfBoundsException" => ThrowClass::ArrayIndexOutOfBoundsException,
+        "NegativeArraySizeException" => ThrowClass::NegativeArraySizeException,
         "ArithmeticException" => ThrowClass::ArithmeticException,
         "ExceptionInfo" => ThrowClass::ExceptionInfo,
         "FileNotFoundException" => ThrowClass::FileNotFoundException,
@@ -1986,8 +1988,8 @@ fn clojure_version_map() -> Value {
 /// setDynamic()`): `*assert*`, the `*unchecked-math*` /
 /// `*warn-on-reflection*` / `*allow-unresolved-vars*` flags, `*out*` /
 /// `*err*`, and the `*print-meta*` / `*print-readably*` /
-/// `*print-dup*` triad (corpus 11/15 pin the meta `false` while
-/// `binding` still works).
+/// `*print-dup*` / `*flush-on-newline*` print vars (corpus 11/15
+/// pin the meta `false` while `binding` still works).
 fn def_dynamic_root(eval: &mut Evaluator, name: &str, root: Value) {
     let q = Symbol::new(Some("clojure.core"), name);
     let id = eval.registry.intern(&q);
@@ -2051,6 +2053,7 @@ pub fn boot() -> Evaluator {
     boot_mark_private(&mut eval);
     let user_handle = ns_value("user", user_ns);
     boot_core_vars(&mut eval, user_handle.clone());
+    crate::printsys::boot_print_system(&mut eval);
     boot_refer_user(&mut eval);
     if let Some(id) = core_var(&eval, "*ns*") {
         eval.push_binding(core_var_handle(id, "*ns*"), user_handle);
@@ -2089,6 +2092,8 @@ fn boot_install_natives(eval: &mut Evaluator) {
         .chain(crate::protocol::PROTOCOL_NATIVES.iter())
         .chain(crate::multi::MULTI_NATIVES.iter())
         .chain(crate::core::TOWER_NATIVES.iter())
+        .chain(crate::collmisc::COLLMISC_NATIVES.iter())
+        .chain(crate::printsys::PRINTSYS_NATIVES.iter())
     {
         let func: Arc<crate::ext::NativeImpl> = Arc::new(*f);
         eval.install_native("clojure.core", name, func);
@@ -2172,6 +2177,7 @@ fn boot_core_vars(eval: &mut Evaluator, user_handle: Value) {
     def_dynamic_root(eval, "*read-eval*", Value::Bool(true));
     def_dynamic_root(eval, "*suppress-read*", Value::Nil);
     def_dynamic_root(eval, "*reader-resolver*", Value::Nil);
+    def_dynamic_root(eval, "*flush-on-newline*", Value::Bool(true));
     // `RT.java`: `*agent*` is a dynamic slot with a nil root (bound
     // to the agent inside each action by `send`).
     def_dynamic_root(eval, "*agent*", Value::Nil);
@@ -2202,6 +2208,8 @@ fn boot_refer_user(eval: &mut Evaluator) {
         .chain(crate::reader::READER_NATIVES.iter())
         .chain(crate::concurrency::CONC_NATIVES.iter())
         .chain(crate::fx4_host::FX4_NATIVES.iter())
+        .chain(crate::collmisc::COLLMISC_NATIVES.iter())
+        .chain(crate::printsys::PRINTSYS_NATIVES.iter())
         .map(|(n, _)| (*n).to_owned())
         .collect();
     names.extend(
@@ -2230,6 +2238,11 @@ fn boot_refer_user(eval: &mut Evaluator) {
             "*read-eval*",
             "*suppress-read*",
             "*reader-resolver*",
+            "*flush-on-newline*",
+            "print-method",
+            "print-dup",
+            "char-escape-string",
+            "char-name-string",
             "*agent*",
             "*math-context*",
             "*print-length*",

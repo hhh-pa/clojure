@@ -31,7 +31,7 @@ use crate::lazy::{
     as_pending, as_realized, as_subvector, collect_all, equiv_vals, is_counted_seq, is_seq_value,
     realize_deep,
 };
-use crate::ns::{NativeFnPtr, check_arity, deref_core, signal_to_native, throw_class_for};
+use crate::ns::{NativeFnPtr, check_arity, deref_core, npe, signal_to_native, throw_class_for};
 
 /// `Cannot invoke "Object.getClass()" because "x" is null`: the
 /// numbers-`nil` failure (every arithmetic/comparison op probes it).
@@ -330,12 +330,18 @@ fn char_of_num(n: &Num) -> Result<char, NativeError> {
 
 /// Whether the value is callable (`fn?` plus the `IFn` collections,
 /// keywords, symbols, and vars; `Unbound` passes through to the
-/// caller's unbound error).
+/// caller's unbound error; S12 struct accessors are `IFn` but not
+/// `fn?`, like the JVM's `PersistentStructMap$1` — and struct
+/// instances are `IFn` too, like the JVM's `PersistentStructMap`,
+/// while records stay non-`IFn` on both sides).
 pub(crate) fn is_ifn(v: &Value) -> bool {
     match v {
         Value::Extension(e) => {
             e.as_any().downcast_ref::<crate::ext::Closure>().is_some()
                 || e.as_any().downcast_ref::<crate::ext::NativeFn>().is_some()
+                || e.as_any()
+                    .downcast_ref::<crate::collmisc::AccessorValue>()
+                    .is_some()
                 || as_subvector(v).is_some()
         }
         Value::Keyword(_)
@@ -348,7 +354,10 @@ pub(crate) fn is_ifn(v: &Value) -> bool {
         | Value::Promise(_)
         | Value::MultiFn(_)
         | Value::Unbound(_) => true,
-        _ => false,
+        // Struct instances only (records and bases miss — S12
+        // oracle `sm-ifn`; records stay pinned non-`IFn` by
+        // `types.rs rec_*`).
+        _ => crate::types::is_host_struct(v),
     }
 }
 
@@ -1548,6 +1557,7 @@ fn is_coll(v: &Value) -> bool {
     ) || as_subvector(v).is_some()
         || is_seq_value(v)
         || crate::types::is_host_record(v)
+        || crate::types::is_host_struct(v)
 }
 fn is_sequential(v: &Value) -> bool {
     matches!(v, Value::Vector(_) | Value::MapEntry { .. })
@@ -1558,6 +1568,7 @@ fn is_associative(v: &Value) -> bool {
     matches!(v, Value::Map(_) | Value::Vector(_) | Value::MapEntry { .. })
         || as_subvector(v).is_some()
         || crate::types::is_host_record(v)
+        || crate::types::is_host_struct(v)
 }
 pub(crate) fn is_counted(v: &Value) -> bool {
     matches!(
@@ -1567,6 +1578,8 @@ pub(crate) fn is_counted(v: &Value) -> bool {
         || as_subvector(v).is_some()
         || is_counted_seq(v)
         || crate::types::is_host_record(v)
+        || crate::types::is_host_struct(v)
+        || crate::collmisc::as_chunk_buffer(v).is_some()
 }
 fn is_list(v: &Value) -> bool {
     matches!(v, Value::List(_))
@@ -1575,7 +1588,7 @@ fn is_vector(v: &Value) -> bool {
     matches!(v, Value::Vector(_) | Value::MapEntry { .. }) || as_subvector(v).is_some()
 }
 fn is_map(v: &Value) -> bool {
-    matches!(v, Value::Map(_)) || crate::types::is_host_record(v)
+    matches!(v, Value::Map(_)) || crate::types::is_host_record(v) || crate::types::is_host_struct(v)
 }
 fn is_set(v: &Value) -> bool {
     matches!(v, Value::Set(_))
@@ -1614,6 +1627,7 @@ fn is_seqable(v: &Value) -> bool {
     ) || as_subvector(v).is_some()
         || is_seq_value(v)
         || crate::types::is_host_record(v)
+        || crate::types::is_host_struct(v)
 }
 // `record?` (S-typechain stage 1): true for record instances —
 // including records with extension entries — and nothing else
@@ -2217,14 +2231,16 @@ pub fn print_opts(
         namespace_maps: deref_core(eval, "*print-namespace-maps*").is_truthy(),
         readably: readably.unwrap_or_else(|| deref_core(eval, "*print-readably*").is_truthy()),
         meta: deref_core(eval, "*print-meta*").is_truthy(),
+        dup: deref_core(eval, "*print-dup*").is_truthy(),
     })
 }
 
 /// Whether the value is a JVM `LazySeq` (whose `toString` never
 /// prints contents): a pending seq reporting the `LazySeq` class
 /// (forced or not — memoizing never changes the class), or a
-/// realized seq explicitly kinded `LazySeq`.
-fn is_lazy_seq_str(v: &Value) -> bool {
+/// realized seq explicitly kinded `LazySeq`. Shared with
+/// `print-simple`'s object half (single source).
+pub(crate) fn is_lazy_seq_str(v: &Value) -> bool {
     if as_pending(v).is_some() {
         return jvm_class_of(v) == "clojure.lang.LazySeq";
     }
@@ -2276,13 +2292,15 @@ fn str_of_realized(eval: &mut Evaluator, v: &Value) -> Result<String, NativeErro
         // Multimethods render the `toString` fallback (no methods
         // run for them, oracle `d-prefer`).
         Value::MultiFn(m) => clj_value::multifn_str(&m.name),
-        // Atoms, delays, futures, promises, and agents render their
-        // `toString` (`Class@hex`), never the `#object[…]` print form.
+        // Atoms, delays, futures, promises, agents, and volatiles
+        // render their `toString` (`Class@hex`), never the
+        // `#object[…]` print form.
         Value::Atom(_)
         | Value::Delay(_)
         | Value::Future(_)
         | Value::Promise(_)
-        | Value::Agent(_) => clj_value::java_debug(&r),
+        | Value::Agent(_)
+        | Value::Volatile(_) => clj_value::java_debug(&r),
         Value::List(_) | Value::Vector(_) | Value::Map(_) | Value::Set(_) => {
             clj_value::pr_to_string(&r, &clj_value::PrintOpts::pr())
         }
@@ -2357,18 +2375,45 @@ fn native_subs(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErr
 }
 
 /// `pr-str`/`print-str`: space-joined (nothing for zero args).
+/// Like the JVM's `with-out-str` + `pr`/`print`: `*out*` binds to
+/// a fresh string writer (so user methods see it) and every arg
+/// renders through the `pr-on` driver.
 fn pr_print_str(
     eval: &mut Evaluator,
     args: &[Value],
     readably: Option<bool>,
 ) -> Result<Value, NativeError> {
-    let opts = print_opts(eval, readably)?;
-    let mut parts = Vec::with_capacity(args.len());
+    // Eager validation first (limits CCE before anything realizes,
+    // as before).
+    print_opts(eval, readably)?;
+    let mut vals = Vec::with_capacity(args.len());
     for arg in args {
-        let v = realize_deep(eval, arg).map_err(signal_to_native)?;
-        parts.push(clj_value::pr_to_string(&v, &opts));
+        vals.push(realize_deep(eval, arg).map_err(signal_to_native)?);
     }
-    Ok(Value::Str(Arc::from(parts.join(" ").as_str())))
+    let sw = crate::io::string_writer(eval);
+    let depth = eval.bindings_depth();
+    crate::printsys::bind_core_var(eval, "*out*", sw.clone());
+    crate::printsys::maybe_bind_print_readably(eval, readably);
+    let result = pr_str_args(eval, &vals);
+    eval.pop_bindings(depth);
+    result?;
+    let contents = crate::io::writer_contents(&sw).unwrap_or_default();
+    Ok(Value::Str(Arc::from(contents.as_str())))
+}
+
+/// One `pr-on` per arg into the bound string writer (separators
+/// between, `*out*` re-read per arg like the `pr` path).
+fn pr_str_args(eval: &mut Evaluator, vals: &[Value]) -> Result<(), NativeError> {
+    use crate::ns::deref_core;
+    for (i, v) in vals.iter().enumerate() {
+        let out = deref_core(eval, "*out*");
+        crate::io::check_writer(&out)?;
+        if i > 0 {
+            crate::io::write_to_writer(&out, " ")?;
+        }
+        crate::printsys::pr_on(eval, v, &out).map_err(signal_to_native)?;
+    }
+    Ok(())
 }
 
 fn native_pr_str(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
@@ -2587,6 +2632,48 @@ fn out_of_range(kind: &str, n: Num) -> NativeError {
     )
 }
 
+/// The `(int x)` cast as an `i64`: longs narrow exactly,
+/// doubles range-check before truncating, tower narrows through
+/// the `long` stop, characters convert, nil trips the
+/// `charValue` NPE, anything else fails to `Character`. Shared
+/// with the S12 `seque` capacities and `chunk-buffer` (which pin
+/// the same `Character` cast — oracles `sq-cap-str`,
+/// `fixprobe10`).
+pub(crate) fn int_cast_value(v: &Value) -> Result<i64, NativeError> {
+    match v {
+        Value::Int(i) => int_exact_long(*i).map(i64::from),
+        Value::Double(d) => double_int(*d),
+        Value::Char(c) => Ok(*c as i64),
+        // Tower integers take the `long` range check (exact
+        // digits) then `toIntExact` (oracles `conv-i1`,
+        // `conv-hugeint`); decimals narrow through `double`
+        // first (oracle `conv-hugedecint`: `1.0E30`).
+        Value::BigInt(n) | Value::BigInteger(n) => tower_intcast(n).map(i64::from),
+        Value::Ratio(r) => tower_intcast(&trunc_ratio(r)).map(i64::from),
+        Value::BigDec(d) => bigdec_intcast(d).map(i64::from),
+        Value::Nil => Err(npe_char_value()),
+        v => Err(cce_err(v, "java.lang.Character")),
+    }
+}
+
+/// An `RT.intCast`-shaped `Number` narrowing to `i32` (S12
+/// `mix-collection-hash`/`hash-combine` args): numbers narrow
+/// checked (the `long` range check, then `toIntExact`), tower
+/// truncates first, nil trips the `doubleValue` NPE, anything
+/// else fails to `Number` (oracles `mh-mix-str`,
+/// `mh-comb-seed-str`).
+pub(crate) fn number_int_cast(v: &Value) -> Result<i32, NativeError> {
+    match v {
+        Value::Int(i) => int_exact_long(*i),
+        Value::Double(d) => int_cast_double(*d),
+        Value::BigInt(n) => tower_intcast(n),
+        Value::Ratio(r) => tower_intcast(&trunc_ratio(r)),
+        Value::BigDec(d) => bigdec_intcast(d),
+        Value::Nil => Err(npe_double_value()),
+        v => Err(cce_err(v, "java.lang.Number")),
+    }
+}
+
 fn native_int(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/int", args, &[1])?;
     // `int` keeps the value a `Long` (no 32-bit ints exist), but
@@ -2594,20 +2681,7 @@ fn native_int(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErro
     // integer overflow`, doubles past it `IAE | Value out of
     // range for int` (checked BEFORE truncating), `NaN` is 0,
     // and characters convert (fixprobe10/11).
-    Ok(Value::Int(match &args[0] {
-        Value::Int(i) => int_exact_long(*i).map(i64::from)?,
-        Value::Double(d) => double_int(*d)?,
-        Value::Char(c) => *c as i64,
-        // Tower integers take the `long` range check (exact
-        // digits) then `toIntExact` (oracles `conv-i1`,
-        // `conv-hugeint`); decimals narrow through `double`
-        // first (oracle `conv-hugedecint`: `1.0E30`).
-        Value::BigInt(n) | Value::BigInteger(n) => tower_intcast(n).map(i64::from)?,
-        Value::Ratio(r) => tower_intcast(&trunc_ratio(r)).map(i64::from)?,
-        Value::BigDec(d) => bigdec_intcast(d).map(i64::from)?,
-        Value::Nil => return Err(npe_char_value()),
-        v => return Err(cce_err(v, "java.lang.Character")),
-    }))
+    Ok(Value::Int(int_cast_value(&args[0])?))
 }
 
 /// An `int` from a `double`: `NaN` is 0, past-`i32` fails `Value
@@ -3358,20 +3432,82 @@ fn native_trampoline(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nati
 /// like the JVM.
 fn native_hash(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/hash", args, &[1])?;
-    if clj_value::seq_hash_unsupported(&args[0]) {
-        return Err(NativeError::new(
-            ThrowClass::UnsupportedOperationException,
-            String::new(),
-        ));
+    Ok(Value::Int(i64::from(hasheq_one(eval, &args[0])?)))
+}
+
+/// One value's `hasheq`: unhashable infinites (top-level, nested, or
+/// revealed by forcing) throw bare `UnsupportedOperationException`;
+/// anything else hashes after a full realize (like the JVM walk).
+fn hasheq_one(eval: &mut Evaluator, v: &Value) -> Result<i32, NativeError> {
+    if clj_value::seq_hash_unsupported(v) {
+        return Err(hash_unsupported());
     }
-    let v = realize_deep(eval, &args[0]).map_err(signal_to_native)?;
-    if clj_value::seq_hash_unsupported(&v) {
-        return Err(NativeError::new(
-            ThrowClass::UnsupportedOperationException,
-            String::new(),
-        ));
+    let realized = realize_deep(eval, v).map_err(signal_to_native)?;
+    if clj_value::seq_hash_unsupported(&realized) {
+        return Err(hash_unsupported());
     }
-    Ok(Value::Int(i64::from(clj_value::hasheq(&v))))
+    Ok(clj_value::hasheq(&realized))
+}
+
+/// The bare `UnsupportedOperationException` for unhashable infinite
+/// seqs (the JVM `hasheq` overrides throw with an empty message).
+fn hash_unsupported() -> NativeError {
+    NativeError::new(ThrowClass::UnsupportedOperationException, String::new())
+}
+
+/// The `hash-*-coll` nil NPE (`Iterable.iterator` on a null `xs`).
+const ITERABLE_NIL: &str = "Cannot invoke \"java.lang.Iterable.iterator()\" because \"xs\" is null";
+
+/// Whether the port seqs the value (the `Iterable` analog): the
+/// `seq` walk's accepted set — `is_seqable` plus subvectors and
+/// eductions, which `step_unit` walks but `is_seqable` omits.
+fn is_port_iterable(v: &Value) -> bool {
+    crate::lazy::is_seqable(v)
+        || as_subvector(v).is_some()
+        || crate::xform::Eduction::parts(v).is_some()
+}
+
+/// A `hash-*-coll` argument's items: nil trips the `Iterable` NPE;
+/// strings fail the `Iterable` cast (seqable here, not `Iterable`
+/// on the JVM); anything else the port cannot seq fails the cast
+/// too; the rest walks like `seq` (maps yield entries, entries
+/// their pair).
+fn hash_coll_items(eval: &mut Evaluator, v: &Value) -> Result<Vec<Value>, NativeError> {
+    match v {
+        Value::Nil => Err(npe(ITERABLE_NIL)),
+        Value::Str(_) => Err(cce_err(v, "java.lang.Iterable")),
+        _ if !is_port_iterable(v) => Err(cce_err(v, "java.lang.Iterable")),
+        _ => collect_all(eval, v).map_err(signal_to_native),
+    }
+}
+
+/// `hash-ordered-coll`: the Murmur3 ordered mix over the arg's
+/// items, each hashed exactly like `(hash item)` (map entries hash
+/// as their `[k v]` pair, like `(hash entry)`).
+fn native_hash_ordered_coll(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.core/hash-ordered-coll", args, &[1])?;
+    let items = hash_coll_items(eval, &args[0])?;
+    let mut hashes = Vec::with_capacity(items.len());
+    for item in &items {
+        hashes.push(hasheq_one(eval, item)?);
+    }
+    Ok(Value::Int(i64::from(clj_value::hash_ordered(
+        hashes.into_iter(),
+    ))))
+}
+
+/// `hash-unordered-coll`: the Murmur3 unordered mix over the arg's
+/// items, each hashed exactly like `(hash item)`.
+fn native_hash_unordered_coll(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.core/hash-unordered-coll", args, &[1])?;
+    let items = hash_coll_items(eval, &args[0])?;
+    let mut hashes = Vec::with_capacity(items.len());
+    for item in &items {
+        hashes.push(hasheq_one(eval, item)?);
+    }
+    Ok(Value::Int(i64::from(clj_value::hash_unordered(
+        hashes.into_iter(),
+    ))))
 }
 
 /// `hash-code` (PRIVATE, port-internal): Java `.hashCode` for the
@@ -3615,6 +3751,8 @@ pub(crate) const CORE_NATIVES: &[(&str, NativeFnPtr)] = &[
     ("trampoline", native_trampoline),
     ("hash", native_hash),
     ("hash-code", native_hash_code),
+    ("hash-ordered-coll", native_hash_ordered_coll),
+    ("hash-unordered-coll", native_hash_unordered_coll),
     ("throw-illegal-arg!", native_throw_iae),
     ("throw-npe!", native_throw_npe),
     ("odd?", native_odd),

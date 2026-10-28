@@ -12,11 +12,12 @@
 //! Printing honors the bound `*out*` writer (stdout, stderr, or an
 //! in-memory buffer); file natives only speak UTF-8 paths.
 
+use std::cell::Cell;
 use std::io::Write;
 use std::sync::{Arc, Mutex};
 
-use clj_reader::{EvalReadError, ReadCond, ReaderError, ReaderOpts};
-use clj_value::{ExtensionValue, ThrowClass, Value, pr_to_string};
+use clj_reader::{EvalReadError, ReadCond, Reader, ReaderError, ReaderOpts};
+use clj_value::{ExtensionValue, ThrowClass, Value};
 
 use crate::core::{cce_err, cce_message, print_opts};
 use crate::error::{NativeError, jvm_class_of};
@@ -137,16 +138,23 @@ fn io_err(e: std::io::Error) -> NativeError {
 /// Write a string to the bound `*out*` writer.
 pub(crate) fn write_out(eval: &mut Evaluator, s: &str) -> Result<(), NativeError> {
     let out = deref_core(eval, "*out*");
-    if matches!(out, Value::Nil) {
+    write_to_writer(&out, s)
+}
+
+/// Write a string to a writer value (nil → the `write` NPE,
+/// non-writer → the `Writer` CCE — shared by `write_out`,
+/// `print-simple`, `print-ctor`, and the print driver).
+pub(crate) fn write_to_writer(w: &Value, s: &str) -> Result<(), NativeError> {
+    if matches!(w, Value::Nil) {
         return Err(NativeError::new(
             ThrowClass::NullPointerException,
             "Cannot invoke \"java.io.Writer.write(String)\" because \"w\" is null".to_owned(),
         ));
     }
-    let Some(w) = as_writer(&out) else {
+    let Some(w) = as_writer(w) else {
         return Err(NativeError::new(
             ThrowClass::ClassCastException,
-            cce_message(&jvm_class_of(&out), "java.io.Writer"),
+            cce_message(&jvm_class_of(w), "java.io.Writer"),
         ));
     };
     match &w.kind {
@@ -165,30 +173,144 @@ pub(crate) fn write_out(eval: &mut Evaluator, s: &str) -> Result<(), NativeError
     }
 }
 
+/// A writer value's validity without writing (nil → the `write`
+/// NPE, non-writer → the `Writer` CCE — the upfront `*out*`
+/// validation and the `print-simple`/`print-ctor` writer checks).
+pub(crate) fn check_writer(w: &Value) -> Result<(), NativeError> {
+    if matches!(w, Value::Nil) {
+        return Err(NativeError::new(
+            ThrowClass::NullPointerException,
+            "Cannot invoke \"java.io.Writer.write(String)\" because \"w\" is null".to_owned(),
+        ));
+    }
+    if as_writer(w).is_none() {
+        return Err(NativeError::new(
+            ThrowClass::ClassCastException,
+            cce_message(&jvm_class_of(w), "java.io.Writer"),
+        ));
+    }
+    Ok(())
+}
+
+/// Flush `*out*` (stdout flushes, anything else is a no-op) and
+/// count the flush for the `*flush-on-newline*` test hook.
+pub(crate) fn flush_out(eval: &mut Evaluator) -> Result<(), NativeError> {
+    eval.bump_flush_count();
+    if as_writer(&deref_core(eval, "*out*")).is_some_and(|w| matches!(w.kind, WriterKind::Stdout)) {
+        std::io::stdout().lock().flush().map_err(io_err)?;
+    }
+    Ok(())
+}
+
+/// Serializes whole-print emissions across threads. Pre-S8
+/// `print_impl` rendered the full line and issued one write (one
+/// lock acquisition — atomic); the per-arg `pr-on` driver issues
+/// several writes, so racing `println`s interleave mid-line without
+/// this (`T5-LINE-0T0-LINE-0`, msrv `run_joins_drainers_at_exit`).
+/// Re-entry safe: nested prints on the same thread (a user
+/// `print-method` re-entering `print`, pinned to overflow like the
+/// JVM) skip the mutex and emit inline, while other threads block.
+static PRINT_EMISSION_LOCK: Mutex<()> = Mutex::new(());
+thread_local! {
+    static PRINT_EMISSION_DEPTH: Cell<usize> = const { Cell::new(0) };
+}
+
+/// Held across one top-level print emission (`print_impl`,
+/// `newline`, `print-simple`, `print-ctor`). Depth-tracked so the
+/// same thread never deadlocks on re-entry; the mutex is only ever
+/// uncontended-then-held (no lock ordering: emission never waits on
+/// another thread while holding it).
+pub(crate) struct EmissionGuard {
+    _lock: Option<std::sync::MutexGuard<'static, ()>>,
+}
+
+impl EmissionGuard {
+    pub(crate) fn acquire() -> Self {
+        let nested = PRINT_EMISSION_DEPTH.with(|d| {
+            let n = d.get();
+            d.set(n + 1);
+            n
+        });
+        let lock = if nested == 0 {
+            Some(
+                PRINT_EMISSION_LOCK
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner()),
+            )
+        } else {
+            None
+        };
+        Self { _lock: lock }
+    }
+}
+
+impl Drop for EmissionGuard {
+    fn drop(&mut self) {
+        PRINT_EMISSION_DEPTH.with(|d| d.set(d.get().saturating_sub(1)));
+    }
+}
+
 /// `print`/`println`/`pr`/`prn`: space-joined (no trailing space);
 /// `ln` appends a newline. `readably` overrides the binding when
-/// given (`print` binds false, `pr` honors).
+/// given (`print` binds false, `pr` honors). Every arg renders
+/// through the `pr-on` driver (user `print-method`/`print-dup`
+/// entries fire); `*out*` re-reads per arg, and the `ln` newline
+/// flushes iff `*flush-on-newline*` is truthy. The whole emission
+/// holds the emission lock (atomic lines across threads).
 fn print_impl(
     eval: &mut Evaluator,
     args: &[Value],
     readably: Option<bool>,
     ln: bool,
 ) -> Result<Value, NativeError> {
-    let opts = print_opts(eval, readably)?;
-    let mut parts = Vec::with_capacity(args.len());
+    // Eager validation first (limits CCE before anything realizes
+    // or writes, as before).
+    print_opts(eval, readably)?;
+    let mut vals = Vec::with_capacity(args.len());
     for arg in args {
-        let v = realize_deep(eval, arg).map_err(signal_to_native)?;
-        parts.push(pr_to_string(&v, &opts));
+        vals.push(realize_deep(eval, arg).map_err(signal_to_native)?);
     }
-    let mut out = parts.join(" ");
-    if ln {
-        out.push('\n');
+    // The `readably` override binds like the JVM's `print` (the
+    // driver defaults read the binding back).
+    let depth = crate::printsys::maybe_bind_print_readably(eval, readably);
+    // Upfront `*out*` validation (stock NPE/CCE) whenever output
+    // follows; bare `pr`/`print` write nothing (not even a check).
+    if !vals.is_empty() || ln {
+        let out = deref_core(eval, "*out*");
+        if let Err(e) = check_writer(&out) {
+            eval.pop_bindings(depth);
+            return Err(e);
+        }
     }
-    // Bare `print` writes nothing (not even an empty write).
-    if !out.is_empty() {
-        write_out(eval, &out)?;
+    // One emission, one lock-hold: the arg writes, the `ln`
+    // newline, and its flush serialize against other threads'
+    // emissions (pre-S8 single-write atomicity).
+    let _emission = EmissionGuard::acquire();
+    let result = print_args(eval, &vals, ln);
+    eval.pop_bindings(depth);
+    result?;
+    if ln && deref_core(eval, "*flush-on-newline*").is_truthy() {
+        flush_out(eval)?;
     }
     Ok(Value::Nil)
+}
+
+/// One `pr-on` per arg (separators between, `*out*` re-read per
+/// arg) plus the `ln` newline on the current `*out*`.
+fn print_args(eval: &mut Evaluator, vals: &[Value], ln: bool) -> Result<(), NativeError> {
+    for (i, v) in vals.iter().enumerate() {
+        let out = deref_core(eval, "*out*");
+        check_writer(&out)?;
+        if i > 0 {
+            write_to_writer(&out, " ")?;
+        }
+        crate::printsys::pr_on(eval, v, &out).map_err(signal_to_native)?;
+    }
+    if ln {
+        let out = deref_core(eval, "*out*");
+        write_to_writer(&out, "\n")?;
+    }
+    Ok(())
 }
 
 fn native_print(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
@@ -219,9 +341,12 @@ pub(crate) fn prn_str(eval: &mut Evaluator, line: &str) -> Result<(), NativeErro
     Ok(())
 }
 
-/// `newline`: writes `\n` to `*out*`.
+/// `newline`: writes `\n` to `*out*`. Serialized with print
+/// emissions so it cannot land mid-`println` (pre-S8 both were
+/// single writes through the same lock).
 fn native_newline(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/newline", args, &[0])?;
+    let _emission = EmissionGuard::acquire();
     write_out(eval, "\n")?;
     Ok(Value::Nil)
 }
@@ -229,9 +354,7 @@ fn native_newline(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeE
 /// `flush`: flushes stdout when `*out*` is stdout, else a no-op.
 fn native_flush(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/flush", args, &[0])?;
-    if as_writer(&deref_core(eval, "*out*")).is_some_and(|w| matches!(w.kind, WriterKind::Stdout)) {
-        std::io::stdout().lock().flush().map_err(io_err)?;
-    }
+    flush_out(eval)?;
     Ok(Value::Nil)
 }
 
@@ -348,16 +471,26 @@ fn native_spit(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErr
 
 /// `read-string`: read one form (no line numbers, like the JVM).
 /// S7 gates run after the string checks (probes `g-rs-*`).
+/// The 2-arity reuses the `read` opts parser (issue #40: every
+/// `rs-opts-*` oracle row agrees with the `r-opts-*`/`r-feat-*`/
+/// `r-rc-*` pins), except the string validates FIRST (probes
+/// `rs-opts-order`, `rs-opts-order-nil`) and nil fails with the
+/// `String.length` NPE (probe `rs-opts-nilstr`), not the 1-arity
+/// bare NPE. Errors stay bare `RuntimeException`s (no
+/// `ReaderException` wrapper — every `rs-opts-*` throw row).
 fn native_read_string(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
-    check_arity("clojure.core/read-string", args, &[1])?;
-    if matches!(args[0], Value::Nil) {
-        return Err(NativeError::new(
-            ThrowClass::NullPointerException,
-            String::new(),
-        ));
+    check_arity("clojure.core/read-string", args, &[1, 2])?;
+    let s_arg = args.last().expect("arity 1..=2 has a last arg");
+    if matches!(s_arg, Value::Nil) {
+        let message = if args.len() == 2 {
+            "Cannot invoke \"String.length()\" because \"s\" is null".to_owned()
+        } else {
+            String::new()
+        };
+        return Err(NativeError::new(ThrowClass::NullPointerException, message));
     }
-    let Value::Str(s) = &args[0] else {
-        return Err(cce_err(&args[0], "java.lang.String"));
+    let Value::Str(s) = s_arg else {
+        return Err(cce_err(s_arg, "java.lang.String"));
     };
     let seed = crate::reader::seed_read_gates(eval)?;
     // Syntax-quote and `::` resolve against the synced current
@@ -370,6 +503,16 @@ fn native_read_string(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nat
         read_cond: ReadCond::Deny,
         ..Default::default()
     };
+    // The 1-arity keeps deny-everything defaults (probe
+    // `rs-opts-none`); the 2-arity parses the opts map (the
+    // `recursive` tail is `read`-only — there is no wrapper to
+    // skip here).
+    let (eof_error, eof_value) = if args.len() == 2 {
+        let (eof_error, eof_value, _) = crate::reader::parse_read_opts(&args[0], &mut opts)?;
+        (eof_error, eof_value)
+    } else {
+        (true, Value::Nil)
+    };
     if let Some(ns) = eval.registry.get(&cur) {
         opts.aliases = ns.alias_map();
         opts.refers = ns.refer_map();
@@ -378,16 +521,27 @@ fn native_read_string(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nat
     opts.read_eval = seed.read_eval;
     opts.suppress_read = seed.suppress_read;
     opts.resolver_bound = seed.resolver_bound;
+    // `read_form(false)` separates clean EOF (`None` → the `:eof`
+    // value, probes `rs-opts-eof*`) from truncated input (`Err` →
+    // always throws, probes `rs-opts-eof-trunc*`); `read_str`
+    // cannot (both are bare `Eof` without line numbers).
     let text: &str = s;
-    let (outcome, fired) = {
+    let mut reader = Reader::new(text, &opts);
+    let outcome = {
         let mut hooks = crate::reader::LiveReadHooks::new(eval);
-        clj_reader::read_str_fired(text, &opts, &mut hooks)
+        reader.read_form(false, &mut hooks)
     };
+    let fired = reader.take_fired();
     // Effects precede every outcome (fired tags ran during the read
     // — probe `e-discard-eof` fires before the EOF), so drain first.
     crate::core::drain_fired_tags(eval, fired)?;
     match outcome {
-        Ok(v) => crate::core::resolve_data_readers(eval, v),
+        Ok(Some(v)) => crate::core::resolve_data_readers(eval, v),
+        Ok(None) if !eof_error => Ok(eof_value),
+        Ok(None) => Err(NativeError::new(
+            ThrowClass::RuntimeException,
+            "EOF while reading".to_owned(),
+        )),
         Err(e) => Err(land_read_string_error(e)),
     }
 }

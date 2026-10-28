@@ -4,9 +4,16 @@ The complete inventory of `clojure.core` in this port: every var,
 its conformance state, and — for exclusions — why it is excluded.
 If a var is not listed here, that is a file bug, not a silent gap.
 
-- **505 vars: 487 implemented, 2 divergent, 16 out of scope,
+- **692 vars: 533 implemented, 1 divergent, 158 out of scope,
   0 planned.** The port reports Clojure `1.13.0-alpha9`
   (`clojure-version`).
+- **Universe.** 692 rows = 685 JVM publics + 7 extra-universe rows: 4 port-visible JVM privates
+  (`*loaded-libs*`, `*loading-verbosely*`, `*pending-paths*`,
+  `preserving-reduced`), 1 port-only var (`*load-path*`), 2 guard
+  rows (`clone-thread-bindings`, `pprint`).
+- **Merged `planned` rows must resolve** — the matrix fails on any
+  unresolved `planned` row, so add none unresolved (accepted
+  future work lands as `out-of-scope` with a `future:` note).
 - **Status meanings.** `implemented` — resolves in the booted core
   and behaves like the JVM (pinned by tests named in `notes`).
   `divergent` — resolves, but fenced behavior differs deliberately
@@ -421,10 +428,10 @@ Printing, reading, files, and print dynamic vars.
 | `*err*` | implemented | dynamic root; control.rs boot_dynamics (root + referred) |
 | `slurp` | implemented | tests/io.rs io_smoke_rows (roundtrip) |
 | `spit` | implemented | tests/io.rs io_smoke_rows (:append) |
-| `read-string` | implemented | tests/io.rs io_smoke_rows (S2, 1 form); denies reader conditionals (S-instream, instream_read_string_deny_row) |
+| `read-string` | implemented | tests/io.rs io_smoke_rows (S2, 1 form); denies reader conditionals (S-instream, instream_read_string_deny_row); 2-arity opts (F-read-opts, read_string_opts_rows; probes rs-opts-*) |
 | `*print-length*` | implemented | dyn var, root+meta; control.rs boot_dynamics |
 | `*print-level*` | implemented | dyn var, root+meta; control.rs boot_dynamics |
-| `*print-dup*` | divergent | declared; ignored by the printer |
+| `*print-dup*` | implemented | dup routing on pr paths; undupable kinds throw (S8: printsys.rs dup_rows; probes d-*/p-*; corpus 20 converges) |
 | `*print-meta*` | implemented | ^meta prefix honored (str.rs print_opts_rows) |
 | `*print-readably*` | implemented | honored via pr/print natives (str.rs print_opts_rows) |
 | `*print-namespace-maps*` | implemented | root true; gates #:ns lift (str.rs print_opts_rows) |
@@ -457,7 +464,7 @@ Special forms exposed as macros; `macroexpand-1` expands them (only real special
 
 ## Out of scope (significant exclusions)
 
-Significant vars with no port slice, grouped below by area with the reason. (Two implemented groups live at the end of this section — concurrency and the REPL/CLI environment — because they were inventoried with the exclusions around them.)
+Significant vars with no port slice, grouped below by area with the reason. (Three implemented groups live at the end of this section — concurrency, the REPL/CLI environment, and previously unlisted vars that resolve today — because they were inventoried with the exclusions around them.)
 
 | var | status | notes |
 | --- | --- | --- |
@@ -575,34 +582,32 @@ Significant vars with no port slice, grouped below by area with the reason. (Two
 | `rationalize` | implemented | tower via `BigDecimal.valueOf` (`(rationalize 0.1)` is `1/10`); tower.rs tower_num_rationalize_rows |
 | `pprint` | out-of-scope | clojure.pprint namespace, not core |
 
-### Previously unlisted — accepted future work
+### Previously unlisted — resolves today
 
-Landed ready slices at their PR #41 mirrored positions, flipped
-straight to `implemented` (the #41 land unions the remaining
-slices' rows into this table).
+JVM publics that already resolve in the booted core; the missing rows were file bugs (#40 audit).
 
 | var | status | notes |
 | --- | --- | --- |
-| `*data-readers*` | implemented | S6 dynamic (root `{}`); zero_oos_s6_datareaders.rs data_reader_vars, table_reads_invoke_per_occurrence, table_precedence_and_errors |
-| `*default-data-reader-fn*` | implemented | S6 dynamic (root nil); zero_oos_s6_datareaders.rs data_reader_vars, default_fn_fallback |
-| `*math-context*` | implemented | ns.rs `RT.java`-style dynamic root (nil); `MathContextVal` extension; zero_oos_s2_tower.rs s2_math_context_rows |
-| `*read-eval*` | implemented | true root; false/nil gates `#=`, `:unknown` refuses every read, loads force true; zero_oos_s7_readgates.rs (S7, #50) |
-| `*reader-resolver*` | implemented | nil root; 2-arity fn protocol (current-ns/resolve-alias/resolve-class/resolve-var consults for `::`/syntax-quote); non-fn entry cast; zero_oos_s7_readgates.rs (S7, #50) |
-| `*suppress-read*` | implemented | nil root; gates only `#tag` (unknown tags preserved; `#inst`/`#uuid` also preserved — the suppress check sits above the S6 consult); zero_oos_s7_readgates.rs (S7, #50) |
+| `*agent*` | implemented | dynamic nil root, bound over actions (ns.rs def_dynamic_root; concurrency.rs agent_star_rows) |
+| `bound-fn*` | implemented | fx4_host.rs native_bound_fn (conveyed bindings; fx4_macroexpand.rs host_natives_and_rewrites) |
+| `inc'` | implemented | core.rs native_inc_prime (= inc on the tower; arith.rs core_r4_scalar_gaps) |
+| `some-vals` | implemented | fx4_host.rs native_some_vals (drops nil vals; fx4_macroexpand.rs host_natives_and_rewrites) |
+| `with-redefs-fn` | implemented | fx4_host.rs native_with_redefs_fn (root swap/restore; fx4_macroexpand.rs host_natives_and_rewrites) |
+
+### Previously unlisted — accepted future work
+
+Ready slices, `out-of-scope` today only because the matrix fails on unresolved `planned` rows; each note names the future work.
+
+| var | status | notes |
+| --- | --- | --- |
 | `NaN?` | implemented | core.rs native_nanp (`Double` payload; other numbers false; nil NPE; else CCE `Number`); predicates.rs nan_rows |
 | `abs` | implemented | core.rs native_abs (exact all kinds; `BigDec` rounds under ctx); zero_oos_s2_tower.rs s2_abs_rows |
-| `agent-errors` | implemented | S5: core.clj `(when-let [e (agent-error a)] (list e))` + `:deprecated "1.2"`; zero_oos_s5_state.rs deprecated_trio_rows |
 | `any?` | implemented | core.rs pred1 constantly true; predicates.rs any_rows |
-| `await1` | implemented | S5: concurrency.rs await-iff-queued answering the agent; zero_oos_s5_state.rs await1_rows |
 | `biginteger` | implemented | core.rs native_biginteger (`Value::BigInteger`, bare print); zero_oos_s2_tower.rs s2_biginteger_rows |
 | `bounded-count` | implemented | core.clj port; tests/zero_oos_s3_seqs.rs bounded_count_rows (counted fast path, early exit over infinite; probes `bc-*`) |
-| `clear-agent-errors` | implemented | S5: core.clj `(restart-agent a @a)` + `:deprecated "1.2"`; zero_oos_s5_state.rs deprecated_trio_rows |
 | `decimal?` | implemented | core.rs pred1 over `Value::BigDec`; zero_oos_s2_tower.rs s2_predicate_rows |
-| `default-data-readers` | implemented | S6 map var (`inst`/`uuid` natives); zero_oos_s6_datareaders.rs default_data_readers_table, default_readers_direct_calls |
-| `definline` | implemented | core.clj macro (eval-built specimen; `:inline` recorded, never honored — the port is an interpreter); tests/zero_oos_s4b_macros.rs s4b_definline_rows |
 | `delay?` | implemented | core.rs pred1 over `Value::Delay`; predicates.rs delay_rows |
 | `denominator` | implemented | core.rs ratio_part (`BigInteger`; `Ratio` CCE); zero_oos_s2_tower.rs s2_numerator_denominator_rows |
-| `destructure` | implemented | destructure_expand.rs destructure_public (partition/drop-odd/all-symbols passthrough + shared bind_one; entries as vectors); tests/zero_oos_s4b_macros.rs s4b_destructure_rows |
 | `disj!` | implemented | S5: coll.rs native_disj_bang (1-arity identity; `ITransientSet` cast); zero_oos_s5_state.rs disj_bang_rows |
 | `error-handler` | implemented | S5: concurrency.rs cell read (fn or nil); zero_oos_s5_state.rs error_handler_rows |
 | `error-mode` | implemented | S5: concurrency.rs cell read (`:fail`/`:continue`); zero_oos_s5_state.rs error_handler_rows |
@@ -614,12 +619,9 @@ slices' rows into this table).
 | `get-validator` | implemented | S5: concurrency.rs IRef read (atoms + agents); zero_oos_s5_state.rs validator_rows |
 | `indexed?` | implemented | core.rs pred1 over vectors/entries/subvectors; predicates.rs indexed_rows |
 | `infinite?` | implemented | core.rs native_infinitep (`Double` payload; other numbers false; nil NPE; else CCE `Number`); predicates.rs infinite_rows |
-| `load-reader` | implemented | 1-arity over any reader (last value, nil when empty); `*file*` nil, `*ns*` isolated, forces `*read-eval*` true, `Compiler.load`-style wraps; reads all forms before evaluating (pre-existing load loop); zero_oos_s7_readgates.rs (S7, #50) |
 | `map-entry?` | implemented | core.rs pred1 over `Value::MapEntry` (never 2-vectors); predicates.rs map_entry_rows |
 | `merge-deep` | implemented | core.clj port over merge-with (1.13); tests/zero_oos_s3_seqs.rs merge_deep_rows (probes `md-*`) |
 | `merge-deep-with` | implemented | core.clj port over merge-with (1.13); tests/zero_oos_s3_seqs.rs merge_deep_with_rows (probes `mdw-*`) |
-| `munge` | implemented | core.rs native over ext.rs compiler_munge (true Compiler table; symbol-preserving); tests/zero_oos_s4b_macros.rs s4b_munge_rows |
-| `namespace-munge` | implemented | core.rs native (`str` + `-`→`_`); tests/zero_oos_s4b_macros.rs s4b_namespace_munge_rows |
 | `nat-int?` | implemented | core.rs pred1 over `Int` >= 0; predicates.rs nat_int_rows |
 | `neg-int?` | implemented | core.rs pred1 over `Int` < 0; predicates.rs neg_int_rows |
 | `numerator` | implemented | core.rs ratio_part (`BigInteger`; `Ratio` CCE); zero_oos_s2_tower.rs s2_numerator_denominator_rows |
@@ -635,33 +637,237 @@ slices' rows into this table).
 | `rand-nth` | implemented | zero_oos_s4a_corelib.rs rand_nth_rows (S4a #46; probes corelib.out rn-*) |
 | `ratio?` | implemented | core.rs pred1 over `Value::Ratio`; zero_oos_s2_tower.rs s2_predicate_rows |
 | `rational?` | implemented | core.rs pred1 over `Int`/`BigInt`/`BigInteger`/`Ratio`/`BigDec`; zero_oos_s2_tower.rs s2_predicate_rows |
-| `read+string` | implemented | `[form string]` over StreamReader (0/1/3/4-arity plus the opts arity; LNPR wrap rule); zero_oos_s7_readgates.rs (S7, #50) |
-| `reader-conditional` | implemented | S6 2-arity ctor; zero_oos_s6_datareaders.rs reader_conditional_ctors |
-| `reader-conditional?` | implemented | S6 `pred1!`; zero_oos_s6_datareaders.rs reader_conditional_predicate |
 | `reduce-kv` | implemented | core.clj port: nil arm, vector index loop with reduced unwrap, entry slow path; tests/zero_oos_s3_seqs.rs reduce_kv_rows (probes `rk-*`) |
-| `release-pending-sends` | implemented | S5: concurrency.rs outbox drain answering the count (0 outside actions); zero_oos_s5_state.rs release_pending_sends_rows |
-| `replicate` | implemented | S5: core.clj `(take n (repeat x))` + `:deprecated "1.3"`; zero_oos_s5_state.rs deprecated_trio_rows |
 | `requiring-resolve` | implemented | S5: ns.rs resolve-else-require; zero_oos_s5_state.rs requiring_resolve_rows |
 | `reset-vals!` | implemented | S5: concurrency.rs `reset!` answering `[old new]`; zero_oos_s5_state.rs vals_rows |
 | `run!` | implemented | core.clj port over reduce; tests/zero_oos_s3_seqs.rs run_bang_rows (nil answer; reduced short-circuit; probes `run-*`) |
-| `selector` | implemented | core.clj macro over private selector-impl (rides the destructuring outlets); tests/zero_oos_s4b_macros.rs s4b_selector_rows |
-| `seq-to-map-for-destructuring` | implemented | destructure_expand.rs (assoc pairs; 1-elem first as-is; odd 3+ complex-path tail conj); tests/zero_oos_s4b_macros.rs s4b_seq_to_map_rows |
 | `set-validator!` | implemented | S5: concurrency.rs IRef write (validates current; nil clears); zero_oos_s5_state.rs validator_rows |
 | `some->` | implemented | zero_oos_s4a_corelib.rs some_thread_first_rows (S4a #46; probes corelib.out st-*) |
 | `some->>` | implemented | zero_oos_s4a_corelib.rs some_thread_last_rows (S4a #46; probes corelib.out stt-*) |
 | `special-symbol?` | implemented | core.rs pred1 over the oracle 23-member set; predicates.rs special_symbol_rows |
 | `splitv-at` | implemented | core.clj port, into+take-xf head (1.12); tests/zero_oos_s3_seqs.rs splitv_at_rows (probes `sv-*`) |
 | `swap-vals!` | implemented | S5: concurrency.rs `swap!` answering `[old new]`; zero_oos_s5_state.rs vals_rows |
-| `tagged-literal` | implemented | S6 2-arity ctor (nil tag coerces); zero_oos_s6_datareaders.rs tagged_literal_ctors |
-| `tagged-literal?` | implemented | S6 `pred1!`; zero_oos_s6_datareaders.rs tagged_literal_predicate |
 | `test` | implemented | zero_oos_s4a_corelib.rs test_var_rows (S4a #46; probes corelib.out tst-*) |
 | `tree-seq` | implemented | core.clj port; tests/zero_oos_s3_seqs.rs tree_seq_rows (lazy; children gated on branch?; probes `ts-*`) |
-| `unquote` | implemented | core.clj bare unbound def (syntax-quote support surface; expansion still reader/analyzer-owned); tests/zero_oos_s4b_macros.rs s4b_unquote_rows |
-| `unquote-splicing` | implemented | core.clj bare unbound def (syntax-quote support surface; expansion still reader/analyzer-owned); tests/zero_oos_s4b_macros.rs s4b_unquote_rows |
 | `update-keys` | implemented | core.clj port over reduce-kv (1.11); tests/zero_oos_s3_seqs.rs update_keys_rows (vectors become maps; probes `uk-*`) |
 | `update-vals` | implemented | core.clj port over reduce-kv (1.11); clj editability test (sorted/record/entry take the {} route); tests/zero_oos_s3_seqs.rs update_vals_rows (probes `uv-*`) |
 | `when-first` | implemented | zero_oos_s4a_corelib.rs when_first_rows (S4a #46; probes corelib.out wf-*) |
 | `while` | implemented | zero_oos_s4a_corelib.rs while_rows (S4a #46; probes corelib.out wh-*) |
+
+### Previously unlisted — no slice yet
+
+No slice on this branch: hard-never reasons stand alone, design-blocked rows name their seam.
+
+| var | status | notes |
+| --- | --- | --- |
+| `*'` | out-of-scope | pending design: auto-promote arith overflow-promotion spec; see #40 |
+| `*compile-files*` | out-of-scope | Bytecode compiler/classpath surface; port AOT (clj-aot) is separate |
+| `*compile-path*` | out-of-scope | Bytecode compiler/classpath surface; port AOT (clj-aot) is separate |
+| `*compiler-options*` | out-of-scope | Bytecode compiler/classpath surface; port AOT (clj-aot) is separate |
+| `*data-readers*` | implemented | S6 dynamic (root `{}`); zero_oos_s6_datareaders.rs data_reader_vars, table_reads_invoke_per_occurrence, table_precedence_and_errors |
+| `*default-data-reader-fn*` | implemented | S6 dynamic (root nil); zero_oos_s6_datareaders.rs data_reader_vars, default_fn_fallback |
+| `*flush-on-newline*` | implemented | dyn var root true; prn/println flush iff true (S8: printsys.rs flush_rows; probes f-*) |
+| `*fn-loader*` | out-of-scope | Bytecode compiler/classpath surface; port AOT (clj-aot) is separate |
+| `*math-context*` | implemented | ns.rs `RT.java`-style dynamic root (nil); `MathContextVal` extension; zero_oos_s2_tower.rs s2_math_context_rows |
+| `*read-eval*` | implemented | true root; false/nil gates `#=`, `:unknown` refuses every read, loads force true; zero_oos_s7_readgates.rs (S7, #50) |
+| `*reader-resolver*` | implemented | nil root; 2-arity fn protocol (current-ns/resolve-alias/resolve-class/resolve-var consults for `::`/syntax-quote); non-fn entry cast; zero_oos_s7_readgates.rs (S7, #50) |
+| `*repl*` | out-of-scope | pending design: *repl* root + session wiring; see #40 |
+| `*source-path*` | out-of-scope | Bytecode compiler/classpath surface; port AOT (clj-aot) is separate |
+| `*suppress-read*` | implemented | nil root; gates only `#tag` (unknown tags preserved; `#inst`/`#uuid` also preserved — the suppress check sits above the S6 consult); zero_oos_s7_readgates.rs (S7, #50) |
+| `*use-context-classloader*` | out-of-scope | Bytecode compiler/classpath surface; port AOT (clj-aot) is separate |
+| `*verbose-defrecords*` | out-of-scope | Bytecode compiler/classpath surface; port AOT (clj-aot) is separate |
+| `+'` | out-of-scope | pending design: auto-promote arith overflow-promotion spec; see #40 |
+| `-'` | out-of-scope | pending design: auto-promote arith overflow-promotion spec; see #40 |
+| `->ArrayChunk` | out-of-scope | No type-system slice on this branch: proxies/deftype factories/method internals |
+| `->Eduction` | out-of-scope | No type-system slice on this branch: proxies/deftype factories/method internals |
+| `->Vec` | out-of-scope | No type-system slice on this branch: proxies/deftype factories/method internals |
+| `->VecNode` | out-of-scope | No type-system slice on this branch: proxies/deftype factories/method internals |
+| `->VecSeq` | out-of-scope | No type-system slice on this branch: proxies/deftype factories/method internals |
+| `-cache-protocol-fn` | out-of-scope | No protocol slice on this branch (protocol track owns design) |
+| `-reset-methods` | out-of-scope | No protocol slice on this branch (protocol track owns design) |
+| `EMPTY-NODE` | out-of-scope | No type-system slice on this branch: proxies/deftype factories/method internals |
+| `Inst` | out-of-scope | pending design: date/time value kind + #inst tag; see #40 |
+| `PrintWriter-on` | out-of-scope | java.io.PrintWriter adapter ctor; port Writer kind is separate |
+| `StackTraceElement->vec` | out-of-scope | pending design: error-data shape; see #40 |
+| `Throwable->map` | out-of-scope | pending design: error-data shape; see #40 |
+| `accessor` | implemented | tests/collmisc.rs structmap_rows (basis-key reader; non-struct CCE) |
+| `aclone` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
+| `add-classpath` | out-of-scope | Deprecated on JVM, no replacement named; classpath URLs have no slice |
+| `add-tap` | implemented | cellstaps.rs tap_returns + tap_deliver (conj; lazily starts the clojure.core/tap-loop dispatcher; single 1024 FIFO; per-tap catch) |
+| `agent-errors` | implemented | S5: core.clj `(when-let [e (agent-error a)] (list e))` + `:deprecated "1.2"`; zero_oos_s5_state.rs deprecated_trio_rows |
+| `aget` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
+| `alength` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
+| `amap` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
+| `ancestors` | out-of-scope | pending design: hierarchy maps (coordinate with 33-typechain); see #40 |
+| `areduce` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
+| `aset` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
+| `aset-boolean` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
+| `aset-byte` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
+| `aset-char` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
+| `aset-double` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
+| `aset-float` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
+| `aset-int` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
+| `aset-long` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
+| `aset-short` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
+| `await1` | implemented | S5: concurrency.rs await-iff-queued answering the agent; zero_oos_s5_state.rs await1_rows |
+| `bean` | out-of-scope | Host reflection/interop/beans/method-fns (N1) |
+| `bit-and` | out-of-scope | pending design: bitwise lattice over tower; see #40 |
+| `bit-and-not` | out-of-scope | pending design: bitwise lattice over tower; see #40 |
+| `bit-clear` | out-of-scope | pending design: bitwise lattice over tower; see #40 |
+| `bit-flip` | out-of-scope | pending design: bitwise lattice over tower; see #40 |
+| `bit-not` | out-of-scope | pending design: bitwise lattice over tower; see #40 |
+| `bit-or` | out-of-scope | pending design: bitwise lattice over tower; see #40 |
+| `bit-set` | out-of-scope | pending design: bitwise lattice over tower; see #40 |
+| `bit-shift-left` | out-of-scope | pending design: bitwise lattice over tower; see #40 |
+| `bit-shift-right` | out-of-scope | pending design: bitwise lattice over tower; see #40 |
+| `bit-test` | out-of-scope | pending design: bitwise lattice over tower; see #40 |
+| `bit-xor` | out-of-scope | pending design: bitwise lattice over tower; see #40 |
+| `boolean-array` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
+| `booleans` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
+| `byte-array` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
+| `bytes` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
+| `bytes?` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
+| `cast` | out-of-scope | Host reflection/interop/beans/method-fns (N1) |
+| `char-array` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
+| `char-escape-string` | implemented | 7-entry map; single-source w/ printer tables (S8: printsys.rs charmaps_rows; probes c-*) |
+| `char-name-string` | implemented | 6-entry map; single-source w/ printer tables (S8: printsys.rs charmaps_rows; probes c-*) |
+| `chars` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
+| `chunk` | implemented | tests/collmisc.rs chunk_rows (single-use; degenerate on second take) |
+| `chunk-append` | implemented | tests/collmisc.rs chunk_rows (AIOOBE/store-NPE texts) |
+| `chunk-buffer` | implemented | tests/collmisc.rs chunk_rows (NegativeArraySizeException) |
+| `chunk-cons` | implemented | tests/collmisc.rs chunk_rows (ChunkedCons; empty collapses) |
+| `chunk-first` | implemented | tests/collmisc.rs chunk_rows (ranges/realized/emulated) |
+| `chunk-next` | implemented | tests/collmisc.rs chunk_rows (nil at end) |
+| `chunk-rest` | implemented | tests/collmisc.rs chunk_rows (() at end) |
+| `chunked-seq?` | implemented | tests/collmisc.rs chunk_rows (29-row battery) |
+| `class?` | out-of-scope | Host reflection/interop/beans/method-fns (N1) |
+| `clear-agent-errors` | implemented | S5: core.clj `(restart-agent a @a)` + `:deprecated "1.2"`; zero_oos_s5_state.rs deprecated_trio_rows |
+| `comparator` | implemented | cellstaps.rs comparator_calls + comparator_sort + comparator_errors (verbatim core.clj body; cond keeps truthy preds ordering; sort/sorted-map-by interop) |
+| `compile` | out-of-scope | Bytecode compiler/classpath surface; port AOT (clj-aot) is separate |
+| `construct-proxy` | out-of-scope | No type-system slice on this branch: proxies/deftype factories/method internals |
+| `create-struct` | implemented | tests/collmisc.rs structmap_rows |
+| `dec'` | out-of-scope | pending design: auto-promote arith overflow-promotion spec; see #40 |
+| `default-data-readers` | implemented | S6 map var (`inst`/`uuid` natives); zero_oos_s6_datareaders.rs default_data_readers_table, default_readers_direct_calls |
+| `definline` | implemented | core.clj macro (eval-built specimen; `:inline` recorded, never honored — the port is an interpreter); tests/zero_oos_s4b_macros.rs s4b_definline_rows |
+| `defstruct` | implemented | tests/collmisc.rs structmap_rows (macro; expansion shape) |
+| `derive` | out-of-scope | pending design: hierarchy maps (coordinate with 33-typechain); see #40 |
+| `descendants` | out-of-scope | pending design: hierarchy maps (coordinate with 33-typechain); see #40 |
+| `destructure` | implemented | destructure_expand.rs destructure_public (partition/drop-odd/all-symbols passthrough + shared bind_one; entries as vectors); tests/zero_oos_s4b_macros.rs s4b_destructure_rows |
+| `double-array` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
+| `doubles` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
+| `enumeration-seq` | out-of-scope | JDK collection/stream adapters (N1) |
+| `extenders` | out-of-scope | pending design: protocol surface (protocol track owns design); see #40 |
+| `file-seq` | implemented | tests/collmisc.rs fileseq_rows (string walk; classes/File unrepresentable) |
+| `find-protocol-impl` | out-of-scope | No protocol slice on this branch (protocol track owns design) |
+| `find-protocol-method` | out-of-scope | No protocol slice on this branch (protocol track owns design) |
+| `float-array` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
+| `floats` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
+| `get-proxy-class` | out-of-scope | No type-system slice on this branch: proxies/deftype factories/method internals |
+| `hash-combine` | implemented | tests/collmisc.rs mixhash_rows (Util/hash path; tower y structural, §2.4) |
+| `hash-ordered-coll` | implemented | cellstaps.rs hash_ordered_values + hash_ordered_errors (Murmur3 ordered mix; maps iterate entries; nil NPE + non-Iterable CCE) |
+| `hash-unordered-coll` | implemented | cellstaps.rs hash_unordered_values (Murmur3 unordered mix; vec-order-insensitive; entry = ordered [k v]; nil NPE) |
+| `init-proxy` | out-of-scope | No type-system slice on this branch: proxies/deftype factories/method internals |
+| `inst-ms` | out-of-scope | pending design: date/time value kind + #inst tag; see #40 |
+| `inst-ms*` | out-of-scope | pending design: date/time value kind + #inst tag; see #40 |
+| `inst?` | out-of-scope | pending design: date/time value kind + #inst tag; see #40 |
+| `int-array` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
+| `into-array` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
+| `ints` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
+| `io!` | out-of-scope | STM refs/transactions (N4): never |
+| `isa?` | out-of-scope | pending design: hierarchy maps (coordinate with 33-typechain); see #40 |
+| `iteration` | implemented | tests/collmisc.rs iteration_rows (eager-first-step; re-seqable) |
+| `iterator-seq` | out-of-scope | JDK collection/stream adapters (N1) |
+| `load-reader` | implemented | 1-arity over any reader (last value, nil when empty); `*file*` nil, `*ns*` isolated, forces `*read-eval*` true, `Compiler.load`-style wraps; reads all forms before evaluating (pre-existing load loop); zero_oos_s7_readgates.rs (S7, #50) |
+| `long-array` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
+| `longs` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
+| `make-array` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
+| `make-hierarchy` | out-of-scope | pending design: hierarchy maps (coordinate with 33-typechain); see #40 |
+| `memfn` | out-of-scope | Host reflection/interop/beans/method-fns (N1) |
+| `method-sig` | out-of-scope | No type-system slice on this branch: proxies/deftype factories/method internals |
+| `mix-collection-hash` | implemented | tests/collmisc.rs mixhash_rows (int-checked longs) |
+| `munge` | implemented | core.rs native over ext.rs compiler_munge (true Compiler table; symbol-preserving); tests/zero_oos_s4b_macros.rs s4b_munge_rows |
+| `namespace-munge` | implemented | core.rs native (`str` + `-`→`_`); tests/zero_oos_s4b_macros.rs s4b_namespace_munge_rows |
+| `object-array` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
+| `parents` | out-of-scope | pending design: hierarchy maps (coordinate with 33-typechain); see #40 |
+| `parse-uuid` | out-of-scope | pending design: UUID value kind; see #40 |
+| `prefers` | out-of-scope | pending design: hierarchy maps (coordinate with 33-typechain); see #40 |
+| `primitives-classnames` | out-of-scope | Bytecode compiler/classpath surface; port AOT (clj-aot) is separate |
+| `print-ctor` | implemented | [o print-args w] #= writer (S8: printsys.rs simple_ctor_rows; probes t-*) |
+| `print-dup` | implemented | booted multifn, token dispatch, no :default (S8: printsys.rs dispatch_rows + dup_rows; probes m-*/d-*/p-*) |
+| `print-method` | implemented | booted multifn, :type-or-token dispatch, chaining :default (S8: printsys.rs dispatch_rows; probes m-*) |
+| `print-simple` | implemented | [o w] meta+str writer (S8: printsys.rs simple_ctor_rows; probes s-*/s2-*) |
+| `proxy-call-with-super` | out-of-scope | No type-system slice on this branch: proxies/deftype factories/method internals |
+| `proxy-mappings` | out-of-scope | No type-system slice on this branch: proxies/deftype factories/method internals |
+| `proxy-name` | out-of-scope | No type-system slice on this branch: proxies/deftype factories/method internals |
+| `proxy-super` | out-of-scope | No type-system slice on this branch: proxies/deftype factories/method internals |
+| `random-uuid` | out-of-scope | pending design: UUID value kind; see #40 |
+| `re-groups` | implemented | tests/collmisc.rs rematcher_rows (ISE w/o match; non-handle CCE) |
+| `re-matcher` | implemented | tests/collmisc.rs rematcher_rows (stateful handle; re-find companion) |
+| `read+string` | implemented | `[form string]` over StreamReader (0/1/3/4-arity plus the opts arity; LNPR wrap rule); zero_oos_s7_readgates.rs (S7, #50) |
+| `reader-conditional` | implemented | S6 2-arity ctor; zero_oos_s6_datareaders.rs reader_conditional_ctors |
+| `reader-conditional?` | implemented | S6 `pred1!`; zero_oos_s6_datareaders.rs reader_conditional_predicate |
+| `ref-history-count` | out-of-scope | STM refs/transactions (N4): never |
+| `ref-max-history` | out-of-scope | STM refs/transactions (N4): never |
+| `ref-min-history` | out-of-scope | STM refs/transactions (N4): never |
+| `release-pending-sends` | implemented | S5: concurrency.rs outbox drain answering the count (0 outside actions); zero_oos_s5_state.rs release_pending_sends_rows |
+| `remove-all-methods` | out-of-scope | pending design: multimethod dispatch seam ([multifn]; coordinate with 33-typechain); see #40 |
+| `remove-tap` | implemented | cellstaps.rs tap_returns + tap_set_semantics (disj by =; never starts the loop) |
+| `replicate` | implemented | S5: core.clj `(take n (repeat x))` + `:deprecated "1.3"`; zero_oos_s5_state.rs deprecated_trio_rows |
+| `resultset-seq` | out-of-scope | JDBC ResultSet adapter; never |
+| `selector` | implemented | core.clj macro over private selector-impl (rides the destructuring outlets); tests/zero_oos_s4b_macros.rs s4b_selector_rows |
+| `seq-to-map-for-destructuring` | implemented | destructure_expand.rs (assoc pairs; 1-elem first as-is; odd 3+ complex-path tail conj); tests/zero_oos_s4b_macros.rs s4b_seq_to_map_rows |
+| `seque` | implemented | tests/collmisc.rs seque_rows (feeder+queue; int-cast capacities) |
+| `set-agent-send-executor!` | implemented | cellstaps.rs exec_record_send (accept-and-record: any value stored + returned; dispatch stays on the fixed send pool — pinned divergences from e-routes/e-nil-send/e-non-exec) |
+| `set-agent-send-off-executor!` | implemented | cellstaps.rs exec_record_send_off (accept-and-record mirror of the send slot; fixed send-off pool) |
+| `short-array` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
+| `shorts` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
+| `stream-into!` | out-of-scope | JDK collection/stream adapters (N1) |
+| `stream-reduce!` | out-of-scope | JDK collection/stream adapters (N1) |
+| `stream-seq!` | out-of-scope | JDK collection/stream adapters (N1) |
+| `stream-transduce!` | out-of-scope | JDK collection/stream adapters (N1) |
+| `struct` | implemented | tests/collmisc.rs structmap_rows (positional; too-many IAE) |
+| `struct-map` | implemented | tests/collmisc.rs structmap_rows (basis-first order; extras) |
+| `sync` | out-of-scope | STM refs/transactions (N4): never |
+| `tagged-literal` | implemented | S6 2-arity ctor (nil tag coerces); zero_oos_s6_datareaders.rs tagged_literal_ctors |
+| `tagged-literal?` | implemented | S6 `pred1!`; zero_oos_s6_datareaders.rs tagged_literal_predicate |
+| `tap->` | implemented | cellstaps.rs tap_thread_first (verbatim core.clj one-liner: returns x and delivers it) |
+| `tap>` | implemented | cellstaps.rs tap_returns + tap_deliver + tap_nil + tap_full (non-blocking offer; true with room, false past 1024) |
+| `to-array` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
+| `to-array-2d` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
+| `unchecked-add` | out-of-scope | pending design: wrapping vs tower-checking per fn; see #40 |
+| `unchecked-add-int` | out-of-scope | pending design: wrapping vs tower-checking per fn; see #40 |
+| `unchecked-byte` | out-of-scope | pending design: wrapping vs tower-checking per fn; see #40 |
+| `unchecked-char` | out-of-scope | pending design: wrapping vs tower-checking per fn; see #40 |
+| `unchecked-dec` | out-of-scope | pending design: wrapping vs tower-checking per fn; see #40 |
+| `unchecked-dec-int` | out-of-scope | pending design: wrapping vs tower-checking per fn; see #40 |
+| `unchecked-divide-int` | out-of-scope | pending design: wrapping vs tower-checking per fn; see #40 |
+| `unchecked-double` | out-of-scope | pending design: wrapping vs tower-checking per fn; see #40 |
+| `unchecked-float` | out-of-scope | pending design: wrapping vs tower-checking per fn; see #40 |
+| `unchecked-inc` | out-of-scope | pending design: wrapping vs tower-checking per fn; see #40 |
+| `unchecked-inc-int` | out-of-scope | pending design: wrapping vs tower-checking per fn; see #40 |
+| `unchecked-int` | out-of-scope | pending design: wrapping vs tower-checking per fn; see #40 |
+| `unchecked-long` | out-of-scope | pending design: wrapping vs tower-checking per fn; see #40 |
+| `unchecked-multiply` | out-of-scope | pending design: wrapping vs tower-checking per fn; see #40 |
+| `unchecked-multiply-int` | out-of-scope | pending design: wrapping vs tower-checking per fn; see #40 |
+| `unchecked-negate` | out-of-scope | pending design: wrapping vs tower-checking per fn; see #40 |
+| `unchecked-negate-int` | out-of-scope | pending design: wrapping vs tower-checking per fn; see #40 |
+| `unchecked-remainder-int` | out-of-scope | pending design: wrapping vs tower-checking per fn; see #40 |
+| `unchecked-short` | out-of-scope | pending design: wrapping vs tower-checking per fn; see #40 |
+| `unchecked-subtract` | out-of-scope | pending design: wrapping vs tower-checking per fn; see #40 |
+| `unchecked-subtract-int` | out-of-scope | pending design: wrapping vs tower-checking per fn; see #40 |
+| `underive` | out-of-scope | pending design: hierarchy maps (coordinate with 33-typechain); see #40 |
+| `unquote` | implemented | core.clj bare unbound def (syntax-quote support surface; expansion still reader/analyzer-owned); tests/zero_oos_s4b_macros.rs s4b_unquote_rows |
+| `unquote-splicing` | implemented | core.clj bare unbound def (syntax-quote support surface; expansion still reader/analyzer-owned); tests/zero_oos_s4b_macros.rs s4b_unquote_rows |
+| `unsigned-bit-shift-right` | out-of-scope | pending design: bitwise lattice over tower; see #40 |
+| `update-proxy` | out-of-scope | No type-system slice on this branch: proxies/deftype factories/method internals |
+| `uri?` | out-of-scope | pending design: URI value kind; see #40 |
+| `uuid?` | out-of-scope | pending design: UUID value kind; see #40 |
+| `vector-of` | out-of-scope | pending design: primitive-vector kind; see #40 |
+| `volatile!` | implemented | cellstaps.rs volatile_ctor_print (fresh Volatile cell; transient #object print — pinned divergence from the JVM {:status :ready} rendering) |
+| `volatile?` | implemented | cellstaps.rs volatile_pred (true on Volatile cells only) |
+| `vreset!` | implemented | cellstaps.rs volatile_vreset + volatile_vswap_shape (stores + returns newval; nil NPE + non-volatile CCE; the vswap! checkcast gate) |
+| `vswap!` | implemented | cellstaps.rs volatile_vswap + volatile_vswap_shape (builtin macro: (vreset! v (f (deref v) …)); deliberate double-eval of vol) |
 | `with-loading-context` | implemented | `core.clj` immediately-invoked-fn macro (no classloader to bind on the port); the native `*pending-paths*` cycle guard still applies; zero_oos_s7_readgates.rs (S7, #50) |
 | `with-local-vars` | implemented | core.clj macro over `__local-var*` anonymous dynamic vars (interop-free expansion; bindings pop on return and throw); tests/zero_oos_s4b_macros.rs s4b_with_local_vars_rows |
 | `with-precision` | implemented | core.clj defmacro over `binding` + `math-context` ctor; `+ - * / quot inc dec` consult; zero_oos_s2_tower.rs s2_precision_* |
+| `xml-seq` | out-of-scope | XML element walk; XML has no slice |

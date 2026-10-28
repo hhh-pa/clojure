@@ -3369,20 +3369,19 @@ fn pvalues_error_wraps_execution_exception() {
 }
 
 #[test]
-fn print_dup_flag_ignored_for_atoms() {
-    // DIVERGENCE (s5d-contract, S9B): `*print-dup*` is declared but
-    // ignored. The JVM prints the atom under `false` but THROWS
-    // IllegalArgumentException (no print-dup method for Atom) under
-    // `true`; we print the #object shape on both sides.
+fn print_dup_atom_throws_per_flag() {
+    // CONVERGED (zero-oos S8 #51 — corpus `20-print-dup.clj`
+    // `:dup-atom-true` meets the golden): `false` prints the
+    // `#object` shape, `true` throws the JVM's
+    // IllegalArgumentException (no `print-dup` method for Atom).
     let mut eval = boot();
-    for flag in ["false", "true"] {
-        let pr = run_last(
-            &mut eval,
-            &format!("(binding [*print-dup* {flag}] (pr-str (atom 1)))"),
-        );
-        assert!(
-            pr.starts_with("\"#object[clojure.lang.Atom 0x"),
-            "no atom shape under {flag}: {pr}"
-        );
-    }
+    let plain = run_last(&mut eval, "(binding [*print-dup* false] (pr-str (atom 1)))");
+    assert!(
+        plain.starts_with("\"#object[clojure.lang.Atom 0x"),
+        "no atom shape under false: {plain}"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(binding [*print-dup* true] (pr-str (atom 1)))"),
+        "java.lang.IllegalArgumentException | No method in multimethod 'print-dup' for dispatch value: \"clojure.lang.Atom\""
+    );
 }

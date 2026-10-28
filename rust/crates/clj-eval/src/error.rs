@@ -322,7 +322,8 @@ fn tower_class_of(v: &Value) -> String {
 }
 
 /// Sorted sets print as tree sets, the rest as hash sets.
-fn set_class_of(s: &clj_value::Set) -> &'static str {
+/// Shared with the print driver's dispatch tokens (single source).
+pub(crate) fn set_class_of(s: &clj_value::Set) -> &'static str {
     if s.is_sorted() {
         "clojure.lang.PersistentTreeSet"
     } else {
@@ -355,9 +356,16 @@ fn jvm_class_of_host(v: &Value) -> String {
         Value::Future(f) => f.jvm_class().to_owned(),
         Value::Promise(p) => p.jvm_class().to_owned(),
         Value::Agent(a) => a.jvm_class().to_owned(),
+        Value::Volatile(v) => v.jvm_class().to_owned(),
         Value::Extension(e) => e.class_name(),
-        // Port-defined types report their class name (S-typechain).
-        Value::HostType(h) => h.type_name().to_owned(),
+        // Port-defined types report their class name (S-typechain);
+        // struct bases report the `$Def` member class (S12).
+        Value::HostType(h) => match h.as_ref() {
+            clj_value::HostVal::Def(d) if d.kind == clj_value::HostKind::Struct => {
+                format!("{}$Def", d.name)
+            }
+            _ => h.type_name().to_owned(),
+        },
         // Multimethods report the JVM class (S-typechain stage 3).
         Value::MultiFn(_) => "clojure.lang.MultiFn".to_owned(),
         // Handled upstream; re-enter so the chain stays exhaustive.
@@ -389,8 +397,9 @@ fn jvm_class_of_host(v: &Value) -> String {
 
 /// The reported map class: stored, never derived (promotion is
 /// one-way and history-dependent — `dissoc` never demotes and
-/// `array-map` forces array at any size).
-fn map_class_of(m: &clj_value::Map) -> &'static str {
+/// `array-map` forces array at any size). Shared with the print
+/// driver's dispatch tokens (single source).
+pub(crate) fn map_class_of(m: &clj_value::Map) -> &'static str {
     if m.is_sorted() {
         "clojure.lang.PersistentTreeMap"
     } else if m.is_hashy() {

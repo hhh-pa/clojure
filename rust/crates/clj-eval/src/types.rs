@@ -24,8 +24,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use clj_value::{
-    HostDef, HostInst, HostKind, HostMethod, HostVal, Map, Symbol, ThrowClass, Value, class_name,
-    fallback_str, find_method, is_field, new_map,
+    HostDef, HostInst, HostKind, HostMethod, HostVal, Map, PrintOpts, Symbol, ThrowClass, Value,
+    class_name, fallback_str, find_method, is_field, new_map, pr_to_string,
 };
 
 use crate::core::cce_err;
@@ -196,6 +196,7 @@ fn closeable_def() -> Arc<HostDef> {
         impl_ns: None,
         sigs,
         takes_this: true,
+        struct_keys: Vec::new(),
     })
 }
 
@@ -310,6 +311,7 @@ fn define_type(
         impl_ns: None,
         sigs: HashMap::new(),
         takes_this: true,
+        struct_keys: Vec::new(),
     };
     Ok(Value::HostType(Arc::new(HostVal::Def(Arc::new(def)))))
 }
@@ -413,6 +415,7 @@ fn native_interface(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nati
         impl_ns: None,
         sigs,
         takes_this: true,
+        struct_keys: Vec::new(),
     };
     Ok(Value::HostType(Arc::new(HostVal::Def(Arc::new(def)))))
 }
@@ -445,6 +448,7 @@ fn native_genclass(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Native
         impl_ns: Some(Arc::from(impl_ns)),
         sigs,
         takes_this: true,
+        struct_keys: Vec::new(),
     };
     Ok(Value::HostType(Arc::new(HostVal::Def(Arc::new(def)))))
 }
@@ -483,6 +487,7 @@ fn native_reify(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErr
         impl_ns: None,
         sigs: HashMap::new(),
         takes_this: true,
+        struct_keys: Vec::new(),
     };
     Ok(Value::HostType(Arc::new(HostVal::Inst(HostInst {
         def: Arc::new(def),
@@ -728,17 +733,23 @@ fn field_hit(d: &Arc<HostDef>, h: &HostVal, method: &str) -> Option<Value> {
 
 /// Default `Object` methods for host instances (the JVM resolves
 /// them with no interface entry): `toString/0` is the `Name@hex`
-/// fallback, `hashCode/0` on records is the content map's Java hash
-/// (oracle `j-tostring-dt`, `l-rec-hashcode`). Anything else — and
-/// descriptors, which have no instance methods — is the oracle's
-/// field error.
+/// fallback — except on structs, where it is the readable map
+/// print, like `str` (S12); `hashCode/0` on records and structs
+/// is the content map's Java hash (oracles `j-tostring-dt`,
+/// `l-rec-hashcode`). Anything else — and descriptors, which
+/// have no instance methods — is the oracle's field error.
 fn object_fallback(h: &HostVal, method: &str, class: &str) -> Result<Value, NativeError> {
     match h {
         HostVal::Inst(i) => {
             if method == "toString" {
+                if i.def.kind == HostKind::Struct {
+                    return Ok(Value::Str(Arc::from(
+                        pr_to_string(&Value::Map(i.content.clone()), &PrintOpts::pr()).as_str(),
+                    )));
+                }
                 return Ok(Value::Str(Arc::from(fallback_str(h).as_str())));
             }
-            if method == "hashCode" && i.def.kind == HostKind::Record {
+            if method == "hashCode" && matches!(i.def.kind, HostKind::Record | HostKind::Struct) {
                 let code = clj_value::hash_code(&Value::Map(i.content.clone()));
                 return Ok(Value::Int(i64::from(code)));
             }
@@ -798,6 +809,36 @@ pub(crate) fn record_inst(v: &Value) -> Option<&HostInst> {
     }
 }
 
+/// True for a struct instance (S12 — the other map-like host value).
+pub(crate) fn is_host_struct(v: &Value) -> bool {
+    struct_inst(v).is_some()
+}
+
+/// The struct instance inside a value, if it is one (S12).
+pub(crate) fn struct_inst(v: &Value) -> Option<&HostInst> {
+    match v {
+        Value::HostType(h) => match h.as_ref() {
+            HostVal::Inst(i) if i.def.kind == HostKind::Struct => Some(i),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// The map-like host instance inside a value: a record or a struct
+/// (S12 structmaps follow the record path for every map op except
+/// `dissoc` of a basis key, which throws).
+pub(crate) fn maplike_inst(v: &Value) -> Option<&HostInst> {
+    record_inst(v).or_else(|| struct_inst(v))
+}
+
+/// Whether `k` is one of the struct's basis keys (S12; `=` over
+/// the ordered basis — `dissoc` throws on these, `accessor`
+/// requires one).
+pub(crate) fn is_struct_key(inst: &HostInst, k: &Value) -> bool {
+    inst.def.struct_keys.iter().any(|b| b == k)
+}
+
 /// Rebuild a record around new content (metadata travels — the
 /// ad-hoc oracle: `assoc-meta`, `conj-meta`, `dissoc-meta`).
 pub(crate) fn rewrap_record(inst: &HostInst, content: Map) -> Value {
@@ -808,10 +849,37 @@ pub(crate) fn rewrap_record(inst: &HostInst, content: Map) -> Value {
     })))
 }
 
-/// Rebuild a record around new content with new metadata
-/// (`with-meta` / `vary-meta` replace it — the original keeps its
-/// meta, oracle `n-meta`).
-pub(crate) fn rewrap_record_with_meta(inst: &HostInst, content: Map, meta: Option<Map>) -> Value {
+/// Rebuild a map-like host value around new content: records and
+/// structs alike stay what they are (S12 `assoc` always stays a
+/// struct — oracles `sm-assoc-class`, `sm-assoc-extra-class`).
+/// Metadata travels, like `rewrap_record`.
+pub(crate) fn rewrap_maplike(inst: &HostInst, content: Map) -> Value {
+    Value::HostType(Arc::new(HostVal::Inst(HostInst {
+        def: inst.def.clone(),
+        content,
+        meta: inst.meta.clone(),
+    })))
+}
+
+/// The `(empty struct)` shape (S12): the same basis with
+/// nil-defaulted basis keys in basis order, extras dropped,
+/// meta dropped — still a structmap, still dissoc-guarded
+/// (JVM-verified in the R1 fixup round).
+pub(crate) fn empty_struct(inst: &HostInst) -> Value {
+    let mut content = new_map();
+    for k in inst.def.struct_keys.iter() {
+        content = content.insert(k.clone(), Value::Nil);
+    }
+    Value::HostType(Arc::new(HostVal::Inst(HostInst {
+        def: inst.def.clone(),
+        content,
+        meta: None,
+    })))
+}
+
+/// Rebuild a map-like host value around new content with new
+/// metadata (S12 `with-meta` on structs).
+pub(crate) fn rewrap_maplike_with_meta(inst: &HostInst, content: Map, meta: Option<Map>) -> Value {
     Value::HostType(Arc::new(HostVal::Inst(HostInst {
         def: inst.def.clone(),
         content,
@@ -917,6 +985,9 @@ fn flatten_entries(eval: &mut Evaluator, v: &Value) -> Result<clj_value::Map, Na
 /// `str` of a host value: descriptors render their name; instances
 /// run a zero-arg `toString` method when defined (a non-string
 /// result is the stock cast error), else the `Name@hex` fallback.
+/// Struct instances render their content map readably (S12 — the
+/// JVM's single-arg `str` is `.toString`, the readable map print,
+/// exactly like `str` of a plain map).
 pub(crate) fn host_str(
     eval: &mut Evaluator,
     h: &HostVal,
@@ -925,6 +996,10 @@ pub(crate) fn host_str(
     match h {
         HostVal::Def(d) if d.kind == HostKind::Interface => Ok(format!("interface {}", d.name)),
         HostVal::Def(d) => Ok(d.name.to_string()),
+        HostVal::Inst(i) if i.def.kind == HostKind::Struct => Ok(pr_to_string(
+            &Value::Map(i.content.clone()),
+            &PrintOpts::pr(),
+        )),
         HostVal::Inst(i) => match find_method(&i.def, "toString", 0) {
             Some(m) => {
                 let func = m.func.clone();
@@ -983,6 +1058,7 @@ fn native_proxy(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErr
         impl_ns: None,
         sigs: HashMap::new(),
         takes_this: false,
+        struct_keys: Vec::new(),
     };
     Ok(Value::HostType(Arc::new(HostVal::Inst(HostInst {
         def: Arc::new(def),
@@ -1006,6 +1082,7 @@ mod tests {
             impl_ns: None,
             sigs: HashMap::new(),
             takes_this: true,
+            struct_keys: Vec::new(),
         })
     }
 

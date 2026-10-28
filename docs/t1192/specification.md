@@ -193,7 +193,8 @@ FIX:
   state for FX7); with-meta/meta-value casts report the JVM
   text; fx2-mapentry{,2..19} probes + pins).
 - D-prepost: `:pre`/`:post` silently ignored → FX3.
-- D-printdup: `*print-dup*` declared but ignored → FX4b.
+- D-printdup: RESOLVED conformant (zero-oos S8 #51: dup honored
+  per kind; D-streamprint/D-astral-fmt stay).
 - D-streamprint: str realization up-front vs JVM in-flight
   interleaving → FX4b.
 - D-astral-fmt: `%s` precision counts scalars, JVM counts
@@ -334,10 +335,11 @@ FX2 MapEntry (D-mapentry). Follow-ups found in-slice:
   `reversible?` landed in this slice (Reversible values;
   oracle true on vectors, subvectors, map entries, sorted
   colls, and `vector-of` — port matches the constructible
-  ones, `docs/t1192/probes/fx2b-reversible`); `flatten`/`tree-seq`/
-  `chunk-*` stay unimplemented, each with a non-resolution
-  pin (`ns_vars.rs fx2_tree_walk_vars_stay_unresolved`;
-  probe6 `flatten` rows stand as the oracle pins);
+  ones, `docs/t1192/probes/fx2b-reversible`); `flatten`/`tree-seq`
+  landed in zero-oos S3 and `chunk-first` in S12 (the old
+  `ns_vars.rs` non-resolution pin retired with both landings;
+  presence is covered by `coverage_matrix`; probe6 `flatten`
+  rows stand as the oracle pins);
   `instance?` stays permanent N1 out-of-scope (not
   a slice follow-up); the invoke fallback keeps the pinned
   §E8 cast text (oracle reports JDK — FX7 input) while
@@ -349,7 +351,7 @@ FX4 analyzer builtins as real macros (D-macroexpand: the
   nine heads expand to `let*`/`fn*`/`loop*` and the qualified
   helper calls; the six fence macros stay identity). Done.
   FX4b is not this slice.
-FX4b printer/writer (D-printdup/D-streamprint/D-astral-fmt).
+FX4b printer/writer (D-streamprint/D-astral-fmt; D-printdup converged in S8).
 FT1 number tower (F-tower; closes D-div; D-charf/D-pctpop
   land here; S-intlong documented).
 FT2 reader extensions (F-reader). FT3 `*in*` (F-in).

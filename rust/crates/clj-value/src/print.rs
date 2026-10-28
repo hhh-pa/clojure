@@ -18,6 +18,7 @@
 //! `^meta` prefix when `meta` is set (and `readably`, as on the JVM).
 
 use std::fmt::Write;
+use std::sync::Arc;
 
 use crate::Value;
 
@@ -37,6 +38,11 @@ pub(crate) mod print_opts {
         pub readably: bool,
         /// `*print-meta*`: print the `^meta` prefix (needs `readably`).
         pub meta: bool,
+        /// `*print-dup*`: constructor shapes for dupable kinds
+        /// (length/level ignored, meta forced, strings/chars
+        /// readable). Undupable kinds render the plain fallback —
+        /// the driver throws before the engine ever asks.
+        pub dup: bool,
     }
 
     impl Default for PrintOpts {
@@ -47,6 +53,7 @@ pub(crate) mod print_opts {
                 namespace_maps: true,
                 readably: false,
                 meta: false,
+                dup: false,
             }
         }
     }
@@ -69,6 +76,36 @@ pub(crate) mod print_opts {
     }
 }
 pub use print_opts::PrintOpts;
+
+/// The `char-escape-string` entries (single source: the string
+/// printer consults this table and boot builds the var from it).
+/// Oracle `c-escape`: 7 entries, Char → escape text.
+pub const CHAR_ESCAPES: &[(char, &str)] = &[
+    ('\u{8}', "\\b"),
+    ('\t', "\\t"),
+    ('\n', "\\n"),
+    ('\u{c}', "\\f"),
+    ('\r', "\\r"),
+    ('"', "\\\""),
+    ('\\', "\\\\"),
+];
+
+/// The `char-name-string` entries (single source: the char printer
+/// consults this table and boot builds the var from it). Oracle
+/// `c-name`: 6 entries, Char → name text.
+pub const CHAR_NAMES: &[(char, &str)] = &[
+    ('\u{8}', "backspace"),
+    ('\t', "tab"),
+    ('\n', "newline"),
+    ('\u{c}', "formfeed"),
+    ('\r', "return"),
+    (' ', "space"),
+];
+
+/// Look up a char in a single-source table.
+fn char_table_lookup(table: &'static [(char, &'static str)], c: char) -> Option<&'static str> {
+    table.iter().find(|(k, _)| *k == c).map(|(_, v)| *v)
+}
 
 /// Print a value readably (`pr` semantics) with options.
 #[must_use]
@@ -96,8 +133,163 @@ pub fn print(v: &Value, opts: &PrintOpts) -> String {
 /// `print-sequential`: each collection decrements first, then prints
 /// `#` when the budget goes negative.
 fn print_into(v: &Value, opts: &PrintOpts, level: Option<i64>, out: &mut String) {
-    print_meta_prefix(v, opts, level, out);
-    print_scalars(v, opts, level, out);
+    if !opts.dup {
+        print_meta_prefix(v, opts, level, out);
+        print_scalars(v, opts, level, out);
+        return;
+    }
+    // Dup policy (no production pure path passes `dup: true` — the
+    // driver renders dup shapes through the multis; this exists for
+    // unit tests and documents the §1c pure shapes): length/level
+    // ignored, meta forced; undupable kinds render the plain
+    // fallback (dup ignored entirely).
+    let eff = dup_effective_opts(v, opts);
+    let level = if eff.dup { None } else { level };
+    print_meta_prefix(v, &eff, level, out);
+    // Dup-only shapes pre-dispatch here, so `print_scalars` keeps
+    // its branch count (complexity ratchet).
+    if eff.dup && print_dup_shape(v, &eff, level, out) {
+        return;
+    }
+    print_scalars(v, &eff, level, out);
+}
+
+/// Effective options under `dup: true` (split for the complexity
+/// budget): the dup policy for dupable kinds, the plain fallback
+/// for undupable ones.
+fn dup_effective_opts(v: &Value, opts: &PrintOpts) -> PrintOpts {
+    if is_dup_throw_kind(v) {
+        PrintOpts {
+            dup: false,
+            ..opts.clone()
+        }
+    } else {
+        PrintOpts {
+            length: None,
+            level: None,
+            meta: true,
+            ..opts.clone()
+        }
+    }
+}
+
+/// Kinds with no `print-dup` shape (the driver throws `No method`
+/// for these; the engine renders the plain fallback). Extensions
+/// always take the dup policy: fixed renders ignore it, realized
+/// seqs recurse through it, and ctor extensions (`dup_shape`) need
+/// it.
+fn is_dup_throw_kind(v: &Value) -> bool {
+    match v {
+        Value::Unbound(_)
+        | Value::Throwable(_)
+        | Value::Transient(_)
+        | Value::Atom(_)
+        | Value::Delay(_)
+        | Value::Future(_)
+        | Value::Promise(_)
+        | Value::Agent(_)
+        | Value::ReaderConditional { .. }
+        | Value::MultiFn(_) => true,
+        Value::HostType(h) => match h.as_ref() {
+            crate::HostVal::Def(_) => false,
+            crate::HostVal::Inst(i) => i.def.kind != crate::HostKind::Record,
+        },
+        _ => false,
+    }
+}
+
+/// Print the dup-only shape for a dupable value; `true` when
+/// handled (`→method` kinds answer `false` and fall through to
+/// the plain rendering under dup policy).
+fn print_dup_shape(v: &Value, opts: &PrintOpts, level: Option<i64>, out: &mut String) -> bool {
+    match v {
+        // Dup beats `readably: false` for strings/chars only.
+        Value::Str(s) => {
+            print_string(s, true, out);
+            true
+        }
+        Value::Char(c) => {
+            print_char(*c, true, out);
+            true
+        }
+        Value::Map(m) if !m.is_hashy() => {
+            let class = if m.is_sorted() {
+                DUP_TREEMAP
+            } else {
+                DUP_ARRAYMAP
+            };
+            print_dup_map_ctor(m, class, opts, level, out);
+            true
+        }
+        Value::Set(s) if s.is_sorted() => {
+            let items: Vec<&Value> = s.iter().collect();
+            print_dup_seq_ctor(DUP_TREESET, &items, opts, level, out);
+            true
+        }
+        Value::MapEntry { key, val } => {
+            print_dup_seq_ctor(
+                DUP_MAPENTRY,
+                &[key.as_ref(), val.as_ref()],
+                opts,
+                level,
+                out,
+            );
+            true
+        }
+        Value::Var(v) => {
+            write!(out, "#=(var {})", v.sym).unwrap();
+            true
+        }
+        Value::HostType(h) => print_host_dup_shape(h, opts, level, out),
+        Value::Extension(e) => print_ext_dup_shape(e, opts, level, out),
+        _ => false,
+    }
+}
+
+/// Dup-only host shapes (split for the complexity budget):
+/// descriptors and records; anything else is a `→method` kind.
+fn print_host_dup_shape(
+    h: &crate::HostVal,
+    opts: &PrintOpts,
+    level: Option<i64>,
+    out: &mut String,
+) -> bool {
+    match h {
+        crate::HostVal::Def(d) => {
+            out.push_str("#=");
+            out.push_str(&d.name);
+            true
+        }
+        crate::HostVal::Inst(i) if i.def.kind == crate::HostKind::Record => {
+            print_dup_record(i, opts, level, out);
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Dup-only extension shapes (split for the complexity budget):
+/// subvector ctors and `dup_shape` hooks; anything else falls
+/// through to the plain extension rendering.
+fn print_ext_dup_shape(
+    e: &Arc<dyn crate::ExtensionValue>,
+    opts: &PrintOpts,
+    level: Option<i64>,
+    out: &mut String,
+) -> bool {
+    if let Some(sv) = e.as_any().downcast_ref::<crate::SubVectorValue>() {
+        let items = sv.items();
+        let refs: Vec<&Value> = items.iter().collect();
+        print_dup_seq_ctor(DUP_SUBVEC, &refs, opts, level, out);
+        return true;
+    }
+    match e.dup_shape() {
+        Some(s) => {
+            out.push_str(&s);
+            true
+        }
+        None => false,
+    }
 }
 
 fn print_scalars(v: &Value, opts: &PrintOpts, level: Option<i64>, out: &mut String) {
@@ -267,6 +459,14 @@ fn print_more(v: &Value, opts: &PrintOpts, level: Option<i64>, out: &mut String)
             let id = p.id();
             write!(out, "#object[{class} 0x{id:x} \"{class}@{id:x}\"]").unwrap();
         }
+        Value::Volatile(v) => {
+            let id = v.id();
+            write!(
+                out,
+                "#object[clojure.lang.Volatile 0x{id:x} \"clojure.lang.Volatile@{id:x}\"]"
+            )
+            .unwrap();
+        }
         other => print_port_or_rest(other, opts, level, out),
     }
 }
@@ -286,21 +486,31 @@ fn print_port_or_rest(v: &Value, opts: &PrintOpts, level: Option<i64>, out: &mut
 /// in both modes (oracle `j-pr-rec`, `j-print-rec`; length and level
 /// behave exactly like maps — the shared path); descriptors
 /// print their name (`interface ` prefixed for interfaces, oracle
-/// `rec-iface`); anything else prints the default
-/// `#object[Name 0xH fallback]` shape (oracle `m-pr-dt` — the JVM
-/// embeds the live `toString` there, but print is pure here, so the
-/// fallback renders instead; a custom `toString` still runs through
-/// `str`).
+/// `rec-iface`); struct bases print the pinned `#object[…$Def …]`
+/// shape and struct instances print exactly like their content map
+/// (S12 oracles `sm-basis-print`, `sm-make-print`); anything else
+/// prints the default `#object[Name 0xH fallback]` shape (oracle
+/// `m-pr-dt` — the JVM embeds the live `toString` there, but print
+/// is pure here, so the fallback renders instead; a custom
+/// `toString` still runs through `str`).
 fn print_host(h: &crate::HostVal, opts: &PrintOpts, level: Option<i64>, out: &mut String) {
     match h {
         crate::HostVal::Def(d) if d.kind == crate::HostKind::Interface => {
             out.push_str("interface ");
             out.push_str(&d.name);
         }
+        crate::HostVal::Def(d) if d.kind == crate::HostKind::Struct => {
+            let name = format!("{}$Def", d.name);
+            let hex = crate::identity_hex(h);
+            write!(out, "#object[{name} 0x{hex} \"{name}@{hex}\"]").unwrap();
+        }
         crate::HostVal::Def(d) => out.push_str(&d.name),
         crate::HostVal::Inst(i) if i.def.kind == crate::HostKind::Record => {
             let entries: Vec<(&Value, &Value)> = i.content.iter().collect();
             print_map_entries(&format!("#{}", i.def.name), &entries, opts, level, out);
+        }
+        crate::HostVal::Inst(i) if i.def.kind == crate::HostKind::Struct => {
+            print_map_body(&i.content, opts, level, out);
         }
         other => {
             let name = other.type_name();
@@ -387,6 +597,102 @@ fn print_extension_body(
     }
 }
 
+/// Dup constructor classes (the `#=(<class>/create …)` shapes).
+const DUP_ARRAYMAP: &str = "clojure.lang.PersistentArrayMap";
+const DUP_TREEMAP: &str = "clojure.lang.PersistentTreeMap";
+const DUP_TREESET: &str = "clojure.lang.PersistentTreeSet";
+const DUP_MAPENTRY: &str = "clojure.lang.MapEntry";
+const DUP_SUBVEC: &str = "clojure.lang.APersistentVector$SubVector";
+
+/// `#=(<class>/create {k v, …})`: dup map entries print dup-aware
+/// with no truncation (dup policy) and no namespace lifting (the
+/// JVM `print-map` path).
+fn print_dup_map_ctor(
+    m: &crate::Map,
+    class: &str,
+    opts: &PrintOpts,
+    level: Option<i64>,
+    out: &mut String,
+) {
+    out.push_str("#=(");
+    out.push_str(class);
+    out.push_str("/create {");
+    let mut first = true;
+    for (k, v) in m.iter() {
+        if !first {
+            out.push_str(", ");
+        }
+        first = false;
+        print_into(k, opts, level, out);
+        out.push(' ');
+        print_into(v, opts, level, out);
+    }
+    out.push_str("})");
+}
+
+/// `#=(<class>/create [items])`: dup sequential ctors (tree sets,
+/// map entries, subvectors).
+fn print_dup_seq_ctor(
+    class: &str,
+    items: &[&Value],
+    opts: &PrintOpts,
+    level: Option<i64>,
+    out: &mut String,
+) {
+    out.push_str("#=(");
+    out.push_str(class);
+    out.push_str("/create [");
+    let mut first = true;
+    for item in items {
+        if !first {
+            out.push(' ');
+        }
+        first = false;
+        print_into(item, opts, level, out);
+    }
+    out.push_str("])");
+}
+
+/// `#Name[v1, v2, ...]`: dup records print `(vals r)` — fields
+/// in definition order, then extmap entries in
+/// content-iteration order (always non-verbose —
+/// `*verbose-defrecords*` is out of scope).
+fn print_dup_record(i: &crate::HostInst, opts: &PrintOpts, level: Option<i64>, out: &mut String) {
+    out.push('#');
+    out.push_str(&i.def.name);
+    out.push('[');
+    let field_keys: Vec<Value> = i
+        .def
+        .fields
+        .iter()
+        .map(|f| Value::Keyword(crate::Keyword::new(None, f)))
+        .collect();
+    let mut first = true;
+    for key in &field_keys {
+        let Some(val) = i.content.get(key) else {
+            continue;
+        };
+        if !first {
+            out.push_str(", ");
+        }
+        first = false;
+        print_into(val, opts, level, out);
+    }
+    // The extension map: content entries past the field keys, in
+    // content-iteration order (the second half of `(vals r)`).
+    for (k, v) in i.content.iter() {
+        if field_keys.contains(k) {
+            continue;
+        }
+        if !first {
+            out.push_str(", ");
+        }
+        first = false;
+        print_into(v, opts, level, out);
+    }
+    out.push(']');
+}
+
 /// `#error` rendering (the `print-throwable` shape): the outermost
 /// cause and data, then one `:via` entry per cause-chain link (each
 /// with its own `:data` when present), and an empty `:trace` (no JVM
@@ -432,7 +738,7 @@ fn print_throwable(t: &crate::Throwable, opts: &PrintOpts, level: Option<i64>, o
 /// `^tag ` for a single truthy `:tag`, else `^map `. Empty metas and
 /// non-`readably` output print nothing.
 fn print_meta_prefix(v: &Value, opts: &PrintOpts, level: Option<i64>, out: &mut String) {
-    if !opts.meta || !opts.readably {
+    if !opts.meta || (!opts.readably && !opts.dup) {
         return;
     }
     // Atoms hold their meta behind the lock (`Value::meta` borrows,
@@ -540,8 +846,11 @@ fn print_map_entries(
 }
 
 /// `lift-ns`: when every key is qualified with the same namespace,
-/// return that namespace plus the stripped entries.
-fn lift_ns<'a>(entries: &[(&'a Value, &'a Value)]) -> Option<(String, Vec<(Value, Value)>)> {
+/// return that namespace plus the stripped entries. Public for the
+/// evaluator-level print driver (single source — the driver must
+/// lift exactly like the engine).
+#[must_use]
+pub fn lift_ns<'a>(entries: &[(&'a Value, &'a Value)]) -> Option<(String, Vec<(Value, Value)>)> {
     if entries.is_empty() {
         return None;
     }
@@ -577,15 +886,9 @@ fn print_string(s: &str, readably: bool, out: &mut String) {
     }
     out.push('"');
     for c in s.chars() {
-        match c {
-            '\n' => out.push_str("\\n"),
-            '\t' => out.push_str("\\t"),
-            '\r' => out.push_str("\\r"),
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\u{c}' => out.push_str("\\f"),
-            '\u{8}' => out.push_str("\\b"),
-            _ => out.push(c),
+        match char_table_lookup(CHAR_ESCAPES, c) {
+            Some(e) => out.push_str(e),
+            None => out.push(c),
         }
     }
     out.push('"');
@@ -597,14 +900,9 @@ fn print_char(c: char, readably: bool, out: &mut String) {
         return;
     }
     out.push('\\');
-    match c {
-        '\n' => out.push_str("newline"),
-        '\t' => out.push_str("tab"),
-        ' ' => out.push_str("space"),
-        '\u{8}' => out.push_str("backspace"),
-        '\u{c}' => out.push_str("formfeed"),
-        '\r' => out.push_str("return"),
-        _ => out.push(c),
+    match char_table_lookup(CHAR_NAMES, c) {
+        Some(n) => out.push_str(n),
+        None => out.push(c),
     }
 }
 
@@ -703,6 +1001,7 @@ fn java_debug_rest(v: &Value) -> String {
         Value::Future(f) => format!("{}@{:x}", f.jvm_class(), f.id()),
         Value::Promise(p) => format!("{}@{:x}", p.jvm_class(), p.id()),
         Value::Agent(a) => format!("clojure.lang.Agent@{:x}", a.id()),
+        Value::Volatile(v) => format!("clojure.lang.Volatile@{:x}", v.id()),
         Value::Extension(e) => e.print(),
         // Port-defined types: descriptors render their name;
         // instances render the `toString` fallback (pure — a custom
@@ -1238,6 +1537,7 @@ mod tests {
                 impl_ns: None,
                 sigs: std::collections::HashMap::new(),
                 takes_this: true,
+                struct_keys: Vec::new(),
             })
         }
         let d = def(crate::HostKind::Type);
@@ -1463,5 +1763,442 @@ mod tests {
         // Defensive arm: the single caller partitions the variants,
         // so scalars never arrive here (only a dispatch bug could).
         let _ = super::java_debug_rest(&Value::Nil);
+    }
+
+    fn dup(v: &Value) -> String {
+        pr_to_string(
+            v,
+            &PrintOpts {
+                dup: true,
+                ..PrintOpts::pr()
+            },
+        )
+    }
+
+    #[test]
+    fn char_tables_match_oracle_literals() {
+        // Single-source contents (oracle `c-escape`/`c-name`), entry
+        // for entry — boot builds the vars from these same tables.
+        assert_eq!(
+            super::CHAR_ESCAPES,
+            &[
+                ('\u{8}', "\\b"),
+                ('\t', "\\t"),
+                ('\n', "\\n"),
+                ('\u{c}', "\\f"),
+                ('\r', "\\r"),
+                ('"', "\\\""),
+                ('\\', "\\\\"),
+            ]
+        );
+        assert_eq!(
+            super::CHAR_NAMES,
+            &[
+                ('\u{8}', "backspace"),
+                ('\t', "tab"),
+                ('\n', "newline"),
+                ('\u{c}', "formfeed"),
+                ('\r', "return"),
+                (' ', "space"),
+            ]
+        );
+    }
+
+    #[test]
+    fn dup_delegating_kinds_keep_method_shapes() {
+        // `→method` kinds render exactly the readable shapes.
+        assert_eq!(dup(&Value::Nil), "nil");
+        assert_eq!(dup(&Value::Bool(true)), "true");
+        assert_eq!(dup(&Value::Int(5)), "5");
+        assert_eq!(dup(&Value::Double(1.5)), "1.5");
+        assert_eq!(dup(&Value::Double(f64::NAN)), "##NaN");
+        assert_eq!(dup(&Value::Str(Arc::from("hi"))), "\"hi\"");
+        assert_eq!(dup(&Value::Char('a')), "\\a");
+        assert_eq!(dup(&Value::Char('\n')), "\\newline");
+        assert_eq!(dup(&Value::Keyword(Keyword::new(Some("u"), "id"))), ":u/id");
+        assert_eq!(dup(&Value::Symbol(Symbol::new(Some("a"), "b"))), "a/b");
+        assert_eq!(dup(&Value::Regex(Arc::from("a+"))), "#\"a+\"");
+        assert_eq!(
+            dup(&Value::List(crate::List::from_vec(vec![
+                Value::Int(1),
+                Value::Int(2)
+            ]))),
+            "(1 2)"
+        );
+        assert_eq!(
+            dup(&Value::Vector(crate::Vector::from_vec(vec![
+                Value::Int(1),
+                Value::Int(2)
+            ]))),
+            "[1 2]"
+        );
+        assert_eq!(dup(&Value::Set(crate::new_set())), "#{}");
+    }
+
+    #[test]
+    fn dup_ignores_length_and_level() {
+        let v = Value::Vector(crate::Vector::from_vec(vec![
+            Value::Int(1),
+            Value::Int(2),
+            Value::Int(3),
+        ]));
+        let opts = PrintOpts {
+            dup: true,
+            length: Some(0),
+            level: Some(0),
+            ..PrintOpts::pr()
+        };
+        assert_eq!(pr_to_string(&v, &opts), "[1 2 3]");
+        let nested = Value::Vector(crate::Vector::from_vec(vec![Value::Vector(
+            crate::Vector::from_vec(vec![Value::Int(1)]),
+        )]));
+        assert_eq!(pr_to_string(&nested, &opts), "[[1]]");
+        // Array-map ctors ignore length too.
+        let m = Value::Map(
+            crate::new_map()
+                .insert(Value::Keyword(Keyword::new(None, "a")), Value::Int(1))
+                .insert(Value::Keyword(Keyword::new(None, "b")), Value::Int(2)),
+        );
+        assert_eq!(
+            pr_to_string(&m, &opts),
+            "#=(clojure.lang.PersistentArrayMap/create {:a 1, :b 2})"
+        );
+    }
+
+    #[test]
+    fn dup_forces_meta_and_readable_strings() {
+        // Meta prints with no `*print-meta*`, and meta values render
+        // dup-aware (array-map → ctor form).
+        let v = Value::Vector(crate::Vector::from_vec(vec![Value::Int(1)])).with_meta(Some(
+            crate::new_map().insert(Value::Keyword(Keyword::new(None, "a")), Value::Int(1)),
+        ));
+        assert_eq!(
+            dup(&v),
+            "^#=(clojure.lang.PersistentArrayMap/create {:a 1}) [1]"
+        );
+        // Dup beats `readably: false` for strings and chars only.
+        let unreadable = PrintOpts {
+            dup: true,
+            ..PrintOpts::print()
+        };
+        assert_eq!(
+            pr_to_string(&Value::Str(Arc::from("hi")), &unreadable),
+            "\"hi\""
+        );
+        assert_eq!(pr_to_string(&Value::Char('a'), &unreadable), "\\a");
+        // BigInt keeps ambient readably (no forced `N`).
+        assert_eq!(pr_to_string(&Value::BigInt(5.into()), &unreadable), "5");
+    }
+
+    #[test]
+    fn dup_ctor_shapes() {
+        let entry = |k: &str, v: Value| (Value::Keyword(Keyword::new(None, k)), v);
+        let (ka, va) = entry("a", Value::Int(1));
+        // Array maps (small, insertion-ordered).
+        let array = Value::Map(crate::new_map().insert(ka.clone(), va.clone()));
+        assert_eq!(
+            dup(&array),
+            "#=(clojure.lang.PersistentArrayMap/create {:a 1})"
+        );
+        // Tree maps (sorted — keys stored in sort order, like
+        // `sorted-map` builds them).
+        let sorted = Value::Map(
+            crate::new_map()
+                .with_sort(Some(crate::SortSpec::Natural))
+                .with_ordered_entries(vec![
+                    (ka.clone(), va.clone()),
+                    (Value::Keyword(Keyword::new(None, "b")), Value::Int(2)),
+                ]),
+        );
+        assert_eq!(
+            dup(&sorted),
+            "#=(clojure.lang.PersistentTreeMap/create {:a 1, :b 2})"
+        );
+        // Hash maps delegate (readable shape, order-free pin).
+        let hash = Value::Map(
+            crate::new_map()
+                .with_hashy(true)
+                .insert(ka.clone(), va.clone()),
+        );
+        assert_eq!(dup(&hash), "{:a 1}");
+        // Tree sets take the ctor; hash sets delegate.
+        let tset = Value::Set(
+            crate::new_set()
+                .with_sort(Some(crate::SortSpec::Natural))
+                .with_ordered_members(vec![Value::Int(1), Value::Int(2)]),
+        );
+        assert_eq!(
+            dup(&tset),
+            "#=(clojure.lang.PersistentTreeSet/create [1 2])"
+        );
+        // Map entries.
+        let e = crate::map_entry(ka, va);
+        assert_eq!(dup(&e), "#=(clojure.lang.MapEntry/create [:a 1])");
+        // Subvectors.
+        let sv = Value::Extension(Arc::new(crate::SubVectorValue::new(
+            crate::Vector::from_vec(vec![Value::Int(1), Value::Int(2), Value::Int(3)]),
+            1,
+            3,
+        )));
+        assert_eq!(
+            dup(&sv),
+            "#=(clojure.lang.APersistentVector$SubVector/create [2 3])"
+        );
+        // Vars (no meta prefix even with the forcing — vars carry
+        // no meta in the port).
+        let var = Value::Var(crate::Var {
+            id: 1,
+            sym: Symbol::new(Some("user"), "x"),
+        });
+        assert_eq!(dup(&var), "#=(var user/x)");
+        // Type descriptors (interfaces lose the `interface ` prefix).
+        let def = Arc::new(crate::HostDef {
+            name: Arc::from("user.T"),
+            kind: crate::HostKind::Type,
+            fields: Vec::new(),
+            struct_keys: Vec::new(),
+            methods: std::collections::HashMap::new(),
+            interfaces: Vec::new(),
+            prefix: None,
+            impl_ns: None,
+            sigs: std::collections::HashMap::new(),
+            takes_this: true,
+        });
+        assert_eq!(
+            dup(&Value::HostType(Arc::new(crate::HostVal::Def(def.clone())))),
+            "#=user.T"
+        );
+        // Records: field-order vals (insertion order scrambled to
+        // prove field order wins).
+        let rdef = Arc::new(crate::HostDef {
+            name: Arc::from("user.RP"),
+            kind: crate::HostKind::Record,
+            fields: vec![Arc::from("x"), Arc::from("y")],
+            struct_keys: Vec::new(),
+            methods: std::collections::HashMap::new(),
+            interfaces: Vec::new(),
+            prefix: None,
+            impl_ns: None,
+            sigs: std::collections::HashMap::new(),
+            takes_this: true,
+        });
+        let content = crate::new_map()
+            .insert(Value::Keyword(Keyword::new(None, "y")), Value::Int(2))
+            .insert(Value::Keyword(Keyword::new(None, "x")), Value::Int(1));
+        let rec = Value::HostType(Arc::new(crate::HostVal::Inst(crate::HostInst {
+            def: rdef,
+            content,
+            meta: None,
+        })));
+        assert_eq!(dup(&rec), "#user.RP[1, 2]");
+    }
+
+    #[test]
+    fn dup_record_appends_extmap_in_content_order() {
+        // `(vals r)`: fields in definition order, then extmap
+        // entries in content-iteration order (oracle
+        // `d-record-ext`, `d-record-ext2`).
+        let rdef = Arc::new(crate::HostDef {
+            name: Arc::from("user.RP"),
+            kind: crate::HostKind::Record,
+            fields: vec![Arc::from("x"), Arc::from("y")],
+            struct_keys: Vec::new(),
+            methods: std::collections::HashMap::new(),
+            interfaces: Vec::new(),
+            prefix: None,
+            impl_ns: None,
+            sigs: std::collections::HashMap::new(),
+            takes_this: true,
+        });
+        let one = Value::HostType(Arc::new(crate::HostVal::Inst(crate::HostInst {
+            def: rdef.clone(),
+            content: crate::new_map()
+                .insert(Value::Keyword(Keyword::new(None, "x")), Value::Int(1))
+                .insert(Value::Keyword(Keyword::new(None, "y")), Value::Int(2))
+                .insert(Value::Keyword(Keyword::new(None, "z")), Value::Int(9)),
+            meta: None,
+        })));
+        assert_eq!(dup(&one), "#user.RP[1, 2, 9]");
+        let two = Value::HostType(Arc::new(crate::HostVal::Inst(crate::HostInst {
+            def: rdef,
+            content: crate::new_map()
+                .insert(Value::Keyword(Keyword::new(None, "x")), Value::Int(1))
+                .insert(Value::Keyword(Keyword::new(None, "y")), Value::Int(2))
+                .insert(Value::Keyword(Keyword::new(None, "z")), Value::Int(8))
+                .insert(Value::Keyword(Keyword::new(None, "w")), Value::Int(9)),
+            meta: None,
+        })));
+        assert_eq!(dup(&two), "#user.RP[1, 2, 8, 9]");
+    }
+
+    #[test]
+    fn dup_throw_kinds_render_plain_fallback() {
+        // Undupable kinds ignore `dup` entirely (the driver throws
+        // before ever asking — these pins document the fallback).
+        let plain = PrintOpts::pr();
+        let dup_opts = PrintOpts {
+            dup: true,
+            length: Some(0),
+            ..PrintOpts::pr()
+        };
+        let atom = Value::Atom(crate::Atom::new(Value::Int(1)));
+        assert_eq!(pr_to_string(&atom, &dup_opts), pr_to_string(&atom, &plain));
+        assert!(pr_to_string(&atom, &dup_opts).starts_with("#object[clojure.lang.Atom 0x"));
+        let d = Value::Delay(crate::Delay::new(Value::Int(1)));
+        assert_eq!(pr_to_string(&d, &dup_opts), pr_to_string(&d, &plain));
+        let agent = Value::Agent(crate::Agent::new(Value::Int(1)));
+        assert_eq!(
+            pr_to_string(&agent, &dup_opts),
+            pr_to_string(&agent, &plain)
+        );
+        // Non-record instances (deftype shapes) fall back too.
+        let def = Arc::new(crate::HostDef {
+            name: Arc::from("user.DT"),
+            kind: crate::HostKind::Type,
+            fields: vec![Arc::from("x")],
+            struct_keys: Vec::new(),
+            methods: std::collections::HashMap::new(),
+            interfaces: Vec::new(),
+            prefix: None,
+            impl_ns: None,
+            sigs: std::collections::HashMap::new(),
+            takes_this: true,
+        });
+        let inst = Value::HostType(Arc::new(crate::HostVal::Inst(crate::HostInst {
+            def,
+            content: crate::new_map(),
+            meta: None,
+        })));
+        assert_eq!(pr_to_string(&inst, &dup_opts), pr_to_string(&inst, &plain));
+        // A dupable collection holding an undupable child: the child
+        // renders the fallback inline (length still ignored).
+        let v = Value::Vector(crate::Vector::from_vec(vec![
+            Value::Int(1),
+            atom.clone(),
+            Value::Int(2),
+        ]));
+        let text = pr_to_string(&v, &dup_opts);
+        assert!(
+            text.starts_with("[1 #object[clojure.lang.Atom 0x"),
+            "{text}"
+        );
+        assert!(text.ends_with(" 2]"), "{text}");
+        // Agents take the fallback inline too (the behind-lock meta
+        // path all cells share).
+        let va = Value::Vector(crate::Vector::from_vec(vec![
+            Value::Int(1),
+            agent.clone(),
+            Value::Int(2),
+        ]));
+        let text = pr_to_string(&va, &dup_opts);
+        assert!(
+            text.starts_with("[1 #object[clojure.lang.Agent 0x"),
+            "{text}"
+        );
+        assert!(text.ends_with(" 2]"), "{text}");
+    }
+
+    #[test]
+    fn dup_shape_extension_hook() {
+        // The `dup_shape` trait hook: `Some` wins under dup, `None`
+        // keeps the plain `print` fallback.
+        use crate::ExtensionValue;
+        #[derive(Debug)]
+        struct CtorExt;
+        impl ExtensionValue for CtorExt {
+            fn class_name(&self) -> String {
+                "demo.Ctor".to_owned()
+            }
+            fn print(&self) -> String {
+                "#object[demo.Ctor]".to_owned()
+            }
+            fn dyn_eq(&self, other: &dyn ExtensionValue) -> bool {
+                other.as_any().downcast_ref::<CtorExt>().is_some()
+            }
+            fn dyn_hash(&self, state: &mut dyn std::hash::Hasher) {
+                state.write_u64(0xC70);
+            }
+            fn as_any(&self) -> &dyn std::any::Any {
+                self
+            }
+            fn dup_shape(&self) -> Option<String> {
+                Some("#=(demo.Ctor. )".to_owned())
+            }
+        }
+        let v = Value::Extension(Arc::new(CtorExt));
+        assert_eq!(dup(&v), "#=(demo.Ctor. )");
+        assert_eq!(pr(&v), "#object[demo.Ctor]");
+        // The remaining trait methods (the hook only needs
+        // `as_any`/`dup_shape`; these pin the double directly).
+        assert_eq!(CtorExt.class_name(), "demo.Ctor");
+        assert!(CtorExt.dyn_eq(&CtorExt));
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        CtorExt.dyn_hash(&mut h);
+        let mut expect = std::collections::hash_map::DefaultHasher::new();
+        std::hash::Hasher::write_u64(&mut expect, 0xC70);
+        assert_eq!(
+            std::hash::Hasher::finish(&h),
+            std::hash::Hasher::finish(&expect)
+        );
+    }
+
+    #[test]
+    fn dup_shape_non_record_instance_defers_to_method() {
+        // `print_host_dup_shape` answers `false` for non-record
+        // instances (defensive: `is_dup_throw_kind` routes them to
+        // the plain fallback before `print_dup_shape` ever runs —
+        // pinned by `dup_throw_kinds_render_plain_fallback` — so
+        // only a direct call reaches this arm).
+        let def = Arc::new(crate::HostDef {
+            name: Arc::from("user.DT"),
+            kind: crate::HostKind::Type,
+            fields: vec![Arc::from("x")],
+            struct_keys: Vec::new(),
+            methods: std::collections::HashMap::new(),
+            interfaces: Vec::new(),
+            prefix: None,
+            impl_ns: None,
+            sigs: std::collections::HashMap::new(),
+            takes_this: true,
+        });
+        let inst = Value::HostType(Arc::new(crate::HostVal::Inst(crate::HostInst {
+            def,
+            content: crate::new_map(),
+            meta: None,
+        })));
+        let mut out = String::new();
+        assert!(!super::print_dup_shape(
+            &inst,
+            &PrintOpts::pr(),
+            None,
+            &mut out
+        ));
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn dup_record_skips_missing_fields() {
+        // A record missing a declared field skips it (defensive:
+        // the ctors always fill every field and `dissoc` of a field
+        // loses recordness, so surface values never trigger this).
+        let rdef = Arc::new(crate::HostDef {
+            name: Arc::from("user.RP"),
+            kind: crate::HostKind::Record,
+            fields: vec![Arc::from("x"), Arc::from("y")],
+            struct_keys: Vec::new(),
+            methods: std::collections::HashMap::new(),
+            interfaces: Vec::new(),
+            prefix: None,
+            impl_ns: None,
+            sigs: std::collections::HashMap::new(),
+            takes_this: true,
+        });
+        let rec = Value::HostType(Arc::new(crate::HostVal::Inst(crate::HostInst {
+            def: rdef,
+            content: crate::new_map()
+                .insert(Value::Keyword(Keyword::new(None, "x")), Value::Int(1)),
+            meta: None,
+        })));
+        assert_eq!(dup(&rec), "#user.RP[1]");
     }
 }

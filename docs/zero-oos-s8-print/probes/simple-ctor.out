@@ -1,0 +1,29 @@
+s-arglists ([o w])
+s-fn [true true]
+s-str "hi"
+s-kw ":a"
+s-vec "[1 2]"
+s-onto-out "hi"
+s-meta "^{:a 1} ^{:a 1} [1]"
+s-meta-off "[1]"
+s-meta-dup "^#=(clojure.lang.PersistentArrayMap/create {:a 1}) ^#=(clojure.lang.PersistentArrayMap/create {:a 1}) [1]"
+s-meta-unreadable "[1]"
+s-ret nil
+s-arity0 THROW clojure.lang.ArityException|"Wrong number of args (0) passed to: clojure.core/print-simple"
+s-arity1 THROW clojure.lang.ArityException|"Wrong number of args (1) passed to: clojure.core/print-simple"
+s-arity3 THROW clojure.lang.ArityException|"Wrong number of args (3) passed to: clojure.core/print-simple"
+s-cce THROW java.lang.ClassCastException|"class java.lang.String cannot be cast to class java.io.Writer (java.lang.String and java.io.Writer are in module java.base of loader 'bootstrap')"
+s-nilw THROW java.lang.NullPointerException|"Cannot invoke \"java.io.Writer.write(String)\" because \"w\" is null"
+t-arglists ([o print-args w])
+t-fn [true true]
+t-basic "#=(java.lang.Long. ARGS)"
+t-passes-o "#=(java.lang.Long. 5)"
+t-writer-is-w "#=(java.lang.Long. SAME)"
+t-ret nil
+t-arity THROW clojure.lang.ArityException|"Wrong number of args (1) passed to: clojure.core/print-ctor"
+t-cce THROW java.lang.ClassCastException|"class java.lang.String cannot be cast to class java.io.Writer (java.lang.String and java.io.Writer are in module java.base of loader 'bootstrap')"
+t-nilw THROW java.lang.NullPointerException|"Cannot invoke \"java.io.Writer.write(String)\" because \"w\" is null"
+t-nilo THROW java.lang.NullPointerException|"Cannot invoke \"java.lang.Class.getName()\" because the return value of \"clojure.core$class.invokeStatic(Object)\" is null"
+s-pm-nondynamic THROW java.lang.IllegalStateException|"Can't dynamically bind non-dynamic var: clojure.core/print-method"
+s-pd-nondynamic THROW java.lang.IllegalStateException|"Can't dynamically bind non-dynamic var: clojure.core/print-dup"
+S8-simple-ctor DONE

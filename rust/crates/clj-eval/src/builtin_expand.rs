@@ -8,10 +8,10 @@
 
 //! FX4 expanders for the nine analyzer builtins (`let`, `loop`,
 //! `fn`, `binding`, `letfn`, `with-redefs`, `with-bindings`,
-//! `bound-fn`, `locking`). Each native is the macro fn: `&form`
-//! and `&env` are the first two arguments. Shapes follow alpha9
-//! `clojure.core` (one `macroexpand-1` step does not expand
-//! nested `let`/`fn`).
+//! `bound-fn`, `locking`) plus S10's `vswap!`. Each native is the
+//! macro fn: `&form` and `&env` are the first two arguments. Shapes
+//! follow alpha9 `clojure.core` (one `macroexpand-1` step does not
+//! expand nested `let`/`fn`).
 
 use clj_value::Value;
 
@@ -38,6 +38,7 @@ pub(crate) fn fx4_macro_fn(name: &str) -> Option<Fx4Expand> {
         "with-bindings" => expand_with_bindings,
         "bound-fn" => expand_bound_fn,
         "locking" => expand_locking,
+        "vswap!" => expand_vswap,
         _ => return None,
     })
 }
@@ -416,6 +417,23 @@ fn locking_inner(lockee: &Value, locklocal: &Value, body: &[Value]) -> Value {
         &[locklocal.clone(), lockee.clone()],
         &[ucall("monitor-enter", vec![locklocal.clone()]), lst(tried)],
     )
+}
+
+/// `vswap!` (S10): `(vswap! vol f & args)` expands to `(vreset!
+/// vol (f (deref vol) args…))` — the direct analog of the JVM's
+/// `(.reset v (f (.deref v) …))`, with the port's own
+/// `vreset!`/`deref` in place of `.reset`/`.deref`. `vol` is
+/// deliberately NOT gensym-bound: the JVM evaluates it twice
+/// (oracle `c-double-eval`), and single-eval would be an
+/// observable behavior change. The `^Volatile` tag has no port
+/// analog (no host hints); the equivalent checkcast is
+/// `vreset!`'s CCE.
+fn expand_vswap(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    let (_form, rest) = parts("clojure.core/vswap!", args, 2)?;
+    let vol = rest[0].clone();
+    let mut inner = vec![rest[1].clone(), ucall("deref", vec![vol.clone()])];
+    inner.extend(rest[2..].iter().cloned());
+    Ok(ucall("vreset!", vec![vol, lst(inner)]))
 }
 
 #[cfg(test)]

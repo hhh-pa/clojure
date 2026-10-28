@@ -129,8 +129,9 @@ The concurrency code ships with argument-only validation today
   (S6D verbatim); added the ExecutionException error-propagation
   pin. `:static` meta unmodeled globally (even `map`) — deferred
   as a compile hint with no runtime semantics. `*print-dup*`
-  dispatch stays a catalogued divergence (atom witness pinned:
-  JVM throws under `true`, we print). set-agent-send-executor!
+  dispatch was a catalogued divergence (atom witness pinned:
+  JVM throws under `true`, we printed) — converged by
+  S8/issue #51. set-agent-send-executor!
   et al rejected (no custom executors); load-reader rejected
   (N1-adjacent, needs java.io); data_readers.clj stays spec'd-Out
   (no classpath); clojure.edn deferred (needs a value-producing
@@ -214,8 +215,8 @@ The concurrency code ships with argument-only validation today
   05's `:pcalls-empty`/`:pvalues-sidefx` — renamed
   `:pcalls-vec-empty`/`:pvalues-vec-empty`/`:pvalues-inc3`),
   s5d `20-print-dup.clj` (2 rows; the `:dup-atom-true` golden
-  THROWs on the JVM while the port prints `true` — the pinned
-  divergence), s8 `unsupported/19-nesting.clj` (boundary 41:
+  THROWs on the JVM, matched by the port since S8/issue #51
+  (converged)), s8 `unsupported/19-nesting.clj` (boundary 41:
   `run` exit 0 prints `1`, matching the JVM; `build` exit 1
   with the verbatim `:1:164:` diagnostic; its own replay test
   since the shape differs from the 01–16 table). s6/s5d files

@@ -123,6 +123,7 @@ pub struct Evaluator {
     source: Arc<str>,
     future_threads: Arc<std::sync::Mutex<Vec<std::thread::JoinHandle<()>>>>,
     agent_system: Arc<crate::concurrency::AgentSystem>,
+    tap_system: Arc<crate::concurrency::TapSystem>,
     native_call_span: Option<Span>,
     /// Sends buffered while an agent action fn runs (the JVM's
     /// thread-local `nested`): released on success, discarded on
@@ -132,6 +133,13 @@ pub struct Evaluator {
     /// the run path stays unbounded). Set once on the throwaway
     /// planning evaluator, read by every `Analyzer` it builds.
     pub(crate) analyze_depth_limit: Option<usize>,
+    /// `*out*` flushes served (the `*flush-on-newline*` test hook:
+    /// fresh evaluators read 0; per-evaluator, so parallel-safe).
+    flush_count: u64,
+    /// The print driver renders through the booted defaults only
+    /// (user table entries bypassed) while set — `print-simple`'s
+    /// object half. Save/restore around the region, never nested.
+    pub(crate) print_defaults_only: bool,
 }
 
 /// A `defmacro` definition's parts (bundles `eval_defmacro`'s
@@ -170,9 +178,12 @@ impl Evaluator {
             source: Arc::from(source),
             future_threads: Arc::new(std::sync::Mutex::new(Vec::new())),
             agent_system: Arc::new(crate::concurrency::AgentSystem::new()),
+            tap_system: Arc::new(crate::concurrency::TapSystem::new()),
             native_call_span: None,
             agent_outbox: None,
             analyze_depth_limit: None,
+            flush_count: 0,
+            print_defaults_only: false,
         }
     }
 
@@ -193,11 +204,16 @@ impl Evaluator {
             source: Arc::clone(&self.source),
             future_threads: Arc::clone(&self.future_threads),
             agent_system: Arc::clone(&self.agent_system),
+            tap_system: Arc::clone(&self.tap_system),
             native_call_span: None,
             agent_outbox: None,
             // Budgets never cross threads (limits are set on
             // single-threaded planning evaluators, which never fork).
             analyze_depth_limit: None,
+            // Flushes are counted per evaluator (fresh forks read 0);
+            // defaults-only mode never crosses threads either.
+            flush_count: 0,
+            print_defaults_only: false,
         }
     }
 
@@ -221,6 +237,23 @@ impl Evaluator {
     /// futures reject instead of spawning).
     pub(crate) fn agent_system_shutdown(&self) -> bool {
         self.agent_system.is_shutdown()
+    }
+
+    /// This lineage's tap system (shared by every forked evaluator,
+    /// like the agent system).
+    pub(crate) fn tap_system(&self) -> &Arc<crate::concurrency::TapSystem> {
+        &self.tap_system
+    }
+
+    /// Record the `send` executor (S10 accept-and-record: stored and
+    /// returned by the setter, never consulted by dispatch).
+    pub(crate) fn set_send_executor(&self, executor: Value) {
+        self.agent_system.set_send_executor(executor);
+    }
+
+    /// Record the `send-off` executor (same contract).
+    pub(crate) fn set_send_off_executor(&self, executor: Value) {
+        self.agent_system.set_send_off_executor(executor);
     }
 
     /// This lineage's agent pools, creating them on first use
@@ -310,6 +343,17 @@ impl Evaluator {
     /// read errors — with these, like [`throw`](Self::throw)).
     pub fn next_id(&mut self) -> u64 {
         self.registry.next_id()
+    }
+
+    /// `*out*` flushes served by this evaluator (the
+    /// `*flush-on-newline*` test hook; fresh evaluators read 0).
+    pub fn flush_count(&self) -> u64 {
+        self.flush_count
+    }
+
+    /// Record one served `*out*` flush.
+    pub(crate) fn bump_flush_count(&mut self) {
+        self.flush_count += 1;
     }
 
     /// Analyze one form against the current namespace (tests use
@@ -599,6 +643,12 @@ impl Evaluator {
     /// returned).
     pub fn pop_bindings(&mut self, depth: usize) {
         self.bindings.truncate(depth);
+    }
+
+    /// The current thread-binding stack depth (natives pushing
+    /// several frames pop back to this).
+    pub(crate) fn bindings_depth(&self) -> usize {
+        self.bindings.depth()
     }
 
     /// `set!` on the topmost frame for a var (false when no frame
@@ -1547,6 +1597,14 @@ impl Evaluator {
     }
 
     fn invoke(&mut self, callee: &Value, args: &[Value]) -> Result<Value, Signal> {
+        // Struct instances invoke as maps (S12 oracles `sm-call*`):
+        // a pre-dispatch, not a new table arm, so the complexity
+        // budget holds (`invoke_map` names the plain struct class
+        // for arity errors and `lookup` already reads structs, so
+        // 1/2-arity, `apply`, and seq-fn-as-fn all follow).
+        if crate::types::is_host_struct(callee) {
+            return self.invoke_map(callee, args);
+        }
         match callee {
             Value::Nil => Err(self.throw(NativeError::new(
                 ThrowClass::NullPointerException,
@@ -1621,7 +1679,7 @@ impl Evaluator {
     }
 
     /// Invoke an extension value: closures apply, natives run,
-    /// anything else is the `IFn` cast error.
+    /// struct accessors read, anything else is the `IFn` cast error.
     fn invoke_extension(&mut self, callee: &Value, args: &[Value]) -> Result<Value, Signal> {
         if let Some(closure) = as_closure(callee) {
             return self.apply_closure(closure, args);
@@ -1633,7 +1691,46 @@ impl Evaluator {
         if let Some(sv) = crate::lazy::as_subvector(callee) {
             return self.invoke_subvector(sv, args);
         }
+        if let Some(accessor) = crate::collmisc::as_accessor(callee) {
+            return self.invoke_accessor(accessor, args);
+        }
         Err(self.throw(NativeError::cast(&jvm_class_of(callee), "clojure.lang.IFn")))
+    }
+
+    /// Invoke a struct accessor (S12): exactly one struct argument
+    /// of the accessor's own basis, answered with the basis key's
+    /// value (oracles `sm-accessor-arity0`, `sm-accessor-arity2`,
+    /// `sm-accessor-nil`, `sm-accessor-mismatch`).
+    fn invoke_accessor(
+        &mut self,
+        accessor: &crate::collmisc::AccessorValue,
+        args: &[Value],
+    ) -> Result<Value, Signal> {
+        if args.len() != 1 {
+            return Err(self.throw(NativeError::arity(
+                "clojure.lang.PersistentStructMap/1",
+                args.len(),
+            )));
+        }
+        if matches!(&args[0], Value::Nil) {
+            return Err(self.throw(NativeError::new(
+                ThrowClass::NullPointerException,
+                "Cannot read field \"def\" because \"m\" is null".to_owned(),
+            )));
+        }
+        match crate::types::struct_inst(&args[0]) {
+            Some(i) if Arc::ptr_eq(accessor.def(), &i.def) => {
+                Ok(i.content.get(accessor.key()).cloned().unwrap_or(Value::Nil))
+            }
+            Some(_) => Err(self.throw(NativeError::new(
+                ThrowClass::RuntimeException,
+                "Accessor/struct mismatch".to_owned(),
+            ))),
+            None => Err(self.throw(crate::core::cce_err(
+                &args[0],
+                "clojure.lang.PersistentStructMap",
+            ))),
+        }
     }
 
     /// Invoke a vector: exactly one integer key (arity, key-type,
@@ -2443,8 +2540,9 @@ fn cast_entry(entry: &Value) -> NativeError {
 /// (in range), sets (membership), else `None` (§E12). Never throws.
 fn lookup(coll: &Value, key: &Value) -> Option<Value> {
     // Records read their content map (oracle `h-destructure`
-    // rides this path); every other host value misses.
-    if let Some(i) = crate::types::record_inst(coll) {
+    // rides this path); structs likewise (S12); every other host
+    // value misses.
+    if let Some(i) = crate::types::maplike_inst(coll) {
         return i.content.get(key).cloned();
     }
     match coll {

@@ -38,7 +38,7 @@
 //!   natives MUST realize seqs before calling either function.
 //! - Never assert exact values for identity hashes: [`Value::Transient`],
 //!   [`Value::Atom`], [`Value::Delay`], [`Value::Future`],
-//!   [`Value::Promise`], [`Value::Agent`], [`Value::Var`],
+//!   [`Value::Promise`], [`Value::Agent`], [`Value::Volatile`], [`Value::Var`],
 //!   [`Value::Unbound`], [`Value::Throwable`], and unrecognized
 //!   extensions have NO stable JVM hash (identity hashCode). Here
 //!   they hash from the per-process `id` (or a fixed tag), so values
@@ -170,6 +170,7 @@ fn hasheq_rest(v: &Value) -> i32 {
         Value::Future(f) => id_hash(f.id()),
         Value::Promise(p) => id_hash(p.id()),
         Value::Agent(a) => id_hash(a.id()),
+        Value::Volatile(v) => id_hash(v.id()),
         Value::Extension(ext) => hasheq_extension(&**ext),
         // All other variants are handled by `hasheq`/`hasheq_mid`
         // (the single caller partitions the variants).
@@ -183,12 +184,15 @@ fn hasheq_map(m: &crate::Map) -> i32 {
 
 /// `(hash record)` (split from [`hasheq_mid`] for the complexity
 /// budget): the content-map hash XOR the munged-class-name symbol
-/// hash (oracle `l-hash-rec`); anything else mixes deterministically.
+/// hash (oracle `l-hash-rec`); struct instances hash exactly like
+/// their content map (S12 oracle `sm-hash-eq`); anything else mixes
+/// deterministically.
 fn hasheq_host(h: &crate::HostVal) -> i32 {
     match h {
         crate::HostVal::Inst(i) if i.def.kind == crate::HostKind::Record => {
             crate::record_hasheq(&i.content, &i.def.name)
         }
+        crate::HostVal::Inst(i) if i.def.kind == crate::HostKind::Struct => hasheq_map(&i.content),
         other => crate::inst_hasheq(other),
     }
 }
@@ -271,10 +275,14 @@ fn hash_code_multifn(m: &crate::MultiFn) -> i32 {
 
 /// `(.hashCode record)` (split from [`hash_code_mid`] for the
 /// complexity budget): exactly the content map's hash (oracle
-/// `l-rec-hashcode`); anything else mixes deterministically.
+/// `l-rec-hashcode`); struct instances likewise (S12 — map-identical
+/// in both hashes); anything else mixes deterministically.
 fn hash_code_host(h: &crate::HostVal) -> i32 {
     match h {
         crate::HostVal::Inst(i) if i.def.kind == crate::HostKind::Record => {
+            hash_code_map(&i.content)
+        }
+        crate::HostVal::Inst(i) if i.def.kind == crate::HostKind::Struct => {
             hash_code_map(&i.content)
         }
         crate::HostVal::Inst(i) => hash_combine(
@@ -292,6 +300,7 @@ fn hash_code_rest(v: &Value) -> i32 {
         Value::Future(f) => id_hash(f.id()),
         Value::Promise(p) => id_hash(p.id()),
         Value::Agent(a) => id_hash(a.id()),
+        Value::Volatile(v) => id_hash(v.id()),
         // Deterministic stand-ins (the `BigInteger`/`BigDecimal`
         // word formulas are not mirrored — see module docs).
         Value::BigInt(n) | Value::BigInteger(n) => {
@@ -357,8 +366,11 @@ fn bool_hash(b: bool) -> i32 {
 }
 
 /// `Util.hashCombine`: `seed ^= hash + 0x9e3779b9 + (seed << 6) + (seed >> 2)`
-/// (all wrapping; `>>` arithmetic, like Java).
-fn hash_combine(seed: i32, hash: i32) -> i32 {
+/// (all wrapping; `>>` arithmetic, like Java). Public for the S12
+/// `hash-combine` native, which composes it over `hash_code(y)`
+/// (never murmur — oracle `mh-util-spot`).
+#[must_use]
+pub fn hash_combine(seed: i32, hash: i32) -> i32 {
     seed ^ hash
         .wrapping_add(GOLDEN)
         .wrapping_add(seed << 6)
@@ -426,10 +438,9 @@ fn double_hasheq(d: f64) -> i32 {
 }
 
 /// Identity-typed values (`Var`, `Unbound`, `Throwable`, `Transient`,
-/// `Atom`, `Delay`, `Future`, `Promise`): the JVM uses identity
-/// hashCode; here the
-/// per-process `id` mixed as a long. Stable within one process only —
-/// see the module docs.
+/// `Atom`, `Delay`, `Future`, `Promise`, `Agent`, `Volatile`): the JVM
+/// uses identity hashCode; here the per-process `id` mixed as a long.
+/// Stable within one process only — see the module docs.
 fn id_hash(id: u64) -> i32 {
     long_hash_code(id)
 }
@@ -508,7 +519,7 @@ fn realized_items(ext: &dyn ExtensionValue) -> Option<Vec<Value>> {
 
 /// `Murmur3.hashOrdered`: `31`-chain from `1` over element hasheqs,
 /// then `mixCollHash(hash, count)`.
-fn hash_ordered<I>(hashes: I) -> i32
+pub fn hash_ordered<I>(hashes: I) -> i32
 where
     I: Iterator<Item = i32>,
 {
@@ -523,7 +534,7 @@ where
 
 /// `Murmur3.hashUnordered`: sum of element hasheqs, then
 /// `mixCollHash(sum, count)`.
-fn hash_unordered<I>(hashes: I) -> i32
+pub fn hash_unordered<I>(hashes: I) -> i32
 where
     I: Iterator<Item = i32>,
 {
@@ -591,8 +602,11 @@ fn hash_long(v: i64) -> i32 {
     fmix(h, 8)
 }
 
-/// `Murmur3.mixCollHash`.
-fn mix_coll_hash(hash: i32, count: i32) -> i32 {
+/// `Murmur3.mixCollHash`. Public for the S12
+/// `mix-collection-hash` native (int-checked longs in, like the
+/// JVM wrapper).
+#[must_use]
+pub fn mix_coll_hash(hash: i32, count: i32) -> i32 {
     fmix(mix_h1(0, mix_k1(hash)), count)
 }
 

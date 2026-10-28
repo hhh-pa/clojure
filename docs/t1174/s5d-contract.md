@@ -315,7 +315,10 @@ coll-pins astral note.)
   `*print-meta*` prints the `^meta` prefix, and
   `*print-namespace-maps*` (root true) gates the `#:ns` lift
   (`tests/str.rs::print_opts_rows`; fixprobe9).
-  `*print-dup*` is declared but ignored (divergent).
+  `*print-dup*` is honored per kind (dup-native shapes or the
+  `No method` throw; zero-oos S8 #51 —
+  `tests/printsys.rs::print_dup_atom_throws`, corpus
+  `20-print-dup.clj`).
 
 ## D7. `format` (`fmt.rs`)
 
