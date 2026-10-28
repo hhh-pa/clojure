@@ -1187,3 +1187,19 @@ fn read_string_opts_rows() {
         "clojure.lang.ArityException | Wrong number of args (3) passed to: clojure.core/read-string"
     );
 }
+
+#[test]
+fn t73_read_string_allow_reads_torture_cond() {
+    // Torture #73 finding 7: the reader-cond corpus form reads
+    // under {:read-cond :allow} (like the JVM). The port honors
+    // the opts map (PR #41); the torture read wrapper must pass
+    // it for the port backend as it does for the JVM.
+    let mut eval = boot();
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(read-string {:read-cond :allow} \"#?(:clj :on-jvm :cljr :on-port :default :dflt)\")"
+        ),
+        ":on-jvm"
+    );
+}
