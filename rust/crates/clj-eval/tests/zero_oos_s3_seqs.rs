@@ -65,6 +65,8 @@ fn uncaught(eval: &mut Evaluator, src: &str) -> String {
 
 #[test]
 fn bounded_count_rows() {
+    // Oracle seqwalks.out: bc-vec bc-vec-short bc-lazy bc-lazy-short
+    // bc-inf bc-zero bc-nil bc-empty bc-str bc-map.
     let mut eval = boot();
     assert_eq!(run_last(&mut eval, "(bounded-count 5 [1 2 3])"), "3");
     assert_eq!(run_last(&mut eval, "(bounded-count 2 [1 2 3])"), "3");
@@ -87,6 +89,8 @@ fn bounded_count_rows() {
 
 #[test]
 fn tree_seq_rows() {
+    // Oracle seqwalks.out: ts-nest ts-root-only ts-nil ts-take-inf
+    // ts-no-child-call.
     let mut eval = boot();
     assert_eq!(
         run_last(&mut eval, "(tree-seq sequential? seq [[1] [2 [3]]])"),
@@ -116,6 +120,8 @@ fn tree_seq_rows() {
 
 #[test]
 fn flatten_rows() {
+    // Oracle seqwalks.out: fl-flat fl-nil fl-nest fl-str fl-map
+    // fl-take-inf.
     let mut eval = boot();
     assert_eq!(run_last(&mut eval, "(flatten [1 [2 [3]]])"), "(1 2 3)");
     assert_eq!(run_last(&mut eval, "(flatten nil)"), "()");
@@ -130,6 +136,8 @@ fn flatten_rows() {
 
 #[test]
 fn merge_deep_rows() {
+    // Oracle seqwalks.out: md-basic md-three md-leaf md-map-wins
+    // md-map-loses md-empty md-one md-nil md-added.
     let mut eval = boot();
     assert_eq!(
         run_last(&mut eval, "(merge-deep {:a {:b 1 :c 1}} {:a {:b 2}})"),
@@ -162,6 +170,8 @@ fn merge_deep_rows() {
 
 #[test]
 fn merge_deep_with_rows() {
+    // Oracle seqwalks.out: mdw-basic mdw-three mdw-nonnum mdw-empty
+    // mdw-one mdw-added.
     let mut eval = boot();
     assert_eq!(
         run_last(
@@ -188,6 +198,8 @@ fn merge_deep_with_rows() {
 
 #[test]
 fn partitionv_rows() {
+    // Oracle seqwalks.out: pv-basic pv-drop pv-step pv-gap pv-pad
+    // pv-pad-short pv-empty pv-nil pv-zero pv-take-inf pv-added.
     let mut eval = boot();
     assert_eq!(
         run_last(&mut eval, "(partitionv 2 [1 2 3 4])"),
@@ -228,6 +240,8 @@ fn partitionv_rows() {
 
 #[test]
 fn partitionv_all_rows() {
+    // Oracle seqwalks.out: pva-basic pva-step pva-empty pva-nil pva-xf
+    // pva-xf-empty pva-xf-exact pva-xf-one pva-take-inf pva-added.
     let mut eval = boot();
     assert_eq!(
         run_last(&mut eval, "(partitionv-all 2 [1 2 3])"),
@@ -265,6 +279,9 @@ fn partitionv_all_rows() {
 
 #[test]
 fn reduce_kv_rows() {
+    // Oracle seqwalks.out: rk-map rk-vec rk-keys rk-nil rk-empty
+    // rk-reduced-map rk-reduced-vec rk-sorted rk-seqentries rk-list
+    // rk-str rk-entry (record assert below is port-only).
     let mut eval = boot();
     assert_eq!(
         run_last(&mut eval, "(reduce-kv (fn [a k v] (+ a v)) 0 {:a 1 :b 2})"),
@@ -317,7 +334,8 @@ fn reduce_kv_rows() {
         ),
         "3"
     );
-    // Records ride the slow path (same order as kvreduce).
+    // Records ride the slow path (same order as kvreduce;
+    // port-only, no oracle label).
     assert_eq!(
         run_last(
             &mut eval,
@@ -343,6 +361,7 @@ fn reduce_kv_rows() {
 
 #[test]
 fn run_bang_rows() {
+    // Oracle seqwalks.out: run-basic run-nil run-empty run-reduced.
     let mut eval = boot();
     assert_eq!(
         run_last(
@@ -365,6 +384,8 @@ fn run_bang_rows() {
 
 #[test]
 fn splitv_at_rows() {
+    // Oracle seqwalks.out: sv-basic sv-zero sv-over sv-neg sv-nil
+    // sv-lazy sv-types.
     let mut eval = boot();
     assert_eq!(
         run_last(&mut eval, "(splitv-at 2 [1 2 3 4])"),
@@ -389,6 +410,8 @@ fn splitv_at_rows() {
 
 #[test]
 fn update_vals_rows() {
+    // Oracle seqwalks.out: uv-basic uv-empty uv-nil uv-vec uv-sorted
+    // uv-meta uv-record uv-entry uv-list uv-set.
     let mut eval = boot();
     assert_eq!(
         run_last(&mut eval, "(update-vals {:a 1 :b 2} inc)"),
@@ -437,6 +460,8 @@ fn update_vals_rows() {
 
 #[test]
 fn update_keys_rows() {
+    // Oracle seqwalks.out: uk-basic uk-empty uk-nil uk-vec uk-sorted
+    // uk-meta uk-list uk-set.
     let mut eval = boot();
     assert_eq!(
         run_last(&mut eval, "(update-keys {:a 1 :b 2} name)"),
@@ -476,10 +501,12 @@ fn update_keys_rows() {
 #[test]
 fn arity_miss_rows() {
     let mut eval = boot();
-    // The house `defn` emits anonymous fns, so arity misses name the
-    // volatile `user/evalN/fn--M` display (the JVM names
-    // `clojure.core/NAME` — oracle `*-arity*` rows); pin the class,
-    // the count, and the anonymous-fn shape only.
+    // Oracle seqwalks.out (shape only — the house `defn` emits
+    // anonymous fns, so arity misses name the volatile
+    // `user/evalN/fn--M` display where the JVM names
+    // `clojure.core/NAME`): bc-arity1 bc-arity3 ts-arity2 fl-arity0
+    // fl-arity2 mdw-arity0 pv-arity1 pva-arity0 rk-arity2 run-arity1
+    // sv-arity1 uv-arity1 uk-arity1.
     for (src, count) in [
         ("(bounded-count 1)", 1),
         ("(bounded-count 1 2 3)", 3),

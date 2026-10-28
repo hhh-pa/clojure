@@ -64,7 +64,7 @@
 (throwof "bi-nan" '(biginteger Double/NaN))
 (throwof "bi-inf" '(biginteger Double/POSITIVE_INFINITY))
 (throwof "bi-pr" '(pr-str (biginteger 5)))
-(throwof "bi-str" '(str (biginteger 5)))
+(throwof "bi-tostr" '(str (biginteger 5)))
 (throwof "bi-eq" '(= (bigint 5) (biginteger 5)))
 (throwof "bi-type" '(type (biginteger 5)))
 (throwof "bi-type2" '(type (bigint 5)))

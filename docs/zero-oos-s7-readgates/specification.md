@@ -4,10 +4,10 @@ Six upstream vars over the reader/load machinery, no new value
 kinds: `*read-eval*` `load-reader` `read+string`
 `*reader-resolver*` `*suppress-read*` `with-loading-context`.
 
-Target universe rows come from PR #41's 691-row inventory
-(unlanded); this slice adds its 6 rows to the wave-1 matrix
-at mirrored positions, flipped straight to `implemented`
-with test notes. The #41 land unions them later.
+Target universe rows come from the landed 692-row inventory
+(`rust/core-coverage.md`, via PR #41); this slice flips its 6
+rows to `implemented` in place, with test notes (header
+counts = actual).
 
 ## Semantics
 
@@ -17,9 +17,10 @@ with test notes. The #41 land unions them later.
   eval-free via an `Arc<dyn>` callback), and throws the JVM
   gate text when false. Both arms oracle-pinned, including
   the `*ns*` context of the eval.
-- `*suppress-read*` — dynamic var, root false (oracle pins);
-  when true `read_form` consumes and returns nil (oracle
-  pins consume-vs-skip and error behavior).
+- `*suppress-read*` — dynamic var, root nil (oracle pins);
+  affects only `#tag` reads (unknown tags preserve instead
+  of erroring); plain reads never consult it (`e-basic`,
+  `e-consume`, `e-tag-sup`).
 - `*reader-resolver*` — dynamic var, root nil (oracle pins);
   when bound, `::alias/x` and class resolution consult it
   (oracle pins the JVM role first — triage directive).
@@ -44,7 +45,8 @@ natives (probes pin which wrapper each entry point uses).
   the read throws the JVM gate text; with the default true
   root it evaluates to `3`.
 - Given `(binding [*suppress-read* true] (read-string "42"))`,
-  the read consumes and returns nil.
+  the read answers `42`; given `"#foo [1 2]"` under the same
+  binding, the unknown tag preserves instead of erroring.
 - Given `(read+string (java.io.PushbackReader. ...))`, the
   call returns `[form string]` with the oracle's string.
 - Given `(load-reader rdr)`, the reader's forms load with
@@ -85,9 +87,11 @@ Tag-table dispatch (`DataReader` arm — S6), `*data-readers*`
 - `*suppress-read*` (root nil) affects only `#tag` reads
   (`e-tag-sup`); plain reads never consult it (`e-basic`,
   `e-consume`). `#inst`/`#uuid` bypass suppression on the
-  JVM (`e-inst-sup`) — the port keeps its existing
-  suppress-then-tag order until S6 lands default readers
-  (S6 handoff, documented divergence).
+  JVM (`e-inst-sup`); the port keeps its
+  suppress-before-consult order now that S6 has landed
+  (documented divergence, retained: an invalid `#inst`
+  under suppression is silently preserved by the port
+  while the JVM throws).
 - `*reader-resolver*` (root nil) is a JVM interface; the
   port binds a 2-arity fn `(f op sym)` with `op` in
   `:current-ns :resolve-alias :resolve-class :resolve-var`
@@ -138,3 +142,6 @@ Tag-table dispatch (`DataReader` arm — S6), `*data-readers*`
   promise 0-arity calls through `#=` (the port's promise
   reify lacks it port-wide; `#=` dispatches faithfully),
   and the plain-reader raw side above.
+- `l-plainpushback`/`l-stringreader`: the JVM `load-reader` accepts plain `PushbackReader`/`StringReader` inputs; the port is StreamReader-only.
+- S6's `d-inst-type`/`d-uuid-type`: `type` is untestable — out of scope with no Date/UUID value kinds in the port.
+- S4a's `rn-empty`: the JVM nil message vs the port empty message is unobservable (the `IndexOutOfBoundsException` class is pinned).

@@ -377,8 +377,8 @@ fn s2_math_context_rows() {
 }
 
 /// Issue #44: which ops consult the context (probes `wp-*`,
-/// `r2-*`, `r3-rem`, `r3-eqdiv`, `r5-*`, `r7-*`, `r8-quotscale`,
-/// `r3-quotmcscale`, `r8-remz`).
+/// `r2-*`, `r3-rem`, `r3-eqdiv`, `r3-quotscale`, `r5-*`, `r7-*`,
+/// `r8-quotscale`, `r3-quotmcscale`, `r8-remz`).
 #[test]
 fn s2_precision_consultation_rows() {
     let mut eval = boot();
@@ -435,6 +435,8 @@ fn s2_precision_consultation_rows() {
         ("(with-precision 3 (rem 1/3 1M))", "0.333M"),
         ("(with-precision 5 (quot 5.678M 2.5M))", "2.00M"),
         ("(with-precision 5 (quot 1E+3M 3M))", "333M"),
+        // L7: the no-context baseline (`r3-quotscale`).
+        ("(quot 1E+3M 3M)", "333M"),
         ("(rem 0.333M 1M)", "0.333M"),
         // Asymmetric modes (order pins live here too).
         ("(with-precision 1 :rounding CEILING (- 2.5M 2.4M))", "0.5M"),

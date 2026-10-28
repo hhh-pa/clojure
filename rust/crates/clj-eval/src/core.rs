@@ -2029,15 +2029,15 @@ fn map_needs(m: &Map) -> bool {
 /// Metadata resolves too (tags inside meta maps invoke — probe
 /// `e-meta-inner`). Suppressed reads skip entirely (S7): every tag
 /// preserved, so nothing deferred (probes `e-tag-sup`, `p-sup-tag`,
-/// `m-load-sup`).
+/// `m-load-sup`). The `suppressed` ENTRY seed decides — threaded,
+/// never re-deref'd: read-time user code (`#=`, data-reader fns)
+/// may mutate the root mid-read, skewing a live lookup.
 pub(crate) fn resolve_data_readers(
     eval: &mut Evaluator,
     form: Value,
+    suppressed: bool,
 ) -> Result<Value, NativeError> {
-    // The binding is live here: resolve always runs synchronously
-    // inside the read, before any pop, so the current value is the
-    // read's entry value.
-    if deref_core(eval, "*suppress-read*").is_truthy() {
+    if suppressed {
         return Ok(form);
     }
     if !needs_resolution(&form) {
@@ -2174,13 +2174,15 @@ fn resolve_tag(eval: &mut Evaluator, tag: &Symbol, form: Value) -> Result<Value,
 
 /// Drain fired-discards in read order (S6): each entry's form
 /// resolves first (nested tags fire through it), then the outer tag
-/// invokes for effect (the result drops — `#_` discards).
+/// invokes for effect (the result drops — `#_` discards). The
+/// `suppressed` entry seed threads into the nested resolve (M2).
 pub(crate) fn drain_fired_tags(
     eval: &mut Evaluator,
     fired: Vec<clj_reader::FiredTag>,
+    suppressed: bool,
 ) -> Result<(), NativeError> {
     for entry in fired {
-        let form = resolve_data_readers(eval, entry.form)?;
+        let form = resolve_data_readers(eval, entry.form, suppressed)?;
         resolve_tag(eval, &entry.tag, form)?;
     }
     Ok(())

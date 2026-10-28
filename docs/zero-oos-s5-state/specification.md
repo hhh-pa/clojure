@@ -7,13 +7,9 @@ kinds: `disj!` `reset-vals!` `swap-vals!` `error-handler`
 `release-pending-sends` `await1` `agent-errors`
 `clear-agent-errors` `replicate`.
 
-Target universe rows come from PR #41's 691-row inventory
-(unlanded): 10 from `Previously unlisted — accepted future
-work`, 5 from `Previously unlisted — no slice yet`. This
-slice adds its 15 rows to the wave-1 matrix in one fenced
-`Previously unlisted — S5` block (PR #41 relative order),
-flipped straight to `implemented`. The #41 land unions them
-later.
+Target universe rows come from the landed 692-row inventory
+(`rust/core-coverage.md`, via PR #41); this slice flips its 15
+rows to `implemented` in place (header counts = actual).
 
 ## Semantics (oracle: `probes/state.{clj,out}`, alpha10)
 
@@ -131,7 +127,7 @@ Matrix `notes` name the tests.
   follow-up slice, not this one.
 - `:static` meta on `await1` (JVM `i-static` is true): house
   natives never carry `:static`; unpinned.
-- `requiring-resolve` missing-lib message parity (port
-  loader shapes differ from the JVM classpath text).
+- `c-get-volatile` pins the `Volatile` → `IRef` cast (testable
+  now that S10's `volatile!` has landed).
 - New value kinds (none needed); STM-adjacent `io!` guards
   (the port has no transactions).

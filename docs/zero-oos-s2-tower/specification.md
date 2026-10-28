@@ -5,10 +5,9 @@ the BigDec precision context: `abs` `biginteger` `decimal?`
 `denominator` `numerator` `ratio?` `rational?`
 `*math-context*` `with-precision`.
 
-Target universe rows come from PR #41's 692-row inventory
-(unlanded); this slice adds its 9 rows to the master matrix
-at mirrored positions, flipped straight to `implemented`.
-The #41 land unions them later. (On the wave-1 shared branch
+Target universe rows come from the landed 692-row inventory
+(`rust/core-coverage.md`, via PR #41); this slice flips its 9
+rows to `implemented` in place. (On the wave-1 shared branch
 the header counts the sibling slices' rows too; counts must
 equal actual.)
 
@@ -29,7 +28,7 @@ equal actual.)
   (parent DECISION on #44, option (a)): value-identical to
   `Value::BigInt` (same `=`/`hash`/arithmetic — ops absorb
   it, oracles `r8-add`..`r8-typeop`), but printing bare
-  (`5`, never `5N` — oracles `bi-pr`/`bi-str`).
+  (`5`, never `5N` — oracles `bi-pr`/`bi-tostr`).
 - `decimal?` — `Value::BigDec` only; 1-arity (`pred1!`).
 - `ratio?` — `Value::Ratio` only; 1-arity (`pred1!`).
 - `rational?` — upstream `(or (integer? n) (ratio? n)

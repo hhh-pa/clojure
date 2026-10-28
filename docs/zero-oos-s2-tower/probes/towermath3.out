@@ -6,7 +6,7 @@ r3-plus 0.333M
 r3-speq THROW java.lang.IllegalArgumentException|"bad string format"
 r3-junk THROW java.lang.IllegalArgumentException|"bad string format"
 r3-lowmode THROW java.lang.IllegalArgumentException|"bad string format"
-r3-nomode THROW clojure.lang.Compiler$CompilerException|"Syntax error compiling . at (/Users/hhu/workspace/clojure/.muse/worktrees/subagent-v2-01a17cea-a1d1-73c2-b863-91fc98e8705c-01a17e7d-f763-79a0-8b99-747585eb0b7b/docs/zero-oos-s2-tower/probes/towermath3.clj:20:23)."
+r3-nomode THROW clojure.lang.Compiler$CompilerException|"Syntax error compiling . at (PATH"
 r3-noprec THROW clojure.lang.ArityException|"Wrong number of args (0) passed to: clojure.core/with-precision"
 r3-quotscale 333M
 r3-quotmcscale 333M

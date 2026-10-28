@@ -1,14 +1,13 @@
 # S1 kind predicates (zero-oos slice 1)
 
-Thirteen upstream vars over existing machinery, no new value
+Twelve upstream vars over existing machinery, no new value
 kinds: `NaN?` `infinite?` `nat-int?` `neg-int?` `pos-int?`
 `any?` `delay?` `ffirst` `find-keyword` `indexed?`
 `map-entry?` `special-symbol?`.
 
-Target universe rows come from PR #41's 691-row inventory
-(unlanded); this slice adds its 13 rows to the master matrix
-at mirrored positions, flipped straight to `implemented`
-(436 rows: 418/2/16). The #41 land unions them later.
+Target universe rows come from the landed 692-row inventory
+(`rust/core-coverage.md`, via PR #41); this slice flips its 12
+rows to `implemented` in place (header counts = actual).
 
 ## Semantics
 

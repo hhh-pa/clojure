@@ -420,17 +420,17 @@ impl Evaluator {
                     };
                     match outcome {
                         Ok(Some(v)) => {
-                            Self::drain_data_readers(self, &mut reader)?;
-                            forms.push(Self::resolve_data_readers(self, v)?);
+                            Self::drain_data_readers(self, &mut reader, opts.suppress_read)?;
+                            forms.push(Self::resolve_data_readers(self, v, opts.suppress_read)?);
                         }
                         Ok(None) => {
-                            Self::drain_data_readers(self, &mut reader)?;
+                            Self::drain_data_readers(self, &mut reader, opts.suppress_read)?;
                             return Ok(forms);
                         }
                         Err(e) => {
                             // Effects precede the failure (fired tags ran
                             // during the read), so drain first.
-                            Self::drain_data_readers(self, &mut reader)?;
+                            Self::drain_data_readers(self, &mut reader, opts.suppress_read)?;
                             return Err(SourceError::Reader(e));
                         }
                     }
@@ -504,17 +504,17 @@ impl Evaluator {
             reader.set_opts(opts);
             match reader.read_form(false, hook) {
                 Ok(Some(v)) => {
-                    Self::drain_data_readers(eval, reader)?;
-                    forms.push(Self::resolve_data_readers(eval, v)?);
+                    Self::drain_data_readers(eval, reader, opts.suppress_read)?;
+                    forms.push(Self::resolve_data_readers(eval, v, opts.suppress_read)?);
                 }
                 Ok(None) => {
-                    Self::drain_data_readers(eval, reader)?;
+                    Self::drain_data_readers(eval, reader, opts.suppress_read)?;
                     return Ok(forms);
                 }
                 Err(e) => {
                     // Effects precede the failure (fired tags ran
                     // during the read), so drain first.
-                    Self::drain_data_readers(eval, reader)?;
+                    Self::drain_data_readers(eval, reader, opts.suppress_read)?;
                     return Err(SourceError::Reader(e));
                 }
             }
@@ -522,17 +522,27 @@ impl Evaluator {
     }
 
     /// Drain one read's fired discards (S6), reporting failures as
-    /// uncaught throwables.
-    fn drain_data_readers(&mut self, reader: &mut Reader) -> Result<(), SourceError> {
+    /// uncaught throwables. `suppressed` is the entry seed (M2).
+    fn drain_data_readers(
+        &mut self,
+        reader: &mut Reader,
+        suppressed: bool,
+    ) -> Result<(), SourceError> {
         let fired = reader.take_fired();
-        crate::core::drain_fired_tags(self, fired)
+        crate::core::drain_fired_tags(self, fired, suppressed)
             .map_err(|e| SourceError::Uncaught(self.throwable(e)))
     }
 
     /// Resolve one read form's deferred tags (S6), reporting
-    /// failures as uncaught throwables.
-    fn resolve_data_readers(&mut self, form: Value) -> Result<Value, SourceError> {
-        crate::core::resolve_data_readers(self, form)
+    /// failures as uncaught throwables. `suppressed` is the entry
+    /// seed (M2 — `snapshot_data_readers` never touches it, so the
+    /// loops' `opts.suppress_read` stays the entry value).
+    fn resolve_data_readers(
+        &mut self,
+        form: Value,
+        suppressed: bool,
+    ) -> Result<Value, SourceError> {
+        crate::core::resolve_data_readers(self, form, suppressed)
             .map_err(|e| SourceError::Uncaught(self.throwable(e)))
     }
 

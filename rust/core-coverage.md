@@ -650,7 +650,7 @@ Ready slices, `out-of-scope` today only because the matrix fails on unresolved `
 | `test` | implemented | zero_oos_s4a_corelib.rs test_var_rows (S4a #46; probes corelib.out tst-*) |
 | `tree-seq` | implemented | core.clj port; tests/zero_oos_s3_seqs.rs tree_seq_rows (lazy; children gated on branch?; probes `ts-*`) |
 | `update-keys` | implemented | core.clj port over reduce-kv (1.11); tests/zero_oos_s3_seqs.rs update_keys_rows (vectors become maps; probes `uk-*`) |
-| `update-vals` | implemented | core.clj port over reduce-kv (1.11); clj editability test (sorted/record/entry take the {} route); tests/zero_oos_s3_seqs.rs update_vals_rows (probes `uv-*`) |
+| `update-vals` | implemented | core.clj port over reduce-kv (1.11); clj editability test (sorted/record take the {} route; entry/list/set throw the Map$Entry CCE — `uv-entry`); tests/zero_oos_s3_seqs.rs update_vals_rows (probes `uv-*`) |
 | `when-first` | implemented | zero_oos_s4a_corelib.rs when_first_rows (S4a #46; probes corelib.out wf-*) |
 | `while` | implemented | zero_oos_s4a_corelib.rs while_rows (S4a #46; probes corelib.out wh-*) |
 

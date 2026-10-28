@@ -43,7 +43,7 @@ bi-char THROW java.lang.IllegalArgumentException|"No matching ctor found for cla
 bi-nan THROW java.lang.NumberFormatException|"Infinite or NaN"
 bi-inf THROW java.lang.NumberFormatException|"Infinite or NaN"
 bi-pr "5"
-bi-str "5"
+bi-tostr "5"
 bi-eq true
 bi-type java.math.BigInteger
 bi-type2 clojure.lang.BigInt
@@ -137,8 +137,8 @@ wp-fracprec THROW java.lang.IllegalArgumentException|"No matching ctor found for
 wp-strprec THROW java.lang.IllegalArgumentException|"bad string format"
 wp-nilprec THROW java.lang.NullPointerException|"null String"
 wp-bigprec THROW java.lang.IllegalArgumentException|"No matching ctor found for class java.math.MathContext"
-wp-badmode THROW clojure.lang.Compiler$CompilerException|"Syntax error compiling . at (/Users/hhu/workspace/clojure/.muse/worktrees/subagent-v2-01a17cea-a1d1-73c2-b863-91fc98e8705c-01a17e7d-f763-79a0-8b99-747585eb0b7b/docs/zero-oos-s2-tower/probes/towermath.clj:166:24)."
-wp-lowmode THROW clojure.lang.Compiler$CompilerException|"Syntax error compiling . at (/Users/hhu/workspace/clojure/.muse/worktrees/subagent-v2-01a17cea-a1d1-73c2-b863-91fc98e8705c-01a17e7d-f763-79a0-8b99-747585eb0b7b/docs/zero-oos-s2-tower/probes/towermath.clj:167:24)."
+wp-badmode THROW clojure.lang.Compiler$CompilerException|"Syntax error compiling . at (PATH"
+wp-lowmode THROW clojure.lang.Compiler$CompilerException|"Syntax error compiling . at (PATH"
 ar-abs0 THROW clojure.lang.ArityException|"Wrong number of args (0) passed to: clojure.core/abs"
 ar-abs2 THROW clojure.lang.ArityException|"Wrong number of args (2) passed to: clojure.core/abs"
 ar-bi0 THROW clojure.lang.ArityException|"Wrong number of args (0) passed to: clojure.core/biginteger"

@@ -5,11 +5,9 @@ and JVM name munging: `definline` `selector` `destructure`
 `seq-to-map-for-destructuring` `unquote` `unquote-splicing`
 `munge` `namespace-munge` `with-local-vars`.
 
-Target universe rows come from PR #41's 692-row inventory
-(unlanded); this slice adds its 9 rows to the wave-1 matrix in
-a per-slice `###` subsection mirroring PR #41's `Previously
-unlisted — no slice yet` order, flipped straight to
-`implemented`. The #41 land unions them into that subsection.
+Target universe rows come from the landed 692-row inventory
+(`rust/core-coverage.md`, via PR #41); this slice flips its 9
+rows to `implemented` in place (header counts = actual).
 
 ## Semantics
 

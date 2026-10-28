@@ -989,6 +989,35 @@ pub(crate) fn core_var(eval: &Evaluator, name: &str) -> Option<u64> {
     id_of(&eval.registry, &Symbol::new(Some("clojure.core"), name))
 }
 
+/// Stamp `:arglists` meta on an installed `clojure.core` var
+/// (one vector per arity; S8 single-arity calls route through
+/// here too).
+pub(crate) fn set_arglists_multi(eval: &mut Evaluator, name: &str, arities: &[&[&str]]) {
+    let q = Symbol::new(Some("clojure.core"), name);
+    let id = eval.registry.intern(&q);
+    let arglists = Value::List(List::from_vec(
+        arities
+            .iter()
+            .map(|params| {
+                Value::Vector(Vector::from_vec(
+                    params
+                        .iter()
+                        .map(|p| Value::Symbol(Symbol::new(None, p)))
+                        .collect(),
+                ))
+            })
+            .collect(),
+    ));
+    eval.registry.with_state_mut(id, |st| {
+        let meta = st
+            .meta
+            .clone()
+            .unwrap_or_else(new_map)
+            .insert(Value::Keyword(Keyword::new(None, "arglists")), arglists);
+        st.meta = Some(meta);
+    });
+}
+
 /// The visible value of a `clojure.core` var (total fallback nil —
 /// boot installs every var the loader touches).
 pub(crate) fn deref_core(eval: &Evaluator, name: &str) -> Value {
@@ -1786,12 +1815,32 @@ fn native_load_reader(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nat
     parser.set_opts(&opts);
     let mut forms = Vec::new();
     loop {
+        // Per-form S6 consult (B1 — mirrors `read_forms_loop`):
+        // snapshot, read, drain, resolve. Data-reader failures
+        // surface like `load`'s (raw uncaught throwables, not
+        // `CompilerException` wraps).
+        crate::core::snapshot_data_readers(eval, &mut opts);
+        parser.set_opts(&opts);
         let outcome = {
             let mut hooks = crate::reader::LiveReadHooks::new(&mut *eval);
             parser.read_form(false, &mut hooks)
         };
+        let fired = parser.take_fired();
+        let suppressed = opts.suppress_read;
+        if let Err(e) = crate::core::drain_fired_tags(eval, fired, suppressed) {
+            crate::reader::restore_parser(reader, parser);
+            let thrown = eval.throwable(e);
+            return Err(source_to_native(eval, "", SourceError::Uncaught(thrown)));
+        }
         match outcome {
-            Ok(Some(form)) => forms.push(form),
+            Ok(Some(form)) => match crate::core::resolve_data_readers(eval, form, suppressed) {
+                Ok(form) => forms.push(form),
+                Err(e) => {
+                    crate::reader::restore_parser(reader, parser);
+                    let thrown = eval.throwable(e);
+                    return Err(source_to_native(eval, "", SourceError::Uncaught(thrown)));
+                }
+            },
             Ok(None) => break,
             Err(e) => {
                 crate::reader::restore_parser(reader, parser);
@@ -2054,6 +2103,7 @@ pub fn boot() -> Evaluator {
     let user_handle = ns_value("user", user_ns);
     boot_core_vars(&mut eval, user_handle.clone());
     crate::printsys::boot_print_system(&mut eval);
+    crate::reader::boot_read_arglists(&mut eval);
     boot_refer_user(&mut eval);
     if let Some(id) = core_var(&eval, "*ns*") {
         eval.push_binding(core_var_handle(id, "*ns*"), user_handle);

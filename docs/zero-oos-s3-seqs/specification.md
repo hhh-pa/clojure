@@ -5,18 +5,19 @@ kinds: `bounded-count` `flatten` `merge-deep` `merge-deep-with`
 `partitionv` `partitionv-all` `reduce-kv` `run!` `splitv-at`
 `tree-seq` `update-keys` `update-vals`.
 
-Target universe rows come from PR #41's inventory (unlanded);
-this slice adds its 12 rows to the wave matrix at mirrored
-positions, flipped straight to `implemented` (header counts =
-actual at push time). The #41 land unions them later.
+Target universe rows come from the landed 692-row inventory
+(`rust/core-coverage.md`, via PR #41); this slice flips its 12
+rows to `implemented` in place (header counts = actual at
+push time).
 
 Upstream sources below are alpha10 `clojure/core.clj`
 (`tree-seq` L5189, `reduce-kv` L7161 + `kv-reduce` default
 L7139, `merge-deep` L7276, `merge-deep-with` L7290, `flatten`
 L7509, `splitv-at` L7647, `partitionv` L7653,
 `partitionv-all` L7676, `bounded-count` L7801, `run!` L8127,
-`update-vals` L8363, `update-keys` L8378); docstrings and
-`:added` metadata are ported verbatim.
+`update-vals` L8363, `update-keys` L8378); `:added` metadata
+is ported verbatim (oracle-pinned), upstream docstrings are
+carried over unpinned.
 
 ## Semantics
 
@@ -44,7 +45,7 @@ upstream, each pinned by oracle probes
   `instance?` is out of scope (N1), so the port tests
   `(and (or (map? m) (vector? m) (set? m)) (not (sorted?
   m)))`: sorted maps/sets are not editable on the JVM
-  either (`trans-sorted` probe), and nil/lists fall to the
+  either (`uv-sorted` probe), and nil/lists fall to the
   `{}` route exactly like upstream. Vectors keep the
   vector route (`(update-vals [1 2] inc)` is `[2 3]`, as
   upstream). On records the transient round-trip drops

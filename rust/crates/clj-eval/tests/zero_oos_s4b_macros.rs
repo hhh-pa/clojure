@@ -140,6 +140,14 @@ fn norm_hex(s: &str) -> String {
 
 #[test]
 fn s4b_munge_rows() {
+    // Oracle macros.out: mg-dash mg-slash mg-dot mg-colon mg-plus mg-gt
+    // mg-lt mg-eq mg-tilde mg-bang mg-at mg-hash mg-squote mg-dquote
+    // mg-pct mg-caret mg-amp mg-star mg-bar mg-lbrace mg-rbrace
+    // mg-lbrack mg-rbrack mg-qmark mg-bslash mg-comma mg-semi
+    // mg-lparen mg-rparen mg-dollar mg-under mg-space mg-nl mg-backtick
+    // mg-empty mg-plain mg-multi mg-uni mg-nil mg-num mg-kw mg-sym
+    // mg-symtype mg-strtype mg-vec mg-char (arities in
+    // s4b_native_arities).
     let mut eval = boot();
     assert_eq!(run_last(&mut eval, "(munge \"a-b\")"), "\"a_b\"");
     assert_eq!(run_last(&mut eval, "(munge \"a/b\")"), "\"a_SLASH_b\"");
@@ -206,6 +214,9 @@ fn s4b_munge_rows() {
 
 #[test]
 fn s4b_namespace_munge_rows() {
+    // Oracle macros.out: nm-basic nm-nodash nm-multi nm-other nm-empty
+    // nm-nil nm-sym nm-kw nm-num nm-type (arities in
+    // s4b_native_arities).
     let mut eval = boot();
     assert_eq!(
         run_last(&mut eval, "(namespace-munge \"my.ns-name\")"),
@@ -242,6 +253,11 @@ fn s4b_namespace_munge_rows() {
 
 #[test]
 fn s4b_destructure_rows() {
+    // Oracle macros.out: dt-plain dt-empty dt-single dt-odd
+    // dt-list-plain dt-nil dt-map-in dt-vec dt-map dt-keys dt-rest
+    // dt-as dt-nested dt-entry-syms dt-list-vec dt-str-in dt-kw-in
+    // dt-num-in dt-badform dt-map-in2 dt-entry-pat (arities in
+    // s4b_native_arities).
     let mut eval = boot();
     // Passthroughs (return the input unchanged).
     assert_eq!(
@@ -333,6 +349,12 @@ fn s4b_destructure_rows() {
 
 #[test]
 fn s4b_seq_to_map_rows() {
+    // Oracle macros.out: sm-empty sm-nil sm-one-int sm-one-str
+    // sm-one-map sm-one-kw sm-pair sm-two sm-dup sm-list sm-str
+    // sm-set1 sm-map sm-odd sm-odd-vec sm-odd-map sm-odd-entry
+    // sm-odd-nil sm-even-vecs sm-one-vec sm-odd5 sm-odd-elems
+    // sm-odd-vec3 sm-odd-vec1 sm-odd-str sm-odd-kw sm-kw sm-num
+    // (arities in s4b_native_arities).
     let mut eval = boot();
     assert_eq!(
         run_last(&mut eval, "(seq-to-map-for-destructuring [])"),
@@ -465,6 +487,11 @@ fn s4b_seq_to_map_rows() {
 
 #[test]
 fn s4b_definline_rows() {
+    // Oracle macros.out: di-expand di-call di-inline-fn di-inline-apply
+    // di-arglists di-ret di-docstr di-malformed di-nontemplate di-ar0
+    // di-meta di-marglists (the `definline` setup asserts are unlabeled
+    // in the probe, like there; di-malformed/di-nontemplate replay
+    // the phase only — port's own text, see below).
     // Expansion (fresh boot; byte-identical to the oracle shape).
     assert_eq!(
         fresh("(macroexpand-1 (quote (definline foo [x] `(inc ~x))))"),
@@ -543,6 +570,10 @@ fn s4b_definline_rows() {
 
 #[test]
 fn s4b_selector_rows() {
+    // Oracle macros.out: se-expand1 se-expand2 (both `__auto__`-
+    // normalized) se-fn se-select se-all se-excess se-multi
+    // se-bareselect se-missing se-nonmap se-nodirs se-ar0 se-meta
+    // se-marglists.
     // Expansions (fresh boot each; only `__auto__` normalizes).
     assert_eq!(
         norm_auto(&fresh("(macroexpand-1 (quote (selector {:select [:a]})))")),
@@ -631,6 +662,8 @@ fn s4b_selector_rows() {
 
 #[test]
 fn s4b_unquote_rows() {
+    // Oracle macros.out: uq-resolve uq-resolve-s uq-bound uq-bound-s
+    // uq-name uq-nodecl uq-varget (hash-normalized) uq-eval.
     let mut eval = boot();
     assert_eq!(
         run_last(&mut eval, "(resolve (quote unquote))"),
@@ -668,6 +701,11 @@ fn s4b_unquote_rows() {
 
 #[test]
 fn s4b_with_local_vars_rows() {
+    // Oracle macros.out: wv-expand (port shape, not verbatim — see
+    // below) wv-scope wv-set wv-body wv-empty wv-nested wv-seq wv-pop
+    // wv-noleak wv-throw wv-throwpop wv-unbound (hash-normalized)
+    // wv-meta wv-str wv-pr wv-preds wv-altermeta wv-init-order
+    // wv-nonvec wv-odd wv-meta-m wv-marglists.
     // Expansion (fresh boot; the interop-free port shape).
     assert_eq!(
         fresh("(macroexpand-1 (quote (with-local-vars [a 1] (var-get a))))"),
@@ -786,6 +824,9 @@ fn s4b_with_local_vars_rows() {
 
 #[test]
 fn s4b_native_arities() {
+    // Oracle macros.out: mg-ar0 mg-ar2 nm-ar0 nm-ar2 dt-ar0 dt-ar2
+    // sm-ar0 sm-ar2 (di-ar0/se-ar0 replay in their own tests —
+    // macros keep JVM names at every site).
     let mut eval = boot();
     for (src, want, argc) in [
         ("(munge)", "clojure.core/munge", 0),

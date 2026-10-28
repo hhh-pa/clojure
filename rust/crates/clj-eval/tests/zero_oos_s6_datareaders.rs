@@ -959,6 +959,70 @@ fn default_fn_fallback() {
 }
 
 #[test]
+fn read_plus_string_runs_consult() {
+    // B2 (review round 1): `read+string` consults like `read`
+    // (defer mode was missing: table tags failed, `#inst` hit
+    // the stale N5 text, default-fn tags misrouted, borked
+    // tables misreported).
+    let mut eval = boot();
+    // Table tag resolves; the capture is the trimmed text.
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(binding [*data-readers* {'rs (fn [x] [:rs x])}] (with-in-str \"#rs 7\" (read+string *in*)))"
+        ),
+        "[[:rs 7] \"#rs 7\"]"
+    );
+    // `#inst` validates (same readable value as `read`).
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(with-in-str \"#inst \\\"2020-01-02\\\"\" (read+string *in*))"
+        ),
+        "[#inst \"2020-01-02\" \"#inst \\\"2020-01-02\\\"\"]"
+    );
+    // Default-fn tags route (tags arrive as symbols).
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(binding [*default-data-reader-fn* (fn [tag x] [:d tag x])] (with-in-str \"#zzz 9\" (read+string *in*)))"
+        ),
+        "[[:d zzz 9] \"#zzz 9\"]"
+    );
+    // A borked table throws the table CCE (wrapped — `read`
+    // paths ride `ReaderException`, unlike `read-string`; the
+    // consult-time cast keeps the JVM module verbiage).
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(binding [*data-readers* 42] (with-in-str \"#foo 1\" (read+string *in*)))"
+        ),
+        "clojure.lang.LispReader$ReaderException | java.lang.ClassCastException: class java.lang.Long cannot be cast to class clojure.lang.ILookup (java.lang.Long is in module java.base of loader 'bootstrap'; clojure.lang.ILookup is in unnamed module of loader 'app')"
+    );
+}
+
+#[test]
+fn reentrant_read_during_drain() {
+    // H1 (review round 1): drain/resolve run outside the stream
+    // lock — a data-reader fn that reads the same stream
+    // interleaves instead of deadlocking. Bounded via a thread
+    // + timeout (a regression fails here, not hangs CI).
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut eval = boot();
+        let out = run_last(
+            &mut eval,
+            "(binding [*data-readers* {'rr (fn [x] (read *in*))}] (with-in-str \"#rr 0 99\" (read *in*)))",
+        );
+        let _ = tx.send(out);
+    });
+    let out = rx
+        .recv_timeout(std::time::Duration::from_secs(60))
+        .expect("H1: reentrant read deadlocked");
+    assert_eq!(out, "99");
+}
+
+#[test]
 fn read_ignores_reader_opts() {
     let mut eval = boot();
     // `g-opts-*`: `read` honors no `:readers`/`:default` opts (only

@@ -110,8 +110,9 @@ fn read_eval_gate_both_arms() {
 
 #[test]
 fn read_eval_gate_before_operand() {
-    // The gate fires before the operand is touched (even `#=`
-    // at EOF reports the gate, not EOF).
+    // Port-only (no oracle label): the gate fires before the
+    // operand is touched (even `#=` at EOF reports the gate,
+    // not EOF).
     let mut eval = boot();
     assert_eq!(
         uncaught(
@@ -228,7 +229,7 @@ fn eval_reader_read_time_positions() {
 #[test]
 fn eval_reader_head_resolution() {
     // Probes `c-qq`, `c-qq-miss`, `c-qualmiss`, `c-if`,
-    // `c-quotehead`, `c-nofn`: qualified heads resolve through
+    // `c-quotehead`, `c-nofn`, `c-macrohead`: qualified heads resolve through
     // namespaces/aliases (unknown qualifiers fail the class
     // lookup); unresolvable heads report. (`c-classhead` pins
     // "Can't resolve String" — but the port refers an import-stub
@@ -263,6 +264,11 @@ fn eval_reader_head_resolution() {
     assert_eq!(
         uncaught(&mut eval, "(read-string \"#=(nosuchfn_xyz 1)\")"),
         "java.lang.RuntimeException | Can't resolve nosuchfn_xyz"
+    );
+    // L4; oracle `c-macrohead` (`gates.out:30`).
+    assert_eq!(
+        uncaught(&mut eval, "(read-string \"#=(fn [x] x)\")"),
+        "java.lang.IllegalArgumentException | Parameter declaration missing"
     );
 }
 
@@ -338,9 +344,10 @@ fn eval_reader_non_fn_root() {
 
 #[test]
 fn eval_reader_invokable_roots() {
-    // Every `invoke` arm stays callable through `#=` (the
-    // `is_invokable` mirror): collections look up, nil errors
-    // like a nil call, unbound like an unbound call.
+    // Port-only (no oracle labels): every `invoke` arm stays
+    // callable through `#=` (the `is_invokable` mirror):
+    // collections look up, nil errors like a nil call, unbound
+    // like an unbound call.
     let mut eval = boot();
     run(
         &mut eval,
@@ -617,6 +624,48 @@ fn suppress_eval_and_gate() {
 }
 
 #[test]
+fn suppress_entry_seed_survives_root_flip() {
+    // M2 (review round 1): resolve/drain follow the ENTRY seed,
+    // never a live re-deref — read-time user code may mutate
+    // the root mid-read.
+    let mut eval = boot();
+    run(
+        &mut eval,
+        "(def flip-sr (fn [x] (alter-var-root #'clojure.core/*suppress-read* (constantly true)) :flipped))",
+    );
+    // Entry false + mid-read flip to true: the tag deferred
+    // under the live table still resolves.
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(binding [*data-readers* {'sr (fn [x] [:ok x])}] (read-string \"#sr #=(user/flip-sr 0)\"))"
+        ),
+        "[:ok :flipped]"
+    );
+    run(
+        &mut eval,
+        "(alter-var-root #'clojure.core/*suppress-read* (constantly nil))",
+    );
+    run(
+        &mut eval,
+        "(def flip-sr-f (fn [x] (alter-var-root #'clojure.core/*suppress-read* (constantly false)) :flipped2))",
+    );
+    // Entry true + mid-read flip to false: the tag was
+    // preserved, so nothing resolves (no `No reader function`).
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(binding [*suppress-read* true] (read-string \"#sr #=(user/flip-sr-f 0)\"))"
+        ),
+        "#sr :flipped2"
+    );
+    run(
+        &mut eval,
+        "(alter-var-root #'clojure.core/*suppress-read* (constantly nil))",
+    );
+}
+
+#[test]
 fn suppress_preserves_unknown_tags() {
     // Probes `e-tag`, `e-tag-sup`, `e-tag-sup-truthy`: only `#tag`
     // reads consult the flag (unknown tags preserve instead of
@@ -645,9 +694,10 @@ fn suppress_preserves_unknown_tags() {
 #[test]
 fn suppress_inst_divergence() {
     // Probe `e-inst-sup`: the JVM runs `#inst`/`#uuid` under
-    // suppression (they bypass it); the port has no default
-    // readers yet, so it preserves like any tag (S6 handoff,
-    // documented in the spec).
+    // suppression (they bypass it); the port keeps its
+    // suppress-before-consult order now that S6 has landed, so
+    // it preserves like any tag (documented divergence,
+    // retained — see the spec).
     let mut eval = boot();
     assert_eq!(
         run_last(
@@ -655,6 +705,16 @@ fn suppress_inst_divergence() {
             "(binding [*suppress-read* true] (read-string \"#inst \\\"2020-01-01\\\"\"))"
         ),
         "#inst \"2020-01-01\""
+    );
+    // L1: the sharp edge — an invalid `#inst` under suppression
+    // is silently preserved by the port while the JVM throws
+    // (unsuppressed, S6 pins the throw: `d-inst-bad`).
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(binding [*suppress-read* true] (read-string \"#inst \\\"bogus\\\"\"))"
+        ),
+        "#inst \"bogus\""
     );
 }
 
@@ -1006,6 +1066,26 @@ fn read_plus_string_eof() {
 }
 
 #[test]
+fn recursive_read_rides_throwable_intact() {
+    // M1-reader (review round 1): a raw recursive rethrow still
+    // rides `#=` throwables intact (data and cause survive,
+    // like `read-string`). (`throw` is not a `#=` head, so the
+    // throw hides in a user fn, whose body evaluates normally.)
+    let mut eval = boot();
+    run(
+        &mut eval,
+        "(def boom-fn (fn [x] (throw (ex-info \"boom\" {:k 1}))))",
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(try (with-in-str \"#=(user/boom-fn 0)\" (read *in* true nil true)) :no-throw (catch Throwable t [(ex-message t) (ex-data t)]))"
+        ),
+        "[\"boom\" {:k 1}]"
+    );
+}
+
+#[test]
 fn read_plus_string_errors() {
     // Probes `p-err`, `p-recursive`, `p-gate`, `p-sup-tag`: reader
     // errors wrap like `read` (recursive stays raw), the gate
@@ -1135,6 +1215,65 @@ fn load_reader_basics() {
             "(with-in-str \"1 2\" (read *in*) (load-reader *in*))"
         ),
         "2"
+    );
+}
+
+#[test]
+fn load_reader_runs_data_readers() {
+    // B1 (review round 1): `load-reader` runs the S6 pipeline
+    // per form (snapshot/drain/resolve), like `load-string`.
+    let mut eval = boot();
+    // A table tag resolves through the load.
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(binding [*data-readers* {'lr (fn [x] [:lr x])}] (with-in-str \"#lr 41\" (load-reader *in*)))"
+        ),
+        "[:lr 41]"
+    );
+    // `#inst` validates through the load.
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(with-in-str \"#inst \\\"2020-01-01\\\"\" (load-reader *in*))"
+        ),
+        "#inst \"2020-01-01\""
+    );
+    // A throwing reader fn fails the load raw (resolve arm —
+    // like `load`, no `CompilerException` wrap).
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(binding [*data-readers* {'lr (fn [x] (throw (ex-info \"lr-boom\" {})))}] (with-in-str \"#lr 1\" (load-reader *in*)))"
+        ),
+        "clojure.lang.ExceptionInfo | lr-boom"
+    );
+    // A tag deferred under a live table but resolved after a
+    // mid-resolve root flip fails `No reader function` raw (one
+    // form: both tags defer under the live table, then the first
+    // fn flips the root before the second resolves).
+    run(
+        &mut eval,
+        "(alter-var-root #'clojure.core/*data-readers* (constantly {'lr1 (fn [x] (do (alter-var-root #'clojure.core/*data-readers* (constantly nil)) :f)) 'lr2 (fn [x] :s)}))",
+    );
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(with-in-str \"[#lr1 1 #lr2 2]\" (load-reader *in*))"
+        ),
+        "java.lang.RuntimeException | No reader function for tag lr2"
+    );
+    run(
+        &mut eval,
+        "(alter-var-root #'clojure.core/*data-readers* (constantly nil))",
+    );
+    // A throwing discard-drain fails the load raw (drain arm).
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(binding [*data-readers* {'lr (fn [x] (throw (ex-info \"drain-boom\" {})))}] (with-in-str \"#_ #lr 1 :done\" (load-reader *in*)))"
+        ),
+        "clojure.lang.ExceptionInfo | drain-boom"
     );
 }
 
@@ -1384,4 +1523,40 @@ fn loading_context_guards_cycles() {
         &fx.within("(with-loading-context (load \"cyc_a\"))"),
     );
     assert!(err.contains("Cyclic load dependency"), "cycle guard: {err}");
+}
+
+#[test]
+fn read_plus_string_arglists_match_oracle() {
+    // M4; oracle `p-arglists` (`trio.out:1`).
+    let mut eval = boot();
+    assert_eq!(
+        run_last(&mut eval, "(:arglists (meta #'read+string))"),
+        "([] [stream] [stream eof-error? eof-value] [stream eof-error? eof-value recursive?] [opts stream])"
+    );
+}
+
+#[test]
+fn load_reader_arglists_match_oracle() {
+    // M4; oracle `l-arglists` (`trio.out:27`).
+    let mut eval = boot();
+    assert_eq!(
+        run_last(&mut eval, "(:arglists (meta #'load-reader))"),
+        "([rdr])"
+    );
+}
+
+#[test]
+fn load_string_bad_resolver_wraps_seed_cce() {
+    // Coverage for `read_forms`' seed-failure arm (no oracle —
+    // the probes pin the read-string shape `f-nonresolver*`): a
+    // non-fn `*reader-resolver*` fails the entry cast, wrapped
+    // as an executing error at the seed position.
+    let mut eval = boot();
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(binding [*reader-resolver* 42] (load-string \"(+ 1 2)\"))"
+        ),
+        "clojure.lang.Compiler$CompilerException | Syntax error executing at (1:1)."
+    );
 }

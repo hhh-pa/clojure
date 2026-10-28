@@ -534,9 +534,9 @@ fn native_read_string(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nat
     let fired = reader.take_fired();
     // Effects precede every outcome (fired tags ran during the read
     // — probe `e-discard-eof` fires before the EOF), so drain first.
-    crate::core::drain_fired_tags(eval, fired)?;
+    crate::core::drain_fired_tags(eval, fired, opts.suppress_read)?;
     match outcome {
-        Ok(Some(v)) => crate::core::resolve_data_readers(eval, v),
+        Ok(Some(v)) => crate::core::resolve_data_readers(eval, v, opts.suppress_read),
         Ok(None) if !eof_error => Ok(eof_value),
         Ok(None) => Err(NativeError::new(
             ThrowClass::RuntimeException,

@@ -5,11 +5,9 @@ the reader: `*data-readers*` `*default-data-reader-fn*`
 `default-data-readers` `reader-conditional`
 `reader-conditional?` `tagged-literal` `tagged-literal?`.
 
-Target universe rows come from PR #41's 692-row inventory
-(unlanded); this slice adds its 7 rows to the wave-1 matrix at
-mirrored positions (`### Previously unlisted — no slice yet`),
-flipped straight to `implemented` (+7 rows; header counts =
-actual at land). The #41 land unions them later.
+Target universe rows come from the landed 692-row inventory
+(`rust/core-coverage.md`, via PR #41); this slice flips its 7
+rows to `implemented` in place (header counts = actual).
 
 ## Semantics
 
@@ -43,10 +41,13 @@ span, invocation stays eval-side — `clj-reader` cannot
 call fns):
 
 1. Eval read entry points (`read-string`, `read`,
-   `read_forms` — hence load and the REPL) enable defer
-   mode in `ReaderOpts`, snapshotting the live table
-   keys (or the borked-table class) plus the
-   default-fn flag per form.
+   `read+string`, `read_forms` — hence load and the REPL)
+   enable defer mode in `ReaderOpts`, snapshotting the
+   live table keys (or the borked-table class) plus the
+   default-fn flag per form. `read+string` shares `read`'s
+   `run_read` consult, so its S6 cell rides along with no
+   separate pin: same precedence, and suppression skips
+   resolve there too.
 2. The ctor path consults read-side: dotted record tags
    keep the record deferral (not S6); a borked table
    fails the `ILookup` cast; table hits defer to

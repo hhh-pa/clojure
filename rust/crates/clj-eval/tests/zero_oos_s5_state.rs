@@ -122,6 +122,10 @@ impl Drop for Fixture {
 
 #[test]
 fn error_handler_rows() {
+    // Oracle state.out: a-eh-none a-eh-fn a-eh-ident a-eh-after-set
+    // a-em-default a-em-cont a-em-after-set a-eh-nil a-eh-bad a-em-nil
+    // a-em-bad a-eh-arity0 a-eh-arity2 (the `(error-mode)` arity
+    // assert is port-only — no `a-em-arity0` label).
     let mut eval = boot();
     assert_eq!(run_last(&mut eval, "(error-handler (agent 0))"), "nil");
     assert_eq!(
@@ -190,6 +194,8 @@ fn error_handler_rows() {
 
 #[test]
 fn future_cancelled_rows() {
+    // Oracle state.out: b-false b-done b-true b-nil b-bad b-arity0
+    // (`b-true` blocks on a promise, not `Thread/sleep`).
     let mut eval = boot();
     assert_eq!(
         run_last(&mut eval, "(future-cancelled? (future 1))"),
@@ -222,6 +228,13 @@ fn future_cancelled_rows() {
 
 #[test]
 fn validator_rows() {
+    // Oracle state.out: c-get-none c-get-atom c-get-agent c-set-ret
+    // c-set-readback c-set-nil-clears c-set-bad-current c-set-keeps-old
+    // c-set-nonfn c-set-agent c-get-future c-get-delay c-get-volatile
+    // c-get-nil c-get-bad c-set-future k-set-nil k-set-bad
+    // k-set-nil-badvf k-set-bad-badvf c-set-arity1 c-get-arity0 (the
+    // var asserts pin the Non-goal divergence — JVM oracles
+    // `c-get-var`/`c-get-var-none`/`c-set-var-bad-root` accept vars).
     let mut eval = boot();
     assert_eq!(run_last(&mut eval, "(get-validator (atom 1))"), "nil");
     assert_eq!(
@@ -287,6 +300,12 @@ fn validator_rows() {
         uncaught(&mut eval, "(get-validator (delay 1))"),
         "java.lang.ClassCastException | class clojure.lang.Delay cannot be cast to class clojure.lang.IRef (clojure.lang.Delay and clojure.lang.IRef are in unnamed module of loader 'app')"
     );
+    // Oracle `c-get-volatile` (`state.out:27`): testable now that
+    // S10's `volatile!` has landed.
+    assert_eq!(
+        uncaught(&mut eval, "(get-validator (volatile! 1))"),
+        "java.lang.ClassCastException | class clojure.lang.Volatile cannot be cast to class clojure.lang.IRef (clojure.lang.Volatile and clojure.lang.IRef are in unnamed module of loader 'app')"
+    );
     assert_eq!(
         uncaught(&mut eval, "(get-validator nil)"),
         "java.lang.NullPointerException | Cannot invoke \"clojure.lang.IRef.getValidator()\" because \"iref\" is null"
@@ -324,10 +343,28 @@ fn validator_rows() {
         uncaught(&mut eval, "(get-validator)"),
         "clojure.lang.ArityException | Wrong number of args (0) passed to: clojure.core/get-validator"
     );
+    // L6: vars are rejected with the `IRef` cast (spec Non-goals —
+    // the JVM accepts them: oracles `c-get-var`/`c-get-var-none`/
+    // `c-set-var-bad-root`).
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(do (def s5varx 2) (get-validator (var s5varx)))"
+        ),
+        "java.lang.ClassCastException | class clojure.lang.Var cannot be cast to class clojure.lang.IRef (clojure.lang.Var and clojure.lang.IRef are in unnamed module of loader 'app')"
+    );
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(do (def s5vary 2) (set-validator! (var s5vary) even?))"
+        ),
+        "java.lang.ClassCastException | class clojure.lang.Var cannot be cast to class clojure.lang.IRef (clojure.lang.Var and clojure.lang.IRef are in unnamed module of loader 'app')"
+    );
 }
 
 #[test]
 fn validator_completion_reads_current() {
+    // Port-only: agent completion-timing pin, no oracle label.
     let mut eval = boot();
     // A validator installed after the send but before completion
     // governs the publish (JVM `getValidator`-at-completion).
@@ -342,6 +379,10 @@ fn validator_completion_reads_current() {
 
 #[test]
 fn vals_rows() {
+    // Oracle state.out: d-reset d-reset-watch d-reset-veto d-reset-nil
+    // d-reset-bad d-reset-arity1 d-swap d-swap0 d-swap3 d-swap-watch
+    // d-swap-veto d-swap-nil d-swap-nil3 k-swap-nil4 k-swap-nil5
+    // d-swap-bad d-swap-nilfn d-swap-arity1.
     let mut eval = boot();
     assert_eq!(run_last(&mut eval, "(reset-vals! (atom 1) 2)"), "[1 2]");
     assert_eq!(
@@ -422,6 +463,9 @@ fn vals_rows() {
 
 #[test]
 fn disj_bang_rows() {
+    // Oracle state.out: e-basic e-multi e-missing e-arity1 e-nil
+    // e-persistent e-map-t e-vec-t e-used e-arity0 (the `(disj! 42)`/
+    // `(disj! nil)` 1-arity passthrough asserts are port-only).
     let mut eval = boot();
     assert_eq!(
         run_last(
@@ -482,6 +526,8 @@ fn disj_bang_rows() {
 
 #[test]
 fn find_var_rows() {
+    // Oracle state.out: f-found f-missing-var f-missing-ns
+    // f-unqualified f-nil f-bad f-arity0 f-refer-blind.
     let mut eval = boot();
     assert_eq!(
         run_last(
@@ -526,6 +572,8 @@ fn find_var_rows() {
 
 #[test]
 fn requiring_resolve_rows() {
+    // Oracle state.out: g-loaded g-unqualified g-nil g-bad g-missing
+    // g-arity0 g-arity2.
     let mut eval = boot();
     assert_eq!(
         run_last(
@@ -562,6 +610,7 @@ fn requiring_resolve_rows() {
 
 #[test]
 fn requiring_resolve_loads() {
+    // Port-only: fixture-library load pin, no oracle label.
     let fx = Fixture::new("rrlib");
     fx.write(
         "s5rrlib.clj",
@@ -582,6 +631,8 @@ fn requiring_resolve_loads() {
 
 #[test]
 fn release_pending_sends_rows() {
+    // Oracle state.out: h-outside h-inside h-ctrl h-arity1 (the
+    // empty-inside and post-shutdown asserts are port-only).
     let mut eval = boot();
     assert_eq!(run_last(&mut eval, "(release-pending-sends)"), "0");
     assert_eq!(
@@ -622,6 +673,11 @@ fn release_pending_sends_rows() {
 
 #[test]
 fn await1_rows() {
+    // Oracle state.out: i-basic i-returns-agent i-nil i-bad i-arity0
+    // i-private k-await1-idle-in-action k-await1-self-idle
+    // k-await1-busy-in-action (`i-static` unpinned per Non-goals;
+    // `k-await1-busy-in-action` blocks on gate/hold promises, not
+    // `Thread/sleep`).
     let mut eval = boot();
     assert_eq!(
         run_last(&mut eval, "(let [a (agent 0)] (send a inc) (await1 a) @a)"),
@@ -643,6 +699,8 @@ fn await1_rows() {
         uncaught(&mut eval, "(await1)"),
         "clojure.lang.ArityException | Wrong number of args (0) passed to: clojure.core/await1"
     );
+    // L6; oracle `i-private` (`state.out:91`).
+    assert_eq!(run_last(&mut eval, "(:private (meta (var await1)))"), "nil");
     // An idle agent skips the await — and its in-action guard.
     assert_eq!(
         run_last(
@@ -671,6 +729,11 @@ fn await1_rows() {
 
 #[test]
 fn deprecated_trio_rows() {
+    // Oracle state.out: j-errors-none j-errors-fail j-errors-equiv
+    // j-clear j-clear-unfailed j-clear-equiv j-replicate j-replicate0
+    // j-replicate-equiv j-meta-errors j-meta-clear j-meta-replicate
+    // (`j-errors-fail` uses `ex-info`/`ex-message` for the probe's
+    // `Exception.`/`.getMessage`).
     let mut eval = boot();
     assert_eq!(run_last(&mut eval, "(agent-errors (agent 0))"), "nil");
     assert_eq!(

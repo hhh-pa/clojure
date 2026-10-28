@@ -5,10 +5,9 @@ kinds: `some->` `some->>` `when-first` `while`
 `parse-boolean` `parse-double` `parse-long` `printf`
 `println-str` `prn-str` `rand-nth` `test`.
 
-Target universe rows come from PR #41's 692-row inventory
-(unlanded); this slice adds its 12 rows to the wave-1 matrix
-at mirrored positions, flipped straight to `implemented`.
-The #41 land unions them later.
+Target universe rows come from the landed 692-row inventory
+(`rust/core-coverage.md`, via PR #41); this slice flips its 12
+rows to `implemented` in place (header counts = actual).
 
 ## Semantics
 
@@ -35,7 +34,7 @@ house arity guard; arity misses throw the house text):
   for nil, else `jvm_class_of` — the port's class-name
   table already mirrors the JVM).
 - `parse-long` — `Long/valueOf` or nil on `NumberFormat`
-  (optional single sign, ASCII digits, overflow → nil).
+  (optional single sign, Unicode Nd digits, overflow → nil).
   Oracle settles non-ASCII digits, blank/empty shapes, and
   the non-string IAE text.
 - `parse-double` — `Double/valueOf` or nil on `NumberFormat`

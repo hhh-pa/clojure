@@ -22,7 +22,7 @@ use std::io::{BufRead, BufReader, Stdin};
 use std::sync::{Arc, Mutex};
 
 use clj_reader::{
-    EvalReadError, ReadCond, ReadHooks, Reader, ReaderError, ReaderOpts, ResolverOp, Span,
+    EvalReadError, FiredTag, ReadCond, ReadHooks, Reader, ReaderError, ReaderOpts, ResolverOp, Span,
 };
 use clj_value::{ExtensionValue, Keyword, Map, Symbol, ThrowClass, Throwable, Value, new_map};
 
@@ -31,7 +31,7 @@ use crate::error::NativeError;
 use crate::eval::Evaluator;
 use crate::ns::{
     NativeFnPtr, check_arity, core_var, deref_core, do_resolve, intern_routed, signal_to_native,
-    sym_str, throw_class_for, var_value,
+    sym_str, throw_class_for, throwable_to_native, var_value,
 };
 
 /// The JVM class of both the `*in*` root and the `with-in-str`
@@ -238,6 +238,15 @@ fn map_reader_error(eval: &mut Evaluator, e: &ReaderError, recursive: bool) -> N
     let class = throw_class_for(e.jvm_class());
     let message = e.message();
     if recursive {
+        // A raw rethrow still rides `#=`/resolver throwables
+        // intact (data and cause survive, like `read-string`).
+        if let ReaderError::EvalFailed {
+            error: EvalReadError::Failed(t),
+            ..
+        } = e
+        {
+            return throwable_to_native(t);
+        }
         return NativeError::new(class, message);
     }
     let span = e.span();
@@ -687,6 +696,23 @@ fn pick_stream(eval: &Evaluator, args: &[Value]) -> Value {
     }
 }
 
+/// Stamp the S7 natives' `:arglists` (M4; oracles `p-arglists`,
+/// `l-arglists`). Called from `boot` after the natives install.
+pub(crate) fn boot_read_arglists(eval: &mut Evaluator) {
+    crate::ns::set_arglists_multi(
+        eval,
+        "read+string",
+        &[
+            &[],
+            &["stream"],
+            &["stream", "eof-error?", "eof-value"],
+            &["stream", "eof-error?", "eof-value", "recursive?"],
+            &["opts", "stream"],
+        ],
+    );
+    crate::ns::set_arglists_multi(eval, "load-reader", &[&["rdr"]]);
+}
+
 /// The `PushbackReader` cast: non-nil non-readers fail up front
 /// (probe `r-str-stream`); nil streams wait for the `Reader.read()`
 /// NPE, after opts validation (probe `r-2arity-boolstream`,
@@ -726,17 +752,28 @@ pub(crate) fn sync_reader_ns(eval: &Evaluator, opts: &mut ReaderOpts) {
     }
 }
 
-/// Drain one `read`'s fired discards ahead of its outcome (S6):
+/// Extract one read's drain inputs (fired log + span) from a
+/// locked stream state. The caller drops the guard BEFORE running
+/// user code (H1): drain/resolve invoke data-reader fns, which
+/// may read the same reader again — holding the non-reentrant
+/// lock across them deadlocks.
+fn take_drain(state: &mut StreamState) -> (Vec<FiredTag>, Span) {
+    let at = Span::new(state.parser.line(), state.parser.col());
+    (state.parser.take_fired(), at)
+}
+
+/// Drain fired-discards outside the stream lock (S6 `Reader.`):
 /// effects precede every exit (a fired tag ran during the read).
-fn drain_locked(
+/// See [`take_drain`] for the lock discipline.
+fn run_drain(
     eval: &mut Evaluator,
-    state: &mut StreamState,
-    span: Span,
+    fired: Vec<FiredTag>,
+    at: Span,
     recursive: bool,
+    suppressed: bool,
 ) -> Result<(), NativeError> {
-    let fired = state.parser.take_fired();
-    crate::core::drain_fired_tags(eval, fired)
-        .map_err(|e| wrap_resolution_error(eval, e, span, recursive))
+    crate::core::drain_fired_tags(eval, fired, suppressed)
+        .map_err(|e| wrap_resolution_error(eval, e, at, recursive))
 }
 
 /// A resolution failure as a `read` failure (S6): raw when
@@ -788,11 +825,13 @@ fn capture_text(parser: &Reader, mark: usize, capture: bool) -> String {
 /// deadlock. The dummy left behind is never observed: every path
 /// restores the advanced parser before returning, retrying, or
 /// feeding. Returns whether the stream may grow (stdin).
+/// The taken parser keeps its installed options: callers seed
+/// once up front (per-take re-seeding would wipe the fired log
+/// mid-discard — H2). `opts` only shapes the dummy.
 pub(crate) fn take_parser(reader: &StreamReader, opts: &ReaderOpts) -> (Reader, bool) {
     let mut state = lock_state(reader);
     let grow = may_grow(&state);
-    let mut parser = std::mem::replace(&mut state.parser, Reader::new("", opts));
-    parser.set_opts(opts);
+    let parser = std::mem::replace(&mut state.parser, Reader::new("", opts));
     (parser, grow)
 }
 
@@ -833,6 +872,10 @@ fn run_read(
     capture: bool,
 ) -> Result<(Value, String), NativeError> {
     let mark = lock_state(reader).parser.capture_mark();
+    // Entry options, installed once: re-seeding per attempt would
+    // wipe legit firings mid-discard on stdin retries (H2 —
+    // `set_opts` clears the fired log).
+    lock_state(reader).parser.set_opts(opts);
     loop {
         let (mut parser, grow) = take_parser(reader, opts);
         // Snapshot before the attempt consumes the head (string
@@ -845,9 +888,14 @@ fn run_read(
         match outcome {
             Ok(Some(v)) => {
                 let text = capture_text(&parser, mark, capture);
-                restore_parser(reader, parser);
-                let mut state = lock_state(reader);
-                let form = finish_some(eval, &mut state, v, recursive)?;
+                // One guard episode (restore + extract), then the
+                // guard drops before user code runs (H1).
+                let (fired, at) = {
+                    let mut state = lock_state(reader);
+                    state.parser = parser;
+                    take_drain(&mut state)
+                };
+                let form = finish_some(eval, v, fired, at, recursive, opts.suppress_read)?;
                 return Ok((form, text));
             }
             Ok(None) => {
@@ -856,55 +904,91 @@ fn run_read(
                 match next_chunk(&mut state)? {
                     Some(chunk) => state.parser.extend(&chunk),
                     None => {
-                        let out =
-                            finish_clean_eof(eval, &mut state, eof_error, &eof_value, recursive)?;
+                        // Capture before the drain: a reentrant
+                        // read mid-drain would skew the window.
                         let text = capture_text(&state.parser, mark, capture);
+                        let (fired, at) = take_drain(&mut state);
+                        drop(state);
+                        let out = finish_clean_eof(
+                            eval,
+                            fired,
+                            at,
+                            eof_error,
+                            &eof_value,
+                            recursive,
+                            opts.suppress_read,
+                        )?;
                         return Ok((out, text));
                     }
                 }
             }
             Err(e) => {
                 if !is_eof_error(&e) {
-                    restore_parser(reader, parser);
-                    let mut state = lock_state(reader);
-                    return Err(finish_read_error(eval, &mut state, &e, recursive));
+                    let (fired, at) = {
+                        let mut state = lock_state(reader);
+                        state.parser = parser;
+                        take_drain(&mut state)
+                    };
+                    return Err(finish_read_error(
+                        eval,
+                        fired,
+                        at,
+                        &e,
+                        recursive,
+                        opts.suppress_read,
+                    ));
                 }
                 let mut state = lock_state(reader);
                 state.parser = parser;
                 match next_chunk(&mut state)? {
                     Some(chunk) => feed_chunk(&mut state, snapshot, &chunk),
-                    None => return Err(finish_read_error(eval, &mut state, &e, recursive)),
+                    None => {
+                        let (fired, at) = take_drain(&mut state);
+                        drop(state);
+                        return Err(finish_read_error(
+                            eval,
+                            fired,
+                            at,
+                            &e,
+                            recursive,
+                            opts.suppress_read,
+                        ));
+                    }
                 }
             }
         }
     }
 }
 
-/// A read form: drain first, then resolve (S6).
+/// A read form: drain first, then resolve (S6). Runs unlocked
+/// (see [`take_drain`]): the caller extracts `fired`/`at` under
+/// one guard episode, then drops it before calling here.
 fn finish_some(
     eval: &mut Evaluator,
-    state: &mut StreamState,
     form: Value,
+    fired: Vec<FiredTag>,
+    at: Span,
     recursive: bool,
+    suppressed: bool,
 ) -> Result<Value, NativeError> {
-    let at = Span::new(state.parser.line(), state.parser.col());
-    drain_locked(eval, state, at, recursive)?;
-    crate::core::resolve_data_readers(eval, form)
+    run_drain(eval, fired, at, recursive, suppressed)?;
+    crate::core::resolve_data_readers(eval, form, suppressed)
         .map_err(|e| wrap_resolution_error(eval, e, at, recursive))
 }
 
 /// A clean EOF: drain first, then honor `eof-error?` (the
 /// synthesized error sits at the live tracker position, probe
-/// `r-exdata-eof`).
+/// `r-exdata-eof`). Runs unlocked (see [`take_drain`]).
 fn finish_clean_eof(
     eval: &mut Evaluator,
-    state: &mut StreamState,
+    fired: Vec<FiredTag>,
+    at: Span,
     eof_error: bool,
     eof_value: &Value,
     recursive: bool,
+    suppressed: bool,
 ) -> Result<Value, NativeError> {
-    let at = Span::new(state.parser.line(), state.parser.col());
-    drain_locked(eval, state, at, recursive)?;
+    run_drain(eval, fired, at, recursive, suppressed)?;
     if eof_error {
         let clean = ReaderError::Eof { span: at };
         return Err(map_reader_error(eval, &clean, recursive));
@@ -914,15 +998,17 @@ fn finish_clean_eof(
 
 /// A terminal read error: drain first (effects precede), then map
 /// (always an error — the `read+string` capture has no `Ok` shape
-/// for it, so this returns the error itself).
+/// for it, so this returns the error itself). Runs unlocked (see
+/// [`take_drain`]).
 fn finish_read_error(
     eval: &mut Evaluator,
-    state: &mut StreamState,
+    fired: Vec<FiredTag>,
+    at: Span,
     err: &ReaderError,
     recursive: bool,
+    suppressed: bool,
 ) -> NativeError {
-    let at = Span::new(state.parser.line(), state.parser.col());
-    if let Err(e) = drain_locked(eval, state, at, recursive) {
+    if let Err(e) = run_drain(eval, fired, at, recursive, suppressed) {
         return e;
     }
     map_reader_error(eval, err, recursive)
@@ -993,6 +1079,10 @@ fn native_read_plus_string(eval: &mut Evaluator, args: &[Value]) -> Result<Value
     };
     let (eof_error, eof_value, recursive) = parse_read_tail(args, &mut opts)?;
     sync_reader_ns(eval, &mut opts);
+    // Defer mode, like `read` (B2): without the snapshot, table
+    // tags fail, `#inst` hits the stale N5 text, and default-fn
+    // tags misroute.
+    crate::core::snapshot_data_readers(eval, &mut opts);
     opts.read_eval = seed.read_eval;
     opts.suppress_read = seed.suppress_read;
     opts.resolver_bound = seed.resolver_bound;
@@ -1137,6 +1227,33 @@ mod tests {
     }
 
     #[test]
+    fn stdin_retry_keeps_fired_discards() {
+        // H2 (review round 1): a discard fired before an EOF
+        // retry must survive the continuation — per-take
+        // re-seeding used to wipe the fired log.
+        let mut eval = crate::ns::boot();
+        eval.eval_source("(def h2-calls (atom []))").expect("setup");
+        eval.eval_source("(alter-var-root #'clojure.core/*data-readers* (constantly {'h2foo (fn [x] (do (swap! h2-calls conj :foo) :F))}))")
+            .expect("table");
+        let value = string_reader(&mut eval, "#_ #h2foo 1\n");
+        let reader = as_reader(&value).expect("a reader");
+        lock_state(reader)
+            .script_lines
+            .extend([":kept\n".to_owned()]);
+        let mut opts = ReaderOpts {
+            read_cond: ReadCond::Deny,
+            ..ReaderOpts::default()
+        };
+        crate::core::snapshot_data_readers(&eval, &mut opts);
+        let (v, _) =
+            run_read(&mut eval, reader, true, Value::Nil, false, &opts, false).expect("read");
+        assert_eq!(pr(&v), ":kept");
+        let calls = eval.eval_source("@h2-calls").expect("calls");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(pr(&calls[0]), "[:foo]");
+    }
+
+    #[test]
     fn stdin_retry_keeps_truncated_head() {
         // A stdin form split across lines completes with its head
         // intact (the retry restores the snapshot, then extends).
@@ -1193,6 +1310,18 @@ mod tests {
         let reader = as_reader(&value).expect("a reader");
         let id = reader.id;
         assert_eq!(format!("{reader:?}"), format!("StreamReader({id})"));
+    }
+
+    #[test]
+    fn seed_bare_evaluator_allows() {
+        // The missing-`*read-eval*` arm: a bare evaluator (no
+        // vars installed) seeds `read_eval` true, matching the
+        // true root.
+        let eval = scratch();
+        let seed = seed_read_gates(&eval).expect("bare seed allows");
+        assert!(seed.read_eval);
+        assert!(!seed.suppress_read);
+        assert!(!seed.resolver_bound);
     }
 
     #[test]

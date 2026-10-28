@@ -460,9 +460,14 @@ fn printf_rows() {
         run_last(&mut eval, "(with-out-str (printf \"hi\"))"),
         "\"hi\""
     );
+    // `%n` is the platform separator (JVM `Formatter` parity —
+    // `\r\n` on Windows), like the `format.rs` pins.
+    // (`run_last` pr-prints, so the expectation carries the
+    // pr-escaped separator text.)
+    let nl = if cfg!(windows) { "\\r\\n" } else { "\\n" };
     assert_eq!(
         run_last(&mut eval, "(with-out-str (printf \"a%n\"))"),
-        "\"a\\n\""
+        format!("\"a{nl}\"")
     );
     assert_eq!(
         run_last(&mut eval, "(with-out-str (printf \"%d\" 1))"),
