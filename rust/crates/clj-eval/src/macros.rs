@@ -45,6 +45,9 @@ pub(crate) const BUILTIN_MACROS: &[&str] = &[
     "with-in-str",
     "locking",
     "vswap!",
+    "dosync",
+    "sync",
+    "io!",
 ];
 
 /// A resolved macro's current root (the call runs it with

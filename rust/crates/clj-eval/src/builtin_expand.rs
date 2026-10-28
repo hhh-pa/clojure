@@ -8,7 +8,7 @@
 
 //! FX4 expanders for the nine analyzer builtins (`let`, `loop`,
 //! `fn`, `binding`, `letfn`, `with-redefs`, `with-bindings`,
-//! `bound-fn`, `locking`) plus S10's `vswap!`. Each native is the
+//! `bound-fn`, `locking`) plus S10's `vswap!` and S19's `dosync`. Each native is the
 //! macro fn: `&form` and `&env` are the first two arguments. Shapes
 //! follow alpha9 `clojure.core` (one `macroexpand-1` step does not
 //! expand nested `let`/`fn`).
@@ -39,6 +39,7 @@ pub(crate) fn fx4_macro_fn(name: &str) -> Option<Fx4Expand> {
         "bound-fn" => expand_bound_fn,
         "locking" => expand_locking,
         "vswap!" => expand_vswap,
+        "dosync" => expand_dosync,
         _ => return None,
     })
 }
@@ -434,6 +435,16 @@ fn expand_vswap(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeEr
     let mut inner = vec![rest[1].clone(), ucall("deref", vec![vol.clone()])];
     inner.extend(rest[2..].iter().cloned());
     Ok(ucall("vreset!", vec![vol, lst(inner)]))
+}
+
+/// `dosync` (S19): `(dosync body…)` expands to `(clojure.core/sync
+/// nil body…)` — byte-identical to the JVM expansion
+/// (`t-shape-dosync`).
+fn expand_dosync(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    let (_form, rest) = parts("clojure.core/dosync", args, 0)?;
+    let mut items = vec![sym_q("clojure.core", "sync"), Value::Nil];
+    items.extend(rest.iter().cloned());
+    Ok(lst(items))
 }
 
 #[cfg(test)]

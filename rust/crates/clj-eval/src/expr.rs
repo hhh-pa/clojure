@@ -280,6 +280,17 @@ pub enum Expr {
         lockee: Box<Expr>,
         body: Vec<Expr>,
     },
+    /// `(sync flags body…)` (S19 analyzer form — the flags form is
+    /// dropped before analysis, never evaluated; the body joins or
+    /// begins a transaction).
+    Sync {
+        body: Vec<Expr>,
+    },
+    /// `(io! body…)` (S19 analyzer form — the gate throws inside a
+    /// transaction before the body evaluates).
+    Io {
+        body: Vec<Expr>,
+    },
     /// `(case* ge shift mask default imap switch-type test-type
     /// skip?)` (S5D analyzer form, emitted by the `case` macro):
     /// `cases` maps dispatch keys to `(test, then)` (`test` is an
@@ -527,6 +538,8 @@ enum SpecialOp {
     DelayStar,
     CaseStar,
     Locking,
+    Sync,
+    Io,
 }
 
 /// The special-form table: name → op (one row per form; names
@@ -563,6 +576,8 @@ const SPECIAL_OPS: &[(&str, SpecialOp)] = &[
     ("delay*", SpecialOp::DelayStar),
     ("case*", SpecialOp::CaseStar),
     ("locking", SpecialOp::Locking),
+    ("sync", SpecialOp::Sync),
+    ("io!", SpecialOp::Io),
 ];
 
 /// Parse a special-form operator (the single table behind
@@ -583,8 +598,8 @@ pub(crate) fn is_special(name: &str) -> bool {
 /// with one of these names shadows the macro (real specials never
 /// shadow, probe31 `shadow-*`). `case*` is not shadowable (the JVM
 /// hardcodes it); `lazy-seq*` and `delay*` are (the JVM has no such
-/// forms, so a user definition wins there), as is `locking` (a JVM
-/// `core.clj` macro).
+/// forms, so a user definition wins there), as are `locking`,
+/// `sync`, and `io!` (JVM `core.clj` macros).
 fn is_shadowable_macro(name: &str) -> bool {
     matches!(
         name,
@@ -606,6 +621,8 @@ fn is_shadowable_macro(name: &str) -> bool {
             | "lazy-seq*"
             | "delay*"
             | "locking"
+            | "sync"
+            | "io!"
     )
 }
 
@@ -1233,7 +1250,9 @@ impl<'a> Analyzer<'a> {
             SpecialOp::WithInStr => self.parse_with_in_str(items, span),
             SpecialOp::LazySeqStar => self.parse_lazy_seq_star(items, span),
             SpecialOp::DelayStar => self.parse_delay_star(items, span),
-            SpecialOp::Locking => self.parse_locking(items, span, tail),
+            SpecialOp::Locking | SpecialOp::Sync | SpecialOp::Io => {
+                self.parse_locking_or_tx(op, items, span, tail)
+            }
             SpecialOp::CaseStar => self.parse_case_star(items, span, tail),
         }
     }
@@ -1259,6 +1278,7 @@ impl<'a> Analyzer<'a> {
             SpecialOp::WithBindings => "clojure.core/with-bindings",
             SpecialOp::DefMacro => "clojure.core/defmacro",
             SpecialOp::Locking => "clojure.core/locking",
+            SpecialOp::Sync => "clojure.core/sync",
             _ => return Ok(()),
         };
         Err(CompileError::macro_arity(name, span, &self.source))
@@ -3075,6 +3095,51 @@ impl<'a> Analyzer<'a> {
             lockee: Box::new(lockee),
             body: body?,
         })
+    }
+
+    /// `(sync flags body…)`: the flags form drops before analysis
+    /// (never evaluated — or analyzed); the body is an implicit `do`
+    /// under the transaction. `recur` is fenced (the JVM expansion
+    /// runs the body in a fresh `fn`, which `recur` cannot cross).
+    fn parse_sync(
+        &mut self,
+        items: &[&Value],
+        span: Span,
+        tail: bool,
+    ) -> Result<Expr, CompileError> {
+        let saved_no_recur = self.no_recur;
+        self.no_recur = true;
+        let body = self.analyze_body(&items[2..], span, tail);
+        self.no_recur = saved_no_recur;
+        Ok(Expr::Sync { body: body? })
+    }
+
+    /// `(io! body…)`: an implicit `do` under the I/O gate (no `recur`
+    /// fence — the JVM expansion is a transparent `if`/`do`).
+    fn parse_io(&mut self, items: &[&Value], span: Span, tail: bool) -> Result<Expr, CompileError> {
+        Ok(Expr::Io {
+            body: self.analyze_body(&items[1..], span, tail)?,
+        })
+    }
+
+    /// The lock-adjacent special forms (split from
+    /// [`analyze_special`](Self::analyze_special) for the
+    /// complexity budget — S19's `sync`/`io!` share the
+    /// `locking` dispatch arm, the precedent they follow).
+    fn parse_locking_or_tx(
+        &mut self,
+        op: SpecialOp,
+        items: &[&Value],
+        span: Span,
+        tail: bool,
+    ) -> Result<Expr, CompileError> {
+        if matches!(op, SpecialOp::Locking) {
+            self.parse_locking(items, span, tail)
+        } else if matches!(op, SpecialOp::Sync) {
+            self.parse_sync(items, span, tail)
+        } else {
+            self.parse_io(items, span, tail)
+        }
     }
 
     /// `(case* ge shift mask default imap switch-type test-type

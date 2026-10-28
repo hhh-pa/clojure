@@ -130,6 +130,10 @@ pub struct Evaluator {
     /// thread-local `nested`): released on success, discarded on
     /// failure. `None` outside an action fn.
     pub(crate) agent_outbox: Option<Vec<(clj_value::Agent, clj_value::QueuedAction)>>,
+    /// The running STM transaction (S19): `Some` inside `sync`,
+    /// `None` outside. Lives outside `Bindings` (§1h) — same-thread
+    /// `bound-fn` calls observe it, cross-thread conveyance drops it.
+    pub(crate) tx: Option<crate::stm::Transaction>,
     /// Analyze recursion budget (`Some` on the AOT plan path only;
     /// the run path stays unbounded). Set once on the throwaway
     /// planning evaluator, read by every `Analyzer` it builds.
@@ -182,6 +186,7 @@ impl Evaluator {
             tap_system: Arc::new(crate::concurrency::TapSystem::new()),
             native_call_span: None,
             agent_outbox: None,
+            tx: None,
             analyze_depth_limit: None,
             flush_count: 0,
             print_defaults_only: false,
@@ -208,6 +213,10 @@ impl Evaluator {
             tap_system: Arc::clone(&self.tap_system),
             native_call_span: None,
             agent_outbox: None,
+            // Transactions never cross threads (the JVM's
+            // `LockingTransaction` is a thread-local the binding
+            // conveyor does not copy — S19 §1h).
+            tx: None,
             // Budgets never cross threads (limits are set on
             // single-threaded planning evaluators, which never fork).
             analyze_depth_limit: None,
@@ -845,6 +854,9 @@ impl Evaluator {
             )),
             Expr::DelayStar { display, body } => Ok(self.eval_delay_star(display, body, env)),
             Expr::Locking { lockee, body } => self.eval_locking(lockee, body, env),
+            Expr::Sync { body } | Expr::Io { body } => {
+                crate::stm::eval_sync_or_io(self, expr, body, env)
+            }
             Expr::CaseStar {
                 expr,
                 shift,
@@ -1394,7 +1406,7 @@ impl Evaluator {
     }
 
     /// A body: the last value, or `nil` when empty.
-    fn eval_body(&mut self, body: &[Expr], env: &Env) -> Result<Value, Signal> {
+    pub(crate) fn eval_body(&mut self, body: &[Expr], env: &Env) -> Result<Value, Signal> {
         let mut value = Value::Nil;
         for expr in body {
             value = self.eval(expr, env)?;
@@ -1647,8 +1659,7 @@ impl Evaluator {
                 "Cannot invoke nil as a function".to_owned(),
             ))),
             Value::Extension(_) => self.invoke_extension(callee, args),
-            Value::Keyword(kw) => self.invoke_keyed(callee, &kw.to_string(), args),
-            Value::Symbol(_) => self.invoke_keyed(callee, "clojure.lang.Symbol", args),
+            Value::Keyword(_) | Value::Symbol(_) => self.invoke_keyed_name(callee, args),
             Value::Vector(v) => self.invoke_vector(v, args),
             Value::PrimitiveVector(p) => self.invoke_pv(p, args),
             Value::MapEntry { key, val } => self.invoke_mapentry(key, val, args),
@@ -1661,8 +1672,23 @@ impl Evaluator {
             ))),
             Value::Promise(p) => self.invoke_promise(p, args),
             Value::MultiFn(m) => crate::multi::invoke_multifn(self, m, args),
+            Value::Ref(r) => {
+                let value = crate::stm::tx_deref(self, r);
+                self.invoke(&value, args)
+            }
             _ => Err(self.throw(NativeError::cast(&jvm_class_of(callee), "clojure.lang.IFn"))),
         }
+    }
+
+    /// Invoke a keyword/symbol by name (split from [`invoke`](Self::invoke)
+    /// for the complexity budget — the shared [`invoke_keyed`](Self::invoke_keyed)
+    /// names arity errors per kind).
+    fn invoke_keyed_name(&mut self, callee: &Value, args: &[Value]) -> Result<Value, Signal> {
+        let name = match callee {
+            Value::Keyword(kw) => kw.to_string(),
+            _ => "clojure.lang.Symbol".to_owned(),
+        };
+        self.invoke_keyed(callee, &name, args)
     }
 
     fn invoke_keyed(

@@ -67,6 +67,7 @@ pub(crate) const TOK_UNBOUND: &str = "clojure.lang.Var$Unbound";
 pub(crate) const TOK_THROWABLE: &str = "java.lang.Throwable";
 pub(crate) const TOK_ITRANSIENT: &str = "clojure.lang.ITransientCollection";
 pub(crate) const TOK_ATOM: &str = "clojure.lang.Atom";
+pub(crate) const TOK_REF: &str = "clojure.lang.Ref";
 pub(crate) const TOK_DELAY: &str = "clojure.lang.Delay";
 pub(crate) const TOK_AGENT: &str = "clojure.lang.Agent";
 pub(crate) const TOK_FUTURE: &str = "clojure.core$future_call$reify";
@@ -146,6 +147,7 @@ fn ref_token(v: &Value) -> Option<&'static str> {
         Value::Throwable(_) => Some(TOK_THROWABLE),
         Value::Transient(_) => Some(TOK_ITRANSIENT),
         Value::Atom(_) => Some(TOK_ATOM),
+        Value::Ref(_) => Some(TOK_REF),
         Value::Delay(_) => Some(TOK_DELAY),
         Value::Future(_) => Some(TOK_FUTURE),
         Value::Promise(_) => Some(TOK_PROMISE),
@@ -249,6 +251,7 @@ fn value_meta(v: &Value) -> Option<Map> {
         Value::Agent(a) => a.meta(),
         Value::Future(f) => f.meta(),
         Value::Promise(p) => p.meta(),
+        Value::Ref(r) => r.meta(),
         _ => v.meta().cloned(),
     }
 }
@@ -625,7 +628,7 @@ fn scalar_default(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeE
     match o {
         // Cells have no rendered children: the plain body (the
         // prefix above is their only meta).
-        Value::Atom(_) | Value::Agent(_) | Value::Future(_) | Value::Promise(_) => {
+        Value::Atom(_) | Value::Agent(_) | Value::Future(_) | Value::Promise(_) | Value::Ref(_) => {
             write_engine_body(o, w, &opts)?;
         }
         // Anything else renders top-meta-stripped (already
@@ -1269,6 +1272,7 @@ const METHOD_TABLE: &[(&str, NativeFnPtr)] = &[
     (TOK_THROWABLE, scalar_default),
     (TOK_ITRANSIENT, scalar_default),
     (TOK_ATOM, scalar_default),
+    (TOK_REF, scalar_default),
     (TOK_DELAY, scalar_default),
     (TOK_AGENT, scalar_default),
     (TOK_FUTURE, scalar_default),

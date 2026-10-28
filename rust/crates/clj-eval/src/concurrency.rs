@@ -61,8 +61,8 @@ use std::time::{Duration, Instant};
 
 use clj_value::{
     Agent, AgentAction, AgentPool, Atom, Delay, DelayState, ErrorMode, Future, FutureOutcome,
-    FutureState, Keyword, Map, PrintOpts, Promise, QueuedAction, Symbol, ThrowClass, Throwable,
-    Value, Var, Vector, Volatile, new_map, pr_to_string,
+    FutureState, Keyword, Map, PrintOpts, Promise, QueuedAction, Ref, Symbol, ThrowClass,
+    Throwable, Value, Var, Vector, Volatile, new_map, pr_to_string,
 };
 
 use crate::core::{cce_err, is_ifn};
@@ -92,18 +92,20 @@ fn as_atom_fixed(v: &Value, nil_message: &str) -> Result<Atom, NativeError> {
     }
 }
 
-/// An `IRef` receiver (atoms in S6A, agents in S6C).
+/// An `IRef` receiver (atoms in S6A, agents in S6C, refs in S19).
 enum WatchedRef {
     Atom(Atom),
     Agent(Agent),
+    Ref(Ref),
 }
 
 /// The `IRef` receiver: nil trips the call-shape NPE, anything else
-/// non-atom non-agent the `IRef` cast.
+/// non-atom non-agent non-ref the `IRef` cast.
 fn as_iref(v: &Value, nil_message: &str) -> Result<WatchedRef, NativeError> {
     match v {
         Value::Atom(a) => Ok(WatchedRef::Atom(a.clone())),
         Value::Agent(a) => Ok(WatchedRef::Agent(a.clone())),
+        Value::Ref(r) => Ok(WatchedRef::Ref(r.clone())),
         Value::Nil => Err(npe(nil_message)),
         other => Err(cce_err(other, "clojure.lang.IRef")),
     }
@@ -111,7 +113,8 @@ fn as_iref(v: &Value, nil_message: &str) -> Result<WatchedRef, NativeError> {
 
 /// The `atom` options as a map (`(apply hash-map options)`:
 /// dup-last-wins, unknown keys ignored by the installers below).
-fn atom_options(args: &[Value]) -> Result<Map, NativeError> {
+/// Shared with S19's `ref` (same shapes, same texts).
+pub(crate) fn atom_options(args: &[Value]) -> Result<Map, NativeError> {
     if args.len() % 2 == 1 {
         let last = args.last().unwrap_or(&Value::Nil);
         return Err(NativeError::new(
@@ -163,8 +166,9 @@ fn native_atom(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErro
 /// Run an atom validator over a candidate value: a falsy verdict
 /// vetoes with `Invalid reference state`; a throwing validator
 /// propagates `RuntimeException`s/`Error`s as-is and wraps checked
-/// failures the same way (JVM `ARef.validate`).
-fn validate_new(
+/// failures the same way (JVM `ARef.validate`). Shared with S19's
+/// ref construction and commit validation.
+pub(crate) fn validate_new(
     eval: &mut Evaluator,
     validator: &Value,
     candidate: &Value,
@@ -394,6 +398,16 @@ fn native_add_watch(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nati
             }
             Ok(Value::Agent(agent))
         }
+        WatchedRef::Ref(reff) => {
+            {
+                let mut state = reff.lock();
+                state.watches = state
+                    .watches
+                    .clone()
+                    .insert(args[1].clone(), args[2].clone());
+            }
+            Ok(Value::Ref(reff))
+        }
     }
 }
 
@@ -417,6 +431,13 @@ fn native_remove_watch(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, N
                 inner.watches = inner.watches.clone().without(&args[1]);
             }
             Ok(Value::Agent(agent))
+        }
+        WatchedRef::Ref(reff) => {
+            {
+                let mut state = reff.lock();
+                state.watches = state.watches.clone().without(&args[1]);
+            }
+            Ok(Value::Ref(reff))
         }
     }
 }
@@ -516,6 +537,7 @@ fn native_deref(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErr
         Value::Atom(a) => Ok(a.lock().value.clone()),
         Value::Agent(a) => Ok(a.lock().value.clone()),
         Value::Volatile(v) => Ok(v.lock().clone()),
+        Value::Ref(r) => Ok(crate::stm::tx_deref(eval, r)),
         Value::Delay(d) => force_delay(eval, d).map_err(signal_to_native),
         Value::Future(f) => future_outcome(&f.get()),
         Value::Promise(p) => Ok(p.get()),
@@ -1561,14 +1583,10 @@ fn native_agent(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErr
     Ok(Value::Agent(agent))
 }
 
-/// Dispatch an action: inside an action fn or its watches the send
-/// buffers into the running action's outbox (released on success,
-/// discarded on failure, like the JVM's thread-local `nested`);
-/// otherwise the failed check beats shutdown (like the JVM's
-/// `dispatch`), the fn is never validated eagerly (a bad fn fails
-/// inside the action), an idle agent's head submits (dropped after
-/// shutdown), and a running agent's completion picks the rest up
-/// (nested sends run after the enclosing action — no self-deadlock).
+/// Dispatch an action: inside a transaction the send validates
+/// eagerly and defers into the transaction's outbox (S19 §1f — the
+/// branch below is the only deferral; `None` falls through to the
+/// identical path); otherwise see [`enqueue_send_item`].
 fn send_action(
     eval: &mut Evaluator,
     pool: AgentPool,
@@ -1587,6 +1605,34 @@ fn send_action(
         pool,
         action: Box::new(action),
     };
+    // S19 §1f: inside a running transaction the send validates
+    // eagerly (the failed check included — an eager throw aborts the
+    // body like the JVM) and defers into the transaction's outbox
+    // for post-commit dispatch (in order, after watches fire).
+    if let Some(tx) = eval.tx.as_mut() {
+        if let Some(error) = agent.error() {
+            return Err(agent_failed(&error));
+        }
+        tx.outbox.push((agent.clone(), item));
+        return Ok(Value::Agent(agent.clone()));
+    }
+    enqueue_send_item(eval, agent, item)
+}
+
+/// Enqueue one action through the normal path: inside an action fn or
+/// its watches the send buffers into the running action's outbox
+/// (released on success, discarded on failure, like the JVM's
+/// thread-local `nested`); otherwise the failed check beats shutdown
+/// (like the JVM's `dispatch`), the fn is never validated eagerly (a
+/// bad fn fails inside the action), an idle agent's head submits
+/// (dropped after shutdown), and a running agent's completion picks
+/// the rest up (nested sends run after the enclosing action — no
+/// self-deadlock). Shared with S19's commit outbox dispatch.
+pub(crate) fn enqueue_send_item(
+    eval: &mut Evaluator,
+    agent: &Agent,
+    item: QueuedAction,
+) -> Result<Value, NativeError> {
     // Nested sends (inside an action fn or its watches) buffer into
     // the running action's outbox — unchecked, like the JVM's
     // thread-local `nested` — for release on success.
@@ -1734,6 +1780,7 @@ fn await_latches(
 }
 
 fn native_await(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    crate::stm::check_await_not_in_tx(eval, "await")?;
     check_not_in_action(eval)?;
     let (agents, rx) = send_barriers(eval, args)?;
     await_latches(&agents, &rx, None)?;
@@ -1742,6 +1789,7 @@ fn native_await(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErr
 
 fn native_await_for(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_min_arity("clojure.core/await-for", args, 1)?;
+    crate::stm::check_await_not_in_tx(eval, "await-for")?;
     check_not_in_action(eval)?;
     // Barriers validate and queue BEFORE the timeout converts (the
     // JVM's `doseq` precedes the latch wait).
