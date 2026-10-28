@@ -1415,6 +1415,91 @@ fn load_string_eval_read_errors() {
 }
 
 #[test]
+fn load_reader_eval_error_restores() {
+    // Coverage for `run_loaded_values`' eval-error arm (no
+    // oracle — the probes pin read-phase failures): a form
+    // that reads but throws surfaces raw, like `load`, with
+    // the namespace restored and earlier defs kept.
+    let mut eval = boot();
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(with-in-str \"(def evlr-ok 1) (throw (ex-info \\\"ev-boom\\\" {}))\" (load-reader *in*))"
+        ),
+        "clojure.lang.ExceptionInfo | ev-boom"
+    );
+    assert_eq!(run_last(&mut eval, "evlr-ok"), "1");
+    assert_eq!(run_last(&mut eval, "(ns-name *ns*)"), "user");
+}
+
+#[test]
+fn resolver_midread_unbind_skips_consult() {
+    // Coverage for the resolve-time nil arm (M2-class root
+    // flip, no oracle): entry-bound fn, unbound before the
+    // consult → the consult answers no-consult, and the
+    // auto-keyword falls to `Invalid token` (never-bound
+    // would resolve via the maps).
+    let mut eval = boot();
+    run(
+        &mut eval,
+        "(alter-var-root #'clojure.core/*reader-resolver* (constantly (fn [op s] :consulted)))",
+    );
+    run(
+        &mut eval,
+        "(def flip-rsv-nil (fn [] (alter-var-root #'clojure.core/*reader-resolver* (constantly nil)) nil))",
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(load-string \"#=(user/flip-rsv-nil) ::x\")",),
+        "clojure.lang.Compiler$CompilerException | Syntax error reading source at (2:1)."
+    );
+    run(
+        &mut eval,
+        "(alter-var-root #'clojure.core/*reader-resolver* (constantly nil))",
+    );
+}
+
+#[test]
+fn resolver_midread_badflip_throws_cce() {
+    // Coverage for the resolve-time CCE arm (M2-class root
+    // flip, no oracle): entry-bound fn, rebound to a non-fn
+    // before the consult → the `Resolver` cast fires.
+    let mut eval = boot();
+    run(
+        &mut eval,
+        "(alter-var-root #'clojure.core/*reader-resolver* (constantly (fn [op s] :consulted)))",
+    );
+    run(
+        &mut eval,
+        "(def flip-rsv-bad (fn [] (alter-var-root #'clojure.core/*reader-resolver* (constantly 42)) nil))",
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(load-string \"#=(user/flip-rsv-bad) ::x\")",),
+        "clojure.lang.Compiler$CompilerException | Syntax error reading source at (2:1)."
+    );
+    // No root restore: with 42 still bound, even the restore
+    // form would trip the entry cast (f-nonresolver); the
+    // evaluator is dropped with the test.
+}
+
+#[test]
+fn eval_reader_plain_ns_head_skips_aliases() {
+    // Coverage for `resolve_ns_target`'s fallback (no oracle —
+    // every probed qualified head is alias-mapped): a head
+    // qualified with a real, unaliased namespace resolves
+    // without alias mapping. (The unrelated alias forces a
+    // non-matching loop iteration.)
+    let mut eval = boot();
+    run(
+        &mut eval,
+        "(do (create-ns 'evn2) (intern 'evn2 'evfn (fn [x] (+ x 1))) (create-ns 'other2) (alias 'zz2 'other2))",
+    );
+    assert_eq!(
+        run_last(&mut eval, "(read-string \"#=(evn2/evfn 1)\")"),
+        "2"
+    );
+}
+
+#[test]
 fn load_seeds_suppress_and_resolver() {
     // Probes `m-load-sup`, `m-load-resolver`: loads consult the
     // ambient suppression flag, and a bad resolver fails
@@ -1542,21 +1627,5 @@ fn load_reader_arglists_match_oracle() {
     assert_eq!(
         run_last(&mut eval, "(:arglists (meta #'load-reader))"),
         "([rdr])"
-    );
-}
-
-#[test]
-fn load_string_bad_resolver_wraps_seed_cce() {
-    // Coverage for `read_forms`' seed-failure arm (no oracle —
-    // the probes pin the read-string shape `f-nonresolver*`): a
-    // non-fn `*reader-resolver*` fails the entry cast, wrapped
-    // as an executing error at the seed position.
-    let mut eval = boot();
-    assert_eq!(
-        uncaught(
-            &mut eval,
-            "(binding [*reader-resolver* 42] (load-string \"(+ 1 2)\"))"
-        ),
-        "clojure.lang.Compiler$CompilerException | Syntax error executing at (1:1)."
     );
 }

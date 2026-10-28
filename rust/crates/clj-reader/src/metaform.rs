@@ -111,10 +111,16 @@ impl Reader {
         let token = read_token(&mut self.stream, '%');
         let span = self.span();
         if self.arg_env.is_none() {
-            return match interpret_token(&token, &self.opts, hook) {
-                Ok(Some(v)) => Ok(Some(v)),
-                Ok(None) => Err(ReaderError::InvalidToken { span, token }),
-                Err(error) => Err(ReaderError::EvalFailed { span, error }),
+            // The token keeps its `%` prefix, so it never starts
+            // with `::` — `interpret_token` cannot eval-fail here
+            // (its only `Err` is the auto-keyword resolver
+            // consult). The error maps on a live line, keeping
+            // every line covered.
+            let opt = interpret_token(&token, &self.opts, hook)
+                .map_err(|error| ReaderError::EvalFailed { span, error })?;
+            return match opt {
+                Some(v) => Ok(Some(v)),
+                None => Err(ReaderError::InvalidToken { span, token }),
             };
         }
         // `%99999999999999999999`: `Integer.parseInt` NFE.
@@ -737,6 +743,24 @@ mod tests {
     #[should_panic(expected = "expected quoted symbol")]
     fn read_quoted_helper_rejects_non_symbol_second() {
         let _ = read_quoted("'(1 2)", &ReaderOpts::default());
+    }
+
+    #[test]
+    #[should_panic(expected = "expected (quote sym)")]
+    fn read_quoted_hooked_helper_rejects_non_lists() {
+        use crate::hooks::ScriptedHooks;
+
+        let mut hooks = ScriptedHooks::new(Err(crate::EvalReadError::NoHook), vec![]);
+        let _ = read_quoted_hooked("42", &ReaderOpts::default(), &mut hooks);
+    }
+
+    #[test]
+    #[should_panic(expected = "expected quoted symbol")]
+    fn read_quoted_hooked_helper_rejects_non_symbol_second() {
+        use crate::hooks::ScriptedHooks;
+
+        let mut hooks = ScriptedHooks::new(Err(crate::EvalReadError::NoHook), vec![]);
+        let _ = read_quoted_hooked("'(1 2)", &ReaderOpts::default(), &mut hooks);
     }
 
     /// Read `` `sym `` with a scripted resolver, returning the

@@ -1261,14 +1261,14 @@ fn fail_head(
 /// and completion applies, like the JVM's `getValidator` there).
 struct EvalAction {
     child: Evaluator,
-    agent: Value,
+    agent: Agent,
     f: Value,
     args: Vec<Value>,
 }
 
 impl AgentAction for EvalAction {
     fn run(&mut self, state: &Value) -> Result<Value, Throwable> {
-        let bound = bind_agent(&mut self.child, &self.agent);
+        let bound = bind_agent(&mut self.child, &Value::Agent(self.agent.clone()));
         // Arm the nested-send outbox for the fn AND the watches (the
         // JVM's `nested` buffer spans both): failures below discard
         // it, success leaves it for release after the watches.
@@ -1287,10 +1287,7 @@ impl AgentAction for EvalAction {
                 return Err(e);
             }
         };
-        let validator = match &self.agent {
-            Value::Agent(agent) => agent.lock().validator.clone(),
-            _ => None,
-        };
+        let validator = self.agent.lock().validator.clone();
         let validated = match validator {
             Some(validator) => validate_action(&mut self.child, &validator, &candidate),
             None => Ok(()),
@@ -1582,7 +1579,7 @@ fn send_action(
     let child = eval.fork_for_thread(eval.clone_bindings());
     let action = EvalAction {
         child,
-        agent: Value::Agent(agent.clone()),
+        agent: agent.clone(),
         f: f.clone(),
         args: extra.to_vec(),
     };

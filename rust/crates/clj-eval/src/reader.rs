@@ -519,14 +519,15 @@ impl<'a> LiveReadHooks<'a> {
     /// Resolve a qualifier to its namespace (aliases first).
     fn resolve_ns_target(&self, ns_part: &str) -> String {
         let cur = self.eval.current_ns_name();
-        if let Some(home) = self.eval.registry.get(&cur) {
-            for (alias, ns, _) in home.aliases() {
-                if alias == ns_part {
-                    return ns.to_owned();
-                }
-            }
-        }
-        ns_part.to_owned()
+        self.eval
+            .registry
+            .get(&cur)
+            .and_then(|home| {
+                home.aliases()
+                    .find(|(alias, _, _)| *alias == ns_part)
+                    .map(|(_, ns, _)| ns.to_owned())
+            })
+            .unwrap_or_else(|| ns_part.to_owned())
     }
 }
 

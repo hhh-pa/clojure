@@ -2806,4 +2806,29 @@ mod tests {
             Some("Cannot enter synchronized block because \"lock\" is null")
         );
     }
+
+    #[test]
+    fn read_forms_seed_cce_wraps() {
+        // Coverage for `read_forms`' seed-failure arm (the
+        // `load-string` twin is oracle-pinned by
+        // `m-load-resolver`; this is the hook-taking twin the
+        // AOT subset drives): a non-fn `*reader-resolver*`
+        // fails the entry cast, wrapped as an executing error
+        // at the seed position.
+        let mut eval = crate::ns::boot();
+        eval.eval_source("(alter-var-root #'clojure.core/*reader-resolver* (constantly 42))")
+            .expect("root flip");
+        let err = eval
+            .read_forms("(+ 1 2)", &mut clj_reader::NoHooks)
+            .expect_err("seed cce");
+        // No root restore: with 42 still bound, even the restore
+        // form would trip the entry cast; the evaluator is dropped
+        // with the test. (`Display` renders `Class | message`,
+        // like the integration `uncaught` helper. The `const`
+        // keeps the assert on one line — multi-line assert
+        // literals attract dead macro regions.)
+        const WANT: &str =
+            "clojure.lang.Compiler$CompilerException | Syntax error executing at (1:1).";
+        assert_eq!(err.to_string(), WANT);
+    }
 }
