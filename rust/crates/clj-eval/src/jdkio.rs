@@ -500,9 +500,6 @@ fn pull_files(
     if let Some(node) = root.take() {
         out.push(check_file_root(&node)?);
         push_children(stack, &node);
-        if out.len() >= n {
-            return Ok(out);
-        }
     }
     while out.len() < n {
         let Some(frame) = stack.last_mut() else {
@@ -853,3 +850,18 @@ pub(crate) const JDKIO_NATIVES: &[(&str, NativeFnPtr)] = &[
     ("resultset-seq", native_resultset_seq),
     ("file-seq", native_file_seq),
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn push_children_ignores_non_files() {
+        // Walks only ever push `File` values (the root is
+        // checked first), so the silent-ignore arm is covered
+        // directly.
+        let mut stack = Vec::new();
+        push_children(&mut stack, &Value::Int(1));
+        assert!(stack.is_empty());
+    }
+}

@@ -133,8 +133,16 @@ fn handle_print_rows() {
     );
     // Identity: handles equal themselves only — except files,
     // which compare by path like `java.io.File.equals`.
+    // (`=` dispatches on the left operand, so every handle
+    // takes the left seat.)
     assert_eq!(run_last(&mut eval, "(= s17-e s17-e)"), "true");
     assert_eq!(run_last(&mut eval, "(= s17-e s17-i)"), "false");
+    assert_eq!(run_last(&mut eval, "(= s17-i s17-i)"), "true");
+    assert_eq!(run_last(&mut eval, "(= s17-i s17-e)"), "false");
+    assert_eq!(run_last(&mut eval, "(= s17-s s17-s)"), "true");
+    assert_eq!(run_last(&mut eval, "(= s17-s s17-e)"), "false");
+    assert_eq!(run_last(&mut eval, "(= s17-r s17-r)"), "true");
+    assert_eq!(run_last(&mut eval, "(= s17-r s17-e)"), "false");
     assert_eq!(run_last(&mut eval, "(= s17-f s17-f)"), "true");
     let f2 = jdkio::file(&mut eval, "some/path.txt");
     intern(&mut eval, "s17-f2", f2);
@@ -143,6 +151,41 @@ fn handle_print_rows() {
     assert_eq!(run_last(&mut eval, "(= s17-f s17-f2)"), "true");
     assert_eq!(run_last(&mut eval, "(= s17-f s17-f3)"), "false");
     assert_eq!(run_last(&mut eval, "(= s17-f \"some/path.txt\")"), "false");
+    // Every handle hashes, and round-trips as a map key
+    // (path-consistent for files).
+    for h in ["s17-e", "s17-i", "s17-s", "s17-r", "s17-f"] {
+        assert_eq!(
+            run_last(&mut eval, &format!("(integer? (hash {h}))")),
+            "true",
+            "{h}"
+        );
+        assert_eq!(
+            run_last(&mut eval, &format!("(get (assoc {{}} {h} :v) {h})")),
+            ":v",
+            "{h}"
+        );
+    }
+    assert_eq!(
+        run_last(&mut eval, "(get (assoc {} s17-f :v) s17-f2)"),
+        ":v"
+    );
+    // CCEs *from* stream/resultset/file handles (their class names).
+    assert_eq!(
+        uncaught(&mut eval, "(iterator-seq s17-s)"),
+        "java.lang.ClassCastException | class java.util.stream.Stream cannot be cast to class java.util.Iterator (java.util.stream.Stream and java.util.Iterator are in module java.base of loader 'bootstrap')"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(enumeration-seq s17-r)"),
+        "java.lang.ClassCastException | class java.sql.ResultSet cannot be cast to class java.util.Enumeration (java.sql.ResultSet is in module java.sql of loader 'platform'; java.util.Enumeration is in module java.base of loader 'bootstrap')"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(iterator-seq s17-f)"),
+        "java.lang.ClassCastException | class java.io.File cannot be cast to class java.util.Iterator (java.io.File and java.util.Iterator are in module java.base of loader 'bootstrap')"
+    );
+    // Cursor probes answer `None` off-handle (and files have no cursor).
+    assert_eq!(jdkio::remaining(&Value::Int(1)), None);
+    assert_eq!(jdkio::remaining(&lookup(&eval, "s17-f")), None);
+    assert_eq!(jdkio::stream_consumed(&Value::Int(1)), None);
     // Handles are not seqable.
     assert_eq!(
         uncaught(&mut eval, "(seq s17-e)"),
@@ -511,6 +554,19 @@ fn stream_into_rows() {
     let h_s17_nl = jdkio::stream(&mut eval, ints(3));
     intern(&mut eval, "s17-nl", h_s17_nl);
     assert_eq!(run_last(&mut eval, "(stream-into! () s17-nl)"), "(3 2 1)");
+    // Non-editable `to` with an xform (conj path, no transient).
+    let h_s17_nlx = jdkio::stream(&mut eval, ints(3));
+    intern(&mut eval, "s17-nlx", h_s17_nlx);
+    assert_eq!(
+        run_last(&mut eval, "(stream-into! () (map inc) s17-nlx)"),
+        "(4 3 2)"
+    );
+    let h_s17_nn = jdkio::stream(&mut eval, ints(2));
+    intern(&mut eval, "s17-nn", h_s17_nn);
+    assert_eq!(
+        run_last(&mut eval, "(stream-into! nil (map inc) s17-nn)"),
+        "(3 2)"
+    );
     // Editable targets persist (no transient escapes).
     let h_s17_nv = jdkio::stream(&mut eval, ints(2));
     intern(&mut eval, "s17-nv", h_s17_nv);
