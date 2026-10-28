@@ -1,0 +1,236 @@
+p-any-nil true
+p-any-false true
+p-any-true true
+p-any-int true
+p-any-str true
+p-any-vec true
+p-any-map true
+p-any-set true
+p-any-kw true
+p-any-sym true
+p-any-delay true
+p-any-fn true
+p-any-rec true
+p-any-multi true
+p-any-ar0 THROW clojure.lang.ArityException|"Wrong number of args (0) passed to: clojure.core/any?"
+p-any-ar2 THROW clojure.lang.ArityException|"Wrong number of args (2) passed to: clojure.core/any?"
+p-delay-t true
+p-delay-def true
+p-delay-force 99
+p-delay-realized true
+p-delay-nil false
+p-delay-int false
+p-delay-future false
+p-delay-promise false
+p-delay-atom false
+p-delay-fn false
+p-delay-str false
+p-delay-vec false
+p-delay-ar0 THROW clojure.lang.ArityException|"Wrong number of args (0) passed to: clojure.core/delay?"
+p-delay-ar2 THROW clojure.lang.ArityException|"Wrong number of args (2) passed to: clojure.core/delay?"
+p-mapseq-entry true
+p-mapseq-find true
+p-mapseq-firstmap true
+p-mapseq-vec2 false
+p-mapseq-vec false
+p-mapseq-map false
+p-mapseq-list false
+p-mapseq-nil false
+p-mapseq-str false
+p-mapseq-int false
+p-mapseq-ar0 THROW clojure.lang.ArityException|"Wrong number of args (0) passed to: clojure.core/map-entry?"
+p-mapseq-ar2 THROW clojure.lang.ArityException|"Wrong number of args (2) passed to: clojure.core/map-entry?"
+p-indexed-vec true
+p-indexed-empty true
+p-indexed-entry true
+p-indexed-subvec true
+p-indexed-str false
+p-indexed-list false
+p-indexed-seq false
+p-indexed-lazy false
+p-indexed-map false
+p-indexed-sortedmap false
+p-indexed-set false
+p-indexed-sortedset false
+p-indexed-objarr false
+p-indexed-intarr false
+p-indexed-rec false
+p-indexed-nil false
+p-indexed-int false
+p-indexed-delay false
+p-indexed-ar0 THROW clojure.lang.ArityException|"Wrong number of args (0) passed to: clojure.core/indexed?"
+p-indexed-ar2 THROW clojure.lang.ArityException|"Wrong number of args (2) passed to: clojure.core/indexed?"
+p-nan-t true
+p-nan-float true
+p-nan-inf false
+p-nan-neginf false
+p-nan-zero false
+p-nan-negzero false
+p-nan-dbl false
+p-nan-int false
+p-nan-bigint false
+p-nan-ratio false
+p-nan-bigdec false
+p-nan-nil THROW java.lang.NullPointerException|"Cannot invoke \"java.lang.Number.doubleValue()\" because \"x\" is null"
+p-nan-str THROW java.lang.ClassCastException|"class java.lang.String cannot be cast to class java.lang.Number (java.lang.String and java.lang.Number are in module java.base of loader 'bootstrap')"
+p-nan-bool THROW java.lang.ClassCastException|"class java.lang.Boolean cannot be cast to class java.lang.Number (java.lang.Boolean and java.lang.Number are in module java.base of loader 'bootstrap')"
+p-nan-vec THROW java.lang.ClassCastException|"class clojure.lang.PersistentVector cannot be cast to class java.lang.Number (clojure.lang.PersistentVector is in unnamed module of loader 'app'; java.lang.Number is in module java.base of loader 'bootstrap')"
+p-nan-char THROW java.lang.ClassCastException|"class java.lang.Character cannot be cast to class java.lang.Number (java.lang.Character and java.lang.Number are in module java.base of loader 'bootstrap')"
+p-nan-ar0 THROW clojure.lang.ArityException|"Wrong number of args (0) passed to: clojure.core/NaN?"
+p-nan-ar2 THROW clojure.lang.ArityException|"Wrong number of args (2) passed to: clojure.core/NaN?"
+p-inf-t true
+p-inf-negt true
+p-inf-float true
+p-inf-nan false
+p-inf-zero false
+p-inf-dbl false
+p-inf-int false
+p-inf-bigint false
+p-inf-ratio false
+p-inf-bigdec false
+p-inf-nil THROW java.lang.NullPointerException|"Cannot invoke \"java.lang.Number.doubleValue()\" because \"x\" is null"
+p-inf-str THROW java.lang.ClassCastException|"class java.lang.String cannot be cast to class java.lang.Number (java.lang.String and java.lang.Number are in module java.base of loader 'bootstrap')"
+p-inf-bool THROW java.lang.ClassCastException|"class java.lang.Boolean cannot be cast to class java.lang.Number (java.lang.Boolean and java.lang.Number are in module java.base of loader 'bootstrap')"
+p-inf-vec THROW java.lang.ClassCastException|"class clojure.lang.PersistentVector cannot be cast to class java.lang.Number (clojure.lang.PersistentVector is in unnamed module of loader 'app'; java.lang.Number is in module java.base of loader 'bootstrap')"
+p-inf-char THROW java.lang.ClassCastException|"class java.lang.Character cannot be cast to class java.lang.Number (java.lang.Character and java.lang.Number are in module java.base of loader 'bootstrap')"
+p-inf-ar0 THROW clojure.lang.ArityException|"Wrong number of args (0) passed to: clojure.core/infinite?"
+p-inf-ar2 THROW clojure.lang.ArityException|"Wrong number of args (2) passed to: clojure.core/infinite?"
+p-intp-int true
+p-intp-zero true
+p-intp-bigint false
+p-intp-negbig false
+p-intp-zerobig false
+p-intp-dbl false
+p-intp-ratio false
+p-intp-bigdec false
+p-intp-nil false
+p-intp-str false
+p-intp-bool false
+p-intp-char false
+p-intp-byte true
+p-intp-short true
+p-nat-zero true
+p-nat-pos true
+p-nat-neg false
+p-nat-big false
+p-nat-negbig false
+p-nat-zerobig false
+p-nat-dbl false
+p-nat-ratio false
+p-nat-bigdec false
+p-nat-zerodec false
+p-nat-nil false
+p-nat-str false
+p-nat-bool false
+p-nat-ar0 THROW clojure.lang.ArityException|"Wrong number of args (0) passed to: clojure.core/nat-int?"
+p-nat-ar2 THROW clojure.lang.ArityException|"Wrong number of args (2) passed to: clojure.core/nat-int?"
+p-neg-neg true
+p-neg-zero false
+p-neg-pos false
+p-neg-big false
+p-neg-negbig false
+p-neg-dbl false
+p-neg-ratio false
+p-neg-bigdec false
+p-neg-nil false
+p-neg-str false
+p-neg-bool false
+p-neg-ar0 THROW clojure.lang.ArityException|"Wrong number of args (0) passed to: clojure.core/neg-int?"
+p-neg-ar2 THROW clojure.lang.ArityException|"Wrong number of args (2) passed to: clojure.core/neg-int?"
+p-pos-pos true
+p-pos-zero false
+p-pos-neg false
+p-pos-big false
+p-pos-negbig false
+p-pos-dbl false
+p-pos-ratio false
+p-pos-bigdec false
+p-pos-nil false
+p-pos-str false
+p-pos-bool false
+p-pos-ar0 THROW clojure.lang.ArityException|"Wrong number of args (0) passed to: clojure.core/pos-int?"
+p-pos-ar2 THROW clojure.lang.ArityException|"Wrong number of args (2) passed to: clojure.core/pos-int?"
+p-findkw-miss1 nil
+p-findkw-miss2 nil
+p-findkw-2miss nil
+p-findkw-plain :s1-rtplain
+p-findkw-nsname :s1-rt/s1-rtname
+p-findkw-split :s1-rt2/s1-rtname2
+p-findkw-kw :s1-lit
+p-findkw-symfresh nil
+p-findkw-symknown :s1-symknown
+p-findkw-nil nil
+p-findkw-num nil
+p-findkw-2nilns :s1-nilns
+p-findkw-2badns THROW java.lang.ClassCastException|"class java.lang.Long cannot be cast to class java.lang.String (java.lang.Long and java.lang.String are in module java.base of loader 'bootstrap')"
+p-findkw-2badname THROW java.lang.ClassCastException|"class java.lang.Long cannot be cast to class java.lang.String (java.lang.Long and java.lang.String are in module java.base of loader 'bootstrap')"
+p-findkw-2nilname THROW java.lang.NullPointerException|"Cannot invoke \"String.hashCode()\" because \"this.name\" is null"
+p-findkw-ar0 THROW clojure.lang.ArityException|"Wrong number of args (0) passed to: clojure.core/find-keyword"
+p-findkw-ar3 THROW clojure.lang.ArityException|"Wrong number of args (3) passed to: clojure.core/find-keyword"
+p-special-def true
+p-special-if true
+p-special-do true
+p-special-let false
+p-special-quote true
+p-special-var true
+p-special-fnstar true
+p-special-loopstar true
+p-special-recur true
+p-special-throw true
+p-special-try true
+p-special-monitorenter true
+p-special-monitorexit true
+p-special-dot true
+p-special-new true
+p-special-setb true
+p-special-amp true
+p-special-fn false
+p-special-letstar true
+p-special-loop false
+p-special-case false
+p-special-casestar true
+p-special-defn false
+p-special-defmacro false
+p-special-ns false
+p-special-import false
+p-special-importstar false
+p-special-deftype false
+p-special-deftypestar true
+p-special-defrecord false
+p-special-defrecordstar false
+p-special-reify false
+p-special-reifystar true
+p-special-letfnstar true
+p-special-qual false
+p-special-dotqual false
+p-special-str false
+p-special-kw false
+p-special-nil false
+p-special-int false
+p-special-ar0 THROW clojure.lang.ArityException|"Wrong number of args (0) passed to: clojure.core/special-symbol?"
+p-special-ar2 THROW clojure.lang.ArityException|"Wrong number of args (2) passed to: clojure.core/special-symbol?"
+p-ffirst-nest 1
+p-ffirst-deep [9]
+p-ffirst-empty nil
+p-ffirst-nil nil
+p-ffirst-emptynest nil
+p-ffirst-lists 1
+p-ffirst-map :a
+p-ffirst-str THROW java.lang.IllegalArgumentException|"Don't know how to create ISeq from: java.lang.Character"
+p-ffirst-num THROW java.lang.IllegalArgumentException|"Don't know how to create ISeq from: java.lang.Long"
+p-ffirst-mixed 1
+p-ffirst-ar0 THROW clojure.lang.ArityException|"Wrong number of args (0) passed to: clojure.core/ffirst--N"
+p-ffirst-ar2 THROW clojure.lang.ArityException|"Wrong number of args (2) passed to: clojure.core/ffirst--N"
+p-special-catch true
+p-special-finally true
+p-special-else false
+p-special-letfn false
+p-special-defonce false
+p-special-declare false
+p-special-comment false
+p-special-while false
+p-special-dotdot false
+p-special-deftype2 true
+p-special-defrecord2 false
+p-special-import2 false
+p-special-amp2 true

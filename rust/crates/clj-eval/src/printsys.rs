@@ -22,9 +22,9 @@ use std::sync::Arc;
 
 use clj_value::{
     CHAR_ESCAPES, CHAR_NAMES, ConsValue, CycleValue, ExtensionValue, HostKind, HostVal,
-    IterateValue, KeySeqValue, Keyword, List, Map, MultiFn, PrintOpts, RangeValue, RealizedSeq,
-    RepeatValue, SubVectorValue, Symbol, ThrowClass, ValSeqValue, Value, Var, Vector, lift_ns,
-    new_map, pr_to_string,
+    IterateValue, KeySeqValue, Keyword, Map, MultiFn, PrintOpts, RangeValue, RealizedSeq,
+    RepeatValue, SubVectorValue, Symbol, ThrowClass, ValSeqValue, Value, Var, lift_ns, new_map,
+    pr_to_string,
 };
 
 use crate::core::{Reduced, cce_err, is_lazy_seq_str, print_opts, str_of_one};
@@ -1523,25 +1523,9 @@ fn install_plain_root(eval: &mut Evaluator, name: &str, root: Value) {
     });
 }
 
-/// Stamp `:arglists` meta on an installed var.
+/// Stamp `:arglists` meta on an installed var (single arity).
 fn set_arglists(eval: &mut Evaluator, name: &str, params: &[&str]) {
-    let q = Symbol::new(Some("clojure.core"), name);
-    let id = eval.registry.intern(&q);
-    let argv = Value::Vector(Vector::from_vec(
-        params
-            .iter()
-            .map(|p| Value::Symbol(Symbol::new(None, p)))
-            .collect(),
-    ));
-    let arglists = Value::List(List::from_vec(vec![argv]));
-    eval.registry.with_state_mut(id, |st| {
-        let meta = st
-            .meta
-            .clone()
-            .unwrap_or_else(new_map)
-            .insert(Value::Keyword(Keyword::new(None, "arglists")), arglists);
-        st.meta = Some(meta);
-    });
+    crate::ns::set_arglists_multi(eval, name, &[params]);
 }
 
 /// A char-map var root from a single-source table.

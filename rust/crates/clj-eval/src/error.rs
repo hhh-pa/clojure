@@ -295,7 +295,9 @@ pub fn jvm_class_of(v: &Value) -> String {
         Value::Bool(_) => "java.lang.Boolean".to_owned(),
         Value::Int(_) => "java.lang.Long".to_owned(),
         Value::Double(_) => "java.lang.Double".to_owned(),
-        Value::BigInt(_) | Value::BigDec(_) | Value::Ratio(_) => tower_class_of(v),
+        Value::BigInt(_) | Value::BigInteger(_) | Value::BigDec(_) | Value::Ratio(_) => {
+            tower_class_of(v)
+        }
         Value::Str(_) => "java.lang.String".to_owned(),
         Value::Char(_) => "java.lang.Character".to_owned(),
         Value::Symbol(_) => "clojure.lang.Symbol".to_owned(),
@@ -313,6 +315,7 @@ pub fn jvm_class_of(v: &Value) -> String {
 fn tower_class_of(v: &Value) -> String {
     match v {
         Value::BigInt(_) => "clojure.lang.BigInt".to_owned(),
+        Value::BigInteger(_) => "java.math.BigInteger".to_owned(),
         Value::BigDec(_) => "java.math.BigDecimal".to_owned(),
         _ => "clojure.lang.Ratio".to_owned(),
     }
@@ -366,6 +369,7 @@ fn jvm_class_of_host(v: &Value) -> String {
         | Value::Int(_)
         | Value::Double(_)
         | Value::BigInt(_)
+        | Value::BigInteger(_)
         | Value::BigDec(_)
         | Value::Ratio(_)
         | Value::Str(_)

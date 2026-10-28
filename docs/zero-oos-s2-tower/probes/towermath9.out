@@ -1,0 +1,9 @@
+r9-absbi 5N
+r9-numbi THROW java.lang.ClassCastException|"class java.math.BigInteger cannot be cast to class clojure.lang.Ratio (java.math.BigInteger is in module java.base of loader 'bootstrap'; clojure.lang.Ratio is in unnamed module of loader 'app')"
+r9-inthuge THROW java.lang.IllegalArgumentException|"Value out of range for long: 9223372036854775808"
+r9-longhuge THROW java.lang.IllegalArgumentException|"Value out of range for long: 18446744073709551616"
+r9-shorthuge THROW java.lang.IllegalArgumentException|"Value out of range for short: 100000"
+r9-bytehuge THROW java.lang.IllegalArgumentException|"Value out of range for byte: 1000"
+r9-charhuge THROW java.lang.IllegalArgumentException|"Value out of range for char: 1114112"
+r9-char \A
+r9-floathuge THROW java.lang.IllegalArgumentException|"Value out of range for float: 10000000000000000000000000000000000000000"

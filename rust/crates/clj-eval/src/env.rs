@@ -295,6 +295,11 @@ pub struct NamespaceRegistry {
     next_ns_id: u64,
     by_id: HashMap<u64, String>,
     removed: HashMap<String, Namespace>,
+    /// Anonymous var states (S4b `with-local-vars`): ids with no
+    /// namespace home, so `all-ns`/`ns-interns` never see them.
+    /// [`state`](Self::state)/[`state_mut`](Self::state_mut)
+    /// answer from here when `by_id` misses.
+    anon: HashMap<u64, VarState>,
 }
 
 impl NamespaceRegistry {
@@ -583,15 +588,44 @@ impl NamespaceRegistry {
     /// states, like the JVM's surviving var objects).
     #[must_use]
     pub fn state(&self, id: u64) -> Option<&VarState> {
-        let name = self.by_id.get(&id)?;
-        self.namespaces
-            .get(name)
-            .and_then(|ns| ns.state(id))
-            .or_else(|| self.removed.get(name).and_then(|ns| ns.state(id)))
+        self.by_id
+            .get(&id)
+            .and_then(|name| {
+                self.namespaces
+                    .get(name)
+                    .and_then(|ns| ns.state(id))
+                    .or_else(|| self.removed.get(name).and_then(|ns| ns.state(id)))
+            })
+            .or_else(|| self.anon.get(&id))
+    }
+
+    /// Allocate an anonymous dynamic var (S4b
+    /// `with-local-vars`, the JVM `Var.create().setDynamic()`):
+    /// a registry-issued id with no namespace home, no root,
+    /// `dynamic` set, and the JVM create-time meta (`{:ns nil,
+    /// :name nil}`, oracle `wv-meta`).
+    pub fn fresh_anonymous(&mut self) -> u64 {
+        let id = self.next_id;
+        self.next_id += 1;
+        let meta = new_map()
+            .insert(Value::Keyword(Keyword::new(None, "ns")), Value::Nil)
+            .insert(Value::Keyword(Keyword::new(None, "name")), Value::Nil);
+        self.anon.insert(
+            id,
+            VarState {
+                root: None,
+                meta: Some(meta),
+                dynamic: true,
+            },
+        );
+        id
     }
 
     /// The var's state, mutably.
     pub fn state_mut(&mut self, id: u64) -> Option<&mut VarState> {
+        if self.anon.contains_key(&id) {
+            return self.anon.get_mut(&id);
+        }
         let name = self.by_id.get(&id)?.clone();
         if self
             .namespaces
@@ -867,6 +901,12 @@ impl SharedRegistry {
     /// [`NamespaceRegistry::intern`]).
     pub fn intern(&self, sym: &Symbol) -> u64 {
         self.lock().registry.intern(sym)
+    }
+
+    /// Allocate an anonymous dynamic var (see
+    /// [`NamespaceRegistry::fresh_anonymous`]).
+    pub fn fresh_anonymous(&self) -> u64 {
+        self.lock().registry.fresh_anonymous()
     }
 
     /// Intern a var into a live or removed namespace (see

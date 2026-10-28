@@ -101,7 +101,9 @@ pub fn hasheq(v: &Value) -> i32 {
         Value::Keyword(k) => keyword_hasheq(k),
         Value::List(l) => hash_ordered(l.iter().map(hasheq)),
         Value::Vector(v) => hash_ordered(v.iter().map(hasheq)),
-        Value::BigInt(_) | Value::BigDec(_) | Value::Ratio(_) => hasheq_tower(v),
+        Value::BigInt(_) | Value::BigInteger(_) | Value::BigDec(_) | Value::Ratio(_) => {
+            hasheq_tower(v)
+        }
         other => hasheq_mid(other),
     }
 }
@@ -114,7 +116,7 @@ pub fn hasheq(v: &Value) -> i32 {
 /// numerator and denominator.
 fn hasheq_tower(v: &Value) -> i32 {
     match v {
-        Value::BigInt(n) => match n.to_i64() {
+        Value::BigInt(n) | Value::BigInteger(n) => match n.to_i64() {
             Some(i) => hash_long(i),
             None => hash_ordered(n.to_signed_bytes_be().into_iter().map(i32::from)),
         },
@@ -308,7 +310,9 @@ fn hash_code_rest(v: &Value) -> i32 {
         Value::Volatile(v) => id_hash(v.id()),
         // Deterministic stand-ins (the `BigInteger`/`BigDecimal`
         // word formulas are not mirrored — see module docs).
-        Value::BigInt(n) => hash_ordered(n.to_signed_bytes_be().into_iter().map(i32::from)),
+        Value::BigInt(n) | Value::BigInteger(n) => {
+            hash_ordered(n.to_signed_bytes_be().into_iter().map(i32::from))
+        }
         Value::BigDec(d) => {
             let (unscaled, scale) = d.stripped();
             hash_combine(

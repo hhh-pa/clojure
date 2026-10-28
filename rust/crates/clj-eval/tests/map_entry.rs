@@ -695,9 +695,9 @@ fn seq_fn_rows() {
     // fx2-mapentry6.reversible?: entries implement Reversible
     // (fx2b-reversible `entry`).
     assert_eq!(run_last(&mut eval, "(reversible? e)"), "true");
-    // No `flatten` row: `flatten` needs lazy tree-walk machinery the
-    // port lacks (`tree-seq` is unimplemented) — the probe6
-    // `flatten` row stands as the oracle pin for that slice.
+    // fx2-mapentry6.flatten: entries seq, so `flatten` walks
+    // into them (zero-oos S3; oracle probe6 `flatten` row).
+    assert_eq!(run_last(&mut eval, "(flatten e)"), "(:a 1)");
     assert_eq!(
         run_last(&mut eval, "(reduce (fn [a b] (str a b)) \"\" e)"),
         "\":a1\""

@@ -920,6 +920,101 @@
   ([prob] (filter (fn [_] (< (rand) prob))))
   ([prob coll] (filter (fn [_] (< (rand) prob)) coll)))
 
+;; --- Corelib small vars (zero-oos S4a, #46): control macros,
+;; printer one-liners, `rand-nth`, and `test` — verbatim ports
+;; over implemented vars (the three `parse-*` fns are `core.rs`
+;; natives for JVM parse parity, not here). Owned by S4a: no
+;; other slice edits inside this block.
+(defmacro some->
+  "When expr is not nil, threads it into the first form (via ->),
+  and when that result is not nil, through the next etc"
+  {:added "1.5"}
+  [expr & forms]
+  (let [g (gensym)
+        steps (map (fn [step] `(~'if (nil? ~g) nil (-> ~g ~step)))
+                   forms)]
+    `(let [~g ~expr
+           ~@(interleave (repeat g) (butlast steps))]
+       ~(if (empty? steps)
+          g
+          (last steps)))))
+
+(defmacro some->>
+  "When expr is not nil, threads it into the first form (via ->>),
+  and when that result is not nil, through the next etc"
+  {:added "1.5"}
+  [expr & forms]
+  (let [g (gensym)
+        steps (map (fn [step] `(~'if (nil? ~g) nil (->> ~g ~step)))
+                   forms)]
+    `(let [~g ~expr
+           ~@(interleave (repeat g) (butlast steps))]
+       ~(if (empty? steps)
+          g
+          (last steps)))))
+
+(defmacro when-first
+  "bindings => x xs
+
+  Roughly the same as (when (seq xs) (let [x (first xs)] body)) but xs is evaluated only once"
+  {:added "1.0"}
+  [bindings & body]
+  (assert-args
+     (vector? bindings) "a vector for its binding"
+     (= 2 (count bindings)) "exactly 2 forms in binding vector")
+  (let [[x xs] bindings]
+    `(when-let [xs# (seq ~xs)]
+       (let [~x (first xs#)]
+         ~@body))))
+
+(defmacro while
+  "Repeatedly executes body while test expression is true. Presumes
+  some side-effect will cause test to become false/nil. Returns nil"
+  {:added "1.0"}
+  [test & body]
+  `(loop []
+     (when ~test
+       ~@body
+       (~'recur))))
+
+(defn printf
+  "Prints formatted output, as per format"
+  {:added "1.0"}
+  [fmt & args]
+  (print (apply format fmt args)))
+
+(defn println-str
+  "println to a string, returning it"
+  {:added "1.0"}
+  [& xs]
+  (with-out-str
+    (apply println xs)))
+
+(defn prn-str
+  "prn to a string, returning it"
+  {:added "1.0"}
+  [& xs]
+  (with-out-str
+    (apply prn xs)))
+
+(defn rand-nth
+  "Return a random element of the (sequential) collection. Will have
+  the same performance characteristics as nth for the given
+  collection."
+  {:added "1.2"}
+  [coll]
+  (nth coll (rand-int (count coll))))
+
+(defn test
+  "test [v] finds fn at key :test in var metadata and calls it,
+  presuming failure will throw exception"
+  {:added "1.0"}
+  [v]
+  (let [f (:test (meta v))]
+    (if f
+      (do (f) :ok)
+      :no-test)))
+
 ;; --- Types (S-typechain stage 1): `deftype` / `defrecord` / `reify` /
 ;; `proxy` / `gen-class` / `gen-interface` / `definterface` expand to
 ;; the hidden `__deftype*` et al natives (methods become `(fn [this
@@ -1386,6 +1481,365 @@
 ;; the JVM instead rejects non-`BufferedReader`s (probes
 ;; `ls-basic`..`ls-empty` document the JVM side).
 (defn line-seq [rdr] ((fn step [] (binding [*in* rdr] (when-let [line (read-line)] (cons line (lazy-seq (step))))))))
+
+;; --- `with-precision` (zero-oos S2): upstream shape over
+;; `binding`, except the `MathContext` comes from the port-only
+;; `clojure.core/math-context` ctor (installed, never referred
+;; — no interop here) and the `:rounding` mode splices quoted
+;; (upstream resolves it as a static field at compile time).
+(defmacro with-precision [precision & exprs]
+  (let [[body rm] (if (= (first exprs) :rounding)
+                    [(next (next exprs)) (list (second exprs))]
+                    [exprs nil])]
+    `(binding [*math-context* (clojure.core/math-context ~precision ~@(map (fn [m] (list 'quote m)) rm))]
+       ~@body)))
+
+;; --- `ffirst` (S1): the stock composite (probes `p-ffirst-*`).
+(defn ffirst
+  "Same as (first (first x))"
+  {:added "1.0"
+   :static true}
+  [x] (first (first x)))
+
+;; --- Deprecated aliases (S5 state introspection): verbatim ports,
+;; meta included (oracle `j-*` pins value- and meta-equivalence
+;; with the replacements).
+(defn agent-errors
+  "DEPRECATED: Use 'agent-error' instead.
+  Returns a sequence of the exceptions thrown during asynchronous
+  actions of the agent."
+  {:added "1.0"
+   :deprecated "1.2"}
+  [a]
+  (when-let [e (agent-error a)]
+    (list e)))
+
+(defn clear-agent-errors
+  "DEPRECATED: Use 'restart-agent' instead.
+  Clears any exceptions thrown during asynchronous actions of the
+  agent, allowing subsequent actions to occur."
+  {:added "1.0"
+   :deprecated "1.2"}
+  [a] (restart-agent a @a))
+
+(defn replicate
+  "DEPRECATED: Use 'repeat' instead.
+   Returns a lazy seq of n xs."
+  {:added "1.0"
+   :deprecated "1.3"}
+  [n x] (take n (repeat x)))
+
+;; --- S4b macro machinery (zero-oos #47): the expansion-helper
+;; surface, JVM name munging (natives), and the var-frame
+;; macros. `definline` records `:inline` without honoring it
+;; (the port is an interpreter; calls run the specimen body).
+;; `selector` rides the destructuring outlets. `unquote` /
+;; `unquote-splicing` are bare unbounds (upstream core.clj
+;; lines 13-14) so reader-emitted `~` symbols resolve.
+;; `with-local-vars` expands interop-free over the private
+;; `__local-var*` (anonymous dynamic vars).
+
+(def unquote)
+
+(def unquote-splicing)
+
+(defmacro definline
+  "Experimental - like defmacro, except defines a named function whose
+  body is the expansion, calls to which may be expanded inline as if
+  it were a macro. Cannot be used with variadic (&) args."
+  {:added "1.0"}
+  [name & decl]
+  (let [[pre-args [args expr]] (split-with (comp not vector?) decl)]
+    `(do
+       (defn ~name ~@pre-args ~args ~(apply (eval (list `fn args expr)) args))
+       (alter-meta! (var ~name) assoc :inline (fn ~name ~args ~expr))
+       (var ~name))))
+
+(defn- selector-impl [m]
+  (let [dirs [:select :excess :missing :all]
+        names (zipmap (filter m dirs) (repeatedly gensym))]
+    (if (empty? names)
+      (throw-illegal-arg! "form must contain at least one of :select :excess :missing :all")
+      `(fn ~(gensym "selector")
+         [map#]
+         (let [~(merge m names) map#]
+           ~(if (= 1 (count names))
+              (-> names first val)
+              (list `some-vals names)))))))
+
+(defmacro selector
+  "Builds a selecting-fn from m, a map destructuring form that must
+  include one or more of the :select, :all, :missing, and :excess
+  directives. The return function takes a collection, destructures it
+  per m, and returns a map of the result(s).
+
+  If m has exactly one directive, the result is the value that
+  directive would yield. If m has more than one directive, then it
+  returns a map of directives to values.
+
+  As in destructuring, :missing controls whether missing required keys
+  throw or are collected.
+
+  While a map destructuring form may and sometimes must include
+  bindings, selector doesn't produce bindings, thus ignoring the
+  associated directive names.
+
+  Throws an exception if the argument is not a map."
+  {:added "1.13"}
+  [m]
+  (when (not (map? m))
+    (throw-illegal-arg! "expected a map"))
+  (selector-impl m))
+
+(defmacro with-local-vars
+  "varbinding=> symbol init-expr
+
+  Executes the exprs in a context in which the symbols are bound to
+  vars with per-thread bindings to the init-exprs.  The symbols refer
+  to the var objects themselves, and must be accessed with var-get and
+  var-set"
+  {:added "1.0"}
+  [name-vals-vec & body]
+  (assert-args
+     (vector? name-vals-vec) "a vector for its binding"
+     (even? (count name-vals-vec)) "an even number of forms in binding vector")
+  `(let [~@(interleave (take-nth 2 name-vals-vec)
+                       (repeat (list 'clojure.core/__local-var*)))]
+     (clojure.core/push-thread-bindings (hash-map ~@name-vals-vec))
+     ;; The `finally` clause is a concrete list (syntax-quote
+     ;; would leave a seq, which the `try` clause matcher
+     ;; rejects); it prints exactly like the upstream shape.
+     (try ~@body ~(list 'finally (list 'clojure.core/pop-thread-bindings)))))
+
+;; --- Zero-oos S3 seq/coll walks (issue #45): `tree-seq` /
+;; `flatten` / `reduce-kv` / `merge-deep` / `merge-deep-with` /
+;; `bounded-count` / `run!` / `splitv-at` / `partitionv` /
+;; `partitionv-all` / `update-vals` / `update-keys`, ported from
+;; alpha10 `clojure/core.clj` (docstrings and `:added` kept;
+;; `:static` dropped — nothing compiles statically). Oracle:
+;; `docs/zero-oos-s3-seqs/probes/seqwalks.{clj,out}`.
+;;
+;; Port deltas from upstream (each probed):
+;; - `reduce-kv` dispatches in clj (no `IKVReduce` exists):
+;;   nil answers init, vectors take an index loop (`reduced?`
+;;   unwraps via `unreduced`, like `kvreduce`), everything
+;;   else reduces over entries with `key`/`val` (the `Object`
+;;   slow path). Bare map entries ride the slow path too
+;;   (entries are vectors but not `IKVReduce` on the JVM):
+;;   `s3-entry?` probes with `key`, the only discriminator
+;;   either runtime exposes.
+;; - `update-vals` tests editability in clj (`instance?` is
+;;   N1): maps/vectors/sets except sorted ones (not
+;;   editable on the JVM either), records (the port cannot
+;;   transient a `HostType`; the JVM drops record-ness
+;;   through the round-trip anyway), and bare entries.
+;; - `partitionv-all` 1-arity inlines the stateful
+;;   transducer in clj (an atom buffer for the `ArrayList`;
+;;   the port's `partition-all` has no 1-arity).
+;; - `merge-deep`/`merge-deep-with` self-recurse by name,
+;;   so they are declared first.
+(declare merge-deep merge-deep-with)
+
+(defn- s3-entry? [x]
+  (try (do (key x) true)
+       (catch ClassCastException _ false)))
+
+(defn- s3-editable? [m]
+  (and (or (map? m) (vector? m) (set? m))
+       (not (sorted? m))
+       (not (record? m))
+       (not (s3-entry? m))))
+
+(defn tree-seq
+  "Returns a lazy sequence of the nodes in a tree, via a depth-first walk.
+   branch? must be a fn of one arg that returns true if passed a node
+   that can have children (but may not).  children must be a fn of one
+   arg that returns a sequence of the children. Will only be called on
+   nodes for which branch? returns true. Root is the root node of the
+  tree."
+  {:added "1.0"}
+  [branch? children root]
+  (let [walk (fn walk [node]
+               (lazy-seq
+                (cons node
+                 (when (branch? node)
+                   (mapcat walk (children node))))))]
+    (walk root)))
+
+(defn flatten
+  "Takes any nested combination of sequential things (lists, vectors,
+  etc.) and returns their contents as a single, flat lazy sequence.
+  (flatten nil) returns an empty sequence."
+  {:added "1.2"}
+  [x]
+  (filter (complement sequential?)
+          (rest (tree-seq sequential? seq x))))
+
+(defn reduce-kv
+  "Reduces an associative collection. f should be a function of 3
+  arguments. Returns the result of applying f to init, the first key
+  and the first value in coll, then applying f to that result and the
+  2nd key and value, etc. If coll contains no entries, returns init
+  and f is not called. Note that reduce-kv is supported on vectors,
+  where the keys will be the ordinals."
+  {:added "1.4"}
+  [f init coll]
+  (cond
+    (nil? coll) init
+    (and (vector? coll) (not (s3-entry? coll)))
+    (let [n (count coll)]
+      (loop [i 0
+             acc init]
+        (if (< i n)
+          (let [ret (f acc i (nth coll i))]
+            (if (reduced? ret)
+              (unreduced ret)
+              (recur (inc i) ret)))
+          acc)))
+    :else (reduce (fn [acc e] (f acc (key e) (val e))) init coll)))
+
+(defn merge-deep
+  "Returns a map that consists of the rest of the maps conj-ed onto
+  the first. For each pairwise merge, when a key occurs in both maps,
+  if both values are maps, then recursively merge-deep, else use the
+  latter (left-to-right) value."
+  {:added "1.13"}
+  [& maps]
+  (apply merge-with
+    (fn [x y]
+      (if (and (map? x) (map? y))
+        (merge-deep x y)
+        y))
+    maps))
+
+(defn merge-deep-with
+  "Returns a map that consists of the rest of the maps conj-ed onto
+  the first. For each pairwise merge, when a key occurs in both maps,
+  if both values are maps, then recursively merge-deep-with, else use
+  the result of (f val-in-prior val-in-latter)."
+  {:added "1.13"}
+  [f & maps]
+  (apply merge-with
+    (fn [x y]
+      (if (and (map? x) (map? y))
+        (merge-deep-with f x y)
+        (f x y)))
+    maps))
+
+(defn bounded-count
+  "If coll is counted? returns its count, else will count at most the first n
+  elements of coll using its seq"
+  {:added "1.9"}
+  [n coll]
+  (if (counted? coll)
+    (count coll)
+    (loop [i 0 s (seq coll)]
+      (if (and s (< i n))
+        (recur (inc i) (next s))
+        i))))
+
+(defn run!
+  "Runs the supplied procedure (via reduce), for purposes of side
+  effects, on successive items in the collection. Returns nil"
+  {:added "1.7"}
+  [proc coll]
+  (reduce #(proc %2) nil coll)
+  nil)
+
+(defn splitv-at
+  "Returns a vector of [(into [] (take n) coll) (drop n coll)]"
+  {:added "1.12"}
+  [n coll]
+  [(into [] (take n) coll) (drop n coll)])
+
+(defn partitionv
+  "Returns a lazy sequence of vectors of n items each, at offsets step
+  apart. If step is not supplied, defaults to n, i.e. the partitions
+  do not overlap. If a pad collection is supplied, use its elements as
+  necessary to complete last partition upto n items. In case there are
+  not enough padding elements, return a partition with less than n items."
+  {:added "1.12"}
+  ([n coll]
+   (partitionv n n coll))
+  ([n step coll]
+   (lazy-seq
+     (when-let [s (seq coll)]
+       (let [p (into [] (take n) s)]
+         (when (= n (count p))
+           (cons p (partitionv n step (nthrest s step))))))))
+  ([n step pad coll]
+   (lazy-seq
+     (when-let [s (seq coll)]
+       (let [p (into [] (take n) s)]
+         (if (= n (count p))
+           (cons p (partitionv n step pad (nthrest s step)))
+           (list (into [] (take n) (concat p pad)))))))))
+
+(defn partitionv-all
+  "Returns a lazy sequence of vector partitions, but may include
+  partitions with fewer than n items at the end.
+  Returns a stateful transducer when no collection is provided."
+  {:added "1.12"}
+  ([n]
+   (fn [rf]
+     (let [a (atom [])]
+       (fn
+         ([] (rf))
+         ([result]
+          (let [result (if (empty? @a)
+                         result
+                         (let [v @a]
+                           (reset! a [])
+                           (unreduced (rf result v))))]
+            (rf result)))
+         ([result input]
+          (let [v (swap! a conj input)]
+            (if (= n (count v))
+              (do (reset! a [])
+                  (rf result v))
+              result)))))))
+  ([n coll]
+   (partitionv-all n n coll))
+  ([n step coll]
+   (lazy-seq
+     (when-let [s (seq coll)]
+       (let [seg (into [] (take n) coll)]
+         (cons seg (partitionv-all n step (drop step s))))))))
+
+(defn update-vals
+  "m f => {k (f v) ...}
+
+  Given a map m and a function f of 1-argument, returns a new map where the keys of m
+  are mapped to result of applying f to the corresponding values of m."
+  {:added "1.11"}
+  [m f]
+  (persistent!
+   (reduce-kv
+    (fn [acc k v] (assoc! acc k (f v)))
+    (transient
+     (if (s3-editable? m) m
+         (with-meta {} (meta m))))
+    m)))
+
+(defn update-keys
+  "m f => {(f k) v ...}
+
+  Given a map m and a function f of 1-argument, returns a new map whose
+  keys are the result of applying f to the keys of m, mapped to the
+  corresponding values of m.
+  f must return a unique key for each key of m, else the behavior is undefined."
+  {:added "1.11"}
+  [m f]
+  (let [ret (persistent!
+             (reduce-kv (fn [acc k v] (assoc! acc (f k) v))
+                        (transient {})
+                        m))]
+    (with-meta ret (meta m))))
+;; --- `with-loading-context` (S7 read gates): the JVM binds the
+;; loader around the body (probe `w-expand`); the port has no
+;; classloaders, so the macro keeps the immediate-invocation shape
+;; and the cycle guard stays native (never forked here).
+(defmacro with-loading-context [& body] `((fn ~(gensym "loading") [] ~@body)))
 
 ;; --- `defstruct` (S12): the legacy structmap basis macro (oracle
 ;; `sm-defstruct-expand` pins the expansion shape).

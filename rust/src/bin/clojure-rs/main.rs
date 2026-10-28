@@ -137,7 +137,8 @@ fn cmd_eval(form: &str, edn: bool) -> ExitCode {
 /// Evaluate and print each form (split from `cmd_eval` so the exit
 /// join runs on every path, success and failure alike).
 fn cmd_eval_forms(eval: &mut Evaluator, form: &str) -> ExitCode {
-    let forms = match eval.read_forms(form) {
+    // Live hooks (S7): `#=` evaluates during the read, like `eval_source`.
+    let forms = match eval.read_forms_live(form) {
         Ok(forms) => forms,
         Err(e) => {
             eprintln!("{}", eval_diagnostic(&e));
@@ -848,7 +849,7 @@ mod tests {
         // wrapper always reads clean), so a REAL reader error from
         // the same `read_forms` exercises the formatting.
         let err = boot()
-            .read_forms(")")
+            .read_forms_live(")")
             .expect_err("stray closer must not read");
         assert!(matches!(&err, SourceError::Reader(_)));
         assert_eq!(

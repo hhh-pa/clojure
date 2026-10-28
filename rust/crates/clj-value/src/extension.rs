@@ -77,7 +77,7 @@ pub enum ThrowClass {
     RejectedExecutionException,
     PatternSyntaxException,
     ReaderException,
-    /// `ClassNotFoundException` (S16 `import`): a checked exception
+    /// `ClassNotFoundException` (S16 `import`, wave1): a checked exception
     /// under `ReflectiveOperationException`.
     ClassNotFoundException,
     /// `NoSuchElementException` (S16 `getFirst`/`getLast` on empty
@@ -190,6 +190,33 @@ impl ThrowClass {
     }
 }
 
+/// A JVM `ClassCastException` text with JDK module verbiage: same
+/// modules combine (`A and B are in M`), different modules split
+/// (`A is in M1; B is in M2`) — byte-pinned by probe39. Shared home
+/// (moved from `clj-eval` for S6): the reader's spanful `TableCce`
+/// and the tag validators format through this too.
+#[must_use]
+pub fn cce_message(from_jvm: &str, to_jvm: &str) -> String {
+    fn module_of(cls: &str) -> &'static str {
+        if cls.starts_with("java.") {
+            "module java.base of loader 'bootstrap'"
+        } else {
+            "unnamed module of loader 'app'"
+        }
+    }
+    let from_mod = module_of(from_jvm);
+    let to_mod = module_of(to_jvm);
+    if from_mod == to_mod {
+        format!(
+            "class {from_jvm} cannot be cast to class {to_jvm} ({from_jvm} and {to_jvm} are in {from_mod})"
+        )
+    } else {
+        format!(
+            "class {from_jvm} cannot be cast to class {to_jvm} ({from_jvm} is in {from_mod}; {to_jvm} is in {to_mod})"
+        )
+    }
+}
+
 /// The superclass of a [`ThrowClass::jvm_name`], or `None` for
 /// `java.lang.Throwable` itself. Unknown names have no parent (they
 /// never appear on the chain — `matches` only walks names produced
@@ -205,6 +232,8 @@ fn throw_parent(jvm_name: &str) -> Option<&'static str> {
         "java.lang.NumberFormatException" => Some("java.lang.IllegalArgumentException"),
         "java.io.FileNotFoundException" => Some("java.io.IOException"),
         "java.io.IOException" => Some("java.lang.Exception"),
+        "java.lang.ClassNotFoundException" => Some("java.lang.ReflectiveOperationException"),
+        "java.lang.ReflectiveOperationException" => Some("java.lang.Exception"),
         "java.lang.AssertionError" => Some("java.lang.Error"),
         "java.lang.ArrayIndexOutOfBoundsException" => Some("java.lang.IndexOutOfBoundsException"),
         "java.lang.IllegalArgumentException"
@@ -299,6 +328,13 @@ pub trait ExtensionValue: std::fmt::Debug + Send + Sync {
     /// engine ever asks). Only closures, native fns (`#=(munged. )`)
     /// and namespaces (`#=(find-ns name)`) override this.
     fn dup_shape(&self) -> Option<String> {
+        None
+    }
+
+    /// The `str`/`print` display (used when not `readably`):
+    /// `None` keeps [`print`](ExtensionValue::print) (the default
+    /// — only `MathContext` overrides it, S2 oracle `wp-str`).
+    fn print_str(&self) -> Option<String> {
         None
     }
 }
@@ -961,6 +997,20 @@ mod tests {
         assert_eq!(hash_of(&other), hash_of(&other.clone()));
         let err = compare(&other, &Value::Int(1)).unwrap_err();
         assert_eq!(err.message(), "Cannot compare test.Other to Long");
+    }
+
+    #[test]
+    fn class_not_found_names_and_catches() {
+        // S7 `#=` symbol/class heads (probes `d-class-miss`,
+        // `c-qualmiss`): the JVM binary name and the
+        // `ReflectiveOperationException` catch chain.
+        let class = ThrowClass::ClassNotFoundException;
+        assert_eq!(class.jvm_name(), "java.lang.ClassNotFoundException");
+        assert!(class.matches("java.lang.ClassNotFoundException"));
+        assert!(class.matches("java.lang.ReflectiveOperationException"));
+        assert!(class.matches("java.lang.Exception"));
+        assert!(class.matches("java.lang.Throwable"));
+        assert!(!class.matches("java.lang.RuntimeException"));
     }
 
     #[test]

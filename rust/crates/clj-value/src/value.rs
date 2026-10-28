@@ -797,6 +797,11 @@ pub enum Value {
     Double(f64),
     /// Arbitrary-precision integer (`clojure.lang.BigInt`).
     BigInt(num_bigint::BigInt),
+    /// Arbitrary-precision integer (`java.math.BigInteger`, S2):
+    /// value-identical to [`Value::BigInt`] (same `=`/`hash`/
+    /// arithmetic — ops absorb it into `BigInt`), but prints
+    /// bare (`5`, never `5N`).
+    BigInteger(num_bigint::BigInt),
     /// Arbitrary-precision decimal (`java.math.BigDecimal`).
     BigDec(crate::BigDec),
     /// Exact rational (`clojure.lang.Ratio`, always normalized).
@@ -1167,21 +1172,31 @@ fn value_eq_rest(a: &Value, b: &Value) -> bool {
     }
 }
 
-/// Either side is a tower numeric (`BigInt`/`BigDec`/`Ratio`).
+/// Either side is a tower numeric
+/// (`BigInt`/`BigInteger`/`BigDec`/`Ratio`).
 fn is_tower(v: &Value) -> bool {
-    matches!(v, Value::BigInt(_) | Value::BigDec(_) | Value::Ratio(_))
+    matches!(
+        v,
+        Value::BigInt(_) | Value::BigInteger(_) | Value::BigDec(_) | Value::Ratio(_)
+    )
 }
 
 /// Tower `=` (oracle-pinned), shared by `==` (`PartialEq`) and
-/// `Util.equiv` (`jvm_equiv`): `BigInt` equivs `Int` by value and
-/// itself; `BigDec` equivs itself by `compareTo`
-/// (scale-insensitive); `Ratio` equivs itself; every other cross
-/// pairing is false.
+/// `Util.equiv` (`jvm_equiv`): `BigInt`/`BigInteger` equiv each
+/// other and `Int` by value; `BigDec` equivs itself by
+/// `compareTo` (scale-insensitive); `Ratio` equivs itself;
+/// every other cross pairing is false.
 fn tower_equiv(a: &Value, b: &Value) -> bool {
     match (a, b) {
-        (Value::BigInt(x), Value::BigInt(y)) => x == y,
-        (Value::BigInt(x), Value::Int(y)) => x.to_i64().is_some_and(|i| i == *y),
-        (Value::Int(x), Value::BigInt(y)) => y.to_i64().is_some_and(|i| i == *x),
+        (Value::BigInt(x) | Value::BigInteger(x), Value::BigInt(y) | Value::BigInteger(y)) => {
+            x == y
+        }
+        (Value::BigInt(x) | Value::BigInteger(x), Value::Int(y)) => {
+            x.to_i64().is_some_and(|i| i == *y)
+        }
+        (Value::Int(x), Value::BigInt(y) | Value::BigInteger(y)) => {
+            y.to_i64().is_some_and(|i| i == *x)
+        }
         (Value::BigDec(x), Value::BigDec(y)) => x.compare(y) == std::cmp::Ordering::Equal,
         (Value::Ratio(x), Value::Ratio(y)) => x == y,
         _ => false,
@@ -1231,7 +1246,7 @@ fn double_hash_bits(d: f64) -> u64 {
 /// unique.
 fn hash_tower_value<H: Hasher>(v: &Value, state: &mut H) {
     match v {
-        Value::BigInt(n) => {
+        Value::BigInt(n) | Value::BigInteger(n) => {
             if let Some(i) = n.to_i64() {
                 state.write_u8(2);
                 state.write_i64(i);
@@ -1274,7 +1289,7 @@ impl Hash for Value {
                 state.write_u8(3);
                 state.write_u64(double_hash_bits(*d));
             }
-            Value::BigInt(_) | Value::BigDec(_) | Value::Ratio(_) => {
+            Value::BigInt(_) | Value::BigInteger(_) | Value::BigDec(_) | Value::Ratio(_) => {
                 hash_tower_value(self, state);
             }
             Value::Str(s) => {

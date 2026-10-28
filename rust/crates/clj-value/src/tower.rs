@@ -462,6 +462,387 @@ impl BigDec {
     }
 }
 
+/// `java.math.RoundingMode` (S2): the eight `with-precision`
+/// modes (names exact — `:rounding` matching is
+/// case-sensitive, oracles `wp-lowmode`/`r3-lowmode`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RoundingMode {
+    Up,
+    Down,
+    Ceiling,
+    Floor,
+    HalfUp,
+    HalfDown,
+    HalfEven,
+    Unnecessary,
+}
+
+impl RoundingMode {
+    /// The JDK enum name (`HALF_UP`, ...).
+    #[must_use]
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Up => "UP",
+            Self::Down => "DOWN",
+            Self::Ceiling => "CEILING",
+            Self::Floor => "FLOOR",
+            Self::HalfUp => "HALF_UP",
+            Self::HalfDown => "HALF_DOWN",
+            Self::HalfEven => "HALF_EVEN",
+            Self::Unnecessary => "UNNECESSARY",
+        }
+    }
+
+    /// Parse a JDK enum name (exact — anything else is `None`).
+    #[must_use]
+    pub fn parse(name: &str) -> Option<Self> {
+        match name {
+            "UP" => Some(Self::Up),
+            "DOWN" => Some(Self::Down),
+            "CEILING" => Some(Self::Ceiling),
+            "FLOOR" => Some(Self::Floor),
+            "HALF_UP" => Some(Self::HalfUp),
+            "HALF_DOWN" => Some(Self::HalfDown),
+            "HALF_EVEN" => Some(Self::HalfEven),
+            "UNNECESSARY" => Some(Self::Unnecessary),
+            _ => None,
+        }
+    }
+}
+
+/// `java.math.MathContext` (S2): precision significant digits
+/// (0 = unlimited) plus a rounding mode.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MathContext {
+    precision: u32,
+    rounding: RoundingMode,
+}
+
+/// `MathContext(String)` with a malformed string.
+pub const BAD_CTX_FORMAT: &str = "bad string format";
+
+/// `new MathContext` with negative precision.
+pub const DIGITS_LT_0: &str = "Digits < 0";
+
+/// `UNNECESSARY` rounding of an inexact result.
+pub const ROUNDING_NECESSARY: &str = "Rounding necessary";
+
+impl MathContext {
+    /// A context from validated parts (callers range-check).
+    #[must_use]
+    pub fn new(precision: u32, rounding: RoundingMode) -> Self {
+        Self {
+            precision,
+            rounding,
+        }
+    }
+
+    #[must_use]
+    pub fn precision(&self) -> u32 {
+        self.precision
+    }
+
+    #[must_use]
+    pub fn rounding(&self) -> RoundingMode {
+        self.rounding
+    }
+
+    /// `MathContext.toString`: `precision=N roundingMode=MODE`.
+    #[must_use]
+    pub fn to_context_string(&self) -> String {
+        format!(
+            "precision={} roundingMode={}",
+            self.precision,
+            self.rounding.name()
+        )
+    }
+
+    /// `MathContext(String)`: strict `precision=N roundingMode=M`
+    /// — exact single space, case-sensitive keys and mode
+    /// (oracles `r2-str*`/`r3-*`/`r4-*`). Malformed strings fail
+    /// `bad string format`; a parsed negative precision fails
+    /// `Digits < 0`.
+    pub fn parse(s: &str) -> Result<Self, String> {
+        let rest = s.strip_prefix("precision=").ok_or(BAD_CTX_FORMAT)?;
+        let (digits, rest) = rest.split_once(' ').ok_or(BAD_CTX_FORMAT)?;
+        let mode = rest.strip_prefix("roundingMode=").ok_or(BAD_CTX_FORMAT)?;
+        let precision = digits.parse::<i32>().map_err(|_| BAD_CTX_FORMAT)?;
+        if precision < 0 {
+            return Err(DIGITS_LT_0.to_owned());
+        }
+        let rounding = RoundingMode::parse(mode).ok_or(BAD_CTX_FORMAT)?;
+        Ok(Self {
+            precision: precision as u32,
+            rounding,
+        })
+    }
+}
+
+/// Decimal digit count (magnitudes carry no leading zeros).
+fn dec_len(n: &BigInt) -> usize {
+    n.abs().to_string().len()
+}
+
+/// Whether the dropped fraction increments the kept quotient:
+/// the JDK mode table over the value sign, exactness, and the
+/// twice-remainder-vs-divisor comparison (`Less` = below half,
+/// `Equal` = exactly half, `Greater` = above half).
+fn round_up(
+    mode: RoundingMode,
+    sign: Ordering,
+    zero: bool,
+    cmp: Ordering,
+    q_odd: bool,
+) -> Result<bool, &'static str> {
+    if zero {
+        return Ok(false);
+    }
+    match mode {
+        RoundingMode::Up => Ok(true),
+        RoundingMode::Down => Ok(false),
+        RoundingMode::Ceiling => Ok(sign == Ordering::Greater),
+        RoundingMode::Floor => Ok(sign == Ordering::Less),
+        RoundingMode::HalfUp => Ok(cmp != Ordering::Less),
+        RoundingMode::HalfDown => Ok(cmp == Ordering::Greater),
+        RoundingMode::HalfEven => Ok(cmp == Ordering::Greater || (cmp == Ordering::Equal && q_odd)),
+        RoundingMode::Unnecessary => Err(ROUNDING_NECESSARY),
+    }
+}
+
+impl BigDec {
+    /// Absolute value (exact — context rounding applies on top).
+    #[must_use]
+    pub fn abs(&self) -> Self {
+        if self.sign() == Ordering::Less {
+            self.neg()
+        } else {
+            self.clone()
+        }
+    }
+
+    /// Significant digits (unscaled carries none to skip).
+    fn dec_digits(&self) -> u32 {
+        dec_len(&self.unscaled) as u32
+    }
+
+    /// `round(mc)`: to precision significant digits (0 is a
+    /// no-op). Zeros keep their scale (oracle `r5-zadd`);
+    /// increment carries scale down (`9.99` → `10`, oracles
+    /// `wp-inc`/`wp-abs`).
+    pub fn round(&self, mc: &MathContext) -> Result<Self, &'static str> {
+        if mc.precision == 0 || self.unscaled.is_zero() {
+            return Ok(self.clone());
+        }
+        let keep = mc.precision as usize;
+        let digits = dec_len(&self.unscaled);
+        if digits <= keep {
+            return Ok(self.clone());
+        }
+        let drop = digits - keep;
+        let divisor = pow10(drop as u32);
+        let abs = self.unscaled.abs();
+        let (mut q, r) = (&abs / &divisor, &abs % &divisor);
+        let double_r = &r + &r;
+        let cmp = double_r.cmp(&divisor);
+        let odd = (&q % 2) != BigInt::ZERO;
+        if round_up(mc.rounding, self.sign(), r.is_zero(), cmp, odd)? {
+            q += 1;
+        }
+        // Carry (`99→100`): one digit fewer, scale one lower.
+        let (unscaled, scale) = if q == pow10(keep as u32) {
+            (q / 10, self.scale - drop as i64 - 1)
+        } else {
+            (q, self.scale - drop as i64)
+        };
+        let unscaled = if self.sign() == Ordering::Less {
+            -unscaled
+        } else {
+            unscaled
+        };
+        Ok(Self { unscaled, scale })
+    }
+
+    /// Exact sum rounded to the context (oracles `wp-add`/`r2-add`).
+    pub fn add_mc(&self, other: &Self, mc: &MathContext) -> Result<Self, &'static str> {
+        self.add(other).round(mc)
+    }
+
+    /// `x.subtract(y, mc)` is `add(x, negate(y, mc))` — the
+    /// subtrahend rounds FIRST (oracles `r2-sub3`/`r5-selfsub`/
+    /// `r6-subceil`).
+    pub fn sub_mc(&self, other: &Self, mc: &MathContext) -> Result<Self, &'static str> {
+        self.add(&other.neg_mc(mc)?).round(mc)
+    }
+
+    /// Exact product rounded to the context (oracles `wp-mul`/`r2-mul`).
+    pub fn mul_mc(&self, other: &Self, mc: &MathContext) -> Result<Self, &'static str> {
+        self.mul(other).round(mc)
+    }
+
+    /// Negation rounded to the context (oracles `wp-neg`/`r6-negceil`).
+    pub fn neg_mc(&self, mc: &MathContext) -> Result<Self, &'static str> {
+        self.neg().round(mc)
+    }
+
+    /// Absolute value rounded to the context (oracle `wp-abs`).
+    pub fn abs_mc(&self, mc: &MathContext) -> Result<Self, &'static str> {
+        self.abs().round(mc)
+    }
+
+    /// `x.divide(y, mc)`: precision 0 (or an exact result within
+    /// precision) takes the exact path — a non-terminating one
+    /// without precision fails (oracles `wp-prec0`/
+    /// `wp-nomixratio`); zeros keep the preferred scale (oracles
+    /// `r5-zdiv`/`r5-zdiv2`); otherwise guard-digit long division
+    /// rounded to precision (oracles `wp-div`/`r2-*`).
+    pub fn div_mc(&self, other: &Self, mc: &MathContext) -> Result<Self, &'static str> {
+        if other.is_zero() {
+            return Err("Divide by zero");
+        }
+        if self.is_zero() {
+            return Ok(Self {
+                unscaled: BigInt::ZERO,
+                scale: self.scale - other.scale,
+            });
+        }
+        let q = self.to_rational() / other.to_rational();
+        if mc.precision == 0 {
+            return Self::from_rational_exact(&q);
+        }
+        // Exact-and-short keeps the stripped exact value (oracle
+        // `wp-divexact`: `(/ 1M 2M)` is `0.5M`, never `0.500M`).
+        if let Ok(exact) = Self::from_rational_exact(&q) {
+            if exact.dec_digits() <= mc.precision {
+                return Ok(exact);
+            }
+        }
+        div_round(q.numer(), q.denom(), mc)
+    }
+
+    /// Truncating integral quotient under a context (S2 oracles
+    /// `r2-quot`/`r7-quotmix`/`r8-quotscale`): the integral value
+    /// at the preferred scale (`max(0, x.scale - y.scale)`),
+    /// rounded to the context.
+    pub fn quot_mc(&self, other: &Self, mc: &MathContext) -> Result<Self, &'static str> {
+        let q = self.to_rational() / other.to_rational();
+        let trunc = q.numer() / q.denom();
+        let scale = (self.scale - other.scale).max(0);
+        Self {
+            unscaled: trunc * pow10(u32_scale(scale)),
+            scale,
+        }
+        .round(mc)
+    }
+
+    /// A ratio as a decimal under a context: exact-and-short stays
+    /// exact, else guard-digit division (oracles
+    /// `wp-mixratio`/`wp-bigdec`).
+    pub fn from_ratio_mc(r: &BigRational, mc: &MathContext) -> Result<Self, &'static str> {
+        if mc.precision == 0 {
+            return Self::from_rational_exact(r);
+        }
+        if let Ok(exact) = Self::from_rational_exact(r) {
+            if exact.dec_digits() <= mc.precision {
+                return Ok(exact);
+            }
+        }
+        div_round(r.numer(), r.denom(), mc)
+    }
+}
+
+/// Guard-digit long division: `numer/denom` (exact, nonzero)
+/// rounded to `mc.precision` significant digits (callers take
+/// the exact path for precision 0 and zero dividends). Chained
+/// so each fn stays under the complexity gate.
+fn div_round(numer: &BigInt, denom: &BigInt, mc: &MathContext) -> Result<BigDec, &'static str> {
+    debug_assert!(mc.precision > 0 && !numer.is_zero());
+    let p = mc.precision as usize;
+    let neg = numer.sign() != denom.sign();
+    let (n, d) = (numer.abs(), denom.abs());
+    // Candidate scale with one guard digit: the quotient then
+    // has `p` or `p+1` digits (normalized below).
+    let scale = p as i64 - (dec_len(&n) as i64 - dec_len(&d) as i64);
+    let (q, r) = divmod_scale(&n, &d, scale);
+    let (q, r, scale) = grow_quotient(q, r, &d, scale, p);
+    round_quotient(q, r, scale, mc, neg)
+}
+
+/// `(n * 10^scale) divmod d` (negative scales multiply the
+/// divisor instead).
+fn divmod_scale(n: &BigInt, d: &BigInt, scale: i64) -> (BigInt, BigInt) {
+    if scale >= 0 {
+        let num = n * pow10(u32_scale(scale));
+        (&num / d, &num % d)
+    } else {
+        let den = d * pow10(u32_scale(scale.saturating_neg()));
+        (n / &den, n % &den)
+    }
+}
+
+/// A guard-division scale magnitude (panics loud past `u32` like
+/// `gap_u32` — the JVM exhausts memory there too).
+fn u32_scale(scale: i64) -> u32 {
+    u32::try_from(scale).expect("BigDec divide scale exceeds u32::MAX; exact expansion infeasible")
+}
+
+/// Grow the guard quotient to exactly `p+1` digits,
+/// redistributing the remainder (exact — the value never
+/// changes).
+fn grow_quotient(
+    mut q: BigInt,
+    mut r: BigInt,
+    d: &BigInt,
+    mut scale: i64,
+    p: usize,
+) -> (BigInt, BigInt, i64) {
+    while dec_len(&q) < p + 1 {
+        let num = r.clone() * 10u32;
+        let extra = &num / d;
+        r = &num % d;
+        q = q * 10u32 + extra;
+        scale += 1;
+    }
+    (q, r, scale)
+}
+
+/// Round the `p+1`-digit guard quotient to `p` digits (guard
+/// digit + sticky remainder — exact halves detected).
+fn round_quotient(
+    q: BigInt,
+    r: BigInt,
+    scale: i64,
+    mc: &MathContext,
+    neg: bool,
+) -> Result<BigDec, &'static str> {
+    let p = mc.precision as usize;
+    let ten = BigInt::from(10);
+    let g = &q % &ten;
+    let mut rest = q / &ten;
+    let sticky = !r.is_zero();
+    let double_g = &g + &g;
+    let cmp = match double_g.cmp(&ten) {
+        Ordering::Equal if sticky => Ordering::Greater,
+        c => c,
+    };
+    let odd = (&rest % 2) != BigInt::ZERO;
+    let sign = if neg {
+        Ordering::Less
+    } else {
+        Ordering::Greater
+    };
+    if round_up(mc.rounding, sign, g.is_zero() && !sticky, cmp, odd)? {
+        rest += 1;
+    }
+    // Carry: one digit fewer, scale one lower (plus the dropped guard).
+    let (unscaled, scale) = if rest == pow10(p as u32) {
+        (rest / 10, scale - 2)
+    } else {
+        (rest, scale - 1)
+    };
+    let unscaled = if neg { -unscaled } else { unscaled };
+    Ok(BigDec { unscaled, scale })
+}
+
 /// A scale gap as `u32` for exact `pow10` expansion. Gaps past
 /// `u32::MAX` need multi-GB digit counts (only reachable through
 /// arithmetic-grown scales — literals cap at `i32`), where the

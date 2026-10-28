@@ -15,7 +15,7 @@
 
 use std::sync::Arc;
 
-use clj_reader::{ReaderOpts, Span, read_all};
+use clj_reader::{Reader, ReaderOpts, Span};
 use clj_value::{
     Delay, Keyword, List, Map, Promise, Symbol, ThrowClass, Throwable, Value, Var, Vector, new_map,
 };
@@ -368,18 +368,182 @@ impl Evaluator {
     /// namespace (syntax-quote and `::` resolve read-time, like the
     /// JVM). S7 drivers use this + [`eval_top_form`](Self::eval_top_form)
     /// to iterate per-form (print/shift each value, stop at the
-    /// first error).
-    pub fn read_forms(&self, text: &str) -> Result<Vec<Value>, SourceError> {
-        let cur = self.current_ns_name();
+    /// first error). Like `Compiler.load`, leading whitespace is
+    /// consumed before the zero-oos-S7 entry checks (which blame
+    /// the post-skip position), and `*read-eval*` is forced true.
+    /// The hook applies `#=` and consults the resolver (hookless
+    /// callers pass `NoHooks`, which reports `#=` unevaluated).
+    /// Data readers resolve per form (S6): the consult
+    /// re-snapshots every iteration (user code runs between forms),
+    /// fired discards drain before each form resolves, and
+    /// resolution failures surface as uncaught throwables.
+    pub fn read_forms(
+        &mut self,
+        text: &str,
+        hook: &mut dyn clj_reader::ReadHooks,
+    ) -> Result<Vec<Value>, SourceError> {
+        let (reader, seed) = Self::read_forms_pre(self, text);
+        match seed {
+            Ok(seed) => {
+                let mut reader = reader;
+                let mut opts = Self::read_forms_opts(self, &seed);
+                Self::read_forms_loop(self, &mut reader, hook, &mut opts)
+            }
+            Err(cce) => Err(crate::reader::executing_wrap(
+                reader.line(),
+                reader.col(),
+                &cce,
+                hook.fresh_id(),
+                hook.fresh_id(),
+            )),
+        }
+    }
+
+    /// [`read_forms`](Self::read_forms) with the live evaluator
+    /// hooks (what `eval`/`load` use). The loop is inlined (not
+    /// shared with `read_forms_loop`): the live hooks borrow the
+    /// evaluator, which the per-form consult also needs mutably,
+    /// so each attempt scopes its own hooks.
+    pub fn read_forms_live(&mut self, text: &str) -> Result<Vec<Value>, SourceError> {
+        let (reader, seed) = Self::read_forms_pre(self, text);
+        match seed {
+            Ok(seed) => {
+                let mut reader = reader;
+                let mut opts = Self::read_forms_opts(self, &seed);
+                let mut forms = Vec::new();
+                loop {
+                    crate::core::snapshot_data_readers(self, &mut opts);
+                    reader.set_opts(&opts);
+                    let outcome = {
+                        let mut hooks = crate::reader::LiveReadHooks::new(self);
+                        reader.read_form(false, &mut hooks)
+                    };
+                    match outcome {
+                        Ok(Some(v)) => {
+                            Self::drain_data_readers(self, &mut reader, opts.suppress_read)?;
+                            forms.push(Self::resolve_data_readers(self, v, opts.suppress_read)?);
+                        }
+                        Ok(None) => {
+                            Self::drain_data_readers(self, &mut reader, opts.suppress_read)?;
+                            return Ok(forms);
+                        }
+                        Err(e) => {
+                            // Effects precede the failure (fired tags ran
+                            // during the read), so drain first.
+                            Self::drain_data_readers(self, &mut reader, opts.suppress_read)?;
+                            return Err(SourceError::Reader(e));
+                        }
+                    }
+                }
+            }
+            Err(cce) => {
+                let outer = self.next_id();
+                let cause = self.next_id();
+                Err(crate::reader::executing_wrap(
+                    reader.line(),
+                    reader.col(),
+                    &cce,
+                    outer,
+                    cause,
+                ))
+            }
+        }
+    }
+
+    /// The shared read prologue: synced options, leading
+    /// whitespace consumed, gates seeded (entry failures keep the
+    /// post-skip reader, so callers blame the position like
+    /// `Compiler.load`).
+    fn read_forms_pre(
+        eval: &mut Evaluator,
+        text: &str,
+    ) -> (
+        clj_reader::Reader,
+        Result<crate::reader::ReadGateSeed, NativeError>,
+    ) {
+        let mut reader = clj_reader::Reader::new(text, &ReaderOpts::default());
+        reader.consume_whitespaces();
+        let seed = crate::reader::seed_load_gates(eval);
+        if let Ok(seed) = &seed {
+            reader.set_opts(&Self::read_forms_opts(eval, seed));
+        }
+        (reader, seed)
+    }
+
+    /// The synced base options for [`read_forms`](Self::read_forms):
+    /// the current namespace maps plus the seeded read gates (the
+    /// prologue installs them on the reader; the per-form loops
+    /// re-snapshot the data-reader fields from this base).
+    fn read_forms_opts(eval: &mut Evaluator, seed: &crate::reader::ReadGateSeed) -> ReaderOpts {
+        let cur = eval.current_ns_name();
         let mut opts = ReaderOpts {
             current_ns: cur.clone(),
             ..Default::default()
         };
-        if let Some(ns) = self.registry.get(&cur) {
+        if let Some(ns) = eval.registry.get(&cur) {
             opts.aliases = ns.alias_map();
             opts.refers = ns.refer_map();
         }
-        read_all(text, &opts).map_err(SourceError::Reader)
+        opts.read_eval = seed.read_eval;
+        opts.suppress_read = seed.suppress_read;
+        opts.resolver_bound = seed.resolver_bound;
+        opts
+    }
+
+    /// Read every form from a primed reader, resolving data
+    /// readers per form (S6 consult inside the S7 hook loop).
+    fn read_forms_loop(
+        eval: &mut Evaluator,
+        reader: &mut clj_reader::Reader,
+        hook: &mut dyn clj_reader::ReadHooks,
+        opts: &mut ReaderOpts,
+    ) -> Result<Vec<Value>, SourceError> {
+        let mut forms = Vec::new();
+        loop {
+            crate::core::snapshot_data_readers(eval, opts);
+            reader.set_opts(opts);
+            match reader.read_form(false, hook) {
+                Ok(Some(v)) => {
+                    Self::drain_data_readers(eval, reader, opts.suppress_read)?;
+                    forms.push(Self::resolve_data_readers(eval, v, opts.suppress_read)?);
+                }
+                Ok(None) => {
+                    Self::drain_data_readers(eval, reader, opts.suppress_read)?;
+                    return Ok(forms);
+                }
+                Err(e) => {
+                    // Effects precede the failure (fired tags ran
+                    // during the read), so drain first.
+                    Self::drain_data_readers(eval, reader, opts.suppress_read)?;
+                    return Err(SourceError::Reader(e));
+                }
+            }
+        }
+    }
+
+    /// Drain one read's fired discards (S6), reporting failures as
+    /// uncaught throwables. `suppressed` is the entry seed (M2).
+    fn drain_data_readers(
+        &mut self,
+        reader: &mut Reader,
+        suppressed: bool,
+    ) -> Result<(), SourceError> {
+        let fired = reader.take_fired();
+        crate::core::drain_fired_tags(self, fired, suppressed)
+            .map_err(|e| SourceError::Uncaught(self.throwable(e)))
+    }
+
+    /// Resolve one read form's deferred tags (S6), reporting
+    /// failures as uncaught throwables. `suppressed` is the entry
+    /// seed (M2 — `snapshot_data_readers` never touches it, so the
+    /// loops' `opts.suppress_read` stays the entry value).
+    fn resolve_data_readers(
+        &mut self,
+        form: Value,
+        suppressed: bool,
+    ) -> Result<Value, SourceError> {
+        crate::core::resolve_data_readers(self, form, suppressed)
+            .map_err(|e| SourceError::Uncaught(self.throwable(e)))
     }
 
     /// Read every form in `text` (default `:read-cond :allow`
@@ -387,7 +551,7 @@ impl Evaluator {
     /// read form. Uncaught throwables (including bare macro-arity
     /// failures) abort the load.
     pub fn eval_source(&mut self, text: &str) -> Result<Vec<Value>, SourceError> {
-        let forms = self.read_forms(text)?;
+        let forms = self.read_forms_live(text)?;
         let mut out = Vec::with_capacity(forms.len());
         for form in &forms {
             out.push(self.eval_top_form(form)?);
@@ -548,6 +712,12 @@ impl Evaluator {
 
     /// Stamp a runtime failure with an identity and throw it.
     pub(crate) fn throw(&mut self, err: NativeError) -> Signal {
+        Signal::Throw(self.throwable(err))
+    }
+
+    /// Stamp a runtime failure with an identity (S6: read paths
+    /// report data-reader failures as uncaught throwables).
+    pub(crate) fn throwable(&mut self, err: NativeError) -> Throwable {
         let inner = err.into_inner();
         // A missing message stays missing (the JVM's no-arg
         // `CancellationException` reports a nil message, and
@@ -557,13 +727,13 @@ impl Evaluator {
         } else {
             Some(Arc::from(inner.message.as_str()))
         };
-        Signal::Throw(Throwable {
+        Throwable {
             id: self.next_id(),
             class: inner.class,
             message,
             data: inner.data.map(Box::new),
             cause: inner.cause.map(Box::new),
-        })
+        }
     }
 
     /// The visible value of a var: thread binding, else root (or
@@ -2219,9 +2389,18 @@ impl Evaluator {
                 *map = std::mem::replace(map, new_map()).insert((**key).clone(), (**val).clone());
                 Ok(())
             }
-            Value::List(l) => self.check_seqable_trailing(map, l.iter().next().cloned()),
-            Value::Set(s) => self.check_seqable_trailing(map, s.iter().next().cloned()),
-            Value::Str(s) => self.check_seqable_trailing(map, s.chars().next().map(Value::Char)),
+            Value::List(l) => {
+                let elems: Vec<Value> = l.iter().cloned().collect();
+                self.fold_seqable_trailing(map, elems)
+            }
+            Value::Set(s) => {
+                let elems: Vec<Value> = s.iter().cloned().collect();
+                self.fold_seqable_trailing(map, elems)
+            }
+            Value::Str(s) => {
+                let elems: Vec<Value> = s.chars().map(Value::Char).collect();
+                self.fold_seqable_trailing(map, elems)
+            }
             other => Err(self.throw(NativeError::new(
                 ThrowClass::IllegalArgumentException,
                 format!(
@@ -2232,25 +2411,25 @@ impl Evaluator {
         }
     }
 
-    /// The odd-tail seqable rule: empties vanish, a leading entry
-    /// conjs as its pair (Oracle FX2 `trailer-listentry`), else the
-    /// first element is the entry-cast error.
-    fn check_seqable_trailing(
-        &mut self,
-        map: &mut Map,
-        first: Option<Value>,
-    ) -> Result<(), Signal> {
-        match first {
-            None => Ok(()),
-            Some(Value::MapEntry { key, val }) => {
-                *map = std::mem::replace(map, new_map()).insert(*key, *val);
-                Ok(())
+    /// The odd-tail seqable rule: empties vanish, every entry
+    /// conjs as its pair (Oracle FX2 `trailer-listentry`), and the
+    /// first non-entry is the entry-cast error (issue #70: the JVM
+    /// `APersistentMap.cons` loop folds EVERY seqed element).
+    fn fold_seqable_trailing(&mut self, map: &mut Map, elems: Vec<Value>) -> Result<(), Signal> {
+        for elem in elems {
+            match elem {
+                Value::MapEntry { key, val } => {
+                    *map = std::mem::replace(map, new_map()).insert(*key, *val);
+                }
+                other => {
+                    return Err(self.throw(NativeError::cast(
+                        &jvm_class_of(&other),
+                        "java.util.Map$Entry",
+                    )));
+                }
             }
-            Some(first) => Err(self.throw(NativeError::cast(
-                &jvm_class_of(&first),
-                "java.util.Map$Entry",
-            ))),
         }
+        Ok(())
     }
 }
 
@@ -2635,5 +2814,30 @@ mod tests {
             t.message.as_deref(),
             Some("Cannot enter synchronized block because \"lock\" is null")
         );
+    }
+
+    #[test]
+    fn read_forms_seed_cce_wraps() {
+        // Coverage for `read_forms`' seed-failure arm (the
+        // `load-string` twin is oracle-pinned by
+        // `m-load-resolver`; this is the hook-taking twin the
+        // AOT subset drives): a non-fn `*reader-resolver*`
+        // fails the entry cast, wrapped as an executing error
+        // at the seed position.
+        let mut eval = crate::ns::boot();
+        eval.eval_source("(alter-var-root #'clojure.core/*reader-resolver* (constantly 42))")
+            .expect("root flip");
+        let err = eval
+            .read_forms("(+ 1 2)", &mut clj_reader::NoHooks)
+            .expect_err("seed cce");
+        // No root restore: with 42 still bound, even the restore
+        // form would trip the entry cast; the evaluator is dropped
+        // with the test. (`Display` renders `Class | message`,
+        // like the integration `uncaught` helper. The `const`
+        // keeps the assert on one line — multi-line assert
+        // literals attract dead macro regions.)
+        const WANT: &str =
+            "clojure.lang.Compiler$CompilerException | Syntax error executing at (1:1).";
+        assert_eq!(err.to_string(), WANT);
     }
 }

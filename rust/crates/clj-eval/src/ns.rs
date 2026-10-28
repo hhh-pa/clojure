@@ -16,6 +16,7 @@
 
 use std::sync::Arc;
 
+use clj_reader::ReaderError;
 use clj_value::{
     Keyword, List, Map, PrintOpts, Set, Symbol, ThrowClass, Throwable, Value, Var, Vector, new_map,
     new_set, pr_to_string, seq_vec,
@@ -221,7 +222,7 @@ fn iseq_err(v: &Value) -> NativeError {
 
 /// A `throw` signal as a native error (the class, message, data, and
 /// cause survive; the evaluator stamps a fresh identity).
-fn throwable_to_native(t: &Throwable) -> NativeError {
+pub(crate) fn throwable_to_native(t: &Throwable) -> NativeError {
     let mut err = NativeError::new(t.class, t.message.as_deref().unwrap_or("").to_owned());
     err.data = t.data.clone().map(|b| *b);
     err.cause = t.cause.clone().map(|b| *b);
@@ -666,7 +667,7 @@ fn native_refer_clojure(eval: &mut Evaluator, args: &[Value]) -> Result<Value, N
 /// Route an `intern` through a handle pin (stale handles land in
 /// the tombstone, which becomes the var's home) or by name (live
 /// first). Returns the var id and the home namespace id.
-fn intern_routed(
+pub(crate) fn intern_routed(
     eval: &mut Evaluator,
     ns_name: &str,
     pinned: Option<u64>,
@@ -727,7 +728,7 @@ fn native_intern(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeEr
 /// `ns-resolve`/`resolve` through an explicit home (the env check
 /// runs before symbol validation, like the `when-not` in
 /// `ns-resolve`).
-fn do_resolve(
+pub(crate) fn do_resolve(
     eval: &Evaluator,
     ns_name: &str,
     pinned: Option<u64>,
@@ -799,6 +800,65 @@ fn native_resolve(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeE
     do_resolve(eval, &cur, None, env, sym_v)
 }
 
+/// `find-var`: the interned var named by a namespace-qualified
+/// symbol, or nil when the namespace exists but the var does not
+/// (S5; oracle `f-*`). Refers are blind (interns only, like
+/// `Var.find`); a missing namespace and an unqualified symbol
+/// throw `IllegalArgumentException`, like the JVM.
+fn native_find_var(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.core/find-var", args, &[1])?;
+    let sym = match &args[0] {
+        Value::Nil => {
+            return Err(npe(
+                "Cannot read field \"ns\" because \"nsQualifiedSym\" is null",
+            ));
+        }
+        Value::Symbol(s) => s,
+        other => return Err(cce_err(other, SYMBOL_CLASS)),
+    };
+    let Some(ns_part) = sym.namespace() else {
+        return Err(NativeError::new(
+            ThrowClass::IllegalArgumentException,
+            "Symbol must be namespace-qualified".to_owned(),
+        ));
+    };
+    let Some(home) = eval.registry.get(ns_part) else {
+        return Err(NativeError::new(
+            ThrowClass::IllegalArgumentException,
+            format!("No such namespace: {ns_part}"),
+        ));
+    };
+    match home.lookup(sym) {
+        Some(id) => Ok(var_value(id, sym)),
+        None => Ok(Value::Nil),
+    }
+}
+
+/// `requiring-resolve`: resolve a namespace-qualified symbol in
+/// the current ns, requiring its namespace first when the initial
+/// resolve misses (S5; oracle `g-*`). Loader failures propagate
+/// in port shapes.
+fn native_requiring_resolve(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.core/requiring-resolve", args, &[1])?;
+    let ns_part = match &args[0] {
+        Value::Symbol(s) if s.namespace().is_some() => s.namespace().unwrap_or("").to_owned(),
+        _ => {
+            return Err(NativeError::new(
+                ThrowClass::IllegalArgumentException,
+                format!("Not a qualified symbol: {}", str_of(&args[0])),
+            ));
+        }
+    };
+    let cur = eval.current_ns_name();
+    let first = do_resolve(eval, &cur, None, None, &args[0])?;
+    if !matches!(first, Value::Nil) {
+        return Ok(first);
+    }
+    let lib = Value::Symbol(Symbol::new(None, &ns_part));
+    load_libs(eval, &["require"], std::slice::from_ref(&lib))?;
+    do_resolve(eval, &cur, None, None, &args[0])
+}
+
 fn native_ns_unmap(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/ns-unmap", args, &[2])?;
     let ns_name = the_ns_name(&eval.registry, &args[0])?;
@@ -860,6 +920,7 @@ pub(crate) fn throw_class_for(name: &str) -> ThrowClass {
         "ArityException" => ThrowClass::ArityException,
         "NullPointerException" => ThrowClass::NullPointerException,
         "ClassCastException" => ThrowClass::ClassCastException,
+        "ClassNotFoundException" => ThrowClass::ClassNotFoundException,
         "IndexOutOfBoundsException" => ThrowClass::IndexOutOfBoundsException,
         "ArrayIndexOutOfBoundsException" => ThrowClass::ArrayIndexOutOfBoundsException,
         "NegativeArraySizeException" => ThrowClass::NegativeArraySizeException,
@@ -900,12 +961,21 @@ fn source_to_native(eval: &mut Evaluator, source: &str, e: SourceError) -> Nativ
                     site_of(source, span)
                 ),
             );
-            outer.cause = Some(Throwable {
-                id: eval.next_id(),
-                class: throw_class_for(e.jvm_class()),
-                message: Some(Arc::from(e.message().as_str())),
-                data: None,
-                cause: None,
+            // S7: a `#=`/resolver throwable rides as the cause
+            // intact (its `ex-data` and cause chain survive the
+            // wrap, like the JVM).
+            outer.cause = Some(match e {
+                ReaderError::EvalFailed {
+                    error: clj_reader::EvalReadError::Failed(t),
+                    ..
+                } => t.clone(),
+                _ => Throwable {
+                    id: eval.next_id(),
+                    class: throw_class_for(e.jvm_class()),
+                    message: Some(Arc::from(e.message().as_str())),
+                    data: None,
+                    cause: None,
+                },
             });
             outer
         }
@@ -939,8 +1009,37 @@ fn core_var_handle(id: u64, name: &str) -> Var {
     }
 }
 
-fn core_var(eval: &Evaluator, name: &str) -> Option<u64> {
+pub(crate) fn core_var(eval: &Evaluator, name: &str) -> Option<u64> {
     id_of(&eval.registry, &Symbol::new(Some("clojure.core"), name))
+}
+
+/// Stamp `:arglists` meta on an installed `clojure.core` var
+/// (one vector per arity; S8 single-arity calls route through
+/// here too).
+pub(crate) fn set_arglists_multi(eval: &mut Evaluator, name: &str, arities: &[&[&str]]) {
+    let q = Symbol::new(Some("clojure.core"), name);
+    let id = eval.registry.intern(&q);
+    let arglists = Value::List(List::from_vec(
+        arities
+            .iter()
+            .map(|params| {
+                Value::Vector(Vector::from_vec(
+                    params
+                        .iter()
+                        .map(|p| Value::Symbol(Symbol::new(None, p)))
+                        .collect(),
+                ))
+            })
+            .collect(),
+    ));
+    eval.registry.with_state_mut(id, |st| {
+        let meta = st
+            .meta
+            .clone()
+            .unwrap_or_else(new_map)
+            .insert(Value::Keyword(Keyword::new(None, "arglists")), arglists);
+        st.meta = Some(meta);
+    });
 }
 
 /// The visible value of a `clojure.core` var (total fallback nil —
@@ -1095,6 +1194,13 @@ fn run_loaded(
     }
     if isolate_ns {
         push_ns_frame(eval, &mut depth);
+    }
+    // S7: load forces `*read-eval*` true, visibly (probes `l-gate`,
+    // `m-*` — `Compiler.load` binds it the same way). The push rides
+    // the `depth` pop below (`*file*` is installed whenever this is,
+    // so a depth always exists here).
+    if let Some(id) = core_var(eval, "*read-eval*") {
+        eval.push_binding(core_var_handle(id, "*read-eval*"), Value::Bool(true));
     }
     let out = eval.load_source(spans, text);
     eval.registry.set_current(&cur);
@@ -1688,6 +1794,121 @@ fn native_load_string(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nat
     }
 }
 
+/// `load-reader`: read every form from a reader and evaluate
+/// them, returning the last value (nil when empty — S7; probes
+/// `l-*`). `*file*` is nil, `*ns*` is isolated, `*read-eval*` is
+/// forced true (visibly), and `*pending-paths*` is untouched.
+fn native_load_reader(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.core/load-reader", args, &[1])?;
+    let reader = match &args[0] {
+        Value::Nil => {
+            return Err(NativeError::new(
+                ThrowClass::NullPointerException,
+                String::new(),
+            ));
+        }
+        v => match crate::reader::as_reader(v) {
+            Some(r) => r,
+            None => return Err(cce_err(v, "java.io.Reader")),
+        },
+    };
+    // `Compiler.load` consumes leading whitespace before its entry
+    // checks, so entry failures blame the post-skip position; the
+    // parser stays out of its lock for the whole read phase (the
+    // hook runs user code, which may read the same reader again).
+    let mut opts = clj_reader::ReaderOpts {
+        read_cond: clj_reader::ReadCond::Allow,
+        ..clj_reader::ReaderOpts::default()
+    };
+    let (mut parser, _) = crate::reader::take_parser(reader, &opts);
+    parser.consume_whitespaces();
+    let (line, col) = (parser.line(), parser.col());
+    let seed = match crate::reader::seed_load_gates(eval) {
+        Ok(seed) => seed,
+        Err(cce) => {
+            let wrap =
+                crate::reader::executing_wrap(line, col, &cce, eval.next_id(), eval.next_id());
+            crate::reader::restore_parser(reader, parser);
+            return Err(source_to_native(eval, "", wrap));
+        }
+    };
+    crate::reader::sync_reader_ns(eval, &mut opts);
+    opts.read_eval = seed.read_eval;
+    opts.suppress_read = seed.suppress_read;
+    opts.resolver_bound = seed.resolver_bound;
+    parser.set_opts(&opts);
+    let mut forms = Vec::new();
+    loop {
+        // Per-form S6 consult (B1 — mirrors `read_forms_loop`):
+        // snapshot, read, drain, resolve. Data-reader failures
+        // surface like `load`'s (raw uncaught throwables, not
+        // `CompilerException` wraps).
+        crate::core::snapshot_data_readers(eval, &mut opts);
+        parser.set_opts(&opts);
+        let outcome = {
+            let mut hooks = crate::reader::LiveReadHooks::new(&mut *eval);
+            parser.read_form(false, &mut hooks)
+        };
+        let fired = parser.take_fired();
+        let suppressed = opts.suppress_read;
+        if let Err(e) = crate::core::drain_fired_tags(eval, fired, suppressed) {
+            crate::reader::restore_parser(reader, parser);
+            let thrown = eval.throwable(e);
+            return Err(source_to_native(eval, "", SourceError::Uncaught(thrown)));
+        }
+        match outcome {
+            Ok(Some(form)) => match crate::core::resolve_data_readers(eval, form, suppressed) {
+                Ok(form) => forms.push(form),
+                Err(e) => {
+                    crate::reader::restore_parser(reader, parser);
+                    let thrown = eval.throwable(e);
+                    return Err(source_to_native(eval, "", SourceError::Uncaught(thrown)));
+                }
+            },
+            Ok(None) => break,
+            Err(e) => {
+                crate::reader::restore_parser(reader, parser);
+                return Err(source_to_native(eval, "", SourceError::Reader(e)));
+            }
+        }
+    }
+    crate::reader::restore_parser(reader, parser);
+    run_loaded_values(eval, forms)
+}
+
+/// Evaluate loaded forms under the `load-reader` frame (`*file*`
+/// nil, `*ns*` isolated, `*read-eval*` forced true) and return the
+/// last value (nil when empty).
+fn run_loaded_values(eval: &mut Evaluator, forms: Vec<Value>) -> Result<Value, NativeError> {
+    let cur = eval.registry.current().to_owned();
+    let mut depth = None;
+    if let Some(id) = core_var(eval, "*file*") {
+        depth = Some(eval.push_binding(core_var_handle(id, "*file*"), Value::Nil));
+    }
+    push_ns_frame(eval, &mut depth);
+    if let Some(id) = core_var(eval, "*read-eval*") {
+        eval.push_binding(core_var_handle(id, "*read-eval*"), Value::Bool(true));
+    }
+    let mut out = Value::Nil;
+    for form in &forms {
+        match eval.eval_top_form(form) {
+            Ok(v) => out = v,
+            Err(e) => {
+                eval.registry.set_current(&cur);
+                if let Some(d) = depth {
+                    eval.pop_bindings(d);
+                }
+                return Err(source_to_native(eval, "", e));
+            }
+        }
+    }
+    eval.registry.set_current(&cur);
+    if let Some(d) = depth {
+        eval.pop_bindings(d);
+    }
+    Ok(out)
+}
+
 fn native_loaded_libs(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/loaded-libs", args, &[0])?;
     Ok(Value::Set(libs_set(eval)?))
@@ -1726,6 +1947,8 @@ const NATIVES: &[(&str, NativeFnPtr)] = &[
     ("intern", native_intern),
     ("ns-resolve", native_ns_resolve),
     ("resolve", native_resolve),
+    ("find-var", native_find_var),
+    ("requiring-resolve", native_requiring_resolve),
     ("ns-unmap", native_ns_unmap),
     ("ns-unalias", native_ns_unalias),
     ("require", native_require),
@@ -1733,6 +1956,7 @@ const NATIVES: &[(&str, NativeFnPtr)] = &[
     ("load", native_load),
     ("load-string", native_load_string),
     ("load-file", native_load_file),
+    ("load-reader", native_load_reader),
     ("loaded-libs", native_loaded_libs),
     ("eval", native_eval),
 ];
@@ -1790,6 +2014,21 @@ fn core_vars(user_ns: Value) -> Vec<(String, Value, bool, bool)> {
         ("*e".to_owned(), Value::Nil, true, false),
         // S7 CLI (P4): nil root; `run` binds the arg seq.
         ("*command-line-args*".to_owned(), Value::Nil, true, false),
+        // S6 data readers: the tag table (empty root) and the
+        // default-fn fallback (nil root); both `^:dynamic` with
+        // `:dynamic` meta (probes `a-roots`, `a-meta`).
+        (
+            "*data-readers*".to_owned(),
+            Value::Map(new_map()),
+            true,
+            false,
+        ),
+        (
+            "*default-data-reader-fn*".to_owned(),
+            Value::Nil,
+            true,
+            false,
+        ),
         // S7 environment (P3): a plain (non-dynamic) root map over
         // the workspace release version.
         (
@@ -1888,6 +2127,7 @@ pub fn boot() -> Evaluator {
     let user_handle = ns_value("user", user_ns);
     boot_core_vars(&mut eval, user_handle.clone());
     crate::printsys::boot_print_system(&mut eval);
+    crate::reader::boot_read_arglists(&mut eval);
     boot_refer_user(&mut eval);
     if let Some(id) = core_var(&eval, "*ns*") {
         eval.push_binding(core_var_handle(id, "*ns*"), user_handle);
@@ -1925,6 +2165,7 @@ fn boot_install_natives(eval: &mut Evaluator) {
         .chain(crate::types::TYPES_NATIVES.iter())
         .chain(crate::protocol::PROTOCOL_NATIVES.iter())
         .chain(crate::multi::MULTI_NATIVES.iter())
+        .chain(crate::core::TOWER_NATIVES.iter())
         .chain(crate::collmisc::COLLMISC_NATIVES.iter())
         .chain(crate::printsys::PRINTSYS_NATIVES.iter())
         .chain(crate::classemu::CLASS_EMU_NATIVES.iter())
@@ -2007,10 +2248,23 @@ fn boot_core_vars(eval: &mut Evaluator, user_handle: Value) {
     def_dynamic_root(eval, "*print-meta*", Value::Bool(false));
     def_dynamic_root(eval, "*print-readably*", Value::Bool(true));
     def_dynamic_root(eval, "*print-dup*", Value::Bool(false));
+    // S7 read gates (issue #50; probes `a-*`): the roots the JVM
+    // interns them with (no `:dynamic` meta, like the others here).
+    def_dynamic_root(eval, "*read-eval*", Value::Bool(true));
+    def_dynamic_root(eval, "*suppress-read*", Value::Nil);
+    def_dynamic_root(eval, "*reader-resolver*", Value::Nil);
     def_dynamic_root(eval, "*flush-on-newline*", Value::Bool(true));
     // `RT.java`: `*agent*` is a dynamic slot with a nil root (bound
     // to the agent inside each action by `send`).
     def_dynamic_root(eval, "*agent*", Value::Nil);
+    // `RT.java`: `*math-context*` is a dynamic slot with a nil
+    // root, bound by `with-precision` (S2; no `:dynamic` meta —
+    // oracle `mc-meta`).
+    def_dynamic_root(eval, "*math-context*", Value::Nil);
+    // S6: the default tag table (a plain map var — neither dynamic
+    // nor private, probe `a-ddr-meta`).
+    let defaults = crate::core::default_data_readers_map(eval);
+    def_var(eval, "default-data-readers", defaults, false, false);
 }
 
 /// Refer every public install into `user` (JVM boot refers
@@ -2058,12 +2312,16 @@ fn boot_refer_user(eval: &mut Evaluator) {
             "*print-meta*",
             "*print-readably*",
             "*print-dup*",
+            "*read-eval*",
+            "*suppress-read*",
+            "*reader-resolver*",
             "*flush-on-newline*",
             "print-method",
             "print-dup",
             "char-escape-string",
             "char-name-string",
             "*agent*",
+            "*math-context*",
             "*print-length*",
             "*print-level*",
             "*print-namespace-maps*",
@@ -2073,6 +2331,9 @@ fn boot_refer_user(eval: &mut Evaluator) {
             "*e",
             "*command-line-args*",
             "*clojure-version*",
+            "*data-readers*",
+            "*default-data-reader-fn*",
+            "default-data-readers",
         ]
         .iter()
         .map(|s| (*s).to_owned()),

@@ -1,0 +1,8 @@
+r5-selfsub -0.002M
+r5-mixsub 0.667M
+r5-zdiv 0M
+r5-zdiv2 0.0M
+r5-zadd 0.0M
+r5-garbage THROW java.lang.ClassCastException|"class java.lang.Long cannot be cast to class java.math.MathContext (java.lang.Long and java.math.MathContext are in module java.base of loader 'bootstrap')"
+r5-garbage-int 3
+r5-garbage-str THROW java.lang.ClassCastException|"class java.lang.String cannot be cast to class java.math.MathContext (java.lang.String and java.math.MathContext are in module java.base of loader 'bootstrap')"

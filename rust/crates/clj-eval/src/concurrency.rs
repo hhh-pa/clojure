@@ -62,7 +62,7 @@ use std::time::{Duration, Instant};
 use clj_value::{
     Agent, AgentAction, AgentPool, Atom, Delay, DelayState, ErrorMode, Future, FutureOutcome,
     FutureState, Keyword, Map, PrintOpts, Promise, QueuedAction, Symbol, ThrowClass, Throwable,
-    Value, Var, Volatile, new_map, pr_to_string,
+    Value, Var, Vector, Volatile, new_map, pr_to_string,
 };
 
 use crate::core::{cce_err, is_ifn};
@@ -244,13 +244,13 @@ fn try_publish(atom: &Atom, old: &Value, new: &Value) -> Option<Map> {
 /// The `swap!` CAS loop: apply `f`, validate, publish iff the state
 /// is unchanged (else retry — `f` published meanwhile). Validation
 /// vetoes and `f` failures leave the state untouched and fire no
-/// watches.
+/// watches. Answers `[old new]` (callers take what they return).
 fn swap_loop(
     eval: &mut Evaluator,
     atom: &Atom,
     f: &Value,
     extra: &[Value],
-) -> Result<Value, NativeError> {
+) -> Result<(Value, Value), NativeError> {
     loop {
         let old = atom.lock().value.clone();
         let mut f_args = Vec::with_capacity(extra.len() + 1);
@@ -263,7 +263,7 @@ fn swap_loop(
         }
         if let Some(watches) = try_publish(atom, &old, &new) {
             fire_watches(eval, atom, &old, &new, &watches)?;
-            return Ok(new);
+            return Ok((old, new));
         }
     }
 }
@@ -308,7 +308,7 @@ fn native_swap(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErro
         other => return Err(cce_err(other, "clojure.lang.IAtom")),
     };
     check_swap_fn(&args[1], args.len())?;
-    swap_loop(eval, &atom, &args[1], &args[2..])
+    swap_loop(eval, &atom, &args[1], &args[2..]).map(|(_, new)| new)
 }
 
 fn native_reset(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
@@ -1257,19 +1257,18 @@ fn fail_head(
 /// forked evaluator (bindings conveyed at send time, `*agent*` bound
 /// around the fn call, the watches, and the error handler — only
 /// the validator runs bare, like the JVM's popped conveyor). The
-/// validator is captured at send (no setter exists, so it never
-/// changes).
+/// validator reads at completion (a `set-validator!` between send
+/// and completion applies, like the JVM's `getValidator` there).
 struct EvalAction {
     child: Evaluator,
-    agent: Value,
+    agent: Agent,
     f: Value,
     args: Vec<Value>,
-    validator: Option<Value>,
 }
 
 impl AgentAction for EvalAction {
     fn run(&mut self, state: &Value) -> Result<Value, Throwable> {
-        let bound = bind_agent(&mut self.child, &self.agent);
+        let bound = bind_agent(&mut self.child, &Value::Agent(self.agent.clone()));
         // Arm the nested-send outbox for the fn AND the watches (the
         // JVM's `nested` buffer spans both): failures below discard
         // it, success leaves it for release after the watches.
@@ -1288,7 +1287,8 @@ impl AgentAction for EvalAction {
                 return Err(e);
             }
         };
-        let validated = match self.validator.clone() {
+        let validator = self.agent.lock().validator.clone();
+        let validated = match validator {
             Some(validator) => validate_action(&mut self.child, &validator, &candidate),
             None => Ok(()),
         };
@@ -1576,14 +1576,12 @@ fn send_action(
     f: &Value,
     extra: &[Value],
 ) -> Result<Value, NativeError> {
-    let validator = agent.lock().validator.clone();
     let child = eval.fork_for_thread(eval.clone_bindings());
     let action = EvalAction {
         child,
-        agent: Value::Agent(agent.clone()),
+        agent: agent.clone(),
         f: f.clone(),
         args: extra.to_vec(),
-        validator,
     };
     let item = QueuedAction {
         pool,
@@ -1852,6 +1850,224 @@ fn native_set_error_mode(_eval: &mut Evaluator, args: &[Value]) -> Result<Value,
         ErrorMode::Fail
     };
     Ok(Value::Nil)
+}
+
+/// `error-handler`: the cell's handler fn, or nil when none is
+/// installed (S5; oracle `a-eh-*`).
+fn native_error_handler(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.core/error-handler", args, &[1])?;
+    let agent = as_agent(
+        &args[0],
+        "Cannot invoke \"clojure.lang.Agent.getErrorHandler()\" because \"a\" is null",
+    )?;
+    Ok(agent.lock().error_handler.clone().unwrap_or(Value::Nil))
+}
+
+/// `error-mode`: the cell's mode as `:fail`/`:continue` (S5;
+/// oracle `a-em-*`).
+fn native_error_mode(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.core/error-mode", args, &[1])?;
+    let agent = as_agent(
+        &args[0],
+        "Cannot invoke \"clojure.lang.Agent.getErrorMode()\" because \"a\" is null",
+    )?;
+    let mode = match agent.lock().error_mode {
+        ErrorMode::Continue => "continue",
+        ErrorMode::Fail => "fail",
+    };
+    Ok(Value::Keyword(Keyword::new(None, mode)))
+}
+
+/// `future-cancelled?`: whether the future was cancelled (S5;
+/// oracle `b-*`).
+fn native_future_cancelled(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.core/future-cancelled?", args, &[1])?;
+    match &args[0] {
+        Value::Future(f) => Ok(Value::Bool(f.is_cancelled())),
+        Value::Nil => Err(npe(
+            "Cannot invoke \"java.util.concurrent.Future.isCancelled()\" because \"f\" is null",
+        )),
+        other => Err(cce_err(other, "java.util.concurrent.Future")),
+    }
+}
+
+/// `get-validator`: the IRef's validator fn, or nil when none is
+/// installed (S5; oracle `c-get-*`). Atoms and agents only — the
+/// house `as_iref` set shared with `add-watch` (vars are a
+/// follow-up; futures/delays fail the `IRef` cast like the JVM).
+fn native_get_validator(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.core/get-validator", args, &[1])?;
+    let target = as_iref(
+        &args[0],
+        "Cannot invoke \"clojure.lang.IRef.getValidator()\" because \"iref\" is null",
+    )?;
+    let validator = match &target {
+        WatchedRef::Atom(a) => a.lock().validator.clone(),
+        WatchedRef::Agent(a) => a.lock().validator.clone(),
+    };
+    Ok(validator.unwrap_or(Value::Nil))
+}
+
+/// Receiver checkcast for `set-validator!` (S5): atoms and
+/// agents answer `Some`, nil passes through (the NPE trips only
+/// after the fn check, per JVM order), anything else CCEs.
+fn watched_or_nil(v: &Value) -> Result<Option<WatchedRef>, NativeError> {
+    match v {
+        Value::Atom(a) => Ok(Some(WatchedRef::Atom(a.clone()))),
+        Value::Agent(a) => Ok(Some(WatchedRef::Agent(a.clone()))),
+        Value::Nil => Ok(None),
+        other => Err(cce_err(other, "clojure.lang.IRef")),
+    }
+}
+
+/// Validator-fn checkcast for `set-validator!` (S5): nil clears
+/// (`None`), IFns install, anything else CCEs to `IFn`.
+fn check_validator_fn(v: &Value) -> Result<Option<Value>, NativeError> {
+    match v {
+        Value::Nil => Ok(None),
+        vf if is_ifn(vf) => Ok(Some(vf.clone())),
+        other => Err(cce_err(other, "clojure.lang.IFn")),
+    }
+}
+
+/// Current value behind a watched ref (S5): one lock, one clone.
+fn iref_current(target: &WatchedRef) -> Value {
+    match target {
+        WatchedRef::Atom(a) => a.lock().value.clone(),
+        WatchedRef::Agent(a) => a.lock().value.clone(),
+    }
+}
+
+/// Install (or clear) the validator behind a watched ref (S5).
+fn store_validator(target: WatchedRef, next: Option<Value>) {
+    match target {
+        WatchedRef::Atom(a) => {
+            a.lock().validator = next;
+        }
+        WatchedRef::Agent(a) => {
+            a.lock().validator = next;
+        }
+    }
+}
+
+/// `set-validator!`: install (or clear, with nil) the IRef's
+/// validator, validating the current value first — a veto keeps
+/// the old validator (S5; oracle `c-set-*`, `k-set-*`). The
+/// checkcasts run in JVM order: the receiver to `IRef` (nil
+/// passes through), then the fn to `IFn` (nil clears), and only
+/// then does the null receiver trip the call-shape NPE.
+fn native_set_validator(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.core/set-validator!", args, &[2])?;
+    let target = watched_or_nil(&args[0])?;
+    let next = check_validator_fn(&args[1])?;
+    let Some(target) = target else {
+        return Err(npe(
+            "Cannot invoke \"clojure.lang.IRef.setValidator(clojure.lang.IFn)\" because \"iref\" is null",
+        ));
+    };
+    if let Some(vf) = &next {
+        validate_new(eval, vf, &iref_current(&target))?;
+    }
+    store_validator(target, next);
+    Ok(Value::Nil)
+}
+
+fn native_reset_vals(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.core/reset-vals!", args, &[2])?;
+    let atom = match &args[0] {
+        Value::Atom(a) => a.clone(),
+        Value::Nil => {
+            return Err(npe(
+                "Cannot invoke \"clojure.lang.IAtom2.resetVals(Object)\" because \"atom\" is null",
+            ));
+        }
+        other => return Err(cce_err(other, "clojure.lang.IAtom2")),
+    };
+    if let Some(vf) = atom.lock().validator.clone() {
+        validate_new(eval, &vf, &args[1])?;
+    }
+    let (old, watches) = {
+        let mut state = atom.lock();
+        let old = std::mem::replace(&mut state.value, args[1].clone());
+        (old, state.watches.clone())
+    };
+    fire_watches(eval, &atom, &old, &args[1], &watches)?;
+    Ok(Value::Vector(Vector::from_vec(vec![old, args[1].clone()])))
+}
+
+/// The `IAtom2.swapVals` overload name for the nil-receiver NPE
+/// (the JVM dispatches 2/3/4/5+-arg calls to distinct overloads,
+/// like `swap!`'s `IAtom.swap` shapes).
+fn swap_vals_nil_message(argc: usize) -> String {
+    let sig = match argc {
+        2 => "clojure.lang.IAtom2.swapVals(clojure.lang.IFn)",
+        3 => "clojure.lang.IAtom2.swapVals(clojure.lang.IFn, Object)",
+        4 => "clojure.lang.IAtom2.swapVals(clojure.lang.IFn, Object, Object)",
+        _ => "clojure.lang.IAtom2.swapVals(clojure.lang.IFn, Object, Object, clojure.lang.ISeq)",
+    };
+    format!("Cannot invoke \"{sig}\" because \"atom\" is null")
+}
+
+fn native_swap_vals(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_min_arity("clojure.core/swap-vals!", args, 2)?;
+    let atom = match &args[0] {
+        Value::Atom(a) => a.clone(),
+        Value::Nil => return Err(npe(&swap_vals_nil_message(args.len()))),
+        other => return Err(cce_err(other, "clojure.lang.IAtom2")),
+    };
+    check_swap_fn(&args[1], args.len())?;
+    let (old, new) = swap_loop(eval, &atom, &args[1], &args[2..])?;
+    Ok(Value::Vector(Vector::from_vec(vec![old, new])))
+}
+
+/// `release-pending-sends`: dispatch the running action's buffered
+/// nested sends now (they would otherwise release when the action
+/// completes), answering how many dispatched; outside an action
+/// the outbox is unarmed and this answers 0 (S5; oracle `h-*`).
+/// The outbox stays armed, so sends after the release buffer
+/// again; a failure later still discards whatever re-buffered.
+fn native_release_pending_sends(
+    eval: &mut Evaluator,
+    args: &[Value],
+) -> Result<Value, NativeError> {
+    check_arity("clojure.core/release-pending-sends", args, &[0])?;
+    let Some(outbox) = eval.agent_outbox.as_mut() else {
+        return Ok(Value::Int(0));
+    };
+    let pending = std::mem::take(outbox);
+    let count = i64::try_from(pending.len()).unwrap_or(i64::MAX);
+    if pending.is_empty() {
+        return Ok(Value::Int(0));
+    }
+    match eval.agent_pools_for_send()? {
+        Some(pools) => release_outbox(pending, &pools),
+        None => {
+            for (target, item) in pending {
+                if let Some(head) = target.enqueue_nested(item) {
+                    reject_head(&target, head);
+                }
+            }
+        }
+    }
+    Ok(Value::Int(count))
+}
+
+/// `await1`: await the agent iff it has outstanding actions
+/// (queued or running), answering the agent itself (S5; oracle
+/// `i-*`, `k-await1-*`). An idle agent skips the await — and
+/// with it the in-action guard — exactly like the JVM decl.
+fn native_await1(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.core/await1", args, &[1])?;
+    let agent = as_agent(
+        &args[0],
+        "Cannot invoke \"clojure.lang.Agent.getQueueCount()\" because \"a\" is null",
+    )?;
+    if agent.queue_count() > 0 {
+        check_not_in_action(eval)?;
+        let (agents, rx) = send_barriers(eval, std::slice::from_ref(&args[0]))?;
+        await_latches(&agents, &rx, None)?;
+    }
+    Ok(Value::Agent(agent))
 }
 
 /// The `locking` monitor: one process-global reentrant lock (every
@@ -2161,6 +2377,15 @@ pub(crate) const CONC_NATIVES: &[(&str, NativeFnPtr)] = &[
     ("shutdown-agents", native_shutdown_agents),
     ("set-error-handler!", native_set_error_handler),
     ("set-error-mode!", native_set_error_mode),
+    ("error-handler", native_error_handler),
+    ("error-mode", native_error_mode),
+    ("future-cancelled?", native_future_cancelled),
+    ("get-validator", native_get_validator),
+    ("set-validator!", native_set_validator),
+    ("reset-vals!", native_reset_vals),
+    ("swap-vals!", native_swap_vals),
+    ("release-pending-sends", native_release_pending_sends),
+    ("await1", native_await1),
     ("volatile!", native_volatile),
     ("volatile?", native_volatile_pred),
     ("vreset!", native_vreset),
