@@ -514,4 +514,26 @@ fn repl_echo_print_dup_root_with_plain_fallback() {
         "{text:?}"
     );
     assert!(!text.contains("No method"), "{text:?}");
+    // Fn/namespace echoes converge with `pr-str` dup shapes (the
+    // engine `dup_shape` hook); realized seqs echo the plain
+    // delegation (the hook's `None` arm).
+    let (code, text) = run(
+        "(alter-var-root #'*print-dup* (constantly true))\ninc\n(find-ns 'user)\n(map inc [1 2])\n",
+        None,
+    );
+    assert_eq!(code, 0);
+    assert!(text.contains("#=(clojure.core$inc. )"), "{text:?}");
+    assert!(text.contains("#=(find-ns user)"), "{text:?}");
+    assert!(text.contains("(2 3)"), "{text:?}");
+    // Closures converge too (allocator-shaped display, so
+    // contains-pins like `d-anonfn`).
+    let (code, text) = run(
+        "(alter-var-root #'*print-dup* (constantly true))\n(fn [x] x)\n",
+        None,
+    );
+    assert_eq!(code, 0);
+    assert!(
+        text.contains("#=(") && text.contains("$fn__") && text.contains(". )"),
+        "{text:?}"
+    );
 }

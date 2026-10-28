@@ -12,4 +12,6 @@ f-print [0 "1"]
 f-prn-empty [1 "\n"]
 f-multi [1 "1 2\n"]
 f-newline-then-prn [1 "\n1\n"]
+f-newline-nil THROW java.lang.NullPointerException|"Cannot invoke \"java.io.Writer.append(java.lang.CharSequence)\" because the return value of \"clojure.lang.Var.get()\" is null"
+f-newline-cce THROW java.lang.ClassCastException|"class java.lang.String cannot be cast to class java.io.Writer (java.lang.String and java.io.Writer are in module java.base of loader 'bootstrap')"
 S8-flush DONE

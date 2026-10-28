@@ -20,5 +20,7 @@ s2-simple-type-vec "ST!"
 s2-str-type-map "ST!"
 s2-simple-type-map "ST!"
 s2-seqlength "(1 ...)"
+s2-keyseq "(:a)"
+s2-valseq "(1)"
 s2-mapentry-str "[\"a\" 1]"
 S8-str-semantics DONE

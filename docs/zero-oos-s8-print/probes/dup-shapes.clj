@@ -79,6 +79,7 @@
 (dupof "d-ns" '(binding [*print-dup* true] (pr-str (find-ns 'user))))
 (dupof "d-anonfn" '(binding [*print-dup* true] (pr-str (fn [x] x))))
 (dupof "d-namedfn" '(binding [*print-dup* true] (pr-str @#'dupshape-f)))
+(dupof "d-nativefn" '(binding [*print-dup* true] (pr-str inc)))
 ;; ---- records, classes ----
 (dupof "d-record" '(binding [*print-dup* true] (pr-str (->RP 1 2))))
 (dupof "d-record-str" '(binding [*print-dup* true] (pr-str (->RP 1 "a"))))

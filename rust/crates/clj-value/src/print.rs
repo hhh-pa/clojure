@@ -1968,6 +1968,11 @@ mod tests {
         assert!(pr_to_string(&atom, &dup_opts).starts_with("#object[clojure.lang.Atom 0x"));
         let d = Value::Delay(crate::Delay::new(Value::Int(1)));
         assert_eq!(pr_to_string(&d, &dup_opts), pr_to_string(&d, &plain));
+        let agent = Value::Agent(crate::Agent::new(Value::Int(1)));
+        assert_eq!(
+            pr_to_string(&agent, &dup_opts),
+            pr_to_string(&agent, &plain)
+        );
         // Non-record instances (deftype shapes) fall back too.
         let def = Arc::new(crate::HostDef {
             name: Arc::from("user.DT"),
@@ -1996,6 +2001,19 @@ mod tests {
         let text = pr_to_string(&v, &dup_opts);
         assert!(
             text.starts_with("[1 #object[clojure.lang.Atom 0x"),
+            "{text}"
+        );
+        assert!(text.ends_with(" 2]"), "{text}");
+        // Agents take the fallback inline too (the behind-lock meta
+        // path all cells share).
+        let va = Value::Vector(crate::Vector::from_vec(vec![
+            Value::Int(1),
+            agent.clone(),
+            Value::Int(2),
+        ]));
+        let text = pr_to_string(&va, &dup_opts);
+        assert!(
+            text.starts_with("[1 #object[clojure.lang.Agent 0x"),
             "{text}"
         );
         assert!(text.ends_with(" 2]"), "{text}");
@@ -2031,5 +2049,75 @@ mod tests {
         let v = Value::Extension(Arc::new(CtorExt));
         assert_eq!(dup(&v), "#=(demo.Ctor. )");
         assert_eq!(pr(&v), "#object[demo.Ctor]");
+        // The remaining trait methods (the hook only needs
+        // `as_any`/`dup_shape`; these pin the double directly).
+        assert_eq!(CtorExt.class_name(), "demo.Ctor");
+        assert!(CtorExt.dyn_eq(&CtorExt));
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        CtorExt.dyn_hash(&mut h);
+        let mut expect = std::collections::hash_map::DefaultHasher::new();
+        std::hash::Hasher::write_u64(&mut expect, 0xC70);
+        assert_eq!(
+            std::hash::Hasher::finish(&h),
+            std::hash::Hasher::finish(&expect)
+        );
+    }
+
+    #[test]
+    fn dup_shape_non_record_instance_defers_to_method() {
+        // `print_host_dup_shape` answers `false` for non-record
+        // instances (defensive: `is_dup_throw_kind` routes them to
+        // the plain fallback before `print_dup_shape` ever runs —
+        // pinned by `dup_throw_kinds_render_plain_fallback` — so
+        // only a direct call reaches this arm).
+        let def = Arc::new(crate::HostDef {
+            name: Arc::from("user.DT"),
+            kind: crate::HostKind::Type,
+            fields: vec![Arc::from("x")],
+            methods: std::collections::HashMap::new(),
+            interfaces: Vec::new(),
+            prefix: None,
+            impl_ns: None,
+            sigs: std::collections::HashMap::new(),
+            takes_this: true,
+        });
+        let inst = Value::HostType(Arc::new(crate::HostVal::Inst(crate::HostInst {
+            def,
+            content: crate::new_map(),
+            meta: None,
+        })));
+        let mut out = String::new();
+        assert!(!super::print_dup_shape(
+            &inst,
+            &PrintOpts::pr(),
+            None,
+            &mut out
+        ));
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn dup_record_skips_missing_fields() {
+        // A record missing a declared field skips it (defensive:
+        // the ctors always fill every field and `dissoc` of a field
+        // loses recordness, so surface values never trigger this).
+        let rdef = Arc::new(crate::HostDef {
+            name: Arc::from("user.RP"),
+            kind: crate::HostKind::Record,
+            fields: vec![Arc::from("x"), Arc::from("y")],
+            methods: std::collections::HashMap::new(),
+            interfaces: Vec::new(),
+            prefix: None,
+            impl_ns: None,
+            sigs: std::collections::HashMap::new(),
+            takes_this: true,
+        });
+        let rec = Value::HostType(Arc::new(crate::HostVal::Inst(crate::HostInst {
+            def: rdef,
+            content: crate::new_map()
+                .insert(Value::Keyword(Keyword::new(None, "x")), Value::Int(1)),
+            meta: None,
+        })));
+        assert_eq!(dup(&rec), "#user.RP[1]");
     }
 }

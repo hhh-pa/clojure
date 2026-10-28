@@ -20,5 +20,7 @@ m-dup-user ["DUP!" "#object[user.DD 0xH \"user.DD@L\"]"]
 m-dup-remove THROW java.lang.IllegalArgumentException|"No method in multimethod 'print-dup' for dispatch value: class user.DD"
 m-type-strip-visible "[1]"
 m-type-nonstr-meta "^{:type \"nope\"} [1]"
+m-type-record "#user.RP{:x 1, :y 2}"
+m-type-seq "(1 2)"
 m-iface ["NUM" "5"]
 m-str-override [[4 2] true]

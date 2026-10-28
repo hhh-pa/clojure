@@ -49,5 +49,7 @@
 (sof "s2-str-type-map" '(str (with-meta {:a 1} {:type ::st})))
 (sof "s2-simple-type-map" '(let [sw (java.io.StringWriter.)] (print-simple (with-meta {:a 1} {:type ::st}) sw) (str sw)))
 (sof "s2-seqlength" '(binding [*print-length* 1] (str (cons 1 [2 3]))))
+(sof "s2-keyseq" '(let [sw (java.io.StringWriter.)] (print-simple (keys {:a 1}) sw) (str sw)))
+(sof "s2-valseq" '(let [sw (java.io.StringWriter.)] (print-simple (vals {:a 1}) sw) (str sw)))
 (sof "s2-mapentry-str" '(str (first {"a" 1})))
 (println "S8-str-semantics DONE")

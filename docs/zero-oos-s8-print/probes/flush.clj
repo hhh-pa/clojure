@@ -26,4 +26,10 @@
 (fprobe "f-prn-empty" #(prn))
 (fprobe "f-multi" #(prn 1 2))
 (fprobe "f-newline-then-prn" #(do (newline) (prn 1)))
+(defn ferr [label thunk]
+  (try (thunk) (println (str label " NO-THROW"))
+    (catch Throwable t
+      (println (str label " THROW " (.getName (class t)) "|" (pr-str (str (.getMessage t))))))))
+(ferr "f-newline-nil" #(binding [*out* nil] (newline)))
+(ferr "f-newline-cce" #(binding [*out* "nope"] (newline)))
 (println "S8-flush DONE")

@@ -89,6 +89,10 @@ fn dispatch_rows() {
         ),
         "[true true]"
     );
+    // Native fns print `#object` through the `Fn` default (the
+    // `eval_ext_token` native arm; oracle shape per `d-nativefn`).
+    let inc = run_last(&mut eval, "(pr-str inc)");
+    assert!(inc.starts_with("\"#object[clojure.core$inc 0x"), "{inc}");
     // User fixtures (meta-`:type` — the port has no class values
     // to hang methods on; user methods write via `print-simple`).
     run(
@@ -182,6 +186,19 @@ fn dispatch_rows() {
     assert_eq!(
         run_last(&mut eval, "(pr-str (with-meta [1] {:type ::unknown}))"),
         "\"[1]\""
+    );
+    // `m-type-record`, `m-type-seq`: `:default` chains through
+    // `:type` for records and seqs too (strip, re-invoke).
+    assert_eq!(
+        run_last(&mut eval, "(pr-str (with-meta (->DT 1) {:type ::unknown}))"),
+        "\"#user.DT{:x 1}\""
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(pr-str (with-meta (cons 1 [2]) {:type ::unknown}))"
+        ),
+        "\"(1 2)\""
     );
     // `m-type-atom-ctor`: atoms are not `IObj`, so `:default`
     // takes the `print-simple` arm (`toString`).
@@ -455,6 +472,12 @@ fn dup_rows() {
             && named.ends_with(". )\""),
         "{named}"
     );
+    // `d-nativefn`: native fns take the same `#=(munged. )` shape
+    // (exact — no identity hash).
+    assert_eq!(
+        run_last(&mut eval, "(binding [*print-dup* true] (pr-str inc))"),
+        "\"#=(clojure.core$inc. )\""
+    );
     // Records, classes: `d-record`, `d-record-str`,
     // `d-record-ext`, `d-record-ext2`, `d-class`, `d-class-iface`.
     assert_eq!(
@@ -691,6 +714,8 @@ fn dup_policy_rows() {
     // Unbounded seqs print `(...)` (never forced — driver and
     // `print-simple` alike).
     assert_eq!(run_last(&mut eval, "(pr-str (range))"), "\"(...)\"");
+    assert_eq!(run_last(&mut eval, "(pr-str (repeat 1))"), "\"(...)\"");
+    assert_eq!(run_last(&mut eval, "(pr-str (cycle [1]))"), "\"(...)\"");
     assert_eq!(
         run_last(&mut eval, "(with-out-str (print-simple (range) *out*))"),
         "\"(...)\""
@@ -1065,6 +1090,22 @@ fn simple_ctor_rows() {
         )
         .starts_with("\"clojure.lang.LazySeq@")
     );
+    // `s2-keyseq`, `s2-valseq`: key/val seqs print contents
+    // through `print-simple`.
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(with-out-str (print-simple (keys {:a 1}) *out*))"
+        ),
+        "\"(:a)\""
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(with-out-str (print-simple (vals {:a 1}) *out*))"
+        ),
+        "\"(1)\""
+    );
     // `s2-seqlength`, `s2-mapentry-str` (ahead of the user-method
     // installs: under the live collection arm a `String` method
     // would fire nested in the entry).
@@ -1241,6 +1282,18 @@ fn flush_rows() {
         );
         assert_eq!(eval.flush_count() - before, flushes, "{form}");
     }
+    // `f-newline-nil`, `f-newline-cce`: `newline` validates `*out*`
+    // through the shared writer checks (the port's standard
+    // write-NPE — the JVM names `append` there — and the verbatim
+    // `Writer` CCE).
+    assert_eq!(
+        uncaught(&mut eval, "(binding [*out* nil] (newline))"),
+        "java.lang.NullPointerException | Cannot invoke \"java.io.Writer.write(String)\" because \"w\" is null"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(binding [*out* \"nope\"] (newline))"),
+        "java.lang.ClassCastException | class java.lang.String cannot be cast to class java.io.Writer (java.lang.String and java.io.Writer are in module java.base of loader 'bootstrap')"
+    );
 }
 
 /// Driver truncation mirror (§1h): length/level/meta/
@@ -1347,6 +1400,41 @@ fn driver_truncation_rows() {
     assert_eq!(
         run_last(&mut eval, "(print-str {:a 1} [2])"),
         "\"{:a 1} [2]\""
+    );
+    // Records print `#Name{entries}` through the driver (mirror).
+    run(&mut eval, "(defrecord RP [x y])");
+    assert_eq!(
+        run_last(&mut eval, "(pr-str (->RP 1 2))"),
+        "\"#user.RP{:x 1, :y 2}\""
+    );
+    // Level 0 gates the whole body for sets, subvectors, and
+    // records (mirror — the engine-shared `#`; the JVM prints
+    // `#user.RP#` for records there, a pre-existing engine
+    // divergence the driver mirrors).
+    assert_eq!(
+        run_last(&mut eval, "(binding [*print-level* 0] (pr-str #{1}))"),
+        "\"#\""
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(binding [*print-level* 0] (pr-str (subvec [1 2 3] 1)))"
+        ),
+        "\"#\""
+    );
+    assert_eq!(
+        run_last(&mut eval, "(binding [*print-level* 0] (pr-str (->RP 1 2)))"),
+        "\"#\""
+    );
+    // Map entries print `[k v]` through the driver (mirror).
+    assert_eq!(run_last(&mut eval, "(pr-str (first {:a 1}))"), "\"[:a 1]\"");
+    // Empty meta prints no prefix (mirror; the JVM agrees).
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(binding [*print-meta* true] (pr-str (with-meta [1] {})))"
+        ),
+        "\"[1]\""
     );
 }
 
@@ -1486,5 +1574,38 @@ fn print_dup_atom_throws() {
     assert_eq!(
         uncaught(&mut eval, "(binding [*print-dup* true] (pr-str (atom 1)))"),
         "java.lang.IllegalArgumentException | No method in multimethod 'print-dup' for dispatch value: \"clojure.lang.Atom\""
+    );
+}
+
+/// Degenerate multi roots: nil roots (the unbooted shape) render
+/// engine-direct; a redefined root breaks `pr` with the `MultiFn`
+/// CCE.
+#[test]
+fn degenerate_roots_fall_back_or_throw() {
+    let mut eval = boot();
+    run(
+        &mut eval,
+        "(alter-var-root #'print-method (constantly nil))",
+    );
+    assert_eq!(run_last(&mut eval, "(pr-str 5)"), "\"5\"");
+    let mut eval = boot();
+    run(&mut eval, "(alter-var-root #'print-method (constantly 5))");
+    let err = uncaught(&mut eval, "(pr-str 5)");
+    assert!(
+        err.starts_with("java.lang.ClassCastException | ") && err.contains("MultiFn"),
+        "{err}"
+    );
+    let mut eval = boot();
+    run(&mut eval, "(alter-var-root #'print-dup (constantly nil))");
+    assert_eq!(
+        run_last(&mut eval, "(binding [*print-dup* true] (pr-str 5))"),
+        "\"5\""
+    );
+    let mut eval = boot();
+    run(&mut eval, "(alter-var-root #'print-dup (constantly 5))");
+    let err = uncaught(&mut eval, "(binding [*print-dup* true] (pr-str 5))");
+    assert!(
+        err.starts_with("java.lang.ClassCastException | ") && err.contains("MultiFn"),
+        "{err}"
     );
 }

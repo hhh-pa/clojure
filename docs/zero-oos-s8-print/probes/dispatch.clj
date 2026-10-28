@@ -30,6 +30,7 @@
 (defmethod print-method DT [o w] (.write ^java.io.Writer w (str "DT" (.x ^DT o))))
 (deftype DW [x])
 (defmethod print-method DW [o w] (.write ^java.io.Writer w (if (identical? w *out*) "SAME" "DIFF")))
+(defrecord RP [x y])
 (defmethod print-method ::ntype [o w] (.write ^java.io.Writer w "NTYPE"))
 (defmethod print-method ::xatom [o w] (.write ^java.io.Writer w "X!"))
 (deftype DD [x])
@@ -57,6 +58,8 @@
 ;; ---- the :default strip, made visible with *print-meta* ----
 (mof "m-type-strip-visible" '(binding [*print-meta* true] (pr-str (with-meta [1] {:type ::unknown}))))
 (mof "m-type-nonstr-meta" '(binding [*print-meta* true] (pr-str (with-meta [1] {:type "nope"}))))
+(mof "m-type-record" '(pr-str (with-meta (->RP 1 2) {:type ::unknown})))
+(mof "m-type-seq" '(pr-str (with-meta (cons 1 [2]) {:type ::unknown})))
 ;; ---- interface-level user methods (informational: needs hierarchies, so the
 ;; port — exact-plus-default dispatch per #37 — does NOT replicate this) ----
 (mof "m-iface" '(let [orig (get-method print-method Number)] (defmethod print-method Number [o w] (.write ^java.io.Writer w "NUM")) (let [r (pr-str 5)] (. ^clojure.lang.MultiFn print-method addMethod Number orig) [r (pr-str 5)])))

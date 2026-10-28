@@ -547,6 +547,44 @@ fn write_seq_items(
     Ok(())
 }
 
+/// The effective length cap (dup never truncates — the JVM's
+/// `print-sequential` policy).
+fn capped_len(opts: &PrintOpts) -> Option<usize> {
+    if opts.dup { None } else { opts.length }
+}
+
+/// Whether index `i` trips the length cap.
+fn is_truncated(len: Option<usize>, i: usize) -> bool {
+    len.is_some_and(|max| i >= max)
+}
+
+/// The `", "` separator between map pairs (a no-op first).
+fn write_pair_sep(w: &Value, first: bool) -> Result<(), NativeError> {
+    if !first {
+        write_to_writer(w, ", ")?;
+    }
+    Ok(())
+}
+
+/// The length-truncation tail (`", ..."` mid-map, `"..."` empty).
+fn write_truncated_tail(w: &Value, first: bool) -> Result<(), NativeError> {
+    write_pair_sep(w, first)?;
+    write_to_writer(w, "...")
+}
+
+/// One `k v` pair through the driver (children see user methods).
+fn write_map_pair(
+    eval: &mut Evaluator,
+    k: &Value,
+    v: &Value,
+    w: &Value,
+) -> Result<(), NativeError> {
+    pr_on(eval, k, w).map_err(signal_to_native)?;
+    write_to_writer(w, " ")?;
+    pr_on(eval, v, w).map_err(signal_to_native)?;
+    Ok(())
+}
+
 /// One map body through the driver (`prefix{` + `k v` pairs, `", "`
 /// separators — the engine's `print_map_entries` policy verbatim).
 fn write_map_items(
@@ -556,25 +594,18 @@ fn write_map_items(
     w: &Value,
     opts: &PrintOpts,
 ) -> Result<(), NativeError> {
-    let len = if opts.dup { None } else { opts.length };
+    let len = capped_len(opts);
     write_to_writer(w, prefix)?;
     write_to_writer(w, "{")?;
     let mut first = true;
     for (i, (k, v)) in pairs.iter().enumerate() {
-        if len.is_some_and(|max| i >= max) {
-            if !first {
-                write_to_writer(w, ", ")?;
-            }
-            write_to_writer(w, "...")?;
+        if is_truncated(len, i) {
+            write_truncated_tail(w, first)?;
             break;
         }
-        if !first {
-            write_to_writer(w, ", ")?;
-        }
+        write_pair_sep(w, first)?;
         first = false;
-        pr_on(eval, k, w).map_err(signal_to_native)?;
-        write_to_writer(w, " ")?;
-        pr_on(eval, v, w).map_err(signal_to_native)?;
+        write_map_pair(eval, k, v, w)?;
     }
     write_to_writer(w, "}")?;
     Ok(())
@@ -982,12 +1013,8 @@ fn dup_mapentry(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErr
         write_engine_body(&head.o, &head.w, &head.opts)?;
         return Ok(Value::Nil);
     };
-    dup_seq_shape(
-        eval,
-        &[key.as_ref().clone(), val.as_ref().clone()],
-        TOK_MAPENTRY,
-        &head.w,
-    )?;
+    let pair = [key.as_ref().clone(), val.as_ref().clone()];
+    dup_seq_shape(eval, &pair, TOK_MAPENTRY, &head.w)?;
     Ok(Value::Nil)
 }
 
@@ -1075,59 +1102,106 @@ fn dup_fn(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     Ok(Value::Nil)
 }
 
+/// The dup-record payload (name, declared fields, content map),
+/// or `None` for degenerate direct calls (non-records render
+/// engine-direct).
+fn dup_record_parts(o: &Value) -> Option<(String, Vec<Arc<str>>, Map)> {
+    let Value::HostType(h) = o else {
+        return None;
+    };
+    let HostVal::Inst(i) = h.as_ref() else {
+        return None;
+    };
+    if i.def.kind != HostKind::Record {
+        return None;
+    }
+    Some((
+        i.def.name.to_string(),
+        i.def.fields.clone(),
+        i.content.clone(),
+    ))
+}
+
+/// The `#Name[` record header.
+fn write_record_header(w: &Value, name: &str) -> Result<(), NativeError> {
+    write_to_writer(w, "#")?;
+    write_to_writer(w, name)?;
+    write_to_writer(w, "[")
+}
+
+/// Declared fields as lookup keys (`:field` keywords).
+fn record_field_keys(fields: &[Arc<str>]) -> Vec<Value> {
+    fields
+        .iter()
+        .map(|f| Value::Keyword(Keyword::new(None, f)))
+        .collect()
+}
+
+/// One dup-record value (`, ` separator past the first).
+fn write_dup_record_value(
+    eval: &mut Evaluator,
+    v: &Value,
+    w: &Value,
+    first: &mut bool,
+) -> Result<(), NativeError> {
+    if !*first {
+        write_to_writer(w, ", ")?;
+    }
+    *first = false;
+    pr_on(eval, v, w).map_err(signal_to_native)?;
+    Ok(())
+}
+
+/// Declared fields in definition order (missing fields skipped —
+/// the first half of `(vals r)`).
+fn write_dup_record_fields(
+    eval: &mut Evaluator,
+    content: &Map,
+    keys: &[Value],
+    w: &Value,
+    first: &mut bool,
+) -> Result<(), NativeError> {
+    for key in keys {
+        let Some(val) = content.get(key) else {
+            continue;
+        };
+        write_dup_record_value(eval, val, w, first)?;
+    }
+    Ok(())
+}
+
+/// The extension map: content entries past the field keys, in
+/// content-iteration order (the second half of `(vals r)`).
+fn write_dup_record_extmap(
+    eval: &mut Evaluator,
+    content: &Map,
+    keys: &[Value],
+    w: &Value,
+    first: &mut bool,
+) -> Result<(), NativeError> {
+    for (k, v) in content.iter() {
+        if keys.contains(k) {
+            continue;
+        }
+        write_dup_record_value(eval, v, w, first)?;
+    }
+    Ok(())
+}
+
 /// Dup records (`#Name[v1, v2, ...]` — `(vals r)`: fields in
 /// definition order, then extmap entries in content-iteration
 /// order; always non-verbose).
 fn dup_record(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     let head = dup_head(eval, args)?;
-    let fields = match &head.o {
-        Value::HostType(h) => match h.as_ref() {
-            HostVal::Inst(i) if i.def.kind == HostKind::Record => (
-                i.def.name.to_string(),
-                i.def.fields.clone(),
-                i.content.clone(),
-            ),
-            _ => {
-                write_engine_body(&head.o, &head.w, &head.opts)?;
-                return Ok(Value::Nil);
-            }
-        },
-        _ => {
-            write_engine_body(&head.o, &head.w, &head.opts)?;
-            return Ok(Value::Nil);
-        }
+    let Some((name, fields, content)) = dup_record_parts(&head.o) else {
+        write_engine_body(&head.o, &head.w, &head.opts)?;
+        return Ok(Value::Nil);
     };
-    let (name, fields, content) = fields;
-    write_to_writer(&head.w, "#")?;
-    write_to_writer(&head.w, &name)?;
-    write_to_writer(&head.w, "[")?;
-    let field_keys: Vec<Value> = fields
-        .iter()
-        .map(|f| Value::Keyword(Keyword::new(None, f)))
-        .collect();
+    write_record_header(&head.w, &name)?;
+    let keys = record_field_keys(&fields);
     let mut first = true;
-    for key in &field_keys {
-        let Some(val) = content.get(key) else {
-            continue;
-        };
-        if !first {
-            write_to_writer(&head.w, ", ")?;
-        }
-        first = false;
-        pr_on(eval, val, &head.w).map_err(signal_to_native)?;
-    }
-    // The extension map: content entries past the field keys, in
-    // content-iteration order (the second half of `(vals r)`).
-    for (k, v) in content.iter() {
-        if field_keys.contains(k) {
-            continue;
-        }
-        if !first {
-            write_to_writer(&head.w, ", ")?;
-        }
-        first = false;
-        pr_on(eval, v, &head.w).map_err(signal_to_native)?;
-    }
+    write_dup_record_fields(eval, &content, &keys, &head.w, &mut first)?;
+    write_dup_record_extmap(eval, &content, &keys, &head.w, &mut first)?;
     write_to_writer(&head.w, "]")?;
     Ok(Value::Nil)
 }
@@ -1471,4 +1545,321 @@ fn char_map_value(table: &[(char, &str)]) -> Value {
         map = map.insert(Value::Char(*c), Value::Str(Arc::from(*s)));
     }
     Value::Map(map)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::env::Env;
+    use crate::ext::{NativeImpl, as_closure};
+    use crate::io::{string_writer, writer_contents};
+    use clj_value::{Atom, HostDef, HostInst, Unbound, Volatile};
+
+    fn booted_writer(eval: &mut Evaluator) -> Value {
+        string_writer(eval)
+    }
+
+    fn last_value(eval: &mut Evaluator, src: &str) -> Value {
+        eval.eval_source(src).unwrap().pop().unwrap()
+    }
+
+    fn test_def(kind: HostKind, name: &str, fields: &[&str]) -> Arc<HostDef> {
+        Arc::new(HostDef {
+            name: Arc::from(name),
+            kind,
+            fields: fields.iter().map(|f| Arc::from(*f)).collect(),
+            methods: std::collections::HashMap::new(),
+            interfaces: Vec::new(),
+            prefix: None,
+            impl_ns: None,
+            sigs: std::collections::HashMap::new(),
+            takes_this: true,
+        })
+    }
+
+    #[test]
+    fn static_tables_mirror_boot() {
+        // The static dispatch tables agree with the booted tables
+        // entry for entry (user entries bypassed); unknown
+        // dispatches miss to `:default` / `None`.
+        for (token, f) in METHOD_TABLE {
+            let dv = Value::Str(Arc::from(*token));
+            assert!(std::ptr::fn_addr_eq(static_method_fn(&dv), *f), "{token}");
+        }
+        assert!(std::ptr::fn_addr_eq(
+            static_method_fn(&Value::Nil),
+            scalar_default as NativeFnPtr
+        ));
+        assert!(std::ptr::fn_addr_eq(
+            static_method_fn(&Value::Str(Arc::from("bogus"))),
+            method_default as NativeFnPtr
+        ));
+        assert!(std::ptr::fn_addr_eq(
+            static_method_fn(&Value::Int(1)),
+            method_default as NativeFnPtr
+        ));
+        for (token, f) in DUP_TABLE {
+            let dv = Value::Str(Arc::from(*token));
+            assert!(
+                static_dup_fn(&dv).is_some_and(|g| std::ptr::fn_addr_eq(g, *f)),
+                "{token}"
+            );
+        }
+        assert!(
+            static_dup_fn(&Value::Nil)
+                .is_some_and(|g| std::ptr::fn_addr_eq(g, dup_delegate as NativeFnPtr))
+        );
+        assert!(static_dup_fn(&Value::Str(Arc::from("bogus"))).is_none());
+        assert!(static_dup_fn(&Value::Int(1)).is_none());
+    }
+
+    #[test]
+    fn defaults_only_bypasses_user_methods() {
+        // `print_defaults_only` renders through the booted defaults
+        // (user table entries bypassed). No production path sets
+        // the flag (only `print_simple_str` touches it, and only to
+        // save/set-false/restore) — the mode pins here directly.
+        let mut eval = crate::boot();
+        eval.eval_source(
+            "(defmethod print-method \"java.lang.Long\" [o w] (print-simple \"HACKED\" w))",
+        )
+        .unwrap();
+        let w = booted_writer(&mut eval);
+        pr_on(&mut eval, &Value::Int(5), &w).unwrap();
+        assert_eq!(writer_contents(&w).as_deref(), Some("HACKED"));
+        let w2 = booted_writer(&mut eval);
+        eval.print_defaults_only = true;
+        pr_on(&mut eval, &Value::Int(5), &w2).unwrap();
+        eval.print_defaults_only = false;
+        assert_eq!(writer_contents(&w2).as_deref(), Some("5"));
+    }
+
+    #[test]
+    fn defaults_only_dup_paths() {
+        // Static `print-dup`: token hits delegate through the
+        // static method side; misses throw the stock `No method`
+        // error.
+        let mut eval = crate::boot();
+        eval.print_defaults_only = true;
+        bind_core_var(&mut eval, "*print-dup*", Value::Bool(true));
+        let w = booted_writer(&mut eval);
+        pr_on(&mut eval, &Value::Int(5), &w).unwrap();
+        assert_eq!(writer_contents(&w).as_deref(), Some("5"));
+        let atom = Value::Atom(Atom::new(Value::Int(1)));
+        let w2 = booted_writer(&mut eval);
+        let err = pr_on(&mut eval, &atom, &w2).unwrap_err();
+        assert!(
+            matches!(err, Signal::Throw(_)),
+            "expected a throw, got {err:?}"
+        );
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("IllegalArgumentException"), "{dbg}");
+        assert!(
+            dbg.contains("No method in multimethod 'print-dup' for dispatch value:")
+                && dbg.contains("clojure.lang.Atom"),
+            "{dbg}"
+        );
+        eval.print_defaults_only = false;
+    }
+
+    #[test]
+    fn defaults_only_default_takes_native_simple() {
+        // The `:default` print-simple arm runs the native directly
+        // in defaults-only mode (the live root otherwise).
+        let mut eval = crate::boot();
+        eval.print_defaults_only = true;
+        let w = booted_writer(&mut eval);
+        method_default(&mut eval, &[Value::Int(5), w.clone()]).unwrap();
+        eval.print_defaults_only = false;
+        assert_eq!(writer_contents(&w).as_deref(), Some("5"));
+    }
+
+    #[test]
+    fn degenerate_direct_calls_render_engine_direct() {
+        // Dispatch never routes a mismatched value to a default
+        // (each table entry is keyed by the token its kind
+        // produces, and dispatch computes the token from the
+        // value) — these arms only run for direct method-fn calls,
+        // where they render engine-direct.
+        let mut eval = crate::boot();
+        let cases: &[(&str, NativeFnPtr, Value)] = &[
+            ("seq", seq_default, Value::Int(5)),
+            ("map", map_default, Value::Int(5)),
+            ("set", set_default, Value::Int(5)),
+            ("subvec", subvec_default, Value::Int(5)),
+            ("record", record_default, Value::Int(5)),
+            ("arraymap", dup_arraymap, Value::Int(5)),
+            ("treeset", dup_treeset, Value::Int(5)),
+            ("mapentry", dup_mapentry, Value::Int(5)),
+            ("subvec-ctor", dup_subvec, Value::Int(5)),
+            ("var", dup_var, Value::Int(5)),
+            ("ns", dup_ns, Value::Int(5)),
+            ("fn", dup_fn, Value::Int(5)),
+            ("record-ctor", dup_record, Value::Int(5)),
+            ("class", dup_class, Value::Int(5)),
+        ];
+        for (name, f, v) in cases {
+            let w = booted_writer(&mut eval);
+            let out = f(&mut eval, &[v.clone(), w.clone()]).unwrap();
+            assert_eq!(out, Value::Nil, "{name}");
+            assert_eq!(writer_contents(&w).as_deref(), Some("5"), "{name}");
+        }
+        // Extension-typed mismatches (each `else` shape in turn).
+        let closure = last_value(&mut eval, "(fn [x] x)");
+        let w = booted_writer(&mut eval);
+        dup_ns(&mut eval, &[closure.clone(), w.clone()]).unwrap();
+        assert!(writer_contents(&w).unwrap().starts_with("#object["));
+        let ns = last_value(&mut eval, "(find-ns 'user)");
+        let w = booted_writer(&mut eval);
+        dup_fn(&mut eval, &[ns, w.clone()]).unwrap();
+        assert!(writer_contents(&w).unwrap().starts_with("#object["));
+        let w = booted_writer(&mut eval);
+        subvec_default(&mut eval, &[closure.clone(), w.clone()]).unwrap();
+        assert!(writer_contents(&w).unwrap().starts_with("#object["));
+        let w = booted_writer(&mut eval);
+        dup_subvec(&mut eval, &[closure.clone(), w.clone()]).unwrap();
+        assert!(writer_contents(&w).unwrap().starts_with("#object["));
+        // Host-typed mismatches (descriptor vs instance vs record).
+        let def = test_def(HostKind::Type, "user.DT", &["x"]);
+        let deftype_inst = Value::HostType(Arc::new(HostVal::Inst(HostInst {
+            def: def.clone(),
+            content: new_map(),
+            meta: None,
+        })));
+        let descriptor = Value::HostType(Arc::new(HostVal::Def(def)));
+        for (name, f, v) in [
+            (
+                "record-ctor-def",
+                dup_record as NativeFnPtr,
+                descriptor.clone(),
+            ),
+            (
+                "record-ctor-deftype",
+                dup_record as NativeFnPtr,
+                deftype_inst.clone(),
+            ),
+            ("class-inst", dup_class as NativeFnPtr, deftype_inst.clone()),
+        ] {
+            let w = booted_writer(&mut eval);
+            f(&mut eval, &[v, w.clone()]).unwrap();
+            assert!(!writer_contents(&w).unwrap().is_empty(), "{name}");
+        }
+        for v in [descriptor, deftype_inst] {
+            let w = booted_writer(&mut eval);
+            record_default(&mut eval, &[v, w.clone()]).unwrap();
+            assert!(!writer_contents(&w).unwrap().is_empty());
+        }
+        // A non-sequence extension through the sequential body (the
+        // `seq_default` unrealized guard returns before this — only
+        // a direct call reaches it).
+        let w = booted_writer(&mut eval);
+        let opts = print_opts(&eval, None).unwrap();
+        write_seq_body(&mut eval, &closure, &w, &opts).unwrap();
+        assert!(writer_contents(&w).unwrap().starts_with("#object["));
+    }
+
+    #[test]
+    fn strip_type_handles_fn_and_plain_metas() {
+        // Fn metas live outside `Value::meta`, so dispatch never
+        // sees fn `:type` (§2d F7) — these arms only run for direct
+        // calls (removing the `Fn` method would loop
+        // strip-and-reinvoke, so no surface test can reach them).
+        // Plain values route through `value_meta`
+        // (surface-pinned); the no-type arm pins here.
+        let key = type_key();
+        let with_type = new_map().insert(key.clone(), Value::Keyword(Keyword::new(None, "mine")));
+        let closure = Closure {
+            id: 1,
+            display: Arc::from("user/f"),
+            arities: Vec::new(),
+            env: Env::new(),
+            meta: Some(with_type.clone()),
+            conveyed: None,
+        };
+        // `:type`-only fn meta strips to nothing ...
+        let stripped = strip_type_meta(&Value::Extension(Arc::new(closure.clone())));
+        assert!(as_closure(&stripped).unwrap().meta.is_none());
+        // ... extra keys survive minus `:type` ...
+        let rich = new_map()
+            .insert(key.clone(), Value::Keyword(Keyword::new(None, "mine")))
+            .insert(Value::Keyword(Keyword::new(None, "k")), Value::Int(1));
+        let rich_closure = Closure {
+            meta: Some(rich),
+            ..closure.clone()
+        };
+        let stripped = strip_type_meta(&Value::Extension(Arc::new(rich_closure)));
+        let meta = as_closure(&stripped).unwrap().meta.clone().unwrap();
+        assert_eq!(meta.size(), 1);
+        assert!(meta.get(&key).is_none());
+        // ... present-but-typeless fn meta clones back ...
+        let kmeta = new_map().insert(Value::Keyword(Keyword::new(None, "k")), Value::Int(1));
+        let k_closure = Closure {
+            meta: Some(kmeta.clone()),
+            ..closure.clone()
+        };
+        let stripped = strip_type_meta(&Value::Extension(Arc::new(k_closure)));
+        let kept = as_closure(&stripped).unwrap().meta.clone().unwrap();
+        assert_eq!(kept.size(), 1);
+        assert!(kept.get(&key).is_none());
+        // ... missing fn meta stays missing ...
+        let plain_closure = Closure {
+            meta: None,
+            ..closure.clone()
+        };
+        let stripped = strip_type_meta(&Value::Extension(Arc::new(plain_closure)));
+        assert!(as_closure(&stripped).unwrap().meta.is_none());
+        // ... and native fns strip the same way.
+        let func: Arc<NativeImpl> = Arc::new(|_, _| Ok(Value::Nil));
+        let native = NativeFn {
+            id: 2,
+            display: Arc::from("user/g"),
+            func,
+            meta: Some(with_type),
+        };
+        let stripped = strip_type_meta(&Value::Extension(Arc::new(native)));
+        assert!(matches!(stripped, Value::Extension(_)));
+        // Plain values without `:type` pass through.
+        let bare = Value::Vector(clj_value::Vector::from_vec(vec![Value::Int(1)]));
+        assert_eq!(strip_type_meta(&bare), bare);
+    }
+
+    #[test]
+    fn token_fallthroughs() {
+        // Total-dispatch arms no surface value can reach: tagged
+        // literals and unbounds are unconstructible from Clojure
+        // surface (dup-table comment), pending seqs never survive
+        // to dispatch (bounded ones pre-realize; unbounded ones hang
+        // `collect_all` first), and volatiles take the `Object`
+        // fallthrough (no suite prints one through the driver).
+        let tagged = Value::TaggedLiteral {
+            tag: Symbol::new(None, "x"),
+            form: Box::new(Value::Int(1)),
+        };
+        assert_eq!(token_of(&tagged), Some(TOK_TAGGED));
+        let unbound = Value::Unbound(Unbound {
+            sym: Symbol::new(Some("user"), "u"),
+            var_id: 1,
+        });
+        assert_eq!(token_of(&unbound), Some(TOK_UNBOUND));
+        let mut eval = crate::boot();
+        let pending = last_value(&mut eval, "(map inc [1 2])");
+        assert_eq!(token_of(&pending), Some(TOK_ISEQ));
+        let vol = Value::Volatile(Volatile::new(Value::Int(1)));
+        assert_eq!(token_of(&vol), Some(TOK_OBJECT));
+    }
+
+    #[test]
+    fn dup_record_skips_missing_fields() {
+        // A record missing a declared field skips it (defensive:
+        // the ctors always fill every field and `dissoc` of a field
+        // loses recordness, so surface values never trigger this).
+        let mut eval = crate::boot();
+        let def = test_def(HostKind::Record, "user.RP", &["x", "y"]);
+        let content = new_map().insert(Value::Keyword(Keyword::new(None, "x")), Value::Int(1));
+        let w = booted_writer(&mut eval);
+        let keys = record_field_keys(&def.fields);
+        let mut first = true;
+        write_dup_record_fields(&mut eval, &content, &keys, &w, &mut first).unwrap();
+        assert_eq!(writer_contents(&w).as_deref(), Some("1"));
+    }
 }
