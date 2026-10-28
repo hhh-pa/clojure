@@ -1163,10 +1163,9 @@
       name)))
 
 (defmacro reify [& specs]
-  (let [[things methods] (split-with symbol? specs)
-        triples (mapcat (fn [m] (method-triples "reify" (first m) (rest m))) methods)]
+  (let [{:keys [ifaces triples]} (parse-type-specs "reify" specs)]
     (list 'clojure.core/__reify*
-      (list 'quote (vec things))
+      (list 'quote (vec ifaces))
       (emit-type-methods "reify" triples nil))))
 
 (defmacro proxy [super args & methods]

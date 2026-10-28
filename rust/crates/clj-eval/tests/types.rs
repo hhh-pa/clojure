@@ -1681,3 +1681,18 @@ fn t73_deftype_fields_visible_as_locals() {
         "\"hi Bo\""
     );
 }
+
+#[test]
+fn t73_reify_interleaved_interfaces() {
+    // Torture #73 finding 2: reify with interleaved interface +
+    // method groups (protocol then Object) macroexpands instead of
+    // throwing the ISeq error.
+    let mut eval = boot();
+    assert_eq!(
+        run(
+            &mut eval,
+            "(defprotocol R (rval [x y])) (let [r (reify R (rval [_ y] [:got y]) Object (toString [_] \"R!\"))] [(rval r 9) (str r) (satisfies? R r)])"
+        ),
+        "[[:got 9] \"R!\" true]"
+    );
+}
