@@ -789,10 +789,7 @@ fn file_seq_rows() {
         "false"
     );
     assert_eq!(run_last(&mut eval, "(do (file-seq \"foo\") :ok)"), ":ok");
-    assert_eq!(
-        run_last(&mut eval, "(vec (file-seq \"foo\"))"),
-        "[\"foo\"]"
-    );
+    assert_eq!(run_last(&mut eval, "(vec (file-seq \"foo\"))"), "[\"foo\"]");
     // `n-file-nil-unforced` / `n-file-nil`: nil likewise.
     assert_eq!(run_last(&mut eval, "(realized? (file-seq nil))"), "false");
     assert_eq!(

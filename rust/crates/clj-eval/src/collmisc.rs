@@ -27,7 +27,7 @@ use crate::lazy::{
     PendingSeq, Thunk, check_seqable, chunked_parts, empty_list_value, first_value,
     is_chunked_seq_value, next_value, pending_value, realize_deep, seq_value,
 };
-use crate::ns::{NativeFnPtr, check_arity, deref_core, signal_to_native, str_of};
+use crate::ns::{NativeFnPtr, check_arity, deref_core, signal_to_native};
 use crate::vars::check_min_arity;
 
 /// The S12 natives installed into `clojure.core` by
