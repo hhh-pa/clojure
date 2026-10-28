@@ -1258,6 +1258,28 @@ fn strip_handles_unicode() {
     assert!(fake_calls().is_empty());
 }
 
+/// Lone-`\r` breaks survive the strip: the reader normalizes them to
+/// newlines, so a blanked `\r` inside the `ns` form would merge
+/// lines and mis-blame later diagnostics.
+#[test]
+fn strip_handles_lone_cr() {
+    let fx = Fixture::new("lonecr");
+    fx.write(
+        "my/lr.clj",
+        "(ns my.lr\r  (:refer-clojure :exclude [x]))\r(defn ok [] 1)\r(defrecord R [x])\r",
+    );
+    let _lock = use_fake(FakeMode::Record);
+    let mut eval = boot();
+    let chain = uncaught_chain(&mut eval, &fx.within("(compile 'my.lr)"));
+    assert_eq!(chain.len(), 1);
+    assert!(
+        chain[0].contains(":4:1: unsupported form in AOT subset: defrecord"),
+        "unexpected chain: {chain:?}"
+    );
+    assert_eq!(run_last(&mut eval, "(loaded-libs)"), "#{}");
+    assert!(fake_calls().is_empty());
+}
+
 /// An `ns`-only file plans the empty program and compiles clean
 /// (the local half of R5; the real driver's empty acceptance is
 /// `empty_ns_only`).

@@ -317,8 +317,8 @@ fn obj_path_for(dir: &str, root: &str) -> PathBuf {
 /// table, no default fn, `user` ns, no aliases). Only `refers`
 /// differs, and it never affects read success — so a strip/no-strip
 /// decision always agrees with what the planner can read. A misread
-/// fails closed either way: no strip means the planner reports the
-/// subset diagnostic itself.)
+/// fails closed either way: the planner reports the failure itself
+/// (T6a reader or T6c subset).)
 fn strip_leading_ns(text: &str) -> String {
     let mut reader = Reader::new(
         text,
@@ -354,12 +354,13 @@ fn is_ns_head(form: &Value) -> bool {
     }
 }
 
-/// Blank `[from, to)` with spaces, preserving newlines (later forms
-/// keep their line/columns, so plan diagnostics blame truly).
+/// Blank `[from, to)` with spaces, preserving line breaks (`\n`
+/// and lone `\r` — the reader normalizes both, so blanking either
+/// would merge lines and mis-blame later diagnostics).
 fn blank_range(text: &str, from: usize, to: usize) -> String {
     text.char_indices()
         .map(|(at, c)| {
-            if at >= from && at < to && c != '\n' {
+            if at >= from && at < to && c != '\n' && c != '\r' {
                 ' '
             } else {
                 c
