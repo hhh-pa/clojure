@@ -461,7 +461,9 @@ fn iseq_err(v: &Value) -> NativeError {
 /// Whether `vec` accepts the value (mirrors `RT.canSeq` over
 /// our value types: transients and throwables are not seqable,
 /// so `vec` fails them with the conversion error, not the seq
-/// error). `seqable?` keeps its own predicate in `core.rs`.
+/// error). `seqable?` keeps its own predicate in `core.rs`;
+/// S10's `hash-*-coll` starts from this set (plus the subvector
+/// and eduction views `step_unit` walks).
 pub(crate) fn is_seqable(v: &Value) -> bool {
     // Map-like hosts seq (oracles `g-seqable-rec`, S12
     // `sm-seq`); anything else host does not (oracle

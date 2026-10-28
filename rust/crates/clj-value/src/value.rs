@@ -39,7 +39,7 @@ use num_traits::ToPrimitive;
 
 use crate::{
     Agent, Atom, Delay, ExtensionValue, Future, HostInst, HostKind, HostVal, Keyword, MultiFn,
-    Promise, Symbol, Throwable, Transient, Unbound, Var, host_eq,
+    Promise, Symbol, Throwable, Transient, Unbound, Var, Volatile, host_eq,
 };
 
 /// Deterministic Fx hasher for maps/sets (rpds's default RandomState
@@ -762,6 +762,8 @@ pub enum Value {
     Promise(Promise),
     /// An agent (S6C): identity equality (shared cell, equal meta).
     Agent(Agent),
+    /// A volatile (S10): identity equality (shared cell — no meta).
+    Volatile(Volatile),
     /// A host-defined value behind the [`ExtensionValue`] trait (S4).
     Extension(Arc<dyn ExtensionValue>),
     /// A port-defined type descriptor or instance (S-typechain):
@@ -1069,6 +1071,7 @@ fn value_eq_rest(a: &Value, b: &Value) -> bool {
     match (a, b) {
         (Value::Promise(a), Value::Promise(b)) => cell_meta_eq(a.same_cell(b), a.meta(), b.meta()),
         (Value::Agent(a), Value::Agent(b)) => cell_meta_eq(a.same_cell(b), a.meta(), b.meta()),
+        (Value::Volatile(a), Value::Volatile(b)) => a.same_cell(b),
         (Value::Extension(a), Value::Extension(b)) => a.dyn_eq(&**b),
         _ => false,
     }
@@ -1300,6 +1303,10 @@ fn hash_value_rest<H: Hasher>(v: &Value, state: &mut H) {
         Value::Agent(a) => {
             state.write_u8(22);
             state.write_u64(a.id());
+        }
+        Value::Volatile(v) => {
+            state.write_u8(27);
+            state.write_u64(v.id());
         }
         Value::Extension(e) => hash_extension(e, state),
         // Port-defined types: the class name plus the content map

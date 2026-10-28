@@ -236,6 +236,14 @@ fn print_more(v: &Value, opts: &PrintOpts, level: Option<i64>, out: &mut String)
             let id = p.id();
             write!(out, "#object[{class} 0x{id:x} \"{class}@{id:x}\"]").unwrap();
         }
+        Value::Volatile(v) => {
+            let id = v.id();
+            write!(
+                out,
+                "#object[clojure.lang.Volatile 0x{id:x} \"clojure.lang.Volatile@{id:x}\"]"
+            )
+            .unwrap();
+        }
         other => print_port_or_rest(other, opts, level, out),
     }
 }
@@ -676,6 +684,7 @@ fn java_debug_rest(v: &Value) -> String {
         Value::Future(f) => format!("{}@{:x}", f.jvm_class(), f.id()),
         Value::Promise(p) => format!("{}@{:x}", p.jvm_class(), p.id()),
         Value::Agent(a) => format!("clojure.lang.Agent@{:x}", a.id()),
+        Value::Volatile(v) => format!("clojure.lang.Volatile@{:x}", v.id()),
         Value::Extension(e) => e.print(),
         // Port-defined types: descriptors render their name;
         // instances render the `toString` fallback (pure — a custom

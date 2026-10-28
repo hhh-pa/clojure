@@ -986,16 +986,14 @@ fn current_ns_falls_back_on_foreign_star_ns() {
 
 #[test]
 fn s9b_out_of_scope_vars_stay_unresolved() {
-    // S9B: the executor setters + `load-reader` stay unbound. The
-    // absence pin runs under `boot()` (a bare harness would pass
-    // with everything unbound): `resolve` says nil for all three,
-    // and both use positions surface the compile-error shape.
+    // S9B: `load-reader` stays unbound (the executor setters left
+    // this list in S10 — they now resolve as accept-and-record
+    // natives, pinned by `cellstaps.rs exec_record_*`). The absence
+    // pin runs under `boot()` (a bare harness would pass with
+    // everything unbound): `resolve` says nil, and both use
+    // positions surface the compile-error shape.
     let mut eval = boot();
-    for name in [
-        "set-agent-send-executor!",
-        "set-agent-send-off-executor!",
-        "load-reader",
-    ] {
+    for name in ["load-reader"] {
         assert_eq!(
             run_last(&mut eval, &format!("(resolve '{name})")),
             "nil",

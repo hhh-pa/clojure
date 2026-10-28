@@ -44,6 +44,7 @@ pub(crate) const BUILTIN_MACROS: &[&str] = &[
     "with-out-str",
     "with-in-str",
     "locking",
+    "vswap!",
 ];
 
 /// A resolved macro's current root (the call runs it with
