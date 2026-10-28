@@ -2039,6 +2039,14 @@ fn core_vars(user_ns: Value) -> Vec<(String, Value, bool, bool)> {
             true,
             false,
         ),
+        // S18 compiler knob (`core_print.clj` `def ^:dynamic`:
+        // slot AND `:dynamic` meta, like the print trio above).
+        (
+            "*verbose-defrecords*".to_owned(),
+            Value::Bool(false),
+            true,
+            false,
+        ),
         // S7 environment (P3): a plain (non-dynamic) root map over
         // the workspace release version.
         (
@@ -2280,6 +2288,18 @@ fn boot_core_vars(eval: &mut Evaluator, user_handle: Value) {
     // nor private, probe `a-ddr-meta`).
     let defaults = crate::core::default_data_readers_map(eval);
     def_var(eval, "default-data-readers", defaults, false, false);
+    // S18 compiler knobs (slot-only roots owned by `compiler.rs`)
+    // plus the plain `primitives-classnames` root map.
+    for (name, root) in crate::compiler::knob_roots() {
+        def_dynamic_root(eval, name, root);
+    }
+    def_var(
+        eval,
+        "primitives-classnames",
+        crate::compiler::prims_map(),
+        false,
+        false,
+    );
 }
 
 /// Refer every public install into `user` (JVM boot refers
@@ -2349,6 +2369,14 @@ fn boot_refer_user(eval: &mut Evaluator) {
             "*data-readers*",
             "*default-data-reader-fn*",
             "default-data-readers",
+            "*compile-path*",
+            "*compile-files*",
+            "*compiler-options*",
+            "*source-path*",
+            "*fn-loader*",
+            "*use-context-classloader*",
+            "*verbose-defrecords*",
+            "primitives-classnames",
         ]
         .iter()
         .map(|s| (*s).to_owned()),
