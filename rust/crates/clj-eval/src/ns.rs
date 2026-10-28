@@ -1966,6 +1966,7 @@ const NATIVES: &[(&str, NativeFnPtr)] = &[
     ("load-reader", native_load_reader),
     ("loaded-libs", native_loaded_libs),
     ("eval", native_eval),
+    ("add-classpath", crate::compiler::native_add_classpath),
 ];
 
 /// The `clojure.core` vars installed by [`boot`]: name, root,

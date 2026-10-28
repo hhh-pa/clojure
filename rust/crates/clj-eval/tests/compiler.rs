@@ -18,7 +18,9 @@
 //! `*load-path*`; `primitives-classnames` keys are class-name
 //! strings; cast texts are the port's stable `Cannot cast` shape.
 
-use clj_eval::{Evaluator, boot};
+use std::path::PathBuf;
+
+use clj_eval::{Evaluator, SourceError, boot};
 use clj_value::{PrintOpts, Value, pr_to_string};
 
 fn pr(v: &Value) -> String {
@@ -43,6 +45,53 @@ fn run_last(eval: &mut Evaluator, src: &str) -> String {
     let vs = eval.eval_source(src).unwrap();
     let v = vs.last().unwrap();
     pr(&realized(eval, v))
+}
+
+/// The `Class | message` of an uncaught throw.
+fn uncaught(eval: &mut Evaluator, src: &str) -> String {
+    match eval.eval_source(src) {
+        Err(SourceError::Uncaught(t)) => format!(
+            "{} | {}",
+            t.class.jvm_name(),
+            t.message.as_deref().unwrap_or("")
+        ),
+        Err(other) => panic!("expected an uncaught throw, got {other}"),
+        Ok(_) => panic!("expected an uncaught throw, got values"),
+    }
+}
+
+/// A per-test fixture dir (unique across parallel tests, removed on
+/// drop) holding `*load-path*` sources and `*compile-path*` outputs.
+struct Fixture {
+    dir: PathBuf,
+}
+
+impl Fixture {
+    fn new(name: &str) -> Self {
+        let dir = std::env::temp_dir().join(format!("clj-s18-{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        Self { dir }
+    }
+
+    fn write(&self, rel: &str, text: &str) {
+        let path = self.dir.join(rel);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(path, text).unwrap();
+    }
+
+    /// The dir as a Clojure string literal.
+    fn lit(&self) -> String {
+        let s = self.dir.to_string_lossy();
+        format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+    }
+}
+
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
 }
 
 /// `*compile-path*` root (folded `"classes"`), slot-only dynamics
@@ -191,4 +240,157 @@ fn miss_is_nil() {
         run_last(&mut eval, "(primitives-classnames \"java.lang.String\")"),
         "nil"
     );
+}
+
+/// The add answers nil and prints the verbatim WARNING (`a-warning`,
+/// `a-warn-text`, `a-ret`).
+#[test]
+fn warns_and_returns_nil() {
+    let fx = Fixture::new("addcp-warn");
+    let mut eval = boot();
+    assert_eq!(
+        run_last(&mut eval, &format!("(add-classpath {})", fx.lit())),
+        "nil"
+    );
+    let mut eval = boot();
+    assert_eq!(
+        run_last(
+            &mut eval,
+            &format!("(with-out-str (add-classpath {}))", fx.lit())
+        ),
+        "\"WARNING: add-classpath is deprecated\\n\""
+    );
+}
+
+/// Appends in order; the first-added dir wins resolution; later dirs
+/// resolve new libs (`a-urls`, `a-order`, `a-effect`, `a-ret`,
+/// `a-add2`).
+#[test]
+fn appends_first_wins() {
+    let d1 = Fixture::new("addcp-d1");
+    let d2 = Fixture::new("addcp-d2");
+    d1.write("my/lib.clj", "(ns my.lib)\n(def marker \"d1\")\n");
+    d2.write("my/lib.clj", "(ns my.lib)\n(def marker \"d2\")\n");
+    d2.write("new/lib.clj", "(ns new.lib)\n(def marker \"new\")\n");
+    let mut eval = boot();
+    assert_eq!(
+        run_last(&mut eval, &format!("(add-classpath {})", d1.lit())),
+        "nil"
+    );
+    assert_eq!(
+        run_last(&mut eval, &format!("(add-classpath {})", d2.lit())),
+        "nil"
+    );
+    assert_eq!(
+        run_last(&mut eval, "*load-path*"),
+        format!("[{} {}]", d1.lit(), d2.lit())
+    );
+    assert_eq!(
+        run_last(&mut eval, "(require 'my.lib) @#'my.lib/marker"),
+        "\"d1\""
+    );
+    assert_eq!(
+        run_last(&mut eval, "(require 'new.lib) @#'new.lib/marker"),
+        "\"new\""
+    );
+}
+
+/// Re-adding is a no-op returning nil (`a-dup-ret`, `a-dup-urls`).
+#[test]
+fn dup_is_noop() {
+    let d1 = Fixture::new("addcp-dup1");
+    let d2 = Fixture::new("addcp-dup2");
+    let mut eval = boot();
+    run_last(&mut eval, &format!("(add-classpath {})", d1.lit()));
+    run_last(&mut eval, &format!("(add-classpath {})", d2.lit()));
+    assert_eq!(
+        run_last(&mut eval, &format!("(add-classpath {})", d1.lit())),
+        "nil"
+    );
+    assert_eq!(
+        run_last(&mut eval, "*load-path*"),
+        format!("[{} {}]", d1.lit(), d2.lit())
+    );
+}
+
+/// Nonexistent dirs are accepted silently (`a-missing`).
+#[test]
+fn missing_accepted() {
+    let mut eval = boot();
+    assert_eq!(
+        run_last(&mut eval, "(add-classpath \"/nonexistent-s18-dir\")"),
+        "nil"
+    );
+    assert_eq!(
+        run_last(&mut eval, "*load-path*"),
+        "[\"/nonexistent-s18-dir\"]"
+    );
+}
+
+/// Non-strings throw CCE `String` after the WARNING
+/// (`a-broken-file/num`, port-narrowed).
+#[test]
+fn nonstr_rejected() {
+    let mut eval = boot();
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(with-out-str (try (add-classpath 42) (catch Exception _ :caught)))"
+        ),
+        "\"WARNING: add-classpath is deprecated\\n\""
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(add-classpath 42)"),
+        "java.lang.ClassCastException | Cannot cast java.lang.Long to java.lang.String"
+    );
+}
+
+/// Arity ≠ 1 throws with no WARNING (`a-arity0/2`; the row-1
+/// `compile` sections join this test — §1.10 names both `arity`).
+#[test]
+fn arity() {
+    let mut eval = boot();
+    assert_eq!(
+        uncaught(&mut eval, "(add-classpath)"),
+        "clojure.lang.ArityException | Wrong number of args (0) passed to: clojure.core/add-classpath"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(add-classpath \"a\" \"b\")"),
+        "clojure.lang.ArityException | Wrong number of args (2) passed to: clojure.core/add-classpath"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(with-out-str (try (add-classpath) (catch Exception _ :caught)))"
+        ),
+        "\"\""
+    );
+}
+
+/// A nil `*load-path*` root normalizes to `[]` first (append holds).
+#[test]
+fn nil_path_normalizes() {
+    let fx = Fixture::new("addcp-nil");
+    let mut eval = boot();
+    run_last(&mut eval, "(alter-var-root #'*load-path* (fn [_] nil))");
+    assert_eq!(
+        run_last(&mut eval, &format!("(add-classpath {})", fx.lit())),
+        "nil"
+    );
+    assert_eq!(
+        run_last(&mut eval, "*load-path*"),
+        format!("[{}]", fx.lit())
+    );
+}
+
+/// Non-vector coll roots get `conj` semantics (lists prepend).
+#[test]
+fn list_root_conj_semantics() {
+    let mut eval = boot();
+    run_last(
+        &mut eval,
+        "(alter-var-root #'*load-path* (fn [_] (quote (\"a\"))))",
+    );
+    assert_eq!(run_last(&mut eval, "(add-classpath \"b\")"), "nil");
+    assert_eq!(run_last(&mut eval, "*load-path*"), "(\"b\" \"a\")");
 }
