@@ -20,7 +20,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
-use clj_reader::{Reader, ReaderOpts, Span};
+use clj_reader::{NoHooks, Reader, ReaderOpts, Span};
 use clj_value::{ThrowClass, Value, Vector, new_map, seq_vec};
 
 use crate::aot_subset::{PlanError, SubsetProgram, plan_source};
@@ -317,7 +317,10 @@ fn obj_path_for(dir: &str, root: &str) -> PathBuf {
 /// affect just `::` and syntax-quote, never a plain `ns` head.)
 fn strip_leading_ns(text: &str) -> String {
     let mut reader = Reader::new(text, &ReaderOpts::default());
-    let form = match reader.read_form(false) {
+    // `NoHooks`: only a plain `ns` head is ever detected here, so
+    // `#=`/resolver hooks never fire; anything exotic fails the
+    // read and plans as-is per the contract above.
+    let form = match reader.read_form(false, &mut NoHooks) {
         Ok(Some(form)) => form,
         _ => return text.to_owned(),
     };
