@@ -752,9 +752,9 @@ impl Evaluator {
     pub fn eval(&mut self, expr: &Expr, env: &Env) -> Result<Value, Signal> {
         match expr {
             Expr::Literal(v) | Expr::Quote(v) => Ok(v.clone()),
-            Expr::VecLit(elems) => self.eval_vec(elems, env),
-            Expr::MapLit(pairs) => self.eval_map_lit(pairs, env),
-            Expr::SetLit(elems) => self.eval_set_lit(elems, env),
+            Expr::VecLit(elems, meta) => self.eval_vec(elems, meta.clone(), env),
+            Expr::MapLit(pairs, meta) => self.eval_map_lit(pairs, meta.clone(), env),
+            Expr::SetLit(elems, meta) => self.eval_set_lit(elems, meta.clone(), env),
             Expr::Global(sym) => {
                 let id = self.var_id(sym);
                 Ok(self.deref_var(id, sym))
@@ -885,32 +885,47 @@ impl Evaluator {
     }
 
     /// A vector literal (elements evaluate left to right).
-    fn eval_vec(&mut self, elems: &[Expr], env: &Env) -> Result<Value, Signal> {
+    fn eval_vec(
+        &mut self,
+        elems: &[Expr],
+        meta: Option<Map>,
+        env: &Env,
+    ) -> Result<Value, Signal> {
         let mut out = Vec::with_capacity(elems.len());
         for elem in elems {
             out.push(self.eval(elem, env)?);
         }
-        Ok(Value::Vector(Vector::from_vec(out)))
+        Ok(Value::Vector(Vector::from_vec(out).with_meta(meta)))
     }
 
     /// A map literal (keys and values evaluate left to right).
-    fn eval_map_lit(&mut self, pairs: &[(Expr, Expr)], env: &Env) -> Result<Value, Signal> {
+    fn eval_map_lit(
+        &mut self,
+        pairs: &[(Expr, Expr)],
+        meta: Option<Map>,
+        env: &Env,
+    ) -> Result<Value, Signal> {
         let mut out = new_map();
         for (k, v) in pairs {
             let key = self.eval(k, env)?;
             let val = self.eval(v, env)?;
             out = out.insert(key, val);
         }
-        Ok(Value::Map(out))
+        Ok(Value::Map(out.with_meta(meta)))
     }
 
     /// A set literal (elements evaluate left to right).
-    fn eval_set_lit(&mut self, elems: &[Expr], env: &Env) -> Result<Value, Signal> {
+    fn eval_set_lit(
+        &mut self,
+        elems: &[Expr],
+        meta: Option<Map>,
+        env: &Env,
+    ) -> Result<Value, Signal> {
         let mut out = clj_value::new_set();
         for elem in elems {
             out = out.insert(self.eval(elem, env)?);
         }
-        Ok(Value::Set(out))
+        Ok(Value::Set(out.with_meta(meta)))
     }
 
     /// `letfn`: extend the frame, fill each slot with its closure

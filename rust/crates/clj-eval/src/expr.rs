@@ -123,10 +123,11 @@ pub enum CaseTest {
 pub enum Expr {
     /// Self-evaluating (atoms, quotes' values, `()`).
     Literal(Value),
-    /// Collection literals evaluate their elements.
-    VecLit(Vec<Expr>),
-    MapLit(Vec<(Expr, Expr)>),
-    SetLit(Vec<Expr>),
+    /// Collection literals evaluate their elements (carrying the
+    /// reader form's metadata, like the JVM).
+    VecLit(Vec<Expr>, Option<Map>),
+    MapLit(Vec<(Expr, Expr)>, Option<Map>),
+    SetLit(Vec<Expr>, Option<Map>),
     /// A resolved global (qualified `user/x`).
     Global(Symbol),
     /// A local slot index.
@@ -743,7 +744,7 @@ impl<'a> Analyzer<'a> {
         for elem in v.iter() {
             out.push(self.analyze(elem, span, false)?);
         }
-        Ok(Expr::VecLit(out))
+        Ok(Expr::VecLit(out, v.meta().cloned()))
     }
 
     /// A map literal (keys and values analyze left to right).
@@ -755,7 +756,7 @@ impl<'a> Analyzer<'a> {
                 self.analyze(val, span, false)?,
             ));
         }
-        Ok(Expr::MapLit(out))
+        Ok(Expr::MapLit(out, m.meta().cloned()))
     }
 
     /// A set literal (elements analyze left to right).
@@ -764,7 +765,7 @@ impl<'a> Analyzer<'a> {
         for elem in s.iter() {
             out.push(self.analyze(elem, span, false)?);
         }
-        Ok(Expr::SetLit(out))
+        Ok(Expr::SetLit(out, s.meta().cloned()))
     }
 
     /// A body: every form non-tail except the last.
