@@ -1928,23 +1928,24 @@ fn native_load_reader(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nat
 /// last value (nil when empty).
 fn run_loaded_values(eval: &mut Evaluator, forms: Vec<Value>) -> Result<Value, NativeError> {
     let cur = eval.registry.current().to_owned();
-    let mut depth = None;
+    let depth = eval.bindings_depth();
     if let Some(id) = core_var(eval, "*file*") {
-        depth = Some(eval.push_binding(core_var_handle(id, "*file*"), Value::Nil));
+        eval.push_binding(core_var_handle(id, "*file*"), Value::Nil);
     }
     // S18: `load-reader` binds `*source-path*` to the root (its
     // `*file*` is nil — the `load-string` shape, never "leave",
     // §2.2).
     if let Some(id) = core_var(eval, "*source-path*") {
-        let d = eval.push_binding(
+        eval.push_binding(
             core_var_handle(id, "*source-path*"),
             source_path_value(&Value::Nil),
         );
-        if depth.is_none() {
-            depth = Some(d);
-        }
     }
-    push_ns_frame(eval, &mut depth);
+    // Always `Some`: the depth is captured up front (the
+    // `run_loaded` shape), so the isolation frame never records
+    // here.
+    let mut keep = Some(depth);
+    push_ns_frame(eval, &mut keep);
     if let Some(id) = core_var(eval, "*read-eval*") {
         eval.push_binding(core_var_handle(id, "*read-eval*"), Value::Bool(true));
     }
@@ -1954,17 +1955,13 @@ fn run_loaded_values(eval: &mut Evaluator, forms: Vec<Value>) -> Result<Value, N
             Ok(v) => out = v,
             Err(e) => {
                 eval.registry.set_current(&cur);
-                if let Some(d) = depth {
-                    eval.pop_bindings(d);
-                }
+                eval.pop_bindings(depth);
                 return Err(source_to_native(eval, "", e));
             }
         }
     }
     eval.registry.set_current(&cur);
-    if let Some(d) = depth {
-        eval.pop_bindings(d);
-    }
+    eval.pop_bindings(depth);
     Ok(out)
 }
 
