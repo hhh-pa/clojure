@@ -73,3 +73,11 @@
 (throwcause "sm-map-nonbasis" '(struct-map {:a 0} :a 1))
 (throwcause "sm-struct-nonbasis" '(struct "x" 1))
 (throwcause "sm-accessor-nonbasis" '(accessor {:a 0} :a))
+;; ---- struct IFn (R2: structs invoke as maps; records stay non-IFn) ----
+(throwof "sm-ifn" '(ifn? (struct-map person :name "Ada" :age 36 :zzz 9)))
+(throwof "sm-call" '((struct-map person :name "Ada" :age 36 :zzz 9) :age))
+(throwof "sm-call-nf" '((struct-map person :name "Ada" :age 36 :zzz 9) :missing :nf))
+(throwcause "sm-call-arity0" '((struct-map person :name "Ada" :age 36 :zzz 9)))
+(throwcause "sm-call-arity3" '((struct-map person :name "Ada" :age 36 :zzz 9) :a :b :c))
+(throwof "sm-apply" '(apply (struct-map person :name "Ada" :age 36 :zzz 9) [:age]))
+(throwof "sm-mapfn" '(pr-str (map (struct-map person :name "Ada" :age 36 :zzz 9) [:age :name :zzz :nope :nf-x])))

@@ -2480,6 +2480,41 @@ enum PendingChunk {
     Gone,
 }
 
+/// S12: the `chunked_pending_parts` decision, made under the
+/// memo lock (split for the complexity budget).
+fn chunked_pending_decision(p: &PendingSeq) -> PendingChunk {
+    let state = p.state.lock().unwrap_or_else(|e| e.into_inner());
+    match &*state {
+        SeqState::Pending(t) => match &**t {
+            Thunk::ChunkHead { chunk, tail } => PendingChunk::Parts(chunk.clone(), tail.clone()),
+            Thunk::Chain { head, tail } => {
+                PendingChunk::Parts(crate::collmisc::head_chunk(head.clone()), tail.clone())
+            }
+            _ => PendingChunk::Force,
+        },
+        SeqState::Chunk { items, pos, tail } => PendingChunk::Parts(
+            crate::collmisc::head_chunk(items[*pos..].to_vec()),
+            tail.clone(),
+        ),
+        SeqState::Empty => PendingChunk::Gone,
+    }
+}
+
+/// S12: the `chunked_pending_parts` force half — force one step
+/// after the memo lock drops (split for the complexity budget).
+fn chunked_pending_forced(
+    eval: &mut Evaluator,
+    p: &PendingSeq,
+) -> Result<Option<(crate::collmisc::ChunkValue, Option<Value>)>, Signal> {
+    match force_pending(eval, p)? {
+        Forced::Empty => Ok(None),
+        Forced::Chunk { items, tail } => {
+            let chunk = crate::collmisc::head_chunk(items.to_vec());
+            Ok(Some((chunk, tail_seq_opt(eval, &tail)?)))
+        }
+    }
+}
+
 /// S12: head chunk + tail of an emulated chunked cons (forced
 /// state reads without forcing; unforced non-chain thunks force
 /// one step).
@@ -2487,34 +2522,9 @@ fn chunked_pending_parts(
     eval: &mut Evaluator,
     p: &PendingSeq,
 ) -> Result<Option<(crate::collmisc::ChunkValue, Option<Value>)>, Signal> {
-    let decision = {
-        let state = p.state.lock().unwrap_or_else(|e| e.into_inner());
-        match &*state {
-            SeqState::Pending(t) => match &**t {
-                Thunk::ChunkHead { chunk, tail } => {
-                    PendingChunk::Parts(chunk.clone(), tail.clone())
-                }
-                Thunk::Chain { head, tail } => {
-                    PendingChunk::Parts(crate::collmisc::head_chunk(head.clone()), tail.clone())
-                }
-                _ => PendingChunk::Force,
-            },
-            SeqState::Chunk { items, pos, tail } => PendingChunk::Parts(
-                crate::collmisc::head_chunk(items[*pos..].to_vec()),
-                tail.clone(),
-            ),
-            SeqState::Empty => PendingChunk::Gone,
-        }
-    };
-    match decision {
+    match chunked_pending_decision(p) {
         PendingChunk::Gone => Ok(None),
-        PendingChunk::Force => match force_pending(eval, p)? {
-            Forced::Empty => Ok(None),
-            Forced::Chunk { items, tail } => {
-                let chunk = crate::collmisc::head_chunk(items.to_vec());
-                Ok(Some((chunk, tail_seq_opt(eval, &tail)?)))
-            }
-        },
+        PendingChunk::Force => chunked_pending_forced(eval, p),
         PendingChunk::Parts(chunk, tail) => Ok(Some((chunk, tail_seq_opt(eval, &tail)?))),
     }
 }

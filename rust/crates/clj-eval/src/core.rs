@@ -345,7 +345,9 @@ fn char_of_num(n: &Num) -> Result<char, NativeError> {
 /// Whether the value is callable (`fn?` plus the `IFn` collections,
 /// keywords, symbols, and vars; `Unbound` passes through to the
 /// caller's unbound error; S12 struct accessors are `IFn` but not
-/// `fn?`, like the JVM's `PersistentStructMap$1`).
+/// `fn?`, like the JVM's `PersistentStructMap$1` — and struct
+/// instances are `IFn` too, like the JVM's `PersistentStructMap`,
+/// while records stay non-`IFn` on both sides).
 pub(crate) fn is_ifn(v: &Value) -> bool {
     match v {
         Value::Extension(e) => {
@@ -366,7 +368,10 @@ pub(crate) fn is_ifn(v: &Value) -> bool {
         | Value::Promise(_)
         | Value::MultiFn(_)
         | Value::Unbound(_) => true,
-        _ => false,
+        // Struct instances only (records and bases miss — S12
+        // oracle `sm-ifn`; records stay pinned non-`IFn` by
+        // `types.rs rec_*`).
+        _ => crate::types::is_host_struct(v),
     }
 }
 
@@ -1426,6 +1431,7 @@ pub(crate) fn is_counted(v: &Value) -> bool {
         || is_counted_seq(v)
         || crate::types::is_host_record(v)
         || crate::types::is_host_struct(v)
+        || crate::collmisc::as_chunk_buffer(v).is_some()
 }
 fn is_list(v: &Value) -> bool {
     matches!(v, Value::List(_))

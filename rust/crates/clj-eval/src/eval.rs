@@ -1387,6 +1387,14 @@ impl Evaluator {
     }
 
     fn invoke(&mut self, callee: &Value, args: &[Value]) -> Result<Value, Signal> {
+        // Struct instances invoke as maps (S12 oracles `sm-call*`):
+        // a pre-dispatch, not a new table arm, so the complexity
+        // budget holds (`invoke_map` names the plain struct class
+        // for arity errors and `lookup` already reads structs, so
+        // 1/2-arity, `apply`, and seq-fn-as-fn all follow).
+        if crate::types::is_host_struct(callee) {
+            return self.invoke_map(callee, args);
+        }
         match callee {
             Value::Nil => Err(self.throw(NativeError::new(
                 ThrowClass::NullPointerException,

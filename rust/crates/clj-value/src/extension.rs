@@ -97,7 +97,9 @@ impl ThrowClass {
             Self::IndexOutOfBoundsException => "java.lang.IndexOutOfBoundsException",
             Self::ArrayIndexOutOfBoundsException => "java.lang.ArrayIndexOutOfBoundsException",
             Self::NegativeArraySizeException => "java.lang.NegativeArraySizeException",
-            Self::ArithmeticException => "java.lang.ArithmeticException",
+            // `ArithmeticException` lives in `jvm_name_rest` (which
+            // has budget); the chain still matches every variant
+            // exactly once.
             other => other.jvm_name_mid(),
         }
     }
@@ -128,6 +130,7 @@ impl ThrowClass {
     /// Remaining throw classes.
     fn jvm_name_rest(&self) -> &'static str {
         match self {
+            Self::ArithmeticException => "java.lang.ArithmeticException",
             Self::DuplicateFormatFlagsException => "java.util.DuplicateFormatFlagsException",
             Self::IllegalFormatFlagsException => "java.util.IllegalFormatFlagsException",
             Self::IllegalFormatWidthException => "java.util.IllegalFormatWidthException",
@@ -182,7 +185,6 @@ fn throw_parent(jvm_name: &str) -> Option<&'static str> {
         "java.io.IOException" => Some("java.lang.Exception"),
         "java.lang.AssertionError" => Some("java.lang.Error"),
         "java.lang.IllegalAccessError" => Some("java.lang.LinkageError"),
-        "java.lang.LinkageError" => Some("java.lang.Error"),
         "java.lang.ArrayIndexOutOfBoundsException" => Some("java.lang.IndexOutOfBoundsException"),
         "java.lang.IllegalArgumentException"
         | "java.lang.IllegalStateException"
@@ -196,6 +198,15 @@ fn throw_parent(jvm_name: &str) -> Option<&'static str> {
         | "clojure.lang.ExceptionInfo"
         | "clojure.lang.Compiler$CompilerException"
         | "clojure.lang.LispReader$ReaderException" => Some("java.lang.RuntimeException"),
+        _ => throw_parent_rest(jvm_name),
+    }
+}
+
+/// The linkage-error branch of [`throw_parent`] (split for the
+/// complexity budget; chains into [`throw_parent_format`]).
+fn throw_parent_rest(jvm_name: &str) -> Option<&'static str> {
+    match jvm_name {
+        "java.lang.LinkageError" => Some("java.lang.Error"),
         _ => throw_parent_format(jvm_name),
     }
 }

@@ -17,6 +17,12 @@ ch-nth-cap-oob THROW java.lang.ArrayIndexOutOfBoundsException|"Index 32 out of b
 ch-use-once THROW java.lang.NullPointerException|"Cannot store to object array because \"this.buffer\" is null"
 ch-chunk-twice THROW java.lang.NullPointerException|"Cannot load from object array because \"this.array\" is null"
 ch-append-ret [true 1]
+ch-buf-count-fresh 0
+ch-buf-count-used 1
+ch-buf-count-dead 1
+ch-buf-count-dead0 0
+ch-buf-empty true
+ch-buf-counted true
 ch-cons-empty true
 ch-cons-print "(1 2 3)"
 ch-cons-class "class clojure.lang.ChunkedCons"

@@ -9,20 +9,23 @@
 //! Zero-oos S12 collections misc (issue #54): structmaps, chunks,
 //! `hash-combine`/`mix-collection-hash`, `seque`, `iteration`,
 //! `file-seq`, and the `re-matcher`/`re-groups` handle pair.
-//! Oracle: `docs/zero-oos-s12-collmisc/probes/*.out` (203 pins).
+//! Oracle: `docs/zero-oos-s12-collmisc/probes/*.out` (228 pins).
 
 use std::collections::HashMap;
 use std::hash::Hasher;
 use std::sync::{Arc, Mutex, mpsc};
 
-use clj_value::{ExtensionValue, HostDef, HostInst, HostKind, HostVal, ThrowClass, Value, Vector};
+use clj_value::{
+    ExtensionValue, HostDef, HostInst, HostKind, HostVal, Keyword, ThrowClass, Value, Vector,
+};
 
+use crate::coll::lookup_present;
 use crate::core::{cce_err, int_cast_value, number_int_cast};
 use crate::error::{NativeError, Signal};
 use crate::eval::Evaluator;
 use crate::lazy::{
-    PendingSeq, Thunk, check_seqable, chunked_parts, empty_list_value, is_chunked_seq_value,
-    pending_value, realize_deep,
+    PendingSeq, Thunk, check_seqable, chunked_parts, empty_list_value, first_value,
+    is_chunked_seq_value, next_value, pending_value, realize_deep, seq_value,
 };
 use crate::ns::{NativeFnPtr, check_arity, deref_core, signal_to_native, str_of};
 use crate::vars::check_min_arity;
@@ -61,6 +64,8 @@ const CHUNK_BUFFER_CLASS: &str = "clojure.lang.ChunkBuffer";
 const ICHUNKEDSEQ_CLASS: &str = "clojure.lang.IChunkedSeq";
 /// The JVM matcher class.
 const MATCHER_CLASS: &str = "java.util.regex.Matcher";
+/// The odd-tail entry-cast target (`APersistentMap.cons`).
+const MAP_ENTRY_CLASS: &str = "java.util.Map$Entry";
 
 /// Downcast a value to a struct accessor, if it is one.
 pub(crate) fn as_accessor(v: &Value) -> Option<&AccessorValue> {
@@ -79,7 +84,7 @@ pub(crate) fn as_chunk(v: &Value) -> Option<&ChunkValue> {
 }
 
 /// Downcast a value to a chunk buffer, if it is one.
-fn as_chunk_buffer(v: &Value) -> Option<&ChunkBufferValue> {
+pub(crate) fn as_chunk_buffer(v: &Value) -> Option<&ChunkBufferValue> {
     match v {
         Value::Extension(e) => e.as_any().downcast_ref::<ChunkBufferValue>(),
         _ => None,
@@ -463,6 +468,13 @@ fn native_chunk(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeEr
     })))
 }
 
+/// `count` of a chunk buffer: the appended slots — which
+/// survive the take, so a dead buffer still counts its used
+/// slots (oracles `ch-buf-count-*`).
+pub(crate) fn chunk_buffer_count(b: &ChunkBufferValue) -> i64 {
+    b.state.lock().unwrap_or_else(|e| e.into_inner()).len as i64
+}
+
 /// `count` of a chunk: the appended items (a degenerate chunk
 /// raises its NPE — oracle `ch-chunk-twice`).
 pub(crate) fn chunk_count(c: &ChunkValue) -> Result<i64, NativeError> {
@@ -742,51 +754,144 @@ struct IterationOpts {
     initk: Option<Value>,
 }
 
-/// The ISeq coercion error (per-module shape, like `ns.rs`).
-fn iseq_err(v: &Value) -> NativeError {
-    NativeError::new(
-        ThrowClass::IllegalArgumentException,
-        format!(
-            "Don't know how to create ISeq from: {}",
-            crate::error::jvm_class_of(v)
-        ),
-    )
-}
-
 /// Collect `iteration` opts from flat keyvals (a nil `:somef` /
-/// `:vf` / `:kf` takes the default, like `:or`). Odd tails follow
-/// the JVM's `& {:keys}` destructuring over the rest seq: a lone
-/// key is ignored (all defaults), a longer odd tail seqs its last
-/// key (JVM-verified in the R1 fixup round — the port's own fn
-/// destructuring agrees).
-fn iteration_opts(opts: &[Value]) -> Result<IterationOpts, NativeError> {
-    if opts.len() % 2 == 1 && opts.len() > 1 {
-        let last = opts.last().expect("odd opts have a last item");
-        return Err(iseq_err(last));
-    }
+/// `:vf` / `:kf` takes the default, like `:or`). `iteration` is
+/// `[step & {:keys … :or …}]`, i.e. kwargs: a lone element IS the
+/// opts map (`hash-map*` returns it itself — maps, sets via
+/// membership, and structs are honored; anything else reads
+/// defaults); a longer odd tail folds via `APersistentMap.cons`
+/// (trailing wins over pairs). Mirrors `eval.rs cons_trailing`
+/// rather than reusing it: the JVM casts EVERY seqed element to
+/// `Map.Entry` with full CCE verbiage (oracles `it-opts-*`).
+fn iteration_opts(eval: &mut Evaluator, opts: &[Value]) -> Result<IterationOpts, NativeError> {
     let mut out = IterationOpts {
         somef: None,
         vf: None,
         kf: None,
         initk: None,
     };
-    for pair in opts.chunks_exact(2) {
-        let Value::Keyword(kw) = &pair[0] else {
-            continue;
-        };
-        if kw.namespace().is_some() {
-            continue;
-        }
-        let slot = match kw.name() {
-            "somef" => &mut out.somef,
-            "vf" => &mut out.vf,
-            "kf" => &mut out.kf,
-            "initk" => &mut out.initk,
-            _ => continue,
-        };
-        *slot = Some(pair[1].clone());
+    if opts.len() == 1 {
+        iteration_lone_opts(eval, &opts[0], &mut out)?;
+        return Ok(out);
+    }
+    let odd = opts.len() % 2 == 1;
+    let body = if odd { &opts[..opts.len() - 1] } else { opts };
+    for pair in body.chunks_exact(2) {
+        iteration_set_opt(&mut out, &pair[0], pair[1].clone());
+    }
+    if odd {
+        let last = opts.last().expect("odd opts have a last item");
+        iteration_fold_trailing(eval, &mut out, last)?;
     }
     Ok(out)
+}
+
+/// The slot for a known unqualified opt key, if it is one.
+fn iteration_slot<'a>(out: &'a mut IterationOpts, name: &str) -> Option<&'a mut Option<Value>> {
+    match name {
+        "somef" => Some(&mut out.somef),
+        "vf" => Some(&mut out.vf),
+        "kf" => Some(&mut out.kf),
+        "initk" => Some(&mut out.initk),
+        _ => None,
+    }
+}
+
+/// Set one known opt from a key/value pair (unknown, qualified,
+/// and non-keyword keys are ignored — oracles `it-unknown-opt`,
+/// `it-opts-strkey`, `it-opts-nskey`).
+fn iteration_set_opt(out: &mut IterationOpts, k: &Value, v: Value) {
+    let Value::Keyword(kw) = k else {
+        return;
+    };
+    if kw.namespace().is_some() {
+        return;
+    }
+    if let Some(slot) = iteration_slot(out, kw.name()) {
+        *slot = Some(v);
+    }
+}
+
+/// Read the four opts from a lone element, which IS the opts map
+/// (oracles `it-opts-lonemap`, `it-opts-loneset`; keywords and
+/// friends read defaults — oracle `it-opts-lonekw`).
+fn iteration_lone_opts(
+    eval: &mut Evaluator,
+    elem: &Value,
+    out: &mut IterationOpts,
+) -> Result<(), NativeError> {
+    for name in ["somef", "vf", "kf", "initk"] {
+        let key = Value::Keyword(Keyword::new(None, name));
+        if let Some(v) = lookup_present(eval, elem, &key)? {
+            *iteration_slot(out, name).expect("known opt") = Some(v);
+        }
+    }
+    Ok(())
+}
+
+/// Fold a longer odd tail per `APersistentMap.cons` (trailing
+/// wins): entries assoc as their pair, maps and map-likes merge,
+/// vectors pair-check, nil vanishes, and anything else seqs with
+/// each element cast to `Map.Entry` (oracles `it-opts-trail*`).
+fn iteration_fold_trailing(
+    eval: &mut Evaluator,
+    out: &mut IterationOpts,
+    trailing: &Value,
+) -> Result<(), NativeError> {
+    if let Value::MapEntry { key, val } = trailing {
+        iteration_set_opt(out, key, (**val).clone());
+        return Ok(());
+    }
+    if let Value::Map(m) = trailing {
+        for (k, v) in m.iter() {
+            iteration_set_opt(out, k, v.clone());
+        }
+        return Ok(());
+    }
+    if let Some(i) = crate::types::maplike_inst(trailing) {
+        for (k, v) in i.content.iter() {
+            iteration_set_opt(out, k, v.clone());
+        }
+        return Ok(());
+    }
+    if let Value::Vector(v) = trailing {
+        let items: Vec<&Value> = v.iter().collect();
+        if items.len() != 2 {
+            return Err(NativeError::new(
+                ThrowClass::IllegalArgumentException,
+                "Vector arg to map conj must be a pair".to_owned(),
+            ));
+        }
+        iteration_set_opt(out, items[0], items[1].clone());
+        return Ok(());
+    }
+    if matches!(trailing, Value::Nil) {
+        return Ok(());
+    }
+    iteration_fold_seq(eval, out, trailing)
+}
+
+/// Fold a seqable odd tail: `RT.seq` (the ISeq error iff
+/// unseqable — oracle `it-opts-trailkw`), then every element
+/// cast to `Map.Entry` (oracles `it-opts-trailstr`,
+/// `it-opts-traillist`).
+fn iteration_fold_seq(
+    eval: &mut Evaluator,
+    out: &mut IterationOpts,
+    trailing: &Value,
+) -> Result<(), NativeError> {
+    let mut cur = seq_value(eval, trailing).map_err(signal_to_native)?;
+    loop {
+        if matches!(cur, Value::Nil) {
+            return Ok(());
+        }
+        let head = first_value(eval, &cur).map_err(signal_to_native)?;
+        let Value::MapEntry { key, val } = &head else {
+            return Err(cce_err(&head, MAP_ENTRY_CLASS));
+        };
+        iteration_set_opt(out, key, (**val).clone());
+        cur = next_value(eval, &cur).map_err(signal_to_native)?;
+    }
 }
 
 /// A collected opt, defaulting nils (like `:or`).
@@ -801,7 +906,7 @@ fn opt_or(opt: Option<Value>, default: Value) -> Value {
 /// `some?`, `:vf`/`:kf` `identity`, `:initk` nil).
 fn native_iteration(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_min_arity("clojure.core/iteration", args, 1)?;
-    let opts = iteration_opts(&args[1..])?;
+    let opts = iteration_opts(eval, &args[1..])?;
     Ok(Value::Extension(Arc::new(IterationValue {
         step: args[0].clone(),
         somef: opt_or(opts.somef, deref_core(eval, "some?")),

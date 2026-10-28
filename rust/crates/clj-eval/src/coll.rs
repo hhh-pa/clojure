@@ -595,13 +595,18 @@ fn count_fallback(eval: &mut Evaluator, v: &Value) -> Result<i64, NativeError> {
 fn count_of(eval: &mut Evaluator, v: &Value) -> Result<i64, NativeError> {
     // Records count their content (oracle `rec-count`); structs
     // likewise (S12 oracle `sm-count`); chunks count their
-    // appended items (S12 oracle `ch-build`); anything else host
-    // takes the unsupported path (oracle `dtor-count`).
+    // appended items (S12 oracle `ch-build`); chunk buffers
+    // count their used slots, dead or alive (S12 oracles
+    // `ch-buf-count-*`); anything else host takes the
+    // unsupported path (oracle `dtor-count`).
     if let Some(i) = crate::types::maplike_inst(v) {
         return Ok(i.content.size() as i64);
     }
     if let Some(c) = crate::collmisc::as_chunk(v) {
         return crate::collmisc::chunk_count(c);
+    }
+    if let Some(b) = crate::collmisc::as_chunk_buffer(v) {
+        return Ok(crate::collmisc::chunk_buffer_count(b));
     }
     match v {
         Value::Nil => Ok(0),
@@ -1007,6 +1012,24 @@ fn native_assoc(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErr
     Ok(acc)
 }
 
+/// Struct `dissoc`: extras drop and the value stays a struct,
+/// but dropping a basis key throws (S12 oracles
+/// `sm-dissoc-basis`, `sm-dissoc-extra*`; split from
+/// `native_dissoc` for the complexity budget).
+fn dissoc_struct(inst: &clj_value::HostInst, keys: &[Value]) -> Result<Value, NativeError> {
+    if keys.iter().any(|k| crate::types::is_struct_key(inst, k)) {
+        return Err(NativeError::new(
+            ThrowClass::RuntimeException,
+            "Can't remove struct key".to_owned(),
+        ));
+    }
+    let mut out = inst.content.clone();
+    for k in keys {
+        out = out.without(k);
+    }
+    Ok(crate::types::rewrap_maplike(inst, out))
+}
+
 fn native_dissoc(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_min_arity("clojure.core/dissoc", args, 1)?;
     if args.len() == 1 {
@@ -1015,21 +1038,8 @@ fn native_dissoc(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeEr
     if matches!(args[0], Value::Nil) {
         return Ok(Value::Nil);
     }
-    // Structs dissoc extras and stay structs, but dropping a basis
-    // key throws (S12 oracles `sm-dissoc-basis`,
-    // `sm-dissoc-extra*`).
     if let Some(i) = crate::types::struct_inst(&args[0]) {
-        if args[1..].iter().any(|k| crate::types::is_struct_key(i, k)) {
-            return Err(NativeError::new(
-                ThrowClass::RuntimeException,
-                "Can't remove struct key".to_owned(),
-            ));
-        }
-        let mut out = i.content.clone();
-        for k in &args[1..] {
-            out = out.without(k);
-        }
-        return Ok(crate::types::rewrap_maplike(i, out));
+        return dissoc_struct(i, &args[1..]);
     }
     // Records dissoc through their content map: dropping a declared
     // field loses recordness (a plain map, oracle `rec-dissoc-type`);

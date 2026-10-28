@@ -41,3 +41,10 @@ sm-empty-basis THROW java.lang.IllegalArgumentException|"Must supply keys"
 sm-map-nonbasis THROW java.lang.ClassCastException|"class clojure.lang.PersistentArrayMap cannot be cast to class clojure.lang.PersistentStructMap$Def (clojure.lang.PersistentArrayMap and clojure.lang.PersistentStructMap$Def are in unnamed module of loader 'app')"
 sm-struct-nonbasis THROW java.lang.ClassCastException|"class java.lang.String cannot be cast to class clojure.lang.PersistentStructMap$Def (java.lang.String is in module java.base of loader 'bootstrap'; clojure.lang.PersistentStructMap$Def is in unnamed module of loader 'app')"
 sm-accessor-nonbasis THROW java.lang.ClassCastException|"class clojure.lang.PersistentArrayMap cannot be cast to class clojure.lang.PersistentStructMap$Def (clojure.lang.PersistentArrayMap and clojure.lang.PersistentStructMap$Def are in unnamed module of loader 'app')"
+sm-ifn true
+sm-call 36
+sm-call-nf :nf
+sm-call-arity0 THROW clojure.lang.ArityException|"Wrong number of args (0) passed to: clojure.lang.PersistentStructMap"
+sm-call-arity3 THROW clojure.lang.ArityException|"Wrong number of args (3) passed to: clojure.lang.PersistentStructMap"
+sm-apply 36
+sm-mapfn "(36 \"Ada\" 9 nil nil)"

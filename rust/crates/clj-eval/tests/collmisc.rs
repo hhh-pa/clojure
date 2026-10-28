@@ -10,7 +10,7 @@
 //! structmap surface, the chunk machinery, `hash-combine` /
 //! `mix-collection-hash`, `seque`, `iteration`, `file-seq`, and
 //! the `re-matcher` / `re-groups` handle pair (see
-//! `docs/zero-oos-s12-collmisc/probes/*.{clj,out}` — 203 pins).
+//! `docs/zero-oos-s12-collmisc/probes/*.{clj,out}` — 228 pins).
 //! Every `sm-*`/`ch-*`/`mh-*`/`sq-*`/`it-*`/`fs-*`/`rm-*` label
 //! below names its oracle row; `(derived)` marks a port-test
 //! assertion derived from an oracle pin rather than quoted by it.
@@ -681,6 +681,65 @@ fn structmap_rows() {
         uncaught(&mut eval, "(seq person)"),
         format!("java.lang.IllegalArgumentException | Don't know how to create ISeq from: {DEF}")
     );
+    // sm-ifn
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(ifn? (struct-map person :name \"Ada\" :age 36 :zzz 9))"
+        ),
+        "true"
+    );
+    // sm-call
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "((struct-map person :name \"Ada\" :age 36 :zzz 9) :age)"
+        ),
+        "36"
+    );
+    // sm-call-nf
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "((struct-map person :name \"Ada\" :age 36 :zzz 9) :missing :nf)"
+        ),
+        ":nf"
+    );
+    // sm-call-arity0
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "((struct-map person :name \"Ada\" :age 36 :zzz 9))"
+        ),
+        format!("clojure.lang.ArityException | Wrong number of args (0) passed to: {STRUCT}")
+    );
+    // sm-call-arity3
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "((struct-map person :name \"Ada\" :age 36 :zzz 9) :a :b :c)"
+        ),
+        format!("clojure.lang.ArityException | Wrong number of args (3) passed to: {STRUCT}")
+    );
+    // sm-apply
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(apply (struct-map person :name \"Ada\" :age 36 :zzz 9) [:age])"
+        ),
+        "36"
+    );
+    // sm-mapfn
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(pr-str (map (struct-map person :name \"Ada\" :age 36 :zzz 9) [:age :name :zzz :nope :nf-x]))"
+        ),
+        "\"(36 \\\"Ada\\\" 9 nil nil)\""
+    );
+    // (derived) records stay non-`IFn` — pinned by
+    // `types.rs rec_invoke_not_supported` (the `is_ifn` change is
+    // struct-only).
 }
 
 const CHUNK: &str = "clojure.lang.ArrayChunk";
@@ -822,6 +881,41 @@ fn chunk_rows() {
             "(let [b (chunk-buffer 32)] [(nil? (chunk-append b 1)) (count (chunk b))])"
         ),
         "[true 1]"
+    );
+    // ch-buf-count-fresh
+    assert_eq!(run_last(&mut eval, "(count (chunk-buffer 4))"), "0");
+    // ch-buf-count-used
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [b (chunk-buffer 4)] (chunk-append b 1) (count b))"
+        ),
+        "1"
+    );
+    // ch-buf-count-dead
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [b (chunk-buffer 4)] (chunk-append b 1) (chunk b) (count b))"
+        ),
+        "1"
+    );
+    // ch-buf-count-dead0
+    assert_eq!(
+        run_last(&mut eval, "(let [b (chunk-buffer 4)] (chunk b) (count b))"),
+        "0"
+    );
+    // ch-buf-empty
+    assert_eq!(run_last(&mut eval, "(empty? (chunk-buffer 4))"), "true");
+    // ch-buf-counted
+    assert_eq!(run_last(&mut eval, "(counted? (chunk-buffer 4))"), "true");
+    // (derived) a used buffer is not empty (the count path).
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [b (chunk-buffer 4)] (chunk-append b 1) (empty? b))"
+        ),
+        "false"
     );
     // ch-cons-empty (`identical?` is N1 out-of-scope in the
     // port — identity is derived two ways: a non-chunked rest
@@ -1448,9 +1542,7 @@ fn iteration_rows() {
         ),
         "\"(1)\""
     );
-    // Coverage pins (JVM-verified in the R1 fixup round; no oracle
-    // rows): non-keyword and namespaced opt keys are ignored like
-    // unknown keywords.
+    // it-opts-strkey
     assert_eq!(
         run_last(
             &mut eval,
@@ -1458,6 +1550,7 @@ fn iteration_rows() {
         ),
         "\"(1)\""
     );
+    // it-opts-nskey
     assert_eq!(
         run_last(
             &mut eval,
@@ -1465,16 +1558,121 @@ fn iteration_rows() {
         ),
         "\"(1)\""
     );
-    // Coverage pins (no oracle rows): odd opt tails follow `&
-    // {:keys}` — a lone key is ignored, a longer odd tail seqs
-    // its last key.
+    // it-opts-lonemap
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(pr-str (take 3 (iteration identity {:initk 5})))"
+        ),
+        "\"(5 5 5)\""
+    );
+    // it-opts-loneset
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(pr-str (take 3 (iteration identity #{:initk})))"
+        ),
+        "\"(:initk :initk :initk)\""
+    );
+    // it-opts-trailmap
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(pr-str (take 3 (iteration identity :vf identity {:initk 5})))"
+        ),
+        "\"(5 5 5)\""
+    );
+    // it-opts-trailnil
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(pr-str (take 3 (iteration identity :vf identity nil)))"
+        ),
+        "\"()\""
+    );
+    // it-opts-trailpair
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(pr-str (take 3 (iteration identity :vf identity [:a :b])))"
+        ),
+        "\"()\""
+    );
+    // it-opts-trailstr
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(take 3 (iteration identity :vf identity \"x\"))"
+        ),
+        cce("java.lang.Character", "java.util.Map$Entry")
+    );
+    // it-opts-traillist
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(take 3 (iteration identity :vf identity '([:initk 5])))"
+        ),
+        cce("clojure.lang.PersistentVector", "java.util.Map$Entry")
+    );
+    // it-opts-trailvec1
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(take 3 (iteration identity :vf identity [[:initk 5]]))"
+        ),
+        "java.lang.IllegalArgumentException | Vector arg to map conj must be a pair"
+    );
+    // it-opts-lonekw
     assert_eq!(
         run_last(&mut eval, "(pr-str (take 1 (iteration (fn [_] 7) :initk)))"),
         "\"(7)\""
     );
+    // it-opts-trailkw
     assert_eq!(
         uncaught(&mut eval, "(take 1 (iteration inc :initk 0 :vf))"),
         "java.lang.IllegalArgumentException | Don't know how to create ISeq from: clojure.lang.Keyword"
+    );
+    // (derived) every seqed trailing element folds — later wins
+    // (JVM: `(6 6)`), and the trailing wins over pairs (JVM:
+    // `(5 5)`).
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(pr-str (take 2 (iteration identity :vf identity (list (first {:initk 5}) (first {:initk 6})))))"
+        ),
+        "\"(6 6)\""
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(pr-str (take 2 (iteration identity :initk 1 :vf identity {:initk 5})))"
+        ),
+        "\"(5 5)\""
+    );
+    // (derived) an entry trailing conjs as its pair, a struct
+    // trailing merges its content, and a set trailing casts its
+    // elements (JVM: `(5 5)`, `(9 9)`, CCE Keyword).
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(pr-str (take 3 (iteration identity :vf identity (first {:initk 5}))))"
+        ),
+        "\"(5 5 5)\""
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(do (defstruct ittiny :initk)
+                 (pr-str (take 2 (iteration identity :vf identity (struct-map ittiny :initk 9)))))"
+        ),
+        "\"(9 9)\""
+    );
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(take 3 (iteration identity :vf identity #{:a}))"
+        ),
+        cce("clojure.lang.Keyword", "java.util.Map$Entry")
     );
     // Coverage pins (no oracle rows): iterations compare by
     // identity (like the JVM's reify object).

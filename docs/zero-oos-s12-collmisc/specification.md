@@ -6,7 +6,7 @@
   Branch: `zero-oos-s12-collmisc`.
 - Probes: `docs/zero-oos-s12-collmisc/probes/`
   `{structmaps,chunks,mixhash,seque,iteration,fileseq,rematcher}.{clj,out}`
-  (203 pins, every file exit 0 and rerun-stable; one redundant dissoc-class probe dropped at owner review).
+  (228 pins, every file exit 0 and rerun-stable; one redundant dissoc-class probe dropped at owner review).
 
 ## Problem
 
@@ -95,6 +95,13 @@ is map-identical in print, `=`, and `hash`.
 | sm-map-nonbasis | THROW CCE ArrayMap → `$Def` |
 | sm-struct-nonbasis | THROW CCE String → `$Def` (cross-module shape) |
 | sm-accessor-nonbasis | THROW CCE ArrayMap → `$Def` |
+| sm-ifn | instance answers `ifn?` true (records stay false) |
+| sm-call | 1-arity call reads the key |
+| sm-call-nf | 2-arity call reads the key with not-found |
+| sm-call-arity0 | THROW ArityException `(0)` passed to `…PersistentStructMap` (plain class name) |
+| sm-call-arity3 | THROW ArityException `(3)` passed to `…PersistentStructMap` (plain class name) |
+| sm-apply | `apply` of an instance reads the key |
+| sm-mapfn | instance as a mapping fn reads each key (missing → nil) |
 
 Derived port tests: `(chunk-first (struct-map …))` throws CCE
 from `clojure.lang.PersistentStructMap` (pins sm-make-class
@@ -127,6 +134,12 @@ bounds check below capacity).
 | ch-nth-cap | nth at capacity-1 hole is nil |
 | ch-nth-cap-oob | THROW AIOOBE `"Index 32 out of bounds for length 32"` |
 | ch-append-ret | append returns nil; chunk then counts 1 |
+| ch-buf-count-fresh | fresh buffer counts 0 |
+| ch-buf-count-used | buffer counts appended slots |
+| ch-buf-count-dead | taken buffer still counts its used slots |
+| ch-buf-count-dead0 | taken empty buffer counts 0 |
+| ch-buf-empty | fresh buffer is `empty?` |
+| ch-buf-counted | buffer is `counted?` |
 | ch-use-once | THROW NPE `"… \"this.buffer\" is null"` (append after chunk) |
 | ch-chunk-twice | 2nd chunk is degenerate; count THROWs NPE `"… \"this.array\" is null"` |
 | ch-cons-empty | empty chunk + rest returns rest identically |
@@ -275,6 +288,25 @@ reduce path loops with `reduced` short-circuit.
 | it-twice | each consumption re-steps from `:initk` |
 | it-reduce-count | reduce steps through the failing ret |
 | it-unknown-opt | unknown opts are ignored |
+| it-opts-lonemap | a lone map IS the opts map |
+| it-opts-loneset | a lone set IS the opts map (membership reads) |
+| it-opts-trailmap | a trailing map folds in (trailing wins) |
+| it-opts-trailnil | a trailing nil vanishes |
+| it-opts-trailpair | a trailing 2-vector folds as one pair |
+| it-opts-trailstr | a trailing string THROWs CCE Character → `Map$Entry` |
+| it-opts-traillist | a trailing list casts each element to `Map.Entry` |
+| it-opts-trailvec1 | a trailing non-pair vector THROWs IAE `"Vector arg to map conj must be a pair"` |
+| it-opts-lonekw | a lone keyword reads defaults |
+| it-opts-trailkw | a trailing keyword THROWs the ISeq error |
+| it-opts-strkey | non-keyword pair keys are ignored |
+| it-opts-nskey | namespaced pair keys are ignored |
+
+`iteration` takes kwargs (`[step & {:keys … :or …}]`):
+`hash-map*` returns a lone element itself as the opts map, and
+`createAsIfByAssoc` folds a longer odd tail via
+`APersistentMap.cons` — entries assoc as their pair, vectors
+pair-check, nil vanishes, and anything else seqs (the ISeq
+error iff unseqable) with every element cast to `Map.Entry`.
 
 ### 1.7 File-seq
 
@@ -379,7 +411,9 @@ keeps them or renames consistently.
   content map; `jvm_class_of` reports `…PersistentStructMap`
   for instances and `…PersistentStructMap$Def` for bases;
   map ops follow the record path except dissoc-of-basis-key
-  throws and assoc always stays struct.
+  throws and assoc always stays struct. Instances are `IFn`
+  (they invoke as maps — arity errors name the plain struct
+  class); records are not, on either side.
 - D2 (accessor): dedicated `ExtensionValue` + IFn arms
   (callable, `fn?` false). Not a `NativeFn` (`fn?` is true
   for those). Print `#object[…$1 …]`, CCE target
@@ -396,7 +430,9 @@ keeps them or renames consistently.
   NPE texts. `nth` indexes raw slots (nil holes, AIOOBE at
   capacity). `jvm_class_of`: `…ArrayChunk` /
   `…ChunkBuffer`; both print the pinned `#object` shapes;
-  `(seq chunk)` falls into the existing `iseq_err`.
+  `(seq chunk)` falls into the existing `iseq_err`. Buffers
+  are `Counted`: `count` reads the used slots (which survive
+  the take), so `empty?` follows the count path.
 - D4 (chunked cons): reuse `SeqKind::ChunkedCons` (empty chunks
   already collapse to the tail, matching ch-cons-empty).
   No new seq shape.

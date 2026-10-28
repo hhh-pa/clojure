@@ -43,6 +43,13 @@
 (throwcause "ch-use-once" '(let [b (chunk-buffer 32)] (chunk-append b 1) (let [c (chunk b)] (chunk-append b 2) [(count c) (nth c 0) (nth c 1)])))
 (throwcause "ch-chunk-twice" '(let [b (chunk-buffer 32)] (chunk-append b 1) (chunk b) (let [c2 (chunk b)] [(count c2) (nil? (nth c2 0))])))
 (throwof "ch-append-ret" '(let [b (chunk-buffer 32)] [(nil? (chunk-append b 1)) (count (chunk b))]))
+;; ---- buffer counts (R2: buffers are Counted; dead buffers keep counting) ----
+(throwof "ch-buf-count-fresh" '(count (chunk-buffer 4)))
+(throwof "ch-buf-count-used" '(let [b (chunk-buffer 4)] (chunk-append b 1) (count b)))
+(throwof "ch-buf-count-dead" '(let [b (chunk-buffer 4)] (chunk-append b 1) (chunk b) (count b)))
+(throwof "ch-buf-count-dead0" '(let [b (chunk-buffer 4)] (chunk b) (count b)))
+(throwof "ch-buf-empty" '(empty? (chunk-buffer 4)))
+(throwof "ch-buf-counted" '(counted? (chunk-buffer 4)))
 ;; ---- cons ----
 (throwof "ch-cons-empty" '(let [r (quote (1 2))] (identical? (chunk-cons (chunk (chunk-buffer 32)) r) r)))
 (throwof "ch-cons-print" '(pr-str (chunk-cons (let [b (chunk-buffer 32)] (chunk-append b 1) (chunk-append b 2) (chunk b)) (quote (3)))))
