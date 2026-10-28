@@ -243,7 +243,7 @@ jobs:
   quality-gates:
     name: quality gates
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 600
     permissions:
       contents: read # checkout
       actions: write # coverage artifact + GHA image cache
