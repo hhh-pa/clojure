@@ -1794,10 +1794,12 @@ impl Evaluator {
                 "Key must be integer".to_owned(),
             )));
         }
-        let coerced = crate::core::native_int(self, &args[0..1]).map_err(|e| self.throw(e))?;
-        let Value::Int(i) = coerced else {
-            unreachable!("int answers Int")
-        };
+        // `int_cast_value` is core-`int` minus the arity check
+        // (the key slice is always exactly one arg): it
+        // answers the `i64` directly, so no `Int` unwrap
+        // remains (the old `unreachable!` could never
+        // execute — `int` only answers `Int`).
+        let i = crate::core::int_cast_value(&args[0]).map_err(|e| self.throw(e))?;
         // Core-`int` range-checks, so the `i64` always fits `i32`.
         match usize::try_from(i as i32).ok().and_then(|idx| p.get(idx)) {
             Some(elem) => Ok(elem.clone()),
@@ -2928,11 +2930,13 @@ mod tests {
             Value::Int(2),
             pv(vec![Value::Int(3), Value::Int(4)]),
         ]));
-        let Value::Map(m) = eval.seq_to_map(&list).expect("pv pair trailer") else {
-            panic!("expected a map");
-        };
-        assert!(matches!(m.get(&Value::Int(1)), Some(Value::Int(2))));
-        assert!(matches!(m.get(&Value::Int(3)), Some(Value::Int(4))));
+        let trailer = eval.seq_to_map(&list).expect("pv pair trailer");
+        assert!(
+            matches!(&trailer, Value::Map(m)
+                if matches!(m.get(&Value::Int(1)), Some(Value::Int(2)))
+                    && matches!(m.get(&Value::Int(3)), Some(Value::Int(4)))),
+            "expected a map trailer, got {trailer:?}"
+        );
         let bad = Value::List(List::from_vec(vec![
             Value::Int(1),
             Value::Int(2),
@@ -2953,11 +2957,13 @@ mod tests {
             }]),
         ));
         let list = Value::List(List::from_vec(vec![Value::Int(1), Value::Int(2), arr]));
-        let Value::Map(m) = eval.seq_to_map(&list).expect("array trailer") else {
-            panic!("expected a map");
-        };
-        assert!(matches!(m.get(&Value::Int(1)), Some(Value::Int(2))));
-        assert!(matches!(m.get(&Value::Int(3)), Some(Value::Int(4))));
+        let trailer = eval.seq_to_map(&list).expect("array trailer");
+        assert!(
+            matches!(&trailer, Value::Map(m)
+                if matches!(m.get(&Value::Int(1)), Some(Value::Int(2)))
+                    && matches!(m.get(&Value::Int(3)), Some(Value::Int(4)))),
+            "expected a map trailer, got {trailer:?}"
+        );
     }
 
     #[test]
@@ -2985,6 +2991,44 @@ mod tests {
         assert_eq!(
             t.message.as_deref(),
             Some("Vector arg to map conj must be a pair")
+        );
+    }
+
+    #[test]
+    fn conj_one_pv_coerces_and_appends() {
+        // `Evaluator::conj_one` is the destructuring-`into1`
+        // path (surface `conj` plans in `coll.rs`), so its PV
+        // arm is covered directly: ints append, strings fail
+        // the core-`int` coerce (same text as surface
+        // `f-conj-bad`).
+        let mut eval = Evaluator::new("test");
+        let pv = Value::PrimitiveVector(PrimitiveVector::new(
+            clj_value::Elem8::Int,
+            vec![Value::Int(1)],
+            None,
+        ));
+        let got = eval.conj_one(pv, Value::Int(2)).expect("pv conj");
+        assert!(
+            matches!(&got, Value::PrimitiveVector(p)
+                if p.elem() == clj_value::Elem8::Int
+                    && p.items() == vec![Value::Int(1), Value::Int(2)]),
+            "expected int pv [1 2], got {got:?}"
+        );
+        let pv = Value::PrimitiveVector(PrimitiveVector::new(
+            clj_value::Elem8::Int,
+            vec![Value::Int(1)],
+            None,
+        ));
+        let err = eval
+            .conj_one(pv, Value::Str("a".into()))
+            .expect_err("pv conj coerce");
+        let t = try_thrown(err).expect("throws");
+        assert_eq!(t.class, ThrowClass::ClassCastException);
+        assert_eq!(
+            t.message.as_deref(),
+            Some(
+                "class java.lang.String cannot be cast to class java.lang.Character (java.lang.String and java.lang.Character are in module java.base of loader 'bootstrap')"
+            )
         );
     }
 }

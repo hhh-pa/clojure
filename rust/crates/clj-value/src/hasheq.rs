@@ -1201,6 +1201,14 @@ mod tests {
         let _ = super::hasheq_tower(&Value::Nil);
     }
 
+    /// `scalar_hash` rejects non-scalars (both callers dispatch
+    /// on kind first — the panic is the contract).
+    #[test]
+    #[should_panic(expected = "caller passes scalars only")]
+    fn scalar_hash_rejects_non_scalar() {
+        let _ = super::scalar_hash(&Value::Nil);
+    }
+
     /// `hash_code` walks every tower arm (Java word formulas are
     /// stand-ins — see module docs — so the pins are determinism
     /// and scattering, not magic numbers).

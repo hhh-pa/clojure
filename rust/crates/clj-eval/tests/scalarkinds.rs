@@ -157,6 +157,25 @@ fn parse_uuid_failures_answer_nil() {
     }
 }
 
+/// Slow-path edges also answer nil: a five-dash shape (never a
+/// UUID), a group overflowing the `u64` accumulator, and a
+/// non-Latin-1 nibble (the fast path only reads Latin-1).
+#[test]
+fn parse_uuid_slow_path_edges_answer_nil() {
+    let mut eval = boot();
+    for input in [
+        "1-2-3-4-5-6",
+        "10000000000000000-1-1-1-1",
+        "550e8400-e29b-41d4-a716-44665544Ā000",
+    ] {
+        assert_eq!(
+            run_last(&mut eval, &format!("(parse-uuid \"{input}\")")),
+            "nil",
+            "{input}"
+        );
+    }
+}
+
 /// Nil is the verbatim NPE; non-strings fail the `String` cast
 /// (`u-parse-nil`, `u-parse-num`, `u-parse-bool`, `u-parse-vec`,
 /// `u-parse-kw`).

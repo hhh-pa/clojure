@@ -1843,6 +1843,32 @@ mod tests {
         let _ = super::java_debug_rest(&Value::Nil);
     }
 
+    /// `print_named` rejects non-named values (the caller
+    /// dispatches on kind first — the panic is the contract).
+    #[test]
+    #[should_panic(expected = "named gate")]
+    fn print_named_rejects_non_named() {
+        let mut out = String::new();
+        super::print_named(&Value::Nil, &mut out);
+    }
+
+    /// `print_scalar` rejects non-scalars (the caller dispatches
+    /// on kind first — the panic is the contract).
+    #[test]
+    #[should_panic(expected = "caller passes scalars only")]
+    fn print_scalar_rejects_non_scalar() {
+        let mut out = String::new();
+        super::print_scalar(&Value::Nil, &PrintOpts::pr(), &mut out);
+    }
+
+    /// `scalar_debug` rejects non-scalars (the caller dispatches
+    /// on kind first — the panic is the contract).
+    #[test]
+    #[should_panic(expected = "caller passes scalars only")]
+    fn scalar_debug_rejects_non_scalar() {
+        let _ = super::scalar_debug(&Value::Nil);
+    }
+
     fn dup(v: &Value) -> String {
         pr_to_string(
             v,

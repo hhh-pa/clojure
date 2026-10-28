@@ -4628,6 +4628,83 @@ mod tests {
         let _ = num_bigdec(&Num::Double(0.5));
     }
 
+    /// Instants order by millis (unit-tested: `#inst` reads
+    /// a `TaggedLiteral`, so no surface form builds a real
+    /// instant).
+    #[test]
+    fn scalar_pair_orders_instants() {
+        let instant = |ms: i64| Value::Instant(clj_value::Instant::from_millis(ms));
+        assert_eq!(
+            jvm_compare(&instant(0), &instant(1000)).unwrap(),
+            std::cmp::Ordering::Less
+        );
+        assert_eq!(
+            jvm_compare(&instant(1000), &instant(1000)).unwrap(),
+            std::cmp::Ordering::Equal
+        );
+    }
+
+    /// An instant against a non-instant fails the `String`
+    /// checkcast to `java.util.Date` (unit-tested: no
+    /// surface form builds a real instant).
+    #[test]
+    fn instant_compare_cast_names_date_class() {
+        let instant = Value::Instant(clj_value::Instant::from_millis(0));
+        let err = jvm_compare(&instant, &Value::Str("s".into())).expect_err("inst vs str");
+        assert_eq!(err.class, clj_value::ThrowClass::ClassCastException);
+        assert!(
+            err.message
+                .starts_with("class java.lang.String cannot be cast to class java.util.Date")
+        );
+    }
+
+    /// URIs order by parts (scheme, authority, path, query,
+    /// fragment): `compare` over two URIs is unit-tested
+    /// because upstream has no URI constructor, so no
+    /// surface form builds one.
+    #[test]
+    fn scalar_pair_orders_uris() {
+        let uri = |s: &str| Value::Uri(Box::new(clj_value::Uri::parse(s).unwrap()));
+        assert_eq!(
+            jvm_compare(&uri("http://h/a"), &uri("http://h/b")).unwrap(),
+            std::cmp::Ordering::Less
+        );
+        assert_eq!(
+            jvm_compare(&uri("http://h/a"), &uri("http://h/a")).unwrap(),
+            std::cmp::Ordering::Equal
+        );
+    }
+
+    /// A URI against a non-URI fails the `String` checkcast to
+    /// `java.net.URI` (unit-tested: no surface form builds a
+    /// URI).
+    #[test]
+    fn uri_compare_cast_names_uri_class() {
+        let uri = Value::Uri(Box::new(clj_value::Uri::parse("http://h/a").unwrap()));
+        let err = jvm_compare(&uri, &Value::Str("s".into())).expect_err("uri vs str");
+        assert_eq!(err.class, clj_value::ThrowClass::ClassCastException);
+        assert!(
+            err.message
+                .starts_with("class java.lang.String cannot be cast to class java.net.URI")
+        );
+    }
+
+    /// The scalar gate only admits same-kind S9 pairs (the
+    /// caller partitions — the panic is the contract).
+    #[test]
+    #[should_panic(expected = "scalar gate")]
+    fn scalar_pair_rejects_mixed() {
+        let _ = compare_scalar_pair(&Value::Int(1), &Value::Int(2));
+    }
+
+    /// The entry gate only admits vector/entry pairs (the
+    /// caller partitions — the panic is the contract).
+    #[test]
+    #[should_panic(expected = "entry gate")]
+    fn entry_pair_rejects_scalars() {
+        let _ = compare_entry_pair(&Value::Int(1), &Value::Int(2));
+    }
+
     /// A denominator-1 rational folds to `BigInt` (user code only
     /// builds reduced ratios, so this arm is the safety net).
     #[test]

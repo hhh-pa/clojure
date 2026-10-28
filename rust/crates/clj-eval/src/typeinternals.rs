@@ -2225,4 +2225,58 @@ mod tests {
         );
         let _ = keys;
     }
+
+    #[test]
+    fn proxy_cell_from_non_map_shapes() {
+        // `__proxy*` validates through `parse_methods` first, so
+        // these totality arms only fire on hand-built shapes: a
+        // non-map methods arg starts empty, and non-map method
+        // entries are skipped.
+        assert_eq!(
+            proxy_cell_from_methods(&Value::Int(42)),
+            Value::Map(new_map())
+        );
+        let methods = new_map().insert(Value::Str(Arc::from("m")), Value::Int(42));
+        assert_eq!(
+            proxy_cell_from_methods(&Value::Map(methods)),
+            Value::Map(new_map())
+        );
+    }
+
+    #[test]
+    fn proxy_cell_hit_without_cell_defaults() {
+        // Both proxy constructors mint the cell, so dispatch
+        // never sees a cell-less instance — the miss still falls
+        // to the `Object` super/default path.
+        let def = Arc::new(HostDef {
+            name: Arc::from("user.T"),
+            kind: HostKind::Type,
+            fields: Vec::new(),
+            methods: HashMap::new(),
+            interfaces: Vec::new(),
+            prefix: None,
+            impl_ns: None,
+            sigs: HashMap::new(),
+            takes_this: false,
+            struct_keys: Vec::new(),
+        });
+        let inst = HostInst {
+            def,
+            content: new_map(),
+            meta: None,
+            proxy_map: None,
+        };
+        assert!(matches!(
+            proxy_cell_hit(&inst, "toString", 0),
+            ProxyHit::Default
+        ));
+    }
+
+    #[test]
+    fn chain_past_self_null_walks_nothing() {
+        // `find-protocol-impl` returns early for `nil`, so the
+        // chain never sees `"null"` — the guard pins the
+        // documented empty walk regardless.
+        assert!(chain_past_self("null").is_empty());
+    }
 }

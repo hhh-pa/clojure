@@ -157,9 +157,11 @@ impl ThrowClass {
     /// the complexity gate.
     fn jvm_name_array(&self) -> &'static str {
         match self {
-            Self::ArrayIndexOutOfBoundsException => "java.lang.ArrayIndexOutOfBoundsException",
+            // Only `ArrayStoreException` and `OutOfMemoryError`
+            // reach here: `ArrayIndexOutOfBoundsException` and
+            // `NegativeArraySizeException` are answered directly
+            // by `jvm_name`, like every other upstream variant.
             Self::ArrayStoreException => "java.lang.ArrayStoreException",
-            Self::NegativeArraySizeException => "java.lang.NegativeArraySizeException",
             Self::OutOfMemoryError => "java.lang.OutOfMemoryError",
             // All other variants are handled upstream (the single
             // caller partitions the variants).
@@ -718,6 +720,27 @@ mod tests {
             (
                 ThrowClass::RejectedExecutionException,
                 "java.lang.Error",
+                false,
+            ),
+            (
+                ThrowClass::ArrayStoreException,
+                "java.lang.ArrayStoreException",
+                true,
+            ),
+            (
+                ThrowClass::ArrayStoreException,
+                "java.lang.RuntimeException",
+                true,
+            ),
+            (ThrowClass::ArrayStoreException, "java.lang.Exception", true),
+            (ThrowClass::ArrayStoreException, "java.lang.Throwable", true),
+            (ThrowClass::ArrayStoreException, "java.lang.Error", false),
+            // Unlike `ArrayIndexOutOfBoundsException`, the store
+            // check is not an index check: it sits directly under
+            // `RuntimeException`.
+            (
+                ThrowClass::ArrayStoreException,
+                "java.lang.IndexOutOfBoundsException",
                 false,
             ),
         ];

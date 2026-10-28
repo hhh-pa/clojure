@@ -154,16 +154,20 @@ mod tests {
     #[test]
     fn inst_ms_error_names_class() {
         let mut eval = crate::ns::boot();
-        match call_var(&mut eval, "inst-ms", &[Value::Int(42)]) {
-            Err(Signal::Throw(t)) => {
-                assert_eq!(t.class.jvm_name(), "java.lang.IllegalArgumentException");
-                assert_eq!(
-                    t.message.as_deref().unwrap_or(""),
-                    "No implementation of method: :inst-ms* of protocol: #'clojure.core/Inst found for class: java.lang.Long"
-                );
-            }
-            other => panic!("expected a protocol throw, got {other:?}"),
-        }
+        let result = call_var(&mut eval, "inst-ms", &[Value::Int(42)]);
+        // Guarded `matches!`: the class and message asserts below
+        // only pass on the `Throw` shape, so no `else`/`panic`
+        // arm is needed (every line runs — the 100% line gate).
+        assert!(matches!(
+            &result,
+            Err(Signal::Throw(t)) if t.class.jvm_name() == "java.lang.IllegalArgumentException"
+        ));
+        assert!(matches!(
+            &result,
+            Err(Signal::Throw(t))
+                if t.message.as_deref().unwrap_or("")
+                    == "No implementation of method: :inst-ms* of protocol: #'clojure.core/Inst found for class: java.lang.Long"
+        ));
     }
 
     /// The hidden millis reader, direct.
@@ -175,16 +179,18 @@ mod tests {
             call_var(&mut eval, "__inst_millis*", &[instant]).expect("millis answers"),
             Value::Int(1704067200000)
         );
-        match call_var(&mut eval, "__inst_millis*", &[Value::Str("x".into())]) {
-            Err(Signal::Throw(t)) => {
-                assert_eq!(t.class.jvm_name(), "java.lang.ClassCastException");
-                assert!(
-                    t.message.as_deref().unwrap_or("").starts_with(
-                        "class java.lang.String cannot be cast to class java.util.Date"
-                    )
-                );
-            }
-            other => panic!("expected a cast throw, got {other:?}"),
-        }
+        let result = call_var(&mut eval, "__inst_millis*", &[Value::Str("x".into())]);
+        assert!(matches!(
+            &result,
+            Err(Signal::Throw(t)) if t.class.jvm_name() == "java.lang.ClassCastException"
+        ));
+        assert!(matches!(
+            &result,
+            Err(Signal::Throw(t))
+                if t.message
+                    .as_deref()
+                    .unwrap_or("")
+                    .starts_with("class java.lang.String cannot be cast to class java.util.Date")
+        ));
     }
 }

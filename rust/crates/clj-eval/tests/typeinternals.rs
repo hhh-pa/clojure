@@ -962,3 +962,288 @@ fn proxy_protocol_inline_limitation() {
         "[:baked :baked]"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Coverage closure: proxy cells, class walks, and registry shapes.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn fresh_proxy_cell_paths() {
+    // A fresh `construct-proxy` has a nil fn map: `str` falls
+    // back (the non-map cell arm), and
+    // `proxy-call-with-super` masks from `{}` (the non-map
+    // saved arm), restoring nil after.
+    let mut eval = boot();
+    let v = run_last(
+        &mut eval,
+        "(str (construct-proxy (get-proxy-class Object)))",
+    );
+    assert!(
+        v.starts_with("\"user.proxy$java.lang.Object$ff19274a@"),
+        "{v}"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [p (construct-proxy (get-proxy-class Object))] [(proxy-call-with-super (fn [] :ok) p \"toString\") (proxy-mappings p)])"
+        ),
+        "[:ok nil]"
+    );
+}
+
+#[test]
+fn proxy_arity_miss_is_no_method() {
+    // A multi-overload cell with no matching arity falls to
+    // the super path — which, with args, is the
+    // missing-method error (port rule, pinned).
+    let mut eval = boot();
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(do (definterface PAM (m [x]) (m [x y])) (let [p (proxy [Object PAM] [] (m [x] :one) (m [x y] :two))] (.m p 1 2 3)))"
+        ),
+        "java.lang.IllegalArgumentException | No matching method m found taking 3 args for class user$proxy"
+    );
+}
+
+#[test]
+fn proxy_str_call_shapes() {
+    // `str` over a proxy whose `toString/0` answers a
+    // non-string is the `String` cast; a throwing `toString/0`
+    // propagates.
+    let mut eval = boot();
+    assert_eq!(
+        uncaught(&mut eval, "(str (proxy [Object] [] (toString [] 42)))"),
+        "java.lang.ClassCastException | class java.lang.Long cannot be cast to class java.lang.String (java.lang.Long and java.lang.String are in module java.base of loader 'bootstrap')"
+    );
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(str (proxy [Object] [] (toString [] (throw (ex-info \"t\" {})))))"
+        ),
+        "clojure.lang.ExceptionInfo | t"
+    );
+}
+
+#[test]
+fn proxy_class_args_reject_instances() {
+    // Host instances are not classes (the `Class` cast): a
+    // proxy instance as the `proxy-name` super; an instance or
+    // a non-class as a `get-proxy-class` interface; an
+    // instance as the first base.
+    let mut eval = boot();
+    assert_eq!(
+        uncaught(&mut eval, "(do (deftype PNC [x]) (proxy-name (PNC. 1) []))"),
+        "java.lang.ClassCastException | class user.PNC cannot be cast to class java.lang.Class (user.PNC is in unnamed module of loader 'app'; java.lang.Class is in module java.base of loader 'bootstrap')"
+    );
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(do (deftype PIF [x]) (get-proxy-class \"java.lang.Object\" (PIF. 1)))"
+        ),
+        "java.lang.ClassCastException | class user.PIF cannot be cast to class java.lang.Class (user.PIF is in unnamed module of loader 'app'; java.lang.Class is in module java.base of loader 'bootstrap')"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(get-proxy-class \"java.lang.Object\" 42)"),
+        "java.lang.ClassCastException | class java.lang.Long cannot be cast to class java.lang.Class (java.lang.Long and java.lang.Class are in module java.base of loader 'bootstrap')"
+    );
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(do (deftype PBS [x]) (get-proxy-class (PBS. 1)))"
+        ),
+        "java.lang.ClassCastException | class user.PBS cannot be cast to class java.lang.Class (user.PBS is in unnamed module of loader 'app'; java.lang.Class is in module java.base of loader 'bootstrap')"
+    );
+}
+
+#[test]
+fn method_sig_list_rows() {
+    // The triple contract also reads lists (port rule,
+    // pinned): same normalized shape as vectors.
+    let mut eval = boot();
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(method-sig (list \"toString\" nil \"java.lang.String\"))"
+        ),
+        "[\"toString\" nil \"java.lang.String\"]"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(method-sig (list \"valueOf\" (list \"java.lang.Object\") \"java.lang.String\"))"
+        ),
+        "[\"valueOf\" (\"java.lang.Object\") \"java.lang.String\"]"
+    );
+}
+
+#[test]
+fn find_protocol_impl_throwable_walk() {
+    // Throwables walk the parent chain (not the lattice):
+    // `ExceptionInfo` reaches the `Object` entry, and an
+    // empty protocol answers nil.
+    let mut eval = boot();
+    assert_eq!(run_last(&mut eval, PROTO_SETUP), ":setup");
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(sort (keys (find-protocol-impl RP (ex-info \"b\" {}))))"
+        ),
+        "(:rm)"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "((find-protocol-method RP :rm (ex-info \"b\" {})) (ex-info \"b\" {}))"
+        ),
+        ":obj-m"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(find-protocol-impl RQ (ex-info \"b\" {}))"),
+        "nil"
+    );
+}
+
+#[test]
+fn find_protocol_impl_non_lattice_walks() {
+    // Non-lattice classes default past `Object`: a deftype
+    // instance that claims nothing, and a bare type
+    // descriptor (which also skips the instance-consult
+    // step), both miss on an empty protocol.
+    let mut eval = boot();
+    assert_eq!(run_last(&mut eval, PROTO_SETUP), ":setup");
+    assert_eq!(
+        run_last(&mut eval, "(find-protocol-impl RQ (RI. 1))"),
+        "nil"
+    );
+    assert_eq!(run_last(&mut eval, "(find-protocol-impl RQ RI)"), "nil");
+}
+
+#[test]
+fn find_protocol_impl_fn_values() {
+    // Fn values walk as `AFn`s (probe `l-fn`): closures and
+    // natives alike miss on an empty protocol, as does any
+    // other extension value.
+    let mut eval = boot();
+    assert_eq!(run_last(&mut eval, PROTO_SETUP), ":setup");
+    assert_eq!(
+        run_last(&mut eval, "(find-protocol-impl RQ (fn [x] x))"),
+        "nil"
+    );
+    assert_eq!(run_last(&mut eval, "(find-protocol-impl RQ +)"), "nil");
+    assert_eq!(run_last(&mut eval, "(find-protocol-impl RQ *ns*)"), "nil");
+}
+
+#[test]
+fn find_protocol_impl_registry_shapes() {
+    // Hand-built `:impls` normalize leniently (port rule,
+    // pinned): keyword method keys dispatch end to end, while
+    // non-keyword method keys, non-map method tables, and
+    // non-integer arities are skipped.
+    let mut eval = boot();
+    assert_eq!(run_last(&mut eval, PROTO_SETUP), ":setup");
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "((find-protocol-method (assoc RQ :impls {\"java.lang.String\" {:kw {0 (fn [x] :hit)}}}) :kw \"s\") \"s\")"
+        ),
+        ":hit"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(find-protocol-impl (assoc RQ :impls {\"java.lang.String\" {42 {0 (fn [x] :hit)}}}) \"s\")"
+        ),
+        "{}"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(find-protocol-impl (assoc RQ :impls {\"java.lang.String\" {\"m\" 42}}) \"s\")"
+        ),
+        "{}"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(find-protocol-impl (assoc RQ :impls {\"java.lang.String\" {\"m\" {\"x\" (fn [x] :hit)}}}) \"s\")"
+        ),
+        "{}"
+    );
+    // A `pref` winner with no method table falls through to
+    // nil (the `Serializable` entry here is not a map).
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(find-protocol-impl (assoc RQ :impls {\"java.io.Serializable\" 42}) \"s\")"
+        ),
+        "nil"
+    );
+}
+
+#[test]
+fn cache_protocol_fn_exact_class() {
+    // The `isInstance` shortcut hits on exact class equality
+    // too (not just interface membership).
+    let mut eval = boot();
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(do (defprotocol RC (rcm [x])) (extend-protocol RC String (rcm [x] :cached)) :setup)"
+        ),
+        ":setup"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(-cache-protocol-fn rcm \"hi\" \"java.lang.String\" :INTERF)"
+        ),
+        ":INTERF"
+    );
+}
+
+#[test]
+fn cache_protocol_fn_class_and_proto_errors() {
+    // The class hint takes the `Class` cast (host instances
+    // are not classes); a rebound protocol var is no longer a
+    // protocol.
+    let mut eval = boot();
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(do (defprotocol RC (rcm [x])) (deftype RD [] RC (rcm [this] :d)) :setup)"
+        ),
+        ":setup"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(-cache-protocol-fn rcm \"hi\" (RD.) :INTERF)"),
+        "java.lang.ClassCastException | class user.RD cannot be cast to class java.lang.Class (user.RD is in unnamed module of loader 'app'; java.lang.Class is in module java.base of loader 'bootstrap')"
+    );
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(do (defprotocol RC9 (rcm9 [x])) (def on9 (:on RC9)) (def RC9 42) (-cache-protocol-fn rcm9 \"hi\" on9 :INTERF))"
+        ),
+        "java.lang.IllegalArgumentException | 42 is not a protocol"
+    );
+}
+
+#[test]
+fn protocol_method_hint_errors() {
+    // `__protocol_method*` checks its hints left to right
+    // (house cast texts).
+    let mut eval = boot();
+    assert_eq!(run_last(&mut eval, PROTO_SETUP), ":setup");
+    assert_eq!(
+        uncaught(&mut eval, "(__protocol_method* 5 \"m\" (fn [x] x))"),
+        "java.lang.ClassCastException | class java.lang.Long cannot be cast to class clojure.lang.Var (java.lang.Long is in module java.base of loader 'bootstrap'; clojure.lang.Var is in unnamed module of loader 'app')"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(__protocol_method* #'user/rm 5 (fn [x] x))"),
+        "java.lang.ClassCastException | class java.lang.Long cannot be cast to class java.lang.String (java.lang.Long and java.lang.String are in module java.base of loader 'bootstrap')"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(__protocol_method* #'user/rm \"m\" 5)"),
+        "java.lang.ClassCastException | class java.lang.Long cannot be cast to class clojure.lang.AFunction (java.lang.Long is in module java.base of loader 'bootstrap'; clojure.lang.AFunction is in unnamed module of loader 'app')"
+    );
+}

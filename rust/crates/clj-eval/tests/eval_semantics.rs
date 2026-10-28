@@ -1445,3 +1445,39 @@ fn source_error_display_renders_all_variants() {
         "internal error: x"
     );
 }
+
+/// `&`-rest over a primitive vector / Java array: the `gseq`
+/// seqs eagerly (fixed heads bind via `first`, the rest is a
+/// realized list). Rigged core: its `let` keeps the `Vec`
+/// pattern, while full core macroexpands destructuring into
+/// `nth`/`next` (both agree on the answer).
+#[test]
+fn destructure_rest_over_pv_and_array() {
+    let (mut eval, _) = rigged();
+    // The rigged core has no ctors, so the values intern
+    // from Rust (the `jdkio` file-walk pattern).
+    let pv = Value::PrimitiveVector(clj_value::PrimitiveVector::new(
+        clj_value::Elem8::Int,
+        vec![Value::Int(1), Value::Int(2), Value::Int(3)],
+        None,
+    ));
+    let arr = Value::Array(clj_value::Array::new(
+        clj_value::ArrayDesc::flat(clj_value::BaseType::Int),
+        clj_value::ArrayStore::Ints(vec![1, 2, 3]),
+    ));
+    for (name, v) in [("t-pv", pv), ("t-arr", arr)] {
+        let sym = Symbol::new(Some("user"), name);
+        let id = eval.registry.intern(&sym);
+        eval.registry.with_state_mut(id, |state| {
+            state.root = Some(v);
+        });
+    }
+    assert_eq!(
+        run_last(&mut eval, "(let [[a & r] t-pv] [a r])"),
+        "[1 (2 3)]"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(let [[a & r] t-arr] [a r])"),
+        "[1 (2 3)]"
+    );
+}

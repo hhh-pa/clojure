@@ -3225,3 +3225,442 @@ fn mi3d_walk_and_order() {
         "(nil)"
     );
 }
+
+// ---- Coverage closure: tower fills, cast ranges, tails, widening ----
+
+#[test]
+fn ctor_tower_fills() {
+    let mut eval = boot();
+    // `longValue` narrowing keeps the sign (negative `BigInt`
+    // sign-extends through the low 64 bits).
+    assert_eq!(run_last(&mut eval, "(seq (long-array [(- 5N)]))"), "(-5)");
+    // `intValue` fills narrow the tower (`BigInt` wraps low-32,
+    // `Ratio`/`BigDec` truncate toward zero).
+    assert_eq!(run_last(&mut eval, "(seq (int-array [5N]))"), "(5)");
+    assert_eq!(run_last(&mut eval, "(seq (int-array [7/2]))"), "(3)");
+    assert_eq!(run_last(&mut eval, "(seq (int-array [2.9M]))"), "(2)");
+    assert_eq!(
+        run_last(&mut eval, "(seq (long-array [5N 7/2 2.9M]))"),
+        "(5 3 2)"
+    );
+    // `floatValue`/`doubleValue` fills take the exact `f64`.
+    assert_eq!(run_last(&mut eval, "(seq (double-array [5N]))"), "(5.0)");
+    assert_eq!(run_last(&mut eval, "(seq (double-array [1/2]))"), "(0.5)");
+    assert_eq!(run_last(&mut eval, "(seq (double-array [2.5M]))"), "(2.5)");
+    assert_eq!(run_last(&mut eval, "(seq (float-array [1/2]))"), "(0.5)");
+    // Unboxing a nil seq element trips the fill NPE.
+    assert_eq!(
+        uncaught(&mut eval, "(long-array [nil])"),
+        "java.lang.NullPointerException | Cannot invoke \"java.lang.Number.longValue()\" because the return value of \"clojure.lang.ISeq.first()\" is null"
+    );
+}
+
+#[test]
+fn ctor_from_array_and_nil_fills() {
+    let mut eval = boot();
+    // Arrays seq-fill from a snapshot (boxing reads).
+    assert_eq!(
+        run_last(&mut eval, "(seq (int-array (long-array [1 2 3])))"),
+        "(1 2 3)"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(seq (into-array (int-array [4 5])))"),
+        "(4 5)"
+    );
+    // Unboxing a nil seq element trips the `Numbers` fill NPE.
+    assert_eq!(
+        uncaught(&mut eval, "(byte-array [nil])"),
+        "java.lang.NullPointerException | Cannot invoke \"java.lang.Number.byteValue()\" because the return value of \"clojure.lang.ISeq.first()\" is null"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(short-array [nil])"),
+        "java.lang.NullPointerException | Cannot invoke \"java.lang.Number.shortValue()\" because the return value of \"clojure.lang.ISeq.first()\" is null"
+    );
+}
+
+#[test]
+fn into_array_cast_tower_and_nil() {
+    let mut eval = boot();
+    // `intCast` truncates ratios and decimals.
+    assert_eq!(run_last(&mut eval, "(seq (into-array :int [7/2]))"), "(3)");
+    assert_eq!(run_last(&mut eval, "(seq (into-array :int [2.9M]))"), "(2)");
+    // The `long` stop takes every tower kind.
+    assert_eq!(run_last(&mut eval, "(seq (into-array :byte [5N]))"), "(5)");
+    assert_eq!(
+        run_last(&mut eval, "(seq (into-array :short [7/2]))"),
+        "(3)"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(seq (into-array :byte [2.9M]))"),
+        "(2)"
+    );
+    // Past-`i64` tower fails `Value out of range for long` with
+    // the exact digits.
+    assert_eq!(
+        uncaught(&mut eval, "(into-array :byte [99999999999999999999999N])"),
+        "java.lang.IllegalArgumentException | Value out of range for long: 99999999999999999999999"
+    );
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(into-array :short [100000000000000000000001/2])"
+        ),
+        "java.lang.IllegalArgumentException | Value out of range for long: 50000000000000000000000"
+    );
+    // Nil through the `long` stop trips the unbox NPEs.
+    assert_eq!(
+        uncaught(&mut eval, "(into-array :byte [nil])"),
+        "java.lang.NullPointerException | Cannot invoke \"java.lang.Number.doubleValue()\" because \"x\" is null"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(into-array :char [nil])"),
+        "java.lang.NullPointerException | Cannot invoke \"java.lang.Number.longValue()\" because \"x\" is null"
+    );
+}
+
+#[test]
+fn into_array_cast_range_rendering() {
+    let mut eval = boot();
+    // The width range checks render the ORIGINAL value.
+    assert_eq!(
+        uncaught(&mut eval, "(into-array :byte [200.0])"),
+        "java.lang.IllegalArgumentException | Value out of range for byte: 200.0"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(into-array :byte [200N])"),
+        "java.lang.IllegalArgumentException | Value out of range for byte: 200"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(into-array :byte [401/2])"),
+        "java.lang.IllegalArgumentException | Value out of range for byte: 401/2"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(into-array :byte [200M])"),
+        "java.lang.IllegalArgumentException | Value out of range for byte: 200"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(into-array :byte [(char 200)])"),
+        "java.lang.IllegalArgumentException | Value out of range for byte: È"
+    );
+}
+
+#[test]
+fn ctor_init_negative_size() {
+    let mut eval = boot();
+    // The 2-arity ctors size-check like the 1-arity ones.
+    assert_eq!(
+        uncaught(&mut eval, "(int-array -1 5)"),
+        "java.lang.NegativeArraySizeException | -1"
+    );
+}
+
+#[test]
+fn array_get_tower_keys() {
+    let mut eval = boot();
+    // `get`/`contains?` narrow tower keys through `intValue`.
+    assert_eq!(
+        run_last(&mut eval, "(get (int-array [10 20 30]) 1/2)"),
+        "10"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(get (int-array [10 20 30]) 1.9M)"),
+        "20"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(contains? (long-array [7]) 1/2)"),
+        "true"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(contains? (long-array [7]) 1.9M)"),
+        "false"
+    );
+}
+
+#[test]
+fn to_array_2d_hint_misses() {
+    let mut eval = boot();
+    // Scalars fail the `^Collection` hint (like maps/strings).
+    assert_eq!(
+        uncaught(&mut eval, "(to-array-2d 5)"),
+        "java.lang.ClassCastException | class java.lang.Long cannot be cast to class java.util.Collection (java.lang.Long and java.util.Collection are in module java.base of loader 'bootstrap')"
+    );
+    // Host extension values fail it too (never `Collection`s).
+    assert_eq!(
+        uncaught(&mut eval, "(to-array-2d (reduced 1))"),
+        "java.lang.ClassCastException | class clojure.lang.Reduced cannot be cast to class java.util.Collection (clojure.lang.Reduced is in unnamed module of loader 'app'; java.util.Collection is in module java.base of loader 'bootstrap')"
+    );
+}
+
+#[test]
+fn aset_direct_nested() {
+    let mut eval = boot();
+    // Nil stores into (and answers from) nested slots.
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [a (make-array :object 2 2)] (aset a 0 nil))"
+        ),
+        "nil"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [a (make-array :object 2 2)] (aset a 0 nil) (aget a 0))"
+        ),
+        "nil"
+    );
+    // Assignable inners store (covariant through `Object`).
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [a (make-array :object 2 2)] (aset a 0 (object-array [1])) (seq (aget a 0)))"
+        ),
+        "(1)"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [a (make-array :int 2 2)] (aset a 0 (int-array [7 8])) (seq (aget a 0)))"
+        ),
+        "(7 8)"
+    );
+    // A scalar into nesting misses with the VM store text.
+    assert_eq!(
+        uncaught(&mut eval, "(aset (make-array :int 2 2) 0 5)"),
+        "java.lang.ArrayStoreException | java.lang.Long"
+    );
+}
+
+#[test]
+fn aset_raw_primitive_tails() {
+    let mut eval = boot();
+    // `Array.set` widens `Character` into `int`/`long`.
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [a (make-array :int 2 2)] (aset a 0 0 \\a) (aget a 0 0))"
+        ),
+        "97"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [a (make-array :long 2 2)] (aset a 0 0 5) (aget a 0 0))"
+        ),
+        "5"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [a (make-array :long 2 2)] (aset a 0 0 \\a) (aget a 0 0))"
+        ),
+        "97"
+    );
+    // No `Double`→`long` narrowing through `Array.set`.
+    assert_eq!(
+        uncaught(&mut eval, "(aset (make-array :long 2 2) 0 0 1.5)"),
+        "java.lang.IllegalArgumentException | argument type mismatch"
+    );
+    // No port value unboxes to `short`/`byte`.
+    assert_eq!(
+        uncaught(&mut eval, "(aset (make-array :short 2 2) 0 0 5)"),
+        "java.lang.IllegalArgumentException | argument type mismatch"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(aset (make-array :byte 2 2) 0 0 5)"),
+        "java.lang.IllegalArgumentException | argument type mismatch"
+    );
+    // `char` tails take exactly `Character`.
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [a (make-array :char 2 2)] (aset a 0 0 \\a) (aget a 0 0))"
+        ),
+        "\\a"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(aset (make-array :char 2 2) 0 0 5)"),
+        "java.lang.IllegalArgumentException | argument type mismatch"
+    );
+    // `float` tails widen `long`/`char`, never narrow `double`.
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [a (make-array :float 2 2)] (aset a 0 0 5) (aget a 0 0))"
+        ),
+        "5.0"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [a (make-array :float 2 2)] (aset a 0 0 \\a) (aget a 0 0))"
+        ),
+        "97.0"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(aset (make-array :float 2 2) 0 0 1.5)"),
+        "java.lang.IllegalArgumentException | argument type mismatch"
+    );
+    // `double` tails widen everything below them.
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [a (make-array :double 2 2)] (aset a 0 0 1.5) (aget a 0 0))"
+        ),
+        "1.5"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [a (make-array :double 2 2)] (aset a 0 0 5) (aget a 0 0))"
+        ),
+        "5.0"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [a (make-array :double 2 2)] (aset a 0 0 \\a) (aget a 0 0))"
+        ),
+        "97.0"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(aset (make-array :double 2 2) 0 0 \"s\")"),
+        "java.lang.IllegalArgumentException | argument type mismatch"
+    );
+    // `boolean` tails take exactly `Boolean`.
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [a (make-array :boolean 2 2)] (aset a 0 0 true) (aget a 0 0))"
+        ),
+        "true"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(aset (make-array :boolean 2 2) 0 0 5)"),
+        "java.lang.IllegalArgumentException | argument type mismatch"
+    );
+}
+
+#[test]
+fn aset_raw_ref_tails() {
+    let mut eval = boot();
+    // Nil fits nested tails.
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [a (make-array :object 2 2 2)] (aset a 0 0 nil) (aget a 0 0))"
+        ),
+        "nil"
+    );
+    // Plain `Object` inners fit everything through tails.
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [a (make-array :object 2 2)] (aset a 0 0 42) (aget a 0 0))"
+        ),
+        "42"
+    );
+    // Narrowed inners check the component: matching stores.
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [inner (into-array [\"a\" \"b\"]) outer (into-array [inner])] (aset outer 0 0 \"c\") (seq (aget outer 0)))"
+        ),
+        "(\"c\" \"b\")"
+    );
+    // Narrowed inners check the component: misses fail.
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(let [inner (into-array [\"a\"]) outer (into-array [inner])] (aset outer 0 0 5))"
+        ),
+        "java.lang.IllegalArgumentException | array element type mismatch"
+    );
+    // Assignable `Object` inners store through tails.
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [a (make-array :object 2 2 2)] (aset a 0 0 (make-array :object 2)) (alength (aget a 0 0)))"
+        ),
+        "2"
+    );
+}
+
+#[test]
+fn setx_widening() {
+    let mut eval = boot();
+    // `setByte` stores into `byte` and widens into `short`.
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [a (byte-array [0])] (aset-byte a 0 5) (seq a))"
+        ),
+        "(5)"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [a (short-array [0])] (aset-byte a 0 5) (seq a))"
+        ),
+        "(5)"
+    );
+    // `setChar` widens into every numeric width above `char`.
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [a (int-array [0])] (aset-char a 0 \\a) (seq a))"
+        ),
+        "(97)"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [a (long-array [0])] (aset-char a 0 \\a) (seq a))"
+        ),
+        "(97)"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [a (float-array [0])] (aset-char a 0 \\a) (seq a))"
+        ),
+        "(97.0)"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [a (double-array [0])] (aset-char a 0 \\a) (seq a))"
+        ),
+        "(97.0)"
+    );
+}
+
+#[test]
+fn setx_arity() {
+    let mut eval = boot();
+    assert_eq!(
+        uncaught(&mut eval, "(aset-int (int-array [1]) 0)"),
+        "clojure.lang.ArityException | Wrong number of args (2) passed to: clojure.core/aset-int"
+    );
+}
+
+#[test]
+fn make_array_bad_keyword() {
+    let mut eval = boot();
+    // Only the nine plain keywords name classes.
+    assert_eq!(
+        uncaught(&mut eval, "(make-array :string 2)"),
+        "java.lang.ClassCastException | class clojure.lang.Keyword cannot be cast to class java.lang.Class (clojure.lang.Keyword is in unnamed module of loader 'app'; java.lang.Class is in module java.base of loader 'bootstrap')"
+    );
+}
+
+#[test]
+fn vector_of_char_and_short() {
+    let mut eval = boot();
+    assert_eq!(
+        run_last(&mut eval, "(seq (vector-of :char \\a \\b))"),
+        "(\\a \\b)"
+    );
+    assert_eq!(run_last(&mut eval, "(seq (vector-of :char 65))"), "(\\A)");
+    assert_eq!(run_last(&mut eval, "(seq (vector-of :short 1 2))"), "(1 2)");
+}

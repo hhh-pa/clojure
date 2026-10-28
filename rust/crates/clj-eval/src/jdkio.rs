@@ -614,16 +614,16 @@ fn stream_transduce_core(
     call_checked(eval, &step, &[acc])
 }
 
-/// Push a node's children when it is a directory (silently
-/// none otherwise — the JVM's null `listFiles`).
+/// Push a node's children (silently none for non-directories
+/// — the JVM's null `listFiles`). No `is_dir` pre-check:
+/// `read_dir` fails the same way for files, so the guard
+/// was redundant (and racy); empty frames pop immediately
+/// in [`pull_files`], so files walk exactly as before.
 fn push_children(stack: &mut Vec<FileFrame>, node: &Value) {
     let Some(f) = as_file(node) else {
         return;
     };
     let path: &str = &f.path;
-    if !std::path::Path::new(path).is_dir() {
-        return;
-    }
     stack.push(FileFrame {
         entries: Arc::from(list_dir(path)),
         idx: 0,

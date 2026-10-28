@@ -737,29 +737,20 @@ impl Uri {
         self.authority_eq(other)
     }
 
-    /// The authority leg of [`Uri::uri_eq`] (split for the budget).
+    /// The authority leg of [`Uri::uri_eq`] (split for the budget):
+    /// server authorities compare the `(userInfo, host, port)`
+    /// triple; anything else compares the raw authority normalized
+    /// (`Some` vs `None` always differs).
     fn authority_eq(&self, other: &Self) -> bool {
         if self.authority == other.authority {
             return true;
         }
         if self.host.is_some() {
-            if !uri_equal(self.user_info.as_deref(), other.user_info.as_deref()) {
-                return false;
-            }
-            if !equal_ignoring_case(self.host.as_deref(), other.host.as_deref()) {
-                return false;
-            }
-            if self.port != other.port {
-                return false;
-            }
-        } else if self.authority.is_some() {
-            if !uri_equal(self.authority.as_deref(), other.authority.as_deref()) {
-                return false;
-            }
-        } else if other.authority.is_some() {
-            return false;
+            return uri_equal(self.user_info.as_deref(), other.user_info.as_deref())
+                && equal_ignoring_case(self.host.as_deref(), other.host.as_deref())
+                && self.port == other.port;
         }
-        true
+        uri_equal(self.authority.as_deref(), other.authority.as_deref())
     }
 
     /// `URI.hashCode`.
@@ -1226,15 +1217,13 @@ impl UriParser {
     /// server chars attempt the server parse (syntax failures fall
     /// back to registry; an escaping `NumberFormatException` keeps
     /// flying — the JDK catches `URISyntaxException` only);
-    /// registry-only chars go straight there.
+    /// anything else falls straight to registry (the `REG_NAME`
+    /// masks sit inside the `SERVER` masks, so a `reg && !server`
+    /// fast path would be dead — the fallback installs it).
     fn parse_authority(&mut self, start: usize, end: usize) -> Result<(), UriError> {
         let server_chars = self.authority_server_chars(start, end)?;
         let qreg = self.scan_mask(start, end, L_REG_NAME, H_REG_NAME)?;
         let reg_chars = qreg == end;
-        if reg_chars && !server_chars {
-            self.authority = Some(self.slice(start, end));
-            return Ok(());
-        }
         let mut saved: Option<UriError> = None;
         if server_chars {
             match self.parse_server(start, end) {
@@ -1756,11 +1745,12 @@ fn uri_compare(s: Option<&str>, t: Option<&str>) -> i32 {
 /// escapes.
 fn percent_normalized(s: &Option<Vec<u16>>, t: &Option<Vec<u16>>, equality: bool) -> i32 {
     let (Some(s), Some(t)) = (s, t) else {
-        return match (s, t) {
-            (None, None) => 0,
-            (None, Some(_)) => -1,
-            (Some(_), None) => 1,
-            _ => 0,
+        // `(Some, Some)` is excluded above, so matching on `s`
+        // alone is exhaustive with no dead arm.
+        return match s {
+            None if t.is_none() => 0,
+            None => -1,
+            Some(_) => 1,
         };
     };
     if !s.contains(&u16::from(b'%')) {
@@ -2022,6 +2012,7 @@ mod tests {
             "",
             "550e8400-e29b-41d4-a716",
             "550e8400e29b41d4a716446655440000",
+            "1-2-3-4-5-6",
         ] {
             assert_eq!(
                 uuid_err(s),
@@ -2061,6 +2052,25 @@ mod tests {
             (
                 "NumberFormatException".to_owned(),
                 "Error at index 15 in: \"fffffffffffffffff\"".to_owned()
+            )
+        );
+        // A non-Latin-1 nibble misses the fast path (36 units, so
+        // the fast path runs), then fails the slow path at its
+        // group index.
+        assert_eq!(
+            uuid_err("550e8400-e29b-41d4-a716-44665544Ā000"),
+            (
+                "NumberFormatException".to_owned(),
+                "Error at index 8 in: \"44665544Ā000\"".to_owned()
+            )
+        );
+        // Seventeen digits without an early `i64` trip overflow the
+        // `u64` accumulator instead (`2^60 * 16`).
+        assert_eq!(
+            uuid_err("10000000000000000-1-1-1-1"),
+            (
+                "NumberFormatException".to_owned(),
+                "Error at index 16 in: \"10000000000000000\"".to_owned()
             )
         );
     }
@@ -2365,6 +2375,12 @@ mod tests {
         // The hour colon is structural (drift trips `from_str`'s
         // expect, never silent millis).
         assert!(parse_validated("2024-01-01T00x00").is_none());
+        // A non-digit where digits belong, trailing junk instead of
+        // a zone, and a zoneless `+HHMM` (the zone colon) all fail
+        // the split.
+        assert!(parse_validated("202x").is_none());
+        assert!(parse_validated("2024x").is_none());
+        assert!(parse_validated("2024+0200").is_none());
     }
 
     fn uri(s: &str) -> Uri {
@@ -2892,6 +2908,231 @@ mod tests {
                     None,
                 ],
             ),
+            (
+                "http://1.2.3.4/x",
+                vec![
+                    o("http"),
+                    o("1.2.3.4"),
+                    None,
+                    o("1.2.3.4"),
+                    o("-1"),
+                    o("/x"),
+                    None,
+                    None,
+                    o("false"),
+                    None,
+                ],
+            ),
+            (
+                "http://1.2.3.4:8080/x",
+                vec![
+                    o("http"),
+                    o("1.2.3.4:8080"),
+                    None,
+                    o("1.2.3.4"),
+                    o("8080"),
+                    o("/x"),
+                    None,
+                    None,
+                    o("false"),
+                    None,
+                ],
+            ),
+            (
+                "http://1.2.3.04/x",
+                vec![
+                    o("http"),
+                    o("1.2.3.04"),
+                    None,
+                    o("1.2.3.04"),
+                    o("-1"),
+                    o("/x"),
+                    None,
+                    None,
+                    o("false"),
+                    None,
+                ],
+            ),
+            (
+                "http://192.168.001.1/x",
+                vec![
+                    o("http"),
+                    o("192.168.001.1"),
+                    None,
+                    o("192.168.001.1"),
+                    o("-1"),
+                    o("/x"),
+                    None,
+                    None,
+                    o("false"),
+                    None,
+                ],
+            ),
+            (
+                "http://256.1.1.1/x",
+                vec![
+                    o("http"),
+                    o("256.1.1.1"),
+                    None,
+                    None,
+                    o("-1"),
+                    o("/x"),
+                    None,
+                    None,
+                    o("false"),
+                    None,
+                ],
+            ),
+            (
+                "http://1.2.3/x",
+                vec![
+                    o("http"),
+                    o("1.2.3"),
+                    None,
+                    None,
+                    o("-1"),
+                    o("/x"),
+                    None,
+                    None,
+                    o("false"),
+                    None,
+                ],
+            ),
+            (
+                "http://1..3.4/x",
+                vec![
+                    o("http"),
+                    o("1..3.4"),
+                    None,
+                    None,
+                    o("-1"),
+                    o("/x"),
+                    None,
+                    None,
+                    o("false"),
+                    None,
+                ],
+            ),
+            (
+                "http://1.2.3.4x/x",
+                vec![
+                    o("http"),
+                    o("1.2.3.4x"),
+                    None,
+                    None,
+                    o("-1"),
+                    o("/x"),
+                    None,
+                    None,
+                    o("false"),
+                    None,
+                ],
+            ),
+            (
+                "http://h-/x",
+                vec![
+                    o("http"),
+                    o("h-"),
+                    None,
+                    None,
+                    o("-1"),
+                    o("/x"),
+                    None,
+                    None,
+                    o("false"),
+                    None,
+                ],
+            ),
+            (
+                "http://h-ost/x",
+                vec![
+                    o("http"),
+                    o("h-ost"),
+                    None,
+                    o("h-ost"),
+                    o("-1"),
+                    o("/x"),
+                    None,
+                    None,
+                    o("false"),
+                    None,
+                ],
+            ),
+            (
+                "http://h./x",
+                vec![
+                    o("http"),
+                    o("h."),
+                    None,
+                    o("h."),
+                    o("-1"),
+                    o("/x"),
+                    None,
+                    None,
+                    o("false"),
+                    None,
+                ],
+            ),
+            (
+                "http://h:99999999999/x",
+                vec![
+                    o("http"),
+                    o("h:99999999999"),
+                    None,
+                    None,
+                    o("-1"),
+                    o("/x"),
+                    None,
+                    None,
+                    o("false"),
+                    None,
+                ],
+            ),
+            (
+                "http://[0:1:2:3:4:5:1.2.3.4]/x",
+                vec![
+                    o("http"),
+                    o("[0:1:2:3:4:5:1.2.3.4]"),
+                    None,
+                    o("[0:1:2:3:4:5:1.2.3.4]"),
+                    o("-1"),
+                    o("/x"),
+                    None,
+                    None,
+                    o("false"),
+                    None,
+                ],
+            ),
+            (
+                "http://[1::]/x",
+                vec![
+                    o("http"),
+                    o("[1::]"),
+                    None,
+                    o("[1::]"),
+                    o("-1"),
+                    o("/x"),
+                    None,
+                    None,
+                    o("false"),
+                    None,
+                ],
+            ),
+            (
+                "http://[::1.2.3.4]/x",
+                vec![
+                    o("http"),
+                    o("[::1.2.3.4]"),
+                    None,
+                    o("[::1.2.3.4]"),
+                    o("-1"),
+                    o("/x"),
+                    None,
+                    None,
+                    o("false"),
+                    None,
+                ],
+            ),
         ] {
             assert_eq!(uri_parts(&uri(input)), want, "{input}");
         }
@@ -3004,6 +3245,46 @@ mod tests {
                 "http://[::1.2.3.12345678901234567890]/x",
                 "Malformed IPv4 address at index 16: http://[::1.2.3.12345678901234567890]/x",
             ),
+            (
+                "http://]/x",
+                "Illegal character in hostname at index 7: http://]/x",
+            ),
+            (
+                "http://[::1]x/y",
+                "Expected port number at index 12: http://[::1]x/y",
+            ),
+            (
+                "http://[%eth0]/x",
+                "Malformed IPv6 address at index 8: http://[%eth0]/x",
+            ),
+            (
+                "http://[0:1:2:3:4:5:6:7:8]/x",
+                "IPv6 address too long at index 8: http://[0:1:2:3:4:5:6:7:8]/x",
+            ),
+            (
+                "http://[0:1:2]/x",
+                "IPv6 address too short at index 8: http://[0:1:2]/x",
+            ),
+            (
+                "http://[1:2:3:4:5:6:7::8]/x",
+                "Malformed IPv6 address at index 8: http://[1:2:3:4:5:6:7::8]/x",
+            ),
+            (
+                "http://[1:2:3:4:5:6:7:8x]/x",
+                "Malformed IPv6 address at index 8: http://[1:2:3:4:5:6:7:8x]/x",
+            ),
+            (
+                "http://[1:2:3:4:5:6:7:]/x",
+                "Expected digits for an IPv6 address at index 22: http://[1:2:3:4:5:6:7:]/x",
+            ),
+            (
+                "http://[1:23456]/x",
+                "IPv6 hexadecimal digit sequence too long at index 10: http://[1:23456]/x",
+            ),
+            (
+                "http://h/a\u{0}b",
+                "Illegal character in path at index 10: http://h/a\u{0}b",
+            ),
         ] {
             let err = Uri::parse(input).expect_err("expected a URI error");
             assert_eq!(err.to_string(), want, "{input}");
@@ -3045,6 +3326,7 @@ mod tests {
             ("http:/x", "http:///x"),
             ("http://h:/x", "http://h/x"),
             ("http://h:8x/x", "http://h:8x/x"),
+            ("http://h%2fx/x", "http://h%2Fx/x"),
         ] {
             assert!(eq(a, b), "{a} == {b}");
             assert!(eq(b, a), "{b} == {a}");
@@ -3062,6 +3344,10 @@ mod tests {
             ("http://h/a%2fb", "http://h/a%2fc"),
             ("http://a;b/x", "http://A;B/x"),
             ("http://h:-1/x", "http://h/x"),
+            ("http://h/x", "ftp://h/x"),
+            ("http:/x", "http://h:8x/x"),
+            ("http://h/x?a=%2F", "http://h/x"),
+            ("http://h/a%2Fb", "http://h/a%2Fbc"),
         ] {
             assert!(!eq(a, b), "{a} != {b}");
             assert!(!eq(b, a), "{b} != {a}");
@@ -3131,8 +3417,63 @@ mod tests {
             ("http:/x", "http://h/x", -1),
             ("http://b;x/y", "http://a;x/y", 1),
             ("http://h/a%2fb", "http://h/a%2Fb", 0),
+            ("mailto:a@b.c#f1", "mailto:a@b.c#f2", -1),
+            ("mailto:a", "mailto:/x", 1),
+            ("mailto:/x", "mailto:a", -1),
+            ("http://h/a%2Fb", "http://h/aXb", -51),
+            ("http://h/a%2Fb", "http://h/a%3Fb", -1),
+            ("http://h/a%2Fb", "http://h/a%2Cb", 3),
+            ("//h/x", "http://h/x", -1),
+            ("http://h/x", "//h/x", 1),
         ] {
             assert_eq!(uri(a).compare_uri(&uri(b)), want, "{a} <=> {b}");
         }
+    }
+
+    fn content_hash(u: &Uri) -> u64 {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::Hasher;
+        let mut h = DefaultHasher::new();
+        u.hash_content(&mut h);
+        h.finish()
+    }
+
+    /// `hash_content` is `Eq`-consistent with `uri_eq`: equal URIs
+    /// hash equally across the opaque, server, and registry shapes
+    /// (scheme/host case, escape case, empty-port collapse).
+    #[test]
+    fn uri_content_hash_matches_eq() {
+        for (a, b) in [
+            ("http://example.com/x", "HTTP://EXAMPLE.com/x"),
+            ("http://h/a%2fb", "http://h/a%2Fb"),
+            ("http://h:/x", "http://h/x"),
+            ("mailto:a@b.c", "MAILTO:a@b.c"),
+            ("http://h:8x/x", "http://h:8x/x"),
+            ("http://u@h:8080/a%2Fb?y#f", "http://u@h:8080/a%2fb?y#f"),
+        ] {
+            assert_eq!(content_hash(&uri(a)), content_hash(&uri(b)), "{a} == {b}");
+        }
+        assert_ne!(
+            content_hash(&uri("http://h/x")),
+            content_hash(&uri("mailto:a@b.c"))
+        );
+        assert_ne!(
+            content_hash(&uri("http://h/x")),
+            content_hash(&uri("http://h/y"))
+        );
+        assert_ne!(
+            content_hash(&uri("http://h:8x/x")),
+            content_hash(&uri("http://h:9x/x"))
+        );
+    }
+
+    /// Construction ids are unique and increasing (the `#object`
+    /// hex in `print.rs`).
+    #[test]
+    fn uri_ids_are_unique() {
+        let a = uri("http://h/x").id();
+        let b = uri("http://h/x").id();
+        assert_ne!(a, b);
+        assert!(b > a);
     }
 }
