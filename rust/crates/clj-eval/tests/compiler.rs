@@ -1244,14 +1244,14 @@ fn strip_handles_unicode() {
     let fx = Fixture::new("unicode");
     fx.write(
         "my/un.clj",
-        "; ünïcode comment —–\n(ns my.un) ; trailing ünï\n(defn ok [] 1)\n(defrecord R [x])\n",
+        "; ünïcode comment —–\n(ns my.un {:doc \"ünï\"}) ; trailing ünï\n(defn ok [] 1)\n  (defrecord R [x])\n",
     );
     let _lock = use_fake(FakeMode::Record);
     let mut eval = boot();
     let chain = uncaught_chain(&mut eval, &fx.within("(compile 'my.un)"));
     assert_eq!(chain.len(), 1);
     assert!(
-        chain[0].contains(":4:1: unsupported form in AOT subset: defrecord"),
+        chain[0].contains(":4:3: unsupported form in AOT subset: defrecord"),
         "unexpected chain: {chain:?}"
     );
     assert_eq!(run_last(&mut eval, "(loaded-libs)"), "#{}");
@@ -1408,6 +1408,7 @@ fn nonroot_loads_never_emit() {
         ),
         "nil"
     );
+    assert_eq!(run_last(&mut eval, "(my.plain/f 1)"), "2");
     assert_eq!(
         run_last(
             &mut eval,

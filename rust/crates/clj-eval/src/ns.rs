@@ -1235,7 +1235,9 @@ fn source_path_value(file_star: &Value) -> Value {
 
 /// The last path segment (split on `/` or `\`: root loads pin
 /// `/` in `*file*`, but `load-file` binds the path as opened, so a
-/// native Windows path still yields its basename).
+/// native Windows path still yields its basename). Both separators
+/// split on every platform — a deliberate narrowing (Unix backslash
+/// filenames are out of scope; spec §2.1 D10).
 fn last_segment(path: &str) -> &str {
     path.rsplit(['/', '\\']).next().unwrap_or(path)
 }
@@ -2547,6 +2549,9 @@ mod tests {
         assert_eq!(last_segment("my/ctx.clj"), "ctx.clj");
         assert_eq!(last_segment("ctx.clj"), "ctx.clj");
         assert_eq!(last_segment("C:\\my\\ctx.clj"), "ctx.clj");
+        assert_eq!(last_segment("a/b\\c.clj"), "c.clj");
+        assert_eq!(last_segment("a/"), "");
+        assert_eq!(last_segment(""), "");
     }
 
     #[test]

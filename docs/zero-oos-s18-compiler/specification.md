@@ -324,7 +324,7 @@ even when the add then fails — the `a-broken-*` interleavings),
 then the String check (CCE `String` for non-strings — the port
 accepts plain path strings only; JVM URL objects, URL-strings,
 and `File`s are unrepresentable under N1, so `a-broken-url`/
-`a-url`-side acceptance narrows to strings, §2.4), then
+`a-urls`-side acceptance narrows to strings, §2.4), then
 contains-guarded `conj` onto `*load-path*` (nil normalizes to
 `[]` first, preserving the append invariant; non-vector rebound
 colls get `conj` semantics with append guaranteed for the vector
@@ -362,7 +362,7 @@ STALE, §2.5 R4).
 | 1 | `compile` | `returns_lib_symbol`, `binds_files_true`, `always_reloads`, `uses_load_path_order`, `leaves_flag_false_path_untouched`, `arity`, `missing`, `str_arg`, `num_arg`, `nil_arg`, `keyword_arg`, `keyword_ns_arg`, `broken_plan_diagnostic`, `broken_marks_and_no_artifact`, `mismatch_check_and_unmarked`, `nil_path`, `bad_path`, `strip_keeps_spans`, `plan_first_atomic_fake`, `transitive_emits_both_fake`, `driver_unset`, `driver_target_emit_io_fake`, `genclass_survives_fake` | `c-ret`…`c-no-mkdirs`, `c-broken-files`, `c-mismatch-files` | LOCAL |
 | 1c | `compile` (artifacts) | `emits_object_layout`, `overwrite_idempotent`, `no_mkdirs_real`, `mismatch_leaves_root_object`, `empty_ns_only`, `broken_leaves_nothing`, `genclass_survives_real` | `c-files`, `c-gc-files`, `c-mismatch-files`, `c-broken-files` | CI |
 | 2 | `*compile-path*` | `root_classes_and_slot_only`, `bound_path_drives_emit_fake`, `relative_and_absolute` | `k-compile-path`, `k-root-compile-path`, `k-dyn-compile-path`, `k-bind-compile-path` | LOCAL |
-| 3 | `*compile-files*` | `root_false_and_slot_only`, `false_skips_plan_and_emit` (fake asserts zero driver calls + eval happened), `true_load_emits_fake`, `truthy_one_emits_fake`, `compile_forces_true_over_outer_false` | `k-compile-files`, `k-root-compile-files`, `c-false-files`, `c-false-eval`, `c-true-load`, `c-flag-truthy`, `c-captured` | LOCAL |
+| 3 | `*compile-files*` | `root_false_and_slot_only`, `false_skips_plan_and_emit` (fake asserts zero driver calls + eval happened), `true_load_emits_fake`, `truthy_one_emits_fake`, `compile_forces_true_over_outer_false` | `k-compile-files`, `k-root-compile-files`, `k-dyn-compile-files`, `c-false-files`, `c-false-eval`, `c-true-load`, `c-flag-truthy`, `c-captured` | LOCAL |
 | 4 | `*compiler-options*` | `root_nil_slot_only_and_binds`, `bound_map_tolerated_fake` | `k-compiler-options`, `k-root-compiler-options`, `k-dyn-compiler-options`, `k-bind-options`, `c-options-bound` | LOCAL |
 | 5 | `*source-path*` | `root_no_source_file_slot_only`, `load_binds_basename`, `loadfile_binds_basename`, `loadstring_binds_no_source_file`, `eval_does_not_rebind`, `compile_observes_basename` | `k-source-path`, `k-root-source-path`, `k-dyn-source-path`, `c-captured`, `c-load-captured`, `c-loadfile-source`, `c-loadstring-source`, `k-eval-source` | LOCAL |
 | 6 | `*fn-loader*` | `root_nil_slot_only_and_binds`, `nil_during_load_and_compile` | `k-fn-loader`, `k-root-fn-loader`, `k-dyn-fn-loader`, `c-captured`, `k-eval-fnloader` | LOCAL |
@@ -453,7 +453,8 @@ load-one + emit `<root>.o`; probes c-ret, c-files)``.
   in the oracle (§2.2), and each JVM meaning (subset-void
   option keys, loader selection) is unrepresentable.
 - D10 (`*source-path*` basename rule, §1.8): every file load
-  binds the last path segment (even `load-file` absolutes);
+  binds the last path segment (even `load-file` absolutes — both
+  separators split on every platform, a deliberate narrowing);
   `load-string` binds the root; plain `eval` never rebinds.
   Mirrors all five oracle contexts with one rule.
 - D11 (verbose branch in `dup_record`, §1.8): the port today
