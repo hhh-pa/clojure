@@ -885,12 +885,7 @@ impl Evaluator {
     }
 
     /// A vector literal (elements evaluate left to right).
-    fn eval_vec(
-        &mut self,
-        elems: &[Expr],
-        meta: Option<Map>,
-        env: &Env,
-    ) -> Result<Value, Signal> {
+    fn eval_vec(&mut self, elems: &[Expr], meta: Option<Map>, env: &Env) -> Result<Value, Signal> {
         let mut out = Vec::with_capacity(elems.len());
         for elem in elems {
             out.push(self.eval(elem, env)?);

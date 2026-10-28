@@ -2579,7 +2579,10 @@ fn t73_reader_meta_on_evaluated_literals() {
     // Torture #73 finding 3: ^meta on vector/map/set literals
     // survives evaluation (like the JVM); plain literals stay nil.
     let mut eval = boot();
-    assert_eq!(run_last(&mut eval, "(meta ^:private [1])"), "{:private true}");
+    assert_eq!(
+        run_last(&mut eval, "(meta ^:private [1])"),
+        "{:private true}"
+    );
     assert_eq!(run_last(&mut eval, "(meta ^:k {:m 1})"), "{:k true}");
     assert_eq!(
         run_last(&mut eval, "(meta ^:private #{1})"),
