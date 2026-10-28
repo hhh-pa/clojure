@@ -130,9 +130,9 @@
   {
    "file": "crates/clj-eval/src/coll.rs",
    "function": "native_nth",
-   "cyclomatic": 18.0,
-   "cognitive": 15.0,
-   "justification": "S15 adds the Array/PV arms; one arm per nth kind"
+   "cyclomatic": 19.0,
+   "cognitive": 16.0,
+   "justification": "S15 adds the Array/PV arms; one arm per nth kind. Wave-2 landing: the S12 chunk pre-dispatch also lands here (19/16 measured under rca 0.0.25)"
   },
   {
    "file": "crates/clj-eval/src/eval.rs",
@@ -175,6 +175,27 @@
    "cyclomatic": 16.0,
    "cognitive": 3.0,
    "justification": "S15 adds the Array/PV arms; one arm per hash kind"
+  },
+  {
+   "file": "crates/clj-eval/src/error.rs",
+   "function": "jvm_class_of_host",
+   "cyclomatic": 17.0,
+   "cognitive": 3.0,
+   "justification": "one arm per Value variant; the class-name table stays exhaustive. Wave-2 landing: S15 Array/PV arms tip it over (S9 scalars + S12 struct/volatile arms already here; 17/3 measured under rca 0.0.25)"
+  },
+  {
+   "file": "crates/clj-eval/src/eval.rs",
+   "function": "Evaluator::invoke",
+   "cyclomatic": 16.0,
+   "cognitive": 2.0,
+   "justification": "one arm per invocable kind, each delegating to a helper. Wave-2 landing: S15 adds the PrimitiveVector arm (S12 deliberately kept structs a pre-dispatch; 16/2 measured under rca 0.0.25)"
+  },
+  {
+   "file": "crates/clj-value/src/value.rs",
+   "function": "hash_value_rest",
+   "cyclomatic": 17.0,
+   "cognitive": 7.0,
+   "justification": "one arm per hash kind; the hash partition stays exhaustive. Wave-2 landing: S9 scalars + S15 Array arm on top of the S12 struct shape (17/7 measured under rca 0.0.25)"
   }
  ]
 }
