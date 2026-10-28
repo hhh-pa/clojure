@@ -2912,4 +2912,79 @@ mod tests {
             "clojure.lang.Compiler$CompilerException | Syntax error executing at (1:1).";
         assert_eq!(err.to_string(), WANT);
     }
+
+    #[test]
+    fn seq_to_map_pv_and_array_trailers() {
+        // No suite feeds `cons_trailing` a PV/Array odd
+        // trailer, so the arms are covered directly with a
+        // hand-built list: a PV pair assocs, a PV triple is
+        // the pair error, an array folds its entries.
+        let mut eval = Evaluator::new("test");
+        let pv = |items: Vec<Value>| {
+            Value::PrimitiveVector(PrimitiveVector::new(clj_value::Elem8::Int, items, None))
+        };
+        let list = Value::List(List::from_vec(vec![
+            Value::Int(1),
+            Value::Int(2),
+            pv(vec![Value::Int(3), Value::Int(4)]),
+        ]));
+        let Value::Map(m) = eval.seq_to_map(&list).expect("pv pair trailer") else {
+            panic!("expected a map");
+        };
+        assert!(matches!(m.get(&Value::Int(1)), Some(Value::Int(2))));
+        assert!(matches!(m.get(&Value::Int(3)), Some(Value::Int(4))));
+        let bad = Value::List(List::from_vec(vec![
+            Value::Int(1),
+            Value::Int(2),
+            pv(vec![Value::Int(1), Value::Int(2), Value::Int(3)]),
+        ]));
+        let err = eval.seq_to_map(&bad).expect_err("pv triple trailer");
+        let t = try_thrown(err).expect("throws");
+        assert_eq!(t.class, ThrowClass::IllegalArgumentException);
+        assert_eq!(
+            t.message.as_deref(),
+            Some("Vector arg to map conj must be a pair")
+        );
+        let arr = Value::Array(clj_value::Array::new(
+            clj_value::ArrayDesc::flat(clj_value::BaseType::Object),
+            clj_value::ArrayStore::Objs(vec![Value::MapEntry {
+                key: Box::new(Value::Int(3)),
+                val: Box::new(Value::Int(4)),
+            }]),
+        ));
+        let list = Value::List(List::from_vec(vec![Value::Int(1), Value::Int(2), arr]));
+        let Value::Map(m) = eval.seq_to_map(&list).expect("array trailer") else {
+            panic!("expected a map");
+        };
+        assert!(matches!(m.get(&Value::Int(1)), Some(Value::Int(2))));
+        assert!(matches!(m.get(&Value::Int(3)), Some(Value::Int(4))));
+    }
+
+    #[test]
+    fn conj_map_pv_pair_and_nonpair() {
+        // `Evaluator::conj_map` is the destructuring-`into1`
+        // path (surface `conj` plans in `coll.rs`), so its PV
+        // arms are covered directly: pairs assoc, non-pairs
+        // are the pair error.
+        let mut eval = Evaluator::new("test");
+        let pv = Value::PrimitiveVector(PrimitiveVector::new(
+            clj_value::Elem8::Int,
+            vec![Value::Int(1), Value::Int(2)],
+            None,
+        ));
+        let m = eval.conj_map(new_map(), pv).expect("pv pair");
+        assert!(matches!(m.get(&Value::Int(1)), Some(Value::Int(2))));
+        let bad = Value::PrimitiveVector(PrimitiveVector::new(
+            clj_value::Elem8::Int,
+            vec![Value::Int(1)],
+            None,
+        ));
+        let err = eval.conj_map(new_map(), bad).expect_err("pv non-pair");
+        let t = try_thrown(err).expect("throws");
+        assert_eq!(t.class, ThrowClass::IllegalArgumentException);
+        assert_eq!(
+            t.message.as_deref(),
+            Some("Vector arg to map conj must be a pair")
+        );
+    }
 }

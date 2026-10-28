@@ -2048,6 +2048,28 @@ fn vector_of() {
         run_last(&mut eval, "(contains? (vector-of :int 5) 0N)"),
         "false"
     );
+    // Port pin (PR #72 H3): `merge-with` over a PV
+    // right-hand side folds index/value pairs.
+    assert_eq!(
+        run_last(&mut eval, "(merge-with + {0 100} (vector-of :int 1 2))"),
+        "{0 101, 1 2}"
+    );
+    // Port pins (PR #72 H4): `conj` of a PV onto a map
+    // assocs pairs; non-pairs are the pair error.
+    assert_eq!(
+        run_last(&mut eval, "(conj {} (vector-of :int 1 2))"),
+        "{1 2}"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(conj {} (vector-of :int 1 2 3))"),
+        "java.lang.IllegalArgumentException | Vector arg to map conj must be a pair"
+    );
+    // Port pin (PR #72 H6): negative `assoc` on a PV is the
+    // empty `IOOBE`.
+    assert_eq!(
+        uncaught(&mut eval, "(assoc (vector-of :int 1) -1 9)"),
+        "java.lang.IndexOutOfBoundsException | "
+    );
 }
 
 // ---- `seq`/`nth`/`get`/`count` over arrays (`interop.out` §A/B, `match.out` §E, `scalar.out` §B/C) ----

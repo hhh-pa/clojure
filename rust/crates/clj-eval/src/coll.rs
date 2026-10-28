@@ -317,6 +317,16 @@ enum MapConjPlan {
     Entries(Vec<(Value, Value)>),
 }
 
+/// A vector-family conj plan: exactly a pair assocs,
+/// anything else is the JVM's pair error (`Vec` is an
+/// `IPersistentVector`, like vectors).
+fn pair_plan(items: &[Value]) -> Result<MapConjPlan, NativeError> {
+    match items {
+        [k, v] => Ok(MapConjPlan::Pair(k.clone(), v.clone())),
+        _ => Err(pair_err()),
+    }
+}
+
 fn map_conj_plan(eval: &mut Evaluator, x: &Value) -> Result<MapConjPlan, NativeError> {
     match x {
         Value::Nil => Ok(MapConjPlan::Nil),
@@ -324,12 +334,12 @@ fn map_conj_plan(eval: &mut Evaluator, x: &Value) -> Result<MapConjPlan, NativeE
             other.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
         )),
         Value::Vector(v) => {
-            let items: Vec<&Value> = v.iter().collect();
-            if items.len() != 2 {
-                return Err(pair_err());
-            }
-            Ok(MapConjPlan::Pair(items[0].clone(), items[1].clone()))
+            let items: Vec<Value> = v.iter().cloned().collect();
+            pair_plan(&items)
         }
+        // `Vec` pairs assoc like vectors (S15); non-pairs are
+        // the pair error, never the entry cast.
+        Value::PrimitiveVector(p) => pair_plan(&p.items()),
         Value::MapEntry { key, val } => Ok(MapConjPlan::Pair((**key).clone(), (**val).clone())),
         _ => {
             if let Some(sv) = as_subvector(x) {

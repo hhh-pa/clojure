@@ -518,8 +518,10 @@ fn pull_files(
     Ok(out)
 }
 
-/// The lazy root check: nil is the oracle NPE, non-files the
-/// oracle CCE (both fire on first force, like `tree-seq`).
+/// The lazy root check: nil is the oracle NPE on first
+/// force (like `tree-seq`); the non-file CCE is
+/// defensive-only — `native_file_seq` eagerly rejects
+/// non-File roots, so only a direct call reaches it.
 fn check_file_root(node: &Value) -> Result<Value, NativeError> {
     if matches!(node, Value::Nil) {
         return Err(npe(
@@ -863,5 +865,15 @@ mod tests {
         let mut stack = Vec::new();
         push_children(&mut stack, &Value::Int(1));
         assert!(stack.is_empty());
+    }
+
+    #[test]
+    fn check_file_root_rejects_non_file() {
+        // Defensive arm: `native_file_seq` eagerly rejects
+        // non-File roots, so only a direct call reaches the
+        // CCE here (mirrors
+        // `resolve_hierarchy_rejects_non_ref`).
+        let err = check_file_root(&Value::Int(1)).unwrap_err();
+        assert_eq!(err.class, ThrowClass::ClassCastException);
     }
 }

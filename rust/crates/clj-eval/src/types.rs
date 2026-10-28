@@ -1148,4 +1148,16 @@ mod tests {
         let err = object_fallback(&HostVal::Def(def), "m", "user.T").unwrap_err();
         assert_eq!(err.class, ThrowClass::IllegalArgumentException);
     }
+
+    #[test]
+    fn meth_on_proxy_with_descriptor_misses() {
+        // Descriptors never reach `meth_on_proxy`
+        // (`meth_on_def` misses first); the arm keeps the
+        // match total.
+        let mut eval = crate::boot();
+        let def = test_def();
+        let err = meth_on_proxy(&mut eval, &HostVal::Def(def), "m", &[]).unwrap_err();
+        assert_eq!(err.class, ThrowClass::IllegalArgumentException);
+        assert_eq!(err.message, "No matching field found: m for class <proxy>");
+    }
 }
