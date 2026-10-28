@@ -844,6 +844,40 @@ fn mismatch_check_and_unmarked() {
     assert_eq!(calls[0].obj, fx.classes_dir().join("my/mismatch.o"));
 }
 
+/// The strip's read fallback (no first form to blank): an empty
+/// file plans the empty program and fails the check after emission
+/// (T5 — nothing self-marks), while a first-form-broken file fails
+/// the plan with the load's exact shape (T6a, `c-broken`).
+#[test]
+fn strip_fallback_empty_and_broken_first() {
+    let fx = Fixture::new("stripfb");
+    fx.write("my/empty.clj", "");
+    fx.write("my/fb.clj", "(defn broken [)\n");
+    let _lock = use_fake(FakeMode::Record);
+    let mut eval = boot();
+    assert_eq!(
+        uncaught(&mut eval, &fx.within("(compile 'my.empty)")),
+        "java.lang.Exception | namespace 'my.empty' not found after loading '/my/empty'"
+    );
+    assert_eq!(run_last(&mut eval, "(loaded-libs)"), "#{}");
+    let calls = fake_calls();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].fns, 0);
+    assert_eq!(calls[0].obj, fx.classes_dir().join("my/empty.o"));
+    let chain = uncaught_chain(&mut eval, &fx.within("(compile 'my.fb)"));
+    assert_eq!(chain.len(), 2);
+    assert_eq!(run_last(&mut eval, "(loaded-libs)"), "#{}");
+    assert_eq!(fake_calls().len(), 1);
+    let mut eval = boot();
+    eval.eval_source(&fx.within("(load \"/my/empty\")")).unwrap();
+    assert_eq!(run_last(&mut eval, "(loaded-libs)"), "#{}");
+    assert_eq!(
+        uncaught_chain(&mut eval, &fx.within("(load \"/my/fb\")")),
+        chain
+    );
+    assert_eq!(run_last(&mut eval, "(loaded-libs)"), "#{}");
+}
+
 /// Nil `*compile-path*` throws verbatim (T7, `c-nil-path`).
 #[test]
 fn nil_path() {
@@ -1143,20 +1177,22 @@ fn strip_only_first_unqualified_ns() {
 }
 
 /// The strip mirrors the reader's CRLF normalization: spans stay
-/// exact under `\r\n` line endings.
+/// exact under `\r\n` line endings. The leading comment lines put
+/// the `ns` form on line 3, driving the offset walk across two
+/// CRLF pairs.
 #[test]
 fn strip_handles_crlf() {
     let fx = Fixture::new("crlf");
     fx.write(
         "my/cr.clj",
-        "(ns my.cr)\r\n(defn f [] 1)\r\n(defrecord R [x])\r\n",
+        "; a\r\n; b\r\n(ns my.cr)\r\n(defn f [] 1)\r\n(defrecord R [x])\r\n",
     );
     let _lock = use_fake(FakeMode::Record);
     let mut eval = boot();
     let chain = uncaught_chain(&mut eval, &fx.within("(compile 'my.cr)"));
     assert_eq!(chain.len(), 1);
     assert!(
-        chain[0].contains(":3:1: unsupported form in AOT subset: defrecord"),
+        chain[0].contains(":5:1: unsupported form in AOT subset: defrecord"),
         "unexpected chain: {chain:?}"
     );
     assert!(fake_calls().is_empty());
