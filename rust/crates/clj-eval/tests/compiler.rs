@@ -337,7 +337,8 @@ fn root_true_slot_only_and_binds() {
 }
 
 /// `print-dup` records honor the knob: positional by default, the
-/// `#Name{map}` body when verbose (`k-dup-false`, `k-verbose-true`).
+/// `#Name{map}` body when verbose (`k-verbose-false`,
+/// `k-verbose-true`, `k-verbose-default`).
 #[test]
 fn dup_record_both_shapes() {
     let mut eval = boot();
@@ -1215,7 +1216,7 @@ fn ns_only_emits_empty_fake() {
     assert_eq!(calls[0].fns, 0);
 }
 
-/// The bound `*compile-path*` drives emission (`c-bind-compile-path`).
+/// The bound `*compile-path*` drives emission (`k-bind-compile-path`).
 #[test]
 fn bound_path_drives_emit_fake() {
     let fx = Fixture::new("boundpath");
@@ -1260,7 +1261,7 @@ fn relative_and_absolute() {
 }
 
 /// A false flag skips even the plan: arbitrary fixtures load with
-/// zero calls (`c-false-files`, `c-true-files` negative).
+/// zero calls (`c-false-files`; the `c-true-load` negative).
 #[test]
 fn false_skips_plan_and_emit() {
     let fx = Fixture::new("falseskip");
@@ -1282,7 +1283,7 @@ fn false_skips_plan_and_emit() {
 }
 
 /// A true flag on `load` emits exactly what `compile` emits for the
-/// same root (`c-true-load`, `c-true-files`).
+/// same root (`c-true-load`).
 #[test]
 fn true_load_emits_fake() {
     let fx = Fixture::new("trueload");
@@ -1309,7 +1310,7 @@ fn true_load_emits_fake() {
     assert_eq!(calls[0].obj, fx.classes_dir().join("my/plain.o"));
 }
 
-/// Any truthy flag emits (not just `true`, `c-files-truthy`).
+/// Any truthy flag emits (not just `true`, `c-flag-truthy`).
 #[test]
 fn truthy_one_emits_fake() {
     let fx = Fixture::new("truthy");
@@ -1324,6 +1325,40 @@ fn truthy_one_emits_fake() {
         "nil"
     );
     assert_eq!(fake_calls().len(), 1);
+}
+
+/// Non-root loads never emit, even under a true flag: `load-file`
+/// and `load-string` have no load root to derive the path from
+/// (§1.4 D6 — evaluation still runs).
+#[test]
+fn nonroot_loads_never_emit() {
+    let fx = Fixture::new("nonroot");
+    fx.write("my/plain.clj", "(ns my.plain)\n(defn f [x] (+ x 1))\n");
+    let _lock = use_fake(FakeMode::Record);
+    let mut eval = boot();
+    // `/`-normalized (the `load_file_and_load_string` precedent).
+    let rel = format!(
+        "{}/my/plain.clj",
+        fx.dir.to_string_lossy().replace('\\', "/")
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            &fx.within(&format!(
+                "(binding [*compile-files* true] (load-file \"{rel}\"))"
+            ))
+        ),
+        "nil"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            &fx.within("(binding [*compile-files* true] (load-string \"(ns my.ls) (def lsm 7)\"))")
+        ),
+        "nil"
+    );
+    assert_eq!(run_last(&mut eval, "@#'my.ls/lsm"), "7");
+    assert!(fake_calls().is_empty());
 }
 
 /// `compile` binds `true` unconditionally: an outer `false` does not
@@ -1345,7 +1380,7 @@ fn compile_forces_true_over_outer_false() {
 }
 
 /// A bound options map is tolerated through a compile
-/// (`c-options-bound`, `c-options-loaded`).
+/// (`c-options-bound`).
 #[test]
 fn bound_map_tolerated_fake() {
     let fx = Fixture::new("optbound");
@@ -1383,15 +1418,19 @@ fn loadfile_binds_basename() {
         "(ns my.ctx)\n(def captured [*source-path* *file*])\n",
     );
     let mut eval = boot();
-    let abs = fx.dir.join("my/ctx.clj");
-    run_last(&mut eval, &format!("(load-file {})", lit(&abs)));
+    // `/`-normalized (the `load_file_and_load_string` precedent):
+    // the input is absolute, so `absolutize` is identity and the
+    // input pins the separators, not the platform.
+    let rel = format!("{}/my/ctx.clj", fx.dir.to_string_lossy().replace('\\', "/"));
+    run_last(&mut eval, &format!("(load-file \"{rel}\")"));
     assert_eq!(
         run_last(&mut eval, "(first @#'my.ctx/captured)"),
         "\"ctx.clj\""
     );
-    let file = run_last(&mut eval, "(second @#'my.ctx/captured)");
-    assert!(file.ends_with("my/ctx.clj\""), "file was {file}");
-    assert!(file.starts_with("\"/"), "file was {file}");
+    assert_eq!(
+        run_last(&mut eval, "(second @#'my.ctx/captured)"),
+        format!("\"{rel}\"")
+    );
 }
 
 /// `load-string` binds the root with `*file*` nil
@@ -1449,8 +1488,8 @@ fn compile_observes_basename() {
 }
 
 /// `*fn-loader*` is nil during loads and compiles (data-only: never
-/// bound, never consulted — `c-fn-loader-load`, `c-fn-loader-file`,
-/// `c-fn-loader-string`).
+/// bound, never consulted — `c-captured`, `c-load-captured`,
+/// `c-loadfile-source`, `c-loadstring-source`, `k-eval-fnloader`).
 #[test]
 fn nil_during_load_and_compile() {
     let fx = Fixture::new("fnloader");

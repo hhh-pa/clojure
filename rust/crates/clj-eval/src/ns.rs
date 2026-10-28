@@ -1233,9 +1233,11 @@ fn source_path_value(file_star: &Value) -> Value {
     }
 }
 
-/// The last `/` segment of a path (the whole path when unslashed).
+/// The last path segment (split on `/` or `\`: root loads pin
+/// `/` in `*file*`, but `load-file` binds the path as opened, so a
+/// native Windows path still yields its basename).
 fn last_segment(path: &str) -> &str {
-    path.rsplit('/').next().unwrap_or(path)
+    path.rsplit(['/', '\\']).next().unwrap_or(path)
 }
 
 /// Push the isolating `*ns*` frame for a load (recording the

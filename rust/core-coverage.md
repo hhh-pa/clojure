@@ -666,7 +666,7 @@ No slice on this branch: hard-never reasons stand alone, design-blocked rows nam
 | `*data-readers*` | implemented | S6 dynamic (root `{}`); zero_oos_s6_datareaders.rs data_reader_vars, table_reads_invoke_per_occurrence, table_precedence_and_errors |
 | `*default-data-reader-fn*` | implemented | S6 dynamic (root nil); zero_oos_s6_datareaders.rs data_reader_vars, default_fn_fallback |
 | `*flush-on-newline*` | implemented | dyn var root true; prn/println flush iff true (S8: printsys.rs flush_rows; probes f-*) |
-| `*fn-loader*` | implemented | tests/compiler.rs root_nil_slot_only_and_binds, nil_during_load_and_compile (S18: data-only nil; probes k-root-fn-loader, c-fn-loader-load) |
+| `*fn-loader*` | implemented | tests/compiler.rs root_nil_slot_only_and_binds, nil_during_load_and_compile (S18: data-only nil; probes k-root-fn-loader, c-captured, c-load-captured) |
 | `*math-context*` | implemented | ns.rs `RT.java`-style dynamic root (nil); `MathContextVal` extension; zero_oos_s2_tower.rs s2_math_context_rows |
 | `*read-eval*` | implemented | true root; false/nil gates `#=`, `:unknown` refuses every read, loads force true; zero_oos_s7_readgates.rs (S7, #50) |
 | `*reader-resolver*` | implemented | nil root; 2-arity fn protocol (current-ns/resolve-alias/resolve-class/resolve-var consults for `::`/syntax-quote); non-fn entry cast; zero_oos_s7_readgates.rs (S7, #50) |
@@ -674,7 +674,7 @@ No slice on this branch: hard-never reasons stand alone, design-blocked rows nam
 | `*source-path*` | implemented | tests/compiler.rs root_no_source_file_slot_only, load_binds_basename, loadfile_binds_basename, loadstring_binds_no_source_file (S18: loads bind basename; probes k-source-path, c-load-captured, c-loadfile-source, c-loadstring-source) |
 | `*suppress-read*` | implemented | nil root; gates only `#tag` (unknown tags preserved; `#inst`/`#uuid` also preserved — the suppress check sits above the S6 consult); zero_oos_s7_readgates.rs (S7, #50) |
 | `*use-context-classloader*` | implemented | tests/compiler.rs root_true_slot_only_and_binds, loads_succeed_under_both (S18: data-only; probes k-use-context, a-use-true, c-use-true) |
-| `*verbose-defrecords*` | implemented | tests/compiler.rs root_false_dynamic_and_binds, dup_record_both_shapes (S18: core dynamic; dup #Name{map} when set; probes k-verbose, k-dup-false) |
+| `*verbose-defrecords*` | implemented | tests/compiler.rs root_false_dynamic_and_binds, dup_record_both_shapes (S18: core dynamic; dup #Name{map} when set; probes k-verbose, k-verbose-false, k-verbose-true) |
 | `+'` | implemented | core.rs native_add_prime (promoting fold; 1-arity `Number` cast); tests/extarith.rs s11_add_prime_rows (S11, #56; probes `ap-*`, `a2-add*`) |
 | `-'` | implemented | core.rs native_sub_prime (promoting fold/negate); tests/extarith.rs s11_sub_prime_rows (S11, #56; probes `sp-*`, `a2-subchar`) |
 | `->ArrayChunk` | implemented | S14 opaque `Handle` (`[am arr off end]`, `.-field` reads); typeinternals.rs factory_print_shapes, factory_arities, factory_fields (S14, #58) |
