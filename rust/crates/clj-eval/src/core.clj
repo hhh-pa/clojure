@@ -1255,14 +1255,45 @@
              (list 'quote t) mmap))
          (partition 2 proto+mmaps))))
 
-;; Host class names as values (the port has no class literals):
-;; `String` in value position is its name string, so `extends?` /
-;; `satisfies?` take classes the way the pins write them.
-(def String "java.lang.String")
-(def Long "java.lang.Long")
-(def Double "java.lang.Double")
-(def Boolean "java.lang.Boolean")
-(def Object "java.lang.Object")
+;; S16 class emulation: `import`, `..`, `memfn`. Classes are values
+;; and namespaces carry an import table (simple name → class) with no
+;; default imports — `String` and friends resolve only after an
+;; explicit `import`. The `import` macro validates each spec (an
+;; unqualified symbol, or a package list of 2+ unqualified symbols)
+;; and fans out to the hidden `__import*` native; `..`/`memfn`
+;; expand to the hidden `__meth*`/`__field*` calls the dot-forms
+;; read as.
+(defmacro import
+  [& specs]
+  (let [strip (fn [s] (if (and (seq? s) (= 'quote (first s))) (second s) s))
+        spec-error (fn [] (throw (ex-info "Call to clojure.core/import did not conform to spec." nil)))
+        emit-one (fn [s]
+                   (let [s (strip s)]
+                     (cond
+                       (and (symbol? s) (nil? (namespace s)))
+                       (list (list 'clojure.core/__import* (str s)))
+                       (and (sequential? s)
+                            (>= (count s) 2)
+                            (every? (fn [e] (and (symbol? e) (nil? (namespace e)))) s))
+                       (map (fn [c] (list 'clojure.core/__import* (str (first s) "." c))) (rest s))
+                       :else (spec-error))))]
+    (list* 'do (mapcat emit-one specs))))
+
+(defmacro .. [x form & more]
+  ;; Expansions build lists (never `list*` conses): nested conses
+  ;; print elided and `macroexpand` only loops over lists.
+  (let [one (if (seq? form)
+              (apply list 'clojure.core/__meth* (list 'quote (first form)) x (next form))
+              (list 'clojure.core/__field* (list 'quote form) x))]
+    (if more
+      (apply list 'clojure.core/.. one more)
+      one)))
+
+(defmacro memfn [name & args]
+  ;; Lists, never `list*` conses (see `..` above).
+  (let [target (with-meta (gensym "target") (meta name))]
+    (list 'fn* (vec (cons target args))
+          (apply list 'clojure.core/__meth* (list 'quote name) target args))))
 
 (defmacro with-open [bindings & body]
   (when-not (vector? bindings)

@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 
-use clj_value::{Keyword, Map, Symbol, Unbound, Value, Var, new_map};
+use clj_value::{ClassVal, Keyword, Map, Symbol, Unbound, Value, Var, new_map};
 
 use crate::ext::NsHandle;
 
@@ -44,11 +44,12 @@ impl VarState {
 }
 
 /// One namespace: vars by id, qualified symbols to ids, aliases,
-/// and refers (simple name → qualified target). Var ids come from
-/// the registry counter, never per-namespace, so ids stay unique
-/// across namespaces (and double as the `#object` hex for `Unbound`
-/// sentinels). The namespace `id` (also registry-issued, never
-/// reused while live) is the `#object` hex for namespace values.
+/// refers (simple name → qualified target), and imports (S16:
+/// simple name → class). Var ids come from the registry counter,
+/// never per-namespace, so ids stay unique across namespaces (and
+/// double as the `#object` hex for `Unbound` sentinels). The
+/// namespace `id` (also registry-issued, never reused while live)
+/// is the `#object` hex for namespace values.
 #[derive(Clone, Debug)]
 pub struct Namespace {
     name: String,
@@ -57,6 +58,7 @@ pub struct Namespace {
     ids: HashMap<Symbol, u64>,
     aliases: HashMap<String, (String, u64)>,
     refers: HashMap<String, (Symbol, u64)>,
+    imports: HashMap<String, Arc<ClassVal>>,
     meta: Option<Map>,
 }
 
@@ -72,6 +74,7 @@ impl Namespace {
             ids: HashMap::new(),
             aliases: HashMap::new(),
             refers: HashMap::new(),
+            imports: HashMap::new(),
             meta: None,
         }
     }
@@ -111,10 +114,10 @@ impl Namespace {
 
     /// Intern (find or create) a var in this namespace (the symbol
     /// must already name it). Creation stamps the `:ns`/`:name`
-    /// meta (JVM `Var.intern`) and drops any refer of the same name
-    /// (`def`/`intern` silently replace refers, like
-    /// `Namespace.reference` minus its `*err*` warning, which waits
-    /// for S5D). Ids come from the registry counter.
+    /// meta (JVM `Var.intern`) and drops any refer or import of the
+    /// same name (`def`/`intern` silently replace refers and imports,
+    /// like `Namespace.reference` minus its `*err*` warning, which
+    /// waits for S5D). Ids come from the registry counter.
     pub fn intern(&mut self, sym: &Symbol, next_id: &mut u64) -> u64 {
         if let Some(id) = self.ids.get(sym) {
             return *id;
@@ -133,6 +136,7 @@ impl Namespace {
         self.vars.insert(id, state);
         self.ids.insert(sym.clone(), id);
         self.refers.remove(sym.name());
+        self.imports.remove(sym.name());
         id
     }
 
@@ -196,17 +200,38 @@ impl Namespace {
     /// Install a refer (replaces silently; callers keep interns —
     /// an intern of the same name must never reach this). The var
     /// id is pinned at install so `ns-refers`/`ns-resolve` see the
-    /// referred var even after the target is re-interned.
+    /// referred var even after the target is re-interned. Any import
+    /// of the same name goes (imports live under refers, like the
+    /// JVM's single mapping).
     pub fn add_refer(&mut self, name: &str, target: Symbol, target_id: u64) {
         self.refers.insert(name.to_owned(), (target, target_id));
+        self.imports.remove(name);
     }
 
-    /// Drop the intern and refer mappings for a simple name (the
-    /// var state survives, like the JVM — only the mapping goes).
+    /// Drop the intern, refer, and import mappings for a simple name
+    /// (the var state survives, like the JVM — only the mappings
+    /// go; imports are mappings too).
     pub fn unmap(&mut self, name: &str) {
         let q = Symbol::new(Some(&self.name), name);
         self.ids.remove(&q);
         self.refers.remove(name);
+        self.imports.remove(name);
+    }
+
+    /// Install an import: simple name → class (S16 `import`).
+    pub fn import_class(&mut self, simple: &str, class: Arc<ClassVal>) {
+        self.imports.insert(simple.to_owned(), class);
+    }
+
+    /// The import for a simple name, if any.
+    #[must_use]
+    pub fn get_import(&self, simple: &str) -> Option<Arc<ClassVal>> {
+        self.imports.get(simple).cloned()
+    }
+
+    /// Import mappings: simple name to class.
+    pub fn imports(&self) -> impl Iterator<Item = (&str, &Arc<ClassVal>)> + '_ {
+        self.imports.iter().map(|(n, c)| (n.as_str(), c))
     }
 
     /// Interned mappings: qualified symbol to var id.

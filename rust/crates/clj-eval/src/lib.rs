@@ -14,6 +14,7 @@
 
 pub mod aot_subset;
 pub mod builtin_expand;
+pub mod classemu;
 pub mod coll;
 pub mod collmisc;
 pub mod concurrency;

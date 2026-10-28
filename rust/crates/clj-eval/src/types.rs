@@ -102,7 +102,9 @@ fn int_arg(v: &Value) -> Result<usize, NativeError> {
 /// `user` plus name `Point` (split at the last dot), so JVM-style
 /// fully-qualified construction works without an import table;
 /// slash-qualified symbols (`user/Point`) ride `resolve_in`
-/// (aliases included). Shared by [`resolve_def`] and the
+/// (aliases included); anything else checks the var first, then the
+/// S16 import table (construction and interface position resolve
+/// imports after vars). Shared by [`resolve_def`] and the
 /// interface-position check.
 fn lookup_root(eval: &Evaluator, sym: &Symbol) -> Option<Value> {
     if sym.namespace().is_none() {
@@ -114,24 +116,57 @@ fn lookup_root(eval: &Evaluator, sym: &Symbol) -> Option<Value> {
                 .and_then(|q| eval.registry.lookup(&q).map(|id| (id, q)))
                 .map(|(id, q)| eval.deref_var(id, &q));
         }
+        if let Some(root) = var_root(eval, sym) {
+            return Some(root);
+        }
+        let cur = eval.current_ns_name();
+        return crate::classemu::import_in(eval, &cur, sym.name()).map(Value::Class);
     }
     var_root(eval, sym)
+}
+
+/// A `HostDef` by qualified name (dotted split + registry, reusing
+/// the import-or-var lookup): the `Value::Class` arm of construction
+/// and the lattice's HostDef rule. Dotless names never match (the
+/// JVM's `Class.forName` likewise rejects them), and import entries
+/// resolve to classes, never descriptors, so this cannot regress.
+pub(crate) fn hostdef_by_name(eval: &Evaluator, name: &str) -> Option<Arc<HostDef>> {
+    if !name.contains('.') {
+        return None;
+    }
+    let dotted = Symbol::new(None, name);
+    match lookup_root(eval, &dotted) {
+        Some(Value::HostType(h)) => match h.as_ref() {
+            HostVal::Def(d) => Some(d.clone()),
+            HostVal::Inst(_) => None,
+        },
+        _ => None,
+    }
 }
 
 /// Resolve a symbol to a type descriptor value (`None` details in
 /// the error: unresolvable vs bound-to-something-else).
 fn resolve_def(eval: &Evaluator, sym: &Symbol) -> Result<Arc<HostDef>, NativeError> {
-    def_of_root(lookup_root(eval, sym), sym)
+    def_of_root(eval, lookup_root(eval, sym), sym)
 }
 
 /// A resolved root must be a descriptor (an instance or any other
-/// value is `Not a type`; missing or rootless is unresolvable).
-fn def_of_root(root: Option<Value>, sym: &Symbol) -> Result<Arc<HostDef>, NativeError> {
+/// value is `Not a type`; missing or rootless is unresolvable). A
+/// class resolves through its name to a `HostDef` (a JDK name with
+/// no `HostDef` names the class, mirroring [`not_a_type`]).
+fn def_of_root(
+    eval: &Evaluator,
+    root: Option<Value>,
+    sym: &Symbol,
+) -> Result<Arc<HostDef>, NativeError> {
     match root {
         Some(Value::HostType(h)) => match h.as_ref() {
             HostVal::Def(d) => Ok(d.clone()),
             HostVal::Inst(_) => Err(not_a_type(sym)),
         },
+        Some(Value::Class(c)) => {
+            hostdef_by_name(eval, c.name()).ok_or_else(|| not_a_class(c.name()))
+        }
         Some(Value::Unbound(_)) | None => Err(unresolvable(sym)),
         Some(_) => Err(not_a_type(sym)),
     }
@@ -145,11 +180,21 @@ fn not_a_type(sym: &Symbol) -> NativeError {
     )
 }
 
+/// The no-`HostDef` error for a class (mirroring [`not_a_type`]).
+fn not_a_class(name: &str) -> NativeError {
+    NativeError::new(
+        ThrowClass::IllegalArgumentException,
+        format!("Not a type: {name}"),
+    )
+}
+
 /// Resolve a symbol to an interface descriptor (for `reify` /
 /// `proxy` / definition interface lists). An instance root is not
 /// a type at all (its `Not a type` stands); any other bound
-/// non-descriptor (like the core `String` class-name string) IS a
-/// type, just not an interface; missing names stay unresolvable.
+/// non-descriptor (like a string or number var) IS a type, just
+/// not an interface; missing names stay unresolvable. Classes
+/// resolve through their names (the `Value::Class` arm of
+/// [`def_of_root`]) with the same miss shapes.
 fn resolve_iface(eval: &Evaluator, sym: &Symbol) -> Result<Arc<HostDef>, NativeError> {
     let d = match resolve_def(eval, sym) {
         Ok(d) => d,
@@ -537,6 +582,7 @@ fn native_new(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError
                 ));
             }
         },
+        Value::Class(c) => hostdef_by_name(eval, c.name()).ok_or_else(|| not_a_class(c.name()))?,
         _ => return Err(cce_err(&args[0], "clojure.lang.Symbol")),
     };
     if def.kind == HostKind::Interface {
@@ -580,19 +626,22 @@ fn no_field(field: &str, class: &str) -> NativeError {
 
 /// A method call on a descriptor (split from [`native_meth`] for
 /// the complexity budget): zero-arg calls read the field error
-/// (the reflector reads fields first), longer calls the method
-/// error — descriptors never dispatch.
+/// (the reflector reads fields first) unless the member is real
+/// (then method-shape, like every non-nil miss), longer calls the
+/// method error — descriptors never dispatch.
 fn desc_miss(class: &str, method: &str, argc: usize) -> Result<Value, NativeError> {
-    Err(if argc == 0 {
-        no_field(method, class)
-    } else {
-        no_method(method, argc, class)
-    })
+    Err(
+        if argc == 0 && !crate::classemu::surface_member_name(method) {
+            no_field(method, class)
+        } else {
+            no_method(method, argc, class)
+        },
+    )
 }
 
 /// The oracle's missing-method error (the count always reads
 /// `{n} args`, even for one — oracle `k-meth-arity`).
-fn no_method(method: &str, argc: usize, class: &str) -> NativeError {
+pub(crate) fn no_method(method: &str, argc: usize, class: &str) -> NativeError {
     NativeError::new(
         ThrowClass::IllegalArgumentException,
         format!("No matching method {method} found taking {argc} args for class {class}"),
@@ -613,11 +662,22 @@ pub(crate) fn call_method(
     eval.call(func, &full).map_err(signal_to_native)
 }
 
-/// `(.method x args…)`: args are `[method-str target args…]`.
-/// Zero-arg calls read a field first (like the JVM's reflector);
-/// `gen-class` instances forward to their `prefix` fns; anything
-/// missing is the oracle's field/method error. Non-host targets get
-/// the same shapes with their own class (uniform — including `nil`).
+/// The nil-target NPE (the JVM's reflector text for a nil
+/// receiver — the member resolved, but there is no target).
+fn npe_target() -> NativeError {
+    NativeError::new(
+        ThrowClass::NullPointerException,
+        "Cannot invoke \"Object.getClass()\" because \"target\" is null".to_owned(),
+    )
+}
+
+/// `(.method x args…)`: args are `[method-str target args…]`. The
+/// S16 member surface goes first (nil targets take the R1 rule:
+/// resolved members NPE, the rest miss); zero-arg host calls then
+/// read a field first (like the JVM's reflector); `gen-class`
+/// instances forward to their `prefix` fns; anything missing is the
+/// oracle's field/method error. Non-host targets get the same shapes
+/// with their own class (uniform — including `nil`).
 fn native_meth(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     if args.len() < 2 {
         return Err(NativeError::arity("clojure.core/__meth*", args.len()));
@@ -629,6 +689,9 @@ fn native_meth(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErro
     };
     let target = &args[1];
     let rest = &args[2..];
+    if let Some(hit) = surface_probe(eval, &method, target, rest) {
+        return hit;
+    }
     // The descriptor plus the witness that the target is host (so
     // downstream dispatch never re-matches a proven fact).
     let host = match target {
@@ -642,12 +705,49 @@ fn native_meth(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErro
         Some((d, h)) => meth_on_def(eval, &d, h, target.clone(), &method, rest),
         None => {
             let class = jvm_class_of(target);
-            if rest.is_empty() {
-                Err(no_field(&method, &class))
-            } else {
-                Err(no_method(&method, rest.len(), &class))
-            }
+            meth_miss(&method, target, rest, &class)
         }
+    }
+}
+
+/// The S16 surface dispatch (split from [`native_meth`] for the
+/// complexity budget): nil targets NPE on known surface members;
+/// anything else on the surface dispatches there.
+fn surface_probe(
+    eval: &mut Evaluator,
+    method: &str,
+    target: &Value,
+    rest: &[Value],
+) -> Option<Result<Value, NativeError>> {
+    if matches!(target, Value::Nil) {
+        if crate::classemu::surface_member_hit(method, rest.len()) {
+            return Some(Err(npe_target()));
+        }
+        None
+    } else {
+        crate::classemu::surface_meth(eval, method, target, rest)
+    }
+}
+
+/// The non-host miss report (split from [`native_meth`] for the
+/// complexity budget): longer calls name the method; nil keeps
+/// field-first (the R1 rule); every other 0-arg miss on a real
+/// surface member reads method-shape (wrong kind or arity, not
+/// absent).
+fn meth_miss(
+    method: &str,
+    target: &Value,
+    rest: &[Value],
+    class: &str,
+) -> Result<Value, NativeError> {
+    if !rest.is_empty() {
+        Err(no_method(method, rest.len(), class))
+    } else if matches!(target, Value::Nil) {
+        Err(no_field(method, class))
+    } else if crate::classemu::surface_member_name(method) {
+        Err(no_method(method, 0, class))
+    } else {
+        Err(no_field(method, class))
     }
 }
 
@@ -673,6 +773,46 @@ fn meth_on_def(
     meth_on_host(eval, d, h.as_ref(), target, method, rest)
 }
 
+/// Run a method closure honoring the `takes_this` convention
+/// (proxy fns exclude `this` and run with the args as written;
+/// every other kind prepends the instance). Shared by `__meth*`
+/// and `bean` so the two cannot drift.
+fn call_with_this(
+    eval: &mut Evaluator,
+    d: &HostDef,
+    func: &Value,
+    target: Value,
+    rest: &[Value],
+) -> Result<Value, NativeError> {
+    if d.takes_this {
+        call_method(eval, func, target, rest)
+    } else {
+        eval.call(func, rest).map_err(signal_to_native)
+    }
+}
+
+/// Call a 0-arg host method by name for `bean` (S16): descriptors
+/// miss (they carry no instance methods), instances dispatch their
+/// listed 0-arg overload (gen-class defs list none, so they never
+/// reach here).
+pub(crate) fn call_zero_arg_method(
+    eval: &mut Evaluator,
+    h: &Arc<HostVal>,
+    target: Value,
+    name: &str,
+) -> Result<Value, NativeError> {
+    match h.as_ref() {
+        HostVal::Def(d) => desc_miss(&d.name, name, 0),
+        HostVal::Inst(i) => {
+            let Some(m) = find_method(&i.def, name, 0) else {
+                return Err(no_method(name, 0, &i.def.name));
+            };
+            let func = m.func.clone();
+            call_with_this(eval, &i.def, &func, target, &[])
+        }
+    }
+}
+
 /// Instance method/field dispatch (split from [`native_meth`] for
 /// the complexity budget): zero-arg calls read a field first (like
 /// the JVM's reflector), then a zero-arg method, else the `Object`
@@ -687,27 +827,20 @@ fn meth_on_host(
     method: &str,
     rest: &[Value],
 ) -> Result<Value, NativeError> {
-    let call = |eval: &mut Evaluator, func: &Value, target: Value, rest: &[Value]| {
-        if d.takes_this {
-            call_method(eval, func, target, rest)
-        } else {
-            eval.call(func, rest).map_err(signal_to_native)
-        }
-    };
     if rest.is_empty() {
         if let Some(v) = field_hit(d, h, method) {
             return Ok(v);
         }
         if let Some(m) = find_method(d, method, 0) {
             let func = m.func.clone();
-            return call(eval, &func, target, rest);
+            return call_with_this(eval, d, &func, target, rest);
         }
         return object_fallback(h, method, &d.name);
     }
     match find_method(d, method, rest.len()) {
         Some(m) => {
             let func = m.func.clone();
-            call(eval, &func, target, rest)
+            call_with_this(eval, d, &func, target, rest)
         }
         None => Err(no_method(method, rest.len(), &d.name)),
     }
@@ -752,6 +885,9 @@ fn object_fallback(h: &HostVal, method: &str, class: &str) -> Result<Value, Nati
             if method == "hashCode" && matches!(i.def.kind, HostKind::Record | HostKind::Struct) {
                 let code = clj_value::hash_code(&Value::Map(i.content.clone()));
                 return Ok(Value::Int(i64::from(code)));
+            }
+            if crate::classemu::surface_member_name(method) {
+                return Err(no_method(method, 0, class));
             }
             Err(no_field(method, class))
         }
@@ -1101,5 +1237,86 @@ mod tests {
         let def = test_def();
         let err = object_fallback(&HostVal::Def(def), "m", "user.T").unwrap_err();
         assert_eq!(err.class, ThrowClass::IllegalArgumentException);
+    }
+
+    #[test]
+    fn surface_nil_target_sweep() {
+        // Every surface (member, argc) pair NPEs on a nil target
+        // (the R1 rule); anything else keeps the miss shapes.
+        let mut eval = crate::boot();
+        let mut prev: Option<(&str, usize)> = None;
+        for (member, argc) in crate::classemu::SURFACE_MEMBERS {
+            if let Some((pm, pa)) = prev {
+                assert!((pm, pa) < (*member, *argc), "unsorted surface table");
+            }
+            prev = Some((member, *argc));
+            assert!(crate::classemu::surface_member_hit(member, *argc));
+            let mut args = vec![
+                Value::Symbol(clj_value::Symbol::new(None, member)),
+                Value::Nil,
+            ];
+            args.extend(std::iter::repeat_n(Value::Nil, *argc));
+            let err = native_meth(&mut eval, &args).unwrap_err();
+            assert_eq!(err.class, ThrowClass::NullPointerException);
+            assert_eq!(
+                err.message,
+                "Cannot invoke \"Object.getClass()\" because \"target\" is null"
+            );
+        }
+        let args = vec![
+            Value::Symbol(clj_value::Symbol::new(None, "nosuch_xyz")),
+            Value::Nil,
+        ];
+        let err = native_meth(&mut eval, &args).unwrap_err();
+        assert_eq!(err.class, ThrowClass::IllegalArgumentException);
+    }
+
+    #[test]
+    fn call_zero_arg_method_defensive_arms() {
+        // `bean` only calls listed instance methods, so the
+        // descriptor arm and the unlisted-method arm need direct
+        // pins: descriptors miss (field-shape for unknown members,
+        // method-shape for real ones), unlisted methods miss.
+        let mut eval = crate::boot();
+        let def = test_def();
+        let target = Value::HostType(Arc::new(HostVal::Def(def.clone())));
+        let err = call_zero_arg_method(
+            &mut eval,
+            &Arc::new(HostVal::Def(def.clone())),
+            target.clone(),
+            "getX",
+        )
+        .unwrap_err();
+        assert_eq!(
+            err.message,
+            "No matching field found: getX for class user.T"
+        );
+        let err = call_zero_arg_method(
+            &mut eval,
+            &Arc::new(HostVal::Def(def.clone())),
+            target,
+            "isEmpty",
+        )
+        .unwrap_err();
+        assert_eq!(
+            err.message,
+            "No matching method isEmpty found taking 0 args for class user.T"
+        );
+        let inst = HostVal::Inst(HostInst {
+            def: def.clone(),
+            content: clj_value::new_map(),
+            meta: None,
+        });
+        let err = call_zero_arg_method(
+            &mut eval,
+            &Arc::new(inst.clone()),
+            Value::HostType(Arc::new(inst)),
+            "getX",
+        )
+        .unwrap_err();
+        assert_eq!(
+            err.message,
+            "No matching method getX found taking 0 args for class user.T"
+        );
     }
 }

@@ -357,9 +357,13 @@ fn family_home(eval: &Evaluator, args: &[Value], display: &str) -> Result<Namesp
 
 fn native_ns_map(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     let home = family_home(eval, args, "clojure.core/ns-map")?;
-    // Refers first: interns overwrite on collision (stable sort
+    // Imports first, then refers, then interns: refers overwrite
+    // imports and interns overwrite both on collision (stable sort
     // keeps that order for equal names).
     let mut pairs = Vec::new();
+    for (n, c) in home.imports() {
+        pairs.push((n.to_owned(), Value::Class(c.clone())));
+    }
     for (n, t, i) in home.refers() {
         pairs.push((n.to_owned(), var_value(i, t)));
     }
@@ -398,8 +402,12 @@ fn native_ns_refers(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nativ
 }
 
 fn native_ns_imports(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
-    let _ = family_home(eval, args, "clojure.core/ns-imports")?;
-    Ok(Value::Map(new_map()))
+    let home = family_home(eval, args, "clojure.core/ns-imports")?;
+    let pairs: Vec<(String, Value)> = home
+        .imports()
+        .map(|(n, c)| (n.to_owned(), Value::Class(c.clone())))
+        .collect();
+    Ok(Value::Map(sorted_map(pairs)))
 }
 
 fn native_ns_aliases(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
@@ -727,12 +735,7 @@ fn do_resolve(
     sym_v: &Value,
 ) -> Result<Value, NativeError> {
     if let Some(e) = env {
-        let hit = match e {
-            Value::Map(m) => m.contains_key(sym_v),
-            Value::Set(s) => s.contains(sym_v),
-            _ => false,
-        };
-        if hit {
+        if env_shadows(e, sym_v) {
             return Ok(Value::Nil);
         }
     }
@@ -746,9 +749,30 @@ fn do_resolve(
         Some(id) => eval.registry.ns_for_handle(ns_name, id),
         None => eval.registry.ns_live_or_removed(ns_name),
     };
-    match home.and_then(|h| resolve_var_in(&h, &eval.registry, sym)) {
-        Some((q, id)) => Ok(var_value(id, &q)),
-        None => Ok(Value::Nil),
+    if let Some((q, id)) = home
+        .as_ref()
+        .and_then(|h| resolve_var_in(h, &eval.registry, sym))
+    {
+        return Ok(var_value(id, &q));
+    }
+    // Imports resolve after vars (unqualified only — imports are
+    // simple names; the value is the class, not a var).
+    if sym.namespace().is_none() {
+        if let Some(class) = home.as_ref().and_then(|h| h.get_import(sym.name())) {
+            return Ok(Value::Class(class));
+        }
+    }
+    Ok(Value::Nil)
+}
+
+/// Whether the `&env` argument shadows a resolve (split from
+/// [`do_resolve`] for the complexity budget): a map or set
+/// containing the symbol resolves `nil` (locals win).
+fn env_shadows(env: &Value, sym_v: &Value) -> bool {
+    match env {
+        Value::Map(m) => m.contains_key(sym_v),
+        Value::Set(s) => s.contains(sym_v),
+        _ => false,
     }
 }
 
@@ -1903,6 +1927,8 @@ fn boot_install_natives(eval: &mut Evaluator) {
         .chain(crate::multi::MULTI_NATIVES.iter())
         .chain(crate::collmisc::COLLMISC_NATIVES.iter())
         .chain(crate::printsys::PRINTSYS_NATIVES.iter())
+        .chain(crate::classemu::CLASS_EMU_NATIVES.iter())
+        .chain(crate::classemu::CLASS_EMU_HIDDEN.iter())
     {
         let func: Arc<crate::ext::NativeImpl> = Arc::new(*f);
         eval.install_native("clojure.core", name, func);
@@ -2006,6 +2032,7 @@ fn boot_refer_user(eval: &mut Evaluator) {
         .chain(crate::fx4_host::FX4_NATIVES.iter())
         .chain(crate::collmisc::COLLMISC_NATIVES.iter())
         .chain(crate::printsys::PRINTSYS_NATIVES.iter())
+        .chain(crate::classemu::CLASS_EMU_NATIVES.iter())
         .map(|(n, _)| (*n).to_owned())
         .collect();
     names.extend(
