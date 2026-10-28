@@ -899,7 +899,9 @@ pub(crate) fn throw_class_for(name: &str) -> ThrowClass {
         "ClassNotFoundException" => ThrowClass::ClassNotFoundException,
         "IndexOutOfBoundsException" => ThrowClass::IndexOutOfBoundsException,
         "ArrayIndexOutOfBoundsException" => ThrowClass::ArrayIndexOutOfBoundsException,
+        "ArrayStoreException" => ThrowClass::ArrayStoreException,
         "NegativeArraySizeException" => ThrowClass::NegativeArraySizeException,
+        "OutOfMemoryError" => ThrowClass::OutOfMemoryError,
         "ArithmeticException" => ThrowClass::ArithmeticException,
         "ExceptionInfo" => ThrowClass::ExceptionInfo,
         "FileNotFoundException" => ThrowClass::FileNotFoundException,
@@ -2147,6 +2149,7 @@ fn boot_install_natives(eval: &mut Evaluator) {
         .chain(crate::collmisc::COLLMISC_NATIVES.iter())
         .chain(crate::printsys::PRINTSYS_NATIVES.iter())
         .chain(crate::scalars::SCALAR_NATIVES.iter())
+        .chain(crate::arrays::ARRAY_NATIVES.iter())
     {
         let func: Arc<crate::ext::NativeImpl> = Arc::new(*f);
         eval.install_native("clojure.core", name, func);

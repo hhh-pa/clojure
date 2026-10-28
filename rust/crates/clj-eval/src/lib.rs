@@ -13,6 +13,7 @@
 //! runs them. Single namespace (`user`), no prelude yet (S5).
 
 pub mod aot_subset;
+pub mod arrays;
 pub mod builtin_expand;
 pub mod coll;
 pub mod collmisc;
