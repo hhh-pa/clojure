@@ -336,6 +336,25 @@ fn root_true_slot_only_and_binds() {
     );
 }
 
+/// `print-dup` records honor the knob: positional by default, the
+/// `#Name{map}` body when verbose (`k-dup-false`, `k-verbose-true`).
+#[test]
+fn dup_record_both_shapes() {
+    let mut eval = boot();
+    run_last(&mut eval, "(defrecord Rec [x])");
+    assert_eq!(
+        run_last(&mut eval, "(binding [*print-dup* true] (pr-str (->Rec 1)))"),
+        "\"#user.Rec[1]\""
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(binding [*print-dup* true *verbose-defrecords* true] (pr-str (->Rec 1)))"
+        ),
+        "\"#user.Rec{:x 1}\""
+    );
+}
+
 /// `*verbose-defrecords*` root false, `:dynamic` true, rebindable
 /// (`k-verbose`, `k-root-verbose`, `k-dyn-verbose`).
 #[test]
