@@ -1,0 +1,41 @@
+mh-mix-1-0 -2017569654
+mh-mix-0-0 -15128758
+mh-mix-1-1 1978132887
+mh-mix-1-2 1734656966
+mh-mix-neg -196466786
+mh-mix-big 1485565228
+mh-mix-max THROW java.lang.ArithmeticException|"integer overflow"
+mh-mix-vec true
+mh-mix-set true
+mh-mix-arity THROW clojure.lang.ArityException|"Wrong number of args (1) passed to: clojure.core/mix-collection-hash"
+mh-mix-str THROW java.lang.ClassCastException|"class java.lang.String cannot be cast to class java.lang.Number (java.lang.String and java.lang.Number are in module java.base of loader 'bootstrap')"
+mh-mix-double 1978132887
+mh-comb-formula true
+mh-comb-0-nil -1640531527
+mh-comb-0-0 -1640531527
+mh-comb-0-1 -1640531526
+mh-comb-1-1 -1640531461
+mh-comb-0-str -1640531430
+mh-comb-0-kw -626620958
+mh-comb-5-kw -626620634
+mh-comb-0-vec -1640530533
+mh-comb-0-map -626620959
+mh-comb-0-set -1640531526
+mh-comb-neg 1640528486
+mh-comb-big -1639734210
+mh-comb-double -567313991
+mh-comb-ratio -1640531524
+mh-comb-char -1640531430
+mh-comb-bool -1640530296
+mh-comb-negzero 506952121
+mh-comb-bigint 506952121
+mh-tower-hash [1740791543 3 466]
+mh-tower-util [5 3 466]
+mh-comb-bign -1640531522
+mh-comb-dec -1640531061
+mh-util-spot [994 1013910569 1013910568 0]
+mh-comb-list -1640530533
+mh-tower-agree [true true]
+mh-comb-seed-str THROW java.lang.ClassCastException|"class java.lang.String cannot be cast to class java.lang.Number (java.lang.String and java.lang.Number are in module java.base of loader 'bootstrap')"
+mh-comb-bigseed THROW java.lang.ArithmeticException|"integer overflow"
+mh-comb-arity THROW clojure.lang.ArityException|"Wrong number of args (1) passed to: clojure.core/hash-combine"

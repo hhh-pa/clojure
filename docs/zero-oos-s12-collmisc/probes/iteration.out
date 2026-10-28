@@ -1,0 +1,30 @@
+it-basic "(1 2 3)"
+it-take-inf "(1 2 3)"
+it-empty true
+it-reduce-empty 7
+it-reduce 6
+it-reduced 1
+it-vf "([0] [1] [2])"
+it-kf-stop "(3 2 1 0)"
+it-somef "(1 2)"
+it-somef-skips [1]
+it-seqable true
+it-reducible true
+it-cq false
+it-step-once [true 1]
+it-take-count ["(1 2)" 2]
+it-twice ["nil" "nil" 2]
+it-reduce-count 3
+it-unknown-opt "(1)"
+it-opts-lonemap "(5 5 5)"
+it-opts-loneset "(:initk :initk :initk)"
+it-opts-trailmap "(5 5 5)"
+it-opts-trailnil "()"
+it-opts-trailpair "()"
+it-opts-trailstr THROW java.lang.ClassCastException|"class java.lang.Character cannot be cast to class java.util.Map$Entry (java.lang.Character and java.util.Map$Entry are in module java.base of loader 'bootstrap')"
+it-opts-traillist THROW java.lang.ClassCastException|"class clojure.lang.PersistentVector cannot be cast to class java.util.Map$Entry (clojure.lang.PersistentVector is in unnamed module of loader 'app'; java.util.Map$Entry is in module java.base of loader 'bootstrap')"
+it-opts-trailvec1 THROW java.lang.IllegalArgumentException|"Vector arg to map conj must be a pair"
+it-opts-lonekw "(7)"
+it-opts-trailkw THROW java.lang.IllegalArgumentException|"Don't know how to create ISeq from: clojure.lang.Keyword"
+it-opts-strkey "(1)"
+it-opts-nskey "(1)"

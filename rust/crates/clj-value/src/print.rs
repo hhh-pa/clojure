@@ -455,21 +455,31 @@ fn print_port_or_rest(v: &Value, opts: &PrintOpts, level: Option<i64>, out: &mut
 /// in both modes (oracle `j-pr-rec`, `j-print-rec`; length and level
 /// behave exactly like maps — the shared path); descriptors
 /// print their name (`interface ` prefixed for interfaces, oracle
-/// `rec-iface`); anything else prints the default
-/// `#object[Name 0xH fallback]` shape (oracle `m-pr-dt` — the JVM
-/// embeds the live `toString` there, but print is pure here, so the
-/// fallback renders instead; a custom `toString` still runs through
-/// `str`).
+/// `rec-iface`); struct bases print the pinned `#object[…$Def …]`
+/// shape and struct instances print exactly like their content map
+/// (S12 oracles `sm-basis-print`, `sm-make-print`); anything else
+/// prints the default `#object[Name 0xH fallback]` shape (oracle
+/// `m-pr-dt` — the JVM embeds the live `toString` there, but print
+/// is pure here, so the fallback renders instead; a custom
+/// `toString` still runs through `str`).
 fn print_host(h: &crate::HostVal, opts: &PrintOpts, level: Option<i64>, out: &mut String) {
     match h {
         crate::HostVal::Def(d) if d.kind == crate::HostKind::Interface => {
             out.push_str("interface ");
             out.push_str(&d.name);
         }
+        crate::HostVal::Def(d) if d.kind == crate::HostKind::Struct => {
+            let name = format!("{}$Def", d.name);
+            let hex = crate::identity_hex(h);
+            write!(out, "#object[{name} 0x{hex} \"{name}@{hex}\"]").unwrap();
+        }
         crate::HostVal::Def(d) => out.push_str(&d.name),
         crate::HostVal::Inst(i) if i.def.kind == crate::HostKind::Record => {
             let entries: Vec<(&Value, &Value)> = i.content.iter().collect();
             print_map_entries(&format!("#{}", i.def.name), &entries, opts, level, out);
+        }
+        crate::HostVal::Inst(i) if i.def.kind == crate::HostKind::Struct => {
+            print_map_body(&i.content, opts, level, out);
         }
         other => {
             let name = other.type_name();
@@ -1463,6 +1473,7 @@ mod tests {
                 impl_ns: None,
                 sigs: std::collections::HashMap::new(),
                 takes_this: true,
+                struct_keys: Vec::new(),
             })
         }
         let d = def(crate::HostKind::Type);
@@ -1881,6 +1892,7 @@ mod tests {
             name: Arc::from("user.T"),
             kind: crate::HostKind::Type,
             fields: Vec::new(),
+            struct_keys: Vec::new(),
             methods: std::collections::HashMap::new(),
             interfaces: Vec::new(),
             prefix: None,
@@ -1898,6 +1910,7 @@ mod tests {
             name: Arc::from("user.RP"),
             kind: crate::HostKind::Record,
             fields: vec![Arc::from("x"), Arc::from("y")],
+            struct_keys: Vec::new(),
             methods: std::collections::HashMap::new(),
             interfaces: Vec::new(),
             prefix: None,
@@ -1925,6 +1938,7 @@ mod tests {
             name: Arc::from("user.RP"),
             kind: crate::HostKind::Record,
             fields: vec![Arc::from("x"), Arc::from("y")],
+            struct_keys: Vec::new(),
             methods: std::collections::HashMap::new(),
             interfaces: Vec::new(),
             prefix: None,
@@ -1978,6 +1992,7 @@ mod tests {
             name: Arc::from("user.DT"),
             kind: crate::HostKind::Type,
             fields: vec![Arc::from("x")],
+            struct_keys: Vec::new(),
             methods: std::collections::HashMap::new(),
             interfaces: Vec::new(),
             prefix: None,
@@ -2074,6 +2089,7 @@ mod tests {
             name: Arc::from("user.DT"),
             kind: crate::HostKind::Type,
             fields: vec![Arc::from("x")],
+            struct_keys: Vec::new(),
             methods: std::collections::HashMap::new(),
             interfaces: Vec::new(),
             prefix: None,
@@ -2105,6 +2121,7 @@ mod tests {
             name: Arc::from("user.RP"),
             kind: crate::HostKind::Record,
             fields: vec![Arc::from("x"), Arc::from("y")],
+            struct_keys: Vec::new(),
             methods: std::collections::HashMap::new(),
             interfaces: Vec::new(),
             prefix: None,

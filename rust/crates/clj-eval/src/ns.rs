@@ -837,6 +837,8 @@ pub(crate) fn throw_class_for(name: &str) -> ThrowClass {
         "NullPointerException" => ThrowClass::NullPointerException,
         "ClassCastException" => ThrowClass::ClassCastException,
         "IndexOutOfBoundsException" => ThrowClass::IndexOutOfBoundsException,
+        "ArrayIndexOutOfBoundsException" => ThrowClass::ArrayIndexOutOfBoundsException,
+        "NegativeArraySizeException" => ThrowClass::NegativeArraySizeException,
         "ArithmeticException" => ThrowClass::ArithmeticException,
         "ExceptionInfo" => ThrowClass::ExceptionInfo,
         "FileNotFoundException" => ThrowClass::FileNotFoundException,
@@ -1899,6 +1901,7 @@ fn boot_install_natives(eval: &mut Evaluator) {
         .chain(crate::types::TYPES_NATIVES.iter())
         .chain(crate::protocol::PROTOCOL_NATIVES.iter())
         .chain(crate::multi::MULTI_NATIVES.iter())
+        .chain(crate::collmisc::COLLMISC_NATIVES.iter())
         .chain(crate::printsys::PRINTSYS_NATIVES.iter())
     {
         let func: Arc<crate::ext::NativeImpl> = Arc::new(*f);
@@ -2001,6 +2004,7 @@ fn boot_refer_user(eval: &mut Evaluator) {
         .chain(crate::reader::READER_NATIVES.iter())
         .chain(crate::concurrency::CONC_NATIVES.iter())
         .chain(crate::fx4_host::FX4_NATIVES.iter())
+        .chain(crate::collmisc::COLLMISC_NATIVES.iter())
         .chain(crate::printsys::PRINTSYS_NATIVES.iter())
         .map(|(n, _)| (*n).to_owned())
         .collect();

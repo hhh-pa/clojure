@@ -39,9 +39,9 @@
   {
    "file": "crates/clj-eval/src/ns.rs",
    "function": "throw_class_for",
-   "cyclomatic": 31.0,
+   "cyclomatic": 33.0,
    "cognitive": 1.0,
-   "justification": "one arm per class name; load-error class table stays exhaustive. S5D extends the table with the core/format throw-site classes (ArithmeticException, format exceptions, IO, IllegalState, FileNotFound). S6B adds ExecutionException/CancellationException. S6C adds RejectedExecutionException. S-instream adds the ReaderException spellings."
+   "justification": "one arm per class name; load-error class table stays exhaustive. S5D extends the table with the core/format throw-site classes (ArithmeticException, format exceptions, IO, IllegalState, FileNotFound). S6B adds ExecutionException/CancellationException. S6C adds RejectedExecutionException. S-instream adds the ReaderException spellings. S12 adds the chunk array exceptions (ArrayIndexOutOfBoundsException, NegativeArraySizeException)."
   },
   {
    "file": "crates/clj-reader/src/lib.rs",

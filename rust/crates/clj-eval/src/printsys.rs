@@ -1568,6 +1568,7 @@ mod tests {
             name: Arc::from(name),
             kind,
             fields: fields.iter().map(|f| Arc::from(*f)).collect(),
+            struct_keys: Vec::new(),
             methods: std::collections::HashMap::new(),
             interfaces: Vec::new(),
             prefix: None,

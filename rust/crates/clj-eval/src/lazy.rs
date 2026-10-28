@@ -204,6 +204,34 @@ pub(crate) enum Thunk {
         step: Value,
         srcs: Vec<Value>,
     },
+    /// S12: a `seque` drain over the feeder queue (one blocking
+    /// take per step; the eos sentinel or a dropped feeder ends
+    /// the seq).
+    Seque {
+        rx: crate::collmisc::SequeRx,
+    },
+    /// S12: one `iteration` cell (step once; emit through
+    /// `:vf` when `:somef` passes, continue at `:kf` unless nil).
+    Iteration {
+        step: Value,
+        somef: Value,
+        vf: Value,
+        kf: Value,
+        k: Value,
+    },
+    /// S12: a `file-seq` walk (paths left to visit, root first;
+    /// each step pops one path and pushes its children when it is
+    /// a directory).
+    FileSeq {
+        stack: Vec<String>,
+    },
+    /// S12: a `chunk-cons` head (the exact chunk plus its tail;
+    /// empty chunks collapse at construction, so heads are
+    /// never empty).
+    ChunkHead {
+        chunk: crate::collmisc::ChunkValue,
+        tail: Value,
+    },
 }
 
 /// A forced step: empty, or a chunk plus its tail value.
@@ -247,6 +275,19 @@ impl PendingSeq {
             *self.state.lock().unwrap_or_else(|e| e.into_inner()),
             SeqState::Pending(_)
         )
+    }
+
+    /// Whether this pending seq reports `ChunkedCons` (S12
+    /// `chunked-seq?` answers true for these: `chunk-cons`
+    /// results and `rest`-of-chunk tails).
+    pub(crate) fn is_chunked_cons(&self) -> bool {
+        matches!(self.kind, LazyKind::ChunkedCons)
+    }
+
+    /// Build a `ChunkedCons`-classed pending seq from a thunk (S12
+    /// `chunk-cons`).
+    pub(crate) fn pending_chunked_cons(thunk: Thunk) -> Value {
+        Self::pending_kind(thunk, LazyKind::ChunkedCons)
     }
 
     /// A metadata-carrying clone with a FRESH memo cell (like the
@@ -417,15 +458,17 @@ fn iseq_err(v: &Value) -> NativeError {
     )
 }
 
-/// Whether `seq` accepts the value without forcing it (mirrors
-/// `RT.canSeq` over our value types; transients and throwables
-/// are not seqable). Staged for `seqable?` (S5D); S10's
-/// `hash-*-coll` starts from this set (plus the subvector and
-/// eduction views `step_unit` walks).
+/// Whether `vec` accepts the value (mirrors `RT.canSeq` over
+/// our value types: transients and throwables are not seqable,
+/// so `vec` fails them with the conversion error, not the seq
+/// error). `seqable?` keeps its own predicate in `core.rs`;
+/// S10's `hash-*-coll` starts from this set (plus the subvector
+/// and eduction views `step_unit` walks).
 pub(crate) fn is_seqable(v: &Value) -> bool {
-    // Records seq (oracle `g-seqable-rec`); anything else host
-    // does not (oracle `g-seqable-dt`).
-    if crate::types::is_host_record(v) {
+    // Map-like hosts seq (oracles `g-seqable-rec`, S12
+    // `sm-seq`); anything else host does not (oracle
+    // `g-seqable-dt`).
+    if crate::types::maplike_inst(v).is_some() {
         return true;
     }
     match v {
@@ -558,6 +601,12 @@ fn step_unit_extension(eval: &mut Evaluator, v: &Value) -> Result<StepUnit, Sign
         let s = seq_eduction(eval, xform, coll)?;
         return step_unit(eval, &s);
     }
+    // S12: walking an iteration steps its eager-first-step seq
+    // (same hook as `seq`).
+    if let Some(it) = crate::collmisc::as_iteration(v) {
+        let s = crate::collmisc::seq_iteration(eval, it)?;
+        return step_unit(eval, &s);
+    }
     Err(eval.throw(iseq_err(v)))
 }
 
@@ -633,9 +682,9 @@ pub(crate) fn step_unit(eval: &mut Evaluator, v: &Value) -> Result<StepUnit, Sig
         Value::Map(m) => step_map_unit(m),
         Value::Set(s) => step_set_unit(s),
         Value::Str(s) => step_str_unit(s),
-        // Records step their content entries (like `seq_value`;
-        // anything else host has no seq).
-        Value::HostType(_) => match crate::types::record_inst(v) {
+        // Map-like hosts step their content entries (like
+        // `seq_value`; anything else host has no seq).
+        Value::HostType(_) => match crate::types::maplike_inst(v) {
             Some(i) => step_map_unit(&i.content),
             None => Err(eval.throw(iseq_err(v))),
         },
@@ -963,9 +1012,95 @@ fn step_thunk_rest(eval: &mut Evaluator, thunk: Thunk) -> Result<Forced, Signal>
         } => step_reductions(eval, &f, acc, has_init, input, started),
         Thunk::Replace { smap, input } => step_replace(eval, &smap, input),
         Thunk::Sequence { step, srcs } => step_sequence(eval, &step, srcs),
-        // All other variants are handled by `step_thunk`/`step_thunk_mid`
-        // (the single caller partitions the variants).
+        other => step_thunk_s12(eval, other),
+    }
+}
+
+/// S12 thunks (`seque` drains, `iteration` cells, `file-seq`
+/// walks). Chained so each match stays under the complexity gate.
+fn step_thunk_s12(eval: &mut Evaluator, thunk: Thunk) -> Result<Forced, Signal> {
+    match thunk {
+        Thunk::Seque { rx } => Ok(step_seque(&rx)),
+        Thunk::Iteration {
+            step,
+            somef,
+            vf,
+            kf,
+            k,
+        } => step_iteration_cell(eval, &step, &somef, &vf, &kf, &k),
+        Thunk::FileSeq { stack } => Ok(step_fileseq(&stack)),
+        Thunk::ChunkHead { chunk, tail } => Ok(step_chunk_head(&chunk, &tail)),
+        // All other variants are handled by
+        // `step_thunk`/`step_thunk_mid`/`step_thunk_rest` (the
+        // single caller partitions the variants).
         _ => unreachable!("thunk partition"),
+    }
+}
+
+/// Step a `seque` drain (S12): one blocking take per step (the
+/// consumer pulls exactly what it consumes, like the JVM's
+/// per-element `.take`); the eos sentinel or a dropped feeder
+/// ends the seq.
+fn step_seque(rx: &crate::collmisc::SequeRx) -> Forced {
+    let item = rx.lock().recv().ok().flatten();
+    match item {
+        Some(v) => Forced::Chunk {
+            items: Arc::from(vec![v]),
+            tail: pending_value(Thunk::Seque { rx: rx.clone() }),
+        },
+        None => Forced::Empty,
+    }
+}
+
+/// Step one `iteration` cell (S12): step once at `k`, emit
+/// through `:vf` when `:somef` passes, and continue at `:kf`
+/// unless it is nil.
+fn step_iteration_cell(
+    eval: &mut Evaluator,
+    step: &Value,
+    somef: &Value,
+    vf: &Value,
+    kf: &Value,
+    k: &Value,
+) -> Result<Forced, Signal> {
+    match crate::collmisc::iteration_advance(eval, step, somef, vf, kf, k)? {
+        Some((v, tail)) => Ok(Forced::Chunk {
+            items: Arc::from(vec![v]),
+            tail,
+        }),
+        None => Ok(Forced::Empty),
+    }
+}
+
+/// Step a `chunk-cons` head (S12): the chunk's appended items
+/// plus its tail (never empty — construction collapses).
+fn step_chunk_head(chunk: &crate::collmisc::ChunkValue, tail: &Value) -> Forced {
+    Forced::Chunk {
+        items: chunk.items_arc(),
+        tail: tail.clone(),
+    }
+}
+
+/// Step a `file-seq` walk (S12): pop the next path, emitting it
+/// and pushing its children when it is a directory (unreadable
+/// directories read as leaves, like the JVM's null `listFiles`).
+fn step_fileseq(stack: &[String]) -> Forced {
+    let mut stack = stack.to_vec();
+    let Some(path) = stack.pop() else {
+        return Forced::Empty;
+    };
+    if std::fs::metadata(&path).is_ok_and(|m| m.is_dir()) {
+        // Unreadable directories read as leaves (like the JVM's
+        // null `listFiles`): `read_dir` failure pushes nothing
+        // (the iterator chain keeps this branchless — an `if let`
+        // `Err` arm is untestable without chmod).
+        for entry in std::fs::read_dir(&path).into_iter().flatten().flatten() {
+            stack.push(entry.path().to_string_lossy().into_owned());
+        }
+    }
+    Forced::Chunk {
+        items: Arc::from(vec![Value::Str(Arc::from(path.as_str()))]),
+        tail: pending_value(Thunk::FileSeq { stack }),
     }
 }
 
@@ -2225,6 +2360,188 @@ fn is_always_seq(v: &Value) -> bool {
     as_iterate(v).is_some() || as_cons_value(v).is_some()
 }
 
+/// S12: whether `chunked-seq?` answers true: a bounded range, a
+/// realized seq over a chunked head, or the emulated chunked cons
+/// (`chunk-cons` results and `rest`-of-chunk tails).
+pub(crate) fn is_chunked_seq_value(v: &Value) -> bool {
+    if let Some(r) = as_range(v) {
+        return r.end().is_some();
+    }
+    if let Some(s) = as_realized(v) {
+        return matches!(s.kind(), SeqKind::Chunked | SeqKind::ChunkedCons);
+    }
+    if let Some(p) = as_pending(v) {
+        return p.is_chunked_cons();
+    }
+    false
+}
+
+/// S12: decompose a chunked seq into its head chunk plus the tail
+/// after it (`None` tail at the end). `Ok(None)` is not chunked
+/// (projectors take the `IChunkedSeq` cast there).
+pub(crate) fn chunked_parts(
+    eval: &mut Evaluator,
+    v: &Value,
+) -> Result<Option<(crate::collmisc::ChunkValue, Option<Value>)>, Signal> {
+    if let Some(s) = as_realized(v) {
+        if !matches!(s.kind(), SeqKind::Chunked | SeqKind::ChunkedCons) {
+            return Ok(None);
+        }
+        return Ok(chunked_realized_parts(s));
+    }
+    if let Some(r) = as_range(v) {
+        if r.end().is_none() {
+            return Ok(None);
+        }
+        return chunked_range_parts(eval, r);
+    }
+    if let Some(p) = as_pending(v) {
+        if !p.is_chunked_cons() {
+            return Ok(None);
+        }
+        return chunked_pending_parts(eval, p);
+    }
+    Ok(None)
+}
+
+/// S12: head chunk + tail of a realized chunked seq (the current
+/// 32-block; a non-chunked shape under a chunked kind splits the
+/// items instead, so projectors stay total).
+fn chunked_realized_parts(s: &RealizedSeq) -> Option<(crate::collmisc::ChunkValue, Option<Value>)> {
+    if let Some((items, rest)) = s.seq().chunk_next() {
+        let tail = if rest.is_empty() {
+            None
+        } else {
+            Some(Value::Extension(Arc::new(RealizedSeq::flagged(
+                rest,
+                s.is_counted(),
+                s.is_idrop(),
+                s.kind(),
+            ))))
+        };
+        return Some((crate::collmisc::head_chunk(items.to_vec()), tail));
+    }
+    // Defensive: chunked kind over an eager shape (no constructor
+    // builds this today) — split the first 32 items off.
+    let items = s.items();
+    if items.is_empty() {
+        return None;
+    }
+    let head: Vec<Value> = items.iter().take(CHUNK_SIZE).cloned().collect();
+    let rest: Vec<Value> = items.iter().skip(CHUNK_SIZE).cloned().collect();
+    let tail = step_realized(&rest, true).map(|seq| {
+        Value::Extension(Arc::new(RealizedSeq::flagged(
+            seq,
+            s.is_counted(),
+            s.is_idrop(),
+            s.kind(),
+        )))
+    });
+    Some((crate::collmisc::head_chunk(head), tail))
+}
+
+/// S12: head chunk + tail of a bounded range (up to 32 stepped
+/// items; an inexact `BigDec`/ratio step raises, like the walk).
+fn chunked_range_parts(
+    eval: &mut Evaluator,
+    r: &RangeValue,
+) -> Result<Option<(crate::collmisc::ChunkValue, Option<Value>)>, Signal> {
+    let mut items = Vec::new();
+    let mut cur = r.clone();
+    let mut tail: Option<Value> = None;
+    while items.len() < CHUNK_SIZE {
+        let Some((head, next)) = cur.stepped() else {
+            break;
+        };
+        items.push(head);
+        match next {
+            Some(nxt) => {
+                tail = Some(Value::Extension(Arc::new(nxt.clone())));
+                cur = nxt;
+            }
+            None => {
+                if cur.step_inexact() {
+                    return Err(eval.throw(range_step_error()));
+                }
+                tail = None;
+                break;
+            }
+        }
+    }
+    if cur.done() {
+        tail = None;
+    }
+    Ok(Some((crate::collmisc::head_chunk(items), tail)))
+}
+
+/// One `chunked_pending_parts` decision, made under the memo lock
+/// (forcing happens after the lock drops — never nested).
+enum PendingChunk {
+    Parts(crate::collmisc::ChunkValue, Value),
+    Force,
+    Gone,
+}
+
+/// S12: the `chunked_pending_parts` decision, made under the
+/// memo lock (split for the complexity budget).
+fn chunked_pending_decision(p: &PendingSeq) -> PendingChunk {
+    let state = p.state.lock().unwrap_or_else(|e| e.into_inner());
+    match &*state {
+        SeqState::Pending(t) => match &**t {
+            Thunk::ChunkHead { chunk, tail } => PendingChunk::Parts(chunk.clone(), tail.clone()),
+            Thunk::Chain { head, tail } => {
+                PendingChunk::Parts(crate::collmisc::head_chunk(head.clone()), tail.clone())
+            }
+            _ => PendingChunk::Force,
+        },
+        SeqState::Chunk { items, pos, tail } => PendingChunk::Parts(
+            crate::collmisc::head_chunk(items[*pos..].to_vec()),
+            tail.clone(),
+        ),
+        SeqState::Empty => PendingChunk::Gone,
+    }
+}
+
+/// S12: the `chunked_pending_parts` force half — force one step
+/// after the memo lock drops (split for the complexity budget).
+fn chunked_pending_forced(
+    eval: &mut Evaluator,
+    p: &PendingSeq,
+) -> Result<Option<(crate::collmisc::ChunkValue, Option<Value>)>, Signal> {
+    match force_pending(eval, p)? {
+        Forced::Empty => Ok(None),
+        Forced::Chunk { items, tail } => {
+            let chunk = crate::collmisc::head_chunk(items.to_vec());
+            Ok(Some((chunk, tail_seq_opt(eval, &tail)?)))
+        }
+    }
+}
+
+/// S12: head chunk + tail of an emulated chunked cons (forced
+/// state reads without forcing; unforced non-chain thunks force
+/// one step).
+fn chunked_pending_parts(
+    eval: &mut Evaluator,
+    p: &PendingSeq,
+) -> Result<Option<(crate::collmisc::ChunkValue, Option<Value>)>, Signal> {
+    match chunked_pending_decision(p) {
+        PendingChunk::Gone => Ok(None),
+        PendingChunk::Force => chunked_pending_forced(eval, p),
+        PendingChunk::Parts(chunk, tail) => Ok(Some((chunk, tail_seq_opt(eval, &tail)?))),
+    }
+}
+
+/// S12: a chunk tail as a seq value (`None` when empty — `rest`
+/// answers `()` there, `next` answers nil).
+fn tail_seq_opt(eval: &mut Evaluator, tail: &Value) -> Result<Option<Value>, Signal> {
+    let s = seq_value(eval, tail)?;
+    if matches!(s, Value::Nil) {
+        Ok(None)
+    } else {
+        Ok(Some(s))
+    }
+}
+
 /// `seq` of an extension value.
 fn seq_value_extension(eval: &mut Evaluator, v: &Value) -> Result<Value, Signal> {
     if let Some(p) = as_pending(v) {
@@ -2262,6 +2579,11 @@ fn seq_value_extension(eval: &mut Evaluator, v: &Value) -> Result<Value, Signal>
     if let Some((xform, coll)) = crate::xform::Eduction::parts(v) {
         return seq_eduction(eval, xform, coll);
     }
+    // S12: iterations seq through one eager step per use (fresh
+    // from `:initk` every time, like the JVM's `Seqable`).
+    if let Some(it) = crate::collmisc::as_iteration(v) {
+        return crate::collmisc::seq_iteration(eval, it);
+    }
     Err(eval.throw(iseq_err(v)))
 }
 
@@ -2273,6 +2595,23 @@ fn seq_eduction(eval: &mut Evaluator, xform: &Value, coll: &Value) -> Result<Val
     let step = crate::xform::apply_xf(eval, xform, crate::ns::deref_core(eval, "conj"))
         .map_err(|e| eval.throw(e))?;
     Ok(sequence_thunk(step, vec![coll.clone()]))
+}
+
+/// Whether an extension value backs a lazy transform without
+/// forcing (split from [`check_seqable`] so both stay within the
+/// complexity budget).
+fn is_extension_seqable(v: &Value) -> bool {
+    as_pending(v).is_some()
+        || as_realized(v).is_some()
+        || as_range(v).is_some()
+        || as_repeat(v).is_some()
+        || as_cycle(v).is_some()
+        || is_always_seq(v)
+        || as_keys(v).is_some()
+        || as_vals(v).is_some()
+        || as_subvector(v).is_some()
+        || crate::xform::Eduction::parts(v).is_some()
+        || crate::collmisc::as_iteration(v).is_some()
 }
 
 /// Whether a value can back a lazy transform *without forcing it*:
@@ -2289,18 +2628,7 @@ pub(crate) fn check_seqable(eval: &mut Evaluator, v: &Value) -> Result<(), Signa
         | Value::Map(_)
         | Value::Set(_)
         | Value::Str(_) => true,
-        Value::Extension(_) => {
-            as_pending(v).is_some()
-                || as_realized(v).is_some()
-                || as_range(v).is_some()
-                || as_repeat(v).is_some()
-                || as_cycle(v).is_some()
-                || is_always_seq(v)
-                || as_keys(v).is_some()
-                || as_vals(v).is_some()
-                || as_subvector(v).is_some()
-                || crate::xform::Eduction::parts(v).is_some()
-        }
+        Value::Extension(_) => is_extension_seqable(v),
         _ => false,
     };
     if ok {
@@ -2376,8 +2704,9 @@ pub(crate) fn seq_value(eval: &mut Evaluator, v: &Value) -> Result<Value, Signal
         Value::Set(s) => Ok(seq_set(s)),
         Value::Str(s) => Ok(seq_str(s)),
         // Records seq their content entries (oracle `rec-seq`);
-        // anything else host has no seq (oracle `i-seq`).
-        Value::HostType(_) => match crate::types::record_inst(v) {
+        // structs likewise (S12 oracle `sm-seq`); anything else
+        // host has no seq (oracle `i-seq`).
+        Value::HostType(_) => match crate::types::maplike_inst(v) {
             Some(i) => Ok(seq_map(&i.content)),
             None => Err(eval.throw(iseq_err(v))),
         },
@@ -2401,8 +2730,9 @@ fn first_direct(v: &Value) -> Option<Value> {
         Value::Set(s) => Some(s.iter().next().cloned().unwrap_or(Value::Nil)),
         Value::Str(s) => Some(s.chars().next().map(Value::Char).unwrap_or(Value::Nil)),
         // Records read their first content entry (empty reads nil,
-        // like `{}`); other host values keep the `ISeq` error.
-        Value::HostType(_) => crate::types::record_inst(v).map(|i| {
+        // like `{}`); structs likewise (S12); other host values
+        // keep the `ISeq` error.
+        Value::HostType(_) => crate::types::maplike_inst(v).map(|i| {
             i.content
                 .iter()
                 .next()
@@ -2798,16 +3128,27 @@ fn equiv_set_member(eval: &mut Evaluator, v: &Value, y: &Set) -> Result<bool, Si
     Ok(false)
 }
 
+/// The map behind a value: plain maps read directly, struct
+/// instances read their content (S12); anything else is `None`.
+fn map_or_struct_content(v: &Value) -> Option<&Map> {
+    match v {
+        Value::Map(m) => Some(m),
+        other => crate::types::struct_inst(other).map(|i| &i.content),
+    }
+}
+
 /// `Util.equiv`: sequential pairs walk pairwise (early exit);
 /// maps compare by size plus per-key recursion (missing keys fail
-/// even for nil values, like the JVM's sentinel lookup);
+/// even for nil values, like the JVM's sentinel lookup) — struct
+/// instances equiv as their content map, to plain maps and across
+/// bases (S12 oracles `sm-eq-map`, `sm-cross-basis`);
 /// unhashable-infinite members throw like `hasheq` does during
 /// the JVM's hash lookups; anything else falls back to `==`.
 pub(crate) fn equiv_vals(eval: &mut Evaluator, a: &Value, b: &Value) -> Result<bool, Signal> {
     if is_sequential(a) && is_sequential(b) {
         return equiv_seq(eval, a, b);
     }
-    if let (Value::Map(x), Value::Map(y)) = (a, b) {
+    if let (Some(x), Some(y)) = (map_or_struct_content(a), map_or_struct_content(b)) {
         return equiv_map_vals(eval, x, y);
     }
     if let (Value::Set(x), Value::Set(y)) = (a, b) {
@@ -2961,9 +3302,9 @@ pub(crate) fn realize_deep(eval: &mut Evaluator, v: &Value) -> Result<Value, Sig
         return Ok(v.clone());
     }
     // Records realize their content like maps (a lazy field
-    // value forces before `hash`/`pr` walks it); other host values
-    // hold no realizable spine.
-    if let Some(i) = crate::types::record_inst(v) {
+    // value forces before `hash`/`pr` walks it); structs likewise
+    // (S12); other host values hold no realizable spine.
+    if let Some(i) = crate::types::maplike_inst(v) {
         let mut pairs = Vec::with_capacity(i.content.size());
         for (k, val) in i.content.iter() {
             pairs.push((realize_deep(eval, k)?, realize_deep(eval, val)?));
@@ -2972,7 +3313,7 @@ pub(crate) fn realize_deep(eval: &mut Evaluator, v: &Value) -> Result<Value, Sig
         for (k, val) in pairs {
             out = out.insert(k, val);
         }
-        return Ok(crate::types::rewrap_record(i, out));
+        return Ok(crate::types::rewrap_maplike(i, out));
     }
     match v {
         Value::Extension(_) => realize_deep_extension(eval, v),
@@ -3613,5 +3954,84 @@ mod tests {
             inputs: Vec::new(),
         };
         let _ = super::step_thunk_rest(&mut eval, thunk);
+    }
+
+    #[test]
+    fn chunked_parts_rejects_unbounded_range() {
+        // Only `chunked-seq?` on unbounded ranges is pinned
+        // behaviorally; the projector `None` is structural (the
+        // CCE from-name stays the range slice's business).
+        let mut eval = crate::eval::Evaluator::new_bare("user");
+        let r = RangeValue::new(RangeNum::Int(0), None, RangeNum::Int(1), true, None);
+        let v = Value::Extension(Arc::new(r));
+        assert!(super::chunked_parts(&mut eval, &v).unwrap().is_none());
+    }
+
+    #[test]
+    fn chunked_pending_parts_forces_foreign_thunk_to_empty() {
+        // Defensive: only `ChunkHead`/`Chain` thunks sit under a
+        // `ChunkedCons` kind in production; anything else forces
+        // one step (empty here, so gone).
+        let mut eval = crate::eval::Evaluator::new_bare("user");
+        let v = PendingSeq::pending_chunked_cons(Thunk::FileSeq { stack: Vec::new() });
+        let p = as_pending(&v).expect("chunked cons builds a pending");
+        assert!(
+            super::chunked_pending_parts(&mut eval, p)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn chunked_pending_parts_reads_forced_foreign_thunk() {
+        // Defensive, forcing to a chunk: items plus the seq tail
+        // (a missing path walks a singleton leaf — no fixture).
+        let mut eval = crate::eval::Evaluator::new_bare("user");
+        let v = PendingSeq::pending_chunked_cons(Thunk::FileSeq {
+            stack: vec!["/definitely/not/an/s12/dir".to_owned()],
+        });
+        let p = as_pending(&v).expect("chunked cons builds a pending");
+        let (chunk, tail) = super::chunked_pending_parts(&mut eval, p)
+            .unwrap()
+            .expect("forced chunk reads");
+        assert_eq!(chunk.items_arc().len(), 1);
+        assert!(tail.is_none());
+    }
+
+    #[test]
+    fn chunked_pending_parts_empty_is_gone() {
+        // Defensive: `ChunkedCons` cells never empty in production
+        // (heads are never empty); an empty one reads as gone.
+        let mut eval = crate::eval::Evaluator::new_bare("user");
+        let p = pending_seq(SeqState::Empty, LazyKind::ChunkedCons);
+        assert!(
+            super::chunked_pending_parts(&mut eval, &p)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn chunked_realized_parts_empty_shape_is_gone() {
+        // Defensive: no constructor flags an empty shape chunked;
+        // such a seq reads as gone.
+        let s = RealizedSeq::flagged(Seq::empty(), true, true, SeqKind::Chunked);
+        assert!(super::chunked_realized_parts(&s).is_none());
+    }
+
+    #[test]
+    fn chunked_realized_parts_splits_eager_shape() {
+        // Defensive: no constructor flags an eager shape chunked;
+        // projectors split the first 32 items off instead.
+        let items: Vec<Value> = (0..40).map(Value::Int).collect();
+        let s = RealizedSeq::flagged(
+            Seq::eager(items).expect("non-empty"),
+            true,
+            true,
+            SeqKind::Chunked,
+        );
+        let (chunk, tail) = super::chunked_realized_parts(&s).expect("non-empty splits");
+        assert_eq!(chunk.items_arc().len(), 32);
+        assert!(tail.is_some());
     }
 }

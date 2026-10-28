@@ -344,12 +344,18 @@ fn char_of_num(n: &Num) -> Result<char, NativeError> {
 
 /// Whether the value is callable (`fn?` plus the `IFn` collections,
 /// keywords, symbols, and vars; `Unbound` passes through to the
-/// caller's unbound error).
+/// caller's unbound error; S12 struct accessors are `IFn` but not
+/// `fn?`, like the JVM's `PersistentStructMap$1` — and struct
+/// instances are `IFn` too, like the JVM's `PersistentStructMap`,
+/// while records stay non-`IFn` on both sides).
 pub(crate) fn is_ifn(v: &Value) -> bool {
     match v {
         Value::Extension(e) => {
             e.as_any().downcast_ref::<crate::ext::Closure>().is_some()
                 || e.as_any().downcast_ref::<crate::ext::NativeFn>().is_some()
+                || e.as_any()
+                    .downcast_ref::<crate::collmisc::AccessorValue>()
+                    .is_some()
                 || as_subvector(v).is_some()
         }
         Value::Keyword(_)
@@ -362,7 +368,10 @@ pub(crate) fn is_ifn(v: &Value) -> bool {
         | Value::Promise(_)
         | Value::MultiFn(_)
         | Value::Unbound(_) => true,
-        _ => false,
+        // Struct instances only (records and bases miss — S12
+        // oracle `sm-ifn`; records stay pinned non-`IFn` by
+        // `types.rs rec_*`).
+        _ => crate::types::is_host_struct(v),
     }
 }
 
@@ -1400,6 +1409,7 @@ fn is_coll(v: &Value) -> bool {
     ) || as_subvector(v).is_some()
         || is_seq_value(v)
         || crate::types::is_host_record(v)
+        || crate::types::is_host_struct(v)
 }
 fn is_sequential(v: &Value) -> bool {
     matches!(v, Value::Vector(_) | Value::MapEntry { .. })
@@ -1410,6 +1420,7 @@ fn is_associative(v: &Value) -> bool {
     matches!(v, Value::Map(_) | Value::Vector(_) | Value::MapEntry { .. })
         || as_subvector(v).is_some()
         || crate::types::is_host_record(v)
+        || crate::types::is_host_struct(v)
 }
 pub(crate) fn is_counted(v: &Value) -> bool {
     matches!(
@@ -1419,6 +1430,8 @@ pub(crate) fn is_counted(v: &Value) -> bool {
         || as_subvector(v).is_some()
         || is_counted_seq(v)
         || crate::types::is_host_record(v)
+        || crate::types::is_host_struct(v)
+        || crate::collmisc::as_chunk_buffer(v).is_some()
 }
 fn is_list(v: &Value) -> bool {
     matches!(v, Value::List(_))
@@ -1427,7 +1440,7 @@ fn is_vector(v: &Value) -> bool {
     matches!(v, Value::Vector(_) | Value::MapEntry { .. }) || as_subvector(v).is_some()
 }
 fn is_map(v: &Value) -> bool {
-    matches!(v, Value::Map(_)) || crate::types::is_host_record(v)
+    matches!(v, Value::Map(_)) || crate::types::is_host_record(v) || crate::types::is_host_struct(v)
 }
 fn is_set(v: &Value) -> bool {
     matches!(v, Value::Set(_))
@@ -1466,6 +1479,7 @@ fn is_seqable(v: &Value) -> bool {
     ) || as_subvector(v).is_some()
         || is_seq_value(v)
         || crate::types::is_host_record(v)
+        || crate::types::is_host_struct(v)
 }
 // `record?` (S-typechain stage 1): true for record instances —
 // including records with extension entries — and nothing else
@@ -1948,6 +1962,48 @@ fn out_of_range(kind: &str, n: Num) -> NativeError {
     )
 }
 
+/// The `(int x)` cast as an `i64`: longs narrow exactly,
+/// doubles range-check before truncating, tower narrows through
+/// the `long` stop, characters convert, nil trips the
+/// `charValue` NPE, anything else fails to `Character`. Shared
+/// with the S12 `seque` capacities and `chunk-buffer` (which pin
+/// the same `Character` cast — oracles `sq-cap-str`,
+/// `fixprobe10`).
+pub(crate) fn int_cast_value(v: &Value) -> Result<i64, NativeError> {
+    match v {
+        Value::Int(i) => int_exact_long(*i).map(i64::from),
+        Value::Double(d) => double_int(*d),
+        Value::Char(c) => Ok(*c as i64),
+        // Tower integers take the `long` range check (exact
+        // digits) then `toIntExact` (oracles `conv-i1`,
+        // `conv-hugeint`); decimals narrow through `double`
+        // first (oracle `conv-hugedecint`: `1.0E30`).
+        Value::BigInt(n) => tower_intcast(n).map(i64::from),
+        Value::Ratio(r) => tower_intcast(&trunc_ratio(r)).map(i64::from),
+        Value::BigDec(d) => bigdec_intcast(d).map(i64::from),
+        Value::Nil => Err(npe_char_value()),
+        v => Err(cce_err(v, "java.lang.Character")),
+    }
+}
+
+/// An `RT.intCast`-shaped `Number` narrowing to `i32` (S12
+/// `mix-collection-hash`/`hash-combine` args): numbers narrow
+/// checked (the `long` range check, then `toIntExact`), tower
+/// truncates first, nil trips the `doubleValue` NPE, anything
+/// else fails to `Number` (oracles `mh-mix-str`,
+/// `mh-comb-seed-str`).
+pub(crate) fn number_int_cast(v: &Value) -> Result<i32, NativeError> {
+    match v {
+        Value::Int(i) => int_exact_long(*i),
+        Value::Double(d) => int_cast_double(*d),
+        Value::BigInt(n) => tower_intcast(n),
+        Value::Ratio(r) => tower_intcast(&trunc_ratio(r)),
+        Value::BigDec(d) => bigdec_intcast(d),
+        Value::Nil => Err(npe_double_value()),
+        v => Err(cce_err(v, "java.lang.Number")),
+    }
+}
+
 fn native_int(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/int", args, &[1])?;
     // `int` keeps the value a `Long` (no 32-bit ints exist), but
@@ -1955,20 +2011,7 @@ fn native_int(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErro
     // integer overflow`, doubles past it `IAE | Value out of
     // range for int` (checked BEFORE truncating), `NaN` is 0,
     // and characters convert (fixprobe10/11).
-    Ok(Value::Int(match &args[0] {
-        Value::Int(i) => int_exact_long(*i).map(i64::from)?,
-        Value::Double(d) => double_int(*d)?,
-        Value::Char(c) => *c as i64,
-        // Tower integers take the `long` range check (exact
-        // digits) then `toIntExact` (oracles `conv-i1`,
-        // `conv-hugeint`); decimals narrow through `double`
-        // first (oracle `conv-hugedecint`: `1.0E30`).
-        Value::BigInt(n) => tower_intcast(n).map(i64::from)?,
-        Value::Ratio(r) => tower_intcast(&trunc_ratio(r)).map(i64::from)?,
-        Value::BigDec(d) => bigdec_intcast(d).map(i64::from)?,
-        Value::Nil => return Err(npe_char_value()),
-        v => return Err(cce_err(v, "java.lang.Character")),
-    }))
+    Ok(Value::Int(int_cast_value(&args[0])?))
 }
 
 /// An `int` from a `double`: `NaN` is 0, past-`i32` fails `Value

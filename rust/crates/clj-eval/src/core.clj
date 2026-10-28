@@ -1356,6 +1356,12 @@
 ;; `ls-basic`..`ls-empty` document the JVM side).
 (defn line-seq [rdr] ((fn step [] (binding [*in* rdr] (when-let [line (read-line)] (cons line (lazy-seq (step))))))))
 
+;; --- `defstruct` (S12): the legacy structmap basis macro (oracle
+;; `sm-defstruct-expand` pins the expansion shape).
+(defmacro defstruct
+  [name & keys]
+  (list 'def name (cons 'clojure.core/create-struct keys)))
+
 ;; --- S10: `comparator` (verbatim JVM body) and `tap->`
 ;; (verbatim JVM one-liner). The `cond` (not `if`) matters —
 ;; truthy non-bool pred results order (probes `k-truthy-lt`,
