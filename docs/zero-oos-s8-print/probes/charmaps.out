@@ -1,0 +1,13 @@
+c-escape {\backspace "\\b", \tab "\\t", \newline "\\n", \formfeed "\\f", \return "\\r", \" "\\\"", \\ "\\\\"}
+c-name {\backspace "backspace", \tab "tab", \newline "newline", \formfeed "formfeed", \return "return", \space "space"}
+c-counts [7 6]
+c-types [true true true true]
+c-escape-lookup ["\\n" nil]
+c-name-lookup ["space" nil]
+c-dynamic [nil nil]
+c-bind-err THROW java.lang.IllegalStateException|"Can't dynamically bind non-dynamic var: clojure.core/char-escape-string"
+c-uses-escape "\"a\\nb\\t\\\"\\\\\""
+c-uses-name "[\\newline \\tab \\space \\backspace \\formfeed \\return]"
+c-redef-escape "\"a\nb\""
+c-redef-name "\\\n"
+S8-charmaps DONE

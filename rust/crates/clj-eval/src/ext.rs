@@ -114,6 +114,11 @@ impl ExtensionValue for Closure {
     fn as_any(&self) -> &dyn Any {
         self
     }
+
+    fn dup_shape(&self) -> Option<String> {
+        let munged = munge(&self.display);
+        Some(format!("#=({munged}. )"))
+    }
 }
 
 /// A Rust callable: `display` names arity errors, `func` runs the
@@ -165,6 +170,11 @@ impl ExtensionValue for NativeFn {
 
     fn as_any(&self) -> &dyn Any {
         self
+    }
+
+    fn dup_shape(&self) -> Option<String> {
+        let munged = munge(&self.display);
+        Some(format!("#=({munged}. )"))
     }
 }
 
@@ -220,6 +230,10 @@ impl ExtensionValue for NsHandle {
 
     fn as_any(&self) -> &dyn Any {
         self
+    }
+
+    fn dup_shape(&self) -> Option<String> {
+        Some(format!("#=(find-ns {})", self.name))
     }
 }
 

@@ -193,7 +193,8 @@ FIX:
   state for FX7); with-meta/meta-value casts report the JVM
   text; fx2-mapentry{,2..19} probes + pins).
 - D-prepost: `:pre`/`:post` silently ignored → FX3.
-- D-printdup: `*print-dup*` declared but ignored → FX4b.
+- D-printdup: RESOLVED conformant (zero-oos S8 #51: dup honored
+  per kind; D-streamprint/D-astral-fmt stay).
 - D-streamprint: str realization up-front vs JVM in-flight
   interleaving → FX4b.
 - D-astral-fmt: `%s` precision counts scalars, JVM counts
@@ -349,7 +350,7 @@ FX4 analyzer builtins as real macros (D-macroexpand: the
   nine heads expand to `let*`/`fn*`/`loop*` and the qualified
   helper calls; the six fence macros stay identity). Done.
   FX4b is not this slice.
-FX4b printer/writer (D-printdup/D-streamprint/D-astral-fmt).
+FX4b printer/writer (D-streamprint/D-astral-fmt; D-printdup converged in S8).
 FT1 number tower (F-tower; closes D-div; D-charf/D-pctpop
   land here; S-intlong documented).
 FT2 reader extensions (F-reader). FT3 `*in*` (F-in).
