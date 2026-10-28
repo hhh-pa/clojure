@@ -1609,3 +1609,44 @@ fn degenerate_roots_fall_back_or_throw() {
         "{err}"
     );
 }
+
+/// Racing `println`s keep line atomicity (msrv
+/// `run_joins_drainers_at_exit`): futures convey the `with-out-str`
+/// binding, so 8 threads × 50 `println`s share one buffer. The
+/// per-arg `pr-on` driver issues several writes per line; the
+/// emission lock serializes whole lines (the pre-S8 single-write
+/// guarantee). Without it, ~1/3 of lines interleave under load
+/// (`T5-LINE-0T0-LINE-0`).
+#[test]
+fn concurrent_println_lines_stay_atomic() {
+    let mut eval = boot();
+    // `run_last` pr-quotes: newlines surface as `\n` escapes.
+    let out = run_last(
+        &mut eval,
+        "(with-out-str (let [jobs (doall (for [t (range 8)] (future (dotimes [i 50] (println (str \"T\" t \"-LINE-\" i))))))] (doseq [j jobs] @j)))",
+    );
+    // 400 lines, each exactly once (no drops, dups, or interleaves).
+    for t in 0..8 {
+        for i in 0..50 {
+            let line = format!("T{t}-LINE-{i}\\n");
+            assert_eq!(out.matches(&line).count(), 1, "line {line:?} missing");
+        }
+    }
+    // Every `LINE-<digits>` run is followed by the `\n` escape (an
+    // interleave would glue a `T…` marker onto the digits).
+    let bytes = out.as_bytes();
+    let mut pos = 0;
+    let mut lines = 0;
+    while let Some(k) = out[pos..].find("LINE-") {
+        let mut j = pos + k + 5;
+        assert!(bytes[j].is_ascii_digit(), "no digits in: {out}");
+        while bytes[j].is_ascii_digit() {
+            j += 1;
+        }
+        assert_eq!(&out[j..j + 2], "\\n", "interleaved line near byte {j}");
+        lines += 1;
+        pos = j + 2;
+    }
+    assert_eq!(lines, 400);
+    eval.join_drainers();
+}

@@ -31,7 +31,7 @@ use crate::core::{Reduced, cce_err, is_lazy_seq_str, print_opts, str_of_one};
 use crate::error::{NativeError, Signal, jvm_class_of, map_class_of, set_class_of};
 use crate::eval::Evaluator;
 use crate::ext::{Closure, NativeFn, NsHandle, munge};
-use crate::io::{Writer, check_writer, write_to_writer};
+use crate::io::{EmissionGuard, Writer, check_writer, write_to_writer};
 use crate::lazy::{PendingSeq, realize_deep};
 use crate::multi::invoke_multifn;
 use crate::ns::{NativeFnPtr, check_arity, deref_core, signal_to_native};
@@ -1360,6 +1360,7 @@ fn native_print_simple(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Na
     check_arity("clojure.core/print-simple", args, &[2])?;
     let (o, w) = (&args[0], &args[1]);
     check_writer(w)?;
+    let _emission = EmissionGuard::acquire();
     let opts = print_opts(eval, None)?;
     // The explicit prefix (live, like the JVM's `print-meta` — the
     // `str` half adds its own, the JVM's double prefix, since `str`
@@ -1423,6 +1424,9 @@ fn native_print_ctor(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nati
             "Cannot invoke \"java.lang.Class.getName()\" because \"o\" is null".to_owned(),
         ));
     }
+    // Serialized like `print_impl` (multi-write emission; the
+    // user call in the middle re-enters safely).
+    let _emission = EmissionGuard::acquire();
     write_to_writer(w, "#=(")?;
     write_to_writer(w, &jvm_class_of(o))?;
     write_to_writer(w, ". ")?;
@@ -1826,12 +1830,14 @@ mod tests {
 
     #[test]
     fn token_fallthroughs() {
-        // Total-dispatch arms no surface value can reach: tagged
-        // literals and unbounds are unconstructible from Clojure
-        // surface (dup-table comment), pending seqs never survive
-        // to dispatch (bounded ones pre-realize; unbounded ones hang
-        // `collect_all` first), and volatiles take the `Object`
-        // fallthrough (no suite prints one through the driver).
+        // Total-dispatch arms: tagged literals and unbounds are
+        // unconstructible from Clojure surface (dup-table comment);
+        // pending seqs DO reach dispatch on direct `print-method` /
+        // `print-dup` surface calls (the chain is
+        // realization-free — only the pr-family driver path
+        // pre-realizes via `collect_all`); volatiles take the
+        // `Object` fallthrough (no suite prints one through the
+        // driver).
         let tagged = Value::TaggedLiteral {
             tag: Symbol::new(None, "x"),
             form: Box::new(Value::Int(1)),

@@ -12,6 +12,7 @@
 //! Printing honors the bound `*out*` writer (stdout, stderr, or an
 //! in-memory buffer); file natives only speak UTF-8 paths.
 
+use std::cell::Cell;
 use std::io::Write;
 use std::sync::{Arc, Mutex};
 
@@ -198,12 +199,61 @@ pub(crate) fn flush_out(eval: &mut Evaluator) -> Result<(), NativeError> {
     Ok(())
 }
 
+/// Serializes whole-print emissions across threads. Pre-S8
+/// `print_impl` rendered the full line and issued one write (one
+/// lock acquisition — atomic); the per-arg `pr-on` driver issues
+/// several writes, so racing `println`s interleave mid-line without
+/// this (`T5-LINE-0T0-LINE-0`, msrv `run_joins_drainers_at_exit`).
+/// Re-entry safe: nested prints on the same thread (a user
+/// `print-method` re-entering `print`, pinned to overflow like the
+/// JVM) skip the mutex and emit inline, while other threads block.
+static PRINT_EMISSION_LOCK: Mutex<()> = Mutex::new(());
+thread_local! {
+    static PRINT_EMISSION_DEPTH: Cell<usize> = const { Cell::new(0) };
+}
+
+/// Held across one top-level print emission (`print_impl`,
+/// `newline`, `print-simple`, `print-ctor`). Depth-tracked so the
+/// same thread never deadlocks on re-entry; the mutex is only ever
+/// uncontended-then-held (no lock ordering: emission never waits on
+/// another thread while holding it).
+pub(crate) struct EmissionGuard {
+    _lock: Option<std::sync::MutexGuard<'static, ()>>,
+}
+
+impl EmissionGuard {
+    pub(crate) fn acquire() -> Self {
+        let nested = PRINT_EMISSION_DEPTH.with(|d| {
+            let n = d.get();
+            d.set(n + 1);
+            n
+        });
+        let lock = if nested == 0 {
+            Some(
+                PRINT_EMISSION_LOCK
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner()),
+            )
+        } else {
+            None
+        };
+        Self { _lock: lock }
+    }
+}
+
+impl Drop for EmissionGuard {
+    fn drop(&mut self) {
+        PRINT_EMISSION_DEPTH.with(|d| d.set(d.get().saturating_sub(1)));
+    }
+}
+
 /// `print`/`println`/`pr`/`prn`: space-joined (no trailing space);
 /// `ln` appends a newline. `readably` overrides the binding when
 /// given (`print` binds false, `pr` honors). Every arg renders
 /// through the `pr-on` driver (user `print-method`/`print-dup`
 /// entries fire); `*out*` re-reads per arg, and the `ln` newline
-/// flushes iff `*flush-on-newline*` is truthy.
+/// flushes iff `*flush-on-newline*` is truthy. The whole emission
+/// holds the emission lock (atomic lines across threads).
 fn print_impl(
     eval: &mut Evaluator,
     args: &[Value],
@@ -229,6 +279,10 @@ fn print_impl(
             return Err(e);
         }
     }
+    // One emission, one lock-hold: the arg writes, the `ln`
+    // newline, and its flush serialize against other threads'
+    // emissions (pre-S8 single-write atomicity).
+    let _emission = EmissionGuard::acquire();
     let result = print_args(eval, &vals, ln);
     eval.pop_bindings(depth);
     result?;
@@ -284,9 +338,12 @@ pub(crate) fn prn_str(eval: &mut Evaluator, line: &str) -> Result<(), NativeErro
     Ok(())
 }
 
-/// `newline`: writes `\n` to `*out*`.
+/// `newline`: writes `\n` to `*out*`. Serialized with print
+/// emissions so it cannot land mid-`println` (pre-S8 both were
+/// single writes through the same lock).
 fn native_newline(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/newline", args, &[0])?;
+    let _emission = EmissionGuard::acquire();
     write_out(eval, "\n")?;
     Ok(Value::Nil)
 }

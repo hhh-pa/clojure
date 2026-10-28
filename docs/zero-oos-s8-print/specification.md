@@ -102,6 +102,15 @@ defaults; it is not a second print path for pr-family output.
   `print-simple`'s halves (§1f), only the non-collection arm's
   object half bypasses (engine-direct `str`); the explicit meta
   prefix and the collection arm render through the live multi.
+- Emission atomicity (port guarantee, pre-S8 behavior kept):
+  one `print`/`println`/`pr`/`prn`/`newline`/`print-simple`/
+  `print-ctor` emission holds the emission lock across all its
+  writes (plus the `ln` flush), so racing threads cannot
+  interleave mid-line; same-thread re-entry (a user method
+  printing) skips the lock and emits inline, never deadlocks.
+  Pinned by `concurrent_println_lines_stay_atomic` (8 threads ×
+  50 `println`s into one shared buffer, every line intact) and
+  the pre-existing msrv `run_joins_drainers_at_exit` CLI pin.
 
 ### 1b. Dispatch tokens (the port's dispatch domain)
 
