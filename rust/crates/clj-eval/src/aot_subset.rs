@@ -572,7 +572,9 @@ pub fn plan_source(text: &str) -> Result<SubsetProgram, PlanError> {
     if let Some((span, depth)) = DepthScan::scan(text) {
         return Err(depth_error(span, depth, false));
     }
-    let forms = eval.read_forms(text).map_err(lift)?;
+    let forms = eval
+        .read_forms(text, &mut clj_reader::NoHooks)
+        .map_err(lift)?;
     let mut planner = Planner::new();
     for form in &forms {
         planner.plan_top(&mut eval, form)?;
@@ -2111,8 +2113,10 @@ mod tests {
 
     #[test]
     fn value_depth_scores_nesting() {
-        let eval = boot();
-        let forms = eval.read_forms("([1] {:a 1} #{2})").expect("read");
+        let mut eval = boot();
+        let forms = eval
+            .read_forms("([1] {:a 1} #{2})", &mut clj_reader::NoHooks)
+            .expect("read");
         let tagged = Value::TaggedLiteral {
             tag: Symbol::new(None, "foo"),
             form: Box::new(Value::Int(1)),

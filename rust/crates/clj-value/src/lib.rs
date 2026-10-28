@@ -15,6 +15,7 @@
 mod agent;
 mod atom;
 mod compare;
+mod datareaders;
 mod delay;
 mod extension;
 mod future;
@@ -34,8 +35,9 @@ mod volatile;
 pub use agent::{Agent, AgentAction, AgentInner, AgentPool, ErrorMode, QueuedAction};
 pub use atom::{Atom, AtomState};
 pub use compare::{CompareError, compare};
+pub use datareaders::{TagError, validate_inst, validate_uuid};
 pub use delay::{Delay, DelayState};
-pub use extension::{ExtensionValue, ThrowClass, Throwable, Unbound, Var};
+pub use extension::{ExtensionValue, ThrowClass, Throwable, Unbound, Var, cce_message};
 pub use future::{Future, FutureOutcome, FutureState};
 pub use hasheq::{
     hash_code, hash_combine, hash_ordered, hash_unordered, hasheq, mix_coll_hash,
@@ -57,7 +59,10 @@ pub use seq::{
     RealizedSeq, RepeatValue, Seq, SeqKind, SubVectorValue, ValSeqValue, seq_vec,
 };
 pub use symbol::Symbol;
-pub use tower::{BigDec, NON_TERMINATING, bigint_parse};
+pub use tower::{
+    BAD_CTX_FORMAT, BigDec, DIGITS_LT_0, MathContext, NON_TERMINATING, ROUNDING_NECESSARY,
+    RoundingMode, bigint_parse,
+};
 pub use transient::{
     Transient, TransientError, TransientKind, TransientMap, TransientSet, TransientVector,
 };

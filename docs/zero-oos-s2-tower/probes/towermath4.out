@@ -1,0 +1,3 @@
+r4-bigstr THROW java.lang.IllegalArgumentException|"bad string format"
+r4-emptystr THROW java.lang.IllegalArgumentException|"bad string format"
+r4-boolprec THROW java.lang.IllegalArgumentException|"No matching ctor found for class java.math.MathContext"

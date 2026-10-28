@@ -11,22 +11,27 @@
 //! family, `trampoline`, and `reduced`. Oracle: probe39; rules:
 //! `docs/t1174/s5d-contract.md`.
 
+use std::any::Any;
+use std::collections::HashSet;
+use std::hash::Hasher;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use num_traits::{ToPrimitive, Zero};
+use num_traits::{Signed, ToPrimitive, Zero};
 
 use clj_value::{
-    ExtensionValue, Keyword, PrintOpts, Symbol, ThrowClass, Throwable, Value, pr_to_string,
+    ExtensionValue, Keyword, List, Map, PrintOpts, Set, Symbol, TagError, ThrowClass, Throwable,
+    Value, Vector, new_map, new_set, pr_to_string, validate_inst, validate_uuid,
 };
 
 use crate::error::{NativeError, jvm_class_of};
 use crate::eval::Evaluator;
+use crate::ext::NativeFn;
 use crate::lazy::{
     as_pending, as_realized, as_subvector, collect_all, equiv_vals, is_counted_seq, is_seq_value,
     realize_deep,
 };
-use crate::ns::{NativeFnPtr, check_arity, npe, signal_to_native};
+use crate::ns::{NativeFnPtr, check_arity, deref_core, npe, signal_to_native, throw_class_for};
 
 /// `Cannot invoke "Object.getClass()" because "x" is null`: the
 /// numbers-`nil` failure (every arithmetic/comparison op probes it).
@@ -37,29 +42,10 @@ pub(crate) fn npe_getclass() -> NativeError {
     )
 }
 
-/// A JVM `ClassCastException` text with JDK module verbiage: same
-/// modules combine (`A and B are in M`), different modules split
-/// (`A is in M1; B is in M2`) — byte-pinned by probe39.
-pub(crate) fn cce_message(from_jvm: &str, to_jvm: &str) -> String {
-    fn module_of(cls: &str) -> &'static str {
-        if cls.starts_with("java.") {
-            "module java.base of loader 'bootstrap'"
-        } else {
-            "unnamed module of loader 'app'"
-        }
-    }
-    let from_mod = module_of(from_jvm);
-    let to_mod = module_of(to_jvm);
-    if from_mod == to_mod {
-        format!(
-            "class {from_jvm} cannot be cast to class {to_jvm} ({from_jvm} and {to_jvm} are in {from_mod})"
-        )
-    } else {
-        format!(
-            "class {from_jvm} cannot be cast to class {to_jvm} ({from_jvm} is in {from_mod}; {to_jvm} is in {to_mod})"
-        )
-    }
-}
+/// The JVM cast text (S6 moved the shared home to `clj-value` for
+/// the reader's spanful `TableCce`; this re-export keeps every
+/// `crate::core::cce_message` caller working).
+pub(crate) use clj_value::cce_message;
 
 /// A cast failure to `to_jvm` (NPEs never reach here — nils fail
 /// loudly at each call site instead).
@@ -81,7 +67,7 @@ pub(crate) fn take_count(v: &Value) -> Result<i64, NativeError> {
         // Tower counts like `double` counts (the JVM `pos?`/`dec`
         // loop behaves as `ceil`: oracle `index-tower`,
         // `index-big` with its `1.0E20` rendering).
-        Value::BigInt(n) => Ok(take_double(n.to_f64().unwrap_or(f64::NAN))),
+        Value::BigInt(n) | Value::BigInteger(n) => Ok(take_double(n.to_f64().unwrap_or(f64::NAN))),
         Value::Ratio(r) => Ok(take_double(r.to_f64().unwrap_or(f64::NAN))),
         Value::BigDec(d) => Ok(take_double(d.to_f64())),
         Value::Nil => Err(npe_getclass()),
@@ -112,7 +98,7 @@ pub(crate) fn repeat_count(v: &Value) -> Result<i64, NativeError> {
         Value::Double(d) => repeat_double(*d),
         // Tower truncates like `intValue`, through the same
         // range check (the drop-path `double` rendering stays).
-        Value::BigInt(n) => repeat_double(n.to_f64().unwrap_or(f64::NAN)),
+        Value::BigInt(n) | Value::BigInteger(n) => repeat_double(n.to_f64().unwrap_or(f64::NAN)),
         Value::Ratio(r) => repeat_double(r.to_f64().unwrap_or(f64::NAN)),
         Value::BigDec(d) => repeat_double(d.to_f64()),
         Value::Nil => Err(NativeError::new(
@@ -200,7 +186,7 @@ pub(crate) fn nth_index(v: &Value) -> Result<i32, NativeError> {
         // range check (exact digits) and `toIntExact` (oracle
         // `nth-trunc2`, `nth-big`, `nth-intrange`); decimals
         // narrow through `double` first (like `int`).
-        Value::BigInt(n) => tower_intcast(n),
+        Value::BigInt(n) | Value::BigInteger(n) => tower_intcast(n),
         Value::Ratio(r) => tower_intcast(&trunc_ratio(r)),
         Value::BigDec(d) => bigdec_intcast(d),
         _ => Err(cce_err(v, "java.lang.Number")),
@@ -421,7 +407,9 @@ pub(crate) enum Num {
 pub(crate) fn as_num(v: &Value) -> Result<Num, NativeError> {
     match v {
         Value::Int(i) => Ok(Num::Int(*i)),
-        Value::BigInt(n) => Ok(Num::BigInt(n.clone())),
+        // `BigInteger` folds into `Num::BigInt`: ops absorb it
+        // (results print `N` — S2 oracles `r8-add`..`r8-typeop`).
+        Value::BigInt(n) | Value::BigInteger(n) => Ok(Num::BigInt(n.clone())),
         Value::Ratio(r) => Ok(Num::Ratio(r.clone())),
         Value::BigDec(d) => Ok(Num::BigDec(d.clone())),
         Value::Double(d) => Ok(Num::Double(*d)),
@@ -490,37 +478,50 @@ fn infinite_or_nan() -> NativeError {
 
 /// Promoted `+`: `Int`/`Int` keeps the checked errors;
 /// otherwise the top rank present computes (`Double` > `BigDec` >
-/// `Ratio` > `BigInt`, oracle `promo1`).
-fn add(a: Num, b: Num) -> Result<Num, NativeError> {
+/// `Ratio` > `BigInt`, oracle `promo1`). A bound
+/// `*math-context*` rounds `BigDec`-involved pairs (S2).
+fn add(eval: &mut Evaluator, a: Num, b: Num) -> Result<Num, NativeError> {
     match (&a, &b) {
         (Num::Int(x), Num::Int(y)) => x.checked_add(*y).map(Num::Int).ok_or_else(overflow),
         _ if either_double(&a, &b) => Ok(Num::Double(to_f64(a) + to_f64(b))),
         _ if num_rank(&a).max(num_rank(&b)) == 3 => {
-            Ok(Num::BigDec(num_bigdec(&a)?.add(&num_bigdec(&b)?)))
+            let (x, y, mc) = dec_pair(eval, &a, &b)?;
+            Ok(Num::BigDec(match mc {
+                None => x.add(&y),
+                Some(mc) => x.add_mc(&y, &mc).map_err(arithmetic)?,
+            }))
         }
         _ => Ok(num_ratio(num_rational(&a) + num_rational(&b))),
     }
 }
 
 /// Promoted `-` (same lattice as [`add`]).
-fn sub(a: Num, b: Num) -> Result<Num, NativeError> {
+fn sub(eval: &mut Evaluator, a: Num, b: Num) -> Result<Num, NativeError> {
     match (&a, &b) {
         (Num::Int(x), Num::Int(y)) => x.checked_sub(*y).map(Num::Int).ok_or_else(overflow),
         _ if either_double(&a, &b) => Ok(Num::Double(to_f64(a) - to_f64(b))),
         _ if num_rank(&a).max(num_rank(&b)) == 3 => {
-            Ok(Num::BigDec(num_bigdec(&a)?.sub(&num_bigdec(&b)?)))
+            let (x, y, mc) = dec_pair(eval, &a, &b)?;
+            Ok(Num::BigDec(match mc {
+                None => x.sub(&y),
+                Some(mc) => x.sub_mc(&y, &mc).map_err(arithmetic)?,
+            }))
         }
         _ => Ok(num_ratio(num_rational(&a) - num_rational(&b))),
     }
 }
 
 /// Promoted `*` (same lattice as [`add`]).
-fn mul(a: Num, b: Num) -> Result<Num, NativeError> {
+fn mul(eval: &mut Evaluator, a: Num, b: Num) -> Result<Num, NativeError> {
     match (&a, &b) {
         (Num::Int(x), Num::Int(y)) => x.checked_mul(*y).map(Num::Int).ok_or_else(overflow),
         _ if either_double(&a, &b) => Ok(Num::Double(to_f64(a) * to_f64(b))),
         _ if num_rank(&a).max(num_rank(&b)) == 3 => {
-            Ok(Num::BigDec(num_bigdec(&a)?.mul(&num_bigdec(&b)?)))
+            let (x, y, mc) = dec_pair(eval, &a, &b)?;
+            Ok(Num::BigDec(match mc {
+                None => x.mul(&y),
+                Some(mc) => x.mul_mc(&y, &mc).map_err(arithmetic)?,
+            }))
         }
         _ => Ok(num_ratio(num_rational(&a) * num_rational(&b))),
     }
@@ -529,8 +530,9 @@ fn mul(a: Num, b: Num) -> Result<Num, NativeError> {
 /// Promoted `/`: `Int`/`Int` keeps the wedge (exact when divisible,
 /// else the `Double` division — C1 documents the ratio
 /// deviation); tower division is exact (`(/ 5N 2)` → `5/2`, a
-/// non-terminating decimal fails like `(bigdec 1/3)`).
-fn div(a: Num, b: Num) -> Result<Num, NativeError> {
+/// non-terminating decimal fails like `(bigdec 1/3)`), or rounded
+/// under a bound `*math-context*` (S2).
+fn div(eval: &mut Evaluator, a: Num, b: Num) -> Result<Num, NativeError> {
     match (&a, &b) {
         (Num::Int(x), Num::Int(y)) => {
             if *y == 0 {
@@ -545,12 +547,13 @@ fn div(a: Num, b: Num) -> Result<Num, NativeError> {
             }
         }
         _ if either_double(&a, &b) => Ok(Num::Double(to_f64(a) / to_f64(b))),
-        _ if num_rank(&a).max(num_rank(&b)) == 3 => num_bigdec(&a)?
-            .div_exact(&num_bigdec(&b)?)
-            .map(Num::BigDec)
-            .map_err(|m| {
-                NativeError::new(clj_value::ThrowClass::ArithmeticException, m.to_owned())
-            }),
+        _ if num_rank(&a).max(num_rank(&b)) == 3 => {
+            let (x, y, mc) = dec_pair(eval, &a, &b)?;
+            Ok(Num::BigDec(match mc {
+                None => x.div_exact(&y).map_err(arithmetic)?,
+                Some(mc) => x.div_mc(&y, &mc).map_err(arithmetic)?,
+            }))
+        }
         _ => {
             let (x, y) = (num_rational(&a), num_rational(&b));
             if y.numer().is_zero() {
@@ -564,8 +567,9 @@ fn div(a: Num, b: Num) -> Result<Num, NativeError> {
 /// A left-associative variadic fold (`+`/`-`/`*`/`/`; every caller
 /// rejects empty args first).
 fn fold(
+    eval: &mut Evaluator,
     args: &[Value],
-    op: fn(Num, Num) -> Result<Num, NativeError>,
+    op: fn(&mut Evaluator, Num, Num) -> Result<Num, NativeError>,
 ) -> Result<Value, NativeError> {
     if args.len() == 1 {
         // Single args pass through unchecked (probe39 shapes).
@@ -573,19 +577,19 @@ fn fold(
     }
     let mut acc = as_num(&args[0])?;
     for arg in &args[1..] {
-        acc = op(acc, as_num(arg)?)?;
+        acc = op(eval, acc, as_num(arg)?)?;
     }
     Ok(num_value(acc))
 }
 
-fn native_add(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+fn native_add(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     if args.is_empty() {
         return Ok(Value::Int(0));
     }
-    fold(args, add)
+    fold(eval, args, add)
 }
 
-fn native_sub(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+fn native_sub(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     if args.is_empty() {
         return Err(NativeError::arity("clojure.core/-", 0));
     }
@@ -594,31 +598,34 @@ fn native_sub(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErro
             Num::Int(x) => x.checked_neg().map(Value::Int).ok_or_else(overflow),
             Num::BigInt(x) => Ok(Value::BigInt(-x)),
             Num::Ratio(x) => Ok(num_value(num_ratio(-x))),
-            Num::BigDec(x) => Ok(Value::BigDec(x.neg())),
+            Num::BigDec(x) => Ok(Value::BigDec(match math_context_of(eval)? {
+                None => x.neg(),
+                Some(mc) => x.neg_mc(&mc).map_err(arithmetic)?,
+            })),
             Num::Double(x) => Ok(Value::Double(-x)),
         };
     }
-    fold(args, sub)
+    fold(eval, args, sub)
 }
 
-fn native_mul(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+fn native_mul(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     if args.is_empty() {
         return Ok(Value::Int(1));
     }
-    fold(args, mul)
+    fold(eval, args, mul)
 }
 
-fn native_div(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+fn native_div(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     if args.is_empty() {
         return Err(NativeError::arity("clojure.core//", 0));
     }
     if args.len() == 1 {
-        return div(Num::Int(1), as_num(&args[0])?).map(num_value);
+        return div(eval, Num::Int(1), as_num(&args[0])?).map(num_value);
     }
-    fold(args, div)
+    fold(eval, args, div)
 }
 
-fn native_quot(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+fn native_quot(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/quot", args, &[2])?;
     let (a, b) = (as_num(&args[0])?, as_num(&args[1])?);
     match (&a, &b) {
@@ -632,7 +639,7 @@ fn native_quot(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErr
         // Tower truncating division (oracle `quotrem`/`quotmix`/
         // `quotdec`): any tower zero divisor is `Divide by zero`
         // (unlike the `Int` `/ by zero` wedge, which stays).
-        _ => quot_tower(&a, &b),
+        _ => quot_tower(eval, &a, &b),
     }
 }
 
@@ -654,13 +661,20 @@ fn quot_double(x: f64, y: f64) -> Result<Value, NativeError> {
     Ok(Value::Double(if q == 0.0 { 0.0 } else { q }))
 }
 
-/// `quot` over tower kinds: exact truncating division.
-fn quot_tower(a: &Num, b: &Num) -> Result<Value, NativeError> {
+/// `quot` over tower kinds: exact truncating division — or the
+/// preferred-scale integral quotient rounded to the bound
+/// `*math-context*` (S2 oracles `r2-quot`/`r7-quotmix`/
+/// `r8-quotscale`).
+fn quot_tower(eval: &mut Evaluator, a: &Num, b: &Num) -> Result<Value, NativeError> {
     if num_rational(b).numer().is_zero() {
         return Err(divide_by_zero());
     }
     if num_rank(a).max(num_rank(b)) == 3 {
-        Ok(Value::BigDec(num_bigdec(a)?.quot_trunc(&num_bigdec(b)?)))
+        let (x, y, mc) = dec_pair(eval, a, b)?;
+        Ok(Value::BigDec(match mc {
+            None => x.quot_trunc(&y),
+            Some(mc) => x.quot_mc(&y, &mc).map_err(arithmetic)?,
+        }))
     } else {
         let (x, y) = (num_rational(a), num_rational(b));
         Ok(num_value(num_ratio(trunc_div(&x, &y))))
@@ -677,7 +691,7 @@ fn trunc_div(
     num_rational::BigRational::from_integer(q)
 }
 
-fn native_rem(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+fn native_rem(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/rem", args, &[2])?;
     let (a, b) = (as_num(&args[0])?, as_num(&args[1])?);
     match (&a, &b) {
@@ -692,7 +706,7 @@ fn native_rem(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErro
         // Tower remainder (oracle `dec-each`): exact, in the
         // dividend's kind (`(rem 5M 2)` → `1M`, `(rem 1/2 1)` →
         // `1/2`).
-        _ => rem_tower(&a, &b),
+        _ => rem_tower(eval, &a, &b),
     }
 }
 
@@ -712,13 +726,17 @@ fn rem_double(x: f64, y: f64) -> Result<Value, NativeError> {
     Ok(Value::Double(x % y))
 }
 
-/// `rem` over tower kinds: exact, in the dividend's kind.
-fn rem_tower(a: &Num, b: &Num) -> Result<Value, NativeError> {
+/// `rem` over tower kinds: exact, in the dividend's kind. The
+/// ratio conversion still consults a bound `*math-context*`
+/// (S2 oracles `r7-remread`/`r7-remmix`); the remainder itself
+/// never rounds (S2 oracles `wp-rem`/`r3-rem`).
+fn rem_tower(eval: &mut Evaluator, a: &Num, b: &Num) -> Result<Value, NativeError> {
     if num_rational(b).numer().is_zero() {
         return Err(divide_by_zero());
     }
     if num_rank(a).max(num_rank(b)) == 3 {
-        Ok(Value::BigDec(num_bigdec(a)?.rem(&num_bigdec(b)?)))
+        let (x, y, _) = dec_pair(eval, a, b)?;
+        Ok(Value::BigDec(x.rem(&y)))
     } else {
         let (x, y) = (num_rational(a), num_rational(b));
         let q = trunc_div(&x, &y);
@@ -726,7 +744,7 @@ fn rem_tower(a: &Num, b: &Num) -> Result<Value, NativeError> {
     }
 }
 
-fn native_mod(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+fn native_mod(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/mod", args, &[2])?;
     let (a, b) = (as_num(&args[0])?, as_num(&args[1])?);
     match (&a, &b) {
@@ -744,7 +762,7 @@ fn native_mod(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErro
         _ if either_double(&a, &b) => mod_double(to_f64(a), to_f64(b)),
         // Tower modulus (oracle `dec-each`): the remainder
         // adjusted to the divisor's sign, in the dividend's kind.
-        _ => mod_tower(&a, &b),
+        _ => mod_tower(eval, &a, &b),
     }
 }
 
@@ -762,13 +780,15 @@ fn mod_double(x: f64, y: f64) -> Result<Value, NativeError> {
 }
 
 /// `mod` over tower kinds: the remainder adjusted to the
-/// divisor's sign, in the dividend's kind.
-fn mod_tower(a: &Num, b: &Num) -> Result<Value, NativeError> {
+/// divisor's sign, in the dividend's kind (conversion
+/// consults a bound context like `rem`, the result never
+/// rounds — S2 oracles `wp-mod`/`r7-remmix`).
+fn mod_tower(eval: &mut Evaluator, a: &Num, b: &Num) -> Result<Value, NativeError> {
     if num_rational(b).numer().is_zero() {
         return Err(divide_by_zero());
     }
     if num_rank(a).max(num_rank(b)) == 3 {
-        let (x, y) = (num_bigdec(a)?, num_bigdec(b)?);
+        let (x, y, _) = dec_pair(eval, a, b)?;
         Ok(Value::BigDec(bigdec_mod(&x, &y)))
     } else {
         mod_rational(&num_rational(a), &num_rational(b))
@@ -862,6 +882,100 @@ fn num_bigdec(n: &Num) -> Result<clj_value::BigDec, NativeError> {
     }
 }
 
+/// An exact `BigDec` under a context (S2): ratios divide with
+/// guard digits (oracle `wp-mixratio`); everything else is exact.
+fn num_bigdec_mc(n: &Num, mc: &clj_value::MathContext) -> Result<clj_value::BigDec, NativeError> {
+    match n {
+        Num::Ratio(r) => clj_value::BigDec::from_ratio_mc(r, mc).map_err(arithmetic),
+        _ => num_bigdec(n),
+    }
+}
+
+/// Both sides as decimals plus the bound context (S2): the
+/// context resolves only when a `BigDec`-involved op needs it
+/// (oracle `r5-garbage-int`); ratios convert exactly without a
+/// context, via guarded division with one (oracles
+/// `wp-nomixratio`/`wp-mixratio`).
+fn dec_pair(
+    eval: &mut Evaluator,
+    a: &Num,
+    b: &Num,
+) -> Result<
+    (
+        clj_value::BigDec,
+        clj_value::BigDec,
+        Option<clj_value::MathContext>,
+    ),
+    NativeError,
+> {
+    match math_context_of(eval)? {
+        None => Ok((num_bigdec(a)?, num_bigdec(b)?, None)),
+        Some(mc) => Ok((num_bigdec_mc(a, &mc)?, num_bigdec_mc(b, &mc)?, Some(mc))),
+    }
+}
+
+/// A bound `*math-context*` (S2): precision + rounding. Stored
+/// as an extension value (no new `Value` kind); `=`/`hash` are
+/// structural like `MathContext.equals` (oracles
+/// `wp-eq2`/`wp-eq3`/`r2-eqrm*`).
+#[derive(Clone, Debug)]
+pub(crate) struct MathContextVal {
+    pub id: u64,
+    pub ctx: clj_value::MathContext,
+}
+
+impl ExtensionValue for MathContextVal {
+    fn class_name(&self) -> String {
+        "java.math.MathContext".to_owned()
+    }
+
+    fn print(&self) -> String {
+        format!(
+            "#object[java.math.MathContext 0x{:x} \"{}\"]",
+            self.id,
+            self.ctx.to_context_string()
+        )
+    }
+
+    fn dyn_eq(&self, other: &dyn ExtensionValue) -> bool {
+        other
+            .as_any()
+            .downcast_ref::<MathContextVal>()
+            .is_some_and(|o| o.ctx == self.ctx)
+    }
+
+    fn dyn_hash(&self, state: &mut dyn Hasher) {
+        state.write_u32(self.ctx.precision());
+        state.write(self.ctx.rounding().name().as_bytes());
+    }
+
+    fn print_str(&self) -> Option<String> {
+        Some(self.ctx.to_context_string())
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+/// The visible `*math-context*` (S2): nil (or an uninstalled
+/// var) is no context; anything bound must BE a context —
+/// garbage fails the `MathContext` cast exactly where a
+/// `BigDec` op consults it (oracles `r5-garbage*`).
+fn math_context_of(eval: &Evaluator) -> Result<Option<clj_value::MathContext>, NativeError> {
+    match deref_core(eval, "*math-context*") {
+        Value::Nil => Ok(None),
+        Value::Extension(e) => match e.as_any().downcast_ref::<MathContextVal>() {
+            Some(m) => Ok(Some(m.ctx)),
+            None => Err(cce_err(
+                &Value::Extension(e.clone()),
+                "java.math.MathContext",
+            )),
+        },
+        v => Err(cce_err(&v, "java.math.MathContext")),
+    }
+}
+
 /// A rational as a `Num` (denominator 1 folds to `BigInt`).
 fn num_ratio(r: num_rational::BigRational) -> Num {
     if r.denom() == &num_bigint::BigInt::from(1) {
@@ -899,48 +1013,58 @@ fn rat_unit() -> num_rational::BigRational {
 }
 
 /// One step (tower kinds keep their kind: `(inc 5M)` → `6M`,
-/// `(inc 1/2)` → `3/2`; `Int` still overflows — the wedge).
-fn inc_one(n: Num) -> Result<Value, NativeError> {
+/// `(inc 1/2)` → `3/2`; `Int` still overflows — the wedge). A
+/// bound `*math-context*` rounds the `BigDec` step (S2 oracle
+/// `wp-inc`).
+fn inc_one(eval: &mut Evaluator, n: Num) -> Result<Value, NativeError> {
     match n {
         Num::Int(x) => x.checked_add(1).map(Value::Int).ok_or_else(overflow),
         Num::BigInt(x) => Ok(Value::BigInt(x + 1)),
         Num::Ratio(x) => Ok(num_value(num_ratio(x + rat_unit()))),
-        Num::BigDec(x) => Ok(Value::BigDec(
-            x.add(&clj_value::BigDec::from_bigint(num_bigint::BigInt::from(1))),
-        )),
+        Num::BigDec(x) => {
+            let one = clj_value::BigDec::from_bigint(num_bigint::BigInt::from(1));
+            Ok(Value::BigDec(match math_context_of(eval)? {
+                None => x.add(&one),
+                Some(mc) => x.add_mc(&one, &mc).map_err(arithmetic)?,
+            }))
+        }
         Num::Double(x) => Ok(Value::Double(x + 1.0)),
     }
 }
 
-/// One step down (mirror of [`inc_one`]).
-fn dec_one(n: Num) -> Result<Value, NativeError> {
+/// One step down (mirror of [`inc_one`], S2 oracle `wp-dec`).
+fn dec_one(eval: &mut Evaluator, n: Num) -> Result<Value, NativeError> {
     match n {
         Num::Int(x) => x.checked_sub(1).map(Value::Int).ok_or_else(overflow),
         Num::BigInt(x) => Ok(Value::BigInt(x - 1)),
         Num::Ratio(x) => Ok(num_value(num_ratio(x - rat_unit()))),
-        Num::BigDec(x) => Ok(Value::BigDec(
-            x.sub(&clj_value::BigDec::from_bigint(num_bigint::BigInt::from(1))),
-        )),
+        Num::BigDec(x) => {
+            let one = clj_value::BigDec::from_bigint(num_bigint::BigInt::from(1));
+            Ok(Value::BigDec(match math_context_of(eval)? {
+                None => x.sub(&one),
+                Some(mc) => x.sub_mc(&one, &mc).map_err(arithmetic)?,
+            }))
+        }
         Num::Double(x) => Ok(Value::Double(x - 1.0)),
     }
 }
 
-fn native_inc(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+fn native_inc(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/inc", args, &[1])?;
-    inc_one(as_num(&args[0])?)
+    inc_one(eval, as_num(&args[0])?)
 }
 
-fn native_dec(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+fn native_dec(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/dec", args, &[1])?;
-    dec_one(as_num(&args[0])?)
+    dec_one(eval, as_num(&args[0])?)
 }
 
 /// `inc'`: auto-promoting increment — identical to `inc` here
 /// (`Int` still overflows instead of growing to `BigInt`; the
 /// wedge stays, tower kinds pass through like `inc`).
-fn native_inc_prime(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+fn native_inc_prime(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/inc'", args, &[1])?;
-    inc_one(as_num(&args[0])?)
+    inc_one(eval, as_num(&args[0])?)
 }
 
 /// `max`/`min`: ties keep the LATTER (`(max 1 1.0)` → `1.0`),
@@ -1346,7 +1470,8 @@ fn is_boolean(v: &Value) -> bool {
     matches!(v, Value::Bool(_))
 }
 fn is_integer(v: &Value) -> bool {
-    matches!(v, Value::Int(_) | Value::BigInt(_))
+    // `BigInteger` is an integer (S2 oracle `r8-integerp`).
+    matches!(v, Value::Int(_) | Value::BigInt(_) | Value::BigInteger(_))
 }
 /// `int?` stays `Int`-only (oracle: `(int? 5N)` is false — the
 /// pinned `(int? 1)` wedge for `Long` stays too).
@@ -1359,7 +1484,30 @@ fn is_double(v: &Value) -> bool {
 fn is_number(v: &Value) -> bool {
     matches!(
         v,
-        Value::Int(_) | Value::Double(_) | Value::BigInt(_) | Value::BigDec(_) | Value::Ratio(_)
+        Value::Int(_)
+            | Value::Double(_)
+            | Value::BigInt(_)
+            | Value::BigInteger(_)
+            | Value::BigDec(_)
+            | Value::Ratio(_)
+    )
+}
+fn is_ratio(v: &Value) -> bool {
+    matches!(v, Value::Ratio(_))
+}
+fn is_decimal(v: &Value) -> bool {
+    matches!(v, Value::BigDec(_))
+}
+/// Upstream `(or (integer? n) (ratio? n) (decimal? n))` —
+/// decimals INCLUDED (S2 oracles `pred-rat-*`).
+fn is_rational(v: &Value) -> bool {
+    matches!(
+        v,
+        Value::Int(_)
+            | Value::BigInt(_)
+            | Value::BigInteger(_)
+            | Value::Ratio(_)
+            | Value::BigDec(_)
     )
 }
 fn is_string(v: &Value) -> bool {
@@ -1488,6 +1636,78 @@ fn is_seqable(v: &Value) -> bool {
 fn is_record(v: &Value) -> bool {
     crate::types::is_host_record(v)
 }
+// `any?` (S1): constantly true (probe `p-any-*`).
+fn is_any(_v: &Value) -> bool {
+    true
+}
+// `delay?` (S1): delays only — futures, promises, and atoms
+// answer false (probes `p-delay-*`).
+fn is_delay(v: &Value) -> bool {
+    matches!(v, Value::Delay(_))
+}
+// `map-entry?` (S1): map entries only, never 2-vectors
+// (probes `p-mapseq-*`).
+fn is_map_entry(v: &Value) -> bool {
+    matches!(v, Value::MapEntry { .. })
+}
+// `indexed?` (S1): vectors, map entries, and subvectors;
+// strings, seqs, maps, sets, and arrays answer false
+// (probes `p-indexed-*`).
+fn is_indexed(v: &Value) -> bool {
+    matches!(v, Value::Vector(_) | Value::MapEntry { .. }) || as_subvector(v).is_some()
+}
+// `nat-int?` / `neg-int?` / `pos-int?` (S1): composed over the
+// port's `int?` (`Int`-only — BigInts answer false exactly like
+// the oracle, probes `p-nat-*` / `p-neg-*` / `p-pos-*`).
+fn is_nat_int(v: &Value) -> bool {
+    matches!(v, Value::Int(n) if *n >= 0)
+}
+fn is_neg_int(v: &Value) -> bool {
+    matches!(v, Value::Int(n) if *n < 0)
+}
+fn is_pos_int(v: &Value) -> bool {
+    matches!(v, Value::Int(n) if *n > 0)
+}
+// `special-symbol?` (S1): the oracle's 23-member set (probes
+// `p-special-*`); qualified symbols never qualify.
+fn is_special_symbol(v: &Value) -> bool {
+    match v {
+        Value::Symbol(s) if s.namespace().is_none() => matches!(
+            s.name(),
+            "def"
+                | "if"
+                | "do"
+                | "quote"
+                | "var"
+                | "fn*"
+                | "loop*"
+                | "recur"
+                | "throw"
+                | "try"
+                | "catch"
+                | "finally"
+                | "monitor-enter"
+                | "monitor-exit"
+                | "."
+                | "new"
+                | "set!"
+                | "&"
+                | "let*"
+                | "case*"
+                | "deftype*"
+                | "reify*"
+                | "letfn*"
+        ),
+        _ => false,
+    }
+}
+
+fn is_tagged_literal(v: &Value) -> bool {
+    matches!(v, Value::TaggedLiteral { .. })
+}
+fn is_reader_conditional(v: &Value) -> bool {
+    matches!(v, Value::ReaderConditional { .. })
+}
 
 pred1!(native_nil, "clojure.core/nil?", is_nil);
 pred1!(native_not, "clojure.core/not", is_falsy_val);
@@ -1501,6 +1721,9 @@ pred1!(native_intp, "clojure.core/int?", is_int);
 pred1!(native_floatp, "clojure.core/float?", is_double);
 pred1!(native_doublep, "clojure.core/double?", is_double);
 pred1!(native_numberp, "clojure.core/number?", is_number);
+pred1!(native_ratiop, "clojure.core/ratio?", is_ratio);
+pred1!(native_decimalp, "clojure.core/decimal?", is_decimal);
+pred1!(native_rationalp, "clojure.core/rational?", is_rational);
 pred1!(native_stringp, "clojure.core/string?", is_string);
 pred1!(native_charp, "clojure.core/char?", is_char);
 pred1!(native_keywordp, "clojure.core/keyword?", is_keyword);
@@ -1564,6 +1787,406 @@ pred1!(native_varp, "clojure.core/var?", is_var);
 pred1!(native_seqp, "clojure.core/seq?", is_seq_value);
 pred1!(native_seqablep, "clojure.core/seqable?", is_seqable);
 pred1!(native_recordp, "clojure.core/record?", is_record);
+pred1!(native_anyp, "clojure.core/any?", is_any);
+pred1!(native_delayp, "clojure.core/delay?", is_delay);
+pred1!(native_indexedp, "clojure.core/indexed?", is_indexed);
+pred1!(native_map_entryp, "clojure.core/map-entry?", is_map_entry);
+pred1!(native_nat_intp, "clojure.core/nat-int?", is_nat_int);
+pred1!(native_neg_intp, "clojure.core/neg-int?", is_neg_int);
+pred1!(native_pos_intp, "clojure.core/pos-int?", is_pos_int);
+pred1!(
+    native_special_symbolp,
+    "clojure.core/special-symbol?",
+    is_special_symbol
+);
+
+/// `NaN?` / `infinite?` over the tower (S1): a `Double` tests
+/// its payload, the other numbers answer false, nil is the
+/// `doubleValue` NPE, anything else CCEs to `Number` (probes
+/// `p-nan-*` / `p-inf-*`).
+fn double_predicate(v: &Value, test: fn(f64) -> bool) -> Result<bool, NativeError> {
+    match v {
+        Value::Double(d) => Ok(test(*d)),
+        Value::Int(_)
+        | Value::BigInt(_)
+        | Value::BigInteger(_)
+        | Value::Ratio(_)
+        | Value::BigDec(_) => Ok(false),
+        Value::Nil => Err(npe_double_value()),
+        _ => Err(cce_err(v, "java.lang.Number")),
+    }
+}
+
+fn native_nanp(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.core/NaN?", args, &[1])?;
+    Ok(Value::Bool(double_predicate(&args[0], f64::is_nan)?))
+}
+
+fn native_infinitep(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.core/infinite?", args, &[1])?;
+    Ok(Value::Bool(double_predicate(&args[0], f64::is_infinite)?))
+}
+pred1!(
+    native_tagged_literalp,
+    "clojure.core/tagged-literal?",
+    is_tagged_literal
+);
+pred1!(
+    native_reader_conditionalp,
+    "clojure.core/reader-conditional?",
+    is_reader_conditional
+);
+
+/// `tagged-literal`: 2-arity `[tag form]` (probe `b-ctor`); nil tags
+/// coerce to `nil` (probe `b-niltag-vs-nilsym`), other non-symbols
+/// fail the `Symbol` cast (probes `b-ctor-strtag`, `b-ctor-kwtag`).
+fn native_tagged_literal(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.core/tagged-literal", args, &[2])?;
+    let tag = match &args[0] {
+        Value::Symbol(sym) => sym.clone(),
+        Value::Nil => Symbol::new(None, "nil"),
+        other => return Err(cce_err(other, "clojure.lang.Symbol")),
+    };
+    Ok(Value::TaggedLiteral {
+        tag,
+        form: Box::new(args[1].clone()),
+    })
+}
+
+/// `reader-conditional`: 2-arity `[form splicing?]` (probe `c-ctor`);
+/// the form is unguarded (probes `c-badform*`), splicing takes
+/// `Boolean` only (nil is the verbatim NPE, probe
+/// `c-badsplice-nil`).
+fn native_reader_conditional(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.core/reader-conditional", args, &[2])?;
+    let Value::Bool(splicing) = &args[1] else {
+        if matches!(args[1], Value::Nil) {
+            return Err(NativeError::new(
+                ThrowClass::NullPointerException,
+                "Cannot invoke \"java.lang.Boolean.booleanValue()\" because \"splicing_QMARK_\" is null"
+                    .to_owned(),
+            ));
+        }
+        return Err(cce_err(&args[1], "java.lang.Boolean"));
+    };
+    Ok(Value::ReaderConditional {
+        form: Box::new(args[0].clone()),
+        splicing: *splicing,
+    })
+}
+
+/// A validator failure as a native error (the validator reports JVM
+/// simple class names).
+fn tag_native(err: TagError) -> NativeError {
+    NativeError::new(throw_class_for(err.class), err.message)
+}
+
+/// The `inst` default reader (shared by the `default-data-readers`
+/// table and the eval walk): nil is the verbatim NPE (probe
+/// `d-inst-nil`), strings validate (probes `d-inst-*`), anything
+/// else fails the `CharSequence` cast (probes `d-inst-nonstr`,
+/// `d-inst-vec`). Valid payloads read back as `TaggedLiteral`
+/// until the date/time value-kind slice lands.
+fn default_inst_reader(form: &Value) -> Result<Value, NativeError> {
+    if matches!(form, Value::Nil) {
+        return Err(NativeError::new(
+            ThrowClass::NullPointerException,
+            "Cannot invoke \"java.lang.CharSequence.length()\" because \"this.text\" is null"
+                .to_owned(),
+        ));
+    }
+    let Value::Str(s) = form else {
+        return Err(cce_err(form, "java.lang.CharSequence"));
+    };
+    validate_inst(s).map_err(tag_native)?;
+    Ok(Value::TaggedLiteral {
+        tag: Symbol::new(None, "inst"),
+        form: Box::new(form.clone()),
+    })
+}
+
+/// The `uuid` default reader (shared like `inst`): non-strings
+/// (nil included) fail as `IllegalArgumentException` (probes
+/// `d-uuid-nonstr`, `d-uuid-nil`), strings validate (probes
+/// `d-uuid-*`).
+fn default_uuid_reader(form: &Value) -> Result<Value, NativeError> {
+    let Value::Str(s) = form else {
+        return Err(NativeError::new(
+            ThrowClass::IllegalArgumentException,
+            "#uuid data reader expected string".to_owned(),
+        ));
+    };
+    validate_uuid(s).map_err(tag_native)?;
+    Ok(Value::TaggedLiteral {
+        tag: Symbol::new(None, "uuid"),
+        form: Box::new(form.clone()),
+    })
+}
+
+/// One default-table entry: a 1-arity native fn value (the arity
+/// error names the JVM var — probes `d-direct-arity0`,
+/// `d-direct-uuid-arity0`).
+fn default_reader_fn(
+    eval: &mut Evaluator,
+    display: &'static str,
+    reader: fn(&Value) -> Result<Value, NativeError>,
+) -> Value {
+    Value::Extension(Arc::new(NativeFn {
+        id: eval.next_id(),
+        display: Arc::from(display),
+        func: Arc::new(move |_, args| {
+            check_arity(display, args, &[1])?;
+            reader(&args[0])
+        }),
+        meta: None,
+    }))
+}
+
+/// The `default-data-readers` root (S6): `{inst, uuid}` over the
+/// 1-arity default natives (probes `a-defaults*`, `a-ddr-*`).
+pub(crate) fn default_data_readers_map(eval: &mut Evaluator) -> Value {
+    let inst = default_reader_fn(
+        eval,
+        "clojure.instant/read-instant-date",
+        default_inst_reader,
+    );
+    let uuid = default_reader_fn(
+        eval,
+        "clojure.uuid/default-uuid-reader",
+        default_uuid_reader,
+    );
+    Value::Map(
+        new_map()
+            .insert(Value::Symbol(Symbol::new(None, "inst")), inst)
+            .insert(Value::Symbol(Symbol::new(None, "uuid")), uuid),
+    )
+}
+
+/// The table's symbol keys for the read-side consult, plus the
+/// borked-table class when the value is neither nil nor a
+/// lookupable (nil, vectors, entries, and records consult without
+/// failing — probes `e-nonmap-nil`, `e-vectable`).
+fn table_snapshot(table: &Value) -> (HashSet<Symbol>, Option<String>) {
+    if let Some(inst) = crate::types::record_inst(table) {
+        return (symbol_keys(&inst.content), None);
+    }
+    match table {
+        Value::Nil | Value::Vector(_) | Value::MapEntry { .. } => (HashSet::new(), None),
+        Value::Map(m) => (symbol_keys(m), None),
+        _ => (HashSet::new(), Some(jvm_class_of(table))),
+    }
+}
+
+/// A map's symbol keys (the read-side membership set ignores
+/// non-symbol keys, which never match a tag — probe `e-strkey`).
+fn symbol_keys(m: &Map) -> HashSet<Symbol> {
+    m.iter()
+        .filter_map(|(k, _)| match k {
+            Value::Symbol(sym) => Some(sym.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Snapshot the live tag consult into `opts` (S6): defer mode on,
+/// the table keys (or the borked class), and the default-fn flag.
+/// Read paths re-snapshot per form (user code runs between forms,
+/// so the consult stays fresh like the JVM's per-tag deref).
+pub(crate) fn snapshot_data_readers(eval: &Evaluator, opts: &mut clj_reader::ReaderOpts) {
+    let (keys, borked) = table_snapshot(&deref_core(eval, "*data-readers*"));
+    opts.data_readers = true;
+    opts.data_reader_keys = keys;
+    opts.data_readers_borked = borked;
+    opts.default_reader_fn = !matches!(deref_core(eval, "*default-data-reader-fn*"), Value::Nil);
+}
+
+/// Whether any tag still needs resolution (the walk's fast path:
+/// tag-free forms return untouched, so S6 is a no-op for them).
+/// Tags nested in preserved conditionals need nothing (the walk
+/// skips those subtrees — probe `g-preserve-usertag`).
+fn needs_resolution(v: &Value) -> bool {
+    match v {
+        Value::TaggedLiteral { .. } => true,
+        Value::Symbol(s) => s.meta().is_some_and(map_needs),
+        Value::List(l) => l.iter().any(needs_resolution) || l.meta().is_some_and(map_needs),
+        Value::Vector(v) => v.iter().any(needs_resolution) || v.meta().is_some_and(map_needs),
+        Value::Map(m) => map_needs(m),
+        Value::Set(s) => s.iter().any(needs_resolution) || s.meta().is_some_and(map_needs),
+        _ => false,
+    }
+}
+
+/// Whether a map holds (or is meta-wrapped with) a tag.
+fn map_needs(m: &Map) -> bool {
+    m.iter()
+        .any(|(k, v)| needs_resolution(k) || needs_resolution(v))
+        || m.meta().is_some_and(map_needs)
+}
+
+/// Resolve deferred tags in one read form (S6): bottom-up in read
+/// order, skipping `ReaderConditional` subtrees and never
+/// re-descending into fn results (probe `e-no-redescent`).
+/// Metadata resolves too (tags inside meta maps invoke — probe
+/// `e-meta-inner`). Suppressed reads skip entirely (S7): every tag
+/// preserved, so nothing deferred (probes `e-tag-sup`, `p-sup-tag`,
+/// `m-load-sup`). The `suppressed` ENTRY seed decides — threaded,
+/// never re-deref'd: read-time user code (`#=`, data-reader fns)
+/// may mutate the root mid-read, skewing a live lookup.
+pub(crate) fn resolve_data_readers(
+    eval: &mut Evaluator,
+    form: Value,
+    suppressed: bool,
+) -> Result<Value, NativeError> {
+    if suppressed {
+        return Ok(form);
+    }
+    if !needs_resolution(&form) {
+        return Ok(form);
+    }
+    resolve_inner(eval, form)
+}
+
+/// One resolved metadata map (`None` stays `None`).
+fn resolve_opt_meta(eval: &mut Evaluator, meta: Option<Map>) -> Result<Option<Map>, NativeError> {
+    match meta {
+        Some(m) => Ok(Some(resolve_map(eval, m)?)),
+        None => Ok(None),
+    }
+}
+
+/// One resolved map: keys and values in insertion order (the JVM
+/// builds from resolved entries too), plus the meta.
+fn resolve_map(eval: &mut Evaluator, m: Map) -> Result<Map, NativeError> {
+    let mut out = new_map();
+    for (k, v) in m.iter() {
+        let key = resolve_inner(eval, k.clone())?;
+        let val = resolve_inner(eval, v.clone())?;
+        out = out.insert(key, val);
+    }
+    Ok(out.with_meta(resolve_opt_meta(eval, m.meta().cloned())?))
+}
+
+/// The resolving walk (the fast path already confirmed tags).
+fn resolve_inner(eval: &mut Evaluator, form: Value) -> Result<Value, NativeError> {
+    match form {
+        Value::TaggedLiteral { tag, form } => {
+            let inner = resolve_inner(eval, *form)?;
+            resolve_tag(eval, &tag, inner)
+        }
+        Value::Symbol(s) => resolve_symbol(eval, s),
+        Value::List(l) => resolve_list(eval, l),
+        Value::Vector(v) => resolve_vector(eval, v),
+        Value::Map(m) => Ok(Value::Map(resolve_map(eval, m)?)),
+        Value::Set(s) => resolve_set(eval, s),
+        // Preserved conditionals stay data (probe
+        // `g-preserve-usertag`); scalars, entries, and host values
+        // never hold unresolved tags (the reader yields none).
+        other => Ok(other),
+    }
+}
+
+/// One resolved symbol (meta only).
+fn resolve_symbol(eval: &mut Evaluator, s: Symbol) -> Result<Value, NativeError> {
+    let meta = resolve_opt_meta(eval, s.meta().cloned())?;
+    Ok(Value::Symbol(s.with_meta(meta)))
+}
+
+/// One resolved list (items in order, plus the meta).
+fn resolve_list(eval: &mut Evaluator, l: List) -> Result<Value, NativeError> {
+    let mut items = Vec::with_capacity(l.len());
+    for v in l.iter() {
+        items.push(resolve_inner(eval, v.clone())?);
+    }
+    let meta = resolve_opt_meta(eval, l.meta().cloned())?;
+    Ok(Value::List(List::from_vec(items).with_meta(meta)))
+}
+
+/// One resolved vector (items in order, plus the meta).
+fn resolve_vector(eval: &mut Evaluator, v: Vector) -> Result<Value, NativeError> {
+    let mut items = Vec::with_capacity(v.len());
+    for item in v.iter() {
+        items.push(resolve_inner(eval, item.clone())?);
+    }
+    let meta = resolve_opt_meta(eval, v.meta().cloned())?;
+    Ok(Value::Vector(Vector::from_vec(items).with_meta(meta)))
+}
+
+/// One resolved set (members in insertion order, plus the meta).
+fn resolve_set(eval: &mut Evaluator, s: Set) -> Result<Value, NativeError> {
+    let mut out = new_set();
+    for v in s.iter() {
+        out = out.insert(resolve_inner(eval, v.clone())?);
+    }
+    let meta = resolve_opt_meta(eval, s.meta().cloned())?;
+    Ok(Value::Set(out.with_meta(meta)))
+}
+
+/// The table lookup: `RT.get` semantics (nil entries miss — probe
+/// `e-nilentry); anything but nil and the lookupables fails the
+/// `ILookup` cast (probe `e-nonmap`).
+fn table_lookup(table: &Value, tag: &Symbol) -> Result<Option<Value>, NativeError> {
+    if let Some(inst) = crate::types::record_inst(table) {
+        return Ok(table_entry(&inst.content, tag));
+    }
+    match table {
+        Value::Nil | Value::Vector(_) | Value::MapEntry { .. } => Ok(None),
+        Value::Map(m) => Ok(table_entry(m, tag)),
+        _ => Err(cce_err(table, "clojure.lang.ILookup")),
+    }
+}
+
+/// One table entry (a nil entry misses like a missing one).
+fn table_entry(m: &Map, tag: &Symbol) -> Option<Value> {
+    m.get(&Value::Symbol(tag.clone()))
+        .cloned()
+        .filter(|v| !matches!(v, Value::Nil))
+}
+
+/// Resolve one tag: the table (fresh deref per tag — user code runs
+/// between tags), then the unqualified `inst`/`uuid` defaults, then
+/// the default fn with `[tag form]`, else the `RuntimeException`
+/// (probes `e-*`, `f-*`). The throw stays reachable when the table
+/// mutates mid-walk (the reader consults the pre-read snapshot).
+fn resolve_tag(eval: &mut Evaluator, tag: &Symbol, form: Value) -> Result<Value, NativeError> {
+    if let Some(f) = table_lookup(&deref_core(eval, "*data-readers*"), tag)? {
+        return eval.call(&f, &[form]).map_err(signal_to_native);
+    }
+    if tag.namespace().is_none() {
+        if tag.name() == "inst" {
+            return default_inst_reader(&form);
+        }
+        if tag.name() == "uuid" {
+            return default_uuid_reader(&form);
+        }
+    }
+    let default_fn = deref_core(eval, "*default-data-reader-fn*");
+    if !matches!(default_fn, Value::Nil) {
+        let tagv = Value::Symbol(tag.clone());
+        return eval
+            .call(&default_fn, &[tagv, form])
+            .map_err(signal_to_native);
+    }
+    Err(NativeError::new(
+        ThrowClass::RuntimeException,
+        format!("No reader function for tag {tag}"),
+    ))
+}
+
+/// Drain fired-discards in read order (S6): each entry's form
+/// resolves first (nested tags fire through it), then the outer tag
+/// invokes for effect (the result drops — `#_` discards). The
+/// `suppressed` entry seed threads into the nested resolve (M2).
+pub(crate) fn drain_fired_tags(
+    eval: &mut Evaluator,
+    fired: Vec<clj_reader::FiredTag>,
+    suppressed: bool,
+) -> Result<(), NativeError> {
+    for entry in fired {
+        let form = resolve_data_readers(eval, entry.form, suppressed)?;
+        resolve_tag(eval, &entry.tag, form)?;
+    }
+    Ok(())
+}
 
 /// Printer options from the bound `*print-*` vars (`readably`
 /// overrides the binding when given — `print` binds false, `pr`
@@ -1604,7 +2227,6 @@ pub fn print_opts(
     eval: &Evaluator,
     readably: Option<bool>,
 ) -> Result<clj_value::PrintOpts, NativeError> {
-    use crate::ns::deref_core;
     Ok(clj_value::PrintOpts {
         length: print_limit(&deref_core(eval, "*print-length*"), false)?,
         level: print_limit(&deref_core(eval, "*print-level*"), true)?,
@@ -1681,9 +2303,16 @@ fn str_of_realized(eval: &mut Evaluator, v: &Value) -> Result<String, NativeErro
         | Value::Promise(_)
         | Value::Agent(_)
         | Value::Volatile(_) => clj_value::java_debug(&r),
-        Value::List(_) | Value::Vector(_) | Value::Map(_) | Value::Set(_) | Value::Extension(_) => {
+        Value::List(_) | Value::Vector(_) | Value::Map(_) | Value::Set(_) => {
             clj_value::pr_to_string(&r, &clj_value::PrintOpts::pr())
         }
+        // Extensions with a `str` display (only `MathContext`,
+        // S2 oracle `wp-str`) render it; the rest print
+        // readably.
+        Value::Extension(e) => match e.print_str() {
+            Some(s) => s,
+            None => clj_value::pr_to_string(&r, &clj_value::PrintOpts::pr()),
+        },
         _ => pr_to_string(&r, &PrintOpts::print()),
     })
 }
@@ -1871,6 +2500,49 @@ fn native_symbol(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeE
     }
 }
 
+/// `find-keyword` (S1): the port never interns keywords (value
+/// equality, `keyword.rs`), so a well-shaped lookup builds the
+/// keyword — only the JVM's nil shapes stay nil (nil and
+/// anything-else 1-arity; probes `p-findkw-*`). The 2-arity
+/// casts to `String` like `keyword`, with a nil namespace
+/// meaning no namespace (probe `p-findkw-2nilns`) and a nil
+/// name the `hashCode` NPE (probe `p-findkw-2nilname`).
+fn native_find_keyword(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    if args.len() > 2 {
+        return Err(NativeError::arity("clojure.core/find-keyword", args.len()));
+    }
+    if args.len() == 2 {
+        let ns = match &args[0] {
+            Value::Nil => None,
+            Value::Str(s) => Some(s.to_string()),
+            v => return Err(cce_err(v, "java.lang.String")),
+        };
+        let name = match &args[1] {
+            Value::Str(s) => s.to_string(),
+            Value::Nil => {
+                return Err(NativeError::new(
+                    ThrowClass::NullPointerException,
+                    "Cannot invoke \"String.hashCode()\" because \"this.name\" is null".to_owned(),
+                ));
+            }
+            v => return Err(cce_err(v, "java.lang.String")),
+        };
+        return Ok(Value::Keyword(Keyword::new(ns.as_deref(), name.as_str())));
+    }
+    check_arity("clojure.core/find-keyword", args, &[1])?;
+    match &args[0] {
+        Value::Nil => Ok(Value::Nil),
+        Value::Keyword(k) => Ok(Value::Keyword(k.clone())),
+        Value::Symbol(s) => Ok(Value::Keyword(Keyword::new(s.namespace(), s.name()))),
+        Value::Str(s) => {
+            let (ns, name) = split_ns_name(s);
+            Ok(Value::Keyword(Keyword::new(ns, name)))
+        }
+        // Anything else is nil (like `keyword`'s 1-arity).
+        _ => Ok(Value::Nil),
+    }
+}
+
 /// The `Named` name (`name` works on strings too).
 fn native_name(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/name", args, &[1])?;
@@ -1978,7 +2650,7 @@ pub(crate) fn int_cast_value(v: &Value) -> Result<i64, NativeError> {
         // digits) then `toIntExact` (oracles `conv-i1`,
         // `conv-hugeint`); decimals narrow through `double`
         // first (oracle `conv-hugedecint`: `1.0E30`).
-        Value::BigInt(n) => tower_intcast(n).map(i64::from),
+        Value::BigInt(n) | Value::BigInteger(n) => tower_intcast(n).map(i64::from),
         Value::Ratio(r) => tower_intcast(&trunc_ratio(r)).map(i64::from),
         Value::BigDec(d) => bigdec_intcast(d).map(i64::from),
         Value::Nil => Err(npe_char_value()),
@@ -2033,7 +2705,7 @@ fn native_long(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErr
         Value::Int(i) => *i,
         Value::Double(d) => double_long(*d)?,
         Value::Char(c) => *c as i64,
-        Value::BigInt(n) => bigint_long(n)?,
+        Value::BigInt(n) | Value::BigInteger(n) => bigint_long(n)?,
         Value::Ratio(r) => bigint_long(&trunc_ratio(r))?,
         // Decimals narrow through `double` (oracle `conv-declong`:
         // `(long 1E+30M)` fails `1.0E30`).
@@ -2048,7 +2720,7 @@ fn native_double(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeE
     Ok(Value::Double(match &args[0] {
         Value::Int(i) => *i as f64,
         Value::Double(d) => *d,
-        Value::BigInt(n) => n.to_f64().unwrap_or(f64::NAN),
+        Value::BigInt(n) | Value::BigInteger(n) => n.to_f64().unwrap_or(f64::NAN),
         Value::Ratio(r) => r.to_f64().unwrap_or(f64::NAN),
         Value::BigDec(d) => d.to_f64(),
         Value::Nil => return Err(npe_double_value()),
@@ -2066,7 +2738,8 @@ fn native_double(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeE
 fn native_bigint(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/bigint", args, &[1])?;
     match &args[0] {
-        Value::BigInt(n) => Ok(Value::BigInt(n.clone())),
+        // `BigInteger` coerces to `BigInt` (S2 oracle `r8-bigrd`).
+        Value::BigInt(n) | Value::BigInteger(n) => Ok(Value::BigInt(n.clone())),
         Value::Int(i) => Ok(Value::BigInt(num_bigint::BigInt::from(*i))),
         Value::Double(d) => {
             let dec = clj_value::BigDec::value_of_f64(*d).map_err(number_format)?;
@@ -2088,13 +2761,182 @@ fn native_bigint(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeE
     }
 }
 
+/// `abs`: exact over every numeric kind (`Long/MIN_VALUE` is a
+/// fixed point, doubles take `abs` — so `-0.0` → `+0.0` and
+/// `NaN`/`Inf` ride through, `BigInteger` absorbs into `BigInt`);
+/// `BigDec` rounds to the bound context (S2 oracle `wp-abs`);
+/// nil is the numbers NPE, anything else the `Number` CCE (all
+/// oracle-verbatim, `abs-*`/`r9-absbi`).
+fn native_abs(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.core/abs", args, &[1])?;
+    Ok(match as_num(&args[0])? {
+        Num::Int(i) => Value::Int(if i == i64::MIN { i } else { i.abs() }),
+        Num::Double(d) => Value::Double(d.abs()),
+        Num::BigInt(n) => Value::BigInt(n.abs()),
+        Num::Ratio(r) => num_value(num_ratio(r.abs())),
+        Num::BigDec(d) => Value::BigDec(match math_context_of(eval)? {
+            None => d.abs(),
+            Some(mc) => d.abs_mc(&mc).map_err(arithmetic)?,
+        }),
+    })
+}
+
+/// `biginteger`: the upstream `cond` chain — `BigDec`/`Double`
+/// truncate toward zero through the canonical decimal
+/// (`NaN`/`Inf` fail like `valueOf`), `Ratio` truncates,
+/// `Int`/`BigInt` widen, strings parse like
+/// `BigInteger(String)`, nil trips the `String.length` NPE,
+/// anything else is the `No matching ctor`
+/// `IllegalArgumentException` (all oracle-verbatim, `bi-*`).
+/// Results print bare (`5`, never `5N`).
+fn native_biginteger(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.core/biginteger", args, &[1])?;
+    match &args[0] {
+        Value::BigInteger(n) => Ok(Value::BigInteger(n.clone())),
+        Value::BigInt(n) => Ok(Value::BigInteger(n.clone())),
+        Value::Int(i) => Ok(Value::BigInteger(num_bigint::BigInt::from(*i))),
+        Value::Double(d) => {
+            let dec = clj_value::BigDec::value_of_f64(*d).map_err(number_format)?;
+            Ok(Value::BigInteger(dec.to_bigint_trunc()))
+        }
+        Value::BigDec(d) => Ok(Value::BigInteger(d.to_bigint_trunc())),
+        Value::Ratio(r) => Ok(Value::BigInteger(r.numer() / r.denom())),
+        Value::Str(s) => clj_value::bigint_parse(s)
+            .map(Value::BigInteger)
+            .map_err(number_format),
+        Value::Nil => Err(NativeError::new(
+            ThrowClass::NullPointerException,
+            "Cannot invoke \"String.length()\" because \"val\" is null".to_owned(),
+        )),
+        _ => Err(NativeError::new(
+            ThrowClass::IllegalArgumentException,
+            "No matching ctor found for class java.math.BigInteger".to_owned(),
+        )),
+    }
+}
+
+/// `numerator` / `denominator`: the reduced `Ratio` parts as
+/// `BigInteger` (the denominator is always positive);
+/// non-`Ratio` args fail the `clojure.lang.Ratio` checkcast,
+/// nil the field-read NPE (S2 oracles `nd-*`/`r2-den-nil`/
+/// `r9-numbi`).
+fn ratio_part(display: &str, args: &[Value], numer: bool) -> Result<Value, NativeError> {
+    check_arity(display, args, &[1])?;
+    let field = if numer { "numerator" } else { "denominator" };
+    match &args[0] {
+        Value::Ratio(r) => Ok(Value::BigInteger(if numer {
+            r.numer().clone()
+        } else {
+            r.denom().clone()
+        })),
+        Value::Nil => Err(NativeError::new(
+            ThrowClass::NullPointerException,
+            format!("Cannot read field \"{field}\" because \"r\" is null"),
+        )),
+        v => Err(cce_err(v, "clojure.lang.Ratio")),
+    }
+}
+
+fn native_numerator(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    ratio_part("clojure.core/numerator", args, true)
+}
+
+fn native_denominator(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    ratio_part("clojure.core/denominator", args, false)
+}
+
+/// Port-only `math-context` ctor behind `with-precision` (S2,
+/// installed but never referred): `(math-context precision)` /
+/// `(math-context precision mode)`. Precision mirrors
+/// `(MathContext. precision)`
+/// reflection: `Int` range-checks like `intCast`
+/// (past-`i32` is `integer overflow`, negative is `Digits <
+/// 0` — oracles `r2-hugeprec`/`wp-negprec`), `String` parses
+/// the strict `MathContext(String)` grammar (oracles
+/// `r2-str*`/`r3-*`/`r4-*`), nil is the `null String` NPE
+/// (oracle `wp-nilprec`), anything else is `No matching ctor`
+/// (oracles `wp-fracprec`/`wp-bigprec`/`r4-boolprec`). A string
+/// precision with an explicit mode fails the `Number` CCE
+/// (oracles `r7-strmode`/`r8-strmodedirect`). Modes name a
+/// `RoundingMode` exactly (symbol/keyword/string — a deliberate
+/// port superset of upstream's static-field symbols); unknown
+/// modes fail the `valueOf` text (upstream fails at compile
+/// with a path-laden `CompilerException` — oracles
+/// `wp-badmode`/`wp-lowmode`/`r3-nomode`).
+fn native_math_context(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.core/math-context", args, &[1, 2])?;
+    let mode = args.get(1);
+    let ctx = match &args[0] {
+        Value::Int(i) => {
+            let p = int_exact_long(*i)?;
+            if p < 0 {
+                return Err(NativeError::new(
+                    ThrowClass::IllegalArgumentException,
+                    clj_value::DIGITS_LT_0.to_owned(),
+                ));
+            }
+            clj_value::MathContext::new(p as u32, ctx_rounding(mode)?)
+        }
+        Value::Str(s) => {
+            // No `(String, RoundingMode)` ctor exists: reflection
+            // lands on `(int, RoundingMode)` and the unbox CCEs
+            // to `Number` (oracles `r7-strmode`/`r8-strmodedirect`).
+            if mode.is_some() {
+                return Err(cce_err(&args[0], "java.lang.Number"));
+            }
+            clj_value::MathContext::parse(s)
+                .map_err(|m| NativeError::new(ThrowClass::IllegalArgumentException, m))?
+        }
+        Value::Nil => {
+            return Err(NativeError::new(
+                ThrowClass::NullPointerException,
+                "null String".to_owned(),
+            ));
+        }
+        _ => {
+            return Err(NativeError::new(
+                ThrowClass::IllegalArgumentException,
+                "No matching ctor found for class java.math.MathContext".to_owned(),
+            ));
+        }
+    };
+    Ok(Value::Extension(Arc::new(MathContextVal {
+        id: eval.next_id(),
+        ctx,
+    })))
+}
+
+/// The `:rounding` mode (default `HALF_UP`): symbols, keywords,
+/// and strings match by exact name; anything else fails the
+/// `RoundingMode.valueOf` text.
+fn ctx_rounding(mode: Option<&Value>) -> Result<clj_value::RoundingMode, NativeError> {
+    let Some(m) = mode else {
+        return Ok(clj_value::RoundingMode::HalfUp);
+    };
+    let name = match m {
+        Value::Symbol(s) => s.name().to_owned(),
+        Value::Keyword(k) => k.name().to_owned(),
+        Value::Str(s) => s.to_string(),
+        _ => return Err(rounding_value_of(&crate::ns::str_of(m))),
+    };
+    clj_value::RoundingMode::parse(&name).ok_or_else(|| rounding_value_of(&name))
+}
+
+/// `RoundingMode.valueOf` failure for a bad mode name.
+fn rounding_value_of(name: &str) -> NativeError {
+    NativeError::new(
+        ThrowClass::IllegalArgumentException,
+        format!("No enum constant java.math.RoundingMode.{name}"),
+    )
+}
+
 /// `bigdec`: `BigDec` passes through; `Int`/`Double` go through
 /// `valueOf` (so `(bigdec 5)` is `5.0M`); `BigInt` widens;
 /// `Ratio` must terminate exactly; strings parse like
 /// `BigDecimal(String)`; nil trips the `toCharArray` NPE;
 /// anything else is the `No matching ctor`
 /// `IllegalArgumentException` (all oracle-verbatim).
-fn native_bigdec(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+fn native_bigdec(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/bigdec", args, &[1])?;
     match &args[0] {
         Value::BigDec(d) => Ok(Value::BigDec(d.clone())),
@@ -2104,10 +2946,19 @@ fn native_bigdec(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeE
         Value::Double(d) => Ok(Value::BigDec(
             clj_value::BigDec::value_of_f64(*d).map_err(number_format)?,
         )),
-        Value::BigInt(n) => Ok(Value::BigDec(clj_value::BigDec::from_bigint(n.clone()))),
-        Value::Ratio(r) => clj_value::BigDec::from_rational_exact(r)
-            .map(Value::BigDec)
-            .map_err(arithmetic),
+        Value::BigInt(n) | Value::BigInteger(n) => {
+            Ok(Value::BigDec(clj_value::BigDec::from_bigint(n.clone())))
+        }
+        // Upstream `(bigdec ratio)` divides through `/`, so a
+        // bound context rounds it (S2 oracle `wp-bigdec`).
+        Value::Ratio(r) => match math_context_of(eval)? {
+            None => clj_value::BigDec::from_rational_exact(r)
+                .map(Value::BigDec)
+                .map_err(arithmetic),
+            Some(mc) => clj_value::BigDec::from_ratio_mc(r, &mc)
+                .map(Value::BigDec)
+                .map_err(arithmetic),
+        },
         Value::Str(s) => clj_value::BigDec::parse(s)
             .map(Value::BigDec)
             .map_err(number_format),
@@ -2131,6 +2982,7 @@ fn native_num(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErro
         Value::Int(_)
         | Value::Double(_)
         | Value::BigInt(_)
+        | Value::BigInteger(_)
         | Value::BigDec(_)
         | Value::Ratio(_) => Ok(args[0].clone()),
         other => Err(cce_err(other, "java.lang.Number")),
@@ -2147,7 +2999,9 @@ fn native_rationalize(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, Na
     check_arity("clojure.core/rationalize", args, &[1])?;
     match &args[0] {
         Value::Nil => Ok(Value::Nil),
-        Value::Int(_) | Value::BigInt(_) | Value::Ratio(_) => Ok(args[0].clone()),
+        Value::Int(_) | Value::BigInt(_) | Value::BigInteger(_) | Value::Ratio(_) => {
+            Ok(args[0].clone())
+        }
         Value::Double(d) => {
             let dec = clj_value::BigDec::value_of_f64(*d).map_err(number_format)?;
             let r = dec.to_rational();
@@ -2190,7 +3044,9 @@ fn native_float(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeEr
         Value::Double(d) => float_checked(*d, Num::Double(*d))?,
         // Tower narrows like `double`, then takes the same
         // range check (the class/precision gap is documented).
-        Value::BigInt(n) => float_checked(n.to_f64().unwrap_or(f64::NAN), Num::BigInt(n.clone()))?,
+        Value::BigInt(n) | Value::BigInteger(n) => {
+            float_checked(n.to_f64().unwrap_or(f64::NAN), Num::BigInt(n.clone()))?
+        }
         Value::Ratio(r) => float_checked(r.to_f64().unwrap_or(f64::NAN), Num::Ratio(r.clone()))?,
         Value::BigDec(d) => float_checked(d.to_f64(), Num::BigDec(d.clone()))?,
         Value::Nil => return Err(npe_double_value()),
@@ -2241,6 +3097,187 @@ fn native_char(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErr
         // `tower-r2f`, `tower-r2g`).
         v => char_of_num(&as_num(v)?)?,
     }))
+}
+
+/// Upstream `parsing-err` (S4a): `Expected string, got nil` for
+/// nil, else the value's JVM class name (oracle `pb-nil`…).
+fn parsing_err(v: &Value) -> NativeError {
+    let got = if matches!(v, Value::Nil) {
+        "nil".to_owned()
+    } else {
+        jvm_class_of(v)
+    };
+    NativeError::new(
+        ThrowClass::IllegalArgumentException,
+        format!("Expected string, got {got}"),
+    )
+}
+
+/// Every Unicode decimal-digit block start: each Nd run is exactly
+/// 10 code points valued 0–9, so the value is `cp - start`
+/// (`Long.parseLong` accepts them all — oracle `pl-arabic`,
+/// `pl-fullwidth`; enumerated from the Unicode database).
+const ND_STARTS: &[u32] = &[
+    0x30, 0x660, 0x6F0, 0x7C0, 0x966, 0x9E6, 0xA66, 0xAE6, 0xB66, 0xBE6, 0xC66, 0xCE6, 0xD66,
+    0xDE6, 0xE50, 0xED0, 0xF20, 0x1040, 0x1090, 0x17E0, 0x1810, 0x1946, 0x19D0, 0x1A80, 0x1A90,
+    0x1B50, 0x1BB0, 0x1C40, 0x1C50, 0xA620, 0xA8D0, 0xA900, 0xA9D0, 0xA9F0, 0xAA50, 0xABF0, 0xFF10,
+    0x104A0, 0x10D30, 0x11066, 0x110F0, 0x11136, 0x111D0, 0x112F0, 0x11450, 0x114D0, 0x11650,
+    0x116C0, 0x11730, 0x118E0, 0x11950, 0x11C50, 0x11D50, 0x11DA0, 0x16A60, 0x16B50, 0x1D7CE,
+    0x1D7D8, 0x1D7E2, 0x1D7EC, 0x1D7F6, 0x1E140, 0x1E2F0, 0x1E950, 0x1FBF0,
+];
+
+/// `Character.digit(c, 10)`: the decimal value of any Nd char.
+fn decimal_value(c: char) -> Option<u32> {
+    let cp = c as u32;
+    let i = ND_STARTS.partition_point(|&s| s <= cp).checked_sub(1)?;
+    let d = cp.checked_sub(ND_STARTS[i])?;
+    (d < 10).then_some(d)
+}
+
+/// `Long.parseLong`: one ASCII sign, 1+ decimal digits (any
+/// script), overflow → `None` (the caller answers nil).
+fn parse_long_str(s: &str) -> Option<i64> {
+    let (neg, digits) = match s.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, s.strip_prefix('+').unwrap_or(s)),
+    };
+    if digits.is_empty() {
+        return None;
+    }
+    let mut acc: u64 = 0;
+    for c in digits.chars() {
+        acc = acc
+            .checked_mul(10)?
+            .checked_add(u64::from(decimal_value(c)?))?;
+    }
+    if neg {
+        (acc <= i64::MAX as u64 + 1).then_some((acc as i64).wrapping_neg())
+    } else {
+        (acc <= i64::MAX as u64).then_some(acc as i64)
+    }
+}
+
+/// A signed `NaN`/`Infinity` spelling (exact case, like the JVM).
+fn signed_special(t: &str) -> Option<f64> {
+    let (neg, body) = match t.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, t.strip_prefix('+').unwrap_or(t)),
+    };
+    match body {
+        "NaN" => Some(f64::NAN),
+        "Infinity" if neg => Some(f64::NEG_INFINITY),
+        "Infinity" => Some(f64::INFINITY),
+        _ => None,
+    }
+}
+
+/// One trailing `d`/`f` suffix (never on an empty core).
+fn strip_float_suffix(t: &str) -> &str {
+    match t.strip_suffix(['d', 'D', 'f', 'F']) {
+        Some(core) if !core.is_empty() => core,
+        _ => t,
+    }
+}
+
+/// A `p`-exponent: ASCII sign plus 1+ digits, clamped past the
+/// f64 range (huge exponents are ±Inf/0 either way).
+fn parse_hex_exp(exp: &str) -> Option<i32> {
+    let digits = exp.strip_prefix(['+', '-']).unwrap_or(exp);
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let mut acc: i32 = 0;
+    for b in digits.bytes() {
+        acc = acc.saturating_mul(10).saturating_add(i32::from(b - b'0'));
+        if acc > 10_000 {
+            break;
+        }
+    }
+    Some(if exp.starts_with('-') { -acc } else { acc })
+}
+
+/// A hex significand digit (ASCII only, like `FloatingDecimal`).
+fn hex_val(c: char) -> Option<u32> {
+    c.to_digit(16)
+}
+
+/// A `0x` float: hex significand, mandatory `p` exponent
+/// (Horner accumulation — exact through 13 significand digits).
+fn parse_hex_float(neg: bool, h: &str) -> Option<f64> {
+    let p = h.find(['p', 'P'])?;
+    let (sig, exp) = (&h[..p], &h[p + 1..]);
+    let exp = parse_hex_exp(exp)?;
+    let (int_part, frac_part) = sig.split_once('.').unwrap_or((sig, ""));
+    if int_part.is_empty() && frac_part.is_empty() {
+        return None;
+    }
+    let mut int_val: f64 = 0.0;
+    for c in int_part.chars() {
+        int_val = int_val.mul_add(16.0, f64::from(hex_val(c)?));
+    }
+    let mut frac_val: f64 = 0.0;
+    for c in frac_part.chars().rev() {
+        frac_val = (frac_val + f64::from(hex_val(c)?)) / 16.0;
+    }
+    let v = (int_val + frac_val) * 2f64.powi(exp);
+    Some(if neg { -v } else { v })
+}
+
+/// `Double.valueOf`: Java-`trim`, exact `NaN`/`Infinity`, decimal
+/// via the host parser (overflow → ±Inf like the JVM), hex
+/// floats manual, one `d`/`f` suffix — never on a bare
+/// `NaN`/`Infinity` (oracle `pd-nansuf`/`pd-infsuf`).
+/// Rejects the `nan`/`inf` spellings the host parser takes but
+/// the JVM refuses, and all non-ASCII digits (oracle
+/// `pd-arabic`/`pd-fullwidth`).
+fn parse_double_str(s: &str) -> Option<f64> {
+    let t = s.trim_matches(|c: char| c <= ' ');
+    if t.is_empty() {
+        return None;
+    }
+    if let Some(v) = signed_special(t) {
+        return Some(v);
+    }
+    let core = strip_float_suffix(t);
+    if signed_special(core).is_some() {
+        return None;
+    }
+    let body = core.strip_prefix(['+', '-']).unwrap_or(core);
+    if body.len() >= 2 && (body.starts_with("0x") || body.starts_with("0X")) {
+        return parse_hex_float(core.starts_with('-'), &body[2..]);
+    }
+    if ["nan", "inf", "infinity"].contains(&body.to_ascii_lowercase().as_str()) {
+        return None;
+    }
+    core.parse::<f64>().ok()
+}
+
+fn native_parse_boolean(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.core/parse-boolean", args, &[1])?;
+    match &args[0] {
+        Value::Str(s) => match s.as_ref() {
+            "true" => Ok(Value::Bool(true)),
+            "false" => Ok(Value::Bool(false)),
+            _ => Ok(Value::Nil),
+        },
+        other => Err(parsing_err(other)),
+    }
+}
+
+fn native_parse_long(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.core/parse-long", args, &[1])?;
+    match &args[0] {
+        Value::Str(s) => Ok(parse_long_str(s).map(Value::Int).unwrap_or(Value::Nil)),
+        other => Err(parsing_err(other)),
+    }
+}
+
+fn native_parse_double(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.core/parse-double", args, &[1])?;
+    match &args[0] {
+        Value::Str(s) => Ok(parse_double_str(s).map(Value::Double).unwrap_or(Value::Nil)),
+        other => Err(parsing_err(other)),
+    }
 }
 
 /// A `reduced` wrapper: `reduce` unwraps it for early exit.
@@ -2552,6 +3589,52 @@ fn native_clojure_version(_eval: &mut Evaluator, args: &[Value]) -> Result<Value
     Ok(Value::Str(Arc::from("1.13.0-alpha9")))
 }
 
+/// `destructure` (S4b): the public expansion helper over
+/// `destructure_expand::destructure_public` (oracle `dt-*`).
+fn native_destructure(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.core/destructure", args, &[1])?;
+    crate::destructure_expand::destructure_public(eval, &args[0])
+}
+
+/// `seq-to-map-for-destructuring` (S4b, oracle `sm-*`).
+fn native_seq_to_map(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.core/seq-to-map-for-destructuring", args, &[1])?;
+    crate::destructure_expand::seq_to_map_for_destructuring(eval, &args[0])
+}
+
+/// `munge` (S4b): `(str s)` through `Compiler/munge`
+/// (`ext::compiler_munge`), symbol-preserving (oracle
+/// `mg-*`). The munged text never contains `/`, so the
+/// rebuilt symbol is always unqualified (like the JVM's).
+fn native_munge(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.core/munge", args, &[1])?;
+    let s = str_concat(eval, args)?;
+    let munged = crate::ext::compiler_munge(&s);
+    if matches!(args[0], Value::Symbol(_)) {
+        Ok(Value::Symbol(Symbol::intern(&munged)))
+    } else {
+        Ok(Value::Str(Arc::from(munged.as_str())))
+    }
+}
+
+/// `namespace-munge` (S4b): `(str ns)` with `-` → `_`,
+/// nothing else (oracle `nm-*`).
+fn native_namespace_munge(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.core/namespace-munge", args, &[1])?;
+    let s = str_concat(eval, args)?;
+    Ok(Value::Str(Arc::from(s.replace('-', "_").as_str())))
+}
+
+/// `__local-var*` (S4b): the `with-local-vars` helper — a
+/// fresh anonymous dynamic var (see
+/// `Registry::fresh_anonymous`; unlisted, `__multifn*`
+/// precedent).
+fn native_fresh_local_var(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.core/__local-var*", args, &[0])?;
+    let id = eval.registry.fresh_anonymous();
+    Ok(crate::ns::var_value(id, &Symbol::new(None, "--unnamed--")))
+}
+
 /// The S5D scalar natives installed into `clojure.core`.
 pub(crate) const CORE_NATIVES: &[(&str, NativeFnPtr)] = &[
     ("+", native_add),
@@ -2589,6 +3672,9 @@ pub(crate) const CORE_NATIVES: &[(&str, NativeFnPtr)] = &[
     ("float?", native_floatp),
     ("double?", native_doublep),
     ("number?", native_numberp),
+    ("ratio?", native_ratiop),
+    ("decimal?", native_decimalp),
+    ("rational?", native_rationalp),
     ("string?", native_stringp),
     ("char?", native_charp),
     ("keyword?", native_keywordp),
@@ -2616,6 +3702,21 @@ pub(crate) const CORE_NATIVES: &[(&str, NativeFnPtr)] = &[
     ("seq?", native_seqp),
     ("seqable?", native_seqablep),
     ("record?", native_recordp),
+    ("any?", native_anyp),
+    ("delay?", native_delayp),
+    ("indexed?", native_indexedp),
+    ("map-entry?", native_map_entryp),
+    ("nat-int?", native_nat_intp),
+    ("neg-int?", native_neg_intp),
+    ("pos-int?", native_pos_intp),
+    ("special-symbol?", native_special_symbolp),
+    ("NaN?", native_nanp),
+    ("infinite?", native_infinitep),
+    ("find-keyword", native_find_keyword),
+    ("tagged-literal", native_tagged_literal),
+    ("tagged-literal?", native_tagged_literalp),
+    ("reader-conditional", native_reader_conditional),
+    ("reader-conditional?", native_reader_conditionalp),
     ("str", native_str),
     ("subs", native_subs),
     ("pr-str", native_pr_str),
@@ -2632,9 +3733,16 @@ pub(crate) const CORE_NATIVES: &[(&str, NativeFnPtr)] = &[
     ("bigdec", native_bigdec),
     ("num", native_num),
     ("rationalize", native_rationalize),
+    ("abs", native_abs),
+    ("biginteger", native_biginteger),
+    ("numerator", native_numerator),
+    ("denominator", native_denominator),
     ("short", native_short),
     ("byte", native_byte),
     ("char", native_char),
+    ("parse-boolean", native_parse_boolean),
+    ("parse-double", native_parse_double),
+    ("parse-long", native_parse_long),
     ("format", crate::fmt::native_format),
     ("reduced", native_reduced),
     ("reduced?", native_reducedp),
@@ -2652,7 +3760,18 @@ pub(crate) const CORE_NATIVES: &[(&str, NativeFnPtr)] = &[
     ("odd?", native_odd),
     ("even?", native_even),
     ("clojure-version", native_clojure_version),
+    ("destructure", native_destructure),
+    ("seq-to-map-for-destructuring", native_seq_to_map),
+    ("munge", native_munge),
+    ("namespace-munge", native_namespace_munge),
+    ("__local-var*", native_fresh_local_var),
 ];
+
+/// Installed but never referred (like `__defmethod*`): the
+/// port-only `math-context` ctor behind `with-precision` —
+/// resolvable qualified, callable cross-namespace (a `:private`
+/// mark would reject the macro's own expansion).
+pub(crate) const TOWER_NATIVES: &[(&str, NativeFnPtr)] = &[("math-context", native_math_context)];
 
 #[cfg(test)]
 mod tests {
@@ -2694,6 +3813,25 @@ mod tests {
             num_value(Num::Ratio(unreduced)),
             Value::BigInt(num_bigint::BigInt::from(1))
         );
+    }
+
+    /// `MathContextVal` hashing is structural like its `=`
+    /// (precision + rounding feed the hasher).
+    #[test]
+    fn math_context_hash_is_structural() {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::Hash;
+        fn hash_of(ctx: clj_value::MathContext) -> u64 {
+            let v = Value::Extension(Arc::new(MathContextVal { id: 1, ctx }));
+            let mut h = DefaultHasher::new();
+            v.hash(&mut h);
+            h.finish()
+        }
+        let a = clj_value::MathContext::new(10, clj_value::RoundingMode::HalfUp);
+        let b = clj_value::MathContext::new(10, clj_value::RoundingMode::HalfUp);
+        let c = clj_value::MathContext::new(11, clj_value::RoundingMode::HalfUp);
+        assert_eq!(hash_of(a), hash_of(b));
+        assert_ne!(hash_of(a), hash_of(c));
     }
 
     #[test]

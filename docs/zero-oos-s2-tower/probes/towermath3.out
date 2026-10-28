@@ -1,0 +1,14 @@
+r3-sp2 THROW java.lang.IllegalArgumentException|"bad string format"
+r3-lead THROW java.lang.IllegalArgumentException|"bad string format"
+r3-trail THROW java.lang.IllegalArgumentException|"bad string format"
+r3-lowkey THROW java.lang.IllegalArgumentException|"bad string format"
+r3-plus 0.333M
+r3-speq THROW java.lang.IllegalArgumentException|"bad string format"
+r3-junk THROW java.lang.IllegalArgumentException|"bad string format"
+r3-lowmode THROW java.lang.IllegalArgumentException|"bad string format"
+r3-nomode THROW clojure.lang.Compiler$CompilerException|"Syntax error compiling . at (PATH"
+r3-noprec THROW clojure.lang.ArityException|"Wrong number of args (0) passed to: clojure.core/with-precision"
+r3-quotscale 333M
+r3-quotmcscale 333M
+r3-rem 0.678M
+r3-eqdiv true

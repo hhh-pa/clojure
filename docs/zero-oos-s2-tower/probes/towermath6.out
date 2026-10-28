@@ -1,0 +1,6 @@
+r6-subceil 0.5M
+r6-subfloor -0.5M
+r6-negceil -2M
+r6-negfloor -3M
+r6-addceil -4M
+r6-mulceil 3M

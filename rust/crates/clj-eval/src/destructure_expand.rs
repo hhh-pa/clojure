@@ -10,7 +10,7 @@
 //! (alpha9 `clojure.core`). Star specials only accept symbols, so
 //! a destructuring `let` must emit symbol bindings before analyze.
 
-use clj_value::{Map, Symbol, Value, new_set};
+use clj_value::{Map, Symbol, Value, Vector, new_map, new_set};
 
 use crate::error::{NativeError, jvm_class_of};
 use crate::eval::Evaluator;
@@ -19,6 +19,101 @@ use crate::fx4_form::{
     kw_get, lst, map_of, npe, pr_of, qcall, seq_data, seq_items, str_of, sym, sym_q, symv,
     tag_iseq, ucall, vector_items, vecv,
 };
+
+/// The public `destructure` var (S4b, oracle `dt-*`):
+/// upstream `(partition 2 bindings)` + all-symbols
+/// passthrough + `bind_one` reduction. Complete pairs only
+/// (`partition` drops the odd tail); the input returns
+/// unchanged when every pair starts with a symbol.
+pub(crate) fn destructure_public(
+    eval: &mut Evaluator,
+    bindings: &Value,
+) -> Result<Value, NativeError> {
+    let items = crate::lazy::collect_all(eval, bindings).map_err(crate::ns::signal_to_native)?;
+    let full = items.len() - items.len() % 2;
+    if items[..full].iter().step_by(2).all(is_symbol_val) {
+        return Ok(bindings.clone());
+    }
+    let mut ret = Vec::new();
+    for pair in items[..full].chunks_exact(2) {
+        bind_one(eval, &mut ret, &pair[0], &pair[1])?;
+    }
+    Ok(vecv(ret))
+}
+
+/// The public `seq-to-map-for-destructuring` var (S4b, oracle
+/// `sm-*`): empty ⟹ `{}`, one element ⟹ `first` as-is, even
+/// ⟹ assoc pairs in order, odd 3+ ⟹ pairs plus the
+/// `createAsIfByAssocComplexPath` tail `conj` ([`conj_tail`]).
+pub(crate) fn seq_to_map_for_destructuring(
+    eval: &mut Evaluator,
+    s: &Value,
+) -> Result<Value, NativeError> {
+    let items = crate::lazy::collect_all(eval, s).map_err(crate::ns::signal_to_native)?;
+    if items.is_empty() {
+        return Ok(Value::Map(new_map()));
+    }
+    if items.len() == 1 {
+        return Ok(items[0].clone());
+    }
+    let full = items.len() - items.len() % 2;
+    let mut map = new_map();
+    for pair in items[..full].chunks_exact(2) {
+        map = map.insert(pair[0].clone(), pair[1].clone());
+    }
+    if items.len() % 2 == 1 {
+        map = conj_tail(eval, map, &items[full])?;
+    }
+    Ok(Value::Map(map))
+}
+
+/// The odd-tail `conj` of [`seq_to_map_for_destructuring`]
+/// (JVM `APersistentMap.cons` via
+/// `createAsIfByAssocComplexPath`, oracle `sm-odd-*`).
+fn conj_tail(eval: &mut Evaluator, map: Map, tail: &Value) -> Result<Map, NativeError> {
+    match tail {
+        Value::Nil => Ok(map),
+        Value::Map(m) => Ok(merge_map(map, m)),
+        Value::MapEntry { key, val } => Ok(map.insert((**key).clone(), (**val).clone())),
+        Value::Vector(x) => conj_tail_vector(map, x),
+        _ => conj_tail_seq(eval, map, tail),
+    }
+}
+
+/// Merge every entry of `m` into `map` (a map tail conjs by
+/// merging, oracle `sm-odd-map`).
+fn merge_map(mut map: Map, m: &Map) -> Map {
+    for (k, v) in m.iter() {
+        map = map.insert(k.clone(), v.clone());
+    }
+    map
+}
+
+/// Assoc a vector tail (exactly a pair, else the JVM's pair
+/// error, oracle `sm-odd-vec*`).
+fn conj_tail_vector(map: Map, x: &Vector) -> Result<Map, NativeError> {
+    let items: Vec<&Value> = x.iter().collect();
+    match items.as_slice() {
+        [k, v] => Ok(map.insert((*k).clone(), (*v).clone())),
+        _ => Err(iae("Vector arg to map conj must be a pair".to_owned())),
+    }
+}
+
+/// Assoc each element of a seqable tail as an entry (the
+/// first non-entry throws its `Map$Entry` cast, oracle
+/// `sm-odd-str`); non-seqables throw the `ISeq` error
+/// (oracle `sm-odd-kw`).
+fn conj_tail_seq(eval: &mut Evaluator, map: Map, tail: &Value) -> Result<Map, NativeError> {
+    let elems = crate::lazy::collect_all(eval, tail).map_err(crate::ns::signal_to_native)?;
+    let mut map = map;
+    for elem in &elems {
+        let Value::MapEntry { key, val } = elem else {
+            return Err(crate::core::cce_err(elem, "java.util.Map$Entry"));
+        };
+        map = map.insert((**key).clone(), (**val).clone());
+    }
+    Ok(map)
+}
 
 /// Rewrite a binding vector. All-symbol vectors pass through (no gensyms).
 pub(crate) fn destructure(eval: &mut Evaluator, bindings: &Value) -> Result<Value, NativeError> {
@@ -45,6 +140,17 @@ fn bind_one(
         ret.push(pat.clone());
         ret.push(val.clone());
         return Ok(());
+    }
+    if let Value::MapEntry {
+        key,
+        val: entry_val,
+    } = pat
+    {
+        // Entries destructure as 2-vectors (the JVM's `MapEntry`
+        // is a vector; oracle `dt-entry-*`). Unreachable from
+        // `let` (no entry literals), only from the public var.
+        let pair = [(**key).clone(), (**entry_val).clone()];
+        return dest_vec(eval, ret, &pair, val);
     }
     if let Some(items) = vector_items(pat) {
         return dest_vec(eval, ret, &items, val);

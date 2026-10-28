@@ -18,6 +18,8 @@
 
 use std::fmt;
 
+use clj_value::cce_message;
+
 /// A 1-based `(line, column)` position; column 0 is observable after
 /// `unread('\n')` (see [`CharStream`](crate::stream::CharStream)).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -144,10 +146,30 @@ pub enum ReaderError {
     /// `ArithmeticException`, but the eval wraps reader errors —
     /// see the `loader` tower test).
     RatioZeroDiv { span: Span },
-    /// `#=` deferral (data-reader follow-up N5).
+    /// `#=` without an evaluator hook (pure-reader contexts only;
+    /// every `clj-eval` entry installs the hook).
     ReadEval { span: Span },
+    /// A `#=`/resolver outcome (S7): the gate denial or an
+    /// application throwable, traveling intact (message and class
+    /// are the throwable's own; wraps treat it like any read).
+    EvalFailed {
+        span: Span,
+        error: crate::hooks::EvalReadError,
+    },
     /// `#inst`/`#uuid` deferral (data-reader follow-up N5).
     DataReader { span: Span, tag: String },
+    /// Defer-mode tag consult over a non-lookupable
+    /// `*data-readers*` value (S6): the JVM's `RT.get` fails the
+    /// `ILookup` cast (`from_jvm` is the table's JVM class).
+    TableCce { span: Span, from_jvm: String },
+    /// Defer-mode `inst`/`uuid` payload validation failure (S6):
+    /// the validator's simple class name plus its verbatim
+    /// message.
+    TagInvoke {
+        span: Span,
+        class: &'static str,
+        message: String,
+    },
     /// Record-tag deferral (S5).
     Record { span: Span, tag: String },
     /// Lone surrogate in a string `\u` escape (JVM accepts; `str`
@@ -207,7 +229,10 @@ impl ReaderError {
             | Self::ArgNumber { span, .. }
             | Self::RatioZeroDiv { span, .. }
             | Self::DataReader { span, .. }
+            | Self::TableCce { span, .. }
+            | Self::TagInvoke { span, .. }
             | Self::Record { span, .. }
+            | Self::EvalFailed { span, .. }
             | Self::LoneSurrogate { span, .. } => span,
         }
     }
@@ -241,8 +266,8 @@ impl ReaderError {
 
     /// The root-cause simple class name (`RuntimeException`,
     /// `NumberFormatException`, `IllegalArgumentException`,
-    /// `IllegalStateException`; deferrals report `ReaderError`, which
-    /// has no JVM counterpart).
+    /// `IllegalStateException`, `ClassCastException`; deferrals
+    /// report `ReaderError`, which has no JVM counterpart).
     #[must_use]
     pub fn jvm_class(&self) -> &'static str {
         match self {
@@ -250,6 +275,8 @@ impl ReaderError {
             | Self::RadixRange { .. }
             | Self::RadixDigit { .. }
             | Self::ArgNumber { .. } => "NumberFormatException",
+            Self::TableCce { .. } => "ClassCastException",
+            Self::TagInvoke { class, .. } => class,
             Self::BadUnicodeChar { .. }
             | Self::BadDigit { .. }
             | Self::BadUnicodeLen { .. }
@@ -263,6 +290,10 @@ impl ReaderError {
             | Self::DataReader { .. }
             | Self::Record { .. }
             | Self::LoneSurrogate { .. } => "ReaderError",
+            Self::EvalFailed { error, .. } => match error {
+                crate::hooks::EvalReadError::Failed(t) => t.class.jvm_name(),
+                crate::hooks::EvalReadError::NoHook => "ReaderError",
+            },
             Self::RatioZeroDiv { .. } => "ArithmeticException",
             _ => "RuntimeException",
         }
@@ -338,9 +369,8 @@ fn message_ns(err: &ReaderError) -> String {
         }
         ReaderError::ArgNumber { token, .. } => format!("For input string: \"{token}\""),
         ReaderError::RatioZeroDiv { .. } => "Divide by zero".to_owned(),
-        ReaderError::ReadEval { .. } => {
-            "Eval reader #= is not supported in this build (data-reader follow-up N5)".to_owned()
-        }
+        ReaderError::ReadEval { .. } => "Eval reader #= requires an evaluator hook".to_owned(),
+        ReaderError::EvalFailed { error, .. } => eval_failed_message(error),
         other => message_defer(other),
     }
 }
@@ -348,6 +378,8 @@ fn message_ns(err: &ReaderError) -> String {
 /// Data-reader and record deferrals.
 fn message_defer(err: &ReaderError) -> String {
     match err {
+        ReaderError::TableCce { from_jvm, .. } => cce_message(from_jvm, "clojure.lang.ILookup"),
+        ReaderError::TagInvoke { message, .. } => message.clone(),
         ReaderError::DataReader { tag, .. } => format!(
             "Reader for tag {tag} is not supported in this build (data-reader follow-up N5)"
         ),
@@ -403,7 +435,20 @@ fn message_defer(err: &ReaderError) -> String {
         | ReaderError::NsMapOdd { .. }
         | ReaderError::ArgNumber { .. }
         | ReaderError::RatioZeroDiv { .. }
-        | ReaderError::ReadEval { .. } => err.message(),
+        | ReaderError::ReadEval { .. }
+        | ReaderError::EvalFailed { .. } => err.message(),
+    }
+}
+
+/// A `#=`/resolver outcome message: the throwable's own message
+/// (empty when it has none); the hookless defensive case renders
+/// the hook error text.
+fn eval_failed_message(error: &crate::hooks::EvalReadError) -> String {
+    match error {
+        crate::hooks::EvalReadError::Failed(t) => t.message.as_deref().unwrap_or("").to_owned(),
+        crate::hooks::EvalReadError::NoHook => {
+            "Eval reader #= requires an evaluator hook".to_owned()
+        }
     }
 }
 
@@ -435,6 +480,8 @@ impl std::error::Error for ReaderError {}
 #[cfg(test)]
 mod tests {
     use super::{ReaderError, Span, message_defer};
+    use crate::hooks::EvalReadError;
+    use clj_value::{ThrowClass, Throwable};
 
     #[test]
     fn messages_and_classes() {
@@ -516,12 +563,75 @@ mod tests {
                 "Lone surrogate \\ud800 in string escape is not representable in str",
                 "ReaderError",
             ),
+            (
+                ReaderError::TableCce {
+                    span,
+                    from_jvm: "java.lang.Long".to_owned(),
+                },
+                "class java.lang.Long cannot be cast to class clojure.lang.ILookup (java.lang.Long is in module java.base of loader 'bootstrap'; clojure.lang.ILookup is in unnamed module of loader 'app')",
+                "ClassCastException",
+            ),
+            (
+                ReaderError::TagInvoke {
+                    span,
+                    class: "RuntimeException",
+                    message: "No reader function for tag foo".to_owned(),
+                },
+                "No reader function for tag foo",
+                "RuntimeException",
+            ),
         ];
         for (err, message, class) in cases {
             assert_eq!(err.message(), message);
             assert_eq!(err.jvm_class(), class);
             assert_eq!(err.span(), span);
         }
+    }
+
+    #[test]
+    fn eval_failed_reports_the_throwable() {
+        // S7: message and class are the throwable's own (the wraps
+        // treat it like any read); the hookless defensive case
+        // renders the hook text.
+        let span = Span::new(1, 3);
+        let failed = ReaderError::EvalFailed {
+            span,
+            error: EvalReadError::Failed(Throwable {
+                id: 9,
+                class: ThrowClass::ArithmeticException,
+                message: Some(std::sync::Arc::from("Divide by zero")),
+                data: None,
+                cause: None,
+            }),
+        };
+        assert_eq!(failed.message(), "Divide by zero");
+        assert_eq!(failed.jvm_class(), "java.lang.ArithmeticException");
+        assert_eq!(failed.span(), span);
+        let messageless = ReaderError::EvalFailed {
+            span,
+            error: EvalReadError::Failed(Throwable {
+                id: 10,
+                class: ThrowClass::NullPointerException,
+                message: None,
+                data: None,
+                cause: None,
+            }),
+        };
+        assert_eq!(messageless.message(), "");
+        assert_eq!(messageless.jvm_class(), "java.lang.NullPointerException");
+        let hookless = ReaderError::EvalFailed {
+            span,
+            error: EvalReadError::NoHook,
+        };
+        assert_eq!(
+            hookless.message(),
+            "Eval reader #= requires an evaluator hook"
+        );
+        assert_eq!(hookless.jvm_class(), "ReaderError");
+        assert_eq!(
+            ReaderError::ReadEval { span }.message(),
+            "Eval reader #= requires an evaluator hook"
+        );
     }
 
     #[test]

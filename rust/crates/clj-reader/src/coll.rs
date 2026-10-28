@@ -18,16 +18,21 @@ use clj_value::{Keyword, List, Map, Set, Value, Vector, java_debug};
 
 use crate::Reader;
 use crate::error::ReaderError;
+use crate::hooks::ReadHooks;
 
 impl Reader {
     /// `readDelimitedList`: forms until `delim` (nested reads —
     /// delimited content is never top-level); EOF reports the body's
     /// first line.
-    pub(crate) fn read_delimited(&mut self, delim: char) -> Result<Vec<Value>, ReaderError> {
+    pub(crate) fn read_delimited(
+        &mut self,
+        delim: char,
+        hook: &mut dyn ReadHooks,
+    ) -> Result<Vec<Value>, ReaderError> {
         let firstline = self.firstline();
         let mut items = Vec::new();
         loop {
-            match self.read_inner(false, Some(delim), false)? {
+            match self.read_inner(false, Some(delim), false, hook)? {
                 crate::Form::Eof => {
                     return Err(match firstline {
                         Some(line) => ReaderError::EofDelimited {
@@ -44,9 +49,12 @@ impl Reader {
     }
 
     /// `ListReader`.
-    pub(crate) fn list_reader(&mut self) -> Result<Option<Value>, ReaderError> {
+    pub(crate) fn list_reader(
+        &mut self,
+        hook: &mut dyn ReadHooks,
+    ) -> Result<Option<Value>, ReaderError> {
         let meta_pos = self.meta_pos();
-        let items = self.read_delimited(')')?;
+        let items = self.read_delimited(')', hook)?;
         if items.is_empty() {
             return Ok(Some(Value::List(List::new_sync())));
         }
@@ -67,16 +75,22 @@ impl Reader {
     }
 
     /// `VectorReader`.
-    pub(crate) fn vector_reader(&mut self) -> Result<Option<Value>, ReaderError> {
+    pub(crate) fn vector_reader(
+        &mut self,
+        hook: &mut dyn ReadHooks,
+    ) -> Result<Option<Value>, ReaderError> {
         Ok(Some(Value::Vector(Vector::from_vec(
-            self.read_delimited(']')?,
+            self.read_delimited(']', hook)?,
         ))))
     }
 
     /// `MapReader`: odd check after the full read, then `RT.map`
     /// duplicate rules.
-    pub(crate) fn map_reader(&mut self) -> Result<Option<Value>, ReaderError> {
-        let items = self.read_delimited('}')?;
+    pub(crate) fn map_reader(
+        &mut self,
+        hook: &mut dyn ReadHooks,
+    ) -> Result<Option<Value>, ReaderError> {
+        let items = self.read_delimited('}', hook)?;
         if items.len() % 2 == 1 {
             return Err(ReaderError::MapOdd { span: self.span() });
         }
@@ -84,8 +98,11 @@ impl Reader {
     }
 
     /// `SetReader`.
-    pub(crate) fn set_reader(&mut self) -> Result<Option<Value>, ReaderError> {
-        let items = self.read_delimited('}')?;
+    pub(crate) fn set_reader(
+        &mut self,
+        hook: &mut dyn ReadHooks,
+    ) -> Result<Option<Value>, ReaderError> {
+        let items = self.read_delimited('}', hook)?;
         match Set::from_items_checked(items) {
             Ok(set) => Ok(Some(Value::Set(set))),
             Err(dup) => Err(ReaderError::DupKey {
@@ -126,6 +143,7 @@ mod tests {
     use crate::Reader;
     use crate::ReaderOpts;
     use crate::error::ReaderError;
+    use crate::hooks::NoHooks;
 
     #[test]
     fn delimited_eof_is_bare_without_line_numbers() {
@@ -136,7 +154,7 @@ mod tests {
             ..ReaderOpts::default()
         };
         let mut reader = Reader::new("(", &opts);
-        let err = reader.read_delimited(')').expect_err("eof");
+        let err = reader.read_delimited(')', &mut NoHooks).expect_err("eof");
         assert!(matches!(err, ReaderError::Eof { .. }), "{err:?}");
     }
 }

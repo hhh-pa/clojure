@@ -335,10 +335,11 @@ FX2 MapEntry (D-mapentry). Follow-ups found in-slice:
   `reversible?` landed in this slice (Reversible values;
   oracle true on vectors, subvectors, map entries, sorted
   colls, and `vector-of` — port matches the constructible
-  ones, `docs/t1192/probes/fx2b-reversible`); `flatten`/`tree-seq`/
-  `chunk-*` stay unimplemented, each with a non-resolution
-  pin (`ns_vars.rs fx2_tree_walk_vars_stay_unresolved`;
-  probe6 `flatten` rows stand as the oracle pins);
+  ones, `docs/t1192/probes/fx2b-reversible`); `flatten`/`tree-seq`
+  landed in zero-oos S3 and `chunk-first` in S12 (the old
+  `ns_vars.rs` non-resolution pin retired with both landings;
+  presence is covered by `coverage_matrix`; probe6 `flatten`
+  rows stand as the oracle pins);
   `instance?` stays permanent N1 out-of-scope (not
   a slice follow-up); the invoke fallback keeps the pinned
   §E8 cast text (oracle reports JDK — FX7 input) while

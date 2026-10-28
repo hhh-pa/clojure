@@ -280,33 +280,33 @@ mod tests {
 
     use clj_value::Value;
 
-    use crate::{ReaderError, ReaderOpts, read_str};
+    use crate::{NoHooks, ReaderError, ReaderOpts, read_str};
 
     #[test]
     fn string_formfeed_escape() {
         // `string_escape` formfeed arm.
-        let v = read_str("\"a\\fb\"", &ReaderOpts::default()).unwrap();
+        let v = read_str("\"a\\fb\"", &ReaderOpts::default(), &mut NoHooks).unwrap();
         assert_eq!(v, Value::Str(Arc::from("a\u{c}b")));
     }
 
     #[test]
     fn string_backspace_escape() {
         // `string_escape` backspace arm (oracled `(read-string "\"a\\bb\"")`).
-        let v = read_str("\"a\\bb\"", &ReaderOpts::default()).unwrap();
+        let v = read_str("\"a\\bb\"", &ReaderOpts::default(), &mut NoHooks).unwrap();
         assert_eq!(v, Value::Str(Arc::from("a\u{8}b")));
     }
 
     #[test]
     fn regex_backslash_at_eof() {
         // `regex_reader` EOF inside a backslash pair.
-        let err = read_str("#\"ab\\", &ReaderOpts::default()).unwrap_err();
+        let err = read_str("#\"ab\\", &ReaderOpts::default(), &mut NoHooks).unwrap_err();
         assert!(matches!(err, ReaderError::EofRegex { .. }), "got {err:?}");
     }
 
     #[test]
     fn string_octal_escape_rejects_non_octal_first_digit() {
         // `pushback_unicode_value` first-digit check.
-        let err = read_str("\"\\8\"", &ReaderOpts::default()).unwrap_err();
+        let err = read_str("\"\\8\"", &ReaderOpts::default(), &mut NoHooks).unwrap_err();
         assert!(matches!(err, ReaderError::BadDigit { .. }));
         assert_eq!(err.message(), "Invalid digit: 8");
     }
@@ -314,7 +314,7 @@ mod tests {
     #[test]
     fn string_short_unicode_escape_at_eof() {
         // `pushback_unicode_value` EOF break, exact length.
-        let err = read_str("\"\\u12", &ReaderOpts::default()).unwrap_err();
+        let err = read_str("\"\\u12", &ReaderOpts::default(), &mut NoHooks).unwrap_err();
         assert!(matches!(err, ReaderError::BadUnicodeLen { .. }));
         assert_eq!(err.message(), "Invalid character length: 2, should be: 4");
     }
@@ -323,7 +323,7 @@ mod tests {
     fn string_octal_escape_at_eof_ends_the_string_read() {
         // `pushback_unicode_value` EOF break, inexact length:
         // the escape resolves, then the string itself hits EOF.
-        let err = read_str("\"\\1", &ReaderOpts::default()).unwrap_err();
+        let err = read_str("\"\\1", &ReaderOpts::default(), &mut NoHooks).unwrap_err();
         assert!(matches!(err, ReaderError::EofString { .. }), "got {err:?}");
     }
 }

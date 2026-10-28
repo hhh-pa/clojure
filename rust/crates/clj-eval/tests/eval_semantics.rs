@@ -1419,13 +1419,17 @@ fn try_handler_throw_finally_ok() {
 fn source_error_display_renders_all_variants() {
     let (mut eval, _) = rigged();
     // Reader errors delegate to the inner display.
-    let err = eval.read_forms("(def").unwrap_err();
+    let err = eval
+        .read_forms("(def", &mut clj_reader::NoHooks)
+        .unwrap_err();
     let SourceError::Reader(inner) = &err else {
         panic!("expected a reader error, got {err:?}")
     };
     assert_eq!(format!("{err}"), format!("{inner}"));
     // Compile errors delegate to the inner display.
-    let forms = eval.read_forms("(def a 1 2)").unwrap();
+    let forms = eval
+        .read_forms("(def a 1 2)", &mut clj_reader::NoHooks)
+        .unwrap();
     let inner = eval.analyze(&forms[0]).unwrap_err();
     let err = SourceError::Compile(inner);
     let SourceError::Compile(inner) = &err else {

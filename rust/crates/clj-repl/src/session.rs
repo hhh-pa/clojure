@@ -67,7 +67,11 @@ pub fn is_incomplete_error(err: &SourceError) -> bool {
 /// default reader opts agree with the session's own read).
 #[must_use]
 pub fn read_is_complete(buf: &str) -> bool {
-    match clj_reader::read_all(buf, &clj_reader::opts::ReaderOpts::default()) {
+    match clj_reader::read_all(
+        buf,
+        &clj_reader::opts::ReaderOpts::default(),
+        &mut clj_reader::NoHooks,
+    ) {
         Ok(_) => true,
         Err(e) => !is_incomplete_message(&e.message()),
     }
@@ -219,7 +223,10 @@ impl<R: BufRead, W: Write> Session<R, W> {
     /// first error — or the incomplete verdict when the reader
     /// wants more lines.
     fn step(&mut self, buf: &str) -> Step {
-        let forms = match self.eval.read_forms(buf) {
+        // Live hooks (S7): the session evaluates `#=` during the
+        // read, like `-e` and `eval_source` (the completeness probe
+        // above stays hookless — it never evaluates).
+        let forms = match self.eval.read_forms_live(buf) {
             Ok(forms) => forms,
             Err(err) => {
                 if is_incomplete_error(&err) {

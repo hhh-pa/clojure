@@ -216,6 +216,14 @@ impl Agent {
         self.lock().error.clone()
     }
 
+    /// Outstanding actions: queued plus running (the JVM's
+    /// `getQueueCount`, which `await1` consults before awaiting).
+    #[must_use]
+    pub fn queue_count(&self) -> usize {
+        let inner = self.lock();
+        inner.queue.len() + usize::from(inner.running)
+    }
+
     /// The JVM class name.
     #[must_use]
     pub fn jvm_class(&self) -> &'static str {

@@ -144,6 +144,25 @@ impl CharStream {
         self.col -= 1;
     }
 
+    /// The logical read position: unread chars count as unconsumed
+    /// (S7 `read+string` capture brackets).
+    #[must_use]
+    pub fn capture_mark(&self) -> usize {
+        self.pos
+            .saturating_sub(usize::from(self.pushback.is_some()))
+    }
+
+    /// The normalized text consumed since `mark` (S7 `read+string`
+    /// capture; a mark past the position captures nothing).
+    #[must_use]
+    pub fn captured_since(&self, mark: usize) -> String {
+        self.chars
+            .get(mark..self.capture_mark())
+            .unwrap_or_default()
+            .iter()
+            .collect()
+    }
+
     /// Current 1-based line.
     #[must_use]
     pub fn line(&self) -> u32 {
@@ -399,6 +418,24 @@ mod tests {
         assert_eq!(t.read(), Some('a'));
         assert_eq!(t.read(), Some('\n'));
         assert_eq!(t.read(), None);
+    }
+
+    #[test]
+    fn capture_brackets_exclude_pushback() {
+        // S7 `read+string`: the mark/excluded-unread bracketing (an
+        // unread terminator belongs to neither side) and the
+        // defensive past-position mark.
+        let mut s = CharStream::new("42 43");
+        let mark = s.capture_mark();
+        assert_eq!(mark, 0);
+        assert_eq!(s.read(), Some('4'));
+        assert_eq!(s.read(), Some('2'));
+        assert_eq!(s.read(), Some(' '));
+        s.unread(' ');
+        assert_eq!(s.captured_since(mark), "42");
+        assert_eq!(s.capture_mark(), 2);
+        assert_eq!(s.captured_since(99), "");
+        assert_eq!(s.captured_since(3), "");
     }
 
     #[test]

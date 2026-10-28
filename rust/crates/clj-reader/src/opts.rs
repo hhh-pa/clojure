@@ -16,7 +16,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use clj_value::Keyword;
+use clj_value::{Keyword, Symbol};
 
 /// `:read-cond` handling: process conditionals, preserve them as
 /// [`Value::ReaderConditional`](clj_value::Value::ReaderConditional),
@@ -51,6 +51,36 @@ pub struct ReaderOpts {
     pub refers: HashMap<String, (String, String)>,
     /// Imported classes (`String` → `java.lang.String`).
     pub class_map: HashMap<String, String>,
+    /// Eval-side data-reader resolution (S6): the tag consult
+    /// runs read-side (table keys, then the `inst`/`uuid` defaults,
+    /// then the default-fn flag, else the `UnknownTag` throw), while
+    /// invocation stays eval-side (the reader cannot call fns).
+    /// Table hits and default-fn tags defer to `TaggedLiteral`
+    /// (logged as fired under `#_`); `inst`/`uuid` payloads
+    /// validate inline (valid ⇒ `TaggedLiteral`, invalid ⇒ the
+    /// spanful `TagInvoke` error). Off by default: standalone
+    /// reads keep throwing `UnknownTag`/`DataReader` as today.
+    pub data_readers: bool,
+    /// `*data-readers*` symbol keys at read start (S6): membership
+    /// defers the tag for eval-side invocation (non-symbol keys
+    /// never match, so the evaluator omits them).
+    pub data_reader_keys: HashSet<Symbol>,
+    /// `*data-readers*` JVM class when its value is neither nil nor
+    /// a lookupable (S6): any tag consulted then fails the
+    /// `ILookup` cast (`TableCce`), like the JVM's `RT.get`.
+    pub data_readers_borked: Option<String>,
+    /// `*default-data-reader-fn*` is bound (S6): tags matching
+    /// nothing else defer for the eval-side `[tag form]` call.
+    pub default_reader_fn: bool,
+    /// `*read-eval*`: `#=` applies when true, throws the gate text
+    /// when false (S7; load entries force true).
+    pub read_eval: bool,
+    /// `*suppress-read*`: seeds the tag-suppression flag (S7; only
+    /// `#tag` reads consult it, and only the entry binding seeds).
+    pub suppress_read: bool,
+    /// `*reader-resolver*` is bound: `::` and syntax-quote consult
+    /// the hook instead of the maps (S7).
+    pub resolver_bound: bool,
 }
 
 impl Default for ReaderOpts {
@@ -63,6 +93,13 @@ impl Default for ReaderOpts {
             aliases: HashMap::new(),
             refers: HashMap::new(),
             class_map: HashMap::new(),
+            data_readers: false,
+            data_reader_keys: HashSet::new(),
+            data_readers_borked: None,
+            default_reader_fn: false,
+            read_eval: true,
+            suppress_read: false,
+            resolver_bound: false,
         }
     }
 }

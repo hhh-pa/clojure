@@ -23,7 +23,7 @@
 
 use std::collections::HashMap;
 
-use clj_reader::{ReadCond, ReaderOpts, read_all};
+use clj_reader::{NoHooks, ReadCond, ReaderOpts, read_all};
 use clj_value::{Keyword, PrintOpts, Symbol, Value, pr_to_string};
 
 /// A corpus case (from `cases.edn`).
@@ -121,7 +121,7 @@ fn parse_keyword(v: &Value) -> Keyword {
 pub fn read_data_file(path: &std::path::Path) -> Value {
     let text = std::fs::read_to_string(path).unwrap();
     let opts = ReaderOpts::default();
-    let forms = read_all(&text, &opts).unwrap();
+    let forms = read_all(&text, &opts, &mut NoHooks).unwrap();
     assert_eq!(forms.len(), 1, "{} must hold one form", path.display());
     forms.into_iter().next().unwrap()
 }
@@ -298,6 +298,14 @@ pub fn case_opts(case: &Case, resolver: &Resolver) -> ReaderOpts {
         aliases: resolver.aliases.clone(),
         refers: resolver.refers.clone(),
         class_map: resolver.class_map.clone(),
+        // The corpus drives the standalone reader: defer mode stays
+        // off (S6 consults only on eval paths); the S7 gate fields
+        // ride the struct default.
+        data_readers: false,
+        data_reader_keys: std::collections::HashSet::new(),
+        data_readers_borked: None,
+        default_reader_fn: false,
+        ..ReaderOpts::default()
     }
 }
 
@@ -307,10 +315,10 @@ pub fn case_opts(case: &Case, resolver: &Resolver) -> ReaderOpts {
 pub fn run_ours(input: &str, opts: &ReaderOpts) -> Result<Vec<Value>, clj_reader::ReaderError> {
     let mut reader = clj_reader::Reader::new(input, opts);
     let mut forms = Vec::new();
-    if let Some(first) = reader.read_form(true)? {
+    if let Some(first) = reader.read_form(true, &mut NoHooks)? {
         forms.push(first);
     }
-    while let Some(v) = reader.read_form(false)? {
+    while let Some(v) = reader.read_form(false, &mut NoHooks)? {
         forms.push(v);
     }
     Ok(forms)
@@ -384,6 +392,7 @@ fn append_canon_body(out: &mut String, v: &Value, print_meta: bool) {
         | Value::Int(_)
         | Value::Double(_)
         | Value::BigInt(_)
+        | Value::BigInteger(_)
         | Value::BigDec(_)
         | Value::Ratio(_)
         | Value::Str(_)

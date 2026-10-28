@@ -1,0 +1,7 @@
+r10-divzero THROW java.lang.ArithmeticException|"Divide by zero"
+r10-divzero2 THROW java.lang.ArithmeticException|"Divide by zero"
+r10-negscale 1.23E+4M
+r10-zerobigdec 0.5M
+r10-exactbigdec 0.5M
+r10-divcarry 1E+1M
+r10-stickytie 0.18M

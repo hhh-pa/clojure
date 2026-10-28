@@ -985,68 +985,6 @@ fn current_ns_falls_back_on_foreign_star_ns() {
 }
 
 #[test]
-fn s9b_out_of_scope_vars_stay_unresolved() {
-    // S9B: `load-reader` stays unbound (the executor setters left
-    // this list in S10 — they now resolve as accept-and-record
-    // natives, pinned by `cellstaps.rs exec_record_*`). The absence
-    // pin runs under `boot()` (a bare harness would pass with
-    // everything unbound): `resolve` says nil, and both use
-    // positions surface the compile-error shape.
-    let mut eval = boot();
-    for name in ["load-reader"] {
-        assert_eq!(
-            run_last(&mut eval, &format!("(resolve '{name})")),
-            "nil",
-            "{name}"
-        );
-        for src in [format!("({name} 1)"), format!("(identity {name})")] {
-            let Err(SourceError::Compile(e)) = eval.eval_source(&src) else {
-                panic!("expected a compile error for {src}");
-            };
-            assert_eq!(
-                e.to_string(),
-                format!(
-                    "Syntax error compiling at (user:1:1).\njava.lang.RuntimeException | Unable to resolve symbol: {name} in this context"
-                ),
-                "{src}"
-            );
-        }
-    }
-}
-
-#[test]
-fn fx2_tree_walk_vars_stay_unresolved() {
-    // FX2 finding 11: `flatten`/`tree-seq` stay unbound
-    // (`reversible?` landed in FX2b; `chunk-first` landed in S12
-    // — issue #54 — so it resolves now). The lazy tree-walk
-    // machinery is a follow-up slice; probe6 `flatten` rows
-    // stand as the oracle pins. Same convention as
-    // `s9b_out_of_scope_vars_stay_unresolved`: under `boot()`,
-    // `resolve` says nil and both use positions surface the
-    // compile-error shape.
-    let mut eval = boot();
-    for name in ["flatten", "tree-seq"] {
-        assert_eq!(
-            run_last(&mut eval, &format!("(resolve '{name})")),
-            "nil",
-            "{name}"
-        );
-        for src in [format!("({name} 1)"), format!("(identity {name})")] {
-            let Err(SourceError::Compile(e)) = eval.eval_source(&src) else {
-                panic!("expected a compile error for {src}");
-            };
-            assert_eq!(
-                e.to_string(),
-                format!(
-                    "Syntax error compiling at (user:1:1).\njava.lang.RuntimeException | Unable to resolve symbol: {name} in this context"
-                ),
-                "{src}"
-            );
-        }
-    }
-}
-
-#[test]
 fn refer_entry_valued_filters() {
     // FX2 finding 14: an entry of symbols is a valid
     // `:only`/`:refer` sequential (`ns.rs check_sequential`
