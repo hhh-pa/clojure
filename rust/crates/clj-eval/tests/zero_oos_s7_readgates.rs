@@ -232,10 +232,12 @@ fn eval_reader_head_resolution() {
     // `c-quotehead`, `c-nofn`, `c-macrohead`: qualified heads resolve through
     // namespaces/aliases (unknown qualifiers fail the class
     // lookup); unresolvable heads report. (`c-classhead` pins
-    // "Can't resolve String" — but the port refers an import-stub
-    // `clojure.core/String` var holding a string, so the head
-    // resolves and fails the `IFn` cast instead; pre-existing
-    // house behavior, not S7's to change.)
+    // "Can't resolve String": the JVM's eval-reader resolves
+    // heads var-only (`RT.resolve`, no import-table consult), so
+    // `String` never resolves there — verified live on alpha10.
+    // S16's real import table replaced the old `clojure.core/String`
+    // import-stub var, retiring the stub-coincidence CCE this assert
+    // used to pin.)
     let mut eval = boot();
     assert_eq!(
         run_last(&mut eval, "(read-string \"#=(clojure.core/+ 1 2)\")"),
@@ -259,7 +261,7 @@ fn eval_reader_head_resolution() {
     );
     assert_eq!(
         uncaught(&mut eval, "(read-string \"#=(String 1)\")"),
-        "java.lang.ClassCastException | class java.lang.String cannot be cast to class clojure.lang.IFn (java.lang.String is in module java.base of loader 'bootstrap'; clojure.lang.IFn is in unnamed module of loader 'app')"
+        "java.lang.RuntimeException | Can't resolve String"
     );
     assert_eq!(
         uncaught(&mut eval, "(read-string \"#=(nosuchfn_xyz 1)\")"),
