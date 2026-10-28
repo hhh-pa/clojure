@@ -174,15 +174,21 @@ tests compare as sets). `(bases Object)` and `(supers
 Object)` are `nil` (`l-java.lang.Object`); interfaces
 have no superclass (`l-clojure.lang.ISeq`).
 
-Import-only rows (2): the port never *reports* these
-names (§1.4 pins the port's divergent simplifications),
-but they are tabled so `__import*` resolves them instead
-of `CNFE`ing on real classes:
+Import-only rows (4): the port never *reports* these
+names, but they are tabled so `__import*` resolves them
+instead of `CNFE`ing on real classes:
 `PersistentHashMap$ArrayNode$Seq`
 (`c-name-seq-bigmap-oo`) and
-`PersistentTreeMap$Seq` (`c-name-seq-sortedmap-oo`).
-More exotic `NodeSeq` variants stay unmapped (follow-up
-if ever needed, §2.2).
+`PersistentTreeMap$Seq` (`c-name-seq-sortedmap-oo`,
+§1.4 pins the port's divergent simplifications),
+plus `java.util.Calendar` (`[Object, Serializable,
+Cloneable, Comparable]`, required by
+`i-import-multi-ret`) and `java.sql.Date`
+(`[java.util.Date]`, required by
+`i-conflict-class`) — both ancestries verified live on
+the JVM by the §2.6 method. More exotic `NodeSeq`
+variants stay unmapped (follow-up if ever needed,
+§2.2).
 
 Synthetic rows (2, port-only, documented here — the
 oracle cannot produce them):

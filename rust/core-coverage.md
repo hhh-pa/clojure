@@ -4,7 +4,7 @@ The complete inventory of `clojure.core` in this port: every var,
 its conformance state, and — for exclusions — why it is excluded.
 If a var is not listed here, that is a file bug, not a silent gap.
 
-- **692 vars: 451 implemented, 1 divergent, 240 out of scope,
+- **692 vars: 465 implemented, 0 divergent, 227 out of scope,
   0 planned.** The port reports Clojure `1.13.0-alpha9`
   (`clojure-version`).
 - **Universe.** 692 rows = 685 JVM publics + 7 extra-universe rows: 4 port-visible JVM privates
@@ -60,7 +60,7 @@ Creating, finding, and wiring namespaces; loading code into them.
 | `ns-publics` | implemented | |
 | `ns-refers` | implemented | |
 | `ns-map` | implemented | |
-| `ns-imports` | divergent | always `{}`; no host classes (N1) |
+| `ns-imports` | implemented | explicit table (sorted), fresh-ns `{}`, coercions (classemu.rs ns_imports_table, ns_imports_coercions) |
 | `ns-unmap` | implemented | |
 | `ns-unalias` | implemented | |
 | `load` | implemented | file by path over `*load-path*` |
@@ -478,11 +478,11 @@ Significant vars with no port slice, grouped below by area with the reason. (Thr
 | `rand` | implemented | rng.rs natives mirroring `Math/random` formulas; re_rng.rs rand_rows |
 | `rand-int` | implemented | rng.rs `randomToLong` path; re_rng.rs rand_int_rows |
 | `shuffle` | implemented | Fisher-Yates over seqables (lazies realized); re_rng.rs shuffle_rows |
-| `instance?` | out-of-scope | interop (N1) |
-| `type` | out-of-scope | class-based; no slice |
-| `class` | out-of-scope | interop (N1) |
-| `bases` | out-of-scope | interop (N1) |
-| `supers` | out-of-scope | interop (N1) |
+| `instance?` | implemented | lattice membership, nil/nonclass/descriptor, var use, analyzer arities (classemu.rs instance_basics, instance_seq_rewrite, instance_var_calls, instance_arities, instance_errors, instance_descriptors) |
+| `type` | implemented | `:type` rule incl. falsy fall-through, arities (classemu.rs type_queries) |
+| `class` | implemented | per-kind incl. names, `nil`, class-of-class, arities (classemu.rs class_queries, class_names, class_value_semantics, hostdef_bases) |
+| `bases` | implemented | order/shape/nil/CCE/arity + the 214-row lattice + dynamic rules (classemu.rs bases_supers_queries, bases_supers_descriptors, lattice_static_rows, lattice_dynamic_rules, lattice_dynamic_names_unimportable) |
+| `supers` | implemented | set-shape/nil/CCE/arity, HostDef walks (classemu.rs bases_supers_queries, bases_supers_descriptors) |
 | `defmulti` | implemented | multimethods.rs multi_dispatch_* + multi_var_shape + multi_custom_default + multi_options_rejected + multi_no_method + multi_bad_dispatch + multi_class_dispatch_analog + multi_value_semantics + multi_native_arity_guards + multi_multifn_native_guards; S-typechain stage 3 (#33): dispatch fn + docstring/attr head, :default option only, exact-plus-default invoke |
 | `defmethod` | implemented | multimethods.rs multi_arity_methods + multi_defmethod_returns_multifn + multi_defmethod_guards + multi_defmethod_missing; S-typechain stage 3 (#33): single/multi-arity tails, answers the multifn |
 | `prefer-method` | implemented | multimethods.rs multi_prefer_method; S-typechain stage 3 (#33): edges stored, never consulted (hierarchy fenced) |
@@ -501,8 +501,8 @@ Significant vars with no port slice, grouped below by area with the reason. (Thr
 | `read-line` | implemented | 0-arity over *in* (nil at EOF); tests/io.rs instream_read_line_rows |
 | `line-seq` | implemented | core.clj eager-head Cons + lazy tail (accepts StreamReader by design); tests/io.rs instream_line_seq_rows |
 | `*in*` | implemented | dynamic root (stdin reader); tests/io.rs instream_in_shape_rows |
-| `import` | out-of-scope | interop (N1) |
-| `..` | out-of-scope | interop (N1) |
+| `import` | implemented | expansion, validation, return, conflicts, CNFE, no-defaults (classemu.rs import_expansions, import_pred_and_ret, import_validation, import_hidden_native, import_unknown, import_dup_and_conflicts, import_same_def_leniency, import_def_over_import, import_intern_refer_unmap, import_deftype_roundtrip, import_struct_name, import_fqn_still_rejected, import_ns_clause_still_rejected) |
+| `..` | implemented | expansion, threading, nil rule, arities + the member surface (classemu.rs dotdot_expansions, dotdot_threading, surface_tostring, surface_tostring_divergent, surface_equals_hashcode, surface_equals_expansions, surface_class_members, surface_hostdef, surface_gates, surface_throwable) |
 | `defprotocol` | implemented | protocols.rs proto_*; S-typechain stage 2 (#33): map descriptors (:on/:sigs/:impls/:interface), variadic dispatch fns |
 | `with-open` | implemented | protocols.rs with_open_*; S-typechain stage 2 (#33): Closeable contract, reverse-order finally closes |
 | `extend` | implemented | protocols.rs extend_*; S-typechain stage 2 (#33): map-form extends, bare-fn per-arity merge |
@@ -571,7 +571,7 @@ Significant vars with no port slice, grouped below by area with the reason. (Thr
 
 | var | status | notes |
 | --- | --- | --- |
-| `identical?` | out-of-scope | reference identity: no slice (values clone) |
+| `identical?` | implemented | per-kind table, rewrite agreement, var use, arities (classemu.rs identical_kinds, identical_inline, identical_arities, identical_first_class) |
 | `re-find` | implemented | re.rs over the `regex` crate (String patterns fail the `String` cast); re_rng.rs re_find_rows |
 | `re-matches` | implemented | re.rs full-match; re_rng.rs re_matches_rows |
 | `re-seq` | implemented | re.rs lazy match seq; re_rng.rs re_seq_rows |
@@ -687,7 +687,7 @@ No slice on this branch: hard-never reasons stand alone, design-blocked rows nam
 | `-reset-methods` | out-of-scope | No protocol slice on this branch (protocol track owns design) |
 | `EMPTY-NODE` | out-of-scope | No type-system slice on this branch: proxies/deftype factories/method internals |
 | `Inst` | out-of-scope | pending design: date/time value kind + #inst tag; see #40 |
-| `PrintWriter-on` | out-of-scope | java.io.PrintWriter adapter ctor; port Writer kind is separate |
+| `PrintWriter-on` | implemented | shape, buffer/flush/close, autoflush-dead, non-fn (classemu.rs printwriter_shape, printwriter_behavior, printwriter_edges) |
 | `StackTraceElement->vec` | out-of-scope | pending design: error-data shape; see #40 |
 | `Throwable->map` | out-of-scope | pending design: error-data shape; see #40 |
 | `accessor` | implemented | tests/collmisc.rs structmap_rows (basis-key reader; non-struct CCE) |
@@ -710,7 +710,7 @@ No slice on this branch: hard-never reasons stand alone, design-blocked rows nam
 | `aset-long` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
 | `aset-short` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
 | `await1` | out-of-scope | Public [a] await returning the agent; implemented await is [& agents] returning nil |
-| `bean` | out-of-scope | Host reflection/interop/beans/method-fns (N1) |
+| `bean` | implemented | per-kind key tables, eagerness, nil, map-ness (classemu.rs bean_basics, bean_keys) |
 | `bit-and` | out-of-scope | pending design: bitwise lattice over tower; see #40 |
 | `bit-and-not` | out-of-scope | pending design: bitwise lattice over tower; see #40 |
 | `bit-clear` | out-of-scope | pending design: bitwise lattice over tower; see #40 |
@@ -727,7 +727,7 @@ No slice on this branch: hard-never reasons stand alone, design-blocked rows nam
 | `byte-array` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
 | `bytes` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
 | `bytes?` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
-| `cast` | out-of-scope | Host reflection/interop/beans/method-fns (N1) |
+| `cast` | implemented | ok/miss/nil/nonclass/order/arity (classemu.rs cast_queries) |
 | `char-array` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
 | `char-escape-string` | implemented | 7-entry map; single-source w/ printer tables (S8: printsys.rs charmaps_rows; probes c-*) |
 | `char-name-string` | implemented | 6-entry map; single-source w/ printer tables (S8: printsys.rs charmaps_rows; probes c-*) |
@@ -740,7 +740,7 @@ No slice on this branch: hard-never reasons stand alone, design-blocked rows nam
 | `chunk-next` | implemented | tests/collmisc.rs chunk_rows (nil at end) |
 | `chunk-rest` | implemented | tests/collmisc.rs chunk_rows (() at end) |
 | `chunked-seq?` | implemented | tests/collmisc.rs chunk_rows (29-row battery) |
-| `class?` | out-of-scope | Host reflection/interop/beans/method-fns (N1) |
+| `class?` | implemented | true/false table, interfaces, arities (classemu.rs classq_queries) |
 | `clear-agent-errors` | out-of-scope | Deprecated on JVM; replacement implemented |
 | `comparator` | implemented | cellstaps.rs comparator_calls + comparator_sort + comparator_errors (verbatim core.clj body; cond keeps truthy preds ordering; sort/sorted-map-by interop) |
 | `compile` | out-of-scope | Bytecode compiler/classpath surface; port AOT (clj-aot) is separate |
@@ -782,7 +782,7 @@ No slice on this branch: hard-never reasons stand alone, design-blocked rows nam
 | `longs` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
 | `make-array` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
 | `make-hierarchy` | out-of-scope | pending design: hierarchy maps (coordinate with 33-typechain); see #40 |
-| `memfn` | out-of-scope | Host reflection/interop/beans/method-fns (N1) |
+| `memfn` | implemented | expansion, hint meta, calls, arity (classemu.rs memfn_tests) |
 | `method-sig` | out-of-scope | No type-system slice on this branch: proxies/deftype factories/method internals |
 | `mix-collection-hash` | implemented | tests/collmisc.rs mixhash_rows (int-checked longs) |
 | `munge` | out-of-scope | pending design: JVM munger escaping adoption; see #40 |
