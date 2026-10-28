@@ -4,7 +4,7 @@ The complete inventory of `clojure.core` in this port: every var,
 its conformance state, and — for exclusions — why it is excluded.
 If a var is not listed here, that is a file bug, not a silent gap.
 
-- **692 vars: 587 implemented, 1 divergent, 104 out of scope,
+- **692 vars: 607 implemented, 1 divergent, 84 out of scope,
   0 planned.** The port reports Clojure `1.13.0-alpha9`
   (`clojure-version`).
 - **Universe.** 692 rows = 685 JVM publics + 7 extra-universe rows: 4 port-visible JVM privates
@@ -678,14 +678,14 @@ No slice on this branch: hard-never reasons stand alone, design-blocked rows nam
 | `*verbose-defrecords*` | out-of-scope | Bytecode compiler/classpath surface; port AOT (clj-aot) is separate |
 | `+'` | implemented | core.rs native_add_prime (promoting fold; 1-arity `Number` cast); tests/extarith.rs s11_add_prime_rows (S11, #56; probes `ap-*`, `a2-add*`) |
 | `-'` | implemented | core.rs native_sub_prime (promoting fold/negate); tests/extarith.rs s11_sub_prime_rows (S11, #56; probes `sp-*`, `a2-subchar`) |
-| `->ArrayChunk` | out-of-scope | No type-system slice on this branch: proxies/deftype factories/method internals |
-| `->Eduction` | out-of-scope | No type-system slice on this branch: proxies/deftype factories/method internals |
-| `->Vec` | out-of-scope | No type-system slice on this branch: proxies/deftype factories/method internals |
-| `->VecNode` | out-of-scope | No type-system slice on this branch: proxies/deftype factories/method internals |
-| `->VecSeq` | out-of-scope | No type-system slice on this branch: proxies/deftype factories/method internals |
-| `-cache-protocol-fn` | out-of-scope | No protocol slice on this branch (protocol track owns design) |
-| `-reset-methods` | out-of-scope | No protocol slice on this branch (protocol track owns design) |
-| `EMPTY-NODE` | out-of-scope | No type-system slice on this branch: proxies/deftype factories/method internals |
+| `->ArrayChunk` | implemented | S14 opaque `Handle` (`[am arr off end]`, `.-field` reads); typeinternals.rs factory_print_shapes, factory_arities, factory_fields (S14, #58) |
+| `->Eduction` | implemented | S14 native `Eduction` value; typeinternals.rs eduction_factory_is_native, factory_arities (S14, #58) |
+| `->Vec` | implemented | S14 opaque `Handle` (6 fields; opaque, never `vector?`); typeinternals.rs factory_print_shapes, factory_arities, factory_fields, factory_predicates, handle_opacity_errors (S14, #58) |
+| `->VecNode` | implemented | S14 opaque `Handle` (1-or-2-arity; 1-arity defaults `arr` to 32 nils); typeinternals.rs vecnode_one_arity_and_empty_node, factory_print_shapes, factory_arities, factory_fields (S14, #58) |
+| `->VecSeq` | implemented | S14 opaque `Handle` (6 fields); typeinternals.rs factory_print_shapes, factory_arities, factory_fields, handle_opacity_errors (S14, #58) |
+| `-cache-protocol-fn` | implemented | S14 cache-fill lookup over the live registry (no stored cache; `Not a protocol fn` for unregistered fns); typeinternals.rs cache_protocol_fn_rows, cache_protocol_fn_errors (S14, #58) |
+| `-reset-methods` | implemented | S14 total no-op answering nil (no cache to rebuild); typeinternals.rs reset_methods_rows (S14, #58) |
+| `EMPTY-NODE` | implemented | S14 `(->VecNode nil <32 nils>)` def; typeinternals.rs vecnode_one_arity_and_empty_node (S14, #58) |
 | `Inst` | implemented | S9 defprotocol + java.util.Date extension (hidden __inst_millis* millis reader); scalarkinds.rs inst_protocol_shape, inst_user_extension |
 | `PrintWriter-on` | out-of-scope | java.io.PrintWriter adapter ctor; port Writer kind is separate |
 | `StackTraceElement->vec` | out-of-scope | pending design: error-data shape; see #40 |
@@ -744,7 +744,7 @@ No slice on this branch: hard-never reasons stand alone, design-blocked rows nam
 | `clear-agent-errors` | implemented | S5: core.clj `(restart-agent a @a)` + `:deprecated "1.2"`; zero_oos_s5_state.rs deprecated_trio_rows |
 | `comparator` | implemented | cellstaps.rs comparator_calls + comparator_sort + comparator_errors (verbatim core.clj body; cond keeps truthy preds ordering; sort/sorted-map-by interop) |
 | `compile` | out-of-scope | Bytecode compiler/classpath surface; port AOT (clj-aot) is separate |
-| `construct-proxy` | out-of-scope | No type-system slice on this branch: proxies/deftype factories/method internals |
+| `construct-proxy` | implemented | S14 proxy instance of the named class (nil fn map; no ctor args); typeinternals.rs construct_proxy_rows, construct_proxy_errors (S14, #58) |
 | `create-struct` | implemented | tests/collmisc.rs structmap_rows |
 | `dec'` | implemented | core.rs native_dec_prime (promoting step; `inc'` retargeted at the promoting step — in-slice fix); tests/extarith.rs s11_prime_steps_rows (S11, #56; probes `dp-*`, `ip-*`) |
 | `default-data-readers` | implemented | S6 map var (`inst`/`uuid` natives); zero_oos_s6_datareaders.rs default_data_readers_table, default_readers_direct_calls |
@@ -756,17 +756,17 @@ No slice on this branch: hard-never reasons stand alone, design-blocked rows nam
 | `double-array` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
 | `doubles` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
 | `enumeration-seq` | out-of-scope | JDK collection/stream adapters (N1) |
-| `extenders` | out-of-scope | pending design: protocol surface (protocol track owns design); see #40 |
+| `extenders` | implemented | S14 `(keys (:impls p))` as class-name strings (total; nil when empty); typeinternals.rs extenders_rows (S14, #58) |
 | `file-seq` | implemented | tests/collmisc.rs fileseq_rows (string walk; classes/File unrepresentable) |
-| `find-protocol-impl` | out-of-scope | No protocol slice on this branch (protocol track owns design) |
-| `find-protocol-method` | out-of-scope | No protocol slice on this branch (protocol track owns design) |
+| `find-protocol-impl` | implemented | S14 class walk over `:impls` (inline answers x; normalized `{kw → fn}`); typeinternals.rs find_protocol_impl_rows, find_protocol_errors (S14, #58) |
+| `find-protocol-method` | implemented | S14 `(get (find-protocol-impl p x) methodk)`; typeinternals.rs find_protocol_method_walk, find_protocol_method_edges, find_protocol_errors, find_multi_arity_and_pref, nil_extension_row (S14, #58) |
 | `float-array` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
 | `floats` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
-| `get-proxy-class` | out-of-scope | No type-system slice on this branch: proxies/deftype factories/method internals |
+| `get-proxy-class` | implemented | S14 proxy class-name string (`Object` default; strings-or-defs); typeinternals.rs get_proxy_class_rows, get_proxy_class_errors (S14, #58) |
 | `hash-combine` | implemented | tests/collmisc.rs mixhash_rows (Util/hash path; tower y structural, §2.4) |
 | `hash-ordered-coll` | implemented | cellstaps.rs hash_ordered_values + hash_ordered_errors (Murmur3 ordered mix; maps iterate entries; nil NPE + non-Iterable CCE) |
 | `hash-unordered-coll` | implemented | cellstaps.rs hash_unordered_values (Murmur3 unordered mix; vec-order-insensitive; entry = ordered [k v]; nil NPE) |
-| `init-proxy` | out-of-scope | No type-system slice on this branch: proxies/deftype factories/method internals |
+| `init-proxy` | implemented | S14 replaces the proxy fn map (answers the proxy); typeinternals.rs proxy_mappings_round_trip, proxy_mutation_errors (S14, #58) |
 | `inst-ms` | implemented | S9 core.clj over inst-ms* (cutover-calendar millis); scalarkinds.rs inst_ms_failures; scalars.rs inst_ms_over_instants |
 | `inst-ms*` | implemented | S9 protocol method (macro-generated dispatch fn); scalarkinds.rs inst_user_extension |
 | `inst?` | implemented | S9 satisfies? over Inst; scalarkinds.rs inst_predicate_matches_satisfies; scalars.rs inst_pred_over_instant |
@@ -783,7 +783,7 @@ No slice on this branch: hard-never reasons stand alone, design-blocked rows nam
 | `make-array` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
 | `make-hierarchy` | implemented | hierarchy.rs hier_make_and_explicit_derive (S13, #57; probes h-make) |
 | `memfn` | out-of-scope | Host reflection/interop/beans/method-fns (N1) |
-| `method-sig` | out-of-scope | No type-system slice on this branch: proxies/deftype factories/method internals |
+| `method-sig` | implemented | S14 `[name params return]` triple normalizer (port descriptor contract); typeinternals.rs method_sig_rows, method_sig_errors (S14, #58) |
 | `mix-collection-hash` | implemented | tests/collmisc.rs mixhash_rows (int-checked longs) |
 | `munge` | implemented | core.rs native over ext.rs compiler_munge (true Compiler table; symbol-preserving); tests/zero_oos_s4b_macros.rs s4b_munge_rows |
 | `namespace-munge` | implemented | core.rs native (`str` + `-`→`_`); tests/zero_oos_s4b_macros.rs s4b_namespace_munge_rows |
@@ -796,10 +796,10 @@ No slice on this branch: hard-never reasons stand alone, design-blocked rows nam
 | `print-dup` | implemented | booted multifn, token dispatch, no :default (S8: printsys.rs dispatch_rows + dup_rows; probes m-*/d-*/p-*) |
 | `print-method` | implemented | booted multifn, :type-or-token dispatch, chaining :default (S8: printsys.rs dispatch_rows; probes m-*) |
 | `print-simple` | implemented | [o w] meta+str writer (S8: printsys.rs simple_ctor_rows; probes s-*/s2-*) |
-| `proxy-call-with-super` | out-of-scope | No type-system slice on this branch: proxies/deftype factories/method internals |
-| `proxy-mappings` | out-of-scope | No type-system slice on this branch: proxies/deftype factories/method internals |
-| `proxy-name` | out-of-scope | No type-system slice on this branch: proxies/deftype factories/method internals |
-| `proxy-super` | out-of-scope | No type-system slice on this branch: proxies/deftype factories/method internals |
+| `proxy-call-with-super` | implemented | S14 masks one mapping during `(call)`, restores after; typeinternals.rs proxy_call_with_super_rows (S14, #58) |
+| `proxy-mappings` | implemented | S14 reads the proxy fn map (nil until initialized); typeinternals.rs proxy_mappings_round_trip, proxy_mutation_errors, construct_proxy_rows, proxy_multi_arity_cell (S14, #58) |
+| `proxy-name` | implemented | S14 JVM name string (munged ns, sorted ifaces, set hash); typeinternals.rs proxy_name_shapes, proxy_name_errors (S14, #58) |
+| `proxy-super` | implemented | S14 core.clj macro (port `.meth` call shape, captures `this`); typeinternals.rs proxy_super_macro (S14, #58) |
 | `random-uuid` | implemented | S9 v4 over the rng.rs source (version/variant stamping); scalarkinds.rs random_uuid_bits |
 | `re-groups` | implemented | tests/collmisc.rs rematcher_rows (ISE w/o match; non-handle CCE) |
 | `re-matcher` | implemented | tests/collmisc.rs rematcher_rows (stateful handle; re-find companion) |
@@ -859,7 +859,7 @@ No slice on this branch: hard-never reasons stand alone, design-blocked rows nam
 | `unquote` | implemented | core.clj bare unbound def (syntax-quote support surface; expansion still reader/analyzer-owned); tests/zero_oos_s4b_macros.rs s4b_unquote_rows |
 | `unquote-splicing` | implemented | core.clj bare unbound def (syntax-quote support surface; expansion still reader/analyzer-owned); tests/zero_oos_s4b_macros.rs s4b_unquote_rows |
 | `unsigned-bit-shift-right` | implemented | core.rs 2-arity Java `>>>` (count masked); tests/extarith.rs s11_bit_shift_rows (S11, #56; probes `ubs-*`, `ev-ubs`) |
-| `update-proxy` | out-of-scope | No type-system slice on this branch: proxies/deftype factories/method internals |
+| `update-proxy` | implemented | S14 assocs onto the proxy fn map (nil reverts to super; answers the proxy); typeinternals.rs proxy_mappings_round_trip, proxy_mutation_errors, proxy_protocol_inline_limitation (S14, #58) |
 | `uri?` | implemented | S9 pred1 over Value::Uri (false battery; kind arms unit-tested in scalar.rs); scalarkinds.rs uri_predicate_battery |
 | `uuid?` | implemented | S9 pred1 over Value::Uuid; scalarkinds.rs uuid_predicate_battery |
 | `vector-of` | out-of-scope | pending design: primitive-vector kind; see #40 |

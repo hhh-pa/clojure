@@ -554,6 +554,7 @@ mod tests {
             def,
             content: crate::new_map(),
             meta: None,
+            proxy_map: None,
         })));
         assert_eq!(type_name(&v), "user.T");
         assert_eq!(

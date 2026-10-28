@@ -916,6 +916,7 @@ impl Value {
                     def: i.def.clone(),
                     content: i.content.clone(),
                     meta,
+                    proxy_map: i.proxy_map.clone(),
                 }))),
                 HostVal::Def(_) => Value::HostType(h.clone()),
             },
@@ -2471,6 +2472,7 @@ mod tests {
             def: def.clone(),
             content: new_map(),
             meta: None,
+            proxy_map: None,
         })))
     }
 

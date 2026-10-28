@@ -40,6 +40,7 @@ pub mod reader;
 pub mod rng;
 pub mod scalars;
 pub mod seqs;
+pub mod typeinternals;
 pub mod types;
 pub mod vars;
 pub mod xform;

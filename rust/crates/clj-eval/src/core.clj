@@ -1162,6 +1162,18 @@
       args
       (emit-type-methods "proxy" triples))))
 
+;; S14: call the superclass method from a proxy method body. The
+;; call takes the port `.meth` shape (the JVM's `.`-head
+;; `(. this meth …)` interop form does not exist here); like the
+;; JVM it captures `this`, which the caller binds, since port
+;; proxy fns exclude it.
+(defmacro proxy-super [meth & args]
+  (list 'clojure.core/proxy-call-with-super
+    (list 'clojure.core/fn []
+      (apply list (symbol (str "." (name meth))) 'this args))
+    'this
+    (name meth)))
+
 (defmacro definterface [name & args]
   (let [{:keys [doc attr sigs]} (parse-iface-head "definterface" name args)]
     (doseq [s sigs]
@@ -1279,15 +1291,19 @@
                              parsed))
         ;; One variadic arity per method: every call reaches
         ;; `__protocol_invoke*`, so its oracle arity error (not the
-        ;; fn's own `ArityException`) fires on bad counts.
-        fns (map (fn [{:keys [m doc]}]
-                   (apply list 'clojure.core/defn m
-                     (concat (when doc [doc])
-                             (list (list '[this & args]
-                                     (list 'clojure.core/__protocol_invoke*
-                                       (list 'var name) (str m)
-                                       (list 'clojure.core/into '[this] 'args)))))))
-                 parsed)]
+        ;; fn's own `ArityException`) fires on bad counts. Each
+        ;; `defn` is followed by its S14 `__protocol_method*`
+        ;; registration (the `-cache-protocol-fn` cache identity).
+        fns (mapcat (fn [{:keys [m doc]}]
+                      [(apply list 'clojure.core/defn m
+                         (concat (when doc [doc])
+                                 (list (list '[this & args]
+                                         (list 'clojure.core/__protocol_invoke*
+                                           (list 'var name) (str m)
+                                           (list 'clojure.core/into '[this] 'args))))))
+                       (list 'clojure.core/__protocol_method*
+                         (list 'var name) (str m) m)])
+                    parsed)]
     (list 'do
       (list 'def iface-sym
         (list 'clojure.core/__interface* ns-str (str name) iface-sigs))
@@ -1378,6 +1394,10 @@
 (def Double "java.lang.Double")
 (def Boolean "java.lang.Boolean")
 (def Object "java.lang.Object")
+
+;; S14: the shared empty gvec node, `(VecNode. nil
+;; (object-array 32))` — a 32-nil vector stands for the array.
+(def EMPTY-NODE (->VecNode nil (vec (repeat 32 nil))))
 
 (defmacro with-open [bindings & body]
   (when-not (vector? bindings)

@@ -23,7 +23,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::{Map, Value};
+use crate::{Atom, Map, Value};
 
 /// What a [`HostDef`] describes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -41,6 +41,10 @@ pub enum HostKind {
     Interface,
     /// `gen-class`: constructable, methods forward to `prefix` fns.
     GenClass,
+    /// Opaque JVM-internal handle (S14 `->Vec` / `->VecNode` /
+    /// `->VecSeq` / `->ArrayChunk`): positional fields, VALUE
+    /// equality (same class name plus equal content), never a map.
+    Handle,
 }
 
 /// One method implementation: fixed arity plus the closure value.
@@ -92,6 +96,12 @@ pub struct HostInst {
     pub def: Arc<HostDef>,
     pub content: Map,
     pub meta: Option<Map>,
+    /// The proxy fn map cell (S14): `Some` exactly on proxy
+    /// instances (`takes_this == false`), holding the
+    /// `{string-name → fn-or-nil}` map verbatim (`nil` until
+    /// initialized). Never content (hash/print/equality stay
+    /// exactly as without it).
+    pub proxy_map: Option<Atom>,
 }
 
 /// A port-defined type value: descriptor or instance.
@@ -172,12 +182,13 @@ pub fn class_name(ns: &str, name: &str) -> String {
 
 /// Host `=`: descriptors compare by identity (a re-`def` mints a new
 /// type, like the JVM's new class); records compare same-type plus
-/// content; struct instances compare by content alone (even across
-/// bases — oracle `sm-cross-basis`); every other instance compares
-/// by identity, so two separately constructed values are never `=`
-/// (oracle `dtor-eq`). Records never equal plain maps (oracle
-/// `rec-eq-map`); structs do (oracle `sm-eq-map`), via the
-/// struct/map arms in `value.rs` (host pairs only meet here).
+/// content, as do `Handle` instances (same shared def plus equal
+/// field content — S14); struct instances compare by content alone
+/// (even across bases — oracle `sm-cross-basis`); every other
+/// instance compares by identity, so two separately constructed
+/// values are never `=` (oracle `dtor-eq`). Records never equal
+/// plain maps (oracle `rec-eq-map`); structs do (oracle `sm-eq-map`),
+/// via the struct/map arms in `value.rs` (host pairs only meet here).
 /// Callers check `Arc::ptr_eq` first, so `(= p p)` stays true.
 #[must_use]
 pub fn host_eq(a: &HostVal, b: &HostVal) -> bool {
@@ -188,8 +199,7 @@ pub fn host_eq(a: &HostVal, b: &HostVal) -> bool {
                 return x.content == y.content;
             }
             Arc::ptr_eq(&x.def, &y.def)
-                && x.def.kind == HostKind::Record
-                && y.def.kind == HostKind::Record
+                && matches!(x.def.kind, HostKind::Record | HostKind::Handle)
                 && x.content == y.content
         }
         _ => false,

@@ -677,6 +677,7 @@ struct SharedInner {
     gensym: u64,
     eval_seq: u64,
     alter_locks: HashMap<u64, Arc<VarAlterLock>>,
+    protocol_fn_methods: HashMap<u64, crate::typeinternals::ProtocolFnInfo>,
 }
 
 /// Per-var reentrant alter lock (T1192 FX1): mirrors the JVM's
@@ -724,6 +725,7 @@ impl Default for SharedRegistry {
                 gensym: 1,
                 eval_seq: 0,
                 alter_locks: HashMap::new(),
+                protocol_fn_methods: HashMap::new(),
             })),
         }
     }
@@ -756,6 +758,18 @@ impl SharedRegistry {
         let mut inner = self.lock();
         inner.fn_seq += 1;
         inner.fn_seq
+    }
+
+    /// Record a protocol method fn's cache identity (S14
+    /// `__protocol_method*`, emitted by `defprotocol`).
+    pub(crate) fn note_protocol_fn(&self, id: u64, info: crate::typeinternals::ProtocolFnInfo) {
+        self.lock().protocol_fn_methods.insert(id, info);
+    }
+
+    /// A protocol method fn's cache identity, if registered
+    /// (S14 `-cache-protocol-fn`).
+    pub(crate) fn protocol_fn_info(&self, id: u64) -> Option<crate::typeinternals::ProtocolFnInfo> {
+        self.lock().protocol_fn_methods.get(&id).cloned()
     }
 
     /// The next `gensym` counter value.

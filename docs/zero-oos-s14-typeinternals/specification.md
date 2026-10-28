@@ -79,10 +79,10 @@ slice's to change.
   lower-hex set hash (probes `a-name-*`). Inputs are
   class-name strings or `HostDef` values (anything answering
   a class uses class-name strings until S16's `Class` values
-  land); anything else is the house `Cannot cast … to
-  java.lang.Class` (probe `a-name-noclass`), nil included
-  (the JVM NPEs, probe `a-name-nil` — the JDK text is
-  unpinnable, so the house cast error stands).
+  land); anything else is the shared `cce_message` `Class`
+  cast (the exact JVM text, probe `a-name-noclass`), nil
+  included (the JVM NPEs, probe `a-name-nil` — the JDK text
+  is unpinnable, so the cast stands).
 - `get-proxy-class [& bases]` answers the proxy class-name
   string (S16 upgrades answers to `Class` values). The first
   base is the superclass unless it is an interface def, in
@@ -108,7 +108,7 @@ slice's to change.
   false`, no claimable interfaces (the name does not parse
   back), empty method table, and a NIL fn map (probe
   `c-mappings-fresh`). `c` must be a class-name string
-  (else the house `Class` cast, probe `c-nonclass`); any
+  (else the shared `Class` cast, probe `c-nonclass`); any
   ctor args are `No matching ctor found for class {c}`
   (probe `c-ctor-args`).
 - Proxy instances grow a `proxy_map: Option<Atom>` cell on
@@ -122,9 +122,9 @@ slice's to change.
   assocs onto it (`nil` values stay visible, probe `d-nil`;
   over a nil map `assoc` builds from `{}`, like the JVM).
   `proxy-mappings` reads the cell (nil until initialized).
-  Non-proxy first args are the house `Cannot cast … to
-  clojure.lang.IProxy`; non-map mappings are the house
-  `Cannot cast … to clojure.lang.IPersistentMap` (probes
+  Non-proxy first args are the shared `cce_message`
+  `IProxy` cast; non-map mappings are the
+  `IPersistentMap` cast (exact JVM texts — probes
   `d-init-nonproxy`, `d-init-nonmap`, `d-update-nonproxy`,
   `d-update-nonmap`, `d-mappings-nonproxy`). Both mutators
   return the identical proxy (probe `d-init`).
@@ -142,13 +142,15 @@ slice's to change.
   (probe `f-super`, `f-restored`); `this` must be a proxy
   (same `IProxy` cast). `meth` is unvalidated (like the
   JVM's `assoc`).
-- `proxy-super [meth & args]` is a macro expanding exactly
-  to `(proxy-call-with-super (fn [] (. this meth args…))
-  this "meth")` (probe `f-macro`). It captures `this`, so
-  on the port — where proxy method fns exclude `this`
-  (#33) — it resolves wherever the caller binds `this`
-  (pinned via an explicit binding; probe `f-supermacro`
-  shows the JVM shape).
+- `proxy-super [meth & args]` is a macro expanding to
+  `(proxy-call-with-super (fn [] (.meth this args…)) this
+  "meth")` — the JVM expansion modulo the call shape (probe
+  `f-macro` shows `(. this meth …)`, whose `.`-head
+  interop form does not exist on the port). It captures
+  `this`, so on the port — where proxy method fns exclude
+  `this` (#33) — it resolves wherever the caller binds
+  `this` (pinned via an explicit binding; probe
+  `f-supermacro` shows the JVM call working).
 - `method-sig [triple]` ports the JVM triple shape
   `[name-string params-seq-or-nil return]` (probes
   `e-tostring`, `e-valueof`, `e-shape`). The JVM input
@@ -157,8 +159,9 @@ slice's to change.
   `[name params return]` (vector or seq): malformed input
   is `IllegalArgumentException: method-sig requires a
   [name params return] triple`, a non-string name is the
-  house `String` cast, non-nil non-sequential params are
-  `IllegalArgumentException: method-sig params must be nil
+  shared `cce_message` `String` cast, non-nil non-sequential
+  params are `IllegalArgumentException: method-sig params
+  must be nil
   or sequential`. The answer re-seqs params (`[]` → nil).
 
 ## Protocol introspection
@@ -204,12 +207,12 @@ slice's to change.
   fns register `(closure-id → var, method-name)` in the
   evaluator via a hidden `__protocol_method*` call the
   macro emits after each `defn`. Checks run left to right
-  (probe `G`): a non-fn `pf` is the house `AFunction` cast;
+  (probe `G`): a non-fn `pf` is the shared `AFunction` cast (exact JVM text);
   an unregistered fn is `IllegalArgumentException: Not a
   protocol fn` (the JVM NPEs reading the null cache, probe
   `d-badpf` — JDK text unpinnable); `c` takes class-name
-  strings and defs (else the house `Class` cast); a
-  non-IFn `interf` is the house `IFn` cast. An `x`
+  strings and defs (else the shared `Class` cast); a
+  non-IFn `interf` is the shared `IFn` cast. An `x`
   implementing `c` (lattice membership) answers `interf`
   (probe `d-interf`); otherwise the `find-protocol-method`
   hit answers (probe `d-hit`), and a miss throws the

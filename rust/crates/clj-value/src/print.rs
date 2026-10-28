@@ -1602,6 +1602,7 @@ mod tests {
             def: d,
             content: crate::new_map(),
             meta: None,
+            proxy_map: None,
         })));
         let s = java_debug(&inst);
         assert!(
