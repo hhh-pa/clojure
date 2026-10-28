@@ -1,7 +1,6 @@
 # Zero-oos S18: compiler surface — Specification
 
-- Status: spec + oracle probes committed; no source edits.
-  Implementer follows §1.10 then §2.7.
+- Status: implemented; under review (PR #75, review loop).
 - Parent: out-of-scope reduction. Issue: #62.
   Branch: `zero-oos-s18-compiler`.
 - Probes: `docs/zero-oos-s18-compiler/probes/`
@@ -328,7 +327,10 @@ and `File`s are unrepresentable under N1, so `a-broken-url`/
 contains-guarded `conj` onto `*load-path*` (nil normalizes to
 `[]` first, preserving the append invariant; non-vector rebound
 colls get `conj` semantics with append guaranteed for the vector
-shape). Answers nil (`a-ret`).
+shape). Answers nil (`a-ret`). The `conj` lands on the root: a
+thread-local `*load-path*` binding shadows the add until it pops
+(the JVM mutates global state instead — unobservable here: no
+test or realistic caller adds under a binding).
 
 | Label | Contract |
 | --- | --- |
