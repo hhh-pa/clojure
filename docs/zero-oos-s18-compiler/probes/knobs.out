@@ -1,0 +1,48 @@
+k-compile-path "classes"
+k-compile-files false
+k-compiler-options nil
+k-source-path "knobs.clj"
+k-fn-loader "nil"
+k-fn-loader-val nil
+k-use-context true
+k-verbose false
+k-dyn-compile-path nil
+k-dyn-compile-files nil
+k-dyn-compiler-options nil
+k-dyn-source-path nil
+k-dyn-fn-loader nil
+k-dyn-use-context nil
+k-dyn-verbose true
+k-dyn-prims nil
+k-added-compile-path "1.0"
+k-added-compile-files "1.0"
+k-added-compiler-options "1.4"
+k-doc-compile-path "Specifies the directory where 'compile' will write out .class\n  files. This directory must be in the classpath for 'compile' to\n  work.\n\n  Defaults to \"classes\""
+k-doc-compile-files "Set to true when compiling files, false otherwise."
+k-doc-compiler-options "A map of keys to options.\n  Note, when binding dynamically make sure to merge with previous value.\n  Supported options:\n  :elide-meta - a collection of metadata keys to elide during compilation.\n  :disable-locals-clearing - set to true to disable clearing, useful for using a debugger\n  :direct-linking - set to true to use direct static invocation of functions, rather than vars\n    Note that call sites compiled with direct linking will not be affected by var redefinition.\n    Use ^:redef (or ^:dynamic) on a var to prevent direct linking and allow redefinition.\n  See https://clojure.org/reference/compilation for more information."
+k-verbose-doc nil
+k-addcp-meta ["1.0" "1.1"]
+k-addcp-doc "DEPRECATED \n\n  Adds the url (String or URL object) to the classpath per\n  URLClassLoader.addURL"
+k-bind-compile-path "/tmp/x"
+k-bind-use-context false
+k-bind-options {:a 1}
+k-verbose-false "#user.Rec[1]"
+k-verbose-true "#user.Rec{:x 1}"
+k-verbose-default "#user.Rec[1]"
+k-root-compile-path nil
+k-root-compile-files false
+k-root-compiler-options nil
+k-root-source-path "NO_SOURCE_FILE"
+k-root-fn-loader nil
+k-root-use-context true
+k-root-verbose false
+k-eval-source "knobs.clj"
+k-eval-fnloader nil
+k-prims-count 8
+k-prims-vals ("Boolean/TYPE" "Byte/TYPE" "Character/TYPE" "Double/TYPE" "Float/TYPE" "Integer/TYPE" "Long/TYPE" "Short/TYPE")
+k-prims-keys ("boolean" "byte" "char" "double" "float" "int" "long" "short")
+k-prims-lookup "Long/TYPE"
+k-prims-miss nil
+k-prims-fn? false
+k-prims-dup "#=(identity Long/TYPE)"
+k-prims-nodup "long"

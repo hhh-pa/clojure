@@ -1,0 +1,41 @@
+c-ret my.ret
+c-ret-class "clojure.lang.Symbol"
+c-files ("my/plain$f.class" "my/plain$fn__N.class" "my/plain$loading__N__auto____N.class" "my/plain__init.class")
+c-ns-loaded true
+c-loaded-libs true
+c-false-files ()
+c-false-eval "plain"
+c-true-load ("my/plain$f.class" "my/plain$fn__N.class" "my/plain$loading__N__auto____N.class" "my/plain__init.class")
+c-flag-truthy ("my/plain$f.class" "my/plain$fn__N.class" "my/plain$loading__N__auto____N.class" "my/plain__init.class")
+c-twice 2
+c-captured {:compile-files true, :compile-path "<ROOT>/classes", :file "my/ctx.clj", :fn-loader "nil", :options nil, :source-path "ctx.clj", :use-context true, :verbose false}
+c-use-true my.use-t
+c-use-false my.use-f
+c-missing THROW java.io.FileNotFoundException|"Could not locate no/such/lib__init.class, no/such/lib.clj or no/such/lib.cljc on classpath."
+c-arity0 THROW clojure.lang.ArityException|"Wrong number of args (0) passed to: clojure.core/compile"
+c-arity2 THROW clojure.lang.ArityException|"Wrong number of args (2) passed to: clojure.core/compile"
+c-str THROW java.lang.ClassCastException|"class java.lang.String cannot be cast to class clojure.lang.Symbol (java.lang.String is in module java.base of loader 'bootstrap'; clojure.lang.Symbol is in unnamed module of loader 'app')"
+c-num THROW java.lang.ClassCastException|"class java.lang.Long cannot be cast to class clojure.lang.Named (java.lang.Long is in module java.base of loader 'bootstrap'; clojure.lang.Named is in unnamed module of loader 'app')"
+c-broken THROW java.lang.RuntimeException|"Unable to resolve symbol: no-such-fn-xyz in this context"
+c-broken-unmarked true
+c-mismatch THROW java.lang.Exception|"namespace 'my.mismatch' not found after loading '/my/mismatch'"
+c-nil-path THROW java.lang.RuntimeException|"*compile-path* not set"
+c-bad-path THROW java.lang.ClassCastException|"class java.lang.Long cannot be cast to class java.lang.String (java.lang.Long and java.lang.String are in module java.base of loader 'bootstrap')"
+c-keyword THROW java.lang.ClassCastException|"class clojure.lang.Keyword cannot be cast to class clojure.lang.Symbol (clojure.lang.Keyword and clojure.lang.Symbol are in unnamed module of loader 'app')"
+c-keyword-ns THROW java.io.FileNotFoundException|"Could not locate plain__init.class, plain.clj or plain.cljc on classpath."
+c-mismatch-unmarked false
+c-mismatch-other true
+c-nil-lib THROW java.lang.NullPointerException|"Cannot invoke \"clojure.lang.Named.getName()\" because \"x\" is null"
+c-no-mkdirs THROW java.io.IOException|"No such file or directory"
+c-broken-files [:threw ("my/broken$fn__N.class" "my/broken$loading__N__auto____N.class")]
+c-mismatch-files [:threw ("my/mismatch__init.class" "other/thing$fn__N.class" "other/thing$loading__N__auto____N.class")]
+c-options-bound my.use-t
+c-load-captured {:compile-files false, :compile-path "<ROOT>/classes", :file "my/ctx.clj", :fn-loader "nil", :options nil, :source-path "ctx.clj", :use-context true, :verbose false}
+c-loadfile-source {:source-path "ctx.clj", :file "<ROOT>/src/my/ctx.clj", :fn-loader "nil"}
+c-loadstring-source {:source-path "NO_SOURCE_FILE", :file nil, :fn-loader nil}
+c-gc-files ("my/gc$_greet.class" "my/gc$fn__N.class" "my/gc$loading__N__auto____N.class" "my/gc.class" "my/gc__init.class")
+c-gc-load "my.gc"
+c-gc-new "my.gc@L"
+c-gc-fn "hi"
+c-record-ok my.record
+c-record-files ("my/record$fn__N.class" "my/record$fn__N$__GT_R__N.class" "my/record$fn__N$map__GT_R__N.class" "my/record$fn__N.class" "my/record$loading__N__auto____N.class" "my/record/R$reify__N.class" "my/record/R.class" "my/record__init.class")
