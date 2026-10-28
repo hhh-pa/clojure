@@ -1057,14 +1057,33 @@
             (throw-illegal-arg! (str "Invalid " kind " method: " (pr-str (apply list mname bodies))))))
         (map (fn [b] [mname (first b) (rest b)]) bodies))))
 
-(defn- emit-type-methods [kind triples]
+(defn- emit-type-method-fn [kind argv body fields]
+  ;; `deftype`/`defrecord` inline methods see fields as locals (like
+  ;; the JVM — params shadow fields, so bound names are excluded).
+  ;; Other kinds (`reify`/`proxy`/extend) have no fields in scope.
+  (let [base (apply list 'fn argv body)]
+    (if-not (and (seq fields) (or (= kind "deftype") (= kind "defrecord")))
+      base
+      (let [this (first argv)]
+        (if-not (and (symbol? this) (not= '& this))
+          base
+          (let [argset (set (filter symbol? argv))
+                binds (vec (mapcat (fn [f]
+                                     (when-not (contains? argset f)
+                                       (list f (list 'clojure.core/__field* (str f) this))))
+                                   fields))]
+            (if (seq binds)
+              (list 'fn argv (apply list 'let binds body))
+              base)))))))
+
+(defn- emit-type-methods [kind triples fields]
   (apply list 'clojure.core/hash-map
     (mapcat (fn [[m entries]]
               (list (str m)
                     (apply list 'clojure.core/hash-map
                       (mapcat (fn [[_ argv body]]
                                 (list (type-method-argc kind argv m)
-                                      (apply list 'fn argv body)))
+                                      (emit-type-method-fn kind argv body fields)))
                               entries))))
             (group-by first triples))))
 
@@ -1117,7 +1136,7 @@
         (list 'str (list 'ns-name '*ns*))
         (str name)
         (list 'quote fields)
-        (emit-type-methods "deftype" triples)
+        (emit-type-methods "deftype" triples fields)
         (list 'quote (vec ifaces))))))
 
 (defmacro defrecord [name & args]
@@ -1131,7 +1150,7 @@
           (list 'str (list 'ns-name '*ns*))
           (str name)
           (list 'quote fields)
-          (emit-type-methods "defrecord" triples)
+          (emit-type-methods "defrecord" triples fields)
           (list 'quote (vec ifaces))))
       (list 'def arrow
         (list 'let ['t name]
@@ -1148,7 +1167,7 @@
         triples (mapcat (fn [m] (method-triples "reify" (first m) (rest m))) methods)]
     (list 'clojure.core/__reify*
       (list 'quote (vec things))
-      (emit-type-methods "reify" triples))))
+      (emit-type-methods "reify" triples nil))))
 
 (defmacro proxy [super args & methods]
   (when-not (and (vector? super) (seq super) (every? symbol? super))
@@ -1160,7 +1179,7 @@
       (list 'quote (first super))
       (list 'quote (vec (rest super)))
       args
-      (emit-type-methods "proxy" triples))))
+      (emit-type-methods "proxy" triples nil))))
 
 ;; S14: call the superclass method from a proxy method body. The
 ;; call takes the port `.meth` shape (the JVM's `.`-head
@@ -1338,7 +1357,7 @@
   (apply list 'do
     (map (fn [[target methods]]
            (let [triples (mapcat (fn [m] (method-triples kind (first m) (rest m))) methods)
-                 mmap (emit-type-methods kind triples)]
+                 mmap (emit-type-methods kind triples nil)]
              (list 'clojure.core/__extend* (proto-of target) (type-of target) mmap)))
          groups)))
 

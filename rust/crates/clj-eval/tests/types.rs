@@ -1653,3 +1653,31 @@ fn stage1_seqable_and_tostring_throw() {
         "java.lang.ArithmeticException | Divide by zero"
     );
 }
+
+#[test]
+fn t73_deftype_fields_visible_as_locals() {
+    // Torture #73 finding 1: deftype/defrecord inline methods see
+    // fields as locals (params shadow fields, like the JVM).
+    let mut eval = boot();
+    assert_eq!(
+        run(
+            &mut eval,
+            "(definterface Named (getName [])) (deftype NamedThing [nm] Named (getName [this] nm)) (.getName (NamedThing. \"Al\"))"
+        ),
+        "\"Al\""
+    );
+    assert_eq!(
+        run(
+            &mut eval,
+            "(definterface J (m [x])) (deftype U [x] J (m [this x] x)) (.m (U. 10) 99)"
+        ),
+        "99"
+    );
+    assert_eq!(
+        run(
+            &mut eval,
+            "(definterface K (g [])) (defrecord R [fname] K (g [this] (str \"hi \" fname))) (.g (R. \"Bo\"))"
+        ),
+        "\"hi Bo\""
+    );
+}
