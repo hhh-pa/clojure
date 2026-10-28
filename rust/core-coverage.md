@@ -4,7 +4,7 @@ The complete inventory of `clojure.core` in this port: every var,
 its conformance state, and — for exclusions — why it is excluded.
 If a var is not listed here, that is a file bug, not a silent gap.
 
-- **692 vars: 607 implemented, 1 divergent, 84 out of scope,
+- **692 vars: 644 implemented, 1 divergent, 47 out of scope,
   0 planned.** The port reports Clojure `1.13.0-alpha9`
   (`clojure-version`).
 - **Universe.** 692 rows = 685 JVM publics + 7 extra-universe rows: 4 port-visible JVM privates
@@ -691,24 +691,24 @@ No slice on this branch: hard-never reasons stand alone, design-blocked rows nam
 | `StackTraceElement->vec` | out-of-scope | pending design: error-data shape; see #40 |
 | `Throwable->map` | out-of-scope | pending design: error-data shape; see #40 |
 | `accessor` | implemented | tests/collmisc.rs structmap_rows (basis-key reader; non-struct CCE) |
-| `aclone` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
+| `aclone` | implemented | S15 arrays (#59): arrays.rs native_aclone (shallow: fresh id, shared inners); tests/arrays.rs alen_clone (probes g-clone-*) |
 | `add-classpath` | out-of-scope | Deprecated on JVM, no replacement named; classpath URLs have no slice |
 | `add-tap` | implemented | cellstaps.rs tap_returns + tap_deliver (conj; lazily starts the clojure.core/tap-loop dispatcher; single 1024 FIFO; per-tap catch) |
 | `agent-errors` | implemented | S5: core.clj `(when-let [e (agent-error a)] (list e))` + `:deprecated "1.2"`; zero_oos_s5_state.rs deprecated_trio_rows |
-| `aget` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
-| `alength` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
-| `amap` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
+| `aget` | implemented | S15 arrays (#59): arrays.rs native_aget (direct inline rule + intcast walks + raw Array.get tails); tests/arrays.rs aget_access, mi3d_walk_and_order (probes a-*, c-aget-*, b-aget-*, mi-3d m4-*, m3-*, ix-*, apply-*) |
+| `alength` | implemented | S15 arrays (#59): arrays.rs native_alength; tests/arrays.rs alen_clone (probes g-len-*) |
+| `amap` | implemented | S15 arrays (#59): core.clj macro (alpha10 verbatim, inc for unchecked-inc); tests/arrays.rs amap_areduce (probes e-amap-*, e-expand-amap) |
 | `ancestors` | implemented | hierarchy.rs hier_class_views, hier_lattice_ancestors, hier_global_arities (S13, #57; probes h-*, n-*) |
-| `areduce` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
-| `aset` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
-| `aset-boolean` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
-| `aset-byte` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
-| `aset-char` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
-| `aset-double` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
-| `aset-float` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
-| `aset-int` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
-| `aset-long` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
-| `aset-short` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
+| `areduce` | implemented | S15 arrays (#59): core.clj macro (alpha10 verbatim, inc for unchecked-inc-int); tests/arrays.rs amap_areduce (probes e-areduce-*, e-expand-areduce) |
+| `aset` | implemented | S15 arrays (#59): arrays.rs native_aset (RT.aset overloads + raw Array.set tails); tests/arrays.rs aset_direct, aset_tails_setx, mi3d_walk_and_order (probes b-*, e-*, c-aset-*, mi-3d ms-*, ord-*, tail-*, ix-*) |
+| `aset-boolean` | implemented | S15 arrays (#59): arrays.rs setx_array (Array.setBoolean + truthiness); tests/arrays.rs aset_tails_setx (probes c-bool, d-setbool-*, b-setbool-2d) |
+| `aset-byte` | implemented | S15 arrays (#59): arrays.rs setx_array (Array.setByte + core byte + widen); tests/arrays.rs aset_tails_setx (probes c-byte-*, d-setbyte-*) |
+| `aset-char` | implemented | S15 arrays (#59): arrays.rs setx_array (Array.setChar + core char + widen); tests/arrays.rs aset_tails_setx (probes c-char-*, d-sethcar-*) |
+| `aset-double` | implemented | S15 arrays (#59): arrays.rs setx_array (Array.setDouble + core double); tests/arrays.rs aset_tails_setx (probes c-double-*, d-setdouble-*) |
+| `aset-float` | implemented | S15 arrays (#59): arrays.rs setx_array (Array.setFloat + core float + widen); tests/arrays.rs aset_tails_setx (probes c-float-*, d-setfloat-*) |
+| `aset-int` | implemented | S15 arrays (#59): arrays.rs setx_array (Array.setInt + core int + widen); tests/arrays.rs aset_tails_setx, mi3d_walk_and_order (probes c-int-*, d-setint-*, b-setint-*, e-setint-*, mi-3d setx-*, ix-setint-order) |
+| `aset-long` | implemented | S15 arrays (#59): arrays.rs setx_array (Array.setLong + core long + widen); tests/arrays.rs aset_tails_setx (probes c-long-*, d-setlong-*) |
+| `aset-short` | implemented | S15 arrays (#59): arrays.rs setx_array (Array.setShort + core short + widen); tests/arrays.rs aset_tails_setx (probes c-short-*, d-setshort-*) |
 | `await1` | implemented | S5: concurrency.rs await-iff-queued answering the agent; zero_oos_s5_state.rs await1_rows |
 | `bean` | out-of-scope | Host reflection/interop/beans/method-fns (N1) |
 | `bit-and` | implemented | core.rs variadic Long-only fold; tests/extarith.rs s11_bitwise_fold_rows (S11, #56; probes `ba-*`, `va-and*`, `ao-*`, `g-order*`) |
@@ -722,16 +722,16 @@ No slice on this branch: hard-never reasons stand alone, design-blocked rows nam
 | `bit-shift-right` | implemented | core.rs 2-arity Java `>>` (count masked); tests/extarith.rs s11_bit_shift_rows (S11, #56; probes `bsr-*`) |
 | `bit-test` | implemented | core.rs 2-arity boolean; tests/extarith.rs s11_bit_index_rows (S11, #56; probes `btt-*`, `fx-test*`) |
 | `bit-xor` | implemented | core.rs variadic Long-only fold; tests/extarith.rs s11_bitwise_fold_rows (S11, #56; probes `bx-*`, `va-xor*`) |
-| `boolean-array` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
-| `booleans` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
-| `byte-array` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
-| `bytes` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
-| `bytes?` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
+| `boolean-array` | implemented | S15 arrays (#59): arrays.rs ctor_array (Numbers rules: size/fill/init); tests/arrays.rs ctors_zero, ctors_seq, ctors_init, ctors_sizes (probes a-bool-*, b-bool-*, d-bool-*) |
+| `booleans` | implemented | S15 arrays (#59): arrays.rs cast_array (exact [Z checkcast); tests/arrays.rs casts_bytesq (probes d-bools-*) |
+| `byte-array` | implemented | S15 arrays (#59): arrays.rs ctor_array (Numbers rules); tests/arrays.rs ctors_zero, ctors_seq, ctors_init, ctors_sizes (probes a-byte-*, b-byte-*, e-byte-*) |
+| `bytes` | implemented | S15 arrays (#59): arrays.rs cast_array (exact [B checkcast); tests/arrays.rs casts_bytesq (probes d-bytes-*, h-bytes-*) |
+| `bytes?` | implemented | S15 arrays (#59): arrays.rs native_bytes_q (flat byte[] only; never throws); tests/arrays.rs casts_bytesq (probes e-bytes-*) |
 | `cast` | out-of-scope | Host reflection/interop/beans/method-fns (N1) |
-| `char-array` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
+| `char-array` | implemented | S15 arrays (#59): arrays.rs ctor_array (Numbers rules); tests/arrays.rs ctors_zero, ctors_seq, ctors_init, ctors_sizes (probes a-char-*, b-char-*, d-char-*, e-char-*) |
 | `char-escape-string` | implemented | 7-entry map; single-source w/ printer tables (S8: printsys.rs charmaps_rows; probes c-*) |
 | `char-name-string` | implemented | 6-entry map; single-source w/ printer tables (S8: printsys.rs charmaps_rows; probes c-*) |
-| `chars` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
+| `chars` | implemented | S15 arrays (#59): arrays.rs cast_array (exact [C checkcast); tests/arrays.rs casts_bytesq (probes d-chars-*) |
 | `chunk` | implemented | tests/collmisc.rs chunk_rows (single-use; degenerate on second take) |
 | `chunk-append` | implemented | tests/collmisc.rs chunk_rows (AIOOBE/store-NPE texts) |
 | `chunk-buffer` | implemented | tests/collmisc.rs chunk_rows (NegativeArraySizeException) |
@@ -753,15 +753,15 @@ No slice on this branch: hard-never reasons stand alone, design-blocked rows nam
 | `derive` | implemented | hierarchy.rs hier_make_and_explicit_derive, hier_derive_errors, hier_derive_tag_shapes, hier_derive_relation_errors, hier_global_arities (S13, #57; probes h-*, n-*) |
 | `descendants` | implemented | hierarchy.rs hier_class_views, hier_lattice_parents, hier_global_arities, hier_unknown_class_names (S13, #57; probes h-*, n-*) |
 | `destructure` | implemented | destructure_expand.rs destructure_public (partition/drop-odd/all-symbols passthrough + shared bind_one; entries as vectors); tests/zero_oos_s4b_macros.rs s4b_destructure_rows |
-| `double-array` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
-| `doubles` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
+| `double-array` | implemented | S15 arrays (#59): arrays.rs ctor_array (Numbers rules); tests/arrays.rs ctors_zero, ctors_seq, ctors_init, ctors_sizes (probes a-double-*, b-double-*) |
+| `doubles` | implemented | S15 arrays (#59): arrays.rs cast_array (exact [D checkcast); tests/arrays.rs casts_bytesq (probes d-doubles-*) |
 | `enumeration-seq` | out-of-scope | JDK collection/stream adapters (N1) |
 | `extenders` | implemented | S14 `(keys (:impls p))` as class-name strings (total; nil when empty); typeinternals.rs extenders_rows (S14, #58) |
 | `file-seq` | implemented | tests/collmisc.rs fileseq_rows (string walk; classes/File unrepresentable) |
 | `find-protocol-impl` | implemented | S14 class walk over `:impls` (inline answers x; normalized `{kw → fn}`); typeinternals.rs find_protocol_impl_rows, find_protocol_errors (S14, #58) |
 | `find-protocol-method` | implemented | S14 `(get (find-protocol-impl p x) methodk)`; typeinternals.rs find_protocol_method_walk, find_protocol_method_edges, find_protocol_errors, find_multi_arity_and_pref, nil_extension_row (S14, #58) |
-| `float-array` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
-| `floats` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
+| `float-array` | implemented | S15 arrays (#59): arrays.rs ctor_array (Numbers rules; D3 exact f64); tests/arrays.rs ctors_zero, ctors_seq, ctors_init, descriptors (probes a-float-*, b-float-*, b-float-inf) |
+| `floats` | implemented | S15 arrays (#59): arrays.rs cast_array (exact [F checkcast); tests/arrays.rs casts_bytesq (probes d-floats-*) |
 | `get-proxy-class` | implemented | S14 proxy class-name string (`Object` default; strings-or-defs); typeinternals.rs get_proxy_class_rows, get_proxy_class_errors (S14, #58) |
 | `hash-combine` | implemented | tests/collmisc.rs mixhash_rows (Util/hash path; tower y structural, §2.4) |
 | `hash-ordered-coll` | implemented | cellstaps.rs hash_ordered_values + hash_ordered_errors (Murmur3 ordered mix; maps iterate entries; nil NPE + non-Iterable CCE) |
@@ -770,24 +770,24 @@ No slice on this branch: hard-never reasons stand alone, design-blocked rows nam
 | `inst-ms` | implemented | S9 core.clj over inst-ms* (cutover-calendar millis); scalarkinds.rs inst_ms_failures; scalars.rs inst_ms_over_instants |
 | `inst-ms*` | implemented | S9 protocol method (macro-generated dispatch fn); scalarkinds.rs inst_user_extension |
 | `inst?` | implemented | S9 satisfies? over Inst; scalarkinds.rs inst_predicate_matches_satisfies; scalars.rs inst_pred_over_instant |
-| `int-array` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
-| `into-array` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
-| `ints` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
+| `int-array` | implemented | S15 arrays (#59): arrays.rs ctor_array (Numbers rules); tests/arrays.rs ctors_zero, ctors_seq, ctors_init, ctors_sizes (probes a-int-*, b-int-*, d-int-*) |
+| `into-array` | implemented | S15 arrays (#59): arrays.rs native_into_array (seqToTypedArray: inference + *Cast/typed); tests/arrays.rs into_array, mi3d_walk_and_order (probes f-into-*, a-*, c-*, mi-3d ia-*) |
+| `ints` | implemented | S15 arrays (#59): arrays.rs cast_array (exact [I checkcast); tests/arrays.rs casts_bytesq (probes d-ints-*, h-ints-*) |
 | `io!` | out-of-scope | STM refs/transactions (N4): never |
 | `isa?` | implemented | hierarchy.rs hier_isa_basics, hier_isa_arm_order, hier_interfaces, hier_global_arities (S13, #57; probes h-*, n-*) |
 | `iteration` | implemented | tests/collmisc.rs iteration_rows (eager-first-step; re-seqable) |
 | `iterator-seq` | out-of-scope | JDK collection/stream adapters (N1) |
 | `load-reader` | implemented | 1-arity over any reader (last value, nil when empty); `*file*` nil, `*ns*` isolated, forces `*read-eval*` true, `Compiler.load`-style wraps; reads all forms before evaluating (pre-existing load loop); zero_oos_s7_readgates.rs (S7, #50) |
-| `long-array` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
-| `longs` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
-| `make-array` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
+| `long-array` | implemented | S15 arrays (#59): arrays.rs ctor_array (Numbers rules); tests/arrays.rs ctors_zero, ctors_seq, ctors_init, ctors_sizes (probes a-long-*, b-long-*, b-long-*) |
+| `longs` | implemented | S15 arrays (#59): arrays.rs cast_array (exact [J checkcast); tests/arrays.rs casts_bytesq (probes d-longs-*) |
+| `make-array` | implemented | S15 arrays (#59): arrays.rs native_make_array (keyword designators, S15 S8 extension; rectangular); tests/arrays.rs make_array (probes e-*, f-make-*) |
 | `make-hierarchy` | implemented | hierarchy.rs hier_make_and_explicit_derive (S13, #57; probes h-make) |
 | `memfn` | out-of-scope | Host reflection/interop/beans/method-fns (N1) |
 | `method-sig` | implemented | S14 `[name params return]` triple normalizer (port descriptor contract); typeinternals.rs method_sig_rows, method_sig_errors (S14, #58) |
 | `mix-collection-hash` | implemented | tests/collmisc.rs mixhash_rows (int-checked longs) |
 | `munge` | implemented | core.rs native over ext.rs compiler_munge (true Compiler table; symbol-preserving); tests/zero_oos_s4b_macros.rs s4b_munge_rows |
 | `namespace-munge` | implemented | core.rs native (`str` + `-`→`_`); tests/zero_oos_s4b_macros.rs s4b_namespace_munge_rows |
-| `object-array` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
+| `object-array` | implemented | S15 arrays (#59): arrays.rs native_object_array (1-arity RT.object_array); tests/arrays.rs ctors_zero, ctors_seq, ctors_init (probes a-object-*, b-obj-*, c-object-*) |
 | `parents` | implemented | hierarchy.rs hier_class_views, hier_lattice_parents, hier_global_arities (S13, #57; probes h-*, n-*) |
 | `parse-uuid` | implemented | S9 native (fromString both paths; invalid nil; nil NPE; non-String CCE); scalarkinds.rs parse_uuid_shapes, parse_uuid_failures_answer_nil, parse_uuid_input_classes |
 | `prefers` | implemented | hierarchy.rs hier_prefer_dispatch, hier_remove_all (S13, #57; probes x-prefers-view, x-rmall) |
@@ -819,8 +819,8 @@ No slice on this branch: hard-never reasons stand alone, design-blocked rows nam
 | `seque` | implemented | tests/collmisc.rs seque_rows (feeder+queue; int-cast capacities) |
 | `set-agent-send-executor!` | implemented | cellstaps.rs exec_record_send (accept-and-record: any value stored + returned; dispatch stays on the fixed send pool — pinned divergences from e-routes/e-nil-send/e-non-exec) |
 | `set-agent-send-off-executor!` | implemented | cellstaps.rs exec_record_send_off (accept-and-record mirror of the send slot; fixed send-off pool) |
-| `short-array` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
-| `shorts` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
+| `short-array` | implemented | S15 arrays (#59): arrays.rs ctor_array (Numbers rules); tests/arrays.rs ctors_zero, ctors_seq, ctors_init, ctors_sizes (probes a-short-*, b-short-*, e-short-*) |
+| `shorts` | implemented | S15 arrays (#59): arrays.rs cast_array (exact [S checkcast); tests/arrays.rs casts_bytesq (probes d-shorts-*) |
 | `stream-into!` | out-of-scope | JDK collection/stream adapters (N1) |
 | `stream-reduce!` | out-of-scope | JDK collection/stream adapters (N1) |
 | `stream-seq!` | out-of-scope | JDK collection/stream adapters (N1) |
@@ -832,8 +832,8 @@ No slice on this branch: hard-never reasons stand alone, design-blocked rows nam
 | `tagged-literal?` | implemented | S6 `pred1!`; zero_oos_s6_datareaders.rs tagged_literal_predicate |
 | `tap->` | implemented | cellstaps.rs tap_thread_first (verbatim core.clj one-liner: returns x and delivers it) |
 | `tap>` | implemented | cellstaps.rs tap_returns + tap_deliver + tap_nil + tap_full (non-blocking offer; true with room, false past 1024) |
-| `to-array` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
-| `to-array-2d` | out-of-scope | Java array ctor/cast/read/write; no array values (N1) |
+| `to-array` | implemented | S15 arrays (#59): arrays.rs native_to_array (RT.toArray: shared empty, same-handle Object[]); tests/arrays.rs to_arrays (probes f-to-*, d-*, e-to-*) |
+| `to-array-2d` | implemented | S15 arrays (#59): arrays.rs native_to_array_2d (^Collection hint, per-row to-array); tests/arrays.rs to_arrays (probes f-to2d-*, g-to2d-*, mi-3d t2d-*) |
 | `unchecked-add` | implemented | core.rs wrapping-`Int` tower fold; tests/extarith.rs s11_unchecked_long_rows (S11, #56; probes `ua-*`) |
 | `unchecked-add-int` | implemented | core.rs checked-intcast wrapping `i32` op; tests/extarith.rs s11_unchecked_int_rows (S11, #56; probes `uai-*`, `xi-*`, `g-int*`) |
 | `unchecked-byte` | implemented | core.rs truncating `byteValue`; tests/extarith.rs s11_unchecked_coercion_rows (S11, #56; probes `ucb-*`, `g-byterat`, `xc-binf`) |
@@ -862,7 +862,7 @@ No slice on this branch: hard-never reasons stand alone, design-blocked rows nam
 | `update-proxy` | implemented | S14 assocs onto the proxy fn map (nil reverts to super; answers the proxy); typeinternals.rs proxy_mappings_round_trip, proxy_mutation_errors, proxy_protocol_inline_limitation (S14, #58) |
 | `uri?` | implemented | S9 pred1 over Value::Uri (false battery; kind arms unit-tested in scalar.rs); scalarkinds.rs uri_predicate_battery |
 | `uuid?` | implemented | S9 pred1 over Value::Uuid; scalarkinds.rs uuid_predicate_battery |
-| `vector-of` | out-of-scope | pending design: primitive-vector kind; see #40 |
+| `vector-of` | implemented | S15 arrays (#59): arrays.rs native_vector_of (ArrayManager core coerces); tests/arrays.rs vector_of (probes f-*, j-*, g-*) |
 | `volatile!` | implemented | cellstaps.rs volatile_ctor_print (fresh Volatile cell; transient #object print — pinned divergence from the JVM {:status :ready} rendering) |
 | `volatile?` | implemented | cellstaps.rs volatile_pred (true on Volatile cells only) |
 | `vreset!` | implemented | cellstaps.rs volatile_vreset + volatile_vswap_shape (stores + returns newval; nil NPE + non-volatile CCE; the vswap! checkcast gate) |

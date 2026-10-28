@@ -46,6 +46,14 @@ convention as `docs/i33-typechain/probes/multimethods.clj`):
 - `scalar.{clj,out}` — checked-int paths, ctor narrowing,
   2-arity fill dispatch, `Vec`/vector invoke, runtime-nil.
 
+`docs/zero-oos-s15-arrays/mi-3d/` (alpha10 jars, same
+convention): `mid-steps.{clj,out}` (40 labels) — 4-arity
+walk idx/array rules, walk-vs-tail idx splits, nil steps,
+`apply` (fn-body) behavior, `int` tower corners;
+`order.{clj,out}` (20 labels) — idx-vs-match order,
+coerce-vs-bounds order, tail `Array.set` order, `setX`
+order, `into-array` cast corners, `to-array-2d` hint CCEs.
+
 Mechanism sources (read, not vendored): `RT.java`
 (`seqToTypedArray`, `toArray`, `object_array`, `intCast`/
 `longCast` families, `aset`/`aget` overloads),
@@ -53,7 +61,11 @@ Mechanism sources (read, not vendored): `RT.java`
 single-match leniency), `Compiler.java` (`emitUnboxArg` =
 `checkCast(Number)` + `intCast`, static literal types),
 `core_print.clj` (`print-tagged-object`), `gvec.clj` (`Vec`
-interfaces incl. 1-arity `IFn.invoke`).
+interfaces incl. 1-arity `IFn.invoke`), plus `javap`
+disassembly of `clojure.lang.RT` (the nine `aget`/`aset`
+overloads — no generic `Object` overload exists) and
+`clojure.core$aget`/`$aset` (multi-arity bodies recurse
+through `apply`; last steps are the fn-body rule).
 
 ## BDD scenarios (issue #59)
 
@@ -146,8 +158,18 @@ collapse above).
   gates on `Util/isInteger` (`Long`/`Integer`/`BigInt`/
   `BigInteger` only — `Short`/`Double`/nil → IAE "Key
   must be integer", OOB → `IndexOutOfBoundsException`
-  with empty message, 2-arity → `AbstractMethodError`
-  verbatim).
+  with empty message, 2-arity → `ArityException` naming
+  `clojure.core.Vec` — the JVM throws `AbstractMethodError`
+  here, but the port pins `ArityException` for
+  reify-shape arity gaps (promise precedent)). Invoke
+  accepts `BigInt` keys per the oracle even though the
+  port's vector invoke does not (pre-existing gap, out
+  of fence). `get`/`assoc`/`contains?`/`find` keep the
+  port vectors' `int`-only keys (oracle `get-vo-big` in
+  `mi-3d/mid-steps.out` shows the JVM `Vec` accepting
+  `BigInt` there too via `valAt`) — widening shared key
+  coercion is out of fence; only the invoke gate takes
+  `BigInt`.
 - `counted?`/`sequential?`/`indexed?`/`reversible?`/
   `seqable?`/`vector?`/`coll?`/`associative?`/`ifn?`
   are true; `list?`/`map?`/`set?`/`seq?`/`record?`/
@@ -226,9 +248,15 @@ CCE→`Number`, `Double`-huge → IAE *long*, oracle
   `ArrayStoreException`; nil always fits; oracles
   `f-into-plain`, `f-into-mixed`, `f-into-empty`,
   `a-into-nil-elem`, `a-into-empty-cls`). 2-arity with
-  an explicit type: `Integer`→core-`int`, `Byte`→`byte`,
-  `Short`→`short`, `Float`→`float`, `Character`→`char`
-  per element (the port natives, verbatim); `Long`/
+  an explicit type runs `RT.intCast`/`byteCast`/
+  `shortCast`/`floatCast`/`charCast` per element — NOT
+  the core fns (`intCast` and friends route `Double`s
+  through the `long` stop: huge → IAE-*long* (oracles
+  `ia-int-hugedbl`, `ia-short-hugedbl` in
+  `mi-3d/order.out`); `charCast`
+  ranges `u16`, oracle `ia-char-70000`; `floatCast`
+  matches core-`float` on every port value, so the
+  port reuses it); `Long`/
   `Double`/`Boolean` and reference types use raw
   `Array.set` rules — exact-wrapper unbox + JLS widen
   (`char`→`long`/`double` ok; `Double`→`long`,
@@ -244,8 +272,9 @@ CCE→`Number`, `Double`-huge → IAE *long*, oracle
   `f-into-niltype`).
 - `to-array`: nil → THE shared empty `Object[]`
   (`identical?` true, oracle `e-to-nil-ident`,
-  `g-to-nil-len`); `Object[]` dims-1 → same handle
-  (oracle `d-ident`); other arrays → boxed copy
+  `g-to-nil-len`); `Object` arrays of ANY dims →
+  same handle (`instanceof Object[]`, oracle
+  `d-ident`); other arrays → boxed copy
   (`f-to-arr`, `d-prim-cls`); `String` → chars
   (`f-to-str`, `d-str-cls`); maps → entries (`f-to-map`,
   `d-map2`); vectors/lists/sets/seqs/`MapEntry`/PV →
@@ -260,7 +289,8 @@ CCE→`Number`, `Double`-huge → IAE *long*, oracle
   null", oracle `g-to2d-nil`); non-`Collection`
   (maps, strings, arrays, scalars) → CCE
   →`java.util.Collection` (oracles `t2d-map`,
-  `t2d-str`); otherwise `[to-array …]` per element
+  `t2d-str`, `t2d-arr` in `mi-3d/order.out`);
+  otherwise `[to-array …]` per element
   (nil element → empty row; non-convertible →
   `RuntimeException`; oracles `f-to2d`,
   `f-to2d-ragged-nil`, `f-to2d-empty`, `g-to2d-str-elem`,
@@ -278,44 +308,88 @@ identity, same descriptor; oracles `g-clone-eq`,
 `g-clone-mut`, `g-clone-2d-shallow`, `g-clone-obj`,
 `h-clone`).
 
-`aget` 2-arity (direct, `RT.aget` overloads): nil →
-"More than one matching method found: aget"; non-array
-→ "No matching method aget found taking 2 args"
+`aget` 2-arity (direct: the inline `(. RT (aget array (int
+idx)))` over the nine `RT.aget` overloads — eight
+primitive plus `Object[]`, confirmed by `javap`; there is no
+generic `Object` overload). The inline coerces idx BEFORE
+matching the array, so an idx failure beats "More than
+one…" / "No matching method…" (oracle `ix-str-idx`);
+nil → "More than one matching method found: aget"
+(DIVERGENCE D4 — on the JVM a nil array literal is a
+`CompilerException` caused by more-than-one (oracle
+`ix-nil-literal`), and a run-time nil runs the overload
+frames (`Cannot load from double array because "xs" is
+null`, oracle `rt-nil-aget`); the port has no compiler or
+frames and pins the stable more-than-one text);
+non-array → "No matching method aget found taking 2 args"
 (oracles `a-nonarray`, `a-nil`, `a-str`); idx through
 core-`int` (port `int`: `Double` 1.0 → 1, `String` →
-CCE→`Character`, nil → NPE-charValue, huge → AE /
-IAE-*int*; oracles `a-idx-type`, `a-idx-nil`,
-`a-idx-str`, `a-idx-long-obj`, `a-arity1`,
-`a-aget-huge`, `a-aget-hugedbl`); OOB → AIOOBE "Index
-{i} out of bounds for length {n}" (oracles `a-neg-idx`,
-`a-oob`, `a-oob-neg`).
+CCE→`Character`, nil → NPE-charValue, huge-`Long` → AE,
+huge-`Double` → IAE-*int*; oracles `a-idx-type`,
+`a-idx-nil`, `a-idx-str`, `a-idx-long-obj`, `a-arity1`,
+`a-aget-huge`, `a-aget-hugedbl`); OOB → AIOOBE "Index {i}
+out of bounds for length {n}" (oracles `a-neg-idx`, `a-oob`,
+`a-oob-neg`). DIVERGENCE D6: the JVM picks the `intCast`
+overload by the idx's static type, so an `Object`-typed
+double takes the `long` stop (oracle `m3-idx1objdbl`); the
+port's `int` is one rule (the `int` stop) and pins it.
 
-`aget`/`aset` multi-index: the first step uses the
-direct rule; every further step uses the raw rule —
-nil array → NPE `getComponentType` text (`aget`, oracle
-`a-nil-inner`) or NPE empty (`aset`, oracle
-`b-aset-nilinner`); non-array → IAE "Argument is not an
-array" (oracles `a-deep-nonarray`, `b-deep-nonarray`);
-idx through checkCast+`intCast` (`Double` → `long` stop
-first: huge → IAE-*long*, `NaN` → 0; non-`Number` →
-CCE→`Number`; nil → NPE-charValue; oracles
-`c-aget-tail-idx`, `c-aget-str-tail`, `b-aget-nidx`,
-`b-aget-cidx`, `a-tail-hugedbl`, `a-tail-nan`).
+`aget`/`aset` multi-index (the `core.clj` bodies recurse
+through `apply` — confirmed by disassembling
+`clojure.core$aget`/`$aset`): steps 1..n-1 pair
+`RT.intCast(Object)` with the run-time reflector match —
+idx: `String` → CCE→`Character`, huge-`Double` → IAE-*long*,
+char → code, nil → NPE-charValue, `BigInt` fine (oracles
+`m4-idx1`, `m4-idx2`, `m4-idx2dbl`, `m3-idx1dbl`,
+`m4-charidx`, `m4-nilidx`, `m4-bigidx`); array: the
+reflector pair with `aget` names, OOB the `Index` text
+(oracles `m4-mid-scalar`, `m3-str-first`, `m4-negidx`,
+`ms-idx2`, `ms-idx3`, `ms-mid-scalar` — `aset` walks via
+`aget`, so walk failures name `aget`); nil at a walk step
+DIVERGES (D4 — the JVM runs the overload frames, oracles
+`m4-mid-nil`, `m3-nil-first`, `ms-mid-nil`, `rt-nil-am3`;
+the port pins more-than-one). The LAST step is the fn-body
+rule. For `aget` the body reads `(class array)` first (nil
+→ NPE `getComponentType` text, oracle `a-nil-inner`,
+`m3-mid-nil`), then checkCast+`intCast` the idx
+(non-`Number` → CCE→`Number`, nil → NPE-charValue, char →
+CCE→`Number`, huge-`Double` → IAE-*long*, `NaN` → 0;
+oracles `c-aget-tail-idx`, `c-aget-str-tail`, `b-aget-nidx`,
+`b-aget-cidx`, `a-tail-hugedbl`, `a-tail-nan`, `m4-idx3`,
+`m4-idx3dbl`), then `Array.get` (non-array → IAE "Argument
+is not an array", oracle `a-deep-nonarray`; OOB → the
+EMPTY `AIOOBE`, oracle `tail-oob-get`). For `aset` the
+body has no `class` call: the idx unbox runs before the
+nil-array check (oracle `ix-body`), nil → NPE empty
+(oracle `b-aset-nilinner`), non-array → IAE "Argument is
+not an array" (oracle `b-deep-nonarray`), then `Array.set`
+(see the tail paragraph).
 
-`aset` direct 3-arity (`RT.aset` overloads, idx via
-core-`int`, oracle `b-idx-type`): nil/non-array mirror
+`aset` direct 3-arity (the inline over the nine `RT.aset`
+overloads): like direct `aget`, idx coerces before array
+matching (oracle `ix-aset-idx`); nil/non-array mirror
 `aget`'s pair with `aset` names (oracles `b-nonarray`,
-`b-nil`, `b-arity2`); OOB → AIOOBE "Index…" (oracle
-`b-oob`); val matching per array type:
+`b-nil`, `b-arity2`; nil DIVERGES per D4 — oracle
+`rt-nil-aset` runs the `Cannot store to object array`
+frame); order is shape-match, then coerce, then bounds:
+shape mismatches beat bounds (oracle `ix-order`),
+failing coercions beat bounds (oracle `ord-int-huge-oob`
+is AE, not `Index`), OOB is the `Index` text (oracles
+`b-oob`, `ord-int-ok-oob`, `ord-short-ok-oob`); val
+matching per array type:
 `int[]`←`Int`-toIntExact (AE past `i32`, oracle
 `e-direct-int-huge`), `long[]`←`Int` exact,
 `short[]`/`byte[]`←`Int` with `short`/`byte` range
 checks (DIVERGENCE D2 — the JVM only matches the
 `Short`/`Byte` wrappers and throws "No matching
-method" for `Long` literals; the port erased the
+method" for `Long` (oracles `ord-short-long-oob`,
+`ord-byte-long-oob`); the port erased the
 wrappers, so it stores in-range values and range-errors
 the rest; without this `(aset s 0 (short x))` could
-never work), `char[]`←`Char`, `boolean[]`←`Bool`,
+never work; the range check runs with the other
+coercions, before bounds — unobservable on the JVM,
+which never matches here), `char[]`←`Char`,
+`boolean[]`←`Bool`,
 `double[]`←`Double`, `float[]`←`Double` (the
 static-`double` rule: JVM literals resolve statically
 and narrow, storing `Inf` past range — the port stores
@@ -346,22 +420,37 @@ unbox + widen — the port reads `Int` as JVM `Long`:
 `long[]`←`Int` stores; oracles `b-2d`,
 `c-aset-int2d-f`, `c-aset-obj2d`, `c-aset-long-tail`,
 `e-tail-int-long`, `e-tail-long-long`,
-`e-tail-int-int`, `c-aset-tail-idx`).
+`e-tail-int-int`, `c-aset-tail-idx`). DIVERGENCE D5:
+`(int 5)` inlines to a primitive `int`, which `apply`
+boxes to `Integer` (exact unbox — stores); the port's
+`Int` is always `Long` (mismatch, like the literal —
+oracle `e-tail-int-int`). `Array.set` order:
+nil-into-primitive beats bounds (oracle
+`tail-oob-nilprim`), bounds (the empty `AIOOBE`) beat
+unbox and ref misses (oracles `tail-oob-set`,
+`tail-oob-mismatch`, `tail-ref-oob-mismatch`); ref
+misses report IAE "array element type mismatch"
+(oracle `tail-ref-mismatch`), nil fits (oracle
+`tail-ref-nil`).
 
-`aset-*` (def-aset): val through the matching core
+`aset-*` (def-aset): idx through checkCast+`intCast`
+(oracles `b-setint-didx`, `b-setint-sidx`,
+`b-setint-nidx`), then val through the matching core
 coercion (port natives verbatim, oracles `c-int-str`,
 `c-int-nil`, `c-byte-str`, `c-float-str`,
 `c-short-nil`, `c-char-str`, `c-bool`, `c-char`,
 `c-float`, `c-double`, `c-short`, `c-byte`,
-`a-setint-huge`, `a-setlong-huge`); idx through
-checkCast+`intCast` (oracles `b-setint-didx`,
-`b-setint-sidx`, `b-setint-nidx`); non-array → IAE
-"Argument is not an array", nil array → NPE empty
-(oracles `e-setint-vec`, `e-setint-nilarr`);
-non-primitive array (`Object[]`, any `dims>1`) → IAE
-"Argument is not an array of primitive type" (oracles
-`c-int-objarr`, `d-setbool-obj`, `b-setint-2d`,
-`b-setbool-2d`); then the JLS `setX` widening table
+`a-setint-huge`, `a-setlong-huge`) — inline arg order
+(oracle `setx-both-bad`; both beat the array checks,
+oracles `setx-badidx-nilarr`, `setx-badval-nilarr`);
+non-array → IAE "Argument is not an array", nil array
+→ NPE empty (oracles `e-setint-vec`,
+`e-setint-nilarr`); non-primitive array (`Object[]`,
+any `dims>1`) → IAE "Argument is not an array of
+primitive type" (oracles `c-int-objarr`,
+`d-setbool-obj`, `b-setint-2d`, `b-setbool-2d`); the
+primitive check runs BEFORE bounds (oracle
+`ix-setint-order`); then the JLS `setX` widening table
 (`setInt`→int/long/float/double,
 `setLong`→long/float/double, `setShort`→short↑,
 `setByte`→byte↑, `setChar`→char/int/long/float/double,
@@ -426,10 +515,9 @@ nil and everything else (oracle `e-bytes-*`).
 
 ### Print / `str`
 
-- pr: `#object["{desc}" 0x{id:x} {desc}@{id:x}]`
-  (class-name quoted, rep bare — oracle `d-pr-*`,
-  `d-pr-in-vec`; the quoting asymmetry is pinned, the
-  JVM mechanism behind it is not reproduced).
+- pr: `#object["{desc}" 0x{id:x} "{desc}@{id:x}"]`
+  (class-name and rep both quoted — oracles `d-pr-*`,
+  `d-pr-in-vec`).
 - print (`readably` false): both bare (oracle
   `d-print-str-obj`). `str`: `{desc}@{id:x}` (oracle
   `d-str-int`). `id` is the port identity (atoms print
@@ -446,10 +534,11 @@ Extend `jvm_class_of` (`error.rs`) with descriptors:
 `ArrayStoreException` (→`RuntimeException`),
 `NegativeArraySizeException` (→`RuntimeException`),
 `OutOfMemoryError` (→`VirtualMachineError`→`Error`),
-`AbstractMethodError` (→`IncompatibleClassChangeError`
-→`LinkageError`→`Error`), with `throw_parent` links
-and `throw_class_for` arms (S7-table format). The
-`catch` name table already lists every name.
+with `throw_parent` links and `throw_class_for` arms
+(S7-table format). The `catch` name table already
+lists every name. (No `AbstractMethodError`: the port
+pins `ArityException` for reify-shape arity gaps —
+promise precedent.)
 
 ## Keywords (§8 extension) and the S16 seam
 
@@ -471,7 +560,10 @@ Verbatim ports of the JVM `core.clj` macros except
 `unchecked-inc`/`unchecked-inc-int` → `inc` (those
 vars do not exist in the port; the port's own
 `dotimes` already substitutes `inc` the same way;
-array indices cannot overflow in practice).
+array indices cannot overflow in practice). The ports
+keep the JVM's `~'recur` self-target (the `loop*`
+binding the macro establishes), so recursion targets
+the loop, not a stale `recur` binding.
 Expansions pinned against oracle `e-expand-amap`/
 `e-expand-areduce` modulo that substitution and
 gensym numbering. Behavior oracles `e-amap`,
@@ -492,7 +584,7 @@ gensym numbering. Behavior oracles `e-amap`,
   matching (`paramArgTypeMatch` + `widenBoxedArgs` +
   static-literal types + single-match leniency +
   `checkCast`+`intCast` unboxing), with the residual
-  divergences D1–D4 enumerated below. VALIDATED.
+  divergences D1–D6 enumerated below. VALIDATED.
 - `vector-of`: own immutable kind, not `Array`-backed
   (persistence vs fixed-mutability are irreconcilable);
   the `Vec` parity surface (invoke gate included) is
@@ -505,23 +597,45 @@ snapshot (above); D2 short/byte direct-`aset` stores
 magnitudes stay finite instead of `Inf`, oracle
 `b-float-inf`, `e-direct-float-huge`); D4 nil arrays
 always take the stable "More than one matching
-method" rule — the JVM's inner/runtime-nil NPEs
-depend on HotSpot method order and vary even within
-one JVM (oracles `e-aset-nil-multi` vs `g-nil-*`;
-unmirrorable, unpinnable). Narrow reads collapse to
-`Int`/`Double` (port-wide posture, not a divergence).
+method" rule — the JVM's nil behaviors are compiler
+and frame internals: a nil array literal is a
+`CompilerException` caused by more-than-one (oracle
+`ix-nil-literal`), while a run-time nil runs the
+overload frames (`Cannot load from double array
+because "xs" is null`, `Cannot store to object array
+because "xs" is null`, oracles `rt-nil-aget`,
+`rt-nil-aset`, `rt-nil-am3`, `m4-mid-nil`,
+`m3-nil-first`, `ms-mid-nil`; which frame fires
+depends on HotSpot method order and varies even
+within one JVM — oracles `e-aset-nil-multi` vs
+`g-nil-*`; unmirrorable, unpinnable — a re-run of
+`scalar.clj` flipped both lines from `int`/`object`
+to `double`, proving run-to-run nondeterminism);
+D5 `(int 5)` tail literals (above — oracle
+`e-tail-int-int`); D6 direct-idx doubles always take
+the `int` stop (above — oracle `m3-idx1objdbl`).
+Narrow reads collapse to `Int`/`Double` (port-wide
+posture, not a divergence). KNOWN GAP (not a
+divergence — unimplemented): `apply` routes through
+the fn bodies while direct calls inline, so the JVM
+answers the body rule under `apply` (oracles
+`apply-aget-str`, `apply-aget-idx`, `apply-aget-nil`,
+`apply-aset-val`); the port answers its direct rule
+in both positions — call-site sensitivity is future
+work, out of fence.
 
 ## Tests
 
 `rust/crates/clj-eval/tests/arrays.rs`: one test per
 var replaying its probe labels verbatim (oracle label
 → port assertion, quoting the `.out` line), plus
-port-only pins (D1–D4, keyword designators, OOM
-guard). Matrix `notes` name the tests.
+port-only pins (D1–D6, keyword designators, OOM
+guard, the `apply` gap). Matrix `notes` name the tests.
 
 ## Non-goals
 
 `type`/`class`/`instance?`/`..` (S16), `unchecked-*`
 arithmetic (whoever claims it), lazy array-seqs (D1),
 explicit narrowed `make-array` (S16), `*unchecked-math*`
-honoring (pre-existing port posture).
+honoring (pre-existing port posture), `apply`-vs-direct
+call-site sensitivity (known gap, above).
