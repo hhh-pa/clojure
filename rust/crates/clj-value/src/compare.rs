@@ -285,6 +285,7 @@ fn ref_or_collection_type_name(v: &Value) -> &'static str {
         Value::Promise(_) => "Promise",
         Value::Agent(_) => "Agent",
         Value::Volatile(_) => "Volatile",
+        Value::Ref(_) => "Ref",
         _ => collection_type_name(v),
     }
 }
@@ -531,6 +532,16 @@ mod tests {
         // pairs decide early), and the collection wildcard is
         // exhaustive-by-construction — both pinned directly.
         assert_eq!(type_name(&Value::Nil), "nil");
+    }
+
+    #[test]
+    fn ref_names_its_kind() {
+        // Refs report the short kind in compare errors (S19 —
+        // pinned directly, like the nil fallback above).
+        assert_eq!(
+            type_name(&Value::Ref(crate::Ref::new(Value::Int(0)))),
+            "Ref"
+        );
     }
 
     #[test]

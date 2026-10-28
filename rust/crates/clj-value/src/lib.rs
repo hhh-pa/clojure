@@ -29,6 +29,8 @@ mod multifn;
 mod print;
 mod promise;
 mod pvec;
+#[path = "ref.rs"]
+mod ref_kind;
 mod scalar;
 mod seq;
 mod symbol;
@@ -67,6 +69,7 @@ pub use print::{
 };
 pub use promise::{Promise, PromiseState};
 pub use pvec::{Elem8, PrimitiveVector};
+pub use ref_kind::{Ref, RefState};
 pub use scalar::{Instant, Uri, UriError, Uuid};
 pub use seq::{
     CHUNK_SIZE, ConsValue, CycleValue, IterateValue, KeySeqValue, RangeNum, RangeValue,

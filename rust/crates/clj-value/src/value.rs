@@ -39,7 +39,7 @@ use num_traits::ToPrimitive;
 
 use crate::{
     Agent, Array, Atom, ClassVal, Delay, ExtensionValue, Future, HostInst, HostKind, HostVal,
-    Keyword, MultiFn, PrimitiveVector, Promise, Symbol, Throwable, Transient, Unbound, Var,
+    Keyword, MultiFn, PrimitiveVector, Promise, Ref, Symbol, Throwable, Transient, Unbound, Var,
     Volatile, host_eq,
 };
 
@@ -863,6 +863,8 @@ pub enum Value {
     Agent(Agent),
     /// A volatile (S10): identity equality (shared cell — no meta).
     Volatile(Volatile),
+    /// A ref (S19): identity equality (shared cell, equal meta).
+    Ref(Ref),
     /// A host-defined value behind the [`ExtensionValue`] trait (S4).
     Extension(Arc<dyn ExtensionValue>),
     /// A port-defined type descriptor or instance (S-typechain):
@@ -1187,6 +1189,7 @@ fn value_eq_rest(a: &Value, b: &Value) -> bool {
         (Value::Promise(a), Value::Promise(b)) => cell_meta_eq(a.same_cell(b), a.meta(), b.meta()),
         (Value::Agent(a), Value::Agent(b)) => cell_meta_eq(a.same_cell(b), a.meta(), b.meta()),
         (Value::Volatile(a), Value::Volatile(b)) => a.same_cell(b),
+        (Value::Ref(a), Value::Ref(b)) => cell_meta_eq(a.same_cell(b), a.meta(), b.meta()),
         (Value::Extension(a), Value::Extension(b)) => a.dyn_eq(&**b),
         // Classes compare by name alone (same name is `=`, whatever
         // the import path that produced the value).
@@ -1449,6 +1452,10 @@ fn hash_value_rest<H: Hasher>(v: &Value, state: &mut H) {
         Value::Volatile(v) => {
             state.write_u8(27);
             state.write_u64(v.id());
+        }
+        Value::Ref(r) => {
+            state.write_u8(28);
+            state.write_u64(r.id());
         }
         Value::Extension(e) => hash_extension(e, state),
         // Port-defined types: the class name plus the content map
