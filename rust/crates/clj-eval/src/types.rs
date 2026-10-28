@@ -24,8 +24,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use clj_value::{
-    HostDef, HostInst, HostKind, HostMethod, HostVal, Map, PrintOpts, Symbol, ThrowClass, Value,
-    class_name, fallback_str, find_method, is_field, new_map, pr_to_string,
+    Atom, HostDef, HostInst, HostKind, HostMethod, HostVal, Map, PrintOpts, Symbol, ThrowClass,
+    Value, class_name, fallback_str, find_method, is_field, new_map, pr_to_string,
 };
 
 use crate::core::cce_err;
@@ -493,6 +493,7 @@ fn native_reify(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErr
         def: Arc::new(def),
         content: new_map(),
         meta: None,
+        proxy_map: None,
     }))))
 }
 
@@ -514,6 +515,7 @@ fn construct(def: &Arc<HostDef>, args: &[Value]) -> Result<Value, NativeError> {
         def: def.clone(),
         content,
         meta: None,
+        proxy_map: None,
     }))))
 }
 
@@ -676,9 +678,9 @@ fn meth_on_def(
 /// Instance method/field dispatch (split from [`native_meth`] for
 /// the complexity budget): zero-arg calls read a field first (like
 /// the JVM's reflector), then a zero-arg method, else the `Object`
-/// fallback; longer calls need a listed overload. Proxy fns exclude
-/// `this`, so they run with the args as written; every other kind
-/// prepends the instance.
+/// fallback; longer calls need a listed overload. Proxies take
+/// the S14 cell path instead; every other kind prepends the
+/// instance as `this`.
 fn meth_on_host(
     eval: &mut Evaluator,
     d: &Arc<HostDef>,
@@ -687,29 +689,53 @@ fn meth_on_host(
     method: &str,
     rest: &[Value],
 ) -> Result<Value, NativeError> {
-    let call = |eval: &mut Evaluator, func: &Value, target: Value, rest: &[Value]| {
-        if d.takes_this {
-            call_method(eval, func, target, rest)
-        } else {
-            eval.call(func, rest).map_err(signal_to_native)
-        }
-    };
+    if !d.takes_this {
+        return meth_on_proxy(eval, h, method, rest);
+    }
     if rest.is_empty() {
         if let Some(v) = field_hit(d, h, method) {
             return Ok(v);
         }
         if let Some(m) = find_method(d, method, 0) {
             let func = m.func.clone();
-            return call(eval, &func, target, rest);
+            return call_method(eval, &func, target, rest);
         }
         return object_fallback(h, method, &d.name);
     }
     match find_method(d, method, rest.len()) {
         Some(m) => {
             let func = m.func.clone();
-            call(eval, &func, target, rest)
+            call_method(eval, &func, target, rest)
         }
         None => Err(no_method(method, rest.len(), &d.name)),
+    }
+}
+
+/// Proxy dispatch (S14): the fn map cell wins, without `this`;
+/// nil and missing entries fall to the `Object` super/default
+/// path — never to the baked table, so `update-proxy` removal
+/// truly reverts to super. Descriptors never reach here
+/// (`meth_on_def` misses first).
+fn meth_on_proxy(
+    eval: &mut Evaluator,
+    h: &HostVal,
+    method: &str,
+    rest: &[Value],
+) -> Result<Value, NativeError> {
+    let HostVal::Inst(i) = h else {
+        return desc_miss("<proxy>", method, rest.len());
+    };
+    match crate::typeinternals::proxy_cell_hit(i, method, rest.len()) {
+        crate::typeinternals::ProxyHit::Call(func) => {
+            eval.call(&func, rest).map_err(signal_to_native)
+        }
+        crate::typeinternals::ProxyHit::Default => {
+            if rest.is_empty() {
+                object_fallback(h, method, &i.def.name)
+            } else {
+                Err(no_method(method, rest.len(), &i.def.name))
+            }
+        }
     }
 }
 
@@ -846,6 +872,7 @@ pub(crate) fn rewrap_record(inst: &HostInst, content: Map) -> Value {
         def: inst.def.clone(),
         content,
         meta: inst.meta.clone(),
+        proxy_map: inst.proxy_map.clone(),
     })))
 }
 
@@ -858,6 +885,7 @@ pub(crate) fn rewrap_maplike(inst: &HostInst, content: Map) -> Value {
         def: inst.def.clone(),
         content,
         meta: inst.meta.clone(),
+        proxy_map: inst.proxy_map.clone(),
     })))
 }
 
@@ -874,6 +902,7 @@ pub(crate) fn empty_struct(inst: &HostInst) -> Value {
         def: inst.def.clone(),
         content,
         meta: None,
+        proxy_map: None,
     })))
 }
 
@@ -884,6 +913,7 @@ pub(crate) fn rewrap_maplike_with_meta(inst: &HostInst, content: Map, meta: Opti
         def: inst.def.clone(),
         content,
         meta,
+        proxy_map: inst.proxy_map.clone(),
     })))
 }
 
@@ -947,6 +977,7 @@ fn native_record_map(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nati
         def,
         content,
         meta: None,
+        proxy_map: None,
     }))))
 }
 
@@ -987,7 +1018,8 @@ fn flatten_entries(eval: &mut Evaluator, v: &Value) -> Result<clj_value::Map, Na
 /// result is the stock cast error), else the `Name@hex` fallback.
 /// Struct instances render their content map readably (S12 — the
 /// JVM's single-arg `str` is `.toString`, the readable map print,
-/// exactly like `str` of a plain map).
+/// exactly like `str` of a plain map). Proxies consult the S14 fn
+/// map cell instead of the baked table.
 pub(crate) fn host_str(
     eval: &mut Evaluator,
     h: &HostVal,
@@ -1000,16 +1032,11 @@ pub(crate) fn host_str(
             &Value::Map(i.content.clone()),
             &PrintOpts::pr(),
         )),
+        HostVal::Inst(i) if !i.def.takes_this => proxy_str(eval, h, i),
         HostVal::Inst(i) => match find_method(&i.def, "toString", 0) {
             Some(m) => {
                 let func = m.func.clone();
-                // Proxy bodies exclude `this`, like in `native_meth`.
-                let out = if i.def.takes_this {
-                    call_method(eval, &func, this, &[])
-                } else {
-                    eval.call(&func, &[]).map_err(signal_to_native)
-                };
-                match out {
+                match call_method(eval, &func, this, &[]) {
                     Ok(Value::Str(s)) => Ok(s.to_string()),
                     Ok(other) => Err(cce_err(&other, "java.lang.String")),
                     Err(e) => Err(e),
@@ -1017,6 +1044,21 @@ pub(crate) fn host_str(
             }
             None => Ok(fallback_str(h)),
         },
+    }
+}
+
+/// `str` of a proxy: the fn map cell's `toString/0` wins (called
+/// without `this`); nil and missing entries take the fallback.
+fn proxy_str(eval: &mut Evaluator, h: &HostVal, i: &HostInst) -> Result<String, NativeError> {
+    match crate::typeinternals::proxy_cell_hit(i, "toString", 0) {
+        crate::typeinternals::ProxyHit::Call(func) => {
+            match eval.call(&func, &[]).map_err(signal_to_native) {
+                Ok(Value::Str(s)) => Ok(s.to_string()),
+                Ok(other) => Err(cce_err(&other, "java.lang.String")),
+                Err(e) => Err(e),
+            }
+        }
+        crate::typeinternals::ProxyHit::Default => Ok(fallback_str(h)),
     }
 }
 
@@ -1060,10 +1102,14 @@ fn native_proxy(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErr
         takes_this: false,
         struct_keys: Vec::new(),
     };
+    // The S14 fn map cell starts as the baked methods (so
+    // `proxy-mappings` and dispatch agree from construction).
+    let cell = crate::typeinternals::proxy_cell_from_methods(&args[3]);
     Ok(Value::HostType(Arc::new(HostVal::Inst(HostInst {
         def: Arc::new(def),
         content: new_map(),
         meta: None,
+        proxy_map: Some(Atom::new(cell)),
     }))))
 }
 
@@ -1101,5 +1147,17 @@ mod tests {
         let def = test_def();
         let err = object_fallback(&HostVal::Def(def), "m", "user.T").unwrap_err();
         assert_eq!(err.class, ThrowClass::IllegalArgumentException);
+    }
+
+    #[test]
+    fn meth_on_proxy_with_descriptor_misses() {
+        // Descriptors never reach `meth_on_proxy`
+        // (`meth_on_def` misses first); the arm keeps the
+        // match total.
+        let mut eval = crate::boot();
+        let def = test_def();
+        let err = meth_on_proxy(&mut eval, &HostVal::Def(def), "m", &[]).unwrap_err();
+        assert_eq!(err.class, ThrowClass::IllegalArgumentException);
+        assert_eq!(err.message, "No matching field found: m for class <proxy>");
     }
 }

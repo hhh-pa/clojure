@@ -1,0 +1,93 @@
+ip-plain 6 <java.lang.Long>
+ip-max 9223372036854775808N <clojure.lang.BigInt>
+ip-min -9223372036854775807 <java.lang.Long>
+ip-neg 0 <java.lang.Long>
+ip-dbl 2.5 <java.lang.Double>
+ip-big 6N <clojure.lang.BigInt>
+ip-rat 3/2 <clojure.lang.Ratio>
+ip-dec 6M <java.math.BigDecimal>
+ip-bigdec 1.1M <java.math.BigDecimal>
+ip-nil THROW java.lang.NullPointerException|"Cannot invoke \"Object.getClass()\" because \"x\" is null"
+ip-str THROW java.lang.ClassCastException|"class java.lang.String cannot be cast to class java.lang.Number (java.lang.String and java.lang.Number are in module java.base of loader 'bootstrap')"
+ip-char THROW java.lang.ClassCastException|"class java.lang.Character cannot be cast to class java.lang.Number (java.lang.Character and java.lang.Number are in module java.base of loader 'bootstrap')"
+ip-ar0 THROW clojure.lang.Compiler$CompilerException|"Syntax error compiling inc' at (/Users/hhu/workspace/clojure/.muse/worktrees/subagent-v2-01a17cea-a1d1-73c2-b863-91fc98e8705c-01a17f53-7da6-78d1-a101-c3685abbfdb8/docs/zero-oos-s11-arith/probes/autopromote.clj:29:20)."
+ip-ar2 THROW clojure.lang.Compiler$CompilerException|"Syntax error compiling inc' at (/Users/hhu/workspace/clojure/.muse/worktrees/subagent-v2-01a17cea-a1d1-73c2-b863-91fc98e8705c-01a17f53-7da6-78d1-a101-c3685abbfdb8/docs/zero-oos-s11-arith/probes/autopromote.clj:30:20)."
+dp-plain 4 <java.lang.Long>
+dp-min -9223372036854775809N <clojure.lang.BigInt>
+dp-max 9223372036854775806 <java.lang.Long>
+dp-neg -2 <java.lang.Long>
+dp-dbl 0.5 <java.lang.Double>
+dp-big 4N <clojure.lang.BigInt>
+dp-rat -1/2 <clojure.lang.Ratio>
+dp-dec 4M <java.math.BigDecimal>
+dp-bigdec -0.9M <java.math.BigDecimal>
+dp-nil THROW java.lang.NullPointerException|"Cannot invoke \"Object.getClass()\" because \"x\" is null"
+dp-str THROW java.lang.ClassCastException|"class java.lang.String cannot be cast to class java.lang.Number (java.lang.String and java.lang.Number are in module java.base of loader 'bootstrap')"
+dp-ar0 THROW clojure.lang.Compiler$CompilerException|"Syntax error compiling dec' at (/Users/hhu/workspace/clojure/.muse/worktrees/subagent-v2-01a17cea-a1d1-73c2-b863-91fc98e8705c-01a17f53-7da6-78d1-a101-c3685abbfdb8/docs/zero-oos-s11-arith/probes/autopromote.clj:43:20)."
+dp-ar2 THROW clojure.lang.Compiler$CompilerException|"Syntax error compiling dec' at (/Users/hhu/workspace/clojure/.muse/worktrees/subagent-v2-01a17cea-a1d1-73c2-b863-91fc98e8705c-01a17f53-7da6-78d1-a101-c3685abbfdb8/docs/zero-oos-s11-arith/probes/autopromote.clj:44:20)."
+ap-ar0 0 <java.lang.Long>
+ap-ar1i 5 <java.lang.Long>
+ap-ar1d 1.5 <java.lang.Double>
+ap-ar1n 5N <clojure.lang.BigInt>
+ap-ar1s THROW java.lang.ClassCastException|"Cannot cast java.lang.String to java.lang.Number"
+ap-ar1nil nil
+ap-plain 3 <java.lang.Long>
+ap-max1 9223372036854775808N <clojure.lang.BigInt>
+ap-min-1 -9223372036854775809N <clojure.lang.BigInt>
+ap-maxmax 18446744073709551614N <clojure.lang.BigInt>
+ap-mixed-ir 3/2 <clojure.lang.Ratio>
+ap-mixed-rn 11/2 <clojure.lang.Ratio>
+ap-mixed-nm 10M <java.math.BigDecimal>
+ap-mixed-md 5.5 <java.lang.Double>
+ap-mixed-id 1.5 <java.lang.Double>
+ap-fold 9223372036854775809N <clojure.lang.BigInt>
+ap-fold3 10 <java.lang.Long>
+ap-dblinf ##Inf <java.lang.Double>
+ap-nan ##NaN <java.lang.Double>
+ap-nil1 THROW java.lang.NullPointerException|"Cannot invoke \"Object.getClass()\" because \"x\" is null"
+ap-nil2 THROW java.lang.NullPointerException|"Cannot invoke \"Object.getClass()\" because \"x\" is null"
+ap-str1 THROW java.lang.ClassCastException|"class java.lang.String cannot be cast to class java.lang.Number (java.lang.String and java.lang.Number are in module java.base of loader 'bootstrap')"
+ap-str2 THROW java.lang.ClassCastException|"class java.lang.String cannot be cast to class java.lang.Number (java.lang.String and java.lang.Number are in module java.base of loader 'bootstrap')"
+sp-ar0 THROW clojure.lang.ArityException|"Wrong number of args (0) passed to: clojure.core/-'"
+sp-neg5 -5 <java.lang.Long>
+sp-negmin 9223372036854775808N <clojure.lang.BigInt>
+sp-negmax -9223372036854775807 <java.lang.Long>
+sp-ar1d -1.5 <java.lang.Double>
+sp-ar1n -5N <clojure.lang.BigInt>
+sp-ar1r -1/2 <clojure.lang.Ratio>
+sp-ar1m -5M <java.math.BigDecimal>
+sp-ar1s THROW java.lang.ClassCastException|"class java.lang.String cannot be cast to class java.lang.Number (java.lang.String and java.lang.Number are in module java.base of loader 'bootstrap')"
+sp-ar1nil THROW java.lang.NullPointerException|"Cannot invoke \"Object.getClass()\" because \"x\" is null"
+sp-plain 2 <java.lang.Long>
+sp-min1 -9223372036854775809N <clojure.lang.BigInt>
+sp-max-1 9223372036854775808N <clojure.lang.BigInt>
+sp-mixed-ir 1/2 <clojure.lang.Ratio>
+sp-mixed-rn -9/2 <clojure.lang.Ratio>
+sp-mixed-nm 0M <java.math.BigDecimal>
+sp-mixed-md 4.5 <java.lang.Double>
+sp-fold -9223372036854775810N <clojure.lang.BigInt>
+sp-fold3 4 <java.lang.Long>
+sp-nil1 THROW java.lang.NullPointerException|"Cannot invoke \"Object.getClass()\" because \"x\" is null"
+sp-str2 THROW java.lang.ClassCastException|"class java.lang.String cannot be cast to class java.lang.Number (java.lang.String and java.lang.Number are in module java.base of loader 'bootstrap')"
+mp-ar0 1 <java.lang.Long>
+mp-ar1i 5 <java.lang.Long>
+mp-ar1s THROW java.lang.ClassCastException|"Cannot cast java.lang.String to java.lang.Number"
+mp-plain 42 <java.lang.Long>
+mp-max2 18446744073709551614N <clojure.lang.BigInt>
+mp-min-1 9223372036854775808N <clojure.lang.BigInt>
+mp-min2 -18446744073709551616N <clojure.lang.BigInt>
+mp-mixed-ir 1N <clojure.lang.BigInt>
+mp-mixed-rn 5/2 <clojure.lang.Ratio>
+mp-mixed-nm 25M <java.math.BigDecimal>
+mp-mixed-md 2.5 <java.lang.Double>
+mp-fold 36893488147419103228N <clojure.lang.BigInt>
+mp-zero 0 <java.lang.Long>
+mp-dblinf ##Inf <java.lang.Double>
+mp-nil1 THROW java.lang.NullPointerException|"Cannot invoke \"Object.getClass()\" because \"x\" is null"
+mp-str2 THROW java.lang.ClassCastException|"class java.lang.String cannot be cast to class java.lang.Number (java.lang.String and java.lang.Number are in module java.base of loader 'bootstrap')"
+mc-addp 0.33M <java.math.BigDecimal>
+mc-add 0.33M <java.math.BigDecimal>
+mc-subp 0.33M <java.math.BigDecimal>
+mc-mulp 0.66M <java.math.BigDecimal>
+mc-incp 4/3 <clojure.lang.Ratio>
+mc-decp 1M <java.math.BigDecimal>

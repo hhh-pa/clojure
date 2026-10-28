@@ -300,13 +300,32 @@ pub fn jvm_class_of(v: &Value) -> String {
         }
         Value::Str(_) => "java.lang.String".to_owned(),
         Value::Char(_) => "java.lang.Character".to_owned(),
-        Value::Symbol(_) => "clojure.lang.Symbol".to_owned(),
-        Value::Keyword(_) => "clojure.lang.Keyword".to_owned(),
+        Value::Symbol(_) | Value::Keyword(_) => named_class_of(v),
+        Value::Uuid(_) | Value::Instant(_) | Value::Uri(_) => scalar_class_of(v),
         Value::Vector(_) => "clojure.lang.PersistentVector".to_owned(),
         Value::MapEntry { .. } => "clojure.lang.MapEntry".to_owned(),
         Value::Map(m) => map_class_of(m).to_owned(),
         Value::Set(s) => set_class_of(s).to_owned(),
         other => jvm_class_of_ref(other),
+    }
+}
+
+/// `Symbol`/`Keyword` class names. Chained so each match stays
+/// under the complexity gate.
+fn named_class_of(v: &Value) -> String {
+    match v {
+        Value::Symbol(_) => "clojure.lang.Symbol".to_owned(),
+        _ => "clojure.lang.Keyword".to_owned(),
+    }
+}
+
+/// S9 scalar class names (split from `jvm_class_of` for the
+/// complexity budget).
+fn scalar_class_of(v: &Value) -> String {
+    match v {
+        Value::Uuid(_) => "java.util.UUID".to_owned(),
+        Value::Instant(_) => "java.util.Date".to_owned(),
+        _ => "java.net.URI".to_owned(),
     }
 }
 
@@ -368,6 +387,11 @@ fn jvm_class_of_host(v: &Value) -> String {
         },
         // Multimethods report the JVM class (S-typechain stage 3).
         Value::MultiFn(_) => "clojure.lang.MultiFn".to_owned(),
+        // Arrays report their descriptor (S15: `[I`, `[[I`,
+        // `[Ljava.lang.Object;`, …).
+        Value::Array(a) => a.descriptor(),
+        // Primitive vectors report the JVM class (S15).
+        Value::PrimitiveVector(_) => "clojure.core.Vec".to_owned(),
         // Handled upstream; re-enter so the chain stays exhaustive.
         Value::Nil
         | Value::Bool(_)
@@ -386,6 +410,9 @@ fn jvm_class_of_host(v: &Value) -> String {
         | Value::Map(_)
         | Value::Set(_)
         | Value::List(_)
+        | Value::Uuid(_)
+        | Value::Instant(_)
+        | Value::Uri(_)
         | Value::Regex(_)
         | Value::TaggedLiteral { .. }
         | Value::ReaderConditional { .. }
@@ -574,6 +601,30 @@ mod tests {
         // The host match lists scalars only so the split stays
         // exhaustive. That arm re-enters the public function.
         assert_eq!(jvm_class_of_host(&Value::Nil), "null");
+    }
+
+    #[test]
+    fn jvm_class_of_scalars() {
+        // S9: the host classes (oracles `u-class`, `i-class`,
+        // `r-class`; the `Inst` extension dispatches on Date).
+        assert_eq!(
+            jvm_class_of(&Value::Uuid(clj_value::Uuid::from_bits(0, 0))),
+            "java.util.UUID"
+        );
+        assert_eq!(
+            jvm_class_of(&Value::Instant(clj_value::Instant::from_millis(0))),
+            "java.util.Date"
+        );
+        assert_eq!(
+            jvm_class_of(&Value::Uri(Box::new(
+                clj_value::Uri::parse("http://h/x").unwrap()
+            ))),
+            "java.net.URI"
+        );
+        assert_eq!(
+            jvm_class_of_host(&Value::Uuid(clj_value::Uuid::from_bits(0, 0))),
+            "java.util.UUID"
+        );
     }
 
     #[test]

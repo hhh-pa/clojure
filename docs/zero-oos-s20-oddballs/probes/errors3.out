@@ -1,0 +1,16 @@
+i-exdata-nilnil {}
+i-exdata-mnil {}
+i-via-data-mnil {}
+i-top-data-mnil {}
+i-top-keys-mnil (":cause" ":data" ":trace" ":via")
+j-cause "r"
+j-top-data {:b 2}
+j-via-msgs ["o" "mid" "r"]
+j-via-data-keys [true false true]
+j-via-data [{:a 1} nil {:b 2}]
+j-trace0-which [false false true]
+k-cause "rt"
+k-top-keys (":cause" ":trace" ":via")
+k-top-data nil
+k-via-data-keys [true false false]
+k-trace0-which [false true true]

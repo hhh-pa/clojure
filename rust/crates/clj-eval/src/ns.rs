@@ -899,7 +899,9 @@ pub(crate) fn throw_class_for(name: &str) -> ThrowClass {
         "ClassNotFoundException" => ThrowClass::ClassNotFoundException,
         "IndexOutOfBoundsException" => ThrowClass::IndexOutOfBoundsException,
         "ArrayIndexOutOfBoundsException" => ThrowClass::ArrayIndexOutOfBoundsException,
+        "ArrayStoreException" => ThrowClass::ArrayStoreException,
         "NegativeArraySizeException" => ThrowClass::NegativeArraySizeException,
+        "OutOfMemoryError" => ThrowClass::OutOfMemoryError,
         "ArithmeticException" => ThrowClass::ArithmeticException,
         "ExceptionInfo" => ThrowClass::ExceptionInfo,
         "FileNotFoundException" => ThrowClass::FileNotFoundException,
@@ -1988,6 +1990,9 @@ fn core_vars(user_ns: Value) -> Vec<(String, Value, bool, bool)> {
         ("*2".to_owned(), Value::Nil, true, false),
         ("*3".to_owned(), Value::Nil, true, false),
         ("*e".to_owned(), Value::Nil, true, false),
+        // S20 oddballs (#55, probes `r-*`): false root; sessions
+        // bind it true (`^:dynamic`, like the window above).
+        ("*repl*".to_owned(), Value::Bool(false), true, false),
         // S7 CLI (P4): nil root; `run` binds the arg seq.
         ("*command-line-args*".to_owned(), Value::Nil, true, false),
         // S6 data readers: the tag table (empty root) and the
@@ -2135,15 +2140,20 @@ fn boot_install_natives(eval: &mut Evaluator) {
         .chain(crate::re::RE_NATIVES.iter())
         .chain(crate::rng::RNG_NATIVES.iter())
         .chain(crate::io::IO_NATIVES.iter())
+        .chain(crate::jdkio::JDKIO_NATIVES.iter())
         .chain(crate::reader::READER_NATIVES.iter())
         .chain(crate::concurrency::CONC_NATIVES.iter())
         .chain(crate::fx4_host::FX4_NATIVES.iter())
         .chain(crate::types::TYPES_NATIVES.iter())
+        .chain(crate::typeinternals::TYPEINTERNALS_NATIVES.iter())
         .chain(crate::protocol::PROTOCOL_NATIVES.iter())
         .chain(crate::multi::MULTI_NATIVES.iter())
+        .chain(crate::hierarchy::HIERARCHY_NATIVES.iter())
         .chain(crate::core::TOWER_NATIVES.iter())
         .chain(crate::collmisc::COLLMISC_NATIVES.iter())
         .chain(crate::printsys::PRINTSYS_NATIVES.iter())
+        .chain(crate::scalars::SCALAR_NATIVES.iter())
+        .chain(crate::arrays::ARRAY_NATIVES.iter())
     {
         let func: Arc<crate::ext::NativeImpl> = Arc::new(*f);
         eval.install_native("clojure.core", name, func);

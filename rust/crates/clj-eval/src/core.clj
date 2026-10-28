@@ -1162,6 +1162,18 @@
       args
       (emit-type-methods "proxy" triples))))
 
+;; S14: call the superclass method from a proxy method body. The
+;; call takes the port `.meth` shape (the JVM's `.`-head
+;; `(. this meth …)` interop form does not exist here); like the
+;; JVM it captures `this`, which the caller binds, since port
+;; proxy fns exclude it.
+(defmacro proxy-super [meth & args]
+  (list 'clojure.core/proxy-call-with-super
+    (list 'clojure.core/fn []
+      (apply list (symbol (str "." (name meth))) 'this args))
+    'this
+    (name meth)))
+
 (defmacro definterface [name & args]
   (let [{:keys [doc attr sigs]} (parse-iface-head "definterface" name args)]
     (doseq [s sigs]
@@ -1279,15 +1291,19 @@
                              parsed))
         ;; One variadic arity per method: every call reaches
         ;; `__protocol_invoke*`, so its oracle arity error (not the
-        ;; fn's own `ArityException`) fires on bad counts.
-        fns (map (fn [{:keys [m doc]}]
-                   (apply list 'clojure.core/defn m
-                     (concat (when doc [doc])
-                             (list (list '[this & args]
-                                     (list 'clojure.core/__protocol_invoke*
-                                       (list 'var name) (str m)
-                                       (list 'clojure.core/into '[this] 'args)))))))
-                 parsed)]
+        ;; fn's own `ArityException`) fires on bad counts. Each
+        ;; `defn` is followed by its S14 `__protocol_method*`
+        ;; registration (the `-cache-protocol-fn` cache identity).
+        fns (mapcat (fn [{:keys [m doc]}]
+                      [(apply list 'clojure.core/defn m
+                         (concat (when doc [doc])
+                                 (list (list '[this & args]
+                                         (list 'clojure.core/__protocol_invoke*
+                                           (list 'var name) (str m)
+                                           (list 'clojure.core/into '[this] 'args))))))
+                       (list 'clojure.core/__protocol_method*
+                         (list 'var name) (str m) m)])
+                    parsed)]
     (list 'do
       (list 'def iface-sym
         (list 'clojure.core/__interface* ns-str (str name) iface-sigs))
@@ -1350,6 +1366,26 @@
              (list 'quote t) mmap))
          (partition 2 proto+mmaps))))
 
+;; S9 scalar kinds (issue #52): `Inst` over the `Instant` kind.
+;; The `java.util.Date` extension reads millis through the hidden
+;; `__inst_millis*` native; user types extend `Inst` through the
+;; ordinary machinery.
+(defprotocol Inst
+  (inst-ms* [inst]))
+(extend-protocol Inst
+  java.util.Date
+  (inst-ms* [inst] (clojure.core/__inst_millis* inst)))
+(defn inst-ms
+  "Return the number of milliseconds since January 1, 1970, 00:00:00 GMT"
+  {:added "1.9"}
+  [inst]
+  (inst-ms* inst))
+(defn inst?
+  "Return true if x satisfies Inst"
+  {:added "1.9"}
+  [x]
+  (satisfies? Inst x))
+
 ;; Host class names as values (the port has no class literals):
 ;; `String` in value position is its name string, so `extends?` /
 ;; `satisfies?` take classes the way the pins write them.
@@ -1358,6 +1394,10 @@
 (def Double "java.lang.Double")
 (def Boolean "java.lang.Boolean")
 (def Object "java.lang.Object")
+
+;; S14: the shared empty gvec node, `(VecNode. nil
+;; (object-array 32))` — a 32-nil vector stands for the array.
+(def EMPTY-NODE (->VecNode nil (vec (repeat 32 nil))))
 
 (defmacro with-open [bindings & body]
   (when-not (vector? bindings)
@@ -1373,15 +1413,22 @@
             (list 'let [n init]
               (list 'try form (list 'finally (list (symbol ".close") n))))))))))
 
+;; The global hierarchy (S13): the `derive` / `underive` short
+;; arities and default multifns alter and read this root
+;; (private, like the JVM — probe `h-private`).
+(def ^:private global-hierarchy (make-hierarchy))
+
 ;; --- Multimethods (S-typechain stage 3): `defmulti` / `defmethod`
-;; / `prefer-method` / `remove-method` expand to the hidden
-;; `__multifn*` et al natives (`get-method` / `methods` are plain
-;; natives on values). Dispatch values are evaluated (keywords,
-;; vectors, and the class-name vars all ride through); method fns
-;; are ordinary fns over the call args. Table updates install a new
-;; var root, so the mutating forms take a var (a symbol is read as
-;; one; anything else falls through to the native's cast error,
-;; like `extend`).
+;; / `prefer-method` / `remove-method` / `remove-all-methods`
+;; expand to the hidden `__multifn*` et al natives (`get-method` /
+;; `methods` / `prefers` are plain natives on values). Dispatch
+;; values are evaluated (keywords, vectors, and the class-name
+;; vars all ride through); method fns are ordinary fns over the
+;; call args. Table updates install a new var root, so the
+;; mutating forms take a var (a symbol is read as one; anything
+;; else falls through to the native's cast error, like `extend`).
+;; Dispatch consults hierarchies (S13): exact entry, best `isa?`
+;; match with preference ties broken, then the default entry.
 
 (defn- parse-multi-head [name args]
   (check-type-name "defmulti" name)
@@ -1392,27 +1439,28 @@
     {:doc doc :attr attr :dispatch (first args) :options (rest args)}))
 
 (defn- parse-multi-options [options]
-  ;; Only `:default` is supported (`:hierarchy` is a follow-up
-  ;; slice — `derive` / `isa?` do not exist yet); option values
-  ;; are emitted for runtime evaluation.
+  ;; `:default` and `:hierarchy` are supported (S13); option
+  ;; values are emitted for runtime evaluation; last wins. The
+  ;; presence flag distinguishes absent `:hierarchy` (global)
+  ;; from explicit nil (NPEs at the call, probe `x-hier-nil`).
   (when (odd? (count options))
     (throw-illegal-arg! "defmulti options must be key/value pairs"))
-  (loop [opts options, default :default]
+  (loop [opts options, default :default, hierarchy nil, present false]
     (if (empty? opts)
-      default
+      [default hierarchy present]
       (let [[k v] opts]
-        (when-not (= :default k)
-          (throw-illegal-arg! (str "Unsupported defmulti option: " k)))
-        (recur (drop 2 opts) v)))))
+        (cond (= :default k) (recur (drop 2 opts) v hierarchy present)
+              (= :hierarchy k) (recur (drop 2 opts) default v true)
+              :else (throw-illegal-arg! (str "Unsupported defmulti option: " k)))))))
 
 (defmacro defmulti [name & args]
   ;; Answers the var (like the JVM's `def`-family shape), not the
   ;; value — the shared tail evaluates `name`, so re-read the var.
   (let [{:keys [doc attr dispatch options]} (parse-multi-head name args)
-        default (parse-multi-options options)]
+        [default hierarchy present] (parse-multi-options options)]
     (list 'do
       (finish-type-def name doc attr
-        (list 'clojure.core/__multifn* (str name) dispatch default))
+        (list 'clojure.core/__multifn* (str name) dispatch default hierarchy present))
       (list 'var name))))
 
 (defn- normalize-defmethod-tail [fn-tail]
@@ -1438,6 +1486,10 @@
   (list 'clojure.core/__remove_method*
     (if (symbol? m) (list 'var m) (list 'quote m))
     dispatch-val))
+
+(defmacro remove-all-methods [m]
+  (list 'clojure.core/__remove_all_methods*
+    (if (symbol? m) (list 'var m) (list 'quote m))))
 
 (defmacro prefer-method [m preferred other]
   (list 'clojure.core/__prefer_method*
@@ -1834,3 +1886,51 @@
   {:added "1.13"}
   [x]
   (doto x tap>))
+
+;; --- `amap` / `areduce` (S15): verbatim ports of the alpha10
+;; `core.clj` macros except `unchecked-inc`/`unchecked-inc-int`
+;; become `inc` (those vars do not exist in the port; the port's
+;; own `dotimes` substitutes `inc` the same way). Oracles:
+;; `docs/zero-oos-s15-arrays/probes/interop.{clj,out}` (`e-amap*`,
+;; `e-areduce*`, `e-expand-*`).
+(defmacro amap
+  "Maps an expression across an array a, using an index named idx, and
+  return value named ret, initialized to a clone of a, then setting
+  each element of ret to the evaluation of expr, returning the new
+  array ret."
+  {:added "1.0"}
+  [a idx ret expr]
+  `(let [a# ~a l# (alength a#)
+         ~ret (aclone a#)]
+     (loop [~idx 0]
+       (if (< ~idx l#)
+         (do
+           (aset ~ret ~idx ~expr)
+           (~'recur (inc ~idx)))
+         ~ret))))
+(defmacro areduce
+  "Reduces an expression across an array a, using an index named idx,
+  and return value named ret, initialized to init, setting ret to the
+  evaluation of expr at each step, returning ret."
+  {:added "1.0"}
+  [a idx ret init expr]
+  `(let [a# ~a l# (alength a#)]
+     (loop [~idx 0 ~ret ~init]
+       (if (< ~idx l#)
+         (~'recur (inc ~idx) ~expr)
+         ~ret))))
+
+;; --- `xml-seq` (zero-oos S17 JDK/IO adapters, issue #61):
+;; verbatim port of alpha10 `clojure/core.clj` (`:static`
+;; dropped — nothing compiles statically). Strings are leaf
+;; nodes, not skipped (oracle `e-walk`); laziness rides
+;; `tree-seq`. Oracle:
+;; `docs/zero-oos-s17-jdkio/probes/jdkio.{clj,out}`.
+(defn xml-seq
+  "A tree seq on the xml elements as per xml/parse"
+  {:added "1.0"}
+  [root]
+    (tree-seq
+     (complement string?)
+     (comp seq :content)
+     root))

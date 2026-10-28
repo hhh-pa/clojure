@@ -1,0 +1,35 @@
+va-and0 THROW clojure.lang.ArityException|"Wrong number of args (0) passed to: clojure.core/bit-and"
+va-and4 1 <java.lang.Long>
+va-andbad3 THROW java.lang.IllegalArgumentException|"bit operation not supported for: class java.lang.String"
+va-or0 THROW clojure.lang.ArityException|"Wrong number of args (0) passed to: clojure.core/bit-or"
+va-or3 7 <java.lang.Long>
+va-xor3 5 <java.lang.Long>
+va-xor0 THROW clojure.lang.ArityException|"Wrong number of args (0) passed to: clojure.core/bit-xor"
+fx-andnot3 4
+fx-set3 THROW clojure.lang.ArityException|"Wrong number of args (3) passed to: clojure.core/bit-set"
+fx-clear3 THROW clojure.lang.ArityException|"Wrong number of args (3) passed to: clojure.core/bit-clear"
+fx-flip3 THROW clojure.lang.ArityException|"Wrong number of args (3) passed to: clojure.core/bit-flip"
+fx-shl3 THROW clojure.lang.Compiler$CompilerException|"Syntax error compiling bit-shift-left at (/Users/hhu/workspace/clojure/.muse/worktrees/subagent-v2-01a17cea-a1d1-73c2-b863-91fc98e8705c-01a17f53-7da6-78d1-a101-c3685abbfdb8/docs/zero-oos-s11-arith/probes/bitwise2.clj:29:21)."
+fx-shr3 THROW clojure.lang.Compiler$CompilerException|"Syntax error compiling bit-shift-right at (/Users/hhu/workspace/clojure/.muse/worktrees/subagent-v2-01a17cea-a1d1-73c2-b863-91fc98e8705c-01a17f53-7da6-78d1-a101-c3685abbfdb8/docs/zero-oos-s11-arith/probes/bitwise2.clj:30:21)."
+fx-ubs3 THROW clojure.lang.Compiler$CompilerException|"Syntax error compiling unsigned-bit-shift-right at (/Users/hhu/workspace/clojure/.muse/worktrees/subagent-v2-01a17cea-a1d1-73c2-b863-91fc98e8705c-01a17f53-7da6-78d1-a101-c3685abbfdb8/docs/zero-oos-s11-arith/probes/bitwise2.clj:31:21)."
+fx-test3 THROW clojure.lang.ArityException|"Wrong number of args (3) passed to: clojure.core/bit-test"
+fx-test0 THROW clojure.lang.ArityException|"Wrong number of args (0) passed to: clojure.core/bit-test"
+jt-andint 2 <java.lang.Long>
+jt-andshort 2 <java.lang.Long>
+jt-andbyte 2 <java.lang.Long>
+jt-andchar THROW java.lang.IllegalArgumentException|"bit operation not supported for: class java.lang.Character"
+jt-notint -7 <java.lang.Long>
+jt-shlint 4 <java.lang.Long>
+jt-orint 7 <java.lang.Long>
+ao-bothbad THROW java.lang.IllegalArgumentException|"bit operation not supported for: class java.lang.String"
+ao-secondbad THROW java.lang.IllegalArgumentException|"bit operation not supported for: class java.lang.String"
+ao-kw THROW java.lang.IllegalArgumentException|"bit operation not supported for: class clojure.lang.Keyword"
+ao-vec THROW java.lang.IllegalArgumentException|"bit operation not supported for: class clojure.lang.PersistentVector"
+ao-bool THROW java.lang.IllegalArgumentException|"bit operation not supported for: class java.lang.Boolean"
+ao-nil2 THROW java.lang.NullPointerException|"Cannot invoke \"Object.getClass()\" because \"x\" is null"
+ao-shnil2 THROW java.lang.NullPointerException|"Cannot invoke \"Object.getClass()\" because \"x\" is null"
+ao-testnil2 THROW java.lang.NullPointerException|"Cannot invoke \"Object.getClass()\" because \"x\" is null"
+ev-hugesh -9223372036854775808 <java.lang.Long>
+ev-ubs 4611686018427387902 <java.lang.Long>
+ev-shr0 5 <java.lang.Long>
+ev-shl0 5 <java.lang.Long>

@@ -198,7 +198,7 @@ pub(crate) fn nth_index(v: &Value) -> Result<i32, NativeError> {
 /// digits, past-`i32` fails `integer overflow` (oracles
 /// `nth-big`, `nth-intrange`, `conv-hugeint` — shared by `int`,
 /// `nth`, and `subvec`).
-fn tower_intcast(n: &num_bigint::BigInt) -> Result<i32, NativeError> {
+pub(crate) fn tower_intcast(n: &num_bigint::BigInt) -> Result<i32, NativeError> {
     let l = n
         .to_i64()
         .ok_or_else(|| out_of_range("long", Num::BigInt(n.clone())))?;
@@ -260,7 +260,7 @@ fn narrow_num(n: &Num, lo: i64, hi: i64, kind: &'static str) -> Result<i64, Nati
 /// Java `intValue`: low 32 bits, sign-extended (`BigDecimal`
 /// `(char 1E300M)` needs the NUL, not a range error; oracle
 /// `tower-r2f`).
-fn bigint_int_value(n: &num_bigint::BigInt) -> i32 {
+pub(crate) fn bigint_int_value(n: &num_bigint::BigInt) -> i32 {
     let mut le = n.to_signed_bytes_le();
     le.resize(
         4,
@@ -353,6 +353,7 @@ pub(crate) fn is_ifn(v: &Value) -> bool {
         | Value::Var(_)
         | Value::Promise(_)
         | Value::MultiFn(_)
+        | Value::PrimitiveVector(_)
         | Value::Unbound(_) => true,
         // Struct instances only (records and bases miss — S12
         // oracle `sm-ifn`; records stay pinned non-`IFn` by
@@ -1059,12 +1060,12 @@ fn native_dec(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError
     dec_one(eval, as_num(&args[0])?)
 }
 
-/// `inc'`: auto-promoting increment — identical to `inc` here
-/// (`Int` still overflows instead of growing to `BigInt`; the
-/// wedge stays, tower kinds pass through like `inc`).
+/// `inc'`: auto-promoting increment — `MAX` grows to
+/// `BigInt` (the S11 in-slice promotion fix; oracles `ip-*`),
+/// everything else keeps the `inc` rules.
 fn native_inc_prime(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/inc'", args, &[1])?;
-    inc_one(eval, as_num(&args[0])?)
+    inc_prime_one(eval, as_num(&args[0])?)
 }
 
 /// `max`/`min`: ties keep the LATTER (`(max 1 1.0)` → `1.0`),
@@ -1334,8 +1335,35 @@ fn compare_same_type(x: &Value, y: &Value) -> Result<Option<std::cmp::Ordering>,
         (Value::Keyword(a), Value::Keyword(b)) => Ok(Some(compare_named(a, b))),
         (Value::Symbol(a), Value::Symbol(b)) => Ok(Some(compare_named(a, b))),
         (Value::Vector(a), Value::Vector(b)) => Ok(Some(compare_vectors(a, b)?)),
+        // S9 scalars order within their kind (the port takes the
+        // sign; the JVM returns raw `compareTo` ints).
+        (Value::Uuid(_), Value::Uuid(_))
+        | (Value::Instant(_), Value::Instant(_))
+        | (Value::Uri(_), Value::Uri(_)) => Ok(Some(compare_scalar_pair(x, y))),
         // Entries order exactly like their 2-vectors (Oracle FX2
         // `compare`, `sort-entries`, `maxkey`).
+        (Value::MapEntry { .. }, Value::Vector(_))
+        | (Value::Vector(_), Value::MapEntry { .. })
+        | (Value::MapEntry { .. }, Value::MapEntry { .. }) => compare_entry_pair(x, y),
+        _ => Ok(None),
+    }
+}
+
+/// S9 scalar order within one kind (split from
+/// `compare_same_type` for the complexity budget).
+fn compare_scalar_pair(x: &Value, y: &Value) -> std::cmp::Ordering {
+    match (x, y) {
+        (Value::Uuid(a), Value::Uuid(b)) => a.cmp_uuid(b),
+        (Value::Instant(a), Value::Instant(b)) => a.cmp_instant(b),
+        (Value::Uri(a), Value::Uri(b)) => a.compare_uri(b).cmp(&0),
+        _ => unreachable!("scalar gate"),
+    }
+}
+
+/// Entry pairs order as their 2-vectors (split from
+/// `compare_same_type` for the complexity budget).
+fn compare_entry_pair(x: &Value, y: &Value) -> Result<Option<std::cmp::Ordering>, NativeError> {
+    match (x, y) {
         (Value::MapEntry { key, val }, Value::Vector(b)) => {
             let tmp = clj_value::Vector::from_vec(vec![(**key).clone(), (**val).clone()]);
             Ok(Some(compare_vectors(&tmp, b)?))
@@ -1349,7 +1377,7 @@ fn compare_same_type(x: &Value, y: &Value) -> Result<Option<std::cmp::Ordering>,
             let b = clj_value::Vector::from_vec(vec![(**k2).clone(), (**v2).clone()]);
             Ok(Some(compare_vectors(&a, &b)?))
         }
-        _ => Ok(None),
+        _ => unreachable!("entry gate"),
     }
 }
 
@@ -1383,6 +1411,11 @@ fn compare_cast_err(x: &Value, y: &Value) -> NativeError {
         Value::Bool(_) => "java.lang.Boolean",
         Value::Keyword(_) => "clojure.lang.Keyword",
         Value::Symbol(_) => "clojure.lang.Symbol",
+        // S9 scalars are `Comparable` (oracles `u-cmp-str`,
+        // `i-cmp-str`, `r-cmp-str` pin the texts).
+        Value::Uuid(_) => "java.util.UUID",
+        Value::Instant(_) => "java.util.Date",
+        Value::Uri(_) => "java.net.URI",
         Value::Vector(_) | Value::MapEntry { .. } => "clojure.lang.IPersistentVector",
         _ => return cce_err(x, "java.lang.Comparable"),
     };
@@ -1553,27 +1586,41 @@ fn is_simple_symbol(v: &Value) -> bool {
 fn is_coll(v: &Value) -> bool {
     matches!(
         v,
-        Value::List(_) | Value::Vector(_) | Value::MapEntry { .. } | Value::Map(_) | Value::Set(_)
+        Value::List(_)
+            | Value::Vector(_)
+            | Value::MapEntry { .. }
+            | Value::Map(_)
+            | Value::Set(_)
+            | Value::PrimitiveVector(_)
     ) || as_subvector(v).is_some()
         || is_seq_value(v)
         || crate::types::is_host_record(v)
         || crate::types::is_host_struct(v)
 }
 fn is_sequential(v: &Value) -> bool {
-    matches!(v, Value::Vector(_) | Value::MapEntry { .. })
-        || as_subvector(v).is_some()
+    matches!(
+        v,
+        Value::Vector(_) | Value::MapEntry { .. } | Value::PrimitiveVector(_)
+    ) || as_subvector(v).is_some()
         || is_seq_value(v)
 }
 fn is_associative(v: &Value) -> bool {
-    matches!(v, Value::Map(_) | Value::Vector(_) | Value::MapEntry { .. })
-        || as_subvector(v).is_some()
+    matches!(
+        v,
+        Value::Map(_) | Value::Vector(_) | Value::MapEntry { .. } | Value::PrimitiveVector(_)
+    ) || as_subvector(v).is_some()
         || crate::types::is_host_record(v)
         || crate::types::is_host_struct(v)
 }
 pub(crate) fn is_counted(v: &Value) -> bool {
     matches!(
         v,
-        Value::List(_) | Value::Vector(_) | Value::MapEntry { .. } | Value::Map(_) | Value::Set(_)
+        Value::List(_)
+            | Value::Vector(_)
+            | Value::MapEntry { .. }
+            | Value::Map(_)
+            | Value::Set(_)
+            | Value::PrimitiveVector(_)
     ) || crate::coll::is_transient(v)
         || as_subvector(v).is_some()
         || is_counted_seq(v)
@@ -1585,7 +1632,10 @@ fn is_list(v: &Value) -> bool {
     matches!(v, Value::List(_))
 }
 fn is_vector(v: &Value) -> bool {
-    matches!(v, Value::Vector(_) | Value::MapEntry { .. }) || as_subvector(v).is_some()
+    matches!(
+        v,
+        Value::Vector(_) | Value::MapEntry { .. } | Value::PrimitiveVector(_)
+    ) || as_subvector(v).is_some()
 }
 fn is_map(v: &Value) -> bool {
     matches!(v, Value::Map(_)) || crate::types::is_host_record(v) || crate::types::is_host_struct(v)
@@ -1607,8 +1657,10 @@ fn is_sorted(v: &Value) -> bool {
 // Lists, hash maps, hash sets, queues, seqs (including `rseq`),
 // and transients do not (`docs/t1192/probes/fx2b-reversible`).
 fn is_reversible(v: &Value) -> bool {
-    matches!(v, Value::Vector(_) | Value::MapEntry { .. })
-        || as_subvector(v).is_some()
+    matches!(
+        v,
+        Value::Vector(_) | Value::MapEntry { .. } | Value::PrimitiveVector(_)
+    ) || as_subvector(v).is_some()
         || is_sorted(v)
 }
 fn is_var(v: &Value) -> bool {
@@ -1624,6 +1676,8 @@ fn is_seqable(v: &Value) -> bool {
             | Value::MapEntry { .. }
             | Value::Map(_)
             | Value::Set(_)
+            | Value::Array(_)
+            | Value::PrimitiveVector(_)
     ) || as_subvector(v).is_some()
         || is_seq_value(v)
         || crate::types::is_host_record(v)
@@ -1654,7 +1708,10 @@ fn is_map_entry(v: &Value) -> bool {
 // strings, seqs, maps, sets, and arrays answer false
 // (probes `p-indexed-*`).
 fn is_indexed(v: &Value) -> bool {
-    matches!(v, Value::Vector(_) | Value::MapEntry { .. }) || as_subvector(v).is_some()
+    matches!(
+        v,
+        Value::Vector(_) | Value::MapEntry { .. } | Value::PrimitiveVector(_)
+    ) || as_subvector(v).is_some()
 }
 // `nat-int?` / `neg-int?` / `pos-int?` (S1): composed over the
 // port's `int?` (`Int`-only — BigInts answer false exactly like
@@ -2302,10 +2359,17 @@ fn str_of_realized(eval: &mut Evaluator, v: &Value) -> Result<String, NativeErro
         | Value::Future(_)
         | Value::Promise(_)
         | Value::Agent(_)
-        | Value::Volatile(_) => clj_value::java_debug(&r),
+        | Value::Volatile(_)
+        // Arrays render `toString` too (`{desc}@{id}` — S15 oracle
+        // `d-str-int`).
+        | Value::Array(_) => clj_value::java_debug(&r),
         Value::List(_) | Value::Vector(_) | Value::Map(_) | Value::Set(_) => {
             clj_value::pr_to_string(&r, &clj_value::PrintOpts::pr())
         }
+        // S9 scalars answer `toString` (bare UUID/URI,
+        // `Date.toString` instants) — `print` stays tagged while
+        // `str` goes bare.
+        Value::Uuid(_) | Value::Instant(_) | Value::Uri(_) => clj_value::java_debug(&r),
         // Extensions with a `str` display (only `MathContext`,
         // S2 oracle `wp-str`) render it; the rest print
         // readably.
@@ -2579,7 +2643,7 @@ fn native_namespace(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nati
 
 /// The `charValue` NPE (`int` of nil — `int` falls back to the
 /// `Character` cast, fixprobe10 `:int-nil`).
-fn npe_char_value() -> NativeError {
+pub(crate) fn npe_char_value() -> NativeError {
     NativeError::new(
         ThrowClass::NullPointerException,
         "Cannot invoke \"java.lang.Character.charValue()\" because \"x\" is null".to_owned(),
@@ -2602,7 +2666,7 @@ fn bigint_long(n: &num_bigint::BigInt) -> Result<i64, NativeError> {
 
 /// The `doubleValue` NPE (`long`/`double`/`float`/`short`/`byte`
 /// of nil).
-fn npe_double_value() -> NativeError {
+pub(crate) fn npe_double_value() -> NativeError {
     NativeError::new(
         ThrowClass::NullPointerException,
         "Cannot invoke \"java.lang.Number.doubleValue()\" because \"x\" is null".to_owned(),
@@ -2610,7 +2674,7 @@ fn npe_double_value() -> NativeError {
 }
 
 /// The `longValue` NPE (`char` of nil).
-fn npe_long_value() -> NativeError {
+pub(crate) fn npe_long_value() -> NativeError {
     NativeError::new(
         ThrowClass::NullPointerException,
         "Cannot invoke \"java.lang.Number.longValue()\" because \"x\" is null".to_owned(),
@@ -2620,7 +2684,7 @@ fn npe_long_value() -> NativeError {
 /// `IAE | Value out of range for {kind}: {x}` — doubles render
 /// via `Double.toString`, ints raw (fixprobe10 `:int-huge`),
 /// tower values exactly.
-fn out_of_range(kind: &str, n: Num) -> NativeError {
+pub(crate) fn out_of_range(kind: &str, n: Num) -> NativeError {
     let x = match n {
         Num::Int(i) => i.to_string(),
         Num::Double(d) => clj_value::java_double_string(d),
@@ -2676,7 +2740,7 @@ pub(crate) fn number_int_cast(v: &Value) -> Result<i32, NativeError> {
     }
 }
 
-fn native_int(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+pub(crate) fn native_int(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/int", args, &[1])?;
     // `int` keeps the value a `Long` (no 32-bit ints exist), but
     // checks the int range exactly: longs past it are `AE |
@@ -2699,7 +2763,7 @@ fn double_int(d: f64) -> Result<i64, NativeError> {
     }
 }
 
-fn native_long(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+pub(crate) fn native_long(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/long", args, &[1])?;
     Ok(Value::Int(match &args[0] {
         Value::Int(i) => *i,
@@ -2715,7 +2779,7 @@ fn native_long(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErr
     }))
 }
 
-fn native_double(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+pub(crate) fn native_double(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/double", args, &[1])?;
     Ok(Value::Double(match &args[0] {
         Value::Int(i) => *i as f64,
@@ -3033,7 +3097,7 @@ pub(crate) fn arithmetic(message: impl Into<String>) -> NativeError {
     NativeError::new(ThrowClass::ArithmeticException, message.into())
 }
 
-fn native_float(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+pub(crate) fn native_float(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/float", args, &[1])?;
     // No `Float` exists: the float range is checked, then the
     // EXACT double is returned (no `f32` rounding — printing and
@@ -3065,7 +3129,7 @@ fn float_checked(f: f64, err: Num) -> Result<f64, NativeError> {
     }
 }
 
-fn native_short(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+pub(crate) fn native_short(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/short", args, &[1])?;
     Ok(Value::Int(match &args[0] {
         Value::Char(c) => *c as i64,
@@ -3077,7 +3141,7 @@ fn native_short(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeEr
     }))
 }
 
-fn native_byte(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+pub(crate) fn native_byte(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/byte", args, &[1])?;
     Ok(Value::Int(match &args[0] {
         Value::Char(c) => *c as i64,
@@ -3088,7 +3152,7 @@ fn native_byte(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErr
     }))
 }
 
-fn native_char(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+pub(crate) fn native_char(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/char", args, &[1])?;
     Ok(Value::Char(match &args[0] {
         Value::Char(c) => *c,
@@ -3411,6 +3475,142 @@ fn native_ex_cause(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nativ
     })
 }
 
+/// S20 oddballs (#55): one cause-chain link's emulated frame line —
+/// the link ex-data's `:clojure.error/line` when it is an `Int`
+/// (reader diagnostics ride there), else `-1` (the JVM unknown-line
+/// convention).
+fn s20_frame_line(link: &Throwable) -> i64 {
+    if let Some(Value::Map(m)) = link.data.as_deref() {
+        let key = Value::Keyword(Keyword::new(Some("clojure.error"), "line"));
+        if let Some(Value::Int(n)) = m.get(&key) {
+            return *n;
+        }
+    }
+    -1
+}
+
+/// S20: one chain link's emulated `[class method file line]` frame.
+/// The class is the link's JVM name as a symbol; the method is the
+/// stable symbol `unknown` (no method names exist in port
+/// diagnostics — N3 stable-form); the file is nil (a JVM-legal
+/// nullable slot). Slot classes stay JVM-shaped: symbol, symbol,
+/// string-or-nil, int (probes `a-via0-at`, `e-ste`).
+fn s20_frame(link: &Throwable) -> Value {
+    Value::Vector(Vector::from_vec(vec![
+        Value::Symbol(Symbol::new(None, link.class.jvm_name())),
+        Value::Symbol(Symbol::new(None, "unknown")),
+        Value::Nil,
+        Value::Int(s20_frame_line(link)),
+    ]))
+}
+
+/// S20: an `ExceptionInfo` link's `:data` value — the alpha10
+/// `ex-info` nil→`{}` normalization (probe `l-raw-data`), applied at
+/// the projection because the port's `ex-info` still stores nil.
+fn s20_link_data(link: &Throwable) -> Value {
+    link.data
+        .as_deref()
+        .cloned()
+        .unwrap_or_else(|| Value::Map(new_map()))
+}
+
+/// S20: one `:via` entry for a chain link (`:type`/`:at` always,
+/// `:message` iff non-nil, `:data` iff `ExceptionInfo`).
+fn s20_via_entry(link: &Throwable) -> Value {
+    let mut entry = new_map();
+    entry = entry.insert(
+        Value::Keyword(Keyword::new(None, "type")),
+        Value::Symbol(Symbol::new(None, link.class.jvm_name())),
+    );
+    entry = entry.insert(Value::Keyword(Keyword::new(None, "at")), s20_frame(link));
+    if let Some(message) = link.message.as_ref() {
+        entry = entry.insert(
+            Value::Keyword(Keyword::new(None, "message")),
+            Value::Str(Arc::clone(message)),
+        );
+    }
+    if link.class == ThrowClass::ExceptionInfo {
+        entry = entry.insert(
+            Value::Keyword(Keyword::new(None, "data")),
+            s20_link_data(link),
+        );
+    }
+    Value::Map(entry)
+}
+
+/// S20 `Throwable->map`: `{:cause :data :via :trace}` over the cause
+/// chain. Top `:cause`/`:data` are conditional keys (root message
+/// iff non-nil; root ex-data iff the root is an `ExceptionInfo`);
+/// `:trace` runs the per-link `:at` frames root-first, so its first
+/// frame is the root link's `:at` (probes `errors*.out` pin every
+/// rule, including the root-stack `:trace` identity).
+fn native_throwable_map(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.core/Throwable->map", args, &[1])?;
+    let Value::Throwable(outer) = &args[0] else {
+        if matches!(args[0], Value::Nil) {
+            return Err(NativeError::new(
+                ThrowClass::NullPointerException,
+                "Cannot invoke \"java.lang.Throwable.getStackTrace()\" because the return value of \"clojure.core$identity.invokeStatic(Object)\" is null"
+                    .to_owned(),
+            ));
+        }
+        return Err(cce_err(&args[0], "java.lang.Throwable"));
+    };
+    let mut chain: Vec<&Throwable> = Vec::new();
+    let mut cursor = Some(outer);
+    while let Some(link) = cursor {
+        chain.push(link);
+        cursor = link.cause.as_deref();
+    }
+    let mut root = outer;
+    while let Some(cause) = root.cause.as_deref() {
+        root = cause;
+    }
+    let via: Vec<Value> = chain.iter().map(|link| s20_via_entry(link)).collect();
+    let trace: Vec<Value> = chain.iter().rev().map(|link| s20_frame(link)).collect();
+    let mut top = new_map();
+    top = top.insert(
+        Value::Keyword(Keyword::new(None, "via")),
+        Value::Vector(Vector::from_vec(via)),
+    );
+    top = top.insert(
+        Value::Keyword(Keyword::new(None, "trace")),
+        Value::Vector(Vector::from_vec(trace)),
+    );
+    if let Some(message) = root.message.as_ref() {
+        top = top.insert(
+            Value::Keyword(Keyword::new(None, "cause")),
+            Value::Str(Arc::clone(message)),
+        );
+    }
+    if root.class == ThrowClass::ExceptionInfo {
+        top = top.insert(
+            Value::Keyword(Keyword::new(None, "data")),
+            s20_link_data(root),
+        );
+    }
+    Ok(Value::Map(top))
+}
+
+/// S20 `StackTraceElement->vec`: the argument throwable's emulated
+/// `:at` frame. The port has no `StackTraceElement` values, so the
+/// domain widens to throwables (the documented emulation — spec);
+/// errors still mirror the JVM hints.
+fn native_ste_vec(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.core/StackTraceElement->vec", args, &[1])?;
+    let Value::Throwable(t) = &args[0] else {
+        if matches!(args[0], Value::Nil) {
+            return Err(NativeError::new(
+                ThrowClass::NullPointerException,
+                "Cannot invoke \"java.lang.StackTraceElement.getClassName()\" because \"o\" is null"
+                    .to_owned(),
+            ));
+        }
+        return Err(cce_err(&args[0], "java.lang.StackTraceElement"));
+    };
+    Ok(s20_frame(t))
+}
+
 /// `trampoline`: call, then bounce zero-arg while the result is a
 /// `fn?` (the initial call takes arguments; anything non-`IFn` is
 /// the `IFn` cast failure).
@@ -3635,6 +3835,594 @@ fn native_fresh_local_var(eval: &mut Evaluator, args: &[Value]) -> Result<Value,
     Ok(crate::ns::var_value(id, &Symbol::new(None, "--unnamed--")))
 }
 
+/// Promoted `+'`: the checked [`add`] lattice with `Int`
+/// arms that grow into `BigInt` on overflow (oracles
+/// `ap-max1`, `ap-fold`, `mc-addp`; the checked fold is
+/// called, not altered).
+fn add_prime(eval: &mut Evaluator, a: Num, b: Num) -> Result<Num, NativeError> {
+    match (&a, &b) {
+        (Num::Int(x), Num::Int(y)) => Ok(x.checked_add(*y).map(Num::Int).unwrap_or_else(|| {
+            Num::BigInt(num_bigint::BigInt::from(*x) + num_bigint::BigInt::from(*y))
+        })),
+        _ => add(eval, a, b),
+    }
+}
+
+/// Promoted `-'` (same lattice as [`add_prime`]).
+fn sub_prime(eval: &mut Evaluator, a: Num, b: Num) -> Result<Num, NativeError> {
+    match (&a, &b) {
+        (Num::Int(x), Num::Int(y)) => Ok(x.checked_sub(*y).map(Num::Int).unwrap_or_else(|| {
+            Num::BigInt(num_bigint::BigInt::from(*x) - num_bigint::BigInt::from(*y))
+        })),
+        _ => sub(eval, a, b),
+    }
+}
+
+/// Promoted `*'` (same lattice as [`add_prime`]).
+fn mul_prime(eval: &mut Evaluator, a: Num, b: Num) -> Result<Num, NativeError> {
+    match (&a, &b) {
+        (Num::Int(x), Num::Int(y)) => Ok(x.checked_mul(*y).map(Num::Int).unwrap_or_else(|| {
+            Num::BigInt(num_bigint::BigInt::from(*x) * num_bigint::BigInt::from(*y))
+        })),
+        _ => mul(eval, a, b),
+    }
+}
+
+/// The `+'`/`*'` 1-arity `(cast Number x)`: numbers (and nil)
+/// pass through, anything else fails `Cannot cast {from} to
+/// java.lang.Number` (oracles `ap-ar1s`, `ap-ar1nil`,
+/// `a2-addchar`, `g-mulnil`).
+fn cast_to_number(v: &Value) -> Result<Value, NativeError> {
+    match v {
+        Value::Int(_)
+        | Value::Double(_)
+        | Value::BigInt(_)
+        | Value::BigInteger(_)
+        | Value::Ratio(_)
+        | Value::BigDec(_)
+        | Value::Nil => Ok(v.clone()),
+        v => Err(NativeError::cast(&jvm_class_of(v), "java.lang.Number")),
+    }
+}
+
+fn native_add_prime(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    if args.is_empty() {
+        return Ok(Value::Int(0));
+    }
+    if args.len() == 1 {
+        return cast_to_number(&args[0]);
+    }
+    fold(eval, args, add_prime)
+}
+
+/// Promoting negate (the `-'` 1-arity): `MIN` grows to
+/// `BigInt`, everything else keeps the checked shape
+/// (oracles `sp-negmin`, `sp-ar1*`).
+fn negate_prime(eval: &mut Evaluator, n: Num) -> Result<Value, NativeError> {
+    match n {
+        Num::Int(x) => Ok(x
+            .checked_neg()
+            .map(Value::Int)
+            .unwrap_or_else(|| Value::BigInt(-num_bigint::BigInt::from(x)))),
+        Num::BigInt(x) => Ok(Value::BigInt(-x)),
+        Num::Ratio(x) => Ok(num_value(num_ratio(-x))),
+        Num::BigDec(x) => Ok(Value::BigDec(match math_context_of(eval)? {
+            None => x.neg(),
+            Some(mc) => x.neg_mc(&mc).map_err(arithmetic)?,
+        })),
+        Num::Double(x) => Ok(Value::Double(-x)),
+    }
+}
+
+fn native_sub_prime(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    if args.is_empty() {
+        return Err(NativeError::arity("clojure.core/-'", 0));
+    }
+    if args.len() == 1 {
+        return negate_prime(eval, as_num(&args[0])?);
+    }
+    fold(eval, args, sub_prime)
+}
+
+fn native_mul_prime(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    if args.is_empty() {
+        return Ok(Value::Int(1));
+    }
+    if args.len() == 1 {
+        return cast_to_number(&args[0]);
+    }
+    fold(eval, args, mul_prime)
+}
+
+/// One promoting step up: only `MAX` overflows into `BigInt`
+/// — the checked [`inc_one`] answers everything else
+/// (oracles `ip-*`).
+fn inc_prime_one(eval: &mut Evaluator, n: Num) -> Result<Value, NativeError> {
+    match n {
+        Num::Int(x) if x == i64::MAX => Ok(Value::BigInt(num_bigint::BigInt::from(x) + 1)),
+        n => inc_one(eval, n),
+    }
+}
+
+/// One promoting step down (mirror of [`inc_prime_one`];
+/// oracles `dp-*`).
+fn dec_prime_one(eval: &mut Evaluator, n: Num) -> Result<Value, NativeError> {
+    match n {
+        Num::Int(x) if x == i64::MIN => Ok(Value::BigInt(num_bigint::BigInt::from(x) - 1)),
+        n => dec_one(eval, n),
+    }
+}
+
+fn native_dec_prime(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.core/dec'", args, &[1])?;
+    dec_prime_one(eval, as_num(&args[0])?)
+}
+
+/// Unchecked `+`: the checked [`add`] lattice with WRAPPING
+/// `Int` arms (tower/double results are value-identical to
+/// the checked op — oracles `ua-wrap`, `ua-big`, `ua-rat`,
+/// `ua-dec`, `xm-addu`).
+fn add_unchecked(eval: &mut Evaluator, a: Num, b: Num) -> Result<Num, NativeError> {
+    match (&a, &b) {
+        (Num::Int(x), Num::Int(y)) => Ok(Num::Int(x.wrapping_add(*y))),
+        _ => add(eval, a, b),
+    }
+}
+
+/// Unchecked `-` (same lattice as [`add_unchecked`]).
+fn sub_unchecked(eval: &mut Evaluator, a: Num, b: Num) -> Result<Num, NativeError> {
+    match (&a, &b) {
+        (Num::Int(x), Num::Int(y)) => Ok(Num::Int(x.wrapping_sub(*y))),
+        _ => sub(eval, a, b),
+    }
+}
+
+/// Unchecked `*` (same lattice as [`add_unchecked`]).
+fn mul_unchecked(eval: &mut Evaluator, a: Num, b: Num) -> Result<Num, NativeError> {
+    match (&a, &b) {
+        (Num::Int(x), Num::Int(y)) => Ok(Num::Int(x.wrapping_mul(*y))),
+        _ => mul(eval, a, b),
+    }
+}
+
+/// One unchecked step up: `Int` wraps, the checked
+/// [`inc_one`] answers every other kind (oracles `ui-*`).
+fn inc_unchecked_one(eval: &mut Evaluator, n: Num) -> Result<Value, NativeError> {
+    match n {
+        Num::Int(x) => Ok(Value::Int(x.wrapping_add(1))),
+        n => inc_one(eval, n),
+    }
+}
+
+/// One unchecked step down (mirror of [`inc_unchecked_one`];
+/// oracles `ud-*`).
+fn dec_unchecked_one(eval: &mut Evaluator, n: Num) -> Result<Value, NativeError> {
+    match n {
+        Num::Int(x) => Ok(Value::Int(x.wrapping_sub(1))),
+        n => dec_one(eval, n),
+    }
+}
+
+/// Unchecked negate: `Int` wraps (`MIN` is a fixed point),
+/// every other kind keeps the checked shape (oracles `un-*`).
+fn negate_unchecked(eval: &mut Evaluator, n: Num) -> Result<Value, NativeError> {
+    match n {
+        Num::Int(x) => Ok(Value::Int(x.wrapping_neg())),
+        Num::BigInt(x) => Ok(Value::BigInt(-x)),
+        Num::Ratio(x) => Ok(num_value(num_ratio(-x))),
+        Num::BigDec(x) => Ok(Value::BigDec(match math_context_of(eval)? {
+            None => x.neg(),
+            Some(mc) => x.neg_mc(&mc).map_err(arithmetic)?,
+        })),
+        Num::Double(x) => Ok(Value::Double(-x)),
+    }
+}
+
+fn native_unchecked_add(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.core/unchecked-add", args, &[2])?;
+    add_unchecked(eval, as_num(&args[0])?, as_num(&args[1])?).map(num_value)
+}
+
+fn native_unchecked_subtract(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.core/unchecked-subtract", args, &[2])?;
+    sub_unchecked(eval, as_num(&args[0])?, as_num(&args[1])?).map(num_value)
+}
+
+fn native_unchecked_multiply(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.core/unchecked-multiply", args, &[2])?;
+    mul_unchecked(eval, as_num(&args[0])?, as_num(&args[1])?).map(num_value)
+}
+
+fn native_unchecked_inc(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.core/unchecked-inc", args, &[1])?;
+    inc_unchecked_one(eval, as_num(&args[0])?)
+}
+
+fn native_unchecked_dec(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.core/unchecked-dec", args, &[1])?;
+    dec_unchecked_one(eval, as_num(&args[0])?)
+}
+
+fn native_unchecked_negate(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.core/unchecked-negate", args, &[1])?;
+    negate_unchecked(eval, as_num(&args[0])?)
+}
+
+/// The `-int` op argument coercion (CHECKED — oracles
+/// `uai-long`, `xi-*`, `g-int*`): `Int` takes `toIntExact`,
+/// `Double` the `long` range check first, tower integers the
+/// `long` stop with exact digits, decimals go through
+/// `double`; nil is the `charValue` NPE quirk, chars and
+/// everything else fail to `Number` (chars do NOT convert
+/// here, unlike `int` — oracle `xi-char`).
+fn intcast(v: &Value) -> Result<i32, NativeError> {
+    match v {
+        Value::Int(i) => int_exact_long(*i),
+        Value::Double(d) => int_cast_double(*d),
+        Value::BigInt(n) | Value::BigInteger(n) => tower_intcast(n),
+        Value::Ratio(r) => tower_intcast(&trunc_ratio(r)),
+        Value::BigDec(d) => bigdec_intcast(d),
+        Value::Nil => Err(npe_char_value()),
+        v => Err(cce_err(v, "java.lang.Number")),
+    }
+}
+
+/// Two `-int` operands (fixed 2-arity).
+fn int_args2(display: &str, args: &[Value]) -> Result<(i32, i32), NativeError> {
+    check_arity(display, args, &[2])?;
+    Ok((intcast(&args[0])?, intcast(&args[1])?))
+}
+
+/// One `-int` operand (fixed 1-arity).
+fn int_arg1(display: &str, args: &[Value]) -> Result<i32, NativeError> {
+    check_arity(display, args, &[1])?;
+    intcast(&args[0])
+}
+
+fn native_unchecked_add_int(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    let (x, y) = int_args2("clojure.core/unchecked-add-int", args)?;
+    Ok(Value::Int(i64::from(x.wrapping_add(y))))
+}
+
+fn native_unchecked_subtract_int(
+    _eval: &mut Evaluator,
+    args: &[Value],
+) -> Result<Value, NativeError> {
+    let (x, y) = int_args2("clojure.core/unchecked-subtract-int", args)?;
+    Ok(Value::Int(i64::from(x.wrapping_sub(y))))
+}
+
+fn native_unchecked_multiply_int(
+    _eval: &mut Evaluator,
+    args: &[Value],
+) -> Result<Value, NativeError> {
+    let (x, y) = int_args2("clojure.core/unchecked-multiply-int", args)?;
+    Ok(Value::Int(i64::from(x.wrapping_mul(y))))
+}
+
+fn native_unchecked_divide_int(
+    _eval: &mut Evaluator,
+    args: &[Value],
+) -> Result<Value, NativeError> {
+    let (x, y) = int_args2("clojure.core/unchecked-divide-int", args)?;
+    if y == 0 {
+        return Err(slash_by_zero());
+    }
+    Ok(Value::Int(i64::from(x.wrapping_div(y))))
+}
+
+fn native_unchecked_remainder_int(
+    _eval: &mut Evaluator,
+    args: &[Value],
+) -> Result<Value, NativeError> {
+    let (x, y) = int_args2("clojure.core/unchecked-remainder-int", args)?;
+    if y == 0 {
+        return Err(slash_by_zero());
+    }
+    Ok(Value::Int(i64::from(x.wrapping_rem(y))))
+}
+
+fn native_unchecked_inc_int(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    let x = int_arg1("clojure.core/unchecked-inc-int", args)?;
+    Ok(Value::Int(i64::from(x.wrapping_add(1))))
+}
+
+fn native_unchecked_dec_int(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    let x = int_arg1("clojure.core/unchecked-dec-int", args)?;
+    Ok(Value::Int(i64::from(x.wrapping_sub(1))))
+}
+
+fn native_unchecked_negate_int(
+    _eval: &mut Evaluator,
+    args: &[Value],
+) -> Result<Value, NativeError> {
+    let x = int_arg1("clojure.core/unchecked-negate-int", args)?;
+    Ok(Value::Int(i64::from(x.wrapping_neg())))
+}
+
+/// A Java `(int)` cast: `NaN` is 0, past-`i32` saturates,
+/// else truncation toward zero (oracles `uci-nan`,
+/// `uci-inf`, `uci-hugedbl`, `xr-intwrap`).
+fn java_double_to_int(d: f64) -> i32 {
+    if d.is_nan() {
+        0
+    } else if d >= 2147483648.0 {
+        i32::MAX
+    } else if d < -2147483648.0 {
+        i32::MIN
+    } else {
+        d.trunc() as i32
+    }
+}
+
+/// A Java `(long)` cast: `NaN` is 0, past-`i64` saturates,
+/// else truncation toward zero (the saturating sibling of
+/// [`double_long`] — oracles `ucl-nan`, `ucl-inf`,
+/// `ucl-hugedbl`).
+fn java_double_to_long(d: f64) -> i64 {
+    if d.is_nan() {
+        0
+    } else if d >= 9223372036854775808.0 {
+        i64::MAX
+    } else if d < -9223372036854775808.0 {
+        i64::MIN
+    } else {
+        d.trunc() as i64
+    }
+}
+
+/// Java `longValue` over an unbounded integer: low 64 bits,
+/// sign-extended (the 8-byte sibling of [`bigint_int_value`];
+/// oracles `ucl-big`, `ucl-negbig`).
+fn bigint_long_value(n: &num_bigint::BigInt) -> i64 {
+    let mut le = n.to_signed_bytes_le();
+    le.resize(
+        8,
+        if n.sign() == num_bigint::Sign::Minus {
+            0xFF
+        } else {
+            0
+        },
+    );
+    i64::from_le_bytes([le[0], le[1], le[2], le[3], le[4], le[5], le[6], le[7]])
+}
+
+/// The `floatValue` NPE (`unchecked-float` of nil).
+fn npe_float_value() -> NativeError {
+    NativeError::new(
+        ThrowClass::NullPointerException,
+        "Cannot invoke \"java.lang.Number.floatValue()\" because \"x\" is null".to_owned(),
+    )
+}
+
+/// The `shortValue` NPE (`unchecked-short` of nil).
+fn npe_short_value() -> NativeError {
+    NativeError::new(
+        ThrowClass::NullPointerException,
+        "Cannot invoke \"java.lang.Number.shortValue()\" because \"x\" is null".to_owned(),
+    )
+}
+
+/// The `byteValue` NPE (`unchecked-byte` of nil).
+fn npe_byte_value() -> NativeError {
+    NativeError::new(
+        ThrowClass::NullPointerException,
+        "Cannot invoke \"java.lang.Number.byteValue()\" because \"x\" is null".to_owned(),
+    )
+}
+
+fn native_unchecked_int(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.core/unchecked-int", args, &[1])?;
+    // Truncating `intValue` (ratios saturate through `double`
+    // — oracle `xr-intwrap`; characters convert, nil is the
+    // `charValue` NPE, anything else fails to `Character`).
+    Ok(Value::Int(i64::from(match &args[0] {
+        Value::Int(i) => *i as i32,
+        Value::Double(d) => java_double_to_int(*d),
+        Value::BigInt(n) | Value::BigInteger(n) => bigint_int_value(n),
+        Value::Ratio(r) => java_double_to_int(r.to_f64().unwrap_or(f64::NAN)),
+        Value::BigDec(d) => bigint_int_value(&d.to_bigint_trunc()),
+        Value::Char(c) => *c as i32,
+        Value::Nil => return Err(npe_char_value()),
+        v => return Err(cce_err(v, "java.lang.Character")),
+    })))
+}
+
+fn native_unchecked_long(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.core/unchecked-long", args, &[1])?;
+    // Truncating `longValue` (characters do NOT convert —
+    // oracle `ucl-char`).
+    Ok(Value::Int(match &args[0] {
+        Value::Int(i) => *i,
+        Value::Double(d) => java_double_to_long(*d),
+        Value::BigInt(n) | Value::BigInteger(n) => bigint_long_value(n),
+        Value::Ratio(r) => bigint_long_value(&trunc_ratio(r)),
+        Value::BigDec(d) => bigint_long_value(&d.to_bigint_trunc()),
+        Value::Nil => return Err(npe_long_value()),
+        v => return Err(cce_err(v, "java.lang.Number")),
+    }))
+}
+
+fn native_unchecked_float(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.core/unchecked-float", args, &[1])?;
+    // No `Float` exists: like `float` but unchecked — the
+    // EXACT double, so common values print identically
+    // (oracle `ucf-dbl` prints `0.1` either way);
+    // out-of-`f32` values stay exact instead of `Inf`
+    // (oracle `ucf-huge` — documented, pinned).
+    Ok(Value::Double(match &args[0] {
+        Value::Int(i) => *i as f64,
+        Value::Double(d) => *d,
+        Value::BigInt(n) | Value::BigInteger(n) => n.to_f64().unwrap_or(f64::NAN),
+        Value::Ratio(r) => r.to_f64().unwrap_or(f64::NAN),
+        Value::BigDec(d) => d.to_f64(),
+        Value::Nil => return Err(npe_float_value()),
+        v => return Err(cce_err(v, "java.lang.Number")),
+    }))
+}
+
+fn native_unchecked_double(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.core/unchecked-double", args, &[1])?;
+    // Extensionally `double` (oracles `ucd-*`, `xc-dchar`).
+    Ok(Value::Double(match &args[0] {
+        Value::Int(i) => *i as f64,
+        Value::Double(d) => *d,
+        Value::BigInt(n) | Value::BigInteger(n) => n.to_f64().unwrap_or(f64::NAN),
+        Value::Ratio(r) => r.to_f64().unwrap_or(f64::NAN),
+        Value::BigDec(d) => d.to_f64(),
+        Value::Nil => return Err(npe_double_value()),
+        v => return Err(cce_err(v, "java.lang.Number")),
+    }))
+}
+
+fn native_unchecked_short(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.core/unchecked-short", args, &[1])?;
+    // Truncating `shortValue` (doubles and ratios narrow
+    // through the Java `(int)` cast first — oracles
+    // `xc-sinf`, `g-shortrat`).
+    Ok(Value::Int(i64::from(match &args[0] {
+        Value::Int(i) => *i as i16,
+        Value::Double(d) => java_double_to_int(*d) as i16,
+        Value::BigInt(n) | Value::BigInteger(n) => bigint_int_value(n) as i16,
+        Value::Ratio(r) => java_double_to_int(r.to_f64().unwrap_or(f64::NAN)) as i16,
+        Value::BigDec(d) => bigint_int_value(&d.to_bigint_trunc()) as i16,
+        Value::Nil => return Err(npe_short_value()),
+        v => return Err(cce_err(v, "java.lang.Number")),
+    })))
+}
+
+fn native_unchecked_byte(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.core/unchecked-byte", args, &[1])?;
+    // Truncating `byteValue` (the `unchecked-short` shape at
+    // 8 bits — oracles `ucb-*`, `g-byterat`, `xc-binf`).
+    Ok(Value::Int(i64::from(match &args[0] {
+        Value::Int(i) => *i as i8,
+        Value::Double(d) => java_double_to_int(*d) as i8,
+        Value::BigInt(n) | Value::BigInteger(n) => bigint_int_value(n) as i8,
+        Value::Ratio(r) => java_double_to_int(r.to_f64().unwrap_or(f64::NAN)) as i8,
+        Value::BigDec(d) => bigint_int_value(&d.to_bigint_trunc()) as i8,
+        Value::Nil => return Err(npe_byte_value()),
+        v => return Err(cce_err(v, "java.lang.Number")),
+    })))
+}
+
+fn native_unchecked_char(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.core/unchecked-char", args, &[1])?;
+    // `(char)longValue` over numbers (oracles `ucc-*`,
+    // `xc-charhuge`, `xr-char`); lone surrogates share the
+    // checked-`char` divergence (house range error).
+    let w = match &args[0] {
+        Value::Char(c) => return Ok(Value::Char(*c)),
+        Value::Int(i) => *i,
+        Value::Double(d) => java_double_to_long(*d),
+        Value::BigInt(n) | Value::BigInteger(n) => bigint_long_value(n),
+        Value::Ratio(r) => bigint_long_value(&trunc_ratio(r)),
+        Value::BigDec(d) => bigint_long_value(&d.to_bigint_trunc()),
+        Value::Nil => return Err(npe_long_value()),
+        v => return Err(cce_err(v, "java.lang.Number")),
+    };
+    match char::from_u32(w as u16 as u32) {
+        Some(c) => Ok(Value::Char(c)),
+        None => Err(out_of_range("char", Num::Int(w))),
+    }
+}
+
+/// A bitwise operand: `Int` only (the JVM also accepts
+/// `Integer`/`Short`/`Byte` — oracles `jt-*` — kinds the
+/// port lacks); nil is the `getClass` NPE, anything else is
+/// the `bit operation not supported for` IAE.
+fn bit_operand(v: &Value) -> Result<i64, NativeError> {
+    match v {
+        Value::Int(i) => Ok(*i),
+        Value::Nil => Err(npe_getclass()),
+        v => Err(NativeError::new(
+            ThrowClass::IllegalArgumentException,
+            format!("bit operation not supported for: class {}", jvm_class_of(v)),
+        )),
+    }
+}
+
+/// A variadic (`[x y & more]`) bitwise left fold; operands
+/// validate left to right, so the FIRST offender is named
+/// (oracles `g-order`, `g-order2`, `va-andbad3`).
+fn bit_fold(display: &str, args: &[Value], op: fn(i64, i64) -> i64) -> Result<Value, NativeError> {
+    if args.len() < 2 {
+        return Err(NativeError::arity(display, args.len()));
+    }
+    let mut acc = bit_operand(&args[0])?;
+    for arg in &args[1..] {
+        acc = op(acc, bit_operand(arg)?);
+    }
+    Ok(Value::Int(acc))
+}
+
+fn native_bit_and(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    bit_fold("clojure.core/bit-and", args, |x, y| x & y)
+}
+
+fn native_bit_or(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    bit_fold("clojure.core/bit-or", args, |x, y| x | y)
+}
+
+fn native_bit_xor(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    bit_fold("clojure.core/bit-xor", args, |x, y| x ^ y)
+}
+
+fn native_bit_and_not(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    bit_fold("clojure.core/bit-and-not", args, |x, y| x & !y)
+}
+
+fn native_bit_not(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.core/bit-not", args, &[1])?;
+    Ok(Value::Int(!bit_operand(&args[0])?))
+}
+
+/// Two bitwise operands (fixed 2-arity).
+fn bit_args2(display: &str, args: &[Value]) -> Result<(i64, i64), NativeError> {
+    check_arity(display, args, &[2])?;
+    Ok((bit_operand(&args[0])?, bit_operand(&args[1])?))
+}
+
+fn native_bit_shift_left(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    let (x, n) = bit_args2("clojure.core/bit-shift-left", args)?;
+    // `wrapping_shl` masks the count to 6 bits exactly like
+    // Java `<<` (oracles `bsl-mask`, `bsl-negsh`).
+    Ok(Value::Int(x.wrapping_shl(n as u32)))
+}
+
+fn native_bit_shift_right(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    let (x, n) = bit_args2("clojure.core/bit-shift-right", args)?;
+    Ok(Value::Int(x.wrapping_shr(n as u32)))
+}
+
+fn native_unsigned_bit_shift_right(
+    _eval: &mut Evaluator,
+    args: &[Value],
+) -> Result<Value, NativeError> {
+    let (x, n) = bit_args2("clojure.core/unsigned-bit-shift-right", args)?;
+    Ok(Value::Int((x as u64).wrapping_shr(n as u32) as i64))
+}
+
+fn native_bit_set(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    let (x, n) = bit_args2("clojure.core/bit-set", args)?;
+    Ok(Value::Int(x | 1i64.wrapping_shl(n as u32)))
+}
+
+fn native_bit_clear(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    let (x, n) = bit_args2("clojure.core/bit-clear", args)?;
+    Ok(Value::Int(x & !1i64.wrapping_shl(n as u32)))
+}
+
+fn native_bit_flip(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    let (x, n) = bit_args2("clojure.core/bit-flip", args)?;
+    Ok(Value::Int(x ^ 1i64.wrapping_shl(n as u32)))
+}
+
+fn native_bit_test(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    let (x, n) = bit_args2("clojure.core/bit-test", args)?;
+    Ok(Value::Bool(x & 1i64.wrapping_shl(n as u32) != 0))
+}
+
 /// The S5D scalar natives installed into `clojure.core`.
 pub(crate) const CORE_NATIVES: &[(&str, NativeFnPtr)] = &[
     ("+", native_add),
@@ -3647,6 +4435,43 @@ pub(crate) const CORE_NATIVES: &[(&str, NativeFnPtr)] = &[
     ("inc", native_inc),
     ("inc'", native_inc_prime),
     ("dec", native_dec),
+    ("+'", native_add_prime),
+    ("-'", native_sub_prime),
+    ("*'", native_mul_prime),
+    ("dec'", native_dec_prime),
+    ("unchecked-add", native_unchecked_add),
+    ("unchecked-add-int", native_unchecked_add_int),
+    ("unchecked-byte", native_unchecked_byte),
+    ("unchecked-char", native_unchecked_char),
+    ("unchecked-dec", native_unchecked_dec),
+    ("unchecked-dec-int", native_unchecked_dec_int),
+    ("unchecked-divide-int", native_unchecked_divide_int),
+    ("unchecked-double", native_unchecked_double),
+    ("unchecked-float", native_unchecked_float),
+    ("unchecked-inc", native_unchecked_inc),
+    ("unchecked-inc-int", native_unchecked_inc_int),
+    ("unchecked-int", native_unchecked_int),
+    ("unchecked-long", native_unchecked_long),
+    ("unchecked-multiply", native_unchecked_multiply),
+    ("unchecked-multiply-int", native_unchecked_multiply_int),
+    ("unchecked-negate", native_unchecked_negate),
+    ("unchecked-negate-int", native_unchecked_negate_int),
+    ("unchecked-remainder-int", native_unchecked_remainder_int),
+    ("unchecked-short", native_unchecked_short),
+    ("unchecked-subtract", native_unchecked_subtract),
+    ("unchecked-subtract-int", native_unchecked_subtract_int),
+    ("bit-and", native_bit_and),
+    ("bit-and-not", native_bit_and_not),
+    ("bit-clear", native_bit_clear),
+    ("bit-flip", native_bit_flip),
+    ("bit-not", native_bit_not),
+    ("bit-or", native_bit_or),
+    ("bit-set", native_bit_set),
+    ("bit-shift-left", native_bit_shift_left),
+    ("bit-shift-right", native_bit_shift_right),
+    ("bit-test", native_bit_test),
+    ("bit-xor", native_bit_xor),
+    ("unsigned-bit-shift-right", native_unsigned_bit_shift_right),
     ("max", native_max),
     ("min", native_min),
     ("=", native_eq),
@@ -3750,6 +4575,8 @@ pub(crate) const CORE_NATIVES: &[(&str, NativeFnPtr)] = &[
     ("ex-data", native_ex_data),
     ("ex-message", native_ex_message),
     ("ex-cause", native_ex_cause),
+    ("Throwable->map", native_throwable_map),
+    ("StackTraceElement->vec", native_ste_vec),
     ("trampoline", native_trampoline),
     ("hash", native_hash),
     ("hash-code", native_hash_code),
@@ -3799,6 +4626,83 @@ mod tests {
     #[should_panic(expected = "rank dispatch keeps doubles out of BigDec ops")]
     fn num_bigdec_rejects_double() {
         let _ = num_bigdec(&Num::Double(0.5));
+    }
+
+    /// Instants order by millis (unit-tested: `#inst` reads
+    /// a `TaggedLiteral`, so no surface form builds a real
+    /// instant).
+    #[test]
+    fn scalar_pair_orders_instants() {
+        let instant = |ms: i64| Value::Instant(clj_value::Instant::from_millis(ms));
+        assert_eq!(
+            jvm_compare(&instant(0), &instant(1000)).unwrap(),
+            std::cmp::Ordering::Less
+        );
+        assert_eq!(
+            jvm_compare(&instant(1000), &instant(1000)).unwrap(),
+            std::cmp::Ordering::Equal
+        );
+    }
+
+    /// An instant against a non-instant fails the `String`
+    /// checkcast to `java.util.Date` (unit-tested: no
+    /// surface form builds a real instant).
+    #[test]
+    fn instant_compare_cast_names_date_class() {
+        let instant = Value::Instant(clj_value::Instant::from_millis(0));
+        let err = jvm_compare(&instant, &Value::Str("s".into())).expect_err("inst vs str");
+        assert_eq!(err.class, clj_value::ThrowClass::ClassCastException);
+        assert!(
+            err.message
+                .starts_with("class java.lang.String cannot be cast to class java.util.Date")
+        );
+    }
+
+    /// URIs order by parts (scheme, authority, path, query,
+    /// fragment): `compare` over two URIs is unit-tested
+    /// because upstream has no URI constructor, so no
+    /// surface form builds one.
+    #[test]
+    fn scalar_pair_orders_uris() {
+        let uri = |s: &str| Value::Uri(Box::new(clj_value::Uri::parse(s).unwrap()));
+        assert_eq!(
+            jvm_compare(&uri("http://h/a"), &uri("http://h/b")).unwrap(),
+            std::cmp::Ordering::Less
+        );
+        assert_eq!(
+            jvm_compare(&uri("http://h/a"), &uri("http://h/a")).unwrap(),
+            std::cmp::Ordering::Equal
+        );
+    }
+
+    /// A URI against a non-URI fails the `String` checkcast to
+    /// `java.net.URI` (unit-tested: no surface form builds a
+    /// URI).
+    #[test]
+    fn uri_compare_cast_names_uri_class() {
+        let uri = Value::Uri(Box::new(clj_value::Uri::parse("http://h/a").unwrap()));
+        let err = jvm_compare(&uri, &Value::Str("s".into())).expect_err("uri vs str");
+        assert_eq!(err.class, clj_value::ThrowClass::ClassCastException);
+        assert!(
+            err.message
+                .starts_with("class java.lang.String cannot be cast to class java.net.URI")
+        );
+    }
+
+    /// The scalar gate only admits same-kind S9 pairs (the
+    /// caller partitions — the panic is the contract).
+    #[test]
+    #[should_panic(expected = "scalar gate")]
+    fn scalar_pair_rejects_mixed() {
+        let _ = compare_scalar_pair(&Value::Int(1), &Value::Int(2));
+    }
+
+    /// The entry gate only admits vector/entry pairs (the
+    /// caller partitions — the panic is the contract).
+    #[test]
+    #[should_panic(expected = "entry gate")]
+    fn entry_pair_rejects_scalars() {
+        let _ = compare_entry_pair(&Value::Int(1), &Value::Int(2));
     }
 
     /// A denominator-1 rational folds to `BigInt` (user code only

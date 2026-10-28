@@ -13,6 +13,7 @@
 //! [`value`](crate::value)); printing lives in [`print`](crate::print).
 
 mod agent;
+mod array;
 mod atom;
 mod compare;
 mod datareaders;
@@ -20,11 +21,14 @@ mod delay;
 mod extension;
 mod future;
 pub mod hasheq;
+mod hierarchy;
 mod host;
 mod keyword;
 mod multifn;
 mod print;
 mod promise;
+mod pvec;
+mod scalar;
 mod seq;
 mod symbol;
 mod tower;
@@ -33,6 +37,7 @@ mod value;
 mod volatile;
 
 pub use agent::{Agent, AgentAction, AgentInner, AgentPool, ErrorMode, QueuedAction};
+pub use array::{Array, ArrayDesc, ArrayStore, BaseType, MAX_ARRAY_BYTES};
 pub use atom::{Atom, AtomState};
 pub use compare::{CompareError, compare};
 pub use datareaders::{TagError, validate_inst, validate_uuid};
@@ -42,6 +47,11 @@ pub use future::{Future, FutureOutcome, FutureState};
 pub use hasheq::{
     hash_code, hash_combine, hash_ordered, hash_unordered, hasheq, mix_coll_hash,
     seq_hash_unsupported,
+};
+pub use hierarchy::{
+    HierError, HierMessage, LatticeEntry, LookupFail, MethodLookup, ancestors_in,
+    assert_global_edge, best_method, derive_in, descendants_in, is_class_value, isa_in,
+    make_hierarchy_map, parents_in, underive_in,
 };
 pub use host::{
     HostDef, HostInst, HostKind, HostMethod, HostVal, class_name, fallback_str, find_method,
@@ -54,6 +64,8 @@ pub use print::{
     print_opts::PrintOpts, print_to_string,
 };
 pub use promise::{Promise, PromiseState};
+pub use pvec::{Elem8, PrimitiveVector};
+pub use scalar::{Instant, Uri, UriError, Uuid};
 pub use seq::{
     CHUNK_SIZE, ConsValue, CycleValue, IterateValue, KeySeqValue, RangeNum, RangeValue,
     RealizedSeq, RepeatValue, Seq, SeqKind, SubVectorValue, ValSeqValue, seq_vec,

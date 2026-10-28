@@ -39,9 +39,9 @@
   {
    "file": "crates/clj-eval/src/ns.rs",
    "function": "throw_class_for",
-   "cyclomatic": 34.0,
+   "cyclomatic": 36.0,
    "cognitive": 1.0,
-   "justification": "one arm per class name; load-error class table stays exhaustive. S5D extends the table with the core/format throw-site classes (ArithmeticException, format exceptions, IO, IllegalState, FileNotFound). S6B adds ExecutionException/CancellationException. S6C adds RejectedExecutionException. S-instream adds the ReaderException spellings. S7 adds ClassNotFoundException. S12 adds the chunk array exceptions (ArrayIndexOutOfBoundsException, NegativeArraySizeException)."
+   "justification": "one arm per class name; load-error class table stays exhaustive. S5D extends the table with the core/format throw-site classes (ArithmeticException, format exceptions, IO, IllegalState, FileNotFound). S6B adds ExecutionException/CancellationException. S6C adds RejectedExecutionException. S-instream adds the ReaderException spellings. S7 adds ClassNotFoundException. S12 adds the chunk array exceptions (ArrayIndexOutOfBoundsException, NegativeArraySizeException). S15 adds the ArrayStore/OutOfMemory arms (ArrayIndexOutOfBounds/NegativeArraySize already covered by S12)."
   },
   {
    "file": "crates/clj-reader/src/lib.rs",
@@ -56,6 +56,146 @@
    "cyclomatic": 17.0,
    "cognitive": 1.0,
    "justification": "S7: one arm per JVM parent link; the catch-chain table stays exhaustive (ClassNotFoundException/ReflectiveOperationException links)"
+  },
+  {
+   "file": "crates/clj-eval/src/arrays.rs",
+   "function": "aset_direct",
+   "cyclomatic": 25.0,
+   "cognitive": 2.0,
+   "justification": "S15: one arm per (BaseType, dims, val-shape) overload match; the direct-aset shape table stays exhaustive"
+  },
+  {
+   "file": "crates/clj-eval/src/arrays.rs",
+   "function": "aset_raw",
+   "cyclomatic": 16.0,
+   "cognitive": 7.0,
+   "justification": "S15: one arm per BaseType unbox rule; the Array.set tail table stays exhaustive"
+  },
+  {
+   "file": "crates/clj-eval/src/arrays.rs",
+   "function": "ctor_init",
+   "cyclomatic": 35.0,
+   "cognitive": 22.0,
+   "justification": "S15: one arm per (ctor, scalar-vs-seq-vs-size) shape incl. per-base narrowing/cast rules; the ctor dispatch stays exhaustive"
+  },
+  {
+   "file": "crates/clj-eval/src/arrays.rs",
+   "function": "native_vector_of",
+   "cyclomatic": 18.0,
+   "cognitive": 5.0,
+   "justification": "S15: keyword dispatch plus per-Elem8 validation; the vector-of front stays exhaustive"
+  },
+  {
+   "file": "crates/clj-eval/src/arrays.rs",
+   "function": "setx_coerce",
+   "cyclomatic": 16.0,
+   "cognitive": 1.0,
+   "justification": "S15: one arm per SetX coercion; the def-aset table stays exhaustive"
+  },
+  {
+   "file": "crates/clj-eval/src/arrays.rs",
+   "function": "store_raw_ref",
+   "cyclomatic": 16.0,
+   "cognitive": 12.0,
+   "justification": "S15: ref-tail assignability per store shape; the narrow/dims>1 matrix stays exhaustive"
+  },
+  {
+   "file": "crates/clj-eval/src/arrays.rs",
+   "function": "vector_coerce",
+   "cyclomatic": 16.0,
+   "cognitive": 1.0,
+   "justification": "S15: one arm per Elem8 ArrayManager coercion; the vector-of table stays exhaustive"
+  },
+  {
+   "file": "crates/clj-eval/src/coll.rs",
+   "function": "conj_one",
+   "cyclomatic": 16.0,
+   "cognitive": 5.0,
+   "justification": "S15 adds the Array/PV arms; one arm per conj target kind"
+  },
+  {
+   "file": "crates/clj-eval/src/coll.rs",
+   "function": "lookup_present",
+   "cyclomatic": 20.0,
+   "cognitive": 7.0,
+   "justification": "S15 adds the Array/PV arms; one arm per lookup kind"
+  },
+  {
+   "file": "crates/clj-eval/src/coll.rs",
+   "function": "native_contains",
+   "cyclomatic": 17.0,
+   "cognitive": 3.0,
+   "justification": "S15 adds the Array/PV arms; one arm per contains kind"
+  },
+  {
+   "file": "crates/clj-eval/src/coll.rs",
+   "function": "native_nth",
+   "cyclomatic": 19.0,
+   "cognitive": 16.0,
+   "justification": "S15 adds the Array/PV arms; one arm per nth kind. Wave-2 landing: the S12 chunk pre-dispatch also lands here (19/16 measured under rca 0.0.25)"
+  },
+  {
+   "file": "crates/clj-eval/src/eval.rs",
+   "function": "Evaluator::conj_map",
+   "cyclomatic": 16.0,
+   "cognitive": 13.0,
+   "justification": "S15 adds the Array/PV arms; one arm per conj kind"
+  },
+  {
+   "file": "crates/clj-eval/src/lazy.rs",
+   "function": "first_direct",
+   "cyclomatic": 17.0,
+   "cognitive": 4.0,
+   "justification": "S15 adds the Array/PV arms; one arm per first kind"
+  },
+  {
+   "file": "crates/clj-eval/src/lazy.rs",
+   "function": "seq_value",
+   "cyclomatic": 16.0,
+   "cognitive": 6.0,
+   "justification": "S15 adds the Array/PV/SeqKind arms; one arm per seqable kind"
+  },
+  {
+   "file": "crates/clj-eval/src/lazy.rs",
+   "function": "step_unit",
+   "cyclomatic": 19.0,
+   "cognitive": 3.0,
+   "justification": "S15 adds the Array/PV chunk arms; one arm per step kind"
+  },
+  {
+   "file": "crates/clj-value/src/array.rs",
+   "function": "Array::snapshot",
+   "cyclomatic": 18.0,
+   "cognitive": 1.0,
+   "justification": "S15: one arm per ArrayStore; the box-on-read table stays exhaustive"
+  },
+  {
+   "file": "crates/clj-value/src/value.rs",
+   "function": "hash_value_mid",
+   "cyclomatic": 16.0,
+   "cognitive": 3.0,
+   "justification": "S15 adds the Array/PV arms; one arm per hash kind"
+  },
+  {
+   "file": "crates/clj-eval/src/error.rs",
+   "function": "jvm_class_of_host",
+   "cyclomatic": 17.0,
+   "cognitive": 3.0,
+   "justification": "one arm per Value variant; the class-name table stays exhaustive. Wave-2 landing: S15 Array/PV arms tip it over (S9 scalars + S12 struct/volatile arms already here; 17/3 measured under rca 0.0.25)"
+  },
+  {
+   "file": "crates/clj-eval/src/eval.rs",
+   "function": "Evaluator::invoke",
+   "cyclomatic": 16.0,
+   "cognitive": 2.0,
+   "justification": "one arm per invocable kind, each delegating to a helper. Wave-2 landing: S15 adds the PrimitiveVector arm (S12 deliberately kept structs a pre-dispatch; 16/2 measured under rca 0.0.25)"
+  },
+  {
+   "file": "crates/clj-value/src/value.rs",
+   "function": "hash_value_rest",
+   "cyclomatic": 17.0,
+   "cognitive": 7.0,
+   "justification": "one arm per hash kind; the hash partition stays exhaustive. Wave-2 landing: S9 scalars + S15 Array arm on top of the S12 struct shape (17/7 measured under rca 0.0.25)"
   }
  ]
 }

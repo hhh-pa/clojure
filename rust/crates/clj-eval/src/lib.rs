@@ -13,6 +13,7 @@
 //! runs them. Single namespace (`user`), no prelude yet (S5).
 
 pub mod aot_subset;
+pub mod arrays;
 pub mod builtin_expand;
 pub mod coll;
 pub mod collmisc;
@@ -27,7 +28,9 @@ pub mod ext;
 pub mod fmt;
 pub mod fx4_form;
 pub mod fx4_host;
+pub mod hierarchy;
 pub mod io;
+pub mod jdkio;
 pub mod lazy;
 pub mod macros;
 pub mod multi;
@@ -37,7 +40,9 @@ pub mod protocol;
 pub mod re;
 pub mod reader;
 pub mod rng;
+pub mod scalars;
 pub mod seqs;
+pub mod typeinternals;
 pub mod types;
 pub mod vars;
 pub mod xform;

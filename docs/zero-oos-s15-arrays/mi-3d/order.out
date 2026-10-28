@@ -1,0 +1,20 @@
+ix-str-idx THROW java.lang.ClassCastException|"class java.lang.String cannot be cast to class java.lang.Character (java.lang.String and java.lang.Character are in module java.base of loader 'bootstrap')"
+ix-order THROW java.lang.IllegalArgumentException|"No matching method aset found taking 3 args"
+ix-setint-order THROW java.lang.IllegalArgumentException|"Argument is not an array of primitive type"
+ix-body THROW java.lang.ClassCastException|"class java.lang.String cannot be cast to class java.lang.Number (java.lang.String and java.lang.Number are in module java.base of loader 'bootstrap')"
+ix-nil-literal THROW clojure.lang.Compiler$CompilerException|"Syntax error compiling . at (/Users/hhu/workspace/clojure/.muse/worktrees/subagent-v2-01a17cea-a1d1-73c2-b863-91fc98e8705c-01a17f58-1f61-7641-ab3a-c8edd1aac16c/docs/zero-oos-s15-arrays/mi-3d/order.clj:15:28)." CAUSE java.lang.IllegalArgumentException|"More than one matching method found: aget"
+ia-int-hugedbl THROW java.lang.IllegalArgumentException|"Value out of range for long: 1.0E300"
+ia-short-hugedbl THROW java.lang.IllegalArgumentException|"Value out of range for long: 1.0E300"
+ia-char-70000 THROW java.lang.IllegalArgumentException|"Value out of range for char: 70000"
+t2d-map THROW java.lang.ClassCastException|"class clojure.lang.PersistentArrayMap cannot be cast to class java.util.Collection (clojure.lang.PersistentArrayMap is in unnamed module of loader 'app'; java.util.Collection is in module java.base of loader 'bootstrap')"
+t2d-str THROW java.lang.ClassCastException|"class java.lang.String cannot be cast to class java.util.Collection (java.lang.String and java.util.Collection are in module java.base of loader 'bootstrap')"
+t2d-arr THROW java.lang.ClassCastException|"class [I cannot be cast to class java.util.Collection ([I and java.util.Collection are in module java.base of loader 'bootstrap')"
+setx-both-bad THROW java.lang.ClassCastException|"class java.lang.String cannot be cast to class java.lang.Number (java.lang.String and java.lang.Number are in module java.base of loader 'bootstrap')"
+setx-badidx-nilarr THROW java.lang.ClassCastException|"class java.lang.String cannot be cast to class java.lang.Number (java.lang.String and java.lang.Number are in module java.base of loader 'bootstrap')"
+setx-badval-nilarr THROW java.lang.ClassCastException|"class java.lang.String cannot be cast to class java.lang.Character (java.lang.String and java.lang.Character are in module java.base of loader 'bootstrap')"
+tail-oob-mismatch THROW java.lang.ArrayIndexOutOfBoundsException|nil
+tail-oob-nilprim THROW java.lang.IllegalArgumentException|nil
+tail-ref-mismatch THROW java.lang.IllegalArgumentException|"array element type mismatch"
+tail-ref-oob-mismatch THROW java.lang.ArrayIndexOutOfBoundsException|nil
+tail-ref-nil [nil (nil)]
+ix-aset-idx THROW java.lang.ClassCastException|"class java.lang.String cannot be cast to class java.lang.Character (java.lang.String and java.lang.Character are in module java.base of loader 'bootstrap')"

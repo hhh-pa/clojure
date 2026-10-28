@@ -31,6 +31,8 @@ const usage = `Rust quality gates (T1174): audit, deny, udeps, geiger, complexit
 
 Usage: rust-quality-gates <workspace-dir> <report-dir> <cov-runner> [cov-args...]
        rust-quality-gates <workspace-dir> --provision-only
+       rust-quality-gates <workspace-dir> --gates-only
+       rust-quality-gates <workspace-dir> <report-dir> --coverage-only <cov-runner> [cov-args...]
   workspace-dir: Rust workspace root (Cargo.toml, Cargo.lock, deny.toml,
     .cargo/audit.toml, *-baseline.json)
   report-dir: where coverage reports land (lcov.info + html/)
@@ -40,6 +42,11 @@ Usage: rust-quality-gates <workspace-dir> <report-dir> <cov-runner> [cov-args...
   --provision-only: install every pinned tool plus the toolchains they
     need, then exit without running any gate. Used to bake the CI gate
     image (scripts/ci/quality-gates.Dockerfile).
+  --gates-only: run audit, deny, udeps, geiger, complexity, skip
+    coverage. The merge leg of a sharded coverage run.
+  --coverage-only: run only the coverage suite and write lcov.info,
+    skipping the gates and the floor/patch enforcement (those run on
+    the merged report). One leg of a sharded coverage run.
   NOTE: for nextest, OMIT the run subcommand. ` + "`cargo llvm-cov nextest`" + `
   calls ` + "`cargo nextest run`" + ` internally, so a literal run would be treated
   as a test-name filter and the coverage run would silently execute only
@@ -873,7 +880,7 @@ func sibling(name string) (string, error) {
 	return cand, nil
 }
 
-func coverageReports(env []string, workspace, reportDir string, covRunner []string) error {
+func coverageReports(env []string, workspace, reportDir string, covRunner []string, enforce bool) error {
 	// The suite run stays fail-fast (a red suite is the primary
 	// signal and its partial profile data would mislead the trend);
 	// the report steps below then always publish from whatever cargo
@@ -899,14 +906,21 @@ func coverageReports(env []string, workspace, reportDir string, covRunner []stri
 	if _, err := sanitizeLCOVFile(lcovPath, workspace); err != nil {
 		return err
 	}
-	if err := run([]string{"cargo", "llvm-cov", "report", "--html", "--workspace", "--output-dir", reportDir}, env, workspace); err != nil {
-		return err
+	if enforce {
+		if err := run([]string{"cargo", "llvm-cov", "report", "--html", "--workspace", "--output-dir", reportDir}, env, workspace); err != nil {
+			return err
+		}
 	}
 	if _, err := upgradeLCOVWithCanonical(env, workspace, reportDir); err != nil {
 		fmt.Printf("WARNING: canonical coverage unavailable (%s); keeping cargo-llvm-cov reports\n", err)
 	}
 	if err := printLCOVSummary(lcovPath, workspace); err != nil {
 		return err
+	}
+	if !enforce {
+		// Shard leg: the floor and patch gates run on the
+		// merged report, where partial coverage is whole.
+		return nil
 	}
 	// The 100% bar, enforced: every line stays covered, no
 	// regressions, no uncovered tail.
@@ -1027,22 +1041,35 @@ func runMain(argv []string) int {
 	if err != nil {
 		return fail(err)
 	}
-	var provisionOnly bool
+	var provisionOnly, gatesOnly, coverageOnly bool
 	var reportDir string
 	var covRunner []string
 	if len(argv) == 2 && argv[1] == "--provision-only" {
 		provisionOnly = true
+	} else if argv[1] == "--gates-only" {
+		if len(argv) != 2 {
+			fmt.Print(usage)
+			return 2
+		}
+		gatesOnly = true
 	} else {
 		if len(argv) < 3 {
 			fmt.Print(usage)
 			return 2
 		}
-		provisionOnly = false
 		reportDir, err = filepath.Abs(argv[1])
 		if err != nil {
 			return fail(err)
 		}
 		covRunner = argv[2:]
+		if covRunner[0] == "--coverage-only" {
+			coverageOnly = true
+			covRunner = covRunner[1:]
+			if len(covRunner) == 0 {
+				fmt.Print(usage)
+				return 2
+			}
+		}
 		if covRunner[0] == "nextest" {
 			for _, a := range covRunner {
 				if a == "run" {
@@ -1136,82 +1163,86 @@ func runMain(argv []string) int {
 		return 0
 	}
 
-	// Per-workspace advisory-db, freshly cloned every run: the
-	// default ~/.cargo/advisory-db is shared across parallel stages
-	// on the node cache, and audit cannot update an existing
-	// checkout anyway.
-	auditDB := filepath.Join(workspace, "target", "advisory-db")
-	os.RemoveAll(auditDB)
 	var failures []string
 	keep := func(msg string) {
 		if msg != "" {
 			failures = append(failures, msg)
 		}
 	}
-	msg, err := attempt("cargo audit --deny warnings",
-		[]string{"cargo", "audit", "--db", auditDB, "--deny", "warnings"}, env, workspace)
-	if err != nil {
-		return fail(err)
-	}
-	keep(msg)
-	msg, err = attempt("cargo deny check licenses bans sources",
-		[]string{"cargo", "deny", "check", "licenses", "bans", "sources"}, env, workspace)
-	if err != nil {
-		return fail(err)
-	}
-	keep(msg)
+	if !coverageOnly {
+		// Per-workspace advisory-db, freshly cloned every run: the
+		// default ~/.cargo/advisory-db is shared across parallel stages
+		// on the node cache, and audit cannot update an existing
+		// checkout anyway.
+		auditDB := filepath.Join(workspace, "target", "advisory-db")
+		os.RemoveAll(auditDB)
+		msg, err := attempt("cargo audit --deny warnings",
+			[]string{"cargo", "audit", "--db", auditDB, "--deny", "warnings"}, env, workspace)
+		if err != nil {
+			return fail(err)
+		}
+		keep(msg)
+		msg, err = attempt("cargo deny check licenses bans sources",
+			[]string{"cargo", "deny", "check", "licenses", "bans", "sources"}, env, workspace)
+		if err != nil {
+			return fail(err)
+		}
+		keep(msg)
 
-	// udeps runs in the cooked nested target dir (T1174): its
-	// fingerprints match only udeps-cooked artifacts, and the
-	// separate dir keeps its nightly .rustc_info.json from dirtying
-	// the stable tree.
-	udepsTargetDir := filepath.Join(cargoTargetDir(env, workspace), "nightly")
-	udepsEnv := append(env, "CARGO_TARGET_DIR="+udepsTargetDir)
-	nightlyFP := filepath.Join(udepsTargetDir, "debug", ".fingerprint")
-	if entries, err := os.ReadDir(nightlyFP); err == nil {
-		fmt.Printf("==> %s: udeps seed holds %d fingerprints\n", workspace, len(entries))
-	} else {
-		fmt.Printf("==> %s: udeps seed MISSING (%s)\n", workspace, nightlyFP)
-	}
-	// Restamp after provisioning (T1174).
-	restampTree(udepsTargetDir)
-	msg, err = attempt("cargo udeps ("+UDEPSNightly+")",
-		[]string{"cargo", "+" + UDEPSNightly, "udeps", "--workspace", "--all-targets"},
-		udepsEnv, workspace)
-	if err != nil {
-		return fail(err)
-	}
-	keep(msg)
+		// udeps runs in the cooked nested target dir (T1174): its
+		// fingerprints match only udeps-cooked artifacts, and the
+		// separate dir keeps its nightly .rustc_info.json from dirtying
+		// the stable tree.
+		udepsTargetDir := filepath.Join(cargoTargetDir(env, workspace), "nightly")
+		udepsEnv := append(env, "CARGO_TARGET_DIR="+udepsTargetDir)
+		nightlyFP := filepath.Join(udepsTargetDir, "debug", ".fingerprint")
+		if entries, err := os.ReadDir(nightlyFP); err == nil {
+			fmt.Printf("==> %s: udeps seed holds %d fingerprints\n", workspace, len(entries))
+		} else {
+			fmt.Printf("==> %s: udeps seed MISSING (%s)\n", workspace, nightlyFP)
+		}
+		// Restamp after provisioning (T1174).
+		restampTree(udepsTargetDir)
+		msg, err = attempt("cargo udeps ("+UDEPSNightly+")",
+			[]string{"cargo", "+" + UDEPSNightly, "udeps", "--workspace", "--all-targets"},
+			udepsEnv, workspace)
+		if err != nil {
+			return fail(err)
+		}
+		keep(msg)
 
-	geigerBin, err := sibling("geiger")
-	if err != nil {
-		return fail(err)
-	}
-	msg, err = attempt("geiger unsafe ratchet",
-		[]string{geigerBin, workspace}, env, workspace)
-	if err != nil {
-		return fail(err)
-	}
-	keep(msg)
+		geigerBin, err := sibling("geiger")
+		if err != nil {
+			return fail(err)
+		}
+		msg, err = attempt("geiger unsafe ratchet",
+			[]string{geigerBin, workspace}, env, workspace)
+		if err != nil {
+			return fail(err)
+		}
+		keep(msg)
 
-	complexityBin, err := sibling("complexity")
-	if err != nil {
-		return fail(err)
-	}
-	msg, err = attempt("complexity ratchet",
-		[]string{complexityBin, workspace}, env, workspace)
-	if err != nil {
-		return fail(err)
-	}
-	keep(msg)
+		complexityBin, err := sibling("complexity")
+		if err != nil {
+			return fail(err)
+		}
+		msg, err = attempt("complexity ratchet",
+			[]string{complexityBin, workspace}, env, workspace)
+		if err != nil {
+			return fail(err)
+		}
+		keep(msg)
+	} // !coverageOnly
 
-	fmt.Printf("==> %s: coverage reports -> %s\n", workspace, reportDir)
-	if err := os.MkdirAll(reportDir, 0o777); err != nil {
-		return fail(err)
-	}
-	if err := coverageReports(env, workspace, reportDir, covRunner); err != nil {
-		failures = append(failures, "coverage: "+err.Error())
-	}
+	if !gatesOnly {
+		fmt.Printf("==> %s: coverage reports -> %s\n", workspace, reportDir)
+		if err := os.MkdirAll(reportDir, 0o777); err != nil {
+			return fail(err)
+		}
+		if err := coverageReports(env, workspace, reportDir, covRunner, !coverageOnly); err != nil {
+			failures = append(failures, "coverage: "+err.Error())
+		}
+	} // !gatesOnly
 	if len(failures) > 0 {
 		fmt.Fprintf(os.Stderr, "rust quality gates: %d failure(s); first: %s\n",
 			len(failures), failures[0])

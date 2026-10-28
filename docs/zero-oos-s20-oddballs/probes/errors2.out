@@ -1,0 +1,15 @@
+g-keys-b (":cause" ":data" ":trace" ":via")
+g-keys-c (":data" ":trace" ":via")
+g-keys-d (":cause" ":trace" ":via")
+g-data-a {:a 1}
+g-data-b {:b 2}
+g-data-c {}
+g-data-d nil
+g-cause-key-c false
+g-via0-data-c {}
+h-via0-at ["sym:clojure.lang.AFn" "sym:applyToHelper" "str" "int"]
+h-via1-at ["sym:clojure.lang.AFn" "sym:applyToHelper" "str" "int"]
+h-trace0 ["sym:clojure.lang.AFn" "sym:applyToHelper" "str" "int"]
+h-trace-count 17
+h-via1-at-is-trace0 true
+h-via-count-a 1

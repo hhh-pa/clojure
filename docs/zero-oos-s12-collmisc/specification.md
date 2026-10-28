@@ -335,6 +335,11 @@ singleton `[dir-string]`; order is filesystem order (tests
 sort, mirroring the JVM `listFiles` caveat); non-string args
 throw IAE `Cannot open <x> as a directory.` (slurp-shaped).
 
+Wave-2 union note (S17): the non-string-args sentence above
+is superseded — nil roots lazy-NPE on first force, `File`
+handles walk as paths, and only non-nil non-string non-`File`
+roots throw the eager slurp-shaped IAE.
+
 ### 1.8 Re-matcher and re-groups
 
 `re-matcher` answers a stateful handle; `re-find` of one arg

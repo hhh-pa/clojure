@@ -1,0 +1,67 @@
+u-parse-canon "550e8400-e29b-41d4-a716-446655440000"
+u-parse-upper "550e8400-e29b-41d4-a716-446655440000"
+u-parse-short1 "0550e840-e29b-41d4-a716-446655440000"
+u-parse-shortmid "550e8400-e29b-041d-a716-446655440000"
+u-parse-longshort "23456789-0123-1234-1234-123456789012"
+u-parse-long1 ""
+u-parse-long4 ""
+u-parse-long5 ""
+u-parse-zeros "00000000-0000-0000-0000-000000000000"
+u-parse-nil THROW java.lang.NullPointerException|"Cannot invoke \"String.length()\" because \"name\" is null"
+u-parse-num THROW java.lang.ClassCastException|"class java.lang.Long cannot be cast to class java.lang.String (java.lang.Long and java.lang.String are in module java.base of loader 'bootstrap')"
+u-parse-bool THROW java.lang.ClassCastException|"class java.lang.Boolean cannot be cast to class java.lang.String (java.lang.Boolean and java.lang.String are in module java.base of loader 'bootstrap')"
+u-parse-vec THROW java.lang.ClassCastException|"class clojure.lang.PersistentVector cannot be cast to class java.lang.String (clojure.lang.PersistentVector is in unnamed module of loader 'app'; java.lang.String is in module java.base of loader 'bootstrap')"
+u-parse-kw THROW java.lang.ClassCastException|"class clojure.lang.Keyword cannot be cast to class java.lang.String (clojure.lang.Keyword is in unnamed module of loader 'app'; java.lang.String is in module java.base of loader 'bootstrap')"
+u-parse-bogus nil
+u-parse-empty nil
+u-parse-braces nil
+u-parse-urn nil
+u-parse-nonhex nil
+u-parse-nodash nil
+u-parse-short nil
+u-parse-emptypart nil
+u-parse-traildash nil
+u-parse-dashes nil
+u-parse-badidx nil
+u-parse-nonstr-cause THROW java.lang.ClassCastException|"class java.lang.Long cannot be cast to class java.lang.String (java.lang.Long and java.lang.String are in module java.base of loader 'bootstrap')"
+u-parse-nil-cause THROW java.lang.NullPointerException|"Cannot invoke \"String.length()\" because \"name\" is null"
+u-rand-len 36
+u-rand-ver \4
+u-rand-var \a
+u-rand-dash (\- \- \- \-)
+u-rand-pred true
+u-rand-roundtrip false
+u-rand-unique false
+u-p-uuid true
+u-p-nil false
+u-p-str false
+u-p-int false
+u-p-vec false
+u-p-map false
+u-p-kw false
+u-p-sym false
+u-p-inst false
+u-p-uri false
+u-p-tagged false
+u-eq-case true
+u-eq-str false
+u-eq-nil false
+u-eq-ne false
+u-hash-a 1170702770
+u-hash-b 0
+u-hash-c 0
+u-hash-case true
+u-hash-map :hit
+u-cmp-eq 0
+u-cmp-lsb -1
+u-cmp-msb 1
+u-cmp-signed -1
+u-cmp-signed-lsb -1
+u-cmp-flip 1
+u-cmp-str THROW java.lang.ClassCastException|"class java.lang.String cannot be cast to class java.util.UUID (java.lang.String and java.util.UUID are in module java.base of loader 'bootstrap')"
+u-cmp-inst THROW java.lang.ClassCastException|"class java.util.Date cannot be cast to class java.util.UUID (java.util.Date and java.util.UUID are in module java.base of loader 'bootstrap')"
+u-pr "#uuid \"550e8400-e29b-41d4-a716-446655440000\""
+u-print "#uuid \"550e8400-e29b-41d4-a716-446655440000\""
+u-str "550e8400-e29b-41d4-a716-446655440000"
+u-pr-roundtrip true
+u-class java.util.UUID

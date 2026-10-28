@@ -1,0 +1,29 @@
+g-empty-scheme THROW java.net.URISyntaxException|"Expected scheme name at index 0: :"
+g-empty-scheme-x THROW java.net.URISyntaxException|"Expected scheme name at index 0: :x"
+g-digit-rel [nil nil nil nil -1 "1x" nil nil false "1x"]
+g-space-scheme THROW java.net.URISyntaxException|"Illegal character in scheme name at index 1: a b:c"
+g-empty-ssp THROW java.net.URISyntaxException|"Expected scheme-specific part at index 5: http:"
+g-empty-ssp-frag THROW java.net.URISyntaxException|"Expected scheme-specific part at index 5: http:#f"
+g-empty-opaque THROW java.net.URISyntaxException|"Expected scheme-specific part at index 7: mailto:"
+g-empty-auth-eof THROW java.net.URISyntaxException|"Expected authority at index 7: http://"
+g-host-only ["http" "h" nil "h" -1 "" nil nil false "//h"]
+g-host-query ["http" "h" nil "h" -1 "" "q" nil false "//h?q"]
+g-host-frag ["http" "h" nil "h" -1 "" nil "" false "//h"]
+g-empty-frag ["http" "h" nil "h" -1 "/x" nil "" false "//h/x"]
+g-empty-query ["http" "h" nil "h" -1 "/x" "" nil false "//h/x?"]
+g-rel-auth [nil "h" nil "h" -1 "/x" nil nil false "//h/x"]
+g-rel-emptyauth [nil nil nil nil -1 "/x" nil nil false "///x"]
+g-opaque-colons ["a" nil nil nil -1 nil nil nil true "b:c"]
+g-empty-host-user ["http" "u@" nil nil -1 "/x" nil nil false "//u@/x"]
+g-bad-ipv6port THROW java.net.URISyntaxException|"Illegal character in port number at index 14: http://[::1]:8x/x"
+g-zeropad-port ["http" "h:0080" nil "h" 80 "/x" nil nil false "//h:0080/x"]
+g-multi-at ["http" "a@b@c" nil nil -1 "/x" nil nil false "//a@b@c/x"]
+g-bad-auth-escape THROW java.net.URISyntaxException|"Malformed escape pair at index 8: http://a%zz/x"
+g-trail-pct THROW java.net.URISyntaxException|"Malformed escape pair at index 10: http://h/a%"
+g-bracket-rel THROW java.net.URISyntaxException|"Illegal character in scheme name at index 0: [::1]/x"
+g-ipv6-full ["http" "[2001:db8::1]" nil "[2001:db8::1]" -1 "/x" nil nil false "//[2001:db8::1]/x"]
+g-ipv6-mapped ["http" "[::ffff:1.2.3.4]" nil "[::ffff:1.2.3.4]" -1 "/x" nil nil false "//[::ffff:1.2.3.4]/x"]
+g-ipv6-double THROW java.net.URISyntaxException|"Expected hex digits or IPv4 address at index 13: http://[1::2::3]/x"
+g-ipv6-longgroup THROW java.net.URISyntaxException|"IPv6 hexadecimal digit sequence too long at index 8: http://[12345::]/x"
+g-underscore ["http" "h_ost" nil nil -1 "/x" nil nil false "//h_ost/x"]
+g-pct-host ["http" "h ost" nil nil -1 "/x" nil nil false "//h ost/x"]

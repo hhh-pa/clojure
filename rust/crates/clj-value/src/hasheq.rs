@@ -101,10 +101,27 @@ pub fn hasheq(v: &Value) -> i32 {
         Value::Keyword(k) => keyword_hasheq(k),
         Value::List(l) => hash_ordered(l.iter().map(hasheq)),
         Value::Vector(v) => hash_ordered(v.iter().map(hasheq)),
+        // Primitive vectors hash exactly like their item vector
+        // (they are `=` to it — S15 oracle `f-hash-eq`).
+        Value::PrimitiveVector(p) => hash_ordered(p.iter().map(hasheq)),
         Value::BigInt(_) | Value::BigInteger(_) | Value::BigDec(_) | Value::Ratio(_) => {
             hasheq_tower(v)
         }
+        // S9 scalars are not `IHashEq`, so `Util.hasheq` falls
+        // back to `.hashCode` (the `TaggedLiteral` rule below).
+        Value::Uuid(_) | Value::Instant(_) | Value::Uri(_) => scalar_hash(v),
         other => hasheq_mid(other),
+    }
+}
+
+/// S9 scalar hashing (split for the budget): the JDK `.hashCode`
+/// of each kind.
+fn scalar_hash(v: &Value) -> i32 {
+    match v {
+        Value::Uuid(u) => u.hash_code(),
+        Value::Instant(i) => i.hash_code(),
+        Value::Uri(u) => u.hash_code(),
+        _ => unreachable!("caller passes scalars only"),
     }
 }
 
@@ -152,6 +169,9 @@ fn hasheq_mid(v: &Value) -> i32 {
         Value::Throwable(t) => id_hash(t.id),
         Value::Transient(t) => id_hash(t.id()),
         Value::Atom(a) => id_hash(a.id()),
+        // Arrays hash their identity (the JVM uses
+        // `identityHashCode` — S15 oracles `c-hash-*`).
+        Value::Array(a) => id_hash(a.id()),
         // Port-defined types: records use the solved content-XOR
         // formula (oracle `l-hash-rec`); anything else mixes its
         // content deterministically (the JVM uses identity here).
@@ -221,6 +241,8 @@ pub fn hash_code(v: &Value) -> i32 {
         Value::Keyword(k) => keyword_hash_code(k),
         Value::List(l) => list_hash_code(l.iter().map(hash_code)),
         Value::Vector(v) => list_hash_code(v.iter().map(hash_code)),
+        Value::Uuid(_) | Value::Instant(_) | Value::Uri(_) => scalar_hash(v),
+        Value::PrimitiveVector(p) => list_hash_code(p.iter().map(hash_code)),
         other => hash_code_mid(other),
     }
 }
@@ -250,6 +272,7 @@ fn hash_code_mid(v: &Value) -> i32 {
         Value::Unbound(u) => id_hash(u.var_id),
         Value::Throwable(t) => id_hash(t.id),
         Value::Transient(t) => id_hash(t.id()),
+        Value::Array(a) => id_hash(a.id()),
         // Port-defined types: records hash exactly like their
         // content map (oracle `l-rec-hashcode`); anything else
         // mixes deterministically (the JVM uses identity here).
@@ -1072,6 +1095,7 @@ mod tests {
             default: Value::Nil,
             methods: crate::new_map(),
             prefers: crate::new_map(),
+            hierarchy: None,
         }));
         assert_eq!(hash_code(&mf), 109);
     }
@@ -1175,6 +1199,14 @@ mod tests {
     #[should_panic(expected = "caller passes tower values only")]
     fn hasheq_tower_rejects_non_tower() {
         let _ = super::hasheq_tower(&Value::Nil);
+    }
+
+    /// `scalar_hash` rejects non-scalars (both callers dispatch
+    /// on kind first — the panic is the contract).
+    #[test]
+    #[should_panic(expected = "caller passes scalars only")]
+    fn scalar_hash_rejects_non_scalar() {
+        let _ = super::scalar_hash(&Value::Nil);
     }
 
     /// `hash_code` walks every tower arm (Java word formulas are

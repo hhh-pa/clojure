@@ -33,6 +33,7 @@ use crate::env::Env;
 use crate::error::{NativeError, Signal, jvm_class_of};
 use crate::eval::Evaluator;
 use crate::expr::Expr;
+use crate::jdkio::JdkCursor;
 use crate::ns::{NativeFnPtr, check_arity, signal_to_native};
 
 /// Which lazy class a [`PendingSeq`] reports: almost everything is
@@ -231,6 +232,14 @@ pub(crate) enum Thunk {
     ChunkHead {
         chunk: crate::collmisc::ChunkValue,
         tail: Value,
+    },
+    /// S17: pulls through a shared JDK-handle cursor (up to
+    /// [`CHUNK_SIZE`] items per step when `chunked`, one
+    /// otherwise) for `iterator-seq`/`stream-seq!`/
+    /// `resultset-seq` tails/`file-seq`.
+    JdkPull {
+        cursor: JdkCursor,
+        chunked: bool,
     },
 }
 
@@ -478,7 +487,9 @@ pub(crate) fn is_seqable(v: &Value) -> bool {
         | Value::MapEntry { .. }
         | Value::Map(_)
         | Value::Set(_)
-        | Value::Str(_) => true,
+        | Value::Str(_)
+        | Value::Array(_)
+        | Value::PrimitiveVector(_) => true,
         Value::Extension(e) => {
             let any = e.as_any();
             any.downcast_ref::<PendingSeq>().is_some()
@@ -682,6 +693,14 @@ pub(crate) fn step_unit(eval: &mut Evaluator, v: &Value) -> Result<StepUnit, Sig
         Value::Map(m) => step_map_unit(m),
         Value::Set(s) => step_set_unit(s),
         Value::Str(s) => step_str_unit(s),
+        Value::Array(a) => step_realized(&a.snapshot(), false).map_or_else(
+            || Ok(StepUnit::Empty),
+            |s| step_seq(&s, true, false, SeqKind::Array, None),
+        ),
+        Value::PrimitiveVector(p) => step_realized(&p.items(), true).map_or_else(
+            || Ok(StepUnit::Empty),
+            |s| step_seq(&s, true, true, SeqKind::Chunked, None),
+        ),
         // Map-like hosts step their content entries (like
         // `seq_value`; anything else host has no seq).
         Value::HostType(_) => match crate::types::maplike_inst(v) {
@@ -1012,6 +1031,7 @@ fn step_thunk_rest(eval: &mut Evaluator, thunk: Thunk) -> Result<Forced, Signal>
         } => step_reductions(eval, &f, acc, has_init, input, started),
         Thunk::Replace { smap, input } => step_replace(eval, &smap, input),
         Thunk::Sequence { step, srcs } => step_sequence(eval, &step, srcs),
+        Thunk::JdkPull { cursor, chunked } => step_jdk_pull(eval, &cursor, chunked),
         other => step_thunk_s12(eval, other),
     }
 }
@@ -1102,6 +1122,26 @@ fn step_fileseq(stack: &[String]) -> Forced {
         items: Arc::from(vec![Value::Str(Arc::from(path.as_str()))]),
         tail: pending_value(Thunk::FileSeq { stack }),
     }
+}
+
+/// S17: one pull through a JDK-handle cursor (a chunk when
+/// `chunked`, one item otherwise); the tail re-pulls through
+/// the same shared cursor.
+fn step_jdk_pull(
+    eval: &mut Evaluator,
+    cursor: &JdkCursor,
+    chunked: bool,
+) -> Result<Forced, Signal> {
+    let mut cursor = cursor.clone();
+    let n = if chunked { CHUNK_SIZE } else { 1 };
+    let items = crate::jdkio::pull_cursor(eval, &mut cursor, n).map_err(|e| eval.throw(e))?;
+    if items.is_empty() {
+        return Ok(Forced::Empty);
+    }
+    Ok(Forced::Chunk {
+        items: Arc::from(items),
+        tail: pending_value(Thunk::JdkPull { cursor, chunked }),
+    })
 }
 
 /// A prebuilt chain: an empty head forces the tail, otherwise the
@@ -2703,6 +2743,24 @@ pub(crate) fn seq_value(eval: &mut Evaluator, v: &Value) -> Result<Value, Signal
         Value::Map(m) => Ok(seq_map(m)),
         Value::Set(s) => Ok(seq_set(s)),
         Value::Str(s) => Ok(seq_str(s)),
+        // Arrays snapshot eagerly (`ArraySeq` from `sort` uses the
+        // same flags; D1 pins the snapshot — S15 oracles `a-seq`,
+        // `a-seq-empty`, `a-seq-obj`, `a-seq-2d`).
+        Value::Array(a) => Ok(realized_value(
+            a.snapshot(),
+            false,
+            true,
+            false,
+            SeqKind::Array,
+        )),
+        // Primitive vectors seq exactly like vectors (chunked).
+        Value::PrimitiveVector(p) => Ok(realized_value(
+            p.items(),
+            true,
+            true,
+            true,
+            SeqKind::Chunked,
+        )),
         // Records seq their content entries (oracle `rec-seq`);
         // structs likewise (S12 oracle `sm-seq`); anything else
         // host has no seq (oracle `i-seq`).
@@ -2729,6 +2787,12 @@ fn first_direct(v: &Value) -> Option<Value> {
         ),
         Value::Set(s) => Some(s.iter().next().cloned().unwrap_or(Value::Nil)),
         Value::Str(s) => Some(s.chars().next().map(Value::Char).unwrap_or(Value::Nil)),
+        Value::Array(a) => Some(if a.is_empty() {
+            Value::Nil
+        } else {
+            crate::arrays::array_read(a, 0)
+        }),
+        Value::PrimitiveVector(p) => Some(p.get(0).cloned().unwrap_or(Value::Nil)),
         // Records read their first content entry (empty reads nil,
         // like `{}`); structs likewise (S12); other host values
         // keep the `ISeq` error.
