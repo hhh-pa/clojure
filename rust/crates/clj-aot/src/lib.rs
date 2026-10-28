@@ -21,6 +21,7 @@
 #[cfg(not(target_pointer_width = "64"))]
 compile_error!("clj-aot requires a 64-bit host (usize FFI widths)");
 
+pub mod driver;
 pub mod link;
 pub mod lower;
 pub mod target;
