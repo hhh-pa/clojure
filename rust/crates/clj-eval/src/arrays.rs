@@ -558,7 +558,8 @@ fn zero_vec<T: Clone>(base: BaseType, size: usize, zero: T) -> Result<Vec<T>, Na
 }
 
 /// A zeroed store (the allocation guard runs first; a failed
-/// reserve OOMs instead of aborting).
+/// reserve OOMs instead of aborting). Split by width for the
+/// complexity gate (nine fallible arms trip cyclomatic 19).
 fn zero_store(base: BaseType, size: usize) -> Result<ArrayStore, NativeError> {
     Ok(match base {
         BaseType::Boolean => ArrayStore::Bools(zero_vec(base, size, false)?),
@@ -566,10 +567,18 @@ fn zero_store(base: BaseType, size: usize) -> Result<ArrayStore, NativeError> {
         BaseType::Char => ArrayStore::Chars(zero_vec(base, size, '\0')?),
         BaseType::Short => ArrayStore::Shorts(zero_vec(base, size, 0_i16)?),
         BaseType::Int => ArrayStore::Ints(zero_vec(base, size, 0_i32)?),
+        wide => zero_store_wide(wide, size)?,
+    })
+}
+
+/// Wide/object zeroed stores (see `zero_store`).
+fn zero_store_wide(base: BaseType, size: usize) -> Result<ArrayStore, NativeError> {
+    Ok(match base {
         BaseType::Long => ArrayStore::Longs(zero_vec(base, size, 0_i64)?),
         BaseType::Float => ArrayStore::Floats(zero_vec(base, size, 0.0_f64)?),
         BaseType::Double => ArrayStore::Doubles(zero_vec(base, size, 0.0_f64)?),
         BaseType::Object => ArrayStore::Objs(zero_vec(base, size, Value::Nil)?),
+        _ => unreachable!("narrow types stay in zero_store"),
     })
 }
 
