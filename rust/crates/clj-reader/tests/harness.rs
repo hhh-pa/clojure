@@ -394,6 +394,7 @@ fn append_canon_body(out: &mut String, v: &Value, print_meta: bool) {
         // Evaluator-only values (the reader never emits them).
         | Value::HostType(_)
         | Value::MultiFn(_)
+        | Value::Class(_)
         | Value::Var(_)
         | Value::Unbound(_)
         | Value::Transient(_)
