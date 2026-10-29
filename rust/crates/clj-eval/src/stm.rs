@@ -979,7 +979,7 @@ pub(crate) const STM_NATIVES: &[(&str, NativeFnPtr)] = &[
 mod tests {
     use super::*;
     use clj_value::Symbol;
-    use clj_value::{AgentAction, AgentPool, Throwable};
+    use clj_value::{AgentAction, AgentPool, Throwable, Var};
     use std::sync::Arc;
 
     /// A ref with a fabricated point/history (the contention-only
@@ -1098,8 +1098,13 @@ mod tests {
             "s19-boom",
             Arc::new(|_, _| panic!("s19 foreign panic")),
         );
+        let sym = Symbol::new(Some("user"), "s19-boom");
+        let id = eval
+            .registry
+            .lookup(&sym)
+            .expect("installed native resolves");
         let body = vec![Expr::Invoke {
-            head: Box::new(Expr::Global(Symbol::new(Some("user"), "s19-boom"))),
+            head: Box::new(Expr::Global(Var { id, sym })),
             args: Vec::new(),
             span: clj_reader::Span::new(1, 1),
         }];
