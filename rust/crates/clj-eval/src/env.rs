@@ -450,7 +450,13 @@ impl NamespaceRegistry {
         match sym.namespace() {
             Some(part) => {
                 let target = self.namespace_target_in(ns_name, part)?;
-                let ns = self.namespaces.get(target)?;
+                // Live-or-removed: aliases dangle into tombstones
+                // (upstream `namespaceFor` returns the alias object
+                // liveness-blind; #81). Global names resolve live
+                // only — `namespace_target_in` never yields a
+                // removed one — so only alias targets read frozen
+                // state here.
+                let ns = self.ns_live_or_removed(target)?;
                 let q = Symbol::new(Some(target), sym.name());
                 ns.ids.contains_key(&q).then_some(q)
             }
@@ -1261,9 +1267,16 @@ mod tests {
         let mut reg = rigged();
         assert!(reg.remove_ns("lib"));
         // The alias still names a namespace (probe34
-        // `ns-alias-removed`); the var itself is gone.
+        // `ns-alias-removed`): it resolves to the detached object
+        // (upstream `namespaceFor` returns the alias object
+        // liveness-blind), so an existing var is found while a
+        // missing one keeps the `No such var` shape (#81).
         assert_eq!(reg.namespace_target("q"), Some("lib"));
-        assert_eq!(reg.resolve(&sym(Some("q"), "v")), None);
+        assert_eq!(
+            reg.resolve(&sym(Some("q"), "v")),
+            Some(sym(Some("lib"), "v"))
+        );
+        assert_eq!(reg.resolve(&sym(Some("q"), "missing")), None);
         assert_eq!(reg.namespace_target("lib"), None);
         // Stale refers stop resolving instead of resurrecting
         // the namespace (fenced: the JVM keeps the var object).

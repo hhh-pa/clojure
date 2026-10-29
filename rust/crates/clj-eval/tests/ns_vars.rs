@@ -1155,6 +1155,37 @@ fn t73_removed_cross_ns_stale_ref_keeps_root() {
 }
 
 #[test]
+fn t81_dangling_alias_resolves_post_removal() {
+    // #81: aliases dangle into tombstones (upstream `namespaceFor`
+    // returns the alias object liveness-blind), so aliased
+    // evaluation and `resolve` agree after the target is removed.
+    let mut eval = boot();
+    run(
+        &mut eval,
+        "(clojure.core/create-ns 'torture.aliased) (clojure.core/in-ns 'torture.aliased)",
+    );
+    run(&mut eval, "(clojure.core/refer 'clojure.core)");
+    run(&mut eval, "(def aval 11)");
+    run(
+        &mut eval,
+        "(clojure.core/create-ns 'torture.aliaser) (clojure.core/in-ns 'torture.aliaser)",
+    );
+    run(&mut eval, "(clojure.core/refer 'clojure.core)");
+    run(&mut eval, "(clojure.core/alias 'tt 'torture.aliased)");
+    assert_eq!(run_last(&mut eval, "tt/aval"), "11");
+    assert_eq!(
+        run_last(&mut eval, "(resolve 'tt/aval)"),
+        "#'torture.aliased/aval"
+    );
+    run(&mut eval, "(clojure.core/remove-ns 'torture.aliased)");
+    assert_eq!(run_last(&mut eval, "tt/aval"), "11");
+    assert_eq!(
+        run_last(&mut eval, "(resolve 'tt/aval)"),
+        "#'torture.aliased/aval"
+    );
+}
+
+#[test]
 fn t73_resolve_qualified_into_removed_ns_is_nil() {
     // Torture #73 round 2 LOW: qualified resolution into a removed
     // namespace is nil (upstream `Compiler.namespaceFor` goes

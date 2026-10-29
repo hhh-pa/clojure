@@ -13,9 +13,11 @@ probe35 (vars), probe36 (loader). Wrappers are the S4 ones
   `b` → `RuntimeException | No such var: a/b`, blaming the symbol
   as written (alias preserved, probe34 `ns-alias-novar`).
 - A dangling alias (target removed) still counts as a namespace:
-  `tt/x` → `No such var: tt/x`, while the bare removed name gives
-  `No such namespace` (probe34 `ns-alias-removed`,
-  `ns-removed-direct`).
+  `tt/x` → `No such var: tt/x` when `x` is missing, while the bare
+  removed name gives `No such namespace` (probe34
+  `ns-alias-removed`, `ns-removed-direct`); an existing var
+  resolves through the detached object (#81, upstream
+  `namespaceFor`).
 - Unqualified: current namespace, then refers (probe34
   `ns-refer-ok`); miss → `Unable to resolve symbol: x in this
   context` (unchanged).
