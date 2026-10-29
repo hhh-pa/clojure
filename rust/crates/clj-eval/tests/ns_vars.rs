@@ -1186,6 +1186,81 @@ fn t81_dangling_alias_resolves_post_removal() {
 }
 
 #[test]
+fn t79_unmapped_var_keeps_root_in_compiled_refs() {
+    // #79: vars captured by analysis keep their root after unmap
+    // (the JVM's compiled Var reference survives uninterning);
+    // evaluating them must not recreate unbound vars.
+    let mut eval = boot();
+    run(&mut eval, "(def myval 123)");
+    assert_eq!(
+        run_last(&mut eval, "((fn [] (do (ns-unmap *ns* 'myval) myval)))"),
+        "123"
+    );
+}
+
+#[test]
+fn t79_unmapped_var_in_removed_ns_keeps_root() {
+    // #79, removed-namespace variant: no resurrection either.
+    let mut eval = boot();
+    run(
+        &mut eval,
+        "(clojure.core/create-ns 'torture.unm) (clojure.core/in-ns 'torture.unm)",
+    );
+    run(&mut eval, "(clojure.core/refer 'clojure.core)");
+    run(&mut eval, "(def myval 123)");
+    run(&mut eval, "(clojure.core/remove-ns 'torture.unm)");
+    assert_eq!(
+        run_last(&mut eval, "((fn [] (do (ns-unmap *ns* 'myval) myval)))"),
+        "123"
+    );
+    assert_eq!(run_last(&mut eval, "(nil? (find-ns 'torture.unm))"), "true");
+}
+
+#[test]
+fn t79_unmapped_var_ref_forms_keep_identity() {
+    // #79: `var`/`with-redefs`/`set!` capture the var object too.
+    let mut eval = boot();
+    run(&mut eval, "(def myval 123)");
+    assert_eq!(
+        run_last(&mut eval, "((fn [] (ns-unmap *ns* 'myval) @#'myval))"),
+        "123"
+    );
+    run(&mut eval, "(def w 1)");
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "((fn [] (ns-unmap *ns* 'w) (with-redefs [w 2] w)))"
+        ),
+        "2"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(contains? (ns-interns *ns*) 'w)"),
+        "false"
+    );
+    run(&mut eval, "(def ^:dynamic d 0)");
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(binding [d 1] ((fn [] (ns-unmap *ns* 'd) (set! d 2))))"
+        ),
+        "2"
+    );
+}
+
+#[test]
+fn t79_bare_dot_form_stays_graceful() {
+    // #79: synthesized core heads on a bare evaluator resolve-or-
+    // intern at analyze time; the missing op surfaces downstream
+    // (never a panic). Pins the pre-refactor behavior.
+    let mut eval = Evaluator::new_bare("user");
+    let err = uncaught(&mut eval, "(.toString 1)");
+    assert_eq!(
+        err,
+        "java.lang.IllegalStateException | Attempting to call unbound fn: #'clojure.core/__meth*"
+    );
+}
+
+#[test]
 fn t73_resolve_qualified_into_removed_ns_is_nil() {
     // Torture #73 round 2 LOW: qualified resolution into a removed
     // namespace is nil (upstream `Compiler.namespaceFor` goes
