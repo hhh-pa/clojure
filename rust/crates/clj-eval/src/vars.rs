@@ -15,9 +15,8 @@
 use std::sync::Arc;
 
 use clj_value::{
-    Agent, Atom, ExtensionValue, Future, HostInst, List, Map, PrimitiveVector, Promise, Ref,
-    Set, Symbol, ThrowClass, Value, Var, Vector, extension_supports_meta, extension_with_meta,
-    new_map,
+    Agent, Atom, ExtensionValue, Future, HostInst, List, Map, PrimitiveVector, Promise, Ref, Set,
+    Symbol, ThrowClass, Value, Var, Vector, extension_supports_meta, extension_with_meta, new_map,
 };
 
 use crate::core::cce_err;

@@ -218,7 +218,7 @@ verifies each with the cited pin):
 | `str` (`core.rs`) | join the `toString` arm → `clojure.lang.Ref@{id:x}` | `r-str` |
 | `meta_of` + `value_meta` | NEW arms → the cloned cell meta | `r-meta-opt`, `r-meta-none` |
 | `as_iref` | NEW `WatchedRef::Ref` (same nil/CCE shapes as atoms); `add-watch` / `remove-watch` answer the ref | `t-addwatch-returns`, `t-removewatch-returns`, `t-addwatch-in-txn` |
-| `as_ref_target` (`alter-meta!`, `reset-meta!`) | NEW `RefTarget::Ref` | `u-altermeta`, `u-resetmeta` (`vary-meta` keeps the `IObj` cast — `u-varymeta`; `set-validator!` takes the separate `watched_or_nil` path and admits atoms/agents only — §1e) |
+| `as_ref_target` (`alter-meta!`, `reset-meta!`) | NEW `RefTarget::Ref` | `u-altermeta`, `u-resetmeta` (`vary-meta` keeps the `IObj` cast — `u-varymeta`; `set-validator!` takes the separate `watched_or_nil` path and admits atoms/agents/refs — §1e) |
 | `as_iobj` (`with-meta`) | none (generic `IObj` cast) | `r-with-meta` |
 | print: `ref_token` (+ `TOK_REF`), cells arm, engine body | NEW arms: the transient `#object[clojure.lang.Ref 0x{id:x} "clojure.lang.Ref@{id:x}"]` convention (PINNED DIVERGENCE from the JVM's `{:status :ready, :val …}` rendering — same rationale as atoms, §2f) | `r-new` (divergence record) |
 | `jvm_class_of_host` | NEW arm → `clojure.lang.Ref` | every `ClassCastException` row naming Ref |
@@ -230,7 +230,7 @@ verifies each with the cited pin):
 |---|---|
 | `t-validator-calls` | the validator runs on the initial value at construction AND once at commit on the FINAL value only (`[0 2]` — the intermediate `1` is never validated) |
 | `r-validator-reject` / `e-validator-msg` | a veto aborts the commit with `IllegalStateException` `Invalid reference state`; nothing is installed |
-| `t-setvalidator-in-txn` | JVM-ONLY: installing a validator on a ref in-txn (which would govern that same commit) is unexpressible — `set-validator!` admits atoms/agents only (S5); ctor-installed ref validators govern commits per `r-validator-reject` |
+| `t-setvalidator-in-txn` | in-txn install governs that same commit (the oracle's commit veto): `set-validator!` admits refs (S5 checkcast extended); install validates the tx-local value like `deref` and writes the slot non-transactionally (JVM `ARef.setValidator`: plain volatile write — survives an abort, `v-ref-abort-keeps`) |
 | `t-watch-commit` | watches fire ONCE per commit with (old committed, new committed): `[[0 2]]` |
 | `t-watch-abort` | aborted transactions fire no watches (`[]`) |
 | `t-addwatch-in-txn` | a watch installed in-txn fires at that commit (`[[0 1]]`) |

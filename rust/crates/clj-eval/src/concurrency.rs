@@ -1952,17 +1952,20 @@ fn native_get_validator(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, 
     let validator = match &target {
         WatchedRef::Atom(a) => a.lock().validator.clone(),
         WatchedRef::Agent(a) => a.lock().validator.clone(),
+        WatchedRef::Ref(r) => r.lock().validator.clone(),
     };
     Ok(validator.unwrap_or(Value::Nil))
 }
 
-/// Receiver checkcast for `set-validator!` (S5): atoms and
-/// agents answer `Some`, nil passes through (the NPE trips only
-/// after the fn check, per JVM order), anything else CCEs.
+/// Receiver checkcast for `set-validator!` (S5, refs in S19):
+/// atoms, agents, and refs answer `Some`, nil passes through
+/// (the NPE trips only after the fn check, per JVM order),
+/// anything else CCEs.
 fn watched_or_nil(v: &Value) -> Result<Option<WatchedRef>, NativeError> {
     match v {
         Value::Atom(a) => Ok(Some(WatchedRef::Atom(a.clone()))),
         Value::Agent(a) => Ok(Some(WatchedRef::Agent(a.clone()))),
+        Value::Ref(r) => Ok(Some(WatchedRef::Ref(r.clone()))),
         Value::Nil => Ok(None),
         other => Err(cce_err(other, "clojure.lang.IRef")),
     }
@@ -1979,14 +1982,21 @@ fn check_validator_fn(v: &Value) -> Result<Option<Value>, NativeError> {
 }
 
 /// Current value behind a watched ref (S5): one lock, one clone.
-fn iref_current(target: &WatchedRef) -> Value {
+/// The ref arm (S19) reads through the transaction like `deref`
+/// — the JVM validates the install against `deref()`, which is
+/// the tx-local value in-txn (`ARef.setValidator`).
+fn iref_current(eval: &mut Evaluator, target: &WatchedRef) -> Value {
     match target {
         WatchedRef::Atom(a) => a.lock().value.clone(),
         WatchedRef::Agent(a) => a.lock().value.clone(),
+        WatchedRef::Ref(r) => crate::stm::tx_deref(eval, r),
     }
 }
 
-/// Install (or clear) the validator behind a watched ref (S5).
+/// Install (or clear) the validator behind a watched ref. The
+/// ref arm (S19) writes the slot directly — non-transactional
+/// like the JVM's volatile field, so an in-txn install governs
+/// that same commit and survives an abort.
 fn store_validator(target: WatchedRef, next: Option<Value>) {
     match target {
         WatchedRef::Atom(a) => {
@@ -1994,6 +2004,9 @@ fn store_validator(target: WatchedRef, next: Option<Value>) {
         }
         WatchedRef::Agent(a) => {
             a.lock().validator = next;
+        }
+        WatchedRef::Ref(r) => {
+            r.lock().validator = next;
         }
     }
 }
@@ -2014,7 +2027,8 @@ fn native_set_validator(eval: &mut Evaluator, args: &[Value]) -> Result<Value, N
         ));
     };
     if let Some(vf) = &next {
-        validate_new(eval, vf, &iref_current(&target))?;
+        let current = iref_current(eval, &target);
+        validate_new(eval, vf, &current)?;
     }
     store_validator(target, next);
     Ok(Value::Nil)

@@ -58,10 +58,10 @@
 //! message). t-sendvia-defer substitutes the `nil` executor
 //! (the JVM static field has no port surface; executors are
 //! ignored). JVM-only rows (t-key-hashes — the port hashes
-//! relationally, never literally; t-setvalidator-in-txn —
-//! `set-validator!` admits atoms/agents only (S5, matrix row
-//! 643), so in-txn installation on a ref is unexpressible)
-//! stay as skip comments with cause.
+//! relationally, never literally) stay as skip comments with
+//! cause. (`set-validator!`/`get-validator` admit refs with
+//! tx-local install validation — `t-setvalidator-in-txn` and
+//! the `v-ref-*` pins.)
 //!
 //! `stm_portside_pins` holds the port-side pins with oracle rows in
 //! `probes/portside.out` (the `u-*` rows, committed in review):
@@ -77,7 +77,7 @@
 use std::sync::Arc;
 
 use clj_eval::{Evaluator, NativeError, SourceError, boot};
-use clj_reader::{ReaderOpts, read_str};
+use clj_reader::{NoHooks, ReaderOpts, read_str};
 use clj_value::{PrintOpts, ThrowClass, Throwable, Value, pr_to_string};
 
 /// A `java.lang.Exception` throw double (`(Exception. …)` has no
@@ -148,7 +148,7 @@ fn uncaught(eval: &mut Evaluator, src: &str) -> String {
 /// `t-sync-arity0` shape — mirrors `analyzer_contract`).
 fn chain_of(src: &str) -> Vec<String> {
     let mut eval = Evaluator::new("test");
-    let form = read_str(src, &ReaderOpts::default()).unwrap();
+    let form = read_str(src, &ReaderOpts::default(), &mut NoHooks).unwrap();
     let err = eval.analyze(&form).unwrap_err();
     err.chain()
 }
@@ -648,11 +648,62 @@ fn validator_watch_timing() {
     );
     // JVM-only: t-key-hashes — the port hashes relationally, never
     // literally (no pin asserts a `hash` value anywhere in the port).
-    // JVM-only: t-setvalidator-in-txn — `set-validator!` admits
-    // atoms/agents only (S5, matrix row 643); installing on a ref
-    // in-txn is unexpressible, so the row's commit-governance pin
-    // has no port spelling (ctor-installed ref validators DO
-    // govern commits — r-validator-reject).
+    // t-setvalidator-in-txn (in-txn install governs that same
+    // commit — the oracle's commit veto).
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [r (ref 0)] [(try (dosync (set-validator! r even?) (alter r (constantly 3))) :committed (catch IllegalStateException e [:thrown (ex-message e)])) @r])"
+        ),
+        "[[:thrown \"Invalid reference state\"] 0]"
+    );
+    // v-ref-get (nil default; ctor-installed answers).
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [r (ref 0) v (ref 0 :validator even?)] [(nil? (get-validator r)) (some? (get-validator v))])"
+        ),
+        "[true true]"
+    );
+    // v-ref-install (out-of-txn install/clear roundtrip).
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [r (ref 0)] (set-validator! r even?) [(some? (get-validator r)) (do (set-validator! r nil) (nil? (get-validator r)))])"
+        ),
+        "[true true]"
+    );
+    // v-ref-install-veto (install validates the current value).
+    assert_eq!(
+        uncaught(&mut eval, "(let [r (ref 3)] (set-validator! r even?))"),
+        ise("Invalid reference state")
+    );
+    // v-ref-tx-local (in-txn install validates the tx-local
+    // value: committed 0 is even but tx-local 1 vetoes) …
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(let [r (ref 0)] (dosync (alter r inc) (set-validator! r even?)))"
+        ),
+        ise("Invalid reference state")
+    );
+    // … and the mirror: committed 1 is odd but tx-local 2 installs.
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [r (ref 1)] (dosync (alter r inc) (set-validator! r even?)) (some? (get-validator r)))"
+        ),
+        "true"
+    );
+    // v-ref-abort-keeps (install is non-transactional like the
+    // JVM's volatile field: survives an abort; ARef source).
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [r (ref 0)] (try (dosync (set-validator! r even?) (throw (s19-ex \"boom\"))) (catch Exception e :caught)) (some? (get-validator r)))"
+        ),
+        "true"
+    );
     // t-watch-abort (an abort fires nothing).
     assert_eq!(
         run_last(
@@ -1334,6 +1385,7 @@ fn stm_portside_pins() {
     let form = read_str(
         "(loop [i 0] (if (< i 3) (dosync (recur (inc i))) i))",
         &ReaderOpts::default(),
+        &mut NoHooks,
     )
     .unwrap();
     assert_eq!(
