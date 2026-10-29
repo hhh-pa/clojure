@@ -819,7 +819,7 @@ fn default_imports() {
         "(do (create-ns 'box) (in-ns 'box) (clojure.core/refer-clojure) (ns-unmap 'box 'String) (deftype String [x]) (clojure.core/in-ns 'user))",
     );
     assert_eq!(
-        uncaught(
+        compile_err(
             &mut eval,
             "(do (in-ns 'impdd) (clojure.core/refer-clojure) (deftype String [x]))"
         ),
@@ -845,7 +845,7 @@ fn default_imports() {
     );
     // `def` over a default is the same def-over-import compile error.
     assert_eq!(
-        uncaught(
+        compile_err(
             &mut eval,
             "(do (in-ns 'impd5) (clojure.core/refer-clojure) (def String 1))"
         ),
@@ -871,6 +871,18 @@ fn default_imports() {
             "(do (in-ns 'impd7) (clojure.core/refer-clojure) (refer 'box2 :only '[String]) [(resolve 'String) (contains? (ns-imports 'impd7) 'String)])"
         ),
         "[#'box2/String false]"
+    );
+    // Var-backed host imports (§1.8 limitation): unmapping the
+    // defining var breaks later imports (CNFE), where the JVM's
+    // loaded class persists. Last: `impd3` needed `box.String`
+    // resolvable above.
+    run(&mut eval, "(ns-unmap 'box 'String)");
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(do (in-ns 'impd8) (clojure.core/refer-clojure) (import 'box.String))"
+        ),
+        "java.lang.ClassNotFoundException | box.String"
     );
 }
 
