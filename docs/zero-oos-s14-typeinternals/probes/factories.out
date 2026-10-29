@@ -1,0 +1,43 @@
+a-empty-class clojure.core.VecNode
+a-vecnode-class clojure.core.VecNode
+a-vec-class clojure.core.Vec
+a-vecseq-class clojure.core.VecSeq
+a-chunk-class clojure.core.ArrayChunk
+a-eduction-class clojure.core.Eduction
+b-vecnode-args ([edit arr])
+b-vec-args ([am cnt shift root tail _meta])
+b-vecseq-args ([am vec anode i offset _meta])
+b-chunk-args ([am arr off end])
+b-eduction-args ([xform coll])
+b-empty-meta {:line 20, :column 1, :file "clojure/gvec.clj", :name EMPTY-NODE, :ns #object[clojure.lang.Namespace 0xH "clojure.core"]}
+c-vecnode-1 THROW clojure.lang.ArityException|"Wrong number of args (1) passed to: clojure.core/fn--N/->VecNode--N"
+c-vecnode-0 THROW clojure.lang.ArityException|"Wrong number of args (0) passed to: clojure.core/fn--N/->VecNode--N"
+c-vec-short THROW clojure.lang.ArityException|"Wrong number of args (4) passed to: clojure.core/fn--N/->Vec--N"
+c-eduction-1 THROW clojure.lang.ArityException|"Wrong number of args (1) passed to: clojure.core/fn--N/->Eduction--N"
+c-chunk-3 THROW clojure.lang.ArityException|"Wrong number of args (3) passed to: clojure.core/fn--N/->ArrayChunk--N"
+c-vecseq-5 THROW clojure.lang.ArityException|"Wrong number of args (5) passed to: clojure.core/fn--N/->VecSeq--N"
+d-empty #object[clojure.core.VecNode 0xH "clojure.core.VecNode@L"]
+d-vecnode #object[clojure.core.VecNode 0xH "clojure.core.VecNode@L"]
+d-eduction (2 3)
+e-self true
+e-fresh false
+e-ident true
+e-eduction false
+f-edit nil
+f-arr-count 32
+f-vec-cnt 7
+f-chunk-off 1
+f-chunk-end 3
+f-vecseq-i 4
+f-eduction-coll [1 2]
+g-map false
+g-vec true
+g-seq-chunk false
+g-sequential-ed true
+g-counted-ed false
+h-ed-seq (2 3 4)
+h-ed-first 2
+h-chunk-count 3
+h-chunk-nth THROW java.lang.NullPointerException|"Cannot invoke \"clojure.core.ArrayManager.aget(Object, int)\" because \"this.am\" is null"
+h-vec-count 0
+h-vecseq-seq THROW java.lang.NullPointerException|"Cannot invoke \"clojure.core.ArrayManager.aget(Object, int)\" because \"this.am\" is null"

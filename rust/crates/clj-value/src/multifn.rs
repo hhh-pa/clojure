@@ -6,9 +6,10 @@
 // the terms of this license.
 // You must not remove this notice, or any other, from this software.
 
-//! Multimethods (S-typechain stage 3, issue #33): the `defmulti`
-//! value — dispatch fn, default dispatch value, method table, and
-//! preference table.
+//! Multimethods (S-typechain stage 3, issue #33; hierarchies
+//! S13, issue #57): the `defmulti` value — dispatch fn, default
+//! dispatch value, method table, preference table, and
+//! hierarchy source.
 //!
 //! Values are immutable snapshots: `defmethod` / `remove-method` /
 //! `prefer-method` install a new root in the multifn's var under the
@@ -16,14 +17,14 @@
 //! multifn value captured before an update keeps its old table (a
 //! documented divergence — the JVM mutates the one object). Ordinary
 //! calls resolve the var fresh, so only explicit captures go stale.
-//! Dispatch is exact-value plus the default entry; hierarchy
-//! derivation (`derive`, `isa?`) is fenced as a follow-up, so the
-//! preference table is stored but never consulted (and ambiguity
-//! errors are unreachable without ancestors to be ambiguous over).
+//! Dispatch consults the resolved hierarchy: exact entry, then the
+//! best `isa?` match with preference edges breaking ties, then the
+//! default entry — unrelated competing methods are the JVM
+//! ambiguity error.
 
 use std::sync::Arc;
 
-use crate::{Map, Value};
+use crate::{LookupFail, Map, MethodLookup, PrintOpts, Value, best_method, pr_to_string};
 
 /// A multifn value: the `def`ined root of `defmulti`, invoked like a
 /// function (dispatch, then the winning method runs on the call
@@ -41,20 +42,50 @@ pub struct MultiFn {
     /// Dispatch value → method fn (the `:default` entry rides here
     /// like any other, oracle `b-default-entry`).
     pub methods: Map,
-    /// Preferred dispatch value → dispreferred set (recorded for
-    /// the hierarchy follow-up; dispatch ignores it).
+    /// Preferred dispatch value → dispreferred set (breaks ties
+    /// between unrelated matching methods).
     pub prefers: Map,
+    /// Explicit `:hierarchy` (`None` is the live global
+    /// hierarchy): a var/atom/agent dereferenced at dispatch,
+    /// or nil (which NPEs on dereference, oracle `x-hier-nil`).
+    pub hierarchy: Option<Value>,
 }
 
-/// Look up the method fn for a dispatch value (split for the
-/// complexity budget): the exact entry, else the default entry,
-/// else no method.
-#[must_use]
-pub fn method_for(mf: &MultiFn, dispatch_val: &Value) -> Option<Value> {
+/// Look up the method fn for a dispatch value against the
+/// resolved hierarchy (split for the complexity budget):
+/// the exact entry, else the best `isa?` match, else the
+/// default entry, else no method. Ambiguity is the JVM
+/// error text (challenger first, probe `n-amb-order`).
+pub fn method_for(
+    mf: &MultiFn,
+    dispatch_val: &Value,
+    hierarchy: &Value,
+) -> Result<Option<Value>, LookupFail> {
     if let Some(f) = mf.methods.get(dispatch_val) {
-        return Some(f.clone());
+        return Ok(Some(f.clone()));
     }
-    mf.methods.get(&mf.default).cloned()
+    match best_method(&mf.methods, &mf.prefers, hierarchy, dispatch_val)
+        .map_err(LookupFail::Hier)?
+    {
+        MethodLookup::Found(f) => Ok(Some(f)),
+        MethodLookup::Missing => Ok(mf.methods.get(&mf.default).cloned()),
+        MethodLookup::Ambiguous { challenger, best } => Err(LookupFail::Ambiguous(ambiguity_msg(
+            &mf.name,
+            dispatch_val,
+            &challenger,
+            &best,
+        ))),
+    }
+}
+
+/// The JVM ambiguity text (`DV -> challenger and best`).
+fn ambiguity_msg(name: &str, dispatch_val: &Value, challenger: &Value, best: &Value) -> String {
+    format!(
+        "Multiple methods in multimethod '{name}' match dispatch value: {} -> {} and {}, and neither is preferred",
+        pr_to_string(dispatch_val, &PrintOpts::pr()),
+        pr_to_string(challenger, &PrintOpts::pr()),
+        pr_to_string(best, &PrintOpts::pr()),
+    )
 }
 
 /// Deterministic identity digits for the `#object[…]` and `Name@H`

@@ -1,0 +1,64 @@
+a-aget-huge THROW java.lang.ArithmeticException|"integer overflow"
+a-aget-hugedbl THROW java.lang.IllegalArgumentException|"Value out of range for int: 1.0E300"
+a-tail-hugedbl THROW java.lang.IllegalArgumentException|"Value out of range for long: 1.0E300"
+a-tail-nan 0
+a-make-huge THROW java.lang.ArithmeticException|"integer overflow"
+a-setint-huge THROW java.lang.ArithmeticException|"integer overflow"
+a-into-huge THROW java.lang.ArithmeticException|"integer overflow"
+a-vo-huge THROW java.lang.ArithmeticException|"integer overflow"
+a-setlong-huge THROW java.lang.IllegalArgumentException|"Value out of range for long: 1.0E300"
+a-long-maxdbl 9223372036854775807
+b-long-huge (9223372036854775807)
+b-int-hugedbl (2147483647)
+b-short-wrap (-25536)
+b-int-wrap (-1294967296)
+b-float-inf (##Inf)
+b-bool-nil THROW java.lang.NullPointerException|"Cannot invoke \"java.lang.Boolean.booleanValue()\" because the return value of \"clojure.lang.ISeq.first()\" is null"
+b-double-nil THROW java.lang.NullPointerException|"Cannot invoke \"java.lang.Number.doubleValue()\" because the return value of \"clojure.lang.ISeq.first()\" is null"
+b-int-bool THROW java.lang.ClassCastException|"class java.lang.Boolean cannot be cast to class java.lang.Number (java.lang.Boolean and java.lang.Number are in module java.base of loader 'bootstrap')"
+b-long-str THROW java.lang.ClassCastException|"class java.lang.String cannot be cast to class java.lang.Number (java.lang.String and java.lang.Number are in module java.base of loader 'bootstrap')"
+b-byte-neg (-1 127)
+d-int-dblinit (2 2)
+d-int-strinit THROW java.lang.ClassCastException|"class java.lang.Character cannot be cast to class java.lang.Number (java.lang.Character and java.lang.Number are in module java.base of loader 'bootstrap')"
+d-int-nilinit (0 0)
+d-long-dblinit (1 1)
+d-bool-nilinit (false false)
+d-int-boolinit THROW java.lang.IllegalArgumentException|"Don't know how to create ISeq from: java.lang.Boolean"
+e-tail-int-long THROW java.lang.IllegalArgumentException|"argument type mismatch"
+e-tail-long-long (5)
+e-tail-int-int (5)
+e-direct-int-huge THROW java.lang.ArithmeticException|"integer overflow"
+e-direct-float-huge [##Inf (##Inf)]
+e-to-nil-ident true
+e-short-huge (-1)
+e-byte-huge (-1)
+e-char-nil THROW java.lang.NullPointerException|"Cannot invoke \"java.lang.Character.charValue()\" because the return value of \"clojure.lang.ISeq.first()\" is null"
+e-aset-nil-multi THROW java.lang.NullPointerException|"Cannot load from int array because \"xs\" is null"
+e-setint-vec THROW java.lang.IllegalArgumentException|"Argument is not an array"
+e-setint-nilarr THROW java.lang.NullPointerException|"nil"
+f-vo-ifn true
+f-vo-invoke 20
+f-vo-assoc true
+f-vo-coll true
+f-vo-seq false
+f-arr-assoc false
+f-arr-ifn false
+g-vo-fkey THROW java.lang.IllegalArgumentException|"Key must be integer"
+g-vo-skey THROW java.lang.IllegalArgumentException|"Key must be integer"
+g-vo-bigkey 20
+g-vo-hugekey THROW java.lang.IllegalArgumentException|"Value out of range for long: 9999999999999999999999"
+g-vo-strkey THROW java.lang.IllegalArgumentException|"Key must be integer"
+g-vo-nilkey THROW java.lang.IllegalArgumentException|"Key must be integer"
+g-vo-oobkey THROW java.lang.IndexOutOfBoundsException|"nil"
+g-vo-negkey THROW java.lang.IndexOutOfBoundsException|"nil"
+g-vo-arity2 THROW java.lang.AbstractMethodError|"Method clojure/core/Vec.invoke(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object; is abstract"
+g-vec-fkey THROW java.lang.IllegalArgumentException|"Key must be integer"
+g-vec-strkey THROW java.lang.IllegalArgumentException|"Key must be integer"
+g-vec-oob THROW java.lang.IndexOutOfBoundsException|"nil"
+g-vec-arity2 THROW clojure.lang.ArityException|"Wrong number of args (2) passed to: clojure.lang.PersistentVector"
+g-vec-nilkey THROW java.lang.IllegalArgumentException|"Key must be integer"
+g-nil-aget THROW java.lang.NullPointerException|"Cannot load from int array because \"xs\" is null"
+g-nil-alen THROW java.lang.NullPointerException|"Cannot read the array length because \"xs\" is null"
+g-nil-aset THROW java.lang.NullPointerException|"Cannot store to object array because \"xs\" is null"
+c-vo-meta "^{:a 1} [1 2]"
+c-vec-meta "^{:a 1} [1 2]"

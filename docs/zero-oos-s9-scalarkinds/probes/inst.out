@@ -1,0 +1,69 @@
+i-ms-day 1704067200000
+i-ms-offset 1704096000000
+i-ms-nozone 1704067200000
+i-ms-ym 1704067200000
+i-ms-year 1704067200000
+i-ms-nosecs 1704067200000
+i-ms-zonez 1704067200000
+i-ms-frac7 1704067200123
+i-ms-frac1 1704067200100
+i-ms-frac-round 1704067200999
+i-ms-leapsec 1704070800000
+i-ms-yearzone 1704067200000
+i-ms-monthzone 1704067200000
+i-ms-dayzone 1704060000000
+i-ms-negzone 1704087000000
+i-ms-leap 1709164800000
+i-ms-y2k 951782400000
+i-ms-pre -304819200000
+i-ms-pre-tz -304759784750
+i-ms-year1 -62135769600000
+i-ms-epoch 0
+i-ms-maxday 253402300799999
+i-ms-nil THROW java.lang.IllegalArgumentException|"No implementation of method: :inst-ms* of protocol: #'clojure.core/Inst found for class: nil"
+i-ms-str THROW java.lang.IllegalArgumentException|"No implementation of method: :inst-ms* of protocol: #'clojure.core/Inst found for class: java.lang.String"
+i-ms-int THROW java.lang.IllegalArgumentException|"No implementation of method: :inst-ms* of protocol: #'clojure.core/Inst found for class: java.lang.Long"
+i-ms-uuid THROW java.lang.IllegalArgumentException|"No implementation of method: :inst-ms* of protocol: #'clojure.core/Inst found for class: java.util.UUID"
+i-ms-vec THROW java.lang.IllegalArgumentException|"No implementation of method: :inst-ms* of protocol: #'clojure.core/Inst found for class: clojure.lang.PersistentVector"
+i-ms-arity0 THROW clojure.lang.ArityException|"Wrong number of args (0) passed to: clojure.core/inst-ms"
+i-ms-arity2 THROW clojure.lang.ArityException|"Wrong number of args (2) passed to: clojure.core/inst-ms"
+i-msm-arity0 THROW clojure.lang.Compiler$CompilerException|"Syntax error compiling inst-ms* at (/Users/hhu/workspace/clojure/.muse/worktrees/subagent-v2-01a17cea-a1d1-73c2-b863-91fc98e8705c-01a17f53-74d0-7172-8986-3d621bbf20f5/docs/zero-oos-s9-scalarkinds/probes/inst.clj:57:26)."
+i-msm-arity2 THROW clojure.lang.Compiler$CompilerException|"Syntax error compiling inst-ms* at (/Users/hhu/workspace/clojure/.muse/worktrees/subagent-v2-01a17cea-a1d1-73c2-b863-91fc98e8705c-01a17f53-74d0-7172-8986-3d621bbf20f5/docs/zero-oos-s9-scalarkinds/probes/inst.clj:58:26)."
+i-p-inst true
+i-p-nil false
+i-p-str false
+i-p-int false
+i-p-date true
+i-p-sql true
+i-p-jtime true
+i-p-cal false
+i-p-uuid false
+i-sat-jtime 0
+i-sat-eq ([true true] [false false] [false false] [false false] [false false] [true true])
+i-eq-parse true
+i-eq-zone true
+i-eq-str false
+i-eq-nil false
+i-hash-a -1034816116
+i-hash-b 0
+i-hash-c -123478087
+i-hash-eq true
+i-hash-map :hit
+i-cmp-eq 0
+i-cmp-lt -1
+i-cmp-gt 1
+i-cmp-neg -1
+i-cmp-str THROW java.lang.ClassCastException|"class java.lang.String cannot be cast to class java.util.Date (java.lang.String and java.util.Date are in module java.base of loader 'bootstrap')"
+i-cmp-uuid THROW java.lang.ClassCastException|"class java.util.UUID cannot be cast to class java.util.Date (java.util.UUID and java.util.Date are in module java.base of loader 'bootstrap')"
+i-pr-day "#inst \"2024-01-01T00:00:00.000-00:00\""
+i-pr-frac "#inst \"2024-01-01T00:00:00.123-00:00\""
+i-pr-pre "#inst \"1960-05-05T00:00:00.000-00:00\""
+i-pr-year1 "#inst \"0001-01-01T00:00:00.000-00:00\""
+i-pr-offset "#inst \"2024-01-01T08:00:00.000-00:00\""
+i-print-day "#inst \"2024-01-01T00:00:00.000-00:00\""
+i-str-day "Mon Jan 01 00:00:00 UTC 2024"
+i-str-pre "Thu May 05 16:30:15 UTC 1960"
+i-pr-roundtrip true
+i-class java.util.Date
+i-ext-str [42 true 1704067200000]
+i-ext-deftype [7 true]

@@ -402,12 +402,12 @@ fn multi_custom_default() {
 
 #[test]
 fn multi_options_rejected() {
-    // Only `:default` is supported (`:hierarchy` needs the
-    // fenced `derive` / `isa?` follow-up); options come in pairs.
+    // `:default` and `:hierarchy` are supported (S13);
+    // anything else fails; options come in pairs.
     let mut eval = boot();
     assert_eq!(
         uncaught(&mut eval, "(defmulti hm (fn [x] x) :hierarchy (quote {}))"),
-        "java.lang.IllegalArgumentException | Unsupported defmulti option: :hierarchy"
+        "java.lang.ClassCastException | class clojure.lang.PersistentArrayMap cannot be cast to class clojure.lang.IRef (clojure.lang.PersistentArrayMap and clojure.lang.IRef are in unnamed module of loader 'app')"
     );
     assert_eq!(
         uncaught(&mut eval, "(defmulti om (fn [x] x) :bogus 1)"),
@@ -432,7 +432,10 @@ fn multi_multifn_native_guards() {
     // passes one).
     let mut eval = boot();
     assert_eq!(
-        uncaught(&mut eval, "(clojure.core/__multifn* 5 (fn [x] x) :default)"),
+        uncaught(
+            &mut eval,
+            "(clojure.core/__multifn* 5 (fn [x] x) :default nil false)"
+        ),
         "java.lang.ClassCastException | class java.lang.Long cannot be cast to class java.lang.String (java.lang.Long and java.lang.String are in module java.base of loader 'bootstrap')"
     );
 }

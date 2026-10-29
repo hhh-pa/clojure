@@ -1,0 +1,4 @@
+n-negmc -0.13M <java.math.BigDecimal>
+n-unegmc -0.13M <java.math.BigDecimal>
+n-negmc10 -5M <java.math.BigDecimal>
+n-unegmc10 -5M <java.math.BigDecimal>

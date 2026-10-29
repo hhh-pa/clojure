@@ -1,0 +1,15 @@
+g-shortrat -1 <java.lang.Short>
+g-shortratneg 0 <java.lang.Short>
+g-byterat -1 <java.lang.Byte>
+g-intbighuge THROW java.lang.IllegalArgumentException|"Value out of range for long: 18446744073709551616"
+g-intbighugneg THROW java.lang.IllegalArgumentException|"Value out of range for long: -18446744073709551617"
+g-intrathuge THROW java.lang.IllegalArgumentException|"Value out of range for long: 18446744073709551616"
+g-intdechuge THROW java.lang.IllegalArgumentException|"Value out of range for long: 1.0E19"
+g-mulnil nil
+g-andnot0 THROW clojure.lang.ArityException|"Wrong number of args (0) passed to: clojure.core/bit-and-not"
+g-andnot1 THROW clojure.lang.ArityException|"Wrong number of args (1) passed to: clojure.core/bit-and-not"
+g-andnot4 4 <java.lang.Long>
+g-or1 THROW clojure.lang.ArityException|"Wrong number of args (1) passed to: clojure.core/bit-or"
+g-xor1 THROW clojure.lang.ArityException|"Wrong number of args (1) passed to: clojure.core/bit-xor"
+g-order THROW java.lang.IllegalArgumentException|"bit operation not supported for: class java.lang.String"
+g-order2 THROW java.lang.IllegalArgumentException|"bit operation not supported for: class java.lang.Double"

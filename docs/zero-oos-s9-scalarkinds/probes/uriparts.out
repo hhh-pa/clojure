@@ -1,0 +1,29 @@
+c-emptyauth ["http" nil nil nil -1 "/x" nil nil false "///x"]
+c-noauth ["http" nil nil nil -1 "/x" nil nil false "/x"]
+c-emptyport ["http" "h:" nil "h" -1 "/x" nil nil false "//h:/x"]
+c-negport ["http" "h:-1" nil nil -1 "/x" nil nil false "//h:-1/x"]
+c-badport ["http" "h:8x" nil nil -1 "/x" nil nil false "//h:8x/x"]
+c-hugeport ["http" "h:99999999999" nil nil -1 "/x" nil nil false "//h:99999999999/x"]
+c-ipv6 ["http" "[::1]" nil "[::1]" -1 "/x" nil nil false "//[::1]/x"]
+c-upper ["HTTP" "H" nil "H" -1 "/X" nil nil false "//H/X"]
+c-opaquefrag ["mailto" nil nil nil -1 nil nil "f" true "a@b.c"]
+c-empty [nil nil nil nil -1 "" nil nil false ""]
+c-query [nil nil nil nil -1 "" "q" nil false "?q"]
+c-frag [nil nil nil nil -1 "" nil "f" false ""]
+c-nonascii ["http" "h" nil "h" -1 "/é" nil nil false "//h/é"]
+c-relscheme ["http" nil nil nil -1 nil nil nil true "a"]
+c-schemechars ["s+1.x-2" nil nil nil -1 nil nil nil true "y"]
+c-user ["http" "u@h" "u" "h" -1 "/x" nil nil false "//u@h/x"]
+c-dots ["https" "h" nil "h" -1 "/a/b/../c" nil nil false "//h/a/b/../c"]
+c-escape ["http" "h" nil "h" -1 "/a/b" nil nil false "//h/a/b"]
+c-scope ["http" "[fe80::1%eth0]" nil "[fe80::1%eth0]" -1 "/x" nil nil false "//[fe80::1%eth0]/x"]
+c-regcolon ["http" "a:b:c" nil nil -1 "/x" nil nil false "//a:b:c/x"]
+c-eq-negport false
+c-eq-emptyport true
+c-eq-badport-self true
+c-hash-negport 293450965
+c-hash-emptyport -233510070
+c-hash-badport 293451377
+c-del THROW java.net.URISyntaxException|"Illegal character in path at index 10: http://h/ab"
+c-c1 THROW java.net.URISyntaxException|"Illegal character in path at index 10: http://h/ab"
+c-nbsp THROW java.net.URISyntaxException|"Illegal character in path at index 10: http://h/a b"

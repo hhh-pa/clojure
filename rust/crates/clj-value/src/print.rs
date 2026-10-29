@@ -310,9 +310,9 @@ fn print_scalars(v: &Value, opts: &PrintOpts, level: Option<i64>, out: &mut Stri
         }
         Value::Str(s) => print_string(s, opts.readably, out),
         Value::Char(c) => print_char(*c, opts.readably, out),
-        Value::Symbol(s) => write!(out, "{s}").unwrap(),
-        Value::Keyword(k) => write!(out, "{k}").unwrap(),
+        Value::Symbol(_) | Value::Keyword(_) => print_named(v, out),
         Value::Regex(pattern) => print_regex(pattern, out),
+        Value::Uuid(_) | Value::Instant(_) | Value::Uri(_) => print_scalar(v, opts, out),
         Value::List(l) => {
             print_sequential(
                 "(",
@@ -336,6 +336,16 @@ fn print_scalars(v: &Value, opts: &PrintOpts, level: Option<i64>, out: &mut Stri
             );
         }
         other => print_more(other, opts, level, out),
+    }
+}
+
+/// Symbols and keywords print bare. Chained so each match stays
+/// under the complexity gate.
+fn print_named(v: &Value, out: &mut String) {
+    match v {
+        Value::Symbol(s) => write!(out, "{s}").unwrap(),
+        Value::Keyword(k) => write!(out, "{k}").unwrap(),
+        _ => unreachable!("named gate"),
     }
 }
 
@@ -366,6 +376,31 @@ fn print_tower(v: &Value, opts: &PrintOpts, out: &mut String) {
                 write!(out, "{}/{}", r.numer(), r.denom()).unwrap();
             }
         }
+    }
+}
+
+/// Print an S9 scalar (both `readably` modes — the JVM
+/// print-methods are unconditional): `#uuid "<canon>"`,
+/// `#inst "<UTC>-00:00"`, `#object[java.net.URI 0x<id> "<text>"]`
+/// (quoted under `pr`, bare under `print`).
+fn print_scalar(v: &Value, opts: &PrintOpts, out: &mut String) {
+    match v {
+        Value::Uuid(u) => {
+            out.push_str("#uuid \"");
+            out.push_str(&u.to_canonical());
+            out.push('"');
+        }
+        Value::Instant(i) => {
+            out.push_str("#inst \"");
+            out.push_str(&i.to_rfc3339());
+            out.push_str("-00:00\"");
+        }
+        Value::Uri(u) => {
+            write!(out, "#object[java.net.URI 0x{:x} ", u.id()).unwrap();
+            print_string(u.text(), opts.readably, out);
+            out.push(']');
+        }
+        _ => unreachable!("caller passes scalars only"),
     }
 }
 
@@ -557,9 +592,33 @@ fn print_rest(v: &Value, opts: &PrintOpts, level: Option<i64>, out: &mut String)
             .unwrap();
         }
         Value::Extension(e) => print_extension_body(e.as_ref(), opts, level, out),
+        // Primitive vectors print exactly like vectors (S15 oracle
+        // `f-ctor` — length/level/meta ride the shared path).
+        Value::PrimitiveVector(p) => {
+            let items = p.items();
+            let refs: Vec<&Value> = items.iter().collect();
+            print_sequential("[", refs, "]", " ", opts, level, out);
+        }
+        // Arrays print the unreadable `#object` shape with the
+        // descriptor quoted in pr mode only (S15 oracles `d-pr-*`,
+        // `d-print-str-obj`).
+        Value::Array(a) => print_array(a, opts.readably, out),
         // All other variants are handled by `print_scalars`/`print_more`
         // (the single caller partitions the variants).
         _ => unreachable!("print partition"),
+    }
+}
+
+/// The unreadable array shape: `#object["{desc}" 0x{id} "{desc}@{id}"]`
+/// readably (tag and rep both quoted — S15 oracle `d-pr-int`),
+/// both fields bare otherwise (oracle `d-print-str-obj`).
+fn print_array(a: &crate::Array, readably: bool, out: &mut String) {
+    let desc = a.descriptor();
+    let id = a.id();
+    if readably {
+        write!(out, "#object[\"{desc}\" 0x{id:x} \"{desc}@{id:x}\"]").unwrap();
+    } else {
+        write!(out, "#object[{desc} 0x{id:x} {desc}@{id:x}]").unwrap();
     }
 }
 
@@ -981,10 +1040,23 @@ pub fn java_debug(v: &Value) -> String {
         Value::Symbol(s) => s.to_string(),
         Value::Keyword(k) => k.to_string(),
         Value::Regex(pattern) => pattern.to_string(),
+        // S9 `toString`s: UUID/URI bare, instants as `Date.toString`.
+        Value::Uuid(_) | Value::Instant(_) | Value::Uri(_) => scalar_debug(v),
         Value::Var(v) => format!("#'{}", v.sym),
         Value::Unbound(u) => format!("Unbound: #'{}", u.sym),
         Value::Throwable(t) => java_debug_throwable(t),
         other => java_debug_rest(other),
+    }
+}
+
+/// S9 scalar `toString`s (split from [`java_debug`] for the
+/// complexity budget).
+fn scalar_debug(v: &Value) -> String {
+    match v {
+        Value::Uuid(u) => u.to_canonical(),
+        Value::Instant(i) => i.to_date_string(),
+        Value::Uri(u) => u.text().to_owned(),
+        _ => unreachable!("caller passes scalars only"),
     }
 }
 
@@ -1021,8 +1093,12 @@ fn java_debug_rest(v: &Value) -> String {
         Value::MultiFn(m) => crate::multifn_str(&m.name),
         // `Class.toString`: `class ` (or `interface `) plus the name.
         Value::Class(c) => class_java_debug(c),
+        // Arrays render `toString` (`{desc}@{id}` — S15 oracle
+        // `d-str-int`).
+        Value::Array(a) => format!("{}@{:x}", a.descriptor(), a.id()),
         Value::List(_)
         | Value::Vector(_)
+        | Value::PrimitiveVector(_)
         | Value::MapEntry { .. }
         | Value::Map(_)
         | Value::Set(_)
@@ -1594,6 +1670,7 @@ mod tests {
             def: d,
             content: crate::new_map(),
             meta: None,
+            proxy_map: None,
         })));
         let s = java_debug(&inst);
         assert!(
@@ -1614,6 +1691,7 @@ mod tests {
             default: Value::Nil,
             methods: crate::new_map(),
             prefers: crate::new_map(),
+            hierarchy: None,
         }));
         assert_eq!(java_debug(&mf), crate::multifn_str("m"));
     }
@@ -1803,6 +1881,32 @@ mod tests {
         // Defensive arm: the single caller partitions the variants,
         // so scalars never arrive here (only a dispatch bug could).
         let _ = super::java_debug_rest(&Value::Nil);
+    }
+
+    /// `print_named` rejects non-named values (the caller
+    /// dispatches on kind first — the panic is the contract).
+    #[test]
+    #[should_panic(expected = "named gate")]
+    fn print_named_rejects_non_named() {
+        let mut out = String::new();
+        super::print_named(&Value::Nil, &mut out);
+    }
+
+    /// `print_scalar` rejects non-scalars (the caller dispatches
+    /// on kind first — the panic is the contract).
+    #[test]
+    #[should_panic(expected = "caller passes scalars only")]
+    fn print_scalar_rejects_non_scalar() {
+        let mut out = String::new();
+        super::print_scalar(&Value::Nil, &PrintOpts::pr(), &mut out);
+    }
+
+    /// `scalar_debug` rejects non-scalars (the caller dispatches
+    /// on kind first — the panic is the contract).
+    #[test]
+    #[should_panic(expected = "caller passes scalars only")]
+    fn scalar_debug_rejects_non_scalar() {
+        let _ = super::scalar_debug(&Value::Nil);
     }
 
     fn dup(v: &Value) -> String {
@@ -2029,6 +2133,7 @@ mod tests {
             def: rdef,
             content,
             meta: None,
+            proxy_map: None,
         })));
         assert_eq!(dup(&rec), "#user.RP[1, 2]");
     }
@@ -2057,6 +2162,7 @@ mod tests {
                 .insert(Value::Keyword(Keyword::new(None, "y")), Value::Int(2))
                 .insert(Value::Keyword(Keyword::new(None, "z")), Value::Int(9)),
             meta: None,
+            proxy_map: None,
         })));
         assert_eq!(dup(&one), "#user.RP[1, 2, 9]");
         let two = Value::HostType(Arc::new(crate::HostVal::Inst(crate::HostInst {
@@ -2067,6 +2173,7 @@ mod tests {
                 .insert(Value::Keyword(Keyword::new(None, "z")), Value::Int(8))
                 .insert(Value::Keyword(Keyword::new(None, "w")), Value::Int(9)),
             meta: None,
+            proxy_map: None,
         })));
         assert_eq!(dup(&two), "#user.RP[1, 2, 8, 9]");
     }
@@ -2124,6 +2231,7 @@ mod tests {
             def,
             content: crate::new_map(),
             meta: None,
+            proxy_map: None,
         })));
         assert_eq!(pr_to_string(&inst, &dup_opts), pr_to_string(&inst, &plain));
         // A dupable collection holding an undupable child: the child
@@ -2221,6 +2329,7 @@ mod tests {
             def,
             content: crate::new_map(),
             meta: None,
+            proxy_map: None,
         })));
         let mut out = String::new();
         assert!(!super::print_dup_shape(
@@ -2254,6 +2363,7 @@ mod tests {
             content: crate::new_map()
                 .insert(Value::Keyword(Keyword::new(None, "x")), Value::Int(1)),
             meta: None,
+            proxy_map: None,
         })));
         assert_eq!(dup(&rec), "#user.RP[1]");
     }

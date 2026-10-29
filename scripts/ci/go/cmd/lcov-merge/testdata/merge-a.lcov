@@ -1,0 +1,16 @@
+SF:src/a.rs
+FN:3,main
+FNDA:10,main
+BRDA:5,0,0,-
+BRDA:5,0,1,4
+DA:3,10
+DA:4,0
+DA:5,4
+LF:3
+LH:2
+end_of_record
+SF:src/b.rs
+DA:1,3
+LF:1
+LH:1
+end_of_record

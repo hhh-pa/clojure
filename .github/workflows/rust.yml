@@ -83,7 +83,7 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
 
   test:
-    name: test (${{ matrix.os }})
+    name: test (${{ matrix.os }}, shard ${{ matrix.shard }}/4)
     runs-on: ${{ matrix.os }}
     permissions:
       contents: read # checkout
@@ -91,10 +91,15 @@ jobs:
     # No macOS leg: ordinary runs skip it (host capacity starves
     # macos-latest for hours); macOS tests run on v* tags via
     # rust-release.yml instead.
+    # Sharded 4 ways via nextest hash partitions (the suite outgrew a
+    # single leg at ~50min); nextest already runs the same suite in
+    # quality gates, so the runner change is proven safe. Ignored
+    # tests stay skipped here (cargo-test parity); gates run them.
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
+        shard: [1, 2, 3, 4]
     defaults:
       run:
         working-directory: rust
@@ -116,14 +121,25 @@ jobs:
         with:
           workspaces: rust
           save-if: 'true'
-      - run: cargo test --workspace --locked
+      # Pinned to the nextest the gate image provisions
+      # (rust-quality-gates nextestVersion).
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.148
+      - run: cargo nextest run --workspace --locked --partition hash:${{ matrix.shard }}/4 --no-fail-fast
 
   msrv:
-    name: msrv (1.85)
+    name: msrv (1.85, shard ${{ matrix.shard }}/4)
     runs-on: ubuntu-latest
     permissions:
       contents: read # checkout
       actions: write # cargo cache
+    # Sharded 4 ways like test above; the nextest binary is prebuilt
+    # (its own MSRV is irrelevant) and drives cargo 1.85.
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     defaults:
       run:
         working-directory: rust
@@ -136,11 +152,14 @@ jobs:
         with:
           workspaces: rust
           save-if: 'true'
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.148
       # S9A D2: LLVM-dependent compilation excluded (inkwell 0.10.0
       # declares no MSRV); the binary builds --no-default-features
       # so clj-aot never enters the unit graph.
-      - run: cargo test --locked -p clj-core -p clj-eval -p clj-reader -p clj-repl -p clj-rt -p clj-value
-      - run: cargo test --locked -p clojure-rs --no-default-features
+      - run: cargo nextest run --locked -p clj-core -p clj-eval -p clj-reader -p clj-repl -p clj-rt -p clj-value --partition hash:${{ matrix.shard }}/4 --no-fail-fast
+      - run: cargo nextest run --locked -p clojure-rs --no-default-features --partition hash:${{ matrix.shard }}/4 --no-fail-fast
 
   test-no-default:
     name: test unlinked (${{ matrix.os }})
@@ -240,10 +259,154 @@ jobs:
           java -Xmx2g -XX:+UseParallelGC -cp /tmp/tla-tools/tla2tools.jar tlc2.TLC \
             -workers auto -cleanup -config agent_queue.cfg agent_queue.tla
 
+  # The coverage suite outgrew a single leg (~60min), so it shards 4
+  # ways: each leg runs one nextest hash partition plus the canonical
+  # LCOV pipeline (--coverage-only skips the gates and the
+  # floor/patch enforcement), then the merge job below reunites the
+  # four partial LCOVs (lcov-merge sums counts) and enforces the
+  # 100% bars on the whole.
+  gates-shard:
+    name: quality gates shard (${{ matrix.shard }}/4)
+    runs-on: ubuntu-latest
+    timeout-minutes: 600
+    permissions:
+      contents: read # checkout
+      actions: write # shard artifact + GHA image cache
+      id-token: write # codecov OIDC upload auth (no stored token)
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    env:
+      # Image repo for the cached gate image (public, so pulls stay
+      # anonymous). Override with the GATE_IMAGE repo variable; pushes need
+      # the DOCKERHUB_USERNAME / DOCKERHUB_TOKEN secrets (a PAT with
+      # read+write on the namespace). Without the token the image builds
+      # local-only and the gates still run (fork PRs stay green, slower).
+      GATE_IMAGE: ${{ vars.GATE_IMAGE || 'hhhpa/clojure' }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/profile-runner
+        with:
+          cache-key: runner-profile-${{ runner.os }}-${{ hashFiles('.github/actions/profile-runner/**', 'scripts/ci/go/go.mod', 'scripts/ci/go/cmd/runner-profile/**', 'scripts/ci/go/internal/executil/**') }}
+      # Cache key: every input the image depends on. A hit pulls the image
+      # and runs the gates in it; a miss rebuilds, pushes, then runs.
+      - name: compute image key
+        run: |
+          key="${{ hashFiles('rust/Cargo.lock', 'scripts/ci/quality-gates.Dockerfile', 'scripts/ci/go/**') }}"
+          echo "GATE_KEY=$key" >> "$GITHUB_ENV"
+          echo "Gate image: $GATE_IMAGE:$key"
+      - name: pull gate image
+        id: pull
+        continue-on-error: true
+        run: docker pull "$GATE_IMAGE:$GATE_KEY"
+      - name: set up buildx
+        if: steps.pull.outcome == 'failure'
+        uses: docker/setup-buildx-action@v4
+      # `secrets` is unusable in `if:`, so probe it in `run:` and gate on
+      # the output instead.
+      - name: check docker hub credentials
+        id: creds
+        if: steps.pull.outcome == 'failure'
+        run: |
+          if [ -n "${{ secrets.DOCKERHUB_TOKEN }}" ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: docker hub login
+        if: steps.pull.outcome == 'failure' && steps.creds.outputs.available == 'true'
+        uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: build gate image
+        if: steps.pull.outcome == 'failure'
+        run: |
+          if [ -n "${{ secrets.DOCKERHUB_TOKEN }}" ]; then
+            docker buildx build --push --cache-from type=gha --cache-to type=gha,mode=max \
+              -t "$GATE_IMAGE:$GATE_KEY" -f scripts/ci/quality-gates.Dockerfile .
+          else
+            echo '::warning::DOCKERHUB_TOKEN not set; gate image stays local.'
+            docker buildx build --load --cache-from type=gha --cache-to type=gha,mode=max \
+              -t "$GATE_IMAGE:$GATE_KEY" -f scripts/ci/quality-gates.Dockerfile .
+          fi
+      # Go CI-tools: same binary cache as the merge job, but restore
+      # plus local build only — the merge job owns the save, so
+      # parallel shards never race it.
+      - name: restore ci-tools binaries
+        id: tools-bin-cache
+        uses: actions/cache/restore@v5
+        with:
+          path: ci-tools-bin
+          key: ci-tools-${{ runner.os }}-${{ hashFiles('scripts/ci/go/**') }}
+      - name: set up Go
+        if: steps.tools-bin-cache.outputs.cache-hit != 'true'
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: scripts/ci/go/go.mod
+          cache: false # stdlib-only module: nothing to cache but the build below
+      - name: cache Go build
+        if: steps.tools-bin-cache.outputs.cache-hit != 'true'
+        uses: actions/cache@v5
+        with:
+          path: ~/.cache/go-build
+          key: go-build-${{ runner.os }}-${{ hashFiles('scripts/ci/go/**') }}
+          restore-keys: |
+            go-build-${{ runner.os }}-
+      - name: test Go CI-tools
+        if: steps.tools-bin-cache.outputs.cache-hit != 'true'
+        working-directory: scripts/ci/go
+        run: |
+          test -z "$(gofmt -l .)"
+          go vet ./...
+          go test ./...
+          # Platform-tagged files never compile on Linux CI otherwise;
+          # build every CI OS.
+          GOOS=windows go build ./...
+          GOOS=darwin go build ./...
+      - name: build ci-tools binaries
+        id: build-tools
+        if: steps.tools-bin-cache.outputs.cache-hit != 'true'
+        run: |
+          rm -rf ci-tools-bin && mkdir -p ci-tools-bin
+          cd scripts/ci/go
+          for tool in coverage-floor coverage-patch coverage-summary geiger complexity lcov-merge rust-quality-gates; do
+            CGO_ENABLED=0 go build -o "$GITHUB_WORKSPACE/ci-tools-bin/$tool" ./cmd/$tool
+          done
+          ls "$GITHUB_WORKSPACE/ci-tools-bin"
+      - name: run coverage shard
+        run: docker run --rm -v "${{ github.workspace }}:/work" -v "${{ github.workspace }}/ci-tools-bin:/tools" -w /work "$GATE_IMAGE:$GATE_KEY" /tools/rust-quality-gates rust rust/target/llvm-cov --coverage-only nextest --partition hash:${{ matrix.shard }}/4 --run-ignored all --no-fail-fast
+      # The container runs as root; hand the report back so the upload
+      # below can read it.
+      - name: take ownership of shard report
+        if: always()
+        run: |
+          if [ -d rust/target/llvm-cov ]; then
+            sudo chown -R "$(id -u):$(id -g)" rust/target/llvm-cov
+          fi
+      - name: upload shard coverage
+        if: always() && hashFiles('rust/target/llvm-cov/lcov.info') != ''
+        uses: actions/upload-artifact@v6
+        with:
+          name: gates-shard-${{ matrix.shard }}
+          path: rust/target/llvm-cov/lcov.info
+          retention-days: 1
+      - name: upload test results to codecov
+        if: ${{ !cancelled() && hashFiles('rust/target/nextest/default/junit.xml') != '' }}
+        uses: codecov/codecov-action@v7
+        with:
+          use_oidc: true
+          files: rust/target/nextest/default/junit.xml
+          report_type: test_results
+          disable_search: true
+          fail_ci_if_error: false
+
   quality-gates:
     name: quality gates
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    needs: [gates-shard]
     permissions:
       contents: read # checkout
       actions: write # coverage artifact + GHA image cache
@@ -308,7 +471,8 @@ jobs:
       # entirely; a miss rebuilds (with the Go build cache warm) and
       # re-saves only after a successful build. The live invocations
       # below run ./ci-tools-bin (bind-mounted into the gate container
-      # where the gates need the provisioned image).
+      # where the gates need the provisioned image). This job owns the
+      # save; shards restore or build locally without saving.
       - name: restore ci-tools binaries
         id: tools-bin-cache
         uses: actions/cache/restore@v5
@@ -346,7 +510,7 @@ jobs:
         run: |
           rm -rf ci-tools-bin && mkdir -p ci-tools-bin
           cd scripts/ci/go
-          for tool in coverage-floor coverage-patch coverage-summary geiger complexity rust-quality-gates; do
+          for tool in coverage-floor coverage-patch coverage-summary geiger complexity lcov-merge rust-quality-gates; do
             CGO_ENABLED=0 go build -o "$GITHUB_WORKSPACE/ci-tools-bin/$tool" ./cmd/$tool
           done
           ls "$GITHUB_WORKSPACE/ci-tools-bin"
@@ -372,8 +536,19 @@ jobs:
           git diff --unified=0 FETCH_HEAD HEAD -- rust/ > patch.diff; code=$?
           if [ "$code" -gt 1 ]; then exit "$code"; fi
           wc -l patch.diff
+      - name: download shard coverage
+        uses: actions/download-artifact@v6
+        with:
+          pattern: gates-shard-*
+          path: shard-cov
       - name: run quality gates
-        run: docker run --rm -e PATCH_DIFF=/work/patch.diff -v "${{ github.workspace }}:/work" -v "${{ github.workspace }}/ci-tools-bin:/tools" -w /work "$GATE_IMAGE:$GATE_KEY" /tools/rust-quality-gates rust rust/target/llvm-cov nextest --run-ignored all --no-fail-fast
+        run: docker run --rm -v "${{ github.workspace }}:/work" -v "${{ github.workspace }}/ci-tools-bin:/tools" -w /work "$GATE_IMAGE:$GATE_KEY" /tools/rust-quality-gates rust --gates-only
+      - name: merge shard coverage
+        run: docker run --rm -v "${{ github.workspace }}:/work" -v "${{ github.workspace }}/ci-tools-bin:/tools" -w /work "$GATE_IMAGE:$GATE_KEY" /bin/sh -c '/tools/lcov-merge rust rust/target/llvm-cov/lcov.info shard-cov/*/lcov.info'
+      - name: enforce coverage floor
+        run: docker run --rm -v "${{ github.workspace }}:/work" -v "${{ github.workspace }}/ci-tools-bin:/tools" -w /work "$GATE_IMAGE:$GATE_KEY" /tools/coverage-floor rust/target/llvm-cov/lcov.info 100
+      - name: enforce patch coverage
+        run: docker run --rm -e PATCH_DIFF=/work/patch.diff -v "${{ github.workspace }}:/work" -v "${{ github.workspace }}/ci-tools-bin:/tools" -w /work "$GATE_IMAGE:$GATE_KEY" /tools/coverage-patch rust/target/llvm-cov/lcov.info /work/patch.diff 100
       # The container runs as root; hand the report back so later steps can
       # read it.
       - name: take ownership of coverage report
@@ -412,15 +587,8 @@ jobs:
           # stray files (it found 10); only the explicit file counts.
           disable_search: true
           fail_ci_if_error: false
-      - name: upload test results to codecov
-        if: ${{ !cancelled() && hashFiles('rust/target/nextest/default/junit.xml') != '' }}
-        uses: codecov/codecov-action@v7
-        with:
-          use_oidc: true
-          files: rust/target/nextest/default/junit.xml
-          report_type: test_results
-          disable_search: true
-          fail_ci_if_error: false
+      # Per-shard junits upload from the shard legs above; codecov
+      # merges test results server-side.
 
   go-tools-test:
     name: go ci-tools tests

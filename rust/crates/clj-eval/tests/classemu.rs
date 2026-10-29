@@ -3392,6 +3392,15 @@ fn bean_basics() {
         ),
         "(\":class\" \":count\")"
     );
+    // Proxies dispatch bean getters through the live fn-map cell
+    // (S14), like `__meth*` — never the baked table.
+    assert_eq!(
+        run(
+            &mut eval,
+            "(do (definterface IPGet (getVal [])) (:val (bean (proxy [Object IPGet] [] (getVal [] 42)))))"
+        ),
+        "42"
+    );
     assert_eq!(
         run(
             &mut eval,

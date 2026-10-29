@@ -1,0 +1,1 @@
+Usage: lcov-merge <workspace-dir> <out.lcov> <in1.lcov> [in2.lcov ...]

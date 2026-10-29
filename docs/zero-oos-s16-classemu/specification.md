@@ -723,8 +723,9 @@ host-only):
   a vector, lattice order — `m-cls-ifaces-order`; the
   JVM returns an array, the port a vector),
   `isInterface` (`m-cls-isiface-t/f`), `isArray`
-  (always `false` — no array classes until S15;
-  `m-cls-isarray`), `isInstance` (membership; `nil` arg
+  (always `false` — array classes have no values yet,
+  S15 follow-up §2.2; `m-cls-isarray`), `isInstance`
+  (membership; `nil` arg
   → `false`, `m-cls-isinstance-t/f/nil`),
   `isAssignableFrom` (lattice closure; non-class arg →
   short CCE, `m-cls-assign-nonclass`; `nil` arg → NPE
@@ -1243,24 +1244,29 @@ implementation itself. Cross-slice upgrades become a
 follow-up issue (filed by the implementer at land
 time), not S16 scope:
 
-- **S13 (hierarchy, peer, unlanded):** S16's lattice
+- **S13 (hierarchy, landed in wave2):** S16's lattice
   walk and S13's `isa?`/`parents` overlap. S16 vendors
-  its own visited-set walk (self-contained suites —
-  no peer imports); the follow-up unifies the two on
-  declaration-order bases (S13 sorts today) and
-  reconciles HostDef implicits (S13 encodes none;
-  §1.3's record/deftype lists are the JVM-exact input).
-  All 41 shared static rows agree as sets today.
-- **S14 (names — no branch exists):** if an S14
-  class-name slice appears, it owns display-name
+  its own visited-set walk; at the wave2 merge S13's
+  `class_of`/`hier_key` learned S16 class values (fold
+  by name through the shared lattice — all 41 shared
+  static rows re-verified agreeing as sets). The
+  follow-up unifies the two walks on declaration-order
+  bases (S13 sorts today) and reconciles HostDef
+  implicits (S13 encodes none; §1.3's record/deftype
+  lists are the JVM-exact input).
+- **S14 (names, landed in wave2):** proxy dispatch and
+  `proxy-name`/`get-proxy-class` read class values by
+  name (merged); `bean` getters dispatch through the
+  live proxy cell like `__meth*`. S14 owns display-name
   policy; S16's fn/reify display rules (§1.3) are the
   consumer input.
-- **S15 (arrays, peer, unlanded):** `isArray` answers
-  `false` unconditionally (`m-cls-isarray`); `bean`'s
-  `:bytes` is dropped (`b-bytes` oracle-only); the
-  `a-*` probes (18 rows) pin JVM array-class behavior
-  for S15's use. S15 flips `isArray` for array classes
-  and adds `:bytes`; S16 needs no changes.
+- **S15 (arrays, landed in wave2):** `isArray` still
+  answers `false` unconditionally (`m-cls-isarray` —
+  array classes have no values yet); `bean`'s `:bytes`
+  stays dropped (`b-bytes` oracle-only); the `a-*`
+  probes (18 rows) pin JVM array-class behavior. The
+  follow-up gives arrays class values and flips
+  `isArray`/adds `:bytes`; S16 needs no changes.
 - **Static surface** (`Integer/MAX_VALUE`,
   `Integer/parseInt`, `System/getProperties` —
   `i-static-field/call`, `m-docstring-oo`,

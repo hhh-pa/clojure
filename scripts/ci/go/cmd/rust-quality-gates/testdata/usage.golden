@@ -2,6 +2,8 @@ Rust quality gates (T1174): audit, deny, udeps, geiger, complexity, coverage.
 
 Usage: rust-quality-gates <workspace-dir> <report-dir> <cov-runner> [cov-args...]
        rust-quality-gates <workspace-dir> --provision-only
+       rust-quality-gates <workspace-dir> --gates-only
+       rust-quality-gates <workspace-dir> <report-dir> --coverage-only <cov-runner> [cov-args...]
   workspace-dir: Rust workspace root (Cargo.toml, Cargo.lock, deny.toml,
     .cargo/audit.toml, *-baseline.json)
   report-dir: where coverage reports land (lcov.info + html/)
@@ -11,6 +13,11 @@ Usage: rust-quality-gates <workspace-dir> <report-dir> <cov-runner> [cov-args...
   --provision-only: install every pinned tool plus the toolchains they
     need, then exit without running any gate. Used to bake the CI gate
     image (scripts/ci/quality-gates.Dockerfile).
+  --gates-only: run audit, deny, udeps, geiger, complexity, skip
+    coverage. The merge leg of a sharded coverage run.
+  --coverage-only: run only the coverage suite and write lcov.info,
+    skipping the gates and the floor/patch enforcement (those run on
+    the merged report). One leg of a sharded coverage run.
   NOTE: for nextest, OMIT the run subcommand. `cargo llvm-cov nextest`
   calls `cargo nextest run` internally, so a literal run would be treated
   as a test-name filter and the coverage run would silently execute only

@@ -1,0 +1,36 @@
+a-keys (":cause" ":data" ":trace" ":via")
+a-cause "boom"
+a-via-count 1
+a-via0-keys (":at" ":data" ":message" ":type")
+a-via0-type clojure.lang.ExceptionInfo
+a-via0-message "boom"
+a-via0-data {:a 1}
+a-via0-at [true 4 ["sym" "sym" "str" "int"]]
+a-trace-vec true
+a-trace-shape [true 4 ["sym" "sym" "str" "int"]]
+a-at-is-trace0 true
+a-trace-all-frames true
+b-cause "inner"
+b-via-count 2
+b-via-msgs ["outer" "inner"]
+b-via-types [clojure.lang.ExceptionInfo clojure.lang.ExceptionInfo]
+b-via-data [{:a 1} {:b 2}]
+b-at-is-trace0 false
+c-cause nil
+c-via0-keys (":at" ":data" ":type")
+c-via0-message nil
+d-via0-keys (":at" ":message" ":type")
+d-via0-type java.lang.IllegalArgumentException
+d-cause "bad"
+e-ste [true 4 ["sym" "sym" "str" "int"]]
+f-map-nonstr THROW java.lang.ClassCastException
+f-map-nil THROW java.lang.NullPointerException
+f-map-arity0 THROW clojure.lang.ArityException
+f-map-arity2 THROW clojure.lang.ArityException
+f-ste-nonstr THROW java.lang.ClassCastException
+f-ste-nil THROW java.lang.NullPointerException
+f-ste-arity0 THROW clojure.lang.ArityException
+g-map-nil java.lang.NullPointerException|"Cannot invoke \"java.lang.Throwable.getStackTrace()\" because the return value of \"clojure.core$identity.invokeStatic(Object)\" is null"
+g-ste-nil java.lang.NullPointerException|"Cannot invoke \"java.lang.StackTraceElement.getClassName()\" because \"o\" is null"
+g-map-cce java.lang.ClassCastException|"class java.lang.Long cannot be cast to class java.lang.Throwable (java.lang.Long and java.lang.Throwable are in module java.base of loader 'bootstrap')"
+g-ste-cce java.lang.ClassCastException|"class java.lang.String cannot be cast to class java.lang.StackTraceElement (java.lang.String and java.lang.StackTraceElement are in module java.base of loader 'bootstrap')"

@@ -81,6 +81,11 @@ pub fn compare(a: &Value, b: &Value) -> Result<Ordering, CompareError> {
             y.namespace(),
             y.name(),
         )),
+        // S9 scalars order within their kind (signed UUID words,
+        // instant millis, the JDK URI order's sign).
+        (Value::Uuid(x), Value::Uuid(y)) => Ok(x.cmp_uuid(y)),
+        (Value::Instant(x), Value::Instant(y)) => Ok(x.cmp_instant(y)),
+        (Value::Uri(x), Value::Uri(y)) => Ok(x.compare_uri(y).cmp(&0)),
         _ => Err(CompareError {
             left: type_name(a),
             right: type_name(b),
@@ -184,12 +189,14 @@ fn utf16_cmp(a: &str, b: &str) -> Ordering {
 
 /// Lexicographic element compare (element errors propagate, like the
 /// JVM's recursive `compareTo`).
-/// The items when `v` is a vector, subvector, or map entry (an
-/// entry is its 2 items — `None` otherwise).
+/// The items when `v` is a vector, subvector, map entry, or
+/// primitive vector (an entry is its 2 items — `None`
+/// otherwise).
 fn vector_items(v: &Value) -> Option<Vec<Value>> {
     match v {
         Value::Vector(x) => Some(x.iter().cloned().collect()),
         Value::MapEntry { key, val } => Some(vec![(**key).clone(), (**val).clone()]),
+        Value::PrimitiveVector(p) => Some(p.items()),
         Value::Extension(e) => e
             .as_any()
             .downcast_ref::<SubVectorValue>()
@@ -220,16 +227,20 @@ fn type_name(v: &Value) -> &'static str {
         Value::Char(_) => "Character",
         Value::Symbol(_) => "Symbol",
         Value::Keyword(_) => "Keyword",
+        Value::Uuid(_) | Value::Instant(_) | Value::Uri(_) => scalar_type_name(v),
         Value::Extension(e) => extension_type_name(e),
         _ => port_type_name(v).unwrap_or_else(|| ref_or_collection_type_name(v)),
     }
 }
 
-/// Scalar number type names (split from `type_name` for the
-/// complexity budget).
+/// Scalar number and S9 type names (split from `type_name` for
+/// the complexity budget).
 fn scalar_type_name(v: &Value) -> &'static str {
     match v {
         Value::Int(_) => "Long",
+        Value::Uuid(_) => "UUID",
+        Value::Instant(_) => "Instant",
+        Value::Uri(_) => "URI",
         _ => "Double",
     }
 }
@@ -295,8 +306,11 @@ fn host_type_name(h: &std::sync::Arc<crate::HostVal>) -> &'static str {
 fn collection_type_name(v: &Value) -> &'static str {
     match v {
         Value::List(_) => "List",
-        // Entries compare (and name) as vectors.
-        Value::Vector(_) | Value::MapEntry { .. } => "Vector",
+        // Entries and primitive vectors compare (and name) as vectors.
+        Value::Vector(_) | Value::MapEntry { .. } | Value::PrimitiveVector(_) => "Vector",
+        // Arrays name by descriptor (leaked, like extensions — compare
+        // errors are exceptional, never hot-loop values).
+        Value::Array(a) => Box::leak(a.descriptor().into_boxed_str()),
         Value::Map(_) => "Map",
         Value::Set(_) => "Set",
         Value::Regex(_) => "Regex",
@@ -536,6 +550,7 @@ mod tests {
             default: Value::Nil,
             methods: crate::new_map(),
             prefers: crate::new_map(),
+            hierarchy: None,
         }));
         assert_eq!(type_name(&mf), "clojure.lang.MultiFn");
         assert_eq!(
@@ -564,6 +579,7 @@ mod tests {
             def,
             content: crate::new_map(),
             meta: None,
+            proxy_map: None,
         })));
         assert_eq!(type_name(&v), "user.T");
         assert_eq!(

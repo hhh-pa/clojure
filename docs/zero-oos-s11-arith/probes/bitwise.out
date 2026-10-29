@@ -1,0 +1,98 @@
+ba-plain 2 <java.lang.Long>
+ba-neg 5 <java.lang.Long>
+ba-big THROW java.lang.IllegalArgumentException|"bit operation not supported for: class clojure.lang.BigInt"
+ba-big2 THROW java.lang.IllegalArgumentException|"bit operation not supported for: class clojure.lang.BigInt"
+ba-bigbig THROW java.lang.IllegalArgumentException|"bit operation not supported for: class clojure.lang.BigInt"
+ba-huge THROW java.lang.IllegalArgumentException|"bit operation not supported for: class clojure.lang.BigInt"
+ba-dbl THROW java.lang.IllegalArgumentException|"bit operation not supported for: class java.lang.Double"
+ba-dbl2 THROW java.lang.IllegalArgumentException|"bit operation not supported for: class java.lang.Double"
+ba-rat THROW java.lang.IllegalArgumentException|"bit operation not supported for: class clojure.lang.Ratio"
+ba-dec THROW java.lang.IllegalArgumentException|"bit operation not supported for: class java.math.BigDecimal"
+ba-nil THROW java.lang.NullPointerException|"Cannot invoke \"Object.getClass()\" because \"x\" is null"
+ba-str THROW java.lang.IllegalArgumentException|"bit operation not supported for: class java.lang.String"
+ba-ar1 THROW clojure.lang.ArityException|"Wrong number of args (1) passed to: clojure.core/bit-and"
+ba-ar3 0
+bo-plain 7 <java.lang.Long>
+bo-big THROW java.lang.IllegalArgumentException|"bit operation not supported for: class clojure.lang.BigInt"
+bo-big2 THROW java.lang.IllegalArgumentException|"bit operation not supported for: class clojure.lang.BigInt"
+bo-dbl THROW java.lang.IllegalArgumentException|"bit operation not supported for: class java.lang.Double"
+bo-rat THROW java.lang.IllegalArgumentException|"bit operation not supported for: class clojure.lang.Ratio"
+bo-dec THROW java.lang.IllegalArgumentException|"bit operation not supported for: class java.math.BigDecimal"
+bo-nil THROW java.lang.NullPointerException|"Cannot invoke \"Object.getClass()\" because \"x\" is null"
+bx-plain 5 <java.lang.Long>
+bx-big THROW java.lang.IllegalArgumentException|"bit operation not supported for: class clojure.lang.BigInt"
+bx-dbl THROW java.lang.IllegalArgumentException|"bit operation not supported for: class java.lang.Double"
+bx-nil THROW java.lang.NullPointerException|"Cannot invoke \"Object.getClass()\" because \"x\" is null"
+ban-plain 4 <java.lang.Long>
+ban-big THROW java.lang.IllegalArgumentException|"bit operation not supported for: class clojure.lang.BigInt"
+ban-dbl THROW java.lang.IllegalArgumentException|"bit operation not supported for: class java.lang.Double"
+ban-nil THROW java.lang.NullPointerException|"Cannot invoke \"Object.getClass()\" because \"x\" is null"
+bn-plain -7 <java.lang.Long>
+bn-neg 0 <java.lang.Long>
+bn-big THROW java.lang.IllegalArgumentException|"bit operation not supported for: class clojure.lang.BigInt"
+bn-negbig THROW java.lang.IllegalArgumentException|"bit operation not supported for: class clojure.lang.BigInt"
+bn-dbl THROW java.lang.IllegalArgumentException|"bit operation not supported for: class java.lang.Double"
+bn-rat THROW java.lang.IllegalArgumentException|"bit operation not supported for: class clojure.lang.Ratio"
+bn-dec THROW java.lang.IllegalArgumentException|"bit operation not supported for: class java.math.BigDecimal"
+bn-nil THROW java.lang.NullPointerException|"Cannot invoke \"Object.getClass()\" because \"x\" is null"
+bn-str THROW java.lang.IllegalArgumentException|"bit operation not supported for: class java.lang.String"
+bn-ar0 THROW clojure.lang.Compiler$CompilerException|"Syntax error compiling bit-not at (/Users/hhu/workspace/clojure/.muse/worktrees/subagent-v2-01a17cea-a1d1-73c2-b863-91fc98e8705c-01a17f53-7da6-78d1-a101-c3685abbfdb8/docs/zero-oos-s11-arith/probes/bitwise.clj:56:20)."
+bn-ar2 THROW clojure.lang.Compiler$CompilerException|"Syntax error compiling bit-not at (/Users/hhu/workspace/clojure/.muse/worktrees/subagent-v2-01a17cea-a1d1-73c2-b863-91fc98e8705c-01a17f53-7da6-78d1-a101-c3685abbfdb8/docs/zero-oos-s11-arith/probes/bitwise.clj:57:20)."
+bsl-plain 4 <java.lang.Long>
+bsl-mask 64 <java.lang.Long>
+bsl-negsh -9223372036854775808 <java.lang.Long>
+bsl-bigsh THROW java.lang.IllegalArgumentException|"bit operation not supported for: class clojure.lang.BigInt"
+bsl-big THROW java.lang.IllegalArgumentException|"bit operation not supported for: class clojure.lang.BigInt"
+bsl-negbig THROW java.lang.IllegalArgumentException|"bit operation not supported for: class clojure.lang.BigInt"
+bsl-bigcnt THROW java.lang.IllegalArgumentException|"bit operation not supported for: class clojure.lang.BigInt"
+bsl-dbl THROW java.lang.IllegalArgumentException|"bit operation not supported for: class java.lang.Double"
+bsl-dblcnt THROW java.lang.IllegalArgumentException|"bit operation not supported for: class java.lang.Double"
+bsl-rat THROW java.lang.IllegalArgumentException|"bit operation not supported for: class clojure.lang.Ratio"
+bsl-dec THROW java.lang.IllegalArgumentException|"bit operation not supported for: class java.math.BigDecimal"
+bsl-nil THROW java.lang.NullPointerException|"Cannot invoke \"Object.getClass()\" because \"x\" is null"
+bsl-str THROW java.lang.IllegalArgumentException|"bit operation not supported for: class java.lang.String"
+bsl-ar1 THROW clojure.lang.Compiler$CompilerException|"Syntax error compiling bit-shift-left at (/Users/hhu/workspace/clojure/.muse/worktrees/subagent-v2-01a17cea-a1d1-73c2-b863-91fc98e8705c-01a17f53-7da6-78d1-a101-c3685abbfdb8/docs/zero-oos-s11-arith/probes/bitwise.clj:72:21)."
+bsr-plain -2 <java.lang.Long>
+bsr-mask -1 <java.lang.Long>
+bsr-negsh 0 <java.lang.Long>
+bsr-big THROW java.lang.IllegalArgumentException|"bit operation not supported for: class clojure.lang.BigInt"
+bsr-negbig THROW java.lang.IllegalArgumentException|"bit operation not supported for: class clojure.lang.BigInt"
+bsr-dbl THROW java.lang.IllegalArgumentException|"bit operation not supported for: class java.lang.Double"
+bsr-dblcnt THROW java.lang.IllegalArgumentException|"bit operation not supported for: class java.lang.Double"
+bsr-nil THROW java.lang.NullPointerException|"Cannot invoke \"Object.getClass()\" because \"x\" is null"
+ubs-plain 9223372036854775807 <java.lang.Long>
+ubs-mask 288230376151711743 <java.lang.Long>
+ubs-negsh 1 <java.lang.Long>
+ubs-big THROW java.lang.IllegalArgumentException|"bit operation not supported for: class clojure.lang.BigInt"
+ubs-posbig THROW java.lang.IllegalArgumentException|"bit operation not supported for: class clojure.lang.BigInt"
+ubs-dbl THROW java.lang.IllegalArgumentException|"bit operation not supported for: class java.lang.Double"
+ubs-dblcnt THROW java.lang.IllegalArgumentException|"bit operation not supported for: class java.lang.Double"
+ubs-nil THROW java.lang.NullPointerException|"Cannot invoke \"Object.getClass()\" because \"x\" is null"
+bst-plain 8 <java.lang.Long>
+bst-big THROW java.lang.IllegalArgumentException|"bit operation not supported for: class clojure.lang.BigInt"
+bst-neg -9223372036854775808 <java.lang.Long>
+bst-bigneg THROW java.lang.IllegalArgumentException|"bit operation not supported for: class clojure.lang.BigInt"
+bst-hugeidx THROW java.lang.IllegalArgumentException|"bit operation not supported for: class clojure.lang.BigInt"
+bst-dbl THROW java.lang.IllegalArgumentException|"bit operation not supported for: class java.lang.Double"
+bst-dblidx THROW java.lang.IllegalArgumentException|"bit operation not supported for: class java.lang.Double"
+bst-rat THROW java.lang.IllegalArgumentException|"bit operation not supported for: class clojure.lang.Ratio"
+bst-nil THROW java.lang.NullPointerException|"Cannot invoke \"Object.getClass()\" because \"x\" is null"
+bcl-plain 5 <java.lang.Long>
+bcl-big THROW java.lang.IllegalArgumentException|"bit operation not supported for: class clojure.lang.BigInt"
+bcl-neg 0 <java.lang.Long>
+bcl-dbl THROW java.lang.IllegalArgumentException|"bit operation not supported for: class java.lang.Double"
+bcl-nil THROW java.lang.NullPointerException|"Cannot invoke \"Object.getClass()\" because \"x\" is null"
+bfl-plain 5 <java.lang.Long>
+bfl-big THROW java.lang.IllegalArgumentException|"bit operation not supported for: class clojure.lang.BigInt"
+bfl-neg -9223372036854775808 <java.lang.Long>
+bfl-dbl THROW java.lang.IllegalArgumentException|"bit operation not supported for: class java.lang.Double"
+bfl-nil THROW java.lang.NullPointerException|"Cannot invoke \"Object.getClass()\" because \"x\" is null"
+btt-plain true <java.lang.Boolean>
+btt-false false <java.lang.Boolean>
+btt-big THROW java.lang.IllegalArgumentException|"bit operation not supported for: class clojure.lang.BigInt"
+btt-neg false <java.lang.Boolean>
+btt-bigneg THROW java.lang.IllegalArgumentException|"bit operation not supported for: class clojure.lang.BigInt"
+btt-dbl THROW java.lang.IllegalArgumentException|"bit operation not supported for: class java.lang.Double"
+btt-dblidx THROW java.lang.IllegalArgumentException|"bit operation not supported for: class java.lang.Double"
+btt-nil THROW java.lang.NullPointerException|"Cannot invoke \"Object.getClass()\" because \"x\" is null"
+btt-ar1 THROW clojure.lang.ArityException|"Wrong number of args (1) passed to: clojure.core/bit-test"

@@ -86,7 +86,7 @@ pub(crate) fn as_protocol_map(v: &Value) -> Option<&Map> {
     }
 }
 
-fn not_a_protocol(v: &Value) -> NativeError {
+pub(crate) fn not_a_protocol(v: &Value) -> NativeError {
     NativeError::new(
         ThrowClass::IllegalArgumentException,
         format!("{} is not a protocol", pr_of(v)),
@@ -400,7 +400,7 @@ fn method_argcnts(sigs: &Map, method: &str) -> Vec<usize> {
 /// Split a protocol map into its dispatch parts (split for budget):
 /// validated maps always carry all three, so anything else is
 /// unreachable through the constructors.
-fn proto_parts(proto: &Map) -> (&Map, &Map, &str) {
+pub(crate) fn proto_parts(proto: &Map) -> (&Map, &Map, &str) {
     let sigs = match proto.get(&sigs_key()) {
         Some(Value::Map(m)) => m,
         _ => unreachable!("protocols always carry sigs"),
@@ -714,6 +714,7 @@ mod tests {
             def,
             content: new_map(),
             meta: None,
+            proxy_map: None,
         })));
         let m = map_with(vec![(iface_key(), inst)]);
         let _ = proto_interface(&m);

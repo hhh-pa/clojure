@@ -38,8 +38,9 @@ use std::sync::Arc;
 use num_traits::ToPrimitive;
 
 use crate::{
-    Agent, Atom, ClassVal, Delay, ExtensionValue, Future, HostInst, HostKind, HostVal, Keyword,
-    MultiFn, Promise, Symbol, Throwable, Transient, Unbound, Var, Volatile, host_eq,
+    Agent, Array, Atom, ClassVal, Delay, ExtensionValue, Future, HostInst, HostKind, HostVal,
+    Keyword, MultiFn, PrimitiveVector, Promise, Symbol, Throwable, Transient, Unbound, Var,
+    Volatile, host_eq,
 };
 
 /// Deterministic Fx hasher for maps/sets (rpds's default RandomState
@@ -829,6 +830,15 @@ pub enum Value {
     Set(Set),
     /// Regex pattern source (matching arrives with `re-*` in S5).
     Regex(Arc<str>),
+    /// A UUID (S9): 128 bits, `java.util.UUID` semantics.
+    Uuid(crate::Uuid),
+    /// An instant (S9): millis since the epoch, `java.util.Date`
+    /// semantics.
+    Instant(crate::Instant),
+    /// A URI (S9): validated string plus raw parts, `java.net.URI`
+    /// semantics. Boxed: the parsed parts are larger than the rest
+    /// of the payload, and `Value` travels in `Result` errors.
+    Uri(Box<crate::Uri>),
     /// `#tag form` under `:read-cond :preserve` (or suppressed reads).
     TaggedLiteral { tag: Symbol, form: Box<Value> },
     /// `#?` / `#?@` under `:read-cond :preserve`.
@@ -865,6 +875,12 @@ pub enum Value {
     /// A JVM class as a value (S16): named equality (same name is
     /// `=`), string hashing, no metadata, never seqable.
     Class(Arc<ClassVal>),
+    /// A Java array (S15): typed, fixed-length, mutable, identity
+    /// equality (see [`Array`]).
+    Array(Array),
+    /// A primitive vector (S15 `vector-of`): immutable, sequential
+    /// equality like vectors (see [`PrimitiveVector`]).
+    PrimitiveVector(PrimitiveVector),
 }
 
 /// Read metadata off a sequence extension value (borrowed).
@@ -961,7 +977,8 @@ impl Value {
     }
 
     /// The metadata map, if this value carries one (Symbol, List,
-    /// Vector, Map, Set, realized seqs — never Keyword).
+    /// Vector, Map, Set, primitive vectors, realized seqs — never
+    /// Keyword, never arrays).
     #[must_use]
     pub fn meta(&self) -> Option<&Map> {
         match self {
@@ -970,6 +987,7 @@ impl Value {
             Value::Vector(v) => v.meta(),
             Value::Map(m) => m.meta(),
             Value::Set(s) => s.meta(),
+            Value::PrimitiveVector(p) => p.meta(),
             Value::Extension(e) => seq_ext_meta(e),
             Value::HostType(h) => h.as_inst().and_then(|i| i.meta.as_ref()),
             _ => None,
@@ -986,6 +1004,7 @@ impl Value {
             Value::Vector(v) => Value::Vector(v.with_meta(meta)),
             Value::Map(m) => Value::Map(m.with_meta(meta)),
             Value::Set(s) => Value::Set(s.with_meta(meta)),
+            Value::PrimitiveVector(p) => Value::PrimitiveVector(p.with_meta(meta)),
             Value::Extension(e) => seq_ext_with_meta(&e, meta)
                 .map(Value::Extension)
                 .unwrap_or_else(|| Value::Extension(e)),
@@ -994,6 +1013,7 @@ impl Value {
                     def: i.def.clone(),
                     content: i.content.clone(),
                     meta,
+                    proxy_map: i.proxy_map.clone(),
                 }))),
                 HostVal::Def(_) => Value::HostType(h.clone()),
             },
@@ -1057,6 +1077,9 @@ fn port_pair_eq(a: &Value, b: &Value) -> Option<bool> {
                 _ => false,
             })
         }
+        // Arrays are identity-compared (same cell only — never
+        // sequential, never cross-type).
+        (Value::Array(x), Value::Array(y)) => Some(x.same_cell(y)),
         _ => None,
     }
 }
@@ -1168,6 +1191,11 @@ fn value_eq_rest(a: &Value, b: &Value) -> bool {
         // Classes compare by name alone (same name is `=`, whatever
         // the import path that produced the value).
         (Value::Class(a), Value::Class(b)) => a.name() == b.name(),
+        // S9 scalars: UUID by bits, instants by millis, URIs by
+        // the JDK `equals` (content only — never the print id).
+        (Value::Uuid(a), Value::Uuid(b)) => a == b,
+        (Value::Instant(a), Value::Instant(b)) => a == b,
+        (Value::Uri(a), Value::Uri(b)) => a.uri_eq(b),
         _ => false,
     }
 }
@@ -1332,6 +1360,15 @@ fn hash_value_mid<H: Hasher>(v: &Value, state: &mut H) {
             state.write_u8(8);
             v.hash(state);
         }
+        // Primitive vectors hash exactly like their item vector
+        // (they are `=` to it).
+        Value::PrimitiveVector(p) => {
+            state.write_u8(8);
+            state.write_usize(p.len());
+            for v in p.iter() {
+                v.hash(state);
+            }
+        }
         // A map entry hashes exactly like its 2-vector (they
         // are `=`, so the `Eq`/`Hash` contract requires it;
         // Oracle FX2 `hash-eq`, `distinct`, `frequencies`).
@@ -1439,9 +1476,43 @@ fn hash_value_rest<H: Hasher>(v: &Value, state: &mut H) {
             m.name.hash(state);
         }
         // Classes hash their name (`=`-equal classes share buckets).
+        // (Discriminant 28 is shared with `Instant` in
+        // `hash_value_scalars`, and 27 with `Uuid`/`Array` —
+        // mixing bytes, not unique tags; both sides keep their
+        // base discriminants so pinned `(hash …)` values do not
+        // move.)
         Value::Class(c) => {
             state.write_u8(28);
             c.name().hash(state);
+        }
+        // Arrays hash their identity (identity equality).
+        Value::Array(a) => {
+            state.write_u8(27);
+            state.write_u64(a.id());
+        }
+        // S9 scalars and anything else upstream-missed funnel to the
+        // scalar split (which rejects non-scalars the same way).
+        other => hash_value_scalars(other, state),
+    }
+}
+
+/// S9 scalar hashes (split from [`hash_value_rest`] for the
+/// complexity budget): UUID by bits, instants by millis, URIs by
+/// normalized content (consistent with `uri_eq`).
+fn hash_value_scalars<H: Hasher>(v: &Value, state: &mut H) {
+    match v {
+        Value::Uuid(u) => {
+            state.write_u8(27);
+            state.write_u64(u.hi);
+            state.write_u64(u.lo);
+        }
+        Value::Instant(i) => {
+            state.write_u8(28);
+            state.write_i64(i.millis);
+        }
+        Value::Uri(u) => {
+            state.write_u8(29);
+            u.hash_content(state);
         }
         // All other variants are handled upstream (the single
         // caller partitions the variants).
@@ -1603,7 +1674,12 @@ fn jvm_equiv(a: &Value, b: &Value) -> bool {
 fn is_collection(v: &Value) -> bool {
     matches!(
         v,
-        Value::List(_) | Value::Vector(_) | Value::MapEntry { .. } | Value::Map(_) | Value::Set(_)
+        Value::List(_)
+            | Value::Vector(_)
+            | Value::MapEntry { .. }
+            | Value::Map(_)
+            | Value::Set(_)
+            | Value::PrimitiveVector(_)
     ) || struct_content(v).is_some()
 }
 
@@ -1628,15 +1704,6 @@ fn seq_eq<'a>(
     count == a_len
 }
 
-fn seq_plain_equals<'a>(
-    a_len: usize,
-    a: impl Iterator<Item = &'a Value>,
-    b_len: usize,
-    b: impl Iterator<Item = &'a Value>,
-) -> bool {
-    seq_eq(a_len, a, b_len, b, plain_equals)
-}
-
 /// `pcequiv` with `c` the collection side: sequential `equiv` crosses
 /// `List`/`Vector`/`MapEntry` (an entry is its 2-vector); maps match
 /// same-size with equiv keys and values; sets match same-size with
@@ -1646,6 +1713,7 @@ fn coll_equiv(c: &Value, x: &Value) -> bool {
     match c {
         Value::List(items) => seq_coll_equiv(items.len(), items.iter(), x),
         Value::Vector(items) => seq_coll_equiv(items.len(), items.iter(), x),
+        Value::PrimitiveVector(p) => seq_coll_equiv(p.len(), p.iter(), x),
         Value::MapEntry { key, val } => {
             seq_coll_equiv(2, [key.as_ref(), val.as_ref()].into_iter(), x)
         }
@@ -1663,6 +1731,7 @@ fn seq_coll_equiv<'a>(len: usize, items: impl Iterator<Item = &'a Value>, x: &'a
     match x {
         Value::List(o) => seq_eq(len, items, o.len(), o.iter(), jvm_equiv),
         Value::Vector(o) => seq_eq(len, items, o.len(), o.iter(), jvm_equiv),
+        Value::PrimitiveVector(p) => seq_eq(len, items, p.len(), p.iter(), jvm_equiv),
         Value::MapEntry { key, val } => seq_eq(
             len,
             items,
@@ -1708,6 +1777,9 @@ fn seq_items(v: &Value) -> Option<Vec<Value>> {
         // A map entry compares sequentially as its 2-vector
         // (Oracle FX2 `eq`, `entry-vs-list`, `entry-vs-seq`).
         Value::MapEntry { key, val } => Some(vec![(**key).clone(), (**val).clone()]),
+        // Primitive vectors compare sequentially (cross-type too,
+        // like the JVM `Vec.equals`).
+        Value::PrimitiveVector(p) => Some(p.items()),
         Value::Extension(e) => {
             if let Some(s) = e.as_any().downcast_ref::<crate::RealizedSeq>() {
                 return Some(s.items());
@@ -1776,59 +1848,42 @@ fn plain_equals_rest(a: &Value, b: &Value) -> bool {
         (Value::Extension(a), Value::Extension(b)) => a.dyn_eq(&**b),
         (Value::Map(m), Value::Map(o)) => plain_equals_maps(m, o),
         (Value::Set(s), Value::Set(o)) => plain_equals_sets(s, o),
+        // S9 scalars: `.equals` is the `=` rule here too.
+        (Value::Uuid(a), Value::Uuid(b)) => a == b,
+        (Value::Instant(a), Value::Instant(b)) => a == b,
+        (Value::Uri(a), Value::Uri(b)) => a.uri_eq(b),
         // `.equals` is loose across List/Vector too (`doEquals` takes
         // the `java.util.List` branch; `ASeq.equals` accepts `List`;
-        // an entry is its 2-vector).
-        (Value::List(_) | Value::Vector(_) | Value::MapEntry { .. }, _)
-        | (_, Value::List(_) | Value::Vector(_) | Value::MapEntry { .. }) => plain_equals_seq(a, b),
+        // an entry is its 2-vector; primitive vectors join the
+        // family, like the JVM `Vec.equals`).
+        (
+            Value::List(_) | Value::Vector(_) | Value::MapEntry { .. } | Value::PrimitiveVector(_),
+            _,
+        )
+        | (
+            _,
+            Value::List(_) | Value::Vector(_) | Value::MapEntry { .. } | Value::PrimitiveVector(_),
+        ) => plain_equals_seq(a, b),
         _ => false,
     }
 }
 
+/// The `.equals` items of a sequential value (`None` otherwise).
+fn plain_seq_items(v: &Value) -> Option<Vec<Value>> {
+    match v {
+        Value::List(l) => Some(l.iter().cloned().collect()),
+        Value::Vector(v) => Some(v.iter().cloned().collect()),
+        Value::MapEntry { key, val } => Some(vec![(**key).clone(), (**val).clone()]),
+        Value::PrimitiveVector(p) => Some(p.items()),
+        _ => None,
+    }
+}
+
 fn plain_equals_seq(a: &Value, b: &Value) -> bool {
-    match (a, b) {
-        (Value::List(items), Value::List(o)) => {
-            seq_plain_equals(items.len(), items.iter(), o.len(), o.iter())
+    match (plain_seq_items(a), plain_seq_items(b)) {
+        (Some(x), Some(y)) => {
+            x.len() == y.len() && x.iter().zip(&y).all(|(u, v)| plain_equals(u, v))
         }
-        (Value::List(items), Value::Vector(o)) => {
-            seq_plain_equals(items.len(), items.iter(), o.len(), o.iter())
-        }
-        (Value::Vector(items), Value::List(o)) => {
-            seq_plain_equals(items.len(), items.iter(), o.len(), o.iter())
-        }
-        (Value::Vector(items), Value::Vector(o)) => {
-            seq_plain_equals(items.len(), items.iter(), o.len(), o.iter())
-        }
-        (Value::List(items), Value::MapEntry { key, val }) => seq_plain_equals(
-            items.len(),
-            items.iter(),
-            2,
-            [key.as_ref(), val.as_ref()].into_iter(),
-        ),
-        (Value::MapEntry { key, val }, Value::List(o)) => seq_plain_equals(
-            2,
-            [key.as_ref(), val.as_ref()].into_iter(),
-            o.len(),
-            o.iter(),
-        ),
-        (Value::Vector(items), Value::MapEntry { key, val }) => seq_plain_equals(
-            items.len(),
-            items.iter(),
-            2,
-            [key.as_ref(), val.as_ref()].into_iter(),
-        ),
-        (Value::MapEntry { key, val }, Value::Vector(o)) => seq_plain_equals(
-            2,
-            [key.as_ref(), val.as_ref()].into_iter(),
-            o.len(),
-            o.iter(),
-        ),
-        (Value::MapEntry { key, val }, Value::MapEntry { key: k2, val: v2 }) => seq_plain_equals(
-            2,
-            [key.as_ref(), val.as_ref()].into_iter(),
-            2,
-            [k2.as_ref(), v2.as_ref()].into_iter(),
-        ),
         _ => false,
     }
 }
@@ -2423,6 +2478,7 @@ mod tests {
             def,
             content: content.clone(),
             meta: None,
+            proxy_map: None,
         })));
         assert!(super::coll_equiv(&sm, &Value::Map(content)));
         assert!(!super::coll_equiv(&sm, &Value::Int(1)));
@@ -2533,6 +2589,7 @@ mod tests {
             def: def.clone(),
             content: new_map(),
             meta: None,
+            proxy_map: None,
         })))
     }
 
@@ -2568,6 +2625,7 @@ mod tests {
             default: Value::Keyword(Keyword::new(None, "default")),
             methods: new_map(),
             prefers: new_map(),
+            hierarchy: None,
         }))
     }
 

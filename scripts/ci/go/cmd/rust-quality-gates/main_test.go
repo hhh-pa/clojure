@@ -14,7 +14,7 @@ import (
 
 func TestUsageGolden(t *testing.T) {
 	bin := cmdtest.Build(t, ".")
-	for _, args := range [][]string{nil, {"--help"}, {"onlyws"}} {
+	for _, args := range [][]string{nil, {"--help"}, {"onlyws"}, {"ws", "report", "--coverage-only"}, {"ws", "--gates-only", "extra"}} {
 		out, stderr, code := cmdtest.RunBothEnv(t, bin, "testdata", nil, args...)
 		if code != 2 {
 			t.Fatalf("%v: exit = %d, want 2", args, code)
@@ -317,6 +317,87 @@ func TestProvisionOnlyGolden(t *testing.T) {
 	got := normalize(stdout, ws, "", bin, sysrootOf(env), stubsDir(t))
 	if want := cmdtest.Golden(t, "testdata/provision-only.golden"); got != want {
 		t.Fatalf("stdout mismatch:\n got: %q\nwant: %q", got, want)
+	}
+}
+
+// TestGatesOnly runs the gates without coverage: the coverage runner
+// never executes and no lcov.info lands in the report dir.
+func TestGatesOnly(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("stub tools need sh")
+	}
+	bin := buildTools(t)
+	ws, report, env := stubWorld(t, nil)
+	gates := filepath.Join(bin, "rust-quality-gates")
+	stdout, stderr, code := cmdtest.RunBothEnv(t, gates, ".", env, ws, "--gates-only")
+	if code != 0 {
+		t.Fatalf("exit = %d\n%s\n%s", code, stdout, stderr)
+	}
+	if stderr != "" {
+		t.Fatalf("unexpected stderr:\n%s", stderr)
+	}
+	if strings.Contains(stdout, "coverage reports") {
+		t.Fatalf("coverage ran under --gates-only:\n%s", stdout)
+	}
+	if _, err := os.Stat(filepath.Join(report, "lcov.info")); !os.IsNotExist(err) {
+		t.Fatalf("lcov.info written under --gates-only")
+	}
+	got := normalize(stdout, ws, report, bin, sysrootOf(env), stubsDir(t))
+	if want := cmdtest.Golden(t, "testdata/gates-only.golden"); got != want {
+		t.Fatalf("stdout mismatch:\n got: %q\nwant: %q", got, want)
+	}
+}
+
+// TestCoverageOnly runs coverage without the gates: a stubbed audit
+// failure (fatal on the full path) is ignored, lcov.info lands, and
+// the floor never runs.
+func TestCoverageOnly(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("stub tools need sh")
+	}
+	bin := buildTools(t)
+	ws, report, env := stubWorld(t, []string{"STUB_AUDIT_FAIL=1"})
+	gates := filepath.Join(bin, "rust-quality-gates")
+	runner := []string{"--coverage-only", "nextest", "--run-ignored", "all", "--no-fail-fast"}
+	args := append([]string{ws, report}, runner...)
+	stdout, stderr, code := cmdtest.RunBothEnv(t, gates, ".", env, args...)
+	if code != 0 {
+		t.Fatalf("exit = %d\n%s\n%s", code, stdout, stderr)
+	}
+	if stderr != "" {
+		t.Fatalf("unexpected stderr:\n%s", stderr)
+	}
+	for _, marker := range []string{"cargo audit", "cargo deny", "udeps", "geiger", "complexity ratchet"} {
+		if strings.Contains(stdout, marker) {
+			t.Fatalf("gate %q ran under --coverage-only:\n%s", marker, stdout)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(report, "lcov.info")); err != nil {
+		t.Fatalf("lcov.info missing: %v", err)
+	}
+	if strings.Contains(stdout, "report --html") {
+		t.Fatalf("cargo html report ran under --coverage-only:\n%s", stdout)
+	}
+	got := normalize(stdout, ws, report, bin, sysrootOf(env), stubsDir(t))
+	if want := cmdtest.Golden(t, "testdata/coverage-only.golden"); got != want {
+		t.Fatalf("stdout mismatch:\n got: %q\nwant: %q", got, want)
+	}
+}
+
+// TestCoverageOnlyRefusesRun keeps the nextest `run` refusal on the
+// sharded path: the flag is stripped before the runner is checked.
+func TestCoverageOnlyRefusesRun(t *testing.T) {
+	bin := cmdtest.Build(t, ".")
+	stdout, stderr, code := cmdtest.RunBothEnv(t, bin, "testdata", nil,
+		"ws", "report", "--coverage-only", "nextest", "run")
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1", code)
+	}
+	if stdout != "" {
+		t.Fatalf("stdout should be empty, got %q", stdout)
+	}
+	if want := cmdtest.Golden(t, "testdata/refusal.stderr.golden"); stderr != want {
+		t.Fatalf("stderr mismatch:\n got: %q\nwant: %q", stderr, want)
 	}
 }
 

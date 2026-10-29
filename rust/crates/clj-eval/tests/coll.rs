@@ -2540,3 +2540,36 @@ fn sorted_gap_rows() {
             .starts_with("java.lang.ClassCastException")
     );
 }
+
+/// `find` over a primitive vector reads the `[k v]` entry at
+/// the truncated index, exactly like vectors (missing and
+/// non-integer keys answer nil).
+#[test]
+fn find_over_primitive_vector() {
+    let mut eval = boot();
+    assert_eq!(
+        run_last(&mut eval, "(find (vector-of :int 10 20) 1)"),
+        "[1 20]"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(find (vector-of :int 10 20) 5)"),
+        "nil"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(find (vector-of :int 10 20) :a)"),
+        "nil"
+    );
+}
+
+/// Empty arrays / primitive vectors are empty seqs: `count`
+/// is 0, `first`/`last` answer nil.
+#[test]
+fn empty_array_and_pv_seq_views() {
+    let mut eval = boot();
+    assert_eq!(run_last(&mut eval, "(count (int-array 0))"), "0");
+    assert_eq!(run_last(&mut eval, "(count (vector-of :int))"), "0");
+    assert_eq!(run_last(&mut eval, "(first (int-array 0))"), "nil");
+    assert_eq!(run_last(&mut eval, "(first (vector-of :int))"), "nil");
+    assert_eq!(run_last(&mut eval, "(last (int-array 0))"), "nil");
+    assert_eq!(run_last(&mut eval, "(last (vector-of :int))"), "nil");
+}

@@ -1,0 +1,53 @@
+r-p-uri true
+r-p-nil false
+r-p-str false
+r-p-int false
+r-p-url false
+r-p-uuid false
+r-p-inst false
+r-p-vec false
+r-eq-same true
+r-eq-scheme true
+r-eq-host true
+r-eq-path false
+r-eq-query false
+r-eq-frag false
+r-eq-user false
+r-eq-port false
+r-eq-portsame true
+r-eq-portdiff false
+r-eq-slash false
+r-eq-opaque true
+r-eq-opaque-case true
+r-eq-ssp-case false
+r-eq-rel true
+r-eq-rel-case false
+r-eq-str false
+r-eq-nil false
+r-eq-ipv6 true
+r-eq-reg true
+r-hash-a 61067039
+r-hash-b 61067039
+r-hash-c 170798086
+r-hash-d 1494949
+r-hash-e -1991072518
+r-hash-eq true
+r-hash-map :hit
+r-cmp-eq 0
+r-cmp-scheme -2
+r-cmp-path -1
+r-cmp-query -1
+r-cmp-frag -1
+r-cmp-frag-vs-nofrag -1
+r-cmp-port 1
+r-cmp-port-vs-noport -81
+r-cmp-host -1
+r-cmp-opaque -1
+r-cmp-opaque-vs-hier 5
+r-cmp-rel -1
+r-cmp-str THROW java.lang.ClassCastException|"class java.lang.String cannot be cast to class java.net.URI (java.lang.String and java.net.URI are in module java.base of loader 'bootstrap')"
+r-pr "#object[java.net.URI 0x28f8e165 \"http://example.com/x\"]"
+r-print "#object[java.net.URI 0x405325cf http://example.com/x]"
+r-str "http://example.com/x"
+r-class java.net.URI
+r-readback THROW java.lang.RuntimeException|"No reader function for tag uri"
