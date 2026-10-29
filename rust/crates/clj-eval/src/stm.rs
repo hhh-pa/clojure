@@ -27,6 +27,7 @@ use std::sync::{Mutex, MutexGuard};
 
 use clj_value::{Agent, Keyword, Map, QueuedAction, Ref, RefState, ThrowClass, Value};
 
+use crate::classemu::identical_values;
 use crate::concurrency::{atom_options, enqueue_send_item, validate_new};
 use crate::core::{cce_err, is_ifn, nth_index};
 use crate::env::Env;
@@ -55,8 +56,10 @@ static ACTIVE_READERS: Mutex<Vec<u64>> = Mutex::new(Vec::new());
 #[derive(Debug)]
 struct StmRetry;
 
-/// Raise the internal `Retry` (the cell lock always drops first —
-/// callers resolve under a scoped guard, so the raise never poisons).
+/// Raise the internal `Retry`. The unwind may pass held commit
+/// guards (poisoning them — every lock site recovers via
+/// `into_inner`), which is why the attempt loop catches only this
+/// payload and drops everything with it.
 fn raise_retry() -> ! {
     std::panic::panic_any(StmRetry);
 }
@@ -64,7 +67,7 @@ fn raise_retry() -> ! {
 /// A running transaction (§1g): the snapshot point, the nesting
 /// depth, the read versions, the tx-local writes, every touched ref
 /// (a memo — commits lock through it), the commute records in issue
-/// order, the pre-first-commute snapshots (a memo — the step-4 replay
+/// order, the pre-first-commute snapshots (a memo — the step-2 replay
 /// base), the set-guard and ensure sets, and the deferred sends.
 pub(crate) struct Transaction {
     start_point: u64,
@@ -200,8 +203,14 @@ fn sync_join(eval: &mut Evaluator, body: &[Expr], env: &Env) -> Result<Value, Si
 
 /// The begin path: fresh attempts until one commits (retries are
 /// unbounded in COUNT like the JVM — only the spin phase is bounded;
-/// user throws and vetoes abort with the attempt's outbox).
+/// user throws and vetoes abort with the attempt's outbox). A retry
+/// unwinds past the attempt's binding frames (`binding`,
+/// `with-bindings`, conveyed closures), so each retry truncates the
+/// bindings stack to the entry depth — otherwise stale frames would
+/// leak into the next attempt (roots restore via the `with-redefs`
+/// guard instead; `finally` runs at `eval_try`).
 fn sync_begin(eval: &mut Evaluator, body: &[Expr], env: &Env) -> Result<Value, Signal> {
+    let depth = eval.bindings_depth();
     loop {
         begin_attempt(eval);
         let outcome = catch_unwind(AssertUnwindSafe(|| run_attempt(eval, body, env)));
@@ -212,6 +221,7 @@ fn sync_begin(eval: &mut Evaluator, body: &[Expr], env: &Env) -> Result<Value, S
             }
             Ok(AttemptOutcome::Retry) => {
                 end_attempt(eval);
+                eval.pop_bindings(depth);
             }
             Ok(AttemptOutcome::Throw(signal)) => {
                 end_attempt(eval);
@@ -220,6 +230,7 @@ fn sync_begin(eval: &mut Evaluator, body: &[Expr], env: &Env) -> Result<Value, S
             Err(payload) => {
                 end_attempt(eval);
                 if payload.is::<StmRetry>() {
+                    eval.pop_bindings(depth);
                     continue;
                 }
                 resume_unwind(payload);
@@ -272,15 +283,16 @@ fn commit(eval: &mut Evaluator, body_value: Value) -> AttemptOutcome {
         return AttemptOutcome::Throw(signal);
     }
     let validate_ids = write_ids(tx_ref(eval));
-    if let Err(signal) = validate_writes(eval, &validate_ids) {
-        return AttemptOutcome::Throw(signal);
-    }
+    let validated = match validate_writes(eval, &validate_ids) {
+        Ok(validated) => validated,
+        Err(signal) => return AttemptOutcome::Throw(signal),
+    };
     // Targets snapshot after the user-code steps, so rerun- and
     // validator-phase joins are locked members (never brief-lock
     // stragglers at install).
     let targets = commit_targets(tx_ref(eval));
     let mut guards = spin_acquire(&targets);
-    if !revalidate(tx_ref(eval), &targets, &guards) {
+    if !revalidate(tx_ref(eval), &targets, &guards, &validated) {
         return AttemptOutcome::Retry;
     }
     let install_ids = write_ids(tx_ref(eval));
@@ -361,11 +373,42 @@ fn locked_index(targets: &[(u64, Ref)], id: u64) -> Option<usize> {
 
 /// Step 5: every recorded read's current point still equals the
 /// recorded point (ensured refs ride the same check — the rerun
-/// base pins through the reads its first commute recorded); a
+/// base pins through the reads its first commute recorded), and
+/// every validated validator slot still holds the same fn; a
 /// mismatch drops the locks and retries with a fresh start point.
-fn revalidate(tx: &Transaction, targets: &[(u64, Ref)], guards: &[MutexGuard<RefState>]) -> bool {
+fn revalidate(
+    tx: &Transaction,
+    targets: &[(u64, Ref)],
+    guards: &[MutexGuard<RefState>],
+    validated: &BTreeMap<u64, Option<Value>>,
+) -> bool {
     for (id, point) in tx.reads.iter() {
         if current_point(tx, targets, guards, *id) != *point {
+            return false;
+        }
+    }
+    validators_unchanged(targets, guards, validated)
+}
+
+/// The step-3 validator snapshot still matches every slot (a
+/// `set-validator!` landing between validation and install would
+/// install a value its own validator never saw — retry instead).
+/// Reads through the held guards; validated ids are always locked
+/// members. Identity is per-kind (`identical?`): immutable slots by
+/// value, closures by allocation.
+fn validators_unchanged(
+    targets: &[(u64, Ref)],
+    guards: &[MutexGuard<RefState>],
+    validated: &BTreeMap<u64, Option<Value>>,
+) -> bool {
+    for (id, expected) in validated.iter() {
+        let i = locked_index(targets, *id).expect("validated ids are locked");
+        let same = match (expected, &guards[i].validator) {
+            (None, None) => true,
+            (Some(a), Some(b)) => identical_values(a, b),
+            _ => false,
+        };
+        if !same {
             return false;
         }
     }
@@ -397,10 +440,11 @@ fn current_point(
 /// pins to latest (a stale base retries like any conflict — §1c).
 /// Runs lock-free, before any guard is held. A rerun fn that
 /// commutes records tx-locally but the late commute never reruns
-/// this commit (DIVERGENCE, oracle `u-latecommute-cme`: the JVM
-/// fail-fasts with `ConcurrentModificationException` — the port
-/// snapshots instead of growing the shared `ThrowClass` for a
-/// pathological corner).
+/// this commit — and does not survive even tx-locally past it
+/// (DIVERGENCE, oracle `u-latecommute-cme`: the JVM fail-fasts
+/// with `ConcurrentModificationException` — the port snapshots
+/// instead of growing the shared `ThrowClass` for a pathological
+/// corner).
 fn rerun_commutes(eval: &mut Evaluator) -> Result<(), Signal> {
     let plan: Vec<(u64, Value, Vec<Value>)> = tx_ref(eval).commutes.clone();
     if plan.is_empty() {
@@ -438,22 +482,28 @@ fn rerun_base(eval: &mut Evaluator, id: u64, finals: &BTreeMap<u64, Value>) -> V
 }
 
 /// Step 3: validate every written ref's final value, ascending id (a
-/// veto aborts — never retries). Validators run tx-live with no
-/// guards held (lock-free like the reruns); their writes install
-/// but skip validation (the id list snapshots before the loop —
-/// oracle `u-valphase-*`). The validator slot reads briefly — a
-/// swap landing between validation and install races like the
-/// JVM's own volatile field (unpinned either way).
-fn validate_writes(eval: &mut Evaluator, ids: &[u64]) -> Result<(), Signal> {
+/// veto aborts — never retries), returning the validated validator
+/// slots. Validators run tx-live with no guards held (lock-free
+/// like the reruns); their writes install but skip validation (the
+/// id list snapshots before the loop — oracle `u-valphase-*`). The
+/// JVM validates under its commit locks; the port validates
+/// lock-free (deadlock-freedom) and closes the swap window by
+/// rechecking the snapshot at step 5 instead (a swap retries).
+fn validate_writes(
+    eval: &mut Evaluator,
+    ids: &[u64],
+) -> Result<BTreeMap<u64, Option<Value>>, Signal> {
+    let mut validated = BTreeMap::new();
     for id in ids {
         let (candidate, validator) = write_candidate(eval, *id);
-        if let Some(vf) = validator {
+        if let Some(vf) = validator.clone() {
             if let Err(error) = validate_new(eval, &vf, &candidate) {
                 return Err(eval.throw(error));
             }
         }
+        validated.insert(*id, validator);
     }
-    Ok(())
+    Ok(validated)
 }
 
 /// One validation's candidate plus its current validator (the slot
@@ -1092,6 +1142,119 @@ mod tests {
         }))
         .expect_err("held read-only ref retries");
         assert!(payload.is::<StmRetry>());
+    }
+
+    /// A `user/s19-retry-once` native raising the internal retry
+    /// exactly once (first call), then answering `:ok` — drives
+    /// EXACTLY two attempts with no threads or timing (M1).
+    fn install_retry_once(eval: &mut Evaluator) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let count = Arc::new(AtomicUsize::new(0));
+        eval.install_native(
+            "user",
+            "s19-retry-once",
+            Arc::new(move |_, _| {
+                if count.fetch_add(1, Ordering::SeqCst) == 0 {
+                    super::raise_retry();
+                }
+                Ok(Value::Keyword(Keyword::new(None, "ok")))
+            }),
+        );
+    }
+
+    /// Intern `user/<name>` with a root (M1 fixtures).
+    fn def_test_var(eval: &mut Evaluator, name: &str, root: Value, dynamic: bool) {
+        let sym = Symbol::new(Some("user"), name);
+        let id = eval.registry.intern(&sym);
+        eval.registry.with_state_mut(id, |st| {
+            st.root = Some(root);
+            st.dynamic = dynamic;
+        });
+    }
+
+    /// M1: a retry unwinds past the attempt's `binding` frames —
+    /// `sync_begin` truncates to the entry depth, so neither the
+    /// next attempt nor the world after sees them.
+    #[test]
+    fn retry_truncates_binding_frames() {
+        let mut eval = crate::ns::boot();
+        def_test_var(&mut eval, "s19-tx", Value::Int(0), true);
+        install_retry_once(&mut eval);
+        let out = eval
+            .eval_source("(dosync (binding [user/s19-tx 1] (user/s19-retry-once)))")
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(out, Value::Keyword(Keyword::new(None, "ok")));
+        // Attempt 1's frame is gone (a leak would still read 1).
+        let after = eval.eval_source("user/s19-tx").unwrap().pop().unwrap();
+        assert_eq!(after, Value::Int(0));
+    }
+
+    /// M1: a retry unwinding through `with-redefs` restores the
+    /// saved roots (no global permanent leak).
+    #[test]
+    fn retry_restores_with_redefs_roots() {
+        let mut eval = crate::ns::boot();
+        def_test_var(&mut eval, "s19-rr", Value::Int(0), false);
+        install_retry_once(&mut eval);
+        let out = eval
+            .eval_source("(dosync (with-redefs [user/s19-rr 9] (user/s19-retry-once)))")
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(out, Value::Keyword(Keyword::new(None, "ok")));
+        let after = eval.eval_source("user/s19-rr").unwrap().pop().unwrap();
+        assert_eq!(after, Value::Int(0));
+    }
+
+    /// M1: `finally` runs when a retry unwinds through `try`
+    /// (catches never see it) — once per attempt, like the JVM.
+    #[test]
+    fn retry_runs_finally() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let mut eval = crate::ns::boot();
+        install_retry_once(&mut eval);
+        let fins = Arc::new(AtomicUsize::new(0));
+        let mark = Arc::clone(&fins);
+        eval.install_native(
+            "user",
+            "s19-mark",
+            Arc::new(move |_, _| {
+                mark.fetch_add(1, Ordering::SeqCst);
+                Ok(Value::Keyword(Keyword::new(None, "marked")))
+            }),
+        );
+        let out = eval
+            .eval_source("(dosync (try (user/s19-retry-once) :ok (finally (user/s19-mark))))")
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(out, Value::Keyword(Keyword::new(None, "ok")));
+        // Once for attempt 1's unwind, once for attempt 2's normal path.
+        assert_eq!(fins.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn validators_unchanged_pins_slot_identity() {
+        // N1: matching slots (absent or identical) pass; a swap or
+        // a fresh install between validation and install fails.
+        let plain = Ref::new(Value::Int(0));
+        let vf = Value::Keyword(Keyword::new(None, "vf"));
+        let checked = Ref::new(Value::Int(1));
+        checked.lock().validator = Some(vf.clone());
+        let targets = vec![(plain.id(), plain.clone()), (checked.id(), checked.clone())];
+        let guards = vec![plain.lock(), checked.lock()];
+        let mut snapshot = BTreeMap::new();
+        snapshot.insert(plain.id(), None);
+        snapshot.insert(checked.id(), Some(vf));
+        assert!(validators_unchanged(&targets, &guards, &snapshot));
+        drop(guards);
+        // A swap lands: same snapshot, changed slots.
+        plain.lock().validator = Some(Value::Keyword(Keyword::new(None, "late")));
+        checked.lock().validator = None;
+        let guards = vec![plain.lock(), checked.lock()];
+        assert!(!validators_unchanged(&targets, &guards, &snapshot));
     }
 
     #[test]

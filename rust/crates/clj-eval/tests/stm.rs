@@ -30,12 +30,13 @@
 //! `nesting_join` (t-nested, t-nested-join, t-sync-in),
 //! `commute_compose` (t-alter/refset-returns, every t-commute-*
 //! except t-commute-abort-atomic, t-ensure-commute,
-//! t-commute-ensure, t-ensure-returns), `validator_watch_timing`
+//! t-commute-ensure, t-ensure-returns, t-invoke-in-txn),
+//! `validator_watch_timing`
 //! (t-validator-calls, every t-watch-* and t-addwatch/
 //! t-removewatch-* row, e-validator-msg), `invoke_and_predicates`
 //! (r-deref/reader/timeout, r-realized/atom/num, r-counted,
 //! r-ifn, r-atom-ifn, r-invoke0/1/fnval/variadic, r-atom-invoke,
-//! r-with-meta, t-invoke-in-txn), `await_gates`
+//! r-with-meta), `await_gates`
 //! (t-await-noargs-in/out, t-await/awaitfor-in-dosync,
 //! t-await/awaitfor-action-tx), `boundfn_conveyance` (t-bound-fn,
 //! t-future-no-convey), `print_and_str` (r-str, r-new/nil/coll).
@@ -50,10 +51,9 @@
 //! u-latecommute-cme (a commute recorded during the commit
 //! re-run applies tx-locally but never reruns — the JVM
 //! fail-fasts `ConcurrentModificationException`).
-//! `identical?` is out of scope in the port (matrix row 574), so the
-//! six rows using it substitute `=` (same-cell + equal meta —
-//! equivalent here, where no meta is involved) plus one shared-cell
-//! behavioral pin. `(Exception. …)` has no port surface, so abort
+//! The six rows using `identical?` substitute `=` (same-cell +
+//! equal meta — equivalent here, where no meta is involved) plus
+//! one shared-cell behavioral pin. `(Exception. …)` has no port surface, so abort
 //! signals throw through the `s19-ex` double (same class, same
 //! message). t-sendvia-defer substitutes the `nil` executor
 //! (the JVM static field has no port surface; executors are
@@ -759,6 +759,21 @@ fn validator_may_read_ensured_ref() {
         "3"
     );
     assert_eq!(run_last(&mut eval, "@r2"), "3");
+}
+
+/// L3: a throwing watch aborts the post-commit sequence — the throw
+/// propagates AND the committed outbox never dispatches (spec §1e:
+/// watches fire before sends, in the same terminal step).
+#[test]
+fn watch_throw_drops_outbox() {
+    let mut eval = boot_stm();
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [a (agent 0) r (ref 0)] (add-watch r :k (fn [& _] (throw (s19-ex \"w\")))) [(try (dosync (alter r inc) (send a inc)) (catch Exception e :caught)) (do (await a) @a)])"
+        ),
+        "[:caught 0]"
+    );
 }
 
 #[test]

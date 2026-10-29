@@ -329,7 +329,13 @@ just decrement depth):
    reads its first commute recorded (a base that shifted
    under the lock-free rerun retries like any conflict).
    Read-only refs try briefly — a held cell retries
-   rather than blocking into a lock cycle.
+   rather than blocking into a lock cycle. The step-3
+   validator snapshot is rechecked against the locked
+   slots (per-kind identity) — a swap landing between
+   validation and install retries instead of installing
+   under the wrong validator (the JVM validates under
+   its commit locks; the port reaches the same atomicity
+   via snapshot + recheck).
 6. Bump the clock ONCE; install every new current with the
    fresh point; push each old current onto its history.
 7. Trim each touched history: drop oldest while `len >
@@ -439,8 +445,9 @@ retries — port-side pins with no oracle rows),
 `invoke_and_predicates` (§1d rows), `await_gates` (§1d
 await rows), `boundfn_conveyance` (`t-bound-fn`,
 `t-future-no-convey`), `print_and_str` (`r-str` + port
-`#object` form), `seam_suites_green` (§2f — runs the
-existing agent/future/atom assertions unmodified).
+`#object` form), `seam_suites_green` (§2f — replays
+agent/future/atom smoke rows mirroring the concurrency
+suite's core shapes).
 
 Row flips (implementer, from current `origin/master` —
 §2h.1; verify line numbers at flip time):
@@ -585,7 +592,7 @@ bound is always int-range, so getters never re-check.
 
 | seam | why it stays green | proof |
 |---|---|---|
-| agent suite | deferral adds ONE branch (`if tx.is_some()`) at the top of `send_action`'s dispatch section, AFTER the existing arity/cast validation; `None` falls through to the identical code path | existing `concurrency.rs` agent tests run UNMODIFIED in `seam_suites_green`, plus a new assertion that `send` outside `dosync` dispatches immediately (pre-deferral behavior) |
+| agent suite | deferral adds ONE branch (`if tx.is_some()`) at the top of `send_action`'s dispatch section, AFTER the existing arity/cast validation; `None` falls through to the identical code path | `seam_suites_green` replays agent/future/atom smoke rows mirroring the suite's core shapes (incl. `send` outside `dosync` dispatching immediately, the pre-deferral behavior) |
 | future / promise / delay suites | untouched code paths; tx never crosses `fork_for_thread` (§1h) | same unmodified runs; `t-future-no-convey` pins the isolation |
 | atom suite | untouched arms; refs reuse (never alter) `as_iref`/`as_ref_target` shapes via NEW enum variants | unmodified runs; `r-realized-atom` / `t-watch-order-atom` controls document current behavior |
 | `deref` on non-refs | one NEW match arm; all existing arms byte-identical | unmodified runs + `r-deref-timeout` (falls through to the old arm) |
@@ -625,7 +632,14 @@ such guard to copy.
 5. **Global clock + test parallelism.** The `AtomicU64`
    is contention-free in practice (one CAS per writing
    txn); its VALUES are never user-visible, so parallel
-   tests cannot observe each other through it.
+   tests cannot observe each other through it. The
+   `ACTIVE_READERS` registry is NOT so clean: a foreign
+   open transaction pins one extra history entry, so the
+   exact-count `history_trim` asserts are timing-sensitive
+   in principle (microsecond window — a foreign attempt
+   must be mid-flight during the trim). Never observed;
+   if it ever flakes, serialize the history tests rather
+   than weakening the counts.
 
 ### 2h. Issue-Solution deviations + follow-ups
 

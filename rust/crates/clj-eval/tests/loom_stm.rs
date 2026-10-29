@@ -144,7 +144,12 @@ fn model_commit(
     for (id, point) in tx.reads.iter() {
         let current = match targets.iter().position(|(known, _)| known == id) {
             Some(i) => guards[i].point,
-            None => world.refs[*id].lock().unwrap().point,
+            // A held cell retries like any conflict (mirrors the
+            // real try-briefly read — never blocks into a cycle).
+            None => match world.refs[*id].try_lock() {
+                Ok(state) => state.point,
+                Err(_) => return false,
+            },
         };
         if current != *point {
             return false;

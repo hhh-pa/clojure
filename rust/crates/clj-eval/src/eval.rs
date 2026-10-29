@@ -13,6 +13,7 @@
 //! S4 ships no prelude: tests inject [`NativeFn`](crate::ext::NativeFn)
 //! doubles; `ex-info` et al. arrive with the S5 core subset.
 
+use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::sync::Arc;
 
 use clj_reader::{Reader, ReaderOpts, Span};
@@ -1230,7 +1231,9 @@ impl Evaluator {
     /// Every init evaluates against the old roots (a repeated var
     /// keeps the last value, map-style), the roots install, the body
     /// runs, and the saved roots — or rootlessness — restore in a
-    /// `finally`, even on throw (probe37 `wrd-*`).
+    /// `finally`, even on throw (probe37 `wrd-*`). The restore also
+    /// runs on panic unwind (an S19 retry unwinding through here
+    /// must not leak redefined roots globally).
     fn eval_with_redefs(
         &mut self,
         pairs: &[(Var, Expr)],
@@ -1254,13 +1257,16 @@ impl Evaluator {
                 st.root = Some(value.clone());
             });
         }
-        let result = self.eval_body(body, env);
+        let result = catch_unwind(AssertUnwindSafe(|| self.eval_body(body, env)));
         for (id, saved, _) in saves.iter().rev() {
             self.registry.with_state_mut(*id, |st| {
                 st.root = saved.clone();
             });
         }
-        result
+        match result {
+            Ok(result) => result,
+            Err(payload) => resume_unwind(payload),
+        }
     }
 
     /// `with-bindings`: evaluate the map expression and run the body
@@ -1546,6 +1552,10 @@ impl Evaluator {
 
     /// `(try …)`: the first matching `catch` wins (by hierarchy);
     /// `finally` runs on every path and its value is discarded.
+    /// A panic unwinding through the body (an S19 retry is now
+    /// routine control flow, not just port bugs) still runs
+    /// `finally` — catches never see it — then resumes; a throwing
+    /// `finally` masks the in-flight panic like the JVM.
     fn eval_try(
         &mut self,
         body: &[Expr],
@@ -1553,7 +1563,15 @@ impl Evaluator {
         finally_body: &[Expr],
         env: &Env,
     ) -> Result<Value, Signal> {
-        let result = self.eval_body(body, env);
+        let result = match catch_unwind(AssertUnwindSafe(|| self.eval_body(body, env))) {
+            Ok(result) => result,
+            Err(payload) => {
+                if let Err(signal @ Signal::Throw(_)) = self.eval_body(finally_body, env) {
+                    return Err(signal);
+                }
+                resume_unwind(payload);
+            }
+        };
         match result {
             Ok(value) => {
                 self.eval_body(finally_body, env)?;

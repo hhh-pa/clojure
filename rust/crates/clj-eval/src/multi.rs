@@ -102,7 +102,8 @@ fn unresolvable(sym: &Symbol) -> NativeError {
 /// `[name-str dispatch-fn default hierarchy present?]`; both
 /// tables start empty; an absent hierarchy is global, an
 /// explicit nil NPEs at the call (probe `x-hier-nil`), a
-/// var/atom/agent dereferences live — anything else fails
+/// var/atom/agent/ref dereferences live (refs tx-locally —
+/// the JVM takes any `IRef`) — anything else fails
 /// the `IRef` cast (probes `x-hier-map`, `x-hier-5`).
 fn native_multifn(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/__multifn*", args, &[5])?;
@@ -113,7 +114,9 @@ fn native_multifn(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, Native
     let hierarchy = match (&args[3], &args[4]) {
         (Value::Nil, Value::Bool(false)) => None,
         (Value::Nil, _) => Some(Value::Nil),
-        (v @ (Value::Var(_) | Value::Atom(_) | Value::Agent(_)), _) => Some(v.clone()),
+        (v @ (Value::Var(_) | Value::Atom(_) | Value::Agent(_) | Value::Ref(_)), _) => {
+            Some(v.clone())
+        }
         (other, _) => return Err(cce_err(other, "clojure.lang.IRef")),
     };
     Ok(Value::MultiFn(Arc::new(MultiFn {
@@ -265,6 +268,7 @@ fn resolve_hierarchy(eval: &mut Evaluator, mf: &MultiFn) -> Result<Value, Native
         Some(Value::Var(v)) => Ok(eval.deref_var(v.id, &v.sym)),
         Some(Value::Atom(a)) => Ok(a.lock().value.clone()),
         Some(Value::Agent(a)) => Ok(a.lock().value.clone()),
+        Some(Value::Ref(r)) => Ok(crate::stm::tx_deref(eval, r)),
         Some(other) => Err(cce_err(other, "clojure.lang.IRef")),
     }
 }
