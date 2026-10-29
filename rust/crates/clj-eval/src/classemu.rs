@@ -15,7 +15,8 @@
 //!
 //! The lattice is one static table (transcribed verbatim from
 //! `docs/zero-oos-s16-classemu/probes/lattice.out`, plus the five
-//! documented synthetic rows) with four dynamic rules: the HostDef
+//! documented synthetic rows and the two unprobed import-only rows)
+//! with four dynamic rules: the HostDef
 //! rule (host types and their claimed names), the fn rule (closures
 //! by rest-presence, natives unconditionally `AFunction`), the future
 //! / promise / iteration stable names (static reify rows), and the
@@ -69,7 +70,9 @@ struct StaticRow {
 /// The static lattice: the 214 oracle rows plus the documented
 /// synthetic rows (the future/promise/iteration reifies, the
 /// nonexistent MissingFormatConversionException, and
-/// NoSuchElementException for the S16 getFirst/getLast variant).
+/// NoSuchElementException for the S16 getFirst/getLast variant)
+/// and the two unprobed import-only rows (`java.util.Calendar`,
+/// `java.sql.Date`).
 const STATIC_LATTICE: &[StaticRow] = &[
     StaticRow {
         name: "clojure.core.Eduction",
@@ -1231,11 +1234,15 @@ const STATIC_LATTICE: &[StaticRow] = &[
         iface: false,
         bases: &["java.lang.Number", "java.lang.Comparable"],
     },
+    // Import-only (unprobed; ancestry verified live on the JVM):
+    // `i-conflict-class` needs a second `Date` to collide with.
     StaticRow {
         name: "java.sql.Date",
         iface: false,
         bases: &["java.util.Date"],
     },
+    // Import-only (unprobed; ancestry verified live on the JVM):
+    // `i-import-multi-ret` needs a second `java.util` class.
     StaticRow {
         name: "java.util.Calendar",
         iface: false,
@@ -1893,15 +1900,17 @@ fn import_class(eval: &mut Evaluator, fqn: &str) -> Result<Value, NativeError> {
     let simple = fqn.rsplit('.').next().unwrap_or(fqn);
     let cur = eval.current_ns_name();
     let sym = Symbol::new(None, simple);
-    if let Some(target) = eval.registry.resolve_in(&cur, &sym)
-        && let Some(id) = eval.registry.lookup(&target)
-    {
-        let root = eval.deref_var(id, &target);
-        if def_of_same_name(&root, fqn) {
-            return Ok(Value::Class(class));
+    // Nested `if let` (not a let-chain): MSRV 1.85 predates
+    // let-chains (E0658 on the msrv leg).
+    if let Some(target) = eval.registry.resolve_in(&cur, &sym) {
+        if let Some(id) = eval.registry.lookup(&target) {
+            let root = eval.deref_var(id, &target);
+            if def_of_same_name(&root, fqn) {
+                return Ok(Value::Class(class));
+            }
+            let var = crate::ns::var_value(id, &target);
+            return Err(crate::core::cce_err(&var, "java.lang.Class"));
         }
-        let var = crate::ns::var_value(id, &target);
-        return Err(crate::core::cce_err(&var, "java.lang.Class"));
     }
     if let Some(existing) = import_in(eval, &cur, simple) {
         if existing.name() == class.name() {

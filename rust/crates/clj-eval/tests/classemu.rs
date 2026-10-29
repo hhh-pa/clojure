@@ -2140,6 +2140,48 @@ fn lattice_static_rows() {
     }
 }
 
+// The four tabled-but-unprobed static rows (§1.3): the two
+// import-only rows (`Calendar`, `sql.Date` — ancestries verified
+// live on the JVM) plus the S16 `NoSuchElementException` variant
+// (live-JVM ancestry) and the synthesized nonexistent
+// `MissingFormatConversionException` (throw-chain shape, matching
+// `throw_parent`). Each answers the same `[isInterface
+// ordered-bases sorted-supers]` shape.
+#[test]
+fn lattice_extra_rows() {
+    let mut eval = boot();
+    let lat = "(fn [c] [(.isInterface c) (when-let [b (seq (bases c))] (vec (map #(.getName ^Class %) b))) (when-let [s (seq (supers c))] (vec (sort (map #(.getName ^Class %) s))))])";
+    run(&mut eval, &format!("(def lat {lat})"));
+    assert_eq!(
+        run(
+            &mut eval,
+            "(lat (clojure.core/__import* \"java.util.Calendar\"))"
+        ),
+        "[false [\"java.lang.Object\" \"java.io.Serializable\" \"java.lang.Cloneable\" \"java.lang.Comparable\"] [\"java.io.Serializable\" \"java.lang.Cloneable\" \"java.lang.Comparable\" \"java.lang.Object\"]]"
+    );
+    assert_eq!(
+        run(
+            &mut eval,
+            "(lat (clojure.core/__import* \"java.sql.Date\"))"
+        ),
+        "[false [\"java.util.Date\"] [\"java.io.Serializable\" \"java.lang.Cloneable\" \"java.lang.Comparable\" \"java.lang.Object\" \"java.util.Date\"]]"
+    );
+    assert_eq!(
+        run(
+            &mut eval,
+            "(lat (clojure.core/__import* \"java.util.NoSuchElementException\"))"
+        ),
+        "[false [\"java.lang.RuntimeException\"] [\"java.io.Serializable\" \"java.lang.Exception\" \"java.lang.Object\" \"java.lang.RuntimeException\" \"java.lang.Throwable\"]]"
+    );
+    assert_eq!(
+        run(
+            &mut eval,
+            "(lat (clojure.core/__import* \"java.util.MissingFormatConversionException\"))"
+        ),
+        "[false [\"java.util.IllegalFormatException\"] [\"java.io.Serializable\" \"java.lang.Exception\" \"java.lang.IllegalArgumentException\" \"java.lang.Object\" \"java.lang.RuntimeException\" \"java.lang.Throwable\" \"java.util.IllegalFormatException\"]]"
+    );
+}
+
 // l-fn-fixed/fn-multi-fixed/fn-variadic/fn-name,
 // l-native-fixed/native-rest, l-future/future-name,
 // l-promise/promise-name, l-reify-shape,
@@ -3221,6 +3263,12 @@ fn bean_basics() {
     assert_eq!(run(&mut eval, "(:class (bean \"hi\"))"), "java.lang.String");
     assert_eq!(
         run(&mut eval, "(sort (map str (keys (bean 1))))"),
+        "(\":class\")"
+    );
+    // Writers answer `:class` alone (`close`/`flush` are void
+    // members, never keys, §1.11).
+    assert_eq!(
+        run(&mut eval, "(sort (map str (keys (bean *out*))))"),
         "(\":class\")"
     );
     assert_eq!(

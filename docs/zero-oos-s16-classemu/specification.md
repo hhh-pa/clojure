@@ -142,10 +142,15 @@ ordered-bases)`. It is closed under `bases`+`supers`
 (every name any row mentions has its own row — verified
 mechanically over `lattice.out`), covers every
 `jvm_class_of`/`class_name` name the port reports
-(§1.4), every `ThrowClass` name (except the nonexistent
-`java.util.MissingFormatConversionException`, below;
-`ClassNotFoundException` is tabled for the new variant
-§1.7 adds), every S13 table key (all 41 full rows agree
+(§1.4), every `ThrowClass` name (the nonexistent
+`java.util.MissingFormatConversionException` is
+synthesized below; `ClassNotFoundException` is tabled
+for the new variant §1.7 adds — shared with wave1,
+which added the same variant;
+`java.util.NoSuchElementException` is tabled for the
+new variant §1.10 adds, live-JVM ancestry
+`[RuntimeException]`), every S13 table key (all 41 full
+rows agree
 as sets, §2.2), plus `java.lang.Class`, `java.util.Date`
 (the issue's BDD), `java.math.BigInteger` (S13 parity),
 and the fn-ladder (`AFn`, `AFunction`, `Fn`, `RestFn`,
@@ -751,6 +756,9 @@ host-only):
 - `ExceptionInfo`: `getData` (`m-exinfo-data`).
 - `IPending` (delays, futures, promises, lazy seqs):
   `isRealized` (`m-realized-*`).
+- Writers: `close`/`flush` (0-arg, void — the §1.14
+  probes call `(.close pw)`/`(.flush pw)`; never bean
+  keys, §1.11).
 - HostDef instances/descriptors: the existing dispatch
   (fields, methods, descriptor misses, gen-class
   forwarding) — `m-deftype-field/method`,
@@ -874,6 +882,9 @@ Port key table (oracle → port):
   (`:stackTrace`/`:suppressed` need real stacks —
   follow-up).
 - Delays/futures/promises: `:class :realized`.
+- Writers (`*out*`/`*err*`/buffers/`PrintWriter-on`):
+  `:class` — `close`/`flush` are void members, never
+  keys.
 - Atoms/agents/volatiles/reduced/multifns/patterns/
   matchers/transients/readers/eductions/chunks/
   iterations/accessors/fns/namespaces/vars/structdefs/
@@ -1028,7 +1039,7 @@ already exists in place.)
 | 11 | `bean` | 713 | out-of-scope | `bean_*`: per-kind key tables, eagerness, nil, map-ness |
 | 12 | `cast` | 730 | out-of-scope | `cast_*`: ok/miss/nil/nonclass/descriptor/order/arity |
 | 13 | `class?` | 743 | out-of-scope | `classq_*`: true/false table, interfaces, descriptors, arities |
-| 14 | `memfn` | 785 | out-of-scope | `memfn_*`: expansion (dot-form), hint meta, calls, arity |
+| 14 | `memfn` | 785 | out-of-scope | `memfn_*`: expansion (`__meth*` call), hint meta, calls, arity |
 
 Each flips in place to `implemented` with a test note
 naming its `classemu.rs` tests (house style, §1.1).
@@ -1086,14 +1097,17 @@ rows.
    referable, and excludable like the JVM's; analyzer
    builtins (`vswap!` precedent) are not. Their
    expansions use existing surface (`__import*` hidden
-   native; `.m`/`.-f` dot forms), so no new special
-   forms are needed and bare `.` stays unresolvable.
-7. **`..`/`memfn` expand to dot-forms (vs JVM `.`
-   forms).** The port has no general `.` (bare `.` is
-   pinned unresolvable), so `..` cannot emit
-   `(. x (m))`. It emits the equivalent surface
-   `(.m x)` / `(.-f x)` — same evaluation, different
-   macroexpand text (pinned divergence).
+   native; `__meth*`/`__field*` hidden calls — the same
+   calls the `.m`/`.-f` dot-forms read as), so no new
+   special forms are needed and bare `.` stays
+   unresolvable.
+7. **`..`/`memfn` expand to `__meth*`/`__field*` calls
+   (vs JVM `.` forms).** The port has no general `.`
+   (bare `.` is pinned unresolvable), so `..` cannot
+   emit `(. x (m))`. It emits the equivalent hidden
+   calls (`(clojure.core/__meth* 'm x a)` /
+   `(clojure.core/__field* 'f x)`) — same evaluation,
+   different macroexpand text (pinned divergence).
 8. **Rewrite `identical?` → var (vs keeping `=`).**
    Keeping the `=` lowering would define `identical?`
    as value equality (`(identical? [1] [1])` → true,

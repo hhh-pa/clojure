@@ -252,15 +252,16 @@ fn throw_parent(jvm_name: &str) -> Option<&'static str> {
     }
 }
 
-/// The linkage-error and S16 reflective branches of
-/// [`throw_parent`] (split for the complexity budget; chains into
-/// [`throw_parent_format`]).
+/// The linkage-error branch plus the S16 `NoSuchElementException`
+/// of [`throw_parent`] (split for the complexity budget; chains into
+/// [`throw_parent_format`]). The reflective pair
+/// (`ClassNotFoundException`/`ReflectiveOperationException`) lives in
+/// [`throw_parent`] proper — do not re-add it here (a duplicate arm
+/// would be dead: `throw_parent` matches first).
 fn throw_parent_rest(jvm_name: &str) -> Option<&'static str> {
     match jvm_name {
         "java.lang.LinkageError" => Some("java.lang.Error"),
         "java.lang.IllegalAccessError" => Some("java.lang.LinkageError"),
-        "java.lang.ClassNotFoundException" => Some("java.lang.ReflectiveOperationException"),
-        "java.lang.ReflectiveOperationException" => Some("java.lang.Exception"),
         "java.util.NoSuchElementException" => Some("java.lang.RuntimeException"),
         _ => throw_parent_format(jvm_name),
     }
