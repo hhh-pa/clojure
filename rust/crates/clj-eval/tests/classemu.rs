@@ -3425,6 +3425,33 @@ fn bean_basics() {
         ),
         "(\":URL\" \":class\")"
     );
+    // b-fixed-seed-wins (advisory R3): host getters colliding with
+    // the seeded fixed keys are shadowed, never called — `:class`
+    // via `getClass` on every host instance, `:empty` via
+    // `isEmpty` on records (JVM-inexpressible: `getClass` is
+    // final, records can't override `isEmpty` — port rule
+    // restoring the §2.1.19 surface≡bean identity).
+    assert_eq!(
+        run(
+            &mut eval,
+            "(do (definterface IGC3 (getClass [])) (deftype TGC3 [] IGC3 (getClass [this] :custom)) (let [i (TGC3.)] [(:class (bean i)) (.. i (getClass))]))"
+        ),
+        "[user.TGC3 user.TGC3]"
+    );
+    assert_eq!(
+        run(
+            &mut eval,
+            "(do (definterface IEB (isEmpty [])) (defrecord BER [x] IEB (isEmpty [this] :custom)) (:empty (bean (BER. 1))))"
+        ),
+        "false"
+    );
+    assert_eq!(
+        run(
+            &mut eval,
+            "(do (definterface IPGC (getClass [])) (:class (bean (proxy [Object IPGC] [] (getClass [] :custom)))))"
+        ),
+        "user$proxy"
+    );
 }
 
 // b-keys-sym/var/ns/pattern/matcher/transient/reader/future/promise/

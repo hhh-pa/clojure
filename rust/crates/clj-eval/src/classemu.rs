@@ -2041,7 +2041,12 @@ fn decapitalize(s: &str) -> String {
 
 /// The host-method keys of `bean`: one eager 0-arg call per
 /// getter-named method (sorted for determinism; throwing getters
-/// fail `bean` itself).
+/// fail `bean` itself) — except getters colliding with the
+/// already-seeded fixed keys (`:class` via `getClass` on every
+/// host instance, `:empty` via `isEmpty`/`getEmpty` on
+/// records/structs): the fixed seeds win and the colliding
+/// getter is never called, like the member surface shadowing
+/// host members (§2.1.19).
 fn host_method_bean_keys(
     eval: &mut Evaluator,
     h: &Arc<HostVal>,
@@ -2064,9 +2069,14 @@ fn host_method_bean_keys(
         })
         .collect();
     getters.sort_unstable();
+    let seeded: Vec<Value> = out.iter().map(|(k, _)| k.clone()).collect();
     for (name, suffix) in getters {
+        let key = kw(&decapitalize(suffix));
+        if seeded.contains(&key) {
+            continue;
+        }
         let val = crate::types::call_zero_arg_method(eval, h, target.clone(), name)?;
-        out.push((kw(&decapitalize(suffix)), val));
+        out.push((key, val));
     }
     Ok(())
 }

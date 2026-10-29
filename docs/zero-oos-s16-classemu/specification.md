@@ -919,7 +919,13 @@ Port key table (oracle → port):
   (+ `:empty` for records) plus one key per 0-arg
   `get[A-Z]*`/`is[A-Z]*` method, values called eagerly
   (`m-det-bean-keys`, `b-lazy`). Fields are never keys
-  (`b-keys-deftype` → `(":class")` despite `[x]`).
+  (`b-keys-deftype` → `(":class")` despite `[x]`). Getters
+  colliding with the fixed `:class`/`:empty` seeds
+  (`getClass` on any host instance, `isEmpty`/`getEmpty`
+  on records/structs) are shadowed — never called, never
+  keys — keeping the bean-keys ≡ surface-getters identity
+  (JVM-inexpressible: `getClass` is final, records can't
+  override `isEmpty`; advisory R3, `b-fixed-seed-wins`).
 
 ### 1.12 `memfn`
 
