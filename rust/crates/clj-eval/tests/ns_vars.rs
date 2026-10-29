@@ -269,8 +269,12 @@ fn stale_handles_read_tombstones() {
         "#object[clojure.lang.Namespace 0x3 \"st\"]"
     );
     assert_eq!(run_last(&mut eval, "(ns-name sth)"), "st");
-    // The frozen mappings survive.
-    assert_eq!(run_last(&mut eval, "(ns-map sth)"), "{x #'st/x}");
+    // The frozen mappings survive (1 var + the 106 #74 defaults —
+    // upstream `ns-map` is the full mappings).
+    assert_eq!(
+        run_last(&mut eval, "[(count (ns-map sth)) (get (ns-map sth) 'x)]"),
+        "[107 #'st/x]"
+    );
     assert_eq!(run_last(&mut eval, "(ns-interns sth)"), "{x #'st/x}");
     // And a captured var still derefs through the tombstone when it
     // holds a callable.
@@ -403,8 +407,11 @@ fn ns_map_family() {
         "(do (create-ns 'usefx) (in-ns 'usefx) (clojure.core/refer 'fx :only '[pub]) (clojure.core/in-ns 'user))",
     );
     assert_eq!(
-        run_last(&mut eval, "(ns-map 'fx)"),
-        "{priv #'fx/priv, pub #'fx/pub}"
+        run_last(
+            &mut eval,
+            "[(count (ns-map 'fx)) (get (ns-map 'fx) 'priv) (get (ns-map 'fx) 'pub)]"
+        ),
+        "[108 #'fx/priv #'fx/pub]"
     );
     assert_eq!(
         run_last(&mut eval, "(ns-interns 'fx)"),
@@ -412,7 +419,15 @@ fn ns_map_family() {
     );
     assert_eq!(run_last(&mut eval, "(ns-publics 'fx)"), "{pub #'fx/pub}");
     assert_eq!(run_last(&mut eval, "(ns-refers 'usefx)"), "{pub #'fx/pub}");
-    assert_eq!(run_last(&mut eval, "(ns-imports 'fx)"), "{}");
+    // No explicit imports — but the 106 #74 defaults are listed
+    // (upstream `ns-imports` reads the same table).
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "[(count (ns-imports 'fx)) (get (ns-imports 'fx) 'String)]"
+        ),
+        "[106 java.lang.String]"
+    );
     assert_eq!(
         uncaught(&mut eval, "(ns-map 'missing)"),
         "java.lang.Exception | No namespace: missing found"
@@ -612,8 +627,11 @@ fn refer_private_and_shadow() {
         "sh"
     );
     assert_eq!(
-        run_last(&mut eval, "(clojure.core/ns-map 'sh)"),
-        "{pub #'sh/pub}"
+        run_last(
+            &mut eval,
+            "[(clojure.core/count (clojure.core/ns-map 'sh)) (clojure.core/get (clojure.core/ns-map 'sh) 'pub)]"
+        ),
+        "[107 #'sh/pub]"
     );
     // `def` over a refer replaces it silently.
     run(&mut eval, "(do (clojure.core/in-ns 'user) (create-ns 'dr))");
@@ -624,7 +642,10 @@ fn refer_private_and_shadow() {
     run(&mut eval, "(clojure.core/eval '(def pub 7))");
     run(&mut eval, "(clojure.core/in-ns 'user)");
     assert_eq!(run_last(&mut eval, "(ns-refers 'dr)"), "{}");
-    assert_eq!(run_last(&mut eval, "(ns-map 'dr)"), "{pub #'dr/pub}");
+    assert_eq!(
+        run_last(&mut eval, "[(count (ns-map 'dr)) (get (ns-map 'dr) 'pub)]"),
+        "[107 #'dr/pub]"
+    );
 }
 
 #[test]
@@ -961,7 +982,13 @@ fn ns_map_with_refers() {
         &mut eval,
         "(do (create-ns 'usefx) (in-ns 'usefx) (clojure.core/refer 'fx :only '[pub]) (clojure.core/in-ns 'user))",
     );
-    assert_eq!(run_last(&mut eval, "(ns-map 'usefx)"), "{pub #'fx/pub}");
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "[(count (ns-map 'usefx)) (get (ns-map 'usefx) 'pub)]"
+        ),
+        "[107 #'fx/pub]"
+    );
 }
 
 #[test]

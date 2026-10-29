@@ -754,9 +754,11 @@ fn host_natives_and_rewrites() {
         "false"
     );
     // Classify misses fall through to an unresolved var.
+    // (`(clojure.core/instance? String 1)` left this list in #74:
+    // `String` resolves via defaults now — runtime `false`, pinned
+    // in classemu `default_imports`.)
     for form in [
         "(clojure.core/instance? 1)",
-        "(clojure.core/instance? String 1)",
         "(clojure.core/identical? 1)",
         "(clojure.core/identical? 1 2 3)",
         "(new Object 1)",

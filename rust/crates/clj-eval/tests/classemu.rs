@@ -588,17 +588,128 @@ fn import_ns_clause_still_rejected() {
 
 // ---- ns-imports ----
 
+// The 106 JVM default-import keys in oracle i-defaults order (#74).
+const IMPFRESH_KEYS: &[&str] = &[
+    "AbstractMethodError",
+    "Appendable",
+    "ArithmeticException",
+    "ArrayIndexOutOfBoundsException",
+    "ArrayStoreException",
+    "AssertionError",
+    "AutoCloseable",
+    "BigDecimal",
+    "BigInteger",
+    "Boolean",
+    "BootstrapMethodError",
+    "Byte",
+    "Callable",
+    "CharSequence",
+    "Character",
+    "Class",
+    "ClassCastException",
+    "ClassCircularityError",
+    "ClassFormatError",
+    "ClassLoader",
+    "ClassNotFoundException",
+    "ClassValue",
+    "CloneNotSupportedException",
+    "Cloneable",
+    "Comparable",
+    "Compiler",
+    "Deprecated",
+    "Double",
+    "Enum",
+    "EnumConstantNotPresentException",
+    "Error",
+    "Exception",
+    "ExceptionInInitializerError",
+    "ExceptionInfo",
+    "Float",
+    "IllegalAccessError",
+    "IllegalAccessException",
+    "IllegalArgumentException",
+    "IllegalCallerException",
+    "IllegalMonitorStateException",
+    "IllegalStateException",
+    "IllegalThreadStateException",
+    "IncompatibleClassChangeError",
+    "IndexOutOfBoundsException",
+    "InheritableThreadLocal",
+    "InstantiationError",
+    "InstantiationException",
+    "Integer",
+    "InternalError",
+    "InterruptedException",
+    "Iterable",
+    "LayerInstantiationException",
+    "LinkageError",
+    "Long",
+    "Math",
+    "ModuleLayer",
+    "NegativeArraySizeException",
+    "NoClassDefFoundError",
+    "NoSuchFieldError",
+    "NoSuchFieldException",
+    "NoSuchMethodError",
+    "NoSuchMethodException",
+    "NullPointerException",
+    "Number",
+    "NumberFormatException",
+    "Object",
+    "OutOfMemoryError",
+    "Override",
+    "Package",
+    "Process",
+    "ProcessBuilder",
+    "ProcessHandle",
+    "Readable",
+    "ReflectiveOperationException",
+    "Runnable",
+    "Runtime",
+    "RuntimeException",
+    "RuntimePermission",
+    "SecurityException",
+    "SecurityManager",
+    "Short",
+    "StackOverflowError",
+    "StackTraceElement",
+    "StackWalker",
+    "StrictMath",
+    "String",
+    "StringBuffer",
+    "StringBuilder",
+    "StringIndexOutOfBoundsException",
+    "SuppressWarnings",
+    "System",
+    "Thread",
+    "Thread$State",
+    "Thread$UncaughtExceptionHandler",
+    "ThreadDeath",
+    "ThreadGroup",
+    "ThreadLocal",
+    "Throwable",
+    "TypeNotPresentException",
+    "UnknownError",
+    "UnsatisfiedLinkError",
+    "UnsupportedClassVersionError",
+    "UnsupportedOperationException",
+    "VerifyError",
+    "VirtualMachineError",
+    "Void",
+];
+
 #[test]
 fn ns_imports_table() {
     let mut eval = boot();
-    // i-ns-imports: only explicit imports are listed (the JVM's ~100
-    // defaults are JVM-only).
+    // i-ns-imports: explicit imports are listed alongside the 106
+    // JVM defaults (#74); `Date` is not a default, so the explicit
+    // import adds the 107th entry (oracle i-ns-imports shape).
     assert_eq!(
         run(
             &mut eval,
-            "(do (in-ns 'imp1) (clojure.core/refer-clojure) (import 'java.util.Date) (sort (map str (keys (ns-imports 'imp1)))))"
+            "(do (in-ns 'imp1) (clojure.core/refer-clojure) (import 'java.util.Date) [(count (ns-imports 'imp1)) (get (ns-imports 'imp1) 'Date)])"
         ),
-        "(\"Date\")"
+        "[107 java.util.Date]"
     );
     // i-ns-imports-nsobj/val: `ns-imports` maps simple names to
     // classes (namespace objects coerce like symbols).
@@ -633,16 +744,68 @@ fn ns_imports_table() {
         ),
         "[java.lang.Number java.lang.Number java.lang.Number]"
     );
-    // i-defaults: a fresh namespace imports nothing (the JVM's ~100
-    // default imports are JVM-only; the port installs none).
+    // i-defaults (#74): a fresh namespace carries the JVM's 106
+    // default imports, byte-equal to the oracle key list.
+    assert_eq!(IMPFRESH_KEYS.len(), 106);
+    let want_keys = format!(
+        "({})",
+        IMPFRESH_KEYS
+            .iter()
+            .map(|k| format!("\"{k}\""))
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
     assert_eq!(
         run(
             &mut eval,
             "(do (create-ns 'impfresh) (sort (map str (keys (ns-imports 'impfresh)))))"
         ),
-        "()"
+        want_keys
     );
-    assert_eq!(run(&mut eval, "(ns-imports 'impfresh)"), "{}");
+    assert_eq!(
+        run(
+            &mut eval,
+            "[(count (ns-imports 'impfresh)) (get (ns-imports 'impfresh) 'String) (get (ns-imports 'impfresh) 'ExceptionInfo) (get (ns-imports 'impfresh) 'Thread$State) (get (ns-imports 'impfresh) 'Compiler) (get (ns-imports 'impfresh) 'BigDecimal) (get (ns-imports 'impfresh) 'Callable) (get (ns-imports 'impfresh) 'Readable)]"
+        ),
+        "[106 java.lang.String clojure.lang.ExceptionInfo java.lang.Thread$State clojure.lang.Compiler java.math.BigDecimal java.util.concurrent.Callable java.io.Readable]"
+    );
+}
+
+// #74: default-import behaviors beyond the key list — fresh-ns
+// class resolution, same-default no-op, and explicit-over-default
+// conflict (the JVM throws: `referenceClass` draws no
+// default/explicit distinction).
+#[test]
+fn default_imports() {
+    let mut eval = boot();
+    // Fresh-ns `(instance? String 1)` is runtime `false` (was the
+    // §1.5 compile error before #74).
+    assert_eq!(
+        run(
+            &mut eval,
+            "(do (in-ns 'impd1) (clojure.core/refer-clojure) (clojure.core/instance? String 1))"
+        ),
+        "false"
+    );
+    // Same-as-default explicit import is a no-op success.
+    assert_eq!(
+        run(
+            &mut eval,
+            "(do (in-ns 'impd2) (clojure.core/refer-clojure) (import 'java.lang.String) [(count (ns-imports 'impd2)) (resolve 'String)])"
+        ),
+        "[106 java.lang.String]"
+    );
+    // Explicit-over-different-default throws `already refers to`
+    // (explicit does NOT silently win over defaults):
+    // `java.lang.Compiler` against the shadowed
+    // `clojure.lang.Compiler` default.
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(do (in-ns 'impd3) (clojure.core/refer-clojure) (import 'java.lang.Compiler))"
+        ),
+        "java.lang.IllegalStateException | Compiler already refers to: class clojure.lang.Compiler in namespace: impd3"
+    );
 }
 
 #[test]
@@ -1693,7 +1856,7 @@ const LATTICE_STATIC: &[(&str, &str)] = &[
     ),
     (
         "clojure.lang.LineNumberingPushbackReader",
-        "[false [\"java.io.PushbackReader\"] [\"java.io.Closeable\" \"java.io.FilterReader\" \"java.io.PushbackReader\" \"java.io.Reader\" \"java.lang.AutoCloseable\" \"java.lang.Object\" \"java.lang.Readable\"]]",
+        "[false [\"java.io.PushbackReader\"] [\"java.io.Closeable\" \"java.io.FilterReader\" \"java.io.PushbackReader\" \"java.io.Readable\" \"java.io.Reader\" \"java.lang.AutoCloseable\" \"java.lang.Object\"]]",
     ),
     (
         "clojure.lang.LispReader$ReaderException",
@@ -1860,7 +2023,7 @@ const LATTICE_STATIC: &[(&str, &str)] = &[
     ),
     (
         "java.io.FilterReader",
-        "[false [\"java.io.Reader\"] [\"java.io.Closeable\" \"java.io.Reader\" \"java.lang.AutoCloseable\" \"java.lang.Object\" \"java.lang.Readable\"]]",
+        "[false [\"java.io.Reader\"] [\"java.io.Closeable\" \"java.io.Readable\" \"java.io.Reader\" \"java.lang.AutoCloseable\" \"java.lang.Object\"]]",
     ),
     ("java.io.Flushable", "[true nil nil]"),
     (
@@ -1877,11 +2040,11 @@ const LATTICE_STATIC: &[(&str, &str)] = &[
     ),
     (
         "java.io.PushbackReader",
-        "[false [\"java.io.FilterReader\"] [\"java.io.Closeable\" \"java.io.FilterReader\" \"java.io.Reader\" \"java.lang.AutoCloseable\" \"java.lang.Object\" \"java.lang.Readable\"]]",
+        "[false [\"java.io.FilterReader\"] [\"java.io.Closeable\" \"java.io.FilterReader\" \"java.io.Readable\" \"java.io.Reader\" \"java.lang.AutoCloseable\" \"java.lang.Object\"]]",
     ),
     (
         "java.io.Reader",
-        "[false [\"java.lang.Object\" \"java.lang.Readable\" \"java.io.Closeable\"] [\"java.io.Closeable\" \"java.lang.AutoCloseable\" \"java.lang.Object\" \"java.lang.Readable\"]]",
+        "[false [\"java.lang.Object\" \"java.io.Readable\" \"java.io.Closeable\"] [\"java.io.Closeable\" \"java.io.Readable\" \"java.lang.AutoCloseable\" \"java.lang.Object\"]]",
     ),
     ("java.io.Serializable", "[true nil nil]"),
     (
@@ -1987,7 +2150,7 @@ const LATTICE_STATIC: &[(&str, &str)] = &[
         "[false [\"java.lang.IllegalArgumentException\"] [\"java.io.Serializable\" \"java.lang.Exception\" \"java.lang.IllegalArgumentException\" \"java.lang.Object\" \"java.lang.RuntimeException\" \"java.lang.Throwable\"]]",
     ),
     ("java.lang.Object", "[false nil nil]"),
-    ("java.lang.Readable", "[true nil nil]"),
+    ("java.io.Readable", "[true nil nil]"),
     (
         "java.lang.ReflectiveOperationException",
         "[false [\"java.lang.Exception\"] [\"java.io.Serializable\" \"java.lang.Exception\" \"java.lang.Object\" \"java.lang.Throwable\"]]",
@@ -2155,6 +2318,301 @@ fn lattice_static_rows() {
         );
         assert_eq!(run(&mut eval, &src), *want, "{fqn}");
     }
+}
+
+// The 72 #74 rows (65 defaults + 7 closure), transcribed from JDK 21
+// class declarations — the same source the 214 oracle rows agree
+// with where they overlap. Unlike `LATTICE_STATIC` this mirror is
+// not oracle-verbatim (no probe names these classes); it guards the
+// transcription + wiring against drift. `supers` is derived by the
+// already-pinned closure walk, so the loop pins `[isInterface
+// ordered-bases]`; the spot checks below pin `supers` over each new
+// closure chain. `java.lang.Compiler` is excluded from the loop
+// (importing it throws by design — shadowed default) and pinned via
+// unmap instead.
+const LATTICE_DEFAULTS: &[(&str, &str)] = &[
+    ("clojure.asm.Opcodes", "[true nil]"),
+    (
+        "clojure.lang.Compiler",
+        "[false [\"java.lang.Object\" \"clojure.asm.Opcodes\"]]",
+    ),
+    (
+        "java.lang.AbstractMethodError",
+        "[false [\"java.lang.IncompatibleClassChangeError\"]]",
+    ),
+    (
+        "java.lang.AbstractStringBuilder",
+        "[false [\"java.lang.Object\" \"java.lang.Appendable\" \"java.lang.CharSequence\"]]",
+    ),
+    ("java.lang.AnnotatedElement", "[true nil]"),
+    (
+        "java.lang.ArrayStoreException",
+        "[false [\"java.lang.RuntimeException\"]]",
+    ),
+    (
+        "java.lang.BootstrapMethodError",
+        "[false [\"java.lang.LinkageError\"]]",
+    ),
+    (
+        "java.lang.Byte",
+        "[false [\"java.lang.Number\" \"java.lang.Comparable\" \"java.lang.constant.Constable\" \"java.lang.constant.ConstantDesc\"]]",
+    ),
+    (
+        "java.lang.ClassCircularityError",
+        "[false [\"java.lang.LinkageError\"]]",
+    ),
+    (
+        "java.lang.ClassFormatError",
+        "[false [\"java.lang.LinkageError\"]]",
+    ),
+    ("java.lang.ClassLoader", "[false [\"java.lang.Object\"]]"),
+    ("java.lang.ClassValue", "[false [\"java.lang.Object\"]]"),
+    (
+        "java.lang.CloneNotSupportedException",
+        "[false [\"java.lang.Exception\"]]",
+    ),
+    (
+        "java.lang.Deprecated",
+        "[true [\"java.lang.annotation.Annotation\"]]",
+    ),
+    (
+        "java.lang.Enum",
+        "[false [\"java.lang.Object\" \"java.lang.constant.Constable\" \"java.lang.Comparable\" \"java.io.Serializable\"]]",
+    ),
+    (
+        "java.lang.EnumConstantNotPresentException",
+        "[false [\"java.lang.RuntimeException\"]]",
+    ),
+    (
+        "java.lang.ExceptionInInitializerError",
+        "[false [\"java.lang.LinkageError\"]]",
+    ),
+    (
+        "java.lang.Float",
+        "[false [\"java.lang.Number\" \"java.lang.Comparable\" \"java.lang.constant.Constable\" \"java.lang.constant.ConstantDesc\"]]",
+    ),
+    (
+        "java.lang.IllegalAccessException",
+        "[false [\"java.lang.ReflectiveOperationException\"]]",
+    ),
+    (
+        "java.lang.IllegalCallerException",
+        "[false [\"java.lang.SecurityException\"]]",
+    ),
+    (
+        "java.lang.IllegalMonitorStateException",
+        "[false [\"java.lang.RuntimeException\"]]",
+    ),
+    (
+        "java.lang.IllegalThreadStateException",
+        "[false [\"java.lang.IllegalArgumentException\"]]",
+    ),
+    (
+        "java.lang.InheritableThreadLocal",
+        "[false [\"java.lang.ThreadLocal\"]]",
+    ),
+    (
+        "java.lang.InstantiationError",
+        "[false [\"java.lang.IncompatibleClassChangeError\"]]",
+    ),
+    (
+        "java.lang.InstantiationException",
+        "[false [\"java.lang.ReflectiveOperationException\"]]",
+    ),
+    (
+        "java.lang.Integer",
+        "[false [\"java.lang.Number\" \"java.lang.Comparable\" \"java.lang.constant.Constable\" \"java.lang.constant.ConstantDesc\"]]",
+    ),
+    (
+        "java.lang.InternalError",
+        "[false [\"java.lang.VirtualMachineError\"]]",
+    ),
+    (
+        "java.lang.InterruptedException",
+        "[false [\"java.lang.Exception\"]]",
+    ),
+    (
+        "java.lang.LayerInstantiationException",
+        "[false [\"java.lang.RuntimeException\"]]",
+    ),
+    ("java.lang.Math", "[false [\"java.lang.Object\"]]"),
+    ("java.lang.ModuleLayer", "[false [\"java.lang.Object\"]]"),
+    (
+        "java.lang.NoClassDefFoundError",
+        "[false [\"java.lang.LinkageError\"]]",
+    ),
+    (
+        "java.lang.NoSuchFieldError",
+        "[false [\"java.lang.IncompatibleClassChangeError\"]]",
+    ),
+    (
+        "java.lang.NoSuchFieldException",
+        "[false [\"java.lang.ReflectiveOperationException\"]]",
+    ),
+    (
+        "java.lang.NoSuchMethodError",
+        "[false [\"java.lang.IncompatibleClassChangeError\"]]",
+    ),
+    (
+        "java.lang.NoSuchMethodException",
+        "[false [\"java.lang.ReflectiveOperationException\"]]",
+    ),
+    (
+        "java.lang.OutOfMemoryError",
+        "[false [\"java.lang.VirtualMachineError\"]]",
+    ),
+    (
+        "java.lang.Override",
+        "[true [\"java.lang.annotation.Annotation\"]]",
+    ),
+    (
+        "java.lang.Package",
+        "[false [\"java.lang.Object\" \"java.lang.AnnotatedElement\"]]",
+    ),
+    ("java.lang.Process", "[false [\"java.lang.Object\"]]"),
+    ("java.lang.ProcessBuilder", "[false [\"java.lang.Object\"]]"),
+    ("java.lang.ProcessHandle", "[true nil]"),
+    ("java.lang.Runtime", "[false [\"java.lang.Object\"]]"),
+    (
+        "java.lang.RuntimePermission",
+        "[false [\"java.security.BasicPermission\"]]",
+    ),
+    (
+        "java.lang.SecurityException",
+        "[false [\"java.lang.RuntimeException\"]]",
+    ),
+    (
+        "java.lang.SecurityManager",
+        "[false [\"java.lang.Object\"]]",
+    ),
+    (
+        "java.lang.Short",
+        "[false [\"java.lang.Number\" \"java.lang.Comparable\" \"java.lang.constant.Constable\" \"java.lang.constant.ConstantDesc\"]]",
+    ),
+    (
+        "java.lang.StackOverflowError",
+        "[false [\"java.lang.VirtualMachineError\"]]",
+    ),
+    (
+        "java.lang.StackTraceElement",
+        "[false [\"java.lang.Object\" \"java.io.Serializable\"]]",
+    ),
+    ("java.lang.StackWalker", "[false [\"java.lang.Object\"]]"),
+    ("java.lang.StrictMath", "[false [\"java.lang.Object\"]]"),
+    (
+        "java.lang.StringBuffer",
+        "[false [\"java.lang.AbstractStringBuilder\" \"java.io.Serializable\" \"java.lang.Comparable\" \"java.lang.CharSequence\"]]",
+    ),
+    (
+        "java.lang.StringBuilder",
+        "[false [\"java.lang.AbstractStringBuilder\" \"java.io.Serializable\" \"java.lang.Comparable\" \"java.lang.CharSequence\"]]",
+    ),
+    (
+        "java.lang.SuppressWarnings",
+        "[true [\"java.lang.annotation.Annotation\"]]",
+    ),
+    ("java.lang.System", "[false [\"java.lang.Object\"]]"),
+    (
+        "java.lang.Thread",
+        "[false [\"java.lang.Object\" \"java.lang.Runnable\"]]",
+    ),
+    ("java.lang.Thread$State", "[false [\"java.lang.Enum\"]]"),
+    ("java.lang.Thread$UncaughtExceptionHandler", "[true nil]"),
+    ("java.lang.ThreadDeath", "[false [\"java.lang.Error\"]]"),
+    (
+        "java.lang.ThreadGroup",
+        "[false [\"java.lang.Object\" \"java.lang.Thread$UncaughtExceptionHandler\"]]",
+    ),
+    ("java.lang.ThreadLocal", "[false [\"java.lang.Object\"]]"),
+    (
+        "java.lang.TypeNotPresentException",
+        "[false [\"java.lang.RuntimeException\"]]",
+    ),
+    (
+        "java.lang.UnknownError",
+        "[false [\"java.lang.VirtualMachineError\"]]",
+    ),
+    (
+        "java.lang.UnsatisfiedLinkError",
+        "[false [\"java.lang.LinkageError\"]]",
+    ),
+    (
+        "java.lang.UnsupportedClassVersionError",
+        "[false [\"java.lang.ClassFormatError\"]]",
+    ),
+    (
+        "java.lang.VerifyError",
+        "[false [\"java.lang.LinkageError\"]]",
+    ),
+    (
+        "java.lang.VirtualMachineError",
+        "[false [\"java.lang.Error\"]]",
+    ),
+    ("java.lang.Void", "[false [\"java.lang.Object\"]]"),
+    ("java.lang.annotation.Annotation", "[true nil]"),
+    (
+        "java.security.BasicPermission",
+        "[false [\"java.security.Permission\"]]",
+    ),
+    ("java.security.Guard", "[true nil]"),
+    (
+        "java.security.Permission",
+        "[false [\"java.lang.Object\" \"java.security.Guard\" \"java.io.Serializable\"]]",
+    ),
+];
+
+#[test]
+fn lattice_defaults_rows() {
+    let mut eval = boot();
+    assert_eq!(LATTICE_DEFAULTS.len(), 72);
+    for (fqn, want) in LATTICE_DEFAULTS {
+        let src = format!(
+            "(let [c (clojure.core/__import* \"{fqn}\")] [(.isInterface c) (when-let [b (seq (bases c))] (vec (map #(.getName ^Class %) b)))])"
+        );
+        assert_eq!(run(&mut eval, &src), *want, "{fqn}");
+    }
+    // `supers` over each new closure chain (full `lat` shape).
+    let lat = "(fn [c] [(.isInterface c) (when-let [b (seq (bases c))] (vec (map #(.getName ^Class %) b))) (when-let [s (seq (supers c))] (vec (sort (map #(.getName ^Class %) s))))])";
+    for (fqn, want) in [
+        (
+            "java.lang.StringBuffer",
+            "[false [\"java.lang.AbstractStringBuilder\" \"java.io.Serializable\" \"java.lang.Comparable\" \"java.lang.CharSequence\"] [\"java.io.Serializable\" \"java.lang.AbstractStringBuilder\" \"java.lang.Appendable\" \"java.lang.CharSequence\" \"java.lang.Comparable\" \"java.lang.Object\"]]",
+        ),
+        (
+            "java.lang.RuntimePermission",
+            "[false [\"java.security.BasicPermission\"] [\"java.io.Serializable\" \"java.lang.Object\" \"java.security.BasicPermission\" \"java.security.Guard\" \"java.security.Permission\"]]",
+        ),
+        (
+            "java.lang.ThreadGroup",
+            "[false [\"java.lang.Object\" \"java.lang.Thread$UncaughtExceptionHandler\"] [\"java.lang.Object\" \"java.lang.Thread$UncaughtExceptionHandler\"]]",
+        ),
+        (
+            "java.lang.Package",
+            "[false [\"java.lang.Object\" \"java.lang.AnnotatedElement\"] [\"java.lang.AnnotatedElement\" \"java.lang.Object\"]]",
+        ),
+        (
+            "java.lang.Deprecated",
+            "[true [\"java.lang.annotation.Annotation\"] [\"java.lang.annotation.Annotation\"]]",
+        ),
+        (
+            "clojure.lang.Compiler",
+            "[false [\"java.lang.Object\" \"clojure.asm.Opcodes\"] [\"clojure.asm.Opcodes\" \"java.lang.Object\"]]",
+        ),
+    ] {
+        let src = format!("({lat} (clojure.core/__import* \"{fqn}\"))");
+        assert_eq!(run(&mut eval, &src), want, "{fqn}");
+    }
+    // The shadowed `java.lang.Compiler` edge row: unmap the default,
+    // then the import succeeds and answers `[Object]`/`[Object]`.
+    assert_eq!(
+        run(
+            &mut eval,
+            &format!(
+                "(do (in-ns 'impce) (clojure.core/refer-clojure) (ns-unmap 'impce 'Compiler) (import 'java.lang.Compiler) ({lat} (resolve 'Compiler)))"
+            ),
+        ),
+        "[false [\"java.lang.Object\"] [\"java.lang.Object\"]]"
+    );
 }
 
 // The four tabled-but-unprobed static rows (§1.3): the two

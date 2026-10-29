@@ -64,7 +64,10 @@ pub struct Namespace {
 
 impl Namespace {
     /// A fresh namespace with a registry-issued id (`nil` meta,
-    /// like the JVM).
+    /// like the JVM) and the JVM default imports seeded (#74 —
+    /// `RT.DEFAULT_IMPORTS`, flat like upstream: explicit imports
+    /// conflict with same-named defaults exactly like explicit
+    /// entries).
     #[must_use]
     pub fn new(name: &str, id: u64) -> Self {
         Self {
@@ -74,7 +77,7 @@ impl Namespace {
             ids: HashMap::new(),
             aliases: HashMap::new(),
             refers: HashMap::new(),
-            imports: HashMap::new(),
+            imports: crate::classemu::default_imports().collect(),
             meta: None,
         }
     }

@@ -61,7 +61,7 @@ Creating, finding, and wiring namespaces; loading code into them.
 | `ns-publics` | implemented | |
 | `ns-refers` | implemented | |
 | `ns-map` | implemented | |
-| `ns-imports` | implemented | explicit table (sorted), fresh-ns `{}`, coercions (classemu.rs ns_imports_table, ns_imports_coercions) |
+| `ns-imports` | implemented | explicit table (sorted), fresh-ns 106 defaults, coercions, conflicts (classemu.rs ns_imports_table, ns_imports_coercions, default_imports) |
 | `ns-unmap` | implemented | |
 | `ns-unalias` | implemented | |
 | `load` | implemented | file by path over `*load-path*` |

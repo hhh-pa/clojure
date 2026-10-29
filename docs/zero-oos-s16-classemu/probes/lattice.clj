@@ -195,7 +195,9 @@
 (throwof "l-java.lang.Number" '(lat java.lang.Number))
 (throwof "l-java.lang.NumberFormatException" '(lat java.lang.NumberFormatException))
 (throwof "l-java.lang.Object" '(lat java.lang.Object))
-(throwof "l-java.lang.Readable" '(lat java.lang.Readable))
+;; #74 correction: `Readable` is `java.io` (the old `java.lang.Readable`
+;; names a nonexistent class, so the JVM run threw CNFE here).
+(throwof "l-java.io.Readable" '(lat java.io.Readable))
 (throwof "l-java.lang.ReflectiveOperationException" '(lat java.lang.ReflectiveOperationException))
 (throwof "l-java.lang.Runnable" '(lat java.lang.Runnable))
 (throwof "l-java.lang.RuntimeException" '(lat java.lang.RuntimeException))
