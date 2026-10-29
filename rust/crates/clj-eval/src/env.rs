@@ -411,9 +411,10 @@ impl NamespaceRegistry {
 
     /// Drop a namespace (aliases pointing at it dangle, like the
     /// JVM; var ids are never reused). The namespace survives as
-    /// a tombstone, so stale handles and captured vars keep
-    /// reading their frozen state; only resolution treats the
-    /// name as gone.
+    /// a tombstone, so stale handles, captured vars, and the
+    /// removed current namespace's own unqualified resolution keep
+    /// reading their frozen state; only qualified resolution
+    /// treats the name as gone.
     pub fn remove_ns(&mut self, name: &str) -> bool {
         let Some(ns) = self.namespaces.remove(name) else {
             return false;
@@ -453,8 +454,7 @@ impl NamespaceRegistry {
     /// namespace argument, not the current one).
     #[must_use]
     pub fn namespace_target_in<'a>(&'a self, ns_name: &str, part: &'a str) -> Option<&'a str> {
-        self.namespaces
-            .get(ns_name)
+        self.ns_live_or_removed(ns_name)
             .and_then(|ns| ns.aliases.get(part))
             .map(|(target, _)| target.as_str())
             .or_else(|| self.namespaces.contains_key(part).then_some(part))
@@ -475,12 +475,21 @@ impl NamespaceRegistry {
         match sym.namespace() {
             Some(part) => {
                 let target = self.namespace_target_in(ns_name, part)?;
-                let ns = self.namespaces.get(target)?;
+                // Live-or-removed: aliases dangle into tombstones
+                // (upstream `namespaceFor` returns the alias object
+                // liveness-blind; #81). Global names resolve live
+                // only — `namespace_target_in` never yields a
+                // removed one — so only alias targets read frozen
+                // state here.
+                let ns = self.ns_live_or_removed(target)?;
                 let q = Symbol::new(Some(target), sym.name());
                 ns.ids.contains_key(&q).then_some(q)
             }
             None => {
-                let home = self.namespaces.get(ns_name)?;
+                // A removed current namespace still resolves its own
+                // mappings (like the JVM's detached object — the
+                // `*ns*` handle outlives the name).
+                let home = self.ns_live_or_removed(ns_name)?;
                 let q = Symbol::new(Some(ns_name), sym.name());
                 if home.ids.contains_key(&q) {
                     return Some(q);
@@ -513,7 +522,7 @@ impl NamespaceRegistry {
     #[must_use]
     pub fn lookup_in(&self, ns_name: &str, sym: &Symbol) -> Option<u64> {
         let target = self.resolve_in(ns_name, sym)?;
-        let ns = self.namespaces.get(target.namespace()?)?;
+        let ns = self.ns_live_or_removed(target.namespace()?)?;
         ns.ids.get(&target).copied()
     }
 
@@ -534,6 +543,20 @@ impl NamespaceRegistry {
         let id = ns.intern(&q, next_id);
         by_id.insert(id, ns_name);
         id
+    }
+
+    /// Intern a `def`-family target: qualify into the current
+    /// namespace, then intern live-or-removed (a removed current
+    /// namespace's tombstone absorbs the `def` — the JVM's
+    /// detached `*ns*` object — instead of resurrecting the
+    /// name); create only when the name is in neither map
+    /// (T73 finding 4 round 2: `def`/`declare`/`defmacro` after
+    /// `remove-ns` must not bring the namespace back).
+    pub fn intern_def_target(&mut self, sym: &Symbol) -> u64 {
+        let q = self.qualify(sym);
+        let ns_name = q.namespace().unwrap_or(&self.current).to_owned();
+        self.intern_in(&ns_name, &q)
+            .unwrap_or_else(|| self.intern(&q))
     }
 
     /// Intern a var into a live or removed namespace (never
@@ -929,6 +952,12 @@ impl SharedRegistry {
         self.lock().registry.intern_in(ns_name, sym)
     }
 
+    /// Intern a `def`-family target (see
+    /// [`NamespaceRegistry::intern_def_target`]).
+    pub fn intern_def_target(&self, sym: &Symbol) -> u64 {
+        self.lock().registry.intern_def_target(sym)
+    }
+
     /// Intern a var through a handle-pinned id (see
     /// [`NamespaceRegistry::intern_in_pinned`]).
     pub fn intern_in_pinned(
@@ -1263,9 +1292,16 @@ mod tests {
         let mut reg = rigged();
         assert!(reg.remove_ns("lib"));
         // The alias still names a namespace (probe34
-        // `ns-alias-removed`); the var itself is gone.
+        // `ns-alias-removed`): it resolves to the detached object
+        // (upstream `namespaceFor` returns the alias object
+        // liveness-blind), so an existing var is found while a
+        // missing one keeps the `No such var` shape (#81).
         assert_eq!(reg.namespace_target("q"), Some("lib"));
-        assert_eq!(reg.resolve(&sym(Some("q"), "v")), None);
+        assert_eq!(
+            reg.resolve(&sym(Some("q"), "v")),
+            Some(sym(Some("lib"), "v"))
+        );
+        assert_eq!(reg.resolve(&sym(Some("q"), "missing")), None);
         assert_eq!(reg.namespace_target("lib"), None);
         // Stale refers stop resolving instead of resurrecting
         // the namespace (fenced: the JVM keeps the var object).

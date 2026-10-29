@@ -834,6 +834,25 @@ fn syntax_quote_macros() {
 }
 
 #[test]
+fn t80_syntax_quote_keeps_refers_post_removal() {
+    // #80: syntax-quote resolves through refers even after the
+    // current namespace is removed (the detached `*ns*` object
+    // keeps its refers, like the JVM).
+    let mut eval = boot();
+    run_last(&mut eval, "(clojure.core/create-ns 'torture.sq)");
+    run_last(&mut eval, "(clojure.core/in-ns 'torture.sq)");
+    run_last(&mut eval, "(clojure.core/refer 'clojure.core)");
+    assert_eq!(run_last(&mut eval, "`inc"), "clojure.core/inc");
+    run_last(&mut eval, "(clojure.core/remove-ns 'torture.sq)");
+    assert_eq!(run_last(&mut eval, "`inc"), "clojure.core/inc");
+    // The `read-string` path syncs the same way.
+    assert_eq!(
+        run_last(&mut eval, "(eval (read-string \"`inc\"))"),
+        "clojure.core/inc"
+    );
+}
+
+#[test]
 fn shadowable_new_forms() {
     let mut eval = boot();
     // Locals shadow the new builtins.

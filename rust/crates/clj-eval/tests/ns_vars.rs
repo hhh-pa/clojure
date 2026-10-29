@@ -1046,3 +1046,255 @@ fn require_entry_libspec() {
         "java.lang.IllegalArgumentException | Don't know how to create ISeq from: java.lang.Long"
     );
 }
+
+#[test]
+fn t73_removed_current_ns_resolves_own_mappings() {
+    // Torture #73 finding 4: after remove-ns, the removed current
+    // namespace still resolves its refers (like the JVM's detached
+    // object); the name itself is gone.
+    let mut eval = boot();
+    run(
+        &mut eval,
+        "(clojure.core/create-ns 'torture.scratch) (clojure.core/in-ns 'torture.scratch)",
+    );
+    run(&mut eval, "(clojure.core/refer 'clojure.core)");
+    run(
+        &mut eval,
+        "(clojure.core/intern 'torture.scratch 'myval 123)",
+    );
+    assert_eq!(run_last(&mut eval, "myval"), "123");
+    run(&mut eval, "(clojure.core/remove-ns 'torture.scratch)");
+    // Round 2: own mappings resolve through the tombstone (the
+    // `*ns*` object outlives the name), refers keep working, and
+    // nothing resurrects the namespace.
+    assert_eq!(run_last(&mut eval, "myval"), "123");
+    assert_eq!(run_last(&mut eval, "(inc 41)"), "42");
+    assert_eq!(
+        run_last(&mut eval, "(resolve 'myval)"),
+        "#'torture.scratch/myval"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(nil? (find-ns 'torture.scratch))"),
+        "true"
+    );
+}
+
+#[test]
+fn t73_removed_current_ns_def_no_resurrect() {
+    // Torture #73 finding 4 round 2: `def`/`declare`/`defmacro`
+    // in the removed current namespace land in the tombstone
+    // (like the JVM's detached `*ns*` object) instead of
+    // resurrecting the name.
+    let mut eval = boot();
+    run(
+        &mut eval,
+        "(clojure.core/create-ns 'torture.defns) (clojure.core/in-ns 'torture.defns)",
+    );
+    run(&mut eval, "(clojure.core/refer 'clojure.core)");
+    run(&mut eval, "(clojure.core/remove-ns 'torture.defns)");
+    assert_eq!(run_last(&mut eval, "(def newv 7)"), "#'torture.defns/newv");
+    assert_eq!(run_last(&mut eval, "newv"), "7");
+    assert_eq!(
+        run_last(&mut eval, "(declare declv)"),
+        "#'torture.defns/declv"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(resolve 'declv)"),
+        "#'torture.defns/declv"
+    );
+    run(&mut eval, "(defmacro mymac [x] (list 'inc x))");
+    assert_eq!(run_last(&mut eval, "(mymac 41)"), "42");
+    assert_eq!(
+        run_last(&mut eval, "(nil? (find-ns 'torture.defns))"),
+        "true"
+    );
+}
+
+#[test]
+fn t73_removed_current_ns_deftype_own_protocol() {
+    // Torture #73 finding 4 round 2: interface-position protocol
+    // resolution reads the tombstone, so `deftype` in the removed
+    // current namespace can still implement its own protocols
+    // (like the JVM's detached `*ns*` object).
+    let mut eval = boot();
+    run(
+        &mut eval,
+        "(clojure.core/create-ns 'torture.pto) (clojure.core/in-ns 'torture.pto)",
+    );
+    run(&mut eval, "(clojure.core/refer 'clojure.core)");
+    run(&mut eval, "(defprotocol PP (pval [x]))");
+    run(&mut eval, "(clojure.core/remove-ns 'torture.pto)");
+    run(&mut eval, "(deftype PT [] PP (pval [this] 7))");
+    assert_eq!(run_last(&mut eval, "(pval (PT.))"), "7");
+    assert_eq!(run_last(&mut eval, "(nil? (find-ns 'torture.pto))"), "true");
+}
+
+#[test]
+fn t73_removed_cross_ns_stale_ref_keeps_root() {
+    // Torture #73 finding 4 round 2: a function compiled against a
+    // live namespace keeps reading its captured var after that
+    // namespace is removed (like the JVM's compiled `Var`
+    // reference) instead of resurrecting the name with an unbound
+    // var.
+    let mut eval = boot();
+    run(
+        &mut eval,
+        "(clojure.core/create-ns 'torture.other) (clojure.core/in-ns 'torture.other)",
+    );
+    run(&mut eval, "(clojure.core/refer 'clojure.core)");
+    run(&mut eval, "(def oval 5)");
+    run(&mut eval, "(clojure.core/in-ns 'user)");
+    run(&mut eval, "(defn getoval [] torture.other/oval)");
+    assert_eq!(run_last(&mut eval, "(getoval)"), "5");
+    run(&mut eval, "(clojure.core/remove-ns 'torture.other)");
+    assert_eq!(run_last(&mut eval, "(getoval)"), "5");
+    assert_eq!(
+        run_last(&mut eval, "(nil? (find-ns 'torture.other))"),
+        "true"
+    );
+}
+
+#[test]
+fn t81_dangling_alias_resolves_post_removal() {
+    // #81: aliases dangle into tombstones (upstream `namespaceFor`
+    // returns the alias object liveness-blind), so aliased
+    // evaluation and `resolve` agree after the target is removed.
+    let mut eval = boot();
+    run(
+        &mut eval,
+        "(clojure.core/create-ns 'torture.aliased) (clojure.core/in-ns 'torture.aliased)",
+    );
+    run(&mut eval, "(clojure.core/refer 'clojure.core)");
+    run(&mut eval, "(def aval 11)");
+    run(
+        &mut eval,
+        "(clojure.core/create-ns 'torture.aliaser) (clojure.core/in-ns 'torture.aliaser)",
+    );
+    run(&mut eval, "(clojure.core/refer 'clojure.core)");
+    run(&mut eval, "(clojure.core/alias 'tt 'torture.aliased)");
+    assert_eq!(run_last(&mut eval, "tt/aval"), "11");
+    assert_eq!(
+        run_last(&mut eval, "(resolve 'tt/aval)"),
+        "#'torture.aliased/aval"
+    );
+    run(&mut eval, "(clojure.core/remove-ns 'torture.aliased)");
+    assert_eq!(run_last(&mut eval, "tt/aval"), "11");
+    assert_eq!(
+        run_last(&mut eval, "(resolve 'tt/aval)"),
+        "#'torture.aliased/aval"
+    );
+}
+
+#[test]
+fn t79_unmapped_var_keeps_root_in_compiled_refs() {
+    // #79: vars captured by analysis keep their root after unmap
+    // (the JVM's compiled Var reference survives uninterning);
+    // evaluating them must not recreate unbound vars.
+    let mut eval = boot();
+    run(&mut eval, "(def myval 123)");
+    assert_eq!(
+        run_last(&mut eval, "((fn [] (do (ns-unmap *ns* 'myval) myval)))"),
+        "123"
+    );
+}
+
+#[test]
+fn t79_unmapped_var_in_removed_ns_keeps_root() {
+    // #79, removed-namespace variant: no resurrection either.
+    let mut eval = boot();
+    run(
+        &mut eval,
+        "(clojure.core/create-ns 'torture.unm) (clojure.core/in-ns 'torture.unm)",
+    );
+    run(&mut eval, "(clojure.core/refer 'clojure.core)");
+    run(&mut eval, "(def myval 123)");
+    run(&mut eval, "(clojure.core/remove-ns 'torture.unm)");
+    assert_eq!(
+        run_last(&mut eval, "((fn [] (do (ns-unmap *ns* 'myval) myval)))"),
+        "123"
+    );
+    assert_eq!(run_last(&mut eval, "(nil? (find-ns 'torture.unm))"), "true");
+}
+
+#[test]
+fn t79_unmapped_var_ref_forms_keep_identity() {
+    // #79: `var`/`with-redefs`/`set!` capture the var object too.
+    let mut eval = boot();
+    run(&mut eval, "(def myval 123)");
+    assert_eq!(
+        run_last(&mut eval, "((fn [] (ns-unmap *ns* 'myval) @#'myval))"),
+        "123"
+    );
+    run(&mut eval, "(def w 1)");
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "((fn [] (ns-unmap *ns* 'w) (with-redefs [w 2] w)))"
+        ),
+        "2"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(contains? (ns-interns *ns*) 'w)"),
+        "false"
+    );
+    run(&mut eval, "(def ^:dynamic d 0)");
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(binding [d 1] ((fn [] (ns-unmap *ns* 'd) (set! d 2))))"
+        ),
+        "2"
+    );
+}
+
+#[test]
+fn t79_bare_dot_form_stays_graceful() {
+    // #79: synthesized core heads on a bare evaluator resolve-or-
+    // intern at analyze time; the missing op surfaces downstream
+    // (never a panic). Pins the pre-refactor behavior.
+    let mut eval = Evaluator::new_bare("user");
+    let err = uncaught(&mut eval, "(.toString 1)");
+    assert_eq!(
+        err,
+        "java.lang.IllegalStateException | Attempting to call unbound fn: #'clojure.core/__meth*"
+    );
+}
+
+#[test]
+fn t73_resolve_qualified_into_removed_ns_is_nil() {
+    // Torture #73 round 2 LOW: qualified resolution into a removed
+    // namespace is nil (upstream `Compiler.namespaceFor` goes
+    // aliases-then-global with no self-name shortcut — even stale
+    // handles miss), while unqualified self-resolution still reads
+    // the tombstone.
+    let mut eval = boot();
+    run(
+        &mut eval,
+        "(clojure.core/create-ns 'torture.rsv) (clojure.core/in-ns 'torture.rsv)",
+    );
+    run(&mut eval, "(clojure.core/refer 'clojure.core)");
+    run(&mut eval, "(clojure.core/intern 'torture.rsv 'myval 123)");
+    assert_eq!(
+        run_last(&mut eval, "(resolve 'torture.rsv/myval)"),
+        "#'torture.rsv/myval"
+    );
+    run(&mut eval, "(def h *ns*)");
+    run(&mut eval, "(clojure.core/remove-ns 'torture.rsv)");
+    assert_eq!(run_last(&mut eval, "(resolve 'torture.rsv/myval)"), "nil");
+    assert_eq!(
+        uncaught(&mut eval, "(ns-resolve 'torture.rsv 'torture.rsv/myval)"),
+        "java.lang.Exception | No namespace: torture.rsv found"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(ns-resolve h 'torture.rsv/myval)"),
+        "nil"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(ns-resolve h 'myval)"),
+        "#'torture.rsv/myval"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(resolve 'myval)"),
+        "#'torture.rsv/myval"
+    );
+}

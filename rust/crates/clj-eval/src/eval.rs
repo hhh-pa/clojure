@@ -481,7 +481,9 @@ impl Evaluator {
             current_ns: cur.clone(),
             ..Default::default()
         };
-        if let Some(ns) = eval.registry.get(&cur) {
+        // Live-or-removed (the detached `*ns*` keeps aliases/refers,
+        // like the JVM; #80).
+        if let Some(ns) = eval.registry.ns_live_or_removed(&cur) {
             opts.aliases = ns.alias_map();
             opts.refers = ns.refer_map();
         }
@@ -752,21 +754,12 @@ impl Evaluator {
     pub fn eval(&mut self, expr: &Expr, env: &Env) -> Result<Value, Signal> {
         match expr {
             Expr::Literal(v) | Expr::Quote(v) => Ok(v.clone()),
-            Expr::VecLit(elems) => self.eval_vec(elems, env),
-            Expr::MapLit(pairs) => self.eval_map_lit(pairs, env),
-            Expr::SetLit(elems) => self.eval_set_lit(elems, env),
-            Expr::Global(sym) => {
-                let id = self.var_id(sym);
-                Ok(self.deref_var(id, sym))
-            }
+            Expr::VecLit(elems, meta) => self.eval_vec(elems, meta.clone(), env),
+            Expr::MapLit(pairs, meta) => self.eval_map_lit(pairs, meta.clone(), env),
+            Expr::SetLit(elems, meta) => self.eval_set_lit(elems, meta.clone(), env),
+            Expr::Global(var) => Ok(self.deref_var(var.id, &var.sym)),
             Expr::Local(idx) => Ok(env.get(*idx)),
-            Expr::VarRef(sym) => {
-                let id = self.var_id(sym);
-                Ok(Value::Var(Var {
-                    id,
-                    sym: sym.clone(),
-                }))
-            }
+            Expr::VarRef(var) => Ok(Value::Var(var.clone())),
             Expr::Def {
                 sym,
                 doc,
@@ -808,7 +801,7 @@ impl Evaluator {
                 catches,
                 finally_body,
             } => self.eval_try(body, catches, finally_body, env),
-            Expr::Set { sym, val } => self.eval_set(sym, val, env),
+            Expr::Set { var, val } => self.eval_set(var, val, env),
             Expr::Binding { pairs, body } => self.eval_binding(pairs, body, env),
             Expr::WithRedefs { pairs, body } => self.eval_with_redefs(pairs, body, env),
             Expr::WithBindings { map, body } => self.eval_with_bindings(map, body, env),
@@ -877,40 +870,67 @@ impl Evaluator {
         }
     }
 
-    /// A var id, interning on first reference.
-    fn var_id(&mut self, sym: &Symbol) -> u64 {
+    /// A var id, interning on first reference. Only synthesized
+    /// analyzer heads and VM-internal bindings reach here;
+    /// analyzer-captured paths (`Global`/`VarRef`/`Set`/`Binding`/
+    /// `WithRedefs`) carry their ids and never re-resolve (#79).
+    pub(crate) fn var_id(&mut self, sym: &Symbol) -> u64 {
         self.registry
             .lookup(sym)
+            .or_else(|| self.tombstone_id(sym))
             .unwrap_or_else(|| self.registry.intern(sym))
     }
 
+    /// A var id through a removed namespace's tombstone: every
+    /// caller feeds analyzer-resolved targets, so a lookup miss
+    /// means the home went away after analysis — and the
+    /// analyzer-captured var (ids are never reused) still answers
+    /// from frozen mappings, like the JVM's compiled `Var`
+    /// reference, without resurrecting the name (T73 finding 4
+    /// round 2; live homes win by name inside
+    /// `ns_live_or_removed`, so live behavior is untouched).
+    fn tombstone_id(&self, sym: &Symbol) -> Option<u64> {
+        let ns = sym.namespace()?;
+        self.registry.ns_live_or_removed(ns)?.lookup(sym)
+    }
+
     /// A vector literal (elements evaluate left to right).
-    fn eval_vec(&mut self, elems: &[Expr], env: &Env) -> Result<Value, Signal> {
+    fn eval_vec(&mut self, elems: &[Expr], meta: Option<Map>, env: &Env) -> Result<Value, Signal> {
         let mut out = Vec::with_capacity(elems.len());
         for elem in elems {
             out.push(self.eval(elem, env)?);
         }
-        Ok(Value::Vector(Vector::from_vec(out)))
+        Ok(Value::Vector(Vector::from_vec(out).with_meta(meta)))
     }
 
     /// A map literal (keys and values evaluate left to right).
-    fn eval_map_lit(&mut self, pairs: &[(Expr, Expr)], env: &Env) -> Result<Value, Signal> {
+    fn eval_map_lit(
+        &mut self,
+        pairs: &[(Expr, Expr)],
+        meta: Option<Map>,
+        env: &Env,
+    ) -> Result<Value, Signal> {
         let mut out = new_map();
         for (k, v) in pairs {
             let key = self.eval(k, env)?;
             let val = self.eval(v, env)?;
             out = out.insert(key, val);
         }
-        Ok(Value::Map(out))
+        Ok(Value::Map(out.with_meta(meta)))
     }
 
     /// A set literal (elements evaluate left to right).
-    fn eval_set_lit(&mut self, elems: &[Expr], env: &Env) -> Result<Value, Signal> {
+    fn eval_set_lit(
+        &mut self,
+        elems: &[Expr],
+        meta: Option<Map>,
+        env: &Env,
+    ) -> Result<Value, Signal> {
         let mut out = clj_value::new_set();
         for elem in elems {
             out = out.insert(self.eval(elem, env)?);
         }
-        Ok(Value::Set(out))
+        Ok(Value::Set(out.with_meta(meta)))
     }
 
     /// `letfn`: extend the frame, fill each slot with its closure
@@ -951,17 +971,16 @@ impl Evaluator {
 
     /// `set!`: rebind the thread-local top, else the root-binding
     /// error.
-    fn eval_set(&mut self, sym: &Symbol, val: &Expr, env: &Env) -> Result<Value, Signal> {
+    fn eval_set(&mut self, var: &Var, val: &Expr, env: &Env) -> Result<Value, Signal> {
         let value = self.eval(val, env)?;
-        let id = self.var_id(sym);
-        if self.bindings.set_top(id, value.clone()) {
+        if self.bindings.set_top(var.id, value.clone()) {
             Ok(value)
         } else {
             Err(self.throw(NativeError::new(
                 ThrowClass::IllegalStateException,
                 format!(
                     "Can't change/establish root binding of: {} with set",
-                    sym.name()
+                    var.sym.name()
                 ),
             )))
         }
@@ -975,7 +994,7 @@ impl Evaluator {
     /// so pre-body failures need no unwind.
     fn eval_binding(
         &mut self,
-        pairs: &[(Symbol, Expr)],
+        pairs: &[(Var, Expr)],
         body: &[Expr],
         env: &Env,
     ) -> Result<Value, Signal> {
@@ -983,27 +1002,19 @@ impl Evaluator {
         for (_, init) in pairs {
             values.push(self.eval(init, env)?);
         }
-        for (sym, _) in pairs {
-            let id = self.var_id(sym);
-            let dynamic = self.registry.state(id).is_some_and(|s| s.dynamic);
+        for (var, _) in pairs {
+            let dynamic = self.registry.state(var.id).is_some_and(|s| s.dynamic);
             if !dynamic {
                 return Err(self.throw(NativeError::new(
                     ThrowClass::IllegalStateException,
-                    format!("Can't dynamically bind non-dynamic var: {sym}"),
+                    format!("Can't dynamically bind non-dynamic var: {}", var.sym),
                 )));
             }
         }
         let depth = self.bindings.depth();
         let mut frame = Vec::with_capacity(pairs.len());
-        for ((sym, _), value) in pairs.iter().zip(values) {
-            let id = self.var_id(sym);
-            frame.push((
-                Var {
-                    id,
-                    sym: sym.clone(),
-                },
-                value,
-            ));
+        for ((var, _), value) in pairs.iter().zip(values) {
+            frame.push((var.clone(), value));
         }
         self.bindings.push_frame(frame);
         let result = self.eval_body(body, env);
@@ -1069,7 +1080,14 @@ impl Evaluator {
         env: &Env,
     ) -> Result<Value, Signal> {
         let writer = crate::io::string_writer(self);
-        let pairs = vec![(out.clone(), Expr::Literal(writer.clone()))];
+        let out_id = self.var_id(out);
+        let pairs = vec![(
+            Var {
+                id: out_id,
+                sym: out.clone(),
+            },
+            Expr::Literal(writer.clone()),
+        )];
         self.eval_binding(&pairs, body, env)?;
         let contents = crate::io::writer_contents(&writer).unwrap_or_default();
         Ok(Value::Str(Arc::from(contents.as_str())))
@@ -1091,7 +1109,14 @@ impl Evaluator {
             return Err(self.throw(crate::core::cce_err(&v, "java.lang.String")));
         };
         let reader = crate::reader::string_reader(self, text);
-        let pairs = vec![(input.clone(), Expr::Literal(reader))];
+        let input_id = self.var_id(input);
+        let pairs = vec![(
+            Var {
+                id: input_id,
+                sym: input.clone(),
+            },
+            Expr::Literal(reader),
+        )];
         self.eval_binding(&pairs, body, env)
     }
 
@@ -1202,14 +1227,14 @@ impl Evaluator {
     /// `finally`, even on throw (probe37 `wrd-*`).
     fn eval_with_redefs(
         &mut self,
-        pairs: &[(Symbol, Expr)],
+        pairs: &[(Var, Expr)],
         body: &[Expr],
         env: &Env,
     ) -> Result<Value, Signal> {
         let mut saves: Vec<(u64, Option<Value>, Value)> = Vec::with_capacity(pairs.len());
-        for (sym, init) in pairs {
+        for (var, init) in pairs {
             let value = self.eval(init, env)?;
-            let id = self.var_id(sym);
+            let id = var.id;
             match saves.iter_mut().find(|(i, _, _)| *i == id) {
                 Some(slot) => slot.2 = value,
                 None => {
@@ -1287,7 +1312,7 @@ impl Evaluator {
             fun,
             span,
         } = *parts;
-        let id = self.registry.intern(sym);
+        let id = self.registry.intern_def_target(sym);
         let closure = self.make_closure(fun, env);
         let dynamic = Self::dynamic_of(sym);
         let cur = self.current_ns_name();
@@ -1415,7 +1440,7 @@ impl Evaluator {
         span: Span,
         env: &Env,
     ) -> Result<Value, Signal> {
-        let id = self.registry.intern(sym);
+        let id = self.registry.intern_def_target(sym);
         let value = match init {
             Some(init) => Some(self.eval(init, env)?),
             None => None,

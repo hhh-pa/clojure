@@ -27,7 +27,7 @@ use std::ptr;
 use std::sync::Arc;
 
 use clj_eval::{NativeError, Prim};
-use clj_value::{List, Value, Vector};
+use clj_value::{Keyword, List, Value, Vector};
 
 use crate::runtime::{call_prim, error_line, print_join};
 
@@ -115,6 +115,30 @@ pub extern "C" fn rt_double(x: f64) -> *mut Value {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rt_str(ptr: *const u8, len: usize) -> *mut Value {
     give(Value::Str(Arc::from(unsafe { text(ptr, len) }.as_str())))
+}
+
+/// One keyword box: `name` is required; the `ns` slice is read
+/// only when `has_ns` is nonzero (`0` is unqualified — the slice
+/// must still be valid, but is never read).
+///
+/// # Safety
+///
+/// Both byte slices must be valid for their lengths.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rt_keyword(
+    name_ptr: *const u8,
+    name_len: usize,
+    ns_ptr: *const u8,
+    ns_len: usize,
+    has_ns: u8,
+) -> *mut Value {
+    let name = unsafe { text(name_ptr, name_len) };
+    let ns = if has_ns != 0 {
+        Some(unsafe { text(ns_ptr, ns_len) })
+    } else {
+        None
+    };
+    give(Value::Keyword(Keyword::new(ns.as_deref(), &name)))
 }
 
 /// One empty vector box.

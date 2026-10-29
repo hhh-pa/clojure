@@ -14,8 +14,8 @@ mod support;
 
 use clj_value::Value;
 use cljrt::{
-    rt_argv, rt_bool, rt_clone, rt_double, rt_drop, rt_int, rt_is_truthy, rt_nil, rt_str,
-    rt_vec_new, rt_vec_push,
+    rt_argv, rt_bool, rt_clone, rt_double, rt_drop, rt_int, rt_is_truthy, rt_keyword, rt_nil,
+    rt_str, rt_vec_new, rt_vec_push,
 };
 use support::{inbox, render};
 
@@ -42,6 +42,29 @@ fn string_boxes_decode_bytes() {
     assert_eq!(render(unsafe { rt_str("".as_ptr(), 0) }), "");
     let bad = b"a\xffb";
     assert_eq!(render(unsafe { rt_str(bad.as_ptr(), bad.len()) }), "a�b");
+}
+
+#[test]
+fn keyword_boxes_decode_parts() {
+    // T73 item 8: plain, namespaced, and non-ASCII keywords; any
+    // nonzero flag reads the ns slice, zero ignores it.
+    let miss = "miss";
+    let empty = "";
+    assert_eq!(
+        render(unsafe { rt_keyword(miss.as_ptr(), miss.len(), empty.as_ptr(), 0, 0) }),
+        ":miss"
+    );
+    let ns = "user";
+    let id = "id";
+    assert_eq!(
+        render(unsafe { rt_keyword(id.as_ptr(), id.len(), ns.as_ptr(), ns.len(), 7) }),
+        ":user/id"
+    );
+    let uni = "λ";
+    assert_eq!(
+        render(unsafe { rt_keyword(uni.as_ptr(), uni.len(), empty.as_ptr(), 0, 0) }),
+        ":λ"
+    );
 }
 
 #[test]

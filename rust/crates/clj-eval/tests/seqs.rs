@@ -1251,3 +1251,15 @@ fn sequence_eduction_rows() {
         "{:a 2}"
     );
 }
+
+#[test]
+fn t73_next_nil_puns_spent_repeats() {
+    // Torture #73 finding 6: `next` of an exhausted repeat is nil
+    // (like the JVM), so `get-in` down a repeat path terminates.
+    let mut eval = boot();
+    assert_eq!(run_last(&mut eval, "(nil? (next (repeat 1 0)))"), "true");
+    assert_eq!(
+        run_last(&mut eval, "(get-in [[[:leaf]]] (repeat 3 0))"),
+        ":leaf"
+    );
+}

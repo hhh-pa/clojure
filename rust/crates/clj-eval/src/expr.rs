@@ -20,7 +20,8 @@ use std::sync::Arc;
 
 use clj_reader::Span;
 use clj_value::{
-    Keyword, List, Map, PrintOpts, Symbol, Value, Vector, new_map, pr_to_string, print_to_string,
+    Keyword, List, Map, PrintOpts, Symbol, Value, Var, Vector, new_map, pr_to_string,
+    print_to_string,
 };
 
 use crate::core::cce_message;
@@ -123,12 +124,15 @@ pub enum CaseTest {
 pub enum Expr {
     /// Self-evaluating (atoms, quotes' values, `()`).
     Literal(Value),
-    /// Collection literals evaluate their elements.
-    VecLit(Vec<Expr>),
-    MapLit(Vec<(Expr, Expr)>),
-    SetLit(Vec<Expr>),
-    /// A resolved global (qualified `user/x`).
-    Global(Symbol),
+    /// Collection literals evaluate their elements (carrying the
+    /// reader form's metadata, like the JVM).
+    VecLit(Vec<Expr>, Option<Map>),
+    MapLit(Vec<(Expr, Expr)>, Option<Map>),
+    SetLit(Vec<Expr>, Option<Map>),
+    /// A resolved global (the captured `Var`: analysis resolves
+    /// the id once, like the JVM's compiled `Var` reference, so
+    /// evaluation never re-resolves or resurrects — #79).
+    Global(Var),
     /// A local slot index.
     Local(usize),
     /// `(def sym doc? init?)` (created in the ns at analyze time).
@@ -159,8 +163,8 @@ pub enum Expr {
     Fn(FunExpr),
     Recur(Vec<Expr>),
     Quote(Value),
-    /// `(var sym)` (resolved at analyze time).
-    VarRef(Symbol),
+    /// `(var sym)` (the captured `Var`, resolved at analyze time).
+    VarRef(Var),
     Throw(Box<Expr>),
     /// A freshly constructed throwable (pre/post `assert` failures;
     /// the evaluator stamps the identity).
@@ -173,20 +177,22 @@ pub enum Expr {
         catches: Vec<Catch>,
         finally_body: Vec<Expr>,
     },
-    /// `(set! global init)` (locals rejected at analyze time).
+    /// `(set! global init)` (locals rejected at analyze time;
+    /// the captured `Var`).
     Set {
-        sym: Symbol,
+        var: Var,
         val: Box<Expr>,
     },
-    /// `(binding [var init …] body…)` (S4 minimal surface form).
+    /// `(binding [var init …] body…)` (S4 minimal surface form;
+    /// pairs carry captured `Var`s).
     Binding {
-        pairs: Vec<(Symbol, Expr)>,
+        pairs: Vec<(Var, Expr)>,
         body: Vec<Expr>,
     },
     /// `(with-redefs [var init …] body…)` (S5B parallel root
-    /// swap; symbols are resolved, like `var`).
+    /// swap; pairs carry captured `Var`s, like `var`).
     WithRedefs {
-        pairs: Vec<(Symbol, Expr)>,
+        pairs: Vec<(Var, Expr)>,
         body: Vec<Expr>,
     },
     /// `(with-bindings map-expr body…)` (S5B).
@@ -743,7 +749,7 @@ impl<'a> Analyzer<'a> {
         for elem in v.iter() {
             out.push(self.analyze(elem, span, false)?);
         }
-        Ok(Expr::VecLit(out))
+        Ok(Expr::VecLit(out, v.meta().cloned()))
     }
 
     /// A map literal (keys and values analyze left to right).
@@ -755,7 +761,7 @@ impl<'a> Analyzer<'a> {
                 self.analyze(val, span, false)?,
             ));
         }
-        Ok(Expr::MapLit(out))
+        Ok(Expr::MapLit(out, m.meta().cloned()))
     }
 
     /// A set literal (elements analyze left to right).
@@ -764,7 +770,7 @@ impl<'a> Analyzer<'a> {
         for elem in s.iter() {
             out.push(self.analyze(elem, span, false)?);
         }
-        Ok(Expr::SetLit(out))
+        Ok(Expr::SetLit(out, s.meta().cloned()))
     }
 
     /// A body: every form non-tail except the last.
@@ -809,7 +815,7 @@ impl<'a> Analyzer<'a> {
             let id = self
                 .eval
                 .registry
-                .get(home)
+                .ns_live_or_removed(home)
                 .and_then(|ns| ns.lookup(&target))
                 .expect("resolve_in guarantees the var id exists");
             if home != cur && crate::macros::is_private_var(self.eval, id) {
@@ -830,7 +836,7 @@ impl<'a> Analyzer<'a> {
                     None,
                 ));
             }
-            return Ok(Expr::Global(target));
+            return Ok(Expr::Global(Var { id, sym: target }));
         }
         // S16: imports resolve after vars (the class, not a var) —
         // operator position shares this path.
@@ -979,6 +985,16 @@ impl<'a> Analyzer<'a> {
         Ok(Some(expr))
     }
 
+    /// A synthesized `clojure.core` head's captured var: resolve,
+    /// interning unbound when missing (bare evaluators analyze
+    /// dot/host forms without a booted core — the miss surfaces as
+    /// the usual unbound error at invoke, like before; #79).
+    fn synth_var(&mut self, op: &str) -> Var {
+        let sym = Symbol::new(Some("clojure.core"), op);
+        let id = self.eval.var_id(&sym);
+        Var { id, sym }
+    }
+
     /// Synthesize `(__op* 'Sym args…)` over an already-analyzed tail.
     fn dot_call(
         &mut self,
@@ -987,7 +1003,7 @@ impl<'a> Analyzer<'a> {
         args: &[&Value],
         span: Span,
     ) -> Result<Expr, CompileError> {
-        let head = Expr::Global(Symbol::new(Some("clojure.core"), op));
+        let head = Expr::Global(self.synth_var(op));
         let mut out = Vec::with_capacity(args.len() + 1);
         out.push(Expr::Quote(Value::Symbol(sym)));
         for arg in args {
@@ -1009,7 +1025,7 @@ impl<'a> Analyzer<'a> {
         args: &[&Value],
         span: Span,
     ) -> Result<Expr, CompileError> {
-        let head = Expr::Global(Symbol::new(Some("clojure.core"), op));
+        let head = Expr::Global(self.synth_var(op));
         let mut out = Vec::with_capacity(args.len() + 1);
         out.push(Expr::Quote(Value::Str(Arc::from(name))));
         for arg in args {
@@ -1116,7 +1132,7 @@ impl<'a> Analyzer<'a> {
         let id = self
             .eval
             .registry
-            .get(home)
+            .ns_live_or_removed(home)
             .and_then(|ns| ns.lookup(&target))
             .expect("resolve_in guarantees the var id exists");
         if crate::macros::is_macro_var(self.eval, id) {
@@ -1310,7 +1326,7 @@ impl<'a> Analyzer<'a> {
             .registry
             .qualify_in(&cur, sym)
             .with_meta(sym.meta().cloned());
-        self.eval.registry.intern(&qualified);
+        self.eval.registry.intern_def_target(&qualified);
         let init = init
             .map(|form| self.analyze(form, span, false).map(Box::new))
             .transpose()?;
@@ -1418,12 +1434,20 @@ impl<'a> Analyzer<'a> {
     /// var-forms): locals are invisible, refers and other
     /// namespaces are visible (probe34 `ns-var-refer`,
     /// `ns-var-cross`), and every miss is the single `Unable to
-    /// resolve var` shape (probe25).
-    fn resolve_var(&self, sym: &Symbol, span: Span, op: &str) -> Result<Symbol, CompileError> {
+    /// resolve var` shape (probe25). Captures the id (like the
+    /// JVM's compiled `Var` reference — #79).
+    fn resolve_var(&self, sym: &Symbol, span: Span, op: &str) -> Result<Var, CompileError> {
         // Locals are invisible: only namespace membership matters.
         let cur = self.current_ns();
         if let Some(target) = self.eval.registry.resolve_in(&cur, sym) {
-            Ok(target)
+            let home = target.namespace().unwrap_or("");
+            let id = self
+                .eval
+                .registry
+                .ns_live_or_removed(home)
+                .and_then(|ns| ns.lookup(&target))
+                .expect("resolve_in guarantees the var id exists");
+            Ok(Var { id, sym: target })
         } else {
             Err(self.err(
                 class::RUNTIME,
@@ -1562,8 +1586,8 @@ impl<'a> Analyzer<'a> {
                 Verb::Compiling,
                 Some("fn*".to_owned()),
             )),
-            Expr::Global(sym) => Ok(Expr::Set {
-                sym,
+            Expr::Global(var) => Ok(Expr::Set {
+                var,
                 val: Box::new(self.analyze(items[2], span, false)?),
             }),
             _ => Err(self.err(
@@ -2139,7 +2163,7 @@ impl<'a> Analyzer<'a> {
         fun.display = format!("{cur}/{}", name_sym.name());
         let qualified =
             Symbol::new(Some(&cur), name_sym.name()).with_meta(name_sym.meta().cloned());
-        self.eval.registry.intern(&qualified);
+        self.eval.registry.intern_def_target(&qualified);
         Ok(Expr::DefMacro {
             sym: qualified,
             doc,
@@ -2175,7 +2199,7 @@ impl<'a> Analyzer<'a> {
                 .registry
                 .qualify_in(&cur, sym)
                 .with_meta(sym.meta().cloned());
-            self.eval.registry.intern(&qualified);
+            self.eval.registry.intern_def_target(&qualified);
             syms.push(qualified);
         }
         Ok(Expr::Declare { syms, span })
@@ -4415,7 +4439,7 @@ impl<'a> Analyzer<'a> {
 
     /// Invoke a core var by qualified symbol (skips the private check).
     fn host_call(&mut self, name: &str, args: &[&Value], span: Span) -> Result<Expr, CompileError> {
-        let head = Expr::Global(Symbol::new(Some("clojure.core"), name));
+        let head = Expr::Global(self.synth_var(name));
         let mut analyzed = Vec::with_capacity(args.len());
         for arg in args {
             analyzed.push(self.analyze(arg, span, false)?);

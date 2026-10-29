@@ -14,7 +14,7 @@ below (verified this slice). Port deviations are explicit.
   attr-map accepted-and-ignored (no runtime effect
   in-subset — verified: expansion metadata never feeds
   subset values).
-- Bodies/statements: literals (Int/Double/Bool/Str/Vector
+- Bodies/statements: literals (Int/Double/Bool/Str/Keyword/Vector
   of subset), `if`/`do`/`let` (symbol bindings only, no
   destructuring), closed-set calls (`+ - * quot < <= >
   >= = count nth get conj`, unqualified or
