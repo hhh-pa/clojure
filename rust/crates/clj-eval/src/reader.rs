@@ -747,7 +747,10 @@ fn parse_read_tail(
 pub(crate) fn sync_reader_ns(eval: &Evaluator, opts: &mut ReaderOpts) {
     let cur = eval.current_ns_name();
     opts.current_ns = cur.clone();
-    if let Some(ns) = eval.registry.get(&cur) {
+    // Live-or-removed: a removed current namespace's tombstone keeps
+    // its aliases/refers (the detached `*ns*` object, like the JVM),
+    // so syntax-quote still resolves through refers (#80).
+    if let Some(ns) = eval.registry.ns_live_or_removed(&cur) {
         opts.aliases = ns.alias_map();
         opts.refers = ns.refer_map();
     }

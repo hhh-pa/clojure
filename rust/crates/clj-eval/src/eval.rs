@@ -481,7 +481,9 @@ impl Evaluator {
             current_ns: cur.clone(),
             ..Default::default()
         };
-        if let Some(ns) = eval.registry.get(&cur) {
+        // Live-or-removed (the detached `*ns*` keeps aliases/refers,
+        // like the JVM; #80).
+        if let Some(ns) = eval.registry.ns_live_or_removed(&cur) {
             opts.aliases = ns.alias_map();
             opts.refers = ns.refer_map();
         }

@@ -149,9 +149,10 @@ the split (S5C extends it past macroexpansion).
 - `binding [*ns* …]` does not redirect analysis or installation:
   resolution, `refer`, `alias`, and `def` read the registry
   current only, until S5B syncs the two (fence).
-- `def`/`alias`/`refer` into a removed current namespace recreate
+- `alias`/`refer` into a removed current namespace recreate
   it (the JVM installs into the stale object — unprobed corner,
-  fenced).
+  fenced). `def`/`declare`/`defmacro` install into the tombstone
+  instead (T73 finding 4, like the JVM's detached `*ns*`).
 - `eval`-native error spans use the form's reader meta or 1:1
   (natives receive no caller span — fenced).
 
