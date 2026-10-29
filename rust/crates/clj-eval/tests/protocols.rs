@@ -788,6 +788,16 @@ fn extend_target_shapes() {
         uncaught(&mut eval, "(extend-type NoSuchType Greet (greet [this] 1))"),
         "java.lang.RuntimeException | Unable to resolve symbol: NoSuchType in this context"
     );
+    // A var holding a class-name string names its class (the
+    // legacy core `String`/`Long` shape; S16 retired the core
+    // stubs, so user vars carry it now).
+    assert_eq!(
+        run(
+            &mut eval,
+            "(do (def StrType \"java.lang.String\") (clojure.core/__extend* 'Greet 'StrType {:greet (fn [this] :str)}) (greet \"hi\"))"
+        ),
+        ":str"
+    );
 }
 
 #[test]

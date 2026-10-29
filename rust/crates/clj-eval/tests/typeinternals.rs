@@ -1115,6 +1115,21 @@ fn proxy_arity_miss_is_no_method() {
 }
 
 #[test]
+fn proxy_zero_arg_miss_is_no_field() {
+    // The same Default fall-through with zero args reaches the
+    // host-instance miss report — a non-surface name is the
+    // oracle's field error (port rule, pinned).
+    let mut eval = boot();
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(let [p (proxy [Object] [] (toString [] \"x\"))] (.nosuchzero p))"
+        ),
+        "java.lang.IllegalArgumentException | No matching field found: nosuchzero for class user$proxy"
+    );
+}
+
+#[test]
 fn proxy_str_call_shapes() {
     // `str` over a proxy whose `toString/0` answers a
     // non-string is the `String` cast; a throwing `toString/0`

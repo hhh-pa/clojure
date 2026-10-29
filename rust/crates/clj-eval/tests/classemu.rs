@@ -462,6 +462,23 @@ fn import_intern_refer_unmap() {
 }
 
 #[test]
+fn import_into_removed_ns_records_nothing() {
+    let mut eval = boot();
+    // i-removed-ns: in a removed current namespace, `resolve_in`
+    // answers the tombstone target but the live-only `lookup`
+    // misses, so the import falls through and records nothing
+    // (the live-only write drops) while still answering the
+    // class — and nothing resurrects the namespace.
+    run(
+        &mut eval,
+        "(do (in-ns 'impgone) (clojure.core/refer-clojure) (intern 'impgone 'Date 5) (remove-ns 'impgone))",
+    );
+    assert_eq!(run(&mut eval, "(import 'java.util.Date)"), "java.util.Date");
+    assert_eq!(run(&mut eval, "(resolve 'Date)"), "#'impgone/Date");
+    assert_eq!(run(&mut eval, "(nil? (find-ns 'impgone))"), "true");
+}
+
+#[test]
 fn import_deftype_roundtrip() {
     let mut eval = boot();
     // i-deftype-import/construct: host types import by qualified name
