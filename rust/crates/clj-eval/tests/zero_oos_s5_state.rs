@@ -680,16 +680,21 @@ fn await1_rows() {
     // `Thread/sleep`).
     // `i-basic` reformulated for determinism: the bare
     // `(send a inc) (await1 a)` races pool scheduling (inc may
-    // finish before await1 observes the queue). The gate/hold form
-    // below pins the same observable (await1 waits, @a answers 1)
-    // with a provably-nonempty queue: the blocked head plus the
-    // queued `inc` behind it; agent b releases the head
-    // asynchronously so no sleep is needed.
+    // finish before await1 observes the queue). The gate/hold
+    // form below pins the same observable (await1 waits, @a
+    // answers 1). The release still races in principle: if the
+    // main thread stalls between the release-send and await1's
+    // queue check, the pool can drain first (observed as a
+    // coverage flake on the `await1` blocking path). The
+    // second action's 5000ms `deref` timeout makes that
+    // practically impossible — await1 misses only on a >5s
+    // main-thread stall — while agent b's async release keeps
+    // the suite sleep-free.
     let mut eval = boot();
     assert_eq!(
         run_last(
             &mut eval,
-            "(let [a (agent 0) b (agent 0) gate (promise) hold (promise)] (send a (fn [s] (deliver gate :started) (deref hold) s)) (send a inc) (deref gate) (send b (fn [s] (deliver hold :go) s)) (await1 a) @a)"
+            "(let [a (agent 0) b (agent 0) gate (promise) hold (promise) never (promise)] (send a (fn [s] (deliver gate :started) (deref hold) s)) (send a (fn [s] (deref never 5000 :t) (inc s))) (deref gate) (send b (fn [s] (deliver hold :go) s)) (await1 a) @a)"
         ),
         "1"
     );
