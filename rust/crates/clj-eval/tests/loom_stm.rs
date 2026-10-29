@@ -6,7 +6,7 @@
 // the terms of this license.
 // You must not remove this notice, or any other, from this software.
 
-//! S19 STM loom mirror: the commit lock order (step 2 — ascending
+//! S19 STM loom mirror: the commit lock order (step 4 — ascending
 //! ids, spin-then-barge) and revalidation (step 3) under racing
 //! committers, modeled branch-for-branch after `stm.rs` with the
 //! spin bound as the model parameter (`MODEL_SPIN = 2`). Histories,
@@ -87,7 +87,7 @@ fn model_ensure(world: &Arc<ModelWorld>, tx: &mut ModelTxn, id: usize) -> usize 
     value
 }
 
-/// Step 2, mirrored (`spin_acquire`): ascending ids (asserted —
+/// Step 4, mirrored (`spin_acquire`): ascending ids (asserted —
 /// callers sort like `commit_targets`), `MODEL_SPIN` full `try_lock`
 /// rounds, then the blocking barge in the same order. Guards return
 /// aligned with `targets`.
@@ -132,7 +132,7 @@ fn model_acquire<'a>(
         .collect()
 }
 
-/// Steps 3+6, mirrored (`revalidate` + install): every recorded
+/// Steps 5+6, mirrored (`revalidate` + install): every recorded
 /// read's current point still equals the recorded point, else abort
 /// (guards drop); on success stamp one fresh point over every write.
 fn model_commit(

@@ -298,25 +298,38 @@ just decrement depth):
 1. Empty writes + commutes + ensures → return the body
    value with NO clock bump (read-only fast path;
    unobservable, avoids contention).
-2. Lock the write-set + ensure-set refs in ASCENDING Ref-id
+2. Re-run each ref's commutes IN ISSUE ORDER over (latest
+   committed ⊕ this txn's earlier non-commute writes to
+   that ref) (§1c composition) — lock-free, before any
+   guard is held. A commute recorded DURING the re-run
+   applies tx-locally but never reruns that commit
+   (port-defined: the JVM fail-fasts
+   `ConcurrentModificationException` — oracle
+   `u-latecommute-cme`; pinned in `stm_portside_pins`).
+3. Validate every written ref's final value (a veto ABORTS
+   with `Invalid reference state` — never retries) —
+   likewise lock-free. User code must never run under held
+   guards: a validator (or rerun fn) resolving a locked
+   target would block on its own transaction's guard
+   (single-threaded self-deadlock), or a concurrent
+   committer's (cross deadlock).
+4. Lock the write-set + ensure-set refs in ASCENDING Ref-id
    order: spin phase first (at most `MAX_SPIN_RETRIES =
    64` full `try_lock` rounds over the set, releasing all
    on any failure), then the BARGE phase (blocking
-   acquisition in the same order — deadlock-free by the
-   global order). §2c justifies the bound.
-3. Revalidate: every `reads` entry's current point still
+   acquisition in the same ascending order — deadlock-free
+   by the global order, since the user-code steps above
+   hold nothing). §2c justifies the bound. The target set
+   snapshots here, so rerun- and validator-phase joins
+   are locked members.
+5. Revalidate: every `reads` entry's current point still
    equals the recorded point (else drop locks, `Retry`).
    Ensured refs are covered by the same check (their
-   read-locking).
-4. Re-run each ref's commutes IN ISSUE ORDER over (latest
-   committed ⊕ this txn's earlier non-commute writes to
-   that ref) (§1c composition). A commute recorded DURING
-   the re-run applies tx-locally but never reruns that
-   commit (port-defined: the JVM fail-fasts
-   `ConcurrentModificationException` — oracle
-   `u-latecommute-cme`; pinned in `stm_portside_pins`).
-5. Validate every written ref's final value (a veto ABORTS
-   with `Invalid reference state` — never retries).
+   read-locking), and the rerun base pins through the
+   reads its first commute recorded (a base that shifted
+   under the lock-free rerun retries like any conflict).
+   Read-only refs try briefly — a held cell retries
+   rather than blocking into a lock cycle.
 6. Bump the clock ONCE; install every new current with the
    fresh point; push each old current onto its history.
 7. Trim each touched history: drop oldest while `len >
@@ -328,8 +341,8 @@ just decrement depth):
    other active readers this is exactly trim-to-min —
    every `r-history-*` row.)
 8. Pop the tx (drop locks BEFORE running user code —
-   validators already ran at step 5 under locks; watches
-   and sends run unlocked like the JVM).
+   reruns and validators ran lock-free at steps 2–3;
+   watches and sends run unlocked like the JVM).
 9. Fire watches in ascending Ref-id order, each ref's
    watches in insertion order (§1e).
 10. Dispatch the outbox in issue order through the normal
@@ -360,7 +373,7 @@ config — reuse the existing agent-queue style otherwise):
   B's write visible-after or retries — i.e. no schedule
   commits A blind to B (the revalidation check mirrored
   branch-for-branch).
-- The mirror tracks the real commit steps 2–3
+- The mirror tracks the real commit steps 4–5
   branch-for-branch; drift is a bug (same header contract
   as `loom_var_lock.rs`).
 
@@ -600,7 +613,7 @@ such guard to copy.
    the established analyzer-error mapping and pins
    `t-sync-arity0` exactly.
 3. **Loom model drift.** The §1g mirrors must track
-   commit steps 2–3 branch-for-branch (the
+   commit steps 4–5 branch-for-branch (the
    `loom_var_lock.rs` header contract); the bound-as-a-
    parameter keeps both phases under exploration.
 4. **Unpinned JVM corners.** Multi-ref commit order,

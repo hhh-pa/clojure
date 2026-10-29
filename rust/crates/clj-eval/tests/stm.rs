@@ -745,6 +745,22 @@ fn validator_watch_timing() {
     );
 }
 
+/// Commit-phase user code never resolves under held guards: a
+/// validator reading an ensure-only (locked, unwritten) ref commits
+/// instead of self-deadlocking (R1 H1 — validators and commute
+/// re-runs execute before the lock phase).
+#[test]
+fn validator_may_read_ensured_ref() {
+    let mut eval = boot_stm();
+    run_last(&mut eval, "(def r1 (ref 1)) (def r2 (ref 2))");
+    run_last(&mut eval, "(set-validator! r2 (fn [x] (deref r1) true))");
+    assert_eq!(
+        run_last(&mut eval, "(dosync (ensure r1) (ref-set r2 3))"),
+        "3"
+    );
+    assert_eq!(run_last(&mut eval, "@r2"), "3");
+}
+
 #[test]
 fn send_deferral() {
     let mut eval = boot_stm();

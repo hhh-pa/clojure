@@ -36,7 +36,7 @@ use crate::expr::Expr;
 use crate::ns::{NativeFnPtr, check_arity, npe, signal_to_native};
 use crate::vars::check_min_arity;
 
-/// Spin rounds before the commit barge (§1g step 2; §2c).
+/// Spin rounds before the commit barge (§1g step 4; §2c).
 const MAX_SPIN_RETRIES: u32 = 64;
 
 /// The commit clock (§1g): process-global, since refs are `Send +
@@ -248,6 +248,13 @@ fn call_signal(eval: &mut Evaluator, out: Result<Value, Signal>) -> Result<Value
 }
 
 /// The commit path (outermost `sync` exit only — §1g steps 1–11).
+/// User code (commute re-runs, validators) runs BEFORE any guard is
+/// held: resolving through `tx_deref` under held guards would block
+/// on the transaction's own targets (a validator reading an
+/// ensure-only ref self-deadlocks) or a concurrent committer's
+/// (cross deadlock) — so the lock phase comes after, and the single
+/// revalidation gates the install (a stale rerun base retries like
+/// any conflict).
 fn commit(eval: &mut Evaluator, body_value: Value) -> AttemptOutcome {
     debug_assert_eq!(tx_ref(eval).depth, 0, "commit runs at the outermost exit");
     if is_read_only(tx_ref(eval)) {
@@ -261,17 +268,20 @@ fn commit(eval: &mut Evaluator, body_value: Value) -> AttemptOutcome {
         }
         return AttemptOutcome::Done(body_value);
     }
-    let targets = commit_targets(tx_ref(eval));
-    let mut guards = spin_acquire(&targets);
-    if !revalidate(tx_ref(eval), &targets, &guards) {
-        return AttemptOutcome::Retry;
-    }
     if let Err(signal) = rerun_commutes(eval) {
         return AttemptOutcome::Throw(signal);
     }
     let validate_ids = write_ids(tx_ref(eval));
-    if let Err(signal) = validate_writes(eval, &targets, &guards, &validate_ids) {
+    if let Err(signal) = validate_writes(eval, &validate_ids) {
         return AttemptOutcome::Throw(signal);
+    }
+    // Targets snapshot after the user-code steps, so rerun- and
+    // validator-phase joins are locked members (never brief-lock
+    // stragglers at install).
+    let targets = commit_targets(tx_ref(eval));
+    let mut guards = spin_acquire(&targets);
+    if !revalidate(tx_ref(eval), &targets, &guards) {
+        return AttemptOutcome::Retry;
     }
     let install_ids = write_ids(tx_ref(eval));
     let installed = install_writes(eval, &targets, &mut guards, &install_ids);
@@ -292,7 +302,7 @@ fn is_read_only(tx: &Transaction) -> bool {
     tx.writes.is_empty() && tx.commutes.is_empty() && tx.ensures.is_empty()
 }
 
-/// Step 2's lock set: write-set + ensure-set refs in ascending id
+/// Step 4's lock set: write-set + ensure-set refs in ascending id
 /// order (the global order — deadlock-free).
 fn commit_targets(tx: &Transaction) -> Vec<(u64, Ref)> {
     let mut ids: Vec<u64> = tx
@@ -314,7 +324,7 @@ fn write_ids(tx: &Transaction) -> Vec<u64> {
     tx.writes.keys().copied().collect()
 }
 
-/// Step 2: spin up to `MAX_SPIN_RETRIES` full `try_lock` rounds over
+/// Step 4: spin up to `MAX_SPIN_RETRIES` full `try_lock` rounds over
 /// the set (releasing all on any failure), then barge with blocking
 /// acquisition in the same ascending order (§2c).
 fn spin_acquire(targets: &[(u64, Ref)]) -> Vec<MutexGuard<'_, RefState>> {
@@ -344,14 +354,15 @@ fn barge_acquire(targets: &[(u64, Ref)]) -> Vec<MutexGuard<'_, RefState>> {
 }
 
 /// A locked target's guard index (the targets ascend, so the search
-/// is exact — `None` for read-only or commit-phase-joined refs).
+/// is exact — `None` for read-only refs, which never lock).
 fn locked_index(targets: &[(u64, Ref)], id: u64) -> Option<usize> {
     targets.binary_search_by_key(&id, |(known, _)| *known).ok()
 }
 
-/// Step 3: every recorded read's current point still equals the
-/// recorded point (ensured refs ride the same check); a mismatch
-/// drops the locks and retries with a fresh start point.
+/// Step 5: every recorded read's current point still equals the
+/// recorded point (ensured refs ride the same check — the rerun
+/// base pins through the reads its first commute recorded); a
+/// mismatch drops the locks and retries with a fresh start point.
 fn revalidate(tx: &Transaction, targets: &[(u64, Ref)], guards: &[MutexGuard<RefState>]) -> bool {
     for (id, point) in tx.reads.iter() {
         if current_point(tx, targets, guards, *id) != *point {
@@ -362,7 +373,9 @@ fn revalidate(tx: &Transaction, targets: &[(u64, Ref)], guards: &[MutexGuard<Ref
 }
 
 /// A read ref's current point (locked cells read through the held
-/// guard; read-only refs lock briefly).
+/// guard; read-only refs try briefly — a held cell means a
+/// concurrent committer owns it, so retry like any conflict
+/// instead of blocking into a lock cycle).
 fn current_point(
     tx: &Transaction,
     targets: &[(u64, Ref)],
@@ -370,20 +383,24 @@ fn current_point(
     id: u64,
 ) -> u64 {
     if let Some(i) = locked_index(targets, id) {
-        guards[i].point
-    } else {
-        tx.touched[&id].lock().point
+        return guards[i].point;
+    }
+    match tx.touched[&id].try_lock() {
+        Some(state) => state.point,
+        None => raise_retry(),
     }
 }
 
-/// Step 4: re-run each ref's commutes in issue order over (latest
+/// Step 2: re-run each ref's commutes in issue order over (latest
 /// committed ⊕ this txn's earlier non-commute writes) — i.e. over
-/// the pre-first-commute snapshot, which revalidation pinned to
-/// latest (§1c). A rerun fn that commutes records tx-locally but the
-/// late commute never reruns this commit (DIVERGENCE, oracle
-/// `u-latecommute-cme`: the JVM fail-fasts with
-/// `ConcurrentModificationException` — the port snapshots instead
-/// of growing the shared `ThrowClass` for a pathological corner).
+/// the pre-first-commute snapshot, which the step-5 revalidation
+/// pins to latest (a stale base retries like any conflict — §1c).
+/// Runs lock-free, before any guard is held. A rerun fn that
+/// commutes records tx-locally but the late commute never reruns
+/// this commit (DIVERGENCE, oracle `u-latecommute-cme`: the JVM
+/// fail-fasts with `ConcurrentModificationException` — the port
+/// snapshots instead of growing the shared `ThrowClass` for a
+/// pathological corner).
 fn rerun_commutes(eval: &mut Evaluator) -> Result<(), Signal> {
     let plan: Vec<(u64, Value, Vec<Value>)> = tx_ref(eval).commutes.clone();
     if plan.is_empty() {
@@ -420,18 +437,16 @@ fn rerun_base(eval: &mut Evaluator, id: u64, finals: &BTreeMap<u64, Value>) -> V
         .expect("rerun base recorded at first commute")
 }
 
-/// Step 5: validate every written ref's final value, ascending id (a
-/// veto aborts — never retries). Validators run tx-live under the
-/// commit locks; their writes install but skip validation (the id
-/// list snapshots before the loop — oracle `u-valphase-*`).
-fn validate_writes(
-    eval: &mut Evaluator,
-    targets: &[(u64, Ref)],
-    guards: &[MutexGuard<RefState>],
-    ids: &[u64],
-) -> Result<(), Signal> {
+/// Step 3: validate every written ref's final value, ascending id (a
+/// veto aborts — never retries). Validators run tx-live with no
+/// guards held (lock-free like the reruns); their writes install
+/// but skip validation (the id list snapshots before the loop —
+/// oracle `u-valphase-*`). The validator slot reads briefly — a
+/// swap landing between validation and install races like the
+/// JVM's own volatile field (unpinned either way).
+fn validate_writes(eval: &mut Evaluator, ids: &[u64]) -> Result<(), Signal> {
     for id in ids {
-        let (candidate, validator) = write_candidate(eval, targets, guards, *id);
+        let (candidate, validator) = write_candidate(eval, *id);
         if let Some(vf) = validator {
             if let Err(error) = validate_new(eval, &vf, &candidate) {
                 return Err(eval.throw(error));
@@ -441,30 +456,21 @@ fn validate_writes(
     Ok(())
 }
 
-/// One validation's candidate plus its current validator (locked
-/// cells read through the held guard; rerun-phase writes lock
-/// briefly — they joined after the lock phase).
-fn write_candidate(
-    eval: &mut Evaluator,
-    targets: &[(u64, Ref)],
-    guards: &[MutexGuard<RefState>],
-    id: u64,
-) -> (Value, Option<Value>) {
+/// One validation's candidate plus its current validator (the slot
+/// reads briefly — validation holds no guards).
+fn write_candidate(eval: &mut Evaluator, id: u64) -> (Value, Option<Value>) {
     let candidate = tx_ref(eval)
         .writes
         .get(&id)
         .cloned()
         .expect("validated ids are written");
-    let validator = match locked_index(targets, id) {
-        Some(i) => guards[i].validator.clone(),
-        None => tx_ref(eval)
-            .touched
-            .get(&id)
-            .expect("validated ids are touched")
-            .lock()
-            .validator
-            .clone(),
-    };
+    let validator = tx_ref(eval)
+        .touched
+        .get(&id)
+        .expect("validated ids are touched")
+        .lock()
+        .validator
+        .clone();
     (candidate, validator)
 }
 
@@ -499,8 +505,9 @@ fn install_writes(
     out
 }
 
-/// Install one ref (locked cells mutate through the held guard; late
-/// rerun/validate-phase writes lock briefly).
+/// Install one ref through its held guard (every installed id is a
+/// locked member — targets snapshot after the user-code steps, and
+/// nothing joins between the snapshot and the install).
 fn install_one(
     eval: &mut Evaluator,
     targets: &[(u64, Ref)],
@@ -514,28 +521,14 @@ fn install_one(
         .get(&id)
         .cloned()
         .expect("installed ids are written");
-    if let Some(i) = locked_index(targets, id) {
-        let reff = targets[i].1.clone();
-        let (old, watches) = install_state(&mut guards[i], new.clone(), fresh, others);
-        Installed {
-            reff,
-            old,
-            new,
-            watches,
-        }
-    } else {
-        let reff = tx_ref(eval)
-            .touched
-            .get(&id)
-            .expect("installed ids are touched")
-            .clone();
-        let (old, watches) = install_state(&mut reff.lock(), new.clone(), fresh, others);
-        Installed {
-            reff,
-            old,
-            new,
-            watches,
-        }
+    let i = locked_index(targets, id).expect("installed ids are locked");
+    let reff = targets[i].1.clone();
+    let (old, watches) = install_state(&mut guards[i], new.clone(), fresh, others);
+    Installed {
+        reff,
+        old,
+        new,
+        watches,
     }
 }
 
@@ -1077,6 +1070,28 @@ mod tests {
             trim_history(&mut state, &[]);
             assert_eq!(state.history.len(), 1);
         }
+    }
+
+    #[test]
+    fn revalidate_retries_on_held_read_only_ref() {
+        // A read-only ref held by a concurrent committer: the brief
+        // try fails and the attempt retries (never blocks into a
+        // lock cycle — R1 H1).
+        let held = Ref::new(Value::Int(0));
+        let written = Ref::new(Value::Int(1));
+        let mut tx = Transaction::new(0);
+        tx.touched.insert(held.id(), held.clone());
+        tx.touched.insert(written.id(), written.clone());
+        tx.reads.insert(held.id(), 0);
+        tx.writes.insert(written.id(), Value::Int(2));
+        let targets = vec![(written.id(), written.clone())];
+        let guards = vec![written.lock()];
+        let _foreign = held.lock();
+        let payload = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            current_point(&tx, &targets, &guards, held.id())
+        }))
+        .expect_err("held read-only ref retries");
+        assert!(payload.is::<StmRetry>());
     }
 
     #[test]
