@@ -18,6 +18,7 @@
 //! predicate — behavior-equivalent calls stand in).
 
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 use clj_eval::{Evaluator, SourceError, boot};
 use clj_value::{PrintOpts, Value, pr_to_string};
@@ -678,26 +679,68 @@ fn await1_rows() {
     // k-await1-busy-in-action (`i-static` unpinned per Non-goals;
     // `k-await1-busy-in-action` blocks on gate/hold promises, not
     // `Thread/sleep`).
-    // `i-basic` reformulated for determinism: the bare
-    // `(send a inc) (await1 a)` races pool scheduling (inc may
-    // finish before await1 observes the queue). The gate/hold
-    // form below pins the same observable (await1 waits, @a
-    // answers 1). The release still races in principle: if the
-    // main thread stalls between the release-send and await1's
-    // queue check, the pool can drain first (observed as a
-    // coverage flake on the `await1` blocking path). The
-    // second action's 5000ms `deref` timeout makes that
-    // practically impossible — await1 misses only on a >5s
-    // main-thread stall — while agent b's async release keeps
-    // the suite sleep-free.
+    // `i-basic`: the gate/hold form pins the observable
+    // (await1 waits, @a answers 1). Its outcome is stable, but
+    // its *coverage* of the `await1` blocking path races pool
+    // scheduling (a stalled main thread can find the queue
+    // drained — observed as a floor flake); the white-box pin
+    // below owns that path deterministically.
     let mut eval = boot();
     assert_eq!(
         run_last(
             &mut eval,
-            "(let [a (agent 0) b (agent 0) gate (promise) hold (promise) never (promise)] (send a (fn [s] (deliver gate :started) (deref hold) s)) (send a (fn [s] (deref never 5000 :t) (inc s))) (deref gate) (send b (fn [s] (deliver hold :go) s)) (await1 a) @a)"
+            "(let [a (agent 0) b (agent 0) gate (promise) hold (promise)] (send a (fn [s] (deliver gate :started) (deref hold) s)) (send a inc) (deref gate) (send b (fn [s] (deliver hold :go) s)) (await1 a) @a)"
         ),
         "1"
     );
+    // Deterministic `await1` blocking-path pin (white-box): a
+    // releaser thread delivers `hold` only after observing the
+    // barrier's queue-count bump, which `send_barriers`
+    // performs strictly after `await1`'s nonempty check — so
+    // the check provably sees a nonempty queue in every
+    // interleaving (no sleeps, no margins; the 30s backstop
+    // only converts a hang into a loud failure).
+    {
+        run_last(
+            &mut eval,
+            "(do (def wb-a (agent 0)) (def wb-gate (promise)) (def wb-hold (promise)) nil)",
+        );
+        let agent = match eval.eval_source("wb-a").unwrap().pop().unwrap() {
+            Value::Agent(a) => a,
+            other => panic!("wb-a not an agent: {other:?}"),
+        };
+        let hold = match eval.eval_source("wb-hold").unwrap().pop().unwrap() {
+            Value::Promise(p) => p,
+            other => panic!("wb-hold not a promise: {other:?}"),
+        };
+        run_last(
+            &mut eval,
+            "(do (send wb-a (fn [s] (deliver wb-gate :started) (deref wb-hold) s)) (send wb-a inc) nil)",
+        );
+        eval.eval_source("(deref wb-gate)").unwrap();
+        // Frozen: the head runs on `hold`, `inc` queues behind.
+        assert_eq!(agent.queue_count(), 2);
+        let releaser = std::thread::spawn({
+            let agent = agent.clone();
+            let hold = hold.clone();
+            move || {
+                let start = Instant::now();
+                loop {
+                    if agent.queue_count() > 2 {
+                        assert!(hold.deliver(Value::Nil), "hold delivered once");
+                        return;
+                    }
+                    if start.elapsed() > Duration::from_secs(30) {
+                        panic!("await1 never enqueued its barrier");
+                    }
+                    std::thread::yield_now();
+                }
+            }
+        });
+        assert_eq!(run_last(&mut eval, "(= wb-a (await1 wb-a))"), "true");
+        releaser.join().expect("releaser finished");
+        assert_eq!(run_last(&mut eval, "@wb-a"), "1");
+    }
     assert_eq!(
         run_last(&mut eval, "(let [a (agent 0)] (= a (await1 a)))"),
         "true"
