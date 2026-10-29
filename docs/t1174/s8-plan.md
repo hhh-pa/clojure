@@ -18,7 +18,7 @@ naming the first unsupported form). TDD: subset corpus first
   `(defn ...)` BEFORE expansion): single-clause fixed-arity
   `defn` (+ optional docstring/attr-map, ignored) over
   `if`/`do`/`let` (symbol bindings only), literals
-  (Int/Double/Bool/Str/Vector-of-subset), direct calls to
+  (Int/Double/Bool/Str/Keyword/Vector-of-subset), direct calls to
   sibling `defn`s (self-calls are plain calls — no TCO,
   exactly like the JVM) or the closed primitive set
   (`+ - * quot < <= > >= = count nth get conj`, unqualified
