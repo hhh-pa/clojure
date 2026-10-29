@@ -1057,6 +1057,72 @@
             (throw-illegal-arg! (str "Invalid " kind " method: " (pr-str (apply list mname bodies))))))
         (map (fn [b] [mname (first b) (rest b)]) bodies))))
 
+(defn- directive? [n]
+  ;; A `:keys`/`:syms`/`:strs` directive (any namespace, `!`
+  ;; suffix allowed — the runtime matches the name prefix).
+  (and (>= (count n) 4)
+       (contains? #{"keys" "syms" "strs"} (subs n 0 4))))
+
+(defn- binding-syms-item [item]
+  ;; One `:keys`-family value item: idents bind their name (`&`
+  ;; binds nothing; anything else fails or binds nothing at
+  ;; runtime, so it contributes no symbol here).
+  (cond
+    (symbol? item) (if (= item '&) [] [(symbol (name item))])
+    (keyword? item) [(symbol (name item))]
+    :else []))
+
+(declare binding-syms)
+
+(defn- binding-syms-entry [k v]
+  ;; One map-destructuring entry: plain keys are binding forms,
+  ;; directive values supply the bound names, `:as` binds whole,
+  ;; `:or` (and the outlet options) bind nothing.
+  (if-not (keyword? k)
+    (binding-syms k)
+    (cond
+      (= k :as)
+      (if (or (symbol? v) (keyword? v)) [(symbol (name v))] [])
+      (contains? #{:or :defaults :select :all :excess :missing} k)
+      []
+      (= k :req!)
+      (if (map? v)
+        (vec (mapcat (fn [e] (binding-syms (first e))) v))
+        [])
+      (directive? (name k))
+      (vec (mapcat binding-syms-item (seq v)))
+      :else [])))
+
+(defn- binding-syms-vec [s]
+  ;; Sequential forms: `&` skips to a rest binding form, `:as`
+  ;; binds the next form whole and ends the walk (like the
+  ;; runtime, which returns there).
+  (if-not (seq s)
+    []
+    (let [x (first s)
+          more (rest s)]
+      (cond
+        (= x '&)
+        (vec (concat (binding-syms (first more))
+                     (binding-syms-vec (rest more))))
+        (= x :as)
+        (binding-syms (first more))
+        :else
+        (vec (concat (binding-syms x)
+                     (binding-syms-vec more)))))))
+
+(defn- binding-syms
+  ;; Every name a binding form binds (params shadow fields, so
+  ;; destructured names join the argset too; T73 round 2).
+  ;; Idents bind their name part (the runtime localizes).
+  [form]
+  (cond
+    (symbol? form) (if (= form '&) [] [(symbol (name form))])
+    (keyword? form) [(symbol (name form))]
+    (vector? form) (binding-syms-vec (seq form))
+    (map? form) (vec (mapcat (fn [e] (binding-syms-entry (first e) (first (rest e)))) form))
+    :else []))
+
 (defn- emit-type-method-fn [kind argv body fields]
   ;; `deftype`/`defrecord` inline methods see fields as locals (like
   ;; the JVM — params shadow fields, so bound names are excluded).
@@ -1067,7 +1133,7 @@
       (let [this (first argv)]
         (if-not (and (symbol? this) (not= '& this))
           base
-          (let [argset (set (filter symbol? argv))
+          (let [argset (set (mapcat binding-syms argv))
                 binds (vec (mapcat (fn [f]
                                      (when-not (contains? argset f)
                                        (list f (list 'clojure.core/__field* (str f) this))))

@@ -1683,6 +1683,60 @@ fn t73_deftype_fields_visible_as_locals() {
 }
 
 #[test]
+fn t73_deftype_destructured_params_shadow_fields() {
+    // Torture #73 round 2 LOW: destructured params shadow fields
+    // (like the JVM) — `:keys`/`:strs`/`:as`/sequential forms
+    // join the argset, while `:or` defaults bind nothing.
+    let mut eval = boot();
+    assert_eq!(
+        run(
+            &mut eval,
+            "(definterface DI (m [x])) (deftype DT [a] DI (m [this {:keys [a]}] a)) (.m (DT. 10) {:a 99})"
+        ),
+        "99"
+    );
+    assert_eq!(
+        run(
+            &mut eval,
+            "(definterface DS (m [x])) (deftype DTS [s] DS (m [this {:strs [s]}] s)) (.m (DTS. 10) {\"s\" 3})"
+        ),
+        "3"
+    );
+    assert_eq!(
+        run(
+            &mut eval,
+            "(definterface DA (m [x])) (deftype DTA [w] DA (m [this {:keys [q] :as w}] w)) (.m (DTA. 10) {:q 1})"
+        ),
+        "{:q 1}"
+    );
+    assert_eq!(
+        run(
+            &mut eval,
+            "(definterface DV (m [x])) (deftype DTV [v] DV (m [this [x :as v]] v)) (.m (DTV. 10) [1 2])"
+        ),
+        "[1 2]"
+    );
+    assert_eq!(
+        run(
+            &mut eval,
+            "(definterface DK (m [x])) (deftype DTN [p] DK (m [this [{:keys [p]}]] p)) (.m (DTN. 10) [{:p 7}])"
+        ),
+        "7"
+    );
+    // `:or` defaults bind nothing: `or-b` stays the field (a
+    // global `or-b` distinguishes: a wrongly collected default
+    // would leave the body reading the global).
+    run(&mut eval, "(def or-b 100)");
+    assert_eq!(
+        run(
+            &mut eval,
+            "(definterface DL (m [x])) (deftype DTO [or-b] DL (m [this {:keys [a] :or {a or-b}}] or-b)) (.m (DTO. 5) {})"
+        ),
+        "5"
+    );
+}
+
+#[test]
 fn t73_reify_interleaved_interfaces() {
     // Torture #73 finding 2: reify with interleaved interface +
     // method groups (protocol then Object) macroexpands instead of

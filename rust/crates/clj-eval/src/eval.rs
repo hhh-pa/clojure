@@ -881,7 +881,25 @@ impl Evaluator {
     fn var_id(&mut self, sym: &Symbol) -> u64 {
         self.registry
             .lookup(sym)
+            .or_else(|| self.tombstoned_self_id(sym))
             .unwrap_or_else(|| self.registry.intern(sym))
+    }
+
+    /// A var id through the removed current namespace's tombstone:
+    /// analyzer-resolved self targets keep reading frozen mappings
+    /// (the `*ns*` object outlives the name, like the JVM) without
+    /// resurrecting the namespace. Only the current name qualifies —
+    /// every caller feeds analyzer-resolved targets, so anything
+    /// else stays on the live-only rule (T73 finding 4 round 2).
+    fn tombstoned_self_id(&self, sym: &Symbol) -> Option<u64> {
+        let ns = sym.namespace()?;
+        if ns != self.current_ns_name() {
+            return None;
+        }
+        if self.registry.get(ns).is_some() {
+            return None;
+        }
+        self.registry.ns_live_or_removed(ns)?.lookup(sym)
     }
 
     /// A vector literal (elements evaluate left to right).
@@ -1297,7 +1315,7 @@ impl Evaluator {
             fun,
             span,
         } = *parts;
-        let id = self.registry.intern(sym);
+        let id = self.registry.intern_def_target(sym);
         let closure = self.make_closure(fun, env);
         let dynamic = Self::dynamic_of(sym);
         let cur = self.current_ns_name();
@@ -1425,7 +1443,7 @@ impl Evaluator {
         span: Span,
         env: &Env,
     ) -> Result<Value, Signal> {
-        let id = self.registry.intern(sym);
+        let id = self.registry.intern_def_target(sym);
         let value = match init {
             Some(init) => Some(self.eval(init, env)?),
             None => None,

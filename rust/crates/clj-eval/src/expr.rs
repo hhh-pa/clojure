@@ -1292,7 +1292,7 @@ impl<'a> Analyzer<'a> {
             .registry
             .qualify_in(&cur, sym)
             .with_meta(sym.meta().cloned());
-        self.eval.registry.intern(&qualified);
+        self.eval.registry.intern_def_target(&qualified);
         let init = init
             .map(|form| self.analyze(form, span, false).map(Box::new))
             .transpose()?;
@@ -2121,7 +2121,7 @@ impl<'a> Analyzer<'a> {
         fun.display = format!("{cur}/{}", name_sym.name());
         let qualified =
             Symbol::new(Some(&cur), name_sym.name()).with_meta(name_sym.meta().cloned());
-        self.eval.registry.intern(&qualified);
+        self.eval.registry.intern_def_target(&qualified);
         Ok(Expr::DefMacro {
             sym: qualified,
             doc,
@@ -2157,7 +2157,7 @@ impl<'a> Analyzer<'a> {
                 .registry
                 .qualify_in(&cur, sym)
                 .with_meta(sym.meta().cloned());
-            self.eval.registry.intern(&qualified);
+            self.eval.registry.intern_def_target(&qualified);
             syms.push(qualified);
         }
         Ok(Expr::Declare { syms, span })

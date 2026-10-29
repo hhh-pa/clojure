@@ -145,10 +145,12 @@ pub(crate) fn is_public(reg: &SharedRegistry, id: u64) -> bool {
 /// qualified target and the var id. Refers yield their install-pinned
 /// id (the referred object survives re-interns, like the JVM); alias
 /// targets may dangle into tombstones, but real-namespace qualifiers
-/// must be live.
+/// must be live. Qualified symbols always resolve aliases-then-global
+/// (upstream `Compiler.namespaceFor` — no self-name shortcut, so a
+/// same-name alias wins and a removed home misses even for stale
+/// handles; T73 round 2).
 fn resolve_var_in(home: &Namespace, reg: &SharedRegistry, sym: &Symbol) -> Option<(Symbol, u64)> {
     match sym.namespace() {
-        Some(part) if part == home.name() => home.lookup(sym).map(|id| (sym.clone(), id)),
         Some(part) => resolve_qualified(home, reg, part, sym),
         None => {
             let q = Symbol::new(Some(home.name()), sym.name());
@@ -742,7 +744,9 @@ pub(crate) fn do_resolve(
         Value::Symbol(s) => s,
         v => return Err(cast_err(v, SYMBOL_CLASS)),
     };
-    // Handles pin their generation (stale ones resolve the tombstone).
+    // Handles pin their generation (stale ones resolve the tombstone
+    // for unqualified symbols; qualified ones go aliases-then-global
+    // per `resolve_var_in`, like upstream `namespaceFor`).
     let home = match pinned {
         Some(id) => eval.registry.ns_for_handle(ns_name, id),
         None => eval.registry.ns_live_or_removed(ns_name),

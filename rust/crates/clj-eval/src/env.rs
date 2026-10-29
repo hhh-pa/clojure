@@ -514,6 +514,20 @@ impl NamespaceRegistry {
         id
     }
 
+    /// Intern a `def`-family target: qualify into the current
+    /// namespace, then intern live-or-removed (a removed current
+    /// namespace's tombstone absorbs the `def` — the JVM's
+    /// detached `*ns*` object — instead of resurrecting the
+    /// name); create only when the name is in neither map
+    /// (T73 finding 4 round 2: `def`/`declare`/`defmacro` after
+    /// `remove-ns` must not bring the namespace back).
+    pub fn intern_def_target(&mut self, sym: &Symbol) -> u64 {
+        let q = self.qualify(sym);
+        let ns_name = q.namespace().unwrap_or(&self.current).to_owned();
+        self.intern_in(&ns_name, &q)
+            .unwrap_or_else(|| self.intern(&q))
+    }
+
     /// Intern a var into a live or removed namespace (never
     /// creates: callers resolve through `the-ns` first; live wins
     /// over the tombstone by name). Returns `None` only when
@@ -905,6 +919,12 @@ impl SharedRegistry {
     /// [`NamespaceRegistry::intern_in`]).
     pub fn intern_in(&self, ns_name: &str, sym: &Symbol) -> Option<u64> {
         self.lock().registry.intern_in(ns_name, sym)
+    }
+
+    /// Intern a `def`-family target (see
+    /// [`NamespaceRegistry::intern_def_target`]).
+    pub fn intern_def_target(&self, sym: &Symbol) -> u64 {
+        self.lock().registry.intern_def_target(sym)
     }
 
     /// Intern a var through a handle-pinned id (see
