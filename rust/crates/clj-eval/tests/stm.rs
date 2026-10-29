@@ -7,8 +7,9 @@
 // You must not remove this notice, or any other, from this software.
 
 //! S19 STM pins: every oracle row in
-//! `docs/zero-oos-s19-stm/probes/{refs,txn,errors}.out` (46 + 70 +
-//! 58), transcribed probe-identically except where noted.
+//! `docs/zero-oos-s19-stm/probes/{refs,txn,errors,portside}.out`
+//! (46 + 70 + 58 + 38), transcribed probe-identically except
+//! where noted.
 //!
 //! Row map (the §1i covering tests): `atomic_commit`
 //! (t-body-value, t-empty, t-commit, t-atomic-abort, t-deref-local,
@@ -43,7 +44,12 @@
 //! transient `#object[…]` convention), t-shape-sync/t-shape-io/
 //! t-shape-io-multi (`sync`/`io!` are special forms —
 //! `macroexpand-1` is the identity), t-watch-order* (insertion
-//! order — the port's atom convention; t-watch-strkeys coincides).
+//! order — the port's atom convention; t-watch-strkeys coincides),
+//! u-recur-across/u-recur-sync-zero (`sync` fences `recur` like
+//! `try` — the JVM binds it to the sync macro's synthetic fn),
+//! u-latecommute-cme (a commute recorded during the commit
+//! re-run applies tx-locally but never reruns — the JVM
+//! fail-fasts `ConcurrentModificationException`).
 //! `identical?` is out of scope in the port (matrix row 574), so the
 //! six rows using it substitute `=` (same-cell + equal meta —
 //! equivalent here, where no meta is involved) plus one shared-cell
@@ -53,11 +59,12 @@
 //! (the JVM static field has no port surface; executors are
 //! ignored). JVM-only rows (t-key-hashes — the port hashes
 //! relationally, never literally; t-setvalidator-in-txn —
-//! `set-validator!` is out of scope, matrix row 644) stay as
-//! skip comments with cause.
+//! `set-validator!` admits atoms/agents only (S5, matrix row
+//! 643), so in-txn installation on a ref is unexpressible)
+//! stay as skip comments with cause.
 //!
-//! `stm_portside_pins` holds port-side pins with no oracle rows
-//! (oracle-verified locally during implementation):
+//! `stm_portside_pins` holds the port-side pins with oracle rows in
+//! `probes/portside.out` (the `u-*` rows, committed in review):
 //! commit-phase write semantics, recur fences, eager send checks,
 //! the alter/commute check-order corners, and trim edges.
 //! `stm_retry_under_contention` pins a genuine conflict retry
@@ -641,8 +648,11 @@ fn validator_watch_timing() {
     );
     // JVM-only: t-key-hashes — the port hashes relationally, never
     // literally (no pin asserts a `hash` value anywhere in the port).
-    // JVM-only: t-setvalidator-in-txn — `set-validator!` is
-    // out-of-scope in the port (matrix row 644); the row needs it.
+    // JVM-only: t-setvalidator-in-txn — `set-validator!` admits
+    // atoms/agents only (S5, matrix row 643); installing on a ref
+    // in-txn is unexpressible, so the row's commit-governance pin
+    // has no port spelling (ctor-installed ref validators DO
+    // govern commits — r-validator-reject).
     // t-watch-abort (an abort fires nothing).
     assert_eq!(
         run_last(
@@ -1313,9 +1323,12 @@ fn stm_portside_pins() {
         ),
         cce("clojure.lang.Ref", "clojure.lang.IObj")
     );
-    // `recur` cannot cross `sync` (the JVM expansion runs the body
-    // in a fresh `fn`), but an inner loop recurs freely and `io!`
-    // never fences (oracle `u-recur-across`, `u-recur-inside`,
+    // `recur` cannot cross `sync` (DIVERGENCE, oracle
+    // `u-recur-across` / `u-recur-sync-zero`: the JVM binds the
+    // recur to the sync macro's synthetic 0-arity fn — an arity
+    // mismatch there, a silent compile when arities coincide —
+    // while the port fences like `try`), but an inner loop recurs
+    // freely and `io!` never fences (oracle `u-recur-inside`,
     // `u-recur-io`).
     let mut fenced = boot();
     let form = read_str(
@@ -1327,6 +1340,21 @@ fn stm_portside_pins() {
         fenced.analyze(&form).unwrap_err().chain(),
         vec![
             "Syntax error compiling recur at (user:1:33).".to_owned(),
+            "java.lang.UnsupportedOperationException | Cannot recur across try".to_owned(),
+        ]
+    );
+    // The coinciding-arity shape (the JVM compiles it —
+    // `u-recur-sync-zero`) fences the same way.
+    let form = read_str(
+        "(loop [] (dosync (recur)))",
+        &ReaderOpts::default(),
+        &mut NoHooks,
+    )
+    .unwrap();
+    assert_eq!(
+        fenced.analyze(&form).unwrap_err().chain(),
+        vec![
+            "Syntax error compiling recur at (user:1:18).".to_owned(),
             "java.lang.UnsupportedOperationException | Cannot recur across try".to_owned(),
         ]
     );
@@ -1557,9 +1585,10 @@ fn stm_portside_pins() {
         ),
         "[1 [[100 101]] 101]"
     );
-    // Divergence: a commute recorded during the re-run applies
-    // tx-locally but never reruns (the JVM fail-fasts with
-    // `ConcurrentModificationException` — the port snapshots).
+    // Divergence (oracle `u-latecommute-cme`): a commute recorded
+    // during the re-run applies tx-locally but never reruns (the
+    // JVM fail-fasts with `ConcurrentModificationException` —
+    // the port snapshots).
     assert_eq!(
         run_last(
             &mut eval,

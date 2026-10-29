@@ -1,12 +1,13 @@
 # Zero-oos S19: STM (issue #63) — Specification
 
-- Status: spec + oracle probes (174 rows, all exit 0 and
+- Status: spec + oracle probes (212 rows, all exit 0 and
   rerun-stable). No source edits; implementation is the
   owner's.
 - Parent: out-of-scope reduction. Issue: #63. Branch:
   `zero-oos-s19-stm`. Probes:
-  `docs/zero-oos-s19-stm/probes/{refs,txn,errors}.{clj,out}`
-  (oracle: 1.13.0-alpha10 jars under `/home/hhu/.m2`;
+  `docs/zero-oos-s19-stm/probes/{refs,txn,errors,portside}.{clj,out}`
+  (174 spec-first rows + 38 review-committed `u-*` rows;
+  oracle: 1.13.0-alpha10 jars under `/home/hhu/.m2`;
   invocation in each `.clj` header).
 - Scope: 11 vars — `ref`, `dosync`, `commute`, `ensure`,
   `alter`, `ref-set`, `io!`, `ref-history-count`,
@@ -149,6 +150,17 @@ begins one (§1g). `(macroexpand '(dosync x))` stops at
 `(sync nil x)` (DIVERGENCE from the JVM's full expansion —
 a consequence of the special-form decision).
 
+**Recur fence (DIVERGENCE).** `sync` fences `recur` like
+`try` (`Cannot recur across try`): the JVM instead binds
+the recur to the sync macro's synthetic 0-arity fn — an
+`IllegalArgumentException` arity mismatch when the counts
+differ, a silent compile (recurring the body fn, not the
+loop) when they coincide (oracle `u-recur-across`,
+`u-recur-sync-zero`; the port's loud fence beats both the
+confusing IAE and the silent infinite loop). An inner loop
+recurs freely and `io!` never fences (`u-recur-inside`,
+`u-recur-io`).
+
 ### 1c. `alter` / `commute` / `ref-set` / `ensure` (check order, composition)
 
 One check order for all four, oracle-pinned step by step:
@@ -206,7 +218,7 @@ verifies each with the cited pin):
 | `str` (`core.rs`) | join the `toString` arm → `clojure.lang.Ref@{id:x}` | `r-str` |
 | `meta_of` + `value_meta` | NEW arms → the cloned cell meta | `r-meta-opt`, `r-meta-none` |
 | `as_iref` | NEW `WatchedRef::Ref` (same nil/CCE shapes as atoms); `add-watch` / `remove-watch` answer the ref | `t-addwatch-returns`, `t-removewatch-returns`, `t-addwatch-in-txn` |
-| `as_ref_target` (`alter-meta!`, `reset-meta!`, `set-validator!`) | NEW `RefTarget::Ref` | `t-setvalidator-in-txn` |
+| `as_ref_target` (`alter-meta!`, `reset-meta!`) | NEW `RefTarget::Ref` | `u-altermeta`, `u-resetmeta` (`vary-meta` keeps the `IObj` cast — `u-varymeta`; `set-validator!` takes the separate `watched_or_nil` path and admits atoms/agents only — §1e) |
 | `as_iobj` (`with-meta`) | none (generic `IObj` cast) | `r-with-meta` |
 | print: `ref_token` (+ `TOK_REF`), cells arm, engine body | NEW arms: the transient `#object[clojure.lang.Ref 0x{id:x} "clojure.lang.Ref@{id:x}"]` convention (PINNED DIVERGENCE from the JVM's `{:status :ready, :val …}` rendering — same rationale as atoms, §2f) | `r-new` (divergence record) |
 | `jvm_class_of_host` | NEW arm → `clojure.lang.Ref` | every `ClassCastException` row naming Ref |
@@ -217,7 +229,8 @@ verifies each with the cited pin):
 | probe id | pins (port matches the oracle row) |
 |---|---|
 | `t-validator-calls` | the validator runs on the initial value at construction AND once at commit on the FINAL value only (`[0 2]` — the intermediate `1` is never validated) |
-| `r-validator-reject` / `e-validator-msg` / `t-setvalidator-in-txn` | a veto aborts the commit with `IllegalStateException` `Invalid reference state`; nothing is installed; a validator installed in-txn governs that same commit |
+| `r-validator-reject` / `e-validator-msg` | a veto aborts the commit with `IllegalStateException` `Invalid reference state`; nothing is installed |
+| `t-setvalidator-in-txn` | JVM-ONLY: installing a validator on a ref in-txn (which would govern that same commit) is unexpressible — `set-validator!` admits atoms/agents only (S5); ctor-installed ref validators govern commits per `r-validator-reject` |
 | `t-watch-commit` | watches fire ONCE per commit with (old committed, new committed): `[[0 2]]` |
 | `t-watch-abort` | aborted transactions fire no watches (`[]`) |
 | `t-addwatch-in-txn` | a watch installed in-txn fires at that commit (`[[0 1]]`) |
@@ -297,7 +310,11 @@ just decrement depth):
    read-locking).
 4. Re-run each ref's commutes IN ISSUE ORDER over (latest
    committed ⊕ this txn's earlier non-commute writes to
-   that ref) (§1c composition).
+   that ref) (§1c composition). A commute recorded DURING
+   the re-run applies tx-locally but never reruns that
+   commit (port-defined: the JVM fail-fasts
+   `ConcurrentModificationException` — oracle
+   `u-latecommute-cme`; pinned in `stm_portside_pins`).
 5. Validate every written ref's final value (a veto ABORTS
    with `Invalid reference state` — never retries).
 6. Bump the clock ONCE; install every new current with the
@@ -401,7 +418,11 @@ Remaining covering tests: `ref_ctor_opts` (§1a rows),
 `history_trim` (`r-history-*`), `macro_shapes`
 (`t-shape-dosync` exact; `sync`/`io!` identity),
 `nesting_join` (`t-nested*`), `commute_compose`
-(`t-commute-*`), `validator_watch_timing` (§1e rows),
+(`t-commute-*`), `stm_portside_pins` (the `u-*` rows in
+`probes/portside.out`), `stm_retry_under_contention` +
+`stm_revalidate_retry` (genuine conflict/revalidation
+retries — port-side pins with no oracle rows),
+`validator_watch_timing` (§1e rows),
 `invoke_and_predicates` (§1d rows), `await_gates` (§1d
 await rows), `boundfn_conveyance` (`t-bound-fn`,
 `t-future-no-convey`), `print_and_str` (`r-str` + port

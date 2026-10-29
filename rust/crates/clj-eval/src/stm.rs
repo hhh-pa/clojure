@@ -380,10 +380,10 @@ fn current_point(
 /// committed ⊕ this txn's earlier non-commute writes) — i.e. over
 /// the pre-first-commute snapshot, which revalidation pinned to
 /// latest (§1c). A rerun fn that commutes records tx-locally but the
-/// late commute never reruns this commit (DIVERGENCE: the JVM
-/// fail-fasts with `ConcurrentModificationException` — the port
-/// snapshots instead of growing the shared `ThrowClass` for a
-/// pathological corner).
+/// late commute never reruns this commit (DIVERGENCE, oracle
+/// `u-latecommute-cme`: the JVM fail-fasts with
+/// `ConcurrentModificationException` — the port snapshots instead
+/// of growing the shared `ThrowClass` for a pathological corner).
 fn rerun_commutes(eval: &mut Evaluator) -> Result<(), Signal> {
     let plan: Vec<(u64, Value, Vec<Value>)> = tx_ref(eval).commutes.clone();
     if plan.is_empty() {
