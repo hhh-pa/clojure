@@ -561,9 +561,7 @@ pub(crate) struct ProtoIface {
 /// T73 round 2).
 pub(crate) fn proto_of(eval: &mut Evaluator, sym: &Symbol) -> Option<ProtoIface> {
     let cur = eval.current_ns_name();
-    let q = eval.registry.resolve_in(&cur, sym)?;
-    let home = q.namespace()?;
-    let id = eval.registry.ns_live_or_removed(home)?.lookup(&q)?;
+    let (_, id) = eval.registry.resolve_target_and_id(&cur, sym)?;
     let root = eval.deref_var(id, sym);
     as_protocol_map(&root).map(|m| ProtoIface { map: m.clone() })
 }

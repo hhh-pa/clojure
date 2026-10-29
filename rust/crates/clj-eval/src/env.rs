@@ -504,8 +504,9 @@ impl NamespaceRegistry {
     /// Resolve a symbol to its qualified target and var id under
     /// one borrow — single-locked through `SharedRegistry`, so no
     /// concurrent unmap can slip between resolution and id lookup
-    /// (#86). Callers needing both must use this instead of
-    /// `resolve_in` plus a second lookup.
+    /// (#86). Callers needing both a target and its id should
+    /// prefer this; live-only snapshots and cross-namespace
+    /// re-resolution keep their own reads.
     #[must_use]
     pub fn resolve_target_and_id(&self, ns_name: &str, sym: &Symbol) -> Option<(Symbol, u64)> {
         let target = self.resolve_in(ns_name, sym)?;

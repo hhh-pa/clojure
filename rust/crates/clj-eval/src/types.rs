@@ -54,9 +54,7 @@ pub const TYPES_NATIVES: &[(&str, NativeFnPtr)] = &[
 /// JVM's detached `*ns*` object; T73 round 2).
 fn var_root(eval: &Evaluator, sym: &Symbol) -> Option<Value> {
     let cur = eval.current_ns_name();
-    let q = eval.registry.resolve_in(&cur, sym)?;
-    let home = q.namespace()?;
-    let id = eval.registry.ns_live_or_removed(home)?.lookup(&q)?;
+    let (_, id) = eval.registry.resolve_target_and_id(&cur, sym)?;
     Some(eval.deref_var(id, sym))
 }
 
