@@ -1235,6 +1235,33 @@ mod tests {
         assert_eq!(fins.load(Ordering::SeqCst), 2);
     }
 
+    /// M1: a `finally` that throws while a retry unwinds masks the
+    /// retry like the JVM — attempt 2 never runs, the throw
+    /// propagates out of `dosync` (covers the masking arm).
+    #[test]
+    fn retry_finally_throw_masks_retry() {
+        let mut eval = crate::ns::boot();
+        install_retry_once(&mut eval);
+        eval.install_native(
+            "user",
+            "s19-boom",
+            Arc::new(|_, _| {
+                Err(NativeError::new(
+                    ThrowClass::RuntimeException,
+                    "boom".to_string(),
+                ))
+            }),
+        );
+        let err = eval
+            .eval_source("(dosync (try (user/s19-retry-once) :ok (finally (user/s19-boom))))")
+            .expect_err("the finally throw masks the retry");
+        let msg = match err {
+            crate::eval::SourceError::Uncaught(t) => t.message,
+            other => panic!("expected an uncaught throw, got {other:?}"),
+        };
+        assert_eq!(msg.as_deref(), Some("boom"));
+    }
+
     #[test]
     fn validators_unchanged_pins_slot_identity() {
         // N1: matching slots (absent or identical) pass; a swap or
