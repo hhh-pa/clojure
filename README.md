@@ -133,7 +133,7 @@ unbounded, `:fail` / `:continue` error modes, `await` / `await-for`,
 `restart-agent`, `shutdown-agents`), `locking`, `add-watch` /
 `remove-watch`, `realized?`.
 
-**Core vars: 669 implemented, 0 divergent, 21 out of scope**
+**Core vars: 679 implemented, 0 divergent, 11 out of scope**
 ([`rust/core-coverage.md`](rust/core-coverage.md) is normative and
 CI-enforced: listed vars must resolve, excluded ones must not).
 
@@ -195,8 +195,9 @@ each entry asserts its exact behavior, so drift fails CI:
   JVM (same-thread nesting re-enters; the outer install
   wins).
 - **Namespaces.** `ns-imports` is the explicit import table
-  (sorted; fresh namespaces still map `{}`); `*loaded-libs*`
-  is a plain set, not a ref.
+  (sorted; fresh namespaces seed the 106 JVM default imports
+  flat per namespace, #74); `*loaded-libs*` is a plain set,
+  not a ref.
 
 ## Out of scope
 
@@ -210,9 +211,9 @@ out of scope, not silently missing:
   stay out.
 - STM (`ref` `dosync` `sync` `io!` `alter` `commute` `ensure`
   `ref-set`, history vars) — the S19 slice, not yet landed.
-- Bytecode compiler surface (`compile`, `add-classpath`, the
-  `*compile-*` knobs, `primitives-classnames`) — the S18
-  slice, not yet landed.
+  The bytecode compiler surface (`compile`, `add-classpath`,
+  the `*compile-*` knobs, `primitives-classnames`) landed
+  with S18.
 - Reader: `#=` eval reader, custom `data_readers.clj`
   autoload (the port has no classpath). `#inst` / `#uuid`
   tags read into native `Instant` / `Uuid` values.
