@@ -81,7 +81,7 @@ pub(crate) fn sym_str(s: &Symbol) -> String {
 /// A strict namespace-name symbol: nil is the null-key NPE, anything
 /// else non-symbol is the `Symbol` cast (the `find`/`findOrCreate`
 /// path, probe35 `find-ns-ns-arg`).
-fn strict_sym(v: &Value) -> Result<&Symbol, NativeError> {
+pub(crate) fn strict_sym(v: &Value) -> Result<&Symbol, NativeError> {
     match v {
         Value::Symbol(s) => Ok(s),
         Value::Nil => Err(npe(NIL_KEY_NPE)),
@@ -956,7 +956,7 @@ pub(crate) fn throw_class_for(name: &str) -> ThrowClass {
 /// `CompilerException` wrapper with the structured cause (so `catch`
 /// and `ex-cause` walk the JVM chain); bare failures (macro arity)
 /// escape unwrapped, cause class and cause message only.
-fn source_to_native(eval: &mut Evaluator, source: &str, e: SourceError) -> NativeError {
+pub(crate) fn source_to_native(eval: &mut Evaluator, source: &str, e: SourceError) -> NativeError {
     match e {
         SourceError::Reader(e) => {
             let span = e.span();
@@ -1008,7 +1008,7 @@ fn source_to_native(eval: &mut Evaluator, source: &str, e: SourceError) -> Nativ
 /// A `clojure.core` var id, if installed.
 /// A `Var` handle for a `clojure.core` var id (binding frames
 /// carry the handle so snapshots print without re-lookup).
-fn core_var_handle(id: u64, name: &str) -> Var {
+pub(crate) fn core_var_handle(id: u64, name: &str) -> Var {
     Var {
         id,
         sym: Symbol::new(Some("clojure.core"), name),
@@ -1091,7 +1091,7 @@ fn mark_loaded(eval: &mut Evaluator, lib: &Symbol) -> Result<(), NativeError> {
 /// `(name x)`: strings pass through, symbols and keywords give their
 /// name, nil is the `getName` NPE, anything else the `Named` cast
 /// (core.clj `name`, probe35 `name-num`).
-fn name_of(v: &Value) -> Result<String, NativeError> {
+pub(crate) fn name_of(v: &Value) -> Result<String, NativeError> {
     match v {
         Value::Str(s) => Ok(s.to_string()),
         Value::Symbol(s) => Ok(s.name().to_owned()),
@@ -1103,7 +1103,7 @@ fn name_of(v: &Value) -> Result<String, NativeError> {
 
 /// The root resource for a lib name: dashes to underscores, dots to
 /// slashes, with a leading slash (core.clj `root-resource`).
-fn root_resource(lib_name: &str) -> String {
+pub(crate) fn root_resource(lib_name: &str) -> String {
     let mapped: String = lib_name
         .chars()
         .map(|c| match c {
@@ -1194,26 +1194,52 @@ fn run_loaded(
     isolate_ns: bool,
 ) -> Result<Vec<Value>, SourceError> {
     let cur = eval.registry.current().to_owned();
-    let mut depth = None;
+    let depth = eval.bindings_depth();
+    let source_path = source_path_value(&file_star);
     if let Some(id) = core_var(eval, "*file*") {
-        depth = Some(eval.push_binding(core_var_handle(id, "*file*"), file_star));
+        eval.push_binding(core_var_handle(id, "*file*"), file_star);
+    }
+    // S18: every load binds `*source-path*` alongside `*file*`
+    // (no existing test can observe the new var).
+    if let Some(id) = core_var(eval, "*source-path*") {
+        eval.push_binding(core_var_handle(id, "*source-path*"), source_path);
     }
     if isolate_ns {
-        push_ns_frame(eval, &mut depth);
+        // Always `Some`: the depth is captured up front, so the
+        // isolation frame never records here.
+        let mut keep = Some(depth);
+        push_ns_frame(eval, &mut keep);
     }
     // S7: load forces `*read-eval*` true, visibly (probes `l-gate`,
     // `m-*` — `Compiler.load` binds it the same way). The push rides
-    // the `depth` pop below (`*file*` is installed whenever this is,
-    // so a depth always exists here).
+    // the `depth` pop below (captured up front, so the pop restores
+    // exactly this frame's pushes).
     if let Some(id) = core_var(eval, "*read-eval*") {
         eval.push_binding(core_var_handle(id, "*read-eval*"), Value::Bool(true));
     }
     let out = eval.load_source(spans, text);
     eval.registry.set_current(&cur);
-    if let Some(d) = depth {
-        eval.pop_bindings(d);
-    }
+    eval.pop_bindings(depth);
     out
+}
+
+/// The `*source-path*` value for a load (S18): file loads bind the
+/// last path segment (even `load-file` absolutes); `load-string`
+/// (`*file*` nil) binds the root.
+fn source_path_value(file_star: &Value) -> Value {
+    match file_star {
+        Value::Str(path) => Value::Str(Arc::from(last_segment(path))),
+        _ => Value::Str(Arc::from("NO_SOURCE_FILE")),
+    }
+}
+
+/// The last path segment (split on `/` or `\`: root loads pin
+/// `/` in `*file*`, but `load-file` binds the path as opened, so a
+/// native Windows path still yields its basename). Both separators
+/// split on every platform — a deliberate narrowing (Unix backslash
+/// filenames are out of scope; spec §2.1 D10).
+fn last_segment(path: &str) -> &str {
+    path.rsplit(['/', '\\']).next().unwrap_or(path)
 }
 
 /// Push the isolating `*ns*` frame for a load (recording the
@@ -1231,7 +1257,11 @@ fn push_ns_frame(eval: &mut Evaluator, depth: &mut Option<usize>) {
 /// `load-one`: load a lib's root resource, check the namespace when
 /// `need_ns`, then mark (core.clj `load-one` — the mark runs after
 /// the check, probe36 `req-mismatch-as`; callers always require).
-fn load_one(eval: &mut Evaluator, lib: &Symbol, need_ns: bool) -> Result<(), NativeError> {
+pub(crate) fn load_one(
+    eval: &mut Evaluator,
+    lib: &Symbol,
+    need_ns: bool,
+) -> Result<(), NativeError> {
     let root = root_resource(lib.name());
     load_paths(
         eval,
@@ -1710,6 +1740,9 @@ fn cycle_action(pending: &List, full: &str) -> Result<bool, NativeError> {
 fn load_one_path(eval: &mut Evaluator, full: &str, pending: &List) -> Result<(), NativeError> {
     let root = full.strip_prefix('/').unwrap_or(full).to_owned();
     let (file_star, text) = resolve_source(eval, &root)?;
+    // S18: the flag-gated plan phase (`None` when `*compile-files*`
+    // is falsy — the load below then runs exactly as today).
+    let planned = crate::compiler::maybe_plan_root(eval, &root, &file_star, &text)?;
     // `resolve_load_path` just read this var as a list (no user code
     // runs between), so the var exists and still holds a list.
     let id = core_var(eval, "*pending-paths*").expect("*pending-paths* is bound during load");
@@ -1726,12 +1759,19 @@ fn load_one_path(eval: &mut Evaluator, full: &str, pending: &List) -> Result<(),
     );
     eval.pop_bindings(pending_depth);
     match out {
-        Ok(_) => Ok(()),
+        Ok(_) => {
+            // S18: emit the planned object (skipped when `None` —
+            // eval failures never reach here, so T12 leaves nothing).
+            if let Some(plan) = planned {
+                crate::compiler::emit_planned(&file_star, &plan)?;
+            }
+            Ok(())
+        }
         Err(e) => Err(source_to_native(eval, &file_star, e)),
     }
 }
 
-fn load_paths(eval: &mut Evaluator, paths: &[Value]) -> Result<(), NativeError> {
+pub(crate) fn load_paths(eval: &mut Evaluator, paths: &[Value]) -> Result<(), NativeError> {
     for p in paths {
         let (full, pending) = resolve_load_path(eval, p)?;
         if cycle_action(&pending, &full)? {
@@ -1888,11 +1928,24 @@ fn native_load_reader(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nat
 /// last value (nil when empty).
 fn run_loaded_values(eval: &mut Evaluator, forms: Vec<Value>) -> Result<Value, NativeError> {
     let cur = eval.registry.current().to_owned();
-    let mut depth = None;
+    let depth = eval.bindings_depth();
     if let Some(id) = core_var(eval, "*file*") {
-        depth = Some(eval.push_binding(core_var_handle(id, "*file*"), Value::Nil));
+        eval.push_binding(core_var_handle(id, "*file*"), Value::Nil);
     }
-    push_ns_frame(eval, &mut depth);
+    // S18: `load-reader` binds `*source-path*` to the root (its
+    // `*file*` is nil — the `load-string` shape, never "leave",
+    // §2.2).
+    if let Some(id) = core_var(eval, "*source-path*") {
+        eval.push_binding(
+            core_var_handle(id, "*source-path*"),
+            source_path_value(&Value::Nil),
+        );
+    }
+    // Always `Some`: the depth is captured up front (the
+    // `run_loaded` shape), so the isolation frame never records
+    // here.
+    let mut keep = Some(depth);
+    push_ns_frame(eval, &mut keep);
     if let Some(id) = core_var(eval, "*read-eval*") {
         eval.push_binding(core_var_handle(id, "*read-eval*"), Value::Bool(true));
     }
@@ -1902,17 +1955,13 @@ fn run_loaded_values(eval: &mut Evaluator, forms: Vec<Value>) -> Result<Value, N
             Ok(v) => out = v,
             Err(e) => {
                 eval.registry.set_current(&cur);
-                if let Some(d) = depth {
-                    eval.pop_bindings(d);
-                }
+                eval.pop_bindings(depth);
                 return Err(source_to_native(eval, "", e));
             }
         }
     }
     eval.registry.set_current(&cur);
-    if let Some(d) = depth {
-        eval.pop_bindings(d);
-    }
+    eval.pop_bindings(depth);
     Ok(out)
 }
 
@@ -1966,6 +2015,8 @@ const NATIVES: &[(&str, NativeFnPtr)] = &[
     ("load-reader", native_load_reader),
     ("loaded-libs", native_loaded_libs),
     ("eval", native_eval),
+    ("add-classpath", crate::compiler::native_add_classpath),
+    ("compile", crate::compiler::native_compile),
 ];
 
 /// The `clojure.core` vars installed by [`boot`]: name, root,
@@ -2036,6 +2087,14 @@ fn core_vars(user_ns: Value) -> Vec<(String, Value, bool, bool)> {
         (
             "*default-data-reader-fn*".to_owned(),
             Value::Nil,
+            true,
+            false,
+        ),
+        // S18 compiler knob (`def ^:dynamic` shape: slot AND
+        // `:dynamic` meta, like the print vars above).
+        (
+            "*verbose-defrecords*".to_owned(),
+            Value::Bool(false),
             true,
             false,
         ),
@@ -2280,6 +2339,18 @@ fn boot_core_vars(eval: &mut Evaluator, user_handle: Value) {
     // nor private, probe `a-ddr-meta`).
     let defaults = crate::core::default_data_readers_map(eval);
     def_var(eval, "default-data-readers", defaults, false, false);
+    // S18 compiler knobs (slot-only roots owned by `compiler.rs`)
+    // plus the plain `primitives-classnames` root map.
+    for (name, root) in crate::compiler::knob_roots() {
+        def_dynamic_root(eval, name, root);
+    }
+    def_var(
+        eval,
+        "primitives-classnames",
+        crate::compiler::prims_map(),
+        false,
+        false,
+    );
 }
 
 /// Refer every public install into `user` (JVM boot refers
@@ -2349,6 +2420,14 @@ fn boot_refer_user(eval: &mut Evaluator) {
             "*data-readers*",
             "*default-data-reader-fn*",
             "default-data-readers",
+            "*compile-path*",
+            "*compile-files*",
+            "*compiler-options*",
+            "*source-path*",
+            "*fn-loader*",
+            "*use-context-classloader*",
+            "*verbose-defrecords*",
+            "primitives-classnames",
         ]
         .iter()
         .map(|s| (*s).to_owned()),
@@ -2470,6 +2549,28 @@ mod tests {
         // — the fallback is the pin.
         let eval = Evaluator::new_bare("user");
         assert!(resolve_load_path(&eval, &Value::Str(Arc::from("foo"))).is_err());
+    }
+
+    #[test]
+    fn last_segment_splits_either_separator() {
+        // S18 `*source-path*`: root loads pin `/` in `*file*`, but
+        // `load-file` binds the path as opened.
+        assert_eq!(last_segment("my/ctx.clj"), "ctx.clj");
+        assert_eq!(last_segment("ctx.clj"), "ctx.clj");
+        assert_eq!(last_segment("C:\\my\\ctx.clj"), "ctx.clj");
+        assert_eq!(last_segment("a/b\\c.clj"), "c.clj");
+        assert_eq!(last_segment("a/"), "");
+        assert_eq!(last_segment(""), "");
+    }
+
+    #[test]
+    fn run_loaded_values_without_vars_is_idle() {
+        // S18 `load-reader`: a bare evaluator binds nothing and
+        // answers nil for empty input (the missing-var arms are the
+        // pin — every `if let` here must tolerate absence).
+        let mut eval = Evaluator::new_bare("user");
+        let out = run_loaded_values(&mut eval, Vec::new()).expect("bare empty load-reader");
+        assert_eq!(out, Value::Nil);
     }
 
     #[test]

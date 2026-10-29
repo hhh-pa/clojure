@@ -18,6 +18,7 @@ pub mod builtin_expand;
 pub mod classemu;
 pub mod coll;
 pub mod collmisc;
+pub mod compiler;
 pub mod concurrency;
 pub mod core;
 pub mod destructure_expand;

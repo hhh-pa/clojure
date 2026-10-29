@@ -101,6 +101,14 @@ fn main() -> ExitCode {
     }
 }
 
+/// Install the linked AOT backend as `(compile ...)`'s driver
+/// (S18). Unlinked builds keep the hook unset, so every compile
+/// reports the exact unlinked line (T11).
+fn install_compile_driver() {
+    #[cfg(feature = "aot")]
+    clj_aot::driver::install_driver();
+}
+
 /// The `<eval>` file token (pins P5).
 const EVAL_FILE: &str = "<eval>";
 
@@ -109,6 +117,7 @@ const EVAL_FILE: &str = "<eval>";
 /// Reader spans blame the input directly (no textual wrap, so no
 /// shift to undo); `*1` stays untouched (the JVM binds none here).
 fn cmd_eval(form: &str, edn: bool) -> ExitCode {
+    install_compile_driver();
     let scan = EvalScanner::new(form).run();
     // (Match guard, not a let-chain: MSRV 1.85.)
     match &scan.edn_violation {
@@ -232,6 +241,7 @@ fn eval_diagnostic(e: &SourceError) -> String {
 
 /// The wrapper line minus its ` at (site).` tail, e.g. `Syntax error
 fn cmd_run(file: &Path, args: &[String]) -> ExitCode {
+    install_compile_driver();
     if !file.exists() {
         eprintln!("run: no such file: {}", file.display());
         return ExitCode::from(3);
@@ -638,9 +648,7 @@ fn cmd_build_compile(
     _emit_obj: Option<&Path>,
     _runtime_archive: Option<&Path>,
 ) -> ExitCode {
-    eprintln!(
-        "build: LLVM backend not linked (built with --no-default-features; rebuild with default features to compile)"
-    );
+    eprintln!("{}", clj_eval::compiler::UNLINKED_BUILD_LINE);
     ExitCode::from(1)
 }
 
@@ -690,6 +698,7 @@ fn cmd_repl_with(
     tty: bool,
     make_source: impl FnOnce(Vec<String>, fn(&str) -> bool) -> Result<clj_repl::RustyLineSource, String>,
 ) -> ExitCode {
+    install_compile_driver();
     use std::io::BufReader;
     if !tty {
         let stdin = std::io::stdin();
@@ -1135,5 +1144,41 @@ mod tests {
         let SessionHandler { session, .. } = handler;
         let (_, _, mut out) = session.into_parts();
         assert!(std::io::Write::flush(&mut out).is_err());
+    }
+
+    #[test]
+    fn eval_installs_driver_and_evaluates() {
+        // Covers the S18 install call at the top of `cmd_eval`.
+        assert_eq!(cmd_eval("(+ 1 2)", false), ExitCode::SUCCESS);
+    }
+
+    #[cfg(not(feature = "aot"))]
+    #[test]
+    fn build_unlinked_reports_shared_line() {
+        // Covers the S18 shared unlinked line (T11's CLI side —
+        // the text itself is pinned by `driver_unset` on the same
+        // const, so the two can never drift).
+        assert_eq!(
+            cmd_build_compile(
+                std::path::Path::new("in.clj"),
+                "(+ 1 2)",
+                std::path::Path::new("o"),
+                None,
+                None,
+                None
+            ),
+            ExitCode::from(1)
+        );
+    }
+
+    #[test]
+    fn run_installs_driver_and_runs_script() {
+        // Covers the S18 install call at the top of `cmd_run`.
+        let dir = std::env::temp_dir().join(format!("clj-s18-run-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("s.clj");
+        std::fs::write(&script, "(+ 1 2)\n").unwrap();
+        assert_eq!(cmd_run(&script, &[]), ExitCode::SUCCESS);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

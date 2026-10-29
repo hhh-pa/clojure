@@ -1,0 +1,24 @@
+WARNING: add-classpath is deprecated
+WARNING: add-classpath is deprecated
+a-broken-url THROW java.lang.IllegalAccessError|"Context classloader is not a DynamicClassLoader"
+WARNING: add-classpath is deprecated
+a-broken-bare THROW java.lang.IllegalArgumentException|"URI is not absolute"
+WARNING: add-classpath is deprecated
+a-broken-file THROW java.lang.ClassCastException|"class java.io.File cannot be cast to class java.net.URL (java.io.File and java.net.URL are in module java.base of loader 'bootstrap')"
+WARNING: add-classpath is deprecated
+a-broken-num THROW java.lang.ClassCastException|"class java.lang.Long cannot be cast to class java.net.URL (java.lang.Long and java.net.URL are in module java.base of loader 'bootstrap')"
+a-arity0 THROW clojure.lang.ArityException|"Wrong number of args (0) passed to: clojure.core/add-classpath"
+a-arity2 THROW clojure.lang.ArityException|"Wrong number of args (2) passed to: clojure.core/add-classpath"
+a-warn-text "WARNING: add-classpath is deprecated\n"
+a-ret nil
+a-add2 nil
+a-urls ["file:<ROOT>/d1/" "file:<ROOT>/d2/"]
+a-order "d1"
+a-effect "new"
+a-dup-ret nil
+a-dup-urls ["file:<ROOT>/d1/" "file:<ROOT>/d2/"]
+a-missing nil
+a-use-true "t"
+a-use-false "f"
+a-res-true "file:<ROOT>/ctxonly/ctx-marker.txt"
+a-res-false "file:<ROOT>/ctxonly/ctx-marker.txt"

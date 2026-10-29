@@ -1191,13 +1191,16 @@ fn write_dup_record_extmap(
 
 /// Dup records (`#Name[v1, v2, ...]` — `(vals r)`: fields in
 /// definition order, then extmap entries in content-iteration
-/// order; always non-verbose).
+/// order; the `#Name{map}` body when `*verbose-defrecords*` is set).
 fn dup_record(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     let head = dup_head(eval, args)?;
     let Some((name, fields, content)) = dup_record_parts(&head.o) else {
         write_engine_body(&head.o, &head.w, &head.opts)?;
         return Ok(Value::Nil);
     };
+    if deref_core(eval, "*verbose-defrecords*").is_truthy() {
+        return write_record_body(eval, &head.o, &head.w, &head.opts).map(|_| Value::Nil);
+    }
     write_record_header(&head.w, &name)?;
     let keys = record_field_keys(&fields);
     let mut first = true;
