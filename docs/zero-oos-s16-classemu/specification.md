@@ -204,7 +204,12 @@ agree with where they overlap), plus 7 closure rows
 `AbstractStringBuilder`, the `Permission` chain,
 `Opcodes`). `lattice_defaults_rows` pins each
 `[isInterface, bases]` plus `supers` over each new
-closure chain.
+closure chain. Two declarations surprise JDK-17
+readers, both cross-checked against jdk21u sources:
+`java.lang.Compiler` has no row because the class was
+removed in 21 (importing it is CNFE, pinned), and the
+`Appendable` in the `StringBuffer`/`StringBuilder`
+bases is explicit in the JDK 21 `implements` clause.
 
 Synthetic rows (2, port-only, documented here — the
 oracle cannot produce them):
@@ -603,6 +608,18 @@ Behaviors:
   the port's existing `ns-imports`/`ns-map` pins forbid
   it, §2.1). `def` keeps interning the descriptor var;
   `(Point.)` keeps resolving through it.
+- Defining over a default diverges by phase (#74): the
+  port rejects `(deftype String [x])` at compile time
+  with the def-over-import error, while the JVM defines
+  the class and then throws `already refers to` from
+  the macro's trailing `(import ~classname)`
+  (`core_deftype.clj`). Same mapping outcome (the
+  default survives), different error and side effects.
+- Host-type imports resolve through the defining var,
+  not a classloader: unmapping it (`ns-unmap`) makes
+  later imports of that type CNFE, where the JVM's
+  loaded class persists. Known limitation; a
+  classloader-like store is a follow-up.
 - `deftype` does not consult the table beyond the
   `def` rule above; `catch` keeps its curated
   `resolve_classname` rules (imports do not feed

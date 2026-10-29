@@ -1489,6 +1489,10 @@ const STATIC_LATTICE: &[StaticRow] = &[
     // shape — the same source the 214 oracle rows agree with where
     // they overlap, e.g. `Character`, `Boolean`, `Long`, `BigDecimal`).
     // `lattice_defaults_rows` pins each `[isInterface, bases]`.
+    // Surprises cross-checked against jdk21u sources: no
+    // `java.lang.Compiler` row (the class was removed in 21), and
+    // the `Appendable` in the `StringBuffer`/`Builder` bases is
+    // explicit in the JDK 21 `implements` clause.
     StaticRow {
         name: "java.lang.AbstractMethodError",
         iface: false,

@@ -810,8 +810,10 @@ fn default_imports() {
     // Explicit-over-different-default throws `already refers to`
     // (explicit does NOT silently win over defaults): a host type
     // whose simple name hits a default. (`String` is unmapped in
-    // `box` first — defining over the default is the def-over-import
-    // compile error, same as the JVM.)
+    // `box` first: defining over a default is the def-over-import
+    // compile error on the port, while the JVM defines the class and
+    // then throws `already refers to` from the macro's trailing
+    // import — phase, error, and side effects all diverge, §1.8.)
     run(
         &mut eval,
         "(do (create-ns 'box) (in-ns 'box) (clojure.core/refer-clojure) (ns-unmap 'box 'String) (deftype String [x]) (clojure.core/in-ns 'user))",
@@ -819,9 +821,56 @@ fn default_imports() {
     assert_eq!(
         uncaught(
             &mut eval,
+            "(do (in-ns 'impdd) (clojure.core/refer-clojure) (deftype String [x]))"
+        ),
+        "java.lang.RuntimeException | Expecting var, but String is mapped to class java.lang.String"
+    );
+    assert_eq!(
+        uncaught(
+            &mut eval,
             "(do (in-ns 'impd3) (clojure.core/refer-clojure) (import 'box.String))"
         ),
         "java.lang.IllegalStateException | String already refers to: class java.lang.String in namespace: impd3"
+    );
+    // The failed conflict installs nothing.
+    assert_eq!(run(&mut eval, "(count (ns-imports 'impd3))"), "106");
+    // `java.lang.Compiler` was removed in JDK 21: no row, so the
+    // import is CNFE (guards the B2 fix against row resurrection).
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(do (in-ns 'impd4) (clojure.core/refer-clojure) (import 'java.lang.Compiler))"
+        ),
+        "java.lang.ClassNotFoundException | java.lang.Compiler"
+    );
+    // `def` over a default is the same def-over-import compile error.
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(do (in-ns 'impd5) (clojure.core/refer-clojure) (def String 1))"
+        ),
+        "java.lang.RuntimeException | Expecting var, but String is mapped to class java.lang.String"
+    );
+    // `intern` over a default replaces it (removal, not shadow — the
+    // JVM additionally warns, §2.4).
+    assert_eq!(
+        run(
+            &mut eval,
+            "(do (in-ns 'impd6) (clojure.core/refer-clojure) (intern 'impd6 'String 1) [(resolve 'String) (contains? (ns-imports 'impd6) 'String)])"
+        ),
+        "[#'impd6/String false]"
+    );
+    // `refer` over a default replaces it likewise.
+    run(
+        &mut eval,
+        "(do (create-ns 'box2) (in-ns 'box2) (clojure.core/refer-clojure) (ns-unmap 'box2 'String) (def String 1) (clojure.core/in-ns 'user))",
+    );
+    assert_eq!(
+        run(
+            &mut eval,
+            "(do (in-ns 'impd7) (clojure.core/refer-clojure) (refer 'box2 :only '[String]) [(resolve 'String) (contains? (ns-imports 'impd7) 'String)])"
+        ),
+        "[#'box2/String false]"
     );
 }
 
