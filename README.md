@@ -138,7 +138,7 @@ unbounded, `:fail` / `:continue` error modes, `await` / `await-for`,
 CI-enforced: listed vars must resolve, excluded ones must not).
 
 **AOT (`build`).** Compiles the pure subset — top-level fixed-arity
-`defn` over Int/Double/Bool/Str/Vector value flow, `if`/`do`/`let`
+`defn` over Int/Double/Bool/Str/Keyword/Vector value flow, `if`/`do`/`let`
 + direct self-recursion, calls to a closed 13-primitive set
 (`+ - * quot < <= > >= = count nth get conj`), `print` — to a
 native binary linked against the shipped `clj-rt` runtime archive.

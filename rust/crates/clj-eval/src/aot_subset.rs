@@ -41,7 +41,7 @@ use std::sync::Arc;
 
 use clj_reader::symbol::{is_terminating_macro, is_whitespace};
 use clj_reader::{ReaderError, Span};
-use clj_value::{PrintOpts, Symbol, Throwable, Value, pr_to_string};
+use clj_value::{Keyword, PrintOpts, Symbol, Throwable, Value, pr_to_string};
 
 use crate::error::{CompileError, compile_diagnostic, span_of};
 use crate::eval::{Evaluator, SourceError};
@@ -96,10 +96,10 @@ impl Prim {
 }
 
 /// One planned expression: literals over the subset value flow
-/// (`Int`/`Double`/`Bool`/`Str`/`Vector`, plus the unavoidable
-/// `nil` from `get`-miss/`if`-no-else/`print`), locals by flat
-/// slot, control flow, and calls (primitives, sibling `defn`s by
-/// index, `print`).
+/// (`Int`/`Double`/`Bool`/`Str`/`Keyword`/`Vector`, plus the
+/// unavoidable `nil` from `get`-miss/`if`-no-else/`print`),
+/// locals by flat slot, control flow, and calls (primitives,
+/// sibling `defn`s by index, `print`).
 #[derive(Clone, Debug, PartialEq)]
 pub enum SubsetExpr {
     Nil,
@@ -107,6 +107,7 @@ pub enum SubsetExpr {
     Int(i64),
     Double(f64),
     Str(Arc<str>),
+    Keyword(Keyword),
     VecLit(Vec<SubsetExpr>),
     Local(usize),
     If {
@@ -815,6 +816,7 @@ impl Planner {
             Value::Int(i) => Ok(SubsetExpr::Int(*i)),
             Value::Double(d) => Ok(SubsetExpr::Double(*d)),
             Value::Str(s) => Ok(SubsetExpr::Str(Arc::clone(s))),
+            Value::Keyword(k) => Ok(SubsetExpr::Keyword(k.clone())),
             Value::Symbol(sym) => self.classify_symbol(sym, scope, fallback),
             Value::List(list) => {
                 let span = span_of(form, fallback);
@@ -849,7 +851,7 @@ impl Planner {
             other => Err(PlanError::Subset(SubsetError {
                 span: fallback,
                 form: short_pr(other),
-                hint: "only Int/Double/Bool/Str/Vector values flow".to_owned(),
+                hint: "only Int/Double/Bool/Str/Keyword/Vector values flow".to_owned(),
             })),
         }
     }
@@ -1646,14 +1648,27 @@ mod tests {
     }
 
     #[test]
+    fn keyword_literals_flow() {
+        // T73 item 8: keywords are subset values (plain and
+        // namespaced), including nested in vectors.
+        let prog = plan(":miss [:a :u/id]").expect("keywords plan");
+        assert_eq!(
+            prog.main,
+            vec![
+                SubsetExpr::Keyword(Keyword::new(None, "miss")),
+                SubsetExpr::VecLit(vec![
+                    SubsetExpr::Keyword(Keyword::new(None, "a")),
+                    SubsetExpr::Keyword(Keyword::new(Some("u"), "id")),
+                ]),
+            ]
+        );
+    }
+
+    #[test]
     fn value_literals_outside_the_flow() {
         assert_eq!(
             diag("{:a 1}"),
-            "f.clj:1:1: unsupported form in AOT subset: {:a 1} (only Int/Double/Bool/Str/Vector values flow)"
-        );
-        assert_eq!(
-            diag(":kw"),
-            "f.clj:1:1: unsupported form in AOT subset: :kw (only Int/Double/Bool/Str/Vector values flow)"
+            "f.clj:1:1: unsupported form in AOT subset: {:a 1} (only Int/Double/Bool/Str/Keyword/Vector values flow)"
         );
         assert_eq!(
             diag("()"),
@@ -1718,7 +1733,7 @@ mod tests {
         // literal), not pre/post — which names `defn`.
         assert_eq!(
             diag("(defn f [x] {:a 1})"),
-            "f.clj:1:1: unsupported form in AOT subset: {:a 1} (only Int/Double/Bool/Str/Vector values flow)"
+            "f.clj:1:1: unsupported form in AOT subset: {:a 1} (only Int/Double/Bool/Str/Keyword/Vector values flow)"
         );
     }
 

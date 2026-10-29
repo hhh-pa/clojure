@@ -73,6 +73,7 @@ struct Decls<'ctx> {
     int: FunctionValue<'ctx>,
     double: FunctionValue<'ctx>,
     str_: FunctionValue<'ctx>,
+    keyword: FunctionValue<'ctx>,
     vec_new: FunctionValue<'ctx>,
     vec_push: FunctionValue<'ctx>,
     clone: FunctionValue<'ctx>,
@@ -137,6 +138,14 @@ impl<'ctx> Lower<'ctx> {
             str_: module.add_function(
                 "rt_str",
                 ptr.fn_type(&[ptr.into(), i64t.into()], false),
+                None,
+            ),
+            keyword: module.add_function(
+                "rt_keyword",
+                ptr.fn_type(
+                    &[ptr.into(), i64t.into(), ptr.into(), i64t.into(), i8t.into()],
+                    false,
+                ),
                 None,
             ),
             vec_new: module.add_function("rt_vec_new", ptr.fn_type(&[], false), None),
@@ -396,6 +405,29 @@ impl<'ctx> Lower<'ctx> {
                 self.call_ptr(
                     self.decls.str_,
                     &[ptr.into(), self.i64t.const_int(len, false).into()],
+                )
+            }
+            SubsetExpr::Keyword(k) => {
+                let (name_ptr, name_len) = self.const_str(k.name());
+                let (ns_ptr, ns_len, has_ns) = match k.namespace() {
+                    Some(ns) => {
+                        let (ptr, len) = self.const_str(ns);
+                        (ptr, len, 1)
+                    }
+                    None => {
+                        let (ptr, len) = self.const_str("");
+                        (ptr, len, 0)
+                    }
+                };
+                self.call_ptr(
+                    self.decls.keyword,
+                    &[
+                        name_ptr.into(),
+                        self.i64t.const_int(name_len, false).into(),
+                        ns_ptr.into(),
+                        self.i64t.const_int(ns_len, false).into(),
+                        self.i8t.const_int(has_ns, false).into(),
+                    ],
                 )
             }
             other => self.lower_compound(func, slots, other),
@@ -775,6 +807,13 @@ mod tests {
         assert!(ir.contains("call ptr @rt_double"), "{ir}");
         assert!(ir.contains("call ptr @rt_bool"), "{ir}");
         assert!(ir.contains("call ptr @rt_nil"), "{ir}");
+    }
+
+    #[test]
+    fn keyword_literals_lower() {
+        // T73 item 8: keywords flow (plain and namespaced).
+        let ir = compile_ir("(print :miss [:a :u/id])");
+        assert_eq!(ir.match_indices("call ptr @rt_keyword").count(), 3, "{ir}");
     }
 
     #[test]

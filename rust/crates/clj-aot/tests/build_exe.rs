@@ -140,6 +140,21 @@ fn linked_binary_survives_untaken_let_branches() {
 }
 
 #[test]
+fn linked_binary_flows_keywords() {
+    // T73 item 8: keywords are subset values — the vector-001
+    // shape that used to fail the build with `unsupported form
+    // in AOT subset: :miss` (JVM prints the same line).
+    let (stdout, stderr, code) = build_and_run(
+        "keyword",
+        "(print [(get [1 2] 5 :miss) (= :a :a) (= :a :b) :x :u/id])",
+    );
+    assert_eq!(
+        (stdout.as_str(), stderr.as_str(), code),
+        ("[:miss true false :x :u/id]", "", 0)
+    );
+}
+
+#[test]
 fn linked_binary_reports_runtime_errors() {
     let (stdout, stderr, code) = build_and_run("divzero", "(print (quot 1 0))");
     assert_eq!(stdout, "");
