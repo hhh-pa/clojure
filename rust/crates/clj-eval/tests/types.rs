@@ -225,15 +225,15 @@ fn dtor_non_interface() {
 }
 
 #[test]
-fn dtor_host_super_unresolvable() {
-    // Host classes are interop (N1): S16 resolves `String` only
-    // after an explicit `import` — unimported it stays
-    // unresolvable; imported it is still `Not an interface`
-    // (only port interfaces resolve in interface position).
+fn dtor_host_super_not_interface() {
+    // Host classes are interop (N1): `String` resolves via the #74
+    // defaults whether or not it is explicitly imported — and is
+    // still `Not an interface` either way (only port interfaces
+    // resolve in interface position).
     let mut eval = boot();
     assert_eq!(
         uncaught(&mut eval, "(deftype P [a] String (s [this] 1))"),
-        "java.lang.RuntimeException | Unable to resolve symbol: String in this context"
+        "java.lang.IllegalArgumentException | Not an interface: String"
     );
     assert_eq!(
         uncaught(

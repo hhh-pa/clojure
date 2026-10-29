@@ -15,7 +15,8 @@
 //!
 //! The lattice is one static table (transcribed verbatim from
 //! `docs/zero-oos-s16-classemu/probes/lattice.out`, plus the five
-//! documented synthetic rows and the two unprobed import-only rows)
+//! documented synthetic rows, the two unprobed import-only rows,
+//! and the 72 #74 rows)
 //! with four dynamic rules: the HostDef
 //! rule (host types and their claimed names), the fn rule (closures
 //! by rest-presence, natives unconditionally `AFunction`), the future
@@ -70,9 +71,10 @@ struct StaticRow {
 /// The static lattice: the 214 oracle rows plus the documented
 /// synthetic rows (the future/promise/iteration reifies, the
 /// nonexistent MissingFormatConversionException, and
-/// NoSuchElementException for the S16 getFirst/getLast variant)
-/// and the two unprobed import-only rows (`java.util.Calendar`,
-/// `java.sql.Date`).
+/// NoSuchElementException for the S16 getFirst/getLast variant),
+/// the two unprobed import-only rows (`java.util.Calendar`,
+/// `java.sql.Date`), and the 72 #74 rows (65 defaults + 7 closure,
+/// JDK 21 declarations).
 const STATIC_LATTICE: &[StaticRow] = &[
     StaticRow {
         name: "clojure.core.Eduction",
@@ -1482,11 +1484,568 @@ const STATIC_LATTICE: &[StaticRow] = &[
         iface: false,
         bases: &["java.lang.RuntimeException"],
     },
+    // #74: the default-import rows with no oracle probe (JDK 21
+    // class declarations in superclass-first, declaration-order
+    // shape — the same source the 214 oracle rows agree with where
+    // they overlap, e.g. `Character`, `Boolean`, `Long`, `BigDecimal`).
+    // `lattice_defaults_rows` pins each `[isInterface, bases]`.
+    // Surprises cross-checked against jdk21u sources: no
+    // `java.lang.Compiler` row (the class was removed in 21), and
+    // the `Appendable` in the `StringBuffer`/`Builder` bases is
+    // explicit in the JDK 21 `implements` clause.
+    StaticRow {
+        name: "java.lang.AbstractMethodError",
+        iface: false,
+        bases: &["java.lang.IncompatibleClassChangeError"],
+    },
+    StaticRow {
+        name: "java.lang.ArrayStoreException",
+        iface: false,
+        bases: &["java.lang.RuntimeException"],
+    },
+    StaticRow {
+        name: "java.lang.BootstrapMethodError",
+        iface: false,
+        bases: &["java.lang.LinkageError"],
+    },
+    StaticRow {
+        name: "java.lang.Byte",
+        iface: false,
+        bases: &[
+            "java.lang.Number",
+            "java.lang.Comparable",
+            "java.lang.constant.Constable",
+        ],
+    },
+    StaticRow {
+        name: "java.lang.ClassCircularityError",
+        iface: false,
+        bases: &["java.lang.LinkageError"],
+    },
+    StaticRow {
+        name: "java.lang.ClassFormatError",
+        iface: false,
+        bases: &["java.lang.LinkageError"],
+    },
+    StaticRow {
+        name: "java.lang.ClassLoader",
+        iface: false,
+        bases: &["java.lang.Object"],
+    },
+    StaticRow {
+        name: "java.lang.ClassValue",
+        iface: false,
+        bases: &["java.lang.Object"],
+    },
+    StaticRow {
+        name: "java.lang.CloneNotSupportedException",
+        iface: false,
+        bases: &["java.lang.Exception"],
+    },
+    StaticRow {
+        name: "java.lang.Deprecated",
+        iface: true,
+        bases: &["java.lang.annotation.Annotation"],
+    },
+    StaticRow {
+        name: "java.lang.Enum",
+        iface: false,
+        bases: &[
+            "java.lang.Object",
+            "java.lang.constant.Constable",
+            "java.lang.Comparable",
+            "java.io.Serializable",
+        ],
+    },
+    StaticRow {
+        name: "java.lang.EnumConstantNotPresentException",
+        iface: false,
+        bases: &["java.lang.RuntimeException"],
+    },
+    StaticRow {
+        name: "java.lang.ExceptionInInitializerError",
+        iface: false,
+        bases: &["java.lang.LinkageError"],
+    },
+    StaticRow {
+        name: "java.lang.Float",
+        iface: false,
+        bases: &[
+            "java.lang.Number",
+            "java.lang.Comparable",
+            "java.lang.constant.Constable",
+            "java.lang.constant.ConstantDesc",
+        ],
+    },
+    StaticRow {
+        name: "java.lang.IllegalAccessException",
+        iface: false,
+        bases: &["java.lang.ReflectiveOperationException"],
+    },
+    StaticRow {
+        name: "java.lang.IllegalCallerException",
+        iface: false,
+        bases: &["java.lang.RuntimeException"],
+    },
+    StaticRow {
+        name: "java.lang.IllegalMonitorStateException",
+        iface: false,
+        bases: &["java.lang.RuntimeException"],
+    },
+    StaticRow {
+        name: "java.lang.IllegalThreadStateException",
+        iface: false,
+        bases: &["java.lang.IllegalArgumentException"],
+    },
+    StaticRow {
+        name: "java.lang.InheritableThreadLocal",
+        iface: false,
+        bases: &["java.lang.ThreadLocal"],
+    },
+    StaticRow {
+        name: "java.lang.InstantiationError",
+        iface: false,
+        bases: &["java.lang.IncompatibleClassChangeError"],
+    },
+    StaticRow {
+        name: "java.lang.InstantiationException",
+        iface: false,
+        bases: &["java.lang.ReflectiveOperationException"],
+    },
+    StaticRow {
+        name: "java.lang.Integer",
+        iface: false,
+        bases: &[
+            "java.lang.Number",
+            "java.lang.Comparable",
+            "java.lang.constant.Constable",
+            "java.lang.constant.ConstantDesc",
+        ],
+    },
+    StaticRow {
+        name: "java.lang.InternalError",
+        iface: false,
+        bases: &["java.lang.VirtualMachineError"],
+    },
+    StaticRow {
+        name: "java.lang.InterruptedException",
+        iface: false,
+        bases: &["java.lang.Exception"],
+    },
+    StaticRow {
+        name: "java.lang.LayerInstantiationException",
+        iface: false,
+        bases: &["java.lang.RuntimeException"],
+    },
+    StaticRow {
+        name: "java.lang.Math",
+        iface: false,
+        bases: &["java.lang.Object"],
+    },
+    StaticRow {
+        name: "java.lang.ModuleLayer",
+        iface: false,
+        bases: &["java.lang.Object"],
+    },
+    StaticRow {
+        name: "java.lang.NoClassDefFoundError",
+        iface: false,
+        bases: &["java.lang.LinkageError"],
+    },
+    StaticRow {
+        name: "java.lang.NoSuchFieldError",
+        iface: false,
+        bases: &["java.lang.IncompatibleClassChangeError"],
+    },
+    StaticRow {
+        name: "java.lang.NoSuchFieldException",
+        iface: false,
+        bases: &["java.lang.ReflectiveOperationException"],
+    },
+    StaticRow {
+        name: "java.lang.NoSuchMethodError",
+        iface: false,
+        bases: &["java.lang.IncompatibleClassChangeError"],
+    },
+    StaticRow {
+        name: "java.lang.NoSuchMethodException",
+        iface: false,
+        bases: &["java.lang.ReflectiveOperationException"],
+    },
+    StaticRow {
+        name: "java.lang.OutOfMemoryError",
+        iface: false,
+        bases: &["java.lang.VirtualMachineError"],
+    },
+    StaticRow {
+        name: "java.lang.Override",
+        iface: true,
+        bases: &["java.lang.annotation.Annotation"],
+    },
+    StaticRow {
+        name: "java.lang.Package",
+        iface: false,
+        bases: &[
+            "java.lang.NamedPackage",
+            "java.lang.reflect.AnnotatedElement",
+        ],
+    },
+    StaticRow {
+        name: "java.lang.Process",
+        iface: false,
+        bases: &["java.lang.Object"],
+    },
+    StaticRow {
+        name: "java.lang.ProcessBuilder",
+        iface: false,
+        bases: &["java.lang.Object"],
+    },
+    StaticRow {
+        name: "java.lang.ProcessHandle",
+        iface: true,
+        bases: &["java.lang.Comparable"],
+    },
+    StaticRow {
+        name: "java.lang.Runtime",
+        iface: false,
+        bases: &["java.lang.Object"],
+    },
+    StaticRow {
+        name: "java.lang.RuntimePermission",
+        iface: false,
+        bases: &["java.security.BasicPermission"],
+    },
+    StaticRow {
+        name: "java.lang.SecurityException",
+        iface: false,
+        bases: &["java.lang.RuntimeException"],
+    },
+    StaticRow {
+        name: "java.lang.SecurityManager",
+        iface: false,
+        bases: &["java.lang.Object"],
+    },
+    StaticRow {
+        name: "java.lang.Short",
+        iface: false,
+        bases: &[
+            "java.lang.Number",
+            "java.lang.Comparable",
+            "java.lang.constant.Constable",
+        ],
+    },
+    StaticRow {
+        name: "java.lang.StackOverflowError",
+        iface: false,
+        bases: &["java.lang.VirtualMachineError"],
+    },
+    StaticRow {
+        name: "java.lang.StackTraceElement",
+        iface: false,
+        bases: &["java.lang.Object", "java.io.Serializable"],
+    },
+    StaticRow {
+        name: "java.lang.StackWalker",
+        iface: false,
+        bases: &["java.lang.Object"],
+    },
+    StaticRow {
+        name: "java.lang.StrictMath",
+        iface: false,
+        bases: &["java.lang.Object"],
+    },
+    StaticRow {
+        name: "java.lang.StringBuffer",
+        iface: false,
+        bases: &[
+            "java.lang.AbstractStringBuilder",
+            "java.lang.Appendable",
+            "java.io.Serializable",
+            "java.lang.Comparable",
+            "java.lang.CharSequence",
+        ],
+    },
+    StaticRow {
+        name: "java.lang.StringBuilder",
+        iface: false,
+        bases: &[
+            "java.lang.AbstractStringBuilder",
+            "java.lang.Appendable",
+            "java.io.Serializable",
+            "java.lang.Comparable",
+            "java.lang.CharSequence",
+        ],
+    },
+    StaticRow {
+        name: "java.lang.SuppressWarnings",
+        iface: true,
+        bases: &["java.lang.annotation.Annotation"],
+    },
+    StaticRow {
+        name: "java.lang.System",
+        iface: false,
+        bases: &["java.lang.Object"],
+    },
+    StaticRow {
+        name: "java.lang.Thread",
+        iface: false,
+        bases: &["java.lang.Object", "java.lang.Runnable"],
+    },
+    StaticRow {
+        name: "java.lang.Thread$State",
+        iface: false,
+        bases: &["java.lang.Enum"],
+    },
+    StaticRow {
+        name: "java.lang.Thread$UncaughtExceptionHandler",
+        iface: true,
+        bases: &[],
+    },
+    StaticRow {
+        name: "java.lang.ThreadDeath",
+        iface: false,
+        bases: &["java.lang.Error"],
+    },
+    StaticRow {
+        name: "java.lang.ThreadGroup",
+        iface: false,
+        bases: &[
+            "java.lang.Object",
+            "java.lang.Thread$UncaughtExceptionHandler",
+        ],
+    },
+    StaticRow {
+        name: "java.lang.ThreadLocal",
+        iface: false,
+        bases: &["java.lang.Object"],
+    },
+    StaticRow {
+        name: "java.lang.TypeNotPresentException",
+        iface: false,
+        bases: &["java.lang.RuntimeException"],
+    },
+    StaticRow {
+        name: "java.lang.UnknownError",
+        iface: false,
+        bases: &["java.lang.VirtualMachineError"],
+    },
+    StaticRow {
+        name: "java.lang.UnsatisfiedLinkError",
+        iface: false,
+        bases: &["java.lang.LinkageError"],
+    },
+    StaticRow {
+        name: "java.lang.UnsupportedClassVersionError",
+        iface: false,
+        bases: &["java.lang.ClassFormatError"],
+    },
+    StaticRow {
+        name: "java.lang.VerifyError",
+        iface: false,
+        bases: &["java.lang.LinkageError"],
+    },
+    StaticRow {
+        name: "java.lang.VirtualMachineError",
+        iface: false,
+        bases: &["java.lang.Error"],
+    },
+    StaticRow {
+        name: "java.lang.Void",
+        iface: false,
+        bases: &["java.lang.Object"],
+    },
+    // #74 closure: annotation superinterface (JDK 21 declaration).
+    StaticRow {
+        name: "java.lang.annotation.Annotation",
+        iface: true,
+        bases: &[],
+    },
+    // #74 closure: Package superclass (JDK 21 declaration).
+    StaticRow {
+        name: "java.lang.NamedPackage",
+        iface: false,
+        bases: &["java.lang.Object"],
+    },
+    // #74 closure: StringBuffer/Builder superclass (JDK 21 declaration).
+    StaticRow {
+        name: "java.lang.AbstractStringBuilder",
+        iface: false,
+        bases: &[
+            "java.lang.Object",
+            "java.lang.Appendable",
+            "java.lang.CharSequence",
+        ],
+    },
+    // #74 closure: RuntimePermission superclass (JDK 21 declaration).
+    StaticRow {
+        name: "java.security.BasicPermission",
+        iface: false,
+        bases: &["java.security.Permission"],
+    },
+    // #74 closure: BasicPermission superclass (JDK 21 declaration).
+    StaticRow {
+        name: "java.security.Permission",
+        iface: false,
+        bases: &[
+            "java.lang.Object",
+            "java.security.Guard",
+            "java.io.Serializable",
+        ],
+    },
+    // #74 closure: Permission base (JDK 21 declaration).
+    StaticRow {
+        name: "java.security.Guard",
+        iface: true,
+        bases: &[],
+    },
+    // #74 default import: same-package shadowing — `Compiler` in
+    // `RT.java` resolves to `clojure.lang.Compiler`, never
+    // `java.lang.Compiler` (JLS: single-type > package > java.lang).
+    StaticRow {
+        name: "clojure.lang.Compiler",
+        iface: false,
+        bases: &["java.lang.Object", "clojure.asm.Opcodes"],
+    },
+    // #74 closure: Compiler base (relocated ASM constants).
+    StaticRow {
+        name: "clojure.asm.Opcodes",
+        iface: true,
+        bases: &[],
+    },
 ];
 
 /// A static lattice row by binary name.
 fn static_row(name: &str) -> Option<&'static StaticRow> {
     STATIC_LATTICE.iter().find(|r| r.name == name)
+}
+
+/// The JVM default imports (`RT.DEFAULT_IMPORTS`, #74) in upstream
+/// order. Five keys are not `java.lang` (name resolution inside
+/// `RT.java`): the `java.math` pair (single-type imports), `Callable`
+/// (`j.u.c`, single-type import — the only `Callable` in the JDK),
+/// `Compiler` (`clojure.lang`, same package wins), and
+/// `ExceptionInfo` (explicit). Keys are oracle-pinned (`import.out`
+/// i-defaults); every name is tabled, so seeding resolves through
+/// `static_class` with no evaluator needed.
+const DEFAULT_IMPORTS: &[&str] = &[
+    "java.lang.AbstractMethodError",
+    "java.lang.Appendable",
+    "java.lang.ArithmeticException",
+    "java.lang.ArrayIndexOutOfBoundsException",
+    "java.lang.ArrayStoreException",
+    "java.lang.AssertionError",
+    "java.lang.AutoCloseable",
+    "java.math.BigDecimal",
+    "java.math.BigInteger",
+    "java.lang.Boolean",
+    "java.lang.BootstrapMethodError",
+    "java.lang.Byte",
+    "java.util.concurrent.Callable",
+    "java.lang.CharSequence",
+    "java.lang.Character",
+    "java.lang.Class",
+    "java.lang.ClassCastException",
+    "java.lang.ClassCircularityError",
+    "java.lang.ClassFormatError",
+    "java.lang.ClassLoader",
+    "java.lang.ClassNotFoundException",
+    "java.lang.ClassValue",
+    "java.lang.CloneNotSupportedException",
+    "java.lang.Cloneable",
+    "java.lang.Comparable",
+    "clojure.lang.Compiler",
+    "java.lang.Deprecated",
+    "java.lang.Double",
+    "java.lang.Enum",
+    "java.lang.EnumConstantNotPresentException",
+    "java.lang.Error",
+    "java.lang.Exception",
+    "java.lang.ExceptionInInitializerError",
+    "java.lang.Float",
+    "java.lang.IllegalAccessError",
+    "java.lang.IllegalAccessException",
+    "java.lang.IllegalArgumentException",
+    "java.lang.IllegalCallerException",
+    "java.lang.IllegalMonitorStateException",
+    "java.lang.IllegalStateException",
+    "java.lang.IllegalThreadStateException",
+    "java.lang.IncompatibleClassChangeError",
+    "java.lang.IndexOutOfBoundsException",
+    "java.lang.InheritableThreadLocal",
+    "java.lang.InstantiationError",
+    "java.lang.InstantiationException",
+    "java.lang.Integer",
+    "java.lang.InternalError",
+    "java.lang.InterruptedException",
+    "java.lang.Iterable",
+    "java.lang.LayerInstantiationException",
+    "java.lang.LinkageError",
+    "java.lang.Long",
+    "java.lang.Math",
+    "java.lang.ModuleLayer",
+    "java.lang.NegativeArraySizeException",
+    "java.lang.NoClassDefFoundError",
+    "java.lang.NoSuchFieldError",
+    "java.lang.NoSuchFieldException",
+    "java.lang.NoSuchMethodError",
+    "java.lang.NoSuchMethodException",
+    "java.lang.NullPointerException",
+    "java.lang.Number",
+    "java.lang.NumberFormatException",
+    "java.lang.Object",
+    "java.lang.OutOfMemoryError",
+    "java.lang.Override",
+    "java.lang.Package",
+    "java.lang.Process",
+    "java.lang.ProcessBuilder",
+    "java.lang.ProcessHandle",
+    "java.lang.Readable",
+    "java.lang.ReflectiveOperationException",
+    "java.lang.Runnable",
+    "java.lang.Runtime",
+    "java.lang.RuntimeException",
+    "java.lang.RuntimePermission",
+    "java.lang.SecurityException",
+    "java.lang.SecurityManager",
+    "java.lang.Short",
+    "java.lang.StackOverflowError",
+    "java.lang.StackTraceElement",
+    "java.lang.StackWalker",
+    "java.lang.StrictMath",
+    "java.lang.String",
+    "java.lang.StringBuffer",
+    "java.lang.StringBuilder",
+    "java.lang.StringIndexOutOfBoundsException",
+    "java.lang.SuppressWarnings",
+    "java.lang.System",
+    "java.lang.Thread",
+    "java.lang.Thread$State",
+    "java.lang.Thread$UncaughtExceptionHandler",
+    "java.lang.ThreadDeath",
+    "java.lang.ThreadGroup",
+    "java.lang.ThreadLocal",
+    "java.lang.Throwable",
+    "java.lang.TypeNotPresentException",
+    "java.lang.UnknownError",
+    "java.lang.UnsatisfiedLinkError",
+    "java.lang.UnsupportedClassVersionError",
+    "java.lang.UnsupportedOperationException",
+    "java.lang.VerifyError",
+    "java.lang.VirtualMachineError",
+    "java.lang.Void",
+    "clojure.lang.ExceptionInfo",
+];
+
+/// The default imports as `(simple-name, class)` pairs for
+/// namespace seeding. Every name resolves: a missing row is a
+/// lattice bug and fails loud here rather than seeding a
+/// divergent fallback.
+pub(crate) fn default_imports() -> impl Iterator<Item = (String, Arc<ClassVal>)> {
+    DEFAULT_IMPORTS.iter().map(|fqn| {
+        let simple = fqn.rsplit('.').next().unwrap_or(fqn).to_owned();
+        let class = static_class(fqn).expect("default import is tabled");
+        (simple, class)
+    })
 }
 
 /// A static lattice row as a class value.

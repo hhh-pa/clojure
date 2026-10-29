@@ -195,6 +195,22 @@ the JVM by the §2.6 method. More exotic `NodeSeq`
 variants stay unmapped (follow-up if ever needed,
 §2.2).
 
+Default-import rows (#74, 65 defaults + 7 closure):
+the 106 `RT.DEFAULT_IMPORTS` names must all resolve,
+so the 65 with no oracle row are tabled from JDK 21
+class declarations (the same source the oracle rows
+agree with where they overlap), plus 7 closure rows
+(`Annotation`, `NamedPackage`,
+`AbstractStringBuilder`, the `Permission` chain,
+`Opcodes`). `lattice_defaults_rows` pins each
+`[isInterface, bases]` plus `supers` over each new
+closure chain. Two declarations surprise JDK-17
+readers, both cross-checked against jdk21u sources:
+`java.lang.Compiler` has no row because the class was
+removed in 21 (importing it is CNFE, pinned), and the
+`Appendable` in the `StringBuffer`/`StringBuilder`
+bases is explicit in the JDK 21 `implements` clause.
+
 Synthetic rows (2, port-only, documented here — the
 oracle cannot produce them):
 
@@ -414,9 +430,10 @@ Behaviors:
   (`(clojure.core/instance? 1)` must not compile); it
   phase-diverges from the JVM's runtime `ArityException`
   (§2.4).
-- `(clojure.core/instance? String 1)` stays a compile
-  error via unresolvable `String`: there are no default
-  imports (§1.7), so the pin needs no special case.
+- `(clojure.core/instance? String 1)` is runtime
+  `false`: `String` resolves via the §1.7 defaults (#74
+  retired the compile-error fence; `default_imports`
+  pins it in a fresh ns).
 - First-class use (`apply`, `map`, `resolve`) goes
   through the var with standard runtime arity errors
   (`clojure.core/instance?`, no `--N` — the JVM's
@@ -522,14 +539,21 @@ Behaviors:
   name is a no-op success returning the class (§2.1 —
   importing a type in its defining namespace must not
   CCE when the JVM no-ops).
-- No default imports: a fresh namespace's import table
-  is empty. The JVM installs ~100 (`i-defaults` pins
-  the whole list); the port installs none because the
-  pinned `(clojure.core/instance? String 1)` compile
-  error (§1.5) requires unqualified `String` to stay
-  unresolvable in a fresh `ns` (§2.1). `ns-imports` of
-  a fresh namespace is therefore `{}` (implemented with
-  this fenced difference, §1.15).
+- Default imports (#74 — the fence is retired): every
+  fresh namespace seeds its import table with the JVM's
+  106 `RT.DEFAULT_IMPORTS` (`i-defaults` pins the keys
+  byte-equal; `ns-imports` of a fresh namespace answers
+  the full map). The seed is flat like upstream (a fresh
+  `Namespace`'s mappings start as `DEFAULT_IMPORTS`, and
+  `referenceClass` draws no default/explicit
+  distinction): importing the same class is a no-op,
+  importing a different class over a default throws
+  `already refers to` exactly like an explicit conflict
+  (`default_imports` pins a host `box.String` over the
+  `String` default). Five keys are not `java.lang`
+  (name resolution inside `RT.java`): the `java.math`
+  pair, `j.u.c.Callable`, `clojure.lang.Compiler`,
+  `clojure.lang.ExceptionInfo`.
 - `ns` keeps rejecting `:import` (the `macros.rs`
   `ns_errors` pin, §2.3): only the direct macro exists
   (§2.4).
@@ -537,8 +561,9 @@ Behaviors:
 ### 1.8 The import table
 
 Each namespace carries `imports: Map<simple-name,
-ClassVal>`, consulted LAST (after interns, then
-refers) by every unqualified resolver.
+ClassVal>`, seeded with the §1.7 defaults at creation
+and consulted LAST (after interns, then refers) by
+every unqualified resolver.
 
 | probe IDs | pins |
 |---|---|
@@ -583,6 +608,18 @@ Behaviors:
   the port's existing `ns-imports`/`ns-map` pins forbid
   it, §2.1). `def` keeps interning the descriptor var;
   `(Point.)` keeps resolving through it.
+- Defining over a default diverges by phase (#74): the
+  port rejects `(deftype String [x])` at compile time
+  with the def-over-import error, while the JVM defines
+  the class and then throws `already refers to` from
+  the macro's trailing `(import ~classname)`
+  (`core_deftype.clj`). Same mapping outcome (the
+  default survives), different error and side effects.
+- Host-type imports resolve through the defining var,
+  not a classloader: unmapping it (`ns-unmap`) makes
+  later imports of that type CNFE, where the JVM's
+  loaded class persists. Known limitation; a
+  classloader-like store is a follow-up.
 - `deftype` does not consult the table beyond the
   `def` rule above; `catch` keeps its curated
   `resolve_classname` rules (imports do not feed
@@ -956,8 +993,8 @@ map `{simple-symbol → Class}`, coerced through the
 `ns-*` family's `the_ns_name` (ns-object ok, string →
 short CCE, nil → the JVM-exact `key` NPE, missing →
 `No namespace: X found`). A fresh namespace answers
-`{}` (no default imports — the §1.7 fenced
-divergence; the JVM's ~100 defaults are oracle-only).
+the full 106-entry default map (#74 retired the `{}`
+fence; `i-defaults` pins the keys byte-equal).
 
 | probe IDs | pins |
 |---|---|
@@ -966,7 +1003,7 @@ divergence; the JVM's ~100 defaults are oracle-only).
 | `i-ns-imports-str` | string arg → short CCE (`String` → `Symbol`; the oracle shows the module shape) |
 | `i-ns-imports-nil` | nil arg → NPE (`Cannot invoke "Object.hashCode()" because "key" is null` — byte-exact via `NIL_KEY_NPE`) |
 | `i-ns-imports-missing` | missing ns → `Exception \| No namespace: nosuchnsxyz found` (via `the_ns_name`) |
-| `i-defaults` | oracle-only: the JVM's ~100 default imports (the port installs none) |
+| `i-defaults` | the 106 defaults, byte-equal keys (#74) |
 | `i-ns-clause` | oracle-only: the JVM's `ns` `:import` feeds the table (the port keeps the `ns` spec error, §1.7) |
 
 Behaviors:
@@ -976,9 +1013,8 @@ Behaviors:
   (`i-ns-imports-val`).
 - Coercion is exactly `the_ns_name` — no new error
   paths (§2.3).
-- Fresh-ns `{}` flips the `ns-imports` matrix row
-  from `divergent` to `implemented` with the fenced
-  difference (§1.15).
+- Fresh-ns answers the 106 defaults (#74 retired the
+  `{}` fence); the matrix test-note names the new pins.
 
 ### 1.14 `PrintWriter-on`
 
@@ -1105,11 +1141,14 @@ This spec task edits no matrix rows.
    namespace, where `Point` names the def var. S13
    already folds descriptors for `derive` — S16 is
    consistent with the published seam.
-4. **No default imports (vs JVM's ~100).** Forced by
-   the pinned `(clojure.core/instance? String 1)`
-   compile error: any default `String` mapping would
-   let it compile. `ns-imports` flips to `implemented`
-   with this fenced difference (fresh ns → `{}`).
+4. **Default imports seeded flat (vs no fence).** #74
+   retired the fence: every fresh namespace installs
+   the 106 `RT.DEFAULT_IMPORTS`, flat like upstream, so
+   explicit-over-default conflicts throw and
+   `(clojure.core/instance? String 1)` is runtime
+   `false`. The five non-`java.lang` mappings follow
+   name resolution inside `RT.java` (single-type
+   imports, same package, explicit).
 5. **No auto-import from `deftype` etc. (vs JVM).**
    The JVM maps the type name to the class; the port
    interns a descriptor var (existing pins:
@@ -1413,12 +1452,10 @@ class and adapts the message by house rule:
   on the JDK + Clojure build. All are scrubbed or
   order-pinned where fragile; a JDK upgrade means
   re-running the probes, not rewriting the spec.
-- `ns-imports` fresh-ns `{}` is a fenced divergence
-  from the JVM's ~100 defaults — explicit in §1.7 and
-  the row-flip plan, but the most likely review
-  question. The forcing pin:
-  `(clojure.core/instance? String 1)` must not
-  compile.
+- `ns-imports` fresh-ns `{}` was a fenced divergence —
+  retired by #74 (fresh ns answers the 106 defaults;
+  `(clojure.core/instance? String 1)` is runtime
+  `false`).
 
 ### 2.6 Probe inventory (780 rows, all byte-identical on re-run)
 
