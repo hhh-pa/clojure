@@ -125,15 +125,17 @@ and agent actions), `alter-var-root`, `with-redefs`, metadata
 (`meta with-meta vary-meta alter-meta! reset-meta!`). Macros are
 real: expansion evaluates the macro fn on unevaluated forms.
 
-**Concurrency (no STM).** `atom` (validators, watches, `swap!`
+**Concurrency.** `atom` (validators, watches, `swap!`
 / `reset!` / `compare-and-set!`), `delay` / `force`, `future`
 (binding conveyance, cached failures) / `promise` / `deliver`,
 `pcalls` / `pvalues`, agents (`send` on a fixed pool, `send-off`
 unbounded, `:fail` / `:continue` error modes, `await` / `await-for`,
-`restart-agent`, `shutdown-agents`), `locking`, `add-watch` /
+`restart-agent`, `shutdown-agents`), STM (`dosync` over `ref`s —
+`alter` / `commute` / `ensure` / `ref-set`, `io!`, validators,
+watches, history vars), `locking`, `add-watch` /
 `remove-watch`, `realized?`.
 
-**Core vars: 679 implemented, 0 divergent, 11 out of scope**
+**Core vars: 690 implemented, 0 divergent, 0 out of scope**
 ([`rust/core-coverage.md`](rust/core-coverage.md) is normative and
 CI-enforced: listed vars must resolve, excluded ones must not).
 
@@ -209,11 +211,6 @@ out of scope, not silently missing:
   against the static `clojure.lang.*` table (S16);
   `clojure.java.*`, `clojure.reflect`, and real classloading
   stay out.
-- STM (`ref` `dosync` `sync` `io!` `alter` `commute` `ensure`
-  `ref-set`, history vars) — the S19 slice, not yet landed.
-  The bytecode compiler surface (`compile`, `add-classpath`,
-  the `*compile-*` knobs, `primitives-classnames`) landed
-  with S18.
 - Reader: `#=` eval reader, custom `data_readers.clj`
   autoload (the port has no classpath). `#inst` / `#uuid`
   tags read into native `Instant` / `Uuid` values.
@@ -231,7 +228,7 @@ counting reclaims storage on drop:
   Symbol Keyword List Vector MapEntry Map Set Regex Uuid
   Instant Uri TaggedLiteral
   ReaderConditional Var Unbound Throwable Transient Atom Delay
-  Future Promise Agent Volatile Extension HostType MultiFn
+  Future Promise Agent Volatile Ref Extension HostType MultiFn
   Class Array PrimitiveVector`). Heap payloads — strings,
   collections, metadata, extension values — sit behind `Arc`.
 - Collections are thread-safe `rpds` persistent types with an
