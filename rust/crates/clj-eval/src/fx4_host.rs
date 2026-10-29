@@ -96,6 +96,11 @@ pub(crate) enum HostOp<'a> {
     MonitorEnter(&'a Value),
     MonitorExit(&'a Value),
     LetFnStar,
+    /// A direct qualified `instance?` call with a non-2 arity (the
+    /// count rides along for the compile-time arity error).
+    InstanceArity(usize),
+    /// A direct qualified `identical?` call with a non-2 arity.
+    IdenticalArity(usize),
 }
 
 /// Classify a call the expansions emit. Operator position never
@@ -126,14 +131,17 @@ fn classify_instance<'a>(items: &[&'a Value]) -> HostOp<'a> {
         {
             HostOp::SeqQ(arg)
         }
-        _ => HostOp::None,
+        // Two-arg calls otherwise fall through to the `instance?`
+        // var; any other arity of a direct call is a compile error.
+        [_, _, _] => HostOp::None,
+        _ => HostOp::InstanceArity(items.len() - 1),
     }
 }
 
 fn classify_identical<'a>(items: &[&'a Value]) -> HostOp<'a> {
     match items {
         [_, a, b] => HostOp::Identical(a, b),
-        _ => HostOp::None,
+        _ => HostOp::IdenticalArity(items.len() - 1),
     }
 }
 

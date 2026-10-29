@@ -38,9 +38,9 @@ use std::sync::Arc;
 use num_traits::ToPrimitive;
 
 use crate::{
-    Agent, Array, Atom, Delay, ExtensionValue, Future, HostInst, HostKind, HostVal, Keyword,
-    MultiFn, PrimitiveVector, Promise, Symbol, Throwable, Transient, Unbound, Var, Volatile,
-    host_eq,
+    Agent, Array, Atom, ClassVal, Delay, ExtensionValue, Future, HostInst, HostKind, HostVal,
+    Keyword, MultiFn, PrimitiveVector, Promise, Symbol, Throwable, Transient, Unbound, Var,
+    Volatile, host_eq,
 };
 
 /// Deterministic Fx hasher for maps/sets (rpds's default RandomState
@@ -54,6 +54,33 @@ type RpdsVector = rpds::VectorSync<Value>;
 type RpdsMap = rpds::HashTrieMapSync<Value, Value, FxBuildHasher>;
 type RpdsSet = rpds::HashTrieSetSync<Value, FxBuildHasher>;
 
+/// Identity counters for `identical?` (S16): every freshly
+/// constructed [`List`]/[`Vector`]/[`Map`]/[`Set`] mints an id from
+/// its counter (the `ATOM_ID` precedent); `Clone` preserves it, so
+/// two evaluations of the same binding compare identical while two
+/// separately built collections never do. Equality and hashing
+/// ignore the ids.
+static LIST_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+static VECTOR_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+static MAP_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+static SET_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+fn next_list_id() -> u64 {
+    LIST_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+fn next_vector_id() -> u64 {
+    VECTOR_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+fn next_map_id() -> u64 {
+    MAP_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+fn next_set_id() -> u64 {
+    SET_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 /// A persistent list of values (thread-safe rpds list) with optional
 /// metadata. Method names match the bare rpds type so readers keep
 /// compiling; equality and hashing ignore the metadata.
@@ -61,6 +88,7 @@ type RpdsSet = rpds::HashTrieSetSync<Value, FxBuildHasher>;
 pub struct List {
     inner: RpdsList,
     meta: Option<Arc<Map>>,
+    id: u64,
 }
 
 /// A persistent vector of values (thread-safe rpds vector) with
@@ -69,6 +97,7 @@ pub struct List {
 pub struct Vector {
     inner: RpdsVector,
     meta: Option<Arc<Map>>,
+    id: u64,
 }
 
 /// A persistent map of values (thread-safe rpds hash-trie map) with
@@ -103,6 +132,7 @@ pub struct Map {
     keys: Vec<Value>,
     hashy: bool,
     sort: Option<SortSpec>,
+    id: u64,
 }
 
 /// The sort order of a sorted map or set (FT6): natural
@@ -128,6 +158,7 @@ pub struct Set {
     meta: Option<Arc<Map>>,
     members: Vec<Value>,
     sort: Option<SortSpec>,
+    id: u64,
 }
 
 impl List {
@@ -137,6 +168,7 @@ impl List {
         Self {
             inner: RpdsList::new_sync(),
             meta: None,
+            id: next_list_id(),
         }
     }
 
@@ -156,6 +188,7 @@ impl List {
         Self {
             inner: self.inner.push_front(v),
             meta: self.meta,
+            id: next_list_id(),
         }
     }
 
@@ -172,6 +205,7 @@ impl List {
         self.inner.drop_first().map(|inner| Self {
             inner,
             meta: self.meta.clone(),
+            id: next_list_id(),
         })
     }
 
@@ -202,7 +236,16 @@ impl List {
     #[must_use]
     pub fn with_meta(mut self, meta: Option<Map>) -> Self {
         self.meta = meta.map(Arc::new);
+        // A new object on the JVM (`withMeta` news), so a new id.
+        self.id = next_list_id();
         self
+    }
+
+    /// The allocation identity for `identical?` (S16): minted at
+    /// every construction, preserved by `Clone`.
+    #[must_use]
+    pub fn id(&self) -> u64 {
+        self.id
     }
 }
 
@@ -213,6 +256,7 @@ impl Vector {
         Self {
             inner: RpdsVector::new_sync(),
             meta: None,
+            id: next_vector_id(),
         }
     }
 
@@ -232,6 +276,7 @@ impl Vector {
         Self {
             inner: self.inner.push_back(v),
             meta: self.meta,
+            id: next_vector_id(),
         }
     }
 
@@ -241,6 +286,7 @@ impl Vector {
         self.inner.set(index, v).map(|inner| Self {
             inner,
             meta: self.meta.clone(),
+            id: next_vector_id(),
         })
     }
 
@@ -250,6 +296,7 @@ impl Vector {
         self.inner.drop_last().map(|inner| Self {
             inner,
             meta: self.meta.clone(),
+            id: next_vector_id(),
         })
     }
 
@@ -280,7 +327,16 @@ impl Vector {
     #[must_use]
     pub fn with_meta(mut self, meta: Option<Map>) -> Self {
         self.meta = meta.map(Arc::new);
+        // A new object on the JVM (`withMeta` news), so a new id.
+        self.id = next_vector_id();
         self
+    }
+
+    /// The allocation identity for `identical?` (S16): minted at
+    /// every construction, preserved by `Clone`.
+    #[must_use]
+    pub fn id(&self) -> u64 {
+        self.id
     }
 }
 
@@ -316,6 +372,7 @@ impl Map {
                 keys: self.keys,
                 hashy: self.hashy,
                 sort: self.sort,
+                id: next_map_id(),
             };
         }
         let size = self.inner.size();
@@ -328,6 +385,7 @@ impl Map {
             keys,
             hashy: self.hashy || promote,
             sort: self.sort,
+            id: next_map_id(),
         }
     }
 
@@ -347,6 +405,7 @@ impl Map {
             keys: self.keys,
             hashy: self.hashy,
             sort: self.sort,
+            id: next_map_id(),
         }
     }
 
@@ -407,6 +466,7 @@ impl Map {
             keys,
             hashy: self.hashy,
             sort: self.sort,
+            id: next_map_id(),
         }
     }
 
@@ -452,7 +512,16 @@ impl Map {
     #[must_use]
     pub fn with_meta(mut self, meta: Option<Map>) -> Self {
         self.meta = meta.map(Arc::new);
+        // A new object on the JVM (`withMeta` news), so a new id.
+        self.id = next_map_id();
         self
+    }
+
+    /// The allocation identity for `identical?` (S16): minted at
+    /// every construction, preserved by `Clone`.
+    #[must_use]
+    pub fn id(&self) -> u64 {
+        self.id
     }
 }
 
@@ -484,6 +553,7 @@ impl Set {
                 meta: self.meta,
                 members,
                 sort: self.sort,
+                id: next_set_id(),
             }
         }
     }
@@ -515,6 +585,7 @@ impl Set {
             meta: self.meta,
             members: self.members,
             sort: self.sort,
+            id: next_set_id(),
         }
     }
 
@@ -576,6 +647,7 @@ impl Set {
             meta: self.meta,
             members,
             sort: self.sort,
+            id: next_set_id(),
         }
     }
 
@@ -589,11 +661,21 @@ impl Set {
     #[must_use]
     pub fn with_meta(mut self, meta: Option<Map>) -> Self {
         self.meta = meta.map(Arc::new);
+        // A new object on the JVM (`withMeta` news), so a new id.
+        self.id = next_set_id();
         self
+    }
+
+    /// The allocation identity for `identical?` (S16): minted at
+    /// every construction, preserved by `Clone`.
+    #[must_use]
+    pub fn id(&self) -> u64 {
+        self.id
     }
 }
 
-// Equality and hashing ignore metadata on all four newtypes.
+// Equality and hashing ignore metadata and the `identical?` id on
+// all four newtypes.
 impl PartialEq for List {
     fn eq(&self, other: &Self) -> bool {
         self.iter().eq(other.iter())
@@ -676,6 +758,7 @@ pub fn new_map() -> Map {
         keys: Vec::new(),
         hashy: false,
         sort: None,
+        id: next_map_id(),
     }
 }
 
@@ -687,6 +770,7 @@ pub fn new_set() -> Set {
         meta: None,
         members: Vec::new(),
         sort: None,
+        id: next_set_id(),
     }
 }
 
@@ -788,6 +872,9 @@ pub enum Value {
     /// A multimethod (S-typechain stage 3): the `defmulti` value,
     /// invoked like a function.
     MultiFn(Arc<MultiFn>),
+    /// A JVM class as a value (S16): named equality (same name is
+    /// `=`), string hashing, no metadata, never seqable.
+    Class(Arc<ClassVal>),
     /// A Java array (S15): typed, fixed-length, mutable, identity
     /// equality (see [`Array`]).
     Array(Array),
@@ -1101,6 +1188,9 @@ fn value_eq_rest(a: &Value, b: &Value) -> bool {
         (Value::Agent(a), Value::Agent(b)) => cell_meta_eq(a.same_cell(b), a.meta(), b.meta()),
         (Value::Volatile(a), Value::Volatile(b)) => a.same_cell(b),
         (Value::Extension(a), Value::Extension(b)) => a.dyn_eq(&**b),
+        // Classes compare by name alone (same name is `=`, whatever
+        // the import path that produced the value).
+        (Value::Class(a), Value::Class(b)) => a.name() == b.name(),
         // S9 scalars: UUID by bits, instants by millis, URIs by
         // the JDK `equals` (content only — never the print id).
         (Value::Uuid(a), Value::Uuid(b)) => a == b,
@@ -1385,8 +1475,32 @@ fn hash_value_rest<H: Hasher>(v: &Value, state: &mut H) {
             state.write_u8(26);
             m.name.hash(state);
         }
-        // S9 scalars: UUID by bits, instants by millis, URIs by
-        // normalized content (consistent with `uri_eq`).
+        // Classes hash their name (`=`-equal classes share buckets).
+        // (Discriminant 28 is shared with `Instant` in
+        // `hash_value_scalars`, and 27 with `Uuid`/`Array` —
+        // mixing bytes, not unique tags; both sides keep their
+        // base discriminants so pinned `(hash …)` values do not
+        // move.)
+        Value::Class(c) => {
+            state.write_u8(28);
+            c.name().hash(state);
+        }
+        // Arrays hash their identity (identity equality).
+        Value::Array(a) => {
+            state.write_u8(27);
+            state.write_u64(a.id());
+        }
+        // S9 scalars and anything else upstream-missed funnel to the
+        // scalar split (which rejects non-scalars the same way).
+        other => hash_value_scalars(other, state),
+    }
+}
+
+/// S9 scalar hashes (split from [`hash_value_rest`] for the
+/// complexity budget): UUID by bits, instants by millis, URIs by
+/// normalized content (consistent with `uri_eq`).
+fn hash_value_scalars<H: Hasher>(v: &Value, state: &mut H) {
+    match v {
         Value::Uuid(u) => {
             state.write_u8(27);
             state.write_u64(u.hi);
@@ -1399,11 +1513,6 @@ fn hash_value_rest<H: Hasher>(v: &Value, state: &mut H) {
         Value::Uri(u) => {
             state.write_u8(29);
             u.hash_content(state);
-        }
-        // Arrays hash their identity (identity equality).
-        Value::Array(a) => {
-            state.write_u8(27);
-            state.write_u64(a.id());
         }
         // All other variants are handled upstream (the single
         // caller partitions the variants).

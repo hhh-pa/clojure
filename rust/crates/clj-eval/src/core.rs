@@ -2363,6 +2363,9 @@ fn str_of_realized(eval: &mut Evaluator, v: &Value) -> Result<String, NativeErro
         // Arrays render `toString` too (`{desc}@{id}` — S15 oracle
         // `d-str-int`).
         | Value::Array(_) => clj_value::java_debug(&r),
+        // Classes render `Class.toString` (`class `/`interface `
+        // plus the name — shared with the print engine).
+        Value::Class(c) => clj_value::class_java_debug(c),
         Value::List(_) | Value::Vector(_) | Value::Map(_) | Value::Set(_) => {
             clj_value::pr_to_string(&r, &clj_value::PrintOpts::pr())
         }

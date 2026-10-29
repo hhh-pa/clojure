@@ -44,6 +44,24 @@ enum WriterKind {
     Stdout,
     Stderr,
     Buffer(Arc<Mutex<String>>),
+    PrintWriterOn {
+        state: Arc<Mutex<PrintWriterState>>,
+        // Boxed: two inline `Value`s trip `large_enum_variant`.
+        flush_fn: Box<Value>,
+        close_fn: Box<Value>,
+    },
+}
+
+/// The mutable state of a `PrintWriter-on`: the pending buffer and
+/// the closed flag (one lock so the write/close check-and-set is
+/// atomic). `autoflush` is stored but never consulted (S16 §1.14:
+/// Clojure-level printing never triggers it on the JVM either).
+#[derive(Debug)]
+struct PrintWriterState {
+    buffer: String,
+    closed: bool,
+    #[allow(dead_code)]
+    autoflush: bool,
 }
 
 impl Writer {
@@ -53,6 +71,7 @@ impl Writer {
             WriterKind::Stdout => "java.io.OutputStreamWriter",
             WriterKind::Stderr => "java.io.PrintWriter",
             WriterKind::Buffer(_) => "java.io.StringWriter",
+            WriterKind::PrintWriterOn { .. } => "java.io.PrintWriter",
         }
     }
 }
@@ -170,6 +189,14 @@ pub(crate) fn write_to_writer(w: &Value, s: &str) -> Result<(), NativeError> {
             buf.lock().unwrap_or_else(|e| e.into_inner()).push_str(s);
             Ok(())
         }
+        // Writes to a closed `PrintWriter-on` drop (like the JVM).
+        WriterKind::PrintWriterOn { state, .. } => {
+            let mut st = state.lock().unwrap_or_else(|e| e.into_inner());
+            if !st.closed {
+                st.buffer.push_str(s);
+            }
+            Ok(())
+        }
     }
 }
 
@@ -192,14 +219,98 @@ pub(crate) fn check_writer(w: &Value) -> Result<(), NativeError> {
     Ok(())
 }
 
-/// Flush `*out*` (stdout flushes, anything else is a no-op) and
-/// count the flush for the `*flush-on-newline*` test hook.
+/// Flush `*out*` (stdout flushes, `PrintWriter-on` delivers its
+/// buffer, anything else is a no-op) and count the flush for the
+/// `*flush-on-newline*` test hook.
 pub(crate) fn flush_out(eval: &mut Evaluator) -> Result<(), NativeError> {
     eval.bump_flush_count();
-    if as_writer(&deref_core(eval, "*out*")).is_some_and(|w| matches!(w.kind, WriterKind::Stdout)) {
-        std::io::stdout().lock().flush().map_err(io_err)?;
+    let out = deref_core(eval, "*out*");
+    if let Some(w) = as_writer(&out) {
+        match &w.kind {
+            WriterKind::Stdout => {
+                std::io::stdout().lock().flush().map_err(io_err)?;
+            }
+            WriterKind::PrintWriterOn { .. } => {
+                flush_writer(eval, w)?;
+            }
+            WriterKind::Stderr | WriterKind::Buffer(_) => {}
+        }
     }
     Ok(())
+}
+
+/// Deliver a `PrintWriter-on` buffer to its flush fn (skipped when
+/// empty — the buffer takes under the lock, the user fn runs after,
+/// so re-entrant writes land fresh; anything else is a no-op).
+fn flush_writer(eval: &mut Evaluator, w: &Writer) -> Result<(), NativeError> {
+    let WriterKind::PrintWriterOn {
+        state, flush_fn, ..
+    } = &w.kind
+    else {
+        return Ok(());
+    };
+    let taken = {
+        let mut st = state.lock().unwrap_or_else(|e| e.into_inner());
+        std::mem::take(&mut st.buffer)
+    };
+    if taken.is_empty() {
+        return Ok(());
+    }
+    eval.call(flush_fn, &[Value::Str(Arc::from(taken.as_str()))])
+        .map(|_| ())
+        .map_err(signal_to_native)
+}
+
+/// Close a `PrintWriter-on`: flush first, then the close fn unless
+/// nil; second closes no-op; anything else is a no-op.
+fn close_writer(eval: &mut Evaluator, w: &Writer) -> Result<(), NativeError> {
+    let WriterKind::PrintWriterOn {
+        state,
+        flush_fn,
+        close_fn,
+    } = &w.kind
+    else {
+        return Ok(());
+    };
+    let taken = {
+        let mut st = state.lock().unwrap_or_else(|e| e.into_inner());
+        if st.closed {
+            return Ok(());
+        }
+        st.closed = true;
+        std::mem::take(&mut st.buffer)
+    };
+    if !taken.is_empty() {
+        eval.call(flush_fn, &[Value::Str(Arc::from(taken.as_str()))])
+            .map(|_| ())
+            .map_err(signal_to_native)?;
+    }
+    if !matches!(close_fn.as_ref(), Value::Nil) {
+        eval.call(close_fn, &[])
+            .map(|_| ())
+            .map_err(signal_to_native)?;
+    }
+    Ok(())
+}
+
+/// `close` on a writer value (`None` for non-writers — the miss
+/// shapes; void, so never a bean key).
+pub(crate) fn close_writer_value(
+    eval: &mut Evaluator,
+    e: &Arc<dyn ExtensionValue>,
+) -> Option<Result<Value, NativeError>> {
+    let w = e.as_any().downcast_ref::<Writer>()?;
+    Some(close_writer(eval, w).map(|()| Value::Nil))
+}
+
+/// `flush` on a writer value (`None` for non-writers — the miss
+/// shapes; void, so never a bean key).
+pub(crate) fn flush_writer_value(
+    eval: &mut Evaluator,
+    e: &Arc<dyn ExtensionValue>,
+) -> Option<Result<Value, NativeError>> {
+    let w = e.as_any().downcast_ref::<Writer>()?;
+    Some(flush_writer(eval, w).map(|()| Value::Nil))
 }
 
 /// Serializes whole-print emissions across threads. Pre-S8
@@ -582,7 +693,29 @@ pub(crate) const IO_NATIVES: &[(&str, NativeFnPtr)] = &[
     ("slurp", native_slurp),
     ("spit", native_spit),
     ("read-string", native_read_string),
+    ("PrintWriter-on", native_printwriter_on),
 ];
+
+/// `PrintWriter-on`: a callback writer over an in-memory buffer —
+/// flush delivers the buffer to `flush-fn`, close flushes then runs
+/// `close-fn` (unless nil) exactly once. The autoflush flag is
+/// stored, never consulted (nothing auto-flushes on the port); a
+/// non-fn flush fn fails at flush time, not here.
+fn native_printwriter_on(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.core/PrintWriter-on", args, &[2, 3])?;
+    Ok(Value::Extension(Arc::new(Writer {
+        id: eval.next_id(),
+        kind: WriterKind::PrintWriterOn {
+            state: Arc::new(Mutex::new(PrintWriterState {
+                buffer: String::new(),
+                closed: false,
+                autoflush: args.get(2).is_some_and(Value::is_truthy),
+            })),
+            flush_fn: Box::new(args[0].clone()),
+            close_fn: Box::new(args[1].clone()),
+        },
+    })))
+}
 
 #[cfg(test)]
 mod tests {

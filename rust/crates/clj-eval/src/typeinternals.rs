@@ -306,12 +306,13 @@ fn native_proxy_call_with_super(
     out
 }
 
-/// A class-name string or `HostDef` value as its class name (the
-/// S16 seam: classes travel as strings until `Class` values
-/// land). Anything else is the house `Class` cast.
+/// A class-name string, class value (S16), or `HostDef` value
+/// as its class name. Anything else is the house `Class` cast.
 fn class_name_of(v: &Value) -> Result<String, NativeError> {
     match v {
         Value::Str(s) => Ok(s.to_string()),
+        // S16: class values land — read the name (the seam above).
+        Value::Class(c) => Ok(c.name().to_string()),
         Value::HostType(h) => match h.as_ref() {
             HostVal::Def(d) => Ok(d.name.to_string()),
             _ => Err(cce_err(v, "java.lang.Class")),
@@ -415,6 +416,8 @@ fn proxy_bases_split(args: &[Value]) -> Result<(String, Vec<String>), NativeErro
             _ => Err(cce_err(&args[0], "java.lang.Class")),
         },
         Value::Str(s) => Ok((s.to_string(), proxy_ifaces(&args[1..])?)),
+        // S16: class values land — read the name.
+        Value::Class(c) => Ok((c.name().to_string(), proxy_ifaces(&args[1..])?)),
         _ => Err(cce_err(&args[0], "java.lang.Class")),
     }
 }

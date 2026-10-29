@@ -15,6 +15,7 @@
 mod agent;
 mod array;
 mod atom;
+mod class;
 mod compare;
 mod datareaders;
 mod delay;
@@ -39,6 +40,7 @@ mod volatile;
 pub use agent::{Agent, AgentAction, AgentInner, AgentPool, ErrorMode, QueuedAction};
 pub use array::{Array, ArrayDesc, ArrayStore, BaseType, MAX_ARRAY_BYTES};
 pub use atom::{Atom, AtomState};
+pub use class::ClassVal;
 pub use compare::{CompareError, compare};
 pub use datareaders::{TagError, validate_inst, validate_uuid};
 pub use delay::{Delay, DelayState};
@@ -60,8 +62,8 @@ pub use host::{
 pub use keyword::Keyword;
 pub use multifn::{MultiFn, method_for, multifn_hex, multifn_str};
 pub use print::{
-    CHAR_ESCAPES, CHAR_NAMES, java_debug, java_double_string, lift_ns, pr_to_string, print,
-    print_opts::PrintOpts, print_to_string,
+    CHAR_ESCAPES, CHAR_NAMES, class_java_debug, java_debug, java_double_string, lift_ns,
+    pr_to_string, print, print_opts::PrintOpts, print_to_string,
 };
 pub use promise::{Promise, PromiseState};
 pub use pvec::{Elem8, PrimitiveVector};

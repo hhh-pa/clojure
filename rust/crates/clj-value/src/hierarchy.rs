@@ -1103,12 +1103,14 @@ enum Class<'a> {
     Host(&'a HostDef),
 }
 
-/// Resolve a value to a class (tabled name strings and
-/// `HostDef` descriptors; instances and unknown names are not
-/// classes) with its canonical name.
+/// Resolve a value to a class (tabled name strings, class
+/// values (S16, by name through the same lattice), and `HostDef`
+/// descriptors; instances and unknown names are not classes) with
+/// its canonical name.
 fn class_of(v: &Value) -> Option<(String, Class<'_>)> {
     match v {
         Value::Str(s) => lattice(s).map(|e| (s.to_string(), Class::Lattice(e))),
+        Value::Class(c) => lattice(c.name()).map(|e| (c.name().to_string(), Class::Lattice(e))),
         Value::HostType(h) => match h.as_ref() {
             HostVal::Def(d) => Some((d.name.to_string(), Class::Host(d))),
             HostVal::Inst(_) => None,
@@ -1183,14 +1185,16 @@ fn class_pair_hit(child: &Value, parent: &Value) -> bool {
     }
 }
 
-/// Hierarchy keys identify classes by name: descriptors fold
-/// to their name string, everything else passes through.
+/// Hierarchy keys identify classes by name: descriptors and
+/// class values (S16) fold to their name string, everything else
+/// passes through.
 fn hier_key(v: &Value) -> Value {
     match v {
         Value::HostType(h) => match h.as_ref() {
             HostVal::Def(d) => Value::Str(d.name.clone()),
             HostVal::Inst(_) => v.clone(),
         },
+        Value::Class(c) => Value::Str(Arc::from(c.name())),
         _ => v.clone(),
     }
 }

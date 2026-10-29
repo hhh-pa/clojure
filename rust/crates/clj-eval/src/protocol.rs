@@ -192,7 +192,9 @@ fn not_an_interface(sym: &dyn std::fmt::Display) -> NativeError {
 
 /// The class key an extension targets (split for budget): `nil`
 /// extends null; symbols resolve via [`extend_sym`]; a descriptor
-/// value names itself; anything else is not a type.
+/// value names itself; a class value names its class (S16: direct
+/// `__extend*` calls pass evaluated imports); anything else is not
+/// a type.
 fn extend_target(eval: &mut Evaluator, v: &Value) -> Result<String, NativeError> {
     match v {
         Value::Nil => Ok("null".to_owned()),
@@ -204,18 +206,20 @@ fn extend_target(eval: &mut Evaluator, v: &Value) -> Result<String, NativeError>
             clj_value::HostVal::Def(d) => Ok(d.name.to_string()),
             _ => Err(not_a_type(v)),
         },
+        Value::Class(c) => Ok(c.name().to_string()),
         _ => Err(not_a_type(v)),
     }
 }
 
 /// Resolve an unqualified extension symbol (split from
 /// [`extend_target`] for the complexity budget): a port descriptor
-/// names itself; a string names its class (the core `String` /
-/// `Long` / … vars); any other bound non-type is not a class; a
-/// dotted name rides as-is (like `clojure.lang.IPersistentMap` or
-/// `user.PD`); any other unresolvable name stays unresolvable (a
-/// typo must fail, not extend a phantom `java.lang` class — the
-/// bound class-name vars cover the host values that exist).
+/// names itself; a string names its class (the legacy core
+/// `String` / `Long` / … shape); a class value names its class
+/// (S16: an imported name, or a var holding a class); any other
+/// bound non-type is not a class; a dotted name rides as-is (like
+/// `clojure.lang.IPersistentMap` or `user.PD`); any other
+/// unresolvable name stays unresolvable (a typo must fail, not
+/// extend a phantom `java.lang` class).
 fn extend_sym(eval: &mut Evaluator, sym: &Symbol, v: &Value) -> Result<String, NativeError> {
     match resolve_root(eval, sym) {
         Ok((_, Value::HostType(h))) => match h.as_ref() {
@@ -223,8 +227,15 @@ fn extend_sym(eval: &mut Evaluator, sym: &Symbol, v: &Value) -> Result<String, N
             _ => Err(not_a_type(v)),
         },
         Ok((_, Value::Str(s))) => Ok(s.to_string()),
+        Ok((_, Value::Class(c))) => Ok(c.name().to_string()),
         Ok(_) => Err(not_a_type(v)),
         Err(e) => {
+            // S16 imports (no default imports — the caller imports
+            // `String` first).
+            let cur = eval.current_ns_name();
+            if let Some(class) = crate::classemu::import_in(eval, &cur, sym.name()) {
+                return Ok(class.name().to_string());
+            }
             if sym.name().contains('.') {
                 Ok(sym.name().to_owned())
             } else {
@@ -512,9 +523,9 @@ fn native_satisfies(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nati
 /// Whether a class implements a protocol (split for budget):
 /// descriptors by name (records also answer through the
 /// `IPersistentMap` entry; struct bases do not — the JVM's
-/// `extends?` is false for the struct class there);
-/// class-name strings work too, since host classes have no values
-/// to pass.
+/// `extends?` is false for the struct class there); class values
+/// by name too (S16: an imported name evaluates to one);
+/// class-name strings keep working (the legacy shape).
 fn native_extends(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/extends?", args, &[2])?;
     let proto = match as_protocol_map(&args[0]) {
@@ -532,6 +543,7 @@ fn native_extends(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, Native
             _ => return Err(cce_err(&args[1], "java.lang.Class")),
         },
         Value::Str(s) => (s.to_string(), false, false),
+        Value::Class(c) => (c.name().to_string(), false, false),
         _ => return Err(cce_err(&args[1], "java.lang.Class")),
     };
     let key = Value::Str(Arc::from(name.as_str()));

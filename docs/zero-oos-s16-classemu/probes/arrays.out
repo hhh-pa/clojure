@@ -1,0 +1,18 @@
+a-class-obj "[Ljava.lang.Long;"
+a-class-int "[I"
+a-class-str "[Ljava.lang.String;"
+a-class-2d "[[J"
+a-bases-obj ["java.lang.Object" "java.lang.Cloneable" "java.io.Serializable"]
+a-bases-int ["java.lang.Object" "java.lang.Cloneable" "java.io.Serializable"]
+a-supers-int ["java.io.Serializable" "java.lang.Cloneable" "java.lang.Object"]
+a-instance-t true
+a-instance-f false
+a-instance-obj true
+a-instance-cloneable true
+a-cast-ok [2]
+a-cast-miss THROW java.lang.ClassCastException|"Cannot cast [J to [I"
+a-class-array? true
+a-str "class [I"
+a-pr "int/1"
+a-isarray true
+a-component "int"

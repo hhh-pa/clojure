@@ -672,7 +672,7 @@ fn count_fallback(eval: &mut Evaluator, v: &Value) -> Result<i64, NativeError> {
 }
 
 /// `RT.count` as an `i64` (`count`/`empty?`/arities share this).
-fn count_of(eval: &mut Evaluator, v: &Value) -> Result<i64, NativeError> {
+pub(crate) fn count_of(eval: &mut Evaluator, v: &Value) -> Result<i64, NativeError> {
     // Records count their content (oracle `rec-count`); structs
     // likewise (S12 oracle `sm-count`); chunks count their
     // appended items (S12 oracle `ch-build`); chunk buffers

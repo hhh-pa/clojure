@@ -272,24 +272,26 @@ fn multi_bad_dispatch() {
 
 #[test]
 fn multi_class_dispatch_analog() {
-    // The JVM pins need the out-of-scope `class` core fn, so the
-    // port pins the mechanism instead: dispatch values evaluate,
-    // so the class-name vars ride through as table keys, and a
-    // miss names the dispatch value's print form (oracle
-    // `f-miss` shape).
+    // The JVM pins need the `class` core fn: dispatch values
+    // evaluate, so the imported class rides through as the table
+    // key (S16: no default imports — `String` resolves only after
+    // an explicit `import`).
     let mut eval = boot();
     assert_eq!(
         run(
             &mut eval,
-            "(do (defmulti foo (fn [s] (if (string? s) \"java.lang.String\" :other))) (defmethod foo String [s] :string) (foo \"hi\"))"
+            "(do (import 'java.lang.String) (defmulti foo (fn [s] (if (string? s) String :other))) (defmethod foo String [s] :string) (foo \"hi\"))"
         ),
         ":string"
     );
-    // ...while `class` itself stays out of scope (why the
-    // `f-*` pins are oracle-only): naming it fails resolution.
+    // ...and `class` itself is in scope (S16 implements it):
+    // dispatch on it matches the imported class by name.
     assert_eq!(
-        uncaught(&mut eval, "(do (defmulti foo2 class) (foo2 :kw))"),
-        "java.lang.RuntimeException | Unable to resolve symbol: class in this context"
+        run(
+            &mut eval,
+            "(do (import 'java.lang.String) (defmulti foo2 class) (defmethod foo2 String [s] :str!) (foo2 \"hi\"))"
+        ),
+        ":str!"
     );
 }
 

@@ -377,16 +377,11 @@ fn jvm_class_of_host(v: &Value) -> String {
         Value::Agent(a) => a.jvm_class().to_owned(),
         Value::Volatile(v) => v.jvm_class().to_owned(),
         Value::Extension(e) => e.class_name(),
-        // Port-defined types report their class name (S-typechain);
-        // struct bases report the `$Def` member class (S12).
-        Value::HostType(h) => match h.as_ref() {
-            clj_value::HostVal::Def(d) if d.kind == clj_value::HostKind::Struct => {
-                format!("{}$Def", d.name)
-            }
-            _ => h.type_name().to_owned(),
-        },
+        Value::HostType(h) => jvm_class_of_hosttype(h),
         // Multimethods report the JVM class (S-typechain stage 3).
         Value::MultiFn(_) => "clojure.lang.MultiFn".to_owned(),
+        // Classes report `java.lang.Class` (S16).
+        Value::Class(_) => "java.lang.Class".to_owned(),
         // Arrays report their descriptor (S15: `[I`, `[[I`,
         // `[Ljava.lang.Object;`, …).
         Value::Array(a) => a.descriptor(),
@@ -419,6 +414,18 @@ fn jvm_class_of_host(v: &Value) -> String {
         | Value::Var(_)
         | Value::Unbound(_)
         | Value::Throwable(_) => jvm_class_of(v),
+    }
+}
+
+/// The host-type branch of [`jvm_class_of_host`] (split for the
+/// complexity budget): port-defined types report their class name
+/// (S-typechain); struct bases report the `$Def` member class (S12).
+fn jvm_class_of_hosttype(h: &clj_value::HostVal) -> String {
+    match h {
+        clj_value::HostVal::Def(d) if d.kind == clj_value::HostKind::Struct => {
+            format!("{}$Def", d.name)
+        }
+        _ => h.type_name().to_owned(),
     }
 }
 

@@ -832,6 +832,13 @@ impl<'a> Analyzer<'a> {
             }
             return Ok(Expr::Global(Var { id, sym: target }));
         }
+        // S16: imports resolve after vars (the class, not a var) —
+        // operator position shares this path.
+        if sym.namespace().is_none() {
+            if let Some(class) = crate::classemu::import_in(self.eval, &cur, sym.name()) {
+                return Ok(Expr::Literal(Value::Class(class)));
+            }
+        }
         match sym.namespace() {
             // Aliases count as namespaces even when dangling
             // (probe34 `ns-alias-removed`); both miss shapes blame
@@ -1290,6 +1297,18 @@ impl<'a> Analyzer<'a> {
         // `def` always defines in the current namespace.
         self.check_def_target(sym, span)?;
         let cur = self.current_ns();
+        // S16: `def` over an imported name is a compile error (the
+        // var is never interned).
+        if let Some(class) = crate::classemu::import_in(self.eval, &cur, sym.name()) {
+            return Err(self.def_error(
+                &format!(
+                    "Expecting var, but {} is mapped to class {}",
+                    sym.name(),
+                    class.name()
+                ),
+                span,
+            ));
+        }
         let qualified = self
             .eval
             .registry
@@ -4335,12 +4354,26 @@ impl<'a> Analyzer<'a> {
             crate::fx4_host::HostOp::None => Ok(None),
             crate::fx4_host::HostOp::SeqQ(arg) => Ok(Some(self.host_call("seq?", &[arg], span)?)),
             crate::fx4_host::HostOp::Identical(a, b) => {
-                Ok(Some(self.host_call("=", &[a, b], span)?))
+                Ok(Some(self.host_call("identical?", &[a, b], span)?))
             }
             crate::fx4_host::HostOp::NewObject => Ok(Some(self.fresh_object())),
             crate::fx4_host::HostOp::Pam(inner) => {
                 Ok(Some(self.host_call("fx4-pam-create", &[inner], span)?))
             }
+            rest => self.lower_host_rest(rest, items, span, tail),
+        }
+    }
+
+    /// The monitor/`letfn*`/arity-error branch of [`Analyzer::lower_host`]
+    /// (split for the complexity budget).
+    fn lower_host_rest(
+        &mut self,
+        op: crate::fx4_host::HostOp<'_>,
+        items: &[&Value],
+        span: Span,
+        tail: bool,
+    ) -> Result<Option<Expr>, CompileError> {
+        match op {
             crate::fx4_host::HostOp::MonitorEnter(arg) => {
                 Ok(Some(self.host_call("fx4-monitor-enter", &[arg], span)?))
             }
@@ -4350,7 +4383,33 @@ impl<'a> Analyzer<'a> {
             crate::fx4_host::HostOp::LetFnStar => {
                 Ok(Some(self.parse_letfn_star(items, span, tail)?))
             }
+            crate::fx4_host::HostOp::InstanceArity(n) => {
+                Err(self.host_arity_err("clojure.core/instance?", n, span))
+            }
+            crate::fx4_host::HostOp::IdenticalArity(n) => {
+                Err(self.host_arity_err("clojure.core/identical?", n, span))
+            }
+            // Handled by `lower_host` (the single caller partitions
+            // the ops).
+            _ => unreachable!("host-op partition"),
         }
+    }
+
+    /// A compile-time arity error for a direct qualified
+    /// `instance?`/`identical?` call: the runtime text, at compile
+    /// time, non-bare so it surfaces as `SourceError::Compile`
+    /// (bare errors escape as uncaught throwables).
+    fn host_arity_err(&self, name: &'static str, argc: usize, span: Span) -> CompileError {
+        let message = crate::error::NativeError::arity(name, argc)
+            .into_inner()
+            .message;
+        self.err(
+            "clojure.lang.ArityException",
+            message,
+            span,
+            Verb::Compiling,
+            None,
+        )
     }
 
     fn fresh_object(&self) -> Expr {
@@ -4521,6 +4580,24 @@ mod tests {
     fn seq_values_non_seqable_is_empty() {
         // Defensive arm: non-seqables yield no key-list elements.
         assert!(seq_values(&Value::Int(1)).is_empty());
+    }
+
+    #[test]
+    #[should_panic(expected = "host-op partition")]
+    fn lower_host_rest_rejects_outer_ops() {
+        // Defensive arm: the single caller (`lower_host`)
+        // partitions the ops, so outer-handled ops never arrive
+        // here (only a dispatch bug could send one).
+        let source: Arc<str> = Arc::from("NO_SOURCE_PATH");
+        let mut eval = crate::ns::boot();
+        let mut analyzer = Analyzer::new(&source, &mut eval, 0);
+        let items: Vec<&Value> = vec![];
+        let _ = analyzer.lower_host_rest(
+            crate::fx4_host::HostOp::None,
+            &items,
+            Span::new(1, 1),
+            false,
+        );
     }
 
     fn unqualified_bb() -> Value {

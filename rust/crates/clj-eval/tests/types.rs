@@ -226,13 +226,20 @@ fn dtor_non_interface() {
 
 #[test]
 fn dtor_host_super_unresolvable() {
-    // Host classes are interop (N1): since stage 2 `String` resolves
-    // (as its class-name string, for `extends?`), naming it as an
-    // interface is the accurate `Not an interface` error — still a
-    // rejection, one step closer to the JVM.
+    // Host classes are interop (N1): S16 resolves `String` only
+    // after an explicit `import` — unimported it stays
+    // unresolvable; imported it is still `Not an interface`
+    // (only port interfaces resolve in interface position).
     let mut eval = boot();
     assert_eq!(
         uncaught(&mut eval, "(deftype P [a] String (s [this] 1))"),
+        "java.lang.RuntimeException | Unable to resolve symbol: String in this context"
+    );
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(do (import 'java.lang.String) (deftype P [a] String (s [this] 1)))"
+        ),
         "java.lang.IllegalArgumentException | Not an interface: String"
     );
 }
@@ -1412,9 +1419,9 @@ fn stage1_descriptor_level() {
     // deterministically, and reject collection casts.
     let mut eval = boot();
     // Bare dotted references do not resolve (constructors do —
-    // there is no import table, so only the `Type.` dot form splits
-    // namespace from name); the dotted registry path is covered by
-    // the cross-namespace constructor tests.
+    // imports hold simple names only, so only the `Type.` dot form
+    // splits namespace from name); the dotted registry path is
+    // covered by the cross-namespace constructor tests.
     assert_eq!(
         uncaught(
             &mut eval,
@@ -1438,10 +1445,15 @@ fn stage1_descriptor_level() {
         uncaught(&mut eval, "(deftype Pair [a b]) (conj Pair [:a 1])"),
         cce_same("user.Pair", "clojure.lang.IPersistentCollection")
     );
-    // Methods do not resolve on descriptors.
+    // Methods do not resolve on descriptors (universal members
+    // aside — S16 answers those at the class level, like the JVM).
     assert_eq!(
-        uncaught(&mut eval, "(deftype Pair [a b]) (.toString Pair)"),
-        "java.lang.IllegalArgumentException | No matching field found: toString for class user.Pair"
+        uncaught(&mut eval, "(deftype Pair [a b]) (.nosuch_xyz Pair)"),
+        "java.lang.IllegalArgumentException | No matching field found: nosuch_xyz for class user.Pair"
+    );
+    assert_eq!(
+        run(&mut eval, "(deftype Pair [a b]) (.toString Pair)"),
+        "\"user.Pair\""
     );
     // `meta` of a descriptor is nil (only instances carry it).
     assert_eq!(run(&mut eval, "(deftype Pair [a b]) (meta Pair)"), "nil");
@@ -1554,10 +1566,15 @@ fn stage1_descriptor_field_probe() {
         ),
         "java.lang.IllegalArgumentException | Don't know how to create ISeq from: user.Pair"
     );
-    // ... and no `hashCode` fallback either (records do).
+    // ... and `hashCode` is universal (S16: the JVM's
+    // `Object` method, deterministic per instance — Java
+    // `hashCode`, not `clojure.core/hash`).
     assert_eq!(
-        uncaught(&mut eval, "(deftype Pair [a b]) (.hashCode (Pair. 1 2))"),
-        "java.lang.IllegalArgumentException | No matching field found: hashCode for class user.Pair"
+        run(
+            &mut eval,
+            "(deftype Pair [a b]) (let [p (Pair. 1 2)] (= (.hashCode p) (.hashCode p)))"
+        ),
+        "true"
     );
 }
 

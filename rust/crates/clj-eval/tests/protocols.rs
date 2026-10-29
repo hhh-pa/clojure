@@ -194,7 +194,15 @@ fn extends_deftype() {
 fn extends_no() {
     let mut eval = boot();
     prelude(&mut eval);
-    assert_eq!(run(&mut eval, "(extends? Greet String)"), "false");
+    // S16: no default imports — `String` resolves only after an
+    // explicit `import` (as a class value).
+    assert_eq!(
+        run(
+            &mut eval,
+            "(do (import 'java.lang.String) (extends? Greet String))"
+        ),
+        "false"
+    );
 }
 
 // ---- C: extend-protocol over host types ----
@@ -206,7 +214,7 @@ fn extend_string() {
     assert_eq!(
         run(
             &mut eval,
-            "(do (extend-protocol Greet String (greet [this] (str \"s:\" this)) (greet2 [this x] x)) [(greet \"hi\") (greet2 \"hi\" 9)])"
+            "(do (import 'java.lang.String) (extend-protocol Greet String (greet [this] (str \"s:\" this)) (greet2 [this x] x)) [(greet \"hi\") (greet2 \"hi\" 9)])"
         ),
         "[\"s:hi\" 9]"
     );
@@ -232,7 +240,7 @@ fn extend_long() {
     assert_eq!(
         run(
             &mut eval,
-            "(do (extend-protocol Adder2 Long (add2 [this x y] (+ this x y))) (add2 1 2 3))"
+            "(do (import 'java.lang.Long) (extend-protocol Adder2 Long (add2 [this x y] (+ this x y))) (add2 1 2 3))"
         ),
         "6"
     );
@@ -260,7 +268,7 @@ fn extend_map_form() {
     assert_eq!(
         run(
             &mut eval,
-            "(do (extend Double Greet {:greet (fn [this] \"dbl\") :greet2 (fn [this x] x)}) (greet (double 1.5)))"
+            "(do (import 'java.lang.Double) (extend Double Greet {:greet (fn [this] \"dbl\") :greet2 (fn [this x] x)}) (greet (double 1.5)))"
         ),
         "\"dbl\""
     );
@@ -273,7 +281,7 @@ fn satisfies_extended_host() {
     assert_eq!(
         run(
             &mut eval,
-            "(do (extend Double Greet {:greet (fn [this] \"dbl\")}) (satisfies? Greet (double 1.5)))"
+            "(do (import 'java.lang.Double) (extend Double Greet {:greet (fn [this] \"dbl\")}) (satisfies? Greet (double 1.5)))"
         ),
         "true"
     );
@@ -431,11 +439,17 @@ fn with_open_reverse_order() {
 
 #[test]
 fn with_open_nonclose() {
+    // S16: `close/0` is a real surface member (writers), so
+    // closing a Long is a gate miss — method-shape (the
+    // `m-isempty-long-miss` rule), not the old 0-arg field-shape.
+    // (The JVM spells this call `(. c close)` — symbol syntax,
+    // field-shaped — but the port's `with-open` emits the
+    // `__meth*` call the dot-forms read as.)
     let mut eval = boot();
     prelude(&mut eval);
     assert_eq!(
         uncaught(&mut eval, "(with-open [c 5] c)"),
-        "java.lang.IllegalArgumentException | No matching field found: close for class java.lang.Long"
+        "java.lang.IllegalArgumentException | No matching method close found taking 0 args for class java.lang.Long"
     );
 }
 
@@ -507,7 +521,7 @@ fn multiarity_protocol() {
     assert_eq!(
         run(
             &mut eval,
-            "(do (extend-protocol M Long (m ([this] :zero) ([this x] x))) [(m 1) (m 1 2)])"
+            "(do (import 'java.lang.Long) (extend-protocol M Long (m ([this] :zero) ([this x] x))) [(m 1) (m 1 2)])"
         ),
         "[:zero 2]"
     );
@@ -546,7 +560,7 @@ fn extend_two_protocols() {
     assert_eq!(
         run(
             &mut eval,
-            "(do (extend Long Greet {:greet (fn [this] \"g\")} Adder2 {:add2 (fn [this x y] 0)}) [(greet 1) (add2 1 2 3)])"
+            "(do (import 'java.lang.Long) (extend Long Greet {:greet (fn [this] \"g\")} Adder2 {:add2 (fn [this x y] 0)}) [(greet 1) (add2 1 2 3)])"
         ),
         "[\"g\" 0]"
     );
@@ -563,7 +577,7 @@ fn extend_merges_without_clobber() {
     assert_eq!(
         run(
             &mut eval,
-            "(do (extend-protocol Greet Long (greet [this] :first) (greet2 [this x] :g2)) (extend-protocol Greet Long (greet [this] :second)) [(greet 1) (greet2 1 2)])"
+            "(do (import 'java.lang.Long) (extend-protocol Greet Long (greet [this] :first) (greet2 [this x] :g2)) (extend-protocol Greet Long (greet [this] :second)) [(greet 1) (greet2 1 2)])"
         ),
         "[:second :g2]"
     );
@@ -581,7 +595,10 @@ fn handbuilt_maps_are_not_protocols() {
         "java.lang.IllegalArgumentException | {:on \"X\", :sigs {}} is not a protocol"
     );
     assert_eq!(
-        uncaught(&mut eval, "(extends? {:on \"X\" :sigs {}} String)"),
+        uncaught(
+            &mut eval,
+            "(do (import 'java.lang.String) (extends? {:on \"X\" :sigs {}} String))",
+        ),
         "java.lang.IllegalArgumentException | {:on \"X\", :sigs {}} is not a protocol"
     );
     assert_eq!(
@@ -594,7 +611,7 @@ fn handbuilt_maps_are_not_protocols() {
     assert_eq!(
         uncaught(
             &mut eval,
-            "(do (def P {:on \"X\" :sigs {:m {:arglists '([this])}}}) (clojure.core/__extend* (var P) String {:m (fn [this] 1)}))"
+            "(do (import 'java.lang.String) (def P {:on \"X\" :sigs {:m {:arglists '([this])}}}) (clojure.core/__extend* (var P) String {:m (fn [this] 1)}))"
         ),
         "java.lang.IllegalArgumentException | {:on \"X\", :sigs {:m {:arglists ([this])}}} is not a protocol"
     );
@@ -628,7 +645,7 @@ fn extend_by_symbol_reference() {
     assert_eq!(
         run(
             &mut eval,
-            "(do (clojure.core/__extend* 'Greet 'String {:greet (fn [this] :sym)}) (greet \"x\"))"
+            "(do (import 'java.lang.String) (clojure.core/__extend* 'Greet 'String {:greet (fn [this] :sym)}) (greet \"x\"))"
         ),
         ":sym"
     );
@@ -654,6 +671,36 @@ fn extend_by_symbol_reference() {
             "(clojure.core/__extend* 'foo/Nope 'String {:greet (fn [this] 1)})"
         ),
         "java.lang.RuntimeException | Unable to resolve symbol: foo/Nope in this context"
+    );
+}
+
+#[test]
+fn extend_class_values() {
+    // S16: extensions target classes by value — an evaluated
+    // import through direct `__extend*`, or a var holding a class
+    // through the quoting macros.
+    let mut eval = boot();
+    prelude(&mut eval);
+    assert_eq!(
+        run(
+            &mut eval,
+            "(do (import 'java.lang.String) (clojure.core/__extend* (var Greet) String {:greet (fn [this] :byval)}) (greet \"x\"))"
+        ),
+        ":byval"
+    );
+    assert_eq!(
+        run(
+            &mut eval,
+            "(do (import 'java.lang.String) (def strcls String) (extend-protocol Greet strcls (greet2 [this x] :byvar)) (greet2 \"y\" 1))"
+        ),
+        ":byvar"
+    );
+    assert_eq!(
+        run(
+            &mut eval,
+            "(do (import 'java.lang.String) (extends? Greet String))"
+        ),
+        "true"
     );
 }
 
@@ -741,6 +788,16 @@ fn extend_target_shapes() {
         uncaught(&mut eval, "(extend-type NoSuchType Greet (greet [this] 1))"),
         "java.lang.RuntimeException | Unable to resolve symbol: NoSuchType in this context"
     );
+    // A var holding a class-name string names its class (the
+    // legacy core `String`/`Long` shape; S16 retired the core
+    // stubs, so user vars carry it now).
+    assert_eq!(
+        run(
+            &mut eval,
+            "(do (def StrType \"java.lang.String\") (clojure.core/__extend* 'Greet 'StrType {:greet (fn [this] :str)}) (greet \"hi\"))"
+        ),
+        ":str"
+    );
 }
 
 #[test]
@@ -752,7 +809,7 @@ fn extend_native_guards() {
     assert_eq!(
         run(
             &mut eval,
-            "(map? (clojure.core/__extend* 'Greet 'String {5 6}))"
+            "(do (import 'java.lang.String) (map? (clojure.core/__extend* 'Greet 'String {5 6})))"
         ),
         "true"
     );
@@ -786,14 +843,14 @@ fn partial_extension_misses() {
     assert_eq!(
         uncaught(
             &mut eval,
-            "(do (extend-protocol Greet Long (greet [this] :g)) (greet2 1 2))"
+            "(do (import 'java.lang.Long) (extend-protocol Greet Long (greet [this] :g)) (greet2 1 2))"
         ),
         "java.lang.IllegalArgumentException | No implementation of method: :greet2 of protocol: #'user/Greet found for class: java.lang.Long"
     );
     assert_eq!(
         uncaught(
             &mut eval,
-            "(do (defprotocol P2 (m [this] [this x])) (extend-type Long P2 (m [this] :zero)) (m 1 2))"
+            "(do (import 'java.lang.Long) (defprotocol P2 (m [this] [this x])) (extend-type Long P2 (m [this] :zero)) (m 1 2))"
         ),
         "java.lang.IllegalArgumentException | No implementation of method: :m of protocol: #'user/P2 found for class: java.lang.Long"
     );
@@ -908,7 +965,7 @@ fn invoke_on_unclaimed_instance() {
     assert_eq!(
         uncaught(
             &mut eval,
-            "(do (deftype Q2 [a]) (extend-protocol Greet Long (greet [this] :g)) (greet (Q2. 1)))"
+            "(do (import 'java.lang.Long) (deftype Q2 [a]) (extend-protocol Greet Long (greet [this] :g)) (greet (Q2. 1)))"
         ),
         "java.lang.IllegalArgumentException | No implementation of method: :greet of protocol: #'user/Greet found for class: user.Q2"
     );

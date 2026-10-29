@@ -189,13 +189,6 @@
    "cyclomatic": 16.0,
    "cognitive": 2.0,
    "justification": "one arm per invocable kind, each delegating to a helper. Wave-2 landing: S15 adds the PrimitiveVector arm (S12 deliberately kept structs a pre-dispatch; 16/2 measured under rca 0.0.25)"
-  },
-  {
-   "file": "crates/clj-value/src/value.rs",
-   "function": "hash_value_rest",
-   "cyclomatic": 17.0,
-   "cognitive": 7.0,
-   "justification": "one arm per hash kind; the hash partition stays exhaustive. Wave-2 landing: S9 scalars + S15 Array arm on top of the S12 struct shape (17/7 measured under rca 0.0.25)"
   }
  ]
 }

@@ -79,7 +79,12 @@ pub enum ThrowClass {
     RejectedExecutionException,
     PatternSyntaxException,
     ReaderException,
+    /// `ClassNotFoundException` (S16 `import`, wave1): a checked exception
+    /// under `ReflectiveOperationException`.
     ClassNotFoundException,
+    /// `NoSuchElementException` (S16 `getFirst`/`getLast` on empty
+    /// lists): a `RuntimeException`.
+    NoSuchElementException,
 }
 
 impl ThrowClass {
@@ -130,7 +135,9 @@ impl ThrowClass {
         }
     }
 
-    /// Remaining throw classes.
+    /// Remaining throw classes (the S16 classes live in
+    /// [`ThrowClass::jvm_name_s16`], split for the complexity
+    /// budget).
     fn jvm_name_rest(&self) -> &'static str {
         match self {
             Self::ArithmeticException => "java.lang.ArithmeticException",
@@ -147,7 +154,19 @@ impl ThrowClass {
             Self::CancellationException => "java.util.concurrent.CancellationException",
             Self::RejectedExecutionException => "java.util.concurrent.RejectedExecutionException",
             Self::ReaderException => "clojure.lang.LispReader$ReaderException",
+            // The S16 classes plus anything upstream-handled (which
+            // the tail rejects — the single caller partitions the
+            // variants, so only a dispatch bug could send one here).
+            other => other.jvm_name_s16(),
+        }
+    }
+
+    /// The S16 throw classes (split from [`ThrowClass::jvm_name_rest`]
+    /// for the complexity budget).
+    fn jvm_name_s16(&self) -> &'static str {
+        match self {
             Self::ClassNotFoundException => "java.lang.ClassNotFoundException",
+            Self::NoSuchElementException => "java.util.NoSuchElementException",
             other => other.jvm_name_array(),
         }
     }
@@ -238,7 +257,6 @@ fn throw_parent(jvm_name: &str) -> Option<&'static str> {
         "java.lang.ClassNotFoundException" => Some("java.lang.ReflectiveOperationException"),
         "java.lang.ReflectiveOperationException" => Some("java.lang.Exception"),
         "java.lang.AssertionError" => Some("java.lang.Error"),
-        "java.lang.IllegalAccessError" => Some("java.lang.LinkageError"),
         "java.lang.ArrayIndexOutOfBoundsException" => Some("java.lang.IndexOutOfBoundsException"),
         "java.lang.IllegalArgumentException"
         | "java.lang.IllegalStateException"
@@ -256,11 +274,17 @@ fn throw_parent(jvm_name: &str) -> Option<&'static str> {
     }
 }
 
-/// The linkage-error branch of [`throw_parent`] (split for the
-/// complexity budget; chains into [`throw_parent_format`]).
+/// The linkage-error branch plus the S16 `NoSuchElementException`
+/// of [`throw_parent`] (split for the complexity budget; chains into
+/// [`throw_parent_format`]). The reflective pair
+/// (`ClassNotFoundException`/`ReflectiveOperationException`) lives in
+/// [`throw_parent`] proper — do not re-add it here (a duplicate arm
+/// would be dead: `throw_parent` matches first).
 fn throw_parent_rest(jvm_name: &str) -> Option<&'static str> {
     match jvm_name {
         "java.lang.LinkageError" => Some("java.lang.Error"),
+        "java.lang.IllegalAccessError" => Some("java.lang.LinkageError"),
+        "java.util.NoSuchElementException" => Some("java.lang.RuntimeException"),
         _ => throw_parent_format(jvm_name),
     }
 }

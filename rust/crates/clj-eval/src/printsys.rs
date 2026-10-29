@@ -151,6 +151,7 @@ fn ref_token(v: &Value) -> Option<&'static str> {
         Value::Promise(_) => Some(TOK_PROMISE),
         Value::Agent(_) => Some(TOK_AGENT),
         Value::MultiFn(_) => Some(TOK_MULTIFN),
+        Value::Class(_) => Some(TOK_CLASS),
         _ => None,
     }
 }
@@ -1212,6 +1213,7 @@ fn dup_class(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError>
     let (o, w) = (&args[0], &args[1]);
     check_writer(w)?;
     let name = match o {
+        Value::Class(c) => c.name().to_owned(),
         Value::HostType(h) => match h.as_ref() {
             HostVal::Def(d) => d.name.to_string(),
             _ => {

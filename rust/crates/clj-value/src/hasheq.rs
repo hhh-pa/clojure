@@ -186,6 +186,11 @@ fn hasheq_mid(v: &Value) -> i32 {
 
 fn hasheq_rest(v: &Value) -> i32 {
     match v {
+        // Classes hash their name's string hash (deterministic
+        // stand-in — the JVM uses identity here; `=`-equal classes
+        // share buckets either way; split from `hasheq_mid` for the
+        // complexity budget).
+        Value::Class(c) => hash_int(str_hashcode(c.name())),
         Value::Delay(d) => id_hash(d.id()),
         Value::Future(f) => id_hash(f.id()),
         Value::Promise(p) => id_hash(p.id()),
@@ -318,6 +323,10 @@ fn hash_code_host(h: &crate::HostVal) -> i32 {
 
 fn hash_code_rest(v: &Value) -> i32 {
     match v {
+        // Classes hash their name's `String.hashCode` (deterministic
+        // stand-in — the JVM uses identity here; split from
+        // `hash_code_mid` for the complexity budget).
+        Value::Class(c) => str_hashcode(c.name()),
         Value::Atom(a) => id_hash(a.id()),
         Value::Delay(d) => id_hash(d.id()),
         Value::Future(f) => id_hash(f.id()),

@@ -1,0 +1,43 @@
+d-nil true
+d-bool true
+d-int-small true
+d-int-big false
+d-int-neg true
+d-double false
+d-char-cached true
+d-char-uncached false
+d-bigint false
+d-bigdec false
+d-ratio false
+d-str-lit true
+d-str-built false
+d-kw true
+d-sym false
+d-vec-same true
+d-vec-eq false
+d-map-eq false
+d-list-eq false
+d-set-eq false
+d-fn-same true
+d-fn-distinct false
+d-atom-same true
+d-atom-distinct false
+d-var true
+d-class true
+d-regex false
+d-lazy-same true
+d-macroexpand (identical? a b)
+d-inline-arities #{2}
+d-has-inline true
+d-arity0 THROW clojure.lang.ArityException|"Wrong number of args (0) passed to: clojure.core/identical?"
+d-arity1 THROW clojure.lang.ArityException|"Wrong number of args (1) passed to: clojure.core/identical?"
+d-arity3 THROW clojure.lang.ArityException|"Wrong number of args (3) passed to: clojure.core/identical?"
+d-apply-t true
+d-apply-f false
+d-apply-arity THROW clojure.lang.ArityException|"Wrong number of args (1) passed to: clojure.core/identical?"
+d-ho-str (true)
+d-ho-vec (false)
+d-eval-order [true [:x :y]]
+d-eq-vs-ident-vec [true false]
+d-eq-vs-ident-big [true false]
+d-eq-vs-ident-str [true false]

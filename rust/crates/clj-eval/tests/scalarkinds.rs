@@ -482,6 +482,9 @@ fn inst_ms_failures() {
 #[test]
 fn inst_user_extension() {
     let mut eval = boot();
+    // S16 merge: the class-name string stubs are retired; import
+    // the class (extend-protocol reads it by name).
+    run_last(&mut eval, "(import 'java.lang.String)");
     assert_eq!(
         run_last(
             &mut eval,

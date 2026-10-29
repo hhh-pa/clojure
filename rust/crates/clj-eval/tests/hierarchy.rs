@@ -129,6 +129,9 @@ fn hier_derive_errors() {
     // Oracle `h-self`, `h-tagstr`, `h-tagnil`,
     // `h-parent-str`, `h-parent-num` (verbatim assert texts).
     let mut eval = boot();
+    // S16 merge: the class-name string stubs are retired;
+    // import the classes (S13 reads them by name).
+    run(&mut eval, "(import 'java.lang.String)");
     assert_eq!(
         uncaught(&mut eval, "(derive (make-hierarchy) ::hself ::hself)"),
         "java.lang.AssertionError | Assert failed: (not= tag parent)"
@@ -286,6 +289,9 @@ fn hier_class_views() {
     // answers class-name strings (no `class `/`interface `
     // prefixes) in port sort order.
     let mut eval = boot();
+    // S16 merge: the class-name string stubs are retired;
+    // import the classes (S13 reads them by name).
+    run(&mut eval, "(import 'java.lang.String 'java.lang.Object)");
     assert_eq!(
         run(&mut eval, "(sort (map str (parents String)))"),
         "(\"java.io.Serializable\" \"java.lang.CharSequence\" \"java.lang.Comparable\" \"java.lang.Object\" \"java.lang.constant.Constable\" \"java.lang.constant.ConstantDesc\")"
@@ -366,6 +372,9 @@ fn hier_global_arities() {
     // `h-gdesc`, `h-gparent-plain`, `h-gtag-plain`,
     // `h-gtag-class`, `h-private`.
     let mut eval = boot();
+    // S16 merge: the class-name string stubs are retired;
+    // import the classes (S13 reads them by name).
+    run(&mut eval, "(import 'java.lang.String)");
     assert_eq!(run(&mut eval, "(derive ::hgd ::hgdp)"), "nil");
     assert_eq!(run(&mut eval, "(isa? ::hgd ::hgdp)"), "true");
     assert_eq!(run(&mut eval, "(parents ::hgd)"), "#{:user/hgdp}");
@@ -434,6 +443,12 @@ fn hier_isa_basics() {
     // `h-isa-vec`, `h-isa-supermap`, `h-isa-explicit`
     // (classes by name string).
     let mut eval = boot();
+    // S16 merge: the class-name string stubs are retired;
+    // import the classes (S13 reads them by name).
+    run(
+        &mut eval,
+        "(import 'java.lang.String 'java.lang.Object 'java.lang.Long)",
+    );
     assert_eq!(
         run(
             &mut eval,
@@ -487,6 +502,9 @@ fn hier_isa_mapentry_and_nested() {
     // an `APersistentVector`, probe `l-mapentry`); recursion
     // keeps the class arm (elements may be classes).
     let mut eval = boot();
+    // S16 merge: the class-name string stubs are retired;
+    // import the classes (S13 reads them by name).
+    run(&mut eval, "(import 'java.lang.String 'java.lang.Object)");
     assert_eq!(run(&mut eval, "(isa? (first {:a 1}) [:a 1])"), "true");
     assert_eq!(run(&mut eval, "(isa? [:a 1] (first {:a 1}))"), "true");
     assert_eq!(run(&mut eval, "(isa? (first {:a 1}) [:a])"), "false");
@@ -718,6 +736,9 @@ fn hier_class_dispatch() {
     // class-name strings; methods hang off the class-name
     // vars — the port has no `class` fn).
     let mut eval = boot();
+    // S16 merge: the class-name string stubs are retired;
+    // import the classes (S13 reads them by name).
+    run(&mut eval, "(import 'java.lang.String 'java.lang.Object)");
     assert_eq!(
         run(
             &mut eval,
@@ -929,6 +950,9 @@ fn hier_partial_hierarchies() {
     // general nil-invocation is pre-existing port behavior
     // with house text, outside this slice).
     let mut eval = boot();
+    // S16 merge: the class-name string stubs are retired;
+    // import the classes (S13 reads them by name).
+    run(&mut eval, "(import 'java.lang.String)");
     assert_eq!(
         run(&mut eval, "(isa? {:ancestors {::pa #{::pb}}} ::pa ::pb)"),
         "true"
@@ -993,6 +1017,9 @@ fn hier_isa_arm_order() {
     // `n-isa-vec-badh`, `n-isa-ne-badh`: `=` and the class
     // arm run before the ancestors touch.
     let mut eval = boot();
+    // S16 merge: the class-name string stubs are retired;
+    // import the classes (S13 reads them by name).
+    run(&mut eval, "(import 'java.lang.String 'java.lang.Object)");
     assert_eq!(run(&mut eval, "(isa? 5 ::ox ::ox)"), "true");
     assert_eq!(run(&mut eval, "(isa? 5 String Object)"), "true");
     assert_eq!(run(&mut eval, "(isa? 5 [::ova] [::ova])"), "true");
@@ -1009,6 +1036,9 @@ fn hier_interfaces() {
     // assignable to `Object`; bare interfaces carry no
     // ancestry.
     let mut eval = boot();
+    // S16 merge: the class-name string stubs are retired;
+    // import the classes (S13 reads them by name).
+    run(&mut eval, "(import 'java.lang.Object)");
     assert_eq!(run(&mut eval, "(isa? \"clojure.lang.IFn\" Object)"), "true");
     assert_eq!(
         run(
@@ -1062,6 +1092,9 @@ fn hier_garbage_relation_values() {
     // as absent (`contains?` rule); every build/view path
     // fails the `IPersistentSet` cast.
     let mut eval = boot();
+    // S16 merge: the class-name string stubs are retired;
+    // import the classes (S13 reads them by name).
+    run(&mut eval, "(import 'java.lang.String)");
     let set_cce = "java.lang.ClassCastException | class java.lang.Long cannot be cast to class clojure.lang.IPersistentSet (java.lang.Long is in module java.base of loader 'bootstrap'; clojure.lang.IPersistentSet is in unnamed module of loader 'app')";
     assert_eq!(
         run(&mut eval, "(isa? {:ancestors {::ja 5}} ::ja ::jb)"),
@@ -1124,6 +1157,9 @@ fn hier_hostdef_relations() {
     // interfaces, interfaces claim nothing; descriptors fold
     // to their name string at the hierarchy boundary.
     let mut eval = boot();
+    // S16 merge: the class-name string stubs are retired;
+    // import the classes (S13 reads them by name).
+    run(&mut eval, "(import 'java.lang.Object)");
     eval.eval_source("(deftype HPet [n]) (definterface HSwim (swim [x])) (deftype HDuck [n] HSwim (swim [this x] x))")
         .unwrap();
     assert_eq!(run(&mut eval, "(isa? HPet Object)"), "true");
@@ -1179,6 +1215,9 @@ fn hier_unknown_class_names() {
     // Never-real names are not classes (the S13 lattice is
     // fixed; S16 extends it without touching these pins).
     let mut eval = boot();
+    // S16 merge: the class-name string stubs are retired;
+    // import the classes (S13 reads them by name).
+    run(&mut eval, "(import 'java.lang.Object)");
     assert_eq!(
         run(
             &mut eval,

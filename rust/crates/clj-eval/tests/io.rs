@@ -177,6 +177,15 @@ fn gap2_flush_stdout_row() {
 }
 
 #[test]
+fn gap2_flush_non_writer_noop_row() {
+    let mut eval = boot();
+    // `flush` is total: a non-writer `*out*` skips the flush and
+    // answers nil (the `flush_out` fall-through arm).
+    assert_eq!(run_last(&mut eval, "(binding [*out* nil] (flush))"), "nil");
+    assert_eq!(run_last(&mut eval, "(binding [*out* 42] (flush))"), "nil");
+}
+
+#[test]
 fn gap2_slurp_spit_arg_rows() {
     let mut eval = boot();
     // Arity and target shapes, then file-option shapes (io.rs:236-244, 251-266, 297-324).

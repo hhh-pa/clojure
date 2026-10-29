@@ -243,6 +243,12 @@ fn proxy_name_shapes() {
     // `a-name-str`, `a-name-vec`: exact JVM name strings
     // (including the set hash).
     let mut eval = boot();
+    // S16 merge: the class-name string stubs are retired;
+    // import the classes (S14 reads them by name).
+    run_last(
+        &mut eval,
+        "(import 'java.lang.String 'java.lang.Long 'java.lang.Object)",
+    );
     assert_eq!(
         run_last(&mut eval, "(proxy-name Object [])"),
         "\"user.proxy$java.lang.Object$ff19274a\""
@@ -286,6 +292,12 @@ fn proxy_name_errors() {
     // on the JVM with JDK-only text; the port answers the
     // `Class` cast instead.
     let mut eval = boot();
+    // S16 merge: the class-name string stubs are retired;
+    // import the classes (S14 reads them by name).
+    run_last(
+        &mut eval,
+        "(import 'java.lang.String 'java.lang.Long 'java.lang.Object)",
+    );
     assert_eq!(
         uncaught(&mut eval, "(proxy-name 5 [])"),
         "java.lang.ClassCastException | class java.lang.Long cannot be cast to class java.lang.Class (java.lang.Long and java.lang.Class are in module java.base of loader 'bootstrap')"
@@ -305,6 +317,12 @@ fn get_proxy_class_rows() {
     // Probes `b-name`, `b-name-iface`, `b-default-super`: the
     // class-name string (S16 upgrades to `Class` values).
     let mut eval = boot();
+    // S16 merge: the class-name string stubs are retired;
+    // import the classes (S14 reads them by name).
+    run_last(
+        &mut eval,
+        "(import 'java.lang.String 'java.lang.Long 'java.lang.Object)",
+    );
     assert_eq!(
         run_last(&mut eval, "(get-proxy-class Object)"),
         "\"user.proxy$java.lang.Object$ff19274a\""
@@ -350,6 +368,12 @@ fn get_proxy_class_errors() {
     // `String`, probe `b-final` — unreachable here since only
     // `Object` passes).
     let mut eval = boot();
+    // S16 merge: the class-name string stubs are retired;
+    // import the classes (S14 reads them by name).
+    run_last(
+        &mut eval,
+        "(import 'java.lang.String 'java.lang.Long 'java.lang.Object)",
+    );
     assert_eq!(
         uncaught(&mut eval, "(get-proxy-class 5)"),
         "java.lang.ClassCastException | class java.lang.Long cannot be cast to class java.lang.Class (java.lang.Long and java.lang.Class are in module java.base of loader 'bootstrap')"
@@ -372,6 +396,12 @@ fn construct_proxy_rows() {
     // Probes `c-class`, `c-mappings-fresh`: an instance of the
     // named class with a nil fn map.
     let mut eval = boot();
+    // S16 merge: the class-name string stubs are retired;
+    // import the classes (S14 reads them by name).
+    run_last(
+        &mut eval,
+        "(import 'java.lang.String 'java.lang.Long 'java.lang.Object)",
+    );
     let v = run_last(
         &mut eval,
         "(construct-proxy (get-proxy-class Object \"java.lang.Runnable\"))",
@@ -401,6 +431,12 @@ fn construct_proxy_rows() {
 fn construct_proxy_errors() {
     // Probes `c-ctor-args`, `c-nonclass`, `c-arity`.
     let mut eval = boot();
+    // S16 merge: the class-name string stubs are retired;
+    // import the classes (S14 reads them by name).
+    run_last(
+        &mut eval,
+        "(import 'java.lang.String 'java.lang.Long 'java.lang.Object)",
+    );
     assert_eq!(
         uncaught(&mut eval, "(construct-proxy (get-proxy-class Object) 1 2)"),
         "java.lang.IllegalArgumentException | No matching ctor found for class user.proxy$java.lang.Object$ff19274a"
@@ -421,6 +457,12 @@ fn proxy_mappings_round_trip() {
     // `d-macro-map`: the map round-trips verbatim (port fns
     // take no `this`, per the #33 fence).
     let mut eval = boot();
+    // S16 merge: the class-name string stubs are retired;
+    // import the classes (S14 reads them by name).
+    run_last(
+        &mut eval,
+        "(import 'java.lang.String 'java.lang.Long 'java.lang.Object)",
+    );
     assert_eq!(
         run_last(
             &mut eval,
@@ -648,7 +690,7 @@ fn proxy_super_macro() {
 /// The probe `protocols.clj` setup: `RP` extended over `String`
 /// (both methods), `Long` (`:rm` only), `Number`, `Object`, and
 /// `IPersistentMap`; `RI` implements inline; `RQ` is empty.
-const PROTO_SETUP: &str = "(do (defprotocol RP (rm [x]) (rn [x y])) (extend-protocol RP String (rm [x] :str-m) (rn [x y] :str-n)) (extend-protocol RP Long (rm [x] :long-m)) (extend-protocol RP java.lang.Number (rm [x] :number-m) (rn [x y] :number-n)) (extend-protocol RP clojure.lang.IPersistentMap (rm [x] :map-m)) (extend-protocol RP Object (rm [x] :obj-m)) (deftype RI [x] RP (rm [this] :inline-m)) (defprotocol RQ (qm [x])) :setup)";
+const PROTO_SETUP: &str = "(do (import 'java.lang.String 'java.lang.Long 'java.lang.Object) (defprotocol RP (rm [x]) (rn [x y])) (extend-protocol RP String (rm [x] :str-m) (rn [x y] :str-n)) (extend-protocol RP Long (rm [x] :long-m)) (extend-protocol RP java.lang.Number (rm [x] :number-m) (rn [x y] :number-n)) (extend-protocol RP clojure.lang.IPersistentMap (rm [x] :map-m)) (extend-protocol RP Object (rm [x] :obj-m)) (deftype RI [x] RP (rm [this] :inline-m)) (defprotocol RQ (qm [x])) :setup)";
 
 #[test]
 fn find_protocol_impl_rows() {
@@ -656,6 +698,12 @@ fn find_protocol_impl_rows() {
     // the normalized `{keyword → fn}` map, the instance
     // itself for inline impls, nil on misses.
     let mut eval = boot();
+    // S16 merge: the class-name string stubs are retired;
+    // import the classes (S14 reads them by name).
+    run_last(
+        &mut eval,
+        "(import 'java.lang.String 'java.lang.Long 'java.lang.Object)",
+    );
     assert_eq!(run_last(&mut eval, PROTO_SETUP), ":setup");
     assert_eq!(
         run_last(&mut eval, "(sort (keys (find-protocol-impl RP \"hi\")))"),
@@ -681,6 +729,12 @@ fn find_protocol_method_walk() {
     // `a-long-missing`, `a-super-call`, `a-iface-call`,
     // `a-object-call`: the class walk, step by step.
     let mut eval = boot();
+    // S16 merge: the class-name string stubs are retired;
+    // import the classes (S14 reads them by name).
+    run_last(
+        &mut eval,
+        "(import 'java.lang.String 'java.lang.Long 'java.lang.Object)",
+    );
     assert_eq!(run_last(&mut eval, PROTO_SETUP), ":setup");
     assert_eq!(
         run_last(&mut eval, "((find-protocol-method RP :rm \"hi\") \"hi\")"),
@@ -730,6 +784,12 @@ fn find_protocol_method_walk() {
 fn find_protocol_method_edges() {
     // Probes `b-inline-nil`, `b-str-key`, `b-missing-k`.
     let mut eval = boot();
+    // S16 merge: the class-name string stubs are retired;
+    // import the classes (S14 reads them by name).
+    run_last(
+        &mut eval,
+        "(import 'java.lang.String 'java.lang.Long 'java.lang.Object)",
+    );
     assert_eq!(run_last(&mut eval, PROTO_SETUP), ":setup");
     assert_eq!(
         run_last(&mut eval, "(find-protocol-method RP :rm (RI. 1))"),
@@ -752,6 +812,12 @@ fn find_protocol_errors() {
     // `a-nonproto`, `b-nonproto`); the port answers the house
     // `is not a protocol`, like `satisfies?`/`extends?`.
     let mut eval = boot();
+    // S16 merge: the class-name string stubs are retired;
+    // import the classes (S14 reads them by name).
+    run_last(
+        &mut eval,
+        "(import 'java.lang.String 'java.lang.Long 'java.lang.Object)",
+    );
     assert_eq!(run_last(&mut eval, PROTO_SETUP), ":setup");
     assert_eq!(
         uncaught(&mut eval, "(find-protocol-impl 5 \"hi\")"),
@@ -777,6 +843,12 @@ fn find_multi_arity_and_pref() {
     // rule, pinned); `pref` picks the more specific
     // interface (`IPersistentMap` over `Associative`).
     let mut eval = boot();
+    // S16 merge: the class-name string stubs are retired;
+    // import the classes (S14 reads them by name).
+    run_last(
+        &mut eval,
+        "(import 'java.lang.String 'java.lang.Long 'java.lang.Object)",
+    );
     assert_eq!(
         run_last(
             &mut eval,
@@ -799,6 +871,12 @@ fn extenders_rows() {
     // `c-arity`: class-name strings (S16 upgrades to
     // classes), nil when empty; total like the JVM.
     let mut eval = boot();
+    // S16 merge: the class-name string stubs are retired;
+    // import the classes (S14 reads them by name).
+    run_last(
+        &mut eval,
+        "(import 'java.lang.String 'java.lang.Long 'java.lang.Object)",
+    );
     assert_eq!(run_last(&mut eval, PROTO_SETUP), ":setup");
     assert_eq!(
         run_last(&mut eval, "(sort (extenders RP))"),
@@ -825,6 +903,12 @@ fn nil_extension_row() {
     // Probe `f-nil-call`: an explicit `"null"` entry hits for
     // `nil` (which otherwise skips the walk).
     let mut eval = boot();
+    // S16 merge: the class-name string stubs are retired;
+    // import the classes (S14 reads them by name).
+    run_last(
+        &mut eval,
+        "(import 'java.lang.String 'java.lang.Long 'java.lang.Object)",
+    );
     assert_eq!(run_last(&mut eval, PROTO_SETUP), ":setup");
     assert_eq!(
         run_last(
@@ -842,6 +926,12 @@ fn cache_protocol_fn_rows() {
     // `MethodImplCache`, so nothing is stored — every
     // protocol call reads the live registry).
     let mut eval = boot();
+    // S16 merge: the class-name string stubs are retired;
+    // import the classes (S14 reads them by name).
+    run_last(
+        &mut eval,
+        "(import 'java.lang.String 'java.lang.Long 'java.lang.Object)",
+    );
     assert_eq!(
         run_last(
             &mut eval,
@@ -877,6 +967,12 @@ fn cache_protocol_fn_errors() {
     // JVM with JDK-only text; the port answers `Not a
     // protocol fn`.
     let mut eval = boot();
+    // S16 merge: the class-name string stubs are retired;
+    // import the classes (S14 reads them by name).
+    run_last(
+        &mut eval,
+        "(import 'java.lang.String 'java.lang.Long 'java.lang.Object)",
+    );
     assert_eq!(
         run_last(
             &mut eval,
@@ -923,6 +1019,12 @@ fn reset_methods_rows() {
     // Probes `e-ok`, `e-nonproto`, `e-nil`, `e-arity`: total,
     // answering nil (no cache exists to rebuild).
     let mut eval = boot();
+    // S16 merge: the class-name string stubs are retired;
+    // import the classes (S14 reads them by name).
+    run_last(
+        &mut eval,
+        "(import 'java.lang.String 'java.lang.Long 'java.lang.Object)",
+    );
     assert_eq!(
         run_last(
             &mut eval,
@@ -974,6 +1076,12 @@ fn fresh_proxy_cell_paths() {
     // `proxy-call-with-super` masks from `{}` (the non-map
     // saved arm), restoring nil after.
     let mut eval = boot();
+    // S16 merge: the class-name string stubs are retired;
+    // import the classes (S14 reads them by name).
+    run_last(
+        &mut eval,
+        "(import 'java.lang.String 'java.lang.Long 'java.lang.Object)",
+    );
     let v = run_last(
         &mut eval,
         "(str (construct-proxy (get-proxy-class Object)))",
@@ -1003,6 +1111,21 @@ fn proxy_arity_miss_is_no_method() {
             "(do (definterface PAM (m [x]) (m [x y])) (let [p (proxy [Object PAM] [] (m [x] :one) (m [x y] :two))] (.m p 1 2 3)))"
         ),
         "java.lang.IllegalArgumentException | No matching method m found taking 3 args for class user$proxy"
+    );
+}
+
+#[test]
+fn proxy_zero_arg_miss_is_no_field() {
+    // The same Default fall-through with zero args reaches the
+    // host-instance miss report — a non-surface name is the
+    // oracle's field error (port rule, pinned).
+    let mut eval = boot();
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(let [p (proxy [Object] [] (toString [] \"x\"))] (.nosuchzero p))"
+        ),
+        "java.lang.IllegalArgumentException | No matching field found: nosuchzero for class user$proxy"
     );
 }
 
@@ -1083,6 +1206,12 @@ fn find_protocol_impl_throwable_walk() {
     // `ExceptionInfo` reaches the `Object` entry, and an
     // empty protocol answers nil.
     let mut eval = boot();
+    // S16 merge: the class-name string stubs are retired;
+    // import the classes (S14 reads them by name).
+    run_last(
+        &mut eval,
+        "(import 'java.lang.String 'java.lang.Long 'java.lang.Object)",
+    );
     assert_eq!(run_last(&mut eval, PROTO_SETUP), ":setup");
     assert_eq!(
         run_last(
@@ -1111,6 +1240,12 @@ fn find_protocol_impl_non_lattice_walks() {
     // descriptor (which also skips the instance-consult
     // step), both miss on an empty protocol.
     let mut eval = boot();
+    // S16 merge: the class-name string stubs are retired;
+    // import the classes (S14 reads them by name).
+    run_last(
+        &mut eval,
+        "(import 'java.lang.String 'java.lang.Long 'java.lang.Object)",
+    );
     assert_eq!(run_last(&mut eval, PROTO_SETUP), ":setup");
     assert_eq!(
         run_last(&mut eval, "(find-protocol-impl RQ (RI. 1))"),
@@ -1125,6 +1260,12 @@ fn find_protocol_impl_fn_values() {
     // natives alike miss on an empty protocol, as does any
     // other extension value.
     let mut eval = boot();
+    // S16 merge: the class-name string stubs are retired;
+    // import the classes (S14 reads them by name).
+    run_last(
+        &mut eval,
+        "(import 'java.lang.String 'java.lang.Long 'java.lang.Object)",
+    );
     assert_eq!(run_last(&mut eval, PROTO_SETUP), ":setup");
     assert_eq!(
         run_last(&mut eval, "(find-protocol-impl RQ (fn [x] x))"),
@@ -1141,6 +1282,12 @@ fn find_protocol_impl_registry_shapes() {
     // non-keyword method keys, non-map method tables, and
     // non-integer arities are skipped.
     let mut eval = boot();
+    // S16 merge: the class-name string stubs are retired;
+    // import the classes (S14 reads them by name).
+    run_last(
+        &mut eval,
+        "(import 'java.lang.String 'java.lang.Long 'java.lang.Object)",
+    );
     assert_eq!(run_last(&mut eval, PROTO_SETUP), ":setup");
     assert_eq!(
         run_last(
@@ -1186,6 +1333,12 @@ fn cache_protocol_fn_exact_class() {
     // The `isInstance` shortcut hits on exact class equality
     // too (not just interface membership).
     let mut eval = boot();
+    // S16 merge: the class-name string stubs are retired;
+    // import the classes (S14 reads them by name).
+    run_last(
+        &mut eval,
+        "(import 'java.lang.String 'java.lang.Long 'java.lang.Object)",
+    );
     assert_eq!(
         run_last(
             &mut eval,
@@ -1233,6 +1386,12 @@ fn protocol_method_hint_errors() {
     // `__protocol_method*` checks its hints left to right
     // (house cast texts).
     let mut eval = boot();
+    // S16 merge: the class-name string stubs are retired;
+    // import the classes (S14 reads them by name).
+    run_last(
+        &mut eval,
+        "(import 'java.lang.String 'java.lang.Long 'java.lang.Object)",
+    );
     assert_eq!(run_last(&mut eval, PROTO_SETUP), ":setup");
     assert_eq!(
         uncaught(&mut eval, "(__protocol_method* 5 \"m\" (fn [x] x))"),
