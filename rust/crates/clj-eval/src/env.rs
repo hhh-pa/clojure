@@ -493,12 +493,26 @@ impl NamespaceRegistry {
     }
 
     /// [`lookup`](Self::lookup) against an explicit namespace (the
-    /// analyzer passes the `*ns*`-synced name).
+    /// analyzer passes the `*ns*`-synced name). Single pass:
+    /// alias targets dangle into tombstones (#81), bare names
+    /// stay live-only.
     #[must_use]
     pub fn lookup_in(&self, ns_name: &str, sym: &Symbol) -> Option<u64> {
+        self.resolve_target_and_id(ns_name, sym).map(|(_, id)| id)
+    }
+
+    /// Resolve a symbol to its qualified target and var id under
+    /// one borrow — single-locked through `SharedRegistry`, so no
+    /// concurrent unmap can slip between resolution and id lookup
+    /// (#86). Callers needing both a target and its id should
+    /// prefer this; live-only snapshots and cross-namespace
+    /// re-resolution keep their own reads.
+    #[must_use]
+    pub fn resolve_target_and_id(&self, ns_name: &str, sym: &Symbol) -> Option<(Symbol, u64)> {
         let target = self.resolve_in(ns_name, sym)?;
-        let ns = self.ns_live_or_removed(target.namespace()?)?;
-        ns.ids.get(&target).copied()
+        let home = target.namespace()?;
+        let id = self.ns_live_or_removed(home)?.lookup(&target)?;
+        Some((target, id))
     }
 
     /// Intern (find or create) a var: unqualified symbols land in
@@ -909,6 +923,12 @@ impl SharedRegistry {
         self.lock().registry.lookup_in(ns_name, sym)
     }
 
+    /// Resolve a symbol to target and var id (see
+    /// [`NamespaceRegistry::resolve_target_and_id`]; one lock).
+    pub fn resolve_target_and_id(&self, ns_name: &str, sym: &Symbol) -> Option<(Symbol, u64)> {
+        self.lock().registry.resolve_target_and_id(ns_name, sym)
+    }
+
     /// Intern (find or create) a var (see
     /// [`NamespaceRegistry::intern`]).
     pub fn intern(&self, sym: &Symbol) -> u64 {
@@ -1260,6 +1280,48 @@ mod tests {
             Some(sym(Some("lib"), "v"))
         );
         assert_eq!(reg.namespace_target("q"), Some("lib"));
+    }
+
+    #[test]
+    fn resolve_target_and_id_shapes() {
+        // #86: the single-locked helper resolves every shape —
+        // aliases dangle into tombstones (#81) while bare removed
+        // names and stale refers miss.
+        let reg = rigged();
+        let v = sym(Some("lib"), "v");
+        let v_id = reg.lookup(&v).expect("live lib/v resolves");
+        assert_eq!(
+            reg.resolve_target_and_id("user", &sym(Some("q"), "v")),
+            Some((v.clone(), v_id))
+        );
+        assert_eq!(
+            reg.resolve_target_and_id("user", &sym(Some("q"), "missing")),
+            None
+        );
+        assert_eq!(
+            reg.resolve_target_and_id("user", &v),
+            Some((v.clone(), v_id))
+        );
+        assert_eq!(
+            reg.resolve_target_and_id("user", &sym(None, "w")),
+            Some((v.clone(), v_id))
+        );
+        assert_eq!(
+            reg.resolve_target_and_id("user", &sym(None, "missing")),
+            None
+        );
+        let mut reg = rigged();
+        assert!(reg.remove_ns("lib"));
+        assert_eq!(
+            reg.resolve_target_and_id("user", &sym(Some("q"), "v")),
+            Some((v.clone(), v_id))
+        );
+        assert_eq!(
+            reg.resolve_target_and_id("user", &sym(Some("q"), "missing")),
+            None
+        );
+        assert_eq!(reg.resolve_target_and_id("user", &v), None);
+        assert_eq!(reg.resolve_target_and_id("user", &sym(None, "w")), None);
     }
 
     #[test]
