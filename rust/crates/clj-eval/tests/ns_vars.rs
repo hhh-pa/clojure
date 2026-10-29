@@ -1130,6 +1130,31 @@ fn t73_removed_current_ns_deftype_own_protocol() {
 }
 
 #[test]
+fn t73_removed_cross_ns_stale_ref_keeps_root() {
+    // Torture #73 finding 4 round 2: a function compiled against a
+    // live namespace keeps reading its captured var after that
+    // namespace is removed (like the JVM's compiled `Var`
+    // reference) instead of resurrecting the name with an unbound
+    // var.
+    let mut eval = boot();
+    run(
+        &mut eval,
+        "(clojure.core/create-ns 'torture.other) (clojure.core/in-ns 'torture.other)",
+    );
+    run(&mut eval, "(clojure.core/refer 'clojure.core)");
+    run(&mut eval, "(def oval 5)");
+    run(&mut eval, "(clojure.core/in-ns 'user)");
+    run(&mut eval, "(defn getoval [] torture.other/oval)");
+    assert_eq!(run_last(&mut eval, "(getoval)"), "5");
+    run(&mut eval, "(clojure.core/remove-ns 'torture.other)");
+    assert_eq!(run_last(&mut eval, "(getoval)"), "5");
+    assert_eq!(
+        run_last(&mut eval, "(nil? (find-ns 'torture.other))"),
+        "true"
+    );
+}
+
+#[test]
 fn t73_resolve_qualified_into_removed_ns_is_nil() {
     // Torture #73 round 2 LOW: qualified resolution into a removed
     // namespace is nil (upstream `Compiler.namespaceFor` goes

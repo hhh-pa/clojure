@@ -881,24 +881,20 @@ impl Evaluator {
     fn var_id(&mut self, sym: &Symbol) -> u64 {
         self.registry
             .lookup(sym)
-            .or_else(|| self.tombstoned_self_id(sym))
+            .or_else(|| self.tombstone_id(sym))
             .unwrap_or_else(|| self.registry.intern(sym))
     }
 
-    /// A var id through the removed current namespace's tombstone:
-    /// analyzer-resolved self targets keep reading frozen mappings
-    /// (the `*ns*` object outlives the name, like the JVM) without
-    /// resurrecting the namespace. Only the current name qualifies —
-    /// every caller feeds analyzer-resolved targets, so anything
-    /// else stays on the live-only rule (T73 finding 4 round 2).
-    fn tombstoned_self_id(&self, sym: &Symbol) -> Option<u64> {
+    /// A var id through a removed namespace's tombstone: every
+    /// caller feeds analyzer-resolved targets, so a lookup miss
+    /// means the home went away after analysis — and the
+    /// analyzer-captured var (ids are never reused) still answers
+    /// from frozen mappings, like the JVM's compiled `Var`
+    /// reference, without resurrecting the name (T73 finding 4
+    /// round 2; live homes win by name inside
+    /// `ns_live_or_removed`, so live behavior is untouched).
+    fn tombstone_id(&self, sym: &Symbol) -> Option<u64> {
         let ns = sym.namespace()?;
-        if ns != self.current_ns_name() {
-            return None;
-        }
-        if self.registry.get(ns).is_some() {
-            return None;
-        }
         self.registry.ns_live_or_removed(ns)?.lookup(sym)
     }
 
