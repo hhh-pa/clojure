@@ -757,18 +757,9 @@ impl Evaluator {
             Expr::VecLit(elems, meta) => self.eval_vec(elems, meta.clone(), env),
             Expr::MapLit(pairs, meta) => self.eval_map_lit(pairs, meta.clone(), env),
             Expr::SetLit(elems, meta) => self.eval_set_lit(elems, meta.clone(), env),
-            Expr::Global(sym) => {
-                let id = self.var_id(sym);
-                Ok(self.deref_var(id, sym))
-            }
+            Expr::Global(var) => Ok(self.deref_var(var.id, &var.sym)),
             Expr::Local(idx) => Ok(env.get(*idx)),
-            Expr::VarRef(sym) => {
-                let id = self.var_id(sym);
-                Ok(Value::Var(Var {
-                    id,
-                    sym: sym.clone(),
-                }))
-            }
+            Expr::VarRef(var) => Ok(Value::Var(var.clone())),
             Expr::Def {
                 sym,
                 doc,
@@ -810,7 +801,7 @@ impl Evaluator {
                 catches,
                 finally_body,
             } => self.eval_try(body, catches, finally_body, env),
-            Expr::Set { sym, val } => self.eval_set(sym, val, env),
+            Expr::Set { var, val } => self.eval_set(var, val, env),
             Expr::Binding { pairs, body } => self.eval_binding(pairs, body, env),
             Expr::WithRedefs { pairs, body } => self.eval_with_redefs(pairs, body, env),
             Expr::WithBindings { map, body } => self.eval_with_bindings(map, body, env),
@@ -879,8 +870,11 @@ impl Evaluator {
         }
     }
 
-    /// A var id, interning on first reference.
-    fn var_id(&mut self, sym: &Symbol) -> u64 {
+    /// A var id, interning on first reference. Only synthesized
+    /// analyzer heads and VM-internal bindings reach here;
+    /// analyzer-captured paths (`Global`/`VarRef`/`Set`/`Binding`/
+    /// `WithRedefs`) carry their ids and never re-resolve (#79).
+    pub(crate) fn var_id(&mut self, sym: &Symbol) -> u64 {
         self.registry
             .lookup(sym)
             .or_else(|| self.tombstone_id(sym))
@@ -977,17 +971,16 @@ impl Evaluator {
 
     /// `set!`: rebind the thread-local top, else the root-binding
     /// error.
-    fn eval_set(&mut self, sym: &Symbol, val: &Expr, env: &Env) -> Result<Value, Signal> {
+    fn eval_set(&mut self, var: &Var, val: &Expr, env: &Env) -> Result<Value, Signal> {
         let value = self.eval(val, env)?;
-        let id = self.var_id(sym);
-        if self.bindings.set_top(id, value.clone()) {
+        if self.bindings.set_top(var.id, value.clone()) {
             Ok(value)
         } else {
             Err(self.throw(NativeError::new(
                 ThrowClass::IllegalStateException,
                 format!(
                     "Can't change/establish root binding of: {} with set",
-                    sym.name()
+                    var.sym.name()
                 ),
             )))
         }
@@ -1001,7 +994,7 @@ impl Evaluator {
     /// so pre-body failures need no unwind.
     fn eval_binding(
         &mut self,
-        pairs: &[(Symbol, Expr)],
+        pairs: &[(Var, Expr)],
         body: &[Expr],
         env: &Env,
     ) -> Result<Value, Signal> {
@@ -1009,27 +1002,19 @@ impl Evaluator {
         for (_, init) in pairs {
             values.push(self.eval(init, env)?);
         }
-        for (sym, _) in pairs {
-            let id = self.var_id(sym);
-            let dynamic = self.registry.state(id).is_some_and(|s| s.dynamic);
+        for (var, _) in pairs {
+            let dynamic = self.registry.state(var.id).is_some_and(|s| s.dynamic);
             if !dynamic {
                 return Err(self.throw(NativeError::new(
                     ThrowClass::IllegalStateException,
-                    format!("Can't dynamically bind non-dynamic var: {sym}"),
+                    format!("Can't dynamically bind non-dynamic var: {}", var.sym),
                 )));
             }
         }
         let depth = self.bindings.depth();
         let mut frame = Vec::with_capacity(pairs.len());
-        for ((sym, _), value) in pairs.iter().zip(values) {
-            let id = self.var_id(sym);
-            frame.push((
-                Var {
-                    id,
-                    sym: sym.clone(),
-                },
-                value,
-            ));
+        for ((var, _), value) in pairs.iter().zip(values) {
+            frame.push((var.clone(), value));
         }
         self.bindings.push_frame(frame);
         let result = self.eval_body(body, env);
@@ -1095,7 +1080,14 @@ impl Evaluator {
         env: &Env,
     ) -> Result<Value, Signal> {
         let writer = crate::io::string_writer(self);
-        let pairs = vec![(out.clone(), Expr::Literal(writer.clone()))];
+        let out_id = self.var_id(out);
+        let pairs = vec![(
+            Var {
+                id: out_id,
+                sym: out.clone(),
+            },
+            Expr::Literal(writer.clone()),
+        )];
         self.eval_binding(&pairs, body, env)?;
         let contents = crate::io::writer_contents(&writer).unwrap_or_default();
         Ok(Value::Str(Arc::from(contents.as_str())))
@@ -1117,7 +1109,14 @@ impl Evaluator {
             return Err(self.throw(crate::core::cce_err(&v, "java.lang.String")));
         };
         let reader = crate::reader::string_reader(self, text);
-        let pairs = vec![(input.clone(), Expr::Literal(reader))];
+        let input_id = self.var_id(input);
+        let pairs = vec![(
+            Var {
+                id: input_id,
+                sym: input.clone(),
+            },
+            Expr::Literal(reader),
+        )];
         self.eval_binding(&pairs, body, env)
     }
 
@@ -1228,14 +1227,14 @@ impl Evaluator {
     /// `finally`, even on throw (probe37 `wrd-*`).
     fn eval_with_redefs(
         &mut self,
-        pairs: &[(Symbol, Expr)],
+        pairs: &[(Var, Expr)],
         body: &[Expr],
         env: &Env,
     ) -> Result<Value, Signal> {
         let mut saves: Vec<(u64, Option<Value>, Value)> = Vec::with_capacity(pairs.len());
-        for (sym, init) in pairs {
+        for (var, init) in pairs {
             let value = self.eval(init, env)?;
-            let id = self.var_id(sym);
+            let id = var.id;
             match saves.iter_mut().find(|(i, _, _)| *i == id) {
                 Some(slot) => slot.2 = value,
                 None => {
