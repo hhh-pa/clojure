@@ -138,15 +138,9 @@ pub(crate) fn lookup_macro(eval: &Evaluator, op: &Value) -> Result<Option<MacroR
     let (id, target) = match op {
         Value::Symbol(sym) => {
             let cur = eval.current_ns_name();
-            let Some(target) = eval.registry.resolve_in(&cur, sym) else {
+            let Some((target, id)) = eval.registry.resolve_target_and_id(&cur, sym) else {
                 return Ok(None);
             };
-            let home = target.namespace().unwrap_or(&cur);
-            let id = eval
-                .registry
-                .ns_live_or_removed(home)
-                .and_then(|ns| ns.lookup(&target))
-                .expect("resolve_in guarantees the var id exists");
             (id, target)
         }
         Value::Var(v) => (v.id, v.sym.clone()),

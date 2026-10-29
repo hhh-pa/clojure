@@ -805,19 +805,13 @@ impl<'a> Analyzer<'a> {
             return Ok(Expr::Literal(empty));
         }
         let cur = self.current_ns();
-        if let Some(target) = self.eval.registry.resolve_in(&cur, sym) {
+        if let Some((target, id)) = self.eval.registry.resolve_target_and_id(&cur, sym) {
             // Value-position checks (`analyzeSymbol` order: private
             // first, then macro). Neither wrapper names an operator
             // (probed); the private message spells the symbol as
             // written without `#'`, the macro one the `#'` target.
             // (Invoke position has its own check in `analyze_list`.)
             let home = target.namespace().unwrap_or("");
-            let id = self
-                .eval
-                .registry
-                .ns_live_or_removed(home)
-                .and_then(|ns| ns.lookup(&target))
-                .expect("resolve_in guarantees the var id exists");
             if home != cur && crate::macros::is_private_var(self.eval, id) {
                 return Err(self.err(
                     class::ILLEGAL_STATE,
@@ -1115,19 +1109,13 @@ impl<'a> Analyzer<'a> {
     /// operator as written and the `#'` target (probed).
     fn check_private_invoke(&self, sym: &Symbol, span: Span) -> Result<(), CompileError> {
         let cur = self.current_ns();
-        let Some(target) = self.eval.registry.resolve_in(&cur, sym) else {
+        let Some((target, id)) = self.eval.registry.resolve_target_and_id(&cur, sym) else {
             return Ok(());
         };
         let home = target.namespace().unwrap_or("");
         if home == cur {
             return Ok(());
         }
-        let id = self
-            .eval
-            .registry
-            .ns_live_or_removed(home)
-            .and_then(|ns| ns.lookup(&target))
-            .expect("resolve_in guarantees the var id exists");
         if crate::macros::is_macro_var(self.eval, id) {
             return Ok(());
         }
@@ -1420,14 +1408,7 @@ impl<'a> Analyzer<'a> {
     fn resolve_var(&self, sym: &Symbol, span: Span, op: &str) -> Result<Var, CompileError> {
         // Locals are invisible: only namespace membership matters.
         let cur = self.current_ns();
-        if let Some(target) = self.eval.registry.resolve_in(&cur, sym) {
-            let home = target.namespace().unwrap_or("");
-            let id = self
-                .eval
-                .registry
-                .ns_live_or_removed(home)
-                .and_then(|ns| ns.lookup(&target))
-                .expect("resolve_in guarantees the var id exists");
+        if let Some((target, id)) = self.eval.registry.resolve_target_and_id(&cur, sym) {
             Ok(Var { id, sym: target })
         } else {
             Err(self.err(
