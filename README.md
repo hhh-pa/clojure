@@ -125,15 +125,17 @@ and agent actions), `alter-var-root`, `with-redefs`, metadata
 (`meta with-meta vary-meta alter-meta! reset-meta!`). Macros are
 real: expansion evaluates the macro fn on unevaluated forms.
 
-**Concurrency (no STM).** `atom` (validators, watches, `swap!`
+**Concurrency.** `atom` (validators, watches, `swap!`
 / `reset!` / `compare-and-set!`), `delay` / `force`, `future`
 (binding conveyance, cached failures) / `promise` / `deliver`,
 `pcalls` / `pvalues`, agents (`send` on a fixed pool, `send-off`
 unbounded, `:fail` / `:continue` error modes, `await` / `await-for`,
-`restart-agent`, `shutdown-agents`), `locking`, `add-watch` /
+`restart-agent`, `shutdown-agents`), STM (`dosync` over `ref`s —
+`alter` / `commute` / `ensure` / `ref-set`, `io!`, validators,
+watches, history vars), `locking`, `add-watch` /
 `remove-watch`, `realized?`.
 
-**Core vars: 405 implemented, 2 divergent, 16 out of scope**
+**Core vars: 690 implemented, 0 divergent, 0 out of scope**
 ([`rust/core-coverage.md`](rust/core-coverage.md) is normative and
 CI-enforced: listed vars must resolve, excluded ones must not).
 
@@ -157,12 +159,16 @@ Deliberate, documented, and pinned by the differential corpus —
 each entry asserts its exact behavior, so drift fails CI:
 
 - **No object identity.** Values are compared, never
-  identical (`identical?` is out of scope): `swap!` /
-  `compare-and-set!` publish-compare with `=`, where the JVM
-  compares references.
+  pointer-identical: `swap!` / `compare-and-set!`
+  publish-compare with `=`, where the JVM compares
+  references. `identical?` answers a per-kind table instead
+  (collections by minted id, extensions/host values by
+  allocation, classes by name, other same-kind pairs by `=`;
+  cross-kind pairs are never identical).
 - **Numbers.** `Int` is checked i64 — overflow raises a catchable
   arithmetic error, never wraps. `/` on ints is exact when
-  divisible, else double division (no ratios — see below).
+  divisible, else double division (ratios exist as values but
+  `/` never produces them).
 - **Equality/ordering.** `=` is same-category (`(= 1 1.0)` is
   false); `==` is the cross-category numeric comparison.
   `compare` matches JVM numeric ordering including NaN ties, but
@@ -171,9 +177,10 @@ each entry asserts its exact behavior, so drift fails CI:
 - **Hashing is internal.** `hasheq` is only equiv-consistent —
   values never promise JVM-identical integers.
 - **Printing.** `pr` round-trips EDN values through the reader;
-  `*print-length*` / `*print-level*` truncate with `...`
-  (`*print-dup*` is declared but ignored). Errors render as
-  `file:line:col:` diagnostic chains, not JVM stack dumps.
+  `*print-length*` / `*print-level*` truncate with `...`;
+  `*print-dup*` routes `pr` through the dup printer (undupable
+  kinds throw). Errors render as `file:line:col:`
+  diagnostic chains, not JVM stack dumps.
 - **Analyzer builtins.** `let loop fn binding letfn with-redefs
   with-bindings bound-fn locking` resolve as macros but
   `macroexpand-1` returns them unchanged (documented identity).
@@ -189,19 +196,24 @@ each entry asserts its exact behavior, so drift fails CI:
   per-object). `alter-var-root` serializes per var like the
   JVM (same-thread nesting re-enters; the outer install
   wins).
-- **Namespaces.** `ns-imports` is always `{}` (no host classes);
-  `*loaded-libs*` is a plain set, not a ref.
+- **Namespaces.** `ns-imports` is the explicit import table
+  (sorted; fresh namespaces seed the 106 JVM default imports
+  flat per namespace, #74); `*loaded-libs*` is a plain set,
+  not a ref.
 
 ## Out of scope
 
 Absent from [`rust/core-coverage.md`](rust/core-coverage.md) means
 out of scope, not silently missing:
 
-- JVM interop (`new`, dotted access, `import`, `instance?`,
-  `class`, `..`, `clojure.java.*`, `clojure.reflect`).
-- STM (`ref dosync alter commute ensure ref-set`) — never.
-- Reader: `#=` eval reader, `#inst` / `#uuid` data readers,
-  custom `data_readers.clj`.
+- Host interop beyond the emulated class core: `class` `type`
+  `instance?` `import` `..` `bean` `bases` `supers` resolve
+  against the static `clojure.lang.*` table (S16);
+  `clojure.java.*`, `clojure.reflect`, and real classloading
+  stay out.
+- Reader: `#=` eval reader, custom `data_readers.clj`
+  autoload (the port has no classpath). `#inst` / `#uuid`
+  tags read into native `Instant` / `Uuid` values.
 - LLVM JIT, `clojure.spec`, `core.async`, and binary
   compatibility with JVM-compiled artifacts.
 
@@ -212,10 +224,12 @@ There is no tracing garbage collector. Values are immutable and
 counting reclaims storage on drop:
 
 - `Value` is one enum (`Nil Bool Int(i64) Double(f64) BigInt
-  BigDec Ratio Str Char
-  Symbol Keyword List Vector Map Set Regex TaggedLiteral
+  BigInteger BigDec Ratio Str Char
+  Symbol Keyword List Vector MapEntry Map Set Regex Uuid
+  Instant Uri TaggedLiteral
   ReaderConditional Var Unbound Throwable Transient Atom Delay
-  Future Promise Agent Extension`). Heap payloads — strings,
+  Future Promise Agent Volatile Ref Extension HostType MultiFn
+  Class Array PrimitiveVector`). Heap payloads — strings,
   collections, metadata, extension values — sit behind `Arc`.
 - Collections are thread-safe `rpds` persistent types with an
   `Arc` metadata slot plus insertion-order sidecars (small JVM
