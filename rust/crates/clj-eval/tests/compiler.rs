@@ -1408,7 +1408,8 @@ fn truthy_one_emits_fake() {
 
 /// Non-root loads never emit, even under a true flag: `load-file`,
 /// `load-string`, and `load-reader` have no load root to derive
-/// the path from (§1.4 D6 — evaluation still runs).
+/// the path from (§1.4 D6 — evaluation still runs, and the loads
+/// answer the last value per #77, nil when empty).
 #[test]
 fn nonroot_loads_never_emit() {
     let fx = Fixture::new("nonroot");
@@ -1427,7 +1428,7 @@ fn nonroot_loads_never_emit() {
                 "(binding [*compile-files* true] (load-file \"{rel}\"))"
             ))
         ),
-        "nil"
+        "#'my.plain/f"
     );
     assert_eq!(run_last(&mut eval, "(my.plain/f 1)"), "2");
     assert_eq!(
@@ -1435,7 +1436,7 @@ fn nonroot_loads_never_emit() {
             &mut eval,
             &fx.within("(binding [*compile-files* true] (load-string \"(ns my.ls) (def lsm 7)\"))")
         ),
-        "nil"
+        "#'my.ls/lsm"
     );
     assert_eq!(run_last(&mut eval, "@#'my.ls/lsm"), "7");
     // `load-reader` likewise evaluates without emitting — and binds
