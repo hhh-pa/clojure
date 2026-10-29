@@ -128,9 +128,9 @@ Behaviors:
   oracle row).
 - `identical?`: by name (§1.9).
 - Metadata: none. `(meta C)` → `nil`;
-  `(with-meta C m)` is the short-shape CCE
-  (`cce_err(C, "clojure.lang.IObj")` — the oracle
-  `c-with-meta` shows the JVM's module shape, §2.4).
+  `(with-meta C m)` is the module-shape CCE
+  (`cce_err(C, "clojure.lang.IObj")`, byte-equal to
+  the oracle `c-with-meta`).
 - Not seqable/counted/invokable: `seq`/`count` take the
   existing `iseq_err`/`count` paths with
   `java.lang.Class` (`c-seq-err`); `ifn?`/`fn?` false.
@@ -544,7 +544,7 @@ refers) by every unqualified resolver.
 |---|---|
 | `i-ns-imports*` (table, values, coercions) | the `ns-imports` var — specified in §1.13, not here |
 | `i-resolve`, `i-ns-resolve`, `i-value-pos` | imports resolve to the class (not a var) in `resolve`/`ns-resolve`/value position |
-| `i-construct` | `(Date. 0)` constructs through the import |
+| `i-construct` | `(Date. 0)` constructs through the import (oracle constructs; the port answers `Not a type`, below) |
 | `i-ns-map`, `i-ns-publics`, `i-ns-interns` | imports are in `ns-map`, not in `ns-publics`/`ns-interns` |
 | `i-def-over-import`, `i-def-over-import-after` | `def` over an import is a compile error (`Expecting var, but Date is mapped to class java.util.Date`); nothing is interned |
 | `i-intern-over-import`, `i-refer-over-import`, `i-refer-removes-import`, `i-refer-warn` | `intern`/`refer` replace the import (removal, not shadow; the port stays silent, §2.4) |
@@ -713,7 +713,10 @@ host-only):
 - `Class` (target a `Value::Class`): `getName`
   (`m-cls-getname`), `getSimpleName` (reuse
   `simple_name_of`, §2.3 — `m-cls-simple`,
-  `m-cls-simple-nested`, `m-cls-simple-fn`),
+  `m-cls-simple-nested`, `m-cls-simple-fn`; the
+  synthetic reify names keep their `$`-segment —
+  no JVM oracle exists for the port-invented stable
+  names),
   `getSuperclass` (first base unless interface or
   baseless → `nil`; `m-cls-super/super-iface/
   super-object`), `getInterfaces` (remaining bases as
@@ -758,12 +761,23 @@ host-only):
   `isRealized` (`m-realized-*`).
 - Writers: `close`/`flush` (0-arg, void — the §1.14
   probes call `(.close pw)`/`(.flush pw)`; never bean
-  keys, §1.11).
+  keys, §1.11). On other writers both are silent
+  no-ops returning nil (`(.. *out* (flush))` never
+  flushes stdout, unlike `(flush)`).
 - HostDef instances/descriptors: the existing dispatch
   (fields, methods, descriptor misses, gen-class
   forwarding) — `m-deftype-field/method`,
   `m-record-field`. A 0-arg `__meth*` on a host target
   keeps reading field-first (pre-existing, JVM-same).
+  Universals shadow host members: `equals`/`hashCode`/
+  `getClass` answer the surface even when a host type
+  defines the member (a deftype `(equals [this x] …)`
+  never runs — pinned divergence, no oracle rows
+  define custom universals; deferring to exact host
+  matches is a follow-up, §2.2). `toString`
+  re-dispatches through `str`, so custom `toString`
+  methods run (`m-deftype-method`) while gen-class
+  `toString` sigs answer the default.
 
 Nil target (R1 rule): resolve `(member, arity)`
 against the surface IGNORING the target's kind — a hit
@@ -840,7 +854,13 @@ all-caps run is preserved — `getURL` → `:URL`,
 `b-lazy` → `[1 2]`; the port answers `[1 1]`, §2.1).
 `nil` → NPE naming `x` (`Cannot invoke
 "Object.getClass()" because "x" is null` — note: NOT
-the `..` `target` text, `b-nil`). Missing keys read
+the `..` `target` text, `b-nil`). Eagerness throws at
+`bean` time: `bean` of an empty `List` throws
+`NoSuchElementException` (empty message) evaluating
+`:first`/`:last` — the JVM returns a 4-key proxy map
+and throws `InvocationTargetException` (wrapping the
+NSEE) only when the keys are touched (pinned
+divergence, §2.4). Missing keys read
 `nil`/default, `contains?`/`count`/`assoc`/`meta`
 behave as for plain maps (`b-missing/contains/count/
 assoc/meta`).
@@ -994,7 +1014,10 @@ Behaviors:
   Empty buffer → no call (`w-flush-empty`).
 - Close: flush first, then `close-fn` unless nil
   (`w-close`, `w-close-nil`); a second close is a
-  no-op (`w-close-twice` — track a closed flag).
+  no-op (`w-close-twice` — track a closed flag). If
+  `flush-fn` throws during close, `close-fn` is
+  skipped and the writer stays closed (a second close
+  still no-ops).
   Writes after close are dropped, never throw
   (`w-write-after-close`). Flush and close return
   `nil` (`w-flush-ret`, `w-close-ret`).
@@ -1043,13 +1066,11 @@ already exists in place.)
 
 Each flips in place to `implemented` with a test note
 naming its `classemu.rs` tests (house style, §1.1).
-Header math (re-verified by counting status rows:
-451/1/240/0 here): thirteen `out-of-scope` rows leave
-and one `divergent` row leaves, so the header becomes
-**465 implemented, 0 divergent, 227 out of scope, 0
-planned** (692 total). The implementer re-verifies both
-endpoints by counting; this spec task edits no matrix
-rows.
+Header math (endpoints at spec time: 451/1/240/0 —
+re-verify by counting on the merge base; thirteen
+`out-of-scope` rows leave and one `divergent` row
+leaves, so the header gains fourteen `implemented`).
+This spec task edits no matrix rows.
 
 ## Part 2 — Notes
 
@@ -1258,7 +1279,9 @@ time), not S16 scope:
   (`:validator`/`:watches`/`:error*`), multifn
   (`:methodTable`/`:preferTable`), throwable
   (`:stackTrace`/`:suppressed`), Class (the other 41
-  reflection keys), exotic `NodeSeq` imports. Oracle
+  reflection keys), exotic `NodeSeq` imports, deferring
+  universals (`equals`/`hashCode`/`getClass`) to exact
+  host member matches (§1.10). Oracle
   rows for all are committed (`b-keys-*`,
   `m-isdone-*`, `m-reader-line-oo`).
 - **Queues:** the port has no queue kind, so
@@ -1309,19 +1332,28 @@ time), not S16 scope:
 Where the JVM's text is unportable, the port keeps the
 class and adapts the message by house rule:
 
-- Module-shape CCEs (`(Var is in unnamed module ...)`)
-  → short shape (`Cannot cast {from} to {to}` /
-  `cce_err`). Applies to: `i-conflict-def`,
-  `i-import-over-refer`, `i-ns-imports-str`,
-  `c-inst-nonclass`, `c-bases/supers-nonclass`,
-  `c-cast-nonclass-c`, `c-with-meta`,
-  `m-cls-assign-nonclass`, `b-keys-var`.
+- Short-shape cast failures (`Cannot cast {from} to
+  {to}`, `NativeError::cast` — the JVM's module shape is
+  unportable here): `i-ns-imports-str`,
+  `m-cls-assign-nonclass`, `w-nonfn-flush`. (The other
+  class-position CCEs — `c-inst-nonclass`,
+  `c-bases/supers-nonclass`, `c-cast-nonclass-c`,
+  `c-with-meta`, `i-conflict-def`, `i-import-over-refer`
+  — render the JVM's module shape via `cce_err`,
+  byte-equal to the oracle; `b-keys-var` is not an
+  error — the port answers `:class`, §1.11.)
 - Spec `ExceptionInfo` data → `nil`
   (`i-import-exdata`, `i-expand-str`,
   §2.1 decision 16).
 - Nil-message exceptions → empty message:
   `NoSuchElementException` (`m-first-empty`) and the
   `isAssignableFrom(nil)` NPE (`m-cls-assign-nil`).
+- Eager `bean` of an empty `List` throws the bare
+  `NoSuchElementException` at `bean` time (empty
+  message); the JVM returns a 4-key proxy and throws
+  `InvocationTargetException` (wrapping NSEE) only
+  when `:first`/`:last` (or `keys`/`vals`/print) is
+  touched (§1.11).
 - `..` 0-arg call misses → field-shape (the
   `dtor_method_on_other_values` pin); the JVM answers
   method-shape (`m-miss-0`).

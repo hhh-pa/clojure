@@ -2662,6 +2662,29 @@ fn printwriter_edges() {
         ),
         "[]"
     );
+    // Interop on other writers is a silent no-op (§1.10 —
+    // unlike `(flush)`, which flushes stdout).
+    assert_eq!(
+        run(&mut eval, "[(.. *out* (flush)) (.. *out* (close))]"),
+        "[nil nil]"
+    );
+    // Close with a throwing flush fn: the flush error
+    // propagates, `close-fn` is skipped, and the writer stays
+    // closed (a second close still no-ops, §1.14).
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(let [pw (PrintWriter-on (fn [s] (throw (ex-info \"boom\" {}))) prn)] (binding [*out* pw] (print \"x\")) (.close ^java.io.Writer pw))"
+        ),
+        "clojure.lang.ExceptionInfo | boom"
+    );
+    assert_eq!(
+        run(
+            &mut eval,
+            "(let [ran (atom false) pw (PrintWriter-on (fn [s] (throw (ex-info \"boom\" {}))) (fn [] (reset! ran true)))] (binding [*out* pw] (print \"x\")) [(try (.close ^java.io.Writer pw) (catch Throwable t :caught)) @ran (.close ^java.io.Writer pw)])"
+        ),
+        "[:caught false nil]"
+    );
 }
 
 // w-direct-println-auto/noauto, w-direct-print-auto: oracle-only —
@@ -3059,6 +3082,13 @@ fn surface_equals_expansions() {
             "(do (defrecord QRd [x]) (defstruct qse :x) (.. (QRd. 1) (equals (struct qse 1))))",
             "true",
         ),
+        // Universals shadow host members (§1.10): the custom
+        // `equals` never runs — the surface answers identity
+        // `=` (not `:custom`).
+        (
+            "(do (definterface IEq (equals [x])) (deftype CEq [x] IEq (equals [this o] :custom)) (let [i (CEq. 1)] [(.. i (equals i)) (.. i (equals (CEq. 1)))]))",
+            "[true false]",
+        ),
     ];
     for (src, want) in cases {
         assert_eq!(run(&mut eval, src), want, "{src}");
@@ -3303,6 +3333,13 @@ fn bean_basics() {
     assert_eq!(
         uncaught(&mut eval, "(bean nil)"),
         "java.lang.NullPointerException | Cannot invoke \"Object.getClass()\" because \"x\" is null"
+    );
+    // Eager `bean` of an empty `List` throws at `bean` time
+    // (§1.11, §2.4 — the JVM throws ITE only when `:first`/
+    // `:last` is touched).
+    assert_eq!(
+        uncaught(&mut eval, "(bean [])"),
+        "java.util.NoSuchElementException | "
     );
     assert_eq!(
         run(

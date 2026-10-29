@@ -2199,6 +2199,9 @@ fn is_tower_value(v: &Value) -> bool {
 fn tower_equals(a: &Value, b: &Value) -> bool {
     match (a, b) {
         (Value::Int(x), Value::Int(y)) => x == y,
+        // Bit-equality is exact here: `Double.equals`
+        // canonicalizes all NaN payloads, but the port has no
+        // payload constructors, so every NaN is canonical.
         (Value::Double(x), Value::Double(y)) => x.to_bits() == y.to_bits(),
         (Value::BigInt(x), Value::BigInt(y)) => x == y,
         (Value::BigDec(x), Value::BigDec(y)) => x == y,

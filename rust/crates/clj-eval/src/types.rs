@@ -864,28 +864,15 @@ fn field_hit(d: &Arc<HostDef>, h: &HostVal, method: &str) -> Option<Value> {
     }
 }
 
-/// Default `Object` methods for host instances (the JVM resolves
-/// them with no interface entry): `toString/0` is the `Name@hex`
-/// fallback — except on structs, where it is the readable map
-/// print, like `str` (S12); `hashCode/0` on records and structs
-/// is the content map's Java hash (oracles `j-tostring-dt`,
-/// `l-rec-hashcode`). Anything else — and descriptors, which
-/// have no instance methods — is the oracle's field error.
+/// The 0-arg host-instance miss report (the JVM resolves `Object`
+/// methods with no interface entry, but `toString/0` and
+/// `hashCode/0` never reach here — the S16 member surface answers
+/// them first): real surface members read method-shape, anything
+/// else — and descriptors, which have no instance methods — the
+/// oracle's field error.
 fn object_fallback(h: &HostVal, method: &str, class: &str) -> Result<Value, NativeError> {
     match h {
-        HostVal::Inst(i) => {
-            if method == "toString" {
-                if i.def.kind == HostKind::Struct {
-                    return Ok(Value::Str(Arc::from(
-                        pr_to_string(&Value::Map(i.content.clone()), &PrintOpts::pr()).as_str(),
-                    )));
-                }
-                return Ok(Value::Str(Arc::from(fallback_str(h).as_str())));
-            }
-            if method == "hashCode" && matches!(i.def.kind, HostKind::Record | HostKind::Struct) {
-                let code = clj_value::hash_code(&Value::Map(i.content.clone()));
-                return Ok(Value::Int(i64::from(code)));
-            }
+        HostVal::Inst(_) => {
             if crate::classemu::surface_member_name(method) {
                 return Err(no_method(method, 0, class));
             }
