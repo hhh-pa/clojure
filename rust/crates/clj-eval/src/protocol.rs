@@ -555,11 +555,15 @@ pub(crate) struct ProtoIface {
 
 /// Resolve an interface-position symbol to its protocol (split for
 /// budget): a var whose root is a protocol map. Anything else
-/// (interfaces, missing) is not one.
+/// (interfaces, missing) is not one. The id resolves live-or-removed
+/// (a `resolve_in` target in the removed current namespace's
+/// tombstone still answers, like the JVM's detached `*ns*` object;
+/// T73 round 2).
 pub(crate) fn proto_of(eval: &mut Evaluator, sym: &Symbol) -> Option<ProtoIface> {
     let cur = eval.current_ns_name();
     let q = eval.registry.resolve_in(&cur, sym)?;
-    let id = eval.registry.lookup(&q)?;
+    let home = q.namespace()?;
+    let id = eval.registry.ns_live_or_removed(home)?.lookup(&q)?;
     let root = eval.deref_var(id, sym);
     as_protocol_map(&root).map(|m| ProtoIface { map: m.clone() })
 }

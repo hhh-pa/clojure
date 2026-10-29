@@ -145,10 +145,12 @@ pub(crate) fn is_public(reg: &SharedRegistry, id: u64) -> bool {
 /// qualified target and the var id. Refers yield their install-pinned
 /// id (the referred object survives re-interns, like the JVM); alias
 /// targets may dangle into tombstones, but real-namespace qualifiers
-/// must be live.
+/// must be live. Qualified symbols always resolve aliases-then-global
+/// (upstream `Compiler.namespaceFor` — no self-name shortcut, so a
+/// same-name alias wins and a removed home misses even for stale
+/// handles; T73 round 2).
 fn resolve_var_in(home: &Namespace, reg: &SharedRegistry, sym: &Symbol) -> Option<(Symbol, u64)> {
     match sym.namespace() {
-        Some(part) if part == home.name() => home.lookup(sym).map(|id| (sym.clone(), id)),
         Some(part) => resolve_qualified(home, reg, part, sym),
         None => {
             let q = Symbol::new(Some(home.name()), sym.name());
@@ -742,7 +744,9 @@ pub(crate) fn do_resolve(
         Value::Symbol(s) => s,
         v => return Err(cast_err(v, SYMBOL_CLASS)),
     };
-    // Handles pin their generation (stale ones resolve the tombstone).
+    // Handles pin their generation (stale ones resolve the tombstone
+    // for unqualified symbols; qualified ones go aliases-then-global
+    // per `resolve_var_in`, like upstream `namespaceFor`).
     let home = match pinned {
         Some(id) => eval.registry.ns_for_handle(ns_name, id),
         None => eval.registry.ns_live_or_removed(ns_name),
@@ -1745,7 +1749,7 @@ fn native_load_file(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nativ
     };
     let abs = absolutize(&path);
     // `Compiler.loadFile`: no `*ns*` isolation, no cycle guard —
-    // only `*file*`.
+    // only `*file*`. Returns the last value (nil when empty).
     match run_loaded(
         eval,
         Value::Str(Arc::from(abs.as_str())),
@@ -1753,7 +1757,7 @@ fn native_load_file(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nativ
         &text,
         false,
     ) {
-        Ok(_) => Ok(Value::Nil),
+        Ok(vals) => Ok(vals.last().cloned().unwrap_or(Value::Nil)),
         Err(e) => Err(source_to_native(eval, &abs, e)),
     }
 }
@@ -1765,9 +1769,10 @@ fn native_load_string(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nat
         v => return Err(cast_err(v, "java.lang.String")),
     };
     // `*file*` is nil and spans blame the empty source (probe36
-    // `file-loadstring`, `loadstring-errspan`).
+    // `file-loadstring`, `loadstring-errspan`). Returns the last
+    // value (nil when empty).
     match run_loaded(eval, Value::Nil, "", &text, false) {
-        Ok(_) => Ok(Value::Nil),
+        Ok(vals) => Ok(vals.last().cloned().unwrap_or(Value::Nil)),
         Err(e) => Err(source_to_native(eval, "", e)),
     }
 }

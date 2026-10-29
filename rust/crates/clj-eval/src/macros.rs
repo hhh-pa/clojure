@@ -144,7 +144,7 @@ pub(crate) fn lookup_macro(eval: &Evaluator, op: &Value) -> Result<Option<MacroR
             let home = target.namespace().unwrap_or(&cur);
             let id = eval
                 .registry
-                .get(home)
+                .ns_live_or_removed(home)
                 .and_then(|ns| ns.lookup(&target))
                 .expect("resolve_in guarantees the var id exists");
             (id, target)

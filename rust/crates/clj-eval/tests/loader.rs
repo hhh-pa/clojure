@@ -810,3 +810,23 @@ fn load_string_invalid_number() {
         ]
     );
 }
+
+#[test]
+fn t73_load_string_and_file_return_last_value() {
+    // Torture #73 finding 5: load-string/load-file return the last
+    // value (nil when empty), like the JVM.
+    let mut eval = boot();
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(load-string \"(def load-str-val 41) (inc load-str-val)\")"
+        ),
+        "42"
+    );
+    assert_eq!(run_last(&mut eval, "(load-string \"\")"), "nil");
+    assert_eq!(run_last(&mut eval, "(load-string \"   \")"), "nil");
+    let fx = Fixture::new("t73loadret");
+    fx.write("ret.clj", "(def load-file-val 10) (+ load-file-val 5)\n");
+    let rel = format!("{}/ret.clj", fx.dir.to_string_lossy().replace('\\', "/"));
+    assert_eq!(run_last(&mut eval, &format!("(load-file \"{rel}\")")), "15");
+}

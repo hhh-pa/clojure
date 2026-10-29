@@ -49,10 +49,14 @@ pub const TYPES_NATIVES: &[(&str, NativeFnPtr)] = &[
 ];
 
 /// Read a var root without interning (`None` is unresolvable).
+/// The id resolves live-or-removed (a `resolve_in` target in the
+/// removed current namespace's tombstone still answers, like the
+/// JVM's detached `*ns*` object; T73 round 2).
 fn var_root(eval: &Evaluator, sym: &Symbol) -> Option<Value> {
     let cur = eval.current_ns_name();
     let q = eval.registry.resolve_in(&cur, sym)?;
-    let id = eval.registry.lookup(&q)?;
+    let home = q.namespace()?;
+    let id = eval.registry.ns_live_or_removed(home)?.lookup(&q)?;
     Some(eval.deref_var(id, sym))
 }
 

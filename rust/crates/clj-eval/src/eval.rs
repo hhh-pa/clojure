@@ -752,9 +752,9 @@ impl Evaluator {
     pub fn eval(&mut self, expr: &Expr, env: &Env) -> Result<Value, Signal> {
         match expr {
             Expr::Literal(v) | Expr::Quote(v) => Ok(v.clone()),
-            Expr::VecLit(elems) => self.eval_vec(elems, env),
-            Expr::MapLit(pairs) => self.eval_map_lit(pairs, env),
-            Expr::SetLit(elems) => self.eval_set_lit(elems, env),
+            Expr::VecLit(elems, meta) => self.eval_vec(elems, meta.clone(), env),
+            Expr::MapLit(pairs, meta) => self.eval_map_lit(pairs, meta.clone(), env),
+            Expr::SetLit(elems, meta) => self.eval_set_lit(elems, meta.clone(), env),
             Expr::Global(sym) => {
                 let id = self.var_id(sym);
                 Ok(self.deref_var(id, sym))
@@ -881,36 +881,60 @@ impl Evaluator {
     fn var_id(&mut self, sym: &Symbol) -> u64 {
         self.registry
             .lookup(sym)
+            .or_else(|| self.tombstone_id(sym))
             .unwrap_or_else(|| self.registry.intern(sym))
     }
 
+    /// A var id through a removed namespace's tombstone: every
+    /// caller feeds analyzer-resolved targets, so a lookup miss
+    /// means the home went away after analysis — and the
+    /// analyzer-captured var (ids are never reused) still answers
+    /// from frozen mappings, like the JVM's compiled `Var`
+    /// reference, without resurrecting the name (T73 finding 4
+    /// round 2; live homes win by name inside
+    /// `ns_live_or_removed`, so live behavior is untouched).
+    fn tombstone_id(&self, sym: &Symbol) -> Option<u64> {
+        let ns = sym.namespace()?;
+        self.registry.ns_live_or_removed(ns)?.lookup(sym)
+    }
+
     /// A vector literal (elements evaluate left to right).
-    fn eval_vec(&mut self, elems: &[Expr], env: &Env) -> Result<Value, Signal> {
+    fn eval_vec(&mut self, elems: &[Expr], meta: Option<Map>, env: &Env) -> Result<Value, Signal> {
         let mut out = Vec::with_capacity(elems.len());
         for elem in elems {
             out.push(self.eval(elem, env)?);
         }
-        Ok(Value::Vector(Vector::from_vec(out)))
+        Ok(Value::Vector(Vector::from_vec(out).with_meta(meta)))
     }
 
     /// A map literal (keys and values evaluate left to right).
-    fn eval_map_lit(&mut self, pairs: &[(Expr, Expr)], env: &Env) -> Result<Value, Signal> {
+    fn eval_map_lit(
+        &mut self,
+        pairs: &[(Expr, Expr)],
+        meta: Option<Map>,
+        env: &Env,
+    ) -> Result<Value, Signal> {
         let mut out = new_map();
         for (k, v) in pairs {
             let key = self.eval(k, env)?;
             let val = self.eval(v, env)?;
             out = out.insert(key, val);
         }
-        Ok(Value::Map(out))
+        Ok(Value::Map(out.with_meta(meta)))
     }
 
     /// A set literal (elements evaluate left to right).
-    fn eval_set_lit(&mut self, elems: &[Expr], env: &Env) -> Result<Value, Signal> {
+    fn eval_set_lit(
+        &mut self,
+        elems: &[Expr],
+        meta: Option<Map>,
+        env: &Env,
+    ) -> Result<Value, Signal> {
         let mut out = clj_value::new_set();
         for elem in elems {
             out = out.insert(self.eval(elem, env)?);
         }
-        Ok(Value::Set(out))
+        Ok(Value::Set(out.with_meta(meta)))
     }
 
     /// `letfn`: extend the frame, fill each slot with its closure
@@ -1287,7 +1311,7 @@ impl Evaluator {
             fun,
             span,
         } = *parts;
-        let id = self.registry.intern(sym);
+        let id = self.registry.intern_def_target(sym);
         let closure = self.make_closure(fun, env);
         let dynamic = Self::dynamic_of(sym);
         let cur = self.current_ns_name();
@@ -1415,7 +1439,7 @@ impl Evaluator {
         span: Span,
         env: &Env,
     ) -> Result<Value, Signal> {
-        let id = self.registry.intern(sym);
+        let id = self.registry.intern_def_target(sym);
         let value = match init {
             Some(init) => Some(self.eval(init, env)?),
             None => None,

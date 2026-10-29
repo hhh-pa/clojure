@@ -123,10 +123,11 @@ pub enum CaseTest {
 pub enum Expr {
     /// Self-evaluating (atoms, quotes' values, `()`).
     Literal(Value),
-    /// Collection literals evaluate their elements.
-    VecLit(Vec<Expr>),
-    MapLit(Vec<(Expr, Expr)>),
-    SetLit(Vec<Expr>),
+    /// Collection literals evaluate their elements (carrying the
+    /// reader form's metadata, like the JVM).
+    VecLit(Vec<Expr>, Option<Map>),
+    MapLit(Vec<(Expr, Expr)>, Option<Map>),
+    SetLit(Vec<Expr>, Option<Map>),
     /// A resolved global (qualified `user/x`).
     Global(Symbol),
     /// A local slot index.
@@ -743,7 +744,7 @@ impl<'a> Analyzer<'a> {
         for elem in v.iter() {
             out.push(self.analyze(elem, span, false)?);
         }
-        Ok(Expr::VecLit(out))
+        Ok(Expr::VecLit(out, v.meta().cloned()))
     }
 
     /// A map literal (keys and values analyze left to right).
@@ -755,7 +756,7 @@ impl<'a> Analyzer<'a> {
                 self.analyze(val, span, false)?,
             ));
         }
-        Ok(Expr::MapLit(out))
+        Ok(Expr::MapLit(out, m.meta().cloned()))
     }
 
     /// A set literal (elements analyze left to right).
@@ -764,7 +765,7 @@ impl<'a> Analyzer<'a> {
         for elem in s.iter() {
             out.push(self.analyze(elem, span, false)?);
         }
-        Ok(Expr::SetLit(out))
+        Ok(Expr::SetLit(out, s.meta().cloned()))
     }
 
     /// A body: every form non-tail except the last.
@@ -809,7 +810,7 @@ impl<'a> Analyzer<'a> {
             let id = self
                 .eval
                 .registry
-                .get(home)
+                .ns_live_or_removed(home)
                 .and_then(|ns| ns.lookup(&target))
                 .expect("resolve_in guarantees the var id exists");
             if home != cur && crate::macros::is_private_var(self.eval, id) {
@@ -1109,7 +1110,7 @@ impl<'a> Analyzer<'a> {
         let id = self
             .eval
             .registry
-            .get(home)
+            .ns_live_or_removed(home)
             .and_then(|ns| ns.lookup(&target))
             .expect("resolve_in guarantees the var id exists");
         if crate::macros::is_macro_var(self.eval, id) {
@@ -1291,7 +1292,7 @@ impl<'a> Analyzer<'a> {
             .registry
             .qualify_in(&cur, sym)
             .with_meta(sym.meta().cloned());
-        self.eval.registry.intern(&qualified);
+        self.eval.registry.intern_def_target(&qualified);
         let init = init
             .map(|form| self.analyze(form, span, false).map(Box::new))
             .transpose()?;
@@ -2120,7 +2121,7 @@ impl<'a> Analyzer<'a> {
         fun.display = format!("{cur}/{}", name_sym.name());
         let qualified =
             Symbol::new(Some(&cur), name_sym.name()).with_meta(name_sym.meta().cloned());
-        self.eval.registry.intern(&qualified);
+        self.eval.registry.intern_def_target(&qualified);
         Ok(Expr::DefMacro {
             sym: qualified,
             doc,
@@ -2156,7 +2157,7 @@ impl<'a> Analyzer<'a> {
                 .registry
                 .qualify_in(&cur, sym)
                 .with_meta(sym.meta().cloned());
-            self.eval.registry.intern(&qualified);
+            self.eval.registry.intern_def_target(&qualified);
             syms.push(qualified);
         }
         Ok(Expr::Declare { syms, span })
