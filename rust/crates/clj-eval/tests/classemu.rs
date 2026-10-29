@@ -703,13 +703,25 @@ fn ns_imports_table() {
     let mut eval = boot();
     // i-ns-imports: explicit imports are listed alongside the 106
     // JVM defaults (#74); `Date` is not a default, so the explicit
-    // import adds the 107th entry (oracle i-ns-imports shape).
+    // import adds the 107th entry — full sorted key list, byte-equal
+    // to the oracle i-ns-imports row.
+    let mut want_all = IMPFRESH_KEYS.to_vec();
+    want_all.push("Date");
+    want_all.sort();
+    let want_list = format!(
+        "({})",
+        want_all
+            .iter()
+            .map(|k| format!("\"{k}\""))
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
     assert_eq!(
         run(
             &mut eval,
-            "(do (in-ns 'imp1) (clojure.core/refer-clojure) (import 'java.util.Date) [(count (ns-imports 'imp1)) (get (ns-imports 'imp1) 'Date)])"
+            "(do (in-ns 'imp1) (clojure.core/refer-clojure) (import 'java.util.Date) [(count (ns-imports 'imp1)) (get (ns-imports 'imp1) 'Date) (sort (map str (keys (ns-imports 'imp1))))])"
         ),
-        "[107 java.util.Date]"
+        format!("[107 java.util.Date {want_list}]")
     );
     // i-ns-imports-nsobj/val: `ns-imports` maps simple names to
     // classes (namespace objects coerce like symbols).
@@ -767,7 +779,7 @@ fn ns_imports_table() {
             &mut eval,
             "[(count (ns-imports 'impfresh)) (get (ns-imports 'impfresh) 'String) (get (ns-imports 'impfresh) 'ExceptionInfo) (get (ns-imports 'impfresh) 'Thread$State) (get (ns-imports 'impfresh) 'Compiler) (get (ns-imports 'impfresh) 'BigDecimal) (get (ns-imports 'impfresh) 'Callable) (get (ns-imports 'impfresh) 'Readable)]"
         ),
-        "[106 java.lang.String clojure.lang.ExceptionInfo java.lang.Thread$State clojure.lang.Compiler java.math.BigDecimal java.util.concurrent.Callable java.io.Readable]"
+        "[106 java.lang.String clojure.lang.ExceptionInfo java.lang.Thread$State clojure.lang.Compiler java.math.BigDecimal java.util.concurrent.Callable java.lang.Readable]"
     );
 }
 
@@ -796,15 +808,20 @@ fn default_imports() {
         "[106 java.lang.String]"
     );
     // Explicit-over-different-default throws `already refers to`
-    // (explicit does NOT silently win over defaults):
-    // `java.lang.Compiler` against the shadowed
-    // `clojure.lang.Compiler` default.
+    // (explicit does NOT silently win over defaults): a host type
+    // whose simple name hits a default. (`String` is unmapped in
+    // `box` first — defining over the default is the def-over-import
+    // compile error, same as the JVM.)
+    run(
+        &mut eval,
+        "(do (create-ns 'box) (in-ns 'box) (clojure.core/refer-clojure) (ns-unmap 'box 'String) (deftype String [x]) (clojure.core/in-ns 'user))",
+    );
     assert_eq!(
         uncaught(
             &mut eval,
-            "(do (in-ns 'impd3) (clojure.core/refer-clojure) (import 'java.lang.Compiler))"
+            "(do (in-ns 'impd3) (clojure.core/refer-clojure) (import 'box.String))"
         ),
-        "java.lang.IllegalStateException | Compiler already refers to: class clojure.lang.Compiler in namespace: impd3"
+        "java.lang.IllegalStateException | String already refers to: class java.lang.String in namespace: impd3"
     );
 }
 
@@ -1856,7 +1873,7 @@ const LATTICE_STATIC: &[(&str, &str)] = &[
     ),
     (
         "clojure.lang.LineNumberingPushbackReader",
-        "[false [\"java.io.PushbackReader\"] [\"java.io.Closeable\" \"java.io.FilterReader\" \"java.io.PushbackReader\" \"java.io.Readable\" \"java.io.Reader\" \"java.lang.AutoCloseable\" \"java.lang.Object\"]]",
+        "[false [\"java.io.PushbackReader\"] [\"java.io.Closeable\" \"java.io.FilterReader\" \"java.io.PushbackReader\" \"java.io.Reader\" \"java.lang.AutoCloseable\" \"java.lang.Object\" \"java.lang.Readable\"]]",
     ),
     (
         "clojure.lang.LispReader$ReaderException",
@@ -2023,7 +2040,7 @@ const LATTICE_STATIC: &[(&str, &str)] = &[
     ),
     (
         "java.io.FilterReader",
-        "[false [\"java.io.Reader\"] [\"java.io.Closeable\" \"java.io.Readable\" \"java.io.Reader\" \"java.lang.AutoCloseable\" \"java.lang.Object\"]]",
+        "[false [\"java.io.Reader\"] [\"java.io.Closeable\" \"java.io.Reader\" \"java.lang.AutoCloseable\" \"java.lang.Object\" \"java.lang.Readable\"]]",
     ),
     ("java.io.Flushable", "[true nil nil]"),
     (
@@ -2040,11 +2057,11 @@ const LATTICE_STATIC: &[(&str, &str)] = &[
     ),
     (
         "java.io.PushbackReader",
-        "[false [\"java.io.FilterReader\"] [\"java.io.Closeable\" \"java.io.FilterReader\" \"java.io.Readable\" \"java.io.Reader\" \"java.lang.AutoCloseable\" \"java.lang.Object\"]]",
+        "[false [\"java.io.FilterReader\"] [\"java.io.Closeable\" \"java.io.FilterReader\" \"java.io.Reader\" \"java.lang.AutoCloseable\" \"java.lang.Object\" \"java.lang.Readable\"]]",
     ),
     (
         "java.io.Reader",
-        "[false [\"java.lang.Object\" \"java.io.Readable\" \"java.io.Closeable\"] [\"java.io.Closeable\" \"java.io.Readable\" \"java.lang.AutoCloseable\" \"java.lang.Object\"]]",
+        "[false [\"java.lang.Object\" \"java.lang.Readable\" \"java.io.Closeable\"] [\"java.io.Closeable\" \"java.lang.AutoCloseable\" \"java.lang.Object\" \"java.lang.Readable\"]]",
     ),
     ("java.io.Serializable", "[true nil nil]"),
     (
@@ -2150,7 +2167,7 @@ const LATTICE_STATIC: &[(&str, &str)] = &[
         "[false [\"java.lang.IllegalArgumentException\"] [\"java.io.Serializable\" \"java.lang.Exception\" \"java.lang.IllegalArgumentException\" \"java.lang.Object\" \"java.lang.RuntimeException\" \"java.lang.Throwable\"]]",
     ),
     ("java.lang.Object", "[false nil nil]"),
-    ("java.io.Readable", "[true nil nil]"),
+    ("java.lang.Readable", "[true nil nil]"),
     (
         "java.lang.ReflectiveOperationException",
         "[false [\"java.lang.Exception\"] [\"java.io.Serializable\" \"java.lang.Exception\" \"java.lang.Object\" \"java.lang.Throwable\"]]",
@@ -2327,9 +2344,7 @@ fn lattice_static_rows() {
 // transcription + wiring against drift. `supers` is derived by the
 // already-pinned closure walk, so the loop pins `[isInterface
 // ordered-bases]`; the spot checks below pin `supers` over each new
-// closure chain. `java.lang.Compiler` is excluded from the loop
-// (importing it throws by design — shadowed default) and pinned via
-// unmap instead.
+// closure chain, plus the unmap-then-import host-type path.
 const LATTICE_DEFAULTS: &[(&str, &str)] = &[
     ("clojure.asm.Opcodes", "[true nil]"),
     (
@@ -2344,7 +2359,6 @@ const LATTICE_DEFAULTS: &[(&str, &str)] = &[
         "java.lang.AbstractStringBuilder",
         "[false [\"java.lang.Object\" \"java.lang.Appendable\" \"java.lang.CharSequence\"]]",
     ),
-    ("java.lang.AnnotatedElement", "[true nil]"),
     (
         "java.lang.ArrayStoreException",
         "[false [\"java.lang.RuntimeException\"]]",
@@ -2355,7 +2369,7 @@ const LATTICE_DEFAULTS: &[(&str, &str)] = &[
     ),
     (
         "java.lang.Byte",
-        "[false [\"java.lang.Number\" \"java.lang.Comparable\" \"java.lang.constant.Constable\" \"java.lang.constant.ConstantDesc\"]]",
+        "[false [\"java.lang.Number\" \"java.lang.Comparable\" \"java.lang.constant.Constable\"]]",
     ),
     (
         "java.lang.ClassCircularityError",
@@ -2397,7 +2411,7 @@ const LATTICE_DEFAULTS: &[(&str, &str)] = &[
     ),
     (
         "java.lang.IllegalCallerException",
-        "[false [\"java.lang.SecurityException\"]]",
+        "[false [\"java.lang.RuntimeException\"]]",
     ),
     (
         "java.lang.IllegalMonitorStateException",
@@ -2437,6 +2451,7 @@ const LATTICE_DEFAULTS: &[(&str, &str)] = &[
     ),
     ("java.lang.Math", "[false [\"java.lang.Object\"]]"),
     ("java.lang.ModuleLayer", "[false [\"java.lang.Object\"]]"),
+    ("java.lang.NamedPackage", "[false [\"java.lang.Object\"]]"),
     (
         "java.lang.NoClassDefFoundError",
         "[false [\"java.lang.LinkageError\"]]",
@@ -2467,11 +2482,14 @@ const LATTICE_DEFAULTS: &[(&str, &str)] = &[
     ),
     (
         "java.lang.Package",
-        "[false [\"java.lang.Object\" \"java.lang.AnnotatedElement\"]]",
+        "[false [\"java.lang.NamedPackage\" \"java.lang.reflect.AnnotatedElement\"]]",
     ),
     ("java.lang.Process", "[false [\"java.lang.Object\"]]"),
     ("java.lang.ProcessBuilder", "[false [\"java.lang.Object\"]]"),
-    ("java.lang.ProcessHandle", "[true nil]"),
+    (
+        "java.lang.ProcessHandle",
+        "[true [\"java.lang.Comparable\"]]",
+    ),
     ("java.lang.Runtime", "[false [\"java.lang.Object\"]]"),
     (
         "java.lang.RuntimePermission",
@@ -2487,7 +2505,7 @@ const LATTICE_DEFAULTS: &[(&str, &str)] = &[
     ),
     (
         "java.lang.Short",
-        "[false [\"java.lang.Number\" \"java.lang.Comparable\" \"java.lang.constant.Constable\" \"java.lang.constant.ConstantDesc\"]]",
+        "[false [\"java.lang.Number\" \"java.lang.Comparable\" \"java.lang.constant.Constable\"]]",
     ),
     (
         "java.lang.StackOverflowError",
@@ -2501,11 +2519,11 @@ const LATTICE_DEFAULTS: &[(&str, &str)] = &[
     ("java.lang.StrictMath", "[false [\"java.lang.Object\"]]"),
     (
         "java.lang.StringBuffer",
-        "[false [\"java.lang.AbstractStringBuilder\" \"java.io.Serializable\" \"java.lang.Comparable\" \"java.lang.CharSequence\"]]",
+        "[false [\"java.lang.AbstractStringBuilder\" \"java.lang.Appendable\" \"java.io.Serializable\" \"java.lang.Comparable\" \"java.lang.CharSequence\"]]",
     ),
     (
         "java.lang.StringBuilder",
-        "[false [\"java.lang.AbstractStringBuilder\" \"java.io.Serializable\" \"java.lang.Comparable\" \"java.lang.CharSequence\"]]",
+        "[false [\"java.lang.AbstractStringBuilder\" \"java.lang.Appendable\" \"java.io.Serializable\" \"java.lang.Comparable\" \"java.lang.CharSequence\"]]",
     ),
     (
         "java.lang.SuppressWarnings",
@@ -2576,7 +2594,7 @@ fn lattice_defaults_rows() {
     for (fqn, want) in [
         (
             "java.lang.StringBuffer",
-            "[false [\"java.lang.AbstractStringBuilder\" \"java.io.Serializable\" \"java.lang.Comparable\" \"java.lang.CharSequence\"] [\"java.io.Serializable\" \"java.lang.AbstractStringBuilder\" \"java.lang.Appendable\" \"java.lang.CharSequence\" \"java.lang.Comparable\" \"java.lang.Object\"]]",
+            "[false [\"java.lang.AbstractStringBuilder\" \"java.lang.Appendable\" \"java.io.Serializable\" \"java.lang.Comparable\" \"java.lang.CharSequence\"] [\"java.io.Serializable\" \"java.lang.AbstractStringBuilder\" \"java.lang.Appendable\" \"java.lang.CharSequence\" \"java.lang.Comparable\" \"java.lang.Object\"]]",
         ),
         (
             "java.lang.RuntimePermission",
@@ -2588,7 +2606,7 @@ fn lattice_defaults_rows() {
         ),
         (
             "java.lang.Package",
-            "[false [\"java.lang.Object\" \"java.lang.AnnotatedElement\"] [\"java.lang.AnnotatedElement\" \"java.lang.Object\"]]",
+            "[false [\"java.lang.NamedPackage\" \"java.lang.reflect.AnnotatedElement\"] [\"java.lang.NamedPackage\" \"java.lang.Object\" \"java.lang.reflect.AnnotatedElement\"]]",
         ),
         (
             "java.lang.Deprecated",
@@ -2602,20 +2620,24 @@ fn lattice_defaults_rows() {
         let src = format!("({lat} (clojure.core/__import* \"{fqn}\"))");
         assert_eq!(run(&mut eval, &src), want, "{fqn}");
     }
-    // The shadowed `java.lang.Compiler` edge row: unmap the default,
-    // then the import succeeds and answers `[Object]`/`[Object]`.
+    // Unmapping a default clears the name: the host-type import
+    // then succeeds and answers the HostDef rule (`[Object, IType]`).
+    run(
+        &mut eval,
+        "(do (create-ns 'box) (in-ns 'box) (clojure.core/refer-clojure) (ns-unmap 'box 'String) (deftype String [x]) (clojure.core/in-ns 'user))",
+    );
     assert_eq!(
         run(
             &mut eval,
             &format!(
-                "(do (in-ns 'impce) (clojure.core/refer-clojure) (ns-unmap 'impce 'Compiler) (import 'java.lang.Compiler) ({lat} (resolve 'Compiler)))"
+                "(do (in-ns 'impce) (clojure.core/refer-clojure) (ns-unmap 'impce 'String) (import 'box.String) ({lat} (resolve 'String)))"
             ),
         ),
-        "[false [\"java.lang.Object\"] [\"java.lang.Object\"]]"
+        "[false [\"java.lang.Object\" \"clojure.lang.IType\"] [\"clojure.lang.IType\" \"java.lang.Object\"]]"
     );
 }
 
-// The four tabled-but-unprobed static rows (§1.3): the two
+// The four pre-#74 tabled-but-unprobed static rows (§1.3): the two
 // import-only rows (`Calendar`, `sql.Date` — ancestries verified
 // live on the JVM) plus the S16 `NoSuchElementException` variant
 // (live-JVM ancestry) and the synthesized nonexistent

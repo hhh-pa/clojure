@@ -15,7 +15,8 @@
 //!
 //! The lattice is one static table (transcribed verbatim from
 //! `docs/zero-oos-s16-classemu/probes/lattice.out`, plus the five
-//! documented synthetic rows and the two unprobed import-only rows)
+//! documented synthetic rows, the two unprobed import-only rows,
+//! and the 72 #74 rows)
 //! with four dynamic rules: the HostDef
 //! rule (host types and their claimed names), the fn rule (closures
 //! by rest-presence, natives unconditionally `AFunction`), the future
@@ -72,8 +73,8 @@ struct StaticRow {
 /// nonexistent MissingFormatConversionException, and
 /// NoSuchElementException for the S16 getFirst/getLast variant),
 /// the two unprobed import-only rows (`java.util.Calendar`,
-/// `java.sql.Date`), and the 74 #74 rows (68 default imports +
-/// 6 closure, JDK 21 declarations).
+/// `java.sql.Date`), and the 72 #74 rows (65 defaults + 7 closure,
+/// JDK 21 declarations).
 const STATIC_LATTICE: &[StaticRow] = &[
     StaticRow {
         name: "clojure.core.Eduction",
@@ -944,7 +945,11 @@ const STATIC_LATTICE: &[StaticRow] = &[
     StaticRow {
         name: "java.io.Reader",
         iface: false,
-        bases: &["java.lang.Object", "java.io.Readable", "java.io.Closeable"],
+        bases: &[
+            "java.lang.Object",
+            "java.lang.Readable",
+            "java.io.Closeable",
+        ],
     },
     StaticRow {
         name: "java.io.Serializable",
@@ -1140,7 +1145,7 @@ const STATIC_LATTICE: &[StaticRow] = &[
         bases: &[],
     },
     StaticRow {
-        name: "java.io.Readable",
+        name: "java.lang.Readable",
         iface: true,
         bases: &[],
     },
@@ -1506,7 +1511,6 @@ const STATIC_LATTICE: &[StaticRow] = &[
             "java.lang.Number",
             "java.lang.Comparable",
             "java.lang.constant.Constable",
-            "java.lang.constant.ConstantDesc",
         ],
     },
     StaticRow {
@@ -1533,14 +1537,6 @@ const STATIC_LATTICE: &[StaticRow] = &[
         name: "java.lang.CloneNotSupportedException",
         iface: false,
         bases: &["java.lang.Exception"],
-    },
-    // Import-edge row (not a default): `java.lang.Compiler` is
-    // shadowed by the `clojure.lang.Compiler` default, so importing
-    // it throws `already refers to` — JVM-exact via this row.
-    StaticRow {
-        name: "java.lang.Compiler",
-        iface: false,
-        bases: &["java.lang.Object"],
     },
     StaticRow {
         name: "java.lang.Deprecated",
@@ -1585,7 +1581,7 @@ const STATIC_LATTICE: &[StaticRow] = &[
     StaticRow {
         name: "java.lang.IllegalCallerException",
         iface: false,
-        bases: &["java.lang.SecurityException"],
+        bases: &["java.lang.RuntimeException"],
     },
     StaticRow {
         name: "java.lang.IllegalMonitorStateException",
@@ -1685,7 +1681,10 @@ const STATIC_LATTICE: &[StaticRow] = &[
     StaticRow {
         name: "java.lang.Package",
         iface: false,
-        bases: &["java.lang.Object", "java.lang.AnnotatedElement"],
+        bases: &[
+            "java.lang.NamedPackage",
+            "java.lang.reflect.AnnotatedElement",
+        ],
     },
     StaticRow {
         name: "java.lang.Process",
@@ -1700,7 +1699,7 @@ const STATIC_LATTICE: &[StaticRow] = &[
     StaticRow {
         name: "java.lang.ProcessHandle",
         iface: true,
-        bases: &[],
+        bases: &["java.lang.Comparable"],
     },
     StaticRow {
         name: "java.lang.Runtime",
@@ -1729,7 +1728,6 @@ const STATIC_LATTICE: &[StaticRow] = &[
             "java.lang.Number",
             "java.lang.Comparable",
             "java.lang.constant.Constable",
-            "java.lang.constant.ConstantDesc",
         ],
     },
     StaticRow {
@@ -1757,6 +1755,7 @@ const STATIC_LATTICE: &[StaticRow] = &[
         iface: false,
         bases: &[
             "java.lang.AbstractStringBuilder",
+            "java.lang.Appendable",
             "java.io.Serializable",
             "java.lang.Comparable",
             "java.lang.CharSequence",
@@ -1767,6 +1766,7 @@ const STATIC_LATTICE: &[StaticRow] = &[
         iface: false,
         bases: &[
             "java.lang.AbstractStringBuilder",
+            "java.lang.Appendable",
             "java.io.Serializable",
             "java.lang.Comparable",
             "java.lang.CharSequence",
@@ -1856,11 +1856,11 @@ const STATIC_LATTICE: &[StaticRow] = &[
         iface: true,
         bases: &[],
     },
-    // #74 closure: Package base (JDK 21 declaration).
+    // #74 closure: Package superclass (JDK 21 declaration).
     StaticRow {
-        name: "java.lang.AnnotatedElement",
-        iface: true,
-        bases: &[],
+        name: "java.lang.NamedPackage",
+        iface: false,
+        bases: &["java.lang.Object"],
     },
     // #74 closure: StringBuffer/Builder superclass (JDK 21 declaration).
     StaticRow {
@@ -1916,11 +1916,10 @@ fn static_row(name: &str) -> Option<&'static StaticRow> {
 }
 
 /// The JVM default imports (`RT.DEFAULT_IMPORTS`, #74) in upstream
-/// order. Six keys are not `java.lang` (name resolution inside
+/// order. Five keys are not `java.lang` (name resolution inside
 /// `RT.java`): the `java.math` pair (single-type imports), `Callable`
 /// (`j.u.c`, single-type import — the only `Callable` in the JDK),
-/// `Readable` (`java.io`, star import — no `java.lang.Readable`
-/// exists), `Compiler` (`clojure.lang`, same package wins), and
+/// `Compiler` (`clojure.lang`, same package wins), and
 /// `ExceptionInfo` (explicit). Keys are oracle-pinned (`import.out`
 /// i-defaults); every name is tabled, so seeding resolves through
 /// `static_class` with no evaluator needed.
@@ -1996,7 +1995,7 @@ const DEFAULT_IMPORTS: &[&str] = &[
     "java.lang.Process",
     "java.lang.ProcessBuilder",
     "java.lang.ProcessHandle",
-    "java.io.Readable",
+    "java.lang.Readable",
     "java.lang.ReflectiveOperationException",
     "java.lang.Runnable",
     "java.lang.Runtime",

@@ -195,25 +195,16 @@ the JVM by the §2.6 method. More exotic `NodeSeq`
 variants stay unmapped (follow-up if ever needed,
 §2.2).
 
-Default-import rows (#74, 65 + edge + 7 closure): the
-106 `RT.DEFAULT_IMPORTS` names must all resolve, so
-the 65 with no oracle row are tabled from JDK 21 class
-declarations (the same source the oracle rows agree
-with where they overlap), plus 7 closure rows
-(`Annotation`, `AnnotatedElement`,
+Default-import rows (#74, 65 defaults + 7 closure):
+the 106 `RT.DEFAULT_IMPORTS` names must all resolve,
+so the 65 with no oracle row are tabled from JDK 21
+class declarations (the same source the oracle rows
+agree with where they overlap), plus 7 closure rows
+(`Annotation`, `NamedPackage`,
 `AbstractStringBuilder`, the `Permission` chain,
-`Opcodes`) and the `java.lang.Compiler` import-edge
-row (shadowed by the `clojure.lang.Compiler` default
-— importing it throws, JVM-exact). `lattice_defaults_rows`
-pins each `[isInterface, bases]` plus `supers` over
-each new closure chain.
-
-`Readable` correction (#74): the probe named
-`java.lang.Readable`, which does not exist (a JVM run
-throws CNFE there); the row, its `Reader` base, the 5
-`lattice.out` rows, and the mirror entries now say
-`java.io.Readable`, the star-import resolution `RT.java`
-uses.
+`Opcodes`). `lattice_defaults_rows` pins each
+`[isInterface, bases]` plus `supers` over each new
+closure chain.
 
 Synthetic rows (2, port-only, documented here — the
 oracle cannot produce them):
@@ -553,11 +544,10 @@ Behaviors:
   distinction): importing the same class is a no-op,
   importing a different class over a default throws
   `already refers to` exactly like an explicit conflict
-  (`default_imports` pins `java.lang.Compiler` over the
-  shadowed `clojure.lang.Compiler` default). Six keys
-  are not `java.lang` (name resolution inside `RT.java`):
-  the `java.math` pair, `j.u.c.Callable`,
-  `java.io.Readable`, `clojure.lang.Compiler`,
+  (`default_imports` pins a host `box.String` over the
+  `String` default). Five keys are not `java.lang`
+  (name resolution inside `RT.java`): the `java.math`
+  pair, `j.u.c.Callable`, `clojure.lang.Compiler`,
   `clojure.lang.ExceptionInfo`.
 - `ns` keeps rejecting `:import` (the `macros.rs`
   `ns_errors` pin, §2.3): only the direct macro exists
@@ -1139,11 +1129,9 @@ This spec task edits no matrix rows.
    the 106 `RT.DEFAULT_IMPORTS`, flat like upstream, so
    explicit-over-default conflicts throw and
    `(clojure.core/instance? String 1)` is runtime
-   `false`. The six non-`java.lang` mappings follow
-   name resolution inside `RT.java` — never
-   `java.lang`-prefixed by assumption (that assumption
-   produced the `java.lang.Readable` phantom the same
-   change corrects, §1.3).
+   `false`. The five non-`java.lang` mappings follow
+   name resolution inside `RT.java` (single-type
+   imports, same package, explicit).
 5. **No auto-import from `deftype` etc. (vs JVM).**
    The JVM maps the type name to the class; the port
    interns a descriptor var (existing pins:
