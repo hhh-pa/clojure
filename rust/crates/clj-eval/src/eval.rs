@@ -775,13 +775,7 @@ impl Evaluator {
                 init,
                 span,
             } => self.eval_def(sym, doc.clone(), init.as_deref(), *span, env),
-            Expr::If { test, then, els } => {
-                if self.eval(test, env)?.is_truthy() {
-                    self.eval(then, env)
-                } else {
-                    self.eval(els, env)
-                }
-            }
+            Expr::If { test, then, els } => self.eval_if(test, then, els, env),
             Expr::Do(exprs) => self.eval_body(exprs, env),
             Expr::Let { bindings, body } => {
                 let env = self.bind_all(bindings, env)?;
@@ -1412,6 +1406,22 @@ impl Evaluator {
             value = self.eval(expr, env)?;
         }
         Ok(value)
+    }
+
+    /// `if`: the taken branch (split from [`eval`](Self::eval)
+    /// for the complexity budget).
+    fn eval_if(
+        &mut self,
+        test: &Expr,
+        then: &Expr,
+        els: &Expr,
+        env: &Env,
+    ) -> Result<Value, Signal> {
+        if self.eval(test, env)?.is_truthy() {
+            self.eval(then, env)
+        } else {
+            self.eval(els, env)
+        }
     }
 
     /// Bind `let`/`loop` pairs left to right (each init sees the
