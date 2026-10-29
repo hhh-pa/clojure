@@ -12,9 +12,12 @@
 //! function per `defn` (`extern` runtime helpers per primitive
 //! call); `@main` takes C `argc`/`argv`, drives the tops,
 //! invokes `-main` with the argv list when defined, and returns
-//! 0. Locals clone on every use; all frame slots drop at scope
-//! end; fallible calls null-check into an abort block that
-//! calls libc `exit(1)`.
+//! 0. Locals clone on every use; non-param frame slots start
+//! nil (a `let` in an untaken branch never stores, so without
+//! the init the scope-end drop would free stack garbage);
+//! `let` drops the slot's old box before storing; all frame
+//! slots drop at scope end; fallible calls null-check into an
+//! abort block that calls libc `exit(1)`.
 //!
 //! Builder calls use `.expect()`: the IR is correct by
 //! construction (verified by every snapshot test), so a builder
@@ -251,8 +254,20 @@ impl<'ctx> Lower<'ctx> {
         self.call_void(self.decls.drop_, &[value.into()]);
     }
 
+    /// Nil-initialize every non-param frame slot (params are
+    /// stored by the caller path below; a `let` slot in an
+    /// untaken branch is never stored, so the init is what makes
+    /// every slot a valid owned box on every path).
+    fn init_slots(&self, slots: &[PointerValue<'ctx>], params: usize) {
+        for slot in &slots[params..] {
+            let nil = self.call_ptr(self.decls.nil, &[]);
+            self.builder.build_store(*slot, nil).expect("store nil");
+        }
+    }
+
     /// Drop every frame slot (all hold valid owned boxes: params
-    /// plus one store per `let` binding, never reused).
+    /// stored at entry, `let` slots nil-initialized at entry plus
+    /// one store per executed binding, never reused).
     fn drop_slots(&self, slots: &[PointerValue<'ctx>]) {
         for slot in slots {
             let value = self
@@ -416,6 +431,12 @@ impl<'ctx> Lower<'ctx> {
             SubsetExpr::Let { bindings, body } => {
                 for (slot, init) in bindings {
                     let value = self.lower_expr(func, slots, init);
+                    let old = self
+                        .builder
+                        .build_load(self.ptr, slots[*slot], "old")
+                        .expect("load old")
+                        .into_pointer_value();
+                    self.call_drop(old);
                     self.builder
                         .build_store(slots[*slot], value)
                         .expect("store let");
@@ -591,6 +612,7 @@ impl<'ctx> Lower<'ctx> {
                 .into_pointer_value();
             self.builder.build_store(*slot, param).expect("store param");
         }
+        self.init_slots(&slots, def.arity);
         let retval = self.lower_expr(func, &slots, &def.body);
         self.drop_slots(&slots);
         self.builder.build_return(Some(&retval)).expect("return");
@@ -618,6 +640,7 @@ impl<'ctx> Lower<'ctx> {
                     .expect("alloca slot"),
             );
         }
+        self.init_slots(&slots, 0);
         for stmt in main {
             let value = self.lower_expr(func, &slots, stmt);
             self.call_drop(value);
@@ -803,6 +826,20 @@ mod tests {
         lower.module.verify().expect("verify");
         let ir = lower.module.print_to_string().to_string();
         assert!(ir.contains("call ptr @rt_nil"), "{ir}");
+    }
+
+    #[test]
+    fn conditional_let_slots_nil_init_and_drop_old() {
+        // T73 item 9: a `let` in an untaken branch never stores,
+        // so every non-param slot starts nil (else the scope-end
+        // drop frees stack garbage) and each binding drops the
+        // slot's old box before storing.
+        let ir = compile_ir("(defn f [c] (if c (let [x 1] x) 2))");
+        assert_eq!(ir.match_indices("call ptr @rt_nil").count(), 1, "{ir}");
+        assert_eq!(ir.match_indices("call void @rt_drop").count(), 3, "{ir}");
+        let ir = compile_ir("(print (if false (let [x 1] x) 2))");
+        assert_eq!(ir.match_indices("call ptr @rt_nil").count(), 1, "{ir}");
+        assert_eq!(ir.match_indices("call void @rt_drop").count(), 3, "{ir}");
     }
 
     #[test]

@@ -112,6 +112,32 @@ fn emit_covers_arity_branches_through_the_rlib() {
 }
 
 #[test]
+fn emit_covers_conditional_let_slot_init_through_the_rlib() {
+    // T73 item 9: the unit snapshot pins the shape; emitting here
+    // executes the rlib copy of the slot nil-init and the `let`
+    // drop-old (the libtest copy's profile is dropped as
+    // mismatched on merge).
+    let dir = tmp("let-init");
+    std::fs::create_dir_all(&dir).expect("tmp dir");
+    let ir = dir.join("f.ll");
+    compile_str(
+        "(defn f [c] (if c (let [x 1] x) 2)) (print (f false) (if true 1 (let [y 2] y)))",
+        "f.clj",
+        &dir.join("f"),
+        &EmitOptions {
+            emit_ir: Some(ir.clone()),
+            emit_obj: None,
+        },
+        &no_link(),
+    )
+    .expect("emit conditional lets");
+    let text = std::fs::read_to_string(&ir).expect("read ir");
+    assert!(text.contains("call ptr @rt_nil"), "{text}");
+    assert!(text.contains("call void @rt_drop"), "{text}");
+    std::fs::remove_dir_all(&dir).expect("cleanup");
+}
+
+#[test]
 fn out_of_subset_names_the_form() {
     let err = compile_str(
         "(def x 1)",

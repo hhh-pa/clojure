@@ -127,6 +127,19 @@ fn linked_binary_runs_control_flow() {
 }
 
 #[test]
+fn linked_binary_survives_untaken_let_branches() {
+    // T73 item 9: a `let` in an untaken branch never stores — the
+    // scope-end drop must see nil-inited slots, not stack garbage
+    // (pre-fix: correct stdout, then SIGABRT/SIGSEGV in teardown).
+    let (stdout, stderr, code) = build_and_run(
+        "cond-let",
+        "(defn f [c] (if c (let [x 1] x) (let [y 2] y))) \
+         (print (f false) (f true) (if false (let [z 3] z) 4))",
+    );
+    assert_eq!((stdout.as_str(), stderr.as_str(), code), ("2 1 4", "", 0));
+}
+
+#[test]
 fn linked_binary_reports_runtime_errors() {
     let (stdout, stderr, code) = build_and_run("divzero", "(print (quot 1 0))");
     assert_eq!(stdout, "");
