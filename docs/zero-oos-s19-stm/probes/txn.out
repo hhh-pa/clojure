@@ -1,0 +1,70 @@
+t-body-value 2
+t-empty nil
+t-commit [1 15]
+t-atomic-abort [:caught 0 10]
+t-deref-local 5
+t-retry-invisible [:done 1]
+t-alter-returns 3
+t-refset-returns 9
+t-commute-returns 5
+t-commute-reruns [1 2]
+t-commute-order [10 [:f :g :f :g]]
+t-commute-alter 11
+t-commute-alter-rev THROW java.lang.IllegalStateException|"Can't set after commute"
+t-commute-refset 11
+t-commute-refset-rev ["Can't set after commute" 0]
+t-commute-set-immediate [:t 0 0]
+t-commute-abort-atomic [:t 0 0]
+t-commute-ensure 1
+t-ensure-commute 1
+t-ensure-returns 7
+t-nested [2 2]
+t-nested-join 1
+t-validator-calls [0 2]
+t-watch-commit [[0 2]]
+t-watch-order [:b :a]
+t-watch-order-atom [:b :a]
+t-watch-abort []
+t-addwatch-in-txn [[0 1]]
+t-setvalidator-in-txn [[:thrown "java.lang.IllegalStateException" "Invalid reference state"] 0]
+t-send-defer [5 5]
+t-send-returns-agent true
+t-sendoff-defer [5 5]
+t-send-abort [:caught [0 0]]
+t-sendvia-defer [5 5]
+t-send-badagent-in-txn THROW java.lang.ClassCastException|"class clojure.lang.Keyword cannot be cast to class clojure.lang.Agent (clojure.lang.Keyword and clojure.lang.Agent are in unnamed module of loader 'app')"
+t-await-noargs-in THROW java.lang.IllegalStateException|"await in transaction"
+t-await-noargs-out nil
+t-io-in THROW java.lang.IllegalStateException|"I/O in transaction"
+t-io-out :x
+t-io-multi 3
+t-io-empty nil
+t-sync-in 1
+t-sync-out :x
+t-sync-empty nil
+t-sync-arity0 THROW clojure.lang.ArityException|"Wrong number of args (0) passed to: clojure.core/sync"
+t-sync-flags-ignored [:body 0]
+t-sync-flags-need-not-be-nil :x
+t-sync-runs-tx THROW java.lang.IllegalStateException|"I/O in transaction"
+t-watch-order3 [:c :b :a]
+t-watch-order-shuffled [:c :b :a]
+t-watch-shuffled2 [:c :b :a]
+t-watch-keys4 [:c :b :d :a]
+t-watch-strkeys ["a" "b" "c"]
+t-watch-mixedkeys ["s" 1 :a]
+t-watch-samefn [:c :b :a]
+t-watch-keys8 [:k8 :k5 :k7 :k6 :k3 :k4 :k1 :k2]
+t-key-hashes [-2123407586 1482224470 -1763192079 1972142424 952658428 1429301820 1937862580 -899960619 -1676406075 171900492 1908390374 -885605405]
+t-bound-fn 1
+t-future-no-convey :no-tx
+t-await-in-dosync THROW java.lang.IllegalStateException|"await in transaction"
+t-awaitfor-in-dosync THROW java.lang.IllegalStateException|"await-for in transaction"
+t-await-action-tx "await in transaction"
+t-awaitfor-action-tx "await-for in transaction"
+t-invoke-in-txn 50
+t-addwatch-returns true
+t-removewatch-returns [true 1]
+t-shape-dosync (clojure.core/sync nil (alter r inc))
+t-shape-sync (. clojure.lang.LockingTransaction (clojure.core/runInTransaction (clojure.core/fn [] (alter r inc))))
+t-shape-io (if (clojure.lang.LockingTransaction/isRunning) (throw (new java.lang.IllegalStateException "I/O in transaction")) (do :x))
+t-shape-io-multi (if (clojure.lang.LockingTransaction/isRunning) (throw (new java.lang.IllegalStateException "I/O in transaction")) (do 1 2 3))

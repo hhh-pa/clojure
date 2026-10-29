@@ -39,7 +39,7 @@ use num_traits::ToPrimitive;
 
 use crate::{
     Agent, Array, Atom, ClassVal, Delay, ExtensionValue, Future, HostInst, HostKind, HostVal,
-    Keyword, MultiFn, PrimitiveVector, Promise, Symbol, Throwable, Transient, Unbound, Var,
+    Keyword, MultiFn, PrimitiveVector, Promise, Ref, Symbol, Throwable, Transient, Unbound, Var,
     Volatile, host_eq,
 };
 
@@ -863,6 +863,8 @@ pub enum Value {
     Agent(Agent),
     /// A volatile (S10): identity equality (shared cell — no meta).
     Volatile(Volatile),
+    /// A ref (S19): identity equality (shared cell, equal meta).
+    Ref(Ref),
     /// A host-defined value behind the [`ExtensionValue`] trait (S4).
     Extension(Arc<dyn ExtensionValue>),
     /// A port-defined type descriptor or instance (S-typechain):
@@ -1187,6 +1189,7 @@ fn value_eq_rest(a: &Value, b: &Value) -> bool {
         (Value::Promise(a), Value::Promise(b)) => cell_meta_eq(a.same_cell(b), a.meta(), b.meta()),
         (Value::Agent(a), Value::Agent(b)) => cell_meta_eq(a.same_cell(b), a.meta(), b.meta()),
         (Value::Volatile(a), Value::Volatile(b)) => a.same_cell(b),
+        (Value::Ref(a), Value::Ref(b)) => cell_meta_eq(a.same_cell(b), a.meta(), b.meta()),
         (Value::Extension(a), Value::Extension(b)) => a.dyn_eq(&**b),
         // Classes compare by name alone (same name is `=`, whatever
         // the import path that produced the value).
@@ -1424,32 +1427,31 @@ fn hash_value_mid<H: Hasher>(v: &Value, state: &mut H) {
     }
 }
 
-fn hash_value_rest<H: Hasher>(v: &Value, state: &mut H) {
+/// The tag byte plus minted id for id-hashed cells (atoms,
+/// delays, futures, promises, agents, volatiles, refs — each
+/// hashes its tag plus its id), or `None` for every other
+/// variant (split from [`hash_value_rest`] for the complexity
+/// budget, like [`hash_value_scalars`]).
+fn id_cell_tag(v: &Value) -> Option<(u8, u64)> {
     match v {
-        Value::Atom(a) => {
-            state.write_u8(18);
-            state.write_u64(a.id());
-        }
-        Value::Delay(d) => {
-            state.write_u8(19);
-            state.write_u64(d.id());
-        }
-        Value::Future(f) => {
-            state.write_u8(20);
-            state.write_u64(f.id());
-        }
-        Value::Promise(p) => {
-            state.write_u8(21);
-            state.write_u64(p.id());
-        }
-        Value::Agent(a) => {
-            state.write_u8(22);
-            state.write_u64(a.id());
-        }
-        Value::Volatile(v) => {
-            state.write_u8(27);
-            state.write_u64(v.id());
-        }
+        Value::Atom(a) => Some((18, a.id())),
+        Value::Delay(d) => Some((19, d.id())),
+        Value::Future(f) => Some((20, f.id())),
+        Value::Promise(p) => Some((21, p.id())),
+        Value::Agent(a) => Some((22, a.id())),
+        Value::Volatile(v) => Some((27, v.id())),
+        Value::Ref(r) => Some((28, r.id())),
+        _ => None,
+    }
+}
+
+fn hash_value_rest<H: Hasher>(v: &Value, state: &mut H) {
+    if let Some((tag, id)) = id_cell_tag(v) {
+        state.write_u8(tag);
+        state.write_u64(id);
+        return;
+    }
+    match v {
         Value::Extension(e) => hash_extension(e, state),
         // Port-defined types: the class name plus the content map
         // (order-insensitive, like `Map`, so equal records hash

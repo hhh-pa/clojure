@@ -4,7 +4,7 @@ The complete inventory of `clojure.core` in this port: every var,
 its conformance state, and — for exclusions — why it is excluded.
 If a var is not listed here, that is a file bug, not a silent gap.
 
-- **690 vars: 679 implemented, 0 divergent, 11 out of scope,
+- **690 vars: 690 implemented, 0 divergent, 0 out of scope,
   0 planned.** The port reports Clojure `1.13.0-alpha9`
   (`clojure-version`).
 - **Universe.** 690 rows = 685 JVM publics + 5 extra-universe rows: 4 port-visible JVM privates
@@ -548,12 +548,12 @@ Significant vars with no port slice, grouped below by area with the reason. (Thr
 | `pcalls` | implemented | concurrency.rs pcalls_rows (core.clj port over pmap) |
 | `pmap` | implemented | concurrency.rs pmap_rows (core.clj port; fixed lookahead 6; lazy) |
 | `memoize` | implemented | concurrency.rs memoize_rows (core.clj port, find-based cache) |
-| `ref` | out-of-scope | STM (N4): never |
-| `dosync` | out-of-scope | STM (N4): never |
-| `commute` | out-of-scope | STM (N4): never |
-| `ensure` | out-of-scope | STM (N4): never |
-| `alter` | out-of-scope | STM (N4): never |
-| `ref-set` | out-of-scope | STM (N4): never |
+| `ref` | implemented | tests/stm.rs ref_ctor_opts (ctor/opts/meta/eq/validator) + print_and_str (port #object form — pinned divergence from the JVM {:status :ready} rendering) + invoke_and_predicates (deref/invoke/predicates) |
+| `dosync` | implemented | tests/stm.rs atomic_commit (join/begin; retry invisible) + nesting_join (one commit/watch round) + macro_shapes (byte-identical expansion) |
+| `commute` | implemented | tests/stm.rs commute_compose (reruns/order/set-guard/ensure interplay) |
+| `ensure` | implemented | tests/stm.rs commute_compose (returns/ordering) + loom_stm.rs stm_ensure_blocks_write_skew |
+| `alter` | implemented | tests/stm.rs atomic_commit + commute_compose + outside_tx_gate (gate/check-order/returns) |
+| `ref-set` | implemented | tests/stm.rs commute_compose + outside_tx_gate (returns/compose/gate) |
 
 ### REPL and CLI environment (implemented)
 
@@ -772,7 +772,7 @@ No slice on this branch: hard-never reasons stand alone, design-blocked rows nam
 | `int-array` | implemented | S15 arrays (#59): arrays.rs ctor_array (Numbers rules); tests/arrays.rs ctors_zero, ctors_seq, ctors_init, ctors_sizes (probes a-int-*, b-int-*, d-int-*) |
 | `into-array` | implemented | S15 arrays (#59): arrays.rs native_into_array (seqToTypedArray: inference + *Cast/typed); tests/arrays.rs into_array, mi3d_walk_and_order (probes f-into-*, a-*, c-*, mi-3d ia-*) |
 | `ints` | implemented | S15 arrays (#59): arrays.rs cast_array (exact [I checkcast); tests/arrays.rs casts_bytesq (probes d-ints-*, h-ints-*) |
-| `io!` | out-of-scope | STM refs/transactions (N4): never |
+| `io!` | implemented | tests/stm.rs io_gate (gate before body; pass-through outside) |
 | `isa?` | implemented | hierarchy.rs hier_isa_basics, hier_isa_arm_order, hier_interfaces, hier_global_arities (S13, #57; probes h-*, n-*) |
 | `iteration` | implemented | tests/collmisc.rs iteration_rows (eager-first-step; re-seqable) |
 | `iterator-seq` | implemented | S17 lazy chunked-32 PendingSeq (empty nil); jdkio.rs iterator_seq_rows (S17, #61) |
@@ -805,9 +805,9 @@ No slice on this branch: hard-never reasons stand alone, design-blocked rows nam
 | `read+string` | implemented | `[form string]` over StreamReader (0/1/3/4-arity plus the opts arity; LNPR wrap rule); zero_oos_s7_readgates.rs (S7, #50) |
 | `reader-conditional` | implemented | S6 2-arity ctor; zero_oos_s6_datareaders.rs reader_conditional_ctors |
 | `reader-conditional?` | implemented | S6 `pred1!`; zero_oos_s6_datareaders.rs reader_conditional_predicate |
-| `ref-history-count` | out-of-scope | STM refs/transactions (N4): never |
-| `ref-max-history` | out-of-scope | STM refs/transactions (N4): never |
-| `ref-min-history` | out-of-scope | STM refs/transactions (N4): never |
+| `ref-history-count` | implemented | tests/stm.rs history_accessors (arities/receivers) + history_trim (counts) |
+| `ref-max-history` | implemented | tests/stm.rs history_accessors (ladder + arities; setters answer the ref) |
+| `ref-min-history` | implemented | tests/stm.rs history_accessors (ladder + arities; setters answer the ref) |
 | `release-pending-sends` | implemented | S5: concurrency.rs outbox drain answering the count (0 outside actions); zero_oos_s5_state.rs release_pending_sends_rows |
 | `remove-all-methods` | implemented | hierarchy.rs hier_remove_all (S13, #57; probes x-rmall*) |
 | `remove-tap` | implemented | cellstaps.rs tap_returns + tap_set_semantics (disj by =; never starts the loop) |
@@ -826,7 +826,7 @@ No slice on this branch: hard-never reasons stand alone, design-blocked rows nam
 | `stream-transduce!` | implemented | S17 xform over stream pulls + completion; jdkio.rs stream_transduce_rows (S17, #61) |
 | `struct` | implemented | tests/collmisc.rs structmap_rows (positional; too-many IAE) |
 | `struct-map` | implemented | tests/collmisc.rs structmap_rows (basis-first order; extras) |
-| `sync` | out-of-scope | STM refs/transactions (N4): never |
+| `sync` | implemented | tests/stm.rs nesting_join (join) + macro_shapes (identity expansion; flags dropped) + io_gate (sync forms) |
 | `tagged-literal` | implemented | S6 2-arity ctor (nil tag coerces); zero_oos_s6_datareaders.rs tagged_literal_ctors |
 | `tagged-literal?` | implemented | S6 `pred1!`; zero_oos_s6_datareaders.rs tagged_literal_predicate |
 | `tap->` | implemented | cellstaps.rs tap_thread_first (verbatim core.clj one-liner: returns x and delivers it) |

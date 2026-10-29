@@ -423,6 +423,27 @@ fn multi_options_rejected() {
     );
 }
 
+#[test]
+fn multi_hierarchy_from_ref() {
+    // L2: `:hierarchy` takes any `IRef` (JVM `MultiFn` ctor) —
+    // refs resolve, tx-locally inside `dosync` (the committed
+    // hierarchy is bare at in-txn dispatch time, so `:p` proves
+    // the tx-local read).
+    let mut eval = boot();
+    run(
+        &mut eval,
+        "(do (def hr (ref (make-hierarchy))) (defmulti hm2 :k :hierarchy hr) (defmethod hm2 ::parent [x] :p))",
+    );
+    assert_eq!(
+        run(
+            &mut eval,
+            "(dosync (ref-set hr (derive (make-hierarchy) ::child ::parent)) (hm2 {:k ::child}))"
+        ),
+        ":p"
+    );
+    assert_eq!(run(&mut eval, "(hm2 {:k ::child})"), ":p");
+}
+
 // ---- guards ----
 
 #[test]

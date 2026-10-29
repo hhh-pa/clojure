@@ -188,6 +188,7 @@ fn is_dup_throw_kind(v: &Value) -> bool {
         | Value::Future(_)
         | Value::Promise(_)
         | Value::Agent(_)
+        | Value::Ref(_)
         | Value::ReaderConditional { .. }
         | Value::MultiFn(_) => true,
         Value::HostType(h) => match h.as_ref() {
@@ -469,9 +470,8 @@ fn print_more(v: &Value, opts: &PrintOpts, level: Option<i64>, out: &mut String)
         Value::Var(v) => print_var(v, out),
         Value::Unbound(u) => print_unbound(u, out),
         Value::Throwable(t) => print_throwable(t, opts, level, out),
-        Value::Transient(t) => {
-            let class = t.jvm_class();
-            let id = t.id();
+        Value::Transient(_) | Value::Future(_) | Value::Promise(_) | Value::Ref(_) => {
+            let (class, id) = object_class_id(v);
             write!(out, "#object[{class} 0x{id:x} \"{class}@{id:x}\"]").unwrap();
         }
         Value::Atom(a) => {
@@ -489,16 +489,6 @@ fn print_more(v: &Value, opts: &PrintOpts, level: Option<i64>, out: &mut String)
                 "#object[clojure.lang.Delay 0x{id:x} \"clojure.lang.Delay@{id:x}\"]"
             )
             .unwrap();
-        }
-        Value::Future(f) => {
-            let class = f.jvm_class();
-            let id = f.id();
-            write!(out, "#object[{class} 0x{id:x} \"{class}@{id:x}\"]").unwrap();
-        }
-        Value::Promise(p) => {
-            let class = p.jvm_class();
-            let id = p.id();
-            write!(out, "#object[{class} 0x{id:x} \"{class}@{id:x}\"]").unwrap();
         }
         Value::Volatile(v) => {
             let id = v.id();
@@ -817,6 +807,7 @@ fn print_meta_prefix(v: &Value, opts: &PrintOpts, level: Option<i64>, out: &mut 
         Value::Agent(a) => Some(a.meta()),
         Value::Future(f) => Some(f.meta()),
         Value::Promise(p) => Some(p.meta()),
+        Value::Ref(r) => Some(r.meta()),
         _ => None,
     };
     if let Some(meta) = extra {
@@ -1074,13 +1065,27 @@ fn host_java_debug(h: &crate::HostVal) -> String {
     }
 }
 
+/// A cell's print identity (split from [`print_more`] and
+/// [`java_debug_rest`] for the complexity budget): the JVM class plus
+/// the numeric id.
+fn object_class_id(v: &Value) -> (&'static str, u64) {
+    match v {
+        Value::Transient(t) => (t.jvm_class(), t.id()),
+        Value::Future(f) => (f.jvm_class(), f.id()),
+        Value::Promise(p) => (p.jvm_class(), p.id()),
+        Value::Ref(r) => (r.jvm_class(), r.id()),
+        _ => unreachable!("object partition"),
+    }
+}
+
 fn java_debug_rest(v: &Value) -> String {
     match v {
-        Value::Transient(t) => format!("{}@{:x}", t.jvm_class(), t.id()),
+        Value::Transient(_) | Value::Future(_) | Value::Promise(_) | Value::Ref(_) => {
+            let (class, id) = object_class_id(v);
+            format!("{class}@{id:x}")
+        }
         Value::Atom(a) => format!("clojure.lang.Atom@{:x}", a.id()),
         Value::Delay(d) => format!("clojure.lang.Delay@{:x}", d.id()),
-        Value::Future(f) => format!("{}@{:x}", f.jvm_class(), f.id()),
-        Value::Promise(p) => format!("{}@{:x}", p.jvm_class(), p.id()),
         Value::Agent(a) => format!("clojure.lang.Agent@{:x}", a.id()),
         Value::Volatile(v) => format!("clojure.lang.Volatile@{:x}", v.id()),
         Value::Extension(e) => e.print(),
@@ -1293,6 +1298,44 @@ mod tests {
 
     fn pr(v: &Value) -> String {
         pr_to_string(v, &PrintOpts::pr())
+    }
+
+    #[test]
+    fn object_id_names_cells() {
+        // The split preserves each cell's print identity (refs join
+        // the partition in S19).
+        let reff = crate::Ref::new(Value::Nil);
+        assert_eq!(
+            super::object_class_id(&Value::Ref(reff.clone())),
+            ("clojure.lang.Ref", reff.id())
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "object partition")]
+    fn object_id_rejects_non_cells() {
+        // Defensive fallback: both callers only ever pass cells.
+        super::object_class_id(&Value::Int(1));
+    }
+
+    #[test]
+    fn ref_meta_prefix_renders() {
+        // A meta'd ref renders the `^meta` prefix through the
+        // engine (the `Ref` arm of `print_meta_prefix`).
+        let reff = crate::Ref::new(Value::Int(0));
+        reff.lock().meta = Some(crate::new_map().insert(
+            Value::Keyword(crate::Keyword::new(None, "a")),
+            Value::Int(1),
+        ));
+        let opts = PrintOpts {
+            meta: true,
+            ..PrintOpts::pr()
+        };
+        let text = pr_to_string(&Value::Ref(reff), &opts);
+        assert!(
+            text.starts_with("^{:a 1} #object[clojure.lang.Ref 0x"),
+            "bad ref meta rendering: {text}"
+        );
     }
 
     #[test]

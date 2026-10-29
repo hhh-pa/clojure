@@ -367,15 +367,32 @@ fn jvm_class_of_ref(v: &Value) -> String {
 }
 
 /// Host and reference objects.
+/// The JVM class of a cell value (split from [`jvm_class_of_host`]
+/// for the complexity budget).
+fn cell_jvm_class(v: &Value) -> &'static str {
+    match v {
+        Value::Transient(t) => t.jvm_class(),
+        Value::Atom(a) => a.jvm_class(),
+        Value::Delay(d) => d.jvm_class(),
+        Value::Future(f) => f.jvm_class(),
+        Value::Promise(p) => p.jvm_class(),
+        Value::Agent(a) => a.jvm_class(),
+        Value::Volatile(x) => x.jvm_class(),
+        Value::Ref(r) => r.jvm_class(),
+        _ => unreachable!("cell partition"),
+    }
+}
+
 fn jvm_class_of_host(v: &Value) -> String {
     match v {
-        Value::Transient(t) => t.jvm_class().to_owned(),
-        Value::Atom(a) => a.jvm_class().to_owned(),
-        Value::Delay(d) => d.jvm_class().to_owned(),
-        Value::Future(f) => f.jvm_class().to_owned(),
-        Value::Promise(p) => p.jvm_class().to_owned(),
-        Value::Agent(a) => a.jvm_class().to_owned(),
-        Value::Volatile(v) => v.jvm_class().to_owned(),
+        Value::Transient(_)
+        | Value::Atom(_)
+        | Value::Delay(_)
+        | Value::Future(_)
+        | Value::Promise(_)
+        | Value::Agent(_)
+        | Value::Volatile(_)
+        | Value::Ref(_) => cell_jvm_class(v).to_owned(),
         Value::Extension(e) => e.class_name(),
         Value::HostType(h) => jvm_class_of_hosttype(h),
         // Multimethods report the JVM class (S-typechain stage 3).
@@ -632,6 +649,27 @@ mod tests {
             jvm_class_of_host(&Value::Uuid(clj_value::Uuid::from_bits(0, 0))),
             "java.util.UUID"
         );
+    }
+
+    #[test]
+    fn cell_jvm_class_names_every_cell() {
+        // The split preserves each cell's class (refs join the
+        // partition in S19).
+        assert_eq!(
+            cell_jvm_class(&Value::Ref(clj_value::Ref::new(Value::Nil))),
+            "clojure.lang.Ref"
+        );
+        assert_eq!(
+            cell_jvm_class(&Value::Atom(clj_value::Atom::new(Value::Nil))),
+            "clojure.lang.Atom"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "cell partition")]
+    fn cell_jvm_class_rejects_non_cells() {
+        // Defensive fallback: the host arm only ever passes cells.
+        cell_jvm_class(&Value::Int(1));
     }
 
     #[test]

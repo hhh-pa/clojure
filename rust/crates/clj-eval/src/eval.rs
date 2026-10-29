@@ -13,6 +13,7 @@
 //! S4 ships no prelude: tests inject [`NativeFn`](crate::ext::NativeFn)
 //! doubles; `ex-info` et al. arrive with the S5 core subset.
 
+use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::sync::Arc;
 
 use clj_reader::{Reader, ReaderOpts, Span};
@@ -130,6 +131,10 @@ pub struct Evaluator {
     /// thread-local `nested`): released on success, discarded on
     /// failure. `None` outside an action fn.
     pub(crate) agent_outbox: Option<Vec<(clj_value::Agent, clj_value::QueuedAction)>>,
+    /// The running STM transaction (S19): `Some` inside `sync`,
+    /// `None` outside. Lives outside `Bindings` (§1h) — same-thread
+    /// `bound-fn` calls observe it, cross-thread conveyance drops it.
+    pub(crate) tx: Option<crate::stm::Transaction>,
     /// Analyze recursion budget (`Some` on the AOT plan path only;
     /// the run path stays unbounded). Set once on the throwaway
     /// planning evaluator, read by every `Analyzer` it builds.
@@ -182,6 +187,7 @@ impl Evaluator {
             tap_system: Arc::new(crate::concurrency::TapSystem::new()),
             native_call_span: None,
             agent_outbox: None,
+            tx: None,
             analyze_depth_limit: None,
             flush_count: 0,
             print_defaults_only: false,
@@ -208,6 +214,10 @@ impl Evaluator {
             tap_system: Arc::clone(&self.tap_system),
             native_call_span: None,
             agent_outbox: None,
+            // Transactions never cross threads (the JVM's
+            // `LockingTransaction` is a thread-local the binding
+            // conveyor does not copy — S19 §1h).
+            tx: None,
             // Budgets never cross threads (limits are set on
             // single-threaded planning evaluators, which never fork).
             analyze_depth_limit: None,
@@ -766,13 +776,7 @@ impl Evaluator {
                 init,
                 span,
             } => self.eval_def(sym, doc.clone(), init.as_deref(), *span, env),
-            Expr::If { test, then, els } => {
-                if self.eval(test, env)?.is_truthy() {
-                    self.eval(then, env)
-                } else {
-                    self.eval(els, env)
-                }
-            }
+            Expr::If { test, then, els } => self.eval_if(test, then, els, env),
             Expr::Do(exprs) => self.eval_body(exprs, env),
             Expr::Let { bindings, body } => {
                 let env = self.bind_all(bindings, env)?;
@@ -845,6 +849,9 @@ impl Evaluator {
             )),
             Expr::DelayStar { display, body } => Ok(self.eval_delay_star(display, body, env)),
             Expr::Locking { lockee, body } => self.eval_locking(lockee, body, env),
+            Expr::Sync { body } | Expr::Io { body } => {
+                crate::stm::eval_sync_or_io(self, expr, body, env)
+            }
             Expr::CaseStar {
                 expr,
                 shift,
@@ -1224,7 +1231,9 @@ impl Evaluator {
     /// Every init evaluates against the old roots (a repeated var
     /// keeps the last value, map-style), the roots install, the body
     /// runs, and the saved roots — or rootlessness — restore in a
-    /// `finally`, even on throw (probe37 `wrd-*`).
+    /// `finally`, even on throw (probe37 `wrd-*`). The restore also
+    /// runs on panic unwind (an S19 retry unwinding through here
+    /// must not leak redefined roots globally).
     fn eval_with_redefs(
         &mut self,
         pairs: &[(Var, Expr)],
@@ -1248,13 +1257,16 @@ impl Evaluator {
                 st.root = Some(value.clone());
             });
         }
-        let result = self.eval_body(body, env);
+        let result = catch_unwind(AssertUnwindSafe(|| self.eval_body(body, env)));
         for (id, saved, _) in saves.iter().rev() {
             self.registry.with_state_mut(*id, |st| {
                 st.root = saved.clone();
             });
         }
-        result
+        match result {
+            Ok(result) => result,
+            Err(payload) => resume_unwind(payload),
+        }
     }
 
     /// `with-bindings`: evaluate the map expression and run the body
@@ -1394,12 +1406,28 @@ impl Evaluator {
     }
 
     /// A body: the last value, or `nil` when empty.
-    fn eval_body(&mut self, body: &[Expr], env: &Env) -> Result<Value, Signal> {
+    pub(crate) fn eval_body(&mut self, body: &[Expr], env: &Env) -> Result<Value, Signal> {
         let mut value = Value::Nil;
         for expr in body {
             value = self.eval(expr, env)?;
         }
         Ok(value)
+    }
+
+    /// `if`: the taken branch (split from [`eval`](Self::eval)
+    /// for the complexity budget).
+    fn eval_if(
+        &mut self,
+        test: &Expr,
+        then: &Expr,
+        els: &Expr,
+        env: &Env,
+    ) -> Result<Value, Signal> {
+        if self.eval(test, env)?.is_truthy() {
+            self.eval(then, env)
+        } else {
+            self.eval(els, env)
+        }
     }
 
     /// Bind `let`/`loop` pairs left to right (each init sees the
@@ -1524,6 +1552,10 @@ impl Evaluator {
 
     /// `(try …)`: the first matching `catch` wins (by hierarchy);
     /// `finally` runs on every path and its value is discarded.
+    /// A panic unwinding through the body (an S19 retry is now
+    /// routine control flow, not just port bugs) still runs
+    /// `finally` — catches never see it — then resumes; a throwing
+    /// `finally` masks the in-flight panic like the JVM.
     fn eval_try(
         &mut self,
         body: &[Expr],
@@ -1531,7 +1563,15 @@ impl Evaluator {
         finally_body: &[Expr],
         env: &Env,
     ) -> Result<Value, Signal> {
-        let result = self.eval_body(body, env);
+        let result = match catch_unwind(AssertUnwindSafe(|| self.eval_body(body, env))) {
+            Ok(result) => result,
+            Err(payload) => {
+                if let Err(signal @ Signal::Throw(_)) = self.eval_body(finally_body, env) {
+                    return Err(signal);
+                }
+                resume_unwind(payload);
+            }
+        };
         match result {
             Ok(value) => {
                 self.eval_body(finally_body, env)?;
@@ -1647,8 +1687,7 @@ impl Evaluator {
                 "Cannot invoke nil as a function".to_owned(),
             ))),
             Value::Extension(_) => self.invoke_extension(callee, args),
-            Value::Keyword(kw) => self.invoke_keyed(callee, &kw.to_string(), args),
-            Value::Symbol(_) => self.invoke_keyed(callee, "clojure.lang.Symbol", args),
+            Value::Keyword(_) | Value::Symbol(_) => self.invoke_keyed_name(callee, args),
             Value::Vector(v) => self.invoke_vector(v, args),
             Value::PrimitiveVector(p) => self.invoke_pv(p, args),
             Value::MapEntry { key, val } => self.invoke_mapentry(key, val, args),
@@ -1661,8 +1700,23 @@ impl Evaluator {
             ))),
             Value::Promise(p) => self.invoke_promise(p, args),
             Value::MultiFn(m) => crate::multi::invoke_multifn(self, m, args),
+            Value::Ref(r) => {
+                let value = crate::stm::tx_deref(self, r);
+                self.invoke(&value, args)
+            }
             _ => Err(self.throw(NativeError::cast(&jvm_class_of(callee), "clojure.lang.IFn"))),
         }
+    }
+
+    /// Invoke a keyword/symbol by name (split from [`invoke`](Self::invoke)
+    /// for the complexity budget — the shared [`invoke_keyed`](Self::invoke_keyed)
+    /// names arity errors per kind).
+    fn invoke_keyed_name(&mut self, callee: &Value, args: &[Value]) -> Result<Value, Signal> {
+        let name = match callee {
+            Value::Keyword(kw) => kw.to_string(),
+            _ => "clojure.lang.Symbol".to_owned(),
+        };
+        self.invoke_keyed(callee, &name, args)
     }
 
     fn invoke_keyed(

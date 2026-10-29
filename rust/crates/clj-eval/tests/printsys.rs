@@ -1443,7 +1443,7 @@ fn driver_truncation_rows() {
 #[test]
 fn print_tables_keys() {
     let mut eval = boot();
-    // 42 string tokens + `nil` + `:default`.
+    // 43 string tokens + `nil` + `:default` (S19 adds the `Ref` kind).
     let mut method_keys = vec![
         "",
         ":default",
@@ -1474,6 +1474,7 @@ fn print_tables_keys() {
         "clojure.lang.Ratio",
         "clojure.lang.ReaderConditional",
         "clojure.lang.Reduced",
+        "clojure.lang.Ref",
         "clojure.lang.Symbol",
         "clojure.lang.TaggedLiteral",
         "clojure.lang.Var",
@@ -1508,7 +1509,7 @@ fn print_tables_keys() {
         ),
         want
     );
-    assert_eq!(run_last(&mut eval, "(count (methods print-method))"), "44");
+    assert_eq!(run_last(&mut eval, "(count (methods print-method))"), "45");
     // 27 string tokens + `nil`, no `:default`.
     let mut dup_keys = vec![
         "",
