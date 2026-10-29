@@ -7,7 +7,7 @@
 // You must not remove this notice, or any other, from this software.
 
 //! S19 STM loom mirror: the commit lock order (step 4 — ascending
-//! ids, spin-then-barge) and revalidation (step 3) under racing
+//! ids, spin-then-barge) and revalidation (step 5) under racing
 //! committers, modeled branch-for-branch after `stm.rs` with the
 //! spin bound as the model parameter (`MODEL_SPIN = 2`). Histories,
 //! validators, watches, and sends are elided (single-version reads).
