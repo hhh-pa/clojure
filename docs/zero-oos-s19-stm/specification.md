@@ -334,8 +334,10 @@ just decrement depth):
    slots (per-kind identity) — a swap landing between
    validation and install retries instead of installing
    under the wrong validator (the JVM validates under
-   its commit locks; the port reaches the same atomicity
-   via snapshot + recheck).
+   its commit locks while its validator slot is a lock-free
+   volatile that retains the swap window; the port reaches
+   strict atomicity via snapshot + recheck — a defensive
+   tightening no oracle can distinguish).
 6. Bump the clock ONCE; install every new current with the
    fresh point; push each old current onto its history.
 7. Trim each touched history: drop oldest while `len >
