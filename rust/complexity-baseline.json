@@ -189,6 +189,13 @@
    "cyclomatic": 16.0,
    "cognitive": 2.0,
    "justification": "one arm per invocable kind, each delegating to a helper. Wave-2 landing: S15 adds the PrimitiveVector arm (S12 deliberately kept structs a pre-dispatch; 16/2 measured under rca 0.0.25)"
+  },
+  {
+   "file": "crates/clj-eval/src/concurrency.rs",
+   "function": "monitor_key",
+   "cyclomatic": 41.0,
+   "cognitive": 1.0,
+   "justification": "fence 3b: one arm per Value variant plus scalar shapes; the content-hash table stays exhaustive so Box clones of the same value share a monitor"
   }
  ]
 }

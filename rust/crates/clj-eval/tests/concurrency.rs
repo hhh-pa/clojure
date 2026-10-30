@@ -2963,6 +2963,28 @@ fn locking_rows() {
 }
 
 #[test]
+fn locking_object_kinds() {
+    // Fence 3b: per-object monitors accept every lockee kind
+    // (cells, host instances, arrays included).
+    let mut eval = boot();
+    assert_eq!(run_last(&mut eval, "(locking (atom 1) :ok)"), ":ok");
+    assert_eq!(run_last(&mut eval, "(locking (ref 1) :ok)"), ":ok");
+    assert_eq!(run_last(&mut eval, "(locking (agent 1) :ok)"), ":ok");
+    assert_eq!(
+        run_last(&mut eval, "(locking (int-array [1 2]) :ok)"),
+        ":ok"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(do (deftype LkT [x]) (locking (LkT. 1) :ok))"),
+        ":ok"
+    );
+    // Boxed lockees (`find`/`first` entries): the exit arg is a
+    // fresh clone — content keys keep enter/exit matched.
+    assert_eq!(run_last(&mut eval, "(locking (find {:a 1} :a) :ok)"), ":ok");
+    assert_eq!(run_last(&mut eval, "(locking (first {:a 1}) :ok)"), ":ok");
+}
+
+#[test]
 fn locking_mutual_exclusion() {
     let mut eval = boot();
     // Racing read-modify-writes under the monitor total exactly (a
