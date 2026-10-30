@@ -17,11 +17,12 @@
 //! linking binary; the unset hook reports the CLI's exact unlinked
 //! line (T11).
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
 use clj_reader::{NoHooks, Reader, ReaderOpts, Span};
-use clj_value::{ThrowClass, Value, Vector, new_map, seq_vec};
+use clj_value::{Symbol, ThrowClass, Value, Vector, new_map, seq_vec};
 
 use crate::aot_subset::{PlanError, SubsetProgram, plan_source};
 use crate::error::{CompileError, NativeError, span_of};
@@ -316,16 +317,24 @@ fn obj_path_for(dir: &str, root: &str) -> PathBuf {
 /// success-for-success: `data_readers: true` mirrors the per-form
 /// `snapshot_data_readers`, and every other success-relevant field
 /// agrees (read-eval true, suppress-read/resolver false, empty
-/// table, no default fn, `user` ns, no aliases). Only `refers`
-/// differs, and it never affects read success — so a strip/no-strip
-/// decision always agrees with what the planner can read. A misread
-/// fails closed either way: the planner reports the failure itself
-/// (T6a reader or T6c subset).)
+/// table, the canonical default layer, no default fn, `user` ns,
+/// no aliases). Only `refers` differs, and it never affects read
+/// success — so a strip/no-strip decision always agrees with what
+/// the planner can read. A misread fails closed either way: the
+/// planner reports the failure itself (T6a reader or T6c subset).)
 fn strip_leading_ns(text: &str) -> String {
     let mut reader = Reader::new(
         text,
         &ReaderOpts {
             data_readers: true,
+            // Canonical defaults like the planner's live snapshot
+            // (#94): without them a leading `ns` carrying `#inst`
+            // misreads and skips the strip (probe
+            // `strip_handles_inst_metadata`).
+            default_reader_keys: HashSet::from([
+                Symbol::new(None, "inst"),
+                Symbol::new(None, "uuid"),
+            ]),
             ..Default::default()
         },
     );

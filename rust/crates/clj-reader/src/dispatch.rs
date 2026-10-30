@@ -12,10 +12,11 @@
 //! - `#tag`: the ctor path (unread, read tag — non-symbol rejects —
 //!   read form, then preserve/suppress ⇒ `TaggedLiteral`, dotted
 //!   name ⇒ record deferral, defer mode (S6) ⇒ the consult (table
-//!   keys, then `inst`/`uuid` validation, then the default-fn
-//!   flag, else unknown tag — hits defer to `TaggedLiteral`, with
-//!   the fired-discards log under `#_`), `inst`/`uuid` ⇒
-//!   data-reader deferral, else unknown tag).
+//!   keys, then the default-layer keys with `inst`/`uuid`
+//!   validation, then the default-fn flag, else unknown tag — hits
+//!   defer to `TaggedLiteral`, with the fired-discards log under
+//!   `#_`), `inst`/`uuid` ⇒ data-reader deferral, else unknown
+//!   tag).
 //! - `#=`: immediate deferral without consuming the form. `#<`:
 //!   unreadable.
 //! - `#:`: namespaced maps (auto/current-ns/alias resolution, key
@@ -29,8 +30,8 @@
 //!   top-level splicing rejected unless nothing matched).
 
 use clj_value::{
-    Keyword, List, Symbol, Value, java_debug, reader_conditional, tagged_literal, validate_inst,
-    validate_uuid,
+    Keyword, List, Symbol, TagError, Value, java_debug, reader_conditional, tagged_literal,
+    validate_inst, validate_uuid,
 };
 
 use crate::Reader;
@@ -176,11 +177,11 @@ impl Reader {
         })
     }
 
-    /// Defer-mode tag consult (S6): the table, then the `inst`/`uuid`
-    /// defaults, then the default-fn flag, else the `UnknownTag`
+    /// Defer-mode tag consult (S6): the table, then the default
+    /// layer, then the default-fn flag, else the `UnknownTag`
     /// throw — all with span, exactly where the non-defer path
-    /// throws. Invocation stays eval-side: table hits,
-    /// default-fn tags, and validated `inst`/`uuid` payloads
+    /// throws. Invocation stays eval-side: table hits, default
+    /// hits, default-fn tags, and validated `inst`/`uuid` payloads
     /// defer to `TaggedLiteral` for the eval walk (which resolves
     /// the defaults to natives — #103 — against the live table,
     /// so a mid-walk override install still wins).
@@ -203,23 +204,27 @@ impl Reader {
         if self.opts.data_reader_keys.contains(sym) {
             return self.deferred_tag(sym, form, checkpoint);
         }
-        // DIVERGENCE (#94): this `inst`/`uuid` arm is hardcoded —
-        // upstream consults the `default-data-readers` VAR root
-        // here, so replacing that root is a silent no-op in this
-        // port (like `resolve_tag` eval-side).
-        if sym.namespace().is_none() && matches!(sym.name(), "inst" | "uuid") {
-            // String payloads validate inline (spanful); anything
-            // else defers for the eval-side type dispatch (nil is
-            // the NPE, the rest fail the `CharSequence` cast —
-            // except `uuid`, whose non-strings fail as
-            // `IllegalArgumentException`).
+        // A borked default root fails the cast before the default
+        // consult (probe `h-bork-long`); table hits above already
+        // returned, like the JVM's short-circuit (probe
+        // `h-bork-tablehit`).
+        if let Some(from_jvm) = self.opts.default_readers_borked.clone() {
+            return Err(ReaderError::TableCce {
+                span: self.span(),
+                from_jvm,
+            });
+        }
+        // Default-layer hits defer for eval-side invocation (#94);
+        // canonical `inst`/`uuid` string payloads validate inline
+        // (spanful).
+        // DIVERGENCE (#94): a REPLACED canonical default still
+        // validates here (oracle `h-replace-inst-bad` invokes the
+        // replacement with the raw payload): the snapshot carries
+        // keys without values, so the read side cannot tell a
+        // replacement from the canonical native.
+        if self.opts.default_reader_keys.contains(sym) {
             if let Value::Str(s) = &form {
-                let failure = if sym.name() == "inst" {
-                    validate_inst(s).err()
-                } else {
-                    validate_uuid(s).err()
-                };
-                if let Some(e) = failure {
+                if let Some(e) = Self::default_tag_failure(sym, s) {
                     return Err(ReaderError::TagInvoke {
                         span: self.span(),
                         class: e.class,
@@ -234,6 +239,10 @@ impl Reader {
                 // the walk consults the live table).
                 return Ok(Some(tagged_literal(sym.clone(), form)));
             }
+            // Anything else defers for the eval-side type dispatch
+            // (nil is the NPE, the rest fail the `CharSequence`
+            // cast — except `uuid`, whose non-strings fail as
+            // `IllegalArgumentException`).
             return self.deferred_tag(sym, form, checkpoint);
         }
         if self.opts.default_reader_fn {
@@ -243,6 +252,19 @@ impl Reader {
             span: self.span(),
             tag: sym.to_string(),
         })
+    }
+
+    /// Inline validation for canonical default tags (#94): the
+    /// failure for an invalid `inst`/`uuid` string payload, else
+    /// `None` (non-canonical default tags never validate — the
+    /// eval side invokes whatever the root holds — probes
+    /// `h-extra`, `h-extra-ns`).
+    fn default_tag_failure(sym: &Symbol, s: &str) -> Option<TagError> {
+        match sym.name() {
+            "inst" if sym.namespace().is_none() => validate_inst(s).err(),
+            "uuid" if sym.namespace().is_none() => validate_uuid(s).err(),
+            _ => None,
+        }
     }
 
     /// Defer one tag for eval-side invocation. Under `#_` the
@@ -616,7 +638,9 @@ mod tests {
         ReaderOpts::default()
     }
 
-    /// Defer-mode options: table keys plus the default-fn flag.
+    /// Defer-mode options: table keys plus the default-fn flag,
+    /// over the canonical default layer (`inst`/`uuid`, like the
+    /// evaluator's live snapshot — #94).
     fn defer_opts(keys: &[(&str, &str)], default_fn: bool) -> ReaderOpts {
         ReaderOpts {
             data_readers: true,
@@ -627,6 +651,10 @@ mod tests {
                     Symbol::new(ns, name)
                 })
                 .collect::<HashSet<_>>(),
+            default_reader_keys: HashSet::from([
+                Symbol::new(None, "inst"),
+                Symbol::new(None, "uuid"),
+            ]),
             default_reader_fn: default_fn,
             ..ReaderOpts::default()
         }
@@ -905,6 +933,82 @@ mod tests {
                 "class java.lang.Long cannot be cast to class clojure.lang.ILookup (java.lang.Long is in module java.base of loader 'bootstrap'; clojure.lang.ILookup is in unnamed module of loader 'app')"
             );
         }
+    }
+
+    #[test]
+    fn defer_borked_default_root_fails_the_cast() {
+        // A non-lookupable default root fails `ILookup` before the
+        // default consult (probe `h-bork-long`); table hits already
+        // returned, like the JVM's short-circuit (probe
+        // `h-bork-tablehit`).
+        let opts = ReaderOpts {
+            default_readers_borked: Some("java.lang.Long".to_owned()),
+            ..defer_opts(&[("", "foo")], false)
+        };
+        for input in ["#bar 1", "#inst \"2024-01-01\""] {
+            let err = read_str(input, &opts, &mut NoHooks).unwrap_err();
+            assert!(matches!(err, ReaderError::TableCce { .. }), "{input}");
+            assert_eq!(err.jvm_class(), "ClassCastException");
+            assert_eq!(
+                err.message(),
+                "class java.lang.Long cannot be cast to class clojure.lang.ILookup (java.lang.Long is in module java.base of loader 'bootstrap'; clojure.lang.ILookup is in unnamed module of loader 'app')"
+            );
+        }
+        let (forms, fired) = read_defer("#foo 1", &opts);
+        assert_tagged(forms.unwrap()[0].clone(), "foo", &Value::Int(1));
+        assert!(fired.is_empty());
+    }
+
+    #[test]
+    fn defer_default_keys_defer_without_validating() {
+        // Non-canonical default hits (extra tags, qualified or not)
+        // defer with no inline validation (probes `h-extra`,
+        // `h-extra-ns`); the eval side invokes the root's fn.
+        let opts = ReaderOpts {
+            default_reader_keys: HashSet::from([
+                Symbol::new(None, "foo"),
+                Symbol::new(Some("foo"), "bar"),
+            ]),
+            ..defer_opts(&[], false)
+        };
+        let (forms, fired) = read_defer("#foo \"bogus\"", &opts);
+        assert_tagged(
+            forms.unwrap()[0].clone(),
+            "foo",
+            &Value::Str("bogus".into()),
+        );
+        assert!(fired.is_empty());
+        let (forms, _) = read_defer("#foo/bar \"bogus\"", &opts);
+        assert_tagged(
+            forms.unwrap()[0].clone(),
+            "foo/bar",
+            &Value::Str("bogus".into()),
+        );
+    }
+
+    #[test]
+    fn defer_wiped_defaults_fall_through() {
+        // Validation is gated on default membership: a wiped layer
+        // reads `#inst` as unknown (probe `h-wipe-nil`), or defers
+        // it to the default fn when bound (probe
+        // `h-wipe-defaultfn`).
+        let opts = ReaderOpts {
+            default_reader_keys: HashSet::new(),
+            ..defer_opts(&[], false)
+        };
+        let err = read_str("#inst \"2024-01-01\"", &opts, &mut NoHooks).unwrap_err();
+        assert!(matches!(err, ReaderError::UnknownTag { .. }), "got {err:?}");
+        assert_eq!(err.message(), "No reader function for tag inst");
+        let opts = ReaderOpts {
+            default_reader_keys: HashSet::new(),
+            ..defer_opts(&[], true)
+        };
+        let (forms, _) = read_defer("#inst \"2024-01-01\"", &opts);
+        assert_tagged(
+            forms.unwrap()[0].clone(),
+            "inst",
+            &Value::Str("2024-01-01".into()),
+        );
     }
 
     #[test]
