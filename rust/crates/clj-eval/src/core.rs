@@ -3377,7 +3377,13 @@ fn rounding_value_of(name: &str) -> NativeError {
 /// `IllegalArgumentException` (all oracle-verbatim).
 fn native_bigdec(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/bigdec", args, &[1])?;
-    match &args[0] {
+    bigdec_convert(eval, &args[0])
+}
+
+/// Numeric `bigdec` inputs, split from `native_bigdec` for the
+/// complexity budget.
+fn bigdec_convert(eval: &mut Evaluator, v: &Value) -> Result<Value, NativeError> {
+    match v {
         // `BigDec` passes through (the same object — upstream
         // answers `x`); every other arm boxes fresh (the JDK's
         // `new BigDecimal` ctors — never `valueOf`).
@@ -3391,6 +3397,13 @@ fn native_bigdec(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeEr
         Value::BigInt(n) | Value::BigInteger(n) => Ok(Value::BigDec(Arc::new(
             clj_value::BigDec::from_bigint(n.as_ref().clone()),
         ))),
+        other => bigdec_convert_rest(eval, other),
+    }
+}
+
+/// Non-numeric `bigdec` inputs (ratio/string/nil/other).
+fn bigdec_convert_rest(eval: &mut Evaluator, v: &Value) -> Result<Value, NativeError> {
+    match v {
         // Upstream `(bigdec ratio)` divides through `/`, so a
         // bound context rounds it (S2 oracle `wp-bigdec`).
         Value::Ratio(r) => match math_context_of(eval)? {

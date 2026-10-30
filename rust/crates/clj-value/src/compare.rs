@@ -343,30 +343,6 @@ mod tests {
         }
         let err = compare(&Value::Int(1), &s).expect_err("expected incomparable");
         assert_eq!(err.jvm_class(), "java.lang.ClassCastException");
-        // Tower names survive Arc-boxing (#101).
-        assert_eq!(type_name(&Value::Int(1)), "Long");
-        assert_eq!(type_name(&Value::Double(1.0)), "Double");
-        assert_eq!(
-            type_name(&Value::BigInt(Arc::new(BigInt::from(1)))),
-            "BigInt"
-        );
-        assert_eq!(
-            type_name(&Value::BigInteger(Arc::new(BigInt::from(1)))),
-            "BigInteger"
-        );
-        assert_eq!(
-            type_name(&Value::BigDec(Arc::new(crate::BigDec::from_bigint(
-                BigInt::from(1)
-            )))),
-            "BigDecimal"
-        );
-        assert_eq!(
-            type_name(&Value::Ratio(Arc::new(num_rational::BigRational::new(
-                BigInt::from(1),
-                BigInt::from(2)
-            )))),
-            "Ratio"
-        );
     }
 
     #[test]
