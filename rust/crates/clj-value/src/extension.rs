@@ -117,6 +117,17 @@ impl ThrowClass {
         }
     }
 
+    /// The JVM simple name (`Class.getSimpleName`): the binary
+    /// name past the last package separator or outer class
+    /// (`LispReader$ReaderException` ⇒ `ReaderException`). The
+    /// reader reports it via `jvm_class()` (#125).
+    #[must_use]
+    pub fn simple_name(&self) -> &'static str {
+        let full = self.jvm_name();
+        let cut = full.rfind(['.', '$']).map_or(0, |i| i + 1);
+        &full[cut..]
+    }
+
     /// Format and I/O throw classes. Chained so each match stays under
     /// the complexity gate.
     fn jvm_name_mid(&self) -> &'static str {
@@ -1103,6 +1114,26 @@ mod tests {
         assert!(class.matches("java.lang.Exception"));
         assert!(class.matches("java.lang.Throwable"));
         assert!(!class.matches("java.lang.RuntimeException"));
+    }
+
+    #[test]
+    fn simple_name_strips_package_and_outer() {
+        // #125: `jvm_class()` reports simple names (the oracle
+        // records `getSimpleName`), so nested classes drop the
+        // outer (`$`) as well as the package.
+        assert_eq!(
+            ThrowClass::RuntimeException.simple_name(),
+            "RuntimeException"
+        );
+        assert_eq!(
+            ThrowClass::PatternSyntaxException.simple_name(),
+            "PatternSyntaxException"
+        );
+        assert_eq!(ThrowClass::ReaderException.simple_name(), "ReaderException");
+        assert_eq!(
+            ThrowClass::CompilerException.simple_name(),
+            "CompilerException"
+        );
     }
 
     #[test]
