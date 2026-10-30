@@ -20,7 +20,7 @@ use std::sync::Arc;
 
 use clj_reader::Span;
 use clj_value::{
-    Keyword, List, Map, PrintOpts, Symbol, Value, Var, Vector, new_map, pr_to_string,
+    Keyword, List, Map, PrintOpts, Symbol, Value, Var, Vector, map_entry, new_map, pr_to_string,
     print_to_string,
 };
 
@@ -2046,10 +2046,7 @@ impl<'a> Analyzer<'a> {
             // fail the `var` Symbol cast as `MapEntry`.
             Value::Map(m) => Ok(m
                 .iter()
-                .map(|(k, v)| Value::MapEntry {
-                    key: Box::new(k.clone()),
-                    val: Box::new(v.clone()),
-                })
+                .map(|(k, v)| map_entry(k.clone(), v.clone()))
                 .collect()),
             other => Err(self.err(
                 class::ILLEGAL_ARG,

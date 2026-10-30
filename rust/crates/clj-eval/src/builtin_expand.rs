@@ -13,7 +13,7 @@
 //! follow alpha9 `clojure.core` (one `macroexpand-1` step does not
 //! expand nested `let`/`fn`).
 
-use clj_value::Value;
+use clj_value::{Value, map_entry};
 
 use crate::destructure_expand::destructure;
 use crate::error::NativeError;
@@ -376,10 +376,7 @@ fn wrd_items(bindings: &Value) -> Result<Vec<Value>, NativeError> {
     if let Value::Map(m) = bindings {
         return Ok(m
             .iter()
-            .map(|(k, v)| Value::MapEntry {
-                key: Box::new(k.clone()),
-                val: Box::new(v.clone()),
-            })
+            .map(|(k, v)| map_entry(k.clone(), v.clone()))
             .collect());
     }
     seq_data(bindings)
