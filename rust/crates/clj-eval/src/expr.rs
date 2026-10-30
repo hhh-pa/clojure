@@ -2424,24 +2424,13 @@ fn spec_valid_directive(kw: &Keyword, v: &Value) -> bool {
         "as" | "select" | "excess" | "missing" | "defaults" | "all" => {
             matches!(v, Value::Symbol(sym) if is_local_name(sym))
         }
-        "or" => spec_valid_or(v),
+        "or" => matches!(v, Value::Map(_)),
         "keys" | "keys!" => spec_valid_key_list(v, KeyKind::Keys),
         "syms" | "syms!" => spec_valid_key_list(v, KeyKind::Syms),
         "strs" | "strs!" => spec_valid_key_list(v, KeyKind::Strs),
         "req!" => spec_valid_req(v),
         _ => false,
     }
-}
-
-/// `::or` (fence 4b E1h/E1j/E1o): a map of simple symbols to
-/// defaults — plain unqualified symbols (including `&`, which
-/// `simple-symbol?` accepts though no local can use it).
-fn spec_valid_or(v: &Value) -> bool {
-    let Value::Map(or) = v else {
-        return false;
-    };
-    or.iter()
-        .all(|(k, _)| matches!(k, Value::Symbol(sym) if sym.namespace().is_none()))
 }
 
 /// `::req-bindings` (M2, upstream `core.specs.alpha`): a map of
@@ -2864,11 +2853,10 @@ fn key_cast_err(dir: &KeyDirective, form: &Value) -> WalkError {
     }
 }
 
-/// `:or` semantics for one binding (compile time): `Can't
-/// supply default value for required key` when a required local
-/// has a default. Lookup is by LOCAL only (fence 4b E1i —
-/// key-side matches are ignored: the local wins, never the old
-/// `Multiple` error).
+/// `:or` semantics for one binding (compile time): `Multiple :or
+/// defaults` when both the local and the key have defaults, `Can't
+/// supply default value for required key` when a required binding
+/// has either.
 fn check_or_pair(
     or_map: Option<&Map>,
     local: &str,
@@ -2879,7 +2867,18 @@ fn check_or_pair(
         return Ok(());
     };
     let local_key = Value::Symbol(Symbol::new(None, local));
-    if required && or.contains_key(&local_key) {
+    let has_local = or.get(&local_key).is_some();
+    let has_key = or.get(key).is_some();
+    if has_local && has_key {
+        return Err(WalkError {
+            class: class::EXCEPTION,
+            message: format!(
+                "Multiple :or defaults for same key: {} '{local}'",
+                str_of(key)
+            ),
+        });
+    }
+    if required && (has_local || has_key) {
         return Err(WalkError {
             class: class::EXCEPTION,
             message: format!(

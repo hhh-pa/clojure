@@ -81,7 +81,7 @@ fn fresh(src: &str) -> String {
     run_last(&mut boot(), src)
 }
 
-const CONVERT1: &str = "(if (clojure.core/seq? map__1) \
+const CONVERT1: &str = "(if (clojure.core/instance? clojure.lang.ISeq map__1) \
 (if (clojure.core/next map__1) \
 (clojure.lang.PersistentArrayMap/createAsIfByAssoc (clojure.core/to-array map__1)) \
 (if (clojure.core/seq map__1) (clojure.core/first map__1) \
@@ -190,7 +190,9 @@ fn expand_locking_and_destructure_gensyms() {
     );
     assert_eq!(
         fresh("(macroexpand-1 '(let [{:keys [a] :or {a 1} :as m} v] a))"),
-        format!("(let* [map__1 v map__1 {CONVERT1} m map__1 a (clojure.core/get map__1 :a 1)] a)")
+        format!(
+            "(let* [default__3 1 map__1 v map__1 {CONVERT1} m map__1 a (clojure.core/get map__1 :a default__3)] a)"
+        )
     );
     let keys_bang = fresh("(macroexpand-1 '(let [{:keys! [a] :missing m} v] a))");
     assert!(
@@ -434,15 +436,12 @@ fn expand_errors() {
             "java.lang.IllegalArgumentException | & can only appear once in :keys".to_owned(),
         ]
     );
-    // Fence 4b E1i (`or-bykey`, `or-bothab`): the local wins,
-    // key-side matches are ignored — never `Multiple`.
     assert_eq!(
-        fresh("(macroexpand-1 '(let [{a a :or {a 1}} {}] a))"),
-        format!("(let* [map__1 {{}} map__1 {CONVERT1} a (clojure.core/get map__1 a 1)] a)")
-    );
-    assert_eq!(
-        fresh("(macroexpand-1 '(let [{a b :or {a 1 b 2}} {:b 5}] a))"),
-        format!("(let* [map__1 {{:b 5}} map__1 {CONVERT1} a (clojure.core/get map__1 b 1)] a)")
+        compile_err(&mut eval, "(let [{a a :or {a 1}} {}] a)"),
+        vec![
+            "Syntax error macroexpanding let at (user:1:1).".to_owned(),
+            "java.lang.Exception | Multiple :or defaults for same key: a 'a'".to_owned(),
+        ]
     );
     assert_eq!(
         compile_err(&mut eval, "(let [{:keys! [a] :or {a 1}} {}] a)"),
@@ -492,10 +491,6 @@ fn expand_errors() {
                 .to_owned(),
         ]
     );
-    // Fence 4b E1h/E1j/E1o: `:or` must be a map of simple
-    // symbols (spec-checked at every map level upstream) —
-    // keyword, string, and qualified keys are rejected, as are
-    // non-map and explicit-`nil` `:or` values.
     assert_eq!(
         compile_err(
             &mut eval,
@@ -503,38 +498,7 @@ fn expand_errors() {
         ),
         vec![
             "Syntax error macroexpanding let at (user:1:1).".to_owned(),
-            "java.lang.IllegalArgumentException | :or keys must be simple symbols, got: :z"
-                .to_owned(),
-        ]
-    );
-    assert_eq!(
-        compile_err(&mut eval, "(let [{:keys [a] :or {\"s\" 1}} {}] a)"),
-        vec![
-            "Syntax error macroexpanding let at (user:1:1).".to_owned(),
-            "java.lang.IllegalArgumentException | :or keys must be simple symbols, got: \"s\""
-                .to_owned(),
-        ]
-    );
-    assert_eq!(
-        compile_err(&mut eval, "(let [{:keys [a] :or {a/b 1}} {}] a)"),
-        vec![
-            "Syntax error macroexpanding let at (user:1:1).".to_owned(),
-            "java.lang.IllegalArgumentException | :or keys must be simple symbols, got: a/b"
-                .to_owned(),
-        ]
-    );
-    assert_eq!(
-        compile_err(&mut eval, "(let [{:keys [a] :or nil} {}] a)"),
-        vec![
-            "Syntax error macroexpanding let at (user:1:1).".to_owned(),
-            "java.lang.IllegalArgumentException | :or must be a map, got: nil".to_owned(),
-        ]
-    );
-    assert_eq!(
-        compile_err(&mut eval, "(let [{:keys [a] :or []} {}] a)"),
-        vec![
-            "Syntax error macroexpanding let at (user:1:1).".to_owned(),
-            "java.lang.IllegalArgumentException | :or must be a map, got: []".to_owned(),
+            "java.lang.IllegalArgumentException | keys #{:z} appear only in :or".to_owned(),
         ]
     );
     assert_eq!(
@@ -591,14 +555,16 @@ fn expand_errors() {
         compile_err(&mut eval, "(let [{:keys [a] :or 5} {}] a)"),
         vec![
             "Syntax error macroexpanding let at (user:1:1).".to_owned(),
-            "java.lang.IllegalArgumentException | :or must be a map, got: 5".to_owned(),
+            "java.lang.IllegalArgumentException | Don't know how to create ISeq from: java.lang.Long"
+                .to_owned(),
         ]
     );
     assert_eq!(
         compile_err(&mut eval, "(let [{:keys [a] :or [1]} {}] a)"),
         vec![
-            "Syntax error macroexpanding let at (user:1:1).".to_owned(),
-            "java.lang.IllegalArgumentException | :or must be a map, got: [1]".to_owned(),
+            "Unexpected error macroexpanding let at (user:1:1).".to_owned(),
+            "java.lang.ClassCastException | Cannot cast java.lang.Long to java.util.Map$Entry"
+                .to_owned(),
         ]
     );
 }
@@ -619,8 +585,8 @@ fn eval_expanded_forms() {
         "nil"
     );
     assert_eq!(
-        run_last(&mut eval, "(let [{:keys [a] :or {b 1} :as m} {}] m)"),
-        "{}"
+        run_last(&mut eval, "(let [{:keys [a] :or []} {}] a)"),
+        "nil"
     );
     assert_eq!(
         run_last(&mut eval, "(let [{:keys [a] :or {b 1}} {}] a)"),
@@ -1021,7 +987,7 @@ fn monitor_exit_matrix() {
     // Fence 4b E1k/E1t/E1u: unmatched `monitor-exit` is the JVM's
     // `IllegalMonitorStateException` with an empty message; a nil
     // lockee over an empty stack is the form-naming NPE, over held
-    // monitors a mismatch.
+    // monitors a mismatch (live-oracle matrix, against review B3).
     let mut eval = boot();
     assert_eq!(
         uncaught(&mut eval, "(let [x [1]] (monitor-exit x))"),
@@ -1238,11 +1204,11 @@ fn coverage_top_up_rows() {
     // the port's documented behavior).
     assert_eq!(
         fresh("(macroexpand-1 '(let [{:keys nil} {:a 1}] 42))"),
-        "(let* [map__1 {:a 1} map__1 (if (clojure.core/seq? map__1) (if (clojure.core/next map__1) (clojure.lang.PersistentArrayMap/createAsIfByAssoc (clojure.core/to-array map__1)) (if (clojure.core/seq map__1) (clojure.core/first map__1) clojure.lang.PersistentArrayMap/EMPTY)) map__1)] 42)"
+        "(let* [map__1 {:a 1} map__1 (if (clojure.core/instance? clojure.lang.ISeq map__1) (if (clojure.core/next map__1) (clojure.lang.PersistentArrayMap/createAsIfByAssoc (clojure.core/to-array map__1)) (if (clojure.core/seq map__1) (clojure.core/first map__1) clojure.lang.PersistentArrayMap/EMPTY)) map__1)] 42)"
     );
     assert_eq!(
         fresh("(macroexpand-1 '(let [{:keys #{a}} {:a 1}] a))"),
-        "(let* [map__1 {:a 1} map__1 (if (clojure.core/seq? map__1) (if (clojure.core/next map__1) (clojure.lang.PersistentArrayMap/createAsIfByAssoc (clojure.core/to-array map__1)) (if (clojure.core/seq map__1) (clojure.core/first map__1) clojure.lang.PersistentArrayMap/EMPTY)) map__1) a (clojure.core/get map__1 :a)] a)"
+        "(let* [map__1 {:a 1} map__1 (if (clojure.core/instance? clojure.lang.ISeq map__1) (if (clojure.core/next map__1) (clojure.lang.PersistentArrayMap/createAsIfByAssoc (clojure.core/to-array map__1)) (if (clojure.core/seq map__1) (clojure.core/first map__1) clojure.lang.PersistentArrayMap/EMPTY)) map__1) a (clojure.core/get map__1 :a)] a)"
     );
     // fx4_host.rs:65-67 — `class_name` surfaces through `nth`
     // (oracle `ev-nth-object`).

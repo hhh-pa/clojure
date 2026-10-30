@@ -1,0 +1,29 @@
+letfn-list-fnspecs:
+1
+letfn-map-fnspecs:
+1
+letfn-set-fnspecs:
+1
+wrd-map-odd-drop:
+1
+wrd-map-paired:
+"THROW java.lang.ClassCastException \"class clojure.lang.MapEntry cannot be cast to class clojure.lang.Symbol (clojure.lang.MapEntry and clojure.lang.Symbol are in unnamed module of loader 'app')\""
+letfn*-nonfn-init:
+"THROW java.lang.ClassCastException \"class clojure.lang.Compiler$NumberExpr cannot be cast to class clojure.lang.Compiler$ObjExpr (clojure.lang.Compiler$NumberExpr and clojure.lang.Compiler$ObjExpr are in unnamed module of loader 'app')\""
+locking-nil:
+"THROW java.lang.NullPointerException \"Cannot enter synchronized block because \\\"locklocal__5902__auto__170\\\" is null\""
+--- monitor nil matrix (B3 pushback: held->IMS, empty->NPE; all JIT modes) ---
+monitor-exit-nil-held:
+"THROW java.lang.IllegalMonitorStateException nil"
+monitor-exit-nillocal-held:
+"THROW java.lang.IllegalMonitorStateException nil"
+monitor-exit-callnil-held:
+"THROW java.lang.IllegalMonitorStateException nil"
+monitor-exit-nil-empty:
+"THROW java.lang.NullPointerException \"Cannot exit synchronized block because \\\"null\\\" is null\""
+monitor-exit-nillocal-empty:
+"THROW java.lang.NullPointerException \"Cannot exit synchronized block because \\\"n\\\" is null\""
+monitor-enter-nil:
+"THROW java.lang.NullPointerException \"Cannot enter synchronized block because \\\"null\\\" is null\""
+monitor-exit-unheld:
+"THROW java.lang.IllegalMonitorStateException nil"

@@ -10,13 +10,14 @@
 //! (alpha9 `clojure.core`). Star specials only accept symbols, so
 //! a destructuring `let` must emit symbol bindings before analyze.
 
-use clj_value::{Map, Symbol, Value, Vector, new_map};
+use clj_value::{Map, Symbol, Value, Vector, new_map, new_set};
 
 use crate::error::{NativeError, jvm_class_of};
 use crate::eval::Evaluator;
 use crate::fx4_form::{
-    ex, gs, gs_auto, iae, is_amp, is_as, is_ident, is_symbol_val, kw, kw_get, lst, map_of, npe,
-    pr_of, qcall, seq_data, str_of, sym, sym_q, symv, tag_iseq, ucall, vector_items, vecv,
+    ex, gs, gs_auto, iae, is_amp, is_as, is_ident, is_seqable_data, is_symbol_val, iseq_err, kw,
+    kw_get, lst, map_of, npe, pr_of, qcall, seq_data, seq_items, str_of, sym, sym_q, symv,
+    tag_iseq, ucall, vector_items, vecv,
 };
 
 /// The public `destructure` var (S4b, oracle `dt-*`):
@@ -254,6 +255,7 @@ struct MapCx {
     gseq: Symbol,
     gtemp: Symbol,
     defaults: Option<Map>,
+    gdefaults: Vec<(Value, Symbol)>,
     select: Option<Value>,
     all: Option<Value>,
     excess: Option<Value>,
@@ -291,6 +293,7 @@ fn dest_map(
     val: &Value,
 ) -> Result<(), NativeError> {
     let cx = map_cx(eval, map)?;
+    emit_defaults(ret, &cx);
     emit_gmap(ret, &cx, val);
     emit_as(ret, map, &cx);
     emit_missing_slot(ret, &cx);
@@ -304,6 +307,7 @@ fn map_cx(eval: &mut Evaluator, map: &Map) -> Result<MapCx, NativeError> {
     let gseq = tag_iseq(gmap.clone());
     let gtemp = gs(eval, "temp__");
     let defaults = or_defaults(map)?;
+    let gdefaults = alloc_defaults(eval, defaults.as_ref());
     let missing = opt_copy(map, "missing");
     let notfound = alloc_notfound(eval, truthy(missing.as_ref()));
     Ok(MapCx {
@@ -311,6 +315,7 @@ fn map_cx(eval: &mut Evaluator, map: &Map) -> Result<MapCx, NativeError> {
         gseq,
         gtemp,
         defaults,
+        gdefaults,
         select: opt_copy(map, "select"),
         all: opt_copy(map, "all"),
         excess: opt_copy(map, "excess"),
@@ -320,27 +325,36 @@ fn map_cx(eval: &mut Evaluator, map: &Map) -> Result<MapCx, NativeError> {
     })
 }
 
-/// `:or` intake (fence 4b E1h/E1j/E1o): the upstream spec
-/// (`::or`, checked at EVERY map level) requires a map of
-/// simple symbols to defaults. Anything else present —
-/// non-maps, explicit `nil`, keyword/string/qualified keys —
-/// is rejected here; only an ABSENT `:or` means no defaults.
 fn or_defaults(map: &Map) -> Result<Option<Map>, NativeError> {
-    let Some(raw) = kw_get(map, "or") else {
-        return Ok(None);
-    };
-    let Value::Map(or) = raw else {
-        return Err(iae(format!(":or must be a map, got: {}", pr_of(raw))));
-    };
-    for (k, _) in or.iter() {
-        if !matches!(k, Value::Symbol(sym) if sym.namespace().is_none()) {
-            return Err(iae(format!(
-                ":or keys must be simple symbols, got: {}",
-                pr_of(k)
-            )));
-        }
+    match kw_get(map, "or") {
+        None | Some(Value::Nil) => Ok(None),
+        Some(Value::Map(m)) => Ok(Some(m.clone())),
+        Some(other) => non_map_or(other),
     }
-    Ok(Some(or.clone()))
+}
+
+fn non_map_or(v: &Value) -> Result<Option<Map>, NativeError> {
+    if !is_seqable_data(v) {
+        return Err(iseq_err(v));
+    }
+    match seq_items(v).first() {
+        None => Ok(None),
+        Some(first) => Err(NativeError::cast(
+            &jvm_class_of(first),
+            "java.util.Map$Entry",
+        )),
+    }
+}
+
+fn alloc_defaults(eval: &mut Evaluator, defaults: Option<&Map>) -> Vec<(Value, Symbol)> {
+    let Some(map) = defaults else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for (k, _) in map.iter() {
+        out.push((k.clone(), gs(eval, "default__")));
+    }
+    out
 }
 
 fn alloc_notfound(eval: &mut Evaluator, missing: bool) -> (Option<Symbol>, Option<Symbol>) {
@@ -356,6 +370,16 @@ fn opt_copy(map: &Map, name: &str) -> Option<Value> {
 
 fn truthy(v: Option<&Value>) -> bool {
     v.is_some_and(Value::is_truthy)
+}
+
+fn emit_defaults(ret: &mut Vec<Value>, cx: &MapCx) {
+    let Some(defaults) = &cx.defaults else {
+        return;
+    };
+    for (k, g) in &cx.gdefaults {
+        ret.push(symv(g));
+        ret.push(defaults.get(k).cloned().unwrap_or(Value::Nil));
+    }
 }
 
 fn emit_gmap(ret: &mut Vec<Value>, cx: &MapCx, val: &Value) {
@@ -386,13 +410,11 @@ fn emit_missing_slot(ret: &mut Vec<Value>, cx: &MapCx) {
 fn convert_form(cx: &MapCx) -> Value {
     let g = symv(&cx.gmap);
     let gs = symv(&cx.gseq);
+    let class_sym = sym("clojure.lang.ISeq");
     ucall(
         "if",
         vec![
-            // `seq?` (fence 4b E1: the JVM emits `(seq? gmap)` —
-            // `seq?` IS `instance? ISeq`, but the expansion text
-            // names it).
-            qcall("seq?", vec![g.clone()]),
+            qcall("instance?", vec![class_sym, g.clone()]),
             ucall(
                 "if",
                 vec![
@@ -798,8 +820,10 @@ fn push_required_missing(ret: &mut Vec<Value>, cx: &MapCx, local: &Value, bv: &V
 }
 
 fn getter(cx: &MapCx, local: &Value, bk: &Value, req: bool) -> Result<Value, NativeError> {
-    if has_default(cx, local) {
-        return defaulted_get(cx, local, bk, req);
+    let local_def = has_default(cx, local);
+    let key_def = has_default(cx, bk);
+    if local_def || key_def {
+        return defaulted_get(cx, local, bk, req, local_def, key_def);
     }
     Ok(plain_get(cx, bk, req))
 }
@@ -808,25 +832,35 @@ fn has_default(cx: &MapCx, key: &Value) -> bool {
     cx.defaults.as_ref().is_some_and(|m| m.contains_key(key))
 }
 
-/// A defaulted lookup (fence 4b E1a/E1i): upstream looks the
-/// LOCAL up in `:or` and INLINES the default expression into
-/// the `get` (never hoisted — hoisting would hide `:as` and
-/// earlier locals from the default). Key-side matches are
-/// ignored (never the old `Multiple` error: the local wins).
-fn defaulted_get(cx: &MapCx, local: &Value, bk: &Value, req: bool) -> Result<Value, NativeError> {
+fn defaulted_get(
+    cx: &MapCx,
+    local: &Value,
+    bk: &Value,
+    req: bool,
+    local_def: bool,
+    key_def: bool,
+) -> Result<Value, NativeError> {
+    if local_def && key_def {
+        return Err(ex(format!(
+            "Multiple :or defaults for same key: {} '{}'",
+            str_of(bk),
+            str_of(local)
+        )));
+    }
     if req {
         return Err(ex(format!(
             "Can't supply default value for required key: {}",
             str_of(bk)
         )));
     }
-    let default = cx
-        .defaults
-        .as_ref()
-        .and_then(|m| m.get(local))
-        .cloned()
+    let key = if local_def { local } else { bk };
+    let g = cx
+        .gdefaults
+        .iter()
+        .find(|(k, _)| k == key)
+        .map(|(_, g)| symv(g))
         .unwrap_or(Value::Nil);
-    Ok(qcall("get", vec![symv(&cx.gmap), bk.clone(), default]))
+    Ok(qcall("get", vec![symv(&cx.gmap), bk.clone(), g]))
 }
 
 fn plain_get(cx: &MapCx, bk: &Value, req: bool) -> Value {
@@ -887,35 +921,49 @@ fn emit_outlets(
 }
 
 fn or_dm(cx: &MapCx, walk: &Walk) -> Result<Option<Value>, NativeError> {
-    let Some(defaults) = cx.defaults.as_ref() else {
-        return Ok(None);
-    };
-    if defaults.is_empty() {
+    if cx.gdefaults.is_empty() {
         return Ok(None);
     }
     let strict = truthy(cx.select.as_ref()) || truthy(cx.all.as_ref());
     let mut pairs = Vec::new();
-    for (k, v) in defaults.iter() {
-        pairs.push((map_or_key(k, &walk.btok, strict)?, v.clone()));
+    for (k, g) in &cx.gdefaults {
+        pairs.push((map_or_key(k, &walk.btok, strict)?, symv(g)));
     }
-    Ok(Some(Value::Map(map_of(pairs))))
+    let built = map_of(pairs);
+    if strict {
+        keys_only_in_or(&built, &walk.sel, cx.gdefaults.len())?;
+    }
+    Ok(Some(Value::Map(built)))
 }
 
-/// One `:or` entry's outlet key: the bound key for the local,
-/// `nil` for unmatched locals (non-strict, probe
-/// `or-missing-key`), `does not refer` under `:select`/`:all`.
-/// Keys are validated simple symbols at intake, so no
-/// passthrough remains — and every bound key joins `sel`, so
-/// the old `keys ... appear only in :or` check is subsumed.
 fn map_or_key(key: &Value, btok: &[(Value, Value)], strict: bool) -> Result<Value, NativeError> {
+    let Value::Symbol(sym) = key else {
+        return Ok(key.clone());
+    };
     match btok_get(btok, key) {
         Some(bk) => Ok(bk),
         None if strict => Err(iae(format!(
-            "symbol {} in :or does not refer to a binding",
-            str_of(key)
+            "symbol {sym} in :or does not refer to a binding"
         ))),
         None => Ok(Value::Nil),
     }
+}
+
+fn keys_only_in_or(map: &Map, sel: &[Value], n_defaults: usize) -> Result<(), NativeError> {
+    let hit = sel.iter().filter(|s| map.contains_key(s)).count();
+    if hit == n_defaults {
+        return Ok(());
+    }
+    let mut set = new_set();
+    for (k, _) in map.iter() {
+        if !sel.iter().any(|s| s == k) {
+            set = set.insert(k.clone());
+        }
+    }
+    Err(iae(format!(
+        "keys {} appear only in :or",
+        pr_of(&Value::Set(set))
+    )))
 }
 
 fn emit_select(

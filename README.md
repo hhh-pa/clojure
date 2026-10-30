@@ -185,8 +185,9 @@ each entry asserts its exact behavior, so drift fails CI:
   kinds throw). Errors render as `file:line:col:`
   diagnostic chains, not JVM stack dumps.
 - **Analyzer builtins.** `let loop fn binding letfn with-redefs
-  with-bindings bound-fn locking` resolve as macros but
-  `macroexpand-1` returns them unchanged (documented identity).
+  with-bindings bound-fn locking` resolve as macros and
+  `macroexpand-1` expands them (`let` to `let*`, etc.) via the FX4
+  expanders; only real specials are identity.
 - **Agent executors.** `set-agent-send-executor!` /
   `set-agent-send-off-executor!` record but never install: `send`,
   `send-off`, and `future-call` always use the fixed pools, ignoring

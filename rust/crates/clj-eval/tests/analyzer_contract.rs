@@ -1052,16 +1052,9 @@ fn fn_star_errors() {
     );
     // Per-clause order: 20-count, walk, body, dup checks (probe32).
     check(
-        "(fn ([x] x) ([y] y) ([{a :x :or {a 1}}] a))",
+        "(fn ([x] x) ([y] y) ([{a :x :or {a 1 :x 2}}] a))",
         "Syntax error compiling fn* at (test:1:1).",
         "java.lang.RuntimeException | Can't have 2 overloads with same arity",
-    );
-    // Fence 4b E1h: the `fn` spec (recursive `:or` key check)
-    // fires before arity analysis, as upstream.
-    check(
-        "(fn ([x] x) ([y] y) ([{a :x :or {a 1 :x 2}}] a))",
-        "Syntax error macroexpanding clojure.core/fn at (test:1:1).",
-        "clojure.lang.ExceptionInfo | Call to clojure.core/fn did not conform to spec.",
     );
     check(
         "(fn ([x] nope) ([y] y) ([z] z))",
@@ -1074,7 +1067,7 @@ fn fn_star_errors() {
         "java.lang.RuntimeException | Unable to resolve symbol: nope in this context",
     );
     let or21 = format!(
-        "(fn ([{{a :x :or {{a 1}}}} {}] x))",
+        "(fn ([{{a :x :or {{a 1 :x 2}}}} {}] x))",
         (0..20)
             .map(|n| format!("p{n}"))
             .collect::<Vec<_>>()
@@ -1087,13 +1080,13 @@ fn fn_star_errors() {
     );
     check(
         "(fn ([x & r] x) ([a b] a) ([{a :x :or {a 1 :x 2}}] z))",
-        "Syntax error macroexpanding clojure.core/fn at (test:1:1).",
-        "clojure.lang.ExceptionInfo | Call to clojure.core/fn did not conform to spec.",
+        "Syntax error macroexpanding clojure.core/let at (test:1:1).",
+        "java.lang.Exception | Multiple :or defaults for same key: :x 'a'",
     );
     check(
         "(fn [{a :x :or {a 1 :x 2}}] nope)",
-        "Syntax error macroexpanding clojure.core/fn at (test:1:1).",
-        "clojure.lang.ExceptionInfo | Call to clojure.core/fn did not conform to spec.",
+        "Syntax error macroexpanding clojure.core/let at (test:1:1).",
+        "java.lang.Exception | Multiple :or defaults for same key: :x 'a'",
     );
     // Clause lists are span-transparent, but body lists rebind.
     check(
@@ -1105,12 +1098,10 @@ fn fn_star_errors() {
 
 #[test]
 fn destructure_semantic_errors() {
-    // Fence 4b E1h/E1i: non-simple-symbol `:or` keys fail the
-    // spec (never the old `Multiple` error — the local wins).
     check(
         "(let [{a :x :or {a 1 :x 2}} {:x 3}] a)",
-        "Syntax error macroexpanding clojure.core/let at (test:1:1).",
-        "clojure.lang.ExceptionInfo | Call to clojure.core/let did not conform to spec.",
+        "Syntax error macroexpanding let at (test:1:1).",
+        "java.lang.Exception | Multiple :or defaults for same key: :x 'a'",
     );
     check(
         "(let [{:keys [a] :select s :or {zzz 1}} {:a 1}] s)",
@@ -1119,27 +1110,26 @@ fn destructure_semantic_errors() {
     );
     check(
         "(let [{a :x :select s :or {:y 1}} {:x 5}] s)",
-        "Syntax error macroexpanding clojure.core/let at (test:1:1).",
-        "clojure.lang.ExceptionInfo | Call to clojure.core/let did not conform to spec.",
+        "Syntax error macroexpanding let at (test:1:1).",
+        "java.lang.IllegalArgumentException | keys #{:y} appear only in :or",
     );
     check(
         "(let [{:keys! [a] :or {a 1}} {:a 2}] a)",
         "Syntax error macroexpanding let at (test:1:1).",
         "java.lang.Exception | Can't supply default value for required key: :a",
     );
-    // `fn` parameters take the `fn` spec (recursive `:or` key
-    // check) before the inner-`let` walk.
+    // `fn` parameters destructure through the emitted `let`.
     check(
         "(fn [{a :x :or {a 1 :x 2}}] a)",
-        "Syntax error macroexpanding clojure.core/fn at (test:1:1).",
-        "clojure.lang.ExceptionInfo | Call to clojure.core/fn did not conform to spec.",
+        "Syntax error macroexpanding clojure.core/let at (test:1:1).",
+        "java.lang.Exception | Multiple :or defaults for same key: :x 'a'",
     );
-    // Fence 4b E1h (`or-bothstrs`): the string key fails the
-    // inner-`let` spec (the walk's local-only lookup passes).
+    // The key renders via `str`, so a `:strs` key prints bare
+    // (probe33 `or-multi-strs`).
     check(
         "(loop [{:strs [s] :or {s 1 \"s\" 2}} {}] s)",
-        "Syntax error macroexpanding clojure.core/let at (test:1:1).",
-        "clojure.lang.ExceptionInfo | Call to clojure.core/let did not conform to spec.",
+        "Syntax error macroexpanding loop at (test:1:1).",
+        "java.lang.Exception | Multiple :or defaults for same key: s 's'",
     );
 }
 
