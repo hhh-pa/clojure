@@ -1446,6 +1446,17 @@ fn gap2_with_redefs_binding_rows() {
     );
     // A list bindings form is seqable (JVM `with-redefs` seqs it).
     analyze_ok("((fn [] (with-redefs (va251 2) va251)))");
+    // Fence 4b A4: strings seq to chars (like the JVM's `seq`),
+    // so the first char fails the `var` `Symbol` cast as
+    // `Character` — never the `ISeq` error. A lone char
+    // odd-drops, like a lone map entry.
+    check(
+        "((fn [] (with-redefs \"ab\" :b)))",
+        "Syntax error compiling var at (test:1:9).",
+        "java.lang.ClassCastException | Cannot cast java.lang.Character to clojure.lang.Symbol",
+    );
+    analyze_ok("((fn [] (with-redefs \"a\" :b)))");
+    analyze_ok("((fn [] (with-redefs \"\" :b)))");
     // A scalar bindings form is the ISeq error.
     check(
         "((fn [] (with-redefs 5 :b)))",

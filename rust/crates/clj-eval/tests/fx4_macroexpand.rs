@@ -739,6 +739,19 @@ fn eval_expanded_forms() {
                 .to_owned(),
         ]
     );
+    // Fence 4b A4: string bindings seq to chars (like the JVM's
+    // `seq`) — the first char fails the `var` cast as
+    // `Character`; a lone char odd-drops and `""` is empty.
+    assert_eq!(
+        compile_err(&mut eval, "(with-redefs \"ab\" 1)"),
+        vec![
+            "Syntax error compiling var at (user:1:1).".to_owned(),
+            "java.lang.ClassCastException | Cannot cast java.lang.Character to clojure.lang.Symbol"
+                .to_owned(),
+        ]
+    );
+    assert_eq!(run_last(&mut eval, "(with-redefs \"a\" 1)"), "1");
+    assert_eq!(run_last(&mut eval, "(with-redefs \"\" 1)"), "1");
     assert_eq!(run_last(&mut eval, "z"), "1");
     assert_eq!(
         run_last(&mut eval, "(macroexpand-1 '(with-redefs [a 1 b] a))"),
@@ -971,6 +984,24 @@ fn host_natives_and_rewrites() {
                 .to_owned(),
         ]
     );
+    // Fence 4b A3: the cast is emit-time upstream (`LetFnExpr`
+    // analyzes inits then body, casts in `emit`), so a body
+    // analysis error beats a non-`fn` init CCE — while an init
+    // analysis error still beats a body one.
+    assert_eq!(
+        compile_err(&mut eval, "(letfn* [f 1] (if))"),
+        vec![
+            "Syntax error compiling if at (user:1:15).".to_owned(),
+            "java.lang.RuntimeException | Too few arguments to if".to_owned(),
+        ]
+    );
+    assert_eq!(
+        compile_err(&mut eval, "(letfn* [f (if)] (if 1 2 3 4))"),
+        vec![
+            "Syntax error compiling if at (user:1:12).".to_owned(),
+            "java.lang.RuntimeException | Too few arguments to if".to_owned(),
+        ]
+    );
     // Macros expanding to `fn` qualify as inits (analyzed, then cast).
     run_last(&mut eval, "(defmacro fnmac4b [] '(fn [x] x))");
     assert_eq!(run_last(&mut eval, "(letfn* [f (fnmac4b)] (f 1))"), "1");
@@ -1110,6 +1141,43 @@ fn monitor_exit_matrix() {
             "(try (monitor-exit :nope) (catch RuntimeException e :re))"
         ),
         ":re"
+    );
+}
+
+#[test]
+fn monitor_nested_forms() {
+    // Fence 4b A5 (`nestmon`): a monitor form nested as a lockee
+    // reads as a call. `(monitor-exit (monitor-enter x))` is the
+    // exit NPE here (the inner enter yields nil); the observed
+    // JVMs throw IMS instead — nil-with-held is exactly the
+    // unexplained B3 split condition, so this shape pins the
+    // JVMS rule, not a new mechanism. The sibling
+    // `(monitor-enter (monitor-exit x))` agrees (enter NPE, empty
+    // stack).
+    let mut eval = boot();
+    run_last(&mut eval, "(def w4b-nm :a)");
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(do (monitor-enter w4b-nm) (monitor-exit (monitor-enter w4b-nm)))"
+        ),
+        "java.lang.NullPointerException | Cannot exit synchronized block because the return value of \"clojure.lang.IFn.invoke(Object)\" is null"
+    );
+    // The failed exit released nothing: both holds still unwind
+    // (the monitor stack is thread-local — no leaks).
+    assert_eq!(run_last(&mut eval, "(monitor-exit w4b-nm)"), "nil");
+    assert_eq!(run_last(&mut eval, "(monitor-exit w4b-nm)"), "nil");
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(do (monitor-enter w4b-nm) (monitor-enter (monitor-exit w4b-nm)))"
+        ),
+        "java.lang.NullPointerException | Cannot enter synchronized block because the return value of \"clojure.lang.IFn.invoke(Object)\" is null"
+    );
+    // The inner exit released the hold; the stack is empty.
+    assert_eq!(
+        uncaught(&mut eval, "(monitor-exit w4b-nm)"),
+        "java.lang.IllegalMonitorStateException | "
     );
 }
 
