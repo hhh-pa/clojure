@@ -165,6 +165,12 @@ pub struct AgentInner {
     queue: VecDeque<QueuedAction>,
     /// Whether an action is currently running for this agent.
     running: bool,
+    /// Whether the queue front is a nil-executor wedge: the head
+    /// stays queued AND the runner stays claimed, so the count
+    /// must not cover it twice (fence 3c N1). Set-only — a wedge
+    /// never pumps, never fails, and `restart-agent` rejects clean
+    /// agents, so nothing ever clears it.
+    wedged: bool,
 }
 
 /// A first-class agent value: an identity plus the shared cell.
@@ -194,6 +200,7 @@ impl Agent {
                 error: None,
                 queue: VecDeque::new(),
                 running: false,
+                wedged: false,
             })),
         }
     }
@@ -236,7 +243,9 @@ impl Agent {
     #[must_use]
     pub fn queue_count(&self) -> usize {
         let inner = self.lock();
-        inner.queue.len() + usize::from(inner.running)
+        // The claimed runner covers the popped running head — but
+        // a wedge is queued AND claimed, so it covers only once.
+        inner.queue.len() + usize::from(inner.running) - usize::from(inner.wedged)
     }
 
     /// The JVM class name.
@@ -297,6 +306,7 @@ impl Agent {
         let mut inner = self.lock();
         inner.queue.push_front(head);
         inner.running = true;
+        inner.wedged = true;
     }
 
     /// The runner finished an action failed under `:fail`: latch
@@ -430,7 +440,9 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-        assert_eq!(agent.queue_count(), 3);
+        // Two outstanding (the wedge plus the waiter) — the claimed
+        // runner covers the wedge only once (fence 3c N1).
+        assert_eq!(agent.queue_count(), 2);
     }
 
     #[test]

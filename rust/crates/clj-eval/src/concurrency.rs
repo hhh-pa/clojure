@@ -919,9 +919,10 @@ impl AgentSystem {
     /// The pools for a custom-executor dispatch: shutdown-blind
     /// (custom executors never shut down — `shutdown-agents`
     /// touches the two pools only, like the JVM). Pools born
-    /// post-shutdown start shut (their workers idle on the dropped
-    /// queue; only custom heads ever pump on them — pool heads
-    /// still reject at the send, and handover checks the pool flag).
+    /// post-shutdown start shut (their workers exit at once — the
+    /// queue is already dropped; only custom heads ever pump on
+    /// them — pool heads still reject at the send, and handover
+    /// checks the pool flag).
     pub(crate) fn pools_for_custom(&self) -> Result<Arc<AgentPools>, NativeError> {
         if let Some(pools) = self.pools_for_send()? {
             return Ok(pools);
@@ -1781,7 +1782,9 @@ fn native_send_via(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Native
 fn native_executor(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     let _ = eval;
     check_arity("clojure.core/executor", args, &[0])?;
-    Ok(Value::Executor(Executor::new()))
+    Executor::new()
+        .map(Value::Executor)
+        .map_err(|_| spawn_failed())
 }
 
 /// Refuse `await`/`await-for` inside an agent action (the JVM's
@@ -2220,10 +2223,21 @@ fn native_release_pending_sends(
     }
     match eval.agent_pools_for_send()? {
         Some(pools) => release_outbox(pending, &pools),
+        // Pools gone: each head still runs on its OWN executor
+        // (upstream `releasePendingSends` → `enqueue` → `execute`
+        // ignores the shutdown — only pool heads reject, like the
+        // `enqueue_send_item` arms).
         None => {
             for (target, item) in pending {
                 if let Some(head) = target.enqueue_nested(item) {
-                    reject_head(&target, head);
+                    match head.exec.clone() {
+                        ExecTarget::Pool => reject_head(&target, head),
+                        ExecTarget::Custom(_) => {
+                            let pools = eval.agent_pools_for_custom()?;
+                            dispatch_head(&pools, &target, head);
+                        }
+                        ExecTarget::Nil => nil_executor_wedge(&target, head),
+                    }
                 }
             }
         }

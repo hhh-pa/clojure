@@ -55,27 +55,37 @@ pub struct Executor {
 
 impl Executor {
     /// A fresh single-thread executor (spawns its worker now, so
-    /// submits never queue behind a lazy start).
-    #[must_use]
-    pub fn new() -> Self {
+    /// submits never queue behind a lazy start). A spawn failure
+    /// is an error (near-unreachable on supported targets — the
+    /// pool workers pin the same failure the same way).
+    pub fn new() -> Result<Self, std::io::Error> {
         let id = EXECUTOR_ID.fetch_add(1, Ordering::Relaxed);
         let pool_no = EXECUTOR_POOL.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = mpsc::channel::<ExecutorJob>();
         let name = format!("pool-{pool_no}-thread-1");
-        // A spawn failure leaves a sender with no receiver: submits
-        // drop, like the JVM's rejected `execute` — and the pool
-        // constructors already pin spawn failure as unreachable on
-        // supported targets, so no error path is exposed here.
-        let _ = std::thread::Builder::new().name(name).spawn(move || {
+        let spawned = std::thread::Builder::new().name(name).spawn(move || {
             while let Ok(job) = rx.recv() {
                 job();
             }
         });
-        Self {
+        Self::from_spawned(id, pool_no, tx, spawned)
+    }
+
+    /// Build over an explicit spawn result (takes the `Result` so
+    /// tests can drive the failure, like the pool workers'
+    /// `install_worker`). The worker handle detaches — nothing
+    /// ever joins executor threads (daemon-like at process exit).
+    fn from_spawned(
+        id: u64,
+        pool_no: u64,
+        tx: Sender<ExecutorJob>,
+        spawned: std::io::Result<std::thread::JoinHandle<()>>,
+    ) -> Result<Self, std::io::Error> {
+        spawned.map(|_| Self {
             id,
             pool_no,
             pool: Arc::new(ExecutorPool { tx }),
-        }
+        })
     }
 
     /// The print identity.
@@ -110,12 +120,6 @@ impl Executor {
     }
 }
 
-impl Default for Executor {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::Executor;
@@ -123,7 +127,7 @@ mod tests {
     /// The worker runs jobs FIFO on its `pool-N-thread-1` thread.
     #[test]
     fn worker_runs_fifo_on_named_thread() {
-        let ex = Executor::new();
+        let ex = Executor::new().unwrap();
         let (tx, rx) = std::sync::mpsc::channel();
         for i in 0..3 {
             let tx = tx.clone();
@@ -143,12 +147,20 @@ mod tests {
     /// Clones share the pool; fresh executors do not.
     #[test]
     fn identity_is_shared_pool() {
-        let a = Executor::new();
+        let a = Executor::new().unwrap();
         let b = a.clone();
-        let c = Executor::new();
+        let c = Executor::new().unwrap();
         assert!(a.same_pool(&b));
         assert!(!a.same_pool(&c));
         assert_eq!(a.id(), b.id());
         assert_ne!(a.id(), c.id());
+    }
+
+    /// A spawn failure is an error, not a dead pool (fence 3c N2).
+    #[test]
+    fn spawn_failure_is_an_error() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let err = std::io::Error::other("boom");
+        assert!(super::Executor::from_spawned(1, 1, tx, Err(err)).is_err());
     }
 }
