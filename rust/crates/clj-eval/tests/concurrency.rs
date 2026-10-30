@@ -3133,7 +3133,7 @@ fn locking_symbol_exit_matches_by_identity() {
     assert_eq!(
         run_last(
             &mut eval,
-            "(let [s 'g114-sym] (fx4-monitor-enter s) [(try (fx4-monitor-exit 'g114-sym) :released (catch IllegalStateException e :ims)) (fx4-monitor-exit s)])"
+            "(let [s 'g114-sym] (fx4-monitor-enter s) [(try (fx4-monitor-exit 'g114-sym) :released (catch IllegalMonitorStateException e :ims)) (fx4-monitor-exit s)])"
         ),
         "[:ims nil]"
     );
