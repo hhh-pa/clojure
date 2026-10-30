@@ -25,19 +25,43 @@ use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use crate::datareaders::{TagError, validate_inst};
 
 /// A UUID: the 128 bits as most/least significant words (S9).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+/// The `id` is the allocation identity for `identical?` (fence
+/// 4a) — equality and hashing cover the bits only, like the JVM.
+#[derive(Clone, Copy, Debug)]
 pub struct Uuid {
     /// The most significant 64 bits.
     pub hi: u64,
     /// The least significant 64 bits.
     pub lo: u64,
+    id: u64,
+}
+
+// Manual equality over the bits only (the identity id is
+// invisible, mirroring the JVM's `UUID.equals`).
+impl PartialEq for Uuid {
+    fn eq(&self, other: &Self) -> bool {
+        self.hi == other.hi && self.lo == other.lo
+    }
+}
+
+impl Eq for Uuid {}
+
+impl std::hash::Hash for Uuid {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.hi.hash(state);
+        self.lo.hash(state);
+    }
 }
 
 impl Uuid {
     /// Build from raw words (no masking — construction paths mask).
     #[must_use]
     pub fn from_bits(hi: u64, lo: u64) -> Self {
-        Self { hi, lo }
+        Self {
+            hi,
+            lo,
+            id: crate::value::next_identity_id(),
+        }
     }
 
     /// Stamp two random words as a version-4 UUID (the
@@ -48,7 +72,15 @@ impl Uuid {
         Self {
             hi: (hi & 0xffff_ffff_ffff_0fff) | 0x4000,
             lo: (lo & 0x3fff_ffff_ffff_ffff) | 0x8000_0000_0000_0000,
+            id: crate::value::next_identity_id(),
         }
+    }
+
+    /// The allocation identity for `identical?` (fence 4a): minted
+    /// at every construction, preserved by `Clone`/`Copy`.
+    #[must_use]
+    pub fn id(&self) -> u64 {
+        self.id
     }
 
     /// `toString`: lowercase canonical with fixed dashes.
@@ -296,18 +328,47 @@ fn group_error(part: &str, err: GroupError) -> TagError {
     }
 }
 
-/// An instant: millis since the epoch, UTC (S9).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+/// An instant: millis since the epoch, UTC (S9). The `id` is the
+/// allocation identity for `identical?` (fence 4a) — equality and
+/// hashing cover the millis only, like the JVM.
+#[derive(Clone, Copy, Debug)]
 pub struct Instant {
     /// Millis since 1970-01-01T00:00:00Z.
     pub millis: i64,
+    id: u64,
+}
+
+// Manual equality over the millis only (the identity id is
+// invisible, mirroring the JVM's `Date.equals`).
+impl PartialEq for Instant {
+    fn eq(&self, other: &Self) -> bool {
+        self.millis == other.millis
+    }
+}
+
+impl Eq for Instant {}
+
+impl std::hash::Hash for Instant {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.millis.hash(state);
+    }
 }
 
 impl Instant {
     /// Build from millis.
     #[must_use]
     pub fn from_millis(millis: i64) -> Self {
-        Self { millis }
+        Self {
+            millis,
+            id: crate::value::next_identity_id(),
+        }
+    }
+
+    /// The allocation identity for `identical?` (fence 4a): minted
+    /// at every construction, preserved by `Clone`/`Copy`.
+    #[must_use]
+    pub fn id(&self) -> u64 {
+        self.id
     }
 
     /// `read-instant-date` over an already-validated payload: split
@@ -3475,5 +3536,35 @@ mod tests {
         let b = uri("http://h/x").id();
         assert_ne!(a, b);
         assert!(b > a);
+    }
+
+    fn std_hash<T: std::hash::Hash>(v: &T) -> u64 {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::Hasher;
+        let mut h = DefaultHasher::new();
+        v.hash(&mut h);
+        h.finish()
+    }
+
+    /// `Hash` is `Eq`-consistent and id-blind: equal words hash
+    /// equal (fence 4a coverage: the `Uuid::hash` body).
+    #[test]
+    fn uuid_hash_is_eq_consistent() {
+        let a = Uuid::from_bits(0x0123_4567_89ab_cdef, 0xfedc_ba98_7654_3210);
+        let b = Uuid::from_bits(0x0123_4567_89ab_cdef, 0xfedc_ba98_7654_3210);
+        assert_eq!(a, b);
+        assert_eq!(std_hash(&a), std_hash(&b));
+        assert_ne!(std_hash(&a), std_hash(&Uuid::from_bits(1, 2)));
+    }
+
+    /// Same contract for instants (fence 4a coverage: the
+    /// `Instant::hash` body).
+    #[test]
+    fn instant_hash_is_eq_consistent() {
+        let a = Instant::from_millis(1_700_000_000_000);
+        let b = Instant::from_millis(1_700_000_000_000);
+        assert_eq!(a, b);
+        assert_eq!(std_hash(&a), std_hash(&b));
+        assert_ne!(std_hash(&a), std_hash(&Instant::from_millis(7)));
     }
 }

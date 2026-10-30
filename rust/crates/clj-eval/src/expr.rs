@@ -729,13 +729,16 @@ impl<'a> Analyzer<'a> {
             // Entries in code (syntax-quote can embed them) analyze
             // like vector literals, answering plain vectors (Oracle
             // FX2 `eval-entry-class`).
-            Value::MapEntry { key, val } => {
+            Value::MapEntry { key, val, .. } => {
                 let tmp = clj_value::Vector::from_vec(vec![(**key).clone(), (**val).clone()]);
                 self.analyze_vec_lit(&tmp, span)
             }
             Value::Map(m) => self.analyze_map_lit(m, span),
             Value::Set(s) => self.analyze_set_lit(s, span),
-            _ => Ok(Expr::Literal(form.clone())),
+            // String literals canonicalize through the JVM
+            // string-pool analog (fence 4a — inside the helper,
+            // so this match gains no arm).
+            _ => Ok(Expr::Literal(clj_value::intern_string_value(form))),
         }
     }
 
@@ -1435,7 +1438,10 @@ impl<'a> Analyzer<'a> {
                 Some("quote".to_owned()),
             ));
         }
-        Ok(Expr::Quote(items[1].clone()))
+        // The payload's literal strings canonicalize (fence 4a):
+        // `(identical? (quote "ab") "ab")` is true on the JVM
+        // (the quote answers the interned constant).
+        Ok(Expr::Quote(clj_value::intern_literal_strings(items[1])))
     }
 
     /// Resolve a symbol as a var (shared by `var` and `binding`
@@ -2314,7 +2320,7 @@ enum Pat<'v> {
 fn vector_shape_items(v: &Value) -> Option<Vec<&Value>> {
     match v {
         Value::Vector(vec) => Some(vec.iter().collect()),
-        Value::MapEntry { key, val } => Some(vec![key.as_ref(), val.as_ref()]),
+        Value::MapEntry { key, val, .. } => Some(vec![key.as_ref(), val.as_ref()]),
         _ => None,
     }
 }

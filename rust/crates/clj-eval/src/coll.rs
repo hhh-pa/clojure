@@ -96,7 +96,9 @@ pub(crate) fn lookup_present(
         Value::Map(m) if m.is_sorted() => sorted_lookup_map(eval, m, key),
         Value::Map(m) => Ok(m.get(key).cloned()),
         Value::Vector(x) => Ok(lookup_vector_slot(x, key)),
-        Value::MapEntry { key: ek, val: ev } => Ok(lookup_entry_slot(ek, ev, key)),
+        Value::MapEntry {
+            key: ek, val: ev, ..
+        } => Ok(lookup_entry_slot(ek, ev, key)),
         // Arrays narrow any `Number` key (`intValue`, lenient —
         // OOB/non-`Number`/nil miss; S15 oracles `b-get`,
         // `f-get-*`, `e-get-*`).
@@ -284,7 +286,9 @@ pub(crate) fn find_entry(
         Value::Map(m) => find_entry_map(eval, m, key),
         Value::Vector(x) => Ok(find_entry_vector(x, key)),
         Value::PrimitiveVector(p) => Ok(find_entry_pv(p, key)),
-        Value::MapEntry { key: ek, val: ev } => Ok(int_key(key).and_then(|i| {
+        Value::MapEntry {
+            key: ek, val: ev, ..
+        } => Ok(int_key(key).and_then(|i| {
             usize::try_from(i as i32).ok().and_then(|idx| match idx {
                 0 => Some((key.clone(), (**ek).clone())),
                 1 => Some((key.clone(), (**ev).clone())),
@@ -340,7 +344,7 @@ fn map_conj_plan(eval: &mut Evaluator, x: &Value) -> Result<MapConjPlan, NativeE
         // `Vec` pairs assoc like vectors (S15); non-pairs are
         // the pair error, never the entry cast.
         Value::PrimitiveVector(p) => pair_plan(&p.items()),
-        Value::MapEntry { key, val } => Ok(MapConjPlan::Pair((**key).clone(), (**val).clone())),
+        Value::MapEntry { key, val, .. } => Ok(MapConjPlan::Pair((**key).clone(), (**val).clone())),
         _ => {
             if let Some(sv) = as_subvector(x) {
                 if sv.len() != 2 {
@@ -361,7 +365,7 @@ fn map_conj_plan(eval: &mut Evaluator, x: &Value) -> Result<MapConjPlan, NativeE
                     return Ok(MapConjPlan::Entries(pairs));
                 }
                 let head = first_value(eval, &cur).map_err(signal_to_native)?;
-                let Value::MapEntry { key, val } = head else {
+                let Value::MapEntry { key, val, .. } = head else {
                     return Err(cce_err(&head, "java.util.Map$Entry"));
                 };
                 pairs.push(((*key).clone(), (*val).clone()));
@@ -442,7 +446,7 @@ fn conj_one(eval: &mut Evaluator, coll: &Value, x: Value) -> Result<Value, Nativ
         )),
         // Conj onto an entry appends like its 2-vector (Oracle FX2
         // `conj`, `merge-entry`).
-        Value::MapEntry { key, val } => {
+        Value::MapEntry { key, val, .. } => {
             let tmp = Vector::from_vec(vec![(**key).clone(), (**val).clone()]);
             Ok(Value::Vector(tmp.push_back(x)))
         }
@@ -579,7 +583,7 @@ fn assoc3(eval: &mut Evaluator, coll: &Value, k: &Value, v: Value) -> Result<Val
         }
         // `assoc` on an entry answers a plain vector (Oracle FX2
         // `assoc0`, `assoc1`, `assoc2`).
-        Value::MapEntry { key, val } => {
+        Value::MapEntry { key, val, .. } => {
             let Some(i) = int_key(k) else {
                 return Err(NativeError::new(
                     ThrowClass::IllegalArgumentException,
@@ -830,7 +834,7 @@ fn merge_with3_seq_tail(
             return Ok(m);
         }
         let head = first_value(eval, &cur).map_err(signal_to_native)?;
-        let Value::MapEntry { key, val } = head else {
+        let Value::MapEntry { key, val, .. } = head else {
             return Err(cce_err(&head, "java.util.Map$Entry"));
         };
         m = merge_kv(eval, &m, (*key).clone(), (*val).clone(), f)?;
@@ -1324,7 +1328,7 @@ fn nth_indexed(coll: &Value, n: i32, not_found: Option<&Value>) -> Result<Value,
             .ok()
             .and_then(|idx| x.iter().nth(idx).cloned()),
         Value::PrimitiveVector(p) => usize::try_from(n).ok().and_then(|idx| p.get(idx).cloned()),
-        Value::MapEntry { key, val } => usize::try_from(n).ok().and_then(|idx| match idx {
+        Value::MapEntry { key, val, .. } => usize::try_from(n).ok().and_then(|idx| match idx {
             0 => Some((**key).clone()),
             1 => Some((**val).clone()),
             _ => None,
@@ -2013,7 +2017,7 @@ fn subvec3(v: &Value, start_v: &Value, end_v: &Value) -> Result<Value, NativeErr
         // `subvec` of a primitive vector is a plain subvector
         // (S15 oracle `j-subvec-cls`).
         Value::PrimitiveVector(p) => (Vector::from_vec(p.items()), 0, p.len()),
-        Value::MapEntry { key, val } => (
+        Value::MapEntry { key, val, .. } => (
             Vector::from_vec(vec![(**key).clone(), (**val).clone()]),
             0,
             2,

@@ -1264,7 +1264,7 @@ fn view_entry(h: &Value, key: &Value, tag: &Value) -> Result<Option<Set>, HierEr
 fn vec_items(v: &Value) -> Option<Vec<&Value>> {
     match v {
         Value::Vector(vv) => Some(vv.iter().collect()),
-        Value::MapEntry { key, val } => Some(vec![key, val]),
+        Value::MapEntry { key, val, .. } => Some(vec![key, val]),
         _ => None,
     }
 }

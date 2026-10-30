@@ -2882,17 +2882,23 @@ fn identical_kinds() {
     ] {
         assert_eq!(run(&mut eval, src), "true", "{src}");
     }
-    // Cache/interning-dependent rows DIVERGE (forced, §1.9): the JVM
-    // answers false (distinct boxes), the port compares values.
+    // Cache/interning rows are JVM-identical (fence 4a): the JVM
+    // answers false (distinct boxes), and so does the port.
     for src in [
         "(identical? 10000000000 10000000000)",
         "(identical? 1.5 1.5)",
         "(identical? \\€ \\€)",
+        "(identical? (str \\a) (str \\a))",
+        "(identical? 'a 'a)",
+    ] {
+        assert_eq!(run(&mut eval, src), "false", "{src}");
+    }
+    // Deferred (post-tower, per the (2)↔(4) sequencing): big kinds
+    // still compare by value until the Arc-box lands.
+    for src in [
         "(identical? (bigint 5) (bigint 5))",
         "(identical? 1.5M 1.5M)",
         "(identical? 1/3 1/3)",
-        "(identical? (str \\a) (str \\a))",
-        "(identical? 'a 'a)",
     ] {
         assert_eq!(run(&mut eval, src), "true", "{src}");
     }
@@ -2954,6 +2960,128 @@ fn identical_kinds() {
         ),
         "false"
     );
+}
+
+// Fence 4a: the boxing caches, exactly (oracle `docs/fence-4a-identity/probes.md`
+// P1). Fresh boxes come from arithmetic (literals would share the
+// analyzer's constants); same-binding rows pin the unboxed-locals
+// rebox rule (outside the cache there is no object to share).
+#[test]
+fn identical_caches() {
+    let mut eval = boot();
+    // Long cache hits (fresh boxes, same binding, mixed).
+    for src in [
+        "(identical? (+ 100 27) (+ 100 27))",
+        "(identical? (+ 100 27) (+ 120 7))",
+        "(identical? (+ -100 -28) (+ -120 -8))",
+        "(let [n (+ 100 27)] (identical? n n))",
+        "(identical? (+ 100 27) 127)",
+        "(identical? 127 127)",
+        "(identical? -128 -128)",
+    ] {
+        assert_eq!(run(&mut eval, src), "true", "{src}");
+    }
+    // Outside the cache: never identical, even same-binding.
+    for src in [
+        "(identical? (+ 127 1) (+ 100 28))",
+        "(identical? (+ -100 -29) (+ -120 -9))",
+        "(identical? (+ 999 1) (+ 500 500))",
+        "(let [n (+ 999 1)] (identical? n n))",
+        "(identical? 128 128)",
+        "(identical? 1000 1000)",
+    ] {
+        assert_eq!(run(&mut eval, src), "false", "{src}");
+    }
+    // Char cache hits and misses.
+    for src in [
+        "(identical? (char 97) (char 97))",
+        "(identical? (char 127) (char 127))",
+        "(identical? \\a \\a)",
+    ] {
+        assert_eq!(run(&mut eval, src), "true", "{src}");
+    }
+    for src in [
+        "(identical? (char 200) (char 200))",
+        "(identical? (char 128) (char 128))",
+        "(let [c (char 200)] (identical? c c))",
+    ] {
+        assert_eq!(run(&mut eval, src), "false", "{src}");
+    }
+    // Doubles never cache — not even same-binding NaN.
+    for src in [
+        "(identical? (+ 1.0 0.0) (+ 1.0 0.0))",
+        "(identical? 0.0 -0.0)",
+        "(identical? 1.5 (+ 1.0 0.5))",
+        "(let [d (/ 0.0 0.0)] (identical? d d))",
+    ] {
+        assert_eq!(run(&mut eval, src), "false", "{src}");
+    }
+    // Cross-kind pairs are never identical.
+    for src in ["(identical? 1 1.0)", "(identical? :a \"a\")"] {
+        assert_eq!(run(&mut eval, src), "false", "{src}");
+    }
+}
+
+// Fence 4a: string pooling (oracle P2). Literals share the
+// interned constant (including through `quote`); every runtime
+// construction is fresh.
+#[test]
+fn identical_strings() {
+    let mut eval = boot();
+    for src in [
+        "(identical? \"ab\" \"ab\")",
+        "(let [s (str \"a\" \"\")] (identical? s s))",
+        "(identical? (quote \"ab\") \"ab\")",
+        "(identical? (first (quote (\"ab\"))) \"ab\")",
+    ] {
+        assert_eq!(run(&mut eval, src), "true", "{src}");
+    }
+    for src in [
+        "(identical? (str \"a\" \"\") (str \"a\" \"\"))",
+        "(identical? (subs \"abc\" 0 1) (subs \"abc\" 0 1))",
+        "(identical? \"a\" (str \"a\" \"\"))",
+    ] {
+        assert_eq!(run(&mut eval, src), "false", "{src}");
+    }
+}
+
+// Fence 4a: heap objects (oracle P3). Symbols, uuids, arrays,
+// primitive vectors, tagged literals, and map entries: same
+// binding true, distinct-but-equal false. Keywords intern
+// (always true). `with-meta` news (false). Instants, uris, and
+// reader conditionals have no Clojure surface (upstream has no
+// URI constructor either) — pinned at Rust level in
+// `classemu.rs` (`identical_unreachable_kinds`).
+#[test]
+fn identical_heap() {
+    let mut eval = boot();
+    for src in [
+        "(identical? (keyword \"a\") (keyword \"a\"))",
+        "(identical? (keyword \"n\" \"a\") (keyword \"n\" \"a\"))",
+        "(identical? :a :a)",
+        "(let [s (symbol \"q\")] (identical? s s))",
+        "(let [u (parse-uuid \"123e4567-e89b-12d3-a456-426614174000\")] (identical? u u))",
+        "(let [a (int-array [1])] (identical? a a))",
+        "(let [p (vector-of :int 1)] (identical? p p))",
+        "(let [t (tagged-literal 'x 1)] (identical? t t))",
+        "(let [e (find {:a 1} :a)] (identical? e e))",
+        "(let [p #\"a\"] (identical? p p))",
+        "(identical? + +)",
+    ] {
+        assert_eq!(run(&mut eval, src), "true", "{src}");
+    }
+    for src in [
+        "(identical? (symbol \"a\") (symbol \"a\"))",
+        "(identical? (parse-uuid \"123e4567-e89b-12d3-a456-426614174000\") (parse-uuid \"123e4567-e89b-12d3-a456-426614174000\"))",
+        "(identical? (int-array [1]) (int-array [1]))",
+        "(identical? (vector-of :int 1) (vector-of :int 1))",
+        "(identical? (tagged-literal 'x 1) (tagged-literal 'x 1))",
+        "(identical? (find {:a 1} :a) (find {:a 1} :a))",
+        "(let [s 'a] (identical? s (with-meta s {:x 1})))",
+        "(let [v [1]] (identical? v (with-meta v {:x 1})))",
+    ] {
+        assert_eq!(run(&mut eval, src), "false", "{src}");
+    }
 }
 
 // d-macroexpand/inline-arities/has-inline: no macroexpand; the port
@@ -3034,21 +3162,21 @@ fn identical_first_class() {
         run(&mut eval, "[(= [1] [1]) (identical? [1] [1])]"),
         "[true false]"
     );
-    // d-eq-vs-ident-big/str: `=` agrees; `identical?` diverges per
-    // the value rule (above).
+    // d-eq-vs-ident-big/str: `=` agrees; `identical?` is
+    // JVM-identical per the fence-4a cache rules (above).
     assert_eq!(
         run(
             &mut eval,
             "[(= 10000000000 10000000000) (identical? 10000000000 10000000000)]"
         ),
-        "[true true]"
+        "[true false]"
     );
     assert_eq!(
         run(
             &mut eval,
             "[(= (str \\a) (str \\a)) (identical? (str \\a) (str \\a))]"
         ),
-        "[true true]"
+        "[true false]"
     );
 }
 

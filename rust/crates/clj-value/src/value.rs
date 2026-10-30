@@ -81,6 +81,110 @@ fn next_set_id() -> u64 {
     SET_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
+/// Shared identity counter (fence 4a): every freshly constructed
+/// [`Symbol`](crate::Symbol)/[`Uuid`](crate::Uuid)/[`Instant`](crate::Instant)/
+/// [`PrimitiveVector`](crate::PrimitiveVector)/`MapEntry`/`TaggedLiteral`/
+/// `ReaderConditional` mints an id here (`Clone` preserves it, like
+/// the per-kind counters above; equality and hashing ignore the
+/// ids). One counter for all seven: ids are only ever compared
+/// within a kind.
+static IDENTITY_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+pub(crate) fn next_identity_id() -> u64 {
+    IDENTITY_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// The JVM string-pool analog (fence 4a): every string LITERAL the
+/// analyzer walks canonicalizes here, so equal literals share one
+/// `Arc` (like the JVM's interned class constants) while runtime
+/// constructions (`str`, `subs`, `read-string` results) stay fresh.
+/// `identical?` on strings is `Arc::ptr_eq`.
+static STRING_POOL: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<Arc<str>, Arc<str>>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+/// Canonicalize one analyzed string literal (see [`STRING_POOL`]).
+/// The analyzer calls this for every literal string it walks
+/// (including inside `quote` forms via
+/// [`intern_literal_strings`]); runtime string constructions must
+/// NOT call it (they stay fresh, like the JVM's `new String`).
+#[must_use]
+pub fn intern_string(s: &Arc<str>) -> Arc<str> {
+    let mut pool = STRING_POOL.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(hit) = pool.get(s) {
+        return hit.clone();
+    }
+    pool.insert(s.clone(), s.clone());
+    s.clone()
+}
+
+/// Canonicalize a literal form's top-level string, if any (see
+/// [`intern_string`]): the analyzer's catch-all literal arm runs
+/// every non-collection scalar through here, so string literals
+/// pool without the analyzer gaining a match arm (complexity
+/// ratchet).
+#[must_use]
+pub fn intern_string_value(form: &Value) -> Value {
+    match form {
+        Value::Str(s) => Value::Str(intern_string(s)),
+        _ => form.clone(),
+    }
+}
+
+/// Rebuild a quoted form with every literal string canonicalized
+/// (see [`intern_string`]): `(identical? (quote "ab") "ab")` is
+/// `true` on the JVM (the quote answers the interned constant),
+/// so the analyzer runs this over `quote` payloads. Collections
+/// rebuild with fresh identity ids (each quote form is its own
+/// constant); nested scalars keep their semantics (symbols stay
+/// fresh — the JVM news them per read).
+#[must_use]
+pub fn intern_literal_strings(form: &Value) -> Value {
+    match form {
+        Value::Str(s) => Value::Str(intern_string(s)),
+        Value::List(l) => {
+            let items = l.iter().map(intern_literal_strings).collect();
+            let mut out = List::from_vec(items);
+            if let Some(meta) = l.meta() {
+                out = out.with_meta(Some(meta.clone()));
+            }
+            Value::List(out)
+        }
+        Value::Vector(v) => {
+            let items = v.iter().map(intern_literal_strings).collect();
+            let mut out = Vector::from_vec(items);
+            if let Some(meta) = v.meta() {
+                out = out.with_meta(Some(meta.clone()));
+            }
+            Value::Vector(out)
+        }
+        // The ordered rebuilds preserve metadata, key order, and
+        // the map/set class flags (each quote form stays its own
+        // constant with a fresh identity id).
+        Value::Map(m) => {
+            let entries = m
+                .iter()
+                .map(|(k, v)| (intern_literal_strings(k), intern_literal_strings(v)))
+                .collect();
+            Value::Map(m.clone().with_ordered_entries(entries))
+        }
+        Value::Set(s) => {
+            let members = s.iter().map(intern_literal_strings).collect();
+            Value::Set(s.clone().with_ordered_members(members))
+        }
+        Value::MapEntry { key, val, .. } => {
+            map_entry(intern_literal_strings(key), intern_literal_strings(val))
+        }
+        Value::TaggedLiteral { tag, form, .. } => {
+            tagged_literal(tag.clone(), intern_literal_strings(form))
+        }
+        Value::ReaderConditional { form, splicing, .. } => {
+            reader_conditional(intern_literal_strings(form), *splicing)
+        }
+        other => other.clone(),
+    }
+}
+
 /// A persistent list of values (thread-safe rpds list) with optional
 /// metadata. Method names match the bare rpds type so readers keep
 /// compiling; equality and hashing ignore the metadata.
@@ -781,6 +885,29 @@ pub fn map_entry(key: Value, val: Value) -> Value {
     Value::MapEntry {
         key: Box::new(key),
         val: Box::new(val),
+        id: next_identity_id(),
+    }
+}
+
+/// A tagged literal (fence 4a funnel: the only `TaggedLiteral`
+/// constructor — mints the identity id).
+#[must_use]
+pub fn tagged_literal(tag: Symbol, form: Value) -> Value {
+    Value::TaggedLiteral {
+        tag,
+        form: Box::new(form),
+        id: next_identity_id(),
+    }
+}
+
+/// A reader conditional (fence 4a funnel: the only
+/// `ReaderConditional` constructor — mints the identity id).
+#[must_use]
+pub fn reader_conditional(form: Value, splicing: bool) -> Value {
+    Value::ReaderConditional {
+        form: Box::new(form),
+        splicing,
+        id: next_identity_id(),
     }
 }
 
@@ -822,8 +949,13 @@ pub enum Value {
     /// A map entry (`clojure.lang.MapEntry`, FX2): a 2-element
     /// `APersistentVector` — vector-like (`nth`, `conj`, `=`,
     /// `hash`) but never an `IObj` (no metadata slot by
-    /// construction) and never an `IPersistentMap`.
-    MapEntry { key: Box<Value>, val: Box<Value> },
+    /// construction) and never an `IPersistentMap`. The `id`
+    /// is the allocation identity for `identical?` (fence 4a).
+    MapEntry {
+        key: Box<Value>,
+        val: Box<Value>,
+        id: u64,
+    },
     /// Persistent map.
     Map(Map),
     /// Persistent set.
@@ -840,9 +972,19 @@ pub enum Value {
     /// of the payload, and `Value` travels in `Result` errors.
     Uri(Box<crate::Uri>),
     /// `#tag form` under `:read-cond :preserve` (or suppressed reads).
-    TaggedLiteral { tag: Symbol, form: Box<Value> },
+    /// The `id` is the allocation identity for `identical?` (fence 4a).
+    TaggedLiteral {
+        tag: Symbol,
+        form: Box<Value>,
+        id: u64,
+    },
     /// `#?` / `#?@` under `:read-cond :preserve`.
-    ReaderConditional { form: Box<Value>, splicing: bool },
+    /// The `id` is the allocation identity for `identical?` (fence 4a).
+    ReaderConditional {
+        form: Box<Value>,
+        splicing: bool,
+        id: u64,
+    },
     /// A namespace Var (S4): identity-compared by `id`, like the JVM.
     Var(Var),
     /// An unbound Var's sentinel root (S4): compared by `var_id`.
@@ -1153,17 +1295,23 @@ fn value_eq_mid(a: &Value, b: &Value) -> bool {
         // fallback. The `Hash` impl stays `equiv`-based: bits-equal
         // forms hash equally, so the `Eq`/`Hash` contract holds.
         (
-            Value::TaggedLiteral { tag: t1, form: f1 },
-            Value::TaggedLiteral { tag: t2, form: f2 },
+            Value::TaggedLiteral {
+                tag: t1, form: f1, ..
+            },
+            Value::TaggedLiteral {
+                tag: t2, form: f2, ..
+            },
         ) => tagged_literal_eq(t1, f1, t2, f2),
         (
             Value::ReaderConditional {
                 form: f1,
                 splicing: s1,
+                ..
             },
             Value::ReaderConditional {
                 form: f2,
                 splicing: s2,
+                ..
             },
         ) => reader_cond_eq(*s1, f1, *s2, f2),
         // S4 identity semantics, mirroring `=`: ids only, never
@@ -1379,7 +1527,7 @@ fn hash_value_mid<H: Hasher>(v: &Value, state: &mut H) {
         // A map entry hashes exactly like its 2-vector (they
         // are `=`, so the `Eq`/`Hash` contract requires it;
         // Oracle FX2 `hash-eq`, `distinct`, `frequencies`).
-        Value::MapEntry { key, val } => {
+        Value::MapEntry { key, val, .. } => {
             state.write_u8(8);
             state.write_usize(2);
             key.hash(state);
@@ -1401,12 +1549,12 @@ fn hash_value_mid<H: Hasher>(v: &Value, state: &mut H) {
             state.write_u8(11);
             pattern.hash(state);
         }
-        Value::TaggedLiteral { tag, form } => {
+        Value::TaggedLiteral { tag, form, .. } => {
             state.write_u8(12);
             tag.hash(state);
             form.hash(state);
         }
-        Value::ReaderConditional { form, splicing } => {
+        Value::ReaderConditional { form, splicing, .. } => {
             state.write_u8(13);
             splicing.hash(state);
             form.hash(state);
@@ -1721,7 +1869,7 @@ fn coll_equiv(c: &Value, x: &Value) -> bool {
         Value::List(items) => seq_coll_equiv(items.len(), items.iter(), x),
         Value::Vector(items) => seq_coll_equiv(items.len(), items.iter(), x),
         Value::PrimitiveVector(p) => seq_coll_equiv(p.len(), p.iter(), x),
-        Value::MapEntry { key, val } => {
+        Value::MapEntry { key, val, .. } => {
             seq_coll_equiv(2, [key.as_ref(), val.as_ref()].into_iter(), x)
         }
         Value::Map(m) => map_coll_equiv(m, x),
@@ -1739,7 +1887,7 @@ fn seq_coll_equiv<'a>(len: usize, items: impl Iterator<Item = &'a Value>, x: &'a
         Value::List(o) => seq_eq(len, items, o.len(), o.iter(), jvm_equiv),
         Value::Vector(o) => seq_eq(len, items, o.len(), o.iter(), jvm_equiv),
         Value::PrimitiveVector(p) => seq_eq(len, items, p.len(), p.iter(), jvm_equiv),
-        Value::MapEntry { key, val } => seq_eq(
+        Value::MapEntry { key, val, .. } => seq_eq(
             len,
             items,
             2,
@@ -1783,7 +1931,7 @@ fn seq_items(v: &Value) -> Option<Vec<Value>> {
         Value::Vector(v) => Some(v.iter().cloned().collect()),
         // A map entry compares sequentially as its 2-vector
         // (Oracle FX2 `eq`, `entry-vs-list`, `entry-vs-seq`).
-        Value::MapEntry { key, val } => Some(vec![(**key).clone(), (**val).clone()]),
+        Value::MapEntry { key, val, .. } => Some(vec![(**key).clone(), (**val).clone()]),
         // Primitive vectors compare sequentially (cross-type too,
         // like the JVM `Vec.equals`).
         Value::PrimitiveVector(p) => Some(p.items()),
@@ -1839,17 +1987,23 @@ fn plain_equals(a: &Value, b: &Value) -> bool {
 fn plain_equals_rest(a: &Value, b: &Value) -> bool {
     match (a, b) {
         (
-            Value::TaggedLiteral { tag: t1, form: f1 },
-            Value::TaggedLiteral { tag: t2, form: f2 },
+            Value::TaggedLiteral {
+                tag: t1, form: f1, ..
+            },
+            Value::TaggedLiteral {
+                tag: t2, form: f2, ..
+            },
         ) => t1 == t2 && plain_equals(f1, f2),
         (
             Value::ReaderConditional {
                 form: f1,
                 splicing: s1,
+                ..
             },
             Value::ReaderConditional {
                 form: f2,
                 splicing: s2,
+                ..
             },
         ) => s1 == s2 && plain_equals(f1, f2),
         (Value::Extension(a), Value::Extension(b)) => a.dyn_eq(&**b),
@@ -1880,7 +2034,7 @@ fn plain_seq_items(v: &Value) -> Option<Vec<Value>> {
     match v {
         Value::List(l) => Some(l.iter().cloned().collect()),
         Value::Vector(v) => Some(v.iter().cloned().collect()),
-        Value::MapEntry { key, val } => Some(vec![(**key).clone(), (**val).clone()]),
+        Value::MapEntry { key, val, .. } => Some(vec![(**key).clone(), (**val).clone()]),
         Value::PrimitiveVector(p) => Some(p.items()),
         _ => None,
     }
@@ -1910,11 +2064,135 @@ fn plain_equals_sets(s: &Set, o: &Set) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{Value, find_map_dup, find_set_dup, new_map, new_set, plain_equals};
+    use super::{
+        Value, find_map_dup, find_set_dup, intern_literal_strings, intern_string, new_map, new_set,
+        plain_equals,
+    };
     use crate::{HostDef, HostInst, HostKind, HostVal, Keyword, Symbol};
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
     use std::sync::Arc;
+
+    // Fence 4a: the literal pool canonicalizes (equal literals
+    // share one `Arc`); direct `Arc::from` constructions stay
+    // fresh (the JVM's `new String`).
+    #[test]
+    fn string_pool_canonicalizes() {
+        let a = intern_string(&Arc::from("f4a-pool"));
+        let b = intern_string(&Arc::from("f4a-pool"));
+        assert!(Arc::ptr_eq(&a, &b));
+        let fresh = Arc::from("f4a-pool");
+        assert!(!Arc::ptr_eq(&a, &fresh));
+    }
+
+    // Fence 4a test extractors: `Option` + `.unwrap()` is the
+    // only guard shape the 100% line floor accepts — the floor
+    // counts test code, `if let` without `else` leaves its
+    // closing brace uncovered, and rustfmt always explodes
+    // single-line `let-else`. Both arms of each helper stay hot
+    // (pins take `Some`, the rejection test takes `None`).
+    fn opt_vector(v: &Value) -> Option<&super::Vector> {
+        match v {
+            Value::Vector(inner) => Some(inner),
+            _ => None,
+        }
+    }
+
+    fn opt_str(v: &Value) -> Option<&Arc<str>> {
+        match v {
+            Value::Str(s) => Some(s),
+            _ => None,
+        }
+    }
+
+    fn opt_entry(v: &Value) -> Option<(&Value, &Value)> {
+        match v {
+            Value::MapEntry { key, val, .. } => Some((key.as_ref(), val.as_ref())),
+            _ => None,
+        }
+    }
+
+    fn opt_tagged(v: &Value) -> Option<(&Symbol, &Value)> {
+        match v {
+            Value::TaggedLiteral { tag, form, .. } => Some((tag, form.as_ref())),
+            _ => None,
+        }
+    }
+
+    fn opt_rc(v: &Value) -> Option<(&Value, bool)> {
+        match v {
+            Value::ReaderConditional { form, splicing, .. } => Some((form.as_ref(), *splicing)),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn opt_extractors_reject_wrong_kinds() {
+        assert!(opt_vector(&Value::Int(1)).is_none());
+        assert!(opt_str(&Value::Int(1)).is_none());
+        assert!(opt_entry(&Value::Int(1)).is_none());
+        assert!(opt_tagged(&Value::Int(1)).is_none());
+        assert!(opt_rc(&Value::Int(1)).is_none());
+    }
+
+    // Fence 4a: the quote walk interns nested strings and keeps
+    // the spine (metadata, key order) intact.
+    #[test]
+    fn quote_walk_interns_nested_strings() {
+        let payload = Value::Vector(super::Vector::from_vec(vec![
+            Value::Str(Arc::from("f4a-q")),
+            Value::Int(1),
+        ]));
+        let walked = intern_literal_strings(&payload);
+        let items = opt_vector(&walked).unwrap().iter().collect::<Vec<_>>();
+        assert_eq!(items.len(), 2);
+        let pooled = opt_str(items[0]).unwrap();
+        assert!(Arc::ptr_eq(pooled, &intern_string(&Arc::from("f4a-q"))));
+        assert_eq!(items[1], &Value::Int(1));
+        // Non-string leaves clone through untouched.
+        assert_eq!(intern_literal_strings(&Value::Int(7)), Value::Int(7));
+    }
+
+    // Fence 4a coverage: the quote walk recurses into map
+    // entries, interning both sides.
+    #[test]
+    fn quote_walk_interns_map_entry_sides() {
+        let payload = super::map_entry(
+            Value::Str(Arc::from("f4a-k")),
+            Value::Str(Arc::from("f4a-v")),
+        );
+        let walked = intern_literal_strings(&payload);
+        let (key, val) = opt_entry(&walked).unwrap();
+        let k = opt_str(key).unwrap();
+        assert!(Arc::ptr_eq(k, &intern_string(&Arc::from("f4a-k"))));
+        let v = opt_str(val).unwrap();
+        assert!(Arc::ptr_eq(v, &intern_string(&Arc::from("f4a-v"))));
+    }
+
+    // Fence 4a coverage: the quote walk recurses into tagged
+    // forms, keeping the tag.
+    #[test]
+    fn quote_walk_interns_tagged_form() {
+        let payload =
+            super::tagged_literal(Symbol::new(None, "inst"), Value::Str(Arc::from("f4a-t")));
+        let walked = intern_literal_strings(&payload);
+        let (tag, form) = opt_tagged(&walked).unwrap();
+        assert_eq!(tag, &Symbol::new(None, "inst"));
+        let pooled = opt_str(form).unwrap();
+        assert!(Arc::ptr_eq(pooled, &intern_string(&Arc::from("f4a-t"))));
+    }
+
+    // Fence 4a coverage: the quote walk recurses into reader
+    // conditional forms, keeping the splicing flag.
+    #[test]
+    fn quote_walk_interns_reader_conditional_form() {
+        let payload = super::reader_conditional(Value::Str(Arc::from("f4a-r")), true);
+        let walked = intern_literal_strings(&payload);
+        let (form, splicing) = opt_rc(&walked).unwrap();
+        assert!(splicing);
+        let pooled = opt_str(form).unwrap();
+        assert!(Arc::ptr_eq(pooled, &intern_string(&Arc::from("f4a-r"))));
+    }
 
     fn hash_of(v: &Value) -> u64 {
         let mut h = DefaultHasher::new();
@@ -2075,23 +2353,14 @@ mod tests {
 
     #[test]
     fn tagged_and_conditional_equiv_and_hash() {
-        let tl = |form| Value::TaggedLiteral {
-            tag: Symbol::new(None, "inst"),
-            form: Box::new(form),
-        };
+        let tl = |form| super::tagged_literal(Symbol::new(None, "inst"), form);
         assert_hash_consistent(&tl(Value::Int(1)), &tl(Value::Int(1)));
         assert_ne!(tl(Value::Int(1)), tl(Value::Int(2)));
         assert_ne!(
             tl(Value::Int(1)),
-            Value::TaggedLiteral {
-                tag: Symbol::new(None, "uuid"),
-                form: Box::new(Value::Int(1)),
-            }
+            super::tagged_literal(Symbol::new(None, "uuid"), Value::Int(1))
         );
-        let rc = |splicing| Value::ReaderConditional {
-            form: Box::new(Value::Int(1)),
-            splicing,
-        };
+        let rc = |splicing| super::reader_conditional(Value::Int(1), splicing);
         assert_hash_consistent(&rc(false), &rc(false));
         assert_ne!(rc(false), rc(true));
         assert_ne!(tl(Value::Int(1)), rc(false));
@@ -2221,9 +2490,11 @@ mod tests {
     fn tagged_forms_compare_by_bits() {
         // Oracle: `{#inst [0.0] 1 #inst [-0.0] 2}` reads fine — the
         // tagged form compares with Java `.equals` (doubles by bits).
-        let tl = |v: f64| Value::TaggedLiteral {
-            tag: Symbol::new(None, "inst"),
-            form: Box::new(Value::Vector(vec_into_vector(vec![Value::Double(v)]))),
+        let tl = |v: f64| {
+            super::tagged_literal(
+                Symbol::new(None, "inst"),
+                Value::Vector(vec_into_vector(vec![Value::Double(v)])),
+            )
         };
         let pairs = vec![(tl(0.0), Value::Int(1)), (tl(-0.0), Value::Int(2))];
         assert_eq!(find_map_dup(&map_keys(&pairs)), None);
@@ -2494,10 +2765,7 @@ mod tests {
     #[test]
     fn tagged_identity_forms() {
         use crate::{ThrowClass, Throwable, Unbound, Var};
-        let tl = |form| Value::TaggedLiteral {
-            tag: Symbol::new(None, "t"),
-            form: Box::new(form),
-        };
+        let tl = |form| super::tagged_literal(Symbol::new(None, "t"), form);
         let var = |id| {
             Value::Var(Var {
                 id,
@@ -2529,10 +2797,7 @@ mod tests {
 
     #[test]
     fn tagged_collection_forms() {
-        let tl = |form| Value::TaggedLiteral {
-            tag: Symbol::new(None, "t"),
-            form: Box::new(form),
-        };
+        let tl = |form| super::tagged_literal(Symbol::new(None, "t"), form);
         let l1 = Value::List(super::List::from_vec(vec![Value::Int(1)]));
         let v1 = Value::Vector(super::Vector::from_vec(vec![Value::Int(1)]));
         let v2 = Value::Vector(super::Vector::from_vec(vec![Value::Int(2)]));
@@ -2557,10 +2822,7 @@ mod tests {
 
     #[test]
     fn tagged_extension_forms() {
-        let tl = |form| Value::TaggedLiteral {
-            tag: Symbol::new(None, "t"),
-            form: Box::new(form),
-        };
+        let tl = |form| super::tagged_literal(Symbol::new(None, "t"), form);
         let e1 = Value::Extension(Arc::new(OpaqueExt));
         let e2 = Value::Extension(Arc::new(OpaqueExt));
         assert_eq!(tl(e1), tl(e2));

@@ -30,10 +30,7 @@ fn list_of(items: Vec<Value>) -> Value {
 }
 
 fn tagged(form: Value) -> Value {
-    Value::TaggedLiteral {
-        tag: Symbol::new(None, "inst"),
-        form: Box::new(form),
-    }
+    clj_value::tagged_literal(Symbol::new(None, "inst"), form)
 }
 
 #[test]

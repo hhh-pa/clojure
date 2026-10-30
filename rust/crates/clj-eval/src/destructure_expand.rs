@@ -74,7 +74,7 @@ fn conj_tail(eval: &mut Evaluator, map: Map, tail: &Value) -> Result<Map, Native
     match tail {
         Value::Nil => Ok(map),
         Value::Map(m) => Ok(merge_map(map, m)),
-        Value::MapEntry { key, val } => Ok(map.insert((**key).clone(), (**val).clone())),
+        Value::MapEntry { key, val, .. } => Ok(map.insert((**key).clone(), (**val).clone())),
         Value::Vector(x) => conj_tail_vector(map, x),
         _ => conj_tail_seq(eval, map, tail),
     }
@@ -107,7 +107,7 @@ fn conj_tail_seq(eval: &mut Evaluator, map: Map, tail: &Value) -> Result<Map, Na
     let elems = crate::lazy::collect_all(eval, tail).map_err(crate::ns::signal_to_native)?;
     let mut map = map;
     for elem in &elems {
-        let Value::MapEntry { key, val } = elem else {
+        let Value::MapEntry { key, val, .. } = elem else {
             return Err(crate::core::cce_err(elem, "java.util.Map$Entry"));
         };
         map = map.insert((**key).clone(), (**val).clone());
@@ -144,6 +144,7 @@ fn bind_one(
     if let Value::MapEntry {
         key,
         val: entry_val,
+        ..
     } = pat
     {
         // Entries destructure as 2-vectors (the JVM's `MapEntry`

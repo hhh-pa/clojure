@@ -499,7 +499,7 @@ fn check_sequential(v: &Value) -> Result<Vec<Value>, NativeError> {
     match v {
         Value::List(l) => Ok(l.iter().cloned().collect()),
         Value::Vector(x) => Ok(x.iter().cloned().collect()),
-        Value::MapEntry { key, val } => Ok(vec![(**key).clone(), (**val).clone()]),
+        Value::MapEntry { key, val, .. } => Ok(vec![(**key).clone(), (**val).clone()]),
         _ => Err(ex(
             ":only/:refer value must be a sequential collection of symbols".to_owned(),
         )),
