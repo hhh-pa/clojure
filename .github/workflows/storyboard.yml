@@ -50,7 +50,6 @@ permissions:
 
 jobs:
   sync:
-    if: ${{ secrets.PROJECT_TOKEN != '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -59,6 +58,14 @@ jobs:
           GH_TOKEN: ${{ secrets.PROJECT_TOKEN }}
         run: |
           set -euo pipefail
+          # No job/step `if:` on secrets: GitHub's parser rejects
+          # the secrets context there ("Unrecognized named-value"),
+          # which invalidates the whole file (dead triggers +
+          # zero-job push failures) — so gate inside the script.
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo '::warning::PROJECT_TOKEN secret not set; storyboard sync skipped (see storyboard.yml header).'
+            exit 0
+          fi
           proj=PVT_kwDOEkzkc84Bo8xa
           status_field=PVTSSF_lADOEkzkc84Bo8xazhnahX8
           session_field=PVTF_lADOEkzkc84Bo8xazhnjDYQ
@@ -129,9 +136,3 @@ jobs:
             fi
           done
           echo "reconcile done"
-
-  missing-secret:
-    if: ${{ secrets.PROJECT_TOKEN == '' }}
-    runs-on: ubuntu-latest
-    steps:
-      - run: echo '::warning::PROJECT_TOKEN secret not set; storyboard sync skipped (see storyboard.yml header).'
