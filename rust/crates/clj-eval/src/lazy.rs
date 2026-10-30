@@ -686,7 +686,7 @@ pub(crate) fn step_unit(eval: &mut Evaluator, v: &Value) -> Result<StepUnit, Sig
         Value::List(l) => step_list_unit(l),
         Value::Vector(x) => step_vector_unit(x),
         // Entries step exactly like their 2-vector (chunked).
-        Value::MapEntry { key, val } => {
+        Value::MapEntry { key, val, .. } => {
             let tmp = Vector::from_vec(vec![(**key).clone(), (**val).clone()]);
             step_vector_unit(&tmp)
         }
@@ -890,7 +890,7 @@ fn step_cons_value(_eval: &mut Evaluator, c: &ConsValue) -> Result<StepUnit, Sig
 /// `Map.Entry` cast (Oracle FX2 `keys-of-vec` CCE).
 fn entry_of(item: &Value, keys: bool) -> Result<Value, NativeError> {
     match item {
-        Value::MapEntry { key, val } => {
+        Value::MapEntry { key, val, .. } => {
             if keys {
                 Ok((**key).clone())
             } else {
@@ -2736,7 +2736,7 @@ pub(crate) fn seq_value(eval: &mut Evaluator, v: &Value) -> Result<Value, Signal
         Value::Extension(_) => seq_value_extension(eval, v),
         Value::List(l) => Ok(if l.is_empty() { Value::Nil } else { v.clone() }),
         Value::Vector(x) => Ok(seq_vector(x)),
-        Value::MapEntry { key, val } => {
+        Value::MapEntry { key, val, .. } => {
             let tmp = Vector::from_vec(vec![(**key).clone(), (**val).clone()]);
             Ok(seq_vector(&tmp))
         }
@@ -3373,7 +3373,7 @@ pub(crate) fn realize_deep(eval: &mut Evaluator, v: &Value) -> Result<Value, Sig
         Value::Extension(_) => realize_deep_extension(eval, v),
         Value::List(l) => realize_deep_list(eval, l),
         Value::Vector(x) => realize_deep_vector(eval, x),
-        Value::MapEntry { key, val } => realize_deep_entry(eval, key, val),
+        Value::MapEntry { key, val, .. } => realize_deep_entry(eval, key, val),
         Value::Map(m) => realize_deep_map(eval, m),
         Value::Set(s) => realize_deep_set(eval, s),
         _ => Ok(v.clone()),

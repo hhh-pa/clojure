@@ -842,7 +842,7 @@ fn iteration_fold_trailing(
     out: &mut IterationOpts,
     trailing: &Value,
 ) -> Result<(), NativeError> {
-    if let Value::MapEntry { key, val } = trailing {
+    if let Value::MapEntry { key, val, .. } = trailing {
         iteration_set_opt(out, key, (**val).clone());
         return Ok(());
     }
@@ -890,7 +890,7 @@ fn iteration_fold_seq(
             return Ok(());
         }
         let head = first_value(eval, &cur).map_err(signal_to_native)?;
-        let Value::MapEntry { key, val } = &head else {
+        let Value::MapEntry { key, val, .. } = &head else {
             return Err(cce_err(&head, MAP_ENTRY_CLASS));
         };
         iteration_set_opt(out, key, (**val).clone());

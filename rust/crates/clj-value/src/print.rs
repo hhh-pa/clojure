@@ -227,7 +227,7 @@ fn print_dup_shape(v: &Value, opts: &PrintOpts, level: Option<i64>, out: &mut St
             print_dup_seq_ctor(DUP_TREESET, &items, opts, level, out);
             true
         }
-        Value::MapEntry { key, val } => {
+        Value::MapEntry { key, val, .. } => {
             print_dup_seq_ctor(
                 DUP_MAPENTRY,
                 &[key.as_ref(), val.as_ref()],
@@ -440,7 +440,7 @@ fn print_more(v: &Value, opts: &PrintOpts, level: Option<i64>, out: &mut String)
     match v {
         // Entries print exactly like their 2-vector (Oracle FX2
         // `pr-e`, `str-e`, `entry-pr`).
-        Value::MapEntry { key, val } => {
+        Value::MapEntry { key, val, .. } => {
             print_sequential(
                 "[",
                 vec![key.as_ref(), val.as_ref()],
@@ -463,7 +463,7 @@ fn print_more(v: &Value, opts: &PrintOpts, level: Option<i64>, out: &mut String)
             );
         }
         Value::Map(m) => print_map_body(m, opts, level, out),
-        Value::TaggedLiteral { tag, form } => {
+        Value::TaggedLiteral { tag, form, .. } => {
             write!(out, "#{tag} ").unwrap();
             print_into(form, opts, level, out);
         }
@@ -569,7 +569,7 @@ fn print_multifn(m: &crate::MultiFn, out: &mut String) {
 
 fn print_rest(v: &Value, opts: &PrintOpts, level: Option<i64>, out: &mut String) {
     match v {
-        Value::ReaderConditional { form, splicing } => {
+        Value::ReaderConditional { form, splicing, .. } => {
             out.push_str(if *splicing { "#?@" } else { "#?" });
             print_into(form, opts, level, out);
         }
@@ -1616,23 +1616,23 @@ mod tests {
 
     #[test]
     fn tagged_and_conditional_printing() {
-        let tl = Value::TaggedLiteral {
-            tag: Symbol::new(None, "inst"),
-            form: Box::new(Value::Str(std::sync::Arc::from("2020-01-01"))),
-        };
+        let tl = crate::tagged_literal(
+            Symbol::new(None, "inst"),
+            Value::Str(std::sync::Arc::from("2020-01-01")),
+        );
         assert_eq!(pr(&tl), "#inst \"2020-01-01\"");
-        let rc = Value::ReaderConditional {
-            form: Box::new(Value::List(crate::List::from_vec(vec![
+        let rc = crate::reader_conditional(
+            Value::List(crate::List::from_vec(vec![
                 Value::Keyword(Keyword::new(None, "a")),
                 Value::Int(1),
-            ]))),
-            splicing: false,
-        };
+            ])),
+            false,
+        );
         assert_eq!(pr(&rc), "#?(:a 1)");
-        let rcs = Value::ReaderConditional {
-            form: Box::new(Value::List(crate::List::from_vec(vec![Value::Int(1)]))),
-            splicing: true,
-        };
+        let rcs = crate::reader_conditional(
+            Value::List(crate::List::from_vec(vec![Value::Int(1)])),
+            true,
+        );
         assert_eq!(pr(&rcs), "#?@(1)");
     }
 

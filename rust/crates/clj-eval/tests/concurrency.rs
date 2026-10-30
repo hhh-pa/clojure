@@ -542,6 +542,81 @@ fn cas_rows() {
     );
 }
 
+// Fence 4a: `compare-and-set!` compares references (the JVM's
+// `AtomicReference.compareAndSet` is `==`), not values — a
+// distinct-but-equal box misses (oracle P4).
+#[test]
+fn cas_identity() {
+    let mut eval = boot();
+    // Cache-hit longs and interned keywords hit by value.
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [a (atom 5)] (compare-and-set! a (+ 2 3) :x))"
+        ),
+        "true"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [a (atom :x)] (compare-and-set! a (keyword \"x\") :y))"
+        ),
+        "true"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [a (atom \"a\")] (compare-and-set! a \"a\" :x))"
+        ),
+        "true"
+    );
+    // Uncached longs, doubles, fresh strings/symbols miss despite `=`.
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [a (atom 1000)] [(compare-and-set! a (+ 999 1) :x) @a])"
+        ),
+        "[false 1000]"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [a (atom 1.5)] (compare-and-set! a 1.5 :x))"
+        ),
+        "false"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [a (atom (str \"a\" \"\"))] [(compare-and-set! a (str \"a\" \"\") :x) @a])"
+        ),
+        "[false \"a\"]"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [s (symbol \"q\")] (let [a (atom s)] (compare-and-set! a (symbol \"q\") :y)))"
+        ),
+        "false"
+    );
+    // The validator still runs on a reference miss (construction +
+    // attempt), and no watch fires.
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [calls (atom 0) a (atom 1000 :validator (fn [_] (swap! calls inc) true))] (compare-and-set! a (+ 999 1) :x) @calls)"
+        ),
+        "2"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [log (atom []) a (atom 1000)] (add-watch a :k (fn [k r o n] (swap! log conj 1))) (compare-and-set! a (+ 999 1) :x) [@log @a])"
+        ),
+        "[[] 1000]"
+    );
+}
+
 #[test]
 fn cas_errors() {
     let mut eval = boot();

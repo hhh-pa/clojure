@@ -1690,7 +1690,7 @@ impl Evaluator {
             Value::Keyword(_) | Value::Symbol(_) => self.invoke_keyed_name(callee, args),
             Value::Vector(v) => self.invoke_vector(v, args),
             Value::PrimitiveVector(p) => self.invoke_pv(p, args),
-            Value::MapEntry { key, val } => self.invoke_mapentry(key, val, args),
+            Value::MapEntry { key, val, .. } => self.invoke_mapentry(key, val, args),
             Value::Map(_) => self.invoke_map(callee, args),
             Value::Set(s) => self.invoke_set(s, args),
             Value::Var(v) => self.invoke_var(v, args),
@@ -2399,7 +2399,7 @@ impl Evaluator {
                     .map_err(|e| self.throw(e))?;
                 Ok(Value::PrimitiveVector(p.push_back(co)))
             }
-            Value::MapEntry { key, val } => {
+            Value::MapEntry { key, val, .. } => {
                 let tmp = Vector::from_vec(vec![*key, *val]);
                 Ok(Value::Vector(tmp.push_back(elem)))
             }
@@ -2442,7 +2442,7 @@ impl Evaluator {
                     "Vector arg to map conj must be a pair".to_owned(),
                 ))),
             },
-            Value::MapEntry { key, val } => Ok(map.insert(*key, *val)),
+            Value::MapEntry { key, val, .. } => Ok(map.insert(*key, *val)),
             other => match self.seq_opt(&other)? {
                 None => Ok(map),
                 Some(l) => {
@@ -2450,7 +2450,7 @@ impl Evaluator {
                     // `conj-seq-entries`); the first non-entry is
                     // the `Map$Entry` cast error.
                     for head in l.iter() {
-                        let Value::MapEntry { key, val } = head else {
+                        let Value::MapEntry { key, val, .. } = head else {
                             return Err(self.throw(cast_entry(head)));
                         };
                         map = map.insert((**key).clone(), (**val).clone());
@@ -2532,7 +2532,7 @@ impl Evaluator {
             Value::Nil => Ok(()),
             // An entry trailer conjs as its pair (Oracle FX2
             // `trailer-entry`).
-            Value::MapEntry { key, val } => {
+            Value::MapEntry { key, val, .. } => {
                 *map = std::mem::replace(map, new_map()).insert((**key).clone(), (**val).clone());
                 Ok(())
             }
@@ -2569,7 +2569,7 @@ impl Evaluator {
     fn fold_seqable_trailing(&mut self, map: &mut Map, elems: Vec<Value>) -> Result<(), Signal> {
         for elem in elems {
             match elem {
-                Value::MapEntry { key, val } => {
+                Value::MapEntry { key, val, .. } => {
                     *map = std::mem::replace(map, new_map()).insert(*key, *val);
                 }
                 other => {
@@ -2720,7 +2720,9 @@ fn lookup(coll: &Value, key: &Value) -> Option<Value> {
         Value::Vector(v) => lookup_vector(v, key),
         // Entries read like their 2-vector (map destructuring
         // passes integer keys — Oracle FX2 `mapdest-plain`).
-        Value::MapEntry { key: ek, val: ev } => lookup_entry(ek, ev, key),
+        Value::MapEntry {
+            key: ek, val: ev, ..
+        } => lookup_entry(ek, ev, key),
         Value::Str(s) => lookup_string(s, key),
         Value::Set(s) => member(s, key),
         _ => None,
@@ -2785,7 +2787,7 @@ fn nth_or_nil(coll: &Value, i: usize, eval: &mut Evaluator) -> Result<Value, Sig
     match coll {
         Value::Nil => Ok(Value::Nil),
         Value::Vector(v) => Ok(v.iter().nth(i).cloned().unwrap_or(Value::Nil)),
-        Value::MapEntry { key, val } => Ok(match i {
+        Value::MapEntry { key, val, .. } => Ok(match i {
             0 => (**key).clone(),
             1 => (**val).clone(),
             _ => Value::Nil,
@@ -2829,7 +2831,7 @@ impl Evaluator {
                     .map(|(k, v)| clj_value::map_entry(k.clone(), v.clone()))
                     .collect(),
             )),
-            Value::MapEntry { key, val } => {
+            Value::MapEntry { key, val, .. } => {
                 Ok(Self::seq_list_opt(vec![(**key).clone(), (**val).clone()]))
             }
             other => Err(self.throw(NativeError::new(
@@ -3030,10 +3032,7 @@ mod tests {
         );
         let arr = Value::Array(clj_value::Array::new(
             clj_value::ArrayDesc::flat(clj_value::BaseType::Object),
-            clj_value::ArrayStore::Objs(vec![Value::MapEntry {
-                key: Box::new(Value::Int(3)),
-                val: Box::new(Value::Int(4)),
-            }]),
+            clj_value::ArrayStore::Objs(vec![clj_value::map_entry(Value::Int(3), Value::Int(4))]),
         ));
         let list = Value::List(List::from_vec(vec![Value::Int(1), Value::Int(2), arr]));
         let trailer = eval.seq_to_map(&list).expect("array trailer");

@@ -64,6 +64,7 @@ pub struct PrimitiveVector {
     elem: Elem8,
     inner: RpdsVector,
     meta: Option<Arc<Map>>,
+    id: u64,
 }
 
 impl PrimitiveVector {
@@ -74,7 +75,12 @@ impl PrimitiveVector {
         for v in items {
             inner = inner.push_back(v);
         }
-        Self { elem, inner, meta }
+        Self {
+            elem,
+            inner,
+            meta,
+            id: crate::value::next_identity_id(),
+        }
     }
 
     /// An empty vector of `elem` (fresh, no meta).
@@ -84,6 +90,7 @@ impl PrimitiveVector {
             elem,
             inner: RpdsVector::new_sync(),
             meta: None,
+            id: crate::value::next_identity_id(),
         }
     }
 
@@ -129,6 +136,7 @@ impl PrimitiveVector {
             elem: self.elem,
             inner: self.inner.clone().push_back(v),
             meta: self.meta.clone(),
+            id: crate::value::next_identity_id(),
         }
     }
 
@@ -139,6 +147,7 @@ impl PrimitiveVector {
             elem: self.elem,
             inner,
             meta: self.meta.clone(),
+            id: crate::value::next_identity_id(),
         })
     }
 
@@ -149,6 +158,7 @@ impl PrimitiveVector {
             elem: self.elem,
             inner,
             meta: self.meta.clone(),
+            id: crate::value::next_identity_id(),
         })
     }
 
@@ -162,6 +172,15 @@ impl PrimitiveVector {
     #[must_use]
     pub fn with_meta(mut self, meta: Option<Map>) -> Self {
         self.meta = meta.map(Arc::new);
+        // A new object on the JVM (`withMeta` news), so a new id.
+        self.id = crate::value::next_identity_id();
         self
+    }
+
+    /// The allocation identity for `identical?` (fence 4a): minted
+    /// at every construction, preserved by `Clone`.
+    #[must_use]
+    pub fn id(&self) -> u64 {
+        self.id
     }
 }

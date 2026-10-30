@@ -153,7 +153,7 @@ fn hasheq_mid(v: &Value) -> i32 {
     match v {
         // A map entry hashes exactly like its 2-vector (Oracle FX2
         // `hash-eq`: `(hash e)` ≡ `(hash [:a 1])`).
-        Value::MapEntry { key, val } => {
+        Value::MapEntry { key, val, .. } => {
             hash_ordered([key.as_ref(), val.as_ref()].into_iter().map(hasheq))
         }
         Value::Map(m) => hasheq_map(m),
@@ -258,7 +258,7 @@ fn hash_code_mid(v: &Value) -> i32 {
         // `APersistentVector.hashCode` is inherited, so `.hashCode`
         // matches the 2-vector exactly (Oracle FX2 `pr-e`/`str-e`
         // print shape plus `hash-eq`).
-        Value::MapEntry { key, val } => {
+        Value::MapEntry { key, val, .. } => {
             list_hash_code([key.as_ref(), val.as_ref()].into_iter().map(hash_code))
         }
         Value::Map(m) => hash_code_map(m),
@@ -266,11 +266,11 @@ fn hash_code_mid(v: &Value) -> i32 {
         // Deterministic stand-in (JVM: identity) — see module docs.
         Value::Regex(source) => str_hashcode(source),
         // `TaggedLiteral.hashCode`: `31 * hash(tag) + hash(form)`.
-        Value::TaggedLiteral { tag, form } => symbol_hash_code(tag)
+        Value::TaggedLiteral { tag, form, .. } => symbol_hash_code(tag)
             .wrapping_mul(31)
             .wrapping_add(hash_code(form)),
         // `ReaderConditional.hashCode`: `31 * hash(form) + hash(splicing)`.
-        Value::ReaderConditional { form, splicing } => hash_code(form)
+        Value::ReaderConditional { form, splicing, .. } => hash_code(form)
             .wrapping_mul(31)
             .wrapping_add(bool_hash(*splicing)),
         // Identity types: per-process `id` mix — see module docs.
@@ -493,7 +493,7 @@ pub fn seq_hash_unsupported(v: &Value) -> bool {
     match v {
         Value::List(l) => l.iter().any(seq_hash_unsupported),
         Value::Vector(v) => v.iter().any(seq_hash_unsupported),
-        Value::MapEntry { key, val } => seq_hash_unsupported(key) || seq_hash_unsupported(val),
+        Value::MapEntry { key, val, .. } => seq_hash_unsupported(key) || seq_hash_unsupported(val),
         Value::Map(m) => m
             .iter()
             .any(|(k, v)| seq_hash_unsupported(k) || seq_hash_unsupported(v)),
@@ -974,10 +974,7 @@ mod tests {
     #[test]
     fn tagged_and_conditional_match_jvm_hashcode() {
         // Neither JVM class is `IHashEq`: `(hash x)` IS `.hashCode`.
-        let tagged = Value::TaggedLiteral {
-            tag: Symbol::new(None, "tag"),
-            form: Box::new(vecv(vec![int(1)])),
-        };
+        let tagged = crate::tagged_literal(Symbol::new(None, "tag"), vecv(vec![int(1)]));
         let want = symbol_hash_code(&Symbol::new(None, "tag"))
             .wrapping_mul(31)
             .wrapping_add(hash_code(&vecv(vec![int(1)])));
@@ -985,10 +982,7 @@ mod tests {
         assert_eq!(hasheq(&tagged), want);
 
         for splicing in [false, true] {
-            let rc = Value::ReaderConditional {
-                form: Box::new(int(7)),
-                splicing,
-            };
+            let rc = crate::reader_conditional(int(7), splicing);
             let want = hash_code(&int(7))
                 .wrapping_mul(31)
                 .wrapping_add(if splicing { 1231 } else { 1237 });

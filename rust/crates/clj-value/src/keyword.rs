@@ -7,13 +7,25 @@
 // You must not remove this notice, or any other, from this software.
 
 //! Clojure keywords: like symbols but self-evaluating, with a leading
-//! colon in their printed form. Value-compared, never interned (see
-//! [`Symbol`](crate::Symbol)).
+//! colon in their printed form. Globally interned (the JVM's
+//! `Keyword.intern` table analog): every construction canonicalizes
+//! its arcs, so `identical?` is pointer equality.
 
 use std::cmp::Ordering;
+use std::collections::HashMap;
 use std::fmt;
 use std::hash::{Hash, Hasher};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock, Mutex};
+
+/// One interned keyword's canonical arcs.
+type CanonicalKeyword = (Option<Arc<str>>, Arc<str>);
+
+/// The intern table (fence 4a): `(ns, name)` arcs canonicalized
+/// across every construction, like the JVM's `KeywordTable` (strong
+/// refs — entries live as long as the process, same as interned
+/// keywords on the JVM).
+static KEYWORD_TABLE: LazyLock<Mutex<HashMap<CanonicalKeyword, CanonicalKeyword>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// A Clojure keyword such as `:ok` or `:user/id`.
 #[derive(Clone, Debug)]
@@ -23,12 +35,18 @@ pub struct Keyword {
 }
 
 impl Keyword {
-    /// Build a keyword from namespace and name parts.
+    /// Build a keyword from namespace and name parts, canonicalizing
+    /// through the intern table (every construction of an equal
+    /// keyword shares the arcs).
     #[must_use]
     pub fn new(ns: Option<&str>, name: &str) -> Self {
+        let mut table = KEYWORD_TABLE.lock().unwrap_or_else(|e| e.into_inner());
+        let entry = table
+            .entry((ns.map(Arc::from), Arc::from(name)))
+            .or_insert_with_key(|k| k.clone());
         Self {
-            ns: ns.map(Arc::from),
-            name: Arc::from(name),
+            ns: entry.0.clone(),
+            name: entry.1.clone(),
         }
     }
 
@@ -42,6 +60,18 @@ impl Keyword {
     #[must_use]
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// Pointer identity for `identical?` (fence 4a): complete
+    /// exactly when every construction interns (all of them route
+    /// through [`new`](Keyword::new)).
+    #[must_use]
+    pub fn ptr_eq(&self, other: &Self) -> bool {
+        match (&self.ns, &other.ns) {
+            (None, None) => Arc::ptr_eq(&self.name, &other.name),
+            (Some(a), Some(b)) => Arc::ptr_eq(a, b) && Arc::ptr_eq(&self.name, &other.name),
+            _ => false,
+        }
     }
 }
 
@@ -107,5 +137,20 @@ mod tests {
     fn equality_is_by_value() {
         assert_eq!(Keyword::new(None, "a"), Keyword::new(None, "a"));
         assert_ne!(Keyword::new(None, "a"), Keyword::new(Some("n"), "a"));
+    }
+
+    // Fence 4a: every construction interns — separately built
+    // equal keywords share arcs (pointer identity).
+    #[test]
+    fn interning_shares_arcs() {
+        let a = Keyword::new(None, "f4a-kw");
+        let b = Keyword::new(None, "f4a-kw");
+        assert!(a.ptr_eq(&b));
+        assert!(a.ptr_eq(&a.clone()));
+        let c = Keyword::new(Some("f4a-ns"), "f4a-kw");
+        let d = Keyword::new(Some("f4a-ns"), "f4a-kw");
+        assert!(c.ptr_eq(&d));
+        assert!(!a.ptr_eq(&c));
+        assert!(!c.ptr_eq(&Keyword::new(Some("f4a-ns"), "other")));
     }
 }

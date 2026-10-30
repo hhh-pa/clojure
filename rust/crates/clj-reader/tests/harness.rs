@@ -435,13 +435,13 @@ fn append_canon_body(out: &mut String, v: &Value, print_meta: bool) {
         }
         Value::Map(m) => out.push_str(&canon_map(m, print_meta)),
         Value::Set(s) => append_canon_set(out, s, print_meta),
-        Value::TaggedLiteral { tag, form } => {
+        Value::TaggedLiteral { tag, form, .. } => {
             out.push('#');
             out.push_str(&tag.to_string());
             out.push(' ');
             out.push_str(&canon(form, print_meta));
         }
-        Value::ReaderConditional { form, splicing } => {
+        Value::ReaderConditional { form, splicing, .. } => {
             out.push_str(reader_cond_prefix(*splicing));
             out.push_str(&canon(form, print_meta));
         }

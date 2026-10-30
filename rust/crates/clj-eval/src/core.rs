@@ -1365,15 +1365,22 @@ fn compare_scalar_pair(x: &Value, y: &Value) -> std::cmp::Ordering {
 /// `compare_same_type` for the complexity budget).
 fn compare_entry_pair(x: &Value, y: &Value) -> Result<Option<std::cmp::Ordering>, NativeError> {
     match (x, y) {
-        (Value::MapEntry { key, val }, Value::Vector(b)) => {
+        (Value::MapEntry { key, val, .. }, Value::Vector(b)) => {
             let tmp = clj_value::Vector::from_vec(vec![(**key).clone(), (**val).clone()]);
             Ok(Some(compare_vectors(&tmp, b)?))
         }
-        (Value::Vector(a), Value::MapEntry { key, val }) => {
+        (Value::Vector(a), Value::MapEntry { key, val, .. }) => {
             let tmp = clj_value::Vector::from_vec(vec![(**key).clone(), (**val).clone()]);
             Ok(Some(compare_vectors(a, &tmp)?))
         }
-        (Value::MapEntry { key: k1, val: v1 }, Value::MapEntry { key: k2, val: v2 }) => {
+        (
+            Value::MapEntry {
+                key: k1, val: v1, ..
+            },
+            Value::MapEntry {
+                key: k2, val: v2, ..
+            },
+        ) => {
             let a = clj_value::Vector::from_vec(vec![(**k1).clone(), (**v1).clone()]);
             let b = clj_value::Vector::from_vec(vec![(**k2).clone(), (**v2).clone()]);
             Ok(Some(compare_vectors(&a, &b)?))
@@ -1905,10 +1912,7 @@ fn native_tagged_literal(_eval: &mut Evaluator, args: &[Value]) -> Result<Value,
         Value::Nil => Symbol::new(None, "nil"),
         other => return Err(cce_err(other, "clojure.lang.Symbol")),
     };
-    Ok(Value::TaggedLiteral {
-        tag,
-        form: Box::new(args[1].clone()),
-    })
+    Ok(clj_value::tagged_literal(tag, args[1].clone()))
 }
 
 /// `reader-conditional`: 2-arity `[form splicing?]` (probe `c-ctor`);
@@ -1927,10 +1931,7 @@ fn native_reader_conditional(_eval: &mut Evaluator, args: &[Value]) -> Result<Va
         }
         return Err(cce_err(&args[1], "java.lang.Boolean"));
     };
-    Ok(Value::ReaderConditional {
-        form: Box::new(args[0].clone()),
-        splicing: *splicing,
-    })
+    Ok(clj_value::reader_conditional(args[0].clone(), *splicing))
 }
 
 /// A validator failure as a native error (the validator reports JVM
@@ -1957,10 +1958,10 @@ fn default_inst_reader(form: &Value) -> Result<Value, NativeError> {
         return Err(cce_err(form, "java.lang.CharSequence"));
     };
     validate_inst(s).map_err(tag_native)?;
-    Ok(Value::TaggedLiteral {
-        tag: Symbol::new(None, "inst"),
-        form: Box::new(form.clone()),
-    })
+    Ok(clj_value::tagged_literal(
+        Symbol::new(None, "inst"),
+        form.clone(),
+    ))
 }
 
 /// The `uuid` default reader (shared like `inst`): non-strings
@@ -1975,10 +1976,10 @@ fn default_uuid_reader(form: &Value) -> Result<Value, NativeError> {
         ));
     };
     validate_uuid(s).map_err(tag_native)?;
-    Ok(Value::TaggedLiteral {
-        tag: Symbol::new(None, "uuid"),
-        form: Box::new(form.clone()),
-    })
+    Ok(clj_value::tagged_literal(
+        Symbol::new(None, "uuid"),
+        form.clone(),
+    ))
 }
 
 /// One default-table entry: a 1-arity native fn value (the arity
@@ -2127,7 +2128,7 @@ fn resolve_map(eval: &mut Evaluator, m: Map) -> Result<Map, NativeError> {
 /// The resolving walk (the fast path already confirmed tags).
 fn resolve_inner(eval: &mut Evaluator, form: Value) -> Result<Value, NativeError> {
     match form {
-        Value::TaggedLiteral { tag, form } => {
+        Value::TaggedLiteral { tag, form, .. } => {
             let inner = resolve_inner(eval, *form)?;
             resolve_tag(eval, &tag, inner)
         }

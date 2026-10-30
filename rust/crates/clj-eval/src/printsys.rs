@@ -706,7 +706,7 @@ fn write_seq_body(
             let items: Vec<Value> = v.iter().cloned().collect();
             write_seq_items(eval, &items, "[", "]", " ", w, opts)
         }
-        Value::MapEntry { key, val } => write_seq_items(
+        Value::MapEntry { key, val, .. } => write_seq_items(
             eval,
             &[(**key).clone(), (**val).clone()],
             "[",
@@ -1013,7 +1013,7 @@ fn dup_treeset(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErro
 /// Dup map-entry ctors.
 fn dup_mapentry(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     let head = dup_head(eval, args)?;
-    let Value::MapEntry { key, val } = &head.o else {
+    let Value::MapEntry { key, val, .. } = &head.o else {
         write_engine_body(&head.o, &head.w, &head.opts)?;
         return Ok(Value::Nil);
     };
@@ -1834,10 +1834,7 @@ mod tests {
         // pre-realizes via `collect_all`); volatiles take the
         // `Object` fallthrough (no suite prints one through the
         // driver).
-        let tagged = Value::TaggedLiteral {
-            tag: Symbol::new(None, "x"),
-            form: Box::new(Value::Int(1)),
-        };
+        let tagged = clj_value::tagged_literal(Symbol::new(None, "x"), Value::Int(1));
         assert_eq!(token_of(&tagged), Some(TOK_TAGGED));
         let unbound = Value::Unbound(Unbound {
             sym: Symbol::new(Some("user"), "u"),

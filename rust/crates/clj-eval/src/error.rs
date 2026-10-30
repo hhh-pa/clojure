@@ -680,17 +680,14 @@ mod tests {
             "java.util.regex.Pattern"
         );
         assert_eq!(
-            jvm_class_of(&Value::TaggedLiteral {
-                tag: clj_value::Symbol::new(None, "foo"),
-                form: Box::new(Value::Int(1)),
-            }),
+            jvm_class_of(&clj_value::tagged_literal(
+                clj_value::Symbol::new(None, "foo"),
+                Value::Int(1),
+            )),
             "clojure.lang.TaggedLiteral"
         );
         assert_eq!(
-            jvm_class_of(&Value::ReaderConditional {
-                form: Box::new(Value::Int(1)),
-                splicing: false,
-            }),
+            jvm_class_of(&clj_value::reader_conditional(Value::Int(1), false)),
             "clojure.lang.ReaderConditional"
         );
     }

@@ -343,13 +343,14 @@ fn native_cas(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError
     if let Some(vf) = atom.lock().validator.clone() {
         validate_new(eval, &vf, &args[2])?;
     }
-    // `=` stands in for the JVM's reference comparison (port
-    // values have no object identity, so ABA state changes
-    // compare equal — only `f` side-effect counts can observe
-    // the difference).
+    // Reference comparison (fence 4a): the JVM's
+    // `AtomicReference.compareAndSet` is `==`, so the port
+    // compares through `identical?` — a distinct-but-equal box
+    // (an uncached long, a fresh string) misses, exactly like
+    // the JVM.
     let outcome = {
         let mut state = atom.lock();
-        if state.value == args[1] {
+        if crate::classemu::identical_values(&state.value, &args[1]) {
             let old = std::mem::replace(&mut state.value, args[2].clone());
             Some((old, state.watches.clone()))
         } else {

@@ -2383,17 +2383,78 @@ fn native_classp(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeE
     Ok(Value::Bool(matches!(&args[0], Value::Class(_))))
 }
 
-/// `identical?`: collections compare minted ids, extensions / host
-/// values / multimethods compare allocations, classes compare names,
-/// and every other same-kind pair compares like `=` (cross-kind
-/// pairs are never identical — `1` and `1N` are `=` but distinct
-/// boxes).
+/// `identical?`: the JVM `==` model (fence 4a — oracle battery
+/// `docs/fence-4a-identity/probes.md`).
+///
+/// Unboxed numbers/characters follow the boxing caches, exactly
+/// (JVM locals rebox per use, so outside the cache there is no
+/// object to share — not even for the same binding): longs in
+/// `[-128, 127]` compare by value, anything else long is never
+/// identical; chars in `[\u{0}, \u{7f}]` compare by value, the
+/// rest never; doubles are never identical (even same-binding
+/// `NaN`). `nil`/`Bool` are canonical (value-compared).
+///
+/// Heap kinds compare allocation identity: strings are
+/// `Arc::ptr_eq` (literals pool through the analyzer's interner,
+/// runtime constructions stay fresh); symbols, uuids, instants,
+/// uris, map entries, tagged literals, reader conditionals, and
+/// primitive vectors compare minted ids; collections compare
+/// their minted ids; extensions / host values / multimethods /
+/// regexes compare allocations; classes compare names; vars,
+/// unbounds, throwables, transients, atoms, delays, futures,
+/// promises, agents, volatiles, and refs compare through `=`
+/// (their equality already IS cell identity).
+///
+/// Deferred (post-tower, per the (2)↔(4) sequencing):
+/// `BigInt`/`BigInteger`/`BigDec`/`Ratio` still compare by value
+/// here; the Arc-box + `BigDecimal.valueOf` canonicalization lands
+/// with the tower rebase. Cross-kind pairs are never identical.
 pub(crate) fn identical_values(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        // The `Long` cache (`LongCache`, -128..127): inside, the
+        // box IS the value; outside, every box is fresh.
+        (Value::Int(x), Value::Int(y)) => x == y && (-128..=127).contains(x),
+        // Doubles never cache (`Double.valueOf` news).
+        (Value::Double(_), Value::Double(_)) => false,
+        // The `Character` cache (`\u{0}`..`\u{7f}`).
+        (Value::Char(x), Value::Char(y)) => x == y && (*x as u32) < 128,
+        // Literals pool (analyzer interner); constructions fresh.
+        (Value::Str(x), Value::Str(y)) => Arc::ptr_eq(x, y),
+        (Value::Symbol(x), Value::Symbol(y)) => x.id() == y.id(),
+        // Keywords intern globally (`Keyword.intern` analog).
+        (Value::Keyword(x), Value::Keyword(y)) => x.ptr_eq(y),
+        _ => identical_heap(a, b),
+    }
+}
+
+/// `identical?` for the minted-id kinds (fence 4a): collections,
+/// uuids/instants/uris, entries, tagged literals, reader
+/// conditionals, and primitive vectors compare allocation ids.
+fn identical_heap(a: &Value, b: &Value) -> bool {
     match (a, b) {
         (Value::List(x), Value::List(y)) => x.id() == y.id(),
         (Value::Vector(x), Value::Vector(y)) => x.id() == y.id(),
         (Value::Map(x), Value::Map(y)) => x.id() == y.id(),
         (Value::Set(x), Value::Set(y)) => x.id() == y.id(),
+        (Value::Uuid(x), Value::Uuid(y)) => x.id() == y.id(),
+        (Value::Instant(x), Value::Instant(y)) => x.id() == y.id(),
+        (Value::Uri(x), Value::Uri(y)) => x.id() == y.id(),
+        (Value::MapEntry { id: x, .. }, Value::MapEntry { id: y, .. }) => x == y,
+        (Value::TaggedLiteral { id: x, .. }, Value::TaggedLiteral { id: y, .. }) => x == y,
+        (Value::ReaderConditional { id: x, .. }, Value::ReaderConditional { id: y, .. }) => x == y,
+        (Value::PrimitiveVector(x), Value::PrimitiveVector(y)) => x.id() == y.id(),
+        _ => identical_alloc(a, b),
+    }
+}
+
+/// `identical?` for the allocation/name kinds (fence 4a): extensions
+/// / host values / multimethods / regexes compare allocations,
+/// classes compare names, and every other same-kind pair compares
+/// like `=` (vars, unbounds, throwables, transients, and all cells
+/// compare cell identity through `=`; the deferred big kinds
+/// compare by value until the tower rebase).
+fn identical_alloc(a: &Value, b: &Value) -> bool {
+    match (a, b) {
         (Value::Extension(x), Value::Extension(y)) => Arc::ptr_eq(x, y),
         (Value::HostType(x), Value::HostType(y)) => Arc::ptr_eq(x, y),
         (Value::MultiFn(x), Value::MultiFn(y)) => Arc::ptr_eq(x, y),
@@ -2714,7 +2775,7 @@ fn bean_gated_keys(
                 out.push((kw("blank"), Value::Bool(is_blank(s))));
             }
             collection_bean_keys(eval, v, out)?;
-            if let Value::MapEntry { key, val } = v {
+            if let Value::MapEntry { key, val, .. } = v {
                 out.push((kw("key"), key.as_ref().clone()));
                 out.push((kw("value"), val.as_ref().clone()));
             }
@@ -3218,6 +3279,30 @@ pub(crate) fn surface_member_name(meth: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Fence 4a: kinds with no Clojure surface (upstream has no URI
+    // constructor either) — same allocation true, distinct false.
+    #[test]
+    fn identical_unreachable_kinds() {
+        let instant = Value::Instant(clj_value::Instant::from_millis(1000));
+        assert!(identical_values(&instant, &instant.clone()));
+        assert!(!identical_values(
+            &instant,
+            &Value::Instant(clj_value::Instant::from_millis(1000))
+        ));
+        let uri = Value::Uri(Box::new(clj_value::Uri::parse("http://x/").unwrap()));
+        assert!(identical_values(&uri, &uri.clone()));
+        assert!(!identical_values(
+            &uri,
+            &Value::Uri(Box::new(clj_value::Uri::parse("http://x/").unwrap()))
+        ));
+        let cond = clj_value::reader_conditional(Value::Int(1), false);
+        assert!(identical_values(&cond, &cond.clone()));
+        assert!(!identical_values(
+            &cond,
+            &clj_value::reader_conditional(Value::Int(1), false)
+        ));
+    }
 
     #[test]
     fn static_or_fallback_mints_for_missing() {

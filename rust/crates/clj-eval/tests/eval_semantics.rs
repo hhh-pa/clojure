@@ -1087,10 +1087,7 @@ fn map_destructure_multi_entry_trailer() {
     // prelude, so natives build the entry trailers (probe25
     // `odd-trailing-two` / `odd-trailing-entrybad`).
     fn entry(k: &str, v: i64) -> Value {
-        Value::MapEntry {
-            key: Box::new(Value::Keyword(Keyword::new(None, k))),
-            val: Box::new(Value::Int(v)),
-        }
+        clj_value::map_entry(Value::Keyword(Keyword::new(None, k)), Value::Int(v))
     }
     fn target(tail: Vec<Value>) -> Value {
         Value::List(List::from_vec(vec![

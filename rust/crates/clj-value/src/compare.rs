@@ -195,7 +195,7 @@ fn utf16_cmp(a: &str, b: &str) -> Ordering {
 fn vector_items(v: &Value) -> Option<Vec<Value>> {
     match v {
         Value::Vector(x) => Some(x.iter().cloned().collect()),
-        Value::MapEntry { key, val } => Some(vec![(**key).clone(), (**val).clone()]),
+        Value::MapEntry { key, val, .. } => Some(vec![(**key).clone(), (**val).clone()]),
         Value::PrimitiveVector(p) => Some(p.items()),
         Value::Extension(e) => e
             .as_any()
@@ -508,18 +508,12 @@ mod tests {
     #[test]
     fn reader_type_names() {
         let n = Value::Int(1);
-        let tagged = Value::TaggedLiteral {
-            tag: Symbol::new(None, "t"),
-            form: Box::new(Value::Nil),
-        };
+        let tagged = crate::tagged_literal(Symbol::new(None, "t"), Value::Nil);
         assert_eq!(
             message_of(&tagged, &n),
             "Cannot compare TaggedLiteral to Long"
         );
-        let cond = Value::ReaderConditional {
-            form: Box::new(Value::Nil),
-            splicing: false,
-        };
+        let cond = crate::reader_conditional(Value::Nil, false);
         assert_eq!(
             message_of(&cond, &n),
             "Cannot compare ReaderConditional to Long"
