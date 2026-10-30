@@ -51,6 +51,20 @@ fn run_last(eval: &mut Evaluator, src: &str) -> String {
     run(eval, src).pop().unwrap()
 }
 
+/// Block until `(agent-error ag)` is non-nil (the failure landed):
+/// failures always land, so only a genuine hang trips the timeout
+/// (never await a racing latch — a stuck barrier hangs by design).
+fn wait_failed(eval: &mut Evaluator, ag: &str) {
+    let start = std::time::Instant::now();
+    while run_last(eval, &format!("(nil? (agent-error {ag}))")) != "false" {
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(10),
+            "failure never landed for {ag}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+}
+
 /// The `Class | message` of an uncaught throw.
 fn uncaught(eval: &mut Evaluator, src: &str) -> String {
     match eval.eval_source(src) {
@@ -368,12 +382,27 @@ fn validator_completion_reads_current() {
     // Port-only: agent completion-timing pin, no oracle label.
     let mut eval = boot();
     // A validator installed after the send but before completion
-    // governs the publish (JVM `getValidator`-at-completion).
+    // governs the publish (JVM `getValidator`-at-completion). The
+    // failure must land before the rendezvous (a mid-wait failure
+    // would hang the `await` under load).
+    run(
+        &mut eval,
+        "(def s5v-vg (promise)) (def s5v-vh (promise)) (def s5v-va (agent 0))",
+    );
+    run(
+        &mut eval,
+        "(send s5v-va (fn [s] (deliver s5v-vg :started) (deref s5v-vh) 3)) (deref s5v-vg) (set-validator! s5v-va even?) (deliver s5v-vh :go)",
+    );
+    wait_failed(&mut eval, "s5v-va");
     assert_eq!(
         run_last(
             &mut eval,
-            "(let [a (agent 0) gate (promise) hold (promise)] (send a (fn [s] (deliver gate :started) (deref hold) 3)) (deref gate) (set-validator! a even?) (deliver hold :go) (try (await a) (catch RuntimeException e :failed)) [(some? (agent-error a)) @a])"
+            "(try (await s5v-va) (catch RuntimeException e :failed))"
         ),
+        ":failed"
+    );
+    assert_eq!(
+        run_last(&mut eval, "[(some? (agent-error s5v-va)) @s5v-va]"),
         "[true 0]"
     );
 }
@@ -794,24 +823,47 @@ fn deprecated_trio_rows() {
     // `Exception.`/`.getMessage`).
     let mut eval = boot();
     assert_eq!(run_last(&mut eval, "(agent-errors (agent 0))"), "nil");
+    // Each failure below must land before its rendezvous (a
+    // mid-wait failure would hang the `await` under load).
+    run(
+        &mut eval,
+        "(def s5-je (send (agent 0) (fn [_] (throw (ex-info \"boom\" {})))))",
+    );
+    wait_failed(&mut eval, "s5-je");
     assert_eq!(
         run_last(
             &mut eval,
-            "(let [a (send (agent 0) (fn [_] (throw (ex-info \"boom\" {}))))] (try (await a) (catch RuntimeException e :failed)) (map ex-message (agent-errors a)))"
+            "(try (await s5-je) (catch RuntimeException e :failed))"
         ),
+        ":failed"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(map ex-message (agent-errors s5-je))"),
         "(\"boom\")"
     );
     assert_eq!(
         run_last(
             &mut eval,
-            "(let [a (send (agent 0) (fn [_] (throw (ex-info \"boom\" {}))))] (try (await a) (catch RuntimeException e :failed)) (= (agent-errors a) (list (agent-error a))))"
+            "(= (agent-errors s5-je) (list (agent-error s5-je)))"
         ),
         "true"
+    );
+    run(
+        &mut eval,
+        "(def s5-jc (send (agent 7) (fn [_] (throw (ex-info \"boom\" {})))))",
+    );
+    wait_failed(&mut eval, "s5-jc");
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(try (await s5-jc) (catch RuntimeException e :failed))"
+        ),
+        ":failed"
     );
     assert_eq!(
         run_last(
             &mut eval,
-            "(let [a (send (agent 7) (fn [_] (throw (ex-info \"boom\" {}))))] (try (await a) (catch RuntimeException e :failed)) (clear-agent-errors a) [(agent-error a) @a])"
+            "(clear-agent-errors s5-jc) [(agent-error s5-jc) @s5-jc]"
         ),
         "[nil 7]"
     );
@@ -819,10 +871,30 @@ fn deprecated_trio_rows() {
         uncaught(&mut eval, "(clear-agent-errors (agent 0))"),
         "java.lang.RuntimeException | Agent does not need a restart"
     );
+    run(
+        &mut eval,
+        "(def s5-jr1 (send (agent 7) (fn [_] (throw (ex-info \"boom\" {}))))) (def s5-jr2 (send (agent 7) (fn [_] (throw (ex-info \"boom\" {})))))",
+    );
+    wait_failed(&mut eval, "s5-jr1");
+    wait_failed(&mut eval, "s5-jr2");
     assert_eq!(
         run_last(
             &mut eval,
-            "(let [a (send (agent 7) (fn [_] (throw (ex-info \"boom\" {})))) b (send (agent 7) (fn [_] (throw (ex-info \"boom\" {}))))] (try (await a) (catch RuntimeException e :failed)) (try (await b) (catch RuntimeException e :failed)) [(clear-agent-errors a) (restart-agent b @b)])"
+            "(try (await s5-jr1) (catch RuntimeException e :failed))"
+        ),
+        ":failed"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(try (await s5-jr2) (catch RuntimeException e :failed))"
+        ),
+        ":failed"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "[(clear-agent-errors s5-jr1) (restart-agent s5-jr2 @s5-jr2)]"
         ),
         "[7 7]"
     );

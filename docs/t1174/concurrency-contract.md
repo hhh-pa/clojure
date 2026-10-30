@@ -81,7 +81,12 @@ shapes are exact JVM text (en_US/UTC).
   returns at once and drains async (T1192 FX1 — was BLOCKING).
   Parked workers and future threads join at process exit
   (`Evaluator::join_drainers`, called by the `run`/`eval`/REPL
-  drivers), mirroring the JVM's non-daemon wait.
+  drivers), mirroring the JVM's non-daemon wait. `(executor)`
+  workers are daemon-like instead: their threads detach at
+  spawn and nothing ever joins them, so in-flight custom
+  actions do not hold up process exit (unlike pool and future
+  work — the right call, since custom executors have no
+  shutdown surface to drain through).
 - After shutdown, pool sends return the agent but their
   actions never run (like the JVM's swallowed executor
   rejection — the queue wedges, `await-for` times out

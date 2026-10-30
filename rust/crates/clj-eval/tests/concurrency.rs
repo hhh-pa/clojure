@@ -2310,6 +2310,9 @@ fn agent_watch_rows() {
         "(add-watch s6c-wf :k (fn [k r o n] (throw (ex-info \"w\" {}))))",
     );
     run(&mut eval, "(send s6c-wf inc)");
+    // The failure must land before the rendezvous: a mid-wait
+    // failure leaves the barrier stuck, hanging `await` by design.
+    wait_failed(&mut eval, "s6c-wf");
     assert_eq!(
         run_last(
             &mut eval,
@@ -2692,6 +2695,7 @@ fn agent_restart_resumed_after_shutdown() {
         &mut eval,
         "(def s6c-rs2 (agent 0)) (def s6c-rs2-g (promise)) (send s6c-rs2 (fn [s] @s6c-rs2-g (throw (ex-info \"x\" {})))) (send s6c-rs2 inc) (deliver s6c-rs2-g :go)",
     );
+    wait_failed(&mut eval, "s6c-rs2");
     assert_eq!(
         run_last(
             &mut eval,
@@ -2790,6 +2794,7 @@ fn agent_restart_after_shutdown() {
         &mut eval,
         "(def s6c-rs (agent 0)) (def s6c-rs-gate (promise)) (send s6c-rs (fn [s] @s6c-rs-gate (throw (ex-info \"x\" {})))) (send s6c-rs inc) (deliver s6c-rs-gate :go)",
     );
+    wait_failed(&mut eval, "s6c-rs");
     assert_eq!(
         run_last(
             &mut eval,
@@ -2893,6 +2898,7 @@ fn set_error_mode_rows() {
         &mut eval,
         "(send s6d-sm (fn [s] (throw (ex-info \"y\" {}))))",
     );
+    wait_failed(&mut eval, "s6d-sm");
     assert_eq!(
         run_last(
             &mut eval,
@@ -2911,6 +2917,7 @@ fn set_error_mode_rows() {
         &mut eval,
         "(send s6d-sm (fn [s] (throw (ex-info \"z\" {}))))",
     );
+    wait_failed(&mut eval, "s6d-sm");
     assert_eq!(
         run_last(
             &mut eval,
@@ -2925,6 +2932,7 @@ fn set_error_mode_rows() {
         &mut eval,
         "(send s6d-sm (fn [s] (throw (ex-info \"w\" {}))))",
     );
+    wait_failed(&mut eval, "s6d-sm");
     assert_eq!(
         run_last(
             &mut eval,
@@ -3201,7 +3209,14 @@ fn restart_agent_race_serializes() {
     let mut eval = boot();
     run(
         &mut eval,
-        "(do (def s6-ra (agent 0)) (send s6-ra (fn [_] (throw (ex-info \"boom\" {})))) (try (await s6-ra) (catch RuntimeException e :failed)))",
+        "(do (def s6-ra (agent 0)) (send s6-ra (fn [_] (throw (ex-info \"boom\" {})))))",
+    );
+    // The failure must land before the rendezvous (a mid-wait
+    // failure would hang the `await` under load).
+    wait_failed(&mut eval, "s6-ra");
+    run(
+        &mut eval,
+        "(try (await s6-ra) (catch RuntimeException e :failed))",
     );
     // Two gated futures race `restart-agent` on the failed agent:
     // exactly one wins (returning its new state) while the other
@@ -3358,6 +3373,7 @@ fn agent_panic_foreign_payload() {
     );
     run(&mut eval, "(def s6x-pf (agent 0))");
     run(&mut eval, "(send s6x-pf s6x-panic-any)");
+    wait_failed(&mut eval, "s6x-pf");
     assert_eq!(
         run_last(
             &mut eval,
@@ -3385,6 +3401,7 @@ fn agent_panic_owned_payload() {
     );
     run(&mut eval, "(def s6x-po (agent 0))");
     run(&mut eval, "(send s6x-po s6x-panic-owned)");
+    wait_failed(&mut eval, "s6x-po");
     assert_eq!(
         run_last(
             &mut eval,
@@ -3541,6 +3558,46 @@ fn send_via_nil_wedges_with_handler_npe() {
     run(&mut eval, "(def nvb (agent 0))");
     run(&mut eval, "(send-via nil nvb (fn [s] :never))");
     assert_eq!(run_last(&mut eval, "(await-for 200 nvb)"), "false");
+}
+
+#[test]
+fn release_pending_sends_post_shutdown_dispatches_own_exec() {
+    // Fence 3c B2: an explicit `release-pending-sends` after
+    // shutdown still runs each head on its OWN executor (like
+    // upstream `releasePendingSends` → `execute`): custom heads
+    // run, nil heads wedge — only pool heads reject. The outer
+    // action is held in flight across the shutdown so the release
+    // takes the pools-gone branch, and the nested sends target
+    // IDLE agents (a nested send to the running agent would queue
+    // for the completion handover instead of the release).
+    let mut eval = boot();
+    run(
+        &mut eval,
+        "(def rpx (executor)) (def rpa (agent 0)) (def rpb (agent 0)) (def rpe (agent 0)) (def rpg (promise)) (def rph (promise)) (def rpd (promise)) (def rpw2 (promise)) (def rpx2 (promise)) (def rpc (agent 0 :error-handler (fn [ag e] (deliver rpw2 :wedged))))",
+    );
+    run(
+        &mut eval,
+        "(send rpa (fn [s] (deliver rpg :started) (deref rph) (send-via rpx rpb (fn [x] (deliver rpd :done) (inc x))) (send-via nil rpc (fn [x] :never)) (send rpe (fn [x] (deliver rpx2 :ran) (inc x))) (release-pending-sends) s))",
+    );
+    assert_eq!(run_last(&mut eval, "(deref rpg 8000 :timeout)"), ":started");
+    run(&mut eval, "(shutdown-agents)");
+    run(&mut eval, "(deliver rph :go)");
+    // The custom head ran on its executor despite the shutdown...
+    assert_eq!(run_last(&mut eval, "(deref rpd 8000 :timeout)"), ":done");
+    assert_eq!(run_last(&mut eval, "@rpb"), "1");
+    // ... the pool head rejected (dropped, never runs)...
+    assert_eq!(run_last(&mut eval, "(deref rpx2 200 :timeout)"), ":timeout");
+    assert_eq!(run_last(&mut eval, "@rpe"), "0");
+    // ... and the nil head wedged at `rpc`'s queue front (the NPE
+    // reached the handler): a follow-up on the live executor never
+    // runs (a dropped head would have let it through).
+    assert_eq!(run_last(&mut eval, "(deref rpw2 8000 :timeout)"), ":wedged");
+    run(
+        &mut eval,
+        "(def rpw (promise)) (send-via rpx rpc (fn [x] (deliver rpw :ran2) x))",
+    );
+    assert_eq!(run_last(&mut eval, "(deref rpw 200 :timeout)"), ":timeout");
+    assert_eq!(run_last(&mut eval, "(await-for 200 rpc)"), "false");
 }
 
 #[test]
