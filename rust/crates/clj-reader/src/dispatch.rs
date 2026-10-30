@@ -751,8 +751,9 @@ mod tests {
             let span = err.span();
             assert_eq!((span.line, span.col), (1, 3), "{input}");
         }
-        // #125 (JVM `lnpr-false-nested` probe): the entry span tracks
-        // the `#=` position, so a nested denial sits mid-form.
+        // #125 (forward spec `docs/gap-125/specification.md` §1):
+        // the entry span tracks the `#=` position (the probe1
+        // rule), so a nested denial sits mid-form.
         let opts = ReaderOpts {
             read_eval: false,
             ..ReaderOpts::default()

@@ -21,11 +21,9 @@ our `ReaderError` must expose both (`message()` and `jvm_class()`).
 
 S2 default read options are **load semantics**: `:read-cond :allow`,
 `:features #{:clj}` (JVM always conjs `:clj`, `installPlatformFeature`).
-S5's `read-string` will pass deny explicitly. `*read-eval*` was honored
-in S2 only as: `#=` always errors (N5 deferral, §16); the `:unknown`
-check and `false` branch had no S2 equivalent (no dynamic bindings
-yet). S7 wired the live gates through `clj-eval`, and #125 closed the
-loop: the `false` denial triple matches the JVM exactly (§24 item 2).
+S5's `read-string` will pass deny explicitly. `*read-eval*` is honored
+only as: `#=` always errors (N5 deferral, §16); the `:unknown` check and
+`false` branch have no S2 equivalent (no dynamic bindings yet).
 
 ## §1 Char stream, positions, unread
 
@@ -446,16 +444,9 @@ unreachable in S2 — the ctor path always throws or returns):
 
 ## §16 Eval reader (`#=`)
 
-`EvalReader` checks the `*read-eval*` gate first. `false` ⇒ the denial
-triple (`RuntimeException`,
-`EvalReader not allowed when *read-eval* is false.`, entry span: col
-right after `#=`) **without consuming the following form** (probe1
-`#=(+ 1 2)`); the harness pins the oracle triple exactly (#125). `true`
-⇒ read the operand, then apply the evaluator hook to it: hookless
-contexts (the standalone reader) report `ReadEval` (§22); `clj-eval`
-installs the live hook, which resolves the head and applies it to the
-UNEVALUATED operand forms (S7 probes `c-*`/`d-*`), reporting failures
-with the post-operand span.
+S2 has no evaluator: `#=` ⇒ immediate N5-deferral error (§22) **without
+consuming the following form** (matches the `*read-eval* false` branch
+position: col right after `#=`, probe1 `#=(+ 1 2)`).
 
 ## §17 Unreadable (`#<`)
 
@@ -666,11 +657,7 @@ Deferrals (ours; harness expects divergence — same span discipline,
 - `BigDecimal { token }` ⇒
   `BigDecimal literals are not supported in this build (big-number follow-up N3): {token}`
 - `ReadEval` ⇒
-  `Eval reader #= requires an evaluator hook` (hookless contexts only;
-  every `clj-eval` entry installs the hook)
-- `EvalFailed` ⇒ the traveling throwable's own message and simple class
-  name (the `#=` gate denial under `*read-eval*` false, or a
-  `#=`/resolver application failure; spans per §16)
+  `Eval reader #= is not supported in this build (data-reader follow-up N5)`
 - `DataReader { tag }` (`inst`/`uuid`) ⇒
   `Reader for tag {tag} is not supported in this build (data-reader follow-up N5)`
 - `Record { tag }` ⇒
@@ -704,7 +691,7 @@ class-valued `(ns-map *ns*)`) and serialized (EDN/JSON) for our
 false. Report per form: pr-str (two print configs: default and
 `print-meta`+`readably` true), or on error: root message + root class
 simple name + ex-data line/col. Our side mirrors with the same
-resolver maps and `read_eval: false` (matching the oracle binding).
+resolver maps.
 
 Comparison: canonicalize **map/set order** on both sides first (walk
 the value; sort map entries and set members by pr-str; print
@@ -718,11 +705,8 @@ match exactly — except §24 cases, which assert divergence-shape
 ## §24 Catalogued divergences (harness asserts these as divergences)
 
 1. Big tower (§22 N3 ×3): JVM reads values; we error. Both directions pinned.
-2. `#=` (N5 — conformant since #125): the `*read-eval*` false denial
-   triple (message, simple class, span) matches the JVM exactly; the
-   harness compares it against the oracle, not a snapshot. The
-   hookless-`true` `ReadEval` error has no JVM counterpart by
-   construction (pure-reader contexts only).
+2. `#=` (N5): JVM with `*read-eval*` false errors with its message; we
+   error with ours. Span shape same (col after `#=`).
 3. `#inst`/`#uuid` (N5): JVM invokes readers (valid ⇒ value; invalid ⇒
    its error); we always defer after consuming tag+form.
 4. Record tags (S5): JVM checks `*read-eval*` first; we defer.
