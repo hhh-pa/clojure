@@ -314,11 +314,13 @@ fn native_monitor_exit(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Na
     check_arity("clojure.core/fx4-monitor-exit", args, &[1, 2])?;
     // Fence 4b E1k/E1t/E1u (rule order matters): a nil lockee with
     // an empty stack is the form-naming NPE; a nil lockee over held
-    // monitors is a mismatch (`nil` never matches). Otherwise the
-    // lockee's 3b content key must be held (Box-clone exits match
-    // their enter — identity is unimplementable for cloning Box
-    // kinds; the most recent hold releases, so reentrant nests
-    // unwind in order).
+    // monitors is a mismatch (`nil` never matches) — live-oracle
+    // matrix (kept-fixes.out, all JIT modes; pure-bytecode matrix
+    // in monitor-matrix-jvms.txt), against review B3's JVMS reading.
+    // Otherwise the lockee's 3b content key must be held (Box-clone
+    // exits match their enter — identity is unimplementable for
+    // cloning Box kinds; the most recent hold releases, so
+    // reentrant nests unwind in order).
     if matches!(args[0], Value::Nil) {
         let held = MONITORS.with(|stack| !stack.borrow().is_empty());
         if held {
