@@ -31,6 +31,7 @@ use clj_value::{
     LookupFail, Map, MultiFn, Symbol, ThrowClass, Value, method_for, new_map, new_set,
 };
 
+use crate::concurrency::DEREF_NIL;
 use crate::core::cce_err;
 use crate::error::NativeError;
 use crate::eval::Evaluator;
@@ -262,9 +263,7 @@ fn prefer_insert(prefers: &Map, preferred: &Value, other: &Value) -> Map {
 fn resolve_hierarchy(eval: &mut Evaluator, mf: &MultiFn) -> Result<Value, NativeError> {
     match &mf.hierarchy {
         None => read_global(eval),
-        Some(Value::Nil) => Err(npe(
-            "Cannot invoke \"java.util.concurrent.Future.get()\" because \"fut\" is null",
-        )),
+        Some(Value::Nil) => Err(npe(DEREF_NIL)),
         Some(Value::Var(v)) => Ok(eval.deref_var(v.id, &v.sym)),
         Some(Value::Atom(a)) => Ok(a.lock().value.clone()),
         Some(Value::Agent(a)) => Ok(a.lock().value.clone()),
