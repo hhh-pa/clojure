@@ -34,7 +34,7 @@ pub fn seq_vec(v: &Value) -> Option<Vec<Value>> {
         Value::Str(s) => Some(s.chars().map(Value::Char).collect()),
         Value::List(l) => Some(l.iter().cloned().collect()),
         Value::Vector(v) => Some(v.iter().cloned().collect()),
-        Value::MapEntry { key, val } => Some(vec![(**key).clone(), (**val).clone()]),
+        Value::MapEntry { key, val, .. } => Some(vec![(**key).clone(), (**val).clone()]),
         Value::Map(m) => Some(
             m.iter()
                 .map(|(k, v)| crate::map_entry(k.clone(), v.clone()))

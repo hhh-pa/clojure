@@ -670,25 +670,30 @@ Behaviors:
   clojure.core/identical?`), keeping the two
   `compile_err` pins green; it phase-diverges from the
   JVM's runtime `ArityException` (§2.4).
-- The native (`identical?` var): two rules by kind.
-  Value kinds compare by value (`=`): `Nil`, `Bool`,
-  `Int`, `Double`, `BigInt`, `BigDec`, `Ratio`, `Char`
-  (immediates — no boxes exist), `Str`, `Symbol`,
-  `Keyword` (the port never interns, so pointer
-  identity would be meaningless), and the boxed
-  singletons `MapEntry`, `TaggedLiteral`,
-  `ReaderConditional` (no stable allocation to point
-  at; `=` gives the right answer for the same binding
-  and only over-approximates distinct-but-equal).
-  Identity kinds compare allocation/cell identity:
-  `List`/`Vector`/`Map`/`Set` (new per-value ids, see
-  below — `rpds` exposes no pointer), `Regex`
-  (`Arc::ptr_eq`), `Var`/`Unbound`/`Throwable` and all
-  refs/transients (existing ids — same answers as
-  `=`), `Extension`/`HostType`/`MultiFn`
-  (`Arc::ptr_eq` — NOT `dyn_eq`: seq equality is
-  value-based, but seq identity is not), `Class`
-  (by name — classes are singletons, §1.2).
+- The native (`identical?` var): the JVM `==` model
+  (fence 4a rewired this paragraph; oracle battery
+  `docs/fence-4a-identity/probes.md`). Unboxed numbers
+  follow the boxing caches: `Int` in `[-128, 127]`
+  compares by value (anything else long is never
+  identical — locals rebox per use), `Double` is never
+  identical, `Char` in `[\u{0}, \u{7f}]` compares by
+  value (the rest never); `Nil`/`Bool` are canonical.
+  Heap kinds compare allocation identity: `Str` is
+  `Arc::ptr_eq` (literals pool through the analyzer's
+  interner, constructions stay fresh), `Symbol` mints
+  an id per construction, `Keyword` interns globally
+  (pointer-compared), and `Uuid`/`Instant`/`Uri`/
+  `MapEntry`/`TaggedLiteral`/`ReaderConditional`/
+  `PrimitiveVector` compare minted ids. Identity kinds
+  compare allocation/cell identity:
+  `List`/`Vector`/`Map`/`Set` (per-value ids — `rpds`
+  exposes no pointer), `Regex` (`Arc::ptr_eq`),
+  `Var`/`Unbound`/`Throwable` and all refs/transients
+  (existing ids — same answers as `=`),
+  `Extension`/`HostType`/`MultiFn` (`Arc::ptr_eq` —
+  NOT `dyn_eq`: seq equality is value-based, but seq
+  identity is not), `Class` (by name — classes are
+  singletons, §1.2).
 - Persistent collections need fresh identity ids: add
   a `u64` id field (static `AtomicU64` counters, the
   `ATOM_ID` precedent) to the port's
@@ -697,16 +702,18 @@ Behaviors:
   is the only shared-struct change in the slice; it is
   additive and behavior-neutral except through
   `identical?` (§2.3).
-- JVM divergences, all forced and all pinned: big
-  longs, doubles, uncached chars, bigints/bigdecimals,
-  ratios (`d-int-big`, `d-double`, `d-char-uncached`,
-  `d-bigint`, `d-bigdec`, `d-ratio` — the JVM is
-  cache-dependent, the port compares values);
-  built strings (`d-str-built` — the port has no
-  interning); distinct-but-equal entries/tagged
-  (over-approximation, above); symbols (`d-sym` —
-  value-compared). `d-str-lit`/`d-kw` match (value
-  comparison agrees with interning on literals).
+- JVM divergences (fence 4a closed all but the bigs):
+  `BigInt`/`BigInteger`/`BigDec`/`Ratio` (`d-bigint`,
+  `d-bigdec`, `d-ratio`) still compare by value until
+  the post-tower Arc-box lands (zero-fence sequencing:
+  tower owns numeric representation; the deferred rule
+  — `BigDecimal.valueOf` canonicalization for scale-0
+  0..10, always-fresh otherwise — is recorded in
+  `docs/fence-4a-identity/probes.md` P5). Big longs,
+  doubles, uncached chars (`d-int-big`, `d-double`,
+  `d-char-uncached`), built strings (`d-str-built`),
+  distinct-but-equal entries/tagged, and symbols
+  (`d-sym`) are JVM-identical now.
 - First-class use resolves to the var with runtime
   `ArityException`s (`d-apply-arity`); higher-order
   and eval order match the JVM (`d-ho-str`,

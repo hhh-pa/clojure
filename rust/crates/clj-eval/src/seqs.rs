@@ -487,7 +487,7 @@ fn native_rseq(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErr
         )),
         Value::Vector(x) => Ok(rseq_of(x.iter().cloned().collect())),
         Value::PrimitiveVector(p) => Ok(rseq_of(p.items())),
-        Value::MapEntry { key, val } => Ok(rseq_of(vec![(**key).clone(), (**val).clone()])),
+        Value::MapEntry { key, val, .. } => Ok(rseq_of(vec![(**key).clone(), (**val).clone()])),
         Value::Map(m) if m.is_sorted() => Ok(rseq_of(
             m.iter()
                 .map(|(k, v)| clj_value::map_entry(k.clone(), v.clone()))

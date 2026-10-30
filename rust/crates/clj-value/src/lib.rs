@@ -87,6 +87,7 @@ pub use transient::{
 };
 pub use value::{
     FxBuildHasher, List, Map, Set, SortSpec, Value, Vector, extension_supports_meta,
-    extension_with_meta, map_entry, new_map, new_set,
+    extension_with_meta, intern_literal_strings, intern_string, intern_string_value, map_entry,
+    new_map, new_set, reader_conditional, tagged_literal,
 };
 pub use volatile::Volatile;

@@ -15,7 +15,10 @@
 //!
 //! Symbols carry optional metadata ([`with_meta`](Symbol::with_meta));
 //! equality, hashing, and ordering ignore it, exactly like the JVM's
-//! `Symbol.equals`/`hasheq`/`compareTo`.
+//! `Symbol.equals`/`hasheq`/`compareTo`. Allocation identity for
+//! `identical?` is a minted id ([`id`](Symbol::id)) — the JVM news
+//! a `Symbol` per read, so distinct-but-equal symbols are never
+//! identical.
 
 use std::cmp::Ordering;
 use std::fmt;
@@ -24,12 +27,23 @@ use std::sync::Arc;
 
 use crate::Map;
 
+/// Identity counter for `identical?` (fence 4a): every freshly
+/// built symbol mints an id (`Clone` preserves it, `with_meta`
+/// news it — the JVM news on `withMeta`). Equality and hashing
+/// ignore the id.
+static SYMBOL_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+fn next_symbol_id() -> u64 {
+    SYMBOL_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 /// A Clojure symbol such as `foo` or `clojure.core/map`.
 #[derive(Clone, Debug)]
 pub struct Symbol {
     ns: Option<Arc<str>>,
     name: Arc<str>,
     meta: Option<Arc<Map>>,
+    id: u64,
 }
 
 impl Symbol {
@@ -40,6 +54,7 @@ impl Symbol {
             ns: ns.map(Arc::from),
             name: Arc::from(name),
             meta: None,
+            id: next_symbol_id(),
         }
     }
 
@@ -78,7 +93,16 @@ impl Symbol {
     #[must_use]
     pub fn with_meta(mut self, meta: Option<Map>) -> Self {
         self.meta = meta.map(Arc::new);
+        // A new object on the JVM (`withMeta` news), so a new id.
+        self.id = next_symbol_id();
         self
+    }
+
+    /// The allocation identity for `identical?` (fence 4a): minted
+    /// at every construction, preserved by `Clone`.
+    #[must_use]
+    pub fn id(&self) -> u64 {
+        self.id
     }
 }
 
@@ -192,5 +216,17 @@ mod tests {
         assert!(a.meta().is_none());
         assert_eq!(b.meta().unwrap().size(), 1);
         assert!(b.clone().with_meta(None).meta().is_none());
+    }
+
+    // Fence 4a: every construction mints a fresh id (`Clone`
+    // preserves it, `with_meta` news it — the JVM news per
+    // read and on `withMeta`).
+    #[test]
+    fn ids_fresh_per_construction() {
+        let a = Symbol::new(None, "f4a-sym");
+        let b = Symbol::new(None, "f4a-sym");
+        assert_ne!(a.id(), b.id());
+        assert_eq!(a.id(), a.clone().id());
+        assert_ne!(a.id(), a.clone().with_meta(None).id());
     }
 }

@@ -54,10 +54,7 @@ fn int_array() -> Value {
 }
 
 fn tagged(form: Value) -> Value {
-    Value::TaggedLiteral {
-        tag: Symbol::new(None, "t"),
-        form: Box::new(form),
-    }
+    clj_value::tagged_literal(Symbol::new(None, "t"), form)
 }
 
 fn hash_of(v: &Value) -> u64 {

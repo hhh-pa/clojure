@@ -143,11 +143,11 @@ fn seq_constructors_and_nil_punning() {
     assert_eq!(got.len(), 2);
     assert!(matches!(
         &got[0],
-        Value::MapEntry { key, val } if **key == int(1) && **val == int(2)
+        Value::MapEntry { key, val, .. } if **key == int(1) && **val == int(2)
     ));
     assert!(matches!(
         &got[1],
-        Value::MapEntry { key, val } if **key == int(3) && **val == int(4)
+        Value::MapEntry { key, val, .. } if **key == int(3) && **val == int(4)
     ));
     // Set seqs yield members in insertion order.
     let s = Set::from_items_checked(vec![int(5), int(6)]).unwrap();
@@ -164,11 +164,11 @@ fn seq_vec_map_and_entry_rows() {
     assert_eq!(got.len(), 2);
     assert!(matches!(
         &got[0],
-        Value::MapEntry { key, val } if **key == int(1) && **val == int(2)
+        Value::MapEntry { key, val, .. } if **key == int(1) && **val == int(2)
     ));
     assert!(matches!(
         &got[1],
-        Value::MapEntry { key, val } if **key == int(3) && **val == int(4)
+        Value::MapEntry { key, val, .. } if **key == int(3) && **val == int(4)
     ));
     // seq_vec over an entry yields its 2 items.
     assert_eq!(

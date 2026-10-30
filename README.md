@@ -161,13 +161,15 @@ the interpreter's own natives, so AOT and `run` cannot drift.
 Deliberate, documented, and pinned by the differential corpus —
 each entry asserts its exact behavior, so drift fails CI:
 
-- **No object identity.** Values are compared, never
-  pointer-identical: `swap!` / `compare-and-set!`
-  publish-compare with `=`, where the JVM compares
-  references. `identical?` answers a per-kind table instead
-  (collections by minted id, extensions/host values by
-  allocation, classes by name, other same-kind pairs by `=`;
-  cross-kind pairs are never identical).
+- **Big-number identity deferred.** `identical?` follows the
+  JVM `==` model (Long cache, `Character` range, doubles never,
+  pooled string literals, interned keywords, minted ids for
+  symbols/collections/entries/uuids/instants/uris/tagged/
+  conditionals/vectors), and `compare-and-set!` compares
+  references — except `BigInt`/`BigInteger`/`BigDec`/`Ratio`,
+  which still compare by value until the post-tower Arc-box
+  lands (zero-fence sequencing: tower owns numeric
+  representation).
 - **Ordering.** `compare` matches JVM numeric ordering
   including NaN ties, but incomparable pairs fail with the
   stable `Cannot compare <A> to <B>` instead of

@@ -518,7 +518,7 @@ Significant vars with no port slice, grouped below by area with the reason. (Thr
 | `atom` | implemented | concurrency.rs atom_ctor_rows (validator/meta options, odd-opts IAE) |
 | `swap!` | implemented | concurrency.rs swap_rows (CAS loop, extra args, unconditional watch fire) |
 | `reset!` | implemented | concurrency.rs reset_rows (validates, fires) |
-| `compare-and-set!` | implemented | concurrency.rs cas_rows (bool, validates pre-compare, no fire on miss) |
+| `compare-and-set!` | implemented | concurrency.rs cas_rows (bool, validates pre-compare, no fire on miss) + cas_identity (reference compare: uncached longs/doubles/fresh strings miss, cache/kw/lit hit) |
 | `shutdown-agents` | implemented | concurrency.rs agent_shutdown_rows (nil; returns at once, exit join drains; later pool sends drop, custom sends run) |
 | `delay` | implemented | concurrency.rs delay_rows (delay* form over trapped closure) |
 | `force` | implemented | concurrency.rs force_rows (non-delays pass through) |
@@ -572,7 +572,7 @@ Significant vars with no port slice, grouped below by area with the reason. (Thr
 
 | var | status | notes |
 | --- | --- | --- |
-| `identical?` | implemented | per-kind table, rewrite agreement, var use, arities (classemu.rs identical_kinds, identical_inline, identical_arities, identical_first_class) |
+| `identical?` | implemented | JVM == model: caches, pooled strings, interned kws, minted ids (classemu.rs identical_kinds, identical_caches, identical_strings, identical_heap, identical_inline, identical_arities, identical_first_class; bigs deferred post-tower) |
 | `re-find` | implemented | re.rs over the `regex` crate (String patterns fail the `String` cast); re_rng.rs re_find_rows |
 | `re-matches` | implemented | re.rs full-match; re_rng.rs re_matches_rows |
 | `re-seq` | implemented | re.rs lazy match seq; re_rng.rs re_seq_rows |

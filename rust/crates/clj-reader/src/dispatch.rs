@@ -28,7 +28,10 @@
 //!   splices prepend list/vector items to the shared pending queue;
 //!   top-level splicing rejected unless nothing matched).
 
-use clj_value::{Keyword, List, Symbol, Value, java_debug, validate_inst, validate_uuid};
+use clj_value::{
+    Keyword, List, Symbol, Value, java_debug, reader_conditional, tagged_literal, validate_inst,
+    validate_uuid,
+};
 
 use crate::Reader;
 use crate::error::ReaderError;
@@ -148,10 +151,7 @@ impl Reader {
         // Suppressed reads (the cond discard loop) and preserved
         // conds produce `TaggedLiteral` without invoking anything.
         if self.suppress || (self.in_cond && self.opts.read_cond == ReadCond::Preserve) {
-            return Ok(Some(Value::TaggedLiteral {
-                tag: sym,
-                form: Box::new(form),
-            }));
+            return Ok(Some(tagged_literal(sym, form)));
         }
         // The dotted check is on the tag NAME, not the namespace
         // (both modes: record tags never consult the table).
@@ -226,10 +226,7 @@ impl Reader {
                 // Validated: this `TaggedLiteral` is the readable
                 // value (the eval walk re-validates it uniformly —
                 // idempotent — and invokes nothing for it).
-                return Ok(Some(Value::TaggedLiteral {
-                    tag: sym.clone(),
-                    form: Box::new(form),
-                }));
+                return Ok(Some(tagged_literal(sym.clone(), form)));
             }
             return self.deferred_tag(sym, form, checkpoint);
         }
@@ -260,10 +257,7 @@ impl Reader {
                 form: form.clone(),
             });
         }
-        Ok(Some(Value::TaggedLiteral {
-            tag: sym.clone(),
-            form: Box::new(form),
-        }))
+        Ok(Some(tagged_literal(sym.clone(), form)))
     }
 
     /// `NamespaceMapReader` (see module docs).
@@ -443,10 +437,10 @@ impl Reader {
             // so `expect` (whose line always executes) spells the
             // invariant coverably (100% line gate).
             self.list_reader(hook).map(|form| {
-                Some(Value::ReaderConditional {
-                    form: Box::new(form.expect("the list reader always returns a form")),
+                Some(reader_conditional(
+                    form.expect("the list reader always returns a form"),
                     splicing,
-                })
+                ))
             })
         } else {
             self.read_cond_delimited(splicing, top, hook)
@@ -658,7 +652,10 @@ mod tests {
 
     /// Assert a value is the tagged literal `#tag form` (tag printed).
     fn assert_tagged(v: Value, tag: &str, form: &Value) {
-        let Value::TaggedLiteral { tag: t, form: f } = &v else {
+        let Value::TaggedLiteral {
+            tag: t, form: f, ..
+        } = &v
+        else {
             panic!("expected a tagged literal, got {v:?}");
         };
         assert_eq!(t.to_string(), tag);

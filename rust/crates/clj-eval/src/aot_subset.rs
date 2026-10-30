@@ -2132,14 +2132,8 @@ mod tests {
         let forms = eval
             .read_forms("([1] {:a 1} #{2})", &mut clj_reader::NoHooks)
             .expect("read");
-        let tagged = Value::TaggedLiteral {
-            tag: Symbol::new(None, "foo"),
-            form: Box::new(Value::Int(1)),
-        };
-        let cond = Value::ReaderConditional {
-            form: Box::new(Value::Int(2)),
-            splicing: true,
-        };
+        let tagged = clj_value::tagged_literal(Symbol::new(None, "foo"), Value::Int(1));
+        let cond = clj_value::reader_conditional(Value::Int(2), true);
         let mixed = Value::List(List::from_vec(vec![
             forms[0].clone(),
             tagged,
