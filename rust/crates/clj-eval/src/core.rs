@@ -2084,15 +2084,12 @@ fn symbol_keys(m: &Map) -> HashSet<Symbol> {
 }
 
 /// Snapshot the live tag consult into `opts` (S6): defer mode on,
-/// the table keys (or the borked class), and the default-fn flag.
-/// Read paths re-snapshot per form (user code runs between forms,
-/// so the consult stays fresh like the JVM's per-tag deref). The
+/// the table keys (or the borked class), the default-layer keys
+/// (or its borked class, #94), and the default-fn flag. Read
+/// paths re-snapshot per form (user code runs between forms, so
+/// the consult stays fresh like the JVM's per-tag deref). The
 /// autoload scan runs first, so freshly mounted mapping files are
 /// already in the table the snapshot reads.
-/// DIVERGENCE (#94): upstream falls back to the
-/// `default-data-readers` VAR root between the table and the
-/// default fn; this snapshot never reads that root (like
-/// `resolve_tag` below), so replacing it is a silent no-op here.
 pub(crate) fn snapshot_data_readers(
     eval: &mut Evaluator,
     opts: &mut clj_reader::ReaderOpts,
@@ -2102,8 +2099,20 @@ pub(crate) fn snapshot_data_readers(
     opts.data_readers = true;
     opts.data_reader_keys = keys;
     opts.data_readers_borked = borked;
+    snapshot_default_layer(eval, opts);
     opts.default_reader_fn = !matches!(deref_core(eval, "*default-data-reader-fn*"), Value::Nil);
     Ok(())
+}
+
+/// Snapshot the default layer (`default-data-readers` root) into
+/// `opts` (#94): the symbol keys plus the borked-table class,
+/// like the table above. Shared by `snapshot_data_readers` and
+/// the mapping-file read (which skips the autoload scan but
+/// resolves tags against the same layers).
+fn snapshot_default_layer(eval: &Evaluator, opts: &mut clj_reader::ReaderOpts) {
+    let (keys, borked) = table_snapshot(&deref_core(eval, "default-data-readers"));
+    opts.default_reader_keys = keys;
+    opts.default_readers_borked = borked;
 }
 
 /// `data_readers.clj` autoload (zero-fence reader): upstream
@@ -2317,6 +2326,7 @@ fn read_data_reader_map(
     opts.data_readers = true;
     opts.data_reader_keys = keys;
     opts.data_readers_borked = borked;
+    snapshot_default_layer(eval, &mut opts);
     opts.default_reader_fn = !matches!(deref_core(eval, "*default-data-reader-fn*"), Value::Nil);
     opts.read_eval = seed.read_eval;
     opts.suppress_read = seed.suppress_read;
@@ -2556,24 +2566,17 @@ fn table_entry(m: &Map, tag: &Symbol) -> Option<Value> {
 }
 
 /// Resolve one tag: the table (fresh deref per tag — user code runs
-/// between tags), then the unqualified `inst`/`uuid` defaults, then
+/// between tags), then the `default-data-readers` root (#94), then
 /// the default fn with `[tag form]`, else the `RuntimeException`
-/// (probes `e-*`, `f-*`). The throw stays reachable when the table
-/// mutates mid-walk (the reader consults the pre-read snapshot).
-/// DIVERGENCE (#94): the `inst`/`uuid` arms below are hardcoded —
-/// upstream consults the `default-data-readers` VAR root here, so
-/// replacing that root is a silent no-op in this port.
+/// (probes `e-*`, `f-*`, `h-*`). The throw stays reachable when
+/// the table mutates mid-walk (the reader consults the pre-read
+/// snapshot).
 fn resolve_tag(eval: &mut Evaluator, tag: &Symbol, form: Value) -> Result<Value, NativeError> {
     if let Some(f) = table_lookup(&deref_core(eval, "*data-readers*"), tag)? {
         return eval.call(&f, &[form]).map_err(signal_to_native);
     }
-    if tag.namespace().is_none() {
-        if tag.name() == "inst" {
-            return default_inst_reader(&form);
-        }
-        if tag.name() == "uuid" {
-            return default_uuid_reader(&form);
-        }
+    if let Some(f) = table_lookup(&deref_core(eval, "default-data-readers"), tag)? {
+        return eval.call(&f, &[form]).map_err(signal_to_native);
     }
     let default_fn = deref_core(eval, "*default-data-reader-fn*");
     if !matches!(default_fn, Value::Nil) {

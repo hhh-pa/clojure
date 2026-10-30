@@ -1472,3 +1472,235 @@ fn exotic_tables_and_tags() {
         "[:eof [1]]"
     );
 }
+
+/// Run `body` with the `default-data-readers` root swapped to `root`
+/// (restored after — gap #94 probes `h-*` in
+/// `docs/gap-94/probes/ddr.out`).
+fn with_ddr(root: &str, body: &str) -> String {
+    format!(
+        "(let [saved94 default-data-readers] (try (do (alter-var-root #'default-data-readers (constantly {root})) {body}) (finally (alter-var-root #'default-data-readers (constantly saved94)))))"
+    )
+}
+
+#[test]
+fn default_root_wipe_falls_through() {
+    let mut eval = boot();
+    // `h-wipe-nil` / `h-wipe-empty` / `h-wipe-uuid`: a wiped root
+    // falls through to the throw.
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            &with_ddr("nil", "(read-string \"#inst \\\"2024-01-01\\\"\")")
+        ),
+        "java.lang.RuntimeException | No reader function for tag inst"
+    );
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            &with_ddr("{}", "(read-string \"#inst \\\"2024-01-01\\\"\")")
+        ),
+        "java.lang.RuntimeException | No reader function for tag inst"
+    );
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            &with_ddr(
+                "nil",
+                "(read-string \"#uuid \\\"550e8400-e29b-41d4-a716-446655440000\\\"\")"
+            )
+        ),
+        "java.lang.RuntimeException | No reader function for tag uuid"
+    );
+    // `h-wipe-badpayload`: validation is gated on default
+    // membership — no `TagInvoke` once the layer is gone.
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            &with_ddr("nil", "(read-string \"#inst \\\"bogus\\\"\")")
+        ),
+        "java.lang.RuntimeException | No reader function for tag inst"
+    );
+    // `h-wipe-defaultfn`: the wiped layer falls through to the
+    // default fn with `[tag form]`.
+    assert_eq!(
+        run_last(
+            &mut eval,
+            &with_ddr(
+                "nil",
+                "(binding [*default-data-reader-fn* (fn [tag x] [:d tag x])] (read-string \"#inst \\\"2024-01-01\\\"\"))"
+            )
+        ),
+        "[:d inst \"2024-01-01\"]"
+    );
+    // `h-wipe-table`: the table is unaffected by the wipe.
+    assert_eq!(
+        run_last(
+            &mut eval,
+            &with_ddr(
+                "nil",
+                "(binding [*data-readers* {'foo (fn [x] [:ok x])}] (read-string \"#foo 1\"))"
+            )
+        ),
+        "[:ok 1]"
+    );
+}
+
+#[test]
+fn default_root_borked_extra_replaced() {
+    let mut eval = boot();
+    // `h-bork-long`: a non-lookupable root fails the `ILookup` cast
+    // (like the table — probes `e-nonmap`, `e-nonmap-inst`).
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            &with_ddr("42", "(read-string \"#inst \\\"2024-01-01\\\"\")")
+        ),
+        "java.lang.ClassCastException | class java.lang.Long cannot be cast to class clojure.lang.ILookup (java.lang.Long is in module java.base of loader 'bootstrap'; clojure.lang.ILookup is in unnamed module of loader 'app')"
+    );
+    assert_eq!(
+        uncaught(&mut eval, &with_ddr("42", "(read-string \"#foo 1\")")),
+        "java.lang.ClassCastException | class java.lang.Long cannot be cast to class clojure.lang.ILookup (java.lang.Long is in module java.base of loader 'bootstrap'; clojure.lang.ILookup is in unnamed module of loader 'app')"
+    );
+    // `h-bork-vec`: a vector root misses like a vector table (probe
+    // `e-vectable`).
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            &with_ddr(
+                "[(fn [x] :v)]",
+                "(read-string \"#inst \\\"2024-01-01\\\"\")"
+            )
+        ),
+        "java.lang.RuntimeException | No reader function for tag inst"
+    );
+    // `h-bork-tablehit`: table hits short-circuit past the borked
+    // root; `h-bork-defaultfn`: the default fn does not save it.
+    assert_eq!(
+        run_last(
+            &mut eval,
+            &with_ddr(
+                "42",
+                "(binding [*data-readers* {'foo (fn [x] [:ok x])}] (read-string \"#foo 1\"))"
+            )
+        ),
+        "[:ok 1]"
+    );
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            &with_ddr(
+                "42",
+                "(binding [*default-data-reader-fn* (fn [tag x] :d)] (read-string \"#foo 1\"))"
+            )
+        ),
+        "java.lang.ClassCastException | class java.lang.Long cannot be cast to class clojure.lang.ILookup (java.lang.Long is in module java.base of loader 'bootstrap'; clojure.lang.ILookup is in unnamed module of loader 'app')"
+    );
+    // `h-extra` / `h-extra-ns`: extra default tags invoke (no
+    // namespace restriction, no inline validation).
+    assert_eq!(
+        run_last(
+            &mut eval,
+            &with_ddr(
+                "(assoc default-data-readers 'foo (fn [x] [:ok x]))",
+                "(read-string \"#foo 1\")"
+            )
+        ),
+        "[:ok 1]"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            &with_ddr(
+                "(assoc default-data-readers 'foo/bar (fn [x] [:ok x]))",
+                "(read-string \"#foo/bar 1\")"
+            )
+        ),
+        "[:ok 1]"
+    );
+    // `h-replace-inst` / `h-replace-inst-nonstr` / `h-replace-uuid`:
+    // a replaced canonical default runs with the raw payload.
+    assert_eq!(
+        run_last(
+            &mut eval,
+            &with_ddr(
+                "(assoc default-data-readers 'inst (fn [x] [:mine x]))",
+                "(read-string \"#inst \\\"2024-01-01\\\"\")"
+            )
+        ),
+        "[:mine \"2024-01-01\"]"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            &with_ddr(
+                "(assoc default-data-readers 'inst (fn [x] [:mine x]))",
+                "(read-string \"#inst 42\")"
+            )
+        ),
+        "[:mine 42]"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            &with_ddr(
+                "(assoc default-data-readers 'uuid (fn [x] [:mine x]))",
+                "(read-string \"#uuid \\\"550e8400-e29b-41d4-a716-446655440000\\\"\")"
+            )
+        ),
+        "[:mine \"550e8400-e29b-41d4-a716-446655440000\"]"
+    );
+    // `h-nil-entry` / `h-strkey`: nil entries and non-symbol keys
+    // miss (probes `e-nilentry`, `e-strkey`).
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            &with_ddr(
+                "(assoc default-data-readers 'foo nil)",
+                "(read-string \"#foo 1\")"
+            )
+        ),
+        "java.lang.RuntimeException | No reader function for tag foo"
+    );
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            &with_ddr("{\"foo\" (fn [x] :s)}", "(read-string \"#foo 1\")")
+        ),
+        "java.lang.RuntimeException | No reader function for tag foo"
+    );
+    // `h-nonfn`: a non-fn entry fails the `IFn` cast (the port's
+    // invoke-cast shape — probe `e-nonfn`).
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            &with_ddr(
+                "(assoc default-data-readers 'foo 42)",
+                "(read-string \"#foo 1\")"
+            )
+        ),
+        "java.lang.ClassCastException | Cannot cast java.lang.Long to clojure.lang.IFn"
+    );
+    // `h-var-value`: var entries invoke as fns.
+    run_last(&mut eval, "(defn h94-reader [x] [:v x])");
+    assert_eq!(
+        run_last(
+            &mut eval,
+            &with_ddr(
+                "(assoc default-data-readers 'foo #'h94-reader)",
+                "(read-string \"#foo 1\")"
+            )
+        ),
+        "[:v 1]"
+    );
+    // `h-vs-defaultfn`: the default layer beats the default fn.
+    assert_eq!(
+        run_last(
+            &mut eval,
+            &with_ddr(
+                "(assoc default-data-readers 'foo (fn [x] [:ok x]))",
+                "(binding [*default-data-reader-fn* (fn [tag x] :d)] (read-string \"#foo 1\"))"
+            )
+        ),
+        "[:ok 1]"
+    );
+}

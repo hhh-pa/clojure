@@ -747,7 +747,7 @@ No slice on this branch: hard-never reasons stand alone, design-blocked rows nam
 | `construct-proxy` | implemented | S14 proxy instance of the named class (nil fn map; no ctor args); typeinternals.rs construct_proxy_rows, construct_proxy_errors (S14, #58) |
 | `create-struct` | implemented | tests/collmisc.rs structmap_rows |
 | `dec'` | implemented | core.rs native_dec_prime (promoting step; `inc'` retargeted at the promoting step — in-slice fix); tests/extarith.rs s11_prime_steps_rows (S11, #56; probes `dp-*`, `ip-*`) |
-| `default-data-readers` | implemented | S6 map var (`inst`/`uuid` natives); zero_oos_s6_datareaders.rs default_data_readers_table, default_readers_direct_calls |
+| `default-data-readers` | implemented | S6 map var (`inst`/`uuid` natives); zero_oos_s6_datareaders.rs default_data_readers_table, default_readers_direct_calls, default_root_wipe_falls_through, default_root_borked_extra_replaced (#94; probes `h-*` in docs/gap-94/probes/ddr.out) |
 | `definline` | implemented | core.clj macro (eval-built specimen; `:inline` recorded, never honored — the port is an interpreter); tests/zero_oos_s4b_macros.rs s4b_definline_rows |
 | `defstruct` | implemented | tests/collmisc.rs structmap_rows (macro; expansion shape) |
 | `derive` | implemented | hierarchy.rs hier_make_and_explicit_derive, hier_derive_errors, hier_derive_tag_shapes, hier_derive_relation_errors, hier_global_arities (S13, #57; probes h-*, n-*) |
