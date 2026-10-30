@@ -702,13 +702,13 @@ Behaviors:
   is the only shared-struct change in the slice; it is
   additive and behavior-neutral except through
   `identical?` (§2.3).
-- JVM divergences (fence 4a closed all but the bigs):
+- JVM identity (fence 4a + 4a-big closed every gap):
   `BigInt`/`BigInteger`/`BigDec`/`Ratio` (`d-bigint`,
-  `d-bigdec`, `d-ratio`) still compare by value until
-  the post-tower Arc-box lands (zero-fence sequencing:
-  tower owns numeric representation; the deferred rule
-  — `BigDecimal.valueOf` canonicalization for scale-0
-  0..10, always-fresh otherwise — is recorded in
+  `d-bigdec`, `d-ratio`) compare allocation identity —
+  `BigInt`/`BigInteger`/`Ratio` box fresh per
+  construction, `BigDec` literals box fresh while
+  arithmetic results share `ZERO_THROUGH_TEN` (scale-0
+  0..10) through `BigDecimal.valueOf` (oracle
   `docs/fence-4a-identity/probes.md` P5). Big longs,
   doubles, uncached chars (`d-int-big`, `d-double`,
   `d-char-uncached`), built strings (`d-str-built`),

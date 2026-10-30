@@ -3542,9 +3542,9 @@ fn range_num(v: &Value) -> RangeNum {
     match v {
         Value::Int(i) => RangeNum::Int(*i),
         Value::Double(d) => RangeNum::Double(*d),
-        Value::BigInt(n) | Value::BigInteger(n) => RangeNum::BigInt(n.clone()),
-        Value::Ratio(r) => RangeNum::Ratio(r.clone()),
-        Value::BigDec(d) => RangeNum::BigDec(d.clone()),
+        Value::BigInt(n) | Value::BigInteger(n) => RangeNum::BigInt(n.as_ref().clone()),
+        Value::Ratio(r) => RangeNum::Ratio(r.as_ref().clone()),
+        Value::BigDec(d) => RangeNum::BigDec(d.as_ref().clone()),
         _ => RangeNum::Int(0),
     }
 }

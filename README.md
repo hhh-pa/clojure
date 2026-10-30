@@ -162,15 +162,6 @@ the interpreter's own natives, so AOT and `run` cannot drift.
 Deliberate, documented, and pinned by the differential corpus —
 each entry asserts its exact behavior, so drift fails CI:
 
-- **Big-number identity deferred.** `identical?` follows the
-  JVM `==` model (Long cache, `Character` range, doubles never,
-  pooled string literals, interned keywords, minted ids for
-  symbols/collections/entries/uuids/instants/uris/tagged/
-  conditionals/vectors), and `compare-and-set!` compares
-  references — except `BigInt`/`BigInteger`/`BigDec`/`Ratio`,
-  which still compare by value until the post-tower Arc-box
-  lands (zero-fence sequencing: tower owns numeric
-  representation).
 - **Printing.** `pr` round-trips EDN values through the reader;
   `*print-length*` / `*print-level*` truncate with `...`;
   `*print-dup*` routes `pr` through the dup printer (undupable

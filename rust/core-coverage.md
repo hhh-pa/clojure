@@ -572,7 +572,7 @@ Significant vars with no port slice, grouped below by area with the reason. (Thr
 
 | var | status | notes |
 | --- | --- | --- |
-| `identical?` | implemented | JVM == model: caches, pooled strings, interned kws, minted ids (classemu.rs identical_kinds, identical_caches, identical_strings, identical_heap, identical_inline, identical_arities, identical_first_class; bigs deferred post-tower) |
+| `identical?` | implemented | JVM == model: caches, pooled strings, interned kws, minted ids, Arc-boxed bigs + valueOf decimals (classemu.rs identical_kinds, identical_caches, identical_strings, identical_heap, identical_bigs, identical_inline, identical_arities, identical_first_class) |
 | `re-find` | implemented | re.rs over the `regex` crate (String patterns fail the `String` cast); re_rng.rs re_find_rows |
 | `re-matches` | implemented | re.rs full-match; re_rng.rs re_matches_rows |
 | `re-seq` | implemented | re.rs lazy match seq; re_rng.rs re_seq_rows |
