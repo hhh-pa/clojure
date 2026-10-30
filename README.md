@@ -71,7 +71,8 @@ deref `@`, meta `^`, `%` arg sugar, comments (`;`, `#_`), dispatch
 macros (`#{`, `#"`, `#(`, `#'`, `#_`, `#?` reader conditionals with
 `:cljr` features — `.cljc` never loads JVM branches), `#=` eval
 reader (gated by `*read-eval*`), validated `#inst`/`#uuid`
-tagged reads, and `data_readers.clj`/`data_readers.cljc`
+reads into native `Instant`/`Uuid` values, and
+`data_readers.clj`/`data_readers.cljc`
 autoload from each `*load-path*` dir (the port's classpath
 mapping). Every form carries a span for diagnostics.
 
@@ -214,9 +215,6 @@ out of scope, not silently missing:
   against the static `clojure.lang.*` table (S16);
   `clojure.java.*`, `clojure.reflect`, and real classloading
   stay out.
-- Reader: `#inst`/`#uuid` still read into `TaggedLiteral`
-  (verbatim echo, S6-pinned); the native `Instant`/`Uuid`
-  cutover is a separate slice.
 - LLVM JIT, `clojure.spec`, `core.async`, and binary
   compatibility with JVM-compiled artifacts.
 

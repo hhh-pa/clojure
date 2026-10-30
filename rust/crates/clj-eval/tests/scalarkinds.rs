@@ -13,14 +13,12 @@
 //! the replayed pins (`u-*` in `uuid.out`, `i-*` in `inst.out`,
 //! `r-*` in `uri.out`, `e-*` in `edges.out`).
 //!
-//! The S6 boundary: `#inst` / `#uuid` reads still answer
-//! `TaggedLiteral` on this slice (S6 owns tag routing), so no core
-//! var constructs `Instant` (or `Uri` — upstream has no URI
-//! constructor either). `inst-ms` over real instants and the `Uri`
-//! kind arms are covered by Rust tests (`scalar.rs`,
-//! `scalars.rs`); this file pins everything Clojure-reachable plus
-//! the current boundary behavior (loudly marked — the S6-flip
-//! integration flips those lines).
+//! The S6 boundary is retired (#103): `#inst` / `#uuid` reads
+//! answer native `Instant` / `Uuid` through the flipped tag
+//! defaults, so `inst-ms` / `inst?` over read literals replay
+//! from Clojure here. No core var constructs `Uri` (upstream
+//! has no URI constructor either); the `Uri` kind arms stay
+//! covered by Rust tests (`scalar.rs`, `scalars.rs`).
 
 use clj_eval::{Evaluator, SourceError, boot};
 use clj_value::{PrintOpts, Value, pr_to_string};
@@ -376,8 +374,7 @@ fn uuid_ordering() {
 }
 
 /// `pr`/`print` stay tagged; `str` goes bare (`u-pr`, `u-print`,
-/// `u-str` — note `read-string` stays `TaggedLiteral` here: the
-/// S6 boundary, not the JVM round-trip).
+/// `u-str`).
 #[test]
 fn uuid_printing() {
     let mut eval = boot();
@@ -420,19 +417,12 @@ fn uri_predicate_battery() {
 }
 
 /// `inst?` is `satisfies?` over `Inst` (`i-p-*`, `i-sat-eq`):
-/// nothing Clojure-reachable satisfies it — including the
-/// `#inst` literal, which still reads `TaggedLiteral` (S6
-/// boundary: this line flips with the integration).
+/// the `#inst` literal satisfies it now that reads answer
+/// natives (#103); the rest stay false.
 #[test]
 fn inst_predicate_matches_satisfies() {
     let mut eval = boot();
-    for input in [
-        "nil",
-        "\"2024-01-01\"",
-        "42",
-        "(random-uuid)",
-        "#inst \"2024-01-01\"",
-    ] {
+    for input in ["nil", "\"2024-01-01\"", "42", "(random-uuid)"] {
         assert_eq!(
             run_last(
                 &mut eval,
@@ -442,6 +432,13 @@ fn inst_predicate_matches_satisfies() {
             "{input}"
         );
     }
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "[(inst? #inst \"2024-01-01\") (satisfies? Inst #inst \"2024-01-01\")]"
+        ),
+        "[true true]"
+    );
 }
 
 /// `inst-ms` failure modes (`i-ms-nil`, `i-ms-str`, `i-ms-int`,
@@ -469,11 +466,11 @@ fn inst_ms_failures() {
             "{input}"
         );
     }
-    // S6 boundary: the `#inst` literal is still a tagged literal,
-    // so it fails like one (this line flips with the integration).
+    // The `#inst` literal is a native now, so `inst-ms` answers
+    // its millis (#103; oracle `i-ms-day`).
     assert_eq!(
-        uncaught(&mut eval, "(inst-ms #inst \"2024-01-01\")"),
-        "java.lang.IllegalArgumentException | No implementation of method: :inst-ms* of protocol: #'clojure.core/Inst found for class: clojure.lang.TaggedLiteral"
+        run_last(&mut eval, "(inst-ms #inst \"2024-01-01\")"),
+        "1704067200000"
     );
 }
 

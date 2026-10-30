@@ -137,16 +137,15 @@ protocol exactly like upstream core:
 - `random-uuid`: 0-arity, v4 (`e-uuid-ver4`).
 - `uuid?` / `uri?`: `pred1!` kind predicates (`u-p-*`, `r-p-*`).
 
-## The S6 boundary (read path NOT flipped)
+## The S6 boundary (read path flipped by #103)
 
-`#inst` / `#uuid` reads keep answering `TaggedLiteral` on this
-slice: S6 owns tag routing, its tests pin the echoing literal
+`#inst` / `#uuid` reads kept answering `TaggedLiteral` on this
+slice: S6 owns tag routing, its tests pinned the echoing literal
 (`inst_default_reads`, `uuid_default_reads`,
-`default_readers_direct_calls`), and the issue scopes S9 to
-"kinds + printing only" with ctors exposed for S6. Flipping
-`default_inst_reader` / `default_uuid_reader` to the new ctors is
-a later integration step; the recipe, when it lands (with S6
-test updates in the same commit):
+`default_readers_direct_calls`), and the issue scoped S9 to
+"kinds + printing only" with ctors exposed for S6. The #103
+cutover landed the flip per this recipe (with the S6 test
+updates in the same commit):
 
 1. `default_inst_reader`: after `validate_inst`, return
    `instant_from_str` (infallible post-validation).
@@ -161,13 +160,11 @@ test updates in the same commit):
    `TaggedLiteral` (the reader cannot construct values); the
    eval walk resolves them through the flipped defaults.
 
-Until then the issue's `(inst-ms #inst "...")` BDD item cannot
-run from Clojure: no core var constructs `Instant` (or `Uri` —
-upstream has no URI constructor either). `inst-ms` over real
-instants is covered by Rust tests calling the booted `inst-ms`
-var with constructed values, plus Clojure tests over user types
-extending `Inst`; `uri?` replays the false battery from Clojure
-and the kind arms from Rust.
+Until the flip the issue's `(inst-ms #inst "...")` BDD item
+could not run from Clojure; it replays from Clojure now
+(`scalarkinds.rs`). No core var constructs `Uri` (upstream has
+no URI constructor either): `uri?` replays the false battery
+from Clojure and the kind arms from Rust.
 
 ## Divergences from the JVM (all deliberate, all pinned)
 
