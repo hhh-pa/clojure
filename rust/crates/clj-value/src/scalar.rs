@@ -3537,4 +3537,34 @@ mod tests {
         assert_ne!(a, b);
         assert!(b > a);
     }
+
+    fn std_hash<T: std::hash::Hash>(v: &T) -> u64 {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::Hasher;
+        let mut h = DefaultHasher::new();
+        v.hash(&mut h);
+        h.finish()
+    }
+
+    /// `Hash` is `Eq`-consistent and id-blind: equal words hash
+    /// equal (fence 4a coverage: the `Uuid::hash` body).
+    #[test]
+    fn uuid_hash_is_eq_consistent() {
+        let a = Uuid::from_bits(0x0123_4567_89ab_cdef, 0xfedc_ba98_7654_3210);
+        let b = Uuid::from_bits(0x0123_4567_89ab_cdef, 0xfedc_ba98_7654_3210);
+        assert_eq!(a, b);
+        assert_eq!(std_hash(&a), std_hash(&b));
+        assert_ne!(std_hash(&a), std_hash(&Uuid::from_bits(1, 2)));
+    }
+
+    /// Same contract for instants (fence 4a coverage: the
+    /// `Instant::hash` body).
+    #[test]
+    fn instant_hash_is_eq_consistent() {
+        let a = Instant::from_millis(1_700_000_000_000);
+        let b = Instant::from_millis(1_700_000_000_000);
+        assert_eq!(a, b);
+        assert_eq!(std_hash(&a), std_hash(&b));
+        assert_ne!(std_hash(&a), std_hash(&Instant::from_millis(7)));
+    }
 }

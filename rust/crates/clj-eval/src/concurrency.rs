@@ -2411,15 +2411,17 @@ pub(crate) fn monitor_key(v: &Value) -> u64 {
         // Boxed kinds hash by content: `Box` clones deep-copy, so
         // heap addresses would key clones apart (the fx4 exit arg is
         // a fresh clone of the enter arg).
-        Value::MapEntry { key, val } => (14, hash_debug(&(key.as_ref(), val.as_ref()))),
+        Value::MapEntry { key, val, .. } => (14, hash_debug(&(key.as_ref(), val.as_ref()))),
         Value::Map(m) => (15, m.id()),
         Value::Set(s) => (16, s.id()),
         Value::Regex(r) => (17, Arc::as_ptr(r) as *const () as usize as u64),
         Value::Uuid(u) => (18, u.hi ^ u.lo),
         Value::Instant(t) => (19, t.millis as u64),
         Value::Uri(u) => (20, u.id()),
-        Value::TaggedLiteral { tag, form } => (21, hash_debug(&(tag, form.as_ref()))),
-        Value::ReaderConditional { form, splicing } => (22, hash_debug(&(form.as_ref(), splicing))),
+        Value::TaggedLiteral { tag, form, .. } => (21, hash_debug(&(tag, form.as_ref()))),
+        Value::ReaderConditional { form, splicing, .. } => {
+            (22, hash_debug(&(form.as_ref(), splicing)))
+        }
         Value::Var(v) => (23, v.id),
         Value::Unbound(u) => (24, u.var_id),
         Value::Throwable(t) => (25, t.id),
@@ -2828,7 +2830,7 @@ mod tests {
         use clj_value::{
             BigDec, ClassVal, Elem8, ExtensionValue, Instant as ValueInstant, List, MultiFn,
             PrimitiveVector, Transient, TransientKind, TransientVector, Unbound, Uri, Uuid,
-            new_set,
+            map_entry, new_set, reader_conditional, tagged_literal,
         };
         use std::any::Any;
         use std::hash::Hasher;
@@ -2866,24 +2868,15 @@ mod tests {
             Value::Keyword(Keyword::new(None, "k")),
             Value::List(List::from_vec(vec![])),
             Value::Vector(Vector::from_vec(vec![])),
-            Value::MapEntry {
-                key: Box::new(Value::Nil),
-                val: Box::new(Value::Nil),
-            },
+            map_entry(Value::Nil, Value::Nil),
             Value::Map(new_map()),
             Value::Set(new_set()),
             Value::Regex(Arc::from("r")),
             Value::Uuid(Uuid::from_bits(1, 2)),
             Value::Instant(ValueInstant::from_millis(1)),
             Value::Uri(Box::new(Uri::parse("http://x").unwrap())),
-            Value::TaggedLiteral {
-                tag: Symbol::new(None, "t"),
-                form: Box::new(Value::Nil),
-            },
-            Value::ReaderConditional {
-                form: Box::new(Value::Nil),
-                splicing: false,
-            },
+            tagged_literal(Symbol::new(None, "t"), Value::Nil),
+            reader_conditional(Value::Nil, false),
             Value::Var(Var {
                 id: 9,
                 sym: Symbol::new(None, "v"),
