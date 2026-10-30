@@ -884,6 +884,9 @@ fn host_natives_and_rewrites() {
         ),
         "java.lang.IllegalStateException | attempt to exit a monitor not held by this thread"
     );
+    // ... and `:a` is still held afterwards (the wrong exit released
+    // nothing — its own exit still succeeds).
+    assert_eq!(run_last(&mut eval, "(fx4-monitor-exit :a)"), "nil");
     assert_eq!(
         run_last(
             &mut eval,
