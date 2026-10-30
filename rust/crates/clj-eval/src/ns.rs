@@ -1138,7 +1138,7 @@ fn could_not_locate(root: &str) -> NativeError {
 /// A filesystem failure as `FileNotFoundException` with the path as
 /// given (Rust's ` (os error N)` suffix is stripped — the JVM shape
 /// is the bare OS message, probe36 `loadfile-missing`).
-fn fs_err(path: &str, e: &std::io::Error) -> NativeError {
+pub(crate) fn fs_err(path: &str, e: &std::io::Error) -> NativeError {
     let mut msg = e.to_string();
     if let Some(i) = msg.rfind(" (os error ").filter(|_| msg.ends_with(')')) {
         msg.truncate(i);
@@ -1890,7 +1890,11 @@ fn native_load_reader(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nat
         // snapshot, read, drain, resolve. Data-reader failures
         // surface like `load`'s (raw uncaught throwables, not
         // `CompilerException` wraps).
-        crate::core::snapshot_data_readers(eval, &mut opts);
+        if let Err(e) = crate::core::snapshot_data_readers(eval, &mut opts) {
+            crate::reader::restore_parser(reader, parser);
+            let thrown = eval.throwable(e);
+            return Err(source_to_native(eval, "", SourceError::Uncaught(thrown)));
+        }
         parser.set_opts(&opts);
         let outcome = {
             let mut hooks = crate::reader::LiveReadHooks::new(&mut *eval);

@@ -69,8 +69,11 @@ doubles, strings (escapes + unicode), chars, booleans, nil, lists,
 vectors, maps, sets, quoting (`'`, `` ` `` with unquote/splicing),
 deref `@`, meta `^`, `%` arg sugar, comments (`;`, `#_`), dispatch
 macros (`#{`, `#"`, `#(`, `#'`, `#_`, `#?` reader conditionals with
-`:cljr` features — `.cljc` never loads JVM branches). Every form
-carries a span for diagnostics.
+`:cljr` features — `.cljc` never loads JVM branches), `#=` eval
+reader (gated by `*read-eval*`), validated `#inst`/`#uuid`
+tagged reads, and `data_readers.clj`/`data_readers.cljc`
+autoload from each `*load-path*` dir (the port's classpath
+mapping). Every form carries a span for diagnostics.
 
 **Types (no bytecode).** `deftype defrecord reify proxy
 definterface gen-interface gen-class` over a namespace registry
@@ -211,9 +214,9 @@ out of scope, not silently missing:
   against the static `clojure.lang.*` table (S16);
   `clojure.java.*`, `clojure.reflect`, and real classloading
   stay out.
-- Reader: `#=` eval reader, custom `data_readers.clj`
-  autoload (the port has no classpath). `#inst` / `#uuid`
-  tags read into native `Instant` / `Uuid` values.
+- Reader: `#inst`/`#uuid` still read into `TaggedLiteral`
+  (verbatim echo, S6-pinned); the native `Instant`/`Uuid`
+  cutover is a separate slice.
 - LLVM JIT, `clojure.spec`, `core.async`, and binary
   compatibility with JVM-compiled artifacts.
 

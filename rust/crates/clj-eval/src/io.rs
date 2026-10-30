@@ -630,7 +630,7 @@ fn native_read_string(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nat
         opts.aliases = ns.alias_map();
         opts.refers = ns.refer_map();
     }
-    crate::core::snapshot_data_readers(eval, &mut opts);
+    crate::core::snapshot_data_readers(eval, &mut opts)?;
     opts.read_eval = seed.read_eval;
     opts.suppress_read = seed.suppress_read;
     opts.resolver_bound = seed.resolver_bound;

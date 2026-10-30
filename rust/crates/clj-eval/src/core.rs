@@ -19,9 +19,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use num_traits::{Signed, ToPrimitive, Zero};
 
+use clj_reader::{ReadCond, Reader, ReaderOpts};
 use clj_value::{
     ExtensionValue, Keyword, List, Map, PrintOpts, Set, Symbol, TagError, ThrowClass, Throwable,
-    Value, Vector, new_map, new_set, pr_to_string, validate_inst, validate_uuid,
+    Value, Vector, new_map, new_set, pr_to_string, seq_vec, validate_inst, validate_uuid,
 };
 
 use crate::error::{NativeError, jvm_class_of};
@@ -31,7 +32,11 @@ use crate::lazy::{
     as_pending, as_realized, as_subvector, collect_all, equiv_vals, is_counted_seq, is_seq_value,
     realize_deep,
 };
-use crate::ns::{NativeFnPtr, check_arity, deref_core, npe, signal_to_native, throw_class_for};
+use crate::ns::{
+    NativeFnPtr, check_arity, core_var, core_var_handle, deref_core, intern_routed, npe,
+    signal_to_native, throw_class_for, var_value,
+};
+use crate::reader::{LiveReadHooks, map_reader_error, seed_read_gates, sync_reader_ns};
 
 /// `Cannot invoke "Object.getClass()" because "x" is null`: the
 /// numbers-`nil` failure (every arithmetic/comparison op probes it).
@@ -2049,13 +2054,331 @@ fn symbol_keys(m: &Map) -> HashSet<Symbol> {
 /// Snapshot the live tag consult into `opts` (S6): defer mode on,
 /// the table keys (or the borked class), and the default-fn flag.
 /// Read paths re-snapshot per form (user code runs between forms,
-/// so the consult stays fresh like the JVM's per-tag deref).
-pub(crate) fn snapshot_data_readers(eval: &Evaluator, opts: &mut clj_reader::ReaderOpts) {
+/// so the consult stays fresh like the JVM's per-tag deref). The
+/// autoload scan runs first, so freshly mounted mapping files are
+/// already in the table the snapshot reads.
+/// DIVERGENCE (#94): upstream falls back to the
+/// `default-data-readers` VAR root between the table and the
+/// default fn; this snapshot never reads that root (like
+/// `resolve_tag` below), so replacing it is a silent no-op here.
+pub(crate) fn snapshot_data_readers(
+    eval: &mut Evaluator,
+    opts: &mut clj_reader::ReaderOpts,
+) -> Result<(), NativeError> {
+    ensure_data_readers_autoloaded(eval)?;
     let (keys, borked) = table_snapshot(&deref_core(eval, "*data-readers*"));
     opts.data_readers = true;
     opts.data_reader_keys = keys;
     opts.data_readers_borked = borked;
     opts.default_reader_fn = !matches!(deref_core(eval, "*default-data-reader-fn*"), Value::Nil);
+    Ok(())
+}
+
+/// `data_readers.clj` autoload (zero-fence reader): upstream
+/// `load-data-readers` scans the classpath roots once at startup;
+/// the port has no classpath, so every read entry re-scans when
+/// the `*load-path*` value moved since the last scan and merges
+/// each new mapping file into the `*data-readers*` root (file
+/// order replays `data-reader-urls`: all `.clj` first, then all
+/// `.cljc`). Files merge once each; scan errors (bad maps, bad
+/// keys, conflicts, unreadable files) fail the read raw, like the
+/// entry checks. A useless `*load-path*` value skips the scan —
+/// reads never consulted it before, so they must not start
+/// failing on it now.
+pub(crate) fn ensure_data_readers_autoloaded(eval: &mut Evaluator) -> Result<(), NativeError> {
+    let Some(dirs) = autoload_dirs(eval) else {
+        return Ok(());
+    };
+    if eval.data_reader_scan_path.as_ref() == Some(&dirs) {
+        return Ok(());
+    }
+    // Bare evaluators install no vars: nothing to merge into (the
+    // mark still advances, so the miss costs one compare per read).
+    let Some(id) = core_var(eval, "*data-readers*") else {
+        eval.data_reader_scan_path = Some(dirs);
+        return Ok(());
+    };
+    // Optimistic mark BEFORE reading: mapping reads resolve tags,
+    // so user fns may read again mid-scan — nested scans fast-path
+    // out on this mark instead of recursing. Failures revert it,
+    // so the next read retries the same files.
+    let prev = eval.data_reader_scan_path.clone();
+    eval.data_reader_scan_path = Some(dirs.clone());
+    let root = eval
+        .registry
+        .state(id)
+        .and_then(|s| s.root)
+        .unwrap_or(Value::Nil);
+    let mut acc = root;
+    let mut entries: Vec<(Symbol, Value)> = Vec::new();
+    let mut fresh: Vec<String> = Vec::new();
+    if let Err(e) = autoload_scan(eval, &dirs, &mut acc, &mut entries, &mut fresh) {
+        eval.data_reader_scan_path = prev;
+        return Err(e);
+    }
+    if !fresh.is_empty() {
+        // Merge failures revert the mark like scan failures: the
+        // files stay unrecorded, so the next read retries them
+        // instead of silently skipping them forever.
+        if let Err(e) = merge_autoload_entries(eval, id, &entries, fresh) {
+            eval.data_reader_scan_path = prev;
+            return Err(e);
+        }
+    }
+    Ok(())
+}
+
+/// Merge scanned entries onto the LIVE `*data-readers*` root, one
+/// `assoc` per entry (a nested scan may have merged sibling files
+/// meanwhile — wholesale replace would drop them). Nothing installs
+/// until every assoc succeeds, so a failure leaves the root and the
+/// recorded-file set untouched for the retry.
+fn merge_autoload_entries(
+    eval: &mut Evaluator,
+    id: u64,
+    entries: &[(Symbol, Value)],
+    fresh: Vec<String>,
+) -> Result<(), NativeError> {
+    let assoc_fn = deref_core(eval, "assoc");
+    let mut live = eval
+        .registry
+        .state(id)
+        .and_then(|s| s.root)
+        .unwrap_or(Value::Nil);
+    for (tag, var) in entries {
+        let pair = [live, Value::Symbol(tag.clone()), var.clone()];
+        live = eval.call(&assoc_fn, &pair).map_err(signal_to_native)?;
+    }
+    eval.registry.with_state_mut(id, |st| {
+        st.root = Some(live);
+    });
+    eval.loaded_data_reader_files.extend(fresh);
+    Ok(())
+}
+
+/// The scannable `*load-path*` dirs, leniently: an unlistable value
+/// skips the scan (`None`), and non-string entries are dropped
+/// (they can never name a file).
+fn autoload_dirs(eval: &Evaluator) -> Option<Vec<String>> {
+    seq_vec(&deref_core(eval, "*load-path*")).map(|items| {
+        items
+            .iter()
+            .filter_map(|item| match item {
+                Value::Str(s) => Some(s.to_string()),
+                _ => None,
+            })
+            .collect()
+    })
+}
+
+/// Scan every dir for both mapping names, accumulating new files'
+/// entries (conflict-checked against `acc`, the scan-start root
+/// plus the earlier files — upstream `load-data-reader-file`
+/// checks each file against the same accumulator).
+fn autoload_scan(
+    eval: &mut Evaluator,
+    dirs: &[String],
+    acc: &mut Value,
+    entries: &mut Vec<(Symbol, Value)>,
+    fresh: &mut Vec<String>,
+) -> Result<(), NativeError> {
+    for name in ["data_readers.clj", "data_readers.cljc"] {
+        for dir in dirs {
+            // `/` separators on every platform (like `*file*`
+            // during loads — and the `:url` ex-data below).
+            let path = format!("{dir}/{name}").replace('\\', "/");
+            if eval.loaded_data_reader_files.contains(&path) {
+                continue;
+            }
+            // Missing files skip; anything else unreadable fails
+            // (upstream `openStream` fails the same way — even a
+            // directory wearing the mapping name, which is why the
+            // unit test below covers this arm with one).
+            let text = match std::fs::read_to_string(&path) {
+                Ok(text) => text,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(crate::ns::fs_err(&path, &e)),
+            };
+            load_data_reader_file(eval, &path, &text, name.ends_with("cljc"), acc, entries)?;
+            fresh.push(path);
+        }
+    }
+    Ok(())
+}
+
+/// Upstream `load-data-reader-file`: read one form (`{:eof nil}`,
+/// plus `:read-cond :allow` for `.cljc`), reject non-maps, then
+/// intern each value and conflict-check each tag.
+fn load_data_reader_file(
+    eval: &mut Evaluator,
+    path: &str,
+    text: &str,
+    is_cljc: bool,
+    acc: &mut Value,
+    entries: &mut Vec<(Symbol, Value)>,
+) -> Result<(), NativeError> {
+    let mappings = read_data_reader_map(eval, path, text, is_cljc)?;
+    let Value::Map(m) = &mappings else {
+        return Err(data_reader_ex_info(
+            "Not a valid data-reader map",
+            new_map().insert(url_key(), Value::Str(Arc::from(path))),
+        ));
+    };
+    let assoc_fn = deref_core(eval, "assoc");
+    for (k, v) in m.iter() {
+        let Value::Symbol(tag) = k else {
+            return Err(data_reader_ex_info(
+                "Invalid form in data-reader file",
+                new_map()
+                    .insert(url_key(), Value::Str(Arc::from(path)))
+                    .insert(form_key(), k.clone()),
+            ));
+        };
+        let var = data_reader_var(eval, v)?;
+        if let Some(prev) = acc_lookup(acc, tag) {
+            if prev != var {
+                return Err(data_reader_ex_info(
+                    "Conflicting data-reader mapping",
+                    new_map()
+                        .insert(url_key(), Value::Str(Arc::from(path)))
+                        .insert(conflict_key(), k.clone())
+                        .insert(mappings_key(), acc.clone()),
+                ));
+            }
+        }
+        // `assoc` onto the check basis (borked roots fail exactly
+        // like the upstream `(assoc mappings k v-var)` would).
+        let pair = [acc.clone(), Value::Symbol(tag.clone()), var.clone()];
+        *acc = eval.call(&assoc_fn, &pair).map_err(signal_to_native)?;
+        entries.push((tag.clone(), var));
+    }
+    Ok(())
+}
+
+/// Read the mapping file's single form: a full `read` (gates, live
+/// hooks, tag resolution) with `*file*` bound to the path, EOF
+/// answering nil. Syntax failures wrap in `ReaderException` (the
+/// read is line-numbered, like upstream's).
+fn read_data_reader_map(
+    eval: &mut Evaluator,
+    path: &str,
+    text: &str,
+    is_cljc: bool,
+) -> Result<Value, NativeError> {
+    let seed = seed_read_gates(eval)?;
+    let cur = eval.current_ns_name();
+    let mut opts = ReaderOpts {
+        current_ns: cur,
+        read_cond: if is_cljc {
+            ReadCond::Allow
+        } else {
+            ReadCond::Deny
+        },
+        ..ReaderOpts::default()
+    };
+    sync_reader_ns(eval, &mut opts);
+    // Defer-mode keys WITHOUT the autoload scan (the scan is the
+    // caller — re-entering it here would recurse): the table the
+    // file read resolves against is the pre-scan root, exactly
+    // like upstream (whose nested reads deref the pre-merge root).
+    let (keys, borked) = table_snapshot(&deref_core(eval, "*data-readers*"));
+    opts.data_readers = true;
+    opts.data_reader_keys = keys;
+    opts.data_readers_borked = borked;
+    opts.default_reader_fn = !matches!(deref_core(eval, "*default-data-reader-fn*"), Value::Nil);
+    opts.read_eval = seed.read_eval;
+    opts.suppress_read = seed.suppress_read;
+    opts.resolver_bound = seed.resolver_bound;
+    // Upstream binds `*file*` to the mapping URL for the read.
+    let depth = core_var(eval, "*file*")
+        .map(|id| eval.push_binding(core_var_handle(id, "*file*"), Value::Str(Arc::from(path))));
+    let mut reader = Reader::new(text, &opts);
+    let outcome = {
+        let mut hooks = LiveReadHooks::new(eval);
+        reader.read_form(false, &mut hooks)
+    };
+    let fired = reader.take_fired();
+    // The `*file*` binding covers tag resolution too (upstream
+    // invokes readers during `read`, inside the same binding);
+    // the closure lets the pop run on every exit path.
+    let out = (|| -> Result<Value, NativeError> {
+        drain_fired_tags(eval, fired, opts.suppress_read)?;
+        match outcome {
+            Ok(Some(v)) => resolve_data_readers(eval, v, opts.suppress_read),
+            Ok(None) => Ok(Value::Nil),
+            Err(e) => Err(map_reader_error(eval, &e, false)),
+        }
+    })();
+    if let Some(depth) = depth {
+        eval.pop_bindings(depth);
+    }
+    out
+}
+
+/// Look one tag up in the conflict basis (`contains?` semantics:
+/// only maps hit — nil and anything else miss without throwing).
+fn acc_lookup(acc: &Value, tag: &Symbol) -> Option<Value> {
+    match acc {
+        Value::Map(m) => m.get(&Value::Symbol(tag.clone())).cloned(),
+        _ => None,
+    }
+}
+
+/// Upstream `data-reader-var`: `(intern (create-ns (symbol
+/// (namespace v))) (symbol (name v)))`. The `namespace` call runs
+/// first, so garbage fails exactly like it (nil NPEs, others CCE
+/// to `Named`); unqualified names then fail `(symbol nil)` with
+/// IAE. Keywords ride the same `Named` path upstream, so they do
+/// here too. Interning creates the namespace and the (possibly
+/// unbound) var without loading anything.
+fn data_reader_var(eval: &mut Evaluator, v: &Value) -> Result<Value, NativeError> {
+    let name = match v {
+        Value::Symbol(s) => s.name(),
+        Value::Keyword(k) => k.name(),
+        // Fails the `namespace` call below; this arm only yields a
+        // binding the error path discards.
+        _ => "",
+    };
+    let ns_val = native_namespace(eval, std::slice::from_ref(v))?;
+    let Value::Str(ns) = &ns_val else {
+        return Err(NativeError::new(
+            ThrowClass::IllegalArgumentException,
+            "no conversion to symbol".to_owned(),
+        ));
+    };
+    let ns: &str = ns;
+    eval.registry.ensure_ns(ns);
+    let target = Symbol::new(Some(ns), name);
+    let (id, _) = intern_routed(eval, ns, None, &target)?;
+    Ok(var_value(id, &target))
+}
+
+/// An autoload ex-info: `ExceptionInfo` with its data map (the
+/// message texts and keys replay upstream verbatim).
+fn data_reader_ex_info(message: &str, data: Map) -> NativeError {
+    let mut err = NativeError::new(ThrowClass::ExceptionInfo, message.to_owned());
+    err.data = Some(Value::Map(data));
+    err
+}
+
+/// The `:url` ex-data key (unqualified, like upstream).
+fn url_key() -> Value {
+    Value::Keyword(Keyword::new(None, "url"))
+}
+
+/// The `:form` ex-data key (unqualified, like upstream).
+fn form_key() -> Value {
+    Value::Keyword(Keyword::new(None, "form"))
+}
+
+/// The `:conflict` ex-data key (unqualified, like upstream).
+fn conflict_key() -> Value {
+    Value::Keyword(Keyword::new(None, "conflict"))
+}
+
+/// The `:mappings` ex-data key (unqualified, like upstream).
+fn mappings_key() -> Value {
+    Value::Keyword(Keyword::new(None, "mappings"))
 }
 
 /// Whether any tag still needs resolution (the walk's fast path:
@@ -2205,6 +2528,9 @@ fn table_entry(m: &Map, tag: &Symbol) -> Option<Value> {
 /// the default fn with `[tag form]`, else the `RuntimeException`
 /// (probes `e-*`, `f-*`). The throw stays reachable when the table
 /// mutates mid-walk (the reader consults the pre-read snapshot).
+/// DIVERGENCE (#94): the `inst`/`uuid` arms below are hardcoded —
+/// upstream consults the `default-data-readers` VAR root here, so
+/// replacing that root is a silent no-op in this port.
 fn resolve_tag(eval: &mut Evaluator, tag: &Symbol, form: Value) -> Result<Value, NativeError> {
     if let Some(f) = table_lookup(&deref_core(eval, "*data-readers*"), tag)? {
         return eval.call(&f, &[form]).map_err(signal_to_native);
@@ -4758,5 +5084,97 @@ mod tests {
             clj_value::ThrowClass::UnsupportedOperationException
         );
         assert!(err.message.is_empty());
+    }
+
+    /// Snapshotting over a bare evaluator skips the autoload merge
+    /// (no `*data-readers*` var installed) but still enables defer
+    /// mode with an empty consult.
+    #[test]
+    fn snapshot_bare_evaluator_skips_autoload() {
+        let mut eval = Evaluator::new_bare("user");
+        let mut opts = ReaderOpts::default();
+        snapshot_data_readers(&mut eval, &mut opts).expect("bare snapshot");
+        assert!(opts.data_readers);
+        assert!(opts.data_reader_keys.is_empty());
+        assert!(!opts.default_reader_fn);
+    }
+
+    /// An unreadable mapping file fails the scan (a directory in
+    /// the mapping slot reads as an error on every platform, so
+    /// the failure arm needs no permission juggling).
+    #[test]
+    fn autoload_scan_reports_unreadable_files() {
+        let dir =
+            std::env::temp_dir().join(format!("clj-zerofence-unreadable-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("data_readers.clj")).unwrap();
+        let mut eval = crate::boot();
+        let dirs = vec![dir.to_string_lossy().replace('\\', "/")];
+        let mut acc = Value::Map(new_map());
+        let mut entries = Vec::new();
+        let mut fresh = Vec::new();
+        let err = autoload_scan(&mut eval, &dirs, &mut acc, &mut entries, &mut fresh)
+            .expect_err("unreadable file fails");
+        assert_eq!(err.class, ThrowClass::FileNotFoundException);
+        assert!(fresh.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// B2: a merge failure (mid-scan user code turned the live
+    /// root non-assocable) reverts the optimistic mark and records
+    /// nothing, so the next scan retries the files instead of
+    /// silently skipping them forever. The bork must land
+    /// mid-scan (a tag firing while the mapping file reads): a
+    /// pre-borked root fails the scan instead, and healing
+    /// through reads would advance the mark and mask the revert.
+    #[test]
+    fn autoload_merge_failure_reverts_mark_for_retry() {
+        let dir =
+            std::env::temp_dir().join(format!("clj-zerofence-mergerevert-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut eval = crate::boot();
+        // Setup reads scan nothing — no mapping files exist yet.
+        eval.eval_source(
+            "(do (ns my.lib) (defn borker [x] (do (alter-var-root #'clojure.core/*data-readers* (constantly 5)) 'my.lib/reader)) (in-ns 'user))",
+        )
+        .expect("borker defined");
+        let lit = dir
+            .to_string_lossy()
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"");
+        eval.eval_source(&format!(
+            "(alter-var-root #'clojure.core/*load-path* (constantly [\"{lit}\"]))"
+        ))
+        .expect("load-path root set");
+        eval.eval_source(
+            "(alter-var-root #'clojure.core/*data-readers* assoc 'bork/tag #'my.lib/borker)",
+        )
+        .expect("bork tag registered");
+        eval.data_reader_scan_path = None;
+        std::fs::write(dir.join("data_readers.clj"), "{my/tag #bork/tag [1]}").unwrap();
+        let readers = crate::ns::core_var(&eval, "*data-readers*").expect("readers var");
+        let err = ensure_data_readers_autoloaded(&mut eval).expect_err("merge must fail");
+        assert_eq!(err.class, ThrowClass::ClassCastException);
+        assert_eq!(eval.data_reader_scan_path, None, "mark reverts");
+        assert!(
+            eval.loaded_data_reader_files.is_empty(),
+            "failed files stay unrecorded"
+        );
+        // Heal (directly — reads would advance the mark) and
+        // rewrite the file clean; the retry must pick it up.
+        eval.registry.with_state_mut(readers, |st| {
+            st.root = Some(Value::Map(new_map()));
+        });
+        std::fs::write(dir.join("data_readers.clj"), "{my/tag my.lib/reader}").unwrap();
+        ensure_data_readers_autoloaded(&mut eval).expect("retry merges");
+        assert_eq!(eval.loaded_data_reader_files.len(), 1);
+        let root = eval.registry.state(readers).and_then(|s| s.root);
+        let Value::Map(m) = root.as_ref().expect("merged root present") else {
+            panic!("merged root is a map");
+        };
+        assert!(m.iter().any(|(k, _)| matches!(
+            k,
+            Value::Symbol(s) if s.namespace() == Some("my") && s.name() == "tag"
+        )));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

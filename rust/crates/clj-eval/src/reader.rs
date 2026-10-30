@@ -234,7 +234,11 @@ fn reader_ex_data(span: Span) -> Value {
 /// root (probe `r-recursive-outer`); otherwise a `ReaderException`
 /// (`{root-class}: {root-message}`, ex-data line/column from the
 /// span, the root attached as the cause).
-fn map_reader_error(eval: &mut Evaluator, e: &ReaderError, recursive: bool) -> NativeError {
+pub(crate) fn map_reader_error(
+    eval: &mut Evaluator,
+    e: &ReaderError,
+    recursive: bool,
+) -> NativeError {
     let class = throw_class_for(e.jvm_class());
     let message = e.message();
     if recursive {
@@ -432,6 +436,7 @@ impl<'a> LiveReadHooks<'a> {
             return Err(class_not_found(base));
         }
         let rest: Vec<Value> = items.cloned().collect();
+        let cur = self.eval.current_ns_name();
         if let Some(ns_part) = hs.namespace() {
             // `namesStaticMember`: a head outside every known
             // namespace/alias fails the class lookup (probes
@@ -439,12 +444,14 @@ impl<'a> LiveReadHooks<'a> {
             if !self.ns_or_alias_known(ns_part) {
                 return Err(class_not_found(ns_part));
             }
-            let target = self.resolve_ns_target(ns_part);
-            let bare = Symbol::new(None, hs.name());
-            let resolved = do_resolve(self.eval, &target, None, None, &Value::Symbol(bare))?;
+            // Upstream `maybeResolveIn` is interns-only
+            // (`findInternedVar` — refers excluded): resolving the
+            // full qualified sym from the current ns matches it, so
+            // a referred name under a qualified head throws
+            // `Can't resolve` (probe `eval-qualified-ignores-refers`).
+            let resolved = do_resolve(self.eval, &cur, None, None, &Value::Symbol(hs.clone()))?;
             return self.apply_eval_resolved(resolved, hs, rest);
         }
-        let cur = self.eval.current_ns_name();
         let resolved = do_resolve(self.eval, &cur, None, None, &Value::Symbol(hs.clone()))?;
         self.apply_eval_resolved(resolved, hs, rest)
     }
@@ -514,20 +521,6 @@ impl<'a> LiveReadHooks<'a> {
             .registry
             .get(&cur)
             .is_some_and(|home| home.aliases().any(|(alias, _, _)| alias == ns_part))
-    }
-
-    /// Resolve a qualifier to its namespace (aliases first).
-    fn resolve_ns_target(&self, ns_part: &str) -> String {
-        let cur = self.eval.current_ns_name();
-        self.eval
-            .registry
-            .get(&cur)
-            .and_then(|home| {
-                home.aliases()
-                    .find(|(alias, _, _)| *alias == ns_part)
-                    .map(|(_, ns, _)| ns.to_owned())
-            })
-            .unwrap_or_else(|| ns_part.to_owned())
     }
 }
 
@@ -1034,7 +1027,7 @@ fn native_read(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErro
     };
     let (eof_error, eof_value, recursive) = parse_read_tail(args, &mut opts)?;
     sync_reader_ns(eval, &mut opts);
-    crate::core::snapshot_data_readers(eval, &mut opts);
+    crate::core::snapshot_data_readers(eval, &mut opts)?;
     opts.read_eval = seed.read_eval;
     opts.suppress_read = seed.suppress_read;
     opts.resolver_bound = seed.resolver_bound;
@@ -1086,7 +1079,7 @@ fn native_read_plus_string(eval: &mut Evaluator, args: &[Value]) -> Result<Value
     // Defer mode, like `read` (B2): without the snapshot, table
     // tags fail, `#inst` hits the stale N5 text, and default-fn
     // tags misroute.
-    crate::core::snapshot_data_readers(eval, &mut opts);
+    crate::core::snapshot_data_readers(eval, &mut opts)?;
     opts.read_eval = seed.read_eval;
     opts.suppress_read = seed.suppress_read;
     opts.resolver_bound = seed.resolver_bound;
@@ -1248,7 +1241,7 @@ mod tests {
             read_cond: ReadCond::Deny,
             ..ReaderOpts::default()
         };
-        crate::core::snapshot_data_readers(&eval, &mut opts);
+        crate::core::snapshot_data_readers(&mut eval, &mut opts).expect("snapshot");
         let (v, _) =
             run_read(&mut eval, reader, true, Value::Nil, false, &opts, false).expect("read");
         assert_eq!(pr(&v), ":kept");

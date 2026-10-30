@@ -13,6 +13,7 @@
 //! S4 ships no prelude: tests inject [`NativeFn`](crate::ext::NativeFn)
 //! doubles; `ex-info` et al. arrive with the S5 core subset.
 
+use std::collections::HashSet;
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::sync::Arc;
 
@@ -146,6 +147,15 @@ pub struct Evaluator {
     /// (user table entries bypassed) while set — `print-simple`'s
     /// object half. Save/restore around the region, never nested.
     pub(crate) print_defaults_only: bool,
+    /// The `*load-path*` value at the last `data_readers.clj`
+    /// autoload scan (`None` before the first read): an unchanged
+    /// value skips the scan outright (upstream scans once at
+    /// startup; the port re-scans only when the path moves).
+    pub(crate) data_reader_scan_path: Option<Vec<String>>,
+    /// Mapping files already merged into the `*data-readers*` root
+    /// (`/`-joined paths): files merge once each, so a root the
+    /// user replaced afterwards is never re-merged.
+    pub(crate) loaded_data_reader_files: HashSet<String>,
 }
 
 /// A `defmacro` definition's parts (bundles `eval_defmacro`'s
@@ -191,6 +201,8 @@ impl Evaluator {
             analyze_depth_limit: None,
             flush_count: 0,
             print_defaults_only: false,
+            data_reader_scan_path: None,
+            loaded_data_reader_files: HashSet::new(),
         }
     }
 
@@ -225,6 +237,12 @@ impl Evaluator {
             // defaults-only mode never crosses threads either.
             flush_count: 0,
             print_defaults_only: false,
+            // The registry (hence the merged `*data-readers*` root)
+            // is shared, so the merge history crosses with it —
+            // otherwise a fork would re-merge (and re-fail on) the
+            // same files.
+            data_reader_scan_path: self.data_reader_scan_path.clone(),
+            loaded_data_reader_files: self.loaded_data_reader_files.clone(),
         }
     }
 
@@ -423,7 +441,7 @@ impl Evaluator {
                 let mut opts = Self::read_forms_opts(self, &seed);
                 let mut forms = Vec::new();
                 loop {
-                    crate::core::snapshot_data_readers(self, &mut opts);
+                    Self::snap_data_readers(self, &mut opts)?;
                     reader.set_opts(&opts);
                     let outcome = {
                         let mut hooks = crate::reader::LiveReadHooks::new(self);
@@ -513,7 +531,7 @@ impl Evaluator {
     ) -> Result<Vec<Value>, SourceError> {
         let mut forms = Vec::new();
         loop {
-            crate::core::snapshot_data_readers(eval, opts);
+            Self::snap_data_readers(eval, opts)?;
             reader.set_opts(opts);
             match reader.read_form(false, hook) {
                 Ok(Some(v)) => {
@@ -532,6 +550,14 @@ impl Evaluator {
                 }
             }
         }
+    }
+
+    /// Re-snapshot the tag consult for one form (S6), reporting
+    /// autoload failures as uncaught throwables (shared by both
+    /// per-form loops, so the mapping is pinned once).
+    fn snap_data_readers(eval: &mut Evaluator, opts: &mut ReaderOpts) -> Result<(), SourceError> {
+        crate::core::snapshot_data_readers(eval, opts)
+            .map_err(|e| SourceError::Uncaught(eval.throwable(e)))
     }
 
     /// Drain one read's fired discards (S6), reporting failures as
