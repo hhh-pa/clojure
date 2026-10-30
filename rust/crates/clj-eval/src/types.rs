@@ -1182,7 +1182,7 @@ fn proxy_str(eval: &mut Evaluator, h: &HostVal, i: &HostInst) -> Result<String, 
 
 /// `proxy`: args are `[super-sym ifaces-vec ctor-args-vec
 /// methods-map]`. The superclass is fenced to `Object` (every other
-/// host class is host interop), which takes no constructor args.
+/// host class needs host interop), which takes no constructor args.
 fn native_proxy(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/__proxy*", args, &[4])?;
     let super_sym = sym_arg(&args[0])?;

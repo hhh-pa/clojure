@@ -651,7 +651,7 @@ Deferrals (ours; harness expects divergence — same span discipline,
 `jvm_class()` = `ReaderError`, i.e. no JVM counterpart):
 
 - `ReadEval` ⇒
-  `Eval reader #= is not supported in this build (data-reader follow-up)`
+  `Eval reader #= requires an evaluator hook`
 - `DataReader { tag }` (`inst`/`uuid`) ⇒
   `Reader for tag {tag} is not supported in this build (data-reader follow-up)`
 - `Record { tag }` ⇒

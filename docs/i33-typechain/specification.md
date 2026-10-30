@@ -33,8 +33,8 @@ type system; multimethods dispatch over both):
    `gen-class`/`gen-interface`/`definterface` register named type
    and interface descriptors (constructable, no bytecode emission —
    documented divergence). `proxy` is fenced to `Object` as the
-   only superclass (every other host class is host interop,
-   out of scope) plus port-defined interfaces.
+   only superclass (every other host class needs host interop,
+   future work) plus port-defined interfaces.
 2. **Protocols** (`extend`, `extend-type`, `extend-protocol`,
    `satisfies?`, `extends?`, `with-open` — 6 rows): a `defprotocol`
    helper (unlisted in the matrix — required as the protocol
