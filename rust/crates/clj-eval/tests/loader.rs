@@ -847,6 +847,31 @@ fn reload_all_nil_member_no_panic() {
 }
 
 #[test]
+fn reload_all_sabotage_member_throws() {
+    // Fence 3a NEW-M1: a `ref-set`-planted exotic member (which
+    // skips the commute's own comparison) conjoins-or-throws at the
+    // union — never silently dropped (the JVM's `reduce1 conj`
+    // CCEs the same way).
+    let fx = Fixture::new("sabunion");
+    fx.write(
+        "sab.clj",
+        "(clojure.core/in-ns 'sab)\n(clojure.core/dosync (clojure.core/ref-set (clojure.core/var-get (var clojure.core/*loaded-libs*)) #{:planted}))\n(def sv 1)\n",
+    );
+    let mut eval = boot();
+    let via_union = uncaught(&mut eval, &fx.within("(require 'sab :reload-all)"));
+    // The union failure IS the ordinary sorted-`conj` CCE (same
+    // shape, same direction — no new error is invented).
+    assert_eq!(
+        via_union,
+        uncaught(&mut eval, "(conj (sorted-set :planted) 'sab)")
+    );
+    assert_eq!(
+        via_union,
+        "java.lang.ClassCastException | class clojure.lang.Symbol cannot be cast to class clojure.lang.Keyword (clojure.lang.Symbol and clojure.lang.Keyword are in unnamed module of loader 'app')"
+    );
+}
+
+#[test]
 fn require_in_dosync_abort_rolls_back() {
     // Fence 3a N2: `require` joins the enclosing `dosync` (no
     // nesting failure), and an aborted transaction rolls the mark
