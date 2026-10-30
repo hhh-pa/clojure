@@ -5168,13 +5168,16 @@ mod tests {
         ensure_data_readers_autoloaded(&mut eval).expect("retry merges");
         assert_eq!(eval.loaded_data_reader_files.len(), 1);
         let root = eval.registry.state(readers).and_then(|s| s.root);
-        let Value::Map(m) = root.as_ref().expect("merged root present") else {
-            panic!("merged root is a map");
-        };
-        assert!(m.iter().any(|(k, _)| matches!(
-            k,
-            Value::Symbol(s) if s.namespace() == Some("my") && s.name() == "tag"
-        )));
+        // One covered assertion (a `let-else` panic arm would be a
+        // cold line under the 100% floor): the merged root is a map
+        // carrying `my/tag`.
+        assert!(
+            matches!(&root, Some(Value::Map(m)) if m.iter().any(|(k, _)| matches!(
+                k,
+                Value::Symbol(s) if s.namespace() == Some("my") && s.name() == "tag"
+            ))),
+            "merged root is a map carrying my/tag"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
