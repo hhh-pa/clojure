@@ -496,6 +496,101 @@ fn core_r4_min_neg1_division() {
     assert_eq!(run_last(&mut eval, "(mod -9223372036854775808 -1)"), "0");
 }
 
+/// Any `MIN` side routes `/` through `BigIntOps.divide`, so
+/// integral quotients come back `BigInt` (`1N`, `0N`), never
+/// `Long` — while `quot` stays raw Java `/` (a `Long`).
+#[test]
+fn core_r4_min_side_result_typing() {
+    let mut eval = boot();
+    // Value pins (`N` prints only for `BigInt`).
+    assert_eq!(
+        run_last(&mut eval, "(/ -9223372036854775808 -9223372036854775808)"),
+        "1N"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(/ -9223372036854775808 1)"),
+        "-9223372036854775808N"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(/ -9223372036854775808 2)"),
+        "-4611686018427387904N"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(/ -9223372036854775808 4)"),
+        "-2305843009213693952N"
+    );
+    assert_eq!(run_last(&mut eval, "(/ 0 -9223372036854775808)"), "0N");
+    assert_eq!(
+        run_last(&mut eval, "(/ -9223372036854775808 -9223372036854775808 1)"),
+        "1N"
+    );
+    // Non-integral `MIN`-side quotients stay `Ratio` (unchanged).
+    assert_eq!(
+        run_last(&mut eval, "(/ 1 -9223372036854775808)"),
+        "-1/9223372036854775808"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(/ 4 -9223372036854775808)"),
+        "-1/2305843009213693952"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(/ -9223372036854775808 3)"),
+        "-9223372036854775808/3"
+    );
+    // Type pins (`type`/`class`/`instance?` all observe the class).
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(type (/ -9223372036854775808 -9223372036854775808))"
+        ),
+        "clojure.lang.BigInt"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(type (/ -9223372036854775808 2))"),
+        "clojure.lang.BigInt"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(type (/ 0 -9223372036854775808))"),
+        "clojure.lang.BigInt"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(type (/ 1 -9223372036854775808))"),
+        "clojure.lang.Ratio"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(class (/ -9223372036854775808 -9223372036854775808))"
+        ),
+        "clojure.lang.BigInt"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(instance? Long (/ -9223372036854775808 -9223372036854775808))"
+        ),
+        "false"
+    );
+    // Controls: non-`MIN` `/` and `MIN`-side `quot` stay `Long`.
+    assert_eq!(run_last(&mut eval, "(/ 4 2)"), "2");
+    assert_eq!(run_last(&mut eval, "(type (/ 4 2))"), "java.lang.Long");
+    assert_eq!(run_last(&mut eval, "(instance? Long (/ 4 2))"), "true");
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(quot -9223372036854775808 -9223372036854775808)"
+        ),
+        "1"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(type (quot -9223372036854775808 -9223372036854775808))"
+        ),
+        "java.lang.Long"
+    );
+}
+
 #[test]
 fn core_r4_mixed_arith() {
     let mut eval = boot();
