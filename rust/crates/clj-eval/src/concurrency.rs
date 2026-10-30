@@ -2260,19 +2260,18 @@ pub(crate) fn monitor_key(v: &Value) -> u64 {
         Value::Keyword(k) => (11, hash_debug(&(k.namespace(), k.name()))),
         Value::List(l) => (12, l.id()),
         Value::Vector(v) => (13, v.id()),
-        Value::MapEntry { key, .. } => (14, std::ptr::from_ref(key.as_ref()) as usize as u64),
+        // Boxed kinds hash by content: `Box` clones deep-copy, so
+        // heap addresses would key clones apart (the fx4 exit arg is
+        // a fresh clone of the enter arg).
+        Value::MapEntry { key, val } => (14, hash_debug(&(key.as_ref(), val.as_ref()))),
         Value::Map(m) => (15, m.id()),
         Value::Set(s) => (16, s.id()),
         Value::Regex(r) => (17, Arc::as_ptr(r) as *const () as usize as u64),
         Value::Uuid(u) => (18, u.hi ^ u.lo),
         Value::Instant(t) => (19, t.millis as u64),
         Value::Uri(u) => (20, u.id()),
-        Value::TaggedLiteral { form, .. } => {
-            (21, std::ptr::from_ref(form.as_ref()) as usize as u64)
-        }
-        Value::ReaderConditional { form, .. } => {
-            (22, std::ptr::from_ref(form.as_ref()) as usize as u64)
-        }
+        Value::TaggedLiteral { tag, form } => (21, hash_debug(&(tag, form.as_ref()))),
+        Value::ReaderConditional { form, splicing } => (22, hash_debug(&(form.as_ref(), splicing))),
         Value::Var(v) => (23, v.id),
         Value::Unbound(u) => (24, u.var_id),
         Value::Throwable(t) => (25, t.id),
@@ -2778,6 +2777,11 @@ mod tests {
         assert_eq!(values.len(), 38);
         for v in &values {
             assert_eq!(super::monitor_key(v), super::monitor_key(v));
+            // Clone-stable: the fx4 exit arg is a fresh clone of the
+            // enter arg, so clones must key alike (no heap
+            // addresses — a mismatch spuriously fails the exit and
+            // leaks the entered guard).
+            assert_eq!(super::monitor_key(v), super::monitor_key(&v.clone()));
         }
         assert_eq!(super::monitor_key(&Value::Nil), 0);
         // Distinct cells map distinctly (HostType/Array ride the
