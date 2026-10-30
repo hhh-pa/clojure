@@ -33,7 +33,7 @@ type system; multimethods dispatch over both):
    `gen-class`/`gen-interface`/`definterface` register named type
    and interface descriptors (constructable, no bytecode emission —
    documented divergence). `proxy` is fenced to `Object` as the
-   only superclass (every other host class is interop N1,
+   only superclass (every other host class is host interop,
    out of scope) plus port-defined interfaces.
 2. **Protocols** (`extend`, `extend-type`, `extend-protocol`,
    `satisfies?`, `extends?`, `with-open` — 6 rows): a `defprotocol`
@@ -49,11 +49,11 @@ type system; multimethods dispatch over both):
    `Value::MultiFn` (dispatch fn, default, method table,
    preference table) with exact-value plus `:default` dispatch,
    preference recording, and the table-query natives. Hierarchy
-   derivation (`derive`, `isa?`) is fenced as a follow-up
-   (non-goal): no hierarchy rows exist yet, dispatch without
-   derivation is the faithful subset, and ambiguity detection
-   rides with that follow-up (ambiguity is unreachable without
-   ancestors — preferences record only).
+   derivation (`derive`, `isa?`) shipped as follow-up S13: no
+   hierarchy rows existed yet, dispatch without derivation was
+   the faithful subset, and ambiguity detection rode with S13
+   (ambiguity was unreachable without ancestors — preferences
+   recorded only).
 
 ## Part 1 — User/functional specification
 
@@ -74,14 +74,14 @@ type system; multimethods dispatch over both):
   v)` manage the table verbatim; `prefer-method` records edges
   (ambiguity resolution needs hierarchies — follow-up).
 
-### 1.2 Non-goals (explicit)
+### 1.2 Out of scope (explicit)
 
 - Bytecode emission for `gen-class` (no `.class` output, no AOT —
   divergence, documented at the row).
-- `proxy` of any host class but `Object` (interop N1 owns the rest).
+- `proxy` of any host class but `Object` (host interop owns the rest).
 - Hierarchy derivation (`derive`, `isa?`, `:hierarchy` args to
   `defmulti`) — follow-up slice, not this one.
-- Interop method calls (`.close`, `.foo`) — N1 owns them for
+- Interop method calls (`.close`, `.foo`) — future work owns them for
   host classes; `with-open` emits dot-close (`(.close x)`), which
   dispatches over inline `close` methods on port types (a registry
   protocol extension alone does not satisfy it — documented
@@ -125,7 +125,7 @@ type system; multimethods dispatch over both):
   constructor fn), `gen-interface`/`definterface` (method-signature
   descriptors usable by `proxy` and dispatch). Plus a **fenced
   port-type call surface** using faithful JVM syntax, dispatching
-  only on port-registered types (host interop stays N1):
+  only on port-registered types (host interop stays future work):
   `(TypeName. args)` positional constructors (wrong count →
   `No matching ctor found for class <name>`, oracle
   `dtor-arity1`), `(.-field inst)` positional field reads

@@ -77,7 +77,7 @@ that need to pass these values around.
 - `sorted-map` collapses compare-equal keys (`{1, 1.0}` → one
   entry); sorted collections themselves land in S5.
 
-## §4 Non-goals and follow-ups
+## §4 Out of scope and follow-ups
 
 - No `Integer` variant: probe17 proves the JVM reader yields
   `Long` for every in-range integer (even int-sized), so no

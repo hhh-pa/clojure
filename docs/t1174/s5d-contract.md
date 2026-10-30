@@ -413,7 +413,7 @@ batches; `tests/format.rs`, corpus 12/13/14.)
   `with-in-str`/`read`/`read-line`/`line-seq`/`*in*`,
   `deftype`/`defrecord`/`reify`/`proxy`/`gen-class`,
   `with-open`, protocols, `instance?`/`type`/`class`,
-  `import`/`..`: no slice (N1/type-system/IOAdjacent).
+  `import`/`..`: no slice at plan time (host-interop/type-system/IOAdjacent; classemu since).
 - Reference identity (`identical?`): meaningless over the
   port's clone semantics. Regex matching (`re-find`/
   `re-matches`/`re-seq`/`re-pattern`): no slice (the reader

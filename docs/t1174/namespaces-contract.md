@@ -123,7 +123,7 @@ the split (S5C extends it past macroexpansion).
 - `resolve`/`ns-resolve` return the Var or nil on a miss (probe35
   `resolve-miss`, `ns-resolve-ns-arg`). `resolve` also sees
   imports on the JVM (`(resolve 'String)` is the class); the port
-  has no classes, so that miss is nil (N1 divergence, probe35
+  has no classes, so that miss is nil (interop divergence, probe35
   `resolve-class`).
 - `intern` returns the var (the same object across overwrites —
   3-arity resets the root, probe35 `intern-overwrite`); 2-arity
@@ -147,7 +147,7 @@ the split (S5C extends it past macroexpansion).
   (probe35 `ns-unmap-effect`, `ns-unalias-effect`,
   `ns-unmap-sym-ns`, `ns-unalias-sym-ns`).
 - `ns-imports` is always `{}` and `ns-map` carries no imports
-  (N1: no host classes; `import` out of scope).
+  (no host classes; `import` emulated-only).
 - `binding [*ns* …]` does not redirect analysis or installation:
   resolution, `refer`, `alias`, and `def` read the registry
   current only, until S5B syncs the two (fence).

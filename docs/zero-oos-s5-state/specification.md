@@ -34,7 +34,7 @@ rows to `implemented` in place (header counts = actual).
   install then validates the current value (`Invalid
   reference state`, old validator kept) and publishes,
   returning nil like the `void` setter (`c-set-*`). Vars are
-  NOT accepted (see Non-goals).
+  NOT accepted (see Out of scope).
 - `reset-vals!` — `reset!` returning `[old new]` (validates,
   fires watches with `[old new]`). Nil is the
   `IAtom2.resetVals(Object)` NPE; others the `IAtom2` cast
@@ -118,7 +118,7 @@ and goes stale once validators are writable.
 probe labels verbatim, plus shared arity-miss coverage.
 Matrix `notes` name the tests.
 
-## Non-goals
+## Out of scope
 
 - Var validators: `get/set-validator!` reject vars with the
   `IRef` cast — the same set `add-watch`/`remove-watch`

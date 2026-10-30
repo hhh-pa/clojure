@@ -965,7 +965,7 @@ fn reversible_pred_rows() {
     // Sorted maps/sets and `vector-of` are oracle-true but not
     // constructible (FT6 / no gvec) — no port-false pin against
     // those rows. Queues and records are oracle-false and also
-    // not constructible. Ratios do not read (N3).
+    // not constructible.
     for (form, want) in [
         ("(reversible? nil)", "false"),
         ("(reversible? 1)", "false"),

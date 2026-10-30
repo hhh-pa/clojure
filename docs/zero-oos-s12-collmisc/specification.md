@@ -39,8 +39,8 @@ regex-crate matcher handle with find-then-groups sequencing.
 - `THROW C|"m"` quotes the `.out` throw line verbatim (root cause).
 - `(derived)` marks a port-test assertion derived from an oracle
   pin rather than quoted by it.
-- Class pins transfer without `class` (which is N1
-  out-of-scope in the port): a JVM `(class x)` pin becomes a
+- Class pins transfer without `class` (emulated
+  in the port): a JVM `(class x)` pin becomes a
   `jvm_class_of` mapping, observable through CCE from-names,
   ISeq error text, and `#object` print heads.
 

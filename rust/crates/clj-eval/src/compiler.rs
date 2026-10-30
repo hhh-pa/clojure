@@ -48,7 +48,7 @@ pub(crate) fn knob_roots() -> [(&'static str, Value); 6] {
 }
 
 /// `primitives-classnames`: the 8 spec pairs over class-name-string
-/// keys (JVM keys are `Class` objects — N1-unrepresentable — so the
+/// keys (JVM keys are `Class` objects — host-unrepresentable — so the
 /// 8 `.getName` strings stand in, per the #33 convention).
 pub(crate) fn prims_map() -> Value {
     let mut map = new_map();

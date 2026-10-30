@@ -48,7 +48,7 @@ universe omits 270 JVM publics. Add **269 rows** (all of
 |---|---|---|
 | `implemented` (5) | `implemented` | mechanism + test citation (grep-verified) |
 | `planned` = ready (53) | `out-of-scope` | `future: <one-line plan>` |
-| `out-of-scope` = never (100) | `out-of-scope` | hard reason (`N1`, `N4`, never, …) |
+| `out-of-scope` = never (100) | `out-of-scope` | hard reason (host values absent, STM refs, never, …) |
 | `needs-design` (111 of 112) | `out-of-scope` | `pending design: <seam>; see #40` |
 
 - Ready and pending-design rows are `out-of-scope`, **not**

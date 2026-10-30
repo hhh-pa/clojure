@@ -38,7 +38,7 @@ G4. Short-term release: ship the Rust equivalent of Clojure
     inventory), and keep syncing with the 1.13.0 line (later
     alphas, then final) via small delta slices.
 
-### 1.2 Non-goals (explicit)
+### 1.2 Out of scope (explicit)
 
 N1. JVM interop stays out: `new`, dotted access, `import`,
     `instance?`, `class`, `bases`, `supers`, `..`,

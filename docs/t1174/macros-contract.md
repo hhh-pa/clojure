@@ -150,7 +150,7 @@ tx), probe37 `declare-*`/`ns-*`, corner probes `s5ccorner*`,
   `ns-create`, `ns-switches`, `ns-created-state`,
   `ns-require-clause`, `ns-dup`, probe36 `ns-marks-loaded`).
   `:import`/`:gen-class`/`:load` clauses are ns-spec errors
-  (N1: no host classes — loud, never silently skipped; the
+  (no host classes — loud, never silently skipped; the
   JVM's `:import` destructure accidents are bare `ClassCastException`s — fence).
 
 ## Builtin-macro vars
@@ -220,4 +220,4 @@ tx), probe37 `declare-*`/`ns-*`, corner probes `s5ccorner*`,
   wrapped per partition); separate reader/`gensym` counters;
   `seq`/`concat` went lazy in S5D (eager copies removed);
   map seqs yield vectors (S5D may add `MapEntry`); `String`
-  syntax-quote has no import (`user/String`, N1).
+  syntax-quote has no import (`user/String`, host interop).

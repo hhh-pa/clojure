@@ -25,7 +25,7 @@ fails until each var lands.
   `get-thread-bindings`, `with-bindings*`/`with-bindings`, `bound-fn`
   (dynamic conveyance primitive; S6's `future`/`send` build on it).
 - Meta: `meta`, `with-meta`, `vary-meta`, `alter-meta!`, `reset-meta!`.
-- Out: var validators (no slice), STM (N4).
+- Out: var validators (no slice), STM.
 
 ## S5C. Macros
 
@@ -46,7 +46,7 @@ fails until each var lands.
 - Embedded `.clj`: `defn`/`defn-`, `and`/`or`, `when*`/`if-*`,
   `cond`/`condp`/`case`, threaders (`->`/`->>`/`as->`/`cond->*`),
   `dotimes`/`doseq`/`for`, `lazy-seq`/`lazy-cat`, `comment`, `assert`,
-  `time`, `doto` (fn calls only; methods are N1 interop).
+  `time`, `doto` (fn calls only; methods are host interop).
 - Out of scope (coverage records each with its reason): transducers
   and xform arities, sorted collections, `rand-*`/`shuffle`,
   `instance?`/`type`, multimethods, `with-in-str`/`read`, `deftype`/

@@ -62,7 +62,7 @@ arity text (pinned).
 probe labels verbatim, plus a shared arity-miss test.
 Matrix `notes` name the tests.
 
-## Non-goals
+## Out of scope
 
 `int?` redefinition, BigDec tower gaps, `bytes?` (needs
 the Array kind — S15), `find-var`/`requiring-resolve`

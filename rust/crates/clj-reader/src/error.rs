@@ -156,7 +156,7 @@ pub enum ReaderError {
         span: Span,
         error: crate::hooks::EvalReadError,
     },
-    /// `#inst`/`#uuid` deferral (data-reader follow-up N5).
+    /// `#inst`/`#uuid` deferral (data-reader follow-up).
     DataReader { span: Span, tag: String },
     /// Defer-mode tag consult over a non-lookupable
     /// `*data-readers*` value (S6): the JVM's `RT.get` fails the
@@ -380,9 +380,9 @@ fn message_defer(err: &ReaderError) -> String {
     match err {
         ReaderError::TableCce { from_jvm, .. } => cce_message(from_jvm, "clojure.lang.ILookup"),
         ReaderError::TagInvoke { message, .. } => message.clone(),
-        ReaderError::DataReader { tag, .. } => format!(
-            "Reader for tag {tag} is not supported in this build (data-reader follow-up N5)"
-        ),
+        ReaderError::DataReader { tag, .. } => {
+            format!("Reader for tag {tag} is not supported in this build (data-reader follow-up)")
+        }
         ReaderError::Record { tag, .. } => {
             format!("Record construction is not supported in this build (S5): #{tag}")
         }

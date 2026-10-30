@@ -21,7 +21,7 @@
    tag CI (three-OS tests + archives) must be green before any
    1.13.0-final follow-up.
 
-### 1.2 Non-goals (explicit)
+### 1.2 Out of scope (explicit)
 
 - The 1.13.0-final catch-up and later alpha/beta tracking (later
   slices; this slice freezes the alpha9 line).

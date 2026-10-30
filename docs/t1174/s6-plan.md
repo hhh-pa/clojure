@@ -21,7 +21,7 @@ TDD: stress/determinism tests first (spec §2.5).
 - `memoize` (unlocked by `atom`; coverage row flips here).
 - Validators: ctor `:validator` option only (no
   `set-validator!`/`get-validator` rows — stays unlisted).
-- Out: `ref`/`dosync` (STM, N4).
+- Out: `ref`/`dosync` (STM).
 
 ## S6B. Futures + promises (first threads)
 
@@ -73,7 +73,7 @@ TDD: stress/determinism tests first (spec §2.5).
 - `pmap`/`pcalls`/`pvalues`: verbatim `core.clj` ports
   over futures, except the lookahead's
   `availableProcessors` is a fixed count (6; interop is
-  N1, timing-only) — key pins: `:pmap-chunk` (lookahead),
+  future work, timing-only) — key pins: `:pmap-chunk` (lookahead),
   `:pvalues-sidefx` (normalized `[(1 2) 2]`) (`pmap_rows`,
   `pcalls_rows`, `pvalues_rows`).
 - Corpus: `s6-corpus/05-locking-pmap.clj` (19 entries).

@@ -22,7 +22,7 @@ our `ReaderError` must expose both (`message()` and `jvm_class()`).
 S2 default read options are **load semantics**: `:read-cond :allow`,
 `:features #{:clj}` (JVM always conjs `:clj`, `installPlatformFeature`).
 S5's `read-string` will pass deny explicitly. `*read-eval*` is honored
-only as: `#=` always errors (N5 deferral, §16); the `:unknown` check and
+only as: `#=` always errors (deferral, §16); the `:unknown` check and
 `false` branch have no S2 equivalent (no dynamic bindings yet).
 
 ## §1 Char stream, positions, unread
@@ -438,13 +438,13 @@ unreachable in S2 — the ctor path always throws or returns):
 4. Tag **name** (not ns) contains `.` ⇒ record-deferral (§22)
    (`#foo.bar [1]`, `#foo/bar.baz 1`; but `#foo.bar/baz 1` has no dot
    in the name ⇒ step 5, probe4).
-5. Else tag-table lookup: `inst`/`uuid` ⇒ N5 deferrals (§22);
+5. Else tag-table lookup: `inst`/`uuid` ⇒ deferrals (§22);
    anything else ⇒ `[RE] "No reader function for tag {tag}"`
    (`#a 1`, `#foo/bar 1`, probe1/4).
 
 ## §16 Eval reader (`#=`)
 
-S2 has no evaluator: `#=` ⇒ immediate N5-deferral error (§22) **without
+S2 has no evaluator: `#=` ⇒ immediate deferral error (§22) **without
 consuming the following form** (matches the `*read-eval* false` branch
 position: col right after `#=`, probe1 `#=(+ 1 2)`).
 
@@ -650,16 +650,10 @@ TaggedLiteral/ReaderConditional⇒readable pr (§19 divergence note).
 Deferrals (ours; harness expects divergence — same span discipline,
 `jvm_class()` = `ReaderError`, i.e. no JVM counterpart):
 
-- `Ratio { token }` ⇒
-  `Ratio literals are not supported in this build (big-number follow-up N3): {token}`
-- `BigInt { token }` ⇒
-  `BigInt literals are not supported in this build (big-number follow-up N3): {token}`
-- `BigDecimal { token }` ⇒
-  `BigDecimal literals are not supported in this build (big-number follow-up N3): {token}`
 - `ReadEval` ⇒
-  `Eval reader #= is not supported in this build (data-reader follow-up N5)`
+  `Eval reader #= is not supported in this build (data-reader follow-up)`
 - `DataReader { tag }` (`inst`/`uuid`) ⇒
-  `Reader for tag {tag} is not supported in this build (data-reader follow-up N5)`
+  `Reader for tag {tag} is not supported in this build (data-reader follow-up)`
 - `Record { tag }` ⇒
   `Record construction is not supported in this build (S5): #{tag}`
 - `LoneSurrogate { hex4-lower }` ⇒
@@ -704,10 +698,10 @@ match exactly — except §24 cases, which assert divergence-shape
 
 ## §24 Catalogued divergences (harness asserts these as divergences)
 
-1. Big tower (§22 N3 ×3): JVM reads values; we error. Both directions pinned.
-2. `#=` (N5): JVM with `*read-eval*` false errors with its message; we
+1. Big tower (§22): FIXED — both sides read values since S-rng-tower (kept for history; was: JVM reads values, we errored).
+2. `#=`: JVM with `*read-eval*` false errors with its message; we
    error with ours. Span shape same (col after `#=`).
-3. `#inst`/`#uuid` (N5): JVM invokes readers (valid ⇒ value; invalid ⇒
+3. `#inst`/`#uuid`: JVM invokes readers (valid ⇒ value; invalid ⇒
    its error); we always defer after consuming tag+form.
 4. Record tags (S5): JVM checks `*read-eval*` first; we defer.
 5. Invalid regex: JVM throws `PatternSyntaxException`; we accept (§8).

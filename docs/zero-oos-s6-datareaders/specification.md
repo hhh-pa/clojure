@@ -135,9 +135,9 @@ verbatim, plus `clj-reader` unit tests for the defer
 branches and the opts threading. Matrix `notes` name
 the tests.
 
-## Non-goals
+## Out of scope
 
-`#=` eval reader (still N5), dotted record tags (record
+`#=` eval reader (#125), dotted record tags (record
 slice), `data_readers.clj` classpath autoload (the port
 has no classpath), date/time and UUID value kinds (the
 `inst?`/`inst-ms`/`uuid?` slice upgrades S6's validated

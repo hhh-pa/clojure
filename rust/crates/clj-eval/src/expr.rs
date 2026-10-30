@@ -2210,7 +2210,7 @@ impl<'a> Analyzer<'a> {
     /// unqualified symbol and every clause a list headed by
     /// `:refer-clojure`/`:require`/`:use` (else the `ns` spec
     /// shape, probe37 `ns-bad-clause`, `ns-num-name`).
-    /// `:import`/`:gen-class`/`:load` are spec errors too (N1:
+    /// `:import`/`:gen-class`/`:load` are spec errors too (
     /// no host classes — loud, never skipped).
     fn parse_ns(&mut self, items: &[&Value], span: Span) -> Result<Expr, CompileError> {
         let spec = || self.spec_error("clojure.core/ns", span);

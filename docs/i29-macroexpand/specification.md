@@ -36,10 +36,10 @@ shapes were verified equal (table below) before flipping.
 2. Each flipped note names the machine-checkable pin (test fn),
    so a regression fails CI instead of silently re-diverging.
 
-### 1.2 Non-goals (explicit)
+### 1.2 Out of scope (explicit)
 
 - No behavior change to expansion, evaluation, or errors.
-- No change to `ns-imports` (`N1` interop slice) or `*print-dup*`
+- No change to `ns-imports` (host-interop slice) or `*print-dup*`
   (printer slice): they stay divergent.
 - No new tests: `expand_nine_heads`,
   `expand_locking_and_destructure_gensyms`, and `macros.rs`

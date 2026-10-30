@@ -35,11 +35,11 @@ pub enum NumLit {
     Int(i64),
     /// Double (`f64` parse matches `Double.parseDouble` here).
     Double(f64),
-    /// BigInt deferral (N3).
+    /// BigInt deferral.
     BigInt,
-    /// BigDecimal deferral (N3).
+    /// BigDecimal deferral.
     BigDecimal,
-    /// Ratio deferral (N3).
+    /// Ratio deferral.
     Ratio,
 }
 

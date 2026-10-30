@@ -128,7 +128,7 @@ house already normalizes), plus a shared native arity-miss
 test and an unbound-`resolve` test for the `~` pair. Matrix
 `notes` name the tests.
 
-## Non-goals
+## Out of scope
 
 `:inline` honoring (no compiler); outlet-semantics fixes
 (outlets verified working — any gap found later belongs to

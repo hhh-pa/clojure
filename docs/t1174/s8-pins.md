@@ -97,7 +97,7 @@ order; every file below exits 0 under `run`/`eval`:
   `print_to_string` exactly; in-subset programs cannot
   rebind them (`binding` out), so no observable gap.
 
-## P5. Explicit non-goals (S8 limits)
+## P5. Explicit scope limits
 
 - Host-only compilation; no cross-compilation, no debug
   info, no TCO guarantee (deep self-calls behave like

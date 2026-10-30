@@ -70,7 +70,7 @@ Three stages, each test-first against committed oracle probes:
    map opts in (`r-cond-plain`, `rs-cond`); `:eof` present (even nil)
    means no-throw, absent means throw (`r-opts-eofnil`).
 
-### 1.2 Non-goals (explicit)
+### 1.2 Out of scope (explicit)
 
 - `read+string`, `*read-eval*`, `load-reader`: absent from the 422-row
   coverage universe — flagged as follow-up, not fixed here.

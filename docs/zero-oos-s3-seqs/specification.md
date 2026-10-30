@@ -42,7 +42,7 @@ upstream, each pinned by oracle probes
   entries, same order as `kvreduce`).
 - `update-vals` — upstream transients `m` itself when it is
   `IEditableCollection`, else `(with-meta {} (meta m))`.
-  `instance?` is out of scope (N1), so the port tests
+  `instance?` postdates this slice, so the port tests
   `(and (or (map? m) (vector? m) (set? m)) (not (sorted?
   m)))`: sorted maps/sets are not editable on the JVM
   either (`uv-sorted` probe), and nil/lists fall to the
@@ -107,7 +107,7 @@ so other slices' `core.clj` appends cannot break them.
 probe labels verbatim, plus a shared arity-miss test.
 Matrix `notes` name the tests.
 
-## Non-goals
+## Out of scope
 
 `partition-all` 1-arity transducer (another slice's gap —
 `partitionv-all` carries its own), `instance?`-based

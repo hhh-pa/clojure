@@ -44,7 +44,7 @@ Three stages, each test-first against committed oracle probes:
    (`5N`/`5.0M`/`1/2` under pr, plain under str),
    scale-insensitive `=` (compareTo), exact cross-type `==` /
    `compare`, structural consistent hashing; reader literals
-   `1/2`, `5N`, `5M` enabled (flipping the N3 deferrals);
+   `1/2`, `5N`, `5M` enabled (flipping the big-number deferrals);
    JVM promotion lattice (Double > BigDec > Ratio > BigInt >
    Int) for `+ - * / inc dec quot rem mod`, with the
    Int/Double-only wedges byte-identical (checked-overflow
@@ -83,7 +83,7 @@ Three stages, each test-first against committed oracle probes:
    `(= 5.0M 5.00M)` → true; `(sort [5M 1/2 5N 1 0.5 2])` →
    `(1/2 0.5 1 2 5M 5N)`.
 
-### 1.2 Non-goals (explicit)
+### 1.2 Out of scope (explicit)
 
 - No exact-draw RNG pins (draws differ across runtimes by
   design); determinism pins use seeded shapes/ranges plus the

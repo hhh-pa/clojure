@@ -962,7 +962,7 @@ fn default_fn_fallback() {
 fn read_plus_string_runs_consult() {
     // B2 (review round 1): `read+string` consults like `read`
     // (defer mode was missing: table tags failed, `#inst` hit
-    // the stale N5 text, default-fn tags misrouted, borked
+    // the stale follow-up text, default-fn tags misrouted, borked
     // tables misreported).
     let mut eval = boot();
     // Table tag resolves; the capture is the trimmed text.

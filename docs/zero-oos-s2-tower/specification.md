@@ -136,7 +136,7 @@ its probe labels verbatim, plus a shared arity-miss test,
 a context-restoration test, and the `BigInteger` print
 regression test. Matrix `notes` name the tests.
 
-## Non-goals
+## Out of scope
 
 `int?` changes, auto-promote arith (`+'` family — S11),
 `type`/`class` on tower values (S16), print-dup behavior

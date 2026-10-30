@@ -673,7 +673,7 @@
 
 ;; --- `pmap`/`pcalls`/`pvalues` (S6D): verbatim ports, except the
 ;; lookahead's `(.. Runtime getRuntime availableProcessors)` is a
-;; fixed count (interop is N1; the lookahead only paces future
+;; fixed count (interop is future work; the lookahead only paces future
 ;; creation — timing-only — while `future-call` conveys bindings).
 
 (defn pmap
@@ -1765,8 +1765,8 @@
 ;;   (entries are vectors but not `IKVReduce` on the JVM):
 ;;   `s3-entry?` probes with `key`, the only discriminator
 ;;   either runtime exposes.
-;; - `update-vals` tests editability in clj (`instance?` is
-;;   N1): maps/vectors/sets except sorted ones (not
+;; - `update-vals` tests editability in clj (`instance?` postdates
+;;   this slice): maps/vectors/sets except sorted ones (not
 ;;   editable on the JVM either), records (the port cannot
 ;;   transient a `HostType`; the JVM drops record-ness
 ;;   through the round-trip anyway), and bare entries.

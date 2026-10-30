@@ -105,7 +105,7 @@ fn dtor_fields() {
 
 #[test]
 fn dtor_descriptor_str() {
-    // Oracle `dtor-class` needs `class` (N1); the descriptor prints
+    // Oracle `dtor-class` needs `class`; the descriptor prints
     // the same name through `str`.
     let mut eval = boot();
     assert_eq!(
@@ -226,7 +226,7 @@ fn dtor_non_interface() {
 
 #[test]
 fn dtor_host_super_not_interface() {
-    // Host classes are interop (N1): `String` resolves via the #74
+    // Host classes are interop: `String` resolves via the #74
     // defaults whether or not it is explicitly imported — and is
     // still `Not an interface` either way (only port interfaces
     // resolve in interface position).
@@ -638,8 +638,8 @@ fn rec_empty_transient_nth() {
         uncaught(&mut eval, "(defrecord Point [x y]) (empty (->Point 1 2))"),
         "java.lang.UnsupportedOperationException | Can't create empty: user.Point"
     );
-    // Oracle `h-empty-type` wraps the throw in `class` (N1,
-    // out of scope) — the throw itself is pinned above.
+    // Oracle `h-empty-type` wraps the throw in `class` (emulated;
+    // unpinned here) — the throw itself is pinned above.
     assert_eq!(
         run(&mut eval, "(defrecord Point [x y]) (empty? (->Point 1 2))"),
         "false"
@@ -996,7 +996,7 @@ fn proxy_str_iface() {
 #[test]
 fn proxy_fences() {
     // Only `Object` superclasses, no ctor args: host classes are
-    // interop (N1).
+    // interop.
     let mut eval = boot();
     assert!(
         uncaught(&mut eval, "(proxy [String] [] (toString [] \"x\"))")

@@ -166,7 +166,7 @@ fn structmap_rows() {
     let mut eval = boot();
     struct_setup(&mut eval);
     // sm-basis-class is a `jvm_class_of` mapping in the port
-    // (derived: `class` is N1) — pinned through the CCE
+    // (derived: `class` is emulated) — pinned through the CCE
     // from-names below (sm-map-nonbasis and friends).
     // sm-basis-print
     assert_eq!(
@@ -364,7 +364,7 @@ fn structmap_rows() {
         "false"
     );
     // sm-accessor-class (derived: `jvm_class_of` is `…$1` —
-    // `class` is N1 in the port; pinned through print + `ifn?`).
+    // `class` is emulated in the port; pinned through print + `ifn?`).
     assert_eq!(
         run_last(&mut eval, "(ifn? (accessor person :name))"),
         "true"
@@ -917,8 +917,8 @@ fn chunk_rows() {
         ),
         "false"
     );
-    // ch-cons-empty (`identical?` is N1 out-of-scope in the
-    // port — identity is derived two ways: a non-chunked rest
+    // ch-cons-empty (`identical?` is out of scope in the
+    // port (#99 in flight) — identity is derived two ways: a non-chunked rest
     // stays non-chunked, and a forced lazy rest keeps its memo
     // cell).
     assert_eq!(
@@ -1473,7 +1473,7 @@ fn iteration_rows() {
         ),
         "[1]"
     );
-    // it-seqable (derived: `instance?` is N1 — Seqable-ness is the
+    // it-seqable (derived: `instance?` is emulated — Seqable-ness is the
     // working `seq` above plus the reducible path below).
     assert_eq!(
         run_last(
@@ -1482,7 +1482,7 @@ fn iteration_rows() {
         ),
         "true"
     );
-    // it-reducible (derived: `instance?` is N1 — IReduceInit-ness
+    // it-reducible (derived: `instance?` is emulated — IReduceInit-ness
     // is `reduce` stepping through the failing return).
     assert_eq!(
         run_last(

@@ -909,7 +909,7 @@ fn resolver_bad_answer_cast() {
 fn resolver_var_and_baseline() {
     // A var holding a fn serves (the `Var` consult arm), and the
     // unbound baseline leaves `String/foo` alone (no imports —
-    // pre-existing N1 fence, probe `f-sq-baseline` context).
+    // pre-existing interop fence, probe `f-sq-baseline` context).
     let mut eval = boot();
     run(
         &mut eval,

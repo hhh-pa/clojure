@@ -209,15 +209,12 @@ Each var stores its arg in a per-pool config slot and
 returns it. Dispatch ALWAYS uses the fixed pools
 (`send` → send pool, `send-off` → send-off pool);
 the recorded value is never consulted. No validation:
-any value including nil is accepted. This is the
-`send-via` precedent verbatim ("executor accepted and
-ignored; routes to the fixed pool" — `concurrency.rs`
-`native_send_via`, matrix row `send-via`): the port
-has no host executors (N1), so custom routing is
-unimplementable, and it has no `ExecutorService` host
-type to check against, so the JVM's set-time CCE
-(`e-non-exec`) is unimplementable too — a typecheck
-would accept everything or nothing. Recording (rather
+any value including nil is accepted. Pool replacement
+(consulting the recorded executor) and set-time
+validation (the JVM's `e-non-exec` CCE) are follow-up
+#96: the `Executor` kind and `send-via` dispatch exist
+since 3c, but the setters still record without
+consulting. Recording (rather
 than pure ignore) keeps the `set!` observable for any
 future reader at trivial cost. Consequences, all
 pinned by `cellstaps.rs exec_record` tests: post-set

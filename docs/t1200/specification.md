@@ -21,7 +21,7 @@
 3. Every new behavior is pinned by JVM-oracle probes (alpha10 jars)
    plus differential-corpus rows, so drift fails CI.
 
-### 1.2 Non-goals (explicit)
+### 1.2 Out of scope (explicit)
 
 - No `clojure.spec`, `core.async`, reader, or type-system work.
 - No change to seq (non-xform) arities or laziness behavior.

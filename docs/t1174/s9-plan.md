@@ -133,7 +133,7 @@ The concurrency code ships with argument-only validation today
   JVM throws under `true`, we printed) — converged by
   S8/issue #51. set-agent-send-executor!
   et al rejected (no custom executors); load-reader rejected
-  (N1-adjacent, needs java.io); data_readers.clj stays spec'd-Out
+  (host-adjacent, needs java.io); data_readers.clj stays spec'd-Out
   (no classpath); clojure.edn deferred (needs a value-producing
   EDN reader entry; `--edn` covers interactive use). Absence
   pinned for load-reader, the executor setters, and the

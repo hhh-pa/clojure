@@ -55,7 +55,7 @@ keys; `gen-class` types survive a compile round-trip untouched.
 - `(derived)` marks a port-test assertion derived from an oracle
   pin rather than quoted by it.
 - `(oracle-only)` marks a pin with no port transfer
-  (unrepresentable without N1 interop), recorded as context.
+  (unrepresentable without host interop), recorded as context.
 - `LOCAL` marks behavior verifiable without LLVM (fake driver,
   pure logic); `CI` marks behavior needing the LLVM legs
   (real `clj-aot` driver).
@@ -306,7 +306,7 @@ in `core_print.clj`, like the port's `core_vars` dynamics).
 | `*fn-loader*` | nil (`k-root-fn-loader`) | nil (`k-dyn-fn-loader`) | nil in every load/compile context probed (`c-captured`, `c-load-captured`, `c-loadfile-source`, `k-eval-fnloader`) | data-only: root nil, never bound (no loader kind exists; single-loader runtime — the #33 one-loader note) |
 | `*use-context-classloader*` | true (`k-root-use-context`) | nil (`k-dyn-use-context`) | unrebound; no observed effect on load/require/resource/compile in alpha10 (`c-use-true/false`, `a-use-true/false`, `a-res-true/false`, §2.2) | data-only: root true, never consulted |
 | `*verbose-defrecords*` | false (`k-root-verbose`) | true (`k-dyn-verbose`) | false, unrebound (`c-captured`); role is print-dup over records: false → `#user.Rec[1]`, true → `#user.Rec{:x 1}` (`k-verbose-false/true/default`) | `core_vars` dynamic; honored in `dup_record` (port shapes derived: `#Name[v1, ...]` stays, `#Name{map}` added — §2.1 D11, S8-owner ack) |
-| `primitives-classnames` | 8-entry map (`k-prims-count`) | nil, plain def (`k-dyn-prims`) | none during compile (role is print-dup over `Class`: `k-prims-dup` → `#=(identity Long/TYPE)`) | plain root map; vals verbatim (`k-prims-vals`); keys the 8 `.getName` strings (`k-prims-keys` — divergence: JVM keys are `Class` objects, unrepresentable under N1; consistent with the #33 class-name convention); the `Class` consumer does not transfer (`k-prims-dup/nodup` oracle-only) |
+| `primitives-classnames` | 8-entry map (`k-prims-count`) | nil, plain def (`k-dyn-prims`) | none during compile (role is print-dup over `Class`: `k-prims-dup` → `#=(identity Long/TYPE)`) | plain root map; vals verbatim (`k-prims-vals`); keys the 8 `.getName` strings (`k-prims-keys` — divergence: JVM keys are `Class` objects, unrepresentable without host classes; consistent with the #33 class-name convention); the `Class` consumer does not transfer (`k-prims-dup/nodup` oracle-only) |
 
 ### 1.9 `add-classpath`
 
@@ -322,7 +322,7 @@ failure — `a-arity0/2` show no interleaved line), then print
 even when the add then fails — the `a-broken-*` interleavings),
 then the String check (CCE `String` for non-strings — the port
 accepts plain path strings only; JVM URL objects, URL-strings,
-and `File`s are unrepresentable under N1, so `a-broken-url`/
+and `File`s are unrepresentable without host classes, so `a-broken-url`/
 `a-urls`-side acceptance narrows to strings, §2.4), then
 contains-guarded `conj` onto `*load-path*` (nil normalizes to
 `[]` first, preserving the append invariant; non-vector rebound
@@ -442,7 +442,7 @@ load-one + emit `<root>.o`; probes c-ret, c-files)``.
   (ns-derived paths) needs eval-before-pathing, contradicting
   D3 — deferred as a follow-up, not this slice.
 - D7 (`primitives-classnames` string keys, §1.8): JVM keys are
-  `Class` objects (N1-unrepresentable); the 8 `.getName`
+  `Class` objects (host-unrepresentable); the 8 `.getName`
   strings keep the map's documented purpose expressible and
   match the #33 class-name convention. Opaque keys were
   rejected (un.inspectable, still divergent on lookup).
@@ -497,7 +497,7 @@ load-one + emit `<root>.o`; probes c-ret, c-files)``.
 - `*compile-path*`: JVM root nil (`k-root-compile-path`),
   launcher session binding `"classes"` (`k-compile-path`).
   The port folds the session binding into the root (§1.8):
-  `getRawRoot` is N1-interop (unobservable), the port is a
+  `getRawRoot` is host interop (unobservable), the port is a
   session runtime like `clojure.main`, and the issue names
   `"classes"` as the root.
 - `*source-path*`: root `"NO_SOURCE_FILE"` (`k-root-source-path`)
@@ -574,7 +574,7 @@ load-one + emit `<root>.o`; probes c-ret, c-files)``.
   stated limitation.
 - `load-file`/`load-string`/`load-reader` never emit (narrowing, §1.4 D6).
 - `*compile-path*` root `"classes"` folds the launcher
-  session binding (JVM root nil — N1-invisible, §2.2).
+  session binding (JVM root nil — host-invisible, §2.2).
 - T7 fires at plan time (before side effects) vs JVM
   mid-eval (same text — tightening).
 - `T3` reuses the port's stable name-NPE (JVM text

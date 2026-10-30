@@ -17,7 +17,7 @@
    (worked after REL ships); skips carry reasons so they are
    never revisited silently.
 
-### 1.2 Non-goals (explicit)
+### 1.2 Out of scope (explicit)
 
 - No behavior changes in this slice (inventory only).
 - No alpha10 version bump (a later REL2 decision, not M1).

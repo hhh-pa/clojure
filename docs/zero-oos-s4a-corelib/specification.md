@@ -87,7 +87,7 @@ its probe labels verbatim, plus a shared arity-miss test.
 RNG pins are shape/range only. Matrix `notes` name the
 tests.
 
-## Non-goals
+## Out of scope
 
 `parse-uuid` (S9 scalar kinds), `find-var`/
 `requiring-resolve` (S5), `even?`-style vocabulary gaps

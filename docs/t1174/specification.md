@@ -133,9 +133,10 @@ custom `data_readers.clj`.
 Special forms: `def`, `if`, `do`, `let`/`letfn`, `loop`/`recur`,
 `fn` (multi-arity, variadic, pre/post), `quote`, `var`, `throw`,
 `try`/`catch`/`finally`, `set!` (dynamic vars only), `monitor-enter`
-is out, `new`/`.`/`import` out (N1), `deftype`/`defrecord` (methods
-without host interop) in, `defprotocol`/`extend-protocol`/
-`extend-type` in, `defmulti`/`defmethod` in.
+is out, `new`/`.`/`import` host forms (Object, `..` surface, and
+import emulated; host execution is future work), `deftype`/
+`defrecord` (methods without host interop) in, `defprotocol`/
+`extend-protocol`/`extend-type` in, `defmulti`/`defmethod` in.
 
 Core subset (seed list; the coverage file `rust/core-coverage.md`
 is normative and grows per slice): `+ - * / quot rem mod inc dec
@@ -246,7 +247,8 @@ C5. Namespaces/vars: intern, root + thread-local bindings, dynamic
 C6. Concurrency: `atom` CAS loops with validators + watches;
     `future` conveys bindings and caches exceptions for `deref`;
     `agent` fixed pool, `:fail`/`:continue` error modes, `await`,
-    nested-send ordering. STM excluded (N4).
+    nested-send ordering; STM (`ref`/`dosync`/validators on
+    refs) in.
 C7. Reader conditionals use `:cljr` (+ `:default`); `.cljc` loads
     JVM branches never.
 C8. CLI exit codes: 0 success; 1 evaluation/compile error; 2 usage

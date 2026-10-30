@@ -1077,7 +1077,7 @@ fn native_read_plus_string(eval: &mut Evaluator, args: &[Value]) -> Result<Value
     let (eof_error, eof_value, recursive) = parse_read_tail(args, &mut opts)?;
     sync_reader_ns(eval, &mut opts);
     // Defer mode, like `read` (B2): without the snapshot, table
-    // tags fail, `#inst` hits the stale N5 text, and default-fn
+    // tags fail, `#inst` hits the stale follow-up text, and default-fn
     // tags misroute.
     crate::core::snapshot_data_readers(eval, &mut opts)?;
     opts.read_eval = seed.read_eval;

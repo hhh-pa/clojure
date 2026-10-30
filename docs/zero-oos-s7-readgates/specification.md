@@ -61,7 +61,7 @@ natives (probes pin which wrapper each entry point uses).
 its probe labels verbatim, plus shared arity-miss tests.
 Matrix `notes` name the tests.
 
-## Non-goals
+## Out of scope
 
 Tag-table dispatch (`DataReader` arm — S6), `*data-readers*`
 / `*default-data-reader-fn*` (S6), `read` `:read-cond` /

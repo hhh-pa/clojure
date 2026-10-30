@@ -248,7 +248,7 @@ fn validator_rows() {
     // c-set-nonfn c-set-agent c-get-future c-get-delay c-get-volatile
     // c-get-nil c-get-bad c-set-future k-set-nil k-set-bad
     // k-set-nil-badvf k-set-bad-badvf c-set-arity1 c-get-arity0 (the
-    // var asserts pin the Non-goal divergence — JVM oracles
+    // var asserts pin the scope divergence — JVM oracles
     // `c-get-var`/`c-get-var-none`/`c-set-var-bad-root` accept vars).
     let mut eval = boot();
     assert_eq!(run_last(&mut eval, "(get-validator (atom 1))"), "nil");
@@ -358,7 +358,7 @@ fn validator_rows() {
         uncaught(&mut eval, "(get-validator)"),
         "clojure.lang.ArityException | Wrong number of args (0) passed to: clojure.core/get-validator"
     );
-    // L6: vars are rejected with the `IRef` cast (spec Non-goals —
+    // L6: vars are rejected with the `IRef` cast (spec Out of scope —
     // the JVM accepts them: oracles `c-get-var`/`c-get-var-none`/
     // `c-set-var-bad-root`).
     assert_eq!(
@@ -705,7 +705,7 @@ fn release_pending_sends_rows() {
 fn await1_rows() {
     // Oracle state.out: i-basic i-returns-agent i-nil i-bad i-arity0
     // i-private k-await1-idle-in-action k-await1-self-idle
-    // k-await1-busy-in-action (`i-static` unpinned per Non-goals;
+    // k-await1-busy-in-action (`i-static` unpinned per Out of scope;
     // `k-await1-busy-in-action` blocks on gate/hold promises, not
     // `Thread/sleep`).
     // `i-basic`: the gate/hold form pins the observable

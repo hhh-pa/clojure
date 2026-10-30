@@ -203,7 +203,7 @@ Rust-side cursor-advance pins (chunked-32 pull after
 `first`, unchunked single pull, stream latch). Matrix
 `notes` name the tests.
 
-## Non-goals
+## Out of scope
 
 `type`/`class`/`instance?` on handles (S16 owns class
 emulation); `slurp`/`spit` behavior changes (none —

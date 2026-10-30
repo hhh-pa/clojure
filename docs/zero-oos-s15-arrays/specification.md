@@ -632,7 +632,7 @@ var replaying its probe labels verbatim (oracle label
 port-only pins (D1–D6, keyword designators, OOM
 guard, the `apply` gap). Matrix `notes` name the tests.
 
-## Non-goals
+## Out of scope
 
 `type`/`class`/`instance?`/`..` (S16), `unchecked-*`
 arithmetic (whoever claims it), lazy array-seqs (D1),

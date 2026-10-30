@@ -115,7 +115,7 @@ defaults; it is not a second print path for pr-family output.
 ### 1b. Dispatch tokens (the port's dispatch domain)
 
 The JVM dispatches on `Class` objects; the port has no classes
-(`class`/`type` are out of scope, N1). The booted multis
+(`class`/`type` emulated since classemu). The booted multis
 dispatch on **stable per-kind strings** (echoing the JVM table
 keys where they exist), plus the value `nil` for nil and
 user keywords via meta `:type`. Tokens are exact-matched by

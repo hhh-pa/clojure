@@ -302,7 +302,7 @@ epl-v10.html            license text
 
 ## Further reading
 
-- [Design spec](docs/t1174/specification.md) — goals, non-goals,
+- [Design spec](docs/t1174/specification.md) — goals,
   CLI/language contracts, slice plan (S1–S9, all landed).
 - [Core coverage](rust/core-coverage.md) — every var's
   implemented/divergent/out-of-scope state.

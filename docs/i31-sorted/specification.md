@@ -42,7 +42,7 @@ empty) plus the map/set ops (`assoc`/`dissoc`/`conj`/`disj`/
    (with comparator); content equality with plain maps/sets
    holds (`(= (sorted-map :a 1) {:a 1})`, matching hashes).
 
-### 1.2 Non-goals (explicit)
+### 1.2 Out of scope (explicit)
 
 - No transient sorted variants (JVM has none either).
 - No metadata semantics beyond the `Extension` precedent
