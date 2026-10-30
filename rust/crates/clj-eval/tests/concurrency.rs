@@ -3717,15 +3717,30 @@ fn release_pending_sends_post_shutdown_dispatches_own_exec() {
 fn await_fail_during_hangs_until_restart() {
     // Fence 3c: an agent that fails after its barrier queued leaves
     // the barrier stuck, so `await` hangs (like the JVM) — a plain
-    // restart resumes the barrier and the wait returns. No timing:
-    // the gate orders the queue, so the stuck wait is structural.
+    // restart resumes the barrier and the wait returns.
+    // The future signals liveness immediately before the await and
+    // the main thread rendezvous on it first: a late-starting
+    // future thread (seen on loaded Windows runners) would
+    // otherwise await an already-failed agent and throw instead
+    // of parking (#128).
     let mut eval = boot();
-    run(&mut eval, "(def hdg (promise)) (def hda (agent 0))");
+    run(
+        &mut eval,
+        "(def hdg (promise)) (def hds (promise)) (def hda (agent 0))",
+    );
     run(
         &mut eval,
         "(send hda (fn [s] @hdg (throw (ex-info \"x\" {}))))",
     );
-    run(&mut eval, "(def hdf (future (await hda) :waited))");
+    run(
+        &mut eval,
+        "(def hdf (future (deliver hds :started) (await hda) :waited))",
+    );
+    assert_eq!(run_last(&mut eval, "(deref hds 8000 :timeout)"), ":started");
+    // CI-1 margin (see await_clear_actions_restart_hangs): the
+    // rendezvous proves liveness, not parking — hold `:go` until
+    // the future has parked in `await`.
+    std::thread::sleep(std::time::Duration::from_millis(500));
     run(&mut eval, "(deliver hdg :go)");
     wait_failed(&mut eval, "hda");
     assert_eq!(run_last(&mut eval, "(realized? hdf)"), "false");
