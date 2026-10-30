@@ -804,6 +804,49 @@ fn loaded_libs_ref_nonset_cast() {
 }
 
 #[test]
+fn require_mark_validator_veto() {
+    // A validator-vetoed mark surfaces the commute failure (covers
+    // the mark error arm — the dosync does not swallow it).
+    let fx = Fixture::new("vetolib");
+    fx.write("vetolib.clj", "(clojure.core/in-ns 'vetolib)\n(def v 1)\n");
+    let mut eval = boot();
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            &fx.within(
+                "(binding [clojure.core/*loaded-libs* (ref #{} :validator (fn [_] false))] (require 'vetolib))"
+            )
+        ),
+        "java.lang.IllegalStateException | Invalid reference state"
+    );
+}
+
+#[test]
+fn reload_all_nil_member_no_panic() {
+    // Fence 3a F2: loaded code sharing the blank ref with a nil
+    // commute (`Util.compare`-safe) unions without panicking.
+    let fx = Fixture::new("nilunion");
+    fx.write(
+        "nil_inner.clj",
+        "(clojure.core/in-ns 'nil_inner)\n(clojure.core/dosync (clojure.core/commute (clojure.core/var-get (var clojure.core/*loaded-libs*)) clojure.core/conj nil))\n(def iv 1)\n",
+    );
+    fx.write(
+        "nil_outer.clj",
+        "(clojure.core/in-ns 'nil_outer)\n(clojure.core/require 'nil_inner)\n(def ov 2)\n",
+    );
+    let mut eval = boot();
+    assert_eq!(
+        run_last(&mut eval, &fx.within("(require 'nil_outer :reload-all)")),
+        "nil"
+    );
+    assert_eq!(run_last(&mut eval, "(contains? (loaded-libs) nil)"), "true");
+    assert_eq!(
+        run_last(&mut eval, "(contains? (loaded-libs) 'nil_outer)"),
+        "true"
+    );
+}
+
+#[test]
 fn eval_bare_macro_arity() {
     let mut eval = boot();
     // Bare: no `CompilerException` wrapper, no cause.

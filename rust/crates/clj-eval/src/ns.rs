@@ -1082,9 +1082,23 @@ fn libs_set(eval: &mut Evaluator) -> Result<Set, NativeError> {
 /// would trip the cross-ns publicity check); `dosync` joins
 /// an enclosing transaction instead of nesting.
 fn mark_loaded(eval: &mut Evaluator, lib: &Symbol) -> Result<(), NativeError> {
+    mark_member(eval, &format!("'{lib}"))
+}
+
+/// Re-mark one `load-all` union member through the `load-one`
+/// commute form: symbols quote as `'{lib}`, `nil` conjoins as
+/// `nil` (`Util.compare` says nil is comparison-safe, so loaded
+/// code can share the blank ref with a nil commute — never a
+/// panic). Anything else is unreachable: reaching the union means
+/// the lib's symbol mark committed, and only symbols and nil
+/// compare clean with a symbol under the natural order — an
+/// incomparable member fails its own commute first, failing the
+/// load before the union (callers skip non-symbol non-nil
+/// members rather than assuming totality).
+fn mark_member(eval: &mut Evaluator, arg: &str) -> Result<(), NativeError> {
     let source = eval.source().to_owned();
     let form = format!(
-        "(clojure.core/dosync (clojure.core/commute (clojure.core/var-get (var clojure.core/*loaded-libs*)) clojure.core/conj '{lib}))"
+        "(clojure.core/dosync (clojure.core/commute (clojure.core/var-get (var clojure.core/*loaded-libs*)) clojure.core/conj {arg}))"
     );
     match eval.eval_source(&form) {
         Ok(_) => Ok(()),
@@ -1299,10 +1313,12 @@ fn load_all(eval: &mut Evaluator, lib: &Symbol, need_ns: bool) -> Result<(), Nat
     eval.pop_bindings(depth);
     out?;
     for m in new.unwrap_or(new_set()).iter() {
-        let Value::Symbol(s) = m.clone() else {
-            unreachable!("load-all inner libs holds only marked symbols")
-        };
-        mark_loaded(eval, &s)?;
+        if let Value::Symbol(s) = m.clone() {
+            mark_loaded(eval, &s)?;
+        } else if *m == Value::Nil {
+            mark_member(eval, "nil")?;
+        }
+        // Else unreachable (see `mark_member`): skip, never panic.
     }
     Ok(())
 }
