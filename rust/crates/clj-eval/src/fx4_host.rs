@@ -414,12 +414,7 @@ fn nil_lockee_list(l: &List) -> NilLockee {
     if list_head_is(head, "quote") {
         // `(quote nil)`; other quotes never evaluate nil.
         tag = NilLockee::Null;
-    } else if list_head_is(head, "let")
-        || list_head_is(head, "let*")
-        || list_head_is(head, "letfn")
-        || list_head_is(head, "letfn*")
-        || list_head_is(head, "do")
-    {
+    } else if head_in(head, &["let", "let*", "letfn", "letfn*", "do"]) {
         // The value form is the last body form; a body-less
         // `let`/`do` evaluates nil like a `nil` literal (E1w).
         let off = if list_head_is(head, "do") { 1 } else { 2 };
@@ -427,10 +422,9 @@ fn nil_lockee_list(l: &List) -> NilLockee {
             Some(last) => nil_lockee_tag(last),
             None => NilLockee::Null,
         };
-    } else if list_head_is(head, "if") || list_head_is(head, "case*") {
+    } else if head_in(head, &["if", "case*"]) {
         tag = NilLockee::Bare;
-    } else if list_head_is(head, "try") || list_head_is(head, "loop") || list_head_is(head, "loop*")
-    {
+    } else if head_in(head, &["try", "loop", "loop*"]) {
         tag = NilLockee::Call("clojure.lang.IFn.invoke".to_owned(), 0);
     } else if list_head_is(head, "set!") {
         // `set!` on a var compiles to `Var.set` (E1y); field
@@ -442,4 +436,8 @@ fn nil_lockee_list(l: &List) -> NilLockee {
 
 fn list_head_is(head: Option<&Value>, name: &str) -> bool {
     matches!(head, Some(Value::Symbol(s)) if s.name() == name && s.namespace().is_none_or(|ns| ns == "clojure.core"))
+}
+
+fn head_in(head: Option<&Value>, names: &[&str]) -> bool {
+    names.iter().any(|name| list_head_is(head, name))
 }
