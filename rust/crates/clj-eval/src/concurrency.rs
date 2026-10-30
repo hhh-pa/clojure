@@ -2680,8 +2680,9 @@ mod tests {
     #[test]
     fn monitor_key_covers_every_kind() {
         use clj_value::{
-            BigDec, ClassVal, Elem8, Instant as ValueInstant, List, MultiFn, PrimitiveVector,
-            Transient, TransientKind, TransientVector, Unbound, Uri, Uuid, new_set,
+            BigDec, ClassVal, Elem8, ExtensionValue, Instant as ValueInstant, List, MultiFn,
+            PrimitiveVector, Transient, TransientKind, TransientVector, Unbound, Uri, Uuid,
+            new_set,
         };
         use std::any::Any;
         use std::hash::Hasher;
@@ -2794,6 +2795,17 @@ mod tests {
         let a = Value::Atom(Atom::new(Value::Nil));
         let b = Value::Atom(Atom::new(Value::Nil));
         assert_ne!(super::monitor_key(&a), super::monitor_key(&b));
+        // Exercise the test double's trait surface (coverage floor).
+        let ext = DummyExt;
+        assert_eq!(ext.class_name(), "DummyExt");
+        assert_eq!(ext.print(), "DummyExt");
+        assert!(ext.dyn_eq(&DummyExt));
+        assert!(ext.as_any().is::<DummyExt>());
+        let mut h1 = std::collections::hash_map::DefaultHasher::new();
+        let mut h2 = std::collections::hash_map::DefaultHasher::new();
+        ext.dyn_hash(&mut h1);
+        ext.dyn_hash(&mut h2);
+        assert_eq!(h1.finish(), h2.finish());
     }
 
     #[test]
