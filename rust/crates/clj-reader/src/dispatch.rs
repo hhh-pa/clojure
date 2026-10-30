@@ -17,7 +17,8 @@
 //!   defer to `TaggedLiteral`, with the fired-discards log under
 //!   `#_`), `inst`/`uuid` ⇒ data-reader deferral, else unknown
 //!   tag).
-//! - `#=`: immediate deferral without consuming the form. `#<`:
+//! - `#=`: the `*read-eval*` gate (denial without consuming the
+//!   form), else the operand plus hook application. `#<`:
 //!   unreadable.
 //! - `#:`: namespaced maps (auto/current-ns/alias resolution, key
 //!   rewrite, evenness + duplicate rules).
@@ -746,10 +747,21 @@ mod tests {
                 err.message(),
                 "EvalReader not allowed when *read-eval* is false."
             );
-            assert_eq!(err.jvm_class(), "java.lang.RuntimeException");
+            assert_eq!(err.jvm_class(), "RuntimeException");
             let span = err.span();
             assert_eq!((span.line, span.col), (1, 3), "{input}");
         }
+        // #125 (JVM `lnpr-false-nested` probe): the entry span tracks
+        // the `#=` position, so a nested denial sits mid-form.
+        let opts = ReaderOpts {
+            read_eval: false,
+            ..ReaderOpts::default()
+        };
+        let err = read_str("[#=(+ 1 2)]", &opts, &mut NoHooks).unwrap_err();
+        assert!(matches!(err, ReaderError::EvalFailed { .. }), "{err:?}");
+        assert_eq!(err.jvm_class(), "RuntimeException");
+        let span = err.span();
+        assert_eq!((span.line, span.col), (1, 4));
     }
 
     #[test]
@@ -777,7 +789,7 @@ mod tests {
         let err = read_str("#=(/ 1 0)", &opts, &mut hooks).unwrap_err();
         assert!(matches!(err, ReaderError::EvalFailed { .. }));
         assert_eq!(err.message(), "Divide by zero");
-        assert_eq!(err.jvm_class(), "java.lang.ArithmeticException");
+        assert_eq!(err.jvm_class(), "ArithmeticException");
         let span = err.span();
         assert_eq!((span.line, span.col), (1, 10));
     }
