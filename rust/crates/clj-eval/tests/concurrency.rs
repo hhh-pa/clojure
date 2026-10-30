@@ -3564,6 +3564,31 @@ fn send_via_nil_wedges_with_handler_npe() {
 }
 
 #[test]
+fn release_nested_nil_wedges_through_dispatch_with_pools_up() {
+    // Fence 3c coverage: a nested send-via-nil released while the
+    // pools are up dispatches through `dispatch_head`'s Nil arm
+    // (fresh sends wedge without dispatching, so only this path
+    // covers it).
+    let mut eval = boot();
+    run(&mut eval, "(def rqp (promise)) (def rqe (atom nil))");
+    run(&mut eval, "(def rqa (agent 0))");
+    run(
+        &mut eval,
+        "(def rqb (agent 0 :error-handler (fn [ag e] (reset! rqe e) (deliver rqp :saw))))",
+    );
+    run(
+        &mut eval,
+        "(send rqa (fn [s] (send-via nil rqb (fn [x] :never)) (release-pending-sends) s))",
+    );
+    assert_eq!(run_last(&mut eval, "(deref rqp 8000 :timeout)"), ":saw");
+    assert_eq!(
+        class_of(&mut eval, "@rqe"),
+        "java.lang.NullPointerException"
+    );
+    assert_eq!(run_last(&mut eval, "(await-for 200 rqb)"), "false");
+}
+
+#[test]
 fn release_pending_sends_post_shutdown_dispatches_own_exec() {
     // Fence 3c B2: an explicit `release-pending-sends` after
     // shutdown still runs each head on its OWN executor (like
@@ -3576,11 +3601,11 @@ fn release_pending_sends_post_shutdown_dispatches_own_exec() {
     let mut eval = boot();
     run(
         &mut eval,
-        "(def rpx (executor)) (def rpa (agent 0)) (def rpb (agent 0)) (def rpe (agent 0)) (def rpg (promise)) (def rph (promise)) (def rpd (promise)) (def rpw2 (promise)) (def rpx2 (promise)) (def rpc (agent 0 :error-handler (fn [ag e] (deliver rpw2 :wedged))))",
+        "(def rpx (executor)) (def rpa (agent 0)) (def rpb (agent 0)) (def rpe (agent 0)) (def rpg (promise)) (def rph (promise)) (def rpd (promise)) (def rpw2 (promise)) (def rpx2 (promise)) (def rph2 (promise)) (def rpc-e (atom nil)) (def rpc (agent 0 :error-handler (fn [ag e] (reset! rpc-e e) (deliver rpw2 :wedged))))",
     );
     run(
         &mut eval,
-        "(send rpa (fn [s] (deliver rpg :started) (deref rph) (send-via rpx rpb (fn [x] (deliver rpd :done) (inc x))) (send-via nil rpc (fn [x] :never)) (send rpe (fn [x] (deliver rpx2 :ran) (inc x))) (release-pending-sends) s))",
+        "(send rpa (fn [s] (deliver rpg :started) (deref rph) (send-via rpx rpb (fn [x] (deliver rpd :done) (inc x))) (send-via nil rpc (fn [x] :never)) (send rpe (fn [x] (deliver rpx2 :ran) (inc x))) (send rpa (fn [s] (deliver rph2 :self) (inc s))) (release-pending-sends) s))",
     );
     assert_eq!(run_last(&mut eval, "(deref rpg 8000 :timeout)"), ":started");
     run(&mut eval, "(shutdown-agents)");
@@ -3595,12 +3620,22 @@ fn release_pending_sends_post_shutdown_dispatches_own_exec() {
     // reached the handler): a follow-up on the live executor never
     // runs (a dropped head would have let it through).
     assert_eq!(run_last(&mut eval, "(deref rpw2 8000 :timeout)"), ":wedged");
+    // The wedge (not a drop) reached the handler as the execute NPE.
+    assert_eq!(
+        class_of(&mut eval, "@rpc-e"),
+        "java.lang.NullPointerException"
+    );
     run(
         &mut eval,
         "(def rpw (promise)) (send-via rpx rpc (fn [x] (deliver rpw :ran2) x))",
     );
     assert_eq!(run_last(&mut eval, "(deref rpw 200 :timeout)"), ":timeout");
     assert_eq!(run_last(&mut eval, "(await-for 200 rpc)"), "false");
+    // The nested send to the RUNNING agent found no head at release
+    // (it was still executing) and queued behind; post-shutdown the
+    // handover rejects the pool head, so it never runs.
+    assert_eq!(run_last(&mut eval, "(deref rph2 200 :timeout)"), ":timeout");
+    assert_eq!(run_last(&mut eval, "@rpa"), "0");
 }
 
 #[test]

@@ -156,6 +156,23 @@ mod tests {
         assert_ne!(a.id(), c.id());
     }
 
+    /// Executors hash by minted id (covers `id_cell_tag`'s arm).
+    #[test]
+    fn hash_uses_minted_id() {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        fn hash_of(v: &crate::Value) -> u64 {
+            let mut h = DefaultHasher::new();
+            v.hash(&mut h);
+            h.finish()
+        }
+        let a = Executor::new().unwrap();
+        let (x, y) = (crate::Value::Executor(a.clone()), crate::Value::Executor(a));
+        assert_eq!(hash_of(&x), hash_of(&y));
+        let z = crate::Value::Executor(Executor::new().unwrap());
+        assert_ne!(hash_of(&x), hash_of(&z));
+    }
+
     /// A spawn failure is an error, not a dead pool (fence 3c N2).
     #[test]
     fn spawn_failure_is_an_error() {

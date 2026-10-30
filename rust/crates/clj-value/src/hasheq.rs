@@ -1173,6 +1173,18 @@ mod tests {
     }
 
     #[test]
+    fn executor_hash_from_id() {
+        use crate::Executor;
+        let x = Executor::new().unwrap();
+        let want = (x.id() ^ (x.id() >> 32)) as i32;
+        let v = Value::Executor(x);
+        assert_eq!(hasheq(&v), want);
+        // `.hashCode` is unreachable from Clojure (`hash-code` is
+        // private), so the `hash_code_rest` arm is pinned directly.
+        assert_eq!(hash_code(&v), want);
+    }
+
+    #[test]
     fn atom_delay_agent_hash_from_id() {
         use crate::{Agent, Atom, Delay};
         let a = Atom::new(int(0));
