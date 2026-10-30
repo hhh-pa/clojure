@@ -2298,7 +2298,10 @@ impl Evaluator {
 
     /// One map binding: present keys read, missing keys take the
     /// local-then-key default, missing required keys `req!` (or
-    /// record into `:missing` and bind `nil`).
+    /// record into `:missing` and bind `nil`). Collection honors
+    /// *forced* `:missing` too (upstream a1041abf1): an enclosing
+    /// `:missing` injects a real outlet into nested maps, so their
+    /// required keys collect instead of throwing.
     fn map_binding(
         &mut self,
         ctx: &MapBind,
@@ -2314,7 +2317,7 @@ impl Evaluator {
             .and_then(|local| ctx.defaults.get(local).cloned())
             .or_else(|| ctx.defaults.get(key).cloned());
         if required && default.is_none() {
-            if ctx.pat.missing.is_some() {
+            if ctx.effective(Outlet::Missing) {
                 let m = missing.take().unwrap_or_else(new_map);
                 *missing = Some(m.insert(key.clone(), Value::Nil));
                 return Ok(Value::Nil);

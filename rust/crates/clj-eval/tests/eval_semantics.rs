@@ -1334,6 +1334,110 @@ fn map_destructure_outlet_forcing_edges() {
 }
 
 #[test]
+fn map_destructure_nested_req_outlets() {
+    // Upstream a1041abf1 (CLJ-2990): nested `:req!` patterns combined
+    // with `:missing`/`:select` — mirrors of the upstream
+    // `data_structures.clj` `:req!` outlet tests (`:missing`
+    // collects, both `:select` regressions, the `:as` regression).
+    let (mut eval, _) = rigged();
+    for (src, want) in [
+        // `:req!` with `:missing` collects through nested patterns.
+        (
+            "(let [{:req! {{:keys! [c]} :nested}, :missing miss} {}] miss)",
+            "{:nested {:c nil}}",
+        ),
+        // Symbol keys are bare here: upstream quotes them (macro
+        // keys are code), the analyzer takes keys literally.
+        (
+            "(let [{:req! {{:syms! [c]} nested}, :missing miss} {}] miss)",
+            "{nested {c nil}}",
+        ),
+        (
+            "(let [{:req! {{:strs! [c]} \"nested\"}, :missing miss} {}] miss)",
+            "{\"nested\" {\"c\" nil}}",
+        ),
+        // Present keys bind with no missing collected.
+        (
+            "(let [{:req! {{:keys! [c]} :nested}, :missing miss} {:nested {:c 3}}] [c miss])",
+            "[3 nil]",
+        ),
+        // `:as` nested pattern with `:missing` (upstream `:missing`
+        // regression, `selector` cases as `let` pins).
+        (
+            "(let [{:req! {{:as c} :card}, :missing m} {}] [c m])",
+            "[nil {:card nil}]",
+        ),
+        (
+            "(let [{:req! {{:as c} :card}, :missing m} nil] [c m])",
+            "[nil {:card nil}]",
+        ),
+        (
+            "(let [{:req! {{:as c} :card}, :missing m} {:card {}}] [c m])",
+            "[{} nil]",
+        ),
+        (
+            "(let [{:req! {{:as c} :card}, :missing m} {:card {:n 42}}] [c m])",
+            "[{:n 42} nil]",
+        ),
+        // Optional nested pattern with `:missing` + `:select`.
+        (
+            "(let [{:req! {{:keys [a]} :card}, :missing m, :select s} {}] [m s])",
+            "[{:card nil} {}]",
+        ),
+        (
+            "(let [{:req! {{:keys [a]} :card}, :missing m, :select s} nil] [m s])",
+            "[{:card nil} nil]",
+        ),
+        (
+            "(let [{:req! {{:keys [a]} :card}, :missing m, :select s} {:card {}}] [m s])",
+            "[nil {:card {}}]",
+        ),
+        (
+            "(let [{:req! {{:keys [a]} :card}, :missing m, :select s} {:card {:n 42}}] [m s])",
+            "[nil {:card {}}]",
+        ),
+        (
+            "(let [{:req! {{:keys [a]} :card}, :missing m, :select s} {:card {:a 42}}] [m s])",
+            "[nil {:card {:a 42}}]",
+        ),
+        // Required nested pattern with `:missing` + `:select`.
+        (
+            "(let [{:req! {{:keys! [a]} :card}, :missing m, :select s} {}] [m s])",
+            "[{:card {:a nil}} {}]",
+        ),
+        (
+            "(let [{:req! {{:keys! [a]} :card}, :missing m, :select s} nil] [m s])",
+            "[{:card {:a nil}} nil]",
+        ),
+        (
+            "(let [{:req! {{:keys! [a]} :card}, :missing m, :select s} {:card {}}] [m s])",
+            "[{:card {:a nil}} {:card {}}]",
+        ),
+        (
+            "(let [{:req! {{:keys! [a]} :card}, :missing m, :select s} {:card {:n 42}}] [m s])",
+            "[{:card {:a nil}} {:card {}}]",
+        ),
+        (
+            "(let [{:req! {{:keys! [a]} :card}, :missing m, :select s} {:card {:a 42}}] [m s])",
+            "[nil {:card {:a 42}}]",
+        ),
+        // Through the analyzer engine (`fn` params).
+        (
+            "((fn [{:req! {{:keys! [c]} :nested}, :missing miss}] miss) {})",
+            "{:nested {:c nil}}",
+        ),
+    ] {
+        assert_eq!(run_last(&mut eval, src), want, "{src}");
+    }
+    // Without `:missing` the nested fetch still throws `req!`
+    // (upstream `destructure-form` throw case).
+    assert_eq!(
+        uncaught("(let [{:req! {{:keys! [c]} :nested}} {}] c)"),
+        "java.lang.IllegalArgumentException | Missing required key: :nested"
+    );
+}
+
+#[test]
 fn lookup_collection_edges() {
     let (mut eval, _) = rigged();
     // Int keys index vectors/strings in map patterns.

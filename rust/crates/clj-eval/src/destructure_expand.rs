@@ -779,25 +779,35 @@ fn push1(
 ) -> Result<(), NativeError> {
     let local = localize(bb);
     let bv = getter(cx, &local, bk, req)?;
-    if is_ident(bb) {
-        push_ident(ret, cx, &local, &bv, bk, req);
-        Ok(())
-    } else {
-        let _ = walk;
-        bind_one(eval, ret, bb, &bv)
-    }
-}
-
-fn push_ident(ret: &mut Vec<Value>, cx: &MapCx, local: &Value, bv: &Value, bk: &Value, req: bool) {
+    // Upstream a1041abf1: required + `:missing` emits the
+    // gtemp/missing-tracking bindings for NON-ident `bb` too
+    // (nested patterns spliced from `:req!`), then recurses `pb`
+    // into the nested pattern with `gtemp` as its value. The
+    // `when-not` guard binds `gtemp` itself in that case.
     if req && truthy(cx.missing.as_ref()) {
-        push_required_missing(ret, cx, local, bv, bk);
-        return;
+        push_required_missing(ret, cx, bb, &local, &bv, bk);
+        if is_ident(bb) {
+            return Ok(());
+        }
+        return bind_one(eval, ret, bb, &symv(&cx.gtemp));
     }
-    ret.push(local.clone());
-    ret.push(bv.clone());
+    if is_ident(bb) {
+        ret.push(local.clone());
+        ret.push(bv.clone());
+        return Ok(());
+    }
+    let _ = walk;
+    bind_one(eval, ret, bb, &bv)
 }
 
-fn push_required_missing(ret: &mut Vec<Value>, cx: &MapCx, local: &Value, bv: &Value, bk: &Value) {
+fn push_required_missing(
+    ret: &mut Vec<Value>,
+    cx: &MapCx,
+    bb: &Value,
+    local: &Value,
+    bv: &Value,
+    bk: &Value,
+) {
     let gnot = cx.gnotfound.as_ref().expect("missing allocates notfound");
     let gnotq = cx.gnotfoundq.as_ref().expect("missing allocates notfound?");
     let missing = cx.missing.as_ref().expect("missing");
@@ -814,7 +824,13 @@ fn push_required_missing(ret: &mut Vec<Value>, cx: &MapCx, local: &Value, bv: &V
             missing.clone(),
         ],
     ));
-    ret.push(local.clone());
+    // Upstream `(if (ident? bb) local gtemp)`: a nested pattern
+    // rebinds `gtemp` to the guarded value `pb` recurses into.
+    if is_ident(bb) {
+        ret.push(local.clone());
+    } else {
+        ret.push(symv(&cx.gtemp));
+    }
     ret.push(qcall("when-not", vec![symv(gnotq), symv(&cx.gtemp)]));
 }
 
@@ -1137,6 +1153,41 @@ mod tests {
         let err =
             destructure(&mut eval, &req_bindings(Value::Int(5))).expect_err("scalar :req! fails");
         assert_eq!(err.class, clj_value::ThrowClass::IllegalArgumentException);
+    }
+
+    #[test]
+    fn walk_req_nested_missing_tracks_gtemp() {
+        // Upstream a1041abf1: required + `:missing` + NON-ident bb
+        // (nested pattern spliced from `:req!`) emits the
+        // gtemp/missing-tracking bindings and recurses `pb` into
+        // the nested pattern with `gtemp` as its value; the
+        // `when-not` guard rebinds `gtemp` itself.
+        let mut eval = boot();
+        let nested = Value::Map(map_of(vec![(kw("keys!"), vecv(vec![sym("c")]))]));
+        let req = Value::Map(map_of(vec![(nested, kw("nested"))]));
+        let pat = Value::Map(map_of(vec![
+            (kw("req!"), req),
+            (kw("missing"), sym("miss")),
+        ]));
+        let out =
+            destructure(&mut eval, &vecv(vec![pat, Value::Nil])).expect("nested :req! expands");
+        let printed = pr_of(&out);
+        assert!(
+            printed.contains("temp__2 (clojure.core/get map__1 :nested notfound__3)"),
+            "missing-tracking get: {printed}"
+        );
+        assert!(
+            printed.contains("(clojure.core/identical? temp__2 notfound__3)"),
+            "notfound check: {printed}"
+        );
+        assert!(
+            printed.contains("temp__2 (clojure.core/when-not notfound?__4 temp__2)"),
+            "gtemp guard rebind: {printed}"
+        );
+        assert!(
+            printed.contains("map__6 temp__2"),
+            "nested pattern recurses on gtemp: {printed}"
+        );
     }
 
     #[test]

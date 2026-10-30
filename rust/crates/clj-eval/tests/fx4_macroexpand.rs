@@ -195,6 +195,38 @@ fn expand_locking_and_destructure_gensyms() {
         "{keys_bang}"
     );
     assert!(keys_bang.ends_with("m (clojure.core/merge m (clojure.core/some-vals nil))] a)"));
+    // u104 (upstream a1041abf1): nested `:req!` + `:missing` emits
+    // the gtemp/missing-tracking bindings and recurses into the
+    // nested pattern with `gtemp`; the `when-not` guard rebinds
+    // `gtemp` itself.
+    let nested_req =
+        fresh("(macroexpand-1 '(let [{:req! {{:keys! [c]} :nested}, :missing m} v] m))");
+    assert!(
+        nested_req.contains("temp__2 (clojure.core/get map__1 :nested notfound__3)"),
+        "{nested_req}"
+    );
+    assert!(
+        nested_req.contains("(clojure.core/identical? temp__2 notfound__3)"),
+        "{nested_req}"
+    );
+    assert!(
+        nested_req.contains("temp__2 (clojure.core/when-not notfound?__4 temp__2)"),
+        "{nested_req}"
+    );
+    assert!(
+        nested_req.contains("map__6 temp__2"),
+        "nested pattern recurses on gtemp: {nested_req}"
+    );
+    assert!(
+        nested_req.contains("temp__7 (clojure.core/get map__6 :c notfound__8)"),
+        "nested required key tracks its injected missing: {nested_req}"
+    );
+    assert!(
+        nested_req.ends_with(
+            "m (clojure.core/merge m (clojure.core/some-vals {:nested missing__5}))] m)"
+        ),
+        "{nested_req}"
+    );
     assert_eq!(
         fresh("(macroexpand-1 '(fn [[a b]] a))"),
         "(fn* ([p__1] (clojure.core/let [[a b] p__1] a)))"
