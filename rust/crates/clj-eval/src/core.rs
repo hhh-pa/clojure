@@ -553,12 +553,17 @@ fn div_int(x: i64, y: i64, a: &Num, b: &Num) -> Result<Num, NativeError> {
     if x == i64::MIN || y == i64::MIN {
         return Ok(num_ratio(num_rational(a) / num_rational(b)));
     }
-    match x.checked_div(y) {
-        Some(q) if x % y == 0 => Ok(Num::Int(q)),
-        Some(_) => Ok(num_ratio(num_rational(a) / num_rational(b))),
-        // `checked_div` fails only on `MIN/-1` (a `MIN` side,
-        // returned above) and `/0` (guarded above).
-        None => unreachable!("non-MIN operands divide without overflow"),
+    // `checked_div` fails only on `MIN/-1` (a `MIN` side,
+    // returned above) and `/0` (guarded above): `expect` keeps
+    // the invariant while staying on the covered path (a `None`
+    // arm would be an uncoverable line under the 100% floor).
+    let q = x
+        .checked_div(y)
+        .expect("non-MIN operands divide without overflow");
+    if x % y == 0 {
+        Ok(Num::Int(q))
+    } else {
+        Ok(num_ratio(num_rational(a) / num_rational(b)))
     }
 }
 
