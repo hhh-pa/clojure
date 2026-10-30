@@ -108,5 +108,10 @@ Clojure-compiler artifact.
   the init CCE before analyzing tails is the implemented order.
 - Nested `locking`/`monitor-enter` re-entrancy (reviewer A5): the
   JVM's mechanism for the expanded form is unknown; no port model.
+- Exit matching uses 3b's keys: content-hashed kinds (symbols,
+  Box clones) match across distinct objects, minted-id kinds
+  (vectors, cells) behave identity-like. Full JVM identity is
+  unimplementable for cloning Box kinds, and 3b's landed Box-clone
+  exit test requires key matching (4b-rebase fallout).
 - Unbalanced `monitor-enter` at eval end needs per-object migration
   onto the 3b monitor infra; deferred to the 4b rebase (needs 3b).

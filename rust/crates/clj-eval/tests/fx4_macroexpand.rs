@@ -958,13 +958,14 @@ fn host_natives_and_rewrites() {
         "1"
     );
     // Exit matches by lockee: a wrong exit fails without releasing,
-    // and crossing exits release in any order (fence 3b).
+    // and crossing exits release in any order (fence 3b; 4b rebase:
+    // the failure is now IMS with an empty message).
     assert_eq!(
         uncaught(
             &mut eval,
             "(do (fx4-monitor-enter :a) (fx4-monitor-exit :b))"
         ),
-        "java.lang.IllegalStateException | attempt to exit a monitor not held by this thread"
+        "java.lang.IllegalMonitorStateException | "
     );
     // ... and `:a` is still held afterwards (the wrong exit released
     // nothing — its own exit still succeeds).
@@ -1032,13 +1033,22 @@ fn monitor_exit_matrix() {
         ),
         "1"
     );
-    // Equal-but-distinct lockees are unheld (identity, like the JVM).
+    // Id-keyed lockees (vectors) behave identity-like: an
+    // equal-but-distinct exit is unheld (IMS).
     run_last(&mut eval, "(def w4b-mv [1])");
     assert_eq!(
         uncaught(&mut eval, "(do (monitor-enter w4b-mv) (monitor-exit [1]))"),
         "java.lang.IllegalMonitorStateException | "
     );
     assert_eq!(run_last(&mut eval, "(monitor-exit w4b-mv)"), "nil");
+    // Content-keyed lockees (symbols hash by name) share 3b's key,
+    // so the exit releases (Box-clone exits match their enter for
+    // the same reason — identity is unimplementable for cloning
+    // Box kinds).
+    assert_eq!(
+        run_last(&mut eval, "(do (monitor-enter 'w4b-sk) (monitor-exit 'w4b-sk))"),
+        "nil"
+    );
     // `catch` sees the hierarchy (`IMS` is an `ISE` is an `RE`).
     assert_eq!(
         run_last(
