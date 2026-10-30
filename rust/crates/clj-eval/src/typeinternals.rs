@@ -1762,6 +1762,10 @@ const THROW_PARENTS: &[(&str, &str)] = &[
         "java.lang.RuntimeException",
     ),
     (
+        "java.lang.IllegalMonitorStateException",
+        "java.lang.IllegalStateException",
+    ),
+    (
         "java.lang.IllegalStateException",
         "java.lang.RuntimeException",
     ),

@@ -13,7 +13,7 @@
 //! follow alpha9 `clojure.core` (one `macroexpand-1` step does not
 //! expand nested `let`/`fn`).
 
-use clj_value::Value;
+use clj_value::{Value, map_entry};
 
 use crate::destructure_expand::destructure;
 use crate::error::NativeError;
@@ -362,9 +362,24 @@ fn fn_over_spec(parts: &[Value]) -> Value {
 
 fn expand_with_redefs(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     let (_form, rest) = parts("clojure.core/with-redefs", args, 1)?;
-    let items = seq_data(&rest[0])?;
+    let items = wrd_items(&rest[0])?;
     let map = zip_vars(&items);
     Ok(qcall("with-redefs-fn", vec![map, fn_body(&rest[1..])]))
+}
+
+/// `with-redefs` bindings items (fence 4b E1e/E1q): `seq_data`
+/// everywhere except maps, whose entries stay `MapEntry` values
+/// (like the JVM's `seq`) so a paired entry fails the `var`
+/// `Symbol` cast as `MapEntry`, not `PersistentVector` — while a
+/// lone entry odd-drops in `zip_vars` (no error).
+fn wrd_items(bindings: &Value) -> Result<Vec<Value>, NativeError> {
+    if let Value::Map(m) = bindings {
+        return Ok(m
+            .iter()
+            .map(|(k, v)| map_entry(k.clone(), v.clone()))
+            .collect());
+    }
+    seq_data(bindings)
 }
 
 fn zip_vars(items: &[Value]) -> Value {
