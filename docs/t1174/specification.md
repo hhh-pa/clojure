@@ -28,22 +28,6 @@ G4. CI parity with `../arcanist`: fmt+clippy, tests on Linux/macOS/
     tag releases with attached archives.
 G5. The JVM build (`pom.xml`, Maven workflows) keeps working untouched.
 
-### 1.2 Non-goals (explicit)
-
-N1. JVM interop: dotted method/field access, `new`, `definterface`,
-    `genclass`, `proxy`, `reify` host members, `clojure.java.*`,
-    `clojure.reflect`, `import` of JVM classes.
-N2. Full `core.clj` compatibility. `core.clj` is JVM-coupled; the port
-    ships a Rust-backed core subset with a published coverage list.
-N3. Big-number tower in this task: ratios, BigInt, BigDecimal are a
-    follow-up. Implemented numbers: 64-bit integers (checked,
-    overflow is an error, not silent wrap) and IEEE-754 doubles.
-N4. STM (`ref`/`dosync`/validators on refs) in this task; `atom`
-    (with validators), `delay`, `future`, `agent` are in.
-N5. LLVM JIT, `clojure.spec`, `core.async`, tools.deps, data readers
-    needing I/O (`#=` eval reader), and binary compatibility with
-    JVM-compiled artifacts.
-
 ### 1.3 BDD scenarios
 
 ```gherkin

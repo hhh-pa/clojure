@@ -83,22 +83,27 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
 
   test:
-    name: test (${{ matrix.os }}, shard ${{ matrix.shard }}/8)
-    runs-on: ${{ matrix.os }}
+    name: test (windows-latest, shard ${{ matrix.shard }}/8)
+    runs-on: windows-latest
     permissions:
       contents: read # checkout
       actions: write # cargo cache
     # No macOS leg: ordinary runs skip it (host capacity starves
     # macos-latest for hours); macOS tests run on v* tags via
     # rust-release.yml instead.
+    # No Ubuntu legs either: gates-shard below runs the identical
+    # workspace suite on Ubuntu with --run-ignored all (a strict
+    # superset of this job's ignored-skipped set), so Ubuntu legs
+    # here were pure duplication (~69 leg-min per run). Windows legs
+    # stay: they are the only Windows signal.
     # Sharded 8 ways via nextest hash partitions (4-way legs reached
-    # ~25min on Windows); nextest already runs the same suite in
-    # quality gates, so the runner change is proven safe. Ignored
+    # ~25min on Windows; 16-way trialed and rejected: +29% total
+    # leg-min, worse stragglers); nextest already runs the same suite
+    # in quality gates, so the runner change is proven safe. Ignored
     # tests stay skipped here (cargo-test parity); gates run them.
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
         shard: [1, 2, 3, 4, 5, 6, 7, 8]
     defaults:
       run:
@@ -113,7 +118,6 @@ jobs:
       # S8 link tests shell to `link` on Windows: put the MSVC
       # toolchain (link.exe + INCLUDE/LIB) on PATH first.
       - uses: ilammy/msvc-dev-cmd@v1
-        if: runner.os == 'Windows'
       # Cargo registry + target/ cache: warm runs skip crate downloads
       # and reuse prior compilation. `save-if` forces a save on branch
       # runs too, so the second push already hits.
