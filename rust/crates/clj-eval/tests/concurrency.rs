@@ -2978,6 +2978,10 @@ fn locking_object_kinds() {
         run_last(&mut eval, "(do (deftype LkT [x]) (locking (LkT. 1) :ok))"),
         ":ok"
     );
+    // Boxed lockees (`find`/`first` entries): the exit arg is a
+    // fresh clone — content keys keep enter/exit matched.
+    assert_eq!(run_last(&mut eval, "(locking (find {:a 1} :a) :ok)"), ":ok");
+    assert_eq!(run_last(&mut eval, "(locking (first {:a 1}) :ok)"), ":ok");
 }
 
 #[test]
