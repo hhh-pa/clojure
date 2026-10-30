@@ -729,6 +729,39 @@ fn require_vector_string() {
 }
 
 #[test]
+fn loaded_libs_root_is_sorted_ref() {
+    // Fence 3a (JVM core.clj): `*loaded-libs*` holds a Ref over a
+    // sorted set — deref reads through, `loaded-libs` is sorted.
+    let fx = Fixture::new("libref");
+    fx.write("zlib.clj", "(clojure.core/in-ns 'zlib)\n(def z 1)\n");
+    fx.write("alib.clj", "(clojure.core/in-ns 'alib)\n(def a 1)\n");
+    let mut eval = boot();
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(class (var-get (var clojure.core/*loaded-libs*)))"
+        ),
+        "clojure.lang.Ref"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            &fx.within("(do (require 'zlib) (require 'alib) (loaded-libs))")
+        ),
+        "#{alib zlib}"
+    );
+    assert_eq!(run_last(&mut eval, "(sorted? (loaded-libs))"), "true");
+    // Tx-local: a mark inside `dosync` reads back in-transaction.
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(dosync (commute (var-get (var clojure.core/*loaded-libs*)) conj 'txmark) (contains? (loaded-libs) 'txmark))"
+        ),
+        "true"
+    );
+}
+
+#[test]
 fn loaded_libs_long() {
     let mut eval = boot();
     assert_eq!(
@@ -736,7 +769,7 @@ fn loaded_libs_long() {
             &mut eval,
             "(binding [clojure.core/*loaded-libs* 42] (require 'user))"
         ),
-        "java.lang.ClassCastException | Cannot cast java.lang.Long to clojure.lang.IPersistentSet"
+        "java.lang.ClassCastException | class java.lang.Long cannot be cast to class java.util.concurrent.Future (java.lang.Long and java.util.concurrent.Future are in module java.base of loader 'bootstrap')"
     );
 }
 

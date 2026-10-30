@@ -596,7 +596,7 @@ fn ns_basics() {
         "#'clojure.core/list"
     );
     assert_eq!(
-        run_last(&mut eval, "(var-get (var clojure.core/*loaded-libs*))"),
+        run_last(&mut eval, "@(var-get (var clojure.core/*loaded-libs*))"),
         "#{foo}"
     );
     // Docstring and attrmap land as the ns meta.
@@ -667,7 +667,7 @@ fn ns_clauses() {
     assert_eq!(run_last(&mut eval, "(ns-name *ns*)"), "userns");
     assert_eq!(run_last(&mut eval, "f/h"), "42");
     assert_eq!(
-        run_last(&mut eval, "(var-get (var clojure.core/*loaded-libs*))"),
+        run_last(&mut eval, "@(var-get (var clojure.core/*loaded-libs*))"),
         "#{fxlib userns}"
     );
     // `:use` refers publics.

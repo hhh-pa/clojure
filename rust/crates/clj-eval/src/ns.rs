@@ -18,8 +18,8 @@ use std::sync::Arc;
 
 use clj_reader::ReaderError;
 use clj_value::{
-    Keyword, List, Map, PrintOpts, Set, Symbol, ThrowClass, Throwable, Value, Var, Vector, new_map,
-    new_set, pr_to_string, seq_vec,
+    Keyword, List, Map, PrintOpts, Ref, Set, SortSpec, Symbol, ThrowClass, Throwable, Value, Var,
+    Vector, new_map, new_set, pr_to_string, seq_vec,
 };
 
 use crate::core::cce_err;
@@ -28,6 +28,7 @@ use crate::error::{NativeError, Signal, jvm_class_of, site_of};
 use crate::eval::{Evaluator, SourceError};
 use crate::expr::NsClause;
 use crate::ext::{NsHandle, as_ns};
+use crate::stm::tx_deref;
 
 /// `clojure.lang.Symbol`, the cast target for namespace arguments.
 pub(crate) const SYMBOL_CLASS: &str = "clojure.lang.Symbol";
@@ -1057,35 +1058,36 @@ pub(crate) fn deref_core(eval: &Evaluator, name: &str) -> Value {
     }
 }
 
-/// The visible `*loaded-libs*` set.
-fn libs_set(eval: &Evaluator) -> Result<Set, NativeError> {
-    match deref_core(eval, "*loaded-libs*") {
+/// The visible `*loaded-libs*` set: the var holds a `Ref`
+/// (JVM core.clj `(ref (sorted-set))`), so read exactly like
+/// `@` — a transaction-aware deref, and `deref`'s own cast
+/// error on anything else (probe H1).
+fn libs_set(eval: &mut Evaluator) -> Result<Set, NativeError> {
+    let derefed = match deref_core(eval, "*loaded-libs*") {
+        Value::Ref(reff) => tx_deref(eval, &reff),
+        v => return Err(cce_err(&v, "java.util.concurrent.Future")),
+    };
+    match derefed {
         Value::Set(s) => Ok(s),
         v => Err(cast_err(&v, "clojure.lang.IPersistentSet")),
     }
 }
 
-/// `*loaded-libs*` assignment: the top frame when thread-bound
-/// (`load-all` scopes a blank set per load), else the root
-/// (mirrors [`set_ns_current`]).
-fn set_loaded_libs(eval: &mut Evaluator, v: Value) {
-    // (Match guard, not a let-chain: MSRV 1.85.)
-    match core_var(eval, "*loaded-libs*") {
-        Some(id) if !eval.set_binding_top(id, v.clone()) => {
-            set_root(&eval.registry, id, v);
-        }
-        _ => {}
-    }
-}
-
-/// Mark a lib loaded (conjs the visible set — the port holds the
-/// set directly, where the JVM commutes a `Ref` — and writes it
-/// back through [`set_loaded_libs`], so marks under `load-all`
-/// accumulate in its frame instead of leaking to the root).
+/// Mark a lib loaded, exactly like the JVM's `load-one`:
+/// `(dosync (commute *loaded-libs* conj lib))` (core.clj).
+/// Fully qualified, so no refers are needed (`var` is the
+/// unchecked special form — a value read of the private var
+/// would trip the cross-ns publicity check); `dosync` joins
+/// an enclosing transaction instead of nesting.
 fn mark_loaded(eval: &mut Evaluator, lib: &Symbol) -> Result<(), NativeError> {
-    let set = libs_set(eval)?;
-    set_loaded_libs(eval, Value::Set(set.insert(Value::Symbol(lib.clone()))));
-    Ok(())
+    let source = eval.source().to_owned();
+    let form = format!(
+        "(clojure.core/dosync (clojure.core/commute (clojure.core/var-get (var clojure.core/*loaded-libs*)) clojure.core/conj '{lib}))"
+    );
+    match eval.eval_source(&form) {
+        Ok(_) => Ok(()),
+        Err(e) => Err(source_to_native(eval, &source, e)),
+    }
 }
 
 /// `(name x)`: strings pass through, symbols and keywords give their
@@ -1278,25 +1280,28 @@ pub(crate) fn load_one(
     Ok(())
 }
 
-/// `load-all`: `load-one` against a blank `*loaded-libs*`, unioning
-/// whatever the load pulled in (core.clj `load-all` — the port's
-/// embedded set is flat, so this behaves as `:reload`).
+/// `load-all`: `load-one` against a blank `*loaded-libs*` ref,
+/// unioning whatever the load pulled in (core.clj `load-all` —
+/// the port's embedded set is flat, so this behaves as
+/// `:reload`). The union re-marks member by member: marks are
+/// monotonic set additions, so one commute per member commits
+/// the same set as the JVM's single union commute.
 fn load_all(eval: &mut Evaluator, lib: &Symbol, need_ns: bool) -> Result<(), NativeError> {
-    let save = libs_set(eval)?;
-    // `libs_set` just read this var as a set, so it exists.
     let id = core_var(eval, "*loaded-libs*").expect("*loaded-libs* is bound during load");
-    let depth = eval.push_binding(core_var_handle(id, "*loaded-libs*"), Value::Set(new_set()));
+    let blank = Value::Ref(Ref::new(Value::Set(
+        new_set().with_sort(Some(SortSpec::Natural)),
+    )));
+    let depth = eval.push_binding(core_var_handle(id, "*loaded-libs*"), blank);
     let out = load_one(eval, lib, need_ns);
     let new = libs_set(eval);
     eval.pop_bindings(depth);
     out?;
-    let mut acc = save;
     for m in new.unwrap_or(new_set()).iter() {
-        acc = acc.insert(m.clone());
+        let Value::Symbol(s) = m.clone() else {
+            unreachable!("load-all inner libs holds only marked symbols")
+        };
+        mark_loaded(eval, &s)?;
     }
-    // The union lands in the caller's frame when a load-all
-    // nests (an outer frame is still pushed), else the root.
-    set_loaded_libs(eval, Value::Set(acc));
     Ok(())
 }
 
@@ -2054,7 +2059,9 @@ fn core_vars(user_ns: Value) -> Vec<(String, Value, bool, bool)> {
         ),
         (
             "*loaded-libs*".to_owned(),
-            Value::Set(new_set()),
+            Value::Ref(Ref::new(Value::Set(
+                new_set().with_sort(Some(SortSpec::Natural)),
+            ))),
             true,
             true,
         ),
