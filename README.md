@@ -302,6 +302,7 @@ epl-v10.html            license text
 
 ## Further reading
 
+- [Roadmap](docs/roadmap/specification.md) — what needs to be done (goals, queue, backlog).
 - [Design spec](docs/t1174/specification.md) — goals, non-goals,
   CLI/language contracts, slice plan (S1–S9, all landed).
 - [Core coverage](rust/core-coverage.md) — every var's
