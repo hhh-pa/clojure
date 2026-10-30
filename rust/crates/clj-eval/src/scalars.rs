@@ -99,9 +99,9 @@ mod tests {
 
     use crate::error::Signal;
 
-    /// Call a `clojure.core` var root with constructed values (the
-    /// S6 boundary keeps instants out of Clojure source, so the
-    /// `Date` extension is exercised here).
+    /// Call a `clojure.core` var root with constructed values
+    /// (direct var calls complement the `#inst`-literal replay in
+    /// `scalarkinds.rs`).
     fn call_var(
         eval: &mut crate::eval::Evaluator,
         name: &str,

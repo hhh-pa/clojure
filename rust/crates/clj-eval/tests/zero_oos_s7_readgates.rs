@@ -1233,13 +1233,13 @@ fn load_reader_runs_data_readers() {
         ),
         "[:lr 41]"
     );
-    // `#inst` validates through the load.
+    // `#inst` validates and resolves through the load (#103).
     assert_eq!(
         run_last(
             &mut eval,
             "(with-in-str \"#inst \\\"2020-01-01\\\"\" (load-reader *in*))"
         ),
-        "#inst \"2020-01-01\""
+        "#inst \"2020-01-01T00:00:00.000-00:00\""
     );
     // A throwing reader fn fails the load raw (resolve arm —
     // like `load`, no `CompilerException` wrap).
