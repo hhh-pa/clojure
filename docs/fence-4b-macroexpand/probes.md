@@ -70,28 +70,26 @@ matches (restored `non_map_or`, restored `:or []` eval pin). The
   `IllegalMonitorStateException` with an empty message
   (`monitor-exit-unheld` shows a nil message).
 
-## B3 pushback: nil-held `monitor-exit` is IMS, not NPE
+## B3: nil `monitor-exit` is always NPE (JVMS null-first)
 
-The monitor nil matrix (`kept-fixes.out`, byte-identical under
-`-Xint`; pure-bytecode cross-check in
-`probes/monitor-matrix-jvms.txt`, unanimous across Oracle 27 /
-Temurin 21 × default / `-Xint`; full repro — generator, driver,
-javap listings, run script — in `probes/jvm-matrix/`):
+The port implements the JVMS rule: a nil lockee on the exit path is
+the form-naming NPE whether or not monitors are held (JVMS SE 21
+orders the MONITOREXIT null check before the ownership / IMS rule;
+`MonitorExitExpr.emit` is a bare MONITOREXIT, so there is no
+compiler-level null check to model). Unmatched non-nil exits stay
+IMS with an empty message.
 
-- `monitor-exit-nil-held`, `-nillocal-held`, `-callnil-held` → IMS
-  (nil message), for literal, local, and call nils alike — including
-  the review's exact `(do (monitor-enter x) (monitor-exit nil))`.
-- `monitor-exit-nil-empty`, `-nillocal-empty` → NPE naming the form
-  (`"null"`, `"n"`, `IFn.invoke(Object)` templates verbatim).
-- `monitor-enter-nil` → NPE (enter null-checks first).
-
-Observed HotSpot behavior is state-dependent on the exit path on
-every JVM tested, so the port keeps the state-dependent rule. The
-template-interpreter source does show a leading `null_check`, which
-makes the held→IMS rows surprising — but behavior is the project's
-oracle standard, and no live run on any available JVM produces the
-review's NPE-always; the pure-bytecode matrix rules out a
-Clojure-compiler artifact.
+Observed-variance record (preserved, not followed): Oracle 27+35 /
+Temurin 21.0.13 produce a held→IMS / empty→NPE split instead, at
+both the Clojure level (`kept-fixes.out` rows below, byte-identical
+under `-Xint`, re-verified 2026-10-30 on stock 1.13.0-alpha9) and
+the pure-bytecode level (`probes/monitor-matrix-jvms.txt`,
+unanimous across both vendors × default / `-Xint`; full repro —
+generator, driver, javap listings, run script — in
+`probes/jvm-matrix/`, re-run 2026-10-30 with identical output).
+The mechanism is unexplained (the template-interpreter source
+shows a leading `null_check`, which predicts NPE-always), so the
+port follows the spec text and keeps the repro for re-testing.
 
 ## Pinned as-is
 

@@ -312,20 +312,20 @@ fn native_monitor_enter(eval: &mut Evaluator, args: &[Value]) -> Result<Value, N
 fn native_monitor_exit(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     let _ = eval;
     check_arity("clojure.core/fx4-monitor-exit", args, &[1, 2])?;
-    // Fence 4b E1k/E1t/E1u (rule order matters): a nil lockee with
-    // an empty stack is the form-naming NPE; a nil lockee over held
-    // monitors is a mismatch (`nil` never matches) — live-oracle
-    // matrix (kept-fixes.out, all JIT modes; pure-bytecode matrix
-    // in monitor-matrix-jvms.txt), against review B3's JVMS reading.
+    // Fence 4b E1k/E1t/E1u (review B3: JVMS null-first): a nil
+    // lockee is ALWAYS the form-naming NPE, held or not — JVMS SE
+    // 21 orders the MONITOREXIT null check before the ownership
+    // (IMS) rule, and the port implements the spec. Variance note:
+    // Oracle 27+35 / Temurin 21.0.13 observe held→IMS here (empty
+    // message), at both the Clojure level (kept-fixes.out) and the
+    // pure-bytecode level (probes/jvm-matrix/, re-verified
+    // 2026-10-30); the mechanism is unexplained, the repro is
+    // committed, and the port deliberately does not follow it.
     // Otherwise the lockee's 3b key must be held (content keys
     // for Box/symbol kinds, so clone exits match their enter;
     // minted ids elsewhere, which behave identity-like; the most
     // recent hold releases, so reentrant nests unwind in order).
     if matches!(args[0], Value::Nil) {
-        let held = MONITORS.with(|stack| !stack.borrow().is_empty());
-        if held {
-            return Err(ims());
-        }
         return Err(npe(&nil_lockee_message("exit", args.get(1))));
     }
     let key = monitor_key(&args[0]);

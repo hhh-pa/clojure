@@ -985,10 +985,10 @@ fn host_natives_and_rewrites() {
 
 #[test]
 fn monitor_exit_matrix() {
-    // Fence 4b E1k/E1t/E1u: unmatched `monitor-exit` is the JVM's
+    // Fence 4b E1k/E1t/E1u (review B3: JVMS null-first):
+    // unmatched `monitor-exit` is the JVM's
     // `IllegalMonitorStateException` with an empty message; a nil
-    // lockee over an empty stack is the form-naming NPE, over held
-    // monitors a mismatch (live-oracle matrix, against review B3).
+    // lockee is always the form-naming NPE, held or not.
     let mut eval = boot();
     assert_eq!(
         uncaught(&mut eval, "(let [x [1]] (monitor-exit x))"),
@@ -998,9 +998,9 @@ fn monitor_exit_matrix() {
         run_last(&mut eval, "(do (monitor-enter :a) (monitor-exit :a) 1)"),
         "1"
     );
-    // Mismatched and nil-held exits leave their holds behind, so
-    // each binds its lockee for a cleanup exit (the monitor stack
-    // is thread-local — a leak would pollute later tests).
+    // Mismatched and nil exits throw without releasing, so each
+    // binds its lockee for a cleanup exit (the monitor stack is
+    // thread-local — a leak would pollute later tests).
     run_last(&mut eval, "(def w4b-mm :a)");
     assert_eq!(
         uncaught(&mut eval, "(do (monitor-enter w4b-mm) (monitor-exit :b))"),
@@ -1022,7 +1022,7 @@ fn monitor_exit_matrix() {
     run_last(&mut eval, "(def w4b-mh [1])");
     assert_eq!(
         uncaught(&mut eval, "(do (monitor-enter w4b-mh) (monitor-exit nil))"),
-        "java.lang.IllegalMonitorStateException | "
+        "java.lang.NullPointerException | Cannot exit synchronized block because \"null\" is null"
     );
     assert_eq!(run_last(&mut eval, "(monitor-exit w4b-mh)"), "nil");
     // Reentrant nests unwind in order (identity-held).

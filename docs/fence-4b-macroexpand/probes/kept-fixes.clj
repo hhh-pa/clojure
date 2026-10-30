@@ -36,7 +36,7 @@
 (probe "locking-nil:"
   #(eval '(locking nil 1)))
 
-(println "--- monitor nil matrix (B3 pushback: held->IMS, empty->NPE; all JIT modes) ---")
+(println "--- monitor nil matrix (B3: observed split held->IMS / empty->NPE on Oracle 27+35, default + -Xint; port implements JVMS NPE-always) ---")
 
 (probe "monitor-exit-nil-held:"
   #((fn [] (let [x (Object.)] (do (monitor-enter x) (monitor-exit nil))))))
