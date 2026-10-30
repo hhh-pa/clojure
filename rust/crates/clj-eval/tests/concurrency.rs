@@ -3644,6 +3644,11 @@ fn await_clear_actions_restart_hangs() {
         "(def hcf (future (deliver hcs :started) (await hca) :waited))",
     );
     assert_eq!(run_last(&mut eval, "(deref hcs 8000 :timeout)"), ":started");
+    // CI-1 margin: the rendezvous proves liveness, not parking —
+    // hold `:go` until the future has parked in `await` (the 500 ms
+    // matches await_for_failure_waits_out_deadline's blessed
+    // margin and dwarfs thread-scheduling jitter).
+    std::thread::sleep(std::time::Duration::from_millis(500));
     run(&mut eval, "(deliver hcg :go)");
     wait_failed(&mut eval, "hca");
     assert_eq!(
