@@ -31,8 +31,8 @@
 //! `docs/t1174/concurrency-contract.md`, `docs/t1174/s6-pins.md` P5.
 //!
 //! S6D adds `set-error-handler!`/`set-error-mode!` and the `locking`
-//! monitor (one global reentrant lock; oracles: `/tmp/s6d-probe*.clj`;
-//! pins P6).
+//! monitor (per-object striped reentrant locks since fence 3b —
+//! one global lock before; oracles: `/tmp/s6d-probe*.clj`; pins P6).
 //!
 //! S10 adds volatile cells (`volatile!`, `volatile?`, `vreset!` —
 //! `vswap!` is a builtin macro in `builtin_expand.rs`), taps

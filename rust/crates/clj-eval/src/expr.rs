@@ -274,8 +274,8 @@ pub enum Expr {
     },
     /// `(locking lockee body…)` (S6D analyzer form — the JVM's
     /// `locking` is a `core.clj` macro over `monitor-enter/-exit`,
-    /// but the port has no per-object monitors, so the analyzer
-    /// takes the single global one directly).
+    /// and the port's analyzer takes the lockee's per-object
+    /// monitor directly (fence 3b stripes)).
     Locking {
         lockee: Box<Expr>,
         body: Vec<Expr>,
