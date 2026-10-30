@@ -13,17 +13,21 @@
 //! queue, FIFO order. Jobs are opaque closures, so the pool needs no
 //! evaluator types (agent actions arrive wrapped by the caller).
 //!
-//! Lifecycle is port-fixed: workers run until process exit (there is
-//! no upstream shutdown surface outside interop, so none is mirrored
-//! — `shutdown-agents` touches the two agent pools only, like the
-//! JVM). Equality is shared-pool identity; printing follows the cell
-//! `#object[…]` convention under the classic delegated-service class
-//! (newer JDKs report an `AutoShutdown` variant instead —
-//! port-fixed, like the version-dependent cast texts).
+//! Lifecycle (gap-96): `shutdown-agents` shuts the installed pool
+//! fields (customs included, like the JVM's `Agent/shutdown` over
+//! the current fields) — queued jobs still run, later submits
+//! reject. A `send-via`-only executor is never installed, so it
+//! never shuts down (fence 3c). Workers detach at spawn and nothing
+//! ever joins them (daemon-like at process exit). Equality is
+//! shared-pool identity; printing follows the cell `#object[…]`
+//! convention under the classic delegated-service class (newer JDKs
+//! report an `AutoShutdown` variant instead — port-fixed, like the
+//! version-dependent cast texts).
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Sender};
+use std::sync::{Mutex, MutexGuard};
 
 /// Fresh executor identities (print-only; equality is shared-pool).
 static EXECUTOR_ID: AtomicU64 = AtomicU64::new(1);
@@ -37,11 +41,19 @@ static EXECUTOR_POOL: AtomicU64 = AtomicU64::new(1);
 pub type ExecutorJob = Box<dyn FnOnce() + Send + 'static>;
 
 /// The shared worker behind an [`Executor`]: the job queue's sender
-/// (clones share the pool; the worker exits only when every sender
-/// drops, i.e. never before process exit in practice).
+/// (clones share the pool; `None` once shut down — the worker drains
+/// the queued jobs, then exits).
 #[derive(Debug)]
 struct ExecutorPool {
-    tx: Sender<ExecutorJob>,
+    tx: Mutex<Option<Sender<ExecutorJob>>>,
+}
+
+impl ExecutorPool {
+    /// Lock the sender slot (short critical sections only; the send
+    /// itself never blocks — the queue is unbounded).
+    fn lock(&self) -> MutexGuard<'_, Option<Sender<ExecutorJob>>> {
+        self.tx.lock().unwrap_or_else(|e| e.into_inner())
+    }
 }
 
 /// A first-class executor value: an identity plus the shared worker.
@@ -84,7 +96,9 @@ impl Executor {
         spawned.map(|_| Self {
             id,
             pool_no,
-            pool: Arc::new(ExecutorPool { tx }),
+            pool: Arc::new(ExecutorPool {
+                tx: Mutex::new(Some(tx)),
+            }),
         })
     }
 
@@ -107,9 +121,28 @@ impl Executor {
     }
 
     /// Queue `job` on the worker (never blocks — the queue is
-    /// unbounded; a dead worker drops it, like a rejection).
-    pub fn submit(&self, job: ExecutorJob) {
-        let _ = self.pool.tx.send(job);
+    /// unbounded). `false` once shut down — the job never runs (like
+    /// the JVM's `execute` rejection); a dead worker drops it all the
+    /// same (unreachable — the worker outlives the sender).
+    pub fn submit(&self, job: ExecutorJob) -> bool {
+        match self.pool.lock().as_ref() {
+            Some(tx) => tx.send(job).is_ok(),
+            None => false,
+        }
+    }
+
+    /// Shut the pool down (idempotent): queued jobs still run, later
+    /// submits reject, and the worker exits once the queue drains —
+    /// like the JVM's `ExecutorService/shutdown`, which
+    /// `shutdown-agents` calls over the installed fields.
+    pub fn shutdown(&self) {
+        self.pool.lock().take();
+    }
+
+    /// Whether the pool is shut down.
+    #[must_use]
+    pub fn is_shutdown(&self) -> bool {
+        self.pool.lock().is_none()
     }
 
     /// The JVM class name (the classic delegated service — newer
@@ -131,10 +164,10 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::channel();
         for i in 0..3 {
             let tx = tx.clone();
-            ex.submit(Box::new(move || {
+            assert!(ex.submit(Box::new(move || {
                 let name = std::thread::current().name().unwrap_or("?").to_owned();
                 tx.send((i, name)).unwrap();
-            }));
+            })));
         }
         drop(tx);
         let got: Vec<(i32, String)> = rx.into_iter().collect();
@@ -179,5 +212,33 @@ mod tests {
         let (tx, _rx) = std::sync::mpsc::channel();
         let err = std::io::Error::other("boom");
         assert!(super::Executor::from_spawned(1, 1, tx, Err(err)).is_err());
+    }
+
+    /// Shutdown drains the queued jobs, then rejects (gap-96).
+    #[test]
+    fn shutdown_drains_then_rejects() {
+        let ex = Executor::new().unwrap();
+        assert!(!ex.is_shutdown());
+        let (tx, rx) = std::sync::mpsc::channel();
+        assert!(ex.submit(Box::new(move || tx.send(7).unwrap())));
+        ex.shutdown();
+        assert!(ex.is_shutdown());
+        // The queued job still runs (the worker drains before
+        // exiting); later submits reject.
+        assert_eq!(rx.recv().unwrap(), 7);
+        assert!(!ex.submit(Box::new(|| {})));
+        // Idempotent (like the JVM's `shutdown`).
+        ex.shutdown();
+        assert!(ex.is_shutdown());
+    }
+
+    /// Shutdown is shared-pool state: clones shut together.
+    #[test]
+    fn shutdown_is_shared_pool_state() {
+        let a = Executor::new().unwrap();
+        let b = a.clone();
+        a.shutdown();
+        assert!(b.is_shutdown());
+        assert!(!b.submit(Box::new(|| {})));
     }
 }

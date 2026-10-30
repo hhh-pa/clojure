@@ -274,15 +274,22 @@ impl Evaluator {
         &self.tap_system
     }
 
-    /// Record the `send` executor (S10 accept-and-record: stored and
-    /// returned by the setter, never consulted by dispatch).
-    pub(crate) fn set_send_executor(&self, executor: Value) {
-        self.agent_system.set_send_executor(executor);
+    /// Install the `send` pool field (validating, like the JVM's
+    /// `set!` — a rejection installs nothing, gap-96).
+    pub(crate) fn set_send_executor(&self, executor: Value) -> Result<(), NativeError> {
+        self.agent_system.set_send_executor(executor)
     }
 
-    /// Record the `send-off` executor (same contract).
-    pub(crate) fn set_send_off_executor(&self, executor: Value) {
-        self.agent_system.set_send_off_executor(executor);
+    /// Install the `send-off` pool field (same contract).
+    pub(crate) fn set_send_off_executor(&self, executor: Value) -> Result<(), NativeError> {
+        self.agent_system.set_send_off_executor(executor)
+    }
+
+    /// Where a `send`/`send-off` action executes: the installed
+    /// field when set (read per send), else the fixed pools
+    /// (gap-96 — the JVM's volatile pool fields).
+    pub(crate) fn agent_target_for(&self, pool: clj_value::AgentPool) -> clj_value::ExecTarget {
+        self.agent_system.target_for(pool)
     }
 
     /// This lineage's agent pools, creating them on first use
@@ -295,7 +302,7 @@ impl Evaluator {
     }
 
     /// This lineage's agent pools for a custom-executor dispatch:
-    /// shutdown-blind (custom executors never shut down) —
+    /// shutdown-blind (the custom target may still be live) —
     /// born-shut when created post-shutdown.
     pub(crate) fn agent_pools_for_custom(
         &self,
@@ -306,9 +313,11 @@ impl Evaluator {
     /// Stop the agent pools (running actions complete; queued
     /// ones drop; new sends fail). Returns at once, like the
     /// JVM — draining happens on the workers; the exit join (see
-    /// `join_drainers`) waits them out (T1192 FX1).
-    pub(crate) fn shutdown_agents(&self) {
-        self.agent_system.shutdown();
+    /// `join_drainers`) waits them out (T1192 FX1). Shuts the
+    /// current pool fields, customs included — a nil field throws
+    /// its NPE instead (gap-96).
+    pub(crate) fn shutdown_agents(&self) -> Result<(), NativeError> {
+        self.agent_system.shutdown()
     }
 
     /// Latch the pools shut (idempotent — like `clojure.main`'s
@@ -318,7 +327,7 @@ impl Evaluator {
     /// alive past main. The `run`, `eval`, and REPL drivers call
     /// this before exiting (T1192 FX1).
     pub fn join_drainers(&self) {
-        self.agent_system.shutdown();
+        self.agent_system.shutdown_for_exit();
         self.agent_system.join_parked();
         let handles = std::mem::take(
             &mut *self

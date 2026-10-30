@@ -817,8 +817,8 @@ No slice on this branch: hard-never reasons stand alone, design-blocked rows nam
 | `selector` | implemented | core.clj macro over private selector-impl (rides the destructuring outlets); tests/zero_oos_s4b_macros.rs s4b_selector_rows |
 | `seq-to-map-for-destructuring` | implemented | destructure_expand.rs (assoc pairs; 1-elem first as-is; odd 3+ complex-path tail conj); tests/zero_oos_s4b_macros.rs s4b_seq_to_map_rows |
 | `seque` | implemented | tests/collmisc.rs seque_rows (feeder+queue; int-cast capacities) |
-| `set-agent-send-executor!` | implemented | cellstaps.rs exec_record_send (accept-and-record: any value stored + returned; sends ignore it — fenced, tracked by #96) |
-| `set-agent-send-off-executor!` | implemented | cellstaps.rs exec_record_send_off (accept-and-record mirror of the send slot; sends ignore it — fenced, tracked by #96) |
+| `set-agent-send-executor!` | implemented | cellstaps.rs exec_install_send (installs: executor/nil ok, else ExecutorService CCE; sends read the field per send — gap-96, docs/gap-96/) |
+| `set-agent-send-off-executor!` | implemented | cellstaps.rs exec_install_send_off (install mirror of the send slot; send-off/future-call read it per call — gap-96) |
 | `short-array` | implemented | S15 arrays (#59): arrays.rs ctor_array (Numbers rules); tests/arrays.rs ctors_zero, ctors_seq, ctors_init, ctors_sizes (probes a-short-*, b-short-*, e-short-*) |
 | `shorts` | implemented | S15 arrays (#59): arrays.rs cast_array (exact [S checkcast); tests/arrays.rs casts_bytesq (probes d-shorts-*) |
 | `stream-into!` | implemented | S17 into_xform editable dispatch over stream pulls; jdkio.rs stream_into_rows (S17, #61) |

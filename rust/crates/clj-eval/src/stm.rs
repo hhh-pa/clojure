@@ -1404,7 +1404,7 @@ mod tests {
         // the read-only fast path aborts with the agent error (§1f —
         // the outbox dispatches only on success).
         let mut eval = Evaluator::new("test");
-        eval.shutdown_agents();
+        eval.shutdown_agents().expect("shutdown latches");
         let mut tx = Transaction::new(u64::MAX);
         lock_readers().push(u64::MAX);
         let (agent, item) = failed_outbox();
@@ -1423,7 +1423,7 @@ mod tests {
         // install lands, then dispatch fails and the commit reports
         // the agent error.
         let mut eval = Evaluator::new("test");
-        eval.shutdown_agents();
+        eval.shutdown_agents().expect("shutdown latches");
         let reff = Ref::new(Value::Int(0));
         let mut tx = Transaction::new(u64::MAX);
         lock_readers().push(u64::MAX);

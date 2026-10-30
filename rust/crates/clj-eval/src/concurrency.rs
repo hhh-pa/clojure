@@ -41,8 +41,10 @@
 //! (`add-tap`/`remove-tap`/`tap>` over one daemon dispatcher —
 //! `tap->` is a `core.clj` one-liner), and the executor vars
 //! (`set-agent-send-executor!`/`set-agent-send-off-executor!`,
-//! accept-and-record). Oracle:
+//! installed since gap-96 — each `send`/`send-off`/`future-call`
+//! reads its slot, like the JVM's volatile pool fields). Oracle:
 //! `docs/zero-oos-s10-cells/probes/`; rules: the S10 specification.
+//! Gap-96 oracles: `docs/gap-96/`.
 //!
 //! Publish discipline: validators run BEFORE publishing (vetoes and
 //! `f` failures leave the state untouched and fire no watches);
@@ -680,15 +682,26 @@ fn spawn_failed() -> NativeError {
 }
 
 /// `future-call`: convey the calling thread's bindings onto a forked
-/// evaluator and spawn the zero-arg fn on its own thread. The fn is
+/// evaluator and run the zero-arg fn — on the installed solo
+/// executor when set (read per call, like the JVM's `.submit`
+/// over the solo field), else on its own thread. The fn is
 /// never validated eagerly (like the JVM's `binding-conveyor-fn`
 /// wrap: a non-function fails inside the body, surfacing as the
 /// future's cached failure).
 fn native_future_call(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/future-call", args, &[1])?;
-    // Post-shutdown submits reject like the JVM's pool `execute`
-    // (T1192 FX1); the message is port-fixed — the JVM's embeds
-    // pool identity.
+    match eval.agent_target_for(AgentPool::SendOff) {
+        ExecTarget::Custom(ex) => future_via_executor(eval, &args[0], &ex),
+        ExecTarget::Nil => Err(npe(FUTURE_SOLO_NPE)),
+        ExecTarget::Pool => future_on_thread(eval, &args[0]),
+    }
+}
+
+/// `future-call` over the unset solo field: one thread per future
+/// (the unbounded default pool). Post-shutdown submits reject
+/// like the JVM's pool `execute` (T1192 FX1); the message is
+/// port-fixed — the JVM's embeds pool identity.
+fn future_on_thread(eval: &mut Evaluator, f: &Value) -> Result<Value, NativeError> {
     if eval.agent_system_shutdown() {
         return Err(NativeError::new(
             ThrowClass::RejectedExecutionException,
@@ -698,7 +711,7 @@ fn native_future_call(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nat
     let future = Future::new();
     let cell = future.clone();
     let child = eval.fork_for_thread(eval.clone_bindings());
-    let f = args[0].clone();
+    let f = f.clone();
     let name = format!("clj-future-{}", future.id());
     let handle = std::thread::Builder::new()
         .name(name)
@@ -706,6 +719,29 @@ fn native_future_call(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nat
         .map_err(|_| spawn_failed())?;
     eval.push_future_thread(handle);
     Ok(Value::Future(future))
+}
+
+/// `future-call` onto the installed solo executor (gap-96): the
+/// body queues on the custom pool (probed `r-future`,
+/// `s-fresh-future`); a shut pool rejects with the port-fixed
+/// `RejectedExecutionException` (probed `s-post-future`).
+fn future_via_executor(
+    eval: &mut Evaluator,
+    f: &Value,
+    ex: &Executor,
+) -> Result<Value, NativeError> {
+    let future = Future::new();
+    let cell = future.clone();
+    let child = eval.fork_for_thread(eval.clone_bindings());
+    let f = f.clone();
+    if ex.submit(Box::new(move || run_future_body(child, f, cell))) {
+        Ok(Value::Future(future))
+    } else {
+        Err(NativeError::new(
+            ThrowClass::RejectedExecutionException,
+            "future rejected after shutdown".to_owned(),
+        ))
+    }
 }
 
 /// A future body's whole thread: call the zero-arg fn (bindings
@@ -820,12 +856,27 @@ fn native_force(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErr
     }
 }
 
+/// One installed pool field (gap-96): the JVM's volatile
+/// `pooledExecutor`/`soloExecutor` statics — `send`, `send-off`,
+/// and `future-call` read their field on every call.
+#[derive(Clone, Debug)]
+pub enum PoolField {
+    /// Never installed: dispatch uses the fixed pools.
+    Unset,
+    /// Nil installed: the execute attempt NPEs and the head wedges
+    /// (probed `n-handler-*` — exactly the `send-via` nil shape).
+    Nil,
+    /// A custom executor: dispatch submits onto it (probed `r-*`).
+    Custom(Executor),
+}
+
 /// The lineage's agent system: lazily built pools plus the
 /// shutdown latch (shared by every forked evaluator, like the
 /// future-thread list). Sends create the pools on first use;
-/// `shutdown-agents` latches shutdown (later sends fail) and
-/// parks the worker handles for the exit join — the call itself
-/// never blocks (T1192 FX1).
+/// `shutdown-agents` shuts the current pool fields (fixed pools
+/// plus installed customs, like the JVM) and parks the worker
+/// handles for the exit join — the call itself never blocks
+/// (T1192 FX1).
 pub struct AgentSystem {
     inner: Mutex<AgentSystemInner>,
 }
@@ -834,12 +885,10 @@ struct AgentSystemInner {
     pools: Option<Arc<AgentPools>>,
     shutdown: bool,
     parked: Vec<std::thread::JoinHandle<()>>,
-    /// The recorded `send` executor (S10 accept-and-record: stored
-    /// and returned, never consulted — dispatch always uses the
-    /// fixed pools).
-    send_executor: Option<Value>,
-    /// The recorded `send-off` executor (same contract).
-    send_off_executor: Option<Value>,
+    /// The installed `send` pool field.
+    send_executor: PoolField,
+    /// The installed `send-off` pool field.
+    send_off_executor: PoolField,
 }
 
 impl AgentSystem {
@@ -850,23 +899,37 @@ impl AgentSystem {
                 pools: None,
                 shutdown: false,
                 parked: Vec::new(),
-                send_executor: None,
-                send_off_executor: None,
+                send_executor: PoolField::Unset,
+                send_off_executor: PoolField::Unset,
             }),
         }
     }
 
-    /// Record the `send` executor (any value, including nil —
-    /// never validated, never consulted).
-    pub fn set_send_executor(&self, executor: Value) {
+    /// Check one installed value: executors install, nil installs
+    /// (the sends then NPE-wedge), anything else fails the
+    /// `ExecutorService` checkcast — the JVM's `set!` over the
+    /// typed field (probed `e-non-exec`, `n-cce-*`).
+    fn check_field(executor: &Value) -> Result<PoolField, NativeError> {
+        match executor {
+            Value::Executor(ex) => Ok(PoolField::Custom(ex.clone())),
+            Value::Nil => Ok(PoolField::Nil),
+            other => Err(cce_err(other, "java.util.concurrent.ExecutorService")),
+        }
+    }
+
+    /// Install the `send` pool field (validating, like the JVM's
+    /// `set!` — a rejection installs nothing).
+    pub fn set_send_executor(&self, executor: Value) -> Result<(), NativeError> {
+        let field = Self::check_field(&executor)?;
         self.inner
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .send_executor = Some(executor);
+            .send_executor = field;
+        Ok(())
     }
 
-    /// The recorded `send` executor, if set.
-    pub fn send_executor(&self) -> Option<Value> {
+    /// The installed `send` pool field.
+    pub fn send_executor(&self) -> PoolField {
         self.inner
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -874,22 +937,39 @@ impl AgentSystem {
             .clone()
     }
 
-    /// Record the `send-off` executor (any value, including nil —
-    /// never validated, never consulted).
-    pub fn set_send_off_executor(&self, executor: Value) {
+    /// Install the `send-off` pool field (same contract).
+    pub fn set_send_off_executor(&self, executor: Value) -> Result<(), NativeError> {
+        let field = Self::check_field(&executor)?;
         self.inner
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .send_off_executor = Some(executor);
+            .send_off_executor = field;
+        Ok(())
     }
 
-    /// The recorded `send-off` executor, if set.
-    pub fn send_off_executor(&self) -> Option<Value> {
+    /// The installed `send-off` pool field.
+    pub fn send_off_executor(&self) -> PoolField {
         self.inner
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .send_off_executor
             .clone()
+    }
+
+    /// Where a `send`/`send-off` action executes: the installed
+    /// field when set (read per send, like the JVM), else the
+    /// fixed pools. Each action remembers its own target, like
+    /// the JVM's per-`Action` executor.
+    pub(crate) fn target_for(&self, pool: AgentPool) -> ExecTarget {
+        let field = match pool {
+            AgentPool::Send => self.send_executor(),
+            AgentPool::SendOff => self.send_off_executor(),
+        };
+        match field {
+            PoolField::Unset => ExecTarget::Pool,
+            PoolField::Nil => ExecTarget::Nil,
+            PoolField::Custom(ex) => ExecTarget::Custom(ex),
+        }
     }
 
     /// Whether `shutdown-agents` has latched (post-shutdown sends
@@ -922,8 +1002,9 @@ impl AgentSystem {
     }
 
     /// The pools for a custom-executor dispatch: shutdown-blind
-    /// (custom executors never shut down — `shutdown-agents`
-    /// touches the two pools only, like the JVM). Pools born
+    /// (the custom target may still be live — fresh installs run
+    /// post-shutdown, and `send-via` executors are never installed
+    /// so they never shut — like the JVM). Pools born
     /// post-shutdown start shut (their workers exit at once — the
     /// queue is already dropped; only custom heads ever pump on
     /// them — pool heads still reject at the send, and handover
@@ -942,13 +1023,22 @@ impl AgentSystem {
         Ok(pools)
     }
 
-    /// Latch shutdown and park the worker handles for the exit
-    /// join (in-flight heads finish; queued-but-unstarted heads
-    /// drop like the JVM's rejected `execute`; later sends
-    /// enqueue-then-drop). Returns at once, like the JVM's
+    /// Shut one installed side (installed customs shut; unset
+    /// sides wait for the fixed pools; nil sides never reach here —
+    /// the caller throws the field NPE first, like the JVM).
+    fn shutdown_side(field: &PoolField) {
+        if let PoolField::Custom(ex) = field {
+            ex.shutdown();
+        }
+    }
+
+    /// Latch shutdown and park the fixed-pool worker handles for
+    /// the exit join (idempotent — re-latching parks nothing new).
+    /// In-flight heads finish; later fixed-pool sends
+    /// enqueue-then-drop. Returns at once, like the JVM's
     /// `shutdown` — draining happens on the workers themselves,
     /// which exit once the dropped queue runs dry (T1192 FX1).
-    pub(crate) fn shutdown(&self) {
+    fn latch_and_park(&self) {
         // Take the pools under this lock, then release it before
         // touching the pools lock (workers lock the other way
         // around on nested sends — never nest).
@@ -965,6 +1055,46 @@ impl AgentSystem {
                 .parked
                 .extend(handles);
         }
+    }
+
+    /// `shutdown-agents`: shut the current pool fields, like the
+    /// JVM's `Agent/shutdown` — the solo side first (a both-nil
+    /// shutdown throws the solo NPE, probed `z-both`), then the
+    /// send side. A nil side throws its field NPE (probed
+    /// `z-nil-*`): the solo NPE lands before anything shuts, the
+    /// pooled NPE after the solo side ran. Installed customs shut
+    /// with their side (later submits reject); a side installed
+    /// fresh afterwards is live again (probed `s-fresh-*`).
+    pub(crate) fn shutdown(&self) -> Result<(), NativeError> {
+        let (send, off) = {
+            let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            (inner.send_executor.clone(), inner.send_off_executor.clone())
+        };
+        if matches!(off, PoolField::Nil) {
+            return Err(npe(SHUTDOWN_SOLO_NPE));
+        }
+        Self::shutdown_side(&off);
+        if matches!(send, PoolField::Nil) {
+            self.latch_and_park();
+            return Err(npe(SHUTDOWN_POOLED_NPE));
+        }
+        Self::shutdown_side(&send);
+        self.latch_and_park();
+        Ok(())
+    }
+
+    /// The process-exit shutdown (infallible — nil sides skip):
+    /// every side shuts and the latch parks, so the exit join
+    /// always drains (a throwing exit latch could hang the
+    /// process on live pool workers).
+    pub(crate) fn shutdown_for_exit(&self) {
+        let (send, off) = {
+            let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            (inner.send_executor.clone(), inner.send_off_executor.clone())
+        };
+        Self::shutdown_side(&off);
+        Self::shutdown_side(&send);
+        self.latch_and_park();
     }
 
     /// Join every parked worker handle (the process-exit join —
@@ -1140,18 +1270,27 @@ fn reject_head(agent: &Agent, mut head: QueuedAction) {
 /// Dispatch a dequeued head to its own target (each action
 /// remembers its executor, like the JVM's per-`Action` `exec`).
 /// Pool heads route by pool; custom heads submit onto their
-/// executor (custom executors never shut down — `shutdown-agents`
-/// touches the two pools only, like the JVM); nil heads wedge (the
-/// JVM's NPE'd `execute`).
+/// executor (a shut one rejects after notifying the handler, like
+/// the JVM's `execute` catch); nil heads wedge (the JVM's NPE'd
+/// `execute`).
 fn dispatch_head(pools: &Arc<AgentPools>, agent: &Agent, head: QueuedAction) {
     // The target clones cheaply (executor handles are `Arc`s); the
     // head itself moves into exactly one arm.
     match head.exec.clone() {
         ExecTarget::Pool => pools_dispatch(pools, agent, head),
         ExecTarget::Custom(ex) => {
-            let pools = Arc::clone(pools);
-            let agent = agent.clone();
-            ex.submit(Box::new(move || pump_agent(&pools, &agent, head)));
+            // A shut executor rejects after notifying the handler
+            // (the JVM's `execute` catch); the pre-check keeps the
+            // head for the handler ping — a shutdown racing the
+            // submit drops the job silently instead (the same
+            // silence as `pools_dispatch`'s ignored send result).
+            if ex.is_shutdown() {
+                reject_head(agent, head);
+            } else {
+                let pools = Arc::clone(pools);
+                let agent = agent.clone();
+                ex.submit(Box::new(move || pump_agent(&pools, &agent, head)));
+            }
         }
         ExecTarget::Nil => nil_executor_wedge(agent, head),
     }
@@ -1162,6 +1301,15 @@ fn dispatch_head(pools: &Arc<AgentPools>, agent: &Agent, head: QueuedAction) {
 /// installed), and the head wedges at the queue front — the send
 /// that queued it already returned the agent.
 const NIL_EXEC_NPE: &str = "Cannot invoke \"java.util.concurrent.Executor.execute(java.lang.Runnable)\" because \"this.exec\" is null";
+
+/// `shutdown-agents` over a nil solo field (probed `z-nil-solo-*`).
+const SHUTDOWN_SOLO_NPE: &str = "Cannot invoke \"java.util.concurrent.ExecutorService.shutdown()\" because \"clojure.lang.Agent.soloExecutor\" is null";
+
+/// `shutdown-agents` over a nil send field (probed `z-nil-pooled-*`).
+const SHUTDOWN_POOLED_NPE: &str = "Cannot invoke \"java.util.concurrent.ExecutorService.shutdown()\" because \"clojure.lang.Agent.pooledExecutor\" is null";
+
+/// `future-call` over a nil solo field (probed `n-future`).
+const FUTURE_SOLO_NPE: &str = "Cannot invoke \"java.util.concurrent.ExecutorService.submit(java.util.concurrent.Callable)\" because \"clojure.lang.Agent.soloExecutor\" is null";
 
 fn nil_executor_wedge(agent: &Agent, mut head: QueuedAction) {
     let handler = agent.lock().error_handler.clone();
@@ -1725,7 +1873,8 @@ pub(crate) fn enqueue_send_item(
                     // `execute`); the queue wedges, the send returns.
                     None => reject_head(agent, head),
                 },
-                // Custom executors never shut down (like the JVM).
+                // Custom targets route shutdown-blind (a shut one
+                // rejects at submit, like the JVM).
                 ExecTarget::Custom(_) => {
                     let pools = eval.agent_pools_for_custom()?;
                     dispatch_head(&pools, agent, head);
@@ -1743,27 +1892,19 @@ pub(crate) fn enqueue_send_item(
 fn native_send(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_min_arity("clojure.core/send", args, 2)?;
     let agent = as_agent(&args[0], DISPATCH_NIL)?;
-    send_action(
-        eval,
-        AgentPool::Send,
-        ExecTarget::Pool,
-        &agent,
-        &args[1],
-        &args[2..],
-    )
+    // The send field, read per send (gap-96): the JVM's
+    // `(apply send-via pooledExecutor …)`.
+    let exec = eval.agent_target_for(AgentPool::Send);
+    send_action(eval, AgentPool::Send, exec, &agent, &args[1], &args[2..])
 }
 
 fn native_send_off(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_min_arity("clojure.core/send-off", args, 2)?;
     let agent = as_agent(&args[0], DISPATCH_NIL)?;
-    send_action(
-        eval,
-        AgentPool::SendOff,
-        ExecTarget::Pool,
-        &agent,
-        &args[1],
-        &args[2..],
-    )
+    // The send-off field, read per send (gap-96): the JVM's
+    // `(apply send-via soloExecutor …)`.
+    let exec = eval.agent_target_for(AgentPool::SendOff);
+    send_action(eval, AgentPool::SendOff, exec, &agent, &args[1], &args[2..])
 }
 
 /// `send-via`: dispatch onto the given executor (fence 3c). A
@@ -1819,9 +1960,10 @@ fn barrier_fn(eval: &mut Evaluator, tx: mpsc::Sender<()>) -> Value {
     }))
 }
 
-/// Send one barrier per agent over the `send` pool (like the JVM's
-/// `doseq`), validating each agent first — a failed agent throws
-/// before anything waits.
+/// Send one barrier per agent over `send` (like the JVM's
+/// `doseq` — barriers read the send field too, probed `r-await`),
+/// validating each agent first — a failed agent throws before
+/// anything waits.
 fn send_barriers(
     eval: &mut Evaluator,
     args: &[Value],
@@ -1831,14 +1973,8 @@ fn send_barriers(
     for arg in args {
         let agent = as_agent(arg, DISPATCH_NIL)?;
         let count_down = barrier_fn(eval, tx.clone());
-        send_action(
-            eval,
-            AgentPool::Send,
-            ExecTarget::Pool,
-            &agent,
-            &count_down,
-            &[],
-        )?;
+        let exec = eval.agent_target_for(AgentPool::Send);
+        send_action(eval, AgentPool::Send, exec, &agent, &count_down, &[])?;
         agents.push(agent);
     }
     Ok((agents, rx))
@@ -1992,7 +2128,7 @@ fn restart_not_needed() -> NativeError {
 
 fn native_shutdown_agents(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/shutdown-agents", args, &[0])?;
-    eval.shutdown_agents();
+    eval.shutdown_agents()?;
     Ok(Value::Nil)
 }
 
@@ -2653,7 +2789,7 @@ fn native_tap(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError
 
 fn native_set_send_executor(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/set-agent-send-executor!", args, &[1])?;
-    eval.set_send_executor(args[0].clone());
+    eval.set_send_executor(args[0].clone())?;
     Ok(args[0].clone())
 }
 
@@ -2662,7 +2798,7 @@ fn native_set_send_off_executor(
     args: &[Value],
 ) -> Result<Value, NativeError> {
     check_arity("clojure.core/set-agent-send-off-executor!", args, &[1])?;
-    eval.set_send_off_executor(args[0].clone());
+    eval.set_send_off_executor(args[0].clone())?;
     Ok(args[0].clone())
 }
 
@@ -2720,21 +2856,70 @@ mod tests {
     use super::*;
 
     #[test]
-    fn executor_slots_record_any_value() {
-        // S10 accept-and-record: each setter stores its arg
-        // (including nil) for a future reader; dispatch never
-        // consults the slots (pinned by `cellstaps.rs exec_record`
-        // completions, not here).
+    fn executor_slots_validate_and_route() {
+        // Gap-96: executors and nil install; anything else fails
+        // the `ExecutorService` checkcast and installs nothing.
+        // Unset fields route to the fixed pools.
         let sys = AgentSystem::new();
-        assert_eq!(sys.send_executor(), None);
-        assert_eq!(sys.send_off_executor(), None);
-        sys.set_send_executor(Value::Keyword(Keyword::new(None, "kw")));
-        sys.set_send_off_executor(Value::Nil);
-        assert_eq!(
-            sys.send_executor(),
-            Some(Value::Keyword(Keyword::new(None, "kw")))
-        );
-        assert_eq!(sys.send_off_executor(), Some(Value::Nil));
+        assert!(matches!(sys.send_executor(), PoolField::Unset));
+        assert!(matches!(sys.send_off_executor(), PoolField::Unset));
+        assert!(matches!(sys.target_for(AgentPool::Send), ExecTarget::Pool));
+        assert!(matches!(
+            sys.target_for(AgentPool::SendOff),
+            ExecTarget::Pool
+        ));
+        let ex = Executor::new().unwrap();
+        sys.set_send_executor(Value::Executor(ex.clone())).unwrap();
+        sys.set_send_off_executor(Value::Nil).unwrap();
+        assert!(matches!(sys.send_executor(), PoolField::Custom(_)));
+        assert!(matches!(sys.send_off_executor(), PoolField::Nil));
+        assert!(matches!(
+            sys.target_for(AgentPool::Send),
+            ExecTarget::Custom(_)
+        ));
+        assert!(matches!(
+            sys.target_for(AgentPool::SendOff),
+            ExecTarget::Nil
+        ));
+        let err = sys
+            .set_send_executor(Value::Keyword(Keyword::new(None, "kw")))
+            .expect_err("non-executors fail the checkcast");
+        assert_eq!(err.class, ThrowClass::ClassCastException);
+        // The rejection installed nothing (the custom is still set).
+        assert!(matches!(sys.send_executor(), PoolField::Custom(_)));
+    }
+
+    #[test]
+    fn shutdown_throws_nil_fields_solo_first() {
+        // Gap-96: a nil solo side throws before anything shuts; a
+        // nil send side throws after the solo side ran; both nil
+        // throws the solo NPE (probed `z-*`).
+        let sys = AgentSystem::new();
+        sys.set_send_executor(Value::Nil).unwrap();
+        sys.set_send_off_executor(Value::Nil).unwrap();
+        let err = sys.shutdown().expect_err("both nil throws");
+        assert_eq!(err.class, ThrowClass::NullPointerException);
+        assert!(err.message.contains("soloExecutor"));
+        assert!(!sys.is_shutdown());
+
+        let sys = AgentSystem::new();
+        let ex = Executor::new().unwrap();
+        sys.set_send_executor(Value::Nil).unwrap();
+        sys.set_send_off_executor(Value::Executor(ex.clone()))
+            .unwrap();
+        let err = sys.shutdown().expect_err("nil send throws");
+        assert_eq!(err.class, ThrowClass::NullPointerException);
+        assert!(err.message.contains("pooledExecutor"));
+        // The solo side ran (its custom shut) before the throw.
+        assert!(ex.is_shutdown());
+        assert!(sys.is_shutdown());
+
+        // The exit latch never throws (nil sides skip).
+        let sys = AgentSystem::new();
+        sys.set_send_executor(Value::Nil).unwrap();
+        sys.set_send_off_executor(Value::Nil).unwrap();
+        sys.shutdown_for_exit();
+        assert!(sys.is_shutdown());
     }
 
     #[test]
