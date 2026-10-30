@@ -1,0 +1,134 @@
+# Storyboard sync: keeps ProjectV2 #2 (the zero-divergence
+# storyboard) in step with issues/PRs, so nobody hand-edits the
+# board for mechanical moves.
+#
+# Behavior:
+#   opened/reopened (issue or PR)  -> ensure on board, Status=Todo
+#   labeled session:<id>            -> Status=In Progress, Session=<id>
+#   unlabeled (last session:* gone) -> Status=Todo, Session cleared
+#   closed (incl. merged)           -> Status=Done
+#
+# Claim protocol compatibility: sessions label PRs `session:<id>`
+# and post CLAIM on #88; this workflow turns the label into the
+# board move. YIELD = remove your label (board drops to Todo).
+# Draft cards, assignees, and the Slice-status field are untouched.
+#
+# Auth: GITHUB_TOKEN cannot write org ProjectsV2, so this needs a
+# repo Actions secret PROJECT_TOKEN (classic PAT, `project` scope
+# only, 90-day expiry): repo Settings -> Secrets and variables ->
+# Actions -> New repository secret. Without it the job skips with
+# a warning and nothing reds.
+#
+# IDs below are storyboard-specific (project PVT_kwDOEkzkc84Bo8xa):
+# Status field PVTSSF_lADOEkzkc84Bo8xazhnahX8 (Todo f75ad846,
+# In Progress 47fc9ee4, Done 98236657), Session text field
+# PVTF_lADOEkzkc84Bo8xazhnjDYQ. If the board is ever rebuilt,
+# re-read them via the projectV2 GraphQL fields query.
+
+name: storyboard
+
+on:
+  issues:
+    types: [opened, closed, reopened, labeled, unlabeled]
+  pull_request_target:
+    types: [opened, closed, reopened, labeled, unlabeled]
+
+# pull_request_target runs the BASE revision (safe for label-only
+# logic) and only needs read access; project writes use PAT.
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    if: ${{ secrets.PROJECT_TOKEN != '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Sync board item
+        env:
+          GH_TOKEN: ${{ secrets.PROJECT_TOKEN }}
+          EVENT: ${{ github.event_name }}
+          ACTION: ${{ github.event.action }}
+          LABEL: ${{ github.event.label.name }}
+        run: |
+          set -euo pipefail
+          proj=PVT_kwDOEkzkc84Bo8xa
+          status_field=PVTSSF_lADOEkzkc84Bo8xazhnahX8
+          session_field=PVTF_lADOEkzkc84Bo8xazhnjDYQ
+          opt_todo=f75ad846
+          opt_prog=47fc9ee4
+          opt_done=98236657
+
+          if [ "$EVENT" = issues ]; then
+            num=${{ github.event.issue.number }}
+            node=${{ github.event.issue.node_id }}
+            labels=${{ join(github.event.issue.labels.*.name, ' ') }}
+          else
+            num=${{ github.event.pull_request.number }}
+            node=${{ github.event.pull_request.node_id }}
+            labels=${{ join(github.event.pull_request.labels.*.name, ' ') }}
+          fi
+
+          # Upsert: find the board item for this issue/PR, else add it.
+          # (Board holds ~70 items; first:100 has headroom. Revisit if
+          # it ever approaches 100 — a miss would double-add.)
+          item=$(NODE="$node" gh api graphql -f query='
+            query($p:ID!){
+              node(id:$p){... on ProjectV2{
+                items(first:100){nodes{id content{
+                  ... on Issue{id} ... on PullRequest{id}}}}}}}' \
+            -f p="$proj" \
+            --jq '[.data.node.items.nodes[]
+                   | select(.content.id==env.NODE) | .id] | first // empty')
+          if [ -z "$item" ]; then
+            item=$(gh api graphql -f query='
+              mutation($p:ID!,$c:ID!){
+                addProjectV2ItemById(input:{projectId:$p,contentId:$c}){
+                  item{id}}}' \
+              -f p="$proj" -f c="$node" --jq .data.addProjectV2ItemById.item.id)
+            echo "Added #$num as $item"
+          fi
+
+          set_status() {
+            gh api graphql -f query='
+              mutation($p:ID!,$i:ID!,$f:ID!,$o:ID!){
+                updateProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i,
+                  fieldId:$f,value:{singleSelectOptionId:$o}}){clientMutationId}}' \
+              -f p="$proj" -f i="$item" -f f="$status_field" -f o="$1" >/dev/null
+          }
+          set_session() {
+            gh api graphql -f query='
+              mutation($p:ID!,$i:ID!,$f:ID!,$t:String!){
+                updateProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i,
+                  fieldId:$f,value:{text:$t}}){clientMutationId}}' \
+              -f p="$proj" -f i="$item" -f f="$session_field" -f t="$1" >/dev/null
+          }
+
+          case "$ACTION" in
+            opened|reopened)
+              set_status "$opt_todo"; echo "#$num -> Todo";;
+            closed)
+              set_status "$opt_done"; echo "#$num -> Done";;
+            labeled)
+              case "$LABEL" in
+                session:*)
+                  set_status "$opt_prog"
+                  set_session "${LABEL#session:}"
+                  echo "#$num -> In Progress (${LABEL#session:})";;
+                *) echo "label $LABEL ignored";;
+              esac;;
+            unlabeled)
+              # Only drop back when NO session label remains.
+              if printf '%s' "$labels" | tr ' ' '\n' | grep -q '^session:'; then
+                echo "session label remains; no change"
+              else
+                set_status "$opt_todo"; set_session ""
+                echo "#$num -> Todo (claim released)"
+              fi;;
+          esac
+
+  missing-secret:
+    if: ${{ secrets.PROJECT_TOKEN == '' }}
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo '::warning::PROJECT_TOKEN secret not set; storyboard sync skipped (see storyboard.yml header).'
