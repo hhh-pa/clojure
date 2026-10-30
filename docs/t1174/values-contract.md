@@ -88,5 +88,8 @@ that need to pass these values around.
 - No `Value::Seq` / `Value::Transient*` variants in S3 (see
   top); S5 adds them with `eq`/`hash`/printer arms and the
   complexity-baseline regen that growth requires.
-- `hasheq` values are internal: only equiv-consistency is
-  required, never JVM-identical integers.
+- `hasheq`/`hashCode` values are JVM-identical for every
+  deterministic type, tower numerics included (`BigInteger` /
+  `BigDecimal` word formulas, `Ratio` `num ^ den`), and stay
+  equiv-consistent (`equal ⇒ same hash` — see the `tower_*`
+  tests in `hasheq.rs`).

@@ -534,25 +534,33 @@ fn mul(eval: &mut Evaluator, a: Num, b: Num) -> Result<Num, NativeError> {
     }
 }
 
-/// Promoted `/`: `Int`/`Int` keeps the wedge (exact when divisible,
-/// else the `Double` division — C1 documents the ratio
-/// deviation); tower division is exact (`(/ 5N 2)` → `5/2`, a
-/// non-terminating decimal fails like `(bigdec 1/3)`), or rounded
-/// under a bound `*math-context*` (S2).
+/// Promoted `/`: `Int`/`Int` is exact when divisible (a reduced
+/// ratio otherwise — `(/ 1 2)` is `1/2`, never a `Double`); the
+/// exact `MIN/-1` promotes to `BigInt` (`LongOps.divide` routes any
+/// `MIN` side through `BigIntOps.divide`). Tower division is exact
+/// (`(/ 5N 2)` → `5/2`, a non-terminating decimal fails like
+/// `(bigdec 1/3)`), or rounded under a bound `*math-context*` (S2).
+/// `Int`/`Int` division (split from [`div`] for the complexity
+/// budget): exact when divisible, else a reduced ratio; the exact
+/// `MIN/-1` promotes to `BigInt` (`checked_div` fails only there —
+/// `MIN % -1` is `0` — and a successful divide means the `%`
+/// below cannot overflow either).
+fn div_int(x: i64, y: i64, a: &Num, b: &Num) -> Result<Num, NativeError> {
+    if y == 0 {
+        return Err(divide_by_zero());
+    }
+    match x.checked_div(y) {
+        Some(q) if x % y == 0 => Ok(Num::Int(q)),
+        Some(_) => Ok(num_ratio(num_rational(a) / num_rational(b))),
+        None => Ok(Num::BigInt(
+            num_bigint::BigInt::from(x) / num_bigint::BigInt::from(y),
+        )),
+    }
+}
+
 fn div(eval: &mut Evaluator, a: Num, b: Num) -> Result<Num, NativeError> {
     match (&a, &b) {
-        (Num::Int(x), Num::Int(y)) => {
-            if *y == 0 {
-                return Err(divide_by_zero());
-            }
-            if x % y == 0 {
-                x.checked_div(*y).map(Num::Int).ok_or_else(overflow)
-            } else {
-                // Inexact `Int` division is a reduced ratio, never a
-                // `Double` (oracle `promo-mul`: `(/ 1 2)` is `1/2`).
-                Ok(num_ratio(num_rational(&a) / num_rational(&b)))
-            }
-        }
+        (Num::Int(x), Num::Int(y)) => div_int(*x, *y, &a, &b),
         _ if either_double(&a, &b) => Ok(Num::Double(to_f64(a) / to_f64(b))),
         _ if num_rank(&a).max(num_rank(&b)) == 3 => {
             let (x, y, mc) = dec_pair(eval, &a, &b)?;
@@ -640,7 +648,9 @@ fn native_quot(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErro
             if *y == 0 {
                 return Err(slash_by_zero());
             }
-            x.checked_div(*y).map(Value::Int).ok_or_else(overflow)
+            // `LongOps.quotient` is raw Java `/`: `MIN/-1` is `MIN`
+            // (JLS 15.17.2), never an overflow error.
+            Ok(Value::Int(x.wrapping_div(*y)))
         }
         _ if either_double(&a, &b) => quot_double(to_f64(a), to_f64(b)),
         // Tower truncating division (oracle `quotrem`/`quotmix`/
@@ -706,8 +716,9 @@ fn native_rem(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError
             if *y == 0 {
                 return Err(slash_by_zero());
             }
-            // `MIN % -1` is the only overflow (0, but checked).
-            x.checked_rem(*y).map(Value::Int).ok_or_else(overflow)
+            // `LongOps.remainder` is raw Java `%`: `MIN % -1` is `0`
+            // (JLS 15.17.3), never an overflow error.
+            Ok(Value::Int(x.wrapping_rem(*y)))
         }
         _ if either_double(&a, &b) => rem_double(to_f64(a), to_f64(b)),
         // Tower remainder (oracle `dec-each`): exact, in the
@@ -759,7 +770,10 @@ fn native_mod(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError
             if *y == 0 {
                 return Err(divide_by_zero());
             }
-            let r = x.checked_rem(*y).ok_or_else(overflow)?;
+            // Java `%` (`MIN % -1` is `0`, so `(mod MIN -1)` is `0`);
+            // the sign adjust below cannot overflow (`|r| < |y|` with
+            // differing signs keeps `|r + y| < |y|` — still checked).
+            let r = x.wrapping_rem(*y);
             Ok(Value::Int(if r == 0 || (r > 0) == (*y > 0) {
                 r
             } else {

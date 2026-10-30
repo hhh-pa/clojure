@@ -297,6 +297,19 @@ impl BigDec {
         self.unscaled.is_zero()
     }
 
+    /// The raw pair, for `hashCode` (which — unlike `hasheq` — hashes
+    /// the UNstripped value, so scale counts).
+    #[must_use]
+    pub fn unscaled(&self) -> &BigInt {
+        &self.unscaled
+    }
+
+    /// The raw pair, for `hashCode` (see [`BigDec::unscaled`]).
+    #[must_use]
+    pub fn scale(&self) -> i64 {
+        self.scale
+    }
+
     #[must_use]
     pub fn sign(&self) -> Ordering {
         if self.unscaled.is_zero() {
@@ -948,6 +961,18 @@ mod tests {
         assert_eq!(BigDec::parse("0.0").unwrap().sign(), Ordering::Equal);
         assert_eq!(BigDec::parse("-2.5").unwrap().sign(), Ordering::Less);
         assert_eq!(BigDec::parse("3").unwrap().sign(), Ordering::Greater);
+    }
+
+    #[test]
+    fn stripped_canonicalizes_zero_at_any_scale() {
+        // Zeros strip to `(0, 0)` at any scale sign (like
+        // `stripTrailingZeros`; without this arm the loop below
+        // would spin forever on `0`). Callers pre-check
+        // `is_zero`, so only this test covers the arm.
+        for text in ["0", "0.0", "0.00", "0E+3", "0E-3"] {
+            let (unscaled, scale) = BigDec::parse(text).unwrap().stripped();
+            assert_eq!((unscaled, scale), (BigInt::ZERO, 0), "{text}");
+        }
     }
 
     /// Arithmetic-grown scales (literals cap at `i32`, products do
