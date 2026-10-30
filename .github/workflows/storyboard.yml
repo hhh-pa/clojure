@@ -2,16 +2,28 @@
 # storyboard) in step with issues/PRs, so nobody hand-edits the
 # board for mechanical moves.
 #
-# Behavior:
-#   opened/reopened (issue or PR)  -> ensure on board, Status=Todo
-#   labeled session:<id>            -> Status=In Progress, Session=<id>
-#   unlabeled (last session:* gone) -> Status=Todo, Session cleared
-#   closed (incl. merged)           -> Status=Done
+# Design (schedule reconciliation, not events): the original
+# event-driven shape (issues/pull_request_target labeled/closed,
+# #139) never fired — zero runs from any declared trigger across
+# label add/remove probes, issue closes, and PR merges, while
+# every push repo-wide produced a zero-job failed run for this
+# file. Cause undetermined via API (valid YAML, active workflow,
+# disable/enable round-trip clean). This revision pivots to a
+# 15-minute full-board reconcile plus manual dispatch: desired
+# state derives from live labels, drifts get mutated, and
+# `gh workflow run storyboard` proves the path on demand.
+#
+# Desired state per board item (content issues/PRs only):
+#   closed (incl. merged)           -> Status=Done (Session kept)
+#   open + session:<id> label        -> Status=In Progress, Session=<id>
+#   open + no session:* label        -> Status=Todo, Session cleared
+# Draft cards, assignees, Labels rollup, and Slice-status are
+# untouched. Only drifts are written.
 #
 # Claim protocol compatibility: sessions label PRs `session:<id>`
-# and post CLAIM on #88; this workflow turns the label into the
-# board move. YIELD = remove your label (board drops to Todo).
-# Draft cards, assignees, and the Slice-status field are untouched.
+# and post CLAIM on #88; the board follows within 15 minutes (or
+# run the workflow by hand). YIELD = remove your label (board
+# drops to Todo at the next pass).
 #
 # Auth: GITHUB_TOKEN cannot write org ProjectsV2, so this needs a
 # repo Actions secret PROJECT_TOKEN (classic PAT, `project` scope
@@ -28,13 +40,11 @@
 name: storyboard
 
 on:
-  issues:
-    types: [opened, closed, reopened, labeled, unlabeled]
-  pull_request_target:
-    types: [opened, closed, reopened, labeled, unlabeled]
+  schedule:
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
 
-# pull_request_target runs the BASE revision (safe for label-only
-# logic) and only needs read access; project writes use PAT.
+# Read-only except the PAT-authed project writes below.
 permissions:
   contents: read
 
@@ -42,14 +52,11 @@ jobs:
   sync:
     if: ${{ secrets.PROJECT_TOKEN != '' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
-      - name: Sync board item
+      - name: Reconcile board items
         env:
           GH_TOKEN: ${{ secrets.PROJECT_TOKEN }}
-          EVENT: ${{ github.event_name }}
-          ACTION: ${{ github.event.action }}
-          LABEL: ${{ github.event.label.name }}
         run: |
           set -euo pipefail
           proj=PVT_kwDOEkzkc84Bo8xa
@@ -59,73 +66,69 @@ jobs:
           opt_prog=47fc9ee4
           opt_done=98236657
 
-          if [ "$EVENT" = issues ]; then
-            num=${{ github.event.issue.number }}
-            node=${{ github.event.issue.node_id }}
-            labels=${{ join(github.event.issue.labels.*.name, ' ') }}
-          else
-            num=${{ github.event.pull_request.number }}
-            node=${{ github.event.pull_request.node_id }}
-            labels=${{ join(github.event.pull_request.labels.*.name, ' ') }}
-          fi
-
-          # Upsert: find the board item for this issue/PR, else add it.
-          # (Board holds ~70 items; first:100 has headroom. Revisit if
-          # it ever approaches 100 — a miss would double-add.)
-          item=$(NODE="$node" gh api graphql -f query='
+          # One pass over the board (~70 items; first:100 has
+          # headroom — revisit past 100 or items go unmanaged).
+          gh api graphql -f query='
             query($p:ID!){
               node(id:$p){... on ProjectV2{
-                items(first:100){nodes{id content{
-                  ... on Issue{id} ... on PullRequest{id}}}}}}}' \
+                items(first:100){nodes{id
+                  content{__typename
+                    ... on Issue{number closed labels(first:30){nodes{name}}}}
+                    ... on PullRequest{number closed labels(first:30){nodes{name}}}}
+                  fieldValues(first:10){nodes{__typename
+                    ... on ProjectV2ItemFieldSingleSelectValue{optionId
+                      field{... on ProjectV2SingleSelectField{id}}}
+                    ... on ProjectV2ItemFieldTextValue{text
+                      field{... on ProjectV2Field{id}}}}}}}}}}' \
             -f p="$proj" \
-            --jq '[.data.node.items.nodes[]
-                   | select(.content.id==env.NODE) | .id] | first // empty')
-          if [ -z "$item" ]; then
-            item=$(gh api graphql -f query='
-              mutation($p:ID!,$c:ID!){
-                addProjectV2ItemById(input:{projectId:$p,contentId:$c}){
-                  item{id}}}' \
-              -f p="$proj" -f c="$node" --jq .data.addProjectV2ItemById.item.id)
-            echo "Added #$num as $item"
-          fi
+            --jq --arg sf "$status_field" --arg yf "$session_field" '
+              [.data.node.items.nodes[]
+               | select(.content.__typename != "DraftIssue")
+               | {item: .id, num: .content.number, closed: .content.closed,
+                  session: ([.content.labels.nodes[].name
+                             | select(startswith("session:")) | .[8:]]
+                            | first // ""),
+                  cur_status: ([.fieldValues.nodes[]
+                                | select(.field.id == $sf) | .optionId]
+                               | first // ""),
+                  cur_session: ([.fieldValues.nodes[]
+                                 | select(.field.id == $yf) | .text]
+                                | first // "")}]
+               | .[] | @json' |
+          while IFS= read -r row; do
+            item=$(jq -r .item <<<"$row")
+            num=$(jq -r .num <<<"$row")
+            closed=$(jq -r .closed <<<"$row")
+            session=$(jq -r .session <<<"$row")
+            cur_status=$(jq -r .cur_status <<<"$row")
+            cur_session=$(jq -r .cur_session <<<"$row")
 
-          set_status() {
-            gh api graphql -f query='
-              mutation($p:ID!,$i:ID!,$f:ID!,$o:ID!){
-                updateProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i,
-                  fieldId:$f,value:{singleSelectOptionId:$o}}){clientMutationId}}' \
-              -f p="$proj" -f i="$item" -f f="$status_field" -f o="$1" >/dev/null
-          }
-          set_session() {
-            gh api graphql -f query='
-              mutation($p:ID!,$i:ID!,$f:ID!,$t:String!){
-                updateProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i,
-                  fieldId:$f,value:{text:$t}}){clientMutationId}}' \
-              -f p="$proj" -f i="$item" -f f="$session_field" -f t="$1" >/dev/null
-          }
+            if [ "$closed" = true ]; then
+              want_status=$opt_done; want_session=$cur_session
+            elif [ -n "$session" ]; then
+              want_status=$opt_prog; want_session=$session
+            else
+              want_status=$opt_todo; want_session=""
+            fi
 
-          case "$ACTION" in
-            opened|reopened)
-              set_status "$opt_todo"; echo "#$num -> Todo";;
-            closed)
-              set_status "$opt_done"; echo "#$num -> Done";;
-            labeled)
-              case "$LABEL" in
-                session:*)
-                  set_status "$opt_prog"
-                  set_session "${LABEL#session:}"
-                  echo "#$num -> In Progress (${LABEL#session:})";;
-                *) echo "label $LABEL ignored";;
-              esac;;
-            unlabeled)
-              # Only drop back when NO session label remains.
-              if printf '%s' "$labels" | tr ' ' '\n' | grep -q '^session:'; then
-                echo "session label remains; no change"
-              else
-                set_status "$opt_todo"; set_session ""
-                echo "#$num -> Todo (claim released)"
-              fi;;
-          esac
+            if [ "$want_status" != "$cur_status" ]; then
+              gh api graphql -f query='
+                mutation($p:ID!,$i:ID!,$f:ID!,$o:ID!){
+                  updateProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i,
+                    fieldId:$f,value:{singleSelectOptionId:$o}}){clientMutationId}}' \
+                -f p="$proj" -f i="$item" -f f="$status_field" -f o="$want_status" >/dev/null
+              echo "#$num status -> $want_status"
+            fi
+            if [ "$want_session" != "$cur_session" ]; then
+              gh api graphql -f query='
+                mutation($p:ID!,$i:ID!,$f:ID!,$t:String!){
+                  updateProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i,
+                    fieldId:$f,value:{text:$t}}){clientMutationId}}' \
+                -f p="$proj" -f i="$item" -f f="$session_field" -f t="$want_session" >/dev/null
+              echo "#$num session -> [$want_session]"
+            fi
+          done
+          echo "reconcile done"
 
   missing-secret:
     if: ${{ secrets.PROJECT_TOKEN == '' }}
