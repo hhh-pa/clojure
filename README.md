@@ -170,15 +170,6 @@ each entry asserts its exact behavior, so drift fails CI:
   which still compare by value until the post-tower Arc-box
   lands (zero-fence sequencing: tower owns numeric
   representation).
-- **Ordering.** `compare` matches JVM numeric ordering
-  including NaN ties, but incomparable pairs fail with the
-  stable `Cannot compare <A> to <B>` instead of
-  JDK-version-dependent `ClassCastException` text. (`=`
-  stays same-category and `==` cross-category, checked
-  arithmetic still throws `long overflow` on overflow, `/`
-  produces ratios, and `hasheq` is JVM-identical — all
-  exactly like the JVM, so the old Numbers/Equality/Hashing
-  entries are gone.)
 - **Printing.** `pr` round-trips EDN values through the reader;
   `*print-length*` / `*print-level*` truncate with `...`;
   `*print-dup*` routes `pr` through the dup printer (undupable

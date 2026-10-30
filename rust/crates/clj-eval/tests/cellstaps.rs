@@ -384,19 +384,25 @@ fn volatile_str() {
 #[test]
 fn volatile_compare_name() {
     // Port-side pin (no oracle rows): `clj_value::compare` (not the
-    // `compare` native, which routes through `jvm_compare`)
-    // reports the `Volatile` type name on incomparable pairs.
+    // `compare` native, which routes through `jvm_compare`) fails
+    // the `Volatile` class against `Comparable` (#102).
     let v = Value::Volatile(Volatile::new(Value::Int(1)));
     let err = clj_value::compare(&v, &Value::Int(1)).expect_err("volatile is incomparable");
-    assert_eq!(err.message(), "Cannot compare Volatile to Long");
+    assert_eq!(
+        err.message(),
+        "class clojure.lang.Volatile cannot be cast to class java.lang.Comparable (clojure.lang.Volatile is in unnamed module of loader 'app'; java.lang.Comparable is in module java.base of loader 'bootstrap')"
+    );
 }
 
 #[test]
 fn executor_compare_name() {
-    // Fence 3c: same port-side pin for the `Executor` kind.
+    // Fence 3c: same port-side pin for the `Executor` kind (#102).
     let v = Value::Executor(clj_value::Executor::new().unwrap());
     let err = clj_value::compare(&v, &Value::Int(1)).expect_err("executor is incomparable");
-    assert_eq!(err.message(), "Cannot compare Executor to Long");
+    assert_eq!(
+        err.message(),
+        "class java.util.concurrent.Executors$FinalizableDelegatedExecutorService cannot be cast to class java.lang.Comparable (java.util.concurrent.Executors$FinalizableDelegatedExecutorService and java.lang.Comparable are in module java.base of loader 'bootstrap')"
+    );
 }
 
 // ---- taps ----

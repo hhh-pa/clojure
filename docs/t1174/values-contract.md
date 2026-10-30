@@ -69,11 +69,12 @@ that need to pass these values around.
   NaN compares `Equal` to everything numeric (even NaN) and
   `-0.0` equals `0.0`.
 - Lists (either side), maps, sets, regexes, tagged literals,
-  reader conditionals, and all other cross-type pairs fail.
-  **Deviation**: our message is the stable `Cannot compare
-  <A> to <B>` (Clojure type names); the JVM throws a JDK
-  `ClassCastException` whose text embeds module/loader
-  verbiage that varies by JDK release.
+  reader conditionals, and all other cross-type pairs fail
+  with the JDK `ClassCastException` text (#102): numeric
+  `k1` fails `k2` to `Number`, non-`Comparable` `k1` fails
+  itself to `Comparable`, and `Comparable` `k1` fails `k2`
+  to its own class (the `compareTo` checkcast) — see
+  `docs/i102-compare-cce/probes.md`.
 - `sorted-map` collapses compare-equal keys (`{1, 1.0}` → one
   entry); sorted collections themselves land in S5.
 

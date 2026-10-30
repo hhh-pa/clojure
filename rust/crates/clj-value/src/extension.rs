@@ -909,16 +909,34 @@ mod tests {
             var_id: 1,
         });
         let t = throwable(1, "boom");
+        // Non-`Comparable` `k1` fails itself against `Comparable`;
+        // a `String` `k1` fails the alien `k2` to `String` (#102).
         for (a, b, want) in [
-            (&var, &var, "Cannot compare Var to Var"),
-            (&var, &Value::Int(1), "Cannot compare Var to Long"),
+            (
+                &var,
+                &var,
+                "class clojure.lang.Var cannot be cast to class java.lang.Comparable (clojure.lang.Var is in unnamed module of loader 'app'; java.lang.Comparable is in module java.base of loader 'bootstrap')",
+            ),
+            (
+                &var,
+                &Value::Int(1),
+                "class clojure.lang.Var cannot be cast to class java.lang.Comparable (clojure.lang.Var is in unnamed module of loader 'app'; java.lang.Comparable is in module java.base of loader 'bootstrap')",
+            ),
             (
                 &Value::Str(Arc::from("s")),
                 &unb,
-                "Cannot compare String to Unbound",
+                "class clojure.lang.Var$Unbound cannot be cast to class java.lang.String (clojure.lang.Var$Unbound is in unnamed module of loader 'app'; java.lang.String is in module java.base of loader 'bootstrap')",
             ),
-            (&t, &t, "Cannot compare Throwable to Throwable"),
-            (&t, &var, "Cannot compare Throwable to Var"),
+            (
+                &t,
+                &t,
+                "class java.lang.Exception cannot be cast to class java.lang.Comparable (java.lang.Exception and java.lang.Comparable are in module java.base of loader 'bootstrap')",
+            ),
+            (
+                &t,
+                &var,
+                "class java.lang.Exception cannot be cast to class java.lang.Comparable (java.lang.Exception and java.lang.Comparable are in module java.base of loader 'bootstrap')",
+            ),
         ] {
             assert_eq!(compare(a, b).unwrap_err().message(), want);
         }
@@ -1001,11 +1019,17 @@ mod tests {
         // Cross-variant pairs are unequal.
         assert_ne!(stub(3), Value::Int(3));
         assert_ne!(stub(3), Value::Str(Arc::from("#test.Stub[3]")));
-        // Compare errors name the host class.
+        // Compare errors fail the host class (#102).
         let err = compare(&stub(3), &Value::Int(1)).unwrap_err();
-        assert_eq!(err.message(), "Cannot compare test.Stub to Long");
+        assert_eq!(
+            err.message(),
+            "class test.Stub cannot be cast to class java.lang.Comparable (test.Stub is in unnamed module of loader 'app'; java.lang.Comparable is in module java.base of loader 'bootstrap')"
+        );
         let err = compare(&Value::Int(1), &stub(3)).unwrap_err();
-        assert_eq!(err.message(), "Cannot compare Long to test.Stub");
+        assert_eq!(
+            err.message(),
+            "class test.Stub cannot be cast to class java.lang.Number (test.Stub is in unnamed module of loader 'app'; java.lang.Number is in module java.base of loader 'bootstrap')"
+        );
     }
 
     #[test]
@@ -1055,7 +1079,10 @@ mod tests {
         assert_eq!(other, other.clone());
         assert_eq!(hash_of(&other), hash_of(&other.clone()));
         let err = compare(&other, &Value::Int(1)).unwrap_err();
-        assert_eq!(err.message(), "Cannot compare test.Other to Long");
+        assert_eq!(
+            err.message(),
+            "class test.Other cannot be cast to class java.lang.Comparable (test.Other is in unnamed module of loader 'app'; java.lang.Comparable is in module java.base of loader 'bootstrap')"
+        );
     }
 
     #[test]

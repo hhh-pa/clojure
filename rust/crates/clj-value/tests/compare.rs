@@ -150,24 +150,40 @@ fn nil_orders_first() {
 }
 
 #[test]
-fn cross_type_compares_fail_with_stable_message() {
-    for (a, b) in [
-        (int(1), Value::Keyword(Keyword::new(None, "a"))),
+fn cross_type_compares_fail_with_cce_text() {
+    // #102: numeric `k1` fails `k2` to `Number`, `Comparable`
+    // `k1` fails `k2` to its own class (the `compareTo`
+    // checkcast) — the JDK text, byte-pinned.
+    for (a, b, want) in [
+        (
+            int(1),
+            Value::Keyword(Keyword::new(None, "a")),
+            "class clojure.lang.Keyword cannot be cast to class java.lang.Number (clojure.lang.Keyword is in unnamed module of loader 'app'; java.lang.Number is in module java.base of loader 'bootstrap')",
+        ),
         (
             Value::Keyword(Keyword::new(None, "a")),
             Value::Symbol(Symbol::new(None, "a")),
+            "class clojure.lang.Symbol cannot be cast to class clojure.lang.Keyword (clojure.lang.Symbol and clojure.lang.Keyword are in unnamed module of loader 'app')",
         ),
-        (int(1), Value::Bool(true)),
-        (Value::Bool(true), int(1)),
+        (
+            int(1),
+            Value::Bool(true),
+            "class java.lang.Boolean cannot be cast to class java.lang.Number (java.lang.Boolean and java.lang.Number are in module java.base of loader 'bootstrap')",
+        ),
+        (
+            Value::Bool(true),
+            int(1),
+            "class java.lang.Long cannot be cast to class java.lang.Boolean (java.lang.Long and java.lang.Boolean are in module java.base of loader 'bootstrap')",
+        ),
         (
             Value::Str(Arc::from("a")),
             Value::Keyword(Keyword::new(None, "a")),
+            "class clojure.lang.Keyword cannot be cast to class java.lang.String (clojure.lang.Keyword is in unnamed module of loader 'app'; java.lang.String is in module java.base of loader 'bootstrap')",
         ),
     ] {
-        assert!(compare(&a, &b).is_err(), "{a:?} vs {b:?}");
+        assert_eq!(compare(&a, &b).unwrap_err().message(), want);
     }
     let err = compare(&int(1), &Value::Keyword(Keyword::new(None, "a"))).unwrap_err();
-    assert_eq!(err.message(), "Cannot compare Long to Keyword");
     assert_eq!(err.jvm_class(), "java.lang.ClassCastException");
 }
 
@@ -214,27 +230,23 @@ fn map_entries_compare_as_two_vectors() {
 fn map_entry_cross_type_compares_fail_without_panicking() {
     // T1192 FX2 finding 13: entry<->list and entry<->int are
     // incomparable — Err, never the old `unreachable!` panic.
-    // Entries name as Vector in the stable message.
+    // Entries fail like vectors (#102: to `IPersistentVector`).
     let e12 = entry(int(1), int(2));
     let list = Value::List(List::from_vec(vec![int(1), int(2)]));
-    assert!(compare(&e12, &list).is_err());
-    assert!(compare(&list, &e12).is_err());
     assert_eq!(
         compare(&e12, &list).unwrap_err().message(),
-        "Cannot compare Vector to List"
+        "class clojure.lang.PersistentList cannot be cast to class clojure.lang.IPersistentVector (clojure.lang.PersistentList and clojure.lang.IPersistentVector are in unnamed module of loader 'app')"
     );
     assert_eq!(
         compare(&list, &e12).unwrap_err().message(),
-        "Cannot compare List to Vector"
+        "class clojure.lang.PersistentList cannot be cast to class java.lang.Comparable (clojure.lang.PersistentList is in unnamed module of loader 'app'; java.lang.Comparable is in module java.base of loader 'bootstrap')"
     );
-    assert!(compare(&e12, &int(1)).is_err());
-    assert!(compare(&int(1), &e12).is_err());
     assert_eq!(
         compare(&e12, &int(1)).unwrap_err().message(),
-        "Cannot compare Vector to Long"
+        "class java.lang.Long cannot be cast to class clojure.lang.IPersistentVector (java.lang.Long is in module java.base of loader 'bootstrap'; clojure.lang.IPersistentVector is in unnamed module of loader 'app')"
     );
     assert_eq!(
         compare(&int(1), &e12).unwrap_err().message(),
-        "Cannot compare Long to Vector"
+        "class clojure.lang.MapEntry cannot be cast to class java.lang.Number (clojure.lang.MapEntry is in unnamed module of loader 'app'; java.lang.Number is in module java.base of loader 'bootstrap')"
     );
 }
