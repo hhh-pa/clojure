@@ -44,6 +44,9 @@ pub enum ThrowClass {
     RuntimeException,
     IllegalArgumentException,
     IllegalStateException,
+    /// `IllegalMonitorStateException` (fence 4b F8b): an
+    /// `IllegalStateException` (unmatched `monitor-exit`).
+    IllegalMonitorStateException,
     UnsupportedOperationException,
     AssertionError,
     ArityException,
@@ -97,6 +100,7 @@ impl ThrowClass {
             Self::RuntimeException => "java.lang.RuntimeException",
             Self::IllegalArgumentException => "java.lang.IllegalArgumentException",
             Self::IllegalStateException => "java.lang.IllegalStateException",
+            Self::IllegalMonitorStateException => "java.lang.IllegalMonitorStateException",
             Self::UnsupportedOperationException => "java.lang.UnsupportedOperationException",
             Self::AssertionError => "java.lang.AssertionError",
             Self::ArityException => "clojure.lang.ArityException",
@@ -258,6 +262,7 @@ fn throw_parent(jvm_name: &str) -> Option<&'static str> {
         "java.lang.ReflectiveOperationException" => Some("java.lang.Exception"),
         "java.lang.AssertionError" => Some("java.lang.Error"),
         "java.lang.ArrayIndexOutOfBoundsException" => Some("java.lang.IndexOutOfBoundsException"),
+        "java.lang.IllegalMonitorStateException" => Some("java.lang.IllegalStateException"),
         "java.lang.IllegalArgumentException"
         | "java.lang.IllegalStateException"
         | "java.lang.UnsupportedOperationException"

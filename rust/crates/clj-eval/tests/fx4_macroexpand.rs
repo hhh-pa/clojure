@@ -81,7 +81,7 @@ fn fresh(src: &str) -> String {
     run_last(&mut boot(), src)
 }
 
-const CONVERT1: &str = "(if (clojure.core/instance? clojure.lang.ISeq map__1) \
+const CONVERT1: &str = "(if (clojure.core/seq? map__1) \
 (if (clojure.core/next map__1) \
 (clojure.lang.PersistentArrayMap/createAsIfByAssoc (clojure.core/to-array map__1)) \
 (if (clojure.core/seq map__1) (clojure.core/first map__1) \
@@ -140,6 +140,15 @@ fn expand_nine_heads() {
         run_last(&mut eval, "(macroexpand-1 '(bound-fn [x] x))"),
         "(clojure.core/bound-fn* (clojure.core/fn [x] x))"
     );
+    // Fence 4b E1e (`boundfn-pre`): `bound-fn` is a pure template
+    // — pre/post rides along raw inside the embedded `fn`.
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(macroexpand-1 '(bound-fn [x] {:pre [(pos? x)]} x))"
+        ),
+        "(clojure.core/bound-fn* (clojure.core/fn [x] {:pre [(pos? x)]} x))"
+    );
     assert_eq!(
         run_last(&mut eval, "(macroexpand-1 '(clojure.core/let [a 1] a))"),
         "(let* [a 1] a)"
@@ -181,9 +190,7 @@ fn expand_locking_and_destructure_gensyms() {
     );
     assert_eq!(
         fresh("(macroexpand-1 '(let [{:keys [a] :or {a 1} :as m} v] a))"),
-        format!(
-            "(let* [default__3 1 map__1 v map__1 {CONVERT1} m map__1 a (clojure.core/get map__1 :a default__3)] a)"
-        )
+        format!("(let* [map__1 v map__1 {CONVERT1} m map__1 a (clojure.core/get map__1 :a 1)] a)")
     );
     let keys_bang = fresh("(macroexpand-1 '(let [{:keys! [a] :missing m} v] a))");
     assert!(
@@ -278,6 +285,20 @@ fn expand_errors() {
     assert_eq!(
         uncaught(&mut eval, "((var-get (var fn)))"),
         "clojure.lang.ArityException | Wrong number of args (0) passed to: clojure.core/fn"
+    );
+    // Fence 4b E1f: non-seqable `letfn`/`with-redefs` heads are the
+    // `ISeq` error (class and message, both paths agree).
+    assert_eq!(
+        uncaught(&mut eval, "(macroexpand-1 '(letfn [f] 1))"),
+        "java.lang.IllegalArgumentException | Syntax error macroexpanding letfn at (user:1:1).\njava.lang.IllegalArgumentException | Don't know how to create ISeq from: clojure.lang.Symbol"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(macroexpand-1 '(letfn f 1))"),
+        "java.lang.IllegalArgumentException | Syntax error macroexpanding letfn at (user:1:1).\njava.lang.IllegalArgumentException | Don't know how to create ISeq from: clojure.lang.Symbol"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(macroexpand-1 '(with-redefs a 1))"),
+        "java.lang.IllegalArgumentException | Syntax error macroexpanding with-redefs at (user:1:1).\njava.lang.IllegalArgumentException | Don't know how to create ISeq from: clojure.lang.Symbol"
     );
     assert_eq!(
         compile_err(&mut eval, "(let 1)"),
@@ -413,12 +434,15 @@ fn expand_errors() {
             "java.lang.IllegalArgumentException | & can only appear once in :keys".to_owned(),
         ]
     );
+    // Fence 4b E1i (`or-bykey`, `or-bothab`): the local wins,
+    // key-side matches are ignored — never `Multiple`.
     assert_eq!(
-        compile_err(&mut eval, "(let [{a a :or {a 1}} {}] a)"),
-        vec![
-            "Syntax error macroexpanding let at (user:1:1).".to_owned(),
-            "java.lang.Exception | Multiple :or defaults for same key: a 'a'".to_owned(),
-        ]
+        fresh("(macroexpand-1 '(let [{a a :or {a 1}} {}] a))"),
+        format!("(let* [map__1 {{}} map__1 {CONVERT1} a (clojure.core/get map__1 a 1)] a)")
+    );
+    assert_eq!(
+        fresh("(macroexpand-1 '(let [{a b :or {a 1 b 2}} {:b 5}] a))"),
+        format!("(let* [map__1 {{:b 5}} map__1 {CONVERT1} a (clojure.core/get map__1 b 1)] a)")
     );
     assert_eq!(
         compile_err(&mut eval, "(let [{:keys! [a] :or {a 1}} {}] a)"),
@@ -468,6 +492,10 @@ fn expand_errors() {
                 .to_owned(),
         ]
     );
+    // Fence 4b E1h/E1j/E1o: `:or` must be a map of simple
+    // symbols (spec-checked at every map level upstream) —
+    // keyword, string, and qualified keys are rejected, as are
+    // non-map and explicit-`nil` `:or` values.
     assert_eq!(
         compile_err(
             &mut eval,
@@ -475,7 +503,38 @@ fn expand_errors() {
         ),
         vec![
             "Syntax error macroexpanding let at (user:1:1).".to_owned(),
-            "java.lang.IllegalArgumentException | keys #{:z} appear only in :or".to_owned(),
+            "java.lang.IllegalArgumentException | :or keys must be simple symbols, got: :z"
+                .to_owned(),
+        ]
+    );
+    assert_eq!(
+        compile_err(&mut eval, "(let [{:keys [a] :or {\"s\" 1}} {}] a)"),
+        vec![
+            "Syntax error macroexpanding let at (user:1:1).".to_owned(),
+            "java.lang.IllegalArgumentException | :or keys must be simple symbols, got: \"s\""
+                .to_owned(),
+        ]
+    );
+    assert_eq!(
+        compile_err(&mut eval, "(let [{:keys [a] :or {a/b 1}} {}] a)"),
+        vec![
+            "Syntax error macroexpanding let at (user:1:1).".to_owned(),
+            "java.lang.IllegalArgumentException | :or keys must be simple symbols, got: a/b"
+                .to_owned(),
+        ]
+    );
+    assert_eq!(
+        compile_err(&mut eval, "(let [{:keys [a] :or nil} {}] a)"),
+        vec![
+            "Syntax error macroexpanding let at (user:1:1).".to_owned(),
+            "java.lang.IllegalArgumentException | :or must be a map, got: nil".to_owned(),
+        ]
+    );
+    assert_eq!(
+        compile_err(&mut eval, "(let [{:keys [a] :or []} {}] a)"),
+        vec![
+            "Syntax error macroexpanding let at (user:1:1).".to_owned(),
+            "java.lang.IllegalArgumentException | :or must be a map, got: []".to_owned(),
         ]
     );
     assert_eq!(
@@ -532,16 +591,14 @@ fn expand_errors() {
         compile_err(&mut eval, "(let [{:keys [a] :or 5} {}] a)"),
         vec![
             "Syntax error macroexpanding let at (user:1:1).".to_owned(),
-            "java.lang.IllegalArgumentException | Don't know how to create ISeq from: java.lang.Long"
-                .to_owned(),
+            "java.lang.IllegalArgumentException | :or must be a map, got: 5".to_owned(),
         ]
     );
     assert_eq!(
         compile_err(&mut eval, "(let [{:keys [a] :or [1]} {}] a)"),
         vec![
-            "Unexpected error macroexpanding let at (user:1:1).".to_owned(),
-            "java.lang.ClassCastException | Cannot cast java.lang.Long to java.util.Map$Entry"
-                .to_owned(),
+            "Syntax error macroexpanding let at (user:1:1).".to_owned(),
+            "java.lang.IllegalArgumentException | :or must be a map, got: [1]".to_owned(),
         ]
     );
 }
@@ -562,8 +619,8 @@ fn eval_expanded_forms() {
         "nil"
     );
     assert_eq!(
-        run_last(&mut eval, "(let [{:keys [a] :or []} {}] a)"),
-        "nil"
+        run_last(&mut eval, "(let [{:keys [a] :or {b 1} :as m} {}] m)"),
+        "{}"
     );
     assert_eq!(
         run_last(&mut eval, "(let [{:keys [a] :or {b 1}} {}] a)"),
@@ -606,6 +663,19 @@ fn eval_expanded_forms() {
         uncaught(&mut eval, "((eval '(fn [x] {:post [(number? %)]} x)) :k)"),
         "java.lang.AssertionError | Assert failed: (number? %)"
     );
+    // Fence 4b E1m (`letfn-pre-enforced`): `letfn`/`letfn*` inits
+    // compile as `fn` forms, so pre/post enforces.
+    assert_eq!(
+        uncaught(&mut eval, "(letfn [(f [x] {:pre [(pos? x)]} x)] (f -1))"),
+        "java.lang.AssertionError | Assert failed: (pos? x)"
+    );
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(letfn* [f (fn f [x] {:pre [(pos? x)]} x)] (f -1))"
+        ),
+        "java.lang.AssertionError | Assert failed: (pos? x)"
+    );
     assert_eq!(
         run_last(
             &mut eval,
@@ -626,6 +696,11 @@ fn eval_expanded_forms() {
         "0"
     );
     assert_eq!(run_last(&mut eval, "(letfn [(f [])] 1)"), "1");
+    // Fence 4b E1e/E1p: fnspecs seq like `mapcat` (lists, maps,
+    // sets — not just vectors).
+    assert_eq!(run_last(&mut eval, "(letfn ((f [x] x)) (f 1))"), "1");
+    assert_eq!(run_last(&mut eval, "(letfn {f [x]} 1)"), "1");
+    assert_eq!(run_last(&mut eval, "(letfn #{(f [x] x)} (f 1))"), "1");
     assert_eq!(
         compile_err(&mut eval, "(letfn [(f 1)] 1)"),
         vec![
@@ -648,16 +723,38 @@ fn eval_expanded_forms() {
     );
     assert_eq!(run_last(&mut eval, "(locking :x 1)"), "1");
     assert_eq!(run_last(&mut eval, "(locking :x (locking :x 2))"), "2");
+    // Fence 4b E1r: `locking` expands before analysis, so the nil
+    // message names the expansion's lockee gensym (like the JVM's
+    // `lockee#` leak); a fresh boot fixes the counter.
     assert_eq!(
-        uncaught(&mut eval, "(locking nil 1)"),
-        "java.lang.NullPointerException | Cannot enter synchronized block because \"lock\" is null"
+        uncaught(&mut boot(), "(locking nil 1)"),
+        "java.lang.NullPointerException | Cannot enter synchronized block because \"locklocal__2__auto__\" is null"
     );
     run_last(&mut eval, "(def z 1)");
     assert_eq!(run_last(&mut eval, "(with-redefs [z 9] z)"), "9");
+    assert_eq!(run_last(&mut eval, "(with-redefs {a 1} 1)"), "1");
+    assert_eq!(
+        compile_err(&mut eval, "(with-redefs {a 1 b 2} 1)"),
+        vec![
+            "Syntax error compiling var at (user:1:1).".to_owned(),
+            "java.lang.ClassCastException | Cannot cast clojure.lang.MapEntry to clojure.lang.Symbol"
+                .to_owned(),
+        ]
+    );
     assert_eq!(run_last(&mut eval, "z"), "1");
     assert_eq!(
         run_last(&mut eval, "(macroexpand-1 '(with-redefs [a 1 b] a))"),
         "(clojure.core/with-redefs-fn {(var a) 1} (clojure.core/fn [] a))"
+    );
+    // Fence 4b E1e/E1q: maps seq to entries — a lone entry
+    // odd-drops to `{}`, paired entries embed for the `var` cast.
+    assert_eq!(
+        run_last(&mut eval, "(macroexpand-1 '(with-redefs {a 1} 1))"),
+        "(clojure.core/with-redefs-fn {} (clojure.core/fn [] 1))"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(macroexpand-1 '(with-redefs {a 1 b 2} 1))"),
+        "(clojure.core/with-redefs-fn {(var [a 1]) [b 2]} (clojure.core/fn [] 1))"
     );
     assert_eq!(run_last(&mut eval, "(with-redefs [])"), "nil");
     assert_eq!(
@@ -850,23 +947,42 @@ fn host_natives_and_rewrites() {
             "java.lang.RuntimeException | Can't let qualified name: u/f".to_owned(),
         ]
     );
+    // Fence 4b E1k/E1r: `letfn*` inits compile as expressions,
+    // then cast to `ObjExpr` (a non-`fn` init is the CCE).
     assert_eq!(
         compile_err(&mut eval, "(letfn* [f 1])"),
         vec![
-            "Syntax error macroexpanding clojure.core/fn at (user:1:1).".to_owned(),
-            "clojure.lang.ExceptionInfo | Call to clojure.core/fn did not conform to spec."
+            "Syntax error compiling fn* at (user:1:1).".to_owned(),
+            "java.lang.ClassCastException | Cannot cast java.lang.Long to clojure.lang.Compiler$ObjExpr"
                 .to_owned(),
         ]
     );
+    assert_eq!(
+        compile_err(&mut eval, "(letfn* [f (let [g (fn [x] x)] g)] (f 1))"),
+        vec![
+            "Syntax error compiling fn* at (user:1:1).".to_owned(),
+            "java.lang.ClassCastException | Cannot cast clojure.lang.PersistentList to clojure.lang.Compiler$ObjExpr"
+                .to_owned(),
+        ]
+    );
+    assert_eq!(
+        compile_err(&mut eval, "(letfn* [f nil] f)"),
+        vec![
+            "Syntax error compiling fn* at (user:1:1).".to_owned(),
+            "java.lang.ClassCastException | Cannot cast null to clojure.lang.Compiler$ObjExpr"
+                .to_owned(),
+        ]
+    );
+    // Macros expanding to `fn` qualify as inits (analyzed, then cast).
+    run_last(&mut eval, "(defmacro fnmac4b [] '(fn [x] x))");
+    assert_eq!(run_last(&mut eval, "(letfn* [f (fnmac4b)] (f 1))"), "1");
     // Private monitor natives are reachable from `clojure.core`.
     run_last(&mut eval, "(in-ns 'clojure.core)");
+    // Fence 4b E1t: a nil lockee with an empty stack is the NPE
+    // (direct calls keep the legacy `"lock"` placeholder).
     assert_eq!(
         uncaught(&mut eval, "(fx4-monitor-exit nil)"),
         "java.lang.NullPointerException | Cannot exit synchronized block because \"lock\" is null"
-    );
-    assert_eq!(
-        uncaught(&mut eval, "(fx4-monitor-exit :never-entered)"),
-        "java.lang.IllegalStateException | attempt to exit a monitor not held by this thread"
     );
     assert_eq!(
         run_last(
@@ -897,6 +1013,155 @@ fn host_natives_and_rewrites() {
     assert_eq!(
         uncaught(&mut eval, "(fx4-monitor-enter nil)"),
         "java.lang.NullPointerException | Cannot enter synchronized block because \"lock\" is null"
+    );
+}
+
+#[test]
+fn monitor_exit_matrix() {
+    // Fence 4b E1k/E1t/E1u: unmatched `monitor-exit` is the JVM's
+    // `IllegalMonitorStateException` with an empty message; a nil
+    // lockee over an empty stack is the form-naming NPE, over held
+    // monitors a mismatch.
+    let mut eval = boot();
+    assert_eq!(
+        uncaught(&mut eval, "(let [x [1]] (monitor-exit x))"),
+        "java.lang.IllegalMonitorStateException | "
+    );
+    assert_eq!(
+        run_last(&mut eval, "(do (monitor-enter :a) (monitor-exit :a) 1)"),
+        "1"
+    );
+    // Mismatched and nil-held exits leave their holds behind, so
+    // each binds its lockee for a cleanup exit (the monitor stack
+    // is thread-local — a leak would pollute later tests).
+    run_last(&mut eval, "(def w4b-mm :a)");
+    assert_eq!(
+        uncaught(&mut eval, "(do (monitor-enter w4b-mm) (monitor-exit :b))"),
+        "java.lang.IllegalMonitorStateException | "
+    );
+    assert_eq!(run_last(&mut eval, "(monitor-exit w4b-mm)"), "nil");
+    assert_eq!(
+        uncaught(&mut eval, "(monitor-exit nil)"),
+        "java.lang.NullPointerException | Cannot exit synchronized block because \"null\" is null"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(let [n nil] (monitor-exit n))"),
+        "java.lang.NullPointerException | Cannot exit synchronized block because \"n\" is null"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(monitor-exit (identity nil))"),
+        "java.lang.NullPointerException | Cannot exit synchronized block because the return value of \"clojure.lang.IFn.invoke(Object)\" is null"
+    );
+    run_last(&mut eval, "(def w4b-mh [1])");
+    assert_eq!(
+        uncaught(&mut eval, "(do (monitor-enter w4b-mh) (monitor-exit nil))"),
+        "java.lang.IllegalMonitorStateException | "
+    );
+    assert_eq!(run_last(&mut eval, "(monitor-exit w4b-mh)"), "nil");
+    // Reentrant nests unwind in order (identity-held).
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(do (monitor-enter :r) (monitor-enter :r) (monitor-exit :r) (monitor-exit :r) 1)"
+        ),
+        "1"
+    );
+    // Equal-but-distinct lockees are unheld (identity, like the JVM).
+    run_last(&mut eval, "(def w4b-mv [1])");
+    assert_eq!(
+        uncaught(&mut eval, "(do (monitor-enter w4b-mv) (monitor-exit [1]))"),
+        "java.lang.IllegalMonitorStateException | "
+    );
+    assert_eq!(run_last(&mut eval, "(monitor-exit w4b-mv)"), "nil");
+    // `catch` sees the hierarchy (`IMS` is an `ISE` is an `RE`).
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(try (monitor-exit :nope) (catch IllegalMonitorStateException e :ims))"
+        ),
+        ":ims"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(try (monitor-exit :nope) (catch IllegalStateException e :ise))"
+        ),
+        ":ise"
+    );
+}
+
+#[test]
+fn monitor_enter_nil_messages() {
+    // Fence 4b E1r/E1s/E1u/E1v/E1w/E1x/E1y: the nil lockee names
+    // its expanded form, like the JVM's compiler messages.
+    let mut eval = boot();
+    assert_eq!(
+        uncaught(&mut eval, "(monitor-enter nil)"),
+        "java.lang.NullPointerException | Cannot enter synchronized block because \"null\" is null"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(let [x nil] (monitor-enter x))"),
+        "java.lang.NullPointerException | Cannot enter synchronized block because \"x\" is null"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(monitor-enter (identity nil))"),
+        "java.lang.NullPointerException | Cannot enter synchronized block because the return value of \"clojure.lang.IFn.invoke(Object)\" is null"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(monitor-enter ((fn [a b] nil) 1 2))"),
+        "java.lang.NullPointerException | Cannot enter synchronized block because the return value of \"clojure.lang.IFn.invoke(Object, Object)\" is null"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(monitor-enter (quote nil))"),
+        "java.lang.NullPointerException | Cannot enter synchronized block because \"null\" is null"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(monitor-enter (let [x nil] x))"),
+        "java.lang.NullPointerException | Cannot enter synchronized block because \"x\" is null"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(monitor-enter (do nil))"),
+        "java.lang.NullPointerException | Cannot enter synchronized block because \"null\" is null"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(monitor-enter (let [x 1]))"),
+        "java.lang.NullPointerException | Cannot enter synchronized block because \"null\" is null"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(monitor-enter (do))"),
+        "java.lang.NullPointerException | Cannot enter synchronized block because \"null\" is null"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(monitor-enter (if true nil nil))"),
+        "java.lang.NullPointerException | Cannot enter synchronized block"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(monitor-enter (case 2 1 :a nil))"),
+        "java.lang.NullPointerException | Cannot enter synchronized block"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(monitor-enter (try nil (catch Throwable t 1)))"),
+        "java.lang.NullPointerException | Cannot enter synchronized block because the return value of \"clojure.lang.IFn.invoke()\" is null"
+    );
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(monitor-enter (loop [i 0] (if (< i 1) (recur (inc i)) nil)))"
+        ),
+        "java.lang.NullPointerException | Cannot enter synchronized block because the return value of \"clojure.lang.IFn.invoke()\" is null"
+    );
+    run_last(&mut eval, "(def ^:dynamic w4b-set 1)");
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(binding [w4b-set 1] (monitor-enter (set! w4b-set nil)))"
+        ),
+        "java.lang.NullPointerException | Cannot enter synchronized block because the return value of \"clojure.lang.Var.set(Object)\" is null"
+    );
+    // Post-expansion shapes: `when` reads as its `if`.
+    assert_eq!(
+        uncaught(&mut eval, "(monitor-enter (when nil nil))"),
+        "java.lang.NullPointerException | Cannot enter synchronized block"
     );
 }
 
@@ -973,11 +1238,11 @@ fn coverage_top_up_rows() {
     // the port's documented behavior).
     assert_eq!(
         fresh("(macroexpand-1 '(let [{:keys nil} {:a 1}] 42))"),
-        "(let* [map__1 {:a 1} map__1 (if (clojure.core/instance? clojure.lang.ISeq map__1) (if (clojure.core/next map__1) (clojure.lang.PersistentArrayMap/createAsIfByAssoc (clojure.core/to-array map__1)) (if (clojure.core/seq map__1) (clojure.core/first map__1) clojure.lang.PersistentArrayMap/EMPTY)) map__1)] 42)"
+        "(let* [map__1 {:a 1} map__1 (if (clojure.core/seq? map__1) (if (clojure.core/next map__1) (clojure.lang.PersistentArrayMap/createAsIfByAssoc (clojure.core/to-array map__1)) (if (clojure.core/seq map__1) (clojure.core/first map__1) clojure.lang.PersistentArrayMap/EMPTY)) map__1)] 42)"
     );
     assert_eq!(
         fresh("(macroexpand-1 '(let [{:keys #{a}} {:a 1}] a))"),
-        "(let* [map__1 {:a 1} map__1 (if (clojure.core/instance? clojure.lang.ISeq map__1) (if (clojure.core/next map__1) (clojure.lang.PersistentArrayMap/createAsIfByAssoc (clojure.core/to-array map__1)) (if (clojure.core/seq map__1) (clojure.core/first map__1) clojure.lang.PersistentArrayMap/EMPTY)) map__1) a (clojure.core/get map__1 :a)] a)"
+        "(let* [map__1 {:a 1} map__1 (if (clojure.core/seq? map__1) (if (clojure.core/next map__1) (clojure.lang.PersistentArrayMap/createAsIfByAssoc (clojure.core/to-array map__1)) (if (clojure.core/seq map__1) (clojure.core/first map__1) clojure.lang.PersistentArrayMap/EMPTY)) map__1) a (clojure.core/get map__1 :a)] a)"
     );
     // fx4_host.rs:65-67 — `class_name` surfaces through `nth`
     // (oracle `ev-nth-object`).
