@@ -83,7 +83,7 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
 
   test:
-    name: test (${{ matrix.os }}, shard ${{ matrix.shard }}/4)
+    name: test (${{ matrix.os }}, shard ${{ matrix.shard }}/8)
     runs-on: ${{ matrix.os }}
     permissions:
       contents: read # checkout
@@ -91,15 +91,15 @@ jobs:
     # No macOS leg: ordinary runs skip it (host capacity starves
     # macos-latest for hours); macOS tests run on v* tags via
     # rust-release.yml instead.
-    # Sharded 4 ways via nextest hash partitions (the suite outgrew a
-    # single leg at ~50min); nextest already runs the same suite in
+    # Sharded 8 ways via nextest hash partitions (4-way legs reached
+    # ~25min on Windows); nextest already runs the same suite in
     # quality gates, so the runner change is proven safe. Ignored
     # tests stay skipped here (cargo-test parity); gates run them.
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
-        shard: [1, 2, 3, 4]
+        shard: [1, 2, 3, 4, 5, 6, 7, 8]
     defaults:
       run:
         working-directory: rust
@@ -126,20 +126,20 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest@0.9.148
-      - run: cargo nextest run --workspace --locked --partition hash:${{ matrix.shard }}/4 --no-fail-fast
+      - run: cargo nextest run --workspace --locked --partition hash:${{ matrix.shard }}/8 --no-fail-fast
 
   msrv:
-    name: msrv (1.85, shard ${{ matrix.shard }}/4)
+    name: msrv (1.85, shard ${{ matrix.shard }}/8)
     runs-on: ubuntu-latest
     permissions:
       contents: read # checkout
       actions: write # cargo cache
-    # Sharded 4 ways like test above; the nextest binary is prebuilt
+    # Sharded 8 ways like test above; the nextest binary is prebuilt
     # (its own MSRV is irrelevant) and drives cargo 1.85.
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4]
+        shard: [1, 2, 3, 4, 5, 6, 7, 8]
     defaults:
       run:
         working-directory: rust
@@ -158,8 +158,8 @@ jobs:
       # S9A D2: LLVM-dependent compilation excluded (inkwell 0.10.0
       # declares no MSRV); the binary builds --no-default-features
       # so clj-aot never enters the unit graph.
-      - run: cargo nextest run --locked -p clj-core -p clj-eval -p clj-reader -p clj-repl -p clj-rt -p clj-value --partition hash:${{ matrix.shard }}/4 --no-fail-fast
-      - run: cargo nextest run --locked -p clojure-rs --no-default-features --partition hash:${{ matrix.shard }}/4 --no-fail-fast
+      - run: cargo nextest run --locked -p clj-core -p clj-eval -p clj-reader -p clj-repl -p clj-rt -p clj-value --partition hash:${{ matrix.shard }}/8 --no-fail-fast
+      - run: cargo nextest run --locked -p clojure-rs --no-default-features --partition hash:${{ matrix.shard }}/8 --no-fail-fast
 
   test-no-default:
     name: test unlinked (${{ matrix.os }})
@@ -259,14 +259,14 @@ jobs:
           java -Xmx2g -XX:+UseParallelGC -cp /tmp/tla-tools/tla2tools.jar tlc2.TLC \
             -workers auto -cleanup -config agent_queue.cfg agent_queue.tla
 
-  # The coverage suite outgrew a single leg (~60min), so it shards 4
+  # The coverage legs reached ~21min at 4 shards, so it shards 8
   # ways: each leg runs one nextest hash partition plus the canonical
   # LCOV pipeline (--coverage-only skips the gates and the
   # floor/patch enforcement), then the merge job below reunites the
-  # four partial LCOVs (lcov-merge sums counts) and enforces the
+  # eight partial LCOVs (lcov-merge sums counts) and enforces the
   # 100% bars on the whole.
   gates-shard:
-    name: quality gates shard (${{ matrix.shard }}/4)
+    name: quality gates shard (${{ matrix.shard }}/8)
     runs-on: ubuntu-latest
     timeout-minutes: 600
     permissions:
@@ -276,7 +276,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4]
+        shard: [1, 2, 3, 4, 5, 6, 7, 8]
     env:
       # Image repo for the cached gate image (public, so pulls stay
       # anonymous). Override with the GATE_IMAGE repo variable; pushes need
@@ -376,7 +376,7 @@ jobs:
           done
           ls "$GITHUB_WORKSPACE/ci-tools-bin"
       - name: run coverage shard
-        run: docker run --rm -v "${{ github.workspace }}:/work" -v "${{ github.workspace }}/ci-tools-bin:/tools" -w /work "$GATE_IMAGE:$GATE_KEY" /tools/rust-quality-gates rust rust/target/llvm-cov --coverage-only nextest --partition hash:${{ matrix.shard }}/4 --run-ignored all --no-fail-fast
+        run: docker run --rm -v "${{ github.workspace }}:/work" -v "${{ github.workspace }}/ci-tools-bin:/tools" -w /work "$GATE_IMAGE:$GATE_KEY" /tools/rust-quality-gates rust rust/target/llvm-cov --coverage-only nextest --partition hash:${{ matrix.shard }}/8 --run-ignored all --no-fail-fast
       # The container runs as root; hand the report back so the upload
       # below can read it.
       - name: take ownership of shard report
