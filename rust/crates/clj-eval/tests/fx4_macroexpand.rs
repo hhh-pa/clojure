@@ -1046,7 +1046,10 @@ fn monitor_exit_matrix() {
     // the same reason — identity is unimplementable for cloning
     // Box kinds).
     assert_eq!(
-        run_last(&mut eval, "(do (monitor-enter 'w4b-sk) (monitor-exit 'w4b-sk))"),
+        run_last(
+            &mut eval,
+            "(do (monitor-enter 'w4b-sk) (monitor-exit 'w4b-sk))"
+        ),
         "nil"
     );
     // `catch` sees the hierarchy (`IMS` is an `ISE` is an `RE`).
