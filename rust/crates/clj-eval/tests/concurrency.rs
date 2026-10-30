@@ -3118,6 +3118,28 @@ fn locking_object_kinds() {
 }
 
 #[test]
+fn locking_symbol_exit_matches_by_identity() {
+    // Gap #114: symbol lockees key by minted id (JVM identity),
+    // so a distinct-but-equal symbol fails the exit with IMS
+    // instead of releasing; the identical binding still exits
+    // cleanly (clones preserve the id).
+    let mut eval = boot();
+    run(&mut eval, "(in-ns 'clojure.core)");
+    // The macro path stays balanced over a symbol lockee (enter
+    // and exit read the same binding).
+    assert_eq!(run_last(&mut eval, "(locking 'g114-sym :ok)"), ":ok");
+    // The distinct exit IMSes, the held monitor stays held, and
+    // the identical exit releases (no leaked guard).
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [s 'g114-sym] (fx4-monitor-enter s) [(try (fx4-monitor-exit 'g114-sym) :released (catch IllegalStateException e :ims)) (fx4-monitor-exit s)])"
+        ),
+        "[:ims nil]"
+    );
+}
+
+#[test]
 fn locking_mutual_exclusion() {
     let mut eval = boot();
     // Racing read-modify-writes under the monitor total exactly (a
