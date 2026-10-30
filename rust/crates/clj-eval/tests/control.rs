@@ -1026,7 +1026,7 @@ fn core_r4_clojure_version() {
     // Port release literal (deliberately NOT the JVM version).
     assert_eq!(
         run_last(&mut eval, "(clojure-version)"),
-        "\"1.13.0-alpha9\""
+        "\"1.13.0-alpha11\""
     );
 }
 
