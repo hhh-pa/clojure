@@ -1841,24 +1841,51 @@ fn native_load_string(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nat
     }
 }
 
+/// One `load-reader` read step: snapshot the data-reader table,
+/// read a form, drain the fired tags. Returns the read outcome
+/// plus the post-read `*suppress-read*` gate. (Split out so
+/// `native_load_reader` stays at the cyclo-15 ratchet — the two
+/// consult branches live here instead of in the loop.)
+fn load_reader_step(
+    eval: &mut Evaluator,
+    opts: &mut clj_reader::ReaderOpts,
+    parser: &mut clj_reader::Reader,
+) -> Result<(Result<Option<Value>, clj_reader::ReaderError>, bool), NativeError> {
+    crate::core::snapshot_data_readers(eval, opts)?;
+    parser.set_opts(opts);
+    let outcome = {
+        let mut hooks = crate::reader::LiveReadHooks::new(&mut *eval);
+        parser.read_form(false, &mut hooks)
+    };
+    let fired = parser.take_fired();
+    let suppressed = opts.suppress_read;
+    crate::core::drain_fired_tags(eval, fired, suppressed)?;
+    Ok((outcome, suppressed))
+}
+
+/// `load-reader` entry checks: arity, then nil (NPE) vs
+/// non-reader (CCE) dispatch. (Split out so
+/// `native_load_reader` stays at the cyclo-15 ratchet.)
+fn load_reader_arg(args: &[Value]) -> Result<&crate::reader::StreamReader, NativeError> {
+    check_arity("clojure.core/load-reader", args, &[1])?;
+    match &args[0] {
+        Value::Nil => Err(NativeError::new(
+            ThrowClass::NullPointerException,
+            String::new(),
+        )),
+        v => match crate::reader::as_reader(v) {
+            Some(r) => Ok(r),
+            None => Err(cce_err(v, "java.io.Reader")),
+        },
+    }
+}
+
 /// `load-reader`: read every form from a reader and evaluate
 /// them, returning the last value (nil when empty — S7; probes
 /// `l-*`). `*file*` is nil, `*ns*` is isolated, `*read-eval*` is
 /// forced true (visibly), and `*pending-paths*` is untouched.
 fn native_load_reader(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
-    check_arity("clojure.core/load-reader", args, &[1])?;
-    let reader = match &args[0] {
-        Value::Nil => {
-            return Err(NativeError::new(
-                ThrowClass::NullPointerException,
-                String::new(),
-            ));
-        }
-        v => match crate::reader::as_reader(v) {
-            Some(r) => r,
-            None => return Err(cce_err(v, "java.io.Reader")),
-        },
-    };
+    let reader = load_reader_arg(args)?;
     // `Compiler.load` consumes leading whitespace before its entry
     // checks, so entry failures blame the post-skip position; the
     // parser stays out of its lock for the whole read phase (the
@@ -1890,23 +1917,14 @@ fn native_load_reader(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nat
         // snapshot, read, drain, resolve. Data-reader failures
         // surface like `load`'s (raw uncaught throwables, not
         // `CompilerException` wraps).
-        if let Err(e) = crate::core::snapshot_data_readers(eval, &mut opts) {
-            crate::reader::restore_parser(reader, parser);
-            let thrown = eval.throwable(e);
-            return Err(source_to_native(eval, "", SourceError::Uncaught(thrown)));
-        }
-        parser.set_opts(&opts);
-        let outcome = {
-            let mut hooks = crate::reader::LiveReadHooks::new(&mut *eval);
-            parser.read_form(false, &mut hooks)
+        let (outcome, suppressed) = match load_reader_step(eval, &mut opts, &mut parser) {
+            Ok(step) => step,
+            Err(e) => {
+                crate::reader::restore_parser(reader, parser);
+                let thrown = eval.throwable(e);
+                return Err(source_to_native(eval, "", SourceError::Uncaught(thrown)));
+            }
         };
-        let fired = parser.take_fired();
-        let suppressed = opts.suppress_read;
-        if let Err(e) = crate::core::drain_fired_tags(eval, fired, suppressed) {
-            crate::reader::restore_parser(reader, parser);
-            let thrown = eval.throwable(e);
-            return Err(source_to_native(eval, "", SourceError::Uncaught(thrown)));
-        }
         match outcome {
             Ok(Some(form)) => match crate::core::resolve_data_readers(eval, form, suppressed) {
                 Ok(form) => forms.push(form),
