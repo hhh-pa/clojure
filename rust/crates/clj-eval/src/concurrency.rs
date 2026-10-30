@@ -73,6 +73,12 @@ use crate::lazy::as_pending;
 use crate::ns::{NativeFnPtr, check_arity, npe, signal_to_native, str_of};
 use crate::vars::check_min_arity;
 
+/// `deref` of nil: the JVM derefs through `Future`, so a nil
+/// receiver is this NPE (shared with `libs_set`, which reads
+/// `*loaded-libs*` exactly like `@`).
+pub(crate) const DEREF_NIL: &str =
+    "Cannot invoke \"java.util.concurrent.Future.get()\" because \"fut\" is null";
+
 /// `Invalid reference state` (every validator veto, JVM `ARef`).
 fn invalid_reference_state() -> NativeError {
     NativeError::new(
@@ -542,9 +548,7 @@ fn native_deref(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErr
         Value::Future(f) => future_outcome(&f.get()),
         Value::Promise(p) => Ok(p.get()),
         Value::Var(v) => Ok(eval.deref_var(v.id, &v.sym)),
-        Value::Nil => Err(npe(
-            "Cannot invoke \"java.util.concurrent.Future.get()\" because \"fut\" is null",
-        )),
+        Value::Nil => Err(npe(DEREF_NIL)),
         other => Err(cce_err(other, "java.util.concurrent.Future")),
     }
 }
