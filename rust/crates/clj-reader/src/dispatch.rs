@@ -200,6 +200,10 @@ impl Reader {
         if self.opts.data_reader_keys.contains(sym) {
             return self.deferred_tag(sym, form, checkpoint);
         }
+        // DIVERGENCE (#94): this `inst`/`uuid` arm is hardcoded —
+        // upstream consults the `default-data-readers` VAR root
+        // here, so replacing that root is a silent no-op in this
+        // port (like `resolve_tag` eval-side).
         if sym.namespace().is_none() && matches!(sym.name(), "inst" | "uuid") {
             // String payloads validate inline (spanful); anything
             // else defers for the eval-side type dispatch (nil is

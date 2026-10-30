@@ -663,7 +663,7 @@ No slice on this branch: hard-never reasons stand alone, design-blocked rows nam
 | `*compile-files*` | implemented | tests/compiler.rs root_false_and_slot_only, false_skips_plan_and_emit, true_load_emits_fake (S18: falsy skips plan+emit; truthy plans+emits; probes k-compile-files, c-false-files, c-true-load) |
 | `*compile-path*` | implemented | tests/compiler.rs root_classes_and_slot_only, bound_path_drives_emit_fake (S18: root "classes" folded; drives emit; probes k-compile-path, c-nil-path, c-bad-path) |
 | `*compiler-options*` | implemented | tests/compiler.rs root_nil_slot_only_and_binds, bound_map_tolerated_fake (S18: data-only; bound maps tolerated; probes k-compiler-options, c-options-bound) |
-| `*data-readers*` | implemented | S6 dynamic (root `{}`); zero_oos_s6_datareaders.rs data_reader_vars, table_reads_invoke_per_occurrence, table_precedence_and_errors |
+| `*data-readers*` | implemented | S6 dynamic (root `{}`); zero_oos_s6_datareaders.rs data_reader_vars, table_reads_invoke_per_occurrence, table_precedence_and_errors; data_readers.clj/cljc autoload over `*load-path*` (zero_fence_reader.rs autoload_*) |
 | `*default-data-reader-fn*` | implemented | S6 dynamic (root nil); zero_oos_s6_datareaders.rs data_reader_vars, default_fn_fallback |
 | `*flush-on-newline*` | implemented | dyn var root true; prn/println flush iff true (S8: printsys.rs flush_rows; probes f-*) |
 | `*fn-loader*` | implemented | tests/compiler.rs root_nil_slot_only_and_binds, nil_during_load_and_compile (S18: data-only nil; probes k-root-fn-loader, c-captured, c-load-captured) |
