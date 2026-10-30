@@ -1421,7 +1421,8 @@ fn map_destructure_nested_req_outlets() {
             "(let [{:req! {{:keys! [a]} :card}, :missing m, :select s} {:card {:a 42}}] [m s])",
             "[nil {:card {:a 42}}]",
         ),
-        // Through the analyzer engine (`fn` params).
+        // `fn`-param shape (like every case in this rigged
+        // harness, this also runs through the analyzer engine).
         (
             "((fn [{:req! {{:keys! [c]} :nested}, :missing miss}] miss) {})",
             "{:nested {:c nil}}",
