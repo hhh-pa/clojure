@@ -543,7 +543,7 @@ Significant vars with no port slice, grouped below by area with the reason. (Thr
 | `set-error-mode!` | implemented | concurrency.rs set_error_mode_rows (void→nil; :bogus/nil behave as :fail) |
 | `add-watch` | implemented | concurrency.rs watch_rows (returns ref, [k ref old new]) |
 | `remove-watch` | implemented | concurrency.rs watch_rows (returns ref, missing keys no-op) |
-| `locking` | implemented | expands to the monitor-enter/exit form (builtin_expand.rs expand_locking); single global reentrant monitor (S6D); fx4_macroexpand.rs expand_locking_and_destructure_gensyms |
+| `locking` | implemented | expands to the monitor-enter/exit form (builtin_expand.rs expand_locking); per-object striped reentrant monitors (fence 3b); fx4_macroexpand.rs expand_locking_and_destructure_gensyms |
 | `pvalues` | implemented | concurrency.rs pvalues_rows (core.clj port over pcalls) |
 | `pcalls` | implemented | concurrency.rs pcalls_rows (core.clj port over pmap) |
 | `pmap` | implemented | concurrency.rs pmap_rows (core.clj port; fixed lookahead 6; lazy) |

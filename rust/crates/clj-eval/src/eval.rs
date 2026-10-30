@@ -1643,9 +1643,9 @@ impl Evaluator {
         Value::Delay(Delay::new(Value::Extension(Arc::new(closure))))
     }
 
-    /// `(locking lockee body…)`: evaluate the lockee once, hold the
-    /// global monitor over the implicit-`do` body, return its value
-    /// (nil for an empty body). A nil lockee is the JVM's
+    /// `(locking lockee body…)`: evaluate the lockee once, hold its
+    /// per-object monitor over the implicit-`do` body, return its
+    /// value (nil for an empty body). A nil lockee is the JVM's
     /// synchronized-block NPE — with a port-fixed lock name (the JVM
     /// embeds a gensym'd local, P6). The guard drops on every exit
     /// path (values, throws, `recur` signals, panics), so the
@@ -1658,7 +1658,8 @@ impl Evaluator {
                 "Cannot enter synchronized block because \"lock\" is null".to_owned(),
             )));
         }
-        let _guard = crate::concurrency::locking_acquire();
+        let key = crate::concurrency::monitor_key(&target);
+        let _guard = crate::concurrency::locking_acquire_key(key);
         self.eval_body(body, env)
     }
 

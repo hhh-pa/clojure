@@ -191,9 +191,8 @@ each entry asserts its exact behavior, so drift fails CI:
   `future` still spawns (the JVM wedges/rejects).
 - **Safety pins.** Re-entrant `force` on a `delay` raises
   `IllegalStateException` (the JVM recurses to
-  `StackOverflowError`, which would abort a Rust process);
-  `locking` holds one global reentrant monitor (the JVM locks
-  per-object). `alter-var-root` serializes per var like the
+  `StackOverflowError`, which would abort a Rust process).
+  `alter-var-root` serializes per var like the
   JVM (same-thread nesting re-enters; the outer install
   wins).
 - **Namespaces.** `ns-imports` is the explicit import table

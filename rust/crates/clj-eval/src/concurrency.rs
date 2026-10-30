@@ -55,7 +55,7 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -2132,42 +2132,76 @@ fn native_await1(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeEr
     Ok(Value::Agent(agent))
 }
 
-/// The `locking` monitor: one process-global reentrant lock (every
-/// forked evaluator shares it, so futures and agent actions mutually
-/// exclude; per-object monitors would be observably identical — only
-/// timing differs — and `std::Mutex` is non-reentrant, so ownership
-/// is tracked explicitly for nested `locking` on one thread).
-struct LockingMonitor {
-    state: Mutex<LockingState>,
+/// Per-object `locking` monitors: 64 stripes shared by every
+/// evaluator in the process, like the JVM's per-object
+/// `synchronized` (fence 3b). Stripes keep the table fixed-size:
+/// two objects sharing a shard only ever serialize, which is
+/// timing, never semantics. `std::Mutex` is non-reentrant, so
+/// ownership is tracked explicitly for nested `locking`.
+const MONITOR_STRIPES: usize = 64;
+
+struct MonitorShard {
+    state: Mutex<ShardState>,
 }
 
-struct LockingState {
+struct ShardState {
     owner: Option<thread::ThreadId>,
     count: u64,
 }
 
-impl LockingMonitor {
-    const fn new() -> Self {
-        Self {
-            state: Mutex::new(LockingState {
-                owner: None,
-                count: 0,
-            }),
+/// The striped monitor table (one global; unit tests use local
+/// instances for isolation).
+pub(crate) struct StripedMonitors {
+    shards: Vec<MonitorShard>,
+}
+
+impl StripedMonitors {
+    fn new() -> Self {
+        let mut shards = Vec::with_capacity(MONITOR_STRIPES);
+        for _ in 0..MONITOR_STRIPES {
+            shards.push(MonitorShard {
+                state: Mutex::new(ShardState {
+                    owner: None,
+                    count: 0,
+                }),
+            });
+        }
+        Self { shards }
+    }
+
+    /// One acquisition attempt (reentrant for the owning thread).
+    fn try_once(&self, key: u64) -> Option<LockingGuard<'_>> {
+        let me = thread::current().id();
+        let idx = key as usize % MONITOR_STRIPES;
+        let mut state = self.shards[idx]
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if state.owner.is_none_or(|owner| owner == me) {
+            state.owner = Some(me);
+            state.count += 1;
+            Some(LockingGuard {
+                table: self,
+                shard: idx,
+            })
+        } else {
+            None
         }
     }
-}
 
-static LOCKING_MONITOR: LockingMonitor = LockingMonitor::new();
+    /// Hold the shard for `key` (reentrant on the calling thread;
+    /// contended threads yield-spin — critical sections are short).
+    fn acquire(&self, key: u64) -> LockingGuard<'_> {
+        loop {
+            if let Some(guard) = self.try_once(key) {
+                return guard;
+            }
+            thread::yield_now();
+        }
+    }
 
-/// One held `locking` monitor: released on drop (Rust-side, so body
-/// throws and panics both release — no `finally` needed).
-pub(crate) struct LockingGuard {
-    _held: (),
-}
-
-impl Drop for LockingGuard {
-    fn drop(&mut self) {
-        let mut state = LOCKING_MONITOR
+    fn release(&self, shard: usize) {
+        let mut state = self.shards[shard]
             .state
             .lock()
             .unwrap_or_else(|e| e.into_inner());
@@ -2178,24 +2212,91 @@ impl Drop for LockingGuard {
     }
 }
 
-/// Hold the `locking` monitor (reentrant on the calling thread;
-/// contended threads yield-spin — critical sections are short).
-pub(crate) fn locking_acquire() -> LockingGuard {
-    let me = thread::current().id();
-    loop {
-        {
-            let mut state = LOCKING_MONITOR
-                .state
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            if state.owner.is_none_or(|owner| owner == me) {
-                state.owner = Some(me);
-                state.count += 1;
-                return LockingGuard { _held: () };
-            }
-        }
-        thread::yield_now();
+static MONITORS: LazyLock<StripedMonitors> = LazyLock::new(StripedMonitors::new);
+
+/// One held `locking` monitor: released on drop (Rust-side, so body
+/// throws and panics both release — no `finally` needed).
+pub(crate) struct LockingGuard<'a> {
+    table: &'a StripedMonitors,
+    shard: usize,
+}
+
+impl Drop for LockingGuard<'_> {
+    fn drop(&mut self) {
+        self.table.release(self.shard);
     }
+}
+
+/// Hash one `Debug` payload (lock keys for kinds without a minted
+/// id or reachable allocation — same value always maps alike).
+fn hash_debug(payload: &dyn std::fmt::Debug) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    format!("{payload:?}").hash(&mut hasher);
+    hasher.finish()
+}
+
+/// The monitor-table key for a lockee: minted ids where they
+/// exist, allocation addresses for shared heaps, value bits for
+/// inline kinds (same object always maps alike; distinct objects
+/// sharing a key only serialize — timing, never semantics).
+/// Nil maps to 0, but both callers raise the synchronized-block
+/// NPE first, so it never reaches the table.
+pub(crate) fn monitor_key(v: &Value) -> u64 {
+    const MIX: u64 = 0x9e37_79b9_7f4a_7c15;
+    let (tag, payload): (u64, u64) = match v {
+        Value::Nil => (0, 0),
+        Value::Bool(b) => (1, u64::from(*b)),
+        Value::Int(i) => (2, *i as u64),
+        Value::Double(f) => (3, f.to_bits()),
+        Value::BigInt(b) => (4, hash_debug(b)),
+        Value::BigInteger(b) => (5, hash_debug(b)),
+        Value::BigDec(d) => (6, hash_debug(d)),
+        Value::Ratio(r) => (7, hash_debug(r)),
+        Value::Str(s) => (8, Arc::as_ptr(s) as *const () as usize as u64),
+        Value::Char(c) => (9, u64::from(*c)),
+        Value::Symbol(s) => (10, hash_debug(&(s.namespace(), s.name()))),
+        Value::Keyword(k) => (11, hash_debug(&(k.namespace(), k.name()))),
+        Value::List(l) => (12, l.id()),
+        Value::Vector(v) => (13, v.id()),
+        Value::MapEntry { key, .. } => (14, std::ptr::from_ref(key.as_ref()) as usize as u64),
+        Value::Map(m) => (15, m.id()),
+        Value::Set(s) => (16, s.id()),
+        Value::Regex(r) => (17, Arc::as_ptr(r) as *const () as usize as u64),
+        Value::Uuid(u) => (18, u.hi ^ u.lo),
+        Value::Instant(t) => (19, t.millis as u64),
+        Value::Uri(u) => (20, u.id()),
+        Value::TaggedLiteral { form, .. } => {
+            (21, std::ptr::from_ref(form.as_ref()) as usize as u64)
+        }
+        Value::ReaderConditional { form, .. } => {
+            (22, std::ptr::from_ref(form.as_ref()) as usize as u64)
+        }
+        Value::Var(v) => (23, v.id),
+        Value::Unbound(u) => (24, u.var_id),
+        Value::Throwable(t) => (25, t.id),
+        Value::Transient(t) => (26, t.id()),
+        Value::Atom(a) => (27, a.id()),
+        Value::Delay(d) => (28, d.id()),
+        Value::Future(f) => (29, f.id()),
+        Value::Promise(p) => (30, p.id()),
+        Value::Agent(a) => (31, a.id()),
+        Value::Volatile(w) => (32, w.id()),
+        Value::Ref(r) => (33, r.id()),
+        Value::Extension(e) => (34, Arc::as_ptr(e) as *const () as usize as u64),
+        Value::HostType(h) => (35, Arc::as_ptr(h) as usize as u64),
+        Value::MultiFn(m) => (36, Arc::as_ptr(m) as usize as u64),
+        Value::Class(c) => (37, Arc::as_ptr(c) as usize as u64),
+        Value::Array(a) => (38, a.id()),
+        Value::PrimitiveVector(p) => (39, hash_debug(&(p.elem(), p.len()))),
+    };
+    tag.wrapping_mul(MIX).wrapping_add(payload)
+}
+
+/// Hold the calling thread's monitor for `key` on the global table.
+pub(crate) fn locking_acquire_key(key: u64) -> LockingGuard<'static> {
+    MONITORS.acquire(key)
 }
 
 /// The `vreset!` nil-volatile NPE (`Volatile.reset` on a null `vol`).
@@ -2514,12 +2615,177 @@ mod tests {
         );
     }
 
+    /// Fence 3b: distinct objects lock independently — key B
+    /// acquires while a thread parks on key A (channel handshake,
+    /// no timing asserts; keys 0 and 1 land on shards 0 and 1).
     #[test]
-    fn locking_monitor_starts_unowned() {
-        let monitor = LockingMonitor::new();
-        let state = monitor.state.lock().expect("fresh monitor is unpoisoned");
-        assert!(state.owner.is_none());
-        assert_eq!(state.count, 0);
+    fn striped_monitors_isolate_objects() {
+        use std::sync::mpsc;
+        let table = super::StripedMonitors::new();
+        let (parked_tx, parked_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        std::thread::scope(|s| {
+            let shared = &table;
+            s.spawn(move || {
+                let _held = shared.acquire(0);
+                parked_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+            });
+            parked_rx.recv().unwrap();
+            assert!(table.try_once(1).is_some(), "key B is independent of key A");
+            assert!(table.try_once(0).is_none());
+            release_tx.send(()).unwrap();
+        });
+    }
+
+    /// Fence 3b: a contended acquire spins until release. The
+    /// barrier makes contention certain (main holds the shard
+    /// past it, so every waiter fails its first attempt) — no
+    /// timing, fully deterministic.
+    #[test]
+    fn striped_monitors_block_until_release() {
+        use std::sync::Barrier;
+        let table = super::StripedMonitors::new();
+        let barrier = Barrier::new(4);
+        std::thread::scope(|s| {
+            for _ in 0..3 {
+                s.spawn(|| {
+                    barrier.wait();
+                    let _held = table.acquire(9);
+                });
+            }
+            let held = table.acquire(9);
+            barrier.wait();
+            drop(held);
+        });
+    }
+
+    /// Fence 3b: same-thread nesting re-enters; drops release.
+    #[test]
+    fn striped_monitors_reenter_and_release() {
+        let table = super::StripedMonitors::new();
+        let first = table.try_once(7).expect("free shard acquires");
+        let second = table.try_once(7).expect("same thread re-enters");
+        drop(first);
+        drop(second);
+        assert!(table.try_once(7).is_some());
+    }
+
+    /// Fence 3b: every value kind maps to a stable monitor key
+    /// (same value always maps alike — the reentrancy
+    /// prerequisite; distinct cells map distinctly).
+    #[test]
+    fn monitor_key_covers_every_kind() {
+        use clj_value::{
+            BigDec, ClassVal, Elem8, Instant as ValueInstant, List, MultiFn, PrimitiveVector,
+            Transient, TransientKind, TransientVector, Unbound, Uri, Uuid, new_set,
+        };
+        use std::any::Any;
+        use std::hash::Hasher;
+        #[derive(Debug)]
+        struct DummyExt;
+        impl clj_value::ExtensionValue for DummyExt {
+            fn class_name(&self) -> String {
+                "DummyExt".to_owned()
+            }
+            fn print(&self) -> String {
+                "DummyExt".to_owned()
+            }
+            fn dyn_eq(&self, other: &dyn clj_value::ExtensionValue) -> bool {
+                other.as_any().is::<DummyExt>()
+            }
+            fn dyn_hash(&self, state: &mut dyn Hasher) {
+                state.write_u8(7);
+            }
+            fn as_any(&self) -> &dyn Any {
+                self
+            }
+        }
+        let values = vec![
+            Value::Nil,
+            Value::Bool(true),
+            Value::Int(1),
+            Value::Double(1.5),
+            Value::BigInt(num_bigint::BigInt::from(1)),
+            Value::BigInteger(num_bigint::BigInt::from(2)),
+            Value::BigDec(BigDec::parse("1.5").unwrap()),
+            Value::Ratio(num_rational::BigRational::new(1.into(), 2.into())),
+            Value::Str(Arc::from("s")),
+            Value::Char('c'),
+            Value::Symbol(Symbol::new(None, "s")),
+            Value::Keyword(Keyword::new(None, "k")),
+            Value::List(List::from_vec(vec![])),
+            Value::Vector(Vector::from_vec(vec![])),
+            Value::MapEntry {
+                key: Box::new(Value::Nil),
+                val: Box::new(Value::Nil),
+            },
+            Value::Map(new_map()),
+            Value::Set(new_set()),
+            Value::Regex(Arc::from("r")),
+            Value::Uuid(Uuid::from_bits(1, 2)),
+            Value::Instant(ValueInstant::from_millis(1)),
+            Value::Uri(Box::new(Uri::parse("http://x").unwrap())),
+            Value::TaggedLiteral {
+                tag: Symbol::new(None, "t"),
+                form: Box::new(Value::Nil),
+            },
+            Value::ReaderConditional {
+                form: Box::new(Value::Nil),
+                splicing: false,
+            },
+            Value::Var(Var {
+                id: 9,
+                sym: Symbol::new(None, "v"),
+            }),
+            Value::Unbound(Unbound {
+                sym: Symbol::new(None, "u"),
+                var_id: 7,
+            }),
+            Value::Throwable(Throwable {
+                id: 1,
+                class: ThrowClass::RuntimeException,
+                message: None,
+                data: None,
+                cause: None,
+            }),
+            Value::Transient(Transient::new(
+                TransientKind::Vector(TransientVector::new()),
+            )),
+            Value::Atom(Atom::new(Value::Nil)),
+            Value::Delay(Delay::new(Value::Nil)),
+            Value::Future(Future::new()),
+            Value::Promise(Promise::new()),
+            Value::Agent(Agent::new(Value::Nil)),
+            Value::Volatile(Volatile::new(Value::Nil)),
+            Value::Ref(Ref::new(Value::Nil)),
+            Value::Extension(Arc::new(DummyExt)),
+            Value::MultiFn(Arc::new(MultiFn {
+                name: Arc::from("m"),
+                dispatch: Value::Nil,
+                default: Value::Nil,
+                methods: new_map(),
+                prefers: new_map(),
+                hierarchy: None,
+            })),
+            Value::Class(Arc::new(ClassVal::new(
+                Arc::from("C"),
+                false,
+                Arc::from(vec![]),
+            ))),
+            Value::PrimitiveVector(PrimitiveVector::empty(Elem8::Boolean)),
+        ];
+        assert_eq!(values.len(), 38);
+        for v in &values {
+            assert_eq!(super::monitor_key(v), super::monitor_key(v));
+        }
+        assert_eq!(super::monitor_key(&Value::Nil), 0);
+        // Distinct cells map distinctly (HostType/Array ride the
+        // integration table — their Rust constructors need
+        // definition scaffolding).
+        let a = Value::Atom(Atom::new(Value::Nil));
+        let b = Value::Atom(Atom::new(Value::Nil));
+        assert_ne!(super::monitor_key(&a), super::monitor_key(&b));
     }
 
     #[test]

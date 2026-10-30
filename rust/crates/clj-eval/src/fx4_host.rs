@@ -21,7 +21,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use clj_value::{ExtensionValue, List, Map, Symbol, ThrowClass, Value, new_map};
 
 use crate::coll::lookup_present;
-use crate::concurrency::{LockingGuard, locking_acquire};
+use crate::concurrency::{LockingGuard, locking_acquire_key, monitor_key};
 use crate::core::cce_err;
 use crate::error::NativeError;
 use crate::eval::Evaluator;
@@ -293,7 +293,8 @@ fn native_pam(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError
 }
 
 thread_local! {
-    static MONITORS: RefCell<Vec<LockingGuard>> = const { RefCell::new(Vec::new()) };
+    static MONITORS: RefCell<Vec<(u64, LockingGuard<'static>)>> =
+        const { RefCell::new(Vec::new()) };
 }
 
 fn native_monitor_enter(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
@@ -304,16 +305,29 @@ fn native_monitor_enter(eval: &mut Evaluator, args: &[Value]) -> Result<Value, N
             "Cannot enter synchronized block because \"lock\" is null",
         ));
     }
-    let guard = locking_acquire();
-    MONITORS.with(|stack| stack.borrow_mut().push(guard));
+    let key = monitor_key(&args[0]);
+    let guard = locking_acquire_key(key);
+    MONITORS.with(|stack| stack.borrow_mut().push((key, guard)));
     Ok(Value::Nil)
 }
 
 fn native_monitor_exit(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     let _ = eval;
     check_arity("clojure.core/fx4-monitor-exit", args, &[1])?;
-    let popped = MONITORS.with(|stack| stack.borrow_mut().pop());
-    if popped.is_none() {
+    if matches!(args[0], Value::Nil) {
+        return Err(npe(
+            "Cannot exit synchronized block because \"lock\" is null",
+        ));
+    }
+    let key = monitor_key(&args[0]);
+    let found = MONITORS.with(|stack| {
+        let mut stack = stack.borrow_mut();
+        stack
+            .iter()
+            .rposition(|(held, _)| *held == key)
+            .map(|pos| stack.remove(pos))
+    });
+    if found.is_none() {
         return Err(NativeError::new(
             ThrowClass::IllegalStateException,
             "attempt to exit a monitor not held by this thread".to_owned(),
