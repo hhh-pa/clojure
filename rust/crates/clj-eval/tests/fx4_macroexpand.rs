@@ -1073,17 +1073,20 @@ fn monitor_exit_matrix() {
         "java.lang.IllegalMonitorStateException | "
     );
     assert_eq!(run_last(&mut eval, "(monitor-exit w4b-mv)"), "nil");
-    // Content-keyed lockees (symbols hash by name) share 3b's key,
-    // so the exit releases (Box-clone exits match their enter for
-    // the same reason — identity is unimplementable for cloning
-    // Box kinds).
+    // Id-keyed lockees (symbols carry minted ids) behave
+    // identity-like: a separately-read exit is unheld (IMS),
+    // like the JVM's distinct `Symbol` objects (gap #114).
+    // (Box-clone exits still match their enter — identity is
+    // unimplementable for cloning Box kinds.)
+    run_last(&mut eval, "(def w4b-sk 'w4b-sk)");
     assert_eq!(
-        run_last(
+        uncaught(
             &mut eval,
-            "(do (monitor-enter 'w4b-sk) (monitor-exit 'w4b-sk))"
+            "(do (monitor-enter w4b-sk) (monitor-exit 'w4b-sk))"
         ),
-        "nil"
+        "java.lang.IllegalMonitorStateException | "
     );
+    assert_eq!(run_last(&mut eval, "(monitor-exit w4b-sk)"), "nil");
     // `catch` sees the JVM hierarchy (`IMS` is a direct
     // `RuntimeException`, a sibling of `ISE` — `javap` verdict):
     // exact and `RE` clauses catch, an `ISE` clause does not.

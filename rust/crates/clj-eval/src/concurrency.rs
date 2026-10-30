@@ -2404,7 +2404,12 @@ pub(crate) fn monitor_key(v: &Value) -> u64 {
         Value::Ratio(r) => (7, hash_debug(r)),
         Value::Str(s) => (8, Arc::as_ptr(s) as *const () as usize as u64),
         Value::Char(c) => (9, u64::from(*c)),
-        Value::Symbol(s) => (10, hash_debug(&(s.namespace(), s.name()))),
+        // Symbols key by minted id (JVM identity): distinct-but-equal
+        // symbols are distinct monitors, so a distinct exit IMSes
+        // instead of releasing (gap #114). Clones preserve the id,
+        // so same-binding enter/exit still match. Keywords stay
+        // content-keyed (globally interned — content is identity).
+        Value::Symbol(s) => (10, s.id()),
         Value::Keyword(k) => (11, hash_debug(&(k.namespace(), k.name()))),
         Value::List(l) => (12, l.id()),
         Value::Vector(v) => (13, v.id()),
@@ -2934,6 +2939,15 @@ mod tests {
         let a = Value::Atom(Atom::new(Value::Nil));
         let b = Value::Atom(Atom::new(Value::Nil));
         assert_ne!(super::monitor_key(&a), super::monitor_key(&b));
+        // Gap #114: distinct-but-equal symbols key apart (minted
+        // ids — the JVM's identity monitors), while separately
+        // built equal keywords still key alike (interned).
+        let s1 = Value::Symbol(Symbol::new(None, "g114"));
+        let s2 = Value::Symbol(Symbol::new(None, "g114"));
+        assert_ne!(super::monitor_key(&s1), super::monitor_key(&s2));
+        let k1 = Value::Keyword(Keyword::new(None, "g114"));
+        let k2 = Value::Keyword(Keyword::new(None, "g114"));
+        assert_eq!(super::monitor_key(&k1), super::monitor_key(&k2));
         // Exercise the test double's trait surface (coverage floor).
         let ext = DummyExt;
         assert_eq!(ext.class_name(), "DummyExt");
