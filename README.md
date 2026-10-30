@@ -185,7 +185,8 @@ each entry asserts its exact behavior, so drift fails CI:
 - **Analyzer builtins.** `let loop fn binding letfn with-redefs
   with-bindings bound-fn locking` resolve as macros and
   `macroexpand-1` expands them (`let` to `let*`, etc.) via the FX4
-  expanders; only real specials are identity.
+  expanders; only real specials and the seven fence macros are
+  identity.
 - **Agents.** `send-via` routes to the `send-off` pool (no custom
   executors); `await` on a failed agent throws instead of hanging;
   `shutdown-agents` blocks until drained (the JVM returns at

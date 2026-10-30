@@ -1,9 +1,11 @@
 # Fence 4b (macroexpand audit) — oracle probes
 
 Slice: `fence-4b-macroexpand`. Oracle: stock Clojure **1.13.0-alpha9**
-(jar from Maven Central; run lines below). Committed scripts +
-outputs live in `probes/` next to this file — every checkable claim
-here traces to a row there or to a vendored-source line.
+(jar from Maven Central; run lines below) on Oracle JDK 27+35
+(aarch64); the monitor matrix is additionally reproduced on
+Temurin OpenJDK 21.0.13 LTS. Committed scripts + outputs live in
+`probes/` next to this file — every checkable claim here traces
+to a row there or to a vendored-source line.
 
 Run (from `probes/`):
 
@@ -43,9 +45,11 @@ flawed differential; the oracle refutes both, so both reverted whole
 non-map `:or` (`did not conform to spec`). The port has no `let`-spec
 and accepts these through the lenient `destructure`-fn layer —
 `fn-or-nil`, `fn-or-empty-vec` (plain expansion), `fn-or-5` (ISeq
-error), `fn-or-vec1` (Map$Entry CCE) — which the port matches exactly
-(restored `non_map_or`, restored `:or []` eval pin). The `let`-spec
-gap predates this slice and is out of scope.
+error), `fn-or-vec1` (Map$Entry CCE — same class pair; the JVM's
+message carries a module clause the port's `Cannot cast` shape
+omits, per the port's CCE convention) — which the port otherwise
+matches (restored `non_map_or`, restored `:or []` eval pin). The
+`let`-spec gap predates this slice and is out of scope.
 
 ## Kept fixes (reviewer-verified genuine)
 
@@ -68,8 +72,10 @@ gap predates this slice and is out of scope.
 
 ## B3 pushback: nil-held `monitor-exit` is IMS, not NPE
 
-The monitor nil matrix (all rows also verified under `-Xint` and
-`-Xcomp`):
+The monitor nil matrix (`kept-fixes.out`, byte-identical under
+`-Xint`; pure-bytecode cross-check in
+`probes/monitor-matrix-jvms.txt`, unanimous across Oracle 27 /
+Temurin 21 × default / `-Xint`):
 
 - `monitor-exit-nil-held`, `-nillocal-held`, `-callnil-held` → IMS
   (nil message), for literal, local, and call nils alike — including
@@ -78,9 +84,13 @@ The monitor nil matrix (all rows also verified under `-Xint` and
   (`"null"`, `"n"`, `IFn.invoke(Object)` templates verbatim).
 - `monitor-enter-nil` → NPE (enter null-checks first).
 
-HotSpot checks ownership before null on the exit path, so the
-review's JVMS reading (null-check-first) does not hold for
-MONITOREXIT; the port keeps the state-dependent rule.
+Observed HotSpot behavior is state-dependent on the exit path on
+every JVM tested, so the port keeps the state-dependent rule. The
+template-interpreter source does show a leading `null_check`, which
+makes the held→IMS rows surprising — but behavior is the project's
+oracle standard, and no live run on any available JVM produces the
+review's NPE-always; the pure-bytecode matrix rules out a
+Clojure-compiler artifact.
 
 ## Pinned as-is
 

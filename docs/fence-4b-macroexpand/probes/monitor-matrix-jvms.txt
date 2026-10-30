@@ -1,0 +1,19 @@
+# Pure-bytecode monitor-exit(nil) matrix (ASM-generated, no Clojure involved).
+# Classes: ExitNilHeld = enter(x);exit(null). ExitNilEmpty = exit(null).
+# Run: java -cp . RunModes  (driver prints class + message per case)
+
+== Oracle JDK 27+35 (aarch64), default ==
+ExitNilHeld THROW java.lang.IllegalMonitorStateException M=null
+ExitNilEmpty THROW java.lang.NullPointerException M=Cannot exit synchronized block because "null" is null
+
+== Oracle JDK 27+35 (aarch64), -Xint ==
+ExitNilHeld THROW java.lang.IllegalMonitorStateException M=null
+ExitNilEmpty THROW java.lang.NullPointerException M=Cannot exit synchronized block because "null" is null
+
+== Temurin OpenJDK 21.0.13 LTS (aarch64), default ==
+ExitNilHeld THROW java.lang.IllegalMonitorStateException M=null
+ExitNilEmpty THROW java.lang.NullPointerException M=Cannot exit synchronized block because "null" is null
+
+== Temurin OpenJDK 21.0.13 LTS (aarch64), -Xint ==
+ExitNilHeld THROW java.lang.IllegalMonitorStateException M=null
+ExitNilEmpty THROW java.lang.NullPointerException M=Cannot exit synchronized block because "null" is null
