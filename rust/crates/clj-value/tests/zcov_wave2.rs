@@ -196,17 +196,17 @@ fn pvec_compares_as_vector() {
 fn compare_errors_name_s9_types() {
     assert_eq!(
         compare(&uuid(1, 2), &Value::Int(1)).unwrap_err().message(),
-        "Cannot compare UUID to Long"
+        "class java.lang.Long cannot be cast to class java.util.UUID (java.lang.Long and java.util.UUID are in module java.base of loader 'bootstrap')"
     );
     assert_eq!(
         compare(&Value::Int(1), &instant(0)).unwrap_err().message(),
-        "Cannot compare Long to Instant"
+        "class java.util.Date cannot be cast to class java.lang.Number (java.util.Date and java.lang.Number are in module java.base of loader 'bootstrap')"
     );
     assert_eq!(
         compare(&uri("http://example.com/"), &Value::Int(1))
             .unwrap_err()
             .message(),
-        "Cannot compare URI to Long"
+        "class java.lang.Long cannot be cast to class java.net.URI (java.lang.Long and java.net.URI are in module java.base of loader 'bootstrap')"
     );
 }
 
@@ -214,7 +214,7 @@ fn compare_errors_name_s9_types() {
 fn compare_errors_name_arrays_by_descriptor() {
     assert_eq!(
         compare(&int_array(), &Value::Int(1)).unwrap_err().message(),
-        "Cannot compare [I to Long"
+        "class [I cannot be cast to class java.lang.Comparable ([I and java.lang.Comparable are in module java.base of loader 'bootstrap')"
     );
 }
 

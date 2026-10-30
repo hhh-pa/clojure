@@ -25,6 +25,7 @@ mod future;
 pub mod hasheq;
 mod hierarchy;
 mod host;
+mod jvm;
 mod keyword;
 mod multifn;
 mod print;
@@ -63,6 +64,7 @@ pub use host::{
     HostDef, HostInst, HostKind, HostMethod, HostVal, class_name, fallback_str, find_method,
     host_eq, identity_hex, inst_hasheq, is_field, munge_ns, record_hasheq,
 };
+pub use jvm::{jvm_class_of, map_class_of, set_class_of};
 pub use keyword::Keyword;
 pub use multifn::{MultiFn, method_for, multifn_hex, multifn_str};
 pub use print::{
