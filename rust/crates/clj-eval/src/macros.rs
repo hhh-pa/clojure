@@ -324,7 +324,7 @@ fn tag_of(v: &Value) -> Option<Symbol> {
 
 /// Upstream 8aa45d128 (`Compiler.macroexpand1`): when the input
 /// form carries a type-hint tag the expansion drops (tags
-/// differ), wrap as `(identity <exp>)` carrying the input form's
+/// differ), wrap as `(clojure.core/identity <exp>)` carrying the input form's
 /// meta, so the hint survives expansion. Equal tags — and
 /// unhinted forms — pass through untouched.
 fn maybe_wrap_hint(form: &Value, exp: Value) -> Value {
