@@ -1149,3 +1149,89 @@ fn macroexpand_throw_assoc_oob() {
         "cause: {err}"
     );
 }
+
+#[test]
+fn macroexpand_hint_wrap() {
+    // Upstream 8aa45d128: a hinted form whose expansion drops the
+    // tag wraps as `(identity <exp>)` carrying the input form's
+    // meta; equal tags and unhinted forms pass through. (The hint
+    // must sit on the macro form itself: `'(^T (m ...))` quotes a
+    // one-element list headed by a list, which no macro heads.)
+    let mut eval = boot();
+    run_last(&mut eval, "(defmacro mhdrop [x] (list 'quote x))");
+    run_last(
+        &mut eval,
+        "(defmacro mhkeep [x] (with-meta (list 'quote x) {:tag 'String}))",
+    );
+    run_last(
+        &mut eval,
+        "(defmacro mhswap [x] (with-meta (list 'quote x) {:tag 'Long}))",
+    );
+    // Dropped tag: wrap appears, wearing the form's meta.
+    assert_eq!(
+        run_last(&mut eval, "(macroexpand-1 '^String (mhdrop 5))"),
+        "(clojure.core/identity (quote 5))"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(:tag (meta (macroexpand-1 '^String (mhdrop 5))))"
+        ),
+        "String"
+    );
+    // A string tag interns bare for the comparison, but the
+    // attached meta keeps the original string.
+    assert_eq!(
+        run_last(&mut eval, "(macroexpand-1 '^\"String\" (mhdrop 5))"),
+        "(clojure.core/identity (quote 5))"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(:tag (meta (macroexpand-1 '^\"String\" (mhdrop 5))))"
+        ),
+        "\"String\""
+    );
+    // Kept tag: no wrap.
+    assert_eq!(
+        run_last(&mut eval, "(macroexpand-1 '^String (mhkeep 5))"),
+        "(quote 5)"
+    );
+    // Present-but-different tag: wrap.
+    assert_eq!(
+        run_last(&mut eval, "(macroexpand-1 '^String (mhswap 5))"),
+        "(clojure.core/identity (quote 5))"
+    );
+    // A non-symbol/string tag reads nil: no wrap.
+    assert_eq!(
+        run_last(&mut eval, "(macroexpand-1 '^{:tag 42} (mhdrop 5))"),
+        "(quote 5)"
+    );
+    // Unhinted forms (quoted, meta-free, scalar expansions):
+    // unchanged behavior.
+    assert_eq!(
+        run_last(&mut eval, "(macroexpand-1 '(mhdrop 5))"),
+        "(quote 5)"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(macroexpand-1 (list 'mhdrop 5))"),
+        "(quote 5)"
+    );
+    run_last(&mut eval, "(defmacro mhint42 [] 42)");
+    assert_eq!(run_last(&mut eval, "(macroexpand-1 '(mhint42))"), "42");
+    assert_eq!(
+        run_last(&mut eval, "(macroexpand-1 '^String (mhint42))"),
+        "(clojure.core/identity 42)"
+    );
+    // The full expander stops at the `identity` head (a fn).
+    assert_eq!(
+        run_last(&mut eval, "(macroexpand '^String (mhdrop 5))"),
+        "(clojure.core/identity (quote 5))"
+    );
+    // A hint on the quoted element (not the head form) never
+    // wraps: the head is a list, so upstream returns `x`.
+    assert_eq!(
+        run_last(&mut eval, "(macroexpand-1 '(^String (mhdrop 5)))"),
+        "((mhdrop 5))"
+    );
+}
