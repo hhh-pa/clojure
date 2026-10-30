@@ -161,12 +161,10 @@ the split (S5C extends it past macroexpansion).
 ## Loader (S5A2, probe36)
 
 - `require`/`use`/`load` return nil; `loaded-libs` is a set of
-  symbols. The JVM set is sorted (`sorted?` true); the port has
-  no sorted sets, so it prints in load order and `sorted?` is
-  false (divergence, probe36 `libs-initial`,
-  `loaded-libs-shape`). `*loaded-libs*` holds the set directly
-  (the JVM wraps it in a Ref; the single-threaded port conjs the
-  root instead).
+  symbols. Like the JVM, the set is sorted (`sorted?` true) and
+  `*loaded-libs*` holds a Ref over it (fence 3a: marks commute
+  through `dosync`, joining an enclosing transaction; an aborted
+  transaction rolls the mark back).
 - Membership — not namespace existence — decides the load:
   `require` loads iff the lib is absent from `loaded-libs`, then
   applies `:as`/`:refer` even on skip (probe36 `alias-on-skip`,

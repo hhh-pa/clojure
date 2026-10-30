@@ -70,7 +70,7 @@ Creating, finding, and wiring namespaces; loading code into them.
 | `loaded-libs` | implemented | |
 | `*ns*` | implemented | |
 | `*file*` | implemented | bound while loading |
-| `*loaded-libs*` | implemented | set, not a Ref (S5A2) |
+| `*loaded-libs*` | implemented | Ref over a sorted set (fence 3a) |
 | `*loading-verbosely*` | implemented | read by `load` |
 | `*pending-paths*` | implemented | private; cycle guard |
 | `*load-path*` | implemented | port-only; dirs vector |

@@ -729,6 +729,39 @@ fn require_vector_string() {
 }
 
 #[test]
+fn loaded_libs_root_is_sorted_ref() {
+    // Fence 3a (JVM core.clj): `*loaded-libs*` holds a Ref over a
+    // sorted set — deref reads through, `loaded-libs` is sorted.
+    let fx = Fixture::new("libref");
+    fx.write("zlib.clj", "(clojure.core/in-ns 'zlib)\n(def z 1)\n");
+    fx.write("alib.clj", "(clojure.core/in-ns 'alib)\n(def a 1)\n");
+    let mut eval = boot();
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(class (var-get (var clojure.core/*loaded-libs*)))"
+        ),
+        "clojure.lang.Ref"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            &fx.within("(do (require 'zlib) (require 'alib) (loaded-libs))")
+        ),
+        "#{alib zlib}"
+    );
+    assert_eq!(run_last(&mut eval, "(sorted? (loaded-libs))"), "true");
+    // Tx-local: a mark inside `dosync` reads back in-transaction.
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(dosync (commute (var-get (var clojure.core/*loaded-libs*)) conj 'txmark) (contains? (loaded-libs) 'txmark))"
+        ),
+        "true"
+    );
+}
+
+#[test]
 fn loaded_libs_long() {
     let mut eval = boot();
     assert_eq!(
@@ -736,7 +769,135 @@ fn loaded_libs_long() {
             &mut eval,
             "(binding [clojure.core/*loaded-libs* 42] (require 'user))"
         ),
+        "java.lang.ClassCastException | class java.lang.Long cannot be cast to class java.util.concurrent.Future (java.lang.Long and java.util.concurrent.Future are in module java.base of loader 'bootstrap')"
+    );
+}
+
+#[test]
+fn loaded_libs_nil_is_deref_npe() {
+    // Fence 3a F1: a nil-bound `*loaded-libs*` reads exactly like
+    // `@nil` — deref's NPE, never the `Future` CCE.
+    let mut eval = boot();
+    let via_libs = uncaught(
+        &mut eval,
+        "(binding [clojure.core/*loaded-libs* nil] (loaded-libs))",
+    );
+    assert_eq!(via_libs, uncaught(&mut eval, "(deref nil)"));
+    assert_eq!(
+        via_libs,
+        "java.lang.NullPointerException | Cannot invoke \"java.util.concurrent.Future.get()\" because \"fut\" is null"
+    );
+}
+
+#[test]
+fn loaded_libs_ref_nonset_cast() {
+    // A Ref over a non-set derefs fine, then fails the set cast
+    // (covers the post-deref arm — a Ref is not enough).
+    let mut eval = boot();
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(binding [clojure.core/*loaded-libs* (ref 42)] (loaded-libs))"
+        ),
         "java.lang.ClassCastException | Cannot cast java.lang.Long to clojure.lang.IPersistentSet"
+    );
+}
+
+#[test]
+fn require_mark_validator_veto() {
+    // A validator-vetoed mark surfaces the commute failure (covers
+    // the mark error arm — the dosync does not swallow it).
+    let fx = Fixture::new("vetolib");
+    fx.write("vetolib.clj", "(clojure.core/in-ns 'vetolib)\n(def v 1)\n");
+    let mut eval = boot();
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            &fx.within(
+                "(binding [clojure.core/*loaded-libs* (ref #{} :validator (fn [_] false))] (require 'vetolib))"
+            )
+        ),
+        "java.lang.IllegalStateException | Invalid reference state"
+    );
+}
+
+#[test]
+fn reload_all_nil_member_no_panic() {
+    // Fence 3a F2: loaded code sharing the blank ref with a nil
+    // commute (`Util.compare`-safe) unions without panicking.
+    let fx = Fixture::new("nilunion");
+    fx.write(
+        "nil_inner.clj",
+        "(clojure.core/in-ns 'nil_inner)\n(clojure.core/dosync (clojure.core/commute (clojure.core/var-get (var clojure.core/*loaded-libs*)) clojure.core/conj nil))\n(def iv 1)\n",
+    );
+    fx.write(
+        "nil_outer.clj",
+        "(clojure.core/in-ns 'nil_outer)\n(clojure.core/require 'nil_inner)\n(def ov 2)\n",
+    );
+    let mut eval = boot();
+    assert_eq!(
+        run_last(&mut eval, &fx.within("(require 'nil_outer :reload-all)")),
+        "nil"
+    );
+    assert_eq!(run_last(&mut eval, "(contains? (loaded-libs) nil)"), "true");
+    assert_eq!(
+        run_last(&mut eval, "(contains? (loaded-libs) 'nil_outer)"),
+        "true"
+    );
+}
+
+#[test]
+fn reload_all_sabotage_member_throws() {
+    // Fence 3a NEW-M1: a `ref-set`-planted exotic member (which
+    // skips the commute's own comparison) conjoins-or-throws at the
+    // union — never silently dropped (the JVM's `reduce1 conj`
+    // CCEs the same way).
+    let fx = Fixture::new("sabunion");
+    fx.write(
+        "sab.clj",
+        "(clojure.core/in-ns 'sab)\n(clojure.core/dosync (clojure.core/ref-set (clojure.core/var-get (var clojure.core/*loaded-libs*)) #{:planted}))\n(def sv 1)\n",
+    );
+    let mut eval = boot();
+    let via_union = uncaught(&mut eval, &fx.within("(require 'sab :reload-all)"));
+    // The union failure IS the ordinary sorted-`conj` CCE (same
+    // shape, same direction — no new error is invented).
+    assert_eq!(
+        via_union,
+        uncaught(&mut eval, "(conj (sorted-set :planted) 'sab)")
+    );
+    assert_eq!(
+        via_union,
+        "java.lang.ClassCastException | class clojure.lang.Symbol cannot be cast to class clojure.lang.Keyword (clojure.lang.Symbol and clojure.lang.Keyword are in unnamed module of loader 'app')"
+    );
+}
+
+#[test]
+fn require_in_dosync_abort_rolls_back() {
+    // Fence 3a N2: `require` joins the enclosing `dosync` (no
+    // nesting failure), and an aborted transaction rolls the mark
+    // back — the headline fix, pinned.
+    let fx = Fixture::new("txreq");
+    fx.write("txjoin.clj", "(clojure.core/in-ns 'txjoin)\n(def j 1)\n");
+    fx.write("txabort.clj", "(clojure.core/in-ns 'txabort)\n(def a 1)\n");
+    let mut eval = boot();
+    assert_eq!(
+        run_last(&mut eval, &fx.within("(dosync (require 'txjoin) :ok)")),
+        ":ok"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(contains? (loaded-libs) 'txjoin)"),
+        "true"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            &fx.within("(try (dosync (require 'txabort) (throw (ex-info \"boom\" {}))) :committed (catch clojure.lang.ExceptionInfo _ :caught))")
+        ),
+        ":caught"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(contains? (loaded-libs) 'txabort)"),
+        "false"
     );
 }
 
