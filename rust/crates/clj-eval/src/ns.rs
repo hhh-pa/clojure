@@ -22,6 +22,7 @@ use clj_value::{
     Vector, new_map, new_set, pr_to_string, seq_vec,
 };
 
+use crate::concurrency::DEREF_NIL;
 use crate::core::cce_err;
 use crate::env::{Namespace, SharedRegistry};
 use crate::error::{NativeError, Signal, jvm_class_of, site_of};
@@ -1065,6 +1066,7 @@ pub(crate) fn deref_core(eval: &Evaluator, name: &str) -> Value {
 fn libs_set(eval: &mut Evaluator) -> Result<Set, NativeError> {
     let derefed = match deref_core(eval, "*loaded-libs*") {
         Value::Ref(reff) => tx_deref(eval, &reff),
+        Value::Nil => return Err(npe(DEREF_NIL)),
         v => return Err(cce_err(&v, "java.util.concurrent.Future")),
     };
     match derefed {

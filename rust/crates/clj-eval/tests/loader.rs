@@ -774,6 +774,36 @@ fn loaded_libs_long() {
 }
 
 #[test]
+fn loaded_libs_nil_is_deref_npe() {
+    // Fence 3a F1: a nil-bound `*loaded-libs*` reads exactly like
+    // `@nil` — deref's NPE, never the `Future` CCE.
+    let mut eval = boot();
+    let via_libs = uncaught(
+        &mut eval,
+        "(binding [clojure.core/*loaded-libs* nil] (loaded-libs))",
+    );
+    assert_eq!(via_libs, uncaught(&mut eval, "(deref nil)"));
+    assert_eq!(
+        via_libs,
+        "java.lang.NullPointerException | Cannot invoke \"java.util.concurrent.Future.get()\" because \"fut\" is null"
+    );
+}
+
+#[test]
+fn loaded_libs_ref_nonset_cast() {
+    // A Ref over a non-set derefs fine, then fails the set cast
+    // (covers the post-deref arm — a Ref is not enough).
+    let mut eval = boot();
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(binding [clojure.core/*loaded-libs* (ref 42)] (loaded-libs))"
+        ),
+        "java.lang.ClassCastException | Cannot cast java.lang.Long to clojure.lang.IPersistentSet"
+    );
+}
+
+#[test]
 fn eval_bare_macro_arity() {
     let mut eval = boot();
     // Bare: no `CompilerException` wrapper, no cause.
