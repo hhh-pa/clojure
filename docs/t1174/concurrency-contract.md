@@ -100,11 +100,11 @@ shapes are exact JVM text (en_US/UTC).
 ## locking
 
 - Analyzer builtin (S6D): evaluates the lockee (`nil` →
-  the `NullPointerException`), then holds a single global
-  reentrant monitor for the body (PINNED DIVERGENCE: the
-  JVM locks per-object; the port serializes every
-  `locking` body on one monitor). Resolves as a macro;
-  `macroexpand-1` returns the form unchanged
+  the `NullPointerException`), then holds the lockee's
+  per-object monitor for the body (fence 3b: a 64-stripe
+  table keyed by lockee — distinct objects lock
+  independently; same-thread nesting re-enters). Resolves
+  as a macro; `macroexpand-1` returns the form unchanged
   (macroexpand-identity divergence, like the S5B
   builtins).
 
