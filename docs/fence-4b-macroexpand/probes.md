@@ -101,12 +101,32 @@ port follows the spec text and keeps the repro for re-testing.
 - The `fn`-nested analyzer path names the fixed lock local (`"lock"`)
   instead of the expansion gensym (reviewer A6: pre-existing, honestly
   documented in `locking_rows`).
-- `with-redefs` string bindings still diverge (reviewer A4:
-  pre-existing, narrowed by F5).
-- `letfn*` CCE-vs-body-error precedence edge (reviewer A3): raising
-  the init CCE before analyzing tails is the implemented order.
-- Nested `locking`/`monitor-enter` re-entrancy (reviewer A5): the
-  JVM's mechanism for the expanded form is unknown; no port model.
+- `with-redefs` string bindings (reviewer A4, closed by #106):
+  strings seq to chars — upstream `RT.seqFrom` takes the
+  `CharSequence` arm (`StringSeq`), the macro feeds each char to
+  `` `(var …) `` (vendored `core.clj:7925`), and
+  `TheVarExpr.Parser.parse` casts straight to `Symbol`
+  (`Compiler.java`), so the first char is the CCE
+  `Character`→`Symbol`. The analyzer now seqs strings the same
+  way (the eval path already did); a lone char odd-drops and
+  `""` is empty, like the macro's `zipmap`.
+- `letfn*` CCE-vs-body-error precedence (reviewer A3, closed by
+  #106): upstream `LetFnExpr.Parser.parse` analyzes inits then
+  the body with no cast, and only casts each init to `ObjExpr`
+  in `emit` (`Compiler.java`) — so a body analysis error beats a
+  non-`fn` init CCE, while an init analysis error still beats a
+  body one. The port now analyzes inits, analyzes the body, then
+  casts, in that order.
+- Nested monitor forms (reviewer A5, pinned by #106): the input
+  is a monitor form as a lockee. `(monitor-exit (monitor-enter
+  x))` is the exit NPE here (call-form message); the observed
+  JVMs throw IMS — the inner enter yields nil (upstream
+  `MonitorEnterExpr.emit` ends in `NIL_EXPR`), so the outer exit
+  is nil-with-held, exactly the unexplained B3 split condition
+  (same mystery, not a new mechanism; the port holds the JVMS
+  rule). The sibling `(monitor-enter (monitor-exit x))` agrees
+  (enter NPE, empty stack). Both shapes are pinned in
+  `monitor_nested_forms`.
 - Exit matching uses 3b's keys: content-hashed kinds (symbols,
   Box clones) match across distinct objects, minted-id kinds
   (vectors, cells) behave identity-like. Full JVM identity is

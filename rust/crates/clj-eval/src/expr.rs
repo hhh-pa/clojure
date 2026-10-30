@@ -1975,12 +1975,13 @@ impl<'a> Analyzer<'a> {
     }
 
     /// `(with-redefs bindings body…)`: bindings seq like the
-    /// macro's `zipmap` — vectors, lists, sets, nil (empty), and
-    /// maps (entries as `MapEntry` values, like the JVM's `seq` —
-    /// a lone entry odd-drops, paired entries fail the `var`
-    /// `Symbol` cast as `MapEntry`); anything else is the `ISeq`
-    /// error under `macroexpanding with-redefs`. An odd trailing
-    /// binding silently drops (probe37 `wrd-odd`).
+    /// macro's `zipmap` — vectors, lists, sets, nil (empty),
+    /// strings (chars, like the JVM's `seq`), and maps (entries
+    /// as `MapEntry` values, like the JVM's `seq` — a lone entry
+    /// odd-drops, paired entries fail the `var` `Symbol` cast as
+    /// `MapEntry`); anything else is the `ISeq` error under
+    /// `macroexpanding with-redefs`. An odd trailing binding
+    /// silently drops (probe37 `wrd-odd`).
     fn parse_with_redefs(
         &mut self,
         items: &[&Value],
@@ -2020,11 +2021,11 @@ impl<'a> Analyzer<'a> {
         })
     }
 
-    /// The `with-redefs` binding items: vectors, lists, sets, and
-    /// nil (empty) seq; a non-empty map fails its first entry's
-    /// `Symbol` cast under `compiling var` (entries aren't
-    /// symbols); anything else is the `ISeq` error under
-    /// `macroexpanding with-redefs`.
+    /// The `with-redefs` binding items: vectors, lists, sets,
+    /// strings (chars), and nil (empty) seq; a non-empty map
+    /// fails its first entry's `Symbol` cast under `compiling
+    /// var` (entries aren't symbols); anything else is the `ISeq`
+    /// error under `macroexpanding with-redefs`.
     fn with_redefs_forms(
         &self,
         bindings: &Value,
@@ -2040,6 +2041,10 @@ impl<'a> Analyzer<'a> {
             Value::List(l) => Ok(l.iter().cloned().collect()),
             Value::Nil => Ok(Vec::new()),
             Value::Set(s) => Ok(s.iter().cloned().collect()),
+            // Fence 4b A4: strings seq to chars (like the JVM's
+            // `seq`, which feeds each char to `(var …)` — the
+            // `Symbol` cast fails as `Character`, not `ISeq`).
+            Value::Str(s) => Ok(s.chars().map(Value::Char).collect()),
             // Fence 4b E1e/E1q: maps seq to their entries (as
             // `MapEntry` values, like the JVM's `seq`) — a lone
             // entry odd-drops downstream (no error); paired entries
@@ -2951,6 +2956,14 @@ struct RawClause<'v> {
 struct FnSpec {
     name: String,
     tail: Vec<Value>,
+}
+
+/// One analyzed `letfn*` init, before the `ObjExpr` cast: a
+/// `fn`-headed init parses straight to its closure, anything else
+/// analyzes to an expression the post-body cast checks (A3).
+enum LetFnInit {
+    Fun(FunExpr),
+    Expr(Expr),
 }
 
 impl<'a> Analyzer<'a> {
@@ -4516,6 +4529,10 @@ impl<'a> Analyzer<'a> {
     }
 
     /// `(letfn* [name (fn name …) …] body…)`, lowered to [`Expr::LetFn`].
+    /// The inits analyze before the body, but the `ObjExpr` cast
+    /// waits until after it: upstream `LetFnExpr` analyzes inits
+    /// then body in `Parser.parse` and only casts in `emit`, so a
+    /// body analysis error beats a non-`fn` init CCE (fence 4b A3).
     fn parse_letfn_star(
         &mut self,
         items: &[&Value],
@@ -4528,8 +4545,12 @@ impl<'a> Analyzer<'a> {
         for (name, _) in &pairs {
             self.locals.push(name.clone());
         }
-        let fns = self.letfn_star_fns(&pairs, span)?;
+        let inits = self.letfn_star_inits(&pairs, span)?;
         let body = self.analyze_body(&items[2..], span, tail)?;
+        let mut fns = Vec::with_capacity(pairs.len());
+        for ((name, form), init) in pairs.iter().zip(inits) {
+            fns.push((name.clone(), self.letfn_star_cast(form, init, span)?));
+        }
         self.locals.truncate(base);
         Ok(Expr::LetFn { fns, body })
     }
@@ -4598,27 +4619,25 @@ impl<'a> Analyzer<'a> {
         )
     }
 
-    fn letfn_star_fns(
+    fn letfn_star_inits(
         &mut self,
         pairs: &[(String, Value)],
         span: Span,
-    ) -> Result<Vec<(String, FunExpr)>, CompileError> {
-        let mut fns = Vec::with_capacity(pairs.len());
-        for (name, form) in pairs {
-            fns.push((name.clone(), self.letfn_star_fun(form, span)?));
+    ) -> Result<Vec<LetFnInit>, CompileError> {
+        let mut inits = Vec::with_capacity(pairs.len());
+        for (_, form) in pairs {
+            inits.push(self.letfn_star_init(form, span)?);
         }
-        Ok(fns)
+        Ok(inits)
     }
 
-    fn letfn_star_fun(&mut self, form: &Value, span: Span) -> Result<FunExpr, CompileError> {
+    fn letfn_star_init(&mut self, form: &Value, span: Span) -> Result<LetFnInit, CompileError> {
         // Fence 4b E1k/E1r: `letfn*` inits compile as expressions,
         // then cast to `ObjExpr`. A `fn`-headed init parses
         // directly (a named `fn` would otherwise analyze to the
         // self-recursion `LetFn` wrap, hiding the `FunExpr`);
-        // anything else analyzes and must come back a `fn` (macros
-        // expanding to `fn` qualify) or the CCE names the source
-        // form's class (the compiler-internal `NumberExpr`/`LetExpr`
-        // kinds have no port counterpart).
+        // anything else analyzes unchecked — the cast waits for the
+        // body (A3).
         if let Value::List(list) = form {
             let items: Vec<Value> = list.iter().cloned().collect();
             let rest = strip_fn_head(&items);
@@ -4629,12 +4648,26 @@ impl<'a> Analyzer<'a> {
                 if let Some(n) = name {
                     fun.display = fun.display.replacen("/fn--", &format!("/{n}--"), 1);
                 }
-                return Ok(fun);
+                return Ok(LetFnInit::Fun(fun));
             }
         }
-        match self.analyze(form, span, false)? {
-            Expr::Fn(fun) => Ok(fun),
-            _ => Err(self.err(
+        Ok(LetFnInit::Expr(self.analyze(form, span, false)?))
+    }
+
+    /// The emit-time `ObjExpr` cast (fence 4b A3): a `fn` result
+    /// qualifies (macros expanding to `fn` included) or the CCE
+    /// names the source form's class (the compiler-internal
+    /// `NumberExpr`/`LetExpr` kinds have no port counterpart).
+    fn letfn_star_cast(
+        &self,
+        form: &Value,
+        init: LetFnInit,
+        span: Span,
+    ) -> Result<FunExpr, CompileError> {
+        match init {
+            LetFnInit::Fun(fun) => Ok(fun),
+            LetFnInit::Expr(Expr::Fn(fun)) => Ok(fun),
+            LetFnInit::Expr(_) => Err(self.err(
                 class::CLASS_CAST,
                 NativeError::cast(&jvm_class_of(form), "clojure.lang.Compiler$ObjExpr")
                     .into_inner()
