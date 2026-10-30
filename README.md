@@ -198,8 +198,7 @@ each entry asserts its exact behavior, so drift fails CI:
   wins).
 - **Namespaces.** `ns-imports` is the explicit import table
   (sorted; fresh namespaces seed the 106 JVM default imports
-  flat per namespace, #74); `*loaded-libs*` is a plain set,
-  not a ref.
+  flat per namespace, #74).
 
 ## Out of scope
 

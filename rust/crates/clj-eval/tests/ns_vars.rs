@@ -104,7 +104,7 @@ fn boot_shape() {
     // `*loaded-libs*` is private: read it through `var`
     // (unchecked, like the JVM) plus `var-get`.
     assert_eq!(
-        run_last(&mut eval, "(var-get (var clojure.core/*loaded-libs*))"),
+        run_last(&mut eval, "@(var-get (var clojure.core/*loaded-libs*))"),
         "#{}"
     );
     assert_eq!(run_last(&mut eval, "*load-path*"), "[]");
