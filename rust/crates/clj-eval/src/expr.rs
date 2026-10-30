@@ -1158,9 +1158,11 @@ impl<'a> Analyzer<'a> {
         Ok(())
     }
 
-    /// Expand a macro-headed list (`isMacro` + call): locals shadow
-    /// macros; private cross-namespace macros escape bare (probed:
-    /// direct and nested invocations alike surface the raw
+    /// Expand a macro-headed list (`isMacro` + call, then the
+    /// 8aa45d128 hint wrap — upstream `analyzeSeq` funnels through
+    /// `macroexpand1`): locals shadow macros; private
+    /// cross-namespace macros escape bare (probed: direct and
+    /// nested invocations alike surface the raw
     /// `IllegalStateException`).
     fn try_expand_macro(
         &mut self,
@@ -1191,7 +1193,7 @@ impl<'a> Analyzer<'a> {
         let arg_vals: Vec<Value> = args.iter().map(|a| (*a).clone()).collect();
         let expanded =
             crate::macros::expand1(self.eval, head, &mac.root, form, &env, &arg_vals, span)?;
-        Ok(Some(expanded))
+        Ok(Some(crate::macros::maybe_wrap_hint(form, expanded)))
     }
 
     /// Whether a global binding shadows a shadowable-macro
