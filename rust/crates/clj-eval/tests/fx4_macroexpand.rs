@@ -862,6 +862,10 @@ fn host_natives_and_rewrites() {
     run_last(&mut eval, "(in-ns 'clojure.core)");
     assert_eq!(
         uncaught(&mut eval, "(fx4-monitor-exit nil)"),
+        "java.lang.NullPointerException | Cannot exit synchronized block because \"lock\" is null"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(fx4-monitor-exit :never-entered)"),
         "java.lang.IllegalStateException | attempt to exit a monitor not held by this thread"
     );
     assert_eq!(
@@ -870,6 +874,22 @@ fn host_natives_and_rewrites() {
             "(do (fx4-monitor-enter :x) (fx4-monitor-exit :x) 1)"
         ),
         "1"
+    );
+    // Exit matches by lockee: a wrong exit fails without releasing,
+    // and crossing exits release in any order (fence 3b).
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(do (fx4-monitor-enter :a) (fx4-monitor-exit :b))"
+        ),
+        "java.lang.IllegalStateException | attempt to exit a monitor not held by this thread"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(do (fx4-monitor-enter :a) (fx4-monitor-enter :b) (fx4-monitor-exit :a) (fx4-monitor-exit :b) :crossed)"
+        ),
+        ":crossed"
     );
     assert_eq!(
         uncaught(&mut eval, "(fx4-monitor-enter nil)"),
