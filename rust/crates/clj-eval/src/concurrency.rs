@@ -20,11 +20,13 @@
 //!
 //! S6C adds agents: `agent` (state + `:meta`/`:validator`/
 //! `:error-handler`/`:error-mode`), `send` (fixed pool) / `send-off`
-//! (unbounded pool) / `send-via` (routes to `send-off` — pinned
-//! divergence, no custom executors), `await`/`await-for` (barrier
-//! rendezvous over the `send` pool, like the JVM's `count-down`),
-//! `agent-error`, `restart-agent`, and `shutdown-agents` (joins the
-//! pools and the future threads). Per-agent FIFO ordering comes from
+//! (unbounded pool) / `send-via` (custom executors since fence 3c
+//! — the `(executor)` kind; nil wedges, like the JVM),
+//! `await`/`await-for` (barrier rendezvous over the `send` pool,
+//! like the JVM's `count-down` — stuck barriers hang, like the
+//! JVM), `agent-error`, `restart-agent`, and `shutdown-agents`
+//! (returns at once; the exit join drains). Per-agent FIFO ordering
+//! comes from
 //! the cell queue ([`Agent::enqueue`](clj_value::Agent::enqueue)):
 //! nested sends from an action run after it (no self-deadlock).
 //! Oracles: `/tmp/s6c-probe*.clj`; rules:
@@ -60,9 +62,9 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use clj_value::{
-    Agent, AgentAction, AgentPool, Atom, Delay, DelayState, ErrorMode, Future, FutureOutcome,
-    FutureState, Keyword, Map, PrintOpts, Promise, QueuedAction, Ref, Symbol, ThrowClass,
-    Throwable, Value, Var, Vector, Volatile, new_map, pr_to_string,
+    Agent, AgentAction, AgentPool, Atom, Delay, DelayState, ErrorMode, ExecTarget, Executor,
+    Future, FutureOutcome, FutureState, Keyword, Map, PrintOpts, Promise, QueuedAction, Ref,
+    Symbol, ThrowClass, Throwable, Value, Var, Vector, Volatile, new_map, pr_to_string,
 };
 
 use crate::core::{cce_err, is_ifn};
@@ -918,6 +920,26 @@ impl AgentSystem {
         }
     }
 
+    /// The pools for a custom-executor dispatch: shutdown-blind
+    /// (custom executors never shut down — `shutdown-agents`
+    /// touches the two pools only, like the JVM). Pools born
+    /// post-shutdown start shut (their workers idle on the dropped
+    /// queue; only custom heads ever pump on them — pool heads
+    /// still reject at the send, and handover checks the pool flag).
+    pub(crate) fn pools_for_custom(&self) -> Result<Arc<AgentPools>, NativeError> {
+        if let Some(pools) = self.pools_for_send()? {
+            return Ok(pools);
+        }
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(pools) = inner.pools.clone() {
+            return Ok(pools);
+        }
+        let pools = AgentPools::create()?;
+        inner.parked.extend(pools.begin_shutdown());
+        inner.pools = Some(pools.clone());
+        Ok(pools)
+    }
+
     /// Latch shutdown and park the worker handles for the exit
     /// join (in-flight heads finish; queued-but-unstarted heads
     /// drop like the JVM's rejected `execute`; later sends
@@ -963,10 +985,9 @@ struct AgentWork {
 /// The agent thread pools: a fixed `send` pool
 /// (`available_parallelism`, else 4) over one `mpsc` queue, plus a
 /// `send-off` pool spawning one thread per action (unbounded, like
-/// the JVM's cached pool; `send-via` routes here — pinned divergence,
-/// no custom executors). Finished send-off threads are reaped on the
-/// next spawn; shutdown drops the `send` queue (workers exit after
-/// draining) and joins every thread.
+/// the JVM's cached pool). Finished send-off threads are reaped on
+/// the next spawn; shutdown drops the `send` queue (workers exit
+/// after draining) and joins every thread.
 pub struct AgentPools {
     inner: Mutex<AgentPoolsInner>,
     sendoff_seq: AtomicU64,
@@ -1114,6 +1135,48 @@ fn reject_head(agent: &Agent, mut head: QueuedAction) {
     }
 }
 
+/// Dispatch a dequeued head to its own target (each action
+/// remembers its executor, like the JVM's per-`Action` `exec`).
+/// Pool heads route by pool; custom heads submit onto their
+/// executor (custom executors never shut down — `shutdown-agents`
+/// touches the two pools only, like the JVM); nil heads wedge (the
+/// JVM's NPE'd `execute`).
+fn dispatch_head(pools: &Arc<AgentPools>, agent: &Agent, head: QueuedAction) {
+    // The target clones cheaply (executor handles are `Arc`s); the
+    // head itself moves into exactly one arm.
+    match head.exec.clone() {
+        ExecTarget::Pool => pools_dispatch(pools, agent, head),
+        ExecTarget::Custom(ex) => {
+            let pools = Arc::clone(pools);
+            let agent = agent.clone();
+            ex.submit(Box::new(move || pump_agent(&pools, &agent, head)));
+        }
+        ExecTarget::Nil => nil_executor_wedge(agent, head),
+    }
+}
+
+/// The nil-executor execute attempt (probed): the agent's error
+/// handler sees this NPE (or nothing, when no handler is
+/// installed), and the head wedges at the queue front — the send
+/// that queued it already returned the agent.
+const NIL_EXEC_NPE: &str = "Cannot invoke \"java.util.concurrent.Executor.execute(java.lang.Runnable)\" because \"this.exec\" is null";
+
+fn nil_executor_wedge(agent: &Agent, mut head: QueuedAction) {
+    let handler = agent.lock().error_handler.clone();
+    if let Some(handler) = handler {
+        let npe = Throwable {
+            id: 0,
+            class: ThrowClass::NullPointerException,
+            message: Some(Arc::from(NIL_EXEC_NPE)),
+            data: None,
+            cause: None,
+        };
+        head.action
+            .handle_error(&handler, &Value::Agent(agent.clone()), &npe);
+    }
+    agent.rewedge(head);
+}
+
 /// Dispatch a dequeued head to its own pool (each action remembers
 /// its pool). Refused dispatches (shut down, queue gone, workers
 /// dead) drop the head after notifying the handler — never inline.
@@ -1199,10 +1262,10 @@ fn dispatch_sendoff(pools: &Arc<AgentPools>, agent: &Agent, head: QueuedAction) 
 /// recursion could overflow).
 fn pump_agent(pools: &Arc<AgentPools>, agent: &Agent, head: QueuedAction) {
     if let Some(next) = execute_head(agent, head.action, pools) {
-        if pools.is_shutdown() {
+        if pools.is_shutdown() && matches!(next.exec, ExecTarget::Pool) {
             reject_head(agent, next);
         } else {
-            pools_dispatch(pools, agent, next);
+            dispatch_head(pools, agent, next);
         }
     }
 }
@@ -1213,7 +1276,7 @@ fn pump_agent(pools: &Arc<AgentPools>, agent: &Agent, head: QueuedAction) {
 fn release_outbox(outbox: Vec<(Agent, QueuedAction)>, pools: &Arc<AgentPools>) {
     for (target, item) in outbox {
         if let Some(head) = target.enqueue_nested(item) {
-            pools_dispatch(pools, &target, head);
+            dispatch_head(pools, &target, head);
         }
     }
 }
@@ -1594,6 +1657,7 @@ fn native_agent(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErr
 fn send_action(
     eval: &mut Evaluator,
     pool: AgentPool,
+    exec: ExecTarget,
     agent: &Agent,
     f: &Value,
     extra: &[Value],
@@ -1607,6 +1671,7 @@ fn send_action(
     };
     let item = QueuedAction {
         pool,
+        exec,
         action: Box::new(action),
     };
     // S19 §1f: inside a running transaction the send validates
@@ -1647,14 +1712,26 @@ pub(crate) fn enqueue_send_item(
     // No failed pre-check: `enqueue` rejects failed agents under its
     // own lock with the same latched error (a restart racing the
     // send linearizes as success either way).
-    let pools = eval.agent_pools_for_send()?;
     match agent.enqueue(item) {
-        Ok(Some(head)) => match pools.as_ref() {
-            Some(pools) => pools_dispatch(pools, agent, head),
-            // Shut down: the head drops (the JVM's rejected
-            // `execute`); the queue wedges, the send returns.
-            None => reject_head(agent, head),
-        },
+        Ok(Some(head)) => {
+            // The target clones cheaply (executor handles are
+            // `Arc`s); the head itself moves into exactly one arm.
+            match head.exec.clone() {
+                ExecTarget::Pool => match eval.agent_pools_for_send()? {
+                    Some(pools) => dispatch_head(&pools, agent, head),
+                    // Shut down: the head drops (the JVM's rejected
+                    // `execute`); the queue wedges, the send returns.
+                    None => reject_head(agent, head),
+                },
+                // Custom executors never shut down (like the JVM).
+                ExecTarget::Custom(_) => {
+                    let pools = eval.agent_pools_for_custom()?;
+                    dispatch_head(&pools, agent, head);
+                }
+                // Nil executors wedge without touching the pools.
+                ExecTarget::Nil => nil_executor_wedge(agent, head),
+            }
+        }
         Ok(None) => {}
         Err(error) => return Err(agent_failed(&error)),
     }
@@ -1664,22 +1741,51 @@ pub(crate) fn enqueue_send_item(
 fn native_send(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_min_arity("clojure.core/send", args, 2)?;
     let agent = as_agent(&args[0], DISPATCH_NIL)?;
-    send_action(eval, AgentPool::Send, &agent, &args[1], &args[2..])
+    send_action(
+        eval,
+        AgentPool::Send,
+        ExecTarget::Pool,
+        &agent,
+        &args[1],
+        &args[2..],
+    )
 }
 
 fn native_send_off(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_min_arity("clojure.core/send-off", args, 2)?;
     let agent = as_agent(&args[0], DISPATCH_NIL)?;
-    send_action(eval, AgentPool::SendOff, &agent, &args[1], &args[2..])
+    send_action(
+        eval,
+        AgentPool::SendOff,
+        ExecTarget::Pool,
+        &agent,
+        &args[1],
+        &args[2..],
+    )
 }
 
+/// `send-via`: dispatch onto the given executor (fence 3c). A
+/// non-executor is the JVM checkcast CCE; nil sends (the execute
+/// attempt NPEs and the head wedges — probed).
 fn native_send_via(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_min_arity("clojure.core/send-via", args, 3)?;
     let agent = as_agent(&args[1], DISPATCH_NIL)?;
-    // The executor is accepted and ignored (PINNED DIVERGENCE: the
-    // port has no custom executors, so every `send-via` routes to
-    // the `send-off` pool).
-    send_action(eval, AgentPool::SendOff, &agent, &args[2], &args[3..])
+    let exec = match &args[0] {
+        Value::Executor(x) => ExecTarget::Custom(x.clone()),
+        Value::Nil => ExecTarget::Nil,
+        other => return Err(cce_err(other, "java.util.concurrent.Executor")),
+    };
+    // The pool tag rides along unused for custom targets (it only
+    // routes [`ExecTarget::Pool`] heads).
+    send_action(eval, AgentPool::SendOff, exec, &agent, &args[2], &args[3..])
+}
+
+/// `(executor)`: a fresh single-thread executor (port-added — no
+/// upstream constructor exists and interop is out of scope).
+fn native_executor(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    let _ = eval;
+    check_arity("clojure.core/executor", args, &[0])?;
+    Ok(Value::Executor(Executor::new()))
 }
 
 /// Refuse `await`/`await-for` inside an agent action (the JVM's
@@ -1721,33 +1827,26 @@ fn send_barriers(
     for arg in args {
         let agent = as_agent(arg, DISPATCH_NIL)?;
         let count_down = barrier_fn(eval, tx.clone());
-        send_action(eval, AgentPool::Send, &agent, &count_down, &[])?;
+        send_action(
+            eval,
+            AgentPool::Send,
+            ExecTarget::Pool,
+            &agent,
+            &count_down,
+            &[],
+        )?;
         agents.push(agent);
     }
     Ok((agents, rx))
 }
 
-/// Throw when any awaited agent is failed (checked while waiting, so
-/// a failure racing the wait surfaces instead of hanging).
-fn check_await_errors(agents: &[Agent]) -> Result<(), NativeError> {
-    for agent in agents {
-        if let Some(error) = agent.error() {
-            return Err(agent_failed(&error));
-        }
-    }
-    Ok(())
-}
-
-/// Wait for every barrier (an `await` rendezvous): each loop polls
-/// the latch and the agents' errors, so an agent that fails after its
-/// barrier queued throws instead of hanging (DIVERGENCE: the JVM
-/// blocks forever there; `await-for` likewise throws on observed
-/// failure instead of waiting out the deadline for `false`).
-/// A deadline bounds the wait (`false` on
-/// expiry); an expired deadline waits nothing (like the JVM's latch,
-/// which checks once without waiting). A dropped barrier — a
-/// `:clear-actions` restart racing the wait — ends it early
-/// (DIVERGENCE: the JVM never returns).
+/// Wait for every barrier (an `await` rendezvous), exactly like
+/// the JVM's latch wait: failures never surface here (an agent that
+/// fails after its barrier queued leaves the barrier stuck, so the
+/// wait hangs); a dropped barrier — a `:clear-actions` restart
+/// racing the wait, or post-shutdown drops — hangs too (a deadline
+/// still bounds `await-for` to `false`; an expired deadline waits
+/// nothing, like the JVM's latch, which checks once).
 fn await_latches(
     agents: &[Agent],
     rx: &mpsc::Receiver<()>,
@@ -1768,14 +1867,20 @@ fn await_latches(
                     remaining -= 1;
                     continue;
                 }
+                // Dropped barriers never count down: without a
+                // deadline the wait never returns (park forever —
+                // spurious wakeups re-park); with one the deadline
+                // still bounds the wait to `false`.
                 Err(RecvTimeoutError::Disconnected) => {
-                    check_await_errors(agents)?;
-                    return Ok(true);
+                    if deadline.is_none() {
+                        loop {
+                            std::thread::park();
+                        }
+                    }
                 }
                 Err(RecvTimeoutError::Timeout) => {}
             }
         }
-        check_await_errors(agents)?;
         if deadline.is_some_and(|d| Instant::now() >= d) {
             return Ok(false);
         }
@@ -1838,11 +1943,23 @@ fn native_restart_agent(eval: &mut Evaluator, args: &[Value]) -> Result<Value, N
         .restart_publish(args[1].clone(), clear)
         .ok_or_else(restart_not_needed)?;
     if let Some(head) = head {
-        match eval.agent_pools_for_send()? {
-            Some(pools) => pools_dispatch(&pools, &agent, head),
-            // Shut down: the resumed head drops (the JVM's rejected
-            // re-`execute`); the restart itself still succeeded.
-            None => reject_head(&agent, head),
+        match head.exec.clone() {
+            ExecTarget::Pool => match eval.agent_pools_for_send()? {
+                Some(pools) => dispatch_head(&pools, &agent, head),
+                // Shut down: the resumed head drops (the JVM's
+                // rejected re-`execute`); the restart itself still
+                // succeeded.
+                None => reject_head(&agent, head),
+            },
+            // A resumed custom head re-runs on its own executor
+            // (shutdown-blind, like the JVM).
+            ExecTarget::Custom(_) => {
+                let pools = eval.agent_pools_for_custom()?;
+                dispatch_head(&pools, &agent, head);
+            }
+            // A resumed nil head re-wedges (the JVM re-attempts the
+            // NPE'd `execute`).
+            ExecTarget::Nil => nil_executor_wedge(&agent, head),
         }
     }
     Ok(args[1].clone())
@@ -2536,6 +2653,7 @@ pub(crate) const CONC_NATIVES: &[(&str, NativeFnPtr)] = &[
     ("send", native_send),
     ("send-off", native_send_off),
     ("send-via", native_send_via),
+    ("executor", native_executor),
     ("await", native_await),
     ("await-for", native_await_for),
     ("agent-error", native_agent_error),
@@ -2903,20 +3021,13 @@ mod tests {
     }
 
     #[test]
-    fn check_await_errors_reports_latched_failure() {
-        // Direct pin: a racing failure mid-wait is timing, but the
-        // check itself runs on any failed cell.
-        let failed = Agent::new(Value::Int(0));
-        failed.complete_failed(Throwable {
-            id: 1,
-            class: ThrowClass::RuntimeException,
-            message: Some(std::sync::Arc::from("boom")),
-            data: None,
-            cause: None,
-        });
-        assert!(check_await_errors(&[failed]).is_err());
-        let clean = Agent::new(Value::Int(0));
-        assert!(check_await_errors(&[clean]).is_ok());
+    fn await_latches_ignores_failures_until_barriers() {
+        // Fence 3c: failures never surface from the wait itself (the
+        // JVM's latch waits through them) — a zero-agent wait
+        // returns at once without consulting any cell.
+        let (_, rx) = mpsc::channel();
+        assert!(await_latches(&[], &rx, None).unwrap());
+        assert!(await_latches(&[], &rx, Some(Duration::from_millis(1))).unwrap());
     }
 
     #[test]
@@ -3023,6 +3134,7 @@ mod tests {
         let fired = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let head = QueuedAction {
             pool: AgentPool::SendOff,
+            exec: ExecTarget::Pool,
             action: Box::new(RecordReject {
                 fired: std::sync::Arc::clone(&fired),
             }),

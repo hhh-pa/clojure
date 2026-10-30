@@ -498,6 +498,11 @@ fn print_more(v: &Value, opts: &PrintOpts, level: Option<i64>, out: &mut String)
             )
             .unwrap();
         }
+        Value::Executor(x) => {
+            let id = x.id();
+            let class = x.jvm_class();
+            write!(out, "#object[{class} 0x{id:x} \"{class}@{id:x}\"]").unwrap();
+        }
         other => print_port_or_rest(other, opts, level, out),
     }
 }
@@ -1088,6 +1093,7 @@ fn java_debug_rest(v: &Value) -> String {
         Value::Delay(d) => format!("clojure.lang.Delay@{:x}", d.id()),
         Value::Agent(a) => format!("clojure.lang.Agent@{:x}", a.id()),
         Value::Volatile(v) => format!("clojure.lang.Volatile@{:x}", v.id()),
+        Value::Executor(x) => format!("{}@{:x}", x.jvm_class(), x.id()),
         Value::Extension(e) => e.print(),
         // Port-defined types: descriptors render their name;
         // instances render the `toString` fallback (pure — a custom

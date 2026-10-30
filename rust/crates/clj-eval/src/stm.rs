@@ -1022,7 +1022,7 @@ pub(crate) const STM_NATIVES: &[(&str, NativeFnPtr)] = &[
 mod tests {
     use super::*;
     use clj_value::Symbol;
-    use clj_value::{AgentAction, AgentPool, Throwable, Var};
+    use clj_value::{AgentAction, AgentPool, ExecTarget, Throwable, Var};
     use std::sync::Arc;
 
     /// A ref with a fabricated point/history (the contention-only
@@ -1364,6 +1364,7 @@ mod tests {
         });
         let item = QueuedAction {
             pool: AgentPool::Send,
+            exec: ExecTarget::Pool,
             action: Box::new(DropAction),
         };
         (agent, item)

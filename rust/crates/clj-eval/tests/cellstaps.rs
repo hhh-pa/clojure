@@ -391,6 +391,14 @@ fn volatile_compare_name() {
     assert_eq!(err.message(), "Cannot compare Volatile to Long");
 }
 
+#[test]
+fn executor_compare_name() {
+    // Fence 3c: same port-side pin for the `Executor` kind.
+    let v = Value::Executor(clj_value::Executor::new());
+    let err = clj_value::compare(&v, &Value::Int(1)).expect_err("executor is incomparable");
+    assert_eq!(err.message(), "Cannot compare Executor to Long");
+}
+
 // ---- taps ----
 
 #[test]

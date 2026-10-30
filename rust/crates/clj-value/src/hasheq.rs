@@ -249,6 +249,7 @@ fn hasheq_rest(v: &Value) -> i32 {
         Value::Agent(a) => id_hash(a.id()),
         Value::Volatile(v) => id_hash(v.id()),
         Value::Ref(r) => id_hash(r.id()),
+        Value::Executor(x) => id_hash(x.id()),
         Value::Extension(ext) => hasheq_extension(&**ext),
         // All other variants are handled by `hasheq`/`hasheq_mid`
         // (the single caller partitions the variants).
@@ -387,6 +388,7 @@ fn hash_code_rest(v: &Value) -> i32 {
         Value::Agent(a) => id_hash(a.id()),
         Value::Volatile(v) => id_hash(v.id()),
         Value::Ref(r) => id_hash(r.id()),
+        Value::Executor(x) => id_hash(x.id()),
         // JVM `.hashCode`s: in-range `BigInt` uses the `Long`
         // bit mix (`BigInt.hashCode`), `BigInteger` always uses
         // `BigInteger.hashCode`, decimals use the UNstripped

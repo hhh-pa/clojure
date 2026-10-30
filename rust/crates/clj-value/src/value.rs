@@ -38,9 +38,9 @@ use std::sync::Arc;
 use num_traits::ToPrimitive;
 
 use crate::{
-    Agent, Array, Atom, ClassVal, Delay, ExtensionValue, Future, HostInst, HostKind, HostVal,
-    Keyword, MultiFn, PrimitiveVector, Promise, Ref, Symbol, Throwable, Transient, Unbound, Var,
-    Volatile, host_eq,
+    Agent, Array, Atom, ClassVal, Delay, Executor, ExtensionValue, Future, HostInst, HostKind,
+    HostVal, Keyword, MultiFn, PrimitiveVector, Promise, Ref, Symbol, Throwable, Transient,
+    Unbound, Var, Volatile, host_eq,
 };
 
 /// Deterministic Fx hasher for maps/sets (rpds's default RandomState
@@ -883,6 +883,9 @@ pub enum Value {
     /// A primitive vector (S15 `vector-of`): immutable, sequential
     /// equality like vectors (see [`PrimitiveVector`]).
     PrimitiveVector(PrimitiveVector),
+    /// An executor (fence 3c): a single-thread pool `send-via`
+    /// honors. Identity equality (shared pool — no meta).
+    Executor(Executor),
 }
 
 /// Read metadata off a sequence extension value (borrowed).
@@ -1190,6 +1193,7 @@ fn value_eq_rest(a: &Value, b: &Value) -> bool {
         (Value::Agent(a), Value::Agent(b)) => cell_meta_eq(a.same_cell(b), a.meta(), b.meta()),
         (Value::Volatile(a), Value::Volatile(b)) => a.same_cell(b),
         (Value::Ref(a), Value::Ref(b)) => cell_meta_eq(a.same_cell(b), a.meta(), b.meta()),
+        (Value::Executor(a), Value::Executor(b)) => a.same_pool(b),
         (Value::Extension(a), Value::Extension(b)) => a.dyn_eq(&**b),
         // Classes compare by name alone (same name is `=`, whatever
         // the import path that produced the value).
@@ -1441,6 +1445,7 @@ fn id_cell_tag(v: &Value) -> Option<(u8, u64)> {
         Value::Agent(a) => Some((22, a.id())),
         Value::Volatile(v) => Some((27, v.id())),
         Value::Ref(r) => Some((28, r.id())),
+        Value::Executor(x) => Some((30, x.id())),
         _ => None,
     }
 }
