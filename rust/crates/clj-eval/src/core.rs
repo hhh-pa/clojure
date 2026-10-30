@@ -536,26 +536,35 @@ fn mul(eval: &mut Evaluator, a: Num, b: Num) -> Result<Num, NativeError> {
 }
 
 /// Promoted `/`: `Int`/`Int` is exact when divisible (a reduced
-/// ratio otherwise — `(/ 1 2)` is `1/2`, never a `Double`); the
-/// exact `MIN/-1` promotes to `BigInt` (`LongOps.divide` routes any
-/// `MIN` side through `BigIntOps.divide`). Tower division is exact
-/// (`(/ 5N 2)` → `5/2`, a non-terminating decimal fails like
-/// `(bigdec 1/3)`), or rounded under a bound `*math-context*` (S2).
+/// ratio otherwise — `(/ 1 2)` is `1/2`, never a `Double`); any
+/// `MIN` side routes through `BigIntOps.divide`, so integral
+/// quotients (`MIN/-1`, `MIN`/`MIN`, `MIN`/2, `0`/`MIN`) come
+/// back `BigInt`. Tower division is exact (`(/ 5N 2)` → `5/2`, a
+/// non-terminating decimal fails like `(bigdec 1/3)`), or rounded
+/// under a bound `*math-context*` (S2).
 /// `Int`/`Int` division (split from [`div`] for the complexity
-/// budget): exact when divisible, else a reduced ratio; the exact
-/// `MIN/-1` promotes to `BigInt` (`checked_div` fails only there —
-/// `MIN % -1` is `0` — and a successful divide means the `%`
-/// below cannot overflow either).
+/// budget): exact when divisible, else a reduced ratio; any `MIN`
+/// side takes the exact path, where integral quotients fold to
+/// `BigInt` (`LongOps.divide` → `BigIntOps.divide`: `(/ MIN
+/// MIN)` is `1N`, `(/ 0 MIN)` is `0N`).
 fn div_int(x: i64, y: i64, a: &Num, b: &Num) -> Result<Num, NativeError> {
     if y == 0 {
         return Err(divide_by_zero());
     }
-    match x.checked_div(y) {
-        Some(q) if x % y == 0 => Ok(Num::Int(q)),
-        Some(_) => Ok(num_ratio(num_rational(a) / num_rational(b))),
-        None => Ok(Num::BigInt(
-            num_bigint::BigInt::from(x) / num_bigint::BigInt::from(y),
-        )),
+    if x == i64::MIN || y == i64::MIN {
+        return Ok(num_ratio(num_rational(a) / num_rational(b)));
+    }
+    // `checked_div` fails only on `MIN/-1` (a `MIN` side,
+    // returned above) and `/0` (guarded above): `expect` keeps
+    // the invariant while staying on the covered path (a `None`
+    // arm would be an uncoverable line under the 100% floor).
+    let q = x
+        .checked_div(y)
+        .expect("non-MIN operands divide without overflow");
+    if x % y == 0 {
+        Ok(Num::Int(q))
+    } else {
+        Ok(num_ratio(num_rational(a) / num_rational(b)))
     }
 }
 
