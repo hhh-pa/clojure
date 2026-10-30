@@ -2085,11 +2085,58 @@ mod tests {
         assert!(!Arc::ptr_eq(&a, &fresh));
     }
 
+    // Fence 4a test extractors: `Option` + `.unwrap()` is the
+    // only guard shape the 100% line floor accepts — the floor
+    // counts test code, `if let` without `else` leaves its
+    // closing brace uncovered, and rustfmt always explodes
+    // single-line `let-else`. Both arms of each helper stay hot
+    // (pins take `Some`, the rejection test takes `None`).
+    fn opt_vector(v: &Value) -> Option<&super::Vector> {
+        match v {
+            Value::Vector(inner) => Some(inner),
+            _ => None,
+        }
+    }
+
+    fn opt_str(v: &Value) -> Option<&Arc<str>> {
+        match v {
+            Value::Str(s) => Some(s),
+            _ => None,
+        }
+    }
+
+    fn opt_entry(v: &Value) -> Option<(&Value, &Value)> {
+        match v {
+            Value::MapEntry { key, val, .. } => Some((key.as_ref(), val.as_ref())),
+            _ => None,
+        }
+    }
+
+    fn opt_tagged(v: &Value) -> Option<(&Symbol, &Value)> {
+        match v {
+            Value::TaggedLiteral { tag, form, .. } => Some((tag, form.as_ref())),
+            _ => None,
+        }
+    }
+
+    fn opt_rc(v: &Value) -> Option<(&Value, bool)> {
+        match v {
+            Value::ReaderConditional { form, splicing, .. } => Some((form.as_ref(), *splicing)),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn opt_extractors_reject_wrong_kinds() {
+        assert!(opt_vector(&Value::Int(1)).is_none());
+        assert!(opt_str(&Value::Int(1)).is_none());
+        assert!(opt_entry(&Value::Int(1)).is_none());
+        assert!(opt_tagged(&Value::Int(1)).is_none());
+        assert!(opt_rc(&Value::Int(1)).is_none());
+    }
+
     // Fence 4a: the quote walk interns nested strings and keeps
-    // the spine (metadata, key order) intact. Guards are
-    // branch-free (`matches!` + `if let`, no `else`): the 100%
-    // line floor counts test code too, so `let-else` panics
-    // would read as uncovered lines.
+    // the spine (metadata, key order) intact.
     #[test]
     fn quote_walk_interns_nested_strings() {
         let payload = Value::Vector(super::Vector::from_vec(vec![
@@ -2097,23 +2144,17 @@ mod tests {
             Value::Int(1),
         ]));
         let walked = intern_literal_strings(&payload);
-        assert!(matches!(&walked, Value::Vector(_)));
-        if let Value::Vector(v) = &walked {
-            let items = v.iter().collect::<Vec<_>>();
-            assert_eq!(items.len(), 2);
-            assert!(matches!(items[0], Value::Str(_)));
-            if let Value::Str(pooled) = items[0] {
-                assert!(Arc::ptr_eq(pooled, &intern_string(&Arc::from("f4a-q"))));
-            }
-            assert_eq!(items[1], &Value::Int(1));
-        }
+        let items = opt_vector(&walked).unwrap().iter().collect::<Vec<_>>();
+        assert_eq!(items.len(), 2);
+        let pooled = opt_str(items[0]).unwrap();
+        assert!(Arc::ptr_eq(pooled, &intern_string(&Arc::from("f4a-q"))));
+        assert_eq!(items[1], &Value::Int(1));
         // Non-string leaves clone through untouched.
         assert_eq!(intern_literal_strings(&Value::Int(7)), Value::Int(7));
     }
 
     // Fence 4a coverage: the quote walk recurses into map
-    // entries, interning both sides (branch-free guards, as
-    // above).
+    // entries, interning both sides.
     #[test]
     fn quote_walk_interns_map_entry_sides() {
         let payload = super::map_entry(
@@ -2121,17 +2162,11 @@ mod tests {
             Value::Str(Arc::from("f4a-v")),
         );
         let walked = intern_literal_strings(&payload);
-        assert!(matches!(&walked, Value::MapEntry { .. }));
-        if let Value::MapEntry { key, val, .. } = &walked {
-            assert!(matches!(key.as_ref(), Value::Str(_)));
-            if let Value::Str(pooled) = key.as_ref() {
-                assert!(Arc::ptr_eq(pooled, &intern_string(&Arc::from("f4a-k"))));
-            }
-            assert!(matches!(val.as_ref(), Value::Str(_)));
-            if let Value::Str(pooled) = val.as_ref() {
-                assert!(Arc::ptr_eq(pooled, &intern_string(&Arc::from("f4a-v"))));
-            }
-        }
+        let (key, val) = opt_entry(&walked).unwrap();
+        let k = opt_str(key).unwrap();
+        assert!(Arc::ptr_eq(k, &intern_string(&Arc::from("f4a-k"))));
+        let v = opt_str(val).unwrap();
+        assert!(Arc::ptr_eq(v, &intern_string(&Arc::from("f4a-v"))));
     }
 
     // Fence 4a coverage: the quote walk recurses into tagged
@@ -2141,14 +2176,10 @@ mod tests {
         let payload =
             super::tagged_literal(Symbol::new(None, "inst"), Value::Str(Arc::from("f4a-t")));
         let walked = intern_literal_strings(&payload);
-        assert!(matches!(&walked, Value::TaggedLiteral { .. }));
-        if let Value::TaggedLiteral { tag, form, .. } = &walked {
-            assert_eq!(tag, &Symbol::new(None, "inst"));
-            assert!(matches!(form.as_ref(), Value::Str(_)));
-            if let Value::Str(pooled) = form.as_ref() {
-                assert!(Arc::ptr_eq(pooled, &intern_string(&Arc::from("f4a-t"))));
-            }
-        }
+        let (tag, form) = opt_tagged(&walked).unwrap();
+        assert_eq!(tag, &Symbol::new(None, "inst"));
+        let pooled = opt_str(form).unwrap();
+        assert!(Arc::ptr_eq(pooled, &intern_string(&Arc::from("f4a-t"))));
     }
 
     // Fence 4a coverage: the quote walk recurses into reader
@@ -2157,14 +2188,10 @@ mod tests {
     fn quote_walk_interns_reader_conditional_form() {
         let payload = super::reader_conditional(Value::Str(Arc::from("f4a-r")), true);
         let walked = intern_literal_strings(&payload);
-        assert!(matches!(&walked, Value::ReaderConditional { .. }));
-        if let Value::ReaderConditional { form, splicing, .. } = &walked {
-            assert!(splicing);
-            assert!(matches!(form.as_ref(), Value::Str(_)));
-            if let Value::Str(pooled) = form.as_ref() {
-                assert!(Arc::ptr_eq(pooled, &intern_string(&Arc::from("f4a-r"))));
-            }
-        }
+        let (form, splicing) = opt_rc(&walked).unwrap();
+        assert!(splicing);
+        let pooled = opt_str(form).unwrap();
+        assert!(Arc::ptr_eq(pooled, &intern_string(&Arc::from("f4a-r"))));
     }
 
     fn hash_of(v: &Value) -> u64 {
