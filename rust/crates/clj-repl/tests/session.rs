@@ -232,13 +232,13 @@ fn eof_mid_form_prints_diagnostic_and_exits_zero() {
 fn clojure_version_transcript() {
     assert_eq!(
         run("(clojure-version)\n", None),
-        (0, "\"1.13.0-alpha9\"\n".to_owned())
+        (0, "\"1.13.0-alpha11\"\n".to_owned())
     );
     assert_eq!(
         run("*clojure-version*\n", None),
         (
             0,
-            "{:major 1, :minor 13, :incremental 0, :qualifier \"alpha9\"}\n".to_owned()
+            "{:major 1, :minor 13, :incremental 0, :qualifier \"alpha11\"}\n".to_owned()
         )
     );
 }
@@ -247,9 +247,9 @@ fn clojure_version_transcript() {
 fn clojure_version_is_semver() {
     let mut eval = clj_eval::boot();
     // T1197 REL probe `rel-version`: the string and the map track
-    // 1.13.0-alpha9 exactly (qualifier-aware shape).
+    // 1.13.0-alpha11 exactly (qualifier-aware shape).
     let version = run_last(&mut eval, "(clojure-version)");
-    assert_eq!(version, "\"1.13.0-alpha9\"");
+    assert_eq!(version, "\"1.13.0-alpha11\"");
     let inner = version.trim_matches('"');
     let (core, qualifier) = inner.split_once('-').unwrap_or((inner, ""));
     let parts: Vec<&str> = core.split('.').collect();
@@ -260,14 +260,14 @@ fn clojure_version_is_semver() {
             "numeric semver part: {part:?}"
         );
     }
-    assert_eq!(qualifier, "alpha9", "release qualifier: {inner:?}");
+    assert_eq!(qualifier, "alpha11", "release qualifier: {inner:?}");
     // The map agrees with the string (P3 shapes, no :interim key).
     assert_eq!(run_last(&mut eval, "(:major *clojure-version*)"), "1");
     assert_eq!(run_last(&mut eval, "(:minor *clojure-version*)"), "13");
     assert_eq!(run_last(&mut eval, "(:incremental *clojure-version*)"), "0");
     assert_eq!(
         run_last(&mut eval, "(:qualifier *clojure-version*)"),
-        "\"alpha9\""
+        "\"alpha11\""
     );
     assert_eq!(run_last(&mut eval, "(:interim *clojure-version*)"), "nil");
 }
