@@ -1969,11 +1969,12 @@ impl<'a> Analyzer<'a> {
     }
 
     /// `(with-redefs bindings body…)`: bindings seq like the
-    /// macro's `zipmap` — vectors, lists, sets, and nil (empty);
-    /// maps seq entries, so a non-empty map fails the entry's
-    /// `Symbol` cast under `compiling var`; anything else is the
-    /// `ISeq` error under `macroexpanding with-redefs`. An odd
-    /// trailing binding silently drops (probe37 `wrd-odd`).
+    /// macro's `zipmap` — vectors, lists, sets, nil (empty), and
+    /// maps (entries as `MapEntry` values, like the JVM's `seq` —
+    /// a lone entry odd-drops, paired entries fail the `var`
+    /// `Symbol` cast as `MapEntry`); anything else is the `ISeq`
+    /// error under `macroexpanding with-redefs`. An odd trailing
+    /// binding silently drops (probe37 `wrd-odd`).
     fn parse_with_redefs(
         &mut self,
         items: &[&Value],
@@ -1991,7 +1992,7 @@ impl<'a> Analyzer<'a> {
         // `as_chunks`, which needs Rust 1.88 > MSRV 1.85); the
         // `len() - len() % 2` drops an odd tail like `zipmap`.
         for i in (0..forms.len() - forms.len() % 2).step_by(2) {
-            let var_sym = match forms[i] {
+            let var_sym = match &forms[i] {
                 Value::Symbol(sym) => self.resolve_var(sym, span, "var")?,
                 other => {
                     return Err(self.err(
@@ -2005,7 +2006,7 @@ impl<'a> Analyzer<'a> {
                     ));
                 }
             };
-            pairs.push((var_sym, self.analyze(forms[i + 1], span, false)?));
+            pairs.push((var_sym, self.analyze(&forms[i + 1], span, false)?));
         }
         Ok(Expr::WithRedefs {
             pairs,
@@ -2018,29 +2019,32 @@ impl<'a> Analyzer<'a> {
     /// `Symbol` cast under `compiling var` (entries aren't
     /// symbols); anything else is the `ISeq` error under
     /// `macroexpanding with-redefs`.
-    fn with_redefs_forms<'v>(
+    fn with_redefs_forms(
         &self,
-        bindings: &'v Value,
+        bindings: &Value,
         span: Span,
         op: &str,
-    ) -> Result<Vec<&'v Value>, CompileError> {
+    ) -> Result<Vec<Value>, CompileError> {
         match bindings {
-            v @ (Value::Vector(_) | Value::MapEntry { .. }) => {
-                Ok(vector_shape_items(v).expect("vector shape checked"))
-            }
-            Value::List(l) => Ok(l.iter().collect()),
+            v @ (Value::Vector(_) | Value::MapEntry { .. }) => Ok(vector_shape_items(v)
+                .expect("vector shape checked")
+                .into_iter()
+                .cloned()
+                .collect()),
+            Value::List(l) => Ok(l.iter().cloned().collect()),
             Value::Nil => Ok(Vec::new()),
-            Value::Set(s) => Ok(s.iter().collect()),
-            Value::Map(m) if m.is_empty() => Ok(Vec::new()),
-            Value::Map(_) => Err(self.err(
-                class::CLASS_CAST,
-                NativeError::cast("clojure.lang.MapEntry", "clojure.lang.Symbol")
-                    .into_inner()
-                    .message,
-                span,
-                Verb::Compiling,
-                Some("var".to_owned()),
-            )),
+            Value::Set(s) => Ok(s.iter().cloned().collect()),
+            // Fence 4b E1e/E1q: maps seq to their entries (as
+            // `MapEntry` values, like the JVM's `seq`) — a lone
+            // entry odd-drops downstream (no error); paired entries
+            // fail the `var` Symbol cast as `MapEntry`.
+            Value::Map(m) => Ok(m
+                .iter()
+                .map(|(k, v)| Value::MapEntry {
+                    key: Box::new(k.clone()),
+                    val: Box::new(v.clone()),
+                })
+                .collect()),
             other => Err(self.err(
                 class::ILLEGAL_ARG,
                 format!(
@@ -2414,13 +2418,24 @@ fn spec_valid_directive(kw: &Keyword, v: &Value) -> bool {
         "as" | "select" | "excess" | "missing" | "defaults" | "all" => {
             matches!(v, Value::Symbol(sym) if is_local_name(sym))
         }
-        "or" => matches!(v, Value::Map(_)),
+        "or" => spec_valid_or(v),
         "keys" | "keys!" => spec_valid_key_list(v, KeyKind::Keys),
         "syms" | "syms!" => spec_valid_key_list(v, KeyKind::Syms),
         "strs" | "strs!" => spec_valid_key_list(v, KeyKind::Strs),
         "req!" => spec_valid_req(v),
         _ => false,
     }
+}
+
+/// `::or` (fence 4b E1h/E1j/E1o): a map of simple symbols to
+/// defaults — plain unqualified symbols (including `&`, which
+/// `simple-symbol?` accepts though no local can use it).
+fn spec_valid_or(v: &Value) -> bool {
+    let Value::Map(or) = v else {
+        return false;
+    };
+    or.iter()
+        .all(|(k, _)| matches!(k, Value::Symbol(sym) if sym.namespace().is_none()))
 }
 
 /// `::req-bindings` (M2, upstream `core.specs.alpha`): a map of
@@ -2843,10 +2858,11 @@ fn key_cast_err(dir: &KeyDirective, form: &Value) -> WalkError {
     }
 }
 
-/// `:or` semantics for one binding (compile time): `Multiple :or
-/// defaults` when both the local and the key have defaults, `Can't
-/// supply default value for required key` when a required binding
-/// has either.
+/// `:or` semantics for one binding (compile time): `Can't
+/// supply default value for required key` when a required local
+/// has a default. Lookup is by LOCAL only (fence 4b E1i —
+/// key-side matches are ignored: the local wins, never the old
+/// `Multiple` error).
 fn check_or_pair(
     or_map: Option<&Map>,
     local: &str,
@@ -2857,18 +2873,7 @@ fn check_or_pair(
         return Ok(());
     };
     let local_key = Value::Symbol(Symbol::new(None, local));
-    let has_local = or.get(&local_key).is_some();
-    let has_key = or.get(key).is_some();
-    if has_local && has_key {
-        return Err(WalkError {
-            class: class::EXCEPTION,
-            message: format!(
-                "Multiple :or defaults for same key: {} '{local}'",
-                str_of(key)
-            ),
-        });
-    }
-    if required && (has_local || has_key) {
+    if required && or.contains_key(&local_key) {
         return Err(WalkError {
             class: class::EXCEPTION,
             message: format!(
@@ -4219,26 +4224,22 @@ impl<'a> Analyzer<'a> {
         tail: bool,
     ) -> Result<Expr, CompileError> {
         let bindings = items.get(1).copied().unwrap_or(&Value::Nil);
-        let specs: Vec<Value> = match bindings {
-            v @ (Value::Vector(_) | Value::MapEntry { .. }) => vector_shape_items(v)
-                .expect("vector shape checked")
-                .into_iter()
-                .cloned()
-                .collect(),
-            Value::Nil => Vec::new(),
-            other => {
-                return Err(self.err(
-                    class::ILLEGAL_ARG,
-                    format!(
-                        "Don't know how to create ISeq from: {}",
-                        jvm_class_of(other)
-                    ),
-                    span,
-                    Verb::Macroexpanding,
-                    Some(op.to_owned()),
-                ));
-            }
-        };
+        // Fence 4b E1e: fnspecs seq like the expansion's `mapcat`
+        // (any seqable — lists, maps, sets, strings — not just
+        // vectors); only non-seqables take the `ISeq` error.
+        if !is_seqable(bindings) {
+            return Err(self.err(
+                class::ILLEGAL_ARG,
+                format!(
+                    "Don't know how to create ISeq from: {}",
+                    jvm_class_of(bindings)
+                ),
+                span,
+                Verb::Macroexpanding,
+                Some(op.to_owned()),
+            ));
+        }
+        let specs: Vec<Value> = seq_values(bindings);
         // Validate every fnspec before analyzing any tail.
         let validated = self.validate_fnspecs(&specs, span, op)?;
         let base = self.locals.len();
@@ -4440,10 +4441,10 @@ impl<'a> Analyzer<'a> {
     ) -> Result<Option<Expr>, CompileError> {
         match op {
             crate::fx4_host::HostOp::MonitorEnter(arg) => {
-                Ok(Some(self.host_call("fx4-monitor-enter", &[arg], span)?))
+                Ok(Some(self.monitor_call("fx4-monitor-enter", arg, span)?))
             }
             crate::fx4_host::HostOp::MonitorExit(arg) => {
-                Ok(Some(self.host_call("fx4-monitor-exit", &[arg], span)?))
+                Ok(Some(self.monitor_call("fx4-monitor-exit", arg, span)?))
             }
             crate::fx4_host::HostOp::LetFnStar => {
                 Ok(Some(self.parse_letfn_star(items, span, tail)?))
@@ -4495,6 +4496,21 @@ impl<'a> Analyzer<'a> {
             args: analyzed,
             span,
         })
+    }
+
+    /// A `monitor-enter`/`monitor-exit` call with the (expanded)
+    /// form quoted alongside (fence 4b E1r–E1y — the nil-message
+    /// builder reads shapes post-expansion, like the JVM).
+    /// Expansion failure falls back to the raw form (analysis
+    /// re-raises it properly downstream).
+    fn monitor_call(&mut self, name: &str, arg: &Value, span: Span) -> Result<Expr, CompileError> {
+        let expanded = crate::macros::macroexpand_full(self.eval, arg, span, &self.source);
+        let form = expanded.as_ref().unwrap_or(arg);
+        let quoted = Value::List(List::from_vec(vec![
+            Value::Symbol(Symbol::new(None, "quote")),
+            (*form).clone(),
+        ]));
+        self.host_call(name, &[form, &quoted], span)
     }
 
     /// `(letfn* [name (fn name …) …] body…)`, lowered to [`Expr::LetFn`].
@@ -4593,22 +4609,39 @@ impl<'a> Analyzer<'a> {
     }
 
     fn letfn_star_fun(&mut self, form: &Value, span: Span) -> Result<FunExpr, CompileError> {
-        let items = fn_form_items(form);
-        let rest = strip_fn_head(&items);
-        let refs: Vec<&Value> = rest.iter().collect();
-        let (name, raw) = self.parse_fn_front(&refs, span)?;
-        let (mut fun, _) = self.build_fun(None, &raw, span)?;
-        if let Some(n) = name {
-            fun.display = fun.display.replacen("/fn--", &format!("/{n}--"), 1);
+        // Fence 4b E1k/E1r: `letfn*` inits compile as expressions,
+        // then cast to `ObjExpr`. A `fn`-headed init parses
+        // directly (a named `fn` would otherwise analyze to the
+        // self-recursion `LetFn` wrap, hiding the `FunExpr`);
+        // anything else analyzes and must come back a `fn` (macros
+        // expanding to `fn` qualify) or the CCE names the source
+        // form's class (the compiler-internal `NumberExpr`/`LetExpr`
+        // kinds have no port counterpart).
+        if let Value::List(list) = form {
+            let items: Vec<Value> = list.iter().cloned().collect();
+            let rest = strip_fn_head(&items);
+            if rest.len() != items.len() {
+                let refs: Vec<&Value> = rest.iter().collect();
+                let (name, raw) = self.parse_fn_front(&refs, span)?;
+                let (mut fun, _) = self.build_fun(None, &raw, span)?;
+                if let Some(n) = name {
+                    fun.display = fun.display.replacen("/fn--", &format!("/{n}--"), 1);
+                }
+                return Ok(fun);
+            }
         }
-        Ok(fun)
-    }
-}
-
-fn fn_form_items(form: &Value) -> Vec<Value> {
-    match form {
-        Value::List(list) => list.iter().cloned().collect(),
-        other => vec![other.clone()],
+        match self.analyze(form, span, false)? {
+            Expr::Fn(fun) => Ok(fun),
+            _ => Err(self.err(
+                class::CLASS_CAST,
+                NativeError::cast(&jvm_class_of(form), "clojure.lang.Compiler$ObjExpr")
+                    .into_inner()
+                    .message,
+                span,
+                Verb::Compiling,
+                Some("fn*".to_owned()),
+            )),
+        }
     }
 }
 

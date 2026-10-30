@@ -1052,9 +1052,16 @@ fn fn_star_errors() {
     );
     // Per-clause order: 20-count, walk, body, dup checks (probe32).
     check(
-        "(fn ([x] x) ([y] y) ([{a :x :or {a 1 :x 2}}] a))",
+        "(fn ([x] x) ([y] y) ([{a :x :or {a 1}}] a))",
         "Syntax error compiling fn* at (test:1:1).",
         "java.lang.RuntimeException | Can't have 2 overloads with same arity",
+    );
+    // Fence 4b E1h: the `fn` spec (recursive `:or` key check)
+    // fires before arity analysis, as upstream.
+    check(
+        "(fn ([x] x) ([y] y) ([{a :x :or {a 1 :x 2}}] a))",
+        "Syntax error macroexpanding clojure.core/fn at (test:1:1).",
+        "clojure.lang.ExceptionInfo | Call to clojure.core/fn did not conform to spec.",
     );
     check(
         "(fn ([x] nope) ([y] y) ([z] z))",
@@ -1067,7 +1074,7 @@ fn fn_star_errors() {
         "java.lang.RuntimeException | Unable to resolve symbol: nope in this context",
     );
     let or21 = format!(
-        "(fn ([{{a :x :or {{a 1 :x 2}}}} {}] x))",
+        "(fn ([{{a :x :or {{a 1}}}} {}] x))",
         (0..20)
             .map(|n| format!("p{n}"))
             .collect::<Vec<_>>()
@@ -1080,13 +1087,13 @@ fn fn_star_errors() {
     );
     check(
         "(fn ([x & r] x) ([a b] a) ([{a :x :or {a 1 :x 2}}] z))",
-        "Syntax error macroexpanding clojure.core/let at (test:1:1).",
-        "java.lang.Exception | Multiple :or defaults for same key: :x 'a'",
+        "Syntax error macroexpanding clojure.core/fn at (test:1:1).",
+        "clojure.lang.ExceptionInfo | Call to clojure.core/fn did not conform to spec.",
     );
     check(
         "(fn [{a :x :or {a 1 :x 2}}] nope)",
-        "Syntax error macroexpanding clojure.core/let at (test:1:1).",
-        "java.lang.Exception | Multiple :or defaults for same key: :x 'a'",
+        "Syntax error macroexpanding clojure.core/fn at (test:1:1).",
+        "clojure.lang.ExceptionInfo | Call to clojure.core/fn did not conform to spec.",
     );
     // Clause lists are span-transparent, but body lists rebind.
     check(
@@ -1098,10 +1105,12 @@ fn fn_star_errors() {
 
 #[test]
 fn destructure_semantic_errors() {
+    // Fence 4b E1h/E1i: non-simple-symbol `:or` keys fail the
+    // spec (never the old `Multiple` error — the local wins).
     check(
         "(let [{a :x :or {a 1 :x 2}} {:x 3}] a)",
-        "Syntax error macroexpanding let at (test:1:1).",
-        "java.lang.Exception | Multiple :or defaults for same key: :x 'a'",
+        "Syntax error macroexpanding clojure.core/let at (test:1:1).",
+        "clojure.lang.ExceptionInfo | Call to clojure.core/let did not conform to spec.",
     );
     check(
         "(let [{:keys [a] :select s :or {zzz 1}} {:a 1}] s)",
@@ -1110,26 +1119,27 @@ fn destructure_semantic_errors() {
     );
     check(
         "(let [{a :x :select s :or {:y 1}} {:x 5}] s)",
-        "Syntax error macroexpanding let at (test:1:1).",
-        "java.lang.IllegalArgumentException | keys #{:y} appear only in :or",
+        "Syntax error macroexpanding clojure.core/let at (test:1:1).",
+        "clojure.lang.ExceptionInfo | Call to clojure.core/let did not conform to spec.",
     );
     check(
         "(let [{:keys! [a] :or {a 1}} {:a 2}] a)",
         "Syntax error macroexpanding let at (test:1:1).",
         "java.lang.Exception | Can't supply default value for required key: :a",
     );
-    // `fn` parameters destructure through the emitted `let`.
+    // `fn` parameters take the `fn` spec (recursive `:or` key
+    // check) before the inner-`let` walk.
     check(
         "(fn [{a :x :or {a 1 :x 2}}] a)",
-        "Syntax error macroexpanding clojure.core/let at (test:1:1).",
-        "java.lang.Exception | Multiple :or defaults for same key: :x 'a'",
+        "Syntax error macroexpanding clojure.core/fn at (test:1:1).",
+        "clojure.lang.ExceptionInfo | Call to clojure.core/fn did not conform to spec.",
     );
-    // The key renders via `str`, so a `:strs` key prints bare
-    // (probe33 `or-multi-strs`).
+    // Fence 4b E1h (`or-bothstrs`): the string key fails the
+    // inner-`let` spec (the walk's local-only lookup passes).
     check(
         "(loop [{:strs [s] :or {s 1 \"s\" 2}} {}] s)",
-        "Syntax error macroexpanding loop at (test:1:1).",
-        "java.lang.Exception | Multiple :or defaults for same key: s 's'",
+        "Syntax error macroexpanding clojure.core/let at (test:1:1).",
+        "clojure.lang.ExceptionInfo | Call to clojure.core/let did not conform to spec.",
     );
 }
 
@@ -1140,6 +1150,10 @@ fn binding_errors() {
         "Syntax error macroexpanding binding at (test:1:1).",
         "java.lang.IllegalArgumentException | binding requires an even number of forms in binding vector",
     );
+    // Fence 4b E1f (`binding-novec`): the JVM appends the form
+    // location to this message (`in user:6`) — the port's wrapper
+    // already carries the (more precise) span, so it is not
+    // duplicated here.
     check(
         "(binding x x)",
         "Syntax error macroexpanding binding at (test:1:1).",
@@ -1421,13 +1435,16 @@ fn gap2_case_star_skip_ok() {
 
 #[test]
 fn gap2_with_redefs_binding_rows() {
-    // Vector/nil/set/empty-map bindings pass; maps fail the Symbol cast (expr.rs:1770-1784).
+    // Vector/nil/set/empty-map bindings pass (expr.rs:1770-1784).
     analyze_ok("(with-redefs [va251 2] va251)");
     analyze_ok("(with-redefs nil 1)");
     analyze_ok("(with-redefs #{} 1)");
     analyze_ok("(with-redefs {} 1)");
+    // Fence 4b E1e/E1q: maps seq to entries — a lone entry
+    // odd-drops (no error); paired entries fail the `var` cast.
+    analyze_ok("(with-redefs {:a 1} 1)");
     check(
-        "(with-redefs {:a 1} 1)",
+        "(with-redefs {a 1 b 2} 1)",
         "Syntax error compiling var at (test:1:1).",
         "java.lang.ClassCastException | Cannot cast clojure.lang.MapEntry to clojure.lang.Symbol",
     );
@@ -1491,6 +1508,17 @@ fn gap2_letfn_binding_rows() {
         "(letfn [nil] 1)",
         "Syntax error compiling letfn* at (test:1:1).",
         "java.lang.IllegalArgumentException | Bad binding form, expected symbol, got: null",
+    );
+    // Fence 4b E1e/E1p: fnspecs seq like the expansion's `mapcat`
+    // (lists, maps, sets accepted); strings seq to chars, so the
+    // first char spec takes the `ISeq` error.
+    analyze_ok("(letfn ((f [x] x)) (f 1))");
+    analyze_ok("(letfn {f [x]} 1)");
+    analyze_ok("(letfn #{(f [x] x)} (f 1))");
+    check(
+        "(letfn \"ab\" 1)",
+        "Syntax error macroexpanding letfn at (test:1:1).",
+        "java.lang.IllegalArgumentException | Don't know how to create ISeq from: java.lang.Character",
     );
 }
 

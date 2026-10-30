@@ -921,6 +921,7 @@ pub(crate) fn throw_class_for(name: &str) -> ThrowClass {
         "RuntimeException" => ThrowClass::RuntimeException,
         "IllegalArgumentException" => ThrowClass::IllegalArgumentException,
         "IllegalStateException" => ThrowClass::IllegalStateException,
+        "IllegalMonitorStateException" => ThrowClass::IllegalMonitorStateException,
         "UnsupportedOperationException" => ThrowClass::UnsupportedOperationException,
         "AssertionError" => ThrowClass::AssertionError,
         "ArityException" => ThrowClass::ArityException,
