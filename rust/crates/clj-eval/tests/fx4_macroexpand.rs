@@ -1052,7 +1052,9 @@ fn monitor_exit_matrix() {
         ),
         "nil"
     );
-    // `catch` sees the hierarchy (`IMS` is an `ISE` is an `RE`).
+    // `catch` sees the JVM hierarchy (`IMS` is a direct
+    // `RuntimeException`, a sibling of `ISE` — `javap` verdict):
+    // exact and `RE` clauses catch, an `ISE` clause does not.
     assert_eq!(
         run_last(
             &mut eval,
@@ -1061,11 +1063,18 @@ fn monitor_exit_matrix() {
         ":ims"
     );
     assert_eq!(
-        run_last(
+        uncaught(
             &mut eval,
             "(try (monitor-exit :nope) (catch IllegalStateException e :ise))"
         ),
-        ":ise"
+        "java.lang.IllegalMonitorStateException | "
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(try (monitor-exit :nope) (catch RuntimeException e :re))"
+        ),
+        ":re"
     );
 }
 
