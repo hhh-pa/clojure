@@ -1,0 +1,14 @@
+public class ExitNilHeld {
+  public static java.lang.String run();
+    Code:
+         0: new           #4                  // class java/lang/Object
+         3: dup
+         4: invokespecial #10                 // Method java/lang/Object."<init>":()V
+         7: astore_0
+         8: aload_0
+         9: monitorenter
+        10: aconst_null
+        11: monitorexit
+        12: ldc           #12                 // String no-throw
+        14: areturn
+}

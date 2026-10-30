@@ -75,7 +75,8 @@ matches (restored `non_map_or`, restored `:or []` eval pin). The
 The monitor nil matrix (`kept-fixes.out`, byte-identical under
 `-Xint`; pure-bytecode cross-check in
 `probes/monitor-matrix-jvms.txt`, unanimous across Oracle 27 /
-Temurin 21 × default / `-Xint`):
+Temurin 21 × default / `-Xint`; full repro — generator, driver,
+javap listings, run script — in `probes/jvm-matrix/`):
 
 - `monitor-exit-nil-held`, `-nillocal-held`, `-callnil-held` → IMS
   (nil message), for literal, local, and call nils alike — including
