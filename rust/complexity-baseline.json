@@ -196,6 +196,13 @@
    "cyclomatic": 42.0,
    "cognitive": 1.0,
    "justification": "fence 3b: one arm per Value variant plus scalar shapes; the content-hash table stays exhaustive so Box clones of the same value share a monitor. Fence 3c rebase: Executor arm (41->42, forced by the new variant; same minted-id shape as Agent)"
+  },
+  {
+   "file": "crates/clj-value/src/hasheq.rs",
+   "function": "hash_code_rest",
+   "cyclomatic": 16.0,
+   "cognitive": 1.0,
+   "justification": "fence 3c rebase: flat one-arm-per-variant hash table tipped 15->16 on the Executor arm (forced by the new variant; same id_hash shape as cells). Flat-table precedent per reviewer concurrence."
   }
  ]
 }
