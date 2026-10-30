@@ -477,6 +477,25 @@ fn core_r4_long_overflow() {
     }
 }
 
+/// `MIN/-1` never overflows: `/` promotes through `BigInt`
+/// (`LongOps.divide` routes any `MIN` side to `BigIntOps.divide`),
+/// while `quot`/`rem` are raw Java `/`/`%` (where `MIN/-1` is
+/// `MIN` and `MIN%-1` is `0`, so `mod` is `0` too).
+#[test]
+fn core_r4_min_neg1_division() {
+    let mut eval = boot();
+    assert_eq!(
+        run_last(&mut eval, "(/ -9223372036854775808 -1)"),
+        "9223372036854775808N"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(quot -9223372036854775808 -1)"),
+        "-9223372036854775808"
+    );
+    assert_eq!(run_last(&mut eval, "(rem -9223372036854775808 -1)"), "0");
+    assert_eq!(run_last(&mut eval, "(mod -9223372036854775808 -1)"), "0");
+}
+
 #[test]
 fn core_r4_mixed_arith() {
     let mut eval = boot();

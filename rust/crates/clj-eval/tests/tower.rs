@@ -563,8 +563,8 @@ fn tower_lattice_rows() {
             "{form}"
         );
     }
-    // `(/ 1 2)` keeps the `Int`-only wedge (`Double`, not a
-    // ratio — tower division is exact).
+    // `(/ 1 2)` is a ratio (asserted above): `Int`-inexact
+    // division never falls back to `Double`.
     assert_eq!(
         run_last(
             &mut eval,

@@ -1237,23 +1237,23 @@ fn mixhash_rows() {
     ] {
         assert_eq!(run_last(&mut eval, src), want, "{src}");
     }
-    // mh-tower-hash (divergent, §2.4: the port hashes tower
-    // values structurally — pinned port literals below).
+    // mh-tower-hash (JVM-identical: in-range `5N` murmurs like
+    // `5`; `1/2` is `1 ^ 2`; `1.5M` is `31 * 15 + 1`).
     assert_eq!(
         run_last(&mut eval, "[(hash 5N) (hash 1/2) (hash 1.5M)]"),
-        "[1740791543 1777801658 335926639]"
+        "[1740791543 3 466]"
     );
-    // mh-tower-util (divergent, §2.4: structural `Util/hash` —
-    // pinned port literals below).
+    // mh-tower-util (JVM-identical `.hashCode`s: the `Long` mix,
+    // `num ^ den`, the unstripped `31 * 15 + 1`).
     assert_eq!(
         hash_codes(&mut eval, &["5N", "1/2", "1.5M"]),
-        vec![528065744, -1524795076, -1547456877]
+        vec![5, 3, 466]
     );
-    // mh-comb-bign / mh-comb-dec / mh-comb-ratio (divergent,
-    // §2.4 — pinned port literals below).
-    assert_eq!(run_last(&mut eval, "(hash-combine 0 5N)"), "-1112465783");
-    assert_eq!(run_last(&mut eval, "(hash-combine 0 1.5M)"), "1106978892");
-    assert_eq!(run_last(&mut eval, "(hash-combine 0 1/2)"), "1129640693");
+    // mh-comb-bign / mh-comb-dec / mh-comb-ratio (JVM-identical:
+    // `hashCombine` over the `.hashCode`s above).
+    assert_eq!(run_last(&mut eval, "(hash-combine 0 5N)"), "-1640531522");
+    assert_eq!(run_last(&mut eval, "(hash-combine 0 1.5M)"), "-1640531061");
+    assert_eq!(run_last(&mut eval, "(hash-combine 0 1/2)"), "-1640531524");
     // mh-util-spot (JVM-identical — no tower involved).
     assert_eq!(
         hash_codes(&mut eval, &["[1 2]", ":a", "{:a 1}", "nil"]),

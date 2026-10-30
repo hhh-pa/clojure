@@ -232,11 +232,13 @@ rooting strategy is designed in the slice-8 spec update.
 
 ### 2.2 Contracts
 
-C1. Numbers: `Int` is i64 with checked arithmetic; overflow raises a
-    catchable arithmetic error (never wraps). Mixed int/double ops
-    promote to double. `/` on ints is exact only when divisible,
-    else double division (documented deviation from ratio behavior
-    until the big-number follow-up; the corpus pins it).
+C1. Numbers: `Int` is i64 with checked arithmetic; overflow of
+    `+`/`-`/`*`/`inc`/`dec`/unary `-` raises a catchable arithmetic
+    error (never wraps). Mixed int/double ops promote to double.
+    `/` on ints is exact when divisible, a reduced ratio otherwise
+    (`(/ 1 2)` is `1/2`), and the exact `MIN/-1` promotes to
+    `BigInt`; `(quot MIN -1)` is `MIN`, `(rem MIN -1)` and
+    `(mod MIN -1)` are `0` (raw Java `/`/`%`).
 C2. Equality: `=` is same-category equality (`(= 1 1.0)` is
     false — `Numbers.equal` gates on category, probe17; `(==
     1 1.0)` is the cross-category comparison, S4); `==` is

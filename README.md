@@ -168,17 +168,15 @@ each entry asserts its exact behavior, so drift fails CI:
   (collections by minted id, extensions/host values by
   allocation, classes by name, other same-kind pairs by `=`;
   cross-kind pairs are never identical).
-- **Numbers.** `Int` is checked i64 — overflow raises a catchable
-  arithmetic error, never wraps. `/` on ints is exact when
-  divisible, else double division (ratios exist as values but
-  `/` never produces them).
-- **Equality/ordering.** `=` is same-category (`(= 1 1.0)` is
-  false); `==` is the cross-category numeric comparison.
-  `compare` matches JVM numeric ordering including NaN ties, but
-  incomparable pairs fail with the stable `Cannot compare <A> to
-  <B>` instead of JDK-version-dependent `ClassCastException` text.
-- **Hashing is internal.** `hasheq` is only equiv-consistent —
-  values never promise JVM-identical integers.
+- **Ordering.** `compare` matches JVM numeric ordering
+  including NaN ties, but incomparable pairs fail with the
+  stable `Cannot compare <A> to <B>` instead of
+  JDK-version-dependent `ClassCastException` text. (`=`
+  stays same-category and `==` cross-category, checked
+  arithmetic still throws `long overflow` on overflow, `/`
+  produces ratios, and `hasheq` is JVM-identical — all
+  exactly like the JVM, so the old Numbers/Equality/Hashing
+  entries are gone.)
 - **Printing.** `pr` round-trips EDN values through the reader;
   `*print-length*` / `*print-level*` truncate with `...`;
   `*print-dup*` routes `pr` through the dup printer (undupable

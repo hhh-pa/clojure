@@ -48,15 +48,15 @@
 //! - [`Value::Regex`] is a deliberate deterministic stand-in: the JVM
 //!   hashes patterns by identity, but here a regex hashes as its source
 //!   string. Do not assert it against JVM output either.
-//! - Tower numerics ([`Value::BigInt`]/[`Value::BigDec`]/
-//!   [`Value::Ratio`]) hash equiv-consistently but NOT to JVM-magic
-//!   values: `BigInt` in `long` range hashes exactly like `Int`,
-//!   decimals mix the trailing-zero-stripped pair, rationals mix
-//!   numerator and denominator. `=`-equal tower values always hash
-//!   equally (map/set lookups agree with the JVM); the bare `hash`
-//!   integers may differ from JVM output — do not assert them
-//!   against JVM output, only consistency (`equal ⇒ same hash`)
-//!   and the in-range `BigInt`-`Int` agreement.
+//! - Tower numerics ([`Value::BigInt`]/[`Value::BigInteger`]/
+//!   [`Value::BigDec`]/[`Value::Ratio`]) hash to JVM-identical
+//!   integers: `BigInt`/`BigInteger` in `long` range hash exactly
+//!   like `Int` (`Murmur3.hashLong`), wider ones as
+//!   `BigInteger.hashCode`; decimals hash as the
+//!   trailing-zero-stripped `BigDecimal.hashCode` (zeros of any
+//!   scale hash `0`); ratios hash as `numerator ^ denominator`.
+//!   `=`-equal tower values always hash equally (assert both the
+//!   integers and the consistency — see the `tower_*` tests).
 //! - `(format "%h" nil)` rendering `"null"` is `format`-level behavior
 //!   (Java renders a null `%h` argument as `"null"`); [`hash_code`] of
 //!   nil is `0`, for use inside collections.
@@ -125,26 +125,78 @@ fn scalar_hash(v: &Value) -> i32 {
     }
 }
 
-/// Tower `hasheq` (equiv-consistent, structural otherwise — the
-/// JVM magic values are not mirrored, see module docs):
-/// `BigInt` in `long` range hashes exactly like `Int` (`{5N :a}`
-/// looks up by `5`); wider ones mix their bytes; decimals mix
-/// the stripped pair (so `5.0M` ≡ `5.00M`); rationals mix
-/// numerator and denominator.
+/// `java.math.BigInteger.hashCode`: the `31`-chain over the
+/// big-endian magnitude words times the sign (the `ArraysSupport`
+/// chain; zero hashes `0` — its magnitude is empty).
+fn bigint_hashcode(n: &num_bigint::BigInt) -> i32 {
+    use num_bigint::Sign;
+    let (sign, mut bytes) = n.to_bytes_be();
+    if sign == Sign::NoSign {
+        return 0;
+    }
+    // Left-pad to whole words: the first group is the most
+    // significant word, like `BigInteger.mag` past leading zeros
+    // (`to_bytes_be` carries no leading zero bytes, so the ragged
+    // first group holds exactly the top word's value).
+    while bytes.len() % 4 != 0 {
+        bytes.insert(0, 0);
+    }
+    let mut h: i32 = 0;
+    for w in bytes.chunks_exact(4) {
+        let word = u32::from_be_bytes([w[0], w[1], w[2], w[3]]) as i32;
+        h = h.wrapping_mul(31).wrapping_add(word);
+    }
+    if sign == Sign::Minus {
+        h.wrapping_neg()
+    } else {
+        h
+    }
+}
+
+/// `java.math.BigDecimal.hashCode`: `31 * unscaled.hashCode +
+/// scale` (the compact fast path computes the same value — the
+/// general formula covers both; `as i32` wraps exactly like the
+/// JDK's `(int)` cast on astronomical parsed scales).
+fn bigdec_hashcode(unscaled: &num_bigint::BigInt, scale: i64) -> i32 {
+    bigint_hashcode(unscaled)
+        .wrapping_mul(31)
+        .wrapping_add(scale as i32)
+}
+
+/// `BigInt.hashCode` (split from [`hash_code_rest`] for the
+/// complexity budget): the `Long` bit mix in range, else the
+/// `BigInteger` word formula (`BigInteger.hashCode` always uses
+/// the word formula, so it needs no helper).
+fn bigint_code(n: &num_bigint::BigInt) -> i32 {
+    match n.to_i64() {
+        Some(i) => long_hash_code(i as u64),
+        None => bigint_hashcode(n),
+    }
+}
+
+/// Tower `hasheq`, bit-exact with the JVM (`Numbers.hasheqFrom` +
+/// `BigInt.hasheq` + `Ratio.hashCode`): `BigInt`/`BigInteger` in
+/// `long` range hash exactly like `Int` (`Murmur3.hashLong`, so
+/// `{5N :a}` looks up by `5`); wider ones hash as
+/// `BigInteger.hashCode`; decimals hash as the trailing-zero-stripped
+/// `BigDecimal.hashCode` (zeros of any scale hash `0`, like
+/// `BigDecimal.ZERO.hashCode`); ratios — not `IHashEq` — fall
+/// through to `Ratio.hashCode` (`numerator ^ denominator`).
 fn hasheq_tower(v: &Value) -> i32 {
     match v {
         Value::BigInt(n) | Value::BigInteger(n) => match n.to_i64() {
             Some(i) => hash_long(i),
-            None => hash_ordered(n.to_signed_bytes_be().into_iter().map(i32::from)),
+            None => bigint_hashcode(n),
         },
         Value::BigDec(d) => {
-            let (unscaled, scale) = d.stripped();
-            hash_combine(hasheq(&Value::BigInt(unscaled)), hash_long(scale))
+            if d.is_zero() {
+                0
+            } else {
+                let (unscaled, scale) = d.stripped();
+                bigdec_hashcode(&unscaled, scale)
+            }
         }
-        Value::Ratio(r) => hash_combine(
-            hasheq(&Value::BigInt(r.numer().clone())),
-            hasheq(&Value::BigInt(r.denom().clone())),
-        ),
+        Value::Ratio(r) => bigint_hashcode(r.numer()) ^ bigint_hashcode(r.denom()),
         _ => unreachable!("caller passes tower values only"),
     }
 }
@@ -335,22 +387,14 @@ fn hash_code_rest(v: &Value) -> i32 {
         Value::Agent(a) => id_hash(a.id()),
         Value::Volatile(v) => id_hash(v.id()),
         Value::Ref(r) => id_hash(r.id()),
-        // Deterministic stand-ins (the `BigInteger`/`BigDecimal`
-        // word formulas are not mirrored — see module docs).
-        Value::BigInt(n) | Value::BigInteger(n) => {
-            hash_ordered(n.to_signed_bytes_be().into_iter().map(i32::from))
-        }
-        Value::BigDec(d) => {
-            let (unscaled, scale) = d.stripped();
-            hash_combine(
-                hash_code(&Value::BigInt(unscaled)),
-                long_hash_code(scale as u64),
-            )
-        }
-        Value::Ratio(r) => hash_combine(
-            hash_code(&Value::BigInt(r.numer().clone())),
-            hash_code(&Value::BigInt(r.denom().clone())),
-        ),
+        // JVM `.hashCode`s: in-range `BigInt` uses the `Long`
+        // bit mix (`BigInt.hashCode`), `BigInteger` always uses
+        // `BigInteger.hashCode`, decimals use the UNstripped
+        // `BigDecimal.hashCode` (scale counts), ratios `num ^ den`.
+        Value::BigInt(n) => bigint_code(n),
+        Value::BigInteger(n) => bigint_hashcode(n),
+        Value::BigDec(d) => bigdec_hashcode(d.unscaled(), d.scale()),
+        Value::Ratio(r) => bigint_hashcode(r.numer()) ^ bigint_hashcode(r.denom()),
         Value::Extension(ext) => hash_code_extension(&**ext),
         // All other variants are handled upstream (the single
         // caller partitions the variants).
@@ -1262,5 +1306,135 @@ mod tests {
         // Defensive arm: the single caller partitions the variants,
         // so scalars never arrive here (only a dispatch bug could).
         let _ = super::hash_code_rest(&Value::Nil);
+    }
+
+    fn bigint(v: &str) -> Value {
+        Value::BigInt(v.parse::<num_bigint::BigInt>().unwrap())
+    }
+
+    fn biginteger(v: &str) -> Value {
+        Value::BigInteger(v.parse::<num_bigint::BigInt>().unwrap())
+    }
+
+    fn bigdec(v: &str) -> Value {
+        Value::BigDec(crate::BigDec::parse(v).unwrap())
+    }
+
+    fn ratio(n: &str, d: &str) -> Value {
+        Value::Ratio(num_rational::BigRational::new(
+            n.parse::<num_bigint::BigInt>().unwrap(),
+            d.parse::<num_bigint::BigInt>().unwrap(),
+        ))
+    }
+
+    /// Tower `hasheq` is JVM-identical: in-`long`-range `BigInt`s hash
+    /// exactly like `Int` (`Murmur3.hashLong`); wider ones hash as
+    /// `BigInteger.hashCode` (the `31`-chain over magnitude words times
+    /// the sign); decimals hash as the trailing-zero-stripped
+    /// `BigDecimal.hashCode` (`31 * unscaled + scale`, zeros are `0`);
+    /// ratios hash as `numerator ^ denominator` (`Ratio.hashCode`).
+    /// Integers below are transcribed from those JDK formulas.
+    #[test]
+    fn tower_hasheq_matches_jdk() {
+        // In-range `BigInt`/`BigInteger` agree with `Int` (murmur).
+        assert_eq!(hasheq(&bigint("5")), hasheq(&int(5)));
+        assert_eq!(hasheq(&biginteger("5")), hasheq(&int(5)));
+        assert_eq!(hasheq(&bigint("-1")), hasheq(&int(-1)));
+        assert_eq!(hasheq(&biginteger("-1")), hasheq(&int(-1)));
+        assert_eq!(
+            hasheq(&bigint("9223372036854775807")),
+            hasheq(&int(i64::MAX))
+        );
+        assert_eq!(
+            hasheq(&biginteger("-9223372036854775808")),
+            hasheq(&int(i64::MIN))
+        );
+        // The murmur range covers the whole `long` range (`2^32`
+        // is `Murmur3.hashLong`, not the word formula).
+        assert_eq!(hasheq(&bigint("4294967296")), 987_256_456);
+        assert_eq!(hasheq(&bigint("4294967296")), hasheq(&int(4_294_967_296)));
+        assert_eq!(hasheq(&bigint("4294967297")), hasheq(&int(4_294_967_297)));
+        // Wide magnitudes are `BigInteger.hashCode`.
+        assert_eq!(hasheq(&bigint("18446744073709551616")), 961);
+        assert_eq!(hasheq(&bigint("-18446744073709551616")), -961);
+        assert_eq!(hasheq(&bigint("9223372036854775808")), -2_147_483_648);
+        assert_eq!(hasheq(&bigint("-9223372036854775809")), 2_147_483_647);
+        assert_eq!(
+            hasheq(&bigint("1000000000000000000000000000000")),
+            1_319_562_394
+        );
+        assert_eq!(hasheq(&biginteger("18446744073709551616")), 961);
+        // Decimals strip trailing zeros first (zeros of any scale are 0).
+        assert_eq!(hasheq(&bigdec("1")), 31);
+        assert_eq!(hasheq(&bigdec("1.0")), 31);
+        assert_eq!(hasheq(&bigdec("1.00")), 31);
+        assert_eq!(hasheq(&bigdec("0")), 0);
+        assert_eq!(hasheq(&bigdec("0.00")), 0);
+        assert_eq!(hasheq(&bigdec("0.5")), 156);
+        assert_eq!(hasheq(&bigdec("100")), 29);
+        assert_eq!(hasheq(&bigdec("1E+3")), 28);
+        // Ratios are `numerator.hashCode ^ denominator.hashCode`.
+        assert_eq!(hasheq(&ratio("1", "2")), 3);
+        assert_eq!(hasheq(&ratio("3", "2")), 1);
+        assert_eq!(hasheq(&ratio("-1", "2")), -3);
+        assert_eq!(hasheq(&ratio("5", "3")), 6);
+        assert_eq!(hasheq(&ratio("18446744073709551616", "3")), 962);
+    }
+
+    /// Tower `.hashCode` is JVM-identical too: in-range `BigInt` uses
+    /// the `Long` bit mix, `BigInteger` always uses
+    /// `BigInteger.hashCode`, decimals use the UNstripped
+    /// `BigDecimal.hashCode` (scale counts: `0.0M` is `1`), ratios
+    /// the same `num ^ den` as `hasheq`.
+    #[test]
+    fn tower_hash_code_matches_jdk() {
+        assert_eq!(hash_code(&bigint("5")), 5);
+        assert_eq!(hash_code(&bigint("-1")), 0);
+        assert_eq!(hash_code(&bigint("18446744073709551616")), 961);
+        assert_eq!(hash_code(&bigint("-18446744073709551616")), -961);
+        assert_eq!(hash_code(&biginteger("5")), 5);
+        assert_eq!(hash_code(&biginteger("-1")), -1);
+        assert_eq!(hash_code(&biginteger("18446744073709551616")), 961);
+        assert_eq!(hash_code(&bigdec("1")), 31);
+        assert_eq!(hash_code(&bigdec("1.0")), 311);
+        assert_eq!(hash_code(&bigdec("0")), 0);
+        assert_eq!(hash_code(&bigdec("0.0")), 1);
+        assert_eq!(hash_code(&ratio("1", "2")), 3);
+        assert_eq!(hash_code(&ratio("-1", "2")), -3);
+    }
+
+    /// Equal values hash equal: the `=`-consistency battery over every
+    /// numeric `=` rule (in-range `Int`/`BigInt`/`BigInteger`, wide
+    /// magnitudes by value, scale-insensitive decimals, normalized
+    /// ratios, `±0.0`). Each pair asserts `=` AND the shared `hasheq`.
+    #[test]
+    fn hasheq_consistent_with_equiv() {
+        let pairs = [
+            (int(5), bigint("5")),
+            (int(5), biginteger("5")),
+            (bigint("5"), biginteger("5")),
+            (int(-1), bigint("-1")),
+            (int(i64::MAX), bigint("9223372036854775807")),
+            (int(i64::MIN), biginteger("-9223372036854775808")),
+            (
+                bigint("18446744073709551616"),
+                biginteger("18446744073709551616"),
+            ),
+            (
+                bigint("-1000000000000000000000000000000"),
+                biginteger("-1000000000000000000000000000000"),
+            ),
+            (bigdec("5.0"), bigdec("5.00")),
+            (bigdec("0"), bigdec("0.00")),
+            (bigdec("100"), bigdec("1E+2")),
+            (ratio("1", "2"), ratio("2", "4")),
+            (ratio("-1", "2"), ratio("-2", "4")),
+            (dbl(0.0), dbl(-0.0)),
+        ];
+        for (a, b) in &pairs {
+            assert_eq!(a, b, "pair must be `=`: {a:?} {b:?}");
+            assert_eq!(b, a, "pair must be `=` both ways");
+            assert_eq!(hasheq(a), hasheq(b), "equal values hash equal: {a:?} {b:?}");
+        }
     }
 }

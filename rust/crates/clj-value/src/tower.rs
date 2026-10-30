@@ -297,6 +297,19 @@ impl BigDec {
         self.unscaled.is_zero()
     }
 
+    /// The raw pair, for `hashCode` (which — unlike `hasheq` — hashes
+    /// the UNstripped value, so scale counts).
+    #[must_use]
+    pub fn unscaled(&self) -> &BigInt {
+        &self.unscaled
+    }
+
+    /// The raw pair, for `hashCode` (see [`BigDec::unscaled`]).
+    #[must_use]
+    pub fn scale(&self) -> i64 {
+        self.scale
+    }
+
     #[must_use]
     pub fn sign(&self) -> Ordering {
         if self.unscaled.is_zero() {
