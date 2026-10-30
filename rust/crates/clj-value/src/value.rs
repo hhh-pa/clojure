@@ -94,6 +94,42 @@ pub(crate) fn next_identity_id() -> u64 {
     IDENTITY_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
+/// `BigDecimal.ZERO_THROUGH_TEN` (fence 4a-big, oracle P5):
+/// scale-0 `0..=10` decimals share these instances — but ONLY
+/// for arithmetic results (see [`bigdec_result`]), like the
+/// JDK's `BigDecimal.valueOf` compact paths. Literals, parses,
+/// and coercions always box fresh (`Arc::new`), like the JDK's
+/// `new BigDecimal` ctors.
+static BIGDEC_ZERO_THROUGH_TEN: std::sync::LazyLock<[Arc<crate::BigDec>; 11]> =
+    std::sync::LazyLock::new(|| {
+        std::array::from_fn(|i| Arc::new(crate::BigDec::from_bigint(num_bigint::BigInt::from(i))))
+    });
+
+/// The `ZERO_THROUGH_TEN` slot for a scale-0 `0..=10` decimal
+/// (`None` otherwise — nonzero scales, negatives, `11+`, and
+/// past-`i64` magnitudes all stay fresh, like the JDK).
+fn canonical_bigdec_index(d: &crate::BigDec) -> Option<usize> {
+    (d.scale() == 0)
+        .then(|| d.unscaled().to_i64())
+        .flatten()
+        .filter(|n| (0..=10).contains(n))
+        .map(|n| n as usize)
+}
+
+/// Wrap an arithmetic-result decimal (see
+/// [`BIGDEC_ZERO_THROUGH_TEN`]): scale-0 `0..=10` results
+/// share the canonical instance (the JVM's `valueOf` compact
+/// paths — `+`/`-`/`*`/`/` and friends all route here);
+/// anything else boxes fresh. Literals, parses, and coercions
+/// must NOT call this (they box fresh, like `new BigDecimal`).
+#[must_use]
+pub fn bigdec_result(d: crate::BigDec) -> Value {
+    match canonical_bigdec_index(&d) {
+        Some(n) => Value::BigDec(BIGDEC_ZERO_THROUGH_TEN[n].clone()),
+        None => Value::BigDec(Arc::new(d)),
+    }
+}
+
 /// The JVM string-pool analog (fence 4a): every string LITERAL the
 /// analyzer walks canonicalizes here, so equal literals share one
 /// `Arc` (like the JVM's interned class constants) while runtime
@@ -923,17 +959,23 @@ pub enum Value {
     Int(i64),
     /// IEEE-754 double.
     Double(f64),
-    /// Arbitrary-precision integer (`clojure.lang.BigInt`).
-    BigInt(num_bigint::BigInt),
-    /// Arbitrary-precision integer (`java.math.BigInteger`, S2):
-    /// value-identical to [`Value::BigInt`] (same `=`/`hash`/
-    /// arithmetic — ops absorb it into `BigInt`), but prints
-    /// bare (`5`, never `5N`).
-    BigInteger(num_bigint::BigInt),
-    /// Arbitrary-precision decimal (`java.math.BigDecimal`).
-    BigDec(crate::BigDec),
-    /// Exact rational (`clojure.lang.Ratio`, always normalized).
-    Ratio(num_rational::BigRational),
+    /// Arbitrary-precision integer (`clojure.lang.BigInt`,
+    /// allocation-boxed: `identical?` is `Arc::ptr_eq` — every
+    /// construction is fresh, like the JVM).
+    BigInt(Arc<num_bigint::BigInt>),
+    /// Arbitrary-precision integer (`java.math.BigInteger`, S2,
+    /// allocation-boxed like [`Value::BigInt`]): value-identical
+    /// to it (same `=`/`hash`/arithmetic — ops absorb it into
+    /// `BigInt`), but prints bare (`5`, never `5N`).
+    BigInteger(Arc<num_bigint::BigInt>),
+    /// Arbitrary-precision decimal (`java.math.BigDecimal`,
+    /// allocation-boxed: `identical?` is `Arc::ptr_eq` —
+    /// literals box fresh, arithmetic results share
+    /// `ZERO_THROUGH_TEN` through [`bigdec_result`]).
+    BigDec(Arc<crate::BigDec>),
+    /// Exact rational (`clojure.lang.Ratio`, always normalized,
+    /// allocation-boxed like [`Value::BigInt`]).
+    Ratio(Arc<num_rational::BigRational>),
     /// String.
     Str(Arc<str>),
     /// Character.
@@ -2065,8 +2107,8 @@ fn plain_equals_sets(s: &Set, o: &Set) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        Value, find_map_dup, find_set_dup, intern_literal_strings, intern_string, new_map, new_set,
-        plain_equals,
+        Value, bigdec_result, find_map_dup, find_set_dup, intern_literal_strings, intern_string,
+        new_map, new_set, plain_equals,
     };
     use crate::{HostDef, HostInst, HostKind, HostVal, Keyword, Symbol};
     use std::collections::hash_map::DefaultHasher;
@@ -2083,6 +2125,42 @@ mod tests {
         assert!(Arc::ptr_eq(&a, &b));
         let fresh = Arc::from("f4a-pool");
         assert!(!Arc::ptr_eq(&a, &fresh));
+    }
+
+    // Fence 4a-big: arithmetic-result decimals at scale-0
+    // `0..=10` share the canonical instance (the JVM's
+    // `BigDecimal.valueOf` rule); negatives, `11+`, nonzero
+    // scales, and past-`i64` magnitudes box fresh — as do
+    // literals (direct `Arc::new`, the `new BigDecimal` analog).
+    #[test]
+    fn bigdec_result_canonicalizes_zero_through_ten() {
+        use num_bigint::BigInt;
+        let boxed = |d: crate::BigDec| opt_bigdec(&bigdec_result(d)).unwrap().clone();
+        let share = |n: i32| {
+            Arc::ptr_eq(
+                &boxed(crate::BigDec::from_bigint(BigInt::from(n))),
+                &boxed(crate::BigDec::from_bigint(BigInt::from(n))),
+            )
+        };
+        assert!(share(0));
+        assert!(share(5));
+        assert!(share(10));
+        assert!(!share(11));
+        assert!(!share(-1));
+        assert!(!Arc::ptr_eq(
+            &boxed(crate::BigDec::parse("5.0").unwrap()),
+            &boxed(crate::BigDec::parse("5.0").unwrap()),
+        ));
+        let wide = BigInt::from(2).pow(100);
+        assert!(!Arc::ptr_eq(
+            &boxed(crate::BigDec::from_bigint(wide.clone())),
+            &boxed(crate::BigDec::from_bigint(wide)),
+        ));
+        let literal = || Value::BigDec(Arc::new(crate::BigDec::from_bigint(BigInt::from(5))));
+        assert!(!Arc::ptr_eq(
+            opt_bigdec(&literal()).unwrap(),
+            opt_bigdec(&literal()).unwrap(),
+        ));
     }
 
     // Fence 4a test extractors: `Option` + `.unwrap()` is the
@@ -2126,6 +2204,13 @@ mod tests {
         }
     }
 
+    fn opt_bigdec(v: &Value) -> Option<&Arc<crate::BigDec>> {
+        match v {
+            Value::BigDec(d) => Some(d),
+            _ => None,
+        }
+    }
+
     #[test]
     fn opt_extractors_reject_wrong_kinds() {
         assert!(opt_vector(&Value::Int(1)).is_none());
@@ -2133,6 +2218,7 @@ mod tests {
         assert!(opt_entry(&Value::Int(1)).is_none());
         assert!(opt_tagged(&Value::Int(1)).is_none());
         assert!(opt_rc(&Value::Int(1)).is_none());
+        assert!(opt_bigdec(&Value::Int(1)).is_none());
     }
 
     // Fence 4a: the quote walk interns nested strings and keeps
@@ -2209,7 +2295,7 @@ mod tests {
     /// `hasheq` contract: equal values hash equally).
     #[test]
     fn wide_bigint_hashes_by_magnitude() {
-        let wide = || Value::BigInt(num_bigint::BigInt::from(2).pow(100));
+        let wide = || Value::BigInt(Arc::new(num_bigint::BigInt::from(2).pow(100)));
         assert_hash_consistent(&wide(), &wide());
     }
 

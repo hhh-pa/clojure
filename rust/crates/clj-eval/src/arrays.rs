@@ -433,7 +433,7 @@ fn longstop_value(v: &Value) -> Result<i64, NativeError> {
         Value::Char(c) => Ok(*c as i64),
         Value::BigInt(n) | Value::BigInteger(n) => n
             .to_i64()
-            .ok_or_else(|| out_of_range("long", Num::BigInt(n.clone()))),
+            .ok_or_else(|| out_of_range("long", Num::BigInt(n.as_ref().clone()))),
         Value::Ratio(r) => {
             let t = r.numer() / r.denom();
             t.to_i64()

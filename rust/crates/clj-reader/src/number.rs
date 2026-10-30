@@ -21,6 +21,8 @@
 //! JVM reader likewise always yields `Long`, even int-sized —
 //! probe17 — so no `Integer` split exists).
 
+use std::sync::Arc;
+
 use clj_value::Value;
 use num_traits::{ToPrimitive, Zero};
 
@@ -125,7 +127,7 @@ pub fn bigint_token_value(token: &str) -> Value {
         } else {
             parse_radix(body, 10)
         };
-    Value::BigInt(if neg { -magnitude } else { magnitude })
+    Value::BigInt(Arc::new(if neg { -magnitude } else { magnitude }))
 }
 
 fn parse_radix(digits: &str, radix: u32) -> num_bigint::BigInt {
@@ -139,9 +141,9 @@ fn parse_radix(digits: &str, radix: u32) -> num_bigint::BigInt {
 #[must_use]
 pub fn bigdec_token_value(token: &str) -> Value {
     let body = token.strip_suffix('M').unwrap_or(token);
-    Value::BigDec(
+    Value::BigDec(Arc::new(
         clj_value::BigDec::parse(body).expect("grammar already validated by match_number"),
-    )
+    ))
 }
 
 /// A ratio token: divisible ratios reduce to `Int`/`BigInt`
@@ -174,10 +176,12 @@ pub fn ratio_token_value(token: &str) -> RatioToken {
         let q = numer / denom;
         return RatioToken::Value(match q.to_i64() {
             Some(i) => Value::Int(i),
-            None => Value::BigInt(q),
+            None => Value::BigInt(Arc::new(q)),
         });
     }
-    RatioToken::Value(Value::Ratio(num_rational::BigRational::new(numer, denom)))
+    RatioToken::Value(Value::Ratio(Arc::new(num_rational::BigRational::new(
+        numer, denom,
+    ))))
 }
 
 fn strip_sign(s: &str) -> (bool, &str) {

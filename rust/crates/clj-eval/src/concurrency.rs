@@ -354,8 +354,8 @@ fn native_cas(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError
     // Reference comparison (fence 4a): the JVM's
     // `AtomicReference.compareAndSet` is `==`, so the port
     // compares through `identical?` — a distinct-but-equal box
-    // (an uncached long, a fresh string) misses, exactly like
-    // the JVM.
+    // (an uncached long, a fresh string, a fresh big number)
+    // misses, exactly like the JVM.
     let outcome = {
         let mut state = atom.lock();
         if crate::classemu::identical_values(&state.value, &args[1]) {
@@ -2858,10 +2858,10 @@ mod tests {
             Value::Bool(true),
             Value::Int(1),
             Value::Double(1.5),
-            Value::BigInt(num_bigint::BigInt::from(1)),
-            Value::BigInteger(num_bigint::BigInt::from(2)),
-            Value::BigDec(BigDec::parse("1.5").unwrap()),
-            Value::Ratio(num_rational::BigRational::new(1.into(), 2.into())),
+            Value::BigInt(Arc::new(num_bigint::BigInt::from(1))),
+            Value::BigInteger(Arc::new(num_bigint::BigInt::from(2))),
+            Value::BigDec(Arc::new(BigDec::parse("1.5").unwrap())),
+            Value::Ratio(Arc::new(num_rational::BigRational::new(1.into(), 2.into()))),
             Value::Str(Arc::from("s")),
             Value::Char('c'),
             Value::Symbol(Symbol::new(None, "s")),

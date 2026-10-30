@@ -613,6 +613,29 @@ fn cas_identity() {
         ),
         "false"
     );
+    // Big numbers compare references too (fence 4a-big): fresh
+    // literals miss despite `=`, canonical decimals hit.
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [a (atom 5N)] [(compare-and-set! a 5N :x) @a])"
+        ),
+        "[false 5N]"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [a (atom 1/3)] [(compare-and-set! a 1/3 :x) @a])"
+        ),
+        "[false 1/3]"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [a (atom (+ 1M 4M))] [(compare-and-set! a (+ 2M 3M) :x) @a])"
+        ),
+        "[true :x]"
+    );
     // The validator still runs on a reference miss (construction +
     // attempt), and no watch fires.
     assert_eq!(

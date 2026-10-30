@@ -23,7 +23,8 @@ use num_traits::{Signed, ToPrimitive, Zero};
 use clj_reader::{ReadCond, Reader, ReaderOpts};
 use clj_value::{
     ExtensionValue, Instant, Keyword, List, Map, PrintOpts, Set, Symbol, TagError, ThrowClass,
-    Throwable, Uuid, Value, Vector, new_map, new_set, pr_to_string, seq_vec, validate_uuid,
+    Throwable, Uuid, Value, Vector, bigdec_result, new_map, new_set, pr_to_string, seq_vec,
+    validate_uuid,
 };
 
 use crate::error::{NativeError, jvm_class_of};
@@ -417,9 +418,9 @@ pub(crate) fn as_num(v: &Value) -> Result<Num, NativeError> {
         Value::Int(i) => Ok(Num::Int(*i)),
         // `BigInteger` folds into `Num::BigInt`: ops absorb it
         // (results print `N` — S2 oracles `r8-add`..`r8-typeop`).
-        Value::BigInt(n) | Value::BigInteger(n) => Ok(Num::BigInt(n.clone())),
-        Value::Ratio(r) => Ok(Num::Ratio(r.clone())),
-        Value::BigDec(d) => Ok(Num::BigDec(d.clone())),
+        Value::BigInt(n) | Value::BigInteger(n) => Ok(Num::BigInt(n.as_ref().clone())),
+        Value::Ratio(r) => Ok(Num::Ratio(r.as_ref().clone())),
+        Value::BigDec(d) => Ok(Num::BigDec(d.as_ref().clone())),
         Value::Double(d) => Ok(Num::Double(*d)),
         Value::Nil => Err(npe_getclass()),
         _ => Err(cce_err(v, "java.lang.Number")),
@@ -429,9 +430,11 @@ pub(crate) fn as_num(v: &Value) -> Result<Num, NativeError> {
 fn num_value(n: Num) -> Value {
     match n {
         Num::Int(i) => Value::Int(i),
-        Num::BigInt(n) => Value::BigInt(n),
+        Num::BigInt(n) => Value::BigInt(Arc::new(n)),
         Num::Ratio(r) => normalize_rational(r),
-        Num::BigDec(d) => Value::BigDec(d),
+        // Arithmetic results canonicalize through `valueOf`
+        // (scale-0 `0..=10` share — fence 4a-big, oracle P5).
+        Num::BigDec(d) => bigdec_result(d),
         Num::Double(d) => Value::Double(d),
     }
 }
@@ -440,9 +443,9 @@ fn num_value(n: Num) -> Value {
 /// `/` rely on this as well as the ops below).
 fn normalize_rational(r: num_rational::BigRational) -> Value {
     if r.denom() == &num_bigint::BigInt::from(1) {
-        Value::BigInt(r.numer().clone())
+        Value::BigInt(Arc::new(r.numer().clone()))
     } else {
-        Value::Ratio(r)
+        Value::Ratio(Arc::new(r))
     }
 }
 
@@ -621,9 +624,9 @@ fn native_sub(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError
     if args.len() == 1 {
         return match as_num(&args[0])? {
             Num::Int(x) => x.checked_neg().map(Value::Int).ok_or_else(overflow),
-            Num::BigInt(x) => Ok(Value::BigInt(-x)),
+            Num::BigInt(x) => Ok(Value::BigInt(Arc::new(-x))),
             Num::Ratio(x) => Ok(num_value(num_ratio(-x))),
-            Num::BigDec(x) => Ok(Value::BigDec(match math_context_of(eval)? {
+            Num::BigDec(x) => Ok(bigdec_result(match math_context_of(eval)? {
                 None => x.neg(),
                 Some(mc) => x.neg_mc(&mc).map_err(arithmetic)?,
             })),
@@ -698,7 +701,7 @@ fn quot_tower(eval: &mut Evaluator, a: &Num, b: &Num) -> Result<Value, NativeErr
     }
     if num_rank(a).max(num_rank(b)) == 3 {
         let (x, y, mc) = dec_pair(eval, a, b)?;
-        Ok(Value::BigDec(match mc {
+        Ok(bigdec_result(match mc {
             None => x.quot_trunc(&y),
             Some(mc) => x.quot_mc(&y, &mc).map_err(arithmetic)?,
         }))
@@ -764,7 +767,7 @@ fn rem_tower(eval: &mut Evaluator, a: &Num, b: &Num) -> Result<Value, NativeErro
     }
     if num_rank(a).max(num_rank(b)) == 3 {
         let (x, y, _) = dec_pair(eval, a, b)?;
-        Ok(Value::BigDec(x.rem(&y)))
+        Ok(bigdec_result(x.rem(&y)))
     } else {
         let (x, y) = (num_rational(a), num_rational(b));
         let q = trunc_div(&x, &y);
@@ -820,7 +823,7 @@ fn mod_tower(eval: &mut Evaluator, a: &Num, b: &Num) -> Result<Value, NativeErro
     }
     if num_rank(a).max(num_rank(b)) == 3 {
         let (x, y, _) = dec_pair(eval, a, b)?;
-        Ok(Value::BigDec(bigdec_mod(&x, &y)))
+        Ok(bigdec_result(bigdec_mod(&x, &y)))
     } else {
         mod_rational(&num_rational(a), &num_rational(b))
     }
@@ -1050,11 +1053,11 @@ fn rat_unit() -> num_rational::BigRational {
 fn inc_one(eval: &mut Evaluator, n: Num) -> Result<Value, NativeError> {
     match n {
         Num::Int(x) => x.checked_add(1).map(Value::Int).ok_or_else(overflow),
-        Num::BigInt(x) => Ok(Value::BigInt(x + 1)),
+        Num::BigInt(x) => Ok(Value::BigInt(Arc::new(x + 1))),
         Num::Ratio(x) => Ok(num_value(num_ratio(x + rat_unit()))),
         Num::BigDec(x) => {
             let one = clj_value::BigDec::from_bigint(num_bigint::BigInt::from(1));
-            Ok(Value::BigDec(match math_context_of(eval)? {
+            Ok(bigdec_result(match math_context_of(eval)? {
                 None => x.add(&one),
                 Some(mc) => x.add_mc(&one, &mc).map_err(arithmetic)?,
             }))
@@ -1067,11 +1070,11 @@ fn inc_one(eval: &mut Evaluator, n: Num) -> Result<Value, NativeError> {
 fn dec_one(eval: &mut Evaluator, n: Num) -> Result<Value, NativeError> {
     match n {
         Num::Int(x) => x.checked_sub(1).map(Value::Int).ok_or_else(overflow),
-        Num::BigInt(x) => Ok(Value::BigInt(x - 1)),
+        Num::BigInt(x) => Ok(Value::BigInt(Arc::new(x - 1))),
         Num::Ratio(x) => Ok(num_value(num_ratio(x - rat_unit()))),
         Num::BigDec(x) => {
             let one = clj_value::BigDec::from_bigint(num_bigint::BigInt::from(1));
-            Ok(Value::BigDec(match math_context_of(eval)? {
+            Ok(bigdec_result(match math_context_of(eval)? {
                 None => x.sub(&one),
                 Some(mc) => x.sub_mc(&one, &mc).map_err(arithmetic)?,
             }))
@@ -1110,7 +1113,10 @@ fn minmax(display: &str, args: &[Value], want_max: bool) -> Result<Value, Native
         return Ok(args[0].clone());
     }
     let mut acc = as_num(&args[0])?;
-    for arg in &args[1..] {
+    // The winning INPUT answers (upstream returns the object,
+    // not a recomputation — identity preserved).
+    let mut winner = 0;
+    for (i, arg) in args[1..].iter().enumerate() {
         let n = as_num(arg)?;
         // The incumbent survives only on a strict win; anything
         // else (a tie, or a latter-side `NaN` since every `NaN`
@@ -1146,9 +1152,10 @@ fn minmax(display: &str, args: &[Value], want_max: bool) -> Result<Value, Native
         };
         if !keep {
             acc = n;
+            winner = i + 1;
         }
     }
-    Ok(num_value(acc))
+    Ok(args[winner].clone())
 }
 
 fn native_max(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
@@ -3160,17 +3167,20 @@ pub(crate) fn native_double(_eval: &mut Evaluator, args: &[Value]) -> Result<Val
 fn native_bigint(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/bigint", args, &[1])?;
     match &args[0] {
-        // `BigInteger` coerces to `BigInt` (S2 oracle `r8-bigrd`).
-        Value::BigInt(n) | Value::BigInteger(n) => Ok(Value::BigInt(n.clone())),
-        Value::Int(i) => Ok(Value::BigInt(num_bigint::BigInt::from(*i))),
+        // `BigInt` passes through (the same object — upstream
+        // answers `x`); `BigInteger` coerces to a fresh `BigInt`
+        // (S2 oracle `r8-bigrd`).
+        Value::BigInt(n) => Ok(Value::BigInt(n.clone())),
+        Value::BigInteger(n) => Ok(Value::BigInt(Arc::new(n.as_ref().clone()))),
+        Value::Int(i) => Ok(Value::BigInt(Arc::new(num_bigint::BigInt::from(*i)))),
         Value::Double(d) => {
             let dec = clj_value::BigDec::value_of_f64(*d).map_err(number_format)?;
-            Ok(Value::BigInt(dec.to_bigint_trunc()))
+            Ok(Value::BigInt(Arc::new(dec.to_bigint_trunc())))
         }
-        Value::BigDec(d) => Ok(Value::BigInt(d.to_bigint_trunc())),
-        Value::Ratio(r) => Ok(Value::BigInt(r.numer() / r.denom())),
+        Value::BigDec(d) => Ok(Value::BigInt(Arc::new(d.to_bigint_trunc()))),
+        Value::Ratio(r) => Ok(Value::BigInt(Arc::new(r.numer() / r.denom()))),
         Value::Str(s) => clj_value::bigint_parse(s)
-            .map(Value::BigInt)
+            .map(|n| Value::BigInt(Arc::new(n)))
             .map_err(number_format),
         Value::Nil => Err(NativeError::new(
             ThrowClass::NullPointerException,
@@ -3194,12 +3204,16 @@ fn native_abs(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError
     Ok(match as_num(&args[0])? {
         Num::Int(i) => Value::Int(if i == i64::MIN { i } else { i.abs() }),
         Num::Double(d) => Value::Double(d.abs()),
-        Num::BigInt(n) => Value::BigInt(n.abs()),
+        Num::BigInt(n) => Value::BigInt(Arc::new(n.abs())),
         Num::Ratio(r) => num_value(num_ratio(r.abs())),
-        Num::BigDec(d) => Value::BigDec(match math_context_of(eval)? {
-            None => d.abs(),
-            Some(mc) => d.abs_mc(&mc).map_err(arithmetic)?,
-        }),
+        // The JDK `abs` answers `this` when non-negative
+        // (identity preserved); negatives negate (a computed
+        // result — canonical when scale-0 `0..=10`).
+        Num::BigDec(d) => match math_context_of(eval)? {
+            None if d.sign() != std::cmp::Ordering::Less => args[0].clone(),
+            None => bigdec_result(d.abs()),
+            Some(mc) => bigdec_result(d.abs_mc(&mc).map_err(arithmetic)?),
+        },
     })
 }
 
@@ -3214,17 +3228,20 @@ fn native_abs(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError
 fn native_biginteger(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/biginteger", args, &[1])?;
     match &args[0] {
+        // `BigInteger` passes through (the same object —
+        // upstream answers `x`); `BigInt` coerces to a fresh
+        // `BigInteger`.
         Value::BigInteger(n) => Ok(Value::BigInteger(n.clone())),
-        Value::BigInt(n) => Ok(Value::BigInteger(n.clone())),
-        Value::Int(i) => Ok(Value::BigInteger(num_bigint::BigInt::from(*i))),
+        Value::BigInt(n) => Ok(Value::BigInteger(Arc::new(n.as_ref().clone()))),
+        Value::Int(i) => Ok(Value::BigInteger(Arc::new(num_bigint::BigInt::from(*i)))),
         Value::Double(d) => {
             let dec = clj_value::BigDec::value_of_f64(*d).map_err(number_format)?;
-            Ok(Value::BigInteger(dec.to_bigint_trunc()))
+            Ok(Value::BigInteger(Arc::new(dec.to_bigint_trunc())))
         }
-        Value::BigDec(d) => Ok(Value::BigInteger(d.to_bigint_trunc())),
-        Value::Ratio(r) => Ok(Value::BigInteger(r.numer() / r.denom())),
+        Value::BigDec(d) => Ok(Value::BigInteger(Arc::new(d.to_bigint_trunc()))),
+        Value::Ratio(r) => Ok(Value::BigInteger(Arc::new(r.numer() / r.denom()))),
         Value::Str(s) => clj_value::bigint_parse(s)
-            .map(Value::BigInteger)
+            .map(|n| Value::BigInteger(Arc::new(n)))
             .map_err(number_format),
         Value::Nil => Err(NativeError::new(
             ThrowClass::NullPointerException,
@@ -3246,11 +3263,11 @@ fn ratio_part(display: &str, args: &[Value], numer: bool) -> Result<Value, Nativ
     check_arity(display, args, &[1])?;
     let field = if numer { "numerator" } else { "denominator" };
     match &args[0] {
-        Value::Ratio(r) => Ok(Value::BigInteger(if numer {
+        Value::Ratio(r) => Ok(Value::BigInteger(Arc::new(if numer {
             r.numer().clone()
         } else {
             r.denom().clone()
-        })),
+        }))),
         Value::Nil => Err(NativeError::new(
             ThrowClass::NullPointerException,
             format!("Cannot read field \"{field}\" because \"r\" is null"),
@@ -3361,28 +3378,31 @@ fn rounding_value_of(name: &str) -> NativeError {
 fn native_bigdec(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/bigdec", args, &[1])?;
     match &args[0] {
+        // `BigDec` passes through (the same object — upstream
+        // answers `x`); every other arm boxes fresh (the JDK's
+        // `new BigDecimal` ctors — never `valueOf`).
         Value::BigDec(d) => Ok(Value::BigDec(d.clone())),
-        Value::Int(i) => Ok(Value::BigDec(
+        Value::Int(i) => Ok(Value::BigDec(Arc::new(
             clj_value::BigDec::value_of_f64(*i as f64).map_err(number_format)?,
-        )),
-        Value::Double(d) => Ok(Value::BigDec(
+        ))),
+        Value::Double(d) => Ok(Value::BigDec(Arc::new(
             clj_value::BigDec::value_of_f64(*d).map_err(number_format)?,
-        )),
-        Value::BigInt(n) | Value::BigInteger(n) => {
-            Ok(Value::BigDec(clj_value::BigDec::from_bigint(n.clone())))
-        }
+        ))),
+        Value::BigInt(n) | Value::BigInteger(n) => Ok(Value::BigDec(Arc::new(
+            clj_value::BigDec::from_bigint(n.as_ref().clone()),
+        ))),
         // Upstream `(bigdec ratio)` divides through `/`, so a
         // bound context rounds it (S2 oracle `wp-bigdec`).
         Value::Ratio(r) => match math_context_of(eval)? {
             None => clj_value::BigDec::from_rational_exact(r)
-                .map(Value::BigDec)
+                .map(|d| Value::BigDec(Arc::new(d)))
                 .map_err(arithmetic),
             Some(mc) => clj_value::BigDec::from_ratio_mc(r, &mc)
-                .map(Value::BigDec)
+                .map(|d| Value::BigDec(Arc::new(d)))
                 .map_err(arithmetic),
         },
         Value::Str(s) => clj_value::BigDec::parse(s)
-            .map(Value::BigDec)
+            .map(|d| Value::BigDec(Arc::new(d)))
             .map_err(number_format),
         Value::Nil => Err(NativeError::new(
             ThrowClass::NullPointerException,
@@ -3428,17 +3448,17 @@ fn native_rationalize(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, Na
             let dec = clj_value::BigDec::value_of_f64(*d).map_err(number_format)?;
             let r = dec.to_rational();
             if r.denom() == &num_bigint::BigInt::from(1) {
-                Ok(Value::BigInt(r.numer().clone()))
+                Ok(Value::BigInt(Arc::new(r.numer().clone())))
             } else {
-                Ok(Value::Ratio(r))
+                Ok(Value::Ratio(Arc::new(r)))
             }
         }
         Value::BigDec(d) => {
             let r = d.to_rational();
             if r.denom() == &num_bigint::BigInt::from(1) {
-                Ok(Value::BigInt(r.numer().clone()))
+                Ok(Value::BigInt(Arc::new(r.numer().clone())))
             } else {
-                Ok(Value::Ratio(r))
+                Ok(Value::Ratio(Arc::new(r)))
             }
         }
         other => Err(cce_err(other, "java.lang.Number")),
@@ -3466,11 +3486,15 @@ pub(crate) fn native_float(_eval: &mut Evaluator, args: &[Value]) -> Result<Valu
         Value::Double(d) => float_checked(*d, Num::Double(*d))?,
         // Tower narrows like `double`, then takes the same
         // range check (the class/precision gap is documented).
-        Value::BigInt(n) | Value::BigInteger(n) => {
-            float_checked(n.to_f64().unwrap_or(f64::NAN), Num::BigInt(n.clone()))?
-        }
-        Value::Ratio(r) => float_checked(r.to_f64().unwrap_or(f64::NAN), Num::Ratio(r.clone()))?,
-        Value::BigDec(d) => float_checked(d.to_f64(), Num::BigDec(d.clone()))?,
+        Value::BigInt(n) | Value::BigInteger(n) => float_checked(
+            n.to_f64().unwrap_or(f64::NAN),
+            Num::BigInt(n.as_ref().clone()),
+        )?,
+        Value::Ratio(r) => float_checked(
+            r.to_f64().unwrap_or(f64::NAN),
+            Num::Ratio(r.as_ref().clone()),
+        )?,
+        Value::BigDec(d) => float_checked(d.to_f64(), Num::BigDec(d.as_ref().clone()))?,
         Value::Nil => return Err(npe_double_value()),
         v => return Err(cce_err(v, "java.lang.Number")),
     }))
@@ -4261,10 +4285,10 @@ fn negate_prime(eval: &mut Evaluator, n: Num) -> Result<Value, NativeError> {
         Num::Int(x) => Ok(x
             .checked_neg()
             .map(Value::Int)
-            .unwrap_or_else(|| Value::BigInt(-num_bigint::BigInt::from(x)))),
-        Num::BigInt(x) => Ok(Value::BigInt(-x)),
+            .unwrap_or_else(|| Value::BigInt(Arc::new(-num_bigint::BigInt::from(x))))),
+        Num::BigInt(x) => Ok(Value::BigInt(Arc::new(-x))),
         Num::Ratio(x) => Ok(num_value(num_ratio(-x))),
-        Num::BigDec(x) => Ok(Value::BigDec(match math_context_of(eval)? {
+        Num::BigDec(x) => Ok(bigdec_result(match math_context_of(eval)? {
             None => x.neg(),
             Some(mc) => x.neg_mc(&mc).map_err(arithmetic)?,
         })),
@@ -4297,7 +4321,9 @@ fn native_mul_prime(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nativ
 /// (oracles `ip-*`).
 fn inc_prime_one(eval: &mut Evaluator, n: Num) -> Result<Value, NativeError> {
     match n {
-        Num::Int(x) if x == i64::MAX => Ok(Value::BigInt(num_bigint::BigInt::from(x) + 1)),
+        Num::Int(x) if x == i64::MAX => {
+            Ok(Value::BigInt(Arc::new(num_bigint::BigInt::from(x) + 1)))
+        }
         n => inc_one(eval, n),
     }
 }
@@ -4306,7 +4332,9 @@ fn inc_prime_one(eval: &mut Evaluator, n: Num) -> Result<Value, NativeError> {
 /// oracles `dp-*`).
 fn dec_prime_one(eval: &mut Evaluator, n: Num) -> Result<Value, NativeError> {
     match n {
-        Num::Int(x) if x == i64::MIN => Ok(Value::BigInt(num_bigint::BigInt::from(x) - 1)),
+        Num::Int(x) if x == i64::MIN => {
+            Ok(Value::BigInt(Arc::new(num_bigint::BigInt::from(x) - 1)))
+        }
         n => dec_one(eval, n),
     }
 }
@@ -4366,9 +4394,9 @@ fn dec_unchecked_one(eval: &mut Evaluator, n: Num) -> Result<Value, NativeError>
 fn negate_unchecked(eval: &mut Evaluator, n: Num) -> Result<Value, NativeError> {
     match n {
         Num::Int(x) => Ok(Value::Int(x.wrapping_neg())),
-        Num::BigInt(x) => Ok(Value::BigInt(-x)),
+        Num::BigInt(x) => Ok(Value::BigInt(Arc::new(-x))),
         Num::Ratio(x) => Ok(num_value(num_ratio(-x))),
-        Num::BigDec(x) => Ok(Value::BigDec(match math_context_of(eval)? {
+        Num::BigDec(x) => Ok(bigdec_result(match math_context_of(eval)? {
             None => x.neg(),
             Some(mc) => x.neg_mc(&mc).map_err(arithmetic)?,
         })),
@@ -5073,7 +5101,7 @@ mod tests {
         );
         assert_eq!(
             num_value(Num::Ratio(unreduced)),
-            Value::BigInt(num_bigint::BigInt::from(1))
+            Value::BigInt(Arc::new(num_bigint::BigInt::from(1)))
         );
     }
 
