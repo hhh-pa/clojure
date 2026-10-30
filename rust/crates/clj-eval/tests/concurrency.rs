@@ -3035,6 +3035,9 @@ fn locking_object_kinds() {
     // fresh clone — content keys keep enter/exit matched.
     assert_eq!(run_last(&mut eval, "(locking (find {:a 1} :a) :ok)"), ":ok");
     assert_eq!(run_last(&mut eval, "(locking (first {:a 1}) :ok)"), ":ok");
+    // Fence 3c rebase: executors lock by minted id (monitor_key
+    // arm 40, same shape as agents).
+    assert_eq!(run_last(&mut eval, "(locking (executor) :ok)"), ":ok");
 }
 
 #[test]

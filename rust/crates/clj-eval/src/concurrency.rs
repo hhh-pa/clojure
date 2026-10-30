@@ -2436,6 +2436,7 @@ pub(crate) fn monitor_key(v: &Value) -> u64 {
         Value::Class(c) => (37, Arc::as_ptr(c) as usize as u64),
         Value::Array(a) => (38, a.id()),
         Value::PrimitiveVector(p) => (39, hash_debug(&(p.elem(), p.len()))),
+        Value::Executor(x) => (40, x.id()),
     };
     tag.wrapping_mul(MIX).wrapping_add(payload)
 }
