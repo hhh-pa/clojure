@@ -1375,6 +1375,30 @@ const STATIC_LATTICE: &[StaticRow] = &[
         iface: false,
         bases: &["java.lang.IllegalStateException"],
     },
+    // Fence 3c: `(executor)` values report the classic delegated
+    // service (ancestry probed from `newSingleThreadExecutor` on an
+    // older JDK — newer JDKs interpose an `AutoShutdown` subclass;
+    // port-fixed).
+    StaticRow {
+        name: "java.util.concurrent.Executor",
+        iface: true,
+        bases: &[],
+    },
+    StaticRow {
+        name: "java.util.concurrent.ExecutorService",
+        iface: true,
+        bases: &["java.util.concurrent.Executor"],
+    },
+    StaticRow {
+        name: "java.util.concurrent.Executors$DelegatedExecutorService",
+        iface: false,
+        bases: &["java.lang.Object", "java.util.concurrent.ExecutorService"],
+    },
+    StaticRow {
+        name: "java.util.concurrent.Executors$FinalizableDelegatedExecutorService",
+        iface: false,
+        bases: &["java.util.concurrent.Executors$DelegatedExecutorService"],
+    },
     StaticRow {
         name: "java.util.concurrent.ExecutionException",
         iface: false,

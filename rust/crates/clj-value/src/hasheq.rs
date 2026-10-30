@@ -249,6 +249,7 @@ fn hasheq_rest(v: &Value) -> i32 {
         Value::Agent(a) => id_hash(a.id()),
         Value::Volatile(v) => id_hash(v.id()),
         Value::Ref(r) => id_hash(r.id()),
+        Value::Executor(x) => id_hash(x.id()),
         Value::Extension(ext) => hasheq_extension(&**ext),
         // All other variants are handled by `hasheq`/`hasheq_mid`
         // (the single caller partitions the variants).
@@ -387,6 +388,7 @@ fn hash_code_rest(v: &Value) -> i32 {
         Value::Agent(a) => id_hash(a.id()),
         Value::Volatile(v) => id_hash(v.id()),
         Value::Ref(r) => id_hash(r.id()),
+        Value::Executor(x) => id_hash(x.id()),
         // JVM `.hashCode`s: in-range `BigInt` uses the `Long`
         // bit mix (`BigInt.hashCode`), `BigInteger` always uses
         // `BigInteger.hashCode`, decimals use the UNstripped
@@ -1167,6 +1169,18 @@ mod tests {
         let want = (p.id() ^ (p.id() >> 32)) as i32;
         let v = Value::Promise(p);
         assert_eq!(hasheq(&v), want);
+        assert_eq!(hash_code(&v), want);
+    }
+
+    #[test]
+    fn executor_hash_from_id() {
+        use crate::Executor;
+        let x = Executor::new().unwrap();
+        let want = (x.id() ^ (x.id() >> 32)) as i32;
+        let v = Value::Executor(x);
+        assert_eq!(hasheq(&v), want);
+        // `.hashCode` is unreachable from Clojure (`hash-code` is
+        // private), so the `hash_code_rest` arm is pinned directly.
         assert_eq!(hash_code(&v), want);
     }
 

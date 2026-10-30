@@ -379,6 +379,7 @@ fn cell_jvm_class(v: &Value) -> &'static str {
         Value::Agent(a) => a.jvm_class(),
         Value::Volatile(x) => x.jvm_class(),
         Value::Ref(r) => r.jvm_class(),
+        Value::Executor(x) => x.jvm_class(),
         _ => unreachable!("cell partition"),
     }
 }
@@ -392,7 +393,8 @@ fn jvm_class_of_host(v: &Value) -> String {
         | Value::Promise(_)
         | Value::Agent(_)
         | Value::Volatile(_)
-        | Value::Ref(_) => cell_jvm_class(v).to_owned(),
+        | Value::Ref(_)
+        | Value::Executor(_) => cell_jvm_class(v).to_owned(),
         Value::Extension(e) => e.class_name(),
         Value::HostType(h) => jvm_class_of_hosttype(h),
         // Multimethods report the JVM class (S-typechain stage 3).

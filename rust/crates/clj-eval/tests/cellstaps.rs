@@ -391,6 +391,14 @@ fn volatile_compare_name() {
     assert_eq!(err.message(), "Cannot compare Volatile to Long");
 }
 
+#[test]
+fn executor_compare_name() {
+    // Fence 3c: same port-side pin for the `Executor` kind.
+    let v = Value::Executor(clj_value::Executor::new().unwrap());
+    let err = clj_value::compare(&v, &Value::Int(1)).expect_err("executor is incomparable");
+    assert_eq!(err.message(), "Cannot compare Executor to Long");
+}
+
 // ---- taps ----
 
 #[test]
@@ -810,11 +818,13 @@ fn exec_record_send() {
     // value semantics). `identical?` is out of scope in the port,
     // so the roundtrip pins `=` on a distinctive value.
     // e-nil-set: nil is accepted at set time. e-nil-send and
-    // e-non-exec are PINNED DIVERGENCES: the port has no host
-    // executors (so custom routing is unimplementable) and no
-    // `ExecutorService` host type to check against (so the JVM's
-    // set-time CCE is unimplementable too) — every value is
-    // accepted, and dispatch stays on the fixed pools.
+    // e-non-exec are FENCED (option (b) accept-and-record,
+    // tracked by #96): every value is stored and returned — the
+    // JVM's set-time `ExecutorService` checkcast needs the host
+    // type — and pool sends ignore the recorded value (pool
+    // replacement needs executor-lifecycle surface with no
+    // upstream expression outside interop). Custom routing exists
+    // only through `(executor)` + `send-via`, never these slots.
     // e-non-exec-pool-ok: the pool is untouched after a
     // would-be rejection (`:set-ok`, not `:caught`).
     let mut eval = boot();
@@ -855,7 +865,7 @@ fn exec_record_send() {
 fn exec_record_send_off() {
     // e-off-ret, e-off-nil-set, e-off-non-exec: the `send-off`
     // mirror of `exec_record_send` (same accept-and-record
-    // contract, same pinned divergences).
+    // contract, same #96 fence).
     let mut eval = boot();
     assert_eq!(
         run_last(
@@ -887,10 +897,11 @@ fn exec_record_send_off() {
 
 #[test]
 fn exec_record_cross() {
-    // e-routes / e-off-routes: PINNED DIVERGENCES — the JVM runs
+    // e-routes / e-off-routes: FENCED (#96) — the JVM runs
     // subsequent actions on the supplied pool's threads; the port
-    // always completes on the fixed pools (the action still runs
-    // and the value still updates; only the thread differs).
+    // records the executor but never installs it, so completions
+    // stay on the fixed pools (the action still runs and the value
+    // still updates; only the thread differs).
     // e-cross: pools are independent (holds trivially — the
     // recorded values are never consulted). e-restored: there are
     // no JVM statics to restore; dispatch is unaffected by every

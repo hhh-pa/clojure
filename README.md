@@ -185,11 +185,13 @@ each entry asserts its exact behavior, so drift fails CI:
 - **Analyzer builtins.** `let loop fn binding letfn with-redefs
   with-bindings bound-fn locking` resolve as macros but
   `macroexpand-1` returns them unchanged (documented identity).
-- **Agents.** `send-via` routes to the `send-off` pool (no custom
-  executors); `await` on a failed agent throws instead of hanging;
-  `shutdown-agents` blocks until drained (the JVM returns at
-  once); post-shutdown `await` returns `nil` and post-shutdown
-  `future` still spawns (the JVM wedges/rejects).
+- **Agent executors.** `set-agent-send-executor!` /
+  `set-agent-send-off-executor!` record but never install: `send`,
+  `send-off`, and `future-call` always use the fixed pools, ignoring
+  the recorded executor. Pool replacement needs executor-lifecycle
+  surface (shutdown, rejection, `isShutdown`) with no upstream
+  expression outside interop
+  ([tracking](https://github.com/hhh-pa/clojure/issues/96)).
 - **Safety pins.** Re-entrant `force` on a `delay` raises
   `IllegalStateException` (the JVM recurses to
   `StackOverflowError`, which would abort a Rust process).

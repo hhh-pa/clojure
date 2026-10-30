@@ -61,37 +61,45 @@ shapes are exact JVM text (en_US/UTC).
 ## Agents
 
 - `send` (fixed pool, #cores), `send-off` (unbounded pool),
-  `send-via` routes to the `send-off` pool (PINNED
-  DIVERGENCE: no custom executors). All return the agent.
+  `send-via` (the given `(executor)` — a fresh single-thread
+  pool per call; a non-executor is the checkcast CCE; nil
+  sends and wedges, like the JVM). All return the agent.
 - `:continue`: failed action keeps state, clears the error,
   queue proceeds. `:fail`: `send`/`await`/`await-for` throw
   `RuntimeException | Agent is failed, needs restart` until
   `restart-agent` (returns new state, clears error;
   `:clear-actions` drops the queue) (P5).
-- `await` → `nil` (throws when failed); `await-for` →
-  bool. An agent that fails AFTER its barrier queued throws
-  instead of hanging (DIVERGENCE: the JVM blocks forever on
-  `await`, and `await-for` waits out the full deadline for
-  `false`). Nested sends run after the enclosing action (P5);
-  nested sends from a FAILED action are discarded (the JVM's
-  unreleased `nested` buffer — never resurrected by a later
-  restart without `:clear-actions`).
+- `await` → `nil` (throws when already failed); `await-for` →
+  bool. An agent that fails AFTER its barrier queued leaves
+  the barrier stuck: `await` hangs and `await-for` waits out
+  the full deadline for `false` (like the JVM). Nested sends
+  run after the enclosing action (P5); nested sends from a
+  FAILED action are discarded (the JVM's unreleased `nested`
+  buffer — never resurrected by a later restart without
+  `:clear-actions`).
 - `*agent*` bound inside actions. `shutdown-agents` → `nil`,
   returns at once and drains async (T1192 FX1 — was BLOCKING).
   Parked workers and future threads join at process exit
   (`Evaluator::join_drainers`, called by the `run`/`eval`/REPL
-  drivers), mirroring the JVM's non-daemon wait.
-- After shutdown, sends return the agent but their actions
-  never run (like the JVM's swallowed executor rejection —
-  the queue wedges, `await-for` times out `false`).
-  Submission failures notify the error handler with a
-  `RejectedExecutionException` first, like the JVM's
-  `execute` catch (the message is port-fixed: the JVM's
-  embeds pool identity).
-- Post-shutdown `await` returns `nil` (DIVERGENCE: the
-  barrier head drops with the queue, so the latch
-  disconnects at once; the JVM's barrier wedges and plain
-  `await` hangs). Post-shutdown `future`/`future-call`
+  drivers), mirroring the JVM's non-daemon wait. `(executor)`
+  workers are daemon-like instead: their threads detach at
+  spawn and nothing ever joins them, so in-flight custom
+  actions do not hold up process exit (unlike pool and future
+  work — the right call, since custom executors have no
+  shutdown surface to drain through).
+- After shutdown, pool sends return the agent but their
+  actions never run (like the JVM's swallowed executor
+  rejection — the queue wedges, `await-for` times out
+  `false`); custom-executor sends still run (their executors
+  never shut down). Submission failures notify the error
+  handler with a `RejectedExecutionException` first, like
+  the JVM's `execute` catch (the message is port-fixed: the
+  JVM's embeds pool identity).
+- Post-shutdown `await` hangs on its dropped barriers (like
+  the JVM — the old `nil` return was fenced); `await-for`
+  waits out its deadline to `false`. Custom-executor sends
+  still run post-shutdown (their executors never shut down).
+  Post-shutdown `future`/`future-call`
   (and `pcalls`/`pvalues` through them) rejects with
   `RejectedExecutionException` (T1192 FX1 — was: spawned;
   the message is port-fixed, the JVM's embeds pool

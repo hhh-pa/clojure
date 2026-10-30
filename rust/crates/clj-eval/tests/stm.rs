@@ -811,12 +811,24 @@ fn send_deferral() {
         ),
         "[:caught [0 0]]"
     );
-    // t-sendvia-defer (the `nil` executor — the JVM static field has
-    // no port surface; executors are ignored on both sides).
+    // t-sendvia-defer (fence 3c — the deferral preserves the
+    // executor: a `nil` executor wedges at commit-dispatch like
+    // the out-of-txn send. The commit itself succeeds (`@r` is 5),
+    // the handler sees the NPE, the action never runs, and
+    // `await-for` times out `false`).
     assert_eq!(
         run_last(
             &mut eval,
-            "(let [r (ref 0) a (agent 0)] (dosync (alter r (constantly 5)) (send-via nil a (fn [_] @r))) (await a) [@r @a])"
+            "(let [r (ref 0) a (agent 0)] (dosync (alter r (constantly 5)) (send-via nil a (fn [_] @r))) [(await-for 500 a) @r @a])"
+        ),
+        "[false 5 0]"
+    );
+    // t-sendvia-custom-defer (the deferred custom dispatch runs
+    // at commit).
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [r (ref 0) a (agent 0) ex (executor)] (dosync (alter r (constantly 5)) (send-via ex a (fn [_] @r))) (await a) [@r @a])"
         ),
         "[5 5]"
     );

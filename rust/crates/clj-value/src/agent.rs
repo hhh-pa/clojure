@@ -36,20 +36,32 @@ use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use crate::{Map, Throwable, Value};
+use crate::{Executor, Map, Throwable, Value};
 
 /// Fresh agent identities (print-only; equality is shared-cell).
 static AGENT_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Which pool runs an action: `send` (fixed) or `send-off`
-/// (unbounded — `send-via` routes here, a pinned divergence, since
-/// the port has no custom executors).
+/// (unbounded).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AgentPool {
     /// The fixed CPU-bound pool (`send`).
     Send,
-    /// The unbounded pool (`send-off`, `send-via`).
+    /// The unbounded pool (`send-off`).
     SendOff,
+}
+
+/// Where a queued action executes (the JVM's per-`Action` executor):
+/// the fixed pools, a custom executor, or nowhere (`send-via` with a
+/// nil executor — the execute attempt NPEs and the head wedges).
+#[derive(Clone, Debug)]
+pub enum ExecTarget {
+    /// Route by [`QueuedAction::pool`] (`send`/`send-off`).
+    Pool,
+    /// Run on this custom executor (`send-via`).
+    Custom(Executor),
+    /// No executor (`send-via` with nil).
+    Nil,
 }
 
 /// What a failed action does to its agent: `:continue` clears the
@@ -103,11 +115,13 @@ pub trait AgentAction: Send + Sync {
     }
 }
 
-/// A queued action plus the pool that runs it (each action
-/// remembers its own pool, like the JVM's per-`Action` executor).
+/// A queued action plus where it runs (each action remembers
+/// its own target, like the JVM's per-`Action` executor).
 pub struct QueuedAction {
-    /// The pool that runs this action.
+    /// The pool that runs this action (for [`ExecTarget::Pool`]).
     pub pool: AgentPool,
+    /// Where this action executes.
+    pub exec: ExecTarget,
     /// The action itself (runs exactly once).
     pub action: Box<dyn AgentAction>,
 }
@@ -116,6 +130,7 @@ impl std::fmt::Debug for QueuedAction {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("QueuedAction")
             .field("pool", &self.pool)
+            .field("exec", &self.exec)
             .finish_non_exhaustive()
     }
 }
@@ -150,6 +165,12 @@ pub struct AgentInner {
     queue: VecDeque<QueuedAction>,
     /// Whether an action is currently running for this agent.
     running: bool,
+    /// Whether the queue front is a nil-executor wedge: the head
+    /// stays queued AND the runner stays claimed, so the count
+    /// must not cover it twice (fence 3c N1). Set-only — a wedge
+    /// never pumps, never fails, and `restart-agent` rejects clean
+    /// agents, so nothing ever clears it.
+    wedged: bool,
 }
 
 /// A first-class agent value: an identity plus the shared cell.
@@ -179,6 +200,7 @@ impl Agent {
                 error: None,
                 queue: VecDeque::new(),
                 running: false,
+                wedged: false,
             })),
         }
     }
@@ -221,7 +243,9 @@ impl Agent {
     #[must_use]
     pub fn queue_count(&self) -> usize {
         let inner = self.lock();
-        inner.queue.len() + usize::from(inner.running)
+        // The claimed runner covers the popped running head — but
+        // a wedge is queued AND claimed, so it covers only once.
+        inner.queue.len() + usize::from(inner.running) - usize::from(inner.wedged)
     }
 
     /// The JVM class name.
@@ -272,6 +296,17 @@ impl Agent {
                 None
             }
         }
+    }
+
+    /// Wedge `head` at the queue front (the nil-executor execute
+    /// attempt): the head stays queued and the runner stays claimed,
+    /// so later sends queue behind it and nothing ever runs — the
+    /// JVM's still-queued failed `execute`, whose head never pops.
+    pub fn rewedge(&self, head: QueuedAction) {
+        let mut inner = self.lock();
+        inner.queue.push_front(head);
+        inner.running = true;
+        inner.wedged = true;
     }
 
     /// The runner finished an action failed under `:fail`: latch
@@ -344,6 +379,7 @@ mod tests {
     fn stub_queued(pool: AgentPool) -> QueuedAction {
         QueuedAction {
             pool,
+            exec: super::ExecTarget::Pool,
             action: Box::new(StubAction),
         }
     }
@@ -381,12 +417,32 @@ mod tests {
     fn queued_action_debug_names_pool() {
         assert_eq!(
             format!("{:?}", stub_queued(AgentPool::Send)),
-            "QueuedAction { pool: Send, .. }"
+            "QueuedAction { pool: Send, exec: Pool, .. }"
         );
         assert_eq!(
             format!("{:?}", stub_queued(AgentPool::SendOff)),
-            "QueuedAction { pool: SendOff, .. }"
+            "QueuedAction { pool: SendOff, exec: Pool, .. }"
         );
+    }
+
+    #[test]
+    fn rewedge_holds_runner_and_head() {
+        let agent = Agent::new(Value::Int(0));
+        let head = agent
+            .enqueue(stub_queued(AgentPool::Send))
+            .unwrap()
+            .unwrap();
+        agent.rewedge(head);
+        // Later sends queue behind the stuck head (never start).
+        assert!(
+            agent
+                .enqueue(stub_queued(AgentPool::Send))
+                .unwrap()
+                .is_none()
+        );
+        // Two outstanding (the wedge plus the waiter) — the claimed
+        // runner covers the wedge only once (fence 3c N1).
+        assert_eq!(agent.queue_count(), 2);
     }
 
     #[test]
