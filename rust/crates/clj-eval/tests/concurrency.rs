@@ -3625,13 +3625,25 @@ fn await_clear_actions_restart_hangs() {
     // Fence 3c: a `:clear-actions` restart drops the barrier with
     // the queue, so the wait never returns (like the JVM). The
     // parked waiter is abandoned (its thread dies with the process).
+    // The future signals liveness immediately before the await and
+    // the main thread rendezvous on it first: a late-starting
+    // future thread (seen on loaded Windows runners) would
+    // otherwise await a post-restart clean agent and complete
+    // instead of parking (CI-1).
     let mut eval = boot();
-    run(&mut eval, "(def hcg (promise)) (def hca (agent 0))");
+    run(
+        &mut eval,
+        "(def hcg (promise)) (def hcs (promise)) (def hca (agent 0))",
+    );
     run(
         &mut eval,
         "(send hca (fn [s] @hcg (throw (ex-info \"x\" {}))))",
     );
-    run(&mut eval, "(def hcf (future (await hca) :waited))");
+    run(
+        &mut eval,
+        "(def hcf (future (deliver hcs :started) (await hca) :waited))",
+    );
+    assert_eq!(run_last(&mut eval, "(deref hcs 8000 :timeout)"), ":started");
     run(&mut eval, "(deliver hcg :go)");
     wait_failed(&mut eval, "hca");
     assert_eq!(

@@ -1946,26 +1946,38 @@ fn native_restart_agent(eval: &mut Evaluator, args: &[Value]) -> Result<Value, N
         .restart_publish(args[1].clone(), clear)
         .ok_or_else(restart_not_needed)?;
     if let Some(head) = head {
-        match head.exec.clone() {
-            ExecTarget::Pool => match eval.agent_pools_for_send()? {
-                Some(pools) => dispatch_head(&pools, &agent, head),
-                // Shut down: the resumed head drops (the JVM's
-                // rejected re-`execute`); the restart itself still
-                // succeeded.
-                None => reject_head(&agent, head),
-            },
-            // A resumed custom head re-runs on its own executor
-            // (shutdown-blind, like the JVM).
-            ExecTarget::Custom(_) => {
-                let pools = eval.agent_pools_for_custom()?;
-                dispatch_head(&pools, &agent, head);
-            }
-            // A resumed nil head re-wedges (the JVM re-attempts the
-            // NPE'd `execute`).
-            ExecTarget::Nil => nil_executor_wedge(&agent, head),
-        }
+        dispatch_resumed_head(eval, &agent, head)?;
     }
     Ok(args[1].clone())
+}
+
+/// Dispatch a restart-resumed queue head back onto its executor
+/// (fence 3c CI-2: extracted from [`native_restart_agent`] so both
+/// stay under the cyclomatic gate).
+fn dispatch_resumed_head(
+    eval: &mut Evaluator,
+    agent: &Agent,
+    head: QueuedAction,
+) -> Result<(), NativeError> {
+    match head.exec.clone() {
+        ExecTarget::Pool => match eval.agent_pools_for_send()? {
+            Some(pools) => dispatch_head(&pools, agent, head),
+            // Shut down: the resumed head drops (the JVM's
+            // rejected re-`execute`); the restart itself still
+            // succeeded.
+            None => reject_head(agent, head),
+        },
+        // A resumed custom head re-runs on its own executor
+        // (shutdown-blind, like the JVM).
+        ExecTarget::Custom(_) => {
+            let pools = eval.agent_pools_for_custom()?;
+            dispatch_head(&pools, agent, head);
+        }
+        // A resumed nil head re-wedges (the JVM re-attempts the
+        // NPE'd `execute`).
+        ExecTarget::Nil => nil_executor_wedge(agent, head),
+    }
+    Ok(())
 }
 
 /// A restart on an unfailed agent (the pre-check and the
