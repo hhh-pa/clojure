@@ -60,10 +60,18 @@ shapes are exact JVM text (en_US/UTC).
 
 ## Agents
 
-- `send` (fixed pool, #cores), `send-off` (unbounded pool),
-  `send-via` (the given `(executor)` — a fresh single-thread
-  pool per call; a non-executor is the checkcast CCE; nil
-  sends and wedges, like the JVM). All return the agent.
+- `send` (the installed send field when set, else the fixed
+  pool, #cores), `send-off` (the installed solo field when
+  set, else the unbounded pool), `send-via` (the given
+  `(executor)` — a fresh single-thread pool per call; a
+  non-executor is the checkcast CCE; nil sends and wedges,
+  like the JVM). All return the agent. Each `send` reads its
+  field (gap-96 — the JVM's volatile pool fields).
+- `set-agent-send-executor!` / `set-agent-send-off-executor!`
+  install their field (gap-96): executors install, nil
+  installs (sends then NPE-wedge exactly like `send-via` nil),
+  anything else fails the `ExecutorService` checkcast and
+  installs nothing.
 - `:continue`: failed action keeps state, clears the error,
   queue proceeds. `:fail`: `send`/`await`/`await-for` throw
   `RuntimeException | Agent is failed, needs restart` until
@@ -78,32 +86,36 @@ shapes are exact JVM text (en_US/UTC).
   buffer — never resurrected by a later restart without
   `:clear-actions`).
 - `*agent*` bound inside actions. `shutdown-agents` → `nil`,
-  returns at once and drains async (T1192 FX1 — was BLOCKING).
-  Parked workers and future threads join at process exit
-  (`Evaluator::join_drainers`, called by the `run`/`eval`/REPL
-  drivers), mirroring the JVM's non-daemon wait. `(executor)`
-  workers are daemon-like instead: their threads detach at
-  spawn and nothing ever joins them, so in-flight custom
-  actions do not hold up process exit (unlike pool and future
-  work — the right call, since custom executors have no
-  shutdown surface to drain through).
+  returns at once and drains async (T1192 FX1 — was BLOCKING):
+  it shuts the current pool fields (gap-96 — installed customs
+  included, solo side first, like the JVM; a nil field throws
+  its NPE instead — the solo NPE before anything shuts, the
+  pooled NPE after the solo side). Parked workers and future
+  threads join at process exit (`Evaluator::join_drainers`,
+  called by the `run`/`eval`/REPL drivers), mirroring the
+  JVM's non-daemon wait. `(executor)` workers are daemon-like
+  instead: their threads detach at spawn and nothing ever
+  joins them, so in-flight custom actions do not hold up
+  process exit (unlike pool and future work).
 - After shutdown, pool sends return the agent but their
   actions never run (like the JVM's swallowed executor
   rejection — the queue wedges, `await-for` times out
-  `false`); custom-executor sends still run (their executors
-  never shut down). Submission failures notify the error
-  handler with a `RejectedExecutionException` first, like
-  the JVM's `execute` catch (the message is port-fixed: the
-  JVM's embeds pool identity).
+  `false`); `send-via` executors are never installed so their
+  sends still run, and sides installed fresh after shutdown
+  are live again (like the JVM, which latches nothing).
+  Submission failures notify the error handler with a
+  `RejectedExecutionException` first, like the JVM's `execute`
+  catch (the message is port-fixed: the JVM's embeds pool
+  identity).
 - Post-shutdown `await` hangs on its dropped barriers (like
   the JVM — the old `nil` return was fenced); `await-for`
-  waits out its deadline to `false`. Custom-executor sends
-  still run post-shutdown (their executors never shut down).
-  Post-shutdown `future`/`future-call`
-  (and `pcalls`/`pvalues` through them) rejects with
-  `RejectedExecutionException` (T1192 FX1 — was: spawned;
-  the message is port-fixed, the JVM's embeds pool
-  identity).
+  waits out its deadline to `false`. Post-shutdown
+  `future`/`future-call` (and `pcalls`/`pvalues` through them)
+  rejects with `RejectedExecutionException` (T1192 FX1 — was:
+  spawned; the message is port-fixed, the JVM's embeds pool
+  identity) — `future-call` submits to the installed solo
+  field when set (gap-96), so a fresh install runs again
+  while a nil field throws the submit NPE to the caller.
 
 ## locking
 

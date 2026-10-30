@@ -857,6 +857,31 @@ fn send_deferral() {
 }
 
 #[test]
+fn installed_field_send_defers_through_txn() {
+    // Gap-96: an in-txn `send` captures the installed field at
+    // send time (like the JVM's per-`Action` executor). The fixed
+    // pools shut first, so only the fresh custom can run the
+    // commit dispatch; a nil field wedges at commit instead (the
+    // P6 shape for pool sends).
+    let mut eval = boot_stm();
+    assert_eq!(run_last(&mut eval, "(shutdown-agents)"), "nil");
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [r (ref 0) a (agent 0) ex (executor)] (set-agent-send-executor! ex) (dosync (alter r (constantly 5)) (send a (fn [_] @r))) (await a) [@r @a])"
+        ),
+        "[5 5]"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [r (ref 0) a (agent 0)] (set-agent-send-executor! nil) (dosync (alter r (constantly 5)) (send a (fn [_] @r))) [(await-for 500 a) @r @a])"
+        ),
+        "[false 5 0]"
+    );
+}
+
+#[test]
 fn await_gates() {
     let mut eval = boot();
     // t-await-noargs-in, t-await-noargs-out (the gate fires even with

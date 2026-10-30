@@ -44,11 +44,14 @@
 //!   `h-unord-eq-hash`, `h-unord-map`, `h-unord-map-eq-hash`,
 //!   `h-unord-vec-order`, `h-unord-vec-val`, `h-entry`,
 //!   `h-unord-nil`).
-//! - executors (12): `exec_record_send` (`e-set-ret`, `e-nil-set`,
+//! - executors (12): `exec_install_send` (`e-set-ret`, `e-nil-set`,
 //!   `e-nil-send`, `e-non-exec`, `e-non-exec-pool-ok`),
-//!   `exec_record_send_off` (`e-off-ret`, `e-off-nil-set`,
-//!   `e-off-non-exec`), `exec_record_cross` (`e-routes`,
-//!   `e-off-routes`, `e-cross`, `e-restored`).
+//!   `exec_install_send_off` (`e-off-ret`, `e-off-nil-set`,
+//!   `e-off-non-exec`), `exec_install_cross` (`e-routes`,
+//!   `e-off-routes`, `e-cross`, `e-restored`). Gap-96 behavior
+//!   (installed routing, shutdown matrix) lives in
+//!   `concurrency.rs` (`installed_*`, `nil_*`, `shutdown_*`,
+//!   `fresh_installs_*`, `await_completes_*`).
 //!
 //! Each test boots its own evaluator (a fresh tap system and fresh
 //! agent pools per test), so deliveries never cross tests; the one
@@ -810,69 +813,108 @@ fn hash_unordered_values() {
     );
 }
 
-// ---- executor vars (accept-and-record) ----
+// ---- executor vars (installed since gap-96) ----
 
 #[test]
-fn exec_record_send() {
+fn exec_install_send() {
     // e-set-ret: the setter returns the executor itself (`set!`
-    // value semantics). `identical?` is out of scope in the port,
-    // so the roundtrip pins `=` on a distinctive value.
-    // e-nil-set: nil is accepted at set time. e-nil-send and
-    // e-non-exec are FENCED (option (b) accept-and-record,
-    // tracked by #96): every value is stored and returned — the
-    // JVM's set-time `ExecutorService` checkcast needs the host
-    // type — and pool sends ignore the recorded value (pool
-    // replacement needs executor-lifecycle surface with no
-    // upstream expression outside interop). Custom routing exists
-    // only through `(executor)` + `send-via`, never these slots.
-    // e-non-exec-pool-ok: the pool is untouched after a
-    // would-be rejection (`:set-ok`, not `:caught`).
+    // value semantics). e-non-exec: anything but an executor or
+    // nil fails the `ExecutorService` checkcast at set time and
+    // installs nothing (gap-96 — was accept-and-record).
+    // e-non-exec-pool-ok: the pool is untouched after a rejection
+    // (`:caught`, and the send still completes — on the fixed
+    // pool when unset, on the installed custom when set).
+    // e-nil-set: nil installs (the sends then NPE-wedge —
+    // `concurrency.rs` pins the wedge, like `send-via` nil).
     let mut eval = boot();
     assert_eq!(
         run_last(
             &mut eval,
-            "(do (def ex1 :fake-send-exec) (= (set-agent-send-executor! ex1) ex1))"
+            "(do (def ex1 (executor)) (= (set-agent-send-executor! ex1) ex1))"
         ),
         "true"
     );
     assert_eq!(
-        run_last(&mut eval, "(do (set-agent-send-executor! nil) :restored)"),
-        ":restored"
+        uncaught(&mut eval, "(set-agent-send-executor! :kw)"),
+        cce(
+            "clojure.lang.Keyword",
+            "java.util.concurrent.ExecutorService"
+        )
     );
-    // Recorded nil changes nothing: the send completes on the
-    // fixed pool (the JVM silently drops it).
     assert_eq!(
-        run_last(
-            &mut eval,
-            "(do (set-agent-send-executor! nil) (def a0 (agent 0)) (send a0 inc) (await a0) @a0)"
-        ),
-        "1"
+        uncaught(&mut eval, "(set-agent-send-executor! 42)"),
+        cce("java.lang.Long", "java.util.concurrent.ExecutorService")
     );
-    // Non-executors are accepted, never CCE'd (the JVM rejects
-    // `:kw` with a CCE to `ExecutorService`).
-    assert_eq!(run_last(&mut eval, "(set-agent-send-executor! :kw)"), ":kw");
+    // The rejections installed nothing: the custom still carries
+    // the send.
     assert_eq!(
         run_last(
             &mut eval,
             "(do (def r (try (do (set-agent-send-executor! :kw) :set-ok) (catch Throwable t :caught))) (def aok (agent 0)) (send aok inc) (await aok) [r @aok])"
         ),
-        "[:set-ok 1]"
+        "[:caught 1]"
+    );
+    eval.join_drainers();
+    // Unset fields keep the fixed pool after a rejection.
+    let mut eval = boot();
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(do (try (set-agent-send-executor! :kw) (catch Throwable t :caught)) (def au (agent 0)) (send au inc) (await au) @au)"
+        ),
+        "1"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(do (set-agent-send-executor! nil) :restored)"),
+        ":restored"
+    );
+    // Nil installs (the JVM's null field): the send wedges instead
+    // of completing on the pool.
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(do (def a0 (agent 0)) (send a0 inc) [(await-for 200 a0) @a0])"
+        ),
+        "[false 0]"
     );
     eval.join_drainers();
 }
 
 #[test]
-fn exec_record_send_off() {
+fn exec_install_send_off() {
     // e-off-ret, e-off-nil-set, e-off-non-exec: the `send-off`
-    // mirror of `exec_record_send` (same accept-and-record
-    // contract, same #96 fence).
+    // mirror of `exec_install_send` (same install contract).
     let mut eval = boot();
     assert_eq!(
         run_last(
             &mut eval,
-            "(do (def ex3 :fake-send-off-exec) (= (set-agent-send-off-executor! ex3) ex3))"
+            "(do (def ex3 (executor)) (= (set-agent-send-off-executor! ex3) ex3))"
         ),
         "true"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(set-agent-send-off-executor! 42)"),
+        cce("java.lang.Long", "java.util.concurrent.ExecutorService")
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(set-agent-send-off-executor! \"x\")"),
+        cce("java.lang.String", "java.util.concurrent.ExecutorService")
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(do (def r (try (do (set-agent-send-off-executor! 42) :set-ok) (catch Throwable t :caught))) (def aok (agent 0)) (send-off aok inc) (await aok) [r @aok])"
+        ),
+        "[:caught 1]"
+    );
+    eval.join_drainers();
+    let mut eval = boot();
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(do (try (set-agent-send-off-executor! 42) (catch Throwable t :caught)) (def au (agent 0)) (send-off au inc) (await au) @au)"
+        ),
+        "1"
     );
     assert_eq!(
         run_last(
@@ -884,47 +926,43 @@ fn exec_record_send_off() {
     assert_eq!(
         run_last(
             &mut eval,
-            "(do (set-agent-send-off-executor! nil) (def a1 (agent 0)) (send-off a1 inc) (await a1) @a1)"
+            "(do (def a1 (agent 0)) (send-off a1 inc) [(await-for 200 a1) @a1])"
         ),
-        "1"
-    );
-    assert_eq!(
-        run_last(&mut eval, "(set-agent-send-off-executor! 42)"),
-        "42"
+        "[false 0]"
     );
     eval.join_drainers();
 }
 
 #[test]
-fn exec_record_cross() {
-    // e-routes / e-off-routes: FENCED (#96) — the JVM runs
-    // subsequent actions on the supplied pool's threads; the port
-    // records the executor but never installs it, so completions
-    // stay on the fixed pools (the action still runs and the value
-    // still updates; only the thread differs).
-    // e-cross: pools are independent (holds trivially — the
-    // recorded values are never consulted). e-restored: there are
-    // no JVM statics to restore; dispatch is unaffected by every
-    // set above, which the completions pin.
+fn exec_install_cross() {
+    // e-routes / e-off-routes: installed executors carry their
+    // sends (gap-96 — the shutdown matrix in `concurrency.rs`
+    // proves the thread; here the completions pin the values).
+    // e-cross: the fields are independent — a `send-off` install
+    // never moves `send` (and vice versa).
     let mut eval = boot();
     assert_eq!(
         run_last(
             &mut eval,
-            "(do (set-agent-send-executor! :elsewhere) (def a1 (agent 0)) (send a1 inc) (await a1) @a1)"
+            "(do (def e1 (executor)) (set-agent-send-executor! e1) (def a1 (agent 0)) (send a1 inc) (await a1) @a1)"
         ),
         "1"
     );
     assert_eq!(
         run_last(
             &mut eval,
-            "(do (set-agent-send-off-executor! :elsewhere-off) (def a2 (agent 0)) (send-off a2 inc) (await a2) @a2)"
+            "(do (def e2 (executor)) (set-agent-send-off-executor! e2) (def a2 (agent 0)) (send-off a2 inc) (await a2) @a2)"
         ),
         "1"
     );
+    eval.join_drainers();
+    // Independence: each install moves only its own sends (fresh
+    // lineages, so only one field is ever set per eval).
+    let mut eval = boot();
     assert_eq!(
         run_last(
             &mut eval,
-            "(do (set-agent-send-off-executor! :cross) (def a3 (agent 0)) (send a3 inc) (await a3) @a3)"
+            "(do (def e3 (executor)) (set-agent-send-off-executor! e3) (def a3 (agent 0)) (send a3 inc) (await a3) @a3)"
         ),
         "1"
     );
