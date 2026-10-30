@@ -1463,6 +1463,12 @@ fn map_destructure_analyzer_edges() {
         // Quoted `:or` spellings match quoted entries.
         ("(let [{a 'k, :or {'k 42}} {}] a)", "42"),
         ("((fn [{a 'k, :or {'k 42}}] a) {})", "42"),
+        // Mixed `:or` spellings apply (F-A, tracked by #112 which
+        // stays open): the analyzer normalizes spellings, while
+        // upstream `contains?` compares key forms (entry `'k` +
+        // `:or {k 1}` ignores the default there).
+        ("(let [{a 'k, :or {k 42}} {}] a)", "42"),
+        ("(let [{a k, :or {'k 42}} {}] a)", "42"),
         // Quoted post-`&` keys join the selection.
         (
             "(let [{:syms [a & 'e], :excess x} {'a 1, 'e 2, 'f 3}] x)",
