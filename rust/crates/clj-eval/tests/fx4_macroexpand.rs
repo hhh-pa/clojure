@@ -140,6 +140,15 @@ fn expand_nine_heads() {
         run_last(&mut eval, "(macroexpand-1 '(bound-fn [x] x))"),
         "(clojure.core/bound-fn* (clojure.core/fn [x] x))"
     );
+    // Fence 4b E1e (`boundfn-pre`): `bound-fn` is a pure template
+    // — pre/post rides along raw inside the embedded `fn`.
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(macroexpand-1 '(bound-fn [x] {:pre [(pos? x)]} x))"
+        ),
+        "(clojure.core/bound-fn* (clojure.core/fn [x] {:pre [(pos? x)]} x))"
+    );
     assert_eq!(
         run_last(&mut eval, "(macroexpand-1 '(clojure.core/let [a 1] a))"),
         "(let* [a 1] a)"
@@ -278,6 +287,20 @@ fn expand_errors() {
     assert_eq!(
         uncaught(&mut eval, "((var-get (var fn)))"),
         "clojure.lang.ArityException | Wrong number of args (0) passed to: clojure.core/fn"
+    );
+    // Fence 4b E1f: non-seqable `letfn`/`with-redefs` heads are the
+    // `ISeq` error (class and message, both paths agree).
+    assert_eq!(
+        uncaught(&mut eval, "(macroexpand-1 '(letfn [f] 1))"),
+        "java.lang.IllegalArgumentException | Syntax error macroexpanding letfn at (user:1:1).\njava.lang.IllegalArgumentException | Don't know how to create ISeq from: clojure.lang.Symbol"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(macroexpand-1 '(letfn f 1))"),
+        "java.lang.IllegalArgumentException | Syntax error macroexpanding letfn at (user:1:1).\njava.lang.IllegalArgumentException | Don't know how to create ISeq from: clojure.lang.Symbol"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(macroexpand-1 '(with-redefs a 1))"),
+        "java.lang.IllegalArgumentException | Syntax error macroexpanding with-redefs at (user:1:1).\njava.lang.IllegalArgumentException | Don't know how to create ISeq from: clojure.lang.Symbol"
     );
     assert_eq!(
         compile_err(&mut eval, "(let 1)"),
@@ -606,6 +629,19 @@ fn eval_expanded_forms() {
         uncaught(&mut eval, "((eval '(fn [x] {:post [(number? %)]} x)) :k)"),
         "java.lang.AssertionError | Assert failed: (number? %)"
     );
+    // Fence 4b E1m (`letfn-pre-enforced`): `letfn`/`letfn*` inits
+    // compile as `fn` forms, so pre/post enforces.
+    assert_eq!(
+        uncaught(&mut eval, "(letfn [(f [x] {:pre [(pos? x)]} x)] (f -1))"),
+        "java.lang.AssertionError | Assert failed: (pos? x)"
+    );
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(letfn* [f (fn f [x] {:pre [(pos? x)]} x)] (f -1))"
+        ),
+        "java.lang.AssertionError | Assert failed: (pos? x)"
+    );
     assert_eq!(
         run_last(
             &mut eval,
@@ -626,6 +662,11 @@ fn eval_expanded_forms() {
         "0"
     );
     assert_eq!(run_last(&mut eval, "(letfn [(f [])] 1)"), "1");
+    // Fence 4b E1e/E1p: fnspecs seq like `mapcat` (lists, maps,
+    // sets — not just vectors).
+    assert_eq!(run_last(&mut eval, "(letfn ((f [x] x)) (f 1))"), "1");
+    assert_eq!(run_last(&mut eval, "(letfn {f [x]} 1)"), "1");
+    assert_eq!(run_last(&mut eval, "(letfn #{(f [x] x)} (f 1))"), "1");
     assert_eq!(
         compile_err(&mut eval, "(letfn [(f 1)] 1)"),
         vec![
@@ -648,16 +689,38 @@ fn eval_expanded_forms() {
     );
     assert_eq!(run_last(&mut eval, "(locking :x 1)"), "1");
     assert_eq!(run_last(&mut eval, "(locking :x (locking :x 2))"), "2");
+    // Fence 4b E1r: `locking` expands before analysis, so the nil
+    // message names the expansion's lockee gensym (like the JVM's
+    // `lockee#` leak); a fresh boot fixes the counter.
     assert_eq!(
-        uncaught(&mut eval, "(locking nil 1)"),
-        "java.lang.NullPointerException | Cannot enter synchronized block because \"lock\" is null"
+        uncaught(&mut boot(), "(locking nil 1)"),
+        "java.lang.NullPointerException | Cannot enter synchronized block because \"locklocal__2__auto__\" is null"
     );
     run_last(&mut eval, "(def z 1)");
     assert_eq!(run_last(&mut eval, "(with-redefs [z 9] z)"), "9");
+    assert_eq!(run_last(&mut eval, "(with-redefs {a 1} 1)"), "1");
+    assert_eq!(
+        compile_err(&mut eval, "(with-redefs {a 1 b 2} 1)"),
+        vec![
+            "Syntax error compiling var at (user:1:1).".to_owned(),
+            "java.lang.ClassCastException | Cannot cast clojure.lang.MapEntry to clojure.lang.Symbol"
+                .to_owned(),
+        ]
+    );
     assert_eq!(run_last(&mut eval, "z"), "1");
     assert_eq!(
         run_last(&mut eval, "(macroexpand-1 '(with-redefs [a 1 b] a))"),
         "(clojure.core/with-redefs-fn {(var a) 1} (clojure.core/fn [] a))"
+    );
+    // Fence 4b E1e/E1q: maps seq to entries — a lone entry
+    // odd-drops to `{}`, paired entries embed for the `var` cast.
+    assert_eq!(
+        run_last(&mut eval, "(macroexpand-1 '(with-redefs {a 1} 1))"),
+        "(clojure.core/with-redefs-fn {} (clojure.core/fn [] 1))"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(macroexpand-1 '(with-redefs {a 1 b 2} 1))"),
+        "(clojure.core/with-redefs-fn {(var [a 1]) [b 2]} (clojure.core/fn [] 1))"
     );
     assert_eq!(run_last(&mut eval, "(with-redefs [])"), "nil");
     assert_eq!(
@@ -850,23 +913,42 @@ fn host_natives_and_rewrites() {
             "java.lang.RuntimeException | Can't let qualified name: u/f".to_owned(),
         ]
     );
+    // Fence 4b E1k/E1r: `letfn*` inits compile as expressions,
+    // then cast to `ObjExpr` (a non-`fn` init is the CCE).
     assert_eq!(
         compile_err(&mut eval, "(letfn* [f 1])"),
         vec![
-            "Syntax error macroexpanding clojure.core/fn at (user:1:1).".to_owned(),
-            "clojure.lang.ExceptionInfo | Call to clojure.core/fn did not conform to spec."
+            "Syntax error compiling fn* at (user:1:1).".to_owned(),
+            "java.lang.ClassCastException | Cannot cast java.lang.Long to clojure.lang.Compiler$ObjExpr"
                 .to_owned(),
         ]
     );
+    assert_eq!(
+        compile_err(&mut eval, "(letfn* [f (let [g (fn [x] x)] g)] (f 1))"),
+        vec![
+            "Syntax error compiling fn* at (user:1:1).".to_owned(),
+            "java.lang.ClassCastException | Cannot cast clojure.lang.PersistentList to clojure.lang.Compiler$ObjExpr"
+                .to_owned(),
+        ]
+    );
+    assert_eq!(
+        compile_err(&mut eval, "(letfn* [f nil] f)"),
+        vec![
+            "Syntax error compiling fn* at (user:1:1).".to_owned(),
+            "java.lang.ClassCastException | Cannot cast null to clojure.lang.Compiler$ObjExpr"
+                .to_owned(),
+        ]
+    );
+    // Macros expanding to `fn` qualify as inits (analyzed, then cast).
+    run_last(&mut eval, "(defmacro fnmac4b [] '(fn [x] x))");
+    assert_eq!(run_last(&mut eval, "(letfn* [f (fnmac4b)] (f 1))"), "1");
     // Private monitor natives are reachable from `clojure.core`.
     run_last(&mut eval, "(in-ns 'clojure.core)");
+    // Fence 4b E1t: a nil lockee with an empty stack is the NPE
+    // (direct calls keep the legacy `"lock"` placeholder).
     assert_eq!(
         uncaught(&mut eval, "(fx4-monitor-exit nil)"),
         "java.lang.NullPointerException | Cannot exit synchronized block because \"lock\" is null"
-    );
-    assert_eq!(
-        uncaught(&mut eval, "(fx4-monitor-exit :never-entered)"),
-        "java.lang.IllegalStateException | attempt to exit a monitor not held by this thread"
     );
     assert_eq!(
         run_last(
@@ -876,13 +958,14 @@ fn host_natives_and_rewrites() {
         "1"
     );
     // Exit matches by lockee: a wrong exit fails without releasing,
-    // and crossing exits release in any order (fence 3b).
+    // and crossing exits release in any order (fence 3b; 4b rebase:
+    // the failure is now IMS with an empty message).
     assert_eq!(
         uncaught(
             &mut eval,
             "(do (fx4-monitor-enter :a) (fx4-monitor-exit :b))"
         ),
-        "java.lang.IllegalStateException | attempt to exit a monitor not held by this thread"
+        "java.lang.IllegalMonitorStateException | "
     );
     // ... and `:a` is still held afterwards (the wrong exit released
     // nothing — its own exit still succeeds).
@@ -897,6 +980,176 @@ fn host_natives_and_rewrites() {
     assert_eq!(
         uncaught(&mut eval, "(fx4-monitor-enter nil)"),
         "java.lang.NullPointerException | Cannot enter synchronized block because \"lock\" is null"
+    );
+}
+
+#[test]
+fn monitor_exit_matrix() {
+    // Fence 4b E1k/E1t/E1u (review B3: JVMS null-first):
+    // unmatched `monitor-exit` is the JVM's
+    // `IllegalMonitorStateException` with an empty message; a nil
+    // lockee is always the form-naming NPE, held or not.
+    let mut eval = boot();
+    assert_eq!(
+        uncaught(&mut eval, "(let [x [1]] (monitor-exit x))"),
+        "java.lang.IllegalMonitorStateException | "
+    );
+    assert_eq!(
+        run_last(&mut eval, "(do (monitor-enter :a) (monitor-exit :a) 1)"),
+        "1"
+    );
+    // Mismatched and nil exits throw without releasing, so each
+    // binds its lockee for a cleanup exit (the monitor stack is
+    // thread-local — a leak would pollute later tests).
+    run_last(&mut eval, "(def w4b-mm :a)");
+    assert_eq!(
+        uncaught(&mut eval, "(do (monitor-enter w4b-mm) (monitor-exit :b))"),
+        "java.lang.IllegalMonitorStateException | "
+    );
+    assert_eq!(run_last(&mut eval, "(monitor-exit w4b-mm)"), "nil");
+    assert_eq!(
+        uncaught(&mut eval, "(monitor-exit nil)"),
+        "java.lang.NullPointerException | Cannot exit synchronized block because \"null\" is null"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(let [n nil] (monitor-exit n))"),
+        "java.lang.NullPointerException | Cannot exit synchronized block because \"n\" is null"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(monitor-exit (identity nil))"),
+        "java.lang.NullPointerException | Cannot exit synchronized block because the return value of \"clojure.lang.IFn.invoke(Object)\" is null"
+    );
+    run_last(&mut eval, "(def w4b-mh [1])");
+    assert_eq!(
+        uncaught(&mut eval, "(do (monitor-enter w4b-mh) (monitor-exit nil))"),
+        "java.lang.NullPointerException | Cannot exit synchronized block because \"null\" is null"
+    );
+    assert_eq!(run_last(&mut eval, "(monitor-exit w4b-mh)"), "nil");
+    // Reentrant nests unwind in order (identity-held).
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(do (monitor-enter :r) (monitor-enter :r) (monitor-exit :r) (monitor-exit :r) 1)"
+        ),
+        "1"
+    );
+    // Id-keyed lockees (vectors) behave identity-like: an
+    // equal-but-distinct exit is unheld (IMS).
+    run_last(&mut eval, "(def w4b-mv [1])");
+    assert_eq!(
+        uncaught(&mut eval, "(do (monitor-enter w4b-mv) (monitor-exit [1]))"),
+        "java.lang.IllegalMonitorStateException | "
+    );
+    assert_eq!(run_last(&mut eval, "(monitor-exit w4b-mv)"), "nil");
+    // Content-keyed lockees (symbols hash by name) share 3b's key,
+    // so the exit releases (Box-clone exits match their enter for
+    // the same reason — identity is unimplementable for cloning
+    // Box kinds).
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(do (monitor-enter 'w4b-sk) (monitor-exit 'w4b-sk))"
+        ),
+        "nil"
+    );
+    // `catch` sees the JVM hierarchy (`IMS` is a direct
+    // `RuntimeException`, a sibling of `ISE` — `javap` verdict):
+    // exact and `RE` clauses catch, an `ISE` clause does not.
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(try (monitor-exit :nope) (catch IllegalMonitorStateException e :ims))"
+        ),
+        ":ims"
+    );
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(try (monitor-exit :nope) (catch IllegalStateException e :ise))"
+        ),
+        "java.lang.IllegalMonitorStateException | "
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(try (monitor-exit :nope) (catch RuntimeException e :re))"
+        ),
+        ":re"
+    );
+}
+
+#[test]
+fn monitor_enter_nil_messages() {
+    // Fence 4b E1r/E1s/E1u/E1v/E1w/E1x/E1y: the nil lockee names
+    // its expanded form, like the JVM's compiler messages.
+    let mut eval = boot();
+    assert_eq!(
+        uncaught(&mut eval, "(monitor-enter nil)"),
+        "java.lang.NullPointerException | Cannot enter synchronized block because \"null\" is null"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(let [x nil] (monitor-enter x))"),
+        "java.lang.NullPointerException | Cannot enter synchronized block because \"x\" is null"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(monitor-enter (identity nil))"),
+        "java.lang.NullPointerException | Cannot enter synchronized block because the return value of \"clojure.lang.IFn.invoke(Object)\" is null"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(monitor-enter ((fn [a b] nil) 1 2))"),
+        "java.lang.NullPointerException | Cannot enter synchronized block because the return value of \"clojure.lang.IFn.invoke(Object, Object)\" is null"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(monitor-enter (quote nil))"),
+        "java.lang.NullPointerException | Cannot enter synchronized block because \"null\" is null"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(monitor-enter (let [x nil] x))"),
+        "java.lang.NullPointerException | Cannot enter synchronized block because \"x\" is null"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(monitor-enter (do nil))"),
+        "java.lang.NullPointerException | Cannot enter synchronized block because \"null\" is null"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(monitor-enter (let [x 1]))"),
+        "java.lang.NullPointerException | Cannot enter synchronized block because \"null\" is null"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(monitor-enter (do))"),
+        "java.lang.NullPointerException | Cannot enter synchronized block because \"null\" is null"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(monitor-enter (if true nil nil))"),
+        "java.lang.NullPointerException | Cannot enter synchronized block"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(monitor-enter (case 2 1 :a nil))"),
+        "java.lang.NullPointerException | Cannot enter synchronized block"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(monitor-enter (try nil (catch Throwable t 1)))"),
+        "java.lang.NullPointerException | Cannot enter synchronized block because the return value of \"clojure.lang.IFn.invoke()\" is null"
+    );
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(monitor-enter (loop [i 0] (if (< i 1) (recur (inc i)) nil)))"
+        ),
+        "java.lang.NullPointerException | Cannot enter synchronized block because the return value of \"clojure.lang.IFn.invoke()\" is null"
+    );
+    run_last(&mut eval, "(def ^:dynamic w4b-set 1)");
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(binding [w4b-set 1] (monitor-enter (set! w4b-set nil)))"
+        ),
+        "java.lang.NullPointerException | Cannot enter synchronized block because the return value of \"clojure.lang.Var.set(Object)\" is null"
+    );
+    // Post-expansion shapes: `when` reads as its `if`.
+    assert_eq!(
+        uncaught(&mut eval, "(monitor-enter (when nil nil))"),
+        "java.lang.NullPointerException | Cannot enter synchronized block"
     );
 }
 

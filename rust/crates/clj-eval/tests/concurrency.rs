@@ -3062,16 +3062,18 @@ fn locking_rows() {
         ),
         ":after"
     );
-    // A nil lockee is the synchronized-block NPE (the JVM embeds a
-    // gensym'd local, so the port fixes the lock name — P6).
+    // A nil lockee is the synchronized-block NPE naming the expansion's
+    // lock local (F8b: JVM-verbatim gensym; fresh boots fix the counter —
+    // the shared eval's counter has moved on).
     assert_eq!(
-        uncaught(&mut eval, "(locking nil 1)"),
-        "java.lang.NullPointerException | Cannot enter synchronized block because \"lock\" is null"
+        uncaught(&mut boot(), "(locking nil 1)"),
+        "java.lang.NullPointerException | Cannot enter synchronized block because \"locklocal__2__auto__\" is null"
     );
-    // A nil lockee nested in a `fn` body takes the analyzer path
-    // to the same NPE (the JVM embeds a gensym'd local instead).
+    // A nil lockee nested in a `fn` body takes the analyzer path, which
+    // names the fixed lock local (port artifact: the JVM macroexpands
+    // first, so no such path exists there — F8b covers the expansion).
     assert_eq!(
-        uncaught(&mut eval, "((fn [] (locking nil 1)))"),
+        uncaught(&mut boot(), "((fn [] (locking nil 1)))"),
         "java.lang.NullPointerException | Cannot enter synchronized block because \"lock\" is null"
     );
     // Bare arity matches the macro's.

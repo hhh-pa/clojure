@@ -179,8 +179,11 @@ impl Reader {
     /// Defer-mode tag consult (S6): the table, then the `inst`/`uuid`
     /// defaults, then the default-fn flag, else the `UnknownTag`
     /// throw — all with span, exactly where the non-defer path
-    /// throws. Invocation stays eval-side: table hits and
-    /// default-fn tags defer to `TaggedLiteral` for the eval walk.
+    /// throws. Invocation stays eval-side: table hits,
+    /// default-fn tags, and validated `inst`/`uuid` payloads
+    /// defer to `TaggedLiteral` for the eval walk (which resolves
+    /// the defaults to natives — #103 — against the live table,
+    /// so a mid-walk override install still wins).
     fn consult_data_readers(
         &mut self,
         sym: &Symbol,
@@ -223,9 +226,12 @@ impl Reader {
                         message: e.message,
                     });
                 }
-                // Validated: this `TaggedLiteral` is the readable
-                // value (the eval walk re-validates it uniformly —
-                // idempotent — and invokes nothing for it).
+                // Validated: this `TaggedLiteral` defers for the
+                // eval walk, which resolves it through the
+                // flipped `inst`/`uuid` defaults to a native
+                // (#103) — re-validating idempotently on the
+                // way (the reader must not construct eagerly:
+                // the walk consults the live table).
                 return Ok(Some(tagged_literal(sym.clone(), form)));
             }
             return self.deferred_tag(sym, form, checkpoint);
@@ -929,10 +935,12 @@ mod tests {
 
     #[test]
     fn defer_validates_inst_payloads() {
-        // Valid strings read to the final literal (no fired entry
-        // even under `#_` — nothing to invoke); invalid ones throw
-        // the spanful validator error (probes `d-inst`,
-        // `d-inst-bad`, `g-discard-inst-bad`).
+        // Valid strings defer as tagged literals for the eval
+        // walk (no fired entry even under `#_` — default
+        // construction is pure, so the drain has nothing to
+        // invoke); invalid ones throw the spanful validator
+        // error (probes `d-inst`, `d-inst-bad`,
+        // `g-discard-inst-bad`).
         let opts = defer_opts(&[], false);
         let (forms, fired) = read_defer("#_ #inst \"2024-01-01\" :kept", &opts);
         assert_eq!(forms.unwrap().len(), 1);

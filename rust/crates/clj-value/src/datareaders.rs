@@ -58,8 +58,9 @@ impl TagError {
 /// components and uppercase `T`, plus an optional `Z`/`[+-]HH:MM`
 /// zone on any prefix) and the six range asserts (leap-aware days,
 /// leap-second 60 iff minutes is 59). Years take any four digits
-/// (no assert). Success means the payload reads (as a
-/// `TaggedLiteral` until the date/time value-kind slice lands).
+/// (no assert). Success means the payload resolves to a native
+/// `Instant` (the eval walk constructs through `FromStr` —
+/// #103).
 pub fn validate_inst(s: &str) -> Result<(), TagError> {
     let parts = parse_instant(s)
         .ok_or_else(|| TagError::runtime(format!("Unrecognized date/time syntax: {s}")))?;

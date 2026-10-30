@@ -1,0 +1,8 @@
+public class ExitNilEmpty {
+  public static java.lang.String run();
+    Code:
+         0: aconst_null
+         1: monitorexit
+         2: ldc           #8                  // String no-throw
+         4: areturn
+}

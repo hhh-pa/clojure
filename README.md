@@ -71,7 +71,8 @@ deref `@`, meta `^`, `%` arg sugar, comments (`;`, `#_`), dispatch
 macros (`#{`, `#"`, `#(`, `#'`, `#_`, `#?` reader conditionals with
 `:cljr` features — `.cljc` never loads JVM branches), `#=` eval
 reader (gated by `*read-eval*`), validated `#inst`/`#uuid`
-tagged reads, and `data_readers.clj`/`data_readers.cljc`
+reads into native `Instant`/`Uuid` values, and
+`data_readers.clj`/`data_readers.cljc`
 autoload from each `*load-path*` dir (the port's classpath
 mapping). Every form carries a span for diagnostics.
 
@@ -170,23 +171,16 @@ each entry asserts its exact behavior, so drift fails CI:
   which still compare by value until the post-tower Arc-box
   lands (zero-fence sequencing: tower owns numeric
   representation).
-- **Ordering.** `compare` matches JVM numeric ordering
-  including NaN ties, but incomparable pairs fail with the
-  stable `Cannot compare <A> to <B>` instead of
-  JDK-version-dependent `ClassCastException` text. (`=`
-  stays same-category and `==` cross-category, checked
-  arithmetic still throws `long overflow` on overflow, `/`
-  produces ratios, and `hasheq` is JVM-identical — all
-  exactly like the JVM, so the old Numbers/Equality/Hashing
-  entries are gone.)
 - **Printing.** `pr` round-trips EDN values through the reader;
   `*print-length*` / `*print-level*` truncate with `...`;
   `*print-dup*` routes `pr` through the dup printer (undupable
   kinds throw). Errors render as `file:line:col:`
   diagnostic chains, not JVM stack dumps.
 - **Analyzer builtins.** `let loop fn binding letfn with-redefs
-  with-bindings bound-fn locking` resolve as macros but
-  `macroexpand-1` returns them unchanged (documented identity).
+  with-bindings bound-fn locking` resolve as macros and
+  `macroexpand-1` expands them (`let` to `let*`, etc.) via the FX4
+  expanders; only real specials and the seven fence macros are
+  identity.
 - **Safety pins.** Re-entrant `force` on a `delay` raises
   `IllegalStateException` (the JVM recurses to
   `StackOverflowError`, which would abort a Rust process).
@@ -207,9 +201,6 @@ out of scope, not silently missing:
   against the static `clojure.lang.*` table (S16);
   `clojure.java.*`, `clojure.reflect`, and real classloading
   stay out.
-- Reader: `#inst`/`#uuid` still read into `TaggedLiteral`
-  (verbatim echo, S6-pinned); the native `Instant`/`Uuid`
-  cutover is a separate slice.
 - LLVM JIT, `clojure.spec`, `core.async`, and binary
   compatibility with JVM-compiled artifacts.
 

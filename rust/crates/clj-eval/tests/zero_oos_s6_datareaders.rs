@@ -351,38 +351,69 @@ fn reader_conditional_predicate() {
 #[test]
 fn inst_default_reads() {
     let mut eval = boot();
-    // Valid payloads read back as tagged literals echoing the
-    // original string (the S6 representation boundary: the JVM
-    // answers `java.util.Date`, printing canonical — probes
-    // `d-inst`, `d-inst-offset`, `d-inst-nosecs`, `d-inst-zonez`,
-    // `d-inst-ym`, `d-inst-year`, `d-inst-frac7`, `d-inst-leapsec`,
-    // `d-inst-yearzone`, `d-inst-monthzone`, `d-inst-dayzone`).
-    for src in [
-        "(read-string \"#inst \\\"2024-01-01\\\"\")",
-        "(read-string \"#inst \\\"2024-01-01T10:00:00.000+02:00\\\"\")",
-        "(read-string \"#inst \\\"2024-01-01T00:00:00\\\"\")",
-        "(read-string \"#inst \\\"2024-01\\\"\")",
-        "(read-string \"#inst \\\"2024\\\"\")",
-        "(read-string \"#inst \\\"2024-01-01T00:00\\\"\")",
-        "(read-string \"#inst \\\"2024-01-01T00:00:00Z\\\"\")",
-        "(read-string \"#inst \\\"2024-01-01T00:00:00.1234567\\\"\")",
-        "(read-string \"#inst \\\"2024-01-01T00:59:60\\\"\")",
-        "(read-string \"#inst \\\"2024Z\\\"\")",
-        "(read-string \"#inst \\\"2024-01Z\\\"\")",
-        "(read-string \"#inst \\\"2024-01-01+02:00\\\"\")",
-        "(read-string \"#inst \\\"2024-02-29\\\"\")",
-        "(read-string \"#inst \\\"2000-02-29\\\"\")",
+    // Valid payloads answer native instants, printing canonical
+    // UTC (#103 cutover — probes `d-inst`, `d-inst-offset`,
+    // `d-inst-nozone`, `d-inst-ym`, `d-inst-year`,
+    // `d-inst-nosecs`, `d-inst-zonez`, `d-inst-frac7`,
+    // `d-inst-leapsec`, `d-inst-yearzone`, `d-inst-monthzone`,
+    // `d-inst-dayzone`, plus leap edge years).
+    for (payload, want) in [
+        ("2024-01-01", "#inst \"2024-01-01T00:00:00.000-00:00\""),
+        (
+            "2024-01-01T10:00:00.000+02:00",
+            "#inst \"2024-01-01T08:00:00.000-00:00\"",
+        ),
+        (
+            "2024-01-01T00:00:00",
+            "#inst \"2024-01-01T00:00:00.000-00:00\"",
+        ),
+        ("2024-01", "#inst \"2024-01-01T00:00:00.000-00:00\""),
+        ("2024", "#inst \"2024-01-01T00:00:00.000-00:00\""),
+        (
+            "2024-01-01T00:00",
+            "#inst \"2024-01-01T00:00:00.000-00:00\"",
+        ),
+        (
+            "2024-01-01T00:00:00Z",
+            "#inst \"2024-01-01T00:00:00.000-00:00\"",
+        ),
+        (
+            "2024-01-01T00:00:00.1234567",
+            "#inst \"2024-01-01T00:00:00.123-00:00\"",
+        ),
+        (
+            "2024-01-01T00:59:60",
+            "#inst \"2024-01-01T01:00:00.000-00:00\"",
+        ),
+        ("2024Z", "#inst \"2024-01-01T00:00:00.000-00:00\""),
+        ("2024-01Z", "#inst \"2024-01-01T00:00:00.000-00:00\""),
+        (
+            "2024-01-01+02:00",
+            "#inst \"2023-12-31T22:00:00.000-00:00\"",
+        ),
+        ("2024-02-29", "#inst \"2024-02-29T00:00:00.000-00:00\""),
+        ("2000-02-29", "#inst \"2000-02-29T00:00:00.000-00:00\""),
     ] {
-        let got = run_last(&mut eval, src);
-        assert!(got.starts_with("#inst \""), "{src} -> {got}");
-        assert!(
-            run_last(&mut eval, &format!("(tagged-literal? {src})")) == "true",
-            "{src}"
+        let src = format!("(read-string \"#inst \\\"{payload}\\\"\")");
+        assert_eq!(run_last(&mut eval, &src), want, "{payload}");
+        assert_eq!(
+            run_last(&mut eval, &format!("(inst? {src})")),
+            "true",
+            "{payload}"
+        );
+        assert_eq!(
+            run_last(&mut eval, &format!("(tagged-literal? {src})")),
+            "false",
+            "{payload}"
         );
     }
+    // The native kind (probe `d-inst-type`).
     assert_eq!(
-        run_last(&mut eval, "(read-string \"#inst \\\"2024-01-01\\\"\")"),
-        "#inst \"2024-01-01\""
+        run_last(
+            &mut eval,
+            "(str (type (read-string \"#inst \\\"2024-01-01\\\"\")))"
+        ),
+        "\"class java.util.Date\""
     );
 }
 
@@ -474,34 +505,67 @@ fn inst_validation_errors() {
 #[test]
 fn uuid_default_reads() {
     let mut eval = boot();
-    // Valid payloads echo (the S6 boundary: the JVM answers
-    // `java.util.UUID`, lowercased — probes `d-uuid`,
-    // `d-uuid-upper`, `d-uuid-shortgroup`, `d-uuid-shortmid`,
-    // `d-uuid-longshort`).
-    assert_eq!(
-        run_last(
-            &mut eval,
-            "(read-string \"#uuid \\\"550e8400-e29b-41d4-a716-446655440000\\\"\")"
+    // Valid payloads answer native UUIDs, printing lowercase
+    // canonical (#103 cutover — probes `d-uuid`, `d-uuid-upper`,
+    // `d-uuid-shortgroup`, `d-uuid-shortmid`, `d-uuid-longshort`).
+    for (payload, want) in [
+        (
+            "550e8400-e29b-41d4-a716-446655440000",
+            "#uuid \"550e8400-e29b-41d4-a716-446655440000\"",
         ),
-        "#uuid \"550e8400-e29b-41d4-a716-446655440000\""
-    );
-    assert_eq!(
-        run_last(
-            &mut eval,
-            "(read-string \"#uuid \\\"550E8400-E29B-41D4-A716-446655440000\\\"\")"
+        (
+            "550E8400-E29B-41D4-A716-446655440000",
+            "#uuid \"550e8400-e29b-41d4-a716-446655440000\"",
         ),
-        "#uuid \"550E8400-E29B-41D4-A716-446655440000\""
-    );
-    for payload in [
-        "550e840-e29b-41d4-a716-446655440000",
-        "550e8400-e29b-41d-a716-446655440000",
-        "123456789-123-1234-1234-123456789012",
+        (
+            "550e840-e29b-41d4-a716-446655440000",
+            "#uuid \"0550e840-e29b-41d4-a716-446655440000\"",
+        ),
+        (
+            "550e8400-e29b-41d-a716-446655440000",
+            "#uuid \"550e8400-e29b-041d-a716-446655440000\"",
+        ),
+        (
+            "123456789-123-1234-1234-123456789012",
+            "#uuid \"23456789-0123-1234-1234-123456789012\"",
+        ),
     ] {
-        let got = run_last(
-            &mut eval,
-            &format!("(read-string \"#uuid \\\"{payload}\\\"\")"),
+        let src = format!("(read-string \"#uuid \\\"{payload}\\\"\")");
+        assert_eq!(run_last(&mut eval, &src), want, "{payload}");
+        assert_eq!(
+            run_last(&mut eval, &format!("(uuid? {src})")),
+            "true",
+            "{payload}"
         );
-        assert_eq!(got, format!("#uuid \"{payload}\""), "{payload}");
+    }
+    // The native kind (probe `d-uuid-type`).
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(str (type (read-string \"#uuid \\\"550e8400-e29b-41d4-a716-446655440000\\\"\")))"
+        ),
+        "\"class java.util.UUID\""
+    );
+    // S6-valid but `fromString`-invalid groups overflow the `i64`
+    // accumulator (probes `e-uuid-overflow`, `e-uuid-overflow5`).
+    for (payload, message) in [
+        (
+            "ffffffffffffffffff-1-1-1-1",
+            "Error at index 15 in: \"ffffffffffffffffff\"",
+        ),
+        (
+            "1-1-1-1-fffffffffffffffff",
+            "Error at index 15 in: \"fffffffffffffffff\"",
+        ),
+    ] {
+        assert_eq!(
+            uncaught(
+                &mut eval,
+                &format!("(read-string \"#uuid \\\"{payload}\\\"\")")
+            ),
+            format!("java.lang.NumberFormatException | {message}"),
+            "{payload}"
+        );
     }
     // Shape failures (probes `d-uuid-bad`, `d-uuid-short`,
     // `d-uuid-empty`, `d-uuid-braces`, `d-uuid-urn`,
@@ -593,14 +657,15 @@ fn uuid_default_reads() {
 #[test]
 fn default_readers_direct_calls() {
     let mut eval = boot();
-    // Direct invocation validates like the read path (probes
-    // `d-direct-inst`, `d-direct-uuid`, `d-direct-bad`).
+    // Direct invocation validates like the read path and answers
+    // natives (#103 — probes `d-direct-inst`, `d-direct-uuid`,
+    // `d-direct-bad`, `e-uuid-overflow`).
     assert_eq!(
         run_last(
             &mut eval,
             "((get default-data-readers 'inst) \"2024-01-01\")"
         ),
-        "#inst \"2024-01-01\""
+        "#inst \"2024-01-01T00:00:00.000-00:00\""
     );
     assert_eq!(
         run_last(
@@ -612,6 +677,13 @@ fn default_readers_direct_calls() {
     assert_eq!(
         uncaught(&mut eval, "((get default-data-readers 'inst) \"bogus\")"),
         "java.lang.RuntimeException | Unrecognized date/time syntax: bogus"
+    );
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "((get default-data-readers 'uuid) \"ffffffffffffffffff-1-1-1-1\")"
+        ),
+        "java.lang.NumberFormatException | Error at index 15 in: \"ffffffffffffffffff\""
     );
     // The arity error names the JVM var (probes `d-direct-arity0`,
     // `d-direct-arity2`, `d-direct-uuid-arity0`).
@@ -767,7 +839,7 @@ fn table_precedence_and_errors() {
             &mut eval,
             "(binding [*data-readers* nil] (read-string \"#inst \\\"2024-01-01\\\"\"))"
         ),
-        "#inst \"2024-01-01\""
+        "#inst \"2024-01-01T00:00:00.000-00:00\""
     );
     // `e-nonfn`: a non-fn entry fails the `IFn` cast (the port's
     // invoke-cast shape — the oracle shows module verbiage, but the
@@ -915,7 +987,7 @@ fn default_fn_fallback() {
             &mut eval,
             "(binding [*default-data-reader-fn* (fn [tag x] :dflt)] (read-string \"#inst \\\"2024-01-01\\\"\"))"
         ),
-        "#inst \"2024-01-01\""
+        "#inst \"2024-01-01T00:00:00.000-00:00\""
     );
     // `f-vs-table` / `f-table-miss`: the table beats the fallback,
     // which catches table misses.
@@ -973,13 +1045,14 @@ fn read_plus_string_runs_consult() {
         ),
         "[[:rs 7] \"#rs 7\"]"
     );
-    // `#inst` validates (same readable value as `read`).
+    // `#inst` validates and resolves (native value, verbatim
+    // consumed text).
     assert_eq!(
         run_last(
             &mut eval,
             "(with-in-str \"#inst \\\"2020-01-02\\\"\" (read+string *in*))"
         ),
-        "[#inst \"2020-01-02\" \"#inst \\\"2020-01-02\\\"\"]"
+        "[#inst \"2020-01-02T00:00:00.000-00:00\" \"#inst \\\"2020-01-02\\\"\"]"
     );
     // Default-fn tags route (tags arrive as symbols).
     assert_eq!(
@@ -1075,13 +1148,14 @@ fn conditional_tag_interplay() {
         ),
         "#?(:a #foo 1)"
     );
-    // `g-preserve-top`: a top-level default still validates.
+    // `g-preserve-top`: a top-level default still validates
+    // and resolves (preserve only shields cond bodies).
     assert_eq!(
         run_last(
             &mut eval,
             "(with-in-str \"#inst \\\"2024-01-01\\\"\" (read {:read-cond :preserve} *in*))"
         ),
-        "#inst \"2024-01-01\""
+        "#inst \"2024-01-01T00:00:00.000-00:00\""
     );
     // `g-allow-match` / `g-allow-nomatch*`: matched arms invoke,
     // suppressed arms never consult.
@@ -1267,7 +1341,7 @@ fn load_and_eval_source_resolve() {
             &mut eval,
             "(do (load-string \"(def s6-loaded #inst \\\"2024-01-01\\\")\") @(resolve 's6-loaded))"
         ),
-        "#inst \"2024-01-01\""
+        "#inst \"2024-01-01T00:00:00.000-00:00\""
     );
     assert_eq!(
         run_last(

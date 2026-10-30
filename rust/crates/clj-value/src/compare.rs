@@ -12,9 +12,10 @@
 //! Numbers compare numerically across `Int`/`Double` (the JVM lt-pair,
 //! so NaN equals everything and `-0.0` equals `0.0`); chars, bools,
 //! strings, symbols, keywords, and vectors compare within their own
-//! type; anything else is [`CompareError::Incomparable`]. The error
-//! message is ours (stable): the JVM's `ClassCastException` text
-//! embeds JDK module verbiage that varies by release.
+//! type; anything else fails with the JDK `ClassCastException`
+//! text — the `Util.compare` checkcast (`Number` for numeric `k1`,
+//! `Comparable` for non-`Comparable` `k1`) or the `compareTo`
+//! checkcast of `k2` to `k1`'s class (#102).
 
 use std::cmp::Ordering;
 use std::fmt;
@@ -28,15 +29,16 @@ use crate::{SubVectorValue, Value};
 /// A failed comparison: the JVM throws `ClassCastException` here.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CompareError {
-    left: &'static str,
-    right: &'static str,
+    from: &'static str,
+    to: &'static str,
 }
 
 impl CompareError {
-    /// The stable message (`Cannot compare <A> to <B>`).
+    /// The JDK `ClassCastException` text for the failed checkcast
+    /// (with module verbiage, via [`cce_message`](crate::cce_message)).
     #[must_use]
     pub fn message(&self) -> String {
-        format!("Cannot compare {} to {}", self.left, self.right)
+        crate::cce_message(self.from, self.to)
     }
 
     /// The JVM exception class.
@@ -86,11 +88,82 @@ pub fn compare(a: &Value, b: &Value) -> Result<Ordering, CompareError> {
         (Value::Uuid(x), Value::Uuid(y)) => Ok(x.cmp_uuid(y)),
         (Value::Instant(x), Value::Instant(y)) => Ok(x.cmp_instant(y)),
         (Value::Uri(x), Value::Uri(y)) => Ok(x.compare_uri(y).cmp(&0)),
-        _ => Err(CompareError {
-            left: type_name(a),
-            right: type_name(b),
-        }),
+        _ => Err(compare_cast_err(a, b)),
     }
+}
+
+/// `Util.compare` on an incomparable pair: a numeric `k1`
+/// checkcasts `k2` to `Number`; otherwise `((Comparable) k1)`
+/// fails a non-`Comparable` `k1` against `Comparable`, and a
+/// `Comparable` `k1` runs `compareTo`, whose first act is the
+/// checkcast of `k2` to `k1`'s class (mirrors `clj-eval`'s
+/// `compare_cast_err`, which pins the same texts through
+/// `cce_err`).
+fn compare_cast_err(a: &Value, b: &Value) -> CompareError {
+    if is_number(a) {
+        return CompareError {
+            from: jvm_name(b),
+            to: "java.lang.Number",
+        };
+    }
+    match compare_to_target(a) {
+        Some(target) => CompareError {
+            from: jvm_name(b),
+            to: target,
+        },
+        None => CompareError {
+            from: jvm_name(a),
+            to: "java.lang.Comparable",
+        },
+    }
+}
+
+/// A tower number (the `Util.compare` `instanceof Number` gate).
+fn is_number(v: &Value) -> bool {
+    matches!(
+        v,
+        Value::Int(_)
+            | Value::Double(_)
+            | Value::BigInt(_)
+            | Value::BigInteger(_)
+            | Value::BigDec(_)
+            | Value::Ratio(_)
+    )
+}
+
+/// The `compareTo` checkcast target for a `Comparable` `k1`
+/// (`None` for non-`Comparable`s, which fail against
+/// `Comparable` instead): `String`/`Character`/`Boolean`/
+/// `Symbol`/`Keyword` cast `k2` to their own class, the S9
+/// scalars to theirs, and vectors (entries and primitive
+/// vectors compare as vectors) to `IPersistentVector`, like
+/// `APersistentVector.compareTo` — subvectors ride along.
+fn compare_to_target(a: &Value) -> Option<&'static str> {
+    match a {
+        Value::Str(_) => Some("java.lang.String"),
+        Value::Char(_) => Some("java.lang.Character"),
+        Value::Bool(_) => Some("java.lang.Boolean"),
+        Value::Keyword(_) => Some("clojure.lang.Keyword"),
+        Value::Symbol(_) => Some("clojure.lang.Symbol"),
+        Value::Uuid(_) => Some("java.util.UUID"),
+        Value::Instant(_) => Some("java.util.Date"),
+        Value::Uri(_) => Some("java.net.URI"),
+        Value::Vector(_) | Value::MapEntry { .. } | Value::PrimitiveVector(_) => {
+            Some("clojure.lang.IPersistentVector")
+        }
+        Value::Extension(e) => e
+            .as_any()
+            .downcast_ref::<SubVectorValue>()
+            .map(|_| "clojure.lang.IPersistentVector"),
+        _ => None,
+    }
+}
+
+/// [`jvm_class_of`](crate::jvm_class_of), borrowed:
+/// [`CompareError`] keeps `Copy`, so the owned name is leaked —
+/// compare errors are exceptional, never hot-loop values.
+fn jvm_name(v: &Value) -> &'static str {
+    Box::leak(crate::jvm_class_of(v).into_boxed_str())
 }
 
 /// `Numbers.compare` over our numeric pairs (`None` unless both are
@@ -215,118 +288,12 @@ fn compare_item_slices(a: &[Value], b: &[Value]) -> Result<Ordering, CompareErro
     Ok(a.len().cmp(&b.len()))
 }
 
-fn type_name(v: &Value) -> &'static str {
-    match v {
-        Value::Nil => "nil",
-        Value::Bool(_) => "Boolean",
-        Value::Int(_) | Value::Double(_) => scalar_type_name(v),
-        Value::BigInt(_) | Value::BigInteger(_) | Value::BigDec(_) | Value::Ratio(_) => {
-            tower_type_name(v)
-        }
-        Value::Str(_) => "String",
-        Value::Char(_) => "Character",
-        Value::Symbol(_) => "Symbol",
-        Value::Keyword(_) => "Keyword",
-        Value::Uuid(_) | Value::Instant(_) | Value::Uri(_) => scalar_type_name(v),
-        Value::Extension(e) => extension_type_name(e),
-        _ => port_type_name(v).unwrap_or_else(|| ref_or_collection_type_name(v)),
-    }
-}
-
-/// Scalar number and S9 type names (split from `type_name` for
-/// the complexity budget).
-fn scalar_type_name(v: &Value) -> &'static str {
-    match v {
-        Value::Int(_) => "Long",
-        Value::Uuid(_) => "UUID",
-        Value::Instant(_) => "Instant",
-        Value::Uri(_) => "URI",
-        _ => "Double",
-    }
-}
-
-/// Tower number type names (split from `type_name` for the
-/// complexity budget).
-fn tower_type_name(v: &Value) -> &'static str {
-    match v {
-        Value::BigInt(_) => "BigInt",
-        Value::BigInteger(_) => "BigInteger",
-        Value::BigDec(_) => "BigDecimal",
-        _ => "Ratio",
-    }
-}
-
-/// Port-defined type names (split from `type_name` for the
-/// complexity budget): host classes leak their per-value name;
-/// multifns report the JVM class (static — no per-value name
-/// leaks here); anything else is `None` for the caller.
-fn port_type_name(v: &Value) -> Option<&'static str> {
-    match v {
-        Value::HostType(h) => Some(host_type_name(h)),
-        Value::MultiFn(_) => Some("clojure.lang.MultiFn"),
-        // Classes are never comparable (the JVM's `Class` is not
-        // `Comparable` either); the name feeds the error alone.
-        Value::Class(_) => Some("Class"),
-        _ => None,
-    }
-}
-
-/// Identity and collection type names (split from [`type_name`] for
-/// the complexity budget).
-fn ref_or_collection_type_name(v: &Value) -> &'static str {
-    match v {
-        Value::Var(_) => "Var",
-        Value::Unbound(_) => "Unbound",
-        Value::Throwable(_) => "Throwable",
-        Value::Transient(_) => "Transient",
-        Value::Atom(_) => "Atom",
-        Value::Delay(_) => "Delay",
-        Value::Future(_) => "Future",
-        Value::Promise(_) => "Promise",
-        Value::Agent(_) => "Agent",
-        Value::Volatile(_) => "Volatile",
-        Value::Ref(_) => "Ref",
-        Value::Executor(_) => "Executor",
-        _ => collection_type_name(v),
-    }
-}
-
-/// The extension's own class name. [`CompareError`] borrows its
-/// names, so the owned name is leaked — compare errors are
-/// exceptional, never hot-loop values.
-fn extension_type_name(e: &std::sync::Arc<dyn crate::ExtensionValue>) -> &'static str {
-    Box::leak(e.class_name().into_boxed_str())
-}
-
-/// The host type's class name. [`CompareError`] borrows its names,
-/// so the owned name is leaked — compare errors are exceptional,
-/// never hot-loop values (same contract as [`extension_type_name`]).
-fn host_type_name(h: &std::sync::Arc<crate::HostVal>) -> &'static str {
-    Box::leak(h.type_name().to_owned().into_boxed_str())
-}
-
-fn collection_type_name(v: &Value) -> &'static str {
-    match v {
-        Value::List(_) => "List",
-        // Entries and primitive vectors compare (and name) as vectors.
-        Value::Vector(_) | Value::MapEntry { .. } | Value::PrimitiveVector(_) => "Vector",
-        // Arrays name by descriptor (leaked, like extensions — compare
-        // errors are exceptional, never hot-loop values).
-        Value::Array(a) => Box::leak(a.descriptor().into_boxed_str()),
-        Value::Map(_) => "Map",
-        Value::Set(_) => "Set",
-        Value::Regex(_) => "Regex",
-        Value::TaggedLiteral { .. } => "TaggedLiteral",
-        Value::ReaderConditional { .. } => "ReaderConditional",
-        _ => unreachable!("atoms handled above"),
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{collection_type_name, compare, type_name};
+    use super::compare;
     use crate::{
-        Agent, Atom, Delay, Future, Promise, Symbol, Transient, TransientKind, TransientVector,
+        Agent, Atom, Delay, Elem8, Future, Instant, Keyword, List, PrimitiveVector, Promise,
+        RepeatValue, SubVectorValue, Symbol, Transient, TransientKind, TransientVector, Uri, Uuid,
         Value, Vector,
     };
     use std::cmp::Ordering;
@@ -342,46 +309,53 @@ mod tests {
         compare(a, b).expect_err("expected incomparable").message()
     }
 
-    /// Numeric type names, incl the S2 `BigInteger` kind.
+    /// A subvector extension over `[1]`.
+    fn subvector_value() -> Value {
+        Value::Extension(Arc::new(SubVectorValue::new(
+            Vector::from_vec(vec![Value::Int(1)]),
+            0,
+            1,
+        )))
+    }
+
+    /// A numeric `k1` against a non-number fails `k2` to `Number`
+    /// (`Util.compare` checkcasts before `Numbers.compare`) — every
+    /// tower kind, incl the S2 `BigInteger` kind.
     #[test]
-    fn numeric_type_names() {
+    fn numeric_k1_fails_k2_to_number() {
         use num_bigint::BigInt;
-        assert_eq!(type_name(&Value::Int(1)), "Long");
-        assert_eq!(type_name(&Value::Double(1.0)), "Double");
-        assert_eq!(type_name(&Value::BigInt(BigInt::from(1))), "BigInt");
-        assert_eq!(type_name(&Value::BigInteger(BigInt::from(1))), "BigInteger");
-        assert_eq!(
-            type_name(&Value::BigDec(crate::BigDec::from_bigint(BigInt::from(1)))),
-            "BigDecimal"
-        );
-        assert_eq!(
-            type_name(&Value::Ratio(num_rational::BigRational::new(
+        let s = Value::Str(Arc::from("s"));
+        let want = "class java.lang.String cannot be cast to class java.lang.Number (java.lang.String and java.lang.Number are in module java.base of loader 'bootstrap')";
+        for k1 in [
+            Value::Int(1),
+            Value::Double(1.0),
+            Value::BigInt(BigInt::from(1)),
+            Value::BigInteger(BigInt::from(1)),
+            Value::BigDec(crate::BigDec::from_bigint(BigInt::from(1))),
+            Value::Ratio(num_rational::BigRational::new(
                 BigInt::from(1),
-                BigInt::from(2)
-            ))),
-            "Ratio"
-        );
-        assert_eq!(
-            message_of(
-                &Value::BigInteger(BigInt::from(1)),
-                &Value::Str(Arc::from("s"))
-            ),
-            "Cannot compare BigInteger to String"
-        );
+                BigInt::from(2),
+            )),
+        ] {
+            assert_eq!(message_of(&k1, &s), want);
+        }
+        let err = compare(&Value::Int(1), &s).expect_err("expected incomparable");
+        assert_eq!(err.jvm_class(), "java.lang.ClassCastException");
     }
 
     #[test]
     fn display_matches_message() {
         let err = compare(&Value::Int(1), &Value::Str(Arc::from("s")))
             .expect_err("expected incomparable");
-        assert_eq!(err.message(), "Cannot compare Long to String");
-        assert_eq!(err.to_string(), "Cannot compare Long to String");
+        let want = "class java.lang.String cannot be cast to class java.lang.Number (java.lang.String and java.lang.Number are in module java.base of loader 'bootstrap')";
+        assert_eq!(err.message(), want);
+        assert_eq!(err.to_string(), want);
     }
 
     #[test]
     fn classes_are_never_comparable() {
-        // The JVM's `Class` is not `Comparable` either; the name
-        // feeds the error alone.
+        // The JVM's `Class` is not `Comparable` either: it fails
+        // itself against `Comparable`.
         let class = || {
             Value::Class(Arc::new(crate::ClassVal::new(
                 Arc::from("java.lang.String"),
@@ -391,7 +365,7 @@ mod tests {
         };
         assert_eq!(
             message_of(&class(), &class()),
-            "Cannot compare Class to Class"
+            "class java.lang.Class cannot be cast to class java.lang.Comparable (java.lang.Class and java.lang.Comparable are in module java.base of loader 'bootstrap')"
         );
     }
 
@@ -445,111 +419,105 @@ mod tests {
         );
     }
 
-    /// Tower type names surface in the incomparable error.
+    /// `Comparable` scalar `k1` against an alien `k2` fails `k2`
+    /// to `k1`'s class (the `compareTo` checkcast — the JDK
+    /// `String`/`Character`/`Boolean`/`UUID`/`Date`/`URI`
+    /// internals cast to their own class).
     #[test]
-    fn tower_type_names() {
-        let s = Value::Str(Arc::from("s"));
-        let big = Value::BigInt(num_bigint::BigInt::from(5));
-        let dec = Value::BigDec(crate::BigDec::parse("5.5").unwrap());
-        let half = Value::Ratio(num_rational::BigRational::new(
-            num_bigint::BigInt::from(1),
-            num_bigint::BigInt::from(2),
-        ));
-        assert_eq!(message_of(&big, &s), "Cannot compare BigInt to String");
-        assert_eq!(message_of(&dec, &s), "Cannot compare BigDecimal to String");
-        assert_eq!(message_of(&half, &s), "Cannot compare Ratio to String");
-    }
-
-    #[test]
-    fn scalar_type_names() {
-        let s = Value::Str(Arc::from("s"));
-        assert_eq!(
-            message_of(&Value::Double(1.0), &s),
-            "Cannot compare Double to String"
-        );
-        assert_eq!(
-            message_of(&s, &Value::Double(1.0)),
-            "Cannot compare String to Double"
-        );
-        assert_eq!(
-            message_of(&Value::Char('a'), &Value::Int(1)),
-            "Cannot compare Character to Long"
-        );
-    }
-
-    #[test]
-    fn ref_type_names() {
+    fn comparable_scalars_fail_k2_to_own_class() {
         let n = Value::Int(1);
+        for (k1, target) in [
+            (Value::Str(Arc::from("s")), "java.lang.String"),
+            (Value::Char('a'), "java.lang.Character"),
+            (Value::Bool(true), "java.lang.Boolean"),
+            (Value::Uuid(Uuid::from_bits(0, 1)), "java.util.UUID"),
+            (Value::Instant(Instant::from_millis(0)), "java.util.Date"),
+            (
+                Value::Uri(Box::new(Uri::parse("http://h/x").unwrap())),
+                "java.net.URI",
+            ),
+        ] {
+            assert_eq!(
+                message_of(&k1, &n),
+                format!(
+                    "class java.lang.Long cannot be cast to class {target} (java.lang.Long and {target} are in module java.base of loader 'bootstrap')"
+                ),
+                "{k1:?}"
+            );
+        }
+        // A `Double` alien fails by its own class too.
         assert_eq!(
-            message_of(&transient_value(), &n),
-            "Cannot compare Transient to Long"
-        );
-        assert_eq!(
-            message_of(&Value::Atom(Atom::new(Value::Nil)), &n),
-            "Cannot compare Atom to Long"
-        );
-        assert_eq!(
-            message_of(&Value::Delay(Delay::new(Value::Nil)), &n),
-            "Cannot compare Delay to Long"
-        );
-        assert_eq!(
-            message_of(&Value::Future(Future::new()), &n),
-            "Cannot compare Future to Long"
-        );
-        assert_eq!(
-            message_of(&Value::Promise(Promise::new()), &n),
-            "Cannot compare Promise to Long"
-        );
-        assert_eq!(
-            message_of(&Value::Agent(Agent::new(Value::Nil)), &n),
-            "Cannot compare Agent to Long"
+            message_of(&Value::Str(Arc::from("s")), &Value::Double(1.0)),
+            "class java.lang.Double cannot be cast to class java.lang.String (java.lang.Double and java.lang.String are in module java.base of loader 'bootstrap')"
         );
     }
 
+    /// `Keyword.compareTo` casts to `Keyword` and
+    /// `Symbol.compareTo` to `Symbol` (upstream sources).
     #[test]
-    fn reader_type_names() {
+    fn comparable_nameds_fail_k2_to_own_class() {
+        let kw = Value::Keyword(Keyword::new(None, "a"));
+        let sym = Value::Symbol(Symbol::new(None, "a"));
+        assert_eq!(
+            message_of(&kw, &sym),
+            "class clojure.lang.Symbol cannot be cast to class clojure.lang.Keyword (clojure.lang.Symbol and clojure.lang.Keyword are in unnamed module of loader 'app')"
+        );
+        assert_eq!(
+            message_of(&sym, &kw),
+            "class clojure.lang.Keyword cannot be cast to class clojure.lang.Symbol (clojure.lang.Keyword and clojure.lang.Symbol are in unnamed module of loader 'app')"
+        );
+    }
+
+    /// Non-`Comparable` cells fail themselves against
+    /// `Comparable` (`((Comparable) k1)`).
+    #[test]
+    fn cells_fail_against_comparable() {
+        let n = Value::Int(1);
+        for (k1, from) in [
+            (
+                transient_value(),
+                "clojure.lang.PersistentVector$TransientVector",
+            ),
+            (Value::Atom(Atom::new(Value::Nil)), "clojure.lang.Atom"),
+            (Value::Delay(Delay::new(Value::Nil)), "clojure.lang.Delay"),
+            (
+                Value::Future(Future::new()),
+                "clojure.core$future_call$reify",
+            ),
+            (Value::Promise(Promise::new()), "clojure.core$promise$reify"),
+            (Value::Agent(Agent::new(Value::Nil)), "clojure.lang.Agent"),
+            (Value::Ref(crate::Ref::new(Value::Nil)), "clojure.lang.Ref"),
+        ] {
+            assert_eq!(
+                message_of(&k1, &n),
+                format!(
+                    "class {from} cannot be cast to class java.lang.Comparable ({from} is in unnamed module of loader 'app'; java.lang.Comparable is in module java.base of loader 'bootstrap')"
+                ),
+                "{k1:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn reader_forms_fail_against_comparable() {
         let n = Value::Int(1);
         let tagged = crate::tagged_literal(Symbol::new(None, "t"), Value::Nil);
         assert_eq!(
             message_of(&tagged, &n),
-            "Cannot compare TaggedLiteral to Long"
+            "class clojure.lang.TaggedLiteral cannot be cast to class java.lang.Comparable (clojure.lang.TaggedLiteral is in unnamed module of loader 'app'; java.lang.Comparable is in module java.base of loader 'bootstrap')"
         );
         let cond = crate::reader_conditional(Value::Nil, false);
         assert_eq!(
             message_of(&cond, &n),
-            "Cannot compare ReaderConditional to Long"
+            "class clojure.lang.ReaderConditional cannot be cast to class java.lang.Comparable (clojure.lang.ReaderConditional is in unnamed module of loader 'app'; java.lang.Comparable is in module java.base of loader 'bootstrap')"
         );
     }
 
     #[test]
-    fn defensive_names_coverable_directly() {
-        // `type_name(Nil)` never fires through `compare` (nil
-        // pairs decide early), and the collection wildcard is
-        // exhaustive-by-construction — both pinned directly.
-        assert_eq!(type_name(&Value::Nil), "nil");
-    }
-
-    #[test]
-    fn ref_names_its_kind() {
-        // Refs report the short kind in compare errors (S19 —
-        // pinned directly, like the nil fallback above).
-        assert_eq!(
-            type_name(&Value::Ref(crate::Ref::new(Value::Int(0)))),
-            "Ref"
-        );
-    }
-
-    #[test]
-    #[should_panic(expected = "atoms handled above")]
-    fn collection_wildcard_panics() {
-        let _ = collection_type_name(&Value::Int(1));
-    }
-
-    #[test]
-    fn multifn_names_its_class() {
-        // Multimethods report the JVM class in compare errors
-        // (unreachable from Clojure — `sort` uses its own
-        // comparator — so pinned directly).
+    fn multifn_fails_against_comparable() {
+        // Multimethods fail their JVM class (unreachable from
+        // Clojure — `sort` uses its own comparator — so pinned
+        // directly).
         let mf = Value::MultiFn(Arc::new(crate::MultiFn {
             name: Arc::from("m"),
             dispatch: Value::Nil,
@@ -558,17 +526,16 @@ mod tests {
             prefers: crate::new_map(),
             hierarchy: None,
         }));
-        assert_eq!(type_name(&mf), "clojure.lang.MultiFn");
         assert_eq!(
             message_of(&mf, &Value::Int(1)),
-            "Cannot compare clojure.lang.MultiFn to Long"
+            "class clojure.lang.MultiFn cannot be cast to class java.lang.Comparable (clojure.lang.MultiFn is in unnamed module of loader 'app'; java.lang.Comparable is in module java.base of loader 'bootstrap')"
         );
     }
 
     #[test]
-    fn host_values_name_their_class() {
-        // Port-defined types report their class name in compare
-        // errors (like the JVM's `ClassCastException` operands).
+    fn host_values_fail_against_comparable() {
+        // Port-defined types fail their class name (like the
+        // JVM's `ClassCastException` operands).
         let def = Arc::new(crate::HostDef {
             name: Arc::from("user.T"),
             kind: crate::HostKind::Type,
@@ -587,10 +554,53 @@ mod tests {
             meta: None,
             proxy_map: None,
         })));
-        assert_eq!(type_name(&v), "user.T");
         assert_eq!(
             message_of(&v, &Value::Int(1)),
-            "Cannot compare user.T to Long"
+            "class user.T cannot be cast to class java.lang.Comparable (user.T is in unnamed module of loader 'app'; java.lang.Comparable is in module java.base of loader 'bootstrap')"
+        );
+    }
+
+    /// Vectors, entries, primitive vectors, and subvectors fail an
+    /// alien `k2` to `IPersistentVector` (like
+    /// `APersistentVector.compareTo`).
+    #[test]
+    fn vector_family_fails_k2_to_ipersistentvector() {
+        let n = Value::Int(1);
+        let want = "class java.lang.Long cannot be cast to class clojure.lang.IPersistentVector (java.lang.Long is in module java.base of loader 'bootstrap'; clojure.lang.IPersistentVector is in unnamed module of loader 'app')";
+        for k1 in [
+            Value::Vector(Vector::from_vec(vec![Value::Int(1)])),
+            crate::map_entry(Value::Int(1), Value::Int(2)),
+            Value::PrimitiveVector(PrimitiveVector::new(Elem8::Long, vec![Value::Int(1)], None)),
+            subvector_value(),
+        ] {
+            assert_eq!(message_of(&k1, &n), want);
+        }
+    }
+
+    /// Non-subvector extensions are not `Comparable`: they fail
+    /// themselves (here a `Repeat` against `Comparable`).
+    #[test]
+    fn plain_extensions_fail_against_comparable() {
+        let rep = Value::Extension(Arc::new(RepeatValue::new(Value::Int(1), Some(2))));
+        assert_eq!(
+            message_of(&rep, &Value::Int(1)),
+            "class clojure.lang.Repeat cannot be cast to class java.lang.Comparable (clojure.lang.Repeat is in unnamed module of loader 'app'; java.lang.Comparable is in module java.base of loader 'bootstrap')"
+        );
+    }
+
+    /// Lists fail themselves both ways (a list `k2` against a
+    /// vector `k1` fails to `IPersistentVector` instead).
+    #[test]
+    fn lists_fail_against_comparable() {
+        let list = Value::List(List::from_vec(vec![Value::Int(1)]));
+        let vec = Value::Vector(Vector::from_vec(vec![Value::Int(1)]));
+        assert_eq!(
+            message_of(&list, &vec),
+            "class clojure.lang.PersistentList cannot be cast to class java.lang.Comparable (clojure.lang.PersistentList is in unnamed module of loader 'app'; java.lang.Comparable is in module java.base of loader 'bootstrap')"
+        );
+        assert_eq!(
+            message_of(&vec, &list),
+            "class clojure.lang.PersistentList cannot be cast to class clojure.lang.IPersistentVector (clojure.lang.PersistentList and clojure.lang.IPersistentVector are in unnamed module of loader 'app')"
         );
     }
 }

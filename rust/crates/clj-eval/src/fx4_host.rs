@@ -299,11 +299,9 @@ thread_local! {
 
 fn native_monitor_enter(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     let _ = eval;
-    check_arity("clojure.core/fx4-monitor-enter", args, &[1])?;
+    check_arity("clojure.core/fx4-monitor-enter", args, &[1, 2])?;
     if matches!(args[0], Value::Nil) {
-        return Err(npe(
-            "Cannot enter synchronized block because \"lock\" is null",
-        ));
+        return Err(npe(&nil_lockee_message("enter", args.get(1))));
     }
     let key = monitor_key(&args[0]);
     let guard = locking_acquire_key(key);
@@ -313,25 +311,133 @@ fn native_monitor_enter(eval: &mut Evaluator, args: &[Value]) -> Result<Value, N
 
 fn native_monitor_exit(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     let _ = eval;
-    check_arity("clojure.core/fx4-monitor-exit", args, &[1])?;
+    check_arity("clojure.core/fx4-monitor-exit", args, &[1, 2])?;
+    // Fence 4b E1k/E1t/E1u (review B3: JVMS null-first): a nil
+    // lockee is ALWAYS the form-naming NPE, held or not — JVMS SE
+    // 21 orders the MONITOREXIT null check before the ownership
+    // (IMS) rule, and the port implements the spec. Variance note:
+    // Oracle 27+35 / Temurin 21.0.13 observe held→IMS here (empty
+    // message), at both the Clojure level (kept-fixes.out) and the
+    // pure-bytecode level (probes/jvm-matrix/, re-verified
+    // 2026-10-30); the mechanism is unexplained, the repro is
+    // committed, and the port deliberately does not follow it.
+    // Otherwise the lockee's 3b key must be held (content keys
+    // for Box/symbol kinds, so clone exits match their enter;
+    // minted ids elsewhere, which behave identity-like; the most
+    // recent hold releases, so reentrant nests unwind in order).
     if matches!(args[0], Value::Nil) {
-        return Err(npe(
-            "Cannot exit synchronized block because \"lock\" is null",
-        ));
+        return Err(npe(&nil_lockee_message("exit", args.get(1))));
     }
     let key = monitor_key(&args[0]);
-    let found = MONITORS.with(|stack| {
+    let released = MONITORS.with(|stack| {
         let mut stack = stack.borrow_mut();
         stack
             .iter()
             .rposition(|(held, _)| *held == key)
             .map(|pos| stack.remove(pos))
+            .is_some()
     });
-    if found.is_none() {
-        return Err(NativeError::new(
-            ThrowClass::IllegalStateException,
-            "attempt to exit a monitor not held by this thread".to_owned(),
-        ));
+    if !released {
+        return Err(ims());
     }
     Ok(Value::Nil)
+}
+
+/// Unmatched `monitor-exit` (fence 4b E1k): the JVM's
+/// `IllegalMonitorStateException` with an empty message.
+fn ims() -> NativeError {
+    NativeError::new(ThrowClass::IllegalMonitorStateException, String::new())
+}
+
+/// How a nil lockee names itself in the `monitor-enter`/
+/// `monitor-exit` NPE (fence 4b E1r/E1s/E1u/E1v/E1w/E1x/E1y — the
+/// JVM's compiler-generated null messages over the EXPANDED form,
+/// which the analyzer quotes as the natives' second argument):
+/// nil/`(quote nil)` → `"null"`; symbols → the name; calls → the
+/// `IFn.invoke` return-value template by arity (`RT.get` and other
+/// inlined callees stay port-fixed as `IFn.invoke`; `set!`
+/// compiles to `Var.set`, pinned exactly); `try`/`loop` → the
+/// synthetic 0-arg template; `let`/`let*`/`letfn*`/`do` → the last
+/// body form (`"null"` when body-less); `if`/`case*` and anything
+/// else → the bare message (the JVM gives up on branches the same
+/// way). A missing form (direct native calls) keeps the legacy
+/// `"lock"` placeholder. Nested monitor forms stay divergent (E1w
+/// `nestmon`: the JVM throws IMS there by an unknown mechanism).
+enum NilLockee {
+    Null,
+    Local(String),
+    Call(String, usize),
+    Bare,
+}
+
+fn nil_lockee_message(verb: &str, form: Option<&Value>) -> String {
+    let Some(form) = form else {
+        // Direct native calls pass no form (legacy placeholder).
+        return format!("Cannot {verb} synchronized block because \"lock\" is null");
+    };
+    match nil_lockee_tag(form) {
+        NilLockee::Null => {
+            format!("Cannot {verb} synchronized block because \"null\" is null")
+        }
+        NilLockee::Local(name) => {
+            format!("Cannot {verb} synchronized block because \"{name}\" is null")
+        }
+        NilLockee::Call(method, arity) => {
+            let desc = vec!["Object"; arity].join(", ");
+            format!(
+                "Cannot {verb} synchronized block because the return value of \"{method}({desc})\" is null"
+            )
+        }
+        NilLockee::Bare => format!("Cannot {verb} synchronized block"),
+    }
+}
+
+fn nil_lockee_tag(form: &Value) -> NilLockee {
+    // Default bare; every line below runs per call, so no arm is
+    // dead (each refinement is pinned by its own probe row).
+    let mut tag = NilLockee::Bare;
+    if matches!(form, Value::Nil) {
+        tag = NilLockee::Null;
+    } else if let Value::Symbol(sym) = form {
+        tag = NilLockee::Local(format!("{sym}"));
+    } else if let Value::List(l) = form {
+        tag = nil_lockee_list(l);
+    }
+    tag
+}
+
+fn nil_lockee_list(l: &List) -> NilLockee {
+    let head = l.iter().next();
+    // `()` never evaluates nil, so this arity is unused there.
+    let arity = l.len().saturating_sub(1);
+    let mut tag = NilLockee::Call("clojure.lang.IFn.invoke".to_owned(), arity);
+    if list_head_is(head, "quote") {
+        // `(quote nil)`; other quotes never evaluate nil.
+        tag = NilLockee::Null;
+    } else if head_in(head, &["let", "let*", "letfn", "letfn*", "do"]) {
+        // The value form is the last body form; a body-less
+        // `let`/`do` evaluates nil like a `nil` literal (E1w).
+        let off = if list_head_is(head, "do") { 1 } else { 2 };
+        tag = match l.iter().skip(off).last() {
+            Some(last) => nil_lockee_tag(last),
+            None => NilLockee::Null,
+        };
+    } else if head_in(head, &["if", "case*"]) {
+        tag = NilLockee::Bare;
+    } else if head_in(head, &["try", "loop", "loop*"]) {
+        tag = NilLockee::Call("clojure.lang.IFn.invoke".to_owned(), 0);
+    } else if list_head_is(head, "set!") {
+        // `set!` on a var compiles to `Var.set` (E1y); field
+        // targets are out of scope (interop fence).
+        tag = NilLockee::Call("clojure.lang.Var.set".to_owned(), 1);
+    }
+    tag
+}
+
+fn list_head_is(head: Option<&Value>, name: &str) -> bool {
+    matches!(head, Some(Value::Symbol(s)) if s.name() == name && s.namespace().is_none_or(|ns| ns == "clojure.core"))
+}
+
+fn head_in(head: Option<&Value>, names: &[&str]) -> bool {
+    names.iter().any(|name| list_head_is(head, name))
 }

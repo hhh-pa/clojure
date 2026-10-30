@@ -1140,6 +1140,10 @@ fn binding_errors() {
         "Syntax error macroexpanding binding at (test:1:1).",
         "java.lang.IllegalArgumentException | binding requires an even number of forms in binding vector",
     );
+    // Fence 4b E1f (`binding-novec`): the JVM appends the form
+    // location to this message (`in user:6`) — the port's wrapper
+    // already carries the (more precise) span, so it is not
+    // duplicated here.
     check(
         "(binding x x)",
         "Syntax error macroexpanding binding at (test:1:1).",
@@ -1421,13 +1425,16 @@ fn gap2_case_star_skip_ok() {
 
 #[test]
 fn gap2_with_redefs_binding_rows() {
-    // Vector/nil/set/empty-map bindings pass; maps fail the Symbol cast (expr.rs:1770-1784).
+    // Vector/nil/set/empty-map bindings pass (expr.rs:1770-1784).
     analyze_ok("(with-redefs [va251 2] va251)");
     analyze_ok("(with-redefs nil 1)");
     analyze_ok("(with-redefs #{} 1)");
     analyze_ok("(with-redefs {} 1)");
+    // Fence 4b E1e/E1q: maps seq to entries — a lone entry
+    // odd-drops (no error); paired entries fail the `var` cast.
+    analyze_ok("(with-redefs {:a 1} 1)");
     check(
-        "(with-redefs {:a 1} 1)",
+        "(with-redefs {a 1 b 2} 1)",
         "Syntax error compiling var at (test:1:1).",
         "java.lang.ClassCastException | Cannot cast clojure.lang.MapEntry to clojure.lang.Symbol",
     );
@@ -1491,6 +1498,17 @@ fn gap2_letfn_binding_rows() {
         "(letfn [nil] 1)",
         "Syntax error compiling letfn* at (test:1:1).",
         "java.lang.IllegalArgumentException | Bad binding form, expected symbol, got: null",
+    );
+    // Fence 4b E1e/E1p: fnspecs seq like the expansion's `mapcat`
+    // (lists, maps, sets accepted); strings seq to chars, so the
+    // first char spec takes the `ISeq` error.
+    analyze_ok("(letfn ((f [x] x)) (f 1))");
+    analyze_ok("(letfn {f [x]} 1)");
+    analyze_ok("(letfn #{(f [x] x)} (f 1))");
+    check(
+        "(letfn \"ab\" 1)",
+        "Syntax error macroexpanding letfn at (test:1:1).",
+        "java.lang.IllegalArgumentException | Don't know how to create ISeq from: java.lang.Character",
     );
 }
 

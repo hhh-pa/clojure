@@ -1,0 +1,26 @@
+instance-emission:
+(let* [map__125 {} map__125 (if (clojure.core/instance? clojure.lang.ISeq map__125) (if (clojure.core/next map__125) (clojure.lang.PersistentArrayMap/createAsIfByAssoc (clojure.core/to-array map__125)) (if (clojure.core/seq map__125) (clojure.core/first map__125) clojure.lang.PersistentArrayMap/EMPTY)) map__125) a (clojure.core/get map__125 :a)] a)
+or-hoist:
+(let* [default__133 1 map__131 {} map__131 (if (clojure.core/instance? clojure.lang.ISeq map__131) (if (clojure.core/next map__131) (clojure.lang.PersistentArrayMap/createAsIfByAssoc (clojure.core/to-array map__131)) (if (clojure.core/seq map__131) (clojure.core/first map__131) clojure.lang.PersistentArrayMap/EMPTY)) map__131) a (clojure.core/get map__131 :a default__133)] a)
+or-multiple:
+"THROW java.lang.Exception \"Multiple :or defaults for same key: :x 'a'\""
+or-keyside:
+7
+or-double-eval:
+[1 {:a 1}]
+or-appear-only:
+"THROW java.lang.IllegalArgumentException \"keys #{:y} appear only in :or\""
+--- let-spec layer (JVM `let` rejects; port has no let-spec: pre-existing gap) ---
+let-or-nil:
+"THROW clojure.lang.ExceptionInfo \"Call to clojure.core/let did not conform to spec.\""
+let-or-empty-vec:
+"THROW clojure.lang.ExceptionInfo \"Call to clojure.core/let did not conform to spec.\""
+--- destructure-fn layer (lenient; the port matches this) ---
+fn-or-nil:
+[map__186 {} map__186 (if (clojure.core/instance? clojure.lang.ISeq map__186) (if (clojure.core/next map__186) (clojure.lang.PersistentArrayMap/createAsIfByAssoc (clojure.core/to-array map__186)) (if (clojure.core/seq map__186) (clojure.core/first map__186) clojure.lang.PersistentArrayMap/EMPTY)) map__186) a (clojure.core/get map__186 :a)]
+fn-or-empty-vec:
+[map__192 {} map__192 (if (clojure.core/instance? clojure.lang.ISeq map__192) (if (clojure.core/next map__192) (clojure.lang.PersistentArrayMap/createAsIfByAssoc (clojure.core/to-array map__192)) (if (clojure.core/seq map__192) (clojure.core/first map__192) clojure.lang.PersistentArrayMap/EMPTY)) map__192) a (clojure.core/get map__192 :a)]
+fn-or-5:
+"THROW java.lang.IllegalArgumentException \"Don't know how to create ISeq from: java.lang.Long\""
+fn-or-vec1:
+"THROW java.lang.ClassCastException \"class java.lang.Long cannot be cast to class java.util.Map$Entry (java.lang.Long and java.util.Map$Entry are in module java.base of loader 'bootstrap')\""

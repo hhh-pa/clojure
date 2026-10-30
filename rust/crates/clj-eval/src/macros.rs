@@ -310,6 +310,34 @@ fn expansion_err(
     }
 }
 
+/// `tagOf` (`Compiler.java`): the `:tag` meta entry as a
+/// symbol — symbols read directly, strings intern bare,
+/// anything else (including absent) reads nil.
+fn tag_of(v: &Value) -> Option<Symbol> {
+    let tag = v.meta()?.get(&Value::Keyword(Keyword::new(None, "tag")))?;
+    match tag {
+        Value::Symbol(s) => Some(s.clone()),
+        Value::Str(s) => Some(Symbol::new(None, s)),
+        _ => None,
+    }
+}
+
+/// Upstream 8aa45d128 (`Compiler.macroexpand1`): when the input
+/// form carries a type-hint tag the expansion drops (tags
+/// differ), wrap as `(clojure.core/identity <exp>)` carrying the input form's
+/// meta, so the hint survives expansion. Equal tags — and
+/// unhinted forms — pass through untouched.
+fn maybe_wrap_hint(form: &Value, exp: Value) -> Value {
+    let Some(tag) = tag_of(form) else {
+        return exp;
+    };
+    if Some(&tag) == tag_of(&exp).as_ref() {
+        return exp;
+    }
+    let head = Value::Symbol(Symbol::new(Some("clojure.core"), "identity"));
+    Value::List(List::from_vec(vec![head, exp])).with_meta(form.meta().cloned())
+}
+
 /// One `macroexpand-1` step over any form (natives and
 /// `eval_top_form` share this): non-seqs, `()`, special/builtin
 /// operators (bare or `clojure.core`-qualified), unresolvable
@@ -350,7 +378,8 @@ pub(crate) fn macroexpand1_value(
         return Ok(form.clone());
     };
     let args: Vec<Value> = l.iter().skip(1).cloned().collect();
-    expand1(eval, op, &mac.root, form, &Value::Nil, &args, span)
+    let exp = expand1(eval, op, &mac.root, form, &Value::Nil, &args, span)?;
+    Ok(maybe_wrap_hint(form, exp))
 }
 
 /// `Compiler.macroexpand`: loop `macroexpand-1` while the head is

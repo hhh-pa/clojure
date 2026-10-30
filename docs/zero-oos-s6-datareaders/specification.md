@@ -82,11 +82,12 @@ call fns):
    port's readers are line-numbering), recursive reads
    rethrow raw, and fn-failure causes keep their data.
 
-S6 boundary (no new value kinds): validated `inst`/`uuid`
-payloads read back as `TaggedLiteral` — a readable
-round-trip whose type the date/time value-kind slice
-later upgrades (landing `inst?`/`inst-ms`/`uuid?`). The
-validators mirror the JVM messages verbatim
+S6 boundary (no new value kinds — retired by the #103
+cutover, which flips the defaults to native `Instant`/`Uuid`,
+landing `inst?`/`inst-ms`/`uuid?` over read literals): on this
+slice validated `inst`/`uuid` payloads read back as
+`TaggedLiteral`. The validators mirror the JVM messages
+verbatim
 (`d-inst-*`, `d-uuid-*`): the `inst` grammar is
 `YYYY(-MM(-DD(THH:MM(:SS(.frac)?)?)?)?)?` with padded
 components, uppercase `T`, and an optional `Z`/`[+-]HH:MM`

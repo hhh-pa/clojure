@@ -14,6 +14,7 @@
 use std::any::Any;
 use std::collections::HashSet;
 use std::hash::Hasher;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -21,8 +22,8 @@ use num_traits::{Signed, ToPrimitive, Zero};
 
 use clj_reader::{ReadCond, Reader, ReaderOpts};
 use clj_value::{
-    ExtensionValue, Keyword, List, Map, PrintOpts, Set, Symbol, TagError, ThrowClass, Throwable,
-    Value, Vector, new_map, new_set, pr_to_string, seq_vec, validate_inst, validate_uuid,
+    ExtensionValue, Instant, Keyword, List, Map, PrintOpts, Set, Symbol, TagError, ThrowClass,
+    Throwable, Uuid, Value, Vector, new_map, new_set, pr_to_string, seq_vec, validate_uuid,
 };
 
 use crate::error::{NativeError, jvm_class_of};
@@ -535,26 +536,35 @@ fn mul(eval: &mut Evaluator, a: Num, b: Num) -> Result<Num, NativeError> {
 }
 
 /// Promoted `/`: `Int`/`Int` is exact when divisible (a reduced
-/// ratio otherwise — `(/ 1 2)` is `1/2`, never a `Double`); the
-/// exact `MIN/-1` promotes to `BigInt` (`LongOps.divide` routes any
-/// `MIN` side through `BigIntOps.divide`). Tower division is exact
-/// (`(/ 5N 2)` → `5/2`, a non-terminating decimal fails like
-/// `(bigdec 1/3)`), or rounded under a bound `*math-context*` (S2).
+/// ratio otherwise — `(/ 1 2)` is `1/2`, never a `Double`); any
+/// `MIN` side routes through `BigIntOps.divide`, so integral
+/// quotients (`MIN/-1`, `MIN`/`MIN`, `MIN`/2, `0`/`MIN`) come
+/// back `BigInt`. Tower division is exact (`(/ 5N 2)` → `5/2`, a
+/// non-terminating decimal fails like `(bigdec 1/3)`), or rounded
+/// under a bound `*math-context*` (S2).
 /// `Int`/`Int` division (split from [`div`] for the complexity
-/// budget): exact when divisible, else a reduced ratio; the exact
-/// `MIN/-1` promotes to `BigInt` (`checked_div` fails only there —
-/// `MIN % -1` is `0` — and a successful divide means the `%`
-/// below cannot overflow either).
+/// budget): exact when divisible, else a reduced ratio; any `MIN`
+/// side takes the exact path, where integral quotients fold to
+/// `BigInt` (`LongOps.divide` → `BigIntOps.divide`: `(/ MIN
+/// MIN)` is `1N`, `(/ 0 MIN)` is `0N`).
 fn div_int(x: i64, y: i64, a: &Num, b: &Num) -> Result<Num, NativeError> {
     if y == 0 {
         return Err(divide_by_zero());
     }
-    match x.checked_div(y) {
-        Some(q) if x % y == 0 => Ok(Num::Int(q)),
-        Some(_) => Ok(num_ratio(num_rational(a) / num_rational(b))),
-        None => Ok(Num::BigInt(
-            num_bigint::BigInt::from(x) / num_bigint::BigInt::from(y),
-        )),
+    if x == i64::MIN || y == i64::MIN {
+        return Ok(num_ratio(num_rational(a) / num_rational(b)));
+    }
+    // `checked_div` fails only on `MIN/-1` (a `MIN` side,
+    // returned above) and `/0` (guarded above): `expect` keeps
+    // the invariant while staying on the covered path (a `None`
+    // arm would be an uncoverable line under the 100% floor).
+    let q = x
+        .checked_div(y)
+        .expect("non-MIN operands divide without overflow");
+    if x % y == 0 {
+        Ok(Num::Int(q))
+    } else {
+        Ok(num_ratio(num_rational(a) / num_rational(b)))
     }
 }
 
@@ -1963,8 +1973,9 @@ fn tag_native(err: TagError) -> NativeError {
 /// table and the eval walk): nil is the verbatim NPE (probe
 /// `d-inst-nil`), strings validate (probes `d-inst-*`), anything
 /// else fails the `CharSequence` cast (probes `d-inst-nonstr`,
-/// `d-inst-vec`). Valid payloads read back as `TaggedLiteral`
-/// until the date/time value-kind slice lands.
+/// `d-inst-vec`). Valid payloads answer native `Instant` (#103:
+/// `FromStr` reuses the validator, so the error surface is
+/// unchanged, then constructs infallibly).
 fn default_inst_reader(form: &Value) -> Result<Value, NativeError> {
     if matches!(form, Value::Nil) {
         return Err(NativeError::new(
@@ -1976,17 +1987,19 @@ fn default_inst_reader(form: &Value) -> Result<Value, NativeError> {
     let Value::Str(s) = form else {
         return Err(cce_err(form, "java.lang.CharSequence"));
     };
-    validate_inst(s).map_err(tag_native)?;
-    Ok(clj_value::tagged_literal(
-        Symbol::new(None, "inst"),
-        form.clone(),
-    ))
+    Ok(Value::Instant(Instant::from_str(s).map_err(tag_native)?))
 }
 
 /// The `uuid` default reader (shared like `inst`): non-strings
 /// (nil included) fail as `IllegalArgumentException` (probes
 /// `d-uuid-nonstr`, `d-uuid-nil`), strings validate (probes
-/// `d-uuid-*`).
+/// `d-uuid-*`), then construct native `Uuid` (#103). Validation
+/// stays first: it keeps the S6 verdict (including the `+`-led
+/// group gap — `e-uuid-plus` parses upstream — inherited
+/// unchanged per the S9 spec), and the residual `FromStr`
+/// failure (S6-valid, `fromString`-invalid `i64` overflow)
+/// maps to the NFE `Error at index` text (probes
+/// `e-uuid-overflow*`).
 fn default_uuid_reader(form: &Value) -> Result<Value, NativeError> {
     let Value::Str(s) = form else {
         return Err(NativeError::new(
@@ -1995,10 +2008,7 @@ fn default_uuid_reader(form: &Value) -> Result<Value, NativeError> {
         ));
     };
     validate_uuid(s).map_err(tag_native)?;
-    Ok(clj_value::tagged_literal(
-        Symbol::new(None, "uuid"),
-        form.clone(),
-    ))
+    Ok(Value::Uuid(Uuid::from_str(s).map_err(tag_native)?))
 }
 
 /// One default-table entry: a 1-arity native fn value (the arity
