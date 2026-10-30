@@ -519,12 +519,12 @@ Significant vars with no port slice, grouped below by area with the reason. (Thr
 | `swap!` | implemented | concurrency.rs swap_rows (CAS loop, extra args, unconditional watch fire) |
 | `reset!` | implemented | concurrency.rs reset_rows (validates, fires) |
 | `compare-and-set!` | implemented | concurrency.rs cas_rows (bool, validates pre-compare, no fire on miss) |
-| `shutdown-agents` | implemented | concurrency.rs agent_shutdown_rows (nil; joins pools + future threads; later sends drop like the JVM) |
+| `shutdown-agents` | implemented | concurrency.rs agent_shutdown_rows (nil; returns at once, exit join drains; later pool sends drop, custom sends run) |
 | `delay` | implemented | concurrency.rs delay_rows (delay* form over trapped closure) |
 | `force` | implemented | concurrency.rs force_rows (non-delays pass through) |
 | `deref` | implemented | concurrency.rs deref_rows + deref_timeout_rows (1-arity atoms/delays/vars/futures/promises; 3-arity IBlockingDeref with Future-cast-first) |
 | `future` | implemented | concurrency.rs future_rows (core.clj macro over future-call) |
-| `future-call` | implemented | concurrency.rs future_rows (binding conveyance, cached failures) |
+| `future-call` | implemented | concurrency.rs future_rows (binding conveyance, cached failures; post-shutdown rejects) |
 | `future?` | implemented | concurrency.rs future_pred_rows (futures only; promises false) |
 | `future-cancel` | implemented | concurrency.rs future_cancel_rows (bool; no interrupt) |
 | `future-done?` | implemented | concurrency.rs future_pred_rows (done incl. cancelled) |
@@ -533,9 +533,10 @@ Significant vars with no port slice, grouped below by area with the reason. (Thr
 | `realized?` | implemented | concurrency.rs realized_rows (delays + lazy seqs + futures/promises; atoms CCE) |
 | `send` | implemented | concurrency.rs agent_send_shapes (fixed pool; extra args; failed throws) |
 | `send-off` | implemented | concurrency.rs agent_send_shapes (unbounded pool; failed throws) |
-| `send-via` | implemented | concurrency.rs agent_send_shapes (executor ignored; routes to send-off pool) |
-| `await` | implemented | concurrency.rs agent_await_rows (nil; barrier rendezvous; throws when failed/in action) |
-| `await-for` | implemented | concurrency.rs agent_await_rows (bool; deref-style timeout; throws when failed) |
+| `send-via` | implemented | concurrency.rs agent_send_shapes (custom Executor honored; nil wedges; non-executor CCEs; agent checkcast first) |
+| `executor` | implemented | concurrency.rs executor_value_semantics (port-added: fresh single-thread pool; no upstream constructor, interop out of scope; class/bases probed) |
+| `await` | implemented | concurrency.rs agent_await_rows (nil; barrier rendezvous; stuck/cleared/post-shutdown barriers hang; already-failed throws; in-action guarded) |
+| `await-for` | implemented | concurrency.rs agent_await_rows (bool; deadline bounds; mid-wait failure waits out to false) |
 | `agent` | implemented | concurrency.rs agent_ctor_rows (meta/validator/handler/mode options; validates initial) |
 | `agent-error` | implemented | concurrency.rs agent_error_mode_rows (latched throwable or nil) |
 | `restart-agent` | implemented | concurrency.rs agent_restart_rows (new state; clears; :clear-actions; validates) |
@@ -816,8 +817,8 @@ No slice on this branch: hard-never reasons stand alone, design-blocked rows nam
 | `selector` | implemented | core.clj macro over private selector-impl (rides the destructuring outlets); tests/zero_oos_s4b_macros.rs s4b_selector_rows |
 | `seq-to-map-for-destructuring` | implemented | destructure_expand.rs (assoc pairs; 1-elem first as-is; odd 3+ complex-path tail conj); tests/zero_oos_s4b_macros.rs s4b_seq_to_map_rows |
 | `seque` | implemented | tests/collmisc.rs seque_rows (feeder+queue; int-cast capacities) |
-| `set-agent-send-executor!` | implemented | cellstaps.rs exec_record_send (accept-and-record: any value stored + returned; dispatch stays on the fixed send pool — pinned divergences from e-routes/e-nil-send/e-non-exec) |
-| `set-agent-send-off-executor!` | implemented | cellstaps.rs exec_record_send_off (accept-and-record mirror of the send slot; fixed send-off pool) |
+| `set-agent-send-executor!` | implemented | cellstaps.rs exec_record_send (accept-and-record: any value stored + returned; sends ignore it — fenced, tracked by #96) |
+| `set-agent-send-off-executor!` | implemented | cellstaps.rs exec_record_send_off (accept-and-record mirror of the send slot; sends ignore it — fenced, tracked by #96) |
 | `short-array` | implemented | S15 arrays (#59): arrays.rs ctor_array (Numbers rules); tests/arrays.rs ctors_zero, ctors_seq, ctors_init, ctors_sizes (probes a-short-*, b-short-*, e-short-*) |
 | `shorts` | implemented | S15 arrays (#59): arrays.rs cast_array (exact [S checkcast); tests/arrays.rs casts_bytesq (probes d-shorts-*) |
 | `stream-into!` | implemented | S17 into_xform editable dispatch over stream pulls; jdkio.rs stream_into_rows (S17, #61) |

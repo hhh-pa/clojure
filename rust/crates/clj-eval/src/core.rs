@@ -2352,9 +2352,9 @@ fn str_of_realized(eval: &mut Evaluator, v: &Value) -> Result<String, NativeErro
         // Multimethods render the `toString` fallback (no methods
         // run for them, oracle `d-prefer`).
         Value::MultiFn(m) => clj_value::multifn_str(&m.name),
-        // Atoms, delays, futures, promises, agents, volatiles, and
-        // refs render their `toString` (`Class@hex`), never the
-        // `#object[…]` print form.
+        // Atoms, delays, futures, promises, agents, volatiles,
+        // refs, and executors render their `toString` (`Class@hex`),
+        // never the `#object[…]` print form.
         Value::Atom(_)
         | Value::Delay(_)
         | Value::Future(_)
@@ -2362,9 +2362,11 @@ fn str_of_realized(eval: &mut Evaluator, v: &Value) -> Result<String, NativeErro
         | Value::Agent(_)
         | Value::Volatile(_)
         // Arrays render `toString` too (`{desc}@{id}` — S15 oracle
-        // `d-str-int`); refs likewise (S19).
+        // `d-str-int`); refs likewise (S19); executors likewise
+        // (fence 3c).
         | Value::Array(_)
-        | Value::Ref(_) => clj_value::java_debug(&r),
+        | Value::Ref(_)
+        | Value::Executor(_) => clj_value::java_debug(&r),
         // Classes render `Class.toString` (`class `/`interface `
         // plus the name — shared with the print engine).
         Value::Class(c) => clj_value::class_java_debug(c),

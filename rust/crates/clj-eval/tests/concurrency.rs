@@ -83,6 +83,20 @@ fn class_of(eval: &mut Evaluator, src: &str) -> String {
     jvm_class_of(vs.last().unwrap())
 }
 
+/// Block until `(agent-error ag)` is non-nil (the failure landed):
+/// failures always land, so only a genuine hang trips the timeout
+/// (never await a racing latch — a stuck barrier hangs by design).
+fn wait_failed(eval: &mut Evaluator, ag: &str) {
+    let start = std::time::Instant::now();
+    while run_last(eval, &format!("(nil? (agent-error {ag}))")) != "false" {
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(10),
+            "failure never landed for {ag}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+}
+
 /// Assert the transient-style `#object` rendering with matching hex
 /// identities (per-process ids, never pinned literally).
 fn assert_object_shape(pr: &str, class: &str) {
@@ -1694,7 +1708,7 @@ fn agent_ctor_rows() {
     assert_eq!(
         run_last(
             &mut eval,
-            "(let [a (agent 0)] [(= a (send-via nil a inc)) (await a) @a])"
+            "(let [a (agent 0)] [(= a (send-via (executor) a inc)) (await a) @a])"
         ),
         "[true nil 1]"
     );
@@ -1757,13 +1771,15 @@ fn agent_error_mode_rows() {
         "[1 nil]"
     );
     // The default mode is `:fail` without a handler: the state parks
-    // and the error latches (the `await` throw below proves the latch
-    // landed before every later assertion runs).
+    // and the error latches (the landed latch orders every later
+    // assertion; awaiting a racing latch could hang on a stuck
+    // barrier instead of throwing).
     run(&mut eval, "(def s6c-fm (agent 0))");
     run(
         &mut eval,
         "(send s6c-fm (fn [s] (throw (ex-info \"boom\" {:n 1}))))",
     );
+    wait_failed(&mut eval, "s6c-fm");
     assert_eq!(
         run_last(
             &mut eval,
@@ -1829,6 +1845,7 @@ fn agent_error_mode_rows() {
         &mut eval,
         "(send s6c-fh (fn [s] (throw (ex-info \"x\" {}))))",
     );
+    wait_failed(&mut eval, "s6c-fh");
     assert_eq!(
         run_last(
             &mut eval,
@@ -1846,6 +1863,7 @@ fn agent_error_mode_rows() {
         &mut eval,
         "(send s6c-bg (fn [s] (throw (ex-info \"x\" {}))))",
     );
+    wait_failed(&mut eval, "s6c-bg");
     assert_eq!(
         run_last(
             &mut eval,
@@ -1869,6 +1887,7 @@ fn agent_restart_rows() {
         &mut eval,
         "(def s6c-ra (agent 0)) (def s6c-ra-gate (promise)) (send s6c-ra (fn [s] @s6c-ra-gate (throw (ex-info \"x\" {})))) (send s6c-ra inc) (deliver s6c-ra-gate :go)",
     );
+    wait_failed(&mut eval, "s6c-ra");
     assert_eq!(
         run_last(
             &mut eval,
@@ -1897,6 +1916,7 @@ fn agent_restart_rows() {
         &mut eval,
         "(def s6c-rc (agent 0)) (def s6c-rc-gate (promise)) (send s6c-rc (fn [s] @s6c-rc-gate (throw (ex-info \"x\" {})))) (send s6c-rc (fn [s] (swap! s6c-rclog conj :held) 99)) (deliver s6c-rc-gate :go)",
     );
+    wait_failed(&mut eval, "s6c-rc");
     assert_eq!(
         run_last(
             &mut eval,
@@ -1920,6 +1940,7 @@ fn agent_restart_rows() {
         &mut eval,
         "(def s6c-rk (agent 0)) (def s6c-rk-gate (promise)) (send s6c-rk (fn [s] @s6c-rk-gate (throw (ex-info \"x\" {})))) (send s6c-rk inc) (deliver s6c-rk-gate :go)",
     );
+    wait_failed(&mut eval, "s6c-rk");
     assert_eq!(
         run_last(
             &mut eval,
@@ -1939,6 +1960,7 @@ fn agent_restart_rows() {
         &mut eval,
         "(send s6c-rv (fn [s] (throw (ex-info \"x\" {}))))",
     );
+    wait_failed(&mut eval, "s6c-rv");
     assert_eq!(
         run_last(
             &mut eval,
@@ -2100,6 +2122,7 @@ fn agent_await_rows() {
         &mut eval,
         "(send s6c-awf (fn [s] (throw (ex-info \"x\" {}))))",
     );
+    wait_failed(&mut eval, "s6c-awf");
     assert_eq!(
         run_last(
             &mut eval,
@@ -2152,11 +2175,20 @@ fn agent_nested_discarded_on_failure() {
     let mut eval = boot();
     // A nested send from a failing action never runs — not even
     // after a restart without `:clear-actions` (the JVM discards
-    // the unreleased `nested` buffer on failure).
+    // the unreleased `nested` buffer on failure). The landed latch
+    // orders the restart (awaiting a racing latch could hang on the
+    // stuck barrier instead of throwing).
+    run(&mut eval, "(def s6c-nd-log (atom []))");
+    run(&mut eval, "(def s6c-nd (agent 0))");
+    run(
+        &mut eval,
+        "(send s6c-nd (fn [s] (send s6c-nd (fn [s2] (swap! s6c-nd-log conj :nested) s2)) (throw (ex-info \"boom\" {}))))",
+    );
+    wait_failed(&mut eval, "s6c-nd");
     assert_eq!(
         run_last(
             &mut eval,
-            "(let [log (atom []) a (agent 0)] (send a (fn [s] (send a (fn [s2] (swap! log conj :nested) s2)) (throw (ex-info \"boom\" {})))) (try (await a) (catch RuntimeException _ nil)) (restart-agent a 0) (await a) [@a @log])"
+            "(restart-agent s6c-nd 0) (await s6c-nd) [@s6c-nd @s6c-nd-log]"
         ),
         "[0 []]"
     );
@@ -2185,6 +2217,7 @@ fn agent_validator_rows() {
     // ... while `:fail` parks with the veto latched.
     run(&mut eval, "(def s6c-va (agent 0 :validator even?))");
     run(&mut eval, "(send s6c-va (fn [s] 3))");
+    wait_failed(&mut eval, "s6c-va");
     assert_eq!(
         run_last(
             &mut eval,
@@ -2376,8 +2409,13 @@ fn agent_send_shapes() {
         uncaught(&mut eval, "(send-via nil (agent 1))"),
         "clojure.lang.ArityException | Wrong number of args (2) passed to: clojure.core/send-via"
     );
-    // Extra args apply (`(apply f old args*)`); any executor value
-    // is accepted and ignored.
+    // The agent checkcast beats the executor checkcast (probed).
+    assert_eq!(
+        uncaught(&mut eval, "(send-via 42 1 inc)"),
+        cce("java.lang.Long", "clojure.lang.Agent")
+    );
+    // Extra args apply (`(apply f old args*)`); a non-executor
+    // `send-via` target is the JVM checkcast CCE (fence 3c).
     assert_eq!(
         run_last(
             &mut eval,
@@ -2393,16 +2431,21 @@ fn agent_send_shapes() {
         "3"
     );
     assert_eq!(
-        run_last(
+        uncaught(
             &mut eval,
-            "(let [a (agent 0)] (send-via :exec a + 1 2 3 4) (await a) @a)"
+            "(let [a (agent 0)] (send-via :exec a + 1 2 3 4))"
         ),
-        "10"
+        cce("clojure.lang.Keyword", "java.util.concurrent.Executor")
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(let [a (agent 0)] (send-via 42 a + 1 2 3 4))"),
+        cce("java.lang.Long", "java.util.concurrent.Executor")
     );
     // The fn is never validated eagerly: a bad fn fails inside the
     // action (the evaluator's call shapes, latched).
     run(&mut eval, "(def s6c-bf (agent 0))");
     run(&mut eval, "(send s6c-bf 5)");
+    wait_failed(&mut eval, "s6c-bf");
     assert_eq!(
         run_last(
             &mut eval,
@@ -2420,6 +2463,7 @@ fn agent_send_shapes() {
     );
     run(&mut eval, "(def s6c-nf (agent 0))");
     run(&mut eval, "(send s6c-nf nil)");
+    wait_failed(&mut eval, "s6c-nf");
     assert_eq!(
         run_last(
             &mut eval,
@@ -2468,6 +2512,7 @@ fn agent_panic_rows() {
     // The latched panic is an `Error` carrying the payload.
     run(&mut eval, "(def s6c-pf (agent 0))");
     run(&mut eval, "(send s6c-pf s6c-panic)");
+    wait_failed(&mut eval, "s6c-pf");
     assert_eq!(
         run_last(
             &mut eval,
@@ -2703,8 +2748,8 @@ fn agent_shutdown_returns_while_blocked() {
     assert_eq!(run_last(&mut eval, "(deref sh-started 8000 :t)"), ":yes");
     assert_eq!(run_last(&mut eval, "(shutdown-agents)"), "nil");
     // Draining still completes: release the gate and the worker
-    // publishes (heartbeat — post-shutdown `await` returns nil by
-    // the kept divergence, so poll instead).
+    // publishes (heartbeat — post-shutdown `await` would hang on
+    // its dropped barriers, like the JVM, so poll instead).
     run(&mut eval, "(deliver sh-g :go)");
     let start = std::time::Instant::now();
     while run_last(&mut eval, "@sh-a") != "1" {
@@ -3073,15 +3118,16 @@ fn shutdown_agents_from_future_body() {
 fn shutdown_agents_from_agent_action() {
     let mut eval = boot();
     // `shutdown-agents` inside an action returns at once
-    // (async drain, T1192 FX1): the action completes, and
-    // `await-for` still rendezvouses (the dropped barrier ends
-    // the wait).
+    // (async drain, T1192 FX1): the action completes, and the
+    // post-shutdown barrier drops — so `await-for` waits out its
+    // deadline to `false` (fence 3c: like the JVM's latch
+    // timeout, never the old early `true`).
     assert_eq!(
         run_last(
             &mut eval,
-            "(do (def s6-sha (agent 0)) (send s6-sha (fn [s] (shutdown-agents) (inc s))) [(await-for 8000 s6-sha) @s6-sha])"
+            "(do (def s6-sha (agent 0)) (send s6-sha (fn [s] (shutdown-agents) (inc s))) [(await-for 300 s6-sha) @s6-sha])"
         ),
-        "[true 1]"
+        "[false 1]"
     );
 }
 
@@ -3384,4 +3430,249 @@ fn print_dup_atom_throws_per_flag() {
         uncaught(&mut eval, "(binding [*print-dup* true] (pr-str (atom 1)))"),
         "java.lang.IllegalArgumentException | No method in multimethod 'print-dup' for dispatch value: \"clojure.lang.Atom\""
     );
+}
+
+#[test]
+fn executor_value_semantics() {
+    // Fence 3c: the `(executor)` kind — single-thread pools
+    // `send-via` honors. Identity equality, cell print shapes,
+    // no metadata.
+    let mut eval = boot();
+    let class = "java.util.concurrent.Executors$FinalizableDelegatedExecutorService";
+    assert_eq!(class_of(&mut eval, "(executor)"), class);
+    assert_object_shape(&run_last(&mut eval, "(executor)"), class);
+    let rendered = run_last(&mut eval, "(str (executor))");
+    assert!(
+        rendered.starts_with(&format!("\"{class}@")),
+        "bad executor str: {rendered}"
+    );
+    assert_eq!(run_last(&mut eval, "(let [e (executor)] (= e e))"), "true");
+    assert_eq!(run_last(&mut eval, "(= (executor) (executor))"), "false");
+    assert_eq!(
+        run_last(&mut eval, "(let [e (executor)] (= (hash e) (hash e)))"),
+        "true"
+    );
+    // `case` dispatches on `.hashCode` (covers the id row).
+    assert_eq!(
+        run_last(&mut eval, "(let [e (executor)] (case e 1 :one :other))"),
+        ":other"
+    );
+    assert_eq!(run_last(&mut eval, "(meta (executor))"), "nil");
+    assert_eq!(
+        uncaught(&mut eval, "(executor 1)"),
+        "clojure.lang.ArityException | Wrong number of args (1) passed to: clojure.core/executor"
+    );
+}
+
+#[test]
+fn send_via_custom_executor_survives_shutdown() {
+    // Fence 3c: custom executors never shut down (like the JVM —
+    // `shutdown-agents` touches the two pools only), so a
+    // post-shutdown custom send runs while pool sends drop.
+    let mut eval = boot();
+    run(
+        &mut eval,
+        "(def svx (executor)) (def sva (agent 0)) (def svp (promise))",
+    );
+    run(&mut eval, "(shutdown-agents)");
+    run(
+        &mut eval,
+        "(send-via svx sva (fn [s] (deliver svp :ran) 7))",
+    );
+    assert_eq!(run_last(&mut eval, "(deref svp 8000 :timeout)"), ":ran");
+    assert_eq!(run_last(&mut eval, "@sva"), "7");
+    // ... and a second send reuses the born-shut pools.
+    run(&mut eval, "(def svp2 (promise))");
+    run(
+        &mut eval,
+        "(send-via svx sva (fn [s] (deliver svp2 :ran2) 8))",
+    );
+    assert_eq!(run_last(&mut eval, "(deref svp2 8000 :timeout)"), ":ran2");
+    assert_eq!(run_last(&mut eval, "@sva"), "8");
+}
+
+#[test]
+fn send_via_nil_wedges_with_handler_npe() {
+    // Fence 3c: a nil executor sends (probed) — the execute attempt
+    // NPEs into the error handler and the head wedges at the queue
+    // front, so follow-ups never run.
+    let mut eval = boot();
+    run(&mut eval, "(def nvp (promise)) (def nve (atom nil))");
+    run(
+        &mut eval,
+        "(def nva (agent 0 :error-handler (fn [ag e] (reset! nve e) (deliver nvp :saw))))",
+    );
+    run(&mut eval, "(send-via nil nva (fn [s] :never))");
+    assert_eq!(run_last(&mut eval, "(deref nvp 8000 :timeout)"), ":saw");
+    assert_eq!(
+        class_of(&mut eval, "@nve"),
+        "java.lang.NullPointerException"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(ex-message @nve)"),
+        "\"Cannot invoke \\\"java.util.concurrent.Executor.execute(java.lang.Runnable)\\\" because \\\"this.exec\\\" is null\""
+    );
+    run(&mut eval, "(send nva (fn [s] :second))");
+    assert_eq!(run_last(&mut eval, "(await-for 200 nva)"), "false");
+    assert_eq!(run_last(&mut eval, "@nva"), "0");
+    // Without a handler the wedge is silent but identical.
+    run(&mut eval, "(def nvb (agent 0))");
+    run(&mut eval, "(send-via nil nvb (fn [s] :never))");
+    assert_eq!(run_last(&mut eval, "(await-for 200 nvb)"), "false");
+}
+
+#[test]
+fn await_fail_during_hangs_until_restart() {
+    // Fence 3c: an agent that fails after its barrier queued leaves
+    // the barrier stuck, so `await` hangs (like the JVM) — a plain
+    // restart resumes the barrier and the wait returns. No timing:
+    // the gate orders the queue, so the stuck wait is structural.
+    let mut eval = boot();
+    run(&mut eval, "(def hdg (promise)) (def hda (agent 0))");
+    run(
+        &mut eval,
+        "(send hda (fn [s] @hdg (throw (ex-info \"x\" {}))))",
+    );
+    run(&mut eval, "(def hdf (future (await hda) :waited))");
+    run(&mut eval, "(deliver hdg :go)");
+    wait_failed(&mut eval, "hda");
+    assert_eq!(run_last(&mut eval, "(realized? hdf)"), "false");
+    assert_eq!(run_last(&mut eval, "(restart-agent hda 0)"), "0");
+    assert_eq!(run_last(&mut eval, "(deref hdf 8000 :timeout)"), ":waited");
+}
+
+#[test]
+fn await_clear_actions_restart_hangs() {
+    // Fence 3c: a `:clear-actions` restart drops the barrier with
+    // the queue, so the wait never returns (like the JVM). The
+    // parked waiter is abandoned (its thread dies with the process).
+    let mut eval = boot();
+    run(&mut eval, "(def hcg (promise)) (def hca (agent 0))");
+    run(
+        &mut eval,
+        "(send hca (fn [s] @hcg (throw (ex-info \"x\" {}))))",
+    );
+    run(&mut eval, "(def hcf (future (await hca) :waited))");
+    run(&mut eval, "(deliver hcg :go)");
+    wait_failed(&mut eval, "hca");
+    assert_eq!(
+        run_last(&mut eval, "(restart-agent hca 0 :clear-actions true)"),
+        "0"
+    );
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    assert_eq!(run_last(&mut eval, "(realized? hcf)"), "false");
+}
+
+#[test]
+fn await_for_failure_waits_out_deadline() {
+    // Fence 3c: `await-for` waits through a mid-wait failure to
+    // `false` (like the JVM's latch timeout) instead of throwing.
+    // The failure lands mid-wait by construction (a delayed
+    // delivery — the barrier queues in microseconds, the failure
+    // hundreds of milliseconds later, the deadline seconds after
+    // that).
+    let mut eval = boot();
+    run(&mut eval, "(def fdg (promise)) (def fda (agent 0))");
+    run(
+        &mut eval,
+        "(send fda (fn [s] @fdg (throw (ex-info \"x\" {}))))",
+    );
+    run(
+        &mut eval,
+        "(future (deref (promise) 500 :t) (deliver fdg :go))",
+    );
+    assert_eq!(run_last(&mut eval, "(await-for 2000 fda)"), "false");
+    wait_failed(&mut eval, "fda");
+}
+
+#[test]
+fn custom_handover_survives_shutdown() {
+    // Fence 3c: a custom head queued behind a pool head still
+    // dispatches when the pool head completes post-shutdown (its
+    // executor never shut down).
+    let mut eval = boot();
+    run(
+        &mut eval,
+        "(def hog (promise)) (def hoe (executor)) (def hoa (agent 0)) (def hop (promise))",
+    );
+    run(&mut eval, "(send hoa (fn [s] @hog :pool-done))");
+    run(
+        &mut eval,
+        "(send-via hoe hoa (fn [s] (deliver hop :custom-ran) :custom-done))",
+    );
+    run(&mut eval, "(shutdown-agents)");
+    run(&mut eval, "(deliver hog :go)");
+    assert_eq!(
+        run_last(&mut eval, "(deref hop 8000 :timeout)"),
+        ":custom-ran"
+    );
+    assert_eq!(run_last(&mut eval, "@hoa"), ":custom-done");
+}
+
+#[test]
+fn restart_custom_resume_runs_post_shutdown() {
+    // Fence 3c: a held custom head resumes onto its own executor
+    // after a post-shutdown restart (like the JVM's re-`execute`).
+    let mut eval = boot();
+    run(
+        &mut eval,
+        "(def rse (executor)) (def rsa (agent 0)) (def rsp (promise)) (def rsg (promise))",
+    );
+    run(
+        &mut eval,
+        "(send-via rse rsa (fn [s] @rsg (throw (ex-info \"x\" {}))))",
+    );
+    run(
+        &mut eval,
+        "(send-via rse rsa (fn [s] (deliver rsp :resumed) 9))",
+    );
+    run(&mut eval, "(deliver rsg :go)");
+    wait_failed(&mut eval, "rsa");
+    run(&mut eval, "(shutdown-agents)");
+    assert_eq!(run_last(&mut eval, "(restart-agent rsa 0)"), "0");
+    assert_eq!(run_last(&mut eval, "(deref rsp 8000 :timeout)"), ":resumed");
+    assert_eq!(run_last(&mut eval, "@rsa"), "9");
+}
+
+#[test]
+fn restart_nil_head_rewedges() {
+    // Fence 3c: a held nil head re-wedges on resume (the JVM
+    // re-attempts the NPE'd `execute`): the handler fires again and
+    // the queue stays stuck. Explicit `:fail` (a bare handler
+    // defaults to `:continue`, like the JVM); the counting handler
+    // pins both notifications without any timing.
+    let mut eval = boot();
+    run(&mut eval, "(def rnc (atom 0)) (def rng (promise))");
+    run(
+        &mut eval,
+        "(def rna (agent 0 :error-handler (fn [ag e] (swap! rnc inc)) :error-mode :fail))",
+    );
+    run(
+        &mut eval,
+        "(send rna (fn [s] @rng (throw (ex-info \"x\" {}))))",
+    );
+    run(&mut eval, "(send-via nil rna (fn [s] :never))");
+    run(&mut eval, "(deliver rng :go)");
+    wait_failed(&mut eval, "rna");
+    assert_eq!(run_last(&mut eval, "@rnc"), "1");
+    assert_eq!(run_last(&mut eval, "(restart-agent rna 0)"), "0");
+    assert_eq!(run_last(&mut eval, "@rnc"), "2");
+    run(&mut eval, "(send rna (fn [s] :never2))");
+    assert_eq!(run_last(&mut eval, "(await-for 200 rna)"), "false");
+}
+
+#[test]
+fn await_post_shutdown_hangs() {
+    // Fence 3c: post-shutdown barriers drop, so `await` never
+    // returns (like the JVM — the old nil return was fenced). The
+    // waiter spawns before the shutdown (a post-shutdown `future`
+    // is rejected) and parks on a gate past it; the parked waiter
+    // is abandoned (its thread dies with the process).
+    let mut eval = boot();
+    run(&mut eval, "(def psg (promise)) (def psa (agent 0))");
+    run(&mut eval, "(def psf (future @psg (await psa) :waited))");
+    run(&mut eval, "(shutdown-agents)");
+    run(&mut eval, "(deliver psg :go)");
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    assert_eq!(run_last(&mut eval, "(realized? psf)"), "false");
 }

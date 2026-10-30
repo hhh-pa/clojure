@@ -19,6 +19,7 @@ mod class;
 mod compare;
 mod datareaders;
 mod delay;
+mod executor;
 mod extension;
 mod future;
 pub mod hasheq;
@@ -39,13 +40,14 @@ mod transient;
 mod value;
 mod volatile;
 
-pub use agent::{Agent, AgentAction, AgentInner, AgentPool, ErrorMode, QueuedAction};
+pub use agent::{Agent, AgentAction, AgentInner, AgentPool, ErrorMode, ExecTarget, QueuedAction};
 pub use array::{Array, ArrayDesc, ArrayStore, BaseType, MAX_ARRAY_BYTES};
 pub use atom::{Atom, AtomState};
 pub use class::ClassVal;
 pub use compare::{CompareError, compare};
 pub use datareaders::{TagError, validate_inst, validate_uuid};
 pub use delay::{Delay, DelayState};
+pub use executor::{Executor, ExecutorJob};
 pub use extension::{ExtensionValue, ThrowClass, Throwable, Unbound, Var, cce_message};
 pub use future::{Future, FutureOutcome, FutureState};
 pub use hasheq::{

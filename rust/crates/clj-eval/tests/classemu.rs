@@ -1614,6 +1614,27 @@ fn bases_supers_descriptors() {
     );
 }
 
+#[test]
+fn executor_ancestry_rows() {
+    // Fence 3c: `(executor)` values report the classic delegated
+    // service (ancestry probed from `newSingleThreadExecutor`).
+    let mut eval = boot();
+    assert_eq!(
+        run(
+            &mut eval,
+            "(let [c (class (executor))] (map #(.getName ^Class %) (bases c)))"
+        ),
+        "(\"java.util.concurrent.Executors$DelegatedExecutorService\")"
+    );
+    assert_eq!(
+        run(
+            &mut eval,
+            "(let [c (class (executor))] (sort (map #(.getName ^Class %) (supers c))))"
+        ),
+        "(\"java.lang.Object\" \"java.util.concurrent.Executor\" \"java.util.concurrent.ExecutorService\" \"java.util.concurrent.Executors$DelegatedExecutorService\")"
+    );
+}
+
 // c-rec-bases/supers/claimed, c-det-bases/claimed: record/deftype
 // implicit interfaces and claimed-first order. The oracle claims
 // the JDK `ISeq` in `c-det-claimed`; the port's interface position

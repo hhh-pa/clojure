@@ -286,6 +286,7 @@ fn ref_or_collection_type_name(v: &Value) -> &'static str {
         Value::Agent(_) => "Agent",
         Value::Volatile(_) => "Volatile",
         Value::Ref(_) => "Ref",
+        Value::Executor(_) => "Executor",
         _ => collection_type_name(v),
     }
 }

@@ -276,6 +276,15 @@ impl Evaluator {
         self.agent_system.pools_for_send()
     }
 
+    /// This lineage's agent pools for a custom-executor dispatch:
+    /// shutdown-blind (custom executors never shut down) —
+    /// born-shut when created post-shutdown.
+    pub(crate) fn agent_pools_for_custom(
+        &self,
+    ) -> Result<Arc<crate::concurrency::AgentPools>, NativeError> {
+        self.agent_system.pools_for_custom()
+    }
+
     /// Stop the agent pools (running actions complete; queued
     /// ones drop; new sends fail). Returns at once, like the
     /// JVM — draining happens on the workers; the exit join (see
