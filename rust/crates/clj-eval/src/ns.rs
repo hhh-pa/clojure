@@ -16,7 +16,7 @@
 
 use std::sync::Arc;
 
-use clj_reader::ReaderError;
+use clj_reader::{ReaderError, Span};
 use clj_value::{
     Keyword, List, Map, PrintOpts, Ref, Set, SortSpec, Symbol, ThrowClass, Throwable, Value, Var,
     Vector, new_map, new_set, pr_to_string, seq_vec,
@@ -24,12 +24,12 @@ use clj_value::{
 
 use crate::concurrency::DEREF_NIL;
 use crate::core::cce_err;
-use crate::env::{Namespace, SharedRegistry};
+use crate::env::{Env, Namespace, SharedRegistry};
 use crate::error::{NativeError, Signal, jvm_class_of, site_of};
 use crate::eval::{Evaluator, SourceError};
-use crate::expr::NsClause;
+use crate::expr::{Expr, NsClause};
 use crate::ext::{NsHandle, as_ns};
-use crate::stm::tx_deref;
+use crate::stm::{eval_sync, tx_deref};
 
 /// `clojure.lang.Symbol`, the cast target for namespace arguments.
 pub(crate) const SYMBOL_CLASS: &str = "clojure.lang.Symbol";
@@ -1077,33 +1077,41 @@ fn libs_set(eval: &mut Evaluator) -> Result<Set, NativeError> {
 
 /// Mark a lib loaded, exactly like the JVM's `load-one`:
 /// `(dosync (commute *loaded-libs* conj lib))` (core.clj).
-/// Fully qualified, so no refers are needed (`var` is the
-/// unchecked special form — a value read of the private var
-/// would trip the cross-ns publicity check); `dosync` joins
-/// an enclosing transaction instead of nesting.
+/// `dosync` joins an enclosing transaction instead of nesting.
 fn mark_loaded(eval: &mut Evaluator, lib: &Symbol) -> Result<(), NativeError> {
-    mark_member(eval, &format!("'{lib}"))
+    mark_member(eval, &Value::Symbol(lib.clone()))
 }
 
-/// Re-mark one `load-all` union member through the `load-one`
-/// commute form: symbols quote as `'{lib}`, `nil` conjoins as
-/// `nil` (`Util.compare` says nil is comparison-safe, so loaded
-/// code can share the blank ref with a nil commute — never a
-/// panic). Anything else is unreachable: reaching the union means
-/// the lib's symbol mark committed, and only symbols and nil
-/// compare clean with a symbol under the natural order — an
-/// incomparable member fails its own commute first, failing the
-/// load before the union (callers skip non-symbol non-nil
-/// members rather than assuming totality).
-fn mark_member(eval: &mut Evaluator, arg: &str) -> Result<(), NativeError> {
-    let source = eval.source().to_owned();
-    let form = format!(
-        "(clojure.core/dosync (clojure.core/commute (clojure.core/var-get (var clojure.core/*loaded-libs*)) clojure.core/conj {arg}))"
-    );
-    match eval.eval_source(&form) {
-        Ok(_) => Ok(()),
-        Err(e) => Err(source_to_native(eval, &source, e)),
-    }
+/// Conjoin one member into `*loaded-libs*` through the real `sync`
+/// machinery: `(commute REF conj MEMBER)` built as expressions and
+/// run through `eval_sync` (join-or-begin plus retries — exactly
+/// what the `dosync` form expands to, minus the source round-trip;
+/// the member passes at the Rust level, so every value conjoins —
+/// nothing is ever dropped or left unrenderable). Union-or-throw,
+/// like the JVM's `reduce1 conj`: symbols and nil commit, while an
+/// incomparable exotic (reachable only via blank-ref `ref-set`
+/// sabotage, which skips the commute's own comparison) fails the
+/// load with the comparator's CCE. Marks commit one member per
+/// transaction, so a sabotaged union can land earlier members
+/// before the CCE aborts the load (the JVM's single union commute
+/// is all-or-nothing — accepted narrowing, sabotage-only).
+fn mark_member(eval: &mut Evaluator, member: &Value) -> Result<(), NativeError> {
+    let commute = deref_core(eval, "commute");
+    let conj = deref_core(eval, "conj");
+    let reff = deref_core(eval, "*loaded-libs*");
+    let call = Expr::Invoke {
+        head: Box::new(Expr::Literal(commute)),
+        args: vec![
+            Expr::Literal(reff),
+            Expr::Literal(conj),
+            Expr::Literal(member.clone()),
+        ],
+        span: Span::new(1, 1),
+    };
+    let env = Env::new();
+    eval_sync(eval, std::slice::from_ref(&call), &env)
+        .map(|_| ())
+        .map_err(signal_to_native)
 }
 
 /// `(name x)`: strings pass through, symbols and keywords give their
@@ -1313,12 +1321,7 @@ fn load_all(eval: &mut Evaluator, lib: &Symbol, need_ns: bool) -> Result<(), Nat
     eval.pop_bindings(depth);
     out?;
     for m in new.unwrap_or(new_set()).iter() {
-        if let Value::Symbol(s) = m.clone() {
-            mark_loaded(eval, &s)?;
-        } else if *m == Value::Nil {
-            mark_member(eval, "nil")?;
-        }
-        // Else unreachable (see `mark_member`): skip, never panic.
+        mark_member(eval, m)?;
     }
     Ok(())
 }
