@@ -847,6 +847,36 @@ fn reload_all_nil_member_no_panic() {
 }
 
 #[test]
+fn require_in_dosync_abort_rolls_back() {
+    // Fence 3a N2: `require` joins the enclosing `dosync` (no
+    // nesting failure), and an aborted transaction rolls the mark
+    // back — the headline fix, pinned.
+    let fx = Fixture::new("txreq");
+    fx.write("txjoin.clj", "(clojure.core/in-ns 'txjoin)\n(def j 1)\n");
+    fx.write("txabort.clj", "(clojure.core/in-ns 'txabort)\n(def a 1)\n");
+    let mut eval = boot();
+    assert_eq!(
+        run_last(&mut eval, &fx.within("(dosync (require 'txjoin) :ok)")),
+        ":ok"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(contains? (loaded-libs) 'txjoin)"),
+        "true"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            &fx.within("(try (dosync (require 'txabort) (throw (ex-info \"boom\" {}))) :committed (catch clojure.lang.ExceptionInfo _ :caught))")
+        ),
+        ":caught"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(contains? (loaded-libs) 'txabort)"),
+        "false"
+    );
+}
+
+#[test]
 fn eval_bare_macro_arity() {
     let mut eval = boot();
     // Bare: no `CompilerException` wrapper, no cause.
