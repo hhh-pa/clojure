@@ -190,7 +190,9 @@ fn read_edn_string_rows() {
         ),
         "{:a 1}"
     );
-    // Tagged literals resolve through the default readers.
+    // A6 divergence: tagged literals resolve through the
+    // default readers (upstream `clojure.edn` would yield tagged
+    // literals; unknown tags throw here).
     assert_eq!(
         run(
             &mut eval,
@@ -203,8 +205,9 @@ fn read_edn_string_rows() {
 #[test]
 fn read_edn_string_multi_throws() {
     // Upstream edn.clj `read-edn`: a second value throws ex-info
-    // naming the path (the inner "single value" text survives the
-    // `io-err` wrap, so the port keeps it verbatim).
+    // naming the path. Port-canonical: the port keeps the inner
+    // "single value" text; upstream's observable wraps it once
+    // more ("Error reading edn. ..." via the `io-err` re-wrap).
     let mut eval = tools_eval();
     let cwd = std::env::current_dir()
         .unwrap()
@@ -1641,31 +1644,53 @@ fn git_lib_location_defers() {
 
 #[test]
 fn lib_location_dispatch_rows() {
-    // Dispatch keys on the coord kind (`:local/root` -> `:local`,
-    // `:mvn/version` -> `:mvn`, git keys -> `:git`); mixed-kind
-    // coords take the first match (pinned, port-canonical);
-    // unknown/non-map coords throw `throw-bad-coord`-shaped
-    // ex-infos (extensions.clj parity).
+    // Dispatch is upstream-exact (extensions.clj `coord-type`
+    // parity): kind keys incl. legacy `:sha`; zero matches throw
+    // `Coord of unknown type` with `{:coord}`-only data; two
+    // matches throw `Coord type is ambiguous` the same way.
+    // Non-map coords take the `throw-bad-coord` shape.
     let mut eval = tools_eval();
-    // Mixed kinds: local wins over mvn and git.
+    // Mixed kinds throw ambiguity (no first-match).
     assert_eq!(
-        run(
+        uncaught(
             &mut eval,
             "(ext/lib-location 'my/lib {:local/root \"/l\" :mvn/version \"1\"} nil)"
         ),
-        "{:base \"/l\", :path \"\", :type :local}"
+        "clojure.lang.ExceptionInfo | Coord type is ambiguous: {:local/root \"/l\", :mvn/version \"1\"}"
     );
-    // Unknown map coords name the lib and coord.
+    assert_eq!(
+        run(
+            &mut eval,
+            "(try (ext/lib-location 'my/lib {:local/root \"/l\" :mvn/version \"1\"} nil) \
+              (catch clojure.lang.ExceptionInfo e (ex-data e)))"
+        ),
+        "{:coord {:local/root \"/l\", :mvn/version \"1\"}}"
+    );
+    // Legacy `:sha` dispatches to `:git` (upstream key set).
+    assert_eq!(
+        uncaught(&mut eval, "(ext/lib-location 'my/lib {:sha \"abc\"} nil)"),
+        "clojure.lang.ExceptionInfo | Cannot resolve git coordinate for my/lib: deferred to the git slice"
+    );
+    // Unknown map coords throw from dispatch (upstream text,
+    // `{:coord}`-only data — no lib).
     assert_eq!(
         uncaught(&mut eval, "(ext/lib-location 'my/lib {} nil)"),
-        "clojure.lang.ExceptionInfo | Coord of unknown type for my/lib: {}"
+        "clojure.lang.ExceptionInfo | Coord of unknown type: {}"
     );
     assert_eq!(
         uncaught(
             &mut eval,
             "(ext/lib-location 'my/lib {:deps/manifest :deps} nil)"
         ),
-        "clojure.lang.ExceptionInfo | Coord of unknown type for my/lib: #:deps{:manifest :deps}"
+        "clojure.lang.ExceptionInfo | Coord of unknown type: #:deps{:manifest :deps}"
+    );
+    assert_eq!(
+        run(
+            &mut eval,
+            "(try (ext/lib-location 'my/lib {} nil) \
+              (catch clojure.lang.ExceptionInfo e (ex-data e)))"
+        ),
+        "{:coord {}}"
     );
     // Non-map coords (incl. nil) take the bad-coordinate shape.
     assert_eq!(
@@ -1705,6 +1730,20 @@ fn restore_env(name: &str, saved: Option<String>) {
     }
 }
 
+/// Panic-safe env restore for the serial test: dropping the
+/// guard re-applies the entry saves even if an assert unwinds.
+struct EnvGuard {
+    saved: Vec<(&'static str, Option<String>)>,
+}
+
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        for (name, value) in self.saved.drain(..) {
+            restore_env(name, value);
+        }
+    }
+}
+
 /// Set an env var for one precedence row.
 fn set_env(name: &str, val: &str) {
     // SAFETY: single-threaded within this test; restored on exit.
@@ -1730,6 +1769,16 @@ fn user_config_dir_serial() {
     let saved_xdg = save_env("XDG_CONFIG_HOME");
     let saved_home = save_env("HOME");
     let saved_profile = save_env("USERPROFILE");
+    // Backstop: restores the entry saves even on panic unwind
+    // (the explicit restores at the end stay — idempotent).
+    let _env_guard = EnvGuard {
+        saved: vec![
+            ("CLJ_CONFIG", saved_clj.clone()),
+            ("XDG_CONFIG_HOME", saved_xdg.clone()),
+            ("HOME", saved_home.clone()),
+            ("USERPROFILE", saved_profile.clone()),
+        ],
+    };
     let mut eval = tools_eval();
     // `CLJ_CONFIG` wins over everything.
     set_env("CLJ_CONFIG", "/cfg/clj");

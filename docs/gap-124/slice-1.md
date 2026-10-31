@@ -2,7 +2,7 @@
 
 Upstream oracle (text only, never executed): `org.clojure/tools.deps.edn`
 `0.9.57` (`clojure/tools/deps/edn.clj`, `specs.clj`, `util/dir.clj`) and
-`org.clojure/tools.deps` `0.12.635` (`extensions/local.clj`), read from
+`org.clojure/tools.deps` `0.31.1646` (`extensions.clj`, `extensions/local.clj`), read from
 Maven Central jars. No JDK/JVM anywhere in this slice.
 
 No specification/TDD/BDD skills are installed in this workspace, so this
@@ -56,7 +56,7 @@ later slices; this slice ends at `:local lib-location`.
 
 | fn | note |
 |---|---|
-| `lib-location` defmulti | dispatch on coord kind (`:local/root`→`:local`, `:mvn/version`→`:mvn`, `:git/url`/sha/tag→`:git`) |
+| `lib-location` defmulti | upstream-exact dispatch: kind keys + legacy `:sha`; 0 matches → `Coord of unknown type`, 2+ → `Coord type is ambiguous` (both `{:coord}`-only, thrown from dispatch) |
 | `:local` method | faithful: `{:base root :path "" :type :local}` |
 | `:mvn` method | **refusal** (redesign, permanent): ex-info naming the lib + "source-only" rationale (R1) |
 | `:git` method | **not-yet**: ex-info "deferred to the git slice" (temporary) |
@@ -72,9 +72,8 @@ upstream gets this from the JDK; documented as such, never in `clojure.core`):
 | `current-dir` | process cwd string |
 | `getenv` | env var string or nil |
 
-Drive-by core addition: `reduce-kv` (faithful upstream `clojure.core`
-`reduce-kv`, incl. `reduced` short-circuit) — a real upstream core fn the
-port lacks; the tools ns needs it. Local helpers inside the tools ns only:
+`reduce-kv` turned out to already exist faithfully in `core.clj`
+(tests only — `core.clj` untouched). Local helpers inside the tools ns only:
 `join-space` (`clojure.string` is unported), `canonicalize-walk` (A5),
 `as->` stays (already a port macro).
 
@@ -96,6 +95,16 @@ port lacks; the tools ns needs it. Local helpers inside the tools ns only:
 - A5 `canonicalize-walk` recurses maps/vectors only (≡ `postwalk` on valid
   `deps.edn`: the grammar has no maps under other nodes; `read-deps`
   validates before canonicalizing, so invalid shapes never reach it).
+- A6 Tag handling is `read-string`, not `clojure.edn`: unknown tags
+  throw and `#inst`/`#uuid` construct where upstream yields tagged
+  literals (a true edn tag-default is optional later work; real
+  `deps.edn` files rarely carry tags).
+- Port-fixes-oracle: the port threads `:path` through `read-deps`
+  errors; upstream drops it (opts map passed positionally into
+  non-spliced `io-err`) and always reports `"unknown path"`.
+  Related: the port keeps the inner single-value text while
+  upstream's observable wraps it (`"Error reading edn. ..."`),
+  pinned port-canonical per R3.
 
 ### 2.3 Design decisions and refusals
 

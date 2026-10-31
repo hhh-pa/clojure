@@ -15,8 +15,11 @@
 //! loaded — never referred into `user`, never in `clojure.core`.
 //!
 //! `read-edn-string` mirrors `clojure.edn/read` over a whole
-//! string: exactly one value (blank answers nil, a second value
-//! throws), read errors throw, and every failure is an ex-info
+//! string (A6: tag handling is `read-string`, not `clojure.edn` —
+//! unknown tags throw and `#inst`/`#uuid` construct instead of
+//! yielding tagged literals): exactly one value (blank answers
+//! nil, a second value throws), read errors throw, and every
+//! failure is an ex-info
 //! carrying `:path` (`io-err` parity: the path absolutizes
 //! `getAbsolutePath`-style — joined onto the cwd, never
 //! normalized — and a missing path reports `"unknown path"`).
@@ -42,8 +45,10 @@ pub(crate) const PORT_NS: &str = "clojure.tools.deps.util.port";
 /// when no `:path` opt arrives).
 const UNKNOWN_PATH: &str = "unknown path";
 
-/// The single-value refusal (upstream `read-edn` inner text,
-/// verbatim — it is tools.deps wording, not reader wording).
+/// The single-value refusal (upstream `read-edn` inner text).
+/// Port-canonical: upstream's observable wraps it once more
+/// (`"Error reading edn. ..."` via the `io-err` re-wrap); the
+/// port keeps the inner text + path (R3 message-text rule).
 const SINGLE_VALUE: &str = "Expected edn to contain a single value.";
 
 /// A `read-edn-string` failure: ex-info naming the absolute path,
@@ -75,6 +80,9 @@ fn edn_abs_path(path: Option<&str>) -> String {
 /// (current ns, aliases, data-reader snapshot) with read-cond
 /// denied and read-eval forced off (clojure.edn parity — deps.edn
 /// never evaluates, and the entry gates stay unconsulted).
+/// A6: full data-reader layers stay installed, so unknown tags
+/// throw and `#inst`/`#uuid` construct where `clojure.edn`
+/// would yield tagged literals.
 fn edn_reader_opts(eval: &mut Evaluator) -> Result<ReaderOpts, NativeError> {
     let cur = eval.current_ns_name();
     let mut opts = ReaderOpts {

@@ -82,7 +82,7 @@
 
 (defn- exclusions-problem
   [xs lib]
-  (cond (not (or (sequential? xs) (set? xs)))
+  (cond (not (sequential? xs))
         (str "invalid :exclusions for " lib ": expected a collection of lib symbols, found " (pr-str xs))
         (not (every? symbol? xs))
         (str "invalid :exclusions for " lib ": expected lib symbols, found " (pr-str xs))
@@ -337,8 +337,9 @@
 ;;;; Dep chain lookups
 
 (defn root-deps
-  "Read the root deps.edn resource from the classpath at the path
-  clojure/tools/deps/deps.edn"
+  "Return the embedded port root (`{}`): upstream reads the root
+  deps.edn resource from the classpath, but the port root carries
+  no defaults (D1 — the binary IS the runtime)."
   []
   {})
 
