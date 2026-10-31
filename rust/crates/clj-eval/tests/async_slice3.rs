@@ -949,6 +949,11 @@ fn alt_block_basics() {
         uncaught(&mut eval, "(a/alt!! :default :x)"),
         "java.lang.AssertionError | Assert failed: alts must have at least one channel operation\n(pos? (count ports))"
     );
+    // An empty op vector contributes no ports (same assert).
+    assert_eq!(
+        uncaught(&mut eval, "(a/alt!! [] :x :default :d)"),
+        "java.lang.AssertionError | Assert failed: alts must have at least one channel operation\n(pos? (count ports))"
+    );
     // Short put vectors destructure leniently (a missing val is
     // nil — the multi-op asserts it, like upstream's EXP1V).
     for src in [
