@@ -2428,15 +2428,18 @@ fn native_classp(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeE
 /// uris, map entries, tagged literals, reader conditionals, and
 /// primitive vectors compare minted ids; collections compare
 /// their minted ids; extensions / host values / multimethods /
-/// regexes compare allocations; classes compare names; vars,
-/// unbounds, throwables, transients, atoms, delays, futures,
-/// promises, agents, volatiles, and refs compare through `=`
-/// (their equality already IS cell identity).
+/// regexes / tower numbers compare allocations; classes compare
+/// names; vars, unbounds, throwables, transients, atoms, delays,
+/// futures, promises, agents, volatiles, and refs compare
+/// through `=` (their equality already IS cell identity).
 ///
-/// Deferred (post-tower, per the (2)↔(4) sequencing):
-/// `BigInt`/`BigInteger`/`BigDec`/`Ratio` still compare by value
-/// here; the Arc-box + `BigDecimal.valueOf` canonicalization lands
-/// with the tower rebase. Cross-kind pairs are never identical.
+/// Tower numbers (`BigInt`/`BigInteger`/`BigDec`/`Ratio`) are
+/// `Arc::ptr_eq` per kind (fence 4a-big, oracle P5):
+/// `BigInt`/`BigInteger`/`Ratio` box fresh per construction,
+/// `BigDec` literals box fresh while arithmetic results share
+/// `ZERO_THROUGH_TEN` (scale-0 `0..=10`) through
+/// `bigdec_result` — the JVM's `BigDecimal.valueOf` rule.
+/// Cross-kind pairs are never identical.
 pub(crate) fn identical_values(a: &Value, b: &Value) -> bool {
     match (a, b) {
         // The `Long` cache (`LongCache`, -128..127): inside, the
@@ -2475,17 +2478,21 @@ fn identical_heap(a: &Value, b: &Value) -> bool {
     }
 }
 
-/// `identical?` for the allocation/name kinds (fence 4a): extensions
-/// / host values / multimethods / regexes compare allocations,
-/// classes compare names, and every other same-kind pair compares
-/// like `=` (vars, unbounds, throwables, transients, and all cells
-/// compare cell identity through `=`; the deferred big kinds
-/// compare by value until the tower rebase).
+/// `identical?` for the allocation/name kinds (fence 4a):
+/// extensions / host values / multimethods / regexes / tower
+/// numbers compare allocations, classes compare names, and
+/// every other same-kind pair compares like `=` (vars,
+/// unbounds, throwables, transients, and all cells compare
+/// cell identity through `=`).
 fn identical_alloc(a: &Value, b: &Value) -> bool {
     match (a, b) {
         (Value::Extension(x), Value::Extension(y)) => Arc::ptr_eq(x, y),
         (Value::HostType(x), Value::HostType(y)) => Arc::ptr_eq(x, y),
         (Value::MultiFn(x), Value::MultiFn(y)) => Arc::ptr_eq(x, y),
+        (Value::BigInt(x), Value::BigInt(y)) => Arc::ptr_eq(x, y),
+        (Value::BigInteger(x), Value::BigInteger(y)) => Arc::ptr_eq(x, y),
+        (Value::BigDec(x), Value::BigDec(y)) => Arc::ptr_eq(x, y),
+        (Value::Ratio(x), Value::Ratio(y)) => Arc::ptr_eq(x, y),
         (Value::Class(x), Value::Class(y)) => x.name() == y.name(),
         _ => std::mem::discriminant(a) == std::mem::discriminant(b) && a == b,
     }

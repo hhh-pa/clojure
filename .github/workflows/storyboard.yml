@@ -2,16 +2,32 @@
 # storyboard) in step with issues/PRs, so nobody hand-edits the
 # board for mechanical moves.
 #
-# Behavior:
-#   opened/reopened (issue or PR)  -> ensure on board, Status=Todo
-#   labeled session:<id>            -> Status=In Progress, Session=<id>
-#   unlabeled (last session:* gone) -> Status=Todo, Session cleared
-#   closed (incl. merged)           -> Status=Done
+# Design (schedule reconciliation, not events): the original
+# event-driven shape (issues/pull_request_target labeled/closed,
+# #139) never fired — zero runs from any declared trigger across
+# label probes, issue closes, and PR merges, while every push
+# repo-wide produced a zero-job failed run for the file. Two
+# stacked causes, both fixed here: (1) the `secrets` context in
+# job-level `if:` invalidates the whole file (GitHub:
+# "Unrecognized named-value"), so the secret gates inside the
+# script (#144); (2) `gh api -f` variables fail to bind
+# `singleSelectOptionId` ("Type mismatch ... (ID! / String)"),
+# so every GraphQL value interpolates inline instead (hand-proven
+# before automating; simulation also scoped ADD to open-only).
+#
+# Each pass does two things. ADD: OPEN issues/PRs missing from
+# the board get items (open-only: no closed-history backfill).
+# RECONCILE: every content item converges to its desired state:
+#   closed (incl. merged)           -> Status=Done (Session kept)
+#   open + session:<id> label        -> Status=In Progress, Session=<id>
+#   open + no session:* label        -> Status=Todo, Session cleared
+# Draft cards, assignees, Labels rollup, and Slice-status are
+# untouched. Only drifts are written.
 #
 # Claim protocol compatibility: sessions label PRs `session:<id>`
-# and post CLAIM on #88; this workflow turns the label into the
-# board move. YIELD = remove your label (board drops to Todo).
-# Draft cards, assignees, and the Slice-status field are untouched.
+# and post CLAIM on #88; the board follows within 15 minutes (or
+# run the workflow by hand). YIELD = remove your label (board
+# drops to Todo at the next pass).
 #
 # Auth: GITHUB_TOKEN cannot write org ProjectsV2, so this needs a
 # repo Actions secret PROJECT_TOKEN (classic PAT, `project` scope
@@ -28,107 +44,171 @@
 name: storyboard
 
 on:
-  issues:
-    types: [opened, closed, reopened, labeled, unlabeled]
-  pull_request_target:
-    types: [opened, closed, reopened, labeled, unlabeled]
+  schedule:
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
 
-# pull_request_target runs the BASE revision (safe for label-only
-# logic) and only needs read access; project writes use PAT.
+# Read-only except the PAT-authed project writes below.
 permissions:
   contents: read
 
 jobs:
   sync:
-    if: ${{ secrets.PROJECT_TOKEN != '' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
-      - name: Sync board item
+      - name: Reconcile board items
         env:
           GH_TOKEN: ${{ secrets.PROJECT_TOKEN }}
-          EVENT: ${{ github.event_name }}
-          ACTION: ${{ github.event.action }}
-          LABEL: ${{ github.event.label.name }}
         run: |
           set -euo pipefail
+          # No job/step `if:` on secrets: GitHub's parser rejects
+          # the secrets context there ("Unrecognized named-value"),
+          # which invalidates the whole file (dead triggers +
+          # zero-job push failures) — so gate inside the script.
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo '::warning::PROJECT_TOKEN secret not set; storyboard sync skipped (see storyboard.yml header).'
+            exit 0
+          fi
           proj=PVT_kwDOEkzkc84Bo8xa
           status_field=PVTSSF_lADOEkzkc84Bo8xazhnahX8
           session_field=PVTF_lADOEkzkc84Bo8xazhnjDYQ
           opt_todo=f75ad846
           opt_prog=47fc9ee4
           opt_done=98236657
+          repo=hhh-pa/clojure
 
-          if [ "$EVENT" = issues ]; then
-            num=${{ github.event.issue.number }}
-            node=${{ github.event.issue.node_id }}
-            labels=${{ join(github.event.issue.labels.*.name, ' ') }}
-          else
-            num=${{ github.event.pull_request.number }}
-            node=${{ github.event.pull_request.node_id }}
-            labels=${{ join(github.event.pull_request.labels.*.name, ' ') }}
-          fi
-
-          # Upsert: find the board item for this issue/PR, else add it.
-          # (Board holds ~70 items; first:100 has headroom. Revisit if
-          # it ever approaches 100 — a miss would double-add.)
-          item=$(NODE="$node" gh api graphql -f query='
-            query($p:ID!){
-              node(id:$p){... on ProjectV2{
-                items(first:100){nodes{id content{
-                  ... on Issue{id} ... on PullRequest{id}}}}}}}' \
-            -f p="$proj" \
-            --jq '[.data.node.items.nodes[]
-                   | select(.content.id==env.NODE) | .id] | first // empty')
-          if [ -z "$item" ]; then
-            item=$(gh api graphql -f query='
-              mutation($p:ID!,$c:ID!){
-                addProjectV2ItemById(input:{projectId:$p,contentId:$c}){
-                  item{id}}}' \
-              -f p="$proj" -f c="$node" --jq .data.addProjectV2ItemById.item.id)
-            echo "Added #$num as $item"
-          fi
-
-          set_status() {
-            gh api graphql -f query='
-              mutation($p:ID!,$i:ID!,$f:ID!,$o:ID!){
-                updateProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i,
-                  fieldId:$f,value:{singleSelectOptionId:$o}}){clientMutationId}}' \
-              -f p="$proj" -f i="$item" -f f="$status_field" -f o="$1" >/dev/null
+          # All GraphQL values interpolate inline: `gh api -f`
+          # variables fail to bind singleSelectOptionId.
+          gql_items() {
+            gh api graphql -f query="query{ node(id:\"$proj\"){... on ProjectV2{
+              items(first:100){nodes{id
+                content{__typename
+                  ... on Issue{number closed labels(first:30){nodes{name}}}}
+                  ... on PullRequest{number closed labels(first:30){nodes{name}}}}
+                fieldValues(first:10){nodes{__typename
+                  ... on ProjectV2ItemFieldSingleSelectValue{optionId
+                    field{... on ProjectV2SingleSelectField{id}}}
+                  ... on ProjectV2ItemFieldTextValue{text
+                    field{... on ProjectV2Field{id}}}}}}}}}"
           }
-          set_session() {
-            gh api graphql -f query='
-              mutation($p:ID!,$i:ID!,$f:ID!,$t:String!){
-                updateProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i,
-                  fieldId:$f,value:{text:$t}}){clientMutationId}}' \
-              -f p="$proj" -f i="$item" -f f="$session_field" -f t="$1" >/dev/null
+          gql_add() { # $1 = content node id -> item id
+            gh api graphql -f query="mutation{ addProjectV2ItemById(
+              input:{projectId:\"$proj\",contentId:\"$1\"}){
+              item{id}}}" --jq .data.addProjectV2ItemById.item.id
+          }
+          gql_set_status() { # $1 = item, $2 = option id
+            gh api graphql -f query="mutation{ updateProjectV2ItemFieldValue(
+              input:{projectId:\"$proj\",itemId:\"$1\",fieldId:\"$status_field\",
+              value:{singleSelectOptionId:\"$2\"}}){clientMutationId}}" >/dev/null
+          }
+          gql_set_session() { # $1 = item, $2 = text
+            gh api graphql -f query="mutation{ updateProjectV2ItemFieldValue(
+              input:{projectId:\"$proj\",itemId:\"$1\",fieldId:\"$session_field\",
+              value:{text:\"$2\"}}){clientMutationId}}" >/dev/null
           }
 
-          case "$ACTION" in
-            opened|reopened)
-              set_status "$opt_todo"; echo "#$num -> Todo";;
-            closed)
-              set_status "$opt_done"; echo "#$num -> Done";;
-            labeled)
-              case "$LABEL" in
-                session:*)
-                  set_status "$opt_prog"
-                  set_session "${LABEL#session:}"
-                  echo "#$num -> In Progress (${LABEL#session:})";;
-                *) echo "label $LABEL ignored";;
-              esac;;
-            unlabeled)
-              # Only drop back when NO session label remains.
-              if printf '%s' "$labels" | tr ' ' '\n' | grep -q '^session:'; then
-                echo "session label remains; no change"
+          # ADD pass: OPEN issues/PRs missing from the board get
+          # items. Open-only is deliberate: backfilling closed
+          # history would 2x the board past first:100 (simulated:
+          # 65 stale misses vs 1 live one). Closed items already
+          # on the board flip to Done in the reconcile below.
+          have=$(gql_items | jq -r '[.data.node.items.nodes[]
+            | .content.number // empty] | map(tostring) | join(" ")')
+          add_missing() { # $1 = kind for log, $2 = REST endpoint
+            # (Issues endpoint includes PRs: keep pure issues
+            # here; PRs come from the pulls endpoint below.)
+            gh api "repos/$repo/$2" --paginate -X GET -f state=open -f per_page=100 \
+              --jq '.[] | select(.pull_request == null)
+                    | [.number, .state, .node_id,
+                       ([.labels[].name] | join(" "))] | @tsv' |
+            while IFS=$'\t' read -r num state node labels; do
+              case " $have " in *" $num "*) continue;; esac
+              item=$(gql_add "$node")
+              session=$(printf '%s' "$labels" | tr ' ' '\n' |
+                        grep '^session:' | head -1 | cut -d: -f2-)
+              if [ "$state" = closed ]; then
+                gql_set_status "$item" "$opt_done"
+              elif [ -n "$session" ]; then
+                gql_set_status "$item" "$opt_prog"
+                gql_set_session "$item" "$session"
               else
-                set_status "$opt_todo"; set_session ""
-                echo "#$num -> Todo (claim released)"
-              fi;;
-          esac
+                gql_set_status "$item" "$opt_todo"
+              fi
+              echo "added $1 #$num"
+            done
+          }
+          add_missing issue issues
+          have_prs=$(gql_items | jq -r '[.data.node.items.nodes[]
+            | select(.content.__typename == "PullRequest")
+            | .content.number] | map(tostring) | join(" ")')
+          gh api "repos/$repo/pulls" --paginate -X GET -f state=open -f per_page=100 \
+            --jq '.[] | [.number, .state, .node_id,
+                  ([.labels[].name] | join(" "))] | @tsv' |
+          while IFS=$'\t' read -r num state node labels; do
+            case " $have_prs " in *" $num "*) continue;; esac
+            item=$(gql_add "$node")
+            session=$(printf '%s' "$labels" | tr ' ' '\n' |
+                      grep '^session:' | head -1 | cut -d: -f2-)
+            if [ "$state" = closed ]; then
+              gql_set_status "$item" "$opt_done"
+            elif [ -n "$session" ]; then
+              gql_set_status "$item" "$opt_prog"
+              gql_set_session "$item" "$session"
+            else
+              gql_set_status "$item" "$opt_todo"
+            fi
+            echo "added pr #$num"
+          done
 
-  missing-secret:
-    if: ${{ secrets.PROJECT_TOKEN == '' }}
-    runs-on: ubuntu-latest
-    steps:
-      - run: echo '::warning::PROJECT_TOKEN secret not set; storyboard sync skipped (see storyboard.yml header).'
+          # RECONCILE pass: converge every content item (fresh read,
+          # so just-added items join in with correct fields already
+          # set — the loop below only fixes drift).
+          gql_items |
+          jq -r --arg sf "$status_field" --arg yf "$session_field" '
+            [.data.node.items.nodes[]
+             | select(.content.__typename != "DraftIssue")
+             | {item: .id, num: .content.number, closed: .content.closed,
+                session: ([.content.labels.nodes[].name
+                           | select(startswith("session:")) | .[8:]]
+                          | first // ""),
+                cur_status: ([.fieldValues.nodes[]
+                              | select(.field.id == $sf) | .optionId]
+                             | first // ""),
+                cur_session: ([.fieldValues.nodes[]
+                               | select(.field.id == $yf) | .text]
+                              | first // "")}]
+             | .[] | @json' |
+          while IFS= read -r row; do
+            item=$(jq -r .item <<<"$row")
+            num=$(jq -r .num <<<"$row")
+            closed=$(jq -r .closed <<<"$row")
+            session=$(jq -r .session <<<"$row")
+            cur_status=$(jq -r .cur_status <<<"$row")
+            cur_session=$(jq -r .cur_session <<<"$row")
+
+            if [ "$closed" = true ]; then
+              want_status=$opt_done; want_session=$cur_session
+            elif [ -n "$session" ]; then
+              want_status=$opt_prog
+              # Keep an annotated Session that already names this
+              # owner ("still-galaxy (uuid)" survives; a changed
+              # owner or an empty field takes the label id).
+              case "$cur_session" in
+                "$session"*) want_session=$cur_session;;
+                *) want_session=$session;;
+              esac
+            else
+              want_status=$opt_todo; want_session=""
+            fi
+
+            if [ "$want_status" != "$cur_status" ]; then
+              gql_set_status "$item" "$want_status"
+              echo "#$num status -> $want_status"
+            fi
+            if [ "$want_session" != "$cur_session" ]; then
+              gql_set_session "$item" "$want_session"
+              echo "#$num session -> [$want_session]"
+            fi
+          done
+          echo "reconcile done"

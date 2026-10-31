@@ -189,10 +189,10 @@ fn compare_numbers(a: &Value, b: &Value) -> Option<Ordering> {
             Some(crate::BigDec::from_bigint((*i).into()).compare(e))
         }
         (Value::BigDec(d), Value::BigInt(n) | Value::BigInteger(n)) => {
-            Some(d.compare(&crate::BigDec::from_bigint(n.clone())))
+            Some(d.compare(&crate::BigDec::from_bigint(n.as_ref().clone())))
         }
         (Value::BigInt(n) | Value::BigInteger(n), Value::BigDec(e)) => {
-            Some(crate::BigDec::from_bigint(n.clone()).compare(e))
+            Some(crate::BigDec::from_bigint(n.as_ref().clone()).compare(e))
         }
         _ => {
             let (x, y) = (to_rational_value(a)?, to_rational_value(b)?);
@@ -206,9 +206,11 @@ fn compare_numbers(a: &Value, b: &Value) -> Option<Ordering> {
 fn to_rational_value(v: &Value) -> Option<BigRational> {
     match v {
         Value::Int(i) => Some(BigRational::from_integer(BigInt::from(*i))),
-        Value::BigInt(n) | Value::BigInteger(n) => Some(BigRational::from_integer(n.clone())),
+        Value::BigInt(n) | Value::BigInteger(n) => {
+            Some(BigRational::from_integer(n.as_ref().clone()))
+        }
         Value::BigDec(d) => Some(d.to_rational()),
-        Value::Ratio(r) => Some(r.clone()),
+        Value::Ratio(r) => Some(r.as_ref().clone()),
         _ => None,
     }
 }
@@ -329,13 +331,13 @@ mod tests {
         for k1 in [
             Value::Int(1),
             Value::Double(1.0),
-            Value::BigInt(BigInt::from(1)),
-            Value::BigInteger(BigInt::from(1)),
-            Value::BigDec(crate::BigDec::from_bigint(BigInt::from(1))),
-            Value::Ratio(num_rational::BigRational::new(
+            Value::BigInt(Arc::new(BigInt::from(1))),
+            Value::BigInteger(Arc::new(BigInt::from(1))),
+            Value::BigDec(Arc::new(crate::BigDec::from_bigint(BigInt::from(1)))),
+            Value::Ratio(Arc::new(num_rational::BigRational::new(
                 BigInt::from(1),
                 BigInt::from(2),
-            )),
+            ))),
         ] {
             assert_eq!(message_of(&k1, &s), want);
         }
@@ -382,12 +384,12 @@ mod tests {
     /// `to_f64_value` tower arm walks here.
     #[test]
     fn tower_pairs_compare() {
-        let big = Value::BigInt(num_bigint::BigInt::from(5));
-        let dec = Value::BigDec(crate::BigDec::parse("5.5").unwrap());
-        let half = Value::Ratio(num_rational::BigRational::new(
+        let big = Value::BigInt(Arc::new(num_bigint::BigInt::from(5)));
+        let dec = Value::BigDec(Arc::new(crate::BigDec::parse("5.5").unwrap()));
+        let half = Value::Ratio(Arc::new(num_rational::BigRational::new(
             num_bigint::BigInt::from(1),
             num_bigint::BigInt::from(2),
-        ));
+        )));
         assert_eq!(compare(&big, &Value::Int(3)), Ok(Ordering::Greater));
         assert_eq!(compare(&dec, &big), Ok(Ordering::Greater));
         assert_eq!(compare(&half, &Value::Int(1)), Ok(Ordering::Less));
@@ -402,19 +404,19 @@ mod tests {
     /// build a two-billion-digit `pow10`).
     #[test]
     fn bigdec_pairs_skip_expansion() {
-        let huge = Value::BigDec(crate::BigDec::parse("1E+2147483648").unwrap());
-        let zero = Value::BigDec(crate::BigDec::parse("0").unwrap());
-        let one = Value::BigDec(crate::BigDec::parse("1.5").unwrap());
+        let huge = Value::BigDec(Arc::new(crate::BigDec::parse("1E+2147483648").unwrap()));
+        let zero = Value::BigDec(Arc::new(crate::BigDec::parse("0").unwrap()));
+        let one = Value::BigDec(Arc::new(crate::BigDec::parse("1.5").unwrap()));
         assert_eq!(compare(&huge, &zero), Ok(Ordering::Greater));
         assert_eq!(compare(&zero, &huge), Ok(Ordering::Less));
         assert_eq!(compare(&one, &Value::Int(1)), Ok(Ordering::Greater));
         assert_eq!(compare(&Value::Int(2), &one), Ok(Ordering::Greater));
         assert_eq!(
-            compare(&one, &Value::BigInt(num_bigint::BigInt::from(2))),
+            compare(&one, &Value::BigInt(Arc::new(num_bigint::BigInt::from(2)))),
             Ok(Ordering::Less)
         );
         assert_eq!(
-            compare(&Value::BigInt(num_bigint::BigInt::from(1)), &one),
+            compare(&Value::BigInt(Arc::new(num_bigint::BigInt::from(1))), &one),
             Ok(Ordering::Less)
         );
     }

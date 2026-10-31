@@ -699,9 +699,9 @@ impl RangeNum {
         match self {
             RangeNum::Int(i) => Value::Int(*i),
             RangeNum::Double(d) => Value::Double(*d),
-            RangeNum::BigInt(n) => Value::BigInt(n.clone()),
-            RangeNum::Ratio(r) => Value::Ratio(r.clone()),
-            RangeNum::BigDec(d) => Value::BigDec(d.clone()),
+            RangeNum::BigInt(n) => Value::BigInt(Arc::new(n.clone())),
+            RangeNum::Ratio(r) => Value::Ratio(Arc::new(r.clone())),
+            RangeNum::BigDec(d) => Value::BigDec(Arc::new(d.clone())),
         }
     }
 

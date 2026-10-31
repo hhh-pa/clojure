@@ -1235,3 +1235,36 @@ fn macroexpand_hint_wrap() {
         "((mhdrop 5))"
     );
 }
+
+#[test]
+fn macroexpand_hint_wrap_analyzer() {
+    // #110: upstream `analyzeSeq` funnels every level through
+    // `macroexpand1`, so a nested evaluated hinted macro call
+    // whose expansion drops the tag evaluates through
+    // `(clojure.core/identity <exp>)`. Observable only with a
+    // pathological instrument: redefine `identity`, and the
+    // nested hinted call follows it (JVM: 42), while unhinted,
+    // kept-tag, and non-symbol-tag calls evaluate direct.
+    let mut eval = boot();
+    run_last(&mut eval, "(defmacro pm110 [] 1)");
+    run_last(
+        &mut eval,
+        "(defmacro pm110keep [x] (with-meta (list 'quote x) {:tag 'String}))",
+    );
+    run_last(
+        &mut eval,
+        "(alter-var-root #'clojure.core/identity (fn [_] (fn [_] 42)))",
+    );
+    // Nested evaluated hinted call: wrapped, follows the instrument.
+    assert_eq!(run_last(&mut eval, "(let [a ^String (pm110)] a)"), "42");
+    // Top-level hinted call already wrapped pre-#110 (via
+    // `macroexpand_full`): parity between the two paths.
+    assert_eq!(run_last(&mut eval, "^String (pm110)"), "42");
+    // Unhinted, kept-tag, and non-symbol-tag calls: no wrap.
+    assert_eq!(run_last(&mut eval, "(let [a (pm110)] a)"), "1");
+    assert_eq!(
+        run_last(&mut eval, "(let [a ^String (pm110keep 7)] a)"),
+        "7"
+    );
+    assert_eq!(run_last(&mut eval, "(let [a ^{:tag 42} (pm110)] a)"), "1");
+}

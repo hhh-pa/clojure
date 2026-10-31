@@ -88,7 +88,7 @@ pub use transient::{
     Transient, TransientError, TransientKind, TransientMap, TransientSet, TransientVector,
 };
 pub use value::{
-    FxBuildHasher, List, Map, Set, SortSpec, Value, Vector, extension_supports_meta,
+    FxBuildHasher, List, Map, Set, SortSpec, Value, Vector, bigdec_result, extension_supports_meta,
     extension_with_meta, intern_literal_strings, intern_string, intern_string_value, map_entry,
     new_map, new_set, reader_conditional, tagged_literal,
 };

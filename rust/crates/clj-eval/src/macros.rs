@@ -326,8 +326,10 @@ fn tag_of(v: &Value) -> Option<Symbol> {
 /// form carries a type-hint tag the expansion drops (tags
 /// differ), wrap as `(clojure.core/identity <exp>)` carrying the input form's
 /// meta, so the hint survives expansion. Equal tags — and
-/// unhinted forms — pass through untouched.
-fn maybe_wrap_hint(form: &Value, exp: Value) -> Value {
+/// unhinted forms — pass through untouched. The analyzer's
+/// macro path shares this (`analyzeSeq` funnels through
+/// `macroexpand1`).
+pub(crate) fn maybe_wrap_hint(form: &Value, exp: Value) -> Value {
     let Some(tag) = tag_of(form) else {
         return exp;
     };

@@ -2170,14 +2170,14 @@ fn core_vars(user_ns: Value) -> Vec<(String, Value, bool, bool)> {
 
 /// The `*clojure-version*` root (P3): same keys as the JVM map
 /// for the tracked release (T1197 REL probe `rel-version`:
-/// `{:major 1, :minor 13, :incremental 0, :qualifier "alpha9"}`).
+/// `{:major 1, :minor 13, :incremental 0, :qualifier "alpha11"}`).
 fn clojure_version_map() -> Value {
     let mut map = new_map();
     for (key, value) in [
         ("major", Value::Int(1)),
         ("minor", Value::Int(13)),
         ("incremental", Value::Int(0)),
-        ("qualifier", Value::Str(Arc::from("alpha9"))),
+        ("qualifier", Value::Str(Arc::from("alpha11"))),
     ] {
         map = map.insert(Value::Keyword(Keyword::new(None, key)), value);
     }

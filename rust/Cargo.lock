@@ -161,7 +161,7 @@ dependencies = [
 
 [[package]]
 name = "clj-aot"
-version = "1.13.0-alpha9"
+version = "1.13.0-alpha11"
 dependencies = [
  "clj-eval",
  "clj-rt",
@@ -170,7 +170,7 @@ dependencies = [
 
 [[package]]
 name = "clj-core"
-version = "1.13.0-alpha9"
+version = "1.13.0-alpha11"
 dependencies = [
  "clj-eval",
  "clj-value",
@@ -178,7 +178,7 @@ dependencies = [
 
 [[package]]
 name = "clj-eval"
-version = "1.13.0-alpha9"
+version = "1.13.0-alpha11"
 dependencies = [
  "clj-reader",
  "clj-value",
@@ -192,7 +192,7 @@ dependencies = [
 
 [[package]]
 name = "clj-reader"
-version = "1.13.0-alpha9"
+version = "1.13.0-alpha11"
 dependencies = [
  "clj-value",
  "num-bigint",
@@ -202,7 +202,7 @@ dependencies = [
 
 [[package]]
 name = "clj-repl"
-version = "1.13.0-alpha9"
+version = "1.13.0-alpha11"
 dependencies = [
  "clj-eval",
  "clj-reader",
@@ -212,7 +212,7 @@ dependencies = [
 
 [[package]]
 name = "clj-rt"
-version = "1.13.0-alpha9"
+version = "1.13.0-alpha11"
 dependencies = [
  "clj-eval",
  "clj-value",
@@ -220,7 +220,7 @@ dependencies = [
 
 [[package]]
 name = "clj-value"
-version = "1.13.0-alpha9"
+version = "1.13.0-alpha11"
 dependencies = [
  "loom",
  "num-bigint",
@@ -233,7 +233,7 @@ dependencies = [
 
 [[package]]
 name = "clojure-rs"
-version = "1.13.0-alpha9"
+version = "1.13.0-alpha11"
 dependencies = [
  "clap",
  "clj-aot",

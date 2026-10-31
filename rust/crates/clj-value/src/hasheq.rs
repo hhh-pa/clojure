@@ -1278,13 +1278,13 @@ mod tests {
     #[test]
     fn hash_code_tower_arms() {
         use num_bigint::BigInt;
-        let big = |n: i32| Value::BigInt(BigInt::from(n));
-        let dec = |n: i32| Value::BigDec(crate::BigDec::from_bigint(BigInt::from(n)));
+        let big = |n: i32| Value::BigInt(Arc::new(BigInt::from(n)));
+        let dec = |n: i32| Value::BigDec(Arc::new(crate::BigDec::from_bigint(BigInt::from(n))));
         let rat = |n: i32, d: i32| {
-            Value::Ratio(num_rational::BigRational::new(
+            Value::Ratio(Arc::new(num_rational::BigRational::new(
                 BigInt::from(n),
                 BigInt::from(d),
-            ))
+            )))
         };
         for v in [big(5), dec(5), rat(1, 2)] {
             assert_eq!(hash_code(&v), hash_code(&v));
@@ -1317,22 +1317,22 @@ mod tests {
     }
 
     fn bigint(v: &str) -> Value {
-        Value::BigInt(v.parse::<num_bigint::BigInt>().unwrap())
+        Value::BigInt(Arc::new(v.parse::<num_bigint::BigInt>().unwrap()))
     }
 
     fn biginteger(v: &str) -> Value {
-        Value::BigInteger(v.parse::<num_bigint::BigInt>().unwrap())
+        Value::BigInteger(Arc::new(v.parse::<num_bigint::BigInt>().unwrap()))
     }
 
     fn bigdec(v: &str) -> Value {
-        Value::BigDec(crate::BigDec::parse(v).unwrap())
+        Value::BigDec(Arc::new(crate::BigDec::parse(v).unwrap()))
     }
 
     fn ratio(n: &str, d: &str) -> Value {
-        Value::Ratio(num_rational::BigRational::new(
+        Value::Ratio(Arc::new(num_rational::BigRational::new(
             n.parse::<num_bigint::BigInt>().unwrap(),
             d.parse::<num_bigint::BigInt>().unwrap(),
-        ))
+        )))
     }
 
     /// Tower `hasheq` is JVM-identical: in-`long`-range `BigInt`s hash

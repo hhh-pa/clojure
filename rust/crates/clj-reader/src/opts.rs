@@ -52,14 +52,15 @@ pub struct ReaderOpts {
     /// Imported classes (`String` → `java.lang.String`).
     pub class_map: HashMap<String, String>,
     /// Eval-side data-reader resolution (S6): the tag consult
-    /// runs read-side (table keys, then the `inst`/`uuid` defaults,
+    /// runs read-side (table keys, then the default-layer keys,
     /// then the default-fn flag, else the `UnknownTag` throw), while
     /// invocation stays eval-side (the reader cannot call fns).
-    /// Table hits and default-fn tags defer to `TaggedLiteral`
-    /// (logged as fired under `#_`); `inst`/`uuid` payloads
-    /// validate inline (valid ⇒ `TaggedLiteral`, invalid ⇒ the
-    /// spanful `TagInvoke` error). Off by default: standalone
-    /// reads keep throwing `UnknownTag`/`DataReader` as today.
+    /// Table hits, default hits, and default-fn tags defer to
+    /// `TaggedLiteral` (logged as fired under `#_`); canonical
+    /// `inst`/`uuid` default hits validate string payloads inline
+    /// (valid ⇒ `TaggedLiteral`, invalid ⇒ the spanful `TagInvoke`
+    /// error). Off by default: standalone reads keep throwing
+    /// `UnknownTag`/`DataReader` as today.
     pub data_readers: bool,
     /// `*data-readers*` symbol keys at read start (S6): membership
     /// defers the tag for eval-side invocation (non-symbol keys
@@ -69,6 +70,15 @@ pub struct ReaderOpts {
     /// a lookupable (S6): any tag consulted then fails the
     /// `ILookup` cast (`TableCce`), like the JVM's `RT.get`.
     pub data_readers_borked: Option<String>,
+    /// `default-data-readers` root symbol keys at read start (#94):
+    /// membership defers the tag for eval-side invocation, between
+    /// the table and the default fn, like the JVM's `readTagged`.
+    pub default_reader_keys: HashSet<Symbol>,
+    /// `default-data-readers` JVM class when its root is neither
+    /// nil nor a lookupable (#94): any tag reaching the default
+    /// layer then fails the `ILookup` cast (`TableCce`) — table
+    /// hits already returned, like the JVM's short-circuit.
+    pub default_readers_borked: Option<String>,
     /// `*default-data-reader-fn*` is bound (S6): tags matching
     /// nothing else defer for the eval-side `[tag form]` call.
     pub default_reader_fn: bool,
@@ -96,6 +106,8 @@ impl Default for ReaderOpts {
             data_readers: false,
             data_reader_keys: HashSet::new(),
             data_readers_borked: None,
+            default_reader_keys: HashSet::new(),
+            default_readers_borked: None,
             default_reader_fn: false,
             read_eval: true,
             suppress_read: false,

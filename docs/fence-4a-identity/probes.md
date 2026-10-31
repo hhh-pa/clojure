@@ -24,7 +24,7 @@ Longs (`LongCache`, -128..127):
 - `(identical? (+ 100 27) 127)` → `true` (mixed fresh/literal)
 - `(identical? 128 128)` → `false` (literals box fresh per
   occurrence — no constant pooling for numbers)
-- `(identical? 1N 1N)` → `false` (deferred: bigs stay `=`)
+- `(identical? 1N 1N)` → `false` (bigs box fresh — see P5)
 
 Chars (`Character` cache, `\u{0}`..`\u{7f}`):
 
@@ -100,7 +100,7 @@ Same binding `true`, distinct-but-equal `false`:
 - validator runs even on a miss: construction + attempt = 2 calls
 - no watch fires on a miss
 
-## P5 — deferred big-number identity (post-tower record)
+## P5 — big-number identity (landed in 4a-big)
 
 `BigDecimal` results canonicalize through `BigDecimal.valueOf`
 (`ZERO_THROUGH_TEN`: scale-0 values 0..10 share — probed across
@@ -108,9 +108,10 @@ Same binding `true`, distinct-but-equal `false`:
 stay fresh (`(identical? 1M 1M)` → `false`), negatives and
 nonzero scales stay fresh. `BigInteger` never canonicalizes
 (`(+ 1N -1N)`, `(* 999N 0N)`, `(bigint 0)` all fresh). Ratios
-always fresh. The deferred Arc-box must reproduce exactly this
+always fresh. The Arc-box reproduces exactly this
 (canonical-share for valueOf-routed scale-0 0..10, fresh
-otherwise); until then bigs stay `=`-compared.
+otherwise); pinned by `identical_bigs` in
+`rust/crates/clj-eval/tests/classemu.rs`.
 
 ## P6 — unreachables (Rust-level pins)
 

@@ -162,15 +162,6 @@ the interpreter's own natives, so AOT and `run` cannot drift.
 Deliberate, documented, and pinned by the differential corpus —
 each entry asserts its exact behavior, so drift fails CI:
 
-- **Big-number identity deferred.** `identical?` follows the
-  JVM `==` model (Long cache, `Character` range, doubles never,
-  pooled string literals, interned keywords, minted ids for
-  symbols/collections/entries/uuids/instants/uris/tagged/
-  conditionals/vectors), and `compare-and-set!` compares
-  references — except `BigInt`/`BigInteger`/`BigDec`/`Ratio`,
-  which still compare by value until the post-tower Arc-box
-  lands (zero-fence sequencing: tower owns numeric
-  representation).
 - **Printing.** `pr` round-trips EDN values through the reader;
   `*print-length*` / `*print-level*` truncate with `...`;
   `*print-dup*` routes `pr` through the dup printer (undupable
@@ -181,13 +172,6 @@ each entry asserts its exact behavior, so drift fails CI:
   `macroexpand-1` expands them (`let` to `let*`, etc.) via the FX4
   expanders; only real specials and the seven fence macros are
   identity.
-- **Agent executors.** `set-agent-send-executor!` /
-  `set-agent-send-off-executor!` record but never install: `send`,
-  `send-off`, and `future-call` always use the fixed pools, ignoring
-  the recorded executor. Pool replacement needs executor-lifecycle
-  surface (shutdown, rejection, `isShutdown`) with no upstream
-  expression outside interop
-  ([tracking](https://github.com/hhh-pa/clojure/issues/96)).
 - **Safety pins.** Re-entrant `force` on a `delay` raises
   `IllegalStateException` (the JVM recurses to
   `StackOverflowError`, which would abort a Rust process).

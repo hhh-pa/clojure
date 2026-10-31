@@ -1,0 +1,11 @@
+r-send [1 "g96-send"]
+r-off [1 "g96-off"]
+r-future "g96-fut"
+r-persend ["g96-one" "g96-two"]
+r-await [nil 1]
+n-handler-send [:saw ["class java.lang.NullPointerException" "Cannot invoke \"java.util.concurrent.Executor.execute(java.lang.Runnable)\" because \"this.exec\" is null"] false 0 true]
+n-handler-off [:saw ["class java.lang.NullPointerException" "Cannot invoke \"java.util.concurrent.Executor.execute(java.lang.Runnable)\" because \"this.exec\" is null"] false 0 true]
+n-future THROW java.lang.NullPointerException|"Cannot invoke \"java.util.concurrent.ExecutorService.submit(java.util.concurrent.Callable)\" because \"clojure.lang.Agent.soloExecutor\" is null"
+n-cce-str THROW java.lang.ClassCastException|"class java.lang.String cannot be cast to class java.util.concurrent.ExecutorService (java.lang.String and java.util.concurrent.ExecutorService are in module java.base of loader 'bootstrap')"
+n-cce-bool THROW java.lang.ClassCastException|"class java.lang.Boolean cannot be cast to class java.util.concurrent.ExecutorService (java.lang.Boolean and java.util.concurrent.ExecutorService are in module java.base of loader 'bootstrap')"
+r-restored true

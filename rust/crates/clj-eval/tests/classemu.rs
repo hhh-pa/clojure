@@ -2861,9 +2861,10 @@ fn lattice_dynamic_names_unimportable() {
 
 // ---- identical? ----
 
-// d-nil–d-lazy-same (28 rows): the per-kind identity table. Value
-// kinds compare by value (the port has no boxes/caches/interning),
-// identity kinds by allocation/cell/id (§1.9).
+// d-nil–d-lazy-same (28 rows): the per-kind identity table. The
+// JVM `==` model (fence 4a + 4a-big): immediates and cached
+// boxings compare by value, heap kinds (big numbers included)
+// by allocation (§1.9).
 #[test]
 fn identical_kinds() {
     let mut eval = boot();
@@ -2891,14 +2892,15 @@ fn identical_kinds() {
     ] {
         assert_eq!(run(&mut eval, src), "false", "{src}");
     }
-    // Deferred (post-tower, per the (2)↔(4) sequencing): big kinds
-    // still compare by value until the Arc-box lands.
+    // Big kinds are allocation-compared (fence 4a-big, oracle
+    // P5): fresh constructions are never identical (the
+    // canonical-decimal rows live in `identical_bigs`).
     for src in [
         "(identical? (bigint 5) (bigint 5))",
         "(identical? 1.5M 1.5M)",
         "(identical? 1/3 1/3)",
     ] {
-        assert_eq!(run(&mut eval, src), "true", "{src}");
+        assert_eq!(run(&mut eval, src), "false", "{src}");
     }
     // Collections: same binding true, distinct-but-equal false.
     assert_eq!(run(&mut eval, "(let [v [1]] (identical? v v))"), "true");
@@ -3077,6 +3079,67 @@ fn identical_heap() {
         "(identical? (find {:a 1} :a) (find {:a 1} :a))",
         "(let [s 'a] (identical? s (with-meta s {:x 1})))",
         "(let [v [1]] (identical? v (with-meta v {:x 1})))",
+    ] {
+        assert_eq!(run(&mut eval, src), "false", "{src}");
+    }
+}
+
+// Fence 4a-big: big-number identity (oracle
+// `docs/fence-4a-identity/probes.md` P5). `BigInt`/`BigInteger`/
+// `Ratio` box fresh per construction (only same bindings — and
+// same-object pass-throughs — are identical); `BigDec`
+// literals box fresh while arithmetic results share
+// `ZERO_THROUGH_TEN` (scale-0 `0..=10`) through
+// `BigDecimal.valueOf`.
+#[test]
+fn identical_bigs() {
+    let mut eval = boot();
+    // Canonical decimals: arithmetic results at scale-0 `0..=10`
+    // share (across `+`/`-`/`*`/`/` and `abs` alike).
+    for src in [
+        "(identical? (+ 1M 4M) (+ 2M 3M))",
+        "(identical? (- 10M 10M) (- 3M 3M))",
+        "(identical? (* 2M 3M) (+ 1M 5M))",
+        "(identical? (/ 6M 2M) (+ 1M 2M))",
+        "(identical? (+ 1M 9M) (- 20M 10M))",
+        "(identical? (abs -5M) (+ 2M 3M))",
+        "(let [n (+ 1M 4M)] (identical? n n))",
+    ] {
+        assert_eq!(run(&mut eval, src), "true", "{src}");
+    }
+    // Same bindings — and same-object pass-throughs — are identical.
+    for src in [
+        "(let [n 5N] (identical? n n))",
+        "(let [n (biginteger 5)] (identical? n n))",
+        "(let [m 1M] (identical? m m))",
+        "(let [r 1/3] (identical? r r))",
+        "(let [m 1M] (identical? m (bigdec m)))",
+        "(let [n 5N] (identical? n (bigint n)))",
+        "(let [n (biginteger 5)] (identical? n (biginteger n)))",
+        "(let [m 5M] (identical? m (abs m)))",
+        "(let [m 5M] (identical? m (max 1M m)))",
+        "(let [m 1M] (identical? m (min m 5M)))",
+    ] {
+        assert_eq!(run(&mut eval, src), "true", "{src}");
+    }
+    // Fresh constructions are never identical: literals,
+    // coercions, negatives, nonzero scales, past-ten results,
+    // and cross-kind pairs.
+    for src in [
+        "(identical? 1M 1M)",
+        "(identical? 1N 1N)",
+        "(identical? (bigint 0) (bigint 0))",
+        "(identical? (+ 1N -1N) (+ 2N -2N))",
+        "(identical? (* 999N 0N) (+ 1N -1N))",
+        "(identical? (biginteger 5) (biginteger 5))",
+        "(identical? 1N (biginteger 1))",
+        "(identical? (+ 1.5M 1.5M) (+ 1.0M 2.0M))",
+        "(identical? (+ -1M -4M) (+ -2M -3M))",
+        "(identical? (+ 5M 6M) (+ 4M 7M))",
+        "(identical? (+ 1M 4M) 5M)",
+        "(identical? (+ 1M 4M) 5)",
+        "(identical? 1/3 1/3)",
+        "(identical? (+ 1/3 1/3) (/ 2 3))",
     ] {
         assert_eq!(run(&mut eval, src), "false", "{src}");
     }

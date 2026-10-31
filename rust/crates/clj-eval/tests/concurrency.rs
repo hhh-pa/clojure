@@ -613,6 +613,29 @@ fn cas_identity() {
         ),
         "false"
     );
+    // Big numbers compare references too (fence 4a-big): fresh
+    // literals miss despite `=`, canonical decimals hit.
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [a (atom 5N)] [(compare-and-set! a 5N :x) @a])"
+        ),
+        "[false 5N]"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [a (atom 1/3)] [(compare-and-set! a 1/3 :x) @a])"
+        ),
+        "[false 1/3]"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [a (atom (+ 1M 4M))] [(compare-and-set! a (+ 2M 3M) :x) @a])"
+        ),
+        "[true :x]"
+    );
     // The validator still runs on a reference miss (construction +
     // attempt), and no watch fires.
     assert_eq!(
@@ -3118,6 +3141,28 @@ fn locking_object_kinds() {
 }
 
 #[test]
+fn locking_symbol_exit_matches_by_identity() {
+    // Gap #114: symbol lockees key by minted id (JVM identity),
+    // so a distinct-but-equal symbol fails the exit with IMS
+    // instead of releasing; the identical binding still exits
+    // cleanly (clones preserve the id).
+    let mut eval = boot();
+    run(&mut eval, "(in-ns 'clojure.core)");
+    // The macro path stays balanced over a symbol lockee (enter
+    // and exit read the same binding).
+    assert_eq!(run_last(&mut eval, "(locking 'g114-sym :ok)"), ":ok");
+    // The distinct exit IMSes, the held monitor stays held, and
+    // the identical exit releases (no leaked guard).
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [s 'g114-sym] (fx4-monitor-enter s) [(try (fx4-monitor-exit 'g114-sym) :released (catch IllegalMonitorStateException e :ims)) (fx4-monitor-exit s)])"
+        ),
+        "[:ims nil]"
+    );
+}
+
+#[test]
 fn locking_mutual_exclusion() {
     let mut eval = boot();
     // Racing read-modify-writes under the monitor total exactly (a
@@ -3638,6 +3683,368 @@ fn send_via_nil_wedges_with_handler_npe() {
     run(&mut eval, "(def nvb (agent 0))");
     run(&mut eval, "(send-via nil nvb (fn [s] :never))");
     assert_eq!(run_last(&mut eval, "(await-for 200 nvb)"), "false");
+}
+
+#[test]
+fn installed_send_executor_carries_sends() {
+    // Gap-96 (r-send, r-persend): `send` reads the installed field
+    // per send. The single-thread FIFO order proves the custom
+    // pool carries the actions: the first head blocks on the gate
+    // while the second queues behind it on the same worker, so
+    // the order is deterministic (on the fixed pool it would race).
+    let mut eval = boot();
+    run(
+        &mut eval,
+        "(def g9x (executor)) (set-agent-send-executor! g9x)",
+    );
+    run(&mut eval, "(def g9a (agent 0)) (def g9b (agent 0))");
+    run(&mut eval, "(def g9gate (promise)) (def g9order (atom []))");
+    run(
+        &mut eval,
+        "(send g9a (fn [s] (deref g9gate 8000 :timeout) (swap! g9order conj :first) 1))",
+    );
+    run(
+        &mut eval,
+        "(send g9b (fn [s] (swap! g9order conj :second) 2))",
+    );
+    run(&mut eval, "(deliver g9gate :go)");
+    assert_eq!(
+        run_last(&mut eval, "(await g9a) (await g9b) @g9order"),
+        "[:first :second]"
+    );
+    assert_eq!(run_last(&mut eval, "[@g9a @g9b]"), "[1 2]");
+    // Per-send read: swapping the field moves later sends.
+    run(
+        &mut eval,
+        "(def g9y (executor)) (set-agent-send-executor! g9y)",
+    );
+    run(&mut eval, "(send g9a inc)");
+    assert_eq!(run_last(&mut eval, "(await g9a) @g9a"), "2");
+}
+
+#[test]
+fn installed_send_off_executor_carries_sends() {
+    // Gap-96 (r-off): `send-off` reads the installed solo field
+    // per send (completion + await pin the routing; the shutdown
+    // matrix below proves the thread).
+    let mut eval = boot();
+    run(
+        &mut eval,
+        "(def g9o (executor)) (set-agent-send-off-executor! g9o)",
+    );
+    run(&mut eval, "(def g9ao (agent 0)) (def g9op (promise))");
+    run(&mut eval, "(send-off g9ao (fn [s] (deliver g9op :ran) 7))");
+    assert_eq!(run_last(&mut eval, "(deref g9op 8000 :timeout)"), ":ran");
+    assert_eq!(run_last(&mut eval, "(await g9ao) @g9ao"), "7");
+}
+
+#[test]
+fn future_call_runs_on_installed_solo() {
+    // Gap-96 (r-future, s-fresh-future): `future-call` submits to
+    // the installed solo field. The post-shutdown fresh install
+    // proves the routing — the default path would throw.
+    let mut eval = boot();
+    run(
+        &mut eval,
+        "(def g9f (executor)) (set-agent-send-off-executor! g9f)",
+    );
+    assert_eq!(run_last(&mut eval, "@(future-call (fn [] 41))"), "41");
+    run(&mut eval, "(shutdown-agents)");
+    // The installed pool shut with the system: submits reject.
+    assert_eq!(
+        uncaught(&mut eval, "(future-call (fn [] 1))"),
+        "java.util.concurrent.RejectedExecutionException | future rejected after shutdown"
+    );
+    // A fresh install is live again (no global latch on customs).
+    run(
+        &mut eval,
+        "(def g9f2 (executor)) (set-agent-send-off-executor! g9f2)",
+    );
+    assert_eq!(run_last(&mut eval, "@(future-call (fn [] 42))"), "42");
+}
+
+#[test]
+fn nil_send_field_wedges_like_send_via() {
+    // Gap-96 (n-handler-send): a nil send field is the JVM's null
+    // field — the send NPEs into the handler (the exact
+    // `send-via` nil shape) and wedges.
+    let mut eval = boot();
+    run(&mut eval, "(def g9np (promise)) (def g9ne (atom nil))");
+    run(
+        &mut eval,
+        "(def g9na (agent 0 :error-handler (fn [ag e] (reset! g9ne e) (deliver g9np :saw))))",
+    );
+    run(&mut eval, "(set-agent-send-executor! nil)");
+    run(&mut eval, "(send g9na (fn [s] :never))");
+    assert_eq!(run_last(&mut eval, "(deref g9np 8000 :timeout)"), ":saw");
+    assert_eq!(
+        class_of(&mut eval, "@g9ne"),
+        "java.lang.NullPointerException"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(ex-message @g9ne)"),
+        "\"Cannot invoke \\\"java.util.concurrent.Executor.execute(java.lang.Runnable)\\\" because \\\"this.exec\\\" is null\""
+    );
+    run(&mut eval, "(send g9na (fn [s] :second))");
+    assert_eq!(run_last(&mut eval, "(await-for 200 g9na)"), "false");
+    assert_eq!(run_last(&mut eval, "@g9na"), "0");
+    assert_eq!(run_last(&mut eval, "(agent-error g9na)"), "nil");
+}
+
+#[test]
+fn nil_send_off_field_wedges_like_send_via() {
+    // Gap-96 (n-handler-off): the `send-off` mirror — a nil solo
+    // field NPEs into the handler and wedges.
+    let mut eval = boot();
+    run(&mut eval, "(def g9mp (promise)) (def g9me (atom nil))");
+    run(
+        &mut eval,
+        "(def g9ma (agent 0 :error-handler (fn [ag e] (reset! g9me e) (deliver g9mp :saw))))",
+    );
+    run(&mut eval, "(set-agent-send-off-executor! nil)");
+    run(&mut eval, "(send-off g9ma (fn [s] :never))");
+    assert_eq!(run_last(&mut eval, "(deref g9mp 8000 :timeout)"), ":saw");
+    assert_eq!(
+        class_of(&mut eval, "@g9me"),
+        "java.lang.NullPointerException"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(ex-message @g9me)"),
+        "\"Cannot invoke \\\"java.util.concurrent.Executor.execute(java.lang.Runnable)\\\" because \\\"this.exec\\\" is null\""
+    );
+    run(&mut eval, "(send-off g9ma (fn [s] :second))");
+    assert_eq!(run_last(&mut eval, "(await-for 200 g9ma)"), "false");
+    assert_eq!(run_last(&mut eval, "@g9ma"), "0");
+    assert_eq!(run_last(&mut eval, "(agent-error g9ma)"), "nil");
+}
+
+#[test]
+fn nil_solo_future_call_throws_npe() {
+    // Gap-96 (n-future): `future-call` over a nil solo field
+    // throws the submit NPE to the caller (like the JVM).
+    let mut eval = boot();
+    run(&mut eval, "(set-agent-send-off-executor! nil)");
+    assert_eq!(
+        uncaught(&mut eval, "(future-call (fn [] 1))"),
+        "java.lang.NullPointerException | Cannot invoke \"java.util.concurrent.ExecutorService.submit(java.util.concurrent.Callable)\" because \"clojure.lang.Agent.soloExecutor\" is null"
+    );
+}
+
+#[test]
+fn shutdown_shuts_installed_customs() {
+    // Gap-96 (s-inflight, s-post-send, s-post-off): shutdown
+    // shuts the installed customs. The gated action proves the
+    // drain: it signals mid-flight, the shutdown lands, and only
+    // then does the gate open — the value still publishes.
+    let mut eval = boot();
+    run(
+        &mut eval,
+        "(def g9s (executor)) (set-agent-send-executor! g9s) (def g9t (executor)) (set-agent-send-off-executor! g9t)",
+    );
+    run(
+        &mut eval,
+        "(def g9sa (agent 0)) (def g9started (promise)) (def g9gate (promise)) (def g9done (promise))",
+    );
+    run(
+        &mut eval,
+        "(send g9sa (fn [s] (deliver g9started :go) (deref g9gate 8000 :timeout) (deliver g9done :ran) 41))",
+    );
+    assert_eq!(
+        run_last(&mut eval, "(deref g9started 8000 :timeout)"),
+        ":go"
+    );
+    assert_eq!(run_last(&mut eval, "(shutdown-agents)"), "nil");
+    run(&mut eval, "(deliver g9gate :open)");
+    assert_eq!(run_last(&mut eval, "(deref g9done 8000 :timeout)"), ":ran");
+    assert_eq!(run_last(&mut eval, "@g9sa"), "41");
+    // Post-shutdown sends are accepted but reject into the
+    // handler (both installed sides).
+    run(&mut eval, "(def g9sp (promise)) (def g9se (atom nil))");
+    run(
+        &mut eval,
+        "(def g9sb (agent 1 :error-handler (fn [ag e] (reset! g9se e) (deliver g9sp :saw))))",
+    );
+    run(&mut eval, "(send g9sb inc)");
+    assert_eq!(run_last(&mut eval, "(deref g9sp 8000 :timeout)"), ":saw");
+    assert_eq!(
+        class_of(&mut eval, "@g9se"),
+        "java.util.concurrent.RejectedExecutionException"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(ex-message @g9se)"),
+        "\"agent action rejected after shutdown\""
+    );
+    assert_eq!(run_last(&mut eval, "(await-for 200 g9sb)"), "false");
+    assert_eq!(run_last(&mut eval, "@g9sb"), "1");
+    run(&mut eval, "(def g9tp (promise)) (def g9te (atom nil))");
+    run(
+        &mut eval,
+        "(def g9tb (agent 2 :error-handler (fn [ag e] (reset! g9te e) (deliver g9tp :saw))))",
+    );
+    run(&mut eval, "(send-off g9tb inc)");
+    assert_eq!(run_last(&mut eval, "(deref g9tp 8000 :timeout)"), ":saw");
+    assert_eq!(
+        class_of(&mut eval, "@g9te"),
+        "java.util.concurrent.RejectedExecutionException"
+    );
+    assert_eq!(run_last(&mut eval, "(await-for 200 g9tb)"), "false");
+    assert_eq!(run_last(&mut eval, "@g9tb"), "2");
+}
+
+#[test]
+fn shutdown_mid_queue_rejects_custom_handover() {
+    // Gap-96: a head that completes after its custom shut drops
+    // the follower with a handler rejection (the pump handover
+    // submits onto the shut pool). The gate orders everything:
+    // the head starts, the shutdown lands, then the gate opens.
+    let mut eval = boot();
+    run(
+        &mut eval,
+        "(def g9h (executor)) (set-agent-send-executor! g9h)",
+    );
+    run(&mut eval, "(def g9hp (promise)) (def g9he (atom nil))");
+    run(
+        &mut eval,
+        "(def g9ha (agent 0 :error-handler (fn [ag e] (reset! g9he e) (deliver g9hp :saw))))",
+    );
+    run(
+        &mut eval,
+        "(def g9hstarted (promise)) (def g9hgate (promise))",
+    );
+    run(
+        &mut eval,
+        "(send g9ha (fn [s] (deliver g9hstarted :go) (deref g9hgate 8000 :timeout) 5))",
+    );
+    run(&mut eval, "(send g9ha inc)");
+    assert_eq!(
+        run_last(&mut eval, "(deref g9hstarted 8000 :timeout)"),
+        ":go"
+    );
+    run(&mut eval, "(shutdown-agents)");
+    run(&mut eval, "(deliver g9hgate :open)");
+    assert_eq!(run_last(&mut eval, "(deref g9hp 8000 :timeout)"), ":saw");
+    assert_eq!(
+        class_of(&mut eval, "@g9he"),
+        "java.util.concurrent.RejectedExecutionException"
+    );
+    assert_eq!(run_last(&mut eval, "@g9ha"), "5");
+}
+
+#[test]
+fn fresh_installs_run_after_shutdown() {
+    // Gap-96 (s-fresh-send, s-fresh-future): shutdown shuts the
+    // CURRENT fields only — sides installed fresh afterwards are
+    // live again (like the JVM, which latches nothing).
+    let mut eval = boot();
+    run(
+        &mut eval,
+        "(def g9e1 (executor)) (set-agent-send-executor! g9e1)",
+    );
+    run(
+        &mut eval,
+        "(def g9fa (agent 0)) (send g9fa inc) (await g9fa)",
+    );
+    assert_eq!(run_last(&mut eval, "@g9fa"), "1");
+    run(&mut eval, "(shutdown-agents)");
+    // The stale custom rejects now.
+    run(&mut eval, "(def g9fp (promise))");
+    run(
+        &mut eval,
+        "(def g9fb (agent 0 :error-handler (fn [ag e] (deliver g9fp :saw))))",
+    );
+    run(&mut eval, "(send g9fb inc)");
+    assert_eq!(run_last(&mut eval, "(deref g9fp 8000 :timeout)"), ":saw");
+    // A fresh install runs (each send re-reads its field).
+    run(
+        &mut eval,
+        "(def g9e2 (executor)) (set-agent-send-executor! g9e2)",
+    );
+    run(&mut eval, "(def g9fc (agent 0)) (def g9fcp (promise))");
+    run(&mut eval, "(send g9fc (fn [s] (deliver g9fcp :ran) 9))");
+    assert_eq!(run_last(&mut eval, "(deref g9fcp 8000 :timeout)"), ":ran");
+    assert_eq!(run_last(&mut eval, "(await-for 8000 g9fc)"), "true");
+    assert_eq!(run_last(&mut eval, "@g9fc"), "9");
+    // Futures ride the fresh solo field too.
+    run(
+        &mut eval,
+        "(def g9fq (executor)) (set-agent-send-off-executor! g9fq)",
+    );
+    assert_eq!(run_last(&mut eval, "@(future-call (fn [] 7))"), "7");
+}
+
+#[test]
+fn shutdown_nil_fields_throw_solo_first() {
+    // Gap-96 (z-*): shutdown over a nil field throws that field's
+    // NPE — the solo side first (both nil throws the solo NPE
+    // with nothing shut); a nil send side throws after the solo
+    // side ran.
+    let mut eval = boot();
+    run(
+        &mut eval,
+        "(set-agent-send-executor! nil) (set-agent-send-off-executor! nil)",
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(shutdown-agents)"),
+        "java.lang.NullPointerException | Cannot invoke \"java.util.concurrent.ExecutorService.shutdown()\" because \"clojure.lang.Agent.soloExecutor\" is null"
+    );
+    // Nothing shut: a custom installed afterwards runs.
+    run(
+        &mut eval,
+        "(def g9z (executor)) (set-agent-send-executor! g9z)",
+    );
+    run(
+        &mut eval,
+        "(def g9za (agent 0)) (send g9za inc) (await g9za)",
+    );
+    assert_eq!(run_last(&mut eval, "@g9za"), "1");
+    // Solo nil alone: the send side is untouched too.
+    let mut eval = boot();
+    run(
+        &mut eval,
+        "(def g9zs (executor)) (set-agent-send-executor! g9zs)",
+    );
+    run(&mut eval, "(set-agent-send-off-executor! nil)");
+    assert_eq!(
+        uncaught(&mut eval, "(shutdown-agents)"),
+        "java.lang.NullPointerException | Cannot invoke \"java.util.concurrent.ExecutorService.shutdown()\" because \"clojure.lang.Agent.soloExecutor\" is null"
+    );
+    run(
+        &mut eval,
+        "(def g9zb (agent 0)) (send g9zb inc) (await g9zb)",
+    );
+    assert_eq!(run_last(&mut eval, "@g9zb"), "1");
+    // Nil send side: the solo custom shuts before the throw.
+    let mut eval = boot();
+    run(
+        &mut eval,
+        "(def g9zo (executor)) (set-agent-send-off-executor! g9zo)",
+    );
+    run(&mut eval, "(set-agent-send-executor! nil)");
+    assert_eq!(
+        uncaught(&mut eval, "(shutdown-agents)"),
+        "java.lang.NullPointerException | Cannot invoke \"java.util.concurrent.ExecutorService.shutdown()\" because \"clojure.lang.Agent.pooledExecutor\" is null"
+    );
+    run(&mut eval, "(def g9zp (promise))");
+    run(
+        &mut eval,
+        "(def g9zc (agent 0 :error-handler (fn [ag e] (deliver g9zp :saw))))",
+    );
+    run(&mut eval, "(send-off g9zc inc)");
+    assert_eq!(run_last(&mut eval, "(deref g9zp 8000 :timeout)"), ":saw");
+}
+
+#[test]
+fn await_completes_on_installed_send_pool() {
+    // Gap-96 (r-await): `await` barriers ride `send`, so they run
+    // on the installed send pool and the wait completes.
+    let mut eval = boot();
+    run(
+        &mut eval,
+        "(def g9w (executor)) (set-agent-send-executor! g9w)",
+    );
+    run(&mut eval, "(def g9wa (agent 0)) (send g9wa inc)");
+    assert_eq!(run_last(&mut eval, "(await g9wa)"), "nil");
+    assert_eq!(run_last(&mut eval, "@g9wa"), "1");
 }
 
 #[test]

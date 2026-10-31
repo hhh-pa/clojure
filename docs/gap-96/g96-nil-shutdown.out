@@ -1,0 +1,6 @@
+z-nil-set-ret true
+z-both [:threw "class java.lang.NullPointerException" "Cannot invoke \"java.util.concurrent.ExecutorService.shutdown()\" because \"clojure.lang.Agent.soloExecutor\" is null"]
+z-both-pools-live [true true 1 1]
+z-nil-pooled-shutdown THROW java.lang.NullPointerException|"Cannot invoke \"java.util.concurrent.ExecutorService.shutdown()\" because \"clojure.lang.Agent.pooledExecutor\" is null"
+z-pooled-npe-shut-solo [true false 1 0]
+z-nil-solo-shutdown THROW java.lang.NullPointerException|"Cannot invoke \"java.util.concurrent.ExecutorService.shutdown()\" because \"clojure.lang.Agent.soloExecutor\" is null"

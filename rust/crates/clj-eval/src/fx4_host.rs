@@ -371,8 +371,14 @@ fn ims() -> NativeError {
 /// body form (`"null"` when body-less); `if`/`case*` and anything
 /// else → the bare message (the JVM gives up on branches the same
 /// way). A missing form (direct native calls) keeps the legacy
-/// `"lock"` placeholder. Nested monitor forms stay divergent (E1w
-/// `nestmon`: the JVM throws IMS there by an unknown mechanism).
+/// `"lock"` placeholder. A monitor form nested as a lockee reads
+/// as a call (E1w `nestmon`): `(monitor-exit (monitor-enter x))`
+/// is the exit NPE here, while the observed JVMs throw IMS — the
+/// inner enter yields nil (upstream `MonitorEnterExpr.emit` ends
+/// in `NIL_EXPR`), so the outer exit is nil-with-held, exactly
+/// the unexplained B3 split condition. The sibling
+/// `(monitor-enter (monitor-exit x))` agrees (enter NPE, empty
+/// stack). Both shapes are pinned in `monitor_nested_forms`.
 enum NilLockee {
     Null,
     Local(String),

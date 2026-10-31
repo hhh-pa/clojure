@@ -2080,7 +2080,10 @@ mod tests {
         );
         assert_eq!(pr_to_string(&Value::Char('a'), &unreadable), "\\a");
         // BigInt keeps ambient readably (no forced `N`).
-        assert_eq!(pr_to_string(&Value::BigInt(5.into()), &unreadable), "5");
+        assert_eq!(
+            pr_to_string(&Value::BigInt(Arc::new(5.into())), &unreadable),
+            "5"
+        );
     }
 
     #[test]
