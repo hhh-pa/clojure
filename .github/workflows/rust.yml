@@ -54,6 +54,51 @@ permissions:
   contents: read
 
 jobs:
+  # Tiering (deadline throughput): PRs always run the core signal
+  # (fmt/clippy, windows tests, coverage gates). The slow legs run
+  # on master/schedule unconditionally, and on PRs only when the
+  # diff touches what they guard: msrv/release/unlinked/loom need
+  # Rust non-test sources (plus manifests/toolchain actions);
+  # tla needs the models. .clj/test/docs-only PRs skip ~14 jobs.
+  # Fail-open: if the diff cannot be computed, everything runs.
+  changes:
+    name: changed paths
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      rust: ${{ steps.diff.outputs.rust }}
+      models: ${{ steps.diff.outputs.models }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 50
+      - id: diff
+        run: |
+          set -u
+          rust=true; models=true
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            base="${{ github.event.pull_request.base.sha }}"
+            if git fetch --no-tags --depth=50 origin "$base" 2>/dev/null \
+              && files=$(git diff --name-only "$base"...HEAD 2>/dev/null); then
+              rust=false; models=false
+              while IFS= read -r f; do
+                case "$f" in
+                  # Workflow edits validate every leg.
+                  .github/workflows/*) rust=true; models=true;;
+                  # Models gate the tla leg (before the docs skip).
+                  docs/t1174/models/*) models=true;;
+                  # Tests, embedded .clj, and docs need no slow legs.
+                  */tests/*|*/test_*.rs|*.clj|*.cljc|*.md|docs/*) ;;
+                  # Rust sources, manifests, toolchain actions,
+                  # and gate tools run the Rust legs.
+                  *.rs|*/Cargo.toml|rust/Cargo.lock|.github/actions/*|scripts/ci/*) rust=true;;
+                esac
+              done <<< "$files"
+            fi
+          fi
+          echo "rust=$rust" >> "$GITHUB_OUTPUT"
+          echo "models=$models" >> "$GITHUB_OUTPUT"
   fmt-clippy:
     name: fmt + clippy
     runs-on: ubuntu-latest
@@ -134,6 +179,8 @@ jobs:
 
   msrv:
     name: msrv (1.85, shard ${{ matrix.shard }}/8)
+    needs: [changes]
+    if: github.event_name != 'pull_request' || needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read # checkout
@@ -167,6 +214,8 @@ jobs:
 
   test-no-default:
     name: test unlinked (${{ matrix.os }})
+    needs: [changes]
+    if: github.event_name != 'pull_request' || needs.changes.outputs.rust == 'true'
     runs-on: ${{ matrix.os }}
     permissions:
       contents: read # checkout
@@ -195,6 +244,8 @@ jobs:
 
   loom-models:
     name: loom models
+    needs: [changes]
+    if: github.event_name != 'pull_request' || needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read # checkout
@@ -219,6 +270,8 @@ jobs:
 
   tla:
     name: tla model check
+    needs: [changes]
+    if: github.event_name != 'pull_request' || needs.changes.outputs.models == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -633,6 +686,8 @@ jobs:
   # tag release; macOS binaries ship on v* tags via rust-release.yml.
   build-release:
     name: release (${{ matrix.os }})
+    needs: [changes]
+    if: github.event_name != 'pull_request' || needs.changes.outputs.rust == 'true'
     runs-on: ${{ matrix.os }}
     permissions:
       contents: read # checkout

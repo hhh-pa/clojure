@@ -63,6 +63,13 @@ on:
     - cron: '*/15 * * * *'
   workflow_dispatch:
 
+# Queue, don't overlap: a quota-sleeping run holds the group so a
+# later pass can't interleave and double-ADD items. Never cancel:
+# a cancelled reconcile is half a reconcile.
+concurrency:
+  group: storyboard
+  cancel-in-progress: false
+
 # PAT-authed project writes below, plus issue assignee edits
 # for the auto-assign pass (GITHUB_TOKEN, issues scope only).
 permissions:
@@ -72,7 +79,8 @@ permissions:
 jobs:
   sync:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # Covers a full quota sleep (~60 min worst case) plus the pass.
+    timeout-minutes: 75
     steps:
       - name: Reconcile board items
         env:
@@ -95,6 +103,22 @@ jobs:
           opt_prog=47fc9ee4
           opt_done=98236657
           repo=hhh-pa/clojure
+          # Rate-limit preflight: the PAT bucket is shared with
+          # interactive sessions, and a pass burns ~100-200 calls.
+          # Sleep until reset instead of failing every 15 minutes
+          # (this endpoint itself is quota-free). Reads degrade to
+          # today's behavior on transient failure (fail-open).
+          rem=$(gh api rate_limit --jq '.resources.core.remaining' 2>/dev/null) || rem=9999
+          if [ "$rem" -lt 250 ]; then
+            reset=$(gh api rate_limit --jq '.resources.core.reset' 2>/dev/null) || reset=""
+            if [ -n "$reset" ]; then
+              wait=$((reset - $(date +%s) + 30))
+              if [ "$wait" -gt 0 ]; then
+                echo "low PAT quota ($rem left); sleeping ${wait}s"
+                sleep "$wait"
+              fi
+            fi
+          fi
 
           # All GraphQL values interpolate inline: `gh api -f`
           # variables fail to bind singleSelectOptionId.
