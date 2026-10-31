@@ -254,16 +254,18 @@ impl Reader {
         })
     }
 
-    /// Inline validation for canonical default tags (#94): the
-    /// failure for an invalid `inst`/`uuid` string payload, else
-    /// `None` (non-canonical default tags never validate — the
-    /// eval side invokes whatever the root holds — probes
-    /// `h-extra`, `h-extra-ns`).
+    /// Inline validation for pristine canonical defaults (#94r):
+    /// the failure for an invalid `inst`/`uuid` string payload,
+    /// else `None`. Only unqualified `inst`/`uuid` reach here (the
+    /// sole caller gates on `default_reader_canonical`, built from
+    /// exactly these two) — non-canonical default tags never
+    /// validate (the eval side invokes whatever the root holds —
+    /// probes `h-extra`, `h-extra-ns`).
     fn default_tag_failure(sym: &Symbol, s: &str) -> Option<TagError> {
-        match sym.name() {
-            "inst" if sym.namespace().is_none() => validate_inst(s).err(),
-            "uuid" if sym.namespace().is_none() => validate_uuid(s).err(),
-            _ => None,
+        if sym.name() == "inst" {
+            validate_inst(s).err()
+        } else {
+            validate_uuid(s).err()
         }
     }
 
