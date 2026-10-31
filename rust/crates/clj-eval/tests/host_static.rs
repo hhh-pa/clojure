@@ -608,3 +608,64 @@ fn sq_imports() {
     assert_eq!(run_step(&mut bare, "`TreeMap"), "user/TreeMap");
     assert_eq!(run_step(&mut bare, "`TreeMap/foo"), "TreeMap/foo");
 }
+
+// ---- direct __static* guards ----
+
+// static-star-arity/static-star-fqn/static-star-member: the
+// synthesized `(__static* fqn member args…)` head guards its own
+// shape at runtime (direct calls bypass the compile-time
+// arity check, so these fire only here).
+#[test]
+fn static_star_guards() {
+    let mut eval = boot();
+    assert_eq!(
+        uncaught(&mut eval, "(__static*)"),
+        "clojure.lang.ArityException | Wrong number of args (0) passed to: clojure.core/__static*"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(__static* 1 \"forName\")"),
+        cce_bootstrap("java.lang.Long", "java.lang.String")
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(__static* \"java.lang.Class\" 1)"),
+        cce_bootstrap("java.lang.Long", "java.lang.String")
+    );
+}
+
+// forName-runtime-arity: static syntax arity-checks at compile
+// time (oracles `forName-0arg`, `forName-4arg`), so the runtime
+// miss fires only through direct `__static*` calls.
+#[test]
+fn forname_runtime_arity() {
+    let mut eval = boot();
+    assert_eq!(
+        uncaught(&mut eval, "(__static* \"java.lang.Class\" \"forName\")"),
+        "java.lang.IllegalArgumentException | No matching method forName found taking 0 args for class java.lang.Class"
+    );
+}
+
+// static-arg-analyze: an unresolvable static-call argument fails
+// analysis inside `static_call`, propagating out of the static
+// rewrite (the head resolves; the tail does not).
+#[test]
+fn static_call_arg_error() {
+    let mut eval = boot();
+    assert_eq!(
+        compile_err(&mut eval, "(Class/forName unbound-xyz)"),
+        "java.lang.RuntimeException | Unable to resolve symbol: unbound-xyz in this context"
+    );
+}
+
+// unmapped-core-macro: an unmapped `clojure.core` macro var is
+// not intact, so the qualified head falls past the builtin
+// intercept to the ordinary var miss (the namespace still
+// exists, so the static rule does not fire).
+#[test]
+fn unmapped_core_macro_falls_through() {
+    let mut eval = boot();
+    run_step(&mut eval, "(ns-unmap 'clojure.core 'let)");
+    assert_eq!(
+        compile_err(&mut eval, "(clojure.core/let [x 1] x)"),
+        "java.lang.RuntimeException | No such var: clojure.core/let"
+    );
+}
