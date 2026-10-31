@@ -47,9 +47,11 @@ pub struct KeyBinding {
 /// A map-destructure pattern (`destmap*`, incl. the 1.13 directives).
 #[derive(Clone, Debug)]
 pub struct MapPattern {
-    /// `(local-pattern, lookup-key, required?)` entries (`:req!`
-    /// locals bind required, like `:keys!` elements).
-    pub entries: Vec<(Pattern, Value, bool)>,
+    /// `(local-pattern, lookup-key, or-key, required?)` entries
+    /// (`:req!` locals bind required, like `:keys!` elements). The
+    /// lookup key is unquoted (map keys are values); the or-key is
+    /// the key form as written (`:or` matches forms, #158).
+    pub entries: Vec<(Pattern, Value, Value, bool)>,
     /// `:keys`/`:strs`/`:syms` (and `!`) bindings.
     pub keys: Vec<KeyBinding>,
     /// Post-`&` key-list keys (selection only, never bound).
@@ -1660,7 +1662,7 @@ pub(crate) fn pattern_names(pat: &Pattern) -> Vec<String> {
         }
         Pattern::Map(m) => {
             let mut out = Vec::new();
-            for (local, _, _) in &m.entries {
+            for (local, _, _, _) in &m.entries {
                 out.extend(pattern_names(local));
             }
             for key in &m.keys {
@@ -2362,8 +2364,8 @@ fn unquote_key(v: &Value) -> Value {
     v.clone()
 }
 
-/// `(quote k)` as a value: an `:or` key spelled quoted matches the
-/// unquoted entry key (#112).
+/// Build `(quote k)` as a value (test-only fixture helper).
+#[cfg(test)]
 fn quote_form(key: &Value) -> Value {
     Value::List(List::from_vec(vec![
         Value::Symbol(Symbol::new(None, "quote")),
@@ -2692,11 +2694,12 @@ fn walk_map_pair(
     }
     walk_binding(k)?;
     // #112: the entry key unquotes (quoted spells the same key).
+    // The `:or` check compares the form as written (#158).
     let key = unquote_key(v);
     sel.push(key.clone());
     if let Value::Symbol(local) = k {
         bound_keys.insert(local.name().to_owned(), key.clone());
-        check_or_pair(or_map, local.name(), &key, false)?;
+        check_or_pair(or_map, local.name(), v, false)?;
     }
     Ok(())
 }
@@ -2810,18 +2813,19 @@ fn walk_req_entry(
 ) -> Result<(), WalkError> {
     // #112: the key unquotes (quoted spells the same key); vector
     // locals validate as nested patterns (the runtime `pb` splice
-    // accepts any binding form, like the expansion path).
-    let key = unquote_key(key);
+    // accepts any binding form, like the expansion path). The `:or`
+    // check compares the form as written (#158).
+    let ukey = unquote_key(key);
     match local {
         Value::Symbol(sym) => {
-            bound_keys.insert(sym.name().to_owned(), key.clone());
-            check_or_pair(or_map, sym.name(), &key, true)?;
+            bound_keys.insert(sym.name().to_owned(), ukey.clone());
+            check_or_pair(or_map, sym.name(), key, true)?;
         }
         Value::Map(nested) => walk_map(nested)?,
         _ if vector_shape_items(local).is_some() => walk_binding(local)?,
         _ => return Err(WalkError::unsupported(local)),
     }
-    sel.push(key);
+    sel.push(ukey);
     Ok(())
 }
 
@@ -2899,6 +2903,9 @@ fn key_cast_err(dir: &KeyDirective, form: &Value) -> WalkError {
 /// supply default value for required key` when a required binding
 /// has either. The key arrives unquoted (#112) while `:or` keys
 /// stay as written, so a quoted `:or` spelling matches too.
+/// Upstream `push1` (`local-default?`/`key-default?`): `:or`
+/// matches the local symbol or the key form as written (#158) —
+/// callers pass the raw form, never the unquoted key.
 fn check_or_pair(
     or_map: Option<&Map>,
     local: &str,
@@ -2910,7 +2917,7 @@ fn check_or_pair(
     };
     let local_key = Value::Symbol(Symbol::new(None, local));
     let has_local = or.get(&local_key).is_some();
-    let has_key = or.get(key).is_some() || or.get(&quote_form(key)).is_some();
+    let has_key = or.get(key).is_some();
     if has_local && has_key {
         return Err(WalkError {
             class: class::EXCEPTION,
@@ -3708,27 +3715,33 @@ impl<'a> Analyzer<'a> {
         let validated = as_pat(k).expect("patterns validated before building");
         let (pat, _) = self.build_pattern(validated, span)?;
         // #112: the entry key unquotes (quoted spells the same key).
-        push_entry(&mut acc.entries, pat, unquote_key(v), false);
+        push_entry(&mut acc.entries, pat, unquote_key(v), v.clone(), false);
         Ok(())
     }
 
-    /// The analyzed `:or` defaults (eager at runtime). Keys unquote
-    /// (#112) so a quoted spelling matches the unquoted entry key
-    /// at lookup, like the walk-time `:or` checks.
+    /// The analyzed `:or` defaults (eager at runtime). Keys stay as
+    /// written: `:or` matches forms (upstream `push1`), so a quoted
+    /// spelling matches only the quoted entry key (#158).
     fn build_or(&mut self, m: &Map, span: Span) -> Result<Vec<(Value, Expr)>, CompileError> {
         let mut or = Vec::new();
         if let Some(Value::Map(or_map)) = map_get(m, "or") {
             for (k, default) in or_map.iter() {
-                or.push((unquote_key(k), self.analyze(default, span, false)?));
+                or.push((k.clone(), self.analyze(default, span, false)?));
             }
         }
         Ok(or)
     }
 }
 
-/// Push one `(pattern, key, required?)` entry.
-fn push_entry(acc: &mut Vec<(Pattern, Value, bool)>, pat: Pattern, key: Value, required: bool) {
-    acc.push((pat, key, required));
+/// Push one `(pattern, lookup-key, or-key, required?)` entry.
+fn push_entry(
+    acc: &mut Vec<(Pattern, Value, Value, bool)>,
+    pat: Pattern,
+    key: Value,
+    or_key: Value,
+    required: bool,
+) {
+    acc.push((pat, key, or_key, required));
 }
 
 impl<'a> Analyzer<'a> {
@@ -3743,7 +3756,7 @@ impl<'a> Analyzer<'a> {
             for (local, key) in req.iter() {
                 let validated = as_pat(local).expect("patterns validated before building");
                 let (pat, _) = self.build_pattern(validated, span)?;
-                push_entry(&mut acc.entries, pat, unquote_key(key), true);
+                push_entry(&mut acc.entries, pat, unquote_key(key), key.clone(), true);
             }
             return Ok(());
         }
@@ -3754,7 +3767,7 @@ impl<'a> Analyzer<'a> {
 /// A map pattern under construction.
 #[derive(Default)]
 struct MapAcc {
-    entries: Vec<(Pattern, Value, bool)>,
+    entries: Vec<(Pattern, Value, Value, bool)>,
     keys: Vec<KeyBinding>,
     extra_keys: Vec<Value>,
     as_sym: Option<String>,

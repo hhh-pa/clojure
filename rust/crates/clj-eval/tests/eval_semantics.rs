@@ -1463,12 +1463,18 @@ fn map_destructure_analyzer_edges() {
         // Quoted `:or` spellings match quoted entries.
         ("(let [{a 'k, :or {'k 42}} {}] a)", "42"),
         ("((fn [{a 'k, :or {'k 42}}] a) {})", "42"),
-        // Mixed `:or` spellings apply (F-A, tracked by #112 which
-        // stays open): the analyzer normalizes spellings, while
-        // upstream `contains?` compares key forms (entry `'k` +
-        // `:or {k 1}` ignores the default there).
-        ("(let [{a 'k, :or {k 42}} {}] a)", "42"),
-        ("(let [{a k, :or {'k 42}} {}] a)", "42"),
+        // Mixed `:or` spellings miss (#158, ex F-A): upstream
+        // `push1` compares key forms (`local-default?` on the local,
+        // `key-default?` on `bk`), so a quoted entry plus a bare
+        // `:or` key (or the reverse) ignores the default.
+        ("(let [{a 'k, :or {k 42}} {}] a)", "nil"),
+        ("((fn [{a 'k, :or {k 42}}] a) {})", "nil"),
+        ("(let [{a k, :or {'k 42}} {}] a)", "nil"),
+        ("((fn [{a k, :or {'k 42}}] a) {})", "nil"),
+        // A quoted `:or` key misses the bare local too (#158):
+        // `(contains? {'a 42} 'a)` is false upstream.
+        ("(let [{a :k, :or {'a 42}} {}] a)", "nil"),
+        ("((fn [{a :k, :or {'a 42}}] a) {})", "nil"),
         // Quoted post-`&` keys join the selection.
         (
             "(let [{:syms [a & 'e], :excess x} {'a 1, 'e 2, 'f 3}] x)",
