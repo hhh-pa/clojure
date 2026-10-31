@@ -1013,6 +1013,10 @@ mod tests {
         assert_eq!(c("-1E30"), (i64::MIN, true));
         assert_eq!(c("9223372036854775807"), (i64::MAX, true));
         assert_eq!(c("9223372036854775808"), (i64::MAX, true));
+        // Wide fractional magnitudes saturate without integral
+        // exactness (unscaled digits past scale + 19).
+        assert_eq!(c(&format!("{}.00001", "9".repeat(310))), (i64::MAX, false));
+        assert_eq!(c(&format!("-{}.00001", "9".repeat(310))), (i64::MIN, false));
         assert_eq!(c("-9223372036854775809"), (i64::MIN, true));
     }
 

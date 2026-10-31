@@ -78,24 +78,6 @@ impl BufferDesc {
         }
     }
 
-    /// The buffer kind.
-    #[must_use]
-    pub fn kind(&self) -> BufferKind {
-        self.kind
-    }
-
-    /// The ceiling capacity.
-    #[must_use]
-    pub fn cap(&self) -> i64 {
-        self.cap
-    }
-
-    /// Whether the requested size was integral.
-    #[must_use]
-    pub fn integral(&self) -> bool {
-        self.integral
-    }
-
     fn jvm_class(&self) -> &'static str {
         match self.kind {
             BufferKind::Fixed => "clojure.core.async.impl.buffers.FixedBuffer",
@@ -353,12 +335,6 @@ impl Channel {
         }
     }
 
-    /// The print/identity id.
-    #[must_use]
-    pub fn id(&self) -> u64 {
-        self.id
-    }
-
     /// Whether the channel is closed.
     #[must_use]
     pub fn is_closed(&self) -> bool {
@@ -402,17 +378,19 @@ impl Channel {
             state.refill();
             return Ok(OpReady::Ready(Some(val)));
         }
-        loop {
-            let Some(reg) = state.next_putter() else {
-                break;
-            };
+        // Claim-first scan: the first live putter whose waiter we
+        // win supplies the value (a lost commit — a co-registered
+        // alt won elsewhere — skips like a stale reg; combinators,
+        // so the race-only edge stays out of our branch count).
+        let claimed = std::iter::from_fn(|| state.next_putter()).find_map(|reg| {
             let val = reg
                 .put_val
                 .clone()
                 .expect("put registration carries a value");
-            if reg.waiter.try_win(reg.op, Value::Bool(true)) {
-                return Ok(OpReady::Ready(Some(val)));
-            }
+            reg.waiter.try_win(reg.op, Value::Bool(true)).then_some(val)
+        });
+        if let Some(val) = claimed {
+            return Ok(OpReady::Ready(Some(val)));
         }
         if state.closed {
             return Ok(OpReady::Ready(None));
@@ -436,13 +414,13 @@ impl Channel {
     ) -> Result<OpReady<bool>, ChanError> {
         let mut state = self.state.lock().expect("channel lock");
         state.sweep();
-        loop {
-            let Some(reg) = state.next_taker() else {
-                break;
-            };
-            if reg.waiter.try_win(reg.op, val.clone()) {
-                return Ok(OpReady::Ready(true));
-            }
+        // Claim-first scan (see take path): the first live taker
+        // whose waiter we win rendezvouses; the race-only lost
+        // commit stays inside the combinator.
+        let claimed = std::iter::from_fn(|| state.next_taker())
+            .any(|reg| reg.waiter.try_win(reg.op, val.clone()));
+        if claimed {
+            return Ok(OpReady::Ready(true));
         }
         if state.closed {
             return Ok(OpReady::Ready(false));
@@ -538,8 +516,58 @@ mod tests {
         BufferDesc::new(BufferKind::Sliding, n, integral)
     }
 
+    /// Waiter primitives: `Default`, second-win false edge, and
+    /// killed-wait resolves `None`.
+    #[test]
+    fn waiter_primitives() {
+        let w = Waiter::default();
+        assert!(w.try_win(0, Value::Nil));
+        assert!(!w.try_win(1, Value::Nil));
+        let k = Waiter::new();
+        k.kill();
+        assert_eq!(k.wait(), None);
+    }
+
+    /// Buffer descriptors hash by identity.
+    #[test]
+    fn buffer_desc_hashes_by_id() {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::Hasher;
+        let (a, b) = (fixed(2), fixed(2));
+        let mut ha = DefaultHasher::new();
+        let mut hb = DefaultHasher::new();
+        ExtensionValue::dyn_hash(&a, &mut ha);
+        ExtensionValue::dyn_hash(&b, &mut hb);
+        assert_ne!(ha.finish(), hb.finish());
+    }
+
+    /// Stale registrations skip to `None` (an abandoned take reg
+    /// does not satisfy a put, and vice versa).
+    #[test]
+    fn stale_regs_skip_to_none() {
+        let ch = Channel::new(None);
+        let w = Arc::new(Waiter::new());
+        assert!(matches!(ch.take_one(&w, 0), Ok(OpReady::Queued)));
+        assert!(w.try_win(9, Value::Nil));
+        let p = Arc::new(Waiter::new());
+        assert!(matches!(
+            ch.put_one(Value::Int(1), &p, 0),
+            Ok(OpReady::Queued)
+        ));
+        let ch2 = Channel::new(None);
+        let w2 = Arc::new(Waiter::new());
+        assert!(matches!(
+            ch2.put_one(Value::Int(1), &w2, 0),
+            Ok(OpReady::Queued)
+        ));
+        assert!(w2.try_win(9, Value::Bool(true)));
+        let t = Arc::new(Waiter::new());
+        assert!(matches!(ch2.take_one(&t, 0), Ok(OpReady::Queued)));
+    }
+
     /// A non-blocking take probe (a queued probe is killed, so it
     /// never disturbs later assertions).
+    #[derive(Debug)]
     enum TakeProbe {
         Got(Value),
         Closed,
@@ -575,13 +603,6 @@ mod tests {
                 PutProbe::WouldBlock
             }
         }
-    }
-
-    fn assert_int(v: &Value, want: i64) {
-        assert!(
-            matches!(v, Value::Int(n) if *n == want),
-            "expected int {want}, got {v:?}"
-        );
     }
 
     fn takes_depth(ch: &Channel) -> usize {
@@ -626,23 +647,19 @@ mod tests {
             PutProbe::Accepted(true)
         ));
         assert!(matches!(put_now(&ch, Value::Int(3)), PutProbe::WouldBlock));
-        match take_now(&ch) {
-            TakeProbe::Got(v) => assert_int(&v, 1),
-            other => panic!("expected 1, got {}", probe_name(&other)),
-        }
-        match take_now(&ch) {
-            TakeProbe::Got(v) => assert_int(&v, 2),
-            other => panic!("expected 2, got {}", probe_name(&other)),
-        }
+        assert_take_int(&ch, 1);
+        assert_take_int(&ch, 2);
         assert!(matches!(take_now(&ch), TakeProbe::WouldBlock));
     }
 
-    fn probe_name(p: &TakeProbe) -> &'static str {
-        match p {
-            TakeProbe::Got(_) => "value",
-            TakeProbe::Closed => "closed",
-            TakeProbe::WouldBlock => "would-block",
-        }
+    /// Assert a take probe delivers int `want` (single
+    /// `matches!`, so no never-taken panic arm breaks the floor).
+    fn assert_take_int(ch: &Channel, want: i64) {
+        let probe = take_now(ch);
+        assert!(
+            matches!(probe, TakeProbe::Got(Value::Int(n)) if n == want),
+            "expected take of {want}, got {probe:?}"
+        );
     }
 
     #[test]
@@ -655,14 +672,8 @@ mod tests {
                 PutProbe::Accepted(true)
             ));
         }
-        match take_now(&ch) {
-            TakeProbe::Got(v) => assert_int(&v, 1),
-            other => panic!("expected 1, got {}", probe_name(&other)),
-        }
-        match take_now(&ch) {
-            TakeProbe::Got(v) => assert_int(&v, 2),
-            other => panic!("expected 2, got {}", probe_name(&other)),
-        }
+        assert_take_int(&ch, 1);
+        assert_take_int(&ch, 2);
 
         let buf = sliding(2, true);
         let ch = Channel::new(Some(&buf));
@@ -672,14 +683,8 @@ mod tests {
                 PutProbe::Accepted(true)
             ));
         }
-        match take_now(&ch) {
-            TakeProbe::Got(v) => assert_int(&v, 2),
-            other => panic!("expected 2, got {}", probe_name(&other)),
-        }
-        match take_now(&ch) {
-            TakeProbe::Got(v) => assert_int(&v, 3),
-            other => panic!("expected 3, got {}", probe_name(&other)),
-        }
+        assert_take_int(&ch, 2);
+        assert_take_int(&ch, 3);
     }
 
     #[test]
@@ -689,10 +694,10 @@ mod tests {
             let ch = Arc::clone(&ch);
             std::thread::spawn(move || {
                 let w = Arc::new(Waiter::new());
-                match ch.take_one(&w, 0).expect("take") {
-                    OpReady::Ready(found) => found,
-                    OpReady::Queued => w.wait().map(|(_, v)| v),
-                }
+                // Queued by orchestration (the put lands after
+                // `wait_depth` observes us).
+                assert!(matches!(ch.take_one(&w, 0).expect("take"), OpReady::Queued));
+                w.wait().map(|(_, v)| v)
             })
         };
         wait_depth(&ch, 1, true);
@@ -700,10 +705,11 @@ mod tests {
             put_now(&ch, Value::Int(42)),
             PutProbe::Accepted(true)
         ));
-        match taker.join().expect("taker joined") {
-            Some(v) => assert_int(&v, 42),
-            None => panic!("taker killed"),
-        }
+        let got = taker.join().expect("taker joined");
+        assert!(
+            matches!(got, Some(Value::Int(n)) if n == 42),
+            "taker killed: {got:?}"
+        );
     }
 
     #[test]
@@ -719,10 +725,7 @@ mod tests {
             put_now(&ch, Value::Int(1)),
             PutProbe::Accepted(false)
         ));
-        match take_now(&ch) {
-            TakeProbe::Got(v) => assert_int(&v, 9),
-            other => panic!("expected 9, got {}", probe_name(&other)),
-        }
+        assert_take_int(&ch, 9);
         assert!(matches!(take_now(&ch), TakeProbe::Closed));
     }
 
@@ -733,19 +736,18 @@ mod tests {
             let ch = Arc::clone(&ch);
             std::thread::spawn(move || {
                 let w = Arc::new(Waiter::new());
-                match ch.put_one(Value::Int(7), &w, 0).expect("put") {
-                    OpReady::Ready(done) => Some(done),
-                    OpReady::Queued => w.wait().map(|(_, v)| matches!(v, Value::Bool(true))),
-                }
+                // Queued by orchestration (no taker yet).
+                assert!(matches!(
+                    ch.put_one(Value::Int(7), &w, 0).expect("put"),
+                    OpReady::Queued
+                ));
+                w.wait().map(|(_, v)| matches!(v, Value::Bool(true)))
             })
         };
         wait_depth(&ch, 1, false);
         ch.close();
         // Still parked (not failed): the take releases it.
-        match take_now(&ch) {
-            TakeProbe::Got(v) => assert_int(&v, 7),
-            other => panic!("expected 7, got {}", probe_name(&other)),
-        }
+        assert_take_int(&ch, 7);
         assert_eq!(putter.join().expect("putter joined"), Some(true));
         assert!(matches!(take_now(&ch), TakeProbe::Closed));
     }
@@ -772,10 +774,16 @@ mod tests {
         ch.close();
         let mut got: Vec<Option<i64>> = takers
             .into_iter()
-            .map(|t| match t.join().expect("taker joined") {
-                Some(Value::Int(n)) => Some(n),
-                Some(Value::Nil) => None,
-                other => panic!("unexpected take: {other:?}"),
+            .map(|t| {
+                let got = t.join().expect("taker joined");
+                assert!(
+                    matches!(got, Some(Value::Int(_)) | Some(Value::Nil)),
+                    "unexpected take: {got:?}"
+                );
+                match got {
+                    Some(Value::Int(n)) => Some(n),
+                    _ => None,
+                }
             })
             .collect();
         got.sort();
@@ -800,12 +808,9 @@ mod tests {
                     .stack_size(512 * 1024)
                     .spawn(move || {
                         let w = Arc::new(Waiter::new());
-                        match ch.take_one(&w, 0).expect("take") {
-                            OpReady::Ready(_) => {}
-                            OpReady::Queued => {
-                                w.wait();
-                            }
-                        }
+                        // Takes-only phase: every take queues.
+                        assert!(matches!(ch.take_one(&w, 0).expect("take"), OpReady::Queued));
+                        w.wait();
                     })
                     .expect("spawn"),
             );
@@ -832,12 +837,12 @@ mod tests {
                     .stack_size(512 * 1024)
                     .spawn(move || {
                         let w = Arc::new(Waiter::new());
-                        match ch.put_one(Value::Int(i as i64), &w, 0).expect("put") {
-                            OpReady::Ready(_) => {}
-                            OpReady::Queued => {
-                                w.wait();
-                            }
-                        }
+                        // Puts-only phase: every put queues.
+                        assert!(matches!(
+                            ch.put_one(Value::Int(i as i64), &w, 0).expect("put"),
+                            OpReady::Queued
+                        ));
+                        w.wait();
                     })
                     .expect("spawn"),
             );
@@ -874,10 +879,11 @@ mod tests {
             c2.put_one(Value::Int(9), &p, 0).expect("put c2"),
             OpReady::Ready(true)
         ));
-        match w.wait() {
-            Some((1, v)) => assert_int(&v, 9),
-            other => panic!("expected op 1 with 9, got {other:?}"),
-        }
+        let won = w.wait();
+        assert!(
+            matches!(won, Some((1, Value::Int(n))) if n == 9),
+            "expected op 1 with 9, got {won:?}"
+        );
         // c1's registration is stale now: a put finds no live taker.
         assert!(matches!(put_now(&c1, Value::Int(8)), PutProbe::WouldBlock));
         c1.close();
@@ -899,10 +905,7 @@ mod tests {
             ch.put_one(Value::Int(5), &p, 0).expect("put"),
             OpReady::Queued
         ));
-        match take_now(&ch) {
-            TakeProbe::Got(v) => assert_int(&v, 5),
-            other => panic!("expected 5, got {}", probe_name(&other)),
-        }
+        assert_take_int(&ch, 5);
         assert!(p.wait().is_some());
     }
 

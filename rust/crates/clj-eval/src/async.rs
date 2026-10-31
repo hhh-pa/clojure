@@ -360,9 +360,6 @@ fn op_port(op: &AltOp) -> Value {
     }
 }
 
-/// The `:default` sentinel op (never a real index).
-const DEFAULT_OP: usize = usize::MAX;
-
 /// The parsed `alts!!` options (later pairs win, like
 /// `hash-map`; `:default` is presence, `:priority` truth).
 struct AltOpts {
@@ -413,19 +410,19 @@ fn native_alts_block(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nat
     if let Some(won) = alts_try_ready(&ops, &order, &waiter)? {
         return Ok(won);
     }
-    if let Some(default) = opts.default {
-        // A concurrent completion may have won first (like the
-        // flag commit in `do-alts`): then wait for its result.
-        if waiter.try_win(DEFAULT_OP, default.clone()) {
-            return Ok(alt_result(default, default_port()));
-        }
+    // The `:default` fallback (#123s1): claim-first — exactly one
+    // of us or a racing completion wins the waiter (the `do-alts`
+    // flag commit). The winner's op index resolves through the
+    // port table without branching (default rides at `ops.len()`).
+    if let Some(default) = &opts.default {
+        let _ = waiter.try_win(ops.len(), default.clone());
     }
     let (op, val) = waiter.wait().ok_or_else(killed)?;
-    if op == DEFAULT_OP {
-        Ok(alt_result(val, default_port()))
-    } else {
-        Ok(alt_result(val, op_port(&ops[op])))
+    let mut ports: Vec<Value> = ops.iter().map(op_port).collect();
+    if opts.default.is_some() {
+        ports.push(default_port());
     }
+    Ok(alt_result(val, ports[op].clone()))
 }
 
 /// One `alts!!` immediate pass (#123s1): register every op in
@@ -442,10 +439,7 @@ fn alts_try_ready(
                 let ch = as_chan(chv, "take!", "ReadPort")?;
                 match ch.take_one(waiter, *idx).map_err(chan_err)? {
                     OpReady::Ready(found) => {
-                        return Ok(Some(alt_result(
-                            found.unwrap_or(Value::Nil),
-                            chv.clone(),
-                        )));
+                        return Ok(Some(alt_result(found.unwrap_or(Value::Nil), chv.clone())));
                     }
                     OpReady::Queued => {}
                 }
@@ -488,5 +482,63 @@ pub(crate) fn install_async_ns(eval: &mut Evaluator) {
     for (name, f) in ASYNC_NATIVES {
         let func: Arc<crate::ext::NativeImpl> = Arc::new(*f);
         eval.install_native(ASYNC_NS, name, func);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `QueueFull` maps to the exact JVM assert texts (puts name
+    /// the windowed-buffer hint; takes do not).
+    #[test]
+    fn chan_err_queue_full_texts() {
+        let puts = chan_err(ChanError::QueueFull { puts: true });
+        assert_eq!(puts.class, ThrowClass::AssertionError);
+        assert!(puts.message.contains("pending puts"), "{}", puts.message);
+        assert!(puts.message.contains("windowed buffer"), "{}", puts.message);
+        let takes = chan_err(ChanError::QueueFull { puts: false });
+        assert_eq!(takes.class, ThrowClass::AssertionError);
+        assert!(takes.message.contains("pending takes"), "{}", takes.message);
+        assert!(!takes.message.contains("windowed"), "{}", takes.message);
+    }
+
+    /// Exotic buffer sizes: negative infinity, bigints, exact
+    /// ratios (fractional doubles pin through eval).
+    #[test]
+    fn exotic_caps() {
+        assert_eq!(double_cap(f64::NEG_INFINITY), (false, i64::MIN, false));
+        assert_eq!(bigint_cap(&num_bigint::BigInt::from(5)), (true, 5, true));
+        assert_eq!(bigint_cap(&num_bigint::BigInt::from(-5)), (false, -5, true));
+        let four_halves = num_rational::BigRational::new(
+            num_bigint::BigInt::from(4),
+            num_bigint::BigInt::from(2),
+        );
+        assert_eq!(ratio_cap(&four_halves), (true, 2, true));
+    }
+
+    /// The abandoned-waiter internal error shape.
+    #[test]
+    fn killed_shape() {
+        let err = killed();
+        assert_eq!(err.class, ThrowClass::Error);
+        assert_eq!(err.message, "async waiter abandoned while parking");
+    }
+
+    /// A map-entry op with a nil value fails the nil-put assert
+    /// (like the vector pair shape).
+    #[test]
+    fn map_entry_nil_put_asserts() {
+        let ch = Value::Extension(Arc::new(Channel::new(None)));
+        let entry = clj_value::map_entry(ch, Value::Nil);
+        let err = parse_alt_ops(std::slice::from_ref(&entry))
+            .err()
+            .expect("nil-put assert");
+        assert_eq!(err.class, ThrowClass::AssertionError);
+        assert!(
+            err.message.contains("can't put nil on channel"),
+            "{}",
+            err.message
+        );
     }
 }
