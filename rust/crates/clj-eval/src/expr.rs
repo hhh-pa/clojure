@@ -868,25 +868,7 @@ impl<'a> Analyzer<'a> {
             // members (method fns, field reads) are a later slice,
             // so those keep `No such namespace` for now.
             Some(ns) if self.eval.registry.namespace_target_in(&cur, ns).is_none() => {
-                if crate::classemu::is_class_position(ns)
-                    && self.static_head_class(&cur, ns).is_none()
-                {
-                    Err(self.err(
-                        class::CLASS_NOT_FOUND,
-                        ns.to_owned(),
-                        span,
-                        Verb::Compiling,
-                        None,
-                    ))
-                } else {
-                    Err(self.err(
-                        class::RUNTIME,
-                        format!("No such namespace: {ns}"),
-                        span,
-                        Verb::Compiling,
-                        None,
-                    ))
-                }
+                Err(self.dangling_alias_err(&cur, ns, span))
             }
             Some(_) => Err(self.err(
                 class::RUNTIME,
@@ -902,6 +884,31 @@ impl<'a> Analyzer<'a> {
                 Verb::Compiling,
                 None,
             )),
+        }
+    }
+
+    /// Error for a dangling alias / unresolvable dotted head
+    /// (split from [`analyze_symbol`](Self::analyze_symbol) for
+    /// the complexity budget): `ClassNotFoundException` when the
+    /// head sits in class position with no static class behind
+    /// it, else `No such namespace`.
+    fn dangling_alias_err(&self, cur: &str, ns: &str, span: Span) -> CompileError {
+        if crate::classemu::is_class_position(ns) && self.static_head_class(cur, ns).is_none() {
+            self.err(
+                class::CLASS_NOT_FOUND,
+                ns.to_owned(),
+                span,
+                Verb::Compiling,
+                None,
+            )
+        } else {
+            self.err(
+                class::RUNTIME,
+                format!("No such namespace: {ns}"),
+                span,
+                Verb::Compiling,
+                None,
+            )
         }
     }
 
