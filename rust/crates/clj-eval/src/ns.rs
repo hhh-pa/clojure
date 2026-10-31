@@ -2390,15 +2390,6 @@ fn boot_core_vars(eval: &mut Evaluator, user_handle: Value) {
     // S6: the default tag table (a plain map var — neither dynamic
     // nor private, probe `a-ddr-meta`).
     let defaults = crate::core::default_data_readers_map(eval);
-    // Stash the pristine natives (#94r): the default-layer
-    // snapshot compares the live root against these by reference.
-    if let Value::Map(m) = &defaults {
-        let inst = m.get(&Value::Symbol(Symbol::new(None, "inst")));
-        let uuid = m.get(&Value::Symbol(Symbol::new(None, "uuid")));
-        if let (Some(inst), Some(uuid)) = (inst, uuid) {
-            eval.canonical_default_readers = Some((inst.clone(), uuid.clone()));
-        }
-    }
     def_var(eval, "default-data-readers", defaults, false, false);
     // S18 compiler knobs (slot-only roots owned by `compiler.rs`)
     // plus the plain `primitives-classnames` root map.

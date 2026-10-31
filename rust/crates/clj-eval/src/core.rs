@@ -2039,6 +2039,9 @@ fn default_reader_fn(
 
 /// The `default-data-readers` root (S6): `{inst, uuid}` over the
 /// 1-arity default natives (probes `a-defaults*`, `a-ddr-*`).
+/// Stashes the pristine pair on the evaluator (#94r): the
+/// default-layer snapshot compares the live root against these by
+/// reference (stashed at mint time, so no extraction branches).
 pub(crate) fn default_data_readers_map(eval: &mut Evaluator) -> Value {
     let inst = default_reader_fn(
         eval,
@@ -2050,6 +2053,7 @@ pub(crate) fn default_data_readers_map(eval: &mut Evaluator) -> Value {
         "clojure.uuid/default-uuid-reader",
         default_uuid_reader,
     );
+    eval.canonical_default_readers = Some((inst.clone(), uuid.clone()));
     Value::Map(
         new_map()
             .insert(Value::Symbol(Symbol::new(None, "inst")), inst)

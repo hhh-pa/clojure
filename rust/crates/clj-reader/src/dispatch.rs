@@ -231,12 +231,12 @@ impl Reader {
                         });
                     }
                 }
-                // Validated: this `TaggedLiteral` defers for the
-                // eval walk, which resolves it through the
-                // flipped `inst`/`uuid` defaults to a native
-                // (#103) — re-validating idempotently on the
-                // way (the reader must not construct eagerly:
-                // the walk consults the live table).
+                // This `TaggedLiteral` defers for the eval walk,
+                // which resolves it through the live
+                // `inst`/`uuid` defaults (#103) — canonicals
+                // validated above, replacements invoked raw
+                // (the reader must not construct eagerly: the
+                // walk consults the live table).
                 return Ok(Some(tagged_literal(sym.clone(), form)));
             }
             // Anything else defers for the eval-side type dispatch
