@@ -15,8 +15,8 @@
 # so every GraphQL value interpolates inline instead (hand-proven
 # before automating; simulation also scoped ADD to open-only).
 #
-# Each pass does two things. ADD: OPEN issues/PRs missing from
-# the board get items (open-only: no closed-history backfill).
+# Each pass does two things. ADD: OPEN issues missing from the
+# board get items (open-only: no closed-history backfill).
 # RECONCILE: every content item converges to its desired state:
 #   closed (incl. merged)           -> Status=Done (Session kept)
 #   open + session:<id> label        -> Status=In Progress, Session=<id>
@@ -24,10 +24,18 @@
 # Draft cards, assignees, Labels rollup, and Slice-status are
 # untouched. Only drifts are written.
 #
-# Claim protocol compatibility: sessions label PRs `session:<id>`
-# and post CLAIM on #88; the board follows within 15 minutes (or
-# run the workflow by hand). YIELD = remove your label (board
-# drops to Todo at the next pass).
+# Board shape (owner-directed): stories (issues) are rows; PRs live
+# in the Linked-pull-requests column via closing keywords (`Fixes
+# #N` in the PR body links even retroactively on merged PRs, with
+# no state change). The ADD pass is issues-only on purpose: PR
+# rows are never created (any stragglers get no special handling;
+# delete them by hand).
+#
+# Claim protocol compatibility: sessions label their STORY issue
+# `session:<id>` and post CLAIM on #88; the board follows within
+# 15 minutes (or run the workflow by hand). YIELD = remove your
+# label (board drops to Todo at the next pass). PR labels are
+# ignored (PRs are not rows).
 #
 # Auth: GITHUB_TOKEN cannot write org ProjectsV2, so this needs a
 # repo Actions secret PROJECT_TOKEN (classic PAT, `project` scope
@@ -108,11 +116,12 @@ jobs:
               value:{text:\"$2\"}}){clientMutationId}}" >/dev/null
           }
 
-          # ADD pass: OPEN issues/PRs missing from the board get
+          # ADD pass: OPEN issues missing from the board get
           # items. Open-only is deliberate: backfilling closed
           # history would 2x the board past first:100 (simulated:
           # 65 stale misses vs 1 live one). Closed items already
           # on the board flip to Done in the reconcile below.
+          # (PRs are never rows; see the header.)
           have=$(gql_items | jq -r '[.data.node.items.nodes[]
             | .content.number // empty] | map(tostring) | join(" ")')
           add_missing() { # $1 = kind for log, $2 = REST endpoint
@@ -139,27 +148,9 @@ jobs:
             done
           }
           add_missing issue issues
-          have_prs=$(gql_items | jq -r '[.data.node.items.nodes[]
-            | select(.content.__typename == "PullRequest")
-            | .content.number] | map(tostring) | join(" ")')
-          gh api "repos/$repo/pulls" --paginate -X GET -f state=open -f per_page=100 \
-            --jq '.[] | [.number, .state, .node_id,
-                  ([.labels[].name] | join(" "))] | @tsv' |
-          while IFS=$'\t' read -r num state node labels; do
-            case " $have_prs " in *" $num "*) continue;; esac
-            item=$(gql_add "$node")
-            session=$(printf '%s' "$labels" | tr ' ' '\n' |
-                      grep '^session:' | head -1 | cut -d: -f2-)
-            if [ "$state" = closed ]; then
-              gql_set_status "$item" "$opt_done"
-            elif [ -n "$session" ]; then
-              gql_set_status "$item" "$opt_prog"
-              gql_set_session "$item" "$session"
-            else
-              gql_set_status "$item" "$opt_todo"
-            fi
-            echo "added pr #$num"
-          done
+          # No PR pass on purpose (owner-directed board shape):
+          # stories are rows, PRs live in Linked-pull-requests via
+          # closing keywords. Never re-add a pulls loop here.
 
           # RECONCILE pass: converge every content item (fresh read,
           # so just-added items join in with correct fields already
