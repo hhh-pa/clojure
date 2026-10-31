@@ -6,26 +6,33 @@
 // the terms of this license.
 // You must not remove this notice, or any other, from this software.
 
-//! Gap-123 slice 1: the `clojure.core.async` namespace — channels
-//! plus blocking ops only (`chan`, `buffer`/`dropping-buffer`/
-//! `sliding-buffer`, `>!!`, `<!!`, `close!`, `closed?`, `alts!!`).
-//! Go blocks and parking ops (`go`, `>!`, `<!`, `alt!`, `alts!`)
-//! are slice 2; the parking fns exist as stubs that fail exactly
-//! like the JVM's (`Assert failed: … used not in (go ...) block`).
+//! Gap-123 slices 1–2: the `clojure.core.async` namespace —
+//! channels plus blocking ops (`chan`, `buffer`/`dropping-buffer`/
+//! `sliding-buffer`, `>!!`, `<!!`, `close!`, `closed?`, `alts!!`),
+//! with slice 2's channel transducers (`chan` xform/ex-handler
+//! arities, stepping on the put path, completion on close and
+//! closed takes). Go blocks and parking ops (`go`, `>!`, `<!`,
+//! `alt!`, `alts!`) are a later slice; the parking fns exist as
+//! stubs that fail exactly like the JVM's (`Assert failed: … used
+//! not in (go ...) block`).
 //!
 //! The namespace installs lazily on `require` (see
 //! [`install_async_ns`], called from `load_one`), so boot is
 //! untouched and unqualified use without a require fails with the
 //! stock "no such namespace", like the JVM without the require.
 //! Oracle: `docs/gap-123/g123-*.clj`; pins:
-//! `docs/gap-123/probes.md`.
+//! `docs/gap-123/probes.md`, `docs/gap-123/slice-2.md`.
 //!
-//! Two documented deviations: `closed?` is public here (the JVM
-//! keeps it in `impl.protocols` — the slice requires it), and a
-//! non-number non-buffer `chan` argument fails eagerly with the
-//! `:full?` protocol error (the JVM stores it and fails on first
-//! use). Transducers are refused with an explicit unsupported
-//! error (slice 2).
+//! Documented deviations (D1–D7 in `slice-2.md`): `closed?` is
+//! public here (the JVM keeps it in `impl.protocols` — the slice
+//! requires it); a non-number non-buffer `chan` argument fails
+//! eagerly with the `:full?` protocol error (the JVM stores it
+//! and fails on first use); the default ex-handler prints one
+//! line (the JVM prints the full trace); puts step at arrival,
+//! so a filtered put behind a full buffer completes at once and
+//! an aborted put still ran its transducer (same values, only
+//! timing differs); a close racing a slow step wins (the JVM
+//! holds its mutex across the step).
 
 use std::sync::Arc;
 
@@ -34,15 +41,16 @@ use num_traits::ToPrimitive;
 use rand::seq::SliceRandom;
 
 use clj_value::{
-    BufferDesc, BufferKind, ChanError, Channel, Keyword, MAX_QUEUE_SIZE, OpReady, ThrowClass,
-    Value, Vector, Waiter, as_buffer, as_channel, jvm_class_of, seq_vec,
+    BufferDesc, BufferKind, ChanError, Channel, Keyword, MAX_QUEUE_SIZE, OpReady, StepOut, StepReq,
+    ThrowClass, Throwable, Value, Vector, Waiter, as_buffer, as_channel, jvm_class_of, seq_vec,
 };
 
-use crate::core::cce_err;
+use crate::core::{as_reduced, cce_err};
 use crate::error::NativeError;
 use crate::eval::Evaluator;
 use crate::fx4_form::iseq_err;
-use crate::ns::{NativeFnPtr, check_arity, str_of};
+use crate::ns::{NativeFnPtr, check_arity, deref_core, str_of, throwable_to_native};
+use crate::seqs::call_checked;
 use crate::vars::check_min_arity;
 
 /// The namespace this module installs.
@@ -84,7 +92,8 @@ fn ioobe() -> NativeError {
 
 /// Map a channel-queue failure to its JVM error text (oracle
 /// `e-take-bound`, `e-put-bound`; the sliding-zero evict is a
-/// `NoSuchElementException` with a nil message).
+/// `NoSuchElementException` with a nil message; a transducer
+/// throw rethrows).
 fn chan_err(e: ChanError) -> NativeError {
     match e {
         ChanError::QueueFull { puts } => {
@@ -104,6 +113,7 @@ fn chan_err(e: ChanError) -> NativeError {
         ChanError::EmptyEvict => {
             NativeError::new(ThrowClass::NoSuchElementException, String::new())
         }
+        ChanError::XformThrow(t) => throwable_to_native(&t),
     }
 }
 
@@ -199,28 +209,12 @@ fn native_sliding_buffer(_eval: &mut Evaluator, args: &[Value]) -> Result<Value,
     make_buffer(&args[0], BufferKind::Sliding, false)
 }
 
-/// The slice-2 refusal (transducers on channels).
-fn xform_unsupported() -> NativeError {
-    NativeError::new(
-        ThrowClass::UnsupportedOperationException,
-        "unsupported: channels with transducers (gap-123 slice 2)".to_owned(),
-    )
-}
-
-fn native_chan(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
-    check_arity("clojure.core.async/chan", args, &[0, 1, 2, 3])?;
-    let buf_or_n = args.first().unwrap_or(&Value::Nil);
-    if args.get(1).is_some_and(Value::is_truthy) {
-        if matches!(buf_or_n, Value::Nil) {
-            return Err(assert_failed(
-                "buffer must be supplied when transducer is",
-                "buf-or-n",
-            ));
-        }
-        return Err(xform_unsupported());
-    }
+/// Resolve `buf-or-n` to a buffer (buffers pass through, numbers
+/// become fixed buffers, nil is unbuffered; anything else is the
+/// eager `:full?` protocol error).
+fn resolve_chan_buf(buf_or_n: &Value) -> Result<Option<BufferDesc>, NativeError> {
     if let Some(buf) = as_buffer(buf_or_n) {
-        return Ok(Value::Extension(Arc::new(Channel::new(Some(buf)))));
+        return Ok(Some(buf.clone()));
     }
     if !matches!(buf_or_n, Value::Nil) {
         match buf_size(buf_or_n) {
@@ -231,13 +225,115 @@ fn native_chan(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErr
                         "(pos? n)",
                     ));
                 }
-                let buf = BufferDesc::new(BufferKind::Fixed, ceil, integral);
-                return Ok(Value::Extension(Arc::new(Channel::new(Some(&buf)))));
+                return Ok(Some(BufferDesc::new(BufferKind::Fixed, ceil, integral)));
             }
             Err(_) => return Err(proto_err(buf_or_n, "full?", "Buffer")),
         }
     }
-    Ok(Value::Extension(Arc::new(Channel::new(None))))
+    Ok(None)
+}
+
+fn native_chan(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.core.async/chan", args, &[0, 1, 2, 3])?;
+    let buf_or_n = args.first().unwrap_or(&Value::Nil);
+    let xform = args.get(1).cloned().unwrap_or(Value::Nil);
+    if xform.is_truthy() {
+        if matches!(buf_or_n, Value::Nil) {
+            return Err(assert_failed(
+                "buffer must be supplied when transducer is",
+                "buf-or-n",
+            ));
+        }
+        let conj = deref_core(eval, "conj");
+        let step = call_checked(eval, &xform, &[conj])?;
+        let exh = args.get(2).cloned().unwrap_or(Value::Nil);
+        let exh = exh.is_truthy().then_some(exh);
+        let buf = resolve_chan_buf(buf_or_n)?;
+        return Ok(Value::Extension(Arc::new(Channel::new_xform(
+            buf.as_ref(),
+            step,
+            exh,
+        ))));
+    }
+    let buf = resolve_chan_buf(buf_or_n)?;
+    Ok(Value::Extension(Arc::new(Channel::new(buf.as_ref()))))
+}
+
+/// Split a step result into its emits plus the `reduced` flag (a
+/// degenerate step returning a non-vector emits nothing — the
+/// JVM's `add!` likewise buffers nothing when the inner `rf`
+/// never runs).
+fn split_step(ret: Value) -> StepOut {
+    let (val, reduced) = match as_reduced(&ret) {
+        Some(inner) => (inner.clone(), true),
+        None => (ret, false),
+    };
+    let emits = match val {
+        Value::Vector(x) => x.iter().cloned().collect(),
+        _ => Vec::new(),
+    };
+    StepOut { emits, reduced }
+}
+
+/// The default ex-handler: print the throwable and drop the value
+/// (the JVM prints the full stack trace — the port has none, so
+/// this stays a one-line `Class | message`, like `uncaught`).
+fn default_ex_handler(t: &Throwable) -> Value {
+    let msg = t.message.as_deref().unwrap_or("");
+    eprintln!("{} | {}", t.class.jvm_name(), msg);
+    Value::Nil
+}
+
+/// The ex-handler path (the JVM's `handle`): a nil result drops
+/// the value, anything else (even `false`) buffers as a single
+/// untransformed replacement; an ex-handler throw escapes.
+fn ex_path(eval: &mut Evaluator, exh: Option<&Value>, t: Throwable) -> Result<StepOut, Throwable> {
+    let ret = match exh {
+        Some(h) => {
+            let arg = Value::Throwable(t);
+            call_checked(eval, h, &[arg]).map_err(|e| eval.throwable(e))?
+        }
+        None => default_ex_handler(&t),
+    };
+    if matches!(ret, Value::Nil) {
+        return Ok(StepOut {
+            emits: Vec::new(),
+            reduced: false,
+        });
+    }
+    Ok(StepOut {
+        emits: vec![ret],
+        reduced: false,
+    })
+}
+
+/// Run one transducer-step request (the channel holds the gate;
+/// step failures route through the ex-handler path, like the
+/// JVM's `add!` try/catch).
+fn xform_step(
+    eval: &mut Evaluator,
+    step: &Value,
+    exh: Option<&Value>,
+    req: StepReq,
+) -> Result<StepOut, Throwable> {
+    let empty = Value::Vector(Vector::from_vec(Vec::new()));
+    match req {
+        StepReq::Input(val) => match call_checked(eval, step, &[empty, val]) {
+            Ok(ret) => Ok(split_step(ret)),
+            Err(e) => {
+                let t = eval.throwable(e);
+                ex_path(eval, exh, t)
+            }
+        },
+        StepReq::Complete => match call_checked(eval, step, &[empty]) {
+            Ok(ret) => Ok(split_step(ret)),
+            Err(e) => {
+                let t = eval.throwable(e);
+                ex_path(eval, exh, t)
+            }
+        },
+        StepReq::Failed(t) => ex_path(eval, exh, t),
+    }
 }
 
 /// A parked-forever waiter result (the owner never waits after
@@ -249,7 +345,48 @@ fn killed() -> NativeError {
     )
 }
 
-fn native_put_block(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+/// Run `f` with the channel's stepper (transducer channels only).
+fn with_stepper<T>(
+    eval: &mut Evaluator,
+    ch: &Channel,
+    f: impl FnOnce(&mut dyn FnMut(StepReq) -> Result<StepOut, Throwable>) -> T,
+) -> T {
+    let xform = ch
+        .xform()
+        .expect("stepper on a channel without a transducer");
+    let (step, exh) = (xform.step.clone(), xform.exh.clone());
+    let mut stepper = |req: StepReq| xform_step(eval, &step, exh.as_ref(), req);
+    f(&mut stepper)
+}
+
+/// One put attempt, stepping through the transducer on xform
+/// channels (shared by `>!!` and `alts!!`).
+fn put_attempt(
+    eval: &mut Evaluator,
+    ch: &Channel,
+    val: Value,
+    waiter: &Arc<Waiter>,
+    op: usize,
+) -> Result<OpReady<bool>, NativeError> {
+    if ch.xform().is_some() {
+        with_stepper(eval, ch, |stepper| ch.put_xform(val, waiter, op, stepper)).map_err(chan_err)
+    } else {
+        ch.put_one(val, waiter, op).map_err(chan_err)
+    }
+}
+
+/// One closed take's value, flushing through the completion
+/// arity on xform channels (shared by `<!!` and `alts!!`).
+fn closed_take_val(eval: &mut Evaluator, ch: &Channel) -> Result<Value, NativeError> {
+    if ch.xform().is_none() {
+        return Ok(Value::Nil);
+    }
+    let flushed =
+        with_stepper(eval, ch, |stepper| ch.complete_closed(stepper)).map_err(chan_err)?;
+    Ok(flushed.unwrap_or(Value::Nil))
+}
+
+fn native_put_block(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core.async/>!!", args, &[2])?;
     let (port, val) = (&args[0], &args[1]);
     if matches!(val, Value::Nil) {
@@ -260,25 +397,33 @@ fn native_put_block(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nati
     }
     let ch = as_chan(port, "put!", "WritePort")?;
     let waiter = Arc::new(Waiter::new());
-    match ch.put_one(val.clone(), &waiter, 0).map_err(chan_err)? {
+    match put_attempt(eval, ch, val.clone(), &waiter, 0)? {
         OpReady::Ready(done) => Ok(Value::Bool(done)),
         OpReady::Queued => waiter.wait().map(|(_, v)| v).ok_or_else(killed),
     }
 }
 
-fn native_take_block(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+fn native_take_block(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core.async/<!!", args, &[1])?;
     let ch = as_chan(&args[0], "take!", "ReadPort")?;
     let waiter = Arc::new(Waiter::new());
     match ch.take_one(&waiter, 0).map_err(chan_err)? {
-        OpReady::Ready(found) => Ok(found.unwrap_or(Value::Nil)),
+        OpReady::Ready(found) => match found {
+            Some(v) => Ok(v),
+            None => closed_take_val(eval, ch),
+        },
         OpReady::Queued => waiter.wait().map(|(_, v)| v).ok_or_else(killed),
     }
 }
 
-fn native_close(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+fn native_close(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core.async/close!", args, &[1])?;
-    as_chan(&args[0], "close!", "Channel")?.close();
+    let ch = as_chan(&args[0], "close!", "Channel")?;
+    if ch.xform().is_some() {
+        with_stepper(eval, ch, |stepper| ch.close_xform(stepper)).map_err(chan_err)?;
+    } else {
+        ch.close();
+    }
     Ok(Value::Nil)
 }
 
@@ -391,7 +536,7 @@ fn parse_alt_opts(opts: &[Value]) -> Result<AltOpts, NativeError> {
     Ok(out)
 }
 
-fn native_alts_block(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+fn native_alts_block(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_min_arity("clojure.core.async/alts!!", args, 1)?;
     let opts = parse_alt_opts(&args[1..])?;
     let ports = seq_vec(&args[0]).ok_or_else(|| iseq_err(&args[0]))?;
@@ -407,7 +552,7 @@ fn native_alts_block(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nat
         order.shuffle(&mut rand::rng());
     }
     let waiter = Arc::new(Waiter::new());
-    if let Some(won) = alts_try_ready(&ops, &order, &waiter)? {
+    if let Some(won) = alts_try_ready(eval, &ops, &order, &waiter)? {
         return Ok(won);
     }
     // The `:default` fallback (#123s1): claim-first — exactly one
@@ -429,6 +574,7 @@ fn native_alts_block(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nat
 /// order, returning the first ready result (like `do-alts`'
 /// immediate check before parking). `None` means every op queued.
 fn alts_try_ready(
+    eval: &mut Evaluator,
     ops: &[AltOp],
     order: &[usize],
     waiter: &Arc<Waiter>,
@@ -439,14 +585,18 @@ fn alts_try_ready(
                 let ch = as_chan(chv, "take!", "ReadPort")?;
                 match ch.take_one(waiter, *idx).map_err(chan_err)? {
                     OpReady::Ready(found) => {
-                        return Ok(Some(alt_result(found.unwrap_or(Value::Nil), chv.clone())));
+                        let val = match found {
+                            Some(v) => v,
+                            None => closed_take_val(eval, ch)?,
+                        };
+                        return Ok(Some(alt_result(val, chv.clone())));
                     }
                     OpReady::Queued => {}
                 }
             }
             AltOp::Put(chv, val) => {
                 let ch = as_chan(chv, "put!", "WritePort")?;
-                match ch.put_one(val.clone(), waiter, *idx).map_err(chan_err)? {
+                match put_attempt(eval, ch, val.clone(), waiter, *idx)? {
                     OpReady::Ready(done) => {
                         return Ok(Some(alt_result(Value::Bool(done), chv.clone())));
                     }
