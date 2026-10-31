@@ -179,9 +179,9 @@ fn forname_hostdefs() {
 // forName-3arg/forName-3arg-init/forName-init-str/
 // forName-loader-str/forName-nil-init/o3-*: the flag is accepted
 // (true and false), casts run in order and nil-permissive, the
-// unbox NPEs before the deref (port-pinned text — the JDK's
-// `because "null" is null` is version-specific), and only nil
-// loaders pass.
+// unbox NPEs before the loader cast and the deref
+// (port-pinned text — the JDK's `because "null" is null` is
+// version-specific), and only nil loaders pass.
 #[test]
 fn forname_three() {
     let mut eval = boot();
@@ -231,6 +231,11 @@ fn forname_three() {
     // The unbox beats the name deref.
     assert_eq!(
         uncaught(&mut eval, "(Class/forName nil nil nil)"),
+        "java.lang.NullPointerException | Cannot invoke \"java.lang.Boolean.booleanValue()\" because \"initialize\" is null"
+    );
+    // The unbox beats a bad loader (oracle o3-init-unbox-first).
+    assert_eq!(
+        uncaught(&mut eval, "(Class/forName \"java.lang.String\" nil \"x\")"),
         "java.lang.NullPointerException | Cannot invoke \"java.lang.Boolean.booleanValue()\" because \"initialize\" is null"
     );
 }
