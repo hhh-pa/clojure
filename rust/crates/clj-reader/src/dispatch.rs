@@ -215,21 +215,21 @@ impl Reader {
             });
         }
         // Default-layer hits defer for eval-side invocation (#94);
-        // canonical `inst`/`uuid` string payloads validate inline
-        // (spanful).
-        // DIVERGENCE (#94): a REPLACED canonical default still
-        // validates here (oracle `h-replace-inst-bad` invokes the
-        // replacement with the raw payload): the snapshot carries
-        // keys without values, so the read side cannot tell a
-        // replacement from the canonical native.
+        // pristine canonical `inst`/`uuid` string payloads validate
+        // inline (spanful). A REPLACED canonical skips validation
+        // (#94r: only `default_reader_canonical` members validate),
+        // so eval invokes the replacement with the raw payload
+        // (oracle `h-replace-inst-bad`).
         if self.opts.default_reader_keys.contains(sym) {
             if let Value::Str(s) = &form {
-                if let Some(e) = Self::default_tag_failure(sym, s) {
-                    return Err(ReaderError::TagInvoke {
-                        span: self.span(),
-                        class: e.class,
-                        message: e.message,
-                    });
+                if self.opts.default_reader_canonical.contains(sym) {
+                    if let Some(e) = Self::default_tag_failure(sym, s) {
+                        return Err(ReaderError::TagInvoke {
+                            span: self.span(),
+                            class: e.class,
+                            message: e.message,
+                        });
+                    }
                 }
                 // Validated: this `TaggedLiteral` defers for the
                 // eval walk, which resolves it through the
@@ -652,6 +652,11 @@ mod tests {
                 })
                 .collect::<HashSet<_>>(),
             default_reader_keys: HashSet::from([
+                Symbol::new(None, "inst"),
+                Symbol::new(None, "uuid"),
+            ]),
+            // Pristine natives, like the snapshot (#94r).
+            default_reader_canonical: HashSet::from([
                 Symbol::new(None, "inst"),
                 Symbol::new(None, "uuid"),
             ]),

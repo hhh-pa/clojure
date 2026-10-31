@@ -74,6 +74,13 @@ pub struct ReaderOpts {
     /// membership defers the tag for eval-side invocation, between
     /// the table and the default fn, like the JVM's `readTagged`.
     pub default_reader_keys: HashSet<Symbol>,
+    /// Default-layer tags whose root value is the pristine boot
+    /// native (#94r): only these inline-validate string payloads
+    /// read-side. A replaced canonical (same key, different value
+    /// object) skips validation and defers, so eval invokes the
+    /// replacement with the raw payload (oracle
+    /// `h-replace-inst-bad`).
+    pub default_reader_canonical: HashSet<Symbol>,
     /// `default-data-readers` JVM class when its root is neither
     /// nil nor a lookupable (#94): any tag reaching the default
     /// layer then fails the `ILookup` cast (`TableCce`) — table
@@ -107,6 +114,7 @@ impl Default for ReaderOpts {
             data_reader_keys: HashSet::new(),
             data_readers_borked: None,
             default_reader_keys: HashSet::new(),
+            default_reader_canonical: HashSet::new(),
             default_readers_borked: None,
             default_reader_fn: false,
             read_eval: true,

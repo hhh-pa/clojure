@@ -156,6 +156,11 @@ pub struct Evaluator {
     /// (`/`-joined paths): files merge once each, so a root the
     /// user replaced afterwards is never re-merged.
     pub(crate) loaded_data_reader_files: HashSet<String>,
+    /// The pristine boot `inst`/`uuid` default natives (#94r):
+    /// the snapshot compares the live root values against these by
+    /// reference, so a replaced canonical skips read-side
+    /// validation (`None` before boot installs the root).
+    pub(crate) canonical_default_readers: Option<(Value, Value)>,
 }
 
 /// A `defmacro` definition's parts (bundles `eval_defmacro`'s
@@ -203,6 +208,7 @@ impl Evaluator {
             print_defaults_only: false,
             data_reader_scan_path: None,
             loaded_data_reader_files: HashSet::new(),
+            canonical_default_readers: None,
         }
     }
 
@@ -243,6 +249,9 @@ impl Evaluator {
             // same files.
             data_reader_scan_path: self.data_reader_scan_path.clone(),
             loaded_data_reader_files: self.loaded_data_reader_files.clone(),
+            // The pristine natives are registry-global values, so
+            // the baseline crosses with the fork.
+            canonical_default_readers: self.canonical_default_readers.clone(),
         }
     }
 

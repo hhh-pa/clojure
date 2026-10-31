@@ -335,6 +335,11 @@ fn strip_leading_ns(text: &str) -> String {
                 Symbol::new(None, "inst"),
                 Symbol::new(None, "uuid"),
             ]),
+            // Pristine natives, like the snapshot (#94r).
+            default_reader_canonical: HashSet::from([
+                Symbol::new(None, "inst"),
+                Symbol::new(None, "uuid"),
+            ]),
             ..Default::default()
         },
     );
