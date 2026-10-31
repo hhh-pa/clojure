@@ -1236,72 +1236,74 @@ fn load_dirs(eval: &Evaluator) -> Result<Vec<String>, NativeError> {
     Ok(out)
 }
 
+/// Embedded library sources by load root (no leading slash):
+/// the `*file*` path and text served without touching
+/// `*load-path*`. New embedded namespaces add a ROW here, never
+/// a branch in [`resolve_source`] (complexity ratchet: the
+/// ten-`if` chain tripped it at cognitive 20).
+const EMBEDDED_SOURCES: &[(&str, &str, &str)] = &[
+    (
+        "clojure/spec/alpha",
+        "clojure/spec/alpha.clj",
+        SPEC_ALPHA_CLJ,
+    ),
+    (
+        "clojure/spec/gen/alpha",
+        "clojure/spec/gen/alpha.clj",
+        SPEC_GEN_ALPHA_CLJ,
+    ),
+    (
+        "clojure/tools/deps/util/dir",
+        "clojure/tools/deps/util/dir.clj",
+        TOOLS_DEPS_UTIL_DIR_CLJ,
+    ),
+    (
+        "clojure/tools/deps/edn",
+        "clojure/tools/deps/edn.clj",
+        TOOLS_DEPS_EDN_CLJ,
+    ),
+    (
+        "clojure/tools/deps/extensions",
+        "clojure/tools/deps/extensions.clj",
+        TOOLS_DEPS_EXTENSIONS_CLJ,
+    ),
+    (
+        "clojure/tools/deps/util/io",
+        "clojure/tools/deps/util/io.clj",
+        TOOLS_DEPS_UTIL_IO_CLJ,
+    ),
+    (
+        "clojure/tools/deps/util/session",
+        "clojure/tools/deps/util/session.clj",
+        TOOLS_DEPS_UTIL_SESSION_CLJ,
+    ),
+    (
+        "clojure/tools/deps/extensions/local",
+        "clojure/tools/deps/extensions/local.clj",
+        TOOLS_DEPS_EXTENSIONS_LOCAL_CLJ,
+    ),
+    (
+        "clojure/tools/deps/extensions/git",
+        "clojure/tools/deps/extensions/git.clj",
+        TOOLS_DEPS_EXTENSIONS_GIT_CLJ,
+    ),
+    (
+        "clojure/tools/deps/extensions/deps",
+        "clojure/tools/deps/extensions/deps.clj",
+        TOOLS_DEPS_EXTENSIONS_DEPS_CLJ,
+    ),
+];
+
 /// Resolve a load root (no leading slash) to the `*file*` path and
 /// text: embedded libs first (gap-122 slices 1+F1:
-/// `clojure/spec/alpha` + `clojure/spec/gen/alpha`; gap-124 slice 1:
-/// the three tools.deps config namespaces; the flat set lives here
-/// when S5D lands), then `.clj` across every `*load-path*` dir,
-/// then `.cljc` (`RT.load` lookup order).
+/// `clojure/spec/alpha` + `clojure/spec/gen/alpha`; gap-124 slices
+/// 1+2: the three tools.deps config namespaces plus the five SPI
+/// namespaces; the flat set lives here when S5D lands), then `.clj`
+/// across every `*load-path*` dir, then `.cljc` (`RT.load` lookup
+/// order).
 fn resolve_source(eval: &Evaluator, root: &str) -> Result<(String, String), NativeError> {
-    if root == "clojure/spec/alpha" {
-        return Ok((
-            "clojure/spec/alpha.clj".to_owned(),
-            SPEC_ALPHA_CLJ.to_owned(),
-        ));
-    }
-    if root == "clojure/spec/gen/alpha" {
-        return Ok((
-            "clojure/spec/gen/alpha.clj".to_owned(),
-            SPEC_GEN_ALPHA_CLJ.to_owned(),
-        ));
-    }
-    if root == "clojure/tools/deps/util/dir" {
-        return Ok((
-            "clojure/tools/deps/util/dir.clj".to_owned(),
-            TOOLS_DEPS_UTIL_DIR_CLJ.to_owned(),
-        ));
-    }
-    if root == "clojure/tools/deps/edn" {
-        return Ok((
-            "clojure/tools/deps/edn.clj".to_owned(),
-            TOOLS_DEPS_EDN_CLJ.to_owned(),
-        ));
-    }
-    if root == "clojure/tools/deps/extensions" {
-        return Ok((
-            "clojure/tools/deps/extensions.clj".to_owned(),
-            TOOLS_DEPS_EXTENSIONS_CLJ.to_owned(),
-        ));
-    }
-    if root == "clojure/tools/deps/util/io" {
-        return Ok((
-            "clojure/tools/deps/util/io.clj".to_owned(),
-            TOOLS_DEPS_UTIL_IO_CLJ.to_owned(),
-        ));
-    }
-    if root == "clojure/tools/deps/util/session" {
-        return Ok((
-            "clojure/tools/deps/util/session.clj".to_owned(),
-            TOOLS_DEPS_UTIL_SESSION_CLJ.to_owned(),
-        ));
-    }
-    if root == "clojure/tools/deps/extensions/local" {
-        return Ok((
-            "clojure/tools/deps/extensions/local.clj".to_owned(),
-            TOOLS_DEPS_EXTENSIONS_LOCAL_CLJ.to_owned(),
-        ));
-    }
-    if root == "clojure/tools/deps/extensions/git" {
-        return Ok((
-            "clojure/tools/deps/extensions/git.clj".to_owned(),
-            TOOLS_DEPS_EXTENSIONS_GIT_CLJ.to_owned(),
-        ));
-    }
-    if root == "clojure/tools/deps/extensions/deps" {
-        return Ok((
-            "clojure/tools/deps/extensions/deps.clj".to_owned(),
-            TOOLS_DEPS_EXTENSIONS_DEPS_CLJ.to_owned(),
-        ));
+    if let Some(&(_, file, text)) = EMBEDDED_SOURCES.iter().find(|(r, _, _)| *r == root) {
+        return Ok((file.to_owned(), text.to_owned()));
     }
     let dirs = load_dirs(eval)?;
     for ext in ["clj", "cljc"] {

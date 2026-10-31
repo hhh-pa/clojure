@@ -501,7 +501,11 @@ fn bdd_missing_local_lib_refused() {
     let proj = scratch("bdd-local-missing");
     let missing = proj.join("nope").to_string_lossy().into_owned();
     let m = clj_str(&missing);
+    // The message embeds the RAW path (`str`, not `pr`): unescape
+    // the pr-string (strip quotes, undo backslash doubling) so
+    // Windows verbatim `\\?\` paths compare correctly.
     let canon = run(&mut eval, &format!("(port/canonical-path {m})"));
+    let raw = canon.trim_matches('"').replace("\\\\", "\\");
     assert_eq!(
         uncaught(
             &mut eval,
@@ -509,7 +513,7 @@ fn bdd_missing_local_lib_refused() {
         ),
         format!(
             "clojure.lang.ExceptionInfo | Local lib my/lib not found: {}",
-            canon.trim_matches('"')
+            raw
         )
     );
 }
