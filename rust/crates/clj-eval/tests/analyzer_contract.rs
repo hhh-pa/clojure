@@ -1258,11 +1258,14 @@ fn gap2_catch_explicit_nil() {
 
 #[test]
 fn gap2_unresolvable_core_builtin() {
-    // No clojure.core ns here, so the qualified builtin misses (expr.rs:873).
+    // No clojure.core ns here, so the qualified builtin misses —
+    // and a dotted miss is `ClassNotFoundException` (#120 slice 1:
+    // the JVM CNFEs every unresolvable dotted namespace part,
+    // oracle `static-unknown-fq`, `removed-ns-call`).
     check(
         "(clojure.core/let [x 1] x)",
         "Syntax error compiling at (test:1:1).",
-        "java.lang.RuntimeException | No such namespace: clojure.core",
+        "java.lang.ClassNotFoundException | clojure.core",
     );
 }
 

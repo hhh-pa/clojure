@@ -1418,16 +1418,17 @@ fn stage1_descriptor_level() {
     // anywhere, descriptors compare by identity, hash
     // deterministically, and reject collection casts.
     let mut eval = boot();
-    // Bare dotted references do not resolve (constructors do —
-    // imports hold simple names only, so only the `Type.` dot form
-    // splits namespace from name); the dotted registry path is
-    // covered by the cross-namespace constructor tests.
+    // Bare dotted references resolve as classes (#120 slice 1 —
+    // the JVM evaluates `user.Foo` to the deftype class, oracle
+    // `bare-deftype`). The lookup splits namespace from name, so
+    // the dashed spelling resolves while the reported class keeps
+    // the munged `HostDef` name.
     assert_eq!(
-        uncaught(
+        run(
             &mut eval,
             "(ns foo-bar) (defrecord R2 [a]) (ns user) (str foo-bar.R2)"
         ),
-        "java.lang.RuntimeException | Unable to resolve symbol: foo-bar.R2 in this context"
+        "\"class foo_bar.R2\""
     );
     assert_eq!(run(&mut eval, "(deftype Pair [a b]) (= Pair Pair)"), "true");
     assert_eq!(

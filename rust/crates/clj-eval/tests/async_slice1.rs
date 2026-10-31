@@ -163,11 +163,14 @@ fn require_alias_and_refer() {
 fn qualified_use_without_require_fails() {
     let mut eval = boot();
     // A compile-time resolution failure (the namespace does not
-    // exist until required).
+    // exist until required) — and a dotted miss is
+    // `ClassNotFoundException` (#120 slice 1: the JVM CNFEs every
+    // unresolvable dotted namespace part, oracle
+    // `static-unknown-fq`, `removed-ns-val`).
     match eval.eval_source("clojure.core.async/chan") {
         Err(e) => assert_eq!(
             format!("{e}"),
-            "Syntax error compiling at (user:1:1).\njava.lang.RuntimeException | No such namespace: clojure.core.async"
+            "Syntax error compiling at (user:1:1).\njava.lang.ClassNotFoundException | clojure.core.async"
         ),
         Ok(vs) => panic!("expected a resolution failure, got {vs:?}"),
     }

@@ -531,17 +531,13 @@ impl Evaluator {
     /// prologue installs them on the reader; the per-form loops
     /// re-snapshot the data-reader fields from this base).
     fn read_forms_opts(eval: &mut Evaluator, seed: &crate::reader::ReadGateSeed) -> ReaderOpts {
-        let cur = eval.current_ns_name();
         let mut opts = ReaderOpts {
-            current_ns: cur.clone(),
+            current_ns: eval.current_ns_name(),
             ..Default::default()
         };
-        // Live-or-removed (the detached `*ns*` keeps aliases/refers,
-        // like the JVM; #80).
-        if let Some(ns) = eval.registry.ns_live_or_removed(&cur) {
-            opts.aliases = ns.alias_map();
-            opts.refers = ns.refer_map();
-        }
+        // Aliases/refers/imports (the detached `*ns*` keeps them,
+        // like the JVM; #80) — shared with the stream readers.
+        crate::reader::sync_reader_ns(eval, &mut opts);
         opts.read_eval = seed.read_eval;
         opts.suppress_read = seed.suppress_read;
         opts.resolver_bound = seed.resolver_bound;
