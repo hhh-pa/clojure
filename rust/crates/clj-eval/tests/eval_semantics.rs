@@ -1344,7 +1344,9 @@ fn map_destructure_nested_req_outlets() {
             "{:nested {:c nil}}",
         ),
         // Symbol keys are bare here: upstream quotes them (macro
-        // keys are code), the analyzer takes keys literally.
+        // keys are code); the analyzer takes keys literally, so
+        // bare binds (quoted binds too since #112 — see
+        // `map_destructure_analyzer_edges`).
         (
             "(let [{:req! {{:syms! [c]} nested}, :missing miss} {}] miss)",
             "{nested {c nil}}",
@@ -1432,6 +1434,88 @@ fn map_destructure_nested_req_outlets() {
     assert_eq!(
         uncaught("(let [{:req! {{:keys! [c]} :nested}} {}] c)"),
         "java.lang.IllegalArgumentException | Missing required key: :nested"
+    );
+}
+
+#[test]
+fn map_destructure_analyzer_edges() {
+    // #112 (the #104/#111 remainder): the analyzer path (`let` as a
+    // special form, `loop`, `fn` params — this rigged harness never
+    // macroexpands) unquotes `(quote k)` keys so the upstream
+    // spelling binds like the expansion path, and takes vector
+    // `:req!` locals like the runtime `pb` splice. Bare symbol keys
+    // stay literal (fenced: key position holds values here, never
+    // var references).
+    let (mut eval, _) = rigged();
+    for (src, want) in [
+        // Quoted entry keys bind (expansion agrees).
+        ("(let [{a 'k} {'k 1}] a)", "1"),
+        ("((fn [{a 'k}] a) {'k 1})", "1"),
+        // Quoted `:req!` keys collect unmangled under `:missing`.
+        (
+            "(let [{:req! {a 'k}, :missing m} {}] [a m])",
+            "[nil {k nil}]",
+        ),
+        (
+            "((fn [{:req! {a 'k}, :missing m}] [a m]) {})",
+            "[nil {k nil}]",
+        ),
+        // Quoted `:or` spellings match quoted entries.
+        ("(let [{a 'k, :or {'k 42}} {}] a)", "42"),
+        ("((fn [{a 'k, :or {'k 42}}] a) {})", "42"),
+        // Mixed `:or` spellings miss (#158, ex F-A): upstream
+        // `push1` compares key forms (`local-default?` on the local,
+        // `key-default?` on `bk`), so a quoted entry plus a bare
+        // `:or` key (or the reverse) ignores the default.
+        ("(let [{a 'k, :or {k 42}} {}] a)", "nil"),
+        ("((fn [{a 'k, :or {k 42}}] a) {})", "nil"),
+        ("(let [{a k, :or {'k 42}} {}] a)", "nil"),
+        ("((fn [{a k, :or {'k 42}}] a) {})", "nil"),
+        // A quoted `:or` key misses the bare local too (#158):
+        // `(contains? {'a 42} 'a)` is false upstream.
+        ("(let [{a :k, :or {'a 42}} {}] a)", "nil"),
+        ("((fn [{a :k, :or {'a 42}}] a) {})", "nil"),
+        // Quoted post-`&` keys join the selection.
+        (
+            "(let [{:syms [a & 'e], :excess x} {'a 1, 'e 2, 'f 3}] x)",
+            "{f 3}",
+        ),
+        (
+            "((fn [{:syms [a & 'e], :excess x}] x) {'a 1, 'e 2, 'f 3})",
+            "{f 3}",
+        ),
+        // Bare symbol keys stay literal (fenced split: the
+        // expansion path reads bare as a var reference and fails
+        // to resolve, like upstream).
+        ("(let [{a k} {'k 1}] a)", "1"),
+        ("((fn [{a k}] a) {'k 1})", "1"),
+        // Vector `:req!` locals bind (expansion agrees).
+        ("(let [{:req! {[a b] :pair}} {:pair [1 2]}] [a b])", "[1 2]"),
+        (
+            "((fn [{:req! {[a b] :pair}}] [a b]) {:pair [1 2]})",
+            "[1 2]",
+        ),
+        (
+            "(loop [{:req! {[a b] :pair}} {:pair [1 2]}] [a b])",
+            "[1 2]",
+        ),
+        // ... and collect under `:missing` instead of throwing.
+        (
+            "(let [{:req! {[a b] :pair}, :missing m} {}] [a b m])",
+            "[nil nil {:pair nil}]",
+        ),
+        (
+            "((fn [{:req! {[a b] :pair}, :missing m}] [a b m]) {})",
+            "[nil nil {:pair nil}]",
+        ),
+    ] {
+        assert_eq!(run_last(&mut eval, src), want, "{src}");
+    }
+    // Without `:missing` the quoted fetch still throws `req!`
+    // (rendered unquoted, like the expansion's evaluated key).
+    assert_eq!(
+        uncaught("(let [{:req! {a 'k}} {}] a)"),
+        "java.lang.IllegalArgumentException | Missing required key: k"
     );
 }
 

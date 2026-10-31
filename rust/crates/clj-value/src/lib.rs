@@ -15,6 +15,7 @@
 mod agent;
 mod array;
 mod atom;
+mod channel;
 mod class;
 mod compare;
 mod datareaders;
@@ -44,6 +45,10 @@ mod volatile;
 pub use agent::{Agent, AgentAction, AgentInner, AgentPool, ErrorMode, ExecTarget, QueuedAction};
 pub use array::{Array, ArrayDesc, ArrayStore, BaseType, MAX_ARRAY_BYTES};
 pub use atom::{Atom, AtomState};
+pub use channel::{
+    BufferDesc, BufferKind, ChanError, Channel, MAX_QUEUE_SIZE, OpReady, Waiter, as_buffer,
+    as_channel,
+};
 pub use class::ClassVal;
 pub use compare::{CompareError, compare};
 pub use datareaders::{TagError, validate_inst, validate_uuid};

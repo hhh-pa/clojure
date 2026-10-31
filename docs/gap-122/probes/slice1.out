@@ -1,0 +1,54 @@
+[:valid-even-4 true]
+[:valid-even-5 false]
+[:valid-bare-even true]
+[:valid-bare-odd false]
+[:conform-even-4 4]
+[:conform-even-5 :clojure.spec.alpha/invalid]
+[:unform-even-4 4]
+[:invalid?-conformed-5 true]
+[:valid-set-2 true]
+[:valid-set-9 false]
+[:valid-big-101 true]
+[:valid-big-99 false]
+[:valid-and-4 true]
+[:valid-and-5 false]
+[:valid-and-42 false]
+[:conform-and-4 4]
+[:conform-and-5 :clojure.spec.alpha/invalid]
+[:unform-and-4 4]
+:explain-even-5-begin
+5 - failed: even? spec: :user/even
+:explain-even-5-end
+:explain-and-5-begin
+5 - failed: even? spec: :user/even-small
+:explain-and-5-end
+:explain-and-42-begin
+42 - failed: (< % 10) spec: :user/even-small
+:explain-and-42-end
+:explain-bare-begin
+5 - failed: even?
+:explain-bare-end
+:explain-success-begin
+Success!
+:explain-success-end
+[:explain-data #:clojure.spec.alpha{:problems [{:path [], :pred clojure.core/even?, :val 5, :via [:user/even], :in []}], :spec :user/even, :value 5}]
+[:explain-data-ok nil]
+[:registry-has-even true]
+[:get-spec-even true]
+[:get-spec-missing nil]
+[:spec?-of-spec true]
+[:spec?-of-fn nil]
+[:spec?-of-kw nil]
+[:def-returns :user/tmp]
+[:def-then-valid true]
+[:def-nil-removed nil]
+[:valid-missing THREW:Unable to resolve spec: :user/definitely-missing]
+[:conform-missing THREW:Unable to resolve spec: :user/definitely-missing]
+[:def-bare-kw THREW:Assert failed: k must be namespaced keyword or resolvable symbol
+(c/and (ident? k) (namespace k))]
+[:form-even clojure.core/even?]
+[:describe-even even?]
+[:form-and (clojure.spec.alpha/and clojure.core/even? (clojure.core/fn [%] (clojure.core/< % 10)))]
+[:describe-and (and even? (< % 10))]
+5 - failed: even? spec: :user/even
+[:explain-returns nil]

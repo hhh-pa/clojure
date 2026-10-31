@@ -779,6 +779,46 @@ fn eval_expanded_forms() {
 }
 
 #[test]
+fn destructure_edges_expansion_agrees() {
+    // #112: the expansion path already matches upstream here — quoted
+    // symbol keys bind, vector `:req!` locals bind — so these pin the
+    // agreement the analyzer now joins (`eval_semantics` mirrors).
+    // Bare symbol keys stay a resolve failure (upstream: keys are
+    // code, so bare is a var reference).
+    let mut eval = boot();
+    for (src, want) in [
+        ("(let [{a 'k} {'k 1}] a)", "1"),
+        (
+            "(let [{:req! {a 'k}, :missing m} {}] [a m])",
+            "[nil {k nil}]",
+        ),
+        ("(let [{a 'k, :or {'k 42}} {}] a)", "42"),
+        (
+            "(let [{:syms [a & 'e], :excess x} {'a 1, 'e 2, 'f 3}] x)",
+            "{f 3}",
+        ),
+        ("(let [{:req! {[a b] :pair}} {:pair [1 2]}] [a b])", "[1 2]"),
+        (
+            "(let [{:req! {[a b] :pair}, :missing m} {}] [a b m])",
+            "[nil nil {:pair nil}]",
+        ),
+    ] {
+        assert_eq!(run_last(&mut eval, src), want, "{src}");
+    }
+    assert_eq!(
+        uncaught(&mut eval, "(let [{:req! {a 'k}} {}] a)"),
+        "java.lang.IllegalArgumentException | Missing required key: k"
+    );
+    assert_eq!(
+        compile_err(&mut eval, "(let [{a k} {'k 1}] a)"),
+        vec![
+            "Syntax error compiling at (user:1:1).".to_owned(),
+            "java.lang.RuntimeException | Unable to resolve symbol: k in this context".to_owned(),
+        ]
+    );
+}
+
+#[test]
 fn host_natives_and_rewrites() {
     let mut eval = boot();
     assert_eq!(
