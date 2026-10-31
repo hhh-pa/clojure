@@ -60,7 +60,7 @@
 
   Rationale: https://clojure.org/about/spec
   Guide: https://clojure.org/guides/spec"
-  (:refer-clojure :exclude [and def + * cat keys merge])
+  (:refer-clojure :exclude [and def + * cat keys merge]))
 
 (alias 'c 'clojure.core)
 
