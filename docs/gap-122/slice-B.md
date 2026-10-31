@@ -28,9 +28,9 @@ Oracle pins:
 | `every-kv` macro | 568-577 |
 | `coll-of` macro | 579-590 |
 | `map-of` macro | 592-604 |
-| `tuple` macro | 694-700 |
-| `pvalid?` | 779-784 |
-| `tuple-impl` | 996-1056 |
+| `tuple` macro (slice D2) | 694-700 |
+| `pvalid?` (slices A/D2) | 779-784 |
+| `tuple-impl` (slice D2) | 996-1056 |
 | `tagged-ret` | 1058-1059 |
 | `or-spec-impl` | 1061-1126 |
 | `coll-prob` | 1223-1241 |
@@ -49,14 +49,15 @@ options (`s/every` sampling, `s/coll-of` exhaustive conform,
 
 ## Solution
 
-Port the five macros plus the two supporting constructs upstream
-`map-of` is built on (`s/tuple` + `tuple-impl`, `s/every-kv`;
-`map-of` expands through `every-kv`, which uses `tuple` as its
-element pred). New spec records `OrSpec`/`NilableSpec`/`TupleSpec`/
-`EverySpec` extend the slice-1 `Spec` protocol, so `valid?`/
-`conform`/`unform`/`explain-data`/`form`/`describe` integrate with
-no changes to existing code. Generator params (`gfn`, `:gen`) are
-narrowed out, as in slice 1 (`gen*`/`with-gen*` stay unextended).
+Port the five macros plus the supporting `s/every-kv` upstream
+`map-of` is built on (`map-of` expands through `every-kv`, which
+uses `tuple` as its element pred; `s/tuple` + `tuple-impl` are
+slice D2's, reused here). New spec records
+`OrSpec`/`NilableSpec`/`EverySpec` extend the slice-1 `Spec`
+protocol, so `valid?`/`conform`/`unform`/`explain-data`/`form`/
+`describe` integrate with no changes to existing code. Generator
+params (`gfn`, `:gen`) are narrowed out, as in slice 1
+(`gen*`/`with-gen*` stay unextended).
 
 Port adaptations (each pinned by tests):
 
@@ -137,7 +138,7 @@ regex ops (`cat`/`alt`/`*`/`+`/`?`/`&`, later slice),
 - Same opt checks as `coll-of` (shared `every-impl`).
 - `describe`: `(every even?)`.
 
-### `s/map-of` / `s/every-kv` / `s/tuple`
+### `s/map-of` / `s/every-kv` (`s/tuple` is slice D2's)
 
 - map-of valid?: good map, bad key, bad val, non-map (`:kind`
   defaults to `map?`).
@@ -147,20 +148,22 @@ regex ops (`cat`/`alt`/`*`/`+`/`?`/`&`, later slice),
 - map-of explain: `in: [:a 1] at: [1]`.
 - `describe`: `(map-of keyword? even?)`.
 - every-kv validates entries, never conforms.
-- tuple: per-element valid?/conform, count mismatch (`(=
-  (count %) 2)`), non-vector (`vector?`), element paths
-  (`in: [0] at: [0]`), unform (+ assert), `(tuple even?
-  string?)`.
+- tuple pins (per-element valid?/conform, count mismatch,
+  non-vector, element paths, unform) live in slice D2's
+  `spec_data_remainder.rs`; here `tuple` is only exercised
+  through `map-of`'s expansion.
 
 ## TDD plan
 
 1. Helpers: `*coll-check-limit*`, `*coll-error-limit*`,
-   `pvalid?`, `tagged-ret`, `res-kind` table, `coll-prob` (red:
-   limit vars resolve; green: direct calls).
+   (`pvalid?`/`tagged-ret` come from slices A/D2 and E),
+   `res-kind` table, `coll-prob` (red: limit vars resolve;
+   green: direct calls).
 2. `s/or` + `or-spec-impl` (red: valid?/conform/unform/explain/
    assert/form tests; green: record + methods + macro).
 3. `s/nilable` + `nilable-impl` (same cycle).
-4. `s/tuple` + `tuple-impl` (same cycle).
+4. `s/tuple` + `tuple-impl`: slice D2's (dropped from this
+   slice at the post-D2 rebase; reused, not re-ported).
 5. `every-impl` + the four macros (`every`, `every-kv`,
    `coll-of`, `map-of`) (red: full opt matrix; green: impl +
    expansions).

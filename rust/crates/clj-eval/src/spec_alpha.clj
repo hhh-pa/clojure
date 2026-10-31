@@ -1388,7 +1388,7 @@ if value does not match spec, else the (possibly destructured) value."
     (when-not (c/or (pvalid? @(:spec this) x) (nil? x))
       (conj (explain-1 (:form this) (:pred this) (conj path :clojure.spec.alpha/pred) via in x)
             {:path (conj path :clojure.spec.alpha/nil) :pred 'nil? :val x :via via :in in})))
-  (describe* [this] (list 'clojure.spec.alpha/nilable (res (:form this)))))>>>>>>> ca7ca272 (Gap #122 slice B: s/or, s/nilable, s/tuple, s/every, s/every-kv, s/coll-of, s/map-of port)
+  (describe* [this] (list 'clojure.spec.alpha/nilable (res (:form this)))))
 
 (extend-type TupleSpec
   Spec

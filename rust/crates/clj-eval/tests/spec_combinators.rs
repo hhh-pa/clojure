@@ -8,8 +8,9 @@
 
 //! Gap-122 slice-B tests: the `clojure.spec.alpha` combinators
 //! (`s/or`, `s/nilable`, `s/coll-of`, `s/map-of`, `s/every`, plus
-//! the supporting `s/tuple`/`s/every-kv` that `s/map-of` expands
-//! through).
+//! `s/every-kv`; `s/tuple` itself is slice D2's, covered in
+//! `spec_data_remainder.rs` and exercised here only through
+//! `s/map-of`'s expansion).
 //!
 //! Oracle: upstream `spec.alpha-0.5.238` (= 0.6.249, byte-identical)
 //! `clojure/spec/alpha.clj`,
@@ -284,96 +285,6 @@ fn nilable_form_and_describe() {
     assert_eq!(
         run(&mut eval, "(s/describe (s/nilable even?))"),
         "(nilable even?)"
-    );
-}
-
-// ---- s/tuple (upstream alpha.clj 694-700, 996-1056) ----
-
-#[test]
-fn tuple_valid_conform() {
-    let mut eval = boot();
-    require_spec(&mut eval);
-    assert_eq!(
-        run(&mut eval, "(s/valid? (s/tuple even? string?) [2 \"a\"])"),
-        "true"
-    );
-    assert_eq!(
-        run(&mut eval, "(s/valid? (s/tuple even? string?) [2])"),
-        "false"
-    );
-    assert_eq!(
-        run(&mut eval, "(s/valid? (s/tuple even? string?) '(2 \"a\"))"),
-        "false"
-    );
-    assert_eq!(
-        run(&mut eval, "(s/valid? (s/tuple even? string?) [3 \"a\"])"),
-        "false"
-    );
-    assert_eq!(
-        run(
-            &mut eval,
-            "(s/conform (s/tuple (s/or :e even?) string?) [2 \"a\"])"
-        ),
-        "[[:e 2] \"a\"]"
-    );
-}
-
-#[test]
-fn tuple_explain_str() {
-    let mut eval = boot();
-    require_spec(&mut eval);
-    assert_eq!(
-        run(&mut eval, "(s/explain-str (s/tuple even? string?) [2])"),
-        "\"[2] - failed: (= (count %) 2)\\n\""
-    );
-    assert_eq!(
-        run(
-            &mut eval,
-            "(s/explain-str (s/tuple even? string?) '(2 \"a\"))"
-        ),
-        "\"(2 \\\"a\\\") - failed: vector?\\n\""
-    );
-    assert_eq!(
-        run(
-            &mut eval,
-            "(s/explain-str (s/tuple even? string?) [3 \"a\"])"
-        ),
-        "\"3 - failed: even? in: [0] at: [0]\\n\""
-    );
-}
-
-#[test]
-fn tuple_unform() {
-    let mut eval = boot();
-    require_spec(&mut eval);
-    assert_eq!(
-        run(
-            &mut eval,
-            "(s/unform (s/tuple (s/or :e even?) string?) [[:e 2] \"a\"])"
-        ),
-        "[2 \"a\"]"
-    );
-    assert_eq!(
-        uncaught(&mut eval, "(s/unform (s/tuple even?) [1 2])"),
-        "java.lang.AssertionError | Assert failed: (c/and (vector? x) (= (count x) (count (:preds this))))"
-    );
-}
-
-#[test]
-fn tuple_macro_assert_and_describe() {
-    let mut eval = boot();
-    require_spec(&mut eval);
-    assert_eq!(
-        uncaught(&mut eval, "(s/tuple)"),
-        "java.lang.AssertionError | Assert failed: (not (empty? preds))"
-    );
-    assert_eq!(
-        run(&mut eval, "(s/form (s/tuple even? string?))"),
-        "(clojure.spec.alpha/tuple clojure.core/even? clojure.core/string?)"
-    );
-    assert_eq!(
-        run(&mut eval, "(s/describe (s/tuple even? string?))"),
-        "(tuple even? string?)"
     );
 }
 
