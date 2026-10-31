@@ -105,6 +105,12 @@ upstream gets this from the JDK; documented as such, never in `clojure.core`):
   Related: the port keeps the inner single-value text while
   upstream's observable wraps it (`"Error reading edn. ..."`),
   pinned port-canonical per R3.
+- A7 `file-separator` is `/` and `nl` is `\n` on all platforms
+  (cosmetic divergence from upstream-on-Windows, which uses `\`
+  / `\r\n`; `/` works on Windows APIs). Native path *values*
+  (`canonical-path`, `current-dir`) stay platform-native, as the
+  JVM's — tests build expectations via `std::path`, never `/`
+  literals, and use `fake_abs()` for platform-absolute paths.
 
 ### 2.3 Design decisions and refusals
 

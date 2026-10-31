@@ -202,6 +202,17 @@ fn read_edn_string_rows() {
     );
 }
 
+/// A platform-absolute fake path (`/abs/...` literals are
+/// Unix-only — drive-relative on Windows, so they would join
+/// the cwd instead of passing through).
+fn fake_abs() -> String {
+    std::env::current_dir()
+        .unwrap()
+        .join("abs-deps.edn")
+        .to_string_lossy()
+        .into_owned()
+}
+
 #[test]
 fn read_edn_string_multi_throws() {
     // Upstream edn.clj `read-edn`: a second value throws ex-info
@@ -233,20 +244,27 @@ fn read_edn_string_multi_throws() {
     );
     // A second value hides behind no comments/whitespace (spec §5:
     // two `read_form` calls on one reader).
+    let fake = fake_abs();
     let msg = uncaught(
         &mut eval,
-        "(port/read-edn-string \"{:a 1} ;; note\\n ;; more\\n [2]\" \"/abs/deps.edn\")",
+        &format!(
+            "(port/read-edn-string \"{{:a 1}} ;; note\\n ;; more\\n [2]\" {})",
+            clj_str(&fake)
+        ),
     );
     assert_eq!(
         msg,
-        "clojure.lang.ExceptionInfo | Expected edn to contain a single value. (/abs/deps.edn)"
+        format!("clojure.lang.ExceptionInfo | Expected edn to contain a single value. ({fake})")
     );
     assert_eq!(
         run(
             &mut eval,
-            "(try (port/read-edn-string \"1 2\" \"/abs/deps.edn\") (catch clojure.lang.ExceptionInfo e (ex-data e)))"
+            &format!(
+                "(try (port/read-edn-string \"1 2\" {}) (catch clojure.lang.ExceptionInfo e (ex-data e)))",
+                clj_str(&fake)
+            )
         ),
-        "{:path \"/abs/deps.edn\"}"
+        format!("{{:path \"{fake}\"}}")
     );
     // A relative path absolutizes `getAbsolutePath`-style (joined
     // onto the cwd, never normalized).
@@ -267,35 +285,41 @@ fn read_edn_string_bad_input_throws() {
     // delimiters) throw ex-info naming the path; texts are port
     // reader wording (R3).
     let mut eval = tools_eval();
+    let fake = fake_abs();
     let msg = uncaught(
         &mut eval,
-        "(port/read-edn-string \"{:a 1\" \"/abs/deps.edn\")",
+        &format!("(port/read-edn-string \"{{:a 1\" {})", clj_str(&fake)),
     );
     assert!(msg.starts_with("clojure.lang.ExceptionInfo | "), "{msg}");
-    assert!(msg.ends_with("(/abs/deps.edn)"), "{msg}");
+    assert!(msg.ends_with(&format!("({fake})")), "{msg}");
     // Trailing garbage after a first value throws too.
     let trailing = uncaught(
         &mut eval,
-        "(port/read-edn-string \"{:a 1} (oops\" \"/abs/deps.edn\")",
+        &format!(
+            "(port/read-edn-string \"{{:a 1}} (oops\" {})",
+            clj_str(&fake)
+        ),
     );
-    assert!(trailing.ends_with("(/abs/deps.edn)"), "{trailing}");
+    assert!(trailing.ends_with(&format!("({fake})")), "{trailing}");
     // `#=` never evaluates (clojure.edn parity — `read-edn` reads
     // through `clojure.edn`, never `clojure.core/read`): the gate
     // text lands in the ex-info instead of running the form.
     let eval_msg = uncaught(
         &mut eval,
-        "(port/read-edn-string \"#=(+ 1 2)\" \"/abs/deps.edn\")",
+        &format!("(port/read-edn-string \"#=(+ 1 2)\" {})", clj_str(&fake)),
     );
     assert_eq!(
         eval_msg,
-        "clojure.lang.ExceptionInfo | EvalReader not allowed when *read-eval* is false. (/abs/deps.edn)"
+        format!(
+            "clojure.lang.ExceptionInfo | EvalReader not allowed when *read-eval* is false. ({fake})"
+        )
     );
     // Read-conds are denied like `read-string`.
     let rc = uncaught(
         &mut eval,
-        "(port/read-edn-string \"#?(:clj 1)\" \"/abs/deps.edn\")",
+        &format!("(port/read-edn-string \"#?(:clj 1)\" {})", clj_str(&fake)),
     );
-    assert!(rc.ends_with("(/abs/deps.edn)"), "{rc}");
+    assert!(rc.ends_with(&format!("({fake})")), "{rc}");
 }
 
 #[test]
