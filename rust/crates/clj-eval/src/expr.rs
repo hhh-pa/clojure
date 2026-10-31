@@ -4767,6 +4767,13 @@ mod tests {
             Value::Symbol(Symbol::new(None, "k")),
         ]));
         assert_eq!(unquote_key(&call), call);
+        // None arm of the guard: a 2-list key whose head is not a
+        // symbol (here `((quote q) v)`) passes through untouched.
+        let nested = Value::List(List::from_vec(vec![
+            quote_form(&Value::Symbol(Symbol::new(None, "q"))),
+            Value::Symbol(Symbol::new(None, "v")),
+        ]));
+        assert_eq!(unquote_key(&nested), nested);
     }
 
     #[test]
