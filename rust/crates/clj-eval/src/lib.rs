@@ -14,6 +14,8 @@
 
 pub mod aot_subset;
 pub mod arrays;
+#[path = "async.rs"]
+pub mod async_ns;
 pub mod builtin_expand;
 pub mod classemu;
 pub mod coll;

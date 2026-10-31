@@ -1,0 +1,5 @@
+e-take-bound => THROW java.lang.AssertionError | "Assert failed: No more than 1024 pending takes are allowed on a single channel.\n(< (.size takes) impl/MAX-QUEUE-SIZE)"
+q-takes-released => true
+e-put-bound => THROW java.lang.AssertionError | "Assert failed: No more than 1024 pending puts are allowed on a single channel. Consider using a windowed buffer.\n(< (.size puts) impl/MAX-QUEUE-SIZE)"
+q-puts-drained => [0 1023 1024]
+q-puts-released => true
