@@ -1196,8 +1196,9 @@ fn load_dirs(eval: &Evaluator) -> Result<Vec<String>, NativeError> {
 
 /// Resolve a load root (no leading slash) to the `*file*` path and
 /// text: embedded libs first (gap-122 slice 1: `clojure/spec/alpha`
-/// only), then `.clj` across every `*load-path*` dir, then
-/// `.cljc` (`RT.load` lookup order).
+/// only; the flat set lives here when S5D lands), then `.clj`
+/// across every `*load-path*` dir, then `.cljc` (`RT.load` lookup
+/// order).
 fn resolve_source(eval: &Evaluator, root: &str) -> Result<(String, String), NativeError> {
     if root == "clojure/spec/alpha" {
         return Ok((
