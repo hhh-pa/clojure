@@ -2342,6 +2342,35 @@ fn as_pat(form: &Value) -> Option<Pat<'_>> {
     }
 }
 
+/// A literal map key from its code form (#112): the analyzer reads
+/// pattern keys as values, but upstream spells symbol keys quoted
+/// (`'k` — macro keys are code, evaluated at runtime). Unquote
+/// `(quote k)` so both spellings denote `k`. Bare symbols stay
+/// literal (fenced: key position holds values here, never var
+/// references, so bare never resolves).
+fn unquote_key(v: &Value) -> Value {
+    if let Value::List(l) = v {
+        if l.len() == 2 {
+            let mut items = l.iter();
+            if let (Some(Value::Symbol(q)), Some(inner)) = (items.next(), items.next()) {
+                if q.namespace().is_none() && q.name() == "quote" {
+                    return inner.clone();
+                }
+            }
+        }
+    }
+    v.clone()
+}
+
+/// `(quote k)` as a value: an `:or` key spelled quoted matches the
+/// unquoted entry key (#112).
+fn quote_form(key: &Value) -> Value {
+    Value::List(List::from_vec(vec![
+        Value::Symbol(Symbol::new(None, "quote")),
+        key.clone(),
+    ]))
+}
+
 /// The deep `::binding-form` spec mirror: plain symbol, sequential
 /// (`forms*` + optional `& rest` + optional `:as sym`), or map
 /// (binding entries + known directives with shaped values).
@@ -2438,16 +2467,15 @@ fn spec_valid_directive(kw: &Keyword, v: &Value) -> bool {
 }
 
 /// `::req-bindings` (M2, upstream `core.specs.alpha`): a map of
-/// local-name (or nested map form) to any key.
+/// local-name (or nested map form) to any key. The runtime splice
+/// (`pb`) accepts vector locals too, and the expansion path takes
+/// them — so the analyzer follows the runtime, not the spec text
+/// (#112): any binding form passes here.
 fn spec_valid_req(v: &Value) -> bool {
     let Value::Map(m) = v else {
         return false;
     };
-    m.iter().all(|(local, _)| match local {
-        Value::Symbol(sym) => is_local_name(sym),
-        Value::Map(nested) => spec_valid_map(nested),
-        _ => false,
-    })
+    m.iter().all(|(local, _)| spec_valid_binding(local))
 }
 
 #[derive(Clone, Copy)]
@@ -2663,10 +2691,12 @@ fn walk_map_pair(
         return walk_key_list(v, kw, &dir, or_map, sel, bound_keys);
     }
     walk_binding(k)?;
-    sel.push(v.clone());
+    // #112: the entry key unquotes (quoted spells the same key).
+    let key = unquote_key(v);
+    sel.push(key.clone());
     if let Value::Symbol(local) = k {
-        bound_keys.insert(local.name().to_owned(), v.clone());
-        check_or_pair(or_map, local.name(), v, false)?;
+        bound_keys.insert(local.name().to_owned(), key.clone());
+        check_or_pair(or_map, local.name(), &key, false)?;
     }
     Ok(())
 }
@@ -2709,7 +2739,8 @@ fn walk_key_list(
                     ),
                 });
             }
-            sel.push(form.clone());
+            // #112: post-`&` keys unquote like entries.
+            sel.push(unquote_key(form));
             continue;
         }
         // `:strs` never casts (`core.clj:4556` bare `str`):
@@ -2734,12 +2765,13 @@ fn walk_key_list(
 
 /// One `:req!` map (M2): locals validate as binding forms with
 /// required `:or` semantics; keys join the selection, mirroring
-/// the upstream splice back into the binding loop. Upstream shapes
-/// are local-names or nested map forms (`::req-bindings`); anything
-/// else is `Unsupported binding form`. Non-maps take the
-/// expansion-stage errors the JVM hits: non-seqables the `ISeq`
-/// error, other shapes the first element's `Map$Entry` cast (probe
-/// `loop-req-num`, `loop-req-bad-full` on alpha10).
+/// the upstream splice back into the binding loop. The spec text
+/// (`::req-bindings`) is local-names or nested map forms, but the
+/// runtime splice takes vector locals too, like the expansion path
+/// (#112); anything else is `Unsupported binding form`. Non-maps
+/// take the expansion-stage errors the JVM hits: non-seqables the
+/// `ISeq` error, other shapes the first element's `Map$Entry` cast
+/// (probe `loop-req-num`, `loop-req-bad-full` on alpha10).
 fn walk_req_list(
     v: &Value,
     or_map: Option<&Map>,
@@ -2776,15 +2808,20 @@ fn walk_req_entry(
     sel: &mut Vec<Value>,
     bound_keys: &mut HashMap<String, Value>,
 ) -> Result<(), WalkError> {
+    // #112: the key unquotes (quoted spells the same key); vector
+    // locals validate as nested patterns (the runtime `pb` splice
+    // accepts any binding form, like the expansion path).
+    let key = unquote_key(key);
     match local {
         Value::Symbol(sym) => {
             bound_keys.insert(sym.name().to_owned(), key.clone());
-            check_or_pair(or_map, sym.name(), key, true)?;
+            check_or_pair(or_map, sym.name(), &key, true)?;
         }
         Value::Map(nested) => walk_map(nested)?,
+        _ if vector_shape_items(local).is_some() => walk_binding(local)?,
         _ => return Err(WalkError::unsupported(local)),
     }
-    sel.push(key.clone());
+    sel.push(key);
     Ok(())
 }
 
@@ -2860,7 +2897,8 @@ fn key_cast_err(dir: &KeyDirective, form: &Value) -> WalkError {
 /// `:or` semantics for one binding (compile time): `Multiple :or
 /// defaults` when both the local and the key have defaults, `Can't
 /// supply default value for required key` when a required binding
-/// has either.
+/// has either. The key arrives unquoted (#112) while `:or` keys
+/// stay as written, so a quoted `:or` spelling matches too.
 fn check_or_pair(
     or_map: Option<&Map>,
     local: &str,
@@ -2872,7 +2910,7 @@ fn check_or_pair(
     };
     let local_key = Value::Symbol(Symbol::new(None, local));
     let has_local = or.get(&local_key).is_some();
-    let has_key = or.get(key).is_some();
+    let has_key = or.get(key).is_some() || or.get(&quote_form(key)).is_some();
     if has_local && has_key {
         return Err(WalkError {
             class: class::EXCEPTION,
@@ -2922,7 +2960,10 @@ fn check_strict_or(
                 }
             }
         } else {
-            mapped.push((*k).clone());
+            // #112: the selection holds unquoted keys, so quoted
+            // `:or` spellings compare unquoted (bare symbols above
+            // still resolve through bound locals only).
+            mapped.push(unquote_key(k));
         }
     }
     let extras: Vec<&Value> = mapped.iter().filter(|k| !sel.contains(k)).collect();
@@ -3646,13 +3687,14 @@ impl<'a> Analyzer<'a> {
         acc: &mut MapAcc,
     ) -> Result<(), CompileError> {
         if let Value::Keyword(kw) = k {
-            // `:req!` (M2): each entry binds required with its raw
-            // key, exactly like the upstream splice back into the
-            // binding loop (validation ran already, so only maps
-            // reach the builder; anything else never does). Hoisted
-            // ahead of the chain so the chain keeps its master shape;
-            // every non-`req!` keyword takes the false edge past the
-            // block, keeping its brace attributed.
+            // `:req!` (M2): each entry binds required with its key
+            // (unquoted, #112), exactly like the upstream splice
+            // back into the binding loop (validation ran already, so
+            // only maps reach the builder; anything else never
+            // does). Hoisted ahead of the chain so the chain keeps
+            // its master shape; every non-`req!` keyword takes the
+            // false edge past the block, keeping its brace
+            // attributed.
             if kw.namespace().is_none() && kw.name() == "req!" {
                 return self.build_req_entries(v, span, acc);
             }
@@ -3665,16 +3707,19 @@ impl<'a> Analyzer<'a> {
         }
         let validated = as_pat(k).expect("patterns validated before building");
         let (pat, _) = self.build_pattern(validated, span)?;
-        push_entry(&mut acc.entries, pat, v.clone(), false);
+        // #112: the entry key unquotes (quoted spells the same key).
+        push_entry(&mut acc.entries, pat, unquote_key(v), false);
         Ok(())
     }
 
-    /// The analyzed `:or` defaults (eager at runtime).
+    /// The analyzed `:or` defaults (eager at runtime). Keys unquote
+    /// (#112) so a quoted spelling matches the unquoted entry key
+    /// at lookup, like the walk-time `:or` checks.
     fn build_or(&mut self, m: &Map, span: Span) -> Result<Vec<(Value, Expr)>, CompileError> {
         let mut or = Vec::new();
         if let Some(Value::Map(or_map)) = map_get(m, "or") {
             for (k, default) in or_map.iter() {
-                or.push(((*k).clone(), self.analyze(default, span, false)?));
+                or.push((unquote_key(k), self.analyze(default, span, false)?));
             }
         }
         Ok(or)
@@ -3698,7 +3743,7 @@ impl<'a> Analyzer<'a> {
             for (local, key) in req.iter() {
                 let validated = as_pat(local).expect("patterns validated before building");
                 let (pat, _) = self.build_pattern(validated, span)?;
-                push_entry(&mut acc.entries, pat, key.clone(), true);
+                push_entry(&mut acc.entries, pat, unquote_key(key), true);
             }
             return Ok(());
         }
@@ -3759,8 +3804,9 @@ fn build_keys(
         if !preamp {
             // Upstream `xfk` (M2): under a namespaced `:keys`/`:keys!`
             // directive an unqualified post-`&` key takes the directive
-            // namespace, a qualified one keeps its own.
-            extra_keys.push(post_amp_key(dir, &form));
+            // namespace, a qualified one keeps its own. Post-`&` keys
+            // unquote like entries (#112).
+            extra_keys.push(unquote_key(&post_amp_key(dir, &form)));
             continue;
         }
         if let Ok((key, local)) = key_for(dir, &form) {
@@ -4737,6 +4783,50 @@ mod tests {
 
     fn unqualified_bb() -> Value {
         Value::Keyword(Keyword::new(None, "bb"))
+    }
+
+    #[test]
+    fn unquote_key_strips_quote_forms() {
+        // #112: `(quote k)` denotes `k`; anything else passes
+        // through untouched (bare symbols stay literal).
+        let quoted = quote_form(&Value::Symbol(Symbol::new(None, "k")));
+        assert_eq!(unquote_key(&quoted), Value::Symbol(Symbol::new(None, "k")));
+        let bare = Value::Symbol(Symbol::new(None, "k"));
+        assert_eq!(unquote_key(&bare), bare);
+        let kw = Value::Keyword(Keyword::new(None, "k"));
+        assert_eq!(unquote_key(&kw), kw);
+        let call = Value::List(List::from_vec(vec![
+            Value::Symbol(Symbol::new(None, "f")),
+            Value::Symbol(Symbol::new(None, "k")),
+        ]));
+        assert_eq!(unquote_key(&call), call);
+        // None arm of the guard: a 2-list key whose head is not a
+        // symbol (here `((quote q) v)`) passes through untouched.
+        let nested = Value::List(List::from_vec(vec![
+            quote_form(&Value::Symbol(Symbol::new(None, "q"))),
+            Value::Symbol(Symbol::new(None, "v")),
+        ]));
+        assert_eq!(unquote_key(&nested), nested);
+        // Length-guard false edge: a list key with length != 2
+        // (here a 1-list) passes through untouched.
+        let singleton = Value::List(List::from_vec(vec![Value::Symbol(Symbol::new(None, "k"))]));
+        assert_eq!(unquote_key(&singleton), singleton);
+    }
+
+    #[test]
+    fn spec_valid_req_takes_vector_locals() {
+        // #112: the runtime splice accepts vector locals (the spec
+        // text is map/local-only, but the expansion path takes
+        // vectors, so the analyzer follows the runtime).
+        let pair = Value::Vector(Vector::from_vec(vec![
+            Value::Symbol(Symbol::new(None, "a")),
+            Value::Symbol(Symbol::new(None, "b")),
+        ]));
+        let req = Value::Map(new_map().insert(pair, Value::Keyword(Keyword::new(None, "pair"))));
+        assert!(spec_valid_req(&req));
+        let bad =
+            Value::Map(new_map().insert(Value::Int(5), Value::Keyword(Keyword::new(None, "a"))));
+        assert!(!spec_valid_req(&bad));
     }
 
     #[test]
