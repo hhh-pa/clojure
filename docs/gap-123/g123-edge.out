@@ -1,0 +1,35 @@
+e-drop-str => THROW java.lang.ClassCastException | "class java.lang.String cannot be cast to class java.lang.Number (java.lang.String and java.lang.Number are in module java.base of loader 'bootstrap')"
+e-slide-str => THROW java.lang.ClassCastException | "class java.lang.String cannot be cast to class java.lang.Number (java.lang.String and java.lang.Number are in module java.base of loader 'bootstrap')"
+e-chan-15 => NO-THROW :done
+e-chan-str2 => NO-THROW :done
+drop0-put => [true]
+Exception in thread "main" java.util.NoSuchElementException
+	at java.base/java.util.LinkedList.removeLast(LinkedList.java:295)
+	at clojure.core.async.impl.buffers.SlidingBuffer.remove_BANG_(buffers.clj:60)
+	at clojure.core.async.impl.buffers.SlidingBuffer.add_BANG__STAR_(buffers.clj:63)
+	at clojure.core.async.impl.protocols$add_BANG_.invokeStatic(protocols.clj:41)
+	at clojure.core.async.impl.protocols$add_BANG_.invoke(protocols.clj:37)
+	at clojure.core.async.impl.channels$chan$fn__637.invoke(channels.clj:303)
+	at clojure.core.async.impl.channels.ManyToManyChannel.put_BANG_(channels.clj:153)
+	at clojure.core.async$fn__7068.invokeStatic(async.clj:198)
+	at clojure.core.async$fn__7068.invoke(async.clj:190)
+	at user$eval9633$fn__9634.invoke(g123-edge.clj:21)
+	at user$thrown1.invokeStatic(g123-edge.clj:6)
+	at user$thrown1.invoke(g123-edge.clj:5)
+	at user$eval9633.invokeStatic(g123-edge.clj:21)
+	at user$eval9633.invoke(g123-edge.clj:21)
+	at clojure.lang.Compiler.eval(Compiler.java:7768)
+	at clojure.lang.Compiler.load(Compiler.java:8234)
+	at clojure.lang.Compiler.loadFile(Compiler.java:8172)
+	at clojure.main$load_script.invokeStatic(main.clj:476)
+	at clojure.main$script_opt.invokeStatic(main.clj:536)
+	at clojure.main$script_opt.invoke(main.clj:531)
+	at clojure.main$main.invokeStatic(main.clj:665)
+	at clojure.main$main.doInvoke(main.clj:617)
+	at clojure.lang.RestFn.applyTo(RestFn.java:140)
+	at clojure.lang.Var.applyTo(Var.java:707)
+	at clojure.main.main(main.java:40)
+slide0-put => NO-THROW :done
+dropneg-put => [true]
+slideneg => 1
+e-chan-vec => THROW java.lang.IllegalArgumentException | "No implementation of method: :full? of protocol: #'clojure.core.async.impl.protocols/Buffer found for class: clojure.lang.PersistentVector"

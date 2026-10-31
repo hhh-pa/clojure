@@ -1289,6 +1289,14 @@ pub(crate) fn load_one(
     lib: &Symbol,
     need_ns: bool,
 ) -> Result<(), NativeError> {
+    // Gap-123 slice 1: `clojure.core.async` is a native namespace
+    // (no source file): requiring it installs the natives and
+    // marks it loaded (reinstalling is a `:reload` no-op).
+    if sym_str(lib) == crate::async_ns::ASYNC_NS {
+        crate::async_ns::install_async_ns(eval);
+        mark_loaded(eval, lib)?;
+        return Ok(());
+    }
     let root = root_resource(lib.name());
     load_paths(
         eval,

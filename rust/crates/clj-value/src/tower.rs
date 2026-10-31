@@ -297,6 +297,47 @@ impl BigDec {
         self.unscaled.is_zero()
     }
 
+    /// The exact ceiling as a saturated `i64` plus integrality
+    /// (gap-123 buffer sizes: the JVM compares `(>= size n)` /
+    /// `(= size n)` exactly, so only reachable magnitudes need
+    /// exactness — past `±i64` the sign saturation decides).
+    #[must_use]
+    pub fn ceil_to_i64(&self) -> (i64, bool) {
+        if self.unscaled.is_zero() {
+            return (0, true);
+        }
+        let sat = if self.sign() == Ordering::Greater {
+            i64::MAX
+        } else {
+            i64::MIN
+        };
+        if self.scale <= 0 {
+            // Integral: `unscaled * 10^-scale` (a 30-digit floor
+            // saturates any wider shift the same way).
+            let v = &self.unscaled * pow10(self.scale.saturating_neg().min(30) as u32);
+            return (v.to_i64().unwrap_or(sat), true);
+        }
+        let digits = self.unscaled.abs().to_string().len() as i64;
+        if digits > self.scale.saturating_add(19) {
+            return (sat, false);
+        }
+        if digits <= self.scale {
+            // Below one in magnitude: 1 (positive) or 0.
+            return (i64::from(self.sign() == Ordering::Greater), false);
+        }
+        let divisor = pow10(self.scale as u32);
+        let trunc = &self.unscaled / &divisor;
+        if (&self.unscaled % &divisor).is_zero() {
+            return (trunc.to_i64().unwrap_or(sat), true);
+        }
+        let ceil = if self.sign() == Ordering::Greater {
+            trunc + 1
+        } else {
+            trunc
+        };
+        (ceil.to_i64().unwrap_or(sat), false)
+    }
+
     /// The raw pair, for `hashCode` (which — unlike `hasheq` — hashes
     /// the UNstripped value, so scale counts).
     #[must_use]
@@ -951,6 +992,28 @@ mod tests {
             BigDec::parse("5.1").unwrap().to_rational(),
             BigRational::new(BigInt::from(51), BigInt::from(10))
         );
+    }
+
+    #[test]
+    fn bigdec_ceil_to_i64_cases() {
+        // Gap-123 buffer sizes: exact ceilings plus integrality.
+        let c = |s: &str| BigDec::parse(s).unwrap().ceil_to_i64();
+        assert_eq!(c("3"), (3, true));
+        assert_eq!(c("3.0"), (3, true));
+        assert_eq!(c("3.5"), (4, false));
+        assert_eq!(c("-3.5"), (-3, false));
+        assert_eq!(c("-3.0"), (-3, true));
+        assert_eq!(c("0.5"), (1, false));
+        assert_eq!(c("-0.5"), (0, false));
+        assert_eq!(c("0"), (0, true));
+        assert_eq!(c("0.0"), (0, true));
+        assert_eq!(c("1E-400"), (1, false));
+        assert_eq!(c("-1E-400"), (0, false));
+        assert_eq!(c("1E30"), (i64::MAX, true));
+        assert_eq!(c("-1E30"), (i64::MIN, true));
+        assert_eq!(c("9223372036854775807"), (i64::MAX, true));
+        assert_eq!(c("9223372036854775808"), (i64::MAX, true));
+        assert_eq!(c("-9223372036854775809"), (i64::MIN, true));
     }
 
     #[test]
