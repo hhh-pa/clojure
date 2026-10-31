@@ -793,6 +793,11 @@ fn bdd_trailing_second_value_rejected() {
         uncaught(&mut eval, &format!("(edn/read-deps {lit})")),
         format!("clojure.lang.ExceptionInfo | Expected edn to contain a single value. ({file})")
     );
+    // The vector print pr-escapes the embedded message string,
+    // so the path inside the message needs escaping too (the raw
+    // path only matches on backslash-free platforms).
+    let lit_inner = clj_str(&file);
+    let lit_inner = lit_inner.trim_matches('"');
     assert_eq!(
         run(
             &mut eval,
@@ -801,7 +806,7 @@ fn bdd_trailing_second_value_rejected() {
             )
         ),
         format!(
-            "[\"Expected edn to contain a single value. ({file})\" {{:path {}}}]",
+            "[\"Expected edn to contain a single value. ({lit_inner})\" {{:path {}}}]",
             clj_str(&file)
         )
     );
