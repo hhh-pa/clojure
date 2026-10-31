@@ -416,7 +416,7 @@ fn conformer_explain_and_describe() {
         .unwrap();
     assert_eq!(
         run(&mut eval, "(s/explain-data :user/ki \"a\")"),
-        "#:clojure.spec.alpha{:problems [{:path [], :pred (clojure.spec.alpha/conformer user/keep-int), :val \"a\", :via [:user/ki], :in []}], :spec :user/ki, :value \"a\"}"
+        "#:clojure.spec.alpha{:problems [{:path [], :pred (conformer user/keep-int), :val \"a\", :via [:user/ki], :in []}], :spec :user/ki, :value \"a\"}"
     );
     assert_eq!(
         run(&mut eval, "(s/explain-str :user/ki \"a\")"),
@@ -426,7 +426,7 @@ fn conformer_explain_and_describe() {
         .unwrap();
     assert_eq!(
         run(&mut eval, "(s/form :user/ud)"),
-        "(clojure.spec.alpha/conformer clojure.core/inc clojure.core/dec)"
+        "(conformer clojure.core/inc clojure.core/dec)"
     );
     assert_eq!(
         run(&mut eval, "(s/describe :user/ud)"),
@@ -472,7 +472,7 @@ fn nonconforming_explain_delegates_and_describes() {
             &mut eval,
             "(let [p (first (:clojure.spec.alpha/problems (s/explain-data :user/nk2 \"a\")))] (:pred p))"
         ),
-        "(clojure.spec.alpha/conformer user/keep-int)"
+        "(conformer user/keep-int)"
     );
     eval.eval_source("(s/def :user/nc (s/nonconforming (s/conformer inc dec)))")
         .unwrap();

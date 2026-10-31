@@ -99,7 +99,7 @@ Out of scope (sibling workers): `s/keys`, `s/merge`, `s/or`,
 is also needed by slice A (`keys`/`merge`); whichever slice lands
 second drops its copy (the definitions are identical).
 
-## Port adaptations (all pinned by tests)
+## Port adaptations (1–2 pinned by tests; 3–4 structural, covered by slices E/F)
 
 1. `IllegalStateException` construction (the conformer "no unform
    fn" throw, oracle line 935; the multi-spec "No method of"
@@ -259,13 +259,13 @@ multimethods defined in the test setup.
     fails `< 10`); When `(s/unform :user/ac 6)` Then `5`.
 27. Explain names the conformer form
     `(s/explain-data :user/ki "a")` has the single problem with
-    `:pred (clojure.spec.alpha/conformer user/keep-int)` and
+    `:pred (conformer user/keep-int)` and
     `:via [:user/ki]`; `explain-str` renders
     `"\"a\" - failed: (conformer keep-int) spec: :user/ki\n"`.
 28. describe/form
     `(s/describe :user/ud)` => `(conformer inc dec)`;
     `(s/form :user/ud)` =>
-    `(clojure.spec.alpha/conformer clojure.core/inc clojure.core/dec)`.
+    `(conformer clojure.core/inc clojure.core/dec)`.
 
 ### nonconforming
 
@@ -284,7 +284,7 @@ multimethods defined in the test setup.
     `(s/explain-data :user/nk2 "a")` equals
     `(s/explain-data (s/get-spec :user/nk2-inner) "a")`-shaped
     problems — i.e. the single problem has
-    `:pred (clojure.spec.alpha/conformer user/keep-int)`.
+    `:pred (conformer user/keep-int)`.
 33. describe wraps the inner description
     `(s/describe :user/nc)` =>
     `(nonconforming (conformer inc dec))`.

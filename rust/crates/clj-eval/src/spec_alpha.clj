@@ -1220,10 +1220,10 @@ if value does not match spec, else the (possibly destructured) value."
   spec that uses it as a predicate/conformer. Optionally takes a
   second fn that does unform of result of first"
   ([f] (list 'clojure.spec.alpha/spec-impl
-             (list 'quote (list 'clojure.spec.alpha/conformer (res f)))
+             (list 'quote (list 'conformer (res f)))
              f true))
   ([f unf] (list 'clojure.spec.alpha/spec-impl
-                 (list 'quote (list 'clojure.spec.alpha/conformer (res f) (res unf)))
+                 (list 'quote (list 'conformer (res f) (res unf)))
                  f true unf)))
 
 ;; Upstream alpha.clj 694-700, built with `list` (as `def`).
