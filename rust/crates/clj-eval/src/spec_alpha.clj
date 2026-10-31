@@ -1466,7 +1466,7 @@ if value does not match spec, else the (possibly destructured) value."
              (if (>= i (count x))
                x
                (if (valid? spec (nth x i))
-                 (recur (+ i step))
+                 (recur (c/+ i step))
                  :clojure.spec.alpha/invalid))))
          (let [limit *coll-check-limit*]
            (loop [i 0 [v & vs :as vseq] (seq x)]
