@@ -63,6 +63,13 @@ const SPEC_ALPHA_CLJ: &str = include_str!("spec_alpha.clj");
 /// on-demand shape as [`SPEC_ALPHA_CLJ`].
 const SPEC_GEN_ALPHA_CLJ: &str = include_str!("gen_alpha.clj");
 
+/// The embedded tools.deps config-layer sources (gap-124 slice 1):
+/// each carries its own `ns` form and loads on demand through the
+/// ordinary `require` path (the `spec_alpha.clj` shape).
+const TOOLS_DEPS_UTIL_DIR_CLJ: &str = include_str!("tools_deps_util_dir.clj");
+const TOOLS_DEPS_EDN_CLJ: &str = include_str!("tools_deps_edn.clj");
+const TOOLS_DEPS_EXTENSIONS_CLJ: &str = include_str!("tools_deps_extensions.clj");
+
 pub(crate) fn npe(message: &str) -> NativeError {
     NativeError::new(ThrowClass::NullPointerException, message.to_owned())
 }
@@ -1222,10 +1229,10 @@ fn load_dirs(eval: &Evaluator) -> Result<Vec<String>, NativeError> {
 
 /// Resolve a load root (no leading slash) to the `*file*` path and
 /// text: embedded libs first (gap-122 slices 1+F1:
-/// `clojure/spec/alpha` + `clojure/spec/gen/alpha`; the flat set
-/// lives here when S5D lands), then `.clj`
-/// across every `*load-path*` dir, then `.cljc` (`RT.load` lookup
-/// order).
+/// `clojure/spec/alpha` + `clojure/spec/gen/alpha`; gap-124 slice 1:
+/// the three tools.deps config namespaces; the flat set lives here
+/// when S5D lands), then `.clj` across every `*load-path*` dir,
+/// then `.cljc` (`RT.load` lookup order).
 fn resolve_source(eval: &Evaluator, root: &str) -> Result<(String, String), NativeError> {
     if root == "clojure/spec/alpha" {
         return Ok((
@@ -1237,6 +1244,24 @@ fn resolve_source(eval: &Evaluator, root: &str) -> Result<(String, String), Nati
         return Ok((
             "clojure/spec/gen/alpha.clj".to_owned(),
             SPEC_GEN_ALPHA_CLJ.to_owned(),
+        ));
+    }
+    if root == "clojure/tools/deps/util/dir" {
+        return Ok((
+            "clojure/tools/deps/util/dir.clj".to_owned(),
+            TOOLS_DEPS_UTIL_DIR_CLJ.to_owned(),
+        ));
+    }
+    if root == "clojure/tools/deps/edn" {
+        return Ok((
+            "clojure/tools/deps/edn.clj".to_owned(),
+            TOOLS_DEPS_EDN_CLJ.to_owned(),
+        ));
+    }
+    if root == "clojure/tools/deps/extensions" {
+        return Ok((
+            "clojure/tools/deps/extensions.clj".to_owned(),
+            TOOLS_DEPS_EXTENSIONS_CLJ.to_owned(),
         ));
     }
     let dirs = load_dirs(eval)?;
@@ -1340,6 +1365,14 @@ pub(crate) fn load_one(
     // marks it loaded (reinstalling is a `:reload` no-op).
     if sym_str(lib) == crate::async_ns::ASYNC_NS {
         crate::async_ns::install_async_ns(eval);
+        mark_loaded(eval, lib)?;
+        return Ok(());
+    }
+    // Gap-124 slice 1: `clojure.tools.deps.util.port` is a native
+    // namespace (the file/env substrate, no source file): same
+    // install-and-mark shape.
+    if sym_str(lib) == crate::portdeps::PORT_NS {
+        crate::portdeps::install_port_ns(eval);
         mark_loaded(eval, lib)?;
         return Ok(());
     }
