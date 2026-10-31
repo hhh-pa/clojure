@@ -1104,18 +1104,15 @@ fn go_resolution_styles() {
         ":v"
     );
     run(&mut eval, "(in-ns 'user)");
-    // A local named `let` shadows the builtin for the walk and
-    // the analyzer alike (the inner form compiles as a call, so
-    // its bindings vector is a literal of unbound symbols).
+    // A `let`-bound `let` shadows the builtin for the walk and
+    // the analyzer alike (the inner form compiles as a call of
+    // `5` — the go settles).
     assert_eq!(
-        compile_err(
+        run_last(
             &mut eval,
-            "(let [let 5] (let [g (a/go (let 6))] [(goo g) (a/closed? g)]))"
+            "(let [g (a/go (let [let 5] (let 6)))] [(goo g) (a/closed? g)])"
         ),
-        vec![
-            "Syntax error compiling at (user:1:14).".to_owned(),
-            "java.lang.RuntimeException | Unable to resolve symbol: g in this context".to_owned(),
-        ]
+        "[nil true]"
     );
     // A global `let` shadows too: the inner form compiles as a
     // call of the user var (defined last — later `let` forms in

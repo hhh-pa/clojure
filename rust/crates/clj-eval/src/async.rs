@@ -913,21 +913,17 @@ impl GoRewrite<'_> {
     fn walk_map_entry(&mut self, k: &Value, v: &Value, names: &mut Vec<String>) -> (Value, Value) {
         if let Value::Keyword(key) = k {
             if key.namespace().is_none() {
-                match key.name() {
-                    "keys" | "syms" | "strs" => {
-                        names.extend(short_names(v));
-                        return (k.clone(), v.clone());
-                    }
-                    "as" => {
-                        if let Value::Symbol(s) = v {
-                            if s.namespace().is_none() {
-                                names.push(s.name().to_owned());
-                            }
-                        }
-                        return (k.clone(), v.clone());
-                    }
-                    "or" => return (k.clone(), self.walk_or(v)),
-                    _ => {}
+                let directive = key.name();
+                if matches!(directive, "keys" | "syms" | "strs") {
+                    names.extend(short_names(v));
+                    return (k.clone(), v.clone());
+                }
+                if directive == "as" {
+                    push_bare_name(v, names);
+                    return (k.clone(), v.clone());
+                }
+                if directive == "or" {
+                    return (k.clone(), self.walk_or(v));
                 }
             }
         }
@@ -947,6 +943,15 @@ impl GoRewrite<'_> {
             out = out.insert(k.clone(), self.walk(dflt));
         }
         Value::Map(out).with_meta(v.meta().cloned())
+    }
+}
+
+/// Bind an `:as` symbol (bare symbols only — anything else
+/// binds nothing and the analyzer reports the shape).
+fn push_bare_name(v: &Value, names: &mut Vec<String>) {
+    let Value::Symbol(s) = v else { return };
+    if s.namespace().is_none() {
+        names.push(s.name().to_owned());
     }
 }
 
@@ -1241,13 +1246,12 @@ fn go_panic_message(panicked: &Box<dyn std::any::Any + Send>) -> String {
 }
 
 /// Deliver the go result (the channel buffers one and takes
-/// exactly one put, so the put always completes synchronously —
-/// a queued put waits out of caution, folded into the ready
-/// line).
+/// exactly one put, so the put completes synchronously in
+/// practice — a queued put waits for its turn).
 fn go_deliver(ch: &Channel, val: Value) {
     let waiter = Arc::new(Waiter::new());
-    if let Ok(ready) = ch.put_one(val, &waiter, 0) {
-        let _ = matches!(ready, OpReady::Queued).then(|| waiter.wait());
+    if let Ok(OpReady::Queued) = ch.put_one(val, &waiter, 0) {
+        let _ = waiter.wait();
     }
 }
 
@@ -1549,6 +1553,12 @@ mod tests {
         let (names, walked) = rw.walk_pattern(&Value::Map(or));
         assert!(names.is_empty());
         assert_eq!(pr_exp(&walked), "{:or 7, :bogus 1}");
+        let mut bound = Vec::new();
+        push_bare_name(&Value::Int(5), &mut bound);
+        push_bare_name(&sym_q("n", "y"), &mut bound);
+        assert!(bound.is_empty());
+        push_bare_name(&sym("m"), &mut bound);
+        assert_eq!(bound, vec!["m".to_owned()]);
         let entry = map_entry(sym("k"), lst(vec![sym_q(ASYNC_NS, "<!"), sym("c")]));
         assert_eq!(pr_exp(&rw.walk(&entry)), "[k (clojure.core.async/<!! c)]");
     }
@@ -1602,18 +1612,14 @@ mod tests {
         let mut eval = scratch_async();
         let err = native_go(&mut eval, &[sym("go")]).expect_err("arity");
         assert_eq!(err.class, ThrowClass::ArityException);
-        assert!(
-            err.message.ends_with("passed to: clojure.core.async/go"),
-            "{}",
-            err.message
-        );
+        let msg = &err.message;
+        assert!(msg.ends_with("passed to: clojure.core.async/go"), "{msg}");
         let err = native_go_loop(&mut eval, &[sym("go-loop"), Value::Nil]).expect_err("arity");
         assert_eq!(err.class, ThrowClass::ArityException);
+        let msg = &err.message;
         assert!(
-            err.message
-                .ends_with("passed to: clojure.core.async/go-loop"),
-            "{}",
-            err.message
+            msg.ends_with("passed to: clojure.core.async/go-loop"),
+            "{msg}"
         );
         let err = alt_impl(
             &mut eval,
@@ -1676,6 +1682,29 @@ mod tests {
         let waiter = Arc::new(Waiter::new());
         let taken = ch.take_one(&waiter, 0).expect("take");
         assert!(matches!(taken, OpReady::Ready(Some(ref v)) if *v == Value::Int(9)));
+    }
+
+    /// `go_deliver` waits out a queued put (a second thread frees
+    /// the buffer — the wait arm is defense, now exercised).
+    #[test]
+    fn go_deliver_waits_when_queued() {
+        let buf = BufferDesc::new(clj_value::BufferKind::Fixed, 1, true);
+        let ch = Arc::new(Channel::new(Some(&buf)));
+        let w0 = Arc::new(Waiter::new());
+        let filled = ch.put_one(Value::Int(0), &w0, 0).expect("fill");
+        assert!(matches!(filled, OpReady::Ready(true)));
+        let ch2 = Arc::clone(&ch);
+        let taker = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            let w = Arc::new(Waiter::new());
+            ch2.take_one(&w, 0)
+        });
+        go_deliver(&ch, Value::Int(9));
+        let took = taker.join().expect("taker joins").expect("take");
+        assert!(matches!(took, OpReady::Ready(Some(ref v)) if *v == Value::Int(0)));
+        let w = Arc::new(Waiter::new());
+        let back = ch.take_one(&w, 0).expect("take back");
+        assert!(matches!(back, OpReady::Ready(Some(ref v)) if *v == Value::Int(9)));
     }
 
     /// `:keys` entries bind their name part; `&env` reads bare
