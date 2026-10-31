@@ -57,13 +57,18 @@ binary/link round-trip.** Consequences:
   add_module, remove_module}`. Its ORC wrappers are vestigial (the
   IR-adding calls are commented out in `execution_engine.rs`).
   llvm-sys 221 ships raw **`orc2`** bindings as a separate path.
-- **Spike question S1 (unverified, must be probed):** upstream LLVM
-  removed MCJIT during the LLVM 21 cycle, so the pinned LLVM 22.1
-  may no longer provide a working MCJIT — in which case
-  `create_jit_execution_engine` fails and Option A dies. This must
-  be settled by a ~30-line probe (create an EE over an empty module),
-  not by assumption. This recon host has no LLVM toolchain
-  (`llvm-config` absent), so the spike runs in CI or a tooled dev box.
+- **Spike question S1 (expected pass, must be probed):** MCJIT
+  still ships on LLVM 22.x (`llvm/lib/ExecutionEngine/MCJIT/`
+  present on `release/21.x`, `release/22.x`, and `main`;
+  `LLVMCreateJITCompilerForModule` still a real EngineBuilder path;
+  LLVM 22 docs still ship "MCJIT Design and Implementation") but is
+  deprecated/slated for removal ([RFC, July
+  2024](https://discourse.llvm.org/t/rfc-removing-mcjit-and-runtimedyld/80464)).
+  The probe (~30 lines: create an EE over an empty module) confirms
+  `create_jit_execution_engine` works on the pin — and hence that
+  Option A is directly executable. This recon host has no LLVM
+  toolchain (`llvm-config` absent), so the spike runs in CI or a
+  tooled dev box.
 - Generated modules expose only C `main(argc, argv) -> i32`
   (`lower.rs`, `add_function("main", …)`). A JIT must either call
   `main` (observing stdout/exit code) or add a value-returning entry
@@ -78,7 +83,7 @@ binary/link round-trip.** Consequences:
 
 ## 3. Slice options
 
-### Option A — In-process JIT via inkwell `ExecutionEngine` (gated on S1)
+### Option A — In-process JIT via inkwell `ExecutionEngine` (S1 confirms)
 
 - **Scope:** new `jit` module (inside `clj-aot` or a new `clj-jit`
   crate, same `aot`-style feature gating): `plan_source` →
@@ -88,28 +93,31 @@ binary/link round-trip.** Consequences:
   mirroring `cmd_build`. Subset-only. Tests mirror
   `clj-aot/tests/build_exe.rs` but run in-process, asserting
   byte-identical stdout/exit vs the AOT binary and the interpreter.
-- **Effort:** S (days) *if S1 passes* — planner and lowerer reused
-  untouched; only the EE runner plus entry/error-path work is new.
-- **Risk:** binary — dies entirely if MCJIT is gone on LLVM 22.1
-  (the expected outcome, pending the probe). Even where present,
-  MCJIT is deprecated upstream, so this path has no future beyond
-  the pin.
+- **Effort:** S (days) — planner and lowerer reused untouched;
+  only the EE runner plus entry/error-path work is new. (Spike S1
+  confirms EE creation on the pin first.)
+- **Risk:** deprecation, not availability — MCJIT works on the pin
+  but is slated for removal upstream, so a future LLVM bump would
+  force a move to Option C. No impact within the LLVM 22 pin.
 
 ### Option B — Link-and-load JIT: temp shared lib + `dlopen`
 
 - **Scope:** same CLI/tests/contract as A, but the runner reuses the
-  already-tested emission path: `target::emit_object` (in-memory) →
-  link a temp `.so`/`.dylib` against the `clj-rt` archive via the
-  existing `link.rs` machinery with `-shared` → load with
-  `libloading`, call the entry, remove the temp. Subset-only.
+  already-tested emission path: `target::emit_object` to a temp
+  object file (`obj_path` via `std::fs::write`) → link a temp
+  `.so`/`.dylib` against the `clj-rt` archive via the existing
+  `link.rs` machinery with `-shared` → load with `libloading`,
+  call the entry, remove the temps. Subset-only.
 - **Effort:** S–M. Zero new LLVM API calls — every LLVM invocation
   is already exercised by the AOT tests. New work: `-shared` link
   variant, loader, temp lifecycle, entry/error-path (shared with A).
 - **Risk:** low technical risk; accepted costs are temp files plus a
   `cc` invocation at JIT time (the hermetic `--emit` legs are
   unaffected), per-eval link latency (fine for run-once; hot-loop
-  speed was never the slice-1 goal), and platform `dlopen` quirks
-  across the three OS legs.
+  speed was never the slice-1 goal), platform `dlopen` quirks
+  across the three OS legs, and a new `libloading` dependency
+  (absent from all manifests and `Cargo.lock` today —
+  license/MSRV/supply-chain review owed).
 
 ### Option C — ORCv2 LLJIT via llvm-sys `orc2` (future-proof in-process)
 
@@ -125,17 +133,19 @@ binary/link round-trip.** Consequences:
 
 ## 4. Recommendation
 
-**Slice 1 = Option B. Run spike S1 first (half-day, time-boxed): if
-MCJIT works on the pinned LLVM 22.1, build Option A instead and keep
-B as the fallback. Defer Option C to a later epic.**
+**Slice 1 = Option A. Run spike S1 first (half-day, time-boxed)
+to confirm EE creation on the pin; fall back to Option B only if
+the probe fails. Defer Option C to a later epic.**
 
-Rationale: against a deadline, slice 1 must be unblockable by
-upstream LLVM removals. B reuses two already-tested paths (emission,
-link) and adds no new LLVM API surface, so it is executable
-regardless of the S1 outcome; A is simpler at runtime but bets the
-slice on a deprecated API that is probably already gone. Either way
-the CLI spelling, subset ceiling, entry/error-path design, and
-equivalence tests are shared, so the spike loses nothing.
+Rationale: A is the simplest runtime (in-process, no temp files, no
+link step) and is directly executable — MCJIT ships on LLVM 22.x,
+so the only risk is deprecation, which cannot bite within the fixed
+LLVM 22 pin. B stays a live fallback (same CLI/tests/contract, no
+new LLVM API calls) at the cost of temp files, a `cc` invocation
+per eval, and a new `libloading` dependency. C remains the
+future-proof answer for a post-MCJIT LLVM bump. The CLI spelling,
+subset ceiling, entry/error-path design, and equivalence tests are
+shared across options, so the spike loses nothing either way.
 
 ## 5. Non-goals (later slices/epics)
 
