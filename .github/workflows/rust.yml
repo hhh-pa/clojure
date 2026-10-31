@@ -573,6 +573,10 @@ jobs:
           retention-days: 30
       - name: coverage PR comment
         if: always() && github.event_name == 'pull_request' && hashFiles('rust/target/llvm-cov/coverage-comment.md') != ''
+        # Fail-soft: fork-PR tokens are read-only despite the job's
+        # pull-requests:write, so the sticky post 403s there (proven
+        # on #145). Coverage still uploads to Codecov below.
+        continue-on-error: true
         uses: marocchino/sticky-pull-request-comment@v3.0.5
         with:
           header: coverage
