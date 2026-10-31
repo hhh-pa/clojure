@@ -1116,7 +1116,7 @@ fn decimal_builtin_draws_decimals() {
 
 // ---- gen-for-pred ----
 
-/// Every `gen-builtins` entry (all 45 oracle preds except `uri?`):
+/// Every `gen-builtins` entry (all 44 oracle preds except `uri?` — 43 resolve):
 /// resolves to a generator whose draws satisfy the pred.
 #[test]
 fn gen_for_pred_table() {
@@ -1182,6 +1182,24 @@ fn gen_for_name_resolves_generator_vars() {
                  (in-ns 'user)
                  (= (gen/generate (gen/gen-for-name 'clojure.spec.gen.alpha/test-gen-xyz) 30 4)
                     (gen/generate @#'clojure.spec.gen.alpha/test-gen-xyz 30 4)))"
+        ),
+        "true"
+    );
+}
+
+#[test]
+fn gen_for_name_resolves_user_ns_vars() {
+    // M1 pin: the `find-ns` guard's side effect — `user`-ns vars
+    // also resolve (previously claimed in the doc, unpinned).
+    let mut eval = boot();
+    require_gen(&mut eval);
+    assert_eq!(
+        run(
+            &mut eval,
+            "(do (in-ns 'user)
+                 (def test-gen-user (clojure.spec.gen.alpha/return 7))
+                 (= (gen/generate (gen/gen-for-name 'user/test-gen-user) 30 4)
+                    (gen/generate @#'user/test-gen-user 30 4)))"
         ),
         "true"
     );

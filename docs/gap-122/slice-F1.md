@@ -35,7 +35,7 @@ Zero new Rust natives: the only Rust change is the 6-line embedding
 ### Public surface
 
 Combinators (all `gen/alpha.clj:95-97` `lazy-combinators` except the deferred
-two): `return` `bind` `fmap` `one-of` `such-that` `elements` `choose` `tuple`
+two, plus `sized`/`resize` from test.check): `return` `bind` `fmap` `one-of` `such-that` `elements` `choose` `tuple`
 `vector` `map` `set` `list` `shuffle` `frequency` `not-empty` `sized` `resize`
 `cat` (`gen/alpha.clj:122-129`) `sample` `generate`, plus `gen-for-pred`
 (`gen/alpha.clj:190-197`) and `gen-for-name` (`gen/alpha.clj:68-74`).
@@ -154,7 +154,10 @@ follow the `spec_alpha.clj` file header)
   miscompiles calls to `:or`-defaulted fn bindings (pre-existing bug —
   `(let [{:keys [e] :or {e (fn [m] …)}} …] (e x))` passes the callee as its own
   first arg), so upstream's `:or` shape is avoided for fns. Untouched by F1
-  beyond the workaround; the port bug itself is out of slice scope.
+  beyond the workaround; the port bug itself is out of slice scope
+  (tracked as #171). Wontfix while #171 is open: explicit-nil opts
+  (e.g. `{:max-tries nil}`) are not normalized to defaults as
+  upstream's `:or` would — pathological input only.
 - `sample`/`sample-seq` keep the size-cycling shape (`(cycle (range 0 200))`,
   `generators.cljc:143-180`); `sample` keeps its assert, `generate` keeps its
   3 arities (default size 30) and no assert, as upstream.
@@ -212,8 +215,8 @@ follow the `spec_alpha.clj` file header)
   throwing and `any` draws are never nil.
 - Given `inst?`/`decimal?` builtins, draws satisfy the predicates and inst
   millis stay in `[0, 4102444800000]`.
-- Given `gen-for-pred`, every builtin pred (all 45 oracle entries except
-  `uri?`) resolves to a generator whose draws satisfy the pred; set preds
+- Given `gen-for-pred`, every builtin pred (all 44 oracle entries except
+  `uri?` — 43 resolve) resolves to a generator whose draws satisfy the pred; set preds
   become `elements`; `uri?` resolves to nil (documented, divergence 3).
 - Given `gen-for-name`, qualified names of generator-valued vars resolve to
   working generators (same seed ⇒ same value as the direct var); unqualified /
