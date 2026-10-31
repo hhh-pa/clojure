@@ -711,6 +711,12 @@ fn env_locals(env: &Value) -> HashSet<String> {
         .collect()
 }
 
+/// Whether the head is always opaque (real specials are never
+/// shadowed — `fn*` too, since `#()` reads through it).
+fn is_boundary_head(ns: Option<&str>, name: &str) -> bool {
+    ns.is_none() && matches!(name, "quote" | "var" | "fn*")
+}
+
 /// The `go` body rewrite (slice 3): operator-position parking
 /// calls resolving to this namespace become the blocking ops;
 /// `fn`/`fn*` bodies, `quote`, and `var` forms bound the walk;
@@ -767,27 +773,11 @@ impl GoRewrite<'_> {
             return self.walk_uniform(form, items);
         };
         let (ns, name) = (sym.namespace(), sym.name());
-        // Real specials: never shadowed, always boundaries (`fn*`
-        // too — `#()` reads through it).
-        if ns.is_none() && matches!(name, "quote" | "var" | "fn*") {
+        if is_boundary_head(ns, name) || self.is_fn_head(ns, name) {
             return form.clone();
         }
-        // `let`/`loop` (+ the `*` pair): binding forms when
-        // builtin, plain calls when shadowed. A qualified real
-        // special is never the builtin (a var lookup instead).
-        let core_builtin =
-            ns == Some("clojure.core") && matches!(name, "let" | "loop") && self.core_intact(name);
-        if matches!(name, "let" | "let*" | "loop" | "loop*")
-            && ((ns.is_none() && self.builtin(name)) || core_builtin)
-        {
+        if self.is_let_head(ns, name) {
             return self.walk_let(form, items);
-        }
-        // `fn`: a boundary when builtin, a plain call when shadowed.
-        if name == "fn"
-            && ((ns.is_none() && self.builtin(name))
-                || (ns == Some("clojure.core") && self.core_intact(name)))
-        {
-            return form.clone();
         }
         // The parking rename (locals shadow bare heads).
         if ns.is_none() && self.shadow.contains(name) {
@@ -803,8 +793,32 @@ impl GoRewrite<'_> {
         self.walk_uniform(form, items)
     }
 
-    fn core_intact(&self, name: &str) -> bool {
-        core_macro_intact(self.eval, name)
+    /// Whether the head opens a `let`/`loop` binding form (`+` the
+    /// `*` pair): builtin when unshadowed, a plain call when
+    /// shadowed. A qualified real special is never the builtin (a
+    /// var lookup instead).
+    fn is_let_head(&self, ns: Option<&str>, name: &str) -> bool {
+        if !matches!(name, "let" | "let*" | "loop" | "loop*") {
+            return false;
+        }
+        if ns.is_none() {
+            return self.builtin(name);
+        }
+        ns == Some("clojure.core")
+            && matches!(name, "let" | "loop")
+            && core_macro_intact(self.eval, name)
+    }
+
+    /// Whether the head opens a builtin `fn` (a boundary; a
+    /// shadowed `fn` is a plain call).
+    fn is_fn_head(&self, ns: Option<&str>, name: &str) -> bool {
+        if name != "fn" {
+            return false;
+        }
+        if ns.is_none() {
+            return self.builtin(name);
+        }
+        ns == Some("clojure.core") && core_macro_intact(self.eval, name)
     }
 
     /// Walk every element (operator included — it may itself nest
@@ -879,46 +893,47 @@ impl GoRewrite<'_> {
         }
     }
 
-    /// Collect a map pattern's names (`:keys`/`:syms`/`:strs`
-    /// entries bind their name part, `:as` its symbol, other keys
-    /// recurse as locals-or-patterns) while rewriting `:or`
+    /// Collect a map pattern's names while rewriting `:or`
     /// defaults as code.
     fn walk_map_pattern(&mut self, pat: &Value, m: &clj_value::Map) -> (Vec<String>, Value) {
         let mut names = Vec::new();
         let mut out = new_map();
         for (k, v) in m.iter() {
-            if let Value::Keyword(key) = k {
-                if key.namespace().is_none() {
-                    match key.name() {
-                        "keys" | "syms" | "strs" => {
-                            names.extend(short_names(v));
-                            out = out.insert(k.clone(), v.clone());
-                            continue;
-                        }
-                        "as" => {
-                            if let Value::Symbol(s) = v {
-                                if s.namespace().is_none() {
-                                    names.push(s.name().to_owned());
-                                }
-                            }
-                            out = out.insert(k.clone(), v.clone());
-                            continue;
-                        }
-                        "or" => {
-                            out = out.insert(k.clone(), self.walk_or(v));
-                            continue;
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            // Any other entry: the key is the local-or-pattern (the
-            // value is match data, never code).
-            let (mut found, walked) = self.walk_pattern(k);
-            names.append(&mut found);
-            out = out.insert(walked, v.clone());
+            let (walked_k, walked_v) = self.walk_map_entry(k, v, &mut names);
+            out = out.insert(walked_k, walked_v);
         }
         (names, Value::Map(out).with_meta(pat.meta().cloned()))
+    }
+
+    /// Walk one map-pattern entry (`:keys`/`:syms`/`:strs`
+    /// entries bind their name part, `:as` its symbol, `:or`
+    /// defaults rewrite as code; any other key recurses as a
+    /// local-or-pattern while its value — match data, never code
+    /// — stands).
+    fn walk_map_entry(&mut self, k: &Value, v: &Value, names: &mut Vec<String>) -> (Value, Value) {
+        if let Value::Keyword(key) = k {
+            if key.namespace().is_none() {
+                match key.name() {
+                    "keys" | "syms" | "strs" => {
+                        names.extend(short_names(v));
+                        return (k.clone(), v.clone());
+                    }
+                    "as" => {
+                        if let Value::Symbol(s) = v {
+                            if s.namespace().is_none() {
+                                names.push(s.name().to_owned());
+                            }
+                        }
+                        return (k.clone(), v.clone());
+                    }
+                    "or" => return (k.clone(), self.walk_or(v)),
+                    _ => {}
+                }
+            }
+        }
+        let (mut found, walked) = self.walk_pattern(k);
+        names.append(&mut found);
+        (walked, v.clone())
     }
 
     /// Rewrite an `:or` defaults map's values as code (keys are

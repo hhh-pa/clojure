@@ -630,6 +630,14 @@ fn go_errors_settle_nil_and_close() {
         ),
         "[nil true]"
     );
+    // A qualified `fn` over the intact builtin bounds too.
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [c (a/chan 1)] (a/>!! c :v) (let [g (a/go ((clojure.core/fn [] (a/<! c))))] [(goo g) (a/closed? g)]))"
+        ),
+        "[nil true]"
+    );
 }
 
 // --- `alts!` inside go (oracle `s-*`) ----------------------------------------
