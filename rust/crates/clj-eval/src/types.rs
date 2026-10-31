@@ -724,7 +724,9 @@ fn surface_probe(
     rest: &[Value],
 ) -> Option<Result<Value, NativeError>> {
     if matches!(target, Value::Nil) {
-        if crate::classemu::surface_member_hit(method, rest.len()) {
+        if crate::classemu::surface_member_hit(method, rest.len())
+            || crate::classemu::static_member_name(method)
+        {
             return Some(Err(npe_target()));
         }
         None

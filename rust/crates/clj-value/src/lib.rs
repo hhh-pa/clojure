@@ -46,8 +46,8 @@ pub use agent::{Agent, AgentAction, AgentInner, AgentPool, ErrorMode, ExecTarget
 pub use array::{Array, ArrayDesc, ArrayStore, BaseType, MAX_ARRAY_BYTES};
 pub use atom::{Atom, AtomState};
 pub use channel::{
-    BufferDesc, BufferKind, ChanError, Channel, MAX_QUEUE_SIZE, OpReady, Waiter, as_buffer,
-    as_channel,
+    BufferDesc, BufferKind, ChanError, Channel, MAX_QUEUE_SIZE, OpReady, StepOut, StepReq, Waiter,
+    Xform, as_buffer, as_channel,
 };
 pub use class::ClassVal;
 pub use compare::{CompareError, compare};

@@ -550,24 +550,22 @@ fn import_struct_name() {
     );
 }
 
-// i-fqn-eval: the JVM evaluates bare `java.lang.String` to the
-// class; the port keeps rejecting dotted bare names (no honorable
-// `Class.forName`), pinned here and by the stage-1 suite.
+// i-fqn-eval (#120 slice 1): the JVM evaluates bare
+// `java.lang.String` to the class (oracle `val-fq-String`), and
+// the port now agrees — `Class.forName` made dotted bare names
+// honorable. Missing dotted names are `ClassNotFoundException`
+// (oracle `val-fq-missing`).
 #[test]
-fn import_fqn_still_rejected() {
+fn import_fqn_resolves() {
     let mut eval = boot();
+    assert_eq!(run(&mut eval, "java.lang.String"), "java.lang.String");
     assert_eq!(
-        compile_err(&mut eval, "java.lang.String"),
-        "java.lang.RuntimeException | Unable to resolve symbol: java.lang.String in this context"
+        run(&mut eval, "(eval 'java.lang.String)"),
+        "java.lang.String"
     );
-    // The oracle's `eval` shape: the same rejection under the
-    // `CompilerException` wrap (cause-walked like `throwcause`).
     assert_eq!(
-        run(
-            &mut eval,
-            "(try (eval 'java.lang.String) (catch Throwable t (ex-message (loop [x t] (let [n (ex-cause x)] (if n (recur n) x))))))"
-        ),
-        "\"Unable to resolve symbol: java.lang.String in this context\""
+        compile_err(&mut eval, "java.no.Klass"),
+        "java.lang.ClassNotFoundException | java.no.Klass"
     );
 }
 

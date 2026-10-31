@@ -163,11 +163,14 @@ fn require_alias_and_refer() {
 fn qualified_use_without_require_fails() {
     let mut eval = boot();
     // A compile-time resolution failure (the namespace does not
-    // exist until required).
+    // exist until required) — and a dotted miss is
+    // `ClassNotFoundException` (#120 slice 1: the JVM CNFEs every
+    // unresolvable dotted namespace part, oracle
+    // `static-unknown-fq`, `removed-ns-val`).
     match eval.eval_source("clojure.core.async/chan") {
         Err(e) => assert_eq!(
             format!("{e}"),
-            "Syntax error compiling at (user:1:1).\njava.lang.RuntimeException | No such namespace: clojure.core.async"
+            "Syntax error compiling at (user:1:1).\njava.lang.ClassNotFoundException | clojure.core.async"
         ),
         Ok(vs) => panic!("expected a resolution failure, got {vs:?}"),
     }
@@ -336,12 +339,12 @@ fn chan_errors() {
 }
 
 #[test]
-fn chan_transducer_refused() {
+fn chan_transducer_arities() {
     let mut eval = boot_async();
-    // Slice 2: an explicit refusal, not an arity error.
+    // Slice 2 accepts transducers (deep pins live in async_slice2).
     assert_eq!(
-        uncaught(&mut eval, "(a/chan 1 (map inc))"),
-        "java.lang.UnsupportedOperationException | unsupported: channels with transducers (gap-123 slice 2)"
+        run_last(&mut eval, "(a/<!! (doto (a/chan 1 (map inc)) (a/>!! 41)))"),
+        "42"
     );
     // The transducer-without-buffer assert still fires first.
     assert_eq!(

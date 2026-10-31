@@ -531,17 +531,13 @@ impl Evaluator {
     /// prologue installs them on the reader; the per-form loops
     /// re-snapshot the data-reader fields from this base).
     fn read_forms_opts(eval: &mut Evaluator, seed: &crate::reader::ReadGateSeed) -> ReaderOpts {
-        let cur = eval.current_ns_name();
         let mut opts = ReaderOpts {
-            current_ns: cur.clone(),
+            current_ns: eval.current_ns_name(),
             ..Default::default()
         };
-        // Live-or-removed (the detached `*ns*` keeps aliases/refers,
-        // like the JVM; #80).
-        if let Some(ns) = eval.registry.ns_live_or_removed(&cur) {
-            opts.aliases = ns.alias_map();
-            opts.refers = ns.refer_map();
-        }
+        // Aliases/refers/imports (the detached `*ns*` keeps them,
+        // like the JVM; #80) — shared with the stream readers.
+        crate::reader::sync_reader_ns(eval, &mut opts);
         opts.read_eval = seed.read_eval;
         opts.suppress_read = seed.suppress_read;
         opts.resolver_bound = seed.resolver_bound;
@@ -2224,15 +2220,16 @@ impl Evaluator {
         subs: &mut SubMaps,
         out: &mut Vec<Value>,
     ) -> Result<(), Signal> {
-        for (local, key, required) in &ctx.pat.entries {
+        for (local, key, or_key, required) in &ctx.pat.entries {
             // `:or` is keyed by the binding local first, then the
-            // lookup key (`destmap*` `push1`); nested locals have no
-            // `Value` form, so only symbols get the local lookup.
+            // key form as written (upstream `destmap*` `push1`;
+            // #158); nested locals have no `Value` form, so only
+            // symbols get the local lookup.
             let local_val = match local {
                 Pattern::Symbol(name) => Some(Value::Symbol(Symbol::new(None, name))),
                 _ => None,
             };
-            let val = self.map_binding(ctx, local_val.as_ref(), key, *required, missing)?;
+            let val = self.map_binding(ctx, local_val.as_ref(), key, or_key, *required, missing)?;
             // Forcing (`destmap*` gensym outlets): an effective
             // outlet the nested map lacks is still computed, for
             // `subs` (never bound).
@@ -2262,7 +2259,16 @@ impl Evaluator {
     ) -> Result<(), Signal> {
         for key in &ctx.pat.keys {
             let local_key = Value::Symbol(Symbol::new(None, &key.local));
-            let val = self.map_binding(ctx, Some(&local_key), &key.key, key.required, missing)?;
+            // Directive keys are built, never quoted: the or-key is
+            // the key itself (#158).
+            let val = self.map_binding(
+                ctx,
+                Some(&local_key),
+                &key.key,
+                &key.key,
+                key.required,
+                missing,
+            )?;
             out.push(val);
         }
         Ok(())
@@ -2334,6 +2340,7 @@ impl Evaluator {
         ctx: &MapBind,
         local: Option<&Value>,
         key: &Value,
+        or_key: &Value,
         required: bool,
         missing: &mut Option<Map>,
     ) -> Result<Value, Signal> {
@@ -2342,7 +2349,7 @@ impl Evaluator {
         }
         let default = local
             .and_then(|local| ctx.defaults.get(local).cloned())
-            .or_else(|| ctx.defaults.get(key).cloned());
+            .or_else(|| ctx.defaults.get(or_key).cloned());
         if required && default.is_none() {
             if ctx.effective(Outlet::Missing) {
                 let m = missing.take().unwrap_or_else(new_map);
@@ -2915,7 +2922,7 @@ impl Evaluator {
 /// set, §E12 documents the divergence).
 fn selection(pat: &MapPattern) -> Vec<Value> {
     let mut sel = Vec::new();
-    for (_, key, _) in &pat.entries {
+    for (_, key, _, _) in &pat.entries {
         if !sel.contains(key) {
             sel.push(key.clone());
         }
@@ -2933,11 +2940,14 @@ fn selection(pat: &MapPattern) -> Vec<Value> {
     sel
 }
 
-/// `:or` defaults keyed by lookup key (symbols resolve through the
-/// local→key map; strict-validated under `:select`/`:all`).
+/// `:or` defaults keyed by lookup key (upstream `push1`, #158): a
+/// symbol `:or` key matches a local only; any other `:or` key must
+/// equal an entry key form as written. Non-matching `:or` keys are
+/// dead like upstream's unreferenced `gdefaults` (excluded here, so
+/// the `:select`/`:all` merge base holds applied defaults only).
 fn or_mapped(pat: &MapPattern, defaults: &Map) -> Map {
     let mut b_to_k: std::collections::HashMap<&str, &Value> = std::collections::HashMap::new();
-    for (local, key, _) in &pat.entries {
+    for (local, key, _, _) in &pat.entries {
         if let Pattern::Symbol(name) = local {
             b_to_k.insert(name.as_str(), key);
         }
@@ -2945,13 +2955,25 @@ fn or_mapped(pat: &MapPattern, defaults: &Map) -> Map {
     for key in &pat.keys {
         b_to_k.insert(key.local.as_str(), &key.key);
     }
+    // Raw entry forms alongside their lookup keys (directive keys
+    // are built, never quoted, so each is its own raw form).
+    let mut raw_keys: Vec<(&Value, &Value)> = Vec::new();
+    for (_, key, raw, _) in &pat.entries {
+        raw_keys.push((raw, key));
+    }
+    for key in &pat.keys {
+        raw_keys.push((&key.key, &key.key));
+    }
     let mut dm = new_map();
     for (key, _) in defaults.iter() {
         let mapped = match key {
-            Value::Symbol(sym) => b_to_k.get(sym.name()).copied().unwrap_or(key),
-            _ => key,
+            Value::Symbol(sym) => b_to_k.get(sym.name()).copied(),
+            _ => raw_keys
+                .iter()
+                .find(|(raw, _)| *raw == key)
+                .map(|(_, key)| *key),
         };
-        if let Some(val) = defaults.get(key) {
+        if let (Some(mapped), Some(val)) = (mapped, defaults.get(key)) {
             dm = dm.insert(mapped.clone(), val.clone());
         }
     }

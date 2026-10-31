@@ -20,8 +20,8 @@ use std::sync::Arc;
 
 use clj_reader::Span;
 use clj_value::{
-    Keyword, List, Map, PrintOpts, Symbol, Value, Var, Vector, map_entry, new_map, pr_to_string,
-    print_to_string,
+    ClassVal, Keyword, List, Map, PrintOpts, Symbol, Value, Var, Vector, map_entry, new_map,
+    pr_to_string, print_to_string,
 };
 
 use crate::core::cce_message;
@@ -47,9 +47,11 @@ pub struct KeyBinding {
 /// A map-destructure pattern (`destmap*`, incl. the 1.13 directives).
 #[derive(Clone, Debug)]
 pub struct MapPattern {
-    /// `(local-pattern, lookup-key, required?)` entries (`:req!`
-    /// locals bind required, like `:keys!` elements).
-    pub entries: Vec<(Pattern, Value, bool)>,
+    /// `(local-pattern, lookup-key, or-key, required?)` entries
+    /// (`:req!` locals bind required, like `:keys!` elements). The
+    /// lookup key is unquoted (map keys are values); the or-key is
+    /// the key form as written (`:or` matches forms, #158).
+    pub entries: Vec<(Pattern, Value, Value, bool)>,
     /// `:keys`/`:strs`/`:syms` (and `!`) bindings.
     pub keys: Vec<KeyBinding>,
     /// Post-`&` key-list keys (selection only, never bound).
@@ -853,24 +855,23 @@ impl<'a> Analyzer<'a> {
             return Ok(Expr::Global(Var { id, sym: target }));
         }
         // S16: imports resolve after vars (the class, not a var) —
-        // operator position shares this path.
-        if sym.namespace().is_none() {
-            if let Some(class) = crate::classemu::import_in(self.eval, &cur, sym.name()) {
-                return Ok(Expr::Literal(Value::Class(class)));
-            }
+        // operator position shares this path (#120: dotted bare
+        // names resolve as classes or fail `CNFE`).
+        if let Some(expr) = self.analyze_symbol_class(sym, span, &cur)? {
+            return Ok(expr);
         }
         match sym.namespace() {
             // Aliases count as namespaces even when dangling
             // (probe34 `ns-alias-removed`); both miss shapes blame
             // the symbol as written (probe34 `ns-alias-novar`).
-            Some(ns) if self.eval.registry.namespace_target_in(&cur, ns).is_none() => Err(self
-                .err(
-                    class::RUNTIME,
-                    format!("No such namespace: {ns}"),
-                    span,
-                    Verb::Compiling,
-                    None,
-                )),
+            // An unresolvable dotted namespace part is
+            // `ClassNotFoundException` (oracle `removed-ns-val`),
+            // unless it names a class — value-position static
+            // members (method fns, field reads) are a later slice,
+            // so those keep `No such namespace` for now.
+            Some(ns) if self.eval.registry.namespace_target_in(&cur, ns).is_none() => {
+                Err(self.dangling_alias_err(&cur, ns, span))
+            }
             Some(_) => Err(self.err(
                 class::RUNTIME,
                 format!("No such var: {sym}"),
@@ -881,6 +882,64 @@ impl<'a> Analyzer<'a> {
             None => Err(self.err(
                 class::RUNTIME,
                 format!("Unable to resolve symbol: {sym} in this context"),
+                span,
+                Verb::Compiling,
+                None,
+            )),
+        }
+    }
+
+    /// Error for a dangling alias / unresolvable dotted head
+    /// (split from [`analyze_symbol`](Self::analyze_symbol) for
+    /// the complexity budget): `ClassNotFoundException` when the
+    /// head sits in class position with no static class behind
+    /// it, else `No such namespace`.
+    fn dangling_alias_err(&self, cur: &str, ns: &str, span: Span) -> CompileError {
+        if crate::classemu::is_class_position(ns) && self.static_head_class(cur, ns).is_none() {
+            self.err(
+                class::CLASS_NOT_FOUND,
+                ns.to_owned(),
+                span,
+                Verb::Compiling,
+                None,
+            )
+        } else {
+            self.err(
+                class::RUNTIME,
+                format!("No such namespace: {ns}"),
+                span,
+                Verb::Compiling,
+                None,
+            )
+        }
+    }
+
+    /// Unqualified class-position resolve (split from
+    /// [`analyze_symbol`](Self::analyze_symbol) for the complexity
+    /// budget): imports, then dotted bare names as classes
+    /// (`ClassNotFoundException` when missing — oracles
+    /// `val-fq-String`, `bare-deftype`, `val-fq-missing`,
+    /// `val-dotdot`). `None` falls through to the namespace match.
+    fn analyze_symbol_class(
+        &self,
+        sym: &Symbol,
+        span: Span,
+        cur: &str,
+    ) -> Result<Option<Expr>, CompileError> {
+        if sym.namespace().is_some() {
+            return Ok(None);
+        }
+        if let Some(class) = crate::classemu::import_in(self.eval, cur, sym.name()) {
+            return Ok(Some(Expr::Literal(Value::Class(class))));
+        }
+        if !crate::classemu::is_class_position(sym.name()) {
+            return Ok(None);
+        }
+        match crate::classemu::resolve_class_name(self.eval, sym.name()) {
+            Some(class) => Ok(Some(Expr::Literal(Value::Class(class)))),
+            None => Err(self.err(
+                class::CLASS_NOT_FOUND,
+                sym.name().to_owned(),
                 span,
                 Verb::Compiling,
                 None,
@@ -933,6 +992,9 @@ impl<'a> Analyzer<'a> {
                 None,
             ));
         }
+        if let Value::Symbol(sym) = head {
+            self.check_class_operator(sym, span)?;
+        }
         let head_expr = self.analyze(head, span, false)?;
         let mut args = Vec::with_capacity(items.len() - 1);
         for arg in &items[1..] {
@@ -959,6 +1021,9 @@ impl<'a> Analyzer<'a> {
             return Ok(Some(expr));
         }
         if let Some(expr) = self.try_dot_form(items, span)? {
+            return Ok(Some(expr));
+        }
+        if let Some(expr) = self.try_static_call(items, span)? {
             return Ok(Some(expr));
         }
         self.intercept_head(head, items, span, tail)
@@ -997,6 +1062,114 @@ impl<'a> Analyzer<'a> {
         }
         let expr = self.dot_call_str("__meth*", &name[1..], &items[1..], span)?;
         Ok(Some(expr))
+    }
+
+    /// Intercept static calls (`Class/forName`,
+    /// `pkg.Cls/member`): qualified heads whose namespace part
+    /// names no namespace or alias but resolves to an emulated
+    /// class rewrite to `__static*` — namespaces and aliases always
+    /// win (oracle `var-vs-class`, `alias-vs-static`), so macro and
+    /// var heads never reach here. Known members validate arities
+    /// at compile time (oracle `forName-0arg`, `forName-4arg`);
+    /// unknown members lower anyway and miss at runtime (a
+    /// documented phase narrowing — the JVM rejects those at
+    /// compile time too, oracle `static-miss-0`). An unresolvable
+    /// dotted namespace part is `ClassNotFoundException` (oracle
+    /// `static-unknown-fq`, `removed-ns-call`); simple ones fall
+    /// through to `No such namespace`. FX4-owned heads are exempt
+    /// (their shapes and misses are the builtin's).
+    fn try_static_call(
+        &mut self,
+        items: &[&Value],
+        span: Span,
+    ) -> Result<Option<Expr>, CompileError> {
+        let Value::Symbol(sym) = items[0] else {
+            return Ok(None);
+        };
+        let Some(ns_part) = sym.namespace() else {
+            return Ok(None);
+        };
+        if crate::fx4_host::owns_call_head(ns_part, sym.name()) {
+            return Ok(None);
+        }
+        let cur = self.current_ns();
+        if self
+            .eval
+            .registry
+            .namespace_target_in(&cur, ns_part)
+            .is_some()
+        {
+            return Ok(None);
+        }
+        let Some(class) = self.static_head_class(&cur, ns_part) else {
+            if crate::classemu::is_class_position(ns_part) {
+                return Err(self.err(
+                    class::CLASS_NOT_FOUND,
+                    ns_part.to_owned(),
+                    span,
+                    Verb::Compiling,
+                    None,
+                ));
+            }
+            return Ok(None);
+        };
+        let argc = items.len() - 1;
+        if let Some(arities) = crate::classemu::static_member_arities(class.name(), sym.name()) {
+            if !arities.contains(&argc) {
+                let message = crate::types::no_method(sym.name(), argc, class.name())
+                    .into_inner()
+                    .message;
+                return Err(self.err(
+                    class::ILLEGAL_ARG,
+                    message,
+                    span,
+                    Verb::Compiling,
+                    Some(sym.to_string()),
+                ));
+            }
+        }
+        Ok(Some(self.static_call(
+            class.name(),
+            sym.name(),
+            &items[1..],
+            span,
+        )?))
+    }
+
+    /// The class a static head's namespace part names: simple names
+    /// resolve through the import table (which carries the JVM's
+    /// 106 default imports, so `Class/forName` needs no explicit
+    /// import), dotted names through the shared lattice (which
+    /// also carves struct names, like `import`).
+    fn static_head_class(&self, cur: &str, ns_part: &str) -> Option<Arc<ClassVal>> {
+        if ns_part.contains('.') {
+            crate::classemu::resolve_class_name(self.eval, ns_part)
+        } else {
+            crate::classemu::import_in(self.eval, cur, ns_part)
+        }
+    }
+
+    /// Synthesize `(__static* "FQN" "member" args…)` over an
+    /// already-analyzed tail.
+    fn static_call(
+        &mut self,
+        fqn: &str,
+        member: &str,
+        args: &[&Value],
+        span: Span,
+    ) -> Result<Expr, CompileError> {
+        let head = Expr::Global(self.synth_var("__static*"));
+        let mut out = Vec::with_capacity(args.len() + 2);
+        out.push(Expr::Quote(Value::Str(Arc::from(fqn))));
+        out.push(Expr::Quote(Value::Str(Arc::from(member))));
+        for arg in args {
+            out.push(self.analyze(arg, span, false)?);
+        }
+        Ok(Expr::Invoke {
+            head: Box::new(head),
+            args: out,
+            span,
+        })
     }
 
     /// A synthesized `clojure.core` head's captured var: resolve,
@@ -1153,6 +1326,35 @@ impl<'a> Analyzer<'a> {
                 span,
                 Verb::Compiling,
                 Some(sym.to_string()),
+            ));
+        }
+        Ok(())
+    }
+
+    /// An imported class in operator position (`(String)`): the
+    /// JVM's bare `Expecting var` (oracle `invoke-class`, `op-args`
+    /// — bare, so it escapes `eval` like any uncaught throwable).
+    /// Only unqualified import mappings reach here: locals shadow
+    /// imports, vars resolve first, and fully-qualified heads take
+    /// the ordinary invoke path (oracle `call-fq-noargs`).
+    fn check_class_operator(&self, sym: &Symbol, span: Span) -> Result<(), CompileError> {
+        if sym.namespace().is_some() || self.local_idx(sym.name()).is_some() {
+            return Ok(());
+        }
+        let cur = self.current_ns();
+        if self.eval.registry.resolve_in(&cur, sym).is_some() {
+            return Ok(());
+        }
+        if let Some(class) = crate::classemu::import_in(self.eval, &cur, sym.name()) {
+            return Err(CompileError::bare(
+                class::RUNTIME,
+                format!(
+                    "Expecting var, but {} is mapped to class {}",
+                    sym.name(),
+                    class.name()
+                ),
+                span,
+                &self.source,
             ));
         }
         Ok(())
@@ -1660,7 +1862,7 @@ pub(crate) fn pattern_names(pat: &Pattern) -> Vec<String> {
         }
         Pattern::Map(m) => {
             let mut out = Vec::new();
-            for (local, _, _) in &m.entries {
+            for (local, _, _, _) in &m.entries {
                 out.extend(pattern_names(local));
             }
             for key in &m.keys {
@@ -2362,8 +2564,8 @@ fn unquote_key(v: &Value) -> Value {
     v.clone()
 }
 
-/// `(quote k)` as a value: an `:or` key spelled quoted matches the
-/// unquoted entry key (#112).
+/// Build `(quote k)` as a value (test-only fixture helper).
+#[cfg(test)]
 fn quote_form(key: &Value) -> Value {
     Value::List(List::from_vec(vec![
         Value::Symbol(Symbol::new(None, "quote")),
@@ -2692,11 +2894,12 @@ fn walk_map_pair(
     }
     walk_binding(k)?;
     // #112: the entry key unquotes (quoted spells the same key).
+    // The `:or` check compares the form as written (#158).
     let key = unquote_key(v);
     sel.push(key.clone());
     if let Value::Symbol(local) = k {
         bound_keys.insert(local.name().to_owned(), key.clone());
-        check_or_pair(or_map, local.name(), &key, false)?;
+        check_or_pair(or_map, local.name(), v, false)?;
     }
     Ok(())
 }
@@ -2810,18 +3013,19 @@ fn walk_req_entry(
 ) -> Result<(), WalkError> {
     // #112: the key unquotes (quoted spells the same key); vector
     // locals validate as nested patterns (the runtime `pb` splice
-    // accepts any binding form, like the expansion path).
-    let key = unquote_key(key);
+    // accepts any binding form, like the expansion path). The `:or`
+    // check compares the form as written (#158).
+    let ukey = unquote_key(key);
     match local {
         Value::Symbol(sym) => {
-            bound_keys.insert(sym.name().to_owned(), key.clone());
-            check_or_pair(or_map, sym.name(), &key, true)?;
+            bound_keys.insert(sym.name().to_owned(), ukey.clone());
+            check_or_pair(or_map, sym.name(), key, true)?;
         }
         Value::Map(nested) => walk_map(nested)?,
         _ if vector_shape_items(local).is_some() => walk_binding(local)?,
         _ => return Err(WalkError::unsupported(local)),
     }
-    sel.push(key);
+    sel.push(ukey);
     Ok(())
 }
 
@@ -2899,6 +3103,9 @@ fn key_cast_err(dir: &KeyDirective, form: &Value) -> WalkError {
 /// supply default value for required key` when a required binding
 /// has either. The key arrives unquoted (#112) while `:or` keys
 /// stay as written, so a quoted `:or` spelling matches too.
+/// Upstream `push1` (`local-default?`/`key-default?`): `:or`
+/// matches the local symbol or the key form as written (#158) —
+/// callers pass the raw form, never the unquoted key.
 fn check_or_pair(
     or_map: Option<&Map>,
     local: &str,
@@ -2910,7 +3117,7 @@ fn check_or_pair(
     };
     let local_key = Value::Symbol(Symbol::new(None, local));
     let has_local = or.get(&local_key).is_some();
-    let has_key = or.get(key).is_some() || or.get(&quote_form(key)).is_some();
+    let has_key = or.get(key).is_some();
     if has_local && has_key {
         return Err(WalkError {
             class: class::EXCEPTION,
@@ -3708,27 +3915,33 @@ impl<'a> Analyzer<'a> {
         let validated = as_pat(k).expect("patterns validated before building");
         let (pat, _) = self.build_pattern(validated, span)?;
         // #112: the entry key unquotes (quoted spells the same key).
-        push_entry(&mut acc.entries, pat, unquote_key(v), false);
+        push_entry(&mut acc.entries, pat, unquote_key(v), v.clone(), false);
         Ok(())
     }
 
-    /// The analyzed `:or` defaults (eager at runtime). Keys unquote
-    /// (#112) so a quoted spelling matches the unquoted entry key
-    /// at lookup, like the walk-time `:or` checks.
+    /// The analyzed `:or` defaults (eager at runtime). Keys stay as
+    /// written: `:or` matches forms (upstream `push1`), so a quoted
+    /// spelling matches only the quoted entry key (#158).
     fn build_or(&mut self, m: &Map, span: Span) -> Result<Vec<(Value, Expr)>, CompileError> {
         let mut or = Vec::new();
         if let Some(Value::Map(or_map)) = map_get(m, "or") {
             for (k, default) in or_map.iter() {
-                or.push((unquote_key(k), self.analyze(default, span, false)?));
+                or.push((k.clone(), self.analyze(default, span, false)?));
             }
         }
         Ok(or)
     }
 }
 
-/// Push one `(pattern, key, required?)` entry.
-fn push_entry(acc: &mut Vec<(Pattern, Value, bool)>, pat: Pattern, key: Value, required: bool) {
-    acc.push((pat, key, required));
+/// Push one `(pattern, lookup-key, or-key, required?)` entry.
+fn push_entry(
+    acc: &mut Vec<(Pattern, Value, Value, bool)>,
+    pat: Pattern,
+    key: Value,
+    or_key: Value,
+    required: bool,
+) {
+    acc.push((pat, key, or_key, required));
 }
 
 impl<'a> Analyzer<'a> {
@@ -3743,7 +3956,7 @@ impl<'a> Analyzer<'a> {
             for (local, key) in req.iter() {
                 let validated = as_pat(local).expect("patterns validated before building");
                 let (pat, _) = self.build_pattern(validated, span)?;
-                push_entry(&mut acc.entries, pat, unquote_key(key), true);
+                push_entry(&mut acc.entries, pat, unquote_key(key), key.clone(), true);
             }
             return Ok(());
         }
@@ -3754,7 +3967,7 @@ impl<'a> Analyzer<'a> {
 /// A map pattern under construction.
 #[derive(Default)]
 struct MapAcc {
-    entries: Vec<(Pattern, Value, bool)>,
+    entries: Vec<(Pattern, Value, Value, bool)>,
     keys: Vec<KeyBinding>,
     extra_keys: Vec<Value>,
     as_sym: Option<String>,
