@@ -1644,6 +1644,14 @@ mod tests {
         assert_eq!(fallback.message.as_deref(), Some("go block panicked"));
     }
 
+    /// `go` spawn failure reports the JVM's native-thread text.
+    #[test]
+    fn go_spawn_failed_shape() {
+        let err = go_spawn_failed();
+        assert_eq!(err.class, ThrowClass::RuntimeException);
+        assert_eq!(err.message, "unable to create native thread");
+    }
+
     /// `go_deliver` lands the result on a buffer-1 channel.
     #[test]
     fn go_deliver_puts_one() {

@@ -46,7 +46,7 @@ block, like `future-call`'s fork; deviation D9):
 
 ```clojure
 (go body...) =>
-(let [c (chan 1)]
+(let [c (chan 1)] ; c is a gensym; every emitted head is fully qualified
   (go-call c (fn [] <rewritten body...>))
   c)
 ```
@@ -54,10 +54,11 @@ block, like `future-call`'s fork; deviation D9):
 The rewrite is resolve-aware: an operator-position
 `<!`/`>!`/`alts!`/`alt!` that resolves to the
 `clojure.core.async` var becomes `<!!`/`>!!`/`alts!!`/
-`alt!!`. `fn`/`fn*` bodies bound the rewrite (oracle
-`e-fn-boundary`), as do `quote` (`g-quote`) and `var`
-(`g-var`) forms; locals shadow (from `&env` plus the
-`let`/`loop` bindings on the walk path — `g-shadow`,
+`alt!!`, following the TARGET var (aliases, refers, and
+`:rename`s count). `fn`/`fn*` bodies bound the rewrite
+(oracle `e-fn-boundary`), as do `quote` (`g-quote`) and
+`var` (`g-var`) forms; locals shadow (from `&env` plus
+the `let`/`loop` bindings on the walk path — `g-shadow`,
 `g-shadow-in`). Parking ops hidden behind fn-creating
 *macros* (`for`, `letfn`, …) are rewritten anyway and
 execute (deviation D11 — upstream asserts, `e-for-fn`).
@@ -65,11 +66,14 @@ execute (deviation D11 — upstream asserts, `e-for-fn`).
 `go-call` (port-internal, public like upstream's
 `ioc-alts!`; deviation D12) forks the evaluator with the
 calling thread's bindings conveyed (like `future-call`;
-`g-binding`), runs the thunk, puts a non-nil result on the
-channel and closes it (`return-chan`: nil skipped —
-`g-nil-body` — but `false` delivered — `g-false-body`);
-on a throw it closes the channel and prints the D6
-one-liner (`run-state-machine-wrapped` minus the trace).
+`g-binding`), runs the thunk on a DETACHED thread (the
+dispatch pool's threads are daemon — parked gos never hold
+the runtime alive past main; no shutdown latch either),
+puts a non-nil result on the channel and closes it
+(`return-chan`: nil skipped — `g-nil-body` — but `false`
+delivered — `g-false-body`); on a throw it closes the
+channel and prints the D6 one-liner
+(`run-state-machine-wrapped` minus the trace).
 `alt!`/`alt!!` port `do-alt` (unbalanced assert, keyword
 opts filtering, gensym port/val bindings, the `cond`
 dispatch with binding-form result exprs); `alt!` expands
