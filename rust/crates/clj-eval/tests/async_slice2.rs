@@ -425,13 +425,14 @@ fn xform_completion_counts() {
         ),
         "[0 1 0 1 nil 2 nil 3 nil 4]"
     );
-    // Closing twice is a no-op (and runs no completion).
+    // Closing twice is a no-op (and runs no completion — the
+    // counter proves the second close steps nothing).
     assert_eq!(
         run_last(
             &mut eval,
-            "(let [c (a/chan 1 (map inc))] (a/close! c) [(a/close! c) (a/closed? c)])"
+            "(let [cnt (atom 0) txf (fn [rf] (fn ([r] (swap! cnt inc) (rf r)) ([r v] (rf r v)))) c (a/chan 1 txf)] (a/close! c) [(a/close! c) (a/closed? c) @cnt])"
         ),
-        "[nil true]"
+        "[nil true 1]"
     );
 }
 
@@ -484,10 +485,16 @@ fn xform_chan_errors() {
         uncaught(&mut eval, "(a/chan 1 42)"),
         "java.lang.ClassCastException | class java.lang.Long cannot be cast to class clojure.lang.IFn (java.lang.Long is in module java.base of loader 'bootstrap'; clojure.lang.IFn is in unnamed module of loader 'app')"
     );
-    // The transducer applies before the buffer validates.
+    // Upstream order: the buffer validates before the
+    // transducer runs (R1) — garbage buffers proto-error and bad
+    // sizes assert without ever invoking the xform.
     assert_eq!(
         uncaught(&mut eval, "(a/chan \"x\" 42)"),
-        "java.lang.ClassCastException | class java.lang.Long cannot be cast to class clojure.lang.IFn (java.lang.Long is in module java.base of loader 'bootstrap'; clojure.lang.IFn is in unnamed module of loader 'app')"
+        "java.lang.IllegalArgumentException | No implementation of method: :full? of protocol: #'clojure.core.async.impl.protocols/Buffer found for class: java.lang.String"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(a/chan 0 42)"),
+        "java.lang.AssertionError | Assert failed: fixed buffers must have size > 0\n(pos? n)"
     );
     assert_eq!(
         uncaught(&mut eval, "(a/chan 0 (map inc))"),

@@ -244,11 +244,15 @@ fn native_chan(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErro
                 "buf-or-n",
             ));
         }
+        // Upstream order (`async.clj` buffer-before-xform): the
+        // size validates before the transducer runs, so `(chan 0
+        // 42)` asserts instead of CCEing and a bad size never
+        // triggers xform side effects (R1).
+        let buf = resolve_chan_buf(buf_or_n)?;
         let conj = deref_core(eval, "conj");
         let step = call_checked(eval, &xform, &[conj])?;
         let exh = args.get(2).cloned().unwrap_or(Value::Nil);
         let exh = exh.is_truthy().then_some(exh);
-        let buf = resolve_chan_buf(buf_or_n)?;
         return Ok(Value::Extension(Arc::new(Channel::new_xform(
             buf.as_ref(),
             step,
@@ -275,12 +279,17 @@ fn split_step(ret: Value) -> StepOut {
     StepOut { emits, reduced }
 }
 
-/// The default ex-handler: print the throwable and drop the value
-/// (the JVM prints the full stack trace — the port has none, so
-/// this stays a one-line `Class | message`, like `uncaught`).
-fn default_ex_handler(t: &Throwable) -> Value {
+/// The default ex-handler's one-line print shape (D6; the JVM
+/// prints the full stack trace — the port has none).
+fn default_ex_message(t: &Throwable) -> String {
     let msg = t.message.as_deref().unwrap_or("");
-    eprintln!("{} | {}", t.class.jvm_name(), msg);
+    format!("{} | {}", t.class.jvm_name(), msg)
+}
+
+/// The default ex-handler: print the throwable and drop the value
+/// (see [`default_ex_message`] for the shape).
+fn default_ex_handler(t: &Throwable) -> Value {
+    eprintln!("{}", default_ex_message(t));
     Value::Nil
 }
 
@@ -651,6 +660,23 @@ mod tests {
         assert_eq!(takes.class, ThrowClass::AssertionError);
         assert!(takes.message.contains("pending takes"), "{}", takes.message);
         assert!(!takes.message.contains("windowed"), "{}", takes.message);
+    }
+
+    /// The default ex-handler prints one `Class | message` line
+    /// (D6; the trace itself is unobservable, so the shape pins
+    /// the message fn, not the stderr transport).
+    #[test]
+    fn default_ex_message_shape() {
+        let t = Throwable {
+            id: 0,
+            class: ThrowClass::ExceptionInfo,
+            message: Some(Arc::from("boom")),
+            data: None,
+            cause: None,
+        };
+        assert_eq!(default_ex_message(&t), "clojure.lang.ExceptionInfo | boom");
+        let mute = Throwable { message: None, ..t };
+        assert_eq!(default_ex_message(&mute), "clojure.lang.ExceptionInfo | ");
     }
 
     /// Exotic buffer sizes: negative infinity, bigints, exact

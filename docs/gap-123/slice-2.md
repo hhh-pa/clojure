@@ -178,6 +178,11 @@ hand-rolled pair-buffer — same channel paths.
   the channel lock, so a close racing a slow step wins
   (the put reports `false`); the JVM holds its mutex
   across the step, so the put would win there instead.
+- D8 (known edge, not probed): the ex-handler runs under the
+  channel lock on the evict-crash path, so a reentrant handler
+  that puts/takes on the same channel self-deadlocks; the JVM
+  holds a reentrant lock there instead. Handlers that avoid
+  same-channel round-trips never observe this.
 
 ## Slice boundary (what remains of #123)
 

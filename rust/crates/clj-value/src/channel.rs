@@ -52,8 +52,8 @@ use crate::value::next_identity_id;
 /// `e-put-bound`).
 pub const MAX_QUEUE_SIZE: usize = 1024;
 
-/// A buffer kind (`impl/buffers`; slice 1 has no transducers, so no
-/// promise-buffer).
+/// A buffer kind (`impl/buffers`; no promise-buffer yet — slice
+/// 2's transducers don't need one).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BufferKind {
     /// Puts block when full.
