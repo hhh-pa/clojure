@@ -400,7 +400,7 @@ fn form_and_describe_and() {
 // ---- out-of-scope errors ----
 
 #[test]
-fn regex_spec_out_of_scope() {
+fn regex_spec_usable_slice_e() {
     // Gap-122 slice E retired the slice-1 guard: a regex-op-shaped
     // map is now a usable spec (see spec_regex.rs for the full
     // pins). Same input, new behavior: 1 is not sequential, so the
