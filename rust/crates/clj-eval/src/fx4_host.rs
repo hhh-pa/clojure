@@ -181,6 +181,16 @@ fn one_arg<'a>(items: &[&'a Value], make: fn(&'a Value) -> HostOp<'a>) -> HostOp
     }
 }
 
+/// Whether a qualified call head belongs to the FX4 builtins even
+/// when no var exists: `PersistentArrayMap/createAsIfByAssoc`
+/// (static calls must not claim it — its rewrite shapes and miss
+/// errors are FX4's, pinned in `fx4_macroexpand`; the other FX4
+/// heads are unqualified or `clojure.core`-qualified, so the
+/// static intercept skips them on its own).
+pub(crate) fn owns_call_head(ns_part: &str, name: &str) -> bool {
+    ns_part == "clojure.lang.PersistentArrayMap" && name == "createAsIfByAssoc"
+}
+
 /// `clojure.lang.PersistentArrayMap/EMPTY` in value position.
 pub(crate) fn pam_empty(sym: &Symbol) -> Option<Value> {
     if sym.namespace() == Some("clojure.lang.PersistentArrayMap") && sym.name() == "EMPTY" {

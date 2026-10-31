@@ -746,6 +746,13 @@ pub(crate) fn sync_reader_ns(eval: &Evaluator, opts: &mut ReaderOpts) {
     if let Some(ns) = eval.registry.ns_live_or_removed(&cur) {
         opts.aliases = ns.alias_map();
         opts.refers = ns.refer_map();
+        // #120: imports feed syntax-quote's class map, so `` `String ``
+        // and `` `String/m `` qualify to the imported class (oracle
+        // `rsq-imported`, `rsq-qual-imported`).
+        opts.class_map = ns
+            .imports()
+            .map(|(simple, class)| (simple.to_owned(), class.name().to_owned()))
+            .collect();
     }
 }
 

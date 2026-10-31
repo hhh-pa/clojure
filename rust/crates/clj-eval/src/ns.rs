@@ -768,6 +768,14 @@ pub(crate) fn do_resolve(
         if let Some(class) = home.as_ref().and_then(|h| h.get_import(sym.name())) {
             return Ok(Value::Class(class));
         }
+        // #120: fully-qualified names resolve as classes like the
+        // analyzer (oracle `resolve-fq`); missing ones are nil
+        // (oracle `resolve-missing` — `resolve` never throws here).
+        if home.is_some() && crate::classemu::is_class_position(sym.name()) {
+            if let Some(class) = crate::classemu::resolve_class_name(eval, sym.name()) {
+                return Ok(Value::Class(class));
+            }
+        }
     }
     Ok(Value::Nil)
 }
