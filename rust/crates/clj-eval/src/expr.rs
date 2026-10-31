@@ -4774,6 +4774,10 @@ mod tests {
             Value::Symbol(Symbol::new(None, "v")),
         ]));
         assert_eq!(unquote_key(&nested), nested);
+        // Length-guard false edge: a list key with length != 2
+        // (here a 1-list) passes through untouched.
+        let singleton = Value::List(List::from_vec(vec![Value::Symbol(Symbol::new(None, "k"))]));
+        assert_eq!(unquote_key(&singleton), singleton);
     }
 
     #[test]
