@@ -2128,8 +2128,7 @@ fn snapshot_default_layer(eval: &Evaluator, opts: &mut clj_reader::ReaderOpts) {
 /// including a same-display native — is a replacement and defers
 /// for eval-side invocation (oracle `h-replace-inst-bad`).
 fn canonical_default_keys(eval: &Evaluator, root: &Value) -> HashSet<Symbol> {
-    let (Some((inst0, uuid0)), Value::Map(m)) =
-        (eval.canonical_default_readers.as_ref(), root)
+    let (Some((inst0, uuid0)), Value::Map(m)) = (eval.canonical_default_readers.as_ref(), root)
     else {
         return HashSet::new();
     };
