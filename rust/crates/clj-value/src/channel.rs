@@ -261,24 +261,16 @@ impl ChanState {
         self.puts.retain(|r| r.waiter.is_pending());
     }
 
-    /// Pop the next live take registration.
+    /// Pop the next live take registration (stale regs skip
+    /// like `cleanup`; combinators, so the early return stays out
+    /// of the coverage map).
     fn next_taker(&mut self) -> Option<Reg> {
-        while let Some(reg) = self.takes.pop_front() {
-            if reg.waiter.is_pending() {
-                return Some(reg);
-            }
-        }
-        None
+        std::iter::from_fn(|| self.takes.pop_front()).find(|reg| reg.waiter.is_pending())
     }
 
     /// Pop the next live put registration.
     fn next_putter(&mut self) -> Option<Reg> {
-        while let Some(reg) = self.puts.pop_front() {
-            if reg.waiter.is_pending() {
-                return Some(reg);
-            }
-        }
-        None
+        std::iter::from_fn(|| self.puts.pop_front()).find(|reg| reg.waiter.is_pending())
     }
 
     /// Whether a queued putter's value fits the buffer now (the
@@ -563,6 +555,33 @@ mod tests {
         assert!(w2.try_win(9, Value::Bool(true)));
         let t = Arc::new(Waiter::new());
         assert!(matches!(ch2.take_one(&t, 0), Ok(OpReady::Queued)));
+    }
+
+    /// A live rendezvous completes synchronously (a parked take
+    /// is handed the next put, and a parked put the next take).
+    #[test]
+    fn live_regs_rendezvous_sync() {
+        let ch = Channel::new(None);
+        let t = Arc::new(Waiter::new());
+        assert!(matches!(ch.take_one(&t, 0), Ok(OpReady::Queued)));
+        let p = Arc::new(Waiter::new());
+        assert!(matches!(
+            ch.put_one(Value::Int(1), &p, 0),
+            Ok(OpReady::Ready(true))
+        ));
+        assert_eq!(t.wait(), Some((0, Value::Int(1))));
+        let ch2 = Channel::new(None);
+        let p2 = Arc::new(Waiter::new());
+        assert!(matches!(
+            ch2.put_one(Value::Int(2), &p2, 0),
+            Ok(OpReady::Queued)
+        ));
+        let t2 = Arc::new(Waiter::new());
+        assert!(matches!(
+            ch2.take_one(&t2, 0),
+            Ok(OpReady::Ready(Some(Value::Int(2))))
+        ));
+        assert_eq!(p2.wait(), Some((0, Value::Bool(true))));
     }
 
     /// A non-blocking take probe (a queued probe is killed, so it

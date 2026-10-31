@@ -515,6 +515,15 @@ mod tests {
             num_bigint::BigInt::from(2),
         );
         assert_eq!(ratio_cap(&four_halves), (true, 2, true));
+        let big5 = Arc::new(num_bigint::BigInt::from(5));
+        assert_eq!(
+            buf_size(&Value::BigInt(Arc::clone(&big5))).expect("bigint buf"),
+            (true, 5, true)
+        );
+        assert_eq!(
+            buf_size(&Value::BigInteger(big5)).expect("biginteger buf"),
+            (true, 5, true)
+        );
     }
 
     /// The abandoned-waiter internal error shape.
@@ -535,10 +544,7 @@ mod tests {
             .err()
             .expect("nil-put assert");
         assert_eq!(err.class, ThrowClass::AssertionError);
-        assert!(
-            err.message.contains("can't put nil on channel"),
-            "{}",
-            err.message
-        );
+        let msg = &err.message;
+        assert!(msg.contains("can't put nil on channel"), "{msg}");
     }
 }
