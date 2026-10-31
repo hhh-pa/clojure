@@ -48,6 +48,13 @@
 # In Progress 47fc9ee4, Done 98236657), Session text field
 # PVTF_lADOEkzkc84Bo8xazhnjDYQ. If the board is ever rebuilt,
 # re-read them via the projectV2 GraphQL fields query.
+#
+# Assignees (owner-directed): the board Assignees column
+# auto-mirrors issue assignees (verified live: the User field is
+# not API-writable and needs no writes). The workflow only runs
+# AUTO-ASSIGN: assignee-less rows with linked PRs go to those
+# PRs' authors (issue edit via BOARD_TOKEN, hence issues:write
+# below); the column follows by itself.
 
 name: storyboard
 
@@ -56,9 +63,11 @@ on:
     - cron: '*/15 * * * *'
   workflow_dispatch:
 
-# Read-only except the PAT-authed project writes below.
+# PAT-authed project writes below, plus issue assignee edits
+# for the auto-assign pass (GITHUB_TOKEN, issues scope only).
 permissions:
   contents: read
+  issues: write
 
 jobs:
   sync:
@@ -68,6 +77,7 @@ jobs:
       - name: Reconcile board items
         env:
           GH_TOKEN: ${{ secrets.PROJECT_TOKEN }}
+          BOARD_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           # No job/step `if:` on secrets: GitHub's parser rejects
@@ -88,17 +98,21 @@ jobs:
 
           # All GraphQL values interpolate inline: `gh api -f`
           # variables fail to bind singleSelectOptionId.
+          # fieldValues(first:30): rows carry 12+ values now; at
+          # first:10 the Status/Session reads went blind the day
+          # Linked-pull-requests landed (found live 2026-10-31).
           gql_items() {
             gh api graphql -f query="query{ node(id:\"$proj\"){... on ProjectV2{
               items(first:100){nodes{id
                 content{__typename
-                  ... on Issue{number closed labels(first:30){nodes{name}}}}
+                  ... on Issue{number closed labels(first:30){nodes{name}} assignees(first:10){nodes{id login}}}
                   ... on PullRequest{number closed labels(first:30){nodes{name}}}}
-                fieldValues(first:10){nodes{__typename
+                fieldValues(first:30){nodes{__typename
                   ... on ProjectV2ItemFieldSingleSelectValue{optionId
                     field{... on ProjectV2SingleSelectField{id}}}
                   ... on ProjectV2ItemFieldTextValue{text
-                    field{... on ProjectV2Field{id}}}}}}}}}"
+                    field{... on ProjectV2Field{id}}}
+                  ... on ProjectV2ItemFieldPullRequestValue{pullRequests(first:5){nodes{author{login}}}}}}}}}}}"
           }
           gql_add() { # $1 = content node id -> item id
             gh api graphql -f query="mutation{ addProjectV2ItemById(
@@ -168,7 +182,14 @@ jobs:
                              | first // ""),
                 cur_session: ([.fieldValues.nodes[]
                                | select(.field.id == $yf) | .text]
-                              | first // "")}]
+                              | first // ""),
+                has_assignees: ([(.content.assignees // {nodes:[]}).nodes[].login]
+                                | length > 0),
+                linked_authors: ([.fieldValues.nodes[]
+                                  | select(.pullRequests != null)
+                                  | .pullRequests.nodes[].author.login
+                                  | select(. != null)]
+                                 | unique | join(" "))}]
              | .[] | @json' |
           while IFS= read -r row; do
             item=$(jq -r .item <<<"$row")
@@ -177,6 +198,8 @@ jobs:
             session=$(jq -r .session <<<"$row")
             cur_status=$(jq -r .cur_status <<<"$row")
             cur_session=$(jq -r .cur_session <<<"$row")
+            has_assignees=$(jq -r .has_assignees <<<"$row")
+            linked_authors=$(jq -r .linked_authors <<<"$row")
 
             if [ "$closed" = true ]; then
               want_status=$opt_done; want_session=$cur_session
@@ -200,6 +223,17 @@ jobs:
             if [ "$want_session" != "$cur_session" ]; then
               gql_set_session "$item" "$want_session"
               echo "#$num session -> [$want_session]"
+            fi
+            # Auto-assign: assignee-less rows with linked PRs go to
+            # those PRs' authors (issue edit via BOARD_TOKEN, whose
+            # issues:write the PAT lacks; the board column mirrors
+            # issue assignees by itself).
+            if [ "$has_assignees" != true ] && [ -n "$linked_authors" ]; then
+              for u in $linked_authors; do
+                GH_TOKEN="$BOARD_TOKEN" gh issue edit "$num" --add-assignee "$u" \
+                  --repo "$repo"
+              done
+              echo "#$num auto-assigned [$linked_authors]"
             fi
           done
           echo "reconcile done"
