@@ -216,28 +216,28 @@ impl Reader {
             });
         }
         // Default-layer hits defer for eval-side invocation (#94);
-        // canonical `inst`/`uuid` string payloads validate inline
-        // (spanful).
-        // DIVERGENCE (#94): a REPLACED canonical default still
-        // validates here (oracle `h-replace-inst-bad` invokes the
-        // replacement with the raw payload): the snapshot carries
-        // keys without values, so the read side cannot tell a
-        // replacement from the canonical native.
+        // pristine canonical `inst`/`uuid` string payloads validate
+        // inline (spanful). A REPLACED canonical skips validation
+        // (#94r: only `default_reader_canonical` members validate),
+        // so eval invokes the replacement with the raw payload
+        // (oracle `h-replace-inst-bad`).
         if self.opts.default_reader_keys.contains(sym) {
             if let Value::Str(s) = &form {
-                if let Some(e) = Self::default_tag_failure(sym, s) {
-                    return Err(ReaderError::TagInvoke {
-                        span: self.span(),
-                        class: e.class,
-                        message: e.message,
-                    });
+                if self.opts.default_reader_canonical.contains(sym) {
+                    if let Some(e) = Self::default_tag_failure(sym, s) {
+                        return Err(ReaderError::TagInvoke {
+                            span: self.span(),
+                            class: e.class,
+                            message: e.message,
+                        });
+                    }
                 }
-                // Validated: this `TaggedLiteral` defers for the
-                // eval walk, which resolves it through the
-                // flipped `inst`/`uuid` defaults to a native
-                // (#103) — re-validating idempotently on the
-                // way (the reader must not construct eagerly:
-                // the walk consults the live table).
+                // This `TaggedLiteral` defers for the eval walk,
+                // which resolves it through the live
+                // `inst`/`uuid` defaults (#103) — canonicals
+                // validated above, replacements invoked raw
+                // (the reader must not construct eagerly: the
+                // walk consults the live table).
                 return Ok(Some(tagged_literal(sym.clone(), form)));
             }
             // Anything else defers for the eval-side type dispatch
@@ -255,16 +255,18 @@ impl Reader {
         })
     }
 
-    /// Inline validation for canonical default tags (#94): the
-    /// failure for an invalid `inst`/`uuid` string payload, else
-    /// `None` (non-canonical default tags never validate — the
-    /// eval side invokes whatever the root holds — probes
-    /// `h-extra`, `h-extra-ns`).
+    /// Inline validation for pristine canonical defaults (#94r):
+    /// the failure for an invalid `inst`/`uuid` string payload,
+    /// else `None`. Only unqualified `inst`/`uuid` reach here (the
+    /// sole caller gates on `default_reader_canonical`, built from
+    /// exactly these two) — non-canonical default tags never
+    /// validate (the eval side invokes whatever the root holds —
+    /// probes `h-extra`, `h-extra-ns`).
     fn default_tag_failure(sym: &Symbol, s: &str) -> Option<TagError> {
-        match sym.name() {
-            "inst" if sym.namespace().is_none() => validate_inst(s).err(),
-            "uuid" if sym.namespace().is_none() => validate_uuid(s).err(),
-            _ => None,
+        if sym.name() == "inst" {
+            validate_inst(s).err()
+        } else {
+            validate_uuid(s).err()
         }
     }
 
@@ -653,6 +655,11 @@ mod tests {
                 })
                 .collect::<HashSet<_>>(),
             default_reader_keys: HashSet::from([
+                Symbol::new(None, "inst"),
+                Symbol::new(None, "uuid"),
+            ]),
+            // Pristine natives, like the snapshot (#94r).
+            default_reader_canonical: HashSet::from([
                 Symbol::new(None, "inst"),
                 Symbol::new(None, "uuid"),
             ]),

@@ -2039,6 +2039,9 @@ fn default_reader_fn(
 
 /// The `default-data-readers` root (S6): `{inst, uuid}` over the
 /// 1-arity default natives (probes `a-defaults*`, `a-ddr-*`).
+/// Stashes the pristine pair on the evaluator (#94r): the
+/// default-layer snapshot compares the live root against these by
+/// reference (stashed at mint time, so no extraction branches).
 pub(crate) fn default_data_readers_map(eval: &mut Evaluator) -> Value {
     let inst = default_reader_fn(
         eval,
@@ -2050,6 +2053,7 @@ pub(crate) fn default_data_readers_map(eval: &mut Evaluator) -> Value {
         "clojure.uuid/default-uuid-reader",
         default_uuid_reader,
     );
+    eval.canonical_default_readers = Some((inst.clone(), uuid.clone()));
     Value::Map(
         new_map()
             .insert(Value::Symbol(Symbol::new(None, "inst")), inst)
@@ -2110,9 +2114,35 @@ pub(crate) fn snapshot_data_readers(
 /// the mapping-file read (which skips the autoload scan but
 /// resolves tags against the same layers).
 fn snapshot_default_layer(eval: &Evaluator, opts: &mut clj_reader::ReaderOpts) {
-    let (keys, borked) = table_snapshot(&deref_core(eval, "default-data-readers"));
+    let root = deref_core(eval, "default-data-readers");
+    let (keys, borked) = table_snapshot(&root);
     opts.default_reader_keys = keys;
     opts.default_readers_borked = borked;
+    opts.default_reader_canonical = canonical_default_keys(eval, &root);
+}
+
+/// Canonical tags whose root value is the pristine boot native
+/// (#94r): only these inline-validate string payloads read-side.
+/// Reference-compared (`identical?` semantics): re-installing the
+/// original value object stays canonical; any other object —
+/// including a same-display native — is a replacement and defers
+/// for eval-side invocation (oracle `h-replace-inst-bad`).
+fn canonical_default_keys(eval: &Evaluator, root: &Value) -> HashSet<Symbol> {
+    let (Some((inst0, uuid0)), Value::Map(m)) = (eval.canonical_default_readers.as_ref(), root)
+    else {
+        return HashSet::new();
+    };
+    [
+        (Symbol::new(None, "inst"), inst0),
+        (Symbol::new(None, "uuid"), uuid0),
+    ]
+    .into_iter()
+    .filter(|(sym, pristine)| {
+        m.get(&Value::Symbol(sym.clone()))
+            .is_some_and(|v| crate::classemu::identical_values(v, pristine))
+    })
+    .map(|(sym, _)| sym)
+    .collect()
 }
 
 /// `data_readers.clj` autoload (zero-fence reader): upstream

@@ -1649,6 +1649,30 @@ fn default_root_borked_extra_replaced() {
         ),
         "[:mine \"550e8400-e29b-41d4-a716-446655440000\"]"
     );
+    // `h-replace-inst-bad` (#94r): a replaced canonical default
+    // with a canonically-INVALID string skips read-side validation
+    // and runs the replacement with the raw payload (the `uuid`
+    // twin follows the same rule).
+    assert_eq!(
+        run_last(
+            &mut eval,
+            &with_ddr(
+                "(assoc default-data-readers 'inst (fn [x] [:mine x]))",
+                "(read-string \"#inst \\\"bogus\\\"\")"
+            )
+        ),
+        "[:mine \"bogus\"]"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            &with_ddr(
+                "(assoc default-data-readers 'uuid (fn [x] [:mine x]))",
+                "(read-string \"#uuid \\\"bogus\\\"\")"
+            )
+        ),
+        "[:mine \"bogus\"]"
+    );
     // `h-nil-entry` / `h-strkey`: nil entries and non-symbol keys
     // miss (probes `e-nilentry`, `e-strkey`).
     assert_eq!(
