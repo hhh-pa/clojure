@@ -339,12 +339,12 @@ fn chan_errors() {
 }
 
 #[test]
-fn chan_transducer_refused() {
+fn chan_transducer_arities() {
     let mut eval = boot_async();
-    // Slice 2: an explicit refusal, not an arity error.
+    // Slice 2 accepts transducers (deep pins live in async_slice2).
     assert_eq!(
-        uncaught(&mut eval, "(a/chan 1 (map inc))"),
-        "java.lang.UnsupportedOperationException | unsupported: channels with transducers (gap-123 slice 2)"
+        run_last(&mut eval, "(a/<!! (doto (a/chan 1 (map inc)) (a/>!! 41)))"),
+        "42"
     );
     // The transducer-without-buffer assert still fires first.
     assert_eq!(
