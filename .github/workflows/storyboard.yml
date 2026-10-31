@@ -231,7 +231,7 @@ jobs:
             if [ "$has_assignees" != true ] && [ -n "$linked_authors" ]; then
               for u in $linked_authors; do
                 GH_TOKEN="$BOARD_TOKEN" gh issue edit "$num" --add-assignee "$u" \
-                  --repo "$repo"
+                  --repo "$repo" || echo "auto-assign failed for $u (#$num)"
               done
               echo "#$num auto-assigned [$linked_authors]"
             fi
