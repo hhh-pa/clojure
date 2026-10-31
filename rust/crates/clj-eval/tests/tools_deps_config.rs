@@ -264,7 +264,7 @@ fn read_edn_string_multi_throws() {
                 clj_str(&fake)
             )
         ),
-        format!("{{:path \"{fake}\"}}")
+        format!("{{:path {}}}", clj_str(&fake))
     );
     // A relative path absolutizes `getAbsolutePath`-style (joined
     // onto the cwd, never normalized).
@@ -851,12 +851,17 @@ fn bdd_simple_lib_canonicalizes_with_warning() {
         run(&mut eval, &format!("(edn/read-deps {lit})")),
         "{:deps #:mylib{mylib #:local{:root \"lib\"}}}"
     );
+    // pr-escaped inner path (same as the bdd_trailing vector:
+    // `run` returns the pr of the captured string).
     assert_eq!(
         run(
             &mut eval,
             &format!("(with-out-str (binding [*err* *out*] (edn/read-deps {lit})))")
         ),
-        format!("\"DEPRECATED: Libs must be qualified, change mylib => mylib/mylib ({file})\\n\"")
+        format!(
+            "\"DEPRECATED: Libs must be qualified, change mylib => mylib/mylib ({})\\n\"",
+            clj_str(&file).trim_matches('"')
+        )
     );
 }
 
