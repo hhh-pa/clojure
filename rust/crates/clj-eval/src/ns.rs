@@ -52,6 +52,12 @@ const NIL_NAME_NPE: &str = "Cannot invoke \"clojure.lang.Named.getName()\" becau
 /// intentionally no `ns` form), then refers the publics into `user`.
 const CORE_CLJ: &str = include_str!("core.clj");
 
+/// The embedded `clojure.spec.alpha` slice-1 source (gap-122):
+/// `resolve_source` serves this for `clojure/spec/alpha` (unlike
+/// `CORE_CLJ` it carries its own `ns` form, so it loads on demand
+/// through the ordinary `require` path).
+const SPEC_ALPHA_CLJ: &str = include_str!("spec_alpha.clj");
+
 pub(crate) fn npe(message: &str) -> NativeError {
     NativeError::new(ThrowClass::NullPointerException, message.to_owned())
 }
@@ -1189,10 +1195,16 @@ fn load_dirs(eval: &Evaluator) -> Result<Vec<String>, NativeError> {
 }
 
 /// Resolve a load root (no leading slash) to the `*file*` path and
-/// text: embedded libs first (none yet — the flat set lives here
-/// when S5D lands), then `.clj` across every `*load-path*` dir, then
+/// text: embedded libs first (gap-122 slice 1: `clojure/spec/alpha`
+/// only), then `.clj` across every `*load-path*` dir, then
 /// `.cljc` (`RT.load` lookup order).
 fn resolve_source(eval: &Evaluator, root: &str) -> Result<(String, String), NativeError> {
+    if root == "clojure/spec/alpha" {
+        return Ok((
+            "clojure/spec/alpha.clj".to_owned(),
+            SPEC_ALPHA_CLJ.to_owned(),
+        ));
+    }
     let dirs = load_dirs(eval)?;
     for ext in ["clj", "cljc"] {
         for dir in &dirs {
