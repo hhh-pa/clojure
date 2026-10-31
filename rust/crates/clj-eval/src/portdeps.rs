@@ -8,8 +8,9 @@
 
 //! Gap-124 slice 1: the `clojure.tools.deps.util.port` substrate —
 //! the natives upstream tools.deps gets from `java.io`/`System`
-//! (file reads, canonical paths, the working directory, env vars),
-//! which the port deliberately lacks. Installed lazily by
+//! (file reads, canonical paths, the working directory, env vars,
+//! slice 2 adds the is-file probe), which the port deliberately
+//! lacks. Installed lazily by
 //! [`install_port_ns`] (the gap-123 `install_async_ns` shape):
 //! requiring the namespace installs the natives and marks it
 //! loaded — never referred into `user`, never in `clojure.core`.
@@ -281,6 +282,19 @@ fn native_canonical_path(_eval: &mut Evaluator, args: &[Value]) -> Result<Value,
     Ok(Value::Str(Arc::from(out.as_str())))
 }
 
+/// `is-file?`: a path string answers whether a plain file
+/// exists there (upstream `File/isFile` — false when missing).
+/// Gap-124 slice 2: `detect-manifest` and `:local`
+/// `manifest-type` need the file/dir distinction.
+fn native_is_file(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.tools.deps.util.port/is-file?", args, &[1])?;
+    let Value::Str(path) = &args[0] else {
+        return Err(cce_err(&args[0], "java.lang.String"));
+    };
+    let path_str: &str = path;
+    Ok(Value::Bool(std::path::Path::new(path_str).is_file()))
+}
+
 /// `current-dir`: the process working directory
 /// (upstream `user.dir`).
 fn native_current_dir(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
@@ -311,6 +325,7 @@ fn native_getenv(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeE
 pub(crate) const PORT_NATIVES: &[(&str, NativeFnPtr)] = &[
     ("read-edn-string", native_read_edn_string),
     ("file-exists?", native_file_exists),
+    ("is-file?", native_is_file),
     ("canonical-path", native_canonical_path),
     ("current-dir", native_current_dir),
     ("getenv", native_getenv),

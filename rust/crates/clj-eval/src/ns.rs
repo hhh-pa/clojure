@@ -70,6 +70,15 @@ const TOOLS_DEPS_UTIL_DIR_CLJ: &str = include_str!("tools_deps_util_dir.clj");
 const TOOLS_DEPS_EDN_CLJ: &str = include_str!("tools_deps_edn.clj");
 const TOOLS_DEPS_EXTENSIONS_CLJ: &str = include_str!("tools_deps_extensions.clj");
 
+/// The embedded tools.deps SPI-layer sources (gap-124 slice 2):
+/// `util.io` + `util.session` and the `local` / `git` / `deps`
+/// extension namespaces, same on-demand shape as slice 1.
+const TOOLS_DEPS_UTIL_IO_CLJ: &str = include_str!("tools_deps_util_io.clj");
+const TOOLS_DEPS_UTIL_SESSION_CLJ: &str = include_str!("tools_deps_util_session.clj");
+const TOOLS_DEPS_EXTENSIONS_LOCAL_CLJ: &str = include_str!("tools_deps_extensions_local.clj");
+const TOOLS_DEPS_EXTENSIONS_GIT_CLJ: &str = include_str!("tools_deps_extensions_git.clj");
+const TOOLS_DEPS_EXTENSIONS_DEPS_CLJ: &str = include_str!("tools_deps_extensions_deps.clj");
+
 pub(crate) fn npe(message: &str) -> NativeError {
     NativeError::new(ThrowClass::NullPointerException, message.to_owned())
 }
@@ -1262,6 +1271,36 @@ fn resolve_source(eval: &Evaluator, root: &str) -> Result<(String, String), Nati
         return Ok((
             "clojure/tools/deps/extensions.clj".to_owned(),
             TOOLS_DEPS_EXTENSIONS_CLJ.to_owned(),
+        ));
+    }
+    if root == "clojure/tools/deps/util/io" {
+        return Ok((
+            "clojure/tools/deps/util/io.clj".to_owned(),
+            TOOLS_DEPS_UTIL_IO_CLJ.to_owned(),
+        ));
+    }
+    if root == "clojure/tools/deps/util/session" {
+        return Ok((
+            "clojure/tools/deps/util/session.clj".to_owned(),
+            TOOLS_DEPS_UTIL_SESSION_CLJ.to_owned(),
+        ));
+    }
+    if root == "clojure/tools/deps/extensions/local" {
+        return Ok((
+            "clojure/tools/deps/extensions/local.clj".to_owned(),
+            TOOLS_DEPS_EXTENSIONS_LOCAL_CLJ.to_owned(),
+        ));
+    }
+    if root == "clojure/tools/deps/extensions/git" {
+        return Ok((
+            "clojure/tools/deps/extensions/git.clj".to_owned(),
+            TOOLS_DEPS_EXTENSIONS_GIT_CLJ.to_owned(),
+        ));
+    }
+    if root == "clojure/tools/deps/extensions/deps" {
+        return Ok((
+            "clojure/tools/deps/extensions/deps.clj".to_owned(),
+            TOOLS_DEPS_EXTENSIONS_DEPS_CLJ.to_owned(),
         ));
     }
     let dirs = load_dirs(eval)?;
