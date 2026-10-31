@@ -1492,17 +1492,23 @@ impl Evaluator {
 
     /// Bind one pattern: extend the frame, evaluate `:or` defaults
     /// against the pre-extension frame, destructure into the slots.
+    /// The pre-extension frame is the env the analyzer saw when it
+    /// analyzed the defaults (the pair's/param's own names extend
+    /// only after), so default closures capture the right length —
+    /// evaluating against the extended frame shifts every captured
+    /// local by the pair's slot count (#171: the callee arrives as
+    /// its own first arg).
     fn bind_pattern(&mut self, pat: &Pattern, value: Value, env: &Env) -> Result<Env, Signal> {
         let count = pattern_names(pat).len();
-        let env = env.extend(vec![Value::Nil; count]);
-        let base = env.len() - count;
+        let extended = env.extend(vec![Value::Nil; count]);
+        let base = extended.len() - count;
         let mut out = Vec::with_capacity(count);
-        self.destructure(pat, &value, &env, &mut out, ForceSet::default())?;
+        self.destructure(pat, &value, env, &mut out, ForceSet::default())?;
         debug_assert_eq!(out.len(), count, "destructure fills every slot");
         for (i, v) in out.into_iter().enumerate() {
-            env.set(base + i, v);
+            extended.set(base + i, v);
         }
-        Ok(env)
+        Ok(extended)
     }
 
     /// `(def …)`: evaluate the init (or leave rootless), refresh
@@ -1568,9 +1574,9 @@ impl Evaluator {
         body: &[Expr],
         env: &Env,
     ) -> Result<Value, Signal> {
-        let base = env.len();
         // Bind sequentially (each init sees the previous pairs),
         // then run the body against the frame.
+        let outer = env.clone();
         let mut env = env.clone();
         for (pat, init) in bindings {
             let value = self.eval(init, &env)?;
@@ -1580,19 +1586,16 @@ impl Evaluator {
             match self.eval_body(body, &env) {
                 Ok(v) => return Ok(v),
                 Err(Signal::Recur(values)) => {
-                    // Copy-on-recur: closures from this iteration
-                    // keep observing the old frame.
-                    env = env.duplicate();
-                    let mut slot = base;
+                    // Fresh frame per iteration (like the copy it
+                    // replaces, closures from this iteration keep
+                    // observing the old frame): rebind through
+                    // `bind_pattern` so `:or` defaults evaluate
+                    // against each pair's pre-extension frame (#171).
+                    let mut frame = outer.clone();
                     for ((pat, _), value) in bindings.iter().zip(values) {
-                        let count = pattern_names(pat).len();
-                        let mut out = Vec::with_capacity(count);
-                        self.destructure(pat, &value, &env, &mut out, ForceSet::default())?;
-                        for (i, v) in out.into_iter().enumerate() {
-                            env.set(slot + i, v);
-                        }
-                        slot += count;
+                        frame = self.bind_pattern(pat, value, &frame)?;
                     }
+                    env = frame;
                 }
                 Err(signal) => return Err(signal),
             }
@@ -2064,31 +2067,25 @@ impl Evaluator {
             values.push(rest);
         }
         let pats: Vec<&Pattern> = arity.fixed.iter().chain(arity.rest.iter()).collect();
-        let base = closure.env.len();
-        let mut env = closure.env.clone();
-        for pat in &pats {
-            let count = pattern_names(pat).len();
-            env = env.extend(vec![Value::Nil; count]);
+        // Bind through `bind_pattern` (initial and `recur` alike)
+        // so each param's `:or` defaults evaluate against the
+        // pre-extension frame the analyzer saw (#171). A fresh
+        // frame per `recur` keeps the old copy-on-recur promise:
+        // closures from this iteration keep the old frame.
+        let outer = closure.env.clone();
+        let mut frame = outer.clone();
+        for (pat, value) in pats.iter().zip(values) {
+            frame = self.bind_pattern(pat, value, &frame)?;
         }
-        let mut frame = env.clone();
-        let mut rebind = values;
         loop {
-            let mut slot = base;
-            for (pat, value) in pats.iter().zip(rebind) {
-                let count = pattern_names(pat).len();
-                let mut out = Vec::with_capacity(count);
-                self.destructure(pat, &value, &frame, &mut out, ForceSet::default())?;
-                for (i, v) in out.into_iter().enumerate() {
-                    frame.set(slot + i, v);
-                }
-                slot += count;
-            }
             match self.eval_body(&arity.body, &frame) {
                 Ok(v) => return Ok(v),
                 Err(Signal::Recur(values)) => {
-                    // Copy-on-recur (see `eval_loop`).
-                    rebind = values;
-                    frame = frame.duplicate();
+                    let mut next = outer.clone();
+                    for (pat, value) in pats.iter().zip(values) {
+                        next = self.bind_pattern(pat, value, &next)?;
+                    }
+                    frame = next;
                 }
                 Err(signal) => return Err(signal),
             }

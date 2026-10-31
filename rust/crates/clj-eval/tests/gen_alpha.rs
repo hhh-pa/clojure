@@ -708,6 +708,22 @@ fn set_map_distinctness_failure() {
         "ExceptionInfo",
         "Couldn't generate enough distinct elements!",
     );
+    // Upstream arglist `:or` shape (#171 fix): provided
+    // `:max-tries` pairs with the defaulted `:ex-fn` …
+    assert_throws(
+        &mut eval,
+        "(gen/generate (gen/set (gen/return 1) {:num-elements 5 :max-tries 1}) 30 1)",
+        "ExceptionInfo",
+        "Couldn't generate enough distinct elements!",
+    );
+    // … a provided `:ex-fn` wins and sees the throw map
+    // (with the defaulted `:max-tries` inside).
+    assert_throws(
+        &mut eval,
+        "(gen/generate (gen/set (gen/return 1) {:num-elements 5 :ex-fn (fn [m] (throw (ex-info (str \"tries=\" (:max-tries m)) m)))}) 30 1)",
+        "ExceptionInfo",
+        "tries=10",
+    );
     assert_throws(
         &mut eval,
         "(gen/set 3)",

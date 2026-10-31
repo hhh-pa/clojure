@@ -411,21 +411,11 @@
                      size
                      0))))))
 
-;; NOTE: upstream takes these defaults via `:or` in the arglist
-;; destructure; the port miscompiles calls to `:or`-defaulted fn
-;; bindings (the callee arrives as its own first arg — pre-existing
-;; port bug, visible on any `{:keys [e] :or {e (fn ...)}}` + `(e x)`),
-;; so F1 merges a default map exactly like `such-that` does.
-(def ^:private
-  default-distinct-opts
-  {:max-tries 10
-   :ex-fn (fn [m] (ex-info "Couldn't generate enough distinct elements!" m))})
-
 (defn- coll-distinct-by
-  [empty-coll key-fn gen opts]
-  (let [{:keys [num-elements min-elements max-elements max-tries ex-fn]}
-        (merge default-distinct-opts opts)
-        hard-min-elements (or num-elements min-elements 1)]
+  [empty-coll key-fn gen {:keys [num-elements min-elements max-elements max-tries ex-fn]
+                          :or {max-tries 10
+                               ex-fn #(ex-info "Couldn't generate enough distinct elements!" %)}}]
+  (let [hard-min-elements (or num-elements min-elements 1)]
     (if num-elements
       (do (assert (and (nil? min-elements) (nil? max-elements)))
           (make-gen
