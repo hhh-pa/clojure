@@ -86,7 +86,7 @@ pub fn run_str(source: &str, source_path: &str, args: &[String]) -> Result<i32, 
 
 Pipeline: `plan_source` → `lower::to_module_jit` (verified
 before return, like AOT) → `create_jit_execution_engine(None)`
-(self-initializes the native target and MCJIT) → map all 28
+(self-initializes the native target and MCJIT) → map all 27
 `rt_*` declarations via `add_global_mapping` → look up `main`
 → call with `(argc, argv)` → return the exit code (0 or 1).
 
@@ -94,7 +94,7 @@ before return, like AOT) → `create_jit_execution_engine(None)`
   speed; no opt passes, fastest JIT turn.
 - Mapping table (single source of truth): 13 prim entries pair
   `cljrt::prim_symbol(prim)` with the shim address (no
-  duplicated symbol strings); 15 helper entries pair the FFI
+  duplicated symbol strings); 14 helper entries pair the FFI
   name with the shim address. No exhaustive `Prim` match (a
   13-arm match trips the cyclomatic gate — the table is a
   branchless array literal). `cljrt::X as *const ()` (clippy

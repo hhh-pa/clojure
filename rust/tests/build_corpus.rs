@@ -7,11 +7,12 @@
 // You must not remove this notice, or any other, from this software.
 
 //! S8D corpus replay: every `docs/t1174/s8-corpus` file, differentially
-//! `run` vs `build`+execute (rules in `MANIFEST.md`). Supported files
-//! must print byte-identical stdout on both paths (exit 0, empty
-//! stderr); error programs pin the AOT abort stderr (true call-site
-//! spans, exit 1); unsupported files pin the exact `build`
-//! diagnostic (exit 1) while `run` still works (exit 0).
+//! `run` vs `build`+execute vs `jit` (rules in `MANIFEST.md`).
+//! Supported files must print byte-identical stdout on all paths
+//! (exit 0, empty stderr); error programs pin the abort stderr
+//! (true call-site spans, exit 1) on the `build` AND `jit` paths;
+//! unsupported files pin the exact plan diagnostic (exit 1) on
+//! both native paths while `run` still works (exit 0).
 
 #![cfg(feature = "aot")]
 
@@ -150,6 +151,21 @@ fn build_and_run_with(
     (build_code, build_err, exe_out, exe_err, exe_code)
 }
 
+/// `jit` a corpus file: (stdout bytes, stderr bytes, exit code).
+fn jit_file(path: &std::path::Path, args: &[&str]) -> (Vec<u8>, Vec<u8>, i32) {
+    let mut cmd = bin();
+    cmd.arg("jit").arg(path);
+    for arg in args {
+        cmd.arg(arg);
+    }
+    let out = cmd.output().expect("spawn clojure-rs jit");
+    (
+        out.stdout,
+        out.stderr,
+        out.status.code().expect("exit code"),
+    )
+}
+
 #[test]
 fn supported_files_match_run_byte_for_byte() {
     // 00-05: both paths exit 0, empty stderr, stdout == the
@@ -176,6 +192,10 @@ fn supported_files_match_run_byte_for_byte() {
         assert_eq!(exe_code, 0, "{stem}: exe exit");
         assert!(exe_err.is_empty(), "{stem}: exe stderr: {exe_err:?}");
         assert_eq!(exe_out, golden, "{stem}: exe stdout vs golden");
+        let (jit_out, jit_err, jit_code) = jit_file(&path, &[]);
+        assert_eq!(jit_code, 0, "{stem}: jit exit");
+        assert!(jit_err.is_empty(), "{stem}: jit stderr: {jit_err:?}");
+        assert_eq!(jit_out, golden, "{stem}: jit stdout vs golden");
     }
 }
 
@@ -212,6 +232,14 @@ fn dash_main_receives_argv_after_tops() {
             exe_out,
             std::fs::read(corpus.join(golden)).expect("exe golden"),
             "{name}: exe stdout"
+        );
+        let (jit_out, jit_err, jit_code) = jit_file(&path, args);
+        assert_eq!(jit_code, 0, "{name}: jit exit");
+        assert!(jit_err.is_empty(), "{name}: jit stderr: {jit_err:?}");
+        assert_eq!(
+            jit_out,
+            std::fs::read(corpus.join(golden)).expect("exe golden"),
+            "{name}: jit stdout"
         );
     }
 }
@@ -260,6 +288,10 @@ fn error_programs_pin_the_aot_abort() {
         assert_eq!(exe_out, golden, "{stem}: exe stdout vs golden");
         let want = format!("{}:2:8: {class}: {message}\n", path.display());
         assert_eq!(lossy(&exe_err), want, "{stem}: exe stderr");
+        let (jit_out, jit_err, jit_code) = jit_file(&path, &[]);
+        assert_eq!(jit_code, 1, "{stem}: jit exit");
+        assert_eq!(jit_out, golden, "{stem}: jit stdout vs golden");
+        assert_eq!(lossy(&jit_err), want, "{stem}: jit stderr");
     }
 }
 
@@ -382,6 +414,10 @@ fn unsupported_files_fail_build_but_run() {
             path.display()
         );
         assert_eq!(lossy(&build_err), want, "{stem}: build stderr");
+        let (jit_out, jit_err, jit_code) = jit_file(&path, &[]);
+        assert_eq!(jit_code, 1, "{stem}: jit exit");
+        assert!(jit_out.is_empty(), "{stem}: jit stdout: {jit_out:?}");
+        assert_eq!(jit_err, build_err, "{stem}: jit stderr == build stderr");
     }
 }
 
@@ -403,6 +439,10 @@ fn malformed_files_report_direct_spans() {
         p17.display()
     );
     assert_eq!(lossy(&build_err), want17, "17: exact text");
+    let (jit_out, jit_err, jit_code) = jit_file(&p17, &[]);
+    assert_eq!(jit_code, 1, "17: jit exit");
+    assert!(jit_out.is_empty(), "17: jit stdout: {jit_out:?}");
+    assert_eq!(jit_err, build_err, "17: jit stderr == build stderr");
 
     let p18 = corpus.join("unsupported/18-reader.clj");
     let (run_out, run_err, run_code) = run_file(&p18);
@@ -416,6 +456,10 @@ fn malformed_files_report_direct_spans() {
     assert_eq!(build_code, 1, "18: build exit");
     let want18 = format!("{}:1:2: Unmatched delimiter: )\n", p18.display());
     assert_eq!(lossy(&build_err), want18, "18: exact text");
+    let (jit_out, jit_err, jit_code) = jit_file(&p18, &[]);
+    assert_eq!(jit_code, 1, "18: jit exit");
+    assert!(jit_out.is_empty(), "18: jit stdout: {jit_out:?}");
+    assert_eq!(jit_err, build_err, "18: jit stderr == build stderr");
 }
 
 #[test]
@@ -440,6 +484,10 @@ fn nesting_limit_reports_clean_diagnostic() {
         path.display()
     );
     assert_eq!(lossy(&build_err), want, "19: exact text");
+    let (jit_out, jit_err, jit_code) = jit_file(&path, &[]);
+    assert_eq!(jit_code, 1, "19: jit exit");
+    assert!(jit_out.is_empty(), "19: jit stdout: {jit_out:?}");
+    assert_eq!(jit_err, build_err, "19: jit stderr == build stderr");
 }
 
 /// Lossy text of captured bytes.

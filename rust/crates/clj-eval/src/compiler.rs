@@ -116,6 +116,11 @@ pub(crate) fn native_add_classpath(
 /// so the two can never drift.
 pub const UNLINKED_BUILD_LINE: &str = "build: LLVM backend not linked (built with --no-default-features; rebuild with default features to compile)";
 
+/// The CLI's exact unlinked-backend line for `jit` (gap-121
+/// slice 1): the single source for the binary's unlinked `jit`
+/// arm, mirroring [`UNLINKED_BUILD_LINE`].
+pub const UNLINKED_JIT_LINE: &str = "jit: LLVM backend not linked (built with --no-default-features; rebuild with default features to run)";
+
 /// Emission failures (LLVM-free): exactly `clj-aot`'s `CompileError`
 /// minus `Plan` (planning stays caller-side, via `plan_source`)
 /// minus `Link` (CLI-only — linking a library is meaningless).

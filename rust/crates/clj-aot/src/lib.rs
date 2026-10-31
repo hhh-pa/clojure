@@ -13,7 +13,9 @@
 //! a host object ([`target`]), and links it against the `clj-rt`
 //! archive ([`link`]). `--emit-ir` / `--emit-obj` stop before
 //! linking (hermetic, linker-less); otherwise a temporary object
-//! links and is removed.
+//! links and is removed. [`jit`] runs the same subset
+//! in-process through an execution engine (no object, no link,
+//! no temp files).
 
 // The FFI declarations assume 64-bit `usize` (R1 finding 8): a
 // 32-bit host would silently miscompile, so refuse to build one
@@ -22,6 +24,7 @@
 compile_error!("clj-aot requires a 64-bit host (usize FFI widths)");
 
 pub mod driver;
+pub mod jit;
 pub mod link;
 pub mod lower;
 pub mod target;
