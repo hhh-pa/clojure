@@ -11,7 +11,8 @@
 //! the supporting `s/tuple`/`s/every-kv` that `s/map-of` expands
 //! through).
 //!
-//! Oracle: upstream `spec.alpha-0.5.238` `clojure/spec/alpha.clj`,
+//! Oracle: upstream `spec.alpha-0.5.238` (= 0.6.249, byte-identical)
+//! `clojure/spec/alpha.clj`,
 //! used as a TEXT oracle only (no JVM was executed for this
 //! slice; pins are derived by code-reading per
 //! `docs/gap-122/slice-B.md`). Upstream line references name the

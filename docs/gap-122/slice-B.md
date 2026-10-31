@@ -8,7 +8,8 @@ branching/collection combinators over the slice-1 core (registry,
 ## Source
 
 Ported from upstream `spec.alpha-0.5.238`
-(`clojure/spec/alpha.clj`, 1996 lines), fetched as the
+(`clojure/spec/alpha.clj`, 1996 lines — byte-identical to `0.6.249`,
+reviewer-verified diff), fetched as the
 `spec.alpha-0.5.238-sources.jar` from Maven Central and used as a
 **text oracle only** (no JVM was executed for this slice; every pin
 below is derived by code-reading the oracle). Upstream line
