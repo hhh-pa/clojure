@@ -784,53 +784,74 @@ mod tests {
 
     #[test]
     fn pending_bounds_match_max_queue_size() {
-        for takes in [true, false] {
-            let ch = Arc::new(Channel::new(None));
-            let mut threads = Vec::new();
-            for i in 0..MAX_QUEUE_SIZE {
-                let ch = Arc::clone(&ch);
-                threads.push(
-                    std::thread::Builder::new()
-                        .stack_size(512 * 1024)
-                        .spawn(move || {
-                            let w = Arc::new(Waiter::new());
-                            if takes {
-                                match ch.take_one(&w, 0).expect("take") {
-                                    OpReady::Ready(_) => {}
-                                    OpReady::Queued => {
-                                        w.wait();
-                                    }
-                                }
-                            } else {
-                                match ch.put_one(Value::Int(i as i64), &w, 0).expect("put") {
-                                    OpReady::Ready(_) => {}
-                                    OpReady::Queued => {
-                                        w.wait();
-                                    }
-                                }
+        pending_take_bound();
+        pending_put_bound();
+    }
+
+    /// The take half: `MAX_QUEUE_SIZE` parked takers, then one more
+    /// take fails `QueueFull`.
+    fn pending_take_bound() {
+        let ch = Arc::new(Channel::new(None));
+        let mut threads = Vec::new();
+        for _ in 0..MAX_QUEUE_SIZE {
+            let ch = Arc::clone(&ch);
+            threads.push(
+                std::thread::Builder::new()
+                    .stack_size(512 * 1024)
+                    .spawn(move || {
+                        let w = Arc::new(Waiter::new());
+                        match ch.take_one(&w, 0).expect("take") {
+                            OpReady::Ready(_) => {}
+                            OpReady::Queued => {
+                                w.wait();
                             }
-                        })
-                        .expect("spawn"),
-                );
-            }
-            wait_depth(&ch, MAX_QUEUE_SIZE, takes);
-            let w = Arc::new(Waiter::new());
-            let err = if takes {
-                ch.take_one(&w, 0).unwrap_err()
-            } else {
-                ch.put_one(Value::Int(-1), &w, 0).unwrap_err()
-            };
-            assert_eq!(err, ChanError::QueueFull { puts: !takes });
-            ch.close();
-            if !takes {
-                // Queued puts survive the close: drain them all.
-                for _ in 0..MAX_QUEUE_SIZE {
-                    assert!(matches!(take_now(&ch), TakeProbe::Got(_)));
-                }
-            }
-            for t in threads {
-                t.join().expect("joined");
-            }
+                        }
+                    })
+                    .expect("spawn"),
+            );
+        }
+        wait_depth(&ch, MAX_QUEUE_SIZE, true);
+        let w = Arc::new(Waiter::new());
+        let err = ch.take_one(&w, 0).unwrap_err();
+        assert_eq!(err, ChanError::QueueFull { puts: false });
+        ch.close();
+        for t in threads {
+            t.join().expect("joined");
+        }
+    }
+
+    /// The put half: `MAX_QUEUE_SIZE` parked puts, then one more put
+    /// fails `QueueFull` (queued puts survive the close: drained).
+    fn pending_put_bound() {
+        let ch = Arc::new(Channel::new(None));
+        let mut threads = Vec::new();
+        for i in 0..MAX_QUEUE_SIZE {
+            let ch = Arc::clone(&ch);
+            threads.push(
+                std::thread::Builder::new()
+                    .stack_size(512 * 1024)
+                    .spawn(move || {
+                        let w = Arc::new(Waiter::new());
+                        match ch.put_one(Value::Int(i as i64), &w, 0).expect("put") {
+                            OpReady::Ready(_) => {}
+                            OpReady::Queued => {
+                                w.wait();
+                            }
+                        }
+                    })
+                    .expect("spawn"),
+            );
+        }
+        wait_depth(&ch, MAX_QUEUE_SIZE, false);
+        let w = Arc::new(Waiter::new());
+        let err = ch.put_one(Value::Int(-1), &w, 0).unwrap_err();
+        assert_eq!(err, ChanError::QueueFull { puts: true });
+        ch.close();
+        for _ in 0..MAX_QUEUE_SIZE {
+            assert!(matches!(take_now(&ch), TakeProbe::Got(_)));
+        }
+        for t in threads {
+            t.join().expect("joined");
         }
     }
 

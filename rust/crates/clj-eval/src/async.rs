@@ -410,27 +410,8 @@ fn native_alts_block(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nat
         order.shuffle(&mut rand::rng());
     }
     let waiter = Arc::new(Waiter::new());
-    for idx in &order {
-        match &ops[*idx] {
-            AltOp::Take(chv) => {
-                let ch = as_chan(chv, "take!", "ReadPort")?;
-                match ch.take_one(&waiter, *idx).map_err(chan_err)? {
-                    OpReady::Ready(found) => {
-                        return Ok(alt_result(found.unwrap_or(Value::Nil), chv.clone()));
-                    }
-                    OpReady::Queued => {}
-                }
-            }
-            AltOp::Put(chv, val) => {
-                let ch = as_chan(chv, "put!", "WritePort")?;
-                match ch.put_one(val.clone(), &waiter, *idx).map_err(chan_err)? {
-                    OpReady::Ready(done) => {
-                        return Ok(alt_result(Value::Bool(done), chv.clone()));
-                    }
-                    OpReady::Queued => {}
-                }
-            }
-        }
+    if let Some(won) = alts_try_ready(&ops, &order, &waiter)? {
+        return Ok(won);
     }
     if let Some(default) = opts.default {
         // A concurrent completion may have won first (like the
@@ -445,6 +426,42 @@ fn native_alts_block(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nat
     } else {
         Ok(alt_result(val, op_port(&ops[op])))
     }
+}
+
+/// One `alts!!` immediate pass (#123s1): register every op in
+/// order, returning the first ready result (like `do-alts`'
+/// immediate check before parking). `None` means every op queued.
+fn alts_try_ready(
+    ops: &[AltOp],
+    order: &[usize],
+    waiter: &Arc<Waiter>,
+) -> Result<Option<Value>, NativeError> {
+    for idx in order {
+        match &ops[*idx] {
+            AltOp::Take(chv) => {
+                let ch = as_chan(chv, "take!", "ReadPort")?;
+                match ch.take_one(waiter, *idx).map_err(chan_err)? {
+                    OpReady::Ready(found) => {
+                        return Ok(Some(alt_result(
+                            found.unwrap_or(Value::Nil),
+                            chv.clone(),
+                        )));
+                    }
+                    OpReady::Queued => {}
+                }
+            }
+            AltOp::Put(chv, val) => {
+                let ch = as_chan(chv, "put!", "WritePort")?;
+                match ch.put_one(val.clone(), waiter, *idx).map_err(chan_err)? {
+                    OpReady::Ready(done) => {
+                        return Ok(Some(alt_result(Value::Bool(done), chv.clone())));
+                    }
+                    OpReady::Queued => {}
+                }
+            }
+        }
+    }
+    Ok(None)
 }
 
 /// The `clojure.core.async` natives (installed lazily by
