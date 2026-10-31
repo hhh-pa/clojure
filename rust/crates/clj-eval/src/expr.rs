@@ -853,27 +853,10 @@ impl<'a> Analyzer<'a> {
             return Ok(Expr::Global(Var { id, sym: target }));
         }
         // S16: imports resolve after vars (the class, not a var) —
-        // operator position shares this path.
-        if sym.namespace().is_none() {
-            if let Some(class) = crate::classemu::import_in(self.eval, &cur, sym.name()) {
-                return Ok(Expr::Literal(Value::Class(class)));
-            }
-            // #120: dotted bare names resolve as classes (oracle
-            // `val-fq-String`, `bare-deftype`) or fail
-            // `ClassNotFoundException` (oracle `val-fq-missing`,
-            // `val-dotdot`).
-            if crate::classemu::is_class_position(sym.name()) {
-                if let Some(class) = crate::classemu::resolve_class_name(self.eval, sym.name()) {
-                    return Ok(Expr::Literal(Value::Class(class)));
-                }
-                return Err(self.err(
-                    class::CLASS_NOT_FOUND,
-                    sym.name().to_owned(),
-                    span,
-                    Verb::Compiling,
-                    None,
-                ));
-            }
+        // operator position shares this path (#120: dotted bare
+        // names resolve as classes or fail `CNFE`).
+        if let Some(expr) = self.analyze_symbol_class(sym, span, &cur)? {
+            return Ok(expr);
         }
         match sym.namespace() {
             // Aliases count as namespaces even when dangling
@@ -915,6 +898,39 @@ impl<'a> Analyzer<'a> {
             None => Err(self.err(
                 class::RUNTIME,
                 format!("Unable to resolve symbol: {sym} in this context"),
+                span,
+                Verb::Compiling,
+                None,
+            )),
+        }
+    }
+
+    /// Unqualified class-position resolve (split from
+    /// [`analyze_symbol`](Self::analyze_symbol) for the complexity
+    /// budget): imports, then dotted bare names as classes
+    /// (`ClassNotFoundException` when missing — oracles
+    /// `val-fq-String`, `bare-deftype`, `val-fq-missing`,
+    /// `val-dotdot`). `None` falls through to the namespace match.
+    fn analyze_symbol_class(
+        &self,
+        sym: &Symbol,
+        span: Span,
+        cur: &str,
+    ) -> Result<Option<Expr>, CompileError> {
+        if sym.namespace().is_some() {
+            return Ok(None);
+        }
+        if let Some(class) = crate::classemu::import_in(self.eval, cur, sym.name()) {
+            return Ok(Some(Expr::Literal(Value::Class(class))));
+        }
+        if !crate::classemu::is_class_position(sym.name()) {
+            return Ok(None);
+        }
+        match crate::classemu::resolve_class_name(self.eval, sym.name()) {
+            Some(class) => Ok(Some(Expr::Literal(Value::Class(class)))),
+            None => Err(self.err(
+                class::CLASS_NOT_FOUND,
+                sym.name().to_owned(),
                 span,
                 Verb::Compiling,
                 None,

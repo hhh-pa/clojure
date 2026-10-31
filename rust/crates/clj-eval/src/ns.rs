@@ -768,16 +768,29 @@ pub(crate) fn do_resolve(
         if let Some(class) = home.as_ref().and_then(|h| h.get_import(sym.name())) {
             return Ok(Value::Class(class));
         }
-        // #120: fully-qualified names resolve as classes like the
-        // analyzer (oracle `resolve-fq`); missing ones are nil
-        // (oracle `resolve-missing` — `resolve` never throws here).
-        if home.is_some() && crate::classemu::is_class_position(sym.name()) {
-            if let Some(class) = crate::classemu::resolve_class_name(eval, sym.name()) {
-                return Ok(Value::Class(class));
-            }
+        if let Some(class) = resolve_class_position(eval, home.as_ref(), sym) {
+            return Ok(Value::Class(class));
         }
     }
     Ok(Value::Nil)
+}
+
+/// FQ class-position resolve (split from [`do_resolve`] for the
+/// complexity budget, like [`env_shadows`]): dotted names resolve
+/// as classes like the analyzer (oracle `resolve-fq`); missing
+/// ones are nil (oracle `resolve-missing` — `resolve` never
+/// throws here).
+fn resolve_class_position(
+    eval: &Evaluator,
+    home: Option<&Namespace>,
+    sym: &Symbol,
+) -> Option<std::sync::Arc<clj_value::ClassVal>> {
+    let _ = home?;
+    if crate::classemu::is_class_position(sym.name()) {
+        crate::classemu::resolve_class_name(eval, sym.name())
+    } else {
+        None
+    }
 }
 
 /// Whether the `&env` argument shadows a resolve (split from
