@@ -6,7 +6,7 @@
 // the terms of this license.
 // You must not remove this notice, or any other, from this software.
 
-//! Gap-123 slice 1: `core.async` channels (blocking side only).
+//! Gap-123 slices 1–2: `core.async` channels (blocking side only).
 //!
 //! A [`Channel`] is a many-to-many rendezvous + buffer mailbox over
 //! one mutex: blocked takes/puts park on per-operation [`Waiter`]
@@ -20,17 +20,31 @@
 //! `close` wakes queued takers (one buffered value each, else nil)
 //! and leaves queued puts parked until a taker releases them.
 //!
+//! Slice 2 adds transducers: an [`Xform`] channel steps every put
+//! through `(xform conj)` (in `clj-eval`, which owns the evaluator;
+//! this crate only serializes the steps behind the xform gate).
+//! Filtered puts complete `true` without touching the mailbox;
+//! multi-emit puts park one [`Reg`] holding every emit; a `reduced`
+//! step aborts (queued puts complete `true`, the channel closes)
+//! once its emits are buffered or its putter is refilled; the
+//! completion arity runs at `close` (puts empty) and on every
+//! closed-with-empty take (oracle `g123-xform.clj`).
+//!
 //! Lock order is channel-then-waiter (completions run under the
 //! channel lock); waits hold only the waiter lock — no path takes
 //! them in the other order, and every op holds at most one channel
-//! lock at a time (like `do-alts`' one-mutex-at-a-time scan).
+//! lock at a time (like `do-alts`' one-mutex-at-a-time scan). The
+//! xform gate sits outside the channel lock (nothing takes the gate
+//! while holding the channel lock); stepping itself runs without
+//! either lock held, so a transducer that peeks at its own channel
+//! (`closed?`) cannot self-deadlock.
 
 use std::collections::VecDeque;
 use std::hash::Hasher;
 use std::sync::{Arc, Condvar, Mutex};
 
 use crate::Value;
-use crate::extension::ExtensionValue;
+use crate::extension::{ExtensionValue, ThrowClass, Throwable};
 use crate::value::next_identity_id;
 
 /// `impl/MAX-QUEUE-SIZE`: at most 1024 pending takes (resp. puts)
@@ -193,12 +207,19 @@ impl Waiter {
 }
 
 /// One queued registration: a take (`put_val: None`) or a put
-/// (`put_val: Some`) parked on `waiter` for op `op`.
+/// (`put_val: Some`) parked on `waiter` for op `op`. A transducer
+/// put parks its whole emit vector (`put_val` is the first emit,
+/// `rest` the remainder — `mapcat` can emit several values per
+/// put); `reduced` marks a put whose step returned `reduced`, so
+/// the refill that consumes it aborts the channel (the JVM steps
+/// queued puts at refill and aborts there).
 #[derive(Clone, Debug)]
 struct Reg {
     waiter: Arc<Waiter>,
     op: usize,
     put_val: Option<Value>,
+    rest: Vec<Value>,
+    reduced: bool,
 }
 
 impl Reg {
@@ -207,6 +228,8 @@ impl Reg {
             waiter: Arc::clone(waiter),
             op,
             put_val: None,
+            rest: Vec::new(),
+            reduced: false,
         }
     }
 
@@ -215,6 +238,22 @@ impl Reg {
             waiter: Arc::clone(waiter),
             op,
             put_val: Some(val),
+            rest: Vec::new(),
+            reduced: false,
+        }
+    }
+
+    /// Park a transducer put's non-empty emit vector (filtered puts
+    /// never park — they complete `true` outright).
+    fn put_many(waiter: &Arc<Waiter>, op: usize, emits: Vec<Value>, reduced: bool) -> Self {
+        let mut emits = emits.into_iter();
+        let first = emits.next().expect("parked puts carry a value");
+        Self {
+            waiter: Arc::clone(waiter),
+            op,
+            put_val: Some(first),
+            rest: emits.collect(),
+            reduced,
         }
     }
 }
@@ -231,7 +270,7 @@ pub enum OpReady<T> {
 
 /// What a queue attempt can fail with (mapped to JVM error text in
 /// `clj-eval`'s `async` module).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub enum ChanError {
     /// The 1025th pending take (`puts: false`) or put (`puts:
     /// true`) — `MAX-QUEUE-SIZE`.
@@ -239,8 +278,55 @@ pub enum ChanError {
     /// A sliding buffer of size 0 evicting from empty (the JVM
     /// crashes the same way — `LinkedList.removeLast`; its default
     /// ex-handler then swallows the trace and drops the value,
-    /// which the port surfaces as this error instead).
+    /// which the port surfaces as this error instead — except on
+    /// transducer channels, where the ex-handler path runs like
+    /// the JVM's `handle` and only a re-crash surfaces this).
     EmptyEvict,
+    /// A transducer step (or the ex-handler itself) threw: the
+    /// caller rethrows the throwable (an ex-handler throw escapes
+    /// `put!` on the JVM too).
+    XformThrow(Throwable),
+}
+
+/// One transducer-step request (slice 2): step an input, run the
+/// completion arity, or run the ex-handler path for a failed
+/// buffer add (the sliding-zero evict crash, which the JVM routes
+/// through `handle`).
+#[derive(Debug)]
+pub enum StepReq {
+    /// Step one put value (never nil — the caller rejects it first).
+    Input(Value),
+    /// Run the completion arity (close / closed-take flush).
+    Complete,
+    /// Run the ex-handler path for a buffer-add crash.
+    Failed(Throwable),
+}
+
+/// One transducer-step outcome: the emitted values (in order) and
+/// whether the step returned `reduced` (the ex-handler path never
+/// reduces — `handle` returns the buffer).
+#[derive(Debug)]
+pub struct StepOut {
+    /// The step's emitted values (an ex-handler replacement is a
+    /// single untransformed value, like the JVM's `handle`).
+    pub emits: Vec<Value>,
+    /// Whether the step returned `reduced` (abort once buffered).
+    pub reduced: bool,
+}
+
+/// A channel transducer (slice 2): the composed step fn (`(xform
+/// conj)`, built once at `chan`), the optional ex-handler (`None`
+/// prints and drops, like the JVM's default), and the gate that
+/// serializes steps (stateful transducers step atomically on the
+/// JVM's channel mutex; here the gate plays that role outside the
+/// channel lock — see the module docs).
+#[derive(Debug)]
+pub struct Xform {
+    /// The composed step fn.
+    pub step: Value,
+    /// The ex-handler, if any.
+    pub exh: Option<Value>,
+    gate: Mutex<()>,
 }
 
 /// The channel state behind the mutex.
@@ -286,7 +372,11 @@ impl ChanState {
     }
 
     /// Move queued putters' values into freed buffer room,
-    /// completing them (the take-path refill).
+    /// completing them (the take-path refill). A transducer putter
+    /// moves its whole emit vector at once (the JVM's `add!` never
+    /// checks `full?`, so refills overfill the same way); consuming
+    /// a `reduced` putter aborts (the JVM aborts when the refill
+    /// step returns `reduced`).
     fn refill(&mut self) {
         while self.refill_room() {
             let Some(reg) = self.next_putter() else {
@@ -296,25 +386,150 @@ impl ChanState {
                 .put_val
                 .clone()
                 .expect("put registration carries a value");
-            if reg.waiter.try_win(reg.op, Value::Bool(true)) {
+            // Flags, not nesting: a lost commit (a co-registered
+            // alt won elsewhere mid-refill) is race-only, so the
+            // branches below stay straight-line and every line
+            // runs on the common paths.
+            let won = reg.waiter.try_win(reg.op, Value::Bool(true));
+            let done = won && reg.reduced;
+            if won {
                 self.buf.push_back(val);
+                self.buf.extend(reg.rest);
+            }
+            if done {
+                self.abort_locked();
+                break;
             }
         }
     }
+
+    /// Abort: every queued put completes `true` and the channel
+    /// closes (the JVM's `abort`, minus its take-serving — takes
+    /// only ever queue behind an empty buffer, and every abort
+    /// site just buffered, so none are queued).
+    fn abort_locked(&mut self) {
+        for reg in self.puts.drain(..) {
+            reg.waiter.try_win(reg.op, Value::Bool(true));
+        }
+        self.closed = true;
+    }
+
+    /// Hand queued takers buffered values (one each, in order),
+    /// then nil to the rest (the close/abort serving).
+    fn serve_takes_all(&mut self) {
+        let takes: Vec<Reg> = self.takes.drain(..).collect();
+        for reg in takes {
+            // Peek-then-pop: a lost commit (a co-registered alt won
+            // elsewhere) leaves the buffered value for the next
+            // taker.
+            let val = self.buf.front().cloned().unwrap_or(Value::Nil);
+            if reg.waiter.try_win(reg.op, val) {
+                self.buf.pop_front();
+            }
+        }
+    }
+
+    /// Hand queued takers buffered values while any remain (a live
+    /// put's serving — unserved takers stay queued, like the JVM's
+    /// `pos?`-bounded take loop).
+    fn serve_takes_while_full(&mut self) {
+        while !self.buf.is_empty() {
+            let Some(reg) = self.next_taker() else {
+                break;
+            };
+            let val = self.buf.front().cloned().unwrap_or(Value::Nil);
+            if reg.waiter.try_win(reg.op, val) {
+                self.buf.pop_front();
+            }
+        }
+    }
+
+    /// Buffer one transducer emit, overfilling like the JVM's
+    /// `add!` (fixed pushes unconditionally; dropping keeps room;
+    /// sliding evicts; the unbuffered arm only serves unit tests —
+    /// `chan` forbids transducers without a buffer).
+    fn buffer_one_overfill(&mut self, val: Value) -> Result<(), ChanError> {
+        match self.kind {
+            Some((BufferKind::Fixed, _, _)) | None => {
+                self.buf.push_back(val);
+                Ok(())
+            }
+            Some((BufferKind::Dropping, cap, _)) => {
+                if (self.buf.len() as i64) < cap {
+                    self.buf.push_back(val);
+                }
+                Ok(())
+            }
+            Some((BufferKind::Sliding, cap, integral)) => {
+                if integral && self.buf.len() as i64 == cap {
+                    self.buf.pop_front().ok_or(ChanError::EmptyEvict)?;
+                }
+                self.buf.push_back(val);
+                Ok(())
+            }
+        }
+    }
+
+    /// Buffer a step's emits, routing a buffer-add crash through
+    /// the ex-handler path (the JVM's `handle`): the remaining
+    /// emits are discarded and the replacement (if any) buffers
+    /// directly — a re-crash escapes, like `handle`'s `add!`.
+    fn buffer_handled(
+        &mut self,
+        emits: Vec<Value>,
+        stepper: &mut dyn FnMut(StepReq) -> Result<StepOut, Throwable>,
+    ) -> Result<(), ChanError> {
+        for val in emits {
+            if self.buffer_one_overfill(val).is_err() {
+                let failed = StepReq::Failed(Throwable {
+                    id: next_identity_id(),
+                    class: ThrowClass::NoSuchElementException,
+                    message: None,
+                    data: None,
+                    cause: None,
+                });
+                let out = stepper(failed).map_err(ChanError::XformThrow)?;
+                for replacement in out.emits {
+                    self.buffer_one_overfill(replacement)?;
+                }
+                return Ok(());
+            }
+        }
+        Ok(())
+    }
 }
 
-/// A many-to-many channel (slice 1: blocking ops only — no
-/// transducers, no async callbacks).
+/// A many-to-many channel (blocking ops only — no async
+/// callbacks; slice 2 adds transducers via [`Channel::new_xform`]).
 #[derive(Debug)]
 pub struct Channel {
     id: u64,
     state: Mutex<ChanState>,
+    xform: Option<Xform>,
 }
 
 impl Channel {
     /// Mint a channel (`None` = unbuffered).
     #[must_use]
     pub fn new(buf: Option<&BufferDesc>) -> Self {
+        Self::build(buf, None)
+    }
+
+    /// Mint a transducer channel (`step` is `(xform conj)`, `exh`
+    /// the optional ex-handler).
+    #[must_use]
+    pub fn new_xform(buf: Option<&BufferDesc>, step: Value, exh: Option<Value>) -> Self {
+        Self::build(
+            buf,
+            Some(Xform {
+                step,
+                exh,
+                gate: Mutex::new(()),
+            }),
+        )
+    }
+
+    fn build(buf: Option<&BufferDesc>, xform: Option<Xform>) -> Self {
         Self {
             id: next_identity_id(),
             state: Mutex::new(ChanState {
@@ -324,7 +539,15 @@ impl Channel {
                 takes: VecDeque::new(),
                 puts: VecDeque::new(),
             }),
+            xform,
         }
+    }
+
+    /// The channel transducer, if any (the caller routes
+    /// transducer channels through the `*_xform` methods).
+    #[must_use]
+    pub fn xform(&self) -> Option<&Xform> {
+        self.xform.as_ref()
     }
 
     /// Whether the channel is closed.
@@ -344,16 +567,38 @@ impl Channel {
         }
         state.closed = true;
         state.sweep();
-        let takes: Vec<Reg> = state.takes.drain(..).collect();
-        for reg in takes {
-            // Peek-then-pop under the channel lock: a lost commit
-            // (a co-registered alt won elsewhere) leaves the
-            // buffered value for the next taker.
-            let val = state.buf.front().cloned().unwrap_or(Value::Nil);
-            if reg.waiter.try_win(reg.op, val) {
-                state.buf.pop_front();
+        state.serve_takes_all();
+    }
+
+    /// Close a transducer channel: the completion arity flushes
+    /// first (only with no puts queued — the JVM's
+    /// `(.isEmpty puts)` guard), then the takes are served (oracle
+    /// `p-*`, `c-*`). Idempotent.
+    pub fn close_xform(
+        &self,
+        stepper: &mut dyn FnMut(StepReq) -> Result<StepOut, Throwable>,
+    ) -> Result<(), ChanError> {
+        let xform = self
+            .xform
+            .as_ref()
+            .expect("close_xform on a channel without a transducer");
+        let generating = {
+            let mut state = self.state.lock().expect("channel lock");
+            if state.closed {
+                return Ok(());
             }
+            state.closed = true;
+            state.sweep();
+            state.puts.is_empty()
+        };
+        if generating {
+            let _gate = xform.gate.lock().expect("xform gate");
+            let out = stepper(StepReq::Complete).map_err(ChanError::XformThrow)?;
+            let mut state = self.state.lock().expect("channel lock");
+            state.buffer_handled(out.emits, stepper)?;
         }
+        self.state.lock().expect("channel lock").serve_takes_all();
+        Ok(())
     }
 
     /// One take attempt: drain the buffer (refilling from queued
@@ -444,6 +689,87 @@ impl Channel {
         }
         state.puts.push_back(Reg::put(waiter, op, val));
         Ok(OpReady::Queued)
+    }
+
+    /// One put attempt on a transducer channel: step the value
+    /// (serialized behind the gate, without the channel lock),
+    /// then buffer every emit (serving queued takers) or park the
+    /// emit vector behind a full fixed buffer. Filtered puts
+    /// complete `true` untouched; a `reduced` step aborts once its
+    /// emits buffer — or parks flagged, aborting at refill (the
+    /// JVM aborts when the refill step returns `reduced`, so puts
+    /// parked behind it still complete `true`; oracle `t-*`).
+    pub fn put_xform(
+        &self,
+        val: Value,
+        waiter: &Arc<Waiter>,
+        op: usize,
+        stepper: &mut dyn FnMut(StepReq) -> Result<StepOut, Throwable>,
+    ) -> Result<OpReady<bool>, ChanError> {
+        if self.is_closed() {
+            return Ok(OpReady::Ready(false));
+        }
+        let xform = self
+            .xform
+            .as_ref()
+            .expect("put_xform on a channel without a transducer");
+        let _gate = xform.gate.lock().expect("xform gate");
+        let out = stepper(StepReq::Input(val)).map_err(ChanError::XformThrow)?;
+        let mut state = self.state.lock().expect("channel lock");
+        state.sweep();
+        if state.closed {
+            return Ok(OpReady::Ready(false));
+        }
+        if out.emits.is_empty() {
+            return Ok(OpReady::Ready(true));
+        }
+        if Self::room_for_first(&state) {
+            state.buffer_handled(out.emits, stepper)?;
+            if out.reduced {
+                state.abort_locked();
+                state.serve_takes_all();
+            } else {
+                state.serve_takes_while_full();
+            }
+            Ok(OpReady::Ready(true))
+        } else {
+            if state.puts.len() >= MAX_QUEUE_SIZE {
+                return Err(ChanError::QueueFull { puts: true });
+            }
+            state
+                .puts
+                .push_back(Reg::put_many(waiter, op, out.emits, out.reduced));
+            Ok(OpReady::Queued)
+        }
+    }
+
+    /// Whether a fresh emit vector buffers outright (fixed needs
+    /// room — otherwise the put parks; windowed buffers never
+    /// park; the unbuffered arm only serves unit tests).
+    fn room_for_first(state: &ChanState) -> bool {
+        match state.kind {
+            Some((BufferKind::Fixed, cap, _)) => (state.buf.len() as i64) < cap,
+            Some(_) => true,
+            None => false,
+        }
+    }
+
+    /// Finish a take that found a closed transducer channel empty:
+    /// run the completion arity and pop what it flushed (the JVM
+    /// runs `(add! buf)` on every such take; oracle `c-flush`).
+    pub fn complete_closed(
+        &self,
+        stepper: &mut dyn FnMut(StepReq) -> Result<StepOut, Throwable>,
+    ) -> Result<Option<Value>, ChanError> {
+        let xform = self
+            .xform
+            .as_ref()
+            .expect("complete_closed on a channel without a transducer");
+        let _gate = xform.gate.lock().expect("xform gate");
+        let out = stepper(StepReq::Complete).map_err(ChanError::XformThrow)?;
+        let mut state = self.state.lock().expect("channel lock");
+        state.buffer_handled(out.emits, stepper)?;
+        Ok(state.buf.pop_front())
     }
 }
 
@@ -837,7 +1163,7 @@ mod tests {
         wait_depth(&ch, MAX_QUEUE_SIZE, true);
         let w = Arc::new(Waiter::new());
         let err = ch.take_one(&w, 0).unwrap_err();
-        assert_eq!(err, ChanError::QueueFull { puts: false });
+        assert!(matches!(err, ChanError::QueueFull { puts: false }));
         ch.close();
         for t in threads {
             t.join().expect("joined");
@@ -869,7 +1195,7 @@ mod tests {
         wait_depth(&ch, MAX_QUEUE_SIZE, false);
         let w = Arc::new(Waiter::new());
         let err = ch.put_one(Value::Int(-1), &w, 0).unwrap_err();
-        assert_eq!(err, ChanError::QueueFull { puts: true });
+        assert!(matches!(err, ChanError::QueueFull { puts: true }));
         ch.close();
         for _ in 0..MAX_QUEUE_SIZE {
             assert!(matches!(take_now(&ch), TakeProbe::Got(_)));
@@ -950,5 +1276,108 @@ mod tests {
             buf.class_name(),
             "clojure.core.async.impl.buffers.SlidingBuffer"
         );
+    }
+
+    /// A canned stepper: inputs echo, completion flushes 99, the
+    /// ex-handler path drops (every arm runs across the xform
+    /// unit tests below).
+    fn echo_stepper(req: StepReq) -> Result<StepOut, Throwable> {
+        match req {
+            StepReq::Input(v) => Ok(StepOut {
+                emits: vec![v],
+                reduced: false,
+            }),
+            StepReq::Complete => Ok(StepOut {
+                emits: vec![Value::Int(99)],
+                reduced: false,
+            }),
+            StepReq::Failed(_) => Ok(StepOut {
+                emits: Vec::new(),
+                reduced: false,
+            }),
+        }
+    }
+
+    /// A stepper that always throws (an ex-handler throw escapes
+    /// the op on the JVM too).
+    fn throw_stepper(_req: StepReq) -> Result<StepOut, Throwable> {
+        Err(Throwable {
+            id: next_identity_id(),
+            class: ThrowClass::ExceptionInfo,
+            message: Some(Arc::from("from-exh")),
+            data: None,
+            cause: None,
+        })
+    }
+
+    /// The `None`-buffer transducer shape (`chan` forbids it, so
+    /// only unit tests pin it): puts park, takes rendezvous, and
+    /// completion buffers through the unbuffered arm.
+    #[test]
+    fn xform_none_parks_and_completes() {
+        let ch = Channel::new_xform(None, Value::Nil, None);
+        let w = Arc::new(Waiter::new());
+        assert!(matches!(
+            ch.put_xform(Value::Int(1), &w, 0, &mut echo_stepper),
+            Ok(OpReady::Queued)
+        ));
+        assert_take_int(&ch, 1);
+        assert!(w.wait().is_some());
+        let flushed = ch.complete_closed(&mut echo_stepper).expect("complete");
+        assert!(matches!(flushed, Some(Value::Int(n)) if n == 99));
+    }
+
+    /// A buffer-add crash routes through the ex-handler path (the
+    /// sliding-zero evict drops the value, like the JVM's
+    /// `handle` with a nil result).
+    #[test]
+    fn xform_evict_routes_failed() {
+        let buf = sliding(0, true);
+        let ch = Channel::new_xform(Some(&buf), Value::Nil, None);
+        let w = Arc::new(Waiter::new());
+        assert!(matches!(
+            ch.put_xform(Value::Int(1), &w, 0, &mut echo_stepper),
+            Ok(OpReady::Ready(true))
+        ));
+        assert!(matches!(take_now(&ch), TakeProbe::WouldBlock));
+    }
+
+    /// A stepper throw surfaces as `XformThrow` (the caller
+    /// rethrows it).
+    #[test]
+    fn xform_throw_propagates() {
+        let buf = fixed(1);
+        let ch = Channel::new_xform(Some(&buf), Value::Nil, None);
+        let w = Arc::new(Waiter::new());
+        assert!(matches!(
+            ch.put_xform(Value::Int(1), &w, 0, &mut throw_stepper),
+            Err(ChanError::XformThrow(_))
+        ));
+    }
+
+    /// A transducer put past a full queue errors `QueueFull`
+    /// (the bound counts parked puts, like the JVM's).
+    #[test]
+    fn xform_parked_put_bound() {
+        let buf = fixed(1);
+        let ch = Channel::new_xform(Some(&buf), Value::Nil, None);
+        let w0 = Arc::new(Waiter::new());
+        assert!(matches!(
+            ch.put_xform(Value::Int(0), &w0, 0, &mut echo_stepper),
+            Ok(OpReady::Ready(true))
+        ));
+        {
+            let mut state = ch.state.lock().expect("channel lock");
+            for i in 0..MAX_QUEUE_SIZE {
+                state
+                    .puts
+                    .push_back(Reg::put(&Arc::new(Waiter::new()), 0, Value::Int(i as i64)));
+            }
+        }
+        let w = Arc::new(Waiter::new());
+        assert!(matches!(
+            ch.put_xform(Value::Int(-1), &w, 0, &mut echo_stepper),
+            Err(ChanError::QueueFull { puts: true })
+        ));
     }
 }
