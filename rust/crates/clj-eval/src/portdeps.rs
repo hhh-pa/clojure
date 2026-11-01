@@ -241,7 +241,27 @@ fn canonical_path_str(base: Option<&str>, path: &str) -> String {
         }
     }
     let out = std::fs::canonicalize(&prefix).unwrap_or(prefix);
-    join_tail(out, &tail).to_string_lossy().into_owned()
+    let joined = join_tail(out, &tail).to_string_lossy().into_owned();
+    strip_verbatim_prefix(&joined)
+}
+
+/// Strip Rust's Windows verbatim prefix (`\\?\`) from a
+/// canonical path (gap-124 slice 3, review round 2): the JVM's
+/// canonical path never carries one, and verbatim form forbids
+/// the `/` joins downstream (`child-path` builds
+/// `\\?\C:\…/deps.edn`, which Windows rejects — manifest lookup
+/// fails). `\\?\C:\…` → `C:\…`, `\\?\UNC\s\…` → `\\s\…`;
+/// anything else passes through untouched (so Unix behavior is
+/// identical). Pure string fn, covered on every platform.
+fn strip_verbatim_prefix(s: &str) -> String {
+    let Some(rest) = s.strip_prefix(r"\\?\") else {
+        return s.to_owned();
+    };
+    if let Some(unc) = rest.strip_prefix(r"UNC\") {
+        format!(r"\\{unc}")
+    } else {
+        rest.to_owned()
+    }
 }
 
 /// Rejoin a missing tail (leaf-first) onto its canonical
@@ -403,5 +423,30 @@ pub(crate) fn install_port_ns(eval: &mut Evaluator) {
     for (name, f) in PORT_NATIVES {
         let func: Arc<crate::ext::NativeImpl> = Arc::new(*f);
         eval.install_native(PORT_NS, name, func);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::strip_verbatim_prefix;
+
+    #[test]
+    fn verbatim_prefix_strips_to_plain_paths() {
+        // Disk-verbatim and UNC-verbatim collapse to the JVM
+        // shapes; everything else passes through (Unix paths
+        // never carry the prefix).
+        assert_eq!(
+            strip_verbatim_prefix(r"\\?\C:\Users\a"),
+            r"C:\Users\a".to_owned()
+        );
+        assert_eq!(
+            strip_verbatim_prefix(r"\\?\UNC\srv\share\d"),
+            r"\\srv\share\d".to_owned()
+        );
+        assert_eq!(
+            strip_verbatim_prefix(r"C:\Users\a"),
+            r"C:\Users\a".to_owned()
+        );
+        assert_eq!(strip_verbatim_prefix("/tmp/x"), "/tmp/x".to_owned());
     }
 }

@@ -149,7 +149,10 @@ positive long), `path-separator` (0-arity → `":"`/`";"`), `thread-id`
   `(jio/file root ensure)` → `child-path` join, `.exists` →
   `file-exists?`, `.getAbsolutePath` ∘ canonicalize →
   `dir/canonicalize` (already absolute), `(jio/file (or dir "."))`
-  → `(or dir ".")`.
+  → `(or dir ".")`. Rust's Windows verbatim prefix (`\\?\`) is
+  stripped in `canonical-path` (review round 2: verbatim form
+  forbids the `/` joins, breaking manifest lookup; the JVM never
+  emits it).
 - C13 Type hints dropped (no classes); `{:deprecated}` and
   `:arglists` metadata kept.
 - C14 Extension `load` → `:require` (`local`/`git`/`deps` only).
