@@ -33,7 +33,7 @@ use inkwell::builder::Builder;
 use inkwell::context::Context;
 use inkwell::module::Module;
 use inkwell::types::BasicMetadataTypeEnum;
-use inkwell::types::{FloatType, IntType, PointerType};
+use inkwell::types::{BasicTypeEnum, FloatType, IntType, PointerType};
 use inkwell::values::{BasicMetadataValueEnum, FunctionValue, IntValue, PointerValue};
 
 /// Prims in discriminant order (index `== prim as usize`;
@@ -358,41 +358,36 @@ impl<'ctx> Lower<'ctx> {
         value
     }
 
-    /// Pack lowered arguments into an array for a helper call
-    /// (always at least one slot — zero-length allocas are
-    /// avoided even for empty calls).
+    /// Pack lowered arguments into a uniform-pointer struct for
+    /// a helper call (always at least one slot — zero-length
+    /// allocas are avoided even for empty calls). The struct has
+    /// identical layout to `[ptr x N]` (zero padding), so element
+    /// addresses match the array form exactly; struct GEP is the
+    /// only safe GEP builder in inkwell 0.10.
     fn pack_args(
         &mut self,
         func: FunctionValue<'ctx>,
         slots: &[PointerValue<'ctx>],
         args: &[SubsetExpr],
     ) -> (PointerValue<'ctx>, IntValue<'ctx>) {
-        let array_ty = self.ptr.array_type(args.len().max(1) as u32);
-        let array = self
+        let fields: Vec<BasicTypeEnum> = vec![self.ptr.into(); args.len().max(1)];
+        let struct_ty = self.ctx.struct_type(&fields, false);
+        let argv = self
             .builder
-            .build_alloca(array_ty, "argv")
+            .build_alloca(struct_ty, "argv")
             .expect("alloca argv");
-        let zero = self.i32t.const_zero();
         for (i, arg) in args.iter().enumerate() {
             let value = self.lower_expr(func, slots, arg);
-            // Safety: index `i` is in bounds (`i < args.len()`).
-            let slot = unsafe {
-                self.builder.build_in_bounds_gep(
-                    array_ty,
-                    array,
-                    &[zero, self.i32t.const_int(i as u64, false)],
-                    "arg",
-                )
-            }
-            .expect("gep");
+            let slot = self
+                .builder
+                .build_struct_gep(struct_ty, argv, i as u32, "arg")
+                .expect("gep");
             self.builder.build_store(slot, value).expect("store arg");
         }
-        // Safety: the base element always exists (`max(1)` slot).
-        let base = unsafe {
-            self.builder
-                .build_in_bounds_gep(array_ty, array, &[zero, zero], "argv0")
-        }
-        .expect("gep");
+        let base = self
+            .builder
+            .build_struct_gep(struct_ty, argv, 0, "argv0")
+            .expect("gep");
         (base, self.i64t.const_int(args.len() as u64, false))
     }
 
