@@ -149,15 +149,13 @@ follow the `spec_alpha.clj` file header)
   (`(quot % 2)` in `container-type` is exact).
 - `coll-distinct-by` ports without the ordered/duplicate arms (only `set`/`map`
   use it in F1; `the-shuffle-fn` and the `allows-dupes?`/`ordered?` params move
-  with `vector-distinct` to F-remainder). Its option defaults use a merged
-  default map (like `such-that`) instead of upstream's arglist `:or`: the port
-  miscompiles calls to `:or`-defaulted fn bindings (pre-existing bug —
-  `(let [{:keys [e] :or {e (fn [m] …)}} …] (e x))` passes the callee as its own
-  first arg), so upstream's `:or` shape is avoided for fns. Untouched by F1
-  beyond the workaround; the port bug itself is out of slice scope
-  (tracked as #171). Wontfix while #171 is open: explicit-nil opts
-  (e.g. `{:max-tries nil}`) are not normalized to defaults as
-  upstream's `:or` would — pathological input only.
+  with `vector-distinct` to F-remainder). Its option defaults use upstream's
+  arglist `:or` verbatim (`:or {max-tries 10, ex-fn …}`); F1 originally merged
+  a default map instead to dodge the `:or`-defaulted-fn-binding port bug
+  (#171, since fixed: `:or` defaults now evaluate against the pre-extension
+  frame on every bind path). Explicit-nil opts (e.g. `{:max-tries nil}`)
+  behave exactly as upstream — `get` keeps explicit nil on both sides, so no
+  normalization either way (pathological input only).
 - `sample`/`sample-seq` keep the size-cycling shape (`(cycle (range 0 200))`,
   `generators.cljc:143-180`); `sample` keeps its assert, `generate` keeps its
   3 arities (default size 30) and no assert, as upstream.
