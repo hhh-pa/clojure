@@ -175,9 +175,10 @@ Slice 1: this directory's `g123-*.clj` / `g123-*.out` (below
 `xform`) + `channel.rs` + `async.rs` + the `require` hook in
 `load_one`. Slice 2 (`slice-2.md` + `g123-xform.*`) adds
 channel transducers (`chan` xform/ex-handler arities).
+Slice 3 (`slice-3.md` + `g123-go.*` + `g123-goalt.*`) adds
+`go`/`go-loop` (thread-per-block), parking `<!`/`>!`/
+`alt!`/`alts!`, and the blocking `alt!!`.
 Still to do: promise-buffers, `put!`/`take!` callbacks +
-the dispatch executor, `timeout`/`thread`, `go`/`go-loop`
-(state-machine compilation), parking `<!`/`>!`/`alt!`/
-`alts!`, `offer!`/`poll!`, `pipeline`/`merge`/`mix`/
-`pub-sub`, and docstring/arglist metadata on the async
-vars.
+the dispatch executor, `timeout`/`thread`, `offer!`/
+`poll!`, `pipeline`/`merge`/`mix`/`pub-sub`, and
+docstring/arglist metadata on the async vars.

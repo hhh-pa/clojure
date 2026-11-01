@@ -1,0 +1,142 @@
+s-take => [:ready true]
+s-put => [true true :v]
+s-closed => [nil true]
+s-put-closed => [false true]
+s-default => [:d :default]
+s-default-nil => [nil :default]
+s-ready-beats-default => [:ready true]
+s-priority => [:first true]
+s-priority-rev => [:second true]
+s-woken => [:late true]
+s-put-woken => [:pv true true]
+s-set => [:in-set true]
+s-unknown-opt => [:x true]
+s-default-expr => [:dflt :default]
+t-take => [:got :ready]
+t-put => :wrote
+t-multi => [:got :second true]
+t-bind => [:v true]
+t-default => 42
+t-priority => :first
+t-nested-take => :v2
+t-putval-take => :x
+t-putval-took => :dv
+t-default-take => :d
+t-outside => THROW java.lang.AssertionError | "Assert failed: alts! used not in (go ...) block\nnil"
+t-unbalanced => THROW clojure.lang.Compiler$CompilerException | "Unexpected error macroexpanding a/alt! at (docs/gap-123/g123-goalt.clj:94:33)."
+u-take => [:got :ready]
+u-put => [:wrote :v]
+u-multi => [:got :second true]
+u-bind => [:v true]
+u-default => 42
+u-priority => :first
+u-dup-default => 2
+u-mixed => [:got :v true]
+u-badport => THROW java.lang.IllegalArgumentException | "No implementation of method: :take! of protocol: #'clojure.core.async.impl.protocols/ReadPort found for class: java.lang.Long"
+u-unbalanced => THROW clojure.lang.Compiler$CompilerException | "Unexpected error macroexpanding a/alt!! at (docs/gap-123/g123-goalt.clj:119:33)."
+u-empty-default => THROW java.lang.AssertionError | "Assert failed: alts must have at least one channel operation\n(pos? (count ports))"
+l-drain => [:a :b :c]
+l-count => 15
+l-single => [:got :only]
+Exception in thread "async-io-N" java.lang.AssertionError: Assert failed: alts must have at least one channel operation
+(pos? (count ports))
+	at clojure.core.async$do_alts.invokeStatic(async.clj:299)
+	at clojure.core.async$do_alts.invoke(async.clj:296)
+	at clojure.core.async$ioc_alts_BANG_.invokeStatic(async.clj:450)
+	at clojure.core.async$ioc_alts_BANG_.doInvoke(async.clj:448)
+	at clojure.lang.RestFn.invoke(RestFn.java:448)
+	at user$eval11053$fn__11059$state_machine__6914__auto____11060$fn__11062.invoke(g123-goalt.clj:133)
+	at user$eval11053$fn__11059$state_machine__6914__auto____11060.invoke(g123-goalt.clj:133)
+	at clojure.core.async.impl.ioc_macros$run_state_machine.invokeStatic(ioc_macros.clj:58)
+	at clojure.core.async.impl.ioc_macros$run_state_machine.invoke(ioc_macros.clj:57)
+	at clojure.core.async.impl.ioc_macros$run_state_machine_wrapped.invokeStatic(ioc_macros.clj:62)
+	at clojure.core.async.impl.ioc_macros$run_state_machine_wrapped.invoke(ioc_macros.clj:60)
+	at user$eval11053$fn__11059.invoke(g123-goalt.clj:133)
+	at clojure.lang.AFn.run(AFn.java:22)
+	at java.base/java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1090)
+	at java.base/java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:614)
+	at java.base/java.lang.Thread.run(Thread.java:1527)
+s-empty => [nil true]
+Exception in thread "async-io-N" java.lang.AssertionError: Assert failed: can't put nil on channel
+(some? (port 1))
+	at clojure.core.async$do_alts$fn__7092.invoke(async.clj:307)
+	at clojure.core.async$do_alts.invokeStatic(async.clj:303)
+	at clojure.core.async$do_alts.invoke(async.clj:296)
+	at clojure.core.async$ioc_alts_BANG_.invokeStatic(async.clj:450)
+	at clojure.core.async$ioc_alts_BANG_.doInvoke(async.clj:448)
+	at clojure.lang.RestFn.invoke(RestFn.java:448)
+	at user$eval11078$fn__11088$state_machine__6914__auto____11091$fn__11093.invoke(g123-goalt.clj:137)
+	at user$eval11078$fn__11088$state_machine__6914__auto____11091.invoke(g123-goalt.clj:137)
+	at clojure.core.async.impl.ioc_macros$run_state_machine.invokeStatic(ioc_macros.clj:58)
+	at clojure.core.async.impl.ioc_macros$run_state_machine.invoke(ioc_macros.clj:57)
+	at clojure.core.async.impl.ioc_macros$run_state_machine_wrapped.invokeStatic(ioc_macros.clj:62)
+	at clojure.core.async.impl.ioc_macros$run_state_machine_wrapped.invoke(ioc_macros.clj:60)
+	at user$eval11078$fn__11088.invoke(g123-goalt.clj:137)
+	at clojure.lang.AFn.run(AFn.java:22)
+	at java.base/java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1090)
+	at java.base/java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:614)
+	at java.base/java.lang.Thread.run(Thread.java:1527)
+s-nil-put => [nil true]
+Exception in thread "async-io-N" java.lang.IllegalArgumentException: No implementation of method: :take! of protocol: #'clojure.core.async.impl.protocols/ReadPort found for class: java.lang.Long
+	at clojure.core$_cache_protocol_fn.invokeStatic(core_deftype.clj:598)
+	at clojure.core$_cache_protocol_fn.invoke(core_deftype.clj:590)
+	at clojure.core.async.impl.protocols$eval148$fn__149$G__139__156.invoke(protocols.clj:15)
+	at clojure.core.async$do_alts$fn__7094.invoke(async.clj:320)
+	at clojure.core.async$do_alts.invokeStatic(async.clj:312)
+	at clojure.core.async$do_alts.invoke(async.clj:296)
+	at clojure.core.async$ioc_alts_BANG_.invokeStatic(async.clj:450)
+	at clojure.core.async$ioc_alts_BANG_.doInvoke(async.clj:448)
+	at clojure.lang.RestFn.invoke(RestFn.java:448)
+	at user$eval11109$fn__11115$state_machine__6914__auto____11116$fn__11118.invoke(g123-goalt.clj:141)
+	at user$eval11109$fn__11115$state_machine__6914__auto____11116.invoke(g123-goalt.clj:141)
+	at clojure.core.async.impl.ioc_macros$run_state_machine.invokeStatic(ioc_macros.clj:58)
+	at clojure.core.async.impl.ioc_macros$run_state_machine.invoke(ioc_macros.clj:57)
+	at clojure.core.async.impl.ioc_macros$run_state_machine_wrapped.invokeStatic(ioc_macros.clj:62)
+	at clojure.core.async.impl.ioc_macros$run_state_machine_wrapped.invoke(ioc_macros.clj:60)
+	at user$eval11109$fn__11115.invoke(g123-goalt.clj:141)
+	at clojure.lang.AFn.run(AFn.java:22)
+	at java.base/java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1090)
+	at java.base/java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:614)
+	at java.base/java.lang.Thread.run(Thread.java:1527)
+s-nonchan => [nil true]
+Exception in thread "async-io-N" java.lang.IllegalArgumentException: contains? not supported on type: clojure.lang.Keyword
+	at clojure.lang.RT.contains(RT.java:848)
+	at clojure.core$contains_QMARK_.invokeStatic(core.clj:1513)
+	at clojure.core$contains_QMARK_.invoke(core.clj:1505)
+	at clojure.core.async$do_alts.invokeStatic(async.clj:326)
+	at clojure.core.async$do_alts.invoke(async.clj:296)
+	at clojure.core.async$ioc_alts_BANG_.invokeStatic(async.clj:450)
+	at clojure.core.async$ioc_alts_BANG_.doInvoke(async.clj:448)
+	at clojure.lang.RestFn.invoke(RestFn.java:470)
+	at user$eval11134$fn__11144$state_machine__6914__auto____11147$fn__11149.invoke(g123-goalt.clj:145)
+	at user$eval11134$fn__11144$state_machine__6914__auto____11147.invoke(g123-goalt.clj:145)
+	at clojure.core.async.impl.ioc_macros$run_state_machine.invokeStatic(ioc_macros.clj:58)
+	at clojure.core.async.impl.ioc_macros$run_state_machine.invoke(ioc_macros.clj:57)
+	at clojure.core.async.impl.ioc_macros$run_state_machine_wrapped.invokeStatic(ioc_macros.clj:62)
+	at clojure.core.async.impl.ioc_macros$run_state_machine_wrapped.invoke(ioc_macros.clj:60)
+	at user$eval11134$fn__11144.invoke(g123-goalt.clj:145)
+	at clojure.lang.AFn.run(AFn.java:22)
+	at java.base/java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1090)
+	at java.base/java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:614)
+	at java.base/java.lang.Thread.run(Thread.java:1527)
+s-odd-opts => [nil true]
+Exception in thread "async-io-N" java.lang.AssertionError: Assert failed: alts must have at least one channel operation
+(pos? (count ports))
+	at clojure.core.async$do_alts.invokeStatic(async.clj:299)
+	at clojure.core.async$do_alts.invoke(async.clj:296)
+	at clojure.core.async$ioc_alts_BANG_.invokeStatic(async.clj:450)
+	at clojure.core.async$ioc_alts_BANG_.doInvoke(async.clj:448)
+	at clojure.lang.RestFn.invoke(RestFn.java:497)
+	at user$eval11165$fn__11183$state_machine__6914__auto____11184$fn__11186.invoke(g123-goalt.clj:149)
+	at user$eval11165$fn__11183$state_machine__6914__auto____11184.invoke(g123-goalt.clj:149)
+	at clojure.core.async.impl.ioc_macros$run_state_machine.invokeStatic(ioc_macros.clj:58)
+	at clojure.core.async.impl.ioc_macros$run_state_machine.invoke(ioc_macros.clj:57)
+	at clojure.core.async.impl.ioc_macros$run_state_machine_wrapped.invokeStatic(ioc_macros.clj:62)
+	at clojure.core.async.impl.ioc_macros$run_state_machine_wrapped.invoke(ioc_macros.clj:60)
+	at user$eval11165$fn__11183.invoke(g123-goalt.clj:149)
+	at clojure.lang.AFn.run(AFn.java:22)
+	at java.base/java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1090)
+	at java.base/java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:614)
+	at java.base/java.lang.Thread.run(Thread.java:1527)
+t-empty-default => [nil true]
+done => :done
