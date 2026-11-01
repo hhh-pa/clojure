@@ -239,8 +239,16 @@ fn file_uri_percent_edges() {
     write_bytes(&dir, "a~", b"tilde\n");
     write_bytes(&dir, "aAb", b"mix\n");
     let mut eval = jio();
-    for (name, want) in [("a%7e", "[\"tilde\"]"), ("a%7E", "[\"tilde\"]"), ("a%41b", "[\"mix\"]")] {
-        let url = format!("file://{}/{}", dir.to_string_lossy().replace('\\', "/"), name);
+    for (name, want) in [
+        ("a%7e", "[\"tilde\"]"),
+        ("a%7E", "[\"tilde\"]"),
+        ("a%41b", "[\"mix\"]"),
+    ] {
+        let url = format!(
+            "file://{}/{}",
+            dir.to_string_lossy().replace('\\', "/"),
+            name
+        );
         assert_eq!(
             run(
                 &mut eval,
@@ -1417,7 +1425,9 @@ fn stream_identity() {
     assert_eq!(
         run(
             &mut eval,
-            &format!("(let [s (io/input-stream {lit})] [(= s s) (= s (io/input-stream {lit})) (= s 1) (integer? (hash s))])")
+            &format!(
+                "(let [s (io/input-stream {lit})] [(= s s) (= s (io/input-stream {lit})) (= s 1) (integer? (hash s))])"
+            )
         ),
         "[true false false true]"
     );
@@ -1425,7 +1435,11 @@ fn stream_identity() {
     assert_eq!(
         run(
             &mut eval,
-            &format!("(let [s (io/output-stream {})] [(= s s) (= s (io/output-stream {})) (= s 1) (integer? (hash s))])", clj_str(&q), clj_str(&q))
+            &format!(
+                "(let [s (io/output-stream {})] [(= s s) (= s (io/output-stream {})) (= s 1) (integer? (hash s))])",
+                clj_str(&q),
+                clj_str(&q)
+            )
         ),
         "[true false false true]"
     );
