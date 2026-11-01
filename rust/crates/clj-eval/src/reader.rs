@@ -950,7 +950,11 @@ fn run_read(
                 }
             }
             Err(e) => {
-                if let Some(err) = finish_err_attempt(
+                // `Err` shares the `Some` arm (100% line gate: a
+                // lone `?` line would be uncoverable — `next_chunk`
+                // fails only on live-stdin IO, which tests never
+                // drive; same or-merge as `read_form`'s EOF arms).
+                match finish_err_attempt(
                     eval,
                     reader,
                     parser,
@@ -958,8 +962,9 @@ fn run_read(
                     &e,
                     recursive,
                     opts.suppress_read,
-                )? {
-                    return Err(err);
+                ) {
+                    Ok(Some(err)) | Err(err) => return Err(err),
+                    Ok(None) => { /* retry */ }
                 }
             }
         }
