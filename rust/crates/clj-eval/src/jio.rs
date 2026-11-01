@@ -284,6 +284,22 @@ fn as_file_miss(v: &Value) -> NativeError {
     )
 }
 
+/// Java `File.isAbsolute`: Rust's `is_absolute` under-reports on
+/// Windows (a rooted-but-driveless `/abs` has no drive prefix, yet
+/// Java counts any prefix — drive, UNC, or bare slash). Windows
+/// checks prefix-or-root; anywhere else the two agree.
+#[cfg(windows)]
+fn file_is_absolute(path: &str) -> bool {
+    let p = std::path::Path::new(path);
+    matches!(p.components().next(), Some(std::path::Component::Prefix(_))) || p.has_root()
+}
+
+/// Unix: Rust and Java agree (leading slash).
+#[cfg(not(windows))]
+fn file_is_absolute(path: &str) -> bool {
+    std::path::Path::new(path).is_absolute()
+}
+
 /// Upstream `as-relative-path`: nil hits the `isAbsolute` NPE
 /// (the `check_file_root` shape), absolute paths the IAE,
 /// otherwise the path itself.
@@ -293,7 +309,7 @@ fn as_relative_path(v: &Value) -> Result<String, NativeError> {
             ThrowClass::NullPointerException,
             "Cannot invoke \"java.io.File.isAbsolute()\" because \"f\" is null".to_owned(),
         )),
-        Some(path) if std::path::Path::new(&path).is_absolute() => Err(NativeError::new(
+        Some(path) if file_is_absolute(&path) => Err(NativeError::new(
             ThrowClass::IllegalArgumentException,
             format!("{path} is not a relative path"),
         )),
