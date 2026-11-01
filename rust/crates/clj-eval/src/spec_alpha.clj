@@ -86,6 +86,14 @@
 ;; docs/gap-122/slice-F2.md). Records carry the upstream `gfn`
 ;; (Or/Multi/Map also the `id`); `-impl` ctors keep short arities
 ;; delegating with nil `gfn`, as upstream.
+;;
+;; gap-122 slice FDEF (finale; see docs/gap-122/slice-fdef.md)
+;; appends `*fspec-iterations*`, `call-valid?`/`validate-fn`, the
+;; `FspecSpec` record + `fspec-impl`, the `fspec`/`fdef` macros,
+;; `macroexpand-check` (plain fn, no compiler hook), the
+;; `int-in`/`inst-in`/`double-in` range specs, and the assert
+;; family (`*compile-asserts*`, `*check-asserts*`,
+;; `check-asserts?`/`check-asserts`, `assert*`, `assert`).
 (ns clojure.spec.alpha
   "The spec library specifies the structure of data or functions and provides
   operations to validate, conform, explain, describe, and generate data based on
@@ -2128,4 +2136,340 @@ if value does not match spec, else the (possibly destructured) value."
 
                 :else [(fn [coll] (empty (c/or conform-into coll))) addcv identity]))]
     (->EverySpec form pred opts spec kfn cfns gfn))))
+
+;; ---- gap-122 slice FDEF (finale): fspec/fdef/assert/ranges ----
+;; (see docs/gap-122/slice-fdef.md). Appended below the slice-B/F2
+;; code; nothing above changes. `exercise-fn` (F2) now resolves
+;; real fspecs, closing F2 divergence 5.
+
+;; Upstream alpha.clj 32-34. (Recon §1a says 100; the oracle text
+;; says 21 — pinned here.)
+(def ^:dynamic *fspec-iterations*
+  "The number of times an anonymous fn specified by fspec will be (generatively) tested during conform"
+  21)
+
+;; Upstream alpha.clj 1726-1734.
+(defn- call-valid?
+  [f specs args]
+  (let [cargs (conform (:args specs) args)]
+    (when-not (invalid? cargs)
+      (let [ret (apply f args)
+            cret (conform (:ret specs) ret)]
+        (c/and (not (invalid? cret))
+               (if (:fn specs)
+                 (pvalid? (:fn specs) {:args cargs :ret cret})
+                 true))))))
+
+;; Upstream alpha.clj 1735-1744. The `gen/for-all*` +
+;; `gen/quick-check` + `:shrunk :smallest` shape becomes a
+;; first-failure-wins loop over `gen/sample`: the port has no rose
+;; trees, so nothing shrinks (slice-fdef divergence 1).
+(defn- validate-fn
+  "returns f if valid, else smallest"
+  [f specs iters]
+  (loop [samples (gen/sample (gen (:args specs)) iters)]
+    (if (empty? samples)
+      f
+      (if (call-valid? f specs (first samples))
+        (recur (rest samples))
+        (first samples)))))
+
+;; Upstream alpha.clj 1745-1793. The upstream `reify` (`ILookup` +
+;; `Specize` + `Spec`) becomes a record: the fields are named
+;; `args`/`ret`/`fn` so keyword lookup answers exactly like the
+;; reify's `valAt` (`(:args fspec)` etc.), and records carry the
+;; metadata `with-name` needs.
+(defrecord FspecSpec [args aform ret rform fn fform gfn])
+
+;; Upstream alpha.clj 1745-1747. Defined before the `extend-type`
+;; (it only needs the record constructor) so no forward `declare`
+;; is required.
+(defn ^:skip-wiki fspec-impl
+  "Do not call this directly, use 'fspec'"
+  [argspec aform retspec rform fnspec fform gfn]
+  (->FspecSpec argspec aform retspec rform fnspec fform gfn))
+
+(extend-type FspecSpec
+  Spec
+  (conform* [this f]
+    (if (:args this)
+      (if (ifn? f)
+        (if (identical? f (validate-fn f this *fspec-iterations*))
+          f
+          :clojure.spec.alpha/invalid)
+        :clojure.spec.alpha/invalid)
+      (throw (ex-info (str "Can't conform fspec without args spec: " (pr-str (describe this))) {}))))
+  (unform* [_ f] f)
+  (explain* [this path via in f]
+    (if (ifn? f)
+      (let [args (validate-fn f this 100)]
+        (if (identical? f args)
+          nil
+          (let [ret (try (apply f args) (catch Throwable t t))]
+            (if (instance? Throwable ret)
+              [{:path path :pred '(apply fn) :val args :reason (.getMessage ret) :via via :in in}]
+              (let [cret (dt (:ret this) ret (:rform this))]
+                (if (invalid? cret)
+                  (explain-1 (:rform this) (:ret this) (conj path :ret) via in ret)
+                  (when (:fn this)
+                    (let [cargs (conform (:args this) args)]
+                      (explain-1 (:fform this) (:fn this) (conj path :fn) via in {:args cargs :ret cret})))))))))
+      [{:path path :pred 'ifn? :val f :via via :in in}]))
+  (gen* [this overrides _ _]
+    (if (:gfn this)
+      ((:gfn this))
+      (gen/return
+       (fn [& args]
+         ;; Bare `assert`: this form is analyzed before the `assert`
+         ;; macro below is defined, so it resolves to core (as the
+         ;; other bare uses above).
+         (assert (pvalid? (:args this) args) (with-out-str (explain (:args this) args)))
+         (gen/generate (gen (:ret this) overrides))))))
+  (with-gen* [this gfn]
+    (fspec-impl (:args this) (:aform this) (:ret this) (:rform this) (:fn this) (:fform this) gfn))
+  (describe* [this]
+    (list 'clojure.spec.alpha/fspec :args (:aform this) :ret (:rform this) :fn (:fform this))))
+
+;; Upstream alpha.clj 674-692, list-built (no syntax-quote: see the
+;; file header). Kwargs are parsed manually (no `fn` local, no
+;; `:or`): `(get m :ret 'clojure.core/any?)` is the upstream
+;; `:or {ret `any?}`. Absent `:args`/`:fn` emit nil directly,
+;; reproducing the upstream `(spec nil)`→nil `(when form …)`
+;; effect (the port's `spec` macro drops that guard: pre-existing
+;; slice-1 narrowing, still out of scope).
+(defmacro fspec
+  "takes :args :ret and (optional) :fn kwargs whose values are preds
+  and returns a spec whose conform/explain take a fn and validates it
+  using generative testing. The conformed value is always the fn itself.
+
+  See 'fdef' for a single operation that creates an fspec and
+  registers it, as well as a full description of :args, :ret and :fn
+
+  fspecs can generate functions that validate the arguments and
+  fabricate a return value compliant with the :ret spec, ignoring
+  the :fn spec if present.
+
+  Optionally takes :gen generator-fn, which must be a fn of no args
+  that returns a test.check generator."
+  [& kvs]
+  (let [m (apply hash-map kvs)
+        args (get m :args)
+        ret (get m :ret 'clojure.core/any?)
+        fnspec (get m :fn)
+        gen (get m :gen)
+        side (fn [form] (if form (list 'clojure.spec.alpha/spec form) nil))]
+    (list 'clojure.spec.alpha/fspec-impl
+          (side args) (list 'quote (res args))
+          (side ret) (list 'quote (res ret))
+          (side fnspec) (list 'quote (res fnspec))
+          gen)))
+
+;; Upstream alpha.clj 714-747, list-built. `fn-sym` passes through
+;; for `def`'s `ns-qualify`, as upstream.
+(defmacro fdef
+  "Takes a symbol naming a function, and one or more of the following:
+
+  :args A regex spec for the function arguments as they were a list to be
+    passed to apply - in this way, a single spec can handle functions with
+    multiple arities
+  :ret A spec for the function's return value
+  :fn A spec of the relationship between args and ret - the
+    value passed is {:args conformed-args :ret conformed-ret} and is
+    expected to contain predicates that relate those values
+
+  Qualifies fn-sym with resolve, or using *ns* if no resolution found.
+  Registers an fspec in the global registry, where it can be retrieved
+  by calling get-spec with the var or fully-qualified symbol.
+
+  Once registered, function specs are included in doc, checked by
+  instrument, tested by the runner clojure.spec.test.alpha/check, and (if
+  a macro) used to explain errors during macroexpansion.
+
+  Note that :fn specs require the presence of :args and :ret specs to
+  conform values, and so :fn specs will be ignored if :args or :ret
+  are missing.
+
+  Returns the qualified fn-sym."
+  [fn-sym & specs]
+  (list 'clojure.spec.alpha/def fn-sym (list* 'clojure.spec.alpha/fspec specs)))
+
+;; Upstream alpha.clj 700-712. A plain fn: the port wires no
+;; macroexpansion-conformance hook (slice-fdef divergence 6).
+(defn- macroexpand-check
+  [v args]
+  (let [fn-spec (get-spec v)]
+    (when-let [arg-spec (:args fn-spec)]
+      (when (invalid? (conform arg-spec args))
+        (let [ed (assoc (explain-data* arg-spec []
+                                       (if-let [name (spec-name arg-spec)] [name] [])
+                                       [] args)
+                        :clojure.spec.alpha/args args)]
+          (throw (ex-info (str "Call to " (->sym v) " did not conform to spec.") ed)))))))
+
+;; Upstream alpha.clj 1904-1906.
+(defn int-in-range?
+  "Return true if start <= val, val < end and val is a fixed
+  precision integer."
+  [start end val]
+  (c/and (int? val) (<= start val) (< val end)))
+
+;; Upstream alpha.clj 1908-1915, list-built. `and` is
+;; `clojure.spec.alpha/and` (as upstream's syntax-quote resolves
+;; it); the `#()` literals become `(fn [g] …)` over `gensym`s.
+(defmacro int-in
+  "Returns a spec that validates fixed precision integers in the
+  range from start (inclusive) to end (exclusive)."
+  [start end]
+  (let [p (gensym "p")]
+    (list 'clojure.spec.alpha/spec
+          (list 'clojure.spec.alpha/and
+                'clojure.core/int?
+                (list 'fn (vector p)
+                      (list 'clojure.spec.alpha/int-in-range? start end p)))
+          :gen
+          (list 'fn (vector)
+                (list 'clojure.spec.gen.alpha/large-integer*
+                      {:min start :max (list 'clojure.core/dec end)})))))
+
+;; Upstream alpha.clj 1890-1892.
+(defn inst-in-range?
+  "Return true if inst at or after start and before end"
+  [start end inst]
+  (c/and (inst? inst)
+         (let [t (inst-ms inst)]
+           (c/and (<= (inst-ms start) t) (< t (inst-ms end))))))
+
+;; Upstream alpha.clj 1894-1902, list-built. `mkdate#` is the gen
+;; namespace's millis reader via `find-var` (qualified refs to
+;; private vars are a compile error, probe P4/P16): same instants
+;; as the JVM `Date` construction (slice-fdef divergence 4).
+(defmacro inst-in
+  "Returns a spec that validates insts in the range from start
+(inclusive) to end (exclusive)."
+  [start end]
+  (let [st (gensym "st") et (gensym "et") mk (gensym "mkdate")
+        p (gensym "p")]
+    (list 'let (vector st (list 'clojure.core/inst-ms start)
+                       et (list 'clojure.core/inst-ms end)
+                       mk (list 'clojure.core/deref
+                                (list 'clojure.core/find-var
+                                      (list 'quote 'clojure.spec.gen.alpha/millis->inst))))
+          (list 'clojure.spec.alpha/spec
+                (list 'clojure.spec.alpha/and
+                      'clojure.core/inst?
+                      (list 'fn (vector p)
+                            (list 'clojure.spec.alpha/inst-in-range? start end p)))
+                :gen
+                (list 'fn (vector)
+                      (list 'clojure.spec.gen.alpha/fmap mk
+                            (list 'clojure.spec.gen.alpha/large-integer* {:min st :max et})))))))
+
+;; Upstream alpha.clj 1917-1935, list-built. `Double/isInfinite`/
+;; `Double/isNaN` become core `infinite?`/`NaN?` (same value sets,
+;; slice-fdef divergence 7); the `:gen` map carries only provided
+;; keys so `double*`'s `:or` defaults still apply.
+(defmacro double-in
+  "Specs a 64-bit floating point number. Options:
+
+    :infinite? - whether +/- infinity allowed (default true)
+    :NaN?      - whether NaN allowed (default true)
+    :min       - minimum value (inclusive, default none)
+    :max       - maximum value (inclusive, default none)"
+  [& kvs]
+  (let [m (apply hash-map kvs)
+        inf? (get m :infinite? true)
+        nan? (get m :NaN? true)
+        minform (get m :min)
+        maxform (get m :max)
+        g (gensym "p")
+        pred (fn [form] (list 'fn (vector g) form))
+        preds (cond-> ['clojure.core/double?]
+                (not inf?) (conj (pred (list 'clojure.core/not (list 'clojure.core/infinite? g))))
+                (not nan?) (conj (pred (list 'clojure.core/not (list 'clojure.core/NaN? g))))
+                maxform (conj (pred (list 'clojure.core/<= g maxform)))
+                minform (conj (pred (list 'clojure.core/<= minform g))))
+        gen-opts (cond-> {}
+                   (contains? m :infinite?) (assoc :infinite? inf?)
+                   (contains? m :NaN?) (assoc :NaN? nan?)
+                   (contains? m :min) (assoc :min minform)
+                   (contains? m :max) (assoc :max maxform))]
+    (list 'clojure.spec.alpha/spec
+          (list* 'clojure.spec.alpha/and preds)
+          :gen
+          (list 'fn (vector)
+                (list 'clojure.spec.gen.alpha/double* gen-opts)))))
+
+;; Upstream alpha.clj 1937-1996. Appended LAST: bare `(assert …)`
+;; uses above keep resolving to core (globals resolve at analyze
+;; time), while from here on bare `assert` is this macro.
+
+;; Upstream alpha.clj 1937-1946 (the sysprop read replaced by the
+;; default; the port has no sysprops).
+(def ^:dynamic *compile-asserts*
+  "If true, compiler will enable spec asserts, which are then
+subject to runtime control via check-asserts? If false, compiler
+will eliminate all spec assert overhead. See 'assert'.
+
+Initially set to boolean value of clojure.spec.compile-asserts
+system property. Defaults to true."
+  true)
+
+;; The port has no `clojure.lang.RT/checkSpecAsserts` static; this
+;; port-named dynamic stands in (slice-fdef divergence 5).
+(def ^:dynamic *check-asserts*
+  "Runtime flag for spec asserts compiled with `*compile-asserts*`
+true. Toggled with `check-asserts`. Defaults to false."
+  false)
+
+;; Upstream alpha.clj 1948-1951.
+(defn check-asserts?
+  "Returns the value set by check-asserts."
+  []
+  *check-asserts*)
+
+;; Upstream alpha.clj 1953-1961. Returns `flag`, as upstream's
+;; `set!` does.
+(defn check-asserts
+  "Enable or disable spec asserts that have been compiled
+with '*compile-asserts*' true.  See 'assert'.
+
+Initially set to boolean value of clojure.spec.check-asserts
+system property. Defaults to false."
+  [flag]
+  (alter-var-root #'*check-asserts* (constantly flag))
+  flag)
+
+;; Upstream alpha.clj 1963-1971.
+(defn assert*
+  "Do not call this directly, use 'assert'."
+  [spec x]
+  (if (valid? spec x)
+    x
+    (let [ed (c/merge (assoc (explain-data* spec [] [] [] x)
+                             :clojure.spec.alpha/failure :assertion-failed))]
+      (throw (ex-info (str "Spec assertion failed\n" (with-out-str (explain-out ed))) ed)))))
+
+;; Upstream alpha.clj 1973-1996. Reads `*compile-asserts*` at
+;; expansion; `if` stays bare (specials are not vars) while the
+;; flag and `assert*` qualify.
+(defmacro assert
+  "spec-checking assert expression. Returns x if x is valid? according
+to spec, else throws an ex-info with explain-data plus ::failure of
+:assertion-failed.
+
+Can be disabled at either compile time or runtime:
+
+If *compile-asserts* is false at compile time, compiles to x. Defaults
+to value of 'clojure.spec.compile-asserts' system property, or true if
+not set.
+
+If (check-asserts?) is false at runtime, always returns x. Defaults to
+value of 'clojure.spec.check-asserts' system property, or false if not
+set. You can toggle check-asserts? with (check-asserts bool)."
+  [spec x]
+  (if *compile-asserts*
+    (list 'if 'clojure.spec.alpha/*check-asserts*
+          (list 'clojure.spec.alpha/assert* spec x)
+          x)
+    x))
 

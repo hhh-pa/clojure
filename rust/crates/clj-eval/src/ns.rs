@@ -63,6 +63,11 @@ const SPEC_ALPHA_CLJ: &str = include_str!("spec_alpha.clj");
 /// on-demand shape as [`SPEC_ALPHA_CLJ`].
 const SPEC_GEN_ALPHA_CLJ: &str = include_str!("gen_alpha.clj");
 
+/// The embedded `clojure.spec.test.alpha` slice-FDEF source (gap-122):
+/// `resolve_source` serves this for `clojure/spec/test/alpha`, same
+/// on-demand shape as [`SPEC_ALPHA_CLJ`].
+const SPEC_TEST_ALPHA_CLJ: &str = include_str!("spec_test_alpha.clj");
+
 /// The embedded tools.deps config-layer sources (gap-124 slice 1):
 /// each carries its own `ns` form and loads on demand through the
 /// ordinary `require` path (the `spec_alpha.clj` shape).
@@ -1251,6 +1256,11 @@ const EMBEDDED_SOURCES: &[(&str, &str, &str)] = &[
         "clojure/spec/gen/alpha",
         "clojure/spec/gen/alpha.clj",
         SPEC_GEN_ALPHA_CLJ,
+    ),
+    (
+        "clojure/spec/test/alpha",
+        "clojure/spec/test/alpha.clj",
+        SPEC_TEST_ALPHA_CLJ,
     ),
     (
         "clojure/tools/deps/util/dir",
