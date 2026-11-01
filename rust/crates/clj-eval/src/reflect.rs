@@ -14,9 +14,10 @@
 //! side parses them through the upstream `parse-flags`), and
 //! `:members` the emulated declared members below. Member coverage
 //! is exactly the emulated surface (`..` members, `Class/forName`,
-//! the `String`/`Object` ctors): every reported member is
-//! invokable/constructible through the port, and nothing else is
-//! reported. New emulated members must add a row here plus a pin in
+//! the `System` statics, the `String`/`Object` ctors): every reported
+//! member is invokable/constructible through the port, and nothing
+//! else is reported (pins invoke the members, proving invokability).
+//! New emulated members must add a row here plus a pin in
 //! `tests/reflect.rs`.
 
 use std::sync::Arc;
@@ -252,6 +253,107 @@ const CLASS_MEMBERS: &[(&str, &[Member])] = &[
                 name: "isBlank",
                 ret: "boolean",
                 params: &[],
+            },
+            Member {
+                kind: MemberKind::Method,
+                name: "length",
+                ret: "int",
+                params: &[],
+            },
+            Member {
+                kind: MemberKind::Method,
+                name: "charAt",
+                ret: "char",
+                params: &["int"],
+            },
+            Member {
+                kind: MemberKind::Method,
+                name: "substring",
+                ret: "java.lang.String",
+                params: &["int"],
+            },
+            Member {
+                kind: MemberKind::Method,
+                name: "substring",
+                ret: "java.lang.String",
+                params: &["int", "int"],
+            },
+            Member {
+                kind: MemberKind::Method,
+                name: "startsWith",
+                ret: "boolean",
+                params: &["java.lang.String"],
+            },
+            Member {
+                kind: MemberKind::Method,
+                name: "startsWith",
+                ret: "boolean",
+                params: &["java.lang.String", "int"],
+            },
+            Member {
+                kind: MemberKind::Method,
+                name: "endsWith",
+                ret: "boolean",
+                params: &["java.lang.String"],
+            },
+            Member {
+                kind: MemberKind::Method,
+                name: "split",
+                ret: "java.lang.String<>",
+                params: &["java.lang.String"],
+            },
+            Member {
+                kind: MemberKind::Method,
+                name: "split",
+                ret: "java.lang.String<>",
+                params: &["java.lang.String", "int"],
+            },
+            Member {
+                kind: MemberKind::Method,
+                name: "trim",
+                ret: "java.lang.String",
+                params: &[],
+            },
+            Member {
+                kind: MemberKind::Method,
+                name: "toUpperCase",
+                ret: "java.lang.String",
+                params: &[],
+            },
+            Member {
+                kind: MemberKind::Method,
+                name: "toLowerCase",
+                ret: "java.lang.String",
+                params: &[],
+            },
+        ],
+    ),
+    (
+        "java.lang.System",
+        &[
+            Member {
+                kind: MemberKind::Static,
+                name: "getProperty",
+                ret: "java.lang.String",
+                params: &["java.lang.String"],
+            },
+            Member {
+                kind: MemberKind::Static,
+                name: "getProperty",
+                ret: "java.lang.String",
+                params: &["java.lang.String", "java.lang.String"],
+            },
+            Member {
+                kind: MemberKind::Static,
+                name: "lineSeparator",
+                ret: "java.lang.String",
+                params: &[],
+            },
+            Member {
+                kind: MemberKind::Static,
+                name: "identityHashCode",
+                ret: "int",
+                params: &["java.lang.Object"],
             },
         ],
     ),

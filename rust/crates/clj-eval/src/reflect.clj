@@ -24,10 +24,10 @@
 ;;   `reflect.rs`. There are no classloaders and no class bytes, so
 ;;   the reflector's `classloader` field is always nil.
 ;; - Members are exactly the emulated surface (`..` members,
-;;   `Class/forName`, the `String`/`Object` ctors); unemulated JVM
-;;   members (e.g. `Object.wait`, `String.length`) are absent, and
-;;   there are no fields (the port exposes none). `:exception-types`
-;;   is always empty.
+;;   `Class/forName`, the `System` statics, the `String`/`Object`
+;;   ctors); unemulated JVM members (e.g. `Object.wait`,
+;;   `String.indexOf`) are absent, and there are no fields (the port
+;;   exposes none). `:exception-types` is always empty.
 ;; - Class modifiers are emulated (`public` throughout, plus
 ;;   `abstract`+`interface` on interfaces); member modifiers add
 ;;   `abstract` on interface methods and `static` on statics.

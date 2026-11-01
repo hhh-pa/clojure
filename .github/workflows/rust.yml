@@ -266,7 +266,8 @@ jobs:
       # (loom types are used directly, so no cfg gate is needed) —
       # this step is the explicit CI evidence, alongside the
       # workspace suite above which runs the same targets.
-      - run: cargo test --locked -p clj-value --test loom_agent --test loom_delay --test loom_future
+      # (#188: loom_channel/loom_executor join the evidence set.)
+      - run: cargo test --locked -p clj-value --test loom_agent --test loom_delay --test loom_future --test loom_channel --test loom_executor
 
   tla:
     name: tla model check
@@ -315,6 +316,21 @@ jobs:
         run: |
           java -Xmx2g -XX:+UseParallelGC -cp /tmp/tla-tools/tla2tools.jar tlc2.TLC \
             -workers auto -cleanup -config agent_queue.cfg agent_queue.tla
+      # #188: model-check the channel-mailbox spec, both buffer-cap
+      # legs (~8.6M + ~9.5M distinct states; ~2 min together), and the
+      # executor spec (~1.3K states; seconds).
+      - name: run TLC (channel mailbox)
+        run: |
+          java -Xmx2g -XX:+UseParallelGC -cp /tmp/tla-tools/tla2tools.jar tlc2.TLC \
+            -workers auto -cleanup -config channel_mailbox.cfg channel_mailbox.tla
+      - name: run TLC (channel mailbox, cap 0)
+        run: |
+          java -Xmx2g -XX:+UseParallelGC -cp /tmp/tla-tools/tla2tools.jar tlc2.TLC \
+            -workers auto -cleanup -config channel_mailbox_cap0.cfg channel_mailbox.tla
+      - name: run TLC (executor)
+        run: |
+          java -Xmx2g -XX:+UseParallelGC -cp /tmp/tla-tools/tla2tools.jar tlc2.TLC \
+            -workers auto -cleanup -config executor.cfg executor.tla
 
   # The coverage legs reached ~21min at 4 shards, so it shards 8
   # ways: each leg runs one nextest hash partition plus the canonical

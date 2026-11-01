@@ -14,9 +14,10 @@
 //! naming, the `:method` flags context for ctors, the `:ancestors`
 //! walk, the `TypeReference`/`Reflector` protocols). Member
 //! *coverage* is the port's own (the emulated surface only —
-//! `..` members, `Class/forName`, the `String`/`Object` ctors),
-//! pinned member by member below; unemulated JVM members are
-//! absent by design (see `reflect.clj`).
+//! `..` members, `Class/forName`, the `System` statics, the
+//! `String`/`Object` ctors), pinned member by member below, each
+//! pin invoking the member; unemulated JVM members are absent by
+//! design (see `reflect.clj`).
 
 use clj_eval::{Evaluator, SourceError, boot};
 use clj_value::{PrintOpts, Value, pr_to_string};
@@ -117,7 +118,7 @@ fn object_members() {
     );
 }
 
-// ---- java.lang.String: bases, ctors, isEmpty/isBlank ----
+// ---- java.lang.String: bases, ctors, methods ----
 
 #[test]
 fn string_bases_flags() {
@@ -149,13 +150,13 @@ fn string_ctor_member() {
         ),
         "true"
     );
-    // Ten ctors (the port-constructible matrix) plus isEmpty/isBlank.
+    // Ten ctors (the port-constructible matrix) plus fourteen methods.
     assert_eq!(
         run(
             &mut eval,
             "(count (:members (r/type-reflect 'java.lang.String)))"
         ),
-        "12"
+        "24"
     );
 }
 
@@ -166,7 +167,8 @@ fn string_methods() {
         run(
             &mut eval,
             "(= (set (map :name (:members (r/type-reflect 'java.lang.String))))
-                '#{java.lang.String isEmpty isBlank})"
+                '#{java.lang.String isEmpty isBlank length charAt substring
+                   startsWith endsWith split trim toUpperCase toLowerCase})"
         ),
         "true"
     );
@@ -180,6 +182,135 @@ fn string_methods() {
         ),
         "true"
     );
+}
+
+#[test]
+fn string_new_members() {
+    let mut eval = fresh();
+    // The #186 rows, pinned whole; the invocations below prove each
+    // reported member is invokable through the port.
+    for want in [
+        "{:name length :declaring-class java.lang.String
+            :parameter-types [] :exception-types []
+            :return-type int :flags #{:public}}",
+        "{:name charAt :declaring-class java.lang.String
+            :parameter-types [int] :exception-types []
+            :return-type char :flags #{:public}}",
+        "{:name substring :declaring-class java.lang.String
+            :parameter-types [int] :exception-types []
+            :return-type java.lang.String :flags #{:public}}",
+        "{:name substring :declaring-class java.lang.String
+            :parameter-types [int int] :exception-types []
+            :return-type java.lang.String :flags #{:public}}",
+        "{:name startsWith :declaring-class java.lang.String
+            :parameter-types [java.lang.String] :exception-types []
+            :return-type boolean :flags #{:public}}",
+        "{:name startsWith :declaring-class java.lang.String
+            :parameter-types [java.lang.String int] :exception-types []
+            :return-type boolean :flags #{:public}}",
+        "{:name endsWith :declaring-class java.lang.String
+            :parameter-types [java.lang.String] :exception-types []
+            :return-type boolean :flags #{:public}}",
+        // The #186 D-note: `split` reports the JVM `String<>`
+        // return even though the port answers a vector (the port
+        // has no arrays, like `clojure.string/split`).
+        "{:name split :declaring-class java.lang.String
+            :parameter-types [java.lang.String] :exception-types []
+            :return-type java.lang.String<> :flags #{:public}}",
+        "{:name split :declaring-class java.lang.String
+            :parameter-types [java.lang.String int] :exception-types []
+            :return-type java.lang.String<> :flags #{:public}}",
+        "{:name trim :declaring-class java.lang.String
+            :parameter-types [] :exception-types []
+            :return-type java.lang.String :flags #{:public}}",
+        "{:name toUpperCase :declaring-class java.lang.String
+            :parameter-types [] :exception-types []
+            :return-type java.lang.String :flags #{:public}}",
+        "{:name toLowerCase :declaring-class java.lang.String
+            :parameter-types [] :exception-types []
+            :return-type java.lang.String :flags #{:public}}",
+    ] {
+        assert_eq!(
+            run(
+                &mut eval,
+                &format!("(contains? (:members (r/type-reflect 'java.lang.String)) '{want})")
+            ),
+            "true",
+            "{want}"
+        );
+    }
+    // One invocation per member (arities covered where they differ).
+    for (src, want) in [
+        ("(.. \"abc\" (length))", "3"),
+        ("(.. \"abc\" (charAt 1))", "\\b"),
+        ("(.. \"abc\" (substring 1))", "\"bc\""),
+        ("(.. \"abc\" (substring 1 2))", "\"b\""),
+        ("(.. \"abc\" (startsWith \"a\"))", "true"),
+        ("(.. \"abc\" (startsWith \"bc\" 1))", "true"),
+        ("(.. \"abc\" (endsWith \"c\"))", "true"),
+        ("(.. \"a,b\" (split \",\"))", "[\"a\" \"b\"]"),
+        ("(.. \"a,b\" (split \",\" 1))", "[\"a,b\"]"),
+        ("(.. \"  a  \" (trim))", "\"a\""),
+        ("(.. \"abc\" (toUpperCase))", "\"ABC\""),
+        ("(.. \"ABC\" (toLowerCase))", "\"abc\""),
+    ] {
+        assert_eq!(run(&mut eval, src), want, "{src}");
+    }
+}
+
+// ---- java.lang.System: the #184 statics ----
+
+#[test]
+fn system_static_members() {
+    let mut eval = fresh();
+    assert_eq!(
+        run(
+            &mut eval,
+            "(count (:members (r/type-reflect 'java.lang.System)))"
+        ),
+        "4"
+    );
+    for want in [
+        "{:name getProperty :declaring-class java.lang.System
+            :parameter-types [java.lang.String] :exception-types []
+            :return-type java.lang.String :flags #{:public :static}}",
+        "{:name getProperty :declaring-class java.lang.System
+            :parameter-types [java.lang.String java.lang.String]
+            :exception-types [] :return-type java.lang.String
+            :flags #{:public :static}}",
+        "{:name lineSeparator :declaring-class java.lang.System
+            :parameter-types [] :exception-types []
+            :return-type java.lang.String :flags #{:public :static}}",
+        "{:name identityHashCode :declaring-class java.lang.System
+            :parameter-types [java.lang.Object] :exception-types []
+            :return-type int :flags #{:public :static}}",
+    ] {
+        assert_eq!(
+            run(
+                &mut eval,
+                &format!("(contains? (:members (r/type-reflect 'java.lang.System)) '{want})")
+            ),
+            "true",
+            "{want}"
+        );
+    }
+    // One invocation per member.
+    assert_eq!(
+        run(&mut eval, "(System/getProperty \"no.such.prop\")"),
+        "nil"
+    );
+    assert_eq!(
+        run(&mut eval, "(System/getProperty \"no.such.prop\" \"dflt\")"),
+        "\"dflt\""
+    );
+    assert_eq!(
+        run(
+            &mut eval,
+            "(= (System/lineSeparator) (System/getProperty \"line.separator\"))"
+        ),
+        "true"
+    );
+    assert_eq!(run(&mut eval, "(System/identityHashCode 5)"), "5");
 }
 
 // ---- java.lang.Class: instance members + static forName ----

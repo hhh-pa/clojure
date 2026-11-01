@@ -89,6 +89,11 @@ const TOOLS_DEPS_EXTENSIONS_LOCAL_CLJ: &str = include_str!("tools_deps_extension
 const TOOLS_DEPS_EXTENSIONS_GIT_CLJ: &str = include_str!("tools_deps_extensions_git.clj");
 const TOOLS_DEPS_EXTENSIONS_DEPS_CLJ: &str = include_str!("tools_deps_extensions_deps.clj");
 
+/// The embedded tools.deps API-layer sources (gap-124 slice 3):
+/// `util.concurrent` and the main `clojure.tools.deps` namespace,
+/// same on-demand shape as slices 1-2.
+const TOOLS_DEPS_UTIL_CONCURRENT_CLJ: &str = include_str!("tools_deps_util_concurrent.clj");
+const TOOLS_DEPS_CLJ: &str = include_str!("tools_deps.clj");
 /// The embedded `clojure.reflect` facsimile (#120 sub-slice 4):
 /// upstream map shapes over the emulated lattice, loaded on demand
 /// through the ordinary `require` path (the `spec_alpha.clj` shape).
@@ -1317,6 +1322,16 @@ const EMBEDDED_SOURCES: &[(&str, &str, &str)] = &[
         "clojure/tools/deps/extensions/deps.clj",
         TOOLS_DEPS_EXTENSIONS_DEPS_CLJ,
     ),
+    (
+        "clojure/tools/deps/util/concurrent",
+        "clojure/tools/deps/util/concurrent.clj",
+        TOOLS_DEPS_UTIL_CONCURRENT_CLJ,
+    ),
+    (
+        "clojure/tools/deps",
+        "clojure/tools/deps.clj",
+        TOOLS_DEPS_CLJ,
+    ),
     ("clojure/reflect", "clojure/reflect.clj", REFLECT_CLJ),
 ];
 
@@ -1324,8 +1339,9 @@ const EMBEDDED_SOURCES: &[(&str, &str, &str)] = &[
 /// text: embedded libs first (gap-122 slices 1+F1:
 /// `clojure/spec/alpha` + `clojure/spec/gen/alpha`; gap-124 slices
 /// 1+2: the three tools.deps config namespaces plus the five SPI
-/// namespaces; #120 sub-slice 4: `clojure/reflect`; the flat set
-/// lives here when S5D lands), then `.clj`
+/// namespaces; slice 3: `util.concurrent` + the API namespace;
+/// #120 sub-slice 4: `clojure/reflect`; the flat set lives here
+/// when S5D lands), then `.clj`
 /// across every `*load-path*` dir, then `.cljc` (`RT.load` lookup
 /// order).
 fn resolve_source(eval: &Evaluator, root: &str) -> Result<(String, String), NativeError> {
