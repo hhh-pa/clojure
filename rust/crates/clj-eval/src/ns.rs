@@ -68,6 +68,11 @@ const SPEC_GEN_ALPHA_CLJ: &str = include_str!("gen_alpha.clj");
 /// on-demand shape as [`SPEC_ALPHA_CLJ`].
 const SPEC_TEST_ALPHA_CLJ: &str = include_str!("spec_test_alpha.clj");
 
+/// The embedded `clojure.java.shell` facsimile (#120 slice 3):
+/// served on demand for `clojure/java/shell`, same shape as
+/// [`SPEC_ALPHA_CLJ`].
+const JAVA_SHELL_CLJ: &str = include_str!("java_shell.clj");
+
 /// The embedded tools.deps config-layer sources (gap-124 slice 1):
 /// each carries its own `ns` form and loads on demand through the
 /// ordinary `require` path (the `spec_alpha.clj` shape).
@@ -1268,6 +1273,11 @@ const EMBEDDED_SOURCES: &[(&str, &str, &str)] = &[
         SPEC_TEST_ALPHA_CLJ,
     ),
     (
+        "clojure/java/shell",
+        "clojure/java/shell.clj",
+        JAVA_SHELL_CLJ,
+    ),
+    (
         "clojure/tools/deps/util/dir",
         "clojure/tools/deps/util/dir.clj",
         TOOLS_DEPS_UTIL_DIR_CLJ,
@@ -1431,6 +1441,14 @@ pub(crate) fn load_one(
     // install-and-mark shape.
     if sym_str(lib) == crate::portdeps::PORT_NS {
         crate::portdeps::install_port_ns(eval);
+        mark_loaded(eval, lib)?;
+        return Ok(());
+    }
+    // #120 slice 3: `clojure.java.shell.impl` is a native
+    // namespace (the spawn helper, no source file): same
+    // install-and-mark shape.
+    if sym_str(lib) == crate::shell::SHELL_NS {
+        crate::shell::install_shell_ns(eval);
         mark_loaded(eval, lib)?;
         return Ok(());
     }

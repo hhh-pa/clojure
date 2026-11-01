@@ -330,7 +330,7 @@ fn npe_bytes() -> NativeError {
 /// A probed charset (spec §3.7 — exactly the oracle-pinned names
 /// ship; everything else is UEE like an unknown name, spec N6).
 #[derive(Clone, Copy)]
-enum Charset {
+pub(crate) enum Charset {
     Utf8,
     Ascii,
     Latin1,
@@ -368,7 +368,7 @@ const CHARSET_ALIASES: &[(&str, Charset)] = &[
 /// throw `UnsupportedEncodingException` carrying the name
 /// verbatim — no trimming (oracles `ctor-str-badcs/4`,
 /// `v-empty`, `v-badchars`, `v-colon`, `s-spcs`).
-fn lookup_charset(name: &str) -> Result<Charset, NativeError> {
+pub(crate) fn lookup_charset(name: &str) -> Result<Charset, NativeError> {
     CHARSET_ALIASES
         .iter()
         .find(|(alias, _)| alias.eq_ignore_ascii_case(name))
@@ -379,7 +379,7 @@ fn lookup_charset(name: &str) -> Result<Charset, NativeError> {
 /// Decode with REPLACE (malformed/truncated input becomes
 /// U+FFFD, never an error — oracles `cs-ascii-high`,
 /// `cs-utf16-odd`, `u32-trunc`, `u32-badcp`).
-fn decode(cs: Charset, bytes: &[u8]) -> String {
+pub(crate) fn decode(cs: Charset, bytes: &[u8]) -> String {
     match cs {
         Charset::Utf8 => decode_utf8(bytes),
         Charset::Ascii => bytes
@@ -398,7 +398,7 @@ fn decode(cs: Charset, bytes: &[u8]) -> String {
 
 /// The default charset: UTF-8 lossy (oracles
 /// `ctor-str-bytearr*`, `ctor-str-bytearr-bad`).
-fn decode_utf8(bytes: &[u8]) -> String {
+pub(crate) fn decode_utf8(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
 }
 
