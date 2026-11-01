@@ -2612,6 +2612,13 @@ pub(crate) fn static_member_arities(fqn: &str, member: &str) -> Option<&'static 
     }
 }
 
+/// Whether a lattice name is an interface (the uniform ctor miss
+/// reads `for interface` for interfaces, `for class` otherwise —
+/// oracles `ctor-iface`, `ctor-abstract`). Unknown names read
+/// `class` (only lattice classes and `HostDef`s reach the miss).
+pub(crate) fn lattice_is_iface(fqn: &str) -> bool {
+    static_row(fqn).is_some_and(|r| r.iface)
+}
 /// `__static*`: `(FQN member args…)` — the analyzer's static-call
 /// lowering plus the instance-position consult for class values.
 /// Known members dispatch; anything else is the oracle's

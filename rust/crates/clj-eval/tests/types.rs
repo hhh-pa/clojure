@@ -182,10 +182,13 @@ fn dtor_ctor_arity() {
 
 #[test]
 fn dtor_unresolvable_type() {
+    // Unresolvable ctor heads report the JVM text at runtime
+    // (#120 slice 2, oracle `ctor-missing-simple`; the JVM
+    // rejects them at compile time — narrowing N1).
     let mut eval = boot();
     assert_eq!(
         uncaught(&mut eval, "(Nosuch. 1)"),
-        "java.lang.RuntimeException | Unable to resolve symbol: Nosuch in this context"
+        "java.lang.IllegalArgumentException | Unable to resolve classname: Nosuch"
     );
 }
 

@@ -77,6 +77,10 @@ pub enum ThrowClass {
     MissingFormatWidthException,
     IllegalFormatArgumentIndexException,
     IOException,
+    /// `UnsupportedEncodingException` (#120 slice 2 `String`
+    /// construction): a checked `IOException` for unknown charset
+    /// names.
+    UnsupportedEncodingException,
     CompilerException,
     ExecutionException,
     CancellationException,
@@ -134,6 +138,7 @@ impl ThrowClass {
         match self {
             Self::ExceptionInfo => "clojure.lang.ExceptionInfo",
             Self::FileNotFoundException => "java.io.FileNotFoundException",
+            Self::UnsupportedEncodingException => "java.io.UnsupportedEncodingException",
             Self::IllegalAccessError => "java.lang.IllegalAccessError",
             Self::NumberFormatException => "java.lang.NumberFormatException",
             Self::StringIndexOutOfBoundsException => "java.lang.StringIndexOutOfBoundsException",
@@ -141,6 +146,14 @@ impl ThrowClass {
             Self::IllegalFormatConversionException => "java.util.IllegalFormatConversionException",
             Self::UnknownFormatConversionException => "java.util.UnknownFormatConversionException",
             Self::MissingFormatConversionException => "java.util.MissingFormatConversionException",
+            other => other.jvm_name_mid_tail(),
+        }
+    }
+
+    /// Trailing format throw classes, split from
+    /// [`ThrowClass::jvm_name_mid`] for the complexity budget.
+    fn jvm_name_mid_tail(&self) -> &'static str {
+        match self {
             Self::MissingFormatArgumentException => "java.util.MissingFormatArgumentException",
             Self::IllegalFormatPrecisionException => "java.util.IllegalFormatPrecisionException",
             Self::IllegalFormatCodePointException => "java.util.IllegalFormatCodePointException",
@@ -293,15 +306,18 @@ fn throw_parent(jvm_name: &str) -> Option<&'static str> {
 
 /// The linkage-error branch plus the S16 `NoSuchElementException`
 /// of [`throw_parent`] (split for the complexity budget; chains into
-/// [`throw_parent_format`]). The reflective pair
-/// (`ClassNotFoundException`/`ReflectiveOperationException`) lives in
-/// [`throw_parent`] proper — do not re-add it here (a duplicate arm
-/// would be dead: `throw_parent` matches first).
+/// [`throw_parent_format`]). Also hosts the slice-2
+/// `UnsupportedEncodingException` arm (moved out of
+/// [`throw_parent`] proper to hold its baselined budget). The
+/// reflective pair (`ClassNotFoundException`/`ReflectiveOperationException`)
+/// lives in [`throw_parent`] proper — do not re-add it here (a
+/// duplicate arm would be dead: `throw_parent` matches first).
 fn throw_parent_rest(jvm_name: &str) -> Option<&'static str> {
     match jvm_name {
         "java.lang.LinkageError" => Some("java.lang.Error"),
         "java.lang.IllegalAccessError" => Some("java.lang.LinkageError"),
         "java.util.NoSuchElementException" => Some("java.lang.RuntimeException"),
+        "java.io.UnsupportedEncodingException" => Some("java.io.IOException"),
         _ => throw_parent_format(jvm_name),
     }
 }
@@ -550,6 +566,10 @@ mod tests {
                 "java.io.FileNotFoundException",
             ),
             (
+                ThrowClass::UnsupportedEncodingException,
+                "java.io.UnsupportedEncodingException",
+            ),
+            (
                 ThrowClass::IllegalAccessError,
                 "java.lang.IllegalAccessError",
             ),
@@ -581,7 +601,7 @@ mod tests {
         for (class, want) in cases {
             assert_eq!(class.jvm_name(), want);
         }
-        assert_eq!(cases.len(), 23);
+        assert_eq!(cases.len(), 24);
     }
 
     #[test]
@@ -811,6 +831,7 @@ mod tests {
             ThrowClass::ArithmeticException,
             ThrowClass::ExceptionInfo,
             ThrowClass::FileNotFoundException,
+            ThrowClass::UnsupportedEncodingException,
             ThrowClass::IllegalAccessError,
             ThrowClass::NumberFormatException,
             ThrowClass::CompilerException,
@@ -826,6 +847,10 @@ mod tests {
         assert!(ThrowClass::FileNotFoundException.matches("java.io.IOException"));
         assert!(ThrowClass::FileNotFoundException.matches("java.lang.Exception"));
         assert!(!ThrowClass::FileNotFoundException.matches("java.lang.Error"));
+        assert!(ThrowClass::UnsupportedEncodingException.matches("java.io.IOException"));
+        assert!(ThrowClass::UnsupportedEncodingException.matches("java.lang.Exception"));
+        assert!(!ThrowClass::UnsupportedEncodingException.matches("java.lang.Error"));
+        assert!(!ThrowClass::UnsupportedEncodingException.matches("java.lang.RuntimeException"));
         assert!(ThrowClass::IllegalAccessError.matches("java.lang.LinkageError"));
         assert!(ThrowClass::IllegalAccessError.matches("java.lang.Error"));
         assert!(!ThrowClass::IllegalAccessError.matches("java.lang.Exception"));

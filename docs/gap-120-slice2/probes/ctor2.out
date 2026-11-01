@@ -1,0 +1,85 @@
+file.encoding=UTF-8
+d-nil-utf8 CHAIN:
+   java.lang.NullPointerException | Cannot read the array length because "bytes" is null
+d-bytes-nil CHAIN:
+   clojure.lang.Compiler$CompilerException | Syntax error compiling new at (/home/opc/workspace/clojure/.muse/worktrees/subagent-v2-01a186ab-6801-7a32-9110-7d9f70845a21-01a193d3-3313-71f0-ab00-36fb812042ba/docs/gap-120-slice2/probes/ctor2.clj:30:1).
+   java.lang.IllegalArgumentException | More than one matching method found: java.lang.String
+d-nil-0 CHAIN:
+   java.lang.NullPointerException | Cannot read the array length because "ascii" is null
+d-nil-0-0-nil CHAIN:
+   clojure.lang.Compiler$CompilerException | Syntax error compiling new at (/home/opc/workspace/clojure/.muse/worktrees/subagent-v2-01a186ab-6801-7a32-9110-7d9f70845a21-01a193d3-3313-71f0-ab00-36fb812042ba/docs/gap-120-slice2/probes/ctor2.clj:32:1).
+   java.lang.IllegalArgumentException | More than one matching method found: java.lang.String
+d-chars-nil-1 CHAIN:
+   java.lang.IllegalArgumentException | No matching ctor found for class java.lang.String
+d-nil4 CHAIN:
+   java.lang.IllegalArgumentException | No matching ctor found for class java.lang.String
+d-nil5 CHAIN:
+   clojure.lang.Compiler$CompilerException | Syntax error compiling new at (/home/opc/workspace/clojure/.muse/worktrees/subagent-v2-01a186ab-6801-7a32-9110-7d9f70845a21-01a193d3-3313-71f0-ab00-36fb812042ba/docs/gap-120-slice2/probes/ctor2.clj:35:1).
+   java.lang.IllegalArgumentException | No matching ctor found for class java.lang.String
+d-str-nil CHAIN:
+   java.lang.IllegalArgumentException | No matching ctor found for class java.lang.String
+c-bigint THROWS java.lang.IllegalArgumentException | No matching ctor found for class java.lang.String
+c-bigint-big CHAIN:
+   java.lang.IllegalArgumentException | No matching ctor found for class java.lang.String
+c-bigdec CHAIN:
+   java.lang.IllegalArgumentException | No matching ctor found for class java.lang.String
+c-ratio => "bc"
+c-char CHAIN:
+   java.lang.IllegalArgumentException | No matching ctor found for class java.lang.String
+c-bool CHAIN:
+   java.lang.IllegalArgumentException | No matching ctor found for class java.lang.String
+c-hibyte-big CHAIN:
+   java.lang.ArithmeticException | integer overflow
+c-hibyte-long => "Łł"
+cs-4arg => "AB"
+cs-utf16le => "A"
+cs-utf16le-bom => "A"
+cs-ascii-high => "�"
+cs-utf16-odd => "�"
+cs-empty => ""
+cs-alias => "A"
+cs-nil-name CHAIN:
+   clojure.lang.Compiler$CompilerException | Syntax error compiling new at (/home/opc/workspace/clojure/.muse/worktrees/subagent-v2-01a186ab-6801-7a32-9110-7d9f70845a21-01a193d3-3313-71f0-ab00-36fb812042ba/docs/gap-120-slice2/probes/ctor2.clj:56:1).
+   java.lang.IllegalArgumentException | More than one matching method found: java.lang.String
+cs-nil-bytes CHAIN:
+   java.lang.NullPointerException | Cannot read the array length because "bytes" is null
+cs-off-oob CHAIN:
+   java.lang.StringIndexOutOfBoundsException | Range [5, 5 + 1) out of bounds for length 1
+cp-surrogate => "?"
+cp-toobig CHAIN:
+   java.lang.IllegalArgumentException | 1114112
+cp-max => "􏿿"
+cp-astral => "😀"
+cn-str => "x"
+cn-str0 => ""
+cn-obj => java.lang.Object
+cn-int => 5
+cn-fq => "x"
+cn-badtype CHAIN:
+   java.lang.IllegalArgumentException | No matching ctor found for class java.lang.String
+cn-arity5 CHAIN:
+   clojure.lang.Compiler$CompilerException | Syntax error compiling String/new at (/home/opc/workspace/clojure/.muse/worktrees/subagent-v2-01a186ab-6801-7a32-9110-7d9f70845a21-01a193d3-3313-71f0-ab00-36fb812042ba/docs/gap-120-slice2/probes/ctor2.clj:73:1).
+   java.lang.IllegalArgumentException | No matching ctor found for class java.lang.String
+cn-nil1 CHAIN:
+   clojure.lang.Compiler$CompilerException | Syntax error compiling String/new at (/home/opc/workspace/clojure/.muse/worktrees/subagent-v2-01a186ab-6801-7a32-9110-7d9f70845a21-01a193d3-3313-71f0-ab00-36fb812042ba/docs/gap-120-slice2/probes/ctor2.clj:74:1).
+   java.lang.IllegalArgumentException | More than one matching method found: java.lang.String
+cn-missing CHAIN:
+   clojure.lang.Compiler$CompilerException | Syntax error compiling at (/home/opc/workspace/clojure/.muse/worktrees/subagent-v2-01a186ab-6801-7a32-9110-7d9f70845a21-01a193d3-3313-71f0-ab00-36fb812042ba/docs/gap-120-slice2/probes/ctor2.clj:75:1).
+   java.lang.RuntimeException | No such namespace: NopeKlass
+cn-missing-fq CHAIN:
+   clojure.lang.Compiler$CompilerException | Syntax error compiling at (/home/opc/workspace/clojure/.muse/worktrees/subagent-v2-01a186ab-6801-7a32-9110-7d9f70845a21-01a193d3-3313-71f0-ab00-36fb812042ba/docs/gap-120-slice2/probes/ctor2.clj:76:1).
+   java.lang.ClassNotFoundException | java.no.Klass
+cn-iface CHAIN:
+   clojure.lang.Compiler$CompilerException | Syntax error compiling java.util.List/new at (/home/opc/workspace/clojure/.muse/worktrees/subagent-v2-01a186ab-6801-7a32-9110-7d9f70845a21-01a193d3-3313-71f0-ab00-36fb812042ba/docs/gap-120-slice2/probes/ctor2.clj:77:1).
+   java.lang.IllegalArgumentException | No matching ctor found for interface java.util.List
+cn-val => #object[user$invoke__String_new__297 0x2617f816 "user$invoke__String_new__297@2617f816"]
+cn-resolve => nil
+cn-shadow-new => "x"
+cn-deftype => #object[user.CNW 0x347bdeef "user.CNW@347bdeef"]
+nl-new-shadow-str => "x"
+nl-ctor-shadow-new => "x"
+nl-new-var-str THROWS clojure.lang.Compiler$CompilerException | Syntax error compiling def at (/home/opc/workspace/clojure/.muse/worktrees/subagent-v2-01a186ab-6801-7a32-9110-7d9f70845a21-01a193d3-3313-71f0-ab00-36fb812042ba/docs/gap-120-slice2/probes/ctor2.clj:86:36).
+nl-new-numclass CHAIN:
+   clojure.lang.Compiler$CompilerException | Syntax error compiling new at (/home/opc/workspace/clojure/.muse/worktrees/subagent-v2-01a186ab-6801-7a32-9110-7d9f70845a21-01a193d3-3313-71f0-ab00-36fb812042ba/docs/gap-120-slice2/probes/ctor2.clj:87:1).
+   java.lang.IllegalArgumentException | Unable to resolve classname: 1
+nl-import-face => java.util.HashMap

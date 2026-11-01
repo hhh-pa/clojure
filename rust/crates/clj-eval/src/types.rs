@@ -566,36 +566,108 @@ fn construct(def: &Arc<HostDef>, args: &[Value]) -> Result<Value, NativeError> {
     }))))
 }
 
-/// `(Type. …)`: args are `[type-sym-or-def args…]`. A descriptor
-/// value works directly (factories capture it, so they build the
-/// defining type from any namespace). Interfaces have no
+/// `(Type. …)` / `(new Type …)` / `(Type/new …)`: args are
+/// `[type-sym-or-def args…]`. A descriptor value works directly
+/// (factories capture it, so they build the defining type from
+/// any namespace); class values dispatch by name (the emulated
+/// allow-list builds, `HostDef` names construct, anything else is
+/// the uniform miss — #120 slice 2). Interfaces have no
 /// constructors (the JVM's missing-ctor error); anything else
 /// non-constructable is `Not a type`.
 fn native_new(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     if args.is_empty() {
         return Err(NativeError::arity("clojure.core/__new*", 0));
     }
-    let def = match &args[0] {
-        Value::Symbol(sym) => resolve_def(eval, sym)?,
+    match &args[0] {
+        Value::Symbol(sym) => new_via_symbol(eval, sym, &args[1..]),
+        Value::Class(c) => new_via_class(eval, c.name(), &args[1..]),
         Value::HostType(h) => match h.as_ref() {
-            HostVal::Def(d) => d.clone(),
-            HostVal::Inst(_) => {
-                return Err(NativeError::new(
-                    ThrowClass::IllegalArgumentException,
-                    "Not a type".to_owned(),
-                ));
-            }
+            HostVal::Def(d) => new_via_def(d, &args[1..]),
+            HostVal::Inst(_) => Err(NativeError::new(
+                ThrowClass::IllegalArgumentException,
+                "Not a type".to_owned(),
+            )),
         },
-        Value::Class(c) => hostdef_by_name(eval, c.name()).ok_or_else(|| not_a_class(c.name()))?,
-        _ => return Err(cce_err(&args[0], "clojure.lang.Symbol")),
-    };
+        _ => Err(cce_err(&args[0], "clojure.lang.Symbol")),
+    }
+}
+
+/// Construct a resolved descriptor (split from [`native_new`]
+/// for the complexity budget): interfaces have no constructors;
+/// anything else zips positional args over the fields.
+fn new_via_def(def: &Arc<HostDef>, args: &[Value]) -> Result<Value, NativeError> {
     if def.kind == HostKind::Interface {
         return Err(NativeError::new(
             ThrowClass::IllegalArgumentException,
             format!("No matching ctor found for class {}", def.name),
         ));
     }
-    construct(&def, &args[1..])
+    construct(def, args)
+}
+
+/// `(Type. …)` via a symbol (split from [`native_new`] for the
+/// complexity budget — mirrors [`def_of_root`], which keeps
+/// serving interface position): descriptors construct,
+/// instances and bound non-descriptors keep `Not a type`
+/// (baseline), class values dispatch by name, and unresolvable
+/// names take the ctor miss shapes.
+fn new_via_symbol(
+    eval: &mut Evaluator,
+    sym: &Symbol,
+    args: &[Value],
+) -> Result<Value, NativeError> {
+    match lookup_root(eval, sym) {
+        Some(Value::HostType(h)) => match h.as_ref() {
+            HostVal::Def(d) => new_via_def(d, args),
+            HostVal::Inst(_) => Err(not_a_type(sym)),
+        },
+        Some(Value::Class(c)) => new_via_class(eval, c.name(), args),
+        Some(Value::Unbound(_)) | None => new_unresolved(eval, sym, args),
+        Some(_) => Err(not_a_type(sym)),
+    }
+}
+
+/// An unresolvable ctor head (split for the complexity budget):
+/// dotted names resolve through the shared lattice (FQ JDK
+/// classes) and CNFE when missing (oracles `ctor-missing-fq`,
+/// `new-missing-fq`); anything else is `Unable to resolve
+/// classname` (oracles `ctor-missing-simple`, `new-missing-simple`,
+/// `m-new-qual*`).
+fn new_unresolved(eval: &Evaluator, sym: &Symbol, args: &[Value]) -> Result<Value, NativeError> {
+    if sym.namespace().is_none() && crate::classemu::is_class_position(sym.name()) {
+        if let Some(class) = crate::classemu::resolve_class_name(eval, sym.name()) {
+            return new_via_class(eval, class.name(), args);
+        }
+        return Err(NativeError::new(
+            ThrowClass::ClassNotFoundException,
+            sym.name().to_owned(),
+        ));
+    }
+    Err(NativeError::new(
+        ThrowClass::IllegalArgumentException,
+        format!("Unable to resolve classname: {sym}"),
+    ))
+}
+
+/// `(Type. …)` via a class value (split from [`native_new`] for
+/// the complexity budget): allow-listed names build, `HostDef`
+/// names construct (interfaces miss), anything else is the
+/// uniform miss — `for interface` iff the lattice says so
+/// (oracles `ctor-iface`, `ctor-abstract`, `ctor-private`).
+fn new_via_class(eval: &Evaluator, name: &str, args: &[Value]) -> Result<Value, NativeError> {
+    if name == "java.lang.String" {
+        return crate::ctor::build_string(args);
+    }
+    if name == "java.lang.Object" {
+        return crate::ctor::build_object(args);
+    }
+    match hostdef_by_name(eval, name) {
+        Some(def) => new_via_def(&def, args),
+        None => Err(crate::ctor::no_ctor(
+            name,
+            crate::classemu::lattice_is_iface(name),
+        )),
+    }
 }
 
 /// `(.-field x)`: args are `[field-str target]`. Reads a positional
