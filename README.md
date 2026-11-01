@@ -191,27 +191,23 @@ out of scope, not silently missing:
   non-goal: the port never loads `.class` files or links JVM
   bytecode.
 
-Everything else formerly listed here is a goal now, landing in
-slices (tracking issue in parentheses):
+Everything else formerly listed here was a goal, and has
+landed (tracking issue in parentheses, all closed):
 
-- Host interop (#120): the emulated class core is landed —
-  `class` `type` `instance?` `import` `..` `bean` `bases`
-  `supers` resolve against the static `clojure.lang.*` table
-  (S16) — and real host construction, invocation, import,
-  reflection, `clojure.java.*`, and `clojure.reflect` are
-  landing in slices.
-- `clojure.spec` (#122): the registry, predicate specs,
-  `and`/`or`, regex ops, `keys`/`merge`, tuple/multi-spec/
-  conformer, collection combinators, and the `spec.gen.alpha`
-  surface are ported; generator wiring (`gen*`) and
-  `fdef`/instrumentation remain.
-- `core.async` (#123): channels, buffers, and ops plus
-  transducers and ex-handlers are ported; further slices in
-  progress.
+- Host interop (#120): all 8 slices landed — the static
+  `clojure.lang.*` class core (S16), emulated construction,
+  `clojure.reflect`, String members, `clojure.java.shell`,
+  `System` statics, the reflect-table follow-up, and
+  `clojure.java.io`.
+- `clojure.spec` (#122): all slices landed, including generator
+  wiring (`gen*`) and the `fdef`/instrumentation finale.
+- `core.async` (#123): slices 1–3 landed (channels, buffers,
+  ops, transducers, ex-handlers, `go` blocks; scoped-complete).
 - `tools.deps` (#124): source-only redesign (no jars, no Maven
-  resolution — `:mvn` coords parse but are refused); the config
-  layer is ported, further slices in progress.
-- LLVM JIT (#121): goal, at recon stage.
+  resolution — `:mvn` coords parse but are refused); config,
+  SPI/manifest, and API-namespace slices landed.
+- LLVM JIT (#121): in-process JIT plus the `jit` subcommand
+  landed (slice 1).
 
 ## Memory management
 
