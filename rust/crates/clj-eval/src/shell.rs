@@ -76,12 +76,9 @@ fn cmd_parts(cmd: &Value) -> Result<Vec<String>, NativeError> {
     Ok(parts)
 }
 
-/// Snapshot a `byte[]`'s unsigned slots (`None` for anything
-/// else, mirroring the slice-2 reader).
-fn input_bytes(v: &Value) -> Option<Vec<u8>> {
-    let Value::Array(a) = v else {
-        return None;
-    };
+/// Snapshot a `byte[]`'s unsigned slots (`None` for other
+/// stores, mirroring the slice-2 reader).
+fn input_bytes(a: &Array) -> Option<Vec<u8>> {
     match &*a.lock() {
         ArrayStore::Bytes(v) => Some(v.iter().map(|b| *b as u8).collect()),
         _ => None,
@@ -111,7 +108,7 @@ fn stdin_of(input: &Value, in_enc: &Value) -> Result<Option<Vec<u8>>, NativeErro
                 str_of(in_enc),
             )),
         },
-        Value::Array(_) => match input_bytes(input) {
+        Value::Array(a) => match input_bytes(a) {
             Some(bytes) => Ok(Some(bytes)),
             None => Err(cce_err(input, "[B")),
         },

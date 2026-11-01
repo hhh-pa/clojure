@@ -260,6 +260,22 @@ fn proc_validates_command_shape() {
         uncaught(&mut eval, r#"(impl/proc ["echo" 5] nil nil nil nil nil)"#),
         "java.lang.ClassCastException | class java.lang.Long cannot be cast to class java.lang.String (java.lang.Long and java.lang.String are in module java.base of loader 'bootstrap')"
     );
+    // Nil encodings mean "default" on direct calls (`sh` always
+    // passes the parse-args defaults, so these arms need `proc`).
+    assert_eq!(
+        run(
+            &mut eval,
+            r#"(:out (impl/proc ["cat"] "hi\n" nil nil nil nil))"#
+        ),
+        r#""hi\n""#
+    );
+    assert_eq!(
+        run(
+            &mut eval,
+            r#"(:out (impl/proc ["echo" "hi"] nil nil nil nil nil))"#
+        ),
+        r#""hi\n""#
+    );
 }
 
 #[test]
