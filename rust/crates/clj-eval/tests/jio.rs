@@ -989,17 +989,24 @@ fn writer_bom_once_per_stream() {
     let dir = fixture("bom-close-empty");
     let p = dir.join("w.txt").to_string_lossy().into_owned();
     let q = dir.join("v.txt").to_string_lossy().into_owned();
+    let t = dir.join("u.txt").to_string_lossy().into_owned();
     let mut eval = jio();
-    let (litp, litq) = (clj_str(&p), clj_str(&q));
+    let (litp, litq, litt) = (clj_str(&p), clj_str(&q), clj_str(&t));
     run(
         &mut eval,
         &format!(
             "(.close (io/writer {litp} :encoding \"UTF-16\")) \
-             (.close (io/writer {litq} :encoding \"UTF-16BE\"))"
+             (.close (io/writer {litq} :encoding \"UTF-16BE\")) \
+             (.close (io/writer {litt} :encoding \"UTF-32\"))"
         ),
     );
     assert_eq!(std::fs::read(&p).unwrap(), &[0xFE, 0xFF]);
     assert!(std::fs::read(&q).unwrap().is_empty());
+    assert_eq!(
+        std::fs::read(&t).unwrap(),
+        &[0x00, 0x00, 0xFE, 0xFF],
+        "UTF-32 close flushes its BOM too"
+    );
 }
 
 // --- `input-stream` ---
@@ -1138,6 +1145,50 @@ fn output_stream_roundtrip() {
     );
     let shown = run(&mut eval, &format!("(pr-str (io/output-stream {lit}))"));
     assert!(shown.contains("java.io.BufferedOutputStream"), "{shown}");
+}
+
+#[test]
+fn output_sinks_accept_file_and_uri() {
+    // `output-stream` opens File values and file URIs like
+    // strings, and `writer` opens File values (every sink arm
+    // the string round-trips never touched).
+    let dir = fixture("output-file-uri");
+    let p = dir.join("f.bin").to_string_lossy().into_owned();
+    let q = dir.join("u.bin").to_string_lossy().into_owned();
+    let r = dir.join("w.txt").to_string_lossy().into_owned();
+    let mut eval = jio();
+    intern_uri(&mut eval, "ouf", &file_url(&q));
+    let (litp, litq, litr) = (clj_str(&p), clj_str(&q), clj_str(&r));
+    assert_eq!(
+        run(
+            &mut eval,
+            &format!(
+                "(let [s (io/output-stream (io/file {litp})) w (io/writer s)] \
+                 (binding [*out* w] (print \"f\")) (.close w) (.close s) (slurp {litp}))"
+            )
+        ),
+        r#""f""#
+    );
+    assert_eq!(
+        run(
+            &mut eval,
+            &format!(
+                "(let [s (io/output-stream ouf) w (io/writer s)] \
+                 (binding [*out* w] (print \"u\")) (.close w) (.close s) (slurp {litq}))"
+            )
+        ),
+        r#""u""#
+    );
+    assert_eq!(
+        run(
+            &mut eval,
+            &format!(
+                "(let [w (io/writer (io/file {litr}))] \
+                 (binding [*out* w] (print \"w\")) (.close w) (slurp {litr}))"
+            )
+        ),
+        r#""w""#
+    );
 }
 
 #[test]
@@ -1530,6 +1581,27 @@ fn stream_identity() {
             )
         ),
         "[true false false true]"
+    );
+    // Streams round-trip as map keys (identity `dyn_hash`, not
+    // the `hasheq` `(hash s)` above) and report JDK classes.
+    assert_eq!(
+        run(
+            &mut eval,
+            &format!(
+                "(let [s (io/input-stream {lit})] [(get (assoc {{}} s :v) s) (.. s (getClass) (getName)) (instance? (class s) s)])"
+            )
+        ),
+        r#"[:v "java.io.BufferedInputStream" true]"#
+    );
+    assert_eq!(
+        run(
+            &mut eval,
+            &format!(
+                "(let [s (io/output-stream {})] [(get (assoc {{}} s :v) s) (.. s (getClass) (getName)) (instance? (class s) s)])",
+                clj_str(&q)
+            )
+        ),
+        r#"[:v "java.io.BufferedOutputStream" true]"#
     );
 }
 
