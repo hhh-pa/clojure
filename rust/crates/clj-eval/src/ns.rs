@@ -68,6 +68,11 @@ const SPEC_GEN_ALPHA_CLJ: &str = include_str!("gen_alpha.clj");
 /// on-demand shape as [`SPEC_ALPHA_CLJ`].
 const SPEC_TEST_ALPHA_CLJ: &str = include_str!("spec_test_alpha.clj");
 
+/// The embedded `clojure.java.shell` facsimile (#120 slice 3):
+/// served on demand for `clojure/java/shell`, same shape as
+/// [`SPEC_ALPHA_CLJ`].
+const JAVA_SHELL_CLJ: &str = include_str!("java_shell.clj");
+
 /// The embedded tools.deps config-layer sources (gap-124 slice 1):
 /// each carries its own `ns` form and loads on demand through the
 /// ordinary `require` path (the `spec_alpha.clj` shape).
@@ -89,6 +94,10 @@ const TOOLS_DEPS_EXTENSIONS_DEPS_CLJ: &str = include_str!("tools_deps_extensions
 /// same on-demand shape as slices 1-2.
 const TOOLS_DEPS_UTIL_CONCURRENT_CLJ: &str = include_str!("tools_deps_util_concurrent.clj");
 const TOOLS_DEPS_CLJ: &str = include_str!("tools_deps.clj");
+/// The embedded `clojure.reflect` facsimile (#120 sub-slice 4):
+/// upstream map shapes over the emulated lattice, loaded on demand
+/// through the ordinary `require` path (the `spec_alpha.clj` shape).
+const REFLECT_CLJ: &str = include_str!("reflect.clj");
 
 pub(crate) fn npe(message: &str) -> NativeError {
     NativeError::new(ThrowClass::NullPointerException, message.to_owned())
@@ -1269,6 +1278,11 @@ const EMBEDDED_SOURCES: &[(&str, &str, &str)] = &[
         SPEC_TEST_ALPHA_CLJ,
     ),
     (
+        "clojure/java/shell",
+        "clojure/java/shell.clj",
+        JAVA_SHELL_CLJ,
+    ),
+    (
         "clojure/tools/deps/util/dir",
         "clojure/tools/deps/util/dir.clj",
         TOOLS_DEPS_UTIL_DIR_CLJ,
@@ -1318,6 +1332,7 @@ const EMBEDDED_SOURCES: &[(&str, &str, &str)] = &[
         "clojure/tools/deps.clj",
         TOOLS_DEPS_CLJ,
     ),
+    ("clojure/reflect", "clojure/reflect.clj", REFLECT_CLJ),
 ];
 
 /// Resolve a load root (no leading slash) to the `*file*` path and
@@ -1325,7 +1340,8 @@ const EMBEDDED_SOURCES: &[(&str, &str, &str)] = &[
 /// `clojure/spec/alpha` + `clojure/spec/gen/alpha`; gap-124 slices
 /// 1+2: the three tools.deps config namespaces plus the five SPI
 /// namespaces; slice 3: `util.concurrent` + the API namespace;
-/// the flat set lives here when S5D lands), then `.clj`
+/// #120 sub-slice 4: `clojure/reflect`; the flat set lives here
+/// when S5D lands), then `.clj`
 /// across every `*load-path*` dir, then `.cljc` (`RT.load` lookup
 /// order).
 fn resolve_source(eval: &Evaluator, root: &str) -> Result<(String, String), NativeError> {
@@ -1441,6 +1457,14 @@ pub(crate) fn load_one(
     // install-and-mark shape.
     if sym_str(lib) == crate::portdeps::PORT_NS {
         crate::portdeps::install_port_ns(eval);
+        mark_loaded(eval, lib)?;
+        return Ok(());
+    }
+    // #120 slice 3: `clojure.java.shell.impl` is a native
+    // namespace (the spawn helper, no source file): same
+    // install-and-mark shape.
+    if sym_str(lib) == crate::shell::SHELL_NS {
+        crate::shell::install_shell_ns(eval);
         mark_loaded(eval, lib)?;
         return Ok(());
     }
@@ -2451,6 +2475,7 @@ fn boot_install_natives(eval: &mut Evaluator) {
         .chain(crate::arrays::ARRAY_NATIVES.iter())
         .chain(crate::classemu::CLASS_EMU_NATIVES.iter())
         .chain(crate::classemu::CLASS_EMU_HIDDEN.iter())
+        .chain(crate::reflect::REFLECT_HIDDEN.iter())
     {
         let func: Arc<crate::ext::NativeImpl> = Arc::new(*f);
         eval.install_native("clojure.core", name, func);
