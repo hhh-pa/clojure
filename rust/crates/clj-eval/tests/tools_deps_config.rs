@@ -71,6 +71,23 @@ fn clj_str(s: &str) -> String {
     out
 }
 
+/// Rust-side canonical path, verbatim-stripped like the port
+/// (gap-124 slice 3 round 2: `File/getCanonicalFile` never emits
+/// `\\?\`, so expectations must not either).
+fn canon(p: &std::path::Path) -> String {
+    let s = std::fs::canonicalize(p)
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    match s.strip_prefix(r"\\?\") {
+        None => s,
+        Some(rest) => match rest.strip_prefix(r"UNC\") {
+            Some(unc) => format!(r"\\{unc}"),
+            None => rest.to_owned(),
+        },
+    }
+}
+
 /// Require the four slice namespaces with short aliases.
 fn require_tools(eval: &mut Evaluator) {
     eval.eval_source(
@@ -384,12 +401,6 @@ fn canonical_path_rows() {
     let dir = scratch("canonical-path");
     let sub = dir.join("sub");
     std::fs::create_dir_all(&sub).unwrap();
-    let canon = |p: &std::path::Path| {
-        std::fs::canonicalize(p)
-            .unwrap()
-            .to_string_lossy()
-            .into_owned()
-    };
     let dir_c = canon(&dir);
     // An existing path answers its canonical form (1- and 2-arity).
     assert_eq!(
@@ -536,17 +547,14 @@ fn the_dir_default_and_canonicalize() {
     let sub = dir.join("sub");
     std::fs::create_dir_all(&sub).unwrap();
     let dir_lit = clj_str(&dir.to_string_lossy());
-    let canon_sub = std::fs::canonicalize(&sub)
-        .unwrap()
-        .to_string_lossy()
-        .into_owned();
+    let canon_sub = canon(&sub);
     // Absolute passes through to canonical form.
     assert_eq!(
         run(
             &mut eval,
             &format!("(dir/with-dir {dir_lit} (dir/canonicalize {dir_lit}))")
         ),
-        clj_str(&std::fs::canonicalize(&dir).unwrap().to_string_lossy())
+        clj_str(&canon(&dir))
     );
     // Relative resolves against the pushed context.
     assert_eq!(
@@ -557,10 +565,7 @@ fn the_dir_default_and_canonicalize() {
         clj_str(&canon_sub)
     );
     // `..` against the context (and through a missing middle).
-    let dir_c = std::fs::canonicalize(&dir)
-        .unwrap()
-        .to_string_lossy()
-        .into_owned();
+    let dir_c = canon(&dir);
     assert_eq!(
         run(
             &mut eval,
@@ -591,14 +596,8 @@ fn with_dir_nesting_and_restore() {
     let inner = outer.join("inner");
     std::fs::create_dir_all(&inner).unwrap();
     let outer_lit = clj_str(&outer.to_string_lossy());
-    let outer_c = std::fs::canonicalize(&outer)
-        .unwrap()
-        .to_string_lossy()
-        .into_owned();
-    let inner_c = std::fs::canonicalize(&inner)
-        .unwrap()
-        .to_string_lossy()
-        .into_owned();
+    let outer_c = canon(&outer);
+    let inner_c = canon(&inner);
     // The body value returns; nesting restores level by level.
     let cwd = run(&mut eval, "dir/*the-dir*");
     assert_eq!(
@@ -707,10 +706,7 @@ fn bdd_read_project_deps_edn() {
         "{:paths [\"src\"], :deps #:my{lib #:local{:root \"../lib\"}}}"
     );
     // The project path helpers join under the context (canonical).
-    let proj_c = std::fs::canonicalize(&proj)
-        .unwrap()
-        .to_string_lossy()
-        .into_owned();
+    let proj_c = canon(&proj);
     assert_eq!(
         run(
             &mut eval,
@@ -729,7 +725,7 @@ fn bdd_read_project_deps_edn() {
                 clj_str(&proj.to_string_lossy())
             )
         ),
-        clj_str(&std::fs::canonicalize(&proj).unwrap().to_string_lossy())
+        clj_str(&canon(&proj))
     );
 }
 
