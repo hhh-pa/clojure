@@ -588,12 +588,17 @@ fn reader_uri_and_file_strings() {
         uncaught(&mut eval, "(io/reader uh)"),
         "java.lang.IllegalArgumentException | Not a file: http://h/x"
     );
-    // Other URL-shaped strings open literally (and miss).
+    // Other URL-shaped strings open literally (and miss — the miss
+    // class is platform-mapped: Unix names the missing literal path,
+    // Windows rejects the `:` spelling outright with os error 123).
     let got = uncaught(&mut eval, "(io/reader \"http://h/x\")");
+    #[cfg(not(windows))]
     assert!(
         got.starts_with("java.io.FileNotFoundException | http://h/x ("),
         "{got}"
     );
+    #[cfg(windows)]
+    assert!(got.starts_with("java.io.IOException | "), "{got}");
 }
 
 #[test]
