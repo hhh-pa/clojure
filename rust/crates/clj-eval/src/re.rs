@@ -92,6 +92,56 @@ fn groups_value(caps: &regex::Captures<'_>) -> Value {
     Value::Vector(Vector::from_vec(items))
 }
 
+/// Split `text` around matches of the `source` pattern (the
+/// JDK `Pattern.java#split` loop over the crate's `find_iter`,
+/// whose empty-match advance matches `Matcher.find`): a
+/// zero-width match at the start yields no empty leader, no
+/// match at all yields the whole input, a positive `limit` caps
+/// the parts (the last keeps the remainder), `0` drops trailing
+/// empties, negative keeps everything. Bad patterns report
+/// `PatternSyntaxException` (the crate text, like `re-pattern`).
+pub(crate) fn pattern_split(text: &str, source: &str, limit: i32) -> Result<Value, NativeError> {
+    let re = compile_source(source)?;
+    let limited = limit > 0;
+    let cap = i64::from(limit) - 1;
+    let mut parts: Vec<String> = Vec::new();
+    let mut index = 0;
+    let mut count: i64 = 0;
+    for m in re.find_iter(text) {
+        if !limited || count < cap {
+            if index == 0 && m.start() == 0 && m.is_empty() {
+                continue;
+            }
+            parts.push(text[index..m.start()].to_owned());
+            index = m.end();
+            count += 1;
+        } else if count == cap {
+            parts.push(text[index..].to_owned());
+            index = m.end();
+            count += 1;
+        }
+    }
+    if index == 0 {
+        return Ok(Value::Vector(Vector::from_vec(vec![Value::Str(
+            Arc::from(text),
+        )])));
+    }
+    if !limited || count < i64::from(limit) {
+        parts.push(text[index..].to_owned());
+    }
+    if limit == 0 {
+        while parts.last().is_some_and(|p| p.is_empty()) {
+            parts.pop();
+        }
+    }
+    Ok(Value::Vector(Vector::from_vec(
+        parts
+            .into_iter()
+            .map(|p| Value::Str(Arc::from(p)))
+            .collect(),
+    )))
+}
+
 /// `re-pattern`: a `Pattern` passes through, a `String` compiles;
 /// anything else fails the `String` cast (oracle `repat-long`:
 /// the JVM compiles the `String` argument, so a `Long` fails
