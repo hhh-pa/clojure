@@ -18,9 +18,12 @@
 //! file/behavior it pins. Divergences are the spec's A1-A5/D1/R1-R3
 //! (`docs/gap-124/slice-1.md`).
 //!
-//! Env-mutating coverage lives in ONE serial test
-//! (`user_config_dir_serial`) with save/restore — env vars are
-//! process-global, so no other test here touches them.
+//! Env-controlled coverage runs in subprocesses: each row spawns
+//! this test binary with `Command::env`/`env_remove` (safe —
+//! child-only) and asserts the child exits 0. Subprocesses are
+//! isolated by construction, so the old serial save/restore guard
+//! is unnecessary — no test here mutates process env (edition
+//! 2024 `set_var`/`remove_var` are `unsafe`, hence this shape).
 
 use clj_eval::{Evaluator, SourceError, boot};
 use clj_value::{PrintOpts, Value, pr_to_string};
@@ -122,6 +125,35 @@ fn write_dep(dir: &std::path::Path, name: &str, content: &str) -> String {
     }
     std::fs::write(&path, content).unwrap();
     path.to_string_lossy().into_owned()
+}
+
+/// Spawn this test binary running `test_name` (exact match) with
+/// `env` applied, asserting it exits successfully. Each entry is
+/// `Some(value)` (set) or `None` (remove) — `Command::env` and
+/// `env_remove` are safe (child-only), unlike in-process
+/// `set_var`/`remove_var`. On failure the child stdout/stderr
+/// print for diagnosis.
+fn run_child(test_name: &str, env: &[(&str, Option<&str>)]) {
+    let exe = std::env::current_exe().unwrap();
+    let mut cmd = std::process::Command::new(exe);
+    cmd.arg(test_name).arg("--exact").arg("--nocapture");
+    for (key, value) in env {
+        match value {
+            Some(v) => {
+                cmd.env(key, v);
+            }
+            None => {
+                cmd.env_remove(key);
+            }
+        }
+    }
+    let out = cmd.output().unwrap();
+    assert!(
+        out.status.success(),
+        "child {test_name} failed (env {env:?}):\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
 
 // ---- load (ns.rs resolve_source/load_one) ----
@@ -515,21 +547,48 @@ fn current_dir_rows() {
 #[test]
 fn getenv_rows() {
     // Upstream `System/getenv` (edn.clj `user-config-dir`).
+    // The set/unset rows run in subprocesses (hermetic env);
+    // the rows below need no env control.
     let mut eval = tools_eval();
-    // SAFETY: a unique var name no other test touches.
-    unsafe { std::env::set_var("CLJ_TD124_PROBE", "probe-value") };
-    assert_eq!(
-        run(&mut eval, "(port/getenv \"CLJ_TD124_PROBE\")"),
-        "\"probe-value\""
-    );
-    unsafe { std::env::remove_var("CLJ_TD124_PROBE") };
-    assert_eq!(run(&mut eval, "(port/getenv \"CLJ_TD124_PROBE\")"), "nil");
     assert_eq!(
         run(&mut eval, "(port/getenv \"CLJ_TD124_NEVER_SET\")"),
         "nil"
     );
     assert!(uncaught(&mut eval, "(port/getenv 42)").contains("java.lang.String"));
     assert!(uncaught(&mut eval, "(port/getenv)").contains("Wrong number of args"));
+    run_child(
+        "getenv_rows_child",
+        &[
+            ("__CLJ_TD124_CHILD", Some("getenv-set")),
+            ("CLJ_TD124_PROBE", Some("probe-value")),
+        ],
+    );
+    run_child(
+        "getenv_rows_child",
+        &[
+            ("__CLJ_TD124_CHILD", Some("getenv-unset")),
+            ("CLJ_TD124_PROBE", None),
+        ],
+    );
+}
+
+#[test]
+fn getenv_rows_child() {
+    // Subprocess worker for `getenv_rows`: skipped when run
+    // directly (no marker), asserted when spawned with env.
+    let mode = std::env::var("__CLJ_TD124_CHILD").unwrap_or_default();
+    if mode != "getenv-set" && mode != "getenv-unset" {
+        return;
+    }
+    let mut eval = tools_eval();
+    if mode == "getenv-set" {
+        assert_eq!(
+            run(&mut eval, "(port/getenv \"CLJ_TD124_PROBE\")"),
+            "\"probe-value\""
+        );
+    } else {
+        assert_eq!(run(&mut eval, "(port/getenv \"CLJ_TD124_PROBE\")"), "nil");
+    }
 }
 
 // ---- util.dir (util/dir.clj) ----
@@ -1741,143 +1800,182 @@ fn lib_location_dispatch_rows() {
     );
 }
 
-// ---- user config dir (edn.clj user-config-dir; SERIAL env) ----
-
-/// Save an env var's current value for later restore.
-fn save_env(name: &str) -> Option<String> {
-    std::env::var(name).ok()
-}
-
-/// Restore an env var to a saved value (or unset it).
-fn restore_env(name: &str, saved: Option<String>) {
-    // SAFETY: single-threaded within this test; every mutated var
-    // is restored before it returns.
-    unsafe {
-        match saved {
-            Some(v) => std::env::set_var(name, v),
-            None => std::env::remove_var(name),
-        }
-    }
-}
-
-/// Panic-safe env restore for the serial test: dropping the
-/// guard re-applies the entry saves even if an assert unwinds.
-struct EnvGuard {
-    saved: Vec<(&'static str, Option<String>)>,
-}
-
-impl Drop for EnvGuard {
-    fn drop(&mut self) {
-        for (name, value) in self.saved.drain(..) {
-            restore_env(name, value);
-        }
-    }
-}
-
-/// Set an env var for one precedence row.
-fn set_env(name: &str, val: &str) {
-    // SAFETY: single-threaded within this test; restored on exit.
-    unsafe { std::env::set_var(name, val) };
-}
-
-/// Unset an env var for one precedence row.
-fn unset_env(name: &str) {
-    // SAFETY: single-threaded within this test; restored on exit.
-    unsafe { std::env::remove_var(name) };
-}
+// ---- user config dir (edn.clj user-config-dir; subprocess env) ----
 
 #[test]
 fn user_config_dir_serial() {
     // Upstream edn.clj `user-config-dir`: `CLJ_CONFIG` >
-    // `XDG_CONFIG_HOME` > home. THE serial env test (spec §5): the
-    // only test here that mutates process env, with save/restore —
-    // it also hosts every `:standard` user/project behavior plus
-    // the user half of BDD scenario 2 (missing user file is nil).
-    // Home reads `$HOME`, else `%USERPROFILE%`, else the cwd
+    // `XDG_CONFIG_HOME` > home. Formerly THE serial env test
+    // (spec §5) with save/restore — now subprocess-isolated
+    // (see module docs): each row spawns the test binary with
+    // controlled env, so no serial guard or restore is needed
+    // (name retained for continuity). It also hosts every
+    // `:standard` user/project behavior plus the user half of
+    // BDD scenario 2 (missing user file is nil). Home reads
+    // `$HOME`, else `%USERPROFILE%`, else the cwd
     // (port-canonical — no `user.home` property here).
-    let saved_clj = save_env("CLJ_CONFIG");
-    let saved_xdg = save_env("XDG_CONFIG_HOME");
-    let saved_home = save_env("HOME");
-    let saved_profile = save_env("USERPROFILE");
-    // Backstop: restores the entry saves even on panic unwind
-    // (the explicit restores at the end stay — idempotent).
-    let _env_guard = EnvGuard {
-        saved: vec![
-            ("CLJ_CONFIG", saved_clj.clone()),
-            ("XDG_CONFIG_HOME", saved_xdg.clone()),
-            ("HOME", saved_home.clone()),
-            ("USERPROFILE", saved_profile.clone()),
-        ],
-    };
-    let mut eval = tools_eval();
     // `CLJ_CONFIG` wins over everything.
-    set_env("CLJ_CONFIG", "/cfg/clj");
-    set_env("XDG_CONFIG_HOME", "/xdg");
-    set_env("HOME", "/home/u");
-    assert_eq!(run(&mut eval, "(edn/user-config-dir)"), "\"/cfg/clj\"");
-    assert_eq!(
-        run(&mut eval, "(edn/user-deps-path)"),
-        "\"/cfg/clj/deps.edn\""
+    run_child(
+        "user_config_dir_serial_child",
+        &[
+            ("__CLJ_TD124_CHILD", Some("usercfg-row1-clj")),
+            ("CLJ_CONFIG", Some("/cfg/clj")),
+            ("XDG_CONFIG_HOME", Some("/xdg")),
+            ("HOME", Some("/home/u")),
+            ("USERPROFILE", None),
+        ],
     );
     // `XDG_CONFIG_HOME` wins when `CLJ_CONFIG` is unset.
-    unset_env("CLJ_CONFIG");
-    assert_eq!(run(&mut eval, "(edn/user-config-dir)"), "\"/xdg/clojure\"");
+    run_child(
+        "user_config_dir_serial_child",
+        &[
+            ("__CLJ_TD124_CHILD", Some("usercfg-row2-xdg")),
+            ("CLJ_CONFIG", None),
+            ("XDG_CONFIG_HOME", Some("/xdg")),
+            ("HOME", Some("/home/u")),
+            ("USERPROFILE", None),
+        ],
+    );
     // `$HOME` wins when both are unset.
-    unset_env("XDG_CONFIG_HOME");
-    assert_eq!(
-        run(&mut eval, "(edn/user-config-dir)"),
-        "\"/home/u/.clojure\""
+    run_child(
+        "user_config_dir_serial_child",
+        &[
+            ("__CLJ_TD124_CHILD", Some("usercfg-row3-home")),
+            ("CLJ_CONFIG", None),
+            ("XDG_CONFIG_HOME", None),
+            ("HOME", Some("/home/u")),
+            ("USERPROFILE", None),
+        ],
     );
     // `%USERPROFILE%` backs `$HOME` (Windows shape).
-    unset_env("HOME");
-    set_env("USERPROFILE", "C:\\Users\\u");
-    assert_eq!(
-        run(&mut eval, "(edn/user-config-dir)"),
-        "\"C:\\\\Users\\\\u/.clojure\""
+    run_child(
+        "user_config_dir_serial_child",
+        &[
+            ("__CLJ_TD124_CHILD", Some("usercfg-row4-profile")),
+            ("CLJ_CONFIG", None),
+            ("XDG_CONFIG_HOME", None),
+            ("HOME", None),
+            ("USERPROFILE", Some("C:\\Users\\u")),
+        ],
     );
     // The cwd backs both when neither is set.
-    unset_env("USERPROFILE");
-    let cwd = std::env::current_dir()
-        .unwrap()
-        .to_string_lossy()
-        .into_owned();
-    assert_eq!(
-        run(&mut eval, "(edn/user-config-dir)"),
-        clj_str(&format!("{cwd}/.clojure"))
+    run_child(
+        "user_config_dir_serial_child",
+        &[
+            ("__CLJ_TD124_CHILD", Some("usercfg-row5-cwd")),
+            ("CLJ_CONFIG", None),
+            ("XDG_CONFIG_HOME", None),
+            ("HOME", None),
+            ("USERPROFILE", None),
+        ],
     );
     // A user deps.edn reads through `CLJ_CONFIG`...
     let cfg = scratch("user-cfg");
     write_dep(&cfg, "deps.edn", "{:paths [\"u\"]}");
-    set_env("CLJ_CONFIG", &cfg.to_string_lossy());
-    assert_eq!(run(&mut eval, "(edn/user-deps)"), "{:paths [\"u\"]}");
+    let cfg_s = cfg.to_string_lossy().into_owned();
+    run_child(
+        "user_config_dir_serial_child",
+        &[
+            ("__CLJ_TD124_CHILD", Some("usercfg-user-present")),
+            ("CLJ_CONFIG", Some(&cfg_s)),
+            ("XDG_CONFIG_HOME", None),
+            ("HOME", None),
+            ("USERPROFILE", None),
+        ],
+    );
     // ...and a missing user file is nil (BDD scenario 2, user half).
     let empty_cfg = scratch("user-cfg-empty");
-    set_env("CLJ_CONFIG", &empty_cfg.to_string_lossy());
-    assert_eq!(run(&mut eval, "(edn/user-deps)"), "nil");
+    let empty_s = empty_cfg.to_string_lossy().into_owned();
+    run_child(
+        "user_config_dir_serial_child",
+        &[
+            ("__CLJ_TD124_CHILD", Some("usercfg-user-missing")),
+            ("CLJ_CONFIG", Some(&empty_s)),
+            ("XDG_CONFIG_HOME", None),
+            ("HOME", None),
+            ("USERPROFILE", None),
+        ],
+    );
     // `:standard` user/project resolve under the controlled env and
     // dir context (both create-edn-maps arities).
     let proj = scratch("user-cfg-proj");
     write_dep(&proj, "deps.edn", "{:paths [\"p\"]}");
-    set_env("CLJ_CONFIG", &cfg.to_string_lossy());
-    for call in ["(edn/create-edn-maps)", "(edn/create-edn-maps {})"] {
-        assert_eq!(
-            run(
-                &mut eval,
-                &format!("(dir/with-dir {} {call})", clj_str(&proj.to_string_lossy()))
-            ),
-            "{:root {}, :user {:paths [\"u\"]}, :project {:paths [\"p\"]}}",
-            "{call} chains root < user < project"
-        );
+    let proj_s = proj.to_string_lossy().into_owned();
+    run_child(
+        "user_config_dir_serial_child",
+        &[
+            ("__CLJ_TD124_CHILD", Some("usercfg-standard-chain")),
+            ("__CLJ_TD124_PROJ", Some(&proj_s)),
+            ("CLJ_CONFIG", Some(&cfg_s)),
+            ("XDG_CONFIG_HOME", None),
+            ("HOME", None),
+            ("USERPROFILE", None),
+        ],
+    );
+}
+
+#[test]
+fn user_config_dir_serial_child() {
+    // Subprocess worker: skipped when run directly (no marker).
+    let mode = std::env::var("__CLJ_TD124_CHILD").unwrap_or_default();
+    if !mode.starts_with("usercfg-") {
+        return;
     }
-    restore_env("CLJ_CONFIG", saved_clj.clone());
-    restore_env("XDG_CONFIG_HOME", saved_xdg.clone());
-    restore_env("HOME", saved_home.clone());
-    restore_env("USERPROFILE", saved_profile.clone());
-    // Restore verified: the saved values read back.
-    assert_eq!(save_env("CLJ_CONFIG"), saved_clj);
-    assert_eq!(save_env("XDG_CONFIG_HOME"), saved_xdg);
-    assert_eq!(save_env("HOME"), saved_home);
-    assert_eq!(save_env("USERPROFILE"), saved_profile);
+    let mut eval = tools_eval();
+    match mode.as_str() {
+        "usercfg-row1-clj" => {
+            assert_eq!(run(&mut eval, "(edn/user-config-dir)"), "\"/cfg/clj\"");
+            assert_eq!(
+                run(&mut eval, "(edn/user-deps-path)"),
+                "\"/cfg/clj/deps.edn\""
+            );
+        }
+        "usercfg-row2-xdg" => {
+            assert_eq!(run(&mut eval, "(edn/user-config-dir)"), "\"/xdg/clojure\"");
+        }
+        "usercfg-row3-home" => {
+            assert_eq!(
+                run(&mut eval, "(edn/user-config-dir)"),
+                "\"/home/u/.clojure\""
+            );
+        }
+        "usercfg-row4-profile" => {
+            assert_eq!(
+                run(&mut eval, "(edn/user-config-dir)"),
+                "\"C:\\\\Users\\\\u/.clojure\""
+            );
+        }
+        "usercfg-row5-cwd" => {
+            let cwd = std::env::current_dir()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned();
+            assert_eq!(
+                run(&mut eval, "(edn/user-config-dir)"),
+                clj_str(&format!("{cwd}/.clojure"))
+            );
+        }
+        "usercfg-user-present" => {
+            assert_eq!(run(&mut eval, "(edn/user-deps)"), "{:paths [\"u\"]}");
+        }
+        "usercfg-user-missing" => {
+            assert_eq!(run(&mut eval, "(edn/user-deps)"), "nil");
+        }
+        "usercfg-standard-chain" => {
+            let proj = std::env::var("__CLJ_TD124_PROJ").unwrap();
+            for call in ["(edn/create-edn-maps)", "(edn/create-edn-maps {})"] {
+                assert_eq!(
+                    run(
+                        &mut eval,
+                        &format!("(dir/with-dir {} {call})", clj_str(&proj))
+                    ),
+                    "{:root {}, :user {:paths [\"u\"]}, :project {:paths [\"p\"]}}",
+                    "{call} chains root < user < project"
+                );
+            }
+        }
+        _ => panic!("unknown child mode {mode}"),
+    }
 }
 
 // ---- reduce-kv drive-by (clojure.core) ----
