@@ -1553,6 +1553,14 @@ mod tests {
         let (names, walked) = rw.walk_pattern(&Value::Map(or));
         assert!(names.is_empty());
         assert_eq!(pr_exp(&walked), "{:or 7, :bogus 1}");
+        // A namespaced keyword is an ordinary entry, never a
+        // directive.
+        let nsed = new_map().insert(
+            Value::Keyword(Keyword::new(Some("n"), "keys")),
+            Value::Int(1),
+        );
+        let (names, _) = rw.walk_pattern(&Value::Map(nsed));
+        assert!(names.is_empty());
         let mut bound = Vec::new();
         push_bare_name(&Value::Int(5), &mut bound);
         push_bare_name(&sym_q("n", "y"), &mut bound);
