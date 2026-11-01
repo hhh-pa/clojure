@@ -16,7 +16,9 @@ Oracle versions (all paths `~/.m2/repository/org/clojure/…`):
   CLJS-only; out of scope.)
 - `core.specs.alpha/0.6.148-alpha12/…jar`:
   `clojure/core/specs/alpha.clj` (**261 lines**).
-- Port-side cites are `rust/crates/clj-eval/…` at the base commit.
+- Port-side cites are `rust/crates/clj-eval/…` at the base commit
+  `11ac1c72` (pre-#170 — point-in-time; later slices moved some
+  claims, noted where known).
 
 Line numbers below are against these exact files.
 
@@ -115,7 +117,10 @@ What breaks on the port, and what does not:
   `test.check`, `spec.gen`, `spec.test` hits only reader-corpus fixtures
   and one comment in `clj-eval/tests/re_rng.rs`. Slice 1 declares `gen*`/
   `with-gen*` on the `Spec` protocol but leaves them unextended
-  (`docs/gap-122/slice-1.md`, "Out of scope").
+  (`docs/gap-122/slice-1.md`, "Out of scope"). Point-in-time as of
+  the base commit: F1 (#170), F2 (#179), and the fdef finale (#181)
+  have since landed — see the slice-F1/F2/fdef docs for current
+  generator/fdef status.
 - `clojure.spec.gen.alpha` (227 lines) is a thin **dynaload shim** over
   test.check: `dynaload`/`quick-check`/`for-all*` (16-46), `delay`
   (55-66), `gen-for-name` (68-74), `lazy-combinator(s)`/`lazy-prim(s)`
