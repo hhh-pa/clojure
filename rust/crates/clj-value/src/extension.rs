@@ -282,7 +282,6 @@ fn throw_parent(jvm_name: &str) -> Option<&'static str> {
         "java.util.concurrent.RejectedExecutionException" => Some("java.lang.RuntimeException"),
         "java.lang.NumberFormatException" => Some("java.lang.IllegalArgumentException"),
         "java.io.FileNotFoundException" => Some("java.io.IOException"),
-        "java.io.UnsupportedEncodingException" => Some("java.io.IOException"),
         "java.io.IOException" => Some("java.lang.Exception"),
         "java.lang.ClassNotFoundException" => Some("java.lang.ReflectiveOperationException"),
         "java.lang.ReflectiveOperationException" => Some("java.lang.Exception"),
@@ -307,15 +306,18 @@ fn throw_parent(jvm_name: &str) -> Option<&'static str> {
 
 /// The linkage-error branch plus the S16 `NoSuchElementException`
 /// of [`throw_parent`] (split for the complexity budget; chains into
-/// [`throw_parent_format`]). The reflective pair
-/// (`ClassNotFoundException`/`ReflectiveOperationException`) lives in
-/// [`throw_parent`] proper — do not re-add it here (a duplicate arm
-/// would be dead: `throw_parent` matches first).
+/// [`throw_parent_format`]). Also hosts the slice-2
+/// `UnsupportedEncodingException` arm (moved out of
+/// [`throw_parent`] proper to hold its baselined budget). The
+/// reflective pair (`ClassNotFoundException`/`ReflectiveOperationException`)
+/// lives in [`throw_parent`] proper — do not re-add it here (a
+/// duplicate arm would be dead: `throw_parent` matches first).
 fn throw_parent_rest(jvm_name: &str) -> Option<&'static str> {
     match jvm_name {
         "java.lang.LinkageError" => Some("java.lang.Error"),
         "java.lang.IllegalAccessError" => Some("java.lang.LinkageError"),
         "java.util.NoSuchElementException" => Some("java.lang.RuntimeException"),
+        "java.io.UnsupportedEncodingException" => Some("java.io.IOException"),
         _ => throw_parent_format(jvm_name),
     }
 }
