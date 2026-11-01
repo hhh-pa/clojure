@@ -50,6 +50,9 @@ enum WriterKind {
         flush_fn: Box<Value>,
         close_fn: Box<Value>,
     },
+    FileText {
+        state: Arc<Mutex<FileWriterState>>,
+    },
 }
 
 /// The mutable state of a `PrintWriter-on`: the pending buffer and
@@ -64,6 +67,25 @@ struct PrintWriterState {
     autoflush: bool,
 }
 
+/// A file-backed writer: the open handle, its output charset,
+/// and the closed flag (one lock so the write/close
+/// check-and-set is atomic). Gap-120 slice 3: `clojure.java.io`
+/// `writer` results — printable through `*out*`, closable and
+/// flushable through the existing writer gates.
+#[derive(Debug)]
+struct FileWriterState {
+    file: std::fs::File,
+    charset: crate::ctor::Charset,
+    closed: bool,
+}
+
+/// A closed file writer/stream/reader reports the JDK text.
+/// Shared with the `clojure.java.io` facsimile and the stream
+/// reader close checks (gap-120 slice 3).
+pub(crate) fn stream_closed() -> NativeError {
+    NativeError::new(ThrowClass::IOException, "Stream closed".to_owned())
+}
+
 impl Writer {
     /// The JVM class name for a writer kind.
     fn class_of(kind: &WriterKind) -> &'static str {
@@ -72,6 +94,7 @@ impl Writer {
             WriterKind::Stderr => "java.io.PrintWriter",
             WriterKind::Buffer(_) => "java.io.StringWriter",
             WriterKind::PrintWriterOn { .. } => "java.io.PrintWriter",
+            WriterKind::FileText { .. } => "java.io.BufferedWriter",
         }
     }
 }
@@ -102,8 +125,9 @@ impl ExtensionValue for Writer {
     }
 }
 
-/// Downcast a value to a writer, if it is one.
-fn as_writer(v: &Value) -> Option<&Writer> {
+/// Downcast a value to a writer, if it is one. Shared with the
+/// `clojure.java.io` facsimile (writer passthrough).
+pub(crate) fn as_writer(v: &Value) -> Option<&Writer> {
     match v {
         Value::Extension(e) => e.as_any().downcast_ref::<Writer>(),
         _ => None,
@@ -125,6 +149,25 @@ pub(crate) fn stderr_writer(eval: &mut Evaluator) -> Value {
     Value::Extension(Arc::new(Writer {
         id: eval.next_id(),
         kind: WriterKind::Stderr,
+    }))
+}
+
+/// A fresh file-backed writer value over an open handle.
+/// Gap-120 slice 3: `clojure.java.io` `writer` results.
+pub(crate) fn file_writer(
+    eval: &mut Evaluator,
+    file: std::fs::File,
+    charset: crate::ctor::Charset,
+) -> Value {
+    Value::Extension(Arc::new(Writer {
+        id: eval.next_id(),
+        kind: WriterKind::FileText {
+            state: Arc::new(Mutex::new(FileWriterState {
+                file,
+                charset,
+                closed: false,
+            })),
+        },
     }))
 }
 
@@ -150,7 +193,8 @@ pub(crate) fn writer_contents(v: &Value) -> Option<String> {
 }
 
 /// An IO failure as an `IOException` carrying the OS message.
-fn io_err(e: std::io::Error) -> NativeError {
+/// Shared with the `clojure.java.io` facsimile (stream flush).
+pub(crate) fn io_err(e: std::io::Error) -> NativeError {
     NativeError::new(ThrowClass::IOException, e.to_string())
 }
 
@@ -197,7 +241,19 @@ pub(crate) fn write_to_writer(w: &Value, s: &str) -> Result<(), NativeError> {
             }
             Ok(())
         }
+        WriterKind::FileText { state } => write_file_text(state, s),
     }
+}
+
+/// One write to a file-backed writer: closed reports the JDK
+/// text, otherwise the charset-encoded bytes append.
+fn write_file_text(state: &Arc<Mutex<FileWriterState>>, s: &str) -> Result<(), NativeError> {
+    let mut st = state.lock().unwrap_or_else(|e| e.into_inner());
+    if st.closed {
+        return Err(stream_closed());
+    }
+    let bytes = crate::ctor::encode(st.charset, s);
+    st.file.write_all(&bytes).map_err(io_err)
 }
 
 /// A writer value's validity without writing (nil → the `write`
@@ -230,7 +286,7 @@ pub(crate) fn flush_out(eval: &mut Evaluator) -> Result<(), NativeError> {
             WriterKind::Stdout => {
                 std::io::stdout().lock().flush().map_err(io_err)?;
             }
-            WriterKind::PrintWriterOn { .. } => {
+            WriterKind::PrintWriterOn { .. } | WriterKind::FileText { .. } => {
                 flush_writer(eval, w)?;
             }
             WriterKind::Stderr | WriterKind::Buffer(_) => {}
@@ -239,16 +295,27 @@ pub(crate) fn flush_out(eval: &mut Evaluator) -> Result<(), NativeError> {
     Ok(())
 }
 
+/// Flush a writer: `PrintWriter-on` delivers its buffer,
+/// file-backed writers flush the handle (closed reports the JDK
+/// text), anything else is a no-op.
+fn flush_writer(eval: &mut Evaluator, w: &Writer) -> Result<(), NativeError> {
+    match &w.kind {
+        WriterKind::PrintWriterOn {
+            state, flush_fn, ..
+        } => flush_print_writer(eval, state, flush_fn),
+        WriterKind::FileText { state } => flush_file_writer(state),
+        WriterKind::Stdout | WriterKind::Stderr | WriterKind::Buffer(_) => Ok(()),
+    }
+}
+
 /// Deliver a `PrintWriter-on` buffer to its flush fn (skipped when
 /// empty — the buffer takes under the lock, the user fn runs after,
-/// so re-entrant writes land fresh; anything else is a no-op).
-fn flush_writer(eval: &mut Evaluator, w: &Writer) -> Result<(), NativeError> {
-    let WriterKind::PrintWriterOn {
-        state, flush_fn, ..
-    } = &w.kind
-    else {
-        return Ok(());
-    };
+/// so re-entrant writes land fresh).
+fn flush_print_writer(
+    eval: &mut Evaluator,
+    state: &Arc<Mutex<PrintWriterState>>,
+    flush_fn: &Value,
+) -> Result<(), NativeError> {
     let taken = {
         let mut st = state.lock().unwrap_or_else(|e| e.into_inner());
         std::mem::take(&mut st.buffer)
@@ -261,17 +328,38 @@ fn flush_writer(eval: &mut Evaluator, w: &Writer) -> Result<(), NativeError> {
         .map_err(signal_to_native)
 }
 
-/// Close a `PrintWriter-on`: flush first, then the close fn unless
-/// nil; second closes no-op; anything else is a no-op.
+/// Flush a file-backed writer (closed reports the JDK text).
+fn flush_file_writer(state: &Arc<Mutex<FileWriterState>>) -> Result<(), NativeError> {
+    let mut st = state.lock().unwrap_or_else(|e| e.into_inner());
+    if st.closed {
+        return Err(stream_closed());
+    }
+    st.file.flush().map_err(io_err)
+}
+
+/// Close a writer: `PrintWriter-on` flushes then runs its close
+/// fn, file-backed writers flush and latch (second closes no-op),
+/// anything else is a no-op.
 fn close_writer(eval: &mut Evaluator, w: &Writer) -> Result<(), NativeError> {
-    let WriterKind::PrintWriterOn {
-        state,
-        flush_fn,
-        close_fn,
-    } = &w.kind
-    else {
-        return Ok(());
-    };
+    match &w.kind {
+        WriterKind::PrintWriterOn {
+            state,
+            flush_fn,
+            close_fn,
+        } => close_print_writer(eval, state, flush_fn, close_fn),
+        WriterKind::FileText { state } => close_file_writer(state),
+        WriterKind::Stdout | WriterKind::Stderr | WriterKind::Buffer(_) => Ok(()),
+    }
+}
+
+/// Close a `PrintWriter-on`: flush first, then the close fn unless
+/// nil; second closes no-op.
+fn close_print_writer(
+    eval: &mut Evaluator,
+    state: &Arc<Mutex<PrintWriterState>>,
+    flush_fn: &Value,
+    close_fn: &Value,
+) -> Result<(), NativeError> {
     let taken = {
         let mut st = state.lock().unwrap_or_else(|e| e.into_inner());
         if st.closed {
@@ -285,12 +373,23 @@ fn close_writer(eval: &mut Evaluator, w: &Writer) -> Result<(), NativeError> {
             .map(|_| ())
             .map_err(signal_to_native)?;
     }
-    if !matches!(close_fn.as_ref(), Value::Nil) {
+    if !matches!(close_fn, Value::Nil) {
         eval.call(close_fn, &[])
             .map(|_| ())
             .map_err(signal_to_native)?;
     }
     Ok(())
+}
+
+/// Close a file-backed writer: flush and latch (second closes
+/// no-op, like the JVM).
+fn close_file_writer(state: &Arc<Mutex<FileWriterState>>) -> Result<(), NativeError> {
+    let mut st = state.lock().unwrap_or_else(|e| e.into_inner());
+    if st.closed {
+        return Ok(());
+    }
+    st.closed = true;
+    st.file.flush().map_err(io_err)
 }
 
 /// `close` on a writer value (`None` for non-writers — the miss
@@ -518,8 +617,9 @@ fn strerror(e: &std::io::Error) -> String {
 }
 
 /// A file failure: missing files name the path plus the bare OS
-/// message, anything else is the bare display.
-fn file_err(path: &str, e: std::io::Error) -> NativeError {
+/// message, anything else is the bare display. Shared with the
+/// `clojure.java.io` facsimile (gap-120 slice 3).
+pub(crate) fn file_err(path: &str, e: std::io::Error) -> NativeError {
     if e.kind() == std::io::ErrorKind::NotFound {
         NativeError::new(
             ThrowClass::FileNotFoundException,

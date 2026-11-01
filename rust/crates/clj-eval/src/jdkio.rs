@@ -291,6 +291,13 @@ fn as_file(v: &Value) -> Option<&JdkFile> {
     }
 }
 
+/// The path of an emulated file (`None` for non-files).
+/// Gap-120 slice 3: the `clojure.java.io` facsimile opens,
+/// joins, and deletes through this.
+pub(crate) fn file_path(v: &Value) -> Option<String> {
+    as_file(v).map(|f| f.path.to_string())
+}
+
 /// An emulated `java.util.Enumeration` over `items` (the only
 /// construction surface — Clojure code consumes handles it is
 /// given).

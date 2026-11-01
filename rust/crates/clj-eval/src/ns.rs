@@ -1427,6 +1427,14 @@ pub(crate) fn load_one(
         mark_loaded(eval, lib)?;
         return Ok(());
     }
+    // Gap-120 slice 3: `clojure.java.io` is a native namespace
+    // (the file/stream facsimile, no source file): same
+    // install-and-mark shape.
+    if sym_str(lib) == crate::jio::JIO_NS {
+        crate::jio::install_jio_ns(eval);
+        mark_loaded(eval, lib)?;
+        return Ok(());
+    }
     let root = root_resource(lib.name());
     load_paths(
         eval,

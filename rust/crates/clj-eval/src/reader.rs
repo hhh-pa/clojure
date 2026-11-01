@@ -57,6 +57,10 @@ impl std::fmt::Debug for StreamReader {
 struct StreamState {
     parser: Reader,
     stdin: Option<BufReader<Stdin>>,
+    /// Latched by `.close` (gap-120 slice 3: `with-open` over
+    /// `clojure.java.io` readers); reads past it report the JDK
+    /// "Stream closed" text.
+    closed: bool,
     /// Scripted input lines (tests only): drained before live
     /// stdin, so retry tests never touch process stdin.
     #[cfg(test)]
@@ -99,6 +103,28 @@ pub(crate) fn as_reader(v: &Value) -> Option<&StreamReader> {
     }
 }
 
+/// `close` on a stream reader value (`None` for non-readers —
+/// the miss shapes; void, so never a bean key). Latches closed
+/// (second closes no-op, like the JVM); gap-120 slice 3.
+pub(crate) fn close_reader_value(e: &Arc<dyn ExtensionValue>) -> Option<Result<Value, NativeError>> {
+    let r = e.as_any().downcast_ref::<StreamReader>()?;
+    Some(close_stream_reader(r).map(|()| Value::Nil))
+}
+
+/// Latch a stream reader closed (idempotent).
+fn close_stream_reader(r: &StreamReader) -> Result<(), NativeError> {
+    lock_state(r).closed = true;
+    Ok(())
+}
+
+/// Reads past `.close` report the JDK text (gap-120 slice 3).
+fn check_reader_open(r: &StreamReader) -> Result<(), NativeError> {
+    if lock_state(r).closed {
+        return Err(crate::io::stream_closed());
+    }
+    Ok(())
+}
+
 /// A fresh stdin reader value (the `*in*` root): an empty parser
 /// fed line by line from process stdin.
 pub(crate) fn stdin_reader(eval: &mut Evaluator) -> Value {
@@ -107,6 +133,7 @@ pub(crate) fn stdin_reader(eval: &mut Evaluator) -> Value {
         state: Arc::new(Mutex::new(StreamState {
             parser: Reader::new("", &ReaderOpts::default()),
             stdin: Some(BufReader::new(std::io::stdin())),
+            closed: false,
             #[cfg(test)]
             script_lines: VecDeque::new(),
         })),
@@ -121,6 +148,7 @@ pub(crate) fn string_reader(eval: &mut Evaluator, s: &str) -> Value {
         state: Arc::new(Mutex::new(StreamState {
             parser: Reader::new(s, &ReaderOpts::default()),
             stdin: None,
+            closed: false,
             #[cfg(test)]
             script_lines: VecDeque::new(),
         })),
@@ -875,6 +903,7 @@ fn run_read(
     opts: &ReaderOpts,
     capture: bool,
 ) -> Result<(Value, String), NativeError> {
+    check_reader_open(reader)?;
     let mark = lock_state(reader).parser.capture_mark();
     // Entry options, installed once: re-seeding per attempt would
     // wipe legit firings mid-discard on stdin retries (H2 —
@@ -1114,6 +1143,7 @@ fn native_read_line(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nativ
     let Some(reader) = as_reader(&stream_value) else {
         return Err(cce_err(&stream_value, "java.io.BufferedReader"));
     };
+    check_reader_open(reader)?;
     let mut state = lock_state(reader);
     if let Some(line) = state.parser.read_line() {
         return Ok(Value::Str(Arc::from(line.as_str())));
