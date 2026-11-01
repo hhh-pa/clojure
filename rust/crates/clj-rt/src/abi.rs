@@ -171,22 +171,28 @@ pub unsafe extern "C" fn rt_vec_push(vec: *mut Value, elem: *mut Value) -> *mut 
 /// FX1 D-argv): `argv[0]` (the program name) is skipped; no
 /// remaining args is nil, else a list of strings — the JVM
 /// shape (fx1-argv probe). Bytes decode lossy (like the JVM's
-/// platform decode).
+/// platform decode). A null entry becomes nil (defensive: real
+/// C `argv[1..argc]` is never null, but a null would otherwise
+/// be instant UB in `CStr::from_ptr`).
 ///
 /// # Safety
 ///
-/// `argv` must be valid for `argc` entries (`argc >= 0`), each a
-/// valid NUL-terminated C string.
+/// `argv` must be valid for `argc` entries (`argc >= 0`), each
+/// either null or a valid NUL-terminated C string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rt_argv(argv: *const *const c_char, argc: i32) -> *mut Value {
     let mut items = Vec::new();
     // Safety: the caller guarantees validity (see module docs).
     for i in 1..argc {
         let entry = unsafe { *argv.offset(i as isize) };
-        let text = unsafe { CStr::from_ptr(entry) }
-            .to_string_lossy()
-            .into_owned();
-        items.push(Value::Str(Arc::from(text.as_str())));
+        if entry.is_null() {
+            items.push(Value::Nil);
+        } else {
+            let text = unsafe { CStr::from_ptr(entry) }
+                .to_string_lossy()
+                .into_owned();
+            items.push(Value::Str(Arc::from(text.as_str())));
+        }
     }
     if items.is_empty() {
         give(Value::Nil)

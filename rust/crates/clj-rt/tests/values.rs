@@ -97,6 +97,19 @@ fn argv_skips_program_name_and_nils_when_empty() {
 }
 
 #[test]
+fn argv_null_entry_becomes_nil() {
+    // G1 audit: a null entry is defined (nil) instead of UB in
+    // `CStr::from_ptr` — real C argv never carries one, but a
+    // buggy caller must not trigger UB.
+    use std::ffi::CString;
+    use std::ptr;
+    let prog = CString::new("prog").unwrap();
+    let a = CString::new("a").unwrap();
+    let argv = [prog.as_ptr(), ptr::null(), a.as_ptr()];
+    assert_eq!(render(unsafe { rt_argv(argv.as_ptr(), 3) }), "(nil a)");
+}
+
+#[test]
 fn vec_push_onto_non_vector_degrades_to_fresh() {
     let not_vec = inbox(Value::Int(9));
     let vec = unsafe { rt_vec_push(not_vec, inbox(Value::Int(1))) };
