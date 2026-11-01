@@ -1406,6 +1406,31 @@ fn close_flush_miss_shapes() {
     );
 }
 
+#[test]
+fn stream_identity() {
+    // Streams compare by identity (like every other opaque
+    // handle) and hash as map keys.
+    let dir = fixture("stream-ident");
+    let p = write_bytes(&dir, "i.bin", b"x");
+    let mut eval = jio();
+    let lit = clj_str(&p);
+    assert_eq!(
+        run(
+            &mut eval,
+            &format!("(let [s (io/input-stream {lit})] [(= s s) (= s (io/input-stream {lit})) (= s 1) (integer? (hash s))])")
+        ),
+        "[true false false true]"
+    );
+    let q = dir.join("o.bin").to_string_lossy().into_owned();
+    assert_eq!(
+        run(
+            &mut eval,
+            &format!("(let [s (io/output-stream {})] [(= s s) (= s (io/output-stream {})) (= s 1) (integer? (hash s))])", clj_str(&q), clj_str(&q))
+        ),
+        "[true false false true]"
+    );
+}
+
 // --- namespace shape ---
 
 #[test]
