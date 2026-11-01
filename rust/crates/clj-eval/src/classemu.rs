@@ -3472,6 +3472,9 @@ fn surface_class_member(
     let Value::Class(c) = target else {
         return None;
     };
+    if let Some(hit) = surface_class_static(eval, meth, c, rest) {
+        return Some(hit);
+    }
     match (meth, rest.len()) {
         ("getName", 0) => Some(Ok(Value::Str(Arc::from(c.name())))),
         ("getSimpleName", 0) => Some(Ok(Value::Str(Arc::from(simple_name_of(c.name()).as_str())))),
@@ -3482,16 +3485,6 @@ fn surface_class_member(
         ("isInstance", 1) => Some(Ok(Value::Bool(is_instance_of(eval, c.name(), &rest[0])))),
         ("isAssignableFrom", 1) => Some(assignable_from(eval, c, &rest[0])),
         ("cast", 1) => Some(cast_to_class(eval, c, &rest[0])),
-        // Statics resolve through instance position on class values
-        // (oracle `dotdot-static`); `Class` and `System` have tabled
-        // statics, so anything else falls to the miss arm, like any
-        // non-class target misses through.
-        ("forName", 1..=3) if c.name() == "java.lang.Class" => Some(static_forname(eval, rest)),
-        ("getProperty", 1..=2) if c.name() == "java.lang.System" => Some(static_getproperty(rest)),
-        ("lineSeparator", 0) if c.name() == "java.lang.System" => Some(static_lineseparator(rest)),
-        ("identityHashCode", 1) if c.name() == "java.lang.System" => {
-            Some(static_identity_hashcode(rest))
-        }
         // Classes miss method-shape at every arity (unlike other
         // values, whose 0-arg misses read field-first).
         _ => Some(Err(crate::types::no_method(
@@ -3499,6 +3492,30 @@ fn surface_class_member(
             rest.len(),
             &crate::error::jvm_class_of(target),
         ))),
+    }
+}
+
+/// Statics resolvable through instance position on class values
+/// (oracle `dotdot-static`); `Class` and `System` have tabled
+/// statics, so anything else is `None` (the caller falls through
+/// to the reflection members and their miss arm, like any
+/// non-class target misses through). Split out so both halves
+/// stay under the complexity ratchet; the arm sets are disjoint
+/// by method name, so checking statics first is order-irrelevant.
+fn surface_class_static(
+    eval: &mut Evaluator,
+    meth: &str,
+    c: &Arc<ClassVal>,
+    rest: &[Value],
+) -> Option<Result<Value, NativeError>> {
+    match (meth, rest.len()) {
+        ("forName", 1..=3) if c.name() == "java.lang.Class" => Some(static_forname(eval, rest)),
+        ("getProperty", 1..=2) if c.name() == "java.lang.System" => Some(static_getproperty(rest)),
+        ("lineSeparator", 0) if c.name() == "java.lang.System" => Some(static_lineseparator(rest)),
+        ("identityHashCode", 1) if c.name() == "java.lang.System" => {
+            Some(static_identity_hashcode(rest))
+        }
+        _ => None,
     }
 }
 
