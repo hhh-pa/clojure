@@ -84,6 +84,11 @@ const TOOLS_DEPS_EXTENSIONS_LOCAL_CLJ: &str = include_str!("tools_deps_extension
 const TOOLS_DEPS_EXTENSIONS_GIT_CLJ: &str = include_str!("tools_deps_extensions_git.clj");
 const TOOLS_DEPS_EXTENSIONS_DEPS_CLJ: &str = include_str!("tools_deps_extensions_deps.clj");
 
+/// The embedded `clojure.reflect` facsimile (#120 sub-slice 4):
+/// upstream map shapes over the emulated lattice, loaded on demand
+/// through the ordinary `require` path (the `spec_alpha.clj` shape).
+const REFLECT_CLJ: &str = include_str!("reflect.clj");
+
 pub(crate) fn npe(message: &str) -> NativeError {
     NativeError::new(ThrowClass::NullPointerException, message.to_owned())
 }
@@ -1302,13 +1307,15 @@ const EMBEDDED_SOURCES: &[(&str, &str, &str)] = &[
         "clojure/tools/deps/extensions/deps.clj",
         TOOLS_DEPS_EXTENSIONS_DEPS_CLJ,
     ),
+    ("clojure/reflect", "clojure/reflect.clj", REFLECT_CLJ),
 ];
 
 /// Resolve a load root (no leading slash) to the `*file*` path and
 /// text: embedded libs first (gap-122 slices 1+F1:
 /// `clojure/spec/alpha` + `clojure/spec/gen/alpha`; gap-124 slices
 /// 1+2: the three tools.deps config namespaces plus the five SPI
-/// namespaces; the flat set lives here when S5D lands), then `.clj`
+/// namespaces; #120 sub-slice 4: `clojure/reflect`; the flat set
+/// lives here when S5D lands), then `.clj`
 /// across every `*load-path*` dir, then `.cljc` (`RT.load` lookup
 /// order).
 fn resolve_source(eval: &Evaluator, root: &str) -> Result<(String, String), NativeError> {
@@ -2434,6 +2441,7 @@ fn boot_install_natives(eval: &mut Evaluator) {
         .chain(crate::arrays::ARRAY_NATIVES.iter())
         .chain(crate::classemu::CLASS_EMU_NATIVES.iter())
         .chain(crate::classemu::CLASS_EMU_HIDDEN.iter())
+        .chain(crate::reflect::REFLECT_HIDDEN.iter())
     {
         let func: Arc<crate::ext::NativeImpl> = Arc::new(*f);
         eval.install_native("clojure.core", name, func);
