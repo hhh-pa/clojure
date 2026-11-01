@@ -53,6 +53,7 @@
 (show-chain "o3-nilname-badinit" "(Class/forName nil \"bad\" nil)")
 (show-chain "o3-nilnilnil" "(Class/forName nil nil nil)")
 (show-chain "o3-missing-nilnil" "(Class/forName \"missing.K\" nil nil)")
+(show-chain "o3-init-unbox-first" "(Class/forName \"java.lang.String\" nil \"x\")")
 (show-chain "forName-loader-real" "(Class/forName \"java.lang.String\" true (ClassLoader/getSystemClassLoader))")
 
 ;; --- 2-arg forName ---

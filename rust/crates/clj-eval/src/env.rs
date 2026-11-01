@@ -1225,22 +1225,8 @@ impl Env {
         }
     }
 
-    /// A private copy of this frame (copy-on-`recur`: the old
-    /// frame stays intact for closures that captured it).
-    #[must_use]
-    pub fn duplicate(&self) -> Self {
-        let slots = self
-            .slots
-            .lock()
-            .map(|slots| slots.clone())
-            .unwrap_or_default();
-        Self {
-            slots: Arc::new(std::sync::Mutex::new(slots)),
-        }
-    }
-
-    /// Overwrite one slot (`letfn`/named-`fn` patching only; `recur`
-    /// duplicates first).
+    /// Overwrite one slot (`letfn`/named-`fn` patching only;
+    /// `recur` rebinds a fresh frame instead since #171).
     pub fn set(&self, idx: usize, value: Value) {
         // Poison is unreachable (nothing panics while holding a
         // frame lock); recover like `SharedRegistry::lock` so a

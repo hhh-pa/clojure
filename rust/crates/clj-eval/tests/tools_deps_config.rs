@@ -1650,7 +1650,7 @@ fn combine_aliases_rules() {
 #[test]
 fn git_lib_location_defers() {
     // The `:git` method is not-yet: it throws deferring to the git
-    // slice (temporary — unlike the permanent `:mvn` refusal).
+    // network slice (temporary — unlike the permanent `:mvn` refusal).
     let mut eval = tools_eval();
     for coord in [
         "{:git/url \"https://x\"}",
@@ -1662,7 +1662,7 @@ fn git_lib_location_defers() {
                 &mut eval,
                 &format!("(ext/lib-location 'my/lib {coord} nil)")
             ),
-            "clojure.lang.ExceptionInfo | Cannot resolve git coordinate for my/lib: deferred to the git slice",
+            "clojure.lang.ExceptionInfo | Cannot resolve git coordinate for my/lib: deferred to the git-network slice",
             "{coord} defers"
         );
     }
@@ -1703,7 +1703,7 @@ fn lib_location_dispatch_rows() {
     // Legacy `:sha` dispatches to `:git` (upstream key set).
     assert_eq!(
         uncaught(&mut eval, "(ext/lib-location 'my/lib {:sha \"abc\"} nil)"),
-        "clojure.lang.ExceptionInfo | Cannot resolve git coordinate for my/lib: deferred to the git slice"
+        "clojure.lang.ExceptionInfo | Cannot resolve git coordinate for my/lib: deferred to the git-network slice"
     );
     // Unknown map coords throw from dispatch (upstream text,
     // `{:coord}`-only data — no lib).

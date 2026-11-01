@@ -2612,17 +2612,6 @@ pub(crate) fn static_member_arities(fqn: &str, member: &str) -> Option<&'static 
     }
 }
 
-/// Whether `member` names a known static (any class): nil targets
-/// NPE on known static names at every arity (oracle
-/// `nil-forName-0/1/3`, `nil-forName-5`) — arity-blind, unlike the
-/// `(member, argc)` surface table, so this stays out of
-/// [`SURFACE_MEMBERS`] (whose 0-arg method-shape would contradict
-/// the oracle's field-shape for statics on non-class targets,
-/// `inst-forName-str`).
-pub(crate) fn static_member_name(member: &str) -> bool {
-    matches!(member, "forName")
-}
-
 /// Whether a lattice name is an interface (the uniform ctor miss
 /// reads `for interface` for interfaces, `for class` otherwise —
 /// oracles `ctor-iface`, `ctor-abstract`). Unknown names read
@@ -2630,7 +2619,6 @@ pub(crate) fn static_member_name(member: &str) -> bool {
 pub(crate) fn lattice_is_iface(fqn: &str) -> bool {
     static_row(fqn).is_some_and(|r| r.iface)
 }
-
 /// `__static*`: `(FQN member args…)` — the analyzer's static-call
 /// lowering plus the instance-position consult for class values.
 /// Known members dispatch; anything else is the oracle's
@@ -2671,11 +2659,13 @@ fn static_forname(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeE
     }
 }
 
-/// The 3-arg overload: casts run in order and nil-permissive
-/// (oracle `o3-name-first`, `o3-init-first`, `o3-missing-badinit`,
-/// `o3-nilname-badinit`), then the `initialize` unbox NPEs (oracle
-/// `forName-nil-init`, `o3-nilnilnil`, `o3-missing-nilnil`),
-/// then the name deref NPEs, and only then does the name resolve.
+/// The 3-arg overload: the JVM coerces static-call args
+/// left-to-right (name checkcast, `initialize` unbox, loader
+/// checkcast — oracle `o3-init-unbox-first`), so the unbox NPEs
+/// before a bad loader CCEs. Name/init casts stay nil-permissive
+/// (oracle `o3-name-first`, `o3-init-first`,
+/// `o3-missing-badinit`, `o3-nilname-badinit`); then the name
+/// deref NPEs, and only then does the name resolve.
 fn forname_three(
     eval: &mut Evaluator,
     name: &Value,
@@ -2686,15 +2676,15 @@ fn forname_three(
     if !matches!(init, Value::Nil | Value::Bool(_)) {
         return Err(crate::core::cce_err(init, "java.lang.Boolean"));
     }
-    if !matches!(loader, Value::Nil) {
-        return Err(crate::core::cce_err(loader, "java.lang.ClassLoader"));
-    }
     if matches!(init, Value::Nil) {
         return Err(NativeError::new(
             ThrowClass::NullPointerException,
             "Cannot invoke \"java.lang.Boolean.booleanValue()\" because \"initialize\" is null"
                 .to_owned(),
         ));
+    }
+    if !matches!(loader, Value::Nil) {
+        return Err(crate::core::cce_err(loader, "java.lang.ClassLoader"));
     }
     // The resolve NPEs a nil name after the unbox (oracle
     // `o3-nilnilnil`).
@@ -3476,15 +3466,7 @@ pub(crate) const SURFACE_MEMBERS: &[(&str, usize)] = &[
     ("toString", 0),
 ];
 
-/// Whether `(member, argc)` resolves against the surface (the
-/// nil-target rule consults this ignoring the target's kind — keep
-/// in sync with [`surface_meth`]; the unit test sweeps every pair).
-pub(crate) fn surface_member_hit(meth: &str, argc: usize) -> bool {
-    SURFACE_MEMBERS.contains(&(meth, argc))
-}
-
-/// Whether `meth` names any surface member (any arity): 0-arg
-/// misses on real members read method-shape.
+/// Whether `meth` names any surface member (any arity).
 pub(crate) fn surface_member_name(meth: &str) -> bool {
     SURFACE_MEMBERS.iter().any(|(name, _)| *name == meth)
 }

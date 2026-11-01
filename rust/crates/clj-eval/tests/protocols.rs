@@ -449,7 +449,7 @@ fn with_open_nonclose() {
     prelude(&mut eval);
     assert_eq!(
         uncaught(&mut eval, "(with-open [c 5] c)"),
-        "java.lang.IllegalArgumentException | No matching method close found taking 0 args for class java.lang.Long"
+        "java.lang.IllegalArgumentException | No matching field found: close for class java.lang.Long"
     );
 }
 

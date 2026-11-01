@@ -391,8 +391,8 @@ fn dtor_field_errors() {
 
 #[test]
 fn dtor_method_on_other_values() {
-    // The fenced surface answers uniformly off-host (including
-    // `nil` — a documented divergence from the JVM's NPE).
+    // The fenced surface answers uniformly off-host; `nil`
+    // targets NPE like the JVM (oracle `nil-nosuch-*`).
     let mut eval = boot();
     assert_eq!(
         uncaught(&mut eval, "(.foo 5)"),
@@ -404,7 +404,7 @@ fn dtor_method_on_other_values() {
     );
     assert_eq!(
         uncaught(&mut eval, "(.foo nil)"),
-        "java.lang.IllegalArgumentException | No matching field found: foo for class null"
+        "java.lang.NullPointerException | Cannot invoke \"Object.getClass()\" because \"target\" is null"
     );
 }
 
