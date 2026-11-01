@@ -3415,8 +3415,9 @@ fn gated_writer_close(eval: &mut Evaluator, target: &Value) -> Option<Result<Val
 /// callable, never a bean key).
 fn gated_writer_flush(eval: &mut Evaluator, target: &Value) -> Option<Result<Value, NativeError>> {
     match target {
-        Value::Extension(e) => crate::io::flush_writer_value(eval, e)
-            .or_else(|| crate::jio::flush_stream_value(e)),
+        Value::Extension(e) => {
+            crate::io::flush_writer_value(eval, e).or_else(|| crate::jio::flush_stream_value(e))
+        }
         _ => None,
     }
 }

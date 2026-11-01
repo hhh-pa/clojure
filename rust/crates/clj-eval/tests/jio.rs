@@ -113,15 +113,9 @@ fn file_str_is_literal() {
 #[test]
 fn file_passthrough_equal_by_path() {
     let mut eval = jio();
+    assert_eq!(run(&mut eval, r#"(= (io/file "a") (io/file "a"))"#), "true");
     assert_eq!(
-        run(&mut eval, r#"(= (io/file "a") (io/file "a"))"#),
-        "true"
-    );
-    assert_eq!(
-        run(
-            &mut eval,
-            r#"(let [f (io/file "a")] (= f (io/file f)))"#
-        ),
+        run(&mut eval, r#"(let [f (io/file "a")] (= f (io/file f)))"#),
         "true"
     );
 }
@@ -154,10 +148,7 @@ fn file_join() {
 fn file_join_trailing_separator_never_doubles() {
     let mut eval = jio();
     assert_eq!(run(&mut eval, r#"(str (io/file "a/" "b"))"#), r#""a/b""#);
-    assert_eq!(
-        run(&mut eval, r#"(str (io/file "a\\" "b"))"#),
-        r#""a\\b""#
-    );
+    assert_eq!(run(&mut eval, r#"(str (io/file "a\\" "b"))"#), r#""a\\b""#);
 }
 
 #[test]
@@ -336,9 +327,7 @@ fn reader_passthrough_ignores_opts() {
     assert_eq!(
         run(
             &mut eval,
-            &format!(
-                "(let [r (io/reader {lit})] (identical? r (io/reader r :encoding \"BAD\")))"
-            )
+            &format!("(let [r (io/reader {lit})] (identical? r (io/reader r :encoding \"BAD\")))")
         ),
         "true"
     );
@@ -350,10 +339,7 @@ fn reader_odd_opts() {
     let p = write_bytes(&dir, "r.txt", b"x\n");
     let mut eval = jio();
     assert_eq!(
-        uncaught(
-            &mut eval,
-            &format!("(io/reader {} :encoding)", clj_str(&p))
-        ),
+        uncaught(&mut eval, &format!("(io/reader {} :encoding)", clj_str(&p))),
         "java.lang.IllegalArgumentException | No value supplied for key: :encoding"
     );
 }
@@ -443,7 +429,10 @@ fn reader_unknown_opts_ignored() {
 fn reader_byte_array() {
     let mut eval = jio();
     assert_eq!(
-        run(&mut eval, "(vec (line-seq (io/reader (byte-array [65 10 66]))))"),
+        run(
+            &mut eval,
+            "(vec (line-seq (io/reader (byte-array [65 10 66]))))"
+        ),
         r#"["A" "B"]"#
     );
     // Invalid UTF-8 becomes U+FFFD (lossy, like the JDK default).
@@ -460,10 +449,7 @@ fn reader_byte_array() {
         r#"["A"]"#
     );
     assert_eq!(
-        uncaught(
-            &mut eval,
-            "(io/reader (byte-array [65]) :encoding \"BAD\")"
-        ),
+        uncaught(&mut eval, "(io/reader (byte-array [65]) :encoding \"BAD\")"),
         "java.io.UnsupportedEncodingException | BAD"
     );
 }
@@ -472,7 +458,10 @@ fn reader_byte_array() {
 fn reader_char_array() {
     let mut eval = jio();
     assert_eq!(
-        run(&mut eval, "(vec (line-seq (io/reader (char-array \"hi\"))))"),
+        run(
+            &mut eval,
+            "(vec (line-seq (io/reader (char-array \"hi\"))))"
+        ),
         r#"["hi"]"#
     );
     // Char inputs never consult the charset (no UEE possible).
@@ -567,8 +556,9 @@ fn reader_miss_pr_shapes() {
         &format!("(let [w (io/writer {})] (io/reader w))", clj_str(&p)),
     );
     assert!(
-        got.starts_with("java.lang.IllegalArgumentException | Cannot open <#object[java.io.BufferedWriter")
-            && got.ends_with("> as an InputStream."),
+        got.starts_with(
+            "java.lang.IllegalArgumentException | Cannot open <#object[java.io.BufferedWriter"
+        ) && got.ends_with("> as an InputStream."),
         "{got}"
     );
 }
@@ -603,12 +593,7 @@ fn reader_latin1() {
 
 /// Print `texts` (each a Clojure string literal) to a fresh
 /// writer over `path` with `opts`, close it, and slurp back.
-fn write_then_slurp(
-    eval: &mut Evaluator,
-    path: &str,
-    opts: &str,
-    texts: &[&str],
-) -> String {
+fn write_then_slurp(eval: &mut Evaluator, path: &str, opts: &str, texts: &[&str]) -> String {
     let lit = clj_str(path);
     let prints = texts
         .iter()
@@ -617,7 +602,9 @@ fn write_then_slurp(
         .join(" ");
     run(
         eval,
-        &format!("(let [w (io/writer {lit} {opts})] (binding [*out* w] {prints}) (.close w) (slurp {lit}))"),
+        &format!(
+            "(let [w (io/writer {lit} {opts})] (binding [*out* w] {prints}) (.close w) (slurp {lit}))"
+        ),
     )
 }
 
@@ -626,19 +613,10 @@ fn writer_roundtrip_and_class() {
     let dir = fixture("writer-roundtrip");
     let p = dir.join("w.txt").to_string_lossy().into_owned();
     let mut eval = jio();
-    assert_eq!(
-        write_then_slurp(&mut eval, &p, "", &[r#""hi""#]),
-        r#""hi""#
-    );
+    assert_eq!(write_then_slurp(&mut eval, &p, "", &[r#""hi""#]), r#""hi""#);
     // Writers print as `java.io.BufferedWriter` (upstream class).
-    let shown = run(
-        &mut eval,
-        &format!("(pr-str (io/writer {}))", clj_str(&p)),
-    );
-    assert!(
-        shown.contains("java.io.BufferedWriter"),
-        "{shown}"
-    );
+    let shown = run(&mut eval, &format!("(pr-str (io/writer {}))", clj_str(&p)));
+    assert!(shown.contains("java.io.BufferedWriter"), "{shown}");
 }
 
 #[test]
@@ -650,7 +628,9 @@ fn writer_append_and_truncate() {
     assert_eq!(
         run(
             &mut eval,
-            &format!("(let [w (io/writer {lit} :append true)] (binding [*out* w] (print \"b\")) (.close w) (slurp {lit}))")
+            &format!(
+                "(let [w (io/writer {lit} :append true)] (binding [*out* w] (print \"b\")) (.close w) (slurp {lit}))"
+            )
         ),
         r#""ab""#
     );
@@ -658,7 +638,9 @@ fn writer_append_and_truncate() {
     assert_eq!(
         run(
             &mut eval,
-            &format!("(let [w (io/writer {lit} :append false :append true)] (binding [*out* w] (print \"c\")) (.close w) (slurp {lit}))")
+            &format!(
+                "(let [w (io/writer {lit} :append false :append true)] (binding [*out* w] (print \"c\")) (.close w) (slurp {lit}))"
+            )
         ),
         r#""abc""#
     );
@@ -666,7 +648,9 @@ fn writer_append_and_truncate() {
     assert_eq!(
         run(
             &mut eval,
-            &format!("(let [w (io/writer {lit})] (binding [*out* w] (print \"z\")) (.close w) (slurp {lit}))")
+            &format!(
+                "(let [w (io/writer {lit})] (binding [*out* w] (print \"z\")) (.close w) (slurp {lit}))"
+            )
         ),
         r#""z""#
     );
@@ -675,7 +659,11 @@ fn writer_append_and_truncate() {
 #[test]
 fn writer_missing_dir() {
     let dir = fixture("writer-missing");
-    let bad = dir.join("no-dir").join("f.txt").to_string_lossy().into_owned();
+    let bad = dir
+        .join("no-dir")
+        .join("f.txt")
+        .to_string_lossy()
+        .into_owned();
     let mut eval = jio();
     let got = uncaught(&mut eval, &format!("(io/writer {})", clj_str(&bad)));
     assert!(
@@ -769,7 +757,11 @@ fn writer_uri_shapes() {
     assert_eq!(
         run(
             &mut eval,
-            &format!("(let [w (io/writer {})] (binding [*out* w] (print \"v\")) (.close w) (slurp {}))", clj_str(&file_url), clj_str(&q))
+            &format!(
+                "(let [w (io/writer {})] (binding [*out* w] (print \"v\")) (.close w) (slurp {}))",
+                clj_str(&file_url),
+                clj_str(&q)
+            )
         ),
         r#""v""#
     );
@@ -925,10 +917,7 @@ fn input_stream_roundtrip() {
         ),
         "true"
     );
-    let shown = run(
-        &mut eval,
-        &format!("(pr-str (io/input-stream {lit}))"),
-    );
+    let shown = run(&mut eval, &format!("(pr-str (io/input-stream {lit}))"));
     assert!(shown.contains("java.io.BufferedInputStream"), "{shown}");
 }
 
@@ -1089,7 +1078,10 @@ fn output_stream_flush_and_double_close() {
     let mut eval = jio();
     let lit = clj_str(&p);
     assert_eq!(
-        run(&mut eval, &format!("(let [s (io/output-stream {lit})] (.flush s))")),
+        run(
+            &mut eval,
+            &format!("(let [s (io/output-stream {lit})] (.flush s))")
+        ),
         "nil"
     );
     assert_eq!(
@@ -1138,7 +1130,10 @@ fn delete_missing_throws_naming_arg() {
     let missing = dir.join("nope.txt").to_string_lossy().into_owned();
     let mut eval = jio();
     assert_eq!(
-        uncaught(&mut eval, &format!("(io/delete-file {})", clj_str(&missing))),
+        uncaught(
+            &mut eval,
+            &format!("(io/delete-file {})", clj_str(&missing))
+        ),
         format!("java.io.IOException | Couldn't delete {missing}")
     );
     // The message names the ORIGINAL arg (a `File` prints its path).
@@ -1154,7 +1149,10 @@ fn delete_silently_answers_value() {
     let missing = dir.join("nope.txt").to_string_lossy().into_owned();
     let mut eval = jio();
     let lit = clj_str(&missing);
-    assert_eq!(run(&mut eval, &format!("(io/delete-file {lit} :ok)")), ":ok");
+    assert_eq!(
+        run(&mut eval, &format!("(io/delete-file {lit} :ok)")),
+        ":ok"
+    );
     // Falsy `silently` still throws (and success answers `true`
     // even with a falsy second arg).
     assert_eq!(
@@ -1167,7 +1165,10 @@ fn delete_silently_answers_value() {
     );
     let p = write_bytes(&dir, "d.txt", b"x");
     assert_eq!(
-        run(&mut eval, &format!("(io/delete-file {} false)", clj_str(&p))),
+        run(
+            &mut eval,
+            &format!("(io/delete-file {} false)", clj_str(&p))
+        ),
         "true"
     );
 }
@@ -1201,7 +1202,10 @@ fn delete_dirs() {
     std::fs::create_dir(&empty).unwrap();
     let empty_s = empty.to_string_lossy().into_owned();
     assert_eq!(
-        run(&mut eval, &format!("(io/delete-file {})", clj_str(&empty_s))),
+        run(
+            &mut eval,
+            &format!("(io/delete-file {})", clj_str(&empty_s))
+        ),
         "true"
     );
     // Non-empty dirs fail (silently or throwing), like the JVM.
@@ -1267,7 +1271,10 @@ fn close_reader_and_reads_past_it() {
     let mut eval = jio();
     let lit = clj_str(&p);
     assert_eq!(
-        run(&mut eval, &format!("(let [r (io/reader {lit})] (.close r))")),
+        run(
+            &mut eval,
+            &format!("(let [r (io/reader {lit})] (.close r))")
+        ),
         "nil"
     );
     // Second closes no-op.
@@ -1320,7 +1327,10 @@ fn close_flush_writer_file() {
     let mut eval = jio();
     let lit = clj_str(&p);
     assert_eq!(
-        run(&mut eval, &format!("(let [w (io/writer {lit})] (.flush w))")),
+        run(
+            &mut eval,
+            &format!("(let [w (io/writer {lit})] (.flush w))")
+        ),
         "nil"
     );
     assert_eq!(
@@ -1348,7 +1358,9 @@ fn close_flush_writer_file() {
     assert_eq!(
         run(
             &mut eval,
-            &format!("(let [w (io/writer {lit})] (binding [*out* w] (print \"f\") (flush)) (slurp {lit}))")
+            &format!(
+                "(let [w (io/writer {lit})] (binding [*out* w] (print \"f\") (flush)) (slurp {lit}))"
+            )
         ),
         r#""f""#
     );
@@ -1389,12 +1401,12 @@ fn ns_surface_is_six_publics() {
         r#"["delete-file" "file" "input-stream" "output-stream" "reader" "writer"]"#
     );
     // Reloading reinstalls cleanly.
+    assert_eq!(run(&mut eval, "(require 'clojure.java.io :reload)"), "nil");
     assert_eq!(
-        run(&mut eval, "(require 'clojure.java.io :reload)"),
-        "nil"
-    );
-    assert_eq!(
-        run(&mut eval, "(map str (sort (keys (ns-publics 'clojure.java.io))))"),
+        run(
+            &mut eval,
+            "(map str (sort (keys (ns-publics 'clojure.java.io))))"
+        ),
         r#"["delete-file" "file" "input-stream" "output-stream" "reader" "writer"]"#
     );
 }

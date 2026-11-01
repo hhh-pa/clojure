@@ -106,7 +106,9 @@ pub(crate) fn as_reader(v: &Value) -> Option<&StreamReader> {
 /// `close` on a stream reader value (`None` for non-readers —
 /// the miss shapes; void, so never a bean key). Latches closed
 /// (second closes no-op, like the JVM); gap-120 slice 3.
-pub(crate) fn close_reader_value(e: &Arc<dyn ExtensionValue>) -> Option<Result<Value, NativeError>> {
+pub(crate) fn close_reader_value(
+    e: &Arc<dyn ExtensionValue>,
+) -> Option<Result<Value, NativeError>> {
     let r = e.as_any().downcast_ref::<StreamReader>()?;
     Some(close_stream_reader(r).map(|()| Value::Nil))
 }
