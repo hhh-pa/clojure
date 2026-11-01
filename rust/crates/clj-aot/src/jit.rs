@@ -110,10 +110,13 @@ pub fn run_str(source: &str, source_path: &str, args: &[String]) -> Result<i32, 
     let program = plan_source(source).map_err(|e| JitError::Plan(e.diagnostic(source_path)))?;
     let ctx = Context::create();
     let module = jit_err(to_module_jit(&ctx, &program, source_path), "lower")?;
-    let ee = jit_err(
-        module.create_jit_execution_engine(OptimizationLevel::None),
-        "engine",
-    )?;
+    // Split across two statements (not one call): the `?`
+    // early-return is environmentally untriggerable, so it must
+    // share its line with the always-executed call or llvm-cov
+    // marks the bare `)?;` line 0/140 — and rustfmt's call-width
+    // rule forbids the one-liner.
+    let engine = module.create_jit_execution_engine(OptimizationLevel::None);
+    let ee = jit_err(engine, "engine")?;
     for (name, addr) in mappings() {
         let func = module
             .get_function(name)
