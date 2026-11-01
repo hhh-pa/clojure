@@ -191,10 +191,10 @@ fn native_file_exists(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, Na
 /// existing ancestor prefix canonicalizes and the missing tail
 /// rejoins lexically (`.` dropped, `..` popping — the JDK
 /// normalizes those lexically too). Total: never throws.
-/// Windows verbatim (`\\?\`) prefixes pass through unstripped:
-/// comparisons stay canonical-vs-canonical, and stripping would
-/// need platform-conditional branches the Linux-only coverage
-/// gate cannot see.
+/// Windows verbatim (`\\?\`) prefixes are stripped (the JVM never
+/// emits them, and verbatim form forbids the `/` joins
+/// downstream): the strip is a pure string fn, so the Linux-only
+/// coverage gate still sees every line.
 fn canonical_path_str(base: Option<&str>, path: &str) -> String {
     let cwd = std::env::current_dir().unwrap_or_default();
     let anchor = match base {
