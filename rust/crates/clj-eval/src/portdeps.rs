@@ -9,7 +9,8 @@
 //! Gap-124 slice 1: the `clojure.tools.deps.util.port` substrate —
 //! the natives upstream tools.deps gets from `java.io`/`System`
 //! (file reads, canonical paths, the working directory, env vars,
-//! slice 2 adds the is-file probe), which the port deliberately
+//! slice 2 adds the is-file probe, slice 3 the processor count,
+//! path separator, and thread id), which the port deliberately
 //! lacks. Installed lazily by
 //! [`install_port_ns`] (the gap-123 `install_async_ns` shape):
 //! requiring the namespace installs the natives and marks it
@@ -190,10 +191,10 @@ fn native_file_exists(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, Na
 /// existing ancestor prefix canonicalizes and the missing tail
 /// rejoins lexically (`.` dropped, `..` popping — the JDK
 /// normalizes those lexically too). Total: never throws.
-/// Windows verbatim (`\\?\`) prefixes pass through unstripped:
-/// comparisons stay canonical-vs-canonical, and stripping would
-/// need platform-conditional branches the Linux-only coverage
-/// gate cannot see.
+/// Windows verbatim (`\\?\`) prefixes are stripped (the JVM never
+/// emits them, and verbatim form forbids the `/` joins
+/// downstream): the strip is a pure string fn, so the Linux-only
+/// coverage gate still sees every line.
 fn canonical_path_str(base: Option<&str>, path: &str) -> String {
     let cwd = std::env::current_dir().unwrap_or_default();
     let anchor = match base {
@@ -240,7 +241,27 @@ fn canonical_path_str(base: Option<&str>, path: &str) -> String {
         }
     }
     let out = std::fs::canonicalize(&prefix).unwrap_or(prefix);
-    join_tail(out, &tail).to_string_lossy().into_owned()
+    let joined = join_tail(out, &tail).to_string_lossy().into_owned();
+    strip_verbatim_prefix(&joined)
+}
+
+/// Strip Rust's Windows verbatim prefix (`\\?\`) from a
+/// canonical path (gap-124 slice 3, review round 2): the JVM's
+/// canonical path never carries one, and verbatim form forbids
+/// the `/` joins downstream (`child-path` builds
+/// `\\?\C:\…/deps.edn`, which Windows rejects — manifest lookup
+/// fails). `\\?\C:\…` → `C:\…`, `\\?\UNC\s\…` → `\\s\…`;
+/// anything else passes through untouched (so Unix behavior is
+/// identical). Pure string fn, covered on every platform.
+fn strip_verbatim_prefix(s: &str) -> String {
+    let Some(rest) = s.strip_prefix(r"\\?\") else {
+        return s.to_owned();
+    };
+    if let Some(unc) = rest.strip_prefix(r"UNC\") {
+        format!(r"\\{unc}")
+    } else {
+        rest.to_owned()
+    }
 }
 
 /// Rejoin a missing tail (leaf-first) onto its canonical
@@ -320,6 +341,67 @@ fn native_getenv(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeE
     }
 }
 
+/// `available-processors`: the machine's CPU count as a long
+/// (upstream `Runtime/availableProcessors` — the default
+/// `:threads` for `resolve-deps`). Falls back to 1 when the
+/// platform cannot report a count (so the value is always
+/// positive). Gap-124 slice 3.
+fn native_available_processors(
+    _eval: &mut Evaluator,
+    args: &[Value],
+) -> Result<Value, NativeError> {
+    check_arity(
+        "clojure.tools.deps.util.port/available-processors",
+        args,
+        &[0],
+    )?;
+    let n = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
+    Ok(Value::Int(i64::try_from(n).unwrap_or(1).max(1)))
+}
+
+/// The platform classpath separator (upstream
+/// `File/pathSeparator`): `#[cfg]` items, not `cfg!` arms, so the
+/// Linux-only coverage gate never sees the foreign platform's line.
+#[cfg(windows)]
+fn platform_path_sep() -> &'static str {
+    ";"
+}
+
+/// The platform classpath separator on non-Windows (see above).
+#[cfg(not(windows))]
+fn platform_path_sep() -> &'static str {
+    ":"
+}
+
+/// `path-separator`: the platform classpath separator as a string
+/// (upstream `File/pathSeparator`). Gap-124 slice 3: deliberately
+/// platform-exact (not an A7-style pin — external tools split
+/// classpaths on it).
+fn native_path_separator(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.tools.deps.util.port/path-separator", args, &[0])?;
+    Ok(Value::Str(Arc::from(platform_path_sep())))
+}
+
+/// The next per-thread id (see [`native_thread_id`]).
+static NEXT_THREAD_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+// The calling thread's id, assigned once from `NEXT_THREAD_ID`
+// (a plain comment: doc comments on macro invocations trip the
+// workspace `unused` deny lint).
+thread_local! {
+    static THREAD_ID: u64 = NEXT_THREAD_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// `thread-id`: the calling thread's id as a long (upstream
+/// `Thread/currentThread .getId` — the `retrieve-local` scope
+/// key). Ids are monotonic and unique among live threads (never
+/// reused, a stronger guarantee than the JVM's). Gap-124 slice 3.
+fn native_thread_id(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.tools.deps.util.port/thread-id", args, &[0])?;
+    let id = THREAD_ID.with(|t| *t);
+    Ok(Value::Int(i64::try_from(id).unwrap_or(i64::MAX)))
+}
+
 /// The port-substrate natives (installed lazily by
 /// [`install_port_ns`] — never referred into `user`).
 pub(crate) const PORT_NATIVES: &[(&str, NativeFnPtr)] = &[
@@ -329,6 +411,9 @@ pub(crate) const PORT_NATIVES: &[(&str, NativeFnPtr)] = &[
     ("canonical-path", native_canonical_path),
     ("current-dir", native_current_dir),
     ("getenv", native_getenv),
+    ("available-processors", native_available_processors),
+    ("path-separator", native_path_separator),
+    ("thread-id", native_thread_id),
 ];
 
 /// Install the `clojure.tools.deps.util.port` namespace
@@ -338,5 +423,30 @@ pub(crate) fn install_port_ns(eval: &mut Evaluator) {
     for (name, f) in PORT_NATIVES {
         let func: Arc<crate::ext::NativeImpl> = Arc::new(*f);
         eval.install_native(PORT_NS, name, func);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::strip_verbatim_prefix;
+
+    #[test]
+    fn verbatim_prefix_strips_to_plain_paths() {
+        // Disk-verbatim and UNC-verbatim collapse to the JVM
+        // shapes; everything else passes through (Unix paths
+        // never carry the prefix).
+        assert_eq!(
+            strip_verbatim_prefix(r"\\?\C:\Users\a"),
+            r"C:\Users\a".to_owned()
+        );
+        assert_eq!(
+            strip_verbatim_prefix(r"\\?\UNC\srv\share\d"),
+            r"\\srv\share\d".to_owned()
+        );
+        assert_eq!(
+            strip_verbatim_prefix(r"C:\Users\a"),
+            r"C:\Users\a".to_owned()
+        );
+        assert_eq!(strip_verbatim_prefix("/tmp/x"), "/tmp/x".to_owned());
     }
 }
