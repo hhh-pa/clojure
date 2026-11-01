@@ -207,30 +207,30 @@ fn file_arity() {
 fn file_uri_shapes() {
     let mut eval = jio();
     intern_uri(&mut eval, "u1", "file:///tmp/a%20b");
-    // Paths normalize to `/` for the assertions (Windows emits `\`,
+    // Platform paths, pr-quoted (Windows emits `\`, escaped by `pr`,
     // like `java.io.File.getPath`).
     assert_eq!(
-        run(&mut eval, "(str (io/file u1))").replace('\\', "/"),
-        r#""/tmp/a b""#
+        run(&mut eval, "(str (io/file u1))"),
+        clj_str(&format!("{0}tmp{0}a b", sep()))
     );
     // The authority drops (even `localhost`).
     intern_uri(&mut eval, "u2", "file://host/x");
     assert_eq!(
-        run(&mut eval, "(str (io/file u2))").replace('\\', "/"),
-        r#""/x""#
+        run(&mut eval, "(str (io/file u2))"),
+        clj_str(&format!("{0}x", sep()))
     );
     intern_uri(&mut eval, "u3", "file://host");
     assert_eq!(run(&mut eval, "(str (io/file u3))"), r#""""#);
     // Schemes match case-insensitively; `+` stays literal.
     intern_uri(&mut eval, "u4", "FILE:/q");
     assert_eq!(
-        run(&mut eval, "(str (io/file u4))").replace('\\', "/"),
-        r#""/q""#
+        run(&mut eval, "(str (io/file u4))"),
+        clj_str(&format!("{0}q", sep()))
     );
     intern_uri(&mut eval, "u5", "file:/a+b");
     assert_eq!(
-        run(&mut eval, "(str (io/file u5))").replace('\\', "/"),
-        r#""/a+b""#
+        run(&mut eval, "(str (io/file u5))"),
+        clj_str(&format!("{0}a+b", sep()))
     );
     intern_uri(&mut eval, "u6", "file:rel");
     assert_eq!(run(&mut eval, "(str (io/file u6))"), r#""rel""#);
@@ -244,7 +244,7 @@ fn file_uri_drive_letter() {
     let mut eval = jio();
     intern_uri(&mut eval, "ud", "file:///C:/x");
     #[cfg(windows)]
-    assert_eq!(run(&mut eval, "(str (io/file ud))"), r#""C:\x""#);
+    assert_eq!(run(&mut eval, "(str (io/file ud))"), clj_str("C:\\x"));
     #[cfg(not(windows))]
     assert_eq!(run(&mut eval, "(str (io/file ud))"), r#""/C:/x""#);
 }
