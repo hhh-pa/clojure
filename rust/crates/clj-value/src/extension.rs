@@ -146,6 +146,14 @@ impl ThrowClass {
             Self::IllegalFormatConversionException => "java.util.IllegalFormatConversionException",
             Self::UnknownFormatConversionException => "java.util.UnknownFormatConversionException",
             Self::MissingFormatConversionException => "java.util.MissingFormatConversionException",
+            other => other.jvm_name_mid_tail(),
+        }
+    }
+
+    /// Trailing format throw classes, split from
+    /// [`ThrowClass::jvm_name_mid`] for the complexity budget.
+    fn jvm_name_mid_tail(&self) -> &'static str {
+        match self {
             Self::MissingFormatArgumentException => "java.util.MissingFormatArgumentException",
             Self::IllegalFormatPrecisionException => "java.util.IllegalFormatPrecisionException",
             Self::IllegalFormatCodePointException => "java.util.IllegalFormatCodePointException",
