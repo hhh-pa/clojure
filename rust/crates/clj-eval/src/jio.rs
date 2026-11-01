@@ -315,13 +315,14 @@ fn join_path(parent: Option<&str>, child: &str) -> String {
 
 /// A `file:` URI's local path: the authority drops (the JDK
 /// `URL.getFile` route keeps path+query only — even
-/// `localhost` vanishes), `/` takes the platform separator,
-/// `%XX` decodes (`+` stays literal). Anything else is the
-/// upstream `Not a file` IAE (D2/D5: no network, no
+/// `localhost` vanishes), a `/` ahead of a `X:/` drive drops on
+/// Windows (the JDK `File(URI)` route), `/` takes the platform
+/// separator, `%XX` decodes (`+` stays literal). Anything else is
+/// the upstream `Not a file` IAE (D2/D5: no network, no
 /// `MalformedURLException`).
 fn uri_file_path(text: &str) -> Result<String, NativeError> {
     match strip_file_scheme(text) {
-        Some(rest) => Ok(percent_decode(&separators(strip_authority(rest)))),
+        Some(rest) => Ok(file_uri_local_path(rest)),
         None => Err(not_a_file(text)),
     }
 }
@@ -357,6 +358,32 @@ fn strip_authority(rest: &str) -> &str {
         Some(i) => &after[i..],
         None => "",
     }
+}
+
+/// Drop the `/` ahead of a `X:/` drive (`file:///C:/x` → `C:/x`).
+/// Windows-only, like the JDK `File(URI)` route — anywhere else a
+/// leading slash is a legitimate absolute path and survives.
+#[cfg(windows)]
+fn strip_drive_slash(s: &str) -> &str {
+    let b = s.as_bytes();
+    if b.len() > 2 && b[0] == b'/' && b[2] == b':' && b[1].is_ascii_alphabetic() {
+        &s[1..]
+    } else {
+        s
+    }
+}
+
+/// No drives off Windows: the remainder survives verbatim.
+#[cfg(not(windows))]
+fn strip_drive_slash(s: &str) -> &str {
+    s
+}
+
+/// A `file:` URI's local path from its scheme-stripped remainder,
+/// shared by the read/write/`file` routes: authority, drive slash,
+/// separators, escapes, in that order (see [`uri_file_path`]).
+fn file_uri_local_path(rest: &str) -> String {
+    percent_decode(&separators(strip_drive_slash(strip_authority(rest))))
 }
 
 /// `/` becomes the platform separator (a Unix no-op scan —
@@ -483,7 +510,7 @@ fn chars_of(v: &Value) -> Option<String> {
 /// else opens literally.
 fn string_path(s: &str) -> String {
     match strip_file_scheme(s) {
-        Some(rest) => percent_decode(&separators(strip_authority(rest))),
+        Some(rest) => file_uri_local_path(rest),
         None => s.to_owned(),
     }
 }
@@ -677,7 +704,7 @@ fn writer_of_path(
 /// words — verbatim).
 fn uri_output_path(u: &str) -> Result<String, NativeError> {
     match strip_file_scheme(u) {
-        Some(rest) => Ok(percent_decode(&separators(strip_authority(rest)))),
+        Some(rest) => Ok(file_uri_local_path(rest)),
         None => Err(NativeError::new(
             ThrowClass::IllegalArgumentException,
             format!("Can not write to non-file URL <{u}>"),

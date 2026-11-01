@@ -77,6 +77,14 @@ fn clj_str(s: &str) -> String {
     out
 }
 
+/// A `file:` URL spelling for an absolute fs path — well-formed
+/// on every platform (Windows needs the third slash before `C:`;
+/// the bare `file://{p}` form parks the drive in the authority
+/// slot there and resolves drive-relative).
+fn file_url(p: &str) -> String {
+    format!("file:///{}", p.replace('\\', "/").trim_start_matches('/'))
+}
+
 /// A scratch dir unique to this test (parallel-safe), wiped first.
 fn fixture(name: &str) -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(format!("clj-jio-{name}-{}", std::process::id()));
@@ -215,6 +223,19 @@ fn file_uri_shapes() {
 }
 
 #[test]
+fn file_uri_drive_letter() {
+    // `file:///C:/x` drops the redundant slash ahead of the drive on
+    // Windows (the JDK `File(URI)` route); anywhere else the leading
+    // slash is a legitimate absolute path and survives.
+    let mut eval = jio();
+    intern_uri(&mut eval, "ud", "file:///C:/x");
+    #[cfg(windows)]
+    assert_eq!(run(&mut eval, "(str (io/file ud))"), r#""C:\x""#);
+    #[cfg(not(windows))]
+    assert_eq!(run(&mut eval, "(str (io/file ud))"), r#""/C:/x""#);
+}
+
+#[test]
 fn file_uri_not_a_file() {
     let mut eval = jio();
     intern_uri(&mut eval, "uhttp", "http://h/x");
@@ -244,11 +265,7 @@ fn file_uri_percent_edges() {
         ("a%7E", "[\"tilde\"]"),
         ("a%41b", "[\"mix\"]"),
     ] {
-        let url = format!(
-            "file://{}/{}",
-            dir.to_string_lossy().replace('\\', "/"),
-            name
-        );
+        let url = file_url(&dir.join(name).to_string_lossy());
         assert_eq!(
             run(
                 &mut eval,
@@ -536,17 +553,17 @@ fn reader_uri_and_file_strings() {
     let dir = fixture("reader-uri");
     let p = write_bytes(&dir, "r.txt", b"u\n");
     let mut eval = jio();
-    intern_uri(&mut eval, "uf", &format!("file://{}", p.replace('\\', "/")));
+    intern_uri(&mut eval, "uf", &file_url(&p));
     assert_eq!(
         run(&mut eval, "(vec (line-seq (io/reader uf)))"),
         r#"["u"]"#
     );
     // `file:` strings resolve too (D2-positive half).
-    let file_url = format!("file://{}", p.replace('\\', "/"));
+    let url = file_url(&p);
     assert_eq!(
         run(
             &mut eval,
-            &format!("(vec (line-seq (io/reader {})))", clj_str(&file_url))
+            &format!("(vec (line-seq (io/reader {})))", clj_str(&url))
         ),
         r#"["u"]"#
     );
@@ -760,7 +777,7 @@ fn writer_uri_shapes() {
     let dir = fixture("writer-uri");
     let p = dir.join("w.txt").to_string_lossy().into_owned();
     let mut eval = jio();
-    intern_uri(&mut eval, "uf", &format!("file://{}", p.replace('\\', "/")));
+    intern_uri(&mut eval, "uf", &file_url(&p));
     assert_eq!(
         run(
             &mut eval,
@@ -779,13 +796,13 @@ fn writer_uri_shapes() {
     );
     // `file:` strings resolve too.
     let q = dir.join("v.txt").to_string_lossy().into_owned();
-    let file_url = format!("file://{}", q.replace('\\', "/"));
+    let url = file_url(&q);
     assert_eq!(
         run(
             &mut eval,
             &format!(
                 "(let [w (io/writer {})] (binding [*out* w] (print \"v\")) (.close w) (slurp {}))",
-                clj_str(&file_url),
+                clj_str(&url),
                 clj_str(&q)
             )
         ),
@@ -1050,7 +1067,7 @@ fn input_stream_opts_and_uri() {
         ),
         r#"["x"]"#
     );
-    intern_uri(&mut eval, "uf", &format!("file://{}", p.replace('\\', "/")));
+    intern_uri(&mut eval, "uf", &file_url(&p));
     assert_eq!(
         run(
             &mut eval,
@@ -1308,7 +1325,7 @@ fn delete_uri() {
     let dir = fixture("delete-uri");
     let p = write_bytes(&dir, "d.txt", b"x");
     let mut eval = jio();
-    intern_uri(&mut eval, "uf", &format!("file://{}", p.replace('\\', "/")));
+    intern_uri(&mut eval, "uf", &file_url(&p));
     assert_eq!(run(&mut eval, "(io/delete-file uf)"), "true");
     assert!(!std::path::Path::new(&p).exists());
     intern_uri(&mut eval, "uh", "http://h/x");
