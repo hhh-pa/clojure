@@ -870,3 +870,55 @@ fn new_object_reroute() {
         "java.lang.Object"
     );
 }
+
+// ---- Runtime miss arms (coverage floor) ----
+
+// The miss arms surface spellings cannot reach (compile-time
+// arity gates) or the worker's pins skipped: 5+ String args and
+// non-empty Object args arrive only through direct `__new*`;
+// non-Int/Str/Nil decode selectors, non-bytes 4-arg buffers,
+// and non-String 4-arg charset names miss at runtime. Same
+// `No matching ctor` shape as the oracle-pinned misses.
+#[test]
+fn string_runtime_miss_arms() {
+    let mut eval = boot();
+    assert_eq!(
+        uncaught(&mut eval, "(__new* 'String 1 2 3 4 5)"),
+        no_ctor("java.lang.String")
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(__new* 'Object 1)"),
+        no_ctor("java.lang.Object")
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(String. (byte-array [65 66]) true)"),
+        no_ctor("java.lang.String")
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(String. 1 0 0 \"UTF-8\")"),
+        no_ctor("java.lang.String")
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(String. (byte-array [65]) 0 0 5)"),
+        no_ctor("java.lang.String")
+    );
+}
+
+// An instance-held var is not a type in ctor position: `(P/new)`
+// falls through to the var miss like any non-descriptor var
+// (`h-var-new` family), and `__new*` over the symbol reports
+// `Not a type`.
+#[test]
+fn instance_var_ctor_miss() {
+    let mut eval = boot();
+    run_step(&mut eval, "(deftype HCPM [a])");
+    run_step(&mut eval, "(def PINST (HCPM. 1))");
+    assert_eq!(
+        compile_err(&mut eval, "(PINST/new 1)"),
+        "java.lang.RuntimeException | No such namespace: PINST"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(__new* 'PINST 1)"),
+        "java.lang.IllegalArgumentException | Not a type: PINST"
+    );
+}
