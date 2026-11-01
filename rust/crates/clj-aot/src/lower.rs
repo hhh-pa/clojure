@@ -36,8 +36,10 @@ use inkwell::types::BasicMetadataTypeEnum;
 use inkwell::types::{FloatType, IntType, PointerType};
 use inkwell::values::{BasicMetadataValueEnum, FunctionValue, IntValue, PointerValue};
 
-/// Prims in discriminant order (index `== prim as usize`).
-const PRIM_ORDER: [Prim; 13] = [
+/// Prims in discriminant order (index `== prim as usize`;
+/// shared with the JIT symbol table so a new prim cannot miss
+/// a mapping silently — the drift test walks this list).
+pub(crate) const PRIM_ORDER: [Prim; 13] = [
     Prim::Add,
     Prim::Sub,
     Prim::Mul,
@@ -104,6 +106,16 @@ struct Lower<'ctx> {
     /// span (once set, everything downstream is unreachable until
     /// the next `if` join resets it per branch).
     diverged: bool,
+    /// JIT return mode (gap-121 slice 1): abort sites drop the
+    /// frame slots and return (null from a `defn`, 1 from
+    /// `main`) instead of calling `exit(1)` — exiting is fatal
+    /// in-process, while callers already null-check every call
+    /// result, so null propagates frame by frame to `main`.
+    jit: bool,
+    /// The function under construction returns `i32` (`main`)
+    /// rather than `ptr` (a `defn`) — set at function entry,
+    /// read by abort sites in JIT mode only.
+    in_main: bool,
 }
 
 impl<'ctx> Lower<'ctx> {
@@ -199,6 +211,16 @@ impl<'ctx> Lower<'ctx> {
             path: source_path.to_owned(),
             fns: Vec::new(),
             diverged: false,
+            jit: false,
+            in_main: false,
+        }
+    }
+
+    /// New session in JIT return mode (see [`to_module_jit`]).
+    fn new_jit(ctx: &'ctx Context, source_path: &str) -> Self {
+        Self {
+            jit: true,
+            ..Self::new(ctx, source_path)
         }
     }
 
@@ -288,15 +310,36 @@ impl<'ctx> Lower<'ctx> {
         }
     }
 
-    /// Abort the binary: `exit(1)` plus `unreachable`.
-    fn emit_abort(&self) {
-        self.call_void(self.decls.exit, &[self.i32t.const_int(1, false).into()]);
-        self.builder.build_unreachable().expect("unreachable");
+    /// Abort the run: the AOT binary exits 1 plus `unreachable`;
+    /// JIT mode drops the frame slots and returns instead (null
+    /// from a `defn`, 1 from `main` — callers null-check every
+    /// call result, so the failure propagates outward).
+    fn emit_abort(&self, slots: &[PointerValue<'ctx>]) {
+        if !self.jit {
+            self.call_void(self.decls.exit, &[self.i32t.const_int(1, false).into()]);
+            self.builder.build_unreachable().expect("unreachable");
+            return;
+        }
+        self.drop_slots(slots);
+        if self.in_main {
+            self.builder
+                .build_return(Some(&self.i32t.const_int(1, false)))
+                .expect("return");
+        } else {
+            self.builder
+                .build_return(Some(&self.ptr.const_null()))
+                .expect("return");
+        }
     }
 
-    /// Null-check a fallible result: null exits 1, else the value
-    /// flows on (single-predecessor join, no phi needed).
-    fn null_check(&mut self, value: PointerValue<'ctx>) -> PointerValue<'ctx> {
+    /// Null-check a fallible result: null aborts (exit 1 AOT,
+    /// slot-dropping return in JIT mode), else the value flows
+    /// on (single-predecessor join, no phi needed).
+    fn null_check(
+        &mut self,
+        slots: &[PointerValue<'ctx>],
+        value: PointerValue<'ctx>,
+    ) -> PointerValue<'ctx> {
         let func = self
             .builder
             .get_insert_block()
@@ -310,7 +353,7 @@ impl<'ctx> Lower<'ctx> {
             .build_conditional_branch(is_null, abort_bb, cont_bb)
             .expect("condbr");
         self.builder.position_at_end(abort_bb);
-        self.emit_abort();
+        self.emit_abort(slots);
         self.builder.position_at_end(cont_bb);
         value
     }
@@ -504,7 +547,7 @@ impl<'ctx> Lower<'ctx> {
                         self.i32t.const_int(u64::from(span.col), false).into(),
                     ],
                 );
-                self.null_check(called)
+                self.null_check(slots, called)
             }
             SubsetExpr::CallFn { index, args, .. } => {
                 let mut params: Vec<BasicMetadataValueEnum> = Vec::with_capacity(args.len());
@@ -512,7 +555,7 @@ impl<'ctx> Lower<'ctx> {
                     params.push(self.lower_expr(func, slots, arg).into());
                 }
                 let called = self.call_ptr(self.fns[*index], &params);
-                self.null_check(called)
+                self.null_check(slots, called)
             }
             SubsetExpr::ArityError {
                 display, got, span, ..
@@ -535,7 +578,7 @@ impl<'ctx> Lower<'ctx> {
                         "arity",
                     )
                     .expect("arity call");
-                self.emit_abort();
+                self.emit_abort(slots);
                 let cont = self.ctx.append_basic_block(func, "cont");
                 self.builder.position_at_end(cont);
                 self.diverged = true;
@@ -629,6 +672,7 @@ impl<'ctx> Lower<'ctx> {
         let entry = self.ctx.append_basic_block(func, "entry");
         self.builder.position_at_end(entry);
         self.diverged = false;
+        self.in_main = false;
         let mut slots = Vec::with_capacity(def.frame_slots);
         for i in 0..def.frame_slots {
             slots.push(
@@ -664,6 +708,7 @@ impl<'ctx> Lower<'ctx> {
         let entry = self.ctx.append_basic_block(func, "entry");
         self.builder.position_at_end(entry);
         self.diverged = false;
+        self.in_main = true;
         let mut slots = Vec::with_capacity(main_slots);
         for i in 0..main_slots {
             slots.push(
@@ -682,6 +727,16 @@ impl<'ctx> Lower<'ctx> {
             let argv = func.get_nth_param(1).expect("argv");
             let args = self.call_ptr(self.decls.argv, &[argv.into(), argc.into()]);
             let ret = self.call_ptr(self.fns[index], &[args.into()]);
+            // JIT only: a failing `-main` returns null (AOT exits
+            // inside instead), so null-check before drop —
+            // `rt_drop(null)` segfaults. Gated on `self.jit` to
+            // keep AOT IR byte-identical; `in_main` is already
+            // true, so the abort drops slots and returns 1.
+            let ret = if self.jit {
+                self.null_check(&slots, ret)
+            } else {
+                ret
+            };
             self.call_drop(ret);
         }
         self.drop_slots(&slots);
@@ -711,6 +766,25 @@ pub fn to_module<'ctx>(
     source_path: &str,
 ) -> Result<Module<'ctx>, String> {
     let mut lower = Lower::new(ctx, source_path);
+    for (index, def) in program.fns.iter().enumerate() {
+        lower.lower_defn(index, def);
+    }
+    lower.lower_main(&program.main, program.main_slots, program.main_fn);
+    verify_module(&lower.module)?;
+    Ok(lower.module)
+}
+
+/// Lower a planned program to a JIT-run module: same IR as
+/// [`to_module`] except abort sites return instead of exiting
+/// (gap-121 slice 1, spec D-error — `exit(1)` is fatal
+/// in-process, so failures propagate as null up to `main`,
+/// which returns 1). Verified before return, like AOT.
+pub fn to_module_jit<'ctx>(
+    ctx: &'ctx Context,
+    program: &SubsetProgram,
+    source_path: &str,
+) -> Result<Module<'ctx>, String> {
+    let mut lower = Lower::new_jit(ctx, source_path);
     for (index, def) in program.fns.iter().enumerate() {
         lower.lower_defn(index, def);
     }
