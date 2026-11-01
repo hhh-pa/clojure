@@ -401,7 +401,9 @@ fn close_file_writer(state: &Arc<Mutex<FileWriterState>>) -> Result<(), NativeEr
     if !st.bom_written {
         st.bom_written = true;
         let cs = st.charset;
-        st.file.write_all(crate::ctor::bom_bytes(cs)).map_err(io_err)?;
+        st.file
+            .write_all(crate::ctor::bom_bytes(cs))
+            .map_err(io_err)?;
     }
     st.file.flush().map_err(io_err)
 }
