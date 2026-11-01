@@ -9,8 +9,9 @@
 //! Host pieces the FX4 expansions call without new special forms:
 //! `req!`, `some-vals`, `with-redefs-fn`, `bound-fn*`, the
 //! array-map constructor, and the monitor natives. `instance?` /
-//! `identical?` / `(new Object)` / `EMPTY` rewrite at analyze time
-//! (`instance?` and `identical?` stay unresolved vars).
+//! `identical?` / `new` / `EMPTY` rewrite at analyze time
+//! (`instance?` and `identical?` stay unresolved vars; `new`
+//! lowers to `__new*`, #120 slice 2).
 
 use std::any::Any;
 use std::cell::RefCell;
@@ -91,7 +92,14 @@ pub(crate) enum HostOp<'a> {
     None,
     SeqQ(&'a Value),
     Identical(&'a Value, &'a Value),
-    NewObject,
+    /// A bare `(new)` (the arity error names the shape).
+    NewEmpty,
+    /// `(new Sym …)` (any symbol — the lowering quotes it for
+    /// `__new*`, #120 slice 2).
+    NewCtor(&'a Symbol),
+    /// `(new head …)` with a non-symbol head (renders via
+    /// `new_head_str` in the analyzer).
+    NewBadHead(&'a Value),
     Pam(&'a Value),
     MonitorEnter(&'a Value),
     MonitorExit(&'a Value),
@@ -115,7 +123,7 @@ pub(crate) fn classify<'a>(items: &[&'a Value]) -> HostOp<'a> {
     match (sym.namespace(), sym.name()) {
         (Some("clojure.core"), "instance?") => classify_instance(items),
         (Some("clojure.core"), "identical?") => classify_identical(items),
-        (None, "new") => classify_new(items),
+        (None, "new") => classify_new(&items[1..]),
         (Some("clojure.lang.PersistentArrayMap"), "createAsIfByAssoc") => classify_pam(items),
         (None, "monitor-enter") => one_arg(items, HostOp::MonitorEnter),
         (None, "monitor-exit") => one_arg(items, HostOp::MonitorExit),
@@ -145,12 +153,14 @@ fn classify_identical<'a>(items: &[&'a Value]) -> HostOp<'a> {
     }
 }
 
-fn classify_new<'a>(items: &[&'a Value]) -> HostOp<'a> {
-    match items {
-        [_, Value::Symbol(class)] if class.namespace().is_none() && class.name() == "Object" => {
-            HostOp::NewObject
-        }
-        _ => HostOp::None,
+fn classify_new<'a>(rest: &[&'a Value]) -> HostOp<'a> {
+    let [head, ..] = rest else {
+        return HostOp::NewEmpty;
+    };
+    let head: &'a Value = head;
+    match head {
+        Value::Symbol(sym) => HostOp::NewCtor(sym),
+        _ => HostOp::NewBadHead(head),
     }
 }
 

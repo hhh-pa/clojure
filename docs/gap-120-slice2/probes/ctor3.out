@@ -1,0 +1,69 @@
+file.encoding=UTF-8
+r-class => java.lang.Long
+r-half CHAIN:
+   java.lang.IllegalArgumentException | No matching ctor found for class java.lang.String
+r-whole => "c"
+r-intcast => "c"
+n-3nil CHAIN:
+   java.lang.IllegalArgumentException | No matching ctor found for class java.lang.String
+n-nil-char CHAIN:
+   java.lang.IllegalArgumentException | No matching ctor found for class java.lang.String
+n-strs CHAIN:
+   java.lang.IllegalArgumentException | No matching ctor found for class java.lang.String
+n-chars-int CHAIN:
+   java.lang.IllegalArgumentException | No matching ctor found for class java.lang.String
+n-intarr-1 CHAIN:
+   java.lang.IllegalArgumentException | No matching ctor found for class java.lang.String
+n-longarr CHAIN:
+   java.lang.IllegalArgumentException | No matching ctor found for class java.lang.String
+v-empty CHAIN:
+   java.io.UnsupportedEncodingException | 
+v-badchars CHAIN:
+   java.io.UnsupportedEncodingException | bad name!
+v-colon CHAIN:
+   java.io.UnsupportedEncodingException | x:y
+a-ascii => "A"
+a-latin1 => "ÿ"
+a-iso8859 => "ÿ"
+a-isoexact => "ÿ"
+a-utf16 => "A"
+a-unicode => "A"
+a-unicodebig => "A"
+a-unicodelittle => "A"
+a-utf16low => "A"
+a-utf16bel => "A"
+a-utf8up => "A"
+u32-be => "A"
+u32-be-x => "A"
+u32-le => "A"
+u32-bom => "A"
+u32-trunc => "�"
+u32-badcp => "�"
+tail-cp1252 => "A"
+sg-hex => "d800"
+sg-len => 2
+sg-mixed => "41"
+hb-2 => "Ɂɂ"
+hb-neg1 => "ａ"
+hb-negbyte => "ÿ"
+bom-le => ""
+bom-be => ""
+fr-e => false
+fr-empty => false
+fr-chararr => false
+m-deftype-simple-new => #object[user.CNX 0x6d868997 "user.CNX@6d868997"]
+m-inst-new CHAIN:
+   clojure.lang.Compiler$CompilerException | Syntax error compiling . at (/home/opc/workspace/clojure/.muse/worktrees/subagent-v2-01a186ab-6801-7a32-9110-7d9f70845a21-01a193d3-3313-71f0-ab00-36fb812042ba/docs/gap-120-slice2/probes/ctor3.clj:90:1).
+   java.lang.IllegalArgumentException | No matching method new found taking 1 args for class java.lang.String
+m-obj-new-arity CHAIN:
+   clojure.lang.Compiler$CompilerException | Syntax error compiling Object/new at (/home/opc/workspace/clojure/.muse/worktrees/subagent-v2-01a186ab-6801-7a32-9110-7d9f70845a21-01a193d3-3313-71f0-ab00-36fb812042ba/docs/gap-120-slice2/probes/ctor3.clj:91:1).
+   java.lang.IllegalArgumentException | No matching ctor found for class java.lang.Object
+m-new-obj-nil CHAIN:
+   clojure.lang.Compiler$CompilerException | Syntax error compiling new at (/home/opc/workspace/clojure/.muse/worktrees/subagent-v2-01a186ab-6801-7a32-9110-7d9f70845a21-01a193d3-3313-71f0-ab00-36fb812042ba/docs/gap-120-slice2/probes/ctor3.clj:92:1).
+   java.lang.IllegalArgumentException | No matching ctor found for class java.lang.Object
+m-new-qual CHAIN:
+   clojure.lang.Compiler$CompilerException | Syntax error compiling new at (/home/opc/workspace/clojure/.muse/worktrees/subagent-v2-01a186ab-6801-7a32-9110-7d9f70845a21-01a193d3-3313-71f0-ab00-36fb812042ba/docs/gap-120-slice2/probes/ctor3.clj:93:1).
+   java.lang.IllegalArgumentException | Unable to resolve classname: foo/bar
+m-new-qual-str CHAIN:
+   clojure.lang.Compiler$CompilerException | Syntax error compiling new at (/home/opc/workspace/clojure/.muse/worktrees/subagent-v2-01a186ab-6801-7a32-9110-7d9f70845a21-01a193d3-3313-71f0-ab00-36fb812042ba/docs/gap-120-slice2/probes/ctor3.clj:94:1).
+   java.lang.IllegalArgumentException | Unable to resolve classname: foo/String

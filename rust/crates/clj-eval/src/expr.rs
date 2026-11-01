@@ -20,8 +20,8 @@ use std::sync::Arc;
 
 use clj_reader::Span;
 use clj_value::{
-    ClassVal, Keyword, List, Map, PrintOpts, Symbol, Value, Var, Vector, map_entry, new_map,
-    pr_to_string, print_to_string,
+    ClassVal, HostVal, Keyword, List, Map, PrintOpts, Symbol, Value, Var, Vector, map_entry,
+    new_map, pr_to_string, print_to_string,
 };
 
 use crate::core::cce_message;
@@ -487,6 +487,20 @@ fn str_of(v: &Value) -> String {
         String::new()
     } else {
         print_to_string(v)
+    }
+}
+
+/// Render a `new` head for `Unable to resolve classname`
+/// (oracles `new-*-head`): nil → `null`, strings and chars
+/// as-is, everything else pr-readably — the JVM
+/// `String.valueOf` prints forms with quotes
+/// (`(Class/forName "java.lang.String")`).
+fn new_head_str(head: &Value) -> String {
+    match head {
+        Value::Nil => "null".to_owned(),
+        Value::Str(s) => s.to_string(),
+        Value::Char(c) => c.to_string(),
+        _ => pr_to_string(head, &PrintOpts::pr()),
     }
 }
 
@@ -1048,6 +1062,7 @@ impl<'a> Analyzer<'a> {
         }
         if let Some(base) = name.strip_suffix('.') {
             let quoted = Symbol::new(sym.namespace(), base);
+            self.check_ctor_arity(&quoted, items.len() - 1, span, "new")?;
             return Ok(Some(self.dot_call("__new*", quoted, &items[1..], span)?));
         }
         if !name.starts_with('.') {
@@ -1077,7 +1092,9 @@ impl<'a> Analyzer<'a> {
     /// dotted namespace part is `ClassNotFoundException` (oracle
     /// `static-unknown-fq`, `removed-ns-call`); simple ones fall
     /// through to `No such namespace`. FX4-owned heads are exempt
-    /// (their shapes and misses are the builtin's).
+    /// (their shapes and misses are the builtin's). The `new`
+    /// member instead routes to construction
+    /// ([`Analyzer::try_ctor_call`], #120 slice 2).
     fn try_static_call(
         &mut self,
         items: &[&Value],
@@ -1100,6 +1117,9 @@ impl<'a> Analyzer<'a> {
             .is_some()
         {
             return Ok(None);
+        }
+        if sym.name() == "new" {
+            return self.try_ctor_call(sym, ns_part, items, span);
         }
         let Some(class) = self.static_head_class(&cur, ns_part) else {
             if crate::classemu::is_class_position(ns_part) {
@@ -1146,6 +1166,132 @@ impl<'a> Analyzer<'a> {
             crate::classemu::resolve_class_name(self.eval, ns_part)
         } else {
             crate::classemu::import_in(self.eval, cur, ns_part)
+        }
+    }
+
+    /// Intercept `(Class/new …)` (oracles `cn-*`): the static-call
+    /// construction spelling lowers to `(__new* 'Class …)` like
+    /// the other two spellings. Resolution extends the static
+    /// rule with var-held descriptors (deftypes by simple name —
+    /// oracle `m-deftype-simple-new`); missing parts keep the
+    /// slice-1 rule (simple falls through to `No such namespace`,
+    /// dotted is `ClassNotFoundException` — oracles `cn-missing`,
+    /// `cn-missing-fq`); allow-listed classes arity-check at
+    /// compile time, attributed to the head as written (oracles
+    /// `cn-arity5`, `m-obj-new-arity`).
+    fn try_ctor_call(
+        &mut self,
+        sym: &Symbol,
+        ns_part: &str,
+        items: &[&Value],
+        span: Span,
+    ) -> Result<Option<Expr>, CompileError> {
+        let cur = self.current_ns();
+        let class = match self.static_head_class(&cur, ns_part) {
+            Some(class) => Some(class),
+            None => self.ctor_var_class(&cur, ns_part),
+        };
+        let Some(class) = class else {
+            if crate::classemu::is_class_position(ns_part) {
+                return Err(self.err(
+                    class::CLASS_NOT_FOUND,
+                    ns_part.to_owned(),
+                    span,
+                    Verb::Compiling,
+                    None,
+                ));
+            }
+            return Ok(None);
+        };
+        let argc = items.len() - 1;
+        if let Some(arities) = crate::ctor::ctor_arities(class.name()) {
+            if !arities.contains(&argc) {
+                let message = crate::ctor::no_ctor(class.name(), false)
+                    .into_inner()
+                    .message;
+                return Err(self.err(
+                    class::ILLEGAL_ARG,
+                    message,
+                    span,
+                    Verb::Compiling,
+                    Some(sym.to_string()),
+                ));
+            }
+        }
+        let head = Symbol::new(None, ns_part);
+        Ok(Some(self.dot_call("__new*", head, &items[1..], span)?))
+    }
+
+    /// A var-held descriptor for `(Simple/new …)` (split for the
+    /// complexity budget): deftypes resolve by simple name through
+    /// their defining var (oracle `m-deftype-simple-new`); dotted
+    /// names never consult vars (the lattice owns them); anything
+    /// else falls through to the ordinary var miss (oracle
+    /// `h-var-new`).
+    fn ctor_var_class(&self, cur: &str, ns_part: &str) -> Option<Arc<ClassVal>> {
+        if ns_part.contains('.') {
+            return None;
+        }
+        let sym = Symbol::new(None, ns_part);
+        let (target, id) = self.eval.registry.resolve_target_and_id(cur, &sym)?;
+        let root = self.eval.deref_var(id, &target);
+        let Value::HostType(h) = root else {
+            return None;
+        };
+        match h.as_ref() {
+            HostVal::Def(d) => crate::classemu::resolve_class_name(self.eval, &d.name),
+            HostVal::Inst(_) => None,
+        }
+    }
+
+    /// The allow-list arity check for construction heads (split
+    /// for the complexity budget): a head naming `String`/`Object`
+    /// through order-independent knowledge arity-checks at compile
+    /// time (oracles `ctor-str-arity5`, `ctor-obj-arity`,
+    /// `s-new-arity5`); anything else (vars, unresolvable, other
+    /// classes) defers to runtime. Attribution is the head as
+    /// written (`new` for `new`/dot forms).
+    fn check_ctor_arity(
+        &self,
+        sym: &Symbol,
+        argc: usize,
+        span: Span,
+        head: &str,
+    ) -> Result<(), CompileError> {
+        let Some(fqn) = self.ctor_head_fqn(sym) else {
+            return Ok(());
+        };
+        let Some(arities) = crate::ctor::ctor_arities(&fqn) else {
+            return Ok(());
+        };
+        if arities.contains(&argc) {
+            return Ok(());
+        }
+        let message = crate::ctor::no_ctor(&fqn, false).into_inner().message;
+        Err(self.err(
+            class::ILLEGAL_ARG,
+            message,
+            span,
+            Verb::Compiling,
+            Some(head.to_owned()),
+        ))
+    }
+
+    /// The FQN a ctor head names through order-independent
+    /// knowledge only: imports for simple names, the shared
+    /// lattice for dotted ones — never vars, so same-form forward
+    /// refs stay runtime (oracles `o-do-deftype-dot`,
+    /// `o-do-import-use`). Qualified symbols never name classes
+    /// here (oracles `m-new-qual*` fail at runtime).
+    fn ctor_head_fqn(&self, sym: &Symbol) -> Option<String> {
+        if sym.namespace().is_some() {
+            return None;
+        }
+        if sym.name().contains('.') {
+            crate::classemu::resolve_class_name(self.eval, sym.name()).map(|c| c.name().to_owned())
+        } else {
+            let cur = self.current_ns();
+            crate::classemu::import_in(self.eval, &cur, sym.name()).map(|c| c.name().to_owned())
         }
     }
 
@@ -4698,7 +4844,11 @@ impl<'a> Analyzer<'a> {
             crate::fx4_host::HostOp::Identical(a, b) => {
                 Ok(Some(self.host_call("identical?", &[a, b], span)?))
             }
-            crate::fx4_host::HostOp::NewObject => Ok(Some(self.fresh_object())),
+            crate::fx4_host::HostOp::NewEmpty => Err(self.new_empty_err(span)),
+            crate::fx4_host::HostOp::NewCtor(sym) => {
+                Ok(Some(self.lower_new(sym, &items[2..], span)?))
+            }
+            crate::fx4_host::HostOp::NewBadHead(head) => Err(self.new_head_err(head, span)),
             crate::fx4_host::HostOp::Pam(inner) => {
                 Ok(Some(self.host_call("fx4-pam-create", &[inner], span)?))
             }
@@ -4754,10 +4904,43 @@ impl<'a> Analyzer<'a> {
         )
     }
 
-    fn fresh_object(&self) -> Expr {
-        Expr::Literal(Value::Extension(Arc::new(
-            crate::fx4_host::Fx4Object::fresh(),
-        )))
+    /// Lower `(new Sym args…)` to `(__new* 'Sym args…)` — the one
+    /// runtime mechanism for all construction spellings — after
+    /// the allow-list arity check (import/lattice resolution
+    /// only: vars stay runtime so same-form forward refs keep
+    /// working, oracles `o-do-deftype-new`, `o-do-import-use`).
+    fn lower_new(
+        &mut self,
+        sym: &Symbol,
+        args: &[&Value],
+        span: Span,
+    ) -> Result<Expr, CompileError> {
+        self.check_ctor_arity(sym, args.len(), span, "new")?;
+        self.dot_call("__new*", sym.clone(), args, span)
+    }
+
+    /// Bare `(new)` (oracle `new-empty`).
+    fn new_empty_err(&self, span: Span) -> CompileError {
+        self.err(
+            class::RUNTIME,
+            "wrong number of arguments, expecting: (new Classname args...)".to_owned(),
+            span,
+            Verb::Compiling,
+            Some("new".to_owned()),
+        )
+    }
+
+    /// `(new head …)` with a non-symbol head (oracles
+    /// `new-num-head`, `new-str-head`, `new-nil-head`,
+    /// `new-list-head`, `new-kw-head`, `nl-new-numclass`).
+    fn new_head_err(&self, head: &Value, span: Span) -> CompileError {
+        self.err(
+            class::ILLEGAL_ARG,
+            format!("Unable to resolve classname: {}", new_head_str(head)),
+            span,
+            Verb::Compiling,
+            Some("new".to_owned()),
+        )
     }
 
     /// Invoke a core var by qualified symbol (skips the private check).

@@ -1,0 +1,6 @@
+e-badboth CHAIN:
+   java.io.UnsupportedEncodingException | NOPE-CS
+e-nil-badbounds CHAIN:
+   java.lang.NullPointerException | Cannot read the array length because "bytes" is null
+e-nil-badcs CHAIN:
+   java.io.UnsupportedEncodingException | NOPE-CS

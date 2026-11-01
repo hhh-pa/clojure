@@ -495,23 +495,24 @@ fn import_deftype_roundtrip() {
         "\"user.ImpPoint\""
     );
     // i-construct: `(Date. 0)` constructs through the import on the
-    // JVM; the port has no `Date` values, so the `__new*` class arm
-    // reports the missing `HostDef` (forced divergence).
+    // JVM; the port has no `Date` values, so the non-allow-listed
+    // class takes the uniform ctor miss (#120 slice 2, spec N4 —
+    // at runtime; the JVM rejects the arity at compile time).
     assert_eq!(
         uncaught(
             &mut eval,
             "(do (in-ns 'impdt) (clojure.core/refer-clojure) (import 'java.util.Date) (eval '(Date. 0)))"
         ),
-        "java.lang.IllegalArgumentException | Not a type: java.util.Date"
+        "java.lang.IllegalArgumentException | No matching ctor found for class java.util.Date"
     );
 }
 
 #[test]
 fn construct_via_class_values() {
     // The `__new*` class arm (§1.8): a class value resolves through
-    // its name to a `HostDef` and constructs; a JDK name with no
-    // `HostDef` is `Not a type`; an interface def is the missing-ctor
-    // error.
+    // its name to a `HostDef` and constructs; an emulated name
+    // builds (#120 slice 2); any other JDK name is the uniform
+    // ctor miss; an interface def is the missing-ctor error.
     let mut eval = boot();
     assert_eq!(
         run(
@@ -521,11 +522,11 @@ fn construct_via_class_values() {
         "user.NCV"
     );
     assert_eq!(
-        uncaught(
+        run(
             &mut eval,
             "(do (import 'java.lang.String) (clojure.core/__new* String \"x\"))"
         ),
-        "java.lang.IllegalArgumentException | Not a type: java.lang.String"
+        "\"x\""
     );
     assert_eq!(
         uncaught(
@@ -1209,15 +1210,14 @@ fn class_queries() {
         ),
         "java.lang.ArithmeticException"
     );
-    // c-class-object: `(Object.)` is the §1.8 miss (a JDK name with
-    // no `HostDef`); the oracle VALUE is JVM-only — no expression in
-    // the port evaluates to a bare `Object`.
+    // c-class-object: `(Object.)` constructs a bare `Object`
+    // (#120 slice 2, oracle `ctor-obj-class`).
     assert_eq!(
-        uncaught(
+        run(
             &mut eval,
             "(do (import 'java.lang.Object) (class (Object.)))"
         ),
-        "java.lang.IllegalArgumentException | Not a type: java.lang.Object"
+        "java.lang.Object"
     );
     // c-class-tagged: `tagged-literal` has no port constructor and no
     // bare tagged value is surface-reachable — JVM-only row.

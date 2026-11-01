@@ -77,6 +77,10 @@ pub enum ThrowClass {
     MissingFormatWidthException,
     IllegalFormatArgumentIndexException,
     IOException,
+    /// `UnsupportedEncodingException` (#120 slice 2 `String`
+    /// construction): a checked `IOException` for unknown charset
+    /// names.
+    UnsupportedEncodingException,
     CompilerException,
     ExecutionException,
     CancellationException,
@@ -134,6 +138,7 @@ impl ThrowClass {
         match self {
             Self::ExceptionInfo => "clojure.lang.ExceptionInfo",
             Self::FileNotFoundException => "java.io.FileNotFoundException",
+            Self::UnsupportedEncodingException => "java.io.UnsupportedEncodingException",
             Self::IllegalAccessError => "java.lang.IllegalAccessError",
             Self::NumberFormatException => "java.lang.NumberFormatException",
             Self::StringIndexOutOfBoundsException => "java.lang.StringIndexOutOfBoundsException",
@@ -269,6 +274,7 @@ fn throw_parent(jvm_name: &str) -> Option<&'static str> {
         "java.util.concurrent.RejectedExecutionException" => Some("java.lang.RuntimeException"),
         "java.lang.NumberFormatException" => Some("java.lang.IllegalArgumentException"),
         "java.io.FileNotFoundException" => Some("java.io.IOException"),
+        "java.io.UnsupportedEncodingException" => Some("java.io.IOException"),
         "java.io.IOException" => Some("java.lang.Exception"),
         "java.lang.ClassNotFoundException" => Some("java.lang.ReflectiveOperationException"),
         "java.lang.ReflectiveOperationException" => Some("java.lang.Exception"),
@@ -550,6 +556,10 @@ mod tests {
                 "java.io.FileNotFoundException",
             ),
             (
+                ThrowClass::UnsupportedEncodingException,
+                "java.io.UnsupportedEncodingException",
+            ),
+            (
                 ThrowClass::IllegalAccessError,
                 "java.lang.IllegalAccessError",
             ),
@@ -581,7 +591,7 @@ mod tests {
         for (class, want) in cases {
             assert_eq!(class.jvm_name(), want);
         }
-        assert_eq!(cases.len(), 23);
+        assert_eq!(cases.len(), 24);
     }
 
     #[test]
@@ -811,6 +821,7 @@ mod tests {
             ThrowClass::ArithmeticException,
             ThrowClass::ExceptionInfo,
             ThrowClass::FileNotFoundException,
+            ThrowClass::UnsupportedEncodingException,
             ThrowClass::IllegalAccessError,
             ThrowClass::NumberFormatException,
             ThrowClass::CompilerException,
@@ -826,6 +837,10 @@ mod tests {
         assert!(ThrowClass::FileNotFoundException.matches("java.io.IOException"));
         assert!(ThrowClass::FileNotFoundException.matches("java.lang.Exception"));
         assert!(!ThrowClass::FileNotFoundException.matches("java.lang.Error"));
+        assert!(ThrowClass::UnsupportedEncodingException.matches("java.io.IOException"));
+        assert!(ThrowClass::UnsupportedEncodingException.matches("java.lang.Exception"));
+        assert!(!ThrowClass::UnsupportedEncodingException.matches("java.lang.Error"));
+        assert!(!ThrowClass::UnsupportedEncodingException.matches("java.lang.RuntimeException"));
         assert!(ThrowClass::IllegalAccessError.matches("java.lang.LinkageError"));
         assert!(ThrowClass::IllegalAccessError.matches("java.lang.Error"));
         assert!(!ThrowClass::IllegalAccessError.matches("java.lang.Exception"));
