@@ -360,7 +360,7 @@ fn strip_authority(rest: &str) -> &str {
 /// `/` becomes the platform separator (a Unix no-op scan —
 /// branchless, so every line covers on every platform).
 fn separators(s: &str) -> String {
-    s.replace('/', &std::path::MAIN_SEPARATOR.to_string())
+    s.replace('/', std::path::MAIN_SEPARATOR_STR)
 }
 
 /// `%XX` decoding with `+` literal (upstream
@@ -527,7 +527,6 @@ fn writer_over_output(
     }
     let path: &str = &s.path;
     let file = std::fs::OpenOptions::new()
-        .write(true)
         .append(true)
         .open(path)
         .map_err(|e| file_err(path, e))?;
