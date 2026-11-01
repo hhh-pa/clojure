@@ -45,6 +45,7 @@ pub(crate) mod printsys;
 pub mod protocol;
 pub mod re;
 pub mod reader;
+pub mod reflect;
 pub mod rng;
 pub mod scalars;
 pub mod seqs;
