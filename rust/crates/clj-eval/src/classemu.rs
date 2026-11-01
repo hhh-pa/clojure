@@ -3449,7 +3449,10 @@ fn str_text_arg(v: &Value) -> Result<Option<&str>, NativeError> {
     match v {
         Value::Str(s) => Ok(Some(s)),
         Value::Nil => Ok(None),
-        other => Err(crate::core::cce_err(other, "java.lang.String")),
+        other => Err(NativeError::cast(
+            &jvm_class_of(other),
+            "java.lang.String",
+        )),
     }
 }
 

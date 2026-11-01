@@ -4625,8 +4625,8 @@ fn surface_strings() {
         ("(.. \"Äé\" (toLowerCase))", "\"äé\""),
         ("(.. \"\" (toUpperCase))", "\"\""),
         // The single-dot spelling transcribes too.
-        ("(. \"abc\" (substring 1))", "\"bc\""),
-        ("(. \"  a  \" trim)", "\"a\""),
+        ("(.substring \"abc\" 1)", "\"bc\""),
+        ("(.trim \"  a  \")", "\"a\""),
     ];
     for (src, want) in cases {
         assert_eq!(run(&mut eval, src), want, "{src}");
@@ -4666,6 +4666,18 @@ fn surface_strings() {
         (
             "(.. 1 (split \",\"))",
             "java.lang.IllegalArgumentException | No matching method split found taking 1 args for class java.lang.Long",
+        ),
+        (
+            "(.. 1 (substring 0))",
+            "java.lang.IllegalArgumentException | No matching method substring found taking 1 args for class java.lang.Long",
+        ),
+        (
+            "(.. 1 (startsWith \"a\"))",
+            "java.lang.IllegalArgumentException | No matching method startsWith found taking 1 args for class java.lang.Long",
+        ),
+        (
+            "(.. 1 (endsWith \"a\"))",
+            "java.lang.IllegalArgumentException | No matching method endsWith found taking 1 args for class java.lang.Long",
         ),
         (
             "(.. \"a\" (charAt))",
