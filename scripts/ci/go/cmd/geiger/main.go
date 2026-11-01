@@ -27,7 +27,8 @@ bins carry required-features get those
 features enabled from cargo metadata, so the bins are analyzed too.
 
 The sum is compared against <workspace>/geiger-baseline.json: a higher total
-fails, a lower one prints a tighten-at-leisure note. Dependency unsafe is
+fails, and so does a lower one (tighten the baseline in the same change —
+zero is the requirement). Dependency unsafe is
 reported (informational) but never gated: new deps routinely allow unsafe.
 
 Usage: geiger <workspace> [--regen]
@@ -299,8 +300,9 @@ func run(argv []string) int {
 		return 1
 	}
 	if total < baseline {
-		fmt.Printf("note: unsafe total fell %d -> %d (tighten the baseline at leisure)\n",
+		fmt.Printf("FAIL: workspace unsafe total fell %d -> %d (tighten the baseline to match — zero is the requirement)\n",
 			baseline, total)
+		return 1
 	}
 	fmt.Println("geiger: OK")
 	return 0
