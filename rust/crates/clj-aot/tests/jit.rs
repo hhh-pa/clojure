@@ -79,6 +79,13 @@ fn jit_reports_errors_inside_defns() {
 }
 
 #[test]
+fn jit_reports_errors_inside_dash_main() {
+    // A failing `-main` exits 1 instead of segfaulting: its
+    // null return is checked before drop (lower_main JIT path).
+    assert_eq!(run("(defn -main [args] (quot 1 0))"), 1);
+}
+
+#[test]
 fn jit_reports_arity_errors() {
     // A wrong-arg-count sibling call reports, then returns
     // through the diverged block instead of exiting.

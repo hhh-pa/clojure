@@ -727,6 +727,16 @@ impl<'ctx> Lower<'ctx> {
             let argv = func.get_nth_param(1).expect("argv");
             let args = self.call_ptr(self.decls.argv, &[argv.into(), argc.into()]);
             let ret = self.call_ptr(self.fns[index], &[args.into()]);
+            // JIT only: a failing `-main` returns null (AOT exits
+            // inside instead), so null-check before drop —
+            // `rt_drop(null)` segfaults. Gated on `self.jit` to
+            // keep AOT IR byte-identical; `in_main` is already
+            // true, so the abort drops slots and returns 1.
+            let ret = if self.jit {
+                self.null_check(&slots, ret)
+            } else {
+                ret
+            };
             self.call_drop(ret);
         }
         self.drop_slots(&slots);
