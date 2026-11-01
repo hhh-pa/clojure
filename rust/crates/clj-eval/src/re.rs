@@ -92,6 +92,75 @@ fn groups_value(caps: &regex::Captures<'_>) -> Value {
     Value::Vector(Vector::from_vec(items))
 }
 
+/// Split `text` around matches of the `source` pattern (the
+/// JDK `Pattern.java#split` loop over the crate's `find_iter`,
+/// whose empty-match advance matches `Matcher.find`): a
+/// zero-width match at the start yields no empty leader, no
+/// match at all yields the whole input, a positive `limit` caps
+/// the parts (the last keeps the remainder), `0` drops trailing
+/// empties, negative keeps everything. Bad patterns report
+/// `PatternSyntaxException` (the crate text, like `re-pattern`).
+/// The running state of the JDK split loop (split out so each
+/// half stays under the complexity ratchet).
+struct SplitAcc {
+    parts: Vec<String>,
+    index: usize,
+    count: i64,
+}
+
+/// One `find_iter` step of the JDK split loop: matches before the
+/// cap push the text before them (a zero-width match at the start
+/// yields no empty leader); once a positive limit is reached, the
+/// next match pushes the remainder instead and later matches are
+/// dead (the `count == cap` arm fires exactly once).
+fn split_step(acc: &mut SplitAcc, text: &str, m: regex::Match, limited: bool, cap: i64) {
+    if !limited || acc.count < cap {
+        let leader = acc.index == 0 && m.start() == 0 && m.is_empty();
+        if !leader {
+            acc.parts.push(text[acc.index..m.start()].to_owned());
+            acc.index = m.end();
+            acc.count += 1;
+        }
+    } else if acc.count == cap {
+        acc.parts.push(text[acc.index..].to_owned());
+        acc.index = m.end();
+        acc.count += 1;
+    }
+}
+
+pub(crate) fn pattern_split(text: &str, source: &str, limit: i32) -> Result<Value, NativeError> {
+    let re = compile_source(source)?;
+    let limited = limit > 0;
+    let cap = i64::from(limit) - 1;
+    let mut acc = SplitAcc {
+        parts: Vec::new(),
+        index: 0,
+        count: 0,
+    };
+    for m in re.find_iter(text) {
+        split_step(&mut acc, text, m, limited, cap);
+    }
+    if acc.index == 0 {
+        return Ok(Value::Vector(Vector::from_vec(vec![Value::Str(
+            Arc::from(text),
+        )])));
+    }
+    if !limited || acc.count < i64::from(limit) {
+        acc.parts.push(text[acc.index..].to_owned());
+    }
+    if limit == 0 {
+        while acc.parts.last().is_some_and(|p| p.is_empty()) {
+            acc.parts.pop();
+        }
+    }
+    Ok(Value::Vector(Vector::from_vec(
+        acc.parts
+            .into_iter()
+            .map(|p| Value::Str(Arc::from(p)))
+            .collect(),
+    )))
+}
+
 /// `re-pattern`: a `Pattern` passes through, a `String` compiles;
 /// anything else fails the `String` cast (oracle `repat-long`:
 /// the JVM compiles the `String` argument, so a `Long` fails

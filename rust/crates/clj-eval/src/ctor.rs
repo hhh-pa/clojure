@@ -400,7 +400,7 @@ pub(crate) fn decode(cs: Charset, bytes: &[u8]) -> String {
 
 /// The default charset: UTF-8 lossy (oracles
 /// `ctor-str-bytearr*`, `ctor-str-bytearr-bad`).
-fn decode_utf8(bytes: &[u8]) -> String {
+pub(crate) fn decode_utf8(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
 }
 

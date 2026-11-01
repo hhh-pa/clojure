@@ -33,6 +33,7 @@ use clj_value::{
     ClassVal, HostDef, HostKind, HostVal, Keyword, List, Map, SeqKind, Symbol, ThrowClass, Value,
     Vector, new_map, new_set,
 };
+use num_traits::ToPrimitive;
 
 use crate::error::{NativeError, jvm_class_of, simple_name_of};
 use crate::eval::Evaluator;
@@ -3310,6 +3311,7 @@ fn surface_gated(
     // so order is irrelevant).
     surface_gated_coll(eval, meth, target, rest)
         .or_else(|| surface_gated_misc(eval, meth, target, rest))
+        .or_else(|| surface_gated_str(meth, target, rest))
 }
 
 /// The collection-gated members (`String`, `Named`, `List`,
@@ -3422,6 +3424,310 @@ fn gated_writer_flush(eval: &mut Evaluator, target: &Value) -> Option<Result<Val
     }
 }
 
+/// The boxArg `int` coercion (upstream
+/// `Reflector.java#boxArg` — every `String` member below is the
+/// lone overload at its arity, so there is no congruence
+/// filter): every `Number` truncates through `intValue` (longs
+/// keep the low 32 bits, doubles saturate-and-truncate like a
+/// Java `(int)` cast, tower values go through the shared
+/// low-bits helper); nil trips the `arg.getClass()` NPE inside
+/// the `Unexpected param type` throw, anything else is that
+/// IAE.
+fn str_int_arg(v: &Value) -> Result<i32, NativeError> {
+    match v {
+        Value::Int(i) => Ok(*i as i32),
+        Value::Double(d) => Ok(*d as i32),
+        Value::BigInt(n) | Value::BigInteger(n) => Ok(crate::core::bigint_int_value(n)),
+        Value::Ratio(r) => Ok(r.to_f64().unwrap_or(f64::NAN) as i32),
+        Value::BigDec(d) => Ok(crate::core::bigint_int_value(&d.to_bigint_trunc())),
+        Value::Nil => Err(boxarg_npe()),
+        _ => Err(unexpected_param(v)),
+    }
+}
+
+/// The boxArg `String` coercion (upstream
+/// `Reflector.java#boxArg` casts): strings pass, nil passes
+/// (the method body NPEs with its own text), anything else
+/// fails the `String` cast (the port's short shape for the
+/// JVM's module shape — the `m-cls-assign-nonclass`
+/// precedent).
+fn str_text_arg(v: &Value) -> Result<Option<&str>, NativeError> {
+    match v {
+        Value::Str(s) => Ok(Some(s)),
+        Value::Nil => Ok(None),
+        other => Err(NativeError::cast(&jvm_class_of(other), "java.lang.String")),
+    }
+}
+
+/// The boxArg nil-for-`int` NPE (upstream
+/// `Reflector.java#boxArg` evaluates `arg.getClass()` while
+/// building the `Unexpected param type` throw, so nil reports
+/// the `arg` receiver).
+fn boxarg_npe() -> NativeError {
+    NativeError::new(
+        ThrowClass::NullPointerException,
+        "Cannot invoke \"Object.getClass()\" because \"arg\" is null".to_owned(),
+    )
+}
+
+/// The boxArg non-`Number` for-`int` failure (upstream
+/// `Reflector.java#boxArg` text, verbatim).
+fn unexpected_param(v: &Value) -> NativeError {
+    NativeError::new(
+        ThrowClass::IllegalArgumentException,
+        format!(
+            "Unexpected param type, expected: int, given: {}",
+            jvm_class_of(v)
+        ),
+    )
+}
+
+/// The JDK `checkIndex` template (`charAt` — upstream
+/// `Preconditions.java#outOfBoundsMessage`, `checkIndex` arm).
+fn sioobe_index(index: i32, len: usize) -> NativeError {
+    NativeError::new(
+        ThrowClass::StringIndexOutOfBoundsException,
+        format!("Index {index} out of bounds for length {len}"),
+    )
+}
+
+/// The JDK `checkFromToIndex` template (`substring` — upstream
+/// `Preconditions.java#outOfBoundsMessage`; the `subs` twin).
+fn sioobe_range(begin: i64, end: i64, len: i64) -> NativeError {
+    NativeError::new(
+        ThrowClass::StringIndexOutOfBoundsException,
+        format!("Range [{begin}, {end}) out of bounds for length {len}"),
+    )
+}
+
+/// The method-body nil-`String` NPE (the body dereferences the
+/// parameter first — upstream `String.java#startsWith`,
+/// `#endsWith`, and `#split` all read `param.length()`).
+fn str_body_npe(param: &str) -> NativeError {
+    NativeError::new(
+        ThrowClass::NullPointerException,
+        format!("Cannot invoke \"String.length()\" because \"{param}\" is null"),
+    )
+}
+
+/// `length` (UTF-16 units — the `count` twin).
+fn gated_str_length(target: &Value) -> Option<Result<Value, NativeError>> {
+    match target {
+        Value::Str(s) => Some(Ok(Value::Int(s.encode_utf16().count() as i64))),
+        _ => None,
+    }
+}
+
+/// `trim` (leading/trailing codepoints `<= U+0020` only —
+/// NBSP and friends stay, unlike `strip`/Rust `trim`).
+fn gated_str_trim(target: &Value) -> Option<Result<Value, NativeError>> {
+    match target {
+        Value::Str(s) => Some(Ok(Value::Str(Arc::from(s.trim_matches(|c| c <= '\u{20}'))))),
+        _ => None,
+    }
+}
+
+/// `toUpperCase` (the Unicode default mapping — the port has no
+/// locales, so `tr`/`az`/`lt` rules and context-sensitive
+/// mappings like final sigma stay unmapped).
+fn gated_str_upper(target: &Value) -> Option<Result<Value, NativeError>> {
+    match target {
+        Value::Str(s) => Some(Ok(Value::Str(Arc::from(
+            s.chars().flat_map(char::to_uppercase).collect::<String>(),
+        )))),
+        _ => None,
+    }
+}
+
+/// `toLowerCase` (same locale narrowing as `toUpperCase`).
+fn gated_str_lower(target: &Value) -> Option<Result<Value, NativeError>> {
+    match target {
+        Value::Str(s) => Some(Ok(Value::Str(Arc::from(
+            s.chars().flat_map(char::to_lowercase).collect::<String>(),
+        )))),
+        _ => None,
+    }
+}
+
+/// `charAt` (UTF-16 units, like `length`; lone surrogates are
+/// unrepresentable — astral halves read U+FFFD, the slice-2 N5
+/// narrowing).
+fn gated_str_charat(target: &Value, rest: &[Value]) -> Option<Result<Value, NativeError>> {
+    match target {
+        Value::Str(s) => Some(str_char_at(s, &rest[0])),
+        _ => None,
+    }
+}
+
+/// The `charAt` body (split for the complexity budget).
+fn str_char_at(s: &str, v: &Value) -> Result<Value, NativeError> {
+    let index = str_int_arg(v)?;
+    let units: Vec<u16> = s.encode_utf16().collect();
+    let unit = usize::try_from(index)
+        .ok()
+        .and_then(|i| units.get(i).copied());
+    match unit {
+        Some(u) => Ok(Value::Char(
+            char::from_u32(u32::from(u)).unwrap_or('\u{FFFD}'),
+        )),
+        None => Err(sioobe_index(index, units.len())),
+    }
+}
+
+/// `substring/1,2` (char-indexed — the `subs` twin, same
+/// astral divergence; the JDK `checkFromToIndex` template).
+fn gated_str_substring(target: &Value, rest: &[Value]) -> Option<Result<Value, NativeError>> {
+    match target {
+        Value::Str(s) => Some(str_substring(s, rest)),
+        _ => None,
+    }
+}
+
+/// The `substring` body (split for the complexity budget).
+fn str_substring(s: &str, rest: &[Value]) -> Result<Value, NativeError> {
+    let chars: Vec<char> = s.chars().collect();
+    let len = chars.len() as i64;
+    let begin = i64::from(str_int_arg(&rest[0])?);
+    let end = if rest.len() == 2 {
+        i64::from(str_int_arg(&rest[1])?)
+    } else {
+        len
+    };
+    if begin < 0 || begin > end || end > len {
+        return Err(sioobe_range(begin, end, len));
+    }
+    Ok(Value::Str(Arc::from(
+        chars[begin as usize..end as usize]
+            .iter()
+            .collect::<String>(),
+    )))
+}
+
+/// `startsWith/1,2` (UTF-16 units, like `length`; a negative
+/// `toffset` is false before the nil-prefix NPE — the JDK
+/// short-circuit in `String.java#startsWith`).
+fn gated_str_startswith(target: &Value, rest: &[Value]) -> Option<Result<Value, NativeError>> {
+    match target {
+        Value::Str(s) => Some(str_starts_with(s, rest)),
+        _ => None,
+    }
+}
+
+/// The `startsWith` body (split for the complexity budget).
+fn str_starts_with(s: &str, rest: &[Value]) -> Result<Value, NativeError> {
+    let prefix = str_text_arg(&rest[0])?;
+    let to = if rest.len() == 2 {
+        str_int_arg(&rest[1])?
+    } else {
+        0
+    };
+    if to < 0 {
+        return Ok(Value::Bool(false));
+    }
+    let Some(prefix) = prefix else {
+        return Err(str_body_npe("prefix"));
+    };
+    Ok(Value::Bool(units_start_with(s, prefix, to)))
+}
+
+/// The unit-slice prefix test (the `startsWith` body past the
+/// bounds check — `to >= 0` by construction).
+fn units_start_with(s: &str, prefix: &str, to: i32) -> bool {
+    let text: Vec<u16> = s.encode_utf16().collect();
+    let pre: Vec<u16> = prefix.encode_utf16().collect();
+    if i64::from(to) > text.len() as i64 - pre.len() as i64 {
+        return false;
+    }
+    text[to as usize..].starts_with(&pre)
+}
+
+/// `endsWith` (literally `startsWith(suffix, len - suflen)` —
+/// upstream `String.java#endsWith`, including the `suffix`
+/// receiver on the nil NPE).
+fn gated_str_endswith(target: &Value, rest: &[Value]) -> Option<Result<Value, NativeError>> {
+    match target {
+        Value::Str(s) => Some(str_ends_with(s, &rest[0])),
+        _ => None,
+    }
+}
+
+/// The `endsWith` body (split for the complexity budget).
+fn str_ends_with(s: &str, v: &Value) -> Result<Value, NativeError> {
+    let Some(suffix) = str_text_arg(v)? else {
+        return Err(str_body_npe("suffix"));
+    };
+    let to = s.encode_utf16().count() as i64 - suffix.encode_utf16().count() as i64;
+    if to < 0 {
+        return Ok(Value::Bool(false));
+    }
+    Ok(Value::Bool(units_start_with(s, suffix, to as i32)))
+}
+
+/// `split/1,2` (limit `0` drops trailing empties, positive caps
+/// the parts, negative keeps all — upstream
+/// `Pattern.java#split`; the port has no arrays, so the parts
+/// come back as a vector, like `clojure.string/split`).
+fn gated_str_split(target: &Value, rest: &[Value]) -> Option<Result<Value, NativeError>> {
+    match target {
+        Value::Str(s) => Some(str_split(s, rest)),
+        _ => None,
+    }
+}
+
+/// The `split` body (split for the complexity budget).
+fn str_split(s: &str, rest: &[Value]) -> Result<Value, NativeError> {
+    let Some(regex) = str_text_arg(&rest[0])? else {
+        return Err(str_body_npe("regex"));
+    };
+    let limit = if rest.len() == 2 {
+        str_int_arg(&rest[1])?
+    } else {
+        0
+    };
+    crate::re::pattern_split(s, regex, limit)
+}
+
+/// The 0-arg string members (`length`, `trim`, case).
+fn surface_gated_str0(
+    meth: &str,
+    target: &Value,
+    rest: &[Value],
+) -> Option<Result<Value, NativeError>> {
+    match (meth, rest.len()) {
+        ("length", 0) => gated_str_length(target),
+        ("trim", 0) => gated_str_trim(target),
+        ("toUpperCase", 0) => gated_str_upper(target),
+        ("toLowerCase", 0) => gated_str_lower(target),
+        _ => None,
+    }
+}
+
+/// The string members with arguments.
+fn surface_gated_strn(
+    meth: &str,
+    target: &Value,
+    rest: &[Value],
+) -> Option<Result<Value, NativeError>> {
+    match (meth, rest.len()) {
+        ("charAt", 1) => gated_str_charat(target, rest),
+        ("substring", 1 | 2) => gated_str_substring(target, rest),
+        ("startsWith", 1 | 2) => gated_str_startswith(target, rest),
+        ("endsWith", 1) => gated_str_endswith(target, rest),
+        ("split", 1 | 2) => gated_str_split(target, rest),
+        _ => None,
+    }
+}
+
+/// The string-gated members (split 0-arg/with-args for the
+/// complexity budget; arms are disjoint).
+fn surface_gated_str(
+    meth: &str,
+    target: &Value,
+    rest: &[Value],
+) -> Option<Result<Value, NativeError>> {
+    surface_gated_str0(meth, target, rest).or_else(|| surface_gated_strn(meth, target, rest))
+}
+
 /// The member surface for `__meth*`: `None` when the member misses
 /// (the caller falls through to the host dispatch and its miss
 /// shapes).
@@ -3444,7 +3750,9 @@ pub(crate) fn surface_meth(
 /// nil-target sweep).
 pub(crate) const SURFACE_MEMBERS: &[(&str, usize)] = &[
     ("cast", 1),
+    ("charAt", 1),
     ("close", 0),
+    ("endsWith", 1),
     ("equals", 1),
     ("flush", 0),
     ("getCause", 0),
@@ -3469,7 +3777,17 @@ pub(crate) const SURFACE_MEMBERS: &[(&str, usize)] = &[
     ("isInstance", 1),
     ("isInterface", 0),
     ("isRealized", 0),
+    ("length", 0),
+    ("split", 1),
+    ("split", 2),
+    ("startsWith", 1),
+    ("startsWith", 2),
+    ("substring", 1),
+    ("substring", 2),
+    ("toLowerCase", 0),
     ("toString", 0),
+    ("toUpperCase", 0),
+    ("trim", 0),
 ];
 
 /// Whether `meth` names any surface member (any arity).
