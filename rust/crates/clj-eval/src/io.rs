@@ -68,15 +68,16 @@ struct PrintWriterState {
 }
 
 /// A file-backed writer: the open handle, its output charset,
-/// and the closed flag (one lock so the write/close
-/// check-and-set is atomic). Gap-120 slice 3: `clojure.java.io`
-/// `writer` results — printable through `*out*`, closable and
-/// flushable through the existing writer gates.
+/// the closed flag, and the bare-form BOM latch (one lock so the
+/// write/close check-and-set is atomic). Gap-120 slice 3:
+/// `clojure.java.io` `writer` results — printable through `*out*`,
+/// closable and flushable through the existing writer gates.
 #[derive(Debug)]
 struct FileWriterState {
     file: std::fs::File,
     charset: crate::ctor::Charset,
     closed: bool,
+    bom_written: bool,
 }
 
 /// A closed file writer/stream/reader reports the JDK text.
@@ -166,6 +167,7 @@ pub(crate) fn file_writer(
                 file,
                 charset,
                 closed: false,
+                bom_written: false,
             })),
         },
     }))
@@ -246,13 +248,18 @@ pub(crate) fn write_to_writer(w: &Value, s: &str) -> Result<(), NativeError> {
 }
 
 /// One write to a file-backed writer: closed reports the JDK
-/// text, otherwise the charset-encoded bytes append.
+/// text, otherwise the charset-encoded bytes append — with the
+/// bare-form BOM ahead of the first non-empty write only (empty
+/// writes emit nothing and don't latch, like the JDK
+/// `OutputStreamWriter`, which defers the BOM the same way).
 fn write_file_text(state: &Arc<Mutex<FileWriterState>>, s: &str) -> Result<(), NativeError> {
     let mut st = state.lock().unwrap_or_else(|e| e.into_inner());
     if st.closed {
         return Err(stream_closed());
     }
-    let bytes = crate::ctor::encode(st.charset, s);
+    let bom = !st.bom_written && !s.is_empty();
+    st.bom_written |= !s.is_empty();
+    let bytes = crate::ctor::encode(st.charset, s, bom);
     st.file.write_all(&bytes).map_err(io_err)
 }
 
@@ -389,6 +396,13 @@ fn close_file_writer(state: &Arc<Mutex<FileWriterState>>) -> Result<(), NativeEr
         return Ok(());
     }
     st.closed = true;
+    // A never-written bare-form writer still emits its BOM (the JDK
+    // end-of-input flush); fixed-endianness forms emit nothing.
+    if !st.bom_written {
+        st.bom_written = true;
+        let cs = st.charset;
+        st.file.write_all(crate::ctor::bom_bytes(cs)).map_err(io_err)?;
+    }
     st.file.flush().map_err(io_err)
 }
 

@@ -28,8 +28,10 @@
 //!   (reader f))` differs from upstream's `BufferedReader`.
 //! - D2: no network — `http(s)` URIs and sockets are refused;
 //!   strings resolve `file:` URIs first, then open literally.
-//! - D3: `(file nil "c")` answers the child alone (the JVM
-//!   resolves against the fs root — a platform quirk skipped).
+//! - D3: `(file nil "c")` answers the child alone — exactly like
+//!   the JDK (`File.java`: a null parent takes `normalize(child)`),
+//!   so this pins parity, not a divergence (the empty-parent
+//!   fs-root case matches too, via the join).
 //! - D4: derived handles are independent — `(writer
 //!   (output-stream f))` opens its own append handle (its close
 //!   never propagates), and `(reader (input-stream f))`
@@ -300,9 +302,9 @@ fn as_relative_path(v: &Value) -> Result<String, NativeError> {
 }
 
 /// `new File(parent, child)`: `None` parents answer the child
-/// (D3 — the JVM resolves against the fs root, a platform
-/// quirk the facsimile skips); trailing separators never
-/// double (either slash — Windows joins accept both).
+/// (D3 — the JDK does the same: a null parent takes
+/// `normalize(child)`); trailing separators never double
+/// (either slash — Windows joins accept both).
 fn join_path(parent: Option<&str>, child: &str) -> String {
     match parent {
         None => child.to_owned(),

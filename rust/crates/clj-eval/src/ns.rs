@@ -2059,6 +2059,7 @@ fn load_reader_arg(args: &[Value]) -> Result<&crate::reader::StreamReader, Nativ
 /// forced true (visibly), and `*pending-paths*` is untouched.
 fn native_load_reader(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     let reader = load_reader_arg(args)?;
+    crate::reader::check_reader_open(reader)?;
     // `Compiler.load` consumes leading whitespace before its entry
     // checks, so entry failures blame the post-skip position; the
     // parser stays out of its lock for the whole read phase (the

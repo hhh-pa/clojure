@@ -914,6 +914,57 @@ fn writer_encodings_byte_exact() {
     );
 }
 
+#[test]
+fn writer_bom_once_per_stream() {
+    // Two writes to one bare-form writer: a single BOM, then both
+    // payloads (the per-write BOM wrote it twice — round-1 M1).
+    let dir = fixture("bom-multi");
+    let p = dir.join("w.txt").to_string_lossy().into_owned();
+    let mut eval = jio();
+    let lit = clj_str(&p);
+    run(
+        &mut eval,
+        &format!(
+            "(let [w (io/writer {lit} :encoding \"UTF-16\")] \
+             (binding [*out* w] (print \"A\") (print \"B\")) (.close w))"
+        ),
+    );
+    assert_eq!(
+        std::fs::read(&p).unwrap(),
+        &[0xFE, 0xFF, 0x00, 0x41, 0x00, 0x42]
+    );
+    // An empty first write emits nothing and doesn't consume the
+    // BOM (the JDK defers it to the first non-empty write).
+    let dir = fixture("bom-empty-first");
+    let p = dir.join("w.txt").to_string_lossy().into_owned();
+    let mut eval = jio();
+    let lit = clj_str(&p);
+    run(
+        &mut eval,
+        &format!(
+            "(let [w (io/writer {lit} :encoding \"UTF-16\")] \
+             (binding [*out* w] (print \"\") (print \"A\")) (.close w))"
+        ),
+    );
+    assert_eq!(std::fs::read(&p).unwrap(), &[0xFE, 0xFF, 0x00, 0x41]);
+    // Closing a never-written bare-form writer still emits the BOM
+    // (the JDK end-of-input flush); fixed forms emit nothing.
+    let dir = fixture("bom-close-empty");
+    let p = dir.join("w.txt").to_string_lossy().into_owned();
+    let q = dir.join("v.txt").to_string_lossy().into_owned();
+    let mut eval = jio();
+    let (litp, litq) = (clj_str(&p), clj_str(&q));
+    run(
+        &mut eval,
+        &format!(
+            "(.close (io/writer {litp} :encoding \"UTF-16\")) \
+             (.close (io/writer {litq} :encoding \"UTF-16BE\"))"
+        ),
+    );
+    assert_eq!(std::fs::read(&p).unwrap(), &[0xFE, 0xFF]);
+    assert!(std::fs::read(&q).unwrap().is_empty());
+}
+
 // --- `input-stream` ---
 
 #[test]
@@ -1442,6 +1493,23 @@ fn stream_identity() {
             )
         ),
         "[true false false true]"
+    );
+}
+
+#[test]
+fn load_reader_past_close_is_stream_closed() {
+    // `load-reader` honors the close latch like `read`/`read-line`
+    // (round-1 L1 — it took the parser unchecked).
+    let dir = fixture("load-closed");
+    let p = write_bytes(&dir, "f.clj", b"(+ 1 2)");
+    let mut eval = jio();
+    let lit = clj_str(&p);
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            &format!("(let [r (io/reader {lit})] (.close r) (load-reader r))")
+        ),
+        "java.io.IOException | Stream closed"
     );
 }
 

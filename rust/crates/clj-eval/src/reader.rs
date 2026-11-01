@@ -120,7 +120,8 @@ fn close_stream_reader(r: &StreamReader) -> Result<(), NativeError> {
 }
 
 /// Reads past `.close` report the JDK text (gap-120 slice 3).
-fn check_reader_open(r: &StreamReader) -> Result<(), NativeError> {
+/// Shared with `load-reader`, which takes the parser directly.
+pub(crate) fn check_reader_open(r: &StreamReader) -> Result<(), NativeError> {
     if lock_state(r).closed {
         return Err(crate::io::stream_closed());
     }

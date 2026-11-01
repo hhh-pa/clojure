@@ -474,10 +474,11 @@ fn decode_utf32_auto(bytes: &[u8]) -> String {
 
 /// Encode a string the way the JDK `OutputStreamWriter` does:
 /// unmappable chars become `?` (ASCII/Latin-1), the bare
-/// `UTF-16`/`UTF-32` forms write a big-endian BOM first, and
-/// the fixed-endianness forms write none. Gap-120 slice 3
+/// `UTF-16`/`UTF-32` forms take a big-endian BOM when `bom`
+/// (once per stream — the caller latches it), and the
+/// fixed-endianness forms never do. Gap-120 slice 3
 /// (`clojure.java.io` writer output).
-pub(crate) fn encode(cs: Charset, s: &str) -> Vec<u8> {
+pub(crate) fn encode(cs: Charset, s: &str, bom: bool) -> Vec<u8> {
     match cs {
         Charset::Utf8 => s.as_bytes().to_vec(),
         Charset::Ascii => s
@@ -488,12 +489,24 @@ pub(crate) fn encode(cs: Charset, s: &str) -> Vec<u8> {
             })
             .collect(),
         Charset::Latin1 => encode_latin1(s),
-        Charset::Utf16 => encode_utf16_units(s, false, true),
+        Charset::Utf16 => encode_utf16_units(s, false, bom),
         Charset::Utf16Be => encode_utf16_units(s, false, false),
         Charset::Utf16Le => encode_utf16_units(s, true, false),
-        Charset::Utf32 => encode_utf32_words(s, false, true),
+        Charset::Utf32 => encode_utf32_words(s, false, bom),
         Charset::Utf32Be => encode_utf32_words(s, false, false),
         Charset::Utf32Le => encode_utf32_words(s, true, false),
+    }
+}
+
+/// The bare-form BOM bytes (empty for every fixed-endianness
+/// form): `close` on a never-written writer emits these, like
+/// the JDK `OutputStreamWriter` end-of-input flush. Gap-120
+/// slice 3 (`clojure.java.io` writer output).
+pub(crate) fn bom_bytes(cs: Charset) -> &'static [u8] {
+    match cs {
+        Charset::Utf16 => &[0xFE, 0xFF],
+        Charset::Utf32 => &[0x00, 0x00, 0xFE, 0xFF],
+        _ => &[],
     }
 }
 
