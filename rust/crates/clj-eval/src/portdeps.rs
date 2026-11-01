@@ -9,7 +9,8 @@
 //! Gap-124 slice 1: the `clojure.tools.deps.util.port` substrate —
 //! the natives upstream tools.deps gets from `java.io`/`System`
 //! (file reads, canonical paths, the working directory, env vars,
-//! slice 2 adds the is-file probe), which the port deliberately
+//! slice 2 adds the is-file probe, slice 3 the processor count,
+//! path separator, and thread id), which the port deliberately
 //! lacks. Installed lazily by
 //! [`install_port_ns`] (the gap-123 `install_async_ns` shape):
 //! requiring the namespace installs the natives and marks it
@@ -320,6 +321,67 @@ fn native_getenv(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeE
     }
 }
 
+/// `available-processors`: the machine's CPU count as a long
+/// (upstream `Runtime/availableProcessors` — the default
+/// `:threads` for `resolve-deps`). Falls back to 1 when the
+/// platform cannot report a count (so the value is always
+/// positive). Gap-124 slice 3.
+fn native_available_processors(
+    _eval: &mut Evaluator,
+    args: &[Value],
+) -> Result<Value, NativeError> {
+    check_arity(
+        "clojure.tools.deps.util.port/available-processors",
+        args,
+        &[0],
+    )?;
+    let n = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
+    Ok(Value::Int(i64::try_from(n).unwrap_or(1).max(1)))
+}
+
+/// The platform classpath separator (upstream
+/// `File/pathSeparator`): `#[cfg]` items, not `cfg!` arms, so the
+/// Linux-only coverage gate never sees the foreign platform's line.
+#[cfg(windows)]
+fn platform_path_sep() -> &'static str {
+    ";"
+}
+
+/// The platform classpath separator on non-Windows (see above).
+#[cfg(not(windows))]
+fn platform_path_sep() -> &'static str {
+    ":"
+}
+
+/// `path-separator`: the platform classpath separator as a string
+/// (upstream `File/pathSeparator`). Gap-124 slice 3: deliberately
+/// platform-exact (not an A7-style pin — external tools split
+/// classpaths on it).
+fn native_path_separator(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.tools.deps.util.port/path-separator", args, &[0])?;
+    Ok(Value::Str(Arc::from(platform_path_sep())))
+}
+
+/// The next per-thread id (see [`native_thread_id`]).
+static NEXT_THREAD_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+// The calling thread's id, assigned once from `NEXT_THREAD_ID`
+// (a plain comment: doc comments on macro invocations trip the
+// workspace `unused` deny lint).
+thread_local! {
+    static THREAD_ID: u64 = NEXT_THREAD_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// `thread-id`: the calling thread's id as a long (upstream
+/// `Thread/currentThread .getId` — the `retrieve-local` scope
+/// key). Ids are monotonic and unique among live threads (never
+/// reused, a stronger guarantee than the JVM's). Gap-124 slice 3.
+fn native_thread_id(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.tools.deps.util.port/thread-id", args, &[0])?;
+    let id = THREAD_ID.with(|t| *t);
+    Ok(Value::Int(i64::try_from(id).unwrap_or(i64::MAX)))
+}
+
 /// The port-substrate natives (installed lazily by
 /// [`install_port_ns`] — never referred into `user`).
 pub(crate) const PORT_NATIVES: &[(&str, NativeFnPtr)] = &[
@@ -329,6 +391,9 @@ pub(crate) const PORT_NATIVES: &[(&str, NativeFnPtr)] = &[
     ("canonical-path", native_canonical_path),
     ("current-dir", native_current_dir),
     ("getenv", native_getenv),
+    ("available-processors", native_available_processors),
+    ("path-separator", native_path_separator),
+    ("thread-id", native_thread_id),
 ];
 
 /// Install the `clojure.tools.deps.util.port` namespace
