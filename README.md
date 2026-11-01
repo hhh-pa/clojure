@@ -160,27 +160,30 @@ the interpreter's own natives, so AOT and `run` cannot drift.
 ## Divergences
 
 Deliberate, documented, and pinned by the differential corpus —
-each entry asserts its exact behavior, so drift fails CI:
+each entry asserts its exact behavior, so drift fails CI. What
+remains is the JVM-impossible residue plus one architectural
+pin (all owner-blessed):
 
 - **Printing.** `pr` round-trips EDN values through the reader;
   `*print-length*` / `*print-level*` truncate with `...`;
   `*print-dup*` routes `pr` through the dup printer (undupable
   kinds throw). Errors render as `file:line:col:`
-  diagnostic chains, not JVM stack dumps.
-- **Analyzer builtins.** `let loop fn binding letfn with-redefs
-  with-bindings bound-fn locking` resolve as macros and
-  `macroexpand-1` expands them (`let` to `let*`, etc.) via the FX4
-  expanders; only real specials and the seven fence macros are
-  identity.
+  diagnostic chains — JVM stack dumps are impossible without
+  a JVM.
+- **Analyzer builtins.** The nine FX4 heads (`let loop fn
+  binding letfn with-redefs with-bindings bound-fn locking`)
+  expand under `macroexpand-1` on both runtimes. The seven
+  fence macros (`defmacro declare ns assert time with-out-str
+  with-in-str`) expand on the JVM but stay identity here —
+  the analyzer consumes them directly, so expansion would
+  destroy the forms it matches on.
 - **Safety pins.** Re-entrant `force` on a `delay` raises
   `IllegalStateException` (the JVM recurses to
   `StackOverflowError`, which would abort a Rust process).
-  `alter-var-root` serializes per var like the
-  JVM (same-thread nesting re-enters; the outer install
-  wins).
-- **Namespaces.** `ns-imports` is the explicit import table
-  (sorted; fresh namespaces seed the 106 JVM default imports
-  flat per namespace, #74).
+- **Namespaces.** `ns-imports` keys are byte-equal to the
+  oracle (sorted; fresh namespaces seed the 106 JVM default
+  imports flat per namespace, #74), but the values are
+  emulated classes — real `Class` objects need a JVM.
 
 ## Out of scope
 
@@ -191,23 +194,9 @@ out of scope, not silently missing:
   non-goal: the port never loads `.class` files or links JVM
   bytecode.
 
-Everything else formerly listed here was a goal, and has
-landed (tracking issue in parentheses, all closed):
-
-- Host interop (#120): all 8 slices landed — the static
-  `clojure.lang.*` class core (S16), emulated construction,
-  `clojure.reflect`, String members, `clojure.java.shell`,
-  `System` statics, the reflect-table follow-up, and
-  `clojure.java.io`.
-- `clojure.spec` (#122): all slices landed, including generator
-  wiring (`gen*`) and the `fdef`/instrumentation finale.
-- `core.async` (#123): slices 1–3 landed (channels, buffers,
-  ops, transducers, ex-handlers, `go` blocks; scoped-complete).
-- `tools.deps` (#124): source-only redesign (no jars, no Maven
-  resolution — `:mvn` coords parse but are refused); config,
-  SPI/manifest, and API-namespace slices landed.
-- LLVM JIT (#121): in-process JIT plus the `jit` subcommand
-  landed (slice 1).
+The former N1/N4 exclusions — host interop (#120), LLVM JIT
+(#121), `clojure.spec` (#122), `core.async` (#123), `tools.deps`
+(#124) — have all landed; see their issues for slice details.
 
 ## Memory management
 
