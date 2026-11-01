@@ -3574,8 +3574,8 @@ fn dotdot_threading() {
     );
 }
 
-// m-strlen-oo, m-substring-oo: oracle-only — real JDK members
-// outside the emulated surface (follow-up, §2.2).
+// m-strlen-oo, m-substring-oo: landed on the surface (#120
+// slice 3 — `surface_strings` pins them).
 
 // m-str-string/int/double/bool/char/bigint/bigdec/ratio/kw/sym/vec/
 // map/set/list/entry/subvec/sortedmap/sortedset/range/cons/struct/
@@ -4008,15 +4008,15 @@ fn memfn_tests() {
         run(&mut eval, "(do (def mts (memfn toString)) (mts \"a\"))"),
         "\"a\""
     );
-    // m-memfn-call-args: the oracle calls `substring` (off-surface
-    // here — `m-substring-oo`), so the port misses there; the
-    // multi-arg call shape transcribes through `equals`.
+    // m-memfn-call-args: `substring` is on-surface now (#120
+    // slice 3), so the multi-arg call shape transcribes
+    // through it.
     assert_eq!(
-        uncaught(
+        run(
             &mut eval,
             "(do (def mss (memfn substring s e)) (mss \"abc\" 1 2))"
         ),
-        "java.lang.IllegalArgumentException | No matching method substring found taking 2 args for class java.lang.String"
+        "\"b\""
     );
     assert_eq!(
         run(
@@ -4529,6 +4529,283 @@ fn surface_gates() {
         uncaught(&mut eval, "(.. [] (getLast))"),
         "java.util.NoSuchElementException | "
     );
+}
+
+// #120 slice 3: the `String` members — `length`, `charAt`,
+// `substring/1,2`, `startsWith/1,2`, `endsWith`, `split/1,2`,
+// `trim`, `toUpperCase`, `toLowerCase`. Oracle: the JDK
+// sources (`String.java`, `Pattern.java#split`,
+// `Preconditions.java#outOfBoundsMessage`) plus upstream
+// `Reflector.java#boxArg` (lone overloads at every arity
+// here, so `int` params truncate every `Number` and
+// `String` params cast); the `split` parts come back as a
+// vector (the port has no arrays, like
+// `clojure.string/split`).
+#[test]
+fn surface_strings() {
+    let mut eval = boot();
+    let cases = [
+        ("(.. \"abc\" (length))", "3"),
+        ("(.. \"\" (length))", "0"),
+        // UTF-16 units, like `count`.
+        ("(.. \"😀\" (length))", "2"),
+        ("(.. \"abc\" (charAt 1))", "\\b"),
+        // `int` params truncate every `Number` (boxArg).
+        ("(.. \"abc\" (charAt 1.9))", "\\b"),
+        ("(.. \"abc\" (charAt ##NaN))", "\\a"),
+        ("(.. \"abc\" (charAt 4294967297N))", "\\b"),
+        ("(.. \"abc\" (charAt (biginteger 1)))", "\\b"),
+        ("(.. \"abc\" (charAt 1.5M))", "\\b"),
+        ("(.. \"abc\" (charAt 3/2))", "\\b"),
+        // Astral halves read U+FFFD (slice-2 N5).
+        ("(.. \"😀\" (charAt 0))", "\\\u{fffd}"),
+        // The JDK `substring` doc examples.
+        ("(.. \"hamburger\" (substring 4 8))", "\"urge\""),
+        ("(.. \"smiles\" (substring 1 5))", "\"mile\""),
+        ("(.. \"abc\" (substring 1))", "\"bc\""),
+        ("(.. \"abc\" (substring 0 3))", "\"abc\""),
+        ("(.. \"abc\" (substring 3))", "\"\""),
+        ("(.. \"abc\" (substring 2 2))", "\"\""),
+        ("(.. \"abc\" (startsWith \"a\"))", "true"),
+        ("(.. \"abc\" (startsWith \"b\"))", "false"),
+        ("(.. \"abc\" (startsWith \"\"))", "true"),
+        ("(.. \"abc\" (startsWith \"bc\" 1))", "true"),
+        ("(.. \"abc\" (startsWith \"bc\" 2))", "false"),
+        ("(.. \"abc\" (startsWith \"a\" -1))", "false"),
+        ("(.. \"abc\" (startsWith \"\" 3))", "true"),
+        ("(.. \"abc\" (startsWith \"\" 4))", "false"),
+        // Nil prefix with a negative offset is false (the JDK
+        // short-circuit — no NPE).
+        ("(.. \"abc\" (startsWith nil -1))", "false"),
+        ("(.. \"abc\" (endsWith \"c\"))", "true"),
+        ("(.. \"abc\" (endsWith \"b\"))", "false"),
+        ("(.. \"abc\" (endsWith \"\"))", "true"),
+        ("(.. \"abc\" (endsWith \"abc\"))", "true"),
+        ("(.. \"abc\" (endsWith \"zabc\"))", "false"),
+        // The JDK `split` doc examples.
+        (
+            "(.. \"boo:and:foo\" (split \":\"))",
+            "[\"boo\" \"and\" \"foo\"]",
+        ),
+        (
+            "(.. \"boo:and:foo\" (split \"o\"))",
+            "[\"b\" \"\" \":and:f\"]",
+        ),
+        (
+            "(.. \"boo:and:foo\" (split \":\" 2))",
+            "[\"boo\" \"and:foo\"]",
+        ),
+        (
+            "(.. \"boo:and:foo\" (split \":\" 5))",
+            "[\"boo\" \"and\" \"foo\"]",
+        ),
+        (
+            "(.. \"boo:and:foo\" (split \":\" -1))",
+            "[\"boo\" \"and\" \"foo\"]",
+        ),
+        (
+            "(.. \"boo:and:foo\" (split \"o\" -1))",
+            "[\"b\" \"\" \":and:f\" \"\" \"\"]",
+        ),
+        ("(.. \"a,\" (split \",\"))", "[\"a\"]"),
+        ("(.. \"a,\" (split \",\" -1))", "[\"a\" \"\"]"),
+        ("(.. \"abc\" (split \",\"))", "[\"abc\"]"),
+        ("(.. \"\" (split \",\"))", "[\"\"]"),
+        ("(.. \"abc\" (split \"\"))", "[\"a\" \"b\" \"c\"]"),
+        ("(.. \"abc\" (split \"\" 2))", "[\"a\" \"bc\"]"),
+        ("(.. \"abc\" (split \"\" 1))", "[\"abc\"]"),
+        ("(.. \"  ab  \" (trim))", "\"ab\""),
+        ("(.. \"\" (trim))", "\"\""),
+        ("(.. \"\\t a \\n\" (trim))", "\"a\""),
+        // NBSP is not `trim` space (stays).
+        ("(.. \"\\u00a0\" (trim))", "\"\u{a0}\""),
+        ("(.. \"abc\" (toUpperCase))", "\"ABC\""),
+        ("(.. \"ABC\" (toLowerCase))", "\"abc\""),
+        ("(.. \"ß\" (toUpperCase))", "\"SS\""),
+        ("(.. \"Äé\" (toLowerCase))", "\"äé\""),
+        ("(.. \"\" (toUpperCase))", "\"\""),
+        // The single-dot spelling transcribes too.
+        ("(.substring \"abc\" 1)", "\"bc\""),
+        ("(.trim \"  a  \")", "\"a\""),
+    ];
+    for (src, want) in cases {
+        assert_eq!(run(&mut eval, src), want, "{src}");
+    }
+    // Non-string targets miss (0-arg reads field-shape, longer
+    // method-shape); host instances and classes keep
+    // method-shape at 0 args for real members.
+    let misses = [
+        (
+            "(.. 1 (length))",
+            "java.lang.IllegalArgumentException | No matching field found: length for class java.lang.Long",
+        ),
+        (
+            "(.. 1 (trim))",
+            "java.lang.IllegalArgumentException | No matching field found: trim for class java.lang.Long",
+        ),
+        (
+            "(.. 1 (toUpperCase))",
+            "java.lang.IllegalArgumentException | No matching field found: toUpperCase for class java.lang.Long",
+        ),
+        (
+            "(.. 1 (toLowerCase))",
+            "java.lang.IllegalArgumentException | No matching field found: toLowerCase for class java.lang.Long",
+        ),
+        (
+            "(do (deftype QS1 [x]) (.. (QS1. 1) (length)))",
+            "java.lang.IllegalArgumentException | No matching method length found taking 0 args for class user.QS1",
+        ),
+        (
+            "(.. (class \"a\") (trim))",
+            "java.lang.IllegalArgumentException | No matching method trim found taking 0 args for class java.lang.Class",
+        ),
+        (
+            "(.. 1 (charAt 0))",
+            "java.lang.IllegalArgumentException | No matching method charAt found taking 1 args for class java.lang.Long",
+        ),
+        (
+            "(.. 1 (split \",\"))",
+            "java.lang.IllegalArgumentException | No matching method split found taking 1 args for class java.lang.Long",
+        ),
+        (
+            "(.. 1 (substring 0))",
+            "java.lang.IllegalArgumentException | No matching method substring found taking 1 args for class java.lang.Long",
+        ),
+        (
+            "(.. 1 (startsWith \"a\"))",
+            "java.lang.IllegalArgumentException | No matching method startsWith found taking 1 args for class java.lang.Long",
+        ),
+        (
+            "(.. 1 (endsWith \"a\"))",
+            "java.lang.IllegalArgumentException | No matching method endsWith found taking 1 args for class java.lang.Long",
+        ),
+        (
+            "(.. \"a\" (charAt))",
+            "java.lang.IllegalArgumentException | No matching field found: charAt for class java.lang.String",
+        ),
+        (
+            "(.. \"a\" (split))",
+            "java.lang.IllegalArgumentException | No matching field found: split for class java.lang.String",
+        ),
+        (
+            "(.. \"a\" (startsWith))",
+            "java.lang.IllegalArgumentException | No matching field found: startsWith for class java.lang.String",
+        ),
+        (
+            "(.. \"a\" (endsWith))",
+            "java.lang.IllegalArgumentException | No matching field found: endsWith for class java.lang.String",
+        ),
+        (
+            "(.. \"a\" (trim 1))",
+            "java.lang.IllegalArgumentException | No matching method trim found taking 1 args for class java.lang.String",
+        ),
+        (
+            "(.. \"a\" (length 1))",
+            "java.lang.IllegalArgumentException | No matching method length found taking 1 args for class java.lang.String",
+        ),
+        (
+            "(.. \"a\" (toUpperCase 1))",
+            "java.lang.IllegalArgumentException | No matching method toUpperCase found taking 1 args for class java.lang.String",
+        ),
+        (
+            "(.. \"a\" (toLowerCase 1))",
+            "java.lang.IllegalArgumentException | No matching method toLowerCase found taking 1 args for class java.lang.String",
+        ),
+        (
+            "(.. \"a\" (substring 0 1 2))",
+            "java.lang.IllegalArgumentException | No matching method substring found taking 3 args for class java.lang.String",
+        ),
+    ];
+    for (src, want) in misses {
+        assert_eq!(uncaught(&mut eval, src), want, "{src}");
+    }
+    // Bounds (the JDK `checkIndex`/`checkFromToIndex`
+    // templates), boxArg coercions, and the method-body NPEs.
+    let errors = [
+        (
+            "(.. \"abc\" (charAt 5))",
+            "java.lang.StringIndexOutOfBoundsException | Index 5 out of bounds for length 3",
+        ),
+        (
+            "(.. \"abc\" (charAt -1))",
+            "java.lang.StringIndexOutOfBoundsException | Index -1 out of bounds for length 3",
+        ),
+        (
+            "(.. \"abc\" (charAt \"x\"))",
+            "java.lang.IllegalArgumentException | Unexpected param type, expected: int, given: java.lang.String",
+        ),
+        (
+            "(.. \"abc\" (charAt \\a))",
+            "java.lang.IllegalArgumentException | Unexpected param type, expected: int, given: java.lang.Character",
+        ),
+        (
+            "(.. \"abc\" (charAt nil))",
+            "java.lang.NullPointerException | Cannot invoke \"Object.getClass()\" because \"arg\" is null",
+        ),
+        (
+            "(.. \"abc\" (substring 2 5))",
+            "java.lang.StringIndexOutOfBoundsException | Range [2, 5) out of bounds for length 3",
+        ),
+        (
+            "(.. \"abc\" (substring -1))",
+            "java.lang.StringIndexOutOfBoundsException | Range [-1, 3) out of bounds for length 3",
+        ),
+        (
+            "(.. \"abc\" (substring 2 1))",
+            "java.lang.StringIndexOutOfBoundsException | Range [2, 1) out of bounds for length 3",
+        ),
+        (
+            "(.. \"abc\" (substring 5))",
+            "java.lang.StringIndexOutOfBoundsException | Range [5, 3) out of bounds for length 3",
+        ),
+        (
+            "(.. \"abc\" (substring \"x\"))",
+            "java.lang.IllegalArgumentException | Unexpected param type, expected: int, given: java.lang.String",
+        ),
+        (
+            "(.. \"abc\" (startsWith 1))",
+            "java.lang.ClassCastException | Cannot cast java.lang.Long to java.lang.String",
+        ),
+        (
+            "(.. \"abc\" (startsWith nil))",
+            "java.lang.NullPointerException | Cannot invoke \"String.length()\" because \"prefix\" is null",
+        ),
+        (
+            "(.. \"abc\" (startsWith \"a\" \"x\"))",
+            "java.lang.IllegalArgumentException | Unexpected param type, expected: int, given: java.lang.String",
+        ),
+        (
+            "(.. \"abc\" (endsWith 1))",
+            "java.lang.ClassCastException | Cannot cast java.lang.Long to java.lang.String",
+        ),
+        (
+            "(.. \"abc\" (endsWith nil))",
+            "java.lang.NullPointerException | Cannot invoke \"String.length()\" because \"suffix\" is null",
+        ),
+        (
+            "(.. \"abc\" (split \"(\"))",
+            "java.util.regex.PatternSyntaxException | regex parse error:\n    (\n    ^\nerror: unclosed group",
+        ),
+        (
+            "(.. \"abc\" (split nil))",
+            "java.lang.NullPointerException | Cannot invoke \"String.length()\" because \"regex\" is null",
+        ),
+        (
+            "(.. \"abc\" (split 1))",
+            "java.lang.ClassCastException | Cannot cast java.lang.Long to java.lang.String",
+        ),
+        (
+            "(.. \"abc\" (split \",\" \"x\"))",
+            "java.lang.IllegalArgumentException | Unexpected param type, expected: int, given: java.lang.String",
+        ),
+        (
+            "(.. \"abc\" (split \",\" nil))",
+            "java.lang.NullPointerException | Cannot invoke \"Object.getClass()\" because \"arg\" is null",
+        ),
+    ];
+    for (src, want) in errors {
+        assert_eq!(uncaught(&mut eval, src), want, "{src}");
+    }
 }
 
 // t-msg/msg-nil/msg-exc/loc/cause-nil/cause-msg/cause-class,
