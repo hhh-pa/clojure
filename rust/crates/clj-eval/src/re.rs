@@ -100,42 +100,61 @@ fn groups_value(caps: &regex::Captures<'_>) -> Value {
 /// the parts (the last keeps the remainder), `0` drops trailing
 /// empties, negative keeps everything. Bad patterns report
 /// `PatternSyntaxException` (the crate text, like `re-pattern`).
+/// The running state of the JDK split loop (split out so each
+/// half stays under the complexity ratchet).
+struct SplitAcc {
+    parts: Vec<String>,
+    index: usize,
+    count: i64,
+}
+
+/// One `find_iter` step of the JDK split loop: matches before the
+/// cap push the text before them (a zero-width match at the start
+/// yields no empty leader); once a positive limit is reached, the
+/// next match pushes the remainder instead and later matches are
+/// dead (the `count == cap` arm fires exactly once).
+fn split_step(acc: &mut SplitAcc, text: &str, m: regex::Match, limited: bool, cap: i64) {
+    if !limited || acc.count < cap {
+        let leader = acc.index == 0 && m.start() == 0 && m.is_empty();
+        if !leader {
+            acc.parts.push(text[acc.index..m.start()].to_owned());
+            acc.index = m.end();
+            acc.count += 1;
+        }
+    } else if acc.count == cap {
+        acc.parts.push(text[acc.index..].to_owned());
+        acc.index = m.end();
+        acc.count += 1;
+    }
+}
+
 pub(crate) fn pattern_split(text: &str, source: &str, limit: i32) -> Result<Value, NativeError> {
     let re = compile_source(source)?;
     let limited = limit > 0;
     let cap = i64::from(limit) - 1;
-    let mut parts: Vec<String> = Vec::new();
-    let mut index = 0;
-    let mut count: i64 = 0;
+    let mut acc = SplitAcc {
+        parts: Vec::new(),
+        index: 0,
+        count: 0,
+    };
     for m in re.find_iter(text) {
-        if !limited || count < cap {
-            if index == 0 && m.start() == 0 && m.is_empty() {
-                continue;
-            }
-            parts.push(text[index..m.start()].to_owned());
-            index = m.end();
-            count += 1;
-        } else if count == cap {
-            parts.push(text[index..].to_owned());
-            index = m.end();
-            count += 1;
-        }
+        split_step(&mut acc, text, m, limited, cap);
     }
-    if index == 0 {
+    if acc.index == 0 {
         return Ok(Value::Vector(Vector::from_vec(vec![Value::Str(
             Arc::from(text),
         )])));
     }
-    if !limited || count < i64::from(limit) {
-        parts.push(text[index..].to_owned());
+    if !limited || acc.count < i64::from(limit) {
+        acc.parts.push(text[acc.index..].to_owned());
     }
     if limit == 0 {
-        while parts.last().is_some_and(|p| p.is_empty()) {
-            parts.pop();
+        while acc.parts.last().is_some_and(|p| p.is_empty()) {
+            acc.parts.pop();
         }
     }
     Ok(Value::Vector(Vector::from_vec(
-        parts
+        acc.parts
             .into_iter()
             .map(|p| Value::Str(Arc::from(p)))
             .collect(),
