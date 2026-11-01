@@ -3686,18 +3686,24 @@ fn gated_realized(eval: &Evaluator, target: &Value) -> Option<Result<Value, Nati
     }
 }
 
-/// `close` on writers (void — callable, never a bean key).
+/// `close` on writers, stream readers, and facsimile streams
+/// (void — callable, never a bean key).
 fn gated_writer_close(eval: &mut Evaluator, target: &Value) -> Option<Result<Value, NativeError>> {
     match target {
-        Value::Extension(e) => crate::io::close_writer_value(eval, e),
+        Value::Extension(e) => crate::io::close_writer_value(eval, e)
+            .or_else(|| crate::reader::close_reader_value(e))
+            .or_else(|| crate::jio::close_stream_value(e)),
         _ => None,
     }
 }
 
-/// `flush` on writers (void — callable, never a bean key).
+/// `flush` on writers and facsimile output streams (void —
+/// callable, never a bean key).
 fn gated_writer_flush(eval: &mut Evaluator, target: &Value) -> Option<Result<Value, NativeError>> {
     match target {
-        Value::Extension(e) => crate::io::flush_writer_value(eval, e),
+        Value::Extension(e) => {
+            crate::io::flush_writer_value(eval, e).or_else(|| crate::jio::flush_stream_value(e))
+        }
         _ => None,
     }
 }

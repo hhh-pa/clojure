@@ -329,7 +329,9 @@ fn npe_bytes() -> NativeError {
 
 /// A probed charset (spec §3.7 — exactly the oracle-pinned names
 /// ship; everything else is UEE like an unknown name, spec N6).
-#[derive(Clone, Copy)]
+/// Shared with the `clojure.java.io` facsimile (gap-120 slice 3),
+/// which decodes file bytes and encodes writer output the same way.
+#[derive(Clone, Copy, Debug)]
 pub(crate) enum Charset {
     Utf8,
     Ascii,
@@ -468,4 +470,90 @@ fn decode_utf32_auto(bytes: &[u8]) -> String {
     } else {
         decode_utf32(bytes, false)
     }
+}
+
+/// Encode a string the way the JDK `OutputStreamWriter` does:
+/// unmappable chars become `?` (ASCII/Latin-1), the bare
+/// `UTF-16`/`UTF-32` forms take a big-endian BOM when `bom`
+/// (once per stream — the caller latches it), and the
+/// fixed-endianness forms never do. Gap-120 slice 3
+/// (`clojure.java.io` writer output).
+pub(crate) fn encode(cs: Charset, s: &str, bom: bool) -> Vec<u8> {
+    match cs {
+        Charset::Utf8 => s.as_bytes().to_vec(),
+        Charset::Ascii => s
+            .chars()
+            .map(|c| {
+                let u = u32::from(c);
+                if u < 128 { u as u8 } else { b'?' }
+            })
+            .collect(),
+        Charset::Latin1 => encode_latin1(s),
+        Charset::Utf16 => encode_utf16_units(s, false, bom),
+        Charset::Utf16Be => encode_utf16_units(s, false, false),
+        Charset::Utf16Le => encode_utf16_units(s, true, false),
+        Charset::Utf32 => encode_utf32_words(s, false, bom),
+        Charset::Utf32Be => encode_utf32_words(s, false, false),
+        Charset::Utf32Le => encode_utf32_words(s, true, false),
+    }
+}
+
+/// The bare-form BOM bytes (empty for every fixed-endianness
+/// form): `close` on a never-written writer emits these, like
+/// the JDK `OutputStreamWriter` end-of-input flush. Gap-120
+/// slice 3 (`clojure.java.io` writer output).
+pub(crate) fn bom_bytes(cs: Charset) -> &'static [u8] {
+    match cs {
+        Charset::Utf16 => &[0xFE, 0xFF],
+        Charset::Utf32 => &[0x00, 0x00, 0xFE, 0xFF],
+        _ => &[],
+    }
+}
+
+/// Latin-1 bytes: chars past U+00FF become `?`.
+fn encode_latin1(s: &str) -> Vec<u8> {
+    let mut out = Vec::with_capacity(s.len());
+    for c in s.chars() {
+        let u = u32::from(c);
+        out.push(if u <= 0xFF { u as u8 } else { b'?' });
+    }
+    out
+}
+
+/// UTF-16 units in the given endianness, with a BOM when `bom`.
+fn encode_utf16_units(s: &str, little: bool, bom: bool) -> Vec<u8> {
+    let mut out = Vec::with_capacity(s.len() * 2 + 2);
+    if bom {
+        out.extend_from_slice(&[0xFE, 0xFF]);
+    }
+    let mut buf = [0u16; 2];
+    for c in s.chars() {
+        for unit in c.encode_utf16(&mut buf) {
+            let bytes = if little {
+                unit.to_le_bytes()
+            } else {
+                unit.to_be_bytes()
+            };
+            out.extend_from_slice(&bytes);
+        }
+    }
+    out
+}
+
+/// UTF-32 words in the given endianness, with a BOM when `bom`.
+fn encode_utf32_words(s: &str, little: bool, bom: bool) -> Vec<u8> {
+    let mut out = Vec::with_capacity(s.len() * 4 + 4);
+    if bom {
+        out.extend_from_slice(&[0x00, 0x00, 0xFE, 0xFF]);
+    }
+    for c in s.chars() {
+        let word = c as u32;
+        let bytes = if little {
+            word.to_le_bytes()
+        } else {
+            word.to_be_bytes()
+        };
+        out.extend_from_slice(&bytes);
+    }
+    out
 }

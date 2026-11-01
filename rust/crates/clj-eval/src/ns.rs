@@ -1460,6 +1460,14 @@ pub(crate) fn load_one(
         mark_loaded(eval, lib)?;
         return Ok(());
     }
+    // Gap-120 slice 3: `clojure.java.io` is a native namespace
+    // (the file/stream facsimile, no source file): same
+    // install-and-mark shape.
+    if sym_str(lib) == crate::jio::JIO_NS {
+        crate::jio::install_jio_ns(eval);
+        mark_loaded(eval, lib)?;
+        return Ok(());
+    }
     // #120 slice 3: `clojure.java.shell.impl` is a native
     // namespace (the spawn helper, no source file): same
     // install-and-mark shape.
@@ -2092,6 +2100,7 @@ fn load_reader_arg(args: &[Value]) -> Result<&crate::reader::StreamReader, Nativ
 /// forced true (visibly), and `*pending-paths*` is untouched.
 fn native_load_reader(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     let reader = load_reader_arg(args)?;
+    crate::reader::check_reader_open(reader)?;
     // `Compiler.load` consumes leading whitespace before its entry
     // checks, so entry failures blame the post-skip position; the
     // parser stays out of its lock for the whole read phase (the
