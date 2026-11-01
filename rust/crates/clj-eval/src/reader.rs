@@ -935,63 +935,110 @@ fn run_read(
                 return Ok((form, text));
             }
             Ok(None) => {
-                let mut state = lock_state(reader);
-                state.parser = parser;
-                match next_chunk(&mut state)? {
-                    Some(chunk) => state.parser.extend(&chunk),
-                    None => {
-                        // Capture before the drain: a reentrant
-                        // read mid-drain would skew the window.
-                        let text = capture_text(&state.parser, mark, capture);
-                        let (fired, at) = take_drain(&mut state);
-                        drop(state);
-                        let out = finish_clean_eof(
-                            eval,
-                            fired,
-                            at,
-                            eof_error,
-                            &eof_value,
-                            recursive,
-                            opts.suppress_read,
-                        )?;
-                        return Ok((out, text));
-                    }
+                if let Some(done) = finish_none_attempt(
+                    eval,
+                    reader,
+                    parser,
+                    mark,
+                    capture,
+                    eof_error,
+                    &eof_value,
+                    recursive,
+                    opts.suppress_read,
+                )? {
+                    return Ok(done);
                 }
             }
             Err(e) => {
-                if !is_eof_error(&e) {
-                    let (fired, at) = {
-                        let mut state = lock_state(reader);
-                        state.parser = parser;
-                        take_drain(&mut state)
-                    };
-                    return Err(finish_read_error(
-                        eval,
-                        fired,
-                        at,
-                        &e,
-                        recursive,
-                        opts.suppress_read,
-                    ));
-                }
-                let mut state = lock_state(reader);
-                state.parser = parser;
-                match next_chunk(&mut state)? {
-                    Some(chunk) => feed_chunk(&mut state, snapshot, &chunk),
-                    None => {
-                        let (fired, at) = take_drain(&mut state);
-                        drop(state);
-                        return Err(finish_read_error(
-                            eval,
-                            fired,
-                            at,
-                            &e,
-                            recursive,
-                            opts.suppress_read,
-                        ));
-                    }
+                if let Some(err) = finish_err_attempt(
+                    eval,
+                    reader,
+                    parser,
+                    snapshot,
+                    &e,
+                    recursive,
+                    opts.suppress_read,
+                )? {
+                    return Err(err);
                 }
             }
+        }
+    }
+}
+
+/// Finish a no-form attempt (split from [`run_read`] for the
+/// complexity ratchet — pure code motion, same guard episodes as
+/// before): a fresh chunk extends the parser and retries (`None`
+/// = retry), a true EOF finishes here.
+#[allow(clippy::too_many_arguments)]
+fn finish_none_attempt(
+    eval: &mut Evaluator,
+    reader: &StreamReader,
+    parser: Reader,
+    mark: usize,
+    capture: bool,
+    eof_error: bool,
+    eof_value: &Value,
+    recursive: bool,
+    suppressed: bool,
+) -> Result<Option<(Value, String)>, NativeError> {
+    let mut state = lock_state(reader);
+    state.parser = parser;
+    match next_chunk(&mut state)? {
+        Some(chunk) => {
+            state.parser.extend(&chunk);
+            Ok(None)
+        }
+        None => {
+            // Capture before the drain: a reentrant
+            // read mid-discard would skew the window.
+            let text = capture_text(&state.parser, mark, capture);
+            let (fired, at) = take_drain(&mut state);
+            drop(state);
+            let out =
+                finish_clean_eof(eval, fired, at, eof_error, eof_value, recursive, suppressed)?;
+            Ok(Some((out, text)))
+        }
+    }
+}
+
+/// Handle a failed read attempt (split from [`run_read`] for the
+/// complexity ratchet — pure code motion, same guard episodes as
+/// before): non-EOF errors and EOF-without-chunk finish here;
+/// EOF-with-chunk feeds the parser and retries (`None` = retry).
+#[allow(clippy::too_many_arguments)]
+fn finish_err_attempt(
+    eval: &mut Evaluator,
+    reader: &StreamReader,
+    parser: Reader,
+    snapshot: Option<Reader>,
+    e: &ReaderError,
+    recursive: bool,
+    suppressed: bool,
+) -> Result<Option<NativeError>, NativeError> {
+    if !is_eof_error(e) {
+        let (fired, at) = {
+            let mut state = lock_state(reader);
+            state.parser = parser;
+            take_drain(&mut state)
+        };
+        return Ok(Some(finish_read_error(
+            eval, fired, at, e, recursive, suppressed,
+        )));
+    }
+    let mut state = lock_state(reader);
+    state.parser = parser;
+    match next_chunk(&mut state)? {
+        Some(chunk) => {
+            feed_chunk(&mut state, snapshot, &chunk);
+            Ok(None)
+        }
+        None => {
+            let (fired, at) = take_drain(&mut state);
+            drop(state);
+            Ok(Some(finish_read_error(
+                eval, fired, at, e, recursive, suppressed,
+            )))
         }
     }
 }
