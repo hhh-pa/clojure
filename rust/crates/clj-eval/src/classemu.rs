@@ -57,7 +57,8 @@ pub(crate) const CLASS_EMU_NATIVES: &[(&str, NativeFnPtr)] = &[
 /// Hidden natives: `__import*` is an implementation detail of the
 /// `import` macro in the standing of `__new*` (public so macro
 /// expansions analyze, unlisted in the matrix); `__static*` is the
-/// analyzer's static-call lowering (`Class/forName`, #120).
+/// analyzer's static-call lowering (`Class/forName` plus the
+/// `System` statics, #120).
 pub(crate) const CLASS_EMU_HIDDEN: &[(&str, NativeFnPtr)] = &[
     ("__import*", native_import_star),
     ("__static*", native_static),
@@ -2597,18 +2598,21 @@ fn import_class(eval: &mut Evaluator, fqn: &str) -> Result<Value, NativeError> {
     Ok(Value::Class(class))
 }
 
-/// The emulated static surface (#120 slice 1): exact `(class,
-/// member)` entries with their fixed arities. `Class/forName` is
-/// the only entry; the analyzer validates arities for known
-/// members at compile time (oracle `forName-0arg`,
-/// `forName-4arg`), while unknown members on resolved classes
-/// defer to the runtime [`native_static`] miss (a documented phase
-/// narrowing — the JVM rejects those at compile time too, oracle
-/// `static-miss-0`). Wire new statics here plus an arm in
-/// [`native_static`].
+/// The emulated static surface (#120 slices 1+3): exact `(class,
+/// member)` entries with their fixed arities. The analyzer
+/// validates arities for known members at compile time (oracle
+/// `forName-0arg`, `forName-4arg`), while unknown members on
+/// resolved classes defer to the runtime [`native_static`] miss (a
+/// documented phase narrowing — the JVM rejects those at compile
+/// time too, oracle `static-miss-0`). Wire new statics here plus
+/// an arm in [`native_static`] (and, for class values, in the
+/// instance-position surface below).
 pub(crate) fn static_member_arities(fqn: &str, member: &str) -> Option<&'static [usize]> {
     match (fqn, member) {
         ("java.lang.Class", "forName") => Some(&[1, 2, 3]),
+        ("java.lang.System", "getProperty") => Some(&[1, 2]),
+        ("java.lang.System", "lineSeparator") => Some(&[0]),
+        ("java.lang.System", "identityHashCode") => Some(&[1]),
         _ => None,
     }
 }
@@ -2638,6 +2642,9 @@ fn native_static(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeEr
     let rest = &args[2..];
     match (fqn.as_ref(), member.as_ref()) {
         ("java.lang.Class", "forName") => static_forname(eval, rest),
+        ("java.lang.System", "getProperty") => static_getproperty(rest),
+        ("java.lang.System", "lineSeparator") => static_lineseparator(rest),
+        ("java.lang.System", "identityHashCode") => static_identity_hashcode(rest),
         _ => Err(crate::types::no_method(member, rest.len(), fqn)),
     }
 }
@@ -2745,6 +2752,261 @@ fn forname_resolve(eval: &Evaluator, name: Option<Arc<str>>) -> Result<Arc<Class
         None => Err(forname_name_npe()),
         Some(s) => resolve_class_name(eval, &s)
             .ok_or_else(|| NativeError::new(ThrowClass::ClassNotFoundException, s.to_string())),
+    }
+}
+
+/// The platform line separator (JDK `System.java`: `"\n"` on UNIX,
+/// `"\r\n"` on Windows — the `line.separator` property, which the
+/// port never rebinds, so `lineSeparator` and the property agree
+/// exactly, like upstream `core.clj` `system-newline`).
+#[cfg(windows)]
+const LINE_SEP: &str = "\r\n";
+#[cfg(not(windows))]
+const LINE_SEP: &str = "\n";
+
+/// The platform path separator (`":"` on UNIX, `";"` on Windows —
+/// the `path.separator` property; `std` exposes no constant, so the
+/// `cfg` pair pins it per platform).
+#[cfg(windows)]
+const PATH_SEP: &str = ";";
+#[cfg(not(windows))]
+const PATH_SEP: &str = ":";
+
+/// The emulated `os.name` (JDK `SystemProps` reads the kernel's OS
+/// name; the port maps `std::env::consts::OS` to the JVM spellings).
+/// `Windows` reads the family only, where the JVM reports the full
+/// marketing version such as `Windows 10` — a documented narrowing
+/// (upstream `process.clj` branches only on the `Windows` prefix).
+#[cfg(target_os = "linux")]
+const OS_NAME: &str = "Linux";
+#[cfg(target_os = "macos")]
+const OS_NAME: &str = "Mac OS X";
+#[cfg(target_os = "windows")]
+const OS_NAME: &str = "Windows";
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+const OS_NAME: &str = std::env::consts::OS;
+
+/// The emulated `os.arch` (JDK `SystemProps` reads the kernel's
+/// arch; `x86_64` takes the JVM spelling `amd64` — `aarch64`
+/// already matches, and anything else reports the Rust arch name).
+#[cfg(target_arch = "x86_64")]
+const OS_ARCH: &str = "amd64";
+#[cfg(target_arch = "x86")]
+const OS_ARCH: &str = "x86";
+#[cfg(not(any(target_arch = "x86_64", target_arch = "x86")))]
+const OS_ARCH: &str = std::env::consts::ARCH;
+
+/// The well-known system properties (#120 slice 3): the keys the
+/// port answers exactly and port-natively (JDK `SystemProps`
+/// standard keys). Everything else ousts precisely — `None` here,
+/// hence nil (1-arg) or the default (2-arg), exactly like the
+/// JVM's unset keys (`System.java`: `props.getProperty` answers
+/// null / the default). Ousted on purpose: `os.version` (no `std`
+/// kernel-version source), `user.*` (dynamic identity — the port
+/// pins constants only), `java.*` (there is no JVM to version),
+/// and every `clojure.*` key (unset unless `-D`-supplied, so the
+/// oust feeds upstream's own defaults — `main.clj`
+/// `clojure.compile.path` → `"classes"`, `clojure.main.report` →
+/// `"file"`, `basis` `clojure.basis` → nil).
+fn system_property(key: &str) -> Option<&'static str> {
+    match key {
+        "line.separator" => Some(LINE_SEP),
+        "file.separator" => Some(std::path::MAIN_SEPARATOR_STR),
+        "path.separator" => Some(PATH_SEP),
+        "file.encoding" => Some("UTF-8"),
+        "os.name" => Some(OS_NAME),
+        "os.arch" => Some(OS_ARCH),
+        _ => None,
+    }
+}
+
+/// Cast a `getProperty` key to `String` (nil passes — `checkKey`
+/// NPEs it with the JDK text; anything else is the bootstrap cast
+/// failure, mirroring [`forname_name_str`]).
+fn property_key_str(key: &Value) -> Result<Option<Arc<str>>, NativeError> {
+    match key {
+        Value::Nil => Ok(None),
+        Value::Str(s) => Ok(Some(Arc::clone(s))),
+        _ => Err(crate::core::cce_err(key, "java.lang.String")),
+    }
+}
+
+/// Cast a `getProperty` default to `String` (nil passes — the JDK
+/// returns it as-is for missing keys; anything else is the
+/// bootstrap cast failure).
+fn property_def_str(def: &Value) -> Result<Value, NativeError> {
+    match def {
+        Value::Nil => Ok(Value::Nil),
+        Value::Str(s) => Ok(Value::Str(Arc::clone(s))),
+        _ => Err(crate::core::cce_err(def, "java.lang.String")),
+    }
+}
+
+/// JDK `System.checkKey`, verbatim: nil keys NPE (`"key can't be
+/// null"`), empty keys IAE (`"key can't be empty"`).
+fn check_property_key(key: Option<&str>) -> Result<&str, NativeError> {
+    match key {
+        None => Err(NativeError::new(
+            ThrowClass::NullPointerException,
+            "key can't be null".to_owned(),
+        )),
+        Some("") => Err(NativeError::new(
+            ThrowClass::IllegalArgumentException,
+            "key can't be empty".to_owned(),
+        )),
+        Some(k) => Ok(k),
+    }
+}
+
+/// `System/getProperty` over the well-known table. Static-call args
+/// coerce left-to-right (the slice-2 `forName` order: key cast,
+/// default cast, both nil-permissive), then `checkKey` fires, then
+/// the lookup — so a bad default CCEs before a nil key NPEs. Other
+/// arities miss (reachable only through instance position or direct
+/// `__static*` calls — static syntax arity-checks at compile time).
+fn static_getproperty(args: &[Value]) -> Result<Value, NativeError> {
+    match args.len() {
+        1 => {
+            let key = property_key_str(&args[0])?;
+            let key = check_property_key(key.as_deref())?;
+            Ok(system_property(key).map_or(Value::Nil, |v| Value::Str(Arc::from(v))))
+        }
+        2 => {
+            let key = property_key_str(&args[0])?;
+            let def = property_def_str(&args[1])?;
+            let key = check_property_key(key.as_deref())?;
+            Ok(system_property(key).map_or(def, |v| Value::Str(Arc::from(v))))
+        }
+        n => Err(crate::types::no_method(
+            "getProperty",
+            n,
+            "java.lang.System",
+        )),
+    }
+}
+
+/// `System/lineSeparator`: the `line.separator` property (JDK
+/// `System.java` is `return lineSeparator` — the two agree by
+/// construction here too). Other arities miss (compile-time for
+/// static syntax, runtime through instance position and direct
+/// `__static*` calls).
+fn static_lineseparator(args: &[Value]) -> Result<Value, NativeError> {
+    match args.len() {
+        0 => Ok(Value::Str(Arc::from(LINE_SEP))),
+        n => Err(crate::types::no_method(
+            "lineSeparator",
+            n,
+            "java.lang.System",
+        )),
+    }
+}
+
+/// `System/identityHashCode`: nil is 0 (JDK javadoc: "The hash code
+/// for the null reference is zero"); anything else hashes its
+/// allocation identity where the port has one (fence-4a ids and
+/// `Arc` allocations) and its content where identity is the value
+/// (cached/pooled kinds). `identical?` values always agree, and
+/// distinct live allocations (all but) always differ. Upstream
+/// consumes it for the `#object[`/`#<` print slots
+/// (`core_print.clj`, `pprint/dispatch.clj`). Other arities miss
+/// (compile-time for static syntax, runtime through instance
+/// position and direct `__static*` calls).
+fn static_identity_hashcode(args: &[Value]) -> Result<Value, NativeError> {
+    match args.len() {
+        1 => Ok(Value::Int(i64::from(identity_hash(&args[0])))),
+        n => Err(crate::types::no_method(
+            "identityHashCode",
+            n,
+            "java.lang.System",
+        )),
+    }
+}
+
+/// Java `Long.hashCode` over an identity id (the private `id_hash`
+/// mix in `hasheq`, restated: small ids survive intact, so distinct
+/// allocation ids hash distinctly).
+fn id_mix(id: u64) -> i32 {
+    (id ^ (id >> 32)) as i32
+}
+
+/// The low 32 address bits of an allocation (stable within one
+/// process; distinct live allocations differ unless 4G apart).
+fn ptr_mix<T: ?Sized>(p: *const T) -> i32 {
+    p.addr() as i32
+}
+
+/// The identity hash (split for the complexity budget): the id
+/// tiers first, then the allocation-pointer tier, else the content
+/// hash — `identical?` values always agree (same id, same
+/// allocation, or equal values in the cached/pooled tiers), and nil
+/// is 0 (shared with `hash_code`, per the JDK).
+fn identity_hash(v: &Value) -> i32 {
+    identity_hash_heap(v)
+        .or_else(|| identity_hash_alloc(v))
+        .or_else(|| identity_hash_ptr(v))
+        .unwrap_or_else(|| clj_value::hash_code(v))
+}
+
+/// `identityHashCode` over the `identical_heap` id kinds plus
+/// `Symbol` (id-compared like them): collections, entries, tagged
+/// and conditional reads, primitive vectors, and the scalar ids.
+/// `None` for every other kind.
+fn identity_hash_heap(v: &Value) -> Option<i32> {
+    match v {
+        Value::Symbol(s) => Some(id_mix(s.id())),
+        Value::List(l) => Some(id_mix(l.id())),
+        Value::Vector(x) => Some(id_mix(x.id())),
+        Value::Map(m) => Some(id_mix(m.id())),
+        Value::Set(s) => Some(id_mix(s.id())),
+        Value::MapEntry { id, .. } => Some(id_mix(*id)),
+        Value::TaggedLiteral { id, .. } => Some(id_mix(*id)),
+        Value::ReaderConditional { id, .. } => Some(id_mix(*id)),
+        Value::PrimitiveVector(p) => Some(id_mix(p.id())),
+        Value::Uuid(u) => Some(id_mix(u.id())),
+        Value::Instant(i) => Some(id_mix(i.id())),
+        Value::Uri(u) => Some(id_mix(u.id())),
+        _ => None,
+    }
+}
+
+/// `identityHashCode` over the cell/var/throwable ids (one tier of
+/// [`identity_hash`]): vars, unbounds, throwables, transients,
+/// atoms, delays, futures, promises, agents, volatiles, refs,
+/// arrays, and executors. `None` for every other kind.
+fn identity_hash_alloc(v: &Value) -> Option<i32> {
+    match v {
+        Value::Var(var) => Some(id_mix(var.id)),
+        Value::Unbound(u) => Some(id_mix(u.var_id)),
+        Value::Throwable(t) => Some(id_mix(t.id)),
+        Value::Transient(t) => Some(id_mix(t.id())),
+        Value::Atom(a) => Some(id_mix(a.id())),
+        Value::Delay(d) => Some(id_mix(d.id())),
+        Value::Future(f) => Some(id_mix(f.id())),
+        Value::Promise(p) => Some(id_mix(p.id())),
+        Value::Agent(a) => Some(id_mix(a.id())),
+        Value::Volatile(x) => Some(id_mix(x.id())),
+        Value::Ref(r) => Some(id_mix(r.id())),
+        Value::Array(a) => Some(id_mix(a.id())),
+        Value::Executor(x) => Some(id_mix(x.id())),
+        _ => None,
+    }
+}
+
+/// `identityHashCode` over the `Arc` allocations (one tier of
+/// [`identity_hash`]): strings, tower numbers, extensions, host
+/// values, and multimethods — every kind whose `identical?` is
+/// `Arc::ptr_eq`. `None` for every other kind.
+fn identity_hash_ptr(v: &Value) -> Option<i32> {
+    match v {
+        Value::Str(s) => Some(ptr_mix(Arc::as_ptr(s))),
+        Value::BigInt(n) => Some(ptr_mix(Arc::as_ptr(n))),
+        Value::BigInteger(n) => Some(ptr_mix(Arc::as_ptr(n))),
+        Value::BigDec(d) => Some(ptr_mix(Arc::as_ptr(d))),
+        Value::Ratio(r) => Some(ptr_mix(Arc::as_ptr(r))),
+        Value::Extension(e) => Some(ptr_mix(Arc::as_ptr(e))),
+        Value::HostType(h) => Some(ptr_mix(Arc::as_ptr(h))),
+        Value::MultiFn(m) => Some(ptr_mix(Arc::as_ptr(m))),
+        _ => None,
     }
 }
 
@@ -3211,6 +3473,9 @@ fn surface_class_member(
     let Value::Class(c) = target else {
         return None;
     };
+    if let Some(hit) = surface_class_static(eval, meth, c, rest) {
+        return Some(hit);
+    }
     match (meth, rest.len()) {
         ("getName", 0) => Some(Ok(Value::Str(Arc::from(c.name())))),
         ("getSimpleName", 0) => Some(Ok(Value::Str(Arc::from(simple_name_of(c.name()).as_str())))),
@@ -3221,11 +3486,6 @@ fn surface_class_member(
         ("isInstance", 1) => Some(Ok(Value::Bool(is_instance_of(eval, c.name(), &rest[0])))),
         ("isAssignableFrom", 1) => Some(assignable_from(eval, c, &rest[0])),
         ("cast", 1) => Some(cast_to_class(eval, c, &rest[0])),
-        // Statics resolve through instance position on class values
-        // (oracle `dotdot-static`); only `Class` has tabled statics
-        // and only `forName` is tabled, so anything else falls to
-        // the miss arm, like any non-class target misses through.
-        ("forName", 1..=3) if c.name() == "java.lang.Class" => Some(static_forname(eval, rest)),
         // Classes miss method-shape at every arity (unlike other
         // values, whose 0-arg misses read field-first).
         _ => Some(Err(crate::types::no_method(
@@ -3233,6 +3493,30 @@ fn surface_class_member(
             rest.len(),
             &crate::error::jvm_class_of(target),
         ))),
+    }
+}
+
+/// Statics resolvable through instance position on class values
+/// (oracle `dotdot-static`); `Class` and `System` have tabled
+/// statics, so anything else is `None` (the caller falls through
+/// to the reflection members and their miss arm, like any
+/// non-class target misses through). Split out so both halves
+/// stay under the complexity ratchet; the arm sets are disjoint
+/// by method name, so checking statics first is order-irrelevant.
+fn surface_class_static(
+    eval: &mut Evaluator,
+    meth: &str,
+    c: &Arc<ClassVal>,
+    rest: &[Value],
+) -> Option<Result<Value, NativeError>> {
+    match (meth, rest.len()) {
+        ("forName", 1..=3) if c.name() == "java.lang.Class" => Some(static_forname(eval, rest)),
+        ("getProperty", 1..=2) if c.name() == "java.lang.System" => Some(static_getproperty(rest)),
+        ("lineSeparator", 0) if c.name() == "java.lang.System" => Some(static_lineseparator(rest)),
+        ("identityHashCode", 1) if c.name() == "java.lang.System" => {
+            Some(static_identity_hashcode(rest))
+        }
+        _ => None,
     }
 }
 
@@ -3815,6 +4099,17 @@ mod tests {
             &cond,
             &clj_value::reader_conditional(Value::Int(1), false)
         ));
+    }
+
+    #[test]
+    fn identity_hash_unreachable_uri() {
+        // `Uri` has no surface constructor (like the unreachable
+        // row above): the id tier still answers — the same
+        // allocation agrees, distinct allocations differ.
+        let uri = Value::Uri(Box::new(clj_value::Uri::parse("http://x/").unwrap()));
+        assert_eq!(identity_hash(&uri), identity_hash(&uri.clone()));
+        let other = Value::Uri(Box::new(clj_value::Uri::parse("http://x/").unwrap()));
+        assert_ne!(identity_hash(&uri), identity_hash(&other));
     }
 
     #[test]
