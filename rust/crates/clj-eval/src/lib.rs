@@ -48,6 +48,7 @@ pub mod reader;
 pub mod rng;
 pub mod scalars;
 pub mod seqs;
+pub mod shell;
 pub mod stm;
 pub mod typeinternals;
 pub mod types;
