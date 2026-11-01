@@ -3743,8 +3743,8 @@ pub(crate) fn surface_meth(
 /// The surface as `(member, argc)` pairs (sorted for the unit test's
 /// nil-target sweep).
 pub(crate) const SURFACE_MEMBERS: &[(&str, usize)] = &[
-    ("charAt", 1),
     ("cast", 1),
+    ("charAt", 1),
     ("close", 0),
     ("endsWith", 1),
     ("equals", 1),
