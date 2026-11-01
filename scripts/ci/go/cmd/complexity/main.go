@@ -31,7 +31,7 @@ workspace (excluding build output) and compares named-function violations
 * a violation not in the baseline -> error (fix the function or, with a
   reviewer, extend the baseline)
 * a baselined violation whose metrics grew -> error
-* a baseline entry that no longer violates -> note (prune at leisure)
+* a baseline entry that no longer violates -> FAIL (prune now; zero is the requirement)
 
 A baselined entry may carry a justification string naming why the
 function is inherently complex; --regen preserves justifications
@@ -455,7 +455,8 @@ func run(argv []string) int {
 		if stale == 1 {
 			noun = "y"
 		}
-		fmt.Printf("note: %d baseline entr%s no longer violate (prune at leisure)\n", stale, noun)
+		fmt.Printf("STALE complexity baseline: %d entr%s no longer violate (prune now — zero is the requirement)\n", stale, noun)
+		failed = true
 	}
 	worst := append([]violation(nil), current...)
 	sort.SliceStable(worst, func(i, j int) bool {
