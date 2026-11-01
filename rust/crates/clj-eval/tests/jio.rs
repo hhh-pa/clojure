@@ -233,19 +233,37 @@ fn file_uri_not_a_file() {
 
 #[test]
 fn file_uri_percent_edges() {
+    // Valid escapes decode (via `file:` strings at real files —
+    // plus the `%20` URI row in `file_uri_shapes`).
+    let dir = fixture("percent-edges");
+    write_bytes(&dir, "a~", b"tilde\n");
+    write_bytes(&dir, "aAb", b"mix\n");
     let mut eval = jio();
+    for (name, want) in [("a%7e", "[\"tilde\"]"), ("a%7E", "[\"tilde\"]"), ("a%41b", "[\"mix\"]")] {
+        let url = format!("file://{}/{}", dir.to_string_lossy().replace('\\', "/"), name);
+        assert_eq!(
+            run(
+                &mut eval,
+                &format!("(vec (line-seq (io/reader {})))", clj_str(&url))
+            ),
+            want,
+            "{name}"
+        );
+    }
     // D5: malformed `%` stays literal (the JDK throws there).
+    // These ride `file:` strings — the port's URI parser itself
+    // rejects malformed escapes, so no `Uri` value can spell them.
     for (text, want) in [
         ("file:/a%zz", "/a%zz"),
         ("file:/a%2z", "/a%2z"),
         ("file:/a%", "/a%"),
         ("file:/a%2", "/a%2"),
-        ("file:/a%7e", "/a~"),
-        ("file:/a%7E", "/a~"),
-        ("file:/a%41b", "/aAb"),
     ] {
-        intern_uri(&mut eval, "u", text);
-        assert_eq!(run(&mut eval, "(str (io/file u))"), clj_str(want), "{text}");
+        let got = uncaught(&mut eval, &format!("(io/reader {})", clj_str(text)));
+        assert!(
+            got.starts_with(&format!("java.io.FileNotFoundException | {want} (")),
+            "{text}: {got}"
+        );
     }
 }
 
@@ -1396,7 +1414,7 @@ fn ns_surface_is_six_publics() {
     assert_eq!(
         run(
             &mut eval,
-            "(map str (sort (keys (ns-publics 'clojure.java.io))))"
+            "(mapv str (sort (keys (ns-publics 'clojure.java.io))))"
         ),
         r#"["delete-file" "file" "input-stream" "output-stream" "reader" "writer"]"#
     );
@@ -1405,7 +1423,7 @@ fn ns_surface_is_six_publics() {
     assert_eq!(
         run(
             &mut eval,
-            "(map str (sort (keys (ns-publics 'clojure.java.io))))"
+            "(mapv str (sort (keys (ns-publics 'clojure.java.io))))"
         ),
         r#"["delete-file" "file" "input-stream" "output-stream" "reader" "writer"]"#
     );
