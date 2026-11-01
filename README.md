@@ -157,12 +157,13 @@ JVM); `main` drops every slot and takes no arguments
 (`*command-line-args*` is unconveyed). Primitives dispatch through
 the interpreter's own natives, so AOT and `run` cannot drift.
 
-## Divergences
+## Accepted differences
 
-Deliberate, documented, and pinned by the differential corpus —
-each entry asserts its exact behavior, so drift fails CI. What
-remains is the JVM-impossible residue plus one architectural
-pin (all owner-blessed):
+Deliberate, documented, owner-accepted, and pinned by the
+differential corpus — each entry asserts its exact behavior, so
+drift fails CI. There are no open divergences: everything below
+differs from the JVM only where matching it would require a JVM,
+plus one architectural pin:
 
 - **Printing.** `pr` round-trips EDN values through the reader;
   `*print-length*` / `*print-level*` truncate with `...`;
