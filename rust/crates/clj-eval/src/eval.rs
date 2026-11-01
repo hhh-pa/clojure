@@ -531,17 +531,13 @@ impl Evaluator {
     /// prologue installs them on the reader; the per-form loops
     /// re-snapshot the data-reader fields from this base).
     fn read_forms_opts(eval: &mut Evaluator, seed: &crate::reader::ReadGateSeed) -> ReaderOpts {
-        let cur = eval.current_ns_name();
         let mut opts = ReaderOpts {
-            current_ns: cur.clone(),
+            current_ns: eval.current_ns_name(),
             ..Default::default()
         };
-        // Live-or-removed (the detached `*ns*` keeps aliases/refers,
-        // like the JVM; #80).
-        if let Some(ns) = eval.registry.ns_live_or_removed(&cur) {
-            opts.aliases = ns.alias_map();
-            opts.refers = ns.refer_map();
-        }
+        // Aliases/refers/imports (the detached `*ns*` keeps them,
+        // like the JVM; #80) — shared with the stream readers.
+        crate::reader::sync_reader_ns(eval, &mut opts);
         opts.read_eval = seed.read_eval;
         opts.suppress_read = seed.suppress_read;
         opts.resolver_bound = seed.resolver_bound;
@@ -1496,17 +1492,23 @@ impl Evaluator {
 
     /// Bind one pattern: extend the frame, evaluate `:or` defaults
     /// against the pre-extension frame, destructure into the slots.
+    /// The pre-extension frame is the env the analyzer saw when it
+    /// analyzed the defaults (the pair's/param's own names extend
+    /// only after), so default closures capture the right length —
+    /// evaluating against the extended frame shifts every captured
+    /// local by the pair's slot count (#171: the callee arrives as
+    /// its own first arg).
     fn bind_pattern(&mut self, pat: &Pattern, value: Value, env: &Env) -> Result<Env, Signal> {
         let count = pattern_names(pat).len();
-        let env = env.extend(vec![Value::Nil; count]);
-        let base = env.len() - count;
+        let extended = env.extend(vec![Value::Nil; count]);
+        let base = extended.len() - count;
         let mut out = Vec::with_capacity(count);
-        self.destructure(pat, &value, &env, &mut out, ForceSet::default())?;
+        self.destructure(pat, &value, env, &mut out, ForceSet::default())?;
         debug_assert_eq!(out.len(), count, "destructure fills every slot");
         for (i, v) in out.into_iter().enumerate() {
-            env.set(base + i, v);
+            extended.set(base + i, v);
         }
-        Ok(env)
+        Ok(extended)
     }
 
     /// `(def …)`: evaluate the init (or leave rootless), refresh
@@ -1572,9 +1574,9 @@ impl Evaluator {
         body: &[Expr],
         env: &Env,
     ) -> Result<Value, Signal> {
-        let base = env.len();
         // Bind sequentially (each init sees the previous pairs),
         // then run the body against the frame.
+        let outer = env.clone();
         let mut env = env.clone();
         for (pat, init) in bindings {
             let value = self.eval(init, &env)?;
@@ -1584,19 +1586,16 @@ impl Evaluator {
             match self.eval_body(body, &env) {
                 Ok(v) => return Ok(v),
                 Err(Signal::Recur(values)) => {
-                    // Copy-on-recur: closures from this iteration
-                    // keep observing the old frame.
-                    env = env.duplicate();
-                    let mut slot = base;
+                    // Fresh frame per iteration (like the copy it
+                    // replaces, closures from this iteration keep
+                    // observing the old frame): rebind through
+                    // `bind_pattern` so `:or` defaults evaluate
+                    // against each pair's pre-extension frame (#171).
+                    let mut frame = outer.clone();
                     for ((pat, _), value) in bindings.iter().zip(values) {
-                        let count = pattern_names(pat).len();
-                        let mut out = Vec::with_capacity(count);
-                        self.destructure(pat, &value, &env, &mut out, ForceSet::default())?;
-                        for (i, v) in out.into_iter().enumerate() {
-                            env.set(slot + i, v);
-                        }
-                        slot += count;
+                        frame = self.bind_pattern(pat, value, &frame)?;
                     }
+                    env = frame;
                 }
                 Err(signal) => return Err(signal),
             }
@@ -2068,31 +2067,25 @@ impl Evaluator {
             values.push(rest);
         }
         let pats: Vec<&Pattern> = arity.fixed.iter().chain(arity.rest.iter()).collect();
-        let base = closure.env.len();
-        let mut env = closure.env.clone();
-        for pat in &pats {
-            let count = pattern_names(pat).len();
-            env = env.extend(vec![Value::Nil; count]);
+        // Bind through `bind_pattern` (initial and `recur` alike)
+        // so each param's `:or` defaults evaluate against the
+        // pre-extension frame the analyzer saw (#171). A fresh
+        // frame per `recur` keeps the old copy-on-recur promise:
+        // closures from this iteration keep the old frame.
+        let outer = closure.env.clone();
+        let mut frame = outer.clone();
+        for (pat, value) in pats.iter().zip(values) {
+            frame = self.bind_pattern(pat, value, &frame)?;
         }
-        let mut frame = env.clone();
-        let mut rebind = values;
         loop {
-            let mut slot = base;
-            for (pat, value) in pats.iter().zip(rebind) {
-                let count = pattern_names(pat).len();
-                let mut out = Vec::with_capacity(count);
-                self.destructure(pat, &value, &frame, &mut out, ForceSet::default())?;
-                for (i, v) in out.into_iter().enumerate() {
-                    frame.set(slot + i, v);
-                }
-                slot += count;
-            }
             match self.eval_body(&arity.body, &frame) {
                 Ok(v) => return Ok(v),
                 Err(Signal::Recur(values)) => {
-                    // Copy-on-recur (see `eval_loop`).
-                    rebind = values;
-                    frame = frame.duplicate();
+                    let mut next = outer.clone();
+                    for (pat, value) in pats.iter().zip(values) {
+                        next = self.bind_pattern(pat, value, &next)?;
+                    }
+                    frame = next;
                 }
                 Err(signal) => return Err(signal),
             }
@@ -2224,15 +2217,16 @@ impl Evaluator {
         subs: &mut SubMaps,
         out: &mut Vec<Value>,
     ) -> Result<(), Signal> {
-        for (local, key, required) in &ctx.pat.entries {
+        for (local, key, or_key, required) in &ctx.pat.entries {
             // `:or` is keyed by the binding local first, then the
-            // lookup key (`destmap*` `push1`); nested locals have no
-            // `Value` form, so only symbols get the local lookup.
+            // key form as written (upstream `destmap*` `push1`;
+            // #158); nested locals have no `Value` form, so only
+            // symbols get the local lookup.
             let local_val = match local {
                 Pattern::Symbol(name) => Some(Value::Symbol(Symbol::new(None, name))),
                 _ => None,
             };
-            let val = self.map_binding(ctx, local_val.as_ref(), key, *required, missing)?;
+            let val = self.map_binding(ctx, local_val.as_ref(), key, or_key, *required, missing)?;
             // Forcing (`destmap*` gensym outlets): an effective
             // outlet the nested map lacks is still computed, for
             // `subs` (never bound).
@@ -2262,7 +2256,16 @@ impl Evaluator {
     ) -> Result<(), Signal> {
         for key in &ctx.pat.keys {
             let local_key = Value::Symbol(Symbol::new(None, &key.local));
-            let val = self.map_binding(ctx, Some(&local_key), &key.key, key.required, missing)?;
+            // Directive keys are built, never quoted: the or-key is
+            // the key itself (#158).
+            let val = self.map_binding(
+                ctx,
+                Some(&local_key),
+                &key.key,
+                &key.key,
+                key.required,
+                missing,
+            )?;
             out.push(val);
         }
         Ok(())
@@ -2334,6 +2337,7 @@ impl Evaluator {
         ctx: &MapBind,
         local: Option<&Value>,
         key: &Value,
+        or_key: &Value,
         required: bool,
         missing: &mut Option<Map>,
     ) -> Result<Value, Signal> {
@@ -2342,7 +2346,7 @@ impl Evaluator {
         }
         let default = local
             .and_then(|local| ctx.defaults.get(local).cloned())
-            .or_else(|| ctx.defaults.get(key).cloned());
+            .or_else(|| ctx.defaults.get(or_key).cloned());
         if required && default.is_none() {
             if ctx.effective(Outlet::Missing) {
                 let m = missing.take().unwrap_or_else(new_map);
@@ -2915,7 +2919,7 @@ impl Evaluator {
 /// set, §E12 documents the divergence).
 fn selection(pat: &MapPattern) -> Vec<Value> {
     let mut sel = Vec::new();
-    for (_, key, _) in &pat.entries {
+    for (_, key, _, _) in &pat.entries {
         if !sel.contains(key) {
             sel.push(key.clone());
         }
@@ -2933,11 +2937,14 @@ fn selection(pat: &MapPattern) -> Vec<Value> {
     sel
 }
 
-/// `:or` defaults keyed by lookup key (symbols resolve through the
-/// local→key map; strict-validated under `:select`/`:all`).
+/// `:or` defaults keyed by lookup key (upstream `push1`, #158): a
+/// symbol `:or` key matches a local only; any other `:or` key must
+/// equal an entry key form as written. Non-matching `:or` keys are
+/// dead like upstream's unreferenced `gdefaults` (excluded here, so
+/// the `:select`/`:all` merge base holds applied defaults only).
 fn or_mapped(pat: &MapPattern, defaults: &Map) -> Map {
     let mut b_to_k: std::collections::HashMap<&str, &Value> = std::collections::HashMap::new();
-    for (local, key, _) in &pat.entries {
+    for (local, key, _, _) in &pat.entries {
         if let Pattern::Symbol(name) = local {
             b_to_k.insert(name.as_str(), key);
         }
@@ -2945,13 +2952,25 @@ fn or_mapped(pat: &MapPattern, defaults: &Map) -> Map {
     for key in &pat.keys {
         b_to_k.insert(key.local.as_str(), &key.key);
     }
+    // Raw entry forms alongside their lookup keys (directive keys
+    // are built, never quoted, so each is its own raw form).
+    let mut raw_keys: Vec<(&Value, &Value)> = Vec::new();
+    for (_, key, raw, _) in &pat.entries {
+        raw_keys.push((raw, key));
+    }
+    for key in &pat.keys {
+        raw_keys.push((&key.key, &key.key));
+    }
     let mut dm = new_map();
     for (key, _) in defaults.iter() {
         let mapped = match key {
-            Value::Symbol(sym) => b_to_k.get(sym.name()).copied().unwrap_or(key),
-            _ => key,
+            Value::Symbol(sym) => b_to_k.get(sym.name()).copied(),
+            _ => raw_keys
+                .iter()
+                .find(|(raw, _)| *raw == key)
+                .map(|(_, key)| *key),
         };
-        if let Some(val) = defaults.get(key) {
+        if let (Some(mapped), Some(val)) = (mapped, defaults.get(key)) {
             dm = dm.insert(mapped.clone(), val.clone());
         }
     }

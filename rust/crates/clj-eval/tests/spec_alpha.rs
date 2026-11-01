@@ -400,28 +400,42 @@ fn form_and_describe_and() {
 // ---- out-of-scope errors ----
 
 #[test]
-fn regex_spec_out_of_scope() {
-    // A regex-op-shaped map reaches the slice-1 guard loudly.
+fn regex_spec_usable_slice_e() {
+    // Gap-122 slice E retired the slice-1 guard: a regex-op-shaped
+    // map is now a usable spec (see spec_regex.rs for the full
+    // pins). Same input, new behavior: 1 is not sequential, so the
+    // accept op simply does not match (no throw).
     let mut eval = boot();
     require_spec(&mut eval);
     assert_eq!(
-        uncaught(&mut eval, "(s/valid? {:clojure.spec.alpha/op :accept} 1)"),
-        "clojure.lang.ExceptionInfo | regex specs are out of scope in gap-122 slice 1"
+        run(&mut eval, "(s/valid? {:clojure.spec.alpha/op :accept} 1)"),
+        "false"
     );
 }
 
 #[test]
-fn gen_methods_unextended() {
-    // `gen*`/`with-gen*` are declared but have no impls yet.
+fn gen_methods_wired() {
+    // Slice F2: `gen*`/`with-gen*` are extended on every spec record
+    // (this test asserted the slice-1 stubs before F2 landed).
     let mut eval = boot();
     require_spec(&mut eval);
-    eval.eval_source("(s/def :user/even even?)").unwrap();
-    let msg = uncaught(
-        &mut eval,
-        "(clojure.spec.alpha/gen* (s/get-spec :user/even) nil [] {})",
+    eval.eval_source("(require '[clojure.spec.gen.alpha :as gen])")
+        .unwrap();
+    // `int?` has a gen builtin (oracle `gen-builtins`); `even?` does not.
+    eval.eval_source("(s/def :user/n int?)").unwrap();
+    assert_eq!(
+        run(
+            &mut eval,
+            "(int? (gen/generate (clojure.spec.alpha/gen* (s/get-spec :user/n) nil [] {}) 30 1))"
+        ),
+        "true"
     );
-    assert!(
-        msg.contains("No implementation of method: :gen*"),
-        "unexpected: {msg}"
+    assert_eq!(
+        run(
+            &mut eval,
+            "(def gspec (clojure.spec.alpha/with-gen* (s/get-spec :user/n) (fn [] (gen/return 42))))
+             (gen/generate (clojure.spec.alpha/gen* gspec nil [] {}) 30 1)"
+        ),
+        "42"
     );
 }

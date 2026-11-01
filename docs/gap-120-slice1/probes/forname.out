@@ -1,0 +1,204 @@
+forName-String => java.lang.String
+forName-eq => true
+forName-missing THROWS java.lang.ClassNotFoundException | no.such.Klass
+forName-nil THROWS java.lang.NullPointerException | Cannot invoke "String.length()" because "str" is null
+forName-num THROWS java.lang.ClassCastException | class java.lang.Long cannot be cast to class java.lang.String (java.lang.Long and java.lang.String are in module java.base of loader 'bootstrap')
+forName-int THROWS java.lang.ClassNotFoundException | int
+forName-arr => java.lang.String/1
+forName-arrI => int/1
+forName-arr-missing THROWS java.lang.ClassNotFoundException | com.foo.Bar
+forName-arr-bad THROWS java.lang.ClassNotFoundException | [X
+fq-forName => java.lang.String
+o1-empty CHAIN:
+   java.lang.ClassNotFoundException | 
+forName-3arg => java.lang.String
+forName-3arg-init => java.lang.String
+forName-init-str CHAIN:
+   java.lang.ClassCastException | class java.lang.String cannot be cast to class java.lang.Boolean (java.lang.String and java.lang.Boolean are in module java.base of loader 'bootstrap')
+forName-loader-str CHAIN:
+   java.lang.ClassCastException | class java.lang.String cannot be cast to class java.lang.ClassLoader (java.lang.String and java.lang.ClassLoader are in module java.base of loader 'bootstrap')
+forName-nil-init CHAIN:
+   java.lang.NullPointerException | Cannot invoke "java.lang.Boolean.booleanValue()" because "null" is null
+o3-name-first CHAIN:
+   java.lang.ClassCastException | class java.lang.Long cannot be cast to class java.lang.String (java.lang.Long and java.lang.String are in module java.base of loader 'bootstrap')
+o3-init-first CHAIN:
+   java.lang.ClassCastException | class java.lang.String cannot be cast to class java.lang.Boolean (java.lang.String and java.lang.Boolean are in module java.base of loader 'bootstrap')
+o3-missing-badinit CHAIN:
+   java.lang.ClassCastException | class java.lang.String cannot be cast to class java.lang.Boolean (java.lang.String and java.lang.Boolean are in module java.base of loader 'bootstrap')
+o3-nilname-badinit CHAIN:
+   java.lang.ClassCastException | class java.lang.String cannot be cast to class java.lang.Boolean (java.lang.String and java.lang.Boolean are in module java.base of loader 'bootstrap')
+o3-nilnilnil CHAIN:
+   java.lang.NullPointerException | Cannot invoke "java.lang.Boolean.booleanValue()" because "null" is null
+o3-missing-nilnil CHAIN:
+   java.lang.NullPointerException | Cannot invoke "java.lang.Boolean.booleanValue()" because "null" is null
+o3-init-unbox-first CHAIN:
+   java.lang.NullPointerException | Cannot invoke "java.lang.Boolean.booleanValue()" because "null" is null
+forName-loader-real => java.lang.String
+forName-2arg THROWS java.lang.ClassCastException | class java.lang.String cannot be cast to class java.lang.Module (java.lang.String and java.lang.Module are in module java.base of loader 'bootstrap')
+forName-2arg-nilmod CHAIN:
+   java.lang.NullPointerException | 
+forName-2arg-nil-bad CHAIN:
+   java.lang.ClassCastException | class java.lang.Long cannot be cast to class java.lang.String (java.lang.Long and java.lang.String are in module java.base of loader 'bootstrap')
+forName-nn CHAIN:
+   java.lang.NullPointerException | 
+forName-order CHAIN:
+   java.lang.ClassCastException | class java.lang.String cannot be cast to class java.lang.Module (java.lang.String and java.lang.Module are in module java.base of loader 'bootstrap')
+forName-0arg CHAIN:
+   clojure.lang.Compiler$CompilerException | Syntax error compiling Class/forName at (/mnt/data/g120-tmp/forname.clj:66:1).
+   java.lang.IllegalArgumentException | No matching method forName found taking 0 args for class java.lang.Class
+forName-4arg CHAIN:
+   clojure.lang.Compiler$CompilerException | Syntax error compiling Class/forName at (/mnt/data/g120-tmp/forname.clj:67:1).
+   java.lang.IllegalArgumentException | No matching method forName found taking 4 args for class java.lang.Class
+static-miss-0 CHAIN:
+   clojure.lang.Compiler$CompilerException | Syntax error compiling String/nope at (/mnt/data/g120-tmp/forname.clj:68:1).
+   java.lang.IllegalArgumentException | No matching method nope found taking 0 args for class java.lang.String
+static-miss-arity CHAIN:
+   clojure.lang.Compiler$CompilerException | Syntax error compiling String/valueOf at (/mnt/data/g120-tmp/forname.clj:69:1).
+   java.lang.IllegalArgumentException | No matching method valueOf found taking 0 args for class java.lang.String
+static-miss-args CHAIN:
+   clojure.lang.Compiler$CompilerException | Syntax error compiling String/nope at (/mnt/data/g120-tmp/forname.clj:70:1).
+   java.lang.IllegalArgumentException | No matching method nope found taking 2 args for class java.lang.String
+static-unknown-class CHAIN:
+   clojure.lang.Compiler$CompilerException | Syntax error compiling at (/mnt/data/g120-tmp/forname.clj:71:1).
+   java.lang.RuntimeException | No such namespace: NopeKlass
+static-unknown-fq CHAIN:
+   clojure.lang.Compiler$CompilerException | Syntax error compiling at (/mnt/data/g120-tmp/forname.clj:72:1).
+   java.lang.ClassNotFoundException | java.no.Klass
+static-valueOf => "1"
+static-field-value => 2147483647
+deftype-static-miss CHAIN:
+   clojure.lang.Compiler$CompilerException | Syntax error compiling user.QE/bar at (/mnt/data/g120-tmp/forname.clj:75:1).
+   java.lang.IllegalArgumentException | No matching method bar found taking 0 args for class user.QE
+import-then-fq => {}
+static-field-call => 2147483647
+field-call-order => #object[java.lang.String$CaseInsensitiveComparator 0x5b69d40d "java.lang.String$CaseInsensitiveComparator@5b69d40d"]
+static-0arg-method => 3815980035851941
+new-String => "x"
+fq-ctor => {}
+class-literal-eq => true
+val-fq-String => java.lang.String
+val-fq-missing CHAIN:
+   clojure.lang.Compiler$CompilerException | Syntax error compiling at (/mnt/data/g120-tmp/forname.clj:86:1).
+   java.lang.ClassNotFoundException | java.no.Klass
+val-simple-missing CHAIN:
+   clojure.lang.Compiler$CompilerException | Syntax error compiling at (/mnt/data/g120-tmp/forname.clj:87:1).
+   java.lang.RuntimeException | Unable to resolve symbol: NopeKlass in this context
+val-dotdot CHAIN:
+   clojure.lang.Compiler$CompilerException | Syntax error compiling at (/mnt/data/g120-tmp/forname.clj:88:1).
+   java.lang.ClassNotFoundException | foo.bar
+val-simplequal-missing CHAIN:
+   clojure.lang.Compiler$CompilerException | Syntax error compiling at (/mnt/data/g120-tmp/forname.clj:89:1).
+   java.lang.RuntimeException | No such namespace: NopeKlass
+removed-ns-call CHAIN:
+   clojure.lang.Compiler$CompilerException | Syntax error compiling at (/mnt/data/g120-tmp/forname.clj:90:1).
+   java.lang.ClassNotFoundException | foo.bar
+removed-ns-val CHAIN:
+   clojure.lang.Compiler$CompilerException | Syntax error compiling at (/mnt/data/g120-tmp/forname.clj:91:1).
+   java.lang.ClassNotFoundException | foo.bar2
+v-dotdash-a CHAIN:
+   clojure.lang.Compiler$CompilerException | Syntax error compiling at (/mnt/data/g120-tmp/forname.clj:92:1).
+   java.lang.RuntimeException | Unable to resolve symbol: .-a in this context
+v-traildot CHAIN:
+   clojure.lang.Compiler$CompilerException | Syntax error compiling at (/mnt/data/g120-tmp/forname.clj:93:1).
+   java.lang.ClassNotFoundException | foo.
+v-leaddot CHAIN:
+   clojure.lang.Compiler$CompilerException | Syntax error compiling at (/mnt/data/g120-tmp/forname.clj:94:1).
+   java.lang.RuntimeException | Unable to resolve symbol: .foo in this context
+v-dashdot CHAIN:
+   clojure.lang.Compiler$CompilerException | Syntax error compiling at (/mnt/data/g120-tmp/forname.clj:95:1).
+   java.lang.ClassNotFoundException | -a.b
+call-fq-noargs CHAIN:
+   java.lang.ClassCastException | class java.lang.Class cannot be cast to class clojure.lang.IFn (java.lang.Class is in module java.base of loader 'bootstrap'; clojure.lang.IFn is in unnamed module of loader 'app')
+v-method => #object[user$invoke__String_valueOf__386 0x56f2bbea "user$invoke__String_valueOf__386@56f2bbea"]
+v-static-meth => #object[user$invoke__Integer_parseInt__390 0x1ad926d3 "user$invoke__Integer_parseInt__390@1ad926d3"]
+v-field => 2147483647
+v-int => #object[clojure.core$int 0x68105edc "clojure.core$int@68105edc"]
+bare-deftype => user.QW
+deftype-forName => user.Foo
+deftype-name => "user.Bar"
+import-deftype => user.Baz
+invoke-num CHAIN:
+   java.lang.ClassCastException | class java.lang.Long cannot be cast to class clojure.lang.IFn (java.lang.Long is in module java.base of loader 'bootstrap'; clojure.lang.IFn is in unnamed module of loader 'app')
+invoke-class CHAIN:
+   java.lang.RuntimeException | Expecting var, but String is mapped to class java.lang.String
+invoke-str CHAIN:
+   java.lang.ClassCastException | class java.lang.String cannot be cast to class clojure.lang.IFn (java.lang.String is in module java.base of loader 'bootstrap'; clojure.lang.IFn is in unnamed module of loader 'app')
+op-args CHAIN:
+   java.lang.RuntimeException | Expecting var, but String is mapped to class java.lang.String
+call-method-on-class CHAIN:
+   clojure.lang.Compiler$CompilerException | Syntax error compiling . at (/mnt/data/g120-tmp/forname.clj:111:1).
+   java.lang.IllegalArgumentException | No matching method toString found taking 0 args for class java.lang.String
+dotdot-static => java.lang.String
+inst-forName-str CHAIN:
+   java.lang.IllegalArgumentException | No matching field found: forName for class java.lang.String
+inst-valueOf CHAIN:
+   java.lang.IllegalArgumentException | No matching method valueOf found taking 1 args for class java.lang.String
+inst-forName-1on-str CHAIN:
+   java.lang.IllegalArgumentException | No matching method forName found taking 1 args for class java.lang.String
+inst-getFirst-str CHAIN:
+   java.lang.IllegalArgumentException | No matching field found: getFirst for class java.lang.String
+inst-getMessage-num CHAIN:
+   java.lang.IllegalArgumentException | No matching field found: getMessage for class java.lang.Long
+inst-getKey-str CHAIN:
+   java.lang.IllegalArgumentException | No matching field found: getKey for class java.lang.String
+nil-forName-1 CHAIN:
+   java.lang.NullPointerException | Cannot invoke "Object.getClass()" because "target" is null
+nil-forName-0 CHAIN:
+   java.lang.NullPointerException | Cannot invoke "Object.getClass()" because "target" is null
+nil-forName-3 CHAIN:
+   java.lang.NullPointerException | Cannot invoke "Object.getClass()" because "target" is null
+nil-forName-5 CHAIN:
+   java.lang.NullPointerException | Cannot invoke "Object.getClass()" because "target" is null
+nil-valueOf CHAIN:
+   java.lang.NullPointerException | Cannot invoke "Object.getClass()" because "target" is null
+nil-getFirst CHAIN:
+   java.lang.NullPointerException | Cannot invoke "Object.getClass()" because "target" is null
+nil-getFirst-2 CHAIN:
+   java.lang.NullPointerException | Cannot invoke "Object.getClass()" because "target" is null
+nil-nosuch-2 CHAIN:
+   java.lang.NullPointerException | Cannot invoke "Object.getClass()" because "target" is null
+nil-nosuch-0 CHAIN:
+   java.lang.NullPointerException | Cannot invoke "Object.getClass()" because "target" is null
+nil-nosuch-1 CHAIN:
+   java.lang.NullPointerException | Cannot invoke "Object.getClass()" because "target" is null
+dotdot-nil-0 CHAIN:
+   java.lang.NullPointerException | Cannot invoke "Object.getClass()" because "target" is null
+dotdot-nil-1 CHAIN:
+   java.lang.NullPointerException | Cannot invoke "Object.getClass()" because "target" is null
+dotdot-nil-2 CHAIN:
+   java.lang.NullPointerException | Cannot invoke "Object.getClass()" because "target" is null
+nil-toString-2 CHAIN:
+   java.lang.NullPointerException | Cannot invoke "Object.getClass()" because "target" is null
+meth-miss-str => 1
+arr-getName => "[I"
+arr-eq => true
+arr-isArray => true
+arr-super => java.lang.Object
+cls-getName => "java.lang.String"
+cls-toString => "class java.lang.String"
+cls-eq-class => true
+cls-canon => "java.lang.String"
+arr-pr => "int/1"
+arr-obj-pr => "java.lang.String/1"
+arr-print => "int/1"
+arr-str => "class [I"
+arr-simple => "int[]"
+arr-obj-simple => "String[]"
+arr-canon => "int[]"
+resolve-String => java.lang.String
+resolve-fq => java.lang.String
+resolve-static => nil
+resolve-missing => nil
+resolve-simple-missing => nil
+resolve-int => #'clojure.core/int
+nsresolve-String => java.lang.Long
+rsq-imported => (quote java.util.HashMap)
+rsq-bare => (quote user/TreeMap)
+rsq-qual-imported => (quote java.util.HashMap/foo)
+rsq-qual-bare => (quote TreeMap/foo)
+sq-static => (java.lang.String/valueOf 1)
+sq-class => (java.lang.Class/forName "x")
+var-vs-class THROWS java.lang.ClassCastException | class java.lang.Long cannot be cast to class java.lang.CharSequence (java.lang.Long and java.lang.CharSequence are in module java.base of loader 'bootstrap')
+alias-vs-static CHAIN:
+   clojure.lang.Compiler$CompilerException | Syntax error compiling at (/mnt/data/g120-tmp/forname.clj:175:1).
+   java.lang.RuntimeException | No such var: String/valueOf

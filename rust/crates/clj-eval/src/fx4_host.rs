@@ -9,8 +9,9 @@
 //! Host pieces the FX4 expansions call without new special forms:
 //! `req!`, `some-vals`, `with-redefs-fn`, `bound-fn*`, the
 //! array-map constructor, and the monitor natives. `instance?` /
-//! `identical?` / `(new Object)` / `EMPTY` rewrite at analyze time
-//! (`instance?` and `identical?` stay unresolved vars).
+//! `identical?` / `new` / `EMPTY` rewrite at analyze time
+//! (`instance?` and `identical?` stay unresolved vars; `new`
+//! lowers to `__new*`, #120 slice 2).
 
 use std::any::Any;
 use std::cell::RefCell;
@@ -91,7 +92,14 @@ pub(crate) enum HostOp<'a> {
     None,
     SeqQ(&'a Value),
     Identical(&'a Value, &'a Value),
-    NewObject,
+    /// A bare `(new)` (the arity error names the shape).
+    NewEmpty,
+    /// `(new Sym …)` (any symbol — the lowering quotes it for
+    /// `__new*`, #120 slice 2).
+    NewCtor(&'a Symbol),
+    /// `(new head …)` with a non-symbol head (renders via
+    /// `new_head_str` in the analyzer).
+    NewBadHead(&'a Value),
     Pam(&'a Value),
     MonitorEnter(&'a Value),
     MonitorExit(&'a Value),
@@ -115,7 +123,7 @@ pub(crate) fn classify<'a>(items: &[&'a Value]) -> HostOp<'a> {
     match (sym.namespace(), sym.name()) {
         (Some("clojure.core"), "instance?") => classify_instance(items),
         (Some("clojure.core"), "identical?") => classify_identical(items),
-        (None, "new") => classify_new(items),
+        (None, "new") => classify_new(&items[1..]),
         (Some("clojure.lang.PersistentArrayMap"), "createAsIfByAssoc") => classify_pam(items),
         (None, "monitor-enter") => one_arg(items, HostOp::MonitorEnter),
         (None, "monitor-exit") => one_arg(items, HostOp::MonitorExit),
@@ -145,12 +153,14 @@ fn classify_identical<'a>(items: &[&'a Value]) -> HostOp<'a> {
     }
 }
 
-fn classify_new<'a>(items: &[&'a Value]) -> HostOp<'a> {
-    match items {
-        [_, Value::Symbol(class)] if class.namespace().is_none() && class.name() == "Object" => {
-            HostOp::NewObject
-        }
-        _ => HostOp::None,
+fn classify_new<'a>(rest: &[&'a Value]) -> HostOp<'a> {
+    let [head, ..] = rest else {
+        return HostOp::NewEmpty;
+    };
+    let head: &'a Value = head;
+    match head {
+        Value::Symbol(sym) => HostOp::NewCtor(sym),
+        _ => HostOp::NewBadHead(head),
     }
 }
 
@@ -179,6 +189,16 @@ fn one_arg<'a>(items: &[&'a Value], make: fn(&'a Value) -> HostOp<'a>) -> HostOp
         [_, arg] => make(arg),
         _ => HostOp::None,
     }
+}
+
+/// Whether a qualified call head belongs to the FX4 builtins even
+/// when no var exists: `PersistentArrayMap/createAsIfByAssoc`
+/// (static calls must not claim it — its rewrite shapes and miss
+/// errors are FX4's, pinned in `fx4_macroexpand`; the other FX4
+/// heads are unqualified or `clojure.core`-qualified, so the
+/// static intercept skips them on its own).
+pub(crate) fn owns_call_head(ns_part: &str, name: &str) -> bool {
+    ns_part == "clojure.lang.PersistentArrayMap" && name == "createAsIfByAssoc"
 }
 
 /// `clojure.lang.PersistentArrayMap/EMPTY` in value position.

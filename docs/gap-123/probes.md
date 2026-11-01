@@ -160,7 +160,8 @@ namespace, installed lazily by `require`).
    stores the garbage and fails on first use).
 3. Sliding-zero puts throw `NoSuchElementException` (nil
    message) instead of printing a swallowed trace (see E).
-4. `(chan buf xform)` refuses with
+4. (Lifted by slice 2 — see `slice-2.md`.) In slice 1,
+   `(chan buf xform)` refused with
    `UnsupportedOperationException | unsupported: channels with
    transducers (gap-123 slice 2)`; `(chan nil xform)` keeps
    the JVM's `Assert failed: buffer must be supplied when
@@ -170,11 +171,14 @@ namespace, installed lazily by `require`).
 
 ## Slice boundary (what remains of #123)
 
-Slice 1: this directory + `channel.rs` + `async.rs` + the
-`require` hook in `load_one`. Still to do: channel
-transducers (`chan` xform/ex-handler arities,
-promise-buffers), `put!`/`take!` callbacks + the dispatch
-executor, `timeout`/`thread`, `go`/`go-loop` (state-machine
-compilation), parking `<!`/`>!`/`alt!`/`alts!`, `offer!`/
-`poll!`, `pipeline`/`merge`/`mix`/`pub-sub`, and docstring/
-arglist metadata on the async vars.
+Slice 1: this directory's `g123-*.clj` / `g123-*.out` (below
+`xform`) + `channel.rs` + `async.rs` + the `require` hook in
+`load_one`. Slice 2 (`slice-2.md` + `g123-xform.*`) adds
+channel transducers (`chan` xform/ex-handler arities).
+Slice 3 (`slice-3.md` + `g123-go.*` + `g123-goalt.*`) adds
+`go`/`go-loop` (thread-per-block), parking `<!`/`>!`/
+`alt!`/`alts!`, and the blocking `alt!!`.
+Still to do: promise-buffers, `put!`/`take!` callbacks +
+the dispatch executor, `timeout`/`thread`, `offer!`/
+`poll!`, `pipeline`/`merge`/`mix`/`pub-sub`, and
+docstring/arglist metadata on the async vars.

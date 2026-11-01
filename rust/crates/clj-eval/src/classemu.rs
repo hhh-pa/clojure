@@ -55,8 +55,12 @@ pub(crate) const CLASS_EMU_NATIVES: &[(&str, NativeFnPtr)] = &[
 
 /// Hidden natives: `__import*` is an implementation detail of the
 /// `import` macro in the standing of `__new*` (public so macro
-/// expansions analyze, unlisted in the matrix).
-pub(crate) const CLASS_EMU_HIDDEN: &[(&str, NativeFnPtr)] = &[("__import*", native_import_star)];
+/// expansions analyze, unlisted in the matrix); `__static*` is the
+/// analyzer's static-call lowering (`Class/forName`, #120).
+pub(crate) const CLASS_EMU_HIDDEN: &[(&str, NativeFnPtr)] = &[
+    ("__import*", native_import_star),
+    ("__static*", native_static),
+];
 
 /// One static lattice row: binary name, interface flag, and the
 /// ordered direct-supertype names, transcribed verbatim from the
@@ -2501,10 +2505,22 @@ fn native_identical(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nati
     Ok(Value::Bool(identical_values(&args[0], &args[1])))
 }
 
-/// Resolve an import name: a static hit, else a `HostDef` of that
+/// Whether a dotted name sits in class position (resolves as a
+/// class or fails `ClassNotFoundException`): dotted without a
+/// leading dot (oracle `val-fq-missing`, `val-dotdot`,
+/// `v-traildot`, `v-dashdot` — leading-dot names like `.-a`/`.foo`
+/// keep the unresolvable error, oracle `v-dotdash-a`,
+/// `v-leaddot`).
+pub(crate) fn is_class_position(name: &str) -> bool {
+    name.contains('.') && !name.starts_with('.')
+}
+
+/// Resolve a class name: a static hit, else a `HostDef` of that
 /// qualified name (struct names carve to
-/// `PersistentStructMap$Def`), else unresolvable.
-fn resolve_import(eval: &Evaluator, fqn: &str) -> Option<Arc<ClassVal>> {
+/// `PersistentStructMap$Def`), else unresolvable. Shared by
+/// `import`, static calls, dotted literals, `resolve`, and
+/// `Class/forName`, so all five agree on every name.
+pub(crate) fn resolve_class_name(eval: &Evaluator, fqn: &str) -> Option<Arc<ClassVal>> {
     if let Some(class) = static_class(fqn) {
         return Some(class);
     }
@@ -2546,7 +2562,7 @@ fn native_import_star(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nat
 /// Import `fqn` into the current namespace (split for the complexity
 /// budget).
 fn import_class(eval: &mut Evaluator, fqn: &str) -> Result<Value, NativeError> {
-    let class = resolve_import(eval, fqn)
+    let class = resolve_class_name(eval, fqn)
         .ok_or_else(|| NativeError::new(ThrowClass::ClassNotFoundException, fqn.to_owned()))?;
     let simple = fqn.rsplit('.').next().unwrap_or(fqn);
     let cur = eval.current_ns_name();
@@ -2578,6 +2594,157 @@ fn import_class(eval: &mut Evaluator, fqn: &str) -> Result<Value, NativeError> {
     eval.registry
         .with_ns_mut(&cur, |ns| ns.import_class(simple, class.clone()));
     Ok(Value::Class(class))
+}
+
+/// The emulated static surface (#120 slice 1): exact `(class,
+/// member)` entries with their fixed arities. `Class/forName` is
+/// the only entry; the analyzer validates arities for known
+/// members at compile time (oracle `forName-0arg`,
+/// `forName-4arg`), while unknown members on resolved classes
+/// defer to the runtime [`native_static`] miss (a documented phase
+/// narrowing — the JVM rejects those at compile time too, oracle
+/// `static-miss-0`). Wire new statics here plus an arm in
+/// [`native_static`].
+pub(crate) fn static_member_arities(fqn: &str, member: &str) -> Option<&'static [usize]> {
+    match (fqn, member) {
+        ("java.lang.Class", "forName") => Some(&[1, 2, 3]),
+        _ => None,
+    }
+}
+
+/// Whether a lattice name is an interface (the uniform ctor miss
+/// reads `for interface` for interfaces, `for class` otherwise —
+/// oracles `ctor-iface`, `ctor-abstract`). Unknown names read
+/// `class` (only lattice classes and `HostDef`s reach the miss).
+pub(crate) fn lattice_is_iface(fqn: &str) -> bool {
+    static_row(fqn).is_some_and(|r| r.iface)
+}
+/// `__static*`: `(FQN member args…)` — the analyzer's static-call
+/// lowering plus the instance-position consult for class values.
+/// Known members dispatch; anything else is the oracle's
+/// missing-method error (oracle `static-miss-args` text, at
+/// runtime per the table-gated narrowing).
+fn native_static(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    if args.len() < 2 {
+        return Err(NativeError::arity("clojure.core/__static*", args.len()));
+    }
+    let Value::Str(fqn) = &args[0] else {
+        return Err(crate::core::cce_err(&args[0], "java.lang.String"));
+    };
+    let Value::Str(member) = &args[1] else {
+        return Err(crate::core::cce_err(&args[1], "java.lang.String"));
+    };
+    let rest = &args[2..];
+    match (fqn.as_ref(), member.as_ref()) {
+        ("java.lang.Class", "forName") => static_forname(eval, rest),
+        _ => Err(crate::types::no_method(member, rest.len(), fqn)),
+    }
+}
+
+/// `Class/forName` over the emulated lattice. The 1- and 3-arg
+/// overloads resolve (the 3-arg `initialize` flag is unobservable
+/// without a runtime and the loader narrows to nil-only — both
+/// still cast); the 2-arg `(Module, String)` overload can never
+/// resolve port-natively (no `Module` values), so it casts and
+/// NPEs exactly as the JVM does for every port-representable
+/// input. Other arities miss (reachable only through instance
+/// position or direct `__static*` calls — static syntax
+/// arity-checks at compile time).
+fn static_forname(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    match args.len() {
+        1 => forname_resolve(eval, forname_name_str(&args[0])?).map(Value::Class),
+        2 => forname_two(&args[0], &args[1]),
+        3 => forname_three(eval, &args[0], &args[1], &args[2]),
+        n => Err(crate::types::no_method("forName", n, "java.lang.Class")),
+    }
+}
+
+/// The 3-arg overload: the JVM coerces static-call args
+/// left-to-right (name checkcast, `initialize` unbox, loader
+/// checkcast — oracle `o3-init-unbox-first`), so the unbox NPEs
+/// before a bad loader CCEs. Name/init casts stay nil-permissive
+/// (oracle `o3-name-first`, `o3-init-first`,
+/// `o3-missing-badinit`, `o3-nilname-badinit`); then the name
+/// deref NPEs, and only then does the name resolve.
+fn forname_three(
+    eval: &mut Evaluator,
+    name: &Value,
+    init: &Value,
+    loader: &Value,
+) -> Result<Value, NativeError> {
+    let s = forname_name_str(name)?;
+    if !matches!(init, Value::Nil | Value::Bool(_)) {
+        return Err(crate::core::cce_err(init, "java.lang.Boolean"));
+    }
+    if matches!(init, Value::Nil) {
+        return Err(NativeError::new(
+            ThrowClass::NullPointerException,
+            "Cannot invoke \"java.lang.Boolean.booleanValue()\" because \"initialize\" is null"
+                .to_owned(),
+        ));
+    }
+    if !matches!(loader, Value::Nil) {
+        return Err(crate::core::cce_err(loader, "java.lang.ClassLoader"));
+    }
+    // The resolve NPEs a nil name after the unbox (oracle
+    // `o3-nilnilnil`).
+    forname_resolve(eval, s).map(Value::Class)
+}
+
+/// The 2-arg `(Module, String)` overload: the module casts (nil
+/// passes — oracle `forName-2arg-nilmod`, `forName-nn`), the name
+/// casts (oracle `forName-2arg-nil-bad`), then the null module
+/// NPEs with the empty message (oracle `forName-2arg-nilmod`,
+/// `forName-nn`, `forName-order` for the cast order).
+fn forname_two(module: &Value, name: &Value) -> Result<Value, NativeError> {
+    if !matches!(module, Value::Nil) {
+        return Err(crate::core::cce_err(module, "java.lang.Module"));
+    }
+    if !matches!(name, Value::Nil | Value::Str(_)) {
+        return Err(crate::core::cce_err(name, "java.lang.String"));
+    }
+    Err(NativeError::new(
+        ThrowClass::NullPointerException,
+        String::new(),
+    ))
+}
+
+/// Cast a `forName` name to `String` (nil passes — the NPE fires at
+/// deref, oracle `o3-nilname-badinit`; anything else is the
+/// bootstrap cast failure, oracle `forName-num`).
+fn forname_name_str(name: &Value) -> Result<Option<Arc<str>>, NativeError> {
+    match name {
+        Value::Nil => Ok(None),
+        Value::Str(s) => Ok(Some(Arc::clone(s))),
+        _ => Err(crate::core::cce_err(name, "java.lang.String")),
+    }
+}
+
+/// The nil-name NPE (port-pinned text in house style: the JDK
+/// message comes from `Class.forName0` internals and varies by
+/// JDK — JDK 27 says `Cannot invoke "String.length()" because
+/// "str" is null`, oracle `forName-nil`).
+fn forname_name_npe() -> NativeError {
+    NativeError::new(
+        ThrowClass::NullPointerException,
+        "Cannot invoke \"java.lang.Class.forName(String)\" because \"name\" is null".to_owned(),
+    )
+}
+
+/// Resolve a cast-checked name: the shared lattice (so `forName`
+/// and `import` agree on every name, including the struct carve
+/// and `HostDef` rows — oracle `deftype-forName`), else
+/// `ClassNotFoundException` (oracle `forName-missing`,
+/// `forName-int`, `o1-empty`). Array descriptors (`[`-led names)
+/// never resolve here (slice 2: array class semantics, oracle
+/// `forName-arr*`) and error exactly like any other unresolvable
+/// name.
+fn forname_resolve(eval: &Evaluator, name: Option<Arc<str>>) -> Result<Arc<ClassVal>, NativeError> {
+    match name {
+        None => Err(forname_name_npe()),
+        Some(s) => resolve_class_name(eval, &s)
+            .ok_or_else(|| NativeError::new(ThrowClass::ClassNotFoundException, s.to_string())),
+    }
 }
 
 /// Read an import mapping (shared with name resolution).
@@ -3053,6 +3220,11 @@ fn surface_class_member(
         ("isInstance", 1) => Some(Ok(Value::Bool(is_instance_of(eval, c.name(), &rest[0])))),
         ("isAssignableFrom", 1) => Some(assignable_from(eval, c, &rest[0])),
         ("cast", 1) => Some(cast_to_class(eval, c, &rest[0])),
+        // Statics resolve through instance position on class values
+        // (oracle `dotdot-static`); only `Class` has tabled statics
+        // and only `forName` is tabled, so anything else falls to
+        // the miss arm, like any non-class target misses through.
+        ("forName", 1..=3) if c.name() == "java.lang.Class" => Some(static_forname(eval, rest)),
         // Classes miss method-shape at every arity (unlike other
         // values, whose 0-arg misses read field-first).
         _ => Some(Err(crate::types::no_method(
@@ -3294,15 +3466,7 @@ pub(crate) const SURFACE_MEMBERS: &[(&str, usize)] = &[
     ("toString", 0),
 ];
 
-/// Whether `(member, argc)` resolves against the surface (the
-/// nil-target rule consults this ignoring the target's kind — keep
-/// in sync with [`surface_meth`]; the unit test sweeps every pair).
-pub(crate) fn surface_member_hit(meth: &str, argc: usize) -> bool {
-    SURFACE_MEMBERS.contains(&(meth, argc))
-}
-
-/// Whether `meth` names any surface member (any arity): 0-arg
-/// misses on real members read method-shape.
+/// Whether `meth` names any surface member (any arity).
 pub(crate) fn surface_member_name(meth: &str) -> bool {
     SURFACE_MEMBERS.iter().any(|(name, _)| *name == meth)
 }

@@ -692,6 +692,55 @@ fn destructure_values() {
 }
 
 #[test]
+fn or_defaulted_fn_binding_calls() {
+    // #171: calling an `:or`-defaulted fn binding must not pass
+    // the callee as its own first arg. Every bind path evaluates
+    // `:or` defaults against the pre-extension frame (the env the
+    // analyzer saw), so default closures capture the right frame.
+    for (src, want) in [
+        // `let` (one `:or` entry, default fires, then call).
+        ("(let [{:keys [e] :or {e (fn [m] m)}} {}] (e 42))", "42"),
+        // Variadic default: the rest arg is the caller's args.
+        (
+            "(let [{:keys [e] :or {e (fn [& xs] xs)}} {}] (e 42 43))",
+            "(42 43)",
+        ),
+        // Default closures still see outer locals.
+        (
+            "(let [x 40] (let [{:keys [e] :or {e (fn [m] (t-plus x m))}} {}] (e 2)))",
+            "42",
+        ),
+        // `fn` params (initial bind).
+        ("((fn [{:keys [e] :or {e (fn [m] m)}}] (e 42)) {})", "42"),
+        // Named `fn` (self slot precedes the params).
+        ("((fn f [{:keys [e] :or {e (fn [m] m)}}] (e 42)) {})", "42"),
+        // `loop` (initial bind).
+        ("(loop [{:keys [e] :or {e (fn [m] m)}} {}] (e 42))", "42"),
+        // `loop`/`recur` rebinds through the same pre-frame.
+        (
+            "(loop [n 1, {:keys [e] :or {e (fn [m] m)}} {}] (if (t-pos? n) (recur (t-dec n) {}) (e 42)))",
+            "42",
+        ),
+        // `fn`/`recur` rebinds through the same pre-frame.
+        (
+            "((fn f [n {:keys [e] :or {e (fn [m] m)}}] (if (t-pos? n) (recur (t-dec n) {}) (e 42))) 1 {})",
+            "42",
+        ),
+        // Later defaults still see earlier bindings (no over-cut).
+        ("(let [x 41, {:keys [a] :or {a x}} {}] a)", "41"),
+        ("((fn [x {:keys [a] :or {a x}}] a) 41 {})", "41"),
+        // Two `:or` entries: each default binds its own local.
+        (
+            "(let [{:keys [a e] :or {a 1, e (fn [m] m)}} {}] [(e 42) a])",
+            "[42 1]",
+        ),
+    ] {
+        let (mut eval, _) = rigged();
+        assert_eq!(run_last(&mut eval, src), want, "{src}");
+    }
+}
+
+#[test]
 fn try_catch_finally() {
     let (mut eval, log) = rigged();
     assert_eq!(run_last(&mut eval, "(try 1 2 3)"), "3");
@@ -1463,12 +1512,18 @@ fn map_destructure_analyzer_edges() {
         // Quoted `:or` spellings match quoted entries.
         ("(let [{a 'k, :or {'k 42}} {}] a)", "42"),
         ("((fn [{a 'k, :or {'k 42}}] a) {})", "42"),
-        // Mixed `:or` spellings apply (F-A, tracked by #112 which
-        // stays open): the analyzer normalizes spellings, while
-        // upstream `contains?` compares key forms (entry `'k` +
-        // `:or {k 1}` ignores the default there).
-        ("(let [{a 'k, :or {k 42}} {}] a)", "42"),
-        ("(let [{a k, :or {'k 42}} {}] a)", "42"),
+        // Mixed `:or` spellings miss (#158, ex F-A): upstream
+        // `push1` compares key forms (`local-default?` on the local,
+        // `key-default?` on `bk`), so a quoted entry plus a bare
+        // `:or` key (or the reverse) ignores the default.
+        ("(let [{a 'k, :or {k 42}} {}] a)", "nil"),
+        ("((fn [{a 'k, :or {k 42}}] a) {})", "nil"),
+        ("(let [{a k, :or {'k 42}} {}] a)", "nil"),
+        ("((fn [{a k, :or {'k 42}}] a) {})", "nil"),
+        // A quoted `:or` key misses the bare local too (#158):
+        // `(contains? {'a 42} 'a)` is false upstream.
+        ("(let [{a :k, :or {'a 42}} {}] a)", "nil"),
+        ("((fn [{a :k, :or {'a 42}}] a) {})", "nil"),
         // Quoted post-`&` keys join the selection.
         (
             "(let [{:syms [a & 'e], :excess x} {'a 1, 'e 2, 'f 3}] x)",

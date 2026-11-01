@@ -1,0 +1,174 @@
+g-ret-class => clojure.core.async.impl.channels.ManyToManyChannel
+g-ch-pr => "#object[clojure.core.async.impl.channels.ManyToManyChannel 0xHEX \"clojure.core.async.impl.channels.ManyToManyChannel@HEX\"]"
+g-val => 42
+g-closed-after => [nil true]
+g-nil-body => [nil true]
+g-false-body => [false nil true]
+g-empty => [nil true]
+g-multi => :c
+g-buf1 => [:v true nil true]
+g-thread => "async-io-N"
+g-thread-diff => true
+g-quote => (a/<! 1)
+g-squote => (user/got :q)
+g-var => #'clojure.core.async/<!
+g-shadow => :shadowed
+g-shadow-in => :in
+g-async => :v
+p-take-then-put => :v
+p-put-ret => true
+p-put-then-take => [:w true]
+p-seq-takes => 3
+p-let-take => 42
+p-if-take => :t
+p-if-take-nil => :f
+p-multi-expr => :done
+p-doseq => :drained
+p-nested-go => :inner
+p-nested-go-chan => :in
+p-try => :v
+p-try-throw => :caught
+p-fan-in => [(0 1 2 3 4 5 6 7) (true true true true true true true true)]
+p-scale16 => (0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15)
+c-take-closed => nil
+c-put-closed => false
+c-park-released => nil
+c-put-full-ret => true
+c-put-full-then-close => [:a :b true]
+c-drain => [:x :y nil]
+b-full-ret => true
+b-full-park => [:a :b true]
+b-drop => :keep
+b-slide => :new
+x-map => 42
+x-filter => 3
+x-mult => [1 2]
+x-reduced-ret => true
+x-reduced => [true 1 2 nil true]
+x-exh => :fb
+Exception in thread "async-io-N" clojure.lang.ExceptionInfo: dflt {:x 1}
+	at user$eval11374$fn__11375.invoke(g123-go.clj:150)
+	at clojure.core$map$fn__6050$fn__6051.invoke(core.clj:2759)
+	at clojure.core.async.impl.channels$chan$fn__637.invoke(channels.clj:303)
+	at clojure.core.async.impl.channels.ManyToManyChannel.put_BANG_(channels.clj:153)
+	at clojure.core.async.impl.ioc_macros$put_BANG_.invokeStatic(ioc_macros.clj:77)
+	at clojure.core.async.impl.ioc_macros$put_BANG_.invoke(ioc_macros.clj:76)
+	at user$eval11374$fn__11386$state_machine__6914__auto____11389$fn__11391.invoke(g123-go.clj:151)
+	at user$eval11374$fn__11386$state_machine__6914__auto____11389.invoke(g123-go.clj:151)
+	at clojure.core.async.impl.ioc_macros$run_state_machine.invokeStatic(ioc_macros.clj:58)
+	at clojure.core.async.impl.ioc_macros$run_state_machine.invoke(ioc_macros.clj:57)
+	at clojure.core.async.impl.ioc_macros$run_state_machine_wrapped.invokeStatic(ioc_macros.clj:62)
+	at clojure.core.async.impl.ioc_macros$run_state_machine_wrapped.invoke(ioc_macros.clj:60)
+	at user$eval11374$fn__11386.invoke(g123-go.clj:151)
+	at clojure.lang.AFn.run(AFn.java:22)
+	at java.base/java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1090)
+	at java.base/java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:614)
+	at java.base/java.lang.Thread.run(Thread.java:1527)
+x-dflt-exh => [:empty :default]
+g-binding => :bound
+Exception in thread "async-io-N" clojure.lang.ExceptionInfo: boom {:n 1}
+	at user$eval11437$fn__11442$state_machine__6914__auto____11443$fn__11445.invoke(g123-go.clj:158)
+	at user$eval11437$fn__11442$state_machine__6914__auto____11443.invoke(g123-go.clj:158)
+	at clojure.core.async.impl.ioc_macros$run_state_machine.invokeStatic(ioc_macros.clj:58)
+	at clojure.core.async.impl.ioc_macros$run_state_machine.invoke(ioc_macros.clj:57)
+	at clojure.core.async.impl.ioc_macros$run_state_machine_wrapped.invokeStatic(ioc_macros.clj:62)
+	at clojure.core.async.impl.ioc_macros$run_state_machine_wrapped.invoke(ioc_macros.clj:60)
+	at user$eval11437$fn__11442.invoke(g123-go.clj:158)
+	at clojure.lang.AFn.run(AFn.java:22)
+	at java.base/java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1090)
+	at java.base/java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:614)
+	at java.base/java.lang.Thread.run(Thread.java:1527)
+e-throw => [nil true]
+Exception in thread "async-io-N" java.lang.AssertionError: Assert failed: <! used not in (go ...) block
+nil
+	at clojure.core.async$_LT__BANG_.invokeStatic(async.clj:168)
+	at clojure.core.async$_LT__BANG_.invoke(async.clj:164)
+	at user$eval11461$fn__11471$state_machine__6914__auto____11474$fn__11476$inst_11467__11478.invoke(g123-go.clj:164)
+	at user$eval11461$fn__11471$state_machine__6914__auto____11474$fn__11476.invoke(g123-go.clj:164)
+	at user$eval11461$fn__11471$state_machine__6914__auto____11474.invoke(g123-go.clj:164)
+	at clojure.core.async.impl.ioc_macros$run_state_machine.invokeStatic(ioc_macros.clj:58)
+	at clojure.core.async.impl.ioc_macros$run_state_machine.invoke(ioc_macros.clj:57)
+	at clojure.core.async.impl.ioc_macros$run_state_machine_wrapped.invokeStatic(ioc_macros.clj:62)
+	at clojure.core.async.impl.ioc_macros$run_state_machine_wrapped.invoke(ioc_macros.clj:60)
+	at user$eval11461$fn__11471.invoke(g123-go.clj:164)
+	at clojure.lang.AFn.run(AFn.java:22)
+	at java.base/java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1090)
+	at java.base/java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:614)
+	at java.base/java.lang.Thread.run(Thread.java:1527)
+e-fn-boundary => [nil true]
+Exception in thread "async-io-N" java.lang.IllegalArgumentException: Can't put nil on channel
+	at clojure.core.async.impl.channels.ManyToManyChannel.put_BANG_(channels.clj:75)
+	at clojure.core.async.impl.ioc_macros$put_BANG_.invokeStatic(ioc_macros.clj:77)
+	at clojure.core.async.impl.ioc_macros$put_BANG_.invoke(ioc_macros.clj:76)
+	at user$eval11494$fn__11503$state_machine__6914__auto____11506$fn__11508.invoke(g123-go.clj:168)
+	at user$eval11494$fn__11503$state_machine__6914__auto____11506.invoke(g123-go.clj:168)
+	at clojure.core.async.impl.ioc_macros$run_state_machine.invokeStatic(ioc_macros.clj:58)
+	at clojure.core.async.impl.ioc_macros$run_state_machine.invoke(ioc_macros.clj:57)
+	at clojure.core.async.impl.ioc_macros$run_state_machine_wrapped.invokeStatic(ioc_macros.clj:62)
+	at clojure.core.async.impl.ioc_macros$run_state_machine_wrapped.invoke(ioc_macros.clj:60)
+	at user$eval11494$fn__11503.invoke(g123-go.clj:168)
+	at clojure.lang.AFn.run(AFn.java:22)
+	at java.base/java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1090)
+	at java.base/java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:614)
+	at java.base/java.lang.Thread.run(Thread.java:1527)
+e-bang-nil => [nil true]
+Exception in thread "async-io-N" java.lang.IllegalArgumentException: No implementation of method: :take! of protocol: #'clojure.core.async.impl.protocols/ReadPort found for class: java.lang.Long
+	at clojure.core$_cache_protocol_fn.invokeStatic(core_deftype.clj:598)
+	at clojure.core$_cache_protocol_fn.invoke(core_deftype.clj:590)
+	at clojure.core.async.impl.protocols$eval148$fn__149$G__139__156.invoke(protocols.clj:15)
+	at clojure.core.async.impl.ioc_macros$take_BANG_.invokeStatic(ioc_macros.clj:68)
+	at clojure.core.async.impl.ioc_macros$take_BANG_.invoke(ioc_macros.clj:67)
+	at user$eval11524$fn__11530$state_machine__6914__auto____11531$fn__11533.invoke(g123-go.clj:172)
+	at user$eval11524$fn__11530$state_machine__6914__auto____11531.invoke(g123-go.clj:172)
+	at clojure.core.async.impl.ioc_macros$run_state_machine.invokeStatic(ioc_macros.clj:58)
+	at clojure.core.async.impl.ioc_macros$run_state_machine.invoke(ioc_macros.clj:57)
+	at clojure.core.async.impl.ioc_macros$run_state_machine_wrapped.invokeStatic(ioc_macros.clj:62)
+	at clojure.core.async.impl.ioc_macros$run_state_machine_wrapped.invoke(ioc_macros.clj:60)
+	at user$eval11524$fn__11530.invoke(g123-go.clj:172)
+	at clojure.lang.AFn.run(AFn.java:22)
+	at java.base/java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1090)
+	at java.base/java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:614)
+	at java.base/java.lang.Thread.run(Thread.java:1527)
+e-take-nonchan => [nil true]
+Exception in thread "async-io-N" clojure.lang.ArityException: Wrong number of args (2) passed to: clojure.core.async.impl.ioc-macros/take!
+	at clojure.lang.AFn.throwArity(AFn.java:429)
+	at clojure.lang.AFn.invoke(AFn.java:36)
+	at user$eval11549$fn__11558$state_machine__6914__auto____11561$fn__11563.invoke(g123-go.clj:176)
+	at user$eval11549$fn__11558$state_machine__6914__auto____11561.invoke(g123-go.clj:176)
+	at clojure.core.async.impl.ioc_macros$run_state_machine.invokeStatic(ioc_macros.clj:58)
+	at clojure.core.async.impl.ioc_macros$run_state_machine.invoke(ioc_macros.clj:57)
+	at clojure.core.async.impl.ioc_macros$run_state_machine_wrapped.invokeStatic(ioc_macros.clj:62)
+	at clojure.core.async.impl.ioc_macros$run_state_machine_wrapped.invoke(ioc_macros.clj:60)
+	at user$eval11549$fn__11558.invoke(g123-go.clj:176)
+	at clojure.lang.AFn.run(AFn.java:22)
+	at java.base/java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1090)
+	at java.base/java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:614)
+	at java.base/java.lang.Thread.run(Thread.java:1527)
+e-arity => [nil true]
+Exception in thread "async-io-N" java.lang.AssertionError: Assert failed: <! used not in (go ...) block
+nil
+	at clojure.core.async$_LT__BANG_.invokeStatic(async.clj:168)
+	at clojure.core.async$_LT__BANG_.invoke(async.clj:164)
+	at user$eval11580$fn__11600$state_machine__6914__auto____11603$fn__11605$iter__11583__11607$fn__11608$fn__11609.invoke(g123-go.clj:182)
+	at user$eval11580$fn__11600$state_machine__6914__auto____11603$fn__11605$iter__11583__11607$fn__11608.invoke(g123-go.clj:182)
+	at clojure.lang.LazySeq.force(LazySeq.java:50)
+	at clojure.lang.LazySeq.realize(LazySeq.java:87)
+	at clojure.lang.LazySeq.seq(LazySeq.java:104)
+	at clojure.lang.RT.seq(RT.java:532)
+	at clojure.core$seq__5582.invokeStatic(core.clj:139)
+	at clojure.core$dorun.invokeStatic(core.clj:3115)
+	at clojure.core$doall.invokeStatic(core.clj:3130)
+	at clojure.core$doall.invoke(core.clj:3130)
+	at user$eval11580$fn__11600$state_machine__6914__auto____11603$fn__11605.invoke(g123-go.clj:182)
+	at user$eval11580$fn__11600$state_machine__6914__auto____11603.invoke(g123-go.clj:182)
+	at clojure.core.async.impl.ioc_macros$run_state_machine.invokeStatic(ioc_macros.clj:58)
+	at clojure.core.async.impl.ioc_macros$run_state_machine.invoke(ioc_macros.clj:57)
+	at clojure.core.async.impl.ioc_macros$run_state_machine_wrapped.invokeStatic(ioc_macros.clj:62)
+	at clojure.core.async.impl.ioc_macros$run_state_machine_wrapped.invoke(ioc_macros.clj:60)
+	at user$eval11580$fn__11600.invoke(g123-go.clj:182)
+	at clojure.lang.AFn.run(AFn.java:22)
+	at java.base/java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1090)
+	at java.base/java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:614)
+	at java.base/java.lang.Thread.run(Thread.java:1527)
+e-for-fn => [nil true]
+done => :done

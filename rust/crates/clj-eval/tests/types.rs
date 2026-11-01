@@ -182,10 +182,13 @@ fn dtor_ctor_arity() {
 
 #[test]
 fn dtor_unresolvable_type() {
+    // Unresolvable ctor heads report the JVM text at runtime
+    // (#120 slice 2, oracle `ctor-missing-simple`; the JVM
+    // rejects them at compile time — narrowing N1).
     let mut eval = boot();
     assert_eq!(
         uncaught(&mut eval, "(Nosuch. 1)"),
-        "java.lang.RuntimeException | Unable to resolve symbol: Nosuch in this context"
+        "java.lang.IllegalArgumentException | Unable to resolve classname: Nosuch"
     );
 }
 
@@ -388,8 +391,8 @@ fn dtor_field_errors() {
 
 #[test]
 fn dtor_method_on_other_values() {
-    // The fenced surface answers uniformly off-host (including
-    // `nil` — a documented divergence from the JVM's NPE).
+    // The fenced surface answers uniformly off-host; `nil`
+    // targets NPE like the JVM (oracle `nil-nosuch-*`).
     let mut eval = boot();
     assert_eq!(
         uncaught(&mut eval, "(.foo 5)"),
@@ -401,7 +404,7 @@ fn dtor_method_on_other_values() {
     );
     assert_eq!(
         uncaught(&mut eval, "(.foo nil)"),
-        "java.lang.IllegalArgumentException | No matching field found: foo for class null"
+        "java.lang.NullPointerException | Cannot invoke \"Object.getClass()\" because \"target\" is null"
     );
 }
 
@@ -1418,16 +1421,17 @@ fn stage1_descriptor_level() {
     // anywhere, descriptors compare by identity, hash
     // deterministically, and reject collection casts.
     let mut eval = boot();
-    // Bare dotted references do not resolve (constructors do —
-    // imports hold simple names only, so only the `Type.` dot form
-    // splits namespace from name); the dotted registry path is
-    // covered by the cross-namespace constructor tests.
+    // Bare dotted references resolve as classes (#120 slice 1 —
+    // the JVM evaluates `user.Foo` to the deftype class, oracle
+    // `bare-deftype`). The lookup splits namespace from name, so
+    // the dashed spelling resolves while the reported class keeps
+    // the munged `HostDef` name.
     assert_eq!(
-        uncaught(
+        run(
             &mut eval,
             "(ns foo-bar) (defrecord R2 [a]) (ns user) (str foo-bar.R2)"
         ),
-        "java.lang.RuntimeException | Unable to resolve symbol: foo-bar.R2 in this context"
+        "\"class foo_bar.R2\""
     );
     assert_eq!(run(&mut eval, "(deftype Pair [a b]) (= Pair Pair)"), "true");
     assert_eq!(

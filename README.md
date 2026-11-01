@@ -187,13 +187,31 @@ each entry asserts its exact behavior, so drift fails CI:
 Absent from [`rust/core-coverage.md`](rust/core-coverage.md) means
 out of scope, not silently missing:
 
-- Host interop beyond the emulated class core: `class` `type`
-  `instance?` `import` `..` `bean` `bases` `supers` resolve
-  against the static `clojure.lang.*` table (S16);
-  `clojure.java.*`, `clojure.reflect`, and real classloading
-  stay out.
-- LLVM JIT, `clojure.spec`, `core.async`, and binary
-  compatibility with JVM-compiled artifacts.
+- Binary compatibility with JVM-compiled artifacts — the only
+  non-goal: the port never loads `.class` files or links JVM
+  bytecode.
+
+Everything else formerly listed here is a goal now, landing in
+slices (tracking issue in parentheses):
+
+- Host interop (#120): the emulated class core is landed —
+  `class` `type` `instance?` `import` `..` `bean` `bases`
+  `supers` resolve against the static `clojure.lang.*` table
+  (S16) — and real host construction, invocation, import,
+  reflection, `clojure.java.*`, and `clojure.reflect` are
+  landing in slices.
+- `clojure.spec` (#122): the registry, predicate specs,
+  `and`/`or`, regex ops, `keys`/`merge`, tuple/multi-spec/
+  conformer, collection combinators, and the `spec.gen.alpha`
+  surface are ported; generator wiring (`gen*`) and
+  `fdef`/instrumentation remain.
+- `core.async` (#123): channels, buffers, and ops plus
+  transducers and ex-handlers are ported; further slices in
+  progress.
+- `tools.deps` (#124): source-only redesign (no jars, no Maven
+  resolution — `:mvn` coords parse but are refused); the config
+  layer is ported, further slices in progress.
+- LLVM JIT (#121): goal, at recon stage.
 
 ## Memory management
 

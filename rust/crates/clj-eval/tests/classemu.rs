@@ -495,23 +495,24 @@ fn import_deftype_roundtrip() {
         "\"user.ImpPoint\""
     );
     // i-construct: `(Date. 0)` constructs through the import on the
-    // JVM; the port has no `Date` values, so the `__new*` class arm
-    // reports the missing `HostDef` (forced divergence).
+    // JVM; the port has no `Date` values, so the non-allow-listed
+    // class takes the uniform ctor miss (#120 slice 2, spec N4 —
+    // at runtime; the JVM rejects the arity at compile time).
     assert_eq!(
         uncaught(
             &mut eval,
             "(do (in-ns 'impdt) (clojure.core/refer-clojure) (import 'java.util.Date) (eval '(Date. 0)))"
         ),
-        "java.lang.IllegalArgumentException | Not a type: java.util.Date"
+        "java.lang.IllegalArgumentException | No matching ctor found for class java.util.Date"
     );
 }
 
 #[test]
 fn construct_via_class_values() {
     // The `__new*` class arm (§1.8): a class value resolves through
-    // its name to a `HostDef` and constructs; a JDK name with no
-    // `HostDef` is `Not a type`; an interface def is the missing-ctor
-    // error.
+    // its name to a `HostDef` and constructs; an emulated name
+    // builds (#120 slice 2); any other JDK name is the uniform
+    // ctor miss; an interface def is the missing-ctor error.
     let mut eval = boot();
     assert_eq!(
         run(
@@ -521,11 +522,11 @@ fn construct_via_class_values() {
         "user.NCV"
     );
     assert_eq!(
-        uncaught(
+        run(
             &mut eval,
             "(do (import 'java.lang.String) (clojure.core/__new* String \"x\"))"
         ),
-        "java.lang.IllegalArgumentException | Not a type: java.lang.String"
+        "\"x\""
     );
     assert_eq!(
         uncaught(
@@ -550,24 +551,22 @@ fn import_struct_name() {
     );
 }
 
-// i-fqn-eval: the JVM evaluates bare `java.lang.String` to the
-// class; the port keeps rejecting dotted bare names (no honorable
-// `Class.forName`), pinned here and by the stage-1 suite.
+// i-fqn-eval (#120 slice 1): the JVM evaluates bare
+// `java.lang.String` to the class (oracle `val-fq-String`), and
+// the port now agrees — `Class.forName` made dotted bare names
+// honorable. Missing dotted names are `ClassNotFoundException`
+// (oracle `val-fq-missing`).
 #[test]
-fn import_fqn_still_rejected() {
+fn import_fqn_resolves() {
     let mut eval = boot();
+    assert_eq!(run(&mut eval, "java.lang.String"), "java.lang.String");
     assert_eq!(
-        compile_err(&mut eval, "java.lang.String"),
-        "java.lang.RuntimeException | Unable to resolve symbol: java.lang.String in this context"
+        run(&mut eval, "(eval 'java.lang.String)"),
+        "java.lang.String"
     );
-    // The oracle's `eval` shape: the same rejection under the
-    // `CompilerException` wrap (cause-walked like `throwcause`).
     assert_eq!(
-        run(
-            &mut eval,
-            "(try (eval 'java.lang.String) (catch Throwable t (ex-message (loop [x t] (let [n (ex-cause x)] (if n (recur n) x))))))"
-        ),
-        "\"Unable to resolve symbol: java.lang.String in this context\""
+        compile_err(&mut eval, "java.no.Klass"),
+        "java.lang.ClassNotFoundException | java.no.Klass"
     );
 }
 
@@ -1211,15 +1210,14 @@ fn class_queries() {
         ),
         "java.lang.ArithmeticException"
     );
-    // c-class-object: `(Object.)` is the §1.8 miss (a JDK name with
-    // no `HostDef`); the oracle VALUE is JVM-only — no expression in
-    // the port evaluates to a bare `Object`.
+    // c-class-object: `(Object.)` constructs a bare `Object`
+    // (#120 slice 2, oracle `ctor-obj-class`).
     assert_eq!(
-        uncaught(
+        run(
             &mut eval,
             "(do (import 'java.lang.Object) (class (Object.)))"
         ),
-        "java.lang.IllegalArgumentException | Not a type: java.lang.Object"
+        "java.lang.Object"
     );
     // c-class-tagged: `tagged-literal` has no port constructor and no
     // bare tagged value is surface-reachable — JVM-only row.
@@ -3539,11 +3537,15 @@ fn dotdot_threading() {
         run(&mut eval, "(.. \"abc\" (getClass) (getName))"),
         "\"java.lang.String\""
     );
+    // Nil targets NPE on every member at every arity — known or
+    // unknown (oracle `nil-nosuch-*`, `dotdot-nil-*`).
     for src in [
         "(.. nil (toString))",
         "(.. nil (hashCode))",
         "(.. nil (equals \"a\"))",
         "(.. nil (getClass))",
+        "(.. nil (nosuch_xyz))",
+        "(.. nil (nosuch_xyz 1))",
     ] {
         assert_eq!(
             uncaught(&mut eval, src),
@@ -3551,14 +3553,9 @@ fn dotdot_threading() {
             "{src}"
         );
     }
-    assert_eq!(
-        uncaught(&mut eval, "(.. nil (nosuch_xyz))"),
-        "java.lang.IllegalArgumentException | No matching field found: nosuch_xyz for class null"
-    );
-    assert_eq!(
-        uncaught(&mut eval, "(.. nil (nosuch_xyz 1))"),
-        "java.lang.IllegalArgumentException | No matching method nosuch_xyz found taking 1 args for class null"
-    );
+    // Field position (`__field*`, not a call) keeps the miss shape
+    // — no oracle row covers field-read on nil (the JVM NPEs there
+    // too; follow-up).
     assert_eq!(
         uncaught(&mut eval, "(.. nil nosuch_xyz)"),
         "java.lang.IllegalArgumentException | No matching field found: nosuch_xyz for class null"
@@ -3765,9 +3762,11 @@ fn surface_equals_hashcode() {
     for (src, want) in cases {
         assert_eq!(run(&mut eval, src), want, "{src}");
     }
+    // Zero-arg misses read field-first even for real members
+    // (the reflector tries fields before methods).
     assert_eq!(
         uncaught(&mut eval, "(.. \"a\" (equals))"),
-        "java.lang.IllegalArgumentException | No matching method equals found taking 0 args for class java.lang.String"
+        "java.lang.IllegalArgumentException | No matching field found: equals for class java.lang.String"
     );
     assert_eq!(
         uncaught(&mut eval, "(.. \"a\" (equals \"x\" \"y\"))"),
@@ -4428,10 +4427,14 @@ fn surface_gates() {
     for (src, want) in cases {
         assert_eq!(run(&mut eval, src), want, "{src}");
     }
+    // Gated members missing their gate read field-first at 0 args
+    // on plain values (the reflector tries fields before methods —
+    // oracle `inst-getFirst-str`, `inst-getMessage-num`); host
+    // instances, descriptors, and classes keep method-shape.
     let misses = [
         (
             "(.. 1 (isEmpty))",
-            "java.lang.IllegalArgumentException | No matching method isEmpty found taking 0 args for class java.lang.Long",
+            "java.lang.IllegalArgumentException | No matching field found: isEmpty for class java.lang.Long",
         ),
         (
             "(do (deftype QD2 [x]) (.. (QD2. 1) (isEmpty)))",
@@ -4443,35 +4446,35 @@ fn surface_gates() {
         ),
         (
             "(.. #'map (getName))",
-            "java.lang.IllegalArgumentException | No matching method getName found taking 0 args for class clojure.lang.Var",
+            "java.lang.IllegalArgumentException | No matching field found: getName for class clojure.lang.Var",
         ),
         (
             "(.. #'map (getNamespace))",
-            "java.lang.IllegalArgumentException | No matching method getNamespace found taking 0 args for class clojure.lang.Var",
+            "java.lang.IllegalArgumentException | No matching field found: getNamespace for class clojure.lang.Var",
         ),
         (
             "(.. \"ab\" (getFirst))",
-            "java.lang.IllegalArgumentException | No matching method getFirst found taking 0 args for class java.lang.String",
+            "java.lang.IllegalArgumentException | No matching field found: getFirst for class java.lang.String",
         ),
         (
             "(.. {:a 1} (getFirst))",
-            "java.lang.IllegalArgumentException | No matching method getFirst found taking 0 args for class clojure.lang.PersistentArrayMap",
+            "java.lang.IllegalArgumentException | No matching field found: getFirst for class clojure.lang.PersistentArrayMap",
         ),
         (
             "(.. (sorted-set 1) (getFirst))",
-            "java.lang.IllegalArgumentException | No matching method getFirst found taking 0 args for class clojure.lang.PersistentTreeSet",
+            "java.lang.IllegalArgumentException | No matching field found: getFirst for class clojure.lang.PersistentTreeSet",
         ),
         (
             "(.. 1 (isRealized))",
-            "java.lang.IllegalArgumentException | No matching method isRealized found taking 0 args for class java.lang.Long",
+            "java.lang.IllegalArgumentException | No matching field found: isRealized for class java.lang.Long",
         ),
         (
             "(.. \"a\" (close))",
-            "java.lang.IllegalArgumentException | No matching method close found taking 0 args for class java.lang.String",
+            "java.lang.IllegalArgumentException | No matching field found: close for class java.lang.String",
         ),
         (
             "(.. \"a\" (flush))",
-            "java.lang.IllegalArgumentException | No matching method flush found taking 0 args for class java.lang.String",
+            "java.lang.IllegalArgumentException | No matching field found: flush for class java.lang.String",
         ),
         (
             "(do (deftype QDd [x]) (.. QDd (isEmpty)))",
@@ -4479,27 +4482,27 @@ fn surface_gates() {
         ),
         (
             "(.. 1 (isBlank))",
-            "java.lang.IllegalArgumentException | No matching method isBlank found taking 0 args for class java.lang.Long",
+            "java.lang.IllegalArgumentException | No matching field found: isBlank for class java.lang.Long",
         ),
         (
             "(.. \"a\" (getKey))",
-            "java.lang.IllegalArgumentException | No matching method getKey found taking 0 args for class java.lang.String",
+            "java.lang.IllegalArgumentException | No matching field found: getKey for class java.lang.String",
         ),
         (
             "(.. \"a\" (getValue))",
-            "java.lang.IllegalArgumentException | No matching method getValue found taking 0 args for class java.lang.String",
+            "java.lang.IllegalArgumentException | No matching field found: getValue for class java.lang.String",
         ),
         (
             "(.. \"a\" (getMessage))",
-            "java.lang.IllegalArgumentException | No matching method getMessage found taking 0 args for class java.lang.String",
+            "java.lang.IllegalArgumentException | No matching field found: getMessage for class java.lang.String",
         ),
         (
             "(.. \"a\" (getCause))",
-            "java.lang.IllegalArgumentException | No matching method getCause found taking 0 args for class java.lang.String",
+            "java.lang.IllegalArgumentException | No matching field found: getCause for class java.lang.String",
         ),
         (
             "(.. \"a\" (getData))",
-            "java.lang.IllegalArgumentException | No matching method getData found taking 0 args for class java.lang.String",
+            "java.lang.IllegalArgumentException | No matching field found: getData for class java.lang.String",
         ),
     ];
     for (src, want) in misses {
@@ -4508,11 +4511,11 @@ fn surface_gates() {
     // Non-writer extensions miss the same way (counters scrubbed).
     assert_eq!(
         normctr(&uncaught(&mut eval, "(.. (fn [x] x) (close))")),
-        "java.lang.IllegalArgumentException | No matching method close found taking 0 args for class user$evalN$fn__N"
+        "java.lang.IllegalArgumentException | No matching field found: close for class user$evalN$fn__N"
     );
     assert_eq!(
         normctr(&uncaught(&mut eval, "(.. (fn [x] x) (flush))")),
-        "java.lang.IllegalArgumentException | No matching method flush found taking 0 args for class user$evalN$fn__N"
+        "java.lang.IllegalArgumentException | No matching field found: flush for class user$evalN$fn__N"
     );
     // m-first-empty: the JVM's message is nil (the oracle prints
     // `<nil>`); the port throws the empty message.

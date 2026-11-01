@@ -6,11 +6,12 @@
 // the terms of this license.
 // You must not remove this notice, or any other, from this software.
 
-//! `clojure-rs`: native Clojure runtime, REPL, and LLVM AOT compiler.
+//! `clojure-rs`: native Clojure runtime, REPL, LLVM AOT compiler, and JIT.
 //!
 //! Slices S1+S7A: CLI shell plus `eval`/`run` wiring over the booted
 //! `clj-eval` core. `repl` landed in S7B/C, `build` in S8 (spec
-//! `docs/t1174/`).
+//! `docs/t1174/`), `jit` in gap-121 slice 1 (spec
+//! `docs/gap-121/slice-1.md`).
 
 use clap::{Parser, Subcommand};
 use clj_eval::{Evaluator, SourceError, boot, compile_diagnostic, compile_head};
@@ -72,6 +73,13 @@ enum Command {
         #[arg(long)]
         runtime_archive: Option<PathBuf>,
     },
+    /// JIT-run the pure subset in-process (no binary emitted).
+    Jit {
+        /// The source file to run.
+        file: PathBuf,
+        /// Passed to the JITted `-main` as its argv list.
+        args: Vec<String>,
+    },
 }
 
 /// Exit codes per spec C8: 0 ok, 1 evaluation/compile error,
@@ -98,6 +106,7 @@ fn main() -> ExitCode {
             emit_obj.as_deref(),
             runtime_archive.as_deref(),
         ),
+        Command::Jit { file, args } => cmd_jit(&file, &args),
     }
 }
 
@@ -652,6 +661,55 @@ fn cmd_build_compile(
     ExitCode::from(1)
 }
 
+/// `jit`: JIT-run the pure subset in-process (gap-121 slice 1).
+/// The IO gate runs on every configuration (missing input is
+/// exit 3 even unlinked); only running itself splits on the
+/// `aot` feature.
+fn cmd_jit(file: &Path, args: &[String]) -> ExitCode {
+    if !file.exists() {
+        eprintln!("jit: no such file: {}", file.display());
+        return ExitCode::from(3);
+    }
+    if file.is_dir() {
+        eprintln!("jit: is a directory: {}", file.display());
+        return ExitCode::from(3);
+    }
+    let source = match std::fs::read_to_string(file) {
+        Ok(source) => source,
+        Err(e) => {
+            eprintln!("jit: cannot open {}: {e}", file.display());
+            return ExitCode::from(3);
+        }
+    };
+    cmd_jit_compile(file, &source, args)
+}
+
+/// Linked `jit`: plan → LLVM → run in-process. Both failures
+/// print through one arm (exit 1) — the diagnostic verbatim,
+/// backend failures `jit: `-prefixed (the prefix is baked into
+/// the error at construction, since the LLVM arm is
+/// environmentally untriggerable and could never cover its own
+/// lines — spec §6).
+#[cfg(feature = "aot")]
+fn cmd_jit_compile(file: &Path, source: &str, args: &[String]) -> ExitCode {
+    let path = file.to_string_lossy();
+    match clj_aot::jit::run_str(source, &path, args) {
+        Ok(code) => ExitCode::from(code as u8),
+        Err(e) => {
+            eprintln!("{e}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+/// Unlinked `jit`: the IO gate already ran, so any input reaching
+/// here is readable — report the missing backend (exit 1).
+#[cfg(not(feature = "aot"))]
+fn cmd_jit_compile(_file: &Path, _source: &str, _args: &[String]) -> ExitCode {
+    eprintln!("{}", clj_eval::compiler::UNLINKED_JIT_LINE);
+    ExitCode::from(1)
+}
+
 /// History persistence from the CLI flags (`--no-history` wins over
 /// `--history-file`).
 fn history_options(no_history: bool, history_file: Option<PathBuf>) -> clj_repl::HistoryOptions {
@@ -1167,6 +1225,18 @@ mod tests {
                 None,
                 None
             ),
+            ExitCode::from(1)
+        );
+    }
+
+    #[cfg(not(feature = "aot"))]
+    #[test]
+    fn jit_unlinked_reports_shared_line() {
+        // The `jit` side of the shared unlinked line (gap-121
+        // slice 1 — the text lives on `UNLINKED_JIT_LINE`, so
+        // the CLI and any future hook can never drift).
+        assert_eq!(
+            cmd_jit_compile(std::path::Path::new("in.clj"), "(+ 1 2)", &[]),
             ExitCode::from(1)
         );
     }

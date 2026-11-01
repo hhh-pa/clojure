@@ -1471,10 +1471,9 @@
   (satisfies? Inst x))
 
 ;; S16 class emulation: `import`, `..`, `memfn`. Classes are values
-;; and namespaces carry an import table (simple name → class) with no
-;; default imports — `String` and friends resolve only after an
-;; explicit `import` (the old class-name string stub vars are
-;; retired). The `import` macro validates each spec (an
+;; and namespaces carry an import table (simple name → class) seeded
+;; with the JVM's 106 default imports (#74; the old class-name string
+;; stub vars are retired). The `import` macro validates each spec (an
 ;; unqualified symbol, or a package list of 2+ unqualified symbols)
 ;; and fans out to the hidden `__import*` native; `..`/`memfn`
 ;; expand to the hidden `__meth*`/`__field*` calls the dot-forms

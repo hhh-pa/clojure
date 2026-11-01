@@ -1,0 +1,147 @@
+file.encoding=UTF-8
+ctor-str-0 => ""
+ctor-str-1 => "x"
+ctor-str-class => java.lang.String
+ctor-str-eq => true
+ctor-str-ident => false
+ctor-str-chararr => "ab"
+ctor-str-chararr-off => "bc"
+ctor-str-chararr-empty => ""
+ctor-str-bytearr => "AB"
+ctor-str-bytearr-off => "BC"
+ctor-str-bytearr-bad => "�"
+ctor-str-bytearr-utf8 => "é"
+ctor-str-bytearr-ascii => "A"
+ctor-str-bytearr-latin => "ÿ"
+ctor-str-bytearr-utf16 => "䄀"
+ctor-str-bytearr-utf16be => "A"
+ctor-str-hibyte => "AB"
+ctor-str-intarr => "AB"
+ctor-str-sb => "xy"
+ctor-str-sbuf => "xy"
+ctor-str-fq => "x"
+new-str-1 => "x"
+new-str-0 => ""
+new-str-fq => "x"
+new-str-chararr => "a"
+ctor-str-coerce-long => "bc"
+ctor-str-coerce-oobig CHAIN:
+   java.lang.ArithmeticException | integer overflow
+ctor-str-coerce-double CHAIN:
+   java.lang.IllegalArgumentException | No matching ctor found for class java.lang.String
+ctor-str-coerce-str CHAIN:
+   java.lang.IllegalArgumentException | No matching ctor found for class java.lang.String
+ctor-str-arity2 CHAIN:
+   java.lang.IllegalArgumentException | No matching ctor found for class java.lang.String
+ctor-str-arity4 CHAIN:
+   java.lang.IllegalArgumentException | No matching ctor found for class java.lang.String
+ctor-str-arity5 CHAIN:
+   clojure.lang.Compiler$CompilerException | Syntax error compiling new at (/home/opc/workspace/clojure/.muse/worktrees/subagent-v2-01a186ab-6801-7a32-9110-7d9f70845a21-01a193d3-3313-71f0-ab00-36fb812042ba/docs/gap-120-slice2/probes/ctor.clj:65:1).
+   java.lang.IllegalArgumentException | No matching ctor found for class java.lang.String
+ctor-str-badtype CHAIN:
+   java.lang.IllegalArgumentException | No matching ctor found for class java.lang.String
+ctor-str-nil1 CHAIN:
+   clojure.lang.Compiler$CompilerException | Syntax error compiling new at (/home/opc/workspace/clojure/.muse/worktrees/subagent-v2-01a186ab-6801-7a32-9110-7d9f70845a21-01a193d3-3313-71f0-ab00-36fb812042ba/docs/gap-120-slice2/probes/ctor.clj:67:1).
+   java.lang.IllegalArgumentException | More than one matching method found: java.lang.String
+ctor-str-nil2 CHAIN:
+   clojure.lang.Compiler$CompilerException | Syntax error compiling new at (/home/opc/workspace/clojure/.muse/worktrees/subagent-v2-01a186ab-6801-7a32-9110-7d9f70845a21-01a193d3-3313-71f0-ab00-36fb812042ba/docs/gap-120-slice2/probes/ctor.clj:68:1).
+   java.lang.IllegalArgumentException | More than one matching method found: java.lang.String
+ctor-str-nil3 CHAIN:
+   clojure.lang.Compiler$CompilerException | Syntax error compiling new at (/home/opc/workspace/clojure/.muse/worktrees/subagent-v2-01a186ab-6801-7a32-9110-7d9f70845a21-01a193d3-3313-71f0-ab00-36fb812042ba/docs/gap-120-slice2/probes/ctor.clj:69:1).
+   java.lang.IllegalArgumentException | More than one matching method found: java.lang.String
+ctor-str-off-oob CHAIN:
+   java.lang.StringIndexOutOfBoundsException | Range [5, 5 + 1) out of bounds for length 1
+ctor-str-off-neg CHAIN:
+   java.lang.StringIndexOutOfBoundsException | Range [-1, -1 + 1) out of bounds for length 1
+ctor-str-cnt-oob CHAIN:
+   java.lang.StringIndexOutOfBoundsException | Range [0, 0 + 2) out of bounds for length 1
+ctor-str-badcs CHAIN:
+   java.io.UnsupportedEncodingException | NOPE-CS
+ctor-str-badcs4 CHAIN:
+   java.io.UnsupportedEncodingException | NOPE-CS
+ctor-str-badcp CHAIN:
+   java.lang.IllegalArgumentException | -1
+ctor-str-bytearr-nil CHAIN:
+   clojure.lang.Compiler$CompilerException | Syntax error compiling new at (/home/opc/workspace/clojure/.muse/worktrees/subagent-v2-01a186ab-6801-7a32-9110-7d9f70845a21-01a193d3-3313-71f0-ab00-36fb812042ba/docs/gap-120-slice2/probes/ctor.clj:76:1).
+   java.lang.IllegalArgumentException | More than one matching method found: java.lang.String
+new-str-bad CHAIN:
+   java.lang.IllegalArgumentException | No matching ctor found for class java.lang.String
+new-str-arity CHAIN:
+   java.lang.IllegalArgumentException | No matching ctor found for class java.lang.String
+ctor-obj-class => java.lang.Object
+ctor-obj-eq => true
+ctor-obj-ident => false
+new-obj-fq => #object[java.lang.Object 0x718607eb "java.lang.Object@718607eb"]
+ctor-obj-arity CHAIN:
+   clojure.lang.Compiler$CompilerException | Syntax error compiling new at (/home/opc/workspace/clojure/.muse/worktrees/subagent-v2-01a186ab-6801-7a32-9110-7d9f70845a21-01a193d3-3313-71f0-ab00-36fb812042ba/docs/gap-120-slice2/probes/ctor.clj:85:1).
+   java.lang.IllegalArgumentException | No matching ctor found for class java.lang.Object
+ctor-obj-nil CHAIN:
+   clojure.lang.Compiler$CompilerException | Syntax error compiling new at (/home/opc/workspace/clojure/.muse/worktrees/subagent-v2-01a186ab-6801-7a32-9110-7d9f70845a21-01a193d3-3313-71f0-ab00-36fb812042ba/docs/gap-120-slice2/probes/ctor.clj:86:1).
+   java.lang.IllegalArgumentException | No matching ctor found for class java.lang.Object
+new-obj-arity CHAIN:
+   clojure.lang.Compiler$CompilerException | Syntax error compiling new at (/home/opc/workspace/clojure/.muse/worktrees/subagent-v2-01a186ab-6801-7a32-9110-7d9f70845a21-01a193d3-3313-71f0-ab00-36fb812042ba/docs/gap-120-slice2/probes/ctor.clj:87:1).
+   java.lang.IllegalArgumentException | No matching ctor found for class java.lang.Object
+ctor-int => 5
+ctor-int-str => 42
+ctor-long-str => 42
+ctor-bool-str => true
+ctor-hashmap => {}
+ctor-hashmap-args => {}
+ctor-arraylist => []
+ctor-iface CHAIN:
+   clojure.lang.Compiler$CompilerException | Syntax error compiling new at (/home/opc/workspace/clojure/.muse/worktrees/subagent-v2-01a186ab-6801-7a32-9110-7d9f70845a21-01a193d3-3313-71f0-ab00-36fb812042ba/docs/gap-120-slice2/probes/ctor.clj:97:1).
+   java.lang.IllegalArgumentException | No matching ctor found for interface java.util.List
+ctor-abstract CHAIN:
+   clojure.lang.Compiler$CompilerException | Syntax error compiling new at (/home/opc/workspace/clojure/.muse/worktrees/subagent-v2-01a186ab-6801-7a32-9110-7d9f70845a21-01a193d3-3313-71f0-ab00-36fb812042ba/docs/gap-120-slice2/probes/ctor.clj:98:1).
+   java.lang.IllegalArgumentException | No matching ctor found for class java.text.Format
+ctor-private CHAIN:
+   clojure.lang.Compiler$CompilerException | Syntax error compiling new at (/home/opc/workspace/clojure/.muse/worktrees/subagent-v2-01a186ab-6801-7a32-9110-7d9f70845a21-01a193d3-3313-71f0-ab00-36fb812042ba/docs/gap-120-slice2/probes/ctor.clj:99:1).
+   java.lang.IllegalArgumentException | No matching ctor found for class java.lang.System
+ctor-private-new CHAIN:
+   clojure.lang.Compiler$CompilerException | Syntax error compiling new at (/home/opc/workspace/clojure/.muse/worktrees/subagent-v2-01a186ab-6801-7a32-9110-7d9f70845a21-01a193d3-3313-71f0-ab00-36fb812042ba/docs/gap-120-slice2/probes/ctor.clj:100:1).
+   java.lang.IllegalArgumentException | No matching ctor found for class java.lang.System
+ctor-missing-simple CHAIN:
+   clojure.lang.Compiler$CompilerException | Syntax error compiling new at (/home/opc/workspace/clojure/.muse/worktrees/subagent-v2-01a186ab-6801-7a32-9110-7d9f70845a21-01a193d3-3313-71f0-ab00-36fb812042ba/docs/gap-120-slice2/probes/ctor.clj:101:1).
+   java.lang.IllegalArgumentException | Unable to resolve classname: NopeKlass
+ctor-missing-fq CHAIN:
+   clojure.lang.Compiler$CompilerException | Syntax error compiling new at (/home/opc/workspace/clojure/.muse/worktrees/subagent-v2-01a186ab-6801-7a32-9110-7d9f70845a21-01a193d3-3313-71f0-ab00-36fb812042ba/docs/gap-120-slice2/probes/ctor.clj:102:1).
+   java.lang.ClassNotFoundException | java.no.Klass
+ctor-missing-fq0 CHAIN:
+   clojure.lang.Compiler$CompilerException | Syntax error compiling new at (/home/opc/workspace/clojure/.muse/worktrees/subagent-v2-01a186ab-6801-7a32-9110-7d9f70845a21-01a193d3-3313-71f0-ab00-36fb812042ba/docs/gap-120-slice2/probes/ctor.clj:103:1).
+   java.lang.ClassNotFoundException | java.no.Klass
+new-missing-simple CHAIN:
+   clojure.lang.Compiler$CompilerException | Syntax error compiling new at (/home/opc/workspace/clojure/.muse/worktrees/subagent-v2-01a186ab-6801-7a32-9110-7d9f70845a21-01a193d3-3313-71f0-ab00-36fb812042ba/docs/gap-120-slice2/probes/ctor.clj:104:1).
+   java.lang.IllegalArgumentException | Unable to resolve classname: NopeKlass
+new-missing-fq CHAIN:
+   clojure.lang.Compiler$CompilerException | Syntax error compiling new at (/home/opc/workspace/clojure/.muse/worktrees/subagent-v2-01a186ab-6801-7a32-9110-7d9f70845a21-01a193d3-3313-71f0-ab00-36fb812042ba/docs/gap-120-slice2/probes/ctor.clj:105:1).
+   java.lang.ClassNotFoundException | java.no.Klass
+val-traildot CHAIN:
+   clojure.lang.Compiler$CompilerException | Syntax error compiling at (/home/opc/workspace/clojure/.muse/worktrees/subagent-v2-01a186ab-6801-7a32-9110-7d9f70845a21-01a193d3-3313-71f0-ab00-36fb812042ba/docs/gap-120-slice2/probes/ctor.clj:106:1).
+   java.lang.ClassNotFoundException | String.
+val-traildot-fq CHAIN:
+   clojure.lang.Compiler$CompilerException | Syntax error compiling at (/home/opc/workspace/clojure/.muse/worktrees/subagent-v2-01a186ab-6801-7a32-9110-7d9f70845a21-01a193d3-3313-71f0-ab00-36fb812042ba/docs/gap-120-slice2/probes/ctor.clj:107:1).
+   java.lang.ClassNotFoundException | java.lang.String.
+static-new => "x"
+new-empty CHAIN:
+   clojure.lang.Compiler$CompilerException | Syntax error compiling new at (/home/opc/workspace/clojure/.muse/worktrees/subagent-v2-01a186ab-6801-7a32-9110-7d9f70845a21-01a193d3-3313-71f0-ab00-36fb812042ba/docs/gap-120-slice2/probes/ctor.clj:111:1).
+   java.lang.RuntimeException | wrong number of arguments, expecting: (new Classname args...)
+new-num-head CHAIN:
+   clojure.lang.Compiler$CompilerException | Syntax error compiling new at (/home/opc/workspace/clojure/.muse/worktrees/subagent-v2-01a186ab-6801-7a32-9110-7d9f70845a21-01a193d3-3313-71f0-ab00-36fb812042ba/docs/gap-120-slice2/probes/ctor.clj:112:1).
+   java.lang.IllegalArgumentException | Unable to resolve classname: 1
+new-str-head CHAIN:
+   clojure.lang.Compiler$CompilerException | Syntax error compiling new at (/home/opc/workspace/clojure/.muse/worktrees/subagent-v2-01a186ab-6801-7a32-9110-7d9f70845a21-01a193d3-3313-71f0-ab00-36fb812042ba/docs/gap-120-slice2/probes/ctor.clj:113:1).
+   java.lang.IllegalArgumentException | Unable to resolve classname: String
+new-nil-head CHAIN:
+   clojure.lang.Compiler$CompilerException | Syntax error compiling new at (/home/opc/workspace/clojure/.muse/worktrees/subagent-v2-01a186ab-6801-7a32-9110-7d9f70845a21-01a193d3-3313-71f0-ab00-36fb812042ba/docs/gap-120-slice2/probes/ctor.clj:114:1).
+   java.lang.IllegalArgumentException | Unable to resolve classname: null
+new-list-head CHAIN:
+   clojure.lang.Compiler$CompilerException | Syntax error compiling new at (/home/opc/workspace/clojure/.muse/worktrees/subagent-v2-01a186ab-6801-7a32-9110-7d9f70845a21-01a193d3-3313-71f0-ab00-36fb812042ba/docs/gap-120-slice2/probes/ctor.clj:115:1).
+   java.lang.IllegalArgumentException | Unable to resolve classname: (Class/forName "java.lang.String")
+new-kw-head CHAIN:
+   clojure.lang.Compiler$CompilerException | Syntax error compiling new at (/home/opc/workspace/clojure/.muse/worktrees/subagent-v2-01a186ab-6801-7a32-9110-7d9f70845a21-01a193d3-3313-71f0-ab00-36fb812042ba/docs/gap-120-slice2/probes/ctor.clj:116:1).
+   java.lang.IllegalArgumentException | Unable to resolve classname: :String
+new-shadow => "x"
+ctor-dot-shadow => "x"
+new-deftype => #object[user.NPT 0x2bfeb1ef "user.NPT@2bfeb1ef"]
+ctor-deftype => #object[user.CPT 0x1f14f20c "user.CPT@1f14f20c"]
+new-obj-shadow => java.lang.Object

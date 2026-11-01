@@ -1258,11 +1258,14 @@ fn gap2_catch_explicit_nil() {
 
 #[test]
 fn gap2_unresolvable_core_builtin() {
-    // No clojure.core ns here, so the qualified builtin misses (expr.rs:873).
+    // No clojure.core ns here, so the qualified builtin misses —
+    // and a dotted miss is `ClassNotFoundException` (#120 slice 1:
+    // the JVM CNFEs every unresolvable dotted namespace part,
+    // oracle `static-unknown-fq`, `removed-ns-call`).
     check(
         "(clojure.core/let [x 1] x)",
         "Syntax error compiling at (test:1:1).",
-        "java.lang.RuntimeException | No such namespace: clojure.core",
+        "java.lang.ClassNotFoundException | clojure.core",
     );
 }
 
@@ -1360,17 +1363,17 @@ fn m2_req_walk_rows() {
 #[test]
 fn i112_req_vector_locals_and_quoted_keys() {
     // #112: vector `:req!` locals analyze (the runtime `pb` splice
-    // takes any binding form, like the expansion path); quoted keys
-    // unquote before the `:or` checks, so a quoted default for a
-    // required quoted key is still `Can't supply` (rendered
-    // unquoted — the analyzer's keys are values).
+    // takes any binding form, like the expansion path); the `:or`
+    // checks compare forms as written (#158), so a quoted default
+    // for a required quoted key is still `Can't supply` (rendered
+    // as written, like the expansion path's `bk`).
     analyze_ok("((fn [{:req! {[a b] :pair}}] [a b]) {:pair [1 2]})");
     analyze_ok("(let [{:req! {[a b] :pair}} {:pair [1 2]}] [a b])");
     analyze_ok("(loop [{:req! {[a b] :pair}} {:pair [1 2]}] [a b])");
     check(
         "((fn [{:req! {a 'k}, :or {'k 1}}] a) {})",
         "Syntax error macroexpanding clojure.core/let at (test:1:2).",
-        "java.lang.Exception | Can't supply default value for required key: k",
+        "java.lang.Exception | Can't supply default value for required key: (quote k)",
     );
 }
 

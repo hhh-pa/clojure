@@ -11,6 +11,8 @@
 //! `repl` landed in S7B/C, `build` in S8. The `build` tests here
 //! stay hermetic (emit flags + error exits, no linking); the S8D
 //! corpus replay (`build_corpus.rs`) covers full link + execute.
+//! The `jit` tests mirror the `build` hermetic set (gap-121
+//! slice 1); the corpus replay covers full JIT equivalence.
 
 mod common;
 
@@ -21,7 +23,7 @@ fn help_lists_all_subcommands() {
     let out = run(["--help"]);
     assert_eq!(out.status.code(), Some(0));
     let text = stdout(&out);
-    for cmd in ["eval", "run", "repl", "build"] {
+    for cmd in ["eval", "run", "repl", "build", "jit"] {
         assert!(text.contains(cmd), "missing subcommand {cmd}:\n{text}");
     }
 }
@@ -654,6 +656,123 @@ fn build_reports_unlinked_llvm() {
         OsStr::new("-o"),
         prog.as_os_str(),
     ]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(stderr(&out).contains("LLVM backend not linked"));
+    std::fs::remove_dir_all(&dir).expect("cleanup");
+}
+
+/// A scratch dir for one `jit` CLI test (pid-suffixed, removed
+/// by the test).
+fn jit_tmp(name: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!("clj-rs-jit-{}-{name}", std::process::id()))
+}
+
+/// `jit` argv as uniform `OsStr`s (paths + literals mix).
+fn jit_argv(args: &[&std::ffi::OsStr]) -> std::process::Output {
+    run(args.iter().copied())
+}
+
+#[test]
+fn jit_missing_input_exits_3() {
+    // The IO gate runs on every configuration (linked or not).
+    use std::ffi::OsStr;
+    let dir = jit_tmp("missing");
+    let missing = dir.join("nope.clj");
+    let out = jit_argv(&[OsStr::new("jit"), missing.as_os_str()]);
+    assert_eq!(out.status.code(), Some(3));
+    let err = stderr(&out);
+    assert!(err.contains("jit: no such file"), "{err}");
+}
+
+#[test]
+fn jit_directory_input_exits_3() {
+    use std::ffi::OsStr;
+    let dir = jit_tmp("dir");
+    std::fs::create_dir_all(&dir).expect("tmp dir");
+    let out = jit_argv(&[OsStr::new("jit"), dir.as_os_str()]);
+    assert_eq!(out.status.code(), Some(3));
+    let err = stderr(&out);
+    assert!(err.contains("jit: is a directory"), "{err}");
+    std::fs::remove_dir_all(&dir).expect("cleanup");
+}
+
+#[test]
+#[cfg(unix)]
+fn jit_unreadable_input_exits_3() {
+    // A Unix socket exists and is not a dir, but can never be
+    // read — unlike chmod 000, this also holds for root (R1
+    // finding 5: CI containers run privileged).
+    use std::ffi::OsStr;
+    use std::os::unix::net::UnixListener;
+    let dir = jit_tmp("unreadable");
+    std::fs::create_dir_all(&dir).expect("tmp dir");
+    let file = dir.join("dark.clj");
+    let socket = UnixListener::bind(&file).expect("bind socket");
+    let out = jit_argv(&[OsStr::new("jit"), file.as_os_str()]);
+    assert_eq!(out.status.code(), Some(3));
+    let err = stderr(&out);
+    assert!(err.contains("jit: cannot open"), "{err}");
+    drop(socket);
+    std::fs::remove_dir_all(&dir).expect("cleanup");
+}
+
+#[test]
+#[cfg(feature = "aot")]
+fn jit_runs_subset_program_in_process() {
+    // Stdout/exit come straight from the in-process run, and no
+    // artifact remains (byte-identity vs AOT lives in the
+    // corpus replay; this pins the CLI shape).
+    use std::ffi::OsStr;
+    let dir = jit_tmp("hello");
+    std::fs::create_dir_all(&dir).expect("tmp dir");
+    let file = dir.join("hello.clj");
+    std::fs::write(&file, "(print (+ 40 2))\n").expect("write source");
+    let out = jit_argv(&[OsStr::new("jit"), file.as_os_str()]);
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    assert_eq!(stdout(&out), "42");
+    assert!(stderr(&out).is_empty());
+    assert_eq!(
+        std::fs::read_dir(&dir).expect("read dir").count(),
+        1,
+        "jit must leave no artifact behind"
+    );
+    std::fs::remove_dir_all(&dir).expect("cleanup");
+}
+
+#[test]
+#[cfg(feature = "aot")]
+fn jit_plan_error_passes_the_diagnostic_through() {
+    // Plan failures print verbatim (no `jit: ` prefix), exit 1 —
+    // the interpreter-identical diagnostic.
+    use std::ffi::OsStr;
+    let dir = jit_tmp("plan-err");
+    std::fs::create_dir_all(&dir).expect("tmp dir");
+    let file = dir.join("bad.clj");
+    std::fs::write(&file, "(def x 1)\n").expect("write source");
+    let out = jit_argv(&[OsStr::new("jit"), file.as_os_str()]);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(
+        stderr(&out),
+        format!(
+            "{}:1:1: unsupported form in AOT subset: def (only defn defines in the AOT subset)\n",
+            file.display()
+        )
+    );
+    assert!(stdout(&out).is_empty(), "stdout must stay empty");
+    std::fs::remove_dir_all(&dir).expect("cleanup");
+}
+
+#[test]
+#[cfg(not(feature = "aot"))]
+fn jit_reports_unlinked_llvm() {
+    // Readable input reaches the backend report (the IO gate runs
+    // first, so a missing file would exit 3 instead).
+    use std::ffi::OsStr;
+    let dir = jit_tmp("unlinked");
+    std::fs::create_dir_all(&dir).expect("tmp dir");
+    let file = dir.join("hello.clj");
+    std::fs::write(&file, "(print (+ 40 2))\n").expect("write source");
+    let out = jit_argv(&[OsStr::new("jit"), file.as_os_str()]);
     assert_eq!(out.status.code(), Some(1));
     assert!(stderr(&out).contains("LLVM backend not linked"));
     std::fs::remove_dir_all(&dir).expect("cleanup");

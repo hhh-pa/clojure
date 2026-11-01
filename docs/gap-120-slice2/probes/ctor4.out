@@ -1,0 +1,26 @@
+file.encoding=UTF-8
+o-do-deftype-dot => #object[user.DLM 0x3b4ef7 "user.DLM@3b4ef7"]
+o-do-deftype-new => #object[user.DLM2 0x27f0ad19 "user.DLM2@27f0ad19"]
+o-do-import-use => #inst "1970-01-01T00:00:00.000-00:00"
+o-do-import-eval => #inst "1970-01-01T00:00:00.000-00:00"
+h-var-new CHAIN:
+   clojure.lang.Compiler$CompilerException | Syntax error compiling at (/home/opc/workspace/clojure/.muse/worktrees/subagent-v2-01a186ab-6801-7a32-9110-7d9f70845a21-01a193d3-3313-71f0-ab00-36fb812042ba/docs/gap-120-slice2/probes/ctor4.clj:34:1).
+   java.lang.RuntimeException | No such namespace: CNX5
+h-var-dot CHAIN:
+   clojure.lang.Compiler$CompilerException | Syntax error compiling new at (/home/opc/workspace/clojure/.muse/worktrees/subagent-v2-01a186ab-6801-7a32-9110-7d9f70845a21-01a193d3-3313-71f0-ab00-36fb812042ba/docs/gap-120-slice2/probes/ctor4.clj:35:1).
+   java.lang.IllegalArgumentException | Unable to resolve classname: CNX6
+h-local-static => "x"
+h-local-new CHAIN:
+   java.lang.IllegalArgumentException | No matching ctor found for class java.lang.String
+s-u32lebom => "A"
+s-spcs CHAIN:
+   java.io.UnsupportedEncodingException |  UTF-8
+s-4arg-be => "�"
+s-new-nil CHAIN:
+   clojure.lang.Compiler$CompilerException | Syntax error compiling new at (/home/opc/workspace/clojure/.muse/worktrees/subagent-v2-01a186ab-6801-7a32-9110-7d9f70845a21-01a193d3-3313-71f0-ab00-36fb812042ba/docs/gap-120-slice2/probes/ctor4.clj:43:1).
+   java.lang.IllegalArgumentException | More than one matching method found: java.lang.String
+s-new-arity5 CHAIN:
+   clojure.lang.Compiler$CompilerException | Syntax error compiling new at (/home/opc/workspace/clojure/.muse/worktrees/subagent-v2-01a186ab-6801-7a32-9110-7d9f70845a21-01a193d3-3313-71f0-ab00-36fb812042ba/docs/gap-120-slice2/probes/ctor4.clj:44:1).
+   java.lang.IllegalArgumentException | No matching ctor found for class java.lang.String
+s-new-str-bad CHAIN:
+   java.lang.IllegalArgumentException | No matching ctor found for class java.lang.String
