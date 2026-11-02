@@ -84,6 +84,18 @@ const JAVA_SHELL_CLJ: &str = include_str!("java_shell.clj");
 const STDLIB_STRING_CLJ: &str = include_str!("stdlib/clojure/string.clj");
 const STDLIB_SET_CLJ: &str = include_str!("stdlib/clojure/set.clj");
 
+// W3 (pprint) — do not merge by hand, integrator resolves
+const STDLIB_PPRINT_CLJ: &str = include_str!("stdlib/clojure/pprint.clj");
+const STDLIB_PPRINT_UTILITIES_CLJ: &str = include_str!("stdlib/clojure/pprint/utilities.clj");
+const STDLIB_PPRINT_COLUMN_WRITER_CLJ: &str =
+    include_str!("stdlib/clojure/pprint/column_writer.clj");
+const STDLIB_PPRINT_PRETTY_WRITER_CLJ: &str =
+    include_str!("stdlib/clojure/pprint/pretty_writer.clj");
+const STDLIB_PPRINT_BASE_CLJ: &str = include_str!("stdlib/clojure/pprint/pprint_base.clj");
+const STDLIB_PPRINT_CL_FORMAT_CLJ: &str = include_str!("stdlib/clojure/pprint/cl_format.clj");
+const STDLIB_PPRINT_DISPATCH_CLJ: &str = include_str!("stdlib/clojure/pprint/dispatch.clj");
+const STDLIB_PPRINT_PRINT_TABLE_CLJ: &str = include_str!("stdlib/clojure/pprint/print_table.clj");
+
 const TOOLS_DEPS_UTIL_DIR_CLJ: &str = include_str!("tools_deps_util_dir.clj");
 const TOOLS_DEPS_EDN_CLJ: &str = include_str!("tools_deps_edn.clj");
 const TOOLS_DEPS_EXTENSIONS_CLJ: &str = include_str!("tools_deps_extensions.clj");
@@ -1343,6 +1355,43 @@ const EMBEDDED_SOURCES: &[(&str, &str, &str)] = &[
     ("clojure/reflect", "clojure/reflect.clj", REFLECT_CLJ),
     ("clojure/string", "clojure/string.clj", STDLIB_STRING_CLJ),
     ("clojure/set", "clojure/set.clj", STDLIB_SET_CLJ),
+    // W3 (pprint) — do not merge by hand, integrator resolves
+    ("clojure/pprint", "clojure/pprint.clj", STDLIB_PPRINT_CLJ),
+    (
+        "clojure/pprint/utilities",
+        "clojure/pprint/utilities.clj",
+        STDLIB_PPRINT_UTILITIES_CLJ,
+    ),
+    (
+        "clojure/pprint/column_writer",
+        "clojure/pprint/column_writer.clj",
+        STDLIB_PPRINT_COLUMN_WRITER_CLJ,
+    ),
+    (
+        "clojure/pprint/pretty_writer",
+        "clojure/pprint/pretty_writer.clj",
+        STDLIB_PPRINT_PRETTY_WRITER_CLJ,
+    ),
+    (
+        "clojure/pprint/pprint_base",
+        "clojure/pprint/pprint_base.clj",
+        STDLIB_PPRINT_BASE_CLJ,
+    ),
+    (
+        "clojure/pprint/cl_format",
+        "clojure/pprint/cl_format.clj",
+        STDLIB_PPRINT_CL_FORMAT_CLJ,
+    ),
+    (
+        "clojure/pprint/dispatch",
+        "clojure/pprint/dispatch.clj",
+        STDLIB_PPRINT_DISPATCH_CLJ,
+    ),
+    (
+        "clojure/pprint/print_table",
+        "clojure/pprint/print_table.clj",
+        STDLIB_PPRINT_PRINT_TABLE_CLJ,
+    ),
 ];
 
 /// Resolve a load root (no leading slash) to the `*file*` path and
