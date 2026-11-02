@@ -29,6 +29,12 @@ fn pr(v: &Value) -> String {
     pr_to_string(v, &PrintOpts::pr())
 }
 
+// Canonicalize the platform line separator: the pretty writer emits
+// `line.separator` (`\r\n` on Windows, matching the JVM), `\n` elsewhere.
+fn nl(s: &str) -> String {
+    s.replace("\r\n", "\n")
+}
+
 fn run(eval: &mut Evaluator, src: &str) -> Vec<String> {
     eval.eval_source(src)
         .unwrap()
@@ -234,10 +240,10 @@ fn pprint_line_breaking_and_limits() {
     let mut eval = boot_pp();
     // Narrow margin breaks linear newlines; continuation indents one space.
     assert_eq!(
-        run_last(
+        nl(&run_last(
             &mut eval,
             "(binding [pp/*print-right-margin* 10] (with-out-str (pp/pprint (vec (range 10)))))"
-        ),
+        )),
         "\"[0\\n 1\\n 2\\n 3\\n 4\\n 5\\n 6\\n 7\\n 8\\n 9]\\n\""
     );
     // A nil right margin never breaks.
@@ -342,18 +348,18 @@ fn pprint_dispatch_and_options() {
         "\"(let [a 1 b 2] (+ a b))\\n\""
     );
     assert_eq!(
-        run_last(
+        nl(&run_last(
             &mut eval,
             "(with-out-str (pp/with-pprint-dispatch pp/code-dispatch (pp/pprint '(ns foo \"doc\" (:require [clojure.string :as s])))))"
-        ),
+        )),
         "\"(ns foo\\n  \\\"doc\\\"\\n  (:require [clojure.string :as s]))\\n\""
     );
     // cond breaks at the outer linear newlines while the pairs fit.
     assert_eq!(
-        run_last(
+        nl(&run_last(
             &mut eval,
             "(binding [pp/*print-right-margin* 12] (with-out-str (pp/with-pprint-dispatch pp/code-dispatch (pp/pprint '(cond a b c d)))))"
-        ),
+        )),
         "\"(cond\\n  a b\\n  c d)\\n\""
     );
     // :dispatch as a write option.

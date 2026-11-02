@@ -21,6 +21,12 @@ fn pr(v: &Value) -> String {
     pr_to_string(v, &PrintOpts::pr())
 }
 
+// Canonicalize the platform line separator: error printing emits
+// `line.separator` (`\r\n` on Windows, matching the JVM), `\n` elsewhere.
+fn nl(s: &str) -> String {
+    s.replace("\r\n", "\n")
+}
+
 fn realized(eval: &mut Evaluator, v: &Value) -> Value {
     match eval.realize_deep(v) {
         Ok(v) => v,
@@ -605,24 +611,24 @@ fn main_triage() {
         "[:read-source \"a.clj\" 5]"
     );
     assert_eq!(
-        run_str(
+        nl(&run_str(
             &mut eval,
             "(m/ex-str (m/ex-triage (Throwable->map (ex-info \"boom\" {}))))"
-        ),
+        )),
         "Execution error (ExceptionInfo) at (REPL:1).\nboom\n"
     );
     assert_eq!(
-        run_str(
+        nl(&run_str(
             &mut eval,
             "(m/err->msg (ex-info \"boom\" {:clojure.error/phase :read-source :clojure.error/source \"a.clj\" :clojure.error/line 3}))"
-        ),
+        )),
         "Syntax error reading source at (a.clj:3).\nboom\n"
     );
     assert_eq!(
-        run_str(
+        nl(&run_str(
             &mut eval,
             "(with-out-str (binding [*err* *out*] (m/repl-caught (ex-info \"cb\" {}))))"
-        ),
+        )),
         "Execution error (ExceptionInfo) at (REPL:1).\ncb\n"
     );
 }
