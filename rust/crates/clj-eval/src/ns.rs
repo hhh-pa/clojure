@@ -83,6 +83,10 @@ const JAVA_SHELL_CLJ: &str = include_str!("java_shell.clj");
 /// with zero install steps.
 const STDLIB_STRING_CLJ: &str = include_str!("stdlib/clojure/string.clj");
 const STDLIB_SET_CLJ: &str = include_str!("stdlib/clojure/set.clj");
+// W2 (test) — do not merge by hand, integrator resolves
+const STDLIB_TEST_CLJ: &str = include_str!("stdlib/clojure/test.clj");
+const STDLIB_TEST_JUNIT_CLJ: &str = include_str!("stdlib/clojure/test/junit.clj");
+const STDLIB_TEST_TAP_CLJ: &str = include_str!("stdlib/clojure/test/tap.clj");
 
 const TOOLS_DEPS_UTIL_DIR_CLJ: &str = include_str!("tools_deps_util_dir.clj");
 const TOOLS_DEPS_EDN_CLJ: &str = include_str!("tools_deps_edn.clj");
@@ -1343,6 +1347,18 @@ const EMBEDDED_SOURCES: &[(&str, &str, &str)] = &[
     ("clojure/reflect", "clojure/reflect.clj", REFLECT_CLJ),
     ("clojure/string", "clojure/string.clj", STDLIB_STRING_CLJ),
     ("clojure/set", "clojure/set.clj", STDLIB_SET_CLJ),
+    // W2 (test) — do not merge by hand, integrator resolves
+    ("clojure/test", "clojure/test.clj", STDLIB_TEST_CLJ),
+    (
+        "clojure/test/junit",
+        "clojure/test/junit.clj",
+        STDLIB_TEST_JUNIT_CLJ,
+    ),
+    (
+        "clojure/test/tap",
+        "clojure/test/tap.clj",
+        STDLIB_TEST_TAP_CLJ,
+    ),
 ];
 
 /// Resolve a load root (no leading slash) to the `*file*` path and
