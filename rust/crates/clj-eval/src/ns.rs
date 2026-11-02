@@ -83,6 +83,11 @@ const JAVA_SHELL_CLJ: &str = include_str!("java_shell.clj");
 /// with zero install steps.
 const STDLIB_STRING_CLJ: &str = include_str!("stdlib/clojure/string.clj");
 const STDLIB_SET_CLJ: &str = include_str!("stdlib/clojure/set.clj");
+// W7 (tools) — do not merge by hand, integrator resolves
+const STDLIB_JAVA_BASIS_CLJ: &str = include_str!("stdlib/clojure/java/basis.clj");
+const STDLIB_JAVA_BASIS_IMPL_CLJ: &str = include_str!("stdlib/clojure/java/basis/impl.clj");
+const STDLIB_TOOLS_DEPS_INTEROP_CLJ: &str = include_str!("stdlib/clojure/tools/deps/interop.clj");
+const STDLIB_REPL_DEPS_CLJ: &str = include_str!("stdlib/clojure/repl/deps.clj");
 
 const TOOLS_DEPS_UTIL_DIR_CLJ: &str = include_str!("tools_deps_util_dir.clj");
 const TOOLS_DEPS_EDN_CLJ: &str = include_str!("tools_deps_edn.clj");
@@ -1343,6 +1348,27 @@ const EMBEDDED_SOURCES: &[(&str, &str, &str)] = &[
     ("clojure/reflect", "clojure/reflect.clj", REFLECT_CLJ),
     ("clojure/string", "clojure/string.clj", STDLIB_STRING_CLJ),
     ("clojure/set", "clojure/set.clj", STDLIB_SET_CLJ),
+    // W7 (tools) — do not merge by hand, integrator resolves
+    (
+        "clojure/java/basis",
+        "clojure/java/basis.clj",
+        STDLIB_JAVA_BASIS_CLJ,
+    ),
+    (
+        "clojure/java/basis/impl",
+        "clojure/java/basis/impl.clj",
+        STDLIB_JAVA_BASIS_IMPL_CLJ,
+    ),
+    (
+        "clojure/tools/deps/interop",
+        "clojure/tools/deps/interop.clj",
+        STDLIB_TOOLS_DEPS_INTEROP_CLJ,
+    ),
+    (
+        "clojure/repl/deps",
+        "clojure/repl/deps.clj",
+        STDLIB_REPL_DEPS_CLJ,
+    ),
 ];
 
 /// Resolve a load root (no leading slash) to the `*file*` path and
