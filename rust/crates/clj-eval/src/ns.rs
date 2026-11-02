@@ -105,6 +105,10 @@ const STDLIB_JAVA_BASIS_CLJ: &str = include_str!("stdlib/clojure/java/basis.clj"
 const STDLIB_JAVA_BASIS_IMPL_CLJ: &str = include_str!("stdlib/clojure/java/basis/impl.clj");
 const STDLIB_TOOLS_DEPS_INTEROP_CLJ: &str = include_str!("stdlib/clojure/tools/deps/interop.clj");
 const STDLIB_REPL_DEPS_CLJ: &str = include_str!("stdlib/clojure/repl/deps.clj");
+// W8 (core) — do not merge by hand, integrator resolves
+const STDLIB_CORE_PROTOCOLS_CLJ: &str = include_str!("stdlib/clojure/core/protocols.clj");
+const STDLIB_INSPECTOR_CLJ: &str = include_str!("stdlib/clojure/inspector.clj");
+const STDLIB_BROWSE_UI_CLJ: &str = include_str!("stdlib/clojure/java/browse_ui.clj");
 
 const TOOLS_DEPS_UTIL_DIR_CLJ: &str = include_str!("tools_deps_util_dir.clj");
 const TOOLS_DEPS_EDN_CLJ: &str = include_str!("tools_deps_edn.clj");
@@ -1421,6 +1425,22 @@ const EMBEDDED_SOURCES: &[(&str, &str, &str)] = &[
         "clojure/repl/deps",
         "clojure/repl/deps.clj",
         STDLIB_REPL_DEPS_CLJ,
+    ),
+    // W8 (core) — do not merge by hand, integrator resolves
+    (
+        "clojure/core/protocols",
+        "clojure/core/protocols.clj",
+        STDLIB_CORE_PROTOCOLS_CLJ,
+    ),
+    (
+        "clojure/inspector",
+        "clojure/inspector.clj",
+        STDLIB_INSPECTOR_CLJ,
+    ),
+    (
+        "clojure/java/browse_ui",
+        "clojure/java/browse_ui.clj",
+        STDLIB_BROWSE_UI_CLJ,
     ),
 ];
 
