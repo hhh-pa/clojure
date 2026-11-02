@@ -5252,4 +5252,108 @@ mod tests {
         assert!(!realized_flag(&Value::Int(1)));
         assert!(!realized_flag(&Value::Nil));
     }
+
+    #[test]
+    fn static_arity_defensive_arms() {
+        // Defensive arms: the analyzer checks arities before
+        // lowering a static call, so a wrong argc only arrives
+        // here — the uniform no-method miss, per member.
+        let one = [Value::Int(1)];
+        let two = [Value::Int(1), Value::Int(2)];
+        for (member, class, err) in [
+            (
+                "isWhitespace",
+                "java.lang.Character",
+                static_character_is_whitespace(&[]),
+            ),
+            ("digit", "java.lang.Character", static_character_digit(&one)),
+            (
+                "createOwning",
+                "clojure.lang.LazilyPersistentVector",
+                static_lpv_create_owning(&[]),
+            ),
+            ("parseLong", "java.lang.Long", static_long_parse_long(&[])),
+            (
+                "remainderUnsigned",
+                "java.lang.Long",
+                static_long_remainder_unsigned(&one),
+            ),
+            (
+                "parseInt",
+                "java.lang.Integer",
+                static_integer_parse_int(&[]),
+            ),
+            (
+                "parseDouble",
+                "java.lang.Double",
+                static_double_parse_double(&[]),
+            ),
+            ("abs", "java.lang.Math", static_math_abs(&[])),
+            ("sqrt", "java.lang.Math", static_math_sqrt(&[])),
+            ("ceil", "java.lang.Math", static_math_ceil(&[])),
+            ("log", "java.lang.Math", static_math_log(&[])),
+            ("exp", "java.lang.Math", static_math_exp(&[])),
+            ("pow", "java.lang.Math", static_math_pow(&one)),
+            ("sin", "java.lang.Math", static_math_sin(&[])),
+            ("atan2", "java.lang.Math", static_math_atan2(&one)),
+            ("hypot", "java.lang.Math", static_math_hypot(&one)),
+            ("round", "java.lang.Math", static_math_round(&[])),
+            (
+                "isLetterOrDigit",
+                "java.lang.Character",
+                static_character_is_letter_or_digit(&two),
+            ),
+            (
+                "isLowerCase",
+                "java.lang.Character",
+                static_character_is_lower_case(&two),
+            ),
+            (
+                "isUpperCase",
+                "java.lang.Character",
+                static_character_is_upper_case(&two),
+            ),
+        ] {
+            let argc = if matches!(
+                member,
+                "digit" | "pow" | "atan2" | "hypot" | "remainderUnsigned"
+            ) {
+                1
+            } else if matches!(member, "isLetterOrDigit" | "isLowerCase" | "isUpperCase") {
+                2
+            } else {
+                0
+            };
+            let e = err.expect_err("wrong argc misses");
+            assert_eq!(
+                e.message,
+                format!("No matching method {member} found taking {argc} args for class {class}")
+            );
+        }
+        // `String/format` takes the evaluator (unused on the arity
+        // path — a bare evaluator suffices).
+        let mut eval = Evaluator::new_bare("user");
+        let e = static_string_format(&mut eval, &[]).expect_err("wrong argc misses");
+        assert_eq!(
+            e.message,
+            "No matching method format found taking 0 args for class java.lang.String"
+        );
+    }
+
+    #[test]
+    fn locale_builder_hash_stable() {
+        // `dyn_hash` feeds the `Hash` impl (Rust-keyed maps), not
+        // `hasheq`: same tag hashes alike, builders hash by id.
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::Hasher;
+        let (mut h1, mut h2) = (DefaultHasher::new(), DefaultHasher::new());
+        LocaleHandle::us().dyn_hash(&mut h1);
+        LocaleHandle::us().dyn_hash(&mut h2);
+        assert_eq!(h1.finish(), h2.finish());
+        let sb = StringBuilder::fresh(String::new());
+        let (mut h1, mut h2) = (DefaultHasher::new(), DefaultHasher::new());
+        sb.dyn_hash(&mut h1);
+        sb.dyn_hash(&mut h2);
+        assert_eq!(h1.finish(), h2.finish());
+    }
 }

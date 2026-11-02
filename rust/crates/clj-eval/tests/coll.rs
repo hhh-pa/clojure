@@ -875,6 +875,25 @@ fn persistent_queue_fifo_201() {
 }
 
 #[test]
+fn str_scan_non_ascii_edges_201() {
+    // Big non-ASCII strings index char→byte offsets (the
+    // `Indexed` scan); past the 2M-char cap the scan gives up
+    // and `count`/`nth` fall back to direct walks.
+    let mut eval = boot();
+    assert_eq!(
+        run_last(&mut eval, "(count (apply str (repeat 300 \"é\")))"),
+        "300"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [s (apply str (repeat 2000001 \"é\"))] [(count s) (nth s 2000000)])"
+        ),
+        "[2000001 \\é]"
+    );
+}
+
+#[test]
 fn subvec_rows() {
     let mut eval = boot();
     assert_eq!(run_last(&mut eval, "(subvec [1 2 3] 1)"), "[2 3]");

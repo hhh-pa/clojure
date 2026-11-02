@@ -1340,6 +1340,17 @@ mod tests {
     }
 
     #[test]
+    fn slurp_reader_drains_script_lines() {
+        // `slurp` over a reader with scripted lines keeps feeding
+        // past the first chunk (the loop-continue arm).
+        let mut eval = scratch();
+        let value = string_reader(&mut eval, "a");
+        let reader = as_reader(&value).expect("a reader");
+        lock_state(reader).script_lines.push_back("b\n".to_owned());
+        assert_eq!(slurp_reader(reader).unwrap(), "ab\n");
+    }
+
+    #[test]
     fn stdin_retry_keeps_fired_discards() {
         // H2 (review round 1): a discard fired before an EOF
         // retry must survive the continuation — per-take

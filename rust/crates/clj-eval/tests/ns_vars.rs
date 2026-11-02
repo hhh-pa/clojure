@@ -1358,6 +1358,11 @@ fn ns_import_clause_201() {
         uncaught(&mut eval, "(ns t201c (:import (42)))"),
         "clojure.lang.ExceptionInfo | Call to clojure.core/import did not conform to spec."
     );
+    // A non-list, non-symbol spec misses the same way.
+    assert_eq!(
+        uncaught(&mut eval, "(ns t201e (:import 42))"),
+        "clojure.lang.ExceptionInfo | Call to clojure.core/import did not conform to spec."
+    );
     // `:gen-class` stays a spec error.
     assert_eq!(
         compile_err(&mut eval, "(ns t201d (:gen-class))"),
