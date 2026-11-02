@@ -1087,7 +1087,6 @@ fn static_host_arity_compile_rows() {
         ]
     );
 }
-}
 
 // static-char-lod/lc-*: the char rule over chars, the int
 // code-point rule over longs (unrepresentable code points read
@@ -1142,4 +1141,3 @@ fn static_char_pred_rows() {
         );
     }
 }
-

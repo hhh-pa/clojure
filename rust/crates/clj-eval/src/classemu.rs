@@ -4689,10 +4689,7 @@ fn match_append_tail(h: &MatcherHandle, rest: &[Value]) -> Result<Value, NativeE
 }
 
 /// `Matcher.replaceFirst` (a reset single scan).
-fn gated_match_replace_first(
-    target: &Value,
-    rest: &[Value],
-) -> Option<Result<Value, NativeError>> {
+fn gated_match_replace_first(target: &Value, rest: &[Value]) -> Option<Result<Value, NativeError>> {
     let h = crate::collmisc::as_matcher(target)?;
     Some(match_replace_first(h, rest))
 }
@@ -5224,12 +5221,7 @@ fn str_index_of(s: &str, rest: &[Value], last: bool) -> Result<Value, NativeErro
             _ => crate::types::no_method("lastIndexOf", 2, "java.lang.String"),
         }),
         Value::Int(i) => Ok(Value::Int(index_of_codepoint(s, *i as i32, from, last))),
-        Value::Char(c) => Ok(Value::Int(index_of_codepoint(
-            s,
-            *c as i32,
-            from,
-            last,
-        ))),
+        Value::Char(c) => Ok(Value::Int(index_of_codepoint(s, *c as i32, from, last))),
         _ => Err(crate::types::no_method(
             name,
             rest.len(),

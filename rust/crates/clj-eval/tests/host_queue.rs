@@ -251,10 +251,7 @@ fn queue_eq_print_rows() {
         "true"
     );
     assert_eq!(
-        run(
-            &mut eval,
-            "(= clojure.lang.PersistentQueue/EMPTY [])"
-        ),
+        run(&mut eval, "(= clojure.lang.PersistentQueue/EMPTY [])"),
         "true"
     );
     assert_eq!(

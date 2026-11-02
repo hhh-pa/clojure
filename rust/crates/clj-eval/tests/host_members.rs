@@ -482,7 +482,10 @@ fn matcher_replace_rows() {
         "java.lang.IllegalArgumentException | Illegal group reference"
     );
     assert_eq!(
-        uncaught(&mut eval, "(.replaceFirst (re-matcher #\"b\" \"ab\") \"x$\")"),
+        uncaught(
+            &mut eval,
+            "(.replaceFirst (re-matcher #\"b\" \"ab\") \"x$\")"
+        ),
         "java.lang.IllegalArgumentException | Illegal group reference: group index is missing"
     );
     assert_eq!(
