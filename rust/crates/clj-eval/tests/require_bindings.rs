@@ -90,3 +90,28 @@ fn bare_require_of_setbang_namespace_throws_like_jvm() {
         "expected root-binding message, got: {err}"
     );
 }
+
+/// A failed load leaves the upstream-identical residue: the `ns` form
+/// self-marks (upstream `core.clj` `ns` macro), the `load-lib` catch
+/// removes the half-built ns (upstream `load-lib`), the mark stays,
+/// and only `:reload` retries — a plain retry is skipped as loaded.
+#[test]
+fn failed_require_leaves_jvm_identical_residue_reload_recovers() {
+    let mut eval = boot();
+    let out = run(
+        &mut eval,
+        r#"(do
+              (try (require 'clojure.string)
+                (catch Exception e :threw))
+              (let [marked (contains? (loaded-libs) 'clojure.string)
+                    gone (nil? (find-ns 'clojure.string))]
+                (binding [*warn-on-reflection* false]
+                  (require 'clojure.string))
+                (let [skipped (nil? (find-ns 'clojure.string))]
+                  (binding [*warn-on-reflection* false]
+                    (require 'clojure.string :reload))
+                  [:threw marked gone skipped
+                   (some? (find-ns 'clojure.string))])))"#,
+    );
+    assert_eq!(out, "[:threw true true true true]");
+}
