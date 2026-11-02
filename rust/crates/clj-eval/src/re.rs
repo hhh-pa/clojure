@@ -323,16 +323,17 @@ fn boundary_alt(alt: &str) -> Option<BoundaryAlt> {
 /// single atom `A`), answering the rest past `)` (`None` for
 /// anything else, including quantified assertions).
 fn boundary_assert(s: &str) -> Option<(BoundaryAssert, &str)> {
-    let (behind, negated, after) = if let Some(r) = s.strip_prefix("(?<=") {
-        (true, false, r)
-    } else if let Some(r) = s.strip_prefix("(?<!") {
-        (true, true, r)
-    } else if let Some(r) = s.strip_prefix("(?=") {
-        (false, false, r)
-    } else if let Some(r) = s.strip_prefix("(?!") {
-        (false, true, r)
-    } else {
-        return None;
+    // Peel `(?`, the optional `<`, then `=`/`!` (openers run
+    // three to four bytes, so lengths stay derived).
+    let rest = s.strip_prefix("(?")?;
+    let (behind, rest) = match rest.strip_prefix('<') {
+        Some(rest) => (true, rest),
+        None => (false, rest),
+    };
+    let (negated, after) = match rest.chars().next() {
+        Some('=') => (false, &rest[1..]),
+        Some('!') => (true, &rest[1..]),
+        _ => return None,
     };
     let (atom, after) = boundary_atom(after)?;
     let after = after.strip_prefix(')')?;
