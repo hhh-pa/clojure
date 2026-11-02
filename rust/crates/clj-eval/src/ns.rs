@@ -83,6 +83,10 @@ const JAVA_SHELL_CLJ: &str = include_str!("java_shell.clj");
 /// with zero install steps.
 const STDLIB_STRING_CLJ: &str = include_str!("stdlib/clojure/string.clj");
 const STDLIB_SET_CLJ: &str = include_str!("stdlib/clojure/set.clj");
+// W8 (core) — do not merge by hand, integrator resolves
+const STDLIB_CORE_PROTOCOLS_CLJ: &str = include_str!("stdlib/clojure/core/protocols.clj");
+const STDLIB_INSPECTOR_CLJ: &str = include_str!("stdlib/clojure/inspector.clj");
+const STDLIB_BROWSE_UI_CLJ: &str = include_str!("stdlib/clojure/java/browse_ui.clj");
 
 const TOOLS_DEPS_UTIL_DIR_CLJ: &str = include_str!("tools_deps_util_dir.clj");
 const TOOLS_DEPS_EDN_CLJ: &str = include_str!("tools_deps_edn.clj");
@@ -1343,6 +1347,22 @@ const EMBEDDED_SOURCES: &[(&str, &str, &str)] = &[
     ("clojure/reflect", "clojure/reflect.clj", REFLECT_CLJ),
     ("clojure/string", "clojure/string.clj", STDLIB_STRING_CLJ),
     ("clojure/set", "clojure/set.clj", STDLIB_SET_CLJ),
+    // W8 (core) — do not merge by hand, integrator resolves
+    (
+        "clojure/core/protocols",
+        "clojure/core/protocols.clj",
+        STDLIB_CORE_PROTOCOLS_CLJ,
+    ),
+    (
+        "clojure/inspector",
+        "clojure/inspector.clj",
+        STDLIB_INSPECTOR_CLJ,
+    ),
+    (
+        "clojure/java/browse_ui",
+        "clojure/java/browse_ui.clj",
+        STDLIB_BROWSE_UI_CLJ,
+    ),
 ];
 
 /// Resolve a load root (no leading slash) to the `*file*` path and
