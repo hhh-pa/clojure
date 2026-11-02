@@ -1409,6 +1409,20 @@ fn run_loaded(
     if let Some(id) = core_var(eval, "*read-eval*") {
         eval.push_binding(core_var_handle(id, "*read-eval*"), Value::Bool(true));
     }
+    // `Compiler.load` also binds these three to their current values
+    // (bare-JVM probe `/tmp/loadbind.txt`: the load frame carries
+    // `*warn-on-reflection*`/`*unchecked-math*`/`*data-readers*`
+    // alongside `*ns*`/`*file*`/`*source-path*`/`*read-eval*`).
+    // Upstream `string.clj:50` `set!`s `*warn-on-reflection*` at top
+    // level, which needs the var thread-bound — without this a bare
+    // `(require 'clojure.string)` fails (the CLI's `with-bindings`
+    // frame only papers over scripts).
+    for name in ["*warn-on-reflection*", "*unchecked-math*", "*data-readers*"] {
+        if let Some(id) = core_var(eval, name) {
+            let cur = deref_core(eval, name);
+            eval.push_binding(core_var_handle(id, name), cur);
+        }
+    }
     let out = eval.load_source(spans, text);
     eval.registry.set_current(&cur);
     eval.pop_bindings(depth);
