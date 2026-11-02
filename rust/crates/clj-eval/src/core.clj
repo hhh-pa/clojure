@@ -2057,3 +2057,159 @@
      (complement string?)
      (comp seq :content)
      root))
+
+;; === W8 (core parity) appendix: genclass lattice registration ===
+;; (issue #204). Upstream `clojure/genclass.clj` is `(in-ns
+;; 'clojure.core)` bytecode machinery (`gen-class`/`gen-interface`
+;; macros; `gen-and-load-class` is commented out upstream and
+;; `prim->class` is private, so neither is a gap). The standing
+;; macros already validate options and build `GenClass`/`Interface`
+;; descriptors through `__genclass*`/`__interface*`, and instances
+;; construct and dispatch prefix fns — but a package-qualified
+;; `:name` never registered: `(import 'com.ex.Foo)` missed because
+;; the lattice's HostDef rule (`types.rs` `hostdef_by_name`) resolves
+;; an FQN through the `<package>/<Simple>` var, which only exists
+;; when the package happens to be the current namespace. The
+;; redefined macros below keep the exact upstream option shape and
+;; every validated behavior and error message, and additionally
+;; `create-ns` + `intern` the descriptor at `<package>/<Simple>` so
+;; the class resolves for `import`, `Class/forName`, dotted
+;; literals, and `resolve` (the `classemu.rs` `resolve_class_name`
+;; five). The package namespace appearing in `all-ns` is the
+;; documented cost (the JVM has a classloader; the port has
+;; namespaces). `gen-and-load-class` is the runtime-fn twin of the
+;; macro (same options, same validations): it registers and returns
+;; the Class (upstream's `defineClass` likewise returns it).
+
+(defn- package-name [raw]
+  ;; Everything before the last dot (`simple-class-name` takes
+  ;; everything after it); callers check dottedness first.
+  (subs raw 0 (- (count raw) (count (simple-class-name raw)) 1)))
+
+(defn- genclass-datum [x]
+  ;; Class objects normalize to name symbols (the runtime fn
+  ;; evaluates its specs, so qualified names arrive as Classes;
+  ;; upstream `the-class` likewise accepts both shapes). Symbols
+  ;; and everything else ride through for validation to judge.
+  (if (class? x) (symbol (.getName x)) x))
+
+(defn- genclass-validated [m]
+  ;; The shared `gen-class`/`gen-and-load-class` option contract
+  ;; (validations and messages verbatim from the standing macro):
+  ;; returns `[raw simple prefix methods implements]` or throws.
+  ;; Method/implements specs normalize Classes to symbols first, so
+  ;; the runtime fn accepts evaluated specs as well as quoted data.
+  (when-not (contains? m :name)
+    (throw-illegal-arg! "Must supply :name to gen-class"))
+  (doseq [k (keys m)]
+    (when-not (#{:name :prefix :methods :implements :extends} k)
+      (throw-illegal-arg! (str "Unsupported gen-class option: " k))))
+  (when-not (or (symbol? (:name m)) (string? (:name m)))
+    (throw-illegal-arg! "gen-class :name must be a symbol or string"))
+  (let [raw (str (:name m))
+        simple (simple-class-name raw)
+        prefix (get m :prefix (str simple "-"))]
+    (when-not (string? prefix)
+      (throw-illegal-arg! "gen-class :prefix must be a string"))
+    (let [methods (vec (map (fn [e]
+                              (if (and (or (seq? e) (vector? e)) (= 3 (count e)) (vector? (nth e 1)))
+                                [(genclass-datum (nth e 0))
+                                 (vec (map genclass-datum (nth e 1)))
+                                 (genclass-datum (nth e 2))]
+                                e))
+                            (get m :methods [])))
+          implements (vec (map genclass-datum (get m :implements [])))]
+      (doseq [e methods]
+        (when-not (and (or (seq? e) (vector? e)) (= 3 (count e)) (symbol? (first e)) (vector? (second e)))
+          (throw-illegal-arg! (str "Invalid gen-class method: " (pr-str e)))))
+      (doseq [i implements]
+        (when-not (symbol? i)
+          (throw-illegal-arg! (str "Invalid gen-class interface: " (pr-str i)))))
+      (when (and (contains? m :extends) (not= 'Object (:extends m)))
+        (throw-illegal-arg! (str "Cannot extend " (:extends m) ": gen-class supports Object only")))
+      [raw simple prefix methods implements])))
+
+(defn- genclass-sigs-map [grouped]
+  ;; The `__genclass*` sigs arg (name string to param-count vector),
+  ;; shared by the macro expansion and the runtime fn.
+  (apply hash-map
+    (mapcat (fn [[n entries]]
+              (list (str n) (vec (map (fn [e] (count (second e))) entries))))
+            grouped)))
+
+(defmacro gen-interface [& opts]
+  (let [m (apply hash-map opts)]
+    (when-not (contains? m :name)
+      (throw-illegal-arg! "Must supply :name to gen-interface"))
+    (doseq [k (keys m)]
+      (when-not (#{:name :methods} k)
+        (throw-illegal-arg! (str "Unsupported gen-interface option: " k))))
+    (when-not (or (symbol? (:name m)) (string? (:name m)))
+      (throw-illegal-arg! "gen-interface :name must be a symbol or string"))
+    (let [raw (str (:name m))
+          methods (get m :methods [])]
+      (doseq [e methods]
+        (when-not (and (or (seq? e) (vector? e)) (= 3 (count e)) (symbol? (first e)) (vector? (second e)))
+          (throw-illegal-arg! (str "Invalid gen-interface method: " (pr-str e)))))
+      (let [grouped (group-by first methods)
+            sym (symbol (simple-class-name raw))
+            desc (list 'clojure.core/__interface*
+                   (list 'str (list 'ns-name '*ns*))
+                   raw
+                   (apply list 'clojure.core/hash-map
+                     (mapcat (fn [[n entries]]
+                               (list (str n) (vec (map (fn [e] (count (second e))) entries))))
+                             grouped)))]
+        (if (some #{\.} (seq raw))
+          (let [pkg (symbol (package-name raw))]
+            (list 'do (list 'def sym desc)
+              (list 'create-ns (list 'quote pkg))
+              (list 'intern (list 'quote pkg) (list 'quote sym) sym)
+              sym))
+          (finish-type-def sym nil nil desc))))))
+
+(defmacro gen-class [& opts]
+  (let [[raw simple prefix methods implements] (genclass-validated (apply hash-map opts))]
+    (let [grouped (group-by first methods)
+          dotted? (some #{\.} (seq raw))
+          class-expr (if dotted?
+                       raw
+                       (list 'str (list 'ns-name '*ns*) "." simple))
+          desc (list 'clojure.core/__genclass*
+                 class-expr
+                 prefix
+                 (apply list 'clojure.core/hash-map
+                   (mapcat (fn [[n entries]]
+                             (list (str n) (vec (map (fn [e] (count (second e))) entries))))
+                           grouped))
+                 (list 'str (list 'ns-name '*ns*))
+                 (list 'quote (vec implements)))
+          sym (symbol simple)]
+      (if dotted?
+        (let [pkg (symbol (package-name raw))]
+          (list 'do (list 'def sym desc)
+            (list 'create-ns (list 'quote pkg))
+            (list 'intern (list 'quote pkg) (list 'quote sym) sym)
+            sym))
+        (finish-type-def sym nil nil desc)))))
+
+(defn gen-and-load-class
+  "Generates and immediately loads the bytecode-free emulated class
+  for the specified options (see gen-class), registering it in the
+  class lattice, and returns the Class. Subsequent to generation you
+  can import it into any desired namespace just like any other class.
+  Unlike the macro, specs evaluate, so method and interface entries
+  may be classes (e.g. java.lang.String) as well as symbols."
+  {:added "1.0"}
+  [& options]
+  (let [[raw simple prefix methods implements] (genclass-validated (apply hash-map options))]
+    (let [fqn (if (some #{\.} (seq raw)) raw (str (ns-name *ns*) "." simple))
+          desc (clojure.core/__genclass*
+                 fqn prefix
+                 (genclass-sigs-map (group-by first methods))
+                 (str (ns-name *ns*))
+                 (vec implements))
+          pkg (symbol (package-name fqn))]
+      (create-ns pkg)
+      (intern pkg (symbol simple) desc)
+      (class desc))))

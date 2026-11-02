@@ -5043,7 +5043,17 @@ fn static_field_reads_201() {
     assert_eq!(run(&mut eval, "Short/MAX_VALUE"), "32767");
     assert_eq!(run(&mut eval, "Byte/MIN_VALUE"), "-128");
     assert_eq!(run(&mut eval, "Byte/MAX_VALUE"), "127");
-    assert_eq!(run(&mut eval, "Float/MIN_VALUE"), "1.1754943508222875E-38");
+    // JDK oracle: MIN_VALUE is the subnormal minimum (the old pin held
+    // MIN_NORMAL). Exact shortest round-trip literals; in-eval `=`
+    // avoids printer-format dependence.
+    assert_eq!(
+        run(&mut eval, "(= Float/MIN_VALUE 1.401298464324817E-45)"),
+        "true"
+    );
+    assert_eq!(
+        run(&mut eval, "(= Double/MIN_VALUE 4.9406564584124654E-324)"),
+        "true"
+    );
     assert_eq!(run(&mut eval, "Float/MAX_VALUE"), "3.4028234663852886E38");
     assert_eq!(run(&mut eval, "Float/POSITIVE_INFINITY"), "##Inf");
     assert_eq!(run(&mut eval, "Float/NEGATIVE_INFINITY"), "##-Inf");

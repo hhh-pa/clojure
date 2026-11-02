@@ -2183,7 +2183,9 @@ fn static_field_byte(field: &str) -> Option<Value> {
 
 fn static_field_double(field: &str) -> Option<Value> {
     match field {
-        "MIN_VALUE" => Some(Value::Double(f64::MIN_POSITIVE)),
+        // JDK `Double/MIN_VALUE` is the smallest positive *subnormal*
+        // (4.9e-324), not `MIN_NORMAL` (`f64::MIN_POSITIVE`, 2.2e-308).
+        "MIN_VALUE" => Some(Value::Double(f64::from_bits(1))),
         "MAX_VALUE" => Some(Value::Double(f64::MAX)),
         "POSITIVE_INFINITY" => Some(Value::Double(f64::INFINITY)),
         "NEGATIVE_INFINITY" => Some(Value::Double(f64::NEG_INFINITY)),
@@ -2194,7 +2196,8 @@ fn static_field_double(field: &str) -> Option<Value> {
 
 fn static_field_float(field: &str) -> Option<Value> {
     match field {
-        "MIN_VALUE" => Some(Value::Double(f64::from(f32::MIN_POSITIVE))),
+        // JDK `Float/MIN_VALUE` is 1.4e-45 (subnormal), not MIN_NORMAL.
+        "MIN_VALUE" => Some(Value::Double(f64::from(f32::from_bits(1)))),
         "MAX_VALUE" => Some(Value::Double(f64::from(f32::MAX))),
         "POSITIVE_INFINITY" => Some(Value::Double(f64::INFINITY)),
         "NEGATIVE_INFINITY" => Some(Value::Double(f64::NEG_INFINITY)),

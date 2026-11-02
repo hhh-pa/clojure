@@ -83,6 +83,58 @@ const JAVA_SHELL_CLJ: &str = include_str!("java_shell.clj");
 /// with zero install steps.
 const STDLIB_STRING_CLJ: &str = include_str!("stdlib/clojure/string.clj");
 const STDLIB_SET_CLJ: &str = include_str!("stdlib/clojure/set.clj");
+// W1 (verbatim+pure) — do not merge by hand, integrator resolves.
+const STDLIB_W1_TEMPLATE_CLJ: &str = include_str!("stdlib/clojure/template.clj");
+const STDLIB_W1_WALK_CLJ: &str = include_str!("stdlib/clojure/walk.clj");
+const STDLIB_W1_ZIP_CLJ: &str = include_str!("stdlib/clojure/zip.clj");
+const STDLIB_W1_DATA_CLJ: &str = include_str!("stdlib/clojure/data.clj");
+const STDLIB_W1_DATAFY_CLJ: &str = include_str!("stdlib/clojure/datafy.clj");
+// W2 (test) — do not merge by hand, integrator resolves
+const STDLIB_TEST_CLJ: &str = include_str!("stdlib/clojure/test.clj");
+const STDLIB_TEST_JUNIT_CLJ: &str = include_str!("stdlib/clojure/test/junit.clj");
+const STDLIB_TEST_TAP_CLJ: &str = include_str!("stdlib/clojure/test/tap.clj");
+
+// W4 (entry/IO) — do not merge by hand, integrator resolves
+const STDLIB_EDN_CLJ: &str = include_str!("stdlib/clojure/edn.clj");
+const STDLIB_REPL_CLJ: &str = include_str!("stdlib/clojure/repl.clj");
+const STDLIB_MAIN_CLJ: &str = include_str!("stdlib/clojure/main.clj");
+const STDLIB_STACKTRACE_CLJ: &str = include_str!("stdlib/clojure/stacktrace.clj");
+const STDLIB_CORE_PRINT_CLJ: &str = include_str!("stdlib/clojure/core_print.clj");
+// W7 (tools) — do not merge by hand, integrator resolves
+const STDLIB_JAVA_BASIS_CLJ: &str = include_str!("stdlib/clojure/java/basis.clj");
+const STDLIB_JAVA_BASIS_IMPL_CLJ: &str = include_str!("stdlib/clojure/java/basis/impl.clj");
+const STDLIB_TOOLS_DEPS_INTEROP_CLJ: &str = include_str!("stdlib/clojure/tools/deps/interop.clj");
+const STDLIB_REPL_DEPS_CLJ: &str = include_str!("stdlib/clojure/repl/deps.clj");
+// W8 (core) — do not merge by hand, integrator resolves
+const STDLIB_CORE_PROTOCOLS_CLJ: &str = include_str!("stdlib/clojure/core/protocols.clj");
+const STDLIB_INSPECTOR_CLJ: &str = include_str!("stdlib/clojure/inspector.clj");
+const STDLIB_BROWSE_UI_CLJ: &str = include_str!("stdlib/clojure/java/browse_ui.clj");
+
+// W3 (pprint) — do not merge by hand, integrator resolves
+const STDLIB_PPRINT_CLJ: &str = include_str!("stdlib/clojure/pprint.clj");
+const STDLIB_PPRINT_UTILITIES_CLJ: &str = include_str!("stdlib/clojure/pprint/utilities.clj");
+const STDLIB_PPRINT_COLUMN_WRITER_CLJ: &str =
+    include_str!("stdlib/clojure/pprint/column_writer.clj");
+const STDLIB_PPRINT_PRETTY_WRITER_CLJ: &str =
+    include_str!("stdlib/clojure/pprint/pretty_writer.clj");
+const STDLIB_PPRINT_BASE_CLJ: &str = include_str!("stdlib/clojure/pprint/pprint_base.clj");
+const STDLIB_PPRINT_CL_FORMAT_CLJ: &str = include_str!("stdlib/clojure/pprint/cl_format.clj");
+const STDLIB_PPRINT_DISPATCH_CLJ: &str = include_str!("stdlib/clojure/pprint/dispatch.clj");
+const STDLIB_PPRINT_PRINT_TABLE_CLJ: &str = include_str!("stdlib/clojure/pprint/print_table.clj");
+// W6 (runtime-ish) — do not merge by hand, integrator resolves.
+const W6_SERVER_CLJ: &str = include_str!("stdlib/clojure/core/server.clj");
+const W6_REDUCERS_CLJ: &str = include_str!("stdlib/clojure/core/reducers.clj");
+const W6_PARALLEL_CLJ: &str = include_str!("stdlib/clojure/parallel.clj");
+const W6_CORE_PROXY_CLJ: &str = include_str!("stdlib/clojure/core_proxy.clj");
+const W6_XML_CLJ: &str = include_str!("stdlib/clojure/xml.clj");
+// W5 (small libs) — do not merge by hand, integrator resolves
+const STDLIB_MATH_CLJ: &str = include_str!("stdlib/clojure/math.clj");
+const STDLIB_UUID_CLJ: &str = include_str!("stdlib/clojure/uuid.clj");
+const STDLIB_INSTANT_CLJ: &str = include_str!("stdlib/clojure/instant.clj");
+const STDLIB_JAVADOC_CLJ: &str = include_str!("stdlib/clojure/java/javadoc.clj");
+const STDLIB_BROWSE_CLJ: &str = include_str!("stdlib/clojure/java/browse.clj");
+const STDLIB_PROCESS_CLJ: &str = include_str!("stdlib/clojure/java/process.clj");
+const STDLIB_GVEC_CLJ: &str = include_str!("stdlib/clojure/gvec.clj");
 
 const TOOLS_DEPS_UTIL_DIR_CLJ: &str = include_str!("tools_deps_util_dir.clj");
 const TOOLS_DEPS_EDN_CLJ: &str = include_str!("tools_deps_edn.clj");
@@ -1338,6 +1390,154 @@ const EMBEDDED_SOURCES: &[(&str, &str, &str)] = &[
     ("clojure/reflect", "clojure/reflect.clj", REFLECT_CLJ),
     ("clojure/string", "clojure/string.clj", STDLIB_STRING_CLJ),
     ("clojure/set", "clojure/set.clj", STDLIB_SET_CLJ),
+    // W1 (verbatim+pure) — do not merge by hand, integrator resolves.
+    (
+        "clojure/template",
+        "clojure/template.clj",
+        STDLIB_W1_TEMPLATE_CLJ,
+    ),
+    ("clojure/walk", "clojure/walk.clj", STDLIB_W1_WALK_CLJ),
+    ("clojure/zip", "clojure/zip.clj", STDLIB_W1_ZIP_CLJ),
+    ("clojure/data", "clojure/data.clj", STDLIB_W1_DATA_CLJ),
+    ("clojure/datafy", "clojure/datafy.clj", STDLIB_W1_DATAFY_CLJ),
+    // W2 (test) — do not merge by hand, integrator resolves
+    ("clojure/test", "clojure/test.clj", STDLIB_TEST_CLJ),
+    (
+        "clojure/test/junit",
+        "clojure/test/junit.clj",
+        STDLIB_TEST_JUNIT_CLJ,
+    ),
+    (
+        "clojure/test/tap",
+        "clojure/test/tap.clj",
+        STDLIB_TEST_TAP_CLJ,
+    ),
+    // W4 (entry/IO) — do not merge by hand, integrator resolves
+    ("clojure/edn", "clojure/edn.clj", STDLIB_EDN_CLJ),
+    ("clojure/repl", "clojure/repl.clj", STDLIB_REPL_CLJ),
+    ("clojure/main", "clojure/main.clj", STDLIB_MAIN_CLJ),
+    (
+        "clojure/stacktrace",
+        "clojure/stacktrace.clj",
+        STDLIB_STACKTRACE_CLJ,
+    ),
+    (
+        "clojure/core_print",
+        "clojure/core_print.clj",
+        STDLIB_CORE_PRINT_CLJ,
+    ),
+    // W7 (tools) — do not merge by hand, integrator resolves
+    (
+        "clojure/java/basis",
+        "clojure/java/basis.clj",
+        STDLIB_JAVA_BASIS_CLJ,
+    ),
+    (
+        "clojure/java/basis/impl",
+        "clojure/java/basis/impl.clj",
+        STDLIB_JAVA_BASIS_IMPL_CLJ,
+    ),
+    (
+        "clojure/tools/deps/interop",
+        "clojure/tools/deps/interop.clj",
+        STDLIB_TOOLS_DEPS_INTEROP_CLJ,
+    ),
+    (
+        "clojure/repl/deps",
+        "clojure/repl/deps.clj",
+        STDLIB_REPL_DEPS_CLJ,
+    ),
+    // W8 (core) — do not merge by hand, integrator resolves
+    (
+        "clojure/core/protocols",
+        "clojure/core/protocols.clj",
+        STDLIB_CORE_PROTOCOLS_CLJ,
+    ),
+    (
+        "clojure/inspector",
+        "clojure/inspector.clj",
+        STDLIB_INSPECTOR_CLJ,
+    ),
+    (
+        "clojure/java/browse_ui",
+        "clojure/java/browse_ui.clj",
+        STDLIB_BROWSE_UI_CLJ,
+    ),
+    // W3 (pprint) — do not merge by hand, integrator resolves
+    ("clojure/pprint", "clojure/pprint.clj", STDLIB_PPRINT_CLJ),
+    (
+        "clojure/pprint/utilities",
+        "clojure/pprint/utilities.clj",
+        STDLIB_PPRINT_UTILITIES_CLJ,
+    ),
+    (
+        "clojure/pprint/column_writer",
+        "clojure/pprint/column_writer.clj",
+        STDLIB_PPRINT_COLUMN_WRITER_CLJ,
+    ),
+    (
+        "clojure/pprint/pretty_writer",
+        "clojure/pprint/pretty_writer.clj",
+        STDLIB_PPRINT_PRETTY_WRITER_CLJ,
+    ),
+    (
+        "clojure/pprint/pprint_base",
+        "clojure/pprint/pprint_base.clj",
+        STDLIB_PPRINT_BASE_CLJ,
+    ),
+    (
+        "clojure/pprint/cl_format",
+        "clojure/pprint/cl_format.clj",
+        STDLIB_PPRINT_CL_FORMAT_CLJ,
+    ),
+    (
+        "clojure/pprint/dispatch",
+        "clojure/pprint/dispatch.clj",
+        STDLIB_PPRINT_DISPATCH_CLJ,
+    ),
+    (
+        "clojure/pprint/print_table",
+        "clojure/pprint/print_table.clj",
+        STDLIB_PPRINT_PRINT_TABLE_CLJ,
+    ),
+    // W6 (runtime-ish) — do not merge by hand, integrator resolves.
+    (
+        "clojure/core/server",
+        "clojure/core/server.clj",
+        W6_SERVER_CLJ,
+    ),
+    (
+        "clojure/core/reducers",
+        "clojure/core/reducers.clj",
+        W6_REDUCERS_CLJ,
+    ),
+    ("clojure/parallel", "clojure/parallel.clj", W6_PARALLEL_CLJ),
+    (
+        "clojure/core_proxy",
+        "clojure/core_proxy.clj",
+        W6_CORE_PROXY_CLJ,
+    ),
+    ("clojure/xml", "clojure/xml.clj", W6_XML_CLJ),
+    // W5 (small libs) — do not merge by hand, integrator resolves
+    ("clojure/math", "clojure/math.clj", STDLIB_MATH_CLJ),
+    ("clojure/uuid", "clojure/uuid.clj", STDLIB_UUID_CLJ),
+    ("clojure/instant", "clojure/instant.clj", STDLIB_INSTANT_CLJ),
+    (
+        "clojure/java/javadoc",
+        "clojure/java/javadoc.clj",
+        STDLIB_JAVADOC_CLJ,
+    ),
+    (
+        "clojure/java/browse",
+        "clojure/java/browse.clj",
+        STDLIB_BROWSE_CLJ,
+    ),
+    (
+        "clojure/java/process",
+        "clojure/java/process.clj",
+        STDLIB_PROCESS_CLJ,
+    ),
+    ("clojure/gvec", "clojure/gvec.clj", STDLIB_GVEC_CLJ),
 ];
 
 /// Resolve a load root (no leading slash) to the `*file*` path and

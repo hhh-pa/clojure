@@ -55,6 +55,8 @@ pub mod stm;
 pub mod typeinternals;
 pub mod types;
 pub mod vars;
+// W6 (runtime-ish) — do not merge by hand, integrator resolves.
+pub mod w6_runtime;
 pub mod xform;
 
 pub use aot_subset::{
