@@ -145,8 +145,7 @@ fn cmd_eval(form: &str, edn: bool) -> ExitCode {
         return ExitCode::SUCCESS;
     }
     let form = form.to_owned();
-    let (eval, code) = match run_on_eval_thread(boot(), move |eval| cmd_eval_forms(eval, &form))
-    {
+    let (eval, code) = match run_on_eval_thread(boot(), move |eval| cmd_eval_forms(eval, &form)) {
         Ok(done) => done,
         Err(diagnostic) => {
             eprintln!("{diagnostic}");

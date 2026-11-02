@@ -4,7 +4,7 @@ The complete inventory of `clojure.core` in this port: every var,
 its conformance state, and — for exclusions — why it is excluded.
 If a var is not listed here, that is a file bug, not a silent gap.
 
-- **690 vars: 690 implemented, 0 divergent, 0 out of scope,
+- **690 vars: 689 implemented, 1 divergent, 0 out of scope,
   0 planned.** The port reports Clojure `1.13.0-alpha9`
   (`clojure-version`).
 - **Universe.** 690 rows = 685 JVM publics + 5 extra-universe rows: 4 port-visible JVM privates
@@ -114,12 +114,18 @@ Defining macros and expanding them.
 
 Checked i64 arithmetic (overflow raises, never wraps) plus exact numeric coercions.
 
+One deliberate fence: `/` on doubles is always IEEE (`##Inf`/`##NaN`
+on a zero divisor), matching the JVM's primitive-overload path; the
+JVM's `Object`-operand path instead throws `Divide by zero` (the `/`
+inline resolves `Numbers.divide` overloads from static types the
+interpreter cannot observe — see the `/` row).
+
 | var | status | notes |
 | --- | --- | --- |
 | `+` | implemented | `control.rs time_rows`; C1, probe39 arith-plus-star-zero |
 | `-` | implemented | `time_rows` + dotimes-emitted (`composites_smoke`); C1, probe39 arith-variadic-exotic |
 | `*` | implemented | `composites_smoke` (`(f 21)`); C1, probe39 arith-plus-star-zero |
-| `/` | implemented | arith.rs div_zero_rows + pred_backlog_rows (exact-if-divisible else double) |
+| `/` | divergent | arith.rs div_zero_rows + pred_backlog_rows (exact-if-divisible else double) + div_object_path_zero_divisor_divergent (Object-path zero divisor: JVM throws, port IEEE) |
 | `quot` | implemented | arith.rs quot_rem_mod_rows (C1, zero/NFE rules) |
 | `rem` | implemented | arith.rs quot_rem_mod_rows (C1, zero/NFE rules) |
 | `mod` | implemented | arith.rs quot_rem_mod_rows; C1 zero/non-finite rules |
