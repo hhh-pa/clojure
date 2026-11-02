@@ -1253,6 +1253,11 @@ fn ctor_runtime_arity_arms() {
         ("java.security.SecureRandom", "1", "java.lang.IllegalArgumentException | No matching ctor found for class java.security.SecureRandom"),
         ("java.math.BigInteger", "", "java.lang.IllegalArgumentException | No matching ctor found for class java.math.BigInteger"),
         ("java.math.BigInteger", "1 2 3", "java.lang.IllegalArgumentException | No matching ctor found for class java.math.BigInteger"),
+        ("java.io.File", "", "java.lang.IllegalArgumentException | No matching ctor found for class java.io.File"),
+        ("java.io.File", "1 2", "java.lang.IllegalArgumentException | No matching ctor found for class java.io.File"),
+        ("java.io.FileInputStream", "", "java.lang.IllegalArgumentException | No matching ctor found for class java.io.FileInputStream"),
+        ("java.io.FileOutputStream", "1 2", "java.lang.IllegalArgumentException | No matching ctor found for class java.io.FileOutputStream"),
+        ("java.io.StringWriter", "1", "java.lang.IllegalArgumentException | No matching ctor found for class java.io.StringWriter"),
     ];
     let mut eval = boot();
     for (class, args, want) in rows {
@@ -1786,6 +1791,334 @@ fn pattern_quote() {
         runtime_miss(&mut eval, "java.util.regex.Pattern", "quote", "1 2"),
         "java.lang.IllegalArgumentException | No matching method quote found taking 2 args for class java.util.regex.Pattern"
     );
+}
+
+/// A unique temp path (parallel-safe; the caller cleans up).
+fn io_tmp(prefix: &str) -> std::path::PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static IO_SEQ: AtomicU64 = AtomicU64::new(0);
+    let n = IO_SEQ.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir().join(format!("algo205-{prefix}-{}-{n}", std::process::id()))
+}
+
+/// `File` construction, `exists`, `length`.
+#[test]
+fn file_ctor_and_members() {
+    let mut eval = boot();
+    let path = io_tmp("file");
+    std::fs::write(&path, "AB").unwrap();
+    let p = path.to_string_lossy().replace('\\', "/");
+    assert_eq!(
+        run(
+            &mut eval,
+            &format!(
+                r#"[(.exists (java.io.File. "{p}")) (.length (java.io.File. "{p}")) (str (java.io.File. "{p}")) (.exists (java.io.File. "{p}-missing")) (.length (java.io.File. "{p}-missing"))]"#
+            )
+        ),
+        format!("[true 2 \"{p}\" false 0]")
+    );
+    // `spit`/`slurp` round-trip through `File` values.
+    assert_eq!(
+        run(
+            &mut eval,
+            &format!(r#"(do (spit (java.io.File. "{p}") "xy") (slurp (java.io.File. "{p}")))"#)
+        ),
+        "\"xy\""
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(java.io.File. nil)"),
+        "java.lang.NullPointerException | Cannot invoke \"java.io.File.<init>\" because \"pathname\" is null"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(java.io.File. 5)"),
+        "java.lang.IllegalArgumentException | No matching ctor found for class java.io.File"
+    );
+    assert_eq!(
+        compile_err(&mut eval, "(java.io.File.)"),
+        "java.lang.IllegalArgumentException | No matching ctor found for class java.io.File"
+    );
+    std::fs::remove_file(&path).unwrap();
+}
+
+/// `File/createTempFile`: unique files, defaults, failures.
+#[test]
+fn file_create_temp_file() {
+    let mut eval = boot();
+    let made: String = run(
+        &mut eval,
+        r#"(do (require 'clojure.java.io) (let [f (java.io.File/createTempFile "block_" ".dat")] [(str f) (.exists f) (.length f)]))"#,
+    );
+    assert!(made.contains("block_") && made.contains(".dat"));
+    // Cleanup through `io/delete-file`, like `external-sort`.
+    assert_eq!(
+        run(
+            &mut eval,
+            r#"(do (require 'clojure.java.io) (let [f (str (java.io.File/createTempFile "block_" ".dat"))] [(clojure.java.io/delete-file f) (.exists (java.io.File. f))]))"#,
+        ),
+        "[true false]"
+    );
+    // Two calls mint distinct files.
+    assert_eq!(
+        run(
+            &mut eval,
+            r#"(= (java.io.File/createTempFile "block_" ".dat") (java.io.File/createTempFile "block_" ".dat"))"#,
+        ),
+        "false"
+    );
+    // Nil suffixes default to `.tmp`; short prefixes fail.
+    assert_eq!(
+        run(
+            &mut eval,
+            r#"(.endsWith (str (java.io.File/createTempFile "block_" nil)) ".tmp")"#,
+        ),
+        "true"
+    );
+    assert_eq!(
+        uncaught(&mut eval, r#"(java.io.File/createTempFile "ab" ".dat")"#),
+        "java.lang.IllegalArgumentException | Prefix string too short"
+    );
+    assert_eq!(
+        uncaught(&mut eval, r#"(java.io.File/createTempFile nil ".dat")"#),
+        "java.lang.NullPointerException | Cannot invoke \"java.io.File.createTempFile(String, String)\" because \"prefix\" is null"
+    );
+    assert!(uncaught(&mut eval, r#"(java.io.File/createTempFile 5 ".dat")"#)
+        .contains("ClassCastException"));
+    assert_eq!(
+        compile_err(&mut eval, r#"(java.io.File/createTempFile "block_")"#),
+        "java.lang.IllegalArgumentException | No matching method createTempFile found taking 1 args for class java.io.File"
+    );
+    assert_eq!(
+        runtime_miss(&mut eval, "java.io.File", "createTempFile", "1 2 3"),
+        "java.lang.IllegalArgumentException | No matching method createTempFile found taking 3 args for class java.io.File"
+    );
+    // An uncreatable path reports `IOException` naming it.
+    let bad = uncaught(
+        &mut eval,
+        r#"(java.io.File/createTempFile "nope/nodir/x" ".dat")"#,
+    );
+    assert!(bad.contains("java.io.IOException") && bad.contains("nope"));
+}
+
+/// File streams: byte writes, `readAllBytes`, closes, ctors.
+#[test]
+fn file_streams_round_trip() {
+    let mut eval = boot();
+    let path = io_tmp("streams");
+    let p = path.to_string_lossy().replace('\\', "/");
+    assert_eq!(
+        run(
+            &mut eval,
+            &format!(
+                r#"(do (with-open [out (java.io.FileOutputStream. "{p}")] (.write out 65) (.write out 300)) (with-open [in (java.io.FileInputStream. "{p}")] (vec (.readAllBytes in))))"#
+            )
+        ),
+        "[65 44]"
+    );
+    // `File` args work; closes latch (writes/reads then fail).
+    assert_eq!(
+        run(
+            &mut eval,
+            &format!(
+                r#"(do (with-open [out (java.io.FileOutputStream. (java.io.File. "{p}"))] (.write out 7)) (with-open [in (java.io.FileInputStream. (java.io.File. "{p}"))] (vec (.readAllBytes in))))"#
+            )
+        ),
+        "[7]"
+    );
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            &format!(
+                r#"(let [out (java.io.FileOutputStream. "{p}")] (.close out) (.write out 1))"#
+            )
+        ),
+        "java.io.IOException | Stream closed"
+    );
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            &format!(
+                r#"(let [in (java.io.FileInputStream. "{p}")] (.close in) (.readAllBytes in))"#
+            )
+        ),
+        "java.io.IOException | Stream closed"
+    );
+    // Missing inputs name the path; nils NPE; mistypes miss.
+    let missing = uncaught(
+        &mut eval,
+        &format!(r#"(java.io.FileInputStream. "{p}-missing")"#),
+    );
+    assert!(missing.contains("FileNotFoundException") && missing.contains("missing"));
+    assert_eq!(
+        uncaught(&mut eval, "(java.io.FileInputStream. nil)"),
+        "java.lang.NullPointerException | Cannot invoke \"java.io.FileInputStream.<init>\" because \"name\" is null"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(java.io.FileOutputStream. nil)"),
+        "java.lang.NullPointerException | Cannot invoke \"java.io.FileOutputStream.<init>\" because \"name\" is null"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(java.io.FileInputStream. 5)"),
+        "java.lang.IllegalArgumentException | No matching ctor found for class java.io.FileInputStream"
+    );
+    assert_eq!(
+        compile_err(&mut eval, "(java.io.FileOutputStream.)"),
+        "java.lang.IllegalArgumentException | No matching ctor found for class java.io.FileOutputStream"
+    );
+    std::fs::remove_file(&path).unwrap();
+}
+
+/// `BufferedReader.readLine` over `io/reader` (the
+/// `external-sort` shape): lines, EOF nil, closes.
+#[test]
+fn reader_read_line_shapes() {
+    let mut eval = boot();
+    let path = io_tmp("lines");
+    std::fs::write(&path, "a\nb\n").unwrap();
+    let p = path.to_string_lossy().replace('\\', "/");
+    assert_eq!(
+        run(
+            &mut eval,
+            &format!(
+                r#"(do (require 'clojure.java.io) (with-open [r (clojure.java.io/reader "{p}")] [(.readLine r) (.readLine r) (.readLine r)]))"#
+            )
+        ),
+        "[\"a\" \"b\" nil]"
+    );
+    // `line-seq` over the same reader shape still works.
+    assert_eq!(
+        run(
+            &mut eval,
+            &format!(
+                r#"(do (require 'clojure.java.io) (with-open [r (clojure.java.io/reader "{p}")] (vec (line-seq r))))"#
+            )
+        ),
+        "[\"a\" \"b\"]"
+    );
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            &format!(
+                r#"(do (require 'clojure.java.io) (let [r (clojure.java.io/reader "{p}")] (.close r) (.readLine r)))"#
+            )
+        ),
+        "java.io.IOException | Stream closed"
+    );
+    assert!(uncaught(&mut eval, "(.readLine \"ab\")").contains("No matching"));
+    std::fs::remove_file(&path).unwrap();
+}
+
+/// `Writer.write` shapes: strings, chars, ints, and the
+/// `print-method`/`*out*` suite shapes.
+#[test]
+fn writer_write_shapes() {
+    let mut eval = boot();
+    assert_eq!(
+        run(
+            &mut eval,
+            r#"(let [w (java.io.StringWriter.)] (.write w "ab") (.write w \c) (.write w 68) (.write w 0xD83D) (str w))"#,
+        ),
+        "\"abcD�\""
+    );
+    // Bound `*out*` collects prints (the LDA/weddles test shape).
+    assert_eq!(
+        run(
+            &mut eval,
+            r#"(let [sw (java.io.StringWriter.)] (binding [*out* sw] (println "hi")) (str sw))"#,
+        ),
+        "\"hi\\n\""
+    );
+    // `print-method` bodies write through `w` (the Dual/Point shape).
+    assert_eq!(
+        run(
+            &mut eval,
+            "(do (defrecord WR [x]) (defmethod print-method WR [o w] (.write ^java.io.Writer w (str \"WR!\" (:x o)))) (with-out-str (pr (WR. 1))))",
+        ),
+        "\"WR!1\""
+    );
+    // File writers persist; nils NPE; mistypes miss.
+    let path = io_tmp("wrote");
+    let p = path.to_string_lossy().replace('\\', "/");
+    assert_eq!(
+        run(
+            &mut eval,
+            &format!(
+                r#"(do (require 'clojure.java.io) (with-open [w (clojure.java.io/writer "{p}")] (.write w "xy")) (slurp "{p}"))"#
+            )
+        ),
+        "\"xy\""
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(let [w (java.io.StringWriter.)] (.write w nil))"),
+        "java.lang.NullPointerException | Cannot invoke \"java.io.Writer.write(String)\" because \"str\" is null"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(let [w (java.io.StringWriter.)] (.write w [1]))"),
+        "java.lang.IllegalArgumentException | No matching method write found taking 1 args for class java.io.Writer"
+    );
+    assert!(uncaught(&mut eval, "(.write \"ab\" \"c\")").contains("No matching"));
+    std::fs::remove_file(&path).unwrap();
+}
+
+/// `io/resource`: load-path hits as `file:` URLs, misses nil.
+#[test]
+fn io_resource_shapes() {
+    let mut eval = boot();
+    let dir = io_tmp("resdir");
+    std::fs::create_dir(&dir).unwrap();
+    std::fs::write(dir.join("res.txt"), "RES!").unwrap();
+    let load = dir.to_string_lossy().replace('\\', "/");
+    // A hit reads back through `io/reader` (the anagrams shape).
+    assert_eq!(
+        run(
+            &mut eval,
+            &format!(
+                r#"(do (require 'clojure.java.io) (binding [clojure.core/*load-path* ["{load}"]] (let [url (clojure.java.io/resource "res.txt")] [(some? url) (.startsWith (str url) "file:") (slurp (clojure.java.io/reader url))]))) "#
+            )
+        ),
+        "[true true \"RES!\"]"
+    );
+    // Misses answer nil; nil names NPE, mistyped names CCE.
+    assert_eq!(
+        run(
+            &mut eval,
+            &format!(
+                r#"(do (require 'clojure.java.io) (binding [clojure.core/*load-path* ["{load}"]] (clojure.java.io/resource "nope.txt")))"#
+            )
+        ),
+        "nil"
+    );
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(do (require 'clojure.java.io) (clojure.java.io/resource nil))"
+        ),
+        "java.lang.NullPointerException | Cannot invoke \"java.lang.ClassLoader.getResource(String)\" because \"name\" is null"
+    );
+    assert!(uncaught(
+        &mut eval,
+        "(do (require 'clojure.java.io) (clojure.java.io/resource 5))"
+    )
+    .contains("ClassCastException"));
+    // A relative load dir resolves against the process directory.
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0);
+    let rel = format!("algo205-rel-{}-{nanos}", std::process::id());
+    let sub = std::env::current_dir().unwrap().join(&rel);
+    std::fs::create_dir(&sub).unwrap();
+    std::fs::write(sub.join("rel.txt"), "REL!").unwrap();
+    assert_eq!(
+        run(
+            &mut eval,
+            &format!(
+                r#"(do (require 'clojure.java.io) (binding [clojure.core/*load-path* ["{rel}"]] (slurp (clojure.java.io/reader (clojure.java.io/resource "rel.txt")))))"#
+            )
+        ),
+        "\"REL!\""
+    );
+    std::fs::remove_dir_all(&sub).unwrap();
+    std::fs::remove_dir_all(&dir).unwrap();
 }
 
 /// Run `f` on a 256 MiB worker (the harness shape): deep

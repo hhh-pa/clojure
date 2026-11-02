@@ -3237,7 +3237,9 @@ fn static_file_create_temp_file(
         .write(true)
         .create_new(true)
         .open(&path)
-        .map_err(|e| crate::io::file_err(&path.to_string_lossy(), e))?;
+        .map_err(|e| {
+            NativeError::new(ThrowClass::IOException, format!("{}: {e}", path.display()))
+        })?;
     Ok(crate::jdkio::file(eval, &path.to_string_lossy()))
 }
 
