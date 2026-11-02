@@ -667,6 +667,7 @@ fn native_seque(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErr
     let name = format!("clj-seque-{}", eval.next_id());
     std::thread::Builder::new()
         .name(name)
+        .stack_size(crate::eval::EVAL_STACK_SIZE)
         .spawn(move || seque_feeder(child, input, tx))
         .map_err(|_| spawn_failed())?;
     Ok(pending_value(Thunk::Seque {
