@@ -625,11 +625,12 @@ fn allowlist_miss() {
     }
     // Names outside the emulated lattice CNFE — exactly like
     // `import` of them does (lattice expansion is the future
-    // "import of real classes" slice, not this one).
+    // "import of real classes" slice, not this one). `ArrayList`
+    // left this loop when #205 Batch D emulated it (ctor pinned
+    // in `algorithms_emu.rs`).
     for (src, name) in [
         ("(java.util.HashMap.)", "java.util.HashMap"),
         ("(java.util.HashMap. 4 0.5)", "java.util.HashMap"),
-        ("(java.util.ArrayList.)", "java.util.ArrayList"),
     ] {
         assert_eq!(
             uncaught(&mut eval, src),
@@ -924,4 +925,40 @@ fn instance_var_ctor_miss() {
         uncaught(&mut eval, "(__new* 'PINST 1)"),
         "java.lang.IllegalArgumentException | Not a type: PINST"
     );
+}
+
+// #205: ctor heads naming an import bake the compile-time FQN,
+// so fns constructing imported classes work when called from any
+// namespace (statics already bake; the raw simple name used to
+// re-resolve against the runtime current-ns and miss the defining
+// ns's imports).
+#[test]
+fn ctor_imported_head_cross_ns_205() {
+    let mut eval = boot();
+    run_step(
+        &mut eval,
+        "(ns ctor205a (:import (java.util PriorityQueue)))",
+    );
+    run_step(
+        &mut eval,
+        "(defn mk-dot [] (PriorityQueue. ^java.util.Collection [3 1 2]))",
+    );
+    run_step(
+        &mut eval,
+        "(defn mk-new [] (new PriorityQueue ^java.util.Collection [3 1 2]))",
+    );
+    run_step(
+        &mut eval,
+        "(defn mk-slash [] (PriorityQueue/new ^java.util.Collection [3 1 2]))",
+    );
+    run_step(&mut eval, "(ns ctor205b)");
+    assert_eq!(
+        run_step(
+            &mut eval,
+            "(let [q (ctor205a/mk-dot)] [(.peek q) (.poll q) (.peek q)])"
+        ),
+        "[1 1 2]"
+    );
+    assert_eq!(run_step(&mut eval, "(.peek (ctor205a/mk-new))"), "1");
+    assert_eq!(run_step(&mut eval, "(.peek (ctor205a/mk-slash))"), "1");
 }

@@ -1108,7 +1108,8 @@ impl<'a> Analyzer<'a> {
         if let Some(base) = name.strip_suffix('.') {
             let quoted = Symbol::new(sym.namespace(), base);
             self.check_ctor_arity(&quoted, items.len() - 1, span, "new")?;
-            return Ok(Some(self.dot_call("__new*", quoted, &items[1..], span)?));
+            let head = self.ctor_baked_head(&quoted);
+            return Ok(Some(self.dot_call("__new*", head, &items[1..], span)?));
         }
         if !name.starts_with('.') {
             return Ok(None);
@@ -1301,7 +1302,11 @@ impl<'a> Analyzer<'a> {
                 ));
             }
         }
-        let head = Symbol::new(None, ns_part);
+        // Bake the compile-time FQN when the head names an import
+        // (var-held descriptors stay symbolic — `ctor_baked_head`
+        // never consults vars, so `m-deftype-simple-new` keeps its
+        // runtime shape).
+        let head = self.ctor_baked_head(&Symbol::new(None, ns_part));
         Ok(Some(self.dot_call("__new*", head, &items[1..], span)?))
     }
 
@@ -1376,6 +1381,25 @@ impl<'a> Analyzer<'a> {
             let cur = self.current_ns();
             crate::classemu::import_in(self.eval, &cur, sym.name()).map(|c| c.name().to_owned())
         }
+    }
+
+    /// The `__new*` head for a ctor symbol: the compile-time FQN
+    /// when the compiling ns's imports name the simple name (#205:
+    /// the raw simple name would re-resolve against the runtime
+    /// current-ns, missing the defining ns's imports whenever the
+    /// constructing fn is called cross-ns — statics already bake
+    /// the FQN, see `try_static_call`). Dotted heads stay raw
+    /// (the lattice owns them at runtime already); unresolvable
+    /// heads (vars, same-form forward refs, missing) stay
+    /// symbolic for runtime (oracles `o-do-deftype-dot`,
+    /// `o-do-import-use`, `m-new-qual*`, `*-missing-simple`).
+    fn ctor_baked_head(&self, sym: &Symbol) -> Symbol {
+        if sym.namespace().is_none() && !sym.name().contains('.') {
+            if let Some(fqn) = self.ctor_head_fqn(sym) {
+                return Symbol::new(None, &fqn);
+            }
+        }
+        sym.clone()
     }
 
     /// Synthesize `(__static* "FQN" "member" args…)` over an
@@ -5012,7 +5036,8 @@ impl<'a> Analyzer<'a> {
         span: Span,
     ) -> Result<Expr, CompileError> {
         self.check_ctor_arity(sym, args.len(), span, "new")?;
-        self.dot_call("__new*", sym.clone(), args, span)
+        let head = self.ctor_baked_head(sym);
+        self.dot_call("__new*", head, args, span)
     }
 
     /// Bare `(new)` (oracle `new-empty`).
