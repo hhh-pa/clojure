@@ -166,6 +166,24 @@ fn odd_even() {
     assert_eq!(run_last(&mut eval, "(odd? -3)"), "true");
     assert_eq!(run_last(&mut eval, "(even? 4)"), "true");
     assert_eq!(run_last(&mut eval, "(even? 4294967296)"), "true");
+    // Tower integers take the low bit too (oracle
+    // `/tmp/oddeven.clj`); ratios and decimals still miss.
+    assert_eq!(run_last(&mut eval, "(odd? 7N)"), "true");
+    assert_eq!(run_last(&mut eval, "(even? 8N)"), "true");
+    assert_eq!(run_last(&mut eval, "(odd? -7N)"), "true");
+    assert_eq!(run_last(&mut eval, "(even? -8N)"), "true");
+    assert_eq!(
+        run_last(&mut eval, "(odd? 123456789012345678901234567893N)"),
+        "true"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(odd? 7/2)"),
+        "java.lang.IllegalArgumentException | Argument must be an integer: 7/2"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(odd? 7M)"),
+        "java.lang.IllegalArgumentException | Argument must be an integer: 7"
+    );
     assert_eq!(
         uncaught(&mut eval, "(odd? 1.5)"),
         "java.lang.IllegalArgumentException | Argument must be an integer: 1.5"
@@ -182,6 +200,31 @@ fn odd_even() {
         uncaught(&mut eval, "(even? 2.0)"),
         "java.lang.IllegalArgumentException | Argument must be an integer: 2.0"
     );
+}
+
+// soe-guard/deep-recursion: non-terminating evaluation throws
+// `StackOverflowError` (empty message, like the JVM) instead of
+// aborting the process, and deep-but-finite recursion still
+// returns. Runs on a roomy-stack thread: libtest threads are
+// 2MB, which the native stack would exhaust first.
+#[test]
+fn eval_depth_guard() {
+    let out = std::thread::Builder::new()
+        .stack_size(clj_eval::EVAL_STACK_SIZE)
+        .spawn(|| {
+            let mut eval = boot();
+            let overflow = uncaught(&mut eval, "(defn f [n] (f (inc n))) (f 0)");
+            let deep = run_last(
+                &mut eval,
+                "(defn g [n] (if (zero? n) 0 (inc (g (dec n))))) (g 3000)",
+            );
+            (overflow, deep)
+        })
+        .expect("spawn")
+        .join()
+        .expect("join");
+    assert_eq!(out.0, "java.lang.StackOverflowError | ");
+    assert_eq!(out.1, "3000");
 }
 
 #[test]

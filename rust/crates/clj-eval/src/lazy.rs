@@ -566,6 +566,15 @@ fn step_subvector_unit(sv: &SubVectorValue) -> Result<StepUnit, Signal> {
     step_seq(&s, true, false, SeqKind::Subvec, None)
 }
 
+/// Step a queue (chunked, front-to-back; empty steps empty,
+/// like vectors).
+fn step_queue_unit(q: &crate::hostvals::QueueValue) -> Result<StepUnit, Signal> {
+    step_realized(&q.items(), true).map_or_else(
+        || Ok(StepUnit::Empty),
+        |s| step_seq(&s, true, true, SeqKind::Chunked, None),
+    )
+}
+
 /// Step the entry-view arms (keys take the `true` projection).
 fn step_entry_unit(eval: &mut Evaluator, v: &Value) -> Result<Option<StepUnit>, Signal> {
     if let Some(k) = as_keys(v) {
@@ -605,6 +614,9 @@ fn step_unit_extension(eval: &mut Evaluator, v: &Value) -> Result<StepUnit, Sign
     }
     if let Some(sv) = as_subvector(v) {
         return step_subvector_unit(sv);
+    }
+    if let Some(q) = crate::hostvals::as_queue(v) {
+        return step_queue_unit(q);
     }
     // T1200 D1: walking an eduction steps its lazy transform (same
     // hook as `seq`, which see for the arm coupling).
@@ -2395,6 +2407,12 @@ fn seq_subvector(sv: &SubVectorValue) -> Value {
     realized_value(sv.items(), false, true, false, SeqKind::Subvec)
 }
 
+/// `seq` of a persistent queue (front-to-back; empty reads nil,
+/// like `seq` of `[]`).
+fn seq_queue(q: &crate::hostvals::QueueValue) -> Value {
+    realized_value(q.items(), true, true, true, SeqKind::Chunked)
+}
+
 /// `seq` of iterate/cons values (never empty).
 fn is_always_seq(v: &Value) -> bool {
     as_iterate(v).is_some() || as_cons_value(v).is_some()
@@ -2614,6 +2632,9 @@ fn seq_value_extension(eval: &mut Evaluator, v: &Value) -> Result<Value, Signal>
     if let Some(sv) = as_subvector(v) {
         return Ok(seq_subvector(sv));
     }
+    if let Some(q) = crate::hostvals::as_queue(v) {
+        return Ok(seq_queue(q));
+    }
     // T1200 D1: eductions seq through the stepping fn per use (like
     // `sequence`; bad collections take the ISeq error via the walk).
     if let Some((xform, coll)) = crate::xform::Eduction::parts(v) {
@@ -2803,9 +2824,11 @@ fn first_direct(v: &Value) -> Option<Value> {
                 .map(|(k, val)| clj_value::map_entry(k.clone(), val.clone()))
                 .unwrap_or(Value::Nil)
         }),
-        Value::Extension(_) => {
-            as_subvector(v).map(|sv| sv.iter().next().cloned().unwrap_or(Value::Nil))
-        }
+        Value::Extension(_) => as_subvector(v)
+            .map(|sv| sv.iter().next().cloned().unwrap_or(Value::Nil))
+            .or_else(|| {
+                crate::hostvals::as_queue(v).map(|q| q.peek().cloned().unwrap_or(Value::Nil))
+            }),
         _ => None,
     }
 }

@@ -1212,3 +1212,63 @@ fn t73_read_string_allow_reads_torture_cond() {
         ":on-jvm"
     );
 }
+
+#[test]
+fn slurp_reader_rows() {
+    let mut eval = boot();
+    // `slurp` over `*in*` drains the reader (stdin scripts read
+    // their whole input this way); exact bytes, no trailing line
+    // required.
+    assert_eq!(
+        run_last(&mut eval, "(with-in-str \"hello\" (slurp *in*))"),
+        "\"hello\""
+    );
+    assert_eq!(
+        run_last(&mut eval, "(with-in-str \"a\nb\n\" (slurp *in*))"),
+        "\"a\\nb\\n\""
+    );
+    assert_eq!(
+        run_last(&mut eval, "(with-in-str \"a\nb\" (slurp *in*))"),
+        "\"a\\nb\""
+    );
+    assert_eq!(
+        run_last(&mut eval, "(with-in-str \"\" (slurp *in*))"),
+        "\"\""
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(with-in-str \"h\u{e9}llo \u{3bb}\" (slurp *in*))"
+        ),
+        "\"h\u{e9}llo \u{3bb}\""
+    );
+    // A partially consumed reader drains its remainder.
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(with-in-str \"a\nb\" (do (read-line) (slurp *in*)))"
+        ),
+        "\"b\""
+    );
+    // Extra opts are ignored for readers, like the JVM.
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(with-in-str \"ab\" (slurp *in* :encoding \"UTF-8\"))"
+        ),
+        "\"ab\""
+    );
+    // A closed reader reports the JDK text.
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(with-in-str \"x\" (do (.close *in*) (slurp *in*)))"
+        ),
+        "java.io.IOException | Stream closed"
+    );
+    // Non-slurpables keep the `InputStream` miss shape.
+    assert_eq!(
+        uncaught(&mut eval, "(slurp 42)"),
+        "java.lang.IllegalArgumentException | Cannot open <42> as an InputStream."
+    );
+}

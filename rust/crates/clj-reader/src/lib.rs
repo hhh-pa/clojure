@@ -167,6 +167,11 @@ impl Reader {
         self.stream.read_line()
     }
 
+    /// Drain every unconsumed char (`slurp` over readers).
+    pub fn take_rest(&mut self) -> String {
+        self.stream.take_rest()
+    }
+
     /// Current 1-based line (live tracker position).
     #[must_use]
     pub fn line(&self) -> u32 {

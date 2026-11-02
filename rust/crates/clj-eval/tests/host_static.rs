@@ -447,8 +447,9 @@ fn fq_operator_invoke() {
 
 // val-simplequal-missing/removed-ns-val: qualified misses blame the
 // namespace part (simple) or CNFE it (dotted). Value-position
-// static members (method fns per `v-method`, field reads per
-// `v-field`) are a later slice and keep `No such namespace`.
+// static methods (method fns per `v-method`) are still deferred
+// and keep `No such namespace`; field reads (per `v-field`)
+// resolve — see `static_fields_rows`.
 #[test]
 fn value_qualified() {
     let mut eval = boot();
@@ -463,10 +464,6 @@ fn value_qualified() {
     assert_eq!(
         compile_err(&mut eval, "String/valueOf"),
         "java.lang.RuntimeException | No such namespace: String"
-    );
-    assert_eq!(
-        compile_err(&mut eval, "Integer/MAX_VALUE"),
-        "java.lang.RuntimeException | No such namespace: Integer"
     );
 }
 
@@ -672,5 +669,549 @@ fn unmapped_core_macro_falls_through() {
     assert_eq!(
         compile_err(&mut eval, "(clojure.core/let [x 1] x)"),
         "java.lang.RuntimeException | No such var: clojure.core/let"
+    );
+}
+
+// ---- value-position static fields ----
+
+// Value-position static fields (oracle `v-field`): known fields
+// read their constants through simple (default-imported) and
+// fully-qualified heads alike; unknown members keep the
+// deferred `No such namespace`.
+#[test]
+fn static_fields_rows() {
+    let mut eval = boot();
+    assert_eq!(run(&mut eval, "Math/PI"), "3.141592653589793");
+    assert_eq!(run(&mut eval, "Math/E"), "2.718281828459045");
+    assert_eq!(run(&mut eval, "Long/MIN_VALUE"), "-9223372036854775808");
+    assert_eq!(run(&mut eval, "Long/MAX_VALUE"), "9223372036854775807");
+    assert_eq!(run(&mut eval, "Integer/MIN_VALUE"), "-2147483648");
+    assert_eq!(run(&mut eval, "Integer/MAX_VALUE"), "2147483647");
+    assert_eq!(run(&mut eval, "Double/MIN_VALUE"), "4.9E-324");
+    assert_eq!(run(&mut eval, "Double/MAX_VALUE"), "1.7976931348623157E308");
+    assert_eq!(run(&mut eval, "Double/POSITIVE_INFINITY"), "##Inf");
+    assert_eq!(run(&mut eval, "Double/NEGATIVE_INFINITY"), "##-Inf");
+    assert_eq!(run(&mut eval, "Double/NaN"), "##NaN");
+    assert_eq!(run(&mut eval, "java.lang.Math/PI"), "3.141592653589793");
+    assert_eq!(run(&mut eval, "(str java.util.Locale/US)"), "\"en_US\"");
+    assert_eq!(
+        run(&mut eval, "(= java.util.Locale/US java.util.Locale/US)"),
+        "true"
+    );
+    assert_eq!(
+        run(
+            &mut eval,
+            "(instance? java.util.Locale java.util.Locale/US)"
+        ),
+        "true"
+    );
+    assert_eq!(
+        run(&mut eval, "(class java.util.Locale/US)"),
+        "java.util.Locale"
+    );
+    assert_eq!(
+        compile_err(&mut eval, "Math/NOPE"),
+        "java.lang.RuntimeException | No such namespace: Math"
+    );
+    assert_eq!(
+        compile_err(&mut eval, "java.util.Locale/UK"),
+        "java.lang.RuntimeException | No such namespace: java.util.Locale"
+    );
+}
+
+// ---- numeric/character/math statics ----
+
+#[test]
+fn static_parse_long_rows() {
+    let mut eval = boot();
+    assert_eq!(run(&mut eval, "(Long/parseLong \"42\")"), "42");
+    assert_eq!(run(&mut eval, "(Long/parseLong \"+42\")"), "42");
+    assert_eq!(run(&mut eval, "(Long/parseLong \"-0\")"), "0");
+    assert_eq!(
+        run(&mut eval, "(Long/parseLong \"9223372036854775807\")"),
+        "9223372036854775807"
+    );
+    assert_eq!(
+        run(&mut eval, "(Long/parseLong \"-9223372036854775808\")"),
+        "-9223372036854775808"
+    );
+    assert_eq!(run(&mut eval, "(Long/parseLong \"ff\" 16)"), "255");
+    assert_eq!(run(&mut eval, "(Long/parseLong \"-ff\" 16)"), "-255");
+    assert_eq!(
+        run(&mut eval, "(Long/parseLong \"\\u0661\\u0662\" 10)"),
+        "12"
+    );
+    assert_eq!(
+        run(&mut eval, "(Long/parseLong \"\\u0661\\u0662\" 16)"),
+        "18"
+    );
+    // The radix narrows through the reflector int rule.
+    assert_eq!(run(&mut eval, "(Long/parseLong \"ff\" 16.0)"), "255");
+    assert_eq!(run(&mut eval, "(Long/parseLong \"ff\" 16.9)"), "255");
+    assert_eq!(run(&mut eval, "(Long/parseLong \"ff\" 16N)"), "255");
+    assert_eq!(run(&mut eval, "(Long/parseLong \"ff\" 16/1)"), "255");
+    assert_eq!(run(&mut eval, "(Long/parseLong \"ff\" 16.0M)"), "255");
+    assert_eq!(
+        uncaught(&mut eval, "(Long/parseLong \"abc\")"),
+        "java.lang.NumberFormatException | For input string: \"abc\""
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(Long/parseLong \"\")"),
+        "java.lang.NumberFormatException | For input string: \"\""
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(Long/parseLong \"9223372036854775808\")"),
+        "java.lang.NumberFormatException | For input string: \"9223372036854775808\""
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(Long/parseLong nil)"),
+        "java.lang.NumberFormatException | Cannot parse null string"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(Long/parseLong 42)"),
+        cce_bootstrap("java.lang.Long", "java.lang.String")
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(Long/parseLong \"g\" 16)"),
+        "java.lang.NumberFormatException | For input string: \"g\" under radix 16"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(Long/parseLong \"1\" 1)"),
+        "java.lang.NumberFormatException | radix 1 less than Character.MIN_RADIX"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(Long/parseLong \"1\" 37)"),
+        "java.lang.NumberFormatException | radix 37 greater than Character.MAX_RADIX"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(Long/parseLong \"ff\" \"16\")"),
+        cce_bootstrap("java.lang.String", "java.lang.Number")
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(Long/parseLong \"ff\" nil)"),
+        "java.lang.NullPointerException | Cannot invoke \"java.lang.Character.charValue()\" because \"x\" is null"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(Long/parseLong \"ff\" \\a)"),
+        cce_bootstrap("java.lang.Character", "java.lang.Number")
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(Long/parseLong \"ff\" 1099511627776)"),
+        "java.lang.ArithmeticException | integer overflow"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(Long/parseLong \"ff\" 1180591620717411303424N)"),
+        "java.lang.IllegalArgumentException | Value out of range for long: 1180591620717411303424"
+    );
+}
+
+#[test]
+fn static_parse_int_rows() {
+    let mut eval = boot();
+    assert_eq!(run(&mut eval, "(Integer/parseInt \"42\")"), "42");
+    assert_eq!(run(&mut eval, "(Integer/parseInt \"-42\")"), "-42");
+    assert_eq!(run(&mut eval, "(Integer/parseInt \"ff\" 16)"), "255");
+    assert_eq!(
+        uncaught(&mut eval, "(Integer/parseInt nil)"),
+        "java.lang.NumberFormatException | Cannot parse null string"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(Integer/parseInt 4.0)"),
+        cce_bootstrap("java.lang.Double", "java.lang.String")
+    );
+    // Out-of-`i32` is the same `For input string` NFE, never
+    // `integer overflow`.
+    assert_eq!(
+        uncaught(&mut eval, "(Integer/parseInt \"2147483648\")"),
+        "java.lang.NumberFormatException | For input string: \"2147483648\""
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(Integer/parseInt \"1ffffffff\" 16)"),
+        "java.lang.NumberFormatException | For input string: \"1ffffffff\" under radix 16"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(Integer/parseInt \"xx\")"),
+        "java.lang.NumberFormatException | For input string: \"xx\""
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(Integer/parseInt \"1\" 0)"),
+        "java.lang.NumberFormatException | radix 0 less than Character.MIN_RADIX"
+    );
+}
+
+#[test]
+fn static_parse_double_rows() {
+    let mut eval = boot();
+    assert_eq!(run(&mut eval, "(Double/parseDouble \"1.5\")"), "1.5");
+    assert_eq!(run(&mut eval, "(Double/parseDouble \"NaN\")"), "##NaN");
+    assert_eq!(run(&mut eval, "(Double/parseDouble \"Infinity\")"), "##Inf");
+    assert_eq!(run(&mut eval, "(Double/parseDouble \"  1.5  \")"), "1.5");
+    assert_eq!(run(&mut eval, "(Double/parseDouble \"0x1p3\")"), "8.0");
+    assert_eq!(run(&mut eval, "(Double/parseDouble \"1e3\")"), "1000.0");
+    assert_eq!(run(&mut eval, "(Double/parseDouble \"1e999\")"), "##Inf");
+    assert_eq!(run(&mut eval, "(Double/parseDouble \"1.5f\")"), "1.5");
+    assert_eq!(
+        uncaught(&mut eval, "(Double/parseDouble \"abc\")"),
+        "java.lang.NumberFormatException | For input string: \"abc\""
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(Double/parseDouble nil)"),
+        "java.lang.NullPointerException | Cannot invoke \"String.length()\" because \"in\" is null"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(Double/parseDouble \"\")"),
+        "java.lang.NumberFormatException | empty String"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(Double/parseDouble 42)"),
+        cce_bootstrap("java.lang.Long", "java.lang.String")
+    );
+}
+
+#[test]
+fn static_remainder_unsigned_rows() {
+    let mut eval = boot();
+    assert_eq!(run(&mut eval, "(Long/remainderUnsigned -1 3)"), "0");
+    assert_eq!(run(&mut eval, "(Long/remainderUnsigned 7 -3)"), "7");
+    assert_eq!(run(&mut eval, "(Long/remainderUnsigned 7.5 2)"), "1");
+    assert_eq!(run(&mut eval, "(Long/remainderUnsigned 7/2 2)"), "1");
+    assert_eq!(
+        uncaught(&mut eval, "(Long/remainderUnsigned 1 0)"),
+        "java.lang.ArithmeticException | / by zero"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(Long/remainderUnsigned nil 2)"),
+        "java.lang.NullPointerException | Cannot invoke \"java.lang.Number.doubleValue()\" because \"x\" is null"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(Long/remainderUnsigned \"7\" 2)"),
+        cce_bootstrap("java.lang.String", "java.lang.Number")
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(Long/remainderUnsigned \\a 2)"),
+        cce_bootstrap("java.lang.Character", "java.lang.Number")
+    );
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(Long/remainderUnsigned 1180591620717411303424N 3)"
+        ),
+        "java.lang.IllegalArgumentException | Value out of range for long: 1180591620717411303424"
+    );
+}
+
+#[test]
+fn static_char_digit_rows() {
+    let mut eval = boot();
+    assert_eq!(run(&mut eval, "(Character/digit \\a 36)"), "10");
+    assert_eq!(run(&mut eval, "(Character/digit \\z 36)"), "35");
+    assert_eq!(run(&mut eval, "(Character/digit \\A 36)"), "10");
+    assert_eq!(run(&mut eval, "(Character/digit \\F 16)"), "15");
+    assert_eq!(run(&mut eval, "(Character/digit \\0 10)"), "0");
+    assert_eq!(run(&mut eval, "(Character/digit \\g 16)"), "-1");
+    assert_eq!(run(&mut eval, "(Character/digit \\9 8)"), "-1");
+    assert_eq!(run(&mut eval, "(Character/digit \\space 10)"), "-1");
+    assert_eq!(run(&mut eval, "(Character/digit \\a 1)"), "-1");
+    assert_eq!(run(&mut eval, "(Character/digit 97 10)"), "-1");
+    assert_eq!(run(&mut eval, "(Character/digit 2000000 16)"), "-1");
+    assert_eq!(run(&mut eval, "(Character/digit \\uFF11 10)"), "1");
+    assert_eq!(run(&mut eval, "(Character/digit \\uFF21 16)"), "10");
+    assert_eq!(run(&mut eval, "(Character/digit \\uFF41 16)"), "10");
+    assert_eq!(run(&mut eval, "(Character/digit \\u0661 10)"), "1");
+    assert_eq!(run(&mut eval, "(Character/digit \\u0661 16)"), "1");
+    assert_eq!(
+        uncaught(&mut eval, "(Character/digit \"a\" 36)"),
+        "java.lang.IllegalArgumentException | No matching method digit found taking 2 args"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(Character/digit nil 10)"),
+        "java.lang.IllegalArgumentException | No matching method digit found taking 2 args"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(Character/digit 1.5 10)"),
+        "java.lang.IllegalArgumentException | No matching method digit found taking 2 args"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(Character/digit 97N 10)"),
+        "java.lang.IllegalArgumentException | No matching method digit found taking 2 args"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(Character/digit \\a nil)"),
+        "java.lang.IllegalArgumentException | No matching method digit found taking 2 args"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(Character/digit 1099511627776 16)"),
+        "java.lang.ArithmeticException | integer overflow"
+    );
+}
+
+#[test]
+fn static_is_whitespace_rows() {
+    let mut eval = boot();
+    assert_eq!(run(&mut eval, "(Character/isWhitespace \\space)"), "true");
+    assert_eq!(run(&mut eval, "(Character/isWhitespace \\tab)"), "true");
+    assert_eq!(run(&mut eval, "(Character/isWhitespace \\newline)"), "true");
+    assert_eq!(run(&mut eval, "(Character/isWhitespace \\a)"), "false");
+    assert_eq!(run(&mut eval, "(Character/isWhitespace \\u001C)"), "true");
+    assert_eq!(run(&mut eval, "(Character/isWhitespace \\u2028)"), "true");
+    assert_eq!(run(&mut eval, "(Character/isWhitespace \\u00A0)"), "false");
+    assert_eq!(run(&mut eval, "(Character/isWhitespace \\u2007)"), "false");
+    assert_eq!(run(&mut eval, "(Character/isWhitespace 32)"), "true");
+    assert_eq!(
+        uncaught(&mut eval, "(Character/isWhitespace \" \")"),
+        "java.lang.IllegalArgumentException | No matching method isWhitespace found taking 1 args"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(Character/isWhitespace nil)"),
+        "java.lang.IllegalArgumentException | No matching method isWhitespace found taking 1 args"
+    );
+}
+
+// static-char-lod/lc-*: the char rule over chars, the int
+// code-point rule over longs (unrepresentable code points read
+// false), anything else the no-overload miss (oracles
+// `/tmp/charpred.clj`, `/tmp/charpred3.clj`, `/tmp/charpred4.clj`).
+#[test]
+fn static_char_pred_rows() {
+    let mut eval = boot();
+    for (src, want) in [
+        ("(Character/isLetterOrDigit \\a)", "true"),
+        ("(Character/isLetterOrDigit \\Z)", "true"),
+        ("(Character/isLetterOrDigit \\5)", "true"),
+        ("(Character/isLetterOrDigit \\é)", "true"),
+        ("(Character/isLetterOrDigit \\α)", "true"),
+        ("(Character/isLetterOrDigit \\中)", "true"),
+        ("(Character/isLetterOrDigit \\_)", "false"),
+        ("(Character/isLetterOrDigit \\space)", "false"),
+        ("(Character/isLetterOrDigit \\ß)", "true"),
+        ("(Character/isLetterOrDigit 97)", "true"),
+        ("(Character/isLetterOrDigit 65)", "true"),
+        ("(Character/isLetterOrDigit 120792)", "true"),
+        ("(Character/isLetterOrDigit -1)", "false"),
+        ("(Character/isLetterOrDigit 1114112)", "false"),
+        ("(Character/isLowerCase \\a)", "true"),
+        ("(Character/isLowerCase \\Z)", "false"),
+        ("(Character/isLowerCase \\5)", "false"),
+        ("(Character/isLowerCase \\é)", "true"),
+        ("(Character/isLowerCase \\α)", "true"),
+        ("(Character/isLowerCase \\中)", "false"),
+        ("(Character/isLowerCase \\ß)", "true"),
+        ("(Character/isLowerCase \\A)", "false"),
+        ("(Character/isLowerCase 223)", "true"),
+        ("(Character/isLowerCase 120792)", "false"),
+        ("(Character/isLowerCase -65)", "false"),
+        ("(Character/isLowerCase 0)", "false"),
+    ] {
+        assert_eq!(run(&mut eval, src), want, "{src}");
+    }
+    for (src, member) in [
+        ("(Character/isLetterOrDigit nil)", "isLetterOrDigit"),
+        ("(Character/isLetterOrDigit \"a\")", "isLetterOrDigit"),
+        ("(Character/isLetterOrDigit 1.5)", "isLetterOrDigit"),
+        ("(Character/isLowerCase 97N)", "isLowerCase"),
+        ("(Character/isLowerCase nil)", "isLowerCase"),
+    ] {
+        assert_eq!(
+            uncaught(&mut eval, src),
+            format!(
+                "java.lang.IllegalArgumentException | No matching method {member} found taking 1 args"
+            ),
+            "{src}"
+        );
+    }
+}
+
+#[test]
+fn static_math_rows() {
+    let mut eval = boot();
+    assert_eq!(run(&mut eval, "(Math/abs -5)"), "5");
+    assert_eq!(
+        run(&mut eval, "(Math/abs -9223372036854775808)"),
+        "-9223372036854775808"
+    );
+    assert_eq!(run(&mut eval, "(Math/abs -5.5)"), "5.5");
+    assert_eq!(run(&mut eval, "(Math/abs -0.0)"), "0.0");
+    assert_eq!(run(&mut eval, "(Math/sqrt 4)"), "2.0");
+    assert_eq!(run(&mut eval, "(Math/sqrt 4N)"), "2.0");
+    assert_eq!(run(&mut eval, "(Math/sqrt 1/2)"), "0.7071067811865476");
+    assert_eq!(run(&mut eval, "(Math/sqrt -1.0)"), "##NaN");
+    assert_eq!(run(&mut eval, "(Math/pow 2 10)"), "1024.0");
+    assert_eq!(run(&mut eval, "(Math/pow 0.0 0.0)"), "1.0");
+    assert_eq!(run(&mut eval, "(Math/ceil 5)"), "5.0");
+    assert_eq!(run(&mut eval, "(Math/ceil -1.5)"), "-1.0");
+    assert_eq!(run(&mut eval, "(Math/log 1.0)"), "0.0");
+    assert_eq!(run(&mut eval, "(Math/exp 1.0)"), "2.718281828459045");
+    assert_eq!(run(&mut eval, "(Math/sin 0.0)"), "0.0");
+    assert_eq!(run(&mut eval, "(Math/cos 0.0)"), "1.0");
+    assert_eq!(run(&mut eval, "(Math/tanh 1.0)"), "0.7615941559557649");
+    assert_eq!(run(&mut eval, "(Math/hypot 3 4)"), "5.0");
+    assert_eq!(
+        uncaught(&mut eval, "(Math/abs 5N)"),
+        "java.lang.IllegalArgumentException | No matching method abs found taking 1 args"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(Math/abs -1/2)"),
+        "java.lang.IllegalArgumentException | No matching method abs found taking 1 args"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(Math/abs nil)"),
+        "java.lang.IllegalArgumentException | No matching method abs found taking 1 args"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(Math/abs \\a)"),
+        "java.lang.IllegalArgumentException | No matching method abs found taking 1 args"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(Math/sqrt nil)"),
+        "java.lang.NullPointerException | Cannot invoke \"java.lang.Number.doubleValue()\" because \"x\" is null"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(Math/sqrt \"4\")"),
+        cce_bootstrap("java.lang.String", "java.lang.Number")
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(Math/sqrt \\a)"),
+        cce_bootstrap("java.lang.Character", "java.lang.Number")
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(Math/nope 1)"),
+        "java.lang.IllegalArgumentException | No matching method nope found taking 1 args for class java.lang.Math"
+    );
+}
+
+#[test]
+fn static_quote_replacement_rows() {
+    let mut eval = boot();
+    assert_eq!(
+        run(
+            &mut eval,
+            "(java.util.regex.Matcher/quoteReplacement \"a$b\\\\c\")"
+        ),
+        "\"a\\\\$b\\\\\\\\c\""
+    );
+    assert_eq!(
+        run(
+            &mut eval,
+            "(java.util.regex.Matcher/quoteReplacement \"abc\")"
+        ),
+        "\"abc\""
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(java.util.regex.Matcher/quoteReplacement nil)"),
+        "java.lang.NullPointerException | Cannot invoke \"String.indexOf(int)\" because \"s\" is null"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(java.util.regex.Matcher/quoteReplacement 42)"),
+        cce_bootstrap("java.lang.Long", "java.lang.String")
+    );
+}
+
+#[test]
+fn static_string_format_rows() {
+    let mut eval = boot();
+    assert_eq!(
+        run(
+            &mut eval,
+            "(String/format \"%.6f\" (to-array [(/ 1.0 3.0)]))"
+        ),
+        "\"0.333333\""
+    );
+    assert_eq!(
+        run(
+            &mut eval,
+            "(String/format java.util.Locale/US \"%.6f\" (to-array [2.5]))"
+        ),
+        "\"2.500000\""
+    );
+    assert_eq!(
+        run(&mut eval, "(String/format \"%s %d\" (to-array [\"a\" 1]))"),
+        "\"a 1\""
+    );
+    assert_eq!(run(&mut eval, "(String/format \"%s\" nil)"), "\"null\"");
+    assert_eq!(
+        run(&mut eval, "(String/format nil \"%s\" (to-array [\"a\"]))"),
+        "\"a\""
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(String/format \"%s\" \"a\")"),
+        cce_bootstrap("java.lang.String", "[Ljava.lang.Object;")
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(String/format \"%s\" (int-array [1]))"),
+        cce_bootstrap("[I", "[Ljava.lang.Object;")
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(String/format 42 (to-array []))"),
+        cce_bootstrap("java.lang.Long", "java.lang.String")
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(String/format nil (to-array []))"),
+        "java.lang.NullPointerException | Cannot invoke \"String.length()\" because \"s\" is null"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(String/format \"%s\" \"a\" \"b\")"),
+        cce_bootstrap("java.lang.String", "java.util.Locale")
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(String/format \"%d\" (to-array [\"a\"]))"),
+        "java.util.IllegalFormatConversionException | d != java.lang.String"
+    );
+}
+
+// The runtime arity miss of every new static (direct `__static*`
+// calls — static syntax arity-checks at compile time).
+#[test]
+fn static_host_runtime_arity_rows() {
+    let mut eval = boot();
+    for (class, member) in [
+        ("java.lang.Long", "parseLong"),
+        ("java.lang.Long", "remainderUnsigned"),
+        ("java.lang.Integer", "parseInt"),
+        ("java.lang.Double", "parseDouble"),
+        ("java.lang.Character", "digit"),
+        ("java.lang.Character", "isWhitespace"),
+        ("java.lang.Math", "abs"),
+        ("java.lang.Math", "sqrt"),
+        ("java.lang.Math", "pow"),
+        ("java.util.regex.Matcher", "quoteReplacement"),
+        ("java.lang.String", "format"),
+    ] {
+        assert_eq!(
+            uncaught(&mut eval, &format!("(__static* \"{class}\" \"{member}\")")),
+            format!(
+                "java.lang.IllegalArgumentException | No matching method {member} found taking 0 args for class {class}"
+            ),
+            "{class}/{member}"
+        );
+    }
+}
+
+// Compile-time arity checks for the new statics (one per shape).
+#[test]
+fn static_host_arity_compile_rows() {
+    let mut eval = boot();
+    assert_eq!(
+        chain(&mut eval, "(Long/parseLong)"),
+        vec![
+            "Syntax error compiling Long/parseLong at (user:1:1).".to_owned(),
+            "java.lang.IllegalArgumentException | No matching method parseLong found taking 0 args for class java.lang.Long"
+                .to_owned(),
+        ]
+    );
+    assert_eq!(
+        chain(&mut eval, "(String/format \"%s\")"),
+        vec![
+            "Syntax error compiling String/format at (user:1:1).".to_owned(),
+            "java.lang.IllegalArgumentException | No matching method format found taking 1 args for class java.lang.String"
+                .to_owned(),
+        ]
+    );
+    assert_eq!(
+        chain(&mut eval, "(Math/pow 1.0)"),
+        vec![
+            "Syntax error compiling Math/pow at (user:1:1).".to_owned(),
+            "java.lang.IllegalArgumentException | No matching method pow found taking 1 args for class java.lang.Math"
+                .to_owned(),
+        ]
     );
 }

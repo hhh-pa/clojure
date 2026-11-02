@@ -884,6 +884,18 @@ impl<'a> Analyzer<'a> {
             // members (method fns, field reads) are a later slice,
             // so those keep `No such namespace` for now.
             Some(ns) if self.eval.registry.namespace_target_in(&cur, ns).is_none() => {
+                // Value-position static fields (`Math/PI`,
+                // `Long/MAX_VALUE`, … — oracle `v-field`): a
+                // resolvable class head plus a known field reads
+                // the constant. Unknown members keep the deferred
+                // miss shapes.
+                if let Some(class) = self.static_head_class(&cur, ns) {
+                    if let Some(value) =
+                        crate::classemu::static_field_value(class.name(), sym.name())
+                    {
+                        return Ok(Expr::Literal(value));
+                    }
+                }
                 Err(self.dangling_alias_err(&cur, ns, span))
             }
             Some(_) => Err(self.err(

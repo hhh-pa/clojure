@@ -298,6 +298,35 @@ fn run_no_args_binds_nil() {
 }
 
 #[test]
+fn run_slurps_piped_stdin() {
+    // `(slurp *in*)` drains piped stdin byte-exact (stdin scripts
+    // read their whole input this way); no trailing line required.
+    let fixture = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/slurp_stdin.clj"
+    );
+    let out = run_with_stdin(["run", fixture], "a\nb");
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(stdout(&out), "a\nb");
+    let out = run_with_stdin(["run", fixture], "");
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(stdout(&out), "");
+}
+
+#[test]
+fn run_preloads_clojure_string() {
+    // JVM `clojure.main` requires `clojure.string`, so scripts may
+    // use qualified vars with no `require` of their own.
+    let fixture = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/string_preloaded.clj"
+    );
+    let out = run(["run", fixture]);
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(stdout(&out), "a,b\n");
+}
+
+#[test]
 fn run_prints_no_per_form_echo() {
     // Pins P7: program output only; defs and values stay silent.
     let fixture = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/quiet.clj");

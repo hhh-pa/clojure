@@ -1667,6 +1667,7 @@ pub(crate) fn is_counted(v: &Value) -> bool {
             | Value::PrimitiveVector(_)
     ) || crate::coll::is_transient(v)
         || as_subvector(v).is_some()
+        || crate::hostvals::as_queue(v).is_some()
         || is_counted_seq(v)
         || crate::types::is_host_record(v)
         || crate::types::is_host_struct(v)
@@ -3161,34 +3162,68 @@ fn double_int(d: f64) -> Result<i64, NativeError> {
     }
 }
 
+/// A `long` from any number (the reflector rule, shared with
+/// `long`): tower narrows exactly, `NaN` is 0, out-of-range
+/// fails; nil trips the `doubleValue` NPE, characters and the
+/// rest fail to `Number`.
+pub(crate) fn long_of(v: &Value) -> Result<i64, NativeError> {
+    match v {
+        Value::Int(i) => Ok(*i),
+        Value::Double(d) => double_long(*d),
+        Value::BigInt(n) | Value::BigInteger(n) => bigint_long(n),
+        Value::Ratio(r) => bigint_long(&trunc_ratio(r)),
+        // Decimals narrow through `double` (oracle `conv-declong`:
+        // `(long 1E+30M)` fails `1.0E30`).
+        Value::BigDec(d) => double_long(d.to_f64()),
+        Value::Nil => Err(npe_double_value()),
+        v => Err(cce_err(v, "java.lang.Number")),
+    }
+}
+
 pub(crate) fn native_long(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/long", args, &[1])?;
     Ok(Value::Int(match &args[0] {
-        Value::Int(i) => *i,
-        Value::Double(d) => double_long(*d)?,
+        // Characters convert (unlike the reflector rule).
         Value::Char(c) => *c as i64,
-        Value::BigInt(n) | Value::BigInteger(n) => bigint_long(n)?,
-        Value::Ratio(r) => bigint_long(&trunc_ratio(r))?,
-        // Decimals narrow through `double` (oracle `conv-declong`:
-        // `(long 1E+30M)` fails `1.0E30`).
-        Value::BigDec(d) => double_long(d.to_f64())?,
-        Value::Nil => return Err(npe_double_value()),
-        v => return Err(cce_err(v, "java.lang.Number")),
+        v => long_of(v)?,
     }))
+}
+
+/// A `double` from any number (shared `double`/reflector rule):
+/// tower widens (`to_f64`, `NaN` when unrepresentable), nil trips
+/// the `doubleValue` NPE, anything else fails to `Number`.
+/// Characters rejected (fixprobe11 `:dbl-ch`).
+pub(crate) fn double_of(v: &Value) -> Result<f64, NativeError> {
+    match v {
+        Value::Int(i) => Ok(*i as f64),
+        Value::Double(d) => Ok(*d),
+        Value::BigInt(n) | Value::BigInteger(n) => Ok(n.to_f64().unwrap_or(f64::NAN)),
+        Value::Ratio(r) => Ok(r.to_f64().unwrap_or(f64::NAN)),
+        Value::BigDec(d) => Ok(d.to_f64()),
+        Value::Nil => Err(npe_double_value()),
+        v => Err(cce_err(v, "java.lang.Number")),
+    }
 }
 
 pub(crate) fn native_double(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/double", args, &[1])?;
-    Ok(Value::Double(match &args[0] {
-        Value::Int(i) => *i as f64,
-        Value::Double(d) => *d,
-        Value::BigInt(n) | Value::BigInteger(n) => n.to_f64().unwrap_or(f64::NAN),
-        Value::Ratio(r) => r.to_f64().unwrap_or(f64::NAN),
-        Value::BigDec(d) => d.to_f64(),
-        Value::Nil => return Err(npe_double_value()),
-        // Characters rejected (fixprobe11 `:dbl-ch`).
-        v => return Err(cce_err(v, "java.lang.Number")),
-    }))
+    Ok(Value::Double(double_of(&args[0])?))
+}
+
+/// An `int` from any number (the reflector radix rule): numbers
+/// narrow through the `long` range check, then `toIntExact`;
+/// nil trips the `charValue` NPE, characters fail to `Number`
+/// like every other non-number.
+pub(crate) fn int_of_number(v: &Value) -> Result<i32, NativeError> {
+    match v {
+        Value::Int(i) => int_exact_long(*i),
+        Value::Double(d) => int_exact_long(double_long(*d)?),
+        Value::BigInt(n) | Value::BigInteger(n) => int_exact_long(bigint_long(n)?),
+        Value::Ratio(r) => int_exact_long(bigint_long(&trunc_ratio(r))?),
+        Value::BigDec(d) => int_exact_long(double_long(d.to_f64())?),
+        Value::Nil => Err(npe_char_value()),
+        v => Err(cce_err(v, "java.lang.Number")),
+    }
 }
 
 /// `bigint`: `BigInt` passes through; `Int` widens; `Double`
@@ -3626,9 +3661,30 @@ fn decimal_value(c: char) -> Option<u32> {
     (d < 10).then_some(d)
 }
 
-/// `Long.parseLong`: one ASCII sign, 1+ decimal digits (any
-/// script), overflow → `None` (the caller answers nil).
-fn parse_long_str(s: &str) -> Option<i64> {
+/// `Character.digit(c, radix)`: the digit value when `c` reads
+/// in `radix` — general-Nd decimals, ASCII `a-zA-Z`, and the
+/// fullwidth letter block — else `None` (the digit caller
+/// answers `-1`, the parse caller fails the whole input).
+pub(crate) fn char_digit(c: char, radix: u32) -> Option<u32> {
+    if !(2..=36).contains(&radix) {
+        return None;
+    }
+    if let Some(d) = decimal_value(c) {
+        return (d < radix).then_some(d);
+    }
+    let d = match c {
+        'a'..='z' => c as u32 - 'a' as u32 + 10,
+        'A'..='Z' => c as u32 - 'A' as u32 + 10,
+        '\u{FF21}'..='\u{FF3A}' => c as u32 - 0xFF21 + 10,
+        '\u{FF41}'..='\u{FF5A}' => c as u32 - 0xFF41 + 10,
+        _ => return None,
+    };
+    (d < radix).then_some(d)
+}
+
+/// `Long.parseLong` over an explicit radix: one ASCII sign, 1+
+/// `Character.digit` digits, overflow → `None`.
+pub(crate) fn parse_long_radix(s: &str, radix: u32) -> Option<i64> {
     let (neg, digits) = match s.strip_prefix('-') {
         Some(rest) => (true, rest),
         None => (false, s.strip_prefix('+').unwrap_or(s)),
@@ -3639,13 +3695,81 @@ fn parse_long_str(s: &str) -> Option<i64> {
     let mut acc: u64 = 0;
     for c in digits.chars() {
         acc = acc
-            .checked_mul(10)?
-            .checked_add(u64::from(decimal_value(c)?))?;
+            .checked_mul(u64::from(radix))?
+            .checked_add(u64::from(char_digit(c, radix)?))?;
     }
     if neg {
         (acc <= i64::MAX as u64 + 1).then_some((acc as i64).wrapping_neg())
     } else {
         (acc <= i64::MAX as u64).then_some(acc as i64)
+    }
+}
+
+/// `Long.parseLong`: one ASCII sign, 1+ decimal digits (any
+/// script), overflow → `None` (the caller answers nil).
+fn parse_long_str(s: &str) -> Option<i64> {
+    parse_long_radix(s, 10)
+}
+
+/// `NumberFormatException | For input string: "s"`.
+pub(crate) fn nfe_for_input(s: &str) -> NativeError {
+    NativeError::new(
+        ThrowClass::NumberFormatException,
+        format!("For input string: \"{s}\""),
+    )
+}
+
+/// `NumberFormatException | For input string: "s" under radix N`.
+pub(crate) fn nfe_for_input_radix(s: &str, radix: i32) -> NativeError {
+    NativeError::new(
+        ThrowClass::NumberFormatException,
+        format!("For input string: \"{s}\" under radix {radix}"),
+    )
+}
+
+/// `NumberFormatException` for a radix outside
+/// `Character.MIN_RADIX..=MAX_RADIX`.
+pub(crate) fn nfe_bad_radix(radix: i32) -> NativeError {
+    let side = if radix < 2 {
+        "less than Character.MIN_RADIX"
+    } else {
+        "greater than Character.MAX_RADIX"
+    };
+    NativeError::new(
+        ThrowClass::NumberFormatException,
+        format!("radix {radix} {side}"),
+    )
+}
+
+/// `NumberFormatException | Cannot parse null string` (a nil
+/// `parseLong`/`parseInt` subject).
+pub(crate) fn nfe_null_string() -> NativeError {
+    NativeError::new(
+        ThrowClass::NumberFormatException,
+        "Cannot parse null string".to_owned(),
+    )
+}
+
+/// `Double.parseDouble`: Java-`trim`, then the shared decimal
+/// shapes — an empty trim fails `empty String`, an unparseable
+/// body fails `For input string`, nil trips the `String.length`
+/// NPE, non-strings fail the `String` cast.
+pub(crate) fn parse_double_throw(v: &Value) -> Result<f64, NativeError> {
+    match v {
+        Value::Str(s) => {
+            if s.trim_matches(|c: char| c <= ' ').is_empty() {
+                return Err(NativeError::new(
+                    ThrowClass::NumberFormatException,
+                    "empty String".to_owned(),
+                ));
+            }
+            parse_double_str(s).ok_or_else(|| nfe_for_input(s))
+        }
+        Value::Nil => Err(NativeError::new(
+            ThrowClass::NullPointerException,
+            "Cannot invoke \"String.length()\" because \"in\" is null".to_owned(),
+        )),
+        other => Err(cce_err(other, "java.lang.String")),
     }
 }
 
@@ -4182,13 +4306,15 @@ fn native_throw_npe(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nativ
     Err(NativeError::new(ThrowClass::NullPointerException, s))
 }
 
-/// `odd?`/`even?`: the low bit of an `Int` (two's complement, so
-/// negatives work); anything else is `Argument must be an integer:
-/// <str>`.
+/// `odd?`/`even?`: the low bit of an `Int`/`BigInt`/`BigInteger`
+/// (two's complement, so negatives work — oracle
+/// `/tmp/oddeven.clj`); anything else is `Argument must be an
+/// integer: <str>`.
 fn native_odd(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/odd?", args, &[1])?;
     match &args[0] {
         Value::Int(n) => Ok(Value::Bool((n & 1) == 1)),
+        Value::BigInt(b) | Value::BigInteger(b) => Ok(Value::Bool(b.bit(0))),
         v => Err(NativeError::new(
             ThrowClass::IllegalArgumentException,
             format!("Argument must be an integer: {}", crate::ns::str_of(v)),
@@ -4200,6 +4326,7 @@ fn native_even(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErr
     check_arity("clojure.core/even?", args, &[1])?;
     match &args[0] {
         Value::Int(n) => Ok(Value::Bool((n & 1) == 0)),
+        Value::BigInt(b) | Value::BigInteger(b) => Ok(Value::Bool(!b.bit(0))),
         v => Err(NativeError::new(
             ThrowClass::IllegalArgumentException,
             format!("Argument must be an integer: {}", crate::ns::str_of(v)),

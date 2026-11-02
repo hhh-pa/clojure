@@ -633,7 +633,11 @@ fn new_via_symbol(
 /// `new-missing-fq`); anything else is `Unable to resolve
 /// classname` (oracles `ctor-missing-simple`, `new-missing-simple`,
 /// `m-new-qual*`).
-fn new_unresolved(eval: &Evaluator, sym: &Symbol, args: &[Value]) -> Result<Value, NativeError> {
+fn new_unresolved(
+    eval: &mut Evaluator,
+    sym: &Symbol,
+    args: &[Value],
+) -> Result<Value, NativeError> {
     if sym.namespace().is_none() && crate::classemu::is_class_position(sym.name()) {
         if let Some(class) = crate::classemu::resolve_class_name(eval, sym.name()) {
             return new_via_class(eval, class.name(), args);
@@ -654,12 +658,21 @@ fn new_unresolved(eval: &Evaluator, sym: &Symbol, args: &[Value]) -> Result<Valu
 /// names construct (interfaces miss), anything else is the
 /// uniform miss — `for interface` iff the lattice says so
 /// (oracles `ctor-iface`, `ctor-abstract`, `ctor-private`).
-fn new_via_class(eval: &Evaluator, name: &str, args: &[Value]) -> Result<Value, NativeError> {
+fn new_via_class(eval: &mut Evaluator, name: &str, args: &[Value]) -> Result<Value, NativeError> {
     if name == "java.lang.String" {
         return crate::ctor::build_string(args);
     }
     if name == "java.lang.Object" {
         return crate::ctor::build_object(args);
+    }
+    if name == "java.lang.StringBuilder" {
+        return crate::ctor::build_builder(args, "java.lang.StringBuilder");
+    }
+    if name == "java.lang.StringBuffer" {
+        return crate::ctor::build_builder(args, "java.lang.StringBuffer");
+    }
+    if name == "java.lang.IllegalArgumentException" {
+        return crate::ctor::build_iae(eval, args);
     }
     match hostdef_by_name(eval, name) {
         Some(def) => new_via_def(&def, args),
@@ -751,10 +764,11 @@ fn npe_target() -> NativeError {
 /// targets NPE on every member at every arity (the JVM reflectors
 /// `getClass` before lookup — oracle `nil-nosuch-*`,
 /// `dotdot-nil-*`); the S16 member surface goes first for the rest,
-/// zero-arg host calls then read a field first (like the JVM's
-/// reflector), `gen-class` instances forward to their `prefix`
-/// fns, and anything missing is the oracle's field/method error.
-/// Non-host targets get the same shapes with their own class.
+/// zero-arg host calls then try a method first, then a field (the
+/// JVM's `invokeNoArgInstanceMember` order), `gen-class` instances
+/// forward to their `prefix` fns, and anything missing is the
+/// oracle's field/method error. Non-host targets get the same
+/// shapes with their own class.
 fn native_meth(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     if args.len() < 2 {
         return Err(NativeError::arity("clojure.core/__meth*", args.len()));
@@ -852,8 +866,9 @@ pub(crate) fn call_zero_arg_method(
 }
 
 /// Instance method/field dispatch (split from [`native_meth`] for
-/// the complexity budget): zero-arg calls read a field first (like
-/// the JVM's reflector), then a zero-arg method, else the `Object`
+/// the complexity budget): zero-arg calls try a zero-arg method
+/// first, then a field (the JVM's
+/// `Reflector.invokeNoArgInstanceMember` order), else the `Object`
 /// fallback; longer calls need a listed overload. Proxies take
 /// the S14 cell path instead; every other kind prepends the
 /// instance as `this`.
@@ -869,12 +884,12 @@ fn meth_on_host(
         return meth_on_proxy(eval, h, method, rest);
     }
     if rest.is_empty() {
-        if let Some(v) = field_hit(d, h, method) {
-            return Ok(v);
-        }
         if let Some(m) = find_method(d, method, 0) {
             let func = m.func.clone();
             return call_method(eval, &func, target, rest);
+        }
+        if let Some(v) = field_hit(d, h, method) {
+            return Ok(v);
         }
         return object_fallback(h, method, &d.name);
     }

@@ -3505,7 +3505,7 @@ fn dotdot_expansions() {
     );
     assert_eq!(
         run(&mut eval, "(macroexpand-1 '(.. rect p))"),
-        "(clojure.core/__field* (quote p) rect)"
+        "(clojure.core/__meth* (quote p) rect)"
     );
     assert_eq!(
         uncaught(&mut eval, "(macroexpand-1 '(.. x))"),
@@ -3523,8 +3523,9 @@ fn dotdot_expansions() {
 
 // m-thread-1/2/field, m-nil-tostring/hash/eq/getclass,
 // m-nil-miss0/miss1/field, m-miss-0/1/field: threading, the nil
-// target rule (resolving members NPE; anything else keeps the miss
-// shapes with class `null`), and 0-arg misses reading field-first.
+// target rule (every member NPEs, paren or bare — oracle
+// `nil-nosuch-*`, `dotdot-nil-*`, `/tmp/dotorder2.clj`), and
+// 0-arg misses keeping the field-shaped error.
 #[test]
 fn dotdot_threading() {
     let mut eval = boot();
@@ -3553,12 +3554,11 @@ fn dotdot_threading() {
             "{src}"
         );
     }
-    // Field position (`__field*`, not a call) keeps the miss shape
-    // — no oracle row covers field-read on nil (the JVM NPEs there
-    // too; follow-up).
+    // Bare-symbol position is a no-arg member call, so nil NPEs
+    // there too (oracle `/tmp/dotorder2.clj` `nil-bare`).
     assert_eq!(
         uncaught(&mut eval, "(.. nil nosuch_xyz)"),
-        "java.lang.IllegalArgumentException | No matching field found: nosuch_xyz for class null"
+        "java.lang.NullPointerException | Cannot invoke \"Object.getClass()\" because \"target\" is null"
     );
     assert_eq!(
         uncaught(&mut eval, "(.. \"a\" (nosuch_xyz))"),
@@ -3572,6 +3572,33 @@ fn dotdot_threading() {
         uncaught(&mut eval, "(.. \"a\" nosuch_xyz)"),
         "java.lang.IllegalArgumentException | No matching field found: nosuch_xyz for class java.lang.String"
     );
+}
+
+// dotdot-noarg-method/field/nil, dot-noarg-precedence: a bare
+// `..` symbol is a no-arg member, not a field — the JVM's
+// `invokeNoArgInstanceMember` tries the zero-arg method first,
+// then the field (oracle `/tmp/dotorder.clj`,
+// `/tmp/dotorder2.clj`).
+#[test]
+fn dotdot_noarg_member_order() {
+    let mut eval = boot();
+    assert_eq!(run(&mut eval, "(.. \"abc\" toString)"), "\"abc\"");
+    assert_eq!(
+        run(&mut eval, "(.. \"abc\" toString toUpperCase)"),
+        "\"ABC\""
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(.. nil nosuch_xyz)"),
+        "java.lang.NullPointerException | Cannot invoke \"Object.getClass()\" because \"target\" is null"
+    );
+    run(
+        &mut eval,
+        "(defprotocol P (foo [this])) (deftype T [foo] P (foo [this] :method))",
+    );
+    assert_eq!(run(&mut eval, "(.. (T. :field) foo)"), ":method");
+    assert_eq!(run(&mut eval, "(.foo (T. :field))"), ":method");
+    run(&mut eval, "(deftype U [bar])");
+    assert_eq!(run(&mut eval, "(.. (U. 42) bar)"), "42");
 }
 
 // m-strlen-oo, m-substring-oo: landed on the surface (#120

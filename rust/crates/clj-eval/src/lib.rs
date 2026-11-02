@@ -34,6 +34,7 @@ pub mod fmt;
 pub mod fx4_form;
 pub mod fx4_host;
 pub mod hierarchy;
+pub mod hostvals;
 pub mod io;
 pub mod jdkio;
 pub mod jio;
@@ -65,7 +66,7 @@ pub use error::{
     CompileError, NativeError, Signal, Verb, compile_diagnostic, compile_head, jvm_class_of,
     simple_class_of, span_of,
 };
-pub use eval::{Evaluator, SourceError};
+pub use eval::{EVAL_DEPTH_LIMIT, EVAL_STACK_SIZE, Evaluator, SourceError};
 pub use expr::{
     Analyzer, Arity, Catch, Expr, FunExpr, KeyBinding, MapPattern, Pattern, VecPattern,
 };

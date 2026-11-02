@@ -18,10 +18,11 @@
 
 use std::sync::Arc;
 
-use clj_value::{ArrayStore, ThrowClass, Value};
+use clj_value::{ArrayStore, ThrowClass, Throwable, Value};
 
 use crate::core::int_exact_long;
 use crate::error::NativeError;
+use crate::eval::Evaluator;
 
 /// The emulated ctor arity table (parallel to
 /// [`crate::classemu::static_member_arities`]): the analyzer
@@ -34,6 +35,9 @@ pub(crate) fn ctor_arities(fqn: &str) -> Option<&'static [usize]> {
     match fqn {
         "java.lang.String" => Some(&[0, 1, 2, 3, 4]),
         "java.lang.Object" => Some(&[0]),
+        "java.lang.StringBuilder" => Some(&[0, 1]),
+        "java.lang.StringBuffer" => Some(&[0, 1]),
+        "java.lang.IllegalArgumentException" => Some(&[0, 1, 2]),
         _ => None,
     }
 }
@@ -52,10 +56,10 @@ pub(crate) fn no_ctor(fqn: &str, is_iface: bool) -> NativeError {
 /// The nil-overload ambiguity error, verbatim (the JVM says
 /// `method` for ctors too — oracles `ctor-str-nil1/2/3`,
 /// `d-bytes-nil`, `cs-nil-name`, `cn-nil1`, `s-new-nil`).
-fn ambiguity() -> NativeError {
+fn ambiguity(fqn: &str) -> NativeError {
     NativeError::new(
         ThrowClass::IllegalArgumentException,
-        "More than one matching method found: java.lang.String".to_owned(),
+        format!("More than one matching method found: {fqn}"),
     )
 }
 
@@ -95,6 +99,94 @@ pub(crate) fn build_object(args: &[Value]) -> Result<Value, NativeError> {
         )))
     } else {
         Err(no_ctor("java.lang.Object", false))
+    }
+}
+
+/// Build `(StringBuilder. …)` / `(StringBuffer. …)`: empty,
+/// copy (strings and fellow builders — the `CharSequence`
+/// overload), or capacity.
+pub(crate) fn build_builder(args: &[Value], class: &'static str) -> Result<Value, NativeError> {
+    match args.len() {
+        0 => Ok(crate::hostvals::BuilderValue::with_text(
+            class,
+            String::new(),
+        )),
+        1 => builder_one(&args[0], class),
+        _ => Err(no_ctor(class, false)),
+    }
+}
+
+/// The 1-arg builder overloads: strings copy, nils take the
+/// `String` overload and NPE in its body, longs size exactly
+/// (negatives fail `NegativeArraySize`), fellow builders copy,
+/// anything else misses (doubles and tower values never unbox
+/// here — oracle `sb-bad`).
+fn builder_one(v: &Value, class: &'static str) -> Result<Value, NativeError> {
+    if let Some(b) = crate::hostvals::as_builder(v) {
+        return Ok(crate::hostvals::BuilderValue::with_text(
+            class,
+            b.contents(),
+        ));
+    }
+    match v {
+        Value::Str(s) => Ok(crate::hostvals::BuilderValue::with_text(
+            class,
+            s.to_string(),
+        )),
+        Value::Nil => Err(NativeError::new(
+            ThrowClass::NullPointerException,
+            "Cannot invoke \"String.length()\" because \"str\" is null".to_owned(),
+        )),
+        Value::Int(i) => {
+            let capacity = crate::core::int_exact_long(*i)?;
+            if capacity < 0 {
+                return Err(NativeError::new(
+                    ThrowClass::NegativeArraySizeException,
+                    capacity.to_string(),
+                ));
+            }
+            Ok(crate::hostvals::BuilderValue::with_text(
+                class,
+                String::new(),
+            ))
+        }
+        _ => Err(no_ctor(class, false)),
+    }
+}
+
+/// An `IllegalArgumentException` throwable value.
+fn iae_value(eval: &mut Evaluator, message: Option<String>, cause: Option<Throwable>) -> Value {
+    Value::Throwable(Throwable {
+        id: eval.next_id(),
+        class: ThrowClass::IllegalArgumentException,
+        message: message.map(Arc::from),
+        data: None,
+        cause: cause.map(Box::new),
+    })
+}
+
+/// Build `(IllegalArgumentException. …)`: blank, message,
+/// cause, or both (a lone nil disambiguates nothing — the JVM
+/// reports the overload ambiguity).
+pub(crate) fn build_iae(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    match args.len() {
+        0 => Ok(iae_value(eval, None, None)),
+        1 => match &args[0] {
+            Value::Nil => Err(ambiguity("java.lang.IllegalArgumentException")),
+            Value::Str(s) => Ok(iae_value(eval, Some(s.to_string()), None)),
+            Value::Throwable(t) => Ok(iae_value(eval, None, Some(t.clone()))),
+            _ => Err(no_ctor("java.lang.IllegalArgumentException", false)),
+        },
+        2 => match (&args[0], &args[1]) {
+            (Value::Str(s), Value::Throwable(t)) => {
+                Ok(iae_value(eval, Some(s.to_string()), Some(t.clone())))
+            }
+            (Value::Str(s), Value::Nil) => Ok(iae_value(eval, Some(s.to_string()), None)),
+            (Value::Nil, Value::Throwable(t)) => Ok(iae_value(eval, None, Some(t.clone()))),
+            (Value::Nil, Value::Nil) => Ok(iae_value(eval, None, None)),
+            _ => Err(no_ctor("java.lang.IllegalArgumentException", false)),
+        },
+        _ => Err(no_ctor("java.lang.IllegalArgumentException", false)),
     }
 }
 
@@ -140,7 +232,7 @@ fn string_one(a0: &Value) -> Result<Value, NativeError> {
         return Ok(fresh_str(s));
     }
     if matches!(a0, Value::Nil) {
-        return Err(ambiguity());
+        return Err(ambiguity("java.lang.String"));
     }
     match ctor_array(a0) {
         Some(CtorArray::Chars(v)) => Ok(fresh_string(v.into_iter().collect())),
@@ -174,7 +266,7 @@ fn string_two(a0: &Value, a1: &Value) -> Result<Value, NativeError> {
         return Err(npe_bytes());
     }
     if matches!(a1, Value::Nil) {
-        return Err(ambiguity());
+        return Err(ambiguity("java.lang.String"));
     }
     Err(no_ctor("java.lang.String", false))
 }
@@ -191,7 +283,7 @@ fn string_two_bytes(bytes: &[u8], a1: &Value) -> Result<Value, NativeError> {
         return Ok(fresh_string(decode(cs, bytes)));
     }
     if matches!(a1, Value::Nil) {
-        return Err(ambiguity());
+        return Err(ambiguity("java.lang.String"));
     }
     Err(no_ctor("java.lang.String", false))
 }
@@ -207,7 +299,7 @@ fn string_three(a0: &Value, a1: &Value, a2: &Value) -> Result<Value, NativeError
         return Err(no_ctor("java.lang.String", false));
     };
     if matches!(a0, Value::Nil) {
-        return Err(ambiguity());
+        return Err(ambiguity("java.lang.String"));
     }
     match ctor_array(a0) {
         Some(CtorArray::Chars(v)) => chars_range(&v, *off, *count),
@@ -235,7 +327,7 @@ fn string_four(a0: &Value, a1: &Value, a2: &Value, a3: &Value) -> Result<Value, 
     }
     let Value::Str(name) = a3 else {
         if matches!(a3, Value::Nil) {
-            return Err(ambiguity());
+            return Err(ambiguity("java.lang.String"));
         }
         return Err(no_ctor("java.lang.String", false));
     };

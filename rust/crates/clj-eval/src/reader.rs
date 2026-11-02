@@ -128,6 +128,31 @@ pub(crate) fn check_reader_open(r: &StreamReader) -> Result<(), NativeError> {
     Ok(())
 }
 
+/// Drain one buffered source to EOF (`slurp` over readers;
+/// generic so unit tests drive it without process stdin).
+fn drain_src<R: BufRead>(src: &mut R, out: &mut String) -> Result<(), NativeError> {
+    src.read_to_string(out)
+        .map_err(|e| NativeError::new(ThrowClass::IOException, e.to_string()))?;
+    Ok(())
+}
+
+/// Drain a stream reader to a string (`slurp`): the parser's
+/// unconsumed remainder, then raw stdin to EOF for stdin-backed
+/// readers. Byte-exact whenever the parser holds no `\r` (stdin
+/// scripts slurp first, so their drain never touches the
+/// normalizing parser at all); a `\r` already pulled into the
+/// parser reads back normalized, exactly as `read-line` yields
+/// it.
+pub(crate) fn drain_reader(reader: &StreamReader) -> Result<String, NativeError> {
+    check_reader_open(reader)?;
+    let mut state = lock_state(reader);
+    let mut out = state.parser.take_rest();
+    if let Some(src) = state.stdin.as_mut() {
+        drain_src(src, &mut out)?;
+    }
+    Ok(out)
+}
+
 /// A fresh stdin reader value (the `*in*` root): an empty parser
 /// fed line by line from process stdin.
 pub(crate) fn stdin_reader(eval: &mut Evaluator) -> Value {
@@ -1297,6 +1322,37 @@ mod tests {
         assert_eq!(state.parser.read_line(), Some("a".to_owned()));
         assert_eq!(state.parser.read_line(), Some("b".to_owned()));
         assert_eq!(state.parser.read_line(), None);
+    }
+
+    /// A source that always fails (`drain_src` error arm).
+    struct FailSrc;
+
+    impl std::io::Read for FailSrc {
+        fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::other("boom"))
+        }
+    }
+
+    impl BufRead for FailSrc {
+        fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
+            Err(std::io::Error::other("boom"))
+        }
+
+        fn consume(&mut self, _amt: usize) {}
+    }
+
+    #[test]
+    fn drain_src_reads_to_eof_or_reports_io() {
+        // Success appends raw bytes (no line splitting).
+        let mut out = String::from("head");
+        let mut src = Cursor::new(b"a\nb" as &[u8]);
+        drain_src(&mut src, &mut out).unwrap();
+        assert_eq!(out, "heada\nb");
+        // A failing source reports `IOException` with its text.
+        let mut out = String::new();
+        let err = drain_src(&mut FailSrc, &mut out).unwrap_err();
+        assert_eq!(err.class, ThrowClass::IOException);
+        assert_eq!(err.message, "boom");
     }
 
     #[test]
