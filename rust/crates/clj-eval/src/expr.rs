@@ -92,12 +92,14 @@ pub struct Arity {
     pub body: Vec<Expr>,
 }
 
-/// An analyzed `fn`: display name plus arities.
+/// An analyzed `fn`: display name plus arities. The arities are
+/// `Arc`-shared (analysis builds them once; every closure over
+/// this `fn` aliases them instead of cloning the AST).
 #[derive(Clone, Debug)]
 pub struct FunExpr {
     /// `user/eval7/fn--8` or `user/eval7/name--9`.
     pub display: String,
-    pub arities: Vec<Arity>,
+    pub arities: Arc<[Arity]>,
 }
 
 /// One `ns` clause (raw unevaluated items, like the macro's
@@ -264,9 +266,11 @@ pub enum Expr {
         body: Vec<Expr>,
     },
     /// `(lazy-seq* body…)` (S5D analyzer form — the JVM has no such
-    /// var; `lazy-seq` expands to this).
+    /// var; `lazy-seq` expands to this). The body is `Arc`-shared
+    /// (analysis builds it once; every thunk aliases it instead of
+    /// cloning the AST).
     LazySeqStar {
-        body: Vec<Expr>,
+        body: Arc<Vec<Expr>>,
     },
     /// `(delay* body…)` (S6A analyzer form — the JVM has no such
     /// var; `delay` expands to this). `display` names the trapped
@@ -3550,7 +3554,9 @@ impl<'a> Analyzer<'a> {
         let body = self.analyze_body(&items[1..], span, true);
         self.recur = saved_recur;
         self.no_recur = saved_no_recur;
-        Ok(Expr::LazySeqStar { body: body? })
+        Ok(Expr::LazySeqStar {
+            body: Arc::new(body?),
+        })
     }
 
     /// `(delay* body…)`: a zero-arg `fn` boundary for `recur` (like
@@ -4411,7 +4417,10 @@ impl<'a> Analyzer<'a> {
         };
         let arities = self.analyze_arities(raw, span)?;
         self.locals.truncate(base);
-        let fun = FunExpr { display, arities };
+        let fun = FunExpr {
+            display,
+            arities: arities.into(),
+        };
         match (name, name_slot) {
             (Some(n), Some(slot)) => Ok((fun, Some((n, slot)))),
             _ => Ok((fun, None)),
@@ -4757,7 +4766,13 @@ impl<'a> Analyzer<'a> {
             let slices: Vec<&[&Value]> = owned.iter().map(Vec::as_slice).collect();
             let raw = self.parse_clause_slices(&slices, span)?;
             let arities = self.analyze_arities(&raw, span)?;
-            fns.push((spec.name.clone(), FunExpr { display, arities }));
+            fns.push((
+                spec.name.clone(),
+                FunExpr {
+                    display,
+                    arities: arities.into(),
+                },
+            ));
         }
         let body = self.analyze_body(&items[2..], span, tail)?;
         self.locals.truncate(base);

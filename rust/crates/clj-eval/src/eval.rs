@@ -942,10 +942,9 @@ impl Evaluator {
             Expr::Time { expr } => self.eval_time(expr, env),
             Expr::WithOutStr { out, body } => self.eval_with_out_str(out, body, env),
             Expr::WithInStr { input, s, body } => self.eval_with_in_str(input, s, body, env),
-            Expr::LazySeqStar { body } => Ok(crate::lazy::thunk0_value(
-                Arc::new(body.clone()),
-                env.clone(),
-            )),
+            Expr::LazySeqStar { body } => {
+                Ok(crate::lazy::thunk0_value(Arc::clone(body), env.clone()))
+            }
             Expr::DelayStar { display, body } => Ok(self.eval_delay_star(display, body, env)),
             Expr::Locking { lockee, body } => self.eval_locking(lockee, body, env),
             Expr::Sync { body } | Expr::Io { body } => {
@@ -962,7 +961,10 @@ impl Evaluator {
             } => self.eval_case_star(expr, *shift, *mask, default, cases, skip, *test, env),
             Expr::Invoke { head, args, span } => {
                 let callee = self.eval(head, env)?;
-                let mut values = Vec::with_capacity(args.len());
+                // Stack-inline arg buffer (spills past 4 args, like
+                // the old heap `Vec`): calls never escape this
+                // buffer, so most arities allocate nothing.
+                let mut values: SmallVec<[Value; 4]> = SmallVec::new();
                 for arg in args {
                     values.push(self.eval(arg, env)?);
                 }
@@ -1731,11 +1733,11 @@ impl Evaluator {
     fn eval_delay_star(&mut self, display: &str, body: &[Expr], env: &Env) -> Value {
         let fun = crate::expr::FunExpr {
             display: display.to_owned(),
-            arities: vec![crate::expr::Arity {
+            arities: Arc::from([crate::expr::Arity {
                 fixed: Vec::new(),
                 rest: None,
                 body: body.to_vec(),
-            }],
+            }]),
         };
         let closure = self.make_closure(&fun, env);
         Value::Delay(Delay::new(Value::Extension(Arc::new(closure))))
@@ -2078,7 +2080,7 @@ impl Evaluator {
     /// The arity dispatch behind [`apply_closure`](Self::apply_closure).
     fn apply_closure_inner(&mut self, closure: &Closure, args: &[Value]) -> Result<Value, Signal> {
         let mut variadic: Option<&crate::expr::Arity> = None;
-        for arity in &closure.arities {
+        for arity in closure.arities.iter() {
             if arity.rest.is_none() && arity.fixed.len() == args.len() {
                 return self.apply_arity(closure, arity, args, None);
             }
