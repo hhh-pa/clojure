@@ -83,6 +83,12 @@ const JAVA_SHELL_CLJ: &str = include_str!("java_shell.clj");
 /// with zero install steps.
 const STDLIB_STRING_CLJ: &str = include_str!("stdlib/clojure/string.clj");
 const STDLIB_SET_CLJ: &str = include_str!("stdlib/clojure/set.clj");
+// W1 (verbatim+pure) — do not merge by hand, integrator resolves.
+const STDLIB_W1_TEMPLATE_CLJ: &str = include_str!("stdlib/clojure/template.clj");
+const STDLIB_W1_WALK_CLJ: &str = include_str!("stdlib/clojure/walk.clj");
+const STDLIB_W1_ZIP_CLJ: &str = include_str!("stdlib/clojure/zip.clj");
+const STDLIB_W1_DATA_CLJ: &str = include_str!("stdlib/clojure/data.clj");
+const STDLIB_W1_DATAFY_CLJ: &str = include_str!("stdlib/clojure/datafy.clj");
 
 const TOOLS_DEPS_UTIL_DIR_CLJ: &str = include_str!("tools_deps_util_dir.clj");
 const TOOLS_DEPS_EDN_CLJ: &str = include_str!("tools_deps_edn.clj");
@@ -1343,6 +1349,16 @@ const EMBEDDED_SOURCES: &[(&str, &str, &str)] = &[
     ("clojure/reflect", "clojure/reflect.clj", REFLECT_CLJ),
     ("clojure/string", "clojure/string.clj", STDLIB_STRING_CLJ),
     ("clojure/set", "clojure/set.clj", STDLIB_SET_CLJ),
+    // W1 (verbatim+pure) — do not merge by hand, integrator resolves.
+    (
+        "clojure/template",
+        "clojure/template.clj",
+        STDLIB_W1_TEMPLATE_CLJ,
+    ),
+    ("clojure/walk", "clojure/walk.clj", STDLIB_W1_WALK_CLJ),
+    ("clojure/zip", "clojure/zip.clj", STDLIB_W1_ZIP_CLJ),
+    ("clojure/data", "clojure/data.clj", STDLIB_W1_DATA_CLJ),
+    ("clojure/datafy", "clojure/datafy.clj", STDLIB_W1_DATAFY_CLJ),
 ];
 
 /// Resolve a load root (no leading slash) to the `*file*` path and
