@@ -83,6 +83,12 @@ const JAVA_SHELL_CLJ: &str = include_str!("java_shell.clj");
 /// with zero install steps.
 const STDLIB_STRING_CLJ: &str = include_str!("stdlib/clojure/string.clj");
 const STDLIB_SET_CLJ: &str = include_str!("stdlib/clojure/set.clj");
+// W6 (runtime-ish) — do not merge by hand, integrator resolves.
+const W6_SERVER_CLJ: &str = include_str!("stdlib/clojure/core/server.clj");
+const W6_REDUCERS_CLJ: &str = include_str!("stdlib/clojure/core/reducers.clj");
+const W6_PARALLEL_CLJ: &str = include_str!("stdlib/clojure/parallel.clj");
+const W6_CORE_PROXY_CLJ: &str = include_str!("stdlib/clojure/core_proxy.clj");
+const W6_XML_CLJ: &str = include_str!("stdlib/clojure/xml.clj");
 
 const TOOLS_DEPS_UTIL_DIR_CLJ: &str = include_str!("tools_deps_util_dir.clj");
 const TOOLS_DEPS_EDN_CLJ: &str = include_str!("tools_deps_edn.clj");
@@ -1343,6 +1349,24 @@ const EMBEDDED_SOURCES: &[(&str, &str, &str)] = &[
     ("clojure/reflect", "clojure/reflect.clj", REFLECT_CLJ),
     ("clojure/string", "clojure/string.clj", STDLIB_STRING_CLJ),
     ("clojure/set", "clojure/set.clj", STDLIB_SET_CLJ),
+    // W6 (runtime-ish) — do not merge by hand, integrator resolves.
+    (
+        "clojure/core/server",
+        "clojure/core/server.clj",
+        W6_SERVER_CLJ,
+    ),
+    (
+        "clojure/core/reducers",
+        "clojure/core/reducers.clj",
+        W6_REDUCERS_CLJ,
+    ),
+    ("clojure/parallel", "clojure/parallel.clj", W6_PARALLEL_CLJ),
+    (
+        "clojure/core_proxy",
+        "clojure/core_proxy.clj",
+        W6_CORE_PROXY_CLJ,
+    ),
+    ("clojure/xml", "clojure/xml.clj", W6_XML_CLJ),
 ];
 
 /// Resolve a load root (no leading slash) to the `*file*` path and
