@@ -18,9 +18,9 @@ use std::collections::HashSet;
 use std::sync::{Arc, Mutex, Weak};
 
 use clj_value::{
-    ConsValue, List, Map, PrimitiveVector, Set, SortSpec, SubVectorValue, ThrowClass,
-    Transient, TransientError, TransientKind, TransientMap, TransientSet, TransientVector, Value,
-    Vector, new_map, new_set,
+    ConsValue, List, Map, PrimitiveVector, Set, SortSpec, SubVectorValue, ThrowClass, Transient,
+    TransientError, TransientKind, TransientMap, TransientSet, TransientVector, Value, Vector,
+    new_map, new_set,
 };
 
 use crate::core::{cce_err, cce_message, is_counted, jvm_compare, nth_index};
