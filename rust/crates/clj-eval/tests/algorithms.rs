@@ -53,6 +53,13 @@ const ENV_DIR: &str = "CLOJURE_ALGORITHMS_DIR";
 /// Empty/absent runs everything.
 const ENV_FILTER: &str = "CLOJURE_ALGORITHMS_FILTER";
 
+/// Optional substring exclusion over namespace names (debugging
+/// aid: census everything but a known-slow benchmark with e.g.
+/// `CLOJURE_ALGORITHMS_EXCLUDE=matrix-exponentiation`, while the
+/// excluded namespace grinds in a separate run).
+/// Empty/absent excludes nothing.
+const ENV_EXCLUDE: &str = "CLOJURE_ALGORITHMS_EXCLUDE";
+
 /// Worker-thread stack (256 MiB): deep-but-legitimate recursion
 /// (e.g. memoized `matrix-chain-order` over 99 items) overflows the
 /// default 2 MiB test-thread stack under the tree-walking
@@ -270,7 +277,12 @@ fn run_ns(eval: &mut Evaluator, dirs: &[String], ns: &str) -> Result<Counts, Str
 /// `test-ns` each loaded one. Progress and failures stream to
 /// `log`; the returned [`Summary`] tallies everything. `filter`
 /// narrows to namespaces whose name contains it (empty = all).
-fn run_algorithms(dir: &Path, filter: &str, log: &mut dyn std::fmt::Write) -> Summary {
+fn run_algorithms(
+    dir: &Path,
+    filter: &str,
+    exclude: &str,
+    log: &mut dyn std::fmt::Write,
+) -> Summary {
     let src_dir = dir.join("src");
     let test_dir = dir.join("test");
     let res_dir = dir.join("resources");
@@ -280,7 +292,10 @@ fn run_algorithms(dir: &Path, filter: &str, log: &mut dyn std::fmt::Write) -> Su
         .collect();
     let namespaces: Vec<String> = discover_tests(&test_dir)
         .into_iter()
-        .filter(|ns| filter.is_empty() || ns.contains(filter))
+        .filter(|ns| {
+            (filter.is_empty() || ns.contains(filter))
+                && (exclude.is_empty() || !ns.contains(exclude))
+        })
         .collect();
     let _ = writeln!(
         log,
@@ -399,6 +414,10 @@ fn algorithms_green() {
     if !filter.is_empty() {
         println!("algorithms: filter={filter:?} (debugging aid — full green needs no filter)");
     }
+    let exclude = std::env::var(ENV_EXCLUDE).unwrap_or_default();
+    if !exclude.is_empty() {
+        println!("algorithms: exclude={exclude:?} (debugging aid — full green needs no exclude)");
+    }
     // Big-stack worker (see WORKER_STACK): the evaluator is
     // tree-walking, and deep legitimate recursion overflows the
     // default test-thread stack.
@@ -407,7 +426,7 @@ fn algorithms_green() {
         .stack_size(WORKER_STACK)
         .spawn(move || {
             let mut log = String::new();
-            let summary = run_algorithms(&dir, &filter, &mut log);
+            let summary = run_algorithms(&dir, &filter, &exclude, &mut log);
             print!("{log}");
             summary
         })
@@ -514,7 +533,7 @@ fn runner_reports_pass_fail_error_and_load_error() {
     );
     fx.write("test/fx/helper.clj", "(ns fx.helper) (def h 1)\n");
     let mut log = String::new();
-    let summary = run_algorithms(&fx.dir, "", &mut log);
+    let summary = run_algorithms(&fx.dir, "", "", &mut log);
     assert_eq!(summary.discovered, 4);
     assert_eq!(summary.loaded, 3);
     assert_eq!(summary.load_errors.len(), 1);
@@ -543,19 +562,47 @@ fn runner_green_fixture_is_green() {
          (deftest ok (is (= 1 1)))\n",
     );
     let mut log = String::new();
-    let summary = run_algorithms(&fx.dir, "", &mut log);
+    let summary = run_algorithms(&fx.dir, "", "", &mut log);
     assert_eq!(summary.discovered, 1);
     assert!(summary.is_green());
     assert!(log.contains("1 test namespaces"));
     // The filter narrows discovery (and an unmatched filter finds none).
     let mut log = String::new();
-    let summary = run_algorithms(&fx.dir, "only", &mut log);
+    let summary = run_algorithms(&fx.dir, "only", "", &mut log);
     assert_eq!(summary.discovered, 1);
     assert!(summary.is_green());
     let mut log = String::new();
-    let summary = run_algorithms(&fx.dir, "zzz-no-match", &mut log);
+    let summary = run_algorithms(&fx.dir, "zzz-no-match", "", &mut log);
     assert_eq!(summary.discovered, 0);
     assert!(!summary.is_green());
+}
+
+#[test]
+fn runner_exclude_drops_namespaces() {
+    let fx = Fixture::new("exclude");
+    for name in ["slow", "fast"] {
+        fx.write(
+            &format!("test/fx/{name}_test.clj"),
+            &format!(
+                "(ns fx.{name}-test (:require [clojure.test :refer [deftest is]]))\n\
+                 (deftest ok (is (= 1 1)))\n"
+            ),
+        );
+    }
+    let mut log = String::new();
+    let summary = run_algorithms(&fx.dir, "", "", &mut log);
+    assert_eq!(summary.discovered, 2);
+    assert!(summary.is_green());
+    // The exclusion drops one namespace; filter and exclusion compose.
+    let mut log = String::new();
+    let summary = run_algorithms(&fx.dir, "", "slow", &mut log);
+    assert_eq!(summary.discovered, 1);
+    assert!(summary.is_green());
+    assert!(log.contains("1 test namespaces"));
+    let mut log = String::new();
+    let summary = run_algorithms(&fx.dir, "fx.", "fast", &mut log);
+    assert_eq!(summary.discovered, 1);
+    assert!(summary.is_green());
 }
 
 #[test]
