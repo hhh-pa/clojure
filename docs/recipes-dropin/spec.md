@@ -172,12 +172,16 @@ against the JVM oracle where semantics were in doubt.
   only keywords worked). Classes map by name; reference element
   types share the `Object` store (store checks narrow away —
   documented; `arrays.rs` `into_array` rows).
-- F9. `PersistentQueue/EMPTY` (4 BFS scripts). Rides on a
-  metadata-marked vector (FIFO via queue `peek`/`pop` arms;
-  empty pops answer the queue itself — oracle; prints as a
-  vector — documented narrowing). Lattice row transcribed from
-  the JVM (`Obj` + `Counted`/`IHashEq`/`IPersistentList`/
-  `Collection` — no `List`). `persistent_queue_fifo_201`.
+- F9. `PersistentQueue/EMPTY` (4 BFS scripts). A `QueueValue`
+  extension (vector-backed; FIFO via queue `conj`/`peek`/`pop`/
+  `count`/`seq`/`first`/`nth` arms; empty pops answer the queue
+  itself — oracle). Prints `#object[…]` and compares/hashes
+  sequentially like the JVM (`(= pq [1 2])` is true — oracles
+  `/tmp/pqsem.clj`, `/tmp/pqsem2.clj`; the `equiv_items` hook
+  bridges the `clj-value` crate boundary). Lattice row
+  transcribed from the JVM (`Obj` + `Counted`/`IHashEq`/
+  `IPersistentList`/`Collection` — no `List`).
+  `persistent_queue_fifo_201` + `tests/host_queue.rs`.
 - F10. String scan cache. `(nth s i)` rescanned chars per call
   (O(n²) — the 37MB dijkstra parse never finished). A Weak-keyed
   8-slot MRU cache holds one scan per `Arc` (ASCII: byte index;

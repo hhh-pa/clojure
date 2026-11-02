@@ -1667,6 +1667,7 @@ pub(crate) fn is_counted(v: &Value) -> bool {
             | Value::PrimitiveVector(_)
     ) || crate::coll::is_transient(v)
         || as_subvector(v).is_some()
+        || crate::hostvals::as_queue(v).is_some()
         || is_counted_seq(v)
         || crate::types::is_host_record(v)
         || crate::types::is_host_struct(v)

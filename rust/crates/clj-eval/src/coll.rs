@@ -18,9 +18,9 @@ use std::collections::HashSet;
 use std::sync::{Arc, Mutex, Weak};
 
 use clj_value::{
-    ConsValue, Keyword, List, Map, PrimitiveVector, Set, SortSpec, SubVectorValue, ThrowClass,
-    Transient, TransientError, TransientKind, TransientMap, TransientSet, TransientVector, Value,
-    Vector, new_map, new_set,
+    ConsValue, List, Map, PrimitiveVector, Set, SortSpec, SubVectorValue, ThrowClass, Transient,
+    TransientError, TransientKind, TransientMap, TransientSet, TransientVector, Value, Vector,
+    new_map, new_set,
 };
 
 use crate::core::{cce_err, cce_message, is_counted, jvm_compare, nth_index};
@@ -462,6 +462,9 @@ fn conj_one(eval: &mut Evaluator, coll: &Value, x: Value) -> Result<Value, Nativ
             if let Some(sv) = as_subvector(coll) {
                 return Ok(subvector_conj(sv, x));
             }
+            if let Some(q) = crate::hostvals::as_queue(coll) {
+                return Ok(q.conj(x));
+            }
             if is_seq_value(coll) {
                 return Ok(Value::Extension(Arc::new(ConsValue::new(x, coll.clone()))));
             }
@@ -650,6 +653,9 @@ fn count_transient(t: &Transient) -> Result<i64, NativeError> {
 fn count_fallback(eval: &mut Evaluator, v: &Value) -> Result<i64, NativeError> {
     if let Some(sv) = as_subvector(v) {
         return Ok(sv.len() as i64);
+    }
+    if let Some(q) = crate::hostvals::as_queue(v) {
+        return Ok(q.len() as i64);
     }
     if let Some(r) = as_range(v) {
         // A `BigDec`/ratio step with no exact decimal raises on
@@ -1527,6 +1533,12 @@ pub(crate) fn native_nth(eval: &mut Evaluator, args: &[Value]) -> Result<Value, 
     {
         return nth_indexed(coll, n, not_found);
     }
+    // Queues read front-to-back with the indexed miss rule (JVM
+    // `nth` over `IPersistentCollection`, oracle `/tmp/queue.clj`).
+    if let Some(q) = crate::hostvals::as_queue(coll) {
+        let found = usize::try_from(n).ok().and_then(|idx| q.nth(idx));
+        return nth_indexed_found(found, not_found);
+    }
     // Arrays: `not-found` on OOB, else the empty `AIOOBE` (S15
     // oracles `a-nth`, `a-nth-nf`, `a-nth-oob`, `e-nth-float`,
     // `n-arr-str`, `n-arr-nil`).
@@ -2036,56 +2048,20 @@ fn native_pop_bang(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nativ
     Ok(Value::Transient(t.clone()))
 }
 
-/// The `PersistentQueue` emulation mark: queues ride on
-/// vectors (insertion-ordered, `conj`/`count`/`seq`/`nth`
-/// already correct), distinguished by this metadata key so
-/// `peek`/`pop` take the front. `conj` and `pop` preserve
-/// metadata, so queues stay queues through BFS loops. The mark
-/// is visible to `meta` (a documented narrowing — real queues
-/// print `#object[…]`; these print as vectors).
-fn queue_mark_key() -> Value {
-    Value::Keyword(Keyword::new(Some("clojure-rs"), "queue"))
-}
-
-/// Whether a vector is a queue emulation (see
-/// [`empty_queue_value`]).
-fn is_queue_vec(x: &Vector) -> bool {
-    x.meta().and_then(|m| m.get(&queue_mark_key())).is_some()
-}
-
-/// `clojure.lang.PersistentQueue/EMPTY`: a marked empty vector
-/// (FIFO via the `peek`/`pop` arms below; 4 recipes BFS with
-/// it).
-pub(crate) fn empty_queue_value() -> Value {
-    Value::Vector(
-        Vector::from_vec(vec![])
-            .with_meta(Some(new_map().insert(queue_mark_key(), Value::Bool(true)))),
-    )
-}
-
-/// `pop` over a queue emulation: drops the FRONT (empty pops
-/// answer the queue itself, like the JVM — oracle).
-fn pop_queue(x: &Vector) -> Value {
-    if x.is_empty() {
-        return Value::Vector(x.clone());
-    }
-    Value::Vector(
-        Vector::from_vec(x.iter().skip(1).cloned().collect()).with_meta(x.meta().cloned()),
-    )
-}
-
 fn native_peek(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/peek", args, &[1])?;
     match &args[0] {
         Value::Nil => Ok(Value::Nil),
         Value::List(l) => Ok(l.first().cloned().unwrap_or(Value::Nil)),
-        Value::Vector(x) if is_queue_vec(x) => Ok(x.iter().next().cloned().unwrap_or(Value::Nil)),
         Value::Vector(x) => Ok(x.iter().last().cloned().unwrap_or(Value::Nil)),
         Value::PrimitiveVector(p) => Ok(p.iter().last().cloned().unwrap_or(Value::Nil)),
         Value::MapEntry { val, .. } => Ok((**val).clone()),
         _ => {
             if let Some(sv) = as_subvector(&args[0]) {
                 return Ok(sv.iter().last().cloned().unwrap_or(Value::Nil));
+            }
+            if let Some(q) = crate::hostvals::as_queue(&args[0]) {
+                return Ok(q.peek().cloned().unwrap_or(Value::Nil));
             }
             Err(cce_err(&args[0], "clojure.lang.IPersistentStack"))
         }
@@ -2135,6 +2111,9 @@ fn pop_pv(p: &PrimitiveVector) -> Result<Value, NativeError> {
 
 /// `pop` over anything else (subvectors shrink; the rest fail).
 fn pop_fallback(arg: &Value) -> Result<Value, NativeError> {
+    if let Some(q) = crate::hostvals::as_queue(arg) {
+        return Ok(q.pop());
+    }
     if let Some(sv) = as_subvector(arg) {
         if sv.len() == 1 {
             return Ok(Value::Vector(Vector::from_vec(Vec::new())));
@@ -2154,7 +2133,6 @@ fn native_pop(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErro
     match &args[0] {
         Value::Nil => Ok(Value::Nil),
         Value::List(l) => pop_list(l),
-        Value::Vector(x) if is_queue_vec(x) => Ok(pop_queue(x)),
         Value::Vector(x) => pop_vector(x),
         Value::PrimitiveVector(p) => pop_pv(p),
         // Popping an entry answers its 1-vector (Oracle FX2

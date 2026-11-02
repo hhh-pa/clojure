@@ -2236,7 +2236,7 @@ fn static_field_locale(field: &str) -> Option<Value> {
 
 fn static_field_queue(field: &str) -> Option<Value> {
     match field {
-        "EMPTY" => Some(crate::coll::empty_queue_value()),
+        "EMPTY" => Some(crate::hostvals::QueueValue::empty()),
         _ => None,
     }
 }

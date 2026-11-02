@@ -404,6 +404,16 @@ pub trait ExtensionValue: std::fmt::Debug + Send + Sync {
         None
     }
 
+    /// Sequential items for `=`/`hash` when this extension
+    /// participates in sequential equality across the crate
+    /// boundary (persistent queues, which `clj-value` cannot
+    /// downcast to): `Some` compares/hashes exactly like a
+    /// vector of these items; `None` (default) keeps the
+    /// downcast/fallback treatment.
+    fn equiv_items(&self) -> Option<Vec<Value>> {
+        None
+    }
+
     /// The `*print-dup*` constructor shape, when this extension has
     /// one (`None` renders the plain [`print`](ExtensionValue::print)
     /// fallback — the driver throws for undupable kinds before the
