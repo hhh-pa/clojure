@@ -32,8 +32,9 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use clj_value::{
-    Array, ArrayDesc, ArrayStore, BaseType, ClassVal, ExtensionValue, HostDef, HostKind, HostVal,
-    Keyword, List, Map, SeqKind, Symbol, ThrowClass, Value, Vector, new_map, new_set,
+    Array, ArrayDesc, ArrayStore, BaseType, BigDec, ClassVal, ExtensionValue, HostDef, HostKind,
+    HostVal, Keyword, List, Map, MathContext, RoundingMode, SeqKind, Symbol, ThrowClass, Value,
+    Vector, bigdec_result, new_map, new_set,
 };
 use num_traits::ToPrimitive;
 use rand::Rng;
@@ -1299,6 +1300,16 @@ const STATIC_LATTICE: &[StaticRow] = &[
         iface: false,
         bases: &["java.lang.Number", "java.lang.Comparable"],
     },
+    StaticRow {
+        name: "java.math.MathContext",
+        iface: false,
+        bases: &["java.lang.Object", "java.io.Serializable"],
+    },
+    StaticRow {
+        name: "java.math.RoundingMode",
+        iface: false,
+        bases: &["java.lang.Enum"],
+    },
     // Import-only (unprobed; ancestry verified live on the JVM):
     // `i-conflict-class` needs a second `Date` to collide with.
     StaticRow {
@@ -2248,6 +2259,7 @@ pub(crate) fn static_field_value(class: &str, field: &str) -> Option<Value> {
         "java.lang.Double" => static_field_double(field),
         "java.lang.Float" => static_field_float(field),
         "java.lang.Character" => static_field_character(field),
+        "java.math.RoundingMode" => static_field_rounding(field),
         "java.lang.Boolean" => static_field_boolean(field),
         "java.lang.Math" => static_field_math(field),
         "java.util.Locale" => static_field_locale(field),
@@ -2268,6 +2280,11 @@ fn static_field_bigint(field: &str) -> Option<Value> {
         _ => return None,
     };
     Some(bigint_value(n))
+}
+
+fn static_field_rounding(field: &str) -> Option<Value> {
+    // #205: all eight enum constants; unknown names miss.
+    RoundingMode::parse(field).map(RoundingModeVal::value)
 }
 
 fn static_field_long(field: &str) -> Option<Value> {
@@ -2897,6 +2914,7 @@ pub(crate) fn static_member_arities(fqn: &str, member: &str) -> Option<&'static 
         "java.lang.Boolean" => static_arities_boolean(member),
         "java.lang.Float" => static_arities_float(member),
         "java.math.BigInteger" => static_arities_bigint(member),
+        "java.math.BigDecimal" => static_arities_bigdec(member),
         "java.util.Arrays" => static_arities_arrays(member),
         "java.util.Collections" => static_arities_collections(member),
         "java.security.MessageDigest" => static_arities_digest(member),
@@ -2998,6 +3016,14 @@ fn static_arities_bigint(member: &str) -> Option<&'static [usize]> {
     }
 }
 
+fn static_arities_bigdec(member: &str) -> Option<&'static [usize]> {
+    // #205: the `(long)`/`(double)` overloads (boxed by type).
+    match member {
+        "valueOf" => Some(&[1]),
+        _ => None,
+    }
+}
+
 fn static_arities_string(member: &str) -> Option<&'static [usize]> {
     match member {
         "format" => Some(&[3]),
@@ -3012,8 +3038,27 @@ fn static_arities_math(member: &str) -> Option<&'static [usize]> {
     // scan below never runs hot).
     const TWO: &[&str] = &["pow", "atan2", "hypot", "floorDiv", "floorMod"];
     const ONE: &[&str] = &[
-        "abs", "sqrt", "ceil", "log", "exp", "sin", "cos", "tan", "asin", "acos", "atan", "sinh",
-        "cosh", "tanh", "cbrt", "floor", "log10", "round", "rint", "toRadians", "toDegrees",
+        "abs",
+        "sqrt",
+        "ceil",
+        "log",
+        "exp",
+        "sin",
+        "cos",
+        "tan",
+        "asin",
+        "acos",
+        "atan",
+        "sinh",
+        "cosh",
+        "tanh",
+        "cbrt",
+        "floor",
+        "log10",
+        "round",
+        "rint",
+        "toRadians",
+        "toDegrees",
     ];
     if TWO.contains(&member) {
         Some(&[2])
@@ -3064,6 +3109,7 @@ fn native_static(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeEr
         "java.lang.Boolean" => static_call_boolean(member.as_ref(), rest),
         "java.lang.Float" => static_call_float(member.as_ref(), rest),
         "java.math.BigInteger" => static_call_bigint(member.as_ref(), rest),
+        "java.math.BigDecimal" => static_call_bigdec(member.as_ref(), rest),
         "java.util.Arrays" => static_call_arrays(member.as_ref(), rest),
         "java.util.Collections" => static_call_collections(member.as_ref(), rest),
         "java.security.MessageDigest" => static_call_digest(eval, member.as_ref(), rest),
@@ -3187,6 +3233,41 @@ fn static_call_bigint(member: &str, rest: &[Value]) -> Result<Value, NativeError
     match member {
         "valueOf" => static_bigint_value_of(rest),
         _ => static_field_or_miss("java.math.BigInteger", member, rest),
+    }
+}
+
+fn static_call_bigdec(member: &str, rest: &[Value]) -> Result<Value, NativeError> {
+    match member {
+        "valueOf" => static_bigdec_value_of(rest),
+        _ => static_field_or_miss("java.math.BigDecimal", member, rest),
+    }
+}
+
+/// `BigDecimal/valueOf` (#205): `(long)` is exact at scale 0
+/// (through the canonical `valueOf` compact paths);
+/// `(double)` is the short rendering (`Infinite`/`NaN` fail
+/// like the JVM). Anything else (including nil — both overloads
+/// take primitives) misses.
+fn static_bigdec_value_of(args: &[Value]) -> Result<Value, NativeError> {
+    if args.len() != 1 {
+        return Err(crate::types::no_method(
+            "valueOf",
+            args.len(),
+            "java.math.BigDecimal",
+        ));
+    }
+    match &args[0] {
+        Value::Int(n) => Ok(bigdec_result(BigDec::from_bigint(
+            num_bigint::BigInt::from(*n),
+        ))),
+        Value::Double(d) => BigDec::value_of_f64(*d)
+            .map(bigdec_result)
+            .map_err(crate::core::number_format),
+        _ => Err(crate::types::no_method(
+            "valueOf",
+            1,
+            "java.math.BigDecimal",
+        )),
     }
 }
 
@@ -4174,7 +4255,9 @@ fn static_math_floor_mod(args: &[Value]) -> Result<Value, NativeError> {
                     "/ by zero".to_owned(),
                 ));
             }
-            Ok(Value::Int((x as i128 - floor_div128(x, y) * y as i128) as i64))
+            Ok(Value::Int(
+                (x as i128 - floor_div128(x, y) * y as i128) as i64,
+            ))
         }
         n => Err(crate::types::no_method("floorMod", n, "java.lang.Math")),
     }
@@ -4185,7 +4268,11 @@ fn floor_div128(x: i64, y: i64) -> i128 {
     let (x, y) = (x as i128, y as i128);
     let d = x / y;
     let r = x % y;
-    if r != 0 && (r < 0) != (y < 0) { d - 1 } else { d }
+    if r != 0 && (r < 0) != (y < 0) {
+        d - 1
+    } else {
+        d
+    }
 }
 
 /// `Math/random`: a `Double` in `[0, 1)` (same draw as
@@ -4221,11 +4308,7 @@ fn static_long_to_hex_string(args: &[Value]) -> Result<Value, NativeError> {
             "{:x}",
             long_arg(&args[0])? as u64
         )))),
-        n => Err(crate::types::no_method(
-            "toHexString",
-            n,
-            "java.lang.Long",
-        )),
+        n => Err(crate::types::no_method("toHexString", n, "java.lang.Long")),
     }
 }
 
@@ -4274,9 +4357,7 @@ fn static_integer_to_binary_string(args: &[Value]) -> Result<Value, NativeError>
 /// the widening double coercion (ints read finite).
 fn static_double_is_nan(args: &[Value]) -> Result<Value, NativeError> {
     match args.len() {
-        1 => Ok(Value::Bool(
-            math_double_arg(&args[0], "isNaN")?.is_nan(),
-        )),
+        1 => Ok(Value::Bool(math_double_arg(&args[0], "isNaN")?.is_nan())),
         n => Err(crate::types::no_method("isNaN", n, "java.lang.Double")),
     }
 }
@@ -4286,11 +4367,7 @@ fn static_double_is_infinite(args: &[Value]) -> Result<Value, NativeError> {
         1 => Ok(Value::Bool(
             math_double_arg(&args[0], "isInfinite")?.is_infinite(),
         )),
-        n => Err(crate::types::no_method(
-            "isInfinite",
-            n,
-            "java.lang.Double",
-        )),
+        n => Err(crate::types::no_method("isInfinite", n, "java.lang.Double")),
     }
 }
 
@@ -4327,7 +4404,11 @@ fn static_float_to_int_bits(args: &[Value]) -> Result<Value, NativeError> {
     match args.len() {
         1 => {
             let f = math_double_arg(&args[0], "floatToIntBits")? as f32;
-            let bits = if f.is_nan() { 0x7fc0_0000u32 } else { f.to_bits() };
+            let bits = if f.is_nan() {
+                0x7fc0_0000u32
+            } else {
+                f.to_bits()
+            };
             Ok(Value::Int(i64::from(bits as i32)))
         }
         n => Err(crate::types::no_method(
@@ -4484,11 +4565,7 @@ fn static_character_is_digit(args: &[Value]) -> Result<Value, NativeError> {
                 return Err(crate::core::cce_err(other, "java.lang.Character"));
             }
         })),
-        n => Err(crate::types::no_method(
-            "isDigit",
-            n,
-            "java.lang.Character",
-        )),
+        n => Err(crate::types::no_method("isDigit", n, "java.lang.Character")),
     }
 }
 
@@ -4565,10 +4642,12 @@ fn static_character_to_upper_case(args: &[Value]) -> Result<Value, NativeError> 
     match args.len() {
         1 => match &args[0] {
             Value::Char(c) => Ok(Value::Char(simple_upper(*c))),
-            Value::Int(i) => Ok(Value::Int(match u32::try_from(*i).ok().and_then(char::from_u32) {
-                Some(c) => i64::from(simple_upper(c) as u32),
-                None => *i,
-            })),
+            Value::Int(i) => Ok(Value::Int(
+                match u32::try_from(*i).ok().and_then(char::from_u32) {
+                    Some(c) => i64::from(simple_upper(c) as u32),
+                    None => *i,
+                },
+            )),
             other => Err(crate::core::cce_err(other, "java.lang.Character")),
         },
         n => Err(crate::types::no_method(
@@ -4584,10 +4663,12 @@ fn static_character_to_lower_case(args: &[Value]) -> Result<Value, NativeError> 
     match args.len() {
         1 => match &args[0] {
             Value::Char(c) => Ok(Value::Char(simple_lower(*c))),
-            Value::Int(i) => Ok(Value::Int(match u32::try_from(*i).ok().and_then(char::from_u32) {
-                Some(c) => i64::from(simple_lower(c) as u32),
-                None => *i,
-            })),
+            Value::Int(i) => Ok(Value::Int(
+                match u32::try_from(*i).ok().and_then(char::from_u32) {
+                    Some(c) => i64::from(simple_lower(c) as u32),
+                    None => *i,
+                },
+            )),
             other => Err(crate::core::cce_err(other, "java.lang.Character")),
         },
         n => Err(crate::types::no_method(
@@ -4640,7 +4721,8 @@ fn static_system_getenv(args: &[Value]) -> Result<Value, NativeError> {
                 .unwrap_or(Value::Nil)),
             Value::Nil => Err(NativeError::new(
                 ThrowClass::NullPointerException,
-                "Cannot invoke \"java.lang.System.getenv(String)\" because \"name\" is null".to_owned(),
+                "Cannot invoke \"java.lang.System.getenv(String)\" because \"name\" is null"
+                    .to_owned(),
             )),
             other => Err(crate::core::cce_err(other, "java.lang.String")),
         },
@@ -4701,11 +4783,7 @@ enum ArrayCells {
 
 /// Snapshot an `arraycopy` source range (the lock drops before
 /// the destination locks — same-array copies never deadlock).
-fn arraycopy_snapshot(
-    store: &clj_value::ArrayStore,
-    s: usize,
-    n: usize,
-) -> Option<ArrayCells> {
+fn arraycopy_snapshot(store: &clj_value::ArrayStore, s: usize, n: usize) -> Option<ArrayCells> {
     match store {
         clj_value::ArrayStore::Bools(sv) => Some(ArrayCells::Bools(sv[s..s + n].to_vec())),
         clj_value::ArrayStore::Bytes(sv) => Some(ArrayCells::Bytes(sv[s..s + n].to_vec())),
@@ -5571,6 +5649,7 @@ fn surface_gated(
         .or_else(|| surface_gated_matcher(meth, target, rest))
         .or_else(|| surface_gated_io(meth, target, rest))
         .or_else(|| surface_gated_bigint(meth, target, rest))
+        .or_else(|| surface_gated_bigdec(meth, target, rest))
         .or_else(|| surface_gated_uri(meth, target, rest))
         .or_else(|| crate::emurand::random_method(meth, target, rest))
 }
@@ -5601,9 +5680,9 @@ fn surface_gated_uri(
     match (meth, rest.len()) {
         ("getHost", 0) => {
             let h = as_uri(target)?;
-            Some(Ok(h.host().map_or(Value::Nil, |host| {
-                Value::Str(Arc::from(host))
-            })))
+            Some(Ok(h
+                .host()
+                .map_or(Value::Nil, |host| Value::Str(Arc::from(host)))))
         }
         _ => None,
     }
@@ -5695,9 +5774,7 @@ fn gated_write(target: &Value, rest: &[Value]) -> Option<Result<Value, NativeErr
 fn gated_writer_write(target: &Value, arg: &Value) -> Result<Value, NativeError> {
     match arg {
         Value::Str(s) => crate::io::write_to_writer(target, s).map(|()| Value::Nil),
-        Value::Char(c) => {
-            crate::io::write_to_writer(target, &c.to_string()).map(|()| Value::Nil)
-        }
+        Value::Char(c) => crate::io::write_to_writer(target, &c.to_string()).map(|()| Value::Nil),
         Value::Int(n) => {
             let unit = char::from_u32((*n & 0xFFFF) as u32).unwrap_or('\u{FFFD}');
             crate::io::write_to_writer(target, &unit.to_string()).map(|()| Value::Nil)
@@ -5780,8 +5857,7 @@ fn gated_coll_indexof(
     // `sorted_linked_list` indexes one as a `List`).
     if let Some(sv) = crate::lazy::as_subvector(target) {
         return Some(
-            indexof_scan(eval, sv.iter().cloned(), &rest[0])
-                .map(|at| Value::Int(at.unwrap_or(-1))),
+            indexof_scan(eval, sv.iter().cloned(), &rest[0]).map(|at| Value::Int(at.unwrap_or(-1))),
         );
     }
     let scanned = match target {
@@ -6207,9 +6283,7 @@ fn gated_str_indexof(target: &Value, rest: &[Value]) -> Option<Result<Value, Nat
     let Value::Str(s) = target else {
         return None;
     };
-    let Some(needle) = str_needle(&rest[0]) else {
-        return None;
-    };
+    let needle = str_needle(&rest[0])?;
     Some(Ok(Value::Int(str_index_search(s, needle, 0))))
 }
 
@@ -6222,9 +6296,7 @@ fn gated_str_indexof_from(target: &Value, rest: &[Value]) -> Option<Result<Value
     let Value::Str(s) = target else {
         return None;
     };
-    let Some(needle) = str_needle(&rest[0]) else {
-        return None;
-    };
+    let needle = str_needle(&rest[0])?;
     let from = match str_int_arg(&rest[1]) {
         Ok(from) => from,
         Err(e) => return Some(Err(e)),
@@ -6366,10 +6438,7 @@ fn str_bytes_value(bytes: Vec<u8>) -> Value {
 /// `String.codePointCount` (#205): code points over the
 /// UTF-16 `[begin, end)` window (surrogate pairs count once).
 /// Bounds are the `substring` template.
-fn gated_str_codepoint_count(
-    target: &Value,
-    rest: &[Value],
-) -> Option<Result<Value, NativeError>> {
+fn gated_str_codepoint_count(target: &Value, rest: &[Value]) -> Option<Result<Value, NativeError>> {
     let Value::Str(s) = target else {
         return None;
     };
@@ -6413,7 +6482,8 @@ fn gated_str_compare_to(target: &Value, rest: &[Value]) -> Option<Result<Value, 
         }
         Value::Nil => Some(Err(NativeError::new(
             ThrowClass::NullPointerException,
-            "Cannot invoke \"String.compareTo(String)\" because \"anotherString\" is null".to_owned(),
+            "Cannot invoke \"String.compareTo(String)\" because \"anotherString\" is null"
+                .to_owned(),
         ))),
         _ => None,
     }
@@ -6569,10 +6639,14 @@ fn gated_bigint_modpow(target: &Value, rest: &[Value]) -> Option<Result<Value, N
         Err(e) => return Some(Err(e)),
     };
     if exp.sign() == num_bigint::Sign::Minus {
-        return Some(Err(crate::core::arithmetic("BigInteger: negative exponent")));
+        return Some(Err(crate::core::arithmetic(
+            "BigInteger: negative exponent",
+        )));
     }
     if modulus.sign() != num_bigint::Sign::Plus {
-        return Some(Err(crate::core::arithmetic("BigInteger: modulus not positive")));
+        return Some(Err(crate::core::arithmetic(
+            "BigInteger: modulus not positive",
+        )));
     }
     Some(Ok(bigint_value(x.modpow(exp, modulus))))
 }
@@ -6590,11 +6664,17 @@ fn gated_bigint_mod(
         Err(e) => return Some(Err(e)),
     };
     if m.sign() != num_bigint::Sign::Plus {
-        return Some(Err(crate::core::arithmetic("BigInteger: modulus not positive")));
+        return Some(Err(crate::core::arithmetic(
+            "BigInteger: modulus not positive",
+        )));
     }
     if meth == "mod" {
         let r = x % m;
-        let out = if r.sign() == num_bigint::Sign::Minus { r + m } else { r };
+        let out = if r.sign() == num_bigint::Sign::Minus {
+            r + m
+        } else {
+            r
+        };
         return Some(Ok(bigint_value(out)));
     }
     match x.modinv(m) {
@@ -6692,14 +6772,28 @@ fn gated_bigint_narrow(meth: &str, target: &Value) -> Option<Result<Value, Nativ
 /// The low 32 bits as an `i32` (wrapping, like the JDK).
 fn bigint_wrap_i32(x: &num_bigint::BigInt) -> i32 {
     let mut le = x.to_signed_bytes_le();
-    le.resize(4, if x.sign() == num_bigint::Sign::Minus { 0xFF } else { 0 });
+    le.resize(
+        4,
+        if x.sign() == num_bigint::Sign::Minus {
+            0xFF
+        } else {
+            0
+        },
+    );
     i32::from_le_bytes([le[0], le[1], le[2], le[3]])
 }
 
 /// The low 64 bits as an `i64` (wrapping, like the JDK).
 fn bigint_wrap_i64(x: &num_bigint::BigInt) -> i64 {
     let mut le = x.to_signed_bytes_le();
-    le.resize(8, if x.sign() == num_bigint::Sign::Minus { 0xFF } else { 0 });
+    le.resize(
+        8,
+        if x.sign() == num_bigint::Sign::Minus {
+            0xFF
+        } else {
+            0
+        },
+    );
     i64::from_le_bytes([le[0], le[1], le[2], le[3], le[4], le[5], le[6], le[7]])
 }
 
@@ -6717,6 +6811,255 @@ fn gated_bigint_tostring(target: &Value, rest: &[Value]) -> Option<Result<Value,
         10
     };
     Some(Ok(Value::Str(Arc::from(x.to_str_radix(radix).as_str()))))
+}
+
+/// A `java.math.RoundingMode` enum constant (#205): fresh per
+/// static-field read (like the `BigInteger` constants), so `=`
+/// compares modes, not ids (the JVM hands out singletons —
+/// same mode is the same constant).
+#[derive(Debug)]
+pub(crate) struct RoundingModeVal {
+    id: u64,
+    mode: RoundingMode,
+}
+
+static NEXT_ROUNDING: AtomicU64 = AtomicU64::new(1);
+
+impl RoundingModeVal {
+    pub(crate) fn value(mode: RoundingMode) -> Value {
+        Value::Extension(Arc::new(Self {
+            id: NEXT_ROUNDING.fetch_add(1, Ordering::Relaxed),
+            mode,
+        }))
+    }
+}
+
+impl ExtensionValue for RoundingModeVal {
+    fn class_name(&self) -> String {
+        "java.math.RoundingMode".to_owned()
+    }
+
+    fn print(&self) -> String {
+        format!(
+            "#object[java.math.RoundingMode 0x{:x} \"{}\"]",
+            self.id,
+            self.mode.name()
+        )
+    }
+
+    fn print_str(&self) -> Option<String> {
+        Some(self.mode.name().to_owned())
+    }
+
+    fn dyn_eq(&self, other: &dyn ExtensionValue) -> bool {
+        other
+            .as_any()
+            .downcast_ref::<RoundingModeVal>()
+            .is_some_and(|o| o.mode == self.mode)
+    }
+
+    fn dyn_hash(&self, state: &mut dyn std::hash::Hasher) {
+        state.write(self.mode.name().as_bytes());
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+/// Downcast a value to a rounding mode, if it is one.
+pub(crate) fn as_rounding(v: &Value) -> Option<RoundingMode> {
+    match v {
+        Value::Extension(e) => e.as_any().downcast_ref::<RoundingModeVal>().map(|r| r.mode),
+        _ => None,
+    }
+}
+
+/// Downcast a value to a math context, if it is one (reuses the
+/// `with-precision` value — same class, same shape).
+fn as_math_context(v: &Value) -> Option<MathContext> {
+    match v {
+        Value::Extension(e) => e
+            .as_any()
+            .downcast_ref::<crate::core::MathContextVal>()
+            .map(|m| m.ctx),
+        _ => None,
+    }
+}
+
+/// The `BigDec` target, when the value is one.
+fn bigdec_self(target: &Value) -> Option<&BigDec> {
+    match target {
+        Value::BigDec(d) => Some(d),
+        _ => None,
+    }
+}
+
+/// A `BigDecimal` method arg: anything else mistypes the
+/// overload miss (only `BigDecimal` overloads exist).
+fn bigdec_param<'a>(v: &'a Value, meth: &str, argc: usize) -> Result<&'a BigDec, NativeError> {
+    match v {
+        Value::BigDec(d) => Ok(d),
+        _ => Err(crate::types::no_method(meth, argc, "java.math.BigDecimal")),
+    }
+}
+
+/// A `MathContext` method arg: nil is the bare NPE (the body
+/// derefs it); anything else mistypes the overload miss.
+fn mc_param(v: &Value, meth: &str, argc: usize) -> Result<MathContext, NativeError> {
+    match v {
+        Value::Nil => Err(NativeError::new(
+            ThrowClass::NullPointerException,
+            String::new(),
+        )),
+        _ => as_math_context(v)
+            .ok_or_else(|| crate::types::no_method(meth, argc, "java.math.BigDecimal")),
+    }
+}
+
+/// A `RoundingMode` method arg: nil is the bare NPE; anything
+/// else mistypes the overload miss.
+fn rounding_param(v: &Value, meth: &str, argc: usize) -> Result<RoundingMode, NativeError> {
+    match v {
+        Value::Nil => Err(NativeError::new(
+            ThrowClass::NullPointerException,
+            String::new(),
+        )),
+        _ => as_rounding(v)
+            .ok_or_else(|| crate::types::no_method(meth, argc, "java.math.BigDecimal")),
+    }
+}
+
+/// A tower arithmetic failure as the JDK error: the tower's
+/// divide-by-zero text is the Clojure shape, the method needs
+/// the JDK's; every other message already matches.
+fn bigdec_arith(err: &'static str) -> NativeError {
+    if err == "Divide by zero" {
+        crate::core::arithmetic("Division by zero")
+    } else {
+        crate::core::arithmetic(err)
+    }
+}
+
+fn surface_gated_bigdec(
+    meth: &str,
+    target: &Value,
+    rest: &[Value],
+) -> Option<Result<Value, NativeError>> {
+    bigdec_self(target)?;
+    match (meth, rest.len()) {
+        ("add" | "subtract" | "multiply", 1) => gated_bigdec_exact(meth, target, rest),
+        ("add" | "subtract" | "multiply", 2) => gated_bigdec_mc(meth, target, rest),
+        ("divide", 1 | 2) => gated_bigdec_div(target, rest),
+        ("sqrt", 1) => gated_bigdec_sqrt(target, rest),
+        ("setScale", 2) => gated_bigdec_setscale(target, rest),
+        ("toPlainString" | "doubleValue" | "toBigInteger" | "toString", 0) => {
+            gated_bigdec_conv(meth, target)
+        }
+        _ => None,
+    }
+}
+
+/// Exact `add`/`subtract`/`multiply` (no context).
+fn gated_bigdec_exact(
+    meth: &str,
+    target: &Value,
+    rest: &[Value],
+) -> Option<Result<Value, NativeError>> {
+    let x = bigdec_self(target)?;
+    let y = match bigdec_param(&rest[0], meth, 1) {
+        Ok(y) => y,
+        Err(e) => return Some(Err(e)),
+    };
+    let out = match meth {
+        "add" => x.add(y),
+        "subtract" => x.sub(y),
+        _ => x.mul(y),
+    };
+    Some(Ok(bigdec_result(out)))
+}
+
+/// Context `add`/`subtract`/`multiply` (chudnovsky threads one).
+fn gated_bigdec_mc(
+    meth: &str,
+    target: &Value,
+    rest: &[Value],
+) -> Option<Result<Value, NativeError>> {
+    let x = bigdec_self(target)?;
+    let y = match bigdec_param(&rest[0], meth, 2) {
+        Ok(y) => y,
+        Err(e) => return Some(Err(e)),
+    };
+    let mc = match mc_param(&rest[1], meth, 2) {
+        Ok(mc) => mc,
+        Err(e) => return Some(Err(e)),
+    };
+    let out = match meth {
+        "add" => x.add_mc(y, &mc),
+        "subtract" => x.sub_mc(y, &mc),
+        _ => x.mul_mc(y, &mc),
+    };
+    Some(out.map(bigdec_result).map_err(bigdec_arith))
+}
+
+/// `divide`, exact or under a context.
+fn gated_bigdec_div(target: &Value, rest: &[Value]) -> Option<Result<Value, NativeError>> {
+    let x = bigdec_self(target)?;
+    let y = match bigdec_param(&rest[0], "divide", rest.len()) {
+        Ok(y) => y,
+        Err(e) => return Some(Err(e)),
+    };
+    if rest.len() == 1 {
+        return Some(x.div_exact(y).map(bigdec_result).map_err(bigdec_arith));
+    }
+    let mc = match mc_param(&rest[1], "divide", 2) {
+        Ok(mc) => mc,
+        Err(e) => return Some(Err(e)),
+    };
+    Some(x.div_mc(y, &mc).map(bigdec_result).map_err(bigdec_arith))
+}
+
+/// `sqrt(mc)`.
+fn gated_bigdec_sqrt(target: &Value, rest: &[Value]) -> Option<Result<Value, NativeError>> {
+    let x = bigdec_self(target)?;
+    let mc = match mc_param(&rest[0], "sqrt", 1) {
+        Ok(mc) => mc,
+        Err(e) => return Some(Err(e)),
+    };
+    Some(x.sqrt_mc(&mc).map(bigdec_result).map_err(bigdec_arith))
+}
+
+/// `setScale(scale, rounding)` (same scale answers the target
+/// itself, like the JVM).
+fn gated_bigdec_setscale(target: &Value, rest: &[Value]) -> Option<Result<Value, NativeError>> {
+    let x = bigdec_self(target)?;
+    let scale = match str_int_arg(&rest[0]) {
+        Ok(scale) => scale as i64,
+        Err(e) => return Some(Err(e)),
+    };
+    if scale == x.scale() {
+        return Some(Ok(target.clone()));
+    }
+    let mode = match rounding_param(&rest[1], "setScale", 2) {
+        Ok(mode) => mode,
+        Err(e) => return Some(Err(e)),
+    };
+    Some(
+        x.set_scale(scale, mode)
+            .map(bigdec_result)
+            .map_err(bigdec_arith),
+    )
+}
+
+/// `toPlainString`/`doubleValue`/`toBigInteger`/`toString`.
+fn gated_bigdec_conv(meth: &str, target: &Value) -> Option<Result<Value, NativeError>> {
+    let x = bigdec_self(target)?;
+    Some(Ok(match meth {
+        "toPlainString" => Value::Str(Arc::from(x.to_plain_string().as_str())),
+        "doubleValue" => Value::Double(x.to_f64()),
+        "toBigInteger" => Value::BigInteger(Arc::new(x.to_bigint_trunc())),
+        _ => Value::Str(Arc::from(x.to_bigdec_string().as_str())),
+    }))
 }
 
 /// A `java.lang.StringBuilder` (issue #201 S5): a growable
@@ -6817,7 +7160,11 @@ impl UriHandle {
     /// minus userinfo/port/brackets (nil without `://`).
     pub(crate) fn parse(raw: &str) -> Result<Self, NativeError> {
         for (i, c) in raw.char_indices() {
-            if c.is_control() || matches!(c, ' ' | '<' | '>' | '"' | '{' | '}' | '|' | '\\' | '^' | '`')
+            if c.is_control()
+                || matches!(
+                    c,
+                    ' ' | '<' | '>' | '"' | '{' | '}' | '|' | '\\' | '^' | '`'
+                )
             {
                 return Err(NativeError::new(
                     ThrowClass::URISyntaxException,
@@ -6955,9 +7302,7 @@ fn gated_builder_append(
 /// chars count twice, like the JDK).
 fn gated_builder_length(target: &Value) -> Option<Result<Value, NativeError>> {
     let b = as_builder(target)?;
-    Some(Ok(Value::Int(
-        b.lock().encode_utf16().count() as i64
-    )))
+    Some(Ok(Value::Int(b.lock().encode_utf16().count() as i64)))
 }
 
 /// `Pattern/split`: the `re` split loop over the pattern source

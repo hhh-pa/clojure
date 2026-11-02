@@ -680,7 +680,11 @@ fn new_via_symbol(
 /// `new-missing-fq`); anything else is `Unable to resolve
 /// classname` (oracles `ctor-missing-simple`, `new-missing-simple`,
 /// `m-new-qual*`).
-fn new_unresolved(eval: &mut Evaluator, sym: &Symbol, args: &[Value]) -> Result<Value, NativeError> {
+fn new_unresolved(
+    eval: &mut Evaluator,
+    sym: &Symbol,
+    args: &[Value],
+) -> Result<Value, NativeError> {
     if sym.namespace().is_none() && crate::classemu::is_class_position(sym.name()) {
         if let Some(class) = crate::classemu::resolve_class_name(eval, sym.name()) {
             return new_via_class(eval, class.name(), args);
@@ -719,6 +723,12 @@ fn new_via_class(eval: &mut Evaluator, name: &str, args: &[Value]) -> Result<Val
     }
     if name == "java.math.BigInteger" {
         return crate::ctor::build_biginteger(args);
+    }
+    if name == "java.math.BigDecimal" {
+        return crate::ctor::build_bigdecimal(args);
+    }
+    if name == "java.math.MathContext" {
+        return crate::ctor::build_mathcontext(eval, args);
     }
     if name == "java.net.URI" {
         return crate::ctor::build_uri(args);
@@ -791,9 +801,7 @@ fn new_throwable(
             ));
         }
         [_] => return Err(crate::ctor::no_ctor(name, false)),
-        [Value::Str(s), Value::Throwable(t)] => {
-            (Some(Arc::from(s.as_ref())), Some(t.clone()))
-        }
+        [Value::Str(s), Value::Throwable(t)] => (Some(Arc::from(s.as_ref())), Some(t.clone())),
         [Value::Str(s), Value::Nil] => (Some(Arc::from(s.as_ref())), None),
         [_, _] => return Err(crate::ctor::no_ctor(name, false)),
         _ => return Err(crate::ctor::no_ctor(name, false)),

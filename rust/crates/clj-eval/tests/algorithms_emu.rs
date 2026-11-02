@@ -113,7 +113,10 @@ fn math_floor_div_mod() {
         "[1 2 -2 -1]"
     );
     // The widening long coercion truncates doubles first.
-    assert_eq!(run(&mut eval, "[(Math/floorDiv 7.9 3) (Math/floorMod 7.9 3)]"), "[2 1]");
+    assert_eq!(
+        run(&mut eval, "[(Math/floorDiv 7.9 3) (Math/floorMod 7.9 3)]"),
+        "[2 1]"
+    );
     // `MIN/-1` wraps to `MIN` (no throw); the mod is zero.
     assert_eq!(
         run(
@@ -170,7 +173,10 @@ fn long_bit_strings_and_counts() {
     assert_eq!(run(&mut eval, "(count (Long/toBinaryString -1))"), "64");
     assert_eq!(run(&mut eval, "(count (Long/toHexString -1))"), "16");
     assert_eq!(
-        run(&mut eval, "[(Long/bitCount 7) (Long/bitCount -1) (Long/bitCount 0)]"),
+        run(
+            &mut eval,
+            "[(Long/bitCount 7) (Long/bitCount -1) (Long/bitCount 0)]"
+        ),
         "[3 64 0]"
     );
     assert_eq!(
@@ -205,7 +211,10 @@ fn integer_to_binary_string_truncates_to_32_bits() {
     // Negatives print 32 digits (the `(int)` overload).
     assert_eq!(run(&mut eval, "(count (Integer/toBinaryString -1))"), "32");
     // Wide longs truncate before formatting.
-    assert_eq!(run(&mut eval, r#"(Integer/toBinaryString 4294967296)"#), r#""0""#);
+    assert_eq!(
+        run(&mut eval, r#"(Integer/toBinaryString 4294967296)"#),
+        r#""0""#
+    );
     assert_eq!(
         compile_err(&mut eval, "(Integer/toBinaryString 1 2)"),
         "java.lang.IllegalArgumentException | No matching method toBinaryString found taking 2 args for class java.lang.Integer"
@@ -277,7 +286,10 @@ fn float_bit_conversions() {
     assert_eq!(run(&mut eval, "(Float/floatToIntBits ##NaN)"), "2143289344");
     assert_eq!(run(&mut eval, "(Float/intBitsToFloat 1065353216)"), "1.0");
     assert_eq!(
-        run(&mut eval, "(Float/intBitsToFloat (Float/floatToIntBits 0.5))"),
+        run(
+            &mut eval,
+            "(Float/intBitsToFloat (Float/floatToIntBits 0.5))"
+        ),
         "0.5"
     );
     assert_eq!(
@@ -345,7 +357,10 @@ fn character_case_mapping() {
     );
     // Out-of-range code points pass through, like the JDK.
     assert_eq!(
-        run(&mut eval, "[(Character/toUpperCase -1) (Character/toLowerCase 1114112)]"),
+        run(
+            &mut eval,
+            "[(Character/toUpperCase -1) (Character/toLowerCase 1114112)]"
+        ),
         "[-1 1114112]"
     );
     // Sigma lowercases simply; sharp-s takes the first scalar of
@@ -508,7 +523,10 @@ fn parse_long_radix() {
         r#"(Long/parseLong " 12" 10)"#,
         r#"(Long/parseLong "7.9" 10)"#,
     ] {
-        assert!(uncaught(&mut eval, bad).contains("NumberFormatException"), "{bad}");
+        assert!(
+            uncaught(&mut eval, bad).contains("NumberFormatException"),
+            "{bad}"
+        );
     }
     assert_eq!(
         uncaught(&mut eval, r#"(Long/parseLong "10" 1)"#),
@@ -523,7 +541,9 @@ fn parse_long_radix() {
         "java.lang.NumberFormatException | For input string: \"null\""
     );
     assert!(uncaught(&mut eval, r#"(Long/parseLong 5 10)"#).contains("ClassCastException"));
-    assert!(uncaught(&mut eval, r#"(Long/parseLong "10" "x")"#).contains("IllegalArgumentException"));
+    assert!(
+        uncaught(&mut eval, r#"(Long/parseLong "10" "x")"#).contains("IllegalArgumentException")
+    );
     assert_eq!(
         compile_err(&mut eval, r#"(Long/parseLong "1" 10 3)"#),
         "java.lang.IllegalArgumentException | No matching method parseLong found taking 3 args for class java.lang.Long"
@@ -540,7 +560,10 @@ fn parse_int_radix_narrows_to_32_bits() {
         ),
         "[255 -2147483648 42]"
     );
-    assert!(uncaught(&mut eval, r#"(Integer/parseInt "80000000" 16)"#).contains("NumberFormatException"));
+    assert!(
+        uncaught(&mut eval, r#"(Integer/parseInt "80000000" 16)"#)
+            .contains("NumberFormatException")
+    );
     assert_eq!(
         uncaught(&mut eval, r#"(Integer/parseInt "10" 1)"#),
         "java.lang.NumberFormatException | radix 1 less than Character.MIN_RADIX"
@@ -596,7 +619,11 @@ fn static_runtime_arity_arms() {
         let want = format!(
             "java.lang.IllegalArgumentException | No matching method {member} found taking {argc} args for class {class}"
         );
-        assert_eq!(runtime_miss(&mut eval, class, member, args), want, "{class}/{member}");
+        assert_eq!(
+            runtime_miss(&mut eval, class, member, args),
+            want,
+            "{class}/{member}"
+        );
     }
     // Unknown members on the new classes miss the same way.
     assert_eq!(
@@ -709,9 +736,14 @@ fn string_index_of_from() {
         "[1 2 -1 -1]"
     );
     // The 1-arg shape still delegates (empty reads 0).
-    assert_eq!(run(&mut eval, r#"[(.indexOf "abc" "") (.indexOf "abc" "z")]"#), "[0 -1]");
+    assert_eq!(
+        run(&mut eval, r#"[(.indexOf "abc" "") (.indexOf "abc" "z")]"#),
+        "[0 -1]"
+    );
     assert!(uncaught(&mut eval, r#"(.indexOf "abc" "b" nil)"#).contains("NullPointerException"));
-    assert!(uncaught(&mut eval, r#"(.indexOf "abc" "b" "x")"#).contains("IllegalArgumentException"));
+    assert!(
+        uncaught(&mut eval, r#"(.indexOf "abc" "b" "x")"#).contains("IllegalArgumentException")
+    );
     // A mistyped needle is the overload miss (before any index check).
     assert_eq!(
         uncaught(&mut eval, r#"(.indexOf "abc" :k 1)"#),
@@ -724,7 +756,10 @@ fn string_index_of_from() {
 fn string_contains() {
     let mut eval = boot();
     assert_eq!(
-        run(&mut eval, r#"[(.contains "hello" "ell") (.contains "hello" "z") (.contains "hello" "")]"#),
+        run(
+            &mut eval,
+            r#"[(.contains "hello" "ell") (.contains "hello" "z") (.contains "hello" "")]"#
+        ),
         "[true false true]"
     );
     assert_eq!(
@@ -742,7 +777,10 @@ fn string_contains() {
 fn string_replace() {
     let mut eval = boot();
     assert_eq!(
-        run(&mut eval, r#"[(.replace "hello" \l \L) (.replace "hello" "ll" "r") (.replace "aaa" "aa" "b")]"#),
+        run(
+            &mut eval,
+            r#"[(.replace "hello" \l \L) (.replace "hello" "ll" "r") (.replace "aaa" "aa" "b")]"#
+        ),
         r#"["heLLo" "hero" "ba"]"#
     );
     assert_eq!(
@@ -765,14 +803,22 @@ fn string_get_bytes() {
     let mut eval = boot();
     assert_eq!(run(&mut eval, r#"(vec (.getBytes "AB"))"#), "[65 66]");
     assert_eq!(run(&mut eval, r#"(vec (.getBytes "é"))"#), "[-61 -87]");
-    assert_eq!(run(&mut eval, r#"(vec (.getBytes "AB" "UTF-8"))"#), "[65 66]");
+    assert_eq!(
+        run(&mut eval, r#"(vec (.getBytes "AB" "UTF-8"))"#),
+        "[65 66]"
+    );
     // Bare UTF-16 takes the big-endian BOM, like the JDK.
-    assert_eq!(run(&mut eval, r#"(vec (.getBytes "A" "UTF-16"))"#), "[-2 -1 0 65]");
+    assert_eq!(
+        run(&mut eval, r#"(vec (.getBytes "A" "UTF-16"))"#),
+        "[-2 -1 0 65]"
+    );
     // Unmappable ASCII chars become `?`.
-    assert_eq!(run(&mut eval, r#"(vec (.getBytes "é" "US-ASCII"))"#), "[63]");
+    assert_eq!(
+        run(&mut eval, r#"(vec (.getBytes "é" "US-ASCII"))"#),
+        "[63]"
+    );
     assert!(
-        uncaught(&mut eval, r#"(.getBytes "A" "NOPE-9")"#)
-            .contains("UnsupportedEncodingException")
+        uncaught(&mut eval, r#"(.getBytes "A" "NOPE-9")"#).contains("UnsupportedEncodingException")
     );
     assert_eq!(
         uncaught(&mut eval, r#"(.getBytes "A" nil)"#),
@@ -806,8 +852,13 @@ fn string_code_point_count() {
             .contains("StringIndexOutOfBoundsException")
     );
     // Either half mistyped is the int-coercion error.
-    assert!(uncaught(&mut eval, r#"(.codePointCount "hello" "x" 5)"#).contains("IllegalArgumentException"));
-    assert!(uncaught(&mut eval, r#"(.codePointCount "hello" 0 nil)"#).contains("NullPointerException"));
+    assert!(
+        uncaught(&mut eval, r#"(.codePointCount "hello" "x" 5)"#)
+            .contains("IllegalArgumentException")
+    );
+    assert!(
+        uncaught(&mut eval, r#"(.codePointCount "hello" 0 nil)"#).contains("NullPointerException")
+    );
 }
 
 /// `compareTo` orders by UTF-16 units, then length.
@@ -835,10 +886,7 @@ fn string_compare_to() {
 #[test]
 fn coll_index_of_subvector() {
     let mut eval = boot();
-    assert_eq!(
-        run(&mut eval, "(.indexOf (subvec [10 20 30] 1) 30)"),
-        "1"
-    );
+    assert_eq!(run(&mut eval, "(.indexOf (subvec [10 20 30] 1) 30)"), "1");
     assert_eq!(run(&mut eval, "(.indexOf (subvec [10 20 30] 1) 10)"), "-1");
     assert_eq!(run(&mut eval, "(.indexOf (subvec [10 20 30] 1 2) 20)"), "0");
 }
@@ -917,10 +965,7 @@ fn throwable_ctors() {
 #[test]
 fn static_field_calls() {
     let mut eval = boot();
-    assert_eq!(
-        run(&mut eval, "(clojure.lang.PersistentQueue/EMPTY)"),
-        "[]"
-    );
+    assert_eq!(run(&mut eval, "(clojure.lang.PersistentQueue/EMPTY)"), "[]");
     assert_eq!(run(&mut eval, "(Math/PI)"), "3.141592653589793");
     assert_eq!(run(&mut eval, "(Long/MAX_VALUE)"), "9223372036854775807");
     // Methods still win over the field path.
@@ -1014,13 +1059,22 @@ fn random_seeded_streams() {
 #[test]
 fn random_shapes_and_errors() {
     let mut eval = boot();
-    assert_eq!(run(&mut eval, "(str (class (java.util.Random. 1)))"), "\"class java.util.Random\"");
     assert_eq!(
-        run(&mut eval, "(let [r (java.util.Random. 1)] [(= r r) (= r (java.util.Random. 1))])"),
+        run(&mut eval, "(str (class (java.util.Random. 1)))"),
+        "\"class java.util.Random\""
+    );
+    assert_eq!(
+        run(
+            &mut eval,
+            "(let [r (java.util.Random. 1)] [(= r r) (= r (java.util.Random. 1))])"
+        ),
         "[true false]"
     );
     assert_eq!(
-        run(&mut eval, "(re-find #\"java\\.util\\.Random@\" (str (java.util.Random. 1)))"),
+        run(
+            &mut eval,
+            "(re-find #\"java\\.util\\.Random@\" (str (java.util.Random. 1)))"
+        ),
         "\"java.util.Random@\""
     );
     // Unseeded construction answers a working generator.
@@ -1041,19 +1095,33 @@ fn random_shapes_and_errors() {
         "java.lang.IllegalArgumentException | bound must be positive"
     );
     // Nil bound unboxes to NPE; mistyped bounds miss.
-    assert!(uncaught(&mut eval, "(let [r (java.util.Random. 1)] (.nextInt r nil))")
-        .contains("NullPointerException"));
+    assert!(
+        uncaught(
+            &mut eval,
+            "(let [r (java.util.Random. 1)] (.nextInt r nil))"
+        )
+        .contains("NullPointerException")
+    );
     assert_eq!(
-        uncaught(&mut eval, "(let [r (java.util.Random. 1)] (.nextInt r \"x\"))"),
+        uncaught(
+            &mut eval,
+            "(let [r (java.util.Random. 1)] (.nextInt r \"x\"))"
+        ),
         "java.lang.IllegalArgumentException | No matching method nextInt found taking 1 args for class java.util.Random"
     );
     // Nil bytes NPE; non-bytes miss.
     assert_eq!(
-        uncaught(&mut eval, "(let [r (java.util.Random. 1)] (.nextBytes r nil))"),
+        uncaught(
+            &mut eval,
+            "(let [r (java.util.Random. 1)] (.nextBytes r nil))"
+        ),
         "java.lang.NullPointerException | Cannot read the array length because \"bytes\" is null"
     );
     assert_eq!(
-        uncaught(&mut eval, "(let [r (java.util.Random. 1)] (.nextBytes r (int-array 2)))"),
+        uncaught(
+            &mut eval,
+            "(let [r (java.util.Random. 1)] (.nextBytes r (int-array 2)))"
+        ),
         "java.lang.IllegalArgumentException | No matching method nextBytes found taking 1 args for class java.util.Random"
     );
     // Unknown members miss with the class.
@@ -1104,7 +1172,10 @@ fn secure_random_draws() {
         "[true false]"
     );
     assert_eq!(
-        uncaught(&mut eval, "(let [r (java.security.SecureRandom.)] (.nextInt r 0))"),
+        uncaught(
+            &mut eval,
+            "(let [r (java.security.SecureRandom.)] (.nextInt r 0))"
+        ),
         "java.lang.IllegalArgumentException | bound must be positive"
     );
     assert_eq!(
@@ -1112,7 +1183,10 @@ fn secure_random_draws() {
         "java.lang.IllegalArgumentException | No matching ctor found for class java.security.SecureRandom"
     );
     assert_eq!(
-        uncaught(&mut eval, "(let [r (java.security.SecureRandom.)] (.nextDouble r))"),
+        uncaught(
+            &mut eval,
+            "(let [r (java.security.SecureRandom.)] (.nextDouble r))"
+        ),
         "java.lang.IllegalArgumentException | No matching method nextDouble found taking 0 args for class java.security.SecureRandom"
     );
 }
@@ -1249,19 +1323,71 @@ fn bigint_ctors() {
 #[test]
 fn ctor_runtime_arity_arms() {
     let rows: &[(&str, &str, &str)] = &[
-        ("java.util.Random", "1 2", "java.lang.IllegalArgumentException | No matching ctor found for class java.util.Random"),
-        ("java.security.SecureRandom", "1", "java.lang.IllegalArgumentException | No matching ctor found for class java.security.SecureRandom"),
-        ("java.math.BigInteger", "", "java.lang.IllegalArgumentException | No matching ctor found for class java.math.BigInteger"),
-        ("java.math.BigInteger", "1 2 3", "java.lang.IllegalArgumentException | No matching ctor found for class java.math.BigInteger"),
-        ("java.io.File", "", "java.lang.IllegalArgumentException | No matching ctor found for class java.io.File"),
-        ("java.io.File", "1 2", "java.lang.IllegalArgumentException | No matching ctor found for class java.io.File"),
-        ("java.io.FileInputStream", "", "java.lang.IllegalArgumentException | No matching ctor found for class java.io.FileInputStream"),
-        ("java.io.FileOutputStream", "1 2", "java.lang.IllegalArgumentException | No matching ctor found for class java.io.FileOutputStream"),
-        ("java.io.StringWriter", "1", "java.lang.IllegalArgumentException | No matching ctor found for class java.io.StringWriter"),
-        ("java.util.ArrayDeque", "1 2", "java.lang.IllegalArgumentException | No matching ctor found for class java.util.ArrayDeque"),
-        ("java.util.ArrayList", "1 2", "java.lang.IllegalArgumentException | No matching ctor found for class java.util.ArrayList"),
-        ("java.util.PriorityQueue", "", "java.lang.IllegalArgumentException | No matching ctor found for class java.util.PriorityQueue"),
-        ("java.util.PriorityQueue", "1 2", "java.lang.IllegalArgumentException | No matching ctor found for class java.util.PriorityQueue"),
+        (
+            "java.util.Random",
+            "1 2",
+            "java.lang.IllegalArgumentException | No matching ctor found for class java.util.Random",
+        ),
+        (
+            "java.security.SecureRandom",
+            "1",
+            "java.lang.IllegalArgumentException | No matching ctor found for class java.security.SecureRandom",
+        ),
+        (
+            "java.math.BigInteger",
+            "",
+            "java.lang.IllegalArgumentException | No matching ctor found for class java.math.BigInteger",
+        ),
+        (
+            "java.math.BigInteger",
+            "1 2 3",
+            "java.lang.IllegalArgumentException | No matching ctor found for class java.math.BigInteger",
+        ),
+        (
+            "java.io.File",
+            "",
+            "java.lang.IllegalArgumentException | No matching ctor found for class java.io.File",
+        ),
+        (
+            "java.io.File",
+            "1 2",
+            "java.lang.IllegalArgumentException | No matching ctor found for class java.io.File",
+        ),
+        (
+            "java.io.FileInputStream",
+            "",
+            "java.lang.IllegalArgumentException | No matching ctor found for class java.io.FileInputStream",
+        ),
+        (
+            "java.io.FileOutputStream",
+            "1 2",
+            "java.lang.IllegalArgumentException | No matching ctor found for class java.io.FileOutputStream",
+        ),
+        (
+            "java.io.StringWriter",
+            "1",
+            "java.lang.IllegalArgumentException | No matching ctor found for class java.io.StringWriter",
+        ),
+        (
+            "java.util.ArrayDeque",
+            "1 2",
+            "java.lang.IllegalArgumentException | No matching ctor found for class java.util.ArrayDeque",
+        ),
+        (
+            "java.util.ArrayList",
+            "1 2",
+            "java.lang.IllegalArgumentException | No matching ctor found for class java.util.ArrayList",
+        ),
+        (
+            "java.util.PriorityQueue",
+            "",
+            "java.lang.IllegalArgumentException | No matching ctor found for class java.util.PriorityQueue",
+        ),
+        (
+            "java.util.PriorityQueue",
+            "1 2",
+            "java.lang.IllegalArgumentException | No matching ctor found for class java.util.PriorityQueue",
+        ),
     ];
     let mut eval = boot();
     for (class, args, want) in rows {
@@ -1289,10 +1415,7 @@ fn bigint_arithmetic() {
         "[8 14 6 -6 5]"
     );
     assert_eq!(
-        uncaught(
-            &mut eval,
-            "(.divide (biginteger 1) (biginteger 0))"
-        ),
+        uncaught(&mut eval, "(.divide (biginteger 1) (biginteger 0))"),
         "java.lang.ArithmeticException | BigInteger divide by zero"
     );
     // Nil params NPE; mistyped params miss.
@@ -1322,7 +1445,10 @@ fn bigint_shifts_and_modular() {
         ),
         "[48 3 3 48 -3]"
     );
-    assert_eq!(run(&mut eval, "(.pow (biginteger 2) 100)"), "1267650600228229401496703205376");
+    assert_eq!(
+        run(&mut eval, "(.pow (biginteger 2) 100)"),
+        "1267650600228229401496703205376"
+    );
     // Diffie-Hellman-shaped: `g^x mod p`.
     assert_eq!(
         run(
@@ -1331,10 +1457,7 @@ fn bigint_shifts_and_modular() {
         ),
         "8"
     );
-    assert_eq!(
-        run(&mut eval, "(.mod (biginteger -7) (biginteger 3))"),
-        "2"
-    );
+    assert_eq!(run(&mut eval, "(.mod (biginteger -7) (biginteger 3))"), "2");
     assert_eq!(
         run(&mut eval, "(.modInverse (biginteger 17) (biginteger 3120))"),
         "2753"
@@ -1344,11 +1467,17 @@ fn bigint_shifts_and_modular() {
         "java.lang.ArithmeticException | Negative exponent"
     );
     assert_eq!(
-        uncaught(&mut eval, "(.modPow (biginteger 2) (biginteger -1) (biginteger 5))"),
+        uncaught(
+            &mut eval,
+            "(.modPow (biginteger 2) (biginteger -1) (biginteger 5))"
+        ),
         "java.lang.ArithmeticException | BigInteger: negative exponent"
     );
     assert_eq!(
-        uncaught(&mut eval, "(.modPow (biginteger 2) (biginteger 3) (biginteger 0))"),
+        uncaught(
+            &mut eval,
+            "(.modPow (biginteger 2) (biginteger 3) (biginteger 0))"
+        ),
         "java.lang.ArithmeticException | BigInteger: modulus not positive"
     );
     assert_eq!(
@@ -1390,10 +1519,7 @@ fn bigint_inspection() {
         ),
         r#"["ff" "-ff" "101" "5"]"#
     );
-    assert_eq!(
-        run(&mut eval, "(vec (.toByteArray (biginteger 0)))"),
-        "[0]"
-    );
+    assert_eq!(run(&mut eval, "(vec (.toByteArray (biginteger 0)))"), "[0]");
     assert_eq!(
         run(&mut eval, "(vec (.toByteArray (biginteger 256)))"),
         "[1 0]"
@@ -1418,7 +1544,10 @@ fn bigint_inspection() {
         "java.lang.ArithmeticException | Negative bit address"
     );
     assert_eq!(
-        uncaught(&mut eval, "(.longValueExact (.shiftLeft BigInteger/ONE 70))"),
+        uncaught(
+            &mut eval,
+            "(.longValueExact (.shiftLeft BigInteger/ONE 70))"
+        ),
         "java.lang.ArithmeticException | BigInteger out of long range"
     );
 }
@@ -1738,8 +1867,10 @@ fn matcher_find_group_start_end() {
         uncaught(&mut eval, r#"(.find "12")"#),
         "java.lang.IllegalArgumentException | No matching field found: find for class java.lang.String"
     );
-    assert!(uncaught(&mut eval, r#"(.find (re-matcher #"\d+" "12") nil)"#)
-        .contains("NullPointerException"));
+    assert!(
+        uncaught(&mut eval, r#"(.find (re-matcher #"\d+" "12") nil)"#)
+            .contains("NullPointerException")
+    );
     // `re-find` over an anchored handle obeys the anchor.
     assert_eq!(
         run(&mut eval, r#"(re-find (re-matcher #"\G\d+" "ab12"))"#),
@@ -1885,8 +2016,10 @@ fn file_create_temp_file() {
         uncaught(&mut eval, r#"(java.io.File/createTempFile nil ".dat")"#),
         "java.lang.NullPointerException | Cannot invoke \"java.io.File.createTempFile(String, String)\" because \"prefix\" is null"
     );
-    assert!(uncaught(&mut eval, r#"(java.io.File/createTempFile 5 ".dat")"#)
-        .contains("ClassCastException"));
+    assert!(
+        uncaught(&mut eval, r#"(java.io.File/createTempFile 5 ".dat")"#)
+            .contains("ClassCastException")
+    );
     assert_eq!(
         compile_err(&mut eval, r#"(java.io.File/createTempFile "block_")"#),
         "java.lang.IllegalArgumentException | No matching method createTempFile found taking 1 args for class java.io.File"
@@ -2052,11 +2185,17 @@ fn writer_write_shapes() {
         "\"xy\""
     );
     assert_eq!(
-        uncaught(&mut eval, "(let [w (java.io.StringWriter.)] (.write w nil))"),
+        uncaught(
+            &mut eval,
+            "(let [w (java.io.StringWriter.)] (.write w nil))"
+        ),
         "java.lang.NullPointerException | Cannot invoke \"java.io.Writer.write(String)\" because \"str\" is null"
     );
     assert_eq!(
-        uncaught(&mut eval, "(let [w (java.io.StringWriter.)] (.write w [1]))"),
+        uncaught(
+            &mut eval,
+            "(let [w (java.io.StringWriter.)] (.write w [1]))"
+        ),
         "java.lang.IllegalArgumentException | No matching method write found taking 1 args for class java.io.Writer"
     );
     assert!(uncaught(&mut eval, "(.write \"ab\" \"c\")").contains("No matching"));
@@ -2098,11 +2237,13 @@ fn io_resource_shapes() {
         ),
         "java.lang.NullPointerException | Cannot invoke \"java.lang.ClassLoader.getResource(String)\" because \"name\" is null"
     );
-    assert!(uncaught(
-        &mut eval,
-        "(do (require 'clojure.java.io) (clojure.java.io/resource 5))"
-    )
-    .contains("ClassCastException"));
+    assert!(
+        uncaught(
+            &mut eval,
+            "(do (require 'clojure.java.io) (clojure.java.io/resource 5))"
+        )
+        .contains("ClassCastException")
+    );
     // A relative load dir resolves against the process directory.
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -2147,11 +2288,17 @@ fn deque_ends() {
     );
     // Null elements NPE; unseqables take the `ISeq` error.
     assert_eq!(
-        uncaught(&mut eval, "(let [dq (java.util.ArrayDeque.)] (.addLast dq nil))"),
+        uncaught(
+            &mut eval,
+            "(let [dq (java.util.ArrayDeque.)] (.addLast dq nil))"
+        ),
         "java.lang.NullPointerException | "
     );
     assert_eq!(
-        uncaught(&mut eval, "(let [dq (java.util.ArrayDeque.)] (.addFirst dq nil))"),
+        uncaught(
+            &mut eval,
+            "(let [dq (java.util.ArrayDeque.)] (.addFirst dq nil))"
+        ),
         "java.lang.NullPointerException | "
     );
     assert!(uncaught(&mut eval, "(java.util.ArrayDeque. 5)").contains("ISeq"));
@@ -2177,10 +2324,7 @@ fn arraylist_collect_seq_shuffle() {
         ),
         "[[1 2 3] (1 2 3) 1 3]"
     );
-    assert_eq!(
-        run(&mut eval, "(seq (java.util.ArrayList.))"),
-        "nil"
-    );
+    assert_eq!(run(&mut eval, "(seq (java.util.ArrayList.))"), "nil");
     // Seeded shuffles are deterministic permutations (exact pins
     // guard the draw order; the TSP oracles verify the values).
     assert_eq!(
@@ -2219,22 +2363,29 @@ fn arraylist_collect_seq_shuffle() {
         ),
         "java.lang.NullPointerException | "
     );
-    assert!(uncaught(
-        &mut eval,
-        "(java.util.Collections/shuffle [1 2] (java.util.Random. 0))"
-    )
-    .contains("java.util.List"));
-    assert!(uncaught(
-        &mut eval,
-        "(java.util.Collections/shuffle (java.util.ArrayList.) 5)"
-    )
-    .contains("java.util.Random"));
+    assert!(
+        uncaught(
+            &mut eval,
+            "(java.util.Collections/shuffle [1 2] (java.util.Random. 0))"
+        )
+        .contains("java.util.List")
+    );
+    assert!(
+        uncaught(
+            &mut eval,
+            "(java.util.Collections/shuffle (java.util.ArrayList.) 5)"
+        )
+        .contains("java.util.Random")
+    );
     assert_eq!(
         uncaught(&mut eval, "(java.util.ArrayList. nil)"),
         "java.lang.NullPointerException | "
     );
     assert_eq!(
-        compile_err(&mut eval, "(java.util.Collections/shuffle (java.util.ArrayList.))"),
+        compile_err(
+            &mut eval,
+            "(java.util.Collections/shuffle (java.util.ArrayList.))"
+        ),
         "java.lang.IllegalArgumentException | No matching method shuffle found taking 1 args for class java.util.Collections"
     );
     assert_eq!(
@@ -2432,23 +2583,24 @@ fn digest_shapes() {
         "java.security.NoSuchAlgorithmException | SHA-1 MessageDigest not available"
     );
     assert_eq!(
-        uncaught(
-            &mut eval,
-            "(java.security.MessageDigest/getInstance nil)",
-        ),
+        uncaught(&mut eval, "(java.security.MessageDigest/getInstance nil)",),
         "java.lang.NullPointerException | Cannot invoke \"java.security.MessageDigest.getInstance(String)\" because \"algorithm\" is null"
     );
-    assert!(uncaught(
-        &mut eval,
-        "(java.security.MessageDigest/getInstance 5)"
-    )
-    .contains("ClassCastException"));
+    assert!(
+        uncaught(&mut eval, "(java.security.MessageDigest/getInstance 5)")
+            .contains("ClassCastException")
+    );
     assert_eq!(
         compile_err(&mut eval, "(java.security.MessageDigest/getInstance)"),
         "java.lang.IllegalArgumentException | No matching method getInstance found taking 0 args for class java.security.MessageDigest"
     );
     assert_eq!(
-        runtime_miss(&mut eval, "java.security.MessageDigest", "getInstance", "1 2"),
+        runtime_miss(
+            &mut eval,
+            "java.security.MessageDigest",
+            "getInstance",
+            "1 2"
+        ),
         "java.lang.IllegalArgumentException | No matching method getInstance found taking 2 args for class java.security.MessageDigest"
     );
     // Input errors name their method; non-digests miss.
@@ -2510,7 +2662,10 @@ fn call_depth_guard_throws_catchable_stack_overflow() {
         // `Throwable` (and `Error`/`VirtualMachineError`) catch it;
         // `Exception` does not.
         assert_eq!(
-            run(&mut eval, "(try (algo-boom) (catch Throwable e :via-throwable))"),
+            run(
+                &mut eval,
+                "(try (algo-boom) (catch Throwable e :via-throwable))"
+            ),
             ":via-throwable"
         );
         assert_eq!(
@@ -2560,10 +2715,15 @@ fn call_depth_guard_leaves_deep_legal_code_alone() {
             "1000"
         );
         // Mutual recursion trips the same guard.
-        eval.eval_source("(declare algo-pong) (defn algo-ping [] (algo-pong)) (defn algo-pong [] (algo-ping))")
-            .unwrap();
+        eval.eval_source(
+            "(declare algo-pong) (defn algo-ping [] (algo-pong)) (defn algo-pong [] (algo-ping))",
+        )
+        .unwrap();
         assert_eq!(
-            run(&mut eval, "(try (algo-ping) (catch StackOverflowError e :caught))"),
+            run(
+                &mut eval,
+                "(try (algo-ping) (catch StackOverflowError e :caught))"
+            ),
             ":caught"
         );
     });
@@ -2575,5 +2735,321 @@ fn call_depth_guard_leaves_deep_legal_code_alone() {
             "(loop [i 100000 acc 0] (if (zero? i) acc (recur (dec i) (inc acc))))"
         ),
         "100000"
+    );
+}
+
+// Batch F (#205): `BigDecimal` ctors box every surveyed shape
+// fresh, like `new` (literals/prints keep their own paths).
+#[test]
+fn bigdec_ctor_shapes() {
+    let mut eval = boot();
+    assert_eq!(
+        run(&mut eval, "(.toPlainString (BigDecimal. \"2.50\"))"),
+        "\"2.50\""
+    );
+    assert_eq!(
+        run(&mut eval, "(.toPlainString (BigDecimal. (biginteger 42)))"),
+        "\"42\""
+    );
+    assert_eq!(run(&mut eval, "(.toPlainString (BigDecimal. 5))"), "\"5\"");
+    assert_eq!(
+        run(&mut eval, "(.toPlainString (BigDecimal. 0.5))"),
+        "\"0.5\""
+    );
+    assert_eq!(
+        run(
+            &mut eval,
+            "(.toPlainString (BigDecimal. (BigDecimal. \"1.5\")))"
+        ),
+        "\"1.5\""
+    );
+    // Fresh boxes: never identical.
+    assert_eq!(
+        run(
+            &mut eval,
+            "(identical? (BigDecimal. \"5\") (BigDecimal. \"5\"))"
+        ),
+        "false"
+    );
+}
+
+// Batch F (#205): ctor misses mirror the overload set (bad
+// text fails the parse message, empty fails bare, nil NPEs on
+// the `String` length, `BigInt` has no overload).
+#[test]
+fn bigdec_ctor_miss() {
+    let mut eval = boot();
+    assert_eq!(
+        uncaught(&mut eval, "(BigDecimal. \"abc\")"),
+        "java.lang.NumberFormatException | Character a is neither a decimal digit number, decimal point, nor \"e\" notation exponential mark."
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(BigDecimal. \"\")"),
+        "java.lang.NumberFormatException | "
+    );
+    assert!(uncaught(&mut eval, "(BigDecimal. ##NaN)").contains("NumberFormatException"));
+    assert_eq!(
+        uncaught(&mut eval, "(BigDecimal. nil)"),
+        "java.lang.NullPointerException | Cannot invoke \"String.length()\" because \"val\" is null"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(BigDecimal. 5N)"),
+        "java.lang.IllegalArgumentException | No matching ctor found for class java.math.BigDecimal"
+    );
+    assert_eq!(
+        compile_err(&mut eval, "(BigDecimal. \"1\" \"2\")"),
+        "java.lang.IllegalArgumentException | No matching ctor found for class java.math.BigDecimal"
+    );
+}
+
+// Batch F (#205): `valueOf` — `(long)` exact through the
+// canonical compact paths (small values share), `(double)`
+// the short rendering.
+#[test]
+fn bigdec_valueof() {
+    let mut eval = boot();
+    assert_eq!(
+        run(&mut eval, "(.toPlainString (BigDecimal/valueOf 5))"),
+        "\"5\""
+    );
+    assert_eq!(
+        run(
+            &mut eval,
+            "(identical? (BigDecimal/valueOf 5) (BigDecimal/valueOf 5))"
+        ),
+        "true"
+    );
+    assert_eq!(
+        run(&mut eval, "(.toPlainString (BigDecimal/valueOf 0.1))"),
+        "\"0.1\""
+    );
+    assert!(uncaught(&mut eval, "(BigDecimal/valueOf ##NaN)").contains("NumberFormatException"));
+    // No `(String)`/nil overloads (both real ones take primitives).
+    assert_eq!(
+        uncaught(&mut eval, "(BigDecimal/valueOf nil)"),
+        "java.lang.IllegalArgumentException | No matching method valueOf found taking 1 args for class java.math.BigDecimal"
+    );
+    assert_eq!(
+        runtime_miss(&mut eval, "java.math.BigDecimal", "valueOf", "1 2"),
+        "java.lang.IllegalArgumentException | No matching method valueOf found taking 2 args for class java.math.BigDecimal"
+    );
+}
+
+// Batch F (#205): `setScale` — the entropy/sin/simpson shape
+// (scale + mode), same-scale identity, `UNNECESSARY`.
+#[test]
+fn bigdec_setscale() {
+    let mut eval = boot();
+    assert_eq!(
+        run(
+            &mut eval,
+            "(.toPlainString (.setScale (BigDecimal. \"2.5\") 0 java.math.RoundingMode/HALF_EVEN))"
+        ),
+        "\"2\""
+    );
+    assert_eq!(
+        run(
+            &mut eval,
+            "(.toPlainString (.setScale (BigDecimal/valueOf 2.5) 0 java.math.RoundingMode/HALF_UP))"
+        ),
+        "\"3\""
+    );
+    assert_eq!(
+        run(
+            &mut eval,
+            "(identical? (let [b (BigDecimal. \"2.5\")] (.setScale b 1 java.math.RoundingMode/HALF_EVEN)) (BigDecimal. \"2.5\"))"
+        ),
+        "false"
+    );
+    let mut eval2 = boot();
+    assert_eq!(
+        run(
+            &mut eval2,
+            "(let [b (BigDecimal. \"2.5\")] (identical? (.setScale b 1 java.math.RoundingMode/HALF_EVEN) b))"
+        ),
+        "true"
+    );
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(.setScale (BigDecimal. \"2.5\") 0 java.math.RoundingMode/UNNECESSARY)"
+        ),
+        "java.lang.ArithmeticException | Rounding necessary"
+    );
+    assert!(
+        uncaught(&mut eval, "(.setScale (BigDecimal. \"2.5\") 0 nil)")
+            .contains("NullPointerException")
+    );
+}
+
+// Batch F (#205): context arithmetic — the chudnovsky shapes.
+#[test]
+fn bigdec_context_arith() {
+    let mut eval = boot();
+    assert_eq!(
+        run(
+            &mut eval,
+            "(.toPlainString (.multiply (BigDecimal. \"426880\") (.sqrt (BigDecimal. \"10005\") (java.math.MathContext. 50 java.math.RoundingMode/HALF_EVEN)) (java.math.MathContext. 50 java.math.RoundingMode/HALF_EVEN)))"
+        ),
+        "\"42698670.666333395817712889160659608273320884002511\""
+    );
+    assert_eq!(
+        run(
+            &mut eval,
+            "(.toPlainString (.add (BigDecimal. \"1.5\") (BigDecimal. \"2.25\") (java.math.MathContext. 2)))"
+        ),
+        "\"3.8\""
+    );
+    assert_eq!(
+        run(
+            &mut eval,
+            "(.toPlainString (.add (BigDecimal. \"1.5\") (BigDecimal. \"2.25\")))"
+        ),
+        "\"3.75\""
+    );
+    assert_eq!(
+        run(
+            &mut eval,
+            "(.toPlainString (.divide (BigDecimal. \"1\") (BigDecimal. \"8\")))"
+        ),
+        "\"0.125\""
+    );
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(.divide (BigDecimal. \"1\") (BigDecimal. \"3\"))"
+        ),
+        "java.lang.ArithmeticException | Non-terminating decimal expansion; no exact representable decimal result."
+    );
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(.divide (BigDecimal. \"1\") (BigDecimal. \"0\"))"
+        ),
+        "java.lang.ArithmeticException | Division by zero"
+    );
+    assert!(
+        uncaught(
+            &mut eval,
+            "(.divide (BigDecimal. \"1\") (BigDecimal. \"2\") nil)"
+        )
+        .contains("NullPointerException")
+    );
+}
+
+// Batch F (#205): `sqrt(mc)` — the problem-080 shape, pinned
+// against JDK digits.
+#[test]
+fn bigdec_sqrt() {
+    let mut eval = boot();
+    assert_eq!(
+        run(
+            &mut eval,
+            "(.toPlainString (.sqrt (BigDecimal. \"2\") (java.math.MathContext. 110 java.math.RoundingMode/HALF_UP)))"
+        ),
+        "\"1.4142135623730950488016887242096980785696718753769480731766797379907324784621070388503875343276415727350138462\""
+    );
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(.sqrt (BigDecimal. \"-1\") (java.math.MathContext. 10))"
+        ),
+        "java.lang.ArithmeticException | Attempted square root of negative BigDecimal"
+    );
+}
+
+// Batch F (#205): conversions — `toPlainString`, `doubleValue`,
+// `toBigInteger` (truncation toward zero), `toString`.
+#[test]
+fn bigdec_conv() {
+    let mut eval = boot();
+    assert_eq!(
+        run(&mut eval, "(.toPlainString (BigDecimal. \"1E+10\"))"),
+        "\"10000000000\""
+    );
+    assert_eq!(
+        run(&mut eval, "(.doubleValue (BigDecimal. \"2.5\"))"),
+        "2.5"
+    );
+    assert_eq!(
+        run(&mut eval, "(.toBigInteger (BigDecimal. \"-1.9\"))"),
+        "-1"
+    );
+    assert_eq!(run(&mut eval, "(.toBigInteger (BigDecimal. 512.0))"), "512");
+    assert_eq!(
+        run(&mut eval, "(.toString (BigDecimal. \"1E+10\"))"),
+        "\"1E+10\""
+    );
+}
+
+// Batch F (#205): the `(java.math.MathContext. …)` interop ctors mirror
+// the port-only shapes, except the mode takes the enum object.
+#[test]
+fn mathcontext_ctor() {
+    let mut eval = boot();
+    assert_eq!(
+        run(&mut eval, "(str (java.math.MathContext. 10))"),
+        "\"precision=10 roundingMode=HALF_UP\""
+    );
+    assert_eq!(
+        run(
+            &mut eval,
+            "(str (java.math.MathContext. 110 java.math.RoundingMode/HALF_UP))"
+        ),
+        "\"precision=110 roundingMode=HALF_UP\""
+    );
+    assert_eq!(
+        run(
+            &mut eval,
+            "(str (java.math.MathContext. \"precision=7 roundingMode=FLOOR\"))"
+        ),
+        "\"precision=7 roundingMode=FLOOR\""
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(java.math.MathContext. -1)"),
+        "java.lang.IllegalArgumentException | Digits < 0"
+    );
+    assert!(
+        uncaught(&mut eval, "(java.math.MathContext. 9999999999)").contains("integer overflow")
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(java.math.MathContext. nil)"),
+        "java.lang.NullPointerException | null String"
+    );
+    assert!(
+        uncaught(&mut eval, "(java.math.MathContext. 10 nil)").contains("NullPointerException")
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(java.math.MathContext. 10 \"HALF_UP\")"),
+        "java.lang.IllegalArgumentException | No matching ctor found for class java.math.MathContext"
+    );
+}
+
+// Batch F (#205): `RoundingMode` constants read as enum values
+// (equal by mode), print the JDK names; unknown names miss.
+#[test]
+fn rounding_fields() {
+    let mut eval = boot();
+    assert_eq!(
+        run(&mut eval, "(str java.math.RoundingMode/HALF_EVEN)"),
+        "\"HALF_EVEN\""
+    );
+    assert_eq!(
+        run(
+            &mut eval,
+            "(= java.math.RoundingMode/HALF_UP java.math.RoundingMode/HALF_UP)"
+        ),
+        "true"
+    );
+    assert_eq!(
+        run(
+            &mut eval,
+            "(= java.math.RoundingMode/HALF_UP java.math.RoundingMode/HALF_EVEN)"
+        ),
+        "false"
+    );
+    assert_eq!(
+        compile_err(&mut eval, "java.math.RoundingMode/NOPE"),
+        "java.lang.IllegalArgumentException | Error - no matches found for static method NOPE in class java.math.RoundingMode"
     );
 }

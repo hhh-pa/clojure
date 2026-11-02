@@ -39,6 +39,8 @@ pub(crate) fn ctor_arities(fqn: &str) -> Option<&'static [usize]> {
         "java.util.Random" => Some(&[0, 1]),
         "java.security.SecureRandom" => Some(&[0]),
         "java.math.BigInteger" => Some(&[1, 2]),
+        "java.math.BigDecimal" => Some(&[1]),
+        "java.math.MathContext" => Some(&[1, 2]),
         "java.net.URI" => Some(&[1]),
         "java.io.File" => Some(&[1]),
         "java.io.FileInputStream" => Some(&[1]),
@@ -618,13 +620,107 @@ fn bigint_ctor_value(n: num_bigint::BigInt) -> Value {
     Value::BigInteger(Arc::new(n))
 }
 
+/// Build `(BigDecimal. …)` (#205): 1-arg takes `String`
+/// (bad text fails the parse message; empty fails bare, like
+/// the JDK), `BigInteger`, `double` (the exact binary
+/// expansion), `long`, or a `BigDecimal` copy — all boxed
+/// fresh, like `new`. Anything else misses (there is no
+/// `(BigInt)` overload on the JVM either).
+pub(crate) fn build_bigdecimal(args: &[Value]) -> Result<Value, NativeError> {
+    const CLASS: &str = "java.math.BigDecimal";
+    match args {
+        [Value::Str(s)] => match clj_value::BigDec::parse(s) {
+            Ok(d) => Ok(Value::BigDec(Arc::new(d))),
+            Err(e) if e == "Zero-length BigDecimal" => {
+                Err(crate::core::number_format(String::new()))
+            }
+            Err(e) => Err(crate::core::number_format(e)),
+        },
+        [Value::BigInteger(n)] => Ok(Value::BigDec(Arc::new(clj_value::BigDec::from_bigint(
+            n.as_ref().clone(),
+        )))),
+        [Value::Double(d)] => clj_value::BigDec::from_f64_exact(*d)
+            .map(|d| Value::BigDec(Arc::new(d)))
+            .map_err(crate::core::number_format),
+        [Value::Int(n)] => Ok(Value::BigDec(Arc::new(clj_value::BigDec::from_bigint(
+            num_bigint::BigInt::from(*n),
+        )))),
+        [Value::BigDec(d)] => Ok(Value::BigDec(Arc::new(d.as_ref().clone()))),
+        [Value::Nil] => Err(bigint_length_npe()),
+        _ => Err(no_ctor(CLASS, false)),
+    }
+}
+
+/// Build `(MathContext. …)` (#205): `(int)` (past-`i32` is
+/// `integer overflow`, negative is `Digits < 0`, default
+/// `HALF_UP`), `(int, RoundingMode)` (explicit nil mode NPEs),
+/// `(String)` (strict grammar). Mirrors the port-only
+/// `math-context` shapes exactly, except the mode arg takes
+/// the enum object (there is no `(int, String)` overload on
+/// the JVM).
+pub(crate) fn build_mathcontext(
+    eval: &mut crate::eval::Evaluator,
+    args: &[Value],
+) -> Result<Value, NativeError> {
+    const CLASS: &str = "java.math.MathContext";
+    let precision = |v: &Value| -> Result<u32, NativeError> {
+        let Value::Int(i) = v else {
+            return Err(no_ctor(CLASS, false));
+        };
+        let p = int_exact_long(*i)?;
+        if p < 0 {
+            return Err(NativeError::new(
+                ThrowClass::IllegalArgumentException,
+                clj_value::DIGITS_LT_0.to_owned(),
+            ));
+        }
+        Ok(p as u32)
+    };
+    let ctx = match args {
+        [Value::Str(s)] => clj_value::MathContext::parse(s)
+            .map_err(|m| NativeError::new(ThrowClass::IllegalArgumentException, m))?,
+        [Value::Nil] => {
+            return Err(NativeError::new(
+                ThrowClass::NullPointerException,
+                "null String".to_owned(),
+            ));
+        }
+        [p] => {
+            let p = precision(p)?;
+            clj_value::MathContext::new(p, clj_value::RoundingMode::HalfUp)
+        }
+        [p, mode] => {
+            if matches!(p, Value::Str(_)) {
+                return Err(crate::core::cce_err(p, "java.lang.Number"));
+            }
+            let p = precision(p)?;
+            let rounding = match mode {
+                Value::Nil => {
+                    return Err(NativeError::new(
+                        ThrowClass::NullPointerException,
+                        String::new(),
+                    ));
+                }
+                _ => crate::classemu::as_rounding(mode).ok_or_else(|| no_ctor(CLASS, false))?,
+            };
+            clj_value::MathContext::new(p, rounding)
+        }
+        _ => return Err(no_ctor(CLASS, false)),
+    };
+    Ok(Value::Extension(Arc::new(crate::core::MathContextVal {
+        id: eval.next_id(),
+        ctx,
+    })))
+}
+
 /// Build `(URI. …)` (#205): 1-arg takes the string (nil NPEs
 /// on the parameter, like the JDK); anything else misses.
 pub(crate) fn build_uri(args: &[Value]) -> Result<Value, NativeError> {
     const CLASS: &str = "java.net.URI";
     match args {
-        [Value::Str(s)] => crate::classemu::UriHandle::parse(s)
-            .map(|h| Value::Extension(Arc::new(h))),
+        [Value::Str(s)] => {
+            crate::classemu::UriHandle::parse(s).map(|h| Value::Extension(Arc::new(h)))
+        }
         [Value::Nil] => Err(NativeError::new(
             ThrowClass::NullPointerException,
             "Cannot invoke \"java.net.URI.<init>\" because \"str\" is null".to_owned(),
@@ -754,7 +850,9 @@ fn bigint_signum(signum: i32, mag: &[u8]) -> Result<Value, NativeError> {
     } else {
         num_bigint::Sign::Plus
     };
-    Ok(bigint_ctor_value(num_bigint::BigInt::from_biguint(sign, mag)))
+    Ok(bigint_ctor_value(num_bigint::BigInt::from_biguint(
+        sign, mag,
+    )))
 }
 
 /// The `(int, Random)` random-bits ctor (excess top bits
@@ -766,7 +864,7 @@ fn bigint_random_bits(num_bits: i32, rnd: &Value) -> Result<Value, NativeError> 
             "numBits must be non-negative".to_owned(),
         ));
     }
-    let nbytes = (num_bits as usize + 7) / 8;
+    let nbytes = (num_bits as usize).div_ceil(8);
     let bytes = crate::emurand::random_bytes(rnd, nbytes).unwrap_or_default();
     let mut mag: Vec<u8> = bytes.into_iter().map(|b| b as u8).collect();
     let excess = nbytes * 8 - num_bits as usize;

@@ -802,6 +802,216 @@ impl BigDec {
         }
         div_round(r.numer(), r.denom(), mc)
     }
+
+    /// `setScale(newScale, rounding)` (#205): rescale exactly,
+    /// rounding discarded digits per mode. Growing the scale
+    /// appends zeros (no rounding); `UNNECESSARY` fails
+    /// `Rounding necessary` when a dropped digit is nonzero, like
+    /// the JDK.
+    pub fn set_scale(&self, scale: i64, rounding: RoundingMode) -> Result<Self, &'static str> {
+        if scale == self.scale {
+            return Ok(self.clone());
+        }
+        if scale > self.scale {
+            let up = u32_scale(scale.saturating_sub(self.scale));
+            return Ok(Self {
+                unscaled: self.unscaled.clone() * pow10(up),
+                scale,
+            });
+        }
+        let drop = u32_scale(self.scale.saturating_sub(scale));
+        let divisor = pow10(drop);
+        let neg = self.unscaled.is_negative();
+        let abs = self.unscaled.abs();
+        let (mut q, r) = (&abs / &divisor, &abs % &divisor);
+        let double_r = &r + &r;
+        let cmp = double_r.cmp(&divisor);
+        let odd = (&q % 2) != BigInt::ZERO;
+        if round_up(rounding, self.sign(), r.is_zero(), cmp, odd)? {
+            q += 1;
+        }
+        let unscaled = if neg { -q } else { q };
+        Ok(Self { unscaled, scale })
+    }
+
+    /// `toPlainString` (#205): never an exponent; zeros print
+    /// `0` regardless of scale (JDK-verified).
+    #[must_use]
+    pub fn to_plain_string(&self) -> String {
+        if self.unscaled.is_zero() {
+            return "0".to_owned();
+        }
+        let neg = self.unscaled.is_negative();
+        let digits = self.unscaled.abs().to_string();
+        let mut out = String::new();
+        if neg {
+            out.push('-');
+        }
+        if self.scale <= 0 {
+            out.push_str(&digits);
+            let zeros = u32_scale(self.scale.saturating_neg()) as usize;
+            out.push_str(&"0".repeat(zeros));
+        } else {
+            let scale = u32_scale(self.scale) as usize;
+            if scale < digits.len() {
+                let split = digits.len() - scale;
+                out.push_str(&digits[..split]);
+                out.push('.');
+                out.push_str(&digits[split..]);
+            } else {
+                out.push_str("0.");
+                out.push_str(&"0".repeat(scale - digits.len()));
+                out.push_str(&digits);
+            }
+        }
+        out
+    }
+
+    /// `BigDecimal(double)`: the EXACT binary expansion (unlike
+    /// `valueOf`'s short rendering — `new BigDecimal(0.1)` keeps
+    /// all 55 digits; trailing zeros strip to the minimal scale,
+    /// like the JDK). Infinities fail like the JVM.
+    pub fn from_f64_exact(d: f64) -> Result<Self, &'static str> {
+        if !d.is_finite() {
+            return Err("Infinite or NaN");
+        }
+        if d == 0.0 {
+            return Ok(Self {
+                unscaled: BigInt::ZERO,
+                scale: 0,
+            });
+        }
+        // value = mant × 2^exp over the full 52-bit mantissa
+        // (subnormals carry no implicit bit, exponent −1074).
+        // Negative exponents scale by 5^−e over 10^−e — binary
+        // fractions always terminate in decimal.
+        let bits = d.to_bits();
+        let neg = bits >> 63 != 0;
+        let raw_exp = ((bits >> 52) & 0x7ff) as i32;
+        let frac = bits & 0xf_ffff_ffff_ffff;
+        let (mant, exp): (u64, i32) = if raw_exp == 0 {
+            (frac, -1074)
+        } else {
+            (frac | 0x10_0000_0000_0000, raw_exp - 1075)
+        };
+        let (mut unscaled, mut scale) = if exp >= 0 {
+            (BigInt::from(mant) << exp as u32, 0)
+        } else {
+            let k = exp.saturating_neg() as u32;
+            (BigInt::from(mant) * BigInt::from(5u32).pow(k), k as i64)
+        };
+        let ten = BigInt::from(10);
+        while scale > 0 && (&unscaled % &ten).is_zero() {
+            unscaled /= &ten;
+            scale -= 1;
+        }
+        if neg {
+            unscaled = -unscaled;
+        }
+        Ok(Self { unscaled, scale })
+    }
+
+    /// `sqrt(mc)` (#205 — `problem-080`, chudnovsky): Newton's
+    /// method with 10 guard digits, rounded once to the context.
+    /// Negatives fail like the JDK; zeros answer zero at the
+    /// preferred scale (`scale/2`); unlimited precision takes
+    /// exact roots only. Perfect squares land exactly (verified
+    /// against the input, so halfway cases can't double-round);
+    /// irrationals round from the guard digits (never exactly
+    /// halfway — correctly rounded).
+    pub fn sqrt_mc(&self, mc: &MathContext) -> Result<Self, &'static str> {
+        if self.sign() == Ordering::Less {
+            return Err("Attempted square root of negative BigDecimal");
+        }
+        if self.is_zero() {
+            return Ok(Self {
+                unscaled: BigInt::ZERO,
+                scale: self.scale / 2,
+            });
+        }
+        if mc.precision == 0 {
+            return Self::sqrt_exact(self).ok_or(NON_TERMINATING);
+        }
+        // Perfect squares round from the exact root (no guard
+        // digits to double-round through at halfway cases).
+        if let Some(exact) = Self::sqrt_exact(self) {
+            return Ok(Self::sqrt_stripped(&exact.round(mc)?, self.scale / 2));
+        }
+        let work = MathContext::new(mc.precision.saturating_add(10), mc.rounding);
+        let mut x = Self::sqrt_guess(self);
+        // Newton doubles the good digits; iterate to stability
+        // (bounded — ulp oscillation still lands within the
+        // guard digits, and irrationals are never exactly
+        // halfway).
+        for _ in 0..32 {
+            let q = self.div_mc(&x, &work)?;
+            // (x + q) / 2, exact: ×5 over one more scale digit.
+            let sum = x.add(&q);
+            let half = Self {
+                unscaled: sum.unscaled * 5,
+                scale: sum.scale + 1,
+            }
+            .round(&work)?;
+            if half.unscaled == x.unscaled && half.scale == x.scale {
+                x = half;
+                break;
+            }
+            x = half;
+        }
+        let rounded = x.round(mc)?;
+        Ok(Self::sqrt_stripped(&rounded, self.scale / 2))
+    }
+
+    /// The JDK strips trailing zeros down to the preferred scale
+    /// (`this.scale()/2`) after rounding the root.
+    fn sqrt_stripped(r: &Self, preferred: i64) -> Self {
+        let mut out = r.clone();
+        let ten = BigInt::from(10);
+        while out.scale > preferred && (&out.unscaled % &ten).is_zero() {
+            out.unscaled /= &ten;
+            out.scale -= 1;
+        }
+        out
+    }
+
+    /// An exact square root, if the value is a perfect square of
+    /// a terminating decimal (normalized to an even scale, then
+    /// an integer root verified against the input).
+    fn sqrt_exact(v: &Self) -> Option<Self> {
+        let (unscaled, scale) = if v.scale % 2 == 0 {
+            (v.unscaled.clone(), v.scale)
+        } else {
+            (v.unscaled.clone() * 10, v.scale + 1)
+        };
+        if unscaled.is_negative() {
+            return None;
+        }
+        let root = unscaled.abs().sqrt();
+        if &root * &root != unscaled.abs() {
+            return None;
+        }
+        Some(Self {
+            unscaled: root,
+            scale: scale / 2,
+        })
+    }
+
+    /// A positive starting guess for Newton: the double root's
+    /// short rendering (~16 good digits), else 10^half-magnitude
+    /// when the double over/underflows.
+    fn sqrt_guess(v: &Self) -> Self {
+        let g = v.to_f64().sqrt();
+        if g.is_finite() && g != 0.0 {
+            if let Ok(x) = Self::value_of_f64(g) {
+                return x;
+            }
+        }
+        let mag = dec_len(&v.unscaled) as i64 - v.scale;
+        Self {
+            unscaled: BigInt::from(1),
+            scale: -mag.div_euclid(2),
+        }
+    }
 }
 
 /// Guard-digit long division: `numer/denom` (exact, nonzero)
@@ -956,7 +1166,7 @@ pub fn bigint_parse_radix(s: &str, radix: u32) -> Result<BigInt, String> {
     if digits.is_empty() {
         return Err(format!("For input string: \"{s}\""));
     }
-    if !digits.chars().all(|c| c.to_digit(radix).is_some()) {
+    if !digits.chars().all(|c| c.is_digit(radix)) {
         return Err(format!("For input string: \"{s}\""));
     }
     BigInt::parse_bytes(s.as_bytes(), radix).ok_or_else(|| format!("For input string: \"{s}\""))
@@ -1086,5 +1296,171 @@ mod tests {
     #[should_panic(expected = "scale gap")]
     fn monster_to_bigint_trunc_panics_loud() {
         let _ = monster().to_bigint_trunc();
+    }
+
+    /// `setScale` (#205): growth appends zeros, shrinks round
+    /// per mode (JDK-verified shapes).
+    #[test]
+    fn set_scale_rounds() {
+        let d = BigDec::parse("2.5").unwrap();
+        assert_eq!(
+            d.set_scale(0, RoundingMode::HalfEven)
+                .unwrap()
+                .to_plain_string(),
+            "2"
+        );
+        assert_eq!(
+            d.set_scale(0, RoundingMode::HalfUp)
+                .unwrap()
+                .to_plain_string(),
+            "3"
+        );
+        assert_eq!(
+            BigDec::parse("2.55")
+                .unwrap()
+                .set_scale(1, RoundingMode::HalfEven)
+                .unwrap()
+                .to_plain_string(),
+            "2.6"
+        );
+        assert_eq!(
+            d.set_scale(4, RoundingMode::Unnecessary)
+                .unwrap()
+                .to_plain_string(),
+            "2.5000"
+        );
+        assert_eq!(
+            BigDec::parse("1000")
+                .unwrap()
+                .set_scale(-2, RoundingMode::HalfUp)
+                .unwrap()
+                .to_plain_string(),
+            "1000"
+        );
+        assert_eq!(
+            d.set_scale(1, RoundingMode::Unnecessary)
+                .unwrap()
+                .to_plain_string(),
+            "2.5"
+        );
+        assert_eq!(
+            d.set_scale(0, RoundingMode::Unnecessary).unwrap_err(),
+            ROUNDING_NECESSARY
+        );
+    }
+
+    /// `toPlainString` (#205): never an exponent; zeros print
+    /// `0` at any scale (JDK-verified).
+    #[test]
+    fn plain_string_shapes() {
+        for (text, plain) in [
+            ("0E+5", "0"),
+            ("0", "0"),
+            ("1E+10", "10000000000"),
+            ("1.5E-7", "0.00000015"),
+            ("-2.5", "-2.5"),
+            ("100", "100"),
+            ("0.5", "0.5"),
+        ] {
+            assert_eq!(
+                BigDec::parse(text).unwrap().to_plain_string(),
+                plain,
+                "{text}"
+            );
+        }
+    }
+
+    /// `BigDecimal(double)` (#205): the exact binary expansion
+    /// at minimal scale (`0.1` keeps all 55 digits; `0.5` is
+    /// scale 1); infinities fail like the JVM.
+    #[test]
+    fn f64_exact_expansion() {
+        assert_eq!(
+            BigDec::from_f64_exact(0.5).unwrap().to_plain_string(),
+            "0.5"
+        );
+        assert_eq!(
+            BigDec::from_f64_exact(0.1).unwrap().to_plain_string(),
+            "0.1000000000000000055511151231257827021181583404541015625"
+        );
+        assert_eq!(BigDec::from_f64_exact(3.0).unwrap().to_plain_string(), "3");
+        assert_eq!(
+            BigDec::from_f64_exact(f64::NAN).unwrap_err(),
+            "Infinite or NaN"
+        );
+        assert_eq!(
+            BigDec::from_f64_exact(f64::INFINITY).unwrap_err(),
+            "Infinite or NaN"
+        );
+    }
+
+    /// `sqrt(mc)` (#205): correctly rounded (JDK-verified
+    /// digits), exact on perfect squares, JDK errors on
+    /// negatives and unlimited irrationals.
+    #[test]
+    fn sqrt_rounds() {
+        let mc110 = MathContext::new(110, RoundingMode::HalfUp);
+        assert_eq!(
+            BigDec::parse("2")
+                .unwrap()
+                .sqrt_mc(&mc110)
+                .unwrap()
+                .to_plain_string(),
+            "1.4142135623730950488016887242096980785696718753769480731766797379907324784621070388503875343276415727350138462"
+        );
+        let mc50 = MathContext::new(50, RoundingMode::HalfEven);
+        assert_eq!(
+            BigDec::parse("10005")
+                .unwrap()
+                .sqrt_mc(&mc50)
+                .unwrap()
+                .to_plain_string(),
+            "100.0249968757810059447921878763577780015950243687"
+        );
+        // Perfect squares land exactly, then round.
+        let mc1 = MathContext::new(1, RoundingMode::HalfEven);
+        assert_eq!(
+            BigDec::parse("2.25")
+                .unwrap()
+                .sqrt_mc(&mc1)
+                .unwrap()
+                .to_plain_string(),
+            "2"
+        );
+        assert_eq!(
+            BigDec::parse("2.25")
+                .unwrap()
+                .sqrt_mc(&MathContext::new(10, RoundingMode::HalfUp))
+                .unwrap()
+                .to_plain_string(),
+            "1.5"
+        );
+        // Negatives fail; zeros answer zero at scale/2.
+        assert_eq!(
+            BigDec::parse("-1").unwrap().sqrt_mc(&mc1).unwrap_err(),
+            "Attempted square root of negative BigDecimal"
+        );
+        assert_eq!(
+            BigDec::parse("0.00")
+                .unwrap()
+                .sqrt_mc(&mc1)
+                .unwrap()
+                .to_plain_string(),
+            "0"
+        );
+        // Unlimited precision takes exact roots only.
+        let unlim = MathContext::new(0, RoundingMode::HalfUp);
+        assert_eq!(
+            BigDec::parse("4")
+                .unwrap()
+                .sqrt_mc(&unlim)
+                .unwrap()
+                .to_plain_string(),
+            "2"
+        );
+        assert_eq!(
+            BigDec::parse("2").unwrap().sqrt_mc(&unlim).unwrap_err(),
+            NON_TERMINATING
+        );
     }
 }
