@@ -608,6 +608,18 @@ fn into_array() {
         uncaught(&mut eval, "(into-array nil [1 2])"),
         "java.lang.NullPointerException | "
     );
+    // Class designators (`(into-array Object xs)` — 44 recipes
+    // build `String/format` arg arrays this way): reference
+    // element types share the `Object` store.
+    assert_eq!(
+        run_last(&mut eval, "(seq (into-array Object [1 \"a\"]))"),
+        "(1 \"a\")"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(seq (into-array String [\"a\" \"b\"]))"),
+        "(\"a\" \"b\")"
+    );
+    assert_eq!(run_last(&mut eval, "(alength (into-array Object []))"), "0");
     // f-into-strs ("a" "b") — the port infers `String[]`.
     assert_eq!(
         run_last(&mut eval, "(seq (into-array [\"a\" \"b\"]))"),

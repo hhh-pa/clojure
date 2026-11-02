@@ -167,6 +167,12 @@ impl Reader {
         self.stream.read_line()
     }
 
+    /// Read one char, or `None` at EOF (issue #201 S8: the
+    /// `slurp`-on-reader drain; exact text, no line roundtrip).
+    pub fn read_char(&mut self) -> Option<char> {
+        self.stream.read()
+    }
+
     /// Current 1-based line (live tracker position).
     #[must_use]
     pub fn line(&self) -> u32 {

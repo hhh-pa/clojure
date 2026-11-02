@@ -1212,3 +1212,24 @@ fn t73_read_string_allow_reads_torture_cond() {
         ":on-jvm"
     );
 }
+
+#[test]
+fn slurp_drains_a_reader_201() {
+    let mut eval = boot();
+    assert_eq!(
+        run_last(&mut eval, "(with-in-str \"a\\nb\\n\" (slurp *in*))"),
+        "\"a\\nb\\n\""
+    );
+    assert_eq!(
+        run_last(&mut eval, "(with-in-str \"\" (slurp *in*))"),
+        "\"\""
+    );
+    // Upstream `with-open`s the reader: a second slurp observes the close.
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(with-in-str \"x\" (do (slurp *in*) (slurp *in*)))"
+        ),
+        "java.io.IOException | Stream closed"
+    );
+}

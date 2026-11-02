@@ -97,7 +97,20 @@ pub(crate) enum Thunk {
         input: Value,
     },
     Concat {
-        inputs: Vec<Value>,
+        /// The input currently being stepped (`Nil` when there are
+        /// no inputs at all).
+        cur: Value,
+        /// The remaining inputs behind `Arc`: `force_pending`
+        /// clones the whole thunk per force (to restore it when a
+        /// step fails), so owned inputs cost O(n) per force —
+        /// `(apply concat buckets)` over tens of thousands of
+        /// buckets was O(n^2) (recipes
+        /// `string_function_calculation` took ~70s at n=32K).
+        /// Shared inputs plus the index below make both the clone
+        /// and the step O(1).
+        rest: Arc<Vec<Value>>,
+        /// The next index into `rest` once `cur` exhausts.
+        idx: usize,
     },
     MapCat {
         outer: Value,
@@ -324,6 +337,115 @@ impl PendingSeq {
     }
 }
 
+/// Swap a seq cell's memoized state out (leaving `Empty`), even
+/// when the mutex is poisoned (a panic during `drop` aborts).
+fn take_seq_state(state: &Mutex<SeqState>) -> SeqState {
+    let mut guard = state.lock().unwrap_or_else(|e| e.into_inner());
+    std::mem::replace(&mut *guard, SeqState::Empty)
+}
+
+/// The one chain-ward link of an unforced thunk, if it has exactly
+/// one (`None` drops the whole thunk normally — every nested seq
+/// cell unwinds through its own `Drop`, so those drops stay
+/// shallow too).
+fn drop_thunk_link(thunk: Thunk) -> Option<Value> {
+    // `SeqState`/`Thunk` destructuring must stay exhaustive: a new
+    // thunk arm without a link decision fails closed at compile time.
+    let single = |mut links: Vec<Value>| {
+        if links.len() == 1 { links.pop() } else { None }
+    };
+    match thunk {
+        Thunk::Map { inputs, .. } => single(inputs),
+        Thunk::Filter { input, .. } => Some(input),
+        Thunk::Remove { input, .. } => Some(input),
+        Thunk::Take { input, .. } => Some(input),
+        Thunk::Concat { cur, rest, idx } => {
+            if matches!(cur, Value::Nil) {
+                None
+            } else if idx >= rest.len() {
+                Some(cur)
+            } else {
+                None
+            }
+        }
+        Thunk::MapCat { outer } => Some(outer),
+        Thunk::Chain { tail, .. } => Some(tail),
+        Thunk::Thunk0 { .. }
+        | Thunk::Repeatedly { .. }
+        | Thunk::Seque { .. }
+        | Thunk::FileSeq { .. }
+        | Thunk::JdkPull { .. } => None,
+        Thunk::Interleave { queue, inputs } => {
+            let mut links = queue;
+            links.extend(inputs);
+            single(links)
+        }
+        Thunk::Interpose { input, .. } => Some(input),
+        Thunk::TakeWhile { input, .. } => Some(input),
+        Thunk::DropWhile { input, .. } => Some(input),
+        Thunk::Drop { input, .. } => Some(input),
+        Thunk::TakeNth { input, .. } => Some(input),
+        Thunk::Partition { input, .. } => Some(input),
+        Thunk::PartitionAll { input, .. } => Some(input),
+        Thunk::PartitionBy { input, .. } => Some(input),
+        // The run is a realized prefix; the chain continues at `s`.
+        Thunk::PartitionByAdvance { s, .. } => Some(s),
+        Thunk::PartitionRun { input, .. } => Some(input),
+        Thunk::Distinct { input, .. } => Some(input),
+        Thunk::Dedupe { input, .. } => Some(input),
+        Thunk::Keep { input, .. } => Some(input),
+        Thunk::KeepIndexed { input, .. } => Some(input),
+        Thunk::MapIndexed { input, .. } => Some(input),
+        Thunk::Reductions { input, .. } => Some(input),
+        Thunk::Replace { input, .. } => Some(input),
+        Thunk::Sequence { srcs, .. } => single(srcs),
+        Thunk::Iteration { .. } => None,
+        Thunk::ChunkHead { tail, .. } => Some(tail),
+    }
+}
+
+/// Unwrap a sole-owned successor seq cell behind an extension Arc
+/// (shared cells stay for their own `Drop` to unwind later).
+fn drop_next_cell(link: &mut Value) -> Option<SeqState> {
+    let Value::Extension(arc) = link else {
+        return None;
+    };
+    let cell = Arc::get_mut(arc)?
+        .as_any_mut()?
+        .downcast_mut::<PendingSeq>()?;
+    Some(take_seq_state(&cell.state))
+}
+
+impl Drop for PendingSeq {
+    fn drop(&mut self) {
+        // Long lazy chains (500K+ forced cells with the head held,
+        // e.g. `(nth (take 500000 (range ...)) 499999)`) would
+        // overflow the stack if each cell's tail dropped
+        // recursively, so unwind sole-owned successor cells
+        // iteratively: each successor's state is swapped out
+        // (leaving `Empty`) before its shell drops, keeping every
+        // nested drop shallow.
+        let mut cur = take_seq_state(&self.state);
+        loop {
+            let mut link = match cur {
+                SeqState::Empty => break,
+                SeqState::Chunk { tail, .. } => tail,
+                SeqState::Pending(thunk) => match drop_thunk_link(*thunk) {
+                    Some(link) => link,
+                    None => break,
+                },
+            };
+            match drop_next_cell(&mut link) {
+                Some(next) => cur = next,
+                // `link` drops here: a shared cell (its own `Drop`
+                // resumes the unwind when its last reference
+                // releases) or a strict value (shallow drop).
+                None => break,
+            }
+        }
+    }
+}
+
 impl ExtensionValue for PendingSeq {
     fn class_name(&self) -> String {
         self.kind.jvm_name().to_owned()
@@ -373,6 +495,10 @@ impl ExtensionValue for PendingSeq {
 
     fn as_any(&self) -> &dyn std::any::Any {
         self
+    }
+
+    fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
+        Some(self)
     }
 }
 
@@ -979,7 +1105,7 @@ fn step_thunk(eval: &mut Evaluator, thunk: Thunk) -> Result<Forced, Signal> {
         Thunk::Filter { f, input } => step_filter(eval, &f, input, false),
         Thunk::Remove { f, input } => step_filter(eval, &f, input, true),
         Thunk::Take { n, input } => step_take(eval, &n, input),
-        Thunk::Concat { inputs } => step_concat(eval, inputs),
+        Thunk::Concat { cur, rest, idx } => step_concat(eval, cur, rest, idx),
         Thunk::MapCat { outer } => step_mapcat(eval, outer),
         Thunk::Chain { head, tail } => step_chain(eval, head, tail),
         Thunk::Thunk0 { body, env } => step_thunk0(eval, &body, &env),
@@ -1529,30 +1655,47 @@ fn step_take(eval: &mut Evaluator, n: &Value, input: Value) -> Result<Forced, Si
 }
 
 /// `concat`: pass the first non-empty input's unit through,
-/// chaining its tail back ahead of the rest.
-fn step_concat(eval: &mut Evaluator, mut inputs: Vec<Value>) -> Result<Forced, Signal> {
-    while let Some(first) = inputs.first() {
-        match step_unit(eval, first)? {
+/// chaining its tail back ahead of the rest. The `rest` vec is
+/// shared, never mutated: exhausted inputs advance the index,
+/// and the current input's tail travels in `cur` — every step is
+/// O(1) no matter how many inputs `(apply concat ...)` splices.
+fn step_concat(
+    eval: &mut Evaluator,
+    mut cur: Value,
+    rest: Arc<Vec<Value>>,
+    mut idx: usize,
+) -> Result<Forced, Signal> {
+    loop {
+        match step_unit(eval, &cur)? {
             StepUnit::Empty => {
-                inputs.remove(0);
+                let Some(next) = rest.get(idx) else {
+                    return Ok(Forced::Empty);
+                };
+                cur = next.clone();
+                idx += 1;
             }
             StepUnit::One { head, tail } => {
-                inputs[0] = tail;
                 return Ok(Forced::Chunk {
                     items: Arc::from(vec![head]),
-                    tail: PendingSeq::pending(Thunk::Concat { inputs }),
+                    tail: PendingSeq::pending(Thunk::Concat {
+                        cur: tail,
+                        rest,
+                        idx,
+                    }),
                 });
             }
             StepUnit::Chunk { items, tail } => {
-                inputs[0] = tail;
                 return Ok(Forced::Chunk {
                     items,
-                    tail: PendingSeq::pending(Thunk::Concat { inputs }),
+                    tail: PendingSeq::pending(Thunk::Concat {
+                        cur: tail,
+                        rest,
+                        idx,
+                    }),
                 });
             }
         }
     }
-    Ok(Forced::Empty)
 }
 
 /// Step a `mapcat` outer seq: each outer item is seq'd and
@@ -1594,13 +1737,17 @@ fn splice_first(eval: &mut Evaluator, s: &Value, cont: Value) -> Result<Forced, 
         StepUnit::One { head, tail } => Ok(Forced::Chunk {
             items: Arc::from(vec![head]),
             tail: PendingSeq::pending(Thunk::Concat {
-                inputs: vec![tail, cont],
+                cur: tail,
+                rest: Arc::new(vec![cont]),
+                idx: 0,
             }),
         }),
         StepUnit::Chunk { items, tail } => Ok(Forced::Chunk {
             items,
             tail: PendingSeq::pending(Thunk::Concat {
-                inputs: vec![tail, cont],
+                cur: tail,
+                rest: Arc::new(vec![cont]),
+                idx: 0,
             }),
         }),
     }
@@ -1880,7 +2027,9 @@ fn step_partition_collect(
         let padded = PendingSeq::pending(Thunk::Take {
             n: n.clone(),
             input: PendingSeq::pending(Thunk::Concat {
-                inputs: vec![lazy_window(eval, window)?, pad],
+                cur: lazy_window(eval, window)?,
+                rest: Arc::new(vec![pad]),
+                idx: 0,
             }),
         });
         return Ok(Forced::Chunk {
@@ -3442,7 +3591,13 @@ pub(crate) fn take_thunk(n: Value, input: Value) -> Value {
 
 /// A `Thunk::Concat` tail value.
 pub(crate) fn concat_thunk(inputs: Vec<Value>) -> Value {
-    pending_value(Thunk::Concat { inputs })
+    let mut inputs = inputs.into_iter();
+    let cur = inputs.next().unwrap_or(Value::Nil);
+    pending_value(Thunk::Concat {
+        cur,
+        rest: Arc::new(inputs.collect()),
+        idx: 0,
+    })
 }
 
 /// `int?` over our numbers (fixed-precision integers only).

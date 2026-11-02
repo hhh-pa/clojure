@@ -1497,9 +1497,14 @@
 (defmacro .. [x form & more]
   ;; Expansions build lists (never `list*` conses): nested conses
   ;; print elided and `macroexpand` only loops over lists.
+  ;; A symbol form is a 0-arg `__meth*` (issue #201: upstream
+  ;; `Reflector/invokeNoArgInstanceMember` tries the method first,
+  ;; then the field — `__meth*` already reports the field miss
+  ;; shape, and host fields still hit through its field-first
+  ;; 0-arg path — never a bare `__field*`).
   (let [one (if (seq? form)
               (apply list 'clojure.core/__meth* (list 'quote (first form)) x (next form))
-              (list 'clojure.core/__field* (list 'quote form) x))]
+              (list 'clojure.core/__meth* (list 'quote form) x))]
     (if more
       (apply list 'clojure.core/.. one more)
       one)))

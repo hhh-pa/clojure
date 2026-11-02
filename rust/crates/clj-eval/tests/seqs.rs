@@ -1252,6 +1252,73 @@ fn sequence_eduction_rows() {
     );
 }
 
+/// Sorted targets are not editable: 3-arg `into` transduces with
+/// plain `conj` (JVM oracle: `(into (sorted-set) (map inc) [3 1])`
+/// is `#{2 4}`, never a transient cast).
+#[test]
+fn into_xform_sorted_targets_201() {
+    let mut eval = boot();
+    assert_eq!(
+        run_last(&mut eval, "(into (sorted-set) (map inc) [3 1])"),
+        "#{2 4}"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(into (sorted-map) (map (fn [[k v]] [k (inc v)])) {:a 1})"
+        ),
+        "{:a 2}"
+    );
+    // Editable targets keep the transient fast path.
+    assert_eq!(run_last(&mut eval, "(into #{1} (map inc) [2])"), "#{1 3}");
+}
+
+#[test]
+fn take_chain_drop_500k_201() {
+    // A walked 500K lazy chain with the head held (the `nth` arg)
+    // must clean up without overflowing the stack: each forced
+    // cell's tail used to drop recursively (8MB stack gone at
+    // ~500K cells); `PendingSeq::drop` now unwinds sole-owned
+    // successor cells iteratively.
+    let mut eval = boot();
+    assert_eq!(
+        run_last(&mut eval, "(nth (take 500000 (range 500001)) 499999)"),
+        "499999"
+    );
+}
+
+#[test]
+fn concat_many_inputs_order_201() {
+    // `(apply concat buckets)` over thousands of inputs (recipes
+    // `string_function_calculation` funnels tens of thousands of
+    // buckets through one): order survives, empties vanish.
+    // (Stepping used to `Vec::remove(0)` each exhausted input —
+    // O(n^2) over the buckets — and now pops a deque front.)
+    let mut eval = boot();
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(vec (apply concat (conj (vec (repeat 2000 [])) [7])))",
+        ),
+        "[7]"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(vec (apply concat [[1] [] [2] [] [3]]))"),
+        "[1 2 3]"
+    );
+    let want = format!(
+        "[{}]",
+        (0..2000)
+            .map(|i: i32| i.to_string())
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
+    assert_eq!(
+        run_last(&mut eval, "(vec (apply concat (map vector (range 2000))))"),
+        want
+    );
+}
+
 #[test]
 fn t73_next_nil_puns_spent_repeats() {
     // Torture #73 finding 6: `next` of an exhausted repeat is nil

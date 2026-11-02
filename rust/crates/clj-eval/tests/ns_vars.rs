@@ -62,6 +62,16 @@ fn uncaught_chain(eval: &mut Evaluator, src: &str) -> Vec<String> {
     out
 }
 
+/// A compile error's `Class | message` (panics unless the failure
+/// phase is compile).
+fn compile_err(eval: &mut Evaluator, src: &str) -> String {
+    match eval.eval_source(src) {
+        Err(SourceError::Compile(e)) => format!("{} | {}", e.class, e.message),
+        Err(other) => panic!("expected a compile error, got {other:?}"),
+        Ok(vs) => panic!("expected a compile error, got values: {vs:?}"),
+    }
+}
+
 fn uncaught(eval: &mut Evaluator, src: &str) -> String {
     match eval.eval_source(src) {
         Err(SourceError::Uncaught(t)) => {
@@ -1323,5 +1333,34 @@ fn t73_resolve_qualified_into_removed_ns_is_nil() {
     assert_eq!(
         run_last(&mut eval, "(resolve 'myval)"),
         "#'torture.rsv/myval"
+    );
+}
+
+#[test]
+fn ns_import_clause_201() {
+    let mut eval = boot();
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(do (ns t201a (:import (java.util.regex Pattern Matcher) java.lang.String)) (str Pattern))"
+        ),
+        "\"class java.util.regex.Pattern\""
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(do (ns t201b (:import (quote java.lang.String))) (str String))"
+        ),
+        "\"class java.lang.String\""
+    );
+    // Malformed specs replay the `import` macro's ex-info text.
+    assert_eq!(
+        uncaught(&mut eval, "(ns t201c (:import (42)))"),
+        "clojure.lang.ExceptionInfo | Call to clojure.core/import did not conform to spec."
+    );
+    // `:gen-class` stays a spec error.
+    assert_eq!(
+        compile_err(&mut eval, "(ns t201d (:gen-class))"),
+        "clojure.lang.ExceptionInfo | Call to clojure.core/ns did not conform to spec."
     );
 }
