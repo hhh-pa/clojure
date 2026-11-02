@@ -1228,15 +1228,14 @@ pub struct Bindings {
 /// can drain frames and counts under separate borrows).
 fn unbind_counts(counts: &mut FxHashMap<u64, usize>, frame: &[(Var, Value)]) {
     for (var, _) in frame {
-        // Every live entry was counted at push, so the entry exists;
-        // a missing one would be a caller bug (ignored, like a
-        // double pop elsewhere).
-        if let Entry::Occupied(mut slot) = counts.entry(var.id) {
-            if *slot.get() <= 1 {
-                slot.remove();
-            } else {
-                *slot.get_mut() -= 1;
-            }
+        // Every live entry was counted at push, so the entry exists
+        // with a positive count; a missing one would be a caller bug
+        // (`and_modify` ignores it, like a double pop elsewhere).
+        counts
+            .entry(var.id)
+            .and_modify(|n| *n = n.saturating_sub(1));
+        if counts.get(&var.id).is_some_and(|n| *n == 0) {
+            counts.remove(&var.id);
         }
     }
 }
@@ -1399,25 +1398,24 @@ impl Env {
         // Pointer-chase through shared refs (no `Arc` bumps): an
         // index at or past `base` belongs to this frame (`[0,
         // base)` is the parent's), so the top frame usually answers
-        // immediately.
+        // immediately. The root frame has base 0, so the descent
+        // always lands (a missing parent here would be a caller bug
+        // — fail loud, like an out-of-range index elsewhere).
         let mut frame: &Frame = &self.frame;
-        loop {
-            if idx >= frame.base {
-                return match &frame.slots {
-                    Slots::Shared(slots) => {
-                        slots.get(idx - frame.base).cloned().unwrap_or(Value::Nil)
-                    }
-                    Slots::Patchable(slots) => slots
-                        .lock()
-                        .ok()
-                        .and_then(|guard| guard.get(idx - frame.base).cloned())
-                        .unwrap_or(Value::Nil),
-                };
-            }
-            match &frame.parent {
-                Some(parent) => frame = &parent.frame,
-                None => return Value::Nil,
-            }
+        while idx < frame.base {
+            frame = &frame
+                .parent
+                .as_ref()
+                .expect("parentless frame with base > 0")
+                .frame;
+        }
+        match &frame.slots {
+            Slots::Shared(slots) => slots.get(idx - frame.base).cloned().unwrap_or(Value::Nil),
+            Slots::Patchable(slots) => slots
+                .lock()
+                .ok()
+                .and_then(|guard| guard.get(idx - frame.base).cloned())
+                .unwrap_or(Value::Nil),
         }
     }
 
@@ -1475,32 +1473,31 @@ impl Env {
     /// in release); past-the-end writes are silent no-ops (the old
     /// out-of-range leniency).
     pub fn set(&self, idx: usize, value: Value) {
+        // Descend like [`get`](Self::get) (the root's base 0 always
+        // lands the loop).
         let mut frame: &Frame = &self.frame;
-        loop {
-            if idx >= frame.base {
-                // Past the whole chain (`[0, base)` is the parent's,
-                // `[base, len)` this frame's): nothing to write.
-                if idx >= frame.len {
-                    return;
-                }
-                if let Slots::Patchable(slots) = &frame.slots {
-                    // Poison is unreachable (nothing panics while
-                    // holding a frame lock); recover like
-                    // `SharedRegistry::lock` so a poisoned lock
-                    // keeps the write instead of dropping it.
-                    let mut guard = slots.lock().unwrap_or_else(|e| e.into_inner());
-                    if let Some(slot) = guard.get_mut(idx - frame.base) {
-                        *slot = value;
-                    }
-                } else {
-                    debug_assert!(false, "set on an immutable frame");
-                }
-                return;
+        while idx < frame.base {
+            frame = &frame
+                .parent
+                .as_ref()
+                .expect("parentless frame with base > 0")
+                .frame;
+        }
+        // Past the whole chain (`[0, base)` is the parent's,
+        // `[base, len)` this frame's): nothing to write.
+        if idx >= frame.len {
+            return;
+        }
+        if let Slots::Patchable(slots) = &frame.slots {
+            // Poison is unreachable (nothing panics while holding a
+            // frame lock); recover like `SharedRegistry::lock` so a
+            // poisoned lock keeps the write instead of dropping it.
+            let mut guard = slots.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(slot) = guard.get_mut(idx - frame.base) {
+                *slot = value;
             }
-            match &frame.parent {
-                Some(parent) => frame = &parent.frame,
-                None => return,
-            }
+        } else {
+            debug_assert!(false, "set on an immutable frame");
         }
     }
 }
