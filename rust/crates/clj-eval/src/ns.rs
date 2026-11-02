@@ -89,6 +89,10 @@ const STDLIB_W1_WALK_CLJ: &str = include_str!("stdlib/clojure/walk.clj");
 const STDLIB_W1_ZIP_CLJ: &str = include_str!("stdlib/clojure/zip.clj");
 const STDLIB_W1_DATA_CLJ: &str = include_str!("stdlib/clojure/data.clj");
 const STDLIB_W1_DATAFY_CLJ: &str = include_str!("stdlib/clojure/datafy.clj");
+// W2 (test) — do not merge by hand, integrator resolves
+const STDLIB_TEST_CLJ: &str = include_str!("stdlib/clojure/test.clj");
+const STDLIB_TEST_JUNIT_CLJ: &str = include_str!("stdlib/clojure/test/junit.clj");
+const STDLIB_TEST_TAP_CLJ: &str = include_str!("stdlib/clojure/test/tap.clj");
 
 const TOOLS_DEPS_UTIL_DIR_CLJ: &str = include_str!("tools_deps_util_dir.clj");
 const TOOLS_DEPS_EDN_CLJ: &str = include_str!("tools_deps_edn.clj");
@@ -1359,6 +1363,18 @@ const EMBEDDED_SOURCES: &[(&str, &str, &str)] = &[
     ("clojure/zip", "clojure/zip.clj", STDLIB_W1_ZIP_CLJ),
     ("clojure/data", "clojure/data.clj", STDLIB_W1_DATA_CLJ),
     ("clojure/datafy", "clojure/datafy.clj", STDLIB_W1_DATAFY_CLJ),
+    // W2 (test) — do not merge by hand, integrator resolves
+    ("clojure/test", "clojure/test.clj", STDLIB_TEST_CLJ),
+    (
+        "clojure/test/junit",
+        "clojure/test/junit.clj",
+        STDLIB_TEST_JUNIT_CLJ,
+    ),
+    (
+        "clojure/test/tap",
+        "clojure/test/tap.clj",
+        STDLIB_TEST_TAP_CLJ,
+    ),
 ];
 
 /// Resolve a load root (no leading slash) to the `*file*` path and
