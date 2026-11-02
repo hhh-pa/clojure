@@ -34,6 +34,7 @@ pub mod fmt;
 pub mod fx4_form;
 pub mod fx4_host;
 pub mod hierarchy;
+pub mod hostvals;
 pub mod io;
 pub mod jdkio;
 pub mod jio;

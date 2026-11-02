@@ -102,7 +102,7 @@ pub(crate) fn as_iteration(v: &Value) -> Option<&IterationValue> {
 }
 
 /// Downcast a value to a matcher handle, if it is one.
-fn as_matcher(v: &Value) -> Option<&MatcherHandle> {
+pub(crate) fn as_matcher(v: &Value) -> Option<&MatcherHandle> {
     match v {
         Value::Extension(e) => e.as_any().downcast_ref::<MatcherHandle>(),
         _ => None,
@@ -970,14 +970,17 @@ pub(crate) fn seq_iteration(eval: &mut Evaluator, it: &IterationValue) -> Result
 // Re-matcher
 // ---------------------------------------------------------------------------
 
-/// A matcher handle's mutable state: the next search offset plus
+/// A matcher handle's mutable state: the next search offset,
 /// the last match groups (full text first, one slot per group —
 /// `None` for unmatched groups, like `Matcher.group` returning
-/// null).
+/// null) with its byte span, and the append position for
+/// `appendReplacement`/`appendTail`.
 #[derive(Clone, Debug)]
 struct MatcherState {
     next: usize,
     last: Option<Vec<Option<String>>>,
+    span: Option<(usize, usize)>,
+    append_to: usize,
 }
 
 /// A stateful regex matcher handle (`re-matcher`): the compiled
@@ -997,15 +1000,30 @@ impl MatcherHandle {
     /// match — an exhausted handle stays nil, oracle
     /// `rm-exhaust`).
     fn find_next(&self) -> Result<Value, NativeError> {
+        if !self.advance() {
+            return Ok(Value::Nil);
+        }
+        Ok(groups_value_owned(
+            &self.last_groups().expect("advance found a match"),
+        ))
+    }
+
+    /// Advance one `find`, recording the match span: `true` on a
+    /// match (an empty match advances one char — oracle
+    /// `rm-empty-advance`), `false` on exhaustion (the last
+    /// match clears, oracle `rm-exhaust`).
+    pub(crate) fn advance(&self) -> bool {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let text: &str = &self.text;
         if state.next > text.len() {
             state.last = None;
-            return Ok(Value::Nil);
+            state.span = None;
+            return false;
         }
         let Some(caps) = self.re.captures_at(text, state.next) else {
             state.last = None;
-            return Ok(Value::Nil);
+            state.span = None;
+            return false;
         };
         let m = caps.get(0).expect("a match holds group 0");
         state.next = if m.start() == m.end() {
@@ -1016,17 +1034,119 @@ impl MatcherHandle {
         let groups: Vec<Option<String>> = (0..caps.len())
             .map(|i| caps.get(i).map(|g| g.as_str().to_owned()))
             .collect();
-        state.last = Some(groups.clone());
-        Ok(groups_value_owned(&groups))
+        state.span = Some((m.start(), m.end()));
+        state.last = Some(groups);
+        true
+    }
+
+    /// Reset the search and append positions (the `replaceAll` /
+    /// `replaceFirst` entry scan starts over).
+    fn reset(&self) {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.next = 0;
+        state.last = None;
+        state.span = None;
+        state.append_to = 0;
     }
 
     /// The last match groups, if any.
-    fn last_groups(&self) -> Option<Vec<Option<String>>> {
+    pub(crate) fn last_groups(&self) -> Option<Vec<Option<String>>> {
         self.state
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .last
             .clone()
+    }
+
+    /// The last match byte span, if any.
+    fn last_span(&self) -> Option<(usize, usize)> {
+        self.state.lock().unwrap_or_else(|e| e.into_inner()).span
+    }
+
+    /// The last match span in UTF-16 units, if any.
+    pub(crate) fn last_utf16_span(&self) -> Option<(i64, i64)> {
+        let (start, end) = self.last_span()?;
+        let text: &str = &self.text;
+        let to_units = |byte: usize| text[..byte].encode_utf16().count() as i64;
+        Some((to_units(start), to_units(end)))
+    }
+
+    /// Append the gap since the last append plus `text` to `sb`
+    /// (the gap ends at the match start; the append position
+    /// advances past the match end).
+    fn push_gap(&self, sb: &crate::hostvals::BuilderValue, text: &str, start: usize, end: usize) {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        sb.push_str(&self.text[state.append_to..start]);
+        sb.push_str(text);
+        state.append_to = end;
+    }
+
+    /// `appendReplacement`: expand `rep` against the last match
+    /// and append the gap plus the expansion (`IllegalState`
+    /// without a match).
+    pub(crate) fn append_replacement(
+        &self,
+        sb: &crate::hostvals::BuilderValue,
+        rep: &str,
+    ) -> Result<(), NativeError> {
+        let (groups, start, end) = match (self.last_groups(), self.last_span()) {
+            (Some(groups), Some((start, end))) => (groups, start, end),
+            _ => return Err(no_match_found()),
+        };
+        let expanded = expand_replacement(rep, &groups)?;
+        self.push_gap(sb, &expanded, start, end);
+        Ok(())
+    }
+
+    /// `appendTail`: append everything past the append position.
+    pub(crate) fn append_tail(&self, sb: &crate::hostvals::BuilderValue) {
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        sb.push_str(&self.text[state.append_to..]);
+    }
+
+    /// `replaceAll` / `replaceFirst`: reset, run the append loop
+    /// over every (or just the first) match, and return the whole
+    /// result (no match returns the input).
+    pub(crate) fn replace(&self, rep: &str, all: bool) -> Result<String, NativeError> {
+        self.reset();
+        let out = crate::hostvals::BuilderValue::with_text("java.lang.StringBuffer", String::new());
+        let sb = crate::hostvals::as_builder(&out).expect("a fresh builder");
+        while self.advance() {
+            let groups = self.last_groups().expect("advance found a match");
+            let (start, end) = self.last_span().expect("advance found a span");
+            let expanded = expand_replacement(rep, &groups)?;
+            self.push_gap(sb, &expanded, start, end);
+            if !all {
+                break;
+            }
+        }
+        self.append_tail(sb);
+        Ok(sb.contents())
+    }
+
+    /// `matches`: a full-span match attempt (the last match
+    /// sets on success and clears on failure).
+    pub(crate) fn try_matches(&self) -> bool {
+        let text: &str = &self.text;
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let full = self.re.captures_at(text, 0).filter(|caps| {
+            caps.get(0)
+                .is_some_and(|m| m.start() == 0 && m.end() == text.len())
+        });
+        let Some(caps) = full else {
+            state.last = None;
+            state.span = None;
+            return false;
+        };
+        let m = caps.get(0).expect("a match holds group 0");
+        let groups: Vec<Option<String>> = (0..caps.len())
+            .map(|i| caps.get(i).map(|g| g.as_str().to_owned()))
+            .collect();
+        state.next = m.end();
+        state.span = Some((m.start(), m.end()));
+        state.append_to = m.end();
+        state.last = Some(groups);
+        true
     }
 }
 
@@ -1082,6 +1202,136 @@ fn groups_value_owned(groups: &[Option<String>]) -> Value {
     ))
 }
 
+/// `IllegalStateException | No match found` (group/start/end/
+/// append reads without a live match).
+pub(crate) fn no_match_found() -> NativeError {
+    NativeError::new(
+        ThrowClass::IllegalStateException,
+        "No match found".to_owned(),
+    )
+}
+
+/// `IndexOutOfBoundsException | No group {n}`.
+pub(crate) fn no_group(n: i64) -> NativeError {
+    NativeError::new(
+        ThrowClass::IndexOutOfBoundsException,
+        format!("No group {n}"),
+    )
+}
+
+/// Append group `n` (unmatched groups append empty).
+fn push_group(groups: &[Option<String>], n: usize, out: &mut String) {
+    if let Some(text) = &groups[n] {
+        out.push_str(text);
+    }
+}
+
+/// Expand one `${…}` ref (`chars[i]` is the `$`, `chars[i+1]`
+/// the `{`): the port holds no named groups, so every name
+/// fails — only the error varies.
+fn expand_named_ref(chars: &[char], i: usize) -> NativeError {
+    let mut j = i + 2;
+    while j < chars.len() && chars[j].is_ascii_alphanumeric() {
+        j += 1;
+    }
+    if chars.get(j) != Some(&'}') {
+        return NativeError::new(
+            ThrowClass::IllegalArgumentException,
+            "named capturing group is missing trailing '}'".to_owned(),
+        );
+    }
+    let name: String = chars[i + 2..j].iter().collect();
+    if name.is_empty() {
+        return NativeError::new(
+            ThrowClass::IllegalArgumentException,
+            "named capturing group has 0 length name".to_owned(),
+        );
+    }
+    if name.starts_with(|c: char| c.is_ascii_digit()) {
+        return NativeError::new(
+            ThrowClass::IllegalArgumentException,
+            format!("capturing group name {{{name}}} starts with digit character"),
+        );
+    }
+    NativeError::new(
+        ThrowClass::IllegalArgumentException,
+        format!("No group with name {{{name}}}"),
+    )
+}
+
+/// Expand one `$` ref (`chars[i]` is the `$`): digits resolve
+/// against the group count (two digits when a group with that
+/// number exists, else one digit plus a literal), `${name}`
+/// resolves named, anything else is `Illegal group reference`.
+/// Returns the next unconsumed index.
+fn expand_group_ref(
+    chars: &[char],
+    i: usize,
+    groups: &[Option<String>],
+    out: &mut String,
+) -> Result<usize, NativeError> {
+    let Some(next) = chars.get(i + 1) else {
+        return Err(NativeError::new(
+            ThrowClass::IllegalArgumentException,
+            "Illegal group reference: group index is missing".to_owned(),
+        ));
+    };
+    if *next == '{' {
+        return Err(expand_named_ref(chars, i));
+    }
+    if !next.is_ascii_digit() {
+        return Err(NativeError::new(
+            ThrowClass::IllegalArgumentException,
+            "Illegal group reference".to_owned(),
+        ));
+    }
+    let one = (*next as u8 - b'0') as usize;
+    if let Some(second) = chars.get(i + 2).filter(|c| c.is_ascii_digit()) {
+        let two = one * 10 + (*second as u8 - b'0') as usize;
+        if two < groups.len() {
+            push_group(groups, two, out);
+            return Ok(i + 3);
+        }
+    }
+    if one < groups.len() {
+        push_group(groups, one, out);
+        Ok(i + 2)
+    } else {
+        Err(no_group(one as i64))
+    }
+}
+
+/// Expand `$` group refs and `\` quotes in a replacement
+/// against `groups` (full text first).
+fn expand_replacement(rep: &str, groups: &[Option<String>]) -> Result<String, NativeError> {
+    let chars: Vec<char> = rep.chars().collect();
+    let mut out = String::new();
+    let mut i = 0;
+    while i < chars.len() {
+        match chars[i] {
+            '$' => {
+                i = expand_group_ref(&chars, i, groups, &mut out)?;
+            }
+            '\\' => {
+                i += 1;
+                let Some(c) = chars.get(i) else {
+                    return Err(NativeError::new(
+                        ThrowClass::IllegalArgumentException,
+                        "character to be escaped is missing".to_owned(),
+                    ));
+                };
+                out.push(*c);
+                i += 1;
+            }
+            c => {
+                out.push(c);
+                i += 1;
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// A `regex`-crate compile failure as the JVM's
 /// `PatternSyntaxException` (mirrors `re.rs` — only the reader
 /// mints `Value::Regex`, so this is a stale-value defense).
@@ -1108,6 +1358,8 @@ fn native_re_matcher(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nat
                 state: Arc::new(Mutex::new(MatcherState {
                     next: 0,
                     last: None,
+                    span: None,
+                    append_to: 0,
                 })),
             })))
         }

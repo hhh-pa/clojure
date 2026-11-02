@@ -166,6 +166,24 @@ fn odd_even() {
     assert_eq!(run_last(&mut eval, "(odd? -3)"), "true");
     assert_eq!(run_last(&mut eval, "(even? 4)"), "true");
     assert_eq!(run_last(&mut eval, "(even? 4294967296)"), "true");
+    // Tower integers take the low bit too (oracle
+    // `/tmp/oddeven.clj`); ratios and decimals still miss.
+    assert_eq!(run_last(&mut eval, "(odd? 7N)"), "true");
+    assert_eq!(run_last(&mut eval, "(even? 8N)"), "true");
+    assert_eq!(run_last(&mut eval, "(odd? -7N)"), "true");
+    assert_eq!(run_last(&mut eval, "(even? -8N)"), "true");
+    assert_eq!(
+        run_last(&mut eval, "(odd? 123456789012345678901234567893N)"),
+        "true"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(odd? 7/2)"),
+        "java.lang.IllegalArgumentException | Argument must be an integer: 7/2"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(odd? 7M)"),
+        "java.lang.IllegalArgumentException | Argument must be an integer: 7"
+    );
     assert_eq!(
         uncaught(&mut eval, "(odd? 1.5)"),
         "java.lang.IllegalArgumentException | Argument must be an integer: 1.5"

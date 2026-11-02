@@ -269,9 +269,14 @@ fn cmd_run(file: &Path, args: &[String]) -> ExitCode {
     let mut eval = boot();
     // `*command-line-args*` is a dynamic `clojure.core` var (S7B);
     // bind the script's args around the `load-file` (pins P7).
+    // `clojure.string` loads first: JVM `clojure.main` requires it,
+    // so scripts may use qualified `clojure.string/*` vars without
+    // their own `require` (snippet corpus relies on this).
     let inits = args_expr(args);
     let target = clj_string(&path);
-    let script = format!("(binding [*command-line-args* {inits}] (load-file {target}))");
+    let script = format!(
+        "(do (require 'clojure.string) (binding [*command-line-args* {inits}] (load-file {target})))"
+    );
     let code = match eval.eval_source(&script) {
         Ok(_) => ExitCode::SUCCESS,
         Err(e) => {
