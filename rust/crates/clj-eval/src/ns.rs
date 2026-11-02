@@ -127,6 +127,14 @@ const W6_REDUCERS_CLJ: &str = include_str!("stdlib/clojure/core/reducers.clj");
 const W6_PARALLEL_CLJ: &str = include_str!("stdlib/clojure/parallel.clj");
 const W6_CORE_PROXY_CLJ: &str = include_str!("stdlib/clojure/core_proxy.clj");
 const W6_XML_CLJ: &str = include_str!("stdlib/clojure/xml.clj");
+// W5 (small libs) — do not merge by hand, integrator resolves
+const STDLIB_MATH_CLJ: &str = include_str!("stdlib/clojure/math.clj");
+const STDLIB_UUID_CLJ: &str = include_str!("stdlib/clojure/uuid.clj");
+const STDLIB_INSTANT_CLJ: &str = include_str!("stdlib/clojure/instant.clj");
+const STDLIB_JAVADOC_CLJ: &str = include_str!("stdlib/clojure/java/javadoc.clj");
+const STDLIB_BROWSE_CLJ: &str = include_str!("stdlib/clojure/java/browse.clj");
+const STDLIB_PROCESS_CLJ: &str = include_str!("stdlib/clojure/java/process.clj");
+const STDLIB_GVEC_CLJ: &str = include_str!("stdlib/clojure/gvec.clj");
 
 const TOOLS_DEPS_UTIL_DIR_CLJ: &str = include_str!("tools_deps_util_dir.clj");
 const TOOLS_DEPS_EDN_CLJ: &str = include_str!("tools_deps_edn.clj");
@@ -1515,6 +1523,26 @@ const EMBEDDED_SOURCES: &[(&str, &str, &str)] = &[
         W6_CORE_PROXY_CLJ,
     ),
     ("clojure/xml", "clojure/xml.clj", W6_XML_CLJ),
+    // W5 (small libs) — do not merge by hand, integrator resolves
+    ("clojure/math", "clojure/math.clj", STDLIB_MATH_CLJ),
+    ("clojure/uuid", "clojure/uuid.clj", STDLIB_UUID_CLJ),
+    ("clojure/instant", "clojure/instant.clj", STDLIB_INSTANT_CLJ),
+    (
+        "clojure/java/javadoc",
+        "clojure/java/javadoc.clj",
+        STDLIB_JAVADOC_CLJ,
+    ),
+    (
+        "clojure/java/browse",
+        "clojure/java/browse.clj",
+        STDLIB_BROWSE_CLJ,
+    ),
+    (
+        "clojure/java/process",
+        "clojure/java/process.clj",
+        STDLIB_PROCESS_CLJ,
+    ),
+    ("clojure/gvec", "clojure/gvec.clj", STDLIB_GVEC_CLJ),
 ];
 
 /// Resolve a load root (no leading slash) to the `*file*` path and
