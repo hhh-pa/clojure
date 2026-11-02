@@ -533,7 +533,8 @@ impl Map {
         }
         let size = self.inner.size();
         let promote = !self.hashy && (size >= 64 || (size >= 8 && !matches!(k, Value::Keyword(_))));
-        let keys = self.keys.push_back(k.clone());
+        let mut keys = self.keys;
+        keys.push_back_mut(k.clone());
         self.inner.insert_mut(k, v);
         Self {
             inner: self.inner,
@@ -557,7 +558,7 @@ impl Map {
         let mut keys = RpdsVector::new_sync();
         for key in self.keys.iter() {
             if key != k {
-                keys = keys.push_back(key.clone());
+                keys.push_back_mut(key.clone());
             }
         }
         self.inner.remove_mut(k);
@@ -620,7 +621,7 @@ impl Map {
         let mut inner = RpdsMap::new_with_hasher_and_ptr_kind(FxBuildHasher::default());
         let mut keys = RpdsVector::new_sync();
         for (k, v) in entries {
-            keys = keys.push_back(k.clone());
+            keys.push_back_mut(k.clone());
             inner.insert_mut(k, v);
         }
         Self {
@@ -709,7 +710,8 @@ impl Set {
         if self.inner.contains(&v) {
             self
         } else {
-            let members = self.members.push_back(v.clone());
+            let mut members = self.members;
+            members.push_back_mut(v.clone());
             self.inner.insert_mut(v);
             Self {
                 inner: self.inner,
@@ -745,7 +747,7 @@ impl Set {
         let mut members = RpdsVector::new_sync();
         for m in self.members.iter() {
             if m != v {
-                members = members.push_back(m.clone());
+                members.push_back_mut(m.clone());
             }
         }
         self.inner.remove_mut(v);
@@ -811,7 +813,7 @@ impl Set {
         let mut inner = RpdsSet::new_with_hasher_with_ptr_kind(FxBuildHasher::default());
         let mut kept = RpdsVector::new_sync();
         for v in &members {
-            kept = kept.push_back(v.clone());
+            kept.push_back_mut(v.clone());
             inner.insert_mut(v.clone());
         }
         let members = kept;
