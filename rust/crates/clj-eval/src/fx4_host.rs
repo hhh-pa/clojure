@@ -273,7 +273,7 @@ fn save_roots(eval: &Evaluator, pairs: &[(u64, Value)]) -> Vec<(u64, Option<Valu
     pairs
         .iter()
         .map(|(id, _)| {
-            let old = eval.registry.state(*id).and_then(|s| s.root.clone());
+            let old = eval.registry.root_cloned(*id);
             (*id, old)
         })
         .collect()

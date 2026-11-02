@@ -212,7 +212,7 @@ fn native_with_bindings_star(eval: &mut Evaluator, args: &[Value]) -> Result<Val
 /// functions; everything else reads nil.
 pub(crate) fn meta_of(eval: &Evaluator, v: &Value) -> Option<Map> {
     match v {
-        Value::Var(var) => eval.registry.state(var.id)?.meta.clone(),
+        Value::Var(var) => eval.registry.meta_cloned(var.id),
         Value::Atom(a) => a.meta(),
         Value::Agent(a) => a.meta(),
         Value::Future(f) => f.meta(),
@@ -460,7 +460,7 @@ fn install_ref_meta(eval: &mut Evaluator, target: &RefTarget, meta: Option<Map>)
 
 fn ref_meta(eval: &Evaluator, target: &RefTarget) -> Option<Map> {
     match target {
-        RefTarget::Var(id) => eval.registry.state(*id)?.meta.clone(),
+        RefTarget::Var(id) => eval.registry.meta_cloned(*id),
         RefTarget::Ns(name, id) => eval.registry.ns_for_handle(name, *id)?.meta().cloned(),
         RefTarget::Atom(a) => a.meta(),
         RefTarget::Agent(a) => a.meta(),
@@ -487,7 +487,7 @@ fn push_checked_entry(
     v: Value,
 ) -> Result<(), NativeError> {
     let var = as_var(k)?.clone();
-    let dynamic = eval.registry.state(var.id).is_some_and(|s| s.dynamic);
+    let dynamic = eval.registry.is_dynamic(var.id);
     if !dynamic {
         return Err(NativeError::new(
             ThrowClass::IllegalStateException,

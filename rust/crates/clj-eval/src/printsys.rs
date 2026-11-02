@@ -1772,7 +1772,7 @@ mod tests {
         let closure = Closure {
             id: 1,
             display: Arc::from("user/f"),
-            arities: Vec::new(),
+            arities: Arc::from([]),
             env: Env::new(),
             meta: Some(with_type.clone()),
             conveyed: None,

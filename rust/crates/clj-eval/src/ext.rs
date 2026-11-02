@@ -135,7 +135,7 @@ fn compiler_munge_char_rest(c: char, out: &mut String) {
 pub struct Closure {
     pub id: u64,
     pub display: Arc<str>,
-    pub arities: Vec<Arity>,
+    pub arities: Arc<[Arity]>,
     pub env: Env,
     pub meta: Option<Map>,
     pub conveyed: Option<Bindings>,
