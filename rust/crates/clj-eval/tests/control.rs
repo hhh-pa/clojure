@@ -195,6 +195,24 @@ fn odd_even() {
         ),
         "true"
     );
+    // Tower-integer literals take the low bit too (oracle
+    // `/tmp/oddeven.clj`); ratios and decimals still miss.
+    assert_eq!(run_last(&mut eval, "(odd? 7N)"), "true");
+    assert_eq!(run_last(&mut eval, "(even? 8N)"), "true");
+    assert_eq!(run_last(&mut eval, "(odd? -7N)"), "true");
+    assert_eq!(run_last(&mut eval, "(even? -8N)"), "true");
+    assert_eq!(
+        run_last(&mut eval, "(odd? 123456789012345678901234567893N)"),
+        "true"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(odd? 7/2)"),
+        "java.lang.IllegalArgumentException | Argument must be an integer: 7/2"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(odd? 7M)"),
+        "java.lang.IllegalArgumentException | Argument must be an integer: 7"
+    );
 }
 
 // soe-guard/deep-recursion: non-terminating evaluation throws

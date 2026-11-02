@@ -200,6 +200,42 @@ fn div_zero_rows() {
     assert_eq!(run_last(&mut eval, "(/ -1.0 0.0)"), "##-Inf");
 }
 
+/// The JVM's `/` inline resolves `Numbers.divide` overloads from
+/// *static* types (oracle `/tmp/bi/run4.clj`, `/tmp/bi/run5.clj`): a
+/// statically-double operand takes a `double`-returning overload
+/// (raw IEEE division, `(/ 1.0 0.0)` is `##Inf`), while two
+/// statically-`Object`/`Number` operands take
+/// `divide(Object, Object)`, whose `DoubleOps` path throws
+/// `ArithmeticException: Divide by zero` on a zero divisor — even
+/// when both values are doubles (`((fn [x y] (/ x y)) 1.0 0.0)`
+/// throws on the JVM, as does `(apply / [1.0 0.0])`). The interpreter
+/// observes values, not static types, so it always takes the IEEE
+/// path for doubles (matching the primitive-overload class, which is
+/// also what literal/static-double operands do on the JVM). The only
+/// divergence is the Object-path zero divisor: the JVM throws, the
+/// port returns `##Inf`/`##NaN`. Mirroring the throw would need
+/// static-type inference plus `Reflector` overload emulation
+/// (JDK-method-order-dependent), so the port deliberately keeps IEEE
+/// here; corpus replay (394 scripts x realistic inputs, 1576/1576
+/// identical) never hits an Object-path zero divisor.
+#[test]
+fn div_object_path_zero_divisor_divergent() {
+    let mut eval = boot();
+    // JVM primitive-overload class — both agree (T0/T1/T9/T10).
+    assert_eq!(run_last(&mut eval, "(/ 0.0 0.0)"), "##NaN");
+    assert_eq!(run_last(&mut eval, "(let [x -0.0 y 0.0] (/ x y))"), "##NaN");
+    assert_eq!(run_last(&mut eval, "(/ 6.0 0)"), "##Inf");
+    // JVM Object-path class — the JVM throws `Divide by zero` on a
+    // zero divisor here (T3/T6/T7/T8); the port returns IEEE values.
+    assert_eq!(run_last(&mut eval, "((fn [x y] (/ x y)) 1.0 0.0)"), "##Inf");
+    assert_eq!(
+        run_last(&mut eval, "((fn [x y] (/ x y)) -0.0 0.0)"),
+        "##NaN"
+    );
+    assert_eq!(run_last(&mut eval, "((fn [x y] (/ x y)) 1.0 0)"), "##Inf");
+    assert_eq!(run_last(&mut eval, "(apply / [1.0 0.0])"), "##Inf");
+}
+
 #[test]
 fn coerce_rows() {
     let mut eval = boot();
