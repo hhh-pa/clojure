@@ -106,15 +106,7 @@ pub(crate) fn lookup_present(
         // Arrays narrow any `Number` key (`intValue`, lenient —
         // OOB/non-`Number`/nil miss; S15 oracles `b-get`,
         // `f-get-*`, `e-get-*`).
-        Value::Array(a) => Ok(crate::arrays::array_intvalue_key(key).and_then(|i| {
-            usize::try_from(i).ok().and_then(|idx| {
-                if idx < a.len() {
-                    Some(crate::arrays::array_read(a, idx))
-                } else {
-                    None
-                }
-            })
-        })),
+        Value::Array(a) => Ok(lookup_array_slot(a, key)),
         Value::PrimitiveVector(p) => Ok(lookup_pv_slot(p, key)),
         Value::Set(s) if s.is_sorted() => Ok(sorted_lookup_set(eval, s, key)?),
         Value::Set(s) => Ok(s.get(key).cloned()),
@@ -155,6 +147,21 @@ fn lookup_str_slot(s: &str, key: &Value) -> Option<Value> {
         usize::try_from(i)
             .ok()
             .and_then(|idx| s.chars().nth(idx).map(Value::Char))
+    })
+}
+
+/// Array lookup through `intValue` keys (split from
+/// [`lookup_present`] for the complexity budget): lenient —
+/// OOB/non-`Number`/nil miss.
+fn lookup_array_slot(a: &clj_value::Array, key: &Value) -> Option<Value> {
+    crate::arrays::array_intvalue_key(key).and_then(|i| {
+        usize::try_from(i).ok().and_then(|idx| {
+            if idx < a.len() {
+                Some(crate::arrays::array_read(a, idx))
+            } else {
+                None
+            }
+        })
     })
 }
 
@@ -393,21 +400,27 @@ fn conj_map(eval: &mut Evaluator, m: &Map, x: &Value) -> Result<Value, NativeErr
     Ok(Value::Map(conj_map_into(eval, m, x)?))
 }
 
+/// Conj onto a sorted persistent map (split from
+/// [`conj_map_into`] for the complexity budget).
+fn conj_map_into_sorted(eval: &mut Evaluator, m: &Map, x: &Value) -> Result<Map, NativeError> {
+    match map_conj_plan(eval, x)? {
+        MapConjPlan::Nil => Ok(m.clone()),
+        MapConjPlan::Pair(k, v) => Ok(sorted_assoc_map(eval, m, k, v)?),
+        MapConjPlan::Entries(entries) => {
+            let mut out = m.clone();
+            for (k, v) in entries {
+                out = sorted_assoc_map(eval, &out, k, v)?;
+            }
+            Ok(out)
+        }
+    }
+}
+
 /// Conj onto a persistent map, answering the map (records rewrap
 /// the answer around their content).
 pub(crate) fn conj_map_into(eval: &mut Evaluator, m: &Map, x: &Value) -> Result<Map, NativeError> {
     if m.is_sorted() {
-        return match map_conj_plan(eval, x)? {
-            MapConjPlan::Nil => Ok(m.clone()),
-            MapConjPlan::Pair(k, v) => Ok(sorted_assoc_map(eval, m, k, v)?),
-            MapConjPlan::Entries(entries) => {
-                let mut out = m.clone();
-                for (k, v) in entries {
-                    out = sorted_assoc_map(eval, &out, k, v)?;
-                }
-                Ok(out)
-            }
-        };
+        return conj_map_into_sorted(eval, m, x);
     }
     match map_conj_plan(eval, x)? {
         MapConjPlan::Nil => Ok(m.clone()),
@@ -441,6 +454,15 @@ fn subvector_conj(sv: &SubVectorValue, x: Value) -> Value {
     ))
 }
 
+/// Conj onto a primitive vector coerces through the type (the
+/// `ArrayManager` rule — split from [`conj_one`] for the
+/// complexity budget).
+fn conj_pv(eval: &mut Evaluator, p: &PrimitiveVector, x: Value) -> Result<Value, NativeError> {
+    Ok(Value::PrimitiveVector(p.push_back(
+        crate::arrays::vector_coerce(eval, p.elem(), &x)?,
+    )))
+}
+
 /// `RT.conj` one element (`conj`/`into` share this).
 fn conj_one(eval: &mut Evaluator, coll: &Value, x: Value) -> Result<Value, NativeError> {
     match coll {
@@ -450,9 +472,7 @@ fn conj_one(eval: &mut Evaluator, coll: &Value, x: Value) -> Result<Value, Nativ
         // Primitive vectors coerce through the type (the
         // `ArrayManager` rule — S15 oracles `f-conj-bad`,
         // `j-byte-vec`, `j-bool-num`, `j-conj-nil`).
-        Value::PrimitiveVector(p) => Ok(Value::PrimitiveVector(
-            p.push_back(crate::arrays::vector_coerce(eval, p.elem(), &x)?),
-        )),
+        Value::PrimitiveVector(p) => conj_pv(eval, p, x),
         // Conj onto an entry appends like its 2-vector (Oracle FX2
         // `conj`, `merge-entry`).
         Value::MapEntry { key, val, .. } => {
@@ -568,6 +588,20 @@ fn assoc_subvector(sv: &SubVectorValue, k: &Value, v: Value) -> Result<Value, Na
     )))
 }
 
+/// `assoc` on a map-like host value (split from [`assoc3`] for
+/// the complexity budget): through the content map, rewrapped so
+/// the answer stays a record (or a struct, S12); anything else
+/// host is not associative.
+fn assoc_maplike(coll: &Value, k: &Value, v: Value) -> Result<Value, NativeError> {
+    match crate::types::maplike_inst(coll) {
+        Some(i) => Ok(crate::types::rewrap_maplike(
+            i,
+            i.content.clone().insert(k.clone(), v),
+        )),
+        None => Err(cce_err(coll, "clojure.lang.Associative")),
+    }
+}
+
 /// `RT.assoc` one triple (`assoc`/`update`/`merge-with` share this;
 /// sorted maps position by comparator, FT6).
 fn assoc3(eval: &mut Evaluator, coll: &Value, k: &Value, v: Value) -> Result<Value, NativeError> {
@@ -616,13 +650,7 @@ fn assoc3(eval: &mut Evaluator, coll: &Value, k: &Value, v: Value) -> Result<Val
         // always stay structs (S12 oracles `sm-assoc-class`,
         // `sm-assoc-extra-class`); anything else host is not
         // associative (oracle `i-assoc`).
-        Value::HostType(_) => match crate::types::maplike_inst(coll) {
-            Some(i) => Ok(crate::types::rewrap_maplike(
-                i,
-                i.content.clone().insert(k.clone(), v),
-            )),
-            None => Err(cce_err(coll, "clojure.lang.Associative")),
-        },
+        Value::HostType(_) => assoc_maplike(coll, k, v),
         _ => {
             if let Some(sv) = as_subvector(coll) {
                 return assoc_subvector(sv, k, v);
@@ -1150,6 +1178,32 @@ fn dissoc_struct(inst: &clj_value::HostInst, keys: &[Value]) -> Result<Value, Na
     Ok(crate::types::rewrap_maplike(inst, out))
 }
 
+/// Record `dissoc` (split from [`native_dissoc`] for the
+/// complexity budget): through the content map — dropping a
+/// declared field loses recordness (a plain map); anything else
+/// stays a record. Metadata travels in both cases.
+fn dissoc_record(
+    eval: &mut Evaluator,
+    inst: &clj_value::HostInst,
+    keys: &[Value],
+) -> Result<Value, NativeError> {
+    let drops_field = keys.iter().any(|k| {
+        inst.def
+            .fields
+            .iter()
+            .any(|f| crate::types::is_field_key(f, k))
+    });
+    let mut out = inst.content.clone();
+    for k in keys {
+        let k = crate::lazy::realize_key(eval, k).map_err(signal_to_native)?;
+        out = out.without(&k);
+    }
+    if drops_field {
+        return Ok(Value::Map(out.with_meta(inst.meta.clone())));
+    }
+    Ok(crate::types::rewrap_record(inst, out))
+}
+
 fn native_dissoc(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_min_arity("clojure.core/dissoc", args, 1)?;
     if args.len() == 1 {
@@ -1166,21 +1220,7 @@ fn native_dissoc(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeEr
     // anything else stays a record (oracle `h-dissoc-missing-type`).
     // Metadata travels in both cases (ad-hoc `dissoc-meta`).
     if let Some(i) = crate::types::record_inst(&args[0]) {
-        let drops_field = args[1..].iter().any(|k| {
-            i.def
-                .fields
-                .iter()
-                .any(|f| crate::types::is_field_key(f, k))
-        });
-        let mut out = i.content.clone();
-        for k in &args[1..] {
-            let k = crate::lazy::realize_key(eval, k).map_err(signal_to_native)?;
-            out = out.without(&k);
-        }
-        if drops_field {
-            return Ok(Value::Map(out.with_meta(i.meta.clone())));
-        }
-        return Ok(crate::types::rewrap_record(i, out));
+        return dissoc_record(eval, i, &args[1..]);
     }
     let Value::Map(m) = &args[0] else {
         return Err(cce_err(&args[0], "clojure.lang.IPersistentMap"));

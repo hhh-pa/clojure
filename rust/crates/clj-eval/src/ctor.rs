@@ -31,6 +31,15 @@ use crate::error::NativeError;
 /// at runtime. Wire new emulated classes here plus an arm in the
 /// [`crate::types`] dispatch.
 pub(crate) fn ctor_arities(fqn: &str) -> Option<&'static [usize]> {
+    if let Some(arities) = ctor_arities_core(fqn) {
+        return Some(arities);
+    }
+    ctor_arities_extra(fqn)
+}
+
+/// The core emulated ctor arities (split from [`ctor_arities`]
+/// for the complexity budget).
+fn ctor_arities_core(fqn: &str) -> Option<&'static [usize]> {
     match fqn {
         "java.lang.String" => Some(&[0, 1, 2, 3, 4]),
         "java.lang.Object" => Some(&[0]),
@@ -41,6 +50,14 @@ pub(crate) fn ctor_arities(fqn: &str) -> Option<&'static [usize]> {
         "java.math.BigInteger" => Some(&[1, 2]),
         "java.math.BigDecimal" => Some(&[1]),
         "java.math.MathContext" => Some(&[1, 2]),
+        _ => None,
+    }
+}
+
+/// The extended emulated ctor arities (split from
+/// [`ctor_arities`] for the complexity budget).
+fn ctor_arities_extra(fqn: &str) -> Option<&'static [usize]> {
+    match fqn {
         "java.net.URI" => Some(&[1]),
         "java.io.File" => Some(&[1]),
         "java.io.FileInputStream" => Some(&[1]),
@@ -663,19 +680,6 @@ pub(crate) fn build_mathcontext(
     args: &[Value],
 ) -> Result<Value, NativeError> {
     const CLASS: &str = "java.math.MathContext";
-    let precision = |v: &Value| -> Result<u32, NativeError> {
-        let Value::Int(i) = v else {
-            return Err(no_ctor(CLASS, false));
-        };
-        let p = int_exact_long(*i)?;
-        if p < 0 {
-            return Err(NativeError::new(
-                ThrowClass::IllegalArgumentException,
-                clj_value::DIGITS_LT_0.to_owned(),
-            ));
-        }
-        Ok(p as u32)
-    };
     let ctx = match args {
         [Value::Str(s)] => clj_value::MathContext::parse(s)
             .map_err(|m| NativeError::new(ThrowClass::IllegalArgumentException, m))?,
@@ -686,31 +690,57 @@ pub(crate) fn build_mathcontext(
             ));
         }
         [p] => {
-            let p = precision(p)?;
+            let p = mathcontext_precision(p)?;
             clj_value::MathContext::new(p, clj_value::RoundingMode::HalfUp)
         }
-        [p, mode] => {
-            if matches!(p, Value::Str(_)) {
-                return Err(crate::core::cce_err(p, "java.lang.Number"));
-            }
-            let p = precision(p)?;
-            let rounding = match mode {
-                Value::Nil => {
-                    return Err(NativeError::new(
-                        ThrowClass::NullPointerException,
-                        String::new(),
-                    ));
-                }
-                _ => crate::classemu::as_rounding(mode).ok_or_else(|| no_ctor(CLASS, false))?,
-            };
-            clj_value::MathContext::new(p, rounding)
-        }
+        [p, mode] => mathcontext_two(p, mode)?,
         _ => return Err(no_ctor(CLASS, false)),
     };
     Ok(Value::Extension(Arc::new(crate::core::MathContextVal {
         id: eval.next_id(),
         ctx,
     })))
+}
+
+/// The `(int)` MathContext precision (split from
+/// [`build_mathcontext`] for the complexity budget).
+fn mathcontext_precision(v: &Value) -> Result<u32, NativeError> {
+    const CLASS: &str = "java.math.MathContext";
+    let Value::Int(i) = v else {
+        return Err(no_ctor(CLASS, false));
+    };
+    let p = int_exact_long(*i)?;
+    if p < 0 {
+        return Err(NativeError::new(
+            ThrowClass::IllegalArgumentException,
+            clj_value::DIGITS_LT_0.to_owned(),
+        ));
+    }
+    Ok(p as u32)
+}
+
+/// The `(int, RoundingMode)` MathContext shape (split from
+/// [`build_mathcontext`] for the complexity budget).
+fn mathcontext_two(p: &Value, mode: &Value) -> Result<clj_value::MathContext, NativeError> {
+    if matches!(p, Value::Str(_)) {
+        return Err(crate::core::cce_err(p, "java.lang.Number"));
+    }
+    let p = mathcontext_precision(p)?;
+    let rounding = mathcontext_rounding(mode)?;
+    Ok(clj_value::MathContext::new(p, rounding))
+}
+
+/// The explicit rounding mode (split from [`build_mathcontext`]
+/// for the complexity budget).
+fn mathcontext_rounding(mode: &Value) -> Result<clj_value::RoundingMode, NativeError> {
+    const CLASS: &str = "java.math.MathContext";
+    match mode {
+        Value::Nil => Err(NativeError::new(
+            ThrowClass::NullPointerException,
+            String::new(),
+        )),
+        _ => crate::classemu::as_rounding(mode).ok_or_else(|| no_ctor(CLASS, false)),
+    }
 }
 
 /// Build `(URI. …)` (#205): 1-arg takes the string (nil NPEs

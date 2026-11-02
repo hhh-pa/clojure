@@ -2318,7 +2318,8 @@ fn static_class(name: &str) -> Option<Arc<ClassVal>> {
 /// widening does); `Character` bounds are `Char`s.
 pub(crate) fn static_field_value(class: &str, field: &str) -> Option<Value> {
     // Two-level dispatch (complexity ratchet): one arm per class,
-    // then a per-class field match below.
+    // then a per-class field match below; the tail classes live
+    // in the helper so neither match breaches the budget.
     match class {
         "java.lang.Long" => static_field_long(field),
         "java.lang.Integer" => static_field_integer(field),
@@ -2330,6 +2331,13 @@ pub(crate) fn static_field_value(class: &str, field: &str) -> Option<Value> {
         "java.math.RoundingMode" => static_field_rounding(field),
         "java.lang.Boolean" => static_field_boolean(field),
         "java.lang.Math" => static_field_math(field),
+        _ => static_field_value_rest(class, field),
+    }
+}
+
+/// The tail half of [`static_field_value`]'s class dispatch.
+fn static_field_value_rest(class: &str, field: &str) -> Option<Value> {
+    match class {
         "java.util.Locale" => static_field_locale(field),
         "clojure.lang.PersistentQueue" => static_field_queue(field),
         "java.math.BigInteger" => static_field_bigint(field),
@@ -2978,7 +2986,8 @@ pub(crate) fn import_class(eval: &mut Evaluator, fqn: &str) -> Result<Value, Nat
 /// instance-position surface below).
 pub(crate) fn static_member_arities(fqn: &str, member: &str) -> Option<&'static [usize]> {
     // Two-level dispatch (complexity ratchet): one arm per class,
-    // then a per-class member match below.
+    // then a per-class member match below; the tail classes live
+    // in the helper so neither match breaches the budget.
     match fqn {
         "java.lang.Class" => static_arities_class(member),
         "java.lang.System" => static_arities_system(member),
@@ -2992,6 +3001,13 @@ pub(crate) fn static_member_arities(fqn: &str, member: &str) -> Option<&'static 
         "java.math.BigInteger" => static_arities_bigint(member),
         "java.math.BigDecimal" => static_arities_bigdec(member),
         "java.util.Arrays" => static_arities_arrays(member),
+        _ => static_member_arities_rest(fqn, member),
+    }
+}
+
+/// The tail half of [`static_member_arities`]' class dispatch.
+fn static_member_arities_rest(fqn: &str, member: &str) -> Option<&'static [usize]> {
+    match fqn {
         "java.util.Collections" => static_arities_collections(member),
         "java.security.MessageDigest" => static_arities_digest(member),
         "java.util.regex.Pattern" => static_arities_pattern(member),
@@ -3177,7 +3193,8 @@ fn native_static(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeEr
     let rest = &args[2..];
     // Two-level dispatch (complexity ratchet): one arm per class,
     // then a per-class member match below (Math's 21 members ride
-    // a name table).
+    // a name table); the later classes live in the mid/tail
+    // helpers so no single match breaches the budget.
     match fqn.as_ref() {
         "java.lang.Class" => static_call_class(eval, member.as_ref(), rest),
         "java.lang.System" => static_call_system(member.as_ref(), rest),
@@ -3187,23 +3204,45 @@ fn native_static(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeEr
         "java.lang.Integer" => static_call_integer(member.as_ref(), rest),
         "java.lang.Double" => static_call_double(member.as_ref(), rest),
         "java.lang.Boolean" => static_call_boolean(member.as_ref(), rest),
-        "java.lang.Float" => static_call_float(member.as_ref(), rest),
-        "java.math.BigInteger" => static_call_bigint(member.as_ref(), rest),
-        "java.math.BigDecimal" => static_call_bigdec(member.as_ref(), rest),
-        "java.util.Arrays" => static_call_arrays(member.as_ref(), rest),
-        "java.util.Collections" => static_call_collections(member.as_ref(), rest),
-        "java.security.MessageDigest" => static_call_digest(eval, member.as_ref(), rest),
-        "java.util.regex.Pattern" => static_call_pattern(member.as_ref(), rest),
-        "java.io.File" => static_call_file(eval, member.as_ref(), rest),
-        "java.net.URLEncoder" => static_call_urlencoder(member.as_ref(), rest),
-        "java.lang.String" => static_call_string(eval, member.as_ref(), rest),
-        "java.lang.Math" => static_call_math(member.as_ref(), rest),
-        "java.time.LocalDate" => crate::emutime::static_call_localdate(member.as_ref(), rest),
-        "java.time.LocalDateTime" => crate::emutime::static_call_datetime(member.as_ref(), rest),
-        "java.time.Instant" => crate::emutime::static_call_instant(member.as_ref(), rest),
-        "java.time.format.DateTimeFormatter" => {
-            crate::emutime::static_call_formatter(member.as_ref(), rest)
-        }
+        _ => native_static_mid(eval, fqn.as_ref(), member.as_ref(), rest),
+    }
+}
+
+/// The middle third of [`native_static`]'s class dispatch.
+fn native_static_mid(
+    eval: &mut Evaluator,
+    fqn: &str,
+    member: &str,
+    rest: &[Value],
+) -> Result<Value, NativeError> {
+    match fqn {
+        "java.lang.Float" => static_call_float(member, rest),
+        "java.math.BigInteger" => static_call_bigint(member, rest),
+        "java.math.BigDecimal" => static_call_bigdec(member, rest),
+        "java.util.Arrays" => static_call_arrays(member, rest),
+        "java.util.Collections" => static_call_collections(member, rest),
+        "java.security.MessageDigest" => static_call_digest(eval, member, rest),
+        "java.util.regex.Pattern" => static_call_pattern(member, rest),
+        "java.io.File" => static_call_file(eval, member, rest),
+        _ => native_static_tail(eval, fqn, member, rest),
+    }
+}
+
+/// The tail third of [`native_static`]'s class dispatch.
+fn native_static_tail(
+    eval: &mut Evaluator,
+    fqn: &str,
+    member: &str,
+    rest: &[Value],
+) -> Result<Value, NativeError> {
+    match fqn {
+        "java.net.URLEncoder" => static_call_urlencoder(member, rest),
+        "java.lang.String" => static_call_string(eval, member, rest),
+        "java.lang.Math" => static_call_math(member, rest),
+        "java.time.LocalDate" => crate::emutime::static_call_localdate(member, rest),
+        "java.time.LocalDateTime" => crate::emutime::static_call_datetime(member, rest),
+        "java.time.Instant" => crate::emutime::static_call_instant(member, rest),
+        "java.time.format.DateTimeFormatter" => crate::emutime::static_call_formatter(member, rest),
         _ => static_field_or_miss(fqn, member, rest),
     }
 }
@@ -4884,14 +4923,9 @@ fn arraycopy_snapshot(store: &clj_value::ArrayStore, s: usize, n: usize) -> Opti
     }
 }
 
-/// Write a snapshotted range into an `arraycopy` destination
-/// (same store or the mismatch error).
-fn arraycopy_write(
-    store: &mut clj_value::ArrayStore,
-    d: usize,
-    cells: ArrayCells,
-) -> Result<(), NativeError> {
-    let n = match &cells {
+/// The cell count of a snapshotted `arraycopy` source range.
+fn arraycells_len(cells: &ArrayCells) -> usize {
+    match cells {
         ArrayCells::Bools(v) => v.len(),
         ArrayCells::Bytes(v) => v.len(),
         ArrayCells::Chars(v) => v.len(),
@@ -4901,7 +4935,17 @@ fn arraycopy_write(
         ArrayCells::Floats(v) => v.len(),
         ArrayCells::Doubles(v) => v.len(),
         ArrayCells::Objs(v) => v.len(),
-    };
+    }
+}
+
+/// Write a snapshotted range into an `arraycopy` destination
+/// (same store or the mismatch error).
+fn arraycopy_write(
+    store: &mut clj_value::ArrayStore,
+    d: usize,
+    cells: ArrayCells,
+) -> Result<(), NativeError> {
+    let n = arraycells_len(&cells);
     match (store, cells) {
         (clj_value::ArrayStore::Bools(dv), ArrayCells::Bools(tmp)) => {
             dv[d..d + n].copy_from_slice(&tmp);
@@ -6394,6 +6438,17 @@ fn surface_gated_strn(
         ("indexOf", 1) => gated_str_indexof(target, rest),
         ("indexOf", 2) => gated_str_indexof_from(target, rest),
         ("lastIndexOf", 1) => gated_str_last_indexof(target, rest),
+        _ => surface_gated_strn_rest(meth, target, rest),
+    }
+}
+
+/// The tail half of [`surface_gated_strn`]'s method dispatch.
+fn surface_gated_strn_rest(
+    meth: &str,
+    target: &Value,
+    rest: &[Value],
+) -> Option<Result<Value, NativeError>> {
+    match (meth, rest.len()) {
         ("lastIndexOf", 2) => gated_str_last_indexof_from(target, rest),
         ("contains", 1) => gated_str_contains(target, rest),
         ("replace", 2) => gated_str_replace(target, rest),

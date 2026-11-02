@@ -23,6 +23,8 @@
 //! only). Patterns support the `yMdHms` runs the suite uses;
 //! anything else fails loudly at `ofPattern`.
 
+use std::iter::Peekable;
+use std::str::Chars;
 use std::sync::Arc;
 
 use clj_value::{ExtensionValue, ThrowClass, Value};
@@ -389,6 +391,62 @@ fn split_epoch(secs: i64) -> (EmuLocalDate, EmuLocalTime) {
     (date, time)
 }
 
+/// One char inside a quoted run: a doubled quote is a literal
+/// quote, a lone quote closes the run, anything else is literal.
+/// Returns whether the run stays open.
+fn push_quoted(c: char, chars: &mut Peekable<Chars<'_>>, elems: &mut Vec<PatElem>) -> bool {
+    if c != '\'' {
+        elems.push(PatElem::Lit(c));
+        return true;
+    }
+    if chars.peek() == Some(&'\'') {
+        chars.next();
+        elems.push(PatElem::Lit('\''));
+        true
+    } else {
+        false
+    }
+}
+
+/// A padded pair (`M d H m s` — the caller maps width 1 to the
+/// bare elem and width 2 to the padded one; wider runs fail there
+/// with the JDK-shaped message).
+fn padded_directive(c: char, padded: bool) -> Option<PatElem> {
+    match (c, padded) {
+        ('M', false) => Some(PatElem::Month),
+        ('M', true) => Some(PatElem::MonthPad),
+        ('d', false) => Some(PatElem::Day),
+        ('d', true) => Some(PatElem::DayPad),
+        ('H', false) => Some(PatElem::Hour),
+        ('H', true) => Some(PatElem::HourPad),
+        ('m', false) => Some(PatElem::Min),
+        ('m', true) => Some(PatElem::MinPad),
+        ('s', false) => Some(PatElem::Sec),
+        ('s', true) => Some(PatElem::SecPad),
+        _ => None,
+    }
+}
+
+/// One letter run outside quotes (`y` at any width, the padded
+/// pairs at width 1–2 — anything else fails like the JDK's eager
+/// validation).
+fn compile_directive(c: char, width: usize) -> Result<PatElem, NativeError> {
+    if c == 'y' {
+        return Ok(PatElem::Year(width));
+    }
+    match padded_directive(c, width == 2) {
+        Some(elem) => {
+            if width > 2 {
+                return Err(dt_err(format!(
+                    "Unsupported DateTimeFormatter pattern: {c} run of width {width}"
+                )));
+            }
+            Ok(elem)
+        }
+        None => Err(dt_err(format!("Unknown pattern letter: {c}"))),
+    }
+}
+
 /// Compile an `ofPattern` pattern (ASCII letters outside quotes
 /// must be `yMdHms` runs — anything else fails here, like the
 /// JDK's eager validation).
@@ -398,16 +456,7 @@ fn compile_pattern(pattern: &str) -> Result<Vec<PatElem>, NativeError> {
     let mut quoted = false;
     while let Some(c) = chars.next() {
         if quoted {
-            if c == '\'' {
-                if chars.peek() == Some(&'\'') {
-                    chars.next();
-                    elems.push(PatElem::Lit('\''));
-                } else {
-                    quoted = false;
-                }
-            } else {
-                elems.push(PatElem::Lit(c));
-            }
+            quoted = push_quoted(c, &mut chars, &mut elems);
             continue;
         }
         if c == '\'' {
@@ -428,50 +477,7 @@ fn compile_pattern(pattern: &str) -> Result<Vec<PatElem>, NativeError> {
             chars.next();
             width += 1;
         }
-        elems.push(match c {
-            'y' => PatElem::Year(width),
-            'M' if width <= 2 => {
-                if width == 2 {
-                    PatElem::MonthPad
-                } else {
-                    PatElem::Month
-                }
-            }
-            'd' if width <= 2 => {
-                if width == 2 {
-                    PatElem::DayPad
-                } else {
-                    PatElem::Day
-                }
-            }
-            'H' if width <= 2 => {
-                if width == 2 {
-                    PatElem::HourPad
-                } else {
-                    PatElem::Hour
-                }
-            }
-            'm' if width <= 2 => {
-                if width == 2 {
-                    PatElem::MinPad
-                } else {
-                    PatElem::Min
-                }
-            }
-            's' if width <= 2 => {
-                if width == 2 {
-                    PatElem::SecPad
-                } else {
-                    PatElem::Sec
-                }
-            }
-            _ if matches!(c, 'M' | 'd' | 'H' | 'm' | 's') => {
-                return Err(dt_err(format!(
-                    "Unsupported DateTimeFormatter pattern: {c} run of width {width}"
-                )));
-            }
-            _ => return Err(dt_err(format!("Unknown pattern letter: {c}"))),
-        });
+        elems.push(compile_directive(c, width)?);
     }
     if quoted {
         return Err(dt_err("Pattern ends with unbalanced quotes".to_owned()));
@@ -479,25 +485,29 @@ fn compile_pattern(pattern: &str) -> Result<Vec<PatElem>, NativeError> {
     Ok(elems)
 }
 
+/// Render the year run (`yy` the century-free pair, wider runs
+/// zero-padded — negatives never pad, like the JDK).
+fn render_year(out: &mut String, y: i32, w: usize) {
+    let y = i64::from(y);
+    if w == 2 {
+        out.push_str(&format!("{:02}", y.rem_euclid(100)));
+    } else if y < 0 {
+        out.push_str(&y.to_string());
+    } else {
+        let digits = y.to_string();
+        for _ in digits.len()..w {
+            out.push('0');
+        }
+        out.push_str(&digits);
+    }
+}
+
 /// Render a datetime through compiled runs.
 fn render(dt: EmuLocalDateTime, elems: &[PatElem]) -> String {
     let mut out = String::new();
     for elem in elems {
         match elem {
-            PatElem::Year(w) => {
-                let y = i64::from(dt.date.y);
-                if *w == 2 {
-                    out.push_str(&format!("{:02}", y.rem_euclid(100)));
-                } else if y < 0 {
-                    out.push_str(&y.to_string());
-                } else {
-                    let digits = y.to_string();
-                    for _ in digits.len()..*w {
-                        out.push('0');
-                    }
-                    out.push_str(&digits);
-                }
-            }
+            PatElem::Year(w) => render_year(&mut out, dt.date.y, *w),
             PatElem::Month => out.push_str(&dt.date.m.to_string()),
             PatElem::MonthPad => out.push_str(&format!("{:02}", dt.date.m)),
             PatElem::Day => out.push_str(&dt.date.d.to_string()),
@@ -674,29 +684,33 @@ pub(crate) fn static_call_localdate(member: &str, rest: &[Value]) -> Result<Valu
     }
 }
 
+/// `LocalDateTime/of` (the 5/6-arg — seconds default to zero).
+fn static_datetime_of(member: &str, rest: &[Value]) -> Result<Value, NativeError> {
+    const CLASS: &str = "java.time.LocalDateTime";
+    if rest.len() != 5 && rest.len() != 6 {
+        return Err(crate::types::no_method(member, rest.len(), CLASS));
+    }
+    let y = crate::classemu::long_arg(&rest[0])?;
+    let m = crate::classemu::long_arg(&rest[1])?;
+    let d = crate::classemu::long_arg(&rest[2])?;
+    let h = crate::classemu::long_arg(&rest[3])?;
+    let mi = crate::classemu::long_arg(&rest[4])?;
+    let s = if rest.len() == 6 {
+        crate::classemu::long_arg(&rest[5])?
+    } else {
+        0
+    };
+    let date = check_date(y, m, d)?;
+    let time = check_time(h, mi, s)?;
+    Ok(datetime_value(EmuLocalDateTime { date, time }))
+}
+
 /// `LocalDateTime/of` and `LocalDateTime/now` (bare `now` reads
 /// the clock as UTC — the suite asserts shape only).
 pub(crate) fn static_call_datetime(member: &str, rest: &[Value]) -> Result<Value, NativeError> {
     const CLASS: &str = "java.time.LocalDateTime";
     match member {
-        "of" => {
-            if rest.len() != 5 && rest.len() != 6 {
-                return Err(crate::types::no_method(member, rest.len(), CLASS));
-            }
-            let y = crate::classemu::long_arg(&rest[0])?;
-            let m = crate::classemu::long_arg(&rest[1])?;
-            let d = crate::classemu::long_arg(&rest[2])?;
-            let h = crate::classemu::long_arg(&rest[3])?;
-            let mi = crate::classemu::long_arg(&rest[4])?;
-            let s = if rest.len() == 6 {
-                crate::classemu::long_arg(&rest[5])?
-            } else {
-                0
-            };
-            let date = check_date(y, m, d)?;
-            let time = check_time(h, mi, s)?;
-            Ok(datetime_value(EmuLocalDateTime { date, time }))
-        }
+        "of" => static_datetime_of(member, rest),
         "now" => {
             if !rest.is_empty() {
                 return Err(crate::types::no_method(member, rest.len(), CLASS));

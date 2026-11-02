@@ -382,6 +382,25 @@ fn take_seq_state(state: &Mutex<SeqState>) -> SeqState {
     std::mem::replace(&mut *guard, SeqState::Empty)
 }
 
+/// The chain-ward link of an unforced concat: `cur` when it is a
+/// cell (left nests like `(reduce concat ...)` and `mapcat`
+/// tails), else the sole remaining rest input when it is a
+/// sole-owned cell (right nests). Sibling cells unwind through
+/// their own `Drop`, and `outer` through `ConcatFrame::Drop`.
+fn drop_concat_link(cur: Value, rest: &mut Arc<Vec<Value>>, idx: usize) -> Option<Value> {
+    if as_pending(&cur).is_some() {
+        return Some(cur);
+    }
+    if idx + 1 == rest.len() {
+        if let Some(slot) = Arc::get_mut(rest).and_then(|v| v.get_mut(idx)) {
+            if as_pending(slot).is_some() {
+                return Some(std::mem::replace(slot, Value::Nil));
+            }
+        }
+    }
+    None
+}
+
 /// The one chain-ward link of an unforced thunk, if it has exactly
 /// one (`None` drops the whole thunk normally — every nested seq
 /// cell unwinds through its own `Drop`, so those drops stay
@@ -418,25 +437,7 @@ fn drop_thunk_link(thunk: Thunk) -> Option<Value> {
         | Thunk::Replace { input, .. } => Some(input),
         Thunk::Concat {
             cur, mut rest, idx, ..
-        } => {
-            // Follow the chain-ward link iteratively: `cur` when it
-            // is a cell (left nests like `(reduce concat ...)` and
-            // `mapcat` tails), else the sole remaining rest input
-            // when it is a sole-owned cell (right nests).
-            // Sibling cells unwind through their own `Drop`, and
-            // `outer` through `ConcatFrame::Drop`.
-            if as_pending(&cur).is_some() {
-                return Some(cur);
-            }
-            if idx + 1 == rest.len() {
-                if let Some(slot) = Arc::get_mut(&mut rest).and_then(|v| v.get_mut(idx)) {
-                    if as_pending(slot).is_some() {
-                        return Some(std::mem::replace(slot, Value::Nil));
-                    }
-                }
-            }
-            None
-        }
+        } => drop_concat_link(cur, &mut rest, idx),
         Thunk::MapCat { outer } => Some(outer),
         Thunk::Chain { tail, .. } | Thunk::ChunkHead { tail, .. } => Some(tail),
         Thunk::Thunk0 { .. }
@@ -756,6 +757,31 @@ fn step_entry_unit(eval: &mut Evaluator, v: &Value) -> Result<Option<StepUnit>, 
     Ok(None)
 }
 
+/// Step the late extension hooks (eduction, iteration, and the
+/// `ArrayList` snapshot — same hooks as `seq`, which see for the
+/// arm coupling).
+fn step_unit_extension_tail(eval: &mut Evaluator, v: &Value) -> Result<StepUnit, Signal> {
+    // T1200 D1: walking an eduction steps its lazy transform (same
+    // hook as `seq`, which see for the arm coupling).
+    if let Some((xform, coll)) = crate::xform::Eduction::parts(v) {
+        let s = seq_eduction(eval, xform, coll)?;
+        return step_unit(eval, &s);
+    }
+    // S12: walking an iteration steps its eager-first-step seq
+    // (same hook as `seq`).
+    if let Some(it) = crate::collmisc::as_iteration(v) {
+        let s = crate::collmisc::seq_iteration(eval, it)?;
+        return step_unit(eval, &s);
+    }
+    // #205: walking an `ArrayList` steps its snapshot seq (same
+    // hook as `seq`).
+    if let Some(items) = crate::emucoll::list_snapshot(v) {
+        let s = realized_value(items, false, true, false, clj_value::SeqKind::Array);
+        return step_unit(eval, &s);
+    }
+    Err(eval.throw(iseq_err(v)))
+}
+
 /// Step an extension input.
 fn step_unit_extension(eval: &mut Evaluator, v: &Value) -> Result<StepUnit, Signal> {
     if let Some(p) = as_pending(v) {
@@ -785,25 +811,7 @@ fn step_unit_extension(eval: &mut Evaluator, v: &Value) -> Result<StepUnit, Sign
     if let Some(sv) = as_subvector(v) {
         return step_subvector_unit(sv);
     }
-    // T1200 D1: walking an eduction steps its lazy transform (same
-    // hook as `seq`, which see for the arm coupling).
-    if let Some((xform, coll)) = crate::xform::Eduction::parts(v) {
-        let s = seq_eduction(eval, xform, coll)?;
-        return step_unit(eval, &s);
-    }
-    // S12: walking an iteration steps its eager-first-step seq
-    // (same hook as `seq`).
-    if let Some(it) = crate::collmisc::as_iteration(v) {
-        let s = crate::collmisc::seq_iteration(eval, it)?;
-        return step_unit(eval, &s);
-    }
-    // #205: walking an `ArrayList` steps its snapshot seq (same
-    // hook as `seq`).
-    if let Some(items) = crate::emucoll::list_snapshot(v) {
-        let s = realized_value(items, false, true, false, clj_value::SeqKind::Array);
-        return step_unit(eval, &s);
-    }
-    Err(eval.throw(iseq_err(v)))
+    step_unit_extension_tail(eval, v)
 }
 
 /// Step a list (one head plus its tail).
@@ -3086,6 +3094,17 @@ pub(crate) fn seq_value(eval: &mut Evaluator, v: &Value) -> Result<Value, Signal
     }
 }
 
+/// The first item of an extension collection (the subvector
+/// head, else the `ArrayList` snapshot head).
+fn first_direct_extension(v: &Value) -> Option<Value> {
+    as_subvector(v)
+        .map(|sv| sv.iter().next().cloned().unwrap_or(Value::Nil))
+        .or_else(|| {
+            crate::emucoll::list_snapshot(v)
+                .map(|items| items.into_iter().next().unwrap_or(Value::Nil))
+        })
+}
+
 /// The first item of a directly-readable collection (`None` for
 /// anything else, including seq values and unseqables).
 fn first_direct(v: &Value) -> Option<Value> {
@@ -3117,12 +3136,7 @@ fn first_direct(v: &Value) -> Option<Value> {
                 .map(|(k, val)| clj_value::map_entry(k.clone(), val.clone()))
                 .unwrap_or(Value::Nil)
         }),
-        Value::Extension(_) => as_subvector(v)
-            .map(|sv| sv.iter().next().cloned().unwrap_or(Value::Nil))
-            .or_else(|| {
-                crate::emucoll::list_snapshot(v)
-                    .map(|items| items.into_iter().next().unwrap_or(Value::Nil))
-            }),
+        Value::Extension(_) => first_direct_extension(v),
         _ => None,
     }
 }

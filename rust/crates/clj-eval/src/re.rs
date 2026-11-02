@@ -403,6 +403,24 @@ fn boundary_atom(s: &str) -> Option<(BoundaryAtom, &str)> {
 /// alternative's every assertion holds (absent sides fail
 /// positives and pass negatives, like the JDK).
 fn boundary_cuts(text: &str, alts: &[BoundaryAlt]) -> Result<Vec<(usize, usize)>, NativeError> {
+    let atoms = compile_boundary_atoms(alts)?;
+    let chars: Vec<char> = text.chars().collect();
+    let bytes: Vec<usize> = text.char_indices().map(|(b, _)| b).collect();
+    let mut cuts = Vec::new();
+    for i in 0..=chars.len() {
+        let left = if i > 0 { Some(chars[i - 1]) } else { None };
+        let right = chars.get(i).copied();
+        if boundary_matched(&atoms, alts, left, right) {
+            let b = bytes.get(i).copied().unwrap_or(text.len());
+            cuts.push((b, b));
+        }
+    }
+    Ok(cuts)
+}
+
+/// Compile each distinct boundary atom once (split from
+/// [`boundary_cuts`] for the complexity budget).
+fn compile_boundary_atoms(alts: &[BoundaryAlt]) -> Result<Vec<(String, Regex)>, NativeError> {
     let mut atoms: Vec<(String, Regex)> = Vec::new();
     for alt in alts {
         for a in alt {
@@ -412,36 +430,60 @@ fn boundary_cuts(text: &str, alts: &[BoundaryAlt]) -> Result<Vec<(usize, usize)>
             }
         }
     }
-    let test = |src: &str, c: char| -> bool {
-        let re = atoms
-            .iter()
-            .find(|(s, _)| s == src)
-            .map(|(_, r)| r)
-            .expect("atom compiled above");
-        let mut buf = [0u8; 4];
-        re.is_match(c.encode_utf8(&mut buf))
-    };
-    let chars: Vec<char> = text.chars().collect();
-    let bytes: Vec<usize> = text.char_indices().map(|(b, _)| b).collect();
-    let mut cuts = Vec::new();
-    for i in 0..=chars.len() {
-        let left = if i > 0 { Some(chars[i - 1]) } else { None };
-        let right = chars.get(i).copied();
-        let matched = alts.iter().any(|alt| {
-            alt.iter().all(|a| {
-                let c = if a.behind { left } else { right };
-                match c {
-                    None => a.negated,
-                    Some(c) => test(&a.atom.src, c) != a.negated,
-                }
-            })
-        });
-        if matched {
-            let b = bytes.get(i).copied().unwrap_or(text.len());
-            cuts.push((b, b));
-        }
+    Ok(atoms)
+}
+
+/// Test one char against a compiled atom (split from
+/// [`boundary_cuts`] for the complexity budget).
+fn boundary_atom_test(atoms: &[(String, Regex)], src: &str, c: char) -> bool {
+    let re = atoms
+        .iter()
+        .find(|(s, _)| s == src)
+        .map(|(_, r)| r)
+        .expect("atom compiled above");
+    let mut buf = [0u8; 4];
+    re.is_match(c.encode_utf8(&mut buf))
+}
+
+/// Whether some alternative's every assertion holds at a
+/// boundary (split from [`boundary_cuts`] for the complexity
+/// budget).
+fn boundary_matched(
+    atoms: &[(String, Regex)],
+    alts: &[BoundaryAlt],
+    left: Option<char>,
+    right: Option<char>,
+) -> bool {
+    alts.iter()
+        .any(|alt| boundary_alt_holds(atoms, alt, left, right))
+}
+
+/// Whether one alternative's every assertion holds (split from
+/// [`boundary_cuts`] for the complexity budget).
+fn boundary_alt_holds(
+    atoms: &[(String, Regex)],
+    alt: &BoundaryAlt,
+    left: Option<char>,
+    right: Option<char>,
+) -> bool {
+    alt.iter()
+        .all(|a| boundary_assert_holds(atoms, a, left, right))
+}
+
+/// Whether one assertion holds (absent sides fail positives
+/// and pass negatives, like the JDK — split from
+/// [`boundary_cuts`] for the complexity budget).
+fn boundary_assert_holds(
+    atoms: &[(String, Regex)],
+    a: &BoundaryAssert,
+    left: Option<char>,
+    right: Option<char>,
+) -> bool {
+    let c = if a.behind { left } else { right };
+    match c {
+        None => a.negated,
+        Some(c) => boundary_atom_test(atoms, &a.atom.src, c) != a.negated,
     }
-    Ok(cuts)
 }
 
 /// `re-pattern`: a `Pattern` passes through, a `String` compiles;

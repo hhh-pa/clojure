@@ -297,25 +297,41 @@ fn comparator_def() -> Arc<HostDef> {
 /// anything else must resolve to an interface.
 fn resolve_iface_sym(eval: &mut Evaluator, s: &Value) -> Result<Option<Arc<HostDef>>, NativeError> {
     let sym = sym_arg(s)?;
-    if sym.namespace().is_none() && sym.name() == "Object" {
+    if is_object_sym(&sym) {
         return Ok(None);
     }
-    if sym.namespace().is_none() && sym.name() == "Closeable"
-        || sym.namespace().is_none() && sym.name() == "java.io.Closeable"
-        || sym.namespace().is_some_and(|n| n == "java.io") && sym.name() == "Closeable"
-    {
+    if is_closeable_sym(&sym) {
         return Ok(Some(closeable_def()));
     }
-    if sym.namespace().is_none() && sym.name() == "Comparator"
-        || sym.namespace().is_none() && sym.name() == "java.util.Comparator"
-        || sym.namespace().is_some_and(|n| n == "java.util") && sym.name() == "Comparator"
-    {
+    if is_comparator_sym(&sym) {
         return Ok(Some(comparator_def()));
     }
     if let Some(p) = crate::protocol::proto_of(eval, &sym) {
         return Ok(Some(crate::protocol::proto_interface(&p.map)));
     }
     resolve_iface(eval, &sym).map(Some)
+}
+
+/// The fenced superclass name (split from [`resolve_iface_sym`]
+/// for the complexity budget).
+fn is_object_sym(sym: &Symbol) -> bool {
+    sym.namespace().is_none() && sym.name() == "Object"
+}
+
+/// The close-contract spellings (split from [`resolve_iface_sym`]
+/// for the complexity budget).
+fn is_closeable_sym(sym: &Symbol) -> bool {
+    sym.namespace().is_none() && sym.name() == "Closeable"
+        || sym.namespace().is_none() && sym.name() == "java.io.Closeable"
+        || sym.namespace().is_some_and(|n| n == "java.io") && sym.name() == "Closeable"
+}
+
+/// The comparator-contract spellings (split from
+/// [`resolve_iface_sym`] for the complexity budget).
+fn is_comparator_sym(sym: &Symbol) -> bool {
+    sym.namespace().is_none() && sym.name() == "Comparator"
+        || sym.namespace().is_none() && sym.name() == "java.util.Comparator"
+        || sym.namespace().is_some_and(|n| n == "java.util") && sym.name() == "Comparator"
 }
 
 /// `Object` methods a body may define without an interface (the
@@ -706,53 +722,11 @@ fn new_unresolved(
 /// uniform miss — `for interface` iff the lattice says so
 /// (oracles `ctor-iface`, `ctor-abstract`, `ctor-private`).
 fn new_via_class(eval: &mut Evaluator, name: &str, args: &[Value]) -> Result<Value, NativeError> {
-    if name == "java.lang.String" {
-        return crate::ctor::build_string(args);
+    if let Some(built) = new_via_class_core(eval, name, args) {
+        return built;
     }
-    if name == "java.lang.Object" {
-        return crate::ctor::build_object(args);
-    }
-    if name == "java.lang.StringBuilder" {
-        return crate::ctor::build_string_builder(args);
-    }
-    if name == "java.util.Random" {
-        return crate::emurand::build_random(args);
-    }
-    if name == "java.security.SecureRandom" {
-        return crate::emurand::build_secure_random(args);
-    }
-    if name == "java.math.BigInteger" {
-        return crate::ctor::build_biginteger(args);
-    }
-    if name == "java.math.BigDecimal" {
-        return crate::ctor::build_bigdecimal(args);
-    }
-    if name == "java.math.MathContext" {
-        return crate::ctor::build_mathcontext(eval, args);
-    }
-    if name == "java.net.URI" {
-        return crate::ctor::build_uri(args);
-    }
-    if name == "java.io.File" {
-        return crate::ctor::build_file(eval, args);
-    }
-    if name == "java.io.FileInputStream" {
-        return crate::ctor::build_file_input_stream(eval, args);
-    }
-    if name == "java.io.FileOutputStream" {
-        return crate::ctor::build_file_output_stream(eval, args);
-    }
-    if name == "java.io.StringWriter" {
-        return crate::ctor::build_string_writer(eval, args);
-    }
-    if name == "java.util.ArrayDeque" {
-        return crate::emucoll::build_deque(eval, args);
-    }
-    if name == "java.util.ArrayList" {
-        return crate::emucoll::build_list(eval, args);
-    }
-    if name == "java.util.PriorityQueue" {
-        return crate::emucoll::build_pqueue(eval, args);
+    if let Some(built) = new_via_class_extra(eval, name, args) {
+        return built;
     }
     if let Some(class) = throw_class_for_name(name) {
         return new_throwable(eval, class, name, args);
@@ -764,6 +738,76 @@ fn new_via_class(eval: &mut Evaluator, name: &str, args: &[Value]) -> Result<Val
             crate::classemu::lattice_is_iface(name),
         )),
     }
+}
+
+/// The core allow-listed builds (split from [`new_via_class`]
+/// for the complexity budget): `None` falls through to the
+/// next dispatch stage.
+fn new_via_class_core(
+    eval: &mut Evaluator,
+    name: &str,
+    args: &[Value],
+) -> Option<Result<Value, NativeError>> {
+    if name == "java.lang.String" {
+        return Some(crate::ctor::build_string(args));
+    }
+    if name == "java.lang.Object" {
+        return Some(crate::ctor::build_object(args));
+    }
+    if name == "java.lang.StringBuilder" {
+        return Some(crate::ctor::build_string_builder(args));
+    }
+    if name == "java.util.Random" {
+        return Some(crate::emurand::build_random(args));
+    }
+    if name == "java.security.SecureRandom" {
+        return Some(crate::emurand::build_secure_random(args));
+    }
+    if name == "java.math.BigInteger" {
+        return Some(crate::ctor::build_biginteger(args));
+    }
+    if name == "java.math.BigDecimal" {
+        return Some(crate::ctor::build_bigdecimal(args));
+    }
+    if name == "java.math.MathContext" {
+        return Some(crate::ctor::build_mathcontext(eval, args));
+    }
+    None
+}
+
+/// The extended allow-listed builds (split from [`new_via_class`]
+/// for the complexity budget): `None` falls through to the
+/// throwable and `HostDef` stages.
+fn new_via_class_extra(
+    eval: &mut Evaluator,
+    name: &str,
+    args: &[Value],
+) -> Option<Result<Value, NativeError>> {
+    if name == "java.net.URI" {
+        return Some(crate::ctor::build_uri(args));
+    }
+    if name == "java.io.File" {
+        return Some(crate::ctor::build_file(eval, args));
+    }
+    if name == "java.io.FileInputStream" {
+        return Some(crate::ctor::build_file_input_stream(eval, args));
+    }
+    if name == "java.io.FileOutputStream" {
+        return Some(crate::ctor::build_file_output_stream(eval, args));
+    }
+    if name == "java.io.StringWriter" {
+        return Some(crate::ctor::build_string_writer(eval, args));
+    }
+    if name == "java.util.ArrayDeque" {
+        return Some(crate::emucoll::build_deque(eval, args));
+    }
+    if name == "java.util.ArrayList" {
+        return Some(crate::emucoll::build_list(eval, args));
+    }
+    if name == "java.util.PriorityQueue" {
+        return Some(crate::emucoll::build_pqueue(eval, args));
+    }
+    None
 }
 
 /// Throwable classes with constructor support (#205): every

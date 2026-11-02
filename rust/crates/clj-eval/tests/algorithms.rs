@@ -273,6 +273,94 @@ fn run_ns(eval: &mut Evaluator, dirs: &[String], ns: &str) -> Result<Counts, Str
     counts_of(&realized).ok_or_else(|| format!("bad test-ns shape: {realized:?}"))
 }
 
+/// Require the ambient stdlib libs (inside the frame, like every
+/// require): 59 suite files call `clojure.string/`/`clojure.set/`
+/// /`clojure.java.io/` fully qualified WITHOUT requiring them
+/// (JVM runner has them ambient via load order).
+fn setup_algorithms(eval: &mut Evaluator, dirs: &[String]) -> Result<(), String> {
+    let setup = in_bindings(
+        dirs,
+        "(require 'clojure.test 'clojure.string 'clojure.set 'clojure.edn 'clojure.java.io)",
+    );
+    if let Err(e) = eval.eval_source(&setup) {
+        return Err(e.to_string());
+    }
+    Ok(())
+}
+
+/// Require every discovered namespace, tallying load errors into
+/// the summary. Returns the loaded ones.
+fn load_namespaces(
+    eval: &mut Evaluator,
+    dirs: &[String],
+    namespaces: &[String],
+    summary: &mut Summary,
+    log: &mut dyn std::fmt::Write,
+) -> Vec<String> {
+    let mut loaded = Vec::with_capacity(namespaces.len());
+    for (i, ns) in namespaces.iter().enumerate() {
+        match require_ns(eval, dirs, ns) {
+            Ok(()) => loaded.push(ns.clone()),
+            Err(e) => {
+                let _ = writeln!(log, "algorithms: LOAD-ERROR {ns}: {e}");
+                summary.load_errors.push((ns.clone(), e));
+            }
+        }
+        if (i + 1) % 200 == 0 {
+            let _ = writeln!(
+                log,
+                "algorithms: …loaded {}/{} ({} errors)",
+                i + 1,
+                namespaces.len(),
+                summary.load_errors.len()
+            );
+        }
+    }
+    loaded
+}
+
+/// `test-ns` every loaded namespace, tallying counts, failures,
+/// and run errors into the summary.
+fn run_namespaces(
+    eval: &mut Evaluator,
+    dirs: &[String],
+    loaded: &[String],
+    summary: &mut Summary,
+    log: &mut dyn std::fmt::Write,
+) {
+    for (i, ns) in loaded.iter().enumerate() {
+        match run_ns(eval, dirs, ns) {
+            Ok(c) => {
+                summary.total.test += c.test;
+                summary.total.pass += c.pass;
+                summary.total.fail += c.fail;
+                summary.total.error += c.error;
+                if c.fail > 0 || c.error > 0 {
+                    let _ = writeln!(
+                        log,
+                        "algorithms: FAIL {ns}: tests={} pass={} fail={} error={}",
+                        c.test, c.pass, c.fail, c.error
+                    );
+                    summary.failing.push((ns.clone(), c));
+                }
+            }
+            Err(e) => {
+                let _ = writeln!(log, "algorithms: RUN-ERROR {ns}: {e}");
+                summary.run_errors.push((ns.clone(), e));
+            }
+        }
+        if (i + 1) % 200 == 0 {
+            let _ = writeln!(
+                log,
+                "algorithms: …ran {}/{} ({} failing)",
+                i + 1,
+                loaded.len(),
+                summary.failing.len() + summary.run_errors.len()
+            );
+        }
+    }
+}
+
 /// Run the whole checkout: require every `*-test` ns, then
 /// `test-ns` each loaded one. Progress and failures stream to
 /// `log`; the returned [`Summary`] tallies everything. `filter`
@@ -309,14 +397,7 @@ fn run_algorithms(
         discovered: namespaces.len(),
         ..Summary::default()
     };
-    // Stdlib libs first (inside the frame, like every require): 59 suite files
-    // call `clojure.string/`/`clojure.set/`/`clojure.java.io/` fully qualified
-    // WITHOUT requiring them (JVM runner has them ambient via load order).
-    let setup = in_bindings(
-        &dirs,
-        "(require 'clojure.test 'clojure.string 'clojure.set 'clojure.edn 'clojure.java.io)",
-    );
-    if let Err(e) = eval.eval_source(&setup) {
+    if let Err(e) = setup_algorithms(&mut eval, &dirs) {
         let _ = writeln!(log, "algorithms: FATAL require clojure.test: {e}");
         for ns in &namespaces {
             summary
@@ -325,62 +406,14 @@ fn run_algorithms(
         }
         return summary;
     }
-    let mut loaded = Vec::with_capacity(namespaces.len());
-    for (i, ns) in namespaces.iter().enumerate() {
-        match require_ns(&mut eval, &dirs, ns) {
-            Ok(()) => loaded.push(ns.clone()),
-            Err(e) => {
-                let _ = writeln!(log, "algorithms: LOAD-ERROR {ns}: {e}");
-                summary.load_errors.push((ns.clone(), e));
-            }
-        }
-        if (i + 1) % 200 == 0 {
-            let _ = writeln!(
-                log,
-                "algorithms: …loaded {}/{} ({} errors)",
-                i + 1,
-                namespaces.len(),
-                summary.load_errors.len()
-            );
-        }
-    }
+    let loaded = load_namespaces(&mut eval, &dirs, &namespaces, &mut summary, log);
     summary.loaded = loaded.len();
     let _ = writeln!(
         log,
         "algorithms: load phase done: {}/{} loaded",
         summary.loaded, summary.discovered
     );
-    for (i, ns) in loaded.iter().enumerate() {
-        match run_ns(&mut eval, &dirs, ns) {
-            Ok(c) => {
-                summary.total.test += c.test;
-                summary.total.pass += c.pass;
-                summary.total.fail += c.fail;
-                summary.total.error += c.error;
-                if c.fail > 0 || c.error > 0 {
-                    let _ = writeln!(
-                        log,
-                        "algorithms: FAIL {ns}: tests={} pass={} fail={} error={}",
-                        c.test, c.pass, c.fail, c.error
-                    );
-                    summary.failing.push((ns.clone(), c));
-                }
-            }
-            Err(e) => {
-                let _ = writeln!(log, "algorithms: RUN-ERROR {ns}: {e}");
-                summary.run_errors.push((ns.clone(), e));
-            }
-        }
-        if (i + 1) % 200 == 0 {
-            let _ = writeln!(
-                log,
-                "algorithms: …ran {}/{} ({} failing)",
-                i + 1,
-                loaded.len(),
-                summary.failing.len() + summary.run_errors.len()
-            );
-        }
-    }
+    run_namespaces(&mut eval, &dirs, &loaded, &mut summary, log);
     // JVM parity: joined drainers (see `main.rs` `cmd_eval`).
     eval.join_drainers();
     summary
