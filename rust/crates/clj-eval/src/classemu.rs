@@ -3347,8 +3347,8 @@ fn static_character_is_whitespace(args: &[Value]) -> Result<Value, NativeError> 
                 .ok()
                 .and_then(char::from_u32)
                 .is_some_and(java_is_whitespace),
-            other => {
-                return Err(crate::core::cce_err(other, "java.lang.Character"));
+            _ => {
+                return Err(no_overload("isWhitespace", 1));
             }
         })),
         n => Err(crate::types::no_method(
@@ -3364,25 +3364,46 @@ fn static_character_is_whitespace(args: &[Value]) -> Result<Value, NativeError> 
 /// read -1 — oracle). `Char` and `Int` (code point) spellings
 /// both apply; only ASCII alphanumerics convert (a documented
 /// narrowing — full `CharacterData` tables stay out).
-fn static_character_digit(args: &[Value]) -> Result<Value, NativeError> {
-    if args.len() != 2 {
-        return Err(crate::types::no_method(
-            "digit",
-            args.len(),
-            "java.lang.Character",
-        ));
+/// The multi-overload miss shape (no `for class` suffix —
+/// the JVM's `No matching method … found taking N args`).
+fn no_overload(member: &str, argc: usize) -> NativeError {
+    NativeError::new(
+        ThrowClass::IllegalArgumentException,
+        format!("No matching method {member} found taking {argc} args"),
+    )
+}
+
+/// A `char`/`int` character parameter: chars pass, longs
+/// narrow through the low 16 bits, anything else misses the
+/// overload (nil matches no primitive — oracle
+/// `/tmp/parsenil.clj`).
+fn char_param(v: &Value, member: &str, argc: usize) -> Result<char, NativeError> {
+    match v {
+        Value::Char(c) => Ok(*c),
+        Value::Int(i) => {
+            let narrowed = crate::core::int_exact_long(*i)? as u16 as u32;
+            // A narrowing lone surrogate is never a digit (and
+            // must not panic the port).
+            Ok(char::from_u32(narrowed).unwrap_or('\u{FFFD}'))
+        }
+        _ => Err(no_overload(member, argc)),
     }
-    let ch = match &args[0] {
-        Value::Char(c) => Some(*c),
-        Value::Int(i) => u32::try_from(*i).ok().and_then(char::from_u32),
-        other => return Err(crate::core::cce_err(other, "java.lang.Character")),
-    };
-    let radix = str_int_arg(&args[1])?;
-    let digit = match (ch, u32::try_from(radix).ok()) {
-        (Some(c), Some(r)) if (2..=36).contains(&r) => c.to_digit(r).map(|d| d as i64),
-        _ => None,
-    };
-    Ok(Value::Int(digit.unwrap_or(-1)))
+}
+
+fn static_character_digit(args: &[Value]) -> Result<Value, NativeError> {
+    match args.len() {
+        2 => {
+            let c = char_param(&args[0], "digit", 2)?;
+            if matches!(args[1], Value::Nil) {
+                return Err(no_overload("digit", 2));
+            }
+            let radix = crate::core::int_of_number(&args[1])?;
+            Ok(Value::Int(
+                crate::core::char_digit(c, radix as u32).map_or(-1, i64::from),
+            ))
+        }
+        n => Err(crate::types::no_method("digit", n, "java.lang.Character")),
+    }
 }
 
 /// The Java whitespace predicate (see `static_character_is_whitespace`).
@@ -3426,13 +3447,23 @@ fn parse_nfe(text: &str) -> NativeError {
 /// `Long/parseLong` (issue #201 S12): the shared `parse_long_str`
 /// body (sign + digits + i64 range, like `parse-long`), throwing
 /// instead of answering nil.
+/// `NumberFormatException | Cannot parse null string` (the
+/// JVM's nil-subject shape for the integral parses — oracle
+/// `/tmp/parsenil.clj`).
+fn nfe_null() -> NativeError {
+    NativeError::new(
+        ThrowClass::NumberFormatException,
+        "Cannot parse null string".to_owned(),
+    )
+}
+
 fn static_long_parse_long(args: &[Value]) -> Result<Value, NativeError> {
     match args.len() {
         1 => match &args[0] {
             Value::Str(s) => crate::core::parse_long_str(s)
                 .map(Value::Int)
                 .ok_or_else(|| parse_nfe(s)),
-            Value::Nil => Err(parse_nfe("null")),
+            Value::Nil => Err(nfe_null()),
             other => Err(crate::core::cce_err(other, "java.lang.String")),
         },
         2 => parse_radix_body(&args[0], &args[1], false),
@@ -3450,7 +3481,7 @@ fn parse_radix_body(
 ) -> Result<Value, NativeError> {
     let Value::Str(s) = subject else {
         if matches!(subject, Value::Nil) {
-            return Err(parse_nfe("null"));
+            return Err(nfe_null());
         }
         return Err(crate::core::cce_err(subject, "java.lang.String"));
     };
@@ -3470,52 +3501,27 @@ fn parse_radix_body(
         .ok_or_else(|| crate::core::nfe_for_input_radix(s, radix))
 }
 
-/// The boxArg `long` coercion (the `str_int_arg` sibling:
-/// every `Number` truncates, nil NPEs on the primitive, the
-/// rest miss the param).
-fn long_arg(v: &Value) -> Result<i64, NativeError> {
-    match v {
-        Value::Int(i) => Ok(*i),
-        Value::Double(d) => Ok(*d as i64),
-        Value::BigInt(n) | Value::BigInteger(n) => Ok(crate::core::bigint_long_value(n)),
-        Value::Ratio(r) => Ok(r.to_f64().unwrap_or(f64::NAN) as i64),
-        Value::BigDec(d) => Ok(crate::core::bigint_long_value(&d.to_bigint_trunc())),
-        Value::Nil => Err(boxarg_npe()),
-        _ => Err(unexpected_param_long(v)),
-    }
-}
-
-/// The boxArg `long`-param miss (the `unexpected_param`
-/// sibling for 64-bit params).
-fn unexpected_param_long(v: &Value) -> NativeError {
-    NativeError::new(
-        ThrowClass::IllegalArgumentException,
-        format!(
-            "Unexpected param type, expected: long, given: {}",
-            jvm_class_of(v)
-        ),
-    )
-}
-
 /// `Long/remainderUnsigned` (2-arg): the unsigned remainder
 /// (zero divisor is `/ by zero` — oracle).
 fn static_long_remainder_unsigned(args: &[Value]) -> Result<Value, NativeError> {
-    if args.len() != 2 {
-        return Err(crate::types::no_method(
+    match args.len() {
+        2 => {
+            let a = crate::core::long_of(&args[0])? as u64;
+            let b = crate::core::long_of(&args[1])? as u64;
+            if b == 0 {
+                return Err(NativeError::new(
+                    ThrowClass::ArithmeticException,
+                    "/ by zero".to_owned(),
+                ));
+            }
+            Ok(Value::Int((a % b) as i64))
+        }
+        n => Err(crate::types::no_method(
             "remainderUnsigned",
-            args.len(),
+            n,
             "java.lang.Long",
-        ));
+        )),
     }
-    let x = long_arg(&args[0])?;
-    let m = long_arg(&args[1])?;
-    if m == 0 {
-        return Err(NativeError::new(
-            ThrowClass::ArithmeticException,
-            "/ by zero".to_owned(),
-        ));
-    }
-    Ok(Value::Int((x as u64).wrapping_rem(m as u64) as i64))
 }
 
 /// `String/format` (3-arg): `(format locale fmt args-array)`
@@ -3605,7 +3611,7 @@ fn static_integer_parse_int(args: &[Value]) -> Result<Value, NativeError> {
                 .and_then(|n| i32::try_from(n).ok())
                 .map(|n| Value::Int(i64::from(n)))
                 .ok_or_else(|| parse_nfe(s)),
-            Value::Nil => Err(parse_nfe("null")),
+            Value::Nil => Err(nfe_null()),
             other => Err(crate::core::cce_err(other, "java.lang.String")),
         },
         2 => parse_radix_body(&args[0], &args[1], true),
@@ -3619,10 +3625,23 @@ fn static_integer_parse_int(args: &[Value]) -> Result<Value, NativeError> {
 fn static_double_parse_double(args: &[Value]) -> Result<Value, NativeError> {
     match args.len() {
         1 => match &args[0] {
+            // Empty input keeps the JDK message (`empty String` —
+            // oracle `/tmp/parsenil.clj`), unlike the integral
+            // parses (`For input string: ""`).
+            Value::Str(s) if s.is_empty() => Err(NativeError::new(
+                ThrowClass::NumberFormatException,
+                "empty String".to_owned(),
+            )),
             Value::Str(s) => crate::core::parse_double_str(s)
                 .map(Value::Double)
                 .ok_or_else(|| parse_nfe(s)),
-            Value::Nil => Err(parse_nfe("null")),
+            // `parseDouble` dereferences before parsing (unlike
+            // the integral parses): nil NPEs (oracle
+            // `/tmp/parsenil.clj`).
+            Value::Nil => Err(NativeError::new(
+                ThrowClass::NullPointerException,
+                "Cannot invoke \"String.length()\" because \"in\" is null".to_owned(),
+            )),
             other => Err(crate::core::cce_err(other, "java.lang.String")),
         },
         n => Err(crate::types::no_method(
@@ -3780,8 +3799,8 @@ fn static_character_is_letter_or_digit(args: &[Value]) -> Result<Value, NativeEr
                 .ok()
                 .and_then(char::from_u32)
                 .is_some_and(|c| c.is_alphanumeric()),
-            other => {
-                return Err(crate::core::cce_err(other, "java.lang.Character"));
+            _ => {
+                return Err(no_overload("isLetterOrDigit", 1));
             }
         })),
         n => Err(crate::types::no_method(
@@ -3807,8 +3826,8 @@ fn static_character_is_lower_case(args: &[Value]) -> Result<Value, NativeError> 
                 .ok()
                 .and_then(char::from_u32)
                 .is_some_and(|c| c.is_lowercase()),
-            other => {
-                return Err(crate::core::cce_err(other, "java.lang.Character"));
+            _ => {
+                return Err(no_overload("isLowerCase", 1));
             }
         })),
         n => Err(crate::types::no_method(
@@ -3827,8 +3846,8 @@ fn static_character_is_upper_case(args: &[Value]) -> Result<Value, NativeError> 
                 .ok()
                 .and_then(char::from_u32)
                 .is_some_and(|c| c.is_uppercase()),
-            other => {
-                return Err(crate::core::cce_err(other, "java.lang.Character"));
+            _ => {
+                return Err(no_overload("isUpperCase", 1));
             }
         })),
         n => Err(crate::types::no_method(

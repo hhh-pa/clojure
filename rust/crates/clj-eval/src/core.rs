@@ -3692,6 +3692,22 @@ pub(crate) fn parse_long_radix(s: &str, radix: u32) -> Option<i64> {
     }
 }
 
+/// The reflector `long` rule (tower values narrow through
+/// their long; decimals through `double`).
+pub(crate) fn long_of(v: &Value) -> Result<i64, NativeError> {
+    match v {
+        Value::Int(i) => Ok(*i),
+        Value::Double(d) => double_long(*d),
+        Value::BigInt(n) | Value::BigInteger(n) => bigint_long(n),
+        Value::Ratio(r) => bigint_long(&trunc_ratio(r)),
+        // Decimals narrow through `double` (oracle `conv-declong`:
+        // `(long 1E+30M)` fails `1.0E30`).
+        Value::BigDec(d) => double_long(d.to_f64()),
+        Value::Nil => Err(npe_double_value()),
+        v => Err(cce_err(v, "java.lang.Number")),
+    }
+}
+
 /// The reflector `int` rule for a numeric radix argument
 /// (tower values narrow through their long).
 pub(crate) fn int_of_number(v: &Value) -> Result<i32, NativeError> {
