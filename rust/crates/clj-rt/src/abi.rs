@@ -31,25 +31,33 @@ use clj_value::{Keyword, List, Value, Vector};
 
 use crate::runtime::{call_prim, error_line, print_join};
 
-/// The `extern "C"` symbol lowering [`Prim`] calls to (S8C
-/// codegen's single source of truth — no parallel table).
+/// The `extern "C"` symbol per [`Prim`], indexed by discriminant
+/// (S8C codegen's single source of truth — a table, not a match:
+/// one arm per prim would trip the complexity gate; the pairing is
+/// pinned by the `prim_symbol` drift tests in `clj-aot` and the FFI
+/// suite instead).
+const PRIM_SYMBOLS: [&str; 15] = [
+    "rt_add",
+    "rt_sub",
+    "rt_mul",
+    "rt_quot",
+    "rt_lt",
+    "rt_le",
+    "rt_gt",
+    "rt_ge",
+    "rt_eq",
+    "rt_count",
+    "rt_nth",
+    "rt_get",
+    "rt_conj",
+    "rt_long",
+    "rt_int_cast",
+];
+
+/// The `extern "C"` symbol lowering [`Prim`] calls to.
 #[must_use]
 pub fn prim_symbol(prim: Prim) -> &'static str {
-    match prim {
-        Prim::Add => "rt_add",
-        Prim::Sub => "rt_sub",
-        Prim::Mul => "rt_mul",
-        Prim::Quot => "rt_quot",
-        Prim::Lt => "rt_lt",
-        Prim::Le => "rt_le",
-        Prim::Gt => "rt_gt",
-        Prim::Ge => "rt_ge",
-        Prim::Eq => "rt_eq",
-        Prim::Count => "rt_count",
-        Prim::Nth => "rt_nth",
-        Prim::Get => "rt_get",
-        Prim::Conj => "rt_conj",
-    }
+    PRIM_SYMBOLS[prim as usize]
 }
 
 /// Borrow a caller byte slice.
@@ -326,3 +334,7 @@ def_prim!(rt_count, 9);
 def_prim!(rt_nth, 10);
 def_prim!(rt_get, 11);
 def_prim!(rt_conj, 12);
+def_prim!(rt_long, 13);
+// `rt_int` is the integer-literal constructor (a different
+// signature), so the `int` cast shim takes the suffixed symbol.
+def_prim!(rt_int_cast, 14);

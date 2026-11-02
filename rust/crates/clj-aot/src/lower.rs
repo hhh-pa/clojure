@@ -39,7 +39,7 @@ use inkwell::values::{BasicMetadataValueEnum, FunctionValue, IntValue, PointerVa
 /// Prims in discriminant order (index `== prim as usize`;
 /// shared with the JIT symbol table so a new prim cannot miss
 /// a mapping silently — the drift test walks this list).
-pub(crate) const PRIM_ORDER: [Prim; 13] = [
+pub(crate) const PRIM_ORDER: [Prim; 15] = [
     Prim::Add,
     Prim::Sub,
     Prim::Mul,
@@ -53,6 +53,8 @@ pub(crate) const PRIM_ORDER: [Prim; 13] = [
     Prim::Nth,
     Prim::Get,
     Prim::Conj,
+    Prim::Long,
+    Prim::Int,
 ];
 
 /// The LLVM symbol per planned `defn`: sanitized name plus source
@@ -69,7 +71,7 @@ pub fn fn_symbol(index: usize, name: &str) -> String {
 
 /// Declared runtime helpers (resolved once per module).
 struct Decls<'ctx> {
-    prims: [FunctionValue<'ctx>; 13],
+    prims: [FunctionValue<'ctx>; 15],
     nil: FunctionValue<'ctx>,
     boolean: FunctionValue<'ctx>,
     int: FunctionValue<'ctx>,
@@ -832,25 +834,52 @@ mod tests {
     #[test]
     fn prim_order_matches_discriminants() {
         let names = [
-            "rt_add", "rt_sub", "rt_mul", "rt_quot", "rt_lt", "rt_le", "rt_gt", "rt_ge", "rt_eq",
-            "rt_count", "rt_nth", "rt_get", "rt_conj",
+            "rt_add",
+            "rt_sub",
+            "rt_mul",
+            "rt_quot",
+            "rt_lt",
+            "rt_le",
+            "rt_gt",
+            "rt_ge",
+            "rt_eq",
+            "rt_count",
+            "rt_nth",
+            "rt_get",
+            "rt_conj",
+            "rt_long",
+            "rt_int_cast",
         ];
         for (index, prim) in PRIM_ORDER.iter().enumerate() {
             assert_eq!(*prim as usize, index);
             assert_eq!(prim_symbol(*prim), names[index]);
         }
-        assert_eq!(format!("{PRIM_ORDER:?}").split(',').count(), 13);
+        assert_eq!(format!("{PRIM_ORDER:?}").split(',').count(), 15);
     }
 
     #[test]
     fn every_prim_lowers_to_its_symbol() {
         let ir = compile_ir(
             "(+ 1 2) (- 3 1) (* 2 3) (quot 7 2) (< 1 2) (<= 1 1) (> 2 1) \
-             (>= 2 2) (= 1 1) (count [1]) (nth [1] 0) (get [1] 0) (conj [1] 2)",
+             (>= 2 2) (= 1 1) (count [1]) (nth [1] 0) (get [1] 0) (conj [1] 2) \
+             (long 5) (int 7)",
         );
         for symbol in [
-            "rt_add", "rt_sub", "rt_mul", "rt_quot", "rt_lt", "rt_le", "rt_gt", "rt_ge", "rt_eq",
-            "rt_count", "rt_nth", "rt_get", "rt_conj",
+            "rt_add",
+            "rt_sub",
+            "rt_mul",
+            "rt_quot",
+            "rt_lt",
+            "rt_le",
+            "rt_gt",
+            "rt_ge",
+            "rt_eq",
+            "rt_count",
+            "rt_nth",
+            "rt_get",
+            "rt_conj",
+            "rt_long",
+            "rt_int_cast",
         ] {
             assert!(
                 ir.contains(&format!("call ptr @{symbol}")),

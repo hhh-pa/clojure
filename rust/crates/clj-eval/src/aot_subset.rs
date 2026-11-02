@@ -20,9 +20,14 @@
 //! 2. Classify the ORIGINAL surface (pre-expansion — the `defn`
 //!    macro's expansion holds `alter-meta!`/`var`, and other
 //!    macros must NOT leak through expansion): single-clause
-//!    fixed-arity `defn`, `if`/`do`/`let`, subset literals,
-//!    direct sibling calls, closed-primitive calls, `print`.
-//!    Anything else is a [`SubsetError`] naming the form.
+//!    fixed-arity `defn`, `if`/`do`/`let`, the `cond`/`and`/`or`/
+//!    `when`/`when-not` macro-forms (desugared to `If`/`Do`/`Let`
+//!    with the macros' exact short-circuit semantics), subset
+//!    literals, direct sibling calls, closed-primitive calls,
+//!    `print`. Anything else is a [`SubsetError`] naming the
+//!    form. (`loop`/`recur`, transients, and the remaining
+//!    macros are later slices' work — the boundary is the
+//!    [`SubsetError`] table below, not an accident.)
 //!
 //! Validation runs before classification per form, so the first
 //! failure in source order wins regardless of kind, and anything
@@ -65,33 +70,45 @@ pub enum Prim {
     Nth,
     Get,
     Conj,
+    Long,
+    Int,
 }
+
+/// The closed-prim name table in discriminant order (a table, not
+/// a match: one arm per prim would trip the complexity gate —
+/// the pairing is pinned by `prim_resolve_table` instead, and
+/// new prims append so discriminants never shift).
+const PRIM_TABLE: [(&str, Prim); 15] = [
+    ("+", Prim::Add),
+    ("-", Prim::Sub),
+    ("*", Prim::Mul),
+    ("quot", Prim::Quot),
+    ("<", Prim::Lt),
+    ("<=", Prim::Le),
+    (">", Prim::Gt),
+    (">=", Prim::Ge),
+    ("=", Prim::Eq),
+    ("count", Prim::Count),
+    ("nth", Prim::Nth),
+    ("get", Prim::Get),
+    ("conj", Prim::Conj),
+    ("long", Prim::Long),
+    ("int", Prim::Int),
+];
 
 impl Prim {
     /// Resolve an unqualified or `clojure.core/`-qualified call head.
     /// Validation-first: only those heads resolve here (anything
-    /// else failed resolution), so the qualified-other arm is
+    /// else failed resolution), so the qualified-other check is
     /// defense in depth, pinned by a direct test.
     fn resolve(ns: Option<&str>, name: &str) -> Option<Self> {
         if ns.is_some_and(|ns| ns != "clojure.core") {
             return None;
         }
-        match name {
-            "+" => Some(Self::Add),
-            "-" => Some(Self::Sub),
-            "*" => Some(Self::Mul),
-            "quot" => Some(Self::Quot),
-            "<" => Some(Self::Lt),
-            "<=" => Some(Self::Le),
-            ">" => Some(Self::Gt),
-            ">=" => Some(Self::Ge),
-            "=" => Some(Self::Eq),
-            "count" => Some(Self::Count),
-            "nth" => Some(Self::Nth),
-            "get" => Some(Self::Get),
-            "conj" => Some(Self::Conj),
-            _ => None,
-        }
+        PRIM_TABLE
+            .iter()
+            .find(|(known, _)| *known == name)
+            .map(|(_, prim)| *prim)
     }
 }
 
@@ -910,29 +927,8 @@ impl Planner {
                 hint: "higher-order calls are outside the subset".to_owned(),
             }));
         }
-        if ns.is_none() {
-            match name {
-                "if" => return self.classify_if(args, scope, next, span),
-                "do" => {
-                    let mut out = Vec::with_capacity(args.len());
-                    for arg in args.iter().copied() {
-                        out.push(self.classify_expr(arg, scope, next, span)?);
-                    }
-                    return Ok(SubsetExpr::Do(out));
-                }
-                "let" => return self.classify_let(args, scope, next, span),
-                "defn" => {
-                    return Err(PlanError::Subset(SubsetError {
-                        span,
-                        form: "defn".to_owned(),
-                        hint: "defn is top-level only".to_owned(),
-                    }));
-                }
-                "print" => return self.classify_print(args, scope, next, span),
-                _ => {}
-            }
-        } else if ns == Some("clojure.core") && name == "print" {
-            return self.classify_print(args, scope, next, span);
+        if let Some(expr) = self.classify_surface(ns, name, args, scope, next, span)? {
+            return Ok(expr);
         }
         // Sibling `defn` calls (validation-first: a same-named
         // resolved referent is the sibling — resolution order
@@ -979,6 +975,258 @@ impl Planner {
             form: display_sym(sym),
             hint: head_hint(name).to_owned(),
         }))
+    }
+
+    /// Classify dedicated surface forms by namespace (`if`/`do`/
+    /// `let`/`print` plus the desugared `cond`/`and`/`or`/`when`/
+    /// `when-not`): `Some` when the head is one, `None` for
+    /// sibling/prim/hint dispatch downstream.
+    fn classify_surface(
+        &mut self,
+        ns: Option<&str>,
+        name: &str,
+        args: &[&Value],
+        scope: &mut Scope,
+        next: &mut usize,
+        span: Span,
+    ) -> Result<Option<SubsetExpr>, PlanError> {
+        if ns.is_none() {
+            return self.classify_unqualified(name, args, scope, next, span);
+        }
+        if ns == Some("clojure.core") {
+            return self.classify_core(name, args, scope, next, span);
+        }
+        Ok(None)
+    }
+
+    /// Classify an unqualified surface head: special forms and
+    /// `print` first (never shadowable, exactly like the
+    /// interpreter), then the macro-forms — unless a sibling
+    /// `defn` shadows one (a redefined macro var is a plain call
+    /// in the interpreter, so it falls through to sibling
+    /// dispatch, exactly like primitives).
+    fn classify_unqualified(
+        &mut self,
+        name: &str,
+        args: &[&Value],
+        scope: &mut Scope,
+        next: &mut usize,
+        span: Span,
+    ) -> Result<Option<SubsetExpr>, PlanError> {
+        if self.shadowed_macro(name) {
+            return Ok(None);
+        }
+        if let Some(expr) = self.classify_special(name, args, scope, next, span)? {
+            return Ok(Some(expr));
+        }
+        self.classify_macro(name, args, scope, next, span)
+    }
+
+    /// Classify an unqualified special form or `print` (`None`
+    /// for anything else, macro-forms included).
+    fn classify_special(
+        &mut self,
+        name: &str,
+        args: &[&Value],
+        scope: &mut Scope,
+        next: &mut usize,
+        span: Span,
+    ) -> Result<Option<SubsetExpr>, PlanError> {
+        match name {
+            "if" => Ok(Some(self.classify_if(args, scope, next, span)?)),
+            "do" => Ok(Some(self.classify_do(args, scope, next, span)?)),
+            "let" => Ok(Some(self.classify_let(args, scope, next, span)?)),
+            "defn" => Err(PlanError::Subset(SubsetError {
+                span,
+                form: "defn".to_owned(),
+                hint: "defn is top-level only".to_owned(),
+            })),
+            "print" => Ok(Some(self.classify_print(args, scope, next, span)?)),
+            _ => Ok(None),
+        }
+    }
+
+    /// Classify a `clojure.core/`-qualified surface head (macros
+    /// are vars, so qualified invocation is the macro — a sibling
+    /// never shadows a qualified head).
+    fn classify_core(
+        &mut self,
+        name: &str,
+        args: &[&Value],
+        scope: &mut Scope,
+        next: &mut usize,
+        span: Span,
+    ) -> Result<Option<SubsetExpr>, PlanError> {
+        match name {
+            "print" => Ok(Some(self.classify_print(args, scope, next, span)?)),
+            _ => self.classify_macro(name, args, scope, next, span),
+        }
+    }
+
+    /// Classify a surface macro-form by desugaring (`None` for any
+    /// other head). Shared by the unqualified and qualified paths.
+    fn classify_macro(
+        &mut self,
+        name: &str,
+        args: &[&Value],
+        scope: &mut Scope,
+        next: &mut usize,
+        span: Span,
+    ) -> Result<Option<SubsetExpr>, PlanError> {
+        match name {
+            "cond" => Ok(Some(self.classify_cond(args, scope, next, span)?)),
+            "and" => Ok(Some(self.classify_and_or(true, args, scope, next, span)?)),
+            "or" => Ok(Some(self.classify_and_or(false, args, scope, next, span)?)),
+            "when" => Ok(Some(self.classify_when(false, args, scope, next, span)?)),
+            "when-not" => Ok(Some(self.classify_when(true, args, scope, next, span)?)),
+            _ => Ok(None),
+        }
+    }
+
+    /// Whether `name` is a surface macro-form shadowed by a sibling
+    /// `defn` (unqualified heads only — the qualified path never
+    /// asks).
+    fn shadowed_macro(&self, name: &str) -> bool {
+        match name {
+            "cond" | "and" | "or" | "when" | "when-not" => self.by_name.contains_key(name),
+            _ => false,
+        }
+    }
+
+    /// Classify `(cond test expr ...)` to nested `If` (the macro's
+    /// own expansion shape): first truthy test wins, later tests
+    /// never evaluate, a trailing test without an expr is the
+    /// macro's arity failure. `(cond)` is nil. `:else` needs no
+    /// special case — it is just a truthy keyword test.
+    /// Validation-first: an odd tail dies in macroexpansion
+    /// (`cond requires an even number of forms`), so the tail arm
+    /// is pinned by a direct test.
+    fn classify_cond(
+        &mut self,
+        args: &[&Value],
+        scope: &mut Scope,
+        next: &mut usize,
+        span: Span,
+    ) -> Result<SubsetExpr, PlanError> {
+        let Some((&test, rest)) = args.split_first() else {
+            return Ok(SubsetExpr::Nil);
+        };
+        let Some((&expr, rest)) = rest.split_first() else {
+            return Err(PlanError::Subset(SubsetError {
+                span,
+                form: "cond".to_owned(),
+                hint: "not in the AOT pure subset".to_owned(),
+            }));
+        };
+        let test = self.classify_expr(test, scope, next, span)?;
+        let then = self.classify_expr(expr, scope, next, span)?;
+        let els = self.classify_cond(rest, scope, next, span)?;
+        Ok(SubsetExpr::If {
+            test: Box::new(test),
+            then: Box::new(then),
+            els: Box::new(els),
+        })
+    }
+
+    /// Classify `(and x ...)` / `(or x ...)` to `Let`-bound nested
+    /// `If` (the macros' own expansion shape): each operand
+    /// evaluates at most once, evaluation stops at the first
+    /// falsy (`and`) / truthy (`or`) value, and THAT value (not a
+    /// boolean) is the result. `(and)` is true, `(or)` is nil, a
+    /// single operand is itself. The `Let` slot is anonymous (no
+    /// scope name), so no user binding can capture it.
+    fn classify_and_or(
+        &mut self,
+        is_and: bool,
+        args: &[&Value],
+        scope: &mut Scope,
+        next: &mut usize,
+        span: Span,
+    ) -> Result<SubsetExpr, PlanError> {
+        let Some((&first, rest)) = args.split_first() else {
+            return Ok(if is_and {
+                SubsetExpr::Bool(true)
+            } else {
+                SubsetExpr::Nil
+            });
+        };
+        if rest.is_empty() {
+            return self.classify_expr(first, scope, next, span);
+        }
+        let init = self.classify_expr(first, scope, next, span)?;
+        let slot = *next;
+        *next += 1;
+        let tail = self.classify_and_or(is_and, rest, scope, next, span)?;
+        let (then, els) = if is_and {
+            (tail, SubsetExpr::Local(slot))
+        } else {
+            (SubsetExpr::Local(slot), tail)
+        };
+        Ok(SubsetExpr::Let {
+            bindings: vec![(slot, init)],
+            body: vec![SubsetExpr::If {
+                test: Box::new(SubsetExpr::Local(slot)),
+                then: Box::new(then),
+                els: Box::new(els),
+            }],
+        })
+    }
+
+    /// Classify `(when test body...)` / `(when-not test body...)`
+    /// to `If` over an implicit `Do` (the macros' own expansion
+    /// shape): a falsy `when` test (truthy `when-not` test) is
+    /// nil, else the last body value. Validation-first: a missing
+    /// test dies in macroexpansion (macro arity), so the empty
+    /// arm is pinned by a direct test.
+    fn classify_when(
+        &mut self,
+        negated: bool,
+        args: &[&Value],
+        scope: &mut Scope,
+        next: &mut usize,
+        span: Span,
+    ) -> Result<SubsetExpr, PlanError> {
+        let Some((&test, body)) = args.split_first() else {
+            return Err(PlanError::Subset(SubsetError {
+                span,
+                form: if negated { "when-not" } else { "when" }.to_owned(),
+                hint: "not in the AOT pure subset".to_owned(),
+            }));
+        };
+        let test = self.classify_expr(test, scope, next, span)?;
+        let mut out = Vec::with_capacity(body.len());
+        for form in body.iter().copied() {
+            out.push(self.classify_expr(form, scope, next, span)?);
+        }
+        let body = SubsetExpr::Do(out);
+        if negated {
+            Ok(SubsetExpr::If {
+                test: Box::new(test),
+                then: Box::new(SubsetExpr::Nil),
+                els: Box::new(body),
+            })
+        } else {
+            Ok(SubsetExpr::If {
+                test: Box::new(test),
+                then: Box::new(body),
+                els: Box::new(SubsetExpr::Nil),
+            })
+        }
+    }
+
+    /// Classify `(do body...)` to a sequence (empty is nil).
+    fn classify_do(
+        &mut self,
+        args: &[&Value],
+        scope: &mut Scope,
+        next: &mut usize,
+        span: Span,
+    ) -> Result<SubsetExpr, PlanError> {
+        let mut out = Vec::with_capacity(args.len());
+        for arg in args.iter().copied() {
+            out.push(self.classify_expr(arg, scope, next, span)?);
+        }
+        Ok(SubsetExpr::Do(out))
     }
 
     /// Classify `(if test then els?)` (2-3 args: validated —
@@ -1224,11 +1472,9 @@ fn head_hint(name: &str) -> &'static str {
         "ns" | "in-ns" | "require" | "use" | "refer" | "load" | "load-file" | "load-string" => {
             "AOT programs are single-file, without namespaces"
         }
-        "comment" | "assert" | "time" | "with-out-str" | "with-in-str" | "cond" | "when"
-        | "when-not" | "if-let" | "when-let" | "if-some" | "when-some" | "condp" | "case"
-        | "and" | "or" | "for" | "doseq" | "dotimes" | "while" | "defn-" => {
-            "macros are not expanded in the AOT subset"
-        }
+        "comment" | "assert" | "time" | "with-out-str" | "with-in-str" | "if-let" | "when-let"
+        | "if-some" | "when-some" | "condp" | "case" | "for" | "doseq" | "dotimes" | "while"
+        | "defn-" => "macros are not expanded in the AOT subset",
         "quote" => "quoted values are outside the value flow",
         _ => "not in the closed call set",
     }
@@ -1578,8 +1824,8 @@ mod tests {
                 "f.clj:1:1: unsupported form in AOT subset: ns (AOT programs are single-file, without namespaces)",
             ),
             (
-                "(when true 1)",
-                "f.clj:1:1: unsupported form in AOT subset: when (macros are not expanded in the AOT subset)",
+                "(if-let [a 1] a)",
+                "f.clj:1:1: unsupported form in AOT subset: if-let (macros are not expanded in the AOT subset)",
             ),
             (
                 "(defmacro m [x] x)",
@@ -1753,6 +1999,241 @@ mod tests {
     }
 
     #[test]
+    fn cond_desugars_to_nested_if() {
+        let prog = plan("(cond false 1 (= 1 2) 2 :else 3)").expect("plans");
+        assert_eq!(
+            prog.main,
+            vec![SubsetExpr::If {
+                test: Box::new(SubsetExpr::Bool(false)),
+                then: Box::new(SubsetExpr::Int(1)),
+                els: Box::new(SubsetExpr::If {
+                    test: Box::new(SubsetExpr::CallPrim {
+                        prim: Prim::Eq,
+                        args: vec![SubsetExpr::Int(1), SubsetExpr::Int(2)],
+                        span: Span::new(1, 15),
+                    }),
+                    then: Box::new(SubsetExpr::Int(2)),
+                    els: Box::new(SubsetExpr::If {
+                        test: Box::new(SubsetExpr::Keyword(Keyword::new(None, "else"))),
+                        then: Box::new(SubsetExpr::Int(3)),
+                        els: Box::new(SubsetExpr::Nil),
+                    }),
+                }),
+            }]
+        );
+        // Empty is nil; a missing else is nil (no implicit `:else`).
+        let prog = plan("(cond) (cond false 1)").expect("plans");
+        assert_eq!(
+            prog.main,
+            vec![
+                SubsetExpr::Nil,
+                SubsetExpr::If {
+                    test: Box::new(SubsetExpr::Bool(false)),
+                    then: Box::new(SubsetExpr::Int(1)),
+                    els: Box::new(SubsetExpr::Nil),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn and_or_short_circuit_through_anonymous_slots() {
+        // `(and 1 2)`: the first operand binds an anonymous slot;
+        // falsy yields the slot, truthy falls to the tail.
+        let prog = plan("(and 1 2)").expect("plans");
+        assert_eq!(
+            prog.main,
+            vec![SubsetExpr::Let {
+                bindings: vec![(0, SubsetExpr::Int(1))],
+                body: vec![SubsetExpr::If {
+                    test: Box::new(SubsetExpr::Local(0)),
+                    then: Box::new(SubsetExpr::Int(2)),
+                    els: Box::new(SubsetExpr::Local(0)),
+                }],
+            }]
+        );
+        assert_eq!(prog.main_slots, 1);
+        // `(or 1 2)`: mirrored — truthy yields the slot.
+        let prog = plan("(or 1 2)").expect("plans");
+        assert_eq!(
+            prog.main,
+            vec![SubsetExpr::Let {
+                bindings: vec![(0, SubsetExpr::Int(1))],
+                body: vec![SubsetExpr::If {
+                    test: Box::new(SubsetExpr::Local(0)),
+                    then: Box::new(SubsetExpr::Local(0)),
+                    els: Box::new(SubsetExpr::Int(2)),
+                }],
+            }]
+        );
+        // Three operands nest (each operand evaluates at most once).
+        let prog = plan("(and 1 2 3)").expect("plans");
+        assert_eq!(prog.main_slots, 2);
+        assert_eq!(
+            prog.main,
+            vec![SubsetExpr::Let {
+                bindings: vec![(0, SubsetExpr::Int(1))],
+                body: vec![SubsetExpr::If {
+                    test: Box::new(SubsetExpr::Local(0)),
+                    then: Box::new(SubsetExpr::Let {
+                        bindings: vec![(1, SubsetExpr::Int(2))],
+                        body: vec![SubsetExpr::If {
+                            test: Box::new(SubsetExpr::Local(1)),
+                            then: Box::new(SubsetExpr::Int(3)),
+                            els: Box::new(SubsetExpr::Local(1)),
+                        }],
+                    }),
+                    els: Box::new(SubsetExpr::Local(0)),
+                }],
+            }]
+        );
+    }
+
+    #[test]
+    fn and_or_degenerate_arities() {
+        // The macros' own edge shapes: `(and)` is true, `(or)` is
+        // nil, a single operand is itself.
+        let prog = plan("(and) (or) (and 5) (or 6)").expect("plans");
+        assert_eq!(
+            prog.main,
+            vec![
+                SubsetExpr::Bool(true),
+                SubsetExpr::Nil,
+                SubsetExpr::Int(5),
+                SubsetExpr::Int(6),
+            ]
+        );
+    }
+
+    #[test]
+    fn when_branches_over_implicit_do() {
+        let prog = plan("(when (> 2 1) 7 8)").expect("plans");
+        assert_eq!(
+            prog.main,
+            vec![SubsetExpr::If {
+                test: Box::new(SubsetExpr::CallPrim {
+                    prim: Prim::Gt,
+                    args: vec![SubsetExpr::Int(2), SubsetExpr::Int(1)],
+                    span: Span::new(1, 7),
+                }),
+                then: Box::new(SubsetExpr::Do(vec![SubsetExpr::Int(7), SubsetExpr::Int(8)])),
+                els: Box::new(SubsetExpr::Nil),
+            }]
+        );
+        let prog = plan("(when-not (= 1 1) 9)").expect("plans");
+        assert_eq!(
+            prog.main,
+            vec![SubsetExpr::If {
+                test: Box::new(SubsetExpr::CallPrim {
+                    prim: Prim::Eq,
+                    args: vec![SubsetExpr::Int(1), SubsetExpr::Int(1)],
+                    span: Span::new(1, 11),
+                }),
+                then: Box::new(SubsetExpr::Nil),
+                els: Box::new(SubsetExpr::Do(vec![SubsetExpr::Int(9)])),
+            }]
+        );
+        // An empty body is an empty `do` (nil at runtime, like the
+        // macro's `(if test (do))`).
+        let prog = plan("(when true) (when-not false)").expect("plans");
+        assert_eq!(
+            prog.main,
+            vec![
+                SubsetExpr::If {
+                    test: Box::new(SubsetExpr::Bool(true)),
+                    then: Box::new(SubsetExpr::Do(Vec::new())),
+                    els: Box::new(SubsetExpr::Nil),
+                },
+                SubsetExpr::If {
+                    test: Box::new(SubsetExpr::Bool(false)),
+                    then: Box::new(SubsetExpr::Nil),
+                    els: Box::new(SubsetExpr::Do(Vec::new())),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn qualified_macro_forms_plan() {
+        // Macros are vars: qualified invocation is the macro.
+        let prog = plan(
+            "(clojure.core/cond false 1 :else 2) (clojure.core/and 1 2) \
+             (clojure.core/or 1 2) (clojure.core/when true 1) (clojure.core/when-not false 1)",
+        )
+        .expect("plans");
+        assert!(matches!(prog.main[0], SubsetExpr::If { .. }));
+        assert!(matches!(prog.main[1], SubsetExpr::Let { .. }));
+        assert!(matches!(prog.main[2], SubsetExpr::Let { .. }));
+        assert!(matches!(prog.main[3], SubsetExpr::If { .. }));
+        assert!(matches!(prog.main[4], SubsetExpr::If { .. }));
+    }
+
+    #[test]
+    fn sibling_defn_shadows_macro_form() {
+        // A redefined macro var is a plain call (like primitives);
+        // the qualified spelling stays the macro.
+        let prog = plan("(defn and [x] x) (and 1) (clojure.core/and 1 2)").expect("plans");
+        assert!(matches!(prog.main[0], SubsetExpr::CallFn { index: 0, .. }));
+        assert!(matches!(prog.main[1], SubsetExpr::Let { .. }));
+        let prog = plan("(defn cond [a b] a) (cond 1 2)").expect("plans");
+        assert!(matches!(prog.main[0], SubsetExpr::CallFn { index: 0, .. }));
+    }
+
+    #[test]
+    fn locals_shadow_macro_form_heads() {
+        assert_eq!(
+            diag("(let [when 1] (when true 2))"),
+            "f.clj:1:15: unsupported form in AOT subset: when (higher-order calls are outside the subset)"
+        );
+    }
+
+    #[test]
+    fn long_and_int_plan_as_prims() {
+        let prog = plan("(print (long 5.9) (int 7) (clojure.core/long 1))").expect("plans");
+        assert_eq!(
+            prog.main,
+            vec![SubsetExpr::Print {
+                args: vec![
+                    SubsetExpr::CallPrim {
+                        prim: Prim::Long,
+                        args: vec![SubsetExpr::Double(5.9)],
+                        span: Span::new(1, 8),
+                    },
+                    SubsetExpr::CallPrim {
+                        prim: Prim::Int,
+                        args: vec![SubsetExpr::Int(7)],
+                        span: Span::new(1, 19),
+                    },
+                    SubsetExpr::CallPrim {
+                        prim: Prim::Long,
+                        args: vec![SubsetExpr::Int(1)],
+                        span: Span::new(1, 27),
+                    },
+                ],
+                span: Span::new(1, 1),
+            }]
+        );
+        // Siblings shadow cast prims, exactly like `+`.
+        let prog = plan("(defn long [x] x) (long 5)").expect("plans");
+        assert!(matches!(prog.main[0], SubsetExpr::CallFn { index: 0, .. }));
+    }
+
+    #[test]
+    fn malformed_macro_forms_fail_before_classification() {
+        // An odd `cond` tail and a missing `when` test die in
+        // macroexpansion (validation runs first), never reaching
+        // the planner's trust arms.
+        assert_eq!(
+            diag("(cond 1)"),
+            "f.clj:1:1: Syntax error macroexpanding cond: cond requires an even number of forms"
+        );
+        assert_eq!(
+            diag("(when)"),
+            "f.clj:1:1: clojure.lang.ArityException: Wrong number of args (0) passed to: clojure.core/when"
+        );
+    }
+
+    #[test]
     fn top_level_non_symbol_head_classifies_head_first() {
         assert_eq!(
             diag("((fn [x] x) 1)"),
@@ -1776,6 +2257,8 @@ mod tests {
             ("nth", Prim::Nth),
             ("get", Prim::Get),
             ("conj", Prim::Conj),
+            ("long", Prim::Long),
+            ("int", Prim::Int),
         ];
         for (name, prim) in all {
             assert_eq!(Prim::resolve(None, name), Some(prim));
@@ -1930,6 +2413,25 @@ mod tests {
         let args = vec![&vec];
         let r = planner.classify_let(&args, &mut scope, &mut next, span);
         assert!(matches!(&r, Err(PlanError::Subset(e)) if e.hint.contains("destructuring")));
+    }
+
+    #[test]
+    fn classify_cond_and_when_shape_trusts_directly() {
+        let mut planner = Planner::new();
+        let mut scope = Scope::default();
+        let mut next = 0;
+        let span = Span::new(1, 1);
+        // Odd cond tail (macroexpansion throws first).
+        let one = Value::Int(1);
+        let args = vec![&one];
+        let r = planner.classify_cond(&args, &mut scope, &mut next, span);
+        assert!(matches!(&r, Err(PlanError::Subset(e)) if e.form == "cond"));
+        // Missing when/when-not test (macro arity throws first).
+        let empty: &[&Value] = &[];
+        let r = planner.classify_when(false, empty, &mut scope, &mut next, span);
+        assert!(matches!(&r, Err(PlanError::Subset(e)) if e.form == "when"));
+        let r = planner.classify_when(true, empty, &mut scope, &mut next, span);
+        assert!(matches!(&r, Err(PlanError::Subset(e)) if e.form == "when-not"));
     }
 
     /// `depth` nested parens around `1`.

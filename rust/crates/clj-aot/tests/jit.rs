@@ -65,6 +65,18 @@ fn jit_flows_keywords() {
 }
 
 #[test]
+fn jit_runs_slice_a_forms() {
+    assert_eq!(
+        run("(print (cond false 1 (= 1 2) 2 :else 3)) \
+             (print (and 1 2) (and 1 nil 3) (or false nil 7) (or)) \
+             (print (when (> 2 1) \"y\") (when-not (= 1 1) \"n\")) \
+             (print (long 5.9) (int 7) (clojure.core/when true :q)) \
+             (and false (print \"X\")) (or true (print \"Y\")) (when false (print \"W\"))"),
+        0
+    );
+}
+
+#[test]
 fn jit_reports_top_level_errors() {
     // A prim failure at top level returns 1 from `main` (the
     // diagnostic went to stderr before the null propagated).

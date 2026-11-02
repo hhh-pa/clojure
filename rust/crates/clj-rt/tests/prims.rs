@@ -17,8 +17,8 @@ mod support;
 use clj_eval::{Evaluator, Prim, boot};
 use clj_value::{Keyword, Value, Vector, print_to_string};
 use cljrt::{
-    prim_symbol, rt_add, rt_conj, rt_count, rt_eq, rt_ge, rt_get, rt_gt, rt_le, rt_lt, rt_mul,
-    rt_nth, rt_quot, rt_sub,
+    prim_symbol, rt_add, rt_conj, rt_count, rt_eq, rt_ge, rt_get, rt_gt, rt_int_cast, rt_le,
+    rt_long, rt_lt, rt_mul, rt_nth, rt_quot, rt_sub,
 };
 use support::{inbox, render};
 
@@ -85,6 +85,10 @@ fn prim_symbol_names_each_helper() {
         (Prim::Nth, "rt_nth"),
         (Prim::Get, "rt_get"),
         (Prim::Conj, "rt_conj"),
+        (Prim::Long, "rt_long"),
+        // `rt_int` is the integer-literal constructor; the `int`
+        // cast shim takes the suffixed symbol.
+        (Prim::Int, "rt_int_cast"),
     ];
     for (prim, symbol) in pairs {
         assert_eq!(prim_symbol(prim), symbol);
@@ -276,5 +280,62 @@ fn conj_delegates() {
         vec![Value::Nil, int(1)],
         "(conj nil 1)",
         "(1)",
+    );
+}
+
+#[test]
+fn long_delegates() {
+    let mut eval = boot();
+    check(&mut eval, rt_long, vec![int(5)], "(long 5)", "5");
+    check(
+        &mut eval,
+        rt_long,
+        vec![Value::Double(5.9)],
+        "(long 5.9)",
+        "5",
+    );
+    check(
+        &mut eval,
+        rt_long,
+        vec![Value::Char('A')],
+        "(long \\A)",
+        "65",
+    );
+    check(&mut eval, rt_long, vec![Value::Nil], "(long nil)", "ERROR");
+    check(&mut eval, rt_long, vec![str_("s")], "(long \"s\")", "ERROR");
+    check(&mut eval, rt_long, vec![], "(long)", "ERROR");
+}
+
+#[test]
+fn int_delegates() {
+    let mut eval = boot();
+    check(&mut eval, rt_int_cast, vec![int(7)], "(int 7)", "7");
+    check(
+        &mut eval,
+        rt_int_cast,
+        vec![Value::Double(7.9)],
+        "(int 7.9)",
+        "7",
+    );
+    check(
+        &mut eval,
+        rt_int_cast,
+        vec![Value::Nil],
+        "(int nil)",
+        "ERROR",
+    );
+    check(
+        &mut eval,
+        rt_int_cast,
+        vec![str_("s")],
+        "(int \"s\")",
+        "ERROR",
+    );
+    check(
+        &mut eval,
+        rt_int_cast,
+        vec![int(1), int(2)],
+        "(int 1 2)",
+        "ERROR",
     );
 }
