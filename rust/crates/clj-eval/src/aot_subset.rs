@@ -1912,6 +1912,46 @@ mod tests {
     }
 
     #[test]
+    fn recur_threads_through_macro_desugars() {
+        // Integration (macro-forms + loop slices): a `recur` in a
+        // macro branch sits in an `if` branch of the expansion, so
+        // it is a tail exactly when the macro form is — while a
+        // test position never is.
+        let prog = plan("(loop [i 0] (cond (= i 0) 0 :else (recur (+ i -1))))")
+            .expect("recur in cond branch plans");
+        assert!(matches!(
+            prog.main.as_slice(),
+            [SubsetExpr::Loop { body, .. }] if matches!(body.as_slice(),
+                [SubsetExpr::If { els, .. }] if matches!(els.as_ref(),
+                    SubsetExpr::If { then, .. } if matches!(then.as_ref(), SubsetExpr::Recur(_))))
+        ));
+        let prog = plan("(loop [i 0] (when (= i 0) (recur (+ i -1))))")
+            .expect("recur in when body plans");
+        assert!(matches!(
+            prog.main.as_slice(),
+            [SubsetExpr::Loop { body, .. }] if matches!(body.as_slice(),
+                [SubsetExpr::If { then, .. }] if matches!(then.as_ref(),
+                    SubsetExpr::Do(exprs) if matches!(exprs.as_slice(), [SubsetExpr::Recur(_)])))
+        ));
+        let prog = plan("(loop [i 0] (and (= i 0) (recur (+ i -1))))")
+            .expect("recur as last and-operand plans");
+        assert!(matches!(
+            prog.main.as_slice(),
+            [SubsetExpr::Loop { body, .. }] if matches!(body.as_slice(),
+                [SubsetExpr::Let { body: arms, .. }] if matches!(arms.as_slice(),
+                    [SubsetExpr::If { then, .. }] if matches!(then.as_ref(), SubsetExpr::Recur(_))))
+        ));
+        assert!(
+            plan("(loop [i 0] (cond (recur 1) 0 :else 1))").is_err(),
+            "recur in cond test rejects"
+        );
+        assert!(
+            plan("(loop [i 0] (when (recur 1) 0))").is_err(),
+            "recur in when test rejects"
+        );
+    }
+
+    #[test]
     fn loop_tails_nest_and_shadow() {
         // A `loop` in non-tail position still takes `recur`
         // (self-tail, like the analyzer); multi-statement `let`
