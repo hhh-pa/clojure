@@ -34,15 +34,33 @@ use clj_value::{ThrowClass, Value, print_to_string};
 /// index IS the discriminant (`prim as usize`). The order test
 /// below pins the pairing; each FFI differential test pins its
 /// shim to its native end to end.
-pub(crate) const PRIM_NAMES: [&str; 15] = [
-    "+", "-", "*", "quot", "<", "<=", ">", ">=", "=", "count", "nth", "get", "conj", "long", "int",
+pub(crate) const PRIM_NAMES: [&str; 19] = [
+    "+",
+    "-",
+    "*",
+    "quot",
+    "<",
+    "<=",
+    ">",
+    ">=",
+    "=",
+    "count",
+    "nth",
+    "get",
+    "conj",
+    "long",
+    "int",
+    "transient",
+    "conj!",
+    "assoc!",
+    "persistent!",
 ];
 
 /// The global runtime: one booted evaluator plus the resolved
 /// primitive implementations, indexed by [`Prim`](clj_eval::Prim) discriminant.
 struct Runtime {
     eval: Evaluator,
-    prims: [Arc<NativeImpl>; 15],
+    prims: [Arc<NativeImpl>; 19],
 }
 
 impl Runtime {
@@ -161,6 +179,10 @@ mod tests {
             (Prim::Conj, "conj"),
             (Prim::Long, "long"),
             (Prim::Int, "int"),
+            (Prim::Transient, "transient"),
+            (Prim::ConjBang, "conj!"),
+            (Prim::AssocBang, "assoc!"),
+            (Prim::PersistentBang, "persistent!"),
         ];
         for (prim, name) in pairs {
             assert_eq!(

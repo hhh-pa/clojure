@@ -39,7 +39,7 @@ use inkwell::values::{BasicMetadataValueEnum, FunctionValue, IntValue, PointerVa
 /// Prims in discriminant order (index `== prim as usize`;
 /// shared with the JIT symbol table so a new prim cannot miss
 /// a mapping silently — the drift test walks this list).
-pub(crate) const PRIM_ORDER: [Prim; 15] = [
+pub(crate) const PRIM_ORDER: [Prim; 19] = [
     Prim::Add,
     Prim::Sub,
     Prim::Mul,
@@ -55,6 +55,10 @@ pub(crate) const PRIM_ORDER: [Prim; 15] = [
     Prim::Conj,
     Prim::Long,
     Prim::Int,
+    Prim::Transient,
+    Prim::ConjBang,
+    Prim::AssocBang,
+    Prim::PersistentBang,
 ];
 
 /// The LLVM symbol per planned `defn`: sanitized name plus source
@@ -71,7 +75,7 @@ pub fn fn_symbol(index: usize, name: &str) -> String {
 
 /// Declared runtime helpers (resolved once per module).
 struct Decls<'ctx> {
-    prims: [FunctionValue<'ctx>; 15],
+    prims: [FunctionValue<'ctx>; 19],
     nil: FunctionValue<'ctx>,
     boolean: FunctionValue<'ctx>,
     int: FunctionValue<'ctx>,
@@ -849,12 +853,16 @@ mod tests {
             "rt_conj",
             "rt_long",
             "rt_int_cast",
+            "rt_transient",
+            "rt_conj_bang",
+            "rt_assoc_bang",
+            "rt_persistent_bang",
         ];
         for (index, prim) in PRIM_ORDER.iter().enumerate() {
             assert_eq!(*prim as usize, index);
             assert_eq!(prim_symbol(*prim), names[index]);
         }
-        assert_eq!(format!("{PRIM_ORDER:?}").split(',').count(), 15);
+        assert_eq!(format!("{PRIM_ORDER:?}").split(',').count(), 19);
     }
 
     #[test]
@@ -862,7 +870,8 @@ mod tests {
         let ir = compile_ir(
             "(+ 1 2) (- 3 1) (* 2 3) (quot 7 2) (< 1 2) (<= 1 1) (> 2 1) \
              (>= 2 2) (= 1 1) (count [1]) (nth [1] 0) (get [1] 0) (conj [1] 2) \
-             (long 5) (int 7)",
+             (long 5) (int 7) (transient [1]) (conj! (transient [1]) 2) \
+             (assoc! (transient [1]) 0 9) (persistent! (transient [1]))",
         );
         for symbol in [
             "rt_add",
@@ -880,6 +889,10 @@ mod tests {
             "rt_conj",
             "rt_long",
             "rt_int_cast",
+            "rt_transient",
+            "rt_conj_bang",
+            "rt_assoc_bang",
+            "rt_persistent_bang",
         ] {
             assert!(
                 ir.contains(&format!("call ptr @{symbol}")),

@@ -11,9 +11,9 @@
   {
    "file": "crates/clj-eval/src/aot_subset.rs",
    "function": "Prim::resolve",
-   "cyclomatic": 17.0,
+   "cyclomatic": 21.0,
    "cognitive": 2.0,
-   "justification": "S8A: one arm per closed primitive; the name table stays exhaustive"
+   "justification": "S8A: one arm per closed primitive; the name table stays exhaustive. Slice B adds the transient/conj!/assoc!/persistent! arms."
   },
   {
    "file": "crates/clj-eval/src/aot_subset.rs",

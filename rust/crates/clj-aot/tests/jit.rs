@@ -112,3 +112,28 @@ fn jit_passes_argv_to_dash_main() {
         0
     );
 }
+
+#[test]
+fn jit_runs_transient_pipelines() {
+    // Vector transients round-trip through the boxed ABI
+    // (map transients need map literals, outside the subset),
+    // and `nth` reads a live transient buffer.
+    assert_eq!(
+        run("(print (persistent! (conj! (transient [1]) 2 3))) \
+             (print (persistent! (assoc! (transient [1 2]) 0 9))) \
+             (print (nth (conj! (transient [7 8]) 9) 2))"),
+        0
+    );
+}
+
+#[test]
+fn jit_reports_transient_errors() {
+    // A `persistent!` of a persistent value fails the shared
+    // native, and use-after-`persistent!` fails the edit check:
+    // both return 1 from `main`.
+    assert_eq!(run("(print (persistent! [1]))"), 1);
+    assert_eq!(
+        run("(let [t (transient [1])] (do (persistent! t) (print (conj! t 2))))"),
+        1
+    );
+}

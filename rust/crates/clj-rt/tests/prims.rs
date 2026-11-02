@@ -15,10 +15,14 @@
 mod support;
 
 use clj_eval::{Evaluator, Prim, boot};
-use clj_value::{Keyword, Value, Vector, print_to_string};
+use clj_value::{
+    Keyword, Transient, TransientKind, TransientMap, TransientVector, Value, Vector, new_map,
+    print_to_string,
+};
 use cljrt::{
-    prim_symbol, rt_add, rt_conj, rt_count, rt_eq, rt_ge, rt_get, rt_gt, rt_int_cast, rt_le,
-    rt_long, rt_lt, rt_mul, rt_nth, rt_quot, rt_sub,
+    prim_symbol, rt_add, rt_assoc_bang, rt_conj, rt_conj_bang, rt_count, rt_eq, rt_ge, rt_get,
+    rt_gt, rt_int_cast, rt_le, rt_long, rt_lt, rt_mul, rt_nth, rt_persistent_bang, rt_quot, rt_sub,
+    rt_transient,
 };
 use support::{inbox, render};
 
@@ -57,6 +61,38 @@ fn check(eval: &mut Evaluator, shim: Shim, args: Vec<Value>, src: &str, want: &s
     assert_eq!(interp(eval, src), want, "{src} via interpreter");
 }
 
+/// Call two helpers in sequence like generated code does
+/// (`first`'s owned return becomes `second`'s single arg).
+fn ffi_chain(first: Shim, args: Vec<Value>, second: Shim) -> String {
+    let boxes: Vec<*mut Value> = args.into_iter().map(inbox).collect();
+    let path = b"f.clj";
+    let mid = unsafe { first(boxes.as_ptr(), boxes.len(), path.as_ptr(), path.len(), 3, 9) };
+    if mid.is_null() {
+        return "ERROR".to_owned();
+    }
+    let mids = [mid];
+    let out = unsafe { second(mids.as_ptr(), mids.len(), path.as_ptr(), path.len(), 3, 9) };
+    if out.is_null() {
+        "ERROR".to_owned()
+    } else {
+        render(out)
+    }
+}
+
+/// Pin one two-helper case three ways (transients print with
+/// identity, so success paths freeze through `persistent!`).
+fn check_chain(
+    eval: &mut Evaluator,
+    first: Shim,
+    args: Vec<Value>,
+    second: Shim,
+    src: &str,
+    want: &str,
+) {
+    assert_eq!(ffi_chain(first, args, second), want, "{src} via helpers");
+    assert_eq!(interp(eval, src), want, "{src} via interpreter");
+}
+
 fn int(n: i64) -> Value {
     Value::Int(n)
 }
@@ -67,6 +103,40 @@ fn str_(s: &str) -> Value {
 
 fn vec_of(items: Vec<Value>) -> Value {
     Value::Vector(Vector::from_vec(items))
+}
+
+/// A fresh vector transient cell (shared by the value builders).
+fn transient_vec_cell(items: Vec<Value>) -> Transient {
+    Transient::new(TransientKind::Vector(TransientVector::from_vector(
+        &Vector::from_vec(items),
+    )))
+}
+
+fn transient_vec(items: Vec<Value>) -> Value {
+    Value::Transient(transient_vec_cell(items))
+}
+
+fn transient_map(pairs: Vec<(Value, Value)>) -> Value {
+    let mut map = new_map();
+    for (k, v) in pairs {
+        map = map.insert(k, v);
+    }
+    Value::Transient(Transient::with_meta(
+        TransientKind::Map(TransientMap::from_map(&map)),
+        None,
+    ))
+}
+
+/// A transient already spent by `persistent!` (any further use errors).
+fn spent_transient_vec(items: Vec<Value>) -> Value {
+    let t = transient_vec_cell(items);
+    {
+        let mut guard = t.lock();
+        if let TransientKind::Vector(tv) = &mut *guard {
+            tv.persistent().expect("fresh transient persists");
+        }
+    }
+    Value::Transient(t)
 }
 
 #[test]
@@ -89,6 +159,10 @@ fn prim_symbol_names_each_helper() {
         // `rt_int` is the integer-literal constructor; the `int`
         // cast shim takes the suffixed symbol.
         (Prim::Int, "rt_int_cast"),
+        (Prim::Transient, "rt_transient"),
+        (Prim::ConjBang, "rt_conj_bang"),
+        (Prim::AssocBang, "rt_assoc_bang"),
+        (Prim::PersistentBang, "rt_persistent_bang"),
     ];
     for (prim, symbol) in pairs {
         assert_eq!(prim_symbol(prim), symbol);
@@ -232,6 +306,13 @@ fn nth_delegates() {
         "(nth [] 5)",
         "ERROR",
     );
+    check(
+        &mut eval,
+        rt_nth,
+        vec![transient_vec(vec![int(10), int(20)]), int(1)],
+        "(nth (transient [10 20]) 1)",
+        "20",
+    );
 }
 
 #[test]
@@ -336,6 +417,119 @@ fn int_delegates() {
         rt_int_cast,
         vec![int(1), int(2)],
         "(int 1 2)",
+        "ERROR",
+    );
+}
+
+#[test]
+fn transient_delegates() {
+    let mut eval = boot();
+    check_chain(
+        &mut eval,
+        rt_transient,
+        vec![vec_of(vec![int(1), int(2)])],
+        rt_persistent_bang,
+        "(persistent! (transient [1 2]))",
+        "[1 2]",
+    );
+    check(
+        &mut eval,
+        rt_transient,
+        vec![int(1)],
+        "(transient 1)",
+        "ERROR",
+    );
+    check(&mut eval, rt_transient, vec![], "(transient)", "ERROR");
+}
+
+#[test]
+fn conj_bang_delegates() {
+    let mut eval = boot();
+    check_chain(
+        &mut eval,
+        rt_conj_bang,
+        vec![transient_vec(vec![int(1)]), int(2), int(3)],
+        rt_persistent_bang,
+        "(persistent! (conj! (transient [1]) 2 3))",
+        "[1 2 3]",
+    );
+    check(
+        &mut eval,
+        rt_conj_bang,
+        vec![vec_of(vec![int(1)]), int(2)],
+        "(conj! [1] 2)",
+        "ERROR",
+    );
+    check(
+        &mut eval,
+        rt_conj_bang,
+        vec![spent_transient_vec(vec![int(1)]), int(2)],
+        "(let [t (transient [1])] (do (persistent! t) (conj! t 2)))",
+        "ERROR",
+    );
+}
+
+#[test]
+fn assoc_bang_delegates() {
+    let mut eval = boot();
+    check_chain(
+        &mut eval,
+        rt_assoc_bang,
+        vec![transient_vec(vec![int(1), int(2)]), int(0), int(9)],
+        rt_persistent_bang,
+        "(persistent! (assoc! (transient [1 2]) 0 9))",
+        "[9 2]",
+    );
+    check_chain(
+        &mut eval,
+        rt_assoc_bang,
+        vec![
+            transient_map(Vec::new()),
+            Value::Keyword(Keyword::new(None, "b")),
+            int(2),
+        ],
+        rt_persistent_bang,
+        "(persistent! (assoc! (transient {}) :b 2))",
+        "{:b 2}",
+    );
+    check(
+        &mut eval,
+        rt_assoc_bang,
+        vec![vec_of(vec![int(1)]), int(0), int(9)],
+        "(assoc! [1] 0 9)",
+        "ERROR",
+    );
+    check(
+        &mut eval,
+        rt_assoc_bang,
+        vec![spent_transient_vec(vec![int(1)]), int(0), int(9)],
+        "(let [t (transient [1])] (do (persistent! t) (assoc! t 0 9)))",
+        "ERROR",
+    );
+}
+
+#[test]
+fn persistent_bang_delegates() {
+    let mut eval = boot();
+    check(
+        &mut eval,
+        rt_persistent_bang,
+        vec![transient_vec(vec![int(1), int(2)])],
+        "(persistent! (transient [1 2]))",
+        "[1 2]",
+    );
+    check(
+        &mut eval,
+        rt_persistent_bang,
+        vec![vec_of(vec![int(1)])],
+        "(persistent! [1])",
+        "ERROR",
+    );
+    check(
+        &mut eval,
+        rt_persistent_bang,
+        vec![spent_transient_vec(vec![int(1)])],
+        "(let [t (transient [1])] (do (persistent! t) (persistent! t)))",
         "ERROR",
     );
 }

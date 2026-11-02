@@ -72,13 +72,17 @@ pub enum Prim {
     Conj,
     Long,
     Int,
+    Transient,
+    ConjBang,
+    AssocBang,
+    PersistentBang,
 }
 
 /// The closed-prim name table in discriminant order (a table, not
 /// a match: one arm per prim would trip the complexity gate —
 /// the pairing is pinned by `prim_resolve_table` instead, and
 /// new prims append so discriminants never shift).
-const PRIM_TABLE: [(&str, Prim); 15] = [
+const PRIM_TABLE: [(&str, Prim); 19] = [
     ("+", Prim::Add),
     ("-", Prim::Sub),
     ("*", Prim::Mul),
@@ -94,6 +98,10 @@ const PRIM_TABLE: [(&str, Prim); 15] = [
     ("conj", Prim::Conj),
     ("long", Prim::Long),
     ("int", Prim::Int),
+    ("transient", Prim::Transient),
+    ("conj!", Prim::ConjBang),
+    ("assoc!", Prim::AssocBang),
+    ("persistent!", Prim::PersistentBang),
 ];
 
 impl Prim {
@@ -1702,6 +1710,53 @@ mod tests {
     }
 
     #[test]
+    fn transient_pipeline_plans_to_nested_prims() {
+        let prog = plan("(print (persistent! (conj! (transient [1]) 2)))").expect("plans");
+        assert_eq!(
+            prog.main,
+            vec![SubsetExpr::Print {
+                args: vec![SubsetExpr::CallPrim {
+                    prim: Prim::PersistentBang,
+                    args: vec![SubsetExpr::CallPrim {
+                        prim: Prim::ConjBang,
+                        args: vec![
+                            SubsetExpr::CallPrim {
+                                prim: Prim::Transient,
+                                args: vec![SubsetExpr::VecLit(vec![SubsetExpr::Int(1)])],
+                                span: Span::new(1, 28),
+                            },
+                            SubsetExpr::Int(2),
+                        ],
+                        span: Span::new(1, 21),
+                    }],
+                    span: Span::new(1, 8),
+                }],
+                span: Span::new(1, 1),
+            }]
+        );
+        let prog = plan("(print (assoc! (transient [1]) 0 9))").expect("plans");
+        assert_eq!(
+            prog.main,
+            vec![SubsetExpr::Print {
+                args: vec![SubsetExpr::CallPrim {
+                    prim: Prim::AssocBang,
+                    args: vec![
+                        SubsetExpr::CallPrim {
+                            prim: Prim::Transient,
+                            args: vec![SubsetExpr::VecLit(vec![SubsetExpr::Int(1)])],
+                            span: Span::new(1, 16),
+                        },
+                        SubsetExpr::Int(0),
+                        SubsetExpr::Int(9),
+                    ],
+                    span: Span::new(1, 8),
+                }],
+                span: Span::new(1, 1),
+            }]
+        );
+    }
+
+    #[test]
     fn user_defn_shadows_primitive() {
         let prog = plan("(defn + [a b] a) (+ 1 2)").expect("plans");
         assert!(matches!(prog.main[0], SubsetExpr::CallFn { index: 0, .. }));
@@ -2259,6 +2314,10 @@ mod tests {
             ("conj", Prim::Conj),
             ("long", Prim::Long),
             ("int", Prim::Int),
+            ("transient", Prim::Transient),
+            ("conj!", Prim::ConjBang),
+            ("assoc!", Prim::AssocBang),
+            ("persistent!", Prim::PersistentBang),
         ];
         for (name, prim) in all {
             assert_eq!(Prim::resolve(None, name), Some(prim));

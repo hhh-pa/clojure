@@ -59,7 +59,7 @@ fn jit_err<T, E: std::fmt::Display>(result: Result<T, E>, what: &str) -> Result<
 /// Prim symbols come from [`prim_symbol`], the single source
 /// of truth; `exit` is deliberately absent (declared but never
 /// emitted in JIT mode, so MCJIT never resolves it).
-fn mappings() -> [(&'static str, *const ()); 29] {
+fn mappings() -> [(&'static str, *const ()); 33] {
     [
         (prim_symbol(Prim::Add), cljrt::rt_add as *const ()),
         (prim_symbol(Prim::Sub), cljrt::rt_sub as *const ()),
@@ -76,6 +76,22 @@ fn mappings() -> [(&'static str, *const ()); 29] {
         (prim_symbol(Prim::Conj), cljrt::rt_conj as *const ()),
         (prim_symbol(Prim::Long), cljrt::rt_long as *const ()),
         (prim_symbol(Prim::Int), cljrt::rt_int_cast as *const ()),
+        (
+            prim_symbol(Prim::Transient),
+            cljrt::rt_transient as *const (),
+        ),
+        (
+            prim_symbol(Prim::ConjBang),
+            cljrt::rt_conj_bang as *const (),
+        ),
+        (
+            prim_symbol(Prim::AssocBang),
+            cljrt::rt_assoc_bang as *const (),
+        ),
+        (
+            prim_symbol(Prim::PersistentBang),
+            cljrt::rt_persistent_bang as *const (),
+        ),
         ("rt_nil", cljrt::rt_nil as *const ()),
         ("rt_bool", cljrt::rt_bool as *const ()),
         ("rt_int", cljrt::rt_int as *const ()),
@@ -212,7 +228,7 @@ mod tests {
             }
             func = f.get_next_function();
         }
-        assert_eq!(decls, 29, "expected all 29 helpers declared");
+        assert_eq!(decls, 33, "expected all 33 helpers declared");
         for prim in PRIM_ORDER {
             let symbol = prim_symbol(prim);
             assert!(

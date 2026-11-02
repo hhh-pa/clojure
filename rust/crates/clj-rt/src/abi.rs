@@ -36,7 +36,7 @@ use crate::runtime::{call_prim, error_line, print_join};
 /// one arm per prim would trip the complexity gate; the pairing is
 /// pinned by the `prim_symbol` drift tests in `clj-aot` and the FFI
 /// suite instead).
-const PRIM_SYMBOLS: [&str; 15] = [
+const PRIM_SYMBOLS: [&str; 19] = [
     "rt_add",
     "rt_sub",
     "rt_mul",
@@ -52,6 +52,10 @@ const PRIM_SYMBOLS: [&str; 15] = [
     "rt_conj",
     "rt_long",
     "rt_int_cast",
+    "rt_transient",
+    "rt_conj_bang",
+    "rt_assoc_bang",
+    "rt_persistent_bang",
 ];
 
 /// The `extern "C"` symbol lowering [`Prim`] calls to.
@@ -338,3 +342,7 @@ def_prim!(rt_long, 13);
 // `rt_int` is the integer-literal constructor (a different
 // signature), so the `int` cast shim takes the suffixed symbol.
 def_prim!(rt_int_cast, 14);
+def_prim!(rt_transient, 15);
+def_prim!(rt_conj_bang, 16);
+def_prim!(rt_assoc_bang, 17);
+def_prim!(rt_persistent_bang, 18);
