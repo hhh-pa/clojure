@@ -29,7 +29,7 @@ use std::sync::Arc;
 use clj_eval::{NativeError, Prim};
 use clj_value::{Keyword, List, Value, Vector};
 
-use crate::runtime::{call_prim, error_line, print_join};
+use crate::runtime::{call_prim, count_str_fast, error_line, nth_str_fast, print_join};
 
 /// The `extern "C"` symbol per [`Prim`], indexed by discriminant
 /// (S8C codegen's single source of truth — a table, not a match:
@@ -93,6 +93,40 @@ unsafe fn take_args(args: *const *mut Value, argc: usize) -> Vec<Value> {
     // Safety: the caller guarantees a valid array (see module docs).
     let items = unsafe { std::slice::from_raw_parts(args, argc) };
     items.iter().map(|ptr| unsafe { take(*ptr) }).collect()
+}
+
+/// Free every consumed box after a borrow-decided fast path
+/// (the fast path inspected borrows; ownership still transfers,
+/// so each box frees exactly once).
+///
+/// # Safety
+///
+/// `args` must be a valid array of `argc` valid boxes, consumed.
+unsafe fn drop_args(args: *const *mut Value, argc: usize) {
+    // Safety: the caller guarantees a valid array (see module docs).
+    let items = unsafe { std::slice::from_raw_parts(args, argc) };
+    for ptr in items {
+        drop(unsafe { take(*ptr) });
+    }
+}
+
+/// The fallible-helper failure: print `path:line:col: Class:
+/// message` and return null (the generated code null-checks and
+/// exits 1).
+///
+/// # Safety
+///
+/// The path slice must be valid for its length.
+unsafe fn fail(
+    path: *const u8,
+    path_len: usize,
+    line: u32,
+    col: u32,
+    err: &NativeError,
+) -> *mut Value {
+    let path = unsafe { text(path, path_len) };
+    eprintln!("{}", error_line(&path, line, col, err));
+    ptr::null_mut()
 }
 
 /// One `nil` box.
@@ -295,11 +329,7 @@ unsafe fn prim_call(
     let owned = unsafe { take_args(args, argc) };
     match call_prim(index, owned) {
         Ok(value) => give(value),
-        Err(err) => {
-            let path = unsafe { text(path, path_len) };
-            eprintln!("{}", error_line(&path, line, col, &err));
-            ptr::null_mut()
-        }
+        Err(err) => unsafe { fail(path, path_len, line, col, &err) },
     }
 }
 
@@ -334,8 +364,6 @@ def_prim!(rt_le, 5);
 def_prim!(rt_gt, 6);
 def_prim!(rt_ge, 7);
 def_prim!(rt_eq, 8);
-def_prim!(rt_count, 9);
-def_prim!(rt_nth, 10);
 def_prim!(rt_get, 11);
 def_prim!(rt_conj, 12);
 def_prim!(rt_long, 13);
@@ -346,3 +374,157 @@ def_prim!(rt_transient, 15);
 def_prim!(rt_conj_bang, 16);
 def_prim!(rt_assoc_bang, 17);
 def_prim!(rt_persistent_bang, 18);
+
+/// `count` with a native string fast path (one closed-set
+/// primitive — see `prim_call` for the delegated shape): a single
+/// string arg counts through the shared scan cache with no mutex
+/// and no evaluator roundtrip; every other shape delegates to the
+/// shared native, so errors stay shared.
+///
+/// # Safety
+///
+/// `args` must be a valid array of `argc` valid boxes, consumed;
+/// the path slice must be valid for its length.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rt_count(
+    args: *const *mut Value,
+    argc: usize,
+    path: *const u8,
+    path_len: usize,
+    line: u32,
+    col: u32,
+) -> *mut Value {
+    if argc == 1 {
+        // Safety: `argc == 1`, so element 0 is a valid box (see
+        // module docs); the borrow ends before the boxes free.
+        let arg = unsafe { &**args };
+        if let Some(value) = count_str_fast(arg) {
+            unsafe { drop_args(args, argc) };
+            return give(value);
+        }
+    }
+    unsafe { prim_call(9, args, argc, path, path_len, line, col) }
+}
+
+/// `nth` with a native string fast path (one closed-set
+/// primitive — see `prim_call` for the delegated shape): a string
+/// collection coerces the index and reads the char through the
+/// shared functions with no mutex and no evaluator roundtrip;
+/// every other shape delegates to the shared native, so errors
+/// stay shared.
+///
+/// # Safety
+///
+/// `args` must be a valid array of `argc` valid boxes, consumed;
+/// the path slice must be valid for its length.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rt_nth(
+    args: *const *mut Value,
+    argc: usize,
+    path: *const u8,
+    path_len: usize,
+    line: u32,
+    col: u32,
+) -> *mut Value {
+    if argc == 2 || argc == 3 {
+        // The borrows end inside the block (the outcome is owned),
+        // so the boxes free after.
+        let fast = {
+            // Safety: `argc` valid boxes (see module docs).
+            let items = unsafe { std::slice::from_raw_parts(args, argc) };
+            // Safety: each box is valid (see module docs).
+            let coll = unsafe { &*items[0] };
+            let idx = unsafe { &*items[1] };
+            let not_found = if argc == 3 {
+                Some(unsafe { &*items[2] })
+            } else {
+                None
+            };
+            nth_str_fast(coll, idx, not_found)
+        };
+        if let Some(outcome) = fast {
+            unsafe { drop_args(args, argc) };
+            return match outcome {
+                Ok(value) => give(value),
+                Err(err) => unsafe { fail(path, path_len, line, col, &err) },
+            };
+        }
+    }
+    unsafe { prim_call(10, args, argc, path, path_len, line, col) }
+}
+
+/// Borrow-test a box for the unboxed-i64 path: `1` when the box
+/// holds an `Int`, else `0` (the specialization guard — generated
+/// code tests before [`rt_unbox_int`] and takes the boxed helper
+/// on `0`).
+///
+/// # Safety
+///
+/// `value` must be a valid box (borrowed, never freed here).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rt_is_int(value: *const Value) -> u8 {
+    // Safety: the caller guarantees a valid box (see module docs).
+    u8::from(matches!(unsafe { &*value }, Value::Int(_)))
+}
+
+/// Borrow-read an `Int` box as a raw `i64` (the unboxed-i64
+/// entry: loop-carried arithmetic runs on the raw value, `rt_int`
+/// re-boxes on region exit).
+///
+/// # Safety
+///
+/// `value` must be a valid box holding an `Int` (borrowed, never
+/// freed here); anything else is a caller bug and degrades to `0`
+/// (the `rt_vec_push` precedent — guards make it unreachable).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rt_unbox_int(value: *const Value) -> i64 {
+    // Safety: the caller guarantees a valid box (see module docs).
+    match unsafe { &*value } {
+        Value::Int(n) => *n,
+        _ => 0,
+    }
+}
+
+/// Flag one checked unboxed step: `0` in `overflow` and the value
+/// on success; `1` in `overflow` and the never-read zero slot on
+/// overflow (the caller re-runs the matching boxed helper, which
+/// reports the shared `long overflow`).
+///
+/// # Safety
+///
+/// `overflow` must be a valid writable byte.
+unsafe fn i64_flagged(result: Option<i64>, overflow: *mut u8) -> i64 {
+    match result {
+        Some(n) => {
+            unsafe { *overflow = 0 };
+            n
+        }
+        None => {
+            unsafe { *overflow = 1 };
+            0
+        }
+    }
+}
+
+macro_rules! def_i64 {
+    ($shim:ident, $checked:ident, $prim:literal) => {
+        #[doc = concat!(
+            "Unboxed-i64 `",
+            $prim,
+            "`: the checked step with the overflow out-flag (see `i64_flagged`). ",
+            "Clojure long arithmetic never wraps, so on `1` the caller re-runs the boxed helper."
+        )]
+        #[doc = ""]
+        #[doc = " # Safety"]
+        #[doc = ""]
+        #[doc = " `overflow` must be a valid writable byte."]
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn $shim(a: i64, b: i64, overflow: *mut u8) -> i64 {
+            unsafe { i64_flagged(a.$checked(b), overflow) }
+        }
+    };
+}
+
+def_i64!(rt_i64_add, checked_add, "+");
+def_i64!(rt_i64_sub, checked_sub, "-");
+def_i64!(rt_i64_mul, checked_mul, "*");

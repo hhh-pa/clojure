@@ -27,6 +27,8 @@
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, LazyLock, Mutex};
 
+use clj_eval::coll::{nth_str, str_utf16_len};
+use clj_eval::core::nth_index;
 use clj_eval::{Evaluator, NativeError, NativeImpl, as_native, boot};
 use clj_value::{ThrowClass, Value, print_to_string};
 
@@ -134,6 +136,36 @@ fn panic_text(payload: &(dyn std::any::Any + Send)) -> String {
     "internal error: native panicked".to_owned()
 }
 
+/// Fast path: `count` of a string in UTF-16 units through the
+/// shared scan cache — `None` unless `arg` is a string (the shim
+/// delegates everything else to the shared native, so arity and
+/// non-string errors stay shared, never reimplemented). Skips the
+/// mutex, the `Arc` clone, and the evaluator roundtrip; the units
+/// themselves are the shared [`str_utf16_len`].
+pub(crate) fn count_str_fast(arg: &Value) -> Option<Value> {
+    match arg {
+        Value::Str(s) => Some(Value::Int(str_utf16_len(s) as i64)),
+        _ => None,
+    }
+}
+
+/// Fast path: `nth` over a string — `None` unless `coll` is a
+/// string (the shim delegates). The index coerces FIRST through
+/// the shared [`nth_index`], exactly like the shared native (the
+/// nil-NPE quirk, tower truncation, and range errors all shared);
+/// the lookup is the shared [`nth_str`] (scan cache, `not-found`,
+/// and `StringIndexOutOfBounds` text all shared).
+pub(crate) fn nth_str_fast(
+    coll: &Value,
+    idx: &Value,
+    not_found: Option<&Value>,
+) -> Option<Result<Value, NativeError>> {
+    let Value::Str(s) = coll else {
+        return None;
+    };
+    Some(nth_index(idx).and_then(|n| nth_str(s, n, not_found)))
+}
+
 /// The helper error line: `path:line:col: Class: message` (spans
 /// baked at the call site; the class/message come straight from
 /// the shared [`NativeError`]).
@@ -156,7 +188,10 @@ pub(crate) fn print_join(args: &[Value]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{PRIM_NAMES, RUNTIME, call_prim, catch_panic, error_line, print_join};
+    use super::{
+        PRIM_NAMES, RUNTIME, call_prim, catch_panic, count_str_fast, error_line, nth_str_fast,
+        print_join,
+    };
     use clj_eval::{NativeError, Prim};
     use clj_value::{ThrowClass, Value};
     use std::panic::AssertUnwindSafe;
@@ -271,6 +306,63 @@ mod tests {
             std::panic::panic_any(7_i32);
         }));
         assert!(matches!(&out, Err(e) if e.message == "internal error: native panicked"));
+    }
+
+    #[test]
+    fn count_str_fast_pins_utf16_units() {
+        // Astral chars count 2 (surrogate pair); BMP 1.
+        assert_eq!(
+            format!(
+                "{:?}",
+                count_str_fast(&Value::Str("a𝄞é".into())).expect("strings hit")
+            ),
+            "Int(4)"
+        );
+        assert_eq!(
+            format!(
+                "{:?}",
+                count_str_fast(&Value::Str("".into())).expect("empty hits")
+            ),
+            "Int(0)"
+        );
+        assert!(count_str_fast(&Value::Int(1)).is_none());
+        assert!(count_str_fast(&Value::Nil).is_none());
+    }
+
+    #[test]
+    fn nth_str_fast_pins_chars_and_shared_errors() {
+        let at = |s: &str, i: Value, nf: Option<&Value>| {
+            nth_str_fast(&Value::Str(s.into()), &i, nf).expect("strings hit")
+        };
+        assert_eq!(
+            format!("{:?}", at("hello", Value::Int(1), None)),
+            "Ok(Char('e'))"
+        );
+        // The index coerces first (double truncation, like the
+        // shared native); `not-found` answers OOB and negatives.
+        assert_eq!(
+            format!("{:?}", at("hello", Value::Double(1.9), None)),
+            "Ok(Char('e'))"
+        );
+        let dflt = Value::Int(7);
+        assert_eq!(
+            format!("{:?}", at("hello", Value::Int(9), Some(&dflt))),
+            "Ok(Int(7))"
+        );
+        assert_eq!(
+            format!("{:?}", at("hello", Value::Int(-1), Some(&dflt))),
+            "Ok(Int(7))"
+        );
+        // Without `not-found` the shared `StringIndexOutOfBounds`
+        // text survives; a nil index trips the shared NPE quirk.
+        let err = at("hello", Value::Int(9), None).expect_err("OOB fails");
+        assert_eq!(
+            error_line("f.clj", 3, 9, &err),
+            "f.clj:3:9: java.lang.StringIndexOutOfBoundsException: Index 9 out of bounds for length 5"
+        );
+        let err = at("hello", Value::Nil, None).expect_err("nil index fails");
+        assert!(matches!(err.class, ThrowClass::NullPointerException));
+        assert!(nth_str_fast(&Value::Int(1), &Value::Int(0), None).is_none());
     }
 
     #[test]
