@@ -2131,36 +2131,114 @@ fn static_class(name: &str) -> Option<Arc<ClassVal>> {
 /// `Float` bounds convert through `f32` exactly as the JVM's
 /// widening does); `Character` bounds are `Char`s.
 pub(crate) fn static_field_value(class: &str, field: &str) -> Option<Value> {
-    let v: Value = match (class, field) {
-        ("java.lang.Long", "MIN_VALUE") => Value::Int(i64::MIN),
-        ("java.lang.Long", "MAX_VALUE") => Value::Int(i64::MAX),
-        ("java.lang.Integer", "MIN_VALUE") => Value::Int(i64::from(i32::MIN)),
-        ("java.lang.Integer", "MAX_VALUE") => Value::Int(i64::from(i32::MAX)),
-        ("java.lang.Short", "MIN_VALUE") => Value::Int(i64::from(i16::MIN)),
-        ("java.lang.Short", "MAX_VALUE") => Value::Int(i64::from(i16::MAX)),
-        ("java.lang.Byte", "MIN_VALUE") => Value::Int(i64::from(i8::MIN)),
-        ("java.lang.Byte", "MAX_VALUE") => Value::Int(i64::from(i8::MAX)),
-        ("java.lang.Double", "MIN_VALUE") => Value::Double(f64::MIN_POSITIVE),
-        ("java.lang.Double", "MAX_VALUE") => Value::Double(f64::MAX),
-        ("java.lang.Double", "POSITIVE_INFINITY") => Value::Double(f64::INFINITY),
-        ("java.lang.Double", "NEGATIVE_INFINITY") => Value::Double(f64::NEG_INFINITY),
-        ("java.lang.Double", "NaN") => Value::Double(f64::NAN),
-        ("java.lang.Float", "MIN_VALUE") => Value::Double(f64::from(f32::MIN_POSITIVE)),
-        ("java.lang.Float", "MAX_VALUE") => Value::Double(f64::from(f32::MAX)),
-        ("java.lang.Float", "POSITIVE_INFINITY") => Value::Double(f64::INFINITY),
-        ("java.lang.Float", "NEGATIVE_INFINITY") => Value::Double(f64::NEG_INFINITY),
-        ("java.lang.Float", "NaN") => Value::Double(f64::NAN),
-        ("java.lang.Character", "MIN_VALUE") => Value::Char('\u{0}'),
-        ("java.lang.Character", "MAX_VALUE") => Value::Char('\u{FFFF}'),
-        ("java.lang.Boolean", "TRUE") => Value::Bool(true),
-        ("java.lang.Boolean", "FALSE") => Value::Bool(false),
-        ("java.lang.Math", "PI") => Value::Double(std::f64::consts::PI),
-        ("java.lang.Math", "E") => Value::Double(std::f64::consts::E),
-        ("java.util.Locale", "US") => Value::Extension(Arc::new(LocaleHandle::us())),
-        ("clojure.lang.PersistentQueue", "EMPTY") => crate::coll::empty_queue_value(),
-        _ => return None,
-    };
-    Some(v)
+    // Two-level dispatch (complexity ratchet): one arm per class,
+    // then a per-class field match below.
+    match class {
+        "java.lang.Long" => static_field_long(field),
+        "java.lang.Integer" => static_field_integer(field),
+        "java.lang.Short" => static_field_short(field),
+        "java.lang.Byte" => static_field_byte(field),
+        "java.lang.Double" => static_field_double(field),
+        "java.lang.Float" => static_field_float(field),
+        "java.lang.Character" => static_field_character(field),
+        "java.lang.Boolean" => static_field_boolean(field),
+        "java.lang.Math" => static_field_math(field),
+        "java.util.Locale" => static_field_locale(field),
+        "clojure.lang.PersistentQueue" => static_field_queue(field),
+        _ => None,
+    }
+}
+
+fn static_field_long(field: &str) -> Option<Value> {
+    match field {
+        "MIN_VALUE" => Some(Value::Int(i64::MIN)),
+        "MAX_VALUE" => Some(Value::Int(i64::MAX)),
+        _ => None,
+    }
+}
+
+fn static_field_integer(field: &str) -> Option<Value> {
+    match field {
+        "MIN_VALUE" => Some(Value::Int(i64::from(i32::MIN))),
+        "MAX_VALUE" => Some(Value::Int(i64::from(i32::MAX))),
+        _ => None,
+    }
+}
+
+fn static_field_short(field: &str) -> Option<Value> {
+    match field {
+        "MIN_VALUE" => Some(Value::Int(i64::from(i16::MIN))),
+        "MAX_VALUE" => Some(Value::Int(i64::from(i16::MAX))),
+        _ => None,
+    }
+}
+
+fn static_field_byte(field: &str) -> Option<Value> {
+    match field {
+        "MIN_VALUE" => Some(Value::Int(i64::from(i8::MIN))),
+        "MAX_VALUE" => Some(Value::Int(i64::from(i8::MAX))),
+        _ => None,
+    }
+}
+
+fn static_field_double(field: &str) -> Option<Value> {
+    match field {
+        "MIN_VALUE" => Some(Value::Double(f64::MIN_POSITIVE)),
+        "MAX_VALUE" => Some(Value::Double(f64::MAX)),
+        "POSITIVE_INFINITY" => Some(Value::Double(f64::INFINITY)),
+        "NEGATIVE_INFINITY" => Some(Value::Double(f64::NEG_INFINITY)),
+        "NaN" => Some(Value::Double(f64::NAN)),
+        _ => None,
+    }
+}
+
+fn static_field_float(field: &str) -> Option<Value> {
+    match field {
+        "MIN_VALUE" => Some(Value::Double(f64::from(f32::MIN_POSITIVE))),
+        "MAX_VALUE" => Some(Value::Double(f64::from(f32::MAX))),
+        "POSITIVE_INFINITY" => Some(Value::Double(f64::INFINITY)),
+        "NEGATIVE_INFINITY" => Some(Value::Double(f64::NEG_INFINITY)),
+        "NaN" => Some(Value::Double(f64::NAN)),
+        _ => None,
+    }
+}
+
+fn static_field_character(field: &str) -> Option<Value> {
+    match field {
+        "MIN_VALUE" => Some(Value::Char('\u{0}')),
+        "MAX_VALUE" => Some(Value::Char('\u{FFFF}')),
+        _ => None,
+    }
+}
+
+fn static_field_boolean(field: &str) -> Option<Value> {
+    match field {
+        "TRUE" => Some(Value::Bool(true)),
+        "FALSE" => Some(Value::Bool(false)),
+        _ => None,
+    }
+}
+
+fn static_field_math(field: &str) -> Option<Value> {
+    match field {
+        "PI" => Some(Value::Double(std::f64::consts::PI)),
+        "E" => Some(Value::Double(std::f64::consts::E)),
+        _ => None,
+    }
+}
+
+fn static_field_locale(field: &str) -> Option<Value> {
+    match field {
+        "US" => Some(Value::Extension(Arc::new(LocaleHandle::us()))),
+        _ => None,
+    }
+}
+
+fn static_field_queue(field: &str) -> Option<Value> {
+    match field {
+        "EMPTY" => Some(crate::coll::empty_queue_value()),
+        _ => None,
+    }
 }
 
 /// A class value from parts (the dynamic rules).
@@ -2682,44 +2760,97 @@ pub(crate) fn import_class(eval: &mut Evaluator, fqn: &str) -> Result<Value, Nat
 /// an arm in [`native_static`] (and, for class values, in the
 /// instance-position surface below).
 pub(crate) fn static_member_arities(fqn: &str, member: &str) -> Option<&'static [usize]> {
-    match (fqn, member) {
-        ("java.lang.Class", "forName") => Some(&[1, 2, 3]),
-        ("java.lang.System", "getProperty") => Some(&[1, 2]),
-        ("java.lang.System", "lineSeparator") => Some(&[0]),
-        ("java.lang.System", "identityHashCode") => Some(&[1]),
-        ("java.lang.Character", "isWhitespace") => Some(&[1]),
-        ("java.lang.Character", "isLetterOrDigit") => Some(&[1]),
-        ("java.lang.Character", "digit") => Some(&[2]),
-        ("clojure.lang.LazilyPersistentVector", "createOwning") => Some(&[1]),
-        ("java.lang.Long", "parseLong") => Some(&[1]),
-        ("java.lang.Long", "remainderUnsigned") => Some(&[2]),
-        ("java.lang.Integer", "parseInt") => Some(&[1]),
-        ("java.lang.Double", "parseDouble") => Some(&[1]),
-        ("java.lang.Math", "abs") => Some(&[1]),
-        ("java.lang.String", "format") => Some(&[3]),
-        ("java.lang.Math", "sqrt") => Some(&[1]),
-        ("java.lang.Math", "ceil") => Some(&[1]),
-        ("java.lang.Math", "log") => Some(&[1]),
-        ("java.lang.Math", "exp") => Some(&[1]),
-        ("java.lang.Math", "pow") => Some(&[2]),
-        ("java.lang.Math", "sin") => Some(&[1]),
-        ("java.lang.Math", "cos") => Some(&[1]),
-        ("java.lang.Math", "tan") => Some(&[1]),
-        ("java.lang.Math", "asin") => Some(&[1]),
-        ("java.lang.Math", "acos") => Some(&[1]),
-        ("java.lang.Math", "atan") => Some(&[1]),
-        ("java.lang.Math", "sinh") => Some(&[1]),
-        ("java.lang.Math", "cosh") => Some(&[1]),
-        ("java.lang.Math", "tanh") => Some(&[1]),
-        ("java.lang.Math", "atan2") => Some(&[2]),
-        ("java.lang.Math", "hypot") => Some(&[2]),
-        ("java.lang.Math", "cbrt") => Some(&[1]),
-        ("java.lang.Math", "floor") => Some(&[1]),
-        ("java.lang.Math", "log10") => Some(&[1]),
-        ("java.lang.Math", "round") => Some(&[1]),
-        ("java.lang.Character", "isLowerCase") => Some(&[1]),
-        ("java.lang.Character", "isUpperCase") => Some(&[1]),
+    // Two-level dispatch (complexity ratchet): one arm per class,
+    // then a per-class member match below.
+    match fqn {
+        "java.lang.Class" => static_arities_class(member),
+        "java.lang.System" => static_arities_system(member),
+        "java.lang.Character" => static_arities_character(member),
+        "clojure.lang.LazilyPersistentVector" => static_arities_lpv(member),
+        "java.lang.Long" => static_arities_long(member),
+        "java.lang.Integer" => static_arities_integer(member),
+        "java.lang.Double" => static_arities_double(member),
+        "java.lang.String" => static_arities_string(member),
+        "java.lang.Math" => static_arities_math(member),
         _ => None,
+    }
+}
+
+fn static_arities_class(member: &str) -> Option<&'static [usize]> {
+    match member {
+        "forName" => Some(&[1, 2, 3]),
+        _ => None,
+    }
+}
+
+fn static_arities_system(member: &str) -> Option<&'static [usize]> {
+    match member {
+        "getProperty" => Some(&[1, 2]),
+        "lineSeparator" => Some(&[0]),
+        "identityHashCode" => Some(&[1]),
+        _ => None,
+    }
+}
+
+fn static_arities_character(member: &str) -> Option<&'static [usize]> {
+    match member {
+        "isWhitespace" | "isLetterOrDigit" | "isLowerCase" | "isUpperCase" => Some(&[1]),
+        "digit" => Some(&[2]),
+        _ => None,
+    }
+}
+
+fn static_arities_lpv(member: &str) -> Option<&'static [usize]> {
+    match member {
+        "createOwning" => Some(&[1]),
+        _ => None,
+    }
+}
+
+fn static_arities_long(member: &str) -> Option<&'static [usize]> {
+    match member {
+        "parseLong" => Some(&[1]),
+        "remainderUnsigned" => Some(&[2]),
+        _ => None,
+    }
+}
+
+fn static_arities_integer(member: &str) -> Option<&'static [usize]> {
+    match member {
+        "parseInt" => Some(&[1]),
+        _ => None,
+    }
+}
+
+fn static_arities_double(member: &str) -> Option<&'static [usize]> {
+    match member {
+        "parseDouble" => Some(&[1]),
+        _ => None,
+    }
+}
+
+fn static_arities_string(member: &str) -> Option<&'static [usize]> {
+    match member {
+        "format" => Some(&[3]),
+        _ => None,
+    }
+}
+
+fn static_arities_math(member: &str) -> Option<&'static [usize]> {
+    // Only `pow`/`atan2`/`hypot` take 2 args; the rest of the
+    // emulated surface is 1-arg (checked at compile time, so the
+    // linear scan below never runs hot).
+    const TWO: &[&str] = &["pow", "atan2", "hypot"];
+    const ONE: &[&str] = &[
+        "abs", "sqrt", "ceil", "log", "exp", "sin", "cos", "tan", "asin", "acos", "atan", "sinh",
+        "cosh", "tanh", "cbrt", "floor", "log10", "round",
+    ];
+    if TWO.contains(&member) {
+        Some(&[2])
+    } else if ONE.contains(&member) {
+        Some(&[1])
+    } else {
+        None
     }
 }
 
@@ -2746,45 +2877,164 @@ fn native_static(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeEr
         return Err(crate::core::cce_err(&args[1], "java.lang.String"));
     };
     let rest = &args[2..];
-    match (fqn.as_ref(), member.as_ref()) {
-        ("java.lang.Class", "forName") => static_forname(eval, rest),
-        ("java.lang.System", "getProperty") => static_getproperty(rest),
-        ("java.lang.System", "lineSeparator") => static_lineseparator(rest),
-        ("java.lang.System", "identityHashCode") => static_identity_hashcode(rest),
-        ("java.lang.Character", "isWhitespace") => static_character_is_whitespace(rest),
-        ("java.lang.Character", "isLetterOrDigit") => static_character_is_letter_or_digit(rest),
-        ("java.lang.Character", "digit") => static_character_digit(rest),
-        ("clojure.lang.LazilyPersistentVector", "createOwning") => static_lpv_create_owning(rest),
-        ("java.lang.Long", "parseLong") => static_long_parse_long(rest),
-        ("java.lang.Long", "remainderUnsigned") => static_long_remainder_unsigned(rest),
-        ("java.lang.Integer", "parseInt") => static_integer_parse_int(rest),
-        ("java.lang.Double", "parseDouble") => static_double_parse_double(rest),
-        ("java.lang.String", "format") => static_string_format(eval, rest),
-        ("java.lang.Math", "abs") => static_math_abs(rest),
-        ("java.lang.Math", "sqrt") => static_math_sqrt(rest),
-        ("java.lang.Math", "ceil") => static_math_ceil(rest),
-        ("java.lang.Math", "log") => static_math_log(rest),
-        ("java.lang.Math", "exp") => static_math_exp(rest),
-        ("java.lang.Math", "pow") => static_math_pow(rest),
-        ("java.lang.Math", "sin") => static_math_sin(rest),
-        ("java.lang.Math", "cos") => static_math_cos(rest),
-        ("java.lang.Math", "tan") => static_math_tan(rest),
-        ("java.lang.Math", "asin") => static_math_asin(rest),
-        ("java.lang.Math", "acos") => static_math_acos(rest),
-        ("java.lang.Math", "atan") => static_math_atan(rest),
-        ("java.lang.Math", "sinh") => static_math_sinh(rest),
-        ("java.lang.Math", "cosh") => static_math_cosh(rest),
-        ("java.lang.Math", "tanh") => static_math_tanh(rest),
-        ("java.lang.Math", "atan2") => static_math_atan2(rest),
-        ("java.lang.Math", "hypot") => static_math_hypot(rest),
-        ("java.lang.Math", "cbrt") => static_math_cbrt(rest),
-        ("java.lang.Math", "floor") => static_math_floor(rest),
-        ("java.lang.Math", "log10") => static_math_log10(rest),
-        ("java.lang.Math", "round") => static_math_round(rest),
-        ("java.lang.Character", "isLowerCase") => static_character_is_lower_case(rest),
-        ("java.lang.Character", "isUpperCase") => static_character_is_upper_case(rest),
+    // Two-level dispatch (complexity ratchet): one arm per class,
+    // then a per-class member match below (Math's 21 members ride
+    // a name table).
+    match fqn.as_ref() {
+        "java.lang.Class" => static_call_class(eval, member.as_ref(), rest),
+        "java.lang.System" => static_call_system(member.as_ref(), rest),
+        "java.lang.Character" => static_call_character(member.as_ref(), rest),
+        "clojure.lang.LazilyPersistentVector" => static_call_lpv(member.as_ref(), rest),
+        "java.lang.Long" => static_call_long(member.as_ref(), rest),
+        "java.lang.Integer" => static_call_integer(member.as_ref(), rest),
+        "java.lang.Double" => static_call_double(member.as_ref(), rest),
+        "java.lang.String" => static_call_string(eval, member.as_ref(), rest),
+        "java.lang.Math" => static_call_math(member.as_ref(), rest),
         _ => Err(crate::types::no_method(member, rest.len(), fqn)),
     }
+}
+
+fn static_call_class(
+    eval: &mut Evaluator,
+    member: &str,
+    rest: &[Value],
+) -> Result<Value, NativeError> {
+    match member {
+        "forName" => static_forname(eval, rest),
+        _ => Err(crate::types::no_method(
+            member,
+            rest.len(),
+            "java.lang.Class",
+        )),
+    }
+}
+
+fn static_call_system(member: &str, rest: &[Value]) -> Result<Value, NativeError> {
+    match member {
+        "getProperty" => static_getproperty(rest),
+        "lineSeparator" => static_lineseparator(rest),
+        "identityHashCode" => static_identity_hashcode(rest),
+        _ => Err(crate::types::no_method(
+            member,
+            rest.len(),
+            "java.lang.System",
+        )),
+    }
+}
+
+fn static_call_character(member: &str, rest: &[Value]) -> Result<Value, NativeError> {
+    match member {
+        "isWhitespace" => static_character_is_whitespace(rest),
+        "isLetterOrDigit" => static_character_is_letter_or_digit(rest),
+        "digit" => static_character_digit(rest),
+        "isLowerCase" => static_character_is_lower_case(rest),
+        "isUpperCase" => static_character_is_upper_case(rest),
+        _ => Err(crate::types::no_method(
+            member,
+            rest.len(),
+            "java.lang.Character",
+        )),
+    }
+}
+
+fn static_call_lpv(member: &str, rest: &[Value]) -> Result<Value, NativeError> {
+    match member {
+        "createOwning" => static_lpv_create_owning(rest),
+        _ => Err(crate::types::no_method(
+            member,
+            rest.len(),
+            "clojure.lang.LazilyPersistentVector",
+        )),
+    }
+}
+
+fn static_call_long(member: &str, rest: &[Value]) -> Result<Value, NativeError> {
+    match member {
+        "parseLong" => static_long_parse_long(rest),
+        "remainderUnsigned" => static_long_remainder_unsigned(rest),
+        _ => Err(crate::types::no_method(
+            member,
+            rest.len(),
+            "java.lang.Long",
+        )),
+    }
+}
+
+fn static_call_integer(member: &str, rest: &[Value]) -> Result<Value, NativeError> {
+    match member {
+        "parseInt" => static_integer_parse_int(rest),
+        _ => Err(crate::types::no_method(
+            member,
+            rest.len(),
+            "java.lang.Integer",
+        )),
+    }
+}
+
+fn static_call_double(member: &str, rest: &[Value]) -> Result<Value, NativeError> {
+    match member {
+        "parseDouble" => static_double_parse_double(rest),
+        _ => Err(crate::types::no_method(
+            member,
+            rest.len(),
+            "java.lang.Double",
+        )),
+    }
+}
+
+fn static_call_string(
+    eval: &mut Evaluator,
+    member: &str,
+    rest: &[Value],
+) -> Result<Value, NativeError> {
+    match member {
+        "format" => static_string_format(eval, rest),
+        _ => Err(crate::types::no_method(
+            member,
+            rest.len(),
+            "java.lang.String",
+        )),
+    }
+}
+
+/// One row of the `java.lang.Math` static dispatch table.
+type MathStatic = (&'static str, fn(&[Value]) -> Result<Value, NativeError>);
+
+fn static_call_math(member: &str, rest: &[Value]) -> Result<Value, NativeError> {
+    const TABLE: &[MathStatic] = &[
+        ("abs", static_math_abs),
+        ("sqrt", static_math_sqrt),
+        ("ceil", static_math_ceil),
+        ("log", static_math_log),
+        ("exp", static_math_exp),
+        ("pow", static_math_pow),
+        ("sin", static_math_sin),
+        ("cos", static_math_cos),
+        ("tan", static_math_tan),
+        ("asin", static_math_asin),
+        ("acos", static_math_acos),
+        ("atan", static_math_atan),
+        ("sinh", static_math_sinh),
+        ("cosh", static_math_cosh),
+        ("tanh", static_math_tanh),
+        ("atan2", static_math_atan2),
+        ("hypot", static_math_hypot),
+        ("cbrt", static_math_cbrt),
+        ("floor", static_math_floor),
+        ("log10", static_math_log10),
+        ("round", static_math_round),
+    ];
+    TABLE
+        .iter()
+        .find(|(name, _)| *name == member)
+        .map(|(_, f)| f(rest))
+        .unwrap_or_else(|| {
+            Err(crate::types::no_method(
+                member,
+                rest.len(),
+                "java.lang.Math",
+            ))
+        })
 }
 
 /// `Class/forName` over the emulated lattice. The 1- and 3-arg

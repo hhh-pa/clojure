@@ -830,6 +830,64 @@ impl<'a> Analyzer<'a> {
         self.locals.iter().rposition(|l| l == name)
     }
 
+    /// Value-position checks for a resolved global (`analyzeSymbol`
+    /// order: private first, then macro). Neither wrapper names an
+    /// operator (probed); the private message spells the symbol as
+    /// written without `#'`, the macro one the `#'` target.
+    /// (Invoke position has its own check in `analyze_list`.)
+    fn global_value_expr(
+        &mut self,
+        sym: &Symbol,
+        span: Span,
+        cur: &str,
+        target: Symbol,
+        id: u64,
+    ) -> Result<Expr, CompileError> {
+        let home = target.namespace().unwrap_or("");
+        if home != cur && crate::macros::is_private_var(self.eval, id) {
+            return Err(self.err(
+                class::ILLEGAL_STATE,
+                format!("var: {sym} is not public"),
+                span,
+                Verb::Compiling,
+                None,
+            ));
+        }
+        if crate::macros::is_macro_var(self.eval, id) {
+            return Err(self.err(
+                class::RUNTIME,
+                format!("Can't take value of a macro: #'{}", target),
+                span,
+                Verb::Compiling,
+                None,
+            ));
+        }
+        Ok(Expr::Global(Var { id, sym: target }))
+    }
+
+    /// Value-position static field reads (`Long/MAX_VALUE`): only
+    /// when no namespace/alias claims the head (a real namespace
+    /// keeps the `No such var` path in `analyze_symbol`).
+    fn analyze_static_field_sym(
+        &mut self,
+        sym: &Symbol,
+        span: Span,
+        cur: &str,
+    ) -> Result<Option<Expr>, CompileError> {
+        let Some(ns_part) = sym.namespace() else {
+            return Ok(None);
+        };
+        if self
+            .eval
+            .registry
+            .namespace_target_in(cur, ns_part)
+            .is_some()
+        {
+            return Ok(None);
+        }
+        self.analyze_static_field(ns_part, sym.name(), span, cur)
+    }
+
     /// Resolve a symbol in value position.
     fn analyze_symbol(&mut self, sym: &Symbol, span: Span) -> Result<Expr, CompileError> {
         if let Some(idx) = self
@@ -843,31 +901,9 @@ impl<'a> Analyzer<'a> {
         }
         let cur = self.current_ns();
         if let Some((target, id)) = self.eval.registry.resolve_target_and_id(&cur, sym) {
-            // Value-position checks (`analyzeSymbol` order: private
-            // first, then macro). Neither wrapper names an operator
-            // (probed); the private message spells the symbol as
-            // written without `#'`, the macro one the `#'` target.
-            // (Invoke position has its own check in `analyze_list`.)
-            let home = target.namespace().unwrap_or("");
-            if home != cur && crate::macros::is_private_var(self.eval, id) {
-                return Err(self.err(
-                    class::ILLEGAL_STATE,
-                    format!("var: {sym} is not public"),
-                    span,
-                    Verb::Compiling,
-                    None,
-                ));
-            }
-            if crate::macros::is_macro_var(self.eval, id) {
-                return Err(self.err(
-                    class::RUNTIME,
-                    format!("Can't take value of a macro: #'{}", target),
-                    span,
-                    Verb::Compiling,
-                    None,
-                ));
-            }
-            return Ok(Expr::Global(Var { id, sym: target }));
+            // Value-position checks (private, then macro — see
+            // `global_value_expr`).
+            return self.global_value_expr(sym, span, &cur, target, id);
         }
         // S16: imports resolve after vars (the class, not a var) —
         // operator position shares this path (#120: dotted bare
@@ -875,20 +911,8 @@ impl<'a> Analyzer<'a> {
         if let Some(expr) = self.analyze_symbol_class(sym, span, &cur)? {
             return Ok(expr);
         }
-        if let Some(ns_part) = sym.namespace() {
-            // Value-position static field reads (`Long/MAX_VALUE`):
-            // only when no namespace/alias claims the head (a real
-            // namespace keeps the `No such var` path below).
-            if self
-                .eval
-                .registry
-                .namespace_target_in(&cur, ns_part)
-                .is_none()
-            {
-                if let Some(expr) = self.analyze_static_field(ns_part, sym.name(), span, &cur)? {
-                    return Ok(expr);
-                }
-            }
+        if let Some(expr) = self.analyze_static_field_sym(sym, span, &cur)? {
+            return Ok(expr);
         }
         match sym.namespace() {
             // Aliases count as namespaces even when dangling
