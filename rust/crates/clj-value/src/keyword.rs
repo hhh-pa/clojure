@@ -17,15 +17,18 @@ use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, LazyLock, Mutex};
 
+use crate::FxBuildHasher;
+
 /// One interned keyword's canonical arcs.
 type CanonicalKeyword = (Option<Arc<str>>, Arc<str>);
 
 /// The intern table (fence 4a): `(ns, name)` arcs canonicalized
 /// across every construction, like the JVM's `KeywordTable` (strong
 /// refs — entries live as long as the process, same as interned
-/// keywords on the JVM).
-static KEYWORD_TABLE: LazyLock<Mutex<HashMap<CanonicalKeyword, CanonicalKeyword>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
+/// keywords on the JVM). Fx-hashed: every keyword construction
+/// probes this table.
+static KEYWORD_TABLE: LazyLock<Mutex<HashMap<CanonicalKeyword, CanonicalKeyword, FxBuildHasher>>> =
+    LazyLock::new(|| Mutex::new(HashMap::default()));
 
 /// A Clojure keyword such as `:ok` or `:user/id`.
 #[derive(Clone, Debug)]

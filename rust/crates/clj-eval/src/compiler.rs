@@ -88,11 +88,7 @@ pub(crate) fn native_add_classpath(
     };
     let dir_val = Value::Str(dir.clone());
     let id = core_var(eval, "*load-path*").expect("boot installs *load-path*");
-    let root = eval
-        .registry
-        .state(id)
-        .and_then(|s| s.root)
-        .unwrap_or(Value::Nil);
+    let root = eval.registry.root_cloned(id).unwrap_or(Value::Nil);
     let coll = match root {
         Value::Nil => Value::Vector(Vector::from_vec(Vec::new())),
         other => other,

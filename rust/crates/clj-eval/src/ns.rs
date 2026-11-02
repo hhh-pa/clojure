@@ -154,7 +154,7 @@ fn the_ns_name(reg: &SharedRegistry, v: &Value) -> Result<String, NativeError> {
         return Ok(h.name.to_string());
     }
     let key = sym_str(strict_sym(v)?);
-    if reg.get(&key).is_some() {
+    if reg.ns_id(&key).is_some() {
         Ok(key)
     } else {
         Err(ex(format!("No namespace: {key} found")))
@@ -190,12 +190,8 @@ pub(crate) fn stamped_meta(base: Map, ns_name: &str, ns_id: u64, name: &str) -> 
 /// `Var.isPublic`).
 pub(crate) fn is_public(reg: &SharedRegistry, id: u64) -> bool {
     let probe = Value::Keyword(Keyword::new(None, "private"));
-    !reg.state(id).is_some_and(|s| {
-        s.meta
-            .as_ref()
-            .and_then(|m| m.get(&probe))
-            .is_some_and(Value::is_truthy)
-    })
+    !reg.meta_cloned(id)
+        .is_some_and(|m| m.get(&probe).is_some_and(Value::is_truthy))
 }
 
 /// Resolve a symbol against an explicit namespace home, returning the
@@ -233,10 +229,9 @@ fn resolve_qualified(
         .aliases()
         .find(|(a, _, _)| *a == part)
         .map(|(_, t, _)| t.to_owned())
-        .or_else(|| reg.get(part).map(|_| part.to_owned()))?;
-    let target_ns = reg.ns_live_or_removed(&target)?;
+        .or_else(|| reg.ns_id(part).map(|_| part.to_owned()))?;
     let q = Symbol::new(Some(target.as_str()), sym.name());
-    target_ns.lookup(&q).map(|id| (q, id))
+    reg.lookup_in_live_or_removed(&target, &q).map(|id| (q, id))
 }
 
 /// Build a symbol-keyed map from `(simple-name, value)` pairs, sorted
@@ -268,7 +263,7 @@ pub(crate) fn check_arity(
 /// A qualified symbol's var id, without the alias step (the target
 /// is already resolved).
 fn id_of(reg: &SharedRegistry, q: &Symbol) -> Option<u64> {
-    reg.get(q.namespace()?).and_then(|ns| ns.lookup(q))
+    reg.lookup_in_ns(q.namespace()?, q)
 }
 
 /// The ISeq coercion error (probe36 `req-string`).
@@ -300,14 +295,14 @@ pub(crate) fn signal_to_native(s: Signal) -> NativeError {
 fn native_create_ns(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/create-ns", args, &[1])?;
     let key = sym_str(strict_sym(&args[0])?);
-    let id = eval.registry.ensure_ns(&key).id();
+    let id = eval.registry.ensure_ns_id(&key);
     Ok(ns_value(&key, id))
 }
 
 fn native_in_ns(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/in-ns", args, &[1])?;
     let key = sym_str(strict_sym(&args[0])?);
-    let id = eval.registry.ensure_ns(&key).id();
+    let id = eval.registry.ensure_ns_id(&key);
     eval.registry.set_current(&key);
     // `RT.inNamespace` is a thread-local `set`: the top frame when
     // bound (boot pushes a base frame, so the root never moves),
@@ -742,7 +737,7 @@ pub(crate) fn intern_routed(
                 .registry
                 .intern_in(ns_name, q)
                 .ok_or_else(|| ex(format!("No namespace: {ns_name} found")))?;
-            Ok((id, eval.registry.get(ns_name).map_or(0, |ns| ns.id())))
+            Ok((id, eval.registry.ns_id(ns_name).unwrap_or(0)))
         }
     }
 }

@@ -13,11 +13,16 @@
 
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 
-use clj_value::{ClassVal, Keyword, Map, Symbol, Unbound, Value, Var, new_map};
+use clj_value::{ClassVal, FxBuildHasher, Keyword, Map, Symbol, Unbound, Value, Var, new_map};
 
 use crate::ext::NsHandle;
+
+/// Registry maps hash with Fx (not SipHash): these sit on the var-deref
+/// hot path, and the keys are not attacker-controlled.
+pub(crate) type FxHashMap<K, V> = HashMap<K, V, FxBuildHasher>;
 
 /// A var's evaluator-side state: the handle in [`Value::Var`] is
 /// just `(id, sym)`; everything mutable lives here.
@@ -54,11 +59,11 @@ impl VarState {
 pub struct Namespace {
     name: String,
     id: u64,
-    vars: HashMap<u64, VarState>,
-    ids: HashMap<Symbol, u64>,
-    aliases: HashMap<String, (String, u64)>,
-    refers: HashMap<String, (Symbol, u64)>,
-    imports: HashMap<String, Arc<ClassVal>>,
+    vars: FxHashMap<u64, VarState>,
+    ids: FxHashMap<Symbol, u64>,
+    aliases: FxHashMap<String, (String, u64)>,
+    refers: FxHashMap<String, (Symbol, u64)>,
+    imports: FxHashMap<String, Arc<ClassVal>>,
     meta: Option<Map>,
 }
 
@@ -73,10 +78,10 @@ impl Namespace {
         Self {
             name: name.to_owned(),
             id,
-            vars: HashMap::new(),
-            ids: HashMap::new(),
-            aliases: HashMap::new(),
-            refers: HashMap::new(),
+            vars: FxHashMap::default(),
+            ids: FxHashMap::default(),
+            aliases: FxHashMap::default(),
+            refers: FxHashMap::default(),
             imports: crate::classemu::default_imports().collect(),
             meta: None,
         }
@@ -272,7 +277,7 @@ impl Namespace {
 /// id on creation (split out so `intern` can share it without
 /// tripping the borrow checker).
 fn ensure_ns_in<'a>(
-    namespaces: &'a mut HashMap<String, Namespace>,
+    namespaces: &'a mut FxHashMap<String, Namespace>,
     next_ns_id: &mut u64,
     name: &str,
 ) -> &'a mut Namespace {
@@ -292,17 +297,17 @@ fn ensure_ns_in<'a>(
 /// [`Bindings`] stay sound.
 #[derive(Clone, Debug, Default)]
 pub struct NamespaceRegistry {
-    namespaces: HashMap<String, Namespace>,
+    namespaces: FxHashMap<String, Namespace>,
     current: String,
     next_id: u64,
     next_ns_id: u64,
-    by_id: HashMap<u64, String>,
-    removed: HashMap<String, Namespace>,
+    by_id: FxHashMap<u64, String>,
+    removed: FxHashMap<String, Namespace>,
     /// Anonymous var states (S4b `with-local-vars`): ids with no
     /// namespace home, so `all-ns`/`ns-interns` never see them.
     /// [`state`](Self::state)/[`state_mut`](Self::state_mut)
     /// answer from here when `by_id` misses.
-    anon: HashMap<u64, VarState>,
+    anon: FxHashMap<u64, VarState>,
 }
 
 impl NamespaceRegistry {
@@ -686,11 +691,33 @@ impl NamespaceRegistry {
             .is_some_and(|s| !matches!(s.root, None | Some(Value::Unbound(_))))
     }
 
+    /// The var's root, cloned (`None` when uninterned or rootless).
+    /// Narrower than [`state`](Self::state): one `Value` clone, no
+    /// metadata clone.
+    #[must_use]
+    pub fn root_cloned(&self, id: u64) -> Option<Value> {
+        self.state(id).and_then(|s| s.root.clone())
+    }
+
+    /// Whether the var is `^:dynamic` (missing counts as non-dynamic).
+    /// Narrower than [`state`](Self::state): no clone at all.
+    #[must_use]
+    pub fn is_dynamic(&self, id: u64) -> bool {
+        self.state(id).is_some_and(|s| s.dynamic)
+    }
+
+    /// The var's metadata, cloned (`None` when uninterned or cleared).
+    /// Narrower than [`state`](Self::state): no root clone.
+    #[must_use]
+    pub fn meta_cloned(&self, id: u64) -> Option<Map> {
+        self.state(id).and_then(|s| s.meta.clone())
+    }
+
     /// `Var.deref` (minus thread bindings): the root, or the var's
     /// own `Unbound` sentinel when rootless. Never throws.
     #[must_use]
     pub fn root_or_unbound(&self, id: u64, sym: &Symbol) -> Value {
-        match self.state(id).and_then(|s| s.root.clone()) {
+        match self.root_cloned(id) {
             Some(v) => v,
             None => Value::Unbound(Unbound {
                 sym: sym.clone(),
@@ -728,6 +755,11 @@ impl NamespaceRegistry {
 #[derive(Clone, Debug)]
 pub struct SharedRegistry {
     inner: Arc<Mutex<SharedInner>>,
+    /// The lineage root generation: every `with_*` writer bumps it
+    /// (those are the only paths that can touch a `VarState`), and
+    /// the per-evaluator root cache reads it lock-free (see
+    /// `Evaluator::deref_var_cached`).
+    epoch: Arc<AtomicU64>,
 }
 
 /// The lineage-global contents: the registry plus the evaluator
@@ -741,8 +773,8 @@ struct SharedInner {
     fn_seq: u64,
     gensym: u64,
     eval_seq: u64,
-    alter_locks: HashMap<u64, Arc<VarAlterLock>>,
-    protocol_fn_methods: HashMap<u64, crate::typeinternals::ProtocolFnInfo>,
+    alter_locks: FxHashMap<u64, Arc<VarAlterLock>>,
+    protocol_fn_methods: FxHashMap<u64, crate::typeinternals::ProtocolFnInfo>,
 }
 
 /// Per-var reentrant alter lock (T1192 FX1): mirrors the JVM's
@@ -789,9 +821,10 @@ impl Default for SharedRegistry {
                 fn_seq: 0,
                 gensym: 1,
                 eval_seq: 0,
-                alter_locks: HashMap::new(),
-                protocol_fn_methods: HashMap::new(),
+                alter_locks: FxHashMap::default(),
+                protocol_fn_methods: FxHashMap::default(),
             })),
+            epoch: Arc::new(AtomicU64::new(0)),
         }
     }
 }
@@ -808,6 +841,19 @@ impl SharedRegistry {
     /// is unreachable).
     fn lock(&self) -> MutexGuard<'_, SharedInner> {
         self.inner.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The current root generation (lock-free).
+    #[must_use]
+    pub fn epoch(&self) -> u64 {
+        self.epoch.load(Ordering::Acquire)
+    }
+
+    /// Bump the root generation (every `with_*` writer calls this —
+    /// any `VarState` mutation may have changed a root, so every
+    /// evaluator's cache generation ends).
+    fn bump_epoch(&self) {
+        self.epoch.fetch_add(1, Ordering::AcqRel);
     }
 
     /// The next throwable/closure/native identity.
@@ -880,10 +926,34 @@ impl SharedRegistry {
         self.lock().registry.ensure_ns(name).clone()
     }
 
+    /// Find or create a namespace, returning its id (like
+    /// [`ensure_ns`](Self::ensure_ns), without cloning the
+    /// namespace).
+    pub fn ensure_ns_id(&self, name: &str) -> u64 {
+        self.lock().registry.ensure_ns(name).id()
+    }
+
     /// Look up a namespace by name.
     #[must_use]
     pub fn get(&self, name: &str) -> Option<Namespace> {
         self.lock().registry.get(name).cloned()
+    }
+
+    /// Look up a var id directly in a live namespace's interns
+    /// (like [`get`](Self::get) + [`lookup`](Namespace::lookup),
+    /// without cloning the namespace — the analyzer resolves
+    /// through this per symbol).
+    #[must_use]
+    pub fn lookup_in_ns(&self, ns_name: &str, sym: &Symbol) -> Option<u64> {
+        self.lock().registry.get(ns_name)?.lookup(sym)
+    }
+
+    /// Look up a var id directly in a live or removed namespace's
+    /// interns (like [`ns_live_or_removed`](Self::ns_live_or_removed)
+    /// + [`lookup`](Namespace::lookup), without the clone).
+    #[must_use]
+    pub fn lookup_in_live_or_removed(&self, name: &str, sym: &Symbol) -> Option<u64> {
+        self.lock().registry.ns_live_or_removed(name)?.lookup(sym)
     }
 
     /// A live namespace's id (`None` when missing or removed).
@@ -1001,6 +1071,27 @@ impl SharedRegistry {
         self.lock().registry.state(id).cloned()
     }
 
+    /// The var's root, cloned (see
+    /// [`NamespaceRegistry::root_cloned`]).
+    #[must_use]
+    pub fn root_cloned(&self, id: u64) -> Option<Value> {
+        self.lock().registry.root_cloned(id)
+    }
+
+    /// Whether the var is `^:dynamic` (see
+    /// [`NamespaceRegistry::is_dynamic`]).
+    #[must_use]
+    pub fn is_dynamic(&self, id: u64) -> bool {
+        self.lock().registry.is_dynamic(id)
+    }
+
+    /// The var's metadata, cloned (see
+    /// [`NamespaceRegistry::meta_cloned`]).
+    #[must_use]
+    pub fn meta_cloned(&self, id: u64) -> Option<Map> {
+        self.lock().registry.meta_cloned(id)
+    }
+
     /// `Var.isBound` (minus thread bindings).
     #[must_use]
     pub fn has_root(&self, id: u64) -> bool {
@@ -1056,46 +1147,66 @@ impl SharedRegistry {
 
     /// Run `f` over a var's state (`None` when uninterned). The
     /// closure must neither touch the registry nor evaluate (the
-    /// lock is held throughout).
+    /// lock is held throughout). Bumps the root generation (the
+    /// closure may have changed the root).
     pub fn with_state_mut<R>(&self, id: u64, f: impl FnOnce(&mut VarState) -> R) -> Option<R> {
-        let mut inner = self.lock();
-        let state = inner.registry.state_mut(id)?;
-        Some(f(state))
+        let out = {
+            let mut inner = self.lock();
+            let state = inner.registry.state_mut(id)?;
+            f(state)
+        };
+        self.bump_epoch();
+        Some(out)
     }
 
     /// Run `f` over a live namespace (`None` when missing). Same
     /// closure discipline as [`with_state_mut`](Self::with_state_mut).
+    /// Bumps the root generation (the closure sees `&mut` states).
     pub fn with_ns_mut<R>(&self, name: &str, f: impl FnOnce(&mut Namespace) -> R) -> Option<R> {
-        let mut inner = self.lock();
-        let ns = inner.registry.get_mut(name)?;
-        Some(f(ns))
+        let out = {
+            let mut inner = self.lock();
+            let ns = inner.registry.get_mut(name)?;
+            f(ns)
+        };
+        self.bump_epoch();
+        Some(out)
     }
 
     /// Run `f` over a live or removed namespace (`None` when
     /// neither). Same closure discipline as
-    /// [`with_state_mut`](Self::with_state_mut).
+    /// [`with_state_mut`](Self::with_state_mut). Bumps the root
+    /// generation (the closure sees `&mut` states).
     pub fn with_live_or_removed_mut<R>(
         &self,
         name: &str,
         f: impl FnOnce(&mut Namespace) -> R,
     ) -> Option<R> {
-        let mut inner = self.lock();
-        let ns = inner.registry.ns_live_or_removed_mut(name)?;
-        Some(f(ns))
+        let out = {
+            let mut inner = self.lock();
+            let ns = inner.registry.ns_live_or_removed_mut(name)?;
+            f(ns)
+        };
+        self.bump_epoch();
+        Some(out)
     }
 
     /// Run `f` over a handle-pinned namespace (`None` when neither
     /// generation matches). Same closure discipline as
-    /// [`with_state_mut`](Self::with_state_mut).
+    /// [`with_state_mut`](Self::with_state_mut). Bumps the root
+    /// generation (the closure sees `&mut` states).
     pub fn with_handle_mut<R>(
         &self,
         name: &str,
         id: u64,
         f: impl FnOnce(&mut Namespace) -> R,
     ) -> Option<R> {
-        let mut inner = self.lock();
-        let ns = inner.registry.ns_for_handle_mut(name, id)?;
-        Some(f(ns))
+        let out = {
+            let mut inner = self.lock();
+            let ns = inner.registry.ns_for_handle_mut(name, id)?;
+            f(ns)
+        };
+        self.bump_epoch();
+        Some(out)
     }
 }
 

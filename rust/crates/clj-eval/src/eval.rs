@@ -15,7 +15,7 @@
 
 use std::collections::HashSet;
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use clj_reader::{Reader, ReaderOpts, Span};
 use clj_value::{
@@ -380,11 +380,15 @@ impl Evaluator {
     /// `in-ns` keeps both in sync), else the registry current.
     /// Public for S7 drivers (the REPL prompt tracks this).
     pub fn current_ns_name(&self) -> String {
-        let star_ns = Symbol::new(Some("clojure.core"), "*ns*");
+        // Static lookup key (equality/hash ignore the id/meta, so
+        // sharing one symbol is sound): this runs per analyzed
+        // symbol, and the direct id lookup skips the whole-namespace
+        // clone `get` + `lookup` paid before.
+        static STAR_NS: LazyLock<Symbol> =
+            LazyLock::new(|| Symbol::new(Some("clojure.core"), "*ns*"));
         let bound = self
             .registry
-            .get("clojure.core")
-            .and_then(|ns| ns.lookup(&star_ns))
+            .lookup_in_ns("clojure.core", &STAR_NS)
             .and_then(|id| self.bindings.get(id))
             .and_then(|v| match v {
                 Value::Extension(h) => h.as_any().downcast_ref::<NsHandle>(),
@@ -947,7 +951,7 @@ impl Evaluator {
     /// `ns_live_or_removed`, so live behavior is untouched).
     fn tombstone_id(&self, sym: &Symbol) -> Option<u64> {
         let ns = sym.namespace()?;
-        self.registry.ns_live_or_removed(ns)?.lookup(sym)
+        self.registry.lookup_in_live_or_removed(ns, sym)
     }
 
     /// A vector literal (elements evaluate left to right).
@@ -1059,7 +1063,7 @@ impl Evaluator {
             values.push(self.eval(init, env)?);
         }
         for (var, _) in pairs {
-            let dynamic = self.registry.state(var.id).is_some_and(|s| s.dynamic);
+            let dynamic = self.registry.is_dynamic(var.id);
             if !dynamic {
                 return Err(self.throw(NativeError::new(
                     ThrowClass::IllegalStateException,
@@ -1296,7 +1300,7 @@ impl Evaluator {
             match saves.iter_mut().find(|(i, _, _)| *i == id) {
                 Some(slot) => slot.2 = value,
                 None => {
-                    let saved = self.registry.state(id).and_then(|s| s.root.clone());
+                    let saved = self.registry.root_cloned(id);
                     saves.push((id, saved, value));
                 }
             }
@@ -1377,7 +1381,7 @@ impl Evaluator {
         let closure = self.make_closure(fun, env);
         let dynamic = Self::dynamic_of(sym);
         let cur = self.current_ns_name();
-        let cur_id = self.registry.get(&cur).map_or(0, |ns| ns.id());
+        let cur_id = self.registry.ns_id(&cur).unwrap_or(0);
         let mut meta = sym.meta().cloned().unwrap_or_else(new_map);
         if let Some(attr) = attr {
             for (k, v) in attr.iter() {
@@ -1530,7 +1534,7 @@ impl Evaluator {
         };
         let dynamic = Self::dynamic_of(sym);
         let cur = self.current_ns_name();
-        let cur_id = self.registry.get(&cur).map_or(0, |ns| ns.id());
+        let cur_id = self.registry.ns_id(&cur).unwrap_or(0);
         let mut meta = sym.meta().cloned().unwrap_or_else(new_map);
         if let Some(doc) = doc {
             let key = Value::Keyword(Keyword::new(None, "doc"));
