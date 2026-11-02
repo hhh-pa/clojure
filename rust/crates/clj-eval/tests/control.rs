@@ -197,6 +197,31 @@ fn odd_even() {
     );
 }
 
+// soe-guard/deep-recursion: non-terminating evaluation throws
+// `StackOverflowError` (empty message, like the JVM) instead of
+// aborting the process, and deep-but-finite recursion still
+// returns. Runs on a roomy-stack thread: libtest threads are
+// 2MB, which the native stack would exhaust first.
+#[test]
+fn eval_depth_guard() {
+    let out = std::thread::Builder::new()
+        .stack_size(clj_eval::EVAL_STACK_SIZE)
+        .spawn(|| {
+            let mut eval = boot();
+            let overflow = uncaught(&mut eval, "(defn f [n] (f (inc n))) (f 0)");
+            let deep = run_last(
+                &mut eval,
+                "(defn g [n] (if (zero? n) 0 (inc (g (dec n))))) (g 3000)",
+            );
+            (overflow, deep)
+        })
+        .expect("spawn")
+        .join()
+        .expect("join");
+    assert_eq!(out.0, "java.lang.StackOverflowError | ");
+    assert_eq!(out.1, "3000");
+}
+
 #[test]
 fn hash_values() {
     let mut eval = boot();

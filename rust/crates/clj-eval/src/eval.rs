@@ -115,6 +115,31 @@ fn case_shift_mask(key: i32, shift: i32, mask: i32) -> i32 {
     }
 }
 
+/// Stack bytes for threads that evaluate user code (script
+/// runs, futures, agents, go blocks, `seque` feeders): roomy
+/// enough that the [`EVAL_DEPTH_LIMIT`] guard always trips
+/// before the native stack does (virtual address only — pages
+/// commit on touch).
+pub const EVAL_STACK_SIZE: usize = 512 * 1024 * 1024;
+
+/// Max live `eval` nesting depth (every nested node counts):
+/// past this, evaluation throws `StackOverflowError` (empty
+/// message, like the JVM) instead of aborting the process.
+/// Profile-split because native frame sizes differ: the debug
+/// value sits below the measured debug abort band on
+/// [`EVAL_STACK_SIZE`] stacks (32–64k frames), while the release
+/// value sits above the JVM's ~8–12k-call overflow band for
+/// typical shapes (probed `/tmp/depthJ.clj`) yet below native
+/// overflow on [`EVAL_STACK_SIZE`] stacks for even the thinnest
+/// nesting. Debug-green therefore implies release-green for
+/// depth (release is strictly more permissive).
+#[cfg(debug_assertions)]
+pub const EVAL_DEPTH_LIMIT: usize = 16_384;
+/// Max live `eval` nesting depth in release builds (see the
+/// debug-noted contract above).
+#[cfg(not(debug_assertions))]
+pub const EVAL_DEPTH_LIMIT: usize = 131_072;
+
 /// The evaluator: shared lineage state (namespace registry plus
 /// identity counters), per-thread bindings, load path, spawned
 /// future threads, and the ambient native call span. `Send + Sync`
@@ -140,6 +165,14 @@ pub struct Evaluator {
     /// the run path stays unbounded). Set once on the throwaway
     /// planning evaluator, read by every `Analyzer` it builds.
     pub(crate) analyze_depth_limit: Option<usize>,
+    /// Live `eval` nesting depth (every nested node counts, so
+    /// calls and literal nesting share one budget): past
+    /// [`EVAL_DEPTH_LIMIT`] evaluation throws `StackOverflowError`
+    /// instead of aborting the process (the JVM behavior).
+    /// Manual increment/decrement (Clojure throws are signals, not
+    /// unwinding; a Rust panic is a port bug and never resumes
+    /// evaluation on the same node).
+    eval_depth: usize,
     /// `*out*` flushes served (the `*flush-on-newline*` test hook:
     /// fresh evaluators read 0; per-evaluator, so parallel-safe).
     flush_count: u64,
@@ -204,6 +237,7 @@ impl Evaluator {
             agent_outbox: None,
             tx: None,
             analyze_depth_limit: None,
+            eval_depth: 0,
             flush_count: 0,
             print_defaults_only: false,
             data_reader_scan_path: None,
@@ -239,6 +273,9 @@ impl Evaluator {
             // Budgets never cross threads (limits are set on
             // single-threaded planning evaluators, which never fork).
             analyze_depth_limit: None,
+            // Live depth never crosses threads either (a forked
+            // evaluator starts a fresh stack).
+            eval_depth: 0,
             // Flushes are counted per evaluator (fresh forks read 0);
             // defaults-only mode never crosses threads either.
             flush_count: 0,
@@ -810,7 +847,26 @@ impl Evaluator {
     }
 
     /// Evaluate an expression to a value (or a control signal).
+    /// Counts live nesting against [`EVAL_DEPTH_LIMIT`] (past it,
+    /// a `StackOverflowError` — the JVM behavior — instead of a
+    /// native stack abort).
     pub fn eval(&mut self, expr: &Expr, env: &Env) -> Result<Value, Signal> {
+        self.eval_depth += 1;
+        if self.eval_depth > EVAL_DEPTH_LIMIT {
+            self.eval_depth -= 1;
+            return Err(self.throw(NativeError::new(
+                ThrowClass::StackOverflowError,
+                String::new(),
+            )));
+        }
+        let out = self.eval_inner(expr, env);
+        self.eval_depth -= 1;
+        out
+    }
+
+    /// The single-node evaluator (every recursive call flows back
+    /// through [`eval`](Self::eval), so all nesting is counted).
+    fn eval_inner(&mut self, expr: &Expr, env: &Env) -> Result<Value, Signal> {
         match expr {
             Expr::Literal(v) | Expr::Quote(v) => Ok(v.clone()),
             Expr::VecLit(elems, meta) => self.eval_vec(elems, meta.clone(), env),

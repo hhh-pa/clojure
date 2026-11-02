@@ -1191,6 +1191,7 @@ fn native_go_call(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeE
     let n = GO_SEQ.fetch_add(1, Ordering::Relaxed);
     let handle = std::thread::Builder::new()
         .name(format!("clj-go-{n}"))
+        .stack_size(crate::eval::EVAL_STACK_SIZE)
         .spawn(move || run_go_body(child, port, thunk))
         .map_err(|_| go_spawn_failed())?;
     drop(handle); // detached: daemon semantics (parked gos never hold the exit join)

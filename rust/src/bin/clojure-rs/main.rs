@@ -14,7 +14,7 @@
 //! `docs/gap-121/slice-1.md`).
 
 use clap::{Parser, Subcommand};
-use clj_eval::{Evaluator, SourceError, boot, compile_diagnostic, compile_head};
+use clj_eval::{EVAL_STACK_SIZE, Evaluator, SourceError, boot, compile_diagnostic, compile_head};
 use clj_value::Value;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -144,8 +144,14 @@ fn cmd_eval(form: &str, edn: bool) -> ExitCode {
         // exit 0, like JVM `-e ''` (pins P5).
         return ExitCode::SUCCESS;
     }
-    let mut eval = boot();
-    let code = cmd_eval_forms(&mut eval, form);
+    let form = form.to_owned();
+    let (eval, code) = match run_on_eval_thread(boot(), move |eval| cmd_eval_forms(eval, &form)) {
+        Ok(done) => done,
+        Err(diagnostic) => {
+            eprintln!("{diagnostic}");
+            return ExitCode::from(3);
+        }
+    };
     // JVM parity: non-daemon pool/future threads keep the JVM alive
     // past main; join them here (T1192 FX1).
     eval.join_drainers();
@@ -265,8 +271,7 @@ fn cmd_run(file: &Path, args: &[String]) -> ExitCode {
         eprintln!("run: cannot open {}: {e}", file.display());
         return ExitCode::from(3);
     }
-    let path = file.to_string_lossy();
-    let mut eval = boot();
+    let path = file.to_string_lossy().into_owned();
     // Upstream `clojure.main/with-bindings` ("vars that often need
     // to be set!"): every script runs inside thread bindings for
     // the set below (issue #201 S3 — upstream `string.clj:46`
@@ -303,17 +308,50 @@ fn cmd_run(file: &Path, args: &[String]) -> ExitCode {
          (require 'clojure.string) \
          (load-file {target}))"
     );
-    let code = match eval.eval_source(&script) {
-        Ok(_) => ExitCode::SUCCESS,
-        Err(e) => {
-            eprintln!("{}", run_diagnostic(&path, &e));
-            ExitCode::from(1)
-        }
-    };
+    let (eval, code) =
+        match run_on_eval_thread(boot(), move |eval| match eval.eval_source(&script) {
+            Ok(_) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("{}", run_diagnostic(&path, &e));
+                ExitCode::from(1)
+            }
+        }) {
+            Ok(done) => done,
+            Err(diagnostic) => {
+                eprintln!("{diagnostic}");
+                return ExitCode::from(3);
+            }
+        };
     // Exit join (see `cmd_eval`): drained agents and futures print
     // before the process goes away, like the JVM's non-daemon wait.
     eval.join_drainers();
     code
+}
+
+/// Evaluate on a roomy-stack thread ([`EVAL_STACK_SIZE`]) so the
+/// depth guard (not the native stack) bounds recursion, like the
+/// JVM's generous main-thread stack. Returns the evaluator for
+/// the exit join alongside the outcome. A panicking evaluator
+/// resumes on this thread (same as an inline panic); a spawn
+/// failure reports its diagnostic.
+fn run_on_eval_thread<T>(
+    eval: Evaluator,
+    f: impl FnOnce(&mut Evaluator) -> T + Send + 'static,
+) -> Result<(Evaluator, T), String>
+where
+    T: Send + 'static,
+{
+    std::thread::Builder::new()
+        .name("clojure-rs-eval".to_owned())
+        .stack_size(EVAL_STACK_SIZE)
+        .spawn(move || {
+            let mut eval = eval;
+            let out = f(&mut eval);
+            (eval, out)
+        })
+        .map_err(|e| format!("cannot spawn eval thread: {e}"))?
+        .join()
+        .map_err(|payload| std::panic::resume_unwind(payload))
 }
 
 /// The `*command-line-args*` init (pins P4): nil without args, else a

@@ -93,6 +93,9 @@ pub enum ThrowClass {
     /// `NoSuchElementException` (S16 `getFirst`/`getLast` on empty
     /// lists): a `RuntimeException`.
     NoSuchElementException,
+    /// `StackOverflowError` (eval depth guard): a
+    /// `VirtualMachineError`, like the JVM's.
+    StackOverflowError,
 }
 
 impl ThrowClass {
@@ -196,6 +199,7 @@ impl ThrowClass {
         match self {
             Self::ClassNotFoundException => "java.lang.ClassNotFoundException",
             Self::NoSuchElementException => "java.util.NoSuchElementException",
+            Self::StackOverflowError => "java.lang.StackOverflowError",
             other => other.jvm_name_array(),
         }
     }
@@ -356,6 +360,7 @@ fn throw_parent_array(jvm_name: &str) -> Option<&'static str> {
             Some("java.lang.RuntimeException")
         }
         "java.lang.OutOfMemoryError" => Some("java.lang.VirtualMachineError"),
+        "java.lang.StackOverflowError" => Some("java.lang.VirtualMachineError"),
         "java.lang.VirtualMachineError" => Some("java.lang.Error"),
         _ => None,
     }
