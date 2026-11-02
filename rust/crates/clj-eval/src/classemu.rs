@@ -28,18 +28,18 @@
 
 use std::collections::HashSet;
 use std::sync::Arc;
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use clj_value::{
-    ClassVal, ExtensionValue, HostDef, HostKind, HostVal, Keyword, List, Map, SeqKind, Symbol,
-    ThrowClass, Value, Vector, new_map, new_set,
+    BaseType, ClassVal, ExtensionValue, HostDef, HostKind, HostVal, Keyword, List, Map, SeqKind,
+    Symbol, ThrowClass, Value, Vector, new_map, new_set,
 };
 use num_traits::ToPrimitive;
 
+use crate::collmisc::MatcherHandle;
 use crate::error::{NativeError, jvm_class_of, simple_name_of};
 use crate::eval::Evaluator;
 use crate::ext::{Closure, NativeFn};
+use crate::hostvals::BuilderValue;
 use crate::ns::{NativeFnPtr, check_arity, signal_to_native};
 
 /// The S16 natives: class queries, `bean`, and `identical?`
@@ -2183,7 +2183,10 @@ fn static_field_byte(field: &str) -> Option<Value> {
 
 fn static_field_double(field: &str) -> Option<Value> {
     match field {
-        "MIN_VALUE" => Some(Value::Double(f64::MIN_POSITIVE)),
+        // `Double/MIN_VALUE` is the smallest positive
+        // *subnormal* (`from_bits(1)`), not `MIN_POSITIVE` (the
+        // smallest *normal*).
+        "MIN_VALUE" => Some(Value::Double(f64::from_bits(1))),
         "MAX_VALUE" => Some(Value::Double(f64::MAX)),
         "POSITIVE_INFINITY" => Some(Value::Double(f64::INFINITY)),
         "NEGATIVE_INFINITY" => Some(Value::Double(f64::NEG_INFINITY)),
@@ -2772,6 +2775,7 @@ pub(crate) fn static_member_arities(fqn: &str, member: &str) -> Option<&'static 
         "java.lang.Double" => static_arities_double(member),
         "java.lang.String" => static_arities_string(member),
         "java.lang.Math" => static_arities_math(member),
+        "java.util.regex.Matcher" => static_arities_matcher(member),
         _ => None,
     }
 }
@@ -2809,7 +2813,7 @@ fn static_arities_lpv(member: &str) -> Option<&'static [usize]> {
 
 fn static_arities_long(member: &str) -> Option<&'static [usize]> {
     match member {
-        "parseLong" => Some(&[1]),
+        "parseLong" => Some(&[1, 2]),
         "remainderUnsigned" => Some(&[2]),
         _ => None,
     }
@@ -2817,7 +2821,7 @@ fn static_arities_long(member: &str) -> Option<&'static [usize]> {
 
 fn static_arities_integer(member: &str) -> Option<&'static [usize]> {
     match member {
-        "parseInt" => Some(&[1]),
+        "parseInt" => Some(&[1, 2]),
         _ => None,
     }
 }
@@ -2831,7 +2835,14 @@ fn static_arities_double(member: &str) -> Option<&'static [usize]> {
 
 fn static_arities_string(member: &str) -> Option<&'static [usize]> {
     match member {
-        "format" => Some(&[3]),
+        "format" => Some(&[2, 3]),
+        _ => None,
+    }
+}
+
+fn static_arities_matcher(member: &str) -> Option<&'static [usize]> {
+    match member {
+        "quoteReplacement" => Some(&[1]),
         _ => None,
     }
 }
@@ -2890,6 +2901,7 @@ fn native_static(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeEr
         "java.lang.Double" => static_call_double(member.as_ref(), rest),
         "java.lang.String" => static_call_string(eval, member.as_ref(), rest),
         "java.lang.Math" => static_call_math(member.as_ref(), rest),
+        "java.util.regex.Matcher" => static_call_matcher(member.as_ref(), rest),
         _ => Err(crate::types::no_method(member, rest.len(), fqn)),
     }
 }
@@ -2993,6 +3005,17 @@ fn static_call_string(
             member,
             rest.len(),
             "java.lang.String",
+        )),
+    }
+}
+
+fn static_call_matcher(member: &str, rest: &[Value]) -> Result<Value, NativeError> {
+    match member {
+        "quoteReplacement" => static_quote_replacement(rest),
+        _ => Err(crate::types::no_method(
+            member,
+            rest.len(),
+            "java.util.regex.Matcher",
         )),
     }
 }
@@ -3412,8 +3435,39 @@ fn static_long_parse_long(args: &[Value]) -> Result<Value, NativeError> {
             Value::Nil => Err(parse_nfe("null")),
             other => Err(crate::core::cce_err(other, "java.lang.String")),
         },
+        2 => parse_radix_body(&args[0], &args[1], false),
         n => Err(crate::types::no_method("parseLong", n, "java.lang.Long")),
     }
+}
+
+/// The 2-arg `(String, int)` parse body shared by `parseLong`
+/// and `parseInt` (the int rule narrows tower values; out of
+/// `2..=36` the radix NFE fires before the input is read).
+fn parse_radix_body(
+    subject: &Value,
+    radix_v: &Value,
+    narrow_int: bool,
+) -> Result<Value, NativeError> {
+    let Value::Str(s) = subject else {
+        if matches!(subject, Value::Nil) {
+            return Err(parse_nfe("null"));
+        }
+        return Err(crate::core::cce_err(subject, "java.lang.String"));
+    };
+    let radix = crate::core::int_of_number(radix_v)?;
+    if !(2..=36).contains(&radix) {
+        return Err(crate::core::nfe_bad_radix(radix));
+    }
+    let parsed = crate::core::parse_long_radix(s, radix as u32);
+    if narrow_int {
+        return parsed
+            .and_then(|n| i32::try_from(n).ok())
+            .map(|n| Value::Int(i64::from(n)))
+            .ok_or_else(|| crate::core::nfe_for_input_radix(s, radix));
+    }
+    parsed
+        .map(Value::Int)
+        .ok_or_else(|| crate::core::nfe_for_input_radix(s, radix))
 }
 
 /// The boxArg `long` coercion (the `str_int_arg` sibling:
@@ -3469,24 +3523,77 @@ fn static_long_remainder_unsigned(args: &[Value]) -> Result<Value, NativeError> 
 /// locale exists here, so the locale is accepted and the
 /// shared `clojure.core/format` engine renders (it always
 /// emits `.` decimals, like `Formatter` under `US`).
+/// A `String/format` locale: nil reads the default locale
+/// (like `new Formatter((Locale) null)`), `Locale` constants
+/// pass, anything else fails the `Locale` cast (oracle
+/// `/tmp/fmtedge.clj`).
+fn format_locale(v: &Value) -> Result<(), NativeError> {
+    match v {
+        Value::Nil => Ok(()),
+        v if as_locale(v).is_some() => Ok(()),
+        other => Err(crate::core::cce_err(other, "java.util.Locale")),
+    }
+}
+
+/// A `String/format` trailing array: `Object[]` spreads its
+/// snapshot, nil formats one null argument, anything else fails
+/// the `[Ljava.lang.Object;` cast (oracle `/tmp/fmtedge.clj`).
+fn format_args_array(v: &Value) -> Result<Vec<Value>, NativeError> {
+    match v {
+        Value::Array(a) if a.desc().base == BaseType::Object => Ok(a.snapshot()),
+        Value::Nil => Ok(vec![Value::Nil]),
+        other => Err(crate::core::cce_err(other, "[Ljava.lang.Object;")),
+    }
+}
+
+/// `String/format`: the 2-arity `(fmt, args)` and 3-arity
+/// `(locale, fmt, args)` overloads over the shared `format`
+/// engine (the engine validates the format string; locales are
+/// accepted and shape US output).
 fn static_string_format(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
-    if args.len() != 3 {
-        return Err(crate::types::no_method(
-            "format",
-            args.len(),
-            "java.lang.String",
-        ));
-    }
-    if as_locale(&args[0]).is_none() {
-        return Err(crate::core::cce_err(&args[0], "java.util.Locale"));
-    }
-    let Value::Array(a) = &args[2] else {
-        return Err(crate::core::cce_err(&args[2], "[Ljava.lang.Object;"));
+    let (fmt, argv) = match args.len() {
+        2 => (&args[0], &args[1]),
+        3 => {
+            format_locale(&args[0])?;
+            (&args[1], &args[2])
+        }
+        n => {
+            return Err(crate::types::no_method("format", n, "java.lang.String"));
+        }
     };
-    let mut full = Vec::with_capacity(a.len() + 1);
-    full.push(args[1].clone());
-    full.extend(a.snapshot());
-    crate::fmt::native_format(eval, &full)
+    let spread = format_args_array(argv)?;
+    let mut combined = Vec::with_capacity(spread.len() + 1);
+    combined.push(fmt.clone());
+    combined.extend(spread);
+    crate::fmt::native_format(eval, &combined)
+}
+
+/// `Matcher/quoteReplacement`: backslash-escapes `\` and `$`.
+fn static_quote_replacement(args: &[Value]) -> Result<Value, NativeError> {
+    match args.len() {
+        1 => match &args[0] {
+            Value::Str(s) => {
+                let mut out = String::with_capacity(s.len());
+                for c in s.chars() {
+                    if c == '\\' || c == '$' {
+                        out.push('\\');
+                    }
+                    out.push(c);
+                }
+                Ok(Value::Str(Arc::from(out.as_str())))
+            }
+            Value::Nil => Err(NativeError::new(
+                ThrowClass::NullPointerException,
+                "Cannot invoke \"String.indexOf(int)\" because \"s\" is null".to_owned(),
+            )),
+            other => Err(crate::core::cce_err(other, "java.lang.String")),
+        },
+        n => Err(crate::types::no_method(
+            "quoteReplacement",
+            n,
+            "java.util.regex.Matcher",
+        )),
+    }
 }
 
 /// `Integer/parseInt` (issue #201 S12): the long body narrowed to
@@ -3501,6 +3608,7 @@ fn static_integer_parse_int(args: &[Value]) -> Result<Value, NativeError> {
             Value::Nil => Err(parse_nfe("null")),
             other => Err(crate::core::cce_err(other, "java.lang.String")),
         },
+        2 => parse_radix_body(&args[0], &args[1], true),
         n => Err(crate::types::no_method("parseInt", n, "java.lang.Integer")),
     }
 }
@@ -4409,8 +4517,9 @@ fn surface_gated(
         .or_else(|| surface_gated_regex(meth, target, rest))
 }
 
-/// The `StringBuilder` members (issue #201 S5): `append` only —
-/// `toString` rides the universal via `print_str`.
+/// The `StringBuilder`/`StringBuffer` members: `append`,
+/// `length`, `reverse` — `toString` rides the universal via
+/// `print_str`.
 fn surface_gated_builder(
     eval: &mut Evaluator,
     meth: &str,
@@ -4419,11 +4528,15 @@ fn surface_gated_builder(
 ) -> Option<Result<Value, NativeError>> {
     match (meth, rest.len()) {
         ("append", 1) => gated_builder_append(eval, target, rest),
+        ("length", 0) => gated_builder_length(target),
+        ("reverse", 0) => gated_builder_reverse(target),
         _ => None,
     }
 }
 
-/// The `Pattern` members (issue #201 S7): `split` only.
+/// The `Pattern`/`Matcher` members (issue #201 S7 + the
+/// member sweep): `Pattern/split`, `Matcher/replaceAll`, and
+/// the find/group/span/append/`replaceFirst` surface.
 fn surface_gated_regex(
     meth: &str,
     target: &Value,
@@ -4432,6 +4545,14 @@ fn surface_gated_regex(
     match (meth, rest.len()) {
         ("split", 1 | 2) => gated_regex_split(target, rest),
         ("replaceAll", 1) => gated_matcher_replace_all(target, rest),
+        ("find", 0) => gated_match_find(target),
+        ("group", 0 | 1) => gated_match_group(target, rest),
+        ("start", 0) => gated_match_span(target, true),
+        ("end", 0) => gated_match_span(target, false),
+        ("matches", 0) => gated_match_matches(target),
+        ("appendReplacement", 2) => gated_match_append_replacement(target, rest),
+        ("appendTail", 1) => gated_match_append_tail(target, rest),
+        ("replaceFirst", 1) => gated_match_replace_first(target, rest),
         _ => None,
     }
 }
@@ -4451,6 +4572,146 @@ fn gated_matcher_replace_all(target: &Value, rest: &[Value]) -> Option<Result<Va
         ))),
         _ => None,
     }
+}
+
+/// `Matcher.find` (boolean advance).
+fn gated_match_find(target: &Value) -> Option<Result<Value, NativeError>> {
+    let h = crate::collmisc::as_matcher(target)?;
+    Some(Ok(Value::Bool(h.advance())))
+}
+
+/// `Matcher.group` (the full match, or group `i` — unmatched
+/// groups answer nil).
+fn gated_match_group(target: &Value, rest: &[Value]) -> Option<Result<Value, NativeError>> {
+    let h = crate::collmisc::as_matcher(target)?;
+    Some(match_group(h, rest))
+}
+
+/// The `group` body (split for the complexity budget).
+fn match_group(h: &MatcherHandle, rest: &[Value]) -> Result<Value, NativeError> {
+    let groups = h
+        .last_groups()
+        .ok_or_else(crate::collmisc::no_match_found)?;
+    if rest.is_empty() {
+        let full = groups[0].as_deref().expect("a match holds group 0");
+        return Ok(Value::Str(Arc::from(full)));
+    }
+    let i = str_int_arg(&rest[0])?;
+    match usize::try_from(i).ok().and_then(|n| groups.get(n)) {
+        Some(Some(g)) => Ok(Value::Str(Arc::from(g.as_str()))),
+        Some(None) => Ok(Value::Nil),
+        None => Err(crate::collmisc::no_group(i64::from(i))),
+    }
+}
+
+/// `Matcher.start`/`end` (UTF-16 offsets of the last match).
+fn gated_match_span(target: &Value, start: bool) -> Option<Result<Value, NativeError>> {
+    let h = crate::collmisc::as_matcher(target)?;
+    Some(match h.last_utf16_span() {
+        Some((s, e)) => Ok(Value::Int(if start { s } else { e })),
+        None => Err(crate::collmisc::no_match_found()),
+    })
+}
+
+/// `Matcher.matches` (a full-span match attempt).
+fn gated_match_matches(target: &Value) -> Option<Result<Value, NativeError>> {
+    let h = crate::collmisc::as_matcher(target)?;
+    Some(Ok(Value::Bool(h.try_matches())))
+}
+
+/// The `StringBuffer` cast (the port's short CCE shape, like
+/// `str_text_arg`).
+fn builder_cast(v: &Value) -> NativeError {
+    NativeError::cast(&jvm_class_of(v), "java.lang.StringBuffer")
+}
+
+/// An `appendReplacement`/`appendTail` buffer: builders pass,
+/// nil NPEs with the call-site text, anything else fails the
+/// `StringBuffer` cast.
+fn append_buffer<'a>(
+    v: &'a Value,
+    nil_message: &'static str,
+) -> Result<&'a BuilderValue, NativeError> {
+    match crate::hostvals::as_builder(v) {
+        Some(sb) => Ok(sb),
+        None if matches!(v, Value::Nil) => Err(NativeError::new(
+            ThrowClass::NullPointerException,
+            nil_message.to_owned(),
+        )),
+        None => Err(builder_cast(v)),
+    }
+}
+
+/// `Matcher.appendReplacement` (returns the buffer, like the
+/// JVM).
+fn gated_match_append_replacement(
+    target: &Value,
+    rest: &[Value],
+) -> Option<Result<Value, NativeError>> {
+    let h = crate::collmisc::as_matcher(target)?;
+    Some(match_append_replacement(h, rest))
+}
+
+/// The `appendReplacement` body (split for the complexity
+/// budget).
+fn match_append_replacement(h: &MatcherHandle, rest: &[Value]) -> Result<Value, NativeError> {
+    let sb = append_buffer(
+        &rest[0],
+        "Cannot invoke \"java.lang.StringBuffer.length()\" because \"sb\" is null",
+    )?;
+    let rep = match str_text_arg(&rest[1])? {
+        Some(r) => r,
+        None => {
+            return Err(NativeError::new(
+                ThrowClass::NullPointerException,
+                "Cannot invoke \"String.length()\" because \"replacement\" is null".to_owned(),
+            ));
+        }
+    };
+    h.append_replacement(sb, rep)?;
+    Ok(rest[0].clone())
+}
+
+/// `Matcher.appendTail` (returns the buffer, like the JVM).
+fn gated_match_append_tail(target: &Value, rest: &[Value]) -> Option<Result<Value, NativeError>> {
+    let h = crate::collmisc::as_matcher(target)?;
+    Some(match_append_tail(h, rest))
+}
+
+/// The `appendTail` body (split for the complexity budget).
+fn match_append_tail(h: &MatcherHandle, rest: &[Value]) -> Result<Value, NativeError> {
+    let sb = append_buffer(
+        &rest[0],
+        "Cannot invoke \"java.lang.StringBuffer.append(java.lang.CharSequence, int, int)\" because \"sb\" is null",
+    )?;
+    h.append_tail(sb);
+    Ok(rest[0].clone())
+}
+
+/// `Matcher.replaceFirst` (a reset single scan).
+fn gated_match_replace_first(
+    target: &Value,
+    rest: &[Value],
+) -> Option<Result<Value, NativeError>> {
+    let h = crate::collmisc::as_matcher(target)?;
+    Some(match_replace_first(h, rest))
+}
+
+/// The `replaceFirst` body (split for the complexity budget).
+fn match_replace_first(h: &MatcherHandle, rest: &[Value]) -> Result<Value, NativeError> {
+    let rep = match &rest[0] {
+        Value::Str(s) => s,
+        Value::Nil => {
+            return Err(NativeError::new(
+                ThrowClass::NullPointerException,
+                String::new(),
+            ));
+        }
+        other => {
+            return Err(NativeError::cast(&jvm_class_of(other), "java.lang.String"));
+        }
+    };
+    Ok(Value::Str(Arc::from(h.replace(rep, false)?.as_str())))
 }
 
 /// The collection-gated members (`String`, `Named`, `List`,
@@ -4899,37 +5160,207 @@ fn surface_gated_strn(
         ("startsWith", 1 | 2) => gated_str_startswith(target, rest),
         ("endsWith", 1) => gated_str_endswith(target, rest),
         ("split", 1 | 2) => gated_str_split(target, rest),
-        ("indexOf", 1) => gated_str_indexof(target, rest),
+        ("indexOf", 1 | 2) => gated_str_index_of(target, rest, false),
+        ("lastIndexOf", 1 | 2) => gated_str_index_of(target, rest, true),
+        ("contains", 1) => gated_str_contains(target, rest),
+        ("replace", 2) => gated_str_replace(target, rest),
+        ("charValue", 0) => gated_char_value(target),
         _ => None,
     }
 }
 
-/// `String.indexOf` (1-arg): the first UTF-16 offset of the
-/// `String` (or code-point) needle, -1 absent. Empty needles
-/// read 0 (the JDK rule).
-fn gated_str_indexof(target: &Value, rest: &[Value]) -> Option<Result<Value, NativeError>> {
+/// `indexOf`/`lastIndexOf` (UTF-16 units): strings search
+/// literally, ints search the code point, nil fails the
+/// overload-body NPE, anything else the no-method miss (the
+/// multi-overload rule — unlike single-overload `charAt`,
+/// doubles never unbox here).
+fn gated_str_index_of(
+    target: &Value,
+    rest: &[Value],
+    last: bool,
+) -> Option<Result<Value, NativeError>> {
     let Value::Str(s) = target else {
         return None;
     };
-    let needle: Vec<u16> = match &rest[0] {
-        Value::Str(p) => p.encode_utf16().collect(),
-        Value::Int(i) => match u32::try_from(*i).ok().and_then(char::from_u32) {
-            Some(c) => c.encode_utf16(&mut [0; 2]).to_vec(),
-            None => return Some(Ok(Value::Int(-1))),
-        },
-        Value::Char(c) => c.encode_utf16(&mut [0; 2]).to_vec(),
-        _ => return None,
+    Some(str_index_of(s, rest, last))
+}
+
+/// The `indexOf`/`lastIndexOf` body (split for the complexity
+/// budget).
+fn str_index_of(s: &str, rest: &[Value], last: bool) -> Result<Value, NativeError> {
+    let name = if last { "lastIndexOf" } else { "indexOf" };
+    let from = if rest.len() == 2 {
+        match &rest[1] {
+            Value::Int(i) => *i as i32,
+            _ => {
+                return Err(crate::types::no_method(name, 2, "java.lang.String"));
+            }
+        }
+    } else if last {
+        // 1-arity `lastIndexOf` scans the whole string (the raw
+        // search clamps to the end).
+        i32::MAX
+    } else {
+        0
     };
-    if needle.is_empty() {
-        return Some(Ok(Value::Int(0)));
+    match &rest[0] {
+        Value::Str(needle) => {
+            let units: Vec<u16> = needle.encode_utf16().collect();
+            Ok(Value::Int(index_of_raw(s, &units, from, last)))
+        }
+        Value::Nil => Err(match (last, rest.len()) {
+            (false, 1) => NativeError::new(
+                ThrowClass::NullPointerException,
+                "Cannot invoke \"String.coder()\" because \"str\" is null".to_owned(),
+            ),
+            (false, _) => NativeError::new(
+                ThrowClass::NullPointerException,
+                "Cannot invoke \"String.length()\" because \"tgtStr\" is null".to_owned(),
+            ),
+            (true, 1) => NativeError::new(
+                ThrowClass::NullPointerException,
+                "Cannot read field \"value\" because \"tgtStr\" is null".to_owned(),
+            ),
+            _ => crate::types::no_method("lastIndexOf", 2, "java.lang.String"),
+        }),
+        Value::Int(i) => Ok(Value::Int(index_of_codepoint(s, *i as i32, from, last))),
+        Value::Char(c) => Ok(Value::Int(index_of_codepoint(
+            s,
+            *c as i32,
+            from,
+            last,
+        ))),
+        _ => Err(crate::types::no_method(
+            name,
+            rest.len(),
+            "java.lang.String",
+        )),
     }
+}
+
+/// Search `needle` units in `s` units from `from`: `indexOf`
+/// clamps negatives to 0 and fails past-the-end (except the
+/// empty needle, which answers the end); `lastIndexOf` fails
+/// negatives and clamps past-the-end to the end.
+fn index_of_raw(s: &str, needle: &[u16], from: i32, last: bool) -> i64 {
     let hay: Vec<u16> = s.encode_utf16().collect();
-    let at = hay
-        .windows(needle.len())
-        .position(|w| w == needle.as_slice())
-        .map(|i| i as i64)
-        .unwrap_or(-1);
-    Some(Ok(Value::Int(at)))
+    let len = hay.len() as i64;
+    if last {
+        if from < 0 {
+            return -1;
+        }
+        let from = i64::from(from).min(len);
+        if needle.is_empty() {
+            return from;
+        }
+        if needle.len() as i64 > len {
+            return -1;
+        }
+        let top = from.min(len - needle.len() as i64) as usize;
+        for start in (0..=top).rev() {
+            if hay[start..start + needle.len()] == needle[..] {
+                return start as i64;
+            }
+        }
+        -1
+    } else {
+        let from = i64::from(from).max(0);
+        if needle.is_empty() {
+            return from.min(len);
+        }
+        if from > len {
+            return -1;
+        }
+        let from = from as usize;
+        if needle.len() > hay.len().saturating_sub(from) {
+            return -1;
+        }
+        for start in from..=(hay.len() - needle.len()) {
+            if hay[start..start + needle.len()] == needle[..] {
+                return start as i64;
+            }
+        }
+        -1
+    }
+}
+
+/// Search one code point: BMP values scan one unit (negatives
+/// through the low 16 bits — a lone surrogate never occurs in
+/// port strings), astral values the surrogate pair,
+/// out-of-range values never match.
+fn index_of_codepoint(s: &str, ch: i32, from: i32, last: bool) -> i64 {
+    let units: Vec<u16> = if ch < 0x1_0000 {
+        match char::from_u32(ch as u16 as u32) {
+            Some(c) => c.encode_utf16(&mut [0; 2]).to_vec(),
+            None => return -1,
+        }
+    } else if ch <= 0x10_FFFF {
+        char::from_u32(ch as u32)
+            .expect("checked astral range")
+            .encode_utf16(&mut [0; 2])
+            .to_vec()
+    } else {
+        return -1;
+    };
+    index_of_raw(s, &units, from, last)
+}
+
+/// The method-body nil-`CharSequence` NPE.
+fn charseq_npe(param: &str) -> NativeError {
+    NativeError::new(
+        ThrowClass::NullPointerException,
+        format!("Cannot invoke \"java.lang.CharSequence.toString()\" because \"{param}\" is null"),
+    )
+}
+
+/// `contains` (encoding-independent substring test).
+fn gated_str_contains(target: &Value, rest: &[Value]) -> Option<Result<Value, NativeError>> {
+    let Value::Str(s) = target else {
+        return None;
+    };
+    Some(str_contains(s, rest))
+}
+
+/// The `contains` body (split for the complexity budget).
+fn str_contains(s: &str, rest: &[Value]) -> Result<Value, NativeError> {
+    match str_text_arg(&rest[0])? {
+        Some(n) => Ok(Value::Bool(s.contains(n))),
+        None => Err(charseq_npe("s")),
+    }
+}
+
+/// `replace` (literal `char`/`char` and `String`/`String`): nils
+/// NPE in the overload bodies, anything else the no-method miss
+/// (the multi-overload rule).
+fn gated_str_replace(target: &Value, rest: &[Value]) -> Option<Result<Value, NativeError>> {
+    let Value::Str(s) = target else {
+        return None;
+    };
+    Some(str_replace(s, rest))
+}
+
+/// The `replace` body (split for the complexity budget).
+fn str_replace(s: &str, rest: &[Value]) -> Result<Value, NativeError> {
+    match (&rest[0], &rest[1]) {
+        (Value::Char(a), Value::Char(b)) => {
+            let to = b.to_string();
+            Ok(Value::Str(Arc::from(s.replace(*a, to.as_str()).as_str())))
+        }
+        (Value::Str(t), Value::Str(r)) => Ok(Value::Str(Arc::from(
+            s.replace(t.as_ref(), r.as_ref()).as_str(),
+        ))),
+        (Value::Nil, _) => Err(charseq_npe("target")),
+        (_, Value::Nil) => Err(charseq_npe("replacement")),
+        _ => Err(crate::types::no_method("replace", 2, "java.lang.String")),
+    }
+}
+
+/// `charValue` (characters answer themselves).
+fn gated_char_value(target: &Value) -> Option<Result<Value, NativeError>> {
+    match target {
+        Value::Char(_) => Some(Ok(target.clone())),
+        _ => None,
+    }
 }
 
 /// The string-gated members (split 0-arg/with-args for the
@@ -4940,31 +5371,6 @@ fn surface_gated_str(
     rest: &[Value],
 ) -> Option<Result<Value, NativeError>> {
     surface_gated_str0(meth, target, rest).or_else(|| surface_gated_strn(meth, target, rest))
-}
-
-/// A `java.lang.StringBuilder` (issue #201 S5): a growable
-/// buffer behind the `Extension` facade. Identity is the
-/// sequence `id` (like `Writer`); `str`/`toString` render the
-/// buffer via `print_str`, `print` keeps the `#object[…]` form.
-#[derive(Debug)]
-pub(crate) struct StringBuilder {
-    id: u64,
-    buf: Mutex<String>,
-}
-
-static NEXT_BUILDER: AtomicU64 = AtomicU64::new(1);
-
-impl StringBuilder {
-    pub(crate) fn fresh(content: String) -> Self {
-        Self {
-            id: NEXT_BUILDER.fetch_add(1, Ordering::Relaxed),
-            buf: Mutex::new(content),
-        }
-    }
-
-    fn lock(&self) -> std::sync::MutexGuard<'_, String> {
-        self.buf.lock().unwrap_or_else(|e| e.into_inner())
-    }
 }
 
 /// A `java.util.Locale` (issue #201 recipes: 44 scripts pin
@@ -5023,66 +5429,47 @@ impl ExtensionValue for LocaleHandle {
     }
 }
 
-impl ExtensionValue for StringBuilder {
-    fn class_name(&self) -> String {
-        "java.lang.StringBuilder".to_owned()
-    }
-
-    fn print(&self) -> String {
-        format!(
-            "#object[java.lang.StringBuilder 0x{:x} \"java.lang.StringBuilder@{:x}\"]",
-            self.id, self.id
-        )
-    }
-
-    fn print_str(&self) -> Option<String> {
-        Some(self.lock().clone())
-    }
-
-    fn dyn_eq(&self, other: &dyn ExtensionValue) -> bool {
-        other
-            .as_any()
-            .downcast_ref::<StringBuilder>()
-            .is_some_and(|o| o.id == self.id)
-    }
-
-    fn dyn_hash(&self, state: &mut dyn std::hash::Hasher) {
-        state.write_u64(self.id);
-    }
-
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-}
-
-/// Downcast a value to a string builder, if it is one.
-fn as_builder(v: &Value) -> Option<&StringBuilder> {
-    match v {
-        Value::Extension(e) => e.as_any().downcast_ref::<StringBuilder>(),
-        _ => None,
-    }
-}
-
-/// `append`: strings/chars push directly, nil appends `"null"`
-/// (`String.valueOf`), anything else renders through `str` —
-/// and returns the builder itself, like the JVM.
+/// `StringBuilder.append` (nils append `"null"` through the
+/// `String.valueOf` rule; the rest renders through `str`;
+/// returns the buffer, like the JVM).
 fn gated_builder_append(
     eval: &mut Evaluator,
     target: &Value,
     rest: &[Value],
 ) -> Option<Result<Value, NativeError>> {
-    let b = as_builder(target)?;
-    let text = match &rest[0] {
-        Value::Nil => "null".to_owned(),
-        Value::Str(s) => s.to_string(),
-        Value::Char(c) => c.to_string(),
-        other => match crate::core::str_of_one(eval, other) {
-            Ok(s) => s,
-            Err(e) => return Some(Err(e)),
-        },
-    };
-    b.lock().push_str(&text);
-    Some(Ok(target.clone()))
+    let b = crate::hostvals::as_builder(target)?;
+    Some(builder_append(eval, target, b, rest))
+}
+
+/// The `append` body (split for the complexity budget).
+fn builder_append(
+    eval: &mut Evaluator,
+    target: &Value,
+    b: &crate::hostvals::BuilderValue,
+    rest: &[Value],
+) -> Result<Value, NativeError> {
+    if matches!(rest[0], Value::Nil) {
+        b.push_str("null");
+    } else {
+        let text = crate::core::str_of_one(eval, &rest[0])?;
+        b.push_str(&text);
+    }
+    Ok(target.clone())
+}
+
+/// `StringBuilder.length` (UTF-16 units).
+fn gated_builder_length(target: &Value) -> Option<Result<Value, NativeError>> {
+    let b = crate::hostvals::as_builder(target)?;
+    Some(Ok(Value::Int(b.utf16_len())))
+}
+
+/// `StringBuilder.reverse` (in place, returning the buffer).
+fn gated_builder_reverse(target: &Value) -> Option<Result<Value, NativeError>> {
+    let b = crate::hostvals::as_builder(target)?;
+    Some({
+        b.reverse_in_place();
+        Ok(target.clone())
+    })
 }
 
 /// `Pattern/split`: the `re` split loop over the pattern source
@@ -5135,11 +5522,17 @@ pub(crate) fn surface_meth(
 /// nil-target sweep).
 pub(crate) const SURFACE_MEMBERS: &[(&str, usize)] = &[
     ("append", 1),
+    ("appendReplacement", 2),
+    ("appendTail", 1),
     ("cast", 1),
     ("charAt", 1),
+    ("charValue", 0),
     ("close", 0),
+    ("contains", 1),
+    ("end", 0),
     ("endsWith", 1),
     ("equals", 1),
+    ("find", 0),
     ("flush", 0),
     ("getCause", 0),
     ("getClass", 0),
@@ -5155,8 +5548,11 @@ pub(crate) const SURFACE_MEMBERS: &[(&str, usize)] = &[
     ("getSimpleName", 0),
     ("getSuperclass", 0),
     ("getValue", 0),
+    ("group", 0),
+    ("group", 1),
     ("hashCode", 0),
     ("indexOf", 1),
+    ("indexOf", 2),
     ("isArray", 0),
     ("isAssignableFrom", 1),
     ("isBlank", 0),
@@ -5164,10 +5560,17 @@ pub(crate) const SURFACE_MEMBERS: &[(&str, usize)] = &[
     ("isInstance", 1),
     ("isInterface", 0),
     ("isRealized", 0),
+    ("lastIndexOf", 1),
+    ("lastIndexOf", 2),
     ("length", 0),
+    ("matches", 0),
+    ("replace", 2),
     ("replaceAll", 1),
+    ("replaceFirst", 1),
+    ("reverse", 0),
     ("split", 1),
     ("split", 2),
+    ("start", 0),
     ("startsWith", 1),
     ("startsWith", 2),
     ("subSequence", 2),

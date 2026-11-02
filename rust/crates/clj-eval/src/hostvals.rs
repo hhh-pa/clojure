@@ -6,17 +6,111 @@
 // the terms of this license.
 // You must not remove this notice, or any other, from this software.
 
-//! Host object values: `PersistentQueue` queues — persistent
+//! Host object values: `StringBuilder` / `StringBuffer`
+//! buffers and `PersistentQueue` queues. Builders are mutable
+//! buffers (interior mutability behind the shared extension
+//! handle, like the matcher state's); queues are persistent
 //! values (`conj` appends, `peek`/`pop` take the front) behind
-//! `clojure.lang.PersistentQueue/EMPTY`. Queues print
-//! `#object[…]` and compare/hash sequentially (like the JVM:
-//! `(= pq [1 2])` is true — oracles `/tmp/pqsem.clj`,
+//! `clojure.lang.PersistentQueue/EMPTY`, printing `#object[…]`
+//! and comparing/hashing sequentially (like the JVM: `(= pq
+//! [1 2])` is true — oracles `/tmp/pqsem.clj`,
 //! `/tmp/pqsem2.clj`).
 
 use std::hash::Hasher;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use clj_value::{ExtensionValue, Value, Vector};
+
+/// A `StringBuilder`/`StringBuffer` buffer: shared mutable text
+/// (interior mutability behind the extension handle, like the
+/// matcher state). Identity equality and hash (the JVM overrides
+/// neither).
+#[derive(Debug)]
+pub(crate) struct BuilderValue {
+    class: &'static str,
+    text: Mutex<String>,
+}
+
+impl BuilderValue {
+    /// A fresh buffer of `class` holding `text`.
+    pub(crate) fn with_text(class: &'static str, text: String) -> Value {
+        Value::Extension(Arc::new(Self {
+            class,
+            text: Mutex::new(text),
+        }))
+    }
+
+    /// A locked guard (a poisoned mutex still yields its data,
+    /// like the stream state).
+    fn lock(&self) -> std::sync::MutexGuard<'_, String> {
+        self.text.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The current contents.
+    pub(crate) fn contents(&self) -> String {
+        self.lock().clone()
+    }
+
+    /// Append `s` (mutates, like the JVM).
+    pub(crate) fn push_str(&self, s: &str) {
+        self.lock().push_str(s);
+    }
+
+    /// Reverse in place (astral chars stay whole — lone
+    /// surrogates are unrepresentable, so the JVM's pair
+    /// preservation falls out of the char model).
+    pub(crate) fn reverse_in_place(&self) {
+        let rev: String = self.lock().chars().rev().collect();
+        *self.lock() = rev;
+    }
+
+    /// The UTF-16 length (the `length` twin).
+    pub(crate) fn utf16_len(&self) -> i64 {
+        self.lock().encode_utf16().count() as i64
+    }
+}
+
+impl ExtensionValue for BuilderValue {
+    fn class_name(&self) -> String {
+        self.class.to_owned()
+    }
+
+    fn print(&self) -> String {
+        format!(
+            "#object[{} 0x{:x} \"{}\"]",
+            self.class,
+            &self.text as *const _ as usize,
+            self.lock()
+        )
+    }
+
+    fn print_str(&self) -> Option<String> {
+        Some(self.contents())
+    }
+
+    fn dyn_eq(&self, other: &dyn ExtensionValue) -> bool {
+        other
+            .as_any()
+            .downcast_ref::<Self>()
+            .is_some_and(|o| std::ptr::eq(&self.text, &o.text))
+    }
+
+    fn dyn_hash(&self, state: &mut dyn Hasher) {
+        state.write_usize(&self.text as *const _ as usize);
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+/// Downcast a value to a string builder/buffer, if it is one.
+pub(crate) fn as_builder(v: &Value) -> Option<&BuilderValue> {
+    match v {
+        Value::Extension(e) => e.as_any().downcast_ref::<BuilderValue>(),
+        _ => None,
+    }
+}
 
 /// A `clojure.lang.PersistentQueue`: items front-to-back in a
 /// persistent vector. A value — every op returns a fresh handle

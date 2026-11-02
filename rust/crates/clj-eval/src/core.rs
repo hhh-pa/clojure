@@ -3650,6 +3650,85 @@ pub(crate) fn parse_long_str(s: &str) -> Option<i64> {
     }
 }
 
+/// `Character.digit` over an explicit radix: decimal values
+/// (any script) plus ASCII and fullwidth Latin letters.
+pub(crate) fn char_digit(c: char, radix: u32) -> Option<u32> {
+    if !(2..=36).contains(&radix) {
+        return None;
+    }
+    if let Some(d) = decimal_value(c) {
+        return (d < radix).then_some(d);
+    }
+    let d = match c {
+        'a'..='z' => c as u32 - 'a' as u32 + 10,
+        'A'..='Z' => c as u32 - 'A' as u32 + 10,
+        '\u{FF21}'..='\u{FF3A}' => c as u32 - 0xFF21 + 10,
+        '\u{FF41}'..='\u{FF5A}' => c as u32 - 0xFF41 + 10,
+        _ => return None,
+    };
+    (d < radix).then_some(d)
+}
+
+/// `Long.parseLong` over an explicit radix: one ASCII sign, 1+
+/// `Character.digit` digits, overflow → `None`.
+pub(crate) fn parse_long_radix(s: &str, radix: u32) -> Option<i64> {
+    let (neg, digits) = match s.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, s.strip_prefix('+').unwrap_or(s)),
+    };
+    if digits.is_empty() {
+        return None;
+    }
+    let mut acc: u64 = 0;
+    for c in digits.chars() {
+        acc = acc
+            .checked_mul(u64::from(radix))?
+            .checked_add(u64::from(char_digit(c, radix)?))?;
+    }
+    if neg {
+        (acc <= i64::MAX as u64 + 1).then_some((acc as i64).wrapping_neg())
+    } else {
+        (acc <= i64::MAX as u64).then_some(acc as i64)
+    }
+}
+
+/// The reflector `int` rule for a numeric radix argument
+/// (tower values narrow through their long).
+pub(crate) fn int_of_number(v: &Value) -> Result<i32, NativeError> {
+    match v {
+        Value::Int(i) => int_exact_long(*i),
+        Value::Double(d) => int_exact_long(double_long(*d)?),
+        Value::BigInt(n) | Value::BigInteger(n) => int_exact_long(bigint_long(n)?),
+        Value::Ratio(r) => int_exact_long(bigint_long(&trunc_ratio(r))?),
+        Value::BigDec(d) => int_exact_long(double_long(d.to_f64())?),
+        Value::Nil => Err(npe_char_value()),
+        v => Err(cce_err(v, "java.lang.Number")),
+    }
+}
+
+/// `NumberFormatException | For input string: "{s}" under radix
+/// {radix}`.
+pub(crate) fn nfe_for_input_radix(s: &str, radix: i32) -> NativeError {
+    NativeError::new(
+        ThrowClass::NumberFormatException,
+        format!("For input string: \"{s}\" under radix {radix}"),
+    )
+}
+
+/// `NumberFormatException | radix {radix} less/greater than
+/// Character.MIN/MAX_RADIX`.
+pub(crate) fn nfe_bad_radix(radix: i32) -> NativeError {
+    let side = if radix < 2 {
+        "less than Character.MIN_RADIX"
+    } else {
+        "greater than Character.MAX_RADIX"
+    };
+    NativeError::new(
+        ThrowClass::NumberFormatException,
+        format!("radix {radix} {side}"),
+    )
+}
+
 /// A signed `NaN`/`Infinity` spelling (exact case, like the JVM).
 fn signed_special(t: &str) -> Option<f64> {
     let (neg, body) = match t.strip_prefix('-') {
