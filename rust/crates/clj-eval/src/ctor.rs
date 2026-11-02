@@ -34,6 +34,7 @@ pub(crate) fn ctor_arities(fqn: &str) -> Option<&'static [usize]> {
     match fqn {
         "java.lang.String" => Some(&[0, 1, 2, 3, 4]),
         "java.lang.Object" => Some(&[0]),
+        "java.lang.StringBuilder" => Some(&[0, 1]),
         _ => None,
     }
 }
@@ -95,6 +96,38 @@ pub(crate) fn build_object(args: &[Value]) -> Result<Value, NativeError> {
         )))
     } else {
         Err(no_ctor("java.lang.Object", false))
+    }
+}
+
+/// Build `(StringBuilder. …)` (issue #201 S5): 0-arg is empty,
+/// 1-arg takes the content (`String`) or the capacity (`int`,
+/// negative is `NegativeArraySizeException`); nil is ambiguous
+/// (`(String)` vs `(CharSequence)` on the JVM) and anything
+/// else misses.
+pub(crate) fn build_string_builder(args: &[Value]) -> Result<Value, NativeError> {
+    match args.len() {
+        0 => Ok(Value::Extension(Arc::new(
+            crate::classemu::StringBuilder::fresh(String::new()),
+        ))),
+        1 => match &args[0] {
+            Value::Str(s) => Ok(Value::Extension(Arc::new(
+                crate::classemu::StringBuilder::fresh(s.to_string()),
+            ))),
+            Value::Int(n) => {
+                let cap = usize::try_from(*n).map_err(|_| {
+                    NativeError::new(ThrowClass::NegativeArraySizeException, n.to_string())
+                })?;
+                Ok(Value::Extension(Arc::new(
+                    crate::classemu::StringBuilder::fresh(String::with_capacity(cap)),
+                )))
+            }
+            Value::Nil => Err(NativeError::new(
+                ThrowClass::IllegalArgumentException,
+                "More than one matching method found: java.lang.StringBuilder".to_owned(),
+            )),
+            _ => Err(no_ctor("java.lang.StringBuilder", false)),
+        },
+        _ => Err(no_ctor("java.lang.StringBuilder", false)),
     }
 }
 

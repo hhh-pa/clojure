@@ -28,10 +28,12 @@
 
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use clj_value::{
-    ClassVal, HostDef, HostKind, HostVal, Keyword, List, Map, SeqKind, Symbol, ThrowClass, Value,
-    Vector, new_map, new_set,
+    ClassVal, ExtensionValue, HostDef, HostKind, HostVal, Keyword, List, Map, SeqKind, Symbol,
+    ThrowClass, Value, Vector, new_map, new_set,
 };
 use num_traits::ToPrimitive;
 
@@ -572,6 +574,16 @@ const STATIC_LATTICE: &[StaticRow] = &[
         ],
     },
     StaticRow {
+        name: "clojure.lang.LazilyPersistentVector",
+        iface: false,
+        bases: &[
+            "clojure.lang.APersistentVector",
+            "clojure.lang.ISeq",
+            "clojure.lang.Sequential",
+            "java.util.List",
+        ],
+    },
+    StaticRow {
         name: "clojure.lang.LazySeq",
         iface: false,
         bases: &[
@@ -721,6 +733,20 @@ const STATIC_LATTICE: &[StaticRow] = &[
             "clojure.lang.ISeq",
             "clojure.lang.Counted",
             "clojure.lang.IHashEq",
+        ],
+    },
+    // Oracle: superclass `Obj`, interfaces `Counted`, `IHashEq`,
+    // `IPersistentList`, `Collection` (no `List`, no
+    // `Serializable`).
+    StaticRow {
+        name: "clojure.lang.PersistentQueue",
+        iface: false,
+        bases: &[
+            "clojure.lang.Obj",
+            "clojure.lang.Counted",
+            "clojure.lang.IHashEq",
+            "clojure.lang.IPersistentList",
+            "java.util.Collection",
         ],
     },
     StaticRow {
@@ -1325,6 +1351,15 @@ const STATIC_LATTICE: &[StaticRow] = &[
         name: "java.util.IllegalFormatWidthException",
         iface: false,
         bases: &["java.util.IllegalFormatException"],
+    },
+    StaticRow {
+        name: "java.util.Locale",
+        iface: false,
+        bases: &[
+            "java.lang.Object",
+            "java.lang.Cloneable",
+            "java.io.Serializable",
+        ],
     },
     StaticRow {
         name: "java.util.List",
@@ -2089,6 +2124,45 @@ fn static_class(name: &str) -> Option<Arc<ClassVal>> {
     })
 }
 
+/// A static field read in value position (`Long/MAX_VALUE`):
+/// the constant for a known `(binary class name, field)` pair.
+/// Boxed numbers surface as the port's unboxed values (`Int`
+/// for every integral bound, `Double` for floating ones —
+/// `Float` bounds convert through `f32` exactly as the JVM's
+/// widening does); `Character` bounds are `Char`s.
+pub(crate) fn static_field_value(class: &str, field: &str) -> Option<Value> {
+    let v: Value = match (class, field) {
+        ("java.lang.Long", "MIN_VALUE") => Value::Int(i64::MIN),
+        ("java.lang.Long", "MAX_VALUE") => Value::Int(i64::MAX),
+        ("java.lang.Integer", "MIN_VALUE") => Value::Int(i64::from(i32::MIN)),
+        ("java.lang.Integer", "MAX_VALUE") => Value::Int(i64::from(i32::MAX)),
+        ("java.lang.Short", "MIN_VALUE") => Value::Int(i64::from(i16::MIN)),
+        ("java.lang.Short", "MAX_VALUE") => Value::Int(i64::from(i16::MAX)),
+        ("java.lang.Byte", "MIN_VALUE") => Value::Int(i64::from(i8::MIN)),
+        ("java.lang.Byte", "MAX_VALUE") => Value::Int(i64::from(i8::MAX)),
+        ("java.lang.Double", "MIN_VALUE") => Value::Double(f64::MIN_POSITIVE),
+        ("java.lang.Double", "MAX_VALUE") => Value::Double(f64::MAX),
+        ("java.lang.Double", "POSITIVE_INFINITY") => Value::Double(f64::INFINITY),
+        ("java.lang.Double", "NEGATIVE_INFINITY") => Value::Double(f64::NEG_INFINITY),
+        ("java.lang.Double", "NaN") => Value::Double(f64::NAN),
+        ("java.lang.Float", "MIN_VALUE") => Value::Double(f64::from(f32::MIN_POSITIVE)),
+        ("java.lang.Float", "MAX_VALUE") => Value::Double(f64::from(f32::MAX)),
+        ("java.lang.Float", "POSITIVE_INFINITY") => Value::Double(f64::INFINITY),
+        ("java.lang.Float", "NEGATIVE_INFINITY") => Value::Double(f64::NEG_INFINITY),
+        ("java.lang.Float", "NaN") => Value::Double(f64::NAN),
+        ("java.lang.Character", "MIN_VALUE") => Value::Char('\u{0}'),
+        ("java.lang.Character", "MAX_VALUE") => Value::Char('\u{FFFF}'),
+        ("java.lang.Boolean", "TRUE") => Value::Bool(true),
+        ("java.lang.Boolean", "FALSE") => Value::Bool(false),
+        ("java.lang.Math", "PI") => Value::Double(std::f64::consts::PI),
+        ("java.lang.Math", "E") => Value::Double(std::f64::consts::E),
+        ("java.util.Locale", "US") => Value::Extension(Arc::new(LocaleHandle::us())),
+        ("clojure.lang.PersistentQueue", "EMPTY") => crate::coll::empty_queue_value(),
+        _ => return None,
+    };
+    Some(v)
+}
+
 /// A class value from parts (the dynamic rules).
 fn dynamic_class(name: &str, iface: bool, bases: &[&str]) -> Arc<ClassVal> {
     Arc::new(ClassVal::new(
@@ -2563,7 +2637,7 @@ fn native_import_star(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nat
 
 /// Import `fqn` into the current namespace (split for the complexity
 /// budget).
-fn import_class(eval: &mut Evaluator, fqn: &str) -> Result<Value, NativeError> {
+pub(crate) fn import_class(eval: &mut Evaluator, fqn: &str) -> Result<Value, NativeError> {
     let class = resolve_class_name(eval, fqn)
         .ok_or_else(|| NativeError::new(ThrowClass::ClassNotFoundException, fqn.to_owned()))?;
     let simple = fqn.rsplit('.').next().unwrap_or(fqn);
@@ -2613,6 +2687,38 @@ pub(crate) fn static_member_arities(fqn: &str, member: &str) -> Option<&'static 
         ("java.lang.System", "getProperty") => Some(&[1, 2]),
         ("java.lang.System", "lineSeparator") => Some(&[0]),
         ("java.lang.System", "identityHashCode") => Some(&[1]),
+        ("java.lang.Character", "isWhitespace") => Some(&[1]),
+        ("java.lang.Character", "isLetterOrDigit") => Some(&[1]),
+        ("java.lang.Character", "digit") => Some(&[2]),
+        ("clojure.lang.LazilyPersistentVector", "createOwning") => Some(&[1]),
+        ("java.lang.Long", "parseLong") => Some(&[1]),
+        ("java.lang.Long", "remainderUnsigned") => Some(&[2]),
+        ("java.lang.Integer", "parseInt") => Some(&[1]),
+        ("java.lang.Double", "parseDouble") => Some(&[1]),
+        ("java.lang.Math", "abs") => Some(&[1]),
+        ("java.lang.String", "format") => Some(&[3]),
+        ("java.lang.Math", "sqrt") => Some(&[1]),
+        ("java.lang.Math", "ceil") => Some(&[1]),
+        ("java.lang.Math", "log") => Some(&[1]),
+        ("java.lang.Math", "exp") => Some(&[1]),
+        ("java.lang.Math", "pow") => Some(&[2]),
+        ("java.lang.Math", "sin") => Some(&[1]),
+        ("java.lang.Math", "cos") => Some(&[1]),
+        ("java.lang.Math", "tan") => Some(&[1]),
+        ("java.lang.Math", "asin") => Some(&[1]),
+        ("java.lang.Math", "acos") => Some(&[1]),
+        ("java.lang.Math", "atan") => Some(&[1]),
+        ("java.lang.Math", "sinh") => Some(&[1]),
+        ("java.lang.Math", "cosh") => Some(&[1]),
+        ("java.lang.Math", "tanh") => Some(&[1]),
+        ("java.lang.Math", "atan2") => Some(&[2]),
+        ("java.lang.Math", "hypot") => Some(&[2]),
+        ("java.lang.Math", "cbrt") => Some(&[1]),
+        ("java.lang.Math", "floor") => Some(&[1]),
+        ("java.lang.Math", "log10") => Some(&[1]),
+        ("java.lang.Math", "round") => Some(&[1]),
+        ("java.lang.Character", "isLowerCase") => Some(&[1]),
+        ("java.lang.Character", "isUpperCase") => Some(&[1]),
         _ => None,
     }
 }
@@ -2645,6 +2751,38 @@ fn native_static(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeEr
         ("java.lang.System", "getProperty") => static_getproperty(rest),
         ("java.lang.System", "lineSeparator") => static_lineseparator(rest),
         ("java.lang.System", "identityHashCode") => static_identity_hashcode(rest),
+        ("java.lang.Character", "isWhitespace") => static_character_is_whitespace(rest),
+        ("java.lang.Character", "isLetterOrDigit") => static_character_is_letter_or_digit(rest),
+        ("java.lang.Character", "digit") => static_character_digit(rest),
+        ("clojure.lang.LazilyPersistentVector", "createOwning") => static_lpv_create_owning(rest),
+        ("java.lang.Long", "parseLong") => static_long_parse_long(rest),
+        ("java.lang.Long", "remainderUnsigned") => static_long_remainder_unsigned(rest),
+        ("java.lang.Integer", "parseInt") => static_integer_parse_int(rest),
+        ("java.lang.Double", "parseDouble") => static_double_parse_double(rest),
+        ("java.lang.String", "format") => static_string_format(eval, rest),
+        ("java.lang.Math", "abs") => static_math_abs(rest),
+        ("java.lang.Math", "sqrt") => static_math_sqrt(rest),
+        ("java.lang.Math", "ceil") => static_math_ceil(rest),
+        ("java.lang.Math", "log") => static_math_log(rest),
+        ("java.lang.Math", "exp") => static_math_exp(rest),
+        ("java.lang.Math", "pow") => static_math_pow(rest),
+        ("java.lang.Math", "sin") => static_math_sin(rest),
+        ("java.lang.Math", "cos") => static_math_cos(rest),
+        ("java.lang.Math", "tan") => static_math_tan(rest),
+        ("java.lang.Math", "asin") => static_math_asin(rest),
+        ("java.lang.Math", "acos") => static_math_acos(rest),
+        ("java.lang.Math", "atan") => static_math_atan(rest),
+        ("java.lang.Math", "sinh") => static_math_sinh(rest),
+        ("java.lang.Math", "cosh") => static_math_cosh(rest),
+        ("java.lang.Math", "tanh") => static_math_tanh(rest),
+        ("java.lang.Math", "atan2") => static_math_atan2(rest),
+        ("java.lang.Math", "hypot") => static_math_hypot(rest),
+        ("java.lang.Math", "cbrt") => static_math_cbrt(rest),
+        ("java.lang.Math", "floor") => static_math_floor(rest),
+        ("java.lang.Math", "log10") => static_math_log10(rest),
+        ("java.lang.Math", "round") => static_math_round(rest),
+        ("java.lang.Character", "isLowerCase") => static_character_is_lower_case(rest),
+        ("java.lang.Character", "isUpperCase") => static_character_is_upper_case(rest),
         _ => Err(crate::types::no_method(member, rest.len(), fqn)),
     }
 }
@@ -2918,6 +3056,427 @@ fn static_identity_hashcode(args: &[Value]) -> Result<Value, NativeError> {
             "identityHashCode",
             n,
             "java.lang.System",
+        )),
+    }
+}
+
+/// `Character/isWhitespace` (issue #201 S6): the `(char)` and
+/// `(int)` overloads. Java's set is Rust's `White_Space` minus
+/// the non-breaking spaces (U+00A0, U+2007, U+202F) plus the
+/// controls U+001C–U+001F. Out-of-range ints and lone
+/// surrogates read false; anything else is the `Character`
+/// cast failure.
+fn static_character_is_whitespace(args: &[Value]) -> Result<Value, NativeError> {
+    match args.len() {
+        1 => Ok(Value::Bool(match &args[0] {
+            Value::Char(c) => java_is_whitespace(*c),
+            Value::Int(i) => u32::try_from(*i)
+                .ok()
+                .and_then(char::from_u32)
+                .is_some_and(java_is_whitespace),
+            other => {
+                return Err(crate::core::cce_err(other, "java.lang.Character"));
+            }
+        })),
+        n => Err(crate::types::no_method(
+            "isWhitespace",
+            n,
+            "java.lang.Character",
+        )),
+    }
+}
+
+/// `Character/digit` (2-arg): the digit value of `ch` in
+/// `radix`, or -1 (non-digits read -1, out-of-range radixes
+/// read -1 — oracle). `Char` and `Int` (code point) spellings
+/// both apply; only ASCII alphanumerics convert (a documented
+/// narrowing — full `CharacterData` tables stay out).
+fn static_character_digit(args: &[Value]) -> Result<Value, NativeError> {
+    if args.len() != 2 {
+        return Err(crate::types::no_method(
+            "digit",
+            args.len(),
+            "java.lang.Character",
+        ));
+    }
+    let ch = match &args[0] {
+        Value::Char(c) => Some(*c),
+        Value::Int(i) => u32::try_from(*i).ok().and_then(char::from_u32),
+        other => return Err(crate::core::cce_err(other, "java.lang.Character")),
+    };
+    let radix = str_int_arg(&args[1])?;
+    let digit = match (ch, u32::try_from(radix).ok()) {
+        (Some(c), Some(r)) if (2..=36).contains(&r) => c.to_digit(r).map(|d| d as i64),
+        _ => None,
+    };
+    Ok(Value::Int(digit.unwrap_or(-1)))
+}
+
+/// The Java whitespace predicate (see `static_character_is_whitespace`).
+fn java_is_whitespace(c: char) -> bool {
+    matches!(c, '\u{1C}'..='\u{1F}')
+        || (c.is_whitespace() && !matches!(c, '\u{A0}' | '\u{2007}' | '\u{202F}'))
+}
+
+/// `LazilyPersistentVector/createOwning` (issue #201 S2): upstream
+/// wraps a `String[]` into an owning vector. Our `Pattern/.split`
+/// already returns a `Value::Vector`, so vectors pass through;
+/// anything else misses (no arrays flow here on any called path).
+fn static_lpv_create_owning(args: &[Value]) -> Result<Value, NativeError> {
+    match args.len() {
+        1 => match &args[0] {
+            Value::Vector(_) => Ok(args[0].clone()),
+            _ => Err(crate::types::no_method(
+                "createOwning",
+                1,
+                "clojure.lang.LazilyPersistentVector",
+            )),
+        },
+        n => Err(crate::types::no_method(
+            "createOwning",
+            n,
+            "clojure.lang.LazilyPersistentVector",
+        )),
+    }
+}
+
+/// The `NumberFormatException` for a bad parse (the JDK's
+/// `For input string` text; nil parses as the literal `null`,
+/// like `Long.parseLong((String) null)`).
+fn parse_nfe(text: &str) -> NativeError {
+    NativeError::new(
+        ThrowClass::NumberFormatException,
+        format!("For input string: \"{text}\""),
+    )
+}
+
+/// `Long/parseLong` (issue #201 S12): the shared `parse_long_str`
+/// body (sign + digits + i64 range, like `parse-long`), throwing
+/// instead of answering nil.
+fn static_long_parse_long(args: &[Value]) -> Result<Value, NativeError> {
+    match args.len() {
+        1 => match &args[0] {
+            Value::Str(s) => crate::core::parse_long_str(s)
+                .map(Value::Int)
+                .ok_or_else(|| parse_nfe(s)),
+            Value::Nil => Err(parse_nfe("null")),
+            other => Err(crate::core::cce_err(other, "java.lang.String")),
+        },
+        n => Err(crate::types::no_method("parseLong", n, "java.lang.Long")),
+    }
+}
+
+/// The boxArg `long` coercion (the `str_int_arg` sibling:
+/// every `Number` truncates, nil NPEs on the primitive, the
+/// rest miss the param).
+fn long_arg(v: &Value) -> Result<i64, NativeError> {
+    match v {
+        Value::Int(i) => Ok(*i),
+        Value::Double(d) => Ok(*d as i64),
+        Value::BigInt(n) | Value::BigInteger(n) => Ok(crate::core::bigint_long_value(n)),
+        Value::Ratio(r) => Ok(r.to_f64().unwrap_or(f64::NAN) as i64),
+        Value::BigDec(d) => Ok(crate::core::bigint_long_value(&d.to_bigint_trunc())),
+        Value::Nil => Err(boxarg_npe()),
+        _ => Err(unexpected_param_long(v)),
+    }
+}
+
+/// The boxArg `long`-param miss (the `unexpected_param`
+/// sibling for 64-bit params).
+fn unexpected_param_long(v: &Value) -> NativeError {
+    NativeError::new(
+        ThrowClass::IllegalArgumentException,
+        format!(
+            "Unexpected param type, expected: long, given: {}",
+            jvm_class_of(v)
+        ),
+    )
+}
+
+/// `Long/remainderUnsigned` (2-arg): the unsigned remainder
+/// (zero divisor is `/ by zero` — oracle).
+fn static_long_remainder_unsigned(args: &[Value]) -> Result<Value, NativeError> {
+    if args.len() != 2 {
+        return Err(crate::types::no_method(
+            "remainderUnsigned",
+            args.len(),
+            "java.lang.Long",
+        ));
+    }
+    let x = long_arg(&args[0])?;
+    let m = long_arg(&args[1])?;
+    if m == 0 {
+        return Err(NativeError::new(
+            ThrowClass::ArithmeticException,
+            "/ by zero".to_owned(),
+        ));
+    }
+    Ok(Value::Int((x as u64).wrapping_rem(m as u64) as i64))
+}
+
+/// `String/format` (3-arg): `(format locale fmt args-array)`
+/// (44 recipes pin `Locale/US` explicitly). Only the `US`
+/// locale exists here, so the locale is accepted and the
+/// shared `clojure.core/format` engine renders (it always
+/// emits `.` decimals, like `Formatter` under `US`).
+fn static_string_format(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    if args.len() != 3 {
+        return Err(crate::types::no_method(
+            "format",
+            args.len(),
+            "java.lang.String",
+        ));
+    }
+    if as_locale(&args[0]).is_none() {
+        return Err(crate::core::cce_err(&args[0], "java.util.Locale"));
+    }
+    let Value::Array(a) = &args[2] else {
+        return Err(crate::core::cce_err(&args[2], "[Ljava.lang.Object;"));
+    };
+    let mut full = Vec::with_capacity(a.len() + 1);
+    full.push(args[1].clone());
+    full.extend(a.snapshot());
+    crate::fmt::native_format(eval, &full)
+}
+
+/// `Integer/parseInt` (issue #201 S12): the long body narrowed to
+/// i32 (out-of-range is the same NFE the JDK raises).
+fn static_integer_parse_int(args: &[Value]) -> Result<Value, NativeError> {
+    match args.len() {
+        1 => match &args[0] {
+            Value::Str(s) => crate::core::parse_long_str(s)
+                .and_then(|n| i32::try_from(n).ok())
+                .map(|n| Value::Int(i64::from(n)))
+                .ok_or_else(|| parse_nfe(s)),
+            Value::Nil => Err(parse_nfe("null")),
+            other => Err(crate::core::cce_err(other, "java.lang.String")),
+        },
+        n => Err(crate::types::no_method("parseInt", n, "java.lang.Integer")),
+    }
+}
+
+/// `Double/parseDouble` (issue #201 S12): the shared
+/// `parse_double_str` body (trim + specials + hex floats, like
+/// `parse-double`), throwing instead of answering nil.
+fn static_double_parse_double(args: &[Value]) -> Result<Value, NativeError> {
+    match args.len() {
+        1 => match &args[0] {
+            Value::Str(s) => crate::core::parse_double_str(s)
+                .map(Value::Double)
+                .ok_or_else(|| parse_nfe(s)),
+            Value::Nil => Err(parse_nfe("null")),
+            other => Err(crate::core::cce_err(other, "java.lang.String")),
+        },
+        n => Err(crate::types::no_method(
+            "parseDouble",
+            n,
+            "java.lang.Double",
+        )),
+    }
+}
+
+/// A `Math/*` double argument (widening, like the `(double)`
+/// overload): ints convert exactly when small, ratios/bigints
+/// through f64 (NaN stays NaN).
+fn math_double_arg(v: &Value, member: &str) -> Result<f64, NativeError> {
+    match v {
+        Value::Double(d) => Ok(*d),
+        Value::Int(i) => Ok(*i as f64),
+        Value::Ratio(r) => Ok(r.to_f64().unwrap_or(f64::NAN)),
+        Value::BigInt(n) | Value::BigInteger(n) => Ok(n.to_f64().unwrap_or(f64::NAN)),
+        Value::BigDec(d) => Ok(d.to_f64()),
+        Value::Nil => Err(NativeError::new(
+            ThrowClass::NullPointerException,
+            format!(
+                "Cannot invoke \"java.lang.Math.{member}(double)\" because the argument is null"
+            ),
+        )),
+        other => Err(crate::core::cce_err(other, "java.lang.Double")),
+    }
+}
+
+/// `Math/abs` (issue #201 S12): ints wrap like the JDK
+/// (`abs(MIN_VALUE)` is itself), everything else goes double.
+fn static_math_abs(args: &[Value]) -> Result<Value, NativeError> {
+    match args.len() {
+        1 => match &args[0] {
+            Value::Int(i) => Ok(Value::Int(i.wrapping_abs())),
+            other => Ok(Value::Double(math_double_arg(other, "abs")?.abs())),
+        },
+        n => Err(crate::types::no_method("abs", n, "java.lang.Math")),
+    }
+}
+
+/// `Math/sqrt` (issue #201 S12).
+fn static_math_sqrt(args: &[Value]) -> Result<Value, NativeError> {
+    match args.len() {
+        1 => Ok(Value::Double(math_double_arg(&args[0], "sqrt")?.sqrt())),
+        n => Err(crate::types::no_method("sqrt", n, "java.lang.Math")),
+    }
+}
+
+/// `Math/ceil` (issue #201 S12).
+fn static_math_ceil(args: &[Value]) -> Result<Value, NativeError> {
+    match args.len() {
+        1 => Ok(Value::Double(math_double_arg(&args[0], "ceil")?.ceil())),
+        n => Err(crate::types::no_method("ceil", n, "java.lang.Math")),
+    }
+}
+
+fn static_math_log(args: &[Value]) -> Result<Value, NativeError> {
+    match args.len() {
+        1 => Ok(Value::Double(math_double_arg(&args[0], "log")?.ln())),
+        n => Err(crate::types::no_method("log", n, "java.lang.Math")),
+    }
+}
+
+fn static_math_exp(args: &[Value]) -> Result<Value, NativeError> {
+    match args.len() {
+        1 => Ok(Value::Double(math_double_arg(&args[0], "exp")?.exp())),
+        n => Err(crate::types::no_method("exp", n, "java.lang.Math")),
+    }
+}
+
+fn static_math_pow(args: &[Value]) -> Result<Value, NativeError> {
+    match args.len() {
+        2 => Ok(Value::Double(
+            math_double_arg(&args[0], "pow")?.powf(math_double_arg(&args[1], "pow")?),
+        )),
+        n => Err(crate::types::no_method("pow", n, "java.lang.Math")),
+    }
+}
+
+/// The trig/hyperbolic/inverse family (recipes `optics/*`,
+/// `finance/var_es`, `search/backprop` call `sin`/`cos`/`tanh`;
+/// the siblings ride along so the next script cannot miss):
+/// plain double math through `math_double_arg`, exactly like
+/// `log`/`exp` above. HotSpot implements these with the system
+/// libm (not `StrictMath`), so on the same platform the bits
+/// match the host libm Rust calls.
+macro_rules! static_math_unary {
+    ($name:ident, $member:literal, $method:ident) => {
+        fn $name(args: &[Value]) -> Result<Value, NativeError> {
+            match args.len() {
+                1 => Ok(Value::Double(math_double_arg(&args[0], $member)?.$method())),
+                n => Err(crate::types::no_method($member, n, "java.lang.Math")),
+            }
+        }
+    };
+}
+
+static_math_unary!(static_math_sin, "sin", sin);
+static_math_unary!(static_math_cos, "cos", cos);
+static_math_unary!(static_math_tan, "tan", tan);
+static_math_unary!(static_math_asin, "asin", asin);
+static_math_unary!(static_math_acos, "acos", acos);
+static_math_unary!(static_math_atan, "atan", atan);
+static_math_unary!(static_math_sinh, "sinh", sinh);
+static_math_unary!(static_math_cosh, "cosh", cosh);
+static_math_unary!(static_math_tanh, "tanh", tanh);
+static_math_unary!(static_math_cbrt, "cbrt", cbrt);
+static_math_unary!(static_math_floor, "floor", floor);
+static_math_unary!(static_math_log10, "log10", log10);
+
+/// `Math/atan2` and `Math/hypot` (2-arg): `bitonic_tsp` computes
+/// distances with `hypot` over int coords (widened by
+/// `math_double_arg`).
+fn static_math_atan2(args: &[Value]) -> Result<Value, NativeError> {
+    match args.len() {
+        2 => Ok(Value::Double(
+            math_double_arg(&args[0], "atan2")?.atan2(math_double_arg(&args[1], "atan2")?),
+        )),
+        n => Err(crate::types::no_method("atan2", n, "java.lang.Math")),
+    }
+}
+
+fn static_math_hypot(args: &[Value]) -> Result<Value, NativeError> {
+    match args.len() {
+        2 => Ok(Value::Double(
+            math_double_arg(&args[0], "hypot")?.hypot(math_double_arg(&args[1], "hypot")?),
+        )),
+        n => Err(crate::types::no_method("hypot", n, "java.lang.Math")),
+    }
+}
+
+/// `Math/round` (1-arg, the `(double)` overload returning
+/// `long`): `floor(a + 0.5)` narrowed Java-style (NaN becomes 0,
+/// out-of-range saturates — Rust's `as i64` does exactly that).
+fn static_math_round(args: &[Value]) -> Result<Value, NativeError> {
+    match args.len() {
+        1 => Ok(Value::Int(
+            (math_double_arg(&args[0], "round")? + 0.5).floor() as i64,
+        )),
+        n => Err(crate::types::no_method("round", n, "java.lang.Math")),
+    }
+}
+
+/// `Character/isLetterOrDigit` (1-arg): `Char` and `Int`
+/// (code point) spellings (a documented narrowing —
+/// `is_alphanumeric` covers a slightly wider Unicode range
+/// than `isLetter||isDigit`, identical over ASCII).
+fn static_character_is_letter_or_digit(args: &[Value]) -> Result<Value, NativeError> {
+    match args.len() {
+        1 => Ok(Value::Bool(match &args[0] {
+            Value::Char(c) => c.is_alphanumeric(),
+            Value::Int(i) => u32::try_from(*i)
+                .ok()
+                .and_then(char::from_u32)
+                .is_some_and(|c| c.is_alphanumeric()),
+            other => {
+                return Err(crate::core::cce_err(other, "java.lang.Character"));
+            }
+        })),
+        n => Err(crate::types::no_method(
+            "isLetterOrDigit",
+            n,
+            "java.lang.Character",
+        )),
+    }
+}
+
+/// `Character/isLowerCase` / `isUpperCase` (1-arg): `Char` and
+/// `Int` (code point) spellings, same shape as
+/// `isLetterOrDigit` above (`fol_unify` tests vars with
+/// `isLowerCase` over `(.charAt sym 0)`). A documented
+/// narrowing — Rust's Unicode case properties differ from
+/// `java.lang.Character` on a handful of non-ASCII code points,
+/// identical over ASCII.
+fn static_character_is_lower_case(args: &[Value]) -> Result<Value, NativeError> {
+    match args.len() {
+        1 => Ok(Value::Bool(match &args[0] {
+            Value::Char(c) => c.is_lowercase(),
+            Value::Int(i) => u32::try_from(*i)
+                .ok()
+                .and_then(char::from_u32)
+                .is_some_and(|c| c.is_lowercase()),
+            other => {
+                return Err(crate::core::cce_err(other, "java.lang.Character"));
+            }
+        })),
+        n => Err(crate::types::no_method(
+            "isLowerCase",
+            n,
+            "java.lang.Character",
+        )),
+    }
+}
+
+fn static_character_is_upper_case(args: &[Value]) -> Result<Value, NativeError> {
+    match args.len() {
+        1 => Ok(Value::Bool(match &args[0] {
+            Value::Char(c) => c.is_uppercase(),
+            Value::Int(i) => u32::try_from(*i)
+                .ok()
+                .and_then(char::from_u32)
+                .is_some_and(|c| c.is_uppercase()),
+            other => {
+                return Err(crate::core::cce_err(other, "java.lang.Character"));
+            }
+        })),
+        n => Err(crate::types::no_method(
+            "isUpperCase",
+            n,
+            "java.lang.Character",
         )),
     }
 }
@@ -3596,6 +4155,52 @@ fn surface_gated(
     surface_gated_coll(eval, meth, target, rest)
         .or_else(|| surface_gated_misc(eval, meth, target, rest))
         .or_else(|| surface_gated_str(meth, target, rest))
+        .or_else(|| surface_gated_builder(eval, meth, target, rest))
+        .or_else(|| surface_gated_regex(meth, target, rest))
+}
+
+/// The `StringBuilder` members (issue #201 S5): `append` only —
+/// `toString` rides the universal via `print_str`.
+fn surface_gated_builder(
+    eval: &mut Evaluator,
+    meth: &str,
+    target: &Value,
+    rest: &[Value],
+) -> Option<Result<Value, NativeError>> {
+    match (meth, rest.len()) {
+        ("append", 1) => gated_builder_append(eval, target, rest),
+        _ => None,
+    }
+}
+
+/// The `Pattern` members (issue #201 S7): `split` only.
+fn surface_gated_regex(
+    meth: &str,
+    target: &Value,
+    rest: &[Value],
+) -> Option<Result<Value, NativeError>> {
+    match (meth, rest.len()) {
+        ("split", 1 | 2) => gated_regex_split(target, rest),
+        ("replaceAll", 1) => gated_matcher_replace_all(target, rest),
+        _ => None,
+    }
+}
+
+/// `Matcher.replaceAll` (1-arg): `string/replace` over patterns
+/// lowers here. Nil is ambiguous (`String` vs `Function`
+/// overloads — the JVM reports the ambiguity); anything else
+/// unhandled falls through to the missing-method error (the
+/// `Function` overload stays unimplemented).
+fn gated_matcher_replace_all(target: &Value, rest: &[Value]) -> Option<Result<Value, NativeError>> {
+    let h = crate::collmisc::as_matcher(target)?;
+    match &rest[0] {
+        Value::Str(r) => Some(Ok(Value::Str(Arc::from(h.replace_all(r).as_str())))),
+        Value::Nil => Some(Err(NativeError::new(
+            ThrowClass::IllegalArgumentException,
+            "More than one matching method found: replaceAll".to_owned(),
+        ))),
+        _ => None,
+    }
 }
 
 /// The collection-gated members (`String`, `Named`, `List`,
@@ -3615,8 +4220,51 @@ fn surface_gated_coll(
         ("getLast", 0) => gated_list_end(eval, target, false),
         ("getKey", 0) => gated_entry_key(target),
         ("getValue", 0) => gated_entry_val(target),
+        ("indexOf", 1) => gated_coll_indexof(eval, target, rest),
         _ => None,
     }
+}
+
+/// `List.indexOf` (1-arg): the first slot `.equals` to the
+/// needle, -1 absent (vectors and lists; other `List`-likes
+/// keep the missing-method error).
+fn gated_coll_indexof(
+    eval: &mut Evaluator,
+    target: &Value,
+    rest: &[Value],
+) -> Option<Result<Value, NativeError>> {
+    let found = match target {
+        Value::Vector(x) => {
+            let mut at = None;
+            for (i, item) in x.iter().enumerate() {
+                match equals_member(eval, item, &rest[0]) {
+                    Ok(true) => {
+                        at = Some(i as i64);
+                        break;
+                    }
+                    Ok(false) => {}
+                    Err(e) => return Some(Err(e)),
+                }
+            }
+            at
+        }
+        Value::List(l) => {
+            let mut at = None;
+            for (i, item) in l.iter().enumerate() {
+                match equals_member(eval, item, &rest[0]) {
+                    Ok(true) => {
+                        at = Some(i as i64);
+                        break;
+                    }
+                    Ok(false) => {}
+                    Err(e) => return Some(Err(e)),
+                }
+            }
+            at
+        }
+        _ => return None,
+    };
+    Some(Ok(Value::Int(found.unwrap_or(-1))))
 }
 
 /// The throwable/pending/writer-gated members.
@@ -3995,11 +4643,43 @@ fn surface_gated_strn(
     match (meth, rest.len()) {
         ("charAt", 1) => gated_str_charat(target, rest),
         ("substring", 1 | 2) => gated_str_substring(target, rest),
+        // `subSequence` shares the substring body (same bounds
+        // template; `CharSequence` results are port strings).
+        ("subSequence", 2) => gated_str_substring(target, rest),
         ("startsWith", 1 | 2) => gated_str_startswith(target, rest),
         ("endsWith", 1) => gated_str_endswith(target, rest),
         ("split", 1 | 2) => gated_str_split(target, rest),
+        ("indexOf", 1) => gated_str_indexof(target, rest),
         _ => None,
     }
+}
+
+/// `String.indexOf` (1-arg): the first UTF-16 offset of the
+/// `String` (or code-point) needle, -1 absent. Empty needles
+/// read 0 (the JDK rule).
+fn gated_str_indexof(target: &Value, rest: &[Value]) -> Option<Result<Value, NativeError>> {
+    let Value::Str(s) = target else {
+        return None;
+    };
+    let needle: Vec<u16> = match &rest[0] {
+        Value::Str(p) => p.encode_utf16().collect(),
+        Value::Int(i) => match u32::try_from(*i).ok().and_then(char::from_u32) {
+            Some(c) => c.encode_utf16(&mut [0; 2]).to_vec(),
+            None => return Some(Ok(Value::Int(-1))),
+        },
+        Value::Char(c) => c.encode_utf16(&mut [0; 2]).to_vec(),
+        _ => return None,
+    };
+    if needle.is_empty() {
+        return Some(Ok(Value::Int(0)));
+    }
+    let hay: Vec<u16> = s.encode_utf16().collect();
+    let at = hay
+        .windows(needle.len())
+        .position(|w| w == needle.as_slice())
+        .map(|i| i as i64)
+        .unwrap_or(-1);
+    Some(Ok(Value::Int(at)))
 }
 
 /// The string-gated members (split 0-arg/with-args for the
@@ -4010,6 +4690,177 @@ fn surface_gated_str(
     rest: &[Value],
 ) -> Option<Result<Value, NativeError>> {
     surface_gated_str0(meth, target, rest).or_else(|| surface_gated_strn(meth, target, rest))
+}
+
+/// A `java.lang.StringBuilder` (issue #201 S5): a growable
+/// buffer behind the `Extension` facade. Identity is the
+/// sequence `id` (like `Writer`); `str`/`toString` render the
+/// buffer via `print_str`, `print` keeps the `#object[…]` form.
+#[derive(Debug)]
+pub(crate) struct StringBuilder {
+    id: u64,
+    buf: Mutex<String>,
+}
+
+static NEXT_BUILDER: AtomicU64 = AtomicU64::new(1);
+
+impl StringBuilder {
+    pub(crate) fn fresh(content: String) -> Self {
+        Self {
+            id: NEXT_BUILDER.fetch_add(1, Ordering::Relaxed),
+            buf: Mutex::new(content),
+        }
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, String> {
+        self.buf.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+/// A `java.util.Locale` (issue #201 recipes: 44 scripts pin
+/// `Locale/US` for `String/format`). Identity is the tag; `str`
+/// renders the JVM `toString` (`en_US`), `print` the
+/// `#object[…]` form.
+#[derive(Debug)]
+pub(crate) struct LocaleHandle {
+    tag: &'static str,
+}
+
+impl LocaleHandle {
+    /// The `Locale/US` constant (`en_US`).
+    fn us() -> Self {
+        Self { tag: "en_US" }
+    }
+}
+
+/// Downcast a locale value to its handle, if any.
+fn as_locale(v: &Value) -> Option<&LocaleHandle> {
+    match v {
+        Value::Extension(e) => e.as_any().downcast_ref::<LocaleHandle>(),
+        _ => None,
+    }
+}
+
+impl ExtensionValue for LocaleHandle {
+    fn class_name(&self) -> String {
+        "java.util.Locale".to_owned()
+    }
+
+    fn print(&self) -> String {
+        format!(
+            "#object[java.util.Locale 0x{:x} \"{}\"]",
+            self as *const Self as usize, self.tag
+        )
+    }
+
+    fn print_str(&self) -> Option<String> {
+        Some(self.tag.to_owned())
+    }
+
+    fn dyn_eq(&self, other: &dyn ExtensionValue) -> bool {
+        other
+            .as_any()
+            .downcast_ref::<LocaleHandle>()
+            .is_some_and(|o| o.tag == self.tag)
+    }
+
+    fn dyn_hash(&self, state: &mut dyn std::hash::Hasher) {
+        state.write(self.tag.as_bytes());
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+impl ExtensionValue for StringBuilder {
+    fn class_name(&self) -> String {
+        "java.lang.StringBuilder".to_owned()
+    }
+
+    fn print(&self) -> String {
+        format!(
+            "#object[java.lang.StringBuilder 0x{:x} \"java.lang.StringBuilder@{:x}\"]",
+            self.id, self.id
+        )
+    }
+
+    fn print_str(&self) -> Option<String> {
+        Some(self.lock().clone())
+    }
+
+    fn dyn_eq(&self, other: &dyn ExtensionValue) -> bool {
+        other
+            .as_any()
+            .downcast_ref::<StringBuilder>()
+            .is_some_and(|o| o.id == self.id)
+    }
+
+    fn dyn_hash(&self, state: &mut dyn std::hash::Hasher) {
+        state.write_u64(self.id);
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+/// Downcast a value to a string builder, if it is one.
+fn as_builder(v: &Value) -> Option<&StringBuilder> {
+    match v {
+        Value::Extension(e) => e.as_any().downcast_ref::<StringBuilder>(),
+        _ => None,
+    }
+}
+
+/// `append`: strings/chars push directly, nil appends `"null"`
+/// (`String.valueOf`), anything else renders through `str` —
+/// and returns the builder itself, like the JVM.
+fn gated_builder_append(
+    eval: &mut Evaluator,
+    target: &Value,
+    rest: &[Value],
+) -> Option<Result<Value, NativeError>> {
+    let b = as_builder(target)?;
+    let text = match &rest[0] {
+        Value::Nil => "null".to_owned(),
+        Value::Str(s) => s.to_string(),
+        Value::Char(c) => c.to_string(),
+        other => match crate::core::str_of_one(eval, other) {
+            Ok(s) => s,
+            Err(e) => return Some(Err(e)),
+        },
+    };
+    b.lock().push_str(&text);
+    Some(Ok(target.clone()))
+}
+
+/// `Pattern/split`: the `re` split loop over the pattern source
+/// (same body as `String/split`, pattern-first argument order).
+fn gated_regex_split(target: &Value, rest: &[Value]) -> Option<Result<Value, NativeError>> {
+    let Value::Regex(source) = target else {
+        return None;
+    };
+    let text = match str_text_arg(&rest[0]) {
+        Ok(Some(t)) => t,
+        Ok(None) => {
+            return Some(Err(NativeError::new(
+                ThrowClass::NullPointerException,
+                "Cannot invoke \"java.lang.CharSequence.length()\" because \"input\" is null"
+                    .to_owned(),
+            )));
+        }
+        Err(e) => return Some(Err(e)),
+    };
+    let limit = if rest.len() == 2 {
+        match str_int_arg(&rest[1]) {
+            Ok(n) => n,
+            Err(e) => return Some(Err(e)),
+        }
+    } else {
+        0
+    };
+    Some(crate::re::pattern_split(text, source, limit))
 }
 
 /// The member surface for `__meth*`: `None` when the member misses
@@ -4033,6 +4884,7 @@ pub(crate) fn surface_meth(
 /// The surface as `(member, argc)` pairs (sorted for the unit test's
 /// nil-target sweep).
 pub(crate) const SURFACE_MEMBERS: &[(&str, usize)] = &[
+    ("append", 1),
     ("cast", 1),
     ("charAt", 1),
     ("close", 0),
@@ -4054,6 +4906,7 @@ pub(crate) const SURFACE_MEMBERS: &[(&str, usize)] = &[
     ("getSuperclass", 0),
     ("getValue", 0),
     ("hashCode", 0),
+    ("indexOf", 1),
     ("isArray", 0),
     ("isAssignableFrom", 1),
     ("isBlank", 0),
@@ -4062,10 +4915,12 @@ pub(crate) const SURFACE_MEMBERS: &[(&str, usize)] = &[
     ("isInterface", 0),
     ("isRealized", 0),
     ("length", 0),
+    ("replaceAll", 1),
     ("split", 1),
     ("split", 2),
     ("startsWith", 1),
     ("startsWith", 2),
+    ("subSequence", 2),
     ("substring", 1),
     ("substring", 2),
     ("toLowerCase", 0),

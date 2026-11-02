@@ -423,6 +423,27 @@ fn nth_rows() {
         uncaught(&mut eval, "(nth \"ab\" -1)"),
         "java.lang.StringIndexOutOfBoundsException | Index -1 out of bounds for length 2"
     );
+    // Big-index string `nth` rides the scan cache (ASCII by
+    // byte, other strings by char→byte offsets — the 37MB
+    // dijkstra parse loop is quadratic without it).
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [s (apply str (repeat 1000 \"ab\"))] [(nth s 1999) (nth s 0) (count s)])"
+        ),
+        "[\\b \\a 2000]"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(nth \"héllo-wörld0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789\" 100)"
+        ),
+        "\\1"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(nth (apply str (repeat 100 \"ab\")) 500)"),
+        "java.lang.StringIndexOutOfBoundsException | Index 500 out of bounds for length 200"
+    );
     assert_eq!(
         uncaught(&mut eval, "(nth 5 0)"),
         "java.lang.UnsupportedOperationException | nth not supported on this type: Long"
@@ -815,6 +836,41 @@ fn peek_pop_rows() {
     assert_eq!(
         uncaught(&mut eval, "(pop (range 3))"),
         "java.lang.ClassCastException | class clojure.lang.LongRange cannot be cast to class clojure.lang.IPersistentStack (clojure.lang.LongRange and clojure.lang.IPersistentStack are in unnamed module of loader 'app')"
+    );
+}
+
+#[test]
+fn persistent_queue_fifo_201() {
+    // `PersistentQueue/EMPTY` rides on marked vectors (FIFO via
+    // the queue `peek`/`pop` arms; 4 recipes BFS with it):
+    // `peek` reads the front, `pop` drops it (empty pops
+    // answer the queue itself, like the JVM — oracle), and the
+    // mark survives `conj`/`into` loops.
+    let mut eval = boot();
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [q (conj clojure.lang.PersistentQueue/EMPTY 1 2 3)] [(peek q) (peek (pop q))])"
+        ),
+        "[1 2]"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(empty? (pop clojure.lang.PersistentQueue/EMPTY))"
+        ),
+        "true"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(peek clojure.lang.PersistentQueue/EMPTY)"),
+        "nil"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [q (into clojure.lang.PersistentQueue/EMPTY [1 2])] [(peek q) (count q)])"
+        ),
+        "[1 2]"
     );
 }
 
@@ -2589,4 +2645,22 @@ fn t73_reader_meta_on_evaluated_literals() {
         "{:private true}"
     );
     assert_eq!(run_last(&mut eval, "(meta [1])"), "nil");
+}
+
+#[test]
+fn conj_bang_is_variadic_201() {
+    let mut eval = boot();
+    assert_eq!(
+        run_last(&mut eval, "(persistent! (conj! (transient [1]) 2 3))"),
+        "[1 2 3]"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(persistent! (conj! (transient [])))"),
+        "[]"
+    );
+    assert_eq!(run_last(&mut eval, "(conj! nil)"), "nil");
+    assert_eq!(
+        run_last(&mut eval, "(persistent! (conj! (transient #{1}) 2 3))"),
+        "#{1 2 3}"
+    );
 }

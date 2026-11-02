@@ -267,11 +267,42 @@ fn cmd_run(file: &Path, args: &[String]) -> ExitCode {
     }
     let path = file.to_string_lossy();
     let mut eval = boot();
-    // `*command-line-args*` is a dynamic `clojure.core` var (S7B);
-    // bind the script's args around the `load-file` (pins P7).
+    // Upstream `clojure.main/with-bindings` ("vars that often need
+    // to be set!"): every script runs inside thread bindings for
+    // the set below (issue #201 S3 — upstream `string.clj:46`
+    // `set!`s `*warn-on-reflection*` at top level, which needs
+    // this frame, not a loader binding). `*compile-path*` keeps
+    // its root (no `System/getProperty` yet); spec's
+    // `*explain-out*` stays out (spec isn't loaded here).
+    //
+    // `clojure.string` is required up front, inside the frame:
+    // JVM `clojure.main <script>` loads `clojure.main`, which
+    // requires `clojure.spec.alpha`, which requires
+    // `clojure.string` — so fully-qualified `clojure.string/...`
+    // uses resolve on the JVM even when the script never
+    // requires it (27 recipe scripts rely on this). `require` is
+    // idempotent, so scripts that require it themselves are
+    // unaffected.
     let inits = args_expr(args);
     let target = clj_string(&path);
-    let script = format!("(binding [*command-line-args* {inits}] (load-file {target}))");
+    let script = format!(
+        "(binding [*ns* *ns* \
+         *warn-on-reflection* *warn-on-reflection* \
+         *math-context* *math-context* \
+         *print-meta* *print-meta* \
+         *print-length* *print-length* \
+         *print-level* *print-level* \
+         *print-namespace-maps* true \
+         *data-readers* *data-readers* \
+         *default-data-reader-fn* *default-data-reader-fn* \
+         *compile-path* *compile-path* \
+         *command-line-args* {inits} \
+         *unchecked-math* *unchecked-math* \
+         *assert* *assert* \
+         *1 nil *2 nil *3 nil *e nil] \
+         (require 'clojure.string) \
+         (load-file {target}))"
+    );
     let code = match eval.eval_source(&script) {
         Ok(_) => ExitCode::SUCCESS,
         Err(e) => {
@@ -938,6 +969,25 @@ mod tests {
             run_diagnostic("script.clj", &err),
             "script.clj:1:1: Syntax error compiling: Unable to resolve symbol: nope in this context"
         );
+    }
+
+    #[test]
+    fn run_preloads_clojure_string_201() {
+        // JVM `clojure.main <script>` loads `clojure.main` →
+        // `clojure.spec.alpha` → `clojure.string`, so
+        // fully-qualified `clojure.string/...` uses resolve even
+        // when the script never requires it (27 recipe scripts).
+        // Pre-fix this exits 1 (`No such namespace`).
+        let path =
+            std::env::temp_dir().join(format!("clj-run-preload-string-{}.clj", std::process::id()));
+        std::fs::write(
+            &path,
+            "(ns preload-probe)\n(def x (clojure.string/trim \"  a  \"))\n(assert (= x \"a\"))\n",
+        )
+        .expect("write probe script");
+        let code = cmd_run(&path, &[]);
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(code, ExitCode::SUCCESS);
     }
 
     #[test]

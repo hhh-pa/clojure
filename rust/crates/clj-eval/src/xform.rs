@@ -892,14 +892,14 @@ pub(crate) fn into_xform(
     xform: &Value,
     from: &Value,
 ) -> Result<Value, NativeError> {
-    // `IEditableCollection` ≈ persistent vector/map/set — plus
-    // transients, which take the `(transient to)` call below and
-    // throw there, exactly like the JVM (oracle
-    // `into-to-transient`).
-    let editable = matches!(
-        to,
-        Value::Vector(_) | Value::Map(_) | Value::Set(_) | Value::Transient(_)
-    );
+    // `IEditableCollection` ≈ persistent vector/map/set — minus
+    // the sorted kinds (never editable on the JVM: sorted targets
+    // transduce with plain `conj`) — plus transients, which take
+    // the `(transient to)` call below and throw there, exactly
+    // like the JVM (oracle `into-to-transient`).
+    let editable = matches!(to, Value::Vector(_) | Value::Transient(_))
+        || matches!(&to, Value::Map(m) if !m.is_sorted())
+        || matches!(&to, Value::Set(s) if !s.is_sorted());
     if editable {
         let transient_to = call_checked(eval, &deref_core(eval, "transient"), &[to])?;
         let rf = into_transient_rf(eval);

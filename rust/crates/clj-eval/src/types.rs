@@ -661,6 +661,9 @@ fn new_via_class(eval: &Evaluator, name: &str, args: &[Value]) -> Result<Value, 
     if name == "java.lang.Object" {
         return crate::ctor::build_object(args);
     }
+    if name == "java.lang.StringBuilder" {
+        return crate::ctor::build_string_builder(args);
+    }
     match hostdef_by_name(eval, name) {
         Some(def) => new_via_def(&def, args),
         None => Err(crate::ctor::no_ctor(

@@ -3628,7 +3628,7 @@ fn decimal_value(c: char) -> Option<u32> {
 
 /// `Long.parseLong`: one ASCII sign, 1+ decimal digits (any
 /// script), overflow → `None` (the caller answers nil).
-fn parse_long_str(s: &str) -> Option<i64> {
+pub(crate) fn parse_long_str(s: &str) -> Option<i64> {
     let (neg, digits) = match s.strip_prefix('-') {
         Some(rest) => (true, rest),
         None => (false, s.strip_prefix('+').unwrap_or(s)),
@@ -3722,7 +3722,7 @@ fn parse_hex_float(neg: bool, h: &str) -> Option<f64> {
 /// Rejects the `nan`/`inf` spellings the host parser takes but
 /// the JVM refuses, and all non-ASCII digits (oracle
 /// `pd-arabic`/`pd-fullwidth`).
-fn parse_double_str(s: &str) -> Option<f64> {
+pub(crate) fn parse_double_str(s: &str) -> Option<f64> {
     let t = s.trim_matches(|c: char| c <= ' ');
     if t.is_empty() {
         return None;
@@ -4182,28 +4182,39 @@ fn native_throw_npe(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nativ
     Err(NativeError::new(ThrowClass::NullPointerException, s))
 }
 
-/// `odd?`/`even?`: the low bit of an `Int` (two's complement, so
-/// negatives work); anything else is `Argument must be an integer:
-/// <str>`.
+/// `odd?`/`even?`: the low bit of every integer kind (`Int`,
+/// `BigInt`, `BigInteger` — upstream checks `integer?`, so
+/// bigints answer too); two's complement throughout, so
+/// negatives work. Anything else is `Argument must be an
+/// integer: <str>`.
+fn odd_even_bit(v: &Value) -> Option<bool> {
+    match v {
+        Value::Int(n) => Some((n & 1) == 1),
+        Value::BigInt(n) | Value::BigInteger(n) => Some(n.bit(0)),
+        _ => None,
+    }
+}
+
+fn odd_even_miss(v: &Value) -> NativeError {
+    NativeError::new(
+        ThrowClass::IllegalArgumentException,
+        format!("Argument must be an integer: {}", crate::ns::str_of(v)),
+    )
+}
+
 fn native_odd(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/odd?", args, &[1])?;
-    match &args[0] {
-        Value::Int(n) => Ok(Value::Bool((n & 1) == 1)),
-        v => Err(NativeError::new(
-            ThrowClass::IllegalArgumentException,
-            format!("Argument must be an integer: {}", crate::ns::str_of(v)),
-        )),
+    match odd_even_bit(&args[0]) {
+        Some(bit) => Ok(Value::Bool(bit)),
+        None => Err(odd_even_miss(&args[0])),
     }
 }
 
 fn native_even(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/even?", args, &[1])?;
-    match &args[0] {
-        Value::Int(n) => Ok(Value::Bool((n & 1) == 0)),
-        v => Err(NativeError::new(
-            ThrowClass::IllegalArgumentException,
-            format!("Argument must be an integer: {}", crate::ns::str_of(v)),
-        )),
+    match odd_even_bit(&args[0]) {
+        Some(bit) => Ok(Value::Bool(!bit)),
+        None => Err(odd_even_miss(&args[0])),
     }
 }
 
@@ -4606,7 +4617,7 @@ fn java_double_to_long(d: f64) -> i64 {
 /// Java `longValue` over an unbounded integer: low 64 bits,
 /// sign-extended (the 8-byte sibling of [`bigint_int_value`];
 /// oracles `ucl-big`, `ucl-negbig`).
-fn bigint_long_value(n: &num_bigint::BigInt) -> i64 {
+pub(crate) fn bigint_long_value(n: &num_bigint::BigInt) -> i64 {
     let mut le = n.to_signed_bytes_le();
     le.resize(
         8,
