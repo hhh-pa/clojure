@@ -100,6 +100,11 @@ const STDLIB_REPL_CLJ: &str = include_str!("stdlib/clojure/repl.clj");
 const STDLIB_MAIN_CLJ: &str = include_str!("stdlib/clojure/main.clj");
 const STDLIB_STACKTRACE_CLJ: &str = include_str!("stdlib/clojure/stacktrace.clj");
 const STDLIB_CORE_PRINT_CLJ: &str = include_str!("stdlib/clojure/core_print.clj");
+// W7 (tools) — do not merge by hand, integrator resolves
+const STDLIB_JAVA_BASIS_CLJ: &str = include_str!("stdlib/clojure/java/basis.clj");
+const STDLIB_JAVA_BASIS_IMPL_CLJ: &str = include_str!("stdlib/clojure/java/basis/impl.clj");
+const STDLIB_TOOLS_DEPS_INTEROP_CLJ: &str = include_str!("stdlib/clojure/tools/deps/interop.clj");
+const STDLIB_REPL_DEPS_CLJ: &str = include_str!("stdlib/clojure/repl/deps.clj");
 
 const TOOLS_DEPS_UTIL_DIR_CLJ: &str = include_str!("tools_deps_util_dir.clj");
 const TOOLS_DEPS_EDN_CLJ: &str = include_str!("tools_deps_edn.clj");
@@ -1395,6 +1400,27 @@ const EMBEDDED_SOURCES: &[(&str, &str, &str)] = &[
         "clojure/core_print",
         "clojure/core_print.clj",
         STDLIB_CORE_PRINT_CLJ,
+    ),
+    // W7 (tools) — do not merge by hand, integrator resolves
+    (
+        "clojure/java/basis",
+        "clojure/java/basis.clj",
+        STDLIB_JAVA_BASIS_CLJ,
+    ),
+    (
+        "clojure/java/basis/impl",
+        "clojure/java/basis/impl.clj",
+        STDLIB_JAVA_BASIS_IMPL_CLJ,
+    ),
+    (
+        "clojure/tools/deps/interop",
+        "clojure/tools/deps/interop.clj",
+        STDLIB_TOOLS_DEPS_INTEROP_CLJ,
+    ),
+    (
+        "clojure/repl/deps",
+        "clojure/repl/deps.clj",
+        STDLIB_REPL_DEPS_CLJ,
     ),
 ];
 
