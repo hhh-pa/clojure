@@ -632,7 +632,6 @@ fn ns_errors() {
         "(ns 5)",
         "(ns \"s\")",
         "(ns foo/bar)",
-        "(ns foo (:import String))",
         "(ns foo \"d1\" \"d2\")",
         "(ns)",
     ] {
@@ -646,6 +645,14 @@ fn ns_errors() {
             "{src}"
         );
     }
+    // Bare `:import` symbols pass the spec (like `(import 'String)`)
+    // and fail at load with CNFE (JVM oracle); the `ns` switches
+    // before the load fails, so switch back for the check below.
+    assert_eq!(
+        uncaught(&mut eval, "(ns foo (:import String))"),
+        "java.lang.ClassNotFoundException | String"
+    );
+    run_last(&mut eval, "(ns user)");
     assert_eq!(run_last(&mut eval, "(ns-name *ns*)"), "user");
     // Load failures surface raw (not as spec errors).
     assert_eq!(

@@ -1199,6 +1199,12 @@ impl<'a> Analyzer<'a> {
         span: Span,
         cur: &str,
     ) -> Result<Option<Expr>, CompileError> {
+        // FX4-owned heads are exempt (their shapes and misses are
+        // the builtin's — call heads fall through to this
+        // value-position path when `try_static_call` declines).
+        if crate::fx4_host::owns_call_head(ns_part, field) {
+            return Ok(None);
+        }
         let Some(class) = self.static_head_class(cur, ns_part) else {
             return Ok(None);
         };
