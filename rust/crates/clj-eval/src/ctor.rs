@@ -40,6 +40,10 @@ pub(crate) fn ctor_arities(fqn: &str) -> Option<&'static [usize]> {
         "java.security.SecureRandom" => Some(&[0]),
         "java.math.BigInteger" => Some(&[1, 2]),
         "java.net.URI" => Some(&[1]),
+        "java.io.File" => Some(&[1]),
+        "java.io.FileInputStream" => Some(&[1]),
+        "java.io.FileOutputStream" => Some(&[1]),
+        "java.io.StringWriter" => Some(&[0]),
         _ => None,
     }
 }
@@ -623,6 +627,81 @@ pub(crate) fn build_uri(args: &[Value]) -> Result<Value, NativeError> {
             "Cannot invoke \"java.net.URI.<init>\" because \"str\" is null".to_owned(),
         )),
         _ => Err(no_ctor(CLASS, false)),
+    }
+}
+
+/// Build `(File. …)` (#205): 1-arg takes the path string (nil
+/// NPEs on the parameter, like the JDK); anything else misses
+/// (there is no `(File)` copy ctor on the JVM either).
+pub(crate) fn build_file(
+    eval: &mut crate::eval::Evaluator,
+    args: &[Value],
+) -> Result<Value, NativeError> {
+    const CLASS: &str = "java.io.File";
+    match args {
+        [Value::Str(s)] => Ok(crate::jdkio::file(eval, s)),
+        [Value::Nil] => Err(NativeError::new(
+            ThrowClass::NullPointerException,
+            "Cannot invoke \"java.io.File.<init>\" because \"pathname\" is null".to_owned(),
+        )),
+        _ => Err(no_ctor(CLASS, false)),
+    }
+}
+
+/// Build `(FileInputStream. …)` (#205): 1-arg takes a path
+/// string or a `File` (the ctor reads — missing names the
+/// path); nil NPEs, anything else misses.
+pub(crate) fn build_file_input_stream(
+    eval: &mut crate::eval::Evaluator,
+    args: &[Value],
+) -> Result<Value, NativeError> {
+    const CLASS: &str = "java.io.FileInputStream";
+    match args {
+        [Value::Str(s)] => crate::jio::file_input_stream(eval, s),
+        [v] if crate::jdkio::file_path(v).is_some() => {
+            let path = crate::jdkio::file_path(v).unwrap_or_default();
+            crate::jio::file_input_stream(eval, &path)
+        }
+        [Value::Nil] => Err(NativeError::new(
+            ThrowClass::NullPointerException,
+            "Cannot invoke \"java.io.FileInputStream.<init>\" because \"name\" is null".to_owned(),
+        )),
+        _ => Err(no_ctor(CLASS, false)),
+    }
+}
+
+/// Build `(FileOutputStream. …)` (#205): 1-arg takes a path
+/// string or a `File` (the ctor creates/truncates); nil NPEs,
+/// anything else misses.
+pub(crate) fn build_file_output_stream(
+    eval: &mut crate::eval::Evaluator,
+    args: &[Value],
+) -> Result<Value, NativeError> {
+    const CLASS: &str = "java.io.FileOutputStream";
+    match args {
+        [Value::Str(s)] => crate::jio::file_output_stream(eval, s),
+        [v] if crate::jdkio::file_path(v).is_some() => {
+            let path = crate::jdkio::file_path(v).unwrap_or_default();
+            crate::jio::file_output_stream(eval, &path)
+        }
+        [Value::Nil] => Err(NativeError::new(
+            ThrowClass::NullPointerException,
+            "Cannot invoke \"java.io.FileOutputStream.<init>\" because \"name\" is null".to_owned(),
+        )),
+        _ => Err(no_ctor(CLASS, false)),
+    }
+}
+
+/// Build `(StringWriter. …)` (#205): 0-arg mints the
+/// string-backed writer; anything else misses.
+pub(crate) fn build_string_writer(
+    eval: &mut crate::eval::Evaluator,
+    args: &[Value],
+) -> Result<Value, NativeError> {
+    if args.is_empty() {
+        Ok(crate::io::string_writer(eval))
+    } else {
+        Err(no_ctor("java.io.StringWriter", false))
     }
 }
 

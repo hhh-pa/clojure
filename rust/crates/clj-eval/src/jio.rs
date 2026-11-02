@@ -7,10 +7,11 @@
 // You must not remove this notice, or any other, from this software.
 
 //! Gap-120 slice 3: the `clojure.java.io` facsimile — `file`,
-//! `reader`, `writer`, `input-stream`, `output-stream`, and
-//! `delete-file` over `std::fs` on the `jdkio`/`io`/`reader`
-//! bases. A native namespace (the portdeps shape): requiring
-//! `clojure.java.io` installs the six natives, with no source
+//! `reader`, `writer`, `input-stream`, `output-stream`,
+//! `delete-file`, and `resource` over `std::fs` on the
+//! `jdkio`/`io`/`reader` bases. A native namespace (the portdeps
+//! shape): requiring
+//! `clojure.java.io` installs the seven natives, with no source
 //! file — the upstream protocols have no port values to extend
 //! (`URL`/`Socket` do not exist here), so the dispatch lives in
 //! Rust and only the error texts travel over.
@@ -44,13 +45,14 @@
 //!   (replacement `?`, `UTF-16`/`UTF-32` BOMs).
 //!
 //! Out of scope (not interned): `as-file`, `as-url`,
-//! `as-relative-path`, `copy`, `resource`, `make-parents`.
+//! `as-relative-path`, `copy`, `make-parents`.
 
 use std::io::Write;
 use std::sync::{Arc, Mutex};
 
 use clj_value::{
-    ArrayStore, ExtensionValue, PrintOpts, ThrowClass, Value, jvm_class_of, pr_to_string,
+    Array, ArrayDesc, ArrayStore, BaseType, ExtensionValue, PrintOpts, ThrowClass, Uri, Value,
+    jvm_class_of, pr_to_string,
 };
 
 use crate::core::cce_err;
@@ -65,7 +67,7 @@ use crate::reader::{as_reader, string_reader};
 /// The facsimile namespace (native-only, no source file).
 pub(crate) const JIO_NS: &str = "clojure.java.io";
 
-/// Install the six facsimile natives (the portdeps shape —
+/// Install the seven facsimile natives (the portdeps shape —
 /// never referred into `user`, never in `clojure.core`).
 pub(crate) fn install_jio_ns(eval: &mut Evaluator) {
     eval.registry.ensure_ns(JIO_NS);
@@ -209,7 +211,10 @@ fn output_stream_value(eval: &mut Evaluator, path: &str, file: std::fs::File) ->
 pub(crate) fn close_stream_value(
     e: &Arc<dyn ExtensionValue>,
 ) -> Option<Result<Value, NativeError>> {
-    close_input_value(e).or_else(|| close_output_value(e))
+    close_input_value(e)
+        .or_else(|| close_output_value(e))
+        .or_else(|| close_file_input_value(e))
+        .or_else(|| close_file_output_value(e))
 }
 
 /// `close` on a facsimile input stream (`None` for anything
@@ -224,6 +229,150 @@ fn close_input_value(e: &Arc<dyn ExtensionValue>) -> Option<Result<Value, Native
 /// else).
 fn close_output_value(e: &Arc<dyn ExtensionValue>) -> Option<Result<Value, NativeError>> {
     let s = e.as_any().downcast_ref::<JioOutputStream>()?;
+    let mut st = s.state.lock().unwrap_or_else(|e| e.into_inner());
+    if st.closed {
+        return Some(Ok(Value::Nil));
+    }
+    st.closed = true;
+    Some(st.file.flush().map(|()| Value::Nil).map_err(io_err))
+}
+
+/// An emulated `java.io.FileInputStream` (#205): eager bytes
+/// plus the closed latch (the ctor reads, D0-consistent).
+#[derive(Debug)]
+pub(crate) struct JioFileInput {
+    id: u64,
+    state: Arc<Mutex<JioInputState>>,
+}
+
+/// An emulated `java.io.FileOutputStream` (#205): the open file
+/// plus the closed latch (the ctor creates/truncates).
+#[derive(Debug)]
+pub(crate) struct JioFileOutput {
+    id: u64,
+    state: Arc<Mutex<JioOutputState>>,
+}
+
+impl ExtensionValue for JioFileInput {
+    fn class_name(&self) -> String {
+        "java.io.FileInputStream".to_owned()
+    }
+
+    fn print(&self) -> String {
+        format!(
+            "#object[java.io.FileInputStream 0x{:x} \"java.io.FileInputStream@{:x}\"]",
+            self.id, self.id
+        )
+    }
+
+    fn dyn_eq(&self, other: &dyn ExtensionValue) -> bool {
+        other
+            .as_any()
+            .downcast_ref::<JioFileInput>()
+            .is_some_and(|o| o.id == self.id)
+    }
+
+    fn dyn_hash(&self, state: &mut dyn std::hash::Hasher) {
+        state.write_u64(self.id);
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+impl ExtensionValue for JioFileOutput {
+    fn class_name(&self) -> String {
+        "java.io.FileOutputStream".to_owned()
+    }
+
+    fn print(&self) -> String {
+        format!(
+            "#object[java.io.FileOutputStream 0x{:x} \"java.io.FileOutputStream@{:x}\"]",
+            self.id, self.id
+        )
+    }
+
+    fn dyn_eq(&self, other: &dyn ExtensionValue) -> bool {
+        other
+            .as_any()
+            .downcast_ref::<JioFileOutput>()
+            .is_some_and(|o| o.id == self.id)
+    }
+
+    fn dyn_hash(&self, state: &mut dyn std::hash::Hasher) {
+        state.write_u64(self.id);
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+/// A fresh file input stream: the path reads NOW (missing names
+/// the path — the `FileInputStream` ctor shape).
+pub(crate) fn file_input_stream(eval: &mut Evaluator, path: &str) -> Result<Value, NativeError> {
+    let bytes = read_path_bytes(path)?;
+    Ok(Value::Extension(Arc::new(JioFileInput {
+        id: eval.next_id(),
+        state: Arc::new(Mutex::new(JioInputState {
+            bytes: Arc::from(bytes),
+            closed: false,
+        })),
+    })))
+}
+
+/// A fresh file output stream: creates/truncates NOW (failures
+/// name the path — the `FileOutputStream` ctor shape).
+pub(crate) fn file_output_stream(eval: &mut Evaluator, path: &str) -> Result<Value, NativeError> {
+    let file = open_output(path, false)?;
+    Ok(Value::Extension(Arc::new(JioFileOutput {
+        id: eval.next_id(),
+        state: Arc::new(Mutex::new(JioOutputState { file, closed: false })),
+    })))
+}
+
+/// `readAllBytes` on a file input stream (`None` for anything
+/// else — the miss shapes; closed reports the JDK text).
+pub(crate) fn file_input_read_all(v: &Value) -> Option<Result<Value, NativeError>> {
+    let Value::Extension(e) = v else {
+        return None;
+    };
+    let s = e.as_any().downcast_ref::<JioFileInput>()?;
+    let st = s.state.lock().unwrap_or_else(|e| e.into_inner());
+    if st.closed {
+        return Some(Err(stream_closed()));
+    }
+    Some(Ok(Value::Array(Array::new(
+        ArrayDesc::flat(BaseType::Byte),
+        ArrayStore::Bytes(st.bytes.iter().map(|b| *b as i8).collect()),
+    ))))
+}
+
+/// `write(int)` on a file output stream (`None` for anything
+/// else — the miss shapes; closed reports the JDK text).
+pub(crate) fn file_output_write(v: &Value, byte: u8) -> Option<Result<Value, NativeError>> {
+    let Value::Extension(e) = v else {
+        return None;
+    };
+    let s = e.as_any().downcast_ref::<JioFileOutput>()?;
+    let mut st = s.state.lock().unwrap_or_else(|e| e.into_inner());
+    if st.closed {
+        return Some(Err(stream_closed()));
+    }
+    Some(st.file.write_all(&[byte]).map(|()| Value::Nil).map_err(io_err))
+}
+
+/// `close` on a file input stream (`None` for anything else).
+fn close_file_input_value(e: &Arc<dyn ExtensionValue>) -> Option<Result<Value, NativeError>> {
+    let s = e.as_any().downcast_ref::<JioFileInput>()?;
+    s.state.lock().unwrap_or_else(|e| e.into_inner()).closed = true;
+    Some(Ok(Value::Nil))
+}
+
+/// `close` on a file output stream (`None` for anything else).
+fn close_file_output_value(e: &Arc<dyn ExtensionValue>) -> Option<Result<Value, NativeError>> {
+    let s = e.as_any().downcast_ref::<JioFileOutput>()?;
     let mut st = s.state.lock().unwrap_or_else(|e| e.into_inner());
     if st.closed {
         return Some(Ok(Value::Nil));
@@ -857,7 +1006,51 @@ fn native_delete_file(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, Na
     ))
 }
 
-/// The six facsimile natives installed into `clojure.java.io`.
+/// `resource`: the first `*load-path*` hit for `name` as a
+/// `file:` URL (nil when missing — the class-loader shape; nil
+/// names NPE, non-strings fail the `String` cast, like the
+/// JDK).
+fn native_resource(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.java.io/resource", args, &[1])?;
+    if matches!(&args[0], Value::Nil) {
+        return Err(NativeError::new(
+            ThrowClass::NullPointerException,
+            "Cannot invoke \"java.lang.ClassLoader.getResource(String)\" because \"name\" is null"
+                .to_owned(),
+        ));
+    }
+    let Value::Str(name) = &args[0] else {
+        return Err(cce_err(&args[0], "java.lang.String"));
+    };
+    for dir in crate::ns::load_dirs(eval)? {
+        let hit = std::path::Path::new(&dir).join(name.as_ref());
+        if hit.is_file() {
+            let abs = resource_abs(&hit);
+            let encoded = abs.replace('%', "%25").replace(' ', "%20").replace('#', "%23");
+            let url = format!("file:{encoded}");
+            if let Ok(uri) = Uri::parse(&url) {
+                return Ok(Value::Uri(Box::new(uri)));
+            }
+            return Ok(Value::Nil);
+        }
+    }
+    Ok(Value::Nil)
+}
+
+/// An absolute path string for a resource hit (load dirs are
+/// absolute in practice; relative ones resolve against the
+/// process directory).
+fn resource_abs(hit: &std::path::Path) -> String {
+    if hit.is_absolute() {
+        return hit.to_string_lossy().into_owned();
+    }
+    std::env::current_dir().map_or_else(
+        |_| hit.to_string_lossy().into_owned(),
+        |cwd| cwd.join(hit).to_string_lossy().into_owned(),
+    )
+}
+
+/// The seven facsimile natives installed into `clojure.java.io`.
 pub(crate) const JIO_NATIVES: &[(&str, NativeFnPtr)] = &[
     ("file", native_file),
     ("reader", native_reader),
@@ -865,4 +1058,5 @@ pub(crate) const JIO_NATIVES: &[(&str, NativeFnPtr)] = &[
     ("input-stream", native_input_stream),
     ("output-stream", native_output_stream),
     ("delete-file", native_delete_file),
+    ("resource", native_resource),
 ];

@@ -942,9 +942,28 @@ const STATIC_LATTICE: &[StaticRow] = &[
         bases: &["java.lang.AutoCloseable"],
     },
     StaticRow {
+        name: "java.io.File",
+        iface: false,
+        bases: &[
+            "java.lang.Object",
+            "java.io.Serializable",
+            "java.lang.Comparable",
+        ],
+    },
+    StaticRow {
+        name: "java.io.FileInputStream",
+        iface: false,
+        bases: &["java.io.InputStream"],
+    },
+    StaticRow {
         name: "java.io.FileNotFoundException",
         iface: false,
         bases: &["java.io.IOException"],
+    },
+    StaticRow {
+        name: "java.io.FileOutputStream",
+        iface: false,
+        bases: &["java.io.OutputStream"],
     },
     StaticRow {
         name: "java.io.FilterReader",
@@ -960,6 +979,16 @@ const STATIC_LATTICE: &[StaticRow] = &[
         name: "java.io.IOException",
         iface: false,
         bases: &["java.lang.Exception"],
+    },
+    StaticRow {
+        name: "java.io.InputStream",
+        iface: false,
+        bases: &["java.lang.Object", "java.io.Closeable"],
+    },
+    StaticRow {
+        name: "java.io.OutputStream",
+        iface: false,
+        bases: &["java.lang.Object", "java.io.Closeable", "java.io.Flushable"],
     },
     StaticRow {
         name: "java.io.OutputStreamWriter",
@@ -2830,6 +2859,7 @@ pub(crate) fn static_member_arities(fqn: &str, member: &str) -> Option<&'static 
         "java.math.BigInteger" => static_arities_bigint(member),
         "java.util.Arrays" => static_arities_arrays(member),
         "java.util.regex.Pattern" => static_arities_pattern(member),
+        "java.io.File" => static_arities_file(member),
         "java.net.URLEncoder" => static_arities_urlencoder(member),
         "java.lang.String" => static_arities_string(member),
         "java.lang.Math" => static_arities_math(member),
@@ -2994,6 +3024,7 @@ fn native_static(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeEr
         "java.math.BigInteger" => static_call_bigint(member.as_ref(), rest),
         "java.util.Arrays" => static_call_arrays(member.as_ref(), rest),
         "java.util.regex.Pattern" => static_call_pattern(member.as_ref(), rest),
+        "java.io.File" => static_call_file(eval, member.as_ref(), rest),
         "java.net.URLEncoder" => static_call_urlencoder(member.as_ref(), rest),
         "java.lang.String" => static_call_string(eval, member.as_ref(), rest),
         "java.lang.Math" => static_call_math(member.as_ref(), rest),
@@ -3148,6 +3179,80 @@ fn static_call_pattern(member: &str, rest: &[Value]) -> Result<Value, NativeErro
         "quote" => static_pattern_quote(rest),
         _ => static_field_or_miss("java.util.regex.Pattern", member, rest),
     }
+}
+
+fn static_arities_file(member: &str) -> Option<&'static [usize]> {
+    match member {
+        "createTempFile" => Some(&[2]),
+        _ => None,
+    }
+}
+
+fn static_call_file(
+    eval: &mut Evaluator,
+    member: &str,
+    rest: &[Value],
+) -> Result<Value, NativeError> {
+    match member {
+        "createTempFile" => static_file_create_temp_file(eval, rest),
+        _ => static_field_or_miss("java.io.File", member, rest),
+    }
+}
+
+/// `File/createTempFile` (#205): the `(prefix, suffix)` overload —
+/// a uniquely-named empty file in the system temp dir (nil
+/// prefixes NPE, short prefixes are `Prefix string too short`,
+/// nil suffixes default to `.tmp` — all the JDK shapes).
+fn static_file_create_temp_file(
+    eval: &mut Evaluator,
+    args: &[Value],
+) -> Result<Value, NativeError> {
+    if args.len() != 2 {
+        return Err(crate::types::no_method(
+            "createTempFile",
+            args.len(),
+            "java.io.File",
+        ));
+    }
+    let prefix = match str_text_arg(&args[0])? {
+        Some(s) => s,
+        None => {
+            return Err(NativeError::new(
+                ThrowClass::NullPointerException,
+                "Cannot invoke \"java.io.File.createTempFile(String, String)\" because \"prefix\" is null"
+                    .to_owned(),
+            ));
+        }
+    };
+    if prefix.chars().count() < 3 {
+        return Err(NativeError::new(
+            ThrowClass::IllegalArgumentException,
+            "Prefix string too short".to_owned(),
+        ));
+    }
+    let suffix = str_text_arg(&args[1])?.unwrap_or(".tmp");
+    let name = format!("{prefix}{}{suffix}", temp_unique());
+    let path = std::env::temp_dir().join(&name);
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .map_err(|e| crate::io::file_err(&path.to_string_lossy(), e))?;
+    Ok(crate::jdkio::file(eval, &path.to_string_lossy()))
+}
+
+/// A temp-file uniqueness stamp (process + nanos + counter —
+/// collisions retry nowhere: one attempt, like `File.createTempFile`
+/// semantics minus the JDK's internal retry loop).
+fn temp_unique() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
+    let seq = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0);
+    format!("{}{seq}{nanos}", std::process::id())
 }
 
 /// `Pattern/quote` (#205): `\Q...\E` with inner `\E`s escaped
@@ -5372,6 +5477,7 @@ fn surface_gated(
         .or_else(|| surface_gated_builder(eval, meth, target, rest))
         .or_else(|| surface_gated_regex(meth, target, rest))
         .or_else(|| surface_gated_matcher(meth, target, rest))
+        .or_else(|| surface_gated_io(meth, target, rest))
         .or_else(|| surface_gated_bigint(meth, target, rest))
         .or_else(|| surface_gated_uri(meth, target, rest))
         .or_else(|| crate::emurand::random_method(meth, target, rest))
@@ -5421,6 +5527,81 @@ fn surface_gated_regex(
         ("split", 1 | 2) => gated_regex_split(target, rest),
         ("replaceAll", 1) => gated_matcher_replace_all(target, rest),
         _ => None,
+    }
+}
+
+/// The file/IO members (#205): `exists`/`length` on files,
+/// `readAllBytes` on file input streams, `write` on writers
+/// (strings, chars, ints) and file output streams (ints),
+/// `readLine` on readers. Anything else misses through.
+fn surface_gated_io(
+    meth: &str,
+    target: &Value,
+    rest: &[Value],
+) -> Option<Result<Value, NativeError>> {
+    match (meth, rest.len()) {
+        ("exists", 0) => gated_file_exists(target),
+        ("length", 0) => gated_file_length(target),
+        ("readAllBytes", 0) => crate::jio::file_input_read_all(target),
+        ("readLine", 0) => gated_reader_read_line(target),
+        ("write", 1) => gated_write(target, rest),
+        _ => None,
+    }
+}
+
+/// `File.exists`: missing paths answer false (like the JDK).
+fn gated_file_exists(target: &Value) -> Option<Result<Value, NativeError>> {
+    let path = crate::jdkio::file_path(target)?;
+    Some(Ok(Value::Bool(std::path::Path::new(&path).exists())))
+}
+
+/// `File.length` on files (other `length` targets fall through
+/// to their own gates): missing paths answer 0, like the JDK.
+fn gated_file_length(target: &Value) -> Option<Result<Value, NativeError>> {
+    let path = crate::jdkio::file_path(target)?;
+    let len = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+    Some(Ok(Value::Int(len as i64)))
+}
+
+/// `BufferedReader.readLine` on stream readers.
+fn gated_reader_read_line(target: &Value) -> Option<Result<Value, NativeError>> {
+    let r = crate::reader::as_reader(target)?;
+    Some(crate::reader::reader_read_line(r))
+}
+
+/// `write` on writers and file output streams (disjoint
+/// targets — writers take strings/chars/ints, streams take the
+/// low byte of ints).
+fn gated_write(target: &Value, rest: &[Value]) -> Option<Result<Value, NativeError>> {
+    if crate::io::as_writer(target).is_some() {
+        return Some(gated_writer_write(target, &rest[0]));
+    }
+    if let Value::Int(n) = &rest[0] {
+        if let hit @ Some(_) = crate::jio::file_output_write(target, *n as u8) {
+            return hit;
+        }
+    }
+    None
+}
+
+/// `Writer.write` (#205): strings append, chars and ints write
+/// one UTF-16 unit (lone surrogates become U+FFFD — Rust
+/// strings cannot hold them), nil NPEs on the parameter.
+fn gated_writer_write(target: &Value, arg: &Value) -> Result<Value, NativeError> {
+    match arg {
+        Value::Str(s) => crate::io::write_to_writer(target, s).map(|()| Value::Nil),
+        Value::Char(c) => {
+            crate::io::write_to_writer(target, &c.to_string()).map(|()| Value::Nil)
+        }
+        Value::Int(n) => {
+            let unit = char::from_u32((*n & 0xFFFF) as u32).unwrap_or('\u{FFFD}');
+            crate::io::write_to_writer(target, &unit.to_string()).map(|()| Value::Nil)
+        }
+        Value::Nil => Err(NativeError::new(
+            ThrowClass::NullPointerException,
+            "Cannot invoke \"java.io.Writer.write(String)\" because \"str\" is null".to_owned(),
+        )),
+        _ => Err(crate::types::no_method("write", 1, "java.io.Writer")),
     }
 }
 
@@ -6737,6 +6918,7 @@ pub(crate) const SURFACE_MEMBERS: &[(&str, usize)] = &[
     ("end", 0),
     ("endsWith", 1),
     ("equals", 1),
+    ("exists", 0),
     ("find", 0),
     ("find", 1),
     ("flush", 0),
@@ -6785,6 +6967,8 @@ pub(crate) const SURFACE_MEMBERS: &[(&str, usize)] = &[
     ("not", 0),
     ("or", 1),
     ("pow", 1),
+    ("readAllBytes", 0),
+    ("readLine", 0),
     ("replace", 2),
     ("replaceAll", 1),
     ("setBit", 1),
@@ -6807,6 +6991,7 @@ pub(crate) const SURFACE_MEMBERS: &[(&str, usize)] = &[
     ("toString", 1),
     ("toUpperCase", 0),
     ("trim", 0),
+    ("write", 1),
     ("xor", 1),
 ];
 

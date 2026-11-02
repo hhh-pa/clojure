@@ -697,6 +697,18 @@ fn new_via_class(eval: &mut Evaluator, name: &str, args: &[Value]) -> Result<Val
     if name == "java.net.URI" {
         return crate::ctor::build_uri(args);
     }
+    if name == "java.io.File" {
+        return crate::ctor::build_file(eval, args);
+    }
+    if name == "java.io.FileInputStream" {
+        return crate::ctor::build_file_input_stream(eval, args);
+    }
+    if name == "java.io.FileOutputStream" {
+        return crate::ctor::build_file_output_stream(eval, args);
+    }
+    if name == "java.io.StringWriter" {
+        return crate::ctor::build_string_writer(eval, args);
+    }
     if let Some(class) = throw_class_for_name(name) {
         return new_throwable(eval, class, name, args);
     }

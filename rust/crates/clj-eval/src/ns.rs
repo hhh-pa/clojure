@@ -1297,8 +1297,8 @@ pub(crate) fn fs_err(path: &str, e: &std::io::Error) -> NativeError {
 }
 
 /// The `*load-path*` directories (seqable, lenient nil; entries must
-/// be strings).
-fn load_dirs(eval: &Evaluator) -> Result<Vec<String>, NativeError> {
+/// be strings). Shared with `io/resource` (#205).
+pub(crate) fn load_dirs(eval: &Evaluator) -> Result<Vec<String>, NativeError> {
     let v = deref_core(eval, "*load-path*");
     let items = seq_vec(&v).ok_or_else(|| cast_err(&v, "clojure.lang.IPersistentVector"))?;
     let mut out = Vec::new();
