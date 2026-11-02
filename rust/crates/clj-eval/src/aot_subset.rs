@@ -973,7 +973,7 @@ impl Planner {
                 hint: "higher-order calls are outside the subset".to_owned(),
             }));
         }
-        if let Some(expr) = self.classify_surface(ns, name, args, scope, next, recur, span)? {
+        if let Some(expr) = self.classify_surface(sym, args, scope, next, recur, span)? {
             return Ok(expr);
         }
         // Sibling `defn` calls (validation-first: a same-named
@@ -1030,14 +1030,17 @@ impl Planner {
     /// (`recur` threads like everywhere else).
     fn classify_surface(
         &mut self,
-        ns: Option<&str>,
-        name: &str,
+        sym: &Symbol,
         args: &[&Value],
         scope: &mut Scope,
         next: &mut usize,
         recur: Option<RecurCtx>,
         span: Span,
     ) -> Result<Option<SubsetExpr>, PlanError> {
+        // The symbol rides whole (namespace + name split inside)
+        // so the recur threading stays under the arg-count gate.
+        let ns = sym.namespace();
+        let name = sym.name();
         if ns.is_none() {
             return self.classify_unqualified(name, args, scope, next, recur, span);
         }

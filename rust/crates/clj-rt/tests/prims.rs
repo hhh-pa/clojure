@@ -95,6 +95,76 @@ fn check_chain(
     assert_eq!(interp(eval, src), want, "{src} via interpreter");
 }
 
+fn time(label: &str, n: usize, mut step: impl FnMut()) {
+    use std::time::Instant;
+    for _ in 0..n {
+        step();
+    }
+    // Best of 5 (noise only ever adds).
+    let mut best = f64::INFINITY;
+    for _ in 0..5 {
+        let start = Instant::now();
+        for _ in 0..n {
+            step();
+        }
+        best = best.min(start.elapsed().as_secs_f64() * 1e9 / n as f64);
+    }
+    eprintln!("clj-rt {label}: best-of-5 {best:.1} ns/call");
+}
+
+// The lean call (no render alloc): box, shim, free — the
+// generated-code shape, so the delta is the shim's own.
+fn ffi_drop(shim: Shim, args: Vec<Value>) {
+    let boxes: Vec<*mut Value> = args.into_iter().map(inbox).collect();
+    let path = b"f.clj";
+    let out = unsafe { shim(boxes.as_ptr(), boxes.len(), path.as_ptr(), path.len(), 3, 9) };
+    assert!(!out.is_null());
+    unsafe { rt_drop(out) };
+}
+
+// Interleaved A/B: alternating batches share each load
+// window, and the median over rounds rejects migrated or
+// preempted batches, so the pair stays comparable on a busy
+// machine.
+fn compare(
+    a_label: &str,
+    b_label: &str,
+    rounds: usize,
+    n: usize,
+    mut a: impl FnMut(),
+    mut b: impl FnMut(),
+) {
+    use std::time::Instant;
+    for _ in 0..n {
+        a();
+        b();
+    }
+    let (mut tas, mut tbs) = (Vec::with_capacity(rounds), Vec::with_capacity(rounds));
+    for _ in 0..rounds {
+        let start = Instant::now();
+        for _ in 0..n {
+            a();
+        }
+        tas.push(start.elapsed().as_secs_f64());
+        let start = Instant::now();
+        for _ in 0..n {
+            b();
+        }
+        tbs.push(start.elapsed().as_secs_f64());
+    }
+    tas.sort_by(f64::total_cmp);
+    tbs.sort_by(f64::total_cmp);
+    let span = n as f64;
+    eprintln!(
+        "clj-rt {a_label}: median-of-{rounds} {:.1} ns/call",
+        tas[rounds / 2] * 1e9 / span
+    );
+    eprintln!(
+        "clj-rt {b_label}: median-of-{rounds} {:.1} ns/call",
+        tbs[rounds / 2] * 1e9 / span
+    );
+}
+
 fn int(n: i64) -> Value {
     Value::Int(n)
 }
@@ -477,7 +547,6 @@ fn string_fast_paths_report_costs() {
     // itself (mutex + `Arc` + `Vec` + evaluator dispatch).
     use std::hint::black_box;
     use std::sync::Arc;
-    use std::time::Instant;
     let big: String = "abcdefgh".repeat(128 * 1024);
     assert_eq!(big.len(), 1_048_576);
     // One shared string (each call clones the `Arc`, like the
@@ -490,71 +559,6 @@ fn string_fast_paths_report_costs() {
     assert_eq!(ffi(rt_count, vec![vec.clone()]), "131072");
     assert_eq!(ffi(rt_nth, vec![big_value.clone(), int(900_000)]), "a");
     assert_eq!(ffi(rt_nth, vec![vec.clone(), int(90_000)]), "90000");
-    fn time(label: &str, n: usize, mut step: impl FnMut()) {
-        for _ in 0..n {
-            step();
-        }
-        // Best of 5 (noise only ever adds).
-        let mut best = f64::INFINITY;
-        for _ in 0..5 {
-            let start = Instant::now();
-            for _ in 0..n {
-                step();
-            }
-            best = best.min(start.elapsed().as_secs_f64() * 1e9 / n as f64);
-        }
-        eprintln!("clj-rt {label}: best-of-5 {best:.1} ns/call");
-    }
-    // The lean call (no render alloc): box, shim, free — the
-    // generated-code shape, so the delta is the shim's own.
-    fn ffi_drop(shim: Shim, args: Vec<Value>) {
-        let boxes: Vec<*mut Value> = args.into_iter().map(inbox).collect();
-        let path = b"f.clj";
-        let out = unsafe { shim(boxes.as_ptr(), boxes.len(), path.as_ptr(), path.len(), 3, 9) };
-        assert!(!out.is_null());
-        unsafe { rt_drop(out) };
-    }
-    // Interleaved A/B: alternating batches share each load
-    // window, and the median over rounds rejects migrated or
-    // preempted batches, so the pair stays comparable on a busy
-    // machine.
-    fn compare(
-        a_label: &str,
-        b_label: &str,
-        rounds: usize,
-        n: usize,
-        mut a: impl FnMut(),
-        mut b: impl FnMut(),
-    ) {
-        for _ in 0..n {
-            a();
-            b();
-        }
-        let (mut tas, mut tbs) = (Vec::with_capacity(rounds), Vec::with_capacity(rounds));
-        for _ in 0..rounds {
-            let start = Instant::now();
-            for _ in 0..n {
-                a();
-            }
-            tas.push(start.elapsed().as_secs_f64());
-            let start = Instant::now();
-            for _ in 0..n {
-                b();
-            }
-            tbs.push(start.elapsed().as_secs_f64());
-        }
-        tas.sort_by(f64::total_cmp);
-        tbs.sort_by(f64::total_cmp);
-        let span = n as f64;
-        eprintln!(
-            "clj-rt {a_label}: median-of-{rounds} {:.1} ns/call",
-            tas[rounds / 2] * 1e9 / span
-        );
-        eprintln!(
-            "clj-rt {b_label}: median-of-{rounds} {:.1} ns/call",
-            tbs[rounds / 2] * 1e9 / span
-        );
-    }
     compare(
         "rt_count(str 1MB, fast)",
         "rt_count(vec 128K, delegated)",

@@ -2,20 +2,6 @@
  "_comment": "rust-code-analysis baseline (T1174): named functions with cyclomatic>15 or cognitive>20. CI fails on NEW violations or worsened ones; prune entries that no longer violate.",
  "violations": [
   {
-   "file": "crates/clj-eval/src/aot_subset.rs",
-   "function": "Planner::classify_call",
-   "cyclomatic": 23.0,
-   "cognitive": 19.0,
-   "justification": "S8A: one arm per special form plus sibling/prim dispatch; the subset call classifier stays exhaustive"
-  },
-  {
-   "file": "crates/clj-eval/src/aot_subset.rs",
-   "function": "Prim::resolve",
-   "cyclomatic": 21.0,
-   "cognitive": 2.0,
-   "justification": "S8A: one arm per closed primitive; the name table stays exhaustive. Slice B adds the transient/conj!/assoc!/persistent! arms."
-  },
-  {
    "file": "crates/clj-eval/src/eval.rs",
    "function": "Evaluator::eval",
    "cyclomatic": 44.0,
