@@ -2402,7 +2402,7 @@ fn sorted_assoc_map(eval: &mut Evaluator, m: &Map, k: Value, v: Value) -> Result
         .cloned()
         .expect("sorted assoc needs a sort order");
     let mut entries: Vec<(Value, Value)> = m.iter().map(|(a, b)| (a.clone(), b.clone())).collect();
-    match sort_position(eval, &spec, m.ordered_keys(), &k)? {
+    match sort_position(eval, &spec, &m.ordered_keys(), &k)? {
         SortPos::Found(i) => entries[i].1 = v,
         SortPos::Insert(i) => entries.insert(i, (k, v)),
     }
@@ -2416,7 +2416,7 @@ fn sorted_without_map(eval: &mut Evaluator, m: &Map, k: &Value) -> Result<Map, N
         .sort_spec()
         .cloned()
         .expect("sorted dissoc needs a sort order");
-    match sort_position(eval, &spec, m.ordered_keys(), k)? {
+    match sort_position(eval, &spec, &m.ordered_keys(), k)? {
         SortPos::Found(i) => {
             let found = m.ordered_keys()[i].clone();
             Ok(m.clone().without(&found))
@@ -2435,7 +2435,7 @@ fn sorted_lookup_map(
         .sort_spec()
         .cloned()
         .expect("sorted get needs a sort order");
-    match sort_position(eval, &spec, m.ordered_keys(), k)? {
+    match sort_position(eval, &spec, &m.ordered_keys(), k)? {
         SortPos::Found(i) => Ok(m.get(&m.ordered_keys()[i]).cloned()),
         SortPos::Insert(_) => Ok(None),
     }
@@ -2447,10 +2447,10 @@ fn sorted_conj_set(eval: &mut Evaluator, s: &Set, v: Value) -> Result<Set, Nativ
         .sort_spec()
         .cloned()
         .expect("sorted conj needs a sort order");
-    match sort_position(eval, &spec, s.ordered_members(), &v)? {
+    match sort_position(eval, &spec, &s.ordered_members(), &v)? {
         SortPos::Found(_) => Ok(s.clone()),
         SortPos::Insert(i) => {
-            let mut members = s.ordered_members().to_vec();
+            let mut members = s.ordered_members();
             members.insert(i, v);
             Ok(s.clone().with_ordered_members(members))
         }
@@ -2463,7 +2463,7 @@ fn sorted_without_set(eval: &mut Evaluator, s: &Set, v: &Value) -> Result<Set, N
         .sort_spec()
         .cloned()
         .expect("sorted disj needs a sort order");
-    match sort_position(eval, &spec, s.ordered_members(), v)? {
+    match sort_position(eval, &spec, &s.ordered_members(), v)? {
         SortPos::Found(i) => {
             let found = s.ordered_members()[i].clone();
             Ok(s.clone().without(&found))
@@ -2477,7 +2477,7 @@ fn sorted_contains_set(eval: &mut Evaluator, s: &Set, v: &Value) -> Result<bool,
         .sort_spec()
         .cloned()
         .expect("sorted contains needs a sort order");
-    match sort_position(eval, &spec, s.ordered_members(), v)? {
+    match sort_position(eval, &spec, &s.ordered_members(), v)? {
         SortPos::Found(_) => Ok(true),
         SortPos::Insert(_) => Ok(false),
     }
@@ -2493,7 +2493,7 @@ fn sorted_lookup_set(
         .sort_spec()
         .cloned()
         .expect("sorted set get needs a sort order");
-    match sort_position(eval, &spec, s.ordered_members(), v)? {
+    match sort_position(eval, &spec, &s.ordered_members(), v)? {
         SortPos::Found(i) => Ok(Some(s.ordered_members()[i].clone())),
         SortPos::Insert(_) => Ok(None),
     }
@@ -2577,7 +2577,7 @@ fn sorted_subseq_source(coll: &Value) -> Result<(Vec<Value>, Vec<Value>, SortSpe
             Ok((keys, items, spec))
         }
         Value::Set(s) if s.is_sorted() => {
-            let members = s.ordered_members().to_vec();
+            let members = s.ordered_members();
             let spec = s
                 .sort_spec()
                 .cloned()
