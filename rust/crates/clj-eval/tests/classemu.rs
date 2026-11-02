@@ -570,14 +570,19 @@ fn import_fqn_resolves() {
     );
 }
 
-// i-ns-clause: the JVM's `(ns impns2 (:import ...))` imports; the
-// port rejects the `:import` clause (existing `ns` pins).
+// i-ns-clause: the JVM's `(ns impns2 (:import ...))` imports, and
+// the port accepts the `:import` clause too since the recipes
+// drop-in (issue #201; `ns_import_clause_201` in `ns_vars.rs`
+// pins the prefix-list/quote/error shapes).
 #[test]
-fn import_ns_clause_still_rejected() {
+fn import_ns_clause_accepted_201() {
     let mut eval = boot();
     assert_eq!(
-        uncaught(&mut eval, "(ns impns2 (:import java.util.Date))"),
-        "clojure.lang.ExceptionInfo | Call to clojure.core/ns did not conform to spec."
+        run(
+            &mut eval,
+            "(do (ns impns2 (:import java.util.Date)) (str Date))"
+        ),
+        "\"class java.util.Date\""
     );
 }
 
@@ -3503,9 +3508,12 @@ fn dotdot_expansions() {
         run(&mut eval, "(macroexpand '(.. \"a\" (toString) (length)))"),
         "(clojure.core/__meth* (quote length) (clojure.core/__meth* (quote toString) \"a\"))"
     );
+    // Bare symbols lower to `__meth*` (method-first per
+    // `Reflector/invokeNoArgInstanceMember` — the JVM answers "a"
+    // for `(.. "a" toString)`), never to a field-only read.
     assert_eq!(
         run(&mut eval, "(macroexpand-1 '(.. rect p))"),
-        "(clojure.core/__field* (quote p) rect)"
+        "(clojure.core/__meth* (quote p) rect)"
     );
     assert_eq!(
         uncaught(&mut eval, "(macroexpand-1 '(.. x))"),
@@ -3529,6 +3537,13 @@ fn dotdot_expansions() {
 fn dotdot_threading() {
     let mut eval = boot();
     assert_eq!(run(&mut eval, "(.. \"a\" (toString))"), "\"a\"");
+    // Bare symbols call 0-arg methods (upstream `clojure.string/trim`
+    // ends `(.. s (subSequence l r) toString)` — JVM oracle).
+    assert_eq!(run(&mut eval, "(.. \"a\" toString)"), "\"a\"");
+    assert_eq!(
+        run(&mut eval, "(.. \"abc\" (subSequence 0 1) toString)"),
+        "\"a\""
+    );
     assert_eq!(
         run(&mut eval, "(.. \"abc\" (toString) (toString))"),
         "\"abc\""
@@ -3553,12 +3568,12 @@ fn dotdot_threading() {
             "{src}"
         );
     }
-    // Field position (`__field*`, not a call) keeps the miss shape
-    // — no oracle row covers field-read on nil (the JVM NPEs there
-    // too; follow-up).
+    // Bare symbols lower to `__meth*` (method-first), so nil targets
+    // NPE exactly like the JVM oracle
+    // (`(.. nil nosuch_xyz)` → `NullPointerException`).
     assert_eq!(
         uncaught(&mut eval, "(.. nil nosuch_xyz)"),
-        "java.lang.IllegalArgumentException | No matching field found: nosuch_xyz for class null"
+        "java.lang.NullPointerException | Cannot invoke \"Object.getClass()\" because \"target\" is null"
     );
     assert_eq!(
         uncaught(&mut eval, "(.. \"a\" (nosuch_xyz))"),
@@ -4882,3 +4897,625 @@ fn surface_throwable() {
 // a-pr            "int/1"
 // a-isarray       true
 // a-component     "int"
+
+#[test]
+fn str_subsequence_201() {
+    let mut eval = boot();
+    assert_eq!(run(&mut eval, "(.subSequence \"abc\" 0 2)"), "\"ab\"");
+    assert_eq!(
+        uncaught(&mut eval, "(.subSequence \"abc\" 0 9)"),
+        "java.lang.StringIndexOutOfBoundsException | Range [0, 9) out of bounds for length 3"
+    );
+}
+
+#[test]
+fn string_builder_201() {
+    let mut eval = boot();
+    assert_eq!(
+        run(
+            &mut eval,
+            "(let [sb (StringBuilder. \"a\")] (.append sb \"b\") (.append sb \\c) (str sb))"
+        ),
+        "\"abc\""
+    );
+    assert_eq!(run(&mut eval, "(str (StringBuilder. 16))"), "\"\"");
+    assert_eq!(run(&mut eval, "(str (StringBuilder.))"), "\"\"");
+    assert_eq!(
+        run(
+            &mut eval,
+            "(let [sb (StringBuilder.)] (.append sb nil) (str sb))"
+        ),
+        "\"null\""
+    );
+    // `append` returns the builder itself.
+    assert_eq!(
+        run(
+            &mut eval,
+            "(let [sb (StringBuilder.)] (identical? sb (.append sb \"x\")))"
+        ),
+        "true"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(StringBuilder. -1)"),
+        "java.lang.NegativeArraySizeException | -1"
+    );
+}
+
+#[test]
+fn character_is_whitespace_201() {
+    let mut eval = boot();
+    assert_eq!(run(&mut eval, "(Character/isWhitespace \\space)"), "true");
+    assert_eq!(run(&mut eval, "(Character/isWhitespace \\A)"), "false");
+    assert_eq!(run(&mut eval, "(Character/isWhitespace 32)"), "true");
+    // The difference set vs Unicode `White_Space`: non-breaking
+    // spaces are NOT Java whitespace; U+001C-001F are (via `char`
+    // — the reader only takes ASCII/named char literals).
+    assert_eq!(
+        run(&mut eval, "(Character/isWhitespace (char 160))"),
+        "false"
+    );
+    assert_eq!(
+        run(&mut eval, "(Character/isWhitespace (char 8199))"),
+        "false"
+    );
+    assert_eq!(
+        run(&mut eval, "(Character/isWhitespace (char 8239))"),
+        "false"
+    );
+    assert_eq!(run(&mut eval, "(Character/isWhitespace (char 28))"), "true");
+    assert_eq!(run(&mut eval, "(Character/isWhitespace 1114112)"), "false");
+}
+
+#[test]
+fn lpv_create_owning_201() {
+    let mut eval = boot();
+    assert_eq!(
+        run(
+            &mut eval,
+            "(clojure.lang.LazilyPersistentVector/createOwning [\"x\" \"y\"])"
+        ),
+        "[\"x\" \"y\"]"
+    );
+    // A non-vector arg misses the member (uniform no-method).
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(clojure.lang.LazilyPersistentVector/createOwning :kw)"
+        ),
+        "java.lang.IllegalArgumentException | No matching method createOwning found taking 1 args for class clojure.lang.LazilyPersistentVector"
+    );
+}
+
+#[test]
+fn number_parse_math_statics_201() {
+    let mut eval = boot();
+    assert_eq!(run(&mut eval, "(Long/parseLong \"42\")"), "42");
+    assert_eq!(run(&mut eval, "(Integer/parseInt \"-7\")"), "-7");
+    assert_eq!(run(&mut eval, "(Double/parseDouble \"1.5\")"), "1.5");
+    assert_eq!(
+        uncaught(&mut eval, "(Long/parseLong \"4x\")"),
+        "java.lang.NumberFormatException | For input string: \"4x\""
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(Integer/parseInt \"9999999999\")"),
+        "java.lang.NumberFormatException | For input string: \"9999999999\""
+    );
+    assert_eq!(run(&mut eval, "(Math/abs -3)"), "3");
+    assert_eq!(run(&mut eval, "(Math/abs -2.5)"), "2.5");
+    assert_eq!(run(&mut eval, "(Math/sqrt 16.0)"), "4.0");
+    assert_eq!(run(&mut eval, "(Math/ceil 2.1)"), "3.0");
+}
+
+#[test]
+fn pattern_split_member_201() {
+    let mut eval = boot();
+    assert_eq!(
+        run(&mut eval, "(.split #\"\\s+\" \"a b  c\")"),
+        "[\"a\" \"b\" \"c\"]"
+    );
+    assert_eq!(run(&mut eval, "(.split #\",\" \"a,b,\")"), "[\"a\" \"b\"]");
+    assert_eq!(
+        run(&mut eval, "(.split #\",\" \"a,b,\" -1)"),
+        "[\"a\" \"b\" \"\"]"
+    );
+    assert_eq!(
+        run(&mut eval, "(.split #\",\" \"a,b,c\" 2)"),
+        "[\"a\" \"b,c\"]"
+    );
+}
+
+#[test]
+fn static_field_reads_201() {
+    let mut eval = boot();
+    assert_eq!(run(&mut eval, "Long/MIN_VALUE"), "-9223372036854775808");
+    assert_eq!(run(&mut eval, "Long/MAX_VALUE"), "9223372036854775807");
+    assert_eq!(run(&mut eval, "Integer/MIN_VALUE"), "-2147483648");
+    assert_eq!(run(&mut eval, "Integer/MAX_VALUE"), "2147483647");
+    assert_eq!(run(&mut eval, "Double/POSITIVE_INFINITY"), "##Inf");
+    assert_eq!(run(&mut eval, "Double/NEGATIVE_INFINITY"), "##-Inf");
+    assert_eq!(run(&mut eval, "Double/NaN"), "##NaN");
+    assert_eq!(run(&mut eval, "Math/PI"), "3.141592653589793");
+    assert_eq!(run(&mut eval, "Math/E"), "2.718281828459045");
+    assert_eq!(run(&mut eval, "(int Character/MAX_VALUE)"), "65535");
+    assert_eq!(run(&mut eval, "Boolean/TRUE"), "true");
+    assert_eq!(run(&mut eval, "Boolean/FALSE"), "false");
+    assert_eq!(run(&mut eval, "Short/MIN_VALUE"), "-32768");
+    assert_eq!(run(&mut eval, "Short/MAX_VALUE"), "32767");
+    assert_eq!(run(&mut eval, "Byte/MIN_VALUE"), "-128");
+    assert_eq!(run(&mut eval, "Byte/MAX_VALUE"), "127");
+    assert_eq!(run(&mut eval, "Float/MIN_VALUE"), "1.1754943508222875E-38");
+    assert_eq!(run(&mut eval, "Float/MAX_VALUE"), "3.4028234663852886E38");
+    assert_eq!(run(&mut eval, "Float/POSITIVE_INFINITY"), "##Inf");
+    assert_eq!(run(&mut eval, "Float/NEGATIVE_INFINITY"), "##-Inf");
+    assert_eq!(run(&mut eval, "Float/NaN"), "##NaN");
+    // Fully-qualified spelling resolves the same field.
+    assert_eq!(
+        run(&mut eval, "java.lang.Long/MAX_VALUE"),
+        "9223372036854775807"
+    );
+    // Known class + unknown field keeps the JVM shape (oracle:
+    // IAE "no matches found for static method FOO in class
+    // java.lang.Long", not a CompilerException wrapper).
+    assert_eq!(
+        compile_err(&mut eval, "Long/FOO"),
+        "java.lang.IllegalArgumentException | Error - no matches found for static method FOO in class java.lang.Long"
+    );
+    // Every class's miss arm reads the same shape.
+    for (spelling, fqn) in [
+        ("Integer/FOO", "java.lang.Integer"),
+        ("Short/FOO", "java.lang.Short"),
+        ("Byte/FOO", "java.lang.Byte"),
+        ("Double/FOO", "java.lang.Double"),
+        ("Float/FOO", "java.lang.Float"),
+        ("Character/FOO", "java.lang.Character"),
+        ("Boolean/FOO", "java.lang.Boolean"),
+        ("Math/FOO", "java.lang.Math"),
+        ("java.util.Locale/FOO", "java.util.Locale"),
+        (
+            "clojure.lang.PersistentQueue/FOO",
+            "clojure.lang.PersistentQueue",
+        ),
+    ] {
+        assert_eq!(
+            compile_err(&mut eval, spelling),
+            format!(
+                "java.lang.IllegalArgumentException | Error - no matches found for static method FOO in class {fqn}"
+            )
+        );
+    }
+}
+
+#[test]
+fn static_unknown_member_201() {
+    // Unknown members skip the compile-time arity table and miss
+    // at runtime with the uniform no-method shape.
+    let mut eval = boot();
+    for (spelling, fqn) in [
+        ("(Long/bogus 1)", "java.lang.Long"),
+        ("(Integer/bogus 1)", "java.lang.Integer"),
+        ("(Double/bogus 1)", "java.lang.Double"),
+        ("(Character/bogus 1)", "java.lang.Character"),
+        ("(Math/bogus 1)", "java.lang.Math"),
+        ("(Class/bogus 1)", "java.lang.Class"),
+        (
+            "(clojure.lang.LazilyPersistentVector/bogus 1)",
+            "clojure.lang.LazilyPersistentVector",
+        ),
+    ] {
+        assert_eq!(
+            uncaught(&mut eval, spelling),
+            format!(
+                "java.lang.IllegalArgumentException | No matching method bogus found taking 1 args for class {fqn}"
+            )
+        );
+    }
+}
+
+#[test]
+fn static_parse_edges_201() {
+    // Nil parses as the literal `null` (NFE, like the JDK);
+    // non-strings miss the `String` param (CCE).
+    let mut eval = boot();
+    assert_eq!(
+        uncaught(&mut eval, "(Long/parseLong nil)"),
+        "java.lang.NumberFormatException | For input string: \"null\""
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(Long/parseLong 5)"),
+        cce_bootstrap("java.lang.Long", "java.lang.String")
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(Integer/parseInt nil)"),
+        "java.lang.NumberFormatException | For input string: \"null\""
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(Integer/parseInt 5)"),
+        cce_bootstrap("java.lang.Long", "java.lang.String")
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(Double/parseDouble nil)"),
+        "java.lang.NumberFormatException | For input string: \"null\""
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(Double/parseDouble 5)"),
+        cce_bootstrap("java.lang.Long", "java.lang.String")
+    );
+}
+
+#[test]
+fn static_long_arg_kinds_201() {
+    // `remainderUnsigned` coerces every `Number` (truncating),
+    // nil NPEs on the primitive, the rest miss the param.
+    let mut eval = boot();
+    assert_eq!(run(&mut eval, "(Long/remainderUnsigned 7.9 3)"), "1");
+    assert_eq!(run(&mut eval, "(Long/remainderUnsigned 7N 3)"), "1");
+    assert_eq!(run(&mut eval, "(Long/remainderUnsigned 7/2 3)"), "0");
+    assert_eq!(run(&mut eval, "(Long/remainderUnsigned 7.9M 3)"), "1");
+    assert_eq!(
+        uncaught(&mut eval, "(Long/remainderUnsigned nil 3)"),
+        "java.lang.NullPointerException | Cannot invoke \"Object.getClass()\" because \"arg\" is null"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(Long/remainderUnsigned \"x\" 3)"),
+        "java.lang.IllegalArgumentException | Unexpected param type, expected: long, given: java.lang.String"
+    );
+}
+
+#[test]
+fn static_math_arg_kinds_201() {
+    // `Math/*` widens ratios/bigints/bigdecimals through f64;
+    // nil NPEs with the member in the message, the rest CCE.
+    let mut eval = boot();
+    assert_eq!(run(&mut eval, "(Math/sqrt 4/9)"), "0.6666666666666666");
+    assert_eq!(run(&mut eval, "(Math/sqrt 4N)"), "2.0");
+    assert_eq!(run(&mut eval, "(Math/sqrt 4.0M)"), "2.0");
+    assert_eq!(
+        uncaught(&mut eval, "(Math/sqrt nil)"),
+        "java.lang.NullPointerException | Cannot invoke \"java.lang.Math.sqrt(double)\" because the argument is null"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(Math/sqrt \"x\")"),
+        cce_bootstrap("java.lang.String", "java.lang.Double")
+    );
+}
+
+#[test]
+fn static_character_edges_201() {
+    // Non-char/code-point args miss the `Character` param (CCE).
+    let mut eval = boot();
+    assert_eq!(
+        uncaught(&mut eval, "(Character/isWhitespace \"x\")"),
+        cce_bootstrap("java.lang.String", "java.lang.Character")
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(Character/isLetterOrDigit \"x\")"),
+        cce_bootstrap("java.lang.String", "java.lang.Character")
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(Character/isLowerCase \"x\")"),
+        cce_bootstrap("java.lang.String", "java.lang.Character")
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(Character/isUpperCase \"x\")"),
+        cce_bootstrap("java.lang.String", "java.lang.Character")
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(Character/digit \"x\" 10)"),
+        cce_bootstrap("java.lang.String", "java.lang.Character")
+    );
+    assert_eq!(run(&mut eval, "(Character/digit \\a 16)"), "10");
+}
+
+#[test]
+fn gated_member_edges_201() {
+    // `indexOf` needles: ints and chars are code points,
+    // out-of-range ints read -1, the rest miss the gate.
+    let mut eval = boot();
+    assert_eq!(run(&mut eval, "(.indexOf \"abc\" 98)"), "1");
+    assert_eq!(run(&mut eval, "(.indexOf \"abc\" \\b)"), "1");
+    assert_eq!(run(&mut eval, "(.indexOf \"abc\" -1)"), "-1");
+    assert_eq!(
+        uncaught(&mut eval, "(.indexOf \"abc\" :kw)"),
+        "java.lang.IllegalArgumentException | No matching method indexOf found taking 1 args for class java.lang.String"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(.indexOf :kw \"x\")"),
+        "java.lang.IllegalArgumentException | No matching method indexOf found taking 1 args for class clojure.lang.Keyword"
+    );
+    // List targets find like vectors; a comparison that throws
+    // propagates (vector and list targets).
+    assert_eq!(run(&mut eval, "(.indexOf '(a b c) 'b)"), "1");
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(.indexOf [(map (fn [_] (throw (ex-info \"boom\" {}))) [1])] '(1))"
+        ),
+        "clojure.lang.ExceptionInfo | boom"
+    );
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(.indexOf (list (map (fn [_] (throw (ex-info \"boom\" {}))) [1])) '(1))"
+        ),
+        "clojure.lang.ExceptionInfo | boom"
+    );
+    // A non-string replacement falls past the matcher gate.
+    assert_eq!(
+        uncaught(&mut eval, "(.replaceAll (re-matcher #\"a\" \"a\") 5)"),
+        "java.lang.IllegalArgumentException | No matching method replaceAll found taking 1 args for class java.util.regex.Matcher"
+    );
+    // `append` renders other values through `str` (a throwing
+    // render propagates); non-builders miss the gate.
+    assert_eq!(
+        run(&mut eval, "(str (.append (StringBuilder.) 42))"),
+        "\"42\""
+    );
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(.append (StringBuilder.) (map (fn [_] (throw (ex-info \"boom\" {}))) [1]))"
+        ),
+        "clojure.lang.ExceptionInfo | boom"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(.append \"s\" \"x\")"),
+        "java.lang.IllegalArgumentException | No matching method append found taking 1 args for class java.lang.String"
+    );
+    // `Pattern/split`: nil input NPEs, bad text/limit args miss.
+    assert_eq!(
+        uncaught(&mut eval, "(.split #\"a\" nil)"),
+        "java.lang.NullPointerException | Cannot invoke \"java.lang.CharSequence.length()\" because \"input\" is null"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(.split #\"a\" 5)"),
+        "java.lang.ClassCastException | Cannot cast java.lang.Long to java.lang.String"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(.split #\"a\" \"abc\" \"x\")"),
+        "java.lang.IllegalArgumentException | Unexpected param type, expected: int, given: java.lang.String"
+    );
+    // `String/format`: the locale and the args array both cast.
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(String/format 5 \"%.6f\" (into-array Object [(double 1)]))"
+        ),
+        cce_bootstrap("java.lang.Long", "java.util.Locale")
+    );
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(String/format java.util.Locale/US \"%s\" [\"n\"])"
+        ),
+        "java.lang.ClassCastException | class clojure.lang.PersistentVector cannot be cast to class [Ljava.lang.Object; (clojure.lang.PersistentVector is in unnamed module of loader 'app'; [Ljava.lang.Object; is in module java.base of loader 'bootstrap')"
+    );
+}
+
+#[test]
+fn locale_builder_values_201() {
+    // Locales and builders print/compare/hash through the
+    // extension trait (`pr` shows the `#object[...]` display;
+    // `re-find` pins it without the identity bits).
+    let mut eval = boot();
+    assert_eq!(
+        run(
+            &mut eval,
+            "(re-find #\"en_US\" (pr-str java.util.Locale/US))"
+        ),
+        "\"en_US\""
+    );
+    assert_eq!(
+        run(&mut eval, "(= java.util.Locale/US java.util.Locale/US)"),
+        "true"
+    );
+    assert_eq!(
+        run(
+            &mut eval,
+            "(= (hash java.util.Locale/US) (hash java.util.Locale/US))"
+        ),
+        "true"
+    );
+    assert_eq!(
+        run(&mut eval, "(.getName (type java.util.Locale/US))"),
+        "\"java.util.Locale\""
+    );
+    assert_eq!(
+        run(
+            &mut eval,
+            "(re-find #\"StringBuilder\" (pr-str (StringBuilder.)))"
+        ),
+        "\"StringBuilder\""
+    );
+    assert_eq!(
+        run(&mut eval, "(= (StringBuilder.) (StringBuilder.))"),
+        "false"
+    );
+    assert_eq!(
+        run(&mut eval, "(.getName (type (StringBuilder. \"hi\")))"),
+        "\"java.lang.StringBuilder\""
+    );
+}
+
+#[test]
+fn string_builder_ctors_201() {
+    // Nil is ambiguous (`(String)` vs `(CharSequence)`); anything
+    // else non-string/non-int, or a wrong arity, misses.
+    let mut eval = boot();
+    assert_eq!(
+        uncaught(&mut eval, "(StringBuilder. nil)"),
+        "java.lang.IllegalArgumentException | More than one matching method found: java.lang.StringBuilder"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(StringBuilder. :kw)"),
+        "java.lang.IllegalArgumentException | No matching ctor found for class java.lang.StringBuilder"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(clojure.core/__new* 'StringBuilder 1 2)"),
+        "java.lang.IllegalArgumentException | No matching ctor found for class java.lang.StringBuilder"
+    );
+}
+
+#[test]
+fn character_digit_201() {
+    // `Character/digit` 2-arg (the cantor_expansion/gray_code
+    // recipes map it over tokens): values convert, non-digits
+    // and out-of-range radixes read -1 (JVM oracle).
+    let mut eval = boot();
+    assert_eq!(run(&mut eval, "(Character/digit \\a 36)"), "10");
+    assert_eq!(run(&mut eval, "(Character/digit \\0 10)"), "0");
+    assert_eq!(run(&mut eval, "(Character/digit \\F 16)"), "15");
+    assert_eq!(run(&mut eval, "(Character/digit \\a 1)"), "-1");
+    assert_eq!(run(&mut eval, "(Character/digit \\a 37)"), "-1");
+    assert_eq!(run(&mut eval, "(Character/digit \\$ 10)"), "-1");
+    assert_eq!(run(&mut eval, "(Character/digit 97 36)"), "10");
+}
+
+#[test]
+fn matcher_replace_all_201() {
+    // `Matcher.replaceAll` 1-arg (verbatim `string.clj`
+    // `replace` over patterns lowers here): every match goes,
+    // `$g` refs expand, in-flight `find` state resets. Nil is
+    // ambiguous (String vs Function overloads — JVM oracle).
+    let mut eval = boot();
+    assert_eq!(
+        run(
+            &mut eval,
+            "(.replaceAll (re-matcher #\"a+\" \"xaax\") \"[$0]\")"
+        ),
+        "\"x[aa]x\""
+    );
+    // Bare `eval` needs the driver's `with-bindings` frame for
+    // the require (upstream `string.clj:46` `set!`s
+    // `*warn-on-reflection*`).
+    run(
+        &mut eval,
+        "(binding [*warn-on-reflection* *warn-on-reflection*] (require '[clojure.string :as str]))",
+    );
+    assert_eq!(
+        run(&mut eval, "(str/replace \"aaa\" #\"a\" \"b\")"),
+        "\"bbb\""
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(.replaceAll (re-matcher #\"a\" \"a\") nil)"),
+        "java.lang.IllegalArgumentException | More than one matching method found: replaceAll"
+    );
+}
+
+#[test]
+fn long_remainder_unsigned_201() {
+    // `Long/remainderUnsigned` 2-arg (9 recipes hash with it):
+    // unsigned arithmetic over the bit patterns, `/ by zero`
+    // on a zero divisor (JVM oracle).
+    let mut eval = boot();
+    assert_eq!(run(&mut eval, "(Long/remainderUnsigned -1 3)"), "0");
+    assert_eq!(run(&mut eval, "(Long/remainderUnsigned 7 3)"), "1");
+    assert_eq!(
+        run(&mut eval, "(Long/remainderUnsigned -9223372036854775808 3)"),
+        "2"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(Long/remainderUnsigned 5 0)"),
+        "java.lang.ArithmeticException | / by zero"
+    );
+}
+
+#[test]
+fn indexof_201() {
+    // `indexOf` 1-arg over strings (UTF-16 offsets, like the
+    // JDK) and over vectors/lists (first `.equals` slot); -1
+    // absent (the left_recursion_elim/variable_elimination
+    // recipes).
+    let mut eval = boot();
+    assert_eq!(run(&mut eval, "(.indexOf \"abc=def\" \"=\")"), "3");
+    assert_eq!(run(&mut eval, "(.indexOf \"abc\" \"z\")"), "-1");
+    assert_eq!(run(&mut eval, "(.indexOf \"abc\" \"\")"), "0");
+    assert_eq!(run(&mut eval, "(.indexOf [10 20 30] 20)"), "1");
+    assert_eq!(run(&mut eval, "(.indexOf '(a b c) 'd)"), "-1");
+    assert_eq!(run(&mut eval, "(.indexOf [:x :y] :y)"), "1");
+}
+
+#[test]
+fn locale_string_format_201() {
+    // `Locale/US` plus `String/format` 3-arg (44 recipes pin
+    // the locale explicitly): the shared `format` engine
+    // renders (`.` decimals, like `Formatter` under `US`).
+    let mut eval = boot();
+    assert_eq!(run(&mut eval, "(str java.util.Locale/US)"), "\"en_US\"");
+    assert_eq!(
+        run(
+            &mut eval,
+            "(String/format java.util.Locale/US \"%.6f\" (into-array Object [(double 3.14159265358979)]))"
+        ),
+        "\"3.141593\""
+    );
+    assert_eq!(
+        run(
+            &mut eval,
+            "(String/format java.util.Locale/US \"%s=%d\" (to-array [\"n\" 7]))"
+        ),
+        "\"n=7\""
+    );
+}
+
+#[test]
+fn math_log_exp_pow_201() {
+    // `Math/log`, `Math/exp`, `Math/pow` (finance/ml recipes
+    // call them): plain double math.
+    let mut eval = boot();
+    assert_eq!(run(&mut eval, "(Math/log 10)"), "2.302585092994046");
+    assert_eq!(run(&mut eval, "(Math/exp 1)"), "2.718281828459045");
+    assert_eq!(run(&mut eval, "(Math/pow 2 10)"), "1024.0");
+}
+
+#[test]
+fn character_is_letter_or_digit_201() {
+    // `Character/isLetterOrDigit` 1-arg: `Char` and `Int`
+    // (code point) spellings.
+    let mut eval = boot();
+    assert_eq!(run(&mut eval, "(Character/isLetterOrDigit \\a)"), "true");
+    assert_eq!(run(&mut eval, "(Character/isLetterOrDigit \\5)"), "true");
+    assert_eq!(run(&mut eval, "(Character/isLetterOrDigit \\$)"), "false");
+    assert_eq!(run(&mut eval, "(Character/isLetterOrDigit 97)"), "true");
+}
+
+#[test]
+fn math_trig_hypot_201() {
+    // The trig/hyperbolic/inverse family (`optics/*` and
+    // `finance/var_es` call `sin`/`cos`, `search/backprop` calls
+    // `tanh`, `bitonic_tsp` computes `hypot` over ints): plain
+    // double math, values pinned to the correctly-rounded libm
+    // results HotSpot prints identically.
+    let mut eval = boot();
+    assert_eq!(run(&mut eval, "(Math/sin 1)"), "0.8414709848078965");
+    assert_eq!(run(&mut eval, "(Math/cos 1)"), "0.5403023058681398");
+    assert_eq!(run(&mut eval, "(Math/tan 0)"), "0.0");
+    assert_eq!(run(&mut eval, "(Math/asin 0)"), "0.0");
+    assert_eq!(run(&mut eval, "(Math/acos 1)"), "0.0");
+    assert_eq!(run(&mut eval, "(Math/atan 0)"), "0.0");
+    assert_eq!(run(&mut eval, "(Math/sinh 0)"), "0.0");
+    assert_eq!(run(&mut eval, "(Math/cosh 0)"), "1.0");
+    assert_eq!(run(&mut eval, "(Math/tanh 1)"), "0.7615941559557649");
+    assert_eq!(run(&mut eval, "(Math/atan2 0 1)"), "0.0");
+    assert_eq!(run(&mut eval, "(Math/hypot 3 4)"), "5.0");
+    assert_eq!(run(&mut eval, "(Math/hypot 1 1)"), "1.4142135623730951");
+    assert_eq!(run(&mut eval, "(Math/cbrt 8)"), "2.0");
+    assert_eq!(run(&mut eval, "(Math/floor 1.5)"), "1.0");
+    assert_eq!(run(&mut eval, "(Math/log10 100)"), "2.0");
+    assert_eq!(run(&mut eval, "(Math/round 2.5)"), "3");
+    assert_eq!(run(&mut eval, "(Math/round 2.4)"), "2");
+    assert_eq!(run(&mut eval, "(Math/round -2.5)"), "-2");
+}
+
+#[test]
+fn character_case_201() {
+    // `Character/isLowerCase` / `isUpperCase` 1-arg (`fol_unify`
+    // tests vars with `isLowerCase` over `(.charAt sym 0)`):
+    // `Char` and `Int` (code point) spellings.
+    let mut eval = boot();
+    assert_eq!(run(&mut eval, "(Character/isLowerCase \\a)"), "true");
+    assert_eq!(run(&mut eval, "(Character/isLowerCase \\A)"), "false");
+    assert_eq!(run(&mut eval, "(Character/isLowerCase 97)"), "true");
+    assert_eq!(run(&mut eval, "(Character/isUpperCase \\A)"), "true");
+    assert_eq!(run(&mut eval, "(Character/isUpperCase \\a)"), "false");
+    assert_eq!(run(&mut eval, "(Character/isUpperCase 65)"), "true");
+}

@@ -107,6 +107,7 @@ pub enum NsClause {
     ReferClojure(Vec<Value>),
     Require(Vec<Value>),
     Use(Vec<Value>),
+    Import(Vec<Value>),
 }
 
 /// A `case*` dispatch mode: `:int` funnels numbers through
@@ -829,6 +830,64 @@ impl<'a> Analyzer<'a> {
         self.locals.iter().rposition(|l| l == name)
     }
 
+    /// Value-position checks for a resolved global (`analyzeSymbol`
+    /// order: private first, then macro). Neither wrapper names an
+    /// operator (probed); the private message spells the symbol as
+    /// written without `#'`, the macro one the `#'` target.
+    /// (Invoke position has its own check in `analyze_list`.)
+    fn global_value_expr(
+        &mut self,
+        sym: &Symbol,
+        span: Span,
+        cur: &str,
+        target: Symbol,
+        id: u64,
+    ) -> Result<Expr, CompileError> {
+        let home = target.namespace().unwrap_or("");
+        if home != cur && crate::macros::is_private_var(self.eval, id) {
+            return Err(self.err(
+                class::ILLEGAL_STATE,
+                format!("var: {sym} is not public"),
+                span,
+                Verb::Compiling,
+                None,
+            ));
+        }
+        if crate::macros::is_macro_var(self.eval, id) {
+            return Err(self.err(
+                class::RUNTIME,
+                format!("Can't take value of a macro: #'{}", target),
+                span,
+                Verb::Compiling,
+                None,
+            ));
+        }
+        Ok(Expr::Global(Var { id, sym: target }))
+    }
+
+    /// Value-position static field reads (`Long/MAX_VALUE`): only
+    /// when no namespace/alias claims the head (a real namespace
+    /// keeps the `No such var` path in `analyze_symbol`).
+    fn analyze_static_field_sym(
+        &mut self,
+        sym: &Symbol,
+        span: Span,
+        cur: &str,
+    ) -> Result<Option<Expr>, CompileError> {
+        let Some(ns_part) = sym.namespace() else {
+            return Ok(None);
+        };
+        if self
+            .eval
+            .registry
+            .namespace_target_in(cur, ns_part)
+            .is_some()
+        {
+            return Ok(None);
+        }
+        self.analyze_static_field(ns_part, sym.name(), span, cur)
+    }
+
     /// Resolve a symbol in value position.
     fn analyze_symbol(&mut self, sym: &Symbol, span: Span) -> Result<Expr, CompileError> {
         if let Some(idx) = self
@@ -842,36 +901,17 @@ impl<'a> Analyzer<'a> {
         }
         let cur = self.current_ns();
         if let Some((target, id)) = self.eval.registry.resolve_target_and_id(&cur, sym) {
-            // Value-position checks (`analyzeSymbol` order: private
-            // first, then macro). Neither wrapper names an operator
-            // (probed); the private message spells the symbol as
-            // written without `#'`, the macro one the `#'` target.
-            // (Invoke position has its own check in `analyze_list`.)
-            let home = target.namespace().unwrap_or("");
-            if home != cur && crate::macros::is_private_var(self.eval, id) {
-                return Err(self.err(
-                    class::ILLEGAL_STATE,
-                    format!("var: {sym} is not public"),
-                    span,
-                    Verb::Compiling,
-                    None,
-                ));
-            }
-            if crate::macros::is_macro_var(self.eval, id) {
-                return Err(self.err(
-                    class::RUNTIME,
-                    format!("Can't take value of a macro: #'{}", target),
-                    span,
-                    Verb::Compiling,
-                    None,
-                ));
-            }
-            return Ok(Expr::Global(Var { id, sym: target }));
+            // Value-position checks (private, then macro — see
+            // `global_value_expr`).
+            return self.global_value_expr(sym, span, &cur, target, id);
         }
         // S16: imports resolve after vars (the class, not a var) —
         // operator position shares this path (#120: dotted bare
         // names resolve as classes or fail `CNFE`).
         if let Some(expr) = self.analyze_symbol_class(sym, span, &cur)? {
+            return Ok(expr);
+        }
+        if let Some(expr) = self.analyze_static_field_sym(sym, span, &cur)? {
             return Ok(expr);
         }
         match sym.namespace() {
@@ -881,8 +921,8 @@ impl<'a> Analyzer<'a> {
             // An unresolvable dotted namespace part is
             // `ClassNotFoundException` (oracle `removed-ns-val`),
             // unless it names a class — value-position static
-            // members (method fns, field reads) are a later slice,
-            // so those keep `No such namespace` for now.
+            // field reads resolve above; static method fns stay a
+            // later slice and keep `No such namespace` for now.
             Some(ns) if self.eval.registry.namespace_target_in(&cur, ns).is_none() => {
                 Err(self.dangling_alias_err(&cur, ns, span))
             }
@@ -1167,6 +1207,44 @@ impl<'a> Analyzer<'a> {
         } else {
             crate::classemu::import_in(self.eval, cur, ns_part)
         }
+    }
+
+    /// Value-position static field read (`Long/MAX_VALUE`; split
+    /// from [`analyze_symbol`](Self::analyze_symbol) for the
+    /// complexity budget): `None` unless the head names a class.
+    /// Known fields fold to literals; a known class with an
+    /// unknown field keeps the JVM miss shape (bare
+    /// `IllegalArgumentException`, "no matches found for static
+    /// method ...", never wrapped).
+    fn analyze_static_field(
+        &self,
+        ns_part: &str,
+        field: &str,
+        span: Span,
+        cur: &str,
+    ) -> Result<Option<Expr>, CompileError> {
+        // FX4-owned heads are exempt (their shapes and misses are
+        // the builtin's — call heads fall through to this
+        // value-position path when `try_static_call` declines).
+        if crate::fx4_host::owns_call_head(ns_part, field) {
+            return Ok(None);
+        }
+        let Some(class) = self.static_head_class(cur, ns_part) else {
+            return Ok(None);
+        };
+        if let Some(v) = crate::classemu::static_field_value(class.name(), field) {
+            return Ok(Some(Expr::Literal(v)));
+        }
+        Err(self.err(
+            class::ILLEGAL_ARG,
+            format!(
+                "Error - no matches found for static method {field} in class {}",
+                class.name()
+            ),
+            span,
+            Verb::Compiling,
+            None,
+        ))
     }
 
     /// Intercept `(Class/new …)` (oracles `cn-*`): the static-call
@@ -2570,10 +2648,11 @@ impl<'a> Analyzer<'a> {
 
     /// `(ns name doc? attr? clause…)`: the name must be an
     /// unqualified symbol and every clause a list headed by
-    /// `:refer-clojure`/`:require`/`:use` (else the `ns` spec
-    /// shape, probe37 `ns-bad-clause`, `ns-num-name`).
-    /// `:import`/`:gen-class`/`:load` are spec errors too (N1:
-    /// no host classes — loud, never skipped).
+    /// `:refer-clojure`/`:require`/`:use`/`:import` (else the
+    /// `ns` spec shape, probe37 `ns-bad-clause`, `ns-num-name`).
+    /// `:gen-class`/`:load` are spec errors too (loud, never
+    /// skipped); `:import` landed with issue #201 S1 (N1 done —
+    /// classes exist now).
     fn parse_ns(&mut self, items: &[&Value], span: Span) -> Result<Expr, CompileError> {
         let spec = || self.spec_error("clojure.core/ns", span);
         let Some(name_value) = items.get(1) else {
@@ -2609,6 +2688,7 @@ impl<'a> Analyzer<'a> {
                     }
                     "require" => clauses.push(NsClause::Require(elems.cloned().collect())),
                     "use" => clauses.push(NsClause::Use(elems.cloned().collect())),
+                    "import" => clauses.push(NsClause::Import(elems.cloned().collect())),
                     _ => return Err(spec()),
                 },
                 _ => return Err(spec()),

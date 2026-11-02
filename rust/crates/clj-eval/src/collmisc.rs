@@ -102,7 +102,7 @@ pub(crate) fn as_iteration(v: &Value) -> Option<&IterationValue> {
 }
 
 /// Downcast a value to a matcher handle, if it is one.
-fn as_matcher(v: &Value) -> Option<&MatcherHandle> {
+pub(crate) fn as_matcher(v: &Value) -> Option<&MatcherHandle> {
     match v {
         Value::Extension(e) => e.as_any().downcast_ref::<MatcherHandle>(),
         _ => None,
@@ -1027,6 +1027,21 @@ impl MatcherHandle {
             .unwrap_or_else(|e| e.into_inner())
             .last
             .clone()
+    }
+
+    /// `Matcher.replaceAll(String)`: replace every match over the
+    /// whole input (the JVM resets first, so in-flight `find`
+    /// state is discarded). `$g` group refs expand via the regex
+    /// crate (`$$` quotes); Java `\<c>` quotes have no
+    /// regex-crate spelling and pass through literally.
+    pub(crate) fn replace_all(&self, replacement: &str) -> String {
+        {
+            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            state.next = 0;
+            state.last = None;
+        }
+        let text: &str = &self.text;
+        self.re.replace_all(text, replacement).into_owned()
     }
 }
 

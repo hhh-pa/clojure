@@ -1497,9 +1497,17 @@
 (defmacro .. [x form & more]
   ;; Expansions build lists (never `list*` conses): nested conses
   ;; print elided and `macroexpand` only loops over lists.
+  ;; A symbol form is a 0-arg `__meth*`: upstream
+  ;; `Reflector/invokeNoArgInstanceMember` tries the METHOD first,
+  ;; then the field (JVM oracle: `(.. "a" toString)` answers "a",
+  ;; and upstream `clojure.string/trim` ends
+  ;; `(.. s (subSequence l r) toString)`). Double misses report the
+  ;; field shape, like the JVM. (List-form 0-arg misses keep the
+  ;; field shape too — the JVM reports a method miss there — a
+  ;; pinned pre-existing divergence, out of scope.)
   (let [one (if (seq? form)
               (apply list 'clojure.core/__meth* (list 'quote (first form)) x (next form))
-              (list 'clojure.core/__field* (list 'quote form) x))]
+              (list 'clojure.core/__meth* (list 'quote form) x))]
     (if more
       (apply list 'clojure.core/.. one more)
       one)))

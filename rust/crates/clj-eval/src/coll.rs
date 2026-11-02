@@ -15,12 +15,12 @@
 
 use std::cmp::Ordering;
 use std::collections::HashSet;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, Weak};
 
 use clj_value::{
-    ConsValue, List, Map, PrimitiveVector, Set, SortSpec, SubVectorValue, ThrowClass, Transient,
-    TransientError, TransientKind, TransientMap, TransientSet, TransientVector, Value, Vector,
-    new_map, new_set,
+    ConsValue, Keyword, List, Map, PrimitiveVector, Set, SortSpec, SubVectorValue, ThrowClass,
+    Transient, TransientError, TransientKind, TransientMap, TransientSet, TransientVector, Value,
+    Vector, new_map, new_set,
 };
 
 use crate::core::{cce_err, cce_message, is_counted, jvm_compare, nth_index};
@@ -124,7 +124,7 @@ fn lookup_vector_slot(x: &Vector, key: &Value) -> Option<Value> {
     int_key(key).and_then(|i| {
         usize::try_from(i as i32)
             .ok()
-            .and_then(|idx| x.iter().nth(idx).cloned())
+            .and_then(|idx| x.get(idx).cloned())
     })
 }
 
@@ -198,7 +198,7 @@ fn find_entry_vector(x: &Vector, key: &Value) -> Option<(Value, Value)> {
     int_key(key).and_then(|i| {
         usize::try_from(i as i32)
             .ok()
-            .and_then(|idx| x.iter().nth(idx).map(|v| (key.clone(), v.clone())))
+            .and_then(|idx| x.get(idx).map(|v| (key.clone(), v.clone())))
     })
 }
 
@@ -694,7 +694,7 @@ pub(crate) fn count_of(eval: &mut Evaluator, v: &Value) -> Result<i64, NativeErr
     }
     match v {
         Value::Nil => Ok(0),
-        Value::Str(s) => Ok(s.encode_utf16().count() as i64),
+        Value::Str(s) => Ok(str_utf16_len(s) as i64),
         Value::List(l) => Ok(l.len() as i64),
         Value::Vector(x) => Ok(x.len() as i64),
         Value::PrimitiveVector(p) => Ok(p.len() as i64),
@@ -1324,9 +1324,7 @@ fn nth_indexed_found(
 
 fn nth_indexed(coll: &Value, n: i32, not_found: Option<&Value>) -> Result<Value, NativeError> {
     let found = match coll {
-        Value::Vector(x) => usize::try_from(n)
-            .ok()
-            .and_then(|idx| x.iter().nth(idx).cloned()),
+        Value::Vector(x) => usize::try_from(n).ok().and_then(|idx| x.get(idx).cloned()),
         Value::PrimitiveVector(p) => usize::try_from(n).ok().and_then(|idx| p.get(idx).cloned()),
         Value::MapEntry { key, val, .. } => usize::try_from(n).ok().and_then(|idx| match idx {
             0 => Some((**key).clone()),
@@ -1372,10 +1370,124 @@ fn nth_walk(
 }
 
 /// `nth` over a string (chars; `StringIndexOutOfBounds` without `not-found`).
-fn nth_str(s: &str, n: i32, not_found: Option<&Value>) -> Result<Value, NativeError> {
+/// A cached string scan: ASCII strings index by byte; other
+/// strings carry char→byte offsets plus the UTF-16 length
+/// (`count` units). Built once per `Arc` — recipes parse
+/// multi-MB inputs char-by-char through `nth`, where a fresh
+/// scan per call is quadratic (the 37MB dijkstra input never
+/// finishes without this).
+#[derive(Clone)]
+enum StrScan {
+    Ascii,
+    Indexed {
+        byte_at: Vec<usize>,
+        utf16_len: usize,
+    },
+}
+
+/// One scan-cache slot: the string weakly (a strong ref would
+/// pin multi-MB inputs past their use; a bare pointer would
+/// ABA when the address is reused).
+struct StrScanEntry {
+    key: Weak<str>,
+    scan: StrScan,
+}
+
+/// The string scan cache (8 MRU slots): `nth`/`count` over
+/// strings consult it past small indexes, where a direct scan
+/// wins.
+static STR_SCAN_CACHE: Mutex<Vec<StrScanEntry>> = Mutex::new(Vec::new());
+
+/// The index threshold past which the scan cache pays (at or
+/// below it a direct `chars().nth` is cheaper than the
+/// lookup).
+const STR_SCAN_DIRECT_MAX: usize = 64;
+
+/// Indexed strings past this many chars skip the offset table
+/// (a memory cap — the slow path stays correct).
+const STR_SCAN_INDEX_CAP: usize = 2_000_000;
+
+/// The cached scan for a string, building it on first use
+/// (one O(n) pass; ASCII costs no table). `None` reads over
+/// the index cap (uncached slow path).
+fn str_scan(s: &Arc<str>) -> Option<StrScan> {
+    {
+        let mut cache = STR_SCAN_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(pos) = cache
+            .iter()
+            .position(|e| e.key.upgrade().is_some_and(|a| Arc::ptr_eq(&a, s)))
+        {
+            let entry = cache.remove(pos);
+            let scan = entry.scan.clone();
+            cache.insert(0, entry);
+            return Some(scan);
+        }
+    }
+    let scan = build_str_scan(s)?;
+    {
+        let mut cache = STR_SCAN_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        cache.insert(
+            0,
+            StrScanEntry {
+                key: Arc::downgrade(s),
+                scan: scan.clone(),
+            },
+        );
+        cache.truncate(8);
+    }
+    Some(scan)
+}
+
+/// Scan a string once: ASCII short-circuits (no table);
+/// otherwise tabulate char→byte offsets (capped).
+fn build_str_scan(s: &str) -> Option<StrScan> {
+    if s.is_ascii() {
+        return Some(StrScan::Ascii);
+    }
+    let mut byte_at = Vec::new();
+    let mut utf16_len = 0usize;
+    for (b, c) in s.char_indices() {
+        if byte_at.len() >= STR_SCAN_INDEX_CAP {
+            return None;
+        }
+        byte_at.push(b);
+        utf16_len += c.len_utf16();
+    }
+    Some(StrScan::Indexed { byte_at, utf16_len })
+}
+
+/// The char at `idx`, via the scan cache past small indexes
+/// (`None` reads out of bounds).
+fn str_char_at(s: &Arc<str>, idx: usize) -> Option<char> {
+    if idx <= STR_SCAN_DIRECT_MAX {
+        return s.chars().nth(idx);
+    }
+    match str_scan(s) {
+        Some(StrScan::Ascii) => s.as_bytes().get(idx).map(|b| *b as char),
+        Some(StrScan::Indexed { byte_at, .. }) => {
+            byte_at.get(idx).and_then(|b| s[*b..].chars().next())
+        }
+        None => s.chars().nth(idx),
+    }
+}
+
+/// The UTF-16 length (`count` units), via the scan cache for
+/// big strings.
+fn str_utf16_len(s: &Arc<str>) -> usize {
+    if s.len() <= 256 {
+        return s.encode_utf16().count();
+    }
+    match str_scan(s) {
+        Some(StrScan::Ascii) => s.len(),
+        Some(StrScan::Indexed { utf16_len, .. }) => utf16_len,
+        None => s.encode_utf16().count(),
+    }
+}
+
+fn nth_str(s: &Arc<str>, n: i32, not_found: Option<&Value>) -> Result<Value, NativeError> {
     let found = usize::try_from(n)
         .ok()
-        .and_then(|idx| s.chars().nth(idx).map(Value::Char));
+        .and_then(|idx| str_char_at(s, idx).map(Value::Char));
     match found {
         Some(c) => Ok(c),
         None => {
@@ -1384,11 +1496,7 @@ fn nth_str(s: &str, n: i32, not_found: Option<&Value>) -> Result<Value, NativeEr
             }
             Err(NativeError::new(
                 ThrowClass::StringIndexOutOfBoundsException,
-                format!(
-                    "Index {} out of bounds for length {}",
-                    n,
-                    s.encode_utf16().count()
-                ),
+                format!("Index {} out of bounds for length {}", n, str_utf16_len(s)),
             ))
         }
     }
@@ -1739,7 +1847,8 @@ fn conj_bang_transient(
 }
 
 fn native_conj_bang(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
-    check_arity("clojure.core/conj!", args, &[0, 1, 2])?;
+    // JVM arities: `([] [coll] [coll x] [coll x & xs])` — variadic.
+    check_min_arity("clojure.core/conj!", args, 0)?;
     if args.is_empty() {
         return Ok(Value::Transient(Transient::new(TransientKind::Vector(
             TransientVector::new(),
@@ -1749,7 +1858,12 @@ fn native_conj_bang(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nativ
         return Ok(args[0].clone());
     }
     match &args[0] {
-        Value::Transient(t) => conj_bang_transient(eval, t, &args[1]),
+        Value::Transient(t) => {
+            for x in &args[1..] {
+                conj_bang_transient(eval, t, x)?;
+            }
+            Ok(Value::Transient(t.clone()))
+        }
         Value::Nil => Err(NativeError::new(
             ThrowClass::NullPointerException,
             "Cannot invoke \"clojure.lang.ITransientCollection.conj(Object)\" because \"coll\" is null"
@@ -1922,11 +2036,50 @@ fn native_pop_bang(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nativ
     Ok(Value::Transient(t.clone()))
 }
 
+/// The `PersistentQueue` emulation mark: queues ride on
+/// vectors (insertion-ordered, `conj`/`count`/`seq`/`nth`
+/// already correct), distinguished by this metadata key so
+/// `peek`/`pop` take the front. `conj` and `pop` preserve
+/// metadata, so queues stay queues through BFS loops. The mark
+/// is visible to `meta` (a documented narrowing — real queues
+/// print `#object[…]`; these print as vectors).
+fn queue_mark_key() -> Value {
+    Value::Keyword(Keyword::new(Some("clojure-rs"), "queue"))
+}
+
+/// Whether a vector is a queue emulation (see
+/// [`empty_queue_value`]).
+fn is_queue_vec(x: &Vector) -> bool {
+    x.meta().and_then(|m| m.get(&queue_mark_key())).is_some()
+}
+
+/// `clojure.lang.PersistentQueue/EMPTY`: a marked empty vector
+/// (FIFO via the `peek`/`pop` arms below; 4 recipes BFS with
+/// it).
+pub(crate) fn empty_queue_value() -> Value {
+    Value::Vector(
+        Vector::from_vec(vec![])
+            .with_meta(Some(new_map().insert(queue_mark_key(), Value::Bool(true)))),
+    )
+}
+
+/// `pop` over a queue emulation: drops the FRONT (empty pops
+/// answer the queue itself, like the JVM — oracle).
+fn pop_queue(x: &Vector) -> Value {
+    if x.is_empty() {
+        return Value::Vector(x.clone());
+    }
+    Value::Vector(
+        Vector::from_vec(x.iter().skip(1).cloned().collect()).with_meta(x.meta().cloned()),
+    )
+}
+
 fn native_peek(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/peek", args, &[1])?;
     match &args[0] {
         Value::Nil => Ok(Value::Nil),
         Value::List(l) => Ok(l.first().cloned().unwrap_or(Value::Nil)),
+        Value::Vector(x) if is_queue_vec(x) => Ok(x.iter().next().cloned().unwrap_or(Value::Nil)),
         Value::Vector(x) => Ok(x.iter().last().cloned().unwrap_or(Value::Nil)),
         Value::PrimitiveVector(p) => Ok(p.iter().last().cloned().unwrap_or(Value::Nil)),
         Value::MapEntry { val, .. } => Ok((**val).clone()),
@@ -2001,6 +2154,7 @@ fn native_pop(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErro
     match &args[0] {
         Value::Nil => Ok(Value::Nil),
         Value::List(l) => pop_list(l),
+        Value::Vector(x) if is_queue_vec(x) => Ok(pop_queue(x)),
         Value::Vector(x) => pop_vector(x),
         Value::PrimitiveVector(p) => pop_pv(p),
         // Popping an entry answers its 1-vector (Oracle FX2

@@ -445,6 +445,13 @@ impl Vector {
         self.inner.iter()
     }
 
+    /// The item at `index` (`None` past the end; logarithmic, never
+    /// a walk — indexed callers must use this, not `iter().nth()`).
+    #[must_use]
+    pub fn get(&self, index: usize) -> Option<&Value> {
+        self.inner.get(index)
+    }
+
     /// The element count.
     #[must_use]
     pub fn len(&self) -> usize {

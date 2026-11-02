@@ -1892,7 +1892,7 @@ impl Evaluator {
                 "Key must be integer".to_owned(),
             )));
         };
-        match usize::try_from(*n).ok().and_then(|i| v.iter().nth(i)) {
+        match usize::try_from(*n).ok().and_then(|i| v.get(i)) {
             Some(elem) => Ok(elem.clone()),
             None => Err(self.throw(NativeError::new(
                 ThrowClass::IndexOutOfBoundsException,
@@ -2792,9 +2792,7 @@ fn lookup(coll: &Value, key: &Value) -> Option<Value> {
 
 fn lookup_vector(v: &Vector, key: &Value) -> Option<Value> {
     match key {
-        Value::Int(n) => usize::try_from(*n)
-            .ok()
-            .and_then(|i| v.iter().nth(i).cloned()),
+        Value::Int(n) => usize::try_from(*n).ok().and_then(|i| v.get(i).cloned()),
         _ => None,
     }
 }
@@ -2847,7 +2845,7 @@ fn rest_list(args: &[Value]) -> Value {
 fn nth_or_nil(coll: &Value, i: usize, eval: &mut Evaluator) -> Result<Value, Signal> {
     match coll {
         Value::Nil => Ok(Value::Nil),
-        Value::Vector(v) => Ok(v.iter().nth(i).cloned().unwrap_or(Value::Nil)),
+        Value::Vector(v) => Ok(v.get(i).cloned().unwrap_or(Value::Nil)),
         Value::MapEntry { key, val, .. } => Ok(match i {
             0 => (**key).clone(),
             1 => (**val).clone(),

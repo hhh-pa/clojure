@@ -113,6 +113,30 @@ pub(crate) fn close_reader_value(
     Some(close_stream_reader(r).map(|()| Value::Nil))
 }
 
+/// Drain a stream reader fully (issue #201 S8): parser remainder
+/// plus every further feed, char by char (exact text — no
+/// line-split roundtrip, so trailing newlines survive). Matches
+/// upstream `slurp`, which `with-open`s the reader: the stream
+/// latches closed on success, even stdin.
+pub(crate) fn slurp_reader(r: &StreamReader) -> Result<String, NativeError> {
+    check_reader_open(r)?;
+    let mut out = String::new();
+    loop {
+        let next = lock_state(r).parser.read_char();
+        match next {
+            Some(c) => out.push(c),
+            None => {
+                let mut state = lock_state(r);
+                if !more_input(&mut state)? {
+                    break;
+                }
+            }
+        }
+    }
+    close_stream_reader(r)?;
+    Ok(out)
+}
+
 /// Latch a stream reader closed (idempotent).
 fn close_stream_reader(r: &StreamReader) -> Result<(), NativeError> {
     lock_state(r).closed = true;
@@ -1313,6 +1337,17 @@ mod tests {
         assert_eq!(state.parser.read_line(), Some("a".to_owned()));
         assert!(!more_input(&mut state).unwrap());
         assert_eq!(state.parser.read_line(), None);
+    }
+
+    #[test]
+    fn slurp_reader_drains_script_lines() {
+        // `slurp` over a reader with scripted lines keeps feeding
+        // past the first chunk (the loop-continue arm).
+        let mut eval = scratch();
+        let value = string_reader(&mut eval, "a");
+        let reader = as_reader(&value).expect("a reader");
+        lock_state(reader).script_lines.push_back("b\n".to_owned());
+        assert_eq!(slurp_reader(reader).unwrap(), "ab\n");
     }
 
     #[test]

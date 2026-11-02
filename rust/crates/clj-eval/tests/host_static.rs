@@ -447,8 +447,10 @@ fn fq_operator_invoke() {
 
 // val-simplequal-missing/removed-ns-val: qualified misses blame the
 // namespace part (simple) or CNFE it (dotted). Value-position
-// static members (method fns per `v-method`, field reads per
-// `v-field`) are a later slice and keep `No such namespace`.
+// static FIELD reads landed with the recipes drop-in (issue #201
+// S12: `Integer/MAX_VALUE` folds); value-position static METHOD
+// fns (`v-method`: the JVM answers a fn for `String/valueOf`) are
+// still a later slice and keep the bare miss shape instead.
 #[test]
 fn value_qualified() {
     let mut eval = boot();
@@ -462,12 +464,9 @@ fn value_qualified() {
     );
     assert_eq!(
         compile_err(&mut eval, "String/valueOf"),
-        "java.lang.RuntimeException | No such namespace: String"
+        "java.lang.IllegalArgumentException | Error - no matches found for static method valueOf in class java.lang.String"
     );
-    assert_eq!(
-        compile_err(&mut eval, "Integer/MAX_VALUE"),
-        "java.lang.RuntimeException | No such namespace: Integer"
-    );
+    assert_eq!(run(&mut eval, "Integer/MAX_VALUE"), "2147483647");
 }
 
 // ---- operator-position imports ----

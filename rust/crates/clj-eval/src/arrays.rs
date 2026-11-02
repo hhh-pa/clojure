@@ -1519,21 +1519,34 @@ fn native_aclone(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeE
 /// Anything else non-nil fails the `^Class` hint `CCE`
 /// (oracles `e-kw-class`, `e-num-class` name the JVM shape);
 /// nil passes the hint and fails at use.
+fn primitive_base_type(name: &str) -> Option<BaseType> {
+    match name {
+        "boolean" => Some(BaseType::Boolean),
+        "byte" => Some(BaseType::Byte),
+        "char" => Some(BaseType::Char),
+        "short" => Some(BaseType::Short),
+        "int" => Some(BaseType::Int),
+        "long" => Some(BaseType::Long),
+        "float" => Some(BaseType::Float),
+        "double" => Some(BaseType::Double),
+        "object" => Some(BaseType::Object),
+        _ => None,
+    }
+}
+
 fn class_designator(t: &Value) -> Result<Option<BaseType>, NativeError> {
     match t {
         Value::Nil => Ok(None),
-        Value::Keyword(k) if k.namespace().is_none() => match k.name() {
-            "boolean" => Ok(Some(BaseType::Boolean)),
-            "byte" => Ok(Some(BaseType::Byte)),
-            "char" => Ok(Some(BaseType::Char)),
-            "short" => Ok(Some(BaseType::Short)),
-            "int" => Ok(Some(BaseType::Int)),
-            "long" => Ok(Some(BaseType::Long)),
-            "float" => Ok(Some(BaseType::Float)),
-            "double" => Ok(Some(BaseType::Double)),
-            "object" => Ok(Some(BaseType::Object)),
-            _ => Err(cce_err(t, "java.lang.Class")),
-        },
+        Value::Keyword(k) if k.namespace().is_none() => primitive_base_type(k.name())
+            .map(Some)
+            .ok_or_else(|| cce_err(t, "java.lang.Class")),
+        // Class designators (`(into-array Object xs)` — 44
+        // recipes): primitives map by name, every reference
+        // element shares the `Object` store (store checks narrow
+        // away — the port keeps one reference kind).
+        Value::Class(c) => Ok(Some(
+            primitive_base_type(c.name()).unwrap_or(BaseType::Object),
+        )),
         _ => Err(cce_err(t, "java.lang.Class")),
     }
 }
