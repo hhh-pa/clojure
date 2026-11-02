@@ -3355,6 +3355,136 @@ fn time_misses() {
         ),
         "java.lang.NullPointerException | zone is null"
     );
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(.format (java.time.LocalDateTime/of 2024 1 1 0 0) \"yyyy\")"
+        )
+        .split('|')
+        .next()
+        .unwrap()
+        .trim(),
+        "java.lang.ClassCastException"
+    );
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(.atZone (java.time.Instant/ofEpochSecond 0) \"UTC\")"
+        )
+        .split('|')
+        .next()
+        .unwrap()
+        .trim(),
+        "java.lang.ClassCastException"
+    );
+    // Unknown members and members on sibling inhabitants miss.
+    assert_eq!(
+        runtime_miss(&mut eval, "java.time.LocalDateTime", "nope", ""),
+        "java.lang.IllegalArgumentException | No matching method nope found taking 0 args for class java.time.LocalDateTime"
+    );
+    assert_eq!(
+        runtime_miss(&mut eval, "java.time.Instant", "nope", ""),
+        "java.lang.IllegalArgumentException | No matching method nope found taking 0 args for class java.time.Instant"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(.getYear java.time.ZoneOffset/UTC)"),
+        "java.lang.IllegalArgumentException | No matching method getYear found taking 0 args for class java.time.ZoneOffset"
+    );
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(.getYear (java.time.format.DateTimeFormatter/ofPattern \"y\"))"
+        ),
+        "java.lang.IllegalArgumentException | No matching method getYear found taking 0 args for class java.time.format.DateTimeFormatter"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(.getYear \"not-a-date\")"),
+        "java.lang.IllegalArgumentException | No matching field found: getYear for class java.lang.String"
+    );
+    // Static arity edges: `now` arities and non-string patterns.
+    assert_eq!(
+        runtime_miss(&mut eval, "java.time.LocalDate", "now", ""),
+        "java.lang.IllegalArgumentException | No matching method now found taking 0 args for class java.time.LocalDate"
+    );
+    assert_eq!(
+        runtime_miss(&mut eval, "java.time.LocalDateTime", "now", "1"),
+        "java.lang.IllegalArgumentException | No matching method now found taking 1 args for class java.time.LocalDateTime"
+    );
+    assert_eq!(
+        runtime_miss(&mut eval, "java.time.LocalDateTime", "of", "1 2 3"),
+        "java.lang.IllegalArgumentException | No matching method of found taking 3 args for class java.time.LocalDateTime"
+    );
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(java.time.format.DateTimeFormatter/ofPattern 5)"
+        ),
+        "java.lang.IllegalArgumentException | No matching method ofPattern found taking 1 args for class java.time.format.DateTimeFormatter"
+    );
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(java.time.format.DateTimeFormatter/ofPattern nil)"
+        ),
+        "java.lang.NullPointerException | pattern is null"
+    );
+}
+
+#[test]
+fn time_validation_and_classes() {
+    let mut eval = boot();
+    // Year range plus minute/second edges (hour is in
+    // `time_of_validation`).
+    assert_eq!(
+        uncaught(&mut eval, "(java.time.LocalDate/of 1000000000 1 1)"),
+        "java.lang.IllegalArgumentException | Invalid value for Year (valid values -999999999 - 999999999): 1000000000"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(java.time.LocalDateTime/of 2024 1 1 0 60)"),
+        "java.lang.IllegalArgumentException | Invalid value for MinuteOfHour (valid values 0 - 59): 60"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(java.time.LocalDateTime/of 2024 1 1 0 0 60)"),
+        "java.lang.IllegalArgumentException | Invalid value for SecondOfMinute (valid values 0 - 59): 60"
+    );
+    // Negative years render (BCE arithmetic is proleptic).
+    assert_eq!(
+        run(&mut eval, "(str (java.time.LocalDate/of -44 3 15))"),
+        "\"-044-03-15\""
+    );
+    // Every inhabitant reports its class, equates, and hashes by
+    // value.
+    assert_eq!(
+        run(
+            &mut eval,
+            "[(str (class (java.time.LocalDate/of 2024 1 2)))
+              (str (class (java.time.LocalDateTime/of 2024 1 2 3 4)))
+              (str (class (java.time.Instant/ofEpochSecond 5)))
+              (str (class java.time.ZoneOffset/UTC))
+              (str (class (.atZone (java.time.Instant/ofEpochSecond 0) java.time.ZoneOffset/UTC)))
+              (str (class (.getDayOfWeek (java.time.LocalDate/of 2024 1 1))))
+              (str (class (java.time.format.DateTimeFormatter/ofPattern \"y\")))]"
+        ),
+        "[\"class java.time.LocalDate\" \"class java.time.LocalDateTime\" \"class java.time.Instant\" \"class java.time.ZoneOffset\" \"class java.time.ZonedDateTime\" \"class java.time.DayOfWeek\" \"class java.time.format.DateTimeFormatter\"]"
+    );
+    assert_eq!(
+        run(
+            &mut eval,
+            "[(= (java.time.LocalDateTime/of 2024 1 2 3 4) (java.time.LocalDateTime/of 2024 1 2 3 4))
+              (= (java.time.Instant/ofEpochSecond 5) (java.time.Instant/ofEpochSecond 5))
+              (= (.getDayOfWeek (java.time.LocalDate/of 2024 1 1)) (.getDayOfWeek (java.time.LocalDate/of 2024 1 8)))
+              (= (java.time.format.DateTimeFormatter/ofPattern \"y\") (java.time.format.DateTimeFormatter/ofPattern \"y\"))
+              (= (.atZone (java.time.Instant/ofEpochSecond 0) java.time.ZoneOffset/UTC)
+                 (.atZone (java.time.Instant/ofEpochSecond 0) java.time.ZoneOffset/UTC))
+              (= (hash (java.time.LocalDate/of 2024 1 2)) (hash (java.time.LocalDate/of 2024 1 2)))
+              (= (hash (java.time.Instant/ofEpochSecond 5)) (hash (java.time.Instant/ofEpochSecond 5)))
+              (= (hash (java.time.LocalDateTime/of 2024 1 2 3 4)) (hash (java.time.LocalDateTime/of 2024 1 2 3 4)))
+              (= (hash java.time.ZoneOffset/UTC) (hash java.time.ZoneOffset/UTC))
+              (= (hash (.getDayOfWeek (java.time.LocalDate/of 2024 1 1)))
+                 (hash (.getDayOfWeek (java.time.LocalDate/of 2024 1 8))))]"
+        ),
+        "[true true true true true true true true true true]"
+    );
 }
 
 // --- Batch H: census stragglers (StringBuilder/reverse,
@@ -3424,6 +3554,15 @@ fn file_get_path_absolute() {
                (= abs (.getAbsolutePath (java.io.File. abs))))"
         ),
         "true"
+    );
+    // `delete` answers whether something was removed.
+    assert_eq!(
+        run(
+            &mut eval,
+            "(let [f (java.io.File/createTempFile \"del_\" \".tmp\")]
+               [(.delete f) (.delete f) (.exists f)])"
+        ),
+        "[true false false]"
     );
 }
 
@@ -3521,6 +3660,26 @@ fn seq_keys_merge_and_equiv() {
         ),
         "[2 {:x 2, :y 1}]"
     );
+    // `assoc` into nil, `conj` pairs/entries, and record content.
+    assert_eq!(
+        run(
+            &mut eval,
+            "(let [p (first (partition 2 1 [4 5]))]
+               [(get (assoc nil p 9) [4 5])
+                (get (conj {} [p 8]) [4 5])
+                (get (conj {} {p 7}) [4 5])])"
+        ),
+        "[9 8 7]"
+    );
+    assert_eq!(
+        run(
+            &mut eval,
+            "(do (defrecord RK [a])
+                 (let [r (RK. 1)]
+                   [(get r :a) (get (dissoc r :a) :a :missing)]))"
+        ),
+        "[1 :missing]"
+    );
 }
 
 #[test]
@@ -3568,6 +3727,20 @@ fn split_boundary_patterns() {
         run(&mut eval, &split("\"ba\"", "#\"(?<!a)\"")),
         "[\"b\" \"a\"]"
     );
+    // Negated lookahead, dot atoms, escaped literals.
+    assert_eq!(run(&mut eval, &split("\"ab\"", "#\"(?!b)\"")), "[\"ab\"]");
+    assert_eq!(
+        run(&mut eval, &split("\"ab\"", "#\"(?=.)\"")),
+        "[\"a\" \"b\"]"
+    );
+    assert_eq!(
+        run(&mut eval, &split("\"a.b\"", "#\"(?<=\\.)\"")),
+        "[\"a.\" \"b\"]"
+    );
+    assert_eq!(
+        run(&mut eval, &split("\"a\nb\"", "#\"(?<=\\n)\"")),
+        "[\"a\\n\" \"b\"]"
+    );
     // Limits ride the shared loop (oracled).
     assert_eq!(
         run(
@@ -3593,6 +3766,11 @@ fn split_boundary_fallthrough() {
         "#\"(?=\\d)+\"",
         "#\"(?<=[0-9])\"",
         "#\"x(?=\\d)\"",
+        "#\"(?=\\d\"",
+        "#\"(?=\\d))\"",
+        "#\"(?=\\d)|\"",
+        "#\"(?<x)\"",
+        "#\"(?<=\\Q)\"",
     ] {
         let err = uncaught(
             &mut eval,

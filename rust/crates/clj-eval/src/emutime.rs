@@ -852,13 +852,9 @@ impl ExtensionValue for EmuZoneOffset {
     }
 
     fn print(&self) -> String {
-        if self.secs == 0 {
-            "Z".to_owned()
-        } else {
-            let sign = if self.secs < 0 { '-' } else { '+' };
-            let abs = self.secs.abs();
-            format!("{sign}{:02}:{:02}", abs / 3600, (abs % 3600) / 60)
-        }
+        // Only UTC inhabitants exist (sole constructor above).
+        debug_assert_eq!(self.secs, 0);
+        "Z".to_owned()
     }
 
     fn dyn_eq(&self, other: &dyn ExtensionValue) -> bool {
