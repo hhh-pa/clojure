@@ -516,10 +516,14 @@ impl Map {
     /// Promotion follows `PersistentArrayMap.assoc`: past 8 pairs a
     /// non-keyword key promotes, past 64 pairs anything does.
     #[must_use]
-    pub fn insert(self, k: Value, v: Value) -> Self {
+    pub fn insert(mut self, k: Value, v: Value) -> Self {
+        // Owned `self`: mutate the trie in place (same rationale as
+        // `Vector::push_back` — rpds still path-copies nodes shared
+        // with *other* versions, so persistence is preserved).
         if self.inner.get(&k).is_some() {
+            self.inner.insert_mut(k, v);
             return Self {
-                inner: self.inner.insert(k, v),
+                inner: self.inner,
                 meta: self.meta,
                 keys: self.keys,
                 hashy: self.hashy,
@@ -531,8 +535,9 @@ impl Map {
         let promote = !self.hashy && (size >= 64 || (size >= 8 && !matches!(k, Value::Keyword(_))));
         let mut keys = self.keys;
         keys.push(k.clone());
+        self.inner.insert_mut(k, v);
         Self {
-            inner: self.inner.insert(k, v),
+            inner: self.inner,
             meta: self.meta,
             keys,
             hashy: self.hashy || promote,
@@ -551,8 +556,9 @@ impl Map {
             return self;
         }
         self.keys.retain(|key| key != k);
+        self.inner.remove_mut(k);
         Self {
-            inner: self.inner.remove(k),
+            inner: self.inner,
             meta: self.meta,
             keys: self.keys,
             hashy: self.hashy,
@@ -610,7 +616,7 @@ impl Map {
         let mut keys = Vec::with_capacity(entries.len());
         for (k, v) in entries {
             keys.push(k.clone());
-            inner = inner.insert(k, v);
+            inner.insert_mut(k, v);
         }
         Self {
             inner,
@@ -694,14 +700,15 @@ impl Set {
     /// Add a value. A new member appends to the insertion order;
     /// a present member is a no-op (keeps the original object).
     #[must_use]
-    pub fn insert(self, v: Value) -> Self {
+    pub fn insert(mut self, v: Value) -> Self {
         if self.inner.contains(&v) {
             self
         } else {
             let mut members = self.members;
             members.push(v.clone());
+            self.inner.insert_mut(v);
             Self {
-                inner: self.inner.insert(v),
+                inner: self.inner,
                 meta: self.meta,
                 members,
                 sort: self.sort,
@@ -732,8 +739,9 @@ impl Set {
             return self;
         }
         self.members.retain(|m| m != v);
+        self.inner.remove_mut(v);
         Self {
-            inner: self.inner.remove(v),
+            inner: self.inner,
             meta: self.meta,
             members: self.members,
             sort: self.sort,
@@ -792,7 +800,7 @@ impl Set {
     pub fn with_ordered_members(self, members: Vec<Value>) -> Self {
         let mut inner = RpdsSet::new_with_hasher_with_ptr_kind(FxBuildHasher::default());
         for v in &members {
-            inner = inner.insert(v.clone());
+            inner.insert_mut(v.clone());
         }
         Self {
             inner,
