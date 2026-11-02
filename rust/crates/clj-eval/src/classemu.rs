@@ -2829,6 +2829,7 @@ pub(crate) fn static_member_arities(fqn: &str, member: &str) -> Option<&'static 
         "java.lang.Float" => static_arities_float(member),
         "java.math.BigInteger" => static_arities_bigint(member),
         "java.util.Arrays" => static_arities_arrays(member),
+        "java.util.regex.Pattern" => static_arities_pattern(member),
         "java.net.URLEncoder" => static_arities_urlencoder(member),
         "java.lang.String" => static_arities_string(member),
         "java.lang.Math" => static_arities_math(member),
@@ -2992,6 +2993,7 @@ fn native_static(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeEr
         "java.lang.Float" => static_call_float(member.as_ref(), rest),
         "java.math.BigInteger" => static_call_bigint(member.as_ref(), rest),
         "java.util.Arrays" => static_call_arrays(member.as_ref(), rest),
+        "java.util.regex.Pattern" => static_call_pattern(member.as_ref(), rest),
         "java.net.URLEncoder" => static_call_urlencoder(member.as_ref(), rest),
         "java.lang.String" => static_call_string(eval, member.as_ref(), rest),
         "java.lang.Math" => static_call_math(member.as_ref(), rest),
@@ -3131,6 +3133,42 @@ fn static_arities_urlencoder(member: &str) -> Option<&'static [usize]> {
     match member {
         "encode" => Some(&[2]),
         _ => None,
+    }
+}
+
+fn static_arities_pattern(member: &str) -> Option<&'static [usize]> {
+    match member {
+        "quote" => Some(&[1]),
+        _ => None,
+    }
+}
+
+fn static_call_pattern(member: &str, rest: &[Value]) -> Result<Value, NativeError> {
+    match member {
+        "quote" => static_pattern_quote(rest),
+        _ => static_field_or_miss("java.util.regex.Pattern", member, rest),
+    }
+}
+
+/// `Pattern/quote` (#205): `\Q...\E` with inner `\E`s escaped
+/// (nil NPEs on the parameter, like the JDK).
+fn static_pattern_quote(args: &[Value]) -> Result<Value, NativeError> {
+    if args.len() != 1 {
+        return Err(crate::types::no_method(
+            "quote",
+            args.len(),
+            "java.util.regex.Pattern",
+        ));
+    }
+    match str_text_arg(&args[0])? {
+        Some(s) => Ok(Value::Str(Arc::from(
+            format!("\\Q{}\\E", s.replace("\\E", "\\E\\\\E\\Q")).as_str(),
+        ))),
+        None => Err(NativeError::new(
+            ThrowClass::NullPointerException,
+            "Cannot invoke \"java.util.regex.Pattern.quote(String)\" because \"s\" is null"
+                .to_owned(),
+        )),
     }
 }
 
@@ -5333,6 +5371,7 @@ fn surface_gated(
         .or_else(|| surface_gated_str(meth, target, rest))
         .or_else(|| surface_gated_builder(eval, meth, target, rest))
         .or_else(|| surface_gated_regex(meth, target, rest))
+        .or_else(|| surface_gated_matcher(meth, target, rest))
         .or_else(|| surface_gated_bigint(meth, target, rest))
         .or_else(|| surface_gated_uri(meth, target, rest))
         .or_else(|| crate::emurand::random_method(meth, target, rest))
@@ -5381,6 +5420,25 @@ fn surface_gated_regex(
     match (meth, rest.len()) {
         ("split", 1 | 2) => gated_regex_split(target, rest),
         ("replaceAll", 1) => gated_matcher_replace_all(target, rest),
+        _ => None,
+    }
+}
+
+/// The `Matcher` members (#205): `find`/`group`/`start`/`end`
+/// (non-handles miss through to the uniform error).
+fn surface_gated_matcher(
+    meth: &str,
+    target: &Value,
+    rest: &[Value],
+) -> Option<Result<Value, NativeError>> {
+    let h = crate::collmisc::as_matcher(target)?;
+    match (meth, rest.len()) {
+        ("find", 0) => Some(Ok(Value::Bool(h.find_bool()))),
+        ("find", 1) => Some(str_int_arg(&rest[0]).and_then(|s| h.find_from(s).map(Value::Bool))),
+        ("group", 0) => Some(h.group0().map(|g| Value::Str(Arc::from(g.as_str())))),
+        ("group", 1) => Some(str_int_arg(&rest[0]).and_then(|i| h.group_n(i))),
+        ("start", 0) => Some(h.last_span().map(|(s, _)| Value::Int(s as i64))),
+        ("end", 0) => Some(h.last_span().map(|(_, e)| Value::Int(e as i64))),
         _ => None,
     }
 }
@@ -6676,8 +6734,11 @@ pub(crate) const SURFACE_MEMBERS: &[(&str, usize)] = &[
     ("compareTo", 1),
     ("contains", 1),
     ("divide", 1),
+    ("end", 0),
     ("endsWith", 1),
     ("equals", 1),
+    ("find", 0),
+    ("find", 1),
     ("flush", 0),
     ("getBytes", 0),
     ("getBytes", 1),
@@ -6696,6 +6757,8 @@ pub(crate) const SURFACE_MEMBERS: &[(&str, usize)] = &[
     ("getSimpleName", 0),
     ("getSuperclass", 0),
     ("getValue", 0),
+    ("group", 0),
+    ("group", 1),
     ("hashCode", 0),
     ("indexOf", 1),
     ("indexOf", 2),
@@ -6730,6 +6793,7 @@ pub(crate) const SURFACE_MEMBERS: &[(&str, usize)] = &[
     ("signum", 0),
     ("split", 1),
     ("split", 2),
+    ("start", 0),
     ("startsWith", 1),
     ("startsWith", 2),
     ("subSequence", 2),

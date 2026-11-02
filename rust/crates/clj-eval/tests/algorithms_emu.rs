@@ -1651,6 +1651,143 @@ fn bigint_equals_and_simple_name() {
     );
 }
 
+/// `Matcher.find/group/start/end`, incl. the weddles `\G`
+/// shape (anchored at the search offset).
+#[test]
+fn matcher_find_group_start_end() {
+    let mut eval = boot();
+    // The weddles number-token shape: find from an offset.
+    assert_eq!(
+        run(
+            &mut eval,
+            r#"(let [m (re-matcher #"\G(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?" "x+12.5")] [(.find m 2) (.group m) (.end m) (.start m)])"#
+        ),
+        "[true \"12.5\" 6 2]"
+    );
+    // Anchored: no match away from the offset.
+    assert_eq!(
+        run(
+            &mut eval,
+            r#"(let [m (re-matcher #"\G\d+" "ab12")] [(.find m 0) (.find m 2) (.group m)])"#
+        ),
+        "[false true \"12\"]"
+    );
+    // Unanchored `find/0` iterates.
+    assert_eq!(
+        run(
+            &mut eval,
+            r#"(let [m (re-matcher #"\d+" "a1b22")] [(.find m) (.group m) (.find m) (.group m) (.find m)])"#
+        ),
+        "[true \"1\" true \"22\" false]"
+    );
+    // Groups: present, unmatched (nil), past-the-end (IOOBE).
+    assert_eq!(
+        run(
+            &mut eval,
+            r#"(let [m (re-matcher #"(\d+)(x)?" "ab12")] (.find m) [(.group m 1) (.group m 2) (.start m) (.end m)])"#
+        ),
+        "[\"12\" nil 2 4]"
+    );
+    // A fresh handle has no match (ISE); bad starts/indices IOOBE.
+    assert_eq!(
+        uncaught(&mut eval, r#"(.group (re-matcher #"\d+" "12"))"#),
+        "java.lang.IllegalStateException | No match found"
+    );
+    assert_eq!(
+        uncaught(&mut eval, r#"(.start (re-matcher #"\d+" "12"))"#),
+        "java.lang.IllegalStateException | No match found"
+    );
+    assert_eq!(
+        uncaught(&mut eval, r#"(.end (re-matcher #"\d+" "12"))"#),
+        "java.lang.IllegalStateException | No match found"
+    );
+    assert_eq!(
+        uncaught(&mut eval, r#"(.find (re-matcher #"\d+" "12") -1)"#),
+        "java.lang.IndexOutOfBoundsException | -1"
+    );
+    assert_eq!(
+        uncaught(&mut eval, r#"(.find (re-matcher #"\d+" "12") 3)"#),
+        "java.lang.IndexOutOfBoundsException | 3"
+    );
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            r#"(let [m (re-matcher #"(\d+)" "12")] (.find m) (.group m 9))"#
+        ),
+        "java.lang.IndexOutOfBoundsException | No group 9"
+    );
+    // A failed `find` clears the last match.
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            r#"(let [m (re-matcher #"\G\d+" "1a")] (.find m) (.find m 1) (.group m))"#
+        ),
+        "java.lang.IllegalStateException | No match found"
+    );
+    // Non-handles miss; nil indices unbox-NPE.
+    assert_eq!(
+        uncaught(&mut eval, r#"(.find "12")"#),
+        "java.lang.IllegalArgumentException | No matching field found: find for class java.lang.String"
+    );
+    assert!(uncaught(&mut eval, r#"(.find (re-matcher #"\d+" "12") nil)"#)
+        .contains("NullPointerException"));
+    // `re-find` over an anchored handle obeys the anchor.
+    assert_eq!(
+        run(&mut eval, r#"(re-find (re-matcher #"\G\d+" "ab12"))"#),
+        "nil"
+    );
+    assert_eq!(
+        run(&mut eval, r#"(re-find (re-matcher #"\G\d+" "12ab"))"#),
+        "\"12\""
+    );
+}
+
+/// `Pattern/quote`: literal quoting, nils, misses.
+#[test]
+fn pattern_quote() {
+    let mut eval = boot();
+    assert_eq!(
+        run(
+            &mut eval,
+            r#"[(java.util.regex.Pattern/quote "a.b") (java.util.regex.Pattern/quote "a\\Eb")]"#
+        ),
+        "[\"\\\\Qa.b\\\\E\" \"\\\\Qa\\\\E\\\\\\\\E\\\\Qb\\\\E\"]"
+    );
+    assert_eq!(
+        run(
+            &mut eval,
+            r#"(re-find (re-pattern (java.util.regex.Pattern/quote "a+b")) "xa+bz")"#,
+        ),
+        "\"a+b\""
+    );
+    // Quotation spans mid-pattern; unclosed quotes to the end;
+    // an escaped `\\Q` stays a literal backslash plus `Q`.
+    assert_eq!(
+        run(&mut eval, r#"(re-find (re-pattern "a\\Q.+\\Eb") "xa.+bz")"#),
+        "\"a.+b\""
+    );
+    assert_eq!(
+        run(&mut eval, r#"(re-find (re-pattern "\\Qa+b") "xa+bz")"#),
+        "\"a+b\""
+    );
+    assert_eq!(
+        run(&mut eval, r#"(re-find (re-pattern "\\\\Q12") "x\\Q12")"#),
+        "\"\\\\Q12\""
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(java.util.regex.Pattern/quote nil)"),
+        "java.lang.NullPointerException | Cannot invoke \"java.util.regex.Pattern.quote(String)\" because \"s\" is null"
+    );
+    assert_eq!(
+        compile_err(&mut eval, "(java.util.regex.Pattern/quote)"),
+        "java.lang.IllegalArgumentException | No matching method quote found taking 0 args for class java.util.regex.Pattern"
+    );
+    assert_eq!(
+        runtime_miss(&mut eval, "java.util.regex.Pattern", "quote", "1 2"),
+        "java.lang.IllegalArgumentException | No matching method quote found taking 2 args for class java.util.regex.Pattern"
+    );
+}
+
 /// Run `f` on a 256 MiB worker (the harness shape): deep
 /// recursion trips the catchable guard there, never an abort.
 fn on_worker<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {

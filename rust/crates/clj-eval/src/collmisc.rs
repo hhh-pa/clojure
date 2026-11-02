@@ -973,21 +973,25 @@ pub(crate) fn seq_iteration(eval: &mut Evaluator, it: &IterationValue) -> Result
 /// A matcher handle's mutable state: the next search offset plus
 /// the last match groups (full text first, one slot per group —
 /// `None` for unmatched groups, like `Matcher.group` returning
-/// null).
+/// null) and the last match's byte offsets (for `start`/`end`).
 #[derive(Clone, Debug)]
 struct MatcherState {
     next: usize,
     last: Option<Vec<Option<String>>>,
+    last_span: Option<(usize, usize)>,
 }
 
 /// A stateful regex matcher handle (`re-matcher`): the compiled
 /// pattern, the subject text, the next search offset, and the
 /// last match (or none). `re-find` advances it (an empty match
 /// advances one char — oracle `rm-empty-advance`); `re-groups`
-/// reads the last match.
+/// reads the last match. `anchored` marks a leading-`\G` source
+/// (the `regex` crate has no `\G`, so `re-matcher` strips it
+/// and `find` requires the match at the search offset).
 #[derive(Clone, Debug)]
 pub struct MatcherHandle {
     re: regex::Regex,
+    anchored: bool,
     text: Arc<str>,
     state: Arc<Mutex<MatcherState>>,
 }
@@ -997,15 +1001,38 @@ impl MatcherHandle {
     /// match — an exhausted handle stays nil, oracle
     /// `rm-exhaust`).
     fn find_next(&self) -> Result<Value, NativeError> {
+        if self.do_find(None) {
+            let groups = self.last_groups().expect("a match holds groups");
+            Ok(groups_value_owned(&groups))
+        } else {
+            Ok(Value::Nil)
+        }
+    }
+
+    /// The shared `find` engine: reset to `from` when given,
+    /// then search from the offset (an anchored handle only
+    /// matches AT the offset — the stripped-`\G` rule).
+    fn do_find(&self, from: Option<usize>) -> bool {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(from) = from {
+            state.next = from;
+            state.last = None;
+            state.last_span = None;
+        }
         let text: &str = &self.text;
         if state.next > text.len() {
             state.last = None;
-            return Ok(Value::Nil);
+            state.last_span = None;
+            return false;
         }
-        let Some(caps) = self.re.captures_at(text, state.next) else {
+        let found = self.re.captures_at(text, state.next).filter(|caps| {
+            let m = caps.get(0).expect("a match holds group 0");
+            !self.anchored || m.start() == state.next
+        });
+        let Some(caps) = found else {
             state.last = None;
-            return Ok(Value::Nil);
+            state.last_span = None;
+            return false;
         };
         let m = caps.get(0).expect("a match holds group 0");
         state.next = if m.start() == m.end() {
@@ -1016,8 +1043,67 @@ impl MatcherHandle {
         let groups: Vec<Option<String>> = (0..caps.len())
             .map(|i| caps.get(i).map(|g| g.as_str().to_owned()))
             .collect();
-        state.last = Some(groups.clone());
-        Ok(groups_value_owned(&groups))
+        state.last_span = Some((m.start(), m.end()));
+        state.last = Some(groups);
+        true
+    }
+
+    /// `Matcher.find()` (#205): the boolean shape over the
+    /// shared engine.
+    pub(crate) fn find_bool(&self) -> bool {
+        self.do_find(None)
+    }
+
+    /// `Matcher.find(start)` (#205): reset-then-find (a negative
+    /// or over-long start is `IndexOutOfBoundsException`, like
+    /// the JDK).
+    pub(crate) fn find_from(&self, start: i32) -> Result<bool, NativeError> {
+        if start < 0 || start as usize > self.text.len() {
+            return Err(NativeError::new(
+                ThrowClass::IndexOutOfBoundsException,
+                start.to_string(),
+            ));
+        }
+        Ok(self.do_find(Some(start as usize)))
+    }
+
+    /// The last match's group 0 text, if any.
+    fn last_text(&self) -> Option<String> {
+        self.last_groups()
+            .and_then(|g| g.into_iter().next().flatten())
+    }
+
+    /// `Matcher.group()` (#205): group 0 or `No match found`.
+    pub(crate) fn group0(&self) -> Result<String, NativeError> {
+        self.last_text().ok_or_else(no_match_found)
+    }
+
+    /// `Matcher.group(i)` (#205): group `i` (nil when unmatched;
+    /// `No match found` without a match, `No group N` past the
+    /// last group).
+    pub(crate) fn group_n(&self, i: i32) -> Result<Value, NativeError> {
+        let Some(groups) = self.last_groups() else {
+            return Err(no_match_found());
+        };
+        if i < 0 || i as usize >= groups.len() {
+            return Err(NativeError::new(
+                ThrowClass::IndexOutOfBoundsException,
+                format!("No group {i}"),
+            ));
+        }
+        Ok(groups[i as usize]
+            .as_deref()
+            .map_or(Value::Nil, |g| Value::Str(Arc::from(g))))
+    }
+
+    /// `Matcher.start()`/`end()` (#205): the last match's
+    /// offsets or `No match found`.
+    pub(crate) fn last_span(&self) -> Result<(usize, usize), NativeError> {
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .last_span
+            .ok_or_else(no_match_found)
     }
 
     /// The last match groups, if any.
@@ -1097,11 +1183,13 @@ fn groups_value_owned(groups: &[Option<String>]) -> Value {
     ))
 }
 
-/// A `regex`-crate compile failure as the JVM's
-/// `PatternSyntaxException` (mirrors `re.rs` — only the reader
-/// mints `Value::Regex`, so this is a stale-value defense).
-fn pattern_syntax(err: regex::Error) -> NativeError {
-    NativeError::new(ThrowClass::PatternSyntaxException, err.to_string())
+/// The `Matcher` "no match" failure (#205): the JDK's
+/// `IllegalStateException` text.
+fn no_match_found() -> NativeError {
+    NativeError::new(
+        ThrowClass::IllegalStateException,
+        "No match found".to_owned(),
+    )
 }
 
 /// `re-matcher`: a stateful handle over a pattern and a subject
@@ -1116,13 +1204,21 @@ fn native_re_matcher(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nat
     };
     match &args[1] {
         Value::Str(text) => {
-            let re = regex::Regex::new(source).map_err(pattern_syntax)?;
+            // A leading `\G` anchors at the search offset (the
+            // crate cannot compile it — strip and flag).
+            let (source, anchored) = match source.strip_prefix("\\G") {
+                Some(rest) => (rest, true),
+                None => (source.as_ref(), false),
+            };
+            let re = crate::re::compile_source(source)?;
             Ok(Value::Extension(Arc::new(MatcherHandle {
                 re,
+                anchored,
                 text: Arc::clone(text),
                 state: Arc::new(Mutex::new(MatcherState {
                     next: 0,
                     last: None,
+                    last_span: None,
                 })),
             })))
         }

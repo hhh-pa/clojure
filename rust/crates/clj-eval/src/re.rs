@@ -45,8 +45,64 @@ fn pattern_syntax(err: regex::Error) -> NativeError {
 /// Compile a pattern source (a stored `Pattern` source is always
 /// compilable — only the reader mints `Value::Regex` — but a
 /// stale value still reports `PatternSyntaxException`).
-fn compile_source(source: &str) -> Result<Regex, NativeError> {
-    Regex::new(source).map_err(pattern_syntax)
+/// `\Q...\E` quotations translate first (the crate has no
+/// quotation syntax — `Pattern/quote` output must compile).
+pub(crate) fn compile_source(source: &str) -> Result<Regex, NativeError> {
+    Regex::new(&translate_quotations(source)).map_err(pattern_syntax)
+}
+
+/// Translate `\Q...\E` quotation spans to escaped literals
+/// (#205): the first `\E` closes (no nesting, like the JDK —
+/// `quote` relies on it); an unclosed `\Q` quotes to the end;
+/// a `\Q` behind an odd backslash run stays literal. A lone
+/// `\E` passes through to the engine (which rejects it, like
+/// the JDK).
+pub(crate) fn translate_quotations(source: &str) -> std::borrow::Cow<'_, str> {
+    if !source.contains("\\Q") {
+        return std::borrow::Cow::Borrowed(source);
+    }
+    let bytes = source.as_bytes();
+    let mut out = String::with_capacity(source.len());
+    let mut i = 0;
+    let mut seg = 0;
+    while i < bytes.len() {
+        let opens = bytes[i] == b'\\'
+            && i + 1 < bytes.len()
+            && bytes[i + 1] == b'Q'
+            && backslashes_before(bytes, i) % 2 == 0;
+        if !opens {
+            i += 1;
+            continue;
+        }
+        out.push_str(&source[seg..i]);
+        let lit = i + 2;
+        match source[lit..].find("\\E") {
+            Some(j) => {
+                out.push_str(&regex::escape(&source[lit..lit + j]));
+                i = lit + j + 2;
+                seg = i;
+            }
+            None => {
+                out.push_str(&regex::escape(&source[lit..]));
+                seg = source.len();
+                break;
+            }
+        }
+    }
+    out.push_str(&source[seg..]);
+    std::borrow::Cow::Owned(out)
+}
+
+/// The backslash run immediately before `i` (quotation
+/// openers behind an odd run are escaped literals).
+fn backslashes_before(bytes: &[u8], i: usize) -> usize {
+    let mut n = 0;
+    let mut k = i;
+    while k > 0 && bytes[k - 1] == b'\\' {
+        n += 1;
+        k -= 1;
+    }
+    n
 }
 
 /// A `re-find`/`re-matches`/`re-seq` pattern: a stored
