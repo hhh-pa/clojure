@@ -770,9 +770,12 @@ fn class_new() {
         compile_err(&mut eval, "(CNX5/new 1)"),
         "java.lang.RuntimeException | No such namespace: CNX5"
     );
+    // Value-position `String/new`: `String` resolves now (recipes
+    // drop-in S12 statics), so this is the bare static miss — the
+    // JVM answers a ctor fn here (`v-method` follow-up).
     assert_eq!(
         compile_err(&mut eval, "String/new"),
-        "java.lang.RuntimeException | No such namespace: String"
+        "java.lang.IllegalArgumentException | Error - no matches found for static method new in class java.lang.String"
     );
     assert_eq!(run(&mut eval, "(resolve 'String/new)"), "nil");
     // Same-form define+use works (top-level `do` splits like
