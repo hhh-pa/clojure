@@ -424,7 +424,10 @@ fn class_method_override(mf: &MultiFn, v: &Value) -> Option<Value> {
             // stores the type object as given), then the class.
             HostVal::Inst(i) => {
                 let desc = Value::HostType(Arc::new(HostVal::Def(i.def.clone())));
-                mf.methods.get(&desc).cloned().or_else(|| class_keyed(mf, v))
+                mf.methods
+                    .get(&desc)
+                    .cloned()
+                    .or_else(|| class_keyed(mf, v))
             }
             // A type object itself dispatches on `Class`
             // (upstream `(class TheClass)`), never on the

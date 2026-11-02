@@ -328,7 +328,10 @@ pub(crate) fn file_output_stream(eval: &mut Evaluator, path: &str) -> Result<Val
     let file = open_output(path, false)?;
     Ok(Value::Extension(Arc::new(JioFileOutput {
         id: eval.next_id(),
-        state: Arc::new(Mutex::new(JioOutputState { file, closed: false })),
+        state: Arc::new(Mutex::new(JioOutputState {
+            file,
+            closed: false,
+        })),
     })))
 }
 
@@ -360,7 +363,12 @@ pub(crate) fn file_output_write(v: &Value, byte: u8) -> Option<Result<Value, Nat
     if st.closed {
         return Some(Err(stream_closed()));
     }
-    Some(st.file.write_all(&[byte]).map(|()| Value::Nil).map_err(io_err))
+    Some(
+        st.file
+            .write_all(&[byte])
+            .map(|()| Value::Nil)
+            .map_err(io_err),
+    )
 }
 
 /// `close` on a file input stream (`None` for anything else).
@@ -1026,7 +1034,10 @@ fn native_resource(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Native
         let hit = std::path::Path::new(&dir).join(name.as_ref());
         if hit.is_file() {
             let abs = resource_abs(&hit);
-            let encoded = abs.replace('%', "%25").replace(' ', "%20").replace('#', "%23");
+            let encoded = abs
+                .replace('%', "%25")
+                .replace(' ', "%20")
+                .replace('#', "%23");
             let url = format!("file:{encoded}");
             if let Ok(uri) = Uri::parse(&url) {
                 return Ok(Value::Uri(Box::new(uri)));

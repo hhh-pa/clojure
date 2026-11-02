@@ -338,9 +338,7 @@ fn throw_parent_rest(jvm_name: &str) -> Option<&'static str> {
         "java.io.UnsupportedEncodingException" => Some("java.io.IOException"),
         "java.net.URISyntaxException" => Some("java.lang.Exception"),
         "java.security.GeneralSecurityException" => Some("java.lang.Exception"),
-        "java.security.NoSuchAlgorithmException" => {
-            Some("java.security.GeneralSecurityException")
-        }
+        "java.security.NoSuchAlgorithmException" => Some("java.security.GeneralSecurityException"),
         _ => throw_parent_format(jvm_name),
     }
 }

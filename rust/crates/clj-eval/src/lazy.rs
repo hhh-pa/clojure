@@ -3117,14 +3117,12 @@ fn first_direct(v: &Value) -> Option<Value> {
                 .map(|(k, val)| clj_value::map_entry(k.clone(), val.clone()))
                 .unwrap_or(Value::Nil)
         }),
-        Value::Extension(_) => {
-            as_subvector(v)
-                .map(|sv| sv.iter().next().cloned().unwrap_or(Value::Nil))
-                .or_else(|| {
-                    crate::emucoll::list_snapshot(v)
-                        .map(|items| items.into_iter().next().unwrap_or(Value::Nil))
-                })
-        }
+        Value::Extension(_) => as_subvector(v)
+            .map(|sv| sv.iter().next().cloned().unwrap_or(Value::Nil))
+            .or_else(|| {
+                crate::emucoll::list_snapshot(v)
+                    .map(|items| items.into_iter().next().unwrap_or(Value::Nil))
+            }),
         _ => None,
     }
 }

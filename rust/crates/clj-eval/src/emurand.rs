@@ -98,7 +98,7 @@ impl EmuRandom {
         let mut state = self.lock();
         if (bound.wrapping_neg() & bound) == bound {
             let bits = Self::next_bits(&mut state, 31);
-            return Ok((i64::from(bound) * i64::from(bits) >> 31) as i32);
+            return Ok(((i64::from(bound) * i64::from(bits)) >> 31) as i32);
         }
         loop {
             let bits = Self::next_bits(&mut state, 31);
@@ -312,7 +312,9 @@ pub(crate) fn build_random(args: &[Value]) -> Result<Value, NativeError> {
 /// `(SecureRandom.)`.
 pub(crate) fn build_secure_random(args: &[Value]) -> Result<Value, NativeError> {
     match args.len() {
-        0 => Ok(Value::Extension(std::sync::Arc::new(EmuSecureRandom::fresh()))),
+        0 => Ok(Value::Extension(std::sync::Arc::new(
+            EmuSecureRandom::fresh(),
+        ))),
         _ => Err(crate::ctor::no_ctor("java.security.SecureRandom", false)),
     }
 }
@@ -394,11 +396,7 @@ fn int_arg(v: &Value, class: &str) -> Result<i32, NativeError> {
 
 /// Run `f` over a `nextBytes` destination cell (a `byte[]` —
 /// nil is the body's NPE, anything else the overload miss).
-fn with_bytes(
-    v: &Value,
-    class: &str,
-    f: impl FnOnce(&mut [i8]),
-) -> Result<Value, NativeError> {
+fn with_bytes(v: &Value, class: &str, f: impl FnOnce(&mut [i8])) -> Result<Value, NativeError> {
     match v {
         Value::Array(a) => {
             let mut guard = a.lock();

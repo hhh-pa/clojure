@@ -137,10 +137,7 @@ fn null_element() -> NativeError {
 /// Build `(ArrayDeque. …)`: 0-arg is empty, 1-arg collects a
 /// collection (nil NPEs — the JDK's `(Collection)` overload —
 /// anything unseqable takes the `ISeq` error).
-pub(crate) fn build_deque(
-    eval: &mut Evaluator,
-    args: &[Value],
-) -> Result<Value, NativeError> {
+pub(crate) fn build_deque(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     const CLASS: &str = "java.util.ArrayDeque";
     match args {
         [] => Ok(Value::Extension(Arc::new(JavaDeque {
@@ -149,7 +146,8 @@ pub(crate) fn build_deque(
         }))),
         [Value::Nil] => Err(null_element()),
         [coll] => {
-            let items = crate::lazy::collect_all(eval, coll).map_err(crate::ns::signal_to_native)?;
+            let items =
+                crate::lazy::collect_all(eval, coll).map_err(crate::ns::signal_to_native)?;
             Ok(Value::Extension(Arc::new(JavaDeque {
                 id: eval.next_id(),
                 items: Mutex::new(items.into_iter().collect()),
@@ -161,10 +159,7 @@ pub(crate) fn build_deque(
 
 /// Build `(ArrayList. …)`: 0-arg is empty, 1-arg collects a
 /// collection (nil NPEs, like the JDK).
-pub(crate) fn build_list(
-    eval: &mut Evaluator,
-    args: &[Value],
-) -> Result<Value, NativeError> {
+pub(crate) fn build_list(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     const CLASS: &str = "java.util.ArrayList";
     match args {
         [] => Ok(Value::Extension(Arc::new(JavaList {
@@ -173,7 +168,8 @@ pub(crate) fn build_list(
         }))),
         [Value::Nil] => Err(null_element()),
         [coll] => {
-            let items = crate::lazy::collect_all(eval, coll).map_err(crate::ns::signal_to_native)?;
+            let items =
+                crate::lazy::collect_all(eval, coll).map_err(crate::ns::signal_to_native)?;
             Ok(Value::Extension(Arc::new(JavaList {
                 id: eval.next_id(),
                 items: Mutex::new(items),
@@ -202,10 +198,7 @@ fn compare_method(v: &Value) -> Option<Value> {
 /// reified `compare` method or a plain fn) or a collection for
 /// natural ordering (nil is ambiguous — `(Collection)` vs
 /// `(Comparator)` — like the JVM).
-pub(crate) fn build_pqueue(
-    eval: &mut Evaluator,
-    args: &[Value],
-) -> Result<Value, NativeError> {
+pub(crate) fn build_pqueue(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     const CLASS: &str = "java.util.PriorityQueue";
     match args {
         [Value::Nil] => Err(NativeError::new(
@@ -228,7 +221,8 @@ pub(crate) fn build_pqueue(
             })))
         }
         [coll] => {
-            let items = crate::lazy::collect_all(eval, coll).map_err(crate::ns::signal_to_native)?;
+            let items =
+                crate::lazy::collect_all(eval, coll).map_err(crate::ns::signal_to_native)?;
             Ok(Value::Extension(Arc::new(JavaPQueue {
                 id: eval.next_id(),
                 items: Mutex::new(items),
@@ -305,9 +299,7 @@ fn pqueue_cmp(
         Some(f) => {
             let r = match this {
                 None => crate::seqs::call_checked(eval, f, &[a.clone(), b.clone()])?,
-                Some(t) => {
-                    crate::seqs::call_checked(eval, f, &[t.clone(), a.clone(), b.clone()])?
-                }
+                Some(t) => crate::seqs::call_checked(eval, f, &[t.clone(), a.clone(), b.clone()])?,
             };
             comparator_order(r)
         }

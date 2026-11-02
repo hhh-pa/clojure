@@ -197,10 +197,9 @@ const MD5_K: [u32; 64] = [
 
 /// The MD5 per-round rotations.
 const MD5_S: [u32; 64] = [
-    7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22,
-    5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20,
-    4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23,
-    6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21,
+    7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 5, 9, 14, 20, 5, 9, 14, 20, 5, 9,
+    14, 20, 5, 9, 14, 20, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 6, 10, 15,
+    21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21,
 ];
 
 /// One MD5 block compression (RFC 1321 §3.4).
@@ -220,10 +219,7 @@ fn md5_block(h: &mut [u32; 4], block: &[u8; 64]) {
         } else {
             (c ^ (b | (!d)), (7 * i) % 16)
         };
-        let sum = a
-            .wrapping_add(f)
-            .wrapping_add(MD5_K[i])
-            .wrapping_add(m[g]);
+        let sum = a.wrapping_add(f).wrapping_add(MD5_K[i]).wrapping_add(m[g]);
         a = d;
         d = c;
         c = b;
@@ -239,9 +235,21 @@ fn md5_block(h: &mut [u32; 4], block: &[u8; 64]) {
 /// the chain state.
 #[derive(Clone, Debug)]
 enum DigestState {
-    Md5 { len: u64, tail: Vec<u8>, h: [u32; 4] },
-    Sha256 { len: u64, tail: Vec<u8>, h: [u32; 8] },
-    Sha512 { len: u64, tail: Vec<u8>, h: [u64; 8] },
+    Md5 {
+        len: u64,
+        tail: Vec<u8>,
+        h: [u32; 4],
+    },
+    Sha256 {
+        len: u64,
+        tail: Vec<u8>,
+        h: [u32; 8],
+    },
+    Sha512 {
+        len: u64,
+        tail: Vec<u8>,
+        h: [u64; 8],
+    },
 }
 
 impl DigestState {
@@ -328,7 +336,11 @@ impl DigestState {
     /// state is consumed — callers reset, like the JDK).
     fn finalize(self) -> Vec<u8> {
         match self {
-            Self::Md5 { len, mut tail, mut h } => {
+            Self::Md5 {
+                len,
+                mut tail,
+                mut h,
+            } => {
                 tail.push(0x80);
                 while tail.len() % 64 != 56 {
                     tail.push(0);
@@ -339,7 +351,11 @@ impl DigestState {
                 }
                 h.iter().flat_map(|w| w.to_le_bytes()).collect()
             }
-            Self::Sha256 { len, mut tail, mut h } => {
+            Self::Sha256 {
+                len,
+                mut tail,
+                mut h,
+            } => {
                 tail.push(0x80);
                 while tail.len() % 64 != 56 {
                     tail.push(0);
@@ -350,7 +366,11 @@ impl DigestState {
                 }
                 h.iter().flat_map(|w| w.to_be_bytes()).collect()
             }
-            Self::Sha512 { len, mut tail, mut h } => {
+            Self::Sha512 {
+                len,
+                mut tail,
+                mut h,
+            } => {
                 tail.push(0x80);
                 while tail.len() % 128 != 112 {
                     tail.push(0);
