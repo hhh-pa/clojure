@@ -1534,6 +1534,21 @@ fn class_designator(t: &Value) -> Result<Option<BaseType>, NativeError> {
             "object" => Ok(Some(BaseType::Object)),
             _ => Err(cce_err(t, "java.lang.Class")),
         },
+        // Class designators (`(into-array Object xs)` — 44
+        // recipes): primitives map by name, every reference
+        // element shares the `Object` store (store checks narrow
+        // away — the port keeps one reference kind).
+        Value::Class(c) => Ok(Some(match c.name() {
+            "boolean" => BaseType::Boolean,
+            "byte" => BaseType::Byte,
+            "char" => BaseType::Char,
+            "short" => BaseType::Short,
+            "int" => BaseType::Int,
+            "long" => BaseType::Long,
+            "float" => BaseType::Float,
+            "double" => BaseType::Double,
+            _ => BaseType::Object,
+        })),
         _ => Err(cce_err(t, "java.lang.Class")),
     }
 }

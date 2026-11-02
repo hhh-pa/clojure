@@ -595,7 +595,7 @@ impl SubVectorValue {
     #[must_use]
     pub fn nth(&self, index: usize) -> Option<&Value> {
         if index < self.len() {
-            self.vec.iter().nth(self.start + index)
+            self.vec.get(self.start + index)
         } else {
             None
         }

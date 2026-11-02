@@ -393,6 +393,12 @@ pub trait ExtensionValue: std::fmt::Debug + Send + Sync {
     /// Downcasting support for [`dyn_eq`](ExtensionValue::dyn_eq).
     fn as_any(&self) -> &dyn Any;
 
+    /// Mutable downcasting support (for iterative cleanup of
+    /// lazily-linked cells; only seq cells override this).
+    fn as_any_mut(&mut self) -> Option<&mut dyn Any> {
+        None
+    }
+
     /// The `*print-dup*` constructor shape, when this extension has
     /// one (`None` renders the plain [`print`](ExtensionValue::print)
     /// fallback — the driver throws for undupable kinds before the

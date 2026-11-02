@@ -107,6 +107,7 @@ pub enum NsClause {
     ReferClojure(Vec<Value>),
     Require(Vec<Value>),
     Use(Vec<Value>),
+    Import(Vec<Value>),
 }
 
 /// A `case*` dispatch mode: `:int` funnels numbers through
@@ -874,6 +875,21 @@ impl<'a> Analyzer<'a> {
         if let Some(expr) = self.analyze_symbol_class(sym, span, &cur)? {
             return Ok(expr);
         }
+        if let Some(ns_part) = sym.namespace() {
+            // Value-position static field reads (`Long/MAX_VALUE`):
+            // only when no namespace/alias claims the head (a real
+            // namespace keeps the `No such var` path below).
+            if self
+                .eval
+                .registry
+                .namespace_target_in(&cur, ns_part)
+                .is_none()
+            {
+                if let Some(expr) = self.analyze_static_field(ns_part, sym.name(), span, &cur)? {
+                    return Ok(expr);
+                }
+            }
+        }
         match sym.namespace() {
             // Aliases count as namespaces even when dangling
             // (probe34 `ns-alias-removed`); both miss shapes blame
@@ -881,8 +897,8 @@ impl<'a> Analyzer<'a> {
             // An unresolvable dotted namespace part is
             // `ClassNotFoundException` (oracle `removed-ns-val`),
             // unless it names a class — value-position static
-            // members (method fns, field reads) are a later slice,
-            // so those keep `No such namespace` for now.
+            // field reads resolve above; static method fns stay a
+            // later slice and keep `No such namespace` for now.
             Some(ns) if self.eval.registry.namespace_target_in(&cur, ns).is_none() => {
                 Err(self.dangling_alias_err(&cur, ns, span))
             }
@@ -1167,6 +1183,38 @@ impl<'a> Analyzer<'a> {
         } else {
             crate::classemu::import_in(self.eval, cur, ns_part)
         }
+    }
+
+    /// Value-position static field read (`Long/MAX_VALUE`; split
+    /// from [`analyze_symbol`](Self::analyze_symbol) for the
+    /// complexity budget): `None` unless the head names a class.
+    /// Known fields fold to literals; a known class with an
+    /// unknown field keeps the JVM miss shape (bare
+    /// `IllegalArgumentException`, "no matches found for static
+    /// method ...", never wrapped).
+    fn analyze_static_field(
+        &self,
+        ns_part: &str,
+        field: &str,
+        span: Span,
+        cur: &str,
+    ) -> Result<Option<Expr>, CompileError> {
+        let Some(class) = self.static_head_class(cur, ns_part) else {
+            return Ok(None);
+        };
+        if let Some(v) = crate::classemu::static_field_value(class.name(), field) {
+            return Ok(Some(Expr::Literal(v)));
+        }
+        Err(self.err(
+            class::ILLEGAL_ARG,
+            format!(
+                "Error - no matches found for static method {field} in class {}",
+                class.name()
+            ),
+            span,
+            Verb::Compiling,
+            None,
+        ))
     }
 
     /// Intercept `(Class/new …)` (oracles `cn-*`): the static-call
@@ -2570,10 +2618,11 @@ impl<'a> Analyzer<'a> {
 
     /// `(ns name doc? attr? clause…)`: the name must be an
     /// unqualified symbol and every clause a list headed by
-    /// `:refer-clojure`/`:require`/`:use` (else the `ns` spec
-    /// shape, probe37 `ns-bad-clause`, `ns-num-name`).
-    /// `:import`/`:gen-class`/`:load` are spec errors too (N1:
-    /// no host classes — loud, never skipped).
+    /// `:refer-clojure`/`:require`/`:use`/`:import` (else the
+    /// `ns` spec shape, probe37 `ns-bad-clause`, `ns-num-name`).
+    /// `:gen-class`/`:load` are spec errors too (loud, never
+    /// skipped); `:import` landed with issue #201 S1 (N1 done —
+    /// classes exist now).
     fn parse_ns(&mut self, items: &[&Value], span: Span) -> Result<Expr, CompileError> {
         let spec = || self.spec_error("clojure.core/ns", span);
         let Some(name_value) = items.get(1) else {
@@ -2609,6 +2658,7 @@ impl<'a> Analyzer<'a> {
                     }
                     "require" => clauses.push(NsClause::Require(elems.cloned().collect())),
                     "use" => clauses.push(NsClause::Use(elems.cloned().collect())),
+                    "import" => clauses.push(NsClause::Import(elems.cloned().collect())),
                     _ => return Err(spec()),
                 },
                 _ => return Err(spec()),

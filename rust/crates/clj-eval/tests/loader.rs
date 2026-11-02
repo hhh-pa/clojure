@@ -991,3 +991,19 @@ fn t73_load_string_and_file_return_last_value() {
     let rel = format!("{}/ret.clj", fx.dir.to_string_lossy().replace('\\', "/"));
     assert_eq!(run_last(&mut eval, &format!("(load-file \"{rel}\")")), "15");
 }
+
+#[test]
+fn stdlib_embeds_require_with_empty_load_path_201() {
+    let mut eval = boot();
+    // The drivers (`run`) push the `with-bindings` frame; bare
+    // `eval` reproduces it here (upstream `string.clj:46` `set!`s
+    // `*warn-on-reflection*`, which needs the thread binding on
+    // the JVM too).
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(binding [*warn-on-reflection* *warn-on-reflection*] (require '[clojure.string :as str] '[clojure.set :as set])) [(str/join \",\" [1 2]) (set/union #{1} #{2})]"
+        ),
+        "[\"1,2\" #{1 2}]"
+    );
+}

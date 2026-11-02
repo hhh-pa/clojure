@@ -1497,6 +1497,9 @@
 (defmacro .. [x form & more]
   ;; Expansions build lists (never `list*` conses): nested conses
   ;; print elided and `macroexpand` only loops over lists.
+  ;; A symbol form is a field (`__field*`), exactly like upstream
+  ;; `(. x sym)` — `Reflector/invokeNoArgInstanceMember` only
+  ;; applies to 0-arg CALLS (`(. x (sym))`), never to bare symbols.
   (let [one (if (seq? form)
               (apply list 'clojure.core/__meth* (list 'quote (first form)) x (next form))
               (list 'clojure.core/__field* (list 'quote form) x))]

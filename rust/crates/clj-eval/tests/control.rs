@@ -182,6 +182,19 @@ fn odd_even() {
         uncaught(&mut eval, "(even? 2.0)"),
         "java.lang.IllegalArgumentException | Argument must be an integer: 2.0"
     );
+    // Bigints answer too (upstream checks `integer?`); the
+    // miller_rabin recipe calls `(even? (bigint n))`.
+    assert_eq!(run_last(&mut eval, "(even? (bigint 4))"), "true");
+    assert_eq!(run_last(&mut eval, "(odd? (bigint 4))"), "false");
+    assert_eq!(run_last(&mut eval, "(odd? (bigint -3))"), "true");
+    assert_eq!(run_last(&mut eval, "(even? (bigint -4))"), "true");
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(even? (bigint 1267650600228229401496703205376))"
+        ),
+        "true"
+    );
 }
 
 #[test]

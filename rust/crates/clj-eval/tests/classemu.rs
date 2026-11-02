@@ -570,14 +570,19 @@ fn import_fqn_resolves() {
     );
 }
 
-// i-ns-clause: the JVM's `(ns impns2 (:import ...))` imports; the
-// port rejects the `:import` clause (existing `ns` pins).
+// i-ns-clause: the JVM's `(ns impns2 (:import ...))` imports, and
+// the port accepts the `:import` clause too since the recipes
+// drop-in (issue #201; `ns_import_clause_201` in `ns_vars.rs`
+// pins the prefix-list/quote/error shapes).
 #[test]
-fn import_ns_clause_still_rejected() {
+fn import_ns_clause_accepted_201() {
     let mut eval = boot();
     assert_eq!(
-        uncaught(&mut eval, "(ns impns2 (:import java.util.Date))"),
-        "clojure.lang.ExceptionInfo | Call to clojure.core/ns did not conform to spec."
+        run(
+            &mut eval,
+            "(do (ns impns2 (:import java.util.Date)) (str Date))"
+        ),
+        "\"class java.util.Date\""
     );
 }
 
@@ -4882,3 +4887,313 @@ fn surface_throwable() {
 // a-pr            "int/1"
 // a-isarray       true
 // a-component     "int"
+
+#[test]
+fn str_subsequence_201() {
+    let mut eval = boot();
+    assert_eq!(run(&mut eval, "(.subSequence \"abc\" 0 2)"), "\"ab\"");
+    assert_eq!(
+        uncaught(&mut eval, "(.subSequence \"abc\" 0 9)"),
+        "java.lang.StringIndexOutOfBoundsException | Range [0, 9) out of bounds for length 3"
+    );
+}
+
+#[test]
+fn string_builder_201() {
+    let mut eval = boot();
+    assert_eq!(
+        run(
+            &mut eval,
+            "(let [sb (StringBuilder. \"a\")] (.append sb \"b\") (.append sb \\c) (str sb))"
+        ),
+        "\"abc\""
+    );
+    assert_eq!(run(&mut eval, "(str (StringBuilder. 16))"), "\"\"");
+    assert_eq!(run(&mut eval, "(str (StringBuilder.))"), "\"\"");
+    assert_eq!(
+        run(
+            &mut eval,
+            "(let [sb (StringBuilder.)] (.append sb nil) (str sb))"
+        ),
+        "\"null\""
+    );
+    // `append` returns the builder itself.
+    assert_eq!(
+        run(
+            &mut eval,
+            "(let [sb (StringBuilder.)] (identical? sb (.append sb \"x\")))"
+        ),
+        "true"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(StringBuilder. -1)"),
+        "java.lang.NegativeArraySizeException | -1"
+    );
+}
+
+#[test]
+fn character_is_whitespace_201() {
+    let mut eval = boot();
+    assert_eq!(run(&mut eval, "(Character/isWhitespace \\space)"), "true");
+    assert_eq!(run(&mut eval, "(Character/isWhitespace \\A)"), "false");
+    assert_eq!(run(&mut eval, "(Character/isWhitespace 32)"), "true");
+    // The difference set vs Unicode `White_Space`: non-breaking
+    // spaces are NOT Java whitespace; U+001C-001F are (via `char`
+    // — the reader only takes ASCII/named char literals).
+    assert_eq!(
+        run(&mut eval, "(Character/isWhitespace (char 160))"),
+        "false"
+    );
+    assert_eq!(
+        run(&mut eval, "(Character/isWhitespace (char 8199))"),
+        "false"
+    );
+    assert_eq!(
+        run(&mut eval, "(Character/isWhitespace (char 8239))"),
+        "false"
+    );
+    assert_eq!(run(&mut eval, "(Character/isWhitespace (char 28))"), "true");
+    assert_eq!(run(&mut eval, "(Character/isWhitespace 1114112)"), "false");
+}
+
+#[test]
+fn lpv_create_owning_201() {
+    let mut eval = boot();
+    assert_eq!(
+        run(
+            &mut eval,
+            "(clojure.lang.LazilyPersistentVector/createOwning [\"x\" \"y\"])"
+        ),
+        "[\"x\" \"y\"]"
+    );
+}
+
+#[test]
+fn number_parse_math_statics_201() {
+    let mut eval = boot();
+    assert_eq!(run(&mut eval, "(Long/parseLong \"42\")"), "42");
+    assert_eq!(run(&mut eval, "(Integer/parseInt \"-7\")"), "-7");
+    assert_eq!(run(&mut eval, "(Double/parseDouble \"1.5\")"), "1.5");
+    assert_eq!(
+        uncaught(&mut eval, "(Long/parseLong \"4x\")"),
+        "java.lang.NumberFormatException | For input string: \"4x\""
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(Integer/parseInt \"9999999999\")"),
+        "java.lang.NumberFormatException | For input string: \"9999999999\""
+    );
+    assert_eq!(run(&mut eval, "(Math/abs -3)"), "3");
+    assert_eq!(run(&mut eval, "(Math/abs -2.5)"), "2.5");
+    assert_eq!(run(&mut eval, "(Math/sqrt 16.0)"), "4.0");
+    assert_eq!(run(&mut eval, "(Math/ceil 2.1)"), "3.0");
+}
+
+#[test]
+fn pattern_split_member_201() {
+    let mut eval = boot();
+    assert_eq!(
+        run(&mut eval, "(.split #\"\\s+\" \"a b  c\")"),
+        "[\"a\" \"b\" \"c\"]"
+    );
+    assert_eq!(run(&mut eval, "(.split #\",\" \"a,b,\")"), "[\"a\" \"b\"]");
+    assert_eq!(
+        run(&mut eval, "(.split #\",\" \"a,b,\" -1)"),
+        "[\"a\" \"b\" \"\"]"
+    );
+    assert_eq!(
+        run(&mut eval, "(.split #\",\" \"a,b,c\" 2)"),
+        "[\"a\" \"b,c\"]"
+    );
+}
+
+#[test]
+fn static_field_reads_201() {
+    let mut eval = boot();
+    assert_eq!(run(&mut eval, "Long/MIN_VALUE"), "-9223372036854775808");
+    assert_eq!(run(&mut eval, "Long/MAX_VALUE"), "9223372036854775807");
+    assert_eq!(run(&mut eval, "Integer/MIN_VALUE"), "-2147483648");
+    assert_eq!(run(&mut eval, "Integer/MAX_VALUE"), "2147483647");
+    assert_eq!(run(&mut eval, "Double/POSITIVE_INFINITY"), "##Inf");
+    assert_eq!(run(&mut eval, "Double/NEGATIVE_INFINITY"), "##-Inf");
+    assert_eq!(run(&mut eval, "Double/NaN"), "##NaN");
+    assert_eq!(run(&mut eval, "Math/PI"), "3.141592653589793");
+    assert_eq!(run(&mut eval, "(int Character/MAX_VALUE)"), "65535");
+    assert_eq!(run(&mut eval, "Boolean/TRUE"), "true");
+    // Fully-qualified spelling resolves the same field.
+    assert_eq!(
+        run(&mut eval, "java.lang.Long/MAX_VALUE"),
+        "9223372036854775807"
+    );
+    // Known class + unknown field keeps the JVM shape (oracle:
+    // IAE "no matches found for static method FOO in class
+    // java.lang.Long", not a CompilerException wrapper).
+    assert_eq!(
+        compile_err(&mut eval, "Long/FOO"),
+        "java.lang.IllegalArgumentException | Error - no matches found for static method FOO in class java.lang.Long"
+    );
+}
+
+#[test]
+fn character_digit_201() {
+    // `Character/digit` 2-arg (the cantor_expansion/gray_code
+    // recipes map it over tokens): values convert, non-digits
+    // and out-of-range radixes read -1 (JVM oracle).
+    let mut eval = boot();
+    assert_eq!(run(&mut eval, "(Character/digit \\a 36)"), "10");
+    assert_eq!(run(&mut eval, "(Character/digit \\0 10)"), "0");
+    assert_eq!(run(&mut eval, "(Character/digit \\F 16)"), "15");
+    assert_eq!(run(&mut eval, "(Character/digit \\a 1)"), "-1");
+    assert_eq!(run(&mut eval, "(Character/digit \\a 37)"), "-1");
+    assert_eq!(run(&mut eval, "(Character/digit \\$ 10)"), "-1");
+    assert_eq!(run(&mut eval, "(Character/digit 97 36)"), "10");
+}
+
+#[test]
+fn matcher_replace_all_201() {
+    // `Matcher.replaceAll` 1-arg (verbatim `string.clj`
+    // `replace` over patterns lowers here): every match goes,
+    // `$g` refs expand, in-flight `find` state resets. Nil is
+    // ambiguous (String vs Function overloads — JVM oracle).
+    let mut eval = boot();
+    assert_eq!(
+        run(
+            &mut eval,
+            "(.replaceAll (re-matcher #\"a+\" \"xaax\") \"[$0]\")"
+        ),
+        "\"x[aa]x\""
+    );
+    // Bare `eval` needs the driver's `with-bindings` frame for
+    // the require (upstream `string.clj:46` `set!`s
+    // `*warn-on-reflection*`).
+    run(
+        &mut eval,
+        "(binding [*warn-on-reflection* *warn-on-reflection*] (require '[clojure.string :as str]))",
+    );
+    assert_eq!(
+        run(&mut eval, "(str/replace \"aaa\" #\"a\" \"b\")"),
+        "\"bbb\""
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(.replaceAll (re-matcher #\"a\" \"a\") nil)"),
+        "java.lang.IllegalArgumentException | More than one matching method found: replaceAll"
+    );
+}
+
+#[test]
+fn long_remainder_unsigned_201() {
+    // `Long/remainderUnsigned` 2-arg (9 recipes hash with it):
+    // unsigned arithmetic over the bit patterns, `/ by zero`
+    // on a zero divisor (JVM oracle).
+    let mut eval = boot();
+    assert_eq!(run(&mut eval, "(Long/remainderUnsigned -1 3)"), "0");
+    assert_eq!(run(&mut eval, "(Long/remainderUnsigned 7 3)"), "1");
+    assert_eq!(
+        run(&mut eval, "(Long/remainderUnsigned -9223372036854775808 3)"),
+        "2"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(Long/remainderUnsigned 5 0)"),
+        "java.lang.ArithmeticException | / by zero"
+    );
+}
+
+#[test]
+fn indexof_201() {
+    // `indexOf` 1-arg over strings (UTF-16 offsets, like the
+    // JDK) and over vectors/lists (first `.equals` slot); -1
+    // absent (the left_recursion_elim/variable_elimination
+    // recipes).
+    let mut eval = boot();
+    assert_eq!(run(&mut eval, "(.indexOf \"abc=def\" \"=\")"), "3");
+    assert_eq!(run(&mut eval, "(.indexOf \"abc\" \"z\")"), "-1");
+    assert_eq!(run(&mut eval, "(.indexOf \"abc\" \"\")"), "0");
+    assert_eq!(run(&mut eval, "(.indexOf [10 20 30] 20)"), "1");
+    assert_eq!(run(&mut eval, "(.indexOf '(a b c) 'd)"), "-1");
+    assert_eq!(run(&mut eval, "(.indexOf [:x :y] :y)"), "1");
+}
+
+#[test]
+fn locale_string_format_201() {
+    // `Locale/US` plus `String/format` 3-arg (44 recipes pin
+    // the locale explicitly): the shared `format` engine
+    // renders (`.` decimals, like `Formatter` under `US`).
+    let mut eval = boot();
+    assert_eq!(run(&mut eval, "(str java.util.Locale/US)"), "\"en_US\"");
+    assert_eq!(
+        run(
+            &mut eval,
+            "(String/format java.util.Locale/US \"%.6f\" (into-array Object [(double 3.14159265358979)]))"
+        ),
+        "\"3.141593\""
+    );
+    assert_eq!(
+        run(
+            &mut eval,
+            "(String/format java.util.Locale/US \"%s=%d\" (to-array [\"n\" 7]))"
+        ),
+        "\"n=7\""
+    );
+}
+
+#[test]
+fn math_log_exp_pow_201() {
+    // `Math/log`, `Math/exp`, `Math/pow` (finance/ml recipes
+    // call them): plain double math.
+    let mut eval = boot();
+    assert_eq!(run(&mut eval, "(Math/log 10)"), "2.302585092994046");
+    assert_eq!(run(&mut eval, "(Math/exp 1)"), "2.718281828459045");
+    assert_eq!(run(&mut eval, "(Math/pow 2 10)"), "1024.0");
+}
+
+#[test]
+fn character_is_letter_or_digit_201() {
+    // `Character/isLetterOrDigit` 1-arg: `Char` and `Int`
+    // (code point) spellings.
+    let mut eval = boot();
+    assert_eq!(run(&mut eval, "(Character/isLetterOrDigit \\a)"), "true");
+    assert_eq!(run(&mut eval, "(Character/isLetterOrDigit \\5)"), "true");
+    assert_eq!(run(&mut eval, "(Character/isLetterOrDigit \\$)"), "false");
+    assert_eq!(run(&mut eval, "(Character/isLetterOrDigit 97)"), "true");
+}
+
+#[test]
+fn math_trig_hypot_201() {
+    // The trig/hyperbolic/inverse family (`optics/*` and
+    // `finance/var_es` call `sin`/`cos`, `search/backprop` calls
+    // `tanh`, `bitonic_tsp` computes `hypot` over ints): plain
+    // double math, values pinned to the correctly-rounded libm
+    // results HotSpot prints identically.
+    let mut eval = boot();
+    assert_eq!(run(&mut eval, "(Math/sin 1)"), "0.8414709848078965");
+    assert_eq!(run(&mut eval, "(Math/cos 1)"), "0.5403023058681398");
+    assert_eq!(run(&mut eval, "(Math/tan 0)"), "0.0");
+    assert_eq!(run(&mut eval, "(Math/asin 0)"), "0.0");
+    assert_eq!(run(&mut eval, "(Math/acos 1)"), "0.0");
+    assert_eq!(run(&mut eval, "(Math/atan 0)"), "0.0");
+    assert_eq!(run(&mut eval, "(Math/sinh 0)"), "0.0");
+    assert_eq!(run(&mut eval, "(Math/cosh 0)"), "1.0");
+    assert_eq!(run(&mut eval, "(Math/tanh 1)"), "0.7615941559557649");
+    assert_eq!(run(&mut eval, "(Math/atan2 0 1)"), "0.0");
+    assert_eq!(run(&mut eval, "(Math/hypot 3 4)"), "5.0");
+    assert_eq!(run(&mut eval, "(Math/hypot 1 1)"), "1.4142135623730951");
+    assert_eq!(run(&mut eval, "(Math/cbrt 8)"), "2.0");
+    assert_eq!(run(&mut eval, "(Math/floor 1.5)"), "1.0");
+    assert_eq!(run(&mut eval, "(Math/log10 100)"), "2.0");
+    assert_eq!(run(&mut eval, "(Math/round 2.5)"), "3");
+    assert_eq!(run(&mut eval, "(Math/round 2.4)"), "2");
+    assert_eq!(run(&mut eval, "(Math/round -2.5)"), "-2");
+}
+
+#[test]
+fn character_case_201() {
+    // `Character/isLowerCase` / `isUpperCase` 1-arg (`fol_unify`
+    // tests vars with `isLowerCase` over `(.charAt sym 0)`):
+    // `Char` and `Int` (code point) spellings.
+    let mut eval = boot();
+    assert_eq!(run(&mut eval, "(Character/isLowerCase \\a)"), "true");
+    assert_eq!(run(&mut eval, "(Character/isLowerCase \\A)"), "false");
+    assert_eq!(run(&mut eval, "(Character/isLowerCase 97)"), "true");
+    assert_eq!(run(&mut eval, "(Character/isUpperCase \\A)"), "true");
+    assert_eq!(run(&mut eval, "(Character/isUpperCase \\a)"), "false");
+    assert_eq!(run(&mut eval, "(Character/isUpperCase 65)"), "true");
+}

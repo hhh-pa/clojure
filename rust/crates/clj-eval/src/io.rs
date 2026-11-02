@@ -646,10 +646,18 @@ pub(crate) fn file_err(path: &str, e: std::io::Error) -> NativeError {
     }
 }
 
-/// `slurp`: read a file as a UTF-8 string.
+/// `slurp`: read a file as a UTF-8 string, or drain a reader
+/// fully (issue #201 S8: upstream opens `f` with `jio/reader`,
+/// which passes readers through — `(slurp *in*)` is the recipes
+/// stdin shape).
 fn native_slurp(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     if args.is_empty() {
         return Err(NativeError::arity("clojure.core/slurp", 0));
+    }
+    if let Some(reader) = crate::reader::as_reader(&args[0]) {
+        file_opts(&args[1..], false)?;
+        let text = crate::reader::slurp_reader(reader)?;
+        return Ok(Value::Str(Arc::from(text.as_str())));
     }
     let Value::Str(path) = &args[0] else {
         return Err(NativeError::new(
