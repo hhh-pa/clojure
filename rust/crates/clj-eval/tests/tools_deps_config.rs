@@ -516,13 +516,14 @@ fn current_dir_rows() {
 fn getenv_rows() {
     // Upstream `System/getenv` (edn.clj `user-config-dir`).
     let mut eval = tools_eval();
-    // SAFETY: a unique var name no other test touches.
-    unsafe { std::env::set_var("CLJ_TD124_PROBE", "probe-value") };
+    // A unique var name no other test touches (via the shared
+    // helpers below).
+    set_env("CLJ_TD124_PROBE", "probe-value");
     assert_eq!(
         run(&mut eval, "(port/getenv \"CLJ_TD124_PROBE\")"),
         "\"probe-value\""
     );
-    unsafe { std::env::remove_var("CLJ_TD124_PROBE") };
+    unset_env("CLJ_TD124_PROBE");
     assert_eq!(run(&mut eval, "(port/getenv \"CLJ_TD124_PROBE\")"), "nil");
     assert_eq!(
         run(&mut eval, "(port/getenv \"CLJ_TD124_NEVER_SET\")"),
