@@ -570,14 +570,19 @@ fn import_fqn_resolves() {
     );
 }
 
-// i-ns-clause: the JVM's `(ns impns2 (:import ...))` imports; the
-// port rejects the `:import` clause (existing `ns` pins).
+// i-ns-clause: the JVM's `(ns impns2 (:import ...))` imports, and
+// the port accepts the `:import` clause too since the recipes
+// drop-in (issue #201; `ns_import_clause_201` in `ns_vars.rs`
+// pins the prefix-list/quote/error shapes).
 #[test]
-fn import_ns_clause_still_rejected() {
+fn import_ns_clause_accepted_201() {
     let mut eval = boot();
     assert_eq!(
-        uncaught(&mut eval, "(ns impns2 (:import java.util.Date))"),
-        "clojure.lang.ExceptionInfo | Call to clojure.core/ns did not conform to spec."
+        run(
+            &mut eval,
+            "(do (ns impns2 (:import java.util.Date)) (str Date))"
+        ),
+        "\"class java.util.Date\""
     );
 }
 
