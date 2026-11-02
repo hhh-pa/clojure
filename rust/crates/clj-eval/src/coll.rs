@@ -458,19 +458,24 @@ fn conj_one(eval: &mut Evaluator, coll: &Value, x: Value) -> Result<Value, Nativ
         Value::HostType(_) => conj_maplike(eval, coll, &x),
         Value::Set(s) if s.is_sorted() => Ok(Value::Set(sorted_conj_set(eval, s, x)?)),
         Value::Set(s) => Ok(Value::Set(s.clone().insert(x))),
-        _ => {
-            if let Some(sv) = as_subvector(coll) {
-                return Ok(subvector_conj(sv, x));
-            }
-            if let Some(q) = crate::hostvals::as_queue(coll) {
-                return Ok(q.conj(x));
-            }
-            if is_seq_value(coll) {
-                return Ok(Value::Extension(Arc::new(ConsValue::new(x, coll.clone()))));
-            }
-            Err(cce_err(coll, "clojure.lang.IPersistentCollection"))
-        }
+        _ => conj_fallback(coll, x),
     }
+}
+
+/// `conj` onto anything else (split from [`conj_one`] for the
+/// complexity budget): subvectors append in place, queues
+/// enqueue, seqs cons, the rest take the collection cast.
+fn conj_fallback(coll: &Value, x: Value) -> Result<Value, NativeError> {
+    if let Some(sv) = as_subvector(coll) {
+        return Ok(subvector_conj(sv, x));
+    }
+    if let Some(q) = crate::hostvals::as_queue(coll) {
+        return Ok(q.conj(x));
+    }
+    if is_seq_value(coll) {
+        return Ok(Value::Extension(Arc::new(ConsValue::new(x, coll.clone()))));
+    }
+    Err(cce_err(coll, "clojure.lang.IPersistentCollection"))
 }
 
 /// Conj onto a map-like host value (split from [`conj_one`] for
@@ -1514,16 +1519,8 @@ pub(crate) fn native_nth(eval: &mut Evaluator, args: &[Value]) -> Result<Value, 
     let n = nth_index(&args[1])?;
     let not_found = args.get(2);
     let coll = &args[0];
-    if matches!(coll, Value::Nil) {
-        return Ok(not_found.cloned().unwrap_or(Value::Nil));
-    }
-    if not_found.is_some() && n < 0 {
-        return Ok(not_found.cloned().unwrap_or(Value::Nil));
-    }
-    // Chunks read their raw slots (nil holes below capacity, S12
-    // oracles `ch-nth-oob`, `ch-nth-cap`).
-    if let Some(c) = crate::collmisc::as_chunk(coll) {
-        return crate::collmisc::chunk_nth(c, n, not_found);
+    if let Some(v) = nth_early(coll, n, not_found)? {
+        return Ok(v);
     }
     if matches!(
         coll,
@@ -1566,6 +1563,28 @@ pub(crate) fn native_nth(eval: &mut Evaluator, args: &[Value]) -> Result<Value, 
         return nth_walk(eval, coll, n, not_found);
     }
     Err(nth_unsupported(coll))
+}
+
+/// `nth` early outs (split from [`native_nth`] for the
+/// complexity budget): nil and negative-with-not-found answer
+/// directly, chunks read their raw slots (nil holes below
+/// capacity, S12 oracles `ch-nth-oob`, `ch-nth-cap`).
+/// `Ok(None)` keeps dispatching.
+fn nth_early(
+    coll: &Value,
+    n: i32,
+    not_found: Option<&Value>,
+) -> Result<Option<Value>, NativeError> {
+    if matches!(coll, Value::Nil) {
+        return Ok(Some(not_found.cloned().unwrap_or(Value::Nil)));
+    }
+    if not_found.is_some() && n < 0 {
+        return Ok(Some(not_found.cloned().unwrap_or(Value::Nil)));
+    }
+    if let Some(c) = crate::collmisc::as_chunk(coll) {
+        return crate::collmisc::chunk_nth(c, n, not_found).map(Some);
+    }
+    Ok(None)
 }
 
 /// The `nth not supported` error (`getSimpleName` rule).

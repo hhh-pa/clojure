@@ -5254,44 +5254,57 @@ fn str_index_of(s: &str, rest: &[Value], last: bool) -> Result<Value, NativeErro
 /// negatives and clamps past-the-end to the end.
 fn index_of_raw(s: &str, needle: &[u16], from: i32, last: bool) -> i64 {
     let hay: Vec<u16> = s.encode_utf16().collect();
-    let len = hay.len() as i64;
     if last {
-        if from < 0 {
-            return -1;
-        }
-        let from = i64::from(from).min(len);
-        if needle.is_empty() {
-            return from;
-        }
-        if needle.len() as i64 > len {
-            return -1;
-        }
-        let top = from.min(len - needle.len() as i64) as usize;
-        for start in (0..=top).rev() {
-            if hay[start..start + needle.len()] == needle[..] {
-                return start as i64;
-            }
-        }
-        -1
+        last_index_of_raw(&hay, needle, from)
     } else {
-        let from = i64::from(from).max(0);
-        if needle.is_empty() {
-            return from.min(len);
-        }
-        if from > len {
-            return -1;
-        }
-        let from = from as usize;
-        if needle.len() > hay.len().saturating_sub(from) {
-            return -1;
-        }
-        for start in from..=(hay.len() - needle.len()) {
-            if hay[start..start + needle.len()] == needle[..] {
-                return start as i64;
-            }
-        }
-        -1
+        first_index_of_raw(&hay, needle, from)
     }
+}
+
+/// The backward UTF-16 search (split from [`index_of_raw`] for
+/// the complexity budget).
+fn last_index_of_raw(hay: &[u16], needle: &[u16], from: i32) -> i64 {
+    let len = hay.len() as i64;
+    if from < 0 {
+        return -1;
+    }
+    let from = i64::from(from).min(len);
+    if needle.is_empty() {
+        return from;
+    }
+    if needle.len() as i64 > len {
+        return -1;
+    }
+    let top = from.min(len - needle.len() as i64) as usize;
+    for start in (0..=top).rev() {
+        if hay[start..start + needle.len()] == needle[..] {
+            return start as i64;
+        }
+    }
+    -1
+}
+
+/// The forward UTF-16 search (split from [`index_of_raw`] for
+/// the complexity budget).
+fn first_index_of_raw(hay: &[u16], needle: &[u16], from: i32) -> i64 {
+    let len = hay.len() as i64;
+    let from = i64::from(from).max(0);
+    if needle.is_empty() {
+        return from.min(len);
+    }
+    if from > len {
+        return -1;
+    }
+    let from = from as usize;
+    if needle.len() > hay.len().saturating_sub(from) {
+        return -1;
+    }
+    for start in from..=(hay.len() - needle.len()) {
+        if hay[start..start + needle.len()] == needle[..] {
+            return start as i64;
+        }
+    }
+    -1
 }
 
 /// Search one code point: BMP values scan one unit (negatives
