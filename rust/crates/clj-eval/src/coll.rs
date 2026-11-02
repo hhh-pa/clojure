@@ -1403,6 +1403,34 @@ static STR_SCAN_CACHE: Mutex<Vec<StrScanEntry>> = Mutex::new(Vec::new());
 /// lookup).
 const STR_SCAN_DIRECT_MAX: usize = 64;
 
+// The last string-scan hit, per thread: parse loops `nth` one
+// `Arc<str>` millions of times, and the memo answers repeats
+// without the global cache mutex. `Weak` keeps the global
+// cache's no-pin/no-ABA properties.
+thread_local! {
+    static LAST_SCAN: std::cell::RefCell<Option<(Weak<str>, StrScan)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// The memoized scan for a string, if it was the last one scanned.
+fn last_scan_hit(s: &Arc<str>) -> Option<StrScan> {
+    LAST_SCAN.with(|memo| {
+        memo.borrow().as_ref().and_then(|(key, scan)| {
+            key.upgrade()
+                .filter(|a| Arc::ptr_eq(a, s))
+                .map(|_| scan.clone())
+        })
+    })
+}
+
+/// Memoize a string's scan (called on every global-cache hit and
+/// fresh build, so repeats skip the mutex).
+fn memoize_scan(s: &Arc<str>, scan: &StrScan) {
+    LAST_SCAN.with(|memo| {
+        *memo.borrow_mut() = Some((Arc::downgrade(s), scan.clone()));
+    });
+}
+
 /// Indexed strings past this many chars skip the offset table
 /// (a memory cap — the slow path stays correct).
 const STR_SCAN_INDEX_CAP: usize = 2_000_000;
@@ -1411,6 +1439,9 @@ const STR_SCAN_INDEX_CAP: usize = 2_000_000;
 /// (one O(n) pass; ASCII costs no table). `None` reads over
 /// the index cap (uncached slow path).
 fn str_scan(s: &Arc<str>) -> Option<StrScan> {
+    if let Some(hit) = last_scan_hit(s) {
+        return Some(hit);
+    }
     {
         let mut cache = STR_SCAN_CACHE.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(pos) = cache
@@ -1420,6 +1451,7 @@ fn str_scan(s: &Arc<str>) -> Option<StrScan> {
             let entry = cache.remove(pos);
             let scan = entry.scan.clone();
             cache.insert(0, entry);
+            memoize_scan(s, &scan);
             return Some(scan);
         }
     }
@@ -1435,6 +1467,7 @@ fn str_scan(s: &Arc<str>) -> Option<StrScan> {
         );
         cache.truncate(8);
     }
+    memoize_scan(s, &scan);
     Some(scan)
 }
 
@@ -2799,3 +2832,27 @@ pub(crate) const COLL_NATIVES: &[(&str, NativeFnPtr)] = &[
     ("into", native_into),
     ("distinct?", native_distinctp),
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn str_scan_memo_answers_repeats() {
+        // Past the direct-scan threshold: the first read builds and
+        // memoizes, repeats hit the memo, and a second string
+        // replaces it (all without touching the global-cache mutex
+        // path twice for the same string).
+        let s: Arc<str> = Arc::from("x".repeat(200));
+        assert_eq!(str_char_at(&s, 100), Some('x'));
+        assert_eq!(str_char_at(&s, 150), Some('x'));
+        let t: Arc<str> = Arc::from("y".repeat(200));
+        assert_eq!(str_char_at(&t, 100), Some('y'));
+        assert_eq!(str_char_at(&s, 120), Some('x'));
+        // A dropped memo key never answers (no ABA): `t2` may reuse
+        // `t`'s address, but the `Weak` is dead.
+        let t2: Arc<str> = Arc::from("z".repeat(200));
+        drop(t);
+        assert_eq!(str_char_at(&t2, 100), Some('z'));
+    }
+}

@@ -2175,11 +2175,7 @@ pub(crate) fn ensure_data_readers_autoloaded(eval: &mut Evaluator) -> Result<(),
     // so the next read retries the same files.
     let prev = eval.data_reader_scan_path.clone();
     eval.data_reader_scan_path = Some(dirs.clone());
-    let root = eval
-        .registry
-        .state(id)
-        .and_then(|s| s.root)
-        .unwrap_or(Value::Nil);
+    let root = eval.registry.root_cloned(id).unwrap_or(Value::Nil);
     let mut acc = root;
     let mut entries: Vec<(Symbol, Value)> = Vec::new();
     let mut fresh: Vec<String> = Vec::new();
@@ -2211,11 +2207,7 @@ fn merge_autoload_entries(
     fresh: Vec<String>,
 ) -> Result<(), NativeError> {
     let assoc_fn = deref_core(eval, "assoc");
-    let mut live = eval
-        .registry
-        .state(id)
-        .and_then(|s| s.root)
-        .unwrap_or(Value::Nil);
+    let mut live = eval.registry.root_cloned(id).unwrap_or(Value::Nil);
     for (tag, var) in entries {
         let pair = [live, Value::Symbol(tag.clone()), var.clone()];
         live = eval.call(&assoc_fn, &pair).map_err(signal_to_native)?;
@@ -5279,7 +5271,7 @@ mod tests {
         std::fs::write(dir.join("data_readers.clj"), "{my/tag my.lib/reader}").unwrap();
         ensure_data_readers_autoloaded(&mut eval).expect("retry merges");
         assert_eq!(eval.loaded_data_reader_files.len(), 1);
-        let root = eval.registry.state(readers).and_then(|s| s.root);
+        let root = eval.registry.root_cloned(readers);
         // One covered assertion (a `let-else` panic arm would be a
         // cold line under the 100% floor): the merged root is a map
         // carrying `my/tag`.
