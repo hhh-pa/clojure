@@ -2333,6 +2333,156 @@ fn pqueue_orderings() {
     );
 }
 
+/// `MessageDigest` vectors (RFC 1321 + FIPS 180-4, hexed the
+/// suite's own `%02x` way — all nine verified against the
+/// system `md5`/`shasum`, plus a multi-block input each).
+#[test]
+fn digest_vectors() {
+    let mut eval = boot();
+    let hex_of = |algo: &str, s: &str| {
+        format!(
+            r#"(let [md (java.security.MessageDigest/getInstance "{algo}")] (.update md (.getBytes "{s}" "UTF-8")) (apply str (map #(format "%02x" (bit-and % 0xFF)) (.digest md))))"#
+        )
+    };
+    assert_eq!(
+        run(
+            &mut eval,
+            &format!(
+                "[{} {} {}]",
+                hex_of("MD5", ""),
+                hex_of("MD5", "abc"),
+                hex_of("MD5", "The quick brown fox jumps over the lazy dog")
+            )
+        ),
+        "[\"d41d8cd98f00b204e9800998ecf8427e\" \"900150983cd24fb0d6963f7d28e17f72\" \"9e107d9d372bb6826bd81d3542a419d6\"]"
+    );
+    assert_eq!(
+        run(
+            &mut eval,
+            &format!(
+                "[{} {} {}]",
+                hex_of("SHA-256", ""),
+                hex_of("SHA-256", "abc"),
+                hex_of("SHA-256", "The quick brown fox jumps over the lazy dog")
+            )
+        ),
+        "[\"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\" \"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad\" \"d7a8fbb307d7809469ca9abcb0082e4f8d5651e46d3cdb762d02d0bf37c9e592\"]"
+    );
+    assert_eq!(
+        run(
+            &mut eval,
+            &format!(
+                "[{} {} {}]",
+                hex_of("SHA-512", ""),
+                hex_of("SHA-512", "abc"),
+                hex_of("SHA-512", "The quick brown fox jumps over the lazy dog")
+            )
+        ),
+        "[\"cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e\" \"ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f\" \"07e547d9586f6a73f73fbac0435ed76951218fb7d0c8d788a309d785436bbb642e93a252a954f23912547d1e8a3b5ed6e1bfd7097821233fa0538f3db854fee6\"]"
+    );
+    // Multi-block inputs (200 bytes) compress eagerly.
+    let long = "a".repeat(200);
+    assert_eq!(
+        run(
+            &mut eval,
+            &format!(
+                "[{} {} {}]",
+                hex_of("MD5", &long),
+                hex_of("SHA-256", &long),
+                hex_of("SHA-512", &long)
+            )
+        ),
+        "[\"887f30b43b2867f4a9accceee7d16e6c\" \"c2a908d98f5df987ade41b5fce213067efbcc21ef2240212a41e54b5e7c28ae5\" \"4b11459c33f52a22ee8236782714c150a3b2c60994e9acee17fe68947a3e6789f31e7668394592da7bef827cddca88c4e6f86e4df7ed1ae6cba71f3e98faee9f\"]"
+    );
+}
+
+/// `MessageDigest` shapes: arities, resets, errors.
+#[test]
+fn digest_shapes() {
+    let mut eval = boot();
+    // `digest(bytes)` feeds first; split updates match; lengths.
+    assert_eq!(
+        run(
+            &mut eval,
+            r#"[(let [a (java.security.MessageDigest/getInstance "SHA-256") b (java.security.MessageDigest/getInstance "SHA-256")] (.update a (.getBytes "ab" "UTF-8")) (= (vec (.digest a)) (vec (.digest b (.getBytes "ab" "UTF-8"))))) (let [m (java.security.MessageDigest/getInstance "MD5")] (.update m (.getBytes "a" "UTF-8")) (.update m (.getBytes "bc" "UTF-8")) (= (vec (.digest m)) (vec (.digest (java.security.MessageDigest/getInstance "MD5") (.getBytes "abc" "UTF-8"))))) (count (.digest (java.security.MessageDigest/getInstance "MD5"))) (count (.digest (java.security.MessageDigest/getInstance "SHA-256"))) (count (.digest (java.security.MessageDigest/getInstance "SHA-512")))]"#
+        ),
+        "[true true 16 32 64]"
+    );
+    // `digest()` resets (the handle digests afresh after).
+    assert_eq!(
+        run(
+            &mut eval,
+            r#"(let [m (java.security.MessageDigest/getInstance "SHA-256")] (.update m (.getBytes "abc" "UTF-8")) (.digest m) (= (vec (.digest m)) (vec (.digest (java.security.MessageDigest/getInstance "SHA-256")))))"#
+        ),
+        "true"
+    );
+    // Lookups are case-blind; unknown names name themselves.
+    assert_eq!(
+        run(
+            &mut eval,
+            r#"(count (.digest (java.security.MessageDigest/getInstance "sha-256") (.getBytes "a" "UTF-8")))"#
+        ),
+        "32"
+    );
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            r#"(java.security.MessageDigest/getInstance "SHA-1")"#,
+        ),
+        "java.security.NoSuchAlgorithmException | SHA-1 MessageDigest not available"
+    );
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(java.security.MessageDigest/getInstance nil)",
+        ),
+        "java.lang.NullPointerException | Cannot invoke \"java.security.MessageDigest.getInstance(String)\" because \"algorithm\" is null"
+    );
+    assert!(uncaught(
+        &mut eval,
+        "(java.security.MessageDigest/getInstance 5)"
+    )
+    .contains("ClassCastException"));
+    assert_eq!(
+        compile_err(&mut eval, "(java.security.MessageDigest/getInstance)"),
+        "java.lang.IllegalArgumentException | No matching method getInstance found taking 0 args for class java.security.MessageDigest"
+    );
+    assert_eq!(
+        runtime_miss(&mut eval, "java.security.MessageDigest", "getInstance", "1 2"),
+        "java.lang.IllegalArgumentException | No matching method getInstance found taking 2 args for class java.security.MessageDigest"
+    );
+    // Input errors name their method; non-digests miss.
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            r#"(let [m (java.security.MessageDigest/getInstance "MD5")] (.update m nil))"#
+        ),
+        "java.lang.NullPointerException | Cannot invoke \"java.security.MessageDigest.update(byte[])\" because \"input\" is null"
+    );
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            r#"(let [m (java.security.MessageDigest/getInstance "MD5")] (.digest m nil))"#
+        ),
+        "java.lang.NullPointerException | Cannot invoke \"java.security.MessageDigest.digest(byte[])\" because \"input\" is null"
+    );
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            r#"(let [m (java.security.MessageDigest/getInstance "MD5")] (.update m "abc"))"#
+        ),
+        "java.lang.IllegalArgumentException | No matching method update found taking 1 args for class java.security.MessageDigest"
+    );
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            r#"(let [m (java.security.MessageDigest/getInstance "MD5")] (.digest m (int-array [1])))"#
+        ),
+        "java.lang.IllegalArgumentException | No matching method digest found taking 1 args for class java.security.MessageDigest"
+    );
+    assert!(uncaught(&mut eval, "(.digest \"abc\")").contains("No matching"));
+}
+
 /// Run `f` on a 256 MiB worker (the harness shape): deep
 /// recursion trips the catchable guard there, never an abort.
 fn on_worker<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {

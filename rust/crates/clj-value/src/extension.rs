@@ -100,6 +100,12 @@ pub enum ThrowClass {
     /// `URISyntaxException` (#205 `java.net.URI`): a checked
     /// `Exception` for unparseable URI strings.
     URISyntaxException,
+    /// `GeneralSecurityException` (#205 digests): the checked
+    /// parent of the `java.security` failures.
+    GeneralSecurityException,
+    /// `NoSuchAlgorithmException` (#205 digests): unknown
+    /// `MessageDigest` algorithms.
+    NoSuchAlgorithmException,
 }
 
 impl ThrowClass {
@@ -204,6 +210,8 @@ impl ThrowClass {
             Self::ClassNotFoundException => "java.lang.ClassNotFoundException",
             Self::NoSuchElementException => "java.util.NoSuchElementException",
             Self::URISyntaxException => "java.net.URISyntaxException",
+            Self::GeneralSecurityException => "java.security.GeneralSecurityException",
+            Self::NoSuchAlgorithmException => "java.security.NoSuchAlgorithmException",
             other => other.jvm_name_array(),
         }
     }
@@ -329,6 +337,10 @@ fn throw_parent_rest(jvm_name: &str) -> Option<&'static str> {
         "java.util.NoSuchElementException" => Some("java.lang.RuntimeException"),
         "java.io.UnsupportedEncodingException" => Some("java.io.IOException"),
         "java.net.URISyntaxException" => Some("java.lang.Exception"),
+        "java.security.GeneralSecurityException" => Some("java.lang.Exception"),
+        "java.security.NoSuchAlgorithmException" => {
+            Some("java.security.GeneralSecurityException")
+        }
         _ => throw_parent_format(jvm_name),
     }
 }

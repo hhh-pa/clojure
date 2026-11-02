@@ -2030,6 +2030,11 @@ const STATIC_LATTICE: &[StaticRow] = &[
         bases: &["java.util.Random"],
     },
     StaticRow {
+        name: "java.security.MessageDigest",
+        iface: false,
+        bases: &["java.security.MessageDigestSpi"],
+    },
+    StaticRow {
         name: "java.util.Arrays",
         iface: false,
         bases: &["java.lang.Object"],
@@ -2894,6 +2899,7 @@ pub(crate) fn static_member_arities(fqn: &str, member: &str) -> Option<&'static 
         "java.math.BigInteger" => static_arities_bigint(member),
         "java.util.Arrays" => static_arities_arrays(member),
         "java.util.Collections" => static_arities_collections(member),
+        "java.security.MessageDigest" => static_arities_digest(member),
         "java.util.regex.Pattern" => static_arities_pattern(member),
         "java.io.File" => static_arities_file(member),
         "java.net.URLEncoder" => static_arities_urlencoder(member),
@@ -3060,6 +3066,7 @@ fn native_static(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeEr
         "java.math.BigInteger" => static_call_bigint(member.as_ref(), rest),
         "java.util.Arrays" => static_call_arrays(member.as_ref(), rest),
         "java.util.Collections" => static_call_collections(member.as_ref(), rest),
+        "java.security.MessageDigest" => static_call_digest(eval, member.as_ref(), rest),
         "java.util.regex.Pattern" => static_call_pattern(member.as_ref(), rest),
         "java.io.File" => static_call_file(eval, member.as_ref(), rest),
         "java.net.URLEncoder" => static_call_urlencoder(member.as_ref(), rest),
@@ -3208,6 +3215,24 @@ fn static_call_collections(member: &str, rest: &[Value]) -> Result<Value, Native
     match member {
         "shuffle" => static_collections_shuffle(rest),
         _ => static_field_or_miss("java.util.Collections", member, rest),
+    }
+}
+
+fn static_arities_digest(member: &str) -> Option<&'static [usize]> {
+    match member {
+        "getInstance" => Some(&[1]),
+        _ => None,
+    }
+}
+
+fn static_call_digest(
+    eval: &mut Evaluator,
+    member: &str,
+    rest: &[Value],
+) -> Result<Value, NativeError> {
+    match member {
+        "getInstance" => crate::emudigest::digest_get_instance(eval, rest),
+        _ => static_field_or_miss("java.security.MessageDigest", member, rest),
     }
 }
 
@@ -5607,6 +5632,7 @@ fn surface_gated_jcoll(
 ) -> Option<Result<Value, NativeError>> {
     crate::emucoll::deque_method(meth, target, rest)
         .or_else(|| crate::emucoll::pqueue_method(eval, meth, target, rest))
+        .or_else(|| crate::emudigest::digest_method(meth, target, rest))
 }
 
 /// The file/IO members (#205): `exists`/`length` on files,
@@ -6995,6 +7021,8 @@ pub(crate) const SURFACE_MEMBERS: &[(&str, usize)] = &[
     ("codePointCount", 2),
     ("compareTo", 1),
     ("contains", 1),
+    ("digest", 0),
+    ("digest", 1),
     ("divide", 1),
     ("end", 0),
     ("endsWith", 1),
@@ -7081,6 +7109,7 @@ pub(crate) const SURFACE_MEMBERS: &[(&str, usize)] = &[
     ("toString", 1),
     ("toUpperCase", 0),
     ("trim", 0),
+    ("update", 1),
     ("write", 1),
     ("xor", 1),
 ];
