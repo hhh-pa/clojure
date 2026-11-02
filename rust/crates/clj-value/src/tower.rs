@@ -983,9 +983,7 @@ impl BigDec {
         } else {
             (v.unscaled.clone() * 10, v.scale + 1)
         };
-        if unscaled.is_negative() {
-            return None;
-        }
+        // Negatives never arrive (`sqrt_mc` rejects them first).
         let root = unscaled.abs().sqrt();
         if &root * &root != unscaled.abs() {
             return None;
@@ -1001,6 +999,8 @@ impl BigDec {
     /// when the double over/underflows.
     fn sqrt_guess(v: &Self) -> Self {
         let g = v.to_f64().sqrt();
+        // Nested (not a let-chain): MSRV 1.85 predates let-chains.
+        #[allow(clippy::collapsible_if)]
         if g.is_finite() && g != 0.0 {
             if let Ok(x) = Self::value_of_f64(g) {
                 return x;
