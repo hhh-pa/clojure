@@ -188,6 +188,7 @@ dependencies = [
  "num-traits",
  "rand",
  "regex",
+ "smallvec",
 ]
 
 [[package]]

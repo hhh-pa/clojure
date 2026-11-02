@@ -22,9 +22,10 @@ use clj_value::{
     Delay, Keyword, List, Map, PrimitiveVector, Promise, Symbol, ThrowClass, Throwable, Value, Var,
     Vector, new_map,
 };
+use smallvec::SmallVec;
 
 use crate::coll::native_nth;
-use crate::env::{Bindings, Env, SharedRegistry};
+use crate::env::{Bindings, Env, FxHashMap, SharedRegistry};
 use crate::error::{CompileError, NativeError, Signal, jvm_class_of, span_of};
 use crate::expr::{Analyzer, CaseTest, Catch, Expr, MapPattern, Pattern, pattern_names};
 use crate::ext::{Closure, NativeFn, NsHandle, as_closure, as_native};
@@ -161,6 +162,13 @@ pub struct Evaluator {
     /// reference, so a replaced canonical skips read-side
     /// validation (`None` before boot installs the root).
     pub(crate) canonical_default_readers: Option<(Value, Value)>,
+    /// Var-root cache (see [`deref_var_cached`](Self::deref_var_cached)):
+    /// var id → root snapshot. Valid only while `root_epoch` equals
+    /// the lineage [`epoch`](SharedRegistry::epoch) — every root
+    /// write bumps the lineage epoch, ending this generation.
+    root_cache: FxHashMap<u64, Value>,
+    /// The lineage epoch [`root_cache`](Self::root_cache) was filled under.
+    root_epoch: u64,
 }
 
 /// A `defmacro` definition's parts (bundles `eval_defmacro`'s
@@ -209,6 +217,8 @@ impl Evaluator {
             data_reader_scan_path: None,
             loaded_data_reader_files: HashSet::new(),
             canonical_default_readers: None,
+            root_cache: FxHashMap::default(),
+            root_epoch: 0,
         }
     }
 
@@ -252,6 +262,11 @@ impl Evaluator {
             // The pristine natives are registry-global values, so
             // the baseline crosses with the fork.
             canonical_default_readers: self.canonical_default_readers.clone(),
+            // A fork starts with an empty root cache at the current
+            // lineage epoch (sibling writes end its generation like
+            // any other evaluator's).
+            root_cache: FxHashMap::default(),
+            root_epoch: self.registry.epoch(),
         }
     }
 
@@ -813,6 +828,37 @@ impl Evaluator {
         self.registry.root_or_unbound(id, sym)
     }
 
+    /// The visible value of a var through the per-evaluator root
+    /// cache (the `Expr::Global` fast path): thread bindings win
+    /// (checked first, like [`deref_var`](Self::deref_var));
+    /// otherwise a cached root snapshot when the lineage epoch is
+    /// unchanged, else the locked read + insert. Every root write
+    /// bumps the lineage epoch, so a hit always serves the current
+    /// root: single-threaded behavior is identical to
+    /// [`deref_var`](Self::deref_var). The insert files under the
+    /// pre-read epoch, so even a cross-thread write racing the
+    /// locked read cannot poison the cache (the next deref sees a
+    /// newer epoch and drops the generation).
+    pub(crate) fn deref_var_cached(&mut self, id: u64, sym: &Symbol) -> Value {
+        if let Some(v) = self.bindings.get(id) {
+            return v.clone();
+        }
+        let epoch = self.registry.epoch();
+        if epoch != self.root_epoch {
+            // A root changed somewhere in the lineage: drop the whole
+            // generation (keeps the cache bounded across re-def-heavy
+            // boots) and fall through to the locked read.
+            self.root_cache.clear();
+            self.root_epoch = epoch;
+        } else if let Some(v) = self.root_cache.get(&id) {
+            return v.clone();
+        }
+        let value = self.registry.root_or_unbound(id, sym);
+        self.root_cache.insert(id, value.clone());
+        self.root_epoch = epoch;
+        value
+    }
+
     /// Evaluate an expression to a value (or a control signal).
     pub fn eval(&mut self, expr: &Expr, env: &Env) -> Result<Value, Signal> {
         match expr {
@@ -820,7 +866,7 @@ impl Evaluator {
             Expr::VecLit(elems, meta) => self.eval_vec(elems, meta.clone(), env),
             Expr::MapLit(pairs, meta) => self.eval_map_lit(pairs, meta.clone(), env),
             Expr::SetLit(elems, meta) => self.eval_set_lit(elems, meta.clone(), env),
-            Expr::Global(var) => Ok(self.deref_var(var.id, &var.sym)),
+            Expr::Global(var) => Ok(self.deref_var_cached(var.id, &var.sym)),
             Expr::Local(idx) => Ok(env.get(*idx)),
             Expr::VarRef(var) => Ok(Value::Var(var.clone())),
             Expr::Def {
@@ -1001,7 +1047,7 @@ impl Evaluator {
         body: &[Expr],
         env: &Env,
     ) -> Result<Value, Signal> {
-        let env = env.extend(vec![Value::Nil; fns.len()]);
+        let env = env.extend_patchable(fns.len());
         let base = env.len() - fns.len();
         for (i, (_, fun)) in fns.iter().enumerate() {
             let closure = self.make_closure(fun, &env);
@@ -1356,7 +1402,7 @@ impl Evaluator {
             closure.conveyed = Some(conveyed);
             return Ok(Value::Extension(Arc::new(closure)));
         }
-        let env = env.extend(vec![Value::Nil]);
+        let env = env.extend_patchable(1);
         let mut closure = self.make_closure(fun, &env);
         closure.conveyed = Some(conveyed);
         let value = Value::Extension(Arc::new(closure));
@@ -1503,16 +1549,17 @@ impl Evaluator {
     /// local by the pair's slot count (#171: the callee arrives as
     /// its own first arg).
     fn bind_pattern(&mut self, pat: &Pattern, value: Value, env: &Env) -> Result<Env, Signal> {
+        // Fast path: a bare symbol binds one slot directly (no
+        // placeholder `Vec`, no `pattern_names` `Vec`, no
+        // destructure `Vec`, no `set`).
+        if matches!(pat, Pattern::Symbol(_)) {
+            return Ok(env.extend_one(value));
+        }
         let count = pattern_names(pat).len();
-        let extended = env.extend(vec![Value::Nil; count]);
-        let base = extended.len() - count;
         let mut out = Vec::with_capacity(count);
         self.destructure(pat, &value, env, &mut out, ForceSet::default())?;
         debug_assert_eq!(out.len(), count, "destructure fills every slot");
-        for (i, v) in out.into_iter().enumerate() {
-            extended.set(base + i, v);
-        }
-        Ok(extended)
+        Ok(env.extend(out))
     }
 
     /// `(def …)`: evaluate the init (or leave rootless), refresh
@@ -1586,20 +1633,15 @@ impl Evaluator {
             let value = self.eval(init, &env)?;
             env = self.bind_pattern(pat, value, &env)?;
         }
+        // The patterns, collected once (a fresh frame per iteration,
+        // like the copy it replaces, so closures from this iteration
+        // keep observing the old frame).
+        let pats: SmallVec<[&Pattern; 8]> = bindings.iter().map(|(pat, _)| pat).collect();
         loop {
             match self.eval_body(body, &env) {
                 Ok(v) => return Ok(v),
                 Err(Signal::Recur(values)) => {
-                    // Fresh frame per iteration (like the copy it
-                    // replaces, closures from this iteration keep
-                    // observing the old frame): rebind through
-                    // `bind_pattern` so `:or` defaults evaluate
-                    // against each pair's pre-extension frame (#171).
-                    let mut frame = outer.clone();
-                    for ((pat, _), value) in bindings.iter().zip(values) {
-                        frame = self.bind_pattern(pat, value, &frame)?;
-                    }
-                    env = frame;
+                    env = self.bind_values(&pats, values, &outer)?;
                 }
                 Err(signal) => return Err(signal),
             }
@@ -2009,7 +2051,7 @@ impl Evaluator {
     /// Invoke a var: deref and delegate (unbounds are the
     /// `IllegalStateException`).
     fn invoke_var(&mut self, v: &Var, args: &[Value]) -> Result<Value, Signal> {
-        let root = self.deref_var(v.id, &v.sym);
+        let root = self.deref_var_cached(v.id, &v.sym);
         if matches!(root, Value::Unbound(_)) {
             return Err(self.throw(NativeError::new(
                 ThrowClass::IllegalStateException,
@@ -2059,6 +2101,29 @@ impl Evaluator {
 
     /// Bind one arity's parameters (sequentially, like `let`) and
     /// run the body, looping on `recur`.
+    /// Bind precomputed values against patterns (call params, `recur`
+    /// rebinds — no inits evaluate here, so no observer can see an
+    /// intermediate frame): all-symbol patterns extend once, with a
+    /// single frame for every slot; destructuring patterns still bind
+    /// one by one through [`bind_pattern`](Self::bind_pattern) so each
+    /// `:or` default evaluates against the pre-extension frame the
+    /// analyzer saw (#171).
+    fn bind_values(
+        &mut self,
+        pats: &[&Pattern],
+        values: Vec<Value>,
+        env: &Env,
+    ) -> Result<Env, Signal> {
+        if pats.iter().all(|p| matches!(p, Pattern::Symbol(_))) {
+            return Ok(env.extend(values));
+        }
+        let mut frame = env.clone();
+        for (pat, value) in pats.iter().zip(values) {
+            frame = self.bind_pattern(pat, value, &frame)?;
+        }
+        Ok(frame)
+    }
+
     fn apply_arity(
         &mut self,
         closure: &Closure,
@@ -2070,26 +2135,19 @@ impl Evaluator {
         if let Some(rest) = rest {
             values.push(rest);
         }
-        let pats: Vec<&Pattern> = arity.fixed.iter().chain(arity.rest.iter()).collect();
-        // Bind through `bind_pattern` (initial and `recur` alike)
-        // so each param's `:or` defaults evaluate against the
-        // pre-extension frame the analyzer saw (#171). A fresh
-        // frame per `recur` keeps the old copy-on-recur promise:
-        // closures from this iteration keep the old frame.
+        // Bind through `bind_values` (initial and `recur` alike). A
+        // fresh frame per `recur` keeps the old copy-on-recur
+        // promise: closures from this iteration keep the old frame.
         let outer = closure.env.clone();
-        let mut frame = outer.clone();
-        for (pat, value) in pats.iter().zip(values) {
-            frame = self.bind_pattern(pat, value, &frame)?;
-        }
+        // The pattern list borrows the arity (no per-call `Vec`;
+        // its length is bounded by the parameter count).
+        let pats: SmallVec<[&Pattern; 8]> = arity.fixed.iter().chain(arity.rest.iter()).collect();
+        let mut frame = self.bind_values(&pats, values, &outer)?;
         loop {
             match self.eval_body(&arity.body, &frame) {
                 Ok(v) => return Ok(v),
                 Err(Signal::Recur(values)) => {
-                    let mut next = outer.clone();
-                    for (pat, value) in pats.iter().zip(values) {
-                        next = self.bind_pattern(pat, value, &next)?;
-                    }
-                    frame = next;
+                    frame = self.bind_values(&pats, values, &outer)?;
                 }
                 Err(signal) => return Err(signal),
             }
@@ -3186,5 +3244,35 @@ mod tests {
                 "class java.lang.String cannot be cast to class java.lang.Character (java.lang.String and java.lang.Character are in module java.base of loader 'bootstrap')"
             )
         );
+    }
+
+    #[test]
+    fn root_cache_tracks_bindings_defs_and_redefs() {
+        let mut eval = Evaluator::new("root-cache-test");
+        let sym = Symbol::new(Some("user"), "rc-x");
+        let id = eval.registry.intern(&sym);
+        // Rootless: the `Unbound` sentinel (miss + insert).
+        assert!(matches!(eval.deref_var_cached(id, &sym), Value::Unbound(_)));
+        // A root write ends the generation: the next deref drops the
+        // cached sentinel and serves the root, then hits the cache.
+        eval.registry
+            .with_state_mut(id, |st| st.root = Some(Value::Int(1)));
+        assert_eq!(eval.deref_var_cached(id, &sym), Value::Int(1));
+        assert_eq!(eval.deref_var_cached(id, &sym), Value::Int(1));
+        // Re-def invalidates again (no stale root survives).
+        eval.registry
+            .with_state_mut(id, |st| st.root = Some(Value::Int(2)));
+        assert_eq!(eval.deref_var_cached(id, &sym), Value::Int(2));
+        // Thread bindings always win over the cached root.
+        eval.bindings.push_frame(vec![(
+            Var {
+                id,
+                sym: sym.clone(),
+            },
+            Value::Int(3),
+        )]);
+        assert_eq!(eval.deref_var_cached(id, &sym), Value::Int(3));
+        eval.bindings.pop_frame();
+        assert_eq!(eval.deref_var_cached(id, &sym), Value::Int(2));
     }
 }

@@ -1217,6 +1217,28 @@ impl SharedRegistry {
 #[derive(Clone, Debug, Default)]
 pub struct Bindings {
     frames: Vec<Vec<(Var, Value)>>,
+    /// Bound-var refcounts: var id → live entry count (across all
+    /// frames). Lets [`get`](Self::get) skip the frame scan when a
+    /// var has no thread binding (the common case on the var-deref
+    /// hot path).
+    counts: FxHashMap<u64, usize>,
+}
+
+/// Drop one frame's refcounts (split out so [`Bindings::truncate`]
+/// can drain frames and counts under separate borrows).
+fn unbind_counts(counts: &mut FxHashMap<u64, usize>, frame: &[(Var, Value)]) {
+    for (var, _) in frame {
+        // Every live entry was counted at push, so the entry exists;
+        // a missing one would be a caller bug (ignored, like a
+        // double pop elsewhere).
+        if let Entry::Occupied(mut slot) = counts.entry(var.id) {
+            if *slot.get() <= 1 {
+                slot.remove();
+            } else {
+                *slot.get_mut() -= 1;
+            }
+        }
+    }
 }
 
 impl Bindings {
@@ -1233,23 +1255,38 @@ impl Bindings {
 
     /// Push one frame (possibly empty, like the JVM).
     pub fn push_frame(&mut self, entries: Vec<(Var, Value)>) {
+        for (var, _) in &entries {
+            *self.counts.entry(var.id).or_default() += 1;
+        }
         self.frames.push(entries);
     }
 
     /// Pop one frame (`None` when the stack is empty —
     /// `pop-thread-bindings` raises then).
     pub fn pop_frame(&mut self) -> Option<Vec<(Var, Value)>> {
-        self.frames.pop()
+        let frame = self.frames.pop()?;
+        unbind_counts(&mut self.counts, &frame);
+        Some(frame)
     }
 
-    /// Pop back to an earlier depth.
+    /// Pop back to an earlier depth (past-the-end depths are a
+    /// lenient no-op, like `Vec::truncate`).
     pub fn truncate(&mut self, depth: usize) {
-        self.frames.truncate(depth);
+        if depth >= self.frames.len() {
+            return;
+        }
+        let Self { frames, counts } = self;
+        for frame in frames.drain(depth..) {
+            unbind_counts(counts, &frame);
+        }
     }
 
     /// The visible value for a var, if bound.
     #[must_use]
     pub fn get(&self, id: u64) -> Option<&Value> {
+        if !self.counts.contains_key(&id) {
+            return None;
+        }
         self.frames.iter().rev().find_map(|frame| {
             frame
                 .iter()
@@ -1284,26 +1321,69 @@ impl Bindings {
     }
 }
 
-/// Local slots: shared (`Arc`) so closures capture their frame,
-/// mutable (`Mutex`) only for `letfn`/named-`fn` patching (before
-/// any observer exists). Extension and `recur` never mutate in
-/// place (they clone), so iteration N's closures never observe
-/// iteration N+1's rebinds. Locks are never held across evaluation.
-#[derive(Clone, Debug, Default)]
+/// One frame's slots: immutable shared slots (the common case —
+/// lock-free reads) or patchable slots behind a mutex (only for
+/// `letfn`/named-`fn` self-patching, where closures captured the
+/// frame before its slots were installed).
+#[derive(Clone, Debug)]
+enum Slots {
+    Shared(Arc<[Value]>),
+    Patchable(Arc<Mutex<Vec<Value>>>),
+}
+
+/// One linked frame: absolute slot indexes (`Local`) keep working
+/// because `base` is the parent chain's length (`[base, len)` are
+/// this frame's slots, `[0, base)` the parent's).
+#[derive(Clone, Debug)]
+struct Frame {
+    parent: Option<Env>,
+    base: usize,
+    len: usize,
+    slots: Slots,
+}
+
+/// The shared empty frame (every `Env::new` aliases it — no
+/// allocation per top-level form).
+static EMPTY_FRAME: std::sync::LazyLock<Arc<Frame>> = std::sync::LazyLock::new(|| {
+    Arc::new(Frame {
+        parent: None,
+        base: 0,
+        len: 0,
+        slots: Slots::Shared(Arc::from([])),
+    })
+});
+
+/// Local slots: a linked chain of immutable frames, shared
+/// (`Arc`) so closures capture their frame. Extension allocates
+/// only the new frame's slots (older frames are never cloned —
+/// iteration N's closures keep observing iteration N's frame, the
+/// old copy-on-`recur` promise); only `letfn`/named-`fn` patching
+/// mutates, through a `Patchable` frame (before any observer
+/// exists). Shared-frame reads take no lock; locks are never held
+/// across evaluation.
+#[derive(Clone, Debug)]
 pub struct Env {
-    slots: Arc<std::sync::Mutex<Vec<Value>>>,
+    frame: Arc<Frame>,
+}
+
+impl Default for Env {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Env {
     #[must_use]
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            frame: Arc::clone(&EMPTY_FRAME),
+        }
     }
 
-    /// The slot count.
+    /// The slot count (O(1), no lock).
     #[must_use]
     pub fn len(&self) -> usize {
-        self.slots.lock().map_or(0, |slots| slots.len())
+        self.frame.len
     }
 
     #[must_use]
@@ -1312,39 +1392,115 @@ impl Env {
     }
 
     /// Read a slot (cloned; missing slots read `nil`, unreachable
-    /// by construction).
+    /// by construction). Shared frames read lock-free; only
+    /// `Patchable` frames lock.
     #[must_use]
     pub fn get(&self, idx: usize) -> Value {
-        self.slots
-            .lock()
-            .ok()
-            .and_then(|slots| slots.get(idx).cloned())
-            .unwrap_or(Value::Nil)
-    }
-
-    /// Extend with fresh slots (the receiver is untouched).
-    #[must_use]
-    pub fn extend(&self, values: Vec<Value>) -> Self {
-        let mut slots = self
-            .slots
-            .lock()
-            .map(|slots| slots.clone())
-            .unwrap_or_default();
-        slots.extend(values);
-        Self {
-            slots: Arc::new(std::sync::Mutex::new(slots)),
+        // Pointer-chase through shared refs (no `Arc` bumps): an
+        // index at or past `base` belongs to this frame (`[0,
+        // base)` is the parent's), so the top frame usually answers
+        // immediately.
+        let mut frame: &Frame = &self.frame;
+        loop {
+            if idx >= frame.base {
+                return match &frame.slots {
+                    Slots::Shared(slots) => {
+                        slots.get(idx - frame.base).cloned().unwrap_or(Value::Nil)
+                    }
+                    Slots::Patchable(slots) => slots
+                        .lock()
+                        .ok()
+                        .and_then(|guard| guard.get(idx - frame.base).cloned())
+                        .unwrap_or(Value::Nil),
+                };
+            }
+            match &frame.parent {
+                Some(parent) => frame = &parent.frame,
+                None => return Value::Nil,
+            }
         }
     }
 
-    /// Overwrite one slot (`letfn`/named-`fn` patching only;
-    /// `recur` rebinds a fresh frame instead since #171).
+    /// Extend with fresh slots (the receiver is untouched — only
+    /// the new frame allocates).
+    #[must_use]
+    pub fn extend(&self, values: Vec<Value>) -> Self {
+        let base = self.len();
+        let len = base + values.len();
+        Self {
+            frame: Arc::new(Frame {
+                parent: Some(self.clone()),
+                base,
+                len,
+                slots: Slots::Shared(values.into()),
+            }),
+        }
+    }
+
+    /// Extend with one fresh slot (the single-name `bind_pattern`
+    /// fast path — no `Vec` at all).
+    #[must_use]
+    pub fn extend_one(&self, value: Value) -> Self {
+        let base = self.len();
+        Self {
+            frame: Arc::new(Frame {
+                parent: Some(self.clone()),
+                base,
+                len: base + 1,
+                slots: Slots::Shared(Arc::from([value])),
+            }),
+        }
+    }
+
+    /// Extend with `count` `nil` slots for `letfn`/named-`fn`
+    /// patching: the frame is `Patchable`, so [`set`](Self::set)
+    /// installs each closure where its capturers observe it.
+    #[must_use]
+    pub fn extend_patchable(&self, count: usize) -> Self {
+        let base = self.len();
+        Self {
+            frame: Arc::new(Frame {
+                parent: Some(self.clone()),
+                base,
+                len: base + count,
+                slots: Slots::Patchable(Arc::new(Mutex::new(vec![Value::Nil; count]))),
+            }),
+        }
+    }
+
+    /// Overwrite one slot (`letfn`/named-`fn` patching only, on a
+    /// [`extend_patchable`](Self::extend_patchable) frame;
+    /// `recur` rebinds a fresh frame instead since #171). Setting
+    /// a live shared slot is a caller bug (debug-asserted, ignored
+    /// in release); past-the-end writes are silent no-ops (the old
+    /// out-of-range leniency).
     pub fn set(&self, idx: usize, value: Value) {
-        // Poison is unreachable (nothing panics while holding a
-        // frame lock); recover like `SharedRegistry::lock` so a
-        // poisoned lock keeps the write instead of dropping it.
-        let mut slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(slot) = slots.get_mut(idx) {
-            *slot = value;
+        let mut frame: &Frame = &self.frame;
+        loop {
+            if idx >= frame.base {
+                // Past the whole chain (`[0, base)` is the parent's,
+                // `[base, len)` this frame's): nothing to write.
+                if idx >= frame.len {
+                    return;
+                }
+                if let Slots::Patchable(slots) = &frame.slots {
+                    // Poison is unreachable (nothing panics while
+                    // holding a frame lock); recover like
+                    // `SharedRegistry::lock` so a poisoned lock
+                    // keeps the write instead of dropping it.
+                    let mut guard = slots.lock().unwrap_or_else(|e| e.into_inner());
+                    if let Some(slot) = guard.get_mut(idx - frame.base) {
+                        *slot = value;
+                    }
+                } else {
+                    debug_assert!(false, "set on an immutable frame");
+                }
+                return;
+            }
+            match &frame.parent {
+                Some(parent) => frame = &parent.frame,
+                None => return,
+            }
         }
     }
 }
@@ -1528,5 +1684,94 @@ mod tests {
         let env = Env::new();
         assert!(env.is_empty());
         assert!(!env.extend(vec![Value::Nil]).is_empty());
+    }
+
+    #[test]
+    fn env_linked_frames_read_write() {
+        // Empty env reads nil everywhere.
+        let env = Env::new();
+        assert!(env.is_empty());
+        assert_eq!(env.len(), 0);
+        assert_eq!(env.get(0), Value::Nil);
+        assert_eq!(env.get(99), Value::Nil);
+        assert_eq!(Env::default().len(), 0);
+
+        // Shared extension: absolute indexing, receiver untouched.
+        let e1 = env.extend(vec![Value::Int(1), Value::Int(2)]);
+        assert_eq!(e1.len(), 2);
+        assert_eq!(e1.get(0), Value::Int(1));
+        assert_eq!(e1.get(1), Value::Int(2));
+        assert_eq!(e1.get(2), Value::Nil);
+        assert_eq!(env.len(), 0);
+
+        // `extend_one` chains; reads fall through to the parent.
+        let e2 = e1.extend_one(Value::Int(3));
+        assert_eq!(e2.len(), 3);
+        assert_eq!(e2.get(0), Value::Int(1));
+        assert_eq!(e2.get(2), Value::Int(3));
+        assert_eq!(e2.get(9), Value::Nil);
+
+        // Empty extension keeps the base==len corner sound.
+        let e_empty = e1.extend(vec![]);
+        assert_eq!(e_empty.len(), 2);
+        assert_eq!(e_empty.get(0), Value::Int(1));
+        assert_eq!(e_empty.get(2), Value::Nil);
+
+        // Patchable frames: `set` is visible through the shared Arc.
+        let p = e1.extend_patchable(2);
+        assert_eq!(p.len(), 4);
+        assert_eq!(p.get(2), Value::Nil);
+        p.set(2, Value::Int(20));
+        p.set(3, Value::Int(30));
+        let p_alias = p.clone();
+        assert_eq!(p_alias.get(2), Value::Int(20));
+        assert_eq!(p_alias.get(3), Value::Int(30));
+        // Parent slots still answer through a patchable child.
+        assert_eq!(p_alias.get(0), Value::Int(1));
+        // Setting through a shared child reaches the patchable parent.
+        let child = p.extend_one(Value::Int(40));
+        assert_eq!(child.len(), 5);
+        child.set(2, Value::Int(21));
+        assert_eq!(p.get(2), Value::Int(21));
+        // Out-of-range writes are silent no-ops (old leniency).
+        child.set(99, Value::Int(1));
+        assert_eq!(child.get(99), Value::Nil);
+    }
+
+    #[test]
+    #[should_panic(expected = "immutable frame")]
+    fn env_set_shared_panics_in_debug() {
+        let env = Env::new().extend_one(Value::Nil);
+        env.set(0, Value::Int(1));
+    }
+
+    #[test]
+    fn bindings_counts_track_push_pop_truncate() {
+        let var = |id: u64| Var {
+            id,
+            sym: sym(None, "x"),
+        };
+        let mut b = Bindings::new();
+        assert_eq!(b.get(1), None);
+        b.push_frame(vec![(var(1), Value::Int(1)), (var(2), Value::Int(2))]);
+        assert_eq!(b.get(1), Some(&Value::Int(1)));
+        // A nested re-bind shadows, and its pop restores (refcounts
+        // stack instead of dropping the outer entry).
+        b.push_frame(vec![(var(1), Value::Int(10))]);
+        assert_eq!(b.get(1), Some(&Value::Int(10)));
+        b.pop_frame();
+        assert_eq!(b.get(1), Some(&Value::Int(1)));
+        // Past-the-end truncate is a lenient no-op.
+        b.truncate(99);
+        assert_eq!(b.get(2), Some(&Value::Int(2)));
+        b.truncate(0);
+        assert_eq!(b.get(1), None);
+        assert_eq!(b.get(2), None);
+        assert!(b.pop_frame().is_none());
+        // `set_top` needs no count change.
+        b.push_frame(vec![(var(3), Value::Int(3))]);
+        assert!(b.set_top(3, Value::Int(30)));
+        assert!(!b.set_top(99, Value::Int(0)));
+        assert_eq!(b.get(3), Some(&Value::Int(30)));
     }
 }
