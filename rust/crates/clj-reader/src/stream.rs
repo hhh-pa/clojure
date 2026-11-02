@@ -99,6 +99,18 @@ impl CharStream {
         }
     }
 
+    /// Drain every unconsumed char (`slurp` over readers): the
+    /// pushback char first, then the buffered tail, then a staged
+    /// trailing `\r` as `\n` — the same order [`Self::read`]
+    /// yields, positions tracked likewise.
+    pub fn take_rest(&mut self) -> String {
+        let mut rest = String::new();
+        while let Some(c) = self.read() {
+            rest.push(c);
+        }
+        rest
+    }
+
     /// Read one char, or `None` at EOF (with the EOF line-bump rule).
     /// A staged chunk-trailing `\r` materializes first, past pushback.
     pub fn read(&mut self) -> Option<char> {
@@ -242,6 +254,26 @@ mod tests {
                 (None, 3, 1),
             ]
         );
+    }
+
+    #[test]
+    fn take_rest_drains_unconsumed() {
+        // Empty and full drains.
+        assert_eq!(CharStream::new("").take_rest(), "");
+        assert_eq!(CharStream::new("a\nb").take_rest(), "a\nb");
+        // A partial read leaves its tail.
+        let mut s = CharStream::new("a\nb");
+        assert_eq!(s.read_line(), Some("a".to_owned()));
+        assert_eq!(s.take_rest(), "b");
+        assert_eq!(s.take_rest(), "");
+        // Pushback and a staged trailing `\r` drain in read order.
+        let mut s = CharStream::new("ab");
+        assert_eq!(s.read(), Some('a'));
+        s.unread('a');
+        assert_eq!(s.take_rest(), "ab");
+        let mut s = CharStream::new("");
+        s.extend("a\r");
+        assert_eq!(s.take_rest(), "a\n");
     }
 
     #[test]

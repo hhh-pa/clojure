@@ -73,6 +73,17 @@ const SPEC_TEST_ALPHA_CLJ: &str = include_str!("spec_test_alpha.clj");
 /// [`SPEC_ALPHA_CLJ`].
 const JAVA_SHELL_CLJ: &str = include_str!("java_shell.clj");
 
+/// The embedded `clojure.string` port (upstream master, minus
+/// the `LazilyPersistentVector` import and the reflection
+/// warning — see the file header): served on demand for
+/// `clojure/string`, same shape as [`SPEC_ALPHA_CLJ`].
+const CLOJURE_STRING_CLJ: &str = include_str!("clojure_string.clj");
+
+/// The embedded `clojure.set` port (upstream master, verbatim):
+/// served on demand for `clojure/set`, same shape as
+/// [`SPEC_ALPHA_CLJ`].
+const CLOJURE_SET_CLJ: &str = include_str!("clojure_set.clj");
+
 /// The embedded tools.deps config-layer sources (gap-124 slice 1):
 /// each carries its own `ns` form and loads on demand through the
 /// ordinary `require` path (the `spec_alpha.clj` shape).
@@ -1282,6 +1293,8 @@ const EMBEDDED_SOURCES: &[(&str, &str, &str)] = &[
         "clojure/java/shell.clj",
         JAVA_SHELL_CLJ,
     ),
+    ("clojure/string", "clojure/string.clj", CLOJURE_STRING_CLJ),
+    ("clojure/set", "clojure/set.clj", CLOJURE_SET_CLJ),
     (
         "clojure/tools/deps/util/dir",
         "clojure/tools/deps/util/dir.clj",

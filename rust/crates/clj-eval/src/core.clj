@@ -1497,9 +1497,12 @@
 (defmacro .. [x form & more]
   ;; Expansions build lists (never `list*` conses): nested conses
   ;; print elided and `macroexpand` only loops over lists.
+  ;; A bare symbol is a no-arg member (`(. x member)`), not a
+  ;; field: the JVM tries the zero-arg method first, then the
+  ;; field (`Reflector.invokeNoArgInstanceMember`).
   (let [one (if (seq? form)
               (apply list 'clojure.core/__meth* (list 'quote (first form)) x (next form))
-              (list 'clojure.core/__field* (list 'quote form) x))]
+              (list 'clojure.core/__meth* (list 'quote form) x))]
     (if more
       (apply list 'clojure.core/.. one more)
       one)))

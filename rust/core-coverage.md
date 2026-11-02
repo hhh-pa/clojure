@@ -198,8 +198,8 @@ Type and shape predicates.
 | `seq?` | implemented | `counted_pred_rows` + case assoc-test incl. seq-const (`case_hashes`) |
 | `seqable?` | implemented | `counted_pred_rows` |
 | `record?` | implemented | arith.rs pred_backlog_rows (always false) |
-| `odd?` | implemented | control.rs odd_even (parity) |
-| `even?` | implemented | control.rs odd_even (parity) |
+| `odd?` | implemented | control.rs odd_even (parity, tower ints) |
+| `even?` | implemented | control.rs odd_even (parity, tower ints) |
 
 ## Strings (S5D)
 
@@ -223,10 +223,10 @@ Persistent collections: lookup, update, transients, sets, maps.
 
 | var | status | notes |
 | --- | --- | --- |
-| `count` | implemented | coll.rs count_rows (UTF-16, transients, subvec, walk, UOE) |
-| `empty?` | implemented | coll.rs empty_rows (nil/str/transient, IAE on 5) |
+| `count` | implemented | coll.rs count_rows (UTF-16, transients, subvec, walk, UOE) + host_queue.rs (queues) |
+| `empty?` | implemented | coll.rs empty_rows (nil/str/transient, IAE on 5) + host_queue.rs (queues) |
 | `not-empty` | implemented | coll.rs empty_rows |
-| `seq` | implemented | eager (S5D makes it lazy); nil-punning |
+| `seq` | implemented | eager (S5D makes it lazy); nil-punning; queues seq front-to-back (host_queue.rs) |
 | `first` | implemented | control.rs key_val + lazy_seq_star_rows + case_star_shape |
 | `second` | implemented | coll.rs pos_rows |
 | `last` | implemented | coll.rs pos_rows (string→char, nil, IAE) |
@@ -236,7 +236,7 @@ Persistent collections: lookup, update, transients, sets, maps.
 | `fnext` | implemented | coll.rs pos_rows |
 | `nfirst` | implemented | coll.rs pos_rows (+IAE) |
 | `cons` | implemented | str.rs str_seq_contents + coll.rs counted_pred_rows |
-| `conj` | implemented | coll.rs conj_rows (pair-arg, map CCEs, subvec class) |
+| `conj` | implemented | coll.rs conj_rows (pair-arg, map CCEs, subvec class) + host_queue.rs (queue append) |
 | `assoc` | implemented | coll.rs assoc_rows (Key-must-be-int, odd-arity IAE, subvec class) |
 | `dissoc` | implemented | coll.rs dissoc_rows (nil/1-arity passthrough, transient CCE) |
 | `get` | implemented | coll.rs get_rows (nil-pun, strings, transients, subvec) |
@@ -252,7 +252,7 @@ Persistent collections: lookup, update, transients, sets, maps.
 | `vector` | implemented | early for syntax-quote (S5C) |
 | `list` | implemented | early for syntax-quote (S5C) |
 | `list*` | implemented | coll.rs list_star_rows |
-| `nth` | implemented | coll.rs nth_rows (f64 truncate, coerce-first, UOE/SIOOBE/IOOBE); neg+:nf→:nf matches RT.java nthFrom |
+| `nth` | implemented | coll.rs nth_rows (f64 truncate, coerce-first, UOE/SIOOBE/IOOBE); neg+:nf→:nf matches RT.java nthFrom; queues read front-to-back (host_queue.rs) |
 | `update` | implemented | coll.rs update_rows |
 | `update-in` | implemented | coll.rs in_rows |
 | `assoc-in` | implemented | coll.rs in_rows |
@@ -267,8 +267,8 @@ Persistent collections: lookup, update, transients, sets, maps.
 | `assoc!` | implemented | coll.rs transient_rows (Key-must-be-int, wrong-kind CCE) |
 | `dissoc!` | implemented | coll.rs transient_rows (wrong-kind CCE) |
 | `pop!` | implemented | coll.rs transient_rows (empty ISE, map-kind CCE) |
-| `peek` | implemented | coll.rs peek_pop_rows (nil-pun, IPersistentStack CCE) |
-| `pop` | implemented | coll.rs peek_pop_rows; subvec 2→1 stays SubVector per APersistentVector.java pop() |
+| `peek` | implemented | coll.rs peek_pop_rows (nil-pun, IPersistentStack CCE) + host_queue.rs (queue front) |
+| `pop` | implemented | coll.rs peek_pop_rows; subvec 2→1 stays SubVector per APersistentVector.java pop(); queues drop front, empty stays empty (host_queue.rs) |
 | `subvec` | implemented | coll.rs subvec_rows (s==e→EMPTY, nesting, invoke arity) |
 | `replace` | implemented | coll.rs replace_rows (vector/subvec stay, else LazySeq) |
 | `into` | implemented | coll.rs into_rows + 3-arg xform (T1200 transduce_rows; probes xform.out) |
@@ -427,7 +427,7 @@ Printing, reading, files, and print dynamic vars.
 | `flush` | implemented | tests/io.rs io_smoke_rows |
 | `*out*` | implemented | dynamic root; control.rs boot_dynamics + with_out_str_rows (rebind) |
 | `*err*` | implemented | dynamic root; control.rs boot_dynamics (root + referred) |
-| `slurp` | implemented | tests/io.rs io_smoke_rows (roundtrip) |
+| `slurp` | implemented | tests/io.rs io_smoke_rows (roundtrip) + slurp_reader_rows (reader drain) |
 | `spit` | implemented | tests/io.rs io_smoke_rows (:append) |
 | `read-string` | implemented | tests/io.rs io_smoke_rows (S2, 1 form); denies reader conditionals (S-instream, instream_read_string_deny_row); 2-arity opts (F-read-opts, read_string_opts_rows; probes rs-opts-*) |
 | `*print-length*` | implemented | dyn var, root+meta; control.rs boot_dynamics |

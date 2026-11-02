@@ -462,6 +462,9 @@ fn conj_one(eval: &mut Evaluator, coll: &Value, x: Value) -> Result<Value, Nativ
             if let Some(sv) = as_subvector(coll) {
                 return Ok(subvector_conj(sv, x));
             }
+            if let Some(q) = crate::hostvals::as_queue(coll) {
+                return Ok(q.conj(x));
+            }
             if is_seq_value(coll) {
                 return Ok(Value::Extension(Arc::new(ConsValue::new(x, coll.clone()))));
             }
@@ -650,6 +653,9 @@ fn count_transient(t: &Transient) -> Result<i64, NativeError> {
 fn count_fallback(eval: &mut Evaluator, v: &Value) -> Result<i64, NativeError> {
     if let Some(sv) = as_subvector(v) {
         return Ok(sv.len() as i64);
+    }
+    if let Some(q) = crate::hostvals::as_queue(v) {
+        return Ok(q.len() as i64);
     }
     if let Some(r) = as_range(v) {
         // A `BigDec`/ratio step with no exact decimal raises on
@@ -1419,6 +1425,12 @@ pub(crate) fn native_nth(eval: &mut Evaluator, args: &[Value]) -> Result<Value, 
     {
         return nth_indexed(coll, n, not_found);
     }
+    // Queues read front-to-back with the indexed miss rule (JVM
+    // `nth` over `IPersistentCollection`, oracle `/tmp/queue.clj`).
+    if let Some(q) = crate::hostvals::as_queue(coll) {
+        let found = usize::try_from(n).ok().and_then(|idx| q.nth(idx));
+        return nth_indexed_found(found, not_found);
+    }
     // Arrays: `not-found` on OOB, else the empty `AIOOBE` (S15
     // oracles `a-nth`, `a-nth-nf`, `a-nth-oob`, `e-nth-float`,
     // `n-arr-str`, `n-arr-nil`).
@@ -1934,6 +1946,9 @@ fn native_peek(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErr
             if let Some(sv) = as_subvector(&args[0]) {
                 return Ok(sv.iter().last().cloned().unwrap_or(Value::Nil));
             }
+            if let Some(q) = crate::hostvals::as_queue(&args[0]) {
+                return Ok(q.peek().cloned().unwrap_or(Value::Nil));
+            }
             Err(cce_err(&args[0], "clojure.lang.IPersistentStack"))
         }
     }
@@ -1980,8 +1995,12 @@ fn pop_pv(p: &PrimitiveVector) -> Result<Value, NativeError> {
     ))
 }
 
-/// `pop` over anything else (subvectors shrink; the rest fail).
+/// `pop` over anything else (subvectors shrink, queues drop
+/// their front with empty staying empty, the rest fail).
 fn pop_fallback(arg: &Value) -> Result<Value, NativeError> {
+    if let Some(q) = crate::hostvals::as_queue(arg) {
+        return Ok(q.pop());
+    }
     if let Some(sv) = as_subvector(arg) {
         if sv.len() == 1 {
             return Ok(Value::Vector(Vector::from_vec(Vec::new())));
