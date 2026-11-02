@@ -121,6 +121,12 @@ const STDLIB_PPRINT_BASE_CLJ: &str = include_str!("stdlib/clojure/pprint/pprint_
 const STDLIB_PPRINT_CL_FORMAT_CLJ: &str = include_str!("stdlib/clojure/pprint/cl_format.clj");
 const STDLIB_PPRINT_DISPATCH_CLJ: &str = include_str!("stdlib/clojure/pprint/dispatch.clj");
 const STDLIB_PPRINT_PRINT_TABLE_CLJ: &str = include_str!("stdlib/clojure/pprint/print_table.clj");
+// W6 (runtime-ish) — do not merge by hand, integrator resolves.
+const W6_SERVER_CLJ: &str = include_str!("stdlib/clojure/core/server.clj");
+const W6_REDUCERS_CLJ: &str = include_str!("stdlib/clojure/core/reducers.clj");
+const W6_PARALLEL_CLJ: &str = include_str!("stdlib/clojure/parallel.clj");
+const W6_CORE_PROXY_CLJ: &str = include_str!("stdlib/clojure/core_proxy.clj");
+const W6_XML_CLJ: &str = include_str!("stdlib/clojure/xml.clj");
 
 const TOOLS_DEPS_UTIL_DIR_CLJ: &str = include_str!("tools_deps_util_dir.clj");
 const TOOLS_DEPS_EDN_CLJ: &str = include_str!("tools_deps_edn.clj");
@@ -1491,6 +1497,24 @@ const EMBEDDED_SOURCES: &[(&str, &str, &str)] = &[
         "clojure/pprint/print_table.clj",
         STDLIB_PPRINT_PRINT_TABLE_CLJ,
     ),
+    // W6 (runtime-ish) — do not merge by hand, integrator resolves.
+    (
+        "clojure/core/server",
+        "clojure/core/server.clj",
+        W6_SERVER_CLJ,
+    ),
+    (
+        "clojure/core/reducers",
+        "clojure/core/reducers.clj",
+        W6_REDUCERS_CLJ,
+    ),
+    ("clojure/parallel", "clojure/parallel.clj", W6_PARALLEL_CLJ),
+    (
+        "clojure/core_proxy",
+        "clojure/core_proxy.clj",
+        W6_CORE_PROXY_CLJ,
+    ),
+    ("clojure/xml", "clojure/xml.clj", W6_XML_CLJ),
 ];
 
 /// Resolve a load root (no leading slash) to the `*file*` path and
