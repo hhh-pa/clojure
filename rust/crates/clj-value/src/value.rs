@@ -412,9 +412,14 @@ impl Vector {
 
     /// Append a value.
     #[must_use]
-    pub fn push_back(self, v: Value) -> Self {
+    pub fn push_back(mut self, v: Value) -> Self {
+        // Owned `self` means no other handle to this vector: mutate the
+        // trie in place instead of cloning the spine per push (rpds
+        // `push_back(&self)` clones unconditionally; `push_back_mut`
+        // still path-copies nodes shared with *other* versions).
+        self.inner.push_back_mut(v);
         Self {
-            inner: self.inner.push_back(v),
+            inner: self.inner,
             meta: self.meta,
             id: next_vector_id(),
         }

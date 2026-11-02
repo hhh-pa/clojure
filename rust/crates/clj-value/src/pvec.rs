@@ -73,7 +73,7 @@ impl PrimitiveVector {
     pub fn new(elem: Elem8, items: Vec<Value>, meta: Option<Arc<Map>>) -> Self {
         let mut inner = RpdsVector::new_sync();
         for v in items {
-            inner = inner.push_back(v);
+            inner.push_back_mut(v);
         }
         Self {
             elem,
