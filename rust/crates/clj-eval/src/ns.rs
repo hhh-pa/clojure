@@ -94,6 +94,13 @@ const STDLIB_TEST_CLJ: &str = include_str!("stdlib/clojure/test.clj");
 const STDLIB_TEST_JUNIT_CLJ: &str = include_str!("stdlib/clojure/test/junit.clj");
 const STDLIB_TEST_TAP_CLJ: &str = include_str!("stdlib/clojure/test/tap.clj");
 
+// W4 (entry/IO) — do not merge by hand, integrator resolves
+const STDLIB_EDN_CLJ: &str = include_str!("stdlib/clojure/edn.clj");
+const STDLIB_REPL_CLJ: &str = include_str!("stdlib/clojure/repl.clj");
+const STDLIB_MAIN_CLJ: &str = include_str!("stdlib/clojure/main.clj");
+const STDLIB_STACKTRACE_CLJ: &str = include_str!("stdlib/clojure/stacktrace.clj");
+const STDLIB_CORE_PRINT_CLJ: &str = include_str!("stdlib/clojure/core_print.clj");
+
 const TOOLS_DEPS_UTIL_DIR_CLJ: &str = include_str!("tools_deps_util_dir.clj");
 const TOOLS_DEPS_EDN_CLJ: &str = include_str!("tools_deps_edn.clj");
 const TOOLS_DEPS_EXTENSIONS_CLJ: &str = include_str!("tools_deps_extensions.clj");
@@ -1374,6 +1381,20 @@ const EMBEDDED_SOURCES: &[(&str, &str, &str)] = &[
         "clojure/test/tap",
         "clojure/test/tap.clj",
         STDLIB_TEST_TAP_CLJ,
+    ),
+    // W4 (entry/IO) — do not merge by hand, integrator resolves
+    ("clojure/edn", "clojure/edn.clj", STDLIB_EDN_CLJ),
+    ("clojure/repl", "clojure/repl.clj", STDLIB_REPL_CLJ),
+    ("clojure/main", "clojure/main.clj", STDLIB_MAIN_CLJ),
+    (
+        "clojure/stacktrace",
+        "clojure/stacktrace.clj",
+        STDLIB_STACKTRACE_CLJ,
+    ),
+    (
+        "clojure/core_print",
+        "clojure/core_print.clj",
+        STDLIB_CORE_PRINT_CLJ,
     ),
 ];
 
