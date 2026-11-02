@@ -959,10 +959,8 @@ mod tests {
             .chain(XML_NATIVES.iter())
             .find(|(n, _)| *n == name)
             .unwrap_or_else(|| panic!("no such native: {name}"));
-        match f(eval, args) {
-            Ok(v) => panic!("{name} unexpectedly ok: {v:?}"),
-            Err(e) => format!("{} | {}", e.class.jvm_name(), e.message),
-        }
+        let e = f(eval, args).expect_err("call_err expects an error");
+        format!("{} | {}", e.class.jvm_name(), e.message)
     }
 
     fn str_val(s: &str) -> Value {
@@ -974,11 +972,34 @@ mod tests {
         call(eval, "__server-socket*", &[Value::Nil, Value::Int(0)])
     }
 
-    fn server_port(eval: &mut Evaluator, sock: &Value) -> u16 {
-        match call(eval, "__server-port*", std::slice::from_ref(sock)) {
-            Value::Int(p) => p as u16,
-            v => panic!("port not an int: {v:?}"),
+    fn expect_int(v: &Value) -> i64 {
+        match v {
+            Value::Int(n) => *n,
+            _ => panic!("int expected"),
         }
+    }
+
+    #[test]
+    #[should_panic(expected = "int expected")]
+    fn expect_int_rejects_non_int() {
+        expect_int(&Value::Nil);
+    }
+
+    fn expect_extension(v: &Value) -> std::sync::Arc<dyn ExtensionValue> {
+        match v {
+            Value::Extension(e) => e.clone(),
+            _ => panic!("extension expected"),
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "extension expected")]
+    fn expect_extension_rejects_non_extension() {
+        expect_extension(&Value::Nil);
+    }
+
+    fn server_port(eval: &mut Evaluator, sock: &Value) -> u16 {
+        expect_int(&call(eval, "__server-port*", std::slice::from_ref(sock))) as u16
     }
 
     /// Dial a server through the native (returns the client conn).
@@ -1367,15 +1388,10 @@ mod tests {
         call(&mut eval, "__socket-close*", std::slice::from_ref(&peer));
         drop(peer);
         let big = "x".repeat(1 << 20);
-        let mut errored = false;
-        for _ in 0..50 {
-            if call_err(&mut eval, "__socket-write*", &[conn.clone(), str_val(&big)])
+        let errored = (0..50).any(|_| {
+            call_err(&mut eval, "__socket-write*", &[conn.clone(), str_val(&big)])
                 .starts_with("java.io.IOException |")
-            {
-                errored = true;
-                break;
-            }
-        }
+        });
         assert!(errored, "writes to a dead peer must eventually fail");
     }
 
@@ -1385,10 +1401,9 @@ mod tests {
         let t1 = call(&mut eval, "__nano-time*", &[]);
         std::thread::sleep(Duration::from_millis(2));
         let t2 = call(&mut eval, "__nano-time*", &[]);
-        match (t1, t2) {
-            (Value::Int(a), Value::Int(b)) => assert!(b >= a, "monotonic: {a} -> {b}"),
-            other => panic!("ints expected: {other:?}"),
-        }
+        let a = expect_int(&t1);
+        let b = expect_int(&t2);
+        assert!(b >= a, "monotonic: {a} -> {b}");
     }
 
     #[test]
@@ -1397,16 +1412,12 @@ mod tests {
         let sock = bind_server(&mut eval);
         let port = server_port(&mut eval, &sock);
         let conn = dial(&mut eval, port);
-        let ext = |v: &Value| match v {
-            Value::Extension(e) => e.clone(),
-            _ => panic!("extension expected"),
-        };
-        let s = ext(&sock);
+        let s = expect_extension(&sock);
         assert_eq!(s.class_name(), "java.net.ServerSocket");
         assert!(s.print().starts_with("#object[java.net.ServerSocket 0x"));
         assert!(s.dyn_eq(s.as_ref()));
-        assert!(!s.dyn_eq(ext(&conn).as_ref()));
-        let c = ext(&conn);
+        assert!(!s.dyn_eq(expect_extension(&conn).as_ref()));
+        let c = expect_extension(&conn);
         assert_eq!(c.class_name(), "java.net.Socket");
         assert!(c.print().starts_with("#object[java.net.Socket 0x"));
         assert!(c.dyn_eq(c.as_ref()));
