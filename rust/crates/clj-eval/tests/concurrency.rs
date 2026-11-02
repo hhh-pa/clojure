@@ -3644,7 +3644,17 @@ fn send_via_custom_executor_survives_shutdown() {
         "(send-via svx sva (fn [s] (deliver svp :ran) 7))",
     );
     assert_eq!(run_last(&mut eval, "(deref svp 8000 :timeout)"), ":ran");
-    assert_eq!(run_last(&mut eval, "@sva"), "7");
+    // The publish lands after the deliver; poll (bounded) for it
+    // (the deref unblocks inside the action, before the new state
+    // commits — an immediate read races and flakes, as seen on a
+    // loaded Windows runner: observed "0", wanted "7").
+    let start = std::time::Instant::now();
+    while run_last(&mut eval, "@sva") != "7" {
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(10),
+            "action never published"
+        );
+    }
     // ... and a second send reuses the born-shut pools.
     run(&mut eval, "(def svp2 (promise))");
     run(
@@ -3652,7 +3662,13 @@ fn send_via_custom_executor_survives_shutdown() {
         "(send-via svx sva (fn [s] (deliver svp2 :ran2) 8))",
     );
     assert_eq!(run_last(&mut eval, "(deref svp2 8000 :timeout)"), ":ran2");
-    assert_eq!(run_last(&mut eval, "@sva"), "8");
+    let start = std::time::Instant::now();
+    while run_last(&mut eval, "@sva") != "8" {
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(10),
+            "second action never published"
+        );
+    }
 }
 
 #[test]
