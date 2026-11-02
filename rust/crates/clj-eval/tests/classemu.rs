@@ -3508,9 +3508,12 @@ fn dotdot_expansions() {
         run(&mut eval, "(macroexpand '(.. \"a\" (toString) (length)))"),
         "(clojure.core/__meth* (quote length) (clojure.core/__meth* (quote toString) \"a\"))"
     );
+    // Bare symbols lower to `__meth*` (method-first per
+    // `Reflector/invokeNoArgInstanceMember` — the JVM answers "a"
+    // for `(.. "a" toString)`), never to a field-only read.
     assert_eq!(
         run(&mut eval, "(macroexpand-1 '(.. rect p))"),
-        "(clojure.core/__field* (quote p) rect)"
+        "(clojure.core/__meth* (quote p) rect)"
     );
     assert_eq!(
         uncaught(&mut eval, "(macroexpand-1 '(.. x))"),
@@ -3534,6 +3537,13 @@ fn dotdot_expansions() {
 fn dotdot_threading() {
     let mut eval = boot();
     assert_eq!(run(&mut eval, "(.. \"a\" (toString))"), "\"a\"");
+    // Bare symbols call 0-arg methods (upstream `clojure.string/trim`
+    // ends `(.. s (subSequence l r) toString)` — JVM oracle).
+    assert_eq!(run(&mut eval, "(.. \"a\" toString)"), "\"a\"");
+    assert_eq!(
+        run(&mut eval, "(.. \"abc\" (subSequence 0 1) toString)"),
+        "\"a\""
+    );
     assert_eq!(
         run(&mut eval, "(.. \"abc\" (toString) (toString))"),
         "\"abc\""
@@ -3558,12 +3568,12 @@ fn dotdot_threading() {
             "{src}"
         );
     }
-    // Field position (`__field*`, not a call) keeps the miss shape
-    // — no oracle row covers field-read on nil (the JVM NPEs there
-    // too; follow-up).
+    // Bare symbols lower to `__meth*` (method-first), so nil targets
+    // NPE exactly like the JVM oracle
+    // (`(.. nil nosuch_xyz)` → `NullPointerException`).
     assert_eq!(
         uncaught(&mut eval, "(.. nil nosuch_xyz)"),
-        "java.lang.IllegalArgumentException | No matching field found: nosuch_xyz for class null"
+        "java.lang.NullPointerException | Cannot invoke \"Object.getClass()\" because \"target\" is null"
     );
     assert_eq!(
         uncaught(&mut eval, "(.. \"a\" (nosuch_xyz))"),
