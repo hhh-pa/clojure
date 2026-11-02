@@ -1808,35 +1808,27 @@ impl Evaluator {
     }
 
     /// Invoke a keyword/symbol by name (split from [`invoke`](Self::invoke)
-    /// for the complexity budget — the shared [`invoke_keyed`](Self::invoke_keyed)
-    /// names arity errors per kind).
+    /// for the complexity budget). The arity-error name builds lazily —
+    /// `Keyword::to_string` never runs on the hit path.
     fn invoke_keyed_name(&mut self, callee: &Value, args: &[Value]) -> Result<Value, Signal> {
-        let name = match callee {
-            Value::Keyword(kw) => kw.to_string(),
-            _ => "clojure.lang.Symbol".to_owned(),
-        };
-        self.invoke_keyed(callee, &name, args)
-    }
-
-    fn invoke_keyed(
-        &mut self,
-        callee: &Value,
-        name: &str,
-        args: &[Value],
-    ) -> Result<Value, Signal> {
         match args {
             [coll] => Ok(lookup(coll, callee).unwrap_or(Value::Nil)),
             [coll, not_found] => Ok(lookup(coll, callee).unwrap_or_else(|| not_found.clone())),
-            _ => Err(self.throw(NativeError::arity(name, args.len()))),
+            _ => {
+                let name = match callee {
+                    Value::Keyword(kw) => kw.to_string(),
+                    _ => "clojure.lang.Symbol".to_owned(),
+                };
+                Err(self.throw(NativeError::arity(&name, args.len())))
+            }
         }
     }
 
     fn invoke_map(&mut self, callee: &Value, args: &[Value]) -> Result<Value, Signal> {
-        let name = jvm_class_of(callee);
         match args {
             [key] => Ok(lookup(callee, key).unwrap_or(Value::Nil)),
             [key, not_found] => Ok(lookup(callee, key).unwrap_or_else(|| not_found.clone())),
-            _ => Err(self.throw(NativeError::arity(&name, args.len()))),
+            _ => Err(self.throw(NativeError::arity(&jvm_class_of(callee), args.len()))),
         }
     }
 
@@ -1868,15 +1860,17 @@ impl Evaluator {
         }
     }
 
-    /// Invoke an extension value: closures apply, natives run,
+    /// Invoke an extension value: natives run, closures apply,
     /// struct accessors read, anything else is the `IFn` cast error.
+    /// Natives dispatch first (every core-fn call is one — a closure
+    /// callee pays one extra failed downcast instead).
     fn invoke_extension(&mut self, callee: &Value, args: &[Value]) -> Result<Value, Signal> {
-        if let Some(closure) = as_closure(callee) {
-            return self.apply_closure(closure, args);
-        }
         if let Some(native) = as_native(callee) {
             let func = Arc::clone(&native.func);
             return func(self, args).map_err(|e| self.throw(e));
+        }
+        if let Some(closure) = as_closure(callee) {
+            return self.apply_closure(closure, args);
         }
         if let Some(sv) = crate::lazy::as_subvector(callee) {
             return self.invoke_subvector(sv, args);
