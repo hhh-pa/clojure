@@ -1033,7 +1033,7 @@ fn native_resource(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Native
     for dir in crate::ns::load_dirs(eval)? {
         let hit = std::path::Path::new(&dir).join(name.as_ref());
         if hit.is_file() {
-            let abs = resource_abs(&hit);
+            let abs = resource_abs(&hit)?;
             let encoded = abs
                 .replace('%', "%25")
                 .replace(' ', "%20")
@@ -1050,15 +1050,14 @@ fn native_resource(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Native
 
 /// An absolute path string for a resource hit (load dirs are
 /// absolute in practice; relative ones resolve against the
-/// process directory).
-fn resource_abs(hit: &std::path::Path) -> String {
+/// process directory — a deleted working directory errors
+/// instead of answering a relative path as absolute).
+fn resource_abs(hit: &std::path::Path) -> Result<String, NativeError> {
     if hit.is_absolute() {
-        return hit.to_string_lossy().into_owned();
+        return Ok(hit.to_string_lossy().into_owned());
     }
-    std::env::current_dir().map_or_else(
-        |_| hit.to_string_lossy().into_owned(),
-        |cwd| cwd.join(hit).to_string_lossy().into_owned(),
-    )
+    let cwd = std::env::current_dir().map_err(io_err)?;
+    Ok(cwd.join(hit).to_string_lossy().into_owned())
 }
 
 /// The seven facsimile natives installed into `clojure.java.io`.

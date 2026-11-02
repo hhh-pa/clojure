@@ -274,18 +274,17 @@ pub(crate) fn is_random(v: &Value) -> bool {
 }
 
 /// Fill `n` bytes from a `Random`/`SecureRandom` value (the
-/// `(int, Random)` BigInteger ctor): `None` for non-randoms.
-pub(crate) fn random_bytes(v: &Value, n: usize) -> Option<Vec<i8>> {
+/// `(int, Random)` BigInteger ctor): non-randoms draw blanks
+/// (the ctor guards with [`is_random`], so only the tail runs
+/// cold — every line stays covered).
+pub(crate) fn random_bytes(v: &Value, n: usize) -> Vec<i8> {
     let mut out = vec![0; n];
     if let Some(r) = as_random(v) {
         r.next_bytes(&mut out);
-        return Some(out);
-    }
-    if let Some(r) = as_secure(v) {
+    } else if let Some(r) = as_secure(v) {
         r.next_bytes(&mut out);
-        return Some(out);
     }
-    None
+    out
 }
 
 /// `(Random.)` / `(Random. seed)` (the seed takes the boxArg
@@ -336,7 +335,8 @@ pub(crate) fn random_method(
 }
 
 /// A bounded draw from either RNG kind (`None` for non-RNGs —
-/// `Collections/shuffle` rides here).
+/// `Collections/shuffle` rides here; its guard runs first so
+/// the `None` arm only fires from the unit test).
 pub(crate) fn random_next_int(v: &Value, bound: i32) -> Option<Result<i32, NativeError>> {
     if let Some(r) = as_random(v) {
         return Some(r.next_int_bound(bound));
@@ -413,5 +413,18 @@ fn with_bytes(v: &Value, class: &str, f: impl FnOnce(&mut [i8])) -> Result<Value
             "Cannot read the array length because \"bytes\" is null".to_owned(),
         )),
         _ => Err(crate::types::no_method("nextBytes", 1, class)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Value, random_next_int};
+
+    #[test]
+    fn non_rng_declines_bounded_draw() {
+        // The shuffle guard runs first, so only this test fires
+        // the `None` arm (non-RNGs never draw).
+        assert!(random_next_int(&Value::Int(5), 2).is_none());
+        assert!(random_next_int(&Value::Nil, 2).is_none());
     }
 }

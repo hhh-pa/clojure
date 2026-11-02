@@ -865,7 +865,7 @@ fn bigint_random_bits(num_bits: i32, rnd: &Value) -> Result<Value, NativeError> 
         ));
     }
     let nbytes = (num_bits as usize).div_ceil(8);
-    let bytes = crate::emurand::random_bytes(rnd, nbytes).unwrap_or_default();
+    let bytes = crate::emurand::random_bytes(rnd, nbytes);
     let mut mag: Vec<u8> = bytes.into_iter().map(|b| b as u8).collect();
     let excess = nbytes * 8 - num_bits as usize;
     if excess > 0 {
@@ -909,4 +909,22 @@ fn encode_utf32_words(s: &str, little: bool, bom: bool) -> Vec<u8> {
         out.extend_from_slice(&bytes);
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_mathcontext;
+    use crate::eval::Evaluator;
+
+    #[test]
+    fn mathcontext_arity_miss() {
+        // Surface syntax rejects bare/3+ arg ctors at compile
+        // time, so the runtime fallthrough pins directly.
+        let mut eval = Evaluator::new_bare("user");
+        let e = build_mathcontext(&mut eval, &[]).expect_err("bare misses");
+        assert_eq!(
+            e.message,
+            "No matching ctor found for class java.math.MathContext"
+        );
+    }
 }

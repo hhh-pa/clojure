@@ -1197,4 +1197,15 @@ mod tests {
         // dispatch bug could).
         let _ = ThrowClass::ExceptionInfo.jvm_name_rest();
     }
+
+    #[test]
+    fn general_security_jvm_name() {
+        // Nothing throws bare `GeneralSecurityException` (digests
+        // throw the `NoSuchAlgorithmException` subclass), so the
+        // name mapping pins directly.
+        assert_eq!(
+            ThrowClass::GeneralSecurityException.jvm_name(),
+            "java.security.GeneralSecurityException"
+        );
+    }
 }
