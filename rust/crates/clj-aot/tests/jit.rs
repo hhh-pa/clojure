@@ -48,6 +48,25 @@ fn jit_runs_control_flow() {
 }
 
 #[test]
+fn jit_runs_loop_recur() {
+    // Countdown, accumulation (the sum pins the value: anything
+    // but 5050 aborts), rebinding order (the swap), and nesting.
+    assert_eq!(
+        run("(print (loop [i 0] (if (= i 3) i (recur (+ i 1)))))"),
+        0
+    );
+    assert_eq!(
+        run(
+            "(let [s (loop [i 1 acc 0] (if (> i 100) acc (recur (+ i 1) (+ acc i))))] \
+             (if (= s 5050) (print s) (quot 1 0))) \
+             (print (loop [a 1 b 2] (if (= a 2) [a b] (recur b a)))) \
+             (print (loop [i 0] (if (= i 2) (loop [j 10] (if (= j 12) (+ i j) (recur (+ j 1)))) (recur (+ i 1)))))"
+        ),
+        0
+    );
+}
+
+#[test]
 fn jit_survives_untaken_let_branches() {
     assert_eq!(
         run("(defn f [c] (if c (let [x 1] x) (let [y 2] y))) \

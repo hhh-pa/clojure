@@ -5,11 +5,13 @@ pins `s8-pins.md`). Truth source: `s8-pins.md` (P1–P5).
 
 ## Layout
 
-- `00-empty`–`05-print`: supported programs. `expected/NN.out`
-  = stdout goldens (seeded from `run`, exit 0, stderr
-  empty); `expected/jvm/NN.jvm.out` = JVM script-mode
-  goldens, byte-identical at commission (triple-grounded:
-  interpreter == JVM; AOT must match both).
+- `00-empty`–`05-print`, `11-loop`, `12-when`: supported programs.
+  `expected/NN.out` = stdout goldens (seeded from `run`,
+  exit 0, stderr empty); `expected/jvm/NN.jvm.out` = JVM
+  script-mode goldens, byte-identical at commission
+  (triple-grounded: interpreter == JVM; AOT must match
+  both — `11-loop.jvm.out` via Clojure 1.11.3,
+  `12-when.jvm.out` via Clojure 1.13.0-alpha10).
 - `06-err-*`–`09-err-*`: runtime-error programs (in-subset
   forms that fail at runtime). `expected/NN.out` = partial
   stdout (`before ` — flushed on both paths); `.runerr` =
@@ -92,6 +94,12 @@ $B build NN-topic.clj -o /tmp/s8/NN && /tmp/s8/NN | diff - expected/NN-topic.out
 - `06-err-quot0`, `07-err-nth`, `08-err-count`,
   `09-err-arity`: abort-path pins (each error class +
   the stdout flush).
+- `11-loop`: `loop`/`recur` (countdown, accumulation,
+  rebinding order, nesting, `defn` bodies).
+- `12-when`: `when`/`when-not` (branch taken/skipped,
+  multi-body, nil results).
+- `unsupported/02-loop`: `loop` with destructuring (still
+  out — names `loop`); plain-symbol loops compile (see `11-loop`).
 
 ## Regression test
 

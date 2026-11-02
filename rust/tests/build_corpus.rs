@@ -168,8 +168,9 @@ fn jit_file(path: &std::path::Path, args: &[&str]) -> (Vec<u8>, Vec<u8>, i32) {
 
 #[test]
 fn supported_files_match_run_byte_for_byte() {
-    // 00-05: both paths exit 0, empty stderr, stdout == the
-    // `run`-seeded golden (which itself matches the JVM golden).
+    // 00-05 + 11-loop: both paths exit 0, empty stderr,
+    // stdout == the `run`-seeded golden (which itself matches
+    // the JVM golden).
     let corpus = corpus_dir();
     let files = [
         "00-empty",
@@ -178,6 +179,8 @@ fn supported_files_match_run_byte_for_byte() {
         "03-types",
         "04-let-do-if",
         "05-print",
+        "11-loop",
+        "12-when",
     ];
     for stem in files {
         let path = corpus.join(format!("{stem}.clj"));
@@ -310,14 +313,14 @@ fn unsupported_files_fail_build_but_run() {
             1,
             8,
             "loop",
-            "the AOT subset is loop-free; use direct self-recursion",
+            "destructuring is outside the subset; bind plain symbols",
         ),
         (
             "03-recur",
             1,
             27,
             "recur",
-            "recur is outside the subset; call the function by name",
+            "recur outside loop is outside the subset; call the function by name",
         ),
         (
             "04-try",
@@ -349,13 +352,8 @@ fn unsupported_files_fail_build_but_run() {
             "ns",
             "AOT programs are single-file, without namespaces",
         ),
-        (
-            "10-when",
-            1,
-            1,
-            "when",
-            "macros are not expanded in the AOT subset",
-        ),
+        // (`10-when` graduated to supported `12-when`: `when` /
+        // `when-not` are in-subset since the macro-forms slice.)
         (
             "11-defmacro",
             1,

@@ -20,14 +20,14 @@
 //! 2. Classify the ORIGINAL surface (pre-expansion — the `defn`
 //!    macro's expansion holds `alter-meta!`/`var`, and other
 //!    macros must NOT leak through expansion): single-clause
-//!    fixed-arity `defn`, `if`/`do`/`let`, the `cond`/`and`/`or`/
-//!    `when`/`when-not` macro-forms (desugared to `If`/`Do`/`Let`
-//!    with the macros' exact short-circuit semantics), subset
-//!    literals, direct sibling calls, closed-primitive calls,
-//!    `print`. Anything else is a [`SubsetError`] naming the
-//!    form. (`loop`/`recur`, transients, and the remaining
-//!    macros are later slices' work — the boundary is the
-//!    [`SubsetError`] table below, not an accident.)
+//!    fixed-arity `defn`, `if`/`do`/`let`/`loop`, tail `recur`,
+//!    the `cond`/`and`/`or`/`when`/`when-not` macro-forms
+//!    (desugared to `If`/`Do`/`Let` with the macros' exact
+//!    short-circuit semantics), subset literals, direct sibling
+//!    calls, closed-primitive calls, `print`. Anything else is a
+//!    [`SubsetError`] naming the form. (The remaining macros are
+//!    later slices' work — the boundary is the [`SubsetError`]
+//!    table below, not an accident.)
 //!
 //! Validation runs before classification per form, so the first
 //! failure in source order wins regardless of kind, and anything
@@ -145,6 +145,21 @@ pub enum SubsetExpr {
         bindings: Vec<(usize, SubsetExpr)>,
         body: Vec<SubsetExpr>,
     },
+    /// A `loop` over flat frame slots: the inits bind once, then
+    /// the body runs; a tail [`SubsetExpr::Recur`] rebinds the
+    /// slots and restarts the body, any other completion yields
+    /// the body's value (empty bodies yield nil). Nested loops
+    /// shadow outer targets (innermost wins, like the analyzer).
+    Loop {
+        bindings: Vec<(usize, SubsetExpr)>,
+        body: Vec<SubsetExpr>,
+    },
+    /// A tail `recur` to the innermost enclosing `loop`: one arg
+    /// per binding slot, all evaluated before any slot rebinds
+    /// (so `(recur b a)` swaps). The planner guarantees tail
+    /// position and arity — lowering stores the args and
+    /// branches to the loop head, never checking.
+    Recur(Vec<SubsetExpr>),
     CallPrim {
         prim: Prim,
         args: Vec<SubsetExpr>,
@@ -174,8 +189,8 @@ pub enum SubsetExpr {
 
 /// One planned top-level `defn`: fixed arity, single body, flat
 /// frame (`frame_slots` covers params `0..arity` plus every
-/// `let`-allocated slot; slots never reuse, so the frame is a
-/// sound over-approximation by construction).
+/// `let`/`loop`-allocated slot; slots never reuse, so the frame
+/// is a sound over-approximation by construction).
 #[derive(Clone, Debug)]
 pub struct SubsetFn {
     /// The `defn` name as written.
@@ -637,6 +652,25 @@ impl Scope {
     }
 }
 
+/// The innermost enclosing `loop` for `recur`: its binding count
+/// plus whether the position is a tail of the loop body.
+/// Validation-first: the analyzer fences the same shapes (tail,
+/// arity, `try`-crossing) on the expansion before classification
+/// runs, so a mismatch here is defense in depth, pinned by
+/// direct unit tests.
+#[derive(Clone, Copy)]
+struct RecurCtx {
+    arity: usize,
+    tail: bool,
+}
+
+/// The same target in a non-tail position (call heads, tests,
+/// args, inits — only `loop` inits clear the target outright,
+/// mirroring the analyzer).
+fn nontail(recur: Option<RecurCtx>) -> Option<RecurCtx> {
+    recur.map(|ctx| RecurCtx { tail: false, ..ctx })
+}
+
 struct Planner {
     fns: Vec<SubsetFn>,
     by_name: HashMap<String, usize>,
@@ -731,7 +765,7 @@ impl Planner {
         }
         let mut scope = Scope::default();
         let mut next = self.main_next;
-        let expr = self.classify_expr(form, &mut scope, &mut next, fallback)?;
+        let expr = self.classify_expr(form, &mut scope, &mut next, None, fallback)?;
         self.main_next = next;
         self.main.push(expr);
         Ok(())
@@ -815,7 +849,7 @@ impl Planner {
         }
         let mut body_exprs = Vec::with_capacity(body.len());
         for form in body {
-            body_exprs.push(self.classify_expr(form, &mut scope, &mut next, span)?);
+            body_exprs.push(self.classify_expr(form, &mut scope, &mut next, None, span)?);
         }
         self.fns[index] = SubsetFn {
             name: name.to_owned(),
@@ -827,12 +861,15 @@ impl Planner {
         Ok(())
     }
 
-    /// Classify one surface expression.
+    /// Classify one surface expression (`recur` is the innermost
+    /// enclosing `loop` target plus whether this position is one
+    /// of its tails — children derive, never inherit blindly).
     fn classify_expr(
         &mut self,
         form: &Value,
         scope: &mut Scope,
         next: &mut usize,
+        recur: Option<RecurCtx>,
         fallback: Span,
     ) -> Result<SubsetExpr, PlanError> {
         match form {
@@ -857,19 +894,19 @@ impl Planner {
                     // The head must itself classify first (its error,
                     // if any, is first in source order); a valid head
                     // value still cannot be called.
-                    self.classify_expr(head, scope, next, span)?;
+                    self.classify_expr(head, scope, next, nontail(recur), span)?;
                     return Err(PlanError::Subset(SubsetError {
                         span,
                         form: short_pr(head),
                         hint: "higher-order calls are outside the subset".to_owned(),
                     }));
                 };
-                self.classify_call(sym, args, scope, next, span)
+                self.classify_call(sym, args, scope, next, recur, span)
             }
             Value::Vector(vec) => {
                 let mut out = Vec::with_capacity(vec.len());
                 for item in vec.iter() {
-                    out.push(self.classify_expr(item, scope, next, fallback)?);
+                    out.push(self.classify_expr(item, scope, next, nontail(recur), fallback)?);
                 }
                 Ok(SubsetExpr::VecLit(out))
             }
@@ -923,6 +960,7 @@ impl Planner {
         args: &[&Value],
         scope: &mut Scope,
         next: &mut usize,
+        recur: Option<RecurCtx>,
         span: Span,
     ) -> Result<SubsetExpr, PlanError> {
         let ns = sym.namespace();
@@ -935,7 +973,7 @@ impl Planner {
                 hint: "higher-order calls are outside the subset".to_owned(),
             }));
         }
-        if let Some(expr) = self.classify_surface(ns, name, args, scope, next, span)? {
+        if let Some(expr) = self.classify_surface(ns, name, args, scope, next, recur, span)? {
             return Ok(expr);
         }
         // Sibling `defn` calls (validation-first: a same-named
@@ -948,7 +986,7 @@ impl Planner {
         if let Some(index) = sibling {
             let mut out = Vec::with_capacity(args.len());
             for arg in args.iter().copied() {
-                out.push(self.classify_expr(arg, scope, next, span)?);
+                out.push(self.classify_expr(arg, scope, next, nontail(recur), span)?);
             }
             let arity = self.fns[index].arity;
             if out.len() != arity {
@@ -969,7 +1007,7 @@ impl Planner {
         if let Some(prim) = Prim::resolve(ns, name) {
             let mut out = Vec::with_capacity(args.len());
             for arg in args.iter().copied() {
-                out.push(self.classify_expr(arg, scope, next, span)?);
+                out.push(self.classify_expr(arg, scope, next, nontail(recur), span)?);
             }
             return Ok(SubsetExpr::CallPrim {
                 prim,
@@ -986,9 +1024,10 @@ impl Planner {
     }
 
     /// Classify dedicated surface forms by namespace (`if`/`do`/
-    /// `let`/`print` plus the desugared `cond`/`and`/`or`/`when`/
-    /// `when-not`): `Some` when the head is one, `None` for
-    /// sibling/prim/hint dispatch downstream.
+    /// `let`/`loop`/`recur`/`print` plus the desugared
+    /// `cond`/`and`/`or`/`when`/`when-not`): `Some` when the head
+    /// is one, `None` for sibling/prim/hint dispatch downstream
+    /// (`recur` threads like everywhere else).
     fn classify_surface(
         &mut self,
         ns: Option<&str>,
@@ -996,13 +1035,14 @@ impl Planner {
         args: &[&Value],
         scope: &mut Scope,
         next: &mut usize,
+        recur: Option<RecurCtx>,
         span: Span,
     ) -> Result<Option<SubsetExpr>, PlanError> {
         if ns.is_none() {
-            return self.classify_unqualified(name, args, scope, next, span);
+            return self.classify_unqualified(name, args, scope, next, recur, span);
         }
         if ns == Some("clojure.core") {
-            return self.classify_core(name, args, scope, next, span);
+            return self.classify_core(name, args, scope, next, recur, span);
         }
         Ok(None)
     }
@@ -1019,37 +1059,43 @@ impl Planner {
         args: &[&Value],
         scope: &mut Scope,
         next: &mut usize,
+        recur: Option<RecurCtx>,
         span: Span,
     ) -> Result<Option<SubsetExpr>, PlanError> {
         if self.shadowed_macro(name) {
             return Ok(None);
         }
-        if let Some(expr) = self.classify_special(name, args, scope, next, span)? {
+        if let Some(expr) = self.classify_special(name, args, scope, next, recur, span)? {
             return Ok(Some(expr));
         }
-        self.classify_macro(name, args, scope, next, span)
+        self.classify_macro(name, args, scope, next, recur, span)
     }
 
-    /// Classify an unqualified special form or `print` (`None`
-    /// for anything else, macro-forms included).
+    /// Classify an unqualified call head that may be special:
+    /// `Some` when `name` is one (`if`/`do`/`let`/`loop`/
+    /// `recur`/`defn`-error/`print`), `None` to continue to
+    /// sibling/prim dispatch.
     fn classify_special(
         &mut self,
         name: &str,
         args: &[&Value],
         scope: &mut Scope,
         next: &mut usize,
+        recur: Option<RecurCtx>,
         span: Span,
     ) -> Result<Option<SubsetExpr>, PlanError> {
         match name {
-            "if" => Ok(Some(self.classify_if(args, scope, next, span)?)),
-            "do" => Ok(Some(self.classify_do(args, scope, next, span)?)),
-            "let" => Ok(Some(self.classify_let(args, scope, next, span)?)),
+            "if" => Ok(Some(self.classify_if(args, scope, next, recur, span)?)),
+            "do" => Ok(Some(self.classify_do(args, scope, next, recur, span)?)),
+            "let" => Ok(Some(self.classify_let(args, scope, next, recur, span)?)),
+            "loop" => Ok(Some(self.classify_loop(args, scope, next, span)?)),
+            "recur" => Ok(Some(self.classify_recur(args, scope, next, recur, span)?)),
             "defn" => Err(PlanError::Subset(SubsetError {
                 span,
                 form: "defn".to_owned(),
                 hint: "defn is top-level only".to_owned(),
             })),
-            "print" => Ok(Some(self.classify_print(args, scope, next, span)?)),
+            "print" => Ok(Some(self.classify_print(args, scope, next, recur, span)?)),
             _ => Ok(None),
         }
     }
@@ -1063,11 +1109,12 @@ impl Planner {
         args: &[&Value],
         scope: &mut Scope,
         next: &mut usize,
+        recur: Option<RecurCtx>,
         span: Span,
     ) -> Result<Option<SubsetExpr>, PlanError> {
         match name {
-            "print" => Ok(Some(self.classify_print(args, scope, next, span)?)),
-            _ => self.classify_macro(name, args, scope, next, span),
+            "print" => Ok(Some(self.classify_print(args, scope, next, recur, span)?)),
+            _ => self.classify_macro(name, args, scope, next, recur, span),
         }
     }
 
@@ -1079,14 +1126,23 @@ impl Planner {
         args: &[&Value],
         scope: &mut Scope,
         next: &mut usize,
+        recur: Option<RecurCtx>,
         span: Span,
     ) -> Result<Option<SubsetExpr>, PlanError> {
         match name {
-            "cond" => Ok(Some(self.classify_cond(args, scope, next, span)?)),
-            "and" => Ok(Some(self.classify_and_or(true, args, scope, next, span)?)),
-            "or" => Ok(Some(self.classify_and_or(false, args, scope, next, span)?)),
-            "when" => Ok(Some(self.classify_when(false, args, scope, next, span)?)),
-            "when-not" => Ok(Some(self.classify_when(true, args, scope, next, span)?)),
+            "cond" => Ok(Some(self.classify_cond(args, scope, next, recur, span)?)),
+            "and" => Ok(Some(
+                self.classify_and_or(true, args, scope, next, recur, span)?,
+            )),
+            "or" => Ok(Some(
+                self.classify_and_or(false, args, scope, next, recur, span)?,
+            )),
+            "when" => Ok(Some(
+                self.classify_when(false, args, scope, next, recur, span)?,
+            )),
+            "when-not" => Ok(Some(
+                self.classify_when(true, args, scope, next, recur, span)?,
+            )),
             _ => Ok(None),
         }
     }
@@ -1114,6 +1170,7 @@ impl Planner {
         args: &[&Value],
         scope: &mut Scope,
         next: &mut usize,
+        recur: Option<RecurCtx>,
         span: Span,
     ) -> Result<SubsetExpr, PlanError> {
         let Some((&test, rest)) = args.split_first() else {
@@ -1126,9 +1183,12 @@ impl Planner {
                 hint: "not in the AOT pure subset".to_owned(),
             }));
         };
-        let test = self.classify_expr(test, scope, next, span)?;
-        let then = self.classify_expr(expr, scope, next, span)?;
-        let els = self.classify_cond(rest, scope, next, span)?;
+        // The test is never a tail; the winning branch and the
+        // remaining clauses inherit the form's (the expansion is
+        // nested `if`s, so this matches the analyzer exactly).
+        let test = self.classify_expr(test, scope, next, nontail(recur), span)?;
+        let then = self.classify_expr(expr, scope, next, recur, span)?;
+        let els = self.classify_cond(rest, scope, next, recur, span)?;
         Ok(SubsetExpr::If {
             test: Box::new(test),
             then: Box::new(then),
@@ -1149,6 +1209,7 @@ impl Planner {
         args: &[&Value],
         scope: &mut Scope,
         next: &mut usize,
+        recur: Option<RecurCtx>,
         span: Span,
     ) -> Result<SubsetExpr, PlanError> {
         let Some((&first, rest)) = args.split_first() else {
@@ -1159,12 +1220,15 @@ impl Planner {
             });
         };
         if rest.is_empty() {
-            return self.classify_expr(first, scope, next, span);
+            return self.classify_expr(first, scope, next, recur, span);
         }
-        let init = self.classify_expr(first, scope, next, span)?;
+        // The bound operand evaluates in init position (never a
+        // tail); the remaining operands sit in an `if` branch of
+        // the expansion, so they inherit the form's tailness.
+        let init = self.classify_expr(first, scope, next, nontail(recur), span)?;
         let slot = *next;
         *next += 1;
-        let tail = self.classify_and_or(is_and, rest, scope, next, span)?;
+        let tail = self.classify_and_or(is_and, rest, scope, next, recur, span)?;
         let (then, els) = if is_and {
             (tail, SubsetExpr::Local(slot))
         } else {
@@ -1192,6 +1256,7 @@ impl Planner {
         args: &[&Value],
         scope: &mut Scope,
         next: &mut usize,
+        recur: Option<RecurCtx>,
         span: Span,
     ) -> Result<SubsetExpr, PlanError> {
         let Some((&test, body)) = args.split_first() else {
@@ -1201,10 +1266,18 @@ impl Planner {
                 hint: "not in the AOT pure subset".to_owned(),
             }));
         };
-        let test = self.classify_expr(test, scope, next, span)?;
+        // The test is never a tail; the implicit `do` body sits in
+        // an `if` branch of the expansion, so its last form
+        // inherits the form's tailness like `classify_do`.
+        let test = self.classify_expr(test, scope, next, nontail(recur), span)?;
         let mut out = Vec::with_capacity(body.len());
-        for form in body.iter().copied() {
-            out.push(self.classify_expr(form, scope, next, span)?);
+        for (i, form) in body.iter().copied().enumerate() {
+            let ctx = if i + 1 == body.len() {
+                recur
+            } else {
+                nontail(recur)
+            };
+            out.push(self.classify_expr(form, scope, next, ctx, span)?);
         }
         let body = SubsetExpr::Do(out);
         if negated {
@@ -1222,34 +1295,43 @@ impl Planner {
         }
     }
 
-    /// Classify `(do body...)` to a sequence (empty is nil).
+    /// Classify `(do body...)`: every statement but the last in
+    /// non-tail position, the last inheriting the form's.
     fn classify_do(
         &mut self,
         args: &[&Value],
         scope: &mut Scope,
         next: &mut usize,
+        recur: Option<RecurCtx>,
         span: Span,
     ) -> Result<SubsetExpr, PlanError> {
         let mut out = Vec::with_capacity(args.len());
-        for arg in args.iter().copied() {
-            out.push(self.classify_expr(arg, scope, next, span)?);
+        for (i, arg) in args.iter().copied().enumerate() {
+            let ctx = if i + 1 == args.len() {
+                recur
+            } else {
+                nontail(recur)
+            };
+            out.push(self.classify_expr(arg, scope, next, ctx, span)?);
         }
         Ok(SubsetExpr::Do(out))
     }
 
     /// Classify `(if test then els?)` (2-3 args: validated —
     /// `if` is special, so the surface IS the validated shape).
+    /// The test is never a tail; the branches inherit the form's.
     fn classify_if(
         &mut self,
         args: &[&Value],
         scope: &mut Scope,
         next: &mut usize,
+        recur: Option<RecurCtx>,
         span: Span,
     ) -> Result<SubsetExpr, PlanError> {
-        let test = self.classify_expr(args[0], scope, next, span)?;
-        let then = self.classify_expr(args[1], scope, next, span)?;
+        let test = self.classify_expr(args[0], scope, next, nontail(recur), span)?;
+        let then = self.classify_expr(args[1], scope, next, recur, span)?;
         let els = match args.get(2) {
-            Some(els) => self.classify_expr(els, scope, next, span)?,
+            Some(els) => self.classify_expr(els, scope, next, recur, span)?,
             None => SubsetExpr::Nil,
         };
         Ok(SubsetExpr::If {
@@ -1259,17 +1341,18 @@ impl Planner {
         })
     }
 
-    /// Classify `(print args...)`.
+    /// Classify `(print args...)` (args are never tails).
     fn classify_print(
         &mut self,
         args: &[&Value],
         scope: &mut Scope,
         next: &mut usize,
+        recur: Option<RecurCtx>,
         span: Span,
     ) -> Result<SubsetExpr, PlanError> {
         let mut out = Vec::with_capacity(args.len());
         for arg in args.iter().copied() {
-            out.push(self.classify_expr(arg, scope, next, span)?);
+            out.push(self.classify_expr(arg, scope, next, nontail(recur), span)?);
         }
         Ok(SubsetExpr::Print { args: out, span })
     }
@@ -1277,12 +1360,14 @@ impl Planner {
     /// Classify `(let [bindings...] body...)` (symbol bindings
     /// only; the vector+even shape is validated — `let` is
     /// special, so the surface IS the validated shape — and the
-    /// trust arms are pinned by direct tests).
+    /// trust arms are pinned by direct tests). Inits are never
+    /// tails; the body's last form inherits the form's.
     fn classify_let(
         &mut self,
         args: &[&Value],
         scope: &mut Scope,
         next: &mut usize,
+        recur: Option<RecurCtx>,
         span: Span,
     ) -> Result<SubsetExpr, PlanError> {
         let [bindings, body @ ..] = args else {
@@ -1326,15 +1411,20 @@ impl Planner {
                     hint: "destructuring is outside the subset; bind plain symbols".to_owned(),
                 }));
             }
-            let init = self.classify_expr(init, scope, next, span)?;
+            let init = self.classify_expr(init, scope, next, nontail(recur), span)?;
             let slot = *next;
             *next += 1;
             shadows.push((sym.name(), scope.push(sym.name(), slot)));
             bound.push((slot, init));
         }
         let mut body_out = Vec::with_capacity(body.len());
-        for form in body.iter().copied() {
-            body_out.push(self.classify_expr(form, scope, next, span)?);
+        for (i, form) in body.iter().copied().enumerate() {
+            let ctx = if i + 1 == body.len() {
+                recur
+            } else {
+                nontail(recur)
+            };
+            body_out.push(self.classify_expr(form, scope, next, ctx, span)?);
         }
         for (name, prev) in shadows.into_iter().rev() {
             scope.restore(name, prev);
@@ -1343,6 +1433,124 @@ impl Planner {
             bindings: bound,
             body: body_out,
         })
+    }
+
+    /// Classify `(loop [bindings...] body...)` (symbol bindings
+    /// only, like `let`; the vector+even shape is validated —
+    /// `loop` is special, so the surface IS the validated shape).
+    /// Inits classify with no `recur` target (the analyzer clears
+    /// it there too); the body is self-tail (a `loop` in any
+    /// position takes `recur`, like the analyzer).
+    fn classify_loop(
+        &mut self,
+        args: &[&Value],
+        scope: &mut Scope,
+        next: &mut usize,
+        span: Span,
+    ) -> Result<SubsetExpr, PlanError> {
+        let [bindings, body @ ..] = args else {
+            return Err(PlanError::Subset(SubsetError {
+                span,
+                form: "loop".to_owned(),
+                hint: "not in the AOT pure subset".to_owned(),
+            }));
+        };
+        let Value::Vector(vec) = bindings else {
+            return Err(PlanError::Subset(SubsetError {
+                span,
+                form: "loop".to_owned(),
+                hint: "not in the AOT pure subset".to_owned(),
+            }));
+        };
+        let items: Vec<&Value> = vec.iter().collect();
+        let mut bound = Vec::with_capacity(items.len() / 2);
+        let mut shadows: Vec<(&str, Option<usize>)> = Vec::new();
+        for pair in items.chunks(2) {
+            // Validated first (odd bindings never analyze), so the
+            // short tail is pinned by a direct test.
+            let &[pat, init] = pair else {
+                return Err(PlanError::Subset(SubsetError {
+                    span,
+                    form: "loop".to_owned(),
+                    hint: "not in the AOT pure subset".to_owned(),
+                }));
+            };
+            let Value::Symbol(sym) = pat else {
+                return Err(PlanError::Subset(SubsetError {
+                    span,
+                    form: "loop".to_owned(),
+                    hint: "destructuring is outside the subset; bind plain symbols".to_owned(),
+                }));
+            };
+            if sym.namespace().is_some() {
+                return Err(PlanError::Subset(SubsetError {
+                    span,
+                    form: "loop".to_owned(),
+                    hint: "destructuring is outside the subset; bind plain symbols".to_owned(),
+                }));
+            }
+            let init = self.classify_expr(init, scope, next, None, span)?;
+            let slot = *next;
+            *next += 1;
+            shadows.push((sym.name(), scope.push(sym.name(), slot)));
+            bound.push((slot, init));
+        }
+        let arity = bound.len();
+        let mut body_out = Vec::with_capacity(body.len());
+        for (i, form) in body.iter().copied().enumerate() {
+            let tail = i + 1 == body.len();
+            let ctx = Some(RecurCtx { arity, tail });
+            body_out.push(self.classify_expr(form, scope, next, ctx, span)?);
+        }
+        for (name, prev) in shadows.into_iter().rev() {
+            scope.restore(name, prev);
+        }
+        Ok(SubsetExpr::Loop {
+            bindings: bound,
+            body: body_out,
+        })
+    }
+
+    /// Classify `(recur args...)`: only in tail position of a
+    /// `loop` body, one arg per binding. The analyzer fences the
+    /// same shapes first, so every arm but the missing-target one
+    /// (fn-targeted `recur`, which validates) is defense in
+    /// depth, pinned by direct tests.
+    fn classify_recur(
+        &mut self,
+        args: &[&Value],
+        scope: &mut Scope,
+        next: &mut usize,
+        recur: Option<RecurCtx>,
+        span: Span,
+    ) -> Result<SubsetExpr, PlanError> {
+        let Some(ctx) = recur else {
+            return Err(PlanError::Subset(SubsetError {
+                span,
+                form: "recur".to_owned(),
+                hint: "recur outside loop is outside the subset; call the function by name"
+                    .to_owned(),
+            }));
+        };
+        if !ctx.tail {
+            return Err(PlanError::Subset(SubsetError {
+                span,
+                form: "recur".to_owned(),
+                hint: "recur must be in tail position of the loop body".to_owned(),
+            }));
+        }
+        if args.len() != ctx.arity {
+            return Err(PlanError::Subset(SubsetError {
+                span,
+                form: "recur".to_owned(),
+                hint: "wrong number of args to recur; match the loop bindings".to_owned(),
+            }));
+        }
+        let mut out = Vec::with_capacity(args.len());
+        for arg in args.iter().copied() {
+            out.push(self.classify_expr(arg, scope, next, nontail(recur), span)?);
+        }
+        Ok(SubsetExpr::Recur(out))
     }
 }
 
@@ -1463,8 +1671,6 @@ fn head_hint(name: &str) -> &'static str {
         "def" | "declare" | "defonce" => "only defn defines in the AOT subset",
         "fn" | "fn*" => "only defn defines functions in the AOT subset",
         "letfn" => "use top-level defn instead",
-        "loop" => "the AOT subset is loop-free; use direct self-recursion",
-        "recur" => "recur is outside the subset; call the function by name",
         "try" | "catch" | "finally" | "throw" => "error handling is outside the AOT subset",
         "var" | "set!" | "binding" | "with-redefs" | "with-bindings" | "bound-fn"
         | "alter-var-root" => "vars are outside the AOT subset",
@@ -1678,6 +1884,84 @@ mod tests {
     }
 
     #[test]
+    fn loop_binds_flat_slots_and_recur_plans() {
+        let prog = plan("(loop [i 0] (if (= i 3) i (recur (+ i 1))))").expect("plans");
+        assert_eq!(prog.main_slots, 1);
+        assert_eq!(
+            prog.main,
+            vec![SubsetExpr::Loop {
+                bindings: vec![(0, SubsetExpr::Int(0))],
+                body: vec![SubsetExpr::If {
+                    test: Box::new(SubsetExpr::CallPrim {
+                        prim: Prim::Eq,
+                        args: vec![SubsetExpr::Local(0), SubsetExpr::Int(3)],
+                        span: Span::new(1, 17),
+                    }),
+                    then: Box::new(SubsetExpr::Local(0)),
+                    els: Box::new(SubsetExpr::Recur(vec![SubsetExpr::CallPrim {
+                        prim: Prim::Add,
+                        args: vec![SubsetExpr::Local(0), SubsetExpr::Int(1)],
+                        span: Span::new(1, 34),
+                    }])),
+                }],
+            }]
+        );
+    }
+
+    #[test]
+    fn loop_tails_nest_and_shadow() {
+        // A `loop` in non-tail position still takes `recur`
+        // (self-tail, like the analyzer); multi-statement `let`
+        // bodies track tails per statement.
+        let prog =
+            plan("(print (loop [i 0] (let [x i] (print x) (if (= x 1) x (recur (+ x 1))))))")
+                .expect("self-tail plans");
+        assert_eq!(prog.main_slots, 2);
+        assert!(matches!(prog.main.as_slice(), [SubsetExpr::Print { .. }]));
+        // Nested loops: the inner `recur` targets the inner loop;
+        // slots never reuse across the nest.
+        let nested =
+            plan("(loop [i 0] (loop [j 1 k 2] (if (= i j) k (recur 7 8))))").expect("nested plans");
+        assert_eq!(nested.main_slots, 3);
+        assert!(matches!(
+            nested.main.as_slice(),
+            [SubsetExpr::Loop { body, .. }]
+            if matches!(body.as_slice(), [SubsetExpr::Loop { .. }])
+        ));
+        // `recur` after a completed inner loop targets the outer
+        // one (multi-statement loop bodies track tails too).
+        let outer = plan("(loop [i 0] (loop [j 0] j) (if (= i 1) i (recur 1)))")
+            .expect("outer recur plans");
+        assert_eq!(outer.main_slots, 2);
+        assert!(matches!(
+            outer.main.as_slice(),
+            [SubsetExpr::Loop { body, .. }] if body.len() == 2
+        ));
+        // Edge shapes: empty bodies yield nil, empty bindings take
+        // bare `(recur)` (both plan; running the latter never
+        // returns, so planning is the whole test).
+        let empty = plan("(loop [i 0]) (loop [] 1) (loop [] (recur))").expect("edges plan");
+        assert_eq!(empty.main_slots, 1);
+        assert!(matches!(
+            empty.main.as_slice(),
+            [
+                SubsetExpr::Loop { body, .. },
+                SubsetExpr::Loop { bindings, .. },
+                SubsetExpr::Loop { .. },
+            ] if body.is_empty() && bindings.is_empty()
+        ));
+        // Loops in `defn` bodies allocate past the params.
+        let defn = plan("(defn f [a] (loop [i a] (if (= i 0) a (recur (+ i -1)))))")
+            .expect("defn loop plans");
+        assert_eq!(defn.fns[0].frame_slots, 2);
+        assert!(matches!(
+            &defn.fns[0].body,
+            SubsetExpr::Do(body)
+            if matches!(body.as_slice(), [SubsetExpr::Loop { .. }])
+        ));
+    }
+
+    #[test]
     fn wrong_argc_is_a_runtime_arity_node() {
         let prog = plan("(defn f [a] a) (print (f 1 2))").expect("plans");
         assert_eq!(
@@ -1831,12 +2115,12 @@ mod tests {
                 "f.clj:1:1: unsupported form in AOT subset: def (only defn defines in the AOT subset)",
             ),
             (
-                "(print (loop [i 0] i))",
-                "f.clj:1:8: unsupported form in AOT subset: loop (the AOT subset is loop-free; use direct self-recursion)",
+                "(print (clojure.core/loop [i 0] i))",
+                "f.clj:1:8: unsupported form in AOT subset: clojure.core/loop (not in the closed call set)",
             ),
             (
                 "(defn g [n] (recur n))",
-                "f.clj:1:13: unsupported form in AOT subset: recur (recur is outside the subset; call the function by name)",
+                "f.clj:1:13: unsupported form in AOT subset: recur (recur outside loop is outside the subset; call the function by name)",
             ),
             (
                 "(print (try 1 (catch Exception e 2)))",
@@ -1915,6 +2199,10 @@ mod tests {
                 "f.clj:1:1: unsupported form in AOT subset: let (destructuring is outside the subset; bind plain symbols)",
             ),
             (
+                "(loop [[a b] [1 2]] a)",
+                "f.clj:1:1: unsupported form in AOT subset: loop (destructuring is outside the subset; bind plain symbols)",
+            ),
+            (
                 "(print (map inc [1]))",
                 "f.clj:1:8: unsupported form in AOT subset: map (not in the closed call set)",
             ),
@@ -1940,7 +2228,7 @@ mod tests {
             ),
             (
                 "(print (loop [i 0] i))\n(def x 1)",
-                "f.clj:1:8: unsupported form in AOT subset: loop (the AOT subset is loop-free; use direct self-recursion)",
+                "f.clj:2:1: unsupported form in AOT subset: def (only defn defines in the AOT subset)",
             ),
         ];
         for (input, want) in cases {
@@ -2330,8 +2618,8 @@ mod tests {
     #[test]
     fn hint_table_lines() {
         let heads = [
-            "def", "fn", "letfn", "loop", "recur", "try", "var", "defmacro", "future", "lazy-seq",
-            "println", "ns", "when", "quote", "map",
+            "def", "fn", "letfn", "try", "var", "defmacro", "future", "lazy-seq", "println", "ns",
+            "when", "quote", "map",
         ];
         for head in heads {
             assert!(!head_hint(head).is_empty(), "{head}");
@@ -2447,7 +2735,7 @@ mod tests {
         let empty: &[&Value] = &[];
         assert!(
             planner
-                .classify_let(empty, &mut scope, &mut next, span)
+                .classify_let(empty, &mut scope, &mut next, None, span)
                 .is_err()
         );
         // Non-vector bindings.
@@ -2455,7 +2743,7 @@ mod tests {
         let args = vec![&one];
         assert!(
             planner
-                .classify_let(&args, &mut scope, &mut next, span)
+                .classify_let(&args, &mut scope, &mut next, None, span)
                 .is_err()
         );
         // Odd bindings.
@@ -2463,14 +2751,14 @@ mod tests {
         let args = vec![&odd];
         assert!(
             planner
-                .classify_let(&args, &mut scope, &mut next, span)
+                .classify_let(&args, &mut scope, &mut next, None, span)
                 .is_err()
         );
         // Namespaced binding.
         let qual = Value::Symbol(Symbol::new(Some("a"), "b"));
         let vec = Value::Vector(Vector::from_vec(vec![qual, Value::Int(1)]));
         let args = vec![&vec];
-        let r = planner.classify_let(&args, &mut scope, &mut next, span);
+        let r = planner.classify_let(&args, &mut scope, &mut next, None, span);
         assert!(matches!(&r, Err(PlanError::Subset(e)) if e.hint.contains("destructuring")));
     }
 
@@ -2483,14 +2771,85 @@ mod tests {
         // Odd cond tail (macroexpansion throws first).
         let one = Value::Int(1);
         let args = vec![&one];
-        let r = planner.classify_cond(&args, &mut scope, &mut next, span);
+        let r = planner.classify_cond(&args, &mut scope, &mut next, None, span);
         assert!(matches!(&r, Err(PlanError::Subset(e)) if e.form == "cond"));
         // Missing when/when-not test (macro arity throws first).
         let empty: &[&Value] = &[];
-        let r = planner.classify_when(false, empty, &mut scope, &mut next, span);
+        let r = planner.classify_when(false, empty, &mut scope, &mut next, None, span);
         assert!(matches!(&r, Err(PlanError::Subset(e)) if e.form == "when"));
-        let r = planner.classify_when(true, empty, &mut scope, &mut next, span);
+        let r = planner.classify_when(true, empty, &mut scope, &mut next, None, span);
         assert!(matches!(&r, Err(PlanError::Subset(e)) if e.form == "when-not"));
+    }
+
+    #[test]
+    fn classify_loop_shape_trusts_directly() {
+        let mut planner = Planner::new();
+        let mut scope = Scope::default();
+        let mut next = 0;
+        let span = Span::new(1, 1);
+        // No bindings element.
+        let empty: &[&Value] = &[];
+        assert!(
+            planner
+                .classify_loop(empty, &mut scope, &mut next, span)
+                .is_err()
+        );
+        // Non-vector bindings.
+        let one = Value::Int(1);
+        let args = vec![&one];
+        assert!(
+            planner
+                .classify_loop(&args, &mut scope, &mut next, span)
+                .is_err()
+        );
+        // Odd bindings.
+        let odd = Value::Vector(Vector::from_vec(vec![sym("x")]));
+        let args = vec![&odd];
+        assert!(
+            planner
+                .classify_loop(&args, &mut scope, &mut next, span)
+                .is_err()
+        );
+        // Namespaced binding.
+        let qual = Value::Symbol(Symbol::new(Some("a"), "b"));
+        let vec = Value::Vector(Vector::from_vec(vec![qual, Value::Int(1)]));
+        let args = vec![&vec];
+        let r = planner.classify_loop(&args, &mut scope, &mut next, span);
+        assert!(matches!(&r, Err(PlanError::Subset(e)) if e.hint.contains("destructuring")));
+    }
+
+    #[test]
+    fn classify_recur_fences_directly() {
+        let mut planner = Planner::new();
+        let mut scope = Scope::default();
+        let mut next = 0;
+        let span = Span::new(1, 1);
+        let one = Value::Int(1);
+        let args = vec![&one];
+        // Non-tail `recur` (validation-first: the analyzer rejects
+        // these before classification runs).
+        let nontail = Some(RecurCtx {
+            arity: 1,
+            tail: false,
+        });
+        let r = planner.classify_recur(&args, &mut scope, &mut next, nontail, span);
+        assert!(
+            matches!(&r, Err(PlanError::Subset(e)) if e.form == "recur" && e.hint.contains("tail position"))
+        );
+        // Arity mismatch.
+        let wrong = Some(RecurCtx {
+            arity: 2,
+            tail: true,
+        });
+        let r = planner.classify_recur(&args, &mut scope, &mut next, wrong, span);
+        assert!(
+            matches!(&r, Err(PlanError::Subset(e)) if e.form == "recur" && e.hint.contains("match the loop bindings"))
+        );
+        // No target (fn-targeted `recur`, which validates).
+        let r = planner.classify_recur(&args, &mut scope, &mut next, None, span);
+        assert!(
+            matches!(&r, Err(PlanError::Subset(e)) if e.form == "recur" && e.hint.contains("outside loop"))
+        );
     }
 
     /// `depth` nested parens around `1`.

@@ -15,9 +15,10 @@ below (verified this slice). Port deviations are explicit.
   in-subset — verified: expansion metadata never feeds
   subset values).
 - Bodies/statements: literals (Int/Double/Bool/Str/Keyword/Vector
-  of subset), `if`/`do`/`let` (symbol bindings only, no
-  destructuring), closed-set calls (`+ - * quot < <= >
-  >= = count nth get conj`, unqualified or
+  of subset), `if`/`do`/`let`/`loop` (symbol bindings only, no
+  destructuring; `recur` only in tail position of a `loop`
+  body, one arg per binding), closed-set calls (`+ - * quot
+  < <= > >= = count nth get conj`, unqualified or
   `clojure.core/`-qualified — verified
   `(clojure.core/+ 1 2)` → `3`), `print` intrinsic.
 - `main` = non-`defn` subset tops in load order, values
@@ -32,9 +33,11 @@ below (verified this slice). Port deviations are explicit.
 order; every file below exits 0 under `run`/`eval`:
 
 - `(def x 41)` → names `def` (vars out).
-- `(loop [i 0] ...)` → names `loop` (loop-free subset).
-- `(recur ...)` (in `fn` tail) → names `recur` (no TCO
-  machinery; direct self-CALLS are the compilable form).
+- `(loop [[a b] ...] ...)` → names `loop` (destructuring
+  out — plain-symbol loops compile, corpus `11-loop`).
+- `(recur ...)` outside a `loop` (in `fn` tail) → names
+  `recur` (only loop bodies take `recur`; direct
+  self-CALLS are the compilable `fn` recursion form).
 - `(try ...)` / `(throw ...)` → names `try`/`throw`.
 - `(var print)` → names `var`; `set!` → names `set!`.
 - `(future 7)`, `(delay 1)`, `(atom 1)` → names the
@@ -42,9 +45,9 @@ order; every file below exits 0 under `run`/`eval`:
 - `(lazy-seq ...)` → names `lazy-seq` (laziness out).
 - `(println :x)` → names `println` (only `print` in).
 - `(ns foo)` → names `ns`.
-- `(when true ...)` → names `when` (non-`defn` macros
-  out — NO macroexpansion in AOT; verified `(when true
-  (print :w))` prints `:w` under the interpreter).
+- `(when ...)` / `(when-not ...)` compile (desugared
+  macro-forms, corpus `12-when`); the remaining
+  non-`defn` macros stay out.
 - `(defmacro m [x] x)` → names `defmacro`.
 - `((fn [x] x) 7)` → names `fn` (only `defn` tops).
 - `(quote 5)` → names `quote` (outside value flow).

@@ -1,1 +1,0 @@
-(when true (print :w))

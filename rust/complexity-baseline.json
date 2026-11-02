@@ -16,13 +16,6 @@
    "justification": "S8A: one arm per closed primitive; the name table stays exhaustive. Slice B adds the transient/conj!/assoc!/persistent! arms."
   },
   {
-   "file": "crates/clj-eval/src/aot_subset.rs",
-   "function": "head_hint",
-   "cyclomatic": 16.0,
-   "cognitive": 1.0,
-   "justification": "S8A: one arm per unsupported head; the hint table stays exhaustive"
-  },
-  {
    "file": "crates/clj-eval/src/eval.rs",
    "function": "Evaluator::eval",
    "cyclomatic": 44.0,
