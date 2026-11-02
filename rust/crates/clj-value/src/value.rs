@@ -1749,6 +1749,15 @@ fn hash_extension<H: Hasher>(e: &Arc<dyn ExtensionValue>, state: &mut H) {
         for item in sv.iter() {
             item.hash(state);
         }
+    } else if let Some(items) = e.equiv_items() {
+        // Cross-crate sequential kinds (persistent queues): the
+        // sequential-family write, identical to a vector's (the
+        // `Eq`/`Hash` contract with `seq_items` above).
+        state.write_u8(8);
+        items.len().hash(state);
+        for item in &items {
+            item.hash(state);
+        }
     } else {
         state.write_u8(17);
         e.dyn_hash(state);
@@ -2002,6 +2011,11 @@ fn seq_items(v: &Value) -> Option<Vec<Value>> {
             }
             if let Some(sv) = e.as_any().downcast_ref::<crate::SubVectorValue>() {
                 return Some(sv.items());
+            }
+            // Cross-crate sequential kinds (persistent queues):
+            // the hook compares exactly like a vector.
+            if let Some(items) = e.equiv_items() {
+                return Some(items);
             }
             None
         }

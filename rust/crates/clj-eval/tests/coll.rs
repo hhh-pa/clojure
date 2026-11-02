@@ -841,11 +841,10 @@ fn peek_pop_rows() {
 
 #[test]
 fn persistent_queue_fifo_201() {
-    // `PersistentQueue/EMPTY` rides on marked vectors (FIFO via
-    // the queue `peek`/`pop` arms; 4 recipes BFS with it):
-    // `peek` reads the front, `pop` drops it (empty pops
-    // answer the queue itself, like the JVM — oracle), and the
-    // mark survives `conj`/`into` loops.
+    // `PersistentQueue/EMPTY` is a `QueueValue` (FIFO via the
+    // queue `peek`/`pop` arms; 4 recipes BFS with it): `peek`
+    // reads the front, `pop` drops it (empty pops answer the
+    // queue itself, like the JVM — oracle).
     let mut eval = boot();
     assert_eq!(
         run_last(

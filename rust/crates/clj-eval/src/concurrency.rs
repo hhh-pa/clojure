@@ -715,6 +715,7 @@ fn future_on_thread(eval: &mut Evaluator, f: &Value) -> Result<Value, NativeErro
     let name = format!("clj-future-{}", future.id());
     let handle = std::thread::Builder::new()
         .name(name)
+        .stack_size(crate::eval::EVAL_STACK_SIZE)
         .spawn(move || run_future_body(child, f, cell))
         .map_err(|_| spawn_failed())?;
     eval.push_future_thread(handle);
@@ -1155,6 +1156,7 @@ impl AgentPools {
             let worker_rx = Arc::clone(&send_rx);
             let spawned = thread::Builder::new()
                 .name(format!("clojure-agent-send-pool-{i}"))
+                .stack_size(crate::eval::EVAL_STACK_SIZE)
                 .spawn(move || send_worker(&worker_pools, &worker_rx));
             Self::install_worker(&pools, &mut handles, spawned)?;
         }
@@ -1399,11 +1401,14 @@ fn dispatch_sendoff(pools: &Arc<AgentPools>, agent: &Agent, head: QueuedAction) 
     // it silently inside the unborn closure.
     let (head_tx, head_rx) = mpsc::channel::<QueuedAction>();
     let name = format!("clojure-agent-send-off-pool-{seq}");
-    let spawned = thread::Builder::new().name(name).spawn(move || {
-        if let Ok(head) = head_rx.recv() {
-            pump_agent(&child_pools, &child_agent, head);
-        }
-    });
+    let spawned = thread::Builder::new()
+        .name(name)
+        .stack_size(crate::eval::EVAL_STACK_SIZE)
+        .spawn(move || {
+            if let Ok(head) = head_rx.recv() {
+                pump_agent(&child_pools, &child_agent, head);
+            }
+        });
     complete_sendoff(inner, head_tx, agent, head, spawned);
 }
 

@@ -592,9 +592,13 @@ fn realized_items(ext: &dyn ExtensionValue) -> Option<Vec<Value>> {
     if let Some(sv) = ext.as_any().downcast_ref::<SubVectorValue>() {
         return Some(sv.items());
     }
-    ext.as_any()
-        .downcast_ref::<RealizedSeq>()
-        .map(RealizedSeq::items)
+    if let Some(s) = ext.as_any().downcast_ref::<RealizedSeq>() {
+        return Some(s.items());
+    }
+    // Cross-crate sequential kinds (persistent queues): `=`-equal
+    // values hash equally in both `hash` and `%h` (oracle
+    // `/tmp/qhash.clj`: queue/lists/vectors share both hashes).
+    ext.equiv_items()
 }
 
 /// `Murmur3.hashOrdered`: `31`-chain from `1` over element hasheqs,

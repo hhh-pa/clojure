@@ -24,10 +24,10 @@
   },
   {
    "file": "crates/clj-eval/src/eval.rs",
-   "function": "Evaluator::eval",
-   "cyclomatic": 44.0,
-   "cognitive": 8.0,
-   "justification": "one arm per Expr variant; arms delegate to small-step helpers. S5B adds the WithRedefs/WithBindings/BoundFn arms; S5C the DefMacro/Declare/Ns arms. S5D adds the Assert/CaseStar/LazySeqStar/Time/WithOutStr arms. S6A adds the DelayStar arm. S6D adds the Locking arm. S-instream adds the WithInStr arm."
+   "function": "Evaluator::eval_inner",
+   "cyclomatic": 43.0,
+   "cognitive": 5.0,
+   "justification": "one arm per Expr variant; arms delegate to small-step helpers. S5B adds the WithRedefs/WithBindings/BoundFn arms; S5C the DefMacro/Declare/Ns arms. S5D adds the Assert/CaseStar/LazySeqStar/Time/WithOutStr arms. S6A adds the DelayStar arm. S6D adds the Locking arm. S-instream adds the WithInStr arm. PR206 renames eval to eval_inner (the depth-guard wrapper takes the eval name); same body, lower metrics."
   },
   {
    "file": "crates/clj-eval/src/expr.rs",
