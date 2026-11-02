@@ -44,6 +44,9 @@ pub(crate) fn ctor_arities(fqn: &str) -> Option<&'static [usize]> {
         "java.io.FileInputStream" => Some(&[1]),
         "java.io.FileOutputStream" => Some(&[1]),
         "java.io.StringWriter" => Some(&[0]),
+        "java.util.ArrayDeque" => Some(&[0, 1]),
+        "java.util.ArrayList" => Some(&[0, 1]),
+        "java.util.PriorityQueue" => Some(&[1]),
         _ => None,
     }
 }

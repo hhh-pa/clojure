@@ -333,6 +333,18 @@ pub(crate) fn random_method(
     None
 }
 
+/// A bounded draw from either RNG kind (`None` for non-RNGs —
+/// `Collections/shuffle` rides here).
+pub(crate) fn random_next_int(v: &Value, bound: i32) -> Option<Result<i32, NativeError>> {
+    if let Some(r) = as_random(v) {
+        return Some(r.next_int_bound(bound));
+    }
+    if let Some(r) = as_secure(v) {
+        return Some(r.next_int_bound(bound));
+    }
+    None
+}
+
 /// Dispatch over a `Random` (split from `random_method` for the
 /// complexity budget).
 fn random_call(r: &EmuRandom, meth: &str, rest: &[Value]) -> Result<Value, NativeError> {

@@ -268,6 +268,26 @@ fn closeable_def() -> Arc<HostDef> {
     })
 }
 
+/// The `java.util.Comparator` contract as an interface descriptor
+/// (#205 — the `closeable_def` shape): `compare/2`, no interop
+/// import needed.
+fn comparator_def() -> Arc<HostDef> {
+    let mut sigs = HashMap::new();
+    sigs.insert(Arc::from("compare"), vec![2usize]);
+    Arc::new(HostDef {
+        name: Arc::from("java.util.Comparator"),
+        kind: HostKind::Interface,
+        fields: Vec::new(),
+        methods: HashMap::new(),
+        interfaces: Vec::new(),
+        prefix: None,
+        impl_ns: None,
+        sigs,
+        takes_this: true,
+        struct_keys: Vec::new(),
+    })
+}
+
 /// An interface-list entry: bare `Object` names the fence
 /// superclass (skipped — its methods are the `object_method` set,
 /// so `(defrecord R [x] Object (toString …))` keeps working);
@@ -285,6 +305,12 @@ fn resolve_iface_sym(eval: &mut Evaluator, s: &Value) -> Result<Option<Arc<HostD
         || sym.namespace().is_some_and(|n| n == "java.io") && sym.name() == "Closeable"
     {
         return Ok(Some(closeable_def()));
+    }
+    if sym.namespace().is_none() && sym.name() == "Comparator"
+        || sym.namespace().is_none() && sym.name() == "java.util.Comparator"
+        || sym.namespace().is_some_and(|n| n == "java.util") && sym.name() == "Comparator"
+    {
+        return Ok(Some(comparator_def()));
     }
     if let Some(p) = crate::protocol::proto_of(eval, &sym) {
         return Ok(Some(crate::protocol::proto_interface(&p.map)));
@@ -708,6 +734,15 @@ fn new_via_class(eval: &mut Evaluator, name: &str, args: &[Value]) -> Result<Val
     }
     if name == "java.io.StringWriter" {
         return crate::ctor::build_string_writer(eval, args);
+    }
+    if name == "java.util.ArrayDeque" {
+        return crate::emucoll::build_deque(eval, args);
+    }
+    if name == "java.util.ArrayList" {
+        return crate::emucoll::build_list(eval, args);
+    }
+    if name == "java.util.PriorityQueue" {
+        return crate::emucoll::build_pqueue(eval, args);
     }
     if let Some(class) = throw_class_for_name(name) {
         return new_throwable(eval, class, name, args);

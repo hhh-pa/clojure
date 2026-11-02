@@ -1258,6 +1258,10 @@ fn ctor_runtime_arity_arms() {
         ("java.io.FileInputStream", "", "java.lang.IllegalArgumentException | No matching ctor found for class java.io.FileInputStream"),
         ("java.io.FileOutputStream", "1 2", "java.lang.IllegalArgumentException | No matching ctor found for class java.io.FileOutputStream"),
         ("java.io.StringWriter", "1", "java.lang.IllegalArgumentException | No matching ctor found for class java.io.StringWriter"),
+        ("java.util.ArrayDeque", "1 2", "java.lang.IllegalArgumentException | No matching ctor found for class java.util.ArrayDeque"),
+        ("java.util.ArrayList", "1 2", "java.lang.IllegalArgumentException | No matching ctor found for class java.util.ArrayList"),
+        ("java.util.PriorityQueue", "", "java.lang.IllegalArgumentException | No matching ctor found for class java.util.PriorityQueue"),
+        ("java.util.PriorityQueue", "1 2", "java.lang.IllegalArgumentException | No matching ctor found for class java.util.PriorityQueue"),
     ];
     let mut eval = boot();
     for (class, args, want) in rows {
@@ -2119,6 +2123,214 @@ fn io_resource_shapes() {
     );
     std::fs::remove_dir_all(&sub).unwrap();
     std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// `ArrayDeque`: ends add/poll/peek, collection ctors, nils.
+#[test]
+fn deque_ends() {
+    let mut eval = boot();
+    // The 0-1 BFS shape: collect, both ends, empties nil.
+    assert_eq!(
+        run(
+            &mut eval,
+            "(let [dq (java.util.ArrayDeque. [1])] (.addFirst dq 0) (.addLast dq 2) (.add dq 3) [(.peekFirst dq) (.peekLast dq) (.poll dq) (.pollFirst dq) (.pollLast dq) (.pollLast dq) (.pollFirst dq) (.isEmpty dq)])"
+        ),
+        "[0 3 0 1 3 2 nil true]"
+    );
+    // Empty ends peek/poll nil.
+    assert_eq!(
+        run(
+            &mut eval,
+            "(let [dq (java.util.ArrayDeque.)] [(.peek dq) (.peekFirst dq) (.peekLast dq) (.poll dq) (.isEmpty dq)])"
+        ),
+        "[nil nil nil nil true]"
+    );
+    // Null elements NPE; unseqables take the `ISeq` error.
+    assert_eq!(
+        uncaught(&mut eval, "(let [dq (java.util.ArrayDeque.)] (.addLast dq nil))"),
+        "java.lang.NullPointerException | "
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(let [dq (java.util.ArrayDeque.)] (.addFirst dq nil))"),
+        "java.lang.NullPointerException | "
+    );
+    assert!(uncaught(&mut eval, "(java.util.ArrayDeque. 5)").contains("ISeq"));
+    assert_eq!(
+        uncaught(&mut eval, "(java.util.ArrayDeque. nil)"),
+        "java.lang.NullPointerException | "
+    );
+    assert_eq!(
+        compile_err(&mut eval, "(java.util.ArrayDeque. 1 2)"),
+        "java.lang.IllegalArgumentException | No matching ctor found for class java.util.ArrayDeque"
+    );
+}
+
+/// `ArrayList` collect/seq plus `Collections/shuffle`.
+#[test]
+fn arraylist_collect_seq_shuffle() {
+    let mut eval = boot();
+    // Collect and seq (the TSP `shuffled` shape).
+    assert_eq!(
+        run(
+            &mut eval,
+            "(let [a (java.util.ArrayList. [1 2 3])] [(vec a) (seq a) (first a) (count a)])"
+        ),
+        "[[1 2 3] (1 2 3) 1 3]"
+    );
+    assert_eq!(
+        run(&mut eval, "(seq (java.util.ArrayList.))"),
+        "nil"
+    );
+    // Seeded shuffles are deterministic permutations (exact pins
+    // guard the draw order; the TSP oracles verify the values).
+    assert_eq!(
+        run(
+            &mut eval,
+            "(let [a (java.util.ArrayList. [0 1 2 3 4 5 6 7])] (java.util.Collections/shuffle a (java.util.Random. 0)) (vec a))"
+        ),
+        "[0 7 3 4 6 1 2 5]"
+    );
+    assert_eq!(
+        run(
+            &mut eval,
+            "(let [a (java.util.ArrayList. [0 1 2 3 4 5 6 7])] (java.util.Collections/shuffle a (java.util.Random. 0)) [(vec a) (= (sort (vec a)) (range 8))])"
+        ),
+        "[[0 7 3 4 6 1 2 5] true]"
+    );
+    // Shuffling answers nil (void); nils NPE, mistypes CCE.
+    assert_eq!(
+        run(
+            &mut eval,
+            "(java.util.Collections/shuffle (java.util.ArrayList. [1]) (java.util.Random. 0))"
+        ),
+        "nil"
+    );
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(java.util.Collections/shuffle nil (java.util.Random. 0))"
+        ),
+        "java.lang.NullPointerException | "
+    );
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(java.util.Collections/shuffle (java.util.ArrayList.) nil)"
+        ),
+        "java.lang.NullPointerException | "
+    );
+    assert!(uncaught(
+        &mut eval,
+        "(java.util.Collections/shuffle [1 2] (java.util.Random. 0))"
+    )
+    .contains("java.util.List"));
+    assert!(uncaught(
+        &mut eval,
+        "(java.util.Collections/shuffle (java.util.ArrayList.) 5)"
+    )
+    .contains("java.util.Random"));
+    assert_eq!(
+        uncaught(&mut eval, "(java.util.ArrayList. nil)"),
+        "java.lang.NullPointerException | "
+    );
+    assert_eq!(
+        compile_err(&mut eval, "(java.util.Collections/shuffle (java.util.ArrayList.))"),
+        "java.lang.IllegalArgumentException | No matching method shuffle found taking 1 args for class java.util.Collections"
+    );
+    assert_eq!(
+        runtime_miss(&mut eval, "java.util.Collections", "shuffle", "1"),
+        "java.lang.IllegalArgumentException | No matching method shuffle found taking 1 args for class java.util.Collections"
+    );
+}
+
+/// `PriorityQueue`: natural ordering, reified comparators, fns.
+#[test]
+fn pqueue_orderings() {
+    let mut eval = boot();
+    // The minimize-deviation shape: natural ordering over a coll.
+    assert_eq!(
+        run(
+            &mut eval,
+            "(let [heap (java.util.PriorityQueue. [-4 -2 -8])] [(.peek heap) (.poll heap) (.peek heap) (.isEmpty heap)])"
+        ),
+        "[-8 -8 -4 false]"
+    );
+    // Empties poll/peek nil; `add` answers true.
+    assert_eq!(
+        run(
+            &mut eval,
+            "(let [heap (java.util.PriorityQueue. [])] [(.poll heap) (.peek heap) (.add heap 1) (.peek heap)])"
+        ),
+        "[nil nil true 1]"
+    );
+    // The smallest-range shape: a reified `Comparator` over pairs.
+    assert_eq!(
+        run(
+            &mut eval,
+            "(do (import 'java.util.Comparator) (let [cmp (reify Comparator (compare [_ a b] (compare (first a) (first b)))) heap (java.util.PriorityQueue. cmp)] (.add heap [3 :c]) (.add heap [1 :a]) (.add heap [2 :b]) [(.poll heap) (.poll heap) (.poll heap) (.poll heap)]))"
+        ),
+        "[[1 :a] [2 :b] [3 :c] nil]"
+    );
+    // Plain fns compare too; throwing comparators propagate.
+    assert_eq!(
+        run(
+            &mut eval,
+            "(let [heap (java.util.PriorityQueue. (fn [a b] (compare b a)))] (.add heap 1) (.add heap 3) (.add heap 2) [(.poll heap) (.poll heap)])"
+        ),
+        "[3 2]"
+    );
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            r#"(let [heap (java.util.PriorityQueue. (fn [a b] (throw (IllegalArgumentException. "boom"))))] (.add heap 1) (.add heap 2) (.poll heap))"#
+        ),
+        "java.lang.IllegalArgumentException | boom"
+    );
+    // Doubles order by truncated sign; anything else CCEs.
+    assert_eq!(
+        run(
+            &mut eval,
+            "(let [heap (java.util.PriorityQueue. (fn [a b] (double (- a b))))] (.add heap 1) (.add heap 3) [(.poll heap) (.poll heap)])"
+        ),
+        "[1 3]"
+    );
+    assert!(uncaught(
+        &mut eval,
+        r#"(let [heap (java.util.PriorityQueue. (fn [a b] "x"))] (.add heap 1) (.add heap 2) (.poll heap))"#
+    )
+    .contains("ClassCastException"));
+    // `offer` aliases `add`; peeks throw through comparators too.
+    assert_eq!(
+        run(
+            &mut eval,
+            "(let [dq (java.util.ArrayDeque.) heap (java.util.PriorityQueue. [])] [(.offer dq 1) (.offerFirst dq 0) (.offerLast dq 2) (.offer heap 5) (.pollFirst dq) (.poll heap)])"
+        ),
+        "[true true true true 0 5]"
+    );
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            r#"(let [heap (java.util.PriorityQueue. (fn [a b] (throw (IllegalArgumentException. "peek-boom"))))] (.add heap 1) (.add heap 2) (.peek heap))"#
+        ),
+        "java.lang.IllegalArgumentException | peek-boom"
+    );
+    // Nils NPE on add and ambiguate the ctor; mistypes ISeq.
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(let [heap (java.util.PriorityQueue. [])] (.add heap nil))"
+        ),
+        "java.lang.NullPointerException | "
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(java.util.PriorityQueue. nil)"),
+        "java.lang.IllegalArgumentException | More than one matching method found: java.util.PriorityQueue"
+    );
+    assert!(uncaught(&mut eval, "(java.util.PriorityQueue. 5)").contains("ISeq"));
+    assert_eq!(
+        compile_err(&mut eval, "(java.util.PriorityQueue.)"),
+        "java.lang.IllegalArgumentException | No matching ctor found for class java.util.PriorityQueue"
+    );
 }
 
 /// Run `f` on a 256 MiB worker (the harness shape): deep

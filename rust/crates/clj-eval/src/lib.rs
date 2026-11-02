@@ -25,6 +25,7 @@ pub mod concurrency;
 pub mod core;
 pub mod ctor;
 pub mod destructure_expand;
+pub mod emucoll;
 pub mod emurand;
 pub mod env;
 pub mod error;

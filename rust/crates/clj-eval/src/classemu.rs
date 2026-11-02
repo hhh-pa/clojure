@@ -1299,21 +1299,6 @@ const STATIC_LATTICE: &[StaticRow] = &[
         iface: false,
         bases: &["java.lang.Number", "java.lang.Comparable"],
     },
-    StaticRow {
-        name: "java.util.Arrays",
-        iface: false,
-        bases: &["java.lang.Object"],
-    },
-    StaticRow {
-        name: "java.net.URI",
-        iface: false,
-        bases: &["java.lang.Object"],
-    },
-    StaticRow {
-        name: "java.net.URLEncoder",
-        iface: false,
-        bases: &["java.lang.Object"],
-    },
     // Import-only (unprobed; ancestry verified live on the JVM):
     // `i-conflict-class` needs a second `Date` to collide with.
     StaticRow {
@@ -2043,6 +2028,56 @@ const STATIC_LATTICE: &[StaticRow] = &[
         name: "java.security.SecureRandom",
         iface: false,
         bases: &["java.util.Random"],
+    },
+    StaticRow {
+        name: "java.util.Arrays",
+        iface: false,
+        bases: &["java.lang.Object"],
+    },
+    StaticRow {
+        name: "java.net.URI",
+        iface: false,
+        bases: &["java.lang.Object"],
+    },
+    StaticRow {
+        name: "java.net.URLEncoder",
+        iface: false,
+        bases: &["java.lang.Object"],
+    },
+    StaticRow {
+        name: "java.util.ArrayDeque",
+        iface: false,
+        bases: &[
+            "java.lang.Object",
+            "java.util.Deque",
+            "java.lang.Cloneable",
+            "java.io.Serializable",
+        ],
+    },
+    StaticRow {
+        name: "java.util.ArrayList",
+        iface: false,
+        bases: &[
+            "java.lang.Object",
+            "java.util.List",
+            "java.util.RandomAccess",
+            "java.lang.Cloneable",
+            "java.io.Serializable",
+        ],
+    },
+    StaticRow {
+        name: "java.util.Collections",
+        iface: false,
+        bases: &["java.lang.Object"],
+    },
+    StaticRow {
+        name: "java.util.PriorityQueue",
+        iface: false,
+        bases: &[
+            "java.lang.Object",
+            "java.util.Queue",
+            "java.io.Serializable",
+        ],
     },
 ];
 
@@ -2858,6 +2893,7 @@ pub(crate) fn static_member_arities(fqn: &str, member: &str) -> Option<&'static 
         "java.lang.Float" => static_arities_float(member),
         "java.math.BigInteger" => static_arities_bigint(member),
         "java.util.Arrays" => static_arities_arrays(member),
+        "java.util.Collections" => static_arities_collections(member),
         "java.util.regex.Pattern" => static_arities_pattern(member),
         "java.io.File" => static_arities_file(member),
         "java.net.URLEncoder" => static_arities_urlencoder(member),
@@ -3023,6 +3059,7 @@ fn native_static(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeEr
         "java.lang.Float" => static_call_float(member.as_ref(), rest),
         "java.math.BigInteger" => static_call_bigint(member.as_ref(), rest),
         "java.util.Arrays" => static_call_arrays(member.as_ref(), rest),
+        "java.util.Collections" => static_call_collections(member.as_ref(), rest),
         "java.util.regex.Pattern" => static_call_pattern(member.as_ref(), rest),
         "java.io.File" => static_call_file(eval, member.as_ref(), rest),
         "java.net.URLEncoder" => static_call_urlencoder(member.as_ref(), rest),
@@ -3158,6 +3195,33 @@ fn static_call_arrays(member: &str, rest: &[Value]) -> Result<Value, NativeError
         "copyOfRange" => static_arrays_copy_of_range(rest),
         _ => static_field_or_miss("java.util.Arrays", member, rest),
     }
+}
+
+fn static_arities_collections(member: &str) -> Option<&'static [usize]> {
+    match member {
+        "shuffle" => Some(&[2]),
+        _ => None,
+    }
+}
+
+fn static_call_collections(member: &str, rest: &[Value]) -> Result<Value, NativeError> {
+    match member {
+        "shuffle" => static_collections_shuffle(rest),
+        _ => static_field_or_miss("java.util.Collections", member, rest),
+    }
+}
+
+/// `Collections/shuffle` (#205): the `(List, Random)` overload
+/// shuffles in place (anything else misses at the arity).
+fn static_collections_shuffle(args: &[Value]) -> Result<Value, NativeError> {
+    if args.len() != 2 {
+        return Err(crate::types::no_method(
+            "shuffle",
+            args.len(),
+            "java.util.Collections",
+        ));
+    }
+    crate::emucoll::shuffle_list(&args[0], &args[1])
 }
 
 fn static_arities_urlencoder(member: &str) -> Option<&'static [usize]> {
@@ -5475,6 +5539,7 @@ fn surface_gated(
     // so order is irrelevant).
     surface_gated_coll(eval, meth, target, rest)
         .or_else(|| surface_gated_misc(eval, meth, target, rest))
+        .or_else(|| surface_gated_jcoll(eval, meth, target, rest))
         .or_else(|| surface_gated_str(meth, target, rest))
         .or_else(|| surface_gated_builder(eval, meth, target, rest))
         .or_else(|| surface_gated_regex(meth, target, rest))
@@ -5530,6 +5595,18 @@ fn surface_gated_regex(
         ("replaceAll", 1) => gated_matcher_replace_all(target, rest),
         _ => None,
     }
+}
+
+/// The `java.util` collection members (#205): deque ends
+/// and queue heap ops (each gates its own target type).
+fn surface_gated_jcoll(
+    eval: &mut Evaluator,
+    meth: &str,
+    target: &Value,
+    rest: &[Value],
+) -> Option<Result<Value, NativeError>> {
+    crate::emucoll::deque_method(meth, target, rest)
+        .or_else(|| crate::emucoll::pqueue_method(eval, meth, target, rest))
 }
 
 /// The file/IO members (#205): `exists`/`length` on files,
@@ -6907,6 +6984,8 @@ pub(crate) fn surface_meth(
 /// nil-target sweep).
 pub(crate) const SURFACE_MEMBERS: &[(&str, usize)] = &[
     ("add", 1),
+    ("addFirst", 1),
+    ("addLast", 1),
     ("and", 1),
     ("append", 1),
     ("bitLength", 0),
@@ -6967,7 +7046,16 @@ pub(crate) const SURFACE_MEMBERS: &[(&str, usize)] = &[
     ("nextInt", 0),
     ("nextInt", 1),
     ("not", 0),
+    ("offer", 1),
+    ("offerFirst", 1),
+    ("offerLast", 1),
     ("or", 1),
+    ("peek", 0),
+    ("peekFirst", 0),
+    ("peekLast", 0),
+    ("poll", 0),
+    ("pollFirst", 0),
+    ("pollLast", 0),
     ("pow", 1),
     ("readAllBytes", 0),
     ("readLine", 0),

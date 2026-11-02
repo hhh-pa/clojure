@@ -629,6 +629,7 @@ pub(crate) fn is_seqable(v: &Value) -> bool {
                 || any.downcast_ref::<ConsValue>().is_some()
                 || any.downcast_ref::<KeySeqValue>().is_some()
                 || any.downcast_ref::<ValSeqValue>().is_some()
+                || crate::emucoll::as_list(v).is_some()
         }
         _ => false,
     }
@@ -744,6 +745,12 @@ fn step_unit_extension(eval: &mut Evaluator, v: &Value) -> Result<StepUnit, Sign
     // (same hook as `seq`).
     if let Some(it) = crate::collmisc::as_iteration(v) {
         let s = crate::collmisc::seq_iteration(eval, it)?;
+        return step_unit(eval, &s);
+    }
+    // #205: walking an `ArrayList` steps its snapshot seq (same
+    // hook as `seq`).
+    if let Some(items) = crate::emucoll::list_snapshot(v) {
+        let s = realized_value(items, false, true, false, clj_value::SeqKind::Array);
         return step_unit(eval, &s);
     }
     Err(eval.throw(iseq_err(v)))
@@ -2775,6 +2782,17 @@ fn seq_value_extension(eval: &mut Evaluator, v: &Value) -> Result<Value, Signal>
     if let Some(it) = crate::collmisc::as_iteration(v) {
         return crate::collmisc::seq_iteration(eval, it);
     }
+    // #205: `ArrayList` seqs snapshot the slots (empties answer
+    // nil — `realized_value` holds that shape).
+    if let Some(items) = crate::emucoll::list_snapshot(v) {
+        return Ok(realized_value(
+            items,
+            false,
+            true,
+            false,
+            clj_value::SeqKind::Array,
+        ));
+    }
     Err(eval.throw(iseq_err(v)))
 }
 
@@ -2955,7 +2973,12 @@ fn first_direct(v: &Value) -> Option<Value> {
                 .unwrap_or(Value::Nil)
         }),
         Value::Extension(_) => {
-            as_subvector(v).map(|sv| sv.iter().next().cloned().unwrap_or(Value::Nil))
+            as_subvector(v)
+                .map(|sv| sv.iter().next().cloned().unwrap_or(Value::Nil))
+                .or_else(|| {
+                    crate::emucoll::list_snapshot(v)
+                        .map(|items| items.into_iter().next().unwrap_or(Value::Nil))
+                })
         }
         _ => None,
     }

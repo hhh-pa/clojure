@@ -651,6 +651,9 @@ fn count_fallback(eval: &mut Evaluator, v: &Value) -> Result<i64, NativeError> {
     if let Some(sv) = as_subvector(v) {
         return Ok(sv.len() as i64);
     }
+    if let Some(items) = crate::emucoll::list_snapshot(v) {
+        return Ok(items.len() as i64);
+    }
     if let Some(r) = as_range(v) {
         // A `BigDec`/ratio step with no exact decimal raises on
         // the first advance (oracle `range-mixed`), so `count`
