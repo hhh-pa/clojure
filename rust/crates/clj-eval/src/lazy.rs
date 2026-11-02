@@ -4254,6 +4254,44 @@ mod tests {
     }
 
     #[test]
+    fn drop_thunk_link_single_input_variants() {
+        // Each single-`input` variant links chain-ward at its
+        // input (the drop unwind follows exactly one link).
+        let input = Value::Int(7);
+        for thunk in [
+            Thunk::Interpose {
+                sep: Value::Int(0),
+                input: input.clone(),
+                first: true,
+            },
+            Thunk::DropWhile {
+                f: Value::Nil,
+                input: input.clone(),
+            },
+            Thunk::PartitionBy {
+                f: Value::Nil,
+                input: input.clone(),
+            },
+            Thunk::PartitionRun {
+                f: Value::Nil,
+                fv: Value::Nil,
+                input: input.clone(),
+            },
+            Thunk::Dedupe {
+                last: None,
+                input: input.clone(),
+            },
+            Thunk::KeepIndexed {
+                f: Value::Nil,
+                input: input.clone(),
+                idx: 0,
+            },
+        ] {
+            assert_eq!(drop_thunk_link(thunk), Some(input.clone()));
+        }
+    }
+
+    #[test]
     fn chunked_realized_parts_splits_eager_shape() {
         // Defensive: no constructor flags an eager shape chunked;
         // projectors split the first 32 items off instead.

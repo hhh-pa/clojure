@@ -2812,6 +2812,14 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "import specs validate before use")]
+    fn symbol_of_non_symbol_panics_loudly() {
+        // Defensive arm: import specs validate before use, so a
+        // non-symbol only arrives here — loud, never silent.
+        symbol_of(&Value::Int(1));
+    }
+
+    #[test]
     fn source_to_native_internal_is_loud() {
         // Direct total-function pin: the `Internal` arm renders loud
         // (only an analyzer bug could produce it from source).

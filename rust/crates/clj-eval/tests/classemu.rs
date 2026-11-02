@@ -4976,6 +4976,14 @@ fn lpv_create_owning_201() {
         ),
         "[\"x\" \"y\"]"
     );
+    // A non-vector arg misses the member (uniform no-method).
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(clojure.lang.LazilyPersistentVector/createOwning :kw)"
+        ),
+        "java.lang.IllegalArgumentException | No matching method createOwning found taking 1 args for class clojure.lang.LazilyPersistentVector"
+    );
 }
 
 #[test]
@@ -5027,8 +5035,19 @@ fn static_field_reads_201() {
     assert_eq!(run(&mut eval, "Double/NEGATIVE_INFINITY"), "##-Inf");
     assert_eq!(run(&mut eval, "Double/NaN"), "##NaN");
     assert_eq!(run(&mut eval, "Math/PI"), "3.141592653589793");
+    assert_eq!(run(&mut eval, "Math/E"), "2.718281828459045");
     assert_eq!(run(&mut eval, "(int Character/MAX_VALUE)"), "65535");
     assert_eq!(run(&mut eval, "Boolean/TRUE"), "true");
+    assert_eq!(run(&mut eval, "Boolean/FALSE"), "false");
+    assert_eq!(run(&mut eval, "Short/MIN_VALUE"), "-32768");
+    assert_eq!(run(&mut eval, "Short/MAX_VALUE"), "32767");
+    assert_eq!(run(&mut eval, "Byte/MIN_VALUE"), "-128");
+    assert_eq!(run(&mut eval, "Byte/MAX_VALUE"), "127");
+    assert_eq!(run(&mut eval, "Float/MIN_VALUE"), "1.1754943508222875E-38");
+    assert_eq!(run(&mut eval, "Float/MAX_VALUE"), "3.4028234663852886E38");
+    assert_eq!(run(&mut eval, "Float/POSITIVE_INFINITY"), "##Inf");
+    assert_eq!(run(&mut eval, "Float/NEGATIVE_INFINITY"), "##-Inf");
+    assert_eq!(run(&mut eval, "Float/NaN"), "##NaN");
     // Fully-qualified spelling resolves the same field.
     assert_eq!(
         run(&mut eval, "java.lang.Long/MAX_VALUE"),
@@ -5040,6 +5059,299 @@ fn static_field_reads_201() {
     assert_eq!(
         compile_err(&mut eval, "Long/FOO"),
         "java.lang.IllegalArgumentException | Error - no matches found for static method FOO in class java.lang.Long"
+    );
+    // Every class's miss arm reads the same shape.
+    for (spelling, fqn) in [
+        ("Integer/FOO", "java.lang.Integer"),
+        ("Short/FOO", "java.lang.Short"),
+        ("Byte/FOO", "java.lang.Byte"),
+        ("Double/FOO", "java.lang.Double"),
+        ("Float/FOO", "java.lang.Float"),
+        ("Character/FOO", "java.lang.Character"),
+        ("Boolean/FOO", "java.lang.Boolean"),
+        ("Math/FOO", "java.lang.Math"),
+        ("java.util.Locale/FOO", "java.util.Locale"),
+        (
+            "clojure.lang.PersistentQueue/FOO",
+            "clojure.lang.PersistentQueue",
+        ),
+    ] {
+        assert_eq!(
+            compile_err(&mut eval, spelling),
+            format!(
+                "java.lang.IllegalArgumentException | Error - no matches found for static method FOO in class {fqn}"
+            )
+        );
+    }
+}
+
+#[test]
+fn static_unknown_member_201() {
+    // Unknown members skip the compile-time arity table and miss
+    // at runtime with the uniform no-method shape.
+    let mut eval = boot();
+    for (spelling, fqn) in [
+        ("(Long/bogus 1)", "java.lang.Long"),
+        ("(Integer/bogus 1)", "java.lang.Integer"),
+        ("(Double/bogus 1)", "java.lang.Double"),
+        ("(Character/bogus 1)", "java.lang.Character"),
+        ("(Math/bogus 1)", "java.lang.Math"),
+        ("(Class/bogus 1)", "java.lang.Class"),
+        (
+            "(clojure.lang.LazilyPersistentVector/bogus 1)",
+            "clojure.lang.LazilyPersistentVector",
+        ),
+    ] {
+        assert_eq!(
+            uncaught(&mut eval, spelling),
+            format!(
+                "java.lang.IllegalArgumentException | No matching method bogus found taking 1 args for class {fqn}"
+            )
+        );
+    }
+}
+
+#[test]
+fn static_parse_edges_201() {
+    // Nil parses as the literal `null` (NFE, like the JDK);
+    // non-strings miss the `String` param (CCE).
+    let mut eval = boot();
+    assert_eq!(
+        uncaught(&mut eval, "(Long/parseLong nil)"),
+        "java.lang.NumberFormatException | For input string: \"null\""
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(Long/parseLong 5)"),
+        cce_bootstrap("java.lang.Long", "java.lang.String")
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(Integer/parseInt nil)"),
+        "java.lang.NumberFormatException | For input string: \"null\""
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(Integer/parseInt 5)"),
+        cce_bootstrap("java.lang.Long", "java.lang.String")
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(Double/parseDouble nil)"),
+        "java.lang.NumberFormatException | For input string: \"null\""
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(Double/parseDouble 5)"),
+        cce_bootstrap("java.lang.Long", "java.lang.String")
+    );
+}
+
+#[test]
+fn static_long_arg_kinds_201() {
+    // `remainderUnsigned` coerces every `Number` (truncating),
+    // nil NPEs on the primitive, the rest miss the param.
+    let mut eval = boot();
+    assert_eq!(run(&mut eval, "(Long/remainderUnsigned 7.9 3)"), "1");
+    assert_eq!(run(&mut eval, "(Long/remainderUnsigned 7N 3)"), "1");
+    assert_eq!(run(&mut eval, "(Long/remainderUnsigned 7/2 3)"), "0");
+    assert_eq!(run(&mut eval, "(Long/remainderUnsigned 7.9M 3)"), "1");
+    assert_eq!(
+        uncaught(&mut eval, "(Long/remainderUnsigned nil 3)"),
+        "java.lang.NullPointerException | Cannot invoke \"Object.getClass()\" because \"arg\" is null"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(Long/remainderUnsigned \"x\" 3)"),
+        "java.lang.IllegalArgumentException | Unexpected param type, expected: long, given: java.lang.String"
+    );
+}
+
+#[test]
+fn static_math_arg_kinds_201() {
+    // `Math/*` widens ratios/bigints/bigdecimals through f64;
+    // nil NPEs with the member in the message, the rest CCE.
+    let mut eval = boot();
+    assert_eq!(run(&mut eval, "(Math/sqrt 4/9)"), "0.6666666666666666");
+    assert_eq!(run(&mut eval, "(Math/sqrt 4N)"), "2.0");
+    assert_eq!(run(&mut eval, "(Math/sqrt 4.0M)"), "2.0");
+    assert_eq!(
+        uncaught(&mut eval, "(Math/sqrt nil)"),
+        "java.lang.NullPointerException | Cannot invoke \"java.lang.Math.sqrt(double)\" because the argument is null"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(Math/sqrt \"x\")"),
+        cce_bootstrap("java.lang.String", "java.lang.Double")
+    );
+}
+
+#[test]
+fn static_character_edges_201() {
+    // Non-char/code-point args miss the `Character` param (CCE).
+    let mut eval = boot();
+    assert_eq!(
+        uncaught(&mut eval, "(Character/isWhitespace \"x\")"),
+        cce_bootstrap("java.lang.String", "java.lang.Character")
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(Character/isLetterOrDigit \"x\")"),
+        cce_bootstrap("java.lang.String", "java.lang.Character")
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(Character/isLowerCase \"x\")"),
+        cce_bootstrap("java.lang.String", "java.lang.Character")
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(Character/isUpperCase \"x\")"),
+        cce_bootstrap("java.lang.String", "java.lang.Character")
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(Character/digit \"x\" 10)"),
+        cce_bootstrap("java.lang.String", "java.lang.Character")
+    );
+    assert_eq!(run(&mut eval, "(Character/digit \\a 16)"), "10");
+}
+
+#[test]
+fn gated_member_edges_201() {
+    // `indexOf` needles: ints and chars are code points,
+    // out-of-range ints read -1, the rest miss the gate.
+    let mut eval = boot();
+    assert_eq!(run(&mut eval, "(.indexOf \"abc\" 98)"), "1");
+    assert_eq!(run(&mut eval, "(.indexOf \"abc\" \\b)"), "1");
+    assert_eq!(run(&mut eval, "(.indexOf \"abc\" -1)"), "-1");
+    assert_eq!(
+        uncaught(&mut eval, "(.indexOf \"abc\" :kw)"),
+        "java.lang.IllegalArgumentException | No matching method indexOf found taking 1 args for class java.lang.String"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(.indexOf :kw \"x\")"),
+        "java.lang.IllegalArgumentException | No matching method indexOf found taking 1 args for class clojure.lang.Keyword"
+    );
+    // List targets find like vectors; a comparison that throws
+    // propagates (vector and list targets).
+    assert_eq!(run(&mut eval, "(.indexOf '(a b c) 'b)"), "1");
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(.indexOf [(map (fn [_] (throw (ex-info \"boom\" {}))) [1])] '(1))"
+        ),
+        "clojure.lang.ExceptionInfo | boom"
+    );
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(.indexOf (list (map (fn [_] (throw (ex-info \"boom\" {}))) [1])) '(1))"
+        ),
+        "clojure.lang.ExceptionInfo | boom"
+    );
+    // A non-string replacement falls past the matcher gate.
+    assert_eq!(
+        uncaught(&mut eval, "(.replaceAll (re-matcher #\"a\" \"a\") 5)"),
+        "java.lang.IllegalArgumentException | No matching method replaceAll found taking 1 args for class java.util.regex.Matcher"
+    );
+    // `append` renders other values through `str` (a throwing
+    // render propagates); non-builders miss the gate.
+    assert_eq!(
+        run(&mut eval, "(str (.append (StringBuilder.) 42))"),
+        "\"42\""
+    );
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(.append (StringBuilder.) (map (fn [_] (throw (ex-info \"boom\" {}))) [1]))"
+        ),
+        "clojure.lang.ExceptionInfo | boom"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(.append \"s\" \"x\")"),
+        "java.lang.IllegalArgumentException | No matching method append found taking 1 args for class java.lang.String"
+    );
+    // `Pattern/split`: nil input NPEs, bad text/limit args miss.
+    assert_eq!(
+        uncaught(&mut eval, "(.split #\"a\" nil)"),
+        "java.lang.NullPointerException | Cannot invoke \"java.lang.CharSequence.length()\" because \"input\" is null"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(.split #\"a\" 5)"),
+        "java.lang.ClassCastException | Cannot cast java.lang.Long to java.lang.String"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(.split #\"a\" \"abc\" \"x\")"),
+        "java.lang.IllegalArgumentException | Unexpected param type, expected: int, given: java.lang.String"
+    );
+    // `String/format`: the locale and the args array both cast.
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(String/format 5 \"%.6f\" (into-array Object [(double 1)]))"
+        ),
+        cce_bootstrap("java.lang.Long", "java.util.Locale")
+    );
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(String/format java.util.Locale/US \"%s\" [\"n\"])"
+        ),
+        "java.lang.ClassCastException | class clojure.lang.PersistentVector cannot be cast to class [Ljava.lang.Object; (clojure.lang.PersistentVector is in unnamed module of loader 'app'; [Ljava.lang.Object; is in module java.base of loader 'bootstrap')"
+    );
+}
+
+#[test]
+fn locale_builder_values_201() {
+    // Locales and builders print/compare/hash through the
+    // extension trait (`pr` shows the `#object[...]` display;
+    // `re-find` pins it without the identity bits).
+    let mut eval = boot();
+    assert_eq!(
+        run(
+            &mut eval,
+            "(re-find #\"en_US\" (pr-str java.util.Locale/US))"
+        ),
+        "\"en_US\""
+    );
+    assert_eq!(
+        run(&mut eval, "(= java.util.Locale/US java.util.Locale/US)"),
+        "true"
+    );
+    assert_eq!(
+        run(
+            &mut eval,
+            "(= (hash java.util.Locale/US) (hash java.util.Locale/US))"
+        ),
+        "true"
+    );
+    assert_eq!(
+        run(&mut eval, "(.getName (type java.util.Locale/US))"),
+        "\"java.util.Locale\""
+    );
+    assert_eq!(
+        run(
+            &mut eval,
+            "(re-find #\"StringBuilder\" (pr-str (StringBuilder.)))"
+        ),
+        "\"StringBuilder\""
+    );
+    assert_eq!(
+        run(&mut eval, "(= (StringBuilder.) (StringBuilder.))"),
+        "false"
+    );
+    assert_eq!(
+        run(&mut eval, "(.getName (type (StringBuilder. \"hi\")))"),
+        "\"java.lang.StringBuilder\""
+    );
+}
+
+#[test]
+fn string_builder_ctors_201() {
+    // Nil is ambiguous (`(String)` vs `(CharSequence)`); anything
+    // else non-string/non-int, or a wrong arity, misses.
+    let mut eval = boot();
+    assert_eq!(
+        uncaught(&mut eval, "(StringBuilder. nil)"),
+        "java.lang.IllegalArgumentException | More than one matching method found: java.lang.StringBuilder"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(StringBuilder. :kw)"),
+        "java.lang.IllegalArgumentException | No matching ctor found for class java.lang.StringBuilder"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(clojure.core/__new* 'StringBuilder 1 2)"),
+        "java.lang.IllegalArgumentException | No matching ctor found for class java.lang.StringBuilder"
     );
 }
 

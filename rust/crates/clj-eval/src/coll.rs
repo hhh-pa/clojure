@@ -18,9 +18,9 @@ use std::collections::HashSet;
 use std::sync::{Arc, Mutex, Weak};
 
 use clj_value::{
-    ConsValue, List, Map, PrimitiveVector, Set, SortSpec, SubVectorValue, ThrowClass, Transient,
-    TransientError, TransientKind, TransientMap, TransientSet, TransientVector, Value, Vector,
-    new_map, new_set,
+    ConsValue, Keyword, List, Map, PrimitiveVector, Set, SortSpec, SubVectorValue, ThrowClass,
+    Transient, TransientError, TransientKind, TransientMap, TransientSet, TransientVector, Value,
+    Vector, new_map, new_set,
 };
 
 use crate::core::{cce_err, cce_message, is_counted, jvm_compare, nth_index};
@@ -2048,11 +2048,50 @@ fn native_pop_bang(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nativ
     Ok(Value::Transient(t.clone()))
 }
 
+/// The `PersistentQueue` emulation mark: queues ride on
+/// vectors (insertion-ordered, `conj`/`count`/`seq`/`nth`
+/// already correct), distinguished by this metadata key so
+/// `peek`/`pop` take the front. `conj` and `pop` preserve
+/// metadata, so queues stay queues through BFS loops. The mark
+/// is visible to `meta` (a documented narrowing — real queues
+/// print `#object[…]`; these print as vectors).
+fn queue_mark_key() -> Value {
+    Value::Keyword(Keyword::new(Some("clojure-rs"), "queue"))
+}
+
+/// Whether a vector is a queue emulation (see
+/// [`empty_queue_value`]).
+fn is_queue_vec(x: &Vector) -> bool {
+    x.meta().and_then(|m| m.get(&queue_mark_key())).is_some()
+}
+
+/// `clojure.lang.PersistentQueue/EMPTY`: a marked empty vector
+/// (FIFO via the `peek`/`pop` arms below; 4 recipes BFS with
+/// it).
+pub(crate) fn empty_queue_value() -> Value {
+    Value::Vector(
+        Vector::from_vec(vec![])
+            .with_meta(Some(new_map().insert(queue_mark_key(), Value::Bool(true)))),
+    )
+}
+
+/// `pop` over a queue emulation: drops the FRONT (empty pops
+/// answer the queue itself, like the JVM — oracle).
+fn pop_queue(x: &Vector) -> Value {
+    if x.is_empty() {
+        return Value::Vector(x.clone());
+    }
+    Value::Vector(
+        Vector::from_vec(x.iter().skip(1).cloned().collect()).with_meta(x.meta().cloned()),
+    )
+}
+
 fn native_peek(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/peek", args, &[1])?;
     match &args[0] {
         Value::Nil => Ok(Value::Nil),
         Value::List(l) => Ok(l.first().cloned().unwrap_or(Value::Nil)),
+        Value::Vector(x) if is_queue_vec(x) => Ok(x.iter().next().cloned().unwrap_or(Value::Nil)),
         Value::Vector(x) => Ok(x.iter().last().cloned().unwrap_or(Value::Nil)),
         Value::PrimitiveVector(p) => Ok(p.iter().last().cloned().unwrap_or(Value::Nil)),
         Value::MapEntry { val, .. } => Ok((**val).clone()),
@@ -2133,6 +2172,7 @@ fn native_pop(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErro
     match &args[0] {
         Value::Nil => Ok(Value::Nil),
         Value::List(l) => pop_list(l),
+        Value::Vector(x) if is_queue_vec(x) => Ok(pop_queue(x)),
         Value::Vector(x) => pop_vector(x),
         Value::PrimitiveVector(p) => pop_pv(p),
         // Popping an entry answers its 1-vector (Oracle FX2
