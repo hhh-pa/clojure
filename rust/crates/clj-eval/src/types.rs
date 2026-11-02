@@ -25,7 +25,7 @@ use std::sync::Arc;
 
 use clj_value::{
     Atom, HostDef, HostInst, HostKind, HostMethod, HostVal, Map, PrintOpts, Symbol, ThrowClass,
-    Value, class_name, fallback_str, find_method, is_field, new_map, pr_to_string,
+    Throwable, Value, class_name, fallback_str, find_method, is_field, new_map, pr_to_string,
 };
 
 use crate::core::cce_err;
@@ -137,7 +137,28 @@ pub(crate) fn hostdef_by_name(eval: &Evaluator, name: &str) -> Option<Arc<HostDe
         return None;
     }
     let dotted = Symbol::new(None, name);
-    match lookup_root(eval, &dotted) {
+    if let Some(d) = hostdef_of_root(lookup_root(eval, &dotted)) {
+        return Some(d);
+    }
+    // Munged binary names (dashes became underscores): retry with
+    // the namespace demunged (#205: `instance?` on records in
+    // dashed namespaces, e.g.
+    // `...dual_number_automatic_differentiation.Dual`). Exact
+    // wins — a literal-underscore namespace keeps its own type
+    // (the JVM collides these too).
+    match name.rsplit_once('.') {
+        Some((ns_part, name_part)) if ns_part.contains('_') => {
+            let demunged = format!("{}.{}", ns_part.replace('_', "-"), name_part);
+            hostdef_of_root(lookup_root(eval, &Symbol::new(None, demunged.as_str())))
+        }
+        _ => None,
+    }
+}
+
+/// A root value as a descriptor (definitions only — instances
+/// and anything else are not types).
+fn hostdef_of_root(root: Option<Value>) -> Option<Arc<HostDef>> {
+    match root {
         Some(Value::HostType(h)) => match h.as_ref() {
             HostVal::Def(d) => Some(d.clone()),
             HostVal::Inst(_) => None,
@@ -633,7 +654,7 @@ fn new_via_symbol(
 /// `new-missing-fq`); anything else is `Unable to resolve
 /// classname` (oracles `ctor-missing-simple`, `new-missing-simple`,
 /// `m-new-qual*`).
-fn new_unresolved(eval: &Evaluator, sym: &Symbol, args: &[Value]) -> Result<Value, NativeError> {
+fn new_unresolved(eval: &mut Evaluator, sym: &Symbol, args: &[Value]) -> Result<Value, NativeError> {
     if sym.namespace().is_none() && crate::classemu::is_class_position(sym.name()) {
         if let Some(class) = crate::classemu::resolve_class_name(eval, sym.name()) {
             return new_via_class(eval, class.name(), args);
@@ -654,7 +675,7 @@ fn new_unresolved(eval: &Evaluator, sym: &Symbol, args: &[Value]) -> Result<Valu
 /// names construct (interfaces miss), anything else is the
 /// uniform miss — `for interface` iff the lattice says so
 /// (oracles `ctor-iface`, `ctor-abstract`, `ctor-private`).
-fn new_via_class(eval: &Evaluator, name: &str, args: &[Value]) -> Result<Value, NativeError> {
+fn new_via_class(eval: &mut Evaluator, name: &str, args: &[Value]) -> Result<Value, NativeError> {
     if name == "java.lang.String" {
         return crate::ctor::build_string(args);
     }
@@ -664,12 +685,87 @@ fn new_via_class(eval: &Evaluator, name: &str, args: &[Value]) -> Result<Value, 
     if name == "java.lang.StringBuilder" {
         return crate::ctor::build_string_builder(args);
     }
+    if name == "java.util.Random" {
+        return crate::emurand::build_random(args);
+    }
+    if name == "java.security.SecureRandom" {
+        return crate::emurand::build_secure_random(args);
+    }
+    if name == "java.math.BigInteger" {
+        return crate::ctor::build_biginteger(args);
+    }
+    if name == "java.net.URI" {
+        return crate::ctor::build_uri(args);
+    }
+    if let Some(class) = throw_class_for_name(name) {
+        return new_throwable(eval, class, name, args);
+    }
     match hostdef_by_name(eval, name) {
         Some(def) => new_via_def(&def, args),
         None => Err(crate::ctor::no_ctor(
             name,
             crate::classemu::lattice_is_iface(name),
         )),
+    }
+}
+
+/// Throwable classes with constructor support (#205): every
+/// exception/error the algorithms suite builds.
+fn throw_class_for_name(name: &str) -> Option<ThrowClass> {
+    Some(match name {
+        "java.lang.Exception" => ThrowClass::Exception,
+        "java.lang.IllegalArgumentException" => ThrowClass::IllegalArgumentException,
+        "java.lang.UnsupportedOperationException" => ThrowClass::UnsupportedOperationException,
+        "java.lang.IndexOutOfBoundsException" => ThrowClass::IndexOutOfBoundsException,
+        "java.lang.ArithmeticException" => ThrowClass::ArithmeticException,
+        "java.lang.AssertionError" => ThrowClass::AssertionError,
+        _ => return None,
+    })
+}
+
+/// `(Ex. …)` (#205): the 0/1/2-arg `Throwable` shapes — bare,
+/// message-or-cause, message-plus-cause. A nil single arg is
+/// ambiguous (`(String)` vs `(Throwable)`); anything else
+/// mistyped is the uniform miss.
+fn new_throwable(
+    eval: &mut Evaluator,
+    class: ThrowClass,
+    name: &str,
+    args: &[Value],
+) -> Result<Value, NativeError> {
+    let (message, cause) = match args {
+        [] => (None, None),
+        [Value::Str(s)] => (Some(Arc::from(s.as_ref())), None),
+        [Value::Throwable(t)] => (Some(throwable_string(t)), Some(t.clone())),
+        [Value::Nil] => {
+            return Err(NativeError::new(
+                ThrowClass::IllegalArgumentException,
+                format!("More than one matching method found: {name}"),
+            ));
+        }
+        [_] => return Err(crate::ctor::no_ctor(name, false)),
+        [Value::Str(s), Value::Throwable(t)] => {
+            (Some(Arc::from(s.as_ref())), Some(t.clone()))
+        }
+        [Value::Str(s), Value::Nil] => (Some(Arc::from(s.as_ref())), None),
+        [_, _] => return Err(crate::ctor::no_ctor(name, false)),
+        _ => return Err(crate::ctor::no_ctor(name, false)),
+    };
+    Ok(Value::Throwable(Throwable {
+        id: eval.next_id(),
+        class,
+        message,
+        data: None,
+        cause: cause.map(Box::new),
+    }))
+}
+
+/// A throwable's `toString` (`Class: message`, bare class when
+/// messageless — the 1-arg cause shape's message).
+fn throwable_string(t: &Throwable) -> Arc<str> {
+    match &t.message {
+        Some(m) => Arc::from(format!("{}: {m}", t.class.jvm_name()).as_str()),
+        None => Arc::from(t.class.jvm_name()),
     }
 }
 

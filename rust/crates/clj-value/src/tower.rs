@@ -942,6 +942,26 @@ pub fn bigint_parse(s: &str) -> Result<BigInt, String> {
     BigInt::parse_bytes(s.as_bytes(), 10).ok_or_else(|| format!("For input string: \"{digits}\""))
 }
 
+/// Parse `s` in `radix` (the `(String, int)` BigInteger ctor,
+/// #205): a lone leading `-` (no `+`, like the JDK), radix
+/// digits, JDK failure texts.
+pub fn bigint_parse_radix(s: &str, radix: u32) -> Result<BigInt, String> {
+    if !(2..=36).contains(&radix) {
+        return Err("Radix out of range".to_owned());
+    }
+    if s.is_empty() {
+        return Err("Zero length BigInteger".to_owned());
+    }
+    let digits = s.strip_prefix('-').unwrap_or(s);
+    if digits.is_empty() {
+        return Err(format!("For input string: \"{s}\""));
+    }
+    if !digits.chars().all(|c| c.to_digit(radix).is_some()) {
+        return Err(format!("For input string: \"{s}\""));
+    }
+    BigInt::parse_bytes(s.as_bytes(), radix).ok_or_else(|| format!("For input string: \"{s}\""))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

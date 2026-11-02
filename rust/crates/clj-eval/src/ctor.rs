@@ -35,6 +35,11 @@ pub(crate) fn ctor_arities(fqn: &str) -> Option<&'static [usize]> {
         "java.lang.String" => Some(&[0, 1, 2, 3, 4]),
         "java.lang.Object" => Some(&[0]),
         "java.lang.StringBuilder" => Some(&[0, 1]),
+        // #205: the emulated allow-list grows (dispatch in `types`).
+        "java.util.Random" => Some(&[0, 1]),
+        "java.security.SecureRandom" => Some(&[0]),
+        "java.math.BigInteger" => Some(&[1, 2]),
+        "java.net.URI" => Some(&[1]),
         _ => None,
     }
 }
@@ -571,6 +576,141 @@ fn encode_utf16_units(s: &str, little: bool, bom: bool) -> Vec<u8> {
         }
     }
     out
+}
+
+/// `(BigInteger. …)` (#205): `(String)`, `(String, int)`,
+/// `(int, byte[])`, and `(int, Random)` (the `(byte[])`
+/// two's-complement spelling is out of the suite's reach, so
+/// it stays a miss). Nil spellings follow the overload match
+/// (a lone nil `String` NPEs on `length`; an `(int, nil)` pair
+/// is ambiguous); mistyped shapes are the uniform miss.
+pub(crate) fn build_biginteger(args: &[Value]) -> Result<Value, NativeError> {
+    const CLASS: &str = "java.math.BigInteger";
+    match args {
+        [Value::Str(s)] => clj_value::bigint_parse(s)
+            .map(bigint_ctor_value)
+            .map_err(crate::core::number_format),
+        [Value::Nil] => Err(bigint_length_npe()),
+        [_] => Err(no_ctor(CLASS, false)),
+        [Value::Str(s), Value::Int(radix)] => {
+            let radix = i32::try_from(*radix).map_err(|_| no_ctor(CLASS, false))?;
+            clj_value::bigint_parse_radix(s, radix as u32)
+                .map(bigint_ctor_value)
+                .map_err(crate::core::number_format)
+        }
+        [Value::Str(_), Value::Nil] => Err(bigint_unbox_npe()),
+        [Value::Str(_), _] => Err(no_ctor(CLASS, false)),
+        [Value::Nil, Value::Int(_)] => Err(bigint_length_npe()),
+        [Value::Int(n), second] => bigint_ctor_int_pair(CLASS, *n, second),
+        _ => Err(no_ctor(CLASS, false)),
+    }
+}
+
+/// Mint a `BigInteger` from a parsed `BigInt`.
+fn bigint_ctor_value(n: num_bigint::BigInt) -> Value {
+    Value::BigInteger(Arc::new(n))
+}
+
+/// Build `(URI. …)` (#205): 1-arg takes the string (nil NPEs
+/// on the parameter, like the JDK); anything else misses.
+pub(crate) fn build_uri(args: &[Value]) -> Result<Value, NativeError> {
+    const CLASS: &str = "java.net.URI";
+    match args {
+        [Value::Str(s)] => crate::classemu::UriHandle::parse(s)
+            .map(|h| Value::Extension(Arc::new(h))),
+        [Value::Nil] => Err(NativeError::new(
+            ThrowClass::NullPointerException,
+            "Cannot invoke \"java.net.URI.<init>\" because \"str\" is null".to_owned(),
+        )),
+        _ => Err(no_ctor(CLASS, false)),
+    }
+}
+
+/// The `(int, …)` BigInteger ctors (split for the complexity
+/// budget): signum-plus-magnitude, or random bits.
+fn bigint_ctor_int_pair(class: &str, n: i64, second: &Value) -> Result<Value, NativeError> {
+    let n = i32::try_from(n).map_err(|_| no_ctor(class, false))?;
+    match second {
+        Value::Array(a) => {
+            let guard = a.lock();
+            match &*guard {
+                ArrayStore::Bytes(cells) => {
+                    let mag: Vec<u8> = cells.iter().map(|b| *b as u8).collect();
+                    bigint_signum(n, &mag)
+                }
+                _ => Err(no_ctor(class, false)),
+            }
+        }
+        Value::Nil => Err(NativeError::new(
+            ThrowClass::IllegalArgumentException,
+            format!("More than one matching method found: {class}"),
+        )),
+        other => {
+            if crate::emurand::is_random(other) {
+                bigint_random_bits(n, other)
+            } else {
+                Err(no_ctor(class, false))
+            }
+        }
+    }
+}
+
+/// The `(int, byte[])` signum-magnitude ctor.
+fn bigint_signum(signum: i32, mag: &[u8]) -> Result<Value, NativeError> {
+    if !(-1..=1).contains(&signum) {
+        return Err(crate::core::number_format("Invalid signum value"));
+    }
+    if signum == 0 {
+        if mag.iter().any(|b| *b != 0) {
+            return Err(crate::core::number_format("signum-magnitude mismatch"));
+        }
+        return Ok(bigint_ctor_value(num_bigint::BigInt::from(0)));
+    }
+    let mag = num_bigint::BigUint::from_bytes_be(mag);
+    let sign = if signum < 0 {
+        num_bigint::Sign::Minus
+    } else {
+        num_bigint::Sign::Plus
+    };
+    Ok(bigint_ctor_value(num_bigint::BigInt::from_biguint(sign, mag)))
+}
+
+/// The `(int, Random)` random-bits ctor (excess top bits
+/// masked, like the JDK).
+fn bigint_random_bits(num_bits: i32, rnd: &Value) -> Result<Value, NativeError> {
+    if num_bits < 0 {
+        return Err(NativeError::new(
+            ThrowClass::NegativeArraySizeException,
+            "numBits must be non-negative".to_owned(),
+        ));
+    }
+    let nbytes = (num_bits as usize + 7) / 8;
+    let bytes = crate::emurand::random_bytes(rnd, nbytes).unwrap_or_default();
+    let mut mag: Vec<u8> = bytes.into_iter().map(|b| b as u8).collect();
+    let excess = nbytes * 8 - num_bits as usize;
+    if excess > 0 {
+        mag[0] &= 0xFF >> excess;
+    }
+    Ok(bigint_ctor_value(num_bigint::BigInt::from_biguint(
+        num_bigint::Sign::Plus,
+        num_bigint::BigUint::from_bytes_be(&mag),
+    )))
+}
+
+/// The nil-`String` body's NPE (the `length` read).
+fn bigint_length_npe() -> NativeError {
+    NativeError::new(
+        ThrowClass::NullPointerException,
+        "Cannot invoke \"String.length()\" because \"val\" is null".to_owned(),
+    )
+}
+
+/// The nil-`int` unbox NPE.
+fn bigint_unbox_npe() -> NativeError {
+    NativeError::new(
+        ThrowClass::NullPointerException,
+        "Cannot invoke \"java.lang.Integer.intValue()\" because \"val\" is null".to_owned(),
+    )
 }
 
 /// UTF-32 words in the given endianness, with a BOM when `bom`.

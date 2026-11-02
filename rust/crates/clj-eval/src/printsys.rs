@@ -375,7 +375,12 @@ fn pr_on_method(eval: &mut Evaluator, v: &Value, w: &Value) -> Result<Value, Sig
         return f(eval, &[v.clone(), w.clone()]).map_err(|e| eval.throw(e));
     }
     match deref_core(eval, "print-method") {
-        Value::MultiFn(mf) => invoke_multifn(eval, &mf, &[v.clone(), w.clone()]),
+        Value::MultiFn(mf) => {
+            if let Some(f) = class_method_override(&mf, v) {
+                return eval.call(&f, &[v.clone(), w.clone()]);
+            }
+            invoke_multifn(eval, &mf, &[v.clone(), w.clone()])
+        }
         // Unbooted (no core vars): the engine renders directly.
         Value::Nil | Value::Unbound(_) => engine_fallback(eval, v, w),
         // A redefined root breaks `pr` on both sides (implementer
@@ -395,10 +400,50 @@ fn pr_on_dup(eval: &mut Evaluator, v: &Value, w: &Value) -> Result<Value, Signal
         }
     }
     match deref_core(eval, "print-dup") {
-        Value::MultiFn(mf) => invoke_multifn(eval, &mf, &[v.clone(), w.clone()]),
+        Value::MultiFn(mf) => {
+            if let Some(f) = class_method_override(&mf, v) {
+                return eval.call(&f, &[v.clone(), w.clone()]);
+            }
+            invoke_multifn(eval, &mf, &[v.clone(), w.clone()])
+        }
         Value::Nil | Value::Unbound(_) => engine_fallback(eval, v, w),
         other => Err(eval.throw(cce_err(&other, "clojure.lang.MultiFn"))),
     }
+}
+
+/// A user method keyed by the value's class or host descriptor
+/// (#205): upstream `print-method`/`print-dup` dispatch on
+/// `(class x)`, while the booted table dispatches on token
+/// strings. An exact class/descriptor entry (e.g. from
+/// `(defmethod print-method Dual …)`) wins over the token
+/// method; otherwise the token path runs unchanged.
+fn class_method_override(mf: &MultiFn, v: &Value) -> Option<Value> {
+    match v {
+        Value::HostType(h) => match h.as_ref() {
+            // Instances: the descriptor entry first (defmethod
+            // stores the type object as given), then the class.
+            HostVal::Inst(i) => {
+                let desc = Value::HostType(Arc::new(HostVal::Def(i.def.clone())));
+                mf.methods.get(&desc).cloned().or_else(|| class_keyed(mf, v))
+            }
+            // A type object itself dispatches on `Class`
+            // (upstream `(class TheClass)`), never on the
+            // described class.
+            HostVal::Def(_) => {
+                let inner = crate::classemu::class_of_value(v)?;
+                let cls = crate::classemu::class_of_value(&Value::Class(inner))?;
+                mf.methods.get(&Value::Class(cls)).cloned()
+            }
+        },
+        // `nil` has no class; everything else answers its own.
+        _ => class_keyed(mf, v),
+    }
+}
+
+/// The table entry keyed by the value's class, if any.
+fn class_keyed(mf: &MultiFn, v: &Value) -> Option<Value> {
+    let class = crate::classemu::class_of_value(v)?;
+    mf.methods.get(&Value::Class(class)).cloned()
 }
 
 /// The unbooted fallback: the engine renders directly (bare

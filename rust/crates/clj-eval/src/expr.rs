@@ -395,6 +395,7 @@ const JAVA_LANG_CLASSES: &[(&str, &str)] = &[
     ),
     ("StackOverflowError", "java.lang.StackOverflowError"),
     ("OutOfMemoryError", "java.lang.OutOfMemoryError"),
+    ("VirtualMachineError", "java.lang.VirtualMachineError"),
     ("ClassFormatError", "java.lang.ClassFormatError"),
     ("NoClassDefFoundError", "java.lang.NoClassDefFoundError"),
     ("VerifyError", "java.lang.VerifyError"),

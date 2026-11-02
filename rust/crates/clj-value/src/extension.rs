@@ -58,6 +58,10 @@ pub enum ThrowClass {
     ArrayStoreException,
     NegativeArraySizeException,
     OutOfMemoryError,
+    /// `StackOverflowError` (#205): the call-depth guard's
+    /// catchable error (a `VirtualMachineError`, like the JDK —
+    /// `(power 2 -1)` must throw it, not abort the process).
+    StackOverflowError,
     ArithmeticException,
     ExceptionInfo,
     FileNotFoundException,
@@ -93,6 +97,9 @@ pub enum ThrowClass {
     /// `NoSuchElementException` (S16 `getFirst`/`getLast` on empty
     /// lists): a `RuntimeException`.
     NoSuchElementException,
+    /// `URISyntaxException` (#205 `java.net.URI`): a checked
+    /// `Exception` for unparseable URI strings.
+    URISyntaxException,
 }
 
 impl ThrowClass {
@@ -196,21 +203,24 @@ impl ThrowClass {
         match self {
             Self::ClassNotFoundException => "java.lang.ClassNotFoundException",
             Self::NoSuchElementException => "java.util.NoSuchElementException",
+            Self::URISyntaxException => "java.net.URISyntaxException",
             other => other.jvm_name_array(),
         }
     }
 
-    /// Array exceptions plus the error class that arrived with
-    /// the array slice (S15). Chained so each match stays under
-    /// the complexity gate.
+    /// Array exceptions plus the error classes that arrived
+    /// with the array slice (S15) and the #205 call-depth guard.
+    /// Chained so each match stays under the complexity gate.
     fn jvm_name_array(&self) -> &'static str {
         match self {
-            // Only `ArrayStoreException` and `OutOfMemoryError`
-            // reach here: `ArrayIndexOutOfBoundsException` and
+            // Only `ArrayStoreException`, `OutOfMemoryError`, and
+            // `StackOverflowError` reach here:
+            // `ArrayIndexOutOfBoundsException` and
             // `NegativeArraySizeException` are answered directly
             // by `jvm_name`, like every other upstream variant.
             Self::ArrayStoreException => "java.lang.ArrayStoreException",
             Self::OutOfMemoryError => "java.lang.OutOfMemoryError",
+            Self::StackOverflowError => "java.lang.StackOverflowError",
             // All other variants are handled upstream (the single
             // caller partitions the variants).
             _ => unreachable!("throw-class partition"),
@@ -318,6 +328,7 @@ fn throw_parent_rest(jvm_name: &str) -> Option<&'static str> {
         "java.lang.IllegalAccessError" => Some("java.lang.LinkageError"),
         "java.util.NoSuchElementException" => Some("java.lang.RuntimeException"),
         "java.io.UnsupportedEncodingException" => Some("java.io.IOException"),
+        "java.net.URISyntaxException" => Some("java.lang.Exception"),
         _ => throw_parent_format(jvm_name),
     }
 }
@@ -356,6 +367,7 @@ fn throw_parent_array(jvm_name: &str) -> Option<&'static str> {
             Some("java.lang.RuntimeException")
         }
         "java.lang.OutOfMemoryError" => Some("java.lang.VirtualMachineError"),
+        "java.lang.StackOverflowError" => Some("java.lang.VirtualMachineError"),
         "java.lang.VirtualMachineError" => Some("java.lang.Error"),
         _ => None,
     }
