@@ -5113,12 +5113,15 @@ fn static_unknown_member_201() {
 
 #[test]
 fn static_parse_edges_201() {
-    // Nil parses as the literal `null` (NFE, like the JDK);
-    // non-strings miss the `String` param (CCE).
+    // Nil is NOT the literal `"null"` (that string parses with
+    // `For input string: "null"`): the integral parses NFE with
+    // `Cannot parse null string`, `parseDouble` NPEs (all JDK
+    // shapes — oracle `/tmp/fiveprobe.clj`); non-strings miss
+    // the `String` param (CCE).
     let mut eval = boot();
     assert_eq!(
         uncaught(&mut eval, "(Long/parseLong nil)"),
-        "java.lang.NumberFormatException | For input string: \"null\""
+        "java.lang.NumberFormatException | Cannot parse null string"
     );
     assert_eq!(
         uncaught(&mut eval, "(Long/parseLong 5)"),
@@ -5126,7 +5129,7 @@ fn static_parse_edges_201() {
     );
     assert_eq!(
         uncaught(&mut eval, "(Integer/parseInt nil)"),
-        "java.lang.NumberFormatException | For input string: \"null\""
+        "java.lang.NumberFormatException | Cannot parse null string"
     );
     assert_eq!(
         uncaught(&mut eval, "(Integer/parseInt 5)"),
@@ -5134,7 +5137,7 @@ fn static_parse_edges_201() {
     );
     assert_eq!(
         uncaught(&mut eval, "(Double/parseDouble nil)"),
-        "java.lang.NumberFormatException | For input string: \"null\""
+        "java.lang.NullPointerException | Cannot invoke \"String.length()\" because \"in\" is null"
     );
     assert_eq!(
         uncaught(&mut eval, "(Double/parseDouble 5)"),
@@ -5144,8 +5147,9 @@ fn static_parse_edges_201() {
 
 #[test]
 fn static_long_arg_kinds_201() {
-    // `remainderUnsigned` coerces every `Number` (truncating),
-    // nil NPEs on the primitive, the rest miss the param.
+    // `remainderUnsigned` coerces every `Number` (truncating);
+    // nil NPEs in unboxing, non-Numbers CCE to `Number`
+    // (oracles `/tmp/fiveprobe.clj`, `/tmp/remstr.clj`).
     let mut eval = boot();
     assert_eq!(run(&mut eval, "(Long/remainderUnsigned 7.9 3)"), "1");
     assert_eq!(run(&mut eval, "(Long/remainderUnsigned 7N 3)"), "1");
@@ -5153,11 +5157,11 @@ fn static_long_arg_kinds_201() {
     assert_eq!(run(&mut eval, "(Long/remainderUnsigned 7.9M 3)"), "1");
     assert_eq!(
         uncaught(&mut eval, "(Long/remainderUnsigned nil 3)"),
-        "java.lang.NullPointerException | Cannot invoke \"Object.getClass()\" because \"arg\" is null"
+        "java.lang.NullPointerException | Cannot invoke \"java.lang.Number.doubleValue()\" because \"x\" is null"
     );
     assert_eq!(
         uncaught(&mut eval, "(Long/remainderUnsigned \"x\" 3)"),
-        "java.lang.IllegalArgumentException | Unexpected param type, expected: long, given: java.lang.String"
+        cce_bootstrap("java.lang.String", "java.lang.Number")
     );
 }
 
@@ -5181,38 +5185,45 @@ fn static_math_arg_kinds_201() {
 
 #[test]
 fn static_character_edges_201() {
-    // Non-char/code-point args miss the `Character` param (CCE).
+    // Non-char args miss the overload entirely (no-match, not
+    // CCE — the Reflector finds no `(String)` method; oracles
+    // `/tmp/fiveprobe.clj`, `/tmp/remstr.clj`).
     let mut eval = boot();
     assert_eq!(
         uncaught(&mut eval, "(Character/isWhitespace \"x\")"),
-        cce_bootstrap("java.lang.String", "java.lang.Character")
+        "java.lang.IllegalArgumentException | No matching method isWhitespace found taking 1 args"
     );
     assert_eq!(
         uncaught(&mut eval, "(Character/isLetterOrDigit \"x\")"),
-        cce_bootstrap("java.lang.String", "java.lang.Character")
+        "java.lang.IllegalArgumentException | No matching method isLetterOrDigit found taking 1 args"
     );
     assert_eq!(
         uncaught(&mut eval, "(Character/isLowerCase \"x\")"),
-        cce_bootstrap("java.lang.String", "java.lang.Character")
+        "java.lang.IllegalArgumentException | No matching method isLowerCase found taking 1 args"
     );
     assert_eq!(
         uncaught(&mut eval, "(Character/isUpperCase \"x\")"),
-        cce_bootstrap("java.lang.String", "java.lang.Character")
+        "java.lang.IllegalArgumentException | No matching method isUpperCase found taking 1 args"
     );
     assert_eq!(
         uncaught(&mut eval, "(Character/digit \"x\" 10)"),
-        cce_bootstrap("java.lang.String", "java.lang.Character")
+        "java.lang.IllegalArgumentException | No matching method digit found taking 2 args"
     );
     assert_eq!(run(&mut eval, "(Character/digit \\a 16)"), "10");
 }
 
 #[test]
 fn gated_member_edges_201() {
-    // `indexOf` needles: ints and chars are code points,
-    // out-of-range ints read -1, the rest miss the gate.
+    // `indexOf` needles: ints are code points, out-of-range
+    // ints read -1; chars miss the gate (the Reflector has no
+    // `(String, Character)` overload — oracle `/tmp/fiveprobe.clj`
+    // `:indexOf-char`), the rest miss too.
     let mut eval = boot();
     assert_eq!(run(&mut eval, "(.indexOf \"abc\" 98)"), "1");
-    assert_eq!(run(&mut eval, "(.indexOf \"abc\" \\b)"), "1");
+    assert_eq!(
+        uncaught(&mut eval, "(.indexOf \"abc\" \\b)"),
+        "java.lang.IllegalArgumentException | No matching method indexOf found taking 1 args for class java.lang.String"
+    );
     assert_eq!(run(&mut eval, "(.indexOf \"abc\" -1)"), "-1");
     assert_eq!(
         uncaught(&mut eval, "(.indexOf \"abc\" :kw)"),
@@ -5261,10 +5272,12 @@ fn gated_member_edges_201() {
         uncaught(&mut eval, "(.append \"s\" \"x\")"),
         "java.lang.IllegalArgumentException | No matching method append found taking 1 args for class java.lang.String"
     );
-    // `Pattern/split`: nil input NPEs, bad text/limit args miss.
+    // `Pattern/split`: nil input NPEs inside `Matcher` (the
+    // field `this.text`, on JDK 21 and 27 alike — oracle
+    // `/tmp/patnil.clj`); bad text/limit args miss.
     assert_eq!(
         uncaught(&mut eval, "(.split #\"a\" nil)"),
-        "java.lang.NullPointerException | Cannot invoke \"java.lang.CharSequence.length()\" because \"input\" is null"
+        "java.lang.NullPointerException | Cannot invoke \"java.lang.CharSequence.length()\" because \"this.text\" is null"
     );
     assert_eq!(
         uncaught(&mut eval, "(.split #\"a\" 5)"),
@@ -5338,12 +5351,13 @@ fn locale_builder_values_201() {
 
 #[test]
 fn string_builder_ctors_201() {
-    // Nil is ambiguous (`(String)` vs `(CharSequence)`); anything
-    // else non-string/non-int, or a wrong arity, misses.
+    // Nil takes the `(String)` overload and NPEs in its body
+    // (not ambiguous — oracle `/tmp/fiveprobe.clj` `:sb-nil`);
+    // anything else non-string/non-int, or a wrong arity, misses.
     let mut eval = boot();
     assert_eq!(
         uncaught(&mut eval, "(StringBuilder. nil)"),
-        "java.lang.IllegalArgumentException | More than one matching method found: java.lang.StringBuilder"
+        "java.lang.NullPointerException | Cannot invoke \"String.length()\" because \"str\" is null"
     );
     assert_eq!(
         uncaught(&mut eval, "(StringBuilder. :kw)"),
@@ -5384,13 +5398,10 @@ fn matcher_replace_all_201() {
         ),
         "\"x[aa]x\""
     );
-    // Bare `eval` needs the driver's `with-bindings` frame for
-    // the require (upstream `string.clj:46` `set!`s
-    // `*warn-on-reflection*`).
-    run(
-        &mut eval,
-        "(binding [*warn-on-reflection* *warn-on-reflection*] (require '[clojure.string :as str]))",
-    );
+    // The load frame binds `*warn-on-reflection*` (like
+    // `Compiler.load`), so the require works bare (upstream
+    // `string.clj` `set!`s it at top level).
+    run(&mut eval, "(require '[clojure.string :as str])");
     assert_eq!(
         run(&mut eval, "(str/replace \"aaa\" #\"a\" \"b\")"),
         "\"bbb\""
