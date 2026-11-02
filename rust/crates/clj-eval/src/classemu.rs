@@ -5221,7 +5221,6 @@ fn str_index_of(s: &str, rest: &[Value], last: bool) -> Result<Value, NativeErro
             _ => crate::types::no_method("lastIndexOf", 2, "java.lang.String"),
         }),
         Value::Int(i) => Ok(Value::Int(index_of_codepoint(s, *i as i32, from, last))),
-        Value::Char(c) => Ok(Value::Int(index_of_codepoint(s, *c as i32, from, last))),
         _ => Err(crate::types::no_method(
             name,
             rest.len(),
@@ -5473,9 +5472,12 @@ fn gated_regex_split(target: &Value, rest: &[Value]) -> Option<Result<Value, Nat
     let text = match str_text_arg(&rest[0]) {
         Ok(Some(t)) => t,
         Ok(None) => {
+            // The NPE fires in the `Matcher` ctor the split
+            // builds, so it names `this.text`, not `input`
+            // (oracle `/tmp/patnil.clj`).
             return Some(Err(NativeError::new(
                 ThrowClass::NullPointerException,
-                "Cannot invoke \"java.lang.CharSequence.length()\" because \"input\" is null"
+                "Cannot invoke \"java.lang.CharSequence.length()\" because \"this.text\" is null"
                     .to_owned(),
             )));
         }
