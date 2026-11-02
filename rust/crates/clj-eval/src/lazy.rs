@@ -354,11 +354,30 @@ fn drop_thunk_link(thunk: Thunk) -> Option<Value> {
     let single = |mut links: Vec<Value>| {
         if links.len() == 1 { links.pop() } else { None }
     };
+    // Arms group same-shaped variants with OR-patterns (the match
+    // stays exhaustive — no wildcard — so new variants still fail
+    // closed at compile time).
     match thunk {
         Thunk::Map { inputs, .. } => single(inputs),
-        Thunk::Filter { input, .. } => Some(input),
-        Thunk::Remove { input, .. } => Some(input),
-        Thunk::Take { input, .. } => Some(input),
+        Thunk::Filter { input, .. }
+        | Thunk::Remove { input, .. }
+        | Thunk::Take { input, .. }
+        | Thunk::Interpose { input, .. }
+        | Thunk::TakeWhile { input, .. }
+        | Thunk::DropWhile { input, .. }
+        | Thunk::Drop { input, .. }
+        | Thunk::TakeNth { input, .. }
+        | Thunk::Partition { input, .. }
+        | Thunk::PartitionAll { input, .. }
+        | Thunk::PartitionBy { input, .. }
+        | Thunk::PartitionRun { input, .. }
+        | Thunk::Distinct { input, .. }
+        | Thunk::Dedupe { input, .. }
+        | Thunk::Keep { input, .. }
+        | Thunk::KeepIndexed { input, .. }
+        | Thunk::MapIndexed { input, .. }
+        | Thunk::Reductions { input, .. }
+        | Thunk::Replace { input, .. } => Some(input),
         Thunk::Concat { cur, rest, idx } => {
             if matches!(cur, Value::Nil) {
                 None
@@ -369,38 +388,21 @@ fn drop_thunk_link(thunk: Thunk) -> Option<Value> {
             }
         }
         Thunk::MapCat { outer } => Some(outer),
-        Thunk::Chain { tail, .. } => Some(tail),
+        Thunk::Chain { tail, .. } | Thunk::ChunkHead { tail, .. } => Some(tail),
         Thunk::Thunk0 { .. }
         | Thunk::Repeatedly { .. }
         | Thunk::Seque { .. }
         | Thunk::FileSeq { .. }
-        | Thunk::JdkPull { .. } => None,
+        | Thunk::JdkPull { .. }
+        | Thunk::Iteration { .. } => None,
         Thunk::Interleave { queue, inputs } => {
             let mut links = queue;
             links.extend(inputs);
             single(links)
         }
-        Thunk::Interpose { input, .. } => Some(input),
-        Thunk::TakeWhile { input, .. } => Some(input),
-        Thunk::DropWhile { input, .. } => Some(input),
-        Thunk::Drop { input, .. } => Some(input),
-        Thunk::TakeNth { input, .. } => Some(input),
-        Thunk::Partition { input, .. } => Some(input),
-        Thunk::PartitionAll { input, .. } => Some(input),
-        Thunk::PartitionBy { input, .. } => Some(input),
         // The run is a realized prefix; the chain continues at `s`.
         Thunk::PartitionByAdvance { s, .. } => Some(s),
-        Thunk::PartitionRun { input, .. } => Some(input),
-        Thunk::Distinct { input, .. } => Some(input),
-        Thunk::Dedupe { input, .. } => Some(input),
-        Thunk::Keep { input, .. } => Some(input),
-        Thunk::KeepIndexed { input, .. } => Some(input),
-        Thunk::MapIndexed { input, .. } => Some(input),
-        Thunk::Reductions { input, .. } => Some(input),
-        Thunk::Replace { input, .. } => Some(input),
         Thunk::Sequence { srcs, .. } => single(srcs),
-        Thunk::Iteration { .. } => None,
-        Thunk::ChunkHead { tail, .. } => Some(tail),
     }
 }
 

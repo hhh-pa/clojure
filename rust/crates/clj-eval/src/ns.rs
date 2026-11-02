@@ -1877,22 +1877,67 @@ fn run_ns_clauses(eval: &mut Evaluator, clauses: &[NsClause]) -> Result<(), Sign
         native_refer_clojure(eval, &[]).map_err(|e| eval.throw(e))?;
     }
     for clause in clauses {
-        match clause {
-            NsClause::ReferClojure(filters) => {
-                native_refer_clojure(eval, filters).map_err(|e| eval.throw(e))?;
-            }
-            NsClause::Require(libspecs) => {
-                native_require(eval, libspecs).map_err(|e| eval.throw(e))?;
-            }
-            NsClause::Use(libspecs) => {
-                native_use(eval, libspecs).map_err(|e| eval.throw(e))?;
-            }
-            NsClause::Import(specs) => {
-                native_import_clause(eval, specs).map_err(|e| eval.throw(e))?;
-            }
-        }
+        run_one_ns_clause(eval, clause)?;
     }
     Ok(())
+}
+
+/// One `(ns …)` clause through its loader entry (failures surface
+/// raw, like the sequential loop it replaces).
+fn run_one_ns_clause(eval: &mut Evaluator, clause: &NsClause) -> Result<(), Signal> {
+    let out = match clause {
+        NsClause::ReferClojure(filters) => native_refer_clojure(eval, filters),
+        NsClause::Require(libspecs) => native_require(eval, libspecs),
+        NsClause::Use(libspecs) => native_use(eval, libspecs),
+        NsClause::Import(specs) => native_import_clause(eval, specs),
+    };
+    out.map(|_| ()).map_err(|e| eval.throw(e))
+}
+
+fn import_spec_error() -> NativeError {
+    NativeError::new(
+        ThrowClass::ExceptionInfo,
+        "Call to clojure.core/import did not conform to spec.".to_owned(),
+    )
+}
+
+/// One `(package Class*)` import list: every element is a bare
+/// symbol and at least the package plus one class are present.
+fn import_package_list(eval: &mut Evaluator, l: &List) -> Result<Value, NativeError> {
+    use crate::classemu::import_class;
+    let parts: Vec<&Value> = l.iter().collect();
+    let ok = parts.len() >= 2
+        && parts
+            .iter()
+            .all(|e| matches!(e, Value::Symbol(s) if s.namespace().is_none()));
+    if !ok {
+        return Err(import_spec_error());
+    }
+    let pkg = sym_str(symbol_of(parts[0]));
+    let mut last = Value::Nil;
+    for class in &parts[1..] {
+        let fqn = format!("{pkg}.{}", sym_str(symbol_of(class)));
+        last = import_class(eval, &fqn)?;
+    }
+    Ok(last)
+}
+
+fn import_one_spec(eval: &mut Evaluator, spec: &Value) -> Result<Value, NativeError> {
+    use crate::classemu::import_class;
+    let items: Vec<&Value> = match spec {
+        Value::List(l) => l.iter().collect(),
+        _ => Vec::new(),
+    };
+    // The `import` macro's `(quote x)` strip, over raw forms.
+    let bare: &Value = match items.as_slice() {
+        [Value::Symbol(q), inner] if q.namespace().is_none() && q.name() == "quote" => inner,
+        _ => spec,
+    };
+    match bare {
+        Value::Symbol(s) if s.namespace().is_none() => import_class(eval, &sym_str(s)),
+        Value::List(l) => import_package_list(eval, l),
+        _ => Err(import_spec_error()),
+    }
 }
 
 /// An `(ns … (:import spec…))` clause (issue #201 S1): the same
@@ -1901,45 +1946,9 @@ fn run_ns_clauses(eval: &mut Evaluator, clauses: &[NsClause]) -> Result<(), Sign
 /// the same way) — fanned out to `import_class`. Malformed specs
 /// replay the macro's ex-info text verbatim.
 fn native_import_clause(eval: &mut Evaluator, specs: &[Value]) -> Result<Value, NativeError> {
-    use crate::classemu::import_class;
-    let spec_error = || {
-        NativeError::new(
-            ThrowClass::ExceptionInfo,
-            "Call to clojure.core/import did not conform to spec.".to_owned(),
-        )
-    };
     let mut last = Value::Nil;
     for spec in specs {
-        let items: Vec<&Value> = match spec {
-            Value::List(l) => l.iter().collect(),
-            _ => Vec::new(),
-        };
-        // The `import` macro's `(quote x)` strip, over raw forms.
-        let bare: &Value = match items.as_slice() {
-            [Value::Symbol(q), inner] if q.namespace().is_none() && q.name() == "quote" => inner,
-            _ => spec,
-        };
-        match bare {
-            Value::Symbol(s) if s.namespace().is_none() => {
-                last = import_class(eval, &sym_str(s))?;
-            }
-            Value::List(l) => {
-                let parts: Vec<&Value> = l.iter().collect();
-                let ok = parts.len() >= 2
-                    && parts
-                        .iter()
-                        .all(|e| matches!(e, Value::Symbol(s) if s.namespace().is_none()));
-                if !ok {
-                    return Err(spec_error());
-                }
-                let pkg = sym_str(symbol_of(parts[0]));
-                for class in &parts[1..] {
-                    let fqn = format!("{pkg}.{}", sym_str(symbol_of(class)));
-                    last = import_class(eval, &fqn)?;
-                }
-            }
-            _ => return Err(spec_error()),
-        }
+        last = import_one_spec(eval, spec)?;
     }
     Ok(last)
 }
