@@ -194,11 +194,12 @@ fn discover_tests(test_dir: &Path) -> Vec<String> {
     let mut out = Vec::new();
     let mut stack = vec![test_dir.to_path_buf()];
     while let Some(dir) = stack.pop() {
-        let entries = std::fs::read_dir(&dir).unwrap_or_else(|_| {
-            panic!("algorithms: cannot list {}", dir.display())
-        });
+        let entries = std::fs::read_dir(&dir)
+            .unwrap_or_else(|_| panic!("algorithms: cannot list {}", dir.display()));
         for entry in entries {
-            let path = entry.unwrap_or_else(|e| panic!("algorithms: bad dir entry: {e}")).path();
+            let path = entry
+                .unwrap_or_else(|e| panic!("algorithms: bad dir entry: {e}"))
+                .path();
             if path.is_dir() {
                 stack.push(path);
             } else if path.extension().is_some_and(|e| e == "clj") {
@@ -239,7 +240,9 @@ fn counts_of(v: &Value) -> Option<Counts> {
 /// Require one namespace inside the frame; `Ok(())` on success.
 fn require_ns(eval: &mut Evaluator, dirs: &[String], ns: &str) -> Result<(), String> {
     let src = in_bindings(dirs, &format!("(require '{ns})"));
-    eval.eval_source(&src).map(|_| ()).map_err(|e| e.to_string())
+    eval.eval_source(&src)
+        .map(|_| ())
+        .map_err(|e| e.to_string())
 }
 
 /// Run one namespace's tests inside the frame; `Ok(counts)` (even
@@ -254,7 +257,9 @@ fn run_ns(eval: &mut Evaluator, dirs: &[String], ns: &str) -> Result<Counts, Str
         ),
     );
     let vs = eval.eval_source(&src).map_err(|e| e.to_string())?;
-    let last = vs.last().ok_or_else(|| "test-ns returned no values".to_owned())?;
+    let last = vs
+        .last()
+        .ok_or_else(|| "test-ns returned no values".to_owned())?;
     let realized = eval
         .realize_deep(last)
         .map_err(|s| format!("realize failed: {s:?}"))?;
@@ -277,15 +282,25 @@ fn run_algorithms(dir: &Path, filter: &str, log: &mut dyn std::fmt::Write) -> Su
         .into_iter()
         .filter(|ns| filter.is_empty() || ns.contains(filter))
         .collect();
-    let _ = writeln!(log, "algorithms: {} test namespaces in {}", namespaces.len(), dir.display());
+    let _ = writeln!(
+        log,
+        "algorithms: {} test namespaces in {}",
+        namespaces.len(),
+        dir.display()
+    );
 
     let mut eval = boot();
     let mut summary = Summary {
         discovered: namespaces.len(),
         ..Summary::default()
     };
-    // `clojure.test` first (inside the frame, like every require).
-    let setup = in_bindings(&dirs, "(require 'clojure.test)");
+    // Stdlib libs first (inside the frame, like every require): 59 suite files
+    // call `clojure.string/`/`clojure.set/`/`clojure.java.io/` fully qualified
+    // WITHOUT requiring them (JVM runner has them ambient via load order).
+    let setup = in_bindings(
+        &dirs,
+        "(require 'clojure.test 'clojure.string 'clojure.set 'clojure.edn 'clojure.java.io)",
+    );
     if let Err(e) = eval.eval_source(&setup) {
         let _ = writeln!(log, "algorithms: FATAL require clojure.test: {e}");
         for ns in &namespaces {
@@ -493,7 +508,10 @@ fn runner_reports_pass_fail_error_and_load_error() {
         "(ns fx.err-test (:require [clojure.test :refer [deftest is]]))\n\
          (deftest boom (is (throw (ex-info \"k\" {}))))\n",
     );
-    fx.write("test/fx/broken_test.clj", "(ns fx.broken-test (:require [fx.nope]))\n");
+    fx.write(
+        "test/fx/broken_test.clj",
+        "(ns fx.broken-test (:require [fx.nope]))\n",
+    );
     fx.write("test/fx/helper.clj", "(ns fx.helper) (def h 1)\n");
     let mut log = String::new();
     let summary = run_algorithms(&fx.dir, "", &mut log);
