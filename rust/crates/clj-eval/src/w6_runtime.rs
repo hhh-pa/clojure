@@ -792,6 +792,29 @@ fn flush_chars(events: &mut Vec<XmlEvent>, chars: &mut String) {
     }
 }
 
+/// If a close tag is next, flush pending chars and consume it,
+/// returning `Some(())` (the content scan is done); else `None`
+/// (content continues). A mismatched close tag is an error.
+fn scan_close(
+    scan: &mut XmlScanner,
+    events: &mut Vec<XmlEvent>,
+    open: &str,
+    chars: &mut String,
+) -> Result<Option<()>, XmlError> {
+    if !scan.starts_with("</") {
+        return Ok(None);
+    }
+    flush_chars(events, chars);
+    let close = scan.read_close_tag()?;
+    if close != open {
+        return Err(scan.fail(format!(
+            "mismatched tag: expected </{open}> but found </{close}>"
+        )));
+    }
+    events.push(XmlEvent::End { tag: close });
+    Ok(Some(()))
+}
+
 /// Scan one element's content (the open tag is consumed): children,
 /// char data, and the matching close tag.
 fn scan_content(
@@ -801,15 +824,7 @@ fn scan_content(
     chars: &mut String,
 ) -> Result<(), XmlError> {
     loop {
-        if scan.starts_with("</") {
-            flush_chars(events, chars);
-            let close = scan.read_close_tag()?;
-            if close != open {
-                return Err(scan.fail(format!(
-                    "mismatched tag: expected </{open}> but found </{close}>"
-                )));
-            }
-            events.push(XmlEvent::End { tag: close });
+        if scan_close(scan, events, open, chars)?.is_some() {
             return Ok(());
         }
         if scan.starts_with("<!--") {
@@ -954,13 +969,21 @@ mod tests {
 
     /// Call a native, expecting an error (returns `Class | message`).
     fn call_err(eval: &mut Evaluator, name: &str, args: &[Value]) -> String {
+        call_err_opt(eval, name, args).expect("call_err expects an error")
+    }
+
+    /// Call a native, returning the `Class | message` rendering, or
+    /// `None` when the call succeeds (for "fails eventually" loops
+    /// where early writes may still land in buffers).
+    fn call_err_opt(eval: &mut Evaluator, name: &str, args: &[Value]) -> Option<String> {
         let (_, f) = SERVER_NATIVES
             .iter()
             .chain(XML_NATIVES.iter())
             .find(|(n, _)| *n == name)
             .unwrap_or_else(|| panic!("no such native: {name}"));
-        let e = f(eval, args).expect_err("call_err expects an error");
-        format!("{} | {}", e.class.jvm_name(), e.message)
+        f(eval, args)
+            .err()
+            .map(|e| format!("{} | {}", e.class.jvm_name(), e.message))
     }
 
     fn str_val(s: &str) -> Value {
@@ -1389,8 +1412,8 @@ mod tests {
         drop(peer);
         let big = "x".repeat(1 << 20);
         let errored = (0..50).any(|_| {
-            call_err(&mut eval, "__socket-write*", &[conn.clone(), str_val(&big)])
-                .starts_with("java.io.IOException |")
+            call_err_opt(&mut eval, "__socket-write*", &[conn.clone(), str_val(&big)])
+                .is_some_and(|s| s.starts_with("java.io.IOException |"))
         });
         assert!(errored, "writes to a dead peer must eventually fail");
     }
