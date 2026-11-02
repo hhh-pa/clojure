@@ -1034,11 +1034,7 @@ fn native_resource(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Native
         let hit = std::path::Path::new(&dir).join(name.as_ref());
         if hit.is_file() {
             let abs = resource_abs(&hit)?;
-            let encoded = abs
-                .replace('%', "%25")
-                .replace(' ', "%20")
-                .replace('#', "%23");
-            let url = format!("file:{encoded}");
+            let url = resource_url(&abs);
             if let Ok(uri) = Uri::parse(&url) {
                 return Ok(Value::Uri(Box::new(uri)));
             }
@@ -1060,6 +1056,25 @@ fn resource_abs(hit: &std::path::Path) -> Result<String, NativeError> {
     Ok(cwd.join(hit).to_string_lossy().into_owned())
 }
 
+/// A `file:` URL for an absolute resource path (pure, so the
+/// Windows shapes pin without Windows): backslashes normalize to
+/// slashes (never valid in a URI), and drive-letter paths take the
+/// `file:///` authority form (`File.toURI` shape — `file:C:/...`
+/// never parses). Unix paths keep the exact `file:/abs` form.
+fn resource_url(abs: &str) -> String {
+    let encoded = abs
+        .replace('\\', "/")
+        .replace('%', "%25")
+        .replace(' ', "%20")
+        .replace('#', "%23");
+    let bytes = encoded.as_bytes();
+    if bytes.len() > 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic() {
+        format!("file:///{encoded}")
+    } else {
+        format!("file:{encoded}")
+    }
+}
+
 /// The seven facsimile natives installed into `clojure.java.io`.
 pub(crate) const JIO_NATIVES: &[(&str, NativeFnPtr)] = &[
     ("file", native_file),
@@ -1070,3 +1085,21 @@ pub(crate) const JIO_NATIVES: &[(&str, NativeFnPtr)] = &[
     ("delete-file", native_delete_file),
     ("resource", native_resource),
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::resource_url;
+
+    #[test]
+    fn resource_url_shapes() {
+        // Unix keeps the exact historical form.
+        assert_eq!(resource_url("/a/b/c.txt"), "file:/a/b/c.txt");
+        assert_eq!(resource_url("/a b/c%.txt"), "file:/a%20b/c%25.txt");
+        // Windows drive paths normalize + take the authority form.
+        assert_eq!(resource_url("C:\\a\\b.txt"), "file:///C:/a/b.txt");
+        assert_eq!(resource_url("C:/a b/c#.txt"), "file:///C:/a%20b/c%23.txt");
+        assert_eq!(resource_url("d:\\x"), "file:///d:/x");
+        // A colon past position 1 is not a drive letter.
+        assert_eq!(resource_url("/a:b/c"), "file:/a:b/c");
+    }
+}

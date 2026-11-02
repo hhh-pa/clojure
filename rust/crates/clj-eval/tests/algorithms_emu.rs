@@ -4556,16 +4556,21 @@ fn jio_stream_topup() {
         ),
         "nil"
     );
-    // A hit whose URL never parses answers nil.
-    std::fs::write(dir.join("a\nb.txt"), "NL").unwrap();
-    let load = dir.to_string_lossy().replace('\\', "/");
-    assert_eq!(
-        run(
-            &mut eval,
-            &format!(
-                "(do (require 'clojure.java.io) (binding [clojure.core/*load-path* [\"{load}\"]] (clojure.java.io/resource \"a\\nb.txt\")))"
-            )
-        ),
-        "nil"
-    );
+    // A hit whose URL never parses answers nil. Unix-only: the
+    // fixture needs a control character in the filename, which
+    // Windows forbids (error 123) — the behavior stays covered
+    // where the platform can express it.
+    if !cfg!(windows) {
+        std::fs::write(dir.join("a\nb.txt"), "NL").unwrap();
+        let load = dir.to_string_lossy().replace('\\', "/");
+        assert_eq!(
+            run(
+                &mut eval,
+                &format!(
+                    "(do (require 'clojure.java.io) (binding [clojure.core/*load-path* [\"{load}\"]] (clojure.java.io/resource \"a\\nb.txt\")))"
+                )
+            ),
+            "nil"
+        );
+    }
 }
