@@ -673,6 +673,7 @@ fn native_group_by(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Native
     let mut groups = new_map();
     walk_seq(eval, &args[1], |eval, head| {
         let key = call_checked(eval, &f, std::slice::from_ref(head))?;
+        let key = crate::lazy::realize_key(eval, &key).map_err(signal_to_native)?;
         let group = match groups.get(&key) {
             Some(Value::Vector(v)) => v.clone(),
             _ => Vector::from_vec(Vec::new()),
@@ -687,13 +688,14 @@ fn native_group_by(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Native
 fn native_frequencies(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/frequencies", args, &[1])?;
     let mut counts = new_map();
-    walk_seq(eval, &args[0], |_, head| {
-        let count = match counts.get(head) {
+    walk_seq(eval, &args[0], |eval, head| {
+        let head = crate::lazy::realize_key(eval, head).map_err(signal_to_native)?;
+        let count = match counts.get(&head) {
             Some(Value::Int(n)) => *n,
             _ => 0,
         };
         let taken = std::mem::replace(&mut counts, new_map());
-        counts = taken.insert(head.clone(), Value::Int(count + 1));
+        counts = taken.insert(head, Value::Int(count + 1));
         Ok(Walk::Continue)
     })?;
     Ok(Value::Map(counts))

@@ -1038,6 +1038,7 @@ impl Evaluator {
         for (k, v) in pairs {
             let key = self.eval(k, env)?;
             let val = self.eval(v, env)?;
+            let key = crate::lazy::realize_key(self, &key)?;
             out = out.insert(key, val);
         }
         Ok(Value::Map(out.with_meta(meta)))
@@ -1052,7 +1053,9 @@ impl Evaluator {
     ) -> Result<Value, Signal> {
         let mut out = clj_value::new_set();
         for elem in elems {
-            out = out.insert(self.eval(elem, env)?);
+            let elem = self.eval(elem, env)?;
+            let elem = crate::lazy::realize_key(self, &elem)?;
+            out = out.insert(elem);
         }
         Ok(Value::Set(out.with_meta(meta)))
     }

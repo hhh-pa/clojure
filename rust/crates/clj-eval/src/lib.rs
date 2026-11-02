@@ -28,6 +28,7 @@ pub mod destructure_expand;
 pub mod emucoll;
 pub mod emudigest;
 pub mod emurand;
+pub mod emutime;
 pub mod env;
 pub mod error;
 pub mod eval;

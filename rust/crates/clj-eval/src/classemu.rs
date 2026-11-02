@@ -2041,6 +2041,74 @@ const STATIC_LATTICE: &[StaticRow] = &[
         bases: &["java.util.Random"],
     },
     StaticRow {
+        name: "java.time.LocalDate",
+        iface: false,
+        bases: &[
+            "java.lang.Object",
+            "java.time.temporal.Temporal",
+            "java.time.temporal.TemporalAdjuster",
+            "java.time.chrono.ChronoLocalDate",
+            "java.io.Serializable",
+        ],
+    },
+    StaticRow {
+        name: "java.time.LocalDateTime",
+        iface: false,
+        bases: &[
+            "java.lang.Object",
+            "java.time.temporal.Temporal",
+            "java.time.temporal.TemporalAdjuster",
+            "java.time.chrono.ChronoLocalDateTime",
+            "java.io.Serializable",
+        ],
+    },
+    StaticRow {
+        name: "java.time.Instant",
+        iface: false,
+        bases: &[
+            "java.lang.Object",
+            "java.time.temporal.Temporal",
+            "java.time.temporal.TemporalAdjuster",
+            "java.lang.Comparable",
+            "java.io.Serializable",
+        ],
+    },
+    StaticRow {
+        name: "java.time.ZoneOffset",
+        iface: false,
+        bases: &[
+            "java.time.ZoneId",
+            "java.time.temporal.TemporalAccessor",
+            "java.time.temporal.TemporalAdjuster",
+            "java.lang.Comparable",
+            "java.io.Serializable",
+        ],
+    },
+    StaticRow {
+        name: "java.time.ZonedDateTime",
+        iface: false,
+        bases: &[
+            "java.lang.Object",
+            "java.time.temporal.Temporal",
+            "java.time.chrono.ChronoZonedDateTime",
+            "java.io.Serializable",
+        ],
+    },
+    StaticRow {
+        name: "java.time.DayOfWeek",
+        iface: false,
+        bases: &[
+            "java.lang.Enum",
+            "java.time.temporal.TemporalAccessor",
+            "java.time.temporal.TemporalAdjuster",
+        ],
+    },
+    StaticRow {
+        name: "java.time.format.DateTimeFormatter",
+        iface: false,
+        bases: &["java.lang.Object"],
+    },
+    StaticRow {
         name: "java.security.MessageDigest",
         iface: false,
         bases: &["java.security.MessageDigestSpi"],
@@ -2265,6 +2333,7 @@ pub(crate) fn static_field_value(class: &str, field: &str) -> Option<Value> {
         "java.util.Locale" => static_field_locale(field),
         "clojure.lang.PersistentQueue" => static_field_queue(field),
         "java.math.BigInteger" => static_field_bigint(field),
+        "java.time.ZoneOffset" => crate::emutime::static_field_zoneoffset(field),
         _ => None,
     }
 }
@@ -2328,6 +2397,13 @@ fn static_field_double(field: &str) -> Option<Value> {
         "POSITIVE_INFINITY" => Some(Value::Double(f64::INFINITY)),
         "NEGATIVE_INFINITY" => Some(Value::Double(f64::NEG_INFINITY)),
         "NaN" => Some(Value::Double(f64::NAN)),
+        // The `double` class (#205: `(make-array Double/TYPE …)` —
+        // the name feeds `class_designator`'s primitive table).
+        "TYPE" => Some(Value::Class(Arc::new(ClassVal::new(
+            Arc::from("double"),
+            false,
+            Arc::from(vec![]),
+        )))),
         _ => None,
     }
 }
@@ -2923,6 +2999,10 @@ pub(crate) fn static_member_arities(fqn: &str, member: &str) -> Option<&'static 
         "java.net.URLEncoder" => static_arities_urlencoder(member),
         "java.lang.String" => static_arities_string(member),
         "java.lang.Math" => static_arities_math(member),
+        "java.time.LocalDate" => crate::emutime::static_arities_localdate(member),
+        "java.time.LocalDateTime" => crate::emutime::static_arities_datetime(member),
+        "java.time.Instant" => crate::emutime::static_arities_instant(member),
+        "java.time.format.DateTimeFormatter" => crate::emutime::static_arities_formatter(member),
         _ => None,
     }
 }
@@ -3118,6 +3198,12 @@ fn native_static(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeEr
         "java.net.URLEncoder" => static_call_urlencoder(member.as_ref(), rest),
         "java.lang.String" => static_call_string(eval, member.as_ref(), rest),
         "java.lang.Math" => static_call_math(member.as_ref(), rest),
+        "java.time.LocalDate" => crate::emutime::static_call_localdate(member.as_ref(), rest),
+        "java.time.LocalDateTime" => crate::emutime::static_call_datetime(member.as_ref(), rest),
+        "java.time.Instant" => crate::emutime::static_call_instant(member.as_ref(), rest),
+        "java.time.format.DateTimeFormatter" => {
+            crate::emutime::static_call_formatter(member.as_ref(), rest)
+        }
         _ => static_field_or_miss(fqn, member, rest),
     }
 }
@@ -5652,11 +5738,13 @@ fn surface_gated(
         .or_else(|| surface_gated_bigdec(meth, target, rest))
         .or_else(|| surface_gated_uri(meth, target, rest))
         .or_else(|| crate::emurand::random_method(meth, target, rest))
+        .or_else(|| crate::emutime::time_method(meth, target, rest))
 }
 
 /// The `StringBuilder` members (issue #201 S5, #205
-/// `length`): `append` plus the UTF-16 length — `toString`
-/// rides the universal via `print_str`.
+/// `length`/`reverse`): `append`, the UTF-16 length, and the
+/// in-place reversal — `toString` rides the universal via
+/// `print_str`.
 fn surface_gated_builder(
     eval: &mut Evaluator,
     meth: &str,
@@ -5666,6 +5754,7 @@ fn surface_gated_builder(
     match (meth, rest.len()) {
         ("append", 1) => gated_builder_append(eval, target, rest),
         ("length", 0) => gated_builder_length(target),
+        ("reverse", 0) => gated_builder_reverse(target),
         _ => None,
     }
 }
@@ -5726,6 +5815,9 @@ fn surface_gated_io(
     match (meth, rest.len()) {
         ("exists", 0) => gated_file_exists(target),
         ("length", 0) => gated_file_length(target),
+        ("getPath", 0) => gated_file_get_path(target),
+        ("getAbsolutePath", 0) => gated_file_get_absolute_path(target),
+        ("delete", 0) => gated_file_delete(target),
         ("readAllBytes", 0) => crate::jio::file_input_read_all(target),
         ("readLine", 0) => gated_reader_read_line(target),
         ("write", 1) => gated_write(target, rest),
@@ -5745,6 +5837,40 @@ fn gated_file_length(target: &Value) -> Option<Result<Value, NativeError>> {
     let path = crate::jdkio::file_path(target)?;
     let len = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
     Some(Ok(Value::Int(len as i64)))
+}
+
+/// `File.getPath` (#205): the path as given.
+fn gated_file_get_path(target: &Value) -> Option<Result<Value, NativeError>> {
+    let path = crate::jdkio::file_path(target)?;
+    Some(Ok(Value::Str(Arc::from(path.as_str()))))
+}
+
+/// `File.getAbsolutePath` (#205): absolute paths pass through;
+/// relative ones resolve against the working directory (the
+/// `user.dir` mirror — the algorithms harness runs in a temp
+/// work dir).
+fn gated_file_get_absolute_path(target: &Value) -> Option<Result<Value, NativeError>> {
+    let path = crate::jdkio::file_path(target)?;
+    if std::path::Path::new(&path).is_absolute() {
+        return Some(Ok(Value::Str(Arc::from(path.as_str()))));
+    }
+    let abs = std::env::current_dir()
+        .map(|cwd| cwd.join(&path).to_string_lossy().into_owned())
+        .unwrap_or(path);
+    Some(Ok(Value::Str(Arc::from(abs.as_str()))))
+}
+
+/// `File.delete` (#205): true when something was removed (files
+/// and empty dirs alike, like the JDK); missing paths answer
+/// false.
+fn gated_file_delete(target: &Value) -> Option<Result<Value, NativeError>> {
+    let path = crate::jdkio::file_path(target)?;
+    let ok = if std::path::Path::new(&path).is_dir() {
+        std::fs::remove_dir(&path).is_ok()
+    } else {
+        std::fs::remove_file(&path).is_ok()
+    };
+    Some(Ok(Value::Bool(ok)))
 }
 
 /// `BufferedReader.readLine` on stream readers.
@@ -6267,6 +6393,8 @@ fn surface_gated_strn(
         ("split", 1 | 2) => gated_str_split(target, rest),
         ("indexOf", 1) => gated_str_indexof(target, rest),
         ("indexOf", 2) => gated_str_indexof_from(target, rest),
+        ("lastIndexOf", 1) => gated_str_last_indexof(target, rest),
+        ("lastIndexOf", 2) => gated_str_last_indexof_from(target, rest),
         ("contains", 1) => gated_str_contains(target, rest),
         ("replace", 2) => gated_str_replace(target, rest),
         ("getBytes", 0 | 1) => gated_str_getbytes(target, rest),
@@ -6285,6 +6413,37 @@ fn gated_str_indexof(target: &Value, rest: &[Value]) -> Option<Result<Value, Nat
     };
     let needle = str_needle(&rest[0])?;
     Some(Ok(Value::Int(str_index_search(s, needle, 0))))
+}
+
+/// `String.lastIndexOf` (1-arg, #205): the last UTF-16 offset
+/// of the needle, -1 absent. Empty needles read the length
+/// (the JDK rule).
+fn gated_str_last_indexof(target: &Value, rest: &[Value]) -> Option<Result<Value, NativeError>> {
+    let Value::Str(s) = target else {
+        return None;
+    };
+    let needle = str_needle(&rest[0])?;
+    let len = s.encode_utf16().count() as i32;
+    Some(Ok(Value::Int(str_last_index_search(s, needle, len))))
+}
+
+/// `String.lastIndexOf` (2-arg, #205): the backward scan from
+/// `fromIndex` (the JDK clamp rules — see
+/// `str_last_index_search`). The needle validates before the
+/// index, like the `indexOf` pair.
+fn gated_str_last_indexof_from(
+    target: &Value,
+    rest: &[Value],
+) -> Option<Result<Value, NativeError>> {
+    let Value::Str(s) = target else {
+        return None;
+    };
+    let needle = str_needle(&rest[0])?;
+    let from = match str_int_arg(&rest[1]) {
+        Ok(from) => from,
+        Err(e) => return Some(Err(e)),
+    };
+    Some(Ok(Value::Int(str_last_index_search(s, needle, from))))
 }
 
 /// `String.indexOf` (2-arg, #205): the same scan from
@@ -6344,6 +6503,31 @@ fn str_index_search(s: &str, needle: StrNeedle, from: i32) -> i64 {
         .windows(units.len())
         .position(|w| w == units.as_slice())
         .map(|i| (from + i) as i64)
+        .unwrap_or(-1)
+}
+
+/// The `lastIndexOf` scan over UTF-16 units (the JDK clamp:
+/// `fromIndex` past the last start clamps, negative reads -1,
+/// empty needles read the clamped start).
+fn str_last_index_search(s: &str, needle: StrNeedle, from: i32) -> i64 {
+    let hay: Vec<u16> = s.encode_utf16().collect();
+    let units = match needle {
+        StrNeedle::Absent => return -1,
+        StrNeedle::Units(units) => units,
+    };
+    let last_start = hay.len() as i64 - units.len() as i64;
+    let from = (from as i64).min(last_start);
+    if from < 0 {
+        return -1;
+    }
+    if units.is_empty() {
+        return from;
+    }
+    let from = from as usize;
+    hay[..=from + units.len() - 1]
+        .windows(units.len())
+        .rposition(|w| w == units.as_slice())
+        .map(|i| i as i64)
         .unwrap_or(-1)
 }
 
@@ -7305,6 +7489,19 @@ fn gated_builder_length(target: &Value) -> Option<Result<Value, NativeError>> {
     Some(Ok(Value::Int(b.lock().encode_utf16().count() as i64)))
 }
 
+/// `StringBuilder.reverse` (#205): the in-place reversal,
+/// answering the builder (like `append`). Reversing by scalar
+/// value matches the JDK's surrogate-preserving unit reversal
+/// on every representable string (the reader rejects lone
+/// surrogates, so no half survives to be split).
+fn gated_builder_reverse(target: &Value) -> Option<Result<Value, NativeError>> {
+    let b = as_builder(target)?;
+    let mut guard = b.lock();
+    let rev: String = guard.chars().rev().collect();
+    *guard = rev;
+    Some(Ok(target.clone()))
+}
+
 /// `Pattern/split`: the `re` split loop over the pattern source
 /// (same body as `String/split`, pattern-first argument order).
 fn gated_regex_split(target: &Value, rest: &[Value]) -> Option<Result<Value, NativeError>> {
@@ -7366,6 +7563,7 @@ pub(crate) const SURFACE_MEMBERS: &[(&str, usize)] = &[
     ("codePointCount", 2),
     ("compareTo", 1),
     ("contains", 1),
+    ("delete", 0),
     ("digest", 0),
     ("digest", 1),
     ("divide", 1),
@@ -7376,6 +7574,7 @@ pub(crate) const SURFACE_MEMBERS: &[(&str, usize)] = &[
     ("find", 0),
     ("find", 1),
     ("flush", 0),
+    ("getAbsolutePath", 0),
     ("getBytes", 0),
     ("getBytes", 1),
     ("getCause", 0),
@@ -7390,6 +7589,7 @@ pub(crate) const SURFACE_MEMBERS: &[(&str, usize)] = &[
     ("getMessage", 0),
     ("getName", 0),
     ("getNamespace", 0),
+    ("getPath", 0),
     ("getSimpleName", 0),
     ("getSuperclass", 0),
     ("getValue", 0),
@@ -7406,6 +7606,8 @@ pub(crate) const SURFACE_MEMBERS: &[(&str, usize)] = &[
     ("isInstance", 1),
     ("isInterface", 0),
     ("isRealized", 0),
+    ("lastIndexOf", 1),
+    ("lastIndexOf", 2),
     ("length", 0),
     ("longValue", 0),
     ("longValueExact", 0),
@@ -7434,6 +7636,7 @@ pub(crate) const SURFACE_MEMBERS: &[(&str, usize)] = &[
     ("readLine", 0),
     ("replace", 2),
     ("replaceAll", 1),
+    ("reverse", 0),
     ("setBit", 1),
     ("shiftLeft", 1),
     ("shiftRight", 1),

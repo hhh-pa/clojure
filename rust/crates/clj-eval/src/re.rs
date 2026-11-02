@@ -13,7 +13,10 @@
 //! Oracle: the alpha10 `clojure.core` sources (`re-matcher` casts,
 //! `re-groups` shapes); the `regex` crate rejects look-around at
 //! compile time (a documented divergence surfacing as
-//! `PatternSyntaxException`, like the JVM).
+//! `PatternSyntaxException`, like the JVM) — except in `split`,
+//! which evaluates pure-boundary patterns (top-level `|` of
+//! single-atom look-around runs, #205 natural-sort) with a
+//! boundary scanner.
 
 use std::sync::Arc;
 
@@ -164,28 +167,49 @@ struct SplitAcc {
     count: i64,
 }
 
-/// One `find_iter` step of the JDK split loop: matches before the
-/// cap push the text before them (a zero-width match at the start
-/// yields no empty leader); once a positive limit is reached, the
-/// next match pushes the remainder instead and later matches are
-/// dead (the `count == cap` arm fires exactly once).
-fn split_step(acc: &mut SplitAcc, text: &str, m: regex::Match, limited: bool, cap: i64) {
+/// One split-loop step over a match `(start, end)`: matches
+/// before the cap push the text before them (a zero-width match
+/// at the start yields no empty leader); once a positive limit
+/// is reached, the next match pushes the remainder instead and
+/// later matches are dead (the `count == cap` arm fires exactly
+/// once).
+fn split_step(
+    acc: &mut SplitAcc,
+    text: &str,
+    m_start: usize,
+    m_end: usize,
+    limited: bool,
+    cap: i64,
+) {
     if !limited || acc.count < cap {
-        let leader = acc.index == 0 && m.start() == 0 && m.is_empty();
+        let leader = acc.index == 0 && m_start == 0 && m_start == m_end;
         if !leader {
-            acc.parts.push(text[acc.index..m.start()].to_owned());
-            acc.index = m.end();
+            acc.parts.push(text[acc.index..m_start].to_owned());
+            acc.index = m_end;
             acc.count += 1;
         }
     } else if acc.count == cap {
         acc.parts.push(text[acc.index..].to_owned());
-        acc.index = m.end();
+        acc.index = m_end;
         acc.count += 1;
     }
 }
 
 pub(crate) fn pattern_split(text: &str, source: &str, limit: i32) -> Result<Value, NativeError> {
+    // Pure-boundary patterns never reach the crate (which cannot
+    // compile look-around); anything else splits as before.
+    if let Some(alts) = boundary_alternatives(source) {
+        let cuts = boundary_cuts(text, &alts)?;
+        return split_around(text, &cuts, limit);
+    }
     let re = compile_source(source)?;
+    let cuts: Vec<(usize, usize)> = re.find_iter(text).map(|m| (m.start(), m.end())).collect();
+    split_around(text, &cuts, limit)
+}
+
+/// Run the JDK split loop over byte ranges (engine-agnostic —
+/// the `regex` crate and the boundary scanner share it).
+fn split_around(text: &str, cuts: &[(usize, usize)], limit: i32) -> Result<Value, NativeError> {
     let limited = limit > 0;
     let cap = i64::from(limit) - 1;
     let mut acc = SplitAcc {
@@ -193,8 +217,8 @@ pub(crate) fn pattern_split(text: &str, source: &str, limit: i32) -> Result<Valu
         index: 0,
         count: 0,
     };
-    for m in re.find_iter(text) {
-        split_step(&mut acc, text, m, limited, cap);
+    for &(start, end) in cuts {
+        split_step(&mut acc, text, start, end, limited, cap);
     }
     if acc.index == 0 {
         return Ok(Value::Vector(Vector::from_vec(vec![Value::Str(
@@ -215,6 +239,208 @@ pub(crate) fn pattern_split(text: &str, source: &str, limit: i32) -> Result<Valu
             .map(|p| Value::Str(Arc::from(p)))
             .collect(),
     )))
+}
+
+/// A single-char boundary atom, kept as source so atom tests run
+/// through the `regex` crate itself (Perl-class semantics stay
+/// identical to the rest of the port by construction).
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct BoundaryAtom {
+    src: String,
+}
+
+/// One zero-width assertion: the side it inspects plus polarity.
+#[derive(Clone, Debug)]
+struct BoundaryAssert {
+    behind: bool,
+    negated: bool,
+    atom: BoundaryAtom,
+}
+
+/// One top-level alternative: a conjunction of assertions (all
+/// must hold at the boundary).
+type BoundaryAlt = Vec<BoundaryAssert>;
+
+/// Parse a pure-boundary pattern (`None` when the pattern is not
+/// one — the caller falls through to the `regex` crate, which
+/// reports its own `PatternSyntaxException` for look-around it
+/// cannot compile). Supported: top-level `|` of assertion runs
+/// over single atoms (`\d\D\s\S\w\W`, `.`, literals, simple
+/// escapes). Unsupported (honest fallthrough): character
+/// classes, groups, anchors, flags, multi-char assertion bodies,
+/// alternation inside assertions, quantified assertions.
+fn boundary_alternatives(source: &str) -> Option<Vec<BoundaryAlt>> {
+    if !source.contains("(?") {
+        return None;
+    }
+    let bytes = source.as_bytes();
+    let mut alts = Vec::new();
+    let mut depth = 0usize;
+    let mut start = 0usize;
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\\' => i = i.saturating_add(2).min(bytes.len()),
+            b'(' => {
+                depth += 1;
+                i += 1;
+            }
+            b')' => {
+                depth = depth.checked_sub(1)?;
+                i += 1;
+            }
+            b'|' if depth == 0 => {
+                alts.push(&source[start..i]);
+                start = i + 1;
+                i += 1;
+            }
+            _ => i += 1,
+        }
+    }
+    if depth != 0 {
+        return None;
+    }
+    alts.push(&source[start..]);
+    alts.into_iter().map(boundary_alt).collect()
+}
+
+/// Parse one alternative: a non-empty run of assertions.
+fn boundary_alt(alt: &str) -> Option<BoundaryAlt> {
+    if alt.is_empty() {
+        return None;
+    }
+    let mut asserts = Vec::new();
+    let mut rest = alt;
+    while !rest.is_empty() {
+        let (assert, tail) = boundary_assert(rest)?;
+        asserts.push(assert);
+        rest = tail;
+    }
+    Some(asserts)
+}
+
+/// Parse one assertion (`(?<=A)`/`(?<!A)`/`(?=A)`/`(?!A)` with a
+/// single atom `A`), answering the rest past `)` (`None` for
+/// anything else, including quantified assertions).
+fn boundary_assert(s: &str) -> Option<(BoundaryAssert, &str)> {
+    let (behind, negated, after) = if let Some(r) = s.strip_prefix("(?<=") {
+        (true, false, r)
+    } else if let Some(r) = s.strip_prefix("(?<!") {
+        (true, true, r)
+    } else if let Some(r) = s.strip_prefix("(?=") {
+        (false, false, r)
+    } else if let Some(r) = s.strip_prefix("(?!") {
+        (false, true, r)
+    } else {
+        return None;
+    };
+    let (atom, after) = boundary_atom(after)?;
+    let after = after.strip_prefix(')')?;
+    if let Some(c) = after.chars().next() {
+        if matches!(c, '*' | '+' | '?' | '{') {
+            return None;
+        }
+    }
+    Some((
+        BoundaryAssert {
+            behind,
+            negated,
+            atom,
+        },
+        after,
+    ))
+}
+
+/// Parse one atom: a Perl class, `.`, a simple escape, or a bare
+/// literal (structural chars decline — classes, groups, and
+/// alternation inside assertions stay unsupported).
+fn boundary_atom(s: &str) -> Option<(BoundaryAtom, &str)> {
+    let mut chars = s.chars();
+    let c = chars.next()?;
+    if c == '\\' {
+        let e = chars.next()?;
+        let src = match e {
+            'd' | 'D' | 's' | 'S' | 'w' | 'W' => format!("\\{e}"),
+            'n' => "\n".to_owned(),
+            't' => "\t".to_owned(),
+            'r' => "\r".to_owned(),
+            'f' => "\u{C}".to_owned(),
+            '0' => "\0".to_owned(),
+            '\\' | '.' | '|' | '(' | ')' | '[' | ']' | '*' | '+' | '?' | '{' | '}' | '^' | '$' => {
+                regex::escape(&e.to_string())
+            }
+            _ => return None,
+        };
+        return Some((BoundaryAtom { src }, &s[c.len_utf8() + e.len_utf8()..]));
+    }
+    if c == '.' {
+        return Some((
+            BoundaryAtom {
+                src: ".".to_owned(),
+            },
+            &s[1..],
+        ));
+    }
+    if matches!(
+        c,
+        '(' | ')' | '[' | ']' | '|' | '*' | '+' | '?' | '{' | '}' | '^' | '$'
+    ) {
+        return None;
+    }
+    let end = c.len_utf8();
+    Some((
+        BoundaryAtom {
+            src: regex::escape(&s[..end]),
+        },
+        &s[end..],
+    ))
+}
+
+/// Evaluate boundary alternatives over `text`, answering the
+/// matching (empty) byte ranges in order. Each distinct atom
+/// compiles once (`^(?:atom)$`); a boundary matches when some
+/// alternative's every assertion holds (absent sides fail
+/// positives and pass negatives, like the JDK).
+fn boundary_cuts(text: &str, alts: &[BoundaryAlt]) -> Result<Vec<(usize, usize)>, NativeError> {
+    let mut atoms: Vec<(String, Regex)> = Vec::new();
+    for alt in alts {
+        for a in alt {
+            if !atoms.iter().any(|(s, _)| s == &a.atom.src) {
+                let re = Regex::new(&format!("^(?:{})$", a.atom.src)).map_err(pattern_syntax)?;
+                atoms.push((a.atom.src.clone(), re));
+            }
+        }
+    }
+    let test = |src: &str, c: char| -> bool {
+        let re = atoms
+            .iter()
+            .find(|(s, _)| s == src)
+            .map(|(_, r)| r)
+            .expect("atom compiled above");
+        let mut buf = [0u8; 4];
+        re.is_match(c.encode_utf8(&mut buf))
+    };
+    let chars: Vec<char> = text.chars().collect();
+    let bytes: Vec<usize> = text.char_indices().map(|(b, _)| b).collect();
+    let mut cuts = Vec::new();
+    for i in 0..=chars.len() {
+        let left = if i > 0 { Some(chars[i - 1]) } else { None };
+        let right = chars.get(i).copied();
+        let matched = alts.iter().any(|alt| {
+            alt.iter().all(|a| {
+                let c = if a.behind { left } else { right };
+                match c {
+                    None => a.negated,
+                    Some(c) => test(&a.atom.src, c) != a.negated,
+                }
+            })
+        });
+        if matched {
+            let b = bytes.get(i).copied().unwrap_or(text.len());
+            cuts.push((b, b));
+        }
+    }
+    Ok(cuts)
 }
 
 /// `re-pattern`: a `Pattern` passes through, a `String` compiles;

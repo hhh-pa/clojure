@@ -3463,7 +3463,8 @@ fn equiv_map_vals(eval: &mut Evaluator, x: &Map, y: &Map) -> Result<bool, Signal
         if is_hash_uoe(k) {
             return Err(eval.throw(uoe()));
         }
-        let Some(w) = y.get(k) else {
+        let k = realize_key(eval, k)?;
+        let Some(w) = y.get(&k) else {
             return Ok(false);
         };
         if !equiv_vals(eval, v, w)? {
@@ -3526,6 +3527,20 @@ pub(crate) fn equiv_vals(eval: &mut Evaluator, a: &Value, b: &Value) -> Result<b
         return equiv_set_vals(eval, x, y);
     }
     Ok(a == b)
+}
+
+/// Realize a prospective map/set key (the key invariant):
+/// pending seqs deep-realize to `RealizedSeq` (which compares
+/// by content under `PartialEq`/`Hash`, like the JVM's memoized
+/// `LazySeq.equals`/`hashCode`); anything else passes through
+/// untouched. Every map/set key boundary funnels here so stored
+/// and lookup keys always agree — without it, `(frequencies
+/// (partition …))` never merges (#205 bpe-tokenizer).
+pub(crate) fn realize_key(eval: &mut Evaluator, k: &Value) -> Result<Value, Signal> {
+    if let Some(p) = as_pending(k) {
+        return realize_pending_deep(eval, k, p);
+    }
+    Ok(k.clone())
 }
 
 /// Deep-realize a pending seq into a realized one (metadata preserved).

@@ -3053,3 +3053,573 @@ fn rounding_fields() {
         "java.lang.IllegalArgumentException | Error - no matches found for static method NOPE in class java.math.RoundingMode"
     );
 }
+
+// --- Batch G: java.time (LocalDate/LocalDateTime/Instant/ZoneOffset/
+// ZonedDateTime/DayOfWeek/DateTimeFormatter). Anchors oracled against
+// `java.time` (see /tmp/joracle/TM.java); the algorithms suite pins
+// the same values through gauss-easter, zellers-congruence, the
+// instagram filename stamps, and get-top-billionaires ages.
+
+#[test]
+fn time_localdate_of_getters() {
+    let mut eval = boot();
+    assert_eq!(
+        run(
+            &mut eval,
+            "(let [d (java.time.LocalDate/of 2024 1 12)] [(.getYear d) (.getMonthValue d) (.getDayOfMonth d)])"
+        ),
+        "[2024 1 12]"
+    );
+    // Value equality (gauss-easter compares `=` across constructions).
+    assert_eq!(
+        run(
+            &mut eval,
+            "(= (java.time.LocalDate/of 2007 4 8) (java.time.LocalDate/of 2007 4 8))"
+        ),
+        "true"
+    );
+    assert_eq!(
+        run(
+            &mut eval,
+            "(= (java.time.LocalDate/of 2007 4 8) (java.time.LocalDate/of 2007 4 9))"
+        ),
+        "false"
+    );
+    assert_eq!(
+        run(&mut eval, "(str (java.time.LocalDate/of 2024 1 12))"),
+        "\"2024-01-12\""
+    );
+}
+
+#[test]
+fn time_plus_days() {
+    let mut eval = boot();
+    // Oracle: 2021-03-22 + 13 = 2021-04-04.
+    assert_eq!(
+        run(
+            &mut eval,
+            "(str (.plusDays (java.time.LocalDate/of 2021 3 22) 13))"
+        ),
+        "\"2021-04-04\""
+    );
+    // Leap and month/year crossings, plus negatives.
+    assert_eq!(
+        run(
+            &mut eval,
+            "[(str (.plusDays (java.time.LocalDate/of 2020 2 28) 1))
+              (str (.plusDays (java.time.LocalDate/of 2021 2 28) 1))
+              (str (.plusDays (java.time.LocalDate/of 2021 1 1) -1))]"
+        ),
+        "[\"2020-02-29\" \"2021-03-01\" \"2020-12-31\"]"
+    );
+}
+
+#[test]
+fn time_day_of_week() {
+    let mut eval = boot();
+    // Oracle: 2010-01-31 is a Sunday (zellers-congruence pins this).
+    assert_eq!(
+        run(
+            &mut eval,
+            "[(str (.getDayOfWeek (java.time.LocalDate/of 2010 1 31)))
+              (.getValue (.getDayOfWeek (java.time.LocalDate/of 2010 1 31)))]"
+        ),
+        "[\"SUNDAY\" 7]"
+    );
+    // 1970-01-01 was a Thursday.
+    assert_eq!(
+        run(
+            &mut eval,
+            "[(str (.getDayOfWeek (java.time.LocalDate/of 1970 1 1)))
+              (.getValue (.getDayOfWeek (java.time.LocalDate/of 1970 1 1)))]"
+        ),
+        "[\"THURSDAY\" 4]"
+    );
+}
+
+#[test]
+fn time_of_validation() {
+    let mut eval = boot();
+    // JDK messages, oracled (the port has no DateTimeException
+    // variant; the suite catches broad Exception).
+    assert_eq!(
+        uncaught(&mut eval, "(java.time.LocalDate/of 2021 2 30)"),
+        "java.lang.IllegalArgumentException | Invalid date 'FEBRUARY 30'"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(java.time.LocalDate/of 2021 13 1)"),
+        "java.lang.IllegalArgumentException | Invalid value for MonthOfYear (valid values 1 - 12): 13"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(java.time.LocalDateTime/of 2024 1 1 24 0)"),
+        "java.lang.IllegalArgumentException | Invalid value for HourOfDay (valid values 0 - 23): 24"
+    );
+}
+
+#[test]
+fn time_datetime_of_format() {
+    let mut eval = boot();
+    // The instagram stamp, oracled.
+    assert_eq!(
+        run(
+            &mut eval,
+            "(.format (java.time.LocalDateTime/of 2024 1 12 10 30 0)
+                      (java.time.format.DateTimeFormatter/ofPattern \"yyyy-MM-dd_HH-mm-ss\"))"
+        ),
+        "\"2024-01-12_10-30-00\""
+    );
+    // 5-arg `of` (seconds default 0); single runs don't pad.
+    assert_eq!(
+        run(
+            &mut eval,
+            "(.format (java.time.LocalDateTime/of 2024 1 12 10 30)
+                      (java.time.format.DateTimeFormatter/ofPattern \"y-M-d H:m:s\"))"
+        ),
+        "\"2024-1-12 10:30:0\""
+    );
+    // Two-digit year, quoted literals, doubled quotes.
+    assert_eq!(
+        run(
+            &mut eval,
+            "(.format (java.time.LocalDateTime/of 2024 1 12 10 30 5)
+                      (java.time.format.DateTimeFormatter/ofPattern \"yy'T'HH\"))"
+        ),
+        "\"24T10\""
+    );
+    assert_eq!(
+        run(
+            &mut eval,
+            "(.format (java.time.LocalDateTime/of 2024 1 12 10 30 5)
+                      (java.time.format.DateTimeFormatter/ofPattern \"HH''mm\"))"
+        ),
+        "\"10'30\""
+    );
+    // `toString` drops zero seconds, oracled.
+    assert_eq!(
+        run(
+            &mut eval,
+            "[(str (java.time.LocalDateTime/of 2024 1 12 10 30))
+              (str (java.time.LocalDateTime/of 2024 1 12 10 30 5))]"
+        ),
+        "[\"2024-01-12T10:30\" \"2024-01-12T10:30:05\"]"
+    );
+}
+
+#[test]
+fn time_pattern_errors() {
+    let mut eval = boot();
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(java.time.format.DateTimeFormatter/ofPattern \"yyyy-QQ\")"
+        ),
+        "java.lang.IllegalArgumentException | Unknown pattern letter: Q"
+    );
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(java.time.format.DateTimeFormatter/ofPattern \"MMM\")"
+        ),
+        "java.lang.IllegalArgumentException | Unsupported DateTimeFormatter pattern: M run of width 3"
+    );
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(java.time.format.DateTimeFormatter/ofPattern \"yyyy'T\")"
+        ),
+        "java.lang.IllegalArgumentException | Pattern ends with unbalanced quotes"
+    );
+}
+
+#[test]
+fn time_zoneoffset_utc() {
+    let mut eval = boot();
+    assert_eq!(
+        run(
+            &mut eval,
+            "[(= java.time.ZoneOffset/UTC java.time.ZoneOffset/UTC)
+              (str java.time.ZoneOffset/UTC)]"
+        ),
+        "[true \"Z\"]"
+    );
+    assert_eq!(
+        compile_err(&mut eval, "java.time.ZoneOffset/NOPE"),
+        "java.lang.IllegalArgumentException | Error - no matches found for static method NOPE in class java.time.ZoneOffset"
+    );
+}
+
+#[test]
+fn time_at_zone_epoch() {
+    let mut eval = boot();
+    // Oracle: -319248000 (billionaires ages pin this absolutely).
+    assert_eq!(
+        run(
+            &mut eval,
+            "(.toEpochSecond (.atZone (java.time.LocalDateTime/of 1959 11 20 0 0) java.time.ZoneOffset/UTC))"
+        ),
+        "-319248000"
+    );
+    // Instant roundtrips (oracle: -283996800 -> 1961-01-01).
+    assert_eq!(
+        run(
+            &mut eval,
+            "[(str (.toLocalDate (.atZone (java.time.Instant/ofEpochSecond -319248000) java.time.ZoneOffset/UTC)))
+              (str (.toLocalDate (.atZone (java.time.Instant/ofEpochSecond -283996800) java.time.ZoneOffset/UTC)))]"
+        ),
+        "[\"1959-11-20\" \"1961-01-01\"]"
+    );
+    assert_eq!(
+        run(&mut eval, "(str (java.time.Instant/ofEpochSecond 0))"),
+        "\"1970-01-01T00:00:00Z\""
+    );
+}
+
+#[test]
+fn time_now_shape() {
+    let mut eval = boot();
+    // The clock reads sane UTC parts (wide ranges — no time bombs).
+    assert_eq!(
+        run(
+            &mut eval,
+            "(let [d (java.time.LocalDate/now java.time.ZoneOffset/UTC)]
+               [(<= 2020 (.getYear d) 2100) (<= 1 (.getMonthValue d) 12) (<= 1 (.getDayOfMonth d) 31)])"
+        ),
+        "[true true true]"
+    );
+    assert_eq!(
+        run(
+            &mut eval,
+            "(let [dt (java.time.LocalDateTime/now)]
+               [(<= 0 (Integer/parseInt (.format dt (java.time.format.DateTimeFormatter/ofPattern \"H\"))) 23)
+                (some? (re-matches #\"\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}(:\\d{2})?\" (str dt)))])"
+        ),
+        "[true true]"
+    );
+}
+
+#[test]
+fn time_print_shapes() {
+    let mut eval = boot();
+    assert_eq!(
+        run(
+            &mut eval,
+            "[(pr-str (java.time.LocalDate/of 2024 1 12))
+              (pr-str (.getDayOfWeek (java.time.LocalDate/of 2010 1 31)))
+              (pr-str (java.time.format.DateTimeFormatter/ofPattern \"yyyy\"))
+              (pr-str (.atZone (java.time.LocalDateTime/of 2024 1 12 0 0) java.time.ZoneOffset/UTC))]"
+        ),
+        "[\"2024-01-12\" \"SUNDAY\" \"yyyy\" \"2024-01-12T00:00Z[UTC]\"]"
+    );
+}
+
+#[test]
+fn time_misses() {
+    let mut eval = boot();
+    // Arity misses (surface and `__static*`).
+    assert_eq!(
+        runtime_miss(&mut eval, "java.time.LocalDate", "of", "1 2"),
+        "java.lang.IllegalArgumentException | No matching method of found taking 2 args for class java.time.LocalDate"
+    );
+    assert_eq!(
+        runtime_miss(
+            &mut eval,
+            "java.time.format.DateTimeFormatter",
+            "ofPattern",
+            "1 2"
+        ),
+        "java.lang.IllegalArgumentException | No matching method ofPattern found taking 2 args for class java.time.format.DateTimeFormatter"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(.nope (java.time.LocalDate/of 2024 1 1))"),
+        "java.lang.IllegalArgumentException | No matching method nope found taking 0 args for class java.time.LocalDate"
+    );
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(.getValue (.getDayOfWeek (java.time.LocalDate/of 2024 1 1)) 9)"
+        ),
+        "java.lang.IllegalArgumentException | No matching method getValue found taking 1 args for class java.time.DayOfWeek"
+    );
+    // Nil formatter/zone are NPEs; mistyped args are CCEs.
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(.format (java.time.LocalDateTime/of 2024 1 1 0 0) nil)"
+        ),
+        "java.lang.NullPointerException | formatter is null"
+    );
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(.atZone (java.time.Instant/ofEpochSecond 0) nil)"
+        ),
+        "java.lang.NullPointerException | zone is null"
+    );
+}
+
+// --- Batch H: census stragglers (StringBuilder/reverse,
+// File/getPath+getAbsolutePath, String/lastIndexOf,
+// Double/TYPE multi-arrays — the run5b ledger, minus bpe and
+// natural-sort, which get their own fixes below).
+
+#[test]
+fn str_builder_reverse() {
+    let mut eval = boot();
+    assert_eq!(
+        run(&mut eval, "(.toString (.reverse (StringBuilder. \"abc\")))"),
+        "\"cba\""
+    );
+    // Astral chars move as units (the JDK's surrogate-preserving
+    // reversal); empty stays empty.
+    assert_eq!(
+        run(
+            &mut eval,
+            "(.toString (.reverse (StringBuilder. \"a😀b\")))"
+        ),
+        "\"b😀a\""
+    );
+    assert_eq!(
+        run(&mut eval, "(.toString (.reverse (StringBuilder. \"\")))"),
+        "\"\""
+    );
+    // Answers the same builder (append chains through it).
+    assert_eq!(
+        run(
+            &mut eval,
+            "(let [b (StringBuilder. \"ab\")] (.append b \"cd\") (.toString (.reverse b)))"
+        ),
+        "\"dcba\""
+    );
+    assert_eq!(
+        run(
+            &mut eval,
+            "(do (binding [*warn-on-reflection* *warn-on-reflection*] (require 'clojure.string))
+                 (clojure.string/reverse \"Hey wollef\"))"
+        ),
+        "\"fellow yeH\""
+    );
+}
+
+#[test]
+fn file_get_path_absolute() {
+    let mut eval = boot();
+    // `getPath` is the path as given.
+    assert_eq!(
+        run(&mut eval, "(.getPath (java.io.File. \"x/y\"))"),
+        "\"x/y\""
+    );
+    // `getAbsolutePath` resolves relative paths (platform-agnostic
+    // assertions: suffix + idempotence on absolute input).
+    assert_eq!(
+        run(
+            &mut eval,
+            "(.endsWith (.getAbsolutePath (java.io.File. \"relchild\")) \"relchild\")"
+        ),
+        "true"
+    );
+    assert_eq!(
+        run(
+            &mut eval,
+            "(let [abs (.getAbsolutePath (java.io.File. \"q\"))]
+               (= abs (.getAbsolutePath (java.io.File. abs))))"
+        ),
+        "true"
+    );
+}
+
+#[test]
+fn str_last_index_of() {
+    let mut eval = boot();
+    assert_eq!(
+        run(
+            &mut eval,
+            "[(.lastIndexOf \"hello world\" \"o\")
+              (.lastIndexOf \"hello\" \"z\")
+              (.lastIndexOf \"abc\" \"\")
+              (.lastIndexOf \"\" \"\")]"
+        ),
+        "[7 -1 3 0]"
+    );
+    // The from-index clamp (past-the-end clamps, negative is -1).
+    assert_eq!(
+        run(
+            &mut eval,
+            "[(.lastIndexOf \"hello\" \"l\" 2)
+              (.lastIndexOf \"hello\" \"l\" 1)
+              (.lastIndexOf \"abc\" \"a\" 99)
+              (.lastIndexOf \"abc\" \"a\" -1)
+              (.lastIndexOf \"abc\" \"\" 1)]"
+        ),
+        "[2 -1 0 -1 1]"
+    );
+    // Code-point needles (int + char); unrepresentable is -1.
+    assert_eq!(
+        run(
+            &mut eval,
+            "(do (binding [*warn-on-reflection* *warn-on-reflection*] (require 'clojure.string))
+                 [(.lastIndexOf \"a/b/c\" 47)
+                  (.lastIndexOf \"abc\" \\b)
+                  (.lastIndexOf \"abc\" 1114112)
+                  (clojure.string/last-index-of \"https://x/a.jpg\" \"/\")])"
+        ),
+        "[3 1 -1 9]"
+    );
+}
+
+#[test]
+fn seq_keys_merge_and_equiv() {
+    let mut eval = boot();
+    // The bpe-tokenizer assertions, verbatim: partition pairs merge
+    // under `frequencies`, and seq-keyed maps equiv vector-keyed ones.
+    assert_eq!(
+        run(&mut eval, "(frequencies (partition 2 1 [2 3 6 2 3 6 2 5]))"),
+        "{(2 3) 2, (3 6) 2, (6 2) 2, (2 5) 1}"
+    );
+    assert_eq!(
+        run(
+            &mut eval,
+            "(= {[73 32] 1} {(first (partition 2 1 [73 32])) 1})"
+        ),
+        "true"
+    );
+    // Every key boundary realizes: assoc/get/contains/find/dissoc,
+    // set conj/disj/contains, literals, zipmap, group-by.
+    assert_eq!(
+        run(
+            &mut eval,
+            "(let [p (first (partition 2 1 [73 32]))
+                   m (assoc {} p :a)]
+               [(get m [73 32]) (get m p) (contains? m [73 32])
+                (find m p) (count (dissoc m [73 32]))])"
+        ),
+        "[:a :a true [(73 32) :a] 0]"
+    );
+    assert_eq!(
+        run(
+            &mut eval,
+            "(let [p (first (partition 2 1 [1 2]))]
+               [(contains? (conj #{} p) [1 2])
+                (count (disj (conj #{} p) [1 2]))
+                (contains? #{[1 2]} p)
+                (= {(first (partition 2 1 [1 2])) 1} {[1 2] 1})])"
+        ),
+        "[true 0 true true]"
+    );
+    assert_eq!(
+        run(
+            &mut eval,
+            "[(get (zipmap (partition 2 1 [1 2 3]) [:a :b]) [2 3])
+              (get (group-by #(take 2 %) [[1 2] [1 2] [3]]) [1 2])]"
+        ),
+        "[:b [[1 2] [1 2]]]"
+    );
+    // Non-seq keys pass through untouched (same values, same count).
+    assert_eq!(
+        run(
+            &mut eval,
+            "[(get (assoc {} :a 1 :b 2) :b) (frequencies [:x :y :x])]"
+        ),
+        "[2 {:x 2, :y 1}]"
+    );
+}
+
+#[test]
+fn split_boundary_patterns() {
+    let mut eval = boot();
+    let split = |s: &str, pat: &str| {
+        format!(
+            "(do (binding [*warn-on-reflection* *warn-on-reflection*] (require 'clojure.string))
+                 (clojure.string/split {s} {pat}))"
+        )
+    };
+    // The natural-sort pattern, JDK-oracled.
+    assert_eq!(
+        run(
+            &mut eval,
+            &split("\"2 ft 7 in\"", "#\"(?<=\\D)(?=\\d)|(?<=\\d)(?=\\D)\"")
+        ),
+        "[\"2\" \" ft \" \"7\" \" in\"]"
+    );
+    // Lookahead/behind, oracled (the start leader never emits).
+    assert_eq!(
+        run(&mut eval, &split("\"ab\"", "#\"(?=b)\"")),
+        "[\"a\" \"b\"]"
+    );
+    assert_eq!(run(&mut eval, &split("\"ba\"", "#\"(?=b)\"")), "[\"ba\"]");
+    assert_eq!(
+        run(&mut eval, &split("\"a1b2\"", "#\"(?<=\\d)\"")),
+        "[\"a1\" \"b2\"]"
+    );
+    assert_eq!(
+        run(&mut eval, &split("\"a,b\"", "#\"(?<=,)\"")),
+        "[\"a,\" \"b\"]"
+    );
+    // Negated assertions on both sides (the `b` in `ab` IS
+    // preceded by `a`, so no cut there — but `xb` cuts).
+    assert_eq!(
+        run(&mut eval, &split("\"xb\"", "#\"(?<!a)(?=b)\"")),
+        "[\"x\" \"b\"]"
+    );
+    assert_eq!(
+        run(&mut eval, &split("\"ab\"", "#\"(?<!a)(?=b)\"")),
+        "[\"ab\"]"
+    );
+    assert_eq!(
+        run(&mut eval, &split("\"ba\"", "#\"(?<!a)\"")),
+        "[\"b\" \"a\"]"
+    );
+    // Limits ride the shared loop (oracled).
+    assert_eq!(
+        run(
+            &mut eval,
+            "(do (binding [*warn-on-reflection* *warn-on-reflection*] (require 'clojure.string))
+                 [(clojure.string/split \"a1b2\" #\"(?<=\\d)\" 2)
+                  (clojure.string/split \"a1\" #\"(?<=\\d)\" -1)])"
+        ),
+        "[[\"a1\" \"b2\"] [\"a1\" \"\"]]"
+    );
+}
+
+#[test]
+fn split_boundary_fallthrough() {
+    let mut eval = boot();
+    // Beyond the boundary grammar, look-around still reports
+    // `PatternSyntaxException` honestly (multi-char bodies,
+    // alternation inside, quantified assertions, classes,
+    // literals beside assertions).
+    for pat in [
+        "#\"(?<=\\d+)\"",
+        "#\"(?<=a|b)\"",
+        "#\"(?=\\d)+\"",
+        "#\"(?<=[0-9])\"",
+        "#\"x(?=\\d)\"",
+    ] {
+        let err = uncaught(
+            &mut eval,
+            &format!(
+                "(do (binding [*warn-on-reflection* *warn-on-reflection*] (require 'clojure.string))
+                     (clojure.string/split \"ab\" {pat}))"
+            ),
+        );
+        assert!(
+            err.starts_with("java.util.regex.PatternSyntaxException | "),
+            "expected PSE for {pat}, got {err}"
+        );
+    }
+}
+
+#[test]
+fn double_type_make_array() {
+    let mut eval = boot();
+    assert_eq!(run(&mut eval, "(alength (make-array Double/TYPE 3))"), "3");
+    // Rectangular 2-D arrays with multi-index access (problem-101).
+    assert_eq!(
+        run(
+            &mut eval,
+            "(let [a (make-array Double/TYPE 2 3)]
+               (aset a 1 2 7.5)
+               [(alength a) (alength (aget a 0)) (aget (aget a 1) 2) (aget a 0 0)])"
+        ),
+        "[2 3 7.5 0.0]"
+    );
+}
