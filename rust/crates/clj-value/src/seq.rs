@@ -1862,6 +1862,11 @@ mod tests {
         let c = CycleValue::new(int(1), int(2));
         assert_eq!(c.class_name(), "clojure.lang.Cycle");
         assert_eq!(c.print(), "(...)");
+        // Identity equality (same pointer is `=`, distinct
+        // instances are not, whatever the items).
+        assert!(c.dyn_eq(&c));
+        let d = CycleValue::new(int(1), int(2));
+        assert!(!c.dyn_eq(&d));
     }
 
     #[test]
@@ -1881,6 +1886,11 @@ mod tests {
         assert!(pending.clone().seed_opt().is_none());
         assert_eq!(it.class_name(), "clojure.lang.Iterate");
         assert_eq!(it.print(), "(...)");
+        // Identity equality (same pointer is `=`, distinct
+        // instances are not, whatever the seeds).
+        assert!(it.dyn_eq(&it));
+        let other = IterateValue::new(int(0), int(1));
+        assert!(!it.dyn_eq(&other));
     }
 
     #[test]

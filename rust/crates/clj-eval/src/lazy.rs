@@ -4618,6 +4618,24 @@ mod tests {
     }
 
     #[test]
+    fn chunked_pending_parts_reads_chain_thunk() {
+        // A `Chain` under `ChunkedCons` reads its head as the
+        // chunk without forcing (the `with_meta_fresh` re-wrap
+        // shape); the tail seqs behind it.
+        let mut eval = crate::eval::Evaluator::new_bare("user");
+        let v = PendingSeq::pending_chunked_cons(Thunk::Chain {
+            head: vec![Value::Int(1), Value::Int(2)],
+            tail: Value::List(List::from_vec(vec![Value::Int(3)])),
+        });
+        let p = as_pending(&v).expect("chunked cons builds a pending");
+        let (chunk, tail) = super::chunked_pending_parts(&mut eval, p)
+            .unwrap()
+            .expect("chain head reads");
+        assert_eq!(chunk.items_arc()[..2], [Value::Int(1), Value::Int(2)]);
+        assert!(tail.is_some());
+    }
+
+    #[test]
     fn chunked_pending_parts_empty_is_gone() {
         // Defensive: `ChunkedCons` cells never empty in production
         // (heads are never empty); an empty one reads as gone.
