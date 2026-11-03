@@ -744,6 +744,8 @@ impl Vector {
                 // `Int`-only here (foreign values unpacked above).
                 if let Value::Int(n) = v {
                     Arc::make_mut(ints)[index] = n;
+                } else {
+                    debug_assert!(false, "foreign values unpack above");
                 }
             }
         }
