@@ -167,6 +167,36 @@ fn emit_covers_keyword_literals_through_the_rlib() {
 }
 
 #[test]
+fn emit_covers_slice_a_forms_through_the_rlib() {
+    // Slice A: the planner unit tests pin the desugared shapes;
+    // emitting here executes the rlib copies of the new planner
+    // arms and the new prim declarations (the libtest copy's
+    // profile is dropped as mismatched on merge).
+    let dir = tmp("slice-a");
+    std::fs::create_dir_all(&dir).expect("tmp dir");
+    let ir = dir.join("f.ll");
+    compile_str(
+        "(defn and [x] x) (print (and 1) (cond false 1 :else 2) (or nil 3) \
+         (when true 4) (when-not false 5) (long 6.5) (int 7) \
+         (clojure.core/cond false 8 true 9) (clojure.core/when-not true 10 11))",
+        "f.clj",
+        &dir.join("f"),
+        &EmitOptions {
+            emit_ir: Some(ir.clone()),
+            emit_obj: None,
+        },
+        &no_link(),
+    )
+    .expect("emit slice-a forms");
+    let text = std::fs::read_to_string(&ir).expect("read ir");
+    assert!(text.contains("call ptr @rt_long"), "{text}");
+    assert!(text.contains("call ptr @rt_int_cast"), "{text}");
+    assert!(text.contains("call i8 @rt_is_truthy"), "{text}");
+    assert!(text.contains("call ptr @cljfn_and_0"), "{text}");
+    std::fs::remove_dir_all(&dir).expect("cleanup");
+}
+
+#[test]
 fn out_of_subset_names_the_form() {
     let err = compile_str(
         "(def x 1)",

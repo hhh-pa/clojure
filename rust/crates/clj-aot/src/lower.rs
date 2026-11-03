@@ -17,7 +17,11 @@
 //! the init the scope-end drop would free stack garbage);
 //! `let` drops the slot's old box before storing; all frame
 //! slots drop at scope end; fallible calls null-check into an
-//! abort block that calls libc `exit(1)`.
+//! abort block that calls libc `exit(1)`. `loop` binds its inits
+//! once behind a head block — a tail `recur` rebinds the slots
+//! and branches back to the head, any other completion falls
+//! through with the body's value (so values stay in stack
+//! allocas throughout; loops add no phi nodes).
 //!
 //! Builder calls use `.expect()`: the IR is correct by
 //! construction (verified by every snapshot test), so a builder
@@ -39,7 +43,7 @@ use inkwell::values::{BasicMetadataValueEnum, FunctionValue, IntValue, PointerVa
 /// Prims in discriminant order (index `== prim as usize`;
 /// shared with the JIT symbol table so a new prim cannot miss
 /// a mapping silently — the drift test walks this list).
-pub(crate) const PRIM_ORDER: [Prim; 13] = [
+pub(crate) const PRIM_ORDER: [Prim; 19] = [
     Prim::Add,
     Prim::Sub,
     Prim::Mul,
@@ -53,6 +57,12 @@ pub(crate) const PRIM_ORDER: [Prim; 13] = [
     Prim::Nth,
     Prim::Get,
     Prim::Conj,
+    Prim::Long,
+    Prim::Int,
+    Prim::Transient,
+    Prim::ConjBang,
+    Prim::AssocBang,
+    Prim::PersistentBang,
 ];
 
 /// The LLVM symbol per planned `defn`: sanitized name plus source
@@ -69,7 +79,7 @@ pub fn fn_symbol(index: usize, name: &str) -> String {
 
 /// Declared runtime helpers (resolved once per module).
 struct Decls<'ctx> {
-    prims: [FunctionValue<'ctx>; 13],
+    prims: [FunctionValue<'ctx>; 19],
     nil: FunctionValue<'ctx>,
     boolean: FunctionValue<'ctx>,
     int: FunctionValue<'ctx>,
@@ -85,6 +95,15 @@ struct Decls<'ctx> {
     arity_error: FunctionValue<'ctx>,
     is_truthy: FunctionValue<'ctx>,
     exit: FunctionValue<'ctx>,
+}
+
+/// A `loop` under lowering: its head block plus its binding
+/// slots (a tail `recur` stores its args into the slots and
+/// branches to the head; nesting shadows — the innermost target
+/// wins, like the planner's).
+struct LoopTarget<'ctx> {
+    head: inkwell::basic_block::BasicBlock<'ctx>,
+    slots: Vec<usize>,
 }
 
 /// The lowering session: one module, one builder, interned string
@@ -116,6 +135,10 @@ struct Lower<'ctx> {
     /// rather than `ptr` (a `defn`) — set at function entry,
     /// read by abort sites in JIT mode only.
     in_main: bool,
+    /// The `loop` targets enclosing the expression under
+    /// lowering, innermost last (a `recur` always binds the top
+    /// — the planner guarantees the target exists and matches).
+    loop_stack: Vec<LoopTarget<'ctx>>,
 }
 
 impl<'ctx> Lower<'ctx> {
@@ -213,6 +236,7 @@ impl<'ctx> Lower<'ctx> {
             diverged: false,
             jit: false,
             in_main: false,
+            loop_stack: Vec::new(),
         }
     }
 
@@ -283,6 +307,21 @@ impl<'ctx> Lower<'ctx> {
     /// Drop one owned box.
     fn call_drop(&self, value: PointerValue<'ctx>) {
         self.call_void(self.decls.drop_, &[value.into()]);
+    }
+
+    /// Store an owned box into a frame slot, dropping the slot's
+    /// old box first (every slot holds a valid owned box: params
+    /// stored at entry, the rest nil-initialized).
+    fn store_slot(&self, slots: &[PointerValue<'ctx>], slot: usize, value: PointerValue<'ctx>) {
+        let old = self
+            .builder
+            .build_load(self.ptr, slots[slot], "old")
+            .expect("load old")
+            .into_pointer_value();
+        self.call_drop(old);
+        self.builder
+            .build_store(slots[slot], value)
+            .expect("store slot");
     }
 
     /// Nil-initialize every non-param frame slot (params are
@@ -360,7 +399,9 @@ impl<'ctx> Lower<'ctx> {
 
     /// Pack lowered arguments into an array for a helper call
     /// (always at least one slot — zero-length allocas are
-    /// avoided even for empty calls).
+    /// avoided even for empty calls). The array is hoisted to the
+    /// entry block: an alloca in a loop body would reallocate on
+    /// every iteration and overflow the stack on long loops.
     fn pack_args(
         &mut self,
         func: FunctionValue<'ctx>,
@@ -368,10 +409,17 @@ impl<'ctx> Lower<'ctx> {
         args: &[SubsetExpr],
     ) -> (PointerValue<'ctx>, IntValue<'ctx>) {
         let array_ty = self.ptr.array_type(args.len().max(1) as u32);
+        let current = self.builder.get_insert_block().expect("insert block");
+        let entry = func.get_first_basic_block().expect("entry block");
+        match entry.get_first_instruction() {
+            Some(first) => self.builder.position_before(&first),
+            None => self.builder.position_at_end(entry),
+        }
         let array = self
             .builder
             .build_alloca(array_ty, "argv")
             .expect("alloca argv");
+        self.builder.position_at_end(current);
         let zero = self.i32t.const_zero();
         for (i, arg) in args.iter().enumerate() {
             let value = self.lower_expr(func, slots, arg);
@@ -506,18 +554,12 @@ impl<'ctx> Lower<'ctx> {
             SubsetExpr::Let { bindings, body } => {
                 for (slot, init) in bindings {
                     let value = self.lower_expr(func, slots, init);
-                    let old = self
-                        .builder
-                        .build_load(self.ptr, slots[*slot], "old")
-                        .expect("load old")
-                        .into_pointer_value();
-                    self.call_drop(old);
-                    self.builder
-                        .build_store(slots[*slot], value)
-                        .expect("store let");
+                    self.store_slot(slots, *slot, value);
                 }
                 self.lower_seq(func, slots, body)
             }
+            SubsetExpr::Loop { bindings, body } => self.lower_loop(func, slots, bindings, body),
+            SubsetExpr::Recur(args) => self.lower_recur(func, slots, args),
             other => self.lower_call(func, slots, other),
         }
     }
@@ -658,6 +700,79 @@ impl<'ctx> Lower<'ctx> {
         } else {
             self.ptr.const_null()
         }
+    }
+
+    /// Lower `loop`: bind the inits into their slots once (like
+    /// `let`), branch to the head, and lower the body — a tail
+    /// `recur` rebinds the slots and branches back to the head,
+    /// any other completion falls through with the body's value
+    /// (no merge block: the body ends in exactly one block, so
+    /// the value flows straight on, like `let`). A body that only
+    /// diverges (bare `recur`, arity abort) seals like an `if`
+    /// branch and continues in a fresh block, marked diverged.
+    /// Limits: fixed flat slots (no reuse, no growth), no
+    /// `try`/`catch` interplay (`try` is outside the subset, so a
+    /// `recur` can never cross one here).
+    fn lower_loop(
+        &mut self,
+        func: FunctionValue<'ctx>,
+        slots: &[PointerValue<'ctx>],
+        bindings: &[(usize, SubsetExpr)],
+        body: &[SubsetExpr],
+    ) -> PointerValue<'ctx> {
+        for (slot, init) in bindings {
+            let value = self.lower_expr(func, slots, init);
+            self.store_slot(slots, *slot, value);
+        }
+        let entry_div = std::mem::replace(&mut self.diverged, false);
+        let head_bb = self.ctx.append_basic_block(func, "loophead");
+        self.builder
+            .build_unconditional_branch(head_bb)
+            .expect("br");
+        self.builder.position_at_end(head_bb);
+        let bound: Vec<usize> = bindings.iter().map(|(slot, _)| *slot).collect();
+        self.loop_stack.push(LoopTarget {
+            head: head_bb,
+            slots: bound,
+        });
+        let value = self.lower_seq(func, slots, body);
+        self.loop_stack.pop().expect("loop target");
+        let body_div = std::mem::replace(&mut self.diverged, false);
+        self.diverged = entry_div || body_div;
+        if body_div {
+            self.builder.build_unreachable().expect("seal");
+            let cont = self.ctx.append_basic_block(func, "cont");
+            self.builder.position_at_end(cont);
+        }
+        value
+    }
+
+    /// Lower a tail `recur`: evaluate every arg first (so later
+    /// args still read the old slots), rebind the innermost
+    /// loop's slots, and branch back to its head — then continue
+    /// in a fresh block marked diverged (like an arity abort:
+    /// downstream joins seal it, never read the null).
+    fn lower_recur(
+        &mut self,
+        func: FunctionValue<'ctx>,
+        slots: &[PointerValue<'ctx>],
+        args: &[SubsetExpr],
+    ) -> PointerValue<'ctx> {
+        let mut fresh = Vec::with_capacity(args.len());
+        for arg in args {
+            fresh.push(self.lower_expr(func, slots, arg));
+        }
+        let target = self.loop_stack.last().expect("recur without loop");
+        for (slot, value) in target.slots.iter().zip(fresh) {
+            self.store_slot(slots, *slot, value);
+        }
+        self.builder
+            .build_unconditional_branch(target.head)
+            .expect("br");
+        let cont = self.ctx.append_basic_block(func, "cont");
+        self.builder.position_at_end(cont);
+        self.diverged = true;
+        self.ptr.const_null()
     }
 
     /// Lower one sibling `defn` (declared before its body so
@@ -832,25 +947,61 @@ mod tests {
     #[test]
     fn prim_order_matches_discriminants() {
         let names = [
-            "rt_add", "rt_sub", "rt_mul", "rt_quot", "rt_lt", "rt_le", "rt_gt", "rt_ge", "rt_eq",
-            "rt_count", "rt_nth", "rt_get", "rt_conj",
+            "rt_add",
+            "rt_sub",
+            "rt_mul",
+            "rt_quot",
+            "rt_lt",
+            "rt_le",
+            "rt_gt",
+            "rt_ge",
+            "rt_eq",
+            "rt_count",
+            "rt_nth",
+            "rt_get",
+            "rt_conj",
+            "rt_long",
+            "rt_int_cast",
+            "rt_transient",
+            "rt_conj_bang",
+            "rt_assoc_bang",
+            "rt_persistent_bang",
         ];
         for (index, prim) in PRIM_ORDER.iter().enumerate() {
             assert_eq!(*prim as usize, index);
             assert_eq!(prim_symbol(*prim), names[index]);
         }
-        assert_eq!(format!("{PRIM_ORDER:?}").split(',').count(), 13);
+        assert_eq!(format!("{PRIM_ORDER:?}").split(',').count(), 19);
     }
 
     #[test]
     fn every_prim_lowers_to_its_symbol() {
         let ir = compile_ir(
             "(+ 1 2) (- 3 1) (* 2 3) (quot 7 2) (< 1 2) (<= 1 1) (> 2 1) \
-             (>= 2 2) (= 1 1) (count [1]) (nth [1] 0) (get [1] 0) (conj [1] 2)",
+             (>= 2 2) (= 1 1) (count [1]) (nth [1] 0) (get [1] 0) (conj [1] 2) \
+             (long 5) (int 7) (transient [1]) (conj! (transient [1]) 2) \
+             (assoc! (transient [1]) 0 9) (persistent! (transient [1]))",
         );
         for symbol in [
-            "rt_add", "rt_sub", "rt_mul", "rt_quot", "rt_lt", "rt_le", "rt_gt", "rt_ge", "rt_eq",
-            "rt_count", "rt_nth", "rt_get", "rt_conj",
+            "rt_add",
+            "rt_sub",
+            "rt_mul",
+            "rt_quot",
+            "rt_lt",
+            "rt_le",
+            "rt_gt",
+            "rt_ge",
+            "rt_eq",
+            "rt_count",
+            "rt_nth",
+            "rt_get",
+            "rt_conj",
+            "rt_long",
+            "rt_int_cast",
+            "rt_transient",
+            "rt_conj_bang",
+            "rt_assoc_bang",
+            "rt_persistent_bang",
         ] {
             assert!(
                 ir.contains(&format!("call ptr @{symbol}")),
@@ -960,5 +1111,39 @@ mod tests {
         let ir = compile_ir("(defn f [n] (if (= n 0) 0 (f 1))) (f 3)");
         assert!(ir.contains("call ptr @cljfn_f_0"), "{ir}");
         assert!(!ir.contains("tail call"), "{ir}");
+    }
+
+    #[test]
+    fn loop_and_recur_lower_to_a_head_branch() {
+        let ir = compile_ir("(print (loop [i 0] (if (= i 3) i (recur (+ i 1)))))");
+        assert!(ir.contains("loophead"), "{ir}");
+        assert!(ir.contains("br label %loophead"), "{ir}");
+        // `recur` rebinds through the frame slots (drop-old then
+        // store); the sealed `recur` branch never joins the `if`,
+        // so loop-carried values add no phi nodes.
+        assert!(ir.contains("call void @rt_drop"), "{ir}");
+        assert!(!ir.contains("phi ptr"), "{ir}");
+    }
+
+    #[test]
+    fn loop_divergence_shapes_verify() {
+        // Every divergence shape verifies: bare `recur` (the body
+        // never completes, with and without bindings), a recur
+        // against an arity abort, an abort before the loop (the
+        // diverged entry), the edge shapes, nesting, and a loop
+        // in a `defn` body.
+        for source in [
+            "(loop [i 0] (recur (+ i 1)))",
+            "(loop [] (recur))",
+            "(defn f [x] x) (loop [i 0] (if (= i 0) (recur 1) (f 1 2)))",
+            "(defn f [x] x) (f 1 2) (loop [i 0] i)",
+            "(loop [i 0])",
+            "(loop [] 1)",
+            "(loop [i 0] (loop [j 0] (if (= i j) i (recur (+ j 1)))))",
+            "(defn f [n] (loop [i n] (if (= i 0) 0 (recur (+ i -1))))) (print (f 3))",
+        ] {
+            let ir = compile_ir(source);
+            assert!(ir.contains("loophead"), "{source}\n{ir}");
+        }
     }
 }

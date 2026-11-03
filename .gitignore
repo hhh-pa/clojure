@@ -1,5 +1,6 @@
 *.jar
 target
+target-geiger/
 clojure.iws
 clojure.ipr
 nbproject/private/

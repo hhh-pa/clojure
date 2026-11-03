@@ -24,25 +24,47 @@
 //! (That single-lock argument is the whole model: there is no lock
 //! ordering to check, so a loom model would be vacuous.)
 
+use std::ffi::CStr;
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::ptr;
 use std::sync::{Arc, LazyLock, Mutex};
 
+use clj_eval::coll::{nth_str, str_utf16_len};
+use clj_eval::core::nth_index;
 use clj_eval::{Evaluator, NativeError, NativeImpl, as_native, boot};
-use clj_value::{ThrowClass, Value, print_to_string};
+use clj_value::{Keyword, List, ThrowClass, Value, Vector, print_to_string};
 
 /// `clojure.core` names in [`Prim`](clj_eval::Prim) declaration order: the table
 /// index IS the discriminant (`prim as usize`). The order test
 /// below pins the pairing; each FFI differential test pins its
 /// shim to its native end to end.
-pub(crate) const PRIM_NAMES: [&str; 13] = [
-    "+", "-", "*", "quot", "<", "<=", ">", ">=", "=", "count", "nth", "get", "conj",
+pub(crate) const PRIM_NAMES: [&str; 19] = [
+    "+",
+    "-",
+    "*",
+    "quot",
+    "<",
+    "<=",
+    ">",
+    ">=",
+    "=",
+    "count",
+    "nth",
+    "get",
+    "conj",
+    "long",
+    "int",
+    "transient",
+    "conj!",
+    "assoc!",
+    "persistent!",
 ];
 
 /// The global runtime: one booted evaluator plus the resolved
 /// primitive implementations, indexed by [`Prim`](clj_eval::Prim) discriminant.
 struct Runtime {
     eval: Evaluator,
-    prims: [Arc<NativeImpl>; 13],
+    prims: [Arc<NativeImpl>; 19],
 }
 
 impl Runtime {
@@ -116,6 +138,54 @@ fn panic_text(payload: &(dyn std::any::Any + Send)) -> String {
     "internal error: native panicked".to_owned()
 }
 
+/// Fast path: `count` of a string in UTF-16 units through the
+/// shared scan cache — `None` unless `arg` is a string (the shim
+/// delegates everything else to the shared native, so arity and
+/// non-string errors stay shared, never reimplemented). Skips the
+/// mutex, the `Arc` clone, and the evaluator roundtrip; the units
+/// themselves are the shared [`str_utf16_len`].
+pub(crate) fn count_str_fast(arg: &Value) -> Option<Value> {
+    match arg {
+        Value::Str(s) => Some(Value::Int(str_utf16_len(s) as i64)),
+        _ => None,
+    }
+}
+
+/// Fast path: `nth` over a string — `None` unless `coll` is a
+/// string (the shim delegates). The index coerces FIRST through
+/// the shared [`nth_index`], exactly like the shared native (the
+/// nil-NPE quirk, tower truncation, and range errors all shared);
+/// the lookup is the shared [`nth_str`] (scan cache, `not-found`,
+/// and `StringIndexOutOfBounds` text all shared).
+pub(crate) fn nth_str_fast(
+    coll: &Value,
+    idx: &Value,
+    not_found: Option<&Value>,
+) -> Option<Result<Value, NativeError>> {
+    let Value::Str(s) = coll else {
+        return None;
+    };
+    Some(nth_index(idx).and_then(|n| nth_str(s, n, not_found)))
+}
+
+/// Borrow-test a box for the unboxed-i64 path: `1` when the box
+/// holds an `Int`, else `0` (the specialization guard — the
+/// `rt_is_int` shim borrows, this decides, so the predicate pins
+/// without crossing the FFI boundary).
+pub(crate) fn is_int_flag(value: &Value) -> u8 {
+    u8::from(matches!(value, Value::Int(_)))
+}
+
+/// Read an `Int` box as a raw `i64` (the unboxed-i64 entry — the
+/// `rt_unbox_int` shim borrows, this reads; non-`Int` degrades to
+/// `0`, the `rt_vec_push` precedent — guards make it unreachable).
+pub(crate) fn unbox_int(value: &Value) -> i64 {
+    match value {
+        Value::Int(n) => *n,
+        _ => 0,
+    }
+}
+
 /// The helper error line: `path:line:col: Class: message` (spans
 /// baked at the call site; the class/message come straight from
 /// the shared [`NativeError`]).
@@ -136,12 +206,142 @@ pub(crate) fn print_join(args: &[Value]) -> String {
         .join(" ")
 }
 
+/// Box a fresh owned value for the caller.
+pub(crate) fn give(value: Value) -> *mut Value {
+    Box::into_raw(Box::new(value))
+}
+
+/// The fallible-helper failure: print `path:line:col: Class:
+/// message` and return null (the generated code null-checks and
+/// exits 1).
+pub(crate) fn fail(path: &str, line: u32, col: u32, err: &NativeError) -> *mut Value {
+    eprintln!("{}", error_line(path, line, col, err));
+    ptr::null_mut()
+}
+
+/// The shared primitive body over owned values: call the shared
+/// native, box the result — or fail (the shims take the boxes,
+/// this decides; every `def_prim` shim funnels through here).
+pub(crate) fn prim_worker(
+    index: usize,
+    owned: Vec<Value>,
+    path: &str,
+    line: u32,
+    col: u32,
+) -> *mut Value {
+    match call_prim(index, owned) {
+        Ok(value) => give(value),
+        Err(err) => fail(path, line, col, &err),
+    }
+}
+
+/// `count` over owned values: a single string arg counts
+/// natively, every other shape delegates to the shared native
+/// (the shim takes the boxes and borrows the path; the owned
+/// boxes drop on the fast arm after the result computes).
+pub(crate) fn count_worker(owned: Vec<Value>, path: &str, line: u32, col: u32) -> *mut Value {
+    let fast = match owned.as_slice() {
+        [arg] => count_str_fast(arg),
+        _ => None,
+    };
+    match fast {
+        Some(value) => give(value),
+        None => prim_worker(9, owned, path, line, col),
+    }
+}
+
+/// `nth` over owned values: a string collection reads natively,
+/// every other shape delegates (same contract as
+/// [`count_worker`]; the `not-found` borrow rides the slice
+/// pattern, so no arity recheck).
+pub(crate) fn nth_worker(owned: Vec<Value>, path: &str, line: u32, col: u32) -> *mut Value {
+    let fast = match owned.as_slice() {
+        [coll, idx] => nth_str_fast(coll, idx, None),
+        [coll, idx, nf] => nth_str_fast(coll, idx, Some(nf)),
+        _ => None,
+    };
+    match fast {
+        Some(Ok(value)) => give(value),
+        Some(Err(err)) => fail(path, line, col, &err),
+        None => prim_worker(10, owned, path, line, col),
+    }
+}
+
+/// The `*command-line-args*` value over borrowed C strings:
+/// `argv[0]` already skipped by the shim; no entries is nil,
+/// else a list of lossy-decoded strings (the JVM shape).
+pub(crate) fn argv_worker(entries: &[&CStr]) -> *mut Value {
+    let mut items = Vec::new();
+    for entry in entries {
+        let text = entry.to_string_lossy().into_owned();
+        items.push(Value::Str(Arc::from(text.as_str())));
+    }
+    if items.is_empty() {
+        give(Value::Nil)
+    } else {
+        give(Value::List(List::from_vec(items)))
+    }
+}
+
+/// Push `elem` onto `old`: a vector grows in place, anything
+/// else degrades to a fresh single-element vector (a non-vector
+/// `vec` is a caller bug — the degrade keeps the line
+/// meaningful).
+pub(crate) fn vec_push_worker(old: Value, elem: Value) -> Value {
+    match old {
+        Value::Vector(items) => Value::Vector(items.push_back(elem)),
+        _ => Value::Vector(Vector::from_vec(vec![elem])),
+    }
+}
+
+/// One keyword box over decoded parts (`None` is unqualified).
+pub(crate) fn keyword_worker(name: &str, ns: Option<&str>) -> *mut Value {
+    give(Value::Keyword(Keyword::new(ns, name)))
+}
+
+/// One string box over a decoded byte string.
+pub(crate) fn str_worker(text: &str) -> *mut Value {
+    give(Value::Str(Arc::from(text)))
+}
+
+/// The `print` intrinsic over owned values: space-joined
+/// rendering with NO trailing newline, stdout flushed, nil.
+pub(crate) fn print_worker(owned: &[Value]) -> *mut Value {
+    print!("{}", print_join(owned));
+    let _ = std::io::Write::flush(&mut std::io::stdout());
+    give(Value::Nil)
+}
+
+/// Clone a borrowed box into a fresh owned box.
+pub(crate) fn clone_worker(value: &Value) -> *mut Value {
+    give((*value).clone())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{PRIM_NAMES, RUNTIME, call_prim, catch_panic, error_line, print_join};
+    use super::{
+        PRIM_NAMES, RUNTIME, argv_worker, call_prim, catch_panic, clone_worker, count_str_fast,
+        count_worker, error_line, is_int_flag, keyword_worker, nth_str_fast, nth_worker,
+        prim_worker, print_join, print_worker, str_worker, unbox_int, vec_push_worker,
+    };
     use clj_eval::{NativeError, Prim};
-    use clj_value::{ThrowClass, Value};
+    use clj_value::{ThrowClass, Value, print_to_string};
     use std::panic::AssertUnwindSafe;
+
+    /// Take a worker return back (frees the box).
+    ///
+    /// # Safety
+    ///
+    /// `ptr` must be a non-null box from a worker return.
+    unsafe fn unbox(ptr: *mut Value) -> Value {
+        unsafe { *Box::from_raw(ptr) }
+    }
+
+    /// Render a worker return to its `print` string (frees the box).
+    fn render(ptr: *mut Value) -> String {
+        let value = unsafe { unbox(ptr) };
+        print_to_string(&value)
+    }
 
     #[test]
     fn prim_names_follow_prim_order() {
@@ -159,6 +359,12 @@ mod tests {
             (Prim::Nth, "nth"),
             (Prim::Get, "get"),
             (Prim::Conj, "conj"),
+            (Prim::Long, "long"),
+            (Prim::Int, "int"),
+            (Prim::Transient, "transient"),
+            (Prim::ConjBang, "conj!"),
+            (Prim::AssocBang, "assoc!"),
+            (Prim::PersistentBang, "persistent!"),
         ];
         for (prim, name) in pairs {
             assert_eq!(
@@ -247,6 +453,174 @@ mod tests {
             std::panic::panic_any(7_i32);
         }));
         assert!(matches!(&out, Err(e) if e.message == "internal error: native panicked"));
+    }
+
+    #[test]
+    fn count_str_fast_pins_utf16_units() {
+        // Astral chars count 2 (surrogate pair); BMP 1.
+        assert_eq!(
+            format!(
+                "{:?}",
+                count_str_fast(&Value::Str("a𝄞é".into())).expect("strings hit")
+            ),
+            "Int(4)"
+        );
+        assert_eq!(
+            format!(
+                "{:?}",
+                count_str_fast(&Value::Str("".into())).expect("empty hits")
+            ),
+            "Int(0)"
+        );
+        assert!(count_str_fast(&Value::Int(1)).is_none());
+        assert!(count_str_fast(&Value::Nil).is_none());
+    }
+
+    #[test]
+    fn nth_str_fast_pins_chars_and_shared_errors() {
+        let at = |s: &str, i: Value, nf: Option<&Value>| {
+            nth_str_fast(&Value::Str(s.into()), &i, nf).expect("strings hit")
+        };
+        assert_eq!(
+            format!("{:?}", at("hello", Value::Int(1), None)),
+            "Ok(Char('e'))"
+        );
+        // The index coerces first (double truncation, like the
+        // shared native); `not-found` answers OOB and negatives.
+        assert_eq!(
+            format!("{:?}", at("hello", Value::Double(1.9), None)),
+            "Ok(Char('e'))"
+        );
+        let dflt = Value::Int(7);
+        assert_eq!(
+            format!("{:?}", at("hello", Value::Int(9), Some(&dflt))),
+            "Ok(Int(7))"
+        );
+        assert_eq!(
+            format!("{:?}", at("hello", Value::Int(-1), Some(&dflt))),
+            "Ok(Int(7))"
+        );
+        // Without `not-found` the shared `StringIndexOutOfBounds`
+        // text survives; a nil index trips the shared NPE quirk.
+        let err = at("hello", Value::Int(9), None).expect_err("OOB fails");
+        assert_eq!(
+            error_line("f.clj", 3, 9, &err),
+            "f.clj:3:9: java.lang.StringIndexOutOfBoundsException: Index 9 out of bounds for length 5"
+        );
+        let err = at("hello", Value::Nil, None).expect_err("nil index fails");
+        assert!(matches!(err.class, ThrowClass::NullPointerException));
+        assert!(nth_str_fast(&Value::Int(1), &Value::Int(0), None).is_none());
+    }
+
+    #[test]
+    fn is_int_flag_pins_ints() {
+        assert_eq!(is_int_flag(&Value::Int(0)), 1);
+        assert_eq!(is_int_flag(&Value::Int(i64::MAX)), 1);
+        assert_eq!(is_int_flag(&Value::Int(i64::MIN)), 1);
+        assert_eq!(is_int_flag(&Value::Str("1".into())), 0);
+        assert_eq!(is_int_flag(&Value::Double(1.0)), 0);
+        assert_eq!(is_int_flag(&Value::Bool(true)), 0);
+        assert_eq!(is_int_flag(&Value::Nil), 0);
+    }
+
+    #[test]
+    fn unbox_int_roundtrips_and_degrades() {
+        for n in [0, 1, -1, 42, i64::MAX, i64::MIN] {
+            assert_eq!(unbox_int(&Value::Int(n)), n);
+        }
+        assert_eq!(unbox_int(&Value::Str("x".into())), 0);
+        assert_eq!(unbox_int(&Value::Bool(true)), 0);
+        assert_eq!(unbox_int(&Value::Nil), 0);
+    }
+
+    #[test]
+    fn prim_worker_dispatches_and_fails_null() {
+        let out = prim_worker(
+            Prim::Add as usize,
+            vec![Value::Int(1), Value::Int(2)],
+            "f.clj",
+            3,
+            9,
+        );
+        assert_eq!(render(out), "3");
+        let out = prim_worker(Prim::Sub as usize, Vec::new(), "f.clj", 3, 9);
+        assert!(out.is_null());
+    }
+
+    #[test]
+    fn count_worker_fast_and_slow() {
+        let out = count_worker(vec![Value::Str("héllo".into())], "f.clj", 3, 9);
+        assert_eq!(render(out), "5");
+        let out = count_worker(vec![Value::Int(1), Value::Int(2)], "f.clj", 3, 9);
+        assert!(out.is_null());
+    }
+
+    #[test]
+    fn nth_worker_fast_slow_and_fail() {
+        let out = nth_worker(
+            vec![Value::Str("hello".into()), Value::Int(1)],
+            "f.clj",
+            3,
+            9,
+        );
+        assert_eq!(render(out), "e");
+        let out = nth_worker(
+            vec![Value::Str("hello".into()), Value::Int(9)],
+            "f.clj",
+            3,
+            9,
+        );
+        assert!(out.is_null());
+        let out = nth_worker(vec![Value::Int(1)], "f.clj", 3, 9);
+        assert!(out.is_null());
+    }
+
+    #[test]
+    fn argv_worker_shapes() {
+        // Post-skip entries (the shim drops argv[0]); empty is nil.
+        let a = c"a";
+        let b = c"b";
+        let bad = c"a\xffb";
+        assert_eq!(render(argv_worker(&[])), "nil");
+        assert_eq!(render(argv_worker(&[a, b])), "(a b)");
+        assert_eq!(render(argv_worker(&[bad])), "(a�b)");
+    }
+
+    #[test]
+    fn vec_push_worker_pushes_and_degrades() {
+        use clj_value::Vector;
+        let out = vec_push_worker(
+            Value::Vector(Vector::from_vec(vec![Value::Int(1)])),
+            Value::Int(2),
+        );
+        assert_eq!(print_to_string(&out), "[1 2]");
+        let out = vec_push_worker(Value::Int(9), Value::Int(1));
+        assert_eq!(print_to_string(&out), "[1]");
+    }
+
+    #[test]
+    fn keyword_worker_plain_and_namespaced() {
+        assert_eq!(render(keyword_worker("miss", None)), ":miss");
+        assert_eq!(render(keyword_worker("id", Some("user"))), ":user/id");
+    }
+
+    #[test]
+    fn str_worker_boxes() {
+        assert_eq!(render(str_worker("héllo")), "héllo");
+        assert_eq!(render(str_worker("")), "");
+    }
+
+    #[test]
+    fn clone_worker_copies() {
+        let out = clone_worker(&Value::Str("v".into()));
+        assert_eq!(render(out), "v");
+    }
+
+    #[test]
+    fn print_worker_renders_and_nils() {
+        // stdout goes to the test capture; the return is nil.
+        let out = print_worker(&[Value::Int(1), Value::Str("a b".into()), Value::Bool(true)]);
+        assert_eq!(render(out), "nil");
     }
 
     #[test]

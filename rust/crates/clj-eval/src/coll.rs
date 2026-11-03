@@ -1571,8 +1571,10 @@ fn str_char_at(s: &Arc<str>, idx: usize) -> Option<char> {
 }
 
 /// The UTF-16 length (`count` units), via the scan cache for
-/// big strings.
-fn str_utf16_len(s: &Arc<str>) -> usize {
+/// big strings. Shared with the `clj-rt` string fast path (same
+/// function, zero drift — the fast path skips only the
+/// mutex/evaluator roundtrip, never this).
+pub fn str_utf16_len(s: &Arc<str>) -> usize {
     if s.len() <= 256 {
         return s.encode_utf16().count();
     }
@@ -1583,7 +1585,11 @@ fn str_utf16_len(s: &Arc<str>) -> usize {
     }
 }
 
-fn nth_str(s: &Arc<str>, n: i32, not_found: Option<&Value>) -> Result<Value, NativeError> {
+/// `nth` over a string (chars; `StringIndexOutOfBounds` without
+/// `not-found`). Shared with the `clj-rt` string fast path (same
+/// function, zero drift — the caller coerces the index first via
+/// [`crate::core::nth_index`], exactly like [`native_nth`]).
+pub fn nth_str(s: &Arc<str>, n: i32, not_found: Option<&Value>) -> Result<Value, NativeError> {
     let found = usize::try_from(n)
         .ok()
         .and_then(|idx| str_char_at(s, idx).map(Value::Char));

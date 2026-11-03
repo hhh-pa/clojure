@@ -6,8 +6,9 @@
 // the terms of this license.
 // You must not remove this notice, or any other, from this software.
 
-//! S8D corpus replay: every `docs/t1174/s8-corpus` file, differentially
-//! `run` vs `build`+execute vs `jit` (rules in `MANIFEST.md`).
+//! S8D corpus replay: every `docs/t1174/s8-corpus` file plus every
+//! `docs/i214-jit-subset/corpus` file, differentially `run` vs
+//! `build`+execute vs `jit` (rules in each `MANIFEST.md`).
 //! Supported files must print byte-identical stdout on all paths
 //! (exit 0, empty stderr); error programs pin the abort stderr
 //! (true call-site spans, exit 1) on the `build` AND `jit` paths;
@@ -30,6 +31,13 @@ fn bin() -> Command {
 fn corpus_dir() -> PathBuf {
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../docs/t1174/s8-corpus");
     dir.canonicalize().expect("corpus dir")
+}
+
+/// The #214 subset-expansion corpus dir (same replay contract as
+/// [`corpus_dir`]; lives outside `docs/t1174`, which is frozen).
+fn corpus_i214_dir() -> PathBuf {
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../docs/i214-jit-subset/corpus");
+    dir.canonicalize().expect("i214 corpus dir")
 }
 
 fn tmp(name: &str) -> PathBuf {
@@ -170,6 +178,8 @@ fn jit_file(path: &std::path::Path, args: &[&str]) -> (Vec<u8>, Vec<u8>, i32) {
 fn supported_files_match_run_byte_for_byte() {
     // 00-05: both paths exit 0, empty stderr, stdout == the
     // `run`-seeded golden (which itself matches the JVM golden).
+    // `11-loop`/`12-when` replay from the i214 corpus instead
+    // (`i214_supported_files_match`).
     let corpus = corpus_dir();
     let files = [
         "00-empty",
@@ -303,21 +313,20 @@ fn unsupported_files_fail_build_but_run() {
     // AOT subset: {form} ({hint})`. Forms/hints are the S8A
     // rejection-table contract; spans read off the sources.
     let corpus = corpus_dir();
+    // (`02-loop`/`10-when` graduated out of this table: plain
+    // loops and `when` compile now. Their t1174 fixtures stay
+    // byte-frozen (t1174-empty-diff rule) but unreferenced; the
+    // live loop/when corpus — `11-loop`, `12-when`, and the
+    // still-unsupported destructuring `02-loop` — replays from
+    // the i214 corpus instead.)
     let cases: &[(&str, u32, u32, &str, &str)] = &[
         ("01-def", 1, 1, "def", "only defn defines in the AOT subset"),
-        (
-            "02-loop",
-            1,
-            8,
-            "loop",
-            "the AOT subset is loop-free; use direct self-recursion",
-        ),
         (
             "03-recur",
             1,
             27,
             "recur",
-            "recur is outside the subset; call the function by name",
+            "recur outside loop is outside the subset; call the function by name",
         ),
         (
             "04-try",
@@ -348,13 +357,6 @@ fn unsupported_files_fail_build_but_run() {
             1,
             "ns",
             "AOT programs are single-file, without namespaces",
-        ),
-        (
-            "10-when",
-            1,
-            1,
-            "when",
-            "macros are not expanded in the AOT subset",
         ),
         (
             "11-defmacro",
@@ -488,6 +490,67 @@ fn nesting_limit_reports_clean_diagnostic() {
     assert_eq!(jit_code, 1, "19: jit exit");
     assert!(jit_out.is_empty(), "19: jit stdout: {jit_out:?}");
     assert_eq!(jit_err, build_err, "19: jit stderr == build stderr");
+}
+
+#[test]
+fn i214_supported_files_match() {
+    // `11-loop`/`12-when` (same contract as
+    // `supported_files_match_run_byte_for_byte`, i214 corpus):
+    // all paths exit 0, empty stderr, stdout == the
+    // `run`-seeded golden (which itself matches the JVM golden).
+    let corpus = corpus_i214_dir();
+    for stem in ["11-loop", "12-when"] {
+        let path = corpus.join(format!("{stem}.clj"));
+        let golden = std::fs::read(corpus.join(format!("expected/{stem}.out"))).expect("golden");
+        let (run_out, run_err, run_code) = run_file(&path);
+        assert_eq!(run_code, 0, "{stem}: run exit");
+        assert!(run_err.is_empty(), "{stem}: run stderr: {run_err:?}");
+        assert_eq!(run_out, golden, "{stem}: run stdout vs golden");
+        let (build_code, build_err, exe_out, exe_err, exe_code) = build_and_run(stem, &path);
+        assert_eq!(build_code, 0, "{stem}: build exit, stderr: {build_err:?}");
+        assert!(build_err.is_empty(), "{stem}: build stderr: {build_err:?}");
+        assert_eq!(exe_code, 0, "{stem}: exe exit");
+        assert!(exe_err.is_empty(), "{stem}: exe stderr: {exe_err:?}");
+        assert_eq!(exe_out, golden, "{stem}: exe stdout vs golden");
+        let (jit_out, jit_err, jit_code) = jit_file(&path, &[]);
+        assert_eq!(jit_code, 0, "{stem}: jit exit");
+        assert!(jit_err.is_empty(), "{stem}: jit stderr: {jit_err:?}");
+        assert_eq!(jit_out, golden, "{stem}: jit stdout vs golden");
+    }
+}
+
+#[test]
+fn i214_unsupported_files_fail_build_but_run() {
+    // Destructuring `02-loop` (same contract as
+    // `unsupported_files_fail_build_but_run`, i214 corpus):
+    // `run` still works (exit 0, `.runout` stdout); `build`
+    // exits 1 naming `loop` (plain-symbol loops compile).
+    let corpus = corpus_i214_dir();
+    let (stem, line, col, form, hint) = (
+        "02-loop",
+        1,
+        8,
+        "loop",
+        "destructuring is outside the subset; bind plain symbols",
+    );
+    let path = corpus.join(format!("unsupported/{stem}.clj"));
+    let runout = std::fs::read(corpus.join(format!("expected/unsupported/{stem}.runout")))
+        .expect("runout golden");
+    let (run_out, run_err, run_code) = run_file(&path);
+    assert_eq!(run_code, 0, "{stem}: run exit");
+    assert!(run_err.is_empty(), "{stem}: run stderr: {run_err:?}");
+    assert_eq!(run_out, runout, "{stem}: run stdout vs golden");
+    let (build_code, build_err, _, _, _) = build_and_run(stem, &path);
+    assert_eq!(build_code, 1, "{stem}: build exit");
+    let want = format!(
+        "{}:{line}:{col}: unsupported form in AOT subset: {form} ({hint})\n",
+        path.display()
+    );
+    assert_eq!(lossy(&build_err), want, "{stem}: build stderr");
+    let (jit_out, jit_err, jit_code) = jit_file(&path, &[]);
+    assert_eq!(jit_code, 1, "{stem}: jit exit");
+    assert!(jit_out.is_empty(), "{stem}: jit stdout: {jit_out:?}");
+    assert_eq!(jit_err, build_err, "{stem}: jit stderr == build stderr");
 }
 
 /// Lossy text of captured bytes.
