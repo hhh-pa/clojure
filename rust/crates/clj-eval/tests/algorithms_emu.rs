@@ -2760,6 +2760,66 @@ fn call_depth_guard_leaves_deep_legal_code_alone() {
     );
 }
 
+/// Run `f` on a 512 KiB worker: depth behavior must not depend on
+/// the thread's stack size (#210/#220 — the call path grows its
+/// own segments, and the depth backstop trips by count).
+fn on_small_stack<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+    std::thread::Builder::new()
+        .stack_size(512 * 1024)
+        .spawn(f)
+        .expect("spawn small-stack worker")
+        .join()
+        .expect("worker panicked")
+}
+
+/// Deep-but-legitimate non-tail recursion returns like the JVM
+/// (#210): 20000 levels on a 512 KiB thread stack.
+#[test]
+fn deep_non_tail_recursion_returns_at_20k() {
+    let mut eval = boot();
+    eval.eval_source("(defn depth-f [n] (if (zero? n) 0 (inc (depth-f (dec n)))))")
+        .unwrap();
+    let out = on_small_stack(move || {
+        let vs = eval.eval_source("(depth-f 20000)").unwrap();
+        pr(&realized(&mut eval, vs.last().unwrap()))
+    });
+    assert_eq!(out, "20000");
+}
+
+/// Truly unbounded recursion throws the catchable
+/// `StackOverflowError` instead of aborting the process (#220):
+/// the `(power 2 -1)` shape (the exponent never reaches zero),
+/// caught via `Throwable`, with a healthy evaluator afterwards.
+#[test]
+fn unbounded_recursion_throws_catchable_stack_overflow() {
+    let mut eval = boot();
+    eval.eval_source("(defn depth-power [b e] (if (zero? e) 1 (* b (depth-power b (dec e)))))")
+        .unwrap();
+    let (caught, healthy) = on_small_stack(move || {
+        let caught = run(
+            &mut eval,
+            "(try (depth-power 2 -1) (catch Throwable e :caught))",
+        );
+        let healthy = run(&mut eval, "(depth-power 2 10)");
+        (caught, healthy)
+    });
+    assert_eq!(caught, ":caught");
+    assert_eq!(healthy, "1024");
+}
+
+/// `loop`/`recur` stays iterative to a million iterations (#210).
+#[test]
+fn loop_recur_stays_iterative_to_1m() {
+    let mut eval = boot();
+    assert_eq!(
+        run(
+            &mut eval,
+            "(loop [i 1000000 acc 0] (if (zero? i) acc (recur (dec i) (inc acc))))"
+        ),
+        "1000000"
+    );
+}
+
 // Batch F (#205): `BigDecimal` ctors box every surveyed shape
 // fresh, like `new` (literals/prints keep their own paths).
 #[test]
