@@ -1925,8 +1925,8 @@ mod tests {
                 [SubsetExpr::If { els, .. }] if matches!(els.as_ref(),
                     SubsetExpr::If { then, .. } if matches!(then.as_ref(), SubsetExpr::Recur(_))))
         ));
-        let prog = plan("(loop [i 0] (when (= i 0) (recur (+ i -1))))")
-            .expect("recur in when body plans");
+        let prog =
+            plan("(loop [i 0] (when (= i 0) (recur (+ i -1))))").expect("recur in when body plans");
         assert!(matches!(
             prog.main.as_slice(),
             [SubsetExpr::Loop { body, .. }] if matches!(body.as_slice(),

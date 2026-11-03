@@ -1,0 +1,1 @@
+{"rustc":13976775244188850736,"features":"","declared_features":"","target":0,"profile":0,"path":0,"deps":[[5150833351789356492,"build_script_build",false,16954130809028559603]],"local":[{"Precalculated":"0.30.1"}],"rustflags":["-C","linker=/tmp/214-loop-recur-llvm/bin/clang-wrap","-C","link-arg=-fuse-ld=lld"],"config":0,"compile_kind":0}
