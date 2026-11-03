@@ -315,7 +315,7 @@ fn run_compile_error_names_file_line_col() {
     assert_eq!(stdout(&out), "before\n");
     assert_eq!(
         stderr(&out),
-        format!("{fixture}:13:1: Syntax error compiling if: Too few arguments to if\n")
+        format!("{fixture}:12:1: Syntax error compiling if: Too few arguments to if\n")
     );
 }
 
