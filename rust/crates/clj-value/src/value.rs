@@ -252,6 +252,12 @@ pub struct Vector {
 /// reproduce; the harness canonicalizes map/set order away, so only
 /// syntax-quote expansion and rendering observe this.)
 ///
+/// The sidecar rides behind an `Arc` (writes go through
+/// `Arc::make_mut`, which clones the O(1) persistent header when
+/// shared): the rpds vector header is 40 bytes, and every `Value`
+/// pays the largest variant's size inline (#221 R1). Cloning a map
+/// stays allocation-free, like the `meta` arc beside it.
+///
 /// `hashy` reports `PersistentHashMap` instead of
 /// `PersistentArrayMap`: promotion is one-way and history-dependent
 /// (content alone cannot decide — `dissoc` never demotes and
@@ -269,7 +275,7 @@ pub struct Vector {
 pub struct Map {
     inner: RpdsMap,
     meta: Option<Arc<Map>>,
-    keys: RpdsVector,
+    keys: Arc<RpdsVector>,
     hashy: bool,
     sort: Option<SortSpec>,
     id: u64,
@@ -289,14 +295,16 @@ pub enum SortSpec {
 /// A persistent set of values (thread-safe rpds hash-trie set) with
 /// optional metadata. See [`List`]. `members` is the insertion-order
 /// sidecar (small JVM sets seq in insertion order); re-inserting a
-/// member is a no-op, like `conj`. `sort` is the FT6 sorted-set
+/// member is a no-op, like `conj`. Like [`Map`]'s `keys`, it rides
+/// behind an `Arc` so the 40-byte rpds header does not inflate
+/// every `Value` (#221 R1). `sort` is the FT6 sorted-set
 /// order (same contract as [`Map`]'s): `members` stays in
 /// comparator order and compare-0 duplicates collapse.
 #[derive(Clone, Debug)]
 pub struct Set {
     inner: RpdsSet,
     meta: Option<Arc<Map>>,
-    members: RpdsVector,
+    members: Arc<RpdsVector>,
     sort: Option<SortSpec>,
     id: u64,
 }
@@ -534,7 +542,7 @@ impl Map {
         let size = self.inner.size();
         let promote = !self.hashy && (size >= 64 || (size >= 8 && !matches!(k, Value::Keyword(_))));
         let mut keys = self.keys;
-        keys.push_back_mut(k.clone());
+        Arc::make_mut(&mut keys).push_back_mut(k.clone());
         self.inner.insert_mut(k, v);
         Self {
             inner: self.inner,
@@ -565,7 +573,7 @@ impl Map {
         Self {
             inner: self.inner,
             meta: self.meta,
-            keys,
+            keys: Arc::new(keys),
             hashy: self.hashy,
             sort: self.sort,
             id: next_map_id(),
@@ -627,7 +635,7 @@ impl Map {
         Self {
             inner,
             meta: self.meta,
-            keys,
+            keys: Arc::new(keys),
             hashy: self.hashy,
             sort: self.sort,
             id: next_map_id(),
@@ -711,7 +719,7 @@ impl Set {
             self
         } else {
             let mut members = self.members;
-            members.push_back_mut(v.clone());
+            Arc::make_mut(&mut members).push_back_mut(v.clone());
             self.inner.insert_mut(v);
             Self {
                 inner: self.inner,
@@ -754,7 +762,7 @@ impl Set {
         Self {
             inner: self.inner,
             meta: self.meta,
-            members,
+            members: Arc::new(members),
             sort: self.sort,
             id: next_set_id(),
         }
@@ -816,7 +824,7 @@ impl Set {
             kept.push_back_mut(v.clone());
             inner.insert_mut(v.clone());
         }
-        let members = kept;
+        let members = Arc::new(kept);
         Self {
             inner,
             meta: self.meta,
@@ -930,7 +938,7 @@ pub fn new_map() -> Map {
     Map {
         inner: RpdsMap::new_with_hasher_and_ptr_kind(FxBuildHasher::default()),
         meta: None,
-        keys: RpdsVector::new_sync(),
+        keys: Arc::new(RpdsVector::new_sync()),
         hashy: false,
         sort: None,
         id: next_map_id(),
@@ -943,7 +951,7 @@ pub fn new_set() -> Set {
     Set {
         inner: RpdsSet::new_with_hasher_with_ptr_kind(FxBuildHasher::default()),
         meta: None,
-        members: RpdsVector::new_sync(),
+        members: Arc::new(RpdsVector::new_sync()),
         sort: None,
         id: next_set_id(),
     }

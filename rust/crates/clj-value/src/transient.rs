@@ -428,12 +428,14 @@ static TRANSIENT_ID: AtomicU64 = AtomicU64::new(1);
 /// A first-class transient value: shared mutable buffer plus the
 /// source metadata (invisible to `meta`, restored by
 /// `persistent!`). Identity equality (same cell); only `counted?`
-/// among the type predicates.
+/// among the type predicates. The metadata rides behind an `Arc`:
+/// an inline `Map` would inflate this struct past 100 bytes, and
+/// every `Value` pays the largest variant's size inline (#221 R1).
 #[derive(Clone, Debug)]
 pub struct Transient {
     id: u64,
     cell: Arc<Mutex<TransientKind>>,
-    meta: Option<Map>,
+    meta: Option<Arc<Map>>,
 }
 
 impl Transient {
@@ -449,7 +451,7 @@ impl Transient {
         Self {
             id: TRANSIENT_ID.fetch_add(1, Ordering::Relaxed),
             cell: Arc::new(Mutex::new(kind)),
-            meta,
+            meta: meta.map(Arc::new),
         }
     }
 
@@ -468,7 +470,7 @@ impl Transient {
     /// The source metadata (restored by `persistent!`).
     #[must_use]
     pub fn source_meta(&self) -> Option<&Map> {
-        self.meta.as_ref()
+        self.meta.as_deref()
     }
 
     /// Lock the buffer (single-threaded use; poison is unreachable).
