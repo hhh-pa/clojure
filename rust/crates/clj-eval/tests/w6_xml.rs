@@ -9,7 +9,7 @@
 //! W6: `clojure.xml` smoke tests — parse/emit round-trips against the
 //! upstream-documented element shape (`:tag`/`:attrs`/`:content`).
 
-use clj_eval::{Evaluator, SourceError, boot, w6_runtime::install_xml_natives};
+use clj_eval::{Evaluator, SourceError, boot};
 use clj_value::{PrintOpts, pr_to_string};
 
 fn pr(v: &clj_value::Value) -> String {
@@ -43,8 +43,9 @@ fn uncaught(eval: &mut Evaluator, src: &str) -> String {
 }
 
 fn boot_xml() -> Evaluator {
+    // #217: no manual installer call — `require` installs the
+    // natives through the `load_one` arm (the production path).
     let mut eval = boot();
-    install_xml_natives(&mut eval);
     run(&mut eval, "(require '[clojure.xml :as xml])");
     eval
 }
@@ -189,4 +190,14 @@ fn parse_reads_files_and_streams() {
         r#"[:root "42"]"#
     );
     std::fs::remove_file(&path).ok();
+}
+
+/// #217: the production path — a bare boot with no manual
+/// installer call: `require` installs the natives, and `parse`
+/// exercises `__xml-scan*`.
+#[test]
+fn require_installs_natives_without_manual_call() {
+    let mut eval = boot();
+    run(&mut eval, "(require '[clojure.xml :as xml])");
+    assert_eq!(run(&mut eval, r#"(xml/tag (xml/parse "<a/>"))"#), ":a");
 }

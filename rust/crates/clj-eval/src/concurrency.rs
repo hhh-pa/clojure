@@ -455,7 +455,8 @@ fn native_remove_watch(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, N
 
 /// A taken delay: either the cached outcome or the fn to run (the
 /// cell now reads `Forcing` owned by this thread, so a re-entrant
-/// force errors instead of recursing while fellow threads wait).
+/// force throws the JVM's empty-message `StackOverflowError`
+/// instead of recursing while fellow threads wait).
 enum DelayTake {
     Done(Result<Value, Signal>),
     Thunk(Value),
@@ -465,7 +466,8 @@ enum DelayTake {
 /// `Forcing` behind; cached states restore themselves). A force
 /// owned by a fellow thread blocks on the cell condvar until it
 /// settles, then shares the outcome (like the JVM's synchronized
-/// force); only same-thread re-entry errors.
+/// force); only same-thread re-entry errors (with the JVM's
+/// empty-message `StackOverflowError`, #200).
 fn take_delay_thunk(eval: &mut Evaluator, delay: &Delay) -> DelayTake {
     let mut state = delay.lock();
     loop {
@@ -491,9 +493,12 @@ fn take_delay_thunk(eval: &mut Evaluator, delay: &Delay) -> DelayTake {
         DelayState::Forcing(owner) => {
             debug_assert_eq!(owner, me, "a fellow force waits above");
             *state = DelayState::Forcing(owner);
+            // #200: the JVM recurses into `StackOverflowError` here;
+            // the port raises its empty-message shape directly (real
+            // recursion would abort the Rust process).
             DelayTake::Done(Err(eval.throw(NativeError::new(
-                ThrowClass::IllegalStateException,
-                "Delay is already being forced".to_owned(),
+                ThrowClass::StackOverflowError,
+                String::new(),
             ))))
         }
         DelayState::Pending(f) => DelayTake::Thunk(f),

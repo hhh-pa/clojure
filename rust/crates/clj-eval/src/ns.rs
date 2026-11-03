@@ -1641,6 +1641,19 @@ fn push_ns_frame(eval: &mut Evaluator, depth: &mut Option<usize>) {
     }
 }
 
+/// Install the hidden natives behind the W6 ported-source
+/// namespaces (#217): `clojure.xml` and `clojure.core.server` are
+/// source files plus natives, so `load_one` installs first (a
+/// `:reload` no-op) and the source load below resolves the calls.
+fn install_w6_natives(eval: &mut Evaluator, lib: &Symbol) {
+    if sym_str(lib) == crate::w6_runtime::XML_NS {
+        crate::w6_runtime::install_xml_natives(eval);
+    }
+    if sym_str(lib) == crate::w6_runtime::SERVER_NS {
+        crate::w6_runtime::install_server_natives(eval);
+    }
+}
+
 /// `load-one`: load a lib's root resource, check the namespace when
 /// `need_ns`, then mark (core.clj `load-one` — the mark runs after
 /// the check, probe36 `req-mismatch-as`; callers always require).
@@ -1681,6 +1694,7 @@ pub(crate) fn load_one(
         mark_loaded(eval, lib)?;
         return Ok(());
     }
+    install_w6_natives(eval, lib);
     let root = root_resource(lib.name());
     load_paths(
         eval,

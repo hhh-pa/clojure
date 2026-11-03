@@ -3907,10 +3907,11 @@ fn static_identity_hashcode(args: &[Value]) -> Result<Value, NativeError> {
 
 /// `Character/isWhitespace` (issue #201 S6): the `(char)` and
 /// `(int)` overloads. Java's set is Rust's `White_Space` minus
-/// the non-breaking spaces (U+00A0, U+2007, U+202F) plus the
-/// controls U+001C–U+001F. Out-of-range ints and lone
-/// surrogates read false; anything else is the `Character`
-/// cast failure.
+/// NEL (U+0085 — `White_Space` but not Java whitespace, JVM
+/// oracle) and the non-breaking spaces (U+00A0, U+2007,
+/// U+202F), plus the controls U+001C–U+001F. Out-of-range ints
+/// and lone surrogates read false; anything else is the
+/// `Character` cast failure.
 fn static_character_is_whitespace(args: &[Value]) -> Result<Value, NativeError> {
     match args.len() {
         1 => Ok(Value::Bool(match &args[0] {
@@ -3960,17 +3961,19 @@ fn static_character_digit(args: &[Value]) -> Result<Value, NativeError> {
 /// The Java whitespace predicate (see `static_character_is_whitespace`).
 fn java_is_whitespace(c: char) -> bool {
     matches!(c, '\u{1C}'..='\u{1F}')
-        || (c.is_whitespace() && !matches!(c, '\u{A0}' | '\u{2007}' | '\u{202F}'))
+        || (c.is_whitespace() && !matches!(c, '\u{85}' | '\u{A0}' | '\u{2007}' | '\u{202F}'))
 }
 
 /// `LazilyPersistentVector/createOwning` (issue #201 S2): upstream
 /// wraps a `String[]` into an owning vector. Our `Pattern/.split`
 /// already returns a `Value::Vector`, so vectors pass through;
-/// anything else misses (no arrays flow here on any called path).
+/// arrays snapshot into an owned vector (`(class ...)` reads
+/// `PersistentVector`, like the JVM — oracle).
 fn static_lpv_create_owning(args: &[Value]) -> Result<Value, NativeError> {
     match args.len() {
         1 => match &args[0] {
             Value::Vector(_) => Ok(args[0].clone()),
+            Value::Array(a) => Ok(Value::Vector(Vector::from_vec(a.snapshot()))),
             _ => Err(crate::types::no_method(
                 "createOwning",
                 1,
@@ -5571,9 +5574,11 @@ fn surface_is_empty(eval: &mut Evaluator, v: &Value) -> Result<bool, NativeError
     }
 }
 
-/// `isBlank` (empty or all whitespace).
+/// `isBlank` (empty or all Java whitespace — the JDK reads
+/// `Character.isWhitespace`, not Unicode `White_Space`: NEL
+/// and the non-breaking spaces are non-blank, FS–US blank).
 fn is_blank(s: &str) -> bool {
-    s.chars().all(|c| c.is_whitespace())
+    s.chars().all(java_is_whitespace)
 }
 
 /// The `isRealized` flag (the IPending gate admits only delays,
@@ -6267,9 +6272,9 @@ fn gated_str_lower(target: &Value) -> Option<Result<Value, NativeError>> {
     }
 }
 
-/// `charAt` (UTF-16 units, like `length`; lone surrogates are
-/// unrepresentable — astral halves read U+FFFD, the slice-2 N5
-/// narrowing).
+/// `charAt` (UTF-16 units, like `length`; astral halves answer
+/// the unit as an int — a lone surrogate is no `Char`, so
+/// `(int (charAt ...))` reads the half, issue #201 S4).
 fn gated_str_charat(target: &Value, rest: &[Value]) -> Option<Result<Value, NativeError>> {
     match target {
         Value::Str(s) => Some(str_char_at(s, &rest[0])),
@@ -6285,11 +6290,16 @@ fn str_char_at(s: &str, v: &Value) -> Result<Value, NativeError> {
         .ok()
         .and_then(|i| units.get(i).copied());
     match unit {
-        Some(u) => Ok(Value::Char(
-            char::from_u32(u32::from(u)).unwrap_or('\u{FFFD}'),
-        )),
+        Some(u) => Ok(utf16_unit_value(u)),
         None => Err(sioobe_index(index, units.len())),
     }
+}
+
+/// A UTF-16 unit as a value: scalars read `Char`, surrogate
+/// halves the unit as an int (a lone surrogate is no `Char`,
+/// so `(int (charAt ...))` reads the half — issue #201 S4).
+fn utf16_unit_value(u: u16) -> Value {
+    char::from_u32(u32::from(u)).map_or(Value::Int(i64::from(u)), Value::Char)
 }
 
 /// `substring/1,2` (char-indexed — the `subs` twin, same

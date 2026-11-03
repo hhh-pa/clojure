@@ -453,7 +453,7 @@ fn subvector_conj(sv: &SubVectorValue, x: Value) -> Value {
 /// `ArrayManager` rule — split from [`conj_one`] for the
 /// complexity budget).
 fn conj_pv(eval: &mut Evaluator, p: &PrimitiveVector, x: Value) -> Result<Value, NativeError> {
-    Ok(Value::PrimitiveVector(p.push_back(
+    Ok(Value::PrimitiveVector(p.clone().push_back(
         crate::arrays::vector_coerce(eval, p.elem(), &x)?,
     )))
 }
@@ -513,13 +513,13 @@ fn conj_maplike(eval: &mut Evaluator, coll: &Value, x: &Value) -> Result<Value, 
 
 /// `assoc` on a vector (integer keys only; at-count appends;
 /// anything else is the empty `IndexOutOfBoundsException`).
-fn assoc_vector(x: &Vector, i: i64, v: Value) -> Result<Value, NativeError> {
+fn assoc_vector(x: Vector, i: i64, v: Value) -> Result<Value, NativeError> {
     if let Ok(n) = usize::try_from(i as i32) {
         if n < x.len() {
-            let out = x.set_nth(n, v).expect("index is below the length");
+            let out = x.set_nth_owned(n, v).expect("index is below the length");
             return Ok(Value::Vector(out));
         } else if n == x.len() {
-            return Ok(Value::Vector(x.clone().push_back(v)));
+            return Ok(Value::Vector(x.push_back(v)));
         }
     }
     Err(NativeError::new(
@@ -532,7 +532,7 @@ fn assoc_vector(x: &Vector, i: i64, v: Value) -> Result<Value, NativeError> {
 /// — `Vec.assocN`; at-count appends; OOB is the empty `IOOBE`).
 fn assoc_pv(
     eval: &mut Evaluator,
-    p: &PrimitiveVector,
+    p: PrimitiveVector,
     i: i64,
     v: Value,
 ) -> Result<Value, NativeError> {
@@ -599,14 +599,18 @@ fn assoc_maplike(coll: &Value, k: &Value, v: Value) -> Result<Value, NativeError
 
 /// `RT.assoc` one triple (`assoc`/`update`/`merge-with` share this;
 /// sorted maps position by comparator, FT6).
-fn assoc3(eval: &mut Evaluator, coll: &Value, k: &Value, v: Value) -> Result<Value, NativeError> {
+fn assoc3(eval: &mut Evaluator, coll: Value, k: &Value, v: Value) -> Result<Value, NativeError> {
+    // Owned `coll` (#215): multi-step callers (`assoc`, `replace`,
+    // `merge-with`) move their accumulator through, so each step
+    // after the first mutates uniquely-owned storage in place
+    // instead of path-copying per step.
     match coll {
         Value::Nil => Ok(Value::Map(new_map().insert(
             crate::lazy::realize_key(eval, k).map_err(signal_to_native)?,
             v,
         ))),
-        Value::Map(m) if m.is_sorted() => Ok(Value::Map(sorted_assoc_map(eval, m, k.clone(), v)?)),
-        Value::Map(m) => Ok(Value::Map(m.clone().insert(
+        Value::Map(m) if m.is_sorted() => Ok(Value::Map(sorted_assoc_map(eval, &m, k.clone(), v)?)),
+        Value::Map(m) => Ok(Value::Map(m.insert(
             crate::lazy::realize_key(eval, k).map_err(signal_to_native)?,
             v,
         ))),
@@ -637,20 +641,23 @@ fn assoc3(eval: &mut Evaluator, coll: &Value, k: &Value, v: Value) -> Result<Val
                     "Key must be integer".to_owned(),
                 ));
             };
-            let tmp = Vector::from_vec(vec![(**key).clone(), (**val).clone()]);
-            assoc_vector(&tmp, i, v)
+            let tmp = Vector::from_vec(vec![*key, *val]);
+            assoc_vector(tmp, i, v)
         }
         // Records assoc through their content map and stay records
         // (oracle `rec-assoc-type`, `h-assoc-existing`); structs
         // always stay structs (S12 oracles `sm-assoc-class`,
         // `sm-assoc-extra-class`); anything else host is not
         // associative (oracle `i-assoc`).
-        Value::HostType(_) => assoc_maplike(coll, k, v),
-        _ => {
-            if let Some(sv) = as_subvector(coll) {
+        Value::HostType(h) => {
+            let coll = Value::HostType(h);
+            assoc_maplike(&coll, k, v)
+        }
+        other => {
+            if let Some(sv) = as_subvector(&other) {
                 return assoc_subvector(sv, k, v);
             }
-            Err(cce_err(coll, "clojure.lang.Associative"))
+            Err(cce_err(&other, "clojure.lang.Associative"))
         }
     }
 }
@@ -784,12 +791,12 @@ fn merge2(eval: &mut Evaluator, x: &Value, y: &Value) -> Result<Value, NativeErr
 /// present keys combine through `f`).
 fn merge_kv(
     eval: &mut Evaluator,
-    m: &Value,
+    m: Value,
     k: Value,
     v: Value,
     f: &Value,
 ) -> Result<Value, NativeError> {
-    match lookup_present(eval, m, &k)? {
+    match lookup_present(eval, &m, &k)? {
         Some(mv) => {
             let combined = eval.call(f, &[mv, v]).map_err(signal_to_native)?;
             assoc3(eval, m, &k, combined)
@@ -821,7 +828,7 @@ fn merge_with3_map(
 ) -> Result<Value, NativeError> {
     let mut m = x.clone();
     for (k, v) in ym.iter() {
-        m = merge_kv(eval, &m, k.clone(), v.clone(), f)?;
+        m = merge_kv(eval, m, k.clone(), v.clone(), f)?;
     }
     Ok(m)
 }
@@ -859,7 +866,7 @@ fn merge_with3_fold_pairs(
 ) -> Result<Value, NativeError> {
     let mut m = x.clone();
     for (k, v) in pairs {
-        m = merge_kv(eval, &m, k, v, f)?;
+        m = merge_kv(eval, m, k, v, f)?;
     }
     Ok(m)
 }
@@ -884,7 +891,7 @@ fn merge_with3_seq_tail(
         let Value::MapEntry { key, val, .. } = head else {
             return Err(cce_err(&head, "java.util.Map$Entry"));
         };
-        m = merge_kv(eval, &m, (*key).clone(), (*val).clone(), f)?;
+        m = merge_kv(eval, m, (*key).clone(), (*val).clone(), f)?;
         cur = next_value(eval, &cur).map_err(signal_to_native)?;
     }
 }
@@ -932,14 +939,14 @@ fn update_in_up(
         let inner = lookup_present(eval, m, k)?.unwrap_or(Value::Nil);
         let (k2, ks2) = seq_first_next(eval, ks)?;
         let updated = update_in_up(eval, &inner, &k2, &ks2, f, args)?;
-        assoc3(eval, m, k, updated)
+        assoc3(eval, m.clone(), k, updated)
     } else {
         let old = lookup_present(eval, m, k)?.unwrap_or(Value::Nil);
         let mut call_args = Vec::with_capacity(args.len() + 1);
         call_args.push(old);
         call_args.extend(args.iter().cloned());
         let new = eval.call(f, &call_args).map_err(signal_to_native)?;
-        assoc3(eval, m, k, new)
+        assoc3(eval, m.clone(), k, new)
     }
 }
 
@@ -955,9 +962,9 @@ fn assoc_in_up(
         let inner = lookup_present(eval, m, k)?.unwrap_or(Value::Nil);
         let (k2, ks2) = seq_first_next(eval, ks)?;
         let updated = assoc_in_up(eval, &inner, &k2, &ks2, v)?;
-        assoc3(eval, m, k, updated)
+        assoc3(eval, m.clone(), k, updated)
     } else {
-        assoc3(eval, m, k, v.clone())
+        assoc3(eval, m.clone(), k, v.clone())
     }
 }
 
@@ -1179,7 +1186,7 @@ fn native_conj(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErro
 
 fn native_assoc(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_min_arity("clojure.core/assoc", args, 3)?;
-    let mut acc = assoc3(eval, &args[0], &args[1], args[2].clone())?;
+    let mut acc = assoc3(eval, args[0].clone(), &args[1], args[2].clone())?;
     for pair in args[3..].chunks(2) {
         if pair.len() != 2 {
             return Err(NativeError::new(
@@ -1188,7 +1195,7 @@ fn native_assoc(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErr
                     .to_owned(),
             ));
         }
-        acc = assoc3(eval, &acc, &pair[0], pair[1].clone())?;
+        acc = assoc3(eval, acc, &pair[0], pair[1].clone())?;
     }
     Ok(acc)
 }
@@ -1814,7 +1821,7 @@ fn native_update(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeEr
     call_args.push(old);
     call_args.extend(args[3..].iter().cloned());
     let new = eval.call(&args[2], &call_args).map_err(signal_to_native)?;
-    assoc3(eval, &args[0], &args[1], new)
+    assoc3(eval, args[0].clone(), &args[1], new)
 }
 
 fn native_update_in(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
@@ -2274,7 +2281,7 @@ fn pop_list(l: &List) -> Result<Value, NativeError> {
 }
 
 /// `pop` over a vector (empty vectors throw).
-fn pop_vector(x: &Vector) -> Result<Value, NativeError> {
+fn pop_vector(x: Vector) -> Result<Value, NativeError> {
     if x.is_empty() {
         return Err(NativeError::new(
             ThrowClass::IllegalStateException,
@@ -2282,13 +2289,13 @@ fn pop_vector(x: &Vector) -> Result<Value, NativeError> {
         ));
     }
     Ok(Value::Vector(
-        x.drop_last().expect("non-empty vector has a tail"),
+        x.drop_last_owned().expect("non-empty vector has a tail"),
     ))
 }
 
 /// `pop` over a primitive vector (stays typed; empty pops throw
 /// like vectors).
-fn pop_pv(p: &PrimitiveVector) -> Result<Value, NativeError> {
+fn pop_pv(p: PrimitiveVector) -> Result<Value, NativeError> {
     if p.is_empty() {
         return Err(NativeError::new(
             ThrowClass::IllegalStateException,
@@ -2322,8 +2329,8 @@ fn native_pop(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErro
         Value::Nil => Ok(Value::Nil),
         Value::List(l) => pop_list(l),
         Value::Vector(x) if is_queue_vec(x) => Ok(pop_queue(x)),
-        Value::Vector(x) => pop_vector(x),
-        Value::PrimitiveVector(p) => pop_pv(p),
+        Value::Vector(x) => pop_vector(x.clone()),
+        Value::PrimitiveVector(p) => pop_pv(p.clone()),
         // Popping an entry answers its 1-vector (Oracle FX2
         // `peek-pop`, `pop-class`).
         Value::MapEntry { key, .. } => Ok(Value::Vector(Vector::from_vec(vec![(**key).clone()]))),
@@ -2396,7 +2403,7 @@ fn native_replace(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeE
         let k = Value::Int(i as i64);
         let x = lookup_present(eval, &acc, &k)?.unwrap_or(Value::Nil);
         if let Some((_, v)) = find_entry(eval, smap, &x)? {
-            acc = assoc3(eval, &acc, &k, v)?;
+            acc = assoc3(eval, acc, &k, v)?;
         }
     }
     Ok(acc)

@@ -177,12 +177,28 @@ pub struct Evaluator {
 }
 
 /// Pending closure applications past this point throw the
-/// catchable `StackOverflowError` (#205): JVM-plausible (real
-/// stacks hold thousands of Clojure frames), far above
-/// legitimate suite depths (hundreds), and — at the measured
-/// worst case of ~20 KiB per heavy frame — below real
-/// overflow on the 256 MiB algorithms worker (~100 MiB).
-pub(crate) const MAX_CALL_DEPTH: usize = 5_000;
+/// catchable `StackOverflowError` (#205, raised #220): the
+/// JVM runs ~10-20k deep, so the backstop sits at 2.5x the
+/// acceptance depth — far above legitimate suite depths
+/// (hundreds) while bounding the grown segments' transient
+/// memory (~440 MiB release / ~1 GiB dev, measured at the trip
+/// point, freed on the unwind). The apply path grows its own
+/// segments
+/// ([`STACK_RED_ZONE`]), so native overflow can no longer
+/// precede this guard on any thread stack size.
+pub(crate) const MAX_CALL_DEPTH: usize = 50_000;
+
+/// The apply path's stack red zone (#210): `maybe_grow` moves
+/// the call onto a fresh heap segment when fewer than this many
+/// bytes remain. Measured total per-level cost (native + heap)
+/// is ~8 KiB (release) to ~20 KiB (dev), so 1 MiB holds any
+/// single level's native frames with 40x+ margin.
+const STACK_RED_ZONE: usize = 1024 * 1024;
+
+/// Fresh-segment size behind [`STACK_RED_ZONE`]: 8 MiB matches
+/// the main-thread stack, so deep runs switch segments about as
+/// often as a native-sized stack would exhaust.
+const STACK_SEGMENT: usize = 8 * 1024 * 1024;
 
 /// A `defmacro` definition's parts (bundles `eval_defmacro`'s
 /// parameters).
@@ -2113,7 +2129,12 @@ impl Evaluator {
         // instead of aborting the process. Every unbounded
         // application path (closures, host methods, multimethod
         // targets, forced thunks) funnels through here; `loop` /
-        // `recur` never touch the counter (they iterate).
+        // `recur` never touch the counter (they iterate). The
+        // frame runs on a grown segment when the native stack
+        // runs low (#210), so the backstop trips by count on
+        // every thread stack size — and `maybe_grow` inlines
+        // when stack suffices, keeping the hot path
+        // allocation-free.
         if self.call_depth >= MAX_CALL_DEPTH {
             return Err(self.throw(NativeError::new(
                 ThrowClass::StackOverflowError,
@@ -2121,7 +2142,9 @@ impl Evaluator {
             )));
         }
         self.call_depth += 1;
-        let result = self.apply_closure_frame(closure, args);
+        let result = stacker::maybe_grow(STACK_RED_ZONE, STACK_SEGMENT, || {
+            self.apply_closure_frame(closure, args)
+        });
         self.call_depth -= 1;
         result
     }

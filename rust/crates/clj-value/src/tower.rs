@@ -1028,20 +1028,23 @@ fn div_round(numer: &BigInt, denom: &BigInt, mc: &MathContext) -> Result<BigDec,
     // Candidate scale with one guard digit: the quotient then
     // has `p` or `p+1` digits (normalized below).
     let scale = p as i64 - (dec_len(&n) as i64 - dec_len(&d) as i64);
-    let (q, r) = divmod_scale(&n, &d, scale);
-    let (q, r, scale) = grow_quotient(q, r, &d, scale, p);
+    let (q, r, scale) = guard_quotient(&n, &d, scale, p);
     round_quotient(q, r, scale, mc, neg)
 }
 
-/// `(n * 10^scale) divmod d` (negative scales multiply the
-/// divisor instead).
-fn divmod_scale(n: &BigInt, d: &BigInt, scale: i64) -> (BigInt, BigInt) {
+/// The `p+1`-digit guard quotient: `(n * 10^scale) divmod d`
+/// grown one digit at a time. Negative candidate scales shift
+/// the divisor instead of the dividend — and the grow loop
+/// divides remainders by that SAME shifted divisor (dividing
+/// by the unshifted `d` swallows ~-scale digits in one step
+/// and the quotient explodes — issue #219).
+fn guard_quotient(n: &BigInt, d: &BigInt, scale: i64, p: usize) -> (BigInt, BigInt, i64) {
     if scale >= 0 {
         let num = n * pow10(u32_scale(scale));
-        (&num / d, &num % d)
+        grow_quotient(&num / d, &num % d, d, scale, p)
     } else {
         let den = d * pow10(u32_scale(scale.saturating_neg()));
-        (n / &den, n % &den)
+        grow_quotient(n / &den, n % &den, &den, scale, p)
     }
 }
 
@@ -1488,10 +1491,80 @@ mod tests {
         assert!(tiny.contains("14142135623730950"), "{tiny}");
         // The fallback itself, pinned directly: double
         // overflow guesses 10^half-magnitude (Newton past
-        // this point is the div-round extreme-scale issue).
+        // this point rides the #219 guard-quotient fix).
         assert_eq!(
             BigDec::sqrt_guess(&BigDec::parse("2E+400").unwrap()).to_bigdec_string(),
             "1E+200"
+        );
+    }
+
+    /// `sqrt(mc)` (#219): extreme-scale roots land correctly
+    /// rounded (JDK-verified full expansions — Newton
+    /// divisions shift the divisor at these magnitudes).
+    #[test]
+    fn sqrt_extreme_scale_matches_jdk() {
+        let mc = MathContext::new(50, RoundingMode::HalfEven);
+        for (text, want) in [
+            (
+                "2E+400",
+                "1.4142135623730950488016887242096980785696718753769E+200",
+            ),
+            (
+                "2E+310",
+                "1.4142135623730950488016887242096980785696718753769E+155",
+            ),
+            (
+                "1.5E+320",
+                "1.2247448713915890490986420373529456959829737403283E+160",
+            ),
+        ] {
+            assert_eq!(
+                BigDec::parse(text)
+                    .unwrap()
+                    .sqrt_mc(&mc)
+                    .unwrap()
+                    .to_bigdec_string(),
+                want,
+                "{text}"
+            );
+        }
+    }
+
+    /// Guard-digit division (#219): a negative candidate scale
+    /// shifts the divisor, and the grow loop divides remainders
+    /// by that SAME shifted divisor (JDK-verified — the
+    /// unshifted divisor explodes the quotient past precision).
+    #[test]
+    fn div_negative_scale_matches_jdk() {
+        // The Newton step that diverged `sqrt(2E+310)`: a
+        // 60-digit divisor at extreme scale under precision 60.
+        let work = MathContext::new(60, RoundingMode::HalfEven);
+        assert_eq!(
+            BigDec::parse("2E+310")
+                .unwrap()
+                .div_mc(
+                    &BigDec::parse(
+                        "1.41666666666666666666666666666666666666666666666666666666666E+155"
+                    )
+                    .unwrap(),
+                    &work
+                )
+                .unwrap()
+                .to_bigdec_string(),
+            "1.41176470588235294117647058823529411764705882352941176470589E+155"
+        );
+        // The same arm through user divide (short divisor,
+        // wide magnitude gap).
+        assert_eq!(
+            BigDec::parse("1E+100")
+                .unwrap()
+                .div_mc(
+                    &BigDec::parse("3").unwrap(),
+                    &MathContext::new(10, RoundingMode::HalfUp)
+                )
+                .unwrap()
+                .to_bigdec_string(),
+            "3.333333333E+99"
         );
     }
 }

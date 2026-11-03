@@ -17,6 +17,17 @@ regex = "1"
 # Stack-inline call-arg buffers (already in the lockfile via rpds:
 # zero new crates compiled).
 smallvec = "1"
+# Segmented-stack growth for the apply path (#210/#220): deep
+# calls run on heap segments instead of overflowing the native
+# stack, so depth is bounded by the `MAX_CALL_DEPTH` backstop (a
+# catchable `StackOverflowError`), never by the thread's stack
+# size. `maybe_grow` runs inline when stack suffices (a TLS read
+# plus a compare), so the hot path stays allocation-free.
+stacker = "0.1"
+# Pinned to 0.1.27 (MSRV 1.85): psm 0.1.28+ pulls the
+# ar_archive_writer/object build chain and 0.1.32 declares
+# rustc 1.88. Revisit if psm declares an MSRV like rustyline.
+psm = "=0.1.27"
 
 [lints]
 workspace = true

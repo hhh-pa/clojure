@@ -178,9 +178,10 @@ plus one architectural pin:
   with-in-str`) expand on the JVM but stay identity here —
   the analyzer consumes them directly, so expansion would
   destroy the forms it matches on.
-- **Safety pins.** Re-entrant `force` on a `delay` raises
-  `IllegalStateException` (the JVM recurses to
-  `StackOverflowError`, which would abort a Rust process).
+- **Safety pins.** Re-entrant `force` on a `delay` raises the
+  JVM's empty-message `StackOverflowError` directly (#200 —
+  raised, never recursed into, since a Rust stack overflow
+  would abort the process).
 - **Namespaces.** `ns-imports` keys are byte-equal to the
   oracle (sorted; fresh namespaces seed the 106 JVM default
   imports flat per namespace, #74), but the values are

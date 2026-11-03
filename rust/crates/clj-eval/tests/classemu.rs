@@ -4395,6 +4395,11 @@ fn surface_gates() {
         ("(.. \"  \" (isBlank))", "true"),
         ("(.. \"a\" (isBlank))", "false"),
         ("(.. \" \\t\\n\" (isBlank))", "true"),
+        // `isBlank` reads `Character.isWhitespace`: NEL and
+        // NBSP are non-blank, FS is blank (JVM oracle).
+        ("(.. \"\\u0085\" (isBlank))", "false"),
+        ("(.. \"\\u00a0\" (isBlank))", "false"),
+        ("(.. \"\\u001c\" (isBlank))", "true"),
         ("(.. (first {:a 1}) (isEmpty))", "false"),
         ("(.. (map inc [1]) (isEmpty))", "false"),
         ("(.. (cons 1 nil) (isEmpty))", "false"),
@@ -4572,8 +4577,12 @@ fn surface_strings() {
         ("(.. \"abc\" (charAt (biginteger 1)))", "\\b"),
         ("(.. \"abc\" (charAt 1.5M))", "\\b"),
         ("(.. \"abc\" (charAt 3/2))", "\\b"),
-        // Astral halves read U+FFFD (slice-2 N5).
-        ("(.. \"😀\" (charAt 0))", "\\\u{fffd}"),
+        // Astral halves answer the UTF-16 unit as an int (a
+        // lone surrogate is no `Char`; #201 S4 — the slice-2 N5
+        // U+FFFD narrowing stays for string-building paths).
+        ("(.. \"😀\" (charAt 0))", "55357"),
+        ("(int (.. \"𝄞x\" (charAt 0)))", "55348"),
+        ("(int (.. \"𝄞x\" (charAt 1)))", "56606"),
         // The JDK `substring` doc examples.
         ("(.. \"hamburger\" (substring 4 8))", "\"urge\""),
         ("(.. \"smiles\" (substring 1 5))", "\"mile\""),
@@ -4963,6 +4972,12 @@ fn character_is_whitespace_201() {
         "false"
     );
     assert_eq!(run(&mut eval, "(Character/isWhitespace (char 28))"), "true");
+    // NEL is `White_Space` but not Java whitespace (JVM oracle;
+    // `str/trim` keeps it — #201 S6).
+    assert_eq!(
+        run(&mut eval, "(Character/isWhitespace (char 133))"),
+        "false"
+    );
     assert_eq!(run(&mut eval, "(Character/isWhitespace 1114112)"), "false");
 }
 
@@ -4975,6 +4990,23 @@ fn lpv_create_owning_201() {
             "(clojure.lang.LazilyPersistentVector/createOwning [\"x\" \"y\"])"
         ),
         "[\"x\" \"y\"]"
+    );
+    // Arrays snapshot into an owned vector (JVM `.split`
+    // answers `String[]`); the class reads `PersistentVector`
+    // on both shapes (JVM oracle).
+    assert_eq!(
+        run(
+            &mut eval,
+            "(clojure.lang.LazilyPersistentVector/createOwning (into-array Object [\"a\" \"b\"]))"
+        ),
+        "[\"a\" \"b\"]"
+    );
+    assert_eq!(
+        run(
+            &mut eval,
+            "(class (clojure.lang.LazilyPersistentVector/createOwning (into-array Object [])))"
+        ),
+        "clojure.lang.PersistentVector"
     );
     // A non-vector arg misses the member (uniform no-method).
     assert_eq!(
