@@ -29,7 +29,7 @@ use clj_value::{
 use crate::core::{Reduced, cce_err, is_lazy_seq_str, print_opts, str_of_one};
 use crate::error::{NativeError, Signal, jvm_class_of, map_class_of, set_class_of};
 use crate::eval::Evaluator;
-use crate::ext::{Closure, NativeFn, NsHandle, munge};
+use crate::ext::{Closure, FastArith, NativeFn, NsHandle, munge};
 use crate::io::{EmissionGuard, Writer, check_writer, write_to_writer};
 use crate::lazy::{PendingSeq, realize_deep};
 use crate::multi::invoke_multifn;
@@ -1568,6 +1568,7 @@ fn method_fn_value(eval: &mut Evaluator, display: &str, f: NativeFnPtr) -> Value
         func,
         owned: None,
         meta: None,
+        fast: FastArith::None,
     }))
 }
 
@@ -1865,6 +1866,7 @@ mod tests {
             func,
             owned: None,
             meta: Some(with_type),
+            fast: FastArith::None,
         };
         let stripped = strip_type_meta(&Value::Extension(Arc::new(native)));
         assert!(matches!(stripped, Value::Extension(_)));

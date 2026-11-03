@@ -30,7 +30,7 @@ use clj_value::{
 
 use crate::error::{NativeError, jvm_class_of};
 use crate::eval::Evaluator;
-use crate::ext::NativeFn;
+use crate::ext::{FastArith, NativeFn};
 use crate::lazy::{
     as_pending, as_realized, as_subvector, collect_all, equiv_vals, is_counted_seq, is_seq_value,
     realize_deep,
@@ -2036,6 +2036,7 @@ fn default_reader_fn(
         }),
         owned: None,
         meta: None,
+        fast: FastArith::None,
     }))
 }
 
@@ -4870,6 +4871,38 @@ fn native_bit_test(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nativ
     Ok(Value::Bool(x & 1i64.wrapping_shl(n as u32) != 0))
 }
 
+/// Genuine core arith/compare natives by fn pointer (the
+/// direct-call inline tags — see [`FastArith`]).
+const FAST_ARITH_TABLE: &[(NativeFnPtr, FastArith)] = &[
+    (native_add, FastArith::Add),
+    (native_sub, FastArith::Sub),
+    (native_mul, FastArith::Mul),
+    (native_lt, FastArith::Lt),
+    (native_lte, FastArith::Lte),
+    (native_gt, FastArith::Gt),
+    (native_gte, FastArith::Gte),
+    (native_inc, FastArith::Inc),
+    (native_dec, FastArith::Dec),
+];
+
+/// The inline integer op for an installing fn pointer (`None`
+/// for everything else — closures, test doubles, and fakes
+/// installed under arith names never match). Identity is the
+/// code address ([`std::ptr::fn_addr_eq`], never the name): a
+/// match means `f` shares the genuine fn's machine code, and
+/// code-identical functions behave identically (identical-code
+/// folding only equates equal bytes — address _equality_ stays
+/// a behavioral claim, which is all the tag asserts; every
+/// non-`Int` operand delegates to the installed `func` anyway).
+/// A missed match (an address the toolchain duplicated) merely
+/// runs the general snapshot call.
+pub(crate) fn fast_arith_for(f: NativeFnPtr) -> FastArith {
+    FAST_ARITH_TABLE
+        .iter()
+        .find_map(|(g, op)| std::ptr::fn_addr_eq(f, *g).then_some(*op))
+        .unwrap_or(FastArith::None)
+}
+
 /// The S5D scalar natives installed into `clojure.core`.
 pub(crate) const CORE_NATIVES: &[(&str, NativeFnPtr)] = &[
     ("+", native_add),
@@ -5295,5 +5328,28 @@ mod tests {
             "merged root is a map carrying my/tag"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn fast_arith_for_tags_genuine_fns_only() {
+        use crate::ext::FastArith;
+        assert_eq!(fast_arith_for(native_add), FastArith::Add);
+        assert_eq!(fast_arith_for(native_sub), FastArith::Sub);
+        assert_eq!(fast_arith_for(native_mul), FastArith::Mul);
+        assert_eq!(fast_arith_for(native_lt), FastArith::Lt);
+        assert_eq!(fast_arith_for(native_lte), FastArith::Lte);
+        assert_eq!(fast_arith_for(native_gt), FastArith::Gt);
+        assert_eq!(fast_arith_for(native_gte), FastArith::Gte);
+        assert_eq!(fast_arith_for(native_inc), FastArith::Inc);
+        assert_eq!(fast_arith_for(native_dec), FastArith::Dec);
+        // Neighbors and lookalike fakes never tag.
+        assert_eq!(fast_arith_for(native_zero), FastArith::None);
+        fn fake(_eval: &mut Evaluator, _args: &[Value]) -> Result<Value, NativeError> {
+            Ok(Value::Nil)
+        }
+        assert_eq!(fast_arith_for(fake), FastArith::None);
+        // The fake itself runs (its body counts as covered code).
+        let mut eval = Evaluator::new_bare("user");
+        assert!(matches!(fake(&mut eval, &[]), Ok(Value::Nil)));
     }
 }
