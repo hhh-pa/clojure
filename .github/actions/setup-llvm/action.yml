@@ -68,13 +68,29 @@ runs:
         set -euo pipefail
         sudo apt-get update
         sudo apt-get install -y wget gnupg lsb-release
-        # Retry: apt.llvm.org flakes from GitHub runners (wget exit
-        # 4 reds whole runs; seen 5x in one day). curl --retry
-        # matches the Windows step below.
-        curl -sSLf --retry 5 --retry-all-errors -o llvm.sh https://apt.llvm.org/llvm.sh
+        # apt.llvm.org DNS flakes badly from GitHub runners (Nov 2026:
+        # hours-long Couldn't-resolve outages red whole runs in
+        # setup). Bridge short outages with retries; if the
+        # runner's resolver is still failing after ~2 min, fall
+        # back to public resolvers for the rest of this step (the
+        # llvm.sh apt pulls below need the same host), then
+        # restore the runner file.
+        sudo cp /etc/resolv.conf /tmp/resolv.conf.bak
+        for i in $(seq 1 30); do
+          if curl -sSLf -o llvm.sh https://apt.llvm.org/llvm.sh && test -s llvm.sh; then
+            break
+          fi
+          if [ "$i" = 6 ]; then
+            echo "apt.llvm.org still unresolvable; falling back to public DNS"
+            printf 'nameserver 8.8.8.8\nnameserver 1.1.1.1\n' | sudo tee /etc/resolv.conf
+          fi
+          rm -f llvm.sh
+          sleep 20
+        done
         test -s llvm.sh
         chmod +x llvm.sh
         sudo ./llvm.sh "${{ inputs.version }}"
+        sudo cp /tmp/resolv.conf.bak /etc/resolv.conf
         # llvm-22-dev brings llvm-config, CMake files, headers, and
         # static archives; the lib*-dev companions satisfy whatever
         # llvm-config --libs/--system-libs reports for static linking
