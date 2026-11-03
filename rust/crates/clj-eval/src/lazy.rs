@@ -3467,9 +3467,7 @@ pub(crate) fn next_value(eval: &mut Evaluator, v: &Value) -> Result<Value, Signa
 /// advances (like the JVM's dead locals) instead of accumulating
 /// behind the head held in `args` (#221).
 pub(crate) fn take_walk_coll(args: &mut SmallVec<[Value; 4]>, idx: usize) -> Value {
-    let coll = args[idx].clone();
-    args[idx] = Value::Nil;
-    coll
+    std::mem::replace(&mut args[idx], Value::Nil)
 }
 
 /// Realize every item (for `apply` spreads, `vec`, `sort`,
