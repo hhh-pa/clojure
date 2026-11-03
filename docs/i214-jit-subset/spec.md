@@ -93,11 +93,15 @@ reallocated stack per iteration — a 1M-iteration loop overflowed the 8 MB
 stack. Argv allocas are hoisted to the entry block (dominate all uses,
 allocate once per function); a 500K-iteration exact-sum JIT test pins it.
 
-Corpus: new `11-loop` case (countdown, 1..100 accumulation, rebind-order
-swap, nesting, `defn` countdown) replays byte-identical across
-run/AOT/JIT/JVM; `12-when` graduates the old unsupported `10-when`
-(interpreter == JVM 1.13.0-alpha10 byte-for-byte); `02-loop` leaves the
-unsupported set.
+Corpus (`corpus/`, replayed by the `i214_*` tests in
+`rust/tests/build_corpus.rs`): new `11-loop` case (countdown, 1..100
+accumulation, rebind-order swap, nesting, `defn` countdown) replays
+byte-identical across run/AOT/JIT/JVM; `12-when` graduates the old
+unsupported `10-when` (interpreter == JVM 1.13.0-alpha10 byte-for-byte);
+`unsupported/02-loop` keeps the still-unsupported destructuring loop
+(plain-symbol loops compile). The `docs/t1174` fixtures stay byte-frozen
+— its `02-loop`/`10-when` files are superseded but kept by the
+t1174-empty-diff rule.
 
 ## 5. Slice D: `clj-rt` fast paths + unboxing spike
 
