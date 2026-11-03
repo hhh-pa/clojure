@@ -1,10 +1,9 @@
-// Copyright (c) Rich Hickey. All rights reserved.
+// Copyright (c) Hao Hu. All rights reserved.
 // The use and distribution terms for this software are covered by the
 // Eclipse Public License 1.0 (http://opensource.org/licenses/eclipse-1.0.php)
 // which can be found in the file epl-v10.html at the root of this distribution.
 // By using this software in any fashion, you are agreeing to be bound by
 // the terms of this license.
-// You must not remove this notice, or any other, from this software.
 
 //! CLI contract tests: help/version/usage codes (slice S1 shell) plus
 //! the S7A `eval`/`run` wiring (spec 1.3/1.4, pins P4/P5/P7).
@@ -316,7 +315,7 @@ fn run_compile_error_names_file_line_col() {
     assert_eq!(stdout(&out), "before\n");
     assert_eq!(
         stderr(&out),
-        format!("{fixture}:13:1: Syntax error compiling if: Too few arguments to if\n")
+        format!("{fixture}:12:1: Syntax error compiling if: Too few arguments to if\n")
     );
 }
 

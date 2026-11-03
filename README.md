@@ -15,6 +15,10 @@ workspace below is the sole implementation.
   against JVM Clojure (same input, same printed output).
 - Codegen: LLVM only, via inkwell 0.10.0 (`llvm22-1`, LLVM 22.1.8).
 - License: EPL-1.0 (`epl-v10.html`).
+- Attribution: the Clojure language is designed by Rich Hickey;
+  vendored upstream sources keep their `Copyright (c) Rich Hickey`
+  notices, adapted files carry dual notices, original port code is
+  `Copyright (c) Hao Hu`, all under EPL-1.0.
 
 Normative details live with the code: the
 [core coverage list](rust/core-coverage.md) (machine-checked by CI),
