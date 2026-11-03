@@ -3,8 +3,9 @@
 ;; Sources: s6-pins.md P1, concurrency.rs delay_rows, delay_throw_cached,
 ;; realized_rows/_errors, force_rows, memoize_rows, deref_rows (delay parts),
 ;; meta_rows + print_str_rows (delay parts), agent_value_shapes (:realized-agent).
-;; Self-force StackOverflowError is NOT pinned (JVM stderr warning is fragile;
-;; the port diverges with IllegalStateException anyway). Every entry is
+;; Self-force StackOverflowError is NOT pinned here (JVM stderr warning is fragile;
+;; the port matches the JVM outcome instead — see
+;; delay_reentrant_force_throws_stack_overflow). Every entry is
 ;; self-contained; never prints raw refs.
 (defn p [tag thunk]
   (print tag " => ")
