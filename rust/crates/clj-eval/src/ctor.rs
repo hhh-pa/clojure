@@ -31,10 +31,41 @@ use crate::error::NativeError;
 /// at runtime. Wire new emulated classes here plus an arm in the
 /// [`crate::types`] dispatch.
 pub(crate) fn ctor_arities(fqn: &str) -> Option<&'static [usize]> {
+    if let Some(arities) = ctor_arities_core(fqn) {
+        return Some(arities);
+    }
+    ctor_arities_extra(fqn)
+}
+
+/// The core emulated ctor arities (split from [`ctor_arities`]
+/// for the complexity budget).
+fn ctor_arities_core(fqn: &str) -> Option<&'static [usize]> {
     match fqn {
         "java.lang.String" => Some(&[0, 1, 2, 3, 4]),
         "java.lang.Object" => Some(&[0]),
         "java.lang.StringBuilder" => Some(&[0, 1]),
+        // #205: the emulated allow-list grows (dispatch in `types`).
+        "java.util.Random" => Some(&[0, 1]),
+        "java.security.SecureRandom" => Some(&[0]),
+        "java.math.BigInteger" => Some(&[1, 2]),
+        "java.math.BigDecimal" => Some(&[1]),
+        "java.math.MathContext" => Some(&[1, 2]),
+        _ => None,
+    }
+}
+
+/// The extended emulated ctor arities (split from
+/// [`ctor_arities`] for the complexity budget).
+fn ctor_arities_extra(fqn: &str) -> Option<&'static [usize]> {
+    match fqn {
+        "java.net.URI" => Some(&[1]),
+        "java.io.File" => Some(&[1]),
+        "java.io.FileInputStream" => Some(&[1]),
+        "java.io.FileOutputStream" => Some(&[1]),
+        "java.io.StringWriter" => Some(&[0]),
+        "java.util.ArrayDeque" => Some(&[0, 1]),
+        "java.util.ArrayList" => Some(&[0, 1]),
+        "java.util.PriorityQueue" => Some(&[1]),
         _ => None,
     }
 }
@@ -573,6 +604,325 @@ fn encode_utf16_units(s: &str, little: bool, bom: bool) -> Vec<u8> {
     out
 }
 
+/// `(BigInteger. …)` (#205): `(String)`, `(String, int)`,
+/// `(int, byte[])`, and `(int, Random)` (the `(byte[])`
+/// two's-complement spelling is out of the suite's reach, so
+/// it stays a miss). Nil spellings follow the overload match
+/// (a lone nil `String` NPEs on `length`; an `(int, nil)` pair
+/// is ambiguous); mistyped shapes are the uniform miss.
+pub(crate) fn build_biginteger(args: &[Value]) -> Result<Value, NativeError> {
+    const CLASS: &str = "java.math.BigInteger";
+    match args {
+        [Value::Str(s)] => clj_value::bigint_parse(s)
+            .map(bigint_ctor_value)
+            .map_err(crate::core::number_format),
+        [Value::Nil] => Err(bigint_length_npe()),
+        [_] => Err(no_ctor(CLASS, false)),
+        [Value::Str(s), Value::Int(radix)] => {
+            let radix = i32::try_from(*radix).map_err(|_| no_ctor(CLASS, false))?;
+            clj_value::bigint_parse_radix(s, radix as u32)
+                .map(bigint_ctor_value)
+                .map_err(crate::core::number_format)
+        }
+        [Value::Str(_), Value::Nil] => Err(bigint_unbox_npe()),
+        [Value::Str(_), _] => Err(no_ctor(CLASS, false)),
+        [Value::Nil, Value::Int(_)] => Err(bigint_length_npe()),
+        [Value::Int(n), second] => bigint_ctor_int_pair(CLASS, *n, second),
+        _ => Err(no_ctor(CLASS, false)),
+    }
+}
+
+/// Mint a `BigInteger` from a parsed `BigInt`.
+fn bigint_ctor_value(n: num_bigint::BigInt) -> Value {
+    Value::BigInteger(Arc::new(n))
+}
+
+/// Build `(BigDecimal. …)` (#205): 1-arg takes `String`
+/// (bad text fails the parse message; empty fails bare, like
+/// the JDK), `BigInteger`, `double` (the exact binary
+/// expansion), `long`, or a `BigDecimal` copy — all boxed
+/// fresh, like `new`. Anything else misses (there is no
+/// `(BigInt)` overload on the JVM either).
+pub(crate) fn build_bigdecimal(args: &[Value]) -> Result<Value, NativeError> {
+    const CLASS: &str = "java.math.BigDecimal";
+    match args {
+        [Value::Str(s)] => match clj_value::BigDec::parse(s) {
+            Ok(d) => Ok(Value::BigDec(Arc::new(d))),
+            Err(e) if e == "Zero-length BigDecimal" => {
+                Err(crate::core::number_format(String::new()))
+            }
+            Err(e) => Err(crate::core::number_format(e)),
+        },
+        [Value::BigInteger(n)] => Ok(Value::BigDec(Arc::new(clj_value::BigDec::from_bigint(
+            n.as_ref().clone(),
+        )))),
+        [Value::Double(d)] => clj_value::BigDec::from_f64_exact(*d)
+            .map(|d| Value::BigDec(Arc::new(d)))
+            .map_err(crate::core::number_format),
+        [Value::Int(n)] => Ok(Value::BigDec(Arc::new(clj_value::BigDec::from_bigint(
+            num_bigint::BigInt::from(*n),
+        )))),
+        [Value::BigDec(d)] => Ok(Value::BigDec(Arc::new(d.as_ref().clone()))),
+        [Value::Nil] => Err(bigint_length_npe()),
+        _ => Err(no_ctor(CLASS, false)),
+    }
+}
+
+/// Build `(MathContext. …)` (#205): `(int)` (past-`i32` is
+/// `integer overflow`, negative is `Digits < 0`, default
+/// `HALF_UP`), `(int, RoundingMode)` (explicit nil mode NPEs),
+/// `(String)` (strict grammar). Mirrors the port-only
+/// `math-context` shapes exactly, except the mode arg takes
+/// the enum object (there is no `(int, String)` overload on
+/// the JVM).
+pub(crate) fn build_mathcontext(
+    eval: &mut crate::eval::Evaluator,
+    args: &[Value],
+) -> Result<Value, NativeError> {
+    const CLASS: &str = "java.math.MathContext";
+    let ctx = match args {
+        [Value::Str(s)] => clj_value::MathContext::parse(s)
+            .map_err(|m| NativeError::new(ThrowClass::IllegalArgumentException, m))?,
+        [Value::Nil] => {
+            return Err(NativeError::new(
+                ThrowClass::NullPointerException,
+                "null String".to_owned(),
+            ));
+        }
+        [p] => {
+            let p = mathcontext_precision(p)?;
+            clj_value::MathContext::new(p, clj_value::RoundingMode::HalfUp)
+        }
+        [p, mode] => mathcontext_two(p, mode)?,
+        _ => return Err(no_ctor(CLASS, false)),
+    };
+    Ok(Value::Extension(Arc::new(crate::core::MathContextVal {
+        id: eval.next_id(),
+        ctx,
+    })))
+}
+
+/// The `(int)` MathContext precision (split from
+/// [`build_mathcontext`] for the complexity budget).
+fn mathcontext_precision(v: &Value) -> Result<u32, NativeError> {
+    const CLASS: &str = "java.math.MathContext";
+    let Value::Int(i) = v else {
+        return Err(no_ctor(CLASS, false));
+    };
+    let p = int_exact_long(*i)?;
+    if p < 0 {
+        return Err(NativeError::new(
+            ThrowClass::IllegalArgumentException,
+            clj_value::DIGITS_LT_0.to_owned(),
+        ));
+    }
+    Ok(p as u32)
+}
+
+/// The `(int, RoundingMode)` MathContext shape (split from
+/// [`build_mathcontext`] for the complexity budget).
+fn mathcontext_two(p: &Value, mode: &Value) -> Result<clj_value::MathContext, NativeError> {
+    if matches!(p, Value::Str(_)) {
+        return Err(crate::core::cce_err(p, "java.lang.Number"));
+    }
+    let p = mathcontext_precision(p)?;
+    let rounding = mathcontext_rounding(mode)?;
+    Ok(clj_value::MathContext::new(p, rounding))
+}
+
+/// The explicit rounding mode (split from [`build_mathcontext`]
+/// for the complexity budget).
+fn mathcontext_rounding(mode: &Value) -> Result<clj_value::RoundingMode, NativeError> {
+    const CLASS: &str = "java.math.MathContext";
+    match mode {
+        Value::Nil => Err(NativeError::new(
+            ThrowClass::NullPointerException,
+            String::new(),
+        )),
+        _ => crate::classemu::as_rounding(mode).ok_or_else(|| no_ctor(CLASS, false)),
+    }
+}
+
+/// Build `(URI. …)` (#205): 1-arg takes the string (nil NPEs
+/// on the parameter, like the JDK); anything else misses.
+pub(crate) fn build_uri(args: &[Value]) -> Result<Value, NativeError> {
+    const CLASS: &str = "java.net.URI";
+    match args {
+        [Value::Str(s)] => {
+            crate::classemu::UriHandle::parse(s).map(|h| Value::Extension(Arc::new(h)))
+        }
+        [Value::Nil] => Err(NativeError::new(
+            ThrowClass::NullPointerException,
+            "Cannot invoke \"java.net.URI.<init>\" because \"str\" is null".to_owned(),
+        )),
+        _ => Err(no_ctor(CLASS, false)),
+    }
+}
+
+/// Build `(File. …)` (#205): 1-arg takes the path string (nil
+/// NPEs on the parameter, like the JDK); anything else misses
+/// (there is no `(File)` copy ctor on the JVM either).
+pub(crate) fn build_file(
+    eval: &mut crate::eval::Evaluator,
+    args: &[Value],
+) -> Result<Value, NativeError> {
+    const CLASS: &str = "java.io.File";
+    match args {
+        [Value::Str(s)] => Ok(crate::jdkio::file(eval, s)),
+        [Value::Nil] => Err(NativeError::new(
+            ThrowClass::NullPointerException,
+            "Cannot invoke \"java.io.File.<init>\" because \"pathname\" is null".to_owned(),
+        )),
+        _ => Err(no_ctor(CLASS, false)),
+    }
+}
+
+/// Build `(FileInputStream. …)` (#205): 1-arg takes a path
+/// string or a `File` (the ctor reads — missing names the
+/// path); nil NPEs, anything else misses.
+pub(crate) fn build_file_input_stream(
+    eval: &mut crate::eval::Evaluator,
+    args: &[Value],
+) -> Result<Value, NativeError> {
+    const CLASS: &str = "java.io.FileInputStream";
+    match args {
+        [Value::Str(s)] => crate::jio::file_input_stream(eval, s),
+        [v] if crate::jdkio::file_path(v).is_some() => {
+            let path = crate::jdkio::file_path(v).unwrap_or_default();
+            crate::jio::file_input_stream(eval, &path)
+        }
+        [Value::Nil] => Err(NativeError::new(
+            ThrowClass::NullPointerException,
+            "Cannot invoke \"java.io.FileInputStream.<init>\" because \"name\" is null".to_owned(),
+        )),
+        _ => Err(no_ctor(CLASS, false)),
+    }
+}
+
+/// Build `(FileOutputStream. …)` (#205): 1-arg takes a path
+/// string or a `File` (the ctor creates/truncates); nil NPEs,
+/// anything else misses.
+pub(crate) fn build_file_output_stream(
+    eval: &mut crate::eval::Evaluator,
+    args: &[Value],
+) -> Result<Value, NativeError> {
+    const CLASS: &str = "java.io.FileOutputStream";
+    match args {
+        [Value::Str(s)] => crate::jio::file_output_stream(eval, s),
+        [v] if crate::jdkio::file_path(v).is_some() => {
+            let path = crate::jdkio::file_path(v).unwrap_or_default();
+            crate::jio::file_output_stream(eval, &path)
+        }
+        [Value::Nil] => Err(NativeError::new(
+            ThrowClass::NullPointerException,
+            "Cannot invoke \"java.io.FileOutputStream.<init>\" because \"name\" is null".to_owned(),
+        )),
+        _ => Err(no_ctor(CLASS, false)),
+    }
+}
+
+/// Build `(StringWriter. …)` (#205): 0-arg mints the
+/// string-backed writer; anything else misses.
+pub(crate) fn build_string_writer(
+    eval: &mut crate::eval::Evaluator,
+    args: &[Value],
+) -> Result<Value, NativeError> {
+    if args.is_empty() {
+        Ok(crate::io::string_writer(eval))
+    } else {
+        Err(no_ctor("java.io.StringWriter", false))
+    }
+}
+
+/// The `(int, …)` BigInteger ctors (split for the complexity
+/// budget): signum-plus-magnitude, or random bits.
+fn bigint_ctor_int_pair(class: &str, n: i64, second: &Value) -> Result<Value, NativeError> {
+    let n = i32::try_from(n).map_err(|_| no_ctor(class, false))?;
+    match second {
+        Value::Array(a) => {
+            let guard = a.lock();
+            match &*guard {
+                ArrayStore::Bytes(cells) => {
+                    let mag: Vec<u8> = cells.iter().map(|b| *b as u8).collect();
+                    bigint_signum(n, &mag)
+                }
+                _ => Err(no_ctor(class, false)),
+            }
+        }
+        Value::Nil => Err(NativeError::new(
+            ThrowClass::IllegalArgumentException,
+            format!("More than one matching method found: {class}"),
+        )),
+        other => {
+            if crate::emurand::is_random(other) {
+                bigint_random_bits(n, other)
+            } else {
+                Err(no_ctor(class, false))
+            }
+        }
+    }
+}
+
+/// The `(int, byte[])` signum-magnitude ctor.
+fn bigint_signum(signum: i32, mag: &[u8]) -> Result<Value, NativeError> {
+    if !(-1..=1).contains(&signum) {
+        return Err(crate::core::number_format("Invalid signum value"));
+    }
+    if signum == 0 {
+        if mag.iter().any(|b| *b != 0) {
+            return Err(crate::core::number_format("signum-magnitude mismatch"));
+        }
+        return Ok(bigint_ctor_value(num_bigint::BigInt::from(0)));
+    }
+    let mag = num_bigint::BigUint::from_bytes_be(mag);
+    let sign = if signum < 0 {
+        num_bigint::Sign::Minus
+    } else {
+        num_bigint::Sign::Plus
+    };
+    Ok(bigint_ctor_value(num_bigint::BigInt::from_biguint(
+        sign, mag,
+    )))
+}
+
+/// The `(int, Random)` random-bits ctor (excess top bits
+/// masked, like the JDK).
+fn bigint_random_bits(num_bits: i32, rnd: &Value) -> Result<Value, NativeError> {
+    if num_bits < 0 {
+        return Err(NativeError::new(
+            ThrowClass::NegativeArraySizeException,
+            "numBits must be non-negative".to_owned(),
+        ));
+    }
+    let nbytes = (num_bits as usize).div_ceil(8);
+    let bytes = crate::emurand::random_bytes(rnd, nbytes);
+    let mut mag: Vec<u8> = bytes.into_iter().map(|b| b as u8).collect();
+    let excess = nbytes * 8 - num_bits as usize;
+    if excess > 0 {
+        mag[0] &= 0xFF >> excess;
+    }
+    Ok(bigint_ctor_value(num_bigint::BigInt::from_biguint(
+        num_bigint::Sign::Plus,
+        num_bigint::BigUint::from_bytes_be(&mag),
+    )))
+}
+
+/// The nil-`String` body's NPE (the `length` read).
+fn bigint_length_npe() -> NativeError {
+    NativeError::new(
+        ThrowClass::NullPointerException,
+        "Cannot invoke \"String.length()\" because \"val\" is null".to_owned(),
+    )
+}
+
+/// The nil-`int` unbox NPE.
+fn bigint_unbox_npe() -> NativeError {
+    NativeError::new(
+        ThrowClass::NullPointerException,
+        "Cannot invoke \"java.lang.Integer.intValue()\" because \"val\" is null".to_owned(),
+    )
+}
+
 /// UTF-32 words in the given endianness, with a BOM when `bom`.
 fn encode_utf32_words(s: &str, little: bool, bom: bool) -> Vec<u8> {
     let mut out = Vec::with_capacity(s.len() * 4 + 4);
@@ -589,4 +939,22 @@ fn encode_utf32_words(s: &str, little: bool, bom: bool) -> Vec<u8> {
         out.extend_from_slice(&bytes);
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_mathcontext;
+    use crate::eval::Evaluator;
+
+    #[test]
+    fn mathcontext_arity_miss() {
+        // Surface syntax rejects bare/3+ arg ctors at compile
+        // time, so the runtime fallthrough pins directly.
+        let mut eval = Evaluator::new_bare("user");
+        let e = build_mathcontext(&mut eval, &[]).expect_err("bare misses");
+        assert_eq!(
+            e.message,
+            "No matching ctor found for class java.math.MathContext"
+        );
+    }
 }

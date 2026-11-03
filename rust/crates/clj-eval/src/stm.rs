@@ -211,6 +211,9 @@ fn sync_join(eval: &mut Evaluator, body: &[Expr], env: &Env) -> Result<Value, Si
 /// guard instead; `finally` runs at `eval_try`).
 fn sync_begin(eval: &mut Evaluator, body: &[Expr], env: &Env) -> Result<Value, Signal> {
     let depth = eval.bindings_depth();
+    // The #205 call-depth counter unwinds past attempt frames on
+    // retry exactly like the bindings stack, so it restores with it.
+    let call_depth = eval.call_depth;
     loop {
         begin_attempt(eval);
         let outcome = catch_unwind(AssertUnwindSafe(|| run_attempt(eval, body, env)));
@@ -222,6 +225,7 @@ fn sync_begin(eval: &mut Evaluator, body: &[Expr], env: &Env) -> Result<Value, S
             Ok(AttemptOutcome::Retry) => {
                 end_attempt(eval);
                 eval.pop_bindings(depth);
+                eval.call_depth = call_depth;
             }
             Ok(AttemptOutcome::Throw(signal)) => {
                 end_attempt(eval);
@@ -231,6 +235,7 @@ fn sync_begin(eval: &mut Evaluator, body: &[Expr], env: &Env) -> Result<Value, S
                 end_attempt(eval);
                 if payload.is::<StmRetry>() {
                     eval.pop_bindings(depth);
+                    eval.call_depth = call_depth;
                     continue;
                 }
                 resume_unwind(payload);

@@ -1237,6 +1237,23 @@ fn native_read_line(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nativ
         .unwrap_or(Value::Nil))
 }
 
+/// `BufferedReader.readLine` on a stream reader (#205): one line
+/// without the terminator (nil at EOF — the `read-line` body
+/// minus the `*in*` lookup; closed reports the JDK text).
+pub(crate) fn reader_read_line(r: &StreamReader) -> Result<Value, NativeError> {
+    check_reader_open(r)?;
+    let mut state = lock_state(r);
+    if let Some(line) = state.parser.read_line() {
+        return Ok(Value::Str(Arc::from(line.as_str())));
+    }
+    more_input(&mut state)?;
+    Ok(state
+        .parser
+        .read_line()
+        .map(|line| Value::Str(Arc::from(line.as_str())))
+        .unwrap_or(Value::Nil))
+}
+
 /// The S-instream natives installed into `clojure.core`.
 pub(crate) const READER_NATIVES: &[(&str, NativeFnPtr)] = &[
     ("read", native_read),

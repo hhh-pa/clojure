@@ -540,12 +540,6 @@ fn system_unimplemented_miss() {
         uncaught(&mut eval, "(System/exit 0)"),
         "java.lang.IllegalArgumentException | No matching method exit found taking 1 args for class java.lang.System"
     );
-    assert_eq!(
-        uncaught(&mut eval, "(System/getenv \"HOME\")"),
-        "java.lang.IllegalArgumentException | No matching method getenv found taking 1 args for class java.lang.System"
-    );
-    assert_eq!(
-        uncaught(&mut eval, "(System/currentTimeMillis)"),
-        "java.lang.IllegalArgumentException | No matching method currentTimeMillis found taking 0 args for class java.lang.System"
-    );
+    // `getenv` and 0-arg `currentTimeMillis` left the miss list
+    // when #205 emulated them (pinned in `algorithms_emu.rs`).
 }

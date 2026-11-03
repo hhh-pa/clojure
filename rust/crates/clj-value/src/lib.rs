@@ -87,7 +87,7 @@ pub use seq::{
 pub use symbol::Symbol;
 pub use tower::{
     BAD_CTX_FORMAT, BigDec, DIGITS_LT_0, MathContext, NON_TERMINATING, ROUNDING_NECESSARY,
-    RoundingMode, bigint_parse,
+    RoundingMode, bigint_parse, bigint_parse_radix,
 };
 pub use transient::{
     Transient, TransientError, TransientKind, TransientMap, TransientSet, TransientVector,

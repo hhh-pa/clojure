@@ -89,12 +89,16 @@ pub(crate) fn lookup_present(
     // `rec-get`); structs likewise (S12 oracle `sm-get-basis`);
     // every other host value misses (oracle `dtor-get`).
     if let Some(i) = crate::types::maplike_inst(coll) {
-        return Ok(i.content.get(key).cloned());
+        let key = crate::lazy::realize_key(eval, key).map_err(signal_to_native)?;
+        return Ok(i.content.get(&key).cloned());
     }
     match coll {
         Value::Nil => Ok(None),
         Value::Map(m) if m.is_sorted() => sorted_lookup_map(eval, m, key),
-        Value::Map(m) => Ok(m.get(key).cloned()),
+        Value::Map(m) => {
+            let key = crate::lazy::realize_key(eval, key).map_err(signal_to_native)?;
+            Ok(m.get(&key).cloned())
+        }
         Value::Vector(x) => Ok(lookup_vector_slot(x, key)),
         Value::MapEntry {
             key: ek, val: ev, ..
@@ -102,15 +106,7 @@ pub(crate) fn lookup_present(
         // Arrays narrow any `Number` key (`intValue`, lenient —
         // OOB/non-`Number`/nil miss; S15 oracles `b-get`,
         // `f-get-*`, `e-get-*`).
-        Value::Array(a) => Ok(crate::arrays::array_intvalue_key(key).and_then(|i| {
-            usize::try_from(i).ok().and_then(|idx| {
-                if idx < a.len() {
-                    Some(crate::arrays::array_read(a, idx))
-                } else {
-                    None
-                }
-            })
-        })),
+        Value::Array(a) => Ok(lookup_array_slot(a, key)),
         Value::PrimitiveVector(p) => Ok(lookup_pv_slot(p, key)),
         Value::Set(s) if s.is_sorted() => Ok(sorted_lookup_set(eval, s, key)?),
         Value::Set(s) => Ok(s.get(key).cloned()),
@@ -151,6 +147,21 @@ fn lookup_str_slot(s: &str, key: &Value) -> Option<Value> {
         usize::try_from(i)
             .ok()
             .and_then(|idx| s.chars().nth(idx).map(Value::Char))
+    })
+}
+
+/// Array lookup through `intValue` keys (split from
+/// [`lookup_present`] for the complexity budget): lenient —
+/// OOB/non-`Number`/nil miss.
+fn lookup_array_slot(a: &clj_value::Array, key: &Value) -> Option<Value> {
+    crate::arrays::array_intvalue_key(key).and_then(|i| {
+        usize::try_from(i).ok().and_then(|idx| {
+            if idx < a.len() {
+                Some(crate::arrays::array_read(a, idx))
+            } else {
+                None
+            }
+        })
     })
 }
 
@@ -266,7 +277,8 @@ fn find_entry_map(
     if m.is_sorted() {
         Ok(sorted_lookup_map(eval, m, key)?.map(|v| (key.clone(), v)))
     } else {
-        Ok(m.get(key).map(|v| (key.clone(), v.clone())))
+        let key = crate::lazy::realize_key(eval, key).map_err(signal_to_native)?;
+        Ok(m.get(&key).map(|v| (key.clone(), v.clone())))
     }
 }
 
@@ -388,28 +400,38 @@ fn conj_map(eval: &mut Evaluator, m: &Map, x: &Value) -> Result<Value, NativeErr
     Ok(Value::Map(conj_map_into(eval, m, x)?))
 }
 
+/// Conj onto a sorted persistent map (split from
+/// [`conj_map_into`] for the complexity budget).
+fn conj_map_into_sorted(eval: &mut Evaluator, m: &Map, x: &Value) -> Result<Map, NativeError> {
+    match map_conj_plan(eval, x)? {
+        MapConjPlan::Nil => Ok(m.clone()),
+        MapConjPlan::Pair(k, v) => Ok(sorted_assoc_map(eval, m, k, v)?),
+        MapConjPlan::Entries(entries) => {
+            let mut out = m.clone();
+            for (k, v) in entries {
+                out = sorted_assoc_map(eval, &out, k, v)?;
+            }
+            Ok(out)
+        }
+    }
+}
+
 /// Conj onto a persistent map, answering the map (records rewrap
 /// the answer around their content).
 pub(crate) fn conj_map_into(eval: &mut Evaluator, m: &Map, x: &Value) -> Result<Map, NativeError> {
     if m.is_sorted() {
-        return match map_conj_plan(eval, x)? {
-            MapConjPlan::Nil => Ok(m.clone()),
-            MapConjPlan::Pair(k, v) => Ok(sorted_assoc_map(eval, m, k, v)?),
-            MapConjPlan::Entries(entries) => {
-                let mut out = m.clone();
-                for (k, v) in entries {
-                    out = sorted_assoc_map(eval, &out, k, v)?;
-                }
-                Ok(out)
-            }
-        };
+        return conj_map_into_sorted(eval, m, x);
     }
     match map_conj_plan(eval, x)? {
         MapConjPlan::Nil => Ok(m.clone()),
-        MapConjPlan::Pair(k, v) => Ok(m.clone().insert(k, v)),
+        MapConjPlan::Pair(k, v) => {
+            let k = crate::lazy::realize_key(eval, &k).map_err(signal_to_native)?;
+            Ok(m.clone().insert(k, v))
+        }
         MapConjPlan::Entries(entries) => {
             let mut out = m.clone();
             for (k, v) in entries {
+                let k = crate::lazy::realize_key(eval, &k).map_err(signal_to_native)?;
                 out = out.insert(k, v);
             }
             Ok(out)
@@ -432,6 +454,15 @@ fn subvector_conj(sv: &SubVectorValue, x: Value) -> Value {
     ))
 }
 
+/// Conj onto a primitive vector coerces through the type (the
+/// `ArrayManager` rule — split from [`conj_one`] for the
+/// complexity budget).
+fn conj_pv(eval: &mut Evaluator, p: &PrimitiveVector, x: Value) -> Result<Value, NativeError> {
+    Ok(Value::PrimitiveVector(p.push_back(
+        crate::arrays::vector_coerce(eval, p.elem(), &x)?,
+    )))
+}
+
 /// `RT.conj` one element (`conj`/`into` share this).
 fn conj_one(eval: &mut Evaluator, coll: &Value, x: Value) -> Result<Value, NativeError> {
     match coll {
@@ -441,9 +472,7 @@ fn conj_one(eval: &mut Evaluator, coll: &Value, x: Value) -> Result<Value, Nativ
         // Primitive vectors coerce through the type (the
         // `ArrayManager` rule — S15 oracles `f-conj-bad`,
         // `j-byte-vec`, `j-bool-num`, `j-conj-nil`).
-        Value::PrimitiveVector(p) => Ok(Value::PrimitiveVector(
-            p.push_back(crate::arrays::vector_coerce(eval, p.elem(), &x)?),
-        )),
+        Value::PrimitiveVector(p) => conj_pv(eval, p, x),
         // Conj onto an entry appends like its 2-vector (Oracle FX2
         // `conj`, `merge-entry`).
         Value::MapEntry { key, val, .. } => {
@@ -457,7 +486,10 @@ fn conj_one(eval: &mut Evaluator, coll: &Value, x: Value) -> Result<Value, Nativ
         // collection cast (oracle `i-conj`).
         Value::HostType(_) => conj_maplike(eval, coll, &x),
         Value::Set(s) if s.is_sorted() => Ok(Value::Set(sorted_conj_set(eval, s, x)?)),
-        Value::Set(s) => Ok(Value::Set(s.clone().insert(x))),
+        Value::Set(s) => {
+            let x = crate::lazy::realize_key(eval, &x).map_err(signal_to_native)?;
+            Ok(Value::Set(s.clone().insert(x)))
+        }
         _ => {
             if let Some(sv) = as_subvector(coll) {
                 return Ok(subvector_conj(sv, x));
@@ -556,13 +588,33 @@ fn assoc_subvector(sv: &SubVectorValue, k: &Value, v: Value) -> Result<Value, Na
     )))
 }
 
+/// `assoc` on a map-like host value (split from [`assoc3`] for
+/// the complexity budget): through the content map, rewrapped so
+/// the answer stays a record (or a struct, S12); anything else
+/// host is not associative.
+fn assoc_maplike(coll: &Value, k: &Value, v: Value) -> Result<Value, NativeError> {
+    match crate::types::maplike_inst(coll) {
+        Some(i) => Ok(crate::types::rewrap_maplike(
+            i,
+            i.content.clone().insert(k.clone(), v),
+        )),
+        None => Err(cce_err(coll, "clojure.lang.Associative")),
+    }
+}
+
 /// `RT.assoc` one triple (`assoc`/`update`/`merge-with` share this;
 /// sorted maps position by comparator, FT6).
 fn assoc3(eval: &mut Evaluator, coll: &Value, k: &Value, v: Value) -> Result<Value, NativeError> {
     match coll {
-        Value::Nil => Ok(Value::Map(new_map().insert(k.clone(), v))),
+        Value::Nil => Ok(Value::Map(new_map().insert(
+            crate::lazy::realize_key(eval, k).map_err(signal_to_native)?,
+            v,
+        ))),
         Value::Map(m) if m.is_sorted() => Ok(Value::Map(sorted_assoc_map(eval, m, k.clone(), v)?)),
-        Value::Map(m) => Ok(Value::Map(m.clone().insert(k.clone(), v))),
+        Value::Map(m) => Ok(Value::Map(m.clone().insert(
+            crate::lazy::realize_key(eval, k).map_err(signal_to_native)?,
+            v,
+        ))),
         Value::Vector(x) => {
             let Some(i) = int_key(k) else {
                 return Err(NativeError::new(
@@ -598,13 +650,7 @@ fn assoc3(eval: &mut Evaluator, coll: &Value, k: &Value, v: Value) -> Result<Val
         // always stay structs (S12 oracles `sm-assoc-class`,
         // `sm-assoc-extra-class`); anything else host is not
         // associative (oracle `i-assoc`).
-        Value::HostType(_) => match crate::types::maplike_inst(coll) {
-            Some(i) => Ok(crate::types::rewrap_maplike(
-                i,
-                i.content.clone().insert(k.clone(), v),
-            )),
-            None => Err(cce_err(coll, "clojure.lang.Associative")),
-        },
+        Value::HostType(_) => assoc_maplike(coll, k, v),
         _ => {
             if let Some(sv) = as_subvector(coll) {
                 return assoc_subvector(sv, k, v);
@@ -650,6 +696,9 @@ fn count_transient(t: &Transient) -> Result<i64, NativeError> {
 fn count_fallback(eval: &mut Evaluator, v: &Value) -> Result<i64, NativeError> {
     if let Some(sv) = as_subvector(v) {
         return Ok(sv.len() as i64);
+    }
+    if let Some(items) = crate::emucoll::list_snapshot(v) {
+        return Ok(items.len() as i64);
     }
     if let Some(r) = as_range(v) {
         // A `BigDec`/ratio step with no exact decimal raises on
@@ -1005,7 +1054,8 @@ fn native_disj(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErro
         Value::Set(s) => {
             let mut out = s.clone();
             for k in &args[1..] {
-                out = out.without(k);
+                let k = crate::lazy::realize_key(eval, k).map_err(signal_to_native)?;
+                out = out.without(&k);
             }
             Ok(Value::Set(out))
         }
@@ -1128,6 +1178,32 @@ fn dissoc_struct(inst: &clj_value::HostInst, keys: &[Value]) -> Result<Value, Na
     Ok(crate::types::rewrap_maplike(inst, out))
 }
 
+/// Record `dissoc` (split from [`native_dissoc`] for the
+/// complexity budget): through the content map — dropping a
+/// declared field loses recordness (a plain map); anything else
+/// stays a record. Metadata travels in both cases.
+fn dissoc_record(
+    eval: &mut Evaluator,
+    inst: &clj_value::HostInst,
+    keys: &[Value],
+) -> Result<Value, NativeError> {
+    let drops_field = keys.iter().any(|k| {
+        inst.def
+            .fields
+            .iter()
+            .any(|f| crate::types::is_field_key(f, k))
+    });
+    let mut out = inst.content.clone();
+    for k in keys {
+        let k = crate::lazy::realize_key(eval, k).map_err(signal_to_native)?;
+        out = out.without(&k);
+    }
+    if drops_field {
+        return Ok(Value::Map(out.with_meta(inst.meta.clone())));
+    }
+    Ok(crate::types::rewrap_record(inst, out))
+}
+
 fn native_dissoc(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_min_arity("clojure.core/dissoc", args, 1)?;
     if args.len() == 1 {
@@ -1144,20 +1220,7 @@ fn native_dissoc(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeEr
     // anything else stays a record (oracle `h-dissoc-missing-type`).
     // Metadata travels in both cases (ad-hoc `dissoc-meta`).
     if let Some(i) = crate::types::record_inst(&args[0]) {
-        let drops_field = args[1..].iter().any(|k| {
-            i.def
-                .fields
-                .iter()
-                .any(|f| crate::types::is_field_key(f, k))
-        });
-        let mut out = i.content.clone();
-        for k in &args[1..] {
-            out = out.without(k);
-        }
-        if drops_field {
-            return Ok(Value::Map(out.with_meta(i.meta.clone())));
-        }
-        return Ok(crate::types::rewrap_record(i, out));
+        return dissoc_record(eval, i, &args[1..]);
     }
     let Value::Map(m) = &args[0] else {
         return Err(cce_err(&args[0], "clojure.lang.IPersistentMap"));
@@ -1171,7 +1234,8 @@ fn native_dissoc(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeEr
     }
     let mut out = m.clone();
     for k in &args[1..] {
-        out = out.without(k);
+        let k = crate::lazy::realize_key(eval, k).map_err(signal_to_native)?;
+        out = out.without(&k);
     }
     Ok(Value::Map(out))
 }
@@ -1225,7 +1289,8 @@ fn contains_map(eval: &mut Evaluator, m: &Map, key: &Value) -> Result<Value, Nat
     if m.is_sorted() {
         Ok(Value::Bool(sorted_lookup_map(eval, m, key)?.is_some()))
     } else {
-        Ok(Value::Bool(m.contains_key(key)))
+        let key = crate::lazy::realize_key(eval, key).map_err(signal_to_native)?;
+        Ok(Value::Bool(m.contains_key(&key)))
     }
 }
 
@@ -1234,7 +1299,8 @@ fn contains_set(eval: &mut Evaluator, s: &Set, key: &Value) -> Result<Value, Nat
     if s.is_sorted() {
         Ok(Value::Bool(sorted_contains_set(eval, s, key)?))
     } else {
-        Ok(Value::Bool(s.contains(key)))
+        let key = crate::lazy::realize_key(eval, key).map_err(signal_to_native)?;
+        Ok(Value::Bool(s.contains(&key)))
     }
 }
 
@@ -1724,6 +1790,7 @@ fn native_zipmap(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeEr
         }
         let k = first_value(eval, &ks).map_err(signal_to_native)?;
         let v = first_value(eval, &vs).map_err(signal_to_native)?;
+        let k = crate::lazy::realize_key(eval, &k).map_err(signal_to_native)?;
         out = out.insert(k, v);
         ks = next_value(eval, &ks).map_err(signal_to_native)?;
         vs = next_value(eval, &vs).map_err(signal_to_native)?;
@@ -2399,7 +2466,7 @@ fn sorted_assoc_map(eval: &mut Evaluator, m: &Map, k: Value, v: Value) -> Result
         .cloned()
         .expect("sorted assoc needs a sort order");
     let mut entries: Vec<(Value, Value)> = m.iter().map(|(a, b)| (a.clone(), b.clone())).collect();
-    match sort_position(eval, &spec, m.ordered_keys(), &k)? {
+    match sort_position(eval, &spec, &m.ordered_keys(), &k)? {
         SortPos::Found(i) => entries[i].1 = v,
         SortPos::Insert(i) => entries.insert(i, (k, v)),
     }
@@ -2413,7 +2480,7 @@ fn sorted_without_map(eval: &mut Evaluator, m: &Map, k: &Value) -> Result<Map, N
         .sort_spec()
         .cloned()
         .expect("sorted dissoc needs a sort order");
-    match sort_position(eval, &spec, m.ordered_keys(), k)? {
+    match sort_position(eval, &spec, &m.ordered_keys(), k)? {
         SortPos::Found(i) => {
             let found = m.ordered_keys()[i].clone();
             Ok(m.clone().without(&found))
@@ -2432,7 +2499,7 @@ fn sorted_lookup_map(
         .sort_spec()
         .cloned()
         .expect("sorted get needs a sort order");
-    match sort_position(eval, &spec, m.ordered_keys(), k)? {
+    match sort_position(eval, &spec, &m.ordered_keys(), k)? {
         SortPos::Found(i) => Ok(m.get(&m.ordered_keys()[i]).cloned()),
         SortPos::Insert(_) => Ok(None),
     }
@@ -2444,10 +2511,10 @@ fn sorted_conj_set(eval: &mut Evaluator, s: &Set, v: Value) -> Result<Set, Nativ
         .sort_spec()
         .cloned()
         .expect("sorted conj needs a sort order");
-    match sort_position(eval, &spec, s.ordered_members(), &v)? {
+    match sort_position(eval, &spec, &s.ordered_members(), &v)? {
         SortPos::Found(_) => Ok(s.clone()),
         SortPos::Insert(i) => {
-            let mut members = s.ordered_members().to_vec();
+            let mut members = s.ordered_members();
             members.insert(i, v);
             Ok(s.clone().with_ordered_members(members))
         }
@@ -2460,7 +2527,7 @@ fn sorted_without_set(eval: &mut Evaluator, s: &Set, v: &Value) -> Result<Set, N
         .sort_spec()
         .cloned()
         .expect("sorted disj needs a sort order");
-    match sort_position(eval, &spec, s.ordered_members(), v)? {
+    match sort_position(eval, &spec, &s.ordered_members(), v)? {
         SortPos::Found(i) => {
             let found = s.ordered_members()[i].clone();
             Ok(s.clone().without(&found))
@@ -2474,7 +2541,7 @@ fn sorted_contains_set(eval: &mut Evaluator, s: &Set, v: &Value) -> Result<bool,
         .sort_spec()
         .cloned()
         .expect("sorted contains needs a sort order");
-    match sort_position(eval, &spec, s.ordered_members(), v)? {
+    match sort_position(eval, &spec, &s.ordered_members(), v)? {
         SortPos::Found(_) => Ok(true),
         SortPos::Insert(_) => Ok(false),
     }
@@ -2490,7 +2557,7 @@ fn sorted_lookup_set(
         .sort_spec()
         .cloned()
         .expect("sorted set get needs a sort order");
-    match sort_position(eval, &spec, s.ordered_members(), v)? {
+    match sort_position(eval, &spec, &s.ordered_members(), v)? {
         SortPos::Found(i) => Ok(Some(s.ordered_members()[i].clone())),
         SortPos::Insert(_) => Ok(None),
     }
@@ -2574,7 +2641,7 @@ fn sorted_subseq_source(coll: &Value) -> Result<(Vec<Value>, Vec<Value>, SortSpe
             Ok((keys, items, spec))
         }
         Value::Set(s) if s.is_sorted() => {
-            let members = s.ordered_members().to_vec();
+            let members = s.ordered_members();
             let spec = s
                 .sort_spec()
                 .cloned()

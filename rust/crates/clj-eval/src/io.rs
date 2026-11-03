@@ -110,6 +110,16 @@ impl ExtensionValue for Writer {
         format!("#object[{class} 0x{:x} \"{class}@{:x}\"]", self.id, self.id)
     }
 
+    /// `str` renders a `StringWriter`'s buffer (the JVM
+    /// `toString`); every other writer keeps the identity print
+    /// (like the JDK, which overrides `toString` only there).
+    fn print_str(&self) -> Option<String> {
+        match &self.kind {
+            WriterKind::Buffer(buf) => buf.lock().ok().map(|s| s.clone()),
+            _ => None,
+        }
+    }
+
     fn dyn_eq(&self, other: &dyn ExtensionValue) -> bool {
         other
             .as_any()
@@ -646,6 +656,16 @@ pub(crate) fn file_err(path: &str, e: std::io::Error) -> NativeError {
     }
 }
 
+/// A `slurp`/`spit` path argument (#205): strings directly,
+/// `File`s via their path (upstream opens through
+/// `clojure.java.io`, which coerces both).
+fn open_path_arg(v: &Value) -> Option<String> {
+    match v {
+        Value::Str(s) => Some(s.to_string()),
+        f => crate::jdkio::file_path(f),
+    }
+}
+
 /// `slurp`: read a file as a UTF-8 string, or drain a reader
 /// fully (issue #201 S8: upstream opens `f` with `jio/reader`,
 /// which passes readers through — `(slurp *in*)` is the recipes
@@ -659,14 +679,14 @@ fn native_slurp(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeEr
         let text = crate::reader::slurp_reader(reader)?;
         return Ok(Value::Str(Arc::from(text.as_str())));
     }
-    let Value::Str(path) = &args[0] else {
+    let Some(path) = open_path_arg(&args[0]) else {
         return Err(NativeError::new(
             ThrowClass::IllegalArgumentException,
             format!("Cannot open <{}> as an InputStream.", str_of(&args[0])),
         ));
     };
     file_opts(&args[1..], false)?;
-    let path_str: &str = path;
+    let path_str: &str = &path;
     let text = std::fs::read_to_string(path_str).map_err(|e| file_err(path_str, e))?;
     Ok(Value::Str(Arc::from(text.as_str())))
 }
@@ -677,7 +697,7 @@ fn native_spit(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErr
     if args.len() < 2 {
         return Err(NativeError::arity("clojure.core/spit", args.len()));
     }
-    let Value::Str(path) = &args[0] else {
+    let Some(path) = open_path_arg(&args[0]) else {
         return Err(NativeError::new(
             ThrowClass::IllegalArgumentException,
             format!("Cannot open <{}> as an OutputStream.", str_of(&args[0])),
@@ -687,7 +707,7 @@ fn native_spit(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErr
         return Err(cce_err(&args[1], "java.lang.String"));
     };
     let append = file_opts(&args[2..], true)?;
-    let path_str: &str = path;
+    let path_str: &str = &path;
     let content_str: &str = content;
     let mut opts = std::fs::OpenOptions::new();
     opts.write(true).create(true);

@@ -1219,9 +1219,13 @@
           (emit-type-methods "defrecord" triples fields)
           (list 'quote (vec ifaces))))
       (list 'def arrow
-        (list 'let ['t name]
-          (list 'fn arrow fields
-            (apply list 'clojure.core/__new* 't fields))))
+        ;; The captured descriptor binding is a gensym: the fn
+        ;; params ARE the field names, so a literal `t` would be
+        ;; shadowed by a field named `t` (#205 `Matrix [t n]`).
+        (let [t (gensym "t")]
+          (list 'let [t name]
+            (list 'fn arrow fields
+              (apply list 'clojure.core/__new* t fields)))))
       (list 'def map-arrow
         (list 'let ['t name]
           (list 'fn map-arrow '[m]

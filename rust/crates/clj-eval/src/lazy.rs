@@ -64,6 +64,40 @@ pub struct PendingSeq {
     kind: LazyKind,
 }
 
+/// One flattened `concat` level: an outer `(rest, idx)` to resume
+/// after the descended-into inner concat exhausts (#205:
+/// `mapcat` tails nest one concat per element, so the descent is
+/// iterative and the resume stack lives here instead of the Rust
+/// stack).
+#[derive(Clone, Debug)]
+pub(crate) struct ConcatFrame {
+    rest: Arc<Vec<Value>>,
+    idx: usize,
+    parent: ConcatStack,
+}
+
+/// A `concat` resume stack (persistent: push, pop, and clone are
+/// O(1) — `force_pending` clones the whole thunk per force, so an
+/// owned `Vec` would make every step O(depth)).
+pub(crate) type ConcatStack = Option<Arc<ConcatFrame>>;
+
+impl Drop for ConcatFrame {
+    fn drop(&mut self) {
+        // Deep stacks (e.g. `(reduce concat ...)` over thousands of
+        // inputs) would overflow the stack dropping parent-by-parent
+        // recursively, so unwind sole-owned parents iteratively
+        // (shared parents resume through their own `Drop`, like
+        // `PendingSeq`).
+        let mut next = self.parent.take();
+        while let Some(node) = next {
+            match Arc::try_unwrap(node) {
+                Ok(mut frame) => next = frame.parent.take(),
+                Err(_) => break,
+            }
+        }
+    }
+}
+
 /// The memoized state: pending thunks become realized chunks.
 #[derive(Clone, Debug)]
 enum SeqState {
@@ -111,6 +145,10 @@ pub(crate) enum Thunk {
         rest: Arc<Vec<Value>>,
         /// The next index into `rest` once `cur` exhausts.
         idx: usize,
+        /// Outer levels flattened by the iterative descent (#205):
+        /// each frame resumes after its inner concat exhausts.
+        /// Persistent (O(1) clone — see `ConcatFrame`).
+        outer: ConcatStack,
     },
     MapCat {
         outer: Value,
@@ -344,6 +382,25 @@ fn take_seq_state(state: &Mutex<SeqState>) -> SeqState {
     std::mem::replace(&mut *guard, SeqState::Empty)
 }
 
+/// The chain-ward link of an unforced concat: `cur` when it is a
+/// cell (left nests like `(reduce concat ...)` and `mapcat`
+/// tails), else the sole remaining rest input when it is a
+/// sole-owned cell (right nests). Sibling cells unwind through
+/// their own `Drop`, and `outer` through `ConcatFrame::Drop`.
+fn drop_concat_link(cur: Value, rest: &mut Arc<Vec<Value>>, idx: usize) -> Option<Value> {
+    if as_pending(&cur).is_some() {
+        return Some(cur);
+    }
+    if idx + 1 == rest.len() {
+        if let Some(slot) = Arc::get_mut(rest).and_then(|v| v.get_mut(idx)) {
+            if as_pending(slot).is_some() {
+                return Some(std::mem::replace(slot, Value::Nil));
+            }
+        }
+    }
+    None
+}
+
 /// The one chain-ward link of an unforced thunk, if it has exactly
 /// one (`None` drops the whole thunk normally — every nested seq
 /// cell unwinds through its own `Drop`, so those drops stay
@@ -378,15 +435,9 @@ fn drop_thunk_link(thunk: Thunk) -> Option<Value> {
         | Thunk::MapIndexed { input, .. }
         | Thunk::Reductions { input, .. }
         | Thunk::Replace { input, .. } => Some(input),
-        Thunk::Concat { cur, rest, idx } => {
-            if matches!(cur, Value::Nil) {
-                None
-            } else if idx >= rest.len() {
-                Some(cur)
-            } else {
-                None
-            }
-        }
+        Thunk::Concat {
+            cur, mut rest, idx, ..
+        } => drop_concat_link(cur, &mut rest, idx),
         Thunk::MapCat { outer } => Some(outer),
         Thunk::Chain { tail, .. } | Thunk::ChunkHead { tail, .. } => Some(tail),
         Thunk::Thunk0 { .. }
@@ -629,6 +680,7 @@ pub(crate) fn is_seqable(v: &Value) -> bool {
                 || any.downcast_ref::<ConsValue>().is_some()
                 || any.downcast_ref::<KeySeqValue>().is_some()
                 || any.downcast_ref::<ValSeqValue>().is_some()
+                || crate::emucoll::as_list(v).is_some()
         }
         _ => false,
     }
@@ -705,6 +757,31 @@ fn step_entry_unit(eval: &mut Evaluator, v: &Value) -> Result<Option<StepUnit>, 
     Ok(None)
 }
 
+/// Step the late extension hooks (eduction, iteration, and the
+/// `ArrayList` snapshot — same hooks as `seq`, which see for the
+/// arm coupling).
+fn step_unit_extension_tail(eval: &mut Evaluator, v: &Value) -> Result<StepUnit, Signal> {
+    // T1200 D1: walking an eduction steps its lazy transform (same
+    // hook as `seq`, which see for the arm coupling).
+    if let Some((xform, coll)) = crate::xform::Eduction::parts(v) {
+        let s = seq_eduction(eval, xform, coll)?;
+        return step_unit(eval, &s);
+    }
+    // S12: walking an iteration steps its eager-first-step seq
+    // (same hook as `seq`).
+    if let Some(it) = crate::collmisc::as_iteration(v) {
+        let s = crate::collmisc::seq_iteration(eval, it)?;
+        return step_unit(eval, &s);
+    }
+    // #205: walking an `ArrayList` steps its snapshot seq (same
+    // hook as `seq`).
+    if let Some(items) = crate::emucoll::list_snapshot(v) {
+        let s = realized_value(items, false, true, false, clj_value::SeqKind::Array);
+        return step_unit(eval, &s);
+    }
+    Err(eval.throw(iseq_err(v)))
+}
+
 /// Step an extension input.
 fn step_unit_extension(eval: &mut Evaluator, v: &Value) -> Result<StepUnit, Signal> {
     if let Some(p) = as_pending(v) {
@@ -734,19 +811,7 @@ fn step_unit_extension(eval: &mut Evaluator, v: &Value) -> Result<StepUnit, Sign
     if let Some(sv) = as_subvector(v) {
         return step_subvector_unit(sv);
     }
-    // T1200 D1: walking an eduction steps its lazy transform (same
-    // hook as `seq`, which see for the arm coupling).
-    if let Some((xform, coll)) = crate::xform::Eduction::parts(v) {
-        let s = seq_eduction(eval, xform, coll)?;
-        return step_unit(eval, &s);
-    }
-    // S12: walking an iteration steps its eager-first-step seq
-    // (same hook as `seq`).
-    if let Some(it) = crate::collmisc::as_iteration(v) {
-        let s = crate::collmisc::seq_iteration(eval, it)?;
-        return step_unit(eval, &s);
-    }
-    Err(eval.throw(iseq_err(v)))
+    step_unit_extension_tail(eval, v)
 }
 
 /// Step a list (one head plus its tail).
@@ -1107,7 +1172,12 @@ fn step_thunk(eval: &mut Evaluator, thunk: Thunk) -> Result<Forced, Signal> {
         Thunk::Filter { f, input } => step_filter(eval, &f, input, false),
         Thunk::Remove { f, input } => step_filter(eval, &f, input, true),
         Thunk::Take { n, input } => step_take(eval, &n, input),
-        Thunk::Concat { cur, rest, idx } => step_concat(eval, cur, rest, idx),
+        Thunk::Concat {
+            cur,
+            rest,
+            idx,
+            outer,
+        } => step_concat(eval, cur, rest, idx, outer),
         Thunk::MapCat { outer } => step_mapcat(eval, outer),
         Thunk::Chain { head, tail } => step_chain(eval, head, tail),
         Thunk::Thunk0 { body, env } => step_thunk0(eval, &body, &env),
@@ -1656,25 +1726,110 @@ fn step_take(eval: &mut Evaluator, n: &Value, input: Value) -> Result<Forced, Si
     })
 }
 
+/// The content of an unforced `Concat` cell, if `v` is one:
+/// cloned out (O(1): one `Value` plus `Arc`s) so `step_concat`
+/// can descend without disturbing the cell — an aliased inner
+/// still forces normally later, yielding identical items. Forced
+/// cells (memoized chunks) and non-concat pendings answer `None`
+/// and step through the normal path.
+fn unforced_concat_parts(v: &Value) -> Option<(Value, Arc<Vec<Value>>, usize, ConcatStack)> {
+    let cell = as_pending(v)?;
+    let state = cell.state.lock().unwrap_or_else(|e| e.into_inner());
+    match &*state {
+        SeqState::Pending(thunk) => match &**thunk {
+            Thunk::Concat {
+                cur,
+                rest,
+                idx,
+                outer,
+            } => Some((cur.clone(), Arc::clone(rest), *idx, outer.clone())),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Push `inner`'s resume frames above `outer` (bottom-first, so
+/// the inner top stays on top). Fresh tails carry no stack; only
+/// re-chained tails do (shallow in practice, iterative
+/// regardless).
+fn splice_concat_stack(inner: ConcatStack, mut outer: ConcatStack) -> ConcatStack {
+    let mut frames = Vec::new();
+    let mut node = inner;
+    while let Some(frame) = node {
+        frames.push((Arc::clone(&frame.rest), frame.idx));
+        node = frame.parent.clone();
+    }
+    for (rest, idx) in frames.into_iter().rev() {
+        outer = Some(Arc::new(ConcatFrame {
+            rest,
+            idx,
+            parent: outer,
+        }));
+    }
+    outer
+}
+
+/// Pop one resume frame (O(1): two `Arc` clones).
+fn pop_concat_frame(stack: &mut ConcatStack) -> Option<(Arc<Vec<Value>>, usize)> {
+    let frame = stack.take()?;
+    *stack = frame.parent.clone();
+    Some((Arc::clone(&frame.rest), frame.idx))
+}
+
 /// `concat`: pass the first non-empty input's unit through,
 /// chaining its tail back ahead of the rest. The `rest` vec is
 /// shared, never mutated: exhausted inputs advance the index,
 /// and the current input's tail travels in `cur` — every step is
 /// O(1) no matter how many inputs `(apply concat ...)` splices.
+/// Nested unforced concats (`mapcat` tails nest one level per
+/// element) flatten through the explicit `outer` stack instead of
+/// the Rust stack (#205: the old recursion overflowed on large
+/// `for`/`mapcat` inputs).
 fn step_concat(
     eval: &mut Evaluator,
     mut cur: Value,
-    rest: Arc<Vec<Value>>,
+    mut rest: Arc<Vec<Value>>,
     mut idx: usize,
+    mut outer: ConcatStack,
 ) -> Result<Forced, Signal> {
     loop {
+        // Descend into nested unforced concats iteratively,
+        // stashing each resumed level on `outer`. Spent levels
+        // (nothing left past `idx`) push nothing: mapcat tails
+        // always advance past their single input, so the hot path
+        // keeps the stack empty and stays O(1) per step.
+        while let Some((icur, irest, iidx, iouter)) = unforced_concat_parts(&cur) {
+            if rest.get(idx).is_some() {
+                outer = Some(Arc::new(ConcatFrame {
+                    rest,
+                    idx,
+                    parent: outer,
+                }));
+            }
+            outer = splice_concat_stack(iouter, outer);
+            cur = icur;
+            rest = irest;
+            idx = iidx;
+        }
         match step_unit(eval, &cur)? {
             StepUnit::Empty => {
-                let Some(next) = rest.get(idx) else {
-                    return Ok(Forced::Empty);
-                };
-                cur = next.clone();
-                idx += 1;
+                // Advance past the spent `cur`, unwinding spent
+                // levels (a resumed level may itself be spent).
+                loop {
+                    if let Some(next) = rest.get(idx) {
+                        cur = next.clone();
+                        idx += 1;
+                        break;
+                    }
+                    match pop_concat_frame(&mut outer) {
+                        Some((orest, oidx)) => {
+                            rest = orest;
+                            idx = oidx;
+                        }
+                        None => return Ok(Forced::Empty),
+                    }
+                }
             }
             StepUnit::One { head, tail } => {
                 return Ok(Forced::Chunk {
@@ -1683,6 +1838,7 @@ fn step_concat(
                         cur: tail,
                         rest,
                         idx,
+                        outer,
                     }),
                 });
             }
@@ -1693,6 +1849,7 @@ fn step_concat(
                         cur: tail,
                         rest,
                         idx,
+                        outer,
                     }),
                 });
             }
@@ -1742,6 +1899,7 @@ fn splice_first(eval: &mut Evaluator, s: &Value, cont: Value) -> Result<Forced, 
                 cur: tail,
                 rest: Arc::new(vec![cont]),
                 idx: 0,
+                outer: None,
             }),
         }),
         StepUnit::Chunk { items, tail } => Ok(Forced::Chunk {
@@ -1750,6 +1908,7 @@ fn splice_first(eval: &mut Evaluator, s: &Value, cont: Value) -> Result<Forced, 
                 cur: tail,
                 rest: Arc::new(vec![cont]),
                 idx: 0,
+                outer: None,
             }),
         }),
     }
@@ -2032,6 +2191,7 @@ fn step_partition_collect(
                 cur: lazy_window(eval, window)?,
                 rest: Arc::new(vec![pad]),
                 idx: 0,
+                outer: None,
             }),
         });
         return Ok(Forced::Chunk {
@@ -2775,6 +2935,17 @@ fn seq_value_extension(eval: &mut Evaluator, v: &Value) -> Result<Value, Signal>
     if let Some(it) = crate::collmisc::as_iteration(v) {
         return crate::collmisc::seq_iteration(eval, it);
     }
+    // #205: `ArrayList` seqs snapshot the slots (empties answer
+    // nil — `realized_value` holds that shape).
+    if let Some(items) = crate::emucoll::list_snapshot(v) {
+        return Ok(realized_value(
+            items,
+            false,
+            true,
+            false,
+            clj_value::SeqKind::Array,
+        ));
+    }
     Err(eval.throw(iseq_err(v)))
 }
 
@@ -2923,6 +3094,17 @@ pub(crate) fn seq_value(eval: &mut Evaluator, v: &Value) -> Result<Value, Signal
     }
 }
 
+/// The first item of an extension collection (the subvector
+/// head, else the `ArrayList` snapshot head).
+fn first_direct_extension(v: &Value) -> Option<Value> {
+    as_subvector(v)
+        .map(|sv| sv.iter().next().cloned().unwrap_or(Value::Nil))
+        .or_else(|| {
+            crate::emucoll::list_snapshot(v)
+                .map(|items| items.into_iter().next().unwrap_or(Value::Nil))
+        })
+}
+
 /// The first item of a directly-readable collection (`None` for
 /// anything else, including seq values and unseqables).
 fn first_direct(v: &Value) -> Option<Value> {
@@ -2954,9 +3136,7 @@ fn first_direct(v: &Value) -> Option<Value> {
                 .map(|(k, val)| clj_value::map_entry(k.clone(), val.clone()))
                 .unwrap_or(Value::Nil)
         }),
-        Value::Extension(_) => {
-            as_subvector(v).map(|sv| sv.iter().next().cloned().unwrap_or(Value::Nil))
-        }
+        Value::Extension(_) => first_direct_extension(v),
         _ => None,
     }
 }
@@ -3297,7 +3477,8 @@ fn equiv_map_vals(eval: &mut Evaluator, x: &Map, y: &Map) -> Result<bool, Signal
         if is_hash_uoe(k) {
             return Err(eval.throw(uoe()));
         }
-        let Some(w) = y.get(k) else {
+        let k = realize_key(eval, k)?;
+        let Some(w) = y.get(&k) else {
             return Ok(false);
         };
         if !equiv_vals(eval, v, w)? {
@@ -3360,6 +3541,20 @@ pub(crate) fn equiv_vals(eval: &mut Evaluator, a: &Value, b: &Value) -> Result<b
         return equiv_set_vals(eval, x, y);
     }
     Ok(a == b)
+}
+
+/// Realize a prospective map/set key (the key invariant):
+/// pending seqs deep-realize to `RealizedSeq` (which compares
+/// by content under `PartialEq`/`Hash`, like the JVM's memoized
+/// `LazySeq.equals`/`hashCode`); anything else passes through
+/// untouched. Every map/set key boundary funnels here so stored
+/// and lookup keys always agree — without it, `(frequencies
+/// (partition …))` never merges (#205 bpe-tokenizer).
+pub(crate) fn realize_key(eval: &mut Evaluator, k: &Value) -> Result<Value, Signal> {
+    if let Some(p) = as_pending(k) {
+        return realize_pending_deep(eval, k, p);
+    }
+    Ok(k.clone())
 }
 
 /// Deep-realize a pending seq into a realized one (metadata preserved).
@@ -3599,6 +3794,7 @@ pub(crate) fn concat_thunk(inputs: Vec<Value>) -> Value {
         cur,
         rest: Arc::new(inputs.collect()),
         idx: 0,
+        outer: None,
     })
 }
 

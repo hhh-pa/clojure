@@ -3504,7 +3504,7 @@ fn native_rationalize(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, Na
 }
 
 /// A `NumberFormatException` for a message.
-fn number_format(message: impl Into<String>) -> NativeError {
+pub(crate) fn number_format(message: impl Into<String>) -> NativeError {
     NativeError::new(ThrowClass::NumberFormatException, message.into())
 }
 

@@ -169,7 +169,20 @@ pub struct Evaluator {
     root_cache: FxHashMap<u64, Value>,
     /// The lineage epoch [`root_cache`](Self::root_cache) was filled under.
     root_epoch: u64,
+    /// Pending closure applications (#205): the JVM's bounded
+    /// stack as a catchable `StackOverflowError` instead of a
+    /// process abort. STM retries restore the entry depth (see
+    /// `sync_begin`), like the bindings stack.
+    pub(crate) call_depth: usize,
 }
+
+/// Pending closure applications past this point throw the
+/// catchable `StackOverflowError` (#205): JVM-plausible (real
+/// stacks hold thousands of Clojure frames), far above
+/// legitimate suite depths (hundreds), and — at the measured
+/// worst case of ~20 KiB per heavy frame — below real
+/// overflow on the 256 MiB algorithms worker (~100 MiB).
+pub(crate) const MAX_CALL_DEPTH: usize = 5_000;
 
 /// A `defmacro` definition's parts (bundles `eval_defmacro`'s
 /// parameters).
@@ -219,6 +232,7 @@ impl Evaluator {
             canonical_default_readers: None,
             root_cache: FxHashMap::default(),
             root_epoch: 0,
+            call_depth: 0,
         }
     }
 
@@ -267,6 +281,8 @@ impl Evaluator {
             // any other evaluator's).
             root_cache: FxHashMap::default(),
             root_epoch: self.registry.epoch(),
+            // A fork starts unwound (its stack is its own).
+            call_depth: 0,
         }
     }
 
@@ -1022,6 +1038,7 @@ impl Evaluator {
         for (k, v) in pairs {
             let key = self.eval(k, env)?;
             let val = self.eval(v, env)?;
+            let key = crate::lazy::realize_key(self, &key)?;
             out = out.insert(key, val);
         }
         Ok(Value::Map(out.with_meta(meta)))
@@ -1036,7 +1053,9 @@ impl Evaluator {
     ) -> Result<Value, Signal> {
         let mut out = clj_value::new_set();
         for elem in elems {
-            out = out.insert(self.eval(elem, env)?);
+            let elem = self.eval(elem, env)?;
+            let elem = crate::lazy::realize_key(self, &elem)?;
+            out = out.insert(elem);
         }
         Ok(Value::Set(out.with_meta(meta)))
     }
@@ -2063,6 +2082,26 @@ impl Evaluator {
     /// the call (popped in a `finally`, like the JVM's
     /// `resetThreadBindingFrame`).
     fn apply_closure(&mut self, closure: &Closure, args: &[Value]) -> Result<Value, Signal> {
+        // The #205 call-depth guard: infinite recursion throws
+        // the catchable `StackOverflowError` (like the JVM)
+        // instead of aborting the process. Every unbounded
+        // application path (closures, host methods, multimethod
+        // targets, forced thunks) funnels through here; `loop` /
+        // `recur` never touch the counter (they iterate).
+        if self.call_depth >= MAX_CALL_DEPTH {
+            return Err(self.throw(NativeError::new(
+                ThrowClass::StackOverflowError,
+                String::new(),
+            )));
+        }
+        self.call_depth += 1;
+        let result = self.apply_closure_frame(closure, args);
+        self.call_depth -= 1;
+        result
+    }
+
+    /// The conveyed-bindings frame behind [`apply_closure`](Self::apply_closure).
+    fn apply_closure_frame(&mut self, closure: &Closure, args: &[Value]) -> Result<Value, Signal> {
         if let Some(conveyed) = closure.conveyed.clone() {
             let depth = self.bindings.depth();
             let frame: Vec<(Var, Value)> = conveyed

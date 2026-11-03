@@ -1369,3 +1369,34 @@ fn ns_import_clause_201() {
         "clojure.lang.ExceptionInfo | Call to clojure.core/ns did not conform to spec."
     );
 }
+
+#[test]
+fn ns_import_clause_vector_specs_205() {
+    let mut eval = boot();
+    // Vector package lists import exactly like list ones (the JVM
+    // takes both shapes).
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(do (ns t205v (:import [java.util ArrayList])) (str ArrayList))"
+        ),
+        "\"class java.util.ArrayList\""
+    );
+    // Multiple classes per vector.
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(do (ns t205w (:import [java.util PriorityQueue Comparator])) (str Comparator))"
+        ),
+        "\"interface java.util.Comparator\""
+    );
+    // Malformed vectors replay the macro's ex-info text.
+    assert_eq!(
+        uncaught(&mut eval, "(ns t205x (:import [java.util]))"),
+        "clojure.lang.ExceptionInfo | Call to clojure.core/import did not conform to spec."
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(ns t205y (:import [java.util 42]))"),
+        "clojure.lang.ExceptionInfo | Call to clojure.core/import did not conform to spec."
+    );
+}

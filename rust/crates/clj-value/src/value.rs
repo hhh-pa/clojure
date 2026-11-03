@@ -269,7 +269,7 @@ pub struct Vector {
 pub struct Map {
     inner: RpdsMap,
     meta: Option<Arc<Map>>,
-    keys: Vec<Value>,
+    keys: RpdsVector,
     hashy: bool,
     sort: Option<SortSpec>,
     id: u64,
@@ -296,7 +296,7 @@ pub enum SortSpec {
 pub struct Set {
     inner: RpdsSet,
     meta: Option<Arc<Map>>,
-    members: Vec<Value>,
+    members: RpdsVector,
     sort: Option<SortSpec>,
     id: u64,
 }
@@ -534,7 +534,7 @@ impl Map {
         let size = self.inner.size();
         let promote = !self.hashy && (size >= 64 || (size >= 8 && !matches!(k, Value::Keyword(_))));
         let mut keys = self.keys;
-        keys.push(k.clone());
+        keys.push_back_mut(k.clone());
         self.inner.insert_mut(k, v);
         Self {
             inner: self.inner,
@@ -555,12 +555,17 @@ impl Map {
         if self.inner.get(k).is_none() {
             return self;
         }
-        self.keys.retain(|key| key != k);
+        let mut keys = RpdsVector::new_sync();
+        for key in self.keys.iter() {
+            if key != k {
+                keys.push_back_mut(key.clone());
+            }
+        }
         self.inner.remove_mut(k);
         Self {
             inner: self.inner,
             meta: self.meta,
-            keys: self.keys,
+            keys,
             hashy: self.hashy,
             sort: self.sort,
             id: next_map_id(),
@@ -602,10 +607,11 @@ impl Map {
     }
 
     /// Keys in iteration order (insertion order, or comparator
-    /// order when sorted).
+    /// order when sorted). Owned: the sidecar is a persistent
+    /// vector, so only sorted paths (already linear) snapshot it.
     #[must_use]
-    pub fn ordered_keys(&self) -> &[Value] {
-        &self.keys
+    pub fn ordered_keys(&self) -> Vec<Value> {
+        self.keys.iter().cloned().collect()
     }
 
     /// Rebuild from explicitly ordered entries, preserving metadata
@@ -613,9 +619,9 @@ impl Map {
     #[must_use]
     pub fn with_ordered_entries(self, entries: Vec<(Value, Value)>) -> Self {
         let mut inner = RpdsMap::new_with_hasher_and_ptr_kind(FxBuildHasher::default());
-        let mut keys = Vec::with_capacity(entries.len());
+        let mut keys = RpdsVector::new_sync();
         for (k, v) in entries {
-            keys.push(k.clone());
+            keys.push_back_mut(k.clone());
             inner.insert_mut(k, v);
         }
         Self {
@@ -705,7 +711,7 @@ impl Set {
             self
         } else {
             let mut members = self.members;
-            members.push(v.clone());
+            members.push_back_mut(v.clone());
             self.inner.insert_mut(v);
             Self {
                 inner: self.inner,
@@ -738,12 +744,17 @@ impl Set {
         if !self.inner.contains(v) {
             return self;
         }
-        self.members.retain(|m| m != v);
+        let mut members = RpdsVector::new_sync();
+        for m in self.members.iter() {
+            if m != v {
+                members.push_back_mut(m.clone());
+            }
+        }
         self.inner.remove_mut(v);
         Self {
             inner: self.inner,
             meta: self.meta,
-            members: self.members,
+            members,
             sort: self.sort,
             id: next_set_id(),
         }
@@ -788,10 +799,11 @@ impl Set {
     }
 
     /// Members in iteration order (insertion order, or comparator
-    /// order when sorted).
+    /// order when sorted). Owned: only sorted paths (already
+    /// linear) snapshot the persistent sidecar.
     #[must_use]
-    pub fn ordered_members(&self) -> &[Value] {
-        &self.members
+    pub fn ordered_members(&self) -> Vec<Value> {
+        self.members.iter().cloned().collect()
     }
 
     /// Rebuild from explicitly ordered members, preserving metadata
@@ -799,9 +811,12 @@ impl Set {
     #[must_use]
     pub fn with_ordered_members(self, members: Vec<Value>) -> Self {
         let mut inner = RpdsSet::new_with_hasher_with_ptr_kind(FxBuildHasher::default());
+        let mut kept = RpdsVector::new_sync();
         for v in &members {
+            kept.push_back_mut(v.clone());
             inner.insert_mut(v.clone());
         }
+        let members = kept;
         Self {
             inner,
             meta: self.meta,
@@ -915,7 +930,7 @@ pub fn new_map() -> Map {
     Map {
         inner: RpdsMap::new_with_hasher_and_ptr_kind(FxBuildHasher::default()),
         meta: None,
-        keys: Vec::new(),
+        keys: RpdsVector::new_sync(),
         hashy: false,
         sort: None,
         id: next_map_id(),
@@ -928,7 +943,7 @@ pub fn new_set() -> Set {
     Set {
         inner: RpdsSet::new_with_hasher_with_ptr_kind(FxBuildHasher::default()),
         meta: None,
-        members: Vec::new(),
+        members: RpdsVector::new_sync(),
         sort: None,
         id: next_set_id(),
     }
@@ -2649,6 +2664,54 @@ mod tests {
             super::Map::from_kvs_checked(vec![(kw("a"), Value::Int(2)), (kw("b"), Value::Int(1))])
                 .unwrap();
         assert_hash_consistent(&Value::Map(a), &Value::Map(b));
+    }
+
+    #[test]
+    fn persistent_sidecar_without_and_snapshot() {
+        // `dissoc` drops the key from the sidecar, keeps the rest in
+        // order; a missing key is a no-op.
+        let m = super::new_map()
+            .insert(kw("a"), Value::Int(1))
+            .insert(kw("b"), Value::Int(2))
+            .insert(kw("c"), Value::Int(3));
+        let dropped = m.clone().without(&kw("b"));
+        assert_eq!(dropped.ordered_keys(), vec![kw("a"), kw("c")]);
+        assert_eq!(dropped.size(), 2);
+        let kept = m.clone().without(&kw("zzz"));
+        assert_eq!(kept.ordered_keys(), m.ordered_keys());
+        // Clones share structure: writing through a clone never
+        // mutates the original.
+        let grown = m.clone().insert(kw("d"), Value::Int(4));
+        assert_eq!(m.ordered_keys(), vec![kw("a"), kw("b"), kw("c")]);
+        assert_eq!(grown.get(&kw("c")), Some(&Value::Int(3)));
+        // Explicit rebuilds restore the given order.
+        let rebuilt =
+            m.with_ordered_entries(vec![(kw("c"), Value::Int(30)), (kw("a"), Value::Int(10))]);
+        assert_eq!(rebuilt.ordered_keys(), vec![kw("c"), kw("a")]);
+        assert_eq!(rebuilt.get(&kw("a")), Some(&Value::Int(10)));
+        // Sets mirror maps: `disj` rebuilds, snapshots clone.
+        let s = super::new_set()
+            .insert(Value::Int(1))
+            .insert(Value::Int(2))
+            .insert(Value::Int(3));
+        let s_dropped = s.clone().without(&Value::Int(2));
+        assert_eq!(
+            s_dropped.ordered_members(),
+            vec![Value::Int(1), Value::Int(3)]
+        );
+        let s_kept = s.clone().without(&Value::Int(99));
+        assert_eq!(s_kept.ordered_members(), s.ordered_members());
+        let s_grown = s.clone().insert(Value::Int(4));
+        assert_eq!(
+            s.ordered_members(),
+            vec![Value::Int(1), Value::Int(2), Value::Int(3)]
+        );
+        assert_eq!(s_grown.size(), 4);
+        let s_rebuilt = s.with_ordered_members(vec![Value::Int(3), Value::Int(1)]);
+        assert_eq!(
+            s_rebuilt.ordered_members(),
+            vec![Value::Int(3), Value::Int(1)]
+        );
     }
 
     #[test]

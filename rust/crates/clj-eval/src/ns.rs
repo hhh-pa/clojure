@@ -1297,8 +1297,8 @@ pub(crate) fn fs_err(path: &str, e: &std::io::Error) -> NativeError {
 }
 
 /// The `*load-path*` directories (seqable, lenient nil; entries must
-/// be strings).
-fn load_dirs(eval: &Evaluator) -> Result<Vec<String>, NativeError> {
+/// be strings). Shared with `io/resource` (#205).
+pub(crate) fn load_dirs(eval: &Evaluator) -> Result<Vec<String>, NativeError> {
     let v = deref_core(eval, "*load-path*");
     let items = seq_vec(&v).ok_or_else(|| cast_err(&v, "clojure.lang.IPersistentVector"))?;
     let mut out = Vec::new();
@@ -2096,11 +2096,12 @@ fn import_spec_error() -> NativeError {
     )
 }
 
-/// One `(package Class*)` import list: every element is a bare
-/// symbol and at least the package plus one class are present.
-fn import_package_list(eval: &mut Evaluator, l: &List) -> Result<Value, NativeError> {
+/// One `(package Class*)` import list (either sequential shape —
+/// the JVM takes lists and vectors alike): every element is a
+/// bare symbol and at least the package plus one class are
+/// present.
+fn import_package_list(eval: &mut Evaluator, parts: &[&Value]) -> Result<Value, NativeError> {
     use crate::classemu::import_class;
-    let parts: Vec<&Value> = l.iter().collect();
     let ok = parts.len() >= 2
         && parts
             .iter()
@@ -2119,6 +2120,12 @@ fn import_package_list(eval: &mut Evaluator, l: &List) -> Result<Value, NativeEr
 
 fn import_one_spec(eval: &mut Evaluator, spec: &Value) -> Result<Value, NativeError> {
     use crate::classemu::import_class;
+    // Vectors are package lists directly (the `(quote x)` strip
+    // below is list-only: a vector IS the spec, never a form).
+    if let Value::Vector(x) = spec {
+        let parts: Vec<&Value> = x.iter().collect();
+        return import_package_list(eval, &parts);
+    }
     let items: Vec<&Value> = match spec {
         Value::List(l) => l.iter().collect(),
         _ => Vec::new(),
@@ -2130,7 +2137,10 @@ fn import_one_spec(eval: &mut Evaluator, spec: &Value) -> Result<Value, NativeEr
     };
     match bare {
         Value::Symbol(s) if s.namespace().is_none() => import_class(eval, &sym_str(s)),
-        Value::List(l) => import_package_list(eval, l),
+        Value::List(l) => {
+            let parts: Vec<&Value> = l.iter().collect();
+            import_package_list(eval, &parts)
+        }
         _ => Err(import_spec_error()),
     }
 }

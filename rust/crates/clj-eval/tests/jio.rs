@@ -1625,14 +1625,14 @@ fn load_reader_past_close_is_stream_closed() {
 // --- namespace shape ---
 
 #[test]
-fn ns_surface_is_six_publics() {
+fn ns_surface_is_seven_publics() {
     let mut eval = jio();
     assert_eq!(
         run(
             &mut eval,
             "(mapv str (sort (keys (ns-publics 'clojure.java.io))))"
         ),
-        r#"["delete-file" "file" "input-stream" "output-stream" "reader" "writer"]"#
+        r#"["delete-file" "file" "input-stream" "output-stream" "reader" "resource" "writer"]"#
     );
     // Reloading reinstalls cleanly.
     assert_eq!(run(&mut eval, "(require 'clojure.java.io :reload)"), "nil");
@@ -1641,6 +1641,6 @@ fn ns_surface_is_six_publics() {
             &mut eval,
             "(mapv str (sort (keys (ns-publics 'clojure.java.io))))"
         ),
-        r#"["delete-file" "file" "input-stream" "output-stream" "reader" "writer"]"#
+        r#"["delete-file" "file" "input-stream" "output-stream" "reader" "resource" "writer"]"#
     );
 }

@@ -25,7 +25,7 @@ use std::sync::Arc;
 
 use clj_value::{
     Atom, HostDef, HostInst, HostKind, HostMethod, HostVal, Map, PrintOpts, Symbol, ThrowClass,
-    Value, class_name, fallback_str, find_method, is_field, new_map, pr_to_string,
+    Throwable, Value, class_name, fallback_str, find_method, is_field, new_map, pr_to_string,
 };
 
 use crate::core::cce_err;
@@ -137,7 +137,28 @@ pub(crate) fn hostdef_by_name(eval: &Evaluator, name: &str) -> Option<Arc<HostDe
         return None;
     }
     let dotted = Symbol::new(None, name);
-    match lookup_root(eval, &dotted) {
+    if let Some(d) = hostdef_of_root(lookup_root(eval, &dotted)) {
+        return Some(d);
+    }
+    // Munged binary names (dashes became underscores): retry with
+    // the namespace demunged (#205: `instance?` on records in
+    // dashed namespaces, e.g.
+    // `...dual_number_automatic_differentiation.Dual`). Exact
+    // wins — a literal-underscore namespace keeps its own type
+    // (the JVM collides these too).
+    match name.rsplit_once('.') {
+        Some((ns_part, name_part)) if ns_part.contains('_') => {
+            let demunged = format!("{}.{}", ns_part.replace('_', "-"), name_part);
+            hostdef_of_root(lookup_root(eval, &Symbol::new(None, demunged.as_str())))
+        }
+        _ => None,
+    }
+}
+
+/// A root value as a descriptor (definitions only — instances
+/// and anything else are not types).
+fn hostdef_of_root(root: Option<Value>) -> Option<Arc<HostDef>> {
+    match root {
         Some(Value::HostType(h)) => match h.as_ref() {
             HostVal::Def(d) => Some(d.clone()),
             HostVal::Inst(_) => None,
@@ -247,6 +268,26 @@ fn closeable_def() -> Arc<HostDef> {
     })
 }
 
+/// The `java.util.Comparator` contract as an interface descriptor
+/// (#205 — the `closeable_def` shape): `compare/2`, no interop
+/// import needed.
+fn comparator_def() -> Arc<HostDef> {
+    let mut sigs = HashMap::new();
+    sigs.insert(Arc::from("compare"), vec![2usize]);
+    Arc::new(HostDef {
+        name: Arc::from("java.util.Comparator"),
+        kind: HostKind::Interface,
+        fields: Vec::new(),
+        methods: HashMap::new(),
+        interfaces: Vec::new(),
+        prefix: None,
+        impl_ns: None,
+        sigs,
+        takes_this: true,
+        struct_keys: Vec::new(),
+    })
+}
+
 /// An interface-list entry: bare `Object` names the fence
 /// superclass (skipped — its methods are the `object_method` set,
 /// so `(defrecord R [x] Object (toString …))` keeps working);
@@ -256,19 +297,41 @@ fn closeable_def() -> Arc<HostDef> {
 /// anything else must resolve to an interface.
 fn resolve_iface_sym(eval: &mut Evaluator, s: &Value) -> Result<Option<Arc<HostDef>>, NativeError> {
     let sym = sym_arg(s)?;
-    if sym.namespace().is_none() && sym.name() == "Object" {
+    if is_object_sym(&sym) {
         return Ok(None);
     }
-    if sym.namespace().is_none() && sym.name() == "Closeable"
-        || sym.namespace().is_none() && sym.name() == "java.io.Closeable"
-        || sym.namespace().is_some_and(|n| n == "java.io") && sym.name() == "Closeable"
-    {
+    if is_closeable_sym(&sym) {
         return Ok(Some(closeable_def()));
+    }
+    if is_comparator_sym(&sym) {
+        return Ok(Some(comparator_def()));
     }
     if let Some(p) = crate::protocol::proto_of(eval, &sym) {
         return Ok(Some(crate::protocol::proto_interface(&p.map)));
     }
     resolve_iface(eval, &sym).map(Some)
+}
+
+/// The fenced superclass name (split from [`resolve_iface_sym`]
+/// for the complexity budget).
+fn is_object_sym(sym: &Symbol) -> bool {
+    sym.namespace().is_none() && sym.name() == "Object"
+}
+
+/// The close-contract spellings (split from [`resolve_iface_sym`]
+/// for the complexity budget).
+fn is_closeable_sym(sym: &Symbol) -> bool {
+    sym.namespace().is_none() && sym.name() == "Closeable"
+        || sym.namespace().is_none() && sym.name() == "java.io.Closeable"
+        || sym.namespace().is_some_and(|n| n == "java.io") && sym.name() == "Closeable"
+}
+
+/// The comparator-contract spellings (split from
+/// [`resolve_iface_sym`] for the complexity budget).
+fn is_comparator_sym(sym: &Symbol) -> bool {
+    sym.namespace().is_none() && sym.name() == "Comparator"
+        || sym.namespace().is_none() && sym.name() == "java.util.Comparator"
+        || sym.namespace().is_some_and(|n| n == "java.util") && sym.name() == "Comparator"
 }
 
 /// `Object` methods a body may define without an interface (the
@@ -633,7 +696,11 @@ fn new_via_symbol(
 /// `new-missing-fq`); anything else is `Unable to resolve
 /// classname` (oracles `ctor-missing-simple`, `new-missing-simple`,
 /// `m-new-qual*`).
-fn new_unresolved(eval: &Evaluator, sym: &Symbol, args: &[Value]) -> Result<Value, NativeError> {
+fn new_unresolved(
+    eval: &mut Evaluator,
+    sym: &Symbol,
+    args: &[Value],
+) -> Result<Value, NativeError> {
     if sym.namespace().is_none() && crate::classemu::is_class_position(sym.name()) {
         if let Some(class) = crate::classemu::resolve_class_name(eval, sym.name()) {
             return new_via_class(eval, class.name(), args);
@@ -654,15 +721,15 @@ fn new_unresolved(eval: &Evaluator, sym: &Symbol, args: &[Value]) -> Result<Valu
 /// names construct (interfaces miss), anything else is the
 /// uniform miss — `for interface` iff the lattice says so
 /// (oracles `ctor-iface`, `ctor-abstract`, `ctor-private`).
-fn new_via_class(eval: &Evaluator, name: &str, args: &[Value]) -> Result<Value, NativeError> {
-    if name == "java.lang.String" {
-        return crate::ctor::build_string(args);
+fn new_via_class(eval: &mut Evaluator, name: &str, args: &[Value]) -> Result<Value, NativeError> {
+    if let Some(built) = new_via_class_core(eval, name, args) {
+        return built;
     }
-    if name == "java.lang.Object" {
-        return crate::ctor::build_object(args);
+    if let Some(built) = new_via_class_extra(eval, name, args) {
+        return built;
     }
-    if name == "java.lang.StringBuilder" {
-        return crate::ctor::build_string_builder(args);
+    if let Some(class) = throw_class_for_name(name) {
+        return new_throwable(eval, class, name, args);
     }
     match hostdef_by_name(eval, name) {
         Some(def) => new_via_def(&def, args),
@@ -670,6 +737,134 @@ fn new_via_class(eval: &Evaluator, name: &str, args: &[Value]) -> Result<Value, 
             name,
             crate::classemu::lattice_is_iface(name),
         )),
+    }
+}
+
+/// The core allow-listed builds (split from [`new_via_class`]
+/// for the complexity budget): `None` falls through to the
+/// next dispatch stage.
+fn new_via_class_core(
+    eval: &mut Evaluator,
+    name: &str,
+    args: &[Value],
+) -> Option<Result<Value, NativeError>> {
+    if name == "java.lang.String" {
+        return Some(crate::ctor::build_string(args));
+    }
+    if name == "java.lang.Object" {
+        return Some(crate::ctor::build_object(args));
+    }
+    if name == "java.lang.StringBuilder" {
+        return Some(crate::ctor::build_string_builder(args));
+    }
+    if name == "java.util.Random" {
+        return Some(crate::emurand::build_random(args));
+    }
+    if name == "java.security.SecureRandom" {
+        return Some(crate::emurand::build_secure_random(args));
+    }
+    if name == "java.math.BigInteger" {
+        return Some(crate::ctor::build_biginteger(args));
+    }
+    if name == "java.math.BigDecimal" {
+        return Some(crate::ctor::build_bigdecimal(args));
+    }
+    if name == "java.math.MathContext" {
+        return Some(crate::ctor::build_mathcontext(eval, args));
+    }
+    None
+}
+
+/// The extended allow-listed builds (split from [`new_via_class`]
+/// for the complexity budget): `None` falls through to the
+/// throwable and `HostDef` stages.
+fn new_via_class_extra(
+    eval: &mut Evaluator,
+    name: &str,
+    args: &[Value],
+) -> Option<Result<Value, NativeError>> {
+    if name == "java.net.URI" {
+        return Some(crate::ctor::build_uri(args));
+    }
+    if name == "java.io.File" {
+        return Some(crate::ctor::build_file(eval, args));
+    }
+    if name == "java.io.FileInputStream" {
+        return Some(crate::ctor::build_file_input_stream(eval, args));
+    }
+    if name == "java.io.FileOutputStream" {
+        return Some(crate::ctor::build_file_output_stream(eval, args));
+    }
+    if name == "java.io.StringWriter" {
+        return Some(crate::ctor::build_string_writer(eval, args));
+    }
+    if name == "java.util.ArrayDeque" {
+        return Some(crate::emucoll::build_deque(eval, args));
+    }
+    if name == "java.util.ArrayList" {
+        return Some(crate::emucoll::build_list(eval, args));
+    }
+    if name == "java.util.PriorityQueue" {
+        return Some(crate::emucoll::build_pqueue(eval, args));
+    }
+    None
+}
+
+/// Throwable classes with constructor support (#205): every
+/// exception/error the algorithms suite builds.
+fn throw_class_for_name(name: &str) -> Option<ThrowClass> {
+    Some(match name {
+        "java.lang.Exception" => ThrowClass::Exception,
+        "java.lang.IllegalArgumentException" => ThrowClass::IllegalArgumentException,
+        "java.lang.UnsupportedOperationException" => ThrowClass::UnsupportedOperationException,
+        "java.lang.IndexOutOfBoundsException" => ThrowClass::IndexOutOfBoundsException,
+        "java.lang.ArithmeticException" => ThrowClass::ArithmeticException,
+        "java.lang.AssertionError" => ThrowClass::AssertionError,
+        _ => return None,
+    })
+}
+
+/// `(Ex. …)` (#205): the 0/1/2-arg `Throwable` shapes — bare,
+/// message-or-cause, message-plus-cause. A nil single arg is
+/// ambiguous (`(String)` vs `(Throwable)`); anything else
+/// mistyped is the uniform miss.
+fn new_throwable(
+    eval: &mut Evaluator,
+    class: ThrowClass,
+    name: &str,
+    args: &[Value],
+) -> Result<Value, NativeError> {
+    let (message, cause) = match args {
+        [] => (None, None),
+        [Value::Str(s)] => (Some(Arc::from(s.as_ref())), None),
+        [Value::Throwable(t)] => (Some(throwable_string(t)), Some(t.clone())),
+        [Value::Nil] => {
+            return Err(NativeError::new(
+                ThrowClass::IllegalArgumentException,
+                format!("More than one matching method found: {name}"),
+            ));
+        }
+        [_] => return Err(crate::ctor::no_ctor(name, false)),
+        [Value::Str(s), Value::Throwable(t)] => (Some(Arc::from(s.as_ref())), Some(t.clone())),
+        [Value::Str(s), Value::Nil] => (Some(Arc::from(s.as_ref())), None),
+        [_, _] => return Err(crate::ctor::no_ctor(name, false)),
+        _ => return Err(crate::ctor::no_ctor(name, false)),
+    };
+    Ok(Value::Throwable(Throwable {
+        id: eval.next_id(),
+        class,
+        message,
+        data: None,
+        cause: cause.map(Box::new),
+    }))
+}
+
+/// A throwable's `toString` (`Class: message`, bare class when
+/// messageless — the 1-arg cause shape's message).
+fn throwable_string(t: &Throwable) -> Arc<str> {
+    match &t.message {
+        Some(m) => Arc::from(format!("{}: {m}", t.class.jvm_name()).as_str()),
+        None => Arc::from(t.class.jvm_name()),
     }
 }
 

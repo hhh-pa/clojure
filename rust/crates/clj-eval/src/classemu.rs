@@ -32,10 +32,12 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use clj_value::{
-    ClassVal, ExtensionValue, HostDef, HostKind, HostVal, Keyword, List, Map, SeqKind, Symbol,
-    ThrowClass, Value, Vector, new_map, new_set,
+    Array, ArrayDesc, ArrayStore, BaseType, BigDec, ClassVal, ExtensionValue, HostDef, HostKind,
+    HostVal, Keyword, List, Map, MathContext, RoundingMode, SeqKind, Symbol, ThrowClass, Value,
+    Vector, bigdec_result, new_map, new_set,
 };
 use num_traits::ToPrimitive;
+use rand::Rng;
 
 use crate::error::{NativeError, jvm_class_of, simple_name_of};
 use crate::eval::Evaluator;
@@ -81,8 +83,9 @@ struct StaticRow {
 /// nonexistent MissingFormatConversionException, and
 /// NoSuchElementException for the S16 getFirst/getLast variant),
 /// the two unprobed import-only rows (`java.util.Calendar`,
-/// `java.sql.Date`), and the 72 #74 rows (65 defaults + 7 closure,
-/// JDK 21 declarations).
+/// `java.sql.Date`), the 72 #74 rows (65 defaults + 7 closure,
+/// JDK 21 declarations), and the #205 emulation rows (JDK 21
+/// declarations, appended at the table's end).
 const STATIC_LATTICE: &[StaticRow] = &[
     StaticRow {
         name: "clojure.core.Eduction",
@@ -940,9 +943,28 @@ const STATIC_LATTICE: &[StaticRow] = &[
         bases: &["java.lang.AutoCloseable"],
     },
     StaticRow {
+        name: "java.io.File",
+        iface: false,
+        bases: &[
+            "java.lang.Object",
+            "java.io.Serializable",
+            "java.lang.Comparable",
+        ],
+    },
+    StaticRow {
+        name: "java.io.FileInputStream",
+        iface: false,
+        bases: &["java.io.InputStream"],
+    },
+    StaticRow {
         name: "java.io.FileNotFoundException",
         iface: false,
         bases: &["java.io.IOException"],
+    },
+    StaticRow {
+        name: "java.io.FileOutputStream",
+        iface: false,
+        bases: &["java.io.OutputStream"],
     },
     StaticRow {
         name: "java.io.FilterReader",
@@ -958,6 +980,16 @@ const STATIC_LATTICE: &[StaticRow] = &[
         name: "java.io.IOException",
         iface: false,
         bases: &["java.lang.Exception"],
+    },
+    StaticRow {
+        name: "java.io.InputStream",
+        iface: false,
+        bases: &["java.lang.Object", "java.io.Closeable"],
+    },
+    StaticRow {
+        name: "java.io.OutputStream",
+        iface: false,
+        bases: &["java.lang.Object", "java.io.Closeable", "java.io.Flushable"],
     },
     StaticRow {
         name: "java.io.OutputStreamWriter",
@@ -1267,6 +1299,16 @@ const STATIC_LATTICE: &[StaticRow] = &[
         name: "java.math.BigInteger",
         iface: false,
         bases: &["java.lang.Number", "java.lang.Comparable"],
+    },
+    StaticRow {
+        name: "java.math.MathContext",
+        iface: false,
+        bases: &["java.lang.Object", "java.io.Serializable"],
+    },
+    StaticRow {
+        name: "java.math.RoundingMode",
+        iface: false,
+        bases: &["java.lang.Enum"],
     },
     // Import-only (unprobed; ancestry verified live on the JVM):
     // `i-conflict-class` needs a second `Date` to collide with.
@@ -1743,6 +1785,11 @@ const STATIC_LATTICE: &[StaticRow] = &[
         bases: &["java.lang.VirtualMachineError"],
     },
     StaticRow {
+        name: "java.lang.VirtualMachineError",
+        iface: false,
+        bases: &["java.lang.Error"],
+    },
+    StaticRow {
         name: "java.lang.Override",
         iface: true,
         bases: &["java.lang.annotation.Annotation"],
@@ -1977,6 +2024,145 @@ const STATIC_LATTICE: &[StaticRow] = &[
         iface: true,
         bases: &[],
     },
+    // #205: the algorithms suite's emulated classes (JDK 21
+    // declarations; bases transcribed like the oracle rows).
+    StaticRow {
+        name: "java.util.Random",
+        iface: false,
+        bases: &[
+            "java.lang.Object",
+            "java.util.random.RandomGenerator",
+            "java.io.Serializable",
+        ],
+    },
+    StaticRow {
+        name: "java.security.SecureRandom",
+        iface: false,
+        bases: &["java.util.Random"],
+    },
+    StaticRow {
+        name: "java.time.LocalDate",
+        iface: false,
+        bases: &[
+            "java.lang.Object",
+            "java.time.temporal.Temporal",
+            "java.time.temporal.TemporalAdjuster",
+            "java.time.chrono.ChronoLocalDate",
+            "java.io.Serializable",
+        ],
+    },
+    StaticRow {
+        name: "java.time.LocalDateTime",
+        iface: false,
+        bases: &[
+            "java.lang.Object",
+            "java.time.temporal.Temporal",
+            "java.time.temporal.TemporalAdjuster",
+            "java.time.chrono.ChronoLocalDateTime",
+            "java.io.Serializable",
+        ],
+    },
+    StaticRow {
+        name: "java.time.Instant",
+        iface: false,
+        bases: &[
+            "java.lang.Object",
+            "java.time.temporal.Temporal",
+            "java.time.temporal.TemporalAdjuster",
+            "java.lang.Comparable",
+            "java.io.Serializable",
+        ],
+    },
+    StaticRow {
+        name: "java.time.ZoneOffset",
+        iface: false,
+        bases: &[
+            "java.time.ZoneId",
+            "java.time.temporal.TemporalAccessor",
+            "java.time.temporal.TemporalAdjuster",
+            "java.lang.Comparable",
+            "java.io.Serializable",
+        ],
+    },
+    StaticRow {
+        name: "java.time.ZonedDateTime",
+        iface: false,
+        bases: &[
+            "java.lang.Object",
+            "java.time.temporal.Temporal",
+            "java.time.chrono.ChronoZonedDateTime",
+            "java.io.Serializable",
+        ],
+    },
+    StaticRow {
+        name: "java.time.DayOfWeek",
+        iface: false,
+        bases: &[
+            "java.lang.Enum",
+            "java.time.temporal.TemporalAccessor",
+            "java.time.temporal.TemporalAdjuster",
+        ],
+    },
+    StaticRow {
+        name: "java.time.format.DateTimeFormatter",
+        iface: false,
+        bases: &["java.lang.Object"],
+    },
+    StaticRow {
+        name: "java.security.MessageDigest",
+        iface: false,
+        bases: &["java.security.MessageDigestSpi"],
+    },
+    StaticRow {
+        name: "java.util.Arrays",
+        iface: false,
+        bases: &["java.lang.Object"],
+    },
+    StaticRow {
+        name: "java.net.URI",
+        iface: false,
+        bases: &["java.lang.Object"],
+    },
+    StaticRow {
+        name: "java.net.URLEncoder",
+        iface: false,
+        bases: &["java.lang.Object"],
+    },
+    StaticRow {
+        name: "java.util.ArrayDeque",
+        iface: false,
+        bases: &[
+            "java.lang.Object",
+            "java.util.Deque",
+            "java.lang.Cloneable",
+            "java.io.Serializable",
+        ],
+    },
+    StaticRow {
+        name: "java.util.ArrayList",
+        iface: false,
+        bases: &[
+            "java.lang.Object",
+            "java.util.List",
+            "java.util.RandomAccess",
+            "java.lang.Cloneable",
+            "java.io.Serializable",
+        ],
+    },
+    StaticRow {
+        name: "java.util.Collections",
+        iface: false,
+        bases: &["java.lang.Object"],
+    },
+    StaticRow {
+        name: "java.util.PriorityQueue",
+        iface: false,
+        bases: &[
+            "java.lang.Object",
+            "java.util.Queue",
+            "java.io.Serializable",
+        ],
+    },
 ];
 
 /// A static lattice row by binary name.
@@ -2132,7 +2318,8 @@ fn static_class(name: &str) -> Option<Arc<ClassVal>> {
 /// widening does); `Character` bounds are `Char`s.
 pub(crate) fn static_field_value(class: &str, field: &str) -> Option<Value> {
     // Two-level dispatch (complexity ratchet): one arm per class,
-    // then a per-class field match below.
+    // then a per-class field match below; the tail classes live
+    // in the helper so neither match breaches the budget.
     match class {
         "java.lang.Long" => static_field_long(field),
         "java.lang.Integer" => static_field_integer(field),
@@ -2141,12 +2328,40 @@ pub(crate) fn static_field_value(class: &str, field: &str) -> Option<Value> {
         "java.lang.Double" => static_field_double(field),
         "java.lang.Float" => static_field_float(field),
         "java.lang.Character" => static_field_character(field),
+        "java.math.RoundingMode" => static_field_rounding(field),
         "java.lang.Boolean" => static_field_boolean(field),
         "java.lang.Math" => static_field_math(field),
+        _ => static_field_value_rest(class, field),
+    }
+}
+
+/// The tail half of [`static_field_value`]'s class dispatch.
+fn static_field_value_rest(class: &str, field: &str) -> Option<Value> {
+    match class {
         "java.util.Locale" => static_field_locale(field),
         "clojure.lang.PersistentQueue" => static_field_queue(field),
+        "java.math.BigInteger" => static_field_bigint(field),
+        "java.time.ZoneOffset" => crate::emutime::static_field_zoneoffset(field),
         _ => None,
     }
+}
+
+/// `BigInteger` constants (#205): fresh values per read (like
+/// every other field — `=` holds, `identical?` does not).
+fn static_field_bigint(field: &str) -> Option<Value> {
+    let n = match field {
+        "ZERO" => num_bigint::BigInt::from(0),
+        "ONE" => num_bigint::BigInt::from(1),
+        "TWO" => num_bigint::BigInt::from(2),
+        "TEN" => num_bigint::BigInt::from(10),
+        _ => return None,
+    };
+    Some(bigint_value(n))
+}
+
+fn static_field_rounding(field: &str) -> Option<Value> {
+    // #205: all eight enum constants; unknown names miss.
+    RoundingMode::parse(field).map(RoundingModeVal::value)
 }
 
 fn static_field_long(field: &str) -> Option<Value> {
@@ -2190,6 +2405,13 @@ fn static_field_double(field: &str) -> Option<Value> {
         "POSITIVE_INFINITY" => Some(Value::Double(f64::INFINITY)),
         "NEGATIVE_INFINITY" => Some(Value::Double(f64::NEG_INFINITY)),
         "NaN" => Some(Value::Double(f64::NAN)),
+        // The `double` class (#205: `(make-array Double/TYPE …)` —
+        // the name feeds `class_designator`'s primitive table).
+        "TYPE" => Some(Value::Class(Arc::new(ClassVal::new(
+            Arc::from("double"),
+            false,
+            Arc::from(vec![]),
+        )))),
         _ => None,
     }
 }
@@ -2358,7 +2580,7 @@ fn extension_class_of(e: &Arc<dyn clj_value::ExtensionValue>) -> Arc<ClassVal> {
 /// `java.lang.Class`, host values fold through [`host_class_of`],
 /// extensions through [`extension_class_of`], and everything else
 /// reports its `jvm_class_of` name (tabled).
-fn class_of_value(v: &Value) -> Option<Arc<ClassVal>> {
+pub(crate) fn class_of_value(v: &Value) -> Option<Arc<ClassVal>> {
     match v {
         Value::Nil => None,
         Value::Class(_) => static_class("java.lang.Class"),
@@ -2764,7 +2986,8 @@ pub(crate) fn import_class(eval: &mut Evaluator, fqn: &str) -> Result<Value, Nat
 /// instance-position surface below).
 pub(crate) fn static_member_arities(fqn: &str, member: &str) -> Option<&'static [usize]> {
     // Two-level dispatch (complexity ratchet): one arm per class,
-    // then a per-class member match below.
+    // then a per-class member match below; the tail classes live
+    // in the helper so neither match breaches the budget.
     match fqn {
         "java.lang.Class" => static_arities_class(member),
         "java.lang.System" => static_arities_system(member),
@@ -2773,8 +2996,29 @@ pub(crate) fn static_member_arities(fqn: &str, member: &str) -> Option<&'static 
         "java.lang.Long" => static_arities_long(member),
         "java.lang.Integer" => static_arities_integer(member),
         "java.lang.Double" => static_arities_double(member),
+        "java.lang.Boolean" => static_arities_boolean(member),
+        "java.lang.Float" => static_arities_float(member),
+        "java.math.BigInteger" => static_arities_bigint(member),
+        "java.math.BigDecimal" => static_arities_bigdec(member),
+        "java.util.Arrays" => static_arities_arrays(member),
+        _ => static_member_arities_rest(fqn, member),
+    }
+}
+
+/// The tail half of [`static_member_arities`]' class dispatch.
+fn static_member_arities_rest(fqn: &str, member: &str) -> Option<&'static [usize]> {
+    match fqn {
+        "java.util.Collections" => static_arities_collections(member),
+        "java.security.MessageDigest" => static_arities_digest(member),
+        "java.util.regex.Pattern" => static_arities_pattern(member),
+        "java.io.File" => static_arities_file(member),
+        "java.net.URLEncoder" => static_arities_urlencoder(member),
         "java.lang.String" => static_arities_string(member),
         "java.lang.Math" => static_arities_math(member),
+        "java.time.LocalDate" => crate::emutime::static_arities_localdate(member),
+        "java.time.LocalDateTime" => crate::emutime::static_arities_datetime(member),
+        "java.time.Instant" => crate::emutime::static_arities_instant(member),
+        "java.time.format.DateTimeFormatter" => crate::emutime::static_arities_formatter(member),
         _ => None,
     }
 }
@@ -2791,13 +3035,18 @@ fn static_arities_system(member: &str) -> Option<&'static [usize]> {
         "getProperty" => Some(&[1, 2]),
         "lineSeparator" => Some(&[0]),
         "identityHashCode" => Some(&[1]),
+        // #205: the algorithms suite measures and copies.
+        "nanoTime" | "currentTimeMillis" => Some(&[0]),
+        "getenv" => Some(&[1]),
+        "arraycopy" => Some(&[5]),
         _ => None,
     }
 }
 
 fn static_arities_character(member: &str) -> Option<&'static [usize]> {
     match member {
-        "isWhitespace" | "isLetterOrDigit" | "isLowerCase" | "isUpperCase" => Some(&[1]),
+        "isWhitespace" | "isLetterOrDigit" | "isLowerCase" | "isUpperCase" | "isDigit"
+        | "isLetter" | "isAlphabetic" | "toUpperCase" | "toLowerCase" => Some(&[1]),
         "digit" => Some(&[2]),
         _ => None,
     }
@@ -2812,15 +3061,20 @@ fn static_arities_lpv(member: &str) -> Option<&'static [usize]> {
 
 fn static_arities_long(member: &str) -> Option<&'static [usize]> {
     match member {
-        "parseLong" => Some(&[1]),
+        // #205: `lempel_ziv` parses binary with a radix.
+        "parseLong" => Some(&[1, 2]),
         "remainderUnsigned" => Some(&[2]),
+        // #205: bit-string formatting and population counts.
+        "toBinaryString" | "toHexString" | "bitCount" | "numberOfTrailingZeros" => Some(&[1]),
         _ => None,
     }
 }
 
 fn static_arities_integer(member: &str) -> Option<&'static [usize]> {
     match member {
-        "parseInt" => Some(&[1]),
+        "parseInt" => Some(&[1, 2]),
+        // #205: bit-string formatting.
+        "toBinaryString" => Some(&[1]),
         _ => None,
     }
 }
@@ -2828,6 +3082,40 @@ fn static_arities_integer(member: &str) -> Option<&'static [usize]> {
 fn static_arities_double(member: &str) -> Option<&'static [usize]> {
     match member {
         "parseDouble" => Some(&[1]),
+        // #205: finiteness guards in finance/neural code.
+        "isNaN" | "isInfinite" | "isFinite" => Some(&[1]),
+        _ => None,
+    }
+}
+
+fn static_arities_boolean(member: &str) -> Option<&'static [usize]> {
+    // #205: `comb_sort` boxes predicates explicitly.
+    match member {
+        "valueOf" => Some(&[1]),
+        _ => None,
+    }
+}
+
+fn static_arities_float(member: &str) -> Option<&'static [usize]> {
+    // #205: `fast_inverse_sqrt` bit-twiddles through floats.
+    match member {
+        "floatToIntBits" | "intBitsToFloat" => Some(&[1]),
+        _ => None,
+    }
+}
+
+fn static_arities_bigint(member: &str) -> Option<&'static [usize]> {
+    // #205: RSA/Diffie-Hellman lift longs into `BigInteger`.
+    match member {
+        "valueOf" => Some(&[1]),
+        _ => None,
+    }
+}
+
+fn static_arities_bigdec(member: &str) -> Option<&'static [usize]> {
+    // #205: the `(long)`/`(double)` overloads (boxed by type).
+    match member {
+        "valueOf" => Some(&[1]),
         _ => None,
     }
 }
@@ -2840,18 +3128,40 @@ fn static_arities_string(member: &str) -> Option<&'static [usize]> {
 }
 
 fn static_arities_math(member: &str) -> Option<&'static [usize]> {
-    // Only `pow`/`atan2`/`hypot` take 2 args; the rest of the
-    // emulated surface is 1-arg (checked at compile time, so the
-    // linear scan below never runs hot).
-    const TWO: &[&str] = &["pow", "atan2", "hypot"];
+    // Only `pow`/`atan2`/`hypot`/`floorDiv`/`floorMod` take 2
+    // args; `random` takes none; the rest of the emulated
+    // surface is 1-arg (checked at compile time, so the linear
+    // scan below never runs hot).
+    const TWO: &[&str] = &["pow", "atan2", "hypot", "floorDiv", "floorMod"];
     const ONE: &[&str] = &[
-        "abs", "sqrt", "ceil", "log", "exp", "sin", "cos", "tan", "asin", "acos", "atan", "sinh",
-        "cosh", "tanh", "cbrt", "floor", "log10", "round",
+        "abs",
+        "sqrt",
+        "ceil",
+        "log",
+        "exp",
+        "sin",
+        "cos",
+        "tan",
+        "asin",
+        "acos",
+        "atan",
+        "sinh",
+        "cosh",
+        "tanh",
+        "cbrt",
+        "floor",
+        "log10",
+        "round",
+        "rint",
+        "toRadians",
+        "toDegrees",
     ];
     if TWO.contains(&member) {
         Some(&[2])
     } else if ONE.contains(&member) {
         Some(&[1])
+    } else if member == "random" {
+        Some(&[0])
     } else {
         None
     }
@@ -2866,9 +3176,10 @@ pub(crate) fn lattice_is_iface(fqn: &str) -> bool {
 }
 /// `__static*`: `(FQN member args…)` — the analyzer's static-call
 /// lowering plus the instance-position consult for class values.
-/// Known members dispatch; anything else is the oracle's
-/// missing-method error (oracle `static-miss-args` text, at
-/// runtime per the table-gated narrowing).
+/// Known members dispatch; 0-arg field names read the field
+/// (#205); anything else is the oracle's missing-method error
+/// (oracle `static-miss-args` text, at runtime per the
+/// table-gated narrowing).
 fn native_static(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     if args.len() < 2 {
         return Err(NativeError::arity("clojure.core/__static*", args.len()));
@@ -2882,7 +3193,8 @@ fn native_static(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeEr
     let rest = &args[2..];
     // Two-level dispatch (complexity ratchet): one arm per class,
     // then a per-class member match below (Math's 21 members ride
-    // a name table).
+    // a name table); the later classes live in the mid/tail
+    // helpers so no single match breaches the budget.
     match fqn.as_ref() {
         "java.lang.Class" => static_call_class(eval, member.as_ref(), rest),
         "java.lang.System" => static_call_system(member.as_ref(), rest),
@@ -2891,10 +3203,63 @@ fn native_static(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeEr
         "java.lang.Long" => static_call_long(member.as_ref(), rest),
         "java.lang.Integer" => static_call_integer(member.as_ref(), rest),
         "java.lang.Double" => static_call_double(member.as_ref(), rest),
-        "java.lang.String" => static_call_string(eval, member.as_ref(), rest),
-        "java.lang.Math" => static_call_math(member.as_ref(), rest),
-        _ => Err(crate::types::no_method(member, rest.len(), fqn)),
+        "java.lang.Boolean" => static_call_boolean(member.as_ref(), rest),
+        _ => native_static_mid(eval, fqn.as_ref(), member.as_ref(), rest),
     }
+}
+
+/// The middle third of [`native_static`]'s class dispatch.
+fn native_static_mid(
+    eval: &mut Evaluator,
+    fqn: &str,
+    member: &str,
+    rest: &[Value],
+) -> Result<Value, NativeError> {
+    match fqn {
+        "java.lang.Float" => static_call_float(member, rest),
+        "java.math.BigInteger" => static_call_bigint(member, rest),
+        "java.math.BigDecimal" => static_call_bigdec(member, rest),
+        "java.util.Arrays" => static_call_arrays(member, rest),
+        "java.util.Collections" => static_call_collections(member, rest),
+        "java.security.MessageDigest" => static_call_digest(eval, member, rest),
+        "java.util.regex.Pattern" => static_call_pattern(member, rest),
+        "java.io.File" => static_call_file(eval, member, rest),
+        _ => native_static_tail(eval, fqn, member, rest),
+    }
+}
+
+/// The tail third of [`native_static`]'s class dispatch.
+fn native_static_tail(
+    eval: &mut Evaluator,
+    fqn: &str,
+    member: &str,
+    rest: &[Value],
+) -> Result<Value, NativeError> {
+    match fqn {
+        "java.net.URLEncoder" => static_call_urlencoder(member, rest),
+        "java.lang.String" => static_call_string(eval, member, rest),
+        "java.lang.Math" => static_call_math(member, rest),
+        "java.time.LocalDate" => crate::emutime::static_call_localdate(member, rest),
+        "java.time.LocalDateTime" => crate::emutime::static_call_datetime(member, rest),
+        "java.time.Instant" => crate::emutime::static_call_instant(member, rest),
+        "java.time.format.DateTimeFormatter" => crate::emutime::static_call_formatter(member, rest),
+        _ => static_field_or_miss(fqn, member, rest),
+    }
+}
+
+/// A static miss that is really a field read (#205): a 0-arg
+/// `Class/member` call where `member` is a static field answers
+/// the field (the JVM compiles `(Integer/MAX_VALUE)` to the
+/// field access — the algorithms suite calls
+/// `(PersistentQueue/EMPTY)`). Methods always win (this runs
+/// only on the miss path); fields with args still miss.
+fn static_field_or_miss(fqn: &str, member: &str, rest: &[Value]) -> Result<Value, NativeError> {
+    if rest.is_empty() {
+        if let Some(value) = static_field_value(fqn, member) {
+            return Ok(value);
+        }
+    }
+    Err(crate::types::no_method(member, rest.len(), fqn))
 }
 
 fn static_call_class(
@@ -2904,11 +3269,7 @@ fn static_call_class(
 ) -> Result<Value, NativeError> {
     match member {
         "forName" => static_forname(eval, rest),
-        _ => Err(crate::types::no_method(
-            member,
-            rest.len(),
-            "java.lang.Class",
-        )),
+        _ => static_field_or_miss("java.lang.Class", member, rest),
     }
 }
 
@@ -2917,11 +3278,11 @@ fn static_call_system(member: &str, rest: &[Value]) -> Result<Value, NativeError
         "getProperty" => static_getproperty(rest),
         "lineSeparator" => static_lineseparator(rest),
         "identityHashCode" => static_identity_hashcode(rest),
-        _ => Err(crate::types::no_method(
-            member,
-            rest.len(),
-            "java.lang.System",
-        )),
+        "nanoTime" => static_system_nano_time(rest),
+        "currentTimeMillis" => static_system_current_time_millis(rest),
+        "getenv" => static_system_getenv(rest),
+        "arraycopy" => static_system_arraycopy(rest),
+        _ => static_field_or_miss("java.lang.System", member, rest),
     }
 }
 
@@ -2932,56 +3293,291 @@ fn static_call_character(member: &str, rest: &[Value]) -> Result<Value, NativeEr
         "digit" => static_character_digit(rest),
         "isLowerCase" => static_character_is_lower_case(rest),
         "isUpperCase" => static_character_is_upper_case(rest),
-        _ => Err(crate::types::no_method(
-            member,
-            rest.len(),
-            "java.lang.Character",
-        )),
+        "isDigit" => static_character_is_digit(rest),
+        "isLetter" => static_character_is_letter(rest),
+        "isAlphabetic" => static_character_is_alphabetic(rest),
+        "toUpperCase" => static_character_to_upper_case(rest),
+        "toLowerCase" => static_character_to_lower_case(rest),
+        _ => static_field_or_miss("java.lang.Character", member, rest),
     }
 }
 
 fn static_call_lpv(member: &str, rest: &[Value]) -> Result<Value, NativeError> {
     match member {
         "createOwning" => static_lpv_create_owning(rest),
-        _ => Err(crate::types::no_method(
-            member,
-            rest.len(),
-            "clojure.lang.LazilyPersistentVector",
-        )),
+        _ => static_field_or_miss("clojure.lang.LazilyPersistentVector", member, rest),
     }
 }
 
 fn static_call_long(member: &str, rest: &[Value]) -> Result<Value, NativeError> {
     match member {
         "parseLong" => static_long_parse_long(rest),
+        "toBinaryString" => static_long_to_binary_string(rest),
+        "toHexString" => static_long_to_hex_string(rest),
+        "bitCount" => static_long_bit_count(rest),
+        "numberOfTrailingZeros" => static_long_number_of_trailing_zeros(rest),
         "remainderUnsigned" => static_long_remainder_unsigned(rest),
-        _ => Err(crate::types::no_method(
-            member,
-            rest.len(),
-            "java.lang.Long",
-        )),
+        _ => static_field_or_miss("java.lang.Long", member, rest),
     }
 }
 
 fn static_call_integer(member: &str, rest: &[Value]) -> Result<Value, NativeError> {
     match member {
         "parseInt" => static_integer_parse_int(rest),
-        _ => Err(crate::types::no_method(
-            member,
-            rest.len(),
-            "java.lang.Integer",
-        )),
+        "toBinaryString" => static_integer_to_binary_string(rest),
+        _ => static_field_or_miss("java.lang.Integer", member, rest),
     }
 }
 
 fn static_call_double(member: &str, rest: &[Value]) -> Result<Value, NativeError> {
     match member {
         "parseDouble" => static_double_parse_double(rest),
+        "isNaN" => static_double_is_nan(rest),
+        "isInfinite" => static_double_is_infinite(rest),
+        "isFinite" => static_double_is_finite(rest),
+        _ => static_field_or_miss("java.lang.Double", member, rest),
+    }
+}
+
+fn static_call_boolean(member: &str, rest: &[Value]) -> Result<Value, NativeError> {
+    match member {
+        "valueOf" => static_boolean_value_of(rest),
+        _ => static_field_or_miss("java.lang.Boolean", member, rest),
+    }
+}
+
+fn static_call_float(member: &str, rest: &[Value]) -> Result<Value, NativeError> {
+    match member {
+        "floatToIntBits" => static_float_to_int_bits(rest),
+        "intBitsToFloat" => static_int_bits_to_float(rest),
+        _ => static_field_or_miss("java.lang.Float", member, rest),
+    }
+}
+
+fn static_call_bigint(member: &str, rest: &[Value]) -> Result<Value, NativeError> {
+    match member {
+        "valueOf" => static_bigint_value_of(rest),
+        _ => static_field_or_miss("java.math.BigInteger", member, rest),
+    }
+}
+
+fn static_call_bigdec(member: &str, rest: &[Value]) -> Result<Value, NativeError> {
+    match member {
+        "valueOf" => static_bigdec_value_of(rest),
+        _ => static_field_or_miss("java.math.BigDecimal", member, rest),
+    }
+}
+
+/// `BigDecimal/valueOf` (#205): `(long)` is exact at scale 0
+/// (through the canonical `valueOf` compact paths);
+/// `(double)` is the short rendering (`Infinite`/`NaN` fail
+/// like the JVM). Anything else (including nil — both overloads
+/// take primitives) misses.
+fn static_bigdec_value_of(args: &[Value]) -> Result<Value, NativeError> {
+    if args.len() != 1 {
+        return Err(crate::types::no_method(
+            "valueOf",
+            args.len(),
+            "java.math.BigDecimal",
+        ));
+    }
+    match &args[0] {
+        Value::Int(n) => Ok(bigdec_result(BigDec::from_bigint(
+            num_bigint::BigInt::from(*n),
+        ))),
+        Value::Double(d) => BigDec::value_of_f64(*d)
+            .map(bigdec_result)
+            .map_err(crate::core::number_format),
         _ => Err(crate::types::no_method(
-            member,
-            rest.len(),
-            "java.lang.Double",
+            "valueOf",
+            1,
+            "java.math.BigDecimal",
         )),
+    }
+}
+
+fn static_arities_arrays(member: &str) -> Option<&'static [usize]> {
+    match member {
+        "copyOfRange" => Some(&[3]),
+        _ => None,
+    }
+}
+
+fn static_call_arrays(member: &str, rest: &[Value]) -> Result<Value, NativeError> {
+    match member {
+        "copyOfRange" => static_arrays_copy_of_range(rest),
+        _ => static_field_or_miss("java.util.Arrays", member, rest),
+    }
+}
+
+fn static_arities_collections(member: &str) -> Option<&'static [usize]> {
+    match member {
+        "shuffle" => Some(&[2]),
+        _ => None,
+    }
+}
+
+fn static_call_collections(member: &str, rest: &[Value]) -> Result<Value, NativeError> {
+    match member {
+        "shuffle" => static_collections_shuffle(rest),
+        _ => static_field_or_miss("java.util.Collections", member, rest),
+    }
+}
+
+fn static_arities_digest(member: &str) -> Option<&'static [usize]> {
+    match member {
+        "getInstance" => Some(&[1]),
+        _ => None,
+    }
+}
+
+fn static_call_digest(
+    eval: &mut Evaluator,
+    member: &str,
+    rest: &[Value],
+) -> Result<Value, NativeError> {
+    match member {
+        "getInstance" => crate::emudigest::digest_get_instance(eval, rest),
+        _ => static_field_or_miss("java.security.MessageDigest", member, rest),
+    }
+}
+
+/// `Collections/shuffle` (#205): the `(List, Random)` overload
+/// shuffles in place (anything else misses at the arity).
+fn static_collections_shuffle(args: &[Value]) -> Result<Value, NativeError> {
+    if args.len() != 2 {
+        return Err(crate::types::no_method(
+            "shuffle",
+            args.len(),
+            "java.util.Collections",
+        ));
+    }
+    crate::emucoll::shuffle_list(&args[0], &args[1])
+}
+
+fn static_arities_urlencoder(member: &str) -> Option<&'static [usize]> {
+    match member {
+        "encode" => Some(&[2]),
+        _ => None,
+    }
+}
+
+fn static_arities_pattern(member: &str) -> Option<&'static [usize]> {
+    match member {
+        "quote" => Some(&[1]),
+        _ => None,
+    }
+}
+
+fn static_call_pattern(member: &str, rest: &[Value]) -> Result<Value, NativeError> {
+    match member {
+        "quote" => static_pattern_quote(rest),
+        _ => static_field_or_miss("java.util.regex.Pattern", member, rest),
+    }
+}
+
+fn static_arities_file(member: &str) -> Option<&'static [usize]> {
+    match member {
+        "createTempFile" => Some(&[2]),
+        _ => None,
+    }
+}
+
+fn static_call_file(
+    eval: &mut Evaluator,
+    member: &str,
+    rest: &[Value],
+) -> Result<Value, NativeError> {
+    match member {
+        "createTempFile" => static_file_create_temp_file(eval, rest),
+        _ => static_field_or_miss("java.io.File", member, rest),
+    }
+}
+
+/// `File/createTempFile` (#205): the `(prefix, suffix)` overload —
+/// a uniquely-named empty file in the system temp dir (nil
+/// prefixes NPE, short prefixes are `Prefix string too short`,
+/// nil suffixes default to `.tmp` — all the JDK shapes).
+fn static_file_create_temp_file(
+    eval: &mut Evaluator,
+    args: &[Value],
+) -> Result<Value, NativeError> {
+    if args.len() != 2 {
+        return Err(crate::types::no_method(
+            "createTempFile",
+            args.len(),
+            "java.io.File",
+        ));
+    }
+    let prefix = match str_text_arg(&args[0])? {
+        Some(s) => s,
+        None => {
+            return Err(NativeError::new(
+                ThrowClass::NullPointerException,
+                "Cannot invoke \"java.io.File.createTempFile(String, String)\" because \"prefix\" is null"
+                    .to_owned(),
+            ));
+        }
+    };
+    if prefix.chars().count() < 3 {
+        return Err(NativeError::new(
+            ThrowClass::IllegalArgumentException,
+            "Prefix string too short".to_owned(),
+        ));
+    }
+    let suffix = str_text_arg(&args[1])?.unwrap_or(".tmp");
+    let name = format!("{prefix}{}{suffix}", temp_unique());
+    let path = std::env::temp_dir().join(&name);
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .map_err(|e| {
+            NativeError::new(ThrowClass::IOException, format!("{}: {e}", path.display()))
+        })?;
+    Ok(crate::jdkio::file(eval, &path.to_string_lossy()))
+}
+
+/// A temp-file uniqueness stamp (process + nanos + counter —
+/// collisions retry nowhere: one attempt, like `File.createTempFile`
+/// semantics minus the JDK's internal retry loop).
+fn temp_unique() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
+    let seq = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0);
+    format!("{}{seq}{nanos}", std::process::id())
+}
+
+/// `Pattern/quote` (#205): `\Q...\E` with inner `\E`s escaped
+/// (nil NPEs on the parameter, like the JDK).
+fn static_pattern_quote(args: &[Value]) -> Result<Value, NativeError> {
+    if args.len() != 1 {
+        return Err(crate::types::no_method(
+            "quote",
+            args.len(),
+            "java.util.regex.Pattern",
+        ));
+    }
+    match str_text_arg(&args[0])? {
+        Some(s) => Ok(Value::Str(Arc::from(
+            format!("\\Q{}\\E", s.replace("\\E", "\\E\\\\E\\Q")).as_str(),
+        ))),
+        None => Err(NativeError::new(
+            ThrowClass::NullPointerException,
+            "Cannot invoke \"java.util.regex.Pattern.quote(String)\" because \"s\" is null"
+                .to_owned(),
+        )),
+    }
+}
+
+fn static_call_urlencoder(member: &str, rest: &[Value]) -> Result<Value, NativeError> {
+    match member {
+        "encode" => static_urlencoder_encode(rest),
+        _ => static_field_or_miss("java.net.URLEncoder", member, rest),
     }
 }
 
@@ -2992,11 +3588,7 @@ fn static_call_string(
 ) -> Result<Value, NativeError> {
     match member {
         "format" => static_string_format(eval, rest),
-        _ => Err(crate::types::no_method(
-            member,
-            rest.len(),
-            "java.lang.String",
-        )),
+        _ => static_field_or_miss("java.lang.String", member, rest),
     }
 }
 
@@ -3026,18 +3618,18 @@ fn static_call_math(member: &str, rest: &[Value]) -> Result<Value, NativeError> 
         ("floor", static_math_floor),
         ("log10", static_math_log10),
         ("round", static_math_round),
+        ("rint", static_math_rint),
+        ("toRadians", static_math_to_radians),
+        ("toDegrees", static_math_to_degrees),
+        ("floorDiv", static_math_floor_div),
+        ("floorMod", static_math_floor_mod),
+        ("random", static_math_random),
     ];
     TABLE
         .iter()
         .find(|(name, _)| *name == member)
         .map(|(_, f)| f(rest))
-        .unwrap_or_else(|| {
-            Err(crate::types::no_method(
-                member,
-                rest.len(),
-                "java.lang.Math",
-            ))
-        })
+        .unwrap_or_else(|| static_field_or_miss("java.lang.Math", member, rest))
 }
 
 /// `Class/forName` over the emulated lattice. The 1- and 3-arg
@@ -3405,7 +3997,8 @@ fn parse_nfe(text: &str) -> NativeError {
 
 /// `Long/parseLong` (issue #201 S12): the shared `parse_long_str`
 /// body (sign + digits + i64 range, like `parse-long`), throwing
-/// instead of answering nil.
+/// instead of answering nil. #205 adds the `(String, int)`
+/// radix overload (`lempel_ziv` parses binary).
 fn static_long_parse_long(args: &[Value]) -> Result<Value, NativeError> {
     match args.len() {
         1 => match &args[0] {
@@ -3415,14 +4008,85 @@ fn static_long_parse_long(args: &[Value]) -> Result<Value, NativeError> {
             Value::Nil => Err(parse_nfe("null")),
             other => Err(crate::core::cce_err(other, "java.lang.String")),
         },
+        2 => {
+            let Value::Str(s) = &args[0] else {
+                if matches!(&args[0], Value::Nil) {
+                    return Err(parse_nfe("null"));
+                }
+                return Err(crate::core::cce_err(&args[0], "java.lang.String"));
+            };
+            let radix = str_int_arg(&args[1])?;
+            parse_long_radix(s, radix)
+                .map(Value::Int)
+                .ok_or_else(|| parse_radix_nfe(s, radix))
+        }
         n => Err(crate::types::no_method("parseLong", n, "java.lang.Long")),
+    }
+}
+
+/// Parse `text` in `radix` (the JDK's negative-accumulation
+/// algorithm, so `MIN_VALUE` parses): `None` on empty input,
+/// lone signs, bad digits, overflow, and out-of-range radixes
+/// (the caller picks the NFE text).
+fn parse_long_radix(text: &str, radix: i32) -> Option<i64> {
+    if !(2..=36).contains(&radix) {
+        return None;
+    }
+    let radix = i64::from(radix);
+    let mut chars = text.chars();
+    let first = chars.next()?;
+    let negative = first == '-';
+    let rest = if first == '-' || first == '+' {
+        chars.as_str()
+    } else {
+        text
+    };
+    if rest.is_empty() {
+        return None;
+    }
+    let limit = if negative { i64::MIN } else { -i64::MAX };
+    let multmin = limit / radix;
+    let mut result: i64 = 0;
+    for c in rest.chars() {
+        let d = i64::from(c.to_digit(radix as u32)?);
+        if result < multmin {
+            return None;
+        }
+        result *= radix;
+        if result < limit + d {
+            return None;
+        }
+        result -= d;
+    }
+    if negative {
+        Some(result)
+    } else {
+        result.checked_neg()
+    }
+}
+
+/// The radix-parse NFE: out-of-range radixes name the radix
+/// (verbatim JDK texts), everything else names the input.
+fn parse_radix_nfe(text: &str, radix: i32) -> NativeError {
+    if radix < 2 {
+        NativeError::new(
+            ThrowClass::NumberFormatException,
+            format!("radix {radix} less than Character.MIN_RADIX"),
+        )
+    } else if radix > 36 {
+        NativeError::new(
+            ThrowClass::NumberFormatException,
+            format!("radix {radix} greater than Character.MAX_RADIX"),
+        )
+    } else {
+        parse_nfe(text)
     }
 }
 
 /// The boxArg `long` coercion (the `str_int_arg` sibling:
 /// every `Number` truncates, nil NPEs on the primitive, the
 /// rest miss the param).
-fn long_arg(v: &Value) -> Result<i64, NativeError> {
+pub(crate) fn long_arg(v: &Value) -> Result<i64, NativeError> {
     match v {
         Value::Int(i) => Ok(*i),
         Value::Double(d) => Ok(*d as i64),
@@ -3493,7 +4157,8 @@ fn static_string_format(eval: &mut Evaluator, args: &[Value]) -> Result<Value, N
 }
 
 /// `Integer/parseInt` (issue #201 S12): the long body narrowed to
-/// i32 (out-of-range is the same NFE the JDK raises).
+/// i32 (out-of-range is the same NFE the JDK raises). #205 adds
+/// the `(String, int)` radix overload.
 fn static_integer_parse_int(args: &[Value]) -> Result<Value, NativeError> {
     match args.len() {
         1 => match &args[0] {
@@ -3504,6 +4169,19 @@ fn static_integer_parse_int(args: &[Value]) -> Result<Value, NativeError> {
             Value::Nil => Err(parse_nfe("null")),
             other => Err(crate::core::cce_err(other, "java.lang.String")),
         },
+        2 => {
+            let Value::Str(s) = &args[0] else {
+                if matches!(&args[0], Value::Nil) {
+                    return Err(parse_nfe("null"));
+                }
+                return Err(crate::core::cce_err(&args[0], "java.lang.String"));
+            };
+            let radix = str_int_arg(&args[1])?;
+            parse_long_radix(s, radix)
+                .and_then(|n| i32::try_from(n).ok())
+                .map(|n| Value::Int(i64::from(n)))
+                .ok_or_else(|| parse_radix_nfe(s, radix))
+        }
         n => Err(crate::types::no_method("parseInt", n, "java.lang.Integer")),
     }
 }
@@ -3661,6 +4339,693 @@ fn static_math_round(args: &[Value]) -> Result<Value, NativeError> {
         )),
         n => Err(crate::types::no_method("round", n, "java.lang.Math")),
     }
+}
+
+static_math_unary!(static_math_rint, "rint", round_ties_even);
+static_math_unary!(static_math_to_radians, "toRadians", to_radians);
+static_math_unary!(static_math_to_degrees, "toDegrees", to_degrees);
+
+/// `Math/floorDiv` (2-arg, the `(long,long)` overload): division
+/// rounded toward negative infinity. Computed in `i128` and
+/// wrapped: `floorDiv(MIN,-1)` is `MIN` on the JVM (no throw —
+/// only a zero divisor throws `/ by zero`).
+fn static_math_floor_div(args: &[Value]) -> Result<Value, NativeError> {
+    match args.len() {
+        2 => {
+            let x = long_arg(&args[0])?;
+            let y = long_arg(&args[1])?;
+            if y == 0 {
+                return Err(NativeError::new(
+                    ThrowClass::ArithmeticException,
+                    "/ by zero".to_owned(),
+                ));
+            }
+            Ok(Value::Int(floor_div128(x, y) as i64))
+        }
+        n => Err(crate::types::no_method("floorDiv", n, "java.lang.Math")),
+    }
+}
+
+/// `Math/floorMod` (2-arg): `x - floorDiv(x,y)*y` (the sign of
+/// the divisor, zero for `MIN % -1`). Zero divisor is `/ by
+/// zero`, like `floorDiv`.
+fn static_math_floor_mod(args: &[Value]) -> Result<Value, NativeError> {
+    match args.len() {
+        2 => {
+            let x = long_arg(&args[0])?;
+            let y = long_arg(&args[1])?;
+            if y == 0 {
+                return Err(NativeError::new(
+                    ThrowClass::ArithmeticException,
+                    "/ by zero".to_owned(),
+                ));
+            }
+            Ok(Value::Int(
+                (x as i128 - floor_div128(x, y) * y as i128) as i64,
+            ))
+        }
+        n => Err(crate::types::no_method("floorMod", n, "java.lang.Math")),
+    }
+}
+
+/// Exact floored division over 128-bit intermediates.
+fn floor_div128(x: i64, y: i64) -> i128 {
+    let (x, y) = (x as i128, y as i128);
+    let d = x / y;
+    let r = x % y;
+    if r != 0 && (r < 0) != (y < 0) {
+        d - 1
+    } else {
+        d
+    }
+}
+
+/// `Math/random`: a `Double` in `[0, 1)` (same draw as
+/// `clojure.core/rand` — the JVM backs both with one `Random`).
+fn static_math_random(args: &[Value]) -> Result<Value, NativeError> {
+    match args.len() {
+        0 => Ok(Value::Double(rand::rng().random_range(0.0..1.0))),
+        n => Err(crate::types::no_method("random", n, "java.lang.Math")),
+    }
+}
+
+/// `Long/toBinaryString` (#205): the unsigned base-2 digits (no
+/// leading zeros; negatives print all 64 bits, like the JDK).
+fn static_long_to_binary_string(args: &[Value]) -> Result<Value, NativeError> {
+    match args.len() {
+        1 => Ok(Value::Str(Arc::from(format!(
+            "{:b}",
+            long_arg(&args[0])? as u64
+        )))),
+        n => Err(crate::types::no_method(
+            "toBinaryString",
+            n,
+            "java.lang.Long",
+        )),
+    }
+}
+
+/// `Long/toHexString` (#205): the unsigned base-16 digits
+/// (lowercase, like the JDK).
+fn static_long_to_hex_string(args: &[Value]) -> Result<Value, NativeError> {
+    match args.len() {
+        1 => Ok(Value::Str(Arc::from(format!(
+            "{:x}",
+            long_arg(&args[0])? as u64
+        )))),
+        n => Err(crate::types::no_method("toHexString", n, "java.lang.Long")),
+    }
+}
+
+/// `Long/bitCount` (#205): the population count.
+fn static_long_bit_count(args: &[Value]) -> Result<Value, NativeError> {
+    match args.len() {
+        1 => Ok(Value::Int(i64::from(
+            (long_arg(&args[0])? as u64).count_ones(),
+        ))),
+        n => Err(crate::types::no_method("bitCount", n, "java.lang.Long")),
+    }
+}
+
+/// `Long/numberOfTrailingZeros` (#205): 64 for zero, like the JDK.
+fn static_long_number_of_trailing_zeros(args: &[Value]) -> Result<Value, NativeError> {
+    match args.len() {
+        1 => Ok(Value::Int(i64::from(
+            (long_arg(&args[0])? as u64).trailing_zeros(),
+        ))),
+        n => Err(crate::types::no_method(
+            "numberOfTrailingZeros",
+            n,
+            "java.lang.Long",
+        )),
+    }
+}
+
+/// `Integer/toBinaryString` (#205): the `(int)` overload —
+/// the arg truncates to 32 bits first (negatives print 32
+/// digits, while `Long/toBinaryString` prints 64).
+fn static_integer_to_binary_string(args: &[Value]) -> Result<Value, NativeError> {
+    match args.len() {
+        1 => Ok(Value::Str(Arc::from(format!(
+            "{:b}",
+            str_int_arg(&args[0])? as u32
+        )))),
+        n => Err(crate::types::no_method(
+            "toBinaryString",
+            n,
+            "java.lang.Integer",
+        )),
+    }
+}
+
+/// `Double/isNaN` / `isInfinite` / `isFinite` (#205): through
+/// the widening double coercion (ints read finite).
+fn static_double_is_nan(args: &[Value]) -> Result<Value, NativeError> {
+    match args.len() {
+        1 => Ok(Value::Bool(math_double_arg(&args[0], "isNaN")?.is_nan())),
+        n => Err(crate::types::no_method("isNaN", n, "java.lang.Double")),
+    }
+}
+
+fn static_double_is_infinite(args: &[Value]) -> Result<Value, NativeError> {
+    match args.len() {
+        1 => Ok(Value::Bool(
+            math_double_arg(&args[0], "isInfinite")?.is_infinite(),
+        )),
+        n => Err(crate::types::no_method("isInfinite", n, "java.lang.Double")),
+    }
+}
+
+fn static_double_is_finite(args: &[Value]) -> Result<Value, NativeError> {
+    match args.len() {
+        1 => Ok(Value::Bool(
+            math_double_arg(&args[0], "isFinite")?.is_finite(),
+        )),
+        n => Err(crate::types::no_method("isFinite", n, "java.lang.Double")),
+    }
+}
+
+/// `Boolean/valueOf` (#205): the `(boolean)` overload passes
+/// through; the `(String)` overload is ASCII
+/// case-insensitive `true` (nil answers false — the JVM's
+/// `(String)` overload with a null, never an NPE). Anything
+/// else has no overload (the miss shape).
+fn static_boolean_value_of(args: &[Value]) -> Result<Value, NativeError> {
+    match args.len() {
+        1 => match &args[0] {
+            Value::Bool(b) => Ok(Value::Bool(*b)),
+            Value::Str(s) => Ok(Value::Bool(s.eq_ignore_ascii_case("true"))),
+            Value::Nil => Ok(Value::Bool(false)),
+            _ => Err(crate::types::no_method("valueOf", 1, "java.lang.Boolean")),
+        },
+        n => Err(crate::types::no_method("valueOf", n, "java.lang.Boolean")),
+    }
+}
+
+/// `Float/floatToIntBits` (#205): the `(float)` overload over a
+/// narrowed double (NaN canonicalizes to `0x7fc00000`, like
+/// the JDK).
+fn static_float_to_int_bits(args: &[Value]) -> Result<Value, NativeError> {
+    match args.len() {
+        1 => {
+            let f = math_double_arg(&args[0], "floatToIntBits")? as f32;
+            let bits = if f.is_nan() {
+                0x7fc0_0000u32
+            } else {
+                f.to_bits()
+            };
+            Ok(Value::Int(i64::from(bits as i32)))
+        }
+        n => Err(crate::types::no_method(
+            "floatToIntBits",
+            n,
+            "java.lang.Float",
+        )),
+    }
+}
+
+/// `Float/intBitsToFloat` (#205): quiet NaN payloads survive
+/// the widening (bit-exact through `f32`, like the JDK).
+fn static_int_bits_to_float(args: &[Value]) -> Result<Value, NativeError> {
+    match args.len() {
+        1 => Ok(Value::Double(f64::from(f32::from_bits(
+            str_int_arg(&args[0])? as u32,
+        )))),
+        n => Err(crate::types::no_method(
+            "intBitsToFloat",
+            n,
+            "java.lang.Float",
+        )),
+    }
+}
+
+/// `BigInteger/valueOf` (#205): the `(long)` overload lifts
+/// through the boxArg coercion.
+fn static_bigint_value_of(args: &[Value]) -> Result<Value, NativeError> {
+    match args.len() {
+        1 => long_arg(&args[0]).map(|n| bigint_value(num_bigint::BigInt::from(n))),
+        n => Err(crate::types::no_method(
+            "valueOf",
+            n,
+            "java.math.BigInteger",
+        )),
+    }
+}
+
+/// `Arrays/copyOfRange` (#205): the `(byte[],int,int)`
+/// overload only (the suite's single use). `from > to` is the
+/// JDK's `IllegalArgumentException` text; a nil array is the
+/// bare NPE (the `arraycopy` precedent); a negative or
+/// over-long `from` is `ArrayIndexOutOfBoundsException` on the
+/// index; a `to` past the end zero-pads. Anything else misses.
+fn static_arrays_copy_of_range(args: &[Value]) -> Result<Value, NativeError> {
+    if args.len() != 3 {
+        return Err(crate::types::no_method(
+            "copyOfRange",
+            args.len(),
+            "java.util.Arrays",
+        ));
+    }
+    if matches!(&args[0], Value::Nil) {
+        return Err(NativeError::new(
+            ThrowClass::NullPointerException,
+            String::new(),
+        ));
+    }
+    let Value::Array(a) = &args[0] else {
+        return Err(crate::types::no_method(
+            "copyOfRange",
+            3,
+            "java.util.Arrays",
+        ));
+    };
+    let (from, to) = (str_int_arg(&args[1])?, str_int_arg(&args[2])?);
+    if to < from {
+        return Err(NativeError::new(
+            ThrowClass::IllegalArgumentException,
+            format!("{from} > {to}"),
+        ));
+    }
+    let guard = a.lock();
+    let clj_value::ArrayStore::Bytes(slots) = &*guard else {
+        return Err(crate::types::no_method(
+            "copyOfRange",
+            3,
+            "java.util.Arrays",
+        ));
+    };
+    if from < 0 || from as usize > slots.len() {
+        return Err(NativeError::new(
+            ThrowClass::ArrayIndexOutOfBoundsException,
+            from.to_string(),
+        ));
+    }
+    let (from, new_len) = (from as usize, (to - from) as usize);
+    let mut out = vec![0i8; new_len];
+    let take = new_len.min(slots.len().saturating_sub(from));
+    out[..take].copy_from_slice(&slots[from..from + take]);
+    Ok(Value::Array(clj_value::Array::new(
+        clj_value::ArrayDesc::flat(clj_value::BaseType::Byte),
+        clj_value::ArrayStore::Bytes(out),
+    )))
+}
+
+/// `URLEncoder/encode` (#205): `application/x-www-form-urlencoded`
+/// over the named charset's bytes (`lookup_charset`, so unknown
+/// names are `UnsupportedEncodingException`, like the JDK).
+/// Unreserved bytes (`0-9A-Za-z.-*`) pass, space becomes `+`,
+/// the rest `%HH` uppercase. Nils NPE on their parameter.
+fn static_urlencoder_encode(args: &[Value]) -> Result<Value, NativeError> {
+    if args.len() != 2 {
+        return Err(crate::types::no_method(
+            "encode",
+            args.len(),
+            "java.net.URLEncoder",
+        ));
+    }
+    let (Some(s), Some(enc)) = (str_text_arg(&args[0])?, str_text_arg(&args[1])?) else {
+        let param = if matches!(&args[0], Value::Nil) {
+            "s"
+        } else {
+            "enc"
+        };
+        return Err(NativeError::new(
+            ThrowClass::NullPointerException,
+            format!(
+                "Cannot invoke \"java.net.URLEncoder.encode(String, String)\" because \"{param}\" is null"
+            ),
+        ));
+    };
+    let cs = crate::ctor::lookup_charset(enc)?;
+    let mut out = String::new();
+    for b in crate::ctor::encode(cs, s, true) {
+        match b {
+            b'0'..=b'9' | b'A'..=b'Z' | b'a'..=b'z' | b'.' | b'-' | b'*' | b'_' => {
+                out.push(b as char);
+            }
+            b' ' => out.push('+'),
+            _ => {
+                use std::fmt::Write as _;
+                let _ = write!(out, "%{b:02X}");
+            }
+        }
+    }
+    Ok(Value::Str(Arc::from(out.as_str())))
+}
+
+/// `Character/isDigit` (#205): `Char` and `Int` (code point)
+/// spellings. `is_numeric` is exact over ASCII; non-ASCII
+/// letter-numbers and number-others (Roman numerals, vulgar
+/// fractions) read true — a documented narrowing (the JDK
+/// counts `Nd` only).
+fn static_character_is_digit(args: &[Value]) -> Result<Value, NativeError> {
+    match args.len() {
+        1 => Ok(Value::Bool(match &args[0] {
+            Value::Char(c) => c.is_numeric(),
+            Value::Int(i) => u32::try_from(*i)
+                .ok()
+                .and_then(char::from_u32)
+                .is_some_and(|c| c.is_numeric()),
+            other => {
+                return Err(crate::core::cce_err(other, "java.lang.Character"));
+            }
+        })),
+        n => Err(crate::types::no_method("isDigit", n, "java.lang.Character")),
+    }
+}
+
+/// `Character/isLetter` (#205): same shape. `is_alphabetic`
+/// is exact except letter-numbers (Roman numerals read true)
+/// — pinned in the cover test.
+fn static_character_is_letter(args: &[Value]) -> Result<Value, NativeError> {
+    match args.len() {
+        1 => Ok(Value::Bool(match &args[0] {
+            Value::Char(c) => c.is_alphabetic(),
+            Value::Int(i) => u32::try_from(*i)
+                .ok()
+                .and_then(char::from_u32)
+                .is_some_and(|c| c.is_alphabetic()),
+            other => {
+                return Err(crate::core::cce_err(other, "java.lang.Character"));
+            }
+        })),
+        n => Err(crate::types::no_method(
+            "isLetter",
+            n,
+            "java.lang.Character",
+        )),
+    }
+}
+
+/// `Character/isAlphabetic` (#205): exact (both are the
+/// Unicode `Alphabetic` property).
+fn static_character_is_alphabetic(args: &[Value]) -> Result<Value, NativeError> {
+    match args.len() {
+        1 => Ok(Value::Bool(match &args[0] {
+            Value::Char(c) => c.is_alphabetic(),
+            Value::Int(i) => u32::try_from(*i)
+                .ok()
+                .and_then(char::from_u32)
+                .is_some_and(|c| c.is_alphabetic()),
+            other => {
+                return Err(crate::core::cce_err(other, "java.lang.Character"));
+            }
+        })),
+        n => Err(crate::types::no_method(
+            "isAlphabetic",
+            n,
+            "java.lang.Character",
+        )),
+    }
+}
+
+/// Simple-uppercase one char (ASCII exact; non-ASCII takes the
+/// first scalar of the full mapping — `ß` maps to `S` where
+/// the JDK's simple mapping keeps `ß`, pinned in the test).
+fn simple_upper(c: char) -> char {
+    if c.is_ascii() {
+        c.to_ascii_uppercase()
+    } else {
+        c.to_uppercase().next().unwrap_or(c)
+    }
+}
+
+/// Simple-lowercase one char (same shape; `Σ` maps to `σ`,
+/// like the JDK's simple mapping).
+fn simple_lower(c: char) -> char {
+    if c.is_ascii() {
+        c.to_ascii_lowercase()
+    } else {
+        c.to_lowercase().next().unwrap_or(c)
+    }
+}
+
+/// `Character/toUpperCase` (#205): the `(char)` overload
+/// answers a `Char`, the `(int)` overload a code-point `Int`
+/// (out-of-range code points pass through, like the JDK).
+fn static_character_to_upper_case(args: &[Value]) -> Result<Value, NativeError> {
+    match args.len() {
+        1 => match &args[0] {
+            Value::Char(c) => Ok(Value::Char(simple_upper(*c))),
+            Value::Int(i) => Ok(Value::Int(
+                match u32::try_from(*i).ok().and_then(char::from_u32) {
+                    Some(c) => i64::from(simple_upper(c) as u32),
+                    None => *i,
+                },
+            )),
+            other => Err(crate::core::cce_err(other, "java.lang.Character")),
+        },
+        n => Err(crate::types::no_method(
+            "toUpperCase",
+            n,
+            "java.lang.Character",
+        )),
+    }
+}
+
+/// `Character/toLowerCase` (#205): the mirror image.
+fn static_character_to_lower_case(args: &[Value]) -> Result<Value, NativeError> {
+    match args.len() {
+        1 => match &args[0] {
+            Value::Char(c) => Ok(Value::Char(simple_lower(*c))),
+            Value::Int(i) => Ok(Value::Int(
+                match u32::try_from(*i).ok().and_then(char::from_u32) {
+                    Some(c) => i64::from(simple_lower(c) as u32),
+                    None => *i,
+                },
+            )),
+            other => Err(crate::core::cce_err(other, "java.lang.Character")),
+        },
+        n => Err(crate::types::no_method(
+            "toLowerCase",
+            n,
+            "java.lang.Character",
+        )),
+    }
+}
+
+/// `System/nanoTime` (#205): epoch nanos (wrapping `as` —
+/// callers difference two readings, like the JDK's
+/// unspecified origin).
+fn static_system_nano_time(args: &[Value]) -> Result<Value, NativeError> {
+    match args.len() {
+        0 => Ok(Value::Int(epoch_nanos() as i64)),
+        n => Err(crate::types::no_method("nanoTime", n, "java.lang.System")),
+    }
+}
+
+/// `System/currentTimeMillis` (#205).
+fn static_system_current_time_millis(args: &[Value]) -> Result<Value, NativeError> {
+    match args.len() {
+        0 => Ok(Value::Int(epoch_nanos() as i64 / 1_000_000)),
+        n => Err(crate::types::no_method(
+            "currentTimeMillis",
+            n,
+            "java.lang.System",
+        )),
+    }
+}
+
+/// Nanos since the Unix epoch (zero before it — unreachable on
+/// real clocks, pinned only through the millis wrapper).
+fn epoch_nanos() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0)
+}
+
+/// `System/getenv` (#205): the var's value, or nil when unset
+/// (non-UTF8 values read nil — the port has no byte strings).
+fn static_system_getenv(args: &[Value]) -> Result<Value, NativeError> {
+    match args.len() {
+        1 => match &args[0] {
+            Value::Str(name) => Ok(std::env::var(name.as_ref())
+                .ok()
+                .map(|v| Value::Str(Arc::from(v.as_str())))
+                .unwrap_or(Value::Nil)),
+            Value::Nil => Err(NativeError::new(
+                ThrowClass::NullPointerException,
+                "Cannot invoke \"java.lang.System.getenv(String)\" because \"name\" is null"
+                    .to_owned(),
+            )),
+            other => Err(crate::core::cce_err(other, "java.lang.String")),
+        },
+        n => Err(crate::types::no_method("getenv", n, "java.lang.System")),
+    }
+}
+
+/// `System/arraycopy` (#205): across same-store arrays (the
+/// `hashes/*` padding loops copy `byte[]`→`byte[]`). Source
+/// bytes snapshot first, so overlapping same-array copies
+/// move correctly. Answers nil (the JVM returns void).
+fn static_system_arraycopy(args: &[Value]) -> Result<Value, NativeError> {
+    if args.len() != 5 {
+        return Err(crate::types::no_method(
+            "arraycopy",
+            args.len(),
+            "java.lang.System",
+        ));
+    }
+    let (Value::Array(src), Value::Array(dst)) = (&args[0], &args[2]) else {
+        let bad = if !matches!(&args[0], Value::Array(_)) {
+            &args[0]
+        } else {
+            &args[2]
+        };
+        if matches!(bad, Value::Nil) {
+            return Err(NativeError::new(
+                ThrowClass::NullPointerException,
+                String::new(),
+            ));
+        }
+        return Err(NativeError::new(
+            ThrowClass::ArrayStoreException,
+            "arraycopy".to_owned(),
+        ));
+    };
+    let s_pos = str_int_arg(&args[1])?;
+    let d_pos = str_int_arg(&args[3])?;
+    let len = str_int_arg(&args[4])?;
+    arraycopy_slots(src, s_pos, dst, d_pos, len)?;
+    Ok(Value::Nil)
+}
+
+/// A snapshotted `arraycopy` source range, one variant per
+/// flat store (multidimensional `Arrays` sources never
+/// snapshot — they take the store-mismatch error, as before).
+enum ArrayCells {
+    Bools(Vec<bool>),
+    Bytes(Vec<i8>),
+    Chars(Vec<char>),
+    Shorts(Vec<i16>),
+    Ints(Vec<i32>),
+    Longs(Vec<i64>),
+    Floats(Vec<f64>),
+    Doubles(Vec<f64>),
+    Objs(Vec<Value>),
+}
+
+/// Snapshot an `arraycopy` source range (the lock drops before
+/// the destination locks — same-array copies never deadlock).
+fn arraycopy_snapshot(store: &clj_value::ArrayStore, s: usize, n: usize) -> Option<ArrayCells> {
+    match store {
+        clj_value::ArrayStore::Bools(sv) => Some(ArrayCells::Bools(sv[s..s + n].to_vec())),
+        clj_value::ArrayStore::Bytes(sv) => Some(ArrayCells::Bytes(sv[s..s + n].to_vec())),
+        clj_value::ArrayStore::Chars(sv) => Some(ArrayCells::Chars(sv[s..s + n].to_vec())),
+        clj_value::ArrayStore::Shorts(sv) => Some(ArrayCells::Shorts(sv[s..s + n].to_vec())),
+        clj_value::ArrayStore::Ints(sv) => Some(ArrayCells::Ints(sv[s..s + n].to_vec())),
+        clj_value::ArrayStore::Longs(sv) => Some(ArrayCells::Longs(sv[s..s + n].to_vec())),
+        clj_value::ArrayStore::Floats(sv) => Some(ArrayCells::Floats(sv[s..s + n].to_vec())),
+        clj_value::ArrayStore::Doubles(sv) => Some(ArrayCells::Doubles(sv[s..s + n].to_vec())),
+        clj_value::ArrayStore::Objs(sv) => Some(ArrayCells::Objs(sv[s..s + n].to_vec())),
+        clj_value::ArrayStore::Arrays(_) => None,
+    }
+}
+
+/// The cell count of a snapshotted `arraycopy` source range.
+fn arraycells_len(cells: &ArrayCells) -> usize {
+    match cells {
+        ArrayCells::Bools(v) => v.len(),
+        ArrayCells::Bytes(v) => v.len(),
+        ArrayCells::Chars(v) => v.len(),
+        ArrayCells::Shorts(v) => v.len(),
+        ArrayCells::Ints(v) => v.len(),
+        ArrayCells::Longs(v) => v.len(),
+        ArrayCells::Floats(v) => v.len(),
+        ArrayCells::Doubles(v) => v.len(),
+        ArrayCells::Objs(v) => v.len(),
+    }
+}
+
+/// Write a snapshotted range into an `arraycopy` destination
+/// (same store or the mismatch error).
+fn arraycopy_write(
+    store: &mut clj_value::ArrayStore,
+    d: usize,
+    cells: ArrayCells,
+) -> Result<(), NativeError> {
+    let n = arraycells_len(&cells);
+    match (store, cells) {
+        (clj_value::ArrayStore::Bools(dv), ArrayCells::Bools(tmp)) => {
+            dv[d..d + n].copy_from_slice(&tmp);
+        }
+        (clj_value::ArrayStore::Bytes(dv), ArrayCells::Bytes(tmp)) => {
+            dv[d..d + n].copy_from_slice(&tmp);
+        }
+        (clj_value::ArrayStore::Chars(dv), ArrayCells::Chars(tmp)) => {
+            dv[d..d + n].copy_from_slice(&tmp);
+        }
+        (clj_value::ArrayStore::Shorts(dv), ArrayCells::Shorts(tmp)) => {
+            dv[d..d + n].copy_from_slice(&tmp);
+        }
+        (clj_value::ArrayStore::Ints(dv), ArrayCells::Ints(tmp)) => {
+            dv[d..d + n].copy_from_slice(&tmp);
+        }
+        (clj_value::ArrayStore::Longs(dv), ArrayCells::Longs(tmp)) => {
+            dv[d..d + n].copy_from_slice(&tmp);
+        }
+        (clj_value::ArrayStore::Floats(dv), ArrayCells::Floats(tmp)) => {
+            dv[d..d + n].copy_from_slice(&tmp);
+        }
+        (clj_value::ArrayStore::Doubles(dv), ArrayCells::Doubles(tmp)) => {
+            dv[d..d + n].copy_from_slice(&tmp);
+        }
+        (clj_value::ArrayStore::Objs(dv), ArrayCells::Objs(tmp)) => {
+            dv[d..d + n].clone_from_slice(&tmp);
+        }
+        _ => {
+            return Err(NativeError::new(
+                ThrowClass::ArrayStoreException,
+                "arraycopy: array type mismatch".to_owned(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The slot move behind `arraycopy` (split for the complexity
+/// budget): negative positions/lengths and overruns are
+/// `IndexOutOfBoundsException`, cross-store copies are
+/// `ArrayStoreException`. The source snapshots under its own
+/// lock and the destination writes under its own — sequential
+/// locks, so same-array copies (memmove) never deadlock.
+fn arraycopy_slots(
+    src: &clj_value::Array,
+    s_pos: i32,
+    dst: &clj_value::Array,
+    d_pos: i32,
+    len: i32,
+) -> Result<(), NativeError> {
+    if s_pos < 0 || d_pos < 0 || len < 0 {
+        return Err(arraycopy_oob());
+    }
+    let (s, d, n) = (s_pos as usize, d_pos as usize, len as usize);
+    let cells = {
+        let guard = src.lock();
+        if s.checked_add(n).is_none_or(|e| e > guard.len()) {
+            return Err(arraycopy_oob());
+        }
+        arraycopy_snapshot(&guard, s, n)
+    };
+    let mut guard = dst.lock();
+    if d.checked_add(n).is_none_or(|e| e > guard.len()) {
+        return Err(arraycopy_oob());
+    }
+    match cells {
+        Some(cells) => arraycopy_write(&mut guard, d, cells),
+        None => Err(NativeError::new(
+            ThrowClass::ArrayStoreException,
+            "arraycopy: array type mismatch".to_owned(),
+        )),
+    }
+}
+
+/// The `arraycopy` bounds failure (the JDK throws
+/// `IndexOutOfBoundsException` with no message from the
+/// intrinsic).
+fn arraycopy_oob() -> NativeError {
+    NativeError::new(ThrowClass::IndexOutOfBoundsException, String::new())
 }
 
 /// `Character/isLetterOrDigit` (1-arg): `Char` and `Int`
@@ -4407,13 +5772,23 @@ fn surface_gated(
     // so order is irrelevant).
     surface_gated_coll(eval, meth, target, rest)
         .or_else(|| surface_gated_misc(eval, meth, target, rest))
+        .or_else(|| surface_gated_jcoll(eval, meth, target, rest))
         .or_else(|| surface_gated_str(meth, target, rest))
         .or_else(|| surface_gated_builder(eval, meth, target, rest))
         .or_else(|| surface_gated_regex(meth, target, rest))
+        .or_else(|| surface_gated_matcher(meth, target, rest))
+        .or_else(|| surface_gated_io(meth, target, rest))
+        .or_else(|| surface_gated_bigint(meth, target, rest))
+        .or_else(|| surface_gated_bigdec(meth, target, rest))
+        .or_else(|| surface_gated_uri(meth, target, rest))
+        .or_else(|| crate::emurand::random_method(meth, target, rest))
+        .or_else(|| crate::emutime::time_method(meth, target, rest))
 }
 
-/// The `StringBuilder` members (issue #201 S5): `append` only —
-/// `toString` rides the universal via `print_str`.
+/// The `StringBuilder` members (issue #201 S5, #205
+/// `length`/`reverse`): `append`, the UTF-16 length, and the
+/// in-place reversal — `toString` rides the universal via
+/// `print_str`.
 fn surface_gated_builder(
     eval: &mut Evaluator,
     meth: &str,
@@ -4422,6 +5797,26 @@ fn surface_gated_builder(
 ) -> Option<Result<Value, NativeError>> {
     match (meth, rest.len()) {
         ("append", 1) => gated_builder_append(eval, target, rest),
+        ("length", 0) => gated_builder_length(target),
+        ("reverse", 0) => gated_builder_reverse(target),
+        _ => None,
+    }
+}
+
+/// The `java.net.URI` members (#205): `getHost` only (the
+/// suite's single use — `emails-from-url`).
+fn surface_gated_uri(
+    meth: &str,
+    target: &Value,
+    rest: &[Value],
+) -> Option<Result<Value, NativeError>> {
+    match (meth, rest.len()) {
+        ("getHost", 0) => {
+            let h = as_uri(target)?;
+            Some(Ok(h
+                .host()
+                .map_or(Value::Nil, |host| Value::Str(Arc::from(host)))))
+        }
         _ => None,
     }
 }
@@ -4435,6 +5830,148 @@ fn surface_gated_regex(
     match (meth, rest.len()) {
         ("split", 1 | 2) => gated_regex_split(target, rest),
         ("replaceAll", 1) => gated_matcher_replace_all(target, rest),
+        _ => None,
+    }
+}
+
+/// The `java.util` collection members (#205): deque ends
+/// and queue heap ops (each gates its own target type).
+fn surface_gated_jcoll(
+    eval: &mut Evaluator,
+    meth: &str,
+    target: &Value,
+    rest: &[Value],
+) -> Option<Result<Value, NativeError>> {
+    crate::emucoll::deque_method(meth, target, rest)
+        .or_else(|| crate::emucoll::pqueue_method(eval, meth, target, rest))
+        .or_else(|| crate::emudigest::digest_method(meth, target, rest))
+}
+
+/// The file/IO members (#205): `exists`/`length` on files,
+/// `readAllBytes` on file input streams, `write` on writers
+/// (strings, chars, ints) and file output streams (ints),
+/// `readLine` on readers. Anything else misses through.
+fn surface_gated_io(
+    meth: &str,
+    target: &Value,
+    rest: &[Value],
+) -> Option<Result<Value, NativeError>> {
+    match (meth, rest.len()) {
+        ("exists", 0) => gated_file_exists(target),
+        ("length", 0) => gated_file_length(target),
+        ("getPath", 0) => gated_file_get_path(target),
+        ("getAbsolutePath", 0) => gated_file_get_absolute_path(target),
+        ("delete", 0) => gated_file_delete(target),
+        ("readAllBytes", 0) => crate::jio::file_input_read_all(target),
+        ("readLine", 0) => gated_reader_read_line(target),
+        ("write", 1) => gated_write(target, rest),
+        _ => None,
+    }
+}
+
+/// `File.exists`: missing paths answer false (like the JDK).
+fn gated_file_exists(target: &Value) -> Option<Result<Value, NativeError>> {
+    let path = crate::jdkio::file_path(target)?;
+    Some(Ok(Value::Bool(std::path::Path::new(&path).exists())))
+}
+
+/// `File.length` on files (other `length` targets fall through
+/// to their own gates): missing paths answer 0, like the JDK.
+fn gated_file_length(target: &Value) -> Option<Result<Value, NativeError>> {
+    let path = crate::jdkio::file_path(target)?;
+    let len = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+    Some(Ok(Value::Int(len as i64)))
+}
+
+/// `File.getPath` (#205): the path as given.
+fn gated_file_get_path(target: &Value) -> Option<Result<Value, NativeError>> {
+    let path = crate::jdkio::file_path(target)?;
+    Some(Ok(Value::Str(Arc::from(path.as_str()))))
+}
+
+/// `File.getAbsolutePath` (#205): absolute paths pass through;
+/// relative ones resolve against the working directory (the
+/// `user.dir` mirror — the algorithms harness runs in a temp
+/// work dir).
+fn gated_file_get_absolute_path(target: &Value) -> Option<Result<Value, NativeError>> {
+    let path = crate::jdkio::file_path(target)?;
+    if std::path::Path::new(&path).is_absolute() {
+        return Some(Ok(Value::Str(Arc::from(path.as_str()))));
+    }
+    let abs = std::env::current_dir()
+        .map(|cwd| cwd.join(&path).to_string_lossy().into_owned())
+        .unwrap_or(path);
+    Some(Ok(Value::Str(Arc::from(abs.as_str()))))
+}
+
+/// `File.delete` (#205): true when something was removed (files
+/// and empty dirs alike, like the JDK); missing paths answer
+/// false.
+fn gated_file_delete(target: &Value) -> Option<Result<Value, NativeError>> {
+    let path = crate::jdkio::file_path(target)?;
+    let ok = if std::path::Path::new(&path).is_dir() {
+        std::fs::remove_dir(&path).is_ok()
+    } else {
+        std::fs::remove_file(&path).is_ok()
+    };
+    Some(Ok(Value::Bool(ok)))
+}
+
+/// `BufferedReader.readLine` on stream readers.
+fn gated_reader_read_line(target: &Value) -> Option<Result<Value, NativeError>> {
+    let r = crate::reader::as_reader(target)?;
+    Some(crate::reader::reader_read_line(r))
+}
+
+/// `write` on writers and file output streams (disjoint
+/// targets — writers take strings/chars/ints, streams take the
+/// low byte of ints).
+fn gated_write(target: &Value, rest: &[Value]) -> Option<Result<Value, NativeError>> {
+    if crate::io::as_writer(target).is_some() {
+        return Some(gated_writer_write(target, &rest[0]));
+    }
+    if let Value::Int(n) = &rest[0] {
+        if let hit @ Some(_) = crate::jio::file_output_write(target, *n as u8) {
+            return hit;
+        }
+    }
+    None
+}
+
+/// `Writer.write` (#205): strings append, chars and ints write
+/// one UTF-16 unit (lone surrogates become U+FFFD — Rust
+/// strings cannot hold them), nil NPEs on the parameter.
+fn gated_writer_write(target: &Value, arg: &Value) -> Result<Value, NativeError> {
+    match arg {
+        Value::Str(s) => crate::io::write_to_writer(target, s).map(|()| Value::Nil),
+        Value::Char(c) => crate::io::write_to_writer(target, &c.to_string()).map(|()| Value::Nil),
+        Value::Int(n) => {
+            let unit = char::from_u32((*n & 0xFFFF) as u32).unwrap_or('\u{FFFD}');
+            crate::io::write_to_writer(target, &unit.to_string()).map(|()| Value::Nil)
+        }
+        Value::Nil => Err(NativeError::new(
+            ThrowClass::NullPointerException,
+            "Cannot invoke \"java.io.Writer.write(String)\" because \"str\" is null".to_owned(),
+        )),
+        _ => Err(crate::types::no_method("write", 1, "java.io.Writer")),
+    }
+}
+
+/// The `Matcher` members (#205): `find`/`group`/`start`/`end`
+/// (non-handles miss through to the uniform error).
+fn surface_gated_matcher(
+    meth: &str,
+    target: &Value,
+    rest: &[Value],
+) -> Option<Result<Value, NativeError>> {
+    let h = crate::collmisc::as_matcher(target)?;
+    match (meth, rest.len()) {
+        ("find", 0) => Some(Ok(Value::Bool(h.find_bool()))),
+        ("find", 1) => Some(str_int_arg(&rest[0]).and_then(|s| h.find_from(s).map(Value::Bool))),
+        ("group", 0) => Some(h.group0().map(|g| Value::Str(Arc::from(g.as_str())))),
+        ("group", 1) => Some(str_int_arg(&rest[0]).and_then(|i| h.group_n(i))),
+        ("start", 0) => Some(h.last_span().map(|(s, _)| Value::Int(s as i64))),
+        ("end", 0) => Some(h.last_span().map(|(_, e)| Value::Int(e as i64))),
         _ => None,
     }
 }
@@ -4486,38 +6023,34 @@ fn gated_coll_indexof(
     target: &Value,
     rest: &[Value],
 ) -> Option<Result<Value, NativeError>> {
-    let found = match target {
-        Value::Vector(x) => {
-            let mut at = None;
-            for (i, item) in x.iter().enumerate() {
-                match equals_member(eval, item, &rest[0]) {
-                    Ok(true) => {
-                        at = Some(i as i64);
-                        break;
-                    }
-                    Ok(false) => {}
-                    Err(e) => return Some(Err(e)),
-                }
-            }
-            at
-        }
-        Value::List(l) => {
-            let mut at = None;
-            for (i, item) in l.iter().enumerate() {
-                match equals_member(eval, item, &rest[0]) {
-                    Ok(true) => {
-                        at = Some(i as i64);
-                        break;
-                    }
-                    Ok(false) => {}
-                    Err(e) => return Some(Err(e)),
-                }
-            }
-            at
-        }
+    // Subvectors compare like lists (#205:
+    // `sorted_linked_list` indexes one as a `List`).
+    if let Some(sv) = crate::lazy::as_subvector(target) {
+        return Some(
+            indexof_scan(eval, sv.iter().cloned(), &rest[0]).map(|at| Value::Int(at.unwrap_or(-1))),
+        );
+    }
+    let scanned = match target {
+        Value::Vector(x) => indexof_scan(eval, x.iter().cloned(), &rest[0]),
+        Value::List(l) => indexof_scan(eval, l.iter().cloned(), &rest[0]),
         _ => return None,
     };
-    Some(Ok(Value::Int(found.unwrap_or(-1))))
+    Some(scanned.map(|at| Value::Int(at.unwrap_or(-1))))
+}
+
+/// Scan items for the needle with `=` semantics (the shared
+/// `indexOf` body for vectors, lists, and subvectors).
+fn indexof_scan(
+    eval: &mut Evaluator,
+    items: impl Iterator<Item = Value>,
+    needle: &Value,
+) -> Result<Option<i64>, NativeError> {
+    for (i, item) in items.enumerate() {
+        if equals_member(eval, &item, needle)? {
+            return Ok(Some(i as i64));
+        }
+    }
+    Ok(None)
 }
 
 /// The throwable/pending/writer-gated members.
@@ -4903,6 +6436,25 @@ fn surface_gated_strn(
         ("endsWith", 1) => gated_str_endswith(target, rest),
         ("split", 1 | 2) => gated_str_split(target, rest),
         ("indexOf", 1) => gated_str_indexof(target, rest),
+        ("indexOf", 2) => gated_str_indexof_from(target, rest),
+        ("lastIndexOf", 1) => gated_str_last_indexof(target, rest),
+        _ => surface_gated_strn_rest(meth, target, rest),
+    }
+}
+
+/// The tail half of [`surface_gated_strn`]'s method dispatch.
+fn surface_gated_strn_rest(
+    meth: &str,
+    target: &Value,
+    rest: &[Value],
+) -> Option<Result<Value, NativeError>> {
+    match (meth, rest.len()) {
+        ("lastIndexOf", 2) => gated_str_last_indexof_from(target, rest),
+        ("contains", 1) => gated_str_contains(target, rest),
+        ("replace", 2) => gated_str_replace(target, rest),
+        ("getBytes", 0 | 1) => gated_str_getbytes(target, rest),
+        ("codePointCount", 2) => gated_str_codepoint_count(target, rest),
+        ("compareTo", 1) => gated_str_compare_to(target, rest),
         _ => None,
     }
 }
@@ -4914,25 +6466,266 @@ fn gated_str_indexof(target: &Value, rest: &[Value]) -> Option<Result<Value, Nat
     let Value::Str(s) = target else {
         return None;
     };
-    let needle: Vec<u16> = match &rest[0] {
-        Value::Str(p) => p.encode_utf16().collect(),
-        Value::Int(i) => match u32::try_from(*i).ok().and_then(char::from_u32) {
-            Some(c) => c.encode_utf16(&mut [0; 2]).to_vec(),
-            None => return Some(Ok(Value::Int(-1))),
-        },
-        Value::Char(c) => c.encode_utf16(&mut [0; 2]).to_vec(),
-        _ => return None,
+    let needle = str_needle(&rest[0])?;
+    Some(Ok(Value::Int(str_index_search(s, needle, 0))))
+}
+
+/// `String.lastIndexOf` (1-arg, #205): the last UTF-16 offset
+/// of the needle, -1 absent. Empty needles read the length
+/// (the JDK rule).
+fn gated_str_last_indexof(target: &Value, rest: &[Value]) -> Option<Result<Value, NativeError>> {
+    let Value::Str(s) = target else {
+        return None;
     };
-    if needle.is_empty() {
-        return Some(Ok(Value::Int(0)));
+    let needle = str_needle(&rest[0])?;
+    let len = s.encode_utf16().count() as i32;
+    Some(Ok(Value::Int(str_last_index_search(s, needle, len))))
+}
+
+/// `String.lastIndexOf` (2-arg, #205): the backward scan from
+/// `fromIndex` (the JDK clamp rules — see
+/// `str_last_index_search`). The needle validates before the
+/// index, like the `indexOf` pair.
+fn gated_str_last_indexof_from(
+    target: &Value,
+    rest: &[Value],
+) -> Option<Result<Value, NativeError>> {
+    let Value::Str(s) = target else {
+        return None;
+    };
+    let needle = str_needle(&rest[0])?;
+    let from = match str_int_arg(&rest[1]) {
+        Ok(from) => from,
+        Err(e) => return Some(Err(e)),
+    };
+    Some(Ok(Value::Int(str_last_index_search(s, needle, from))))
+}
+
+/// `String.indexOf` (2-arg, #205): the same scan from
+/// `fromIndex` (negative reads 0; past-the-end reads the
+/// length for empty needles, -1 otherwise). The needle
+/// validates before the index (a mistyped pair is the
+/// overload miss, like the 1-arg shape).
+fn gated_str_indexof_from(target: &Value, rest: &[Value]) -> Option<Result<Value, NativeError>> {
+    let Value::Str(s) = target else {
+        return None;
+    };
+    let needle = str_needle(&rest[0])?;
+    let from = match str_int_arg(&rest[1]) {
+        Ok(from) => from,
+        Err(e) => return Some(Err(e)),
+    };
+    Some(Ok(Value::Int(str_index_search(s, needle, from))))
+}
+
+/// An `indexOf` needle: UTF-16 units, or `Absent` for an
+/// unrepresentable code point (no match, like the JDK).
+enum StrNeedle {
+    Units(Vec<u16>),
+    Absent,
+}
+
+/// Parse an `indexOf` needle (`String`, code-point `Int`, or
+/// `Char`): `None` for a mistyped needle (the generic miss).
+fn str_needle(v: &Value) -> Option<StrNeedle> {
+    match v {
+        Value::Str(p) => Some(StrNeedle::Units(p.encode_utf16().collect())),
+        Value::Int(i) => match u32::try_from(*i).ok().and_then(char::from_u32) {
+            Some(c) => Some(StrNeedle::Units(c.encode_utf16(&mut [0; 2]).to_vec())),
+            None => Some(StrNeedle::Absent),
+        },
+        Value::Char(c) => Some(StrNeedle::Units(c.encode_utf16(&mut [0; 2]).to_vec())),
+        _ => None,
     }
+}
+
+/// The `indexOf` scan over UTF-16 units from `from` (the JDK
+/// `fromIndex` rules — see `gated_str_indexof_from`).
+fn str_index_search(s: &str, needle: StrNeedle, from: i32) -> i64 {
     let hay: Vec<u16> = s.encode_utf16().collect();
-    let at = hay
-        .windows(needle.len())
-        .position(|w| w == needle.as_slice())
+    let from = from.max(0) as usize;
+    let units = match needle {
+        StrNeedle::Absent => return -1,
+        StrNeedle::Units(units) => units,
+    };
+    if units.is_empty() {
+        return from.min(hay.len()) as i64;
+    }
+    if from > hay.len() {
+        return -1;
+    }
+    hay[from..]
+        .windows(units.len())
+        .position(|w| w == units.as_slice())
+        .map(|i| (from + i) as i64)
+        .unwrap_or(-1)
+}
+
+/// The `lastIndexOf` scan over UTF-16 units (the JDK clamp:
+/// `fromIndex` past the last start clamps, negative reads -1,
+/// empty needles read the clamped start).
+fn str_last_index_search(s: &str, needle: StrNeedle, from: i32) -> i64 {
+    let hay: Vec<u16> = s.encode_utf16().collect();
+    let units = match needle {
+        StrNeedle::Absent => return -1,
+        StrNeedle::Units(units) => units,
+    };
+    let last_start = hay.len() as i64 - units.len() as i64;
+    let from = (from as i64).min(last_start);
+    if from < 0 {
+        return -1;
+    }
+    if units.is_empty() {
+        return from;
+    }
+    let from = from as usize;
+    hay[..=from + units.len() - 1]
+        .windows(units.len())
+        .rposition(|w| w == units.as_slice())
         .map(|i| i as i64)
-        .unwrap_or(-1);
-    Some(Ok(Value::Int(at)))
+        .unwrap_or(-1)
+}
+
+/// `String.contains` (#205): a `CharSequence` substring test
+/// (literal, not regex). Nil is the body's NPE; anything else
+/// mistyped is the overload miss.
+fn gated_str_contains(target: &Value, rest: &[Value]) -> Option<Result<Value, NativeError>> {
+    let Value::Str(s) = target else {
+        return None;
+    };
+    match &rest[0] {
+        Value::Str(p) => Some(Ok(Value::Bool(s.contains(p.as_ref())))),
+        Value::Nil => Some(Err(NativeError::new(
+            ThrowClass::NullPointerException,
+            "Cannot invoke \"java.lang.CharSequence.toString()\" because \"s\" is null".to_owned(),
+        ))),
+        _ => None,
+    }
+}
+
+/// `String.replace` (#205): the `(char, char)` and
+/// `(CharSequence, CharSequence)` overloads (both literal —
+/// regex lives in `replaceAll`). Nil halves are the body's
+/// NPEs; mixed/mistyped pairs are the overload miss.
+fn gated_str_replace(target: &Value, rest: &[Value]) -> Option<Result<Value, NativeError>> {
+    let Value::Str(s) = target else {
+        return None;
+    };
+    match (&rest[0], &rest[1]) {
+        (Value::Char(a), Value::Char(b)) => {
+            let out: String = s.chars().map(|c| if c == *a { *b } else { c }).collect();
+            Some(Ok(Value::Str(Arc::from(out.as_str()))))
+        }
+        (Value::Str(a), Value::Str(b)) => Some(Ok(Value::Str(Arc::from(
+            s.replace(a.as_ref(), b.as_ref()).as_str(),
+        )))),
+        (Value::Nil, _) => Some(Err(str_replace_npe("target"))),
+        (_, Value::Nil) => Some(Err(str_replace_npe("replacement"))),
+        _ => None,
+    }
+}
+
+/// The `replace` body's nil-half NPE (verbatim shape).
+fn str_replace_npe(param: &str) -> NativeError {
+    NativeError::new(
+        ThrowClass::NullPointerException,
+        format!("Cannot invoke \"java.lang.CharSequence.toString()\" because \"{param}\" is null"),
+    )
+}
+
+/// `String.getBytes` (#205): the platform-default (UTF-8)
+/// bytes, or the named charset's (`MessageDigest` feeds on
+/// these). Bare `UTF-16`/`UTF-32` take the BOM, like the JDK;
+/// unknown charsets are `UnsupportedEncodingException`, and a
+/// nil name is ambiguous (`(String)` vs `(Charset)`).
+fn gated_str_getbytes(target: &Value, rest: &[Value]) -> Option<Result<Value, NativeError>> {
+    let Value::Str(s) = target else {
+        return None;
+    };
+    if rest.is_empty() {
+        return Some(Ok(str_bytes_value(crate::ctor::encode(
+            crate::ctor::Charset::Utf8,
+            s,
+            false,
+        ))));
+    }
+    match &rest[0] {
+        Value::Str(name) => {
+            let cs = match crate::ctor::lookup_charset(name) {
+                Ok(cs) => cs,
+                Err(e) => return Some(Err(e)),
+            };
+            Some(Ok(str_bytes_value(crate::ctor::encode(cs, s, true))))
+        }
+        Value::Nil => Some(Err(NativeError::new(
+            ThrowClass::IllegalArgumentException,
+            "More than one matching method found: getBytes".to_owned(),
+        ))),
+        _ => None,
+    }
+}
+
+/// Mint a `byte[]` from encoded bytes.
+fn str_bytes_value(bytes: Vec<u8>) -> Value {
+    let cells: Vec<i8> = bytes.into_iter().map(|b| b as i8).collect();
+    Value::Array(Array::new(
+        ArrayDesc::flat(BaseType::Byte),
+        ArrayStore::Bytes(cells),
+    ))
+}
+
+/// `String.codePointCount` (#205): code points over the
+/// UTF-16 `[begin, end)` window (surrogate pairs count once).
+/// Bounds are the `substring` template.
+fn gated_str_codepoint_count(target: &Value, rest: &[Value]) -> Option<Result<Value, NativeError>> {
+    let Value::Str(s) = target else {
+        return None;
+    };
+    let (begin, end) = match (str_int_arg(&rest[0]), str_int_arg(&rest[1])) {
+        (Ok(begin), Ok(end)) => (i64::from(begin), i64::from(end)),
+        (Err(e), _) | (_, Err(e)) => return Some(Err(e)),
+    };
+    let units: Vec<u16> = s.encode_utf16().collect();
+    let len = units.len() as i64;
+    if begin < 0 || end > len || begin > end {
+        return Some(Err(sioobe_range(begin, end, len)));
+    }
+    let (begin, end) = (begin as usize, end as usize);
+    let mut count: i64 = (end - begin) as i64;
+    for pair in units[begin..end].windows(2) {
+        if (0xD800..0xDC00).contains(&pair[0]) && (0xDC00..0xE000).contains(&pair[1]) {
+            count -= 1;
+        }
+    }
+    Some(Ok(Value::Int(count)))
+}
+
+/// `String.compareTo` (#205): lexicographic by UTF-16 units
+/// (first difference, else the length difference). Nil is the
+/// body's NPE; non-strings are the overload miss.
+fn gated_str_compare_to(target: &Value, rest: &[Value]) -> Option<Result<Value, NativeError>> {
+    let Value::Str(s) = target else {
+        return None;
+    };
+    match &rest[0] {
+        Value::Str(o) => {
+            let (a, b): (Vec<u16>, Vec<u16>) =
+                (s.encode_utf16().collect(), o.encode_utf16().collect());
+            let width = a.len().min(b.len());
+            for i in 0..width {
+                if a[i] != b[i] {
+                    return Some(Ok(Value::Int(i64::from(a[i]) - i64::from(b[i]))));
+                }
+            }
+            Some(Ok(Value::Int(a.len() as i64 - b.len() as i64)))
+        }
+        Value::Nil => Some(Err(NativeError::new(
+            ThrowClass::NullPointerException,
+            "Cannot invoke \"String.compareTo(String)\" because \"anotherString\" is null"
+                .to_owned(),
+        ))),
+        _ => None,
+    }
 }
 
 /// The string-gated members (split 0-arg/with-args for the
@@ -4943,6 +6736,569 @@ fn surface_gated_str(
     rest: &[Value],
 ) -> Option<Result<Value, NativeError>> {
     surface_gated_str0(meth, target, rest).or_else(|| surface_gated_strn(meth, target, rest))
+}
+
+/// The `BigInteger` members (#205): arithmetic, shifts,
+/// modular exponentiation, and conversions over
+/// `Value::BigInteger` targets (strict — `BigInt` twins take
+/// the generic miss, like the JVM, which has no such
+/// methods on `clojure.lang.BigInt`).
+fn surface_gated_bigint(
+    meth: &str,
+    target: &Value,
+    rest: &[Value],
+) -> Option<Result<Value, NativeError>> {
+    match (meth, rest.len()) {
+        ("add" | "subtract" | "multiply" | "divide", 1) => gated_bigint_binop(meth, target, rest),
+        ("and" | "or" | "xor", 1) => gated_bigint_bitop(meth, target, rest),
+        ("not", 0) => gated_bigint_not(target),
+        ("shiftLeft" | "shiftRight", 1) => gated_bigint_shift(meth, target, rest),
+        ("modPow", 2) => gated_bigint_modpow(target, rest),
+        ("mod" | "modInverse", 1) => gated_bigint_mod(meth, target, rest),
+        ("pow", 1) => gated_bigint_pow(target, rest),
+        ("compareTo", 1) => gated_bigint_compare(target, rest),
+        ("signum" | "bitLength", 0) => gated_bigint_measure(meth, target),
+        ("testBit" | "setBit", 1) => gated_bigint_bit(meth, target, rest),
+        ("toByteArray" | "intValue" | "longValue" | "longValueExact", 0) => {
+            gated_bigint_narrow(meth, target)
+        }
+        ("toString", 1) => gated_bigint_tostring(target, rest),
+        _ => None,
+    }
+}
+
+/// The `BigInteger` target, if it is one.
+fn bigint_self(target: &Value) -> Option<&num_bigint::BigInt> {
+    match target {
+        Value::BigInteger(n) => Some(n),
+        _ => None,
+    }
+}
+
+/// A `BigInteger` parameter (nil is the body's NPE, anything
+/// else mistyped the overload miss at the call's arity).
+fn bigint_param<'a>(
+    v: &'a Value,
+    meth: &str,
+    argc: usize,
+) -> Result<&'a num_bigint::BigInt, NativeError> {
+    match v {
+        Value::BigInteger(n) => Ok(n),
+        Value::Nil => Err(NativeError::new(
+            ThrowClass::NullPointerException,
+            format!("Cannot invoke \"java.math.BigInteger.{meth}\" because \"val\" is null"),
+        )),
+        _ => Err(crate::types::no_method(meth, argc, "java.math.BigInteger")),
+    }
+}
+
+/// Mint a `BigInteger` value.
+fn bigint_value(n: num_bigint::BigInt) -> Value {
+    Value::BigInteger(Arc::new(n))
+}
+
+/// `add`/`subtract`/`multiply`/`divide` (division truncates
+/// toward zero, like `/`; zero divisors are the JDK text).
+fn gated_bigint_binop(
+    meth: &str,
+    target: &Value,
+    rest: &[Value],
+) -> Option<Result<Value, NativeError>> {
+    let x = bigint_self(target)?;
+    let y = match bigint_param(&rest[0], meth, 1) {
+        Ok(y) => y,
+        Err(e) => return Some(Err(e)),
+    };
+    let out = match meth {
+        "add" => x + y,
+        "subtract" => x - y,
+        "multiply" => x * y,
+        _ => {
+            if y.sign() == num_bigint::Sign::NoSign {
+                return Some(Err(crate::core::arithmetic("BigInteger divide by zero")));
+            }
+            x / y
+        }
+    };
+    Some(Ok(bigint_value(out)))
+}
+
+/// `and`/`or`/`xor` (infinite two's complement, like the JDK).
+fn gated_bigint_bitop(
+    meth: &str,
+    target: &Value,
+    rest: &[Value],
+) -> Option<Result<Value, NativeError>> {
+    let x = bigint_self(target)?;
+    let y = match bigint_param(&rest[0], meth, 1) {
+        Ok(y) => y,
+        Err(e) => return Some(Err(e)),
+    };
+    let out = match meth {
+        "and" => x & y,
+        "or" => x | y,
+        _ => x ^ y,
+    };
+    Some(Ok(bigint_value(out)))
+}
+
+/// `not` (`-x-1`, the infinite complement).
+fn gated_bigint_not(target: &Value) -> Option<Result<Value, NativeError>> {
+    let x = bigint_self(target)?;
+    Some(Ok(bigint_value(-x - 1)))
+}
+
+/// `shiftLeft`/`shiftRight` (negative distances flip, like the
+/// JDK — there is no `>>>` on `BigInteger`).
+fn gated_bigint_shift(
+    meth: &str,
+    target: &Value,
+    rest: &[Value],
+) -> Option<Result<Value, NativeError>> {
+    let x = bigint_self(target)?;
+    let dist = match str_int_arg(&rest[0]) {
+        Ok(dist) => dist,
+        Err(e) => return Some(Err(e)),
+    };
+    let left = (meth == "shiftLeft") != (dist < 0);
+    let dist = dist.unsigned_abs();
+    Some(Ok(bigint_value(if left { x << dist } else { x >> dist })))
+}
+
+/// `modPow(exponent, modulus)` (guards first — the power
+/// routine panics on negative exponents and zero moduli).
+fn gated_bigint_modpow(target: &Value, rest: &[Value]) -> Option<Result<Value, NativeError>> {
+    let x = bigint_self(target)?;
+    let exp = match bigint_param(&rest[0], "modPow", 2) {
+        Ok(exp) => exp,
+        Err(e) => return Some(Err(e)),
+    };
+    let modulus = match bigint_param(&rest[1], "modPow", 2) {
+        Ok(modulus) => modulus,
+        Err(e) => return Some(Err(e)),
+    };
+    if exp.sign() == num_bigint::Sign::Minus {
+        return Some(Err(crate::core::arithmetic(
+            "BigInteger: negative exponent",
+        )));
+    }
+    if modulus.sign() != num_bigint::Sign::Plus {
+        return Some(Err(crate::core::arithmetic(
+            "BigInteger: modulus not positive",
+        )));
+    }
+    Some(Ok(bigint_value(x.modpow(exp, modulus))))
+}
+
+/// `mod` (floored, non-negative for positive moduli) and
+/// `modInverse` (in `[0, m)`, absent when not coprime).
+fn gated_bigint_mod(
+    meth: &str,
+    target: &Value,
+    rest: &[Value],
+) -> Option<Result<Value, NativeError>> {
+    let x = bigint_self(target)?;
+    let m = match bigint_param(&rest[0], meth, 1) {
+        Ok(m) => m,
+        Err(e) => return Some(Err(e)),
+    };
+    if m.sign() != num_bigint::Sign::Plus {
+        return Some(Err(crate::core::arithmetic(
+            "BigInteger: modulus not positive",
+        )));
+    }
+    if meth == "mod" {
+        let r = x % m;
+        let out = if r.sign() == num_bigint::Sign::Minus {
+            r + m
+        } else {
+            r
+        };
+        return Some(Ok(bigint_value(out)));
+    }
+    match x.modinv(m) {
+        Some(inv) => Some(Ok(bigint_value(inv))),
+        None => Some(Err(crate::core::arithmetic("BigInteger not invertible"))),
+    }
+}
+
+/// `pow` (negative exponents are the JDK text).
+fn gated_bigint_pow(target: &Value, rest: &[Value]) -> Option<Result<Value, NativeError>> {
+    let x = bigint_self(target)?;
+    let exp = match str_int_arg(&rest[0]) {
+        Ok(exp) => exp,
+        Err(e) => return Some(Err(e)),
+    };
+    if exp < 0 {
+        return Some(Err(crate::core::arithmetic("Negative exponent")));
+    }
+    Some(Ok(bigint_value(x.pow(exp as u32))))
+}
+
+/// `compareTo` (the `BigInt` order).
+fn gated_bigint_compare(target: &Value, rest: &[Value]) -> Option<Result<Value, NativeError>> {
+    let x = bigint_self(target)?;
+    let y = match bigint_param(&rest[0], "compareTo", 1) {
+        Ok(y) => y,
+        Err(e) => return Some(Err(e)),
+    };
+    Some(Ok(Value::Int(match x.cmp(y) {
+        std::cmp::Ordering::Less => -1,
+        std::cmp::Ordering::Equal => 0,
+        std::cmp::Ordering::Greater => 1,
+    })))
+}
+
+/// `signum` and `bitLength` (negatives measure `~x`, like the
+/// JDK's minimal-complement rule).
+fn gated_bigint_measure(meth: &str, target: &Value) -> Option<Result<Value, NativeError>> {
+    let x = bigint_self(target)?;
+    if meth == "signum" {
+        return Some(Ok(Value::Int(match x.sign() {
+            num_bigint::Sign::Minus => -1,
+            num_bigint::Sign::NoSign => 0,
+            num_bigint::Sign::Plus => 1,
+        })));
+    }
+    let bits = if x.sign() == num_bigint::Sign::Minus {
+        let comp: num_bigint::BigInt = -x - 1;
+        comp.bits()
+    } else {
+        x.bits()
+    };
+    Some(Ok(Value::Int(bits as i64)))
+}
+
+/// `testBit`/`setBit` (two's complement; negative indices are
+/// the JDK text).
+fn gated_bigint_bit(
+    meth: &str,
+    target: &Value,
+    rest: &[Value],
+) -> Option<Result<Value, NativeError>> {
+    let x = bigint_self(target)?;
+    let bit = match str_int_arg(&rest[0]) {
+        Ok(bit) => bit,
+        Err(e) => return Some(Err(e)),
+    };
+    if bit < 0 {
+        return Some(Err(crate::core::arithmetic("Negative bit address")));
+    }
+    if meth == "testBit" {
+        return Some(Ok(Value::Bool(x.bit(bit as u64))));
+    }
+    let mut out = x.clone();
+    out.set_bit(bit as u64, true);
+    Some(Ok(bigint_value(out)))
+}
+
+/// `toByteArray` (minimal two's complement) and the narrowing
+/// conversions (`intValue`/`longValue` wrap; `longValueExact`
+/// is the JDK text outside `long` range).
+fn gated_bigint_narrow(meth: &str, target: &Value) -> Option<Result<Value, NativeError>> {
+    let x = bigint_self(target)?;
+    match meth {
+        "toByteArray" => Some(Ok(str_bytes_value(x.to_signed_bytes_be()))),
+        "intValue" => Some(Ok(Value::Int(i64::from(bigint_wrap_i32(x))))),
+        "longValue" => Some(Ok(Value::Int(bigint_wrap_i64(x)))),
+        _ => match x.to_i64() {
+            Some(n) => Some(Ok(Value::Int(n))),
+            None => Some(Err(crate::core::arithmetic("BigInteger out of long range"))),
+        },
+    }
+}
+
+/// The low 32 bits as an `i32` (wrapping, like the JDK).
+fn bigint_wrap_i32(x: &num_bigint::BigInt) -> i32 {
+    let mut le = x.to_signed_bytes_le();
+    le.resize(
+        4,
+        if x.sign() == num_bigint::Sign::Minus {
+            0xFF
+        } else {
+            0
+        },
+    );
+    i32::from_le_bytes([le[0], le[1], le[2], le[3]])
+}
+
+/// The low 64 bits as an `i64` (wrapping, like the JDK).
+fn bigint_wrap_i64(x: &num_bigint::BigInt) -> i64 {
+    let mut le = x.to_signed_bytes_le();
+    le.resize(
+        8,
+        if x.sign() == num_bigint::Sign::Minus {
+            0xFF
+        } else {
+            0
+        },
+    );
+    i64::from_le_bytes([le[0], le[1], le[2], le[3], le[4], le[5], le[6], le[7]])
+}
+
+/// `toString(radix)` (lowercase, like the JDK; out-of-range
+/// radixes read 10, the `Long.toString` rule).
+fn gated_bigint_tostring(target: &Value, rest: &[Value]) -> Option<Result<Value, NativeError>> {
+    let x = bigint_self(target)?;
+    let radix = match str_int_arg(&rest[0]) {
+        Ok(radix) => radix,
+        Err(e) => return Some(Err(e)),
+    };
+    let radix = if (2..=36).contains(&radix) {
+        radix as u32
+    } else {
+        10
+    };
+    Some(Ok(Value::Str(Arc::from(x.to_str_radix(radix).as_str()))))
+}
+
+/// A `java.math.RoundingMode` enum constant (#205): fresh per
+/// static-field read (like the `BigInteger` constants), so `=`
+/// compares modes, not ids (the JVM hands out singletons —
+/// same mode is the same constant).
+#[derive(Debug)]
+pub(crate) struct RoundingModeVal {
+    id: u64,
+    mode: RoundingMode,
+}
+
+static NEXT_ROUNDING: AtomicU64 = AtomicU64::new(1);
+
+impl RoundingModeVal {
+    pub(crate) fn value(mode: RoundingMode) -> Value {
+        Value::Extension(Arc::new(Self {
+            id: NEXT_ROUNDING.fetch_add(1, Ordering::Relaxed),
+            mode,
+        }))
+    }
+}
+
+impl ExtensionValue for RoundingModeVal {
+    fn class_name(&self) -> String {
+        "java.math.RoundingMode".to_owned()
+    }
+
+    fn print(&self) -> String {
+        format!(
+            "#object[java.math.RoundingMode 0x{:x} \"{}\"]",
+            self.id,
+            self.mode.name()
+        )
+    }
+
+    fn print_str(&self) -> Option<String> {
+        Some(self.mode.name().to_owned())
+    }
+
+    fn dyn_eq(&self, other: &dyn ExtensionValue) -> bool {
+        other
+            .as_any()
+            .downcast_ref::<RoundingModeVal>()
+            .is_some_and(|o| o.mode == self.mode)
+    }
+
+    fn dyn_hash(&self, state: &mut dyn std::hash::Hasher) {
+        state.write(self.mode.name().as_bytes());
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+/// Downcast a value to a rounding mode, if it is one.
+pub(crate) fn as_rounding(v: &Value) -> Option<RoundingMode> {
+    match v {
+        Value::Extension(e) => e.as_any().downcast_ref::<RoundingModeVal>().map(|r| r.mode),
+        _ => None,
+    }
+}
+
+/// Downcast a value to a math context, if it is one (reuses the
+/// `with-precision` value — same class, same shape).
+fn as_math_context(v: &Value) -> Option<MathContext> {
+    match v {
+        Value::Extension(e) => e
+            .as_any()
+            .downcast_ref::<crate::core::MathContextVal>()
+            .map(|m| m.ctx),
+        _ => None,
+    }
+}
+
+/// The `BigDec` target, when the value is one.
+fn bigdec_self(target: &Value) -> Option<&BigDec> {
+    match target {
+        Value::BigDec(d) => Some(d),
+        _ => None,
+    }
+}
+
+/// A `BigDecimal` method arg: anything else mistypes the
+/// overload miss (only `BigDecimal` overloads exist).
+fn bigdec_param<'a>(v: &'a Value, meth: &str, argc: usize) -> Result<&'a BigDec, NativeError> {
+    match v {
+        Value::BigDec(d) => Ok(d),
+        _ => Err(crate::types::no_method(meth, argc, "java.math.BigDecimal")),
+    }
+}
+
+/// A `MathContext` method arg: nil is the bare NPE (the body
+/// derefs it); anything else mistypes the overload miss.
+fn mc_param(v: &Value, meth: &str, argc: usize) -> Result<MathContext, NativeError> {
+    match v {
+        Value::Nil => Err(NativeError::new(
+            ThrowClass::NullPointerException,
+            String::new(),
+        )),
+        _ => as_math_context(v)
+            .ok_or_else(|| crate::types::no_method(meth, argc, "java.math.BigDecimal")),
+    }
+}
+
+/// A `RoundingMode` method arg: nil is the bare NPE; anything
+/// else mistypes the overload miss.
+fn rounding_param(v: &Value, meth: &str, argc: usize) -> Result<RoundingMode, NativeError> {
+    match v {
+        Value::Nil => Err(NativeError::new(
+            ThrowClass::NullPointerException,
+            String::new(),
+        )),
+        _ => as_rounding(v)
+            .ok_or_else(|| crate::types::no_method(meth, argc, "java.math.BigDecimal")),
+    }
+}
+
+/// A tower arithmetic failure as the JDK error: the tower's
+/// divide-by-zero text is the Clojure shape, the method needs
+/// the JDK's; every other message already matches.
+fn bigdec_arith(err: &'static str) -> NativeError {
+    if err == "Divide by zero" {
+        crate::core::arithmetic("Division by zero")
+    } else {
+        crate::core::arithmetic(err)
+    }
+}
+
+fn surface_gated_bigdec(
+    meth: &str,
+    target: &Value,
+    rest: &[Value],
+) -> Option<Result<Value, NativeError>> {
+    bigdec_self(target)?;
+    match (meth, rest.len()) {
+        ("add" | "subtract" | "multiply", 1) => gated_bigdec_exact(meth, target, rest),
+        ("add" | "subtract" | "multiply", 2) => gated_bigdec_mc(meth, target, rest),
+        ("divide", 1 | 2) => gated_bigdec_div(target, rest),
+        ("sqrt", 1) => gated_bigdec_sqrt(target, rest),
+        ("setScale", 2) => gated_bigdec_setscale(target, rest),
+        ("toPlainString" | "doubleValue" | "toBigInteger", 0) => gated_bigdec_conv(meth, target),
+        _ => None,
+    }
+}
+
+/// Exact `add`/`subtract`/`multiply` (no context).
+fn gated_bigdec_exact(
+    meth: &str,
+    target: &Value,
+    rest: &[Value],
+) -> Option<Result<Value, NativeError>> {
+    let x = bigdec_self(target)?;
+    let y = match bigdec_param(&rest[0], meth, 1) {
+        Ok(y) => y,
+        Err(e) => return Some(Err(e)),
+    };
+    let out = match meth {
+        "add" => x.add(y),
+        "subtract" => x.sub(y),
+        _ => x.mul(y),
+    };
+    Some(Ok(bigdec_result(out)))
+}
+
+/// Context `add`/`subtract`/`multiply` (chudnovsky threads one).
+fn gated_bigdec_mc(
+    meth: &str,
+    target: &Value,
+    rest: &[Value],
+) -> Option<Result<Value, NativeError>> {
+    let x = bigdec_self(target)?;
+    let y = match bigdec_param(&rest[0], meth, 2) {
+        Ok(y) => y,
+        Err(e) => return Some(Err(e)),
+    };
+    let mc = match mc_param(&rest[1], meth, 2) {
+        Ok(mc) => mc,
+        Err(e) => return Some(Err(e)),
+    };
+    let out = match meth {
+        "add" => x.add_mc(y, &mc),
+        "subtract" => x.sub_mc(y, &mc),
+        _ => x.mul_mc(y, &mc),
+    };
+    Some(out.map(bigdec_result).map_err(bigdec_arith))
+}
+
+/// `divide`, exact or under a context.
+fn gated_bigdec_div(target: &Value, rest: &[Value]) -> Option<Result<Value, NativeError>> {
+    let x = bigdec_self(target)?;
+    let y = match bigdec_param(&rest[0], "divide", rest.len()) {
+        Ok(y) => y,
+        Err(e) => return Some(Err(e)),
+    };
+    if rest.len() == 1 {
+        return Some(x.div_exact(y).map(bigdec_result).map_err(bigdec_arith));
+    }
+    let mc = match mc_param(&rest[1], "divide", 2) {
+        Ok(mc) => mc,
+        Err(e) => return Some(Err(e)),
+    };
+    Some(x.div_mc(y, &mc).map(bigdec_result).map_err(bigdec_arith))
+}
+
+/// `sqrt(mc)`.
+fn gated_bigdec_sqrt(target: &Value, rest: &[Value]) -> Option<Result<Value, NativeError>> {
+    let x = bigdec_self(target)?;
+    let mc = match mc_param(&rest[0], "sqrt", 1) {
+        Ok(mc) => mc,
+        Err(e) => return Some(Err(e)),
+    };
+    Some(x.sqrt_mc(&mc).map(bigdec_result).map_err(bigdec_arith))
+}
+
+/// `setScale(scale, rounding)` (same scale answers the target
+/// itself, like the JVM).
+fn gated_bigdec_setscale(target: &Value, rest: &[Value]) -> Option<Result<Value, NativeError>> {
+    let x = bigdec_self(target)?;
+    let scale = match str_int_arg(&rest[0]) {
+        Ok(scale) => scale as i64,
+        Err(e) => return Some(Err(e)),
+    };
+    if scale == x.scale() {
+        return Some(Ok(target.clone()));
+    }
+    let mode = match rounding_param(&rest[1], "setScale", 2) {
+        Ok(mode) => mode,
+        Err(e) => return Some(Err(e)),
+    };
+    Some(
+        x.set_scale(scale, mode)
+            .map(bigdec_result)
+            .map_err(bigdec_arith),
+    )
+}
+
+/// `toPlainString`/`doubleValue`/`toBigInteger` (`toString`
+/// rides the universal gate, like `StringBuilder`).
+fn gated_bigdec_conv(meth: &str, target: &Value) -> Option<Result<Value, NativeError>> {
+    let x = bigdec_self(target)?;
+    Some(Ok(match meth {
+        "toPlainString" => Value::Str(Arc::from(x.to_plain_string().as_str())),
+        "doubleValue" => Value::Double(x.to_f64()),
+        // The caller admits only the three conversions, so the
+        // wildcard is `toBigInteger`.
+        _ => Value::BigInteger(Arc::new(x.to_bigint_trunc())),
+    }))
 }
 
 /// A `java.lang.StringBuilder` (issue #201 S5): a growable
@@ -5026,6 +7382,99 @@ impl ExtensionValue for LocaleHandle {
     }
 }
 
+/// A `java.net.URI` (#205): the raw string plus its parsed
+/// host (`None` when the URI has no registry authority —
+/// `getHost` answers nil, like the JDK). Identity is the
+/// string; `str` renders it.
+#[derive(Debug)]
+pub(crate) struct UriHandle {
+    raw: String,
+    host: Option<String>,
+}
+
+impl UriHandle {
+    /// Parse `raw`: illegal characters fail with the JDK's
+    /// `URISyntaxException` shape (`Illegal character … at
+    /// index N: <input>`); the host is the `://` authority
+    /// minus userinfo/port/brackets (nil without `://`).
+    pub(crate) fn parse(raw: &str) -> Result<Self, NativeError> {
+        for (i, c) in raw.char_indices() {
+            if c.is_control()
+                || matches!(
+                    c,
+                    ' ' | '<' | '>' | '"' | '{' | '}' | '|' | '\\' | '^' | '`'
+                )
+            {
+                return Err(NativeError::new(
+                    ThrowClass::URISyntaxException,
+                    format!("Illegal character in path at index {i}: {raw}"),
+                ));
+            }
+        }
+        let host = raw
+            .split_once("://")
+            .map(|(_, rest)| rest)
+            .and_then(|rest| rest.split(['/', '?', '#']).next())
+            .and_then(|auth| auth.rsplit('@').next())
+            .map(|hostport| {
+                if let Some(rest) = hostport.strip_prefix('[') {
+                    rest.split(']').next().unwrap_or(rest).to_owned()
+                } else {
+                    hostport.split(':').next().unwrap_or(hostport).to_owned()
+                }
+            })
+            .filter(|host| !host.is_empty());
+        Ok(Self {
+            raw: raw.to_owned(),
+            host,
+        })
+    }
+
+    fn host(&self) -> Option<&str> {
+        self.host.as_deref()
+    }
+}
+
+/// Downcast a URI value to its handle, if any.
+fn as_uri(v: &Value) -> Option<&UriHandle> {
+    match v {
+        Value::Extension(e) => e.as_any().downcast_ref::<UriHandle>(),
+        _ => None,
+    }
+}
+
+impl ExtensionValue for UriHandle {
+    fn class_name(&self) -> String {
+        "java.net.URI".to_owned()
+    }
+
+    fn print(&self) -> String {
+        format!(
+            "#object[java.net.URI 0x{:x} \"{}\"]",
+            self as *const Self as usize, self.raw
+        )
+    }
+
+    fn print_str(&self) -> Option<String> {
+        Some(self.raw.clone())
+    }
+
+    fn dyn_eq(&self, other: &dyn ExtensionValue) -> bool {
+        other
+            .as_any()
+            .downcast_ref::<UriHandle>()
+            .is_some_and(|o| o.raw == self.raw)
+    }
+
+    fn dyn_hash(&self, state: &mut dyn std::hash::Hasher) {
+        state.write(self.raw.as_bytes());
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
 impl ExtensionValue for StringBuilder {
     fn class_name(&self) -> String {
         "java.lang.StringBuilder".to_owned()
@@ -5088,6 +7537,26 @@ fn gated_builder_append(
     Some(Ok(target.clone()))
 }
 
+/// `StringBuilder.length` (#205): UTF-16 code units (astral
+/// chars count twice, like the JDK).
+fn gated_builder_length(target: &Value) -> Option<Result<Value, NativeError>> {
+    let b = as_builder(target)?;
+    Some(Ok(Value::Int(b.lock().encode_utf16().count() as i64)))
+}
+
+/// `StringBuilder.reverse` (#205): the in-place reversal,
+/// answering the builder (like `append`). Reversing by scalar
+/// value matches the JDK's surrogate-preserving unit reversal
+/// on every representable string (the reader rejects lone
+/// surrogates, so no half survives to be split).
+fn gated_builder_reverse(target: &Value) -> Option<Result<Value, NativeError>> {
+    let b = as_builder(target)?;
+    let mut guard = b.lock();
+    let rev: String = guard.chars().rev().collect();
+    *guard = rev;
+    Some(Ok(target.clone()))
+}
+
 /// `Pattern/split`: the `re` split loop over the pattern source
 /// (same body as `String/split`, pattern-first argument order).
 fn gated_regex_split(target: &Value, rest: &[Value]) -> Option<Result<Value, NativeError>> {
@@ -5137,17 +7606,37 @@ pub(crate) fn surface_meth(
 /// The surface as `(member, argc)` pairs (sorted for the unit test's
 /// nil-target sweep).
 pub(crate) const SURFACE_MEMBERS: &[(&str, usize)] = &[
+    ("add", 1),
+    ("addFirst", 1),
+    ("addLast", 1),
+    ("and", 1),
     ("append", 1),
+    ("bitLength", 0),
     ("cast", 1),
     ("charAt", 1),
     ("close", 0),
+    ("codePointCount", 2),
+    ("compareTo", 1),
+    ("contains", 1),
+    ("delete", 0),
+    ("digest", 0),
+    ("digest", 1),
+    ("divide", 1),
+    ("end", 0),
     ("endsWith", 1),
     ("equals", 1),
+    ("exists", 0),
+    ("find", 0),
+    ("find", 1),
     ("flush", 0),
+    ("getAbsolutePath", 0),
+    ("getBytes", 0),
+    ("getBytes", 1),
     ("getCause", 0),
     ("getClass", 0),
     ("getData", 0),
     ("getFirst", 0),
+    ("getHost", 0),
     ("getInterfaces", 0),
     ("getKey", 0),
     ("getLast", 0),
@@ -5155,11 +7644,16 @@ pub(crate) const SURFACE_MEMBERS: &[(&str, usize)] = &[
     ("getMessage", 0),
     ("getName", 0),
     ("getNamespace", 0),
+    ("getPath", 0),
     ("getSimpleName", 0),
     ("getSuperclass", 0),
     ("getValue", 0),
+    ("group", 0),
+    ("group", 1),
     ("hashCode", 0),
     ("indexOf", 1),
+    ("indexOf", 2),
+    ("intValue", 0),
     ("isArray", 0),
     ("isAssignableFrom", 1),
     ("isBlank", 0),
@@ -5167,19 +7661,60 @@ pub(crate) const SURFACE_MEMBERS: &[(&str, usize)] = &[
     ("isInstance", 1),
     ("isInterface", 0),
     ("isRealized", 0),
+    ("lastIndexOf", 1),
+    ("lastIndexOf", 2),
     ("length", 0),
+    ("longValue", 0),
+    ("longValueExact", 0),
+    ("mod", 1),
+    ("modInverse", 1),
+    ("modPow", 2),
+    ("multiply", 1),
+    ("nextBytes", 1),
+    ("nextDouble", 0),
+    ("nextGaussian", 0),
+    ("nextInt", 0),
+    ("nextInt", 1),
+    ("not", 0),
+    ("offer", 1),
+    ("offerFirst", 1),
+    ("offerLast", 1),
+    ("or", 1),
+    ("peek", 0),
+    ("peekFirst", 0),
+    ("peekLast", 0),
+    ("poll", 0),
+    ("pollFirst", 0),
+    ("pollLast", 0),
+    ("pow", 1),
+    ("readAllBytes", 0),
+    ("readLine", 0),
+    ("replace", 2),
     ("replaceAll", 1),
+    ("reverse", 0),
+    ("setBit", 1),
+    ("shiftLeft", 1),
+    ("shiftRight", 1),
+    ("signum", 0),
     ("split", 1),
     ("split", 2),
+    ("start", 0),
     ("startsWith", 1),
     ("startsWith", 2),
     ("subSequence", 2),
     ("substring", 1),
     ("substring", 2),
+    ("subtract", 1),
+    ("testBit", 1),
+    ("toByteArray", 0),
     ("toLowerCase", 0),
     ("toString", 0),
+    ("toString", 1),
     ("toUpperCase", 0),
     ("trim", 0),
+    ("update", 1),
+    ("write", 1),
+    ("xor", 1),
 ];
 
 /// Whether `meth` names any surface member (any arity).
