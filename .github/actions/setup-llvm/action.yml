@@ -68,7 +68,11 @@ runs:
         set -euo pipefail
         sudo apt-get update
         sudo apt-get install -y wget gnupg lsb-release
-        wget -q https://apt.llvm.org/llvm.sh
+        # Retry: apt.llvm.org flakes from GitHub runners (wget exit
+        # 4 reds whole runs; seen 5x in one day). curl --retry
+        # matches the Windows step below.
+        curl -sSLf --retry 5 --retry-all-errors -o llvm.sh https://apt.llvm.org/llvm.sh
+        test -s llvm.sh
         chmod +x llvm.sh
         sudo ./llvm.sh "${{ inputs.version }}"
         # llvm-22-dev brings llvm-config, CMake files, headers, and
