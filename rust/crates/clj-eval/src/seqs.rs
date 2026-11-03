@@ -21,7 +21,7 @@ use smallvec::SmallVec;
 use crate::core::{as_reduced, cce_err, check_ifn, jvm_compare, repeat_count, take_count};
 use crate::error::{NativeError, jvm_class_of};
 use crate::eval::Evaluator;
-use crate::ext::{NativeFn, NativeImpl};
+use crate::ext::{FastArith, NativeFn, NativeImpl};
 use crate::lazy::{
     as_subvector, collect_all, collect_packed, concat_thunk, cycle_thunk, dedupe_thunk,
     distinct_thunk, drop_value, drop_while_thunk, empty_list_value, filter_thunk, first_value,
@@ -72,6 +72,7 @@ fn native_fn(
         func: Arc::new(func) as Arc<NativeImpl>,
         owned: None,
         meta: None,
+        fast: FastArith::None,
     }))
 }
 

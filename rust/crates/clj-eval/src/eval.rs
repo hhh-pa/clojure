@@ -26,8 +26,10 @@ use smallvec::SmallVec;
 use crate::coll::native_nth;
 use crate::env::{Bindings, Env, FxHashMap, SharedRegistry};
 use crate::error::{CompileError, NativeError, Signal, jvm_class_of, span_of};
-use crate::expr::{Analyzer, CaseTest, Catch, Expr, MapPattern, Pattern, pattern_names};
-use crate::ext::{Closure, NativeFn, NsHandle, as_closure, as_native};
+use crate::expr::{
+    Analyzer, CaseTest, Catch, DirectCall, Expr, MapPattern, Pattern, pattern_names,
+};
+use crate::ext::{Closure, FastArith, NativeFn, NsHandle, as_closure, as_native};
 
 /// `eval_source` failures: reader errors, analyzer errors, uncaught
 /// throwables, and (unreachable by construction) escaping `recur`s.
@@ -807,6 +809,27 @@ impl Evaluator {
         name: &str,
         func: Arc<crate::ext::NativeImpl>,
     ) -> Value {
+        self.install_native_inner(ns, name, func, FastArith::None)
+    }
+
+    /// Install a table-driven `fn`-pointer native (like
+    /// [`install_native`](Self::install_native), but the inline
+    /// integer tag reads off the installing pointer — only the
+    /// genuine core arith/compare fns tag, never lookalikes).
+    pub fn install_native_ptr(&mut self, ns: &str, name: &str, f: crate::ns::NativeFnPtr) -> Value {
+        let func: Arc<crate::ext::NativeImpl> = Arc::new(f);
+        self.install_native_inner(ns, name, func, crate::core::fast_arith_for(f))
+    }
+
+    /// Install one native root (shared by the `Arc` and
+    /// fn-pointer entries).
+    fn install_native_inner(
+        &mut self,
+        ns: &str,
+        name: &str,
+        func: Arc<crate::ext::NativeImpl>,
+        fast: FastArith,
+    ) -> Value {
         let id = self.next_id();
         let sym = Symbol::new(Some(ns), name);
         let var_id = self.registry.intern(&sym);
@@ -816,6 +839,7 @@ impl Evaluator {
             func,
             owned: crate::ns::owned_entry(name),
             meta: None,
+            fast,
         }));
         self.registry.with_state_mut(var_id, |state| {
             state.root = Some(native.clone());
@@ -909,11 +933,9 @@ impl Evaluator {
             } => self.eval_def(sym, doc.clone(), init.as_deref(), *span, env),
             Expr::If { test, then, els } => self.eval_if(test, then, els, env),
             Expr::Do(exprs) => self.eval_body(exprs, env),
-            Expr::Let { bindings, body } => {
-                let env = self.bind_all(bindings, env)?;
-                self.eval_body(body, &env)
+            Expr::Let { bindings, body } | Expr::Loop { bindings, body } => {
+                self.eval_let_or_loop(expr, bindings, body, env)
             }
-            Expr::Loop { bindings, body } => self.eval_loop(bindings, body, env),
             Expr::LetFn { fns, body } => self.eval_letfn(fns, body, env),
             Expr::Fn(fun) => Ok(Value::Extension(Arc::new(self.make_closure(fun, env)))),
             Expr::Recur(args) => {
@@ -1002,6 +1024,25 @@ impl Evaluator {
                 }
                 self.invoke_args(&callee, values, *span)
             }
+            Expr::DirectNative(call) => self.eval_direct_native(call, env),
+        }
+    }
+
+    /// `let`/`loop` (one merged arm, so the [`eval`](Self::eval)
+    /// dispatch keeps its arm count under the complexity ratchet):
+    /// `loop` installs the recur target, `let` binds plainly.
+    fn eval_let_or_loop(
+        &mut self,
+        expr: &Expr,
+        bindings: &[(Pattern, Expr)],
+        body: &[Expr],
+        env: &Env,
+    ) -> Result<Value, Signal> {
+        if matches!(expr, Expr::Loop { .. }) {
+            self.eval_loop(bindings, body, env)
+        } else {
+            let env = self.bind_all(bindings, env)?;
+            self.eval_body(body, &env)
         }
     }
 
@@ -1837,10 +1878,158 @@ impl Evaluator {
         // The call site stays visible to natives for the
         // duration of the call (nesting saves/restores).
         let saved = self.native_call_span.replace(span);
-        let out = match crate::ext::as_native(callee).and_then(|n| n.owned.clone()) {
-            Some(owned) => owned(self, args).map_err(|e| self.throw(e)),
+        let out = match crate::ext::as_native(callee) {
+            Some(native) => self.invoke_native(native, args),
             None => self.invoke(callee, &args),
         };
+        self.native_call_span = saved;
+        out
+    }
+
+    /// Invoke an already-downcast native (split from
+    /// [`invoke_args`](Self::invoke_args) for the complexity
+    /// budget): owned-args loopers take the buffer, borrow-only
+    /// natives borrow it — through the borrow, so the single
+    /// downcast above is the whole dispatch (no `Arc` bumps, no
+    /// second downcast inside [`invoke`](Self::invoke)).
+    fn invoke_native(
+        &mut self,
+        native: &NativeFn,
+        args: SmallVec<[Value; 4]>,
+    ) -> Result<Value, Signal> {
+        match &native.owned {
+            Some(owned) => owned(self, args).map_err(|e| self.throw(e)),
+            None => (native.func)(self, &args).map_err(|e| self.throw(e)),
+        }
+    }
+
+    /// A direct-threaded native call (see [`Expr::DirectNative`]):
+    /// the validated fast road calls the snapshot entries, any
+    /// validation miss takes the ordinary `Invoke` road.
+    fn eval_direct_native(&mut self, call: &DirectCall, env: &Env) -> Result<Value, Signal> {
+        if self.direct_valid(call) {
+            self.invoke_direct(call, env)
+        } else {
+            self.invoke_direct_slow(call, env)
+        }
+    }
+
+    /// Direct-call validation: no thread binding shadows the var,
+    /// the lineage epoch still matches (no root write since the
+    /// cache generation), and the cached root is still the
+    /// analyzed native by identity.
+    fn direct_valid(&self, call: &DirectCall) -> bool {
+        if self.bindings.get(call.var.id).is_some() {
+            return false;
+        }
+        if self.registry.epoch() != self.root_epoch {
+            return false;
+        }
+        matches!(self.root_cache.get(&call.var.id), Some(Value::Extension(e)) if Arc::ptr_eq(e, &call.expect))
+    }
+
+    /// The slow road: re-resolve the head and invoke generally
+    /// (the `Invoke` arm over a `Global` head, step for step).
+    fn invoke_direct_slow(&mut self, call: &DirectCall, env: &Env) -> Result<Value, Signal> {
+        let callee = self.deref_var_cached(call.var.id, &call.var.sym);
+        let mut values: SmallVec<[Value; 4]> = SmallVec::new();
+        for arg in &call.args {
+            values.push(self.eval(arg, env)?);
+        }
+        self.invoke_args(&callee, values, call.span)
+    }
+
+    /// The validated road: inline integer ops compute directly,
+    /// everything else calls the snapshot entries.
+    fn invoke_direct(&mut self, call: &DirectCall, env: &Env) -> Result<Value, Signal> {
+        match call.fast {
+            FastArith::None => self.call_direct_general(call, env),
+            FastArith::Inc | FastArith::Dec => self.call_direct_arith1(call, env),
+            _ => self.call_direct_arith2(call, env),
+        }
+    }
+
+    /// A validated general call: evaluate into the stack-inline
+    /// buffer and run the snapshot entries (no downcast, no `Arc`
+    /// bump — the `Invoke` road minus the dispatch).
+    fn call_direct_general(&mut self, call: &DirectCall, env: &Env) -> Result<Value, Signal> {
+        let mut values: SmallVec<[Value; 4]> = SmallVec::new();
+        for arg in &call.args {
+            values.push(self.eval(arg, env)?);
+        }
+        let saved = self.native_call_span.replace(call.span);
+        let out = match &call.owned {
+            Some(owned) => owned(self, values).map_err(|e| self.throw(e)),
+            None => (call.func)(self, &values).map_err(|e| self.throw(e)),
+        };
+        self.native_call_span = saved;
+        out
+    }
+
+    /// A validated `inc`/`dec` call: the `Int` step computes
+    /// inline, anything else (non-`Int`, overflow, arity) runs
+    /// the genuine native.
+    fn call_direct_arith1(&mut self, call: &DirectCall, env: &Env) -> Result<Value, Signal> {
+        let [arg] = call.args.as_slice() else {
+            return self.call_direct_general(call, env);
+        };
+        let value = self.eval(arg, env)?;
+        match (call.fast, &value) {
+            (FastArith::Inc, Value::Int(x)) => match x.checked_add(1) {
+                Some(y) => Ok(Value::Int(y)),
+                None => self.call_direct_fallback(call, &[value]),
+            },
+            (FastArith::Dec, Value::Int(x)) => match x.checked_sub(1) {
+                Some(y) => Ok(Value::Int(y)),
+                None => self.call_direct_fallback(call, &[value]),
+            },
+            _ => self.call_direct_fallback(call, &[value]),
+        }
+    }
+
+    /// A validated 2-arg arith/compare call: the `Int`/`Int` pair
+    /// computes inline, anything else (non-`Int`, overflow,
+    /// arity) runs the genuine native.
+    fn call_direct_arith2(&mut self, call: &DirectCall, env: &Env) -> Result<Value, Signal> {
+        let [lhs, rhs] = call.args.as_slice() else {
+            return self.call_direct_general(call, env);
+        };
+        let a = self.eval(lhs, env)?;
+        let b = self.eval(rhs, env)?;
+        if let (Value::Int(x), Value::Int(y)) = (&a, &b) {
+            if let Some(v) = Self::fast_int2(call.fast, *x, *y) {
+                return Ok(v);
+            }
+        }
+        self.call_direct_fallback(call, &[a, b])
+    }
+
+    /// A 2-arg inline integer op (`None` = overflow: the caller
+    /// falls back to the native for the `long overflow` error, so
+    /// `*unchecked-math*` and every error text stay the native's;
+    /// the trailing arm only serves direct unit tests — dispatch
+    /// never routes those tags here).
+    fn fast_int2(op: FastArith, x: i64, y: i64) -> Option<Value> {
+        match op {
+            FastArith::Add => x.checked_add(y).map(Value::Int),
+            FastArith::Sub => x.checked_sub(y).map(Value::Int),
+            FastArith::Mul => x.checked_mul(y).map(Value::Int),
+            FastArith::Lt => Some(Value::Bool(x < y)),
+            FastArith::Lte => Some(Value::Bool(x <= y)),
+            FastArith::Gt => Some(Value::Bool(x > y)),
+            FastArith::Gte => Some(Value::Bool(x >= y)),
+            FastArith::None | FastArith::Inc | FastArith::Dec => None,
+        }
+    }
+
+    /// A validated call over already-evaluated args (fast-path
+    /// fallback: overflow or non-`Int` operands run the genuine
+    /// native, so errors and tower results stay exact — and every
+    /// tagged native installs with `owned: None`, so the borrow
+    /// entry is the whole story).
+    fn call_direct_fallback(&mut self, call: &DirectCall, args: &[Value]) -> Result<Value, Signal> {
+        let saved = self.native_call_span.replace(call.span);
+        let out = (call.func)(self, args).map_err(|e| self.throw(e));
         self.native_call_span = saved;
         out
     }
@@ -3374,5 +3563,28 @@ mod tests {
         assert_eq!(eval.deref_var_cached(id, &sym), Value::Int(3));
         eval.bindings.pop_frame();
         assert_eq!(eval.deref_var_cached(id, &sym), Value::Int(2));
+    }
+
+    #[test]
+    fn fast_int2_rows() {
+        use FastArith::{Add, Dec, Gt, Gte, Inc, Lt, Lte, Mul, Sub};
+        assert_eq!(Evaluator::fast_int2(Add, 1, 2), Some(Value::Int(3)));
+        assert_eq!(Evaluator::fast_int2(Sub, 5, 3), Some(Value::Int(2)));
+        assert_eq!(Evaluator::fast_int2(Mul, 4, -3), Some(Value::Int(-12)));
+        assert_eq!(Evaluator::fast_int2(Lt, 1, 2), Some(Value::Bool(true)));
+        assert_eq!(Evaluator::fast_int2(Lt, 2, 2), Some(Value::Bool(false)));
+        assert_eq!(Evaluator::fast_int2(Lte, 2, 2), Some(Value::Bool(true)));
+        assert_eq!(Evaluator::fast_int2(Gt, 3, 2), Some(Value::Bool(true)));
+        assert_eq!(Evaluator::fast_int2(Gte, 1, 2), Some(Value::Bool(false)));
+        // Overflow reports `None` (the caller falls back to the
+        // native for the `long overflow` error).
+        assert_eq!(Evaluator::fast_int2(Add, i64::MAX, 1), None);
+        assert_eq!(Evaluator::fast_int2(Sub, i64::MIN, 1), None);
+        assert_eq!(Evaluator::fast_int2(Mul, i64::MAX, 2), None);
+        // Dispatch never routes these tags here (direct pins for
+        // the defensive arm).
+        assert_eq!(Evaluator::fast_int2(FastArith::None, 1, 2), None);
+        assert_eq!(Evaluator::fast_int2(Inc, 1, 2), None);
+        assert_eq!(Evaluator::fast_int2(Dec, 1, 2), None);
     }
 }

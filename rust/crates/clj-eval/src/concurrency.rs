@@ -71,7 +71,7 @@ use clj_value::{
 use crate::core::{cce_err, is_ifn};
 use crate::error::{NativeError, Signal, internal_throwable};
 use crate::eval::Evaluator;
-use crate::ext::NativeFn;
+use crate::ext::{FastArith, NativeFn};
 use crate::lazy::as_pending;
 use crate::ns::{NativeFnPtr, check_arity, npe, signal_to_native, str_of};
 use crate::vars::check_min_arity;
@@ -1961,6 +1961,7 @@ fn barrier_fn(eval: &mut Evaluator, tx: mpsc::Sender<()>) -> Value {
             Ok(args.first().cloned().unwrap_or(Value::Nil))
         }),
         owned: None,
+        fast: FastArith::None,
         meta: None,
     }))
 }

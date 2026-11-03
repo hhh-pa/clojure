@@ -31,7 +31,7 @@ use smallvec::SmallVec;
 use crate::core::{Reduced, as_reduced, take_count};
 use crate::error::NativeError;
 use crate::eval::Evaluator;
-use crate::ext::{NativeFn, NativeImpl};
+use crate::ext::{FastArith, NativeFn, NativeImpl};
 use crate::lazy::take_walk_coll;
 use crate::ns::{NativeFnPtr, check_arity, deref_core, signal_to_native};
 use crate::seqs::{call_checked, call_checked_owned};
@@ -70,6 +70,7 @@ fn transducer(
         func: Arc::new(func) as Arc<NativeImpl>,
         owned: None,
         meta: None,
+        fast: FastArith::None,
     }))
 }
 

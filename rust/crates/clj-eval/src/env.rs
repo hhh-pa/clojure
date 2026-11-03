@@ -1279,10 +1279,19 @@ impl Bindings {
         }
     }
 
+    /// Whether no thread binding is live (the refcounts drain to
+    /// empty on pop, so this is exact even with pushed-but-empty
+    /// frames — and a bare length check, so var-deref fast paths
+    /// skip the map probe entirely).
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.counts.is_empty()
+    }
+
     /// The visible value for a var, if bound.
     #[must_use]
     pub fn get(&self, id: u64) -> Option<&Value> {
-        if !self.counts.contains_key(&id) {
+        if self.counts.is_empty() || !self.counts.contains_key(&id) {
             return None;
         }
         self.frames.iter().rev().find_map(|frame| {
@@ -1818,5 +1827,24 @@ mod tests {
         assert!(b.set_top(3, Value::Int(30)));
         assert!(!b.set_top(99, Value::Int(0)));
         assert_eq!(b.get(3), Some(&Value::Int(30)));
+    }
+
+    #[test]
+    fn bindings_is_empty_tracks_entries() {
+        let var = |id: u64| Var {
+            id,
+            sym: sym(None, "x"),
+        };
+        let mut b = Bindings::new();
+        assert!(b.is_empty());
+        // Pushed-but-empty frames hold no entries (still empty).
+        b.push_frame(vec![]);
+        assert!(b.is_empty());
+        b.push_frame(vec![(var(1), Value::Int(1))]);
+        assert!(!b.is_empty());
+        b.pop_frame();
+        assert!(b.is_empty());
+        b.pop_frame();
+        assert!(b.is_empty());
     }
 }

@@ -191,6 +191,35 @@ pub type OwnedNativeImpl = dyn Fn(&mut Evaluator, smallvec::SmallVec<[Value; 4]>
     + Send
     + Sync;
 
+/// An inline-able integer operation for direct-threaded calls
+/// (#226): when a validated direct call site targets one of these
+/// genuine core natives with all-`Int` args, the evaluator
+/// computes the result without the `Num` tower or the `dyn`
+/// call. Identity is the installing fn pointer (see
+/// [`crate::core::fast_arith_for`], never the name), so a
+/// redefined root installing lookalike fakes never mis-tags.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum FastArith {
+    /// No inline op (the general snapshot call).
+    #[default]
+    None,
+    /// `+`/`-`/`*` (2-arg checked `Int` op; overflow falls back
+    /// to the native, so `long overflow` and `*unchecked-math*`
+    /// stay the native's).
+    Add,
+    Sub,
+    Mul,
+    /// `<`/`<=`/`>`/`>=` (2-arg `Int` compare).
+    Lt,
+    Lte,
+    Gt,
+    Gte,
+    /// `inc`/`dec` (1-arg checked `Int` step; overflow falls
+    /// back to the native).
+    Inc,
+    Dec,
+}
+
 #[derive(Clone)]
 pub struct NativeFn {
     pub id: u64,
@@ -199,6 +228,9 @@ pub struct NativeFn {
     /// The owned-args entry (`None` for borrow-only natives).
     pub owned: Option<Arc<OwnedNativeImpl>>,
     pub meta: Option<Map>,
+    /// The inline integer op (`None` unless installed from a
+    /// genuine core arith/compare fn pointer).
+    pub fast: FastArith,
 }
 
 impl std::fmt::Debug for NativeFn {
@@ -339,6 +371,7 @@ mod tests {
             func,
             owned: None,
             meta: None,
+            fast: FastArith::None,
         };
         let s = format!("{f:?}");
         assert!(s.contains("NativeFn"), "{s}");

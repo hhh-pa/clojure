@@ -19,13 +19,14 @@ use std::sync::Arc;
 
 use clj_reader::Span;
 use clj_value::{
-    ClassVal, HostVal, Keyword, List, Map, PrintOpts, Symbol, Value, Var, Vector, map_entry,
-    new_map, pr_to_string, print_to_string,
+    ClassVal, ExtensionValue, HostVal, Keyword, List, Map, PrintOpts, Symbol, Value, Var, Vector,
+    map_entry, new_map, pr_to_string, print_to_string,
 };
 
 use crate::core::cce_message;
 use crate::error::{CompileError, NativeError, Signal, Verb, jvm_class_of, span_of};
 use crate::eval::Evaluator;
+use crate::ext::{FastArith, NativeFn, NativeImpl, OwnedNativeImpl};
 
 /// A `catch` clause: resolved class name, local slot, body.
 #[derive(Clone, Debug)]
@@ -317,6 +318,48 @@ pub enum Expr {
         args: Vec<Expr>,
         span: Span,
     },
+    /// A direct-threaded native call (#226): the head analyzed to
+    /// a global whose root is a native fn, so analysis snapshotted
+    /// the entries. Evaluation validates (no thread binding, the
+    /// lineage epoch unchanged, the cached root still identical by
+    /// `Arc`) and calls the snapshot directly — skipping the
+    /// callee clone, the downcasts, and the `Arc` bumps — with
+    /// inline integer ops for the genuine arith/compare tags. Any
+    /// validation miss (or non-`Int`/overflowing fast-path
+    /// operand) takes the ordinary `Invoke` road, so redefs,
+    /// `binding`, and `with-redefs` behave exactly as before.
+    /// Boxed so the `Expr` footprint stays flat.
+    DirectNative(Box<DirectCall>),
+}
+
+/// A direct-threaded native call site (see
+/// [`Expr::DirectNative`]).
+#[derive(Clone)]
+pub struct DirectCall {
+    /// The head var (the id validates, the sym re-resolves on the
+    /// slow road).
+    pub var: Var,
+    /// The analyzed root (the identity witness for `Arc::ptr_eq`).
+    pub expect: Arc<dyn ExtensionValue>,
+    /// The analyzed native's entries (called without downcast).
+    pub func: Arc<NativeImpl>,
+    pub owned: Option<Arc<OwnedNativeImpl>>,
+    /// The inline integer op (`None` for non-arith natives).
+    pub fast: FastArith,
+    /// The call's argument forms and site.
+    pub args: Vec<Expr>,
+    pub span: Span,
+}
+
+impl std::fmt::Debug for DirectCall {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DirectCall")
+            .field("var", &self.var)
+            .field("fast", &self.fast)
+            .field("args", &self.args)
+            .field("span", &self.span)
+            .finish_non_exhaustive()
+    }
 }
 
 /// JVM classes used by analyzer causes.
@@ -1058,11 +1101,45 @@ impl<'a> Analyzer<'a> {
         for arg in &items[1..] {
             args.push(self.analyze(arg, span, false)?);
         }
-        Ok(Expr::Invoke {
-            head: Box::new(head_expr),
+        Ok(self.direct_or_invoke(head_expr, args, span))
+    }
+
+    /// A direct-threaded call when the head is a global whose
+    /// current root is a native fn, else the ordinary `Invoke`
+    /// (split from [`analyze_list`](Self::analyze_list) for the
+    /// complexity budget — the call adds no branch there).
+    fn direct_or_invoke(&mut self, head: Expr, args: Vec<Expr>, span: Span) -> Expr {
+        let Expr::Global(var) = &head else {
+            return Expr::Invoke {
+                head: Box::new(head),
+                args,
+                span,
+            };
+        };
+        let root = self.eval.registry.root_or_unbound(var.id, &var.sym);
+        let Value::Extension(expect) = root else {
+            return Expr::Invoke {
+                head: Box::new(head),
+                args,
+                span,
+            };
+        };
+        let Some(native) = expect.as_any().downcast_ref::<NativeFn>() else {
+            return Expr::Invoke {
+                head: Box::new(head),
+                args,
+                span,
+            };
+        };
+        Expr::DirectNative(Box::new(DirectCall {
+            var: var.clone(),
+            expect: Arc::clone(&expect),
+            func: Arc::clone(&native.func),
+            owned: native.owned.clone(),
+            fast: native.fast,
             args,
             span,
-        })
+        }))
     }
 
     /// Head interceptions before macro expansion (split from
