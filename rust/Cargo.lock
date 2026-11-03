@@ -223,6 +223,7 @@ dependencies = [
 name = "clj-value"
 version = "1.13.0-alpha11"
 dependencies = [
+ "archery",
  "loom",
  "num-bigint",
  "num-rational",

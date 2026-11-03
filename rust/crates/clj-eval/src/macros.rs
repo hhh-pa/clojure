@@ -499,7 +499,8 @@ fn native_apply(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErr
     let mut call_args: Vec<Value> = args[1..args.len() - 1].to_vec();
     // The spread realizes (JVM `spreadToArray`); any seq value —
     // including the lazy ones syntax-quote expansions build — seqs.
-    let spread = crate::lazy::collect_all(eval, &args[args.len() - 1]).map_err(signal_to_native)?;
+    let spread =
+        crate::lazy::collect_all(eval, args[args.len() - 1].clone()).map_err(signal_to_native)?;
     call_args.extend(spread);
     eval.call(&args[0], &call_args).map_err(signal_to_native)
 }

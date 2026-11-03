@@ -17,6 +17,7 @@ use std::cmp::Ordering;
 use std::sync::Arc;
 
 use clj_value::{List, ThrowClass, Value, Vector, new_map};
+use smallvec::SmallVec;
 
 use crate::core::{as_reduced, cce_err, check_ifn, jvm_compare, repeat_count, take_count};
 use crate::error::{NativeError, jvm_class_of};
@@ -28,7 +29,7 @@ use crate::lazy::{
     interpose_thunk, iterate_thunk, keep_indexed_thunk, keep_thunk, keys_thunk, map_indexed_thunk,
     map_thunk, mapcat_thunk, next_value, nthrest_value, partition_all_thunk, partition_by_thunk,
     partition_thunk, range1, range2, range3, realized_value, reductions_thunk, repeat_thunk,
-    repeatedly_thunk, seq_value, take_nth_thunk, take_thunk, take_while_thunk,
+    repeatedly_thunk, seq_value, take_nth_thunk, take_thunk, take_walk_coll, take_while_thunk,
 };
 use crate::ns::{NativeFnPtr, check_arity, deref_core, signal_to_native};
 use crate::vars::check_min_arity;
@@ -55,6 +56,7 @@ fn native_fn(
         id: eval.next_id(),
         display: Arc::from(display),
         func: Arc::new(func) as Arc<NativeImpl>,
+        owned: None,
         meta: None,
     }))
 }
@@ -68,10 +70,15 @@ enum Walk {
 
 fn walk_seq(
     eval: &mut Evaluator,
-    coll: &Value,
+    coll: Value,
     mut visit: impl FnMut(&mut Evaluator, &Value) -> Result<Walk, NativeError>,
 ) -> Result<(), NativeError> {
-    let mut seq = seq_value(eval, coll).map_err(signal_to_native)?;
+    let mut seq = seq_value(eval, &coll).map_err(signal_to_native)?;
+    // The walk holds `seq`, never `coll`: owned callers nilled the
+    // arg slot (`take_walk_coll`), so dropping the head here frees
+    // memoized chunks as the walk advances (borrow callers pass a
+    // cheap clone, retaining as before).
+    drop(coll);
     while !matches!(seq, Value::Nil) {
         let head = first_value(eval, &seq).map_err(signal_to_native)?;
         if matches!(visit(eval, &head)?, Walk::Stop) {
@@ -84,8 +91,11 @@ fn walk_seq(
 
 /// Force one step plus `n` heads (mirrors `dorun`'s walk: the
 /// initial `seq` always realizes one step, then `n` `next`s).
-fn force_n(eval: &mut Evaluator, coll: &Value, n: i64) -> Result<(), NativeError> {
-    let mut seq = seq_value(eval, coll).map_err(signal_to_native)?;
+fn force_n(eval: &mut Evaluator, coll: Value, n: i64) -> Result<(), NativeError> {
+    let mut seq = seq_value(eval, &coll).map_err(signal_to_native)?;
+    // Owned callers nilled the arg slot: dropping the head here
+    // frees memoized chunks as the walk advances (#221).
+    drop(coll);
     for _ in 0..n.max(0) {
         if matches!(seq, Value::Nil) {
             return Ok(());
@@ -361,7 +371,16 @@ fn native_split_with(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nat
 }
 
 fn native_reduce(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
-    check_arity("clojure.core/reduce", args, &[2, 3])?;
+    // Borrow-path compat shim: correct, retaining (the head stays
+    // in the caller's buffer). Owned callers run `owned` directly.
+    native_reduce_owned(eval, args.iter().cloned().collect())
+}
+
+pub(crate) fn native_reduce_owned(
+    eval: &mut Evaluator,
+    mut args: SmallVec<[Value; 4]>,
+) -> Result<Value, NativeError> {
+    check_arity("clojure.core/reduce", &args, &[2, 3])?;
     let f = args[0].clone();
     // Eductions reduce without `IReduce` (2-arg takes the JVM cast)
     // and complete through `(completing f)` in 3-arg (oracle
@@ -380,14 +399,16 @@ fn native_reduce(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeEr
             &xform.clone(),
             &completing,
             args[1].clone(),
-            &ecoll.clone(),
+            ecoll.clone(),
         );
     }
-    let (mut acc, has_acc, coll) = if args.len() == 3 {
-        (args[1].clone(), true, &args[2])
+    let (mut acc, has_acc) = if args.len() == 3 {
+        (args[1].clone(), true)
     } else {
-        (Value::Nil, false, &args[1])
+        (Value::Nil, false)
     };
+    let coll_idx = if args.len() == 3 { 2 } else { 1 };
+    let coll = take_walk_coll(&mut args, coll_idx);
     let mut first = true;
     let mut empty = true;
     walk_seq(eval, coll, |eval, head| {
@@ -412,12 +433,22 @@ fn native_reduce(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeEr
 }
 
 fn native_take_last(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
-    check_arity("clojure.core/take-last", args, &[2])?;
+    // Borrow-path compat shim (see [`OwnedNativeImpl`]).
+    native_take_last_owned(eval, args.iter().cloned().collect())
+}
+
+pub(crate) fn native_take_last_owned(
+    eval: &mut Evaluator,
+    mut args: SmallVec<[Value; 4]>,
+) -> Result<Value, NativeError> {
+    check_arity("clojure.core/take-last", &args, &[2])?;
     // Exactly the `loop`: `(seq (drop n coll))` validates `n`
     // eagerly, then both sides walk `next` in lockstep (which keeps
     // the result kind-preserving).
-    let mut s = seq_value(eval, &args[1]).map_err(signal_to_native)?;
-    let dropped = drop_value(eval, &args[0], args[1].clone()).map_err(signal_to_native)?;
+    let n = std::mem::replace(&mut args[0], Value::Nil);
+    let coll = std::mem::replace(&mut args[1], Value::Nil);
+    let mut s = seq_value(eval, &coll).map_err(signal_to_native)?;
+    let dropped = drop_value(eval, &n, coll).map_err(signal_to_native)?;
     let mut lead = seq_value(eval, &dropped).map_err(signal_to_native)?;
     while !matches!(lead, Value::Nil) {
         s = next_value(eval, &s).map_err(signal_to_native)?;
@@ -427,11 +458,21 @@ fn native_take_last(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nativ
 }
 
 fn native_drop_last(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
-    check_arity("clojure.core/drop-last", args, &[1, 2])?;
+    // Borrow-path compat shim (see [`OwnedNativeImpl`]).
+    native_drop_last_owned(eval, args.iter().cloned().collect())
+}
+
+pub(crate) fn native_drop_last_owned(
+    eval: &mut Evaluator,
+    mut args: SmallVec<[Value; 4]>,
+) -> Result<Value, NativeError> {
+    check_arity("clojure.core/drop-last", &args, &[1, 2])?;
     let (n, coll) = if args.len() == 1 {
-        (Value::Int(1), args[0].clone())
+        (Value::Int(1), take_walk_coll(&mut args, 0))
     } else {
-        (args[0].clone(), args[1].clone())
+        let n = std::mem::replace(&mut args[0], Value::Nil);
+        let coll = std::mem::replace(&mut args[1], Value::Nil);
+        (n, coll)
     };
     let project = native_fn(eval, "clojure.core/drop-last", |_, args: &[Value]| {
         Ok(args.first().cloned().unwrap_or(Value::Nil))
@@ -441,8 +482,17 @@ fn native_drop_last(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nativ
 }
 
 fn native_butlast(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
-    check_arity("clojure.core/butlast", args, &[1])?;
-    let items = collect_all(eval, &args[0]).map_err(signal_to_native)?;
+    // Borrow-path compat shim (see [`OwnedNativeImpl`]).
+    native_butlast_owned(eval, args.iter().cloned().collect())
+}
+
+pub(crate) fn native_butlast_owned(
+    eval: &mut Evaluator,
+    mut args: SmallVec<[Value; 4]>,
+) -> Result<Value, NativeError> {
+    check_arity("clojure.core/butlast", &args, &[1])?;
+    let coll = take_walk_coll(&mut args, 0);
+    let items = collect_all(eval, coll.clone()).map_err(signal_to_native)?;
     if items.len() < 2 {
         return Ok(Value::Nil);
     }
@@ -467,8 +517,17 @@ fn native_vals(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErro
 }
 
 fn native_reverse(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
-    check_arity("clojure.core/reverse", args, &[1])?;
-    let mut items = collect_all(eval, &args[0]).map_err(signal_to_native)?;
+    // Borrow-path compat shim (see [`OwnedNativeImpl`]).
+    native_reverse_owned(eval, args.iter().cloned().collect())
+}
+
+pub(crate) fn native_reverse_owned(
+    eval: &mut Evaluator,
+    mut args: SmallVec<[Value; 4]>,
+) -> Result<Value, NativeError> {
+    check_arity("clojure.core/reverse", &args, &[1])?;
+    let coll = take_walk_coll(&mut args, 0);
+    let mut items = collect_all(eval, coll.clone()).map_err(signal_to_native)?;
     items.reverse();
     Ok(Value::List(List::from_vec(items)))
 }
@@ -485,7 +544,7 @@ fn native_rseq(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErr
             ThrowClass::NullPointerException,
             "Cannot invoke \"clojure.lang.Reversible.rseq()\" because \"rev\" is null".to_owned(),
         )),
-        Value::Vector(x) => Ok(rseq_of(x.iter().cloned().collect())),
+        Value::Vector(x) => Ok(rseq_of(x.iter().collect())),
         Value::PrimitiveVector(p) => Ok(rseq_of(p.items())),
         Value::MapEntry { key, val, .. } => Ok(rseq_of(vec![(**key).clone(), (**val).clone()])),
         Value::Map(m) if m.is_sorted() => Ok(rseq_of(
@@ -496,7 +555,7 @@ fn native_rseq(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErr
         Value::Set(s) if s.is_sorted() => Ok(rseq_of(s.iter().cloned().collect())),
         other => {
             if let Some(sv) = as_subvector(other) {
-                return Ok(rseq_of(sv.iter().cloned().collect()));
+                return Ok(rseq_of(sv.iter().collect()));
             }
             Err(cce_err(other, "clojure.lang.Reversible"))
         }
@@ -572,13 +631,23 @@ fn sort_by_checked(
 }
 
 fn native_sort(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
-    check_arity("clojure.core/sort", args, &[1, 2])?;
-    let (comp, coll) = if args.len() == 1 {
-        (None, &args[0])
+    // Borrow-path compat shim (see [`OwnedNativeImpl`]).
+    native_sort_owned(eval, args.iter().cloned().collect())
+}
+
+pub(crate) fn native_sort_owned(
+    eval: &mut Evaluator,
+    mut args: SmallVec<[Value; 4]>,
+) -> Result<Value, NativeError> {
+    check_arity("clojure.core/sort", &args, &[1, 2])?;
+    let comp = if args.len() == 1 {
+        None
     } else {
-        (Some(args[0].clone()), &args[1])
+        Some(args[0].clone())
     };
-    let mut items = collect_all(eval, coll).map_err(signal_to_native)?;
+    let coll_idx = if args.len() == 1 { 0 } else { 1 };
+    let coll = take_walk_coll(&mut args, coll_idx);
+    let mut items = collect_all(eval, coll.clone()).map_err(signal_to_native)?;
     match comp {
         None => sort_by_checked(&mut items, jvm_compare)?,
         Some(comp) => {
@@ -603,14 +672,24 @@ fn native_sort(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErro
 }
 
 fn native_sort_by(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
-    check_arity("clojure.core/sort-by", args, &[2, 3])?;
+    // Borrow-path compat shim (see [`OwnedNativeImpl`]).
+    native_sort_by_owned(eval, args.iter().cloned().collect())
+}
+
+pub(crate) fn native_sort_by_owned(
+    eval: &mut Evaluator,
+    mut args: SmallVec<[Value; 4]>,
+) -> Result<Value, NativeError> {
+    check_arity("clojure.core/sort-by", &args, &[2, 3])?;
     let keyfn = args[0].clone();
-    let (comp, coll) = if args.len() == 2 {
-        (deref_core(eval, "compare"), &args[1])
+    let comp = if args.len() == 2 {
+        deref_core(eval, "compare")
     } else {
-        (args[1].clone(), &args[2])
+        args[1].clone()
     };
-    let mut items = collect_all(eval, coll).map_err(signal_to_native)?;
+    let coll_idx = if args.len() == 2 { 1 } else { 2 };
+    let coll = take_walk_coll(&mut args, coll_idx);
+    let mut items = collect_all(eval, coll.clone()).map_err(signal_to_native)?;
     sort_by_checked(&mut items, |a, b| {
         // `(comp (keyfn x) (keyfn y))` directly (the keyfn runs per
         // comparison; no int mapping).
@@ -632,46 +711,98 @@ fn native_sort_by(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeE
 }
 
 fn native_dorun(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
-    check_arity("clojure.core/dorun", args, &[1, 2])?;
+    // Borrow-path compat shim (see [`OwnedNativeImpl`]).
+    native_dorun_owned(eval, args.iter().cloned().collect())
+}
+
+pub(crate) fn native_dorun_owned(
+    eval: &mut Evaluator,
+    mut args: SmallVec<[Value; 4]>,
+) -> Result<Value, NativeError> {
+    check_arity("clojure.core/dorun", &args, &[1, 2])?;
     if args.len() == 1 {
-        walk_seq(eval, &args[0], |_, _| Ok(Walk::Continue))?;
+        let coll = take_walk_coll(&mut args, 0);
+        walk_seq(eval, coll, |_, _| Ok(Walk::Continue))?;
         return Ok(Value::Nil);
     }
     let n = take_count(&args[0])?;
-    force_n(eval, &args[1], n)?;
+    let coll = take_walk_coll(&mut args, 1);
+    force_n(eval, coll, n)?;
     Ok(Value::Nil)
 }
 
 fn native_doall(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
-    check_arity("clojure.core/doall", args, &[1, 2])?;
+    // Borrow-path compat shim (see [`OwnedNativeImpl`]).
+    native_doall_owned(eval, args.iter().cloned().collect())
+}
+
+pub(crate) fn native_doall_owned(
+    eval: &mut Evaluator,
+    mut args: SmallVec<[Value; 4]>,
+) -> Result<Value, NativeError> {
+    check_arity("clojure.core/doall", &args, &[1, 2])?;
+    // `doall` returns the (realized) head, so the walk clones it
+    // (the result legitimately holds the head, like the JVM).
     if args.len() == 1 {
-        walk_seq(eval, &args[0], |_, _| Ok(Walk::Continue))?;
-        return Ok(args[0].clone());
+        let coll = take_walk_coll(&mut args, 0);
+        walk_seq(eval, coll.clone(), |_, _| Ok(Walk::Continue))?;
+        return Ok(coll);
     }
     let n = take_count(&args[0])?;
-    force_n(eval, &args[1], n)?;
-    Ok(args[1].clone())
+    let coll = take_walk_coll(&mut args, 1);
+    force_n(eval, coll.clone(), n)?;
+    Ok(coll)
 }
 
 fn native_mapv(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
-    check_min_arity("clojure.core/mapv", args, 2)?;
-    let mapped = map_thunk(args[0].clone(), args[1..].to_vec());
-    let items = collect_all(eval, &mapped).map_err(signal_to_native)?;
+    // Borrow-path compat shim (see [`OwnedNativeImpl`]).
+    native_mapv_owned(eval, args.iter().cloned().collect())
+}
+
+pub(crate) fn native_mapv_owned(
+    eval: &mut Evaluator,
+    mut args: SmallVec<[Value; 4]>,
+) -> Result<Value, NativeError> {
+    check_min_arity("clojure.core/mapv", &args, 2)?;
+    // The inputs move into the thunk (drained from `args`), so the
+    // walk holds the only handles and input heads free as it
+    // advances (#221).
+    let inputs: Vec<Value> = args.drain(1..).collect();
+    let mapped = map_thunk(args[0].clone(), inputs);
+    let items = collect_all(eval, mapped.clone()).map_err(signal_to_native)?;
     Ok(Value::Vector(Vector::from_vec(items)))
 }
 
 fn native_filterv(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
-    check_arity("clojure.core/filterv", args, &[2])?;
-    let filtered = filter_thunk(args[0].clone(), args[1].clone(), false);
-    let items = collect_all(eval, &filtered).map_err(signal_to_native)?;
+    // Borrow-path compat shim (see [`OwnedNativeImpl`]).
+    native_filterv_owned(eval, args.iter().cloned().collect())
+}
+
+pub(crate) fn native_filterv_owned(
+    eval: &mut Evaluator,
+    mut args: SmallVec<[Value; 4]>,
+) -> Result<Value, NativeError> {
+    check_arity("clojure.core/filterv", &args, &[2])?;
+    let input = take_walk_coll(&mut args, 1);
+    let filtered = filter_thunk(args[0].clone(), input, false);
+    let items = collect_all(eval, filtered.clone()).map_err(signal_to_native)?;
     Ok(Value::Vector(Vector::from_vec(items)))
 }
 
 fn native_group_by(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
-    check_arity("clojure.core/group-by", args, &[2])?;
+    // Borrow-path compat shim (see [`OwnedNativeImpl`]).
+    native_group_by_owned(eval, args.iter().cloned().collect())
+}
+
+pub(crate) fn native_group_by_owned(
+    eval: &mut Evaluator,
+    mut args: SmallVec<[Value; 4]>,
+) -> Result<Value, NativeError> {
+    check_arity("clojure.core/group-by", &args, &[2])?;
     let f = args[0].clone();
     let mut groups = new_map();
-    walk_seq(eval, &args[1], |eval, head| {
+    let coll = take_walk_coll(&mut args, 1);
+    walk_seq(eval, coll, |eval, head| {
         let key = call_checked(eval, &f, std::slice::from_ref(head))?;
         let key = crate::lazy::realize_key(eval, &key).map_err(signal_to_native)?;
         let group = match groups.get(&key) {
@@ -686,9 +817,18 @@ fn native_group_by(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Native
 }
 
 fn native_frequencies(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
-    check_arity("clojure.core/frequencies", args, &[1])?;
+    // Borrow-path compat shim (see [`OwnedNativeImpl`]).
+    native_frequencies_owned(eval, args.iter().cloned().collect())
+}
+
+pub(crate) fn native_frequencies_owned(
+    eval: &mut Evaluator,
+    mut args: SmallVec<[Value; 4]>,
+) -> Result<Value, NativeError> {
+    check_arity("clojure.core/frequencies", &args, &[1])?;
     let mut counts = new_map();
-    walk_seq(eval, &args[0], |eval, head| {
+    let coll = take_walk_coll(&mut args, 0);
+    walk_seq(eval, coll, |eval, head| {
         let head = crate::lazy::realize_key(eval, head).map_err(signal_to_native)?;
         let count = match counts.get(&head) {
             Some(Value::Int(n)) => *n,
@@ -994,10 +1134,19 @@ fn native_fnil(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErro
 }
 
 fn native_every_p(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
-    check_arity("clojure.core/every?", args, &[2])?;
+    // Borrow-path compat shim (see [`OwnedNativeImpl`]).
+    native_every_p_owned(eval, args.iter().cloned().collect())
+}
+
+pub(crate) fn native_every_p_owned(
+    eval: &mut Evaluator,
+    mut args: SmallVec<[Value; 4]>,
+) -> Result<Value, NativeError> {
+    check_arity("clojure.core/every?", &args, &[2])?;
     let pred = args[0].clone();
     let mut all = true;
-    walk_seq(eval, &args[1], |eval, head| {
+    let coll = take_walk_coll(&mut args, 1);
+    walk_seq(eval, coll, |eval, head| {
         if !call_checked(eval, &pred, std::slice::from_ref(head))?.is_truthy() {
             all = false;
             return Ok(Walk::Stop);
@@ -1008,10 +1157,19 @@ fn native_every_p(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeE
 }
 
 fn native_some(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
-    check_arity("clojure.core/some", args, &[2])?;
+    // Borrow-path compat shim (see [`OwnedNativeImpl`]).
+    native_some_owned(eval, args.iter().cloned().collect())
+}
+
+pub(crate) fn native_some_owned(
+    eval: &mut Evaluator,
+    mut args: SmallVec<[Value; 4]>,
+) -> Result<Value, NativeError> {
+    check_arity("clojure.core/some", &args, &[2])?;
     let pred = args[0].clone();
     let mut found = Value::Nil;
-    walk_seq(eval, &args[1], |eval, head| {
+    let coll = take_walk_coll(&mut args, 1);
+    walk_seq(eval, coll, |eval, head| {
         let r = call_checked(eval, &pred, std::slice::from_ref(head))?;
         if r.is_truthy() {
             found = r;
@@ -1023,10 +1181,19 @@ fn native_some(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErro
 }
 
 fn native_not_any_p(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
-    check_arity("clojure.core/not-any?", args, &[2])?;
+    // Borrow-path compat shim (see [`OwnedNativeImpl`]).
+    native_not_any_p_owned(eval, args.iter().cloned().collect())
+}
+
+pub(crate) fn native_not_any_p_owned(
+    eval: &mut Evaluator,
+    mut args: SmallVec<[Value; 4]>,
+) -> Result<Value, NativeError> {
+    check_arity("clojure.core/not-any?", &args, &[2])?;
     let pred = args[0].clone();
     let mut none = true;
-    walk_seq(eval, &args[1], |eval, head| {
+    let coll = take_walk_coll(&mut args, 1);
+    walk_seq(eval, coll, |eval, head| {
         if call_checked(eval, &pred, std::slice::from_ref(head))?.is_truthy() {
             none = false;
             return Ok(Walk::Stop);
@@ -1037,10 +1204,19 @@ fn native_not_any_p(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nativ
 }
 
 fn native_not_every_p(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
-    check_arity("clojure.core/not-every?", args, &[2])?;
+    // Borrow-path compat shim (see [`OwnedNativeImpl`]).
+    native_not_every_p_owned(eval, args.iter().cloned().collect())
+}
+
+pub(crate) fn native_not_every_p_owned(
+    eval: &mut Evaluator,
+    mut args: SmallVec<[Value; 4]>,
+) -> Result<Value, NativeError> {
+    check_arity("clojure.core/not-every?", &args, &[2])?;
     let pred = args[0].clone();
     let mut all = true;
-    walk_seq(eval, &args[1], |eval, head| {
+    let coll = take_walk_coll(&mut args, 1);
+    walk_seq(eval, coll, |eval, head| {
         if !call_checked(eval, &pred, std::slice::from_ref(head))?.is_truthy() {
             all = false;
             return Ok(Walk::Stop);

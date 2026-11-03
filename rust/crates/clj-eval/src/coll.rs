@@ -22,15 +22,16 @@ use clj_value::{
     Transient, TransientError, TransientKind, TransientMap, TransientSet, TransientVector, Value,
     Vector, new_map, new_set,
 };
+use smallvec::SmallVec;
 
 use crate::core::{cce_err, cce_message, is_counted, jvm_compare, nth_index};
 use crate::error::{NativeError, jvm_class_of, simple_name_of};
 use crate::eval::Evaluator;
 use crate::ext::as_native;
 use crate::lazy::{
-    StepUnit, as_range, as_realized, as_repeat, as_subvector, collect_all, empty_list_value,
-    equiv_vals, first_value, is_seq_value, is_seqable, next_value, realized_value, replace_thunk,
-    seq_value, step_unit,
+    StepUnit, as_range, as_realized, as_repeat, as_subvector, collect_all, collect_packed,
+    empty_list_value, equiv_vals, first_value, is_seq_value, is_seqable, next_value,
+    realized_value, replace_thunk, seq_value, step_unit, take_walk_coll,
 };
 use crate::ns::{NativeFnPtr, check_arity, signal_to_native, str_of};
 use crate::seqs::{afunction_order, call_checked};
@@ -117,11 +118,7 @@ pub(crate) fn lookup_present(
 }
 
 fn lookup_vector_slot(x: &Vector, key: &Value) -> Option<Value> {
-    int_key(key).and_then(|i| {
-        usize::try_from(i as i32)
-            .ok()
-            .and_then(|idx| x.get(idx).cloned())
-    })
+    int_key(key).and_then(|i| usize::try_from(i as i32).ok().and_then(|idx| x.get(idx)))
 }
 
 fn lookup_entry_slot(ek: &Value, ev: &Value, key: &Value) -> Option<Value> {
@@ -167,11 +164,9 @@ fn lookup_array_slot(a: &clj_value::Array, key: &Value) -> Option<Value> {
 
 fn lookup_present_fallback(coll: &Value, key: &Value) -> Result<Option<Value>, NativeError> {
     if let Some(sv) = as_subvector(coll) {
-        return Ok(int_key(key).and_then(|i| {
-            usize::try_from(i as i32)
-                .ok()
-                .and_then(|idx| sv.nth(idx).cloned())
-        }));
+        return Ok(
+            int_key(key).and_then(|i| usize::try_from(i as i32).ok().and_then(|idx| sv.nth(idx)))
+        );
     }
     Ok(None)
 }
@@ -188,7 +183,7 @@ fn transient_get(t: &Transient, key: &Value) -> Result<Option<Value>, NativeErro
             let Some(idx) = usize::try_from(i as i32).ok() else {
                 return Ok(None);
             };
-            Ok(tv.nth(idx).map_err(transient_err)?.cloned())
+            Ok(tv.nth(idx).map_err(transient_err)?)
         }
         TransientKind::Map(tm) => Ok(tm.get(key).map_err(transient_err)?.cloned()),
         TransientKind::Set(ts) => {
@@ -350,7 +345,7 @@ fn map_conj_plan(eval: &mut Evaluator, x: &Value) -> Result<MapConjPlan, NativeE
             other.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
         )),
         Value::Vector(v) => {
-            let items: Vec<Value> = v.iter().cloned().collect();
+            let items: Vec<Value> = v.iter().collect();
             pair_plan(&items)
         }
         // `Vec` pairs assoc like vectors (S15); non-pairs are
@@ -758,9 +753,12 @@ pub(crate) fn count_of(eval: &mut Evaluator, v: &Value) -> Result<i64, NativeErr
 
 /// Plain `into` (`reduce conj`; the transient/kvreduce fast paths
 /// are unobservable — same values, same errors).
-fn into_inner(eval: &mut Evaluator, to: &Value, from: &Value) -> Result<Value, NativeError> {
+fn into_inner(eval: &mut Evaluator, to: &Value, from: Value) -> Result<Value, NativeError> {
     let mut acc = to.clone();
-    let mut cur = seq_value(eval, from).map_err(signal_to_native)?;
+    let mut cur = seq_value(eval, &from).map_err(signal_to_native)?;
+    // Owned callers nilled the arg slot: dropping the head here
+    // frees memoized chunks as the walk advances (#221).
+    drop(from);
     loop {
         if matches!(cur, Value::Nil) {
             return Ok(acc);
@@ -774,7 +772,7 @@ fn into_inner(eval: &mut Evaluator, to: &Value, from: &Value) -> Result<Value, N
 /// Two-way `merge` (`([x y] (if (and x y) (into x y) (or x y)))`).
 fn merge2(eval: &mut Evaluator, x: &Value, y: &Value) -> Result<Value, NativeError> {
     if x.is_truthy() && y.is_truthy() {
-        into_inner(eval, x, y)
+        into_inner(eval, x, y.clone())
     } else if x.is_truthy() {
         Ok(x.clone())
     } else {
@@ -964,16 +962,34 @@ fn assoc_in_up(
 }
 
 fn native_count(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
-    check_arity("clojure.core/count", args, &[1])?;
-    Ok(Value::Int(count_of(eval, &args[0])?))
+    // Borrow-path compat shim (see [`OwnedNativeImpl`]).
+    native_count_owned(eval, args.iter().cloned().collect())
+}
+
+pub(crate) fn native_count_owned(
+    eval: &mut Evaluator,
+    mut args: SmallVec<[Value; 4]>,
+) -> Result<Value, NativeError> {
+    check_arity("clojure.core/count", &args, &[1])?;
+    let coll = take_walk_coll(&mut args, 0);
+    Ok(Value::Int(count_of(eval, &coll)?))
 }
 
 fn native_emptyp(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
-    check_arity("clojure.core/empty?", args, &[1])?;
-    if is_counted(&args[0]) {
-        Ok(Value::Bool(count_of(eval, &args[0])? == 0))
+    // Borrow-path compat shim (see [`OwnedNativeImpl`]).
+    native_emptyp_owned(eval, args.iter().cloned().collect())
+}
+
+pub(crate) fn native_emptyp_owned(
+    eval: &mut Evaluator,
+    mut args: SmallVec<[Value; 4]>,
+) -> Result<Value, NativeError> {
+    check_arity("clojure.core/empty?", &args, &[1])?;
+    let coll = take_walk_coll(&mut args, 0);
+    if is_counted(&coll) {
+        Ok(Value::Bool(count_of(eval, &coll)? == 0))
     } else {
-        let s = seq_value(eval, &args[0]).map_err(signal_to_native)?;
+        let s = seq_value(eval, &coll).map_err(signal_to_native)?;
         Ok(Value::Bool(matches!(s, Value::Nil)))
     }
 }
@@ -1064,8 +1080,17 @@ fn native_disj(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErro
 }
 
 fn native_set(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
-    check_arity("clojure.core/set", args, &[1])?;
-    let items = collect_all(eval, &args[0]).map_err(signal_to_native)?;
+    // Borrow-path compat shim (see [`OwnedNativeImpl`]).
+    native_set_owned(eval, args.iter().cloned().collect())
+}
+
+pub(crate) fn native_set_owned(
+    eval: &mut Evaluator,
+    mut args: SmallVec<[Value; 4]>,
+) -> Result<Value, NativeError> {
+    check_arity("clojure.core/set", &args, &[1])?;
+    let coll = take_walk_coll(&mut args, 0);
+    let items = collect_all(eval, coll).map_err(signal_to_native)?;
     let mut out = new_set();
     for item in items {
         out = out.insert(item);
@@ -1080,8 +1105,16 @@ fn native_second(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeEr
 }
 
 fn native_last(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
-    check_arity("clojure.core/last", args, &[1])?;
-    let mut cur = args[0].clone();
+    // Borrow-path compat shim (see [`OwnedNativeImpl`]).
+    native_last_owned(eval, args.iter().cloned().collect())
+}
+
+pub(crate) fn native_last_owned(
+    eval: &mut Evaluator,
+    mut args: SmallVec<[Value; 4]>,
+) -> Result<Value, NativeError> {
+    check_arity("clojure.core/last", &args, &[1])?;
+    let mut cur = take_walk_coll(&mut args, 0);
     let mut last = Value::Nil;
     loop {
         match step_unit(eval, &cur).map_err(signal_to_native)? {
@@ -1364,7 +1397,7 @@ fn nth_indexed_transient(t: &Transient, n: i32) -> Result<Option<Value>, NativeE
     let guard = t.lock();
     match &*guard {
         TransientKind::Vector(tv) => match usize::try_from(n).ok() {
-            Some(idx) => Ok(tv.nth(idx).map_err(transient_err)?.cloned()),
+            Some(idx) => Ok(tv.nth(idx).map_err(transient_err)?),
             None => Ok(None),
         },
         kind => Err(nth_unsupported_class(kind.jvm_class())),
@@ -1390,7 +1423,7 @@ fn nth_indexed_found(
 
 fn nth_indexed(coll: &Value, n: i32, not_found: Option<&Value>) -> Result<Value, NativeError> {
     let found = match coll {
-        Value::Vector(x) => usize::try_from(n).ok().and_then(|idx| x.get(idx).cloned()),
+        Value::Vector(x) => usize::try_from(n).ok().and_then(|idx| x.get(idx)),
         Value::PrimitiveVector(p) => usize::try_from(n).ok().and_then(|idx| p.get(idx).cloned()),
         Value::MapEntry { key, val, .. } => usize::try_from(n).ok().and_then(|idx| match idx {
             0 => Some((**key).clone()),
@@ -1398,8 +1431,7 @@ fn nth_indexed(coll: &Value, n: i32, not_found: Option<&Value>) -> Result<Value,
             _ => None,
         }),
         Value::Transient(t) => nth_indexed_transient(t, n)?,
-        _ => as_subvector(coll)
-            .and_then(|sv| usize::try_from(n).ok().and_then(|idx| sv.nth(idx).cloned())),
+        _ => as_subvector(coll).and_then(|sv| usize::try_from(n).ok().and_then(|idx| sv.nth(idx))),
     };
     nth_indexed_found(found, not_found)
 }
@@ -1608,21 +1640,48 @@ pub fn nth_str(s: &Arc<str>, n: i32, not_found: Option<&Value>) -> Result<Value,
 }
 
 pub(crate) fn native_nth(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
-    check_arity("clojure.core/nth", args, &[2, 3])?;
+    // Borrow-path compat shim (see [`OwnedNativeImpl`]).
+    native_nth_owned(eval, args.iter().cloned().collect())
+}
+
+pub(crate) fn native_nth_owned(
+    eval: &mut Evaluator,
+    mut args: SmallVec<[Value; 4]>,
+) -> Result<Value, NativeError> {
+    check_arity("clojure.core/nth", &args, &[2, 3])?;
     // The index coerces first (before the collection dispatches).
     let n = nth_index(&args[1])?;
-    let not_found = args.get(2);
-    let coll = &args[0];
+    let not_found = args.get(2).cloned();
+    let coll_v = take_walk_coll(&mut args, 0);
+    let coll = &coll_v;
+    if let Some(fast) = nth_fast(coll, n, &not_found) {
+        return fast;
+    }
+    if let Value::Array(a) = coll {
+        return nth_array(a, n, not_found);
+    }
+    if let Value::Str(s) = coll {
+        return nth_str(s, n, not_found.as_ref());
+    }
+    if matches!(coll, Value::List(_)) || is_seq_value(coll) {
+        return nth_walk(eval, coll, n, not_found.as_ref());
+    }
+    Err(nth_unsupported(coll))
+}
+
+/// The `nth` fast paths (`nil`/negative-`not-found`/chunk/indexed;
+/// `None` falls through to array/string/seq dispatch).
+fn nth_fast(coll: &Value, n: i32, not_found: &Option<Value>) -> Option<Result<Value, NativeError>> {
     if matches!(coll, Value::Nil) {
-        return Ok(not_found.cloned().unwrap_or(Value::Nil));
+        return Some(Ok(not_found.clone().unwrap_or(Value::Nil)));
     }
     if not_found.is_some() && n < 0 {
-        return Ok(not_found.cloned().unwrap_or(Value::Nil));
+        return Some(Ok(not_found.clone().unwrap_or(Value::Nil)));
     }
     // Chunks read their raw slots (nil holes below capacity, S12
     // oracles `ch-nth-oob`, `ch-nth-cap`).
     if let Some(c) = crate::collmisc::as_chunk(coll) {
-        return crate::collmisc::chunk_nth(c, n, not_found);
+        return Some(crate::collmisc::chunk_nth(c, n, not_found.as_ref()));
     }
     if matches!(
         coll,
@@ -1630,35 +1689,30 @@ pub(crate) fn native_nth(eval: &mut Evaluator, args: &[Value]) -> Result<Value, 
     ) || as_subvector(coll).is_some()
         || matches!(coll, Value::Transient(_))
     {
-        return nth_indexed(coll, n, not_found);
+        return Some(nth_indexed(coll, n, not_found.as_ref()));
     }
-    // Arrays: `not-found` on OOB, else the empty `AIOOBE` (S15
-    // oracles `a-nth`, `a-nth-nf`, `a-nth-oob`, `e-nth-float`,
-    // `n-arr-str`, `n-arr-nil`).
-    if let Value::Array(a) = coll {
-        let found = usize::try_from(n).ok().and_then(|idx| {
-            if idx < a.len() {
-                Some(crate::arrays::array_read(a, idx))
-            } else {
-                None
-            }
-        });
-        return match (found, not_found) {
-            (Some(v), _) => Ok(v),
-            (None, Some(nf)) => Ok(nf.clone()),
-            (None, None) => Err(NativeError::new(
-                ThrowClass::ArrayIndexOutOfBoundsException,
-                String::new(),
-            )),
-        };
+    None
+}
+
+/// The `nth` array arm (`not-found` on OOB, else the empty
+/// `AIOOBE` — S15 oracles `a-nth`, `a-nth-nf`, `a-nth-oob`,
+/// `e-nth-float`, `n-arr-str`, `n-arr-nil`).
+fn nth_array(a: &clj_value::Array, n: i32, not_found: Option<Value>) -> Result<Value, NativeError> {
+    let found = usize::try_from(n).ok().and_then(|idx| {
+        if idx < a.len() {
+            Some(crate::arrays::array_read(a, idx))
+        } else {
+            None
+        }
+    });
+    match (found, not_found) {
+        (Some(v), _) => Ok(v),
+        (None, Some(nf)) => Ok(nf),
+        (None, None) => Err(NativeError::new(
+            ThrowClass::ArrayIndexOutOfBoundsException,
+            String::new(),
+        )),
     }
-    if let Value::Str(s) = coll {
-        return nth_str(s, n, not_found);
-    }
-    if matches!(coll, Value::List(_)) || is_seq_value(coll) {
-        return nth_walk(eval, coll, n, not_found);
-    }
-    Err(nth_unsupported(coll))
 }
 
 /// The `nth not supported` error (`getSimpleName` rule).
@@ -1676,7 +1730,15 @@ fn nth_unsupported_class(class: &str) -> NativeError {
 }
 
 fn native_vec(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
-    check_arity("clojure.core/vec", args, &[1])?;
+    // Borrow-path compat shim (see [`OwnedNativeImpl`]).
+    native_vec_owned(eval, args.iter().cloned().collect())
+}
+
+pub(crate) fn native_vec_owned(
+    eval: &mut Evaluator,
+    mut args: SmallVec<[Value; 4]>,
+) -> Result<Value, NativeError> {
+    check_arity("clojure.core/vec", &args, &[1])?;
     if matches!(args[0], Value::Vector(_)) || as_subvector(&args[0]).is_some() {
         return Ok(args[0].clone().with_meta(None));
     }
@@ -1691,8 +1753,9 @@ fn native_vec(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError
             ),
         ));
     }
-    let items = collect_all(eval, &args[0]).map_err(signal_to_native)?;
-    Ok(Value::Vector(Vector::from_vec(items)))
+    let coll = take_walk_coll(&mut args, 0);
+    let vec = collect_packed(eval, coll).map_err(signal_to_native)?;
+    Ok(Value::Vector(vec))
 }
 
 fn native_merge(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
@@ -2175,9 +2238,7 @@ fn pop_queue(x: &Vector) -> Value {
     if x.is_empty() {
         return Value::Vector(x.clone());
     }
-    Value::Vector(
-        Vector::from_vec(x.iter().skip(1).cloned().collect()).with_meta(x.meta().cloned()),
-    )
+    Value::Vector(Vector::from_vec(x.iter().skip(1).collect()).with_meta(x.meta().cloned()))
 }
 
 fn native_peek(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
@@ -2185,13 +2246,13 @@ fn native_peek(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErr
     match &args[0] {
         Value::Nil => Ok(Value::Nil),
         Value::List(l) => Ok(l.first().cloned().unwrap_or(Value::Nil)),
-        Value::Vector(x) if is_queue_vec(x) => Ok(x.iter().next().cloned().unwrap_or(Value::Nil)),
-        Value::Vector(x) => Ok(x.iter().last().cloned().unwrap_or(Value::Nil)),
+        Value::Vector(x) if is_queue_vec(x) => Ok(x.iter().next().unwrap_or(Value::Nil)),
+        Value::Vector(x) => Ok(x.iter().next_back().unwrap_or(Value::Nil)),
         Value::PrimitiveVector(p) => Ok(p.iter().last().cloned().unwrap_or(Value::Nil)),
         Value::MapEntry { val, .. } => Ok((**val).clone()),
         _ => {
             if let Some(sv) = as_subvector(&args[0]) {
-                return Ok(sv.iter().last().cloned().unwrap_or(Value::Nil));
+                return Ok(sv.iter().last().unwrap_or(Value::Nil));
             }
             Err(cce_err(&args[0], "clojure.lang.IPersistentStack"))
         }
@@ -2342,7 +2403,15 @@ fn native_replace(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeE
 }
 
 fn native_into(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
-    check_arity("clojure.core/into", args, &[0, 1, 2, 3])?;
+    // Borrow-path compat shim (see [`OwnedNativeImpl`]).
+    native_into_owned(eval, args.iter().cloned().collect())
+}
+
+pub(crate) fn native_into_owned(
+    eval: &mut Evaluator,
+    mut args: SmallVec<[Value; 4]>,
+) -> Result<Value, NativeError> {
+    check_arity("clojure.core/into", &args, &[0, 1, 2, 3])?;
     if args.is_empty() {
         return Ok(Value::Vector(Vector::from_vec(Vec::new())));
     }
@@ -2351,9 +2420,11 @@ fn native_into(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErro
     }
     if args.len() == 3 {
         // `(into to xform from)` (T1200 D1, oracle `into-*`).
-        return crate::xform::into_xform(eval, args[0].clone(), &args[1], &args[2]);
+        let from = take_walk_coll(&mut args, 2);
+        return crate::xform::into_xform(eval, args[0].clone(), &args[1], from);
     }
-    into_inner(eval, &args[0], &args[1])
+    let from = take_walk_coll(&mut args, 1);
+    into_inner(eval, &args[0], from)
 }
 
 #[allow(clippy::mutable_key_type)]

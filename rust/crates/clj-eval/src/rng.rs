@@ -83,12 +83,12 @@ fn native_shuffle(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeE
             "Cannot invoke \"java.util.Collection.toArray()\" because \"c\" is null".to_owned(),
         )),
         Value::Vector(_) | Value::List(_) | Value::Set(_) | Value::MapEntry { .. } => {
-            let mut items = collect_all(eval, &args[0]).map_err(signal_to_native)?;
+            let mut items = collect_all(eval, args[0].clone()).map_err(signal_to_native)?;
             items.shuffle(&mut rand::rng());
             Ok(Value::Vector(Vector::from_vec(items)))
         }
         Value::Extension(_) if is_seq_value(&args[0]) => {
-            let mut items = collect_all(eval, &args[0]).map_err(signal_to_native)?;
+            let mut items = collect_all(eval, args[0].clone()).map_err(signal_to_native)?;
             items.shuffle(&mut rand::rng());
             Ok(Value::Vector(Vector::from_vec(items)))
         }

@@ -208,13 +208,10 @@ impl Completer for NameCompleter {
 }
 
 /// Push the unqualified name of every symbol in `items`.
-fn push_symbol_names<'a>(
-    names: &mut Vec<String>,
-    items: impl Iterator<Item = &'a clj_value::Value>,
-) {
+fn push_symbol_names(names: &mut Vec<String>, items: impl Iterator<Item = clj_value::Value>) {
     use clj_value::Value;
     for item in items {
-        if let Value::Symbol(sym) = item {
+        if let Value::Symbol(sym) = &item {
             names.push(sym.name().to_owned());
         }
     }
@@ -230,7 +227,7 @@ fn push_symbol_names<'a>(
 fn push_value_names(names: &mut Vec<String>, value: &clj_value::Value) {
     use clj_value::Value;
     match value {
-        Value::List(items) => push_symbol_names(names, items.iter()),
+        Value::List(items) => push_symbol_names(names, items.iter().cloned()),
         Value::Vector(items) => push_symbol_names(names, items.iter()),
         _ => {}
     }

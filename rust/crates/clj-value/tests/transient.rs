@@ -52,13 +52,17 @@ fn vector_transient_models_vec() {
         }
         assert_eq!(tv.len().unwrap(), model.len(), "step {step}");
         for (i, want) in model.iter().enumerate() {
-            assert_eq!(tv.nth(i).unwrap(), Some(want), "step {step} idx {i}");
+            assert_eq!(
+                tv.nth(i).unwrap().as_ref(),
+                Some(want),
+                "step {step} idx {i}"
+            );
         }
     }
     let frozen = tv.persistent().unwrap();
     assert_eq!(frozen.len(), model.len());
     for (i, want) in model.iter().enumerate() {
-        assert_eq!(frozen.iter().nth(i), Some(want));
+        assert_eq!(frozen.iter().nth(i).as_ref(), Some(want));
     }
 }
 

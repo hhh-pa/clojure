@@ -20,6 +20,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use num_traits::{Signed, ToPrimitive, Zero};
 
+use smallvec::SmallVec;
+
 use clj_reader::{ReadCond, Reader, ReaderOpts};
 use clj_value::{
     ExtensionValue, Instant, Keyword, List, Map, PrintOpts, Set, Symbol, TagError, ThrowClass,
@@ -1438,7 +1440,7 @@ fn compare_vectors(
             (None, None) => return Ok(Ordering::Equal),
             (None, _) => return Ok(Ordering::Less),
             (_, None) => return Ok(Ordering::Greater),
-            (Some(u), Some(v)) => match jvm_compare(u, v)? {
+            (Some(u), Some(v)) => match jvm_compare(&u, &v)? {
                 Ordering::Equal => {}
                 ord => return Ok(ord),
             },
@@ -2033,6 +2035,7 @@ fn default_reader_fn(
             check_arity(display, args, &[1])?;
             reader(&args[0])
         }),
+        owned: None,
         meta: None,
     }))
 }
@@ -2454,7 +2457,9 @@ fn needs_resolution(v: &Value) -> bool {
         Value::TaggedLiteral { .. } => true,
         Value::Symbol(s) => s.meta().is_some_and(map_needs),
         Value::List(l) => l.iter().any(needs_resolution) || l.meta().is_some_and(map_needs),
-        Value::Vector(v) => v.iter().any(needs_resolution) || v.meta().is_some_and(map_needs),
+        Value::Vector(v) => {
+            v.iter().any(|v| needs_resolution(&v)) || v.meta().is_some_and(map_needs)
+        }
         Value::Map(m) => map_needs(m),
         Value::Set(s) => s.iter().any(needs_resolution) || s.meta().is_some_and(map_needs),
         _ => false,
@@ -2713,7 +2718,7 @@ pub(crate) fn str_of_one(eval: &mut Evaluator, v: &Value) -> Result<String, Nati
 /// A `LazySeq` renders `clojure.lang.LazySeq@<hex>` with the Java
 /// `List` content hash over the fully forced items.
 fn lazy_seq_str(eval: &mut Evaluator, v: &Value) -> Result<String, NativeError> {
-    let items = collect_all(eval, v).map_err(signal_to_native)?;
+    let items = collect_all(eval, v.clone()).map_err(signal_to_native)?;
     let mut h: i32 = 1;
     for item in &items {
         let r = realize_deep(eval, item).map_err(signal_to_native)?;
@@ -2782,7 +2787,15 @@ fn str_concat(eval: &mut Evaluator, args: &[Value]) -> Result<String, NativeErro
 }
 
 pub(crate) fn native_str(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
-    let s = str_concat(eval, args)?;
+    // Borrow-path compat shim (see [`OwnedNativeImpl`]).
+    native_str_owned(eval, args.iter().cloned().collect())
+}
+
+pub(crate) fn native_str_owned(
+    eval: &mut Evaluator,
+    args: SmallVec<[Value; 4]>,
+) -> Result<Value, NativeError> {
+    let s = str_concat(eval, &args)?;
     Ok(Value::Str(Arc::from(s.as_str())))
 }
 
@@ -4099,7 +4112,7 @@ fn hash_coll_items(eval: &mut Evaluator, v: &Value) -> Result<Vec<Value>, Native
         Value::Nil => Err(npe(ITERABLE_NIL)),
         Value::Str(_) => Err(cce_err(v, "java.lang.Iterable")),
         _ if !is_port_iterable(v) => Err(cce_err(v, "java.lang.Iterable")),
-        _ => collect_all(eval, v).map_err(signal_to_native),
+        _ => collect_all(eval, v.clone()).map_err(signal_to_native),
     }
 }
 

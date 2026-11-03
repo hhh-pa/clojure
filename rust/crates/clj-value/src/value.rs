@@ -32,8 +32,11 @@
 //! the NEW key, comparing with a line-by-line port of
 //! `Util.equiv`/`Util.equals` (see [`jvm_equiv`]).
 
+use std::borrow::Borrow;
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock, Weak};
 
 use num_traits::ToPrimitive;
 
@@ -55,14 +58,14 @@ type RpdsMap = rpds::HashTrieMapSync<Value, Value, FxBuildHasher>;
 type RpdsSet = rpds::HashTrieSetSync<Value, FxBuildHasher>;
 
 /// Identity counters for `identical?` (S16): every freshly
-/// constructed [`List`]/[`Vector`]/[`Map`]/[`Set`] mints an id from
-/// its counter (the `ATOM_ID` precedent); `Clone` preserves it, so
-/// two evaluations of the same binding compare identical while two
+/// constructed [`List`]/[`Vector`]/[`Set`] mints an id from its
+/// counter (the `ATOM_ID` precedent); `Clone` preserves it, so two
+/// evaluations of the same binding compare identical while two
 /// separately built collections never do. Equality and hashing
-/// ignore the ids.
+/// ignore the ids. [`Map`] instead identifies by its entries `Arc`
+/// (see [`Map::id`]) — no counter, no field.
 static LIST_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 static VECTOR_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-static MAP_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 static SET_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 fn next_list_id() -> u64 {
@@ -71,10 +74,6 @@ fn next_list_id() -> u64 {
 
 fn next_vector_id() -> u64 {
     VECTOR_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-}
-
-fn next_map_id() -> u64 {
-    MAP_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 fn next_set_id() -> u64 {
@@ -187,7 +186,7 @@ pub fn intern_literal_strings(form: &Value) -> Value {
             Value::List(out)
         }
         Value::Vector(v) => {
-            let items = v.iter().map(intern_literal_strings).collect();
+            let items = v.iter().map(|v| intern_literal_strings(&v)).collect();
             let mut out = Vector::from_vec(items);
             if let Some(meta) = v.meta() {
                 out = out.with_meta(Some(meta.clone()));
@@ -212,7 +211,7 @@ pub fn intern_literal_strings(form: &Value) -> Value {
             map_entry(intern_literal_strings(key), intern_literal_strings(val))
         }
         Value::TaggedLiteral { tag, form, .. } => {
-            tagged_literal(tag.clone(), intern_literal_strings(form))
+            tagged_literal((**tag).clone(), intern_literal_strings(form))
         }
         Value::ReaderConditional { form, splicing, .. } => {
             reader_conditional(intern_literal_strings(form), *splicing)
@@ -233,11 +232,68 @@ pub struct List {
 
 /// A persistent vector of values (thread-safe rpds vector) with
 /// optional metadata. See [`List`].
+///
+/// Homogeneous `Int` vectors ride packed (8 bytes/element instead
+/// of 72 — #221 P1); the representation is invisible (every method
+/// presents `Value`s), so packing never changes `=`/`hash`/
+/// `identical?`/seq behavior (`identical?` on `Int` is
+/// value-based inside the `Long` cache range, fresh-boxed outside —
+/// packed reads box identically to generic reads).
 #[derive(Clone, Debug)]
 pub struct Vector {
-    inner: RpdsVector,
+    inner: VectorInner,
     meta: Option<Arc<Map>>,
     id: u64,
+}
+
+/// Vector storage: the generic trie, or a shared packed `i64` run.
+/// Packing is decided at construction (`from_vec` scans, `from_ints`
+/// and packed transients skip the scan); `push_back` of an `Int`
+/// onto owned packed storage stays packed, anything else unpacks
+/// (one-time cost, then generic speed). Reads always stay packed.
+#[derive(Clone, Debug)]
+enum VectorInner {
+    Generic(RpdsVector),
+    Packed(Arc<Vec<i64>>),
+}
+
+/// Owned-value vector iteration (packed ints box on read). Neither
+/// `Clone` nor `Debug`: the generic arm wraps rpds's iterator,
+/// which implements neither.
+pub struct VectorIter<'a> {
+    inner: VectorIterInner<'a>,
+}
+
+enum VectorIterInner<'a> {
+    Generic(rpds::vector::Iter<'a, Value, archery::ArcTK>),
+    Packed(std::slice::Iter<'a, i64>),
+}
+
+impl Iterator for VectorIter<'_> {
+    type Item = Value;
+
+    fn next(&mut self) -> Option<Value> {
+        match &mut self.inner {
+            VectorIterInner::Generic(it) => it.next().cloned(),
+            VectorIterInner::Packed(it) => it.next().map(|n| Value::Int(*n)),
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        match &self.inner {
+            VectorIterInner::Generic(it) => it.size_hint(),
+            VectorIterInner::Packed(it) => it.size_hint(),
+        }
+    }
+}
+
+impl DoubleEndedIterator for VectorIter<'_> {
+    fn next_back(&mut self) -> Option<Value> {
+        match &mut self.inner {
+            VectorIterInner::Generic(it) => it.next_back().cloned(),
+            VectorIterInner::Packed(it) => it.next_back().map(|n| Value::Int(*n)),
+        }
+    }
 }
 
 /// A persistent map of values (thread-safe rpds hash-trie map) with
@@ -252,6 +308,12 @@ pub struct Vector {
 /// reproduce; the harness canonicalizes map/set order away, so only
 /// syntax-quote expansion and rendering observe this.)
 ///
+/// The sidecar rides behind an `Arc` (writes go through
+/// `Arc::make_mut`, which clones the O(1) persistent header when
+/// shared): the rpds vector header is 24 bytes, and every `Value`
+/// pays the largest variant's size inline (#221 R1). Cloning a map
+/// stays allocation-free, like the `meta` arc beside it.
+///
 /// `hashy` reports `PersistentHashMap` instead of
 /// `PersistentArrayMap`: promotion is one-way and history-dependent
 /// (content alone cannot decide — `dissoc` never demotes and
@@ -265,14 +327,130 @@ pub struct Vector {
 /// only order-sensitive writers (`assoc` position) and readers
 /// (`get`/`dissoc` by compare-0 key, `jvm_class_of`, `nth`,
 /// `sorted?`) consult it.
+/// Entries at or below this count ride shaped (an interned
+/// key-set plus a flat values vec, no HAMT or sidecar allocs) —
+/// the JVM's `PersistentArrayMap` converts past 16 pairs.
+/// Representation is orthogonal to the reported class
+/// (`hashy`): a 9-pair all-keyword map stays array-classed
+/// whether shaped or hashed.
+const INLINE_MAP_MAX: usize = 16;
+
+/// A small map's shared key-set (#221 suffix states: 200k maps
+/// share ONE `[:len :link :next]` shape, so per-map memory is
+/// values-only). Keys ride in iteration order; maps with the
+/// same `==`-equal keys (in the same order) share one shape.
+/// First-interned key objects win: keys that CAN carry metadata
+/// (symbols — keywords/strings cannot) keep the first map's key
+/// object for iteration, so `(meta (first (keys m)))` may see a
+/// different lineage than the JVM's own-key object. Values and
+/// `=`/`seq` semantics are unaffected.
+#[derive(Debug)]
+struct MapShape {
+    keys: Box<[Value]>,
+}
+
+/// A small map's entries: the shared shape plus this version's
+/// values (parallel to `shape.keys`). Boxed slices, not vecs: no
+/// capacity field (a 3-pair map buckets at 256B instead of 288B)
+/// and no growth slack ever.
+#[derive(Debug)]
+struct SmallMap {
+    shape: Arc<MapShape>,
+    vals: Box<[Value]>,
+}
+
+/// Interned shapes by key-set. Entries are `Weak`: a shape dies
+/// with its last map, and the registry drops the dead entry at
+/// the next cleanup — a fresh-keys loop (ever-changing key
+/// sets) retains at most [`SHAPE_CLEANUP_EVERY`] dead entries,
+/// never the shapes themselves.
+struct ShapeRegistry {
+    map: HashMap<Vec<Value>, Weak<MapShape>, FxBuildHasher>,
+    since_cleanup: usize,
+}
+
+/// Dead-entry cleanup cadence: the registry holds at most this
+/// many dead entries between cleanups, and each cleanup scans
+/// at most live + this many entries (~1 amortized step per
+/// intern). Small enough that tests reach it (coverage), large
+/// enough that cleanup never dominates.
+const SHAPE_CLEANUP_EVERY: usize = 16;
+
+thread_local! {
+    static SHAPE_REGISTRY: RefCell<ShapeRegistry> = RefCell::new(ShapeRegistry {
+        map: HashMap::default(),
+        since_cleanup: 0,
+    });
+}
+
+/// Intern a key-set: the canonical [`MapShape`] for these keys
+/// (order-sensitive — `[:a :b]` and `[:b :a]` are different
+/// shapes, matching iteration order). Hits clone one `Arc` and
+/// allocate nothing; misses allocate one shape. Never
+/// re-enters: hashing/cloning keys interns nothing.
+fn intern_shape(keys: &[Value]) -> Arc<MapShape> {
+    SHAPE_REGISTRY.with(|reg| {
+        let mut reg = reg.borrow_mut();
+        if let Some(shape) = reg.map.get(keys).and_then(Weak::upgrade) {
+            return shape;
+        }
+        let shape = Arc::new(MapShape {
+            keys: keys.to_vec().into_boxed_slice(),
+        });
+        reg.map.insert(keys.to_vec(), Arc::downgrade(&shape));
+        reg.since_cleanup += 1;
+        if reg.since_cleanup >= SHAPE_CLEANUP_EVERY {
+            reg.map.retain(|_, weak| weak.strong_count() > 0);
+            reg.since_cleanup = 0;
+        }
+        shape
+    })
+}
+
+/// Shared dummies for the authority a map isn't using: shaped
+/// maps hold `inner: None` and ignore `keys`, hash maps hold
+/// `small: None`, so small maps never allocate a HAMT root or a
+/// keys vector. The empty shape is shared, but every empty map
+/// carries a FRESH [`SmallMap`] allocation: identity is the entries
+/// `Arc` (see [`Map::id`]), so sharing one static would identify
+/// all empties.
+static EMPTY_MAP_KEYS: LazyLock<Arc<RpdsVector>> =
+    LazyLock::new(|| Arc::new(RpdsVector::new_sync()));
+static EMPTY_MAP_SHAPE: LazyLock<Arc<MapShape>> = LazyLock::new(|| intern_shape(&[]));
+
+/// A fresh empty entries allocation (identity-fresh; the shape is
+/// the shared empty shape).
+fn fresh_empty_small() -> Arc<SmallMap> {
+    Arc::new(SmallMap {
+        shape: EMPTY_MAP_SHAPE.clone(),
+        vals: Box::default(),
+    })
+}
+
 #[derive(Clone, Debug)]
 pub struct Map {
-    inner: RpdsMap,
+    /// The entries when `small` is `None` (`None` for shaped maps
+    /// — no dummy trie. Boxed (not inline) so `Map` fits 48 bytes
+    /// and `Value` fits 64).
+    inner: Option<Box<RpdsMap>>,
+    /// `Some` = shaped authoritative (an interned key-set plus
+    /// this version's values, at most [`INLINE_MAP_MAX`] entries
+    /// in iteration order); `None` = `inner`/`keys`
+    /// authoritative. Every version carries a fresh entries `Arc`
+    /// (see [`Map::id`]).
+    small: Option<Arc<SmallMap>>,
+    /// Insertion-order sidecar when `small` is `None` (a
+    /// shared-empty dummy otherwise). Every hash version carries
+    /// a fresh sidecar `Arc` (see [`Map::id`] — writers never
+    /// `make_mut` in place).
+    keys: Arc<RpdsVector>,
     meta: Option<Arc<Map>>,
-    keys: RpdsVector,
     hashy: bool,
-    sort: Option<SortSpec>,
-    id: u64,
+    /// Boxed: sorted maps are rare, and the 8 bytes this saves
+    /// keep `Map` — inline in `Value` — at 48 bytes (the R1
+    /// budget, down from 72: identity rides the entries `Arc`
+    /// instead of a minted field, and the trie rides boxed).
+    sort: Option<Box<SortSpec>>,
 }
 
 /// The sort order of a sorted map or set (FT6): natural
@@ -289,15 +467,19 @@ pub enum SortSpec {
 /// A persistent set of values (thread-safe rpds hash-trie set) with
 /// optional metadata. See [`List`]. `members` is the insertion-order
 /// sidecar (small JVM sets seq in insertion order); re-inserting a
-/// member is a no-op, like `conj`. `sort` is the FT6 sorted-set
+/// member is a no-op, like `conj`. Like [`Map`]'s `keys`, it rides
+/// behind an `Arc` so the 24-byte rpds header does not inflate
+/// every `Value` (#221 R1). `sort` is the FT6 sorted-set
 /// order (same contract as [`Map`]'s): `members` stays in
 /// comparator order and compare-0 duplicates collapse.
 #[derive(Clone, Debug)]
 pub struct Set {
     inner: RpdsSet,
     meta: Option<Arc<Map>>,
-    members: RpdsVector,
-    sort: Option<SortSpec>,
+    members: Arc<RpdsVector>,
+    /// Boxed (like [`Map`]'s): sorted sets are rare, and this
+    /// keeps `Set` at 56 bytes so `Value` fits 64.
+    sort: Option<Box<SortSpec>>,
     id: u64,
 }
 
@@ -390,36 +572,117 @@ impl List {
 }
 
 impl Vector {
-    /// An empty vector.
+    /// An empty vector (packed: `conj` chains over `Int`s stay
+    /// packed from the first push).
     #[must_use]
     pub fn new_sync() -> Self {
         Self {
-            inner: RpdsVector::new_sync(),
+            inner: VectorInner::Packed(Arc::new(Vec::new())),
             meta: None,
             id: next_vector_id(),
         }
     }
 
-    /// Build a vector from items in order.
+    /// Build a vector from items in order (packed when every item
+    /// is an `Int` — one pass, completing generically at the first
+    /// foreign value).
     #[must_use]
     pub fn from_vec(items: Vec<Value>) -> Self {
-        let mut vector = Self::new_sync();
-        for v in items {
-            vector = vector.push_back(v);
+        let mut items = items.into_iter();
+        // Exact capacity: all-`Int` input freezes with no slack.
+        let mut ints = Vec::with_capacity(items.len());
+        loop {
+            match items.next() {
+                None => return Self::from_ints(ints),
+                Some(Value::Int(n)) => ints.push(n),
+                Some(v) => {
+                    let mut trie = RpdsVector::new_sync();
+                    for n in ints {
+                        trie.push_back_mut(Value::Int(n));
+                    }
+                    trie.push_back_mut(v);
+                    for v in items {
+                        trie.push_back_mut(v);
+                    }
+                    return Self {
+                        inner: VectorInner::Generic(trie),
+                        meta: None,
+                        id: next_vector_id(),
+                    };
+                }
+            }
         }
-        vector
+    }
+
+    /// Build a packed vector from `i64`s in order (no scan — for
+    /// callers that already know, like ranges and packed
+    /// transients).
+    #[must_use]
+    pub fn from_ints(ints: Vec<i64>) -> Self {
+        Self {
+            inner: VectorInner::Packed(Arc::new(ints)),
+            meta: None,
+            id: next_vector_id(),
+        }
+    }
+
+    /// Whether this vector rides on packed `i64` storage (8 bytes
+    /// per element instead of one 72-byte `Value` per trie leaf).
+    #[must_use]
+    pub fn is_packed(&self) -> bool {
+        matches!(self.inner, VectorInner::Packed(_))
+    }
+
+    /// The packed `i64` run when packed (`None` for the generic
+    /// trie) — for transients that freeze back to packed storage
+    /// without re-scanning.
+    #[must_use]
+    pub fn packed_slice(&self) -> Option<&[i64]> {
+        match &self.inner {
+            VectorInner::Packed(ints) => Some(ints),
+            VectorInner::Generic(_) => None,
+        }
     }
 
     /// Append a value.
     #[must_use]
     pub fn push_back(mut self, v: Value) -> Self {
-        // Owned `self` means no other handle to this vector: mutate the
-        // trie in place instead of cloning the spine per push (rpds
-        // `push_back(&self)` clones unconditionally; `push_back_mut`
-        // still path-copies nodes shared with *other* versions).
-        self.inner.push_back_mut(v);
+        // The placeholder is immediately overwritten below (never
+        // observed); an empty trie allocates nothing.
+        let inner = std::mem::replace(
+            &mut self.inner,
+            VectorInner::Generic(RpdsVector::new_sync()),
+        );
+        let inner = match (inner, v) {
+            (VectorInner::Generic(mut trie), v) => {
+                // Owned `self` means no other handle to this
+                // vector: mutate the trie in place instead of
+                // cloning the spine per push (rpds `push_back`
+                // clones unconditionally; `push_back_mut` still
+                // path-copies nodes shared with *other* versions).
+                trie.push_back_mut(v);
+                VectorInner::Generic(trie)
+            }
+            (VectorInner::Packed(mut ints), Value::Int(n)) => {
+                // Owned packed storage mutates in place when
+                // unique; `make_mut` copies the 8-byte run when
+                // shared (like any copy-on-write array — repeated
+                // `conj` onto one shared big packed vector is
+                // linear per conj, the one packing tradeoff).
+                Arc::make_mut(&mut ints).push(n);
+                VectorInner::Packed(ints)
+            }
+            (VectorInner::Packed(ints), v) => {
+                let mut out = RpdsVector::new_sync();
+                for n in ints.iter() {
+                    out.push_back_mut(Value::Int(*n));
+                }
+                out.push_back_mut(v);
+                VectorInner::Generic(out)
+            }
+        };
         Self {
-            inner: self.inner,
+            inner,
             meta: self.meta,
             id: next_vector_id(),
         }
@@ -428,45 +691,106 @@ impl Vector {
     /// Replace the item at `index` (`None` when out of bounds).
     #[must_use]
     pub fn set_nth(&self, index: usize, v: Value) -> Option<Self> {
-        self.inner.set(index, v).map(|inner| Self {
-            inner,
-            meta: self.meta.clone(),
-            id: next_vector_id(),
-        })
+        match &self.inner {
+            VectorInner::Generic(inner) => inner.set(index, v).map(|inner| Self {
+                inner: VectorInner::Generic(inner),
+                meta: self.meta.clone(),
+                id: next_vector_id(),
+            }),
+            VectorInner::Packed(ints) => {
+                if index >= ints.len() {
+                    return None;
+                }
+                match v {
+                    Value::Int(n) => {
+                        let mut ints = Arc::clone(ints);
+                        Arc::make_mut(&mut ints)[index] = n;
+                        Some(Self {
+                            inner: VectorInner::Packed(ints),
+                            meta: self.meta.clone(),
+                            id: next_vector_id(),
+                        })
+                    }
+                    v => {
+                        // Unpack in place (one-time cost; mutating
+                        // persistent ops on packed storage go
+                        // through here so chains keep generic speed
+                        // after the first unpack).
+                        let mut out = RpdsVector::new_sync();
+                        for n in ints.iter() {
+                            out.push_back_mut(Value::Int(*n));
+                        }
+                        out = out.set(index, v)?;
+                        Some(Self {
+                            inner: VectorInner::Generic(out),
+                            meta: self.meta.clone(),
+                            id: next_vector_id(),
+                        })
+                    }
+                }
+            }
+        }
     }
 
     /// The vector without its last item (`None` when empty).
     #[must_use]
     pub fn drop_last(&self) -> Option<Self> {
-        self.inner.drop_last().map(|inner| Self {
-            inner,
-            meta: self.meta.clone(),
-            id: next_vector_id(),
-        })
+        match &self.inner {
+            VectorInner::Generic(inner) => inner.drop_last().map(|inner| Self {
+                inner: VectorInner::Generic(inner),
+                meta: self.meta.clone(),
+                id: next_vector_id(),
+            }),
+            VectorInner::Packed(ints) => {
+                if ints.is_empty() {
+                    return None;
+                }
+                let mut ints = Arc::clone(ints);
+                Arc::make_mut(&mut ints).pop();
+                Some(Self {
+                    inner: VectorInner::Packed(ints),
+                    meta: self.meta.clone(),
+                    id: next_vector_id(),
+                })
+            }
+        }
     }
 
-    /// Iterate front to back.
-    pub fn iter(&self) -> impl Iterator<Item = &Value> {
-        self.inner.iter()
+    /// Iterate front to back (owned values; packed ints box on
+    /// read).
+    pub fn iter(&self) -> VectorIter<'_> {
+        VectorIter {
+            inner: match &self.inner {
+                VectorInner::Generic(inner) => VectorIterInner::Generic(inner.iter()),
+                VectorInner::Packed(ints) => VectorIterInner::Packed(ints.iter()),
+            },
+        }
     }
 
-    /// The item at `index` (`None` past the end; logarithmic, never
-    /// a walk — indexed callers must use this, not `iter().nth()`).
+    /// The item at `index` (`None` past the end; logarithmic for
+    /// generic storage, constant for packed — indexed callers must
+    /// use this, not `iter().nth()`).
     #[must_use]
-    pub fn get(&self, index: usize) -> Option<&Value> {
-        self.inner.get(index)
+    pub fn get(&self, index: usize) -> Option<Value> {
+        match &self.inner {
+            VectorInner::Generic(inner) => inner.get(index).cloned(),
+            VectorInner::Packed(ints) => ints.get(index).map(|n| Value::Int(*n)),
+        }
     }
 
     /// The element count.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.inner.len()
+        match &self.inner {
+            VectorInner::Generic(inner) => inner.len(),
+            VectorInner::Packed(ints) => ints.len(),
+        }
     }
 
     /// Whether the vector is empty.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.inner.len() == 0
+        self.len() == 0
     }
 
     /// The metadata map, if any.
@@ -492,67 +816,304 @@ impl Vector {
     }
 }
 
+/// Entries in iteration order (insertion order, or comparator
+/// order when sorted) — one concrete type over both
+/// representations so `Map::iter` stays allocation-free.
+pub struct MapIter<'a> {
+    inner: MapIterInner<'a>,
+}
+
+enum MapIterInner<'a> {
+    Shaped {
+        keys: std::slice::Iter<'a, Value>,
+        vals: std::slice::Iter<'a, Value>,
+    },
+    Hash(HashIter<'a>),
+}
+
+/// Hash-map iteration: position over the keys sidecar, resolving
+/// each key against the trie (every writer keeps both in sync,
+/// so every key resolves).
+struct HashIter<'a> {
+    keys: &'a RpdsVector,
+    map: &'a RpdsMap,
+    pos: usize,
+}
+
+impl<'a> Iterator for HashIter<'a> {
+    type Item = (&'a Value, &'a Value);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.pos >= self.keys.len() {
+            return None;
+        }
+        let k = self.keys.get(self.pos)?;
+        self.pos += 1;
+        // Every writer keeps the sidecar and the trie in sync, so
+        // every iterated key resolves.
+        let v = self.map.get(k).expect("keys sidecar and trie stay in sync");
+        Some((k, v))
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (0, Some(self.keys.len().saturating_sub(self.pos)))
+    }
+}
+
+impl<'a> Iterator for MapIter<'a> {
+    type Item = (&'a Value, &'a Value);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match &mut self.inner {
+            // Keys and vals stay parallel by construction, so
+            // both sides end together; `zip` keeps the tail
+            // from over-running on any divergence.
+            MapIterInner::Shaped { keys, vals } => keys.next().zip(vals.next()),
+            MapIterInner::Hash(it) => it.next(),
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        match &self.inner {
+            MapIterInner::Shaped { keys, vals } => {
+                let (lk, uk) = keys.size_hint();
+                let (lv, uv) = vals.size_hint();
+                (lk.min(lv), uk.zip(uv).map(|(a, b)| a.min(b)))
+            }
+            MapIterInner::Hash(it) => it.size_hint(),
+        }
+    }
+}
+
 impl Map {
     /// Build a map from key/value pairs, duplicate-checking them with
     /// the JVM literal rules: `Err` is the offending key (the FIRST
     /// of the pair for small maps, the NEW key otherwise). Literals
     /// take their class from `canBePAM` (`RT.map`/`mapUniqueKeys`).
+    /// The hash trie (hash arm only — shaped maps hold `None`).
+    fn trie(&self) -> &RpdsMap {
+        self.inner.as_deref().expect("hash map holds a trie")
+    }
+
+    /// The hash trie, mutably (hash arm only).
+    fn trie_mut(&mut self) -> &mut RpdsMap {
+        self.inner.as_deref_mut().expect("hash map holds a trie")
+    }
+
     pub fn from_kvs_checked(pairs: Vec<(Value, Value)>) -> Result<Self, Value> {
         let keys: Vec<&Value> = pairs.iter().map(|(k, _)| k).collect();
         if let Some(dup) = find_map_dup(&keys) {
             return Err(dup.clone());
         }
         let hashy = !can_be_small_map(&keys);
-        let mut map = new_map();
+        let mut keys_owned = Vec::with_capacity(pairs.len());
+        let mut vals = Vec::with_capacity(pairs.len());
         for (k, v) in pairs {
-            map = map.insert(k, v);
+            keys_owned.push(k);
+            vals.push(v);
         }
-        map.hashy = hashy;
-        Ok(map)
+        Ok(Self::from_parts(keys_owned, vals, hashy))
+    }
+
+    /// Build a map from evaluated pairs, last-wins (map literals
+    /// with computed keys): the first occurrence sets the position,
+    /// the last sets the value — exactly the `new_map` + `insert`
+    /// loop, but with one intern and one values alloc instead of a
+    /// transient version per pair (literals in hot loops shed two
+    /// allocs and two registry lookups per pair).
+    #[must_use]
+    pub fn from_kvs_last_wins(pairs: Vec<(Value, Value)>) -> Map {
+        let mut keys: Vec<Value> = Vec::with_capacity(pairs.len());
+        let mut vals: Vec<Value> = Vec::with_capacity(pairs.len());
+        // The class simulates the incremental `insert` promotion
+        // rule pair by pair (overwrites don't advance it).
+        let mut hashy = false;
+        for (k, v) in pairs {
+            if let Some(idx) = keys.iter().position(|ek| ek == &k) {
+                vals[idx] = v;
+                continue;
+            }
+            let distinct = keys.len();
+            if !hashy && (distinct >= 64 || (distinct >= 8 && !matches!(k, Value::Keyword(_)))) {
+                hashy = true;
+            }
+            keys.push(k);
+            vals.push(v);
+        }
+        Self::from_parts(keys, vals, hashy)
+    }
+
+    /// Build from deduped parallel keys/vals (big maps take the
+    /// hash trie directly; small ones intern one shape).
+    fn from_parts(keys: Vec<Value>, vals: Vec<Value>, hashy: bool) -> Self {
+        if keys.len() > INLINE_MAP_MAX {
+            let mut inner = RpdsMap::new_with_hasher_and_ptr_kind(FxBuildHasher::default());
+            let mut keys_side = RpdsVector::new_sync();
+            for (k, v) in keys.into_iter().zip(vals) {
+                keys_side.push_back_mut(k.clone());
+                inner.insert_mut(k, v);
+            }
+            return Self {
+                inner: Some(Box::new(inner)),
+                small: None,
+                keys: Arc::new(keys_side),
+                meta: None,
+                hashy,
+                sort: None,
+            };
+        }
+        if keys.is_empty() {
+            return new_map().with_hashy(hashy);
+        }
+        Self {
+            inner: None,
+            small: Some(Arc::new(SmallMap {
+                shape: intern_shape(&keys),
+                vals: vals.into_boxed_slice(),
+            })),
+            keys: EMPTY_MAP_KEYS.clone(),
+            meta: None,
+            hashy,
+            sort: None,
+        }
     }
 
     /// Assoc a key/value pair. A new key appends to the insertion
     /// order; an existing key keeps its position (and key object).
     /// Promotion follows `PersistentArrayMap.assoc`: past 8 pairs a
-    /// non-keyword key promotes, past 64 pairs anything does.
+    /// non-keyword key promotes, past 64 pairs anything does. Past
+    /// [`INLINE_MAP_MAX`] pairs the representation converts to the
+    /// hash trie (the class flag stays orthogonal).
     #[must_use]
     pub fn insert(mut self, k: Value, v: Value) -> Self {
+        if let Some(small) = self.small.take() {
+            return self.insert_shaped(small, k, v);
+        }
         // Owned `self`: mutate the trie in place (same rationale as
         // `Vector::push_back` — rpds still path-copies nodes shared
-        // with *other* versions, so persistence is preserved).
-        if self.inner.get(&k).is_some() {
-            self.inner.insert_mut(k, v);
+        // with *other* versions, so persistence is preserved). The
+        // sidecar always refreshes: identity rides its `Arc` (see
+        // [`Map::id`]), so versions never share one.
+        if self.trie().get(&k).is_some() {
+            self.trie_mut().insert_mut(k, v);
             return Self {
                 inner: self.inner,
+                small: None,
                 meta: self.meta,
-                keys: self.keys,
+                keys: Arc::new((*self.keys).clone()),
                 hashy: self.hashy,
                 sort: self.sort,
-                id: next_map_id(),
             };
         }
-        let size = self.inner.size();
+        let size = self.trie().size();
         let promote = !self.hashy && (size >= 64 || (size >= 8 && !matches!(k, Value::Keyword(_))));
-        let mut keys = self.keys;
+        let mut keys = (*self.keys).clone();
         keys.push_back_mut(k.clone());
-        self.inner.insert_mut(k, v);
+        self.trie_mut().insert_mut(k, v);
         Self {
             inner: self.inner,
+            small: None,
             meta: self.meta,
-            keys,
+            keys: Arc::new(keys),
             hashy: self.hashy || promote,
             sort: self.sort,
-            id: next_map_id(),
         }
+    }
+
+    /// The shaped arm of [`Map::insert`] (linear scan — the `==`
+    /// relation agrees with the hash trie's, so both arms find
+    /// exactly the same keys). Same-keys assocs allocate only the
+    /// values vec (the shape `Arc` is shared); new keys intern
+    /// the extended key-set (hits allocate nothing past values).
+    fn insert_shaped(mut self, small: Arc<SmallMap>, k: Value, v: Value) -> Self {
+        if let Some(idx) = small.shape.keys.iter().position(|ek| ek == &k) {
+            let mut vals = Vec::with_capacity(small.vals.len());
+            vals.extend(small.vals.iter().cloned());
+            vals[idx] = v;
+            self.small = Some(Arc::new(SmallMap {
+                shape: Arc::clone(&small.shape),
+                vals: vals.into_boxed_slice(),
+            }));
+            return self;
+        }
+        let size = small.vals.len();
+        let promote = !self.hashy && (size >= 64 || (size >= 8 && !matches!(k, Value::Keyword(_))));
+        self.hashy = self.hashy || promote;
+        if size < INLINE_MAP_MAX {
+            // Exact-size: the new version is frozen, so no growth
+            // slack (see [`SmallMap`]).
+            let mut keys = Vec::with_capacity(size + 1);
+            keys.extend(small.shape.keys.iter().cloned());
+            keys.push(k);
+            let mut vals = Vec::with_capacity(size + 1);
+            vals.extend(small.vals.iter().cloned());
+            vals.push(v);
+            self.small = Some(Arc::new(SmallMap {
+                shape: intern_shape(&keys),
+                vals: vals.into_boxed_slice(),
+            }));
+            return self;
+        }
+        self.promote_with(&small, k, v)
+    }
+
+    /// Convert a shaped map to the hash trie, then insert the
+    /// overflowing pair (insertion order preserved through `keys`).
+    fn promote_with(mut self, small: &SmallMap, k: Value, v: Value) -> Self {
+        let mut inner = RpdsMap::new_with_hasher_and_ptr_kind(FxBuildHasher::default());
+        let mut keys = RpdsVector::new_sync();
+        for (ek, ev) in small.shape.keys.iter().zip(small.vals.iter()) {
+            keys.push_back_mut(ek.clone());
+            inner.insert_mut(ek.clone(), ev.clone());
+        }
+        keys.push_back_mut(k.clone());
+        inner.insert_mut(k, v);
+        self.inner = Some(Box::new(inner));
+        self.small = None;
+        self.keys = Arc::new(keys);
+        self
     }
 
     /// Remove a key (`dissoc` one key). A missing key is a no-op;
     /// otherwise both the entries and the insertion-order sidecar
     /// drop it, and later positions shift down. The class never
-    /// demotes (a shrunk hash-map stays a hash-map).
+    /// demotes (a shrunk hash-map stays a hash-map); neither does
+    /// the representation (a shrunk hash-map stays hashed).
     #[must_use]
     pub fn without(mut self, k: &Value) -> Self {
-        if self.inner.get(k).is_none() {
+        if let Some(small) = self.small.take() {
+            let Some(idx) = small.shape.keys.iter().position(|ek| ek == k) else {
+                self.small = Some(small);
+                return self;
+            };
+            if small.vals.len() == 1 {
+                self.small = Some(fresh_empty_small());
+                return self;
+            }
+            let mut keys = Vec::with_capacity(small.vals.len() - 1);
+            keys.extend(
+                small
+                    .shape
+                    .keys
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, ek)| if i == idx { None } else { Some(ek.clone()) }),
+            );
+            let mut vals = Vec::with_capacity(small.vals.len() - 1);
+            vals.extend(
+                small
+                    .vals
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, ev)| if i == idx { None } else { Some(ev.clone()) }),
+            );
+            self.small = Some(Arc::new(SmallMap {
+                shape: intern_shape(&keys),
+                vals: vals.into_boxed_slice(),
+            }));
+            return self;
+        }
+        if self.trie().get(k).is_none() {
             return self;
         }
         let mut keys = RpdsVector::new_sync();
@@ -561,14 +1122,14 @@ impl Map {
                 keys.push_back_mut(key.clone());
             }
         }
-        self.inner.remove_mut(k);
+        self.trie_mut().remove_mut(k);
         Self {
             inner: self.inner,
+            small: None,
             meta: self.meta,
-            keys,
+            keys: Arc::new(keys),
             hashy: self.hashy,
             sort: self.sort,
-            id: next_map_id(),
         }
     }
 
@@ -576,6 +1137,14 @@ impl Map {
     #[must_use]
     pub fn is_hashy(&self) -> bool {
         self.hashy
+    }
+
+    /// Whether entries ride shaped (an interned key-set plus a
+    /// flat values vec, no HAMT or sidecar allocs) rather than
+    /// in the hash trie.
+    #[must_use]
+    pub fn is_shaped(&self) -> bool {
+        self.small.is_some()
     }
 
     /// Force the reported class (`hash-map` forces hash,
@@ -595,14 +1164,14 @@ impl Map {
     /// The sort order, if sorted.
     #[must_use]
     pub fn sort_spec(&self) -> Option<&SortSpec> {
-        self.sort.as_ref()
+        self.sort.as_deref()
     }
 
     /// Mark this map sorted (or clear the order), preserving entries.
     /// Callers maintain `keys` in comparator order alongside.
     #[must_use]
     pub fn with_sort(mut self, sort: Option<SortSpec>) -> Self {
-        self.sort = sort;
+        self.sort = sort.map(Box::new);
         self
     }
 
@@ -611,13 +1180,48 @@ impl Map {
     /// vector, so only sorted paths (already linear) snapshot it.
     #[must_use]
     pub fn ordered_keys(&self) -> Vec<Value> {
-        self.keys.iter().cloned().collect()
+        match &self.small {
+            Some(small) => small.shape.keys.to_vec(),
+            None => self.keys.iter().cloned().collect(),
+        }
     }
 
     /// Rebuild from explicitly ordered entries, preserving metadata
     /// and the sort order (sorted `assoc` positions through here).
     #[must_use]
     pub fn with_ordered_entries(self, entries: Vec<(Value, Value)>) -> Self {
+        if entries.len() <= INLINE_MAP_MAX {
+            if entries.is_empty() {
+                return Self {
+                    inner: None,
+                    small: Some(fresh_empty_small()),
+                    keys: EMPTY_MAP_KEYS.clone(),
+                    meta: self.meta,
+                    hashy: self.hashy,
+                    sort: self.sort,
+                };
+            }
+            // Exact-capacity: callers may hand over slack, and
+            // frozen versions keep exact-size allocs (see
+            // [`SmallMap`]).
+            let mut keys = Vec::with_capacity(entries.len());
+            let mut vals = Vec::with_capacity(entries.len());
+            for (k, v) in entries {
+                keys.push(k);
+                vals.push(v);
+            }
+            return Self {
+                inner: None,
+                small: Some(Arc::new(SmallMap {
+                    shape: intern_shape(&keys),
+                    vals: vals.into_boxed_slice(),
+                })),
+                keys: EMPTY_MAP_KEYS.clone(),
+                meta: self.meta,
+                hashy: self.hashy,
+                sort: self.sort,
+            };
+        }
         let mut inner = RpdsMap::new_with_hasher_and_ptr_kind(FxBuildHasher::default());
         let mut keys = RpdsVector::new_sync();
         for (k, v) in entries {
@@ -625,45 +1229,69 @@ impl Map {
             inner.insert_mut(k, v);
         }
         Self {
-            inner,
+            inner: Some(Box::new(inner)),
+            small: None,
             meta: self.meta,
-            keys,
+            keys: Arc::new(keys),
             hashy: self.hashy,
             sort: self.sort,
-            id: next_map_id(),
         }
     }
 
     /// Look up a key.
     #[must_use]
     pub fn get(&self, k: &Value) -> Option<&Value> {
-        self.inner.get(k)
+        match &self.small {
+            Some(small) => small
+                .shape
+                .keys
+                .iter()
+                .position(|ek| ek == k)
+                .map(|idx| &small.vals[idx]),
+            None => self.trie().get(k),
+        }
     }
 
     /// Whether a key is present.
     #[must_use]
     pub fn contains_key(&self, k: &Value) -> bool {
-        self.inner.get(k).is_some()
+        match &self.small {
+            Some(small) => small.shape.keys.iter().any(|ek| ek == k),
+            None => self.trie().get(k).is_some(),
+        }
     }
 
     /// The entry count.
     #[must_use]
     pub fn size(&self) -> usize {
-        self.inner.size()
+        match &self.small {
+            Some(small) => small.vals.len(),
+            None => self.trie().size(),
+        }
     }
 
     /// Whether the map is empty.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.inner.size() == 0
+        self.size() == 0
     }
 
     /// Iterate entries in insertion order (the JVM small-map seq
     /// order; see the `keys` sidecar).
-    pub fn iter(&self) -> impl Iterator<Item = (&Value, &Value)> {
-        self.keys
-            .iter()
-            .filter_map(|k| self.inner.get(k).map(|v| (k, v)))
+    pub fn iter(&self) -> MapIter<'_> {
+        MapIter {
+            inner: match &self.small {
+                Some(small) => MapIterInner::Shaped {
+                    keys: small.shape.keys.iter(),
+                    vals: small.vals.iter(),
+                },
+                None => MapIterInner::Hash(HashIter {
+                    keys: &self.keys,
+                    map: self.trie(),
+                    pos: 0,
+                }),
+            },
+        }
     }
 
     /// The metadata map, if any.
@@ -676,16 +1304,32 @@ impl Map {
     #[must_use]
     pub fn with_meta(mut self, meta: Option<Map>) -> Self {
         self.meta = meta.map(Arc::new);
-        // A new object on the JVM (`withMeta` news), so a new id.
-        self.id = next_map_id();
+        // A new object on the JVM (`withMeta` news), so fresh
+        // entries (identity rides the entries `Arc`).
+        if let Some(small) = self.small.take() {
+            self.small = Some(Arc::new(SmallMap {
+                shape: Arc::clone(&small.shape),
+                vals: small.vals.clone(),
+            }));
+        } else {
+            self.keys = Arc::new((*self.keys).clone());
+        }
         self
     }
 
-    /// The allocation identity for `identical?` (S16): minted at
-    /// every construction, preserved by `Clone`.
+    /// The allocation identity for `identical?` (S16): the entries
+    /// `Arc` address (shaped) or the sidecar `Arc` address (hash).
+    /// Every writer carries a fresh `Arc`, `Clone` shares it, and
+    /// no-ops return `self` — so live maps compare exactly like
+    /// minted ids, with no field and no counter. Not stable across
+    /// processes (addresses); stable per allocation (like the JVM's
+    /// `identityHashCode`, which is the only other consumer).
     #[must_use]
     pub fn id(&self) -> u64 {
-        self.id
+        match &self.small {
+            Some(small) => Arc::as_ptr(small).addr() as u64,
+            None => Arc::as_ptr(&self.keys).addr() as u64,
+        }
     }
 }
 
@@ -711,7 +1355,7 @@ impl Set {
             self
         } else {
             let mut members = self.members;
-            members.push_back_mut(v.clone());
+            Arc::make_mut(&mut members).push_back_mut(v.clone());
             self.inner.insert_mut(v);
             Self {
                 inner: self.inner,
@@ -754,7 +1398,7 @@ impl Set {
         Self {
             inner: self.inner,
             meta: self.meta,
-            members,
+            members: Arc::new(members),
             sort: self.sort,
             id: next_set_id(),
         }
@@ -787,14 +1431,14 @@ impl Set {
     /// The sort order, if sorted.
     #[must_use]
     pub fn sort_spec(&self) -> Option<&SortSpec> {
-        self.sort.as_ref()
+        self.sort.as_deref()
     }
 
     /// Mark this set sorted (or clear the order), preserving members.
     /// Callers maintain `members` in comparator order alongside.
     #[must_use]
     pub fn with_sort(mut self, sort: Option<SortSpec>) -> Self {
-        self.sort = sort;
+        self.sort = sort.map(Box::new);
         self
     }
 
@@ -816,7 +1460,7 @@ impl Set {
             kept.push_back_mut(v.clone());
             inner.insert_mut(v.clone());
         }
-        let members = kept;
+        let members = Arc::new(kept);
         Self {
             inner,
             meta: self.meta,
@@ -923,17 +1567,16 @@ impl Hash for Set {
     }
 }
 
-/// An empty [`Map`] (rpds's `new_sync` only covers the default
-/// hasher, so construction goes through the explicit hasher form).
+/// An empty [`Map`] (shaped, identity-fresh).
 #[must_use]
 pub fn new_map() -> Map {
     Map {
-        inner: RpdsMap::new_with_hasher_and_ptr_kind(FxBuildHasher::default()),
+        inner: None,
+        small: Some(fresh_empty_small()),
+        keys: EMPTY_MAP_KEYS.clone(),
         meta: None,
-        keys: RpdsVector::new_sync(),
         hashy: false,
         sort: None,
-        id: next_map_id(),
     }
 }
 
@@ -943,7 +1586,7 @@ pub fn new_set() -> Set {
     Set {
         inner: RpdsSet::new_with_hasher_with_ptr_kind(FxBuildHasher::default()),
         meta: None,
-        members: RpdsVector::new_sync(),
+        members: Arc::new(RpdsVector::new_sync()),
         sort: None,
         id: next_set_id(),
     }
@@ -965,7 +1608,7 @@ pub fn map_entry(key: Value, val: Value) -> Value {
 #[must_use]
 pub fn tagged_literal(tag: Symbol, form: Value) -> Value {
     Value::TaggedLiteral {
-        tag,
+        tag: Box::new(tag),
         form: Box::new(form),
         id: next_identity_id(),
     }
@@ -1051,7 +1694,9 @@ pub enum Value {
     /// `#tag form` under `:read-cond :preserve` (or suppressed reads).
     /// The `id` is the allocation identity for `identical?` (fence 4a).
     TaggedLiteral {
-        tag: Symbol,
+        // Boxed: tagged literals are cold (reader-only), and this
+        // keeps the variant at 24 bytes so `Value` fits 64.
+        tag: Box<Symbol>,
         form: Box<Value>,
         id: u64,
     },
@@ -1334,7 +1979,7 @@ impl PartialEq for Value {
             (Value::List(a), Value::List(b)) => a.iter().eq(b.iter()),
             (Value::Vector(a), Value::Vector(b)) => a.iter().eq(b.iter()),
             (Value::List(a), Value::Vector(b)) | (Value::Vector(b), Value::List(a)) => {
-                a.iter().eq(b.iter())
+                list_vector_eq(a, b)
             }
             // Realized seqs compare sequentially against
             // List/Vector/realized seqs (never maps, sets, or
@@ -1343,6 +1988,13 @@ impl PartialEq for Value {
             pair => value_eq_mid(pair.0, pair.1),
         }
     }
+}
+
+/// List/vector cross equality (split for the budget): lists
+/// borrow, vectors yield owned values since packing — compare
+/// pairwise without cloning.
+fn list_vector_eq(a: &List, b: &Vector) -> bool {
+    a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| x == &y)
 }
 
 /// At least one side is sequential (`seq_items`).
@@ -1915,20 +2567,28 @@ fn is_collection(v: &Value) -> bool {
     ) || struct_content(v).is_some()
 }
 
-/// Same length plus pairwise comparison (either comparator).
-fn seq_eq<'a>(
+/// Same length plus pairwise comparison (either comparator). The
+/// sides borrow independently (`Vector::iter` yields owned values
+/// since packing; lists and entries still borrow).
+fn seq_eq<I, J>(
     a_len: usize,
-    a: impl Iterator<Item = &'a Value>,
+    a: I,
     b_len: usize,
-    b: impl Iterator<Item = &'a Value>,
-    mut eq: impl FnMut(&'a Value, &'a Value) -> bool,
-) -> bool {
+    b: J,
+    mut eq: impl FnMut(&Value, &Value) -> bool,
+) -> bool
+where
+    I: Iterator,
+    I::Item: std::borrow::Borrow<Value>,
+    J: Iterator,
+    J::Item: std::borrow::Borrow<Value>,
+{
     if a_len != b_len {
         return false;
     }
     let mut count = 0;
     for (x, y) in a.zip(b) {
-        if !eq(x, y) {
+        if !eq(x.borrow(), y.borrow()) {
             return false;
         }
         count += 1;
@@ -1959,7 +2619,11 @@ fn coll_equiv(c: &Value, x: &Value) -> bool {
     }
 }
 
-fn seq_coll_equiv<'a>(len: usize, items: impl Iterator<Item = &'a Value>, x: &'a Value) -> bool {
+fn seq_coll_equiv<I>(len: usize, items: I, x: &Value) -> bool
+where
+    I: Iterator,
+    I::Item: std::borrow::Borrow<Value>,
+{
     match x {
         Value::List(o) => seq_eq(len, items, o.len(), o.iter(), jvm_equiv),
         Value::Vector(o) => seq_eq(len, items, o.len(), o.iter(), jvm_equiv),
@@ -2005,7 +2669,7 @@ fn set_coll_equiv(s: &Set, x: &Value) -> bool {
 fn seq_items(v: &Value) -> Option<Vec<Value>> {
     match v {
         Value::List(l) => Some(l.iter().cloned().collect()),
-        Value::Vector(v) => Some(v.iter().cloned().collect()),
+        Value::Vector(v) => Some(v.iter().collect()),
         // A map entry compares sequentially as its 2-vector
         // (Oracle FX2 `eq`, `entry-vs-list`, `entry-vs-seq`).
         Value::MapEntry { key, val, .. } => Some(vec![(**key).clone(), (**val).clone()]),
@@ -2110,7 +2774,7 @@ fn plain_equals_rest(a: &Value, b: &Value) -> bool {
 fn plain_seq_items(v: &Value) -> Option<Vec<Value>> {
     match v {
         Value::List(l) => Some(l.iter().cloned().collect()),
-        Value::Vector(v) => Some(v.iter().cloned().collect()),
+        Value::Vector(v) => Some(v.iter().collect()),
         Value::MapEntry { key, val, .. } => Some(vec![(**key).clone(), (**val).clone()]),
         Value::PrimitiveVector(p) => Some(p.items()),
         _ => None,
@@ -2227,7 +2891,7 @@ mod tests {
 
     fn opt_tagged(v: &Value) -> Option<(&Symbol, &Value)> {
         match v {
-            Value::TaggedLiteral { tag, form, .. } => Some((tag, form.as_ref())),
+            Value::TaggedLiteral { tag, form, .. } => Some((tag.as_ref(), form.as_ref())),
             _ => None,
         }
     }
@@ -2267,9 +2931,9 @@ mod tests {
         let walked = intern_literal_strings(&payload);
         let items = opt_vector(&walked).unwrap().iter().collect::<Vec<_>>();
         assert_eq!(items.len(), 2);
-        let pooled = opt_str(items[0]).unwrap();
+        let pooled = opt_str(&items[0]).unwrap();
         assert!(Arc::ptr_eq(pooled, &intern_string(&Arc::from("f4a-q"))));
-        assert_eq!(items[1], &Value::Int(1));
+        assert_eq!(items[1], Value::Int(1));
         // Non-string leaves clone through untouched.
         assert_eq!(intern_literal_strings(&Value::Int(7)), Value::Int(7));
     }
@@ -2632,6 +3296,86 @@ mod tests {
         assert_eq!(map.size(), 2);
         let set = super::Set::from_items_checked(vec![tl(0.0), tl(-0.0)]).unwrap();
         assert_eq!(set.size(), 2);
+    }
+
+    // #221 shaped maps: same key-sets share one canonical shape
+    // (pointer-equal), so per-map memory is values-only; the
+    // shape is order-sensitive (`[1 2]` and `[2 1]` iterate
+    // differently, like the JVM).
+    #[test]
+    fn shapes_shared_across_same_key_maps() {
+        let kv = |v: i64| {
+            super::Map::from_kvs_checked(vec![
+                (Value::Int(1), Value::Int(v)),
+                (Value::Int(2), Value::Int(v + 1)),
+            ])
+            .unwrap()
+        };
+        let a = kv(10);
+        let b = kv(20);
+        let shape_of = |m: &super::Map| Arc::clone(&m.small.as_ref().unwrap().shape);
+        assert!(Arc::ptr_eq(&shape_of(&a), &shape_of(&b)));
+        // Same-keys assoc keeps the shape (values only are new).
+        let a2 = a.clone().insert(Value::Int(1), Value::Int(99));
+        assert!(Arc::ptr_eq(&shape_of(&a), &shape_of(&a2)));
+        assert_eq!(a2.get(&Value::Int(1)), Some(&Value::Int(99)));
+        // Reversed keys are a different shape.
+        let c = super::Map::from_kvs_checked(vec![
+            (Value::Int(2), Value::Int(1)),
+            (Value::Int(1), Value::Int(2)),
+        ])
+        .unwrap();
+        assert!(!Arc::ptr_eq(&shape_of(&a), &shape_of(&c)));
+    }
+
+    // Dead shapes leave only a `Weak` behind: re-interning after
+    // the last map drops works, and cleanup evicts dead entries
+    // (a fresh-keys loop retains at most one window) while live
+    // shapes survive.
+    #[test]
+    fn shape_registry_reclaims_dead_shapes() {
+        let one = |i: i64| {
+            super::Map::from_kvs_checked(vec![(Value::Int(1000 + i), Value::Int(i))]).unwrap()
+        };
+        // Re-intern after drop (dead `Weak` or evicted — same arm).
+        let t = one(99);
+        drop(t);
+        assert_eq!(one(99).get(&Value::Int(1099)), Some(&Value::Int(99)));
+        // Churn two dropped batches past several cleanups (40
+        // consecutive misses guarantee cleanups whatever this
+        // thread interned before).
+        let live = one(7);
+        for i in 0..40 {
+            let _dropped = one(10_000 + i);
+        }
+        for i in 0..40 {
+            let _dropped = one(20_000 + i);
+        }
+        assert_eq!(live.get(&Value::Int(1007)), Some(&Value::Int(7)));
+        let mine = |lo: i64, hi: i64| {
+            super::SHAPE_REGISTRY.with(|r| {
+                r.borrow()
+                    .map
+                    .iter()
+                    .filter(|(k, _)| {
+                        k.len() == 1 && matches!(k[0], Value::Int(i) if (lo..hi).contains(&i))
+                    })
+                    .count()
+            })
+        };
+        // The first batch died before the second batch's first
+        // cleanup, so none of its entries linger ...
+        assert_eq!(mine(11_000, 11_040), 0);
+        // ... and the second batch keeps at most one window.
+        assert!(mine(21_000, 21_040) < super::SHAPE_CLEANUP_EVERY);
+        // The held map's entry is live.
+        let live_strong = super::SHAPE_REGISTRY.with(|r| {
+            r.borrow()
+                .map
+                .get(&vec![Value::Int(1007)][..])
+                .map(|w| w.strong_count())
+        });
+        assert!(live_strong.is_some_and(|n| n >= 1));
     }
 
     #[test]

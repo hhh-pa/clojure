@@ -181,11 +181,24 @@ impl ExtensionValue for Closure {
 /// stamps the identity when throwing).
 pub type NativeImpl = dyn Fn(&mut Evaluator, &[Value]) -> Result<Value, NativeError> + Send + Sync;
 
+/// The owned-args entry of a head-releasing looping native
+/// (`reduce`, `into`, ...): taking the arg buffer by value lets
+/// the walk nil out the coll slot after seqing, so memoized seq
+/// chunks free as the walk advances (like the JVM's dead locals)
+/// instead of accumulating behind the head held in `args` (#221).
+/// Borrow-path callers (`apply`, direct `func` users) run the
+/// compat `func` shim (correct, retaining).
+pub type OwnedNativeImpl = dyn Fn(&mut Evaluator, smallvec::SmallVec<[Value; 4]>) -> Result<Value, NativeError>
+    + Send
+    + Sync;
+
 #[derive(Clone)]
 pub struct NativeFn {
     pub id: u64,
     pub display: Arc<str>,
     pub func: Arc<NativeImpl>,
+    /// The owned-args entry (`None` for borrow-only natives).
+    pub owned: Option<Arc<OwnedNativeImpl>>,
     pub meta: Option<Map>,
 }
 
@@ -325,6 +338,7 @@ mod tests {
             id: 7,
             display: Arc::from("user/dbl"),
             func,
+            owned: None,
             meta: None,
         };
         let s = format!("{f:?}");

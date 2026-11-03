@@ -458,7 +458,7 @@ fn resolve_ifaces(eval: &mut Evaluator, v: &Value) -> Result<Vec<Arc<HostDef>>, 
     };
     let mut ifaces = Vec::with_capacity(ifaces_v.len());
     for s in ifaces_v.iter() {
-        if let Some(d) = resolve_iface_sym(eval, s)? {
+        if let Some(d) = resolve_iface_sym(eval, &s)? {
             ifaces.push(d);
         }
     }
@@ -494,7 +494,7 @@ fn parse_sigs(v: &Value) -> Result<HashMap<Arc<str>, Vec<usize>>, NativeError> {
         let arities_v = vec_arg(v)?;
         let mut arities = Vec::with_capacity(arities_v.len());
         for a in arities_v.iter() {
-            arities.push(int_arg(a)?);
+            arities.push(int_arg(&a)?);
         }
         out.insert(name, arities);
     }
@@ -543,7 +543,7 @@ fn native_genclass(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Native
     let ifaces_v = vec_arg(&args[4])?;
     let mut ifaces = Vec::with_capacity(ifaces_v.len());
     for s in ifaces_v.iter() {
-        if let Some(d) = resolve_iface_sym(eval, s)? {
+        if let Some(d) = resolve_iface_sym(eval, &s)? {
             ifaces.push(d);
         }
     }
@@ -571,7 +571,7 @@ fn reify_ifaces(
 ) -> Result<Vec<Arc<HostDef>>, NativeError> {
     let mut ifaces = Vec::with_capacity(specs.len());
     for s in specs.iter() {
-        if let Some(d) = resolve_iface_sym(eval, s)? {
+        if let Some(d) = resolve_iface_sym(eval, &s)? {
             ifaces.push(d);
         }
     }
@@ -1441,7 +1441,7 @@ fn native_proxy(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErr
     let ifaces_v = vec_arg(&args[1])?;
     let mut ifaces = Vec::with_capacity(ifaces_v.len());
     for s in ifaces_v.iter() {
-        if let Some(d) = resolve_iface_sym(eval, s)? {
+        if let Some(d) = resolve_iface_sym(eval, &s)? {
             ifaces.push(d);
         }
     }

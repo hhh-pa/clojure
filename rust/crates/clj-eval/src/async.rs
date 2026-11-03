@@ -283,7 +283,7 @@ fn split_step(ret: Value) -> StepOut {
         None => (ret, false),
     };
     let emits = match val {
-        Value::Vector(x) => x.iter().cloned().collect(),
+        Value::Vector(x) => x.iter().collect(),
         _ => Vec::new(),
     };
     StepOut { emits, reduced }
@@ -740,7 +740,7 @@ impl GoRewrite<'_> {
                 self.walk_list(form, &items)
             }
             Value::Vector(v) => {
-                let items = v.iter().map(|e| self.walk(e)).collect();
+                let items = v.iter().map(|e| self.walk(&e)).collect();
                 vecv(items).with_meta(form.meta().cloned())
             }
             Value::Map(m) => {
@@ -836,7 +836,7 @@ impl GoRewrite<'_> {
             return self.walk_uniform(form, items);
         };
         let bindings_meta = items[1].meta().cloned();
-        let parts: Vec<Value> = bv.iter().cloned().collect();
+        let parts: Vec<Value> = bv.iter().collect();
         let mut new_parts: Vec<Value> = Vec::with_capacity(parts.len());
         let mut added: Vec<String> = Vec::new();
         let mut chunks = parts.chunks_exact(2);
@@ -878,10 +878,10 @@ impl GoRewrite<'_> {
                 for e in v.iter() {
                     // `&` / `:as` markers bind nothing themselves;
                     // their operands flow through the same arms.
-                    if is_amp(e) || is_as(e) {
+                    if is_amp(&e) || is_as(&e) {
                         out.push(e.clone());
                     } else {
-                        let (mut found, walked) = self.walk_pattern(e);
+                        let (mut found, walked) = self.walk_pattern(&e);
                         names.append(&mut found);
                         out.push(walked);
                     }
@@ -1074,28 +1074,28 @@ fn do_alt(eval: &mut Evaluator, alts: &str, clauses: &[Value]) -> Result<Value, 
     let mut ports: Vec<Value> = Vec::new();
     let mut conds: Vec<(Vec<Value>, Value)> = Vec::new();
     for (ports_form, expr) in &ops {
-        let op_ports: Vec<&Value> = match ports_form {
+        let op_ports: Vec<Value> = match ports_form {
             Value::Vector(v) => v.iter().collect(),
-            _ => vec![*ports_form],
+            _ => vec![(*ports_form).clone()],
         };
         let mut tests: Vec<Value> = Vec::new();
         for port in op_ports {
             match port {
                 Value::Vector(pv) => {
-                    let items: Vec<&Value> = pv.iter().collect();
+                    let items: Vec<Value> = pv.iter().collect();
                     let gp = Value::Symbol(gs(eval, "G__"));
                     let gv = Value::Symbol(gs(eval, "G__"));
                     bindings.push(gp.clone());
-                    bindings.push(items.first().map(|v| (*v).clone()).unwrap_or(Value::Nil));
+                    bindings.push(items.first().cloned().unwrap_or(Value::Nil));
                     bindings.push(gv.clone());
-                    bindings.push(items.get(1).map(|v| (*v).clone()).unwrap_or(Value::Nil));
+                    bindings.push(items.get(1).cloned().unwrap_or(Value::Nil));
                     ports.push(vecv(vec![gp.clone(), gv]));
                     tests.push(gp);
                 }
                 _ => {
                     let gp = Value::Symbol(gs(eval, "G__"));
                     bindings.push(gp.clone());
-                    bindings.push(port.clone());
+                    bindings.push(port);
                     ports.push(gp.clone());
                     tests.push(gp);
                 }

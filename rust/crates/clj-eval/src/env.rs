@@ -1321,12 +1321,15 @@ impl Bindings {
 }
 
 /// One frame's slots: immutable shared slots (the common case —
-/// lock-free reads) or patchable slots behind a mutex (only for
-/// `letfn`/named-`fn` self-patching, where closures captured the
-/// frame before its slots were installed).
+/// lock-free reads), a single value stored inline in the frame (the
+/// `extend_one` fast path — one allocation instead of two, since the
+/// hottest binder binds one name at a time), or patchable slots
+/// behind a mutex (only for `letfn`/named-`fn` self-patching, where
+/// closures captured the frame before its slots were installed).
 #[derive(Clone, Debug)]
 enum Slots {
     Shared(Arc<[Value]>),
+    Inline(Value),
     Patchable(Arc<Mutex<Vec<Value>>>),
 }
 
@@ -1411,6 +1414,13 @@ impl Env {
         }
         match &frame.slots {
             Slots::Shared(slots) => slots.get(idx - frame.base).cloned().unwrap_or(Value::Nil),
+            Slots::Inline(value) => {
+                if idx == frame.base {
+                    value.clone()
+                } else {
+                    Value::Nil
+                }
+            }
             Slots::Patchable(slots) => slots
                 .lock()
                 .ok()
@@ -1435,8 +1445,47 @@ impl Env {
         }
     }
 
+    /// Rebind this frame's slots in place for `recur` when no
+    /// observer can tell: the frame must be the flat all-symbols
+    /// frame over `outer` (direct child at `outer`'s length — a
+    /// trailing destructured frame in a nested init chain can hold
+    /// the same slot count by coincidence, so the length check
+    /// alone is unsound), with shared, uniquely owned slots of
+    /// matching length. Any closure capturing this env — or a child
+    /// of it, whose parent chain shares this frame — bumps the
+    /// count and forces the fresh-frame fallback, preserving the
+    /// copy-on-`recur` promise exactly. Anything unqualified
+    /// returns the values for the caller to bind fresh.
+    pub fn try_rebind(&mut self, outer: &Env, values: Vec<Value>) -> Result<(), Vec<Value>> {
+        // Each guard doubles as a cheap safety net: a captured
+        // frame (or any shape surprise) falls through to the
+        // fresh-frame path. Slots ride with their frame (never
+        // shared alone — that `expect` never fires).
+        let Some(frame) = Arc::get_mut(&mut self.frame) else {
+            return Err(values);
+        };
+        let flat_over_outer = frame.parent.as_ref().is_some_and(|parent| {
+            Arc::ptr_eq(&parent.frame, &outer.frame) && frame.base == outer.len()
+        });
+        if flat_over_outer {
+            let Slots::Shared(slots) = &mut frame.slots else {
+                return Err(values);
+            };
+            let dst = Arc::get_mut(slots).expect("slots ride with their frame");
+            // Destructuring loops bind fewer values than slots (one
+            // per pattern), so a mismatch falls back to a fresh
+            // bind — only exact rebinds go in place.
+            if dst.len() == values.len() {
+                dst.clone_from_slice(&values);
+                return Ok(());
+            }
+        }
+        Err(values)
+    }
+
     /// Extend with one fresh slot (the single-name `bind_pattern`
-    /// fast path — no `Vec` at all).
+    /// fast path — the value rides inline in the frame, so one
+    /// allocation instead of two).
     #[must_use]
     pub fn extend_one(&self, value: Value) -> Self {
         let base = self.len();
@@ -1445,7 +1494,7 @@ impl Env {
                 parent: Some(self.clone()),
                 base,
                 len: base + 1,
-                slots: Slots::Shared(Arc::from([value])),
+                slots: Slots::Inline(value),
             }),
         }
     }

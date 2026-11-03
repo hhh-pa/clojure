@@ -129,7 +129,7 @@ pub(crate) fn is_vector_val(v: &Value) -> bool {
 
 pub(crate) fn vector_items(v: &Value) -> Option<Vec<Value>> {
     match v {
-        Value::Vector(vec) => Some(vec.iter().cloned().collect()),
+        Value::Vector(vec) => Some(vec.iter().collect()),
         Value::MapEntry { key, val, .. } => Some(vec![(**key).clone(), (**val).clone()]),
         _ => None,
     }
@@ -154,7 +154,7 @@ pub(crate) fn seq_items(v: &Value) -> Vec<Value> {
     match v {
         Value::Nil => Vec::new(),
         Value::List(l) => l.iter().cloned().collect(),
-        Value::Vector(vec) => vec.iter().cloned().collect(),
+        Value::Vector(vec) => vec.iter().collect(),
         Value::MapEntry { key, val, .. } => vec![(**key).clone(), (**val).clone()],
         Value::Map(m) => m
             .iter()

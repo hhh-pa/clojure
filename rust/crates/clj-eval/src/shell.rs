@@ -64,7 +64,7 @@ fn cmd_parts(cmd: &Value) -> Result<Vec<String>, NativeError> {
     for item in items.iter() {
         match item {
             Value::Str(s) => parts.push(s.to_string()),
-            _ => return Err(cce_err(item, "java.lang.String")),
+            _ => return Err(cce_err(&item, "java.lang.String")),
         }
     }
     if parts.is_empty() {

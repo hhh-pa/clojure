@@ -1261,10 +1261,10 @@ fn view_entry(h: &Value, key: &Value, tag: &Value) -> Result<Option<Set>, HierEr
 /// Vector-like items: vectors in order, map entries as
 /// pairs (a `MapEntry` is an `APersistentVector`, probe
 /// `l-mapentry`).
-fn vec_items(v: &Value) -> Option<Vec<&Value>> {
+fn vec_items(v: &Value) -> Option<Vec<Value>> {
     match v {
         Value::Vector(vv) => Some(vv.iter().collect()),
-        Value::MapEntry { key, val, .. } => Some(vec![key, val]),
+        Value::MapEntry { key, val, .. } => Some(vec![key.as_ref().clone(), val.as_ref().clone()]),
         _ => None,
     }
 }

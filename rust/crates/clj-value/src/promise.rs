@@ -51,12 +51,14 @@ struct PromiseCell {
 
 /// A first-class promise value: an identity plus the shared latch
 /// cell (and the per-handle metadata). Identity equality (same
-/// cell, equal meta); `counted?` is false, like the JVM.
+/// cell, equal meta); `counted?` is false, like the JVM. The
+/// metadata rides behind an `Arc`, like [`Future`](crate::Future)'s
+/// (#221 R1).
 #[derive(Clone, Debug)]
 pub struct Promise {
     id: u64,
     cell: Arc<PromiseCell>,
-    meta: Option<Map>,
+    meta: Option<Arc<Map>>,
 }
 
 impl Promise {
@@ -161,7 +163,7 @@ impl Promise {
     /// cell is untouched).
     #[must_use]
     pub fn meta(&self) -> Option<Map> {
-        self.meta.clone()
+        self.meta.as_deref().cloned()
     }
 
     /// This handle with `meta` attached (`None` clears it): the
@@ -172,7 +174,7 @@ impl Promise {
         Self {
             id: self.id,
             cell: Arc::clone(&self.cell),
-            meta,
+            meta: meta.map(Arc::new),
         }
     }
 

@@ -73,12 +73,15 @@ struct FutureCell {
 
 /// A first-class future value: an identity plus the shared outcome
 /// cell (and the per-handle metadata). Identity equality (same
-/// cell, equal meta); `counted?` is false, like the JVM.
+/// cell, equal meta); `counted?` is false, like the JVM. The
+/// metadata rides behind an `Arc`: an inline `Map` would inflate
+/// this struct, and every `Value` pays the largest variant's size
+/// inline (#221 R1).
 #[derive(Clone, Debug)]
 pub struct Future {
     id: u64,
     cell: Arc<FutureCell>,
-    meta: Option<Map>,
+    meta: Option<Arc<Map>>,
 }
 
 impl Future {
@@ -199,7 +202,7 @@ impl Future {
     /// outcome cell is untouched).
     #[must_use]
     pub fn meta(&self) -> Option<Map> {
-        self.meta.clone()
+        self.meta.as_deref().cloned()
     }
 
     /// This handle with `meta` attached (`None` clears it): the
@@ -210,7 +213,7 @@ impl Future {
         Self {
             id: self.id,
             cell: Arc::clone(&self.cell),
-            meta,
+            meta: meta.map(Arc::new),
         }
     }
 

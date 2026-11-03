@@ -44,7 +44,7 @@ fn persistent_collections_share_across_threads() {
                 assert_eq!(map.size(), 100);
                 assert!(set.contains(&k));
                 assert_eq!(set.size(), 100);
-                assert_eq!(vec.iter().nth(i as usize), Some(&int(i)));
+                assert_eq!(vec.iter().nth(i as usize), Some(int(i)));
                 assert_eq!(vec.len(), 100);
                 assert_eq!(list.iter().nth(i as usize), Some(&int(i)));
                 assert_eq!(list.len(), 100);

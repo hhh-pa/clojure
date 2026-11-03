@@ -27,11 +27,13 @@ use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
 use clj_value::{ExtensionValue, Keyword, Value, new_map};
+use smallvec::SmallVec;
 
 use crate::core::{Reduced, as_reduced, take_count};
 use crate::error::NativeError;
 use crate::eval::Evaluator;
 use crate::ext::{NativeFn, NativeImpl};
+use crate::lazy::take_walk_coll;
 use crate::ns::{NativeFnPtr, check_arity, deref_core, signal_to_native};
 use crate::seqs::call_checked;
 
@@ -67,6 +69,7 @@ fn transducer(
         id: eval.next_id(),
         display: Arc::from(display),
         func: Arc::new(func) as Arc<NativeImpl>,
+        owned: None,
         meta: None,
     }))
 }
@@ -299,11 +302,14 @@ pub(crate) fn transduce_into(
     xform: &Value,
     f: &Value,
     init: Value,
-    coll: &Value,
+    coll: Value,
 ) -> Result<Value, NativeError> {
     let step = call_checked(eval, xform, std::slice::from_ref(f))?;
     let mut acc = init;
-    let mut seq = crate::lazy::seq_value(eval, coll).map_err(signal_to_native)?;
+    let mut seq = crate::lazy::seq_value(eval, &coll).map_err(signal_to_native)?;
+    // Owned callers nilled the arg slot: dropping the head here
+    // frees memoized chunks as the walk advances (#221).
+    drop(coll);
     while !matches!(seq, Value::Nil) {
         let head = crate::lazy::first_value(eval, &seq).map_err(signal_to_native)?;
         acc = call_checked(eval, &step, &[acc, head])?;
@@ -317,14 +323,23 @@ pub(crate) fn transduce_into(
 }
 
 fn native_transduce(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
-    check_arity("clojure.core/transduce", args, &[3, 4])?;
+    // Borrow-path compat shim (see [`OwnedNativeImpl`]).
+    native_transduce_owned(eval, args.iter().cloned().collect())
+}
+
+pub(crate) fn native_transduce_owned(
+    eval: &mut Evaluator,
+    mut args: SmallVec<[Value; 4]>,
+) -> Result<Value, NativeError> {
+    check_arity("clojure.core/transduce", &args, &[3, 4])?;
     let (xform, f) = (args[0].clone(), args[1].clone());
-    let (init, coll) = if args.len() == 4 {
-        (args[2].clone(), &args[3])
+    let coll_idx = if args.len() == 4 { 3 } else { 2 };
+    let init = if args.len() == 4 {
+        args[2].clone()
     } else {
-        let init = call_checked(eval, &f, &[])?;
-        (init, &args[2])
+        call_checked(eval, &f, &[])?
     };
+    let coll = take_walk_coll(&mut args, coll_idx);
     transduce_into(eval, &xform, &f, init, coll)
 }
 
@@ -890,7 +905,7 @@ pub(crate) fn into_xform(
     eval: &mut Evaluator,
     to: Value,
     xform: &Value,
-    from: &Value,
+    from: Value,
 ) -> Result<Value, NativeError> {
     // `IEditableCollection` ≈ persistent vector/map/set — minus
     // the sorted kinds (never editable on the JVM: sorted targets

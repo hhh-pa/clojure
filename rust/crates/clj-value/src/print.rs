@@ -326,9 +326,11 @@ fn print_scalars(v: &Value, opts: &PrintOpts, level: Option<i64>, out: &mut Stri
             );
         }
         Value::Vector(v) => {
+            // Owned iteration since packing: materialize, then lend.
+            let items: Vec<Value> = v.iter().collect();
             print_sequential(
                 "[",
-                v.iter().collect::<Vec<_>>(),
+                items.iter().collect::<Vec<_>>(),
                 "]",
                 " ",
                 opts,

@@ -378,6 +378,35 @@ fn loop_recur() {
         ),
         "2"
     );
+    // Multi-capture: every iteration's closure keeps its own frame
+    // (#221 R2: in-place `recur` rebind must not disturb these).
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(loop [i 0] (if (t-zero? i) (do (def k0 (fn [] i)) (recur 1)) (if (t-zero? (t-minus i 1)) (do (def k1 (fn [] i)) (recur 2)) (do (def k2 (fn [] i)) [(k0) (k1) (k2)]))))"
+        ),
+        "[0 1 2]"
+    );
+    // A closure passed as a `recur` argument captures the current
+    // frame, so the rebind still copies (oracle: 0, not 1).
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(loop [i 0 f nil] (if (t-zero? i) (recur 1 (fn [] i)) (f)))"
+        ),
+        "0"
+    );
+    // Trailing destructured binding whose slot count collides with
+    // the recur arity (#221 R2: the flat-frame shape check must
+    // reject this — a bare length check rebinds the wrong slots).
+    // Terminates with the wrong value (not a hang) if it regresses.
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(loop [a 0 [b c] [10 20]] (if (t-zero? (t-minus b 10)) (recur 1 [11 21]) [a b c]))"
+        ),
+        "[1 11 21]"
+    );
 }
 
 #[test]

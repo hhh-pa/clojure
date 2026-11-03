@@ -799,6 +799,7 @@ impl Evaluator {
             id,
             display: Arc::from(format!("{ns}/{name}").as_str()),
             func,
+            owned: crate::ns::owned_entry(name),
             meta: None,
         }));
         self.registry.with_state_mut(var_id, |state| {
@@ -984,12 +985,7 @@ impl Evaluator {
                 for arg in args {
                     values.push(self.eval(arg, env)?);
                 }
-                // The call site stays visible to natives for the
-                // duration of the call (nesting saves/restores).
-                let saved = self.native_call_span.replace(*span);
-                let out = self.invoke(&callee, &values);
-                self.native_call_span = saved;
-                out
+                self.invoke_args(&callee, values, *span)
             }
         }
     }
@@ -1034,14 +1030,16 @@ impl Evaluator {
         meta: Option<Map>,
         env: &Env,
     ) -> Result<Value, Signal> {
-        let mut out = new_map();
+        let mut pairs_out = Vec::with_capacity(pairs.len());
         for (k, v) in pairs {
             let key = self.eval(k, env)?;
             let val = self.eval(v, env)?;
             let key = crate::lazy::realize_key(self, &key)?;
-            out = out.insert(key, val);
+            pairs_out.push((key, val));
         }
-        Ok(Value::Map(out.with_meta(meta)))
+        Ok(Value::Map(
+            Map::from_kvs_last_wins(pairs_out).with_meta(meta),
+        ))
     }
 
     /// A set literal (elements evaluate left to right).
@@ -1654,15 +1652,21 @@ impl Evaluator {
             let value = self.eval(init, &env)?;
             env = self.bind_pattern(pat, value, &env)?;
         }
-        // The patterns, collected once (a fresh frame per iteration,
-        // like the copy it replaces, so closures from this iteration
-        // keep observing the old frame).
+        // The patterns, collected once (each iteration rebinds in
+        // place when unobserved, else binds a fresh frame, so
+        // closures from this iteration keep observing the old
+        // frame).
         let pats: SmallVec<[&Pattern; 8]> = bindings.iter().map(|(pat, _)| pat).collect();
         loop {
             match self.eval_body(body, &env) {
                 Ok(v) => return Ok(v),
                 Err(Signal::Recur(values)) => {
-                    env = self.bind_values(&pats, values, &outer)?;
+                    // Rebind in place when unobserved (#221 R2: no
+                    // allocation on the hot path); a captured frame
+                    // falls back to the fresh-frame copy-on-`recur`.
+                    if let Err(values) = env.try_rebind(&outer, values) {
+                        env = self.bind_values(&pats, values, &outer)?;
+                    }
                 }
                 Err(signal) => return Err(signal),
             }
@@ -1790,6 +1794,28 @@ impl Evaluator {
     /// fallbacks and other higher-order calls).
     pub(crate) fn call(&mut self, callee: &Value, args: &[Value]) -> Result<Value, Signal> {
         self.invoke(callee, args)
+    }
+
+    /// Invoke with an owned arg buffer: head-releasing looping
+    /// natives take the buffer (nil-ing walked coll slots so
+    /// memoized seq chunks free as they advance, like the JVM's
+    /// dead locals); everything else borrows it (the buffer drops
+    /// at return, as before).
+    fn invoke_args(
+        &mut self,
+        callee: &Value,
+        args: SmallVec<[Value; 4]>,
+        span: Span,
+    ) -> Result<Value, Signal> {
+        // The call site stays visible to natives for the
+        // duration of the call (nesting saves/restores).
+        let saved = self.native_call_span.replace(span);
+        let out = match crate::ext::as_native(callee).and_then(|n| n.owned.clone()) {
+            Some(owned) => owned(self, args).map_err(|e| self.throw(e)),
+            None => self.invoke(callee, &args),
+        };
+        self.native_call_span = saved;
+        out
     }
 
     fn invoke(&mut self, callee: &Value, args: &[Value]) -> Result<Value, Signal> {
@@ -2170,9 +2196,10 @@ impl Evaluator {
         if let Some(rest) = rest {
             values.push(rest);
         }
-        // Bind through `bind_values` (initial and `recur` alike). A
-        // fresh frame per `recur` keeps the old copy-on-recur
-        // promise: closures from this iteration keep the old frame.
+        // Bind through `bind_values` initially; each `recur`
+        // rebinds in place when the frame is unobserved, else binds
+        // fresh — the copy-on-`recur` promise: closures from this
+        // iteration keep the old frame.
         let outer = closure.env.clone();
         // The pattern list borrows the arity (no per-call `Vec`;
         // its length is bounded by the parameter count).
@@ -2182,7 +2209,11 @@ impl Evaluator {
             match self.eval_body(&arity.body, &frame) {
                 Ok(v) => return Ok(v),
                 Err(Signal::Recur(values)) => {
-                    frame = self.bind_values(&pats, values, &outer)?;
+                    // In-place rebind when unobserved (#221 R2);
+                    // captured frames keep the fresh-frame promise.
+                    if let Err(values) = frame.try_rebind(&outer, values) {
+                        frame = self.bind_values(&pats, values, &outer)?;
+                    }
                 }
                 Err(signal) => return Err(signal),
             }
@@ -2583,7 +2614,7 @@ impl Evaluator {
                 Ok(map)
             }
             Value::Vector(v) => {
-                let items: Vec<Value> = v.iter().cloned().collect();
+                let items: Vec<Value> = v.iter().collect();
                 match items.as_slice() {
                     [k, val] => Ok(map.insert(k.clone(), val.clone())),
                     _ => Err(self.throw(NativeError::new(
@@ -2665,7 +2696,7 @@ impl Evaluator {
                 Ok(())
             }
             Value::Vector(v) => {
-                let items: Vec<&Value> = v.iter().collect();
+                let items: Vec<Value> = v.iter().collect();
                 if items.len() != 2 {
                     return Err(self.throw(NativeError::new(
                         ThrowClass::IllegalArgumentException,
@@ -2889,7 +2920,7 @@ fn lookup(coll: &Value, key: &Value) -> Option<Value> {
 
 fn lookup_vector(v: &Vector, key: &Value) -> Option<Value> {
     match key {
-        Value::Int(n) => usize::try_from(*n).ok().and_then(|i| v.get(i).cloned()),
+        Value::Int(n) => usize::try_from(*n).ok().and_then(|i| v.get(i)),
         _ => None,
     }
 }
@@ -2942,7 +2973,7 @@ fn rest_list(args: &[Value]) -> Value {
 fn nth_or_nil(coll: &Value, i: usize, eval: &mut Evaluator) -> Result<Value, Signal> {
     match coll {
         Value::Nil => Ok(Value::Nil),
-        Value::Vector(v) => Ok(v.get(i).cloned().unwrap_or(Value::Nil)),
+        Value::Vector(v) => Ok(v.get(i).unwrap_or(Value::Nil)),
         Value::MapEntry { key, val, .. } => Ok(match i {
             0 => (**key).clone(),
             1 => (**val).clone(),
@@ -2977,7 +3008,7 @@ impl Evaluator {
                     Ok(Some(l.clone()))
                 }
             }
-            Value::Vector(v) => Ok(Self::seq_list_opt(v.iter().cloned().collect())),
+            Value::Vector(v) => Ok(Self::seq_list_opt(v.iter().collect())),
             Value::PrimitiveVector(p) => Ok(Self::seq_list_opt(p.items())),
             Value::Array(a) => Ok(Self::seq_list_opt(a.snapshot())),
             Value::Set(s) => Ok(Self::seq_list_opt(s.iter().cloned().collect())),

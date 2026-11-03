@@ -229,7 +229,7 @@ fn counts_of(v: &Value) -> Option<Counts> {
     let nums: Vec<i64> = items
         .iter()
         .map(|x| match x {
-            Value::Int(n) => Some(*n),
+            Value::Int(n) => Some(n),
             _ => None,
         })
         .collect::<Option<_>>()?;

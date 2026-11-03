@@ -33,7 +33,7 @@ pub fn seq_vec(v: &Value) -> Option<Vec<Value>> {
         Value::Nil => Some(Vec::new()),
         Value::Str(s) => Some(s.chars().map(Value::Char).collect()),
         Value::List(l) => Some(l.iter().cloned().collect()),
-        Value::Vector(v) => Some(v.iter().cloned().collect()),
+        Value::Vector(v) => Some(v.iter().collect()),
         Value::MapEntry { key, val, .. } => Some(vec![(**key).clone(), (**val).clone()]),
         Value::Map(m) => Some(
             m.iter()
@@ -179,7 +179,7 @@ impl Seq {
     /// Seq over a vector's items (chunked, like the JVM).
     #[must_use]
     pub fn from_vector(v: &Vector) -> Option<Self> {
-        Self::chunked(v.iter().cloned().collect())
+        Self::chunked(v.iter().collect())
     }
 
     /// Seq over a map's entries as `MapEntry` values, in seq order.
@@ -583,17 +583,18 @@ impl SubVectorValue {
     /// The window items, in order.
     #[must_use]
     pub fn items(&self) -> Vec<Value> {
-        self.iter().cloned().collect()
+        self.iter().collect()
     }
 
-    /// Iterate the window items, in order.
-    pub fn iter(&self) -> impl Iterator<Item = &Value> {
+    /// Iterate the window items, in order (owned values since
+    /// vector packing).
+    pub fn iter(&self) -> impl Iterator<Item = Value> + '_ {
         self.vec.iter().skip(self.start).take(self.len())
     }
 
     /// The window item at `index` (`None` past the end).
     #[must_use]
-    pub fn nth(&self, index: usize) -> Option<&Value> {
+    pub fn nth(&self, index: usize) -> Option<Value> {
         if index < self.len() {
             self.vec.get(self.start + index)
         } else {
@@ -619,10 +620,10 @@ impl SubVectorValue {
     /// delimit the window.
     #[must_use]
     pub fn with_window(&self, items: Vec<Value>) -> Self {
-        let mut backing: Vec<Value> = self.vec.iter().take(self.start).cloned().collect();
+        let mut backing: Vec<Value> = self.vec.iter().take(self.start).collect();
         let end = self.start + items.len();
         backing.extend(items);
-        backing.extend(self.vec.iter().skip(self.end).cloned());
+        backing.extend(self.vec.iter().skip(self.end));
         Self {
             vec: Vector::from_vec(backing),
             start: self.start,
@@ -642,7 +643,7 @@ impl crate::ExtensionValue for SubVectorValue {
         // this fallback prints readably without limits.
         let parts: Vec<String> = self
             .iter()
-            .map(|v| crate::pr_to_string(v, &crate::PrintOpts::pr()))
+            .map(|v| crate::pr_to_string(&v, &crate::PrintOpts::pr()))
             .collect();
         format!("[{}]", parts.join(" "))
     }
@@ -1861,6 +1862,11 @@ mod tests {
         let c = CycleValue::new(int(1), int(2));
         assert_eq!(c.class_name(), "clojure.lang.Cycle");
         assert_eq!(c.print(), "(...)");
+        // Identity equality (same pointer is `=`, distinct
+        // instances are not, whatever the items).
+        assert!(c.dyn_eq(&c));
+        let d = CycleValue::new(int(1), int(2));
+        assert!(!c.dyn_eq(&d));
     }
 
     #[test]
@@ -1880,6 +1886,11 @@ mod tests {
         assert!(pending.clone().seed_opt().is_none());
         assert_eq!(it.class_name(), "clojure.lang.Iterate");
         assert_eq!(it.print(), "(...)");
+        // Identity equality (same pointer is `=`, distinct
+        // instances are not, whatever the seeds).
+        assert!(it.dyn_eq(&it));
+        let other = IterateValue::new(int(0), int(1));
+        assert!(!it.dyn_eq(&other));
     }
 
     #[test]

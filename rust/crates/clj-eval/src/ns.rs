@@ -600,7 +600,7 @@ fn opt_get<'a>(pairs: &[(&'a Value, &'a Value)], name: &str) -> Option<&'a Value
 fn check_sequential(v: &Value) -> Result<Vec<Value>, NativeError> {
     match v {
         Value::List(l) => Ok(l.iter().cloned().collect()),
-        Value::Vector(x) => Ok(x.iter().cloned().collect()),
+        Value::Vector(x) => Ok(x.iter().collect()),
         Value::MapEntry { key, val, .. } => Ok(vec![(**key).clone(), (**val).clone()]),
         _ => Err(ex(
             ":only/:refer value must be a sequential collection of symbols".to_owned(),
@@ -2123,7 +2123,8 @@ fn import_one_spec(eval: &mut Evaluator, spec: &Value) -> Result<Value, NativeEr
     // Vectors are package lists directly (the `(quote x)` strip
     // below is list-only: a vector IS the spec, never a form).
     if let Value::Vector(x) = spec {
-        let parts: Vec<&Value> = x.iter().collect();
+        let owned: Vec<Value> = x.iter().collect();
+        let parts: Vec<&Value> = owned.iter().collect();
         return import_package_list(eval, &parts);
     }
     let items: Vec<&Value> = match spec {
@@ -2499,6 +2500,50 @@ fn native_eval(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErro
 
 /// A native fn pointer (all §N natives share the signature).
 pub(crate) type NativeFnPtr = fn(&mut Evaluator, &[Value]) -> Result<Value, NativeError>;
+
+/// An owned-args native fn pointer (head-releasing loopers).
+pub(crate) type OwnedNativeFnPtr =
+    fn(&mut Evaluator, smallvec::SmallVec<[Value; 4]>) -> Result<Value, NativeError>;
+
+/// Owned-args entries by looping-native name (sorted for
+/// binary search; core looper names are unique across installed
+/// namespaces, so the lookup is by name — test doubles install
+/// literally with `owned: None`).
+const OWNED_ENTRIES: &[(&str, OwnedNativeFnPtr)] = &[
+    ("butlast", crate::seqs::native_butlast_owned),
+    ("count", crate::coll::native_count_owned),
+    ("doall", crate::seqs::native_doall_owned),
+    ("dorun", crate::seqs::native_dorun_owned),
+    ("drop-last", crate::seqs::native_drop_last_owned),
+    ("empty?", crate::coll::native_emptyp_owned),
+    ("every?", crate::seqs::native_every_p_owned),
+    ("filterv", crate::seqs::native_filterv_owned),
+    ("frequencies", crate::seqs::native_frequencies_owned),
+    ("group-by", crate::seqs::native_group_by_owned),
+    ("into", crate::coll::native_into_owned),
+    ("last", crate::coll::native_last_owned),
+    ("mapv", crate::seqs::native_mapv_owned),
+    ("not-any?", crate::seqs::native_not_any_p_owned),
+    ("not-every?", crate::seqs::native_not_every_p_owned),
+    ("nth", crate::coll::native_nth_owned),
+    ("reduce", crate::seqs::native_reduce_owned),
+    ("reverse", crate::seqs::native_reverse_owned),
+    ("set", crate::coll::native_set_owned),
+    ("some", crate::seqs::native_some_owned),
+    ("sort", crate::seqs::native_sort_owned),
+    ("sort-by", crate::seqs::native_sort_by_owned),
+    ("str", crate::core::native_str_owned),
+    ("take-last", crate::seqs::native_take_last_owned),
+    ("transduce", crate::xform::native_transduce_owned),
+    ("vec", crate::coll::native_vec_owned),
+];
+
+/// The owned-args entry for a looping native by name (`None`
+/// for borrow-only natives).
+pub(crate) fn owned_entry(name: &str) -> Option<std::sync::Arc<crate::ext::OwnedNativeImpl>> {
+    let idx = OWNED_ENTRIES.binary_search_by(|(n, _)| n.cmp(&name)).ok()?;
+    Some(std::sync::Arc::new(OWNED_ENTRIES[idx].1))
+}
 
 /// The §N natives installed into `clojure.core` by [`boot`].
 const NATIVES: &[(&str, NativeFnPtr)] = &[
@@ -3112,5 +3157,21 @@ mod tests {
         let handle = ns_value("user", 1);
         set_ns_current(&mut eval, var_id, handle.clone());
         assert_eq!(eval.deref_var(var_id, &star), handle);
+    }
+
+    #[test]
+    fn owned_entries_sorted_and_total() {
+        // The binary search needs sorted unique names; every
+        // entry must resolve and unknown names must miss.
+        let names: Vec<&str> = super::OWNED_ENTRIES.iter().map(|(n, _)| *n).collect();
+        let mut sorted = names.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(names, sorted, "OWNED_ENTRIES out of order");
+        for name in &names {
+            assert!(super::owned_entry(name).is_some(), "missing {name}");
+        }
+        assert!(super::owned_entry("map").is_none());
+        assert!(super::owned_entry("").is_none());
     }
 }

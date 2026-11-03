@@ -751,7 +751,7 @@ fn write_seq_body(
             write_seq_items(eval, &items, "(", ")", " ", w, opts)
         }
         Value::Vector(v) => {
-            let items: Vec<Value> = v.iter().cloned().collect();
+            let items: Vec<Value> = v.iter().collect();
             write_seq_items(eval, &items, "[", "]", " ", w, opts)
         }
         Value::MapEntry { key, val, .. } => write_seq_items(
@@ -1567,6 +1567,7 @@ fn method_fn_value(eval: &mut Evaluator, display: &str, f: NativeFnPtr) -> Value
         id: eval.next_id(),
         display: Arc::from(display),
         func,
+        owned: None,
         meta: None,
     }))
 }
@@ -1863,6 +1864,7 @@ mod tests {
             id: 2,
             display: Arc::from("user/g"),
             func,
+            owned: None,
             meta: Some(with_type),
         };
         let stripped = strip_type_meta(&Value::Extension(Arc::new(native)));
