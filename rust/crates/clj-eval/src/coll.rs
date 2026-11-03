@@ -1654,45 +1654,11 @@ pub(crate) fn native_nth_owned(
     let not_found = args.get(2).cloned();
     let coll_v = take_walk_coll(&mut args, 0);
     let coll = &coll_v;
-    if matches!(coll, Value::Nil) {
-        return Ok(not_found.clone().unwrap_or(Value::Nil));
+    if let Some(fast) = nth_fast(coll, n, &not_found) {
+        return fast;
     }
-    if not_found.is_some() && n < 0 {
-        return Ok(not_found.clone().unwrap_or(Value::Nil));
-    }
-    // Chunks read their raw slots (nil holes below capacity, S12
-    // oracles `ch-nth-oob`, `ch-nth-cap`).
-    if let Some(c) = crate::collmisc::as_chunk(coll) {
-        return crate::collmisc::chunk_nth(c, n, not_found.as_ref());
-    }
-    if matches!(
-        coll,
-        Value::Vector(_) | Value::MapEntry { .. } | Value::PrimitiveVector(_)
-    ) || as_subvector(coll).is_some()
-        || matches!(coll, Value::Transient(_))
-    {
-        return nth_indexed(coll, n, not_found.as_ref());
-    }
-    // Arrays: `not-found` on OOB, else the empty `AIOOBE` (S15
-    // oracles `a-nth`, `a-nth-nf`, `a-nth-oob`, `e-nth-float`,
-    // `n-arr-str`, `n-arr-nil`).
     if let Value::Array(a) = coll {
-        let found = usize::try_from(n).ok().and_then(|idx| {
-            if idx < a.len() {
-                Some(crate::arrays::array_read(a, idx))
-            } else {
-                None
-            }
-        });
-        let nf = not_found;
-        return match (found, nf) {
-            (Some(v), _) => Ok(v),
-            (None, Some(nf)) => Ok(nf.clone()),
-            (None, None) => Err(NativeError::new(
-                ThrowClass::ArrayIndexOutOfBoundsException,
-                String::new(),
-            )),
-        };
+        return nth_array(a, n, not_found);
     }
     if let Value::Str(s) = coll {
         return nth_str(s, n, not_found.as_ref());
@@ -1701,6 +1667,52 @@ pub(crate) fn native_nth_owned(
         return nth_walk(eval, coll, n, not_found.as_ref());
     }
     Err(nth_unsupported(coll))
+}
+
+/// The `nth` fast paths (`nil`/negative-`not-found`/chunk/indexed;
+/// `None` falls through to array/string/seq dispatch).
+fn nth_fast(coll: &Value, n: i32, not_found: &Option<Value>) -> Option<Result<Value, NativeError>> {
+    if matches!(coll, Value::Nil) {
+        return Some(Ok(not_found.clone().unwrap_or(Value::Nil)));
+    }
+    if not_found.is_some() && n < 0 {
+        return Some(Ok(not_found.clone().unwrap_or(Value::Nil)));
+    }
+    // Chunks read their raw slots (nil holes below capacity, S12
+    // oracles `ch-nth-oob`, `ch-nth-cap`).
+    if let Some(c) = crate::collmisc::as_chunk(coll) {
+        return Some(crate::collmisc::chunk_nth(c, n, not_found.as_ref()));
+    }
+    if matches!(
+        coll,
+        Value::Vector(_) | Value::MapEntry { .. } | Value::PrimitiveVector(_)
+    ) || as_subvector(coll).is_some()
+        || matches!(coll, Value::Transient(_))
+    {
+        return Some(nth_indexed(coll, n, not_found.as_ref()));
+    }
+    None
+}
+
+/// The `nth` array arm (`not-found` on OOB, else the empty
+/// `AIOOBE` — S15 oracles `a-nth`, `a-nth-nf`, `a-nth-oob`,
+/// `e-nth-float`, `n-arr-str`, `n-arr-nil`).
+fn nth_array(a: &clj_value::Array, n: i32, not_found: Option<Value>) -> Result<Value, NativeError> {
+    let found = usize::try_from(n).ok().and_then(|idx| {
+        if idx < a.len() {
+            Some(crate::arrays::array_read(a, idx))
+        } else {
+            None
+        }
+    });
+    match (found, not_found) {
+        (Some(v), _) => Ok(v),
+        (None, Some(nf)) => Ok(nf),
+        (None, None) => Err(NativeError::new(
+            ThrowClass::ArrayIndexOutOfBoundsException,
+            String::new(),
+        )),
+    }
 }
 
 /// The `nth not supported` error (`getSimpleName` rule).
