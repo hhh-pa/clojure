@@ -2523,7 +2523,9 @@ pub(crate) type OwnedNativeFnPtr =
 /// namespaces, so the lookup is by name — test doubles install
 /// literally with `owned: None`).
 const OWNED_ENTRIES: &[(&str, OwnedNativeFnPtr)] = &[
+    ("assoc", crate::coll::native_assoc_owned),
     ("butlast", crate::seqs::native_butlast_owned),
+    ("conj", crate::coll::native_conj_owned),
     ("count", crate::coll::native_count_owned),
     ("doall", crate::seqs::native_doall_owned),
     ("dorun", crate::seqs::native_dorun_owned),

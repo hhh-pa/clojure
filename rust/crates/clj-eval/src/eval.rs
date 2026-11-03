@@ -1811,6 +1811,18 @@ impl Evaluator {
         self.invoke(callee, args)
     }
 
+    /// Invoke with an owned arg buffer from natives (accumulator
+    /// step calls move the accumulator through, so uniquely-owned
+    /// accs stay unique — see [`invoke_args`](Self::invoke_args)).
+    pub(crate) fn call_owned(
+        &mut self,
+        callee: &Value,
+        args: SmallVec<[Value; 4]>,
+    ) -> Result<Value, Signal> {
+        let span = self.native_call_span.unwrap_or(Span::new(1, 1));
+        self.invoke_args(callee, args, span)
+    }
+
     /// Invoke with an owned arg buffer: head-releasing looping
     /// natives take the buffer (nil-ing walked coll slots so
     /// memoized seq chunks free as they advance, like the JVM's

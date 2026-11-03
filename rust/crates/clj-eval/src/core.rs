@@ -2799,13 +2799,15 @@ pub(crate) fn native_str_owned(
 }
 
 /// `subs` (char-indexed; the JVM's UTF-16 units agree on the BMP —
-/// unpinned astral divergence is documented).
+/// unpinned astral divergence is documented). Borrows the input
+/// and slices by byte window (#227): no whole-string `to_string`
+/// copy and no `chars` vec — only the answer allocates.
 fn native_subs(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     if args.len() < 2 || args.len() > 3 {
         return Err(NativeError::arity("clojure.core/subs", args.len()));
     }
-    let s = match &args[0] {
-        Value::Str(s) => s.to_string(),
+    let s: &str = match &args[0] {
+        Value::Str(s) => s,
         Value::Nil => {
             let method = if args.len() == 2 {
                 "String.substring(int)"
@@ -2819,8 +2821,12 @@ fn native_subs(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErr
         }
         v => return Err(cce_err(v, "java.lang.String")),
     };
-    let chars: Vec<char> = s.chars().collect();
-    let len = chars.len() as i64;
+    // ASCII short-circuits (chars are bytes — one SIMD scan, then a
+    // byte slice); anything else walks `char_indices` windows.
+    if s.is_ascii() {
+        return subs_ascii(s, args);
+    }
+    let len = s.chars().count() as i64;
     // The `nth`/`subvec` index path: doubles truncate, nil trips the
     // `charValue` NPE, anything else fails to `Number`.
     let begin = i64::from(nth_index(&args[1])?);
@@ -2830,16 +2836,48 @@ fn native_subs(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErr
         len
     };
     if begin < 0 || end < begin || end > len {
-        return Err(NativeError::new(
-            ThrowClass::StringIndexOutOfBoundsException,
-            format!("Range [{begin}, {end}) out of bounds for length {len}"),
-        ));
+        return Err(subs_oob(begin, end, len));
     }
-    Ok(Value::Str(Arc::from(
-        chars[begin as usize..end as usize]
-            .iter()
-            .collect::<String>(),
-    )))
+    let start_b = char_byte_at(s, begin, len);
+    let end_b = char_byte_at(s, end, len);
+    Ok(Value::Str(Arc::from(&s[start_b..end_b])))
+}
+
+/// The byte offset of char `idx` (`len`-capped callers only: `idx`
+/// is in bounds, and `idx == len` is the end of the string).
+fn char_byte_at(s: &str, idx: i64, len: i64) -> usize {
+    if idx == len {
+        return s.len();
+    }
+    s.char_indices()
+        .nth(idx as usize)
+        .map(|(b, _)| b)
+        .expect("subs index is in bounds")
+}
+
+/// The `subs` out-of-bounds error (split for the ASCII/non-ASCII arms).
+fn subs_oob(begin: i64, end: i64, len: i64) -> NativeError {
+    NativeError::new(
+        ThrowClass::StringIndexOutOfBoundsException,
+        format!("Range [{begin}, {end}) out of bounds for length {len}"),
+    )
+}
+
+/// The `subs` ASCII arm (chars are bytes, so `len` is `s.len()`
+/// and the window slices directly — same indexes, errors, and
+/// answers as the scalar walk).
+fn subs_ascii(s: &str, args: &[Value]) -> Result<Value, NativeError> {
+    let len = s.len() as i64;
+    let begin = i64::from(nth_index(&args[1])?);
+    let end = if args.len() == 3 {
+        i64::from(nth_index(&args[2])?)
+    } else {
+        len
+    };
+    if begin < 0 || end < begin || end > len {
+        return Err(subs_oob(begin, end, len));
+    }
+    Ok(Value::Str(Arc::from(&s[begin as usize..end as usize])))
 }
 
 /// `pr-str`/`print-str`: space-joined (nothing for zero args).

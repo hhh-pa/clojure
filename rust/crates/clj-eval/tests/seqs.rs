@@ -1329,3 +1329,47 @@ fn t73_next_nil_puns_spent_repeats() {
         ":leaf"
     );
 }
+
+/// #227: `mapv`/`filterv` stream through a packed transient (no
+/// intermediate `Vec<Value>`) with identical answers — all-int,
+/// mixed (mid-stream unpack), empty, and throwing fns.
+#[test]
+fn mapv_filterv_packed_streaming_227() {
+    let mut eval = boot();
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [v (mapv #(* % %) (range 1000))] [(count v) (nth v 999)])"
+        ),
+        "[1000 998001]"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(mapv #(if (odd? %) :odd %) (range 6))"),
+        "[0 :odd 2 :odd 4 :odd]"
+    );
+    assert_eq!(run_last(&mut eval, "(mapv inc [])"), "[]");
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [w (filterv even? (range 1000))] [(count w) (nth w 0) (nth w 499)])"
+        ),
+        "[500 0 998]"
+    );
+    assert_eq!(run_last(&mut eval, "(filterv odd? [2 4])"), "[]");
+    assert_eq!(run_last(&mut eval, "(filterv some? [1 nil 2])"), "[1 2]");
+    // A throwing fn surfaces mid-stream, like the old collect.
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(mapv (fn [x] (throw (ex-info \"boom\" {}))) [1 2])"
+        ),
+        "clojure.lang.ExceptionInfo | boom"
+    );
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(reduce (fn [a x] (throw (ex-info \"bap\" {}))) 0 [1 2])"
+        ),
+        "clojure.lang.ExceptionInfo | bap"
+    );
+}

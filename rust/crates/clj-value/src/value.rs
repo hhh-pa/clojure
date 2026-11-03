@@ -435,13 +435,13 @@ pub struct Map {
     /// `Some` = shaped authoritative (an interned key-set plus
     /// this version's values, at most [`INLINE_MAP_MAX`] entries
     /// in iteration order); `None` = `inner`/`keys`
-    /// authoritative. Every version carries a fresh entries `Arc`
-    /// (see [`Map::id`]).
+    /// authoritative. Writers mint a fresh entries `Arc` except
+    /// uniquely-owned in-place updates (see [`Map::id`]).
     small: Option<Arc<SmallMap>>,
     /// Insertion-order sidecar when `small` is `None` (a
-    /// shared-empty dummy otherwise). Every hash version carries
-    /// a fresh sidecar `Arc` (see [`Map::id`] — writers never
-    /// `make_mut` in place).
+    /// shared-empty dummy otherwise). Writers mint a fresh
+    /// sidecar `Arc` except uniquely-owned in-place updates
+    /// (see [`Map::id`]).
     keys: Arc<RpdsVector>,
     meta: Option<Arc<Map>>,
     hashy: bool,
@@ -646,45 +646,46 @@ impl Vector {
     /// Append a value.
     #[must_use]
     pub fn push_back(mut self, v: Value) -> Self {
-        // The placeholder is immediately overwritten below (never
-        // observed); an empty trie allocates nothing.
-        let inner = std::mem::replace(
-            &mut self.inner,
-            VectorInner::Generic(RpdsVector::new_sync()),
-        );
-        let inner = match (inner, v) {
-            (VectorInner::Generic(mut trie), v) => {
+        // Through `&mut` (no `mem::replace` placeholder — even an
+        // empty trie `Arc::new`s its root, one alloc per `conj`
+        // before #227), so uniquely-owned `conj` chains mutate in
+        // place while versions shared with other handles still
+        // path-copy. Packed storage meeting a foreign value
+        // rebuilds once (unpack), like
+        // [`set_nth_owned`](Self::set_nth_owned).
+        if matches!(&self.inner, VectorInner::Packed(_)) && !matches!(v, Value::Int(_)) {
+            let mut out = RpdsVector::new_sync();
+            for n in self.packed_slice().expect("guarded packed above") {
+                out.push_back_mut(Value::Int(*n));
+            }
+            out.push_back_mut(v);
+            self.inner = VectorInner::Generic(out);
+            self.id = next_vector_id();
+            return self;
+        }
+        match &mut self.inner {
+            VectorInner::Generic(trie) => {
                 // Owned `self` means no other handle to this
                 // vector: mutate the trie in place instead of
                 // cloning the spine per push (rpds `push_back`
                 // clones unconditionally; `push_back_mut` still
                 // path-copies nodes shared with *other* versions).
                 trie.push_back_mut(v);
-                VectorInner::Generic(trie)
             }
-            (VectorInner::Packed(mut ints), Value::Int(n)) => {
+            VectorInner::Packed(ints) => {
                 // Owned packed storage mutates in place when
                 // unique; `make_mut` copies the 8-byte run when
                 // shared (like any copy-on-write array — repeated
                 // `conj` onto one shared big packed vector is
                 // linear per conj, the one packing tradeoff).
-                Arc::make_mut(&mut ints).push(n);
-                VectorInner::Packed(ints)
-            }
-            (VectorInner::Packed(ints), v) => {
-                let mut out = RpdsVector::new_sync();
-                for n in ints.iter() {
-                    out.push_back_mut(Value::Int(*n));
+                // `Int`-only here (foreign values unpacked above).
+                if let Value::Int(n) = v {
+                    Arc::make_mut(ints).push(n);
                 }
-                out.push_back_mut(v);
-                VectorInner::Generic(out)
             }
-        };
-        Self {
-            inner,
-            meta: self.meta,
-            id: next_vector_id(),
         }
+        self.id = next_vector_id();
+        self
     }
 
     /// Replace the item at `index` (`None` when out of bounds).
@@ -1021,47 +1022,64 @@ impl Map {
     /// hash trie (the class flag stays orthogonal).
     #[must_use]
     pub fn insert(mut self, k: Value, v: Value) -> Self {
+        self.insert_mut(k, v);
+        self
+    }
+
+    /// Assoc a key/value pair in place (the [`insert`](Self::insert)
+    /// logic through `&mut`, for accumulators that cannot move —
+    /// the `frequencies`/`group-by` walk closures — so they skip
+    /// the `mem::replace` dummy map per item).
+    ///
+    /// Uniquely-owned storage mutates with no fresh entries or
+    /// sidecar `Arc` (same [`id`](Self::id) — unobservable: the
+    /// in-place arms run only with no live alias, and the consumed
+    /// input is dead); shared storage mints fresh `Arc`s exactly
+    /// as before, so live aliases keep their versions and
+    /// identities.
+    pub fn insert_mut(&mut self, k: Value, v: Value) {
         if let Some(small) = self.small.take() {
-            return self.insert_shaped(small, k, v);
+            return self.insert_shaped_mut(small, k, v);
         }
         // Owned `self`: mutate the trie in place (same rationale as
         // `Vector::push_back` — rpds still path-copies nodes shared
-        // with *other* versions, so persistence is preserved). The
-        // sidecar always refreshes: identity rides its `Arc` (see
-        // [`Map::id`]), so versions never share one.
+        // with *other* versions, so persistence is preserved).
         if self.trie().get(&k).is_some() {
             self.trie_mut().insert_mut(k, v);
-            return Self {
-                inner: self.inner,
-                small: None,
-                meta: self.meta,
-                keys: Arc::new((*self.keys).clone()),
-                hashy: self.hashy,
-                sort: self.sort,
-            };
+            // Fresh identity only when shared: a live alias must
+            // keep its sidecar `Arc` (see [`Map::id`]).
+            if Arc::strong_count(&self.keys) > 1 {
+                self.keys = Arc::new((*self.keys).clone());
+            }
+            return;
         }
         let size = self.trie().size();
         let promote = !self.hashy && (size >= 64 || (size >= 8 && !matches!(k, Value::Keyword(_))));
-        let mut keys = (*self.keys).clone();
-        keys.push_back_mut(k.clone());
+        // `make_mut`: in place when unique; a header clone plus a
+        // path copy when shared (exactly the old clone-then-push).
+        Arc::make_mut(&mut self.keys).push_back_mut(k.clone());
         self.trie_mut().insert_mut(k, v);
-        Self {
-            inner: self.inner,
-            small: None,
-            meta: self.meta,
-            keys: Arc::new(keys),
-            hashy: self.hashy || promote,
-            sort: self.sort,
-        }
+        self.hashy = self.hashy || promote;
     }
 
-    /// The shaped arm of [`Map::insert`] (linear scan — the `==`
+    /// The shaped arm of [`Map::insert_mut`] (linear scan — the `==`
     /// relation agrees with the hash trie's, so both arms find
-    /// exactly the same keys). Same-keys assocs allocate only the
-    /// values vec (the shape `Arc` is shared); new keys intern
-    /// the extended key-set (hits allocate nothing past values).
-    fn insert_shaped(mut self, small: Arc<SmallMap>, k: Value, v: Value) -> Self {
+    /// exactly the same keys). Uniquely-owned same-key assocs
+    /// write the value in place (no allocs); shared same-key
+    /// assocs allocate only the values vec (the shape `Arc` is
+    /// shared); new keys intern the extended key-set (hits
+    /// allocate nothing past values).
+    fn insert_shaped_mut(&mut self, mut small: Arc<SmallMap>, k: Value, v: Value) {
         if let Some(idx) = small.shape.keys.iter().position(|ek| ek == &k) {
+            // `get_mut` succeeds only with no live alias (not even
+            // the consumed input survives), so the write is
+            // invisible and the entries `Arc` (see [`Map::id`])
+            // stays put.
+            if let Some(entries) = Arc::get_mut(&mut small) {
+                entries.vals[idx] = v;
+                self.small = Some(small);
+                return;
+            }
             let mut vals = Vec::with_capacity(small.vals.len());
             vals.extend(small.vals.iter().cloned());
             vals[idx] = v;
@@ -1069,7 +1087,7 @@ impl Map {
                 shape: Arc::clone(&small.shape),
                 vals: vals.into_boxed_slice(),
             }));
-            return self;
+            return;
         }
         let size = small.vals.len();
         let promote = !self.hashy && (size >= 64 || (size >= 8 && !matches!(k, Value::Keyword(_))));
@@ -1087,14 +1105,14 @@ impl Map {
                 shape: intern_shape(&keys),
                 vals: vals.into_boxed_slice(),
             }));
-            return self;
+            return;
         }
-        self.promote_with(&small, k, v)
+        self.promote_with_mut(&small, k, v);
     }
 
     /// Convert a shaped map to the hash trie, then insert the
     /// overflowing pair (insertion order preserved through `keys`).
-    fn promote_with(mut self, small: &SmallMap, k: Value, v: Value) -> Self {
+    fn promote_with_mut(&mut self, small: &SmallMap, k: Value, v: Value) {
         let mut inner = RpdsMap::new_with_hasher_and_ptr_kind(FxBuildHasher::default());
         let mut keys = RpdsVector::new_sync();
         for (ek, ev) in small.shape.keys.iter().zip(small.vals.iter()) {
@@ -1106,7 +1124,6 @@ impl Map {
         self.inner = Some(Box::new(inner));
         self.small = None;
         self.keys = Arc::new(keys);
-        self
     }
 
     /// Remove a key (`dissoc` one key). A missing key is a no-op;
@@ -1354,11 +1371,13 @@ impl Map {
 
     /// The allocation identity for `identical?` (S16): the entries
     /// `Arc` address (shaped) or the sidecar `Arc` address (hash).
-    /// Every writer carries a fresh `Arc`, `Clone` shares it, and
-    /// no-ops return `self` — so live maps compare exactly like
-    /// minted ids, with no field and no counter. Not stable across
-    /// processes (addresses); stable per allocation (like the JVM's
-    /// `identityHashCode`, which is the only other consumer).
+    /// Writers mint a fresh `Arc` except uniquely-owned in-place
+    /// updates (#227 — same address, unobservable: no live alias
+    /// shares it), `Clone` shares it, and no-ops return `self` —
+    /// so live maps compare exactly like minted ids, with no field
+    /// and no counter. Not stable across processes (addresses);
+    /// stable per allocation (like the JVM's `identityHashCode`,
+    /// which is the only other consumer).
     #[must_use]
     pub fn id(&self) -> u64 {
         match &self.small {

@@ -371,3 +371,30 @@ fn core_r4_print_limit_cce() {
         "java.lang.ClassCastException | class java.lang.String cannot be cast to class java.lang.Number (java.lang.String and java.lang.Number are in module java.base of loader 'bootstrap')"
     );
 }
+
+/// #227: `subs` borrows and window-slices (no whole-string copies)
+/// with identical answers — multi-byte BMP, astral scalar
+/// indexing (the documented divergence zone), and edges.
+#[test]
+fn subs_unicode_and_edges_227() {
+    let mut eval = boot();
+    // Multi-byte BMP chars index by scalar, like the JVM units.
+    assert_eq!(eval_str(&mut eval, "(subs \"aéb\" 0 2)"), "aé");
+    assert_eq!(eval_str(&mut eval, "(subs \"aéb\" 1 3)"), "éb");
+    assert_eq!(eval_str(&mut eval, "(subs \"aéb\" 3)"), "");
+    // Astral: scalar-indexed (unpinned divergence — JVM counts
+    // UTF-16 units; both arms agree with the old `chars` walk).
+    assert_eq!(eval_str(&mut eval, "(subs \"a😀b\" 0 2)"), "a😀");
+    assert_eq!(eval_str(&mut eval, "(subs \"a😀b\" 1 2)"), "😀");
+    assert_eq!(eval_str(&mut eval, "(subs \"a😀b\" 0 3)"), "a😀b");
+    assert_eq!(eval_str(&mut eval, "(subs \"a😀b\" 2 2)"), "");
+    assert_eq!(eval_str(&mut eval, "(subs \"a😀b\" 3)"), "");
+    // Edges: empty window, begin == end == len, one-char strings.
+    assert_eq!(eval_str(&mut eval, "(subs \"abc\" 2 2)"), "");
+    assert_eq!(eval_str(&mut eval, "(subs \"x\" 0 1)"), "x");
+    assert_eq!(eval_str(&mut eval, "(subs \"x\" 1)"), "");
+    assert_eq!(
+        uncaught(&mut eval, "(subs \"aéb\" 0 4)"),
+        "java.lang.StringIndexOutOfBoundsException | Range [0, 4) out of bounds for length 3"
+    );
+}
