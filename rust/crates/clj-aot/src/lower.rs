@@ -399,7 +399,9 @@ impl<'ctx> Lower<'ctx> {
 
     /// Pack lowered arguments into an array for a helper call
     /// (always at least one slot — zero-length allocas are
-    /// avoided even for empty calls).
+    /// avoided even for empty calls). The array is hoisted to the
+    /// entry block: an alloca in a loop body would reallocate on
+    /// every iteration and overflow the stack on long loops.
     fn pack_args(
         &mut self,
         func: FunctionValue<'ctx>,
@@ -407,10 +409,17 @@ impl<'ctx> Lower<'ctx> {
         args: &[SubsetExpr],
     ) -> (PointerValue<'ctx>, IntValue<'ctx>) {
         let array_ty = self.ptr.array_type(args.len().max(1) as u32);
+        let current = self.builder.get_insert_block().expect("insert block");
+        let entry = func.get_first_basic_block().expect("entry block");
+        match entry.get_first_instruction() {
+            Some(first) => self.builder.position_before(&first),
+            None => self.builder.position_at_end(entry),
+        }
         let array = self
             .builder
             .build_alloca(array_ty, "argv")
             .expect("alloca argv");
+        self.builder.position_at_end(current);
         let zero = self.i32t.const_zero();
         for (i, arg) in args.iter().enumerate() {
             let value = self.lower_expr(func, slots, arg);

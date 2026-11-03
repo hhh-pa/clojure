@@ -67,6 +67,21 @@ fn jit_runs_loop_recur() {
 }
 
 #[test]
+fn jit_loop_half_million_iterations_keeps_a_flat_stack() {
+    // argv arrays hoist to the entry block: per-iteration
+    // allocas would overflow the 8MB stack around ~130K
+    // iterations (three boxed prims per step here), so this
+    // count fails loud on the old layout and runs in ~1s.
+    assert_eq!(
+        run(
+            "(let [s (loop [i 0 acc 0] (if (< i 500000) (recur (+ i 1) (+ acc i)) acc))] \
+             (if (= s 124999750000) (print s) (quot 1 0)))"
+        ),
+        0
+    );
+}
+
+#[test]
 fn jit_survives_untaken_let_branches() {
     assert_eq!(
         run("(defn f [c] (if c (let [x 1] x) (let [y 2] y))) \
