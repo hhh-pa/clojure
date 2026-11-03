@@ -288,14 +288,19 @@ impl TransientMap {
     /// Freeze into a persistent map (invalidates this transient).
     /// The class comes from the promotion simulation, never the
     /// content (an unpromoted array keeps array class at any size).
+    /// The lookup index is dropped before the build (not after), so
+    /// its duplicate keys are not live alongside the persistent map
+    /// under construction (#221 R3: peak trim for transient builds).
     pub fn persistent(&mut self) -> Result<Map, TransientError> {
         self.check()?;
         self.valid = false;
+        let entries = std::mem::take(&mut self.entries);
+        self.index.clear();
+        self.index.shrink_to_fit();
         let mut map = new_map();
-        for (k, v) in std::mem::take(&mut self.entries) {
+        for (k, v) in entries {
             map = map.insert(k, v);
         }
-        self.index.clear();
         Ok(map.with_hashy(self.promoted))
     }
 }
@@ -377,14 +382,20 @@ impl TransientSet {
     }
 
     /// Freeze into a persistent set (invalidates this transient).
+    /// The lookup index is dropped before the build (not after), so
+    /// its duplicate members are not live alongside the persistent
+    /// set under construction (#221 R3: peak trim for transient
+    /// builds).
     pub fn persistent(&mut self) -> Result<Set, TransientError> {
         self.check()?;
         self.valid = false;
+        let members = std::mem::take(&mut self.members);
+        self.index.clear();
+        self.index.shrink_to_fit();
         let mut set = new_set();
-        for v in std::mem::take(&mut self.members) {
+        for v in members {
             set = set.insert(v);
         }
-        self.index.clear();
         Ok(set)
     }
 }
