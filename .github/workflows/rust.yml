@@ -359,6 +359,21 @@ jobs:
       GATE_IMAGE: ${{ vars.GATE_IMAGE || 'hhhpa/clojure' }}
     steps:
       - uses: actions/checkout@v5
+      # Coverage shards write ~20GB+ of container overlay (seed copy +
+      # instrumented rebuild + in-test build). Small ubuntu-latest runners
+      # (77G disk, ~20G free) ENOSPC on it (master run 41731966612, twice);
+      # shed the preinstalled SDK/toolchain weight this job never reads so
+      # the shard fits every runner size. Runs before the image pull so the
+      # prune cannot touch the gate image; Go re-provisions via setup-go.
+      - name: free disk space for coverage overlay
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup \
+            /usr/local/share/powershell /opt/microsoft/powershell \
+            /usr/local/lib/android /opt/android /usr/share/swift \
+            /opt/hostedtoolcache
+          sudo apt-get clean
+          docker system prune -af --volumes >/dev/null 2>&1 || true
+          df -h / | tail -1
       - uses: ./.github/actions/profile-runner
         with:
           cache-key: runner-profile-${{ runner.os }}-${{ hashFiles('.github/actions/profile-runner/**', 'scripts/ci/go/go.mod', 'scripts/ci/go/cmd/runner-profile/**', 'scripts/ci/go/internal/executil/**') }}
