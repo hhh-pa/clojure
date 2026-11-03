@@ -37,11 +37,11 @@ pub enum DelayState {
     /// Unforced: the zero-arg fn value to call.
     Pending(Value),
     /// A force is in progress, owned by this thread: same-thread
-    /// re-entry (the body forcing its own delay) errors with a
-    /// clean `IllegalStateException` (the JVM recurses into
-    /// `StackOverflowError` instead), while fellow threads block on
-    /// the cell condvar until the owner publishes, then share the
-    /// outcome.
+    /// re-entry (the body forcing its own delay) throws the JVM's
+    /// empty-message `StackOverflowError` (#200 — raised directly
+    /// instead of recursing, which would abort a Rust process),
+    /// while fellow threads block on the cell condvar until the
+    /// owner publishes, then share the outcome.
     Forcing(ThreadId),
     /// The forced value.
     Realized(Value),

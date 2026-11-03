@@ -37,11 +37,10 @@ shapes are exact JVM text (en_US/UTC).
 
 - Run-once (failures cached, never re-run); throwing still
   realizes (P1). `force` passes non-delays through.
-- Re-entrant force (a delay forcing itself) is
-  `IllegalStateException | Delay is already being forced`
-  (PINNED DIVERGENCE: the JVM recurses until
-  `StackOverflowError`; a Rust stack overflow aborts the
-  process, so the port guards instead).
+- Re-entrant force (a delay forcing itself) throws the JVM's
+  `StackOverflowError` with an empty message (#200 — raised
+  directly instead of recursing, since a Rust stack overflow
+  would abort the process).
 
 ## Future/promise
 

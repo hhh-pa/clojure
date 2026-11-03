@@ -868,14 +868,57 @@ fn delay_throw_cached() {
         uncaught(&mut eval, "(force (delay (throw (ex-info \"boom\" {}))))"),
         "clojure.lang.ExceptionInfo | boom"
     );
-    // A body forcing its own delay errors cleanly (the JVM recurses
-    // into `StackOverflowError` — pinned port divergence).
+    // A body forcing its own delay throws the JVM's empty-message
+    // `StackOverflowError` (#200 — raised directly instead of
+    // recursing, which would abort a Rust process).
     assert_eq!(
         uncaught(
             &mut eval,
             "(do (declare rd) (def rd (delay @rd)) (force rd))"
         ),
-        "java.lang.IllegalStateException | Delay is already being forced"
+        "java.lang.StackOverflowError | "
+    );
+}
+
+#[test]
+fn delay_reentrant_force_throws_stack_overflow() {
+    let mut eval = boot();
+    // #200: same-thread re-entry (the body forcing its own delay)
+    // throws `StackOverflowError` with an empty message — the JVM
+    // shape, like the #205 call-depth guard.
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(do (declare rsoe) (def rsoe (delay @rsoe)) (force rsoe))"
+        ),
+        "java.lang.StackOverflowError | "
+    );
+    // Caught by the exact class; the message is nil (an `Error`, so
+    // `Exception` does not catch it).
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(do (declare rsoec) (def rsoec (delay @rsoec)) (try (force rsoec) (catch StackOverflowError e [:caught (nil? (ex-message e)) (instance? StackOverflowError e)])))"
+        ),
+        "[:caught true true]"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(do (declare rsoee) (def rsoee (delay @rsoee)) (try (force rsoee) (catch Exception e :via-exception) (catch Throwable e :via-throwable)))"
+        ),
+        ":via-throwable"
+    );
+    // Catching and continuing is sane: the evaluator keeps working,
+    // and the throw cached like any thrown body — the delay reads
+    // realized, and a re-force rethrows the same failure without
+    // re-running.
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(do (declare rsoer) (def rsoer (delay @rsoer)) (try (force rsoer) (catch StackOverflowError e :caught)) [(realized? rsoer) (try (force rsoer) (catch StackOverflowError e [:again (nil? (ex-message e))])) (+ 1 2)])"
+        ),
+        "[true [:again true] 3]"
     );
 }
 

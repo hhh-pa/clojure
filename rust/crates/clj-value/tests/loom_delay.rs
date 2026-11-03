@@ -58,7 +58,7 @@ enum Take {
 }
 
 /// Why a take finished without running the body: same-thread
-/// re-entry (`IllegalStateException`) or the cached failure.
+/// re-entry (`StackOverflowError`) or the cached failure.
 #[derive(Debug, PartialEq, Eq)]
 enum ForceError {
     Reentrant,

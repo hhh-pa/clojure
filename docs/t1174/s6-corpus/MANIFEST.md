@@ -404,12 +404,14 @@ shared by two tests). Test fns are in
 
 ## Dropped / reshaped entries
 
-- Delay self-force (`delay_throw_cached`): DROPPED. The JVM throws
-  `StackOverflowError` but also prints a HotSpot warning to stderr
-  (`Potentially dangerous stack overflow in ReservedStackAccess
-  ...`), which lands in the golden via `2>&1` and is too fragile
-  to pin. The port diverges here anyway (`IllegalStateException
-  | Delay is already being forced`).
+- Delay self-force (`delay_throw_cached`,
+  `delay_reentrant_force_throws_stack_overflow`): DROPPED. The JVM
+  throws `StackOverflowError` but also prints a HotSpot warning to
+  stderr (`Potentially dangerous stack overflow in
+  ReservedStackAccess ...`), which lands in the golden via `2>&1`
+  and is too fragile to pin. The port matches the JVM's
+  empty-message `StackOverflowError` (#200), pinned by the Rust
+  tests instead.
 - Bare `future-done?` after `shutdown-agents`
   (`agent_shutdown_joins`): RESHAPED. Racy on the JVM (`true`
   then `false` across identical runs — shutdown does not join
