@@ -24,13 +24,13 @@
 
 use std::ffi::{CStr, c_char};
 use std::ptr;
-use std::sync::Arc;
 
 use clj_eval::{NativeError, Prim};
-use clj_value::{Keyword, List, Value, Vector};
+use clj_value::{Value, Vector};
 
 use crate::runtime::{
-    call_prim, count_str_fast, error_line, is_int_flag, nth_str_fast, print_join, unbox_int,
+    argv_worker, clone_worker, count_worker, error_line, give, is_int_flag, keyword_worker,
+    nth_worker, prim_worker, print_worker, str_worker, unbox_int, vec_push_worker,
 };
 
 /// The `extern "C"` symbol per [`Prim`], indexed by discriminant
@@ -78,11 +78,6 @@ unsafe fn text(ptr: *const u8, len: usize) -> String {
     String::from_utf8_lossy(unsafe { bytes(ptr, len) }).into_owned()
 }
 
-/// Box a fresh owned value for the caller.
-fn give(value: Value) -> *mut Value {
-    Box::into_raw(Box::new(value))
-}
-
 /// Take ownership of a caller box.
 unsafe fn take(ptr: *mut Value) -> Value {
     // Safety: the caller transfers ownership (see module docs).
@@ -95,30 +90,6 @@ unsafe fn take_args(args: *const *mut Value, argc: usize) -> Vec<Value> {
     // Safety: the caller guarantees a valid array (see module docs).
     let items = unsafe { std::slice::from_raw_parts(args, argc) };
     items.iter().map(|ptr| unsafe { take(*ptr) }).collect()
-}
-
-/// Free every consumed box after a borrow-decided fast path
-/// (the fast path inspected borrows; ownership still transfers,
-/// so each box frees exactly once).
-///
-/// # Safety
-///
-/// `args` must be a valid array of `argc` valid boxes, consumed.
-unsafe fn drop_args(args: *const *mut Value, argc: usize) {
-    // Safety: the caller guarantees a valid array (see module docs).
-    let items = unsafe { std::slice::from_raw_parts(args, argc) };
-    for ptr in items {
-        drop(unsafe { take(*ptr) });
-    }
-}
-
-/// The fallible-helper failure: print `path:line:col: Class:
-/// message` and return null (the generated code null-checks and
-/// exits 1). Takes the decoded path so the only unsafe is the
-/// caller's borrow — this stays a plain safe helper.
-fn fail(path: &str, line: u32, col: u32, err: &NativeError) -> *mut Value {
-    eprintln!("{}", error_line(path, line, col, err));
-    ptr::null_mut()
 }
 
 /// One `nil` box.
@@ -152,7 +123,8 @@ pub extern "C" fn rt_double(x: f64) -> *mut Value {
 /// `ptr` must be valid for `len` bytes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rt_str(ptr: *const u8, len: usize) -> *mut Value {
-    give(Value::Str(Arc::from(unsafe { text(ptr, len) }.as_str())))
+    // Safety: the caller guarantees validity (see module docs).
+    str_worker(&unsafe { text(ptr, len) })
 }
 
 /// One keyword box: `name` is required; the `ns` slice is read
@@ -170,13 +142,14 @@ pub unsafe extern "C" fn rt_keyword(
     ns_len: usize,
     has_ns: u8,
 ) -> *mut Value {
+    // Safety: the caller guarantees validity (see module docs).
     let name = unsafe { text(name_ptr, name_len) };
     let ns = if has_ns != 0 {
         Some(unsafe { text(ns_ptr, ns_len) })
     } else {
         None
     };
-    give(Value::Keyword(Keyword::new(ns.as_deref(), &name)))
+    keyword_worker(&name, ns.as_deref())
 }
 
 /// One empty vector box.
@@ -198,10 +171,7 @@ pub unsafe extern "C" fn rt_vec_push(vec: *mut Value, elem: *mut Value) -> *mut 
     // Safety: the caller guarantees a valid box (see module docs).
     let slot = unsafe { &mut *vec };
     let old = std::mem::replace(slot, Value::Nil);
-    *slot = match old {
-        Value::Vector(items) => Value::Vector(items.push_back(elem)),
-        _ => Value::Vector(Vector::from_vec(vec![elem])),
-    };
+    *slot = vec_push_worker(old, elem);
     vec
 }
 
@@ -217,20 +187,12 @@ pub unsafe extern "C" fn rt_vec_push(vec: *mut Value, elem: *mut Value) -> *mut 
 /// valid NUL-terminated C string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rt_argv(argv: *const *const c_char, argc: i32) -> *mut Value {
-    let mut items = Vec::new();
+    let mut entries = Vec::new();
     // Safety: the caller guarantees validity (see module docs).
     for i in 1..argc {
-        let entry = unsafe { *argv.offset(i as isize) };
-        let text = unsafe { CStr::from_ptr(entry) }
-            .to_string_lossy()
-            .into_owned();
-        items.push(Value::Str(Arc::from(text.as_str())));
+        entries.push(unsafe { CStr::from_ptr(*argv.offset(i as isize)) });
     }
-    if items.is_empty() {
-        give(Value::Nil)
-    } else {
-        give(Value::List(List::from_vec(items)))
-    }
+    argv_worker(&entries)
 }
 
 /// Clone the borrowed box into a fresh owned box.
@@ -241,7 +203,7 @@ pub unsafe extern "C" fn rt_argv(argv: *const *const c_char, argc: i32) -> *mut 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rt_clone(value: *const Value) -> *mut Value {
     // Safety: the caller guarantees a valid box (see module docs).
-    give(unsafe { (*value).clone() })
+    clone_worker(unsafe { &*value })
 }
 
 /// Free the owned box.
@@ -273,10 +235,8 @@ pub unsafe extern "C" fn rt_is_truthy(value: *mut Value) -> u8 {
 /// `args` must be a valid array of `argc` valid boxes, consumed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rt_print(args: *const *mut Value, argc: usize) -> *mut Value {
-    let owned = unsafe { take_args(args, argc) };
-    print!("{}", print_join(&owned));
-    let _ = std::io::Write::flush(&mut std::io::stdout());
-    give(Value::Nil)
+    // Safety: the caller guarantees a valid array (see module docs).
+    print_worker(&unsafe { take_args(args, argc) })
 }
 
 /// A sibling call with the wrong arg count: always fails with the
@@ -318,11 +278,14 @@ unsafe fn prim_call(
     line: u32,
     col: u32,
 ) -> *mut Value {
-    let owned = unsafe { take_args(args, argc) };
-    match call_prim(index, owned) {
-        Ok(value) => give(value),
-        Err(err) => fail(&unsafe { text(path, path_len) }, line, col, &err),
-    }
+    // Safety: the caller guarantees validity (see module docs).
+    prim_worker(
+        index,
+        unsafe { take_args(args, argc) },
+        &unsafe { text(path, path_len) },
+        line,
+        col,
+    )
 }
 
 macro_rules! def_prim {
@@ -386,16 +349,13 @@ pub unsafe extern "C" fn rt_count(
     line: u32,
     col: u32,
 ) -> *mut Value {
-    if argc == 1 {
-        // Safety: `argc == 1`, so element 0 is a valid box (see
-        // module docs); the borrow ends before the boxes free.
-        let arg = unsafe { &**args };
-        if let Some(value) = count_str_fast(arg) {
-            unsafe { drop_args(args, argc) };
-            return give(value);
-        }
-    }
-    unsafe { prim_call(9, args, argc, path, path_len, line, col) }
+    // Safety: the caller guarantees validity (see module docs).
+    count_worker(
+        unsafe { take_args(args, argc) },
+        &unsafe { text(path, path_len) },
+        line,
+        col,
+    )
 }
 
 /// `nth` with a native string fast path (one closed-set
@@ -418,31 +378,13 @@ pub unsafe extern "C" fn rt_nth(
     line: u32,
     col: u32,
 ) -> *mut Value {
-    if argc == 2 || argc == 3 {
-        // The borrows end inside the block (the outcome is owned),
-        // so the boxes free after.
-        let fast = {
-            // Safety: `argc` valid boxes (see module docs).
-            let items = unsafe { std::slice::from_raw_parts(args, argc) };
-            // Safety: each box is valid (see module docs).
-            let coll = unsafe { &*items[0] };
-            let idx = unsafe { &*items[1] };
-            let not_found = if argc == 3 {
-                Some(unsafe { &*items[2] })
-            } else {
-                None
-            };
-            nth_str_fast(coll, idx, not_found)
-        };
-        if let Some(outcome) = fast {
-            unsafe { drop_args(args, argc) };
-            return match outcome {
-                Ok(value) => give(value),
-                Err(err) => fail(&unsafe { text(path, path_len) }, line, col, &err),
-            };
-        }
-    }
-    unsafe { prim_call(10, args, argc, path, path_len, line, col) }
+    // Safety: the caller guarantees validity (see module docs).
+    nth_worker(
+        unsafe { take_args(args, argc) },
+        &unsafe { text(path, path_len) },
+        line,
+        col,
+    )
 }
 
 /// Borrow-test a box for the unboxed-i64 path: `1` when the box

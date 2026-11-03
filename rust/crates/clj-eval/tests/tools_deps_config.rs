@@ -1750,13 +1750,9 @@ fn save_env(name: &str) -> Option<String> {
 
 /// Restore an env var to a saved value (or unset it).
 fn restore_env(name: &str, saved: Option<String>) {
-    // SAFETY: single-threaded within this test; every mutated var
-    // is restored before it returns.
-    unsafe {
-        match saved {
-            Some(v) => std::env::set_var(name, v),
-            None => std::env::remove_var(name),
-        }
+    match saved {
+        Some(v) => set_env(name, &v),
+        None => unset_env(name),
     }
 }
 

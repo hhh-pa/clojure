@@ -1512,14 +1512,24 @@ fn save_env(name: &str) -> Option<String> {
 
 /// Restore an env var to a saved value (or unset it).
 fn restore_env(name: &str, saved: Option<String>) {
+    match saved {
+        Some(v) => set_env(name, &v),
+        None => unset_env(name),
+    }
+}
+
+/// Set an env var (single boundary block for sets).
+fn set_env(name: &str, val: &str) {
     // SAFETY: single-threaded within this test; every mutated var
     // is restored before it returns.
-    unsafe {
-        match saved {
-            Some(v) => std::env::set_var(name, v),
-            None => std::env::remove_var(name),
-        }
-    }
+    unsafe { std::env::set_var(name, val) };
+}
+
+/// Unset an env var (single boundary block for unsets).
+fn unset_env(name: &str) {
+    // SAFETY: single-threaded within this test; every mutated var
+    // is restored before it returns.
+    unsafe { std::env::remove_var(name) };
 }
 
 /// Panic-safe env restore for the serial test: dropping the

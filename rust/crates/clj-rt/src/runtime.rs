@@ -24,13 +24,15 @@
 //! (That single-lock argument is the whole model: there is no lock
 //! ordering to check, so a loom model would be vacuous.)
 
+use std::ffi::CStr;
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::ptr;
 use std::sync::{Arc, LazyLock, Mutex};
 
 use clj_eval::coll::{nth_str, str_utf16_len};
 use clj_eval::core::nth_index;
 use clj_eval::{Evaluator, NativeError, NativeImpl, as_native, boot};
-use clj_value::{ThrowClass, Value, print_to_string};
+use clj_value::{Keyword, List, ThrowClass, Value, Vector, print_to_string};
 
 /// `clojure.core` names in [`Prim`](clj_eval::Prim) declaration order: the table
 /// index IS the discriminant (`prim as usize`). The order test
@@ -204,15 +206,142 @@ pub(crate) fn print_join(args: &[Value]) -> String {
         .join(" ")
 }
 
+/// Box a fresh owned value for the caller.
+pub(crate) fn give(value: Value) -> *mut Value {
+    Box::into_raw(Box::new(value))
+}
+
+/// The fallible-helper failure: print `path:line:col: Class:
+/// message` and return null (the generated code null-checks and
+/// exits 1).
+pub(crate) fn fail(path: &str, line: u32, col: u32, err: &NativeError) -> *mut Value {
+    eprintln!("{}", error_line(path, line, col, err));
+    ptr::null_mut()
+}
+
+/// The shared primitive body over owned values: call the shared
+/// native, box the result — or fail (the shims take the boxes,
+/// this decides; every `def_prim` shim funnels through here).
+pub(crate) fn prim_worker(
+    index: usize,
+    owned: Vec<Value>,
+    path: &str,
+    line: u32,
+    col: u32,
+) -> *mut Value {
+    match call_prim(index, owned) {
+        Ok(value) => give(value),
+        Err(err) => fail(path, line, col, &err),
+    }
+}
+
+/// `count` over owned values: a single string arg counts
+/// natively, every other shape delegates to the shared native
+/// (the shim takes the boxes and borrows the path; the owned
+/// boxes drop on the fast arm after the result computes).
+pub(crate) fn count_worker(owned: Vec<Value>, path: &str, line: u32, col: u32) -> *mut Value {
+    let fast = match owned.as_slice() {
+        [arg] => count_str_fast(arg),
+        _ => None,
+    };
+    match fast {
+        Some(value) => give(value),
+        None => prim_worker(9, owned, path, line, col),
+    }
+}
+
+/// `nth` over owned values: a string collection reads natively,
+/// every other shape delegates (same contract as
+/// [`count_worker`]; the `not-found` borrow rides the slice
+/// pattern, so no arity recheck).
+pub(crate) fn nth_worker(owned: Vec<Value>, path: &str, line: u32, col: u32) -> *mut Value {
+    let fast = match owned.as_slice() {
+        [coll, idx] => nth_str_fast(coll, idx, None),
+        [coll, idx, nf] => nth_str_fast(coll, idx, Some(nf)),
+        _ => None,
+    };
+    match fast {
+        Some(Ok(value)) => give(value),
+        Some(Err(err)) => fail(path, line, col, &err),
+        None => prim_worker(10, owned, path, line, col),
+    }
+}
+
+/// The `*command-line-args*` value over borrowed C strings:
+/// `argv[0]` already skipped by the shim; no entries is nil,
+/// else a list of lossy-decoded strings (the JVM shape).
+pub(crate) fn argv_worker(entries: &[&CStr]) -> *mut Value {
+    let mut items = Vec::new();
+    for entry in entries {
+        let text = entry.to_string_lossy().into_owned();
+        items.push(Value::Str(Arc::from(text.as_str())));
+    }
+    if items.is_empty() {
+        give(Value::Nil)
+    } else {
+        give(Value::List(List::from_vec(items)))
+    }
+}
+
+/// Push `elem` onto `old`: a vector grows in place, anything
+/// else degrades to a fresh single-element vector (a non-vector
+/// `vec` is a caller bug — the degrade keeps the line
+/// meaningful).
+pub(crate) fn vec_push_worker(old: Value, elem: Value) -> Value {
+    match old {
+        Value::Vector(items) => Value::Vector(items.push_back(elem)),
+        _ => Value::Vector(Vector::from_vec(vec![elem])),
+    }
+}
+
+/// One keyword box over decoded parts (`None` is unqualified).
+pub(crate) fn keyword_worker(name: &str, ns: Option<&str>) -> *mut Value {
+    give(Value::Keyword(Keyword::new(ns, name)))
+}
+
+/// One string box over a decoded byte string.
+pub(crate) fn str_worker(text: &str) -> *mut Value {
+    give(Value::Str(Arc::from(text)))
+}
+
+/// The `print` intrinsic over owned values: space-joined
+/// rendering with NO trailing newline, stdout flushed, nil.
+pub(crate) fn print_worker(owned: &[Value]) -> *mut Value {
+    print!("{}", print_join(owned));
+    let _ = std::io::Write::flush(&mut std::io::stdout());
+    give(Value::Nil)
+}
+
+/// Clone a borrowed box into a fresh owned box.
+pub(crate) fn clone_worker(value: &Value) -> *mut Value {
+    give((*value).clone())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        PRIM_NAMES, RUNTIME, call_prim, catch_panic, count_str_fast, error_line, is_int_flag,
-        nth_str_fast, print_join, unbox_int,
+        PRIM_NAMES, RUNTIME, argv_worker, call_prim, catch_panic, clone_worker, count_str_fast,
+        count_worker, error_line, is_int_flag, keyword_worker, nth_str_fast, nth_worker,
+        prim_worker, print_join, print_worker, str_worker, unbox_int, vec_push_worker,
     };
     use clj_eval::{NativeError, Prim};
-    use clj_value::{ThrowClass, Value};
+    use clj_value::{ThrowClass, Value, print_to_string};
     use std::panic::AssertUnwindSafe;
+
+    /// Take a worker return back (frees the box).
+    ///
+    /// # Safety
+    ///
+    /// `ptr` must be a non-null box from a worker return.
+    unsafe fn unbox(ptr: *mut Value) -> Value {
+        unsafe { *Box::from_raw(ptr) }
+    }
+
+    /// Render a worker return to its `print` string (frees the box).
+    fn render(ptr: *mut Value) -> String {
+        let value = unsafe { unbox(ptr) };
+        print_to_string(&value)
+    }
 
     #[test]
     fn prim_names_follow_prim_order() {
@@ -402,6 +531,96 @@ mod tests {
         assert_eq!(unbox_int(&Value::Str("x".into())), 0);
         assert_eq!(unbox_int(&Value::Bool(true)), 0);
         assert_eq!(unbox_int(&Value::Nil), 0);
+    }
+
+    #[test]
+    fn prim_worker_dispatches_and_fails_null() {
+        let out = prim_worker(
+            Prim::Add as usize,
+            vec![Value::Int(1), Value::Int(2)],
+            "f.clj",
+            3,
+            9,
+        );
+        assert_eq!(render(out), "3");
+        let out = prim_worker(Prim::Sub as usize, Vec::new(), "f.clj", 3, 9);
+        assert!(out.is_null());
+    }
+
+    #[test]
+    fn count_worker_fast_and_slow() {
+        let out = count_worker(vec![Value::Str("héllo".into())], "f.clj", 3, 9);
+        assert_eq!(render(out), "5");
+        let out = count_worker(vec![Value::Int(1), Value::Int(2)], "f.clj", 3, 9);
+        assert!(out.is_null());
+    }
+
+    #[test]
+    fn nth_worker_fast_slow_and_fail() {
+        let out = nth_worker(
+            vec![Value::Str("hello".into()), Value::Int(1)],
+            "f.clj",
+            3,
+            9,
+        );
+        assert_eq!(render(out), "e");
+        let out = nth_worker(
+            vec![Value::Str("hello".into()), Value::Int(9)],
+            "f.clj",
+            3,
+            9,
+        );
+        assert!(out.is_null());
+        let out = nth_worker(vec![Value::Int(1)], "f.clj", 3, 9);
+        assert!(out.is_null());
+    }
+
+    #[test]
+    fn argv_worker_shapes() {
+        // Post-skip entries (the shim drops argv[0]); empty is nil.
+        let a = c"a";
+        let b = c"b";
+        let bad = c"a\xffb";
+        assert_eq!(render(argv_worker(&[])), "nil");
+        assert_eq!(render(argv_worker(&[a, b])), "(a b)");
+        assert_eq!(render(argv_worker(&[bad])), "(a�b)");
+    }
+
+    #[test]
+    fn vec_push_worker_pushes_and_degrades() {
+        use clj_value::Vector;
+        let out = vec_push_worker(
+            Value::Vector(Vector::from_vec(vec![Value::Int(1)])),
+            Value::Int(2),
+        );
+        assert_eq!(print_to_string(&out), "[1 2]");
+        let out = vec_push_worker(Value::Int(9), Value::Int(1));
+        assert_eq!(print_to_string(&out), "[1]");
+    }
+
+    #[test]
+    fn keyword_worker_plain_and_namespaced() {
+        assert_eq!(render(keyword_worker("miss", None)), ":miss");
+        assert_eq!(render(keyword_worker("id", Some("user"))), ":user/id");
+    }
+
+    #[test]
+    fn str_worker_boxes() {
+        assert_eq!(render(str_worker("héllo")), "héllo");
+        assert_eq!(render(str_worker("")), "");
+    }
+
+    #[test]
+    fn clone_worker_copies() {
+        let out = clone_worker(&Value::Str("v".into()));
+        assert_eq!(render(out), "v");
+    }
+
+    #[test]
+    fn print_worker_renders_and_nils() {
+        // stdout goes to the test capture; the return is nil.
+        let out = print_worker(&[Value::Int(1), Value::Str("a b".into()), Value::Bool(true)]);
+        assert_eq!(render(out), "nil");
     }
 
     #[test]
