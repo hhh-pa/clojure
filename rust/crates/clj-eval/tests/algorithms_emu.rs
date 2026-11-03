@@ -516,6 +516,10 @@ fn parse_long_radix() {
     for bad in [
         r#"(Long/parseLong "9223372036854775808" 10)"#,
         r#"(Long/parseLong "-9223372036854775809" 10)"#,
+        // Twenty digits overflow before the multiply (the
+        // `multmin` guard), on both sides of zero.
+        r#"(Long/parseLong "99999999999999999999" 10)"#,
+        r#"(Long/parseLong "-99999999999999999999" 10)"#,
         r#"(Long/parseLong "" 10)"#,
         r#"(Long/parseLong "-" 10)"#,
         r#"(Long/parseLong "+" 10)"#,
@@ -1013,6 +1017,16 @@ fn random_seeded_streams() {
         ),
         "[5 0 5 0 2]"
     );
+    // The rejection loop re-draws: seed 0's first two draws
+    // reject (bound 2^30+7 admits barely half the range), so
+    // the stream answers the third draw's value.
+    assert_eq!(
+        run(
+            &mut eval,
+            "(let [r (java.util.Random. 0)] (.nextInt r 1073741831))"
+        ),
+        "516548029"
+    );
     assert_eq!(
         run(
             &mut eval,
@@ -1121,6 +1135,14 @@ fn random_shapes_and_errors() {
         uncaught(
             &mut eval,
             "(let [r (java.util.Random. 1)] (.nextBytes r (int-array 2)))"
+        ),
+        "java.lang.IllegalArgumentException | No matching method nextBytes found taking 1 args for class java.util.Random"
+    );
+    // Non-array destinations miss the same way.
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(let [r (java.util.Random. 1)] (.nextBytes r \"x\"))"
         ),
         "java.lang.IllegalArgumentException | No matching method nextBytes found taking 1 args for class java.util.Random"
     );
@@ -3680,6 +3702,13 @@ fn str_last_index_of() {
                   (clojure.string/last-index-of \"https://x/a.jpg\" \"/\")])"
         ),
         "[3 1 -1 9]"
+    );
+    // A mistyped from-index is the arg error, like `indexOf`.
+    assert!(
+        uncaught(&mut eval, r#"(.lastIndexOf "abc" "b" nil)"#).contains("NullPointerException")
+    );
+    assert!(
+        uncaught(&mut eval, r#"(.lastIndexOf "abc" "b" "x")"#).contains("IllegalArgumentException")
     );
 }
 

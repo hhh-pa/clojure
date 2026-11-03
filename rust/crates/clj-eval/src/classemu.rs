@@ -7192,9 +7192,7 @@ fn surface_gated_bigdec(
         ("divide", 1 | 2) => gated_bigdec_div(target, rest),
         ("sqrt", 1) => gated_bigdec_sqrt(target, rest),
         ("setScale", 2) => gated_bigdec_setscale(target, rest),
-        ("toPlainString" | "doubleValue" | "toBigInteger" | "toString", 0) => {
-            gated_bigdec_conv(meth, target)
-        }
+        ("toPlainString" | "doubleValue" | "toBigInteger", 0) => gated_bigdec_conv(meth, target),
         _ => None,
     }
 }
@@ -7290,14 +7288,16 @@ fn gated_bigdec_setscale(target: &Value, rest: &[Value]) -> Option<Result<Value,
     )
 }
 
-/// `toPlainString`/`doubleValue`/`toBigInteger`/`toString`.
+/// `toPlainString`/`doubleValue`/`toBigInteger` (`toString`
+/// rides the universal gate, like `StringBuilder`).
 fn gated_bigdec_conv(meth: &str, target: &Value) -> Option<Result<Value, NativeError>> {
     let x = bigdec_self(target)?;
     Some(Ok(match meth {
         "toPlainString" => Value::Str(Arc::from(x.to_plain_string().as_str())),
         "doubleValue" => Value::Double(x.to_f64()),
-        "toBigInteger" => Value::BigInteger(Arc::new(x.to_bigint_trunc())),
-        _ => Value::Str(Arc::from(x.to_bigdec_string().as_str())),
+        // The caller admits only the three conversions, so the
+        // wildcard is `toBigInteger`.
+        _ => Value::BigInteger(Arc::new(x.to_bigint_trunc())),
     }))
 }
 

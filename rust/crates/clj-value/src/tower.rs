@@ -1000,8 +1000,10 @@ impl BigDec {
     fn sqrt_guess(v: &Self) -> Self {
         let g = v.to_f64().sqrt();
         // Nested (not a let-chain): MSRV 1.85 predates let-chains.
+        // `value_of_f64` rejects the non-finite roots, so only
+        // the zero root (double underflow) skips the attempt.
         #[allow(clippy::collapsible_if)]
-        if g.is_finite() && g != 0.0 {
+        if g != 0.0 {
             if let Ok(x) = Self::value_of_f64(g) {
                 return x;
             }
@@ -1461,6 +1463,35 @@ mod tests {
         assert_eq!(
             BigDec::parse("2").unwrap().sqrt_mc(&unlim).unwrap_err(),
             NON_TERMINATING
+        );
+    }
+
+    /// `sqrt(mc)` (#205): double overflow/underflow falls back to
+    /// the magnitude guess, then Newton still lands correctly
+    /// rounded (leading digits pinned, not the full expansion).
+    #[test]
+    fn sqrt_double_overflow_falls_back() {
+        let mc = MathContext::new(50, RoundingMode::HalfEven);
+        let huge = BigDec::parse("1.5E+320")
+            .unwrap()
+            .sqrt_mc(&mc)
+            .unwrap()
+            .to_bigdec_string();
+        assert!(huge.starts_with("1.224744871391589"), "{huge}");
+        assert!(huge.ends_with("E+160"), "{huge}");
+        let tiny = BigDec::parse("2E-400")
+            .unwrap()
+            .sqrt_mc(&mc)
+            .unwrap()
+            .to_bigdec_string();
+        assert!(tiny.starts_with("0.0"), "{tiny}");
+        assert!(tiny.contains("14142135623730950"), "{tiny}");
+        // The fallback itself, pinned directly: double
+        // overflow guesses 10^half-magnitude (Newton past
+        // this point is the div-round extreme-scale issue).
+        assert_eq!(
+            BigDec::sqrt_guess(&BigDec::parse("2E+400").unwrap()).to_bigdec_string(),
+            "1E+200"
         );
     }
 }
