@@ -1435,6 +1435,39 @@ impl Env {
         }
     }
 
+    /// Rebind this frame's slots in place for `recur` when no
+    /// observer can tell: the frame must be the flat all-symbols
+    /// frame over `outer` (direct child at `outer`'s length — a
+    /// trailing destructured frame in a nested init chain can hold
+    /// the same slot count by coincidence, so the length check
+    /// alone is unsound), with shared, uniquely owned slots of
+    /// matching length. Any closure capturing this env — or a child
+    /// of it, whose parent chain shares this frame — bumps the
+    /// count and forces the fresh-frame fallback, preserving the
+    /// copy-on-`recur` promise exactly. Anything unqualified
+    /// returns the values for the caller to bind fresh.
+    pub fn try_rebind(&mut self, outer: &Env, values: Vec<Value>) -> Result<(), Vec<Value>> {
+        if let Some(frame) = Arc::get_mut(&mut self.frame) {
+            let flat_over_outer = match &frame.parent {
+                Some(parent) => {
+                    Arc::ptr_eq(&parent.frame, &outer.frame) && frame.base == outer.len()
+                }
+                None => false,
+            };
+            if flat_over_outer {
+                if let Slots::Shared(slots) = &mut frame.slots {
+                    if let Some(dst) = Arc::get_mut(slots) {
+                        if dst.len() == values.len() {
+                            dst.clone_from_slice(&values);
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+        }
+        Err(values)
+    }
+
     /// Extend with one fresh slot (the single-name `bind_pattern`
     /// fast path — no `Vec` at all).
     #[must_use]

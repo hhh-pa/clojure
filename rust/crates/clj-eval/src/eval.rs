@@ -1654,15 +1654,21 @@ impl Evaluator {
             let value = self.eval(init, &env)?;
             env = self.bind_pattern(pat, value, &env)?;
         }
-        // The patterns, collected once (a fresh frame per iteration,
-        // like the copy it replaces, so closures from this iteration
-        // keep observing the old frame).
+        // The patterns, collected once (each iteration rebinds in
+        // place when unobserved, else binds a fresh frame, so
+        // closures from this iteration keep observing the old
+        // frame).
         let pats: SmallVec<[&Pattern; 8]> = bindings.iter().map(|(pat, _)| pat).collect();
         loop {
             match self.eval_body(body, &env) {
                 Ok(v) => return Ok(v),
                 Err(Signal::Recur(values)) => {
-                    env = self.bind_values(&pats, values, &outer)?;
+                    // Rebind in place when unobserved (#221 R2: no
+                    // allocation on the hot path); a captured frame
+                    // falls back to the fresh-frame copy-on-`recur`.
+                    if let Err(values) = env.try_rebind(&outer, values) {
+                        env = self.bind_values(&pats, values, &outer)?;
+                    }
                 }
                 Err(signal) => return Err(signal),
             }
@@ -2170,9 +2176,10 @@ impl Evaluator {
         if let Some(rest) = rest {
             values.push(rest);
         }
-        // Bind through `bind_values` (initial and `recur` alike). A
-        // fresh frame per `recur` keeps the old copy-on-recur
-        // promise: closures from this iteration keep the old frame.
+        // Bind through `bind_values` initially; each `recur`
+        // rebinds in place when the frame is unobserved, else binds
+        // fresh — the copy-on-`recur` promise: closures from this
+        // iteration keep the old frame.
         let outer = closure.env.clone();
         // The pattern list borrows the arity (no per-call `Vec`;
         // its length is bounded by the parameter count).
@@ -2182,7 +2189,11 @@ impl Evaluator {
             match self.eval_body(&arity.body, &frame) {
                 Ok(v) => return Ok(v),
                 Err(Signal::Recur(values)) => {
-                    frame = self.bind_values(&pats, values, &outer)?;
+                    // In-place rebind when unobserved (#221 R2);
+                    // captured frames keep the fresh-frame promise.
+                    if let Err(values) = frame.try_rebind(&outer, values) {
+                        frame = self.bind_values(&pats, values, &outer)?;
+                    }
                 }
                 Err(signal) => return Err(signal),
             }
