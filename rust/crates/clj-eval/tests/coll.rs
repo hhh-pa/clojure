@@ -2683,3 +2683,124 @@ fn conj_bang_is_variadic_201() {
         "#{1 2 3}"
     );
 }
+
+/// #227: owned `conj`/`assoc` chains never clobber a live alias —
+/// the old version reads its old items however the new version is
+/// built (reduce, into, multi-arg, loop).
+#[test]
+fn owned_conj_assoc_never_clobber_live_alias() {
+    let mut eval = boot();
+    // Vectors (packed ints and generic).
+    assert_eq!(
+        run_last(&mut eval, "(let [v [1 2] w (conj v 3)] [v w])"),
+        "[[1 2] [1 2 3]]"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(let [v [1 :k] w (conj v 3 4)] [v w])"),
+        "[[1 :k] [1 :k 3 4]]"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(let [v [1 2] w (assoc v 0 9 1 8)] [v w])"),
+        "[[1 2] [9 8]]"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [v [1 2] w (into v [3 4]) u (reduce conj v [5 6])] [v w u])"
+        ),
+        "[[1 2] [1 2 3 4] [1 2 5 6]]"
+    );
+    // Shaped maps (same-key and new-key).
+    assert_eq!(
+        run_last(&mut eval, "(let [m {:a 1} n (assoc m :a 2 :b 3)] [m n])"),
+        "[{:a 1} {:a 2, :b 3}]"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(let [m {:a 1} n (conj m [:b 2])] [m n])"),
+        "[{:a 1} {:a 1, :b 2}]"
+    );
+    // Hash maps (past the shaped cap).
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [m (into {} (map (fn [i] [i i]) (range 20))) n (assoc m 0 99 21 21)] [(get m 0) (get n 0) (get n 21) (count m) (count n)])"
+        ),
+        "[0 99 21 20 21]"
+    );
+    // Sets.
+    assert_eq!(
+        run_last(&mut eval, "(let [s #{1} t (conj s 2 3)] [s t])"),
+        "[#{1} #{1 2 3}]"
+    );
+    // Fresh answers are never `identical?` to a live input.
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [v [1] m {:a 1}] [(identical? v (conj v 2)) (identical? m (assoc m :a 1))])"
+        ),
+        "[false false]"
+    );
+}
+
+/// #227: owned-churn smoke at scale — reduce/into/merge/merge-with
+/// over thousands of items answer exactly.
+#[test]
+fn owned_churn_scale_smoke() {
+    let mut eval = boot();
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [v (reduce conj [] (range 10000))] [(count v) (peek v) (nth v 1234)])"
+        ),
+        "[10000 9999 1234]"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [v (into [] (range 10000))] [(count v) (peek v)])"
+        ),
+        "[10000 9999]"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [m (into {} (map (fn [i] [i (* i 2)]) (range 5000)))] [(count m) (get m 4999)])"
+        ),
+        "[5000 9998]"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [m (merge {:a 1} {:b 2} {:a 3 :c 4})] [(:a m) (:b m) (:c m)])"
+        ),
+        "[3 2 4]"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [m (merge-with + {:a 1 :b 1} {:a 2} {:b 3})] [(:a m) (:b m)])"
+        ),
+        "[3 4]"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [v (transduce (map inc) conj [] (range 5000))] [(count v) (nth v 0) (peek v)])"
+        ),
+        "[5000 1 5000]"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [m (frequencies (range 1000))] [(count m) (get m 999)])"
+        ),
+        "[1000 1]"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [g (group-by #(mod % 10) (range 100))] [(count g) (count (get g 0))])"
+        ),
+        "[10 10]"
+    );
+}

@@ -35,7 +35,7 @@ use crate::eval::Evaluator;
 use crate::ext::{NativeFn, NativeImpl};
 use crate::lazy::take_walk_coll;
 use crate::ns::{NativeFnPtr, check_arity, deref_core, signal_to_native};
-use crate::seqs::call_checked;
+use crate::seqs::{call_checked, call_checked_owned};
 
 /// The `clojure.core` transducer natives plus the private helper
 /// (installed by [`boot`](crate::ns::boot)).
@@ -312,7 +312,13 @@ pub(crate) fn transduce_into(
     drop(coll);
     while !matches!(seq, Value::Nil) {
         let head = crate::lazy::first_value(eval, &seq).map_err(signal_to_native)?;
-        acc = call_checked(eval, &step, &[acc, head])?;
+        // Owned step call (#227): the accumulator moves through,
+        // so a uniquely-owned acc stays unique into an owned
+        // `conj` instead of pinning shared behind the borrow.
+        let mut step_args = SmallVec::new();
+        step_args.push(acc);
+        step_args.push(head);
+        acc = call_checked_owned(eval, &step, step_args)?;
         if let Some(inner) = as_reduced(&acc) {
             acc = inner.clone();
             break;

@@ -390,11 +390,6 @@ fn pair_err() -> NativeError {
     )
 }
 
-/// Conj onto a persistent map (`APersistentMap.cons`).
-fn conj_map(eval: &mut Evaluator, m: &Map, x: &Value) -> Result<Value, NativeError> {
-    Ok(Value::Map(conj_map_into(eval, m, x)?))
-}
-
 /// Conj onto a sorted persistent map (split from
 /// [`conj_map_into`] for the complexity budget).
 fn conj_map_into_sorted(eval: &mut Evaluator, m: &Map, x: &Value) -> Result<Map, NativeError> {
@@ -411,20 +406,23 @@ fn conj_map_into_sorted(eval: &mut Evaluator, m: &Map, x: &Value) -> Result<Map,
     }
 }
 
-/// Conj onto a persistent map, answering the map (records rewrap
-/// the answer around their content).
-pub(crate) fn conj_map_into(eval: &mut Evaluator, m: &Map, x: &Value) -> Result<Map, NativeError> {
+/// Conj onto a persistent map (`APersistentMap.cons`), answering
+/// the map (records rewrap the answer around their content).
+/// Owned `m` (#227): multi-step callers move their accumulator
+/// through, so each step after the first mutates uniquely-owned
+/// storage in place instead of path-copying per step.
+pub(crate) fn conj_map_into(eval: &mut Evaluator, m: Map, x: &Value) -> Result<Map, NativeError> {
     if m.is_sorted() {
-        return conj_map_into_sorted(eval, m, x);
+        return conj_map_into_sorted(eval, &m, x);
     }
     match map_conj_plan(eval, x)? {
-        MapConjPlan::Nil => Ok(m.clone()),
+        MapConjPlan::Nil => Ok(m),
         MapConjPlan::Pair(k, v) => {
             let k = crate::lazy::realize_key(eval, &k).map_err(signal_to_native)?;
-            Ok(m.clone().insert(k, v))
+            Ok(m.insert(k, v))
         }
         MapConjPlan::Entries(entries) => {
-            let mut out = m.clone();
+            let mut out = m;
             for (k, v) in entries {
                 let k = crate::lazy::realize_key(eval, &k).map_err(signal_to_native)?;
                 out = out.insert(k, v);
@@ -452,18 +450,21 @@ fn subvector_conj(sv: &SubVectorValue, x: Value) -> Value {
 /// Conj onto a primitive vector coerces through the type (the
 /// `ArrayManager` rule — split from [`conj_one`] for the
 /// complexity budget).
-fn conj_pv(eval: &mut Evaluator, p: &PrimitiveVector, x: Value) -> Result<Value, NativeError> {
-    Ok(Value::PrimitiveVector(p.clone().push_back(
-        crate::arrays::vector_coerce(eval, p.elem(), &x)?,
-    )))
+fn conj_pv(eval: &mut Evaluator, p: PrimitiveVector, x: Value) -> Result<Value, NativeError> {
+    let co = crate::arrays::vector_coerce(eval, p.elem(), &x)?;
+    Ok(Value::PrimitiveVector(p.push_back(co)))
 }
 
 /// `RT.conj` one element (`conj`/`into` share this).
-fn conj_one(eval: &mut Evaluator, coll: &Value, x: Value) -> Result<Value, NativeError> {
+/// Owned `coll` (#227, like `assoc3` in #215): multi-step callers
+/// move their accumulator through, so each step after the first
+/// mutates uniquely-owned storage in place instead of
+/// path-copying per step.
+fn conj_one(eval: &mut Evaluator, coll: Value, x: Value) -> Result<Value, NativeError> {
     match coll {
         Value::Nil => Ok(Value::List(List::from_vec(vec![x]))),
-        Value::List(l) => Ok(Value::List(l.clone().push_front(x))),
-        Value::Vector(v) => Ok(Value::Vector(v.clone().push_back(x))),
+        Value::List(l) => Ok(Value::List(l.push_front(x))),
+        Value::Vector(v) => Ok(Value::Vector(v.push_back(x))),
         // Primitive vectors coerce through the type (the
         // `ArrayManager` rule — S15 oracles `f-conj-bad`,
         // `j-byte-vec`, `j-bool-num`, `j-conj-nil`).
@@ -471,28 +472,31 @@ fn conj_one(eval: &mut Evaluator, coll: &Value, x: Value) -> Result<Value, Nativ
         // Conj onto an entry appends like its 2-vector (Oracle FX2
         // `conj`, `merge-entry`).
         Value::MapEntry { key, val, .. } => {
-            let tmp = Vector::from_vec(vec![(**key).clone(), (**val).clone()]);
+            let tmp = Vector::from_vec(vec![*key, *val]);
             Ok(Value::Vector(tmp.push_back(x)))
         }
-        Value::Map(m) => conj_map(eval, m, &x),
+        Value::Map(m) => Ok(Value::Map(conj_map_into(eval, m, &x)?)),
         // Records conj through their content map and stay records
         // (oracle `h-conj-vec`, `h-conj-map-type`); structs
         // likewise (S12); anything else host falls to the
         // collection cast (oracle `i-conj`).
-        Value::HostType(_) => conj_maplike(eval, coll, &x),
-        Value::Set(s) if s.is_sorted() => Ok(Value::Set(sorted_conj_set(eval, s, x)?)),
+        Value::HostType(h) => {
+            let coll = Value::HostType(h);
+            conj_maplike(eval, coll, &x)
+        }
+        Value::Set(s) if s.is_sorted() => Ok(Value::Set(sorted_conj_set(eval, &s, x)?)),
         Value::Set(s) => {
             let x = crate::lazy::realize_key(eval, &x).map_err(signal_to_native)?;
-            Ok(Value::Set(s.clone().insert(x)))
+            Ok(Value::Set(s.insert(x)))
         }
-        _ => {
-            if let Some(sv) = as_subvector(coll) {
+        other => {
+            if let Some(sv) = as_subvector(&other) {
                 return Ok(subvector_conj(sv, x));
             }
-            if is_seq_value(coll) {
-                return Ok(Value::Extension(Arc::new(ConsValue::new(x, coll.clone()))));
+            if is_seq_value(&other) {
+                return Ok(Value::Extension(Arc::new(ConsValue::new(x, other))));
             }
-            Err(cce_err(coll, "clojure.lang.IPersistentCollection"))
+            Err(cce_err(&other, "clojure.lang.IPersistentCollection"))
         }
     }
 }
@@ -500,14 +504,16 @@ fn conj_one(eval: &mut Evaluator, coll: &Value, x: Value) -> Result<Value, Nativ
 /// Conj onto a map-like host value (split from [`conj_one`] for
 /// the complexity budget): through the content map, rewrapped so
 /// the answer stays a record (or a struct, S12); anything else
-/// host takes the collection cast.
-fn conj_maplike(eval: &mut Evaluator, coll: &Value, x: &Value) -> Result<Value, NativeError> {
-    match crate::types::maplike_inst(coll) {
+/// host takes the collection cast. The content still clones per
+/// step (it borrows out of the owned host), so record `conj`
+/// chains keep their first-step path copy.
+fn conj_maplike(eval: &mut Evaluator, coll: Value, x: &Value) -> Result<Value, NativeError> {
+    match crate::types::maplike_inst(&coll) {
         Some(i) => Ok(crate::types::rewrap_maplike(
             i,
-            conj_map_into(eval, &i.content, x)?,
+            conj_map_into(eval, i.content.clone(), x)?,
         )),
-        None => Err(cce_err(coll, "clojure.lang.IPersistentCollection")),
+        None => Err(cce_err(&coll, "clojure.lang.IPersistentCollection")),
     }
 }
 
@@ -760,8 +766,11 @@ pub(crate) fn count_of(eval: &mut Evaluator, v: &Value) -> Result<i64, NativeErr
 
 /// Plain `into` (`reduce conj`; the transient/kvreduce fast paths
 /// are unobservable — same values, same errors).
-fn into_inner(eval: &mut Evaluator, to: &Value, from: Value) -> Result<Value, NativeError> {
-    let mut acc = to.clone();
+/// Owned `to` (#227): the accumulator moves through [`conj_one`],
+/// so each step after the first mutates uniquely-owned storage in
+/// place instead of path-copying per step.
+fn into_inner(eval: &mut Evaluator, to: Value, from: Value) -> Result<Value, NativeError> {
+    let mut acc = to;
     let mut cur = seq_value(eval, &from).map_err(signal_to_native)?;
     // Owned callers nilled the arg slot: dropping the head here
     // frees memoized chunks as the walk advances (#221).
@@ -771,17 +780,18 @@ fn into_inner(eval: &mut Evaluator, to: &Value, from: Value) -> Result<Value, Na
             return Ok(acc);
         }
         let head = first_value(eval, &cur).map_err(signal_to_native)?;
-        acc = conj_one(eval, &acc, head)?;
+        acc = conj_one(eval, acc, head)?;
         cur = next_value(eval, &cur).map_err(signal_to_native)?;
     }
 }
 
 /// Two-way `merge` (`([x y] (if (and x y) (into x y) (or x y)))`).
-fn merge2(eval: &mut Evaluator, x: &Value, y: &Value) -> Result<Value, NativeError> {
+/// Owned `x` (#227): the accumulator moves through [`into_inner`].
+fn merge2(eval: &mut Evaluator, x: Value, y: &Value) -> Result<Value, NativeError> {
     if x.is_truthy() && y.is_truthy() {
         into_inner(eval, x, y.clone())
     } else if x.is_truthy() {
-        Ok(x.clone())
+        Ok(x)
     } else {
         Ok(y.clone())
     }
@@ -823,10 +833,10 @@ fn merge_with3_early(x: &Value, y: &Value) -> Option<Value> {
 fn merge_with3_map(
     eval: &mut Evaluator,
     f: &Value,
-    x: &Value,
+    x: Value,
     ym: &Map,
 ) -> Result<Value, NativeError> {
-    let mut m = x.clone();
+    let mut m = x;
     for (k, v) in ym.iter() {
         m = merge_kv(eval, m, k.clone(), v.clone(), f)?;
     }
@@ -861,10 +871,10 @@ fn merge_with3_indexed_pairs(y: &Value) -> Option<Vec<(Value, Value)>> {
 fn merge_with3_fold_pairs(
     eval: &mut Evaluator,
     f: &Value,
-    x: &Value,
+    x: Value,
     pairs: Vec<(Value, Value)>,
 ) -> Result<Value, NativeError> {
-    let mut m = x.clone();
+    let mut m = x;
     for (k, v) in pairs {
         m = merge_kv(eval, m, k, v, f)?;
     }
@@ -875,13 +885,13 @@ fn merge_with3_fold_pairs(
 fn merge_with3_seq_tail(
     eval: &mut Evaluator,
     f: &Value,
-    x: &Value,
+    x: Value,
     y: &Value,
 ) -> Result<Value, NativeError> {
     // A sequential right-hand side contributes one pair per entry
     // (Oracle FX2 `conj-seq-entries`, `merge-with-entry` CCEs on
     // the `:a` head — entries are real `MapEntry` values now).
-    let mut m = x.clone();
+    let mut m = x;
     let mut cur = seq_value(eval, y).map_err(signal_to_native)?;
     loop {
         if matches!(cur, Value::Nil) {
@@ -896,13 +906,9 @@ fn merge_with3_seq_tail(
     }
 }
 
-fn merge_with3(
-    eval: &mut Evaluator,
-    f: &Value,
-    x: &Value,
-    y: &Value,
-) -> Result<Value, NativeError> {
-    if let Some(v) = merge_with3_early(x, y) {
+/// Owned `x` (#227): the accumulator moves through [`merge_kv`].
+fn merge_with3(eval: &mut Evaluator, f: &Value, x: Value, y: &Value) -> Result<Value, NativeError> {
+    if let Some(v) = merge_with3_early(&x, y) {
         return Ok(v);
     }
     if let Value::Map(ym) = y {
@@ -1171,22 +1177,44 @@ fn native_list_star(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nativ
 }
 
 fn native_conj(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    // Borrow-path compat shim (see [`OwnedNativeImpl`]).
+    native_conj_owned(eval, args.iter().cloned().collect())
+}
+
+pub(crate) fn native_conj_owned(
+    eval: &mut Evaluator,
+    mut args: SmallVec<[Value; 4]>,
+) -> Result<Value, NativeError> {
     if args.is_empty() {
         return Ok(Value::Vector(Vector::from_vec(Vec::new())));
     }
     if args.len() == 1 {
-        return Ok(args[0].clone());
+        return Ok(std::mem::replace(&mut args[0], Value::Nil));
     }
-    let mut acc = args[0].clone();
-    for arg in &args[1..] {
-        acc = conj_one(eval, &acc, arg.clone())?;
+    // Owned accumulator (#227): the coll moves through `conj_one`,
+    // so uniquely-owned chains mutate in place after the first
+    // step instead of path-copying per step.
+    let mut acc = std::mem::replace(&mut args[0], Value::Nil);
+    for arg in args.drain(1..) {
+        acc = conj_one(eval, acc, arg)?;
     }
     Ok(acc)
 }
 
 fn native_assoc(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
-    check_min_arity("clojure.core/assoc", args, 3)?;
-    let mut acc = assoc3(eval, args[0].clone(), &args[1], args[2].clone())?;
+    // Borrow-path compat shim (see [`OwnedNativeImpl`]).
+    native_assoc_owned(eval, args.iter().cloned().collect())
+}
+
+pub(crate) fn native_assoc_owned(
+    eval: &mut Evaluator,
+    mut args: SmallVec<[Value; 4]>,
+) -> Result<Value, NativeError> {
+    check_min_arity("clojure.core/assoc", &args, 3)?;
+    // Owned coll (#227): fresh-arg chains skip even the first
+    // step's path copy (the buffer is the only handle).
+    let coll = std::mem::replace(&mut args[0], Value::Nil);
+    let mut acc = assoc3(eval, coll, &args[1], args[2].clone())?;
     for pair in args[3..].chunks(2) {
         if pair.len() != 2 {
             return Err(NativeError::new(
@@ -1772,9 +1800,9 @@ fn native_merge(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErr
     if args.len() == 1 {
         return Ok(args[0].clone());
     }
-    let mut acc = merge2(eval, &args[0], &args[1])?;
+    let mut acc = merge2(eval, args[0].clone(), &args[1])?;
     for arg in &args[2..] {
-        acc = merge2(eval, &acc, arg)?;
+        acc = merge2(eval, acc, arg)?;
     }
     Ok(acc)
 }
@@ -1787,9 +1815,9 @@ fn native_merge_with(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nati
     if args.len() == 2 {
         return Ok(args[1].clone());
     }
-    let mut acc = merge_with3(eval, &args[0], &args[1], &args[2])?;
+    let mut acc = merge_with3(eval, &args[0], args[1].clone(), &args[2])?;
     for arg in &args[3..] {
-        acc = merge_with3(eval, &args[0], &acc, arg)?;
+        acc = merge_with3(eval, &args[0], acc, arg)?;
     }
     Ok(acc)
 }
@@ -2431,7 +2459,8 @@ pub(crate) fn native_into_owned(
         return crate::xform::into_xform(eval, args[0].clone(), &args[1], from);
     }
     let from = take_walk_coll(&mut args, 1);
-    into_inner(eval, &args[0], from)
+    let to = take_walk_coll(&mut args, 0);
+    into_inner(eval, to, from)
 }
 
 #[allow(clippy::mutable_key_type)]

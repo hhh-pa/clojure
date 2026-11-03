@@ -24,12 +24,13 @@ use crate::error::{NativeError, jvm_class_of};
 use crate::eval::Evaluator;
 use crate::ext::{NativeFn, NativeImpl};
 use crate::lazy::{
-    as_subvector, collect_all, concat_thunk, cycle_thunk, dedupe_thunk, distinct_thunk, drop_value,
-    drop_while_thunk, empty_list_value, filter_thunk, first_value, interleave_thunk,
-    interpose_thunk, iterate_thunk, keep_indexed_thunk, keep_thunk, keys_thunk, map_indexed_thunk,
-    map_thunk, mapcat_thunk, next_value, nthrest_value, partition_all_thunk, partition_by_thunk,
-    partition_thunk, range1, range2, range3, realized_value, reductions_thunk, repeat_thunk,
-    repeatedly_thunk, seq_value, take_nth_thunk, take_thunk, take_walk_coll, take_while_thunk,
+    as_subvector, collect_all, collect_packed, concat_thunk, cycle_thunk, dedupe_thunk,
+    distinct_thunk, drop_value, drop_while_thunk, empty_list_value, filter_thunk, first_value,
+    interleave_thunk, interpose_thunk, iterate_thunk, keep_indexed_thunk, keep_thunk, keys_thunk,
+    map_indexed_thunk, map_thunk, mapcat_thunk, next_value, nthrest_value, partition_all_thunk,
+    partition_by_thunk, partition_thunk, range1, range2, range3, realized_value, reductions_thunk,
+    repeat_thunk, repeatedly_thunk, seq_value, take_nth_thunk, take_thunk, take_walk_coll,
+    take_while_thunk,
 };
 use crate::ns::{NativeFnPtr, check_arity, deref_core, signal_to_native};
 use crate::vars::check_min_arity;
@@ -44,6 +45,20 @@ pub(crate) fn call_checked(
 ) -> Result<Value, NativeError> {
     check_ifn(eval, f).map_err(signal_to_native)?;
     eval.call(f, args).map_err(signal_to_native)
+}
+
+/// [`call_checked`] with an owned arg buffer: accumulator step
+/// calls (`reduce`, transducers) move the accumulator through,
+/// so a uniquely-owned acc stays unique into an owned native
+/// (`conj`) instead of pinning shared behind the borrow (#227).
+/// Anything else borrows the buffer, exactly as before.
+pub(crate) fn call_checked_owned(
+    eval: &mut Evaluator,
+    f: &Value,
+    args: SmallVec<[Value; 4]>,
+) -> Result<Value, NativeError> {
+    check_ifn(eval, f).map_err(signal_to_native)?;
+    eval.call_owned(f, args).map_err(signal_to_native)
 }
 
 /// A fresh [`NativeFn`] value capturing its environment.
@@ -419,7 +434,15 @@ pub(crate) fn native_reduce_owned(
             return Ok(Walk::Continue);
         }
         first = false;
-        acc = call_checked(eval, &f, &[acc.clone(), head.clone()])?;
+        // Owned step call (#227): the accumulator moves through
+        // (no clone, no borrow pin), so a uniquely-owned acc
+        // mutates in place inside an owned `conj` instead of
+        // path-copying per step.
+        let acc_taken = std::mem::replace(&mut acc, Value::Nil);
+        let mut step_args = SmallVec::new();
+        step_args.push(acc_taken);
+        step_args.push(head.clone());
+        acc = call_checked_owned(eval, &f, step_args)?;
         if let Some(inner) = as_reduced(&acc) {
             acc = inner.clone();
             return Ok(Walk::Stop);
@@ -769,8 +792,10 @@ pub(crate) fn native_mapv_owned(
     // advances (#221).
     let inputs: Vec<Value> = args.drain(1..).collect();
     let mapped = map_thunk(args[0].clone(), inputs);
-    let items = collect_all(eval, mapped.clone()).map_err(signal_to_native)?;
-    Ok(Value::Vector(Vector::from_vec(items)))
+    // Packed streaming (#227): no intermediate `Vec<Value>`, and
+    // all-`Int` results freeze to packed storage zero-copy.
+    let vec = collect_packed(eval, mapped).map_err(signal_to_native)?;
+    Ok(Value::Vector(vec))
 }
 
 fn native_filterv(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
@@ -785,8 +810,10 @@ pub(crate) fn native_filterv_owned(
     check_arity("clojure.core/filterv", &args, &[2])?;
     let input = take_walk_coll(&mut args, 1);
     let filtered = filter_thunk(args[0].clone(), input, false);
-    let items = collect_all(eval, filtered.clone()).map_err(signal_to_native)?;
-    Ok(Value::Vector(Vector::from_vec(items)))
+    // Packed streaming (#227): no intermediate `Vec<Value>`, and
+    // all-`Int` results freeze to packed storage zero-copy.
+    let vec = collect_packed(eval, filtered).map_err(signal_to_native)?;
+    Ok(Value::Vector(vec))
 }
 
 fn native_group_by(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
@@ -809,8 +836,8 @@ pub(crate) fn native_group_by_owned(
             Some(Value::Vector(v)) => v.clone(),
             _ => Vector::from_vec(Vec::new()),
         };
-        let taken = std::mem::replace(&mut groups, new_map());
-        groups = taken.insert(key, Value::Vector(group.push_back(head.clone())));
+        // In place (#227): no `mem::replace` dummy map per item.
+        groups.insert_mut(key, Value::Vector(group.push_back(head.clone())));
         Ok(Walk::Continue)
     })?;
     Ok(Value::Map(groups))
@@ -834,8 +861,8 @@ pub(crate) fn native_frequencies_owned(
             Some(Value::Int(n)) => *n,
             _ => 0,
         };
-        let taken = std::mem::replace(&mut counts, new_map());
-        counts = taken.insert(head, Value::Int(count + 1));
+        // In place (#227): no `mem::replace` dummy map per item.
+        counts.insert_mut(head, Value::Int(count + 1));
         Ok(Walk::Continue)
     })?;
     Ok(Value::Map(counts))

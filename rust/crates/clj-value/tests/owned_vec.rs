@@ -13,7 +13,7 @@
 //! id; the `&self` forms stay for genuinely shared sites (the
 //! subvector writers).
 
-use clj_value::{Elem8, PrimitiveVector, Value, Vector};
+use clj_value::{Elem8, Map, PrimitiveVector, Value, Vector, new_map};
 
 fn ints(n: i64) -> Vec<Value> {
     (0..n).map(Value::Int).collect()
@@ -202,4 +202,175 @@ fn pv_drop_last_shortens_or_none() {
     assert_eq!(q.len(), 1);
     let empty = PrimitiveVector::empty(Elem8::Long);
     assert!(empty.drop_last().is_none());
+}
+
+/// A shaped map with `n` int pairs (shaped below 17 entries).
+fn shaped(n: i64) -> Map {
+    let mut m = new_map();
+    for i in 0..n {
+        m = m.insert(Value::Int(i), Value::Int(i * 10));
+    }
+    assert!(m.is_shaped());
+    m
+}
+
+/// A hash map with `n` int pairs (`n` past the shaped cap).
+fn hashed(n: i64) -> Map {
+    let mut m = new_map();
+    for i in 0..n {
+        m = m.insert(Value::Int(i), Value::Int(i * 10));
+    }
+    assert!(!m.is_shaped());
+    m
+}
+
+/// Owned `push_back` on the generic trie appends under a fresh id
+/// while a pre-existing clone keeps its items.
+#[test]
+fn push_back_generic_appends_and_preserves_sharing() {
+    let v = generic(10);
+    let snapshot = v.clone();
+    let w = v.push_back(Value::Int(99));
+    assert_ne!(w.id(), snapshot.id());
+    assert_eq!(w.len(), 12);
+    assert_eq!(w.get(11), Some(Value::Int(99)));
+    assert_eq!(snapshot.len(), 11);
+    assert_eq!(snapshot.get(10), Some(Value::Nil));
+}
+
+/// Owned `push_back` of an `Int` on packed storage stays packed;
+/// a pre-existing clone keeps its run (shared runs copy, never
+/// clobber).
+#[test]
+fn push_back_packed_int_stays_packed_and_preserves_sharing() {
+    let v = Vector::from_ints(vec![1, 2, 3]);
+    let snapshot = v.clone();
+    let w = v.push_back(Value::Int(4));
+    assert_ne!(w.id(), snapshot.id());
+    assert!(w.is_packed());
+    assert_eq!(w.len(), 4);
+    assert_eq!(w.get(3), Some(Value::Int(4)));
+    assert_eq!(snapshot.len(), 3);
+    assert_eq!(snapshot.get(2), Some(Value::Int(3)));
+}
+
+/// Owned `push_back` of a foreign value unpacks once; the
+/// pre-existing packed clone is untouched.
+#[test]
+fn push_back_packed_foreign_unpacks() {
+    let v = Vector::from_ints(vec![1, 2]);
+    let snapshot = v.clone();
+    let w = v.push_back(Value::Nil);
+    assert!(!w.is_packed());
+    assert_eq!(w.len(), 3);
+    assert_eq!(w.get(0), Some(Value::Int(1)));
+    assert_eq!(w.get(2), Some(Value::Nil));
+    assert!(snapshot.is_packed());
+    assert_eq!(snapshot.len(), 2);
+}
+
+/// `insert_mut` on a shared shaped map mints a fresh entries `Arc`
+/// (fresh id); the live alias keeps its value and metadata rides
+/// along.
+#[test]
+fn insert_mut_shaped_samekey_shared_preserves_alias() {
+    let m = shaped(3).with_meta(Some(new_map()));
+    let snapshot = m.clone();
+    let mut m = m;
+    m.insert_mut(Value::Int(1), Value::Int(99));
+    assert_ne!(m.id(), snapshot.id());
+    assert_eq!(m.get(&Value::Int(1)), Some(&Value::Int(99)));
+    assert_eq!(snapshot.get(&Value::Int(1)), Some(&Value::Int(10)));
+    assert!(m.meta().is_some());
+    assert_eq!(m.size(), 3);
+}
+
+/// `insert_mut` on a uniquely-owned shaped map writes the value in
+/// place (same entries `Arc`, same id — the consumed input is
+/// dead, so no live alias can observe it).
+#[test]
+fn insert_mut_shaped_samekey_unique_writes_in_place() {
+    let mut m = shaped(3);
+    let id = m.id();
+    m.insert_mut(Value::Int(1), Value::Int(99));
+    assert_eq!(m.id(), id);
+    assert_eq!(m.get(&Value::Int(1)), Some(&Value::Int(99)));
+    assert_eq!(m.get(&Value::Int(0)), Some(&Value::Int(0)));
+    assert_eq!(m.size(), 3);
+}
+
+/// `insert_mut` of a new key grows the shaped map (fresh entries
+/// either way — the key-set changed).
+#[test]
+fn insert_mut_shaped_newkey_grows() {
+    let mut m = shaped(3);
+    m.insert_mut(Value::Int(7), Value::Int(70));
+    assert_eq!(m.size(), 4);
+    assert_eq!(m.get(&Value::Int(7)), Some(&Value::Int(70)));
+    assert_eq!(m.get(&Value::Int(2)), Some(&Value::Int(20)));
+}
+
+/// `insert` promotes past the shaped cap with every entry intact.
+#[test]
+fn insert_promotes_past_shaped_cap() {
+    let m = shaped(16);
+    let m = m.insert(Value::Int(100), Value::Int(1));
+    assert!(!m.is_shaped());
+    assert_eq!(m.size(), 17);
+    for i in 0..16 {
+        assert_eq!(m.get(&Value::Int(i)), Some(&Value::Int(i * 10)));
+    }
+    assert_eq!(m.get(&Value::Int(100)), Some(&Value::Int(1)));
+}
+
+/// `insert_mut` of a new key into a shared hash map keeps the live
+/// alias (old size, old entries) under a fresh id.
+#[test]
+fn insert_mut_hash_newkey_shared_preserves_alias() {
+    let m = hashed(20);
+    let snapshot = m.clone();
+    let mut m = m;
+    m.insert_mut(Value::Int(100), Value::Int(1));
+    assert_ne!(m.id(), snapshot.id());
+    assert_eq!(m.size(), 21);
+    assert_eq!(m.get(&Value::Int(100)), Some(&Value::Int(1)));
+    assert_eq!(snapshot.size(), 20);
+    assert_eq!(snapshot.get(&Value::Int(100)), None);
+}
+
+/// `insert_mut` of a new key into a uniquely-owned hash map keeps
+/// the sidecar `Arc` (same id, no fresh sidecar alloc).
+#[test]
+fn insert_mut_hash_newkey_unique_keeps_identity() {
+    let mut m = hashed(20);
+    let id = m.id();
+    m.insert_mut(Value::Int(100), Value::Int(1));
+    assert_eq!(m.id(), id);
+    assert_eq!(m.size(), 21);
+    assert_eq!(m.get(&Value::Int(100)), Some(&Value::Int(1)));
+}
+
+/// `insert_mut` of an existing key into a shared hash map mints a
+/// fresh sidecar (fresh id); the alias keeps the old value.
+#[test]
+fn insert_mut_hash_existing_shared_preserves_alias() {
+    let m = hashed(20);
+    let snapshot = m.clone();
+    let mut m = m;
+    m.insert_mut(Value::Int(5), Value::Int(99));
+    assert_ne!(m.id(), snapshot.id());
+    assert_eq!(m.get(&Value::Int(5)), Some(&Value::Int(99)));
+    assert_eq!(snapshot.get(&Value::Int(5)), Some(&Value::Int(50)));
+}
+
+/// `insert_mut` of an existing key into a uniquely-owned hash map
+/// writes in place (same id, no fresh sidecar alloc).
+#[test]
+fn insert_mut_hash_existing_unique_keeps_identity() {
+    let mut m = hashed(20);
+    let id = m.id();
+    m.insert_mut(Value::Int(5), Value::Int(99));
+    assert_eq!(m.id(), id);
+    assert_eq!(m.get(&Value::Int(5)), Some(&Value::Int(99)));
+    assert_eq!(m.size(), 20);
 }
