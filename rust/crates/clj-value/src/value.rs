@@ -755,15 +755,15 @@ impl<'a> Iterator for HashIter<'a> {
     type Item = (&'a Value, &'a Value);
 
     fn next(&mut self) -> Option<Self::Item> {
-        while self.pos < self.keys.len() {
-            let k = self.keys.get(self.pos)?;
-            self.pos += 1;
-            // Every writer keeps the sidecar and the trie in sync,
-            // so every iterated key resolves.
-            let v = self.map.get(k).expect("keys sidecar and trie stay in sync");
-            return Some((k, v));
+        if self.pos >= self.keys.len() {
+            return None;
         }
-        None
+        let k = self.keys.get(self.pos)?;
+        self.pos += 1;
+        // Every writer keeps the sidecar and the trie in sync, so
+        // every iterated key resolves.
+        let v = self.map.get(k).expect("keys sidecar and trie stay in sync");
+        Some((k, v))
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {

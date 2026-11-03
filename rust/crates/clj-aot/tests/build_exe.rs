@@ -155,6 +155,26 @@ fn linked_binary_flows_keywords() {
 }
 
 #[test]
+fn linked_binary_runs_slice_a_forms() {
+    // Slice A: `cond`/`and`/`or`/`when`/`when-not` desugar with
+    // short-circuit semantics (the trailing statements print
+    // nothing — their branches never evaluate), `long`/`int` cast
+    // through the shared natives (JVM prints the same line).
+    let (stdout, stderr, code) = build_and_run(
+        "slice-a",
+        "(print (cond false 1 (= 1 2) 2 :else 3) (and 1 2) (and 1 nil 3) \
+         (or false nil 7) (or) (when (> 2 1) \"y\") (when-not (= 1 1) \"n\") \
+         (long 5.9) (int 7) (clojure.core/when true :q)) \
+         (and false (print \"X\")) (or true (print \"Y\")) (when false (print \"W\")) \
+         (cond true 1 false (print \"Z\"))",
+    );
+    assert_eq!(
+        (stdout.as_str(), stderr.as_str(), code),
+        ("3 2 nil 7 nil y nil 5 7 :q", "", 0)
+    );
+}
+
+#[test]
 fn linked_binary_reports_runtime_errors() {
     let (stdout, stderr, code) = build_and_run("divzero", "(print (quot 1 0))");
     assert_eq!(stdout, "");

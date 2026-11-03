@@ -48,6 +48,40 @@ fn jit_runs_control_flow() {
 }
 
 #[test]
+fn jit_runs_loop_recur() {
+    // Countdown, accumulation (the sum pins the value: anything
+    // but 5050 aborts), rebinding order (the swap), and nesting.
+    assert_eq!(
+        run("(print (loop [i 0] (if (= i 3) i (recur (+ i 1)))))"),
+        0
+    );
+    assert_eq!(
+        run(
+            "(let [s (loop [i 1 acc 0] (if (> i 100) acc (recur (+ i 1) (+ acc i))))] \
+             (if (= s 5050) (print s) (quot 1 0))) \
+             (print (loop [a 1 b 2] (if (= a 2) [a b] (recur b a)))) \
+             (print (loop [i 0] (if (= i 2) (loop [j 10] (if (= j 12) (+ i j) (recur (+ j 1)))) (recur (+ i 1)))))"
+        ),
+        0
+    );
+}
+
+#[test]
+fn jit_loop_half_million_iterations_keeps_a_flat_stack() {
+    // argv arrays hoist to the entry block: per-iteration
+    // allocas would overflow the 8MB stack around ~130K
+    // iterations (three boxed prims per step here), so this
+    // count fails loud on the old layout and runs in ~1s.
+    assert_eq!(
+        run(
+            "(let [s (loop [i 0 acc 0] (if (< i 500000) (recur (+ i 1) (+ acc i)) acc))] \
+             (if (= s 124999750000) (print s) (quot 1 0)))"
+        ),
+        0
+    );
+}
+
+#[test]
 fn jit_survives_untaken_let_branches() {
     assert_eq!(
         run("(defn f [c] (if c (let [x 1] x) (let [y 2] y))) \
@@ -60,6 +94,18 @@ fn jit_survives_untaken_let_branches() {
 fn jit_flows_keywords() {
     assert_eq!(
         run("(print [(get [1 2] 5 :miss) (= :a :a) (= :a :b) :x :u/id])"),
+        0
+    );
+}
+
+#[test]
+fn jit_runs_slice_a_forms() {
+    assert_eq!(
+        run("(print (cond false 1 (= 1 2) 2 :else 3)) \
+             (print (and 1 2) (and 1 nil 3) (or false nil 7) (or)) \
+             (print (when (> 2 1) \"y\") (when-not (= 1 1) \"n\")) \
+             (print (long 5.9) (int 7) (clojure.core/when true :q)) \
+             (and false (print \"X\")) (or true (print \"Y\")) (when false (print \"W\"))"),
         0
     );
 }
@@ -98,5 +144,30 @@ fn jit_passes_argv_to_dash_main() {
     assert_eq!(
         run_with("(print :top) (defn -main [args] (print args))", &args),
         0
+    );
+}
+
+#[test]
+fn jit_runs_transient_pipelines() {
+    // Vector transients round-trip through the boxed ABI
+    // (map transients need map literals, outside the subset),
+    // and `nth` reads a live transient buffer.
+    assert_eq!(
+        run("(print (persistent! (conj! (transient [1]) 2 3))) \
+             (print (persistent! (assoc! (transient [1 2]) 0 9))) \
+             (print (nth (conj! (transient [7 8]) 9) 2))"),
+        0
+    );
+}
+
+#[test]
+fn jit_reports_transient_errors() {
+    // A `persistent!` of a persistent value fails the shared
+    // native, and use-after-`persistent!` fails the edit check:
+    // both return 1 from `main`.
+    assert_eq!(run("(print (persistent! [1]))"), 1);
+    assert_eq!(
+        run("(let [t (transient [1])] (do (persistent! t) (print (conj! t 2))))"),
+        1
     );
 }

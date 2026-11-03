@@ -177,9 +177,9 @@ pub(crate) fn idrop_coerce(v: &Value) -> Result<i32, NativeError> {
 /// An `nth`/`subvec`/`subs` index through the `RT.intCast`
 /// shape: `nil` trips the `charValue` NPE quirk, numbers narrow
 /// checked (long range then `int` range), anything else fails to
-/// `Number`. Staged for `coll.rs` (S5D).
-#[allow(dead_code)]
-pub(crate) fn nth_index(v: &Value) -> Result<i32, NativeError> {
+/// `Number`. Staged for `coll.rs` (S5D); shared with the `clj-rt`
+/// string fast path (same function, zero drift).
+pub fn nth_index(v: &Value) -> Result<i32, NativeError> {
     if matches!(v, Value::Nil) {
         return Err(NativeError::new(
             ThrowClass::NullPointerException,
