@@ -1321,12 +1321,15 @@ impl Bindings {
 }
 
 /// One frame's slots: immutable shared slots (the common case —
-/// lock-free reads) or patchable slots behind a mutex (only for
-/// `letfn`/named-`fn` self-patching, where closures captured the
-/// frame before its slots were installed).
+/// lock-free reads), a single value stored inline in the frame (the
+/// `extend_one` fast path — one allocation instead of two, since the
+/// hottest binder binds one name at a time), or patchable slots
+/// behind a mutex (only for `letfn`/named-`fn` self-patching, where
+/// closures captured the frame before its slots were installed).
 #[derive(Clone, Debug)]
 enum Slots {
     Shared(Arc<[Value]>),
+    Inline(Value),
     Patchable(Arc<Mutex<Vec<Value>>>),
 }
 
@@ -1411,6 +1414,13 @@ impl Env {
         }
         match &frame.slots {
             Slots::Shared(slots) => slots.get(idx - frame.base).cloned().unwrap_or(Value::Nil),
+            Slots::Inline(value) => {
+                if idx == frame.base {
+                    value.clone()
+                } else {
+                    Value::Nil
+                }
+            }
             Slots::Patchable(slots) => slots
                 .lock()
                 .ok()
@@ -1469,7 +1479,8 @@ impl Env {
     }
 
     /// Extend with one fresh slot (the single-name `bind_pattern`
-    /// fast path — no `Vec` at all).
+    /// fast path — the value rides inline in the frame, so one
+    /// allocation instead of two).
     #[must_use]
     pub fn extend_one(&self, value: Value) -> Self {
         let base = self.len();
@@ -1478,7 +1489,7 @@ impl Env {
                 parent: Some(self.clone()),
                 base,
                 len: base + 1,
-                slots: Slots::Shared(Arc::from([value])),
+                slots: Slots::Inline(value),
             }),
         }
     }
