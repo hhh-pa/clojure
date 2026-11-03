@@ -130,34 +130,56 @@ impl PrimitiveVector {
     }
 
     /// Append a (coerced) value.
+    ///
+    /// The #212 pattern (`mut self` + `push_back_mut`): rpds
+    /// path-copies only nodes shared with *other* versions, so
+    /// `conj` chains over uniquely-owned primitive vectors mutate
+    /// in place.
     #[must_use]
-    pub fn push_back(&self, v: Value) -> Self {
+    pub fn push_back(mut self, v: Value) -> Self {
+        self.inner.push_back_mut(v);
         Self {
             elem: self.elem,
-            inner: self.inner.clone().push_back(v),
-            meta: self.meta.clone(),
+            inner: self.inner,
+            meta: self.meta,
             id: crate::value::next_identity_id(),
         }
     }
 
-    /// Replace the item at `index` (`None` when out of bounds).
+    /// Replace the item at `index` (`None` when out of bounds —
+    /// `self` is consumed either way, so check [`len`](Self::len)
+    /// first when the vector must survive).
+    ///
+    /// The #212 pattern (`mut self` + `set_mut`): like
+    /// [`push_back`](Self::push_back), in place when unique.
     #[must_use]
-    pub fn set_nth(&self, index: usize, v: Value) -> Option<Self> {
-        self.inner.set(index, v).map(|inner| Self {
+    pub fn set_nth(mut self, index: usize, v: Value) -> Option<Self> {
+        if !self.inner.set_mut(index, v) {
+            return None;
+        }
+        Some(Self {
             elem: self.elem,
-            inner,
-            meta: self.meta.clone(),
+            inner: self.inner,
+            meta: self.meta,
             id: crate::value::next_identity_id(),
         })
     }
 
-    /// The vector without its last item (`None` when empty).
+    /// The vector without its last item (`None` when empty — `self`
+    /// is consumed either way, so check [`is_empty`](Self::is_empty)
+    /// first when the vector must survive).
+    ///
+    /// The #212 pattern (`mut self` + `drop_last_mut`): like
+    /// [`push_back`](Self::push_back), in place when unique.
     #[must_use]
-    pub fn drop_last(&self) -> Option<Self> {
-        self.inner.drop_last().map(|inner| Self {
+    pub fn drop_last(mut self) -> Option<Self> {
+        if !self.inner.drop_last_mut() {
+            return None;
+        }
+        Some(Self {
             elem: self.elem,
-            inner,
-            meta: self.meta.clone(),
+            inner: self.inner,
+            meta: self.meta,
             id: crate::value::next_identity_id(),
         })
     }

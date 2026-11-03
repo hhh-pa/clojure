@@ -689,71 +689,107 @@ impl Vector {
     }
 
     /// Replace the item at `index` (`None` when out of bounds).
+    ///
+    /// The shared-storage form, for callers holding only a `&Vector`
+    /// (the subvector writers): clones the header, then applies
+    /// [`set_nth_owned`](Self::set_nth_owned). Owners should call
+    /// `set_nth_owned` directly.
     #[must_use]
     pub fn set_nth(&self, index: usize, v: Value) -> Option<Self> {
-        match &self.inner {
-            VectorInner::Generic(inner) => inner.set(index, v).map(|inner| Self {
-                inner: VectorInner::Generic(inner),
-                meta: self.meta.clone(),
-                id: next_vector_id(),
-            }),
+        self.clone().set_nth_owned(index, v)
+    }
+
+    /// Replace the item at `index` on an owned vector (`None` when
+    /// out of bounds — `self` is consumed either way, so check
+    /// [`len`](Self::len) first when the vector must survive).
+    ///
+    /// The #212 pattern (`mut self` + `set_mut`): rpds path-copies
+    /// only nodes shared with *other* versions, so threading one
+    /// accumulator through an `assoc` chain mutates in place after
+    /// the first step instead of path-copying per step. Packed `Int`
+    /// storage mutates through `Arc::make_mut` (in place when
+    /// unique); a foreign value unpacks once, like [`push_back`](Self::push_back).
+    #[must_use]
+    pub fn set_nth_owned(mut self, index: usize, v: Value) -> Option<Self> {
+        // Packed storage meeting a foreign value rebuilds once
+        // (unpack); every other shape mutates through `&mut`, so
+        // uniquely-owned chains stay allocation-free (no
+        // `mem::replace` placeholder — even an empty trie would
+        // `Arc::new` its root).
+        if matches!(&self.inner, VectorInner::Packed(_)) && !matches!(v, Value::Int(_)) {
+            if index >= self.len() {
+                return None;
+            }
+            let mut out = RpdsVector::new_sync();
+            for n in self.packed_slice().expect("guarded packed above") {
+                out.push_back_mut(Value::Int(*n));
+            }
+            // `index` is below the length (guarded above over these
+            // same items), so this cannot fail.
+            assert!(out.set_mut(index, v));
+            self.inner = VectorInner::Generic(out);
+            self.id = next_vector_id();
+            return Some(self);
+        }
+        match &mut self.inner {
+            VectorInner::Generic(trie) => {
+                if !trie.set_mut(index, v) {
+                    return None;
+                }
+            }
             VectorInner::Packed(ints) => {
                 if index >= ints.len() {
                     return None;
                 }
-                match v {
-                    Value::Int(n) => {
-                        let mut ints = Arc::clone(ints);
-                        Arc::make_mut(&mut ints)[index] = n;
-                        Some(Self {
-                            inner: VectorInner::Packed(ints),
-                            meta: self.meta.clone(),
-                            id: next_vector_id(),
-                        })
-                    }
-                    v => {
-                        // Unpack in place (one-time cost; mutating
-                        // persistent ops on packed storage go
-                        // through here so chains keep generic speed
-                        // after the first unpack).
-                        let mut out = RpdsVector::new_sync();
-                        for n in ints.iter() {
-                            out.push_back_mut(Value::Int(*n));
-                        }
-                        out = out.set(index, v)?;
-                        Some(Self {
-                            inner: VectorInner::Generic(out),
-                            meta: self.meta.clone(),
-                            id: next_vector_id(),
-                        })
-                    }
+                // `Int`-only here (foreign values unpacked above).
+                if let Value::Int(n) = v {
+                    Arc::make_mut(ints)[index] = n;
                 }
             }
         }
+        self.id = next_vector_id();
+        Some(self)
     }
 
     /// The vector without its last item (`None` when empty).
+    ///
+    /// The shared-storage form, for callers holding only a `&Vector`:
+    /// clones the header, then applies
+    /// [`drop_last_owned`](Self::drop_last_owned). Owners should call
+    /// `drop_last_owned` directly.
     #[must_use]
     pub fn drop_last(&self) -> Option<Self> {
-        match &self.inner {
-            VectorInner::Generic(inner) => inner.drop_last().map(|inner| Self {
-                inner: VectorInner::Generic(inner),
-                meta: self.meta.clone(),
-                id: next_vector_id(),
-            }),
+        self.clone().drop_last_owned()
+    }
+
+    /// The owned vector without its last item (`None` when empty —
+    /// `self` is consumed either way, so check
+    /// [`is_empty`](Self::is_empty) first when the vector must survive).
+    ///
+    /// The #212 pattern (`mut self` + `drop_last_mut`): packed
+    /// storage pops through `Arc::make_mut`, so `pop` chains over
+    /// uniquely-owned vectors mutate in place while versions shared
+    /// with other handles still path-copy.
+    #[must_use]
+    pub fn drop_last_owned(mut self) -> Option<Self> {
+        // Through `&mut` (no `mem::replace` placeholder — even an
+        // empty trie would `Arc::new` its root), so uniquely-owned
+        // `pop` chains stay allocation-free.
+        match &mut self.inner {
+            VectorInner::Generic(trie) => {
+                if !trie.drop_last_mut() {
+                    return None;
+                }
+            }
             VectorInner::Packed(ints) => {
                 if ints.is_empty() {
                     return None;
                 }
-                let mut ints = Arc::clone(ints);
-                Arc::make_mut(&mut ints).pop();
-                Some(Self {
-                    inner: VectorInner::Packed(ints),
-                    meta: self.meta.clone(),
-                    id: next_vector_id(),
-                })
+                Arc::make_mut(ints).pop();
             }
         }
+        self.id = next_vector_id();
+        Some(self)
     }
 
     /// Iterate front to back (owned values; packed ints box on
