@@ -773,7 +773,7 @@ impl<'a> Analyzer<'a> {
         span: Span,
         tail: bool,
     ) -> Result<Expr, CompileError> {
-        let items = match crate::lazy::collect_all(self.eval, form) {
+        let items = match crate::lazy::collect_all(self.eval, form.clone()) {
             Ok(items) => items,
             Err(s) => return Err(form_force_err(&self.source, s, span)),
         };

@@ -146,8 +146,8 @@ pub(crate) fn build_deque(eval: &mut Evaluator, args: &[Value]) -> Result<Value,
         }))),
         [Value::Nil] => Err(null_element()),
         [coll] => {
-            let items =
-                crate::lazy::collect_all(eval, coll).map_err(crate::ns::signal_to_native)?;
+            let items = crate::lazy::collect_all(eval, coll.clone())
+                .map_err(crate::ns::signal_to_native)?;
             Ok(Value::Extension(Arc::new(JavaDeque {
                 id: eval.next_id(),
                 items: Mutex::new(items.into_iter().collect()),
@@ -168,8 +168,8 @@ pub(crate) fn build_list(eval: &mut Evaluator, args: &[Value]) -> Result<Value, 
         }))),
         [Value::Nil] => Err(null_element()),
         [coll] => {
-            let items =
-                crate::lazy::collect_all(eval, coll).map_err(crate::ns::signal_to_native)?;
+            let items = crate::lazy::collect_all(eval, coll.clone())
+                .map_err(crate::ns::signal_to_native)?;
             Ok(Value::Extension(Arc::new(JavaList {
                 id: eval.next_id(),
                 items: Mutex::new(items),
@@ -221,8 +221,8 @@ pub(crate) fn build_pqueue(eval: &mut Evaluator, args: &[Value]) -> Result<Value
             })))
         }
         [coll] => {
-            let items =
-                crate::lazy::collect_all(eval, coll).map_err(crate::ns::signal_to_native)?;
+            let items = crate::lazy::collect_all(eval, coll.clone())
+                .map_err(crate::ns::signal_to_native)?;
             Ok(Value::Extension(Arc::new(JavaPQueue {
                 id: eval.next_id(),
                 items: Mutex::new(items),

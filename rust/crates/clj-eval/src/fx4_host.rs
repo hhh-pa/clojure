@@ -307,7 +307,7 @@ fn native_bound_fn(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Native
 
 fn native_pam(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/fx4-pam-create", args, &[1])?;
-    let items = collect_all(eval, &args[0]).map_err(signal_to_native)?;
+    let items = collect_all(eval, args[0].clone()).map_err(signal_to_native)?;
     let list = Value::List(List::from_vec(items));
     eval.seq_to_map(&list).map_err(signal_to_native)
 }

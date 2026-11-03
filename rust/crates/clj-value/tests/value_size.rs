@@ -14,13 +14,14 @@
 
 use clj_value::{Future, Map, Promise, Set, Transient, Value};
 
-/// The whole-enum budget: 72 bytes (was 112 before the sidecar and
-/// metadata arcs). Lower is welcome — tighten the bound if a variant
+/// The whole-enum budget: 64 bytes (was 112 before the sidecar and
+/// metadata arcs, 72 before map identity moved onto the entries
+/// `Arc`). Lower is welcome — tighten the bound if a variant
 /// shrinks for real.
 #[test]
 fn value_stays_compact() {
     assert!(
-        size_of::<Value>() <= 72,
+        size_of::<Value>() <= 64,
         "Value grew to {} bytes; keep large payloads behind Arc (see #221 R1)",
         size_of::<Value>()
     );
@@ -31,7 +32,7 @@ fn value_stays_compact() {
 #[test]
 fn large_payloads_stay_indirect() {
     for (name, size, budget) in [
-        ("Map", size_of::<Map>(), 72),
+        ("Map", size_of::<Map>(), 64),
         ("Set", size_of::<Set>(), 64),
         ("Transient", size_of::<Transient>(), 24),
         ("Future", size_of::<Future>(), 24),

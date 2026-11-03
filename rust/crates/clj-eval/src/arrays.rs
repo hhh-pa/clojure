@@ -238,7 +238,7 @@ fn guard_alloc(base: BaseType, slots: usize) -> Result<(), NativeError> {
 fn seq_items(eval: &mut Evaluator, v: &Value) -> Result<Vec<Value>, NativeError> {
     match v {
         Value::Array(a) => Ok(a.snapshot()),
-        _ => collect_all(eval, v).map_err(signal_to_native),
+        _ => collect_all(eval, v.clone()).map_err(signal_to_native),
     }
 }
 
@@ -1739,7 +1739,7 @@ fn to_array_value(eval: &mut Evaluator, v: &Value) -> Result<Array, NativeError>
             ArrayStore::Objs(a.snapshot()),
         )),
         _ if is_toarray_walkable(v) => {
-            let items = collect_all(eval, v).map_err(signal_to_native)?;
+            let items = collect_all(eval, v.clone()).map_err(signal_to_native)?;
             Ok(Array::new(
                 ArrayDesc::flat(BaseType::Object),
                 ArrayStore::Objs(items),
@@ -1763,7 +1763,7 @@ fn native_to_array_2d(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nat
     if !is_collection(coll) {
         return Err(cce_err(coll, "java.util.Collection"));
     }
-    let items = collect_all(eval, coll).map_err(signal_to_native)?;
+    let items = collect_all(eval, coll.clone()).map_err(signal_to_native)?;
     let mut rows: Vec<Option<Array>> = Vec::with_capacity(items.len());
     for it in &items {
         rows.push(Some(to_array_value(eval, it)?));

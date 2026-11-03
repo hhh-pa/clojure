@@ -1956,6 +1956,7 @@ fn barrier_fn(eval: &mut Evaluator, tx: mpsc::Sender<()>) -> Value {
             let _ = tx.send(());
             Ok(args.first().cloned().unwrap_or(Value::Nil))
         }),
+        owned: None,
         meta: None,
     }))
 }

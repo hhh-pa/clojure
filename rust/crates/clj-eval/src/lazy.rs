@@ -21,6 +21,7 @@ use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
 use num_traits::ToPrimitive;
+use smallvec::SmallVec;
 
 use clj_value::{
     CHUNK_SIZE, ConsValue, CycleValue, ExtensionValue, IterateValue, KeySeqValue, List, Map,
@@ -698,9 +699,22 @@ fn force_pending(eval: &mut Evaluator, p: &PendingSeq) -> Result<Forced, Signal>
         match std::mem::replace(&mut *state, SeqState::Empty) {
             SeqState::Empty => return Ok(Forced::Empty),
             SeqState::Chunk { items, pos, tail } => {
-                let forced = Forced::Chunk {
-                    items: Arc::from(&items[pos..]),
-                    tail: tail.clone(),
+                // Memoized chunks share their items: re-slicing per
+                // force copies O(chunk) on every `first`/`next`/`seq`
+                // (element-wise walks force ~3x per item —
+                // gigabytes of churn on suffix-scale inputs). Fresh
+                // chunks always memoize whole (`pos == 0`); only an
+                // advanced cursor re-slices.
+                let forced = if pos == 0 {
+                    Forced::Chunk {
+                        items: Arc::clone(&items),
+                        tail: tail.clone(),
+                    }
+                } else {
+                    Forced::Chunk {
+                        items: Arc::from(&items[pos..]),
+                        tail: tail.clone(),
+                    }
                 };
                 *state = SeqState::Chunk { items, pos, tail };
                 return Ok(forced);
@@ -3196,9 +3210,31 @@ fn first_direct(v: &Value) -> Option<Value> {
     }
 }
 
-/// The first item of a seq value (iterate heads read without
-/// stepping; entry views cast; anything else steps one unit).
+/// The first item of a seq value (memoized chunks and realized
+/// seqs read their head without stepping — no chunk copy per
+/// `first`; iterate heads read without stepping; entry views
+/// cast; anything else steps one unit).
 fn first_seq_value(eval: &mut Evaluator, v: &Value) -> Result<Value, Signal> {
+    if let Some(p) = as_pending(v) {
+        let state = p.state.lock().unwrap_or_else(|e| e.into_inner());
+        match &*state {
+            SeqState::Chunk { items, pos, .. } if *pos < items.len() => {
+                return Ok(items[*pos].clone());
+            }
+            // An exhausted chunk continues in its tail (like the
+            // JVM's `ChunkedCons.more()`; `rest` seqs the tail at
+            // the last item, so this only sees crafted states).
+            SeqState::Chunk { tail, .. } => {
+                let tail = tail.clone();
+                drop(state);
+                return first_value(eval, &tail);
+            }
+            _ => {}
+        }
+    }
+    if let Some(r) = as_realized(v) {
+        return Ok(r.seq().first().cloned().unwrap_or(Value::Nil));
+    }
     if let Some(it) = as_iterate(v) {
         return iterate_seed(eval, it);
     }
@@ -3270,6 +3306,15 @@ fn range_step_error() -> NativeError {
     )
 }
 
+/// `rest` past a chunk's last item: seq the tail (nil-punning
+/// to `()`).
+fn rest_chunk_tail(eval: &mut Evaluator, tail: &Value) -> Result<Value, Signal> {
+    match seq_value(eval, tail)? {
+        Value::Nil => Ok(empty_list_value()),
+        t => Ok(t),
+    }
+}
+
 /// `rest` of a forced pending chunk: multi-item chunks rest to a
 /// `ChunkedCons` (like the JVM's `more`); empty chunks fall through
 /// to the tail; single items seq the tail (nil-punning to `()`).
@@ -3288,14 +3333,35 @@ fn rest_pending_chunk(
         ));
     }
     // Single-item chunk (forced chunks are never empty).
-    match seq_value(eval, &tail)? {
-        Value::Nil => Ok(empty_list_value()),
-        t => Ok(t),
-    }
+    rest_chunk_tail(eval, &tail)
 }
 
-/// `rest` of a pending seq (forcing one step).
+/// `rest` of a pending seq (a memoized chunk rests by advancing
+/// its cursor — a new cell sharing the items, like the JVM's
+/// `ChunkedCons`, with no per-element chunk copy; anything else
+/// forces one step).
 fn rest_pending(eval: &mut Evaluator, p: &PendingSeq) -> Result<Value, Signal> {
+    {
+        let state = p.state.lock().unwrap_or_else(|e| e.into_inner());
+        if let SeqState::Chunk { items, pos, tail } = &*state {
+            if *pos + 1 < items.len() {
+                // `ChunkedCons` class, like the forcing path below
+                // (JVM `more()`; pinned by `lazy_chunked_cons_*`).
+                return Ok(Value::Extension(Arc::new(PendingSeq {
+                    state: Mutex::new(SeqState::Chunk {
+                        items: Arc::clone(items),
+                        pos: *pos + 1,
+                        tail: tail.clone(),
+                    }),
+                    meta: p.meta.clone(),
+                    kind: LazyKind::ChunkedCons,
+                })));
+            }
+            let tail = tail.clone();
+            drop(state);
+            return rest_chunk_tail(eval, &tail);
+        }
+    }
     match force_pending(eval, p)? {
         Forced::Empty => Ok(empty_list_value()),
         Forced::Chunk { items, tail } => rest_pending_chunk(eval, &items, tail),
@@ -3396,15 +3462,27 @@ pub(crate) fn next_value(eval: &mut Evaluator, v: &Value) -> Result<Value, Signa
     seq_value(eval, &rest)
 }
 
+/// Take ownership of a walked coll arg, niling the slot: the walk
+/// holds the only handle, so memoized seq chunks free as it
+/// advances (like the JVM's dead locals) instead of accumulating
+/// behind the head held in `args` (#221).
+pub(crate) fn take_walk_coll(args: &mut SmallVec<[Value; 4]>, idx: usize) -> Value {
+    let coll = args[idx].clone();
+    args[idx] = Value::Nil;
+    coll
+}
+
 /// Realize every item (for `apply` spreads, `vec`, `sort`,
 /// `count`, printing, and `=`).
 /// Streaming `collect_all` into a vector: items flow one by one
 /// through a transient, so all-`Int` seqs freeze to packed storage
 /// without ever materializing a `Vec<Value>` (8 bytes per element
 /// peak instead of 72, single copy).
-pub(crate) fn collect_packed(eval: &mut Evaluator, v: &Value) -> Result<Vector, Signal> {
+pub(crate) fn collect_packed(eval: &mut Evaluator, v: Value) -> Result<Vector, Signal> {
     let mut tv = TransientVector::new();
-    let mut cur = v.clone();
+    // Owned: the walk advances `cur` off the head (owned callers
+    // nilled the arg slot, so memoized chunks free as it walks).
+    let mut cur = v;
     loop {
         match step_unit(eval, &cur)? {
             StepUnit::Empty => {
@@ -3424,9 +3502,11 @@ pub(crate) fn collect_packed(eval: &mut Evaluator, v: &Value) -> Result<Vector, 
     }
 }
 
-pub(crate) fn collect_all(eval: &mut Evaluator, v: &Value) -> Result<Vec<Value>, Signal> {
+pub(crate) fn collect_all(eval: &mut Evaluator, v: Value) -> Result<Vec<Value>, Signal> {
     let mut out = Vec::new();
-    let mut cur = v.clone();
+    // Owned: the walk advances `cur` off the head (owned callers
+    // nilled the arg slot, so memoized chunks free as it walks).
+    let mut cur = v;
     loop {
         match step_unit(eval, &cur)? {
             StepUnit::Empty => return Ok(out),
@@ -3640,7 +3720,7 @@ pub(crate) fn realize_key(eval: &mut Evaluator, k: &Value) -> Result<Value, Sign
 
 /// Deep-realize a pending seq into a realized one (metadata preserved).
 fn realize_pending_deep(eval: &mut Evaluator, v: &Value, p: &PendingSeq) -> Result<Value, Signal> {
-    let items = collect_all(eval, v)?;
+    let items = collect_all(eval, v.clone())?;
     // Recurse like the realized path: collected items may hold
     // nested pending seqs (partition/partition-by chunks), which
     // must print realized, not `(...)`.
@@ -3678,7 +3758,7 @@ fn is_collectable_seq(v: &Value) -> bool {
 
 /// Deep-realize a strict seq object by collecting (metadata preserved).
 fn realize_strict_seq_deep(eval: &mut Evaluator, v: &Value) -> Result<Value, Signal> {
-    let items = collect_all(eval, v)?;
+    let items = collect_all(eval, v.clone())?;
     let mut seq = RealizedSeq::new(Seq::eager(items).unwrap_or_else(Seq::empty));
     seq = seq.with_meta(v.meta().cloned());
     Ok(Value::Extension(Arc::new(seq)))
@@ -4330,6 +4410,57 @@ mod tests {
         assert_eq!(pending.print(), "(...)");
         let empty = pending_seq(SeqState::Empty, LazyKind::LazySeq);
         assert_eq!(empty.print(), "()");
+    }
+
+    #[test]
+    fn memoized_chunk_heads_read_without_copying() {
+        // `first` on a memoized chunk answers from the cursor (no
+        // force, no chunk copy); `rest` advances a shared cursor
+        // (the original keeps its own — seqs are immutable).
+        let mut eval = crate::eval::Evaluator::new_bare("user");
+        let v = Value::Extension(Arc::new(pending_seq(
+            SeqState::Chunk {
+                items: Arc::from(vec![Value::Int(1), Value::Int(2)]),
+                pos: 0,
+                tail: Value::Nil,
+            },
+            LazyKind::LazySeq,
+        )));
+        assert_eq!(super::first_value(&mut eval, &v).unwrap(), Value::Int(1));
+        let r = super::rest_value(&mut eval, &v).unwrap();
+        assert_eq!(super::first_value(&mut eval, &r).unwrap(), Value::Int(2));
+        assert_eq!(super::first_value(&mut eval, &v).unwrap(), Value::Int(1));
+        // Rest at the last item seqs the (nil) tail to `()`.
+        let end = super::rest_value(&mut eval, &r).unwrap();
+        assert!(matches!(end, Value::List(l) if l.is_empty()));
+        // Realized seqs read their head without stepping either.
+        let vec = clj_value::Vector::from_vec(vec![Value::Int(7)]);
+        let s = super::seq_value(&mut eval, &Value::Vector(vec)).unwrap();
+        assert_eq!(super::first_value(&mut eval, &s).unwrap(), Value::Int(7));
+    }
+
+    #[test]
+    fn advanced_and_exhausted_chunks_use_the_tail() {
+        // Forcing an advanced cursor re-slices (the `pos > 0`
+        // arm); `first`/`rest` past the end continue in the tail,
+        // like the JVM's `ChunkedCons.more()`.
+        let mut eval = crate::eval::Evaluator::new_bare("user");
+        let tail = Value::List(clj_value::List::from_vec(vec![Value::Int(9)]));
+        let v = Value::Extension(Arc::new(pending_seq(
+            SeqState::Chunk {
+                items: Arc::from(vec![Value::Int(1)]),
+                pos: 1,
+                tail: tail.clone(),
+            },
+            LazyKind::ChunkedCons,
+        )));
+        // `seq` forces (re-slice arm) and stays non-nil (live tail).
+        assert!(matches!(
+            super::seq_value(&mut eval, &v).unwrap(),
+            Value::Extension(_)
+        ));
+        assert_eq!(super::first_value(&mut eval, &v).unwrap(), Value::Int(9));
+        assert_eq!(super::rest_value(&mut eval, &v).unwrap(), tail);
     }
 
     #[test]

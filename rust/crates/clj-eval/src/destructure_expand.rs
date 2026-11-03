@@ -29,7 +29,8 @@ pub(crate) fn destructure_public(
     eval: &mut Evaluator,
     bindings: &Value,
 ) -> Result<Value, NativeError> {
-    let items = crate::lazy::collect_all(eval, bindings).map_err(crate::ns::signal_to_native)?;
+    let items =
+        crate::lazy::collect_all(eval, bindings.clone()).map_err(crate::ns::signal_to_native)?;
     let full = items.len() - items.len() % 2;
     if items[..full].iter().step_by(2).all(is_symbol_val) {
         return Ok(bindings.clone());
@@ -49,7 +50,7 @@ pub(crate) fn seq_to_map_for_destructuring(
     eval: &mut Evaluator,
     s: &Value,
 ) -> Result<Value, NativeError> {
-    let items = crate::lazy::collect_all(eval, s).map_err(crate::ns::signal_to_native)?;
+    let items = crate::lazy::collect_all(eval, s.clone()).map_err(crate::ns::signal_to_native)?;
     if items.is_empty() {
         return Ok(Value::Map(new_map()));
     }
@@ -104,7 +105,8 @@ fn conj_tail_vector(map: Map, x: &Vector) -> Result<Map, NativeError> {
 /// `sm-odd-str`); non-seqables throw the `ISeq` error
 /// (oracle `sm-odd-kw`).
 fn conj_tail_seq(eval: &mut Evaluator, map: Map, tail: &Value) -> Result<Map, NativeError> {
-    let elems = crate::lazy::collect_all(eval, tail).map_err(crate::ns::signal_to_native)?;
+    let elems =
+        crate::lazy::collect_all(eval, tail.clone()).map_err(crate::ns::signal_to_native)?;
     let mut map = map;
     for elem in &elems {
         let Value::MapEntry { key, val, .. } = elem else {

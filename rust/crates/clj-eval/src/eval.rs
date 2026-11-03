@@ -799,6 +799,7 @@ impl Evaluator {
             id,
             display: Arc::from(format!("{ns}/{name}").as_str()),
             func,
+            owned: crate::ns::owned_entry(name),
             meta: None,
         }));
         self.registry.with_state_mut(var_id, |state| {
@@ -984,12 +985,7 @@ impl Evaluator {
                 for arg in args {
                     values.push(self.eval(arg, env)?);
                 }
-                // The call site stays visible to natives for the
-                // duration of the call (nesting saves/restores).
-                let saved = self.native_call_span.replace(*span);
-                let out = self.invoke(&callee, &values);
-                self.native_call_span = saved;
-                out
+                self.invoke_args(&callee, values, *span)
             }
         }
     }
@@ -1034,14 +1030,16 @@ impl Evaluator {
         meta: Option<Map>,
         env: &Env,
     ) -> Result<Value, Signal> {
-        let mut out = new_map();
+        let mut pairs_out = Vec::with_capacity(pairs.len());
         for (k, v) in pairs {
             let key = self.eval(k, env)?;
             let val = self.eval(v, env)?;
             let key = crate::lazy::realize_key(self, &key)?;
-            out = out.insert(key, val);
+            pairs_out.push((key, val));
         }
-        Ok(Value::Map(out.with_meta(meta)))
+        Ok(Value::Map(
+            Map::from_kvs_last_wins(pairs_out).with_meta(meta),
+        ))
     }
 
     /// A set literal (elements evaluate left to right).
@@ -1796,6 +1794,28 @@ impl Evaluator {
     /// fallbacks and other higher-order calls).
     pub(crate) fn call(&mut self, callee: &Value, args: &[Value]) -> Result<Value, Signal> {
         self.invoke(callee, args)
+    }
+
+    /// Invoke with an owned arg buffer: head-releasing looping
+    /// natives take the buffer (nil-ing walked coll slots so
+    /// memoized seq chunks free as they advance, like the JVM's
+    /// dead locals); everything else borrows it (the buffer drops
+    /// at return, as before).
+    fn invoke_args(
+        &mut self,
+        callee: &Value,
+        args: SmallVec<[Value; 4]>,
+        span: Span,
+    ) -> Result<Value, Signal> {
+        // The call site stays visible to natives for the
+        // duration of the call (nesting saves/restores).
+        let saved = self.native_call_span.replace(span);
+        let out = match crate::ext::as_native(callee).and_then(|n| n.owned.clone()) {
+            Some(owned) => owned(self, args).map_err(|e| self.throw(e)),
+            None => self.invoke(callee, &args),
+        };
+        self.native_call_span = saved;
+        out
     }
 
     fn invoke(&mut self, callee: &Value, args: &[Value]) -> Result<Value, Signal> {
