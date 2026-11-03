@@ -13,7 +13,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::net::TcpStream;
 use std::time::Duration;
 
-use clj_eval::{Evaluator, SourceError, boot, w6_runtime::install_server_natives};
+use clj_eval::{Evaluator, SourceError, boot};
 use clj_value::{PrintOpts, pr_to_string};
 
 fn pr(v: &clj_value::Value) -> String {
@@ -47,8 +47,9 @@ fn uncaught(eval: &mut Evaluator, src: &str) -> String {
 }
 
 fn boot_server() -> Evaluator {
+    // #217: no manual installer call — `require` installs the
+    // natives through the `load_one` arm (the production path).
     let mut eval = boot();
-    install_server_natives(&mut eval);
     run(&mut eval, "(require '[clojure.core.server :as server])");
     eval
 }
@@ -331,5 +332,21 @@ fn remote_prepl_round_trip() {
     assert_eq!(
         run(&mut eval, "(server/stop-server \"w6-remote-prepl\")"),
         "true"
+    );
+}
+
+/// #217: the production path — a bare boot with no manual
+/// installer call: `require` installs the natives, and one socket
+/// op runs through them.
+#[test]
+fn require_installs_natives_without_manual_call() {
+    let mut eval = boot();
+    run(&mut eval, "(require '[clojure.core.server :as server])");
+    assert_eq!(
+        run(
+            &mut eval,
+            "(let [s (server/__server-socket* nil 0)] [(> (server/__server-port* s) 0) (do (server/__server-close* s) (server/__server-closed?* s))])"
+        ),
+        "[true true]"
     );
 }

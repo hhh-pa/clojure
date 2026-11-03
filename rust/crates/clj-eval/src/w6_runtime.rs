@@ -13,10 +13,10 @@
 //! scanner (no new crates) that never resolves external entities, so
 //! both `startparse` variants are XXE-immune.
 //!
-//! Wiring: the integrator adds `load_one` arms calling
+//! Wiring: the `load_one` arms call
 //! [`install_server_natives`]/[`install_xml_natives`] (the gap-123
-//! `install_async_ns` shape); until then tests call them directly,
-//! which is why they are `pub`.
+//! `install_async_ns` shape) before loading the ported source, so a
+//! bare `require` resolves the hidden natives (#217).
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
@@ -388,10 +388,9 @@ pub(crate) const SERVER_NATIVES: &[(&str, NativeFnPtr)] = &[
 ];
 
 /// Install the `clojure.core.server` natives (idempotent —
-/// reinstalling over itself is a `:reload` no-op). `pub` so
-/// integration tests can install before `require` until the loader
-/// grows the matching arm.
-pub fn install_server_natives(eval: &mut Evaluator) {
+/// reinstalling over itself is a `:reload` no-op), ahead of the
+/// ported source load.
+pub(crate) fn install_server_natives(eval: &mut Evaluator) {
     eval.registry.ensure_ns(SERVER_NS);
     for (name, f) in SERVER_NATIVES {
         let func: Arc<crate::ext::NativeImpl> = Arc::new(*f);
@@ -942,9 +941,8 @@ fn native_xml_scan(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nativ
 pub(crate) const XML_NATIVES: &[(&str, NativeFnPtr)] = &[("__xml-scan*", native_xml_scan)];
 
 /// Install the `clojure.xml` natives (idempotent — reinstalling over
-/// itself is a `:reload` no-op). `pub` so integration tests can
-/// install before `require` until the loader grows the matching arm.
-pub fn install_xml_natives(eval: &mut Evaluator) {
+/// itself is a `:reload` no-op), ahead of the ported source load.
+pub(crate) fn install_xml_natives(eval: &mut Evaluator) {
     eval.registry.ensure_ns(XML_NS);
     for (name, f) in XML_NATIVES {
         let func: Arc<crate::ext::NativeImpl> = Arc::new(*f);
