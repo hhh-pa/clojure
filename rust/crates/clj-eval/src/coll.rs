@@ -489,16 +489,21 @@ fn conj_one(eval: &mut Evaluator, coll: Value, x: Value) -> Result<Value, Native
             let x = crate::lazy::realize_key(eval, &x).map_err(signal_to_native)?;
             Ok(Value::Set(s.insert(x)))
         }
-        other => {
-            if let Some(sv) = as_subvector(&other) {
-                return Ok(subvector_conj(sv, x));
-            }
-            if is_seq_value(&other) {
-                return Ok(Value::Extension(Arc::new(ConsValue::new(x, other))));
-            }
-            Err(cce_err(&other, "clojure.lang.IPersistentCollection"))
-        }
+        other => conj_other(other, x),
     }
+}
+
+/// Conj onto anything else (split from [`conj_one`] for the
+/// complexity budget): subvectors conj through their window, seqs
+/// `cons`, and anything else takes the collection cast.
+fn conj_other(other: Value, x: Value) -> Result<Value, NativeError> {
+    if let Some(sv) = as_subvector(&other) {
+        return Ok(subvector_conj(sv, x));
+    }
+    if is_seq_value(&other) {
+        return Ok(Value::Extension(Arc::new(ConsValue::new(x, other))));
+    }
+    Err(cce_err(&other, "clojure.lang.IPersistentCollection"))
 }
 
 /// Conj onto a map-like host value (split from [`conj_one`] for
