@@ -166,6 +166,24 @@ pub(crate) fn nth_str_fast(
     Some(nth_index(idx).and_then(|n| nth_str(s, n, not_found)))
 }
 
+/// Borrow-test a box for the unboxed-i64 path: `1` when the box
+/// holds an `Int`, else `0` (the specialization guard — the
+/// `rt_is_int` shim borrows, this decides, so the predicate pins
+/// without crossing the FFI boundary).
+pub(crate) fn is_int_flag(value: &Value) -> u8 {
+    u8::from(matches!(value, Value::Int(_)))
+}
+
+/// Read an `Int` box as a raw `i64` (the unboxed-i64 entry — the
+/// `rt_unbox_int` shim borrows, this reads; non-`Int` degrades to
+/// `0`, the `rt_vec_push` precedent — guards make it unreachable).
+pub(crate) fn unbox_int(value: &Value) -> i64 {
+    match value {
+        Value::Int(n) => *n,
+        _ => 0,
+    }
+}
+
 /// The helper error line: `path:line:col: Class: message` (spans
 /// baked at the call site; the class/message come straight from
 /// the shared [`NativeError`]).
@@ -189,8 +207,8 @@ pub(crate) fn print_join(args: &[Value]) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        PRIM_NAMES, RUNTIME, call_prim, catch_panic, count_str_fast, error_line, nth_str_fast,
-        print_join,
+        PRIM_NAMES, RUNTIME, call_prim, catch_panic, count_str_fast, error_line, is_int_flag,
+        nth_str_fast, print_join, unbox_int,
     };
     use clj_eval::{NativeError, Prim};
     use clj_value::{ThrowClass, Value};
@@ -363,6 +381,27 @@ mod tests {
         let err = at("hello", Value::Nil, None).expect_err("nil index fails");
         assert!(matches!(err.class, ThrowClass::NullPointerException));
         assert!(nth_str_fast(&Value::Int(1), &Value::Int(0), None).is_none());
+    }
+
+    #[test]
+    fn is_int_flag_pins_ints() {
+        assert_eq!(is_int_flag(&Value::Int(0)), 1);
+        assert_eq!(is_int_flag(&Value::Int(i64::MAX)), 1);
+        assert_eq!(is_int_flag(&Value::Int(i64::MIN)), 1);
+        assert_eq!(is_int_flag(&Value::Str("1".into())), 0);
+        assert_eq!(is_int_flag(&Value::Double(1.0)), 0);
+        assert_eq!(is_int_flag(&Value::Bool(true)), 0);
+        assert_eq!(is_int_flag(&Value::Nil), 0);
+    }
+
+    #[test]
+    fn unbox_int_roundtrips_and_degrades() {
+        for n in [0, 1, -1, 42, i64::MAX, i64::MIN] {
+            assert_eq!(unbox_int(&Value::Int(n)), n);
+        }
+        assert_eq!(unbox_int(&Value::Str("x".into())), 0);
+        assert_eq!(unbox_int(&Value::Bool(true)), 0);
+        assert_eq!(unbox_int(&Value::Nil), 0);
     }
 
     #[test]

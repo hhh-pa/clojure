@@ -29,7 +29,9 @@ use std::sync::Arc;
 use clj_eval::{NativeError, Prim};
 use clj_value::{Keyword, List, Value, Vector};
 
-use crate::runtime::{call_prim, count_str_fast, error_line, nth_str_fast, print_join};
+use crate::runtime::{
+    call_prim, count_str_fast, error_line, is_int_flag, nth_str_fast, print_join, unbox_int,
+};
 
 /// The `extern "C"` symbol per [`Prim`], indexed by discriminant
 /// (S8C codegen's single source of truth — a table, not a match:
@@ -112,20 +114,10 @@ unsafe fn drop_args(args: *const *mut Value, argc: usize) {
 
 /// The fallible-helper failure: print `path:line:col: Class:
 /// message` and return null (the generated code null-checks and
-/// exits 1).
-///
-/// # Safety
-///
-/// The path slice must be valid for its length.
-unsafe fn fail(
-    path: *const u8,
-    path_len: usize,
-    line: u32,
-    col: u32,
-    err: &NativeError,
-) -> *mut Value {
-    let path = unsafe { text(path, path_len) };
-    eprintln!("{}", error_line(&path, line, col, err));
+/// exits 1). Takes the decoded path so the only unsafe is the
+/// caller's borrow — this stays a plain safe helper.
+fn fail(path: &str, line: u32, col: u32, err: &NativeError) -> *mut Value {
+    eprintln!("{}", error_line(path, line, col, err));
     ptr::null_mut()
 }
 
@@ -329,7 +321,7 @@ unsafe fn prim_call(
     let owned = unsafe { take_args(args, argc) };
     match call_prim(index, owned) {
         Ok(value) => give(value),
-        Err(err) => unsafe { fail(path, path_len, line, col, &err) },
+        Err(err) => fail(&unsafe { text(path, path_len) }, line, col, &err),
     }
 }
 
@@ -446,7 +438,7 @@ pub unsafe extern "C" fn rt_nth(
             unsafe { drop_args(args, argc) };
             return match outcome {
                 Ok(value) => give(value),
-                Err(err) => unsafe { fail(path, path_len, line, col, &err) },
+                Err(err) => fail(&unsafe { text(path, path_len) }, line, col, &err),
             };
         }
     }
@@ -464,7 +456,7 @@ pub unsafe extern "C" fn rt_nth(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rt_is_int(value: *const Value) -> u8 {
     // Safety: the caller guarantees a valid box (see module docs).
-    u8::from(matches!(unsafe { &*value }, Value::Int(_)))
+    is_int_flag(unsafe { &*value })
 }
 
 /// Borrow-read an `Int` box as a raw `i64` (the unboxed-i64
@@ -479,10 +471,7 @@ pub unsafe extern "C" fn rt_is_int(value: *const Value) -> u8 {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rt_unbox_int(value: *const Value) -> i64 {
     // Safety: the caller guarantees a valid box (see module docs).
-    match unsafe { &*value } {
-        Value::Int(n) => *n,
-        _ => 0,
-    }
+    unbox_int(unsafe { &*value })
 }
 
 /// Flag one checked unboxed step: `0` in `overflow` and the value
@@ -494,16 +483,13 @@ pub unsafe extern "C" fn rt_unbox_int(value: *const Value) -> i64 {
 ///
 /// `overflow` must be a valid writable byte.
 unsafe fn i64_flagged(result: Option<i64>, overflow: *mut u8) -> i64 {
-    match result {
-        Some(n) => {
-            unsafe { *overflow = 0 };
-            n
-        }
-        None => {
-            unsafe { *overflow = 1 };
-            0
-        }
-    }
+    let (value, flag) = match result {
+        Some(n) => (n, 0),
+        None => (0, 1),
+    };
+    // Safety: the caller guarantees a writable byte (see module docs).
+    unsafe { *overflow = flag };
+    value
 }
 
 macro_rules! def_i64 {

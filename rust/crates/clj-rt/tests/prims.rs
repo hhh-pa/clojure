@@ -31,13 +31,20 @@ type Shim =
 
 type Shim64 = unsafe extern "C" fn(i64, i64, *mut u8) -> i64;
 
+/// Call a helper exactly like generated code does: the one
+/// unsafe block every `ffi*` wrapper funnels through (the
+/// `path:line:col:` prefix is pinned by the `error_line` unit
+/// tests and the S8D replay).
+fn raw_call(shim: Shim, boxes: &[*mut Value]) -> *mut Value {
+    let path = b"f.clj";
+    unsafe { shim(boxes.as_ptr(), boxes.len(), path.as_ptr(), path.len(), 3, 9) }
+}
+
 /// Call a helper exactly like generated code does (error renders
-/// as `ERROR`; the `path:line:col:` prefix is pinned by the
-/// `error_line` unit tests and the S8D replay).
+/// as `ERROR`).
 fn ffi(shim: Shim, args: Vec<Value>) -> String {
     let boxes: Vec<*mut Value> = args.into_iter().map(inbox).collect();
-    let path = b"f.clj";
-    let out = unsafe { shim(boxes.as_ptr(), boxes.len(), path.as_ptr(), path.len(), 3, 9) };
+    let out = raw_call(shim, &boxes);
     if out.is_null() {
         "ERROR".to_owned()
     } else {
@@ -67,13 +74,12 @@ fn check(eval: &mut Evaluator, shim: Shim, args: Vec<Value>, src: &str, want: &s
 /// (`first`'s owned return becomes `second`'s single arg).
 fn ffi_chain(first: Shim, args: Vec<Value>, second: Shim) -> String {
     let boxes: Vec<*mut Value> = args.into_iter().map(inbox).collect();
-    let path = b"f.clj";
-    let mid = unsafe { first(boxes.as_ptr(), boxes.len(), path.as_ptr(), path.len(), 3, 9) };
+    let mid = raw_call(first, &boxes);
     if mid.is_null() {
         return "ERROR".to_owned();
     }
     let mids = [mid];
-    let out = unsafe { second(mids.as_ptr(), mids.len(), path.as_ptr(), path.len(), 3, 9) };
+    let out = raw_call(second, &mids);
     if out.is_null() {
         "ERROR".to_owned()
     } else {
@@ -116,8 +122,7 @@ fn time(label: &str, n: usize, mut step: impl FnMut()) {
 // generated-code shape, so the delta is the shim's own.
 fn ffi_drop(shim: Shim, args: Vec<Value>) {
     let boxes: Vec<*mut Value> = args.into_iter().map(inbox).collect();
-    let path = b"f.clj";
-    let out = unsafe { shim(boxes.as_ptr(), boxes.len(), path.as_ptr(), path.len(), 3, 9) };
+    let out = raw_call(shim, &boxes);
     assert!(!out.is_null());
     unsafe { rt_drop(out) };
 }
