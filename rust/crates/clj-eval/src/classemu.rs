@@ -6027,11 +6027,11 @@ fn gated_coll_indexof(
     // `sorted_linked_list` indexes one as a `List`).
     if let Some(sv) = crate::lazy::as_subvector(target) {
         return Some(
-            indexof_scan(eval, sv.iter().cloned(), &rest[0]).map(|at| Value::Int(at.unwrap_or(-1))),
+            indexof_scan(eval, sv.iter(), &rest[0]).map(|at| Value::Int(at.unwrap_or(-1))),
         );
     }
     let scanned = match target {
-        Value::Vector(x) => indexof_scan(eval, x.iter().cloned(), &rest[0]),
+        Value::Vector(x) => indexof_scan(eval, x.iter(), &rest[0]),
         Value::List(l) => indexof_scan(eval, l.iter().cloned(), &rest[0]),
         _ => return None,
     };

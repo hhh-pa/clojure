@@ -25,7 +25,7 @@ use num_traits::ToPrimitive;
 use clj_value::{
     CHUNK_SIZE, ConsValue, CycleValue, ExtensionValue, IterateValue, KeySeqValue, List, Map,
     RangeNum, RangeValue, RealizedSeq, RepeatValue, Seq, SeqKind, Set, SubVectorValue, ThrowClass,
-    ValSeqValue, Value, Vector,
+    TransientVector, ValSeqValue, Value, Vector,
 };
 
 use crate::core::Num;
@@ -831,12 +831,33 @@ fn step_list_unit(l: &List) -> Result<StepUnit, Signal> {
     }
 }
 
-/// Step a vector (chunked).
+/// Step a vector (chunked-lazy: 32 items realize per step, like
+/// strings — the old code collected every item eagerly, twice).
 fn step_vector_unit(x: &Vector) -> Result<StepUnit, Signal> {
-    step_realized(&x.iter().cloned().collect::<Vec<_>>(), true).map_or_else(
-        || Ok(StepUnit::Empty),
-        |s| step_seq(&s, true, true, SeqKind::Chunked, None),
-    )
+    if x.is_empty() {
+        return Ok(StepUnit::Empty);
+    }
+    let s = vec_chunk_seq(x.clone(), 0).expect("non-empty vector yields a first chunk");
+    step_seq(&s, true, true, SeqKind::Chunked, None)
+}
+
+/// The [`CHUNK_SIZE`]-item chunk at `pos` plus a lazy tail (`None`
+/// past the end). Dropped chunks free, so walking a vector-seq
+/// holds O(1) items no matter the vector's size.
+fn vec_chunk_seq(v: Vector, pos: usize) -> Option<Seq> {
+    // `pos < len`, so the chunk below always holds at least one
+    // item (no empty tail — the boundary check above is the only
+    // `None`).
+    if pos >= v.len() {
+        return None;
+    }
+    let end = (pos + CHUNK_SIZE).min(v.len());
+    let mut chunk = Vec::with_capacity(end - pos);
+    for i in pos..end {
+        chunk.push(v.get(i).expect("chunk index within bounds"));
+    }
+    let tail = Seq::lazy(move || vec_chunk_seq(v.clone(), end));
+    Some(Seq::chunk_cons(chunk, tail))
 }
 
 /// Step a map (small maps keep `Map` kind).
@@ -863,11 +884,37 @@ fn step_set_unit(s: &Set) -> Result<StepUnit, Signal> {
 
 /// Step a string.
 fn step_str_unit(s: &str) -> Result<StepUnit, Signal> {
-    let chars: Vec<Value> = s.chars().map(Value::Char).collect();
-    step_realized(&chars, false).map_or_else(
-        || Ok(StepUnit::Empty),
-        |s| step_seq(&s, true, true, SeqKind::Str, None),
-    )
+    if s.is_empty() {
+        return Ok(StepUnit::Empty);
+    }
+    // One shared copy of the string; chunks realize 32 chars on
+    // demand (like the JVM's `StringSeq`, O(1) per step — the old
+    // code materialized every char eagerly, 72 bytes each).
+    let shared: Arc<str> = Arc::from(s);
+    let seq = str_chunk_seq(shared, 0).expect("non-empty string yields a first chunk");
+    step_seq(&seq, true, true, SeqKind::Str, None)
+}
+
+/// The [`CHUNK_SIZE`]-char chunk at byte `pos` plus a lazy tail
+/// (`None` past the end). Steps advance through the chunk, then
+/// force the tail thunk for the next chunk; dropped chunks free,
+/// so walking a string holds O(1) chars.
+fn str_chunk_seq(s: Arc<str>, pos: usize) -> Option<Seq> {
+    let rest = s.get(pos..)?;
+    let mut chunk = Vec::new();
+    let mut next = pos;
+    for (i, ch) in rest.char_indices() {
+        if chunk.len() == CHUNK_SIZE {
+            break;
+        }
+        chunk.push(Value::Char(ch));
+        next = pos + i + ch.len_utf8();
+    }
+    if chunk.is_empty() {
+        return None;
+    }
+    let tail = Seq::lazy(move || str_chunk_seq(Arc::clone(&s), next));
+    Some(Seq::chunk_cons(chunk, tail))
 }
 
 /// Step one input: empty, one head, or a whole chunk (chunked
@@ -1409,7 +1456,7 @@ fn idrop_shift_vector(x: &Vector, n: i32, n64: i64) -> Option<Value> {
     if n64 < 0 || n64 >= x.len() as i64 {
         return None;
     }
-    let rest: Vec<Value> = x.iter().skip(n as usize).cloned().collect();
+    let rest: Vec<Value> = x.iter().skip(n as usize).collect();
     Some(realized_value(rest, true, true, true, SeqKind::Chunked))
 }
 
@@ -2424,10 +2471,10 @@ fn step_sequence(
         if let Some(inner) = crate::core::as_reduced(&stepped).cloned() {
             stopped = true;
             if let Value::Vector(v) = &inner {
-                out.extend(v.iter().cloned());
+                out.extend(v.iter());
             }
         } else if let Value::Vector(v) = &stepped {
-            out.extend(v.iter().cloned());
+            out.extend(v.iter());
         }
     }
     if out.is_empty() {
@@ -3001,13 +3048,16 @@ pub(crate) fn check_seqable(eval: &mut Evaluator, v: &Value) -> Result<(), Signa
 
 /// `seq` of a vector (chunked).
 fn seq_vector(x: &Vector) -> Value {
-    realized_value(
-        x.iter().cloned().collect::<Vec<_>>(),
-        true,
+    if x.is_empty() {
+        return Value::Nil;
+    }
+    let seq = vec_chunk_seq(x.clone(), 0).expect("non-empty vector yields a first chunk");
+    Value::Extension(Arc::new(RealizedSeq::flagged(
+        seq,
         true,
         true,
         SeqKind::Chunked,
-    )
+    )))
 }
 
 /// `seq` of a map (small maps keep `Map` kind).
@@ -3036,15 +3086,20 @@ fn seq_set(s: &Set) -> Value {
     )
 }
 
-/// `seq` of a string.
+/// `seq` of a string (chunked-lazy: the first 32 chars realize
+/// now, the rest on demand — same flags as the old eager seq).
 fn seq_str(s: &str) -> Value {
-    realized_value(
-        s.chars().map(Value::Char).collect::<Vec<_>>(),
-        false,
+    if s.is_empty() {
+        return Value::Nil;
+    }
+    let shared: Arc<str> = Arc::from(s);
+    let seq = str_chunk_seq(shared, 0).expect("non-empty string yields a first chunk");
+    Value::Extension(Arc::new(RealizedSeq::flagged(
+        seq,
         true,
         true,
         SeqKind::Str,
-    )
+    )))
 }
 
 /// Nil-punning `seq`: nil for empties, the seq value otherwise.
@@ -3098,7 +3153,7 @@ pub(crate) fn seq_value(eval: &mut Evaluator, v: &Value) -> Result<Value, Signal
 /// head, else the `ArrayList` snapshot head).
 fn first_direct_extension(v: &Value) -> Option<Value> {
     as_subvector(v)
-        .map(|sv| sv.iter().next().cloned().unwrap_or(Value::Nil))
+        .map(|sv| sv.iter().next().unwrap_or(Value::Nil))
         .or_else(|| {
             crate::emucoll::list_snapshot(v)
                 .map(|items| items.into_iter().next().unwrap_or(Value::Nil))
@@ -3110,7 +3165,7 @@ fn first_direct_extension(v: &Value) -> Option<Value> {
 fn first_direct(v: &Value) -> Option<Value> {
     match v {
         Value::List(l) => Some(l.first().cloned().unwrap_or(Value::Nil)),
-        Value::Vector(x) => Some(x.iter().next().cloned().unwrap_or(Value::Nil)),
+        Value::Vector(x) => Some(x.iter().next().unwrap_or(Value::Nil)),
         Value::MapEntry { key, .. } => Some((**key).clone()),
         Value::Map(m) => Some(
             m.iter()
@@ -3343,6 +3398,32 @@ pub(crate) fn next_value(eval: &mut Evaluator, v: &Value) -> Result<Value, Signa
 
 /// Realize every item (for `apply` spreads, `vec`, `sort`,
 /// `count`, printing, and `=`).
+/// Streaming `collect_all` into a vector: items flow one by one
+/// through a transient, so all-`Int` seqs freeze to packed storage
+/// without ever materializing a `Vec<Value>` (8 bytes per element
+/// peak instead of 72, single copy).
+pub(crate) fn collect_packed(eval: &mut Evaluator, v: &Value) -> Result<Vector, Signal> {
+    let mut tv = TransientVector::new();
+    let mut cur = v.clone();
+    loop {
+        match step_unit(eval, &cur)? {
+            StepUnit::Empty => {
+                return Ok(tv.persistent().expect("fresh transient is valid at freeze"));
+            }
+            StepUnit::One { head, tail } => {
+                tv.conj(head).expect("fresh transient accepts conj");
+                cur = tail;
+            }
+            StepUnit::Chunk { items, tail } => {
+                for item in items.iter().cloned() {
+                    tv.conj(item).expect("fresh transient accepts conj");
+                }
+                cur = tail;
+            }
+        }
+    }
+}
+
 pub(crate) fn collect_all(eval: &mut Evaluator, v: &Value) -> Result<Vec<Value>, Signal> {
     let mut out = Vec::new();
     let mut cur = v.clone();
@@ -3607,7 +3688,7 @@ fn realize_strict_seq_deep(eval: &mut Evaluator, v: &Value) -> Result<Value, Sig
 fn realize_subvector_deep(eval: &mut Evaluator, sv: &SubVectorValue) -> Result<Value, Signal> {
     let mut items = Vec::with_capacity(sv.len());
     for item in sv.iter() {
-        items.push(realize_deep(eval, item)?);
+        items.push(realize_deep(eval, &item)?);
     }
     Ok(Value::Extension(Arc::new(sv.with_window(items))))
 }
@@ -3644,7 +3725,7 @@ fn realize_deep_list(eval: &mut Evaluator, l: &List) -> Result<Value, Signal> {
 fn realize_deep_vector(eval: &mut Evaluator, x: &Vector) -> Result<Value, Signal> {
     let mut items = Vec::with_capacity(x.len());
     for item in x.iter() {
-        items.push(realize_deep(eval, item)?);
+        items.push(realize_deep(eval, &item)?);
     }
     Ok(Value::Vector(
         Vector::from_vec(items).with_meta(x.meta().cloned()),

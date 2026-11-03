@@ -21,6 +21,7 @@
 //! Shared by `corpus` and `snapshot`, which use different subsets.
 #![allow(dead_code)]
 
+use std::borrow::Borrow;
 use std::collections::HashMap;
 
 use clj_reader::{NoHooks, ReadCond, ReaderOpts, read_all};
@@ -94,7 +95,7 @@ fn expect_int(v: &Value) -> i64 {
 
 fn expect_vec(v: &Value) -> Vec<Value> {
     match v {
-        Value::Vector(items) => items.iter().cloned().collect(),
+        Value::Vector(items) => items.iter().collect(),
         other => panic!("expected vector, got {other:?}"),
     }
 }
@@ -132,7 +133,7 @@ pub fn parse_cases(v: &Value) -> Vec<Case> {
         Value::Vector(items) => items
             .iter()
             .map(|c| {
-                let m = expect_map(c);
+                let m = expect_map(&c);
                 let opts = expect_map(map_get(m, "opts").unwrap());
                 let read_cond = match kw_name(map_get(opts, "read-cond").unwrap()) {
                     "allow" => ReadCond::Allow,
@@ -266,7 +267,7 @@ pub fn parse_files(v: &Value) -> Vec<FileEntry> {
         Value::Vector(items) => items
             .iter()
             .map(|f| {
-                let m = expect_map(f);
+                let m = expect_map(&f);
                 FileEntry {
                     path: expect_string(map_get(m, "path").unwrap()),
                     count: usize::try_from(map_get(m, "count").map(expect_int).unwrap_or(0))
@@ -465,19 +466,18 @@ fn append_canon_set(out: &mut String, s: &clj_value::Set, print_meta: bool) {
     out.push('}');
 }
 
-fn join_canon<'a>(
-    out: &mut String,
-    items: impl Iterator<Item = &'a Value>,
-    sep: &str,
-    print_meta: bool,
-) {
+fn join_canon<I>(out: &mut String, items: I, sep: &str, print_meta: bool)
+where
+    I: Iterator,
+    I::Item: std::borrow::Borrow<clj_value::Value>,
+{
     let mut first = true;
     for v in items {
         if !first {
             out.push_str(sep);
         }
         first = false;
-        out.push_str(&canon(v, print_meta));
+        out.push_str(&canon(v.borrow(), print_meta));
     }
 }
 

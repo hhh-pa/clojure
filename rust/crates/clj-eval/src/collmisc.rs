@@ -859,14 +859,14 @@ fn iteration_fold_trailing(
         return Ok(());
     }
     if let Value::Vector(v) = trailing {
-        let items: Vec<&Value> = v.iter().collect();
+        let items: Vec<Value> = v.iter().collect();
         if items.len() != 2 {
             return Err(NativeError::new(
                 ThrowClass::IllegalArgumentException,
                 "Vector arg to map conj must be a pair".to_owned(),
             ));
         }
-        iteration_set_opt(out, items[0], items[1].clone());
+        iteration_set_opt(out, &items[0], items[1].clone());
         return Ok(());
     }
     if matches!(trailing, Value::Nil) {

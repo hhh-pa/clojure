@@ -92,7 +92,7 @@ fn merge_map(mut map: Map, m: &Map) -> Map {
 /// Assoc a vector tail (exactly a pair, else the JVM's pair
 /// error, oracle `sm-odd-vec*`).
 fn conj_tail_vector(map: Map, x: &Vector) -> Result<Map, NativeError> {
-    let items: Vec<&Value> = x.iter().collect();
+    let items: Vec<Value> = x.iter().collect();
     match items.as_slice() {
         [k, v] => Ok(map.insert((*k).clone(), (*v).clone())),
         _ => Err(iae("Vector arg to map conj must be a pair".to_owned())),

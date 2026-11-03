@@ -751,7 +751,7 @@ fn write_seq_body(
             write_seq_items(eval, &items, "(", ")", " ", w, opts)
         }
         Value::Vector(v) => {
-            let items: Vec<Value> = v.iter().cloned().collect();
+            let items: Vec<Value> = v.iter().collect();
             write_seq_items(eval, &items, "[", "]", " ", w, opts)
         }
         Value::MapEntry { key, val, .. } => write_seq_items(

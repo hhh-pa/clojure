@@ -2594,7 +2594,7 @@ impl Evaluator {
                 Ok(map)
             }
             Value::Vector(v) => {
-                let items: Vec<Value> = v.iter().cloned().collect();
+                let items: Vec<Value> = v.iter().collect();
                 match items.as_slice() {
                     [k, val] => Ok(map.insert(k.clone(), val.clone())),
                     _ => Err(self.throw(NativeError::new(
@@ -2676,7 +2676,7 @@ impl Evaluator {
                 Ok(())
             }
             Value::Vector(v) => {
-                let items: Vec<&Value> = v.iter().collect();
+                let items: Vec<Value> = v.iter().collect();
                 if items.len() != 2 {
                     return Err(self.throw(NativeError::new(
                         ThrowClass::IllegalArgumentException,
@@ -2900,7 +2900,7 @@ fn lookup(coll: &Value, key: &Value) -> Option<Value> {
 
 fn lookup_vector(v: &Vector, key: &Value) -> Option<Value> {
     match key {
-        Value::Int(n) => usize::try_from(*n).ok().and_then(|i| v.get(i).cloned()),
+        Value::Int(n) => usize::try_from(*n).ok().and_then(|i| v.get(i)),
         _ => None,
     }
 }
@@ -2953,7 +2953,7 @@ fn rest_list(args: &[Value]) -> Value {
 fn nth_or_nil(coll: &Value, i: usize, eval: &mut Evaluator) -> Result<Value, Signal> {
     match coll {
         Value::Nil => Ok(Value::Nil),
-        Value::Vector(v) => Ok(v.get(i).cloned().unwrap_or(Value::Nil)),
+        Value::Vector(v) => Ok(v.get(i).unwrap_or(Value::Nil)),
         Value::MapEntry { key, val, .. } => Ok(match i {
             0 => (**key).clone(),
             1 => (**val).clone(),
@@ -2988,7 +2988,7 @@ impl Evaluator {
                     Ok(Some(l.clone()))
                 }
             }
-            Value::Vector(v) => Ok(Self::seq_list_opt(v.iter().cloned().collect())),
+            Value::Vector(v) => Ok(Self::seq_list_opt(v.iter().collect())),
             Value::PrimitiveVector(p) => Ok(Self::seq_list_opt(p.items())),
             Value::Array(a) => Ok(Self::seq_list_opt(a.snapshot())),
             Value::Set(s) => Ok(Self::seq_list_opt(s.iter().cloned().collect())),

@@ -497,9 +497,9 @@ impl DepthScan {
 /// and propagates it.
 fn value_depth(value: &Value) -> usize {
     let mut max = 0;
-    let mut stack = vec![(value, 0)];
+    let mut stack = vec![(value.clone(), 0)];
     while let Some((node, depth)) = stack.pop() {
-        if push_children(&mut stack, node, depth + 1) {
+        if push_children(&mut stack, &node, depth + 1) {
             max = max.max(depth + 1);
         }
     }
@@ -507,11 +507,13 @@ fn value_depth(value: &Value) -> usize {
 }
 
 /// Push a node's children at `depth`; true when the node is a
-/// container.
-fn push_children<'a>(stack: &mut Vec<(&'a Value, usize)>, value: &'a Value, depth: usize) -> bool {
+/// container. The worklist owns its nodes (packed vector items have
+/// no address to lend); children are cloned in, which is bumps for
+/// heap values on this analyzer-only path.
+fn push_children(stack: &mut Vec<(Value, usize)>, value: &Value, depth: usize) -> bool {
     match value {
         Value::List(l) => {
-            push_each(stack, l.iter(), depth);
+            push_each(stack, l.iter().cloned(), depth);
             true
         }
         Value::Vector(v) => {
@@ -519,22 +521,22 @@ fn push_children<'a>(stack: &mut Vec<(&'a Value, usize)>, value: &'a Value, dept
             true
         }
         Value::Set(s) => {
-            push_each(stack, s.iter(), depth);
+            push_each(stack, s.iter().cloned(), depth);
             true
         }
         Value::Map(m) => {
             for (k, v) in m.iter() {
-                stack.push((k, depth));
-                stack.push((v, depth));
+                stack.push((k.clone(), depth));
+                stack.push((v.clone(), depth));
             }
             true
         }
         Value::TaggedLiteral { form, .. } => {
-            stack.push((&**form, depth));
+            stack.push((form.as_ref().clone(), depth));
             true
         }
         Value::ReaderConditional { form, .. } => {
-            stack.push((&**form, depth));
+            stack.push((form.as_ref().clone(), depth));
             true
         }
         _ => false,
@@ -551,11 +553,7 @@ fn depth_error(span: Span, depth: usize, expanded: bool) -> PlanError {
     }
 }
 
-fn push_each<'a>(
-    stack: &mut Vec<(&'a Value, usize)>,
-    items: impl Iterator<Item = &'a Value>,
-    depth: usize,
-) {
+fn push_each(stack: &mut Vec<(Value, usize)>, items: impl Iterator<Item = Value>, depth: usize) {
     for item in items {
         stack.push((item, depth));
     }
@@ -844,7 +842,7 @@ impl Planner {
             Value::Vector(vec) => {
                 let mut out = Vec::with_capacity(vec.len());
                 for item in vec.iter() {
-                    out.push(self.classify_expr(item, scope, next, fallback)?);
+                    out.push(self.classify_expr(&item, scope, next, fallback)?);
                 }
                 Ok(SubsetExpr::VecLit(out))
             }
@@ -1043,13 +1041,13 @@ impl Planner {
                 hint: "not in the AOT pure subset".to_owned(),
             }));
         };
-        let items: Vec<&Value> = vec.iter().collect();
+        let items: Vec<Value> = vec.iter().collect();
         let mut bound = Vec::with_capacity(items.len() / 2);
         let mut shadows: Vec<(&str, Option<usize>)> = Vec::new();
         for pair in items.chunks(2) {
             // Validated first (odd bindings never analyze), so the
             // short tail is pinned by a direct test.
-            let &[pat, init] = pair else {
+            let [pat, init] = pair else {
                 return Err(PlanError::Subset(SubsetError {
                     span,
                     form: "let".to_owned(),
@@ -1102,7 +1100,7 @@ fn is_defn_head(sym: &Symbol) -> bool {
 enum DefnShape<'a> {
     Single {
         name: &'a str,
-        params: Vec<&'a str>,
+        params: Vec<String>,
         body: Vec<&'a Value>,
     },
     Multi,
@@ -1167,7 +1165,7 @@ fn parse_defn<'a>(items: &[&'a Value]) -> DefnShape<'a> {
         if p.name() == "&" {
             return DefnShape::Variadic;
         }
-        out.push(p.name());
+        out.push(p.name().to_owned());
     }
     // Pre/post: a map in second position with a body after (the
     // macro's `(and (map? pp) (nnext sig))`).

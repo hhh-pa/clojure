@@ -100,7 +100,7 @@ pub fn hasheq(v: &Value) -> i32 {
         Value::Symbol(s) => symbol_hasheq(s),
         Value::Keyword(k) => keyword_hasheq(k),
         Value::List(l) => hash_ordered(l.iter().map(hasheq)),
-        Value::Vector(v) => hash_ordered(v.iter().map(hasheq)),
+        Value::Vector(v) => hash_ordered(v.iter().map(|item| hasheq(&item))),
         // Primitive vectors hash exactly like their item vector
         // (they are `=` to it — S15 oracle `f-hash-eq`).
         Value::PrimitiveVector(p) => hash_ordered(p.iter().map(hasheq)),
@@ -299,7 +299,7 @@ pub fn hash_code(v: &Value) -> i32 {
         Value::Symbol(s) => symbol_hash_code(s),
         Value::Keyword(k) => keyword_hash_code(k),
         Value::List(l) => list_hash_code(l.iter().map(hash_code)),
-        Value::Vector(v) => list_hash_code(v.iter().map(hash_code)),
+        Value::Vector(v) => list_hash_code(v.iter().map(|item| hash_code(&item))),
         Value::Uuid(_) | Value::Instant(_) | Value::Uri(_) => scalar_hash(v),
         Value::PrimitiveVector(p) => list_hash_code(p.iter().map(hash_code)),
         other => hash_code_mid(other),
@@ -538,7 +538,7 @@ fn id_hash(id: u64) -> i32 {
 pub fn seq_hash_unsupported(v: &Value) -> bool {
     match v {
         Value::List(l) => l.iter().any(seq_hash_unsupported),
-        Value::Vector(v) => v.iter().any(seq_hash_unsupported),
+        Value::Vector(v) => v.iter().any(|item| seq_hash_unsupported(&item)),
         Value::MapEntry { key, val, .. } => seq_hash_unsupported(key) || seq_hash_unsupported(val),
         Value::Map(m) => m
             .iter()

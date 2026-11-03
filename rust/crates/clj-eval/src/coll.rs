@@ -28,9 +28,9 @@ use crate::error::{NativeError, jvm_class_of, simple_name_of};
 use crate::eval::Evaluator;
 use crate::ext::as_native;
 use crate::lazy::{
-    StepUnit, as_range, as_realized, as_repeat, as_subvector, collect_all, empty_list_value,
-    equiv_vals, first_value, is_seq_value, is_seqable, next_value, realized_value, replace_thunk,
-    seq_value, step_unit,
+    StepUnit, as_range, as_realized, as_repeat, as_subvector, collect_all, collect_packed,
+    empty_list_value, equiv_vals, first_value, is_seq_value, is_seqable, next_value,
+    realized_value, replace_thunk, seq_value, step_unit,
 };
 use crate::ns::{NativeFnPtr, check_arity, signal_to_native, str_of};
 use crate::seqs::{afunction_order, call_checked};
@@ -117,11 +117,7 @@ pub(crate) fn lookup_present(
 }
 
 fn lookup_vector_slot(x: &Vector, key: &Value) -> Option<Value> {
-    int_key(key).and_then(|i| {
-        usize::try_from(i as i32)
-            .ok()
-            .and_then(|idx| x.get(idx).cloned())
-    })
+    int_key(key).and_then(|i| usize::try_from(i as i32).ok().and_then(|idx| x.get(idx)))
 }
 
 fn lookup_entry_slot(ek: &Value, ev: &Value, key: &Value) -> Option<Value> {
@@ -167,11 +163,9 @@ fn lookup_array_slot(a: &clj_value::Array, key: &Value) -> Option<Value> {
 
 fn lookup_present_fallback(coll: &Value, key: &Value) -> Result<Option<Value>, NativeError> {
     if let Some(sv) = as_subvector(coll) {
-        return Ok(int_key(key).and_then(|i| {
-            usize::try_from(i as i32)
-                .ok()
-                .and_then(|idx| sv.nth(idx).cloned())
-        }));
+        return Ok(
+            int_key(key).and_then(|i| usize::try_from(i as i32).ok().and_then(|idx| sv.nth(idx)))
+        );
     }
     Ok(None)
 }
@@ -188,7 +182,7 @@ fn transient_get(t: &Transient, key: &Value) -> Result<Option<Value>, NativeErro
             let Some(idx) = usize::try_from(i as i32).ok() else {
                 return Ok(None);
             };
-            Ok(tv.nth(idx).map_err(transient_err)?.cloned())
+            Ok(tv.nth(idx).map_err(transient_err)?)
         }
         TransientKind::Map(tm) => Ok(tm.get(key).map_err(transient_err)?.cloned()),
         TransientKind::Set(ts) => {
@@ -350,7 +344,7 @@ fn map_conj_plan(eval: &mut Evaluator, x: &Value) -> Result<MapConjPlan, NativeE
             other.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
         )),
         Value::Vector(v) => {
-            let items: Vec<Value> = v.iter().cloned().collect();
+            let items: Vec<Value> = v.iter().collect();
             pair_plan(&items)
         }
         // `Vec` pairs assoc like vectors (S15); non-pairs are
@@ -1364,7 +1358,7 @@ fn nth_indexed_transient(t: &Transient, n: i32) -> Result<Option<Value>, NativeE
     let guard = t.lock();
     match &*guard {
         TransientKind::Vector(tv) => match usize::try_from(n).ok() {
-            Some(idx) => Ok(tv.nth(idx).map_err(transient_err)?.cloned()),
+            Some(idx) => Ok(tv.nth(idx).map_err(transient_err)?),
             None => Ok(None),
         },
         kind => Err(nth_unsupported_class(kind.jvm_class())),
@@ -1390,7 +1384,7 @@ fn nth_indexed_found(
 
 fn nth_indexed(coll: &Value, n: i32, not_found: Option<&Value>) -> Result<Value, NativeError> {
     let found = match coll {
-        Value::Vector(x) => usize::try_from(n).ok().and_then(|idx| x.get(idx).cloned()),
+        Value::Vector(x) => usize::try_from(n).ok().and_then(|idx| x.get(idx)),
         Value::PrimitiveVector(p) => usize::try_from(n).ok().and_then(|idx| p.get(idx).cloned()),
         Value::MapEntry { key, val, .. } => usize::try_from(n).ok().and_then(|idx| match idx {
             0 => Some((**key).clone()),
@@ -1398,8 +1392,7 @@ fn nth_indexed(coll: &Value, n: i32, not_found: Option<&Value>) -> Result<Value,
             _ => None,
         }),
         Value::Transient(t) => nth_indexed_transient(t, n)?,
-        _ => as_subvector(coll)
-            .and_then(|sv| usize::try_from(n).ok().and_then(|idx| sv.nth(idx).cloned())),
+        _ => as_subvector(coll).and_then(|sv| usize::try_from(n).ok().and_then(|idx| sv.nth(idx))),
     };
     nth_indexed_found(found, not_found)
 }
@@ -1685,8 +1678,8 @@ fn native_vec(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError
             ),
         ));
     }
-    let items = collect_all(eval, &args[0]).map_err(signal_to_native)?;
-    Ok(Value::Vector(Vector::from_vec(items)))
+    let vec = collect_packed(eval, &args[0]).map_err(signal_to_native)?;
+    Ok(Value::Vector(vec))
 }
 
 fn native_merge(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
@@ -2169,9 +2162,7 @@ fn pop_queue(x: &Vector) -> Value {
     if x.is_empty() {
         return Value::Vector(x.clone());
     }
-    Value::Vector(
-        Vector::from_vec(x.iter().skip(1).cloned().collect()).with_meta(x.meta().cloned()),
-    )
+    Value::Vector(Vector::from_vec(x.iter().skip(1).collect()).with_meta(x.meta().cloned()))
 }
 
 fn native_peek(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
@@ -2179,13 +2170,13 @@ fn native_peek(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErr
     match &args[0] {
         Value::Nil => Ok(Value::Nil),
         Value::List(l) => Ok(l.first().cloned().unwrap_or(Value::Nil)),
-        Value::Vector(x) if is_queue_vec(x) => Ok(x.iter().next().cloned().unwrap_or(Value::Nil)),
-        Value::Vector(x) => Ok(x.iter().last().cloned().unwrap_or(Value::Nil)),
+        Value::Vector(x) if is_queue_vec(x) => Ok(x.iter().next().unwrap_or(Value::Nil)),
+        Value::Vector(x) => Ok(x.iter().next_back().unwrap_or(Value::Nil)),
         Value::PrimitiveVector(p) => Ok(p.iter().last().cloned().unwrap_or(Value::Nil)),
         Value::MapEntry { val, .. } => Ok((**val).clone()),
         _ => {
             if let Some(sv) = as_subvector(&args[0]) {
-                return Ok(sv.iter().last().cloned().unwrap_or(Value::Nil));
+                return Ok(sv.iter().last().unwrap_or(Value::Nil));
             }
             Err(cce_err(&args[0], "clojure.lang.IPersistentStack"))
         }

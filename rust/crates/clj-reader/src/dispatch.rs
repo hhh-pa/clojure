@@ -581,7 +581,7 @@ impl Reader {
         }
         let items = match &result {
             Value::List(l) => l.iter().cloned().collect::<Vec<_>>(),
-            Value::Vector(v) => v.iter().cloned().collect::<Vec<_>>(),
+            Value::Vector(v) => v.iter().collect::<Vec<_>>(),
             _ => {
                 return Err(ReaderError::SpliceType { span: self.span() });
             }

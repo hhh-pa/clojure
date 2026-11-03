@@ -486,7 +486,7 @@ fn native_construct_proxy(eval: &mut Evaluator, args: &[Value]) -> Result<Value,
 /// exactly three — the port descriptor contract).
 fn method_sig_items(v: &Value) -> Result<Vec<Value>, NativeError> {
     let items: Vec<Value> = match v {
-        Value::Vector(items) => items.iter().cloned().collect(),
+        Value::Vector(items) => items.iter().collect(),
         Value::List(items) => items.iter().cloned().collect(),
         _ => return Err(method_sig_shape()),
     };

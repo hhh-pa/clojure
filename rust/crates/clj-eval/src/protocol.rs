@@ -383,7 +383,7 @@ fn method_argcnts(sigs: &Map, method: &str) -> Vec<usize> {
     let lists: Vec<Value> = match sigs.get(&key) {
         Some(Value::Map(info)) => match info.get(&Value::Keyword(Keyword::new(None, "arglists"))) {
             Some(Value::List(lists)) => lists.iter().cloned().collect(),
-            Some(Value::Vector(lists)) => lists.iter().cloned().collect(),
+            Some(Value::Vector(lists)) => lists.iter().collect(),
             _ => return Vec::new(),
         },
         _ => return Vec::new(),
@@ -425,7 +425,7 @@ fn native_protocol_invoke(eval: &mut Evaluator, args: &[Value]) -> Result<Value,
         _ => return Err(cce_err(&args[1], "java.lang.String")),
     };
     let callargs = match &args[2] {
-        Value::Vector(items) => items.iter().cloned().collect::<Vec<_>>(),
+        Value::Vector(items) => items.iter().collect::<Vec<_>>(),
         _ => return Err(cce_err(&args[2], "clojure.lang.IPersistentVector")),
     };
     if callargs.is_empty() {

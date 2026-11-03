@@ -485,7 +485,7 @@ fn native_rseq(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErr
             ThrowClass::NullPointerException,
             "Cannot invoke \"clojure.lang.Reversible.rseq()\" because \"rev\" is null".to_owned(),
         )),
-        Value::Vector(x) => Ok(rseq_of(x.iter().cloned().collect())),
+        Value::Vector(x) => Ok(rseq_of(x.iter().collect())),
         Value::PrimitiveVector(p) => Ok(rseq_of(p.items())),
         Value::MapEntry { key, val, .. } => Ok(rseq_of(vec![(**key).clone(), (**val).clone()])),
         Value::Map(m) if m.is_sorted() => Ok(rseq_of(
@@ -496,7 +496,7 @@ fn native_rseq(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErr
         Value::Set(s) if s.is_sorted() => Ok(rseq_of(s.iter().cloned().collect())),
         other => {
             if let Some(sv) = as_subvector(other) {
-                return Ok(rseq_of(sv.iter().cloned().collect()));
+                return Ok(rseq_of(sv.iter().collect()));
             }
             Err(cce_err(other, "clojure.lang.Reversible"))
         }

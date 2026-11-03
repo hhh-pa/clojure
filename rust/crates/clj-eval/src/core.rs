@@ -1438,7 +1438,7 @@ fn compare_vectors(
             (None, None) => return Ok(Ordering::Equal),
             (None, _) => return Ok(Ordering::Less),
             (_, None) => return Ok(Ordering::Greater),
-            (Some(u), Some(v)) => match jvm_compare(u, v)? {
+            (Some(u), Some(v)) => match jvm_compare(&u, &v)? {
                 Ordering::Equal => {}
                 ord => return Ok(ord),
             },
@@ -2454,7 +2454,9 @@ fn needs_resolution(v: &Value) -> bool {
         Value::TaggedLiteral { .. } => true,
         Value::Symbol(s) => s.meta().is_some_and(map_needs),
         Value::List(l) => l.iter().any(needs_resolution) || l.meta().is_some_and(map_needs),
-        Value::Vector(v) => v.iter().any(needs_resolution) || v.meta().is_some_and(map_needs),
+        Value::Vector(v) => {
+            v.iter().any(|v| needs_resolution(&v)) || v.meta().is_some_and(map_needs)
+        }
         Value::Map(m) => map_needs(m),
         Value::Set(s) => s.iter().any(needs_resolution) || s.meta().is_some_and(map_needs),
         _ => false,

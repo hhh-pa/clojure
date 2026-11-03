@@ -157,9 +157,9 @@ pub(crate) fn push_entries(
             let mut entries = Vec::with_capacity(x.len());
             for item in x.iter() {
                 let Value::MapEntry { key, val, .. } = item else {
-                    return Err(cce_err(item, IENTRY_CLASS));
+                    return Err(cce_err(&item, IENTRY_CLASS));
                 };
-                push_checked_entry(eval, &mut entries, key, (**val).clone())?;
+                push_checked_entry(eval, &mut entries, &key, *val)?;
             }
             Ok(entries)
         }

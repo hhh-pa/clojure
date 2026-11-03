@@ -789,7 +789,7 @@ impl<'a> Analyzer<'a> {
     fn analyze_vec_lit(&mut self, v: &Vector, span: Span) -> Result<Expr, CompileError> {
         let mut out = Vec::with_capacity(v.len());
         for elem in v.iter() {
-            out.push(self.analyze(elem, span, false)?);
+            out.push(self.analyze(&elem, span, false)?);
         }
         Ok(Expr::VecLit(out, v.meta().cloned()))
     }
@@ -2409,7 +2409,7 @@ impl<'a> Analyzer<'a> {
         // Step indexing, not `chunks_exact` (new clippy wants
         // `as_chunks`, which needs Rust 1.88 > MSRV 1.85).
         for i in (0..forms.len()).step_by(2) {
-            let var_sym = match forms[i] {
+            let var_sym = match &forms[i] {
                 Value::Symbol(sym) => self.resolve_var(sym, span, "var")?,
                 other => {
                     return Err(self.err(
@@ -2423,7 +2423,7 @@ impl<'a> Analyzer<'a> {
                     ));
                 }
             };
-            pairs.push((var_sym, self.analyze(forms[i + 1], span, false)?));
+            pairs.push((var_sym, self.analyze(&forms[i + 1], span, false)?));
         }
         Ok(Expr::Binding {
             pairs,
@@ -2493,7 +2493,6 @@ impl<'a> Analyzer<'a> {
             v @ (Value::Vector(_) | Value::MapEntry { .. }) => Ok(vector_shape_items(v)
                 .expect("vector shape checked")
                 .into_iter()
-                .cloned()
                 .collect()),
             Value::List(l) => Ok(l.iter().cloned().collect()),
             Value::Nil => Ok(Vec::new()),
@@ -2625,8 +2624,8 @@ impl<'a> Analyzer<'a> {
         let ampform = Value::Symbol(Symbol::new(None, "&form"));
         let ampenv = Value::Symbol(Symbol::new(None, "&env"));
         for clause in &mut raw {
-            clause.fixed.insert(0, &ampenv);
-            clause.fixed.insert(0, &ampform);
+            clause.fixed.insert(0, ampenv.clone());
+            clause.fixed.insert(0, ampform.clone());
         }
         let (mut fun, _) = self.build_fun(None, &raw, span)?;
         let cur = self.current_ns();
@@ -2774,7 +2773,7 @@ fn as_clause(form: &Value) -> Option<(&str, &List)> {
 /// A binding-pattern shape (spec- or star-validated before building).
 enum Pat<'v> {
     Symbol(&'v Symbol),
-    Vector(Vec<&'v Value>),
+    Vector(Vec<Value>),
     Map(&'v Map),
 }
 
@@ -2782,10 +2781,10 @@ enum Pat<'v> {
 /// entry's key and value (`MapEntry extends APersistentVector`, so
 /// every binding/param/pattern position that takes a vector takes
 /// an entry too). `None` for anything else.
-fn vector_shape_items(v: &Value) -> Option<Vec<&Value>> {
+fn vector_shape_items(v: &Value) -> Option<Vec<Value>> {
     match v {
         Value::Vector(vec) => Some(vec.iter().collect()),
-        Value::MapEntry { key, val, .. } => Some(vec![key.as_ref(), val.as_ref()]),
+        Value::MapEntry { key, val, .. } => Some(vec![key.as_ref().clone(), val.as_ref().clone()]),
         _ => None,
     }
 }
@@ -2840,7 +2839,7 @@ fn spec_valid_binding(form: &Value) -> bool {
     }
 }
 
-fn spec_valid_seq(forms: &[&Value]) -> bool {
+fn spec_valid_seq(forms: &[Value]) -> bool {
     let Some(rest) = strip_spec_as(forms) else {
         return false;
     };
@@ -2856,20 +2855,20 @@ fn spec_valid_seq(forms: &[&Value]) -> bool {
 }
 
 /// Strip an optional trailing `:as sym` (`None` = spec failure).
-fn strip_spec_as<'a, 'v>(forms: &'a [&'v Value]) -> Option<&'a [&'v Value]> {
+fn strip_spec_as(forms: &[Value]) -> Option<&[Value]> {
     let as_at_end = forms.len() >= 2
-        && matches!(forms[forms.len() - 2], Value::Keyword(kw) if kw.namespace().is_none() && kw.name() == "as");
+        && matches!(&forms[forms.len() - 2], Value::Keyword(kw) if kw.namespace().is_none() && kw.name() == "as");
     if !as_at_end {
         return Some(forms);
     }
-    if !matches!(forms[forms.len() - 1], Value::Symbol(sym) if is_local_name(sym)) {
+    if !matches!(&forms[forms.len() - 1], Value::Symbol(sym) if is_local_name(sym)) {
         return None;
     }
     Some(&forms[..forms.len() - 2])
 }
 
 /// Strip an optional `& rest` (`None` = dangling/invalid `&`).
-fn strip_spec_rest<'a, 'v>(forms: &'a [&'v Value]) -> Option<&'a [&'v Value]> {
+fn strip_spec_rest(forms: &[Value]) -> Option<&[Value]> {
     let Some(pos) = forms.iter().position(
         |f| matches!(f, Value::Symbol(sym) if sym.namespace().is_none() && sym.name() == "&"),
     ) else {
@@ -2878,7 +2877,7 @@ fn strip_spec_rest<'a, 'v>(forms: &'a [&'v Value]) -> Option<&'a [&'v Value]> {
     if pos + 1 != forms.len() - 1 {
         return None;
     }
-    if !spec_valid_binding(forms[pos + 1]) {
+    if !spec_valid_binding(&forms[pos + 1]) {
         return None;
     }
     Some(&forms[..pos])
@@ -3051,12 +3050,12 @@ fn walk_binding(form: &Value) -> Result<(), WalkError> {
 /// rest pattern (dangling `&` walks `nil`); after `&` only `:as`
 /// may follow; `:as` validates its value (dangling walks `nil`)
 /// immediately — before emission — then ends the scan.
-fn walk_seq(forms: &[&Value]) -> Result<(), WalkError> {
+fn walk_seq(forms: &[Value]) -> Result<(), WalkError> {
     let mut rest = forms;
     let mut seen_rest = false;
     while let Some((first, tail)) = rest.split_first() {
         if is_amp(first) {
-            let second = tail.first().copied().unwrap_or(&Value::Nil);
+            let second = tail.first().unwrap_or(&Value::Nil);
             walk_binding(second)?;
             rest = tail.get(1..).unwrap_or(&[]);
             seen_rest = true;
@@ -3064,7 +3063,7 @@ fn walk_seq(forms: &[&Value]) -> Result<(), WalkError> {
             // The `:as` value walks as a binding form right away
             // (probe31 `loop-as-*`): scalars fail here, while shapes
             // pass and die at the emitted `let`'s spec instead.
-            let value = tail.first().copied().unwrap_or(&Value::Nil);
+            let value = tail.first().unwrap_or(&Value::Nil);
             walk_binding(value)?;
             return Ok(());
         } else {
@@ -3450,8 +3449,8 @@ fn map_get<'m>(m: &'m Map, key: &str) -> Option<&'m Value> {
 /// One raw `fn` clause (or `letfn` fnspec tail clause): parameter
 /// forms plus pre/post/body forms.
 struct RawClause<'v> {
-    fixed: Vec<&'v Value>,
-    rest: Option<&'v Value>,
+    fixed: Vec<Value>,
+    rest: Option<Value>,
     pre: Vec<Value>,
     post: Vec<Value>,
     body: Vec<&'v Value>,
@@ -3827,7 +3826,7 @@ impl<'a> Analyzer<'a> {
                 return Err(self.spec_error("clojure.core/case*", span));
             };
             let test_expr = Expr::Literal(test_form.clone());
-            let then_expr = self.analyze(then_form, span, tail)?;
+            let then_expr = self.analyze(&then_form, span, tail)?;
             cases.push((key, test_expr, then_expr));
         }
         Ok(cases)
@@ -3864,7 +3863,7 @@ impl<'a> Analyzer<'a> {
     ) -> Result<Expr, CompileError> {
         let is_loop = op == "loop" || op == "loop*";
         let forms = self.let_binding_forms(op, items, span)?;
-        let pats: Vec<&Value> = forms.iter().step_by(2).copied().collect();
+        let pats: Vec<&Value> = forms.iter().step_by(2).collect();
         self.validate_let_pats(op, &pats, span)?;
         let saved_recur = self.recur;
         if is_loop {
@@ -3873,8 +3872,8 @@ impl<'a> Analyzer<'a> {
         let base = self.locals.len();
         let mut bindings_out = Vec::with_capacity(pats.len());
         for i in (0..forms.len()).step_by(2) {
-            let init = self.analyze(forms[i + 1], span, false)?;
-            let validated = as_pat(forms[i]).expect("patterns validated before building");
+            let init = self.analyze(&forms[i + 1], span, false)?;
+            let validated = as_pat(&forms[i]).expect("patterns validated before building");
             let (pat, names) = self.build_pattern(validated, span)?;
             self.locals.extend(names);
             bindings_out.push((pat, init));
@@ -3909,12 +3908,12 @@ impl<'a> Analyzer<'a> {
     /// The `let`/`loop`/`let*`/`loop*` bindings vector,
     /// shape-checked: star shapes fail `Bad binding form`, macro
     /// shapes route to the spec/assert checks.
-    fn let_binding_forms<'v>(
+    fn let_binding_forms(
         &self,
         op: &str,
-        items: &[&'v Value],
+        items: &[&Value],
         span: Span,
-    ) -> Result<Vec<&'v Value>, CompileError> {
+    ) -> Result<Vec<Value>, CompileError> {
         let is_loop = op == "loop" || op == "loop*";
         let is_star = matches!(op, "let*" | "loop*");
         let bindings = items.get(1).copied().unwrap_or(&Value::Nil);
@@ -4090,14 +4089,14 @@ impl<'a> Analyzer<'a> {
 
     /// Split a validated sequential pattern (`&` rest, trailing
     /// `:as`; junk after `:as` ignored like the walk).
-    fn build_seq(&mut self, forms: &[&Value], span: Span) -> Result<Pattern, CompileError> {
+    fn build_seq(&mut self, forms: &[Value], span: Span) -> Result<Pattern, CompileError> {
         let mut fixed = Vec::new();
         let mut rest_pat = None;
         let mut as_sym = None;
         let mut rest = forms;
         while let Some((first, tail)) = rest.split_first() {
             if is_amp(first) {
-                let second = tail.first().copied().unwrap_or(&Value::Nil);
+                let second = tail.first().unwrap_or(&Value::Nil);
                 let validated = as_pat(second).expect("patterns validated before building");
                 let (pat, _) = self.build_pattern(validated, span)?;
                 rest_pat = Some(Box::new(pat));
@@ -4298,7 +4297,6 @@ fn seq_values(v: &Value) -> Vec<Value> {
         v @ (Value::Vector(_) | Value::MapEntry { .. }) => vector_shape_items(v)
             .expect("vector shape checked")
             .into_iter()
-            .cloned()
             .collect(),
         Value::Map(m) => m
             .iter()
@@ -4312,8 +4310,8 @@ fn seq_values(v: &Value) -> Vec<Value> {
 
 /// Split parameter forms into fixed + optional rest (`&` must be
 /// second-to-last; `fn` params take no `:as`). `None` = spec failure.
-fn split_params<'v>(forms: &[&'v Value]) -> Option<(Vec<&'v Value>, Option<&'v Value>)> {
-    match forms.iter().position(|f| is_amp(f)) {
+fn split_params(forms: &[Value]) -> Option<(Vec<Value>, Option<Value>)> {
+    match forms.iter().position(is_amp) {
         None => {
             if forms.iter().any(|f| matches!(f, Value::Keyword(_))) {
                 return None;
@@ -4327,7 +4325,7 @@ fn split_params<'v>(forms: &[&'v Value]) -> Option<(Vec<&'v Value>, Option<&'v V
             if forms[..pos].iter().any(|f| matches!(f, Value::Keyword(_))) {
                 return None;
             }
-            Some((forms[..pos].to_vec(), Some(forms[pos + 1])))
+            Some((forms[..pos].to_vec(), Some(forms[pos + 1].clone())))
         }
     }
 }
@@ -4515,16 +4513,16 @@ impl<'a> Analyzer<'a> {
     /// drops (fixed arity); `&` as the rest name, or after the
     /// rest, is `Invalid parameter list`; a plain parameter after
     /// the rest is `Unexpected parameter`.
-    fn star_params<'v>(
+    fn star_params(
         &self,
-        forms: &[&'v Value],
+        forms: &[Value],
         span: Span,
-    ) -> Result<(Vec<&'v Value>, Option<&'v Value>), CompileError> {
+    ) -> Result<(Vec<Value>, Option<Value>), CompileError> {
         let mut fixed = Vec::new();
         let mut rest = None;
         let mut i = 0;
         while i < forms.len() {
-            let form = forms[i];
+            let form = &forms[i];
             if is_amp(form) {
                 if rest.is_some() {
                     return Err(self.fn_star_error(class::RUNTIME, "Invalid parameter list", span));
@@ -4541,14 +4539,14 @@ impl<'a> Analyzer<'a> {
                     }
                     Some(f) => {
                         self.check_star_param(f, span)?;
-                        rest = Some(*f);
+                        rest = Some(f.clone());
                     }
                 }
             } else if rest.is_some() {
                 return Err(self.fn_star_error(class::RUNTIME, "Unexpected parameter", span));
             } else {
                 self.check_star_param(form, span)?;
-                fixed.push(form);
+                fixed.push(form.clone());
             }
             i += 1;
         }
@@ -4690,7 +4688,7 @@ impl<'a> Analyzer<'a> {
             fixed.push(pattern);
         }
         let mut rest_pat = None;
-        if let Some(rest) = clause.rest {
+        if let Some(rest) = &clause.rest {
             let validated = as_pat(rest).expect("patterns validated before building");
             let (pattern, names) = self.build_pattern(validated, span)?;
             self.locals.extend(names);
@@ -4925,7 +4923,7 @@ impl<'a> Analyzer<'a> {
                 .iter()
                 .map(|(k, v)| Value::Vector(Vector::from_vec(vec![k.clone(), v.clone()])))
                 .collect()),
-            Some(v) if is_seqable(v) => Ok(seq_refs(v).into_iter().cloned().collect()),
+            Some(v) if is_seqable(v) => Ok(seq_refs(v).into_iter().collect()),
             Some(other) => Err(self.err(
                 class::ILLEGAL_ARG,
                 format!(
@@ -5136,17 +5134,13 @@ impl<'a> Analyzer<'a> {
         let mut out = Vec::new();
         let mut i = 0;
         while i + 1 < forms.len() {
-            out.push((self.letfn_star_name(forms[i], span)?, forms[i + 1].clone()));
+            out.push((self.letfn_star_name(&forms[i], span)?, forms[i + 1].clone()));
             i += 2;
         }
         Ok(out)
     }
 
-    fn letfn_star_vec<'v>(
-        &self,
-        bindings: &'v Value,
-        span: Span,
-    ) -> Result<Vec<&'v Value>, CompileError> {
+    fn letfn_star_vec(&self, bindings: &Value, span: Span) -> Result<Vec<Value>, CompileError> {
         vector_shape_items(bindings).ok_or_else(|| {
             self.letfn_star_err(
                 class::ILLEGAL_ARG,
@@ -5259,13 +5253,13 @@ fn strip_fn_head(items: &[Value]) -> &[Value] {
 /// Borrowed `seq` for pre/post conditions (`nil` and maps are
 /// filtered by the caller; anything else seqable-but-unlisted
 /// yields no condition refs).
-fn seq_refs(v: &Value) -> Vec<&Value> {
+fn seq_refs(v: &Value) -> Vec<Value> {
     match v {
-        Value::List(l) => l.iter().collect(),
+        Value::List(l) => l.iter().cloned().collect(),
         v @ (Value::Vector(_) | Value::MapEntry { .. }) => {
             vector_shape_items(v).expect("vector shape checked")
         }
-        Value::Set(s) => s.iter().collect(),
+        Value::Set(s) => s.iter().cloned().collect(),
         _ => Vec::new(),
     }
 }

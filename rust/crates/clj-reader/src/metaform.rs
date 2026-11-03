@@ -210,7 +210,7 @@ impl Reader {
                 Ok(apply_shape("hash-map", items))
             }
             Value::Vector(v) => {
-                let items = self.sq_expand_list(v.iter().cloned().collect(), hook)?;
+                let items = self.sq_expand_list(v.iter().collect(), hook)?;
                 Ok(apply_shape("vector", items))
             }
             Value::Set(s) => {

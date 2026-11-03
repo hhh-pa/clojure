@@ -600,7 +600,7 @@ fn opt_get<'a>(pairs: &[(&'a Value, &'a Value)], name: &str) -> Option<&'a Value
 fn check_sequential(v: &Value) -> Result<Vec<Value>, NativeError> {
     match v {
         Value::List(l) => Ok(l.iter().cloned().collect()),
-        Value::Vector(x) => Ok(x.iter().cloned().collect()),
+        Value::Vector(x) => Ok(x.iter().collect()),
         Value::MapEntry { key, val, .. } => Ok(vec![(**key).clone(), (**val).clone()]),
         _ => Err(ex(
             ":only/:refer value must be a sequential collection of symbols".to_owned(),
@@ -2123,7 +2123,8 @@ fn import_one_spec(eval: &mut Evaluator, spec: &Value) -> Result<Value, NativeEr
     // Vectors are package lists directly (the `(quote x)` strip
     // below is list-only: a vector IS the spec, never a form).
     if let Value::Vector(x) = spec {
-        let parts: Vec<&Value> = x.iter().collect();
+        let owned: Vec<Value> = x.iter().collect();
+        let parts: Vec<&Value> = owned.iter().collect();
         return import_package_list(eval, &parts);
     }
     let items: Vec<&Value> = match spec {

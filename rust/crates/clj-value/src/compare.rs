@@ -269,7 +269,7 @@ fn utf16_cmp(a: &str, b: &str) -> Ordering {
 /// otherwise).
 fn vector_items(v: &Value) -> Option<Vec<Value>> {
     match v {
-        Value::Vector(x) => Some(x.iter().cloned().collect()),
+        Value::Vector(x) => Some(x.iter().collect()),
         Value::MapEntry { key, val, .. } => Some(vec![(**key).clone(), (**val).clone()]),
         Value::PrimitiveVector(p) => Some(p.items()),
         Value::Extension(e) => e

@@ -1457,22 +1457,27 @@ impl Env {
     /// copy-on-`recur` promise exactly. Anything unqualified
     /// returns the values for the caller to bind fresh.
     pub fn try_rebind(&mut self, outer: &Env, values: Vec<Value>) -> Result<(), Vec<Value>> {
-        if let Some(frame) = Arc::get_mut(&mut self.frame) {
-            let flat_over_outer = match &frame.parent {
-                Some(parent) => {
-                    Arc::ptr_eq(&parent.frame, &outer.frame) && frame.base == outer.len()
-                }
-                None => false,
+        // Each guard doubles as a cheap safety net: a captured
+        // frame (or any shape surprise) falls through to the
+        // fresh-frame path. Slots ride with their frame (never
+        // shared alone — that `expect` never fires).
+        let Some(frame) = Arc::get_mut(&mut self.frame) else {
+            return Err(values);
+        };
+        let flat_over_outer = frame.parent.as_ref().is_some_and(|parent| {
+            Arc::ptr_eq(&parent.frame, &outer.frame) && frame.base == outer.len()
+        });
+        if flat_over_outer {
+            let Slots::Shared(slots) = &mut frame.slots else {
+                return Err(values);
             };
-            if flat_over_outer {
-                if let Slots::Shared(slots) = &mut frame.slots {
-                    if let Some(dst) = Arc::get_mut(slots) {
-                        if dst.len() == values.len() {
-                            dst.clone_from_slice(&values);
-                            return Ok(());
-                        }
-                    }
-                }
+            let dst = Arc::get_mut(slots).expect("slots ride with their frame");
+            // Destructuring loops bind fewer values than slots (one
+            // per pattern), so a mismatch falls back to a fresh
+            // bind — only exact rebinds go in place.
+            if dst.len() == values.len() {
+                dst.clone_from_slice(&values);
+                return Ok(());
             }
         }
         Err(values)
