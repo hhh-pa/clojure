@@ -3384,34 +3384,55 @@ impl Evaluator {
     fn try_fold_leaves(state: &[i64], ops: &[IntOp]) -> Option<i64> {
         let (op, operands) = ops.split_last()?;
         match op {
-            IntOp::Add(n) if operands.len() == *n => {
-                let mut acc = 0i64;
-                for op in operands {
-                    acc = acc.checked_add(Self::int_leaf(state, op)?)?;
-                }
-                Some(acc)
-            }
-            IntOp::Sub(n) if operands.len() == *n && *n >= 1 => {
-                let mut rest = operands.iter();
-                let first = Self::int_leaf(state, rest.next()?)?;
-                if rest.len() == 0 {
-                    return first.checked_neg();
-                }
-                let mut acc = first;
-                for op in rest {
-                    acc = acc.checked_sub(Self::int_leaf(state, op)?)?;
-                }
-                Some(acc)
-            }
-            IntOp::Mul(n) if operands.len() == *n => {
-                let mut acc = 1i64;
-                for op in operands {
-                    acc = acc.checked_mul(Self::int_leaf(state, op)?)?;
-                }
-                Some(acc)
-            }
+            IntOp::Add(n) => Self::fold_leaf_add(state, operands, *n),
+            IntOp::Sub(n) => Self::fold_leaf_sub(state, operands, *n),
+            IntOp::Mul(n) => Self::fold_leaf_mul(state, operands, *n),
             _ => None,
         }
+    }
+
+    /// Fold `+` over leaf operands (see
+    /// [`Evaluator::try_fold_leaves`]).
+    fn fold_leaf_add(state: &[i64], operands: &[IntOp], n: usize) -> Option<i64> {
+        if operands.len() != n {
+            return None;
+        }
+        let mut acc = 0i64;
+        for op in operands {
+            acc = acc.checked_add(Self::int_leaf(state, op)?)?;
+        }
+        Some(acc)
+    }
+
+    /// Fold `-` over leaf operands (see
+    /// [`Evaluator::try_fold_leaves`]).
+    fn fold_leaf_sub(state: &[i64], operands: &[IntOp], n: usize) -> Option<i64> {
+        if operands.len() != n || n == 0 {
+            return None;
+        }
+        let mut rest = operands.iter();
+        let first = Self::int_leaf(state, rest.next()?)?;
+        if rest.len() == 0 {
+            return first.checked_neg();
+        }
+        let mut acc = first;
+        for op in rest {
+            acc = acc.checked_sub(Self::int_leaf(state, op)?)?;
+        }
+        Some(acc)
+    }
+
+    /// Fold `*` over leaf operands (see
+    /// [`Evaluator::try_fold_leaves`]).
+    fn fold_leaf_mul(state: &[i64], operands: &[IntOp], n: usize) -> Option<i64> {
+        if operands.len() != n {
+            return None;
+        }
+        let mut acc = 1i64;
+        for op in operands {
+            acc = acc.checked_mul(Self::int_leaf(state, op)?)?;
+        }
+        Some(acc)
     }
 
     /// Evaluate a nested expression iteratively over a scratch
@@ -3422,23 +3443,40 @@ impl Evaluator {
         // expressions are cold, so one scratch per eval is fine.
         let mut stack: SmallVec<[i64; 8]> = SmallVec::new();
         for op in ops {
-            match op {
-                IntOp::Var(v) => stack.push(*state.get(*v)?),
-                IntOp::Const(c) => stack.push(*c),
-                IntOp::Inc => {
-                    let x = stack.pop()?;
-                    stack.push(x.checked_add(1)?);
-                }
-                IntOp::Dec => {
-                    let x = stack.pop()?;
-                    stack.push(x.checked_sub(1)?);
-                }
-                IntOp::Add(n) => Self::eval_int_add(&mut stack, *n)?,
-                IntOp::Sub(n) => Self::eval_int_sub(&mut stack, *n)?,
-                IntOp::Mul(n) => Self::eval_int_mul(&mut stack, *n)?,
-            }
+            Self::apply_general_op(state, &mut stack, op)?;
         }
         stack.pop()
+    }
+
+    /// Apply one general-machine op (see
+    /// [`Evaluator::eval_int_general`]).
+    fn apply_general_op(state: &[i64], stack: &mut SmallVec<[i64; 8]>, op: &IntOp) -> Option<()> {
+        match op {
+            IntOp::Var(v) => Self::push_int_var(state, stack, *v),
+            IntOp::Const(c) => {
+                stack.push(*c);
+                Some(())
+            }
+            IntOp::Inc => Self::step_int_top(stack, 1),
+            IntOp::Dec => Self::step_int_top(stack, -1),
+            IntOp::Add(n) => Self::eval_int_add(stack, *n),
+            IntOp::Sub(n) => Self::eval_int_sub(stack, *n),
+            IntOp::Mul(n) => Self::eval_int_mul(stack, *n),
+        }
+    }
+
+    /// Push one loop-var read (see [`Evaluator::eval_int_general`]).
+    fn push_int_var(state: &[i64], stack: &mut SmallVec<[i64; 8]>, v: usize) -> Option<()> {
+        stack.push(*state.get(v)?);
+        Some(())
+    }
+
+    /// Step the top of stack by `delta` (`inc` passes `1`, `dec`
+    /// `-1` — `checked_add(-1)` is exactly `checked_sub(1)`).
+    fn step_int_top(stack: &mut SmallVec<[i64; 8]>, delta: i64) -> Option<()> {
+        let x = stack.pop()?;
+        stack.push(x.checked_add(delta)?);
+        Some(())
     }
 
     /// Fold the top `n` stack slots with `+` (`(+)` is `0`, like the
