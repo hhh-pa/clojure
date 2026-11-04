@@ -420,13 +420,15 @@ fn peel_reused_frame_dorun_pins() {
         ),
         "nil"
     );
-    // Capture plus `recur` (the observed frame rebinds fresh).
+    // Capture plus `recur` (a capture retained outside the unwound
+    // body keeps the frame observed, so the `recur` rebinds fresh;
+    // every round still runs exactly once).
     assert_eq!(
         run_last(
             &mut eval,
-            "(dorun (map (fn [x] (let [c (fn [] x)] (if (> x 0) (recur (dec x)) (c)))) (range 3)))"
+            "(def cap-rec (atom [])) (dorun (map (fn [x] (do (swap! cap-rec conj (fn [] x)) (if (> x 0) (recur (dec x)) :done))) (range 2))) (count @cap-rec)"
         ),
-        "nil"
+        "3"
     );
     // A throwing map fn propagates through the reused apply.
     assert_eq!(
@@ -447,8 +449,8 @@ fn peel_walk_tail_and_empty_pins() {
         uncaught(&mut eval, "(dorun (map inc (range 0M 1M 1/3)))"),
         "java.lang.ArithmeticException | Non-terminating decimal expansion; no exact representable decimal result."
     );
-    // An empty 2-arg `+` reduce over a range bails to the generic
-    // walk, which calls `(f)`.
+    // An empty 2-arg `+` reduce (an empty range is `()`) walks
+    // generically, which calls `(f)`.
     assert_eq!(run_last(&mut eval, "(reduce + (range 5 5))"), "0");
 }
 

@@ -455,7 +455,7 @@ fn int_loop_guard_observes_bindings_and_closures() {
         "101"
     );
     // A redefinition to a non-native (a closure) declines the plan
-    // too (the guard only trusts `Extension` roots); the redefined
+    // too (the guard only trusts the analyzed root); the redefined
     // root computes through the slow path.
     assert_eq!(
         run_last(
@@ -463,6 +463,16 @@ fn int_loop_guard_observes_bindings_and_closures() {
             "(let [orig +] (with-redefs [+ (fn [a b] (orig a b 100))] (loop [i 0] (if (< i 3) (recur (+ i 1)) i))))"
         ),
         "101"
+    );
+    // A redefinition to plain data declines the plan as well (the
+    // guard only inlines `Extension` roots); the slow path calls
+    // the data and raises exactly like the interpreter.
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(with-redefs [+ 5] (loop [i 0] (if (< i 3) (recur (+ i 1)) i)))"
+        ),
+        "java.lang.ClassCastException | Cannot cast java.lang.Long to clojure.lang.IFn"
     );
 }
 

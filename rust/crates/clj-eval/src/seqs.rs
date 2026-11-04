@@ -657,10 +657,13 @@ fn plus_range(r: clj_value::RangeValue, init: Option<i64>) -> PlusRange {
     let mut acc = match init {
         Some(x) => x,
         None => {
-            let Some((head, more)) = cur.next_head() else {
-                // Empty 2-arg: the generic walk calls `(f)`.
-                return PlusRange::Bail;
-            };
+            // A spent range never arrives (every range constructor
+            // nil-puns an empty to `()`), so `unwrap_or` only spells
+            // the empty sum: the generic walk would call `(f)`, and
+            // `(+)` is `0` — the synthetic continuing head folds
+            // through the loop below and exhausts to `Done(0)`,
+            // identically (this attempt only runs for `+`).
+            let (head, more) = cur.next_head().unwrap_or((Value::Int(0), true));
             let Value::Int(x) = head else {
                 return PlusRange::Bail;
             };
