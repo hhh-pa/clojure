@@ -2,7 +2,7 @@
 
 A self-contained native Clojure runtime, REPL, and LLVM AOT compiler
 with no JDK required, tracking upstream Clojure master
-(`clojure/clojure`). (`clojure-version` still reports `1.13.0-alpha9`
+(`clojure/clojure`). (`clojure-version` still reports `1.13.0-alpha11`
 for now; tagged `v*` releases ship per-platform binaries and are cut
 only once the port's divergences and out-of-scope items are fully
 handled.) This repository **is** the port: the original
