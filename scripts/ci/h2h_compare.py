@@ -9,8 +9,8 @@ Usage:
 Compares per-case medians (primary) and cross-checks the README
 convention (cpu min-of-repeats, rss max-of-repeats). Multiple JSONs
 per leg are unioned (one per measure shard); duplicate case keys
-across shards are a hard error (sharding is cohesive, so a dupe
-means misconfiguration, not data).
+across shards are a hard error, except identical run-less
+sweep-skip markers, which every shard records by design.
 
 Strict gate: exits non-zero on any CPU/RSS loss, failure, missing
 case, not-ok case, behavioral drift, or leg-coverage mismatch,
@@ -41,6 +41,14 @@ def key(r):
     return (r["label"], r.get("stem", ""), r.get("case", ""))
 
 
+def _is_skip_marker(r):
+    """True for a run-less sweep-skip marker (no timed runs at all)."""
+    if r.get("runs"):
+        return False
+    summary = r.get("summary") or {}
+    return not summary.get("cpu_s")
+
+
 def union(paths, leg):
     """Union shard reports into (results-by-key, failures, missing, files)."""
     merged = {}
@@ -51,6 +59,12 @@ def union(paths, leg):
         for r in doc["results"]:
             k = key(r)
             if k in merged:
+                # Sweep-skipped namespaces (e.g. algos sweep_skips.json)
+                # are recorded run-less in EVERY shard by design; dedupe
+                # identical markers, keep the hard error for real dupes.
+                prev = merged[k]
+                if _is_skip_marker(prev) and _is_skip_marker(r) and prev == r:
+                    continue
                 raise ValueError(
                     f"duplicate case {k[0]}/{k[1]}/{k[2]} across {leg} shards "
                     f"(shards must partition cases; check --shard flags)")
@@ -135,13 +149,17 @@ def main(argv):
     n_mem_win = n_mem_loss = n_mem_tie = 0
     n_both_win = 0
     cpu_losses, mem_losses = [], []
-    not_ok, drift = [], []
+    not_ok, drift, skipped = [], [], []
     worst_cpu_margin, worst_mem_margin = None, None
     for k in sorted(set(jm) & set(rm)):
         a, b = jm[k], rm[k]
         name = short(k)
         if not a["ok"] or not b["ok"]:
             not_ok.append((name, a.get("error"), b.get("error")))
+            continue
+        if _is_skip_marker(a) or _is_skip_marker(b):
+            skipped.append((name, len(a.get("runs", [])),
+                            len(b.get("runs", []))))
             continue
         # behavioral drift gate (algos carry test_counts)
         if "test_counts" in a or "test_counts" in b:
@@ -200,6 +218,10 @@ def main(argv):
         print(f"--- MEM LOSSES ({len(mem_losses)}) ---")
         for ratio, name, j, r in sorted(mem_losses, reverse=True)[:50]:
             print(f"  {ratio:.3f}x {name} jvm={j:.0f}K rs={r:.0f}K")
+    if skipped:
+        print(f"--- SKIPPED-NO-RUNS ({len(skipped)}) ---")
+        for name, aj, bj in skipped[:20]:
+            print(f"  {name} jvm_runs={aj} rs_runs={bj}")
     if not_ok:
         print(f"--- NOT-OK ({len(not_ok)}) ---")
         for name, je, re in not_ok[:50]:
