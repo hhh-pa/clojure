@@ -2303,10 +2303,10 @@ impl Evaluator {
         exit_env: &mut Option<Env>,
         ints: &[i64],
     ) -> ExitAction {
-        let finals: Vec<Value> = ints.iter().map(|&v| Value::Int(v)).collect();
+        let mut finals: Vec<Value> = ints.iter().map(|&v| Value::Int(v)).collect();
         let env = match exit_env.as_mut() {
             Some(env) => {
-                if let Err(finals) = env.try_rebind(outer, finals) {
+                if !env.try_rebind(outer, &mut finals) {
                     *env = outer.extend(finals);
                 }
                 env
@@ -2579,11 +2579,11 @@ impl Evaluator {
         exit: &Expr,
         outer: &Env,
         exit_env: &mut Option<Env>,
-        finals: Vec<Value>,
+        mut finals: Vec<Value>,
     ) -> ExitAction {
         let env = match exit_env.as_mut() {
             Some(env) => {
-                if let Err(finals) = env.try_rebind(outer, finals) {
+                if !env.try_rebind(outer, &mut finals) {
                     *env = outer.extend(finals);
                 }
                 env
@@ -4334,7 +4334,10 @@ impl Evaluator {
         let pats: SmallVec<[&Pattern; 8]> = arity.fixed.iter().collect();
         let fr = match frame.as_mut() {
             Some(fr) => {
-                if let Err(values) = fr.try_rebind(&outer, args.to_vec()) {
+                // Fresh call args (never a pooled `recur` buffer),
+                // so no recycle on the rebind.
+                let mut values = args.to_vec();
+                if !fr.try_rebind(&outer, &mut values) {
                     *fr = self.bind_values(&pats, values, &outer)?;
                 }
                 fr
@@ -4345,7 +4348,13 @@ impl Evaluator {
             match self.eval_body(&arity.body, fr) {
                 Ok(v) => return Ok(v),
                 Err(Signal::Recur(values)) => {
-                    if let Err(values) = fr.try_rebind(&outer, values) {
+                    let mut values = values;
+                    if fr.try_rebind(&outer, &mut values) {
+                        // Recycle the drained buffer (see `recur_pool`).
+                        if self.recur_pool.len() < RECUR_POOL_MAX {
+                            self.recur_pool.push(values);
+                        }
+                    } else {
                         *fr = self.bind_values(&pats, values, &outer)?;
                     }
                 }
