@@ -214,7 +214,10 @@ jobs:
 
       - name: Add clojure-rs to PATH
         if: matrix.runtime == 'clojure-rs'
-        run: echo "$GITHUB_WORKSPACE/cljrs-bin" >> "$GITHUB_PATH"
+        run: |
+          # download-artifact does not preserve the executable bit.
+          chmod +x "$GITHUB_WORKSPACE/cljrs-bin/clojure-rs"
+          echo "$GITHUB_WORKSPACE/cljrs-bin" >> "$GITHUB_PATH"
 
       - name: Measure head-to-head shard
         working-directory: snippets
@@ -314,7 +317,10 @@ jobs:
 
       - name: Add clojure-rs to PATH
         if: matrix.runtime == 'clojure-rs'
-        run: echo "$GITHUB_WORKSPACE/cljrs-bin" >> "$GITHUB_PATH"
+        run: |
+          # download-artifact does not preserve the executable bit.
+          chmod +x "$GITHUB_WORKSPACE/cljrs-bin/clojure-rs"
+          echo "$GITHUB_WORKSPACE/cljrs-bin" >> "$GITHUB_PATH"
 
       - name: Measure head-to-head shard
         working-directory: algos
