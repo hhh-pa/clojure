@@ -11,7 +11,9 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use clj_value::{List, Map, Seq, Set, Value, Vector, map_entry, seq_vec};
+use clj_value::{
+    List, Map, RangeNum, RangeValue, Seq, Set, Value, Vector, map_entry, new_map, seq_vec,
+};
 
 fn int(i: i64) -> Value {
     Value::Int(i)
@@ -324,4 +326,76 @@ fn seq_vec_coerces_seqables() {
     assert_eq!(seq_vec(&set), Some(vec![Value::Int(3)]));
     assert_eq!(seq_vec(&Value::Int(1)), None);
     assert_eq!(seq_vec(&Value::Bool(true)), None);
+}
+
+/// `next_head` steps a long range in place: verbatim heads, the
+/// count decrements, metadata drops after the first step, and the
+/// walk ends with `None` (never a final `false` — long advances
+/// never fail).
+#[test]
+fn next_head_steps_long_range_in_place() {
+    let mut r = RangeValue::new(
+        RangeNum::Int(0),
+        Some(RangeNum::Int(3)),
+        RangeNum::Int(1),
+        true,
+        Some(3),
+    )
+    .with_meta(Some(new_map()));
+    assert!(r.meta().is_some());
+    assert_eq!(r.next_head(), Some((Value::Int(0), true)));
+    assert_eq!(r.count(), Some(2));
+    assert!(r.meta().is_none());
+    assert_eq!(r.next_head(), Some((Value::Int(1), true)));
+    assert_eq!(r.next_head(), Some((Value::Int(2), true)));
+    assert_eq!(r.count(), Some(0));
+    assert_eq!(r.next_head(), None);
+}
+
+/// `next_head` on a done range is `None` without touching state.
+#[test]
+fn next_head_done_range_is_none() {
+    let mut r = RangeValue::new(
+        RangeNum::Int(3),
+        Some(RangeNum::Int(3)),
+        RangeNum::Int(1),
+        true,
+        Some(0),
+    );
+    assert_eq!(r.next_head(), None);
+    assert_eq!(r.count(), Some(0));
+}
+
+/// `next_head` reports a failed advance as a final head and leaves
+/// the range untouched (the non-`long` checked walk overflows past
+/// `i64::MAX`; callers check `step_inexact` and raise there).
+#[test]
+fn next_head_overflow_reports_final_head_untouched() {
+    let mut r = RangeValue::new(RangeNum::Int(i64::MAX), None, RangeNum::Int(1), false, None);
+    assert!(!r.step_inexact());
+    assert_eq!(r.next_head(), Some((Value::Int(i64::MAX), false)));
+    // Untouched: stepping again reports the same final head.
+    assert_eq!(r.next_head(), Some((Value::Int(i64::MAX), false)));
+}
+
+/// `head_or_nil` reads the head directly (no chunk step), and
+/// nil-puns done ranges.
+#[test]
+fn head_or_nil_reads_head_and_nil_puns_done() {
+    let live = RangeValue::new(
+        RangeNum::Int(7),
+        Some(RangeNum::Int(9)),
+        RangeNum::Int(1),
+        true,
+        Some(2),
+    );
+    assert_eq!(live.head_or_nil(), Value::Int(7));
+    let done = RangeValue::new(
+        RangeNum::Int(9),
+        Some(RangeNum::Int(9)),
+        RangeNum::Int(1),
+        true,
+        Some(0),
+    );
+    assert_eq!(done.head_or_nil(), Value::Nil);
 }

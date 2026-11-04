@@ -245,25 +245,207 @@ pub struct Vector {
     id: u64,
 }
 
-/// Vector storage: the generic trie, or a shared packed `i64` run.
+/// Vector storage: the generic trie, or packed `i64` chunks.
 /// Packing is decided at construction (`from_vec` scans, `from_ints`
-/// and packed transients skip the scan); `push_back` of an `Int`
-/// onto owned packed storage stays packed, anything else unpacks
-/// (one-time cost, then generic speed). Reads always stay packed.
+/// and packed transients skip the scan); `Int` mutating ops stay
+/// packed at any size (one chunk copied per op), foreign values
+/// unpack once. Reads always stay packed.
 #[derive(Clone, Debug)]
 enum VectorInner {
     Generic(RpdsVector),
-    Packed(Arc<Vec<i64>>),
+    Packed(PackedInts),
 }
 
-/// Longest packed `i64` run (#227): a shared packed update clones
-/// the whole run (`Arc::make_mut`), and loop-threaded vectors are
-/// shared at update time (the old binding is alive while the new
-/// value is computed), so an unbounded run turns `conj`/`assoc`
-/// chains quadratic. Past this length `Int` vectors ride the
-/// generic trie (log-time shared updates); at or below it a shared
-/// update clones at most 8KB.
-const MAX_PACKED_LEN: usize = 1024;
+/// Packed tail-chunk capacity: mutating ops copy at most one chunk
+/// (512 bytes), while freezes append one chunk in O(log n).
+const PACKED_CHUNK: usize = 64;
+
+/// Frozen full chunks of a packed int run (each exactly
+/// [`PACKED_CHUNK`] items) in an rpds spine, so appends and chunk
+/// swaps stay logarithmic no matter how big the run grows.
+type PackedChunks = rpds::VectorSync<Arc<Vec<i64>>>;
+
+/// An all-`Int` vector as frozen [`PACKED_CHUNK`]-item chunks plus a
+/// tail chunk (len ≤ `PACKED_CHUNK`): `conj`/`assoc`/`pop` copy at
+/// most one chunk — O(1) persistent updates (a flat run copies the
+/// whole run per op when shared; the generic trie path-copies plus
+/// one `Arc` per leaf). Indexing divides once, iteration walks
+/// chunks front to back, density stays ~8 bytes/element, and old
+/// versions share frozen chunks plus the pre-mutation tail.
+///
+/// Invariants: every frozen chunk has len exactly `PACKED_CHUNK`;
+/// `len = chunks.len() * PACKED_CHUNK + tail.len()`.
+#[derive(Clone, Debug)]
+struct PackedInts {
+    chunks: PackedChunks,
+    tail: Arc<Vec<i64>>,
+}
+
+impl PackedInts {
+    /// The element count.
+    fn len(&self) -> usize {
+        self.chunks.len() * PACKED_CHUNK + self.tail.len()
+    }
+
+    /// The item at `index` (`None` past the end).
+    fn get(&self, index: usize) -> Option<Value> {
+        let frozen = self.chunks.len() * PACKED_CHUNK;
+        if index < frozen {
+            let (c, o) = (index / PACKED_CHUNK, index % PACKED_CHUNK);
+            self.chunks
+                .get(c)
+                .expect("chunk index computed below len")
+                .get(o)
+                .map(|n| Value::Int(*n))
+        } else {
+            self.tail.get(index - frozen).map(|n| Value::Int(*n))
+        }
+    }
+
+    /// Append in place (always stays packed for `Int`s: a tail
+    /// push copies at most one chunk, a full tail freezes in O(log
+    /// n)). The `&mut` form needs no placeholder swap for owned
+    /// [`push_back`](Vector::push_back) (like the trie's
+    /// `push_back_mut`), and loop threading owns its `PackedInts`
+    /// behind `&mut`.
+    fn push_back_mut(&mut self, n: i64) {
+        if self.tail.len() < PACKED_CHUNK {
+            Arc::make_mut(&mut self.tail).push(n);
+        } else {
+            let full = std::mem::replace(&mut self.tail, Arc::new(vec![n]));
+            self.chunks.push_back_mut(full);
+        }
+    }
+
+    /// Loop-threaded replace (see `Evaluator::try_int_loop`): like
+    /// [`PackedInts::set_nth`], but uniquely-owned chunks update in
+    /// place (a shared chunk detaches on first touch, so the entry
+    /// version stays pristine for bailout) and the spine never
+    /// grows. `false` is out of bounds (the slow path throws).
+    fn set_nth_threaded(&mut self, index: usize, n: i64) -> bool {
+        let frozen = self.chunks.len() * PACKED_CHUNK;
+        if index < frozen {
+            // Below `frozen` the chunk and slot always exist (like
+            // [`PackedInts::get`]: the index math bounds `c`, and
+            // frozen chunks hold exactly `PACKED_CHUNK` items).
+            let (c, o) = (index / PACKED_CHUNK, index % PACKED_CHUNK);
+            let chunk = self
+                .chunks
+                .get_mut(c)
+                .expect("chunk index computed below len");
+            let slot = Arc::make_mut(chunk)
+                .get_mut(o)
+                .expect("frozen chunk is full");
+            *slot = n;
+            true
+        } else {
+            let o = index - frozen;
+            if o >= self.tail.len() {
+                return false;
+            }
+            Arc::make_mut(&mut self.tail)[o] = n;
+            true
+        }
+    }
+
+    /// The raw `i64` at `index` (`None` past the end — for loop
+    /// threading, which compares tagless).
+    fn nth_int(&self, index: usize) -> Option<i64> {
+        let frozen = self.chunks.len() * PACKED_CHUNK;
+        if index < frozen {
+            let (c, o) = (index / PACKED_CHUNK, index % PACKED_CHUNK);
+            self.chunks.get(c)?.get(o).copied()
+        } else {
+            self.tail.get(index - frozen).copied()
+        }
+    }
+
+    /// Replace the item at `index` (`None` when out of bounds;
+    /// copies one chunk).
+    #[must_use]
+    fn set_nth(&self, index: usize, n: i64) -> Option<Self> {
+        let frozen = self.chunks.len() * PACKED_CHUNK;
+        if index < frozen {
+            let (c, o) = (index / PACKED_CHUNK, index % PACKED_CHUNK);
+            let chunk = self.chunks.get(c).expect("chunk index computed below len");
+            let mut chunk = Arc::clone(chunk);
+            Arc::make_mut(&mut chunk)[o] = n;
+            self.chunks.set(c, chunk).map(|chunks| Self {
+                chunks,
+                tail: Arc::clone(&self.tail),
+            })
+        } else {
+            let o = index - frozen;
+            if o >= self.tail.len() {
+                return None;
+            }
+            let mut tail = Arc::clone(&self.tail);
+            Arc::make_mut(&mut tail)[o] = n;
+            Some(Self {
+                chunks: self.chunks.clone(),
+                tail,
+            })
+        }
+    }
+
+    /// Without the last item (`None` when empty; emptying the tail
+    /// unfreezes the last chunk).
+    #[must_use]
+    fn drop_last(&self) -> Option<Self> {
+        if !self.tail.is_empty() {
+            let mut tail = Arc::clone(&self.tail);
+            Arc::make_mut(&mut tail).pop();
+            Some(Self {
+                chunks: self.chunks.clone(),
+                tail,
+            })
+        } else if !self.chunks.is_empty() {
+            let last = self.chunks.len() - 1;
+            let chunk = self.chunks.get(last).expect("last chunk exists");
+            let tail = chunk[..PACKED_CHUNK - 1].to_vec();
+            self.chunks.drop_last().map(|chunks| Self {
+                chunks,
+                tail: Arc::new(tail),
+            })
+        } else {
+            None
+        }
+    }
+
+    /// Build from `i64`s in order (single-chunk inputs move
+    /// zero-copy, so small transient freezes stay free).
+    #[must_use]
+    fn from_ints(ints: Vec<i64>) -> Self {
+        if ints.len() <= PACKED_CHUNK {
+            return Self {
+                chunks: PackedChunks::new_sync(),
+                tail: Arc::new(ints),
+            };
+        }
+        let tail_len = ints.len() % PACKED_CHUNK;
+        let frozen = ints.len() - tail_len;
+        let mut chunks = PackedChunks::new_sync();
+        for piece in ints[..frozen].chunks_exact(PACKED_CHUNK) {
+            chunks.push_back_mut(Arc::new(piece.to_vec()));
+        }
+        Self {
+            chunks,
+            tail: Arc::new(ints[frozen..].to_vec()),
+        }
+    }
+
+    /// All items in order (one pass — for unpacking and transient
+    /// materialization of multi-chunk runs).
+    #[must_use]
+    fn collect_all(&self) -> Vec<i64> {
+        let mut out = Vec::with_capacity(self.len());
+        for chunk in self.chunks.iter() {
+            out.extend_from_slice(chunk);
+        }
+        out.extend_from_slice(&self.tail);
+        out
+    }
+}
 
 /// Owned-value vector iteration (packed ints box on read). Neither
 /// `Clone` nor `Debug`: the generic arm wraps rpds's iterator,
@@ -274,7 +456,81 @@ pub struct VectorIter<'a> {
 
 enum VectorIterInner<'a> {
     Generic(rpds::vector::Iter<'a, Value, archery::ArcTK>),
-    Packed(std::slice::Iter<'a, i64>),
+    Packed(PackedIter<'a>),
+}
+
+/// Front-to-back packed iteration over chunked runs: frozen chunks
+/// stream front to back (fast path), `next_back` indexes (rare
+/// path); yielded counts keep the sides from crossing.
+struct PackedIter<'a> {
+    ints: &'a PackedInts,
+    chunks: rpds::vector::Iter<'a, Arc<Vec<i64>>, archery::ArcTK>,
+    front: std::slice::Iter<'a, i64>,
+    tail: Option<std::slice::Iter<'a, i64>>,
+    yielded_front: usize,
+    yielded_back: usize,
+}
+
+impl<'a> PackedIter<'a> {
+    fn new(ints: &'a PackedInts) -> Self {
+        Self {
+            ints,
+            chunks: ints.chunks.iter(),
+            front: [].iter(),
+            tail: Some(ints.tail.iter()),
+            yielded_front: 0,
+            yielded_back: 0,
+        }
+    }
+
+    fn remaining(&self) -> usize {
+        self.ints
+            .len()
+            .saturating_sub(self.yielded_front + self.yielded_back)
+    }
+}
+
+impl Iterator for PackedIter<'_> {
+    type Item = Value;
+
+    fn next(&mut self) -> Option<Value> {
+        if self.remaining() == 0 {
+            return None;
+        }
+        loop {
+            if let Some(n) = self.front.next() {
+                self.yielded_front += 1;
+                return Some(Value::Int(*n));
+            }
+            match self.chunks.next() {
+                Some(chunk) => self.front = chunk.iter(),
+                None => {
+                    // Chunks spent: the tail holds the rest (items
+                    // remain, so it is still pending — an empty tail
+                    // with spent chunks means fully yielded, which
+                    // the `remaining` gate above already excluded).
+                    let tail = self.tail.take().expect("tail pending while items remain");
+                    self.front = tail;
+                }
+            }
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let rest = self.remaining();
+        (rest, Some(rest))
+    }
+}
+
+impl DoubleEndedIterator for PackedIter<'_> {
+    fn next_back(&mut self) -> Option<Value> {
+        if self.remaining() == 0 {
+            return None;
+        }
+        let index = self.ints.len() - self.yielded_back - 1;
+        self.yielded_back += 1;
+        self.ints.get(index)
+    }
 }
 
 impl Iterator for VectorIter<'_> {
@@ -283,7 +539,7 @@ impl Iterator for VectorIter<'_> {
     fn next(&mut self) -> Option<Value> {
         match &mut self.inner {
             VectorIterInner::Generic(it) => it.next().cloned(),
-            VectorIterInner::Packed(it) => it.next().map(|n| Value::Int(*n)),
+            VectorIterInner::Packed(it) => it.next(),
         }
     }
 
@@ -299,7 +555,7 @@ impl DoubleEndedIterator for VectorIter<'_> {
     fn next_back(&mut self) -> Option<Value> {
         match &mut self.inner {
             VectorIterInner::Generic(it) => it.next_back().cloned(),
-            VectorIterInner::Packed(it) => it.next_back().map(|n| Value::Int(*n)),
+            VectorIterInner::Packed(it) => it.next_back(),
         }
     }
 }
@@ -587,13 +843,24 @@ impl List {
     }
 }
 
+/// Copy packed chunks into a fresh trie (for the first foreign
+/// value into an all-`Int` vector — one-time cost, then generic
+/// speed).
+fn unpack_packed(packed: &PackedInts) -> RpdsVector {
+    let mut out = RpdsVector::new_sync();
+    for n in packed.collect_all() {
+        out.push_back_mut(Value::Int(n));
+    }
+    out
+}
+
 impl Vector {
     /// An empty vector (packed: `conj` chains over `Int`s stay
     /// packed from the first push).
     #[must_use]
     pub fn new_sync() -> Self {
         Self {
-            inner: VectorInner::Packed(Arc::new(Vec::new())),
+            inner: VectorInner::Packed(PackedInts::from_ints(Vec::new())),
             meta: None,
             id: next_vector_id(),
         }
@@ -601,7 +868,7 @@ impl Vector {
 
     /// Build a vector from items in order (packed when every item
     /// is an `Int` — one pass, completing generically at the first
-    /// foreign value or past `MAX_PACKED_LEN`).
+    /// foreign value).
     #[must_use]
     pub fn from_vec(items: Vec<Value>) -> Self {
         let mut items = items.into_iter();
@@ -632,43 +899,29 @@ impl Vector {
 
     /// Build a packed vector from `i64`s in order (no scan — for
     /// callers that already know, like ranges and packed
-    /// transients). Past `MAX_PACKED_LEN` the vector rides the
-    /// generic trie instead (a long packed run would clone per
-    /// shared update — #227).
+    /// transients).
     #[must_use]
     pub fn from_ints(ints: Vec<i64>) -> Self {
-        if ints.len() > MAX_PACKED_LEN {
-            let mut trie = RpdsVector::new_sync();
-            for n in ints {
-                trie.push_back_mut(Value::Int(n));
-            }
-            return Self {
-                inner: VectorInner::Generic(trie),
-                meta: None,
-                id: next_vector_id(),
-            };
-        }
         Self {
-            inner: VectorInner::Packed(Arc::new(ints)),
+            inner: VectorInner::Packed(PackedInts::from_ints(ints)),
             meta: None,
             id: next_vector_id(),
         }
     }
 
     /// Whether this vector rides on packed `i64` storage (8 bytes
-    /// per element instead of one 72-byte `Value` per trie leaf).
+    /// per element instead of one boxed `Value` per trie leaf).
     #[must_use]
     pub fn is_packed(&self) -> bool {
         matches!(self.inner, VectorInner::Packed(_))
     }
 
-    /// The packed `i64` run when packed (`None` for the generic
-    /// trie) — for transients that freeze back to packed storage
-    /// without re-scanning.
-    #[must_use]
-    pub fn packed_slice(&self) -> Option<&[i64]> {
+    /// All packed `i64`s in order (`None` for the generic trie) —
+    /// for transients that freeze back to packed storage without
+    /// re-scanning.
+    pub(crate) fn packed_ints(&self) -> Option<Vec<i64>> {
         match &self.inner {
-            VectorInner::Packed(ints) => Some(ints),
+            VectorInner::Packed(packed) => Some(packed.collect_all()),
             VectorInner::Generic(_) => None,
         }
     }
@@ -680,18 +933,13 @@ impl Vector {
         // empty trie `Arc::new`s its root, one alloc per `conj`
         // before #227), so uniquely-owned `conj` chains mutate in
         // place while versions shared with other handles still
-        // path-copy. Packed storage meeting a foreign value — or an
-        // `Int` at `MAX_PACKED_LEN` — rebuilds once (unpack), like
+        // path-copy. Packed storage meeting a foreign value
+        // rebuilds once (unpack), like
         // [`set_nth_owned`](Self::set_nth_owned).
-        let unpack = match (&self.inner, &v) {
-            (VectorInner::Packed(ints), Value::Int(_)) => ints.len() >= MAX_PACKED_LEN,
-            (VectorInner::Packed(_), _) => true,
-            (VectorInner::Generic(_), _) => false,
-        };
-        if unpack {
+        if matches!(&self.inner, VectorInner::Packed(_)) && !matches!(v, Value::Int(_)) {
             let mut out = RpdsVector::new_sync();
-            for n in self.packed_slice().expect("guarded packed above") {
-                out.push_back_mut(Value::Int(*n));
+            for n in self.packed_ints().expect("guarded packed above") {
+                out.push_back_mut(Value::Int(n));
             }
             out.push_back_mut(v);
             self.inner = VectorInner::Generic(out);
@@ -707,16 +955,14 @@ impl Vector {
                 // path-copies nodes shared with *other* versions).
                 trie.push_back_mut(v);
             }
-            VectorInner::Packed(ints) => {
-                // Owned packed storage mutates in place when
-                // unique; `make_mut` copies the 8-byte run when
-                // shared — at most `MAX_PACKED_LEN` ints, since
-                // longer runs unpack above (a shared big run would
-                // clone per `conj`, turning chains quadratic — #227).
-                // `Int`-only below the cap here (foreign values and
-                // at-cap pushes unpacked above).
+            VectorInner::Packed(packed) => {
+                // Stays packed at any size (one chunk copied per
+                // push — the flat run this replaced copied the
+                // whole run when shared, making build loops
+                // quadratic: 200K pushes took 44s). `Int`-only
+                // here (foreign values unpacked above).
                 if let Value::Int(n) = v {
-                    Arc::make_mut(ints).push(n);
+                    packed.push_back_mut(n);
                 }
             }
         }
@@ -743,11 +989,8 @@ impl Vector {
     /// only nodes shared with *other* versions, so threading one
     /// accumulator through an `assoc` chain mutates in place after
     /// the first step instead of path-copying per step. Packed `Int`
-    /// storage mutates through `Arc::make_mut` (in place when
-    /// unique, at most `MAX_PACKED_LEN` ints when shared —
-    /// [`from_ints`](Self::from_ints) and
-    /// [`push_back`](Self::push_back) never build longer runs); a
-    /// foreign value unpacks once, like [`push_back`](Self::push_back).
+    /// storage copies at most one chunk per op; a foreign value
+    /// unpacks once, like [`push_back`](Self::push_back).
     #[must_use]
     pub fn set_nth_owned(mut self, index: usize, v: Value) -> Option<Self> {
         // Packed storage meeting a foreign value rebuilds once
@@ -759,16 +1002,18 @@ impl Vector {
             if index >= self.len() {
                 return None;
             }
-            let mut out = RpdsVector::new_sync();
-            for n in self.packed_slice().expect("guarded packed above") {
-                out.push_back_mut(Value::Int(*n));
+            // Re-match the guarded shape (`if let`: the `else` is
+            // impossible, and an empty `else` keeps every line
+            // executable for coverage).
+            if let VectorInner::Packed(packed) = &self.inner {
+                let mut out = unpack_packed(packed);
+                // `index` is below the length (guarded above over
+                // these same items), so this cannot fail.
+                assert!(out.set_mut(index, v));
+                self.inner = VectorInner::Generic(out);
+                self.id = next_vector_id();
+                return Some(self);
             }
-            // `index` is below the length (guarded above over these
-            // same items), so this cannot fail.
-            assert!(out.set_mut(index, v));
-            self.inner = VectorInner::Generic(out);
-            self.id = next_vector_id();
-            return Some(self);
         }
         match &mut self.inner {
             VectorInner::Generic(trie) => {
@@ -776,18 +1021,58 @@ impl Vector {
                     return None;
                 }
             }
-            VectorInner::Packed(ints) => {
-                if index >= ints.len() {
-                    return None;
-                }
-                // `Int`-only here (foreign values unpacked above).
+            VectorInner::Packed(packed) => {
+                // `Int`-only here (foreign values unpacked above);
+                // one chunk copied per op.
                 if let Value::Int(n) = v {
-                    Arc::make_mut(ints)[index] = n;
+                    let next = packed.set_nth(index, n)?;
+                    *packed = next;
                 }
             }
         }
         self.id = next_vector_id();
         Some(self)
+    }
+
+    /// Detach for loop threading (see `Evaluator::try_int_loop`):
+    /// same storage, fresh identity — threaded versions must never
+    /// alias the entry version's identity (like
+    /// [`Map::insert_threaded`]'s sidecar detach). Chunks stay
+    /// shared until first touch (copy-on-write in
+    /// [`Vector::assoc_int_threaded`]), so the entry version stays
+    /// pristine for bailout.
+    #[must_use]
+    pub fn thread_entry(mut self) -> Self {
+        self.id = next_vector_id();
+        self
+    }
+
+    /// Loop-threaded int `assoc`: like [`Vector::set_nth`] with an
+    /// `Int` (plus the index-at-`len` append the interpreter
+    /// allows), but chunks update in place when uniquely owned
+    /// (first touch detaches from the entry version). `false`
+    /// declines — generic storage or past-the-end (the slow path
+    /// throws exactly).
+    pub fn assoc_int_threaded(&mut self, index: usize, n: i64) -> bool {
+        let VectorInner::Packed(packed) = &mut self.inner else {
+            return false;
+        };
+        if index == packed.len() {
+            packed.push_back_mut(n);
+            return true;
+        }
+        packed.set_nth_threaded(index, n)
+    }
+
+    /// The raw `i64` at `index` (`None` for generic storage or past
+    /// the end — loop threading bails, and the slow path throws
+    /// exactly).
+    #[must_use]
+    pub fn nth_int(&self, index: usize) -> Option<i64> {
+        match &self.inner {
+            VectorInner::Packed(packed) => packed.nth_int(index),
+            VectorInner::Generic(_) => None,
+        }
     }
 
     /// The vector without its last item (`None` when empty).
@@ -806,10 +1091,9 @@ impl Vector {
     /// [`is_empty`](Self::is_empty) first when the vector must survive).
     ///
     /// The #212 pattern (`mut self` + `drop_last_mut`): packed
-    /// storage pops through `Arc::make_mut`, so `pop` chains over
+    /// storage pops copy at most one chunk, so `pop` chains over
     /// uniquely-owned vectors mutate in place while versions shared
-    /// with other handles still path-copy (at most
-    /// `MAX_PACKED_LEN` ints — longer runs never pack).
+    /// with other handles copy one chunk per pop.
     #[must_use]
     pub fn drop_last_owned(mut self) -> Option<Self> {
         // Through `&mut` (no `mem::replace` placeholder — even an
@@ -821,11 +1105,10 @@ impl Vector {
                     return None;
                 }
             }
-            VectorInner::Packed(ints) => {
-                if ints.is_empty() {
-                    return None;
-                }
-                Arc::make_mut(ints).pop();
+            VectorInner::Packed(packed) => {
+                // One chunk copied per op (`None` when empty).
+                let next = packed.drop_last()?;
+                *packed = next;
             }
         }
         self.id = next_vector_id();
@@ -838,7 +1121,7 @@ impl Vector {
         VectorIter {
             inner: match &self.inner {
                 VectorInner::Generic(inner) => VectorIterInner::Generic(inner.iter()),
-                VectorInner::Packed(ints) => VectorIterInner::Packed(ints.iter()),
+                VectorInner::Packed(packed) => VectorIterInner::Packed(PackedIter::new(packed)),
             },
         }
     }
@@ -850,7 +1133,7 @@ impl Vector {
     pub fn get(&self, index: usize) -> Option<Value> {
         match &self.inner {
             VectorInner::Generic(inner) => inner.get(index).cloned(),
-            VectorInner::Packed(ints) => ints.get(index).map(|n| Value::Int(*n)),
+            VectorInner::Packed(packed) => packed.get(index),
         }
     }
 
@@ -859,7 +1142,7 @@ impl Vector {
     pub fn len(&self) -> usize {
         match &self.inner {
             VectorInner::Generic(inner) => inner.len(),
-            VectorInner::Packed(ints) => ints.len(),
+            VectorInner::Packed(packed) => packed.len(),
         }
     }
 
@@ -1081,11 +1364,15 @@ impl Map {
         if let Some(small) = self.small.take() {
             return self.insert_shaped_mut(small, k, v);
         }
-        // Owned `self`: mutate the trie in place (same rationale as
-        // `Vector::push_back` — rpds still path-copies nodes shared
-        // with *other* versions, so persistence is preserved).
-        if self.trie().get(&k).is_some() {
-            self.trie_mut().insert_mut(k, v);
+        // Insert first, then read the size delta instead of a
+        // pre-`get` (one traversal + one hash per assoc, not two —
+        // the delta answers new/existing exactly, since
+        // `insert_mut` bumps `size` only for new keys).
+        let size = self.trie().size();
+        let promote = !self.hashy && (size >= 64 || (size >= 8 && !matches!(k, Value::Keyword(_))));
+        let key = k.clone();
+        self.trie_mut().insert_mut(k, v);
+        if self.trie().size() == size {
             // Fresh identity only when shared: a live alias must
             // keep its sidecar `Arc` (see [`Map::id`]).
             if Arc::strong_count(&self.keys) > 1 {
@@ -1093,13 +1380,66 @@ impl Map {
             }
             return;
         }
-        let size = self.trie().size();
-        let promote = !self.hashy && (size >= 64 || (size >= 8 && !matches!(k, Value::Keyword(_))));
         // `make_mut`: in place when unique; a header clone plus a
         // path copy when shared (exactly the old clone-then-push).
-        Arc::make_mut(&mut self.keys).push_back_mut(k.clone());
-        self.trie_mut().insert_mut(k, v);
+        Arc::make_mut(&mut self.keys).push_back_mut(key);
         self.hashy = self.hashy || promote;
+    }
+
+    /// Loop-threaded `assoc` (see `Evaluator::try_int_loop`): like
+    /// [`Map::insert`], but a uniquely owned sidecar grows in place
+    /// instead of path-copying per version. The first call detaches
+    /// the sidecar when shared (so the threaded versions never alias
+    /// the entry version's identity); intermediate versions share
+    /// one sidecar `Arc` (unobservable — only values escape the
+    /// loop). Never call on sorted maps (their sidecars stay in
+    /// comparator order through `sorted_assoc_map`, not here).
+    #[must_use]
+    pub fn insert_threaded(mut self, k: Value, v: Value) -> Self {
+        if let Some(small) = self.small.take() {
+            self.insert_shaped_mut(small, k, v);
+            return self;
+        }
+        // Detach first (even for existing keys): the entry frame's
+        // copy shares this sidecar, and the threaded versions must
+        // not alias its identity.
+        if Arc::get_mut(&mut self.keys).is_none() {
+            self.keys = Arc::new((*self.keys).clone());
+        }
+        let size = self.trie().size();
+        let promote = !self.hashy && (size >= 64 || (size >= 8 && !matches!(k, Value::Keyword(_))));
+        let key = k.clone();
+        self.trie_mut().insert_mut(k, v);
+        if self.trie().size() == size {
+            return self;
+        }
+        let keys = Arc::get_mut(&mut self.keys).expect("threaded sidecar detached");
+        keys.push_back_mut(key);
+        self.hashy = self.hashy || promote;
+        self
+    }
+
+    /// A structural deep copy: the same entries (in iteration order),
+    /// class flags, and metadata, but fresh trie nodes and a fresh
+    /// sidecar — nothing structural shared. Loop threading
+    /// (`insert_threaded`) runs on the copy while a shallow clone
+    /// stays pristine for bailout; shaped maps return a shallow
+    /// clone instead (threading copies on the first write — the
+    /// entry's storage is shared — and mutates only consumed
+    /// versions after, so sharing stays safe).
+    #[must_use]
+    pub fn deep_clone(&self) -> Self {
+        if self.small.is_some() {
+            return self.clone();
+        }
+        let mut out = new_map();
+        for (k, v) in self.iter() {
+            out = out.insert(k.clone(), v.clone());
+        }
+        out.meta = self.meta.clone();
+        out.hashy = self.hashy;
+        out.sort = self.sort.clone();
+        out
     }
 
     /// The shaped arm of [`Map::insert_mut`] (linear scan — the `==`

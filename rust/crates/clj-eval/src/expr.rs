@@ -1064,18 +1064,7 @@ impl<'a> Analyzer<'a> {
         // Macro expansion (`analyzeSeq` order: specials, then
         // macros): an expanded form re-analyzes from the top.
         if let Some(expanded) = self.try_expand_macro(form, head, &items[1..], span)? {
-            let out = self.analyze(&expanded, span, tail);
-            // B1: macro outputs are the one unbounded-depth class
-            // (30k threading steps build 30k-deep output). Dropping
-            // one recurses per level and can overflow _during
-            // unwinding_ — after the budget already tripped. On the
-            // plan path the build fails right after this either
-            // way, so leak the output instead of dropping it; the
-            // run path is untouched (no budget, same as before).
-            if out.is_err() && self.limit.is_some() {
-                std::mem::forget(expanded);
-            }
-            return out;
+            return self.analyze_expanded(expanded, span, tail);
         }
         // Private cross-namespace invocation (the `isInline`
         // analog): the wrapper names the operator as written, the
@@ -1102,6 +1091,27 @@ impl<'a> Analyzer<'a> {
             args.push(self.analyze(arg, span, false)?);
         }
         Ok(self.direct_or_invoke(head_expr, args, span))
+    }
+
+    /// Re-analyze a macro expansion from the top.
+    fn analyze_expanded(
+        &mut self,
+        expanded: Value,
+        span: Span,
+        tail: bool,
+    ) -> Result<Expr, CompileError> {
+        let out = self.analyze(&expanded, span, tail);
+        // B1: macro outputs are the one unbounded-depth class
+        // (30k threading steps build 30k-deep output). Dropping
+        // one recurses per level and can overflow _during
+        // unwinding_ — after the budget already tripped. On the
+        // plan path the build fails right after this either
+        // way, so leak the output instead of dropping it; the
+        // run path is untouched (no budget, same as before).
+        if out.is_err() && self.limit.is_some() {
+            std::mem::forget(expanded);
+        }
+        out
     }
 
     /// A direct-threaded call when the head is a global whose

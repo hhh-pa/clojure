@@ -71,7 +71,7 @@ use clj_value::{
 use crate::core::{cce_err, is_ifn};
 use crate::error::{NativeError, Signal, internal_throwable};
 use crate::eval::Evaluator;
-use crate::ext::{FastArith, NativeFn};
+use crate::ext::{FastArith, NativeFn, as_native};
 use crate::lazy::as_pending;
 use crate::ns::{NativeFnPtr, check_arity, npe, signal_to_native, str_of};
 use crate::vars::check_min_arity;
@@ -254,6 +254,61 @@ fn try_publish(atom: &Atom, old: &Value, new: &Value) -> Option<Map> {
     Some(state.watches.clone())
 }
 
+/// A fused `swap!` int op: add/sub/mul by a constant, or negate.
+#[derive(Clone, Copy, Debug)]
+enum SwapArith {
+    Add(i64),
+    Sub(i64),
+    Mul(i64),
+    Neg,
+}
+
+impl SwapArith {
+    fn apply(self, old: i64) -> Option<i64> {
+        match self {
+            SwapArith::Add(x) => old.checked_add(x),
+            SwapArith::Sub(x) => old.checked_sub(x),
+            SwapArith::Mul(x) => old.checked_mul(x),
+            SwapArith::Neg => old.checked_neg(),
+        }
+    }
+}
+
+/// Classify `(swap! a f extra...)` for the fast path: known core
+/// arithmetic natives over int extras. Anything else (closures,
+/// non-int extras, other arities) runs the generic loop.
+fn swap_arith_op(f: &Value, extra: &[Value]) -> Option<SwapArith> {
+    let native = as_native(f)?;
+    match (native.display.as_ref(), extra) {
+        ("clojure.core/+", [Value::Int(x)]) => Some(SwapArith::Add(*x)),
+        ("clojure.core/+", []) => Some(SwapArith::Add(0)),
+        ("clojure.core/-", [Value::Int(x)]) => Some(SwapArith::Sub(*x)),
+        ("clojure.core/-", []) => Some(SwapArith::Neg),
+        ("clojure.core/*", [Value::Int(x)]) => Some(SwapArith::Mul(*x)),
+        ("clojure.core/inc", []) => Some(SwapArith::Add(1)),
+        ("clojure.core/dec", []) => Some(SwapArith::Sub(1)),
+        _ => None,
+    }
+}
+
+/// Run a fused int `swap!`: read, compute, and publish under one
+/// lock (atomic — no CAS retry needed, and the mutex serializes
+/// against generic publishers). `None` bails to the generic loop
+/// (validator/watches installed, non-int state, or overflow —
+/// the generic path throws `long overflow`, like `+` itself).
+fn swap_fast(atom: &Atom, op: SwapArith) -> Option<(Value, Value)> {
+    let mut state = atom.lock();
+    if state.validator.is_some() || !state.watches.is_empty() {
+        return None;
+    }
+    let Value::Int(old) = state.value else {
+        return None;
+    };
+    let new = op.apply(old)?;
+    state.value = Value::Int(new);
+    Some((Value::Int(old), Value::Int(new)))
+}
+
 /// The `swap!` CAS loop: apply `f`, validate, publish iff the state
 /// is unchanged (else retry — `f` published meanwhile). Validation
 /// vetoes and `f` failures leave the state untouched and fire no
@@ -264,6 +319,11 @@ fn swap_loop(
     f: &Value,
     extra: &[Value],
 ) -> Result<(Value, Value), NativeError> {
+    if let Some(op) = swap_arith_op(f, extra) {
+        if let Some(done) = swap_fast(atom, op) {
+            return Ok(done);
+        }
+    }
     loop {
         let old = atom.lock().value.clone();
         let mut f_args = Vec::with_capacity(extra.len() + 1);

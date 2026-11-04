@@ -1146,3 +1146,17 @@ fn case_star_shift_mask_dispatch() {
         ":d"
     );
 }
+
+#[test]
+fn single_arg_fn_recur_rebinds_inline() {
+    // A one-parameter `fn` binds its slot inline and rebinds it in
+    // place per `recur` (no fresh frame while unobserved).
+    let mut eval = boot();
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(do (defn countdown [n] (if (pos? n) (recur (dec n)) :done)) (countdown 100))"
+        ),
+        ":done"
+    );
+}

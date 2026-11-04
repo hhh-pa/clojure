@@ -104,8 +104,8 @@ impl TransientVector {
     /// A transient over `v`'s items.
     #[must_use]
     pub fn from_vector(v: &Vector) -> Self {
-        let items = match v.packed_slice() {
-            Some(ints) => TransientItems::Packed(ints.to_vec()),
+        let items = match v.packed_ints() {
+            Some(ints) => TransientItems::Packed(ints),
             None => TransientItems::Generic(v.iter().collect()),
         };
         Self { items, valid: true }

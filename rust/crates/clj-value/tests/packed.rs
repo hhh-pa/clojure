@@ -42,6 +42,26 @@ fn empty_from_vec_is_packed() {
     assert!(v.is_empty());
 }
 
+/// In-bounds `Int` assoc stays packed (one chunk copied).
+#[test]
+fn packed_int_assoc_stays_packed() {
+    let v = Vector::from_ints(vec![1, 2, 3]);
+    let w = v.set_nth_owned(1, Value::Int(9)).expect("in bounds");
+    assert!(w.is_packed());
+    let back: Vec<Value> = w.iter().collect();
+    assert_eq!(back, vec![Value::Int(1), Value::Int(9), Value::Int(3)]);
+}
+
+/// Threaded entry points decline generic storage.
+#[test]
+fn threaded_entry_points_decline_generic() {
+    let v = Vector::from_vec(vec![Value::Int(1), Value::Nil]);
+    assert!(!v.is_packed());
+    assert_eq!(v.nth_int(0), None);
+    let mut t = v.thread_entry();
+    assert!(!t.assoc_int_threaded(0, 5));
+}
+
 /// One non-`Int` item keeps the generic trie.
 #[test]
 fn mixed_from_vec_unpacks() {
@@ -241,70 +261,165 @@ fn transient_generic_arms() {
     assert!(tv.pop().is_err());
 }
 
-/// Long runs never pack (#227): a shared packed update clones
-/// the whole run, so past the cap `Int` vectors ride the generic
-/// trie (log-time shared updates, no quadratic chains). The cap is
-/// 1024 (mirrors `MAX_PACKED_LEN` in value.rs).
+/// Pushing an `Int` onto a shared small packed run copies cheaply
+/// and stays packed; both versions stay intact (persistence).
 #[test]
-fn long_runs_stay_generic() {
-    let v = Vector::from_vec(ints(1024));
+fn push_back_shared_small_int_stays_packed() {
+    let v = Vector::from_vec(ints(10));
     assert!(v.is_packed());
-    let v = Vector::from_vec(ints(1025));
-    assert!(!v.is_packed());
-    let back: Vec<Value> = v.iter().collect();
-    assert_eq!(back, ints(1025));
-    let w = Vector::from_ints((0..2000).collect());
-    assert!(!w.is_packed());
-    assert_eq!(w.len(), 2000);
-    assert_eq!(w.get(1999), Some(Value::Int(1999)));
-}
-
-/// `push_back` past the cap unpacks once; both versions stay
-/// correct (persistence holds across the unpack).
-#[test]
-fn push_back_past_cap_unpacks_once() {
-    let mut v = Vector::from_vec(ints(1024));
-    assert!(v.is_packed());
-    v = v.push_back(Value::Int(1024));
-    assert!(!v.is_packed());
-    assert_eq!(v.len(), 1025);
-    let back: Vec<Value> = v.iter().collect();
-    assert_eq!(back, ints(1025));
-    // Shared updates on the long vector keep every version intact.
     let shared = v.clone();
-    let w = v.push_back(Value::Int(1025));
-    assert_eq!(w.len(), 1026);
-    assert_eq!(shared.len(), 1025);
-    assert_eq!(shared.get(1024), Some(Value::Int(1024)));
-    assert_eq!(w.get(1025), Some(Value::Int(1025)));
+    let w = v.push_back(Value::Int(10));
+    assert!(w.is_packed());
+    assert_eq!(w.len(), 11);
+    assert_eq!(w.iter().collect::<Vec<_>>(), ints(11));
+    assert!(shared.is_packed());
+    assert_eq!(shared.len(), 10);
 }
 
-/// `assoc` on a long `Int` vector keeps every version intact (the
-/// generic trie path-copies; no whole-run clone per update).
+/// Pushing an `Int` onto a uniquely owned big packed run mutates
+/// in place and stays packed.
 #[test]
-fn set_nth_long_int_vector_persists() {
-    let v = Vector::from_vec(ints(5000));
-    assert!(!v.is_packed());
-    let w = v.set_nth(4999, Value::Int(7)).unwrap();
-    assert_eq!(w.get(4999), Some(Value::Int(7)));
-    assert_eq!(v.get(4999), Some(Value::Int(4999)));
-    assert_eq!(w.len(), 5000);
+fn push_back_unique_big_int_stays_packed() {
+    let v = Vector::from_ints((0..1500).collect());
+    assert!(v.is_packed());
+    let w = v.push_back(Value::Int(1500));
+    assert!(w.is_packed());
+    assert_eq!(w.len(), 1501);
+    assert_eq!(w.get(1500), Some(Value::Int(1500)));
+    assert_eq!(w.get(0), Some(Value::Int(0)));
 }
 
-/// `persistent!` of a long packed transient freezes generically
-/// with every item intact.
+/// Pushing an `Int` onto a shared big packed run stays packed
+/// (one chunk copied, never the whole run); the old version stays
+/// packed and intact.
 #[test]
-fn transient_persistent_long_freezes_generic() {
-    let mut tv = TransientVector::new();
-    for i in 0..2000 {
-        tv.conj(Value::Int(i)).unwrap();
+fn push_back_shared_big_int_stays_packed() {
+    let v = Vector::from_ints((0..1500).collect());
+    assert!(v.is_packed());
+    let shared = v.clone();
+    let w = v.push_back(Value::Int(1500));
+    assert!(w.is_packed());
+    assert_eq!(w.len(), 1501);
+    assert_eq!(w.iter().collect::<Vec<_>>(), ints(1501));
+    assert!(shared.is_packed());
+    assert_eq!(shared.len(), 1500);
+    assert_eq!(shared.iter().collect::<Vec<_>>(), ints(1500));
+}
+
+/// `set_nth` of an `Int` on a big packed run stays packed (one
+/// chunk copied); the old version stays packed and intact.
+#[test]
+fn set_nth_big_int_stays_packed() {
+    let v = Vector::from_ints((0..1500).collect());
+    let w = v.set_nth(700, Value::Int(99)).unwrap();
+    assert!(w.is_packed());
+    assert_eq!(w.len(), 1500);
+    assert_eq!(w.get(700), Some(Value::Int(99)));
+    assert_eq!(w.get(0), Some(Value::Int(0)));
+    assert!(v.is_packed());
+    assert_eq!(v.get(700), Some(Value::Int(700)));
+}
+
+/// `drop_last` on a big packed run stays packed; the old version
+/// stays packed and intact.
+#[test]
+fn drop_last_big_stays_packed() {
+    let v = Vector::from_ints((0..1500).collect());
+    let w = v.drop_last().unwrap();
+    assert!(w.is_packed());
+    assert_eq!(w.len(), 1499);
+    assert_eq!(w.iter().collect::<Vec<_>>(), ints(1499));
+    assert!(v.is_packed());
+    assert_eq!(v.len(), 1500);
+}
+
+/// Freezing: pushing past a full 64-chunk keeps every item in
+/// order (frozen chunk + new tail), and `get`/`len` span both.
+#[test]
+fn push_back_freezes_full_tail_into_chunks() {
+    let mut v = Vector::from_ints((0..64).collect());
+    assert_eq!(v.len(), 64);
+    v = v.push_back(Value::Int(64));
+    assert!(v.is_packed());
+    assert_eq!(v.len(), 65);
+    assert_eq!(v.iter().collect::<Vec<_>>(), ints(65));
+    assert_eq!(v.get(0), Some(Value::Int(0)));
+    assert_eq!(v.get(63), Some(Value::Int(63)));
+    assert_eq!(v.get(64), Some(Value::Int(64)));
+    assert_eq!(v.get(65), None);
+}
+
+/// Exact multiples leave an empty tail (two frozen chunks here);
+/// dropping unfreezes the last chunk back into the tail.
+#[test]
+fn exact_multiple_runs_unfreeze_on_drop() {
+    let v = Vector::from_ints((0..128).collect());
+    assert!(v.is_packed());
+    assert_eq!(v.len(), 128);
+    assert_eq!(v.iter().collect::<Vec<_>>(), ints(128));
+    let w = v.drop_last().unwrap();
+    assert!(w.is_packed());
+    assert_eq!(w.len(), 127);
+    assert_eq!(w.iter().collect::<Vec<_>>(), ints(127));
+    assert_eq!(v.len(), 128);
+}
+
+/// `set_nth` inside a frozen chunk copies just that chunk: later
+/// chunks, the tail, and the old version are untouched.
+#[test]
+fn set_nth_frozen_region_shares_the_rest() {
+    let v = Vector::from_ints((0..200).collect());
+    let w = v.set_nth(10, Value::Int(99)).unwrap();
+    assert!(w.is_packed());
+    assert_eq!(w.get(10), Some(Value::Int(99)));
+    assert_eq!(w.get(100), Some(Value::Int(100)));
+    assert_eq!(w.get(199), Some(Value::Int(199)));
+    assert_eq!(v.get(10), Some(Value::Int(10)));
+    // Out of bounds stays `None` on multi-chunk runs.
+    assert_eq!(v.set_nth(200, Value::Int(1)), None);
+}
+
+/// Forward iteration streams chunk after chunk; `next_back`
+/// indexes from the end; mixed ends never cross or double-yield.
+#[test]
+fn packed_iter_walks_chunks_both_ends() {
+    let v = Vector::from_ints((0..200).collect());
+    let mut it = v.iter();
+    assert_eq!(it.size_hint(), (200, Some(200)));
+    assert_eq!(it.next(), Some(Value::Int(0)));
+    assert_eq!(it.next_back(), Some(Value::Int(199)));
+    assert_eq!(it.next(), Some(Value::Int(1)));
+    assert_eq!(it.next_back(), Some(Value::Int(198)));
+    assert_eq!(it.size_hint(), (196, Some(196)));
+    let rest: Vec<_> = it.collect();
+    assert_eq!(rest.len(), 196);
+    assert_eq!(rest[0], Value::Int(2));
+    assert_eq!(rest[195], Value::Int(197));
+    // Fully consumed from both sides ends cleanly.
+    let mut it = v.iter();
+    for _ in 0..100 {
+        it.next();
+        it.next_back();
     }
-    assert!(tv.is_packed());
-    let frozen = tv.persistent().unwrap();
-    assert!(!frozen.is_packed());
-    assert_eq!(frozen.len(), 2000);
-    let back: Vec<Value> = frozen.iter().collect();
-    assert_eq!(back, ints(2000));
+    assert_eq!(it.next(), None);
+    assert_eq!(it.next_back(), None);
+}
+
+/// A foreign value into a multi-chunk run unpacks once to the
+/// trie; the old version stays packed and intact.
+#[test]
+fn foreign_push_on_multichunk_unpacks_once() {
+    let v = Vector::from_ints((0..200).collect());
+    let w = v.clone().push_back(Value::Nil);
+    assert!(!w.is_packed());
+    assert_eq!(w.len(), 201);
+    assert_eq!(w.get(200), Some(Value::Nil));
+    assert_eq!(w.get(199), Some(Value::Int(199)));
+    assert!(v.is_packed());
+    let s = v.set_nth(150, Value::Nil).unwrap();
+    assert!(!s.is_packed());
+    assert_eq!(s.get(150), Some(Value::Nil));
+    assert_eq!(s.get(0), Some(Value::Int(0)));
 }
 
 /// Metadata rides alongside packed storage (vectors stay `IObj`).

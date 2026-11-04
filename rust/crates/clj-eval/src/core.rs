@@ -892,6 +892,9 @@ fn num_rational(n: &Num) -> num_rational::BigRational {
 /// everything else keeps the rational path.
 fn compare_exact(a: &Num, b: &Num) -> std::cmp::Ordering {
     match (a, b) {
+        // Direct `i64` compare (the sort hot path — the rational
+        // fallback below allocates two `BigInt`s per comparison).
+        (Num::Int(x), Num::Int(y)) => x.cmp(y),
         (Num::BigDec(d), Num::BigDec(e)) => d.compare(e),
         (Num::BigDec(d), Num::Int(i)) => d.compare(&clj_value::BigDec::from_bigint((*i).into())),
         (Num::Int(i), Num::BigDec(e)) => clj_value::BigDec::from_bigint((*i).into()).compare(e),
@@ -5144,6 +5147,25 @@ mod tests {
     #[should_panic(expected = "rank dispatch keeps doubles out of BigDec ops")]
     fn num_bigdec_rejects_double() {
         let _ = num_bigdec(&Num::Double(0.5));
+    }
+
+    /// `Int` pairs compare directly (no rational round-trip):
+    /// less, equal (including extremes), greater.
+    #[test]
+    fn int_pairs_compare_directly() {
+        use std::cmp::Ordering;
+        assert_eq!(
+            jvm_compare(&Value::Int(-3), &Value::Int(7)).unwrap(),
+            Ordering::Less
+        );
+        assert_eq!(
+            jvm_compare(&Value::Int(i64::MIN), &Value::Int(i64::MIN)).unwrap(),
+            Ordering::Equal
+        );
+        assert_eq!(
+            jvm_compare(&Value::Int(i64::MAX), &Value::Int(i64::MIN)).unwrap(),
+            Ordering::Greater
+        );
     }
 
     /// Instants order by millis (unit-tested: `#inst` reads

@@ -1504,23 +1504,40 @@ impl Env {
             Arc::ptr_eq(&parent.frame, &outer.frame) && frame.base == outer.len()
         });
         if flat_over_outer {
-            let Slots::Shared(slots) = &mut frame.slots else {
-                return false;
-            };
-            let dst = Arc::get_mut(slots).expect("slots ride with their frame");
-            // Destructuring loops bind fewer values than slots (one
-            // per pattern), so a mismatch falls back to a fresh
-            // bind — only exact rebinds go in place. Values move
-            // (never clone): each assignment drops the old slot
-            // value, and the drain leaves the buffer for the
-            // caller's pool (#235: a `clone_from_slice` here
-            // cloned every slot per `recur`).
-            if dst.len() == values.len() {
-                for (slot, new_val) in dst.iter_mut().zip(values.drain(..)) {
-                    *slot = new_val;
-                }
+            // Single-slot `Inline` frames (the `extend_one` call
+            // path) rebind in place exactly like `Shared` ones —
+            // the frame is unshared, so the slot is unobserved.
+            // Exactly one value always arrives (the analyzer
+            // arity-checks every `recur`); popping it drains the
+            // buffer for the caller's pool, like `Shared` below.
+            if let Slots::Inline(slot) = &mut frame.slots {
+                *slot = values.pop().unwrap_or(Value::Nil);
                 return true;
             }
+            // `Patchable` (`letfn` setup) frames never rebind in
+            // place (`recur` binds fresh since #171), and neither
+            // do length mismatches (destructuring loops bind fewer
+            // values than slots — one per pattern): anything but
+            // an exact `Shared` hit answers `false`.
+            let mut rebound = false;
+            if let Slots::Shared(slots) = &mut frame.slots {
+                let dst = Arc::get_mut(slots).expect("slots ride with their frame");
+                // Destructuring loops bind fewer values than slots
+                // (one per pattern), so a mismatch falls back to a
+                // fresh bind — only exact rebinds go in place.
+                // Values move (never clone): each assignment drops
+                // the old slot value, and the drain leaves the
+                // buffer for the caller's pool (#235: a
+                // `clone_from_slice` here cloned every slot per
+                // `recur`).
+                if dst.len() == values.len() {
+                    for (slot, new_val) in dst.iter_mut().zip(values.drain(..)) {
+                        *slot = new_val;
+                    }
+                    rebound = true;
+                }
+            }
+            return rebound;
         }
         false
     }

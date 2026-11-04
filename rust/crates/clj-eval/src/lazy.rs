@@ -755,7 +755,7 @@ fn step_pending_unit(eval: &mut Evaluator, p: &PendingSeq) -> Result<StepUnit, S
 /// Step a subvector view (eager; subvectors are never empty —
 /// `subvec` answers a plain vector when `start == end`).
 fn step_subvector_unit(sv: &SubVectorValue) -> Result<StepUnit, Signal> {
-    let s = step_realized(&sv.items(), false).expect("subvectors are never empty");
+    let s = step_realized(sv.items(), false).expect("subvectors are never empty");
     step_seq(&s, true, false, SeqKind::Subvec, None)
 }
 
@@ -881,7 +881,7 @@ fn step_map_unit(m: &Map) -> Result<StepUnit, Signal> {
         .collect();
     let small = !m.is_hashy();
     let kind = if small { SeqKind::Map } else { SeqKind::Key };
-    step_realized(&entries, false).map_or_else(
+    step_realized(entries, false).map_or_else(
         || Ok(StepUnit::Empty),
         |s| step_seq(&s, small, small, kind, None),
     )
@@ -889,7 +889,7 @@ fn step_map_unit(m: &Map) -> Result<StepUnit, Signal> {
 
 /// Step a set.
 fn step_set_unit(s: &Set) -> Result<StepUnit, Signal> {
-    step_realized(&s.iter().cloned().collect::<Vec<_>>(), false).map_or_else(
+    step_realized(s.iter().cloned().collect::<Vec<_>>(), false).map_or_else(
         || Ok(StepUnit::Empty),
         |s| step_seq(&s, false, false, SeqKind::Key, None),
     )
@@ -946,11 +946,11 @@ pub(crate) fn step_unit(eval: &mut Evaluator, v: &Value) -> Result<StepUnit, Sig
         Value::Map(m) => step_map_unit(m),
         Value::Set(s) => step_set_unit(s),
         Value::Str(s) => step_str_unit(s),
-        Value::Array(a) => step_realized(&a.snapshot(), false).map_or_else(
+        Value::Array(a) => step_realized(a.snapshot(), false).map_or_else(
             || Ok(StepUnit::Empty),
             |s| step_seq(&s, true, false, SeqKind::Array, None),
         ),
-        Value::PrimitiveVector(p) => step_realized(&p.items(), true).map_or_else(
+        Value::PrimitiveVector(p) => step_realized(p.items(), true).map_or_else(
             || Ok(StepUnit::Empty),
             |s| step_seq(&s, true, true, SeqKind::Chunked, None),
         ),
@@ -1008,49 +1008,57 @@ fn seq_tail(s: Seq, counted: bool, idrop: bool, kind: SeqKind, meta: Option<&Map
 
 /// Build a pure seq from items (chunked for vectors, eager
 /// otherwise), or `None` when empty.
-fn step_realized(items: &[Value], chunked: bool) -> Option<Seq> {
+fn step_realized(items: Vec<Value>, chunked: bool) -> Option<Seq> {
     if chunked {
-        Seq::chunked(items.to_vec())
+        Seq::chunked(items)
     } else {
-        Seq::eager(items.to_vec())
+        Seq::eager(items)
     }
 }
 
-/// Step a range: up to [`CHUNK_SIZE`] verbatim heads plus the
-/// shifted range (nil tail when done). An `Int`+`Int` overflow
-/// ends the walk (like `Range.forceChunk`, whose promoting
+/// Step up to [`CHUNK_SIZE`] range heads (shared by
+/// `step_range_value` and `chunked_range_parts`): the items plus the
+/// live tail, materialized once — never per element. An `Int`+`Int`
+/// overflow ends the walk (like `Range.forceChunk`, whose promoting
 /// `Numbers.addP` always lands out of bounds past `i64`); a
 /// `BigDec`/ratio step with no exact decimal raises the JVM
 /// `ArithmeticException` (oracle `range-mixed`).
-fn step_range_value(eval: &mut Evaluator, r: &RangeValue) -> Result<StepUnit, Signal> {
+fn step_range_chunk(
+    eval: &mut Evaluator,
+    r: &RangeValue,
+) -> Result<(Vec<Value>, Option<RangeValue>), Signal> {
     let mut items = Vec::new();
     let mut cur = r.clone();
-    let mut tail = Value::Nil;
+    let mut live = false;
     while items.len() < CHUNK_SIZE {
-        let Some((head, next)) = cur.stepped() else {
+        let Some((head, more)) = cur.next_head() else {
+            live = false;
             break;
         };
         items.push(head);
-        match next {
-            Some(nxt) => {
-                tail = Value::Extension(Arc::new(nxt.clone()));
-                cur = nxt;
+        if !more {
+            if cur.step_inexact() {
+                return Err(eval.throw(range_step_error()));
             }
-            None => {
-                if cur.step_inexact() {
-                    return Err(eval.throw(range_step_error()));
-                }
-                tail = Value::Nil;
-                break;
-            }
+            live = false;
+            break;
         }
+        live = true;
     }
     // Empty ranges never exist as values (`range` nil-puns), so
     // stepping always yields at least one head.
     debug_assert!(!items.is_empty(), "stepped ranges are non-empty");
-    if cur.done() {
-        tail = Value::Nil;
+    if !live || cur.done() {
+        return Ok((items, None));
     }
+    Ok((items, Some(cur)))
+}
+
+/// Step a range: up to [`CHUNK_SIZE`] verbatim heads plus the
+/// shifted range (nil tail when done).
+fn step_range_value(eval: &mut Evaluator, r: &RangeValue) -> Result<StepUnit, Signal> {
+    let (items, tail) = step_range_chunk(eval, r)?;
+    let tail = tail.map_or(Value::Nil, |t| Value::Extension(Arc::new(t)));
     Ok(StepUnit::Chunk {
         items: Arc::from(items),
         tail,
@@ -1218,7 +1226,7 @@ pub(crate) fn realized_value(
     idrop: bool,
     kind: SeqKind,
 ) -> Value {
-    match step_realized(&items, chunked) {
+    match step_realized(items, chunked) {
         Some(s) => Value::Extension(Arc::new(RealizedSeq::flagged(s, counted, idrop, kind))),
         None => Value::Nil,
     }
@@ -2840,7 +2848,7 @@ fn chunked_realized_parts(s: &RealizedSeq) -> Option<(crate::collmisc::ChunkValu
     }
     let head: Vec<Value> = items.iter().take(CHUNK_SIZE).cloned().collect();
     let rest: Vec<Value> = items.iter().skip(CHUNK_SIZE).cloned().collect();
-    let tail = step_realized(&rest, true).map(|seq| {
+    let tail = step_realized(rest, true).map(|seq| {
         Value::Extension(Arc::new(RealizedSeq::flagged(
             seq,
             s.is_counted(),
@@ -2857,31 +2865,8 @@ fn chunked_range_parts(
     eval: &mut Evaluator,
     r: &RangeValue,
 ) -> Result<Option<(crate::collmisc::ChunkValue, Option<Value>)>, Signal> {
-    let mut items = Vec::new();
-    let mut cur = r.clone();
-    let mut tail: Option<Value> = None;
-    while items.len() < CHUNK_SIZE {
-        let Some((head, next)) = cur.stepped() else {
-            break;
-        };
-        items.push(head);
-        match next {
-            Some(nxt) => {
-                tail = Some(Value::Extension(Arc::new(nxt.clone())));
-                cur = nxt;
-            }
-            None => {
-                if cur.step_inexact() {
-                    return Err(eval.throw(range_step_error()));
-                }
-                tail = None;
-                break;
-            }
-        }
-    }
-    if cur.done() {
-        tail = None;
-    }
+    let (items, tail) = step_range_chunk(eval, r)?;
+    let tail = tail.map(|t| Value::Extension(Arc::new(t)));
     Ok(Some((crate::collmisc::head_chunk(items), tail)))
 }
 
@@ -3214,25 +3199,14 @@ fn first_direct(v: &Value) -> Option<Value> {
 /// `first`; iterate heads read without stepping; entry views
 /// cast; anything else steps one unit).
 fn first_seq_value(eval: &mut Evaluator, v: &Value) -> Result<Value, Signal> {
-    if let Some(p) = as_pending(v) {
-        let state = p.state.lock().unwrap_or_else(|e| e.into_inner());
-        match &*state {
-            SeqState::Chunk { items, pos, .. } if *pos < items.len() => {
-                return Ok(items[*pos].clone());
-            }
-            // An exhausted chunk continues in its tail (like the
-            // JVM's `ChunkedCons.more()`; `rest` seqs the tail at
-            // the last item, so this only sees crafted states).
-            SeqState::Chunk { tail, .. } => {
-                let tail = tail.clone();
-                drop(state);
-                return first_value(eval, &tail);
-            }
-            _ => {}
-        }
+    if let Some(done) = first_pending_chunk(eval, v) {
+        return done;
     }
     if let Some(r) = as_realized(v) {
         return Ok(r.seq().first().cloned().unwrap_or(Value::Nil));
+    }
+    if let Some(r) = as_range(v) {
+        return first_range_head(eval, r);
     }
     if let Some(it) = as_iterate(v) {
         return iterate_seed(eval, it);
@@ -3243,6 +3217,43 @@ fn first_seq_value(eval: &mut Evaluator, v: &Value) -> Result<Value, Signal> {
     if let Some(k) = as_vals(v) {
         return keys_first(eval, k.underlying(), false);
     }
+    first_stepped(eval, v)
+}
+
+/// The head of a chunked pending seq (`None` is neither pending
+/// nor chunked — the caller falls through to the other shapes).
+fn first_pending_chunk(eval: &mut Evaluator, v: &Value) -> Option<Result<Value, Signal>> {
+    let p = as_pending(v)?;
+    let state = p.state.lock().unwrap_or_else(|e| e.into_inner());
+    match &*state {
+        SeqState::Chunk { items, pos, .. } if *pos < items.len() => Some(Ok(items[*pos].clone())),
+        // An exhausted chunk continues in its tail (like the
+        // JVM's `ChunkedCons.more()`; `rest` seqs the tail at
+        // the last item, so this only sees crafted states).
+        SeqState::Chunk { tail, .. } => {
+            let tail = tail.clone();
+            drop(state);
+            Some(first_value(eval, &tail))
+        }
+        _ => None,
+    }
+}
+
+/// A range's head, direct (stepping a 32-chunk for one head is
+/// pure waste); an inexact first step still raises like the walk.
+/// Inexactness is static — the step winner is fixed by the (cur,
+/// step) types, so a bad BigDec/ratio pair fails at head 0 or
+/// never — hence checking the current step matches the old
+/// chunk-eager raise exactly.
+fn first_range_head(eval: &mut Evaluator, r: &RangeValue) -> Result<Value, Signal> {
+    if r.step_inexact() {
+        return Err(eval.throw(range_step_error()));
+    }
+    Ok(r.head_or_nil())
+}
+
+/// A seq value's head once the direct shapes miss: one step.
+fn first_stepped(eval: &mut Evaluator, v: &Value) -> Result<Value, Signal> {
     match step_unit(eval, v)? {
         StepUnit::Empty => Ok(Value::Nil),
         StepUnit::One { head, .. } => Ok(head),
@@ -3298,7 +3309,7 @@ fn range_rest(eval: &mut Evaluator, r: &RangeValue) -> Result<Value, Signal> {
 /// The JVM `ArithmeticException` for a range step that adds
 /// `BigDec` to a ratio with no exact decimal (oracle
 /// `range-mixed`).
-fn range_step_error() -> NativeError {
+pub(crate) fn range_step_error() -> NativeError {
     NativeError::new(
         ThrowClass::ArithmeticException,
         clj_value::NON_TERMINATING.to_owned(),
@@ -3887,6 +3898,72 @@ pub(crate) fn realize_deep(eval: &mut Evaluator, v: &Value) -> Result<Value, Sig
 /// Build a pending seq from a thunk (for the seq natives).
 pub(crate) fn pending_value(thunk: Thunk) -> Value {
     PendingSeq::pending(thunk)
+}
+
+/// A peelable pipeline op: single-input `map`/`filter`/`remove`
+/// with its function value (the sub-input travels alongside the
+/// op out of [`peel_pipe_owned`]).
+#[derive(Clone, Debug)]
+pub(crate) enum PeelOp {
+    Map(Value),
+    Filter { f: Value, invert: bool },
+}
+
+/// Peel one uniquely-owned pending pipeline op off `v`: the op
+/// plus its sub-input. Anything else — shared cells, forced
+/// state, meta/kind-carrying cells, multi-input `map`, other
+/// thunks, non-seqs — comes back untouched in `Err`.
+///
+/// Uniqueness keeps the peel unobservable: the caller walks the
+/// peeled ops instead of stepping (and memoizing into) the cell,
+/// and a sole-owned cell has no other observer of that skipped
+/// memoization.
+pub(crate) fn peel_pipe_owned(v: Value) -> Result<(PeelOp, Value), Value> {
+    let Value::Extension(e) = v else {
+        return Err(v);
+    };
+    if std::sync::Arc::strong_count(&e) != 1 {
+        return Err(Value::Extension(e));
+    }
+    let peeled = {
+        let Some(seq) = e.as_any().downcast_ref::<PendingSeq>() else {
+            return Err(Value::Extension(e));
+        };
+        if seq.meta.is_some() || !matches!(seq.kind, LazyKind::LazySeq) {
+            return Err(Value::Extension(e));
+        }
+        // A poisoned lock recovers with its guard (like every other
+        // seq-state lock — poisoning needs a panicking holder, and
+        // declining here would be an untestable arm).
+        let guard = seq.state.lock().unwrap_or_else(|e| e.into_inner());
+        match &*guard {
+            SeqState::Pending(thunk) => match thunk.as_ref() {
+                Thunk::Map { f, inputs } if inputs.len() == 1 => {
+                    Some((PeelOp::Map(f.clone()), inputs[0].clone()))
+                }
+                Thunk::Filter { f, input } => Some((
+                    PeelOp::Filter {
+                        f: f.clone(),
+                        invert: false,
+                    },
+                    input.clone(),
+                )),
+                Thunk::Remove { f, input } => Some((
+                    PeelOp::Filter {
+                        f: f.clone(),
+                        invert: true,
+                    },
+                    input.clone(),
+                )),
+                _ => None,
+            },
+            _ => None,
+        }
+    };
+    match peeled {
+        Some((op, input)) => Ok((op, input)),
+        None => Err(Value::Extension(e)),
+    }
 }
 
 /// A `Thunk::Map` tail value (for `map`).
@@ -4705,5 +4782,37 @@ mod tests {
         let (chunk, tail) = super::chunked_realized_parts(&s).expect("non-empty splits");
         assert_eq!(chunk.items_arc().len(), 32);
         assert!(tail.is_some());
+    }
+
+    #[test]
+    fn peel_declines_meta_and_chunked_cons() {
+        // Coverage for the peel guards (no suite peels a meta'd or
+        // `ChunkedCons`-classed seq): both decline untouched.
+        let chunked = Value::Extension(Arc::new(pending_seq(
+            SeqState::Empty,
+            LazyKind::ChunkedCons,
+        )));
+        assert!(super::peel_pipe_owned(chunked).is_err());
+        let mut seq = pending_seq(SeqState::Empty, LazyKind::LazySeq);
+        seq.meta = Some(new_map());
+        let meta = Value::Extension(Arc::new(seq));
+        assert!(super::peel_pipe_owned(meta).is_err());
+    }
+
+    #[test]
+    fn peel_declines_settled_states() {
+        // Coverage for the settled-state arm (only `Pending` thunks
+        // peel): chunked and empty cells decline untouched.
+        let chunk = Value::Extension(Arc::new(pending_seq(
+            SeqState::Chunk {
+                items: Arc::from([Value::Int(1)]),
+                pos: 0,
+                tail: Value::Nil,
+            },
+            LazyKind::LazySeq,
+        )));
+        assert!(super::peel_pipe_owned(chunk).is_err());
+        let empty = Value::Extension(Arc::new(pending_seq(SeqState::Empty, LazyKind::LazySeq)));
+        assert!(super::peel_pipe_owned(empty).is_err());
     }
 }

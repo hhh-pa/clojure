@@ -15,21 +15,21 @@
 use std::cmp::Ordering;
 use std::sync::Arc;
 
-use clj_value::{List, ThrowClass, Value, Vector, new_map};
+use clj_value::{CHUNK_SIZE, List, ThrowClass, Value, Vector, new_map};
 use smallvec::SmallVec;
 
 use crate::core::{as_reduced, cce_err, check_ifn, jvm_compare, repeat_count, take_count};
 use crate::error::{NativeError, jvm_class_of};
 use crate::eval::Evaluator;
-use crate::ext::{FastArith, NativeFn, NativeImpl};
+use crate::ext::{FastArith, NativeFn, NativeImpl, as_native};
 use crate::lazy::{
-    as_subvector, collect_all, collect_packed, concat_thunk, cycle_thunk, dedupe_thunk,
-    distinct_thunk, drop_value, drop_while_thunk, empty_list_value, filter_thunk, first_value,
-    interleave_thunk, interpose_thunk, iterate_thunk, keep_indexed_thunk, keep_thunk, keys_thunk,
-    map_indexed_thunk, map_thunk, mapcat_thunk, next_value, nthrest_value, partition_all_thunk,
-    partition_by_thunk, partition_thunk, range1, range2, range3, realized_value, reductions_thunk,
-    repeat_thunk, repeatedly_thunk, seq_value, take_nth_thunk, take_thunk, take_walk_coll,
-    take_while_thunk,
+    PeelOp, as_range, as_subvector, collect_all, collect_packed, concat_thunk, cycle_thunk,
+    dedupe_thunk, distinct_thunk, drop_value, drop_while_thunk, empty_list_value, filter_thunk,
+    first_value, interleave_thunk, interpose_thunk, iterate_thunk, keep_indexed_thunk, keep_thunk,
+    keys_thunk, map_indexed_thunk, map_thunk, mapcat_thunk, next_value, nthrest_value,
+    partition_all_thunk, partition_by_thunk, partition_thunk, peel_pipe_owned, range_step_error,
+    range1, range2, range3, realized_value, reductions_thunk, repeat_thunk, repeatedly_thunk,
+    seq_value, take_nth_thunk, take_thunk, take_walk_coll, take_while_thunk,
 };
 use crate::ns::{NativeFnPtr, check_arity, deref_core, signal_to_native};
 use crate::vars::check_min_arity;
@@ -88,6 +88,24 @@ fn walk_seq(
     coll: Value,
     mut visit: impl FnMut(&mut Evaluator, &Value) -> Result<Walk, NativeError>,
 ) -> Result<(), NativeError> {
+    // Ranges walk head-at-a-time with no per-element dispatch,
+    // clones, or tail allocs (the generic walk steps a chunked
+    // `first` plus a shifted tail per `next`).
+    if let Some(r) = as_range(&coll) {
+        let owned = r.clone();
+        drop(coll);
+        return walk_range(eval, owned, visit);
+    }
+    // Uniquely-owned `map`/`filter`/`remove` chains over a range
+    // walk fused: same heads, same order, same per-chunk checks
+    // and calls as stepping the chain — without per-element
+    // thunk stepping, memoization, or locks. Sole ownership at
+    // every level keeps the skipped memoization unobservable
+    // (shared chains walk the generic path below).
+    let coll = match peel_chain(coll) {
+        Ok((ops, range)) => return walk_peeled(eval, range, &ops, visit),
+        Err(coll) => coll,
+    };
     let mut seq = seq_value(eval, &coll).map_err(signal_to_native)?;
     // The walk holds `seq`, never `coll`: owned callers nilled the
     // arg slot (`take_walk_coll`), so dropping the head here frees
@@ -102,6 +120,179 @@ fn walk_seq(
         seq = next_value(eval, &seq).map_err(signal_to_native)?;
     }
     Ok(())
+}
+
+/// Walk a range head-by-head (short-circuitable): same heads, same
+/// order, and same inexact-raise point as the generic
+/// `first`/`rest` walk (heads yielded before the failing step stay
+/// yielded).
+fn walk_range(
+    eval: &mut Evaluator,
+    r: clj_value::RangeValue,
+    mut visit: impl FnMut(&mut Evaluator, &Value) -> Result<Walk, NativeError>,
+) -> Result<(), NativeError> {
+    let mut cur = r;
+    loop {
+        let Some((head, more)) = cur.next_head() else {
+            return Ok(());
+        };
+        if matches!(visit(eval, &head)?, Walk::Stop) {
+            return Ok(());
+        }
+        if !more {
+            if cur.step_inexact() {
+                return Err(signal_to_native(eval.throw(range_step_error())));
+            }
+            return Ok(());
+        }
+    }
+}
+
+/// Peel a uniquely-owned `map`/`filter`/`remove` chain down to
+/// its range base: the ops outermost-first plus the owned range.
+/// Anything else comes back in `Err` for the generic walk — a
+/// declined base is never a range, so shared mid-chain cells
+/// (whose memoization must be preserved) decline naturally; the
+/// peeled outer shells (proven unique, hence unobservable) are
+/// rebuilt fresh around the declined base.
+fn peel_chain(mut cur: Value) -> Result<(SmallVec<[PeelOp; 4]>, clj_value::RangeValue), Value> {
+    let mut ops: SmallVec<[PeelOp; 4]> = SmallVec::new();
+    loop {
+        match peel_pipe_owned(cur) {
+            Ok((op, input)) => {
+                ops.push(op);
+                cur = input;
+            }
+            Err(base) => {
+                if ops.is_empty() {
+                    return Err(base);
+                }
+                let Some(range) = as_range(&base).cloned() else {
+                    // Rebuild the peeled (proven unique) shells
+                    // around the declined base for the generic
+                    // walk — observably the chain as it was.
+                    let mut rebuilt = base;
+                    for op in ops.into_iter().rev() {
+                        rebuilt = match op {
+                            PeelOp::Map(f) => map_thunk(f, vec![rebuilt]),
+                            PeelOp::Filter { f, invert } => filter_thunk(f, rebuilt, invert),
+                        };
+                    }
+                    return Err(rebuilt);
+                };
+                return Ok((ops, range));
+            }
+        }
+    }
+}
+
+/// Walk a peeled pipeline over a range in [`CHUNK_SIZE`] rounds:
+/// each round pulls raw heads, pushes the chunk through the ops
+/// innermost-first (map replaces, filter retains — checks once
+/// per op per chunk, like the step fns), then visits the
+/// survivors in order. An op that empties the chunk skips the
+/// ops behind it for that round (their checks don't fire — like
+/// a filter step looping for its next non-empty chunk).
+/// Inexact ranges visit the pulled heads, then raise — the
+/// [`walk_range`] tail.
+fn walk_peeled(
+    eval: &mut Evaluator,
+    r: clj_value::RangeValue,
+    ops: &[PeelOp],
+    mut visit: impl FnMut(&mut Evaluator, &Value) -> Result<Walk, NativeError>,
+) -> Result<(), NativeError> {
+    let mut cur = r;
+    let mut buf: SmallVec<[Value; 32]> = SmallVec::new();
+    loop {
+        buf.clear();
+        let (done, raise) = pull_peeled_chunk(&mut cur, &mut buf);
+        // Innermost-first: `ops` peeled outermost-first.
+        for op in ops.iter().rev() {
+            let emptied = apply_peeled_op(eval, op, &mut buf).map_err(signal_to_native)?;
+            if emptied {
+                break;
+            }
+        }
+        for v in buf.iter() {
+            if matches!(visit(eval, v)?, Walk::Stop) {
+                return Ok(());
+            }
+        }
+        if done {
+            if raise {
+                return Err(signal_to_native(eval.throw(range_step_error())));
+            }
+            return Ok(());
+        }
+    }
+}
+
+/// Pull one raw-head chunk: `(done, raise)` — `raise` visits the
+/// pulled heads first, then raises (the [`walk_range`] tail).
+fn pull_peeled_chunk(
+    cur: &mut clj_value::RangeValue,
+    buf: &mut SmallVec<[Value; 32]>,
+) -> (bool, bool) {
+    while buf.len() < CHUNK_SIZE {
+        let Some((head, more)) = cur.next_head() else {
+            return (true, false);
+        };
+        buf.push(head);
+        if !more {
+            return (true, cur.step_inexact());
+        }
+    }
+    (false, false)
+}
+
+/// Push one chunk through a peeled op (`Ok(true)` emptied the
+/// chunk — the ops behind it skip this round, like a filter step
+/// looping for its next non-empty chunk).
+fn apply_peeled_op(
+    eval: &mut Evaluator,
+    op: &PeelOp,
+    buf: &mut SmallVec<[Value; 32]>,
+) -> Result<bool, crate::error::Signal> {
+    match op {
+        PeelOp::Map(f) => {
+            apply_peeled_map(eval, f, buf)?;
+            Ok(false)
+        }
+        PeelOp::Filter { f, invert } => apply_peeled_filter(eval, f, *invert, buf),
+    }
+}
+
+/// Map one chunk in place.
+fn apply_peeled_map(
+    eval: &mut Evaluator,
+    f: &Value,
+    buf: &mut SmallVec<[Value; 32]>,
+) -> Result<(), crate::error::Signal> {
+    check_ifn(eval, f)?;
+    for v in buf.iter_mut() {
+        *v = eval.call(f, std::slice::from_ref(v))?;
+    }
+    Ok(())
+}
+
+/// Retain one chunk's passing heads (`Ok(true)` emptied it).
+fn apply_peeled_filter(
+    eval: &mut Evaluator,
+    f: &Value,
+    invert: bool,
+    buf: &mut SmallVec<[Value; 32]>,
+) -> Result<bool, crate::error::Signal> {
+    check_ifn(eval, f)?;
+    let mut write = 0;
+    for i in 0..buf.len() {
+        let item = std::mem::replace(&mut buf[i], Value::Nil);
+        if eval.call(f, std::slice::from_ref(&item))?.is_truthy() != invert {
+            buf[write] = item;
+            write += 1;
+        }
+    }
+    buf.truncate(write);
+    Ok(buf.is_empty())
 }
 
 /// Force one step plus `n` heads (mirrors `dorun`'s walk: the
@@ -391,68 +582,201 @@ fn native_reduce(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeEr
     native_reduce_owned(eval, args.iter().cloned().collect())
 }
 
+/// Whether `f` is the pristine core `+` native (by boot-installed
+/// display, unspoofable from Clojure — redefined roots take the
+/// generic path, which observes them).
+fn is_plus_native(f: &Value) -> bool {
+    as_native(f).is_some_and(|n| &*n.display == "clojure.core/+")
+}
+
+/// A fused `(reduce + ...)` attempt: `Done` carries the sum,
+/// `Raise` the inexact-tail error, `Bail` falls through to the
+/// generic walk (which recomputes identically — the attempt runs
+/// no user code and mutates nothing).
+enum PlusRange {
+    Done(Value),
+    Bail,
+}
+
+/// Tagless `(reduce + init? range)`: `init` is the 3-arg start
+/// (`None` takes the first head, like the generic walk). Heads
+/// must be `Int` (anything else bails); overflow bails (the
+/// generic walk throws `long overflow`, like `+` itself).
+/// Inexact steps always surface a non-`Int` head first (an
+/// inexact pair needs a `BigDec`/ratio cursor, whose heads are
+/// never `Int`), so they bail above and the generic walk raises
+/// [`range_step_error`] there — unlike [`walk_range`], there is
+/// no inexact tail to raise.
+fn plus_range(r: clj_value::RangeValue, init: Option<i64>) -> PlusRange {
+    let mut cur = r;
+    let mut acc = match init {
+        Some(x) => x,
+        None => {
+            let Some((head, more)) = cur.next_head() else {
+                // Empty 2-arg: the generic walk calls `(f)`.
+                return PlusRange::Bail;
+            };
+            let Value::Int(x) = head else {
+                return PlusRange::Bail;
+            };
+            if !more {
+                // A single `Int` head with a failed step is always
+                // checked-`Int` overflow (inexact pairs need a
+                // non-`Int` cursor, bailed above).
+                return PlusRange::Done(Value::Int(x));
+            }
+            x
+        }
+    };
+    loop {
+        let Some((head, more)) = cur.next_head() else {
+            return PlusRange::Done(Value::Int(acc));
+        };
+        let Value::Int(h) = head else {
+            return PlusRange::Bail;
+        };
+        acc = match acc.checked_add(h) {
+            Some(v) => v,
+            None => return PlusRange::Bail,
+        };
+        if !more {
+            // As above: every head so far is `Int`, so the failed
+            // step is checked-`Int` overflow, never inexact.
+            return PlusRange::Done(Value::Int(acc));
+        }
+    }
+}
+
 pub(crate) fn native_reduce_owned(
     eval: &mut Evaluator,
     mut args: SmallVec<[Value; 4]>,
 ) -> Result<Value, NativeError> {
     check_arity("clojure.core/reduce", &args, &[2, 3])?;
     let f = args[0].clone();
-    // Eductions reduce without `IReduce` (2-arg takes the JVM cast)
-    // and complete through `(completing f)` in 3-arg (oracle
-    // `eduction-reduce*`, `core.clj` source).
-    let coll = if args.len() == 2 { &args[1] } else { &args[2] };
-    if let Some((xform, ecoll)) = crate::xform::Eduction::parts(coll) {
-        if args.len() == 2 {
-            return Err(NativeError::cast(
-                &jvm_class_of(coll),
-                "clojure.lang.IReduce",
-            ));
-        }
-        let completing = crate::xform::completing_fn(eval, f.clone(), None);
-        return crate::xform::transduce_into(
-            eval,
-            &xform.clone(),
-            &completing,
-            args[1].clone(),
-            ecoll.clone(),
-        );
+    if let Some(done) = reduce_eduction(eval, &f, &args) {
+        return done;
     }
-    let (mut acc, has_acc) = if args.len() == 3 {
+    let (acc, has_acc) = if args.len() == 3 {
         (args[1].clone(), true)
     } else {
         (Value::Nil, false)
     };
+    if let Some(done) = try_plus_range_reduce(&f, &args, &acc, has_acc) {
+        return done;
+    }
     let coll_idx = if args.len() == 3 { 2 } else { 1 };
     let coll = take_walk_coll(&mut args, coll_idx);
-    let mut first = true;
-    let mut empty = true;
+    let mut state = ReduceWalk {
+        acc,
+        has_acc,
+        first: true,
+        empty: true,
+    };
     walk_seq(eval, coll, |eval, head| {
-        empty = false;
-        if !has_acc && first {
-            first = false;
-            acc = head.clone();
-            return Ok(Walk::Continue);
-        }
-        first = false;
-        // Owned step call (#227): the accumulator moves through
-        // (no clone, no borrow pin), so a uniquely-owned acc
-        // mutates in place inside an owned `conj` instead of
-        // path-copying per step.
-        let acc_taken = std::mem::replace(&mut acc, Value::Nil);
-        let mut step_args = SmallVec::new();
-        step_args.push(acc_taken);
-        step_args.push(head.clone());
-        acc = call_checked_owned(eval, &f, step_args)?;
-        if let Some(inner) = as_reduced(&acc) {
-            acc = inner.clone();
-            return Ok(Walk::Stop);
-        }
-        Ok(Walk::Continue)
+        reduce_walk_visit(&mut state, eval, &f, head)
     })?;
-    if empty && !has_acc {
+    if state.empty && !state.has_acc {
         return call_checked(eval, &f, &[]);
     }
-    Ok(acc)
+    Ok(state.acc)
+}
+
+/// Reduce an eduction (`None` is not an eduction): without
+/// `IReduce` (2-arg takes the JVM cast) and complete through
+/// `(completing f)` in 3-arg (oracle `eduction-reduce*`,
+/// `core.clj` source).
+fn reduce_eduction(
+    eval: &mut Evaluator,
+    f: &Value,
+    args: &[Value],
+) -> Option<Result<Value, NativeError>> {
+    let coll = if args.len() == 2 { &args[1] } else { &args[2] };
+    let (xform, ecoll) = crate::xform::Eduction::parts(coll)?;
+    if args.len() == 2 {
+        return Some(Err(NativeError::cast(
+            &jvm_class_of(coll),
+            "clojure.lang.IReduce",
+        )));
+    }
+    let completing = crate::xform::completing_fn(eval, f.clone(), None);
+    Some(crate::xform::transduce_into(
+        eval,
+        &xform.clone(),
+        &completing,
+        args[1].clone(),
+        ecoll.clone(),
+    ))
+}
+
+/// Fused `(reduce + init? range)`: tagless `i64` accumulation (no
+/// per-element application, clones, or dispatch). `None` falls
+/// through to the generic walk (non-`+` f, non-int init/head,
+/// overflow, empty 2-arg, inexact tail).
+fn try_plus_range_reduce(
+    f: &Value,
+    args: &[Value],
+    acc: &Value,
+    has_acc: bool,
+) -> Option<Result<Value, NativeError>> {
+    if !is_plus_native(f) {
+        return None;
+    }
+    let range = if args.len() == 3 {
+        as_range(&args[2]).cloned()
+    } else {
+        as_range(&args[1]).cloned()
+    };
+    let r = range?;
+    let init = if has_acc {
+        match acc {
+            Value::Int(x) => Some(Some(*x)),
+            _ => None,
+        }
+    } else {
+        Some(None)
+    };
+    match plus_range(r, init?) {
+        PlusRange::Done(v) => Some(Ok(v)),
+        PlusRange::Bail => None,
+    }
+}
+
+/// The mutable walk state of a generic `reduce`.
+struct ReduceWalk {
+    acc: Value,
+    has_acc: bool,
+    first: bool,
+    empty: bool,
+}
+
+/// Fold one head into a generic `reduce` walk.
+fn reduce_walk_visit(
+    state: &mut ReduceWalk,
+    eval: &mut Evaluator,
+    f: &Value,
+    head: &Value,
+) -> Result<Walk, NativeError> {
+    state.empty = false;
+    if !state.has_acc && state.first {
+        state.first = false;
+        state.acc = head.clone();
+        return Ok(Walk::Continue);
+    }
+    state.first = false;
+    // Owned step call (#227): the accumulator moves through
+    // (no clone, no borrow pin), so a uniquely-owned acc
+    // mutates in place inside an owned `conj` instead of
+    // path-copying per step.
+    let acc_taken = std::mem::replace(&mut state.acc, Value::Nil);
+    let mut step_args = SmallVec::new();
+    step_args.push(acc_taken);
+    step_args.push(head.clone());
+    state.acc = call_checked_owned(eval, f, step_args)?;
+    if let Some(inner) = as_reduced(&state.acc) {
+        state.acc = inner.clone();
+        return Ok(Walk::Stop);
+    }
+    Ok(Walk::Continue)
 }
 
 fn native_take_last(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {

@@ -989,6 +989,41 @@ impl RangeValue {
         Some((head, next))
     }
 
+    /// The head, nil-punning done ranges (for `first` — no chunk
+    /// step needed for one head).
+    #[must_use]
+    pub fn head_or_nil(&self) -> Value {
+        if self.done() {
+            Value::Nil
+        } else {
+            self.cur.value()
+        }
+    }
+
+    /// Step one head in place (for chunked stepping — no per-element
+    /// `end`/`step` clones): `None` when done, else the head plus
+    /// whether the walk continues past it. A successful step advances
+    /// `cur`, decrements `count`, and drops `meta` (like
+    /// [`RangeValue::stepped`]); a failed advance (checked-`Int`
+    /// overflow, inexact decimal pair) leaves `self` untouched and
+    /// reports the head as final — callers check
+    /// [`RangeValue::step_inexact`] and raise there.
+    pub fn next_head(&mut self) -> Option<(Value, bool)> {
+        if self.done() {
+            return None;
+        }
+        let head = self.cur.value();
+        match self.advance() {
+            Some(nxt) => {
+                self.cur = nxt;
+                self.count = self.count.map(|c| c - 1);
+                self.meta = None;
+                Some((head, true))
+            }
+            None => Some((head, false)),
+        }
+    }
+
     /// Call `f` per item (pure walk; infinite ranges never return,
     /// like the JVM's `hashCode` walk; a `long overflow` ends the
     /// walk early — the `hash` fn realizes first and reports it).
