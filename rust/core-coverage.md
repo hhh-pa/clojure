@@ -5,7 +5,7 @@ its conformance state, and — for exclusions — why it is excluded.
 If a var is not listed here, that is a file bug, not a silent gap.
 
 - **690 vars: 690 implemented, 0 divergent, 0 out of scope,
-  0 planned.** The port reports Clojure `1.13.0-alpha9`
+  0 planned.** The port reports Clojure `1.13.0-alpha11`
   (`clojure-version`).
 - **Universe.** 690 rows = 685 JVM publics + 5 extra-universe rows: 4 port-visible JVM privates
   (`*loaded-libs*`, `*loading-verbosely*`, `*pending-paths*`,
@@ -565,7 +565,7 @@ Significant vars with no port slice, grouped below by area with the reason. (Thr
 | `*3` | implemented | S7 REPL: dynamic nil root; session window (P1) |
 | `*e` | implemented | S7 REPL: dynamic nil root; last throwable (P2) |
 | `*command-line-args*` | implemented | S7 CLI: dynamic nil root; run binds the arg seq (P4) |
-| `clojure-version` | implemented | S7 environment: port release literal "1.13.0-alpha9" (P3) |
+| `clojure-version` | implemented | S7 environment: port release literal "1.13.0-alpha11" (P3) |
 | `*clojure-version*` | implemented | S7 environment: plain root version map (P3) |
 
 ### Still excluded (reasons inline)
