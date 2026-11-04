@@ -57,7 +57,7 @@ permissions:
 
 env:
   # Pinned suite revisions (master SHAs at authoring time).
-  SNIPPETS_SHA_DEFAULT: 0450f453e4fbf6059a4adaa2ea149b09298558de
+  SNIPPETS_SHA_DEFAULT: 5cc7903c827563f914f9a4f23e118bca5ea103dc
   ALGORITHMS_SHA_DEFAULT: ab26ab930f1b35497d2e7cef030023777f436786
   # Pinned (not floating "21"): JDK micro versions move cpu numbers
   # and the sweep must stay comparable run to run. Bump deliberately.
