@@ -1401,6 +1401,32 @@ impl Env {
         self.len() == 0
     }
 
+    /// Read a slot reference without cloning (#226: for borrow-path
+    /// evaluation and fast integer ops). Returns `None` for
+    /// `Patchable` frames or out-of-bounds indices.
+    #[must_use]
+    pub fn get_ref(&self, idx: usize) -> Option<&Value> {
+        let mut frame: &Frame = &self.frame;
+        while idx < frame.base {
+            frame = &frame
+                .parent
+                .as_ref()
+                .expect("parentless frame with base > 0")
+                .frame;
+        }
+        match &frame.slots {
+            Slots::Shared(slots) => slots.get(idx - frame.base),
+            Slots::Inline(value) => {
+                if idx == frame.base {
+                    Some(value)
+                } else {
+                    None
+                }
+            }
+            Slots::Patchable(_) => None,
+        }
+    }
+
     /// Read a slot (cloned; missing slots read `nil`, unreachable
     /// by construction). Shared frames read lock-free; only
     /// `Patchable` frames lock.
@@ -1755,34 +1781,45 @@ mod tests {
         assert!(env.is_empty());
         assert_eq!(env.len(), 0);
         assert_eq!(env.get(0), Value::Nil);
+        assert_eq!(env.get_ref(0), None);
         assert_eq!(env.get(99), Value::Nil);
+        assert_eq!(env.get_ref(99), None);
         assert_eq!(Env::default().len(), 0);
 
         // Shared extension: absolute indexing, receiver untouched.
         let e1 = env.extend(vec![Value::Int(1), Value::Int(2)]);
         assert_eq!(e1.len(), 2);
         assert_eq!(e1.get(0), Value::Int(1));
+        assert_eq!(e1.get_ref(0), Some(&Value::Int(1)));
         assert_eq!(e1.get(1), Value::Int(2));
+        assert_eq!(e1.get_ref(1), Some(&Value::Int(2)));
         assert_eq!(e1.get(2), Value::Nil);
+        assert_eq!(e1.get_ref(2), None);
         assert_eq!(env.len(), 0);
 
         // `extend_one` chains; reads fall through to the parent.
         let e2 = e1.extend_one(Value::Int(3));
         assert_eq!(e2.len(), 3);
         assert_eq!(e2.get(0), Value::Int(1));
+        assert_eq!(e2.get_ref(0), Some(&Value::Int(1)));
         assert_eq!(e2.get(2), Value::Int(3));
+        assert_eq!(e2.get_ref(2), Some(&Value::Int(3)));
         assert_eq!(e2.get(9), Value::Nil);
+        assert_eq!(e2.get_ref(9), None);
 
         // Empty extension keeps the base==len corner sound.
         let e_empty = e1.extend(vec![]);
         assert_eq!(e_empty.len(), 2);
         assert_eq!(e_empty.get(0), Value::Int(1));
+        assert_eq!(e_empty.get_ref(0), Some(&Value::Int(1)));
         assert_eq!(e_empty.get(2), Value::Nil);
+        assert_eq!(e_empty.get_ref(2), None);
 
         // Patchable frames: `set` is visible through the shared Arc.
         let p = e1.extend_patchable(2);
         assert_eq!(p.len(), 4);
         assert_eq!(p.get(2), Value::Nil);
+        assert_eq!(p.get_ref(2), None);
         p.set(2, Value::Int(20));
         p.set(3, Value::Int(30));
         let p_alias = p.clone();
