@@ -997,38 +997,37 @@ impl Vector {
         // (unpack); every other shape mutates through `&mut`, so
         // uniquely-owned chains stay allocation-free (no
         // `mem::replace` placeholder — even an empty trie would
-        // `Arc::new` its root).
-        if matches!(&self.inner, VectorInner::Packed(_)) && !matches!(v, Value::Int(_)) {
-            if index >= self.len() {
-                return None;
-            }
-            // Re-match the guarded shape (`if let`: the `else` is
-            // impossible, and an empty `else` keeps every line
-            // executable for coverage).
-            if let VectorInner::Packed(packed) = &self.inner {
-                let mut out = unpack_packed(packed);
-                // `index` is below the length (guarded above over
-                // these same items), so this cannot fail.
-                assert!(out.set_mut(index, v));
-                self.inner = VectorInner::Generic(out);
-                self.id = next_vector_id();
-                return Some(self);
-            }
-        }
-        match &mut self.inner {
-            VectorInner::Generic(trie) => {
-                if !trie.set_mut(index, v) {
+        // `Arc::new` its root). One match over (storage, value):
+        // the `Int` arm precedes the foreign arm, so each arm's
+        // shape is proven by position (no re-match, no dead
+        // `else`); the unpacked trie installs after the borrow
+        // ends.
+        let len = self.len();
+        let mut unpacked = None;
+        match (&mut self.inner, v) {
+            (VectorInner::Generic(trie), w) => {
+                if !trie.set_mut(index, w) {
                     return None;
                 }
             }
-            VectorInner::Packed(packed) => {
-                // `Int`-only here (foreign values unpacked above);
-                // one chunk copied per op.
-                if let Value::Int(n) = v {
-                    let next = packed.set_nth(index, n)?;
-                    *packed = next;
-                }
+            (VectorInner::Packed(packed), Value::Int(n)) => {
+                // One chunk copied per op.
+                let next = packed.set_nth(index, n)?;
+                *packed = next;
             }
+            (VectorInner::Packed(packed), foreign) => {
+                if index >= len {
+                    return None;
+                }
+                let mut out = unpack_packed(packed);
+                // `index` is below the length (guarded above over
+                // these same items), so this cannot fail.
+                assert!(out.set_mut(index, foreign));
+                unpacked = Some(out);
+            }
+        }
+        if let Some(out) = unpacked {
+            self.inner = VectorInner::Generic(out);
         }
         self.id = next_vector_id();
         Some(self)

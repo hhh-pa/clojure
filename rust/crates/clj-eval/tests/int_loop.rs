@@ -439,3 +439,63 @@ fn int_loop_bail_pins() {
         "java.lang.ClassCastException | class clojure.lang.Keyword cannot be cast to class java.lang.Number (clojure.lang.Keyword is in unnamed module of loader 'app'; java.lang.Number is in module java.base of loader 'bootstrap')"
     );
 }
+
+#[test]
+fn int_loop_guard_observes_bindings_and_closures() {
+    let mut eval = boot();
+    // A thread binding on a loop-called var declines the plan (the
+    // slow path observes the binding): a dynamic alias of `+`
+    // shares the `+` native (hence its fast tag) but carries its
+    // own thread binding.
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(def ^:dynamic myplus clojure.core/+) (binding [myplus (fn [a b] (+ a b 100))] (loop [i 0] (if (< i 3) (recur (myplus i 1)) i)))"
+        ),
+        "101"
+    );
+    // A redefinition to a non-native (a closure) declines the plan
+    // too (the guard only trusts `Extension` roots); the redefined
+    // root computes through the slow path.
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [orig +] (with-redefs [+ (fn [a b] (orig a b 100))] (loop [i 0] (if (< i 3) (recur (+ i 1)) i))))"
+        ),
+        "101"
+    );
+}
+
+#[test]
+fn int_loop_leaf_edge_shapes() {
+    let mut eval = boot();
+    // `inc`/`dec` over a zero-operand leaf (`(+)` folds to a bare
+    // counted op, not a `Var`/`Const`): the leaf read misses, so
+    // the general machine computes it.
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(loop [i 0] (if (< (dec (+)) i (inc (+))) (recur (inc i)) :done))"
+        ),
+        ":done"
+    );
+    // A leaf-built step that ends in a non-counted op (nested
+    // `inc`) skips the leaf fold for the general machine.
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(loop [i 0] (if (< i 5) (recur (inc (inc i))) i))"
+        ),
+        "6"
+    );
+    // A counted `*` over a non-flat operand (a nested `+`)
+    // declines the leaf fold (operand count mismatch) for the
+    // general machine.
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(loop [i 0 j 3] (if (< 0 j) (recur (* (+ i 1) j) (dec j)) i))"
+        ),
+        "9"
+    );
+}

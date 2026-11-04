@@ -370,3 +370,101 @@ fn peel_reused_depth_parity() {
         );
     });
 }
+
+#[test]
+fn peel_ineligible_fn_pins() {
+    let mut eval = boot();
+    // Ineligible fns decline the reused frame inside a peeling
+    // walk too (identical values to the generic walk): multi-arity
+    // and conveyed (`bound-fn`) closures, and rest-arg closures.
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(reduce + 0 (map (fn ([x] (inc x)) ([x y] (+ x y))) (range 3)))"
+        ),
+        "6"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(reduce + 0 (map (bound-fn [x] (* x 2)) (range 3)))"
+        ),
+        "6"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(reduce + 0 (map (fn [& xs] (apply + xs)) (range 3)))"
+        ),
+        "3"
+    );
+}
+
+#[test]
+fn peel_reused_frame_dorun_pins() {
+    let mut eval = boot();
+    // A frame observed across applies (a retained capture) falls
+    // back to a fresh bind per apply.
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [a (atom nil)] (dorun (map (fn [x] (reset! a (fn [] x)) x) (range 3))))"
+        ),
+        "nil"
+    );
+    // `recur` to the mapped fn loops the reused frame in place.
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(dorun (map (fn [x] (if (> x 0) (recur (dec x)) :done)) (range 3)))"
+        ),
+        "nil"
+    );
+    // Capture plus `recur` (the observed frame rebinds fresh).
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(dorun (map (fn [x] (let [c (fn [] x)] (if (> x 0) (recur (dec x)) (c)))) (range 3)))"
+        ),
+        "nil"
+    );
+    // A throwing map fn propagates through the reused apply.
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(try (dorun (map (fn [x] (if (= x 1) (throw (ex-info \"b\" {})) x)) (range 3))) (catch Exception e :caught))"
+        ),
+        ":caught"
+    );
+}
+
+#[test]
+fn peel_walk_tail_and_empty_pins() {
+    let mut eval = boot();
+    // A peeling walk visits the pulled heads, then raises at an
+    // inexact tail (the `walk_range` tail).
+    assert_eq!(
+        uncaught(&mut eval, "(dorun (map inc (range 0M 1M 1/3)))"),
+        "java.lang.ArithmeticException | Non-terminating decimal expansion; no exact representable decimal result."
+    );
+    // An empty 2-arg `+` reduce over a range bails to the generic
+    // walk, which calls `(f)`.
+    assert_eq!(run_last(&mut eval, "(reduce + (range 5 5))"), "0");
+}
+
+#[test]
+fn peel_reused_depth_guard() {
+    // Depth grown entirely through the reused apply (direct calls
+    // don't count) trips the reused apply's own guard — a nil-
+    // message `StackOverflowError`, like the generic apply.
+    on_worker(|| {
+        let mut eval = boot();
+        assert_eq!(
+            run_last(
+                &mut eval,
+                "(try ((fn f [x] (dorun (map f (range x (inc x))))) 0) (catch StackOverflowError e [:caught (nil? (ex-message e))]))"
+            ),
+            "[:caught true]"
+        );
+    });
+}
