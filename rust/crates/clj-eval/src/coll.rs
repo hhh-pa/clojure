@@ -1537,9 +1537,9 @@ struct StrScanEntry {
     scan: StrScan,
 }
 
-/// The string scan cache (8 MRU slots): `nth`/`count` over
-/// strings consult it past small indexes, where a direct scan
-/// wins.
+/// The string scan cache (8 MRU slots): `nth`/`count` over big
+/// strings consult it at every index; small strings decode
+/// directly (see [`STR_SCAN_SMALL_MAX`]).
 static STR_SCAN_CACHE: Mutex<Vec<StrScanEntry>> = Mutex::new(Vec::new());
 
 /// Strings at or below this byte length never consult the scan
