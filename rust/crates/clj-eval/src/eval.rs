@@ -18,8 +18,8 @@ use std::sync::{Arc, LazyLock};
 
 use clj_reader::{Reader, ReaderOpts, Span};
 use clj_value::{
-    Delay, Keyword, List, Map, PrimitiveVector, Promise, Symbol, ThrowClass, Throwable, Value, Var,
-    Vector, new_map,
+    Delay, ExtensionValue, Keyword, List, Map, PrimitiveVector, Promise, Symbol, ThrowClass,
+    Throwable, Value, Var, Vector, new_map,
 };
 use smallvec::SmallVec;
 
@@ -227,6 +227,236 @@ struct DefMacroParts<'a> {
     span: Span,
 }
 
+/// The outcome of [`Evaluator::try_int_loop`]: `Slow` falls through
+/// to the standard interpreter loop from the entry `env` (the fast
+/// path mutates nothing, so the fallback is exactly the
+/// unaccelerated run); `Resume` falls through from the carried
+/// values instead (an exit branch already ran — rerunning from
+/// entry would repeat its effects, so the slow loop continues from
+/// the current state); `Done` carries the loop's value.
+enum LoopAccel {
+    Slow,
+    Done(Result<Value, Signal>),
+    Resume(Vec<Value>),
+}
+
+/// The `clojure.core` vars an integer loop answers by identity
+/// (`assoc`, `nth`, `=` — the `fast`-tagged ops ride the
+/// [`DirectNative`](Expr::DirectNative) node instead; see
+/// [`Evaluator::try_int_loop`]).
+struct IntLoopIds {
+    assoc: u64,
+    nth: u64,
+    eq: u64,
+}
+
+/// One direct call a loop plan inlines: the var id plus the
+/// analyzed root the call site captured. The plan guard rechecks
+/// every use (no thread binding, the epoch fresh, the root still
+/// current — the same checks as [`Evaluator::direct_valid`]).
+struct PlanUse {
+    var_id: u64,
+    expect: Arc<dyn ExtensionValue>,
+}
+
+impl PlanUse {
+    fn of(call: &DirectCall) -> Self {
+        Self {
+            var_id: call.var.id,
+            expect: Arc::clone(&call.expect),
+        }
+    }
+}
+
+/// One loop-carried binding's kind: plain integers run tagless,
+/// maps thread through [`Map::insert_threaded`], packed int
+/// vectors through [`Vector::assoc_int_threaded`].
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LoopVarKind {
+    Int,
+    Map,
+    Vec,
+}
+
+/// One loop-carried integer expression: loop vars, frozen entry
+/// constants, and the direct integer ops — compiled to postfix
+/// (leaves and leaf-built steps compute directly in registers;
+/// anything nested runs the iterative machine, so deeply nested
+/// source can't overflow the native stack; any overflow bails to
+/// the interpreter, which throws `long overflow` like the JVM).
+struct IntExpr {
+    ops: Vec<IntOp>,
+}
+
+/// One postfix integer op (see [`IntExpr`]): n-ary counts ride the
+/// op (popped as one run — the matcher guarantees the shape, and
+/// any surprise bails rather than miscomputing).
+enum IntOp {
+    Var(usize),
+    Const(i64),
+    Inc,
+    Dec,
+    Add(usize),
+    Sub(usize),
+    Mul(usize),
+}
+
+impl IntExpr {
+    /// A single-op expression (a leaf).
+    fn single(op: IntOp) -> Self {
+        Self { ops: vec![op] }
+    }
+
+    /// Push one op onto a matched operand (the `inc`/`dec` step).
+    fn push_op(mut self, op: IntOp) -> Self {
+        self.ops.push(op);
+        self
+    }
+}
+
+/// The loop test: a chained comparison (`<`, `<=`, `>`, `>=`, `=`).
+struct IntTest {
+    op: IntCmp,
+    args: Vec<IntExpr>,
+}
+
+#[derive(Clone, Copy)]
+enum IntCmp {
+    Lt,
+    Le,
+    Gt,
+    Ge,
+    Eq,
+}
+
+/// One threaded-`assoc` key or value: a frozen constant (a
+/// literal or an outer local — locals are immutable, so the value
+/// rides unchanged) or a per-round integer expression.
+enum MapKeyVal {
+    Const(Value),
+    Int(IntExpr),
+}
+
+/// One threaded map step: an `assoc` chain onto a loop-carried map
+/// (nested assocs flatten inner-first, like the interpreter).
+struct MapStep {
+    base: usize,
+    assocs: Vec<(MapKeyVal, MapKeyVal)>,
+    /// Whether another step threads the same base (shared bases
+    /// clone per round so every step sees the pre-round map, like
+    /// the slow path; unique bases move).
+    shared_base: bool,
+}
+
+/// One `recur` step: an integer expression, a threaded map step,
+/// or a threaded vector step.
+enum LoopStep {
+    Int(IntExpr),
+    Map(MapStep),
+    Vec(VecStep),
+}
+
+/// One evaluated `recur` step (which next-buffer it lands in).
+enum SteppedValue {
+    Int(i64),
+    Map(Map),
+    Vec(Vector),
+}
+
+/// The classified entry buffers of an integer loop (see
+/// [`Evaluator::try_int_loop`]).
+struct LoopEntry {
+    kinds: Vec<LoopVarKind>,
+    saved: Vec<Value>,
+    ints: Vec<i64>,
+    maps: Vec<Option<Map>>,
+    vecs: Vec<Option<Vector>>,
+}
+
+/// One threaded-vector operand: a per-round integer expression or
+/// an `nth` read against a loop-carried vector.
+enum VecVal {
+    Int(IntExpr),
+    Nth { base: usize, idx: IntExpr },
+}
+
+/// One threaded vector step: a loop-var passthrough, a multi-pair
+/// `assoc` chain onto a loop-carried vector (nested assocs
+/// flatten inner-first, like the interpreter), or an `if` over an
+/// integer comparison with threaded branches.
+enum VecStep {
+    Pass {
+        base: usize,
+        shared_base: bool,
+    },
+    Assoc {
+        base: usize,
+        pairs: Vec<(VecVal, VecVal)>,
+        /// Whether another step threads the same base (shared bases
+        /// clone per round so every step sees the pre-round vector,
+        /// like the slow path; unique bases move).
+        shared_base: bool,
+    },
+    If {
+        op: IntCmp,
+        lhs: VecVal,
+        rhs: VecVal,
+        then: Box<VecStep>,
+        els: Box<VecStep>,
+    },
+}
+
+/// One `if` branch: another round with computed steps, or the exit
+/// expression (evaluated once with the final values; a surfaced
+/// `recur` continues the loop exactly like the slow path).
+/// Integer-only loops keep their steps untagged (`RecurInt`) so the
+/// tagless round loop unwraps nothing per round.
+enum IntBranch<'a> {
+    Recur(Vec<LoopStep>),
+    RecurInt(Vec<IntExpr>),
+    Exit(&'a Expr),
+}
+
+/// The outcome of [`Evaluator::run_loop_rounds`]: `Done` carries
+/// the loop's value; `Bail` re-runs the standard loop from the
+/// restored entry `env` (only when no exit ran yet — nothing
+/// observable happened); `Resume` continues it from the carried
+/// values instead (an exit may have run effects — rerunning would
+/// repeat them).
+enum RoundOutcome {
+    Done(Result<Value, Signal>),
+    Bail,
+    Resume(Vec<Value>),
+}
+
+/// The outcome of one exit-branch evaluation: `Done` leaves the
+/// loop; `Reseed` carries a surfacing `recur`'s values back to the
+/// round loop (which reseeds the buffers, or resumes slow on exotic
+/// shapes).
+enum ExitAction {
+    Done(RoundOutcome),
+    Reseed(Vec<Value>),
+}
+
+/// A matched counted loop (bundles `run_loop_rounds`'s plan).
+struct IntLoopPlan<'a> {
+    test: IntTest,
+    then_act: IntBranch<'a>,
+    else_act: IntBranch<'a>,
+    kinds: Vec<LoopVarKind>,
+    /// The validated root epoch (re-checked per round — every
+    /// inlined direct call observes redefinition, like the
+    /// evaluator's own direct calls).
+    guard_epoch: u64,
+}
+
+/// The shared matching context of the round planner: loop-var
+/// ids, the outer frame length, and the entry env.
+struct LoopMatchCtx<'e> {
+    ids: &'e IntLoopIds,
+    outer_len: usize,
+    env: &'e Env,
+}
 impl Evaluator {
     /// A fresh evaluator loading from `source` (`:file`, used in
     /// spans and `def` meta), with a lone `user` namespace current
@@ -1044,6 +1274,9 @@ impl Evaluator {
                 for arg in args {
                     values.push(self.eval(arg, env)?);
                 }
+                if let Some(closure) = Self::local_closure(head, &callee) {
+                    return self.apply_closure(closure, &values);
+                }
                 self.invoke_args(&callee, values, *span)
             }
             Expr::DirectNative(call) => self.eval_direct_native(call, env),
@@ -1714,6 +1947,1559 @@ impl Evaluator {
         }))
     }
 
+    /// Run a counted loop without interpreter dispatch: the body
+    /// is one `if` over a chained integer comparison, integer steps
+    /// run tagless in `i64`s, and map steps thread one assoc chain
+    /// through [`Map::insert_threaded`]. Calls match only validated
+    /// [`Expr::DirectNative`] sites (like the evaluator's own direct
+    /// calls, the plan observes redefinition: any root or binding
+    /// change declines, and rounds re-check the epoch). Any
+    /// overflow, exotic state, or exotic shape bails — from the
+    /// restored entry `env` when no exit ran yet, or by resuming the
+    /// standard loop from the current state once an exit may have
+    /// run effects (rerunning would repeat them) — so overflow
+    /// errors, coercions, and arity failures stay exactly the
+    /// interpreter's.
+    fn try_int_loop(
+        &mut self,
+        bindings: &[(Pattern, Expr)],
+        body: &[Expr],
+        env: &mut Env,
+        outer: &Env,
+    ) -> LoopAccel {
+        let [only] = body else {
+            return LoopAccel::Slow;
+        };
+        let Expr::If { test, then, els } = only else {
+            return LoopAccel::Slow;
+        };
+        let n_vars = bindings.len();
+        if !Self::loop_bindings_plain(bindings, env, outer, n_vars) {
+            return LoopAccel::Slow;
+        }
+        let Some(entry) = Self::classify_loop_entry(env, outer, n_vars) else {
+            return LoopAccel::Slow;
+        };
+        let ids = match self.int_loop_ids() {
+            Some(ids) => ids,
+            None => return LoopAccel::Slow,
+        };
+        let outer_len = outer.len();
+        let ctx = LoopMatchCtx {
+            ids: &ids,
+            outer_len,
+            env,
+        };
+        let mut uses = Vec::new();
+        let Some(plan) = self.build_loop_plan(test, then, els, entry.kinds, ctx, &mut uses) else {
+            return LoopAccel::Slow;
+        };
+        let has_maps = plan.kinds.contains(&LoopVarKind::Map);
+        let has_vecs = plan.kinds.contains(&LoopVarKind::Vec);
+        if has_maps {
+            // Drop the entry frame's references (in-place map
+            // threading needs unshared nodes); the rounds never
+            // touch `env`, and a bail rebuilds it from the saved
+            // entry values. Vector threading is copy-on-write, so
+            // vec-only loops keep `env` (bail needs no rebuild).
+            *env = outer.clone();
+        }
+        // Integer-only loops run the tagless round loop (no map
+        // buffers); map/vector loops thread below. Every plan
+        // carries the validated root epoch (see `plan_guard_epoch`).
+        let outcome = if has_maps || has_vecs {
+            self.run_loop_rounds(&plan, outer, entry.ints, entry.maps, entry.vecs)
+        } else {
+            self.run_int_rounds(&plan, outer, entry.ints)
+        };
+        Self::finish_loop_accel(outcome, has_maps, outer, entry.saved, env)
+    }
+
+    /// Whether the loop binds plain symbols over sequential single
+    /// slots (each `Symbol` extends by exactly one).
+    fn loop_bindings_plain(
+        bindings: &[(Pattern, Expr)],
+        env: &Env,
+        outer: &Env,
+        n_vars: usize,
+    ) -> bool {
+        env.len() == outer.len() + n_vars
+            && bindings
+                .iter()
+                .all(|(pat, _)| matches!(pat, Pattern::Symbol(_)))
+    }
+
+    /// Entry guard: every loop var holds an `Int`, an unsorted
+    /// `Map`, or a packed int `Vector` (anything else — ratios,
+    /// strings, `nil`, sorted maps, generic vectors — takes the
+    /// slow path, which keeps the exact coercion, ordering, and
+    /// error behavior). `None` declines to the slow path.
+    fn classify_loop_entry(env: &Env, outer: &Env, n_vars: usize) -> Option<LoopEntry> {
+        let mut kinds = Vec::with_capacity(n_vars);
+        let mut saved = Vec::with_capacity(n_vars);
+        let mut ints = Vec::with_capacity(n_vars);
+        let mut maps: Vec<Option<Map>> = Vec::with_capacity(n_vars);
+        let mut vecs: Vec<Option<Vector>> = Vec::with_capacity(n_vars);
+        for slot in outer.len()..outer.len() + n_vars {
+            match env.get(slot) {
+                Value::Int(v) => {
+                    kinds.push(LoopVarKind::Int);
+                    saved.push(Value::Int(v));
+                    ints.push(v);
+                    maps.push(None);
+                    vecs.push(None);
+                }
+                Value::Map(m) if !m.is_sorted() => {
+                    kinds.push(LoopVarKind::Map);
+                    saved.push(Value::Map(m.clone()));
+                    ints.push(0);
+                    // Thread a deep copy (fresh nodes mutate in
+                    // place); the shallow clone above stays pristine
+                    // for bailout.
+                    maps.push(Some(m.deep_clone()));
+                    vecs.push(None);
+                }
+                Value::Vector(v) if v.is_packed() => {
+                    kinds.push(LoopVarKind::Vec);
+                    saved.push(Value::Vector(v.clone()));
+                    ints.push(0);
+                    maps.push(None);
+                    // Thread under a fresh identity (chunks detach
+                    // on first touch); the shallow clone above stays
+                    // pristine for bailout.
+                    vecs.push(Some(v.thread_entry()));
+                }
+                _ => return None,
+            }
+        }
+        Some(LoopEntry {
+            kinds,
+            saved,
+            ints,
+            maps,
+            vecs,
+        })
+    }
+
+    /// Match the test, both branches, and the root guard into a
+    /// round plan (`None` declines to the slow path).
+    fn build_loop_plan<'a>(
+        &mut self,
+        test: &Expr,
+        then: &'a Expr,
+        els: &'a Expr,
+        kinds: Vec<LoopVarKind>,
+        ctx: LoopMatchCtx<'_>,
+        uses: &mut Vec<PlanUse>,
+    ) -> Option<IntLoopPlan<'a>> {
+        let test = Self::match_int_test(test, ctx.ids, &kinds, ctx.outer_len, ctx.env, uses)?;
+        let then_act =
+            Self::match_loop_branch(then, ctx.ids, &kinds, ctx.outer_len, ctx.env, uses)?;
+        let else_act = Self::match_loop_branch(els, ctx.ids, &kinds, ctx.outer_len, ctx.env, uses)?;
+        let guard_epoch = self.plan_guard_epoch(uses)?;
+        Some(IntLoopPlan {
+            test,
+            then_act,
+            else_act,
+            kinds,
+            guard_epoch,
+        })
+    }
+
+    /// Validate every direct call the plan inlined and capture
+    /// the root epoch (`None` declines to the slow path): the same
+    /// checks [`Evaluator::direct_valid`] runs per call (no thread
+    /// binding, a fresh epoch, the analyzed root still current),
+    /// once per plan instead of once per call — including the
+    /// slow road's cache fill (a loop that calls first would
+    /// otherwise always miss, like a first call before its
+    /// [`deref_var_cached`](Self::deref_var_cached)). Rounds
+    /// re-check the epoch (bindings cannot change mid-loop on this
+    /// thread, and every root change bumps the epoch).
+    fn plan_guard_epoch(&mut self, uses: &[PlanUse]) -> Option<u64> {
+        let epoch = self.registry.epoch();
+        if epoch != self.root_epoch {
+            self.root_cache.clear();
+            self.root_epoch = epoch;
+        }
+        for use_ in uses {
+            if self.bindings.get(use_.var_id).is_some() {
+                return None;
+            }
+            let cached = match self.root_cache.get(&use_.var_id) {
+                Some(v) => v.clone(),
+                None => {
+                    let root = self.registry.root_cloned(use_.var_id)?;
+                    self.root_cache.insert(use_.var_id, root.clone());
+                    root
+                }
+            };
+            let Value::Extension(current) = &cached else {
+                return None;
+            };
+            if !Arc::ptr_eq(current, &use_.expect) {
+                return None;
+            }
+        }
+        Some(epoch)
+    }
+
+    /// Whether a direct call site is the genuine `display` native
+    /// (the var id plus the analyzed root's installed display — a
+    /// native-for-native swap like `with-redefs [assoc conj]`
+    /// keeps the id but changes the root, so id alone would
+    /// mis-thread it; test doubles install under `user`, never
+    /// these displays).
+    fn direct_expect_is(call: &DirectCall, id: u64, display: &str) -> bool {
+        call.var.id == id
+            && call
+                .expect
+                .as_any()
+                .downcast_ref::<NativeFn>()
+                .is_some_and(|n| n.display.as_ref() == display)
+    }
+
+    /// Translate a round outcome into the accelerator's answer,
+    /// rebuilding the entry frame on a map-loop bail.
+    fn finish_loop_accel(
+        outcome: RoundOutcome,
+        has_maps: bool,
+        outer: &Env,
+        saved: Vec<Value>,
+        env: &mut Env,
+    ) -> LoopAccel {
+        match outcome {
+            RoundOutcome::Done(result) => LoopAccel::Done(result),
+            RoundOutcome::Bail => {
+                if has_maps {
+                    *env = outer.extend(saved);
+                }
+                LoopAccel::Slow
+            }
+            // The slow loop binds these itself (entry state is
+            // behind us — the entry `env` stays dropped).
+            RoundOutcome::Resume(vals) => LoopAccel::Resume(vals),
+        }
+    }
+
+    /// Run integer-only rounds (see [`Evaluator::try_int_loop`]):
+    /// tagless `i64` state in double-buffered rounds, with no
+    /// per-round allocation past the epoch re-check.
+    fn run_int_rounds(
+        &mut self,
+        plan: &IntLoopPlan,
+        outer: &Env,
+        mut ints: Vec<i64>,
+    ) -> RoundOutcome {
+        let n_vars = plan.kinds.len();
+        let mut next = Vec::with_capacity(n_vars);
+        // One exit env reused across exit rounds (rebound in place
+        // when unobserved, like `eval_loop`'s frame — an exit that
+        // captures and recurs falls back to a fresh frame per
+        // round, so closures keep observing their own round).
+        let mut exit_env: Option<Env> = None;
+        // Whether an exit evaluated yet (exits run arbitrary code —
+        // once one has, a bail resumes slow from the current
+        // integers instead of rerunning from entry, which would
+        // repeat its effects).
+        let mut effects = false;
+        loop {
+            // A root changed mid-loop (redefinition from another
+            // thread): bail so the slow path observes it.
+            if self.registry.epoch() != plan.guard_epoch {
+                return Self::bail_int_rounds(effects, &ints);
+            }
+            let cond = match Self::eval_int_test(&ints, &plan.test) {
+                Some(cond) => cond,
+                None => return Self::bail_int_rounds(effects, &ints),
+            };
+            let action = if cond { &plan.then_act } else { &plan.else_act };
+            match action {
+                IntBranch::RecurInt(steps) => {
+                    // Every step evaluates against the pre-`recur`
+                    // state (like the slow path's value vector).
+                    next.clear();
+                    if !Self::apply_int_steps(steps, &ints, &mut next) {
+                        return Self::bail_int_rounds(effects, &ints);
+                    }
+                    std::mem::swap(&mut ints, &mut next);
+                }
+                IntBranch::Recur(_) => return Self::bail_int_rounds(effects, &ints),
+                IntBranch::Exit(exit) => {
+                    effects = true;
+                    match self.run_int_exit(exit, outer, &mut exit_env, &ints) {
+                        ExitAction::Done(outcome) => return outcome,
+                        // A surfacing `recur` reseeds the buffers
+                        // (keep looping); exotic shapes resume slow
+                        // from their own values (never rerun — the
+                        // exit just ran).
+                        ExitAction::Reseed(vals) => {
+                            if let Err(vals) = Self::reseed_ints(vals, n_vars, &mut ints) {
+                                return RoundOutcome::Resume(vals);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Bail out of integer-only rounds: rerun from entry when no
+    /// exit ran yet (nothing observable happened — pure `recur`
+    /// steps compute into buffers); otherwise resume the slow loop
+    /// from the current integers (the integers are always exact —
+    /// steps compute into the next buffer, never in place).
+    fn bail_int_rounds(effects: bool, ints: &[i64]) -> RoundOutcome {
+        if effects {
+            let vals = ints.iter().map(|&v| Value::Int(v)).collect();
+            RoundOutcome::Resume(vals)
+        } else {
+            RoundOutcome::Bail
+        }
+    }
+
+    /// Apply integer-only `recur` steps into the next buffer
+    /// (`false` bails to the interpreter).
+    fn apply_int_steps(steps: &[IntExpr], ints: &[i64], next: &mut Vec<i64>) -> bool {
+        for step in steps {
+            match Self::eval_int_expr(ints, step) {
+                Some(v) => next.push(v),
+                None => return false,
+            }
+        }
+        true
+    }
+
+    /// Rebind the integers from an exit-branch `recur` (`Err`
+    /// carries the values back: the caller resumes slow from them —
+    /// never reruns, since the exit just ran. Length mismatches only
+    /// arise from hand-built plans — the analyzer arity-checks every
+    /// `recur` — so resume callers always receive well-formed
+    /// lengths).
+    fn reseed_ints(vals: Vec<Value>, n_vars: usize, ints: &mut [i64]) -> Result<(), Vec<Value>> {
+        if vals.len() != n_vars {
+            return Err(vals);
+        }
+        let exotic = vals.iter().any(|v| !matches!(v, Value::Int(_)));
+        if exotic {
+            return Err(vals);
+        }
+        // Infallible (validated above — every value is an `Int`).
+        for (i, v) in vals.into_iter().enumerate() {
+            if let Value::Int(x) = v {
+                ints[i] = x;
+            }
+        }
+        Ok(())
+    }
+
+    /// Run one integer-only exit branch: `Done` leaves the loop,
+    /// `Reseed` carries a surfacing `recur` back (keep looping — the
+    /// slow path rebinds the same way).
+    fn run_int_exit(
+        &mut self,
+        exit: &Expr,
+        outer: &Env,
+        exit_env: &mut Option<Env>,
+        ints: &[i64],
+    ) -> ExitAction {
+        let finals: Vec<Value> = ints.iter().map(|&v| Value::Int(v)).collect();
+        let env = match exit_env.as_mut() {
+            Some(env) => {
+                if let Err(finals) = env.try_rebind(outer, finals) {
+                    *env = outer.extend(finals);
+                }
+                env
+            }
+            None => exit_env.insert(outer.extend(finals)),
+        };
+        match self.eval(exit, env) {
+            Ok(v) => ExitAction::Done(RoundOutcome::Done(Ok(v))),
+            Err(Signal::Recur(vals)) => ExitAction::Reseed(vals),
+            Err(other) => ExitAction::Done(RoundOutcome::Done(Err(other))),
+        }
+    }
+
+    /// Run accelerated rounds (see [`Evaluator::try_int_loop`]):
+    /// every step evaluates against the pre-`recur` state (like the
+    /// slow path's value vector), with double-buffered integers and
+    /// maps (no allocation per round past the threaded assocs
+    /// themselves).
+    fn run_loop_rounds(
+        &mut self,
+        plan: &IntLoopPlan,
+        outer: &Env,
+        mut ints: Vec<i64>,
+        mut maps: Vec<Option<Map>>,
+        mut vecs: Vec<Option<Vector>>,
+    ) -> RoundOutcome {
+        let kinds = &plan.kinds;
+        let n_vars = kinds.len();
+        let mut next_ints = Vec::with_capacity(n_vars);
+        let mut next_maps: Vec<Option<Map>> = Vec::with_capacity(n_vars);
+        let mut next_vecs: Vec<Option<Vector>> = Vec::with_capacity(n_vars);
+        // One exit env reused across exit rounds (see
+        // `run_int_rounds`).
+        let mut exit_env: Option<Env> = None;
+        // Whether an exit evaluated yet (see `run_int_rounds`): past
+        // that point a bail resumes slow from the round-start
+        // snapshot (threaded buffers may hold partial in-place
+        // updates, so the integers alone are not exact).
+        let mut effects = false;
+        let mut snap: Vec<Value> = Vec::new();
+        loop {
+            if effects {
+                Self::snap_round(kinds, &ints, &maps, &vecs, &mut snap);
+            }
+            // A root changed mid-loop (redefinition from another
+            // thread): bail so the slow path observes it.
+            if self.registry.epoch() != plan.guard_epoch {
+                return Self::bail_mixed_rounds(effects, std::mem::take(&mut snap));
+            }
+            let cond = match Self::eval_int_test(&ints, &plan.test) {
+                Some(cond) => cond,
+                None => return Self::bail_mixed_rounds(effects, std::mem::take(&mut snap)),
+            };
+            let action = if cond { &plan.then_act } else { &plan.else_act };
+            match action {
+                IntBranch::Recur(steps) => {
+                    next_ints.clear();
+                    next_maps.clear();
+                    next_vecs.clear();
+                    if !Self::apply_recur_steps(
+                        steps,
+                        &ints,
+                        &mut maps,
+                        &mut vecs,
+                        &mut next_ints,
+                        &mut next_maps,
+                        &mut next_vecs,
+                    ) {
+                        return Self::bail_mixed_rounds(effects, std::mem::take(&mut snap));
+                    }
+                    std::mem::swap(&mut ints, &mut next_ints);
+                    std::mem::swap(&mut maps, &mut next_maps);
+                    std::mem::swap(&mut vecs, &mut next_vecs);
+                }
+                IntBranch::RecurInt(_) => {
+                    return Self::bail_mixed_rounds(effects, std::mem::take(&mut snap));
+                }
+                IntBranch::Exit(exit) => {
+                    let Some(finals) = Self::take_finals(kinds, &ints, &mut maps, &mut vecs) else {
+                        // Drained buffers at an exit arm: only
+                        // hand-built plans (real flow keeps buffers
+                        // full at every round start — entry fills,
+                        // recur swaps, exit-continue reseeds).
+                        return Self::bail_mixed_rounds(effects, std::mem::take(&mut snap));
+                    };
+                    effects = true;
+                    match self.run_loop_exit(exit, outer, &mut exit_env, finals) {
+                        ExitAction::Done(outcome) => return outcome,
+                        // A surfacing `recur` reseeds the buffers
+                        // (keep looping); exotic shapes resume slow
+                        // from their own values (never rerun — the
+                        // exit just ran).
+                        ExitAction::Reseed(vals) => {
+                            if let Err(vals) =
+                                Self::reseed_from_vals(kinds, vals, &mut ints, &mut maps, &mut vecs)
+                            {
+                                return RoundOutcome::Resume(vals);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Snapshot the round-start values for a resume (see
+    /// [`Evaluator::bail_mixed_rounds`]): ints copy, maps/vecs bump
+    /// their `Arc`s (threading detaches on write, so the snapshot
+    /// stays pristine; round-start buffers are always full in real
+    /// flow — entry fills, recur swaps, exit-continue reseeds).
+    fn snap_round(
+        kinds: &[LoopVarKind],
+        ints: &[i64],
+        maps: &[Option<Map>],
+        vecs: &[Option<Vector>],
+        snap: &mut Vec<Value>,
+    ) {
+        snap.clear();
+        for (i, kind) in kinds.iter().enumerate() {
+            match kind {
+                LoopVarKind::Int => snap.push(Value::Int(ints[i])),
+                LoopVarKind::Map => {
+                    snap.push(Value::Map(
+                        maps[i].clone().expect("round-start map present"),
+                    ));
+                }
+                LoopVarKind::Vec => snap.push(Value::Vector(
+                    vecs[i].clone().expect("round-start vector present"),
+                )),
+            }
+        }
+    }
+
+    /// Bail out of mixed rounds: rerun from entry when no exit ran
+    /// yet (nothing observable happened); otherwise resume the slow
+    /// loop from the round-start snapshot (see
+    /// [`Evaluator::snap_round`]).
+    fn bail_mixed_rounds(effects: bool, snap: Vec<Value>) -> RoundOutcome {
+        if effects {
+            RoundOutcome::Resume(snap)
+        } else {
+            RoundOutcome::Bail
+        }
+    }
+
+    /// Evaluate one `recur` step against the round's buffers
+    /// (`None` bails to the interpreter).
+    fn eval_loop_step(
+        step: &LoopStep,
+        ints: &[i64],
+        maps: &mut [Option<Map>],
+        vecs: &mut [Option<Vector>],
+    ) -> Option<SteppedValue> {
+        match step {
+            LoopStep::Int(expr) => Self::eval_int_expr(ints, expr).map(SteppedValue::Int),
+            LoopStep::Map(ms) => Self::eval_map_step(ms, ints, maps).map(SteppedValue::Map),
+            LoopStep::Vec(vs) => Self::eval_vec_step(vs, ints, vecs).map(SteppedValue::Vec),
+        }
+    }
+
+    /// Apply every `recur` step into the next-buffers (`false` bails
+    /// to the interpreter).
+    fn apply_recur_steps(
+        steps: &[LoopStep],
+        ints: &[i64],
+        maps: &mut [Option<Map>],
+        vecs: &mut [Option<Vector>],
+        next_ints: &mut Vec<i64>,
+        next_maps: &mut Vec<Option<Map>>,
+        next_vecs: &mut Vec<Option<Vector>>,
+    ) -> bool {
+        for step in steps {
+            match Self::eval_loop_step(step, ints, maps, vecs) {
+                Some(SteppedValue::Int(v)) => {
+                    next_ints.push(v);
+                    next_maps.push(None);
+                    next_vecs.push(None);
+                }
+                Some(SteppedValue::Map(m)) => {
+                    next_ints.push(0);
+                    next_maps.push(Some(m));
+                    next_vecs.push(None);
+                }
+                Some(SteppedValue::Vec(v)) => {
+                    next_ints.push(0);
+                    next_maps.push(None);
+                    next_vecs.push(Some(v));
+                }
+                None => return false,
+            }
+        }
+        true
+    }
+
+    /// Collect the exit branch's loop-var values (`None` bails to
+    /// the interpreter).
+    fn take_finals(
+        kinds: &[LoopVarKind],
+        ints: &[i64],
+        maps: &mut [Option<Map>],
+        vecs: &mut [Option<Vector>],
+    ) -> Option<Vec<Value>> {
+        let mut finals = Vec::with_capacity(kinds.len());
+        for (i, kind) in kinds.iter().enumerate() {
+            match kind {
+                LoopVarKind::Int => finals.push(Value::Int(ints[i])),
+                LoopVarKind::Map => finals.push(Value::Map(maps[i].take()?)),
+                LoopVarKind::Vec => finals.push(Value::Vector(vecs[i].take()?)),
+            }
+        }
+        Some(finals)
+    }
+
+    /// Rebind the buffers from an exit-branch `recur` (`Err`
+    /// carries the values back: the caller resumes slow from them —
+    /// never reruns, since the exit just ran. Length mismatches only
+    /// arise from hand-built plans — the analyzer arity-checks every
+    /// `recur` — so resume callers always receive well-formed
+    /// lengths).
+    fn reseed_from_vals(
+        kinds: &[LoopVarKind],
+        vals: Vec<Value>,
+        ints: &mut [i64],
+        maps: &mut [Option<Map>],
+        vecs: &mut [Option<Vector>],
+    ) -> Result<(), Vec<Value>> {
+        if vals.len() != kinds.len() {
+            return Err(vals);
+        }
+        let fits = kinds
+            .iter()
+            .zip(vals.iter())
+            .all(|(kind, v)| match (kind, v) {
+                (LoopVarKind::Int, Value::Int(_)) => true,
+                (LoopVarKind::Map, Value::Map(m)) => !m.is_sorted(),
+                (LoopVarKind::Vec, Value::Vector(v)) => v.is_packed(),
+                _ => false,
+            });
+        if !fits {
+            return Err(vals);
+        }
+        // Infallible (validated above — every pair fits its kind).
+        for (i, (kind, v)) in kinds.iter().zip(vals).enumerate() {
+            match kind {
+                LoopVarKind::Int => {
+                    if let Value::Int(x) = v {
+                        ints[i] = x;
+                    }
+                }
+                LoopVarKind::Map => {
+                    if let Value::Map(m) = v {
+                        maps[i] = Some(m);
+                    }
+                }
+                LoopVarKind::Vec => {
+                    if let Value::Vector(v) = v {
+                        vecs[i] = Some(v.thread_entry());
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Run one exit branch over collected finals: `Done` leaves the
+    /// loop, `Reseed` carries a surfacing `recur` back (keep looping
+    /// — the slow path rebinds the same way).
+    fn run_loop_exit(
+        &mut self,
+        exit: &Expr,
+        outer: &Env,
+        exit_env: &mut Option<Env>,
+        finals: Vec<Value>,
+    ) -> ExitAction {
+        let env = match exit_env.as_mut() {
+            Some(env) => {
+                if let Err(finals) = env.try_rebind(outer, finals) {
+                    *env = outer.extend(finals);
+                }
+                env
+            }
+            None => exit_env.insert(outer.extend(finals)),
+        };
+        match self.eval(exit, env) {
+            Ok(v) => ExitAction::Done(RoundOutcome::Done(Ok(v))),
+            Err(Signal::Recur(vals)) => ExitAction::Reseed(vals),
+            Err(other) => ExitAction::Done(RoundOutcome::Done(Err(other))),
+        }
+    }
+
+    /// Resolve the loop-op vars answered by identity (`assoc`,
+    /// `nth`, `=` — the `fast`-tagged ops ride the `DirectNative`
+    /// node instead). A missing core var declines the fast path.
+    fn int_loop_ids(&self) -> Option<IntLoopIds> {
+        let resolve = |name: &str| {
+            let sym = Symbol::new(None, name);
+            self.registry
+                .resolve_target_and_id("clojure.core", &sym)
+                .map(|(_, id)| id)
+        };
+        Some(IntLoopIds {
+            assoc: resolve("assoc")?,
+            nth: resolve("nth")?,
+            eq: resolve("=")?,
+        })
+    }
+
+    /// Match one integer operand: an integer loop var, an `Int`
+    /// literal, a frozen outer `Int` local (no `set!` on locals, and
+    /// the fast loop runs no code that could convey bindings), or a
+    /// validated direct integer op. Indirect calls decline (their
+    /// roots are redefined or non-native, so the slow path must
+    /// observe them).
+    fn match_int_expr(
+        expr: &Expr,
+        kinds: &[LoopVarKind],
+        outer_len: usize,
+        env: &Env,
+        uses: &mut Vec<PlanUse>,
+    ) -> Option<IntExpr> {
+        match expr {
+            Expr::Local(s) => Self::match_int_local(*s, kinds, outer_len, env),
+            Expr::Literal(Value::Int(c)) => Some(IntExpr::single(IntOp::Const(*c))),
+            Expr::DirectNative(call) => Self::match_direct_int(call, kinds, outer_len, env, uses),
+            _ => None,
+        }
+    }
+
+    /// Match an integer loop-var or frozen-outer `Local` (map loop
+    /// vars decline — integer positions never read map state).
+    fn match_int_local(
+        s: usize,
+        kinds: &[LoopVarKind],
+        outer_len: usize,
+        env: &Env,
+    ) -> Option<IntExpr> {
+        if s < outer_len {
+            match env.get(s) {
+                Value::Int(c) => Some(IntExpr::single(IntOp::Const(c))),
+                _ => None,
+            }
+        } else {
+            let var = s - outer_len;
+            (kinds.get(var) == Some(&LoopVarKind::Int)).then(|| IntExpr::single(IntOp::Var(var)))
+        }
+    }
+
+    /// One n-ary integer op over matched operands (postfix: every
+    /// operand's ops, then the counted op — `(-)` stays on the slow
+    /// path, which arity-checks exactly).
+    fn fold_int_tag(tag: FastArith, all: Vec<IntExpr>) -> Option<IntExpr> {
+        let op = if tag == FastArith::Add {
+            IntOp::Add(all.len())
+        } else if tag == FastArith::Sub && !all.is_empty() {
+            IntOp::Sub(all.len())
+        } else if tag == FastArith::Mul {
+            IntOp::Mul(all.len())
+        } else {
+            return None;
+        };
+        let mut ops = Vec::new();
+        for e in all {
+            ops.extend(e.ops);
+        }
+        ops.push(op);
+        Some(IntExpr { ops })
+    }
+
+    /// Match a direct integer-op call (`inc`/`dec`/`+`/`-`/`*`;
+    /// arities the JVM rejects stay on the slow path so the error
+    /// matches). Records the use for the plan guard.
+    fn match_direct_int(
+        call: &DirectCall,
+        kinds: &[LoopVarKind],
+        outer_len: usize,
+        env: &Env,
+        uses: &mut Vec<PlanUse>,
+    ) -> Option<IntExpr> {
+        let out = Self::apply_int_tag(call.fast, &call.args, kinds, outer_len, env, uses)?;
+        uses.push(PlanUse::of(call));
+        Some(out)
+    }
+
+    /// Build an integer expression from a tagged op and matched
+    /// operands.
+    fn apply_int_tag(
+        tag: FastArith,
+        args: &[Expr],
+        kinds: &[LoopVarKind],
+        outer_len: usize,
+        env: &Env,
+        uses: &mut Vec<PlanUse>,
+    ) -> Option<IntExpr> {
+        if tag == FastArith::Inc || tag == FastArith::Dec {
+            let [arg] = args else { return None };
+            let inner = Self::match_int_expr(arg, kinds, outer_len, env, uses)?;
+            return Some(if tag == FastArith::Inc {
+                inner.push_op(IntOp::Inc)
+            } else {
+                inner.push_op(IntOp::Dec)
+            });
+        }
+        let all = Self::match_int_args(args, kinds, outer_len, env, uses)?;
+        Self::fold_int_tag(tag, all)
+    }
+
+    /// Match every operand of an integer op or test.
+    fn match_int_args(
+        args: &[Expr],
+        kinds: &[LoopVarKind],
+        outer_len: usize,
+        env: &Env,
+        uses: &mut Vec<PlanUse>,
+    ) -> Option<Vec<IntExpr>> {
+        args.iter()
+            .map(|arg| Self::match_int_expr(arg, kinds, outer_len, env, uses))
+            .collect()
+    }
+
+    /// Match the loop test: a chained integer comparison over a
+    /// validated direct call (`=` rides tagless, answered by var
+    /// identity; zero-arg comparisons are arity errors on the slow
+    /// path).
+    fn match_int_test(
+        test: &Expr,
+        ids: &IntLoopIds,
+        kinds: &[LoopVarKind],
+        outer_len: usize,
+        env: &Env,
+        uses: &mut Vec<PlanUse>,
+    ) -> Option<IntTest> {
+        let Expr::DirectNative(call) = test else {
+            return None;
+        };
+        let op = match call.fast {
+            FastArith::Lt => IntCmp::Lt,
+            FastArith::Lte => IntCmp::Le,
+            FastArith::Gt => IntCmp::Gt,
+            FastArith::Gte => IntCmp::Ge,
+            FastArith::None if Self::direct_expect_is(call, ids.eq, "clojure.core/=") => IntCmp::Eq,
+            _ => return None,
+        };
+        if call.args.is_empty() {
+            return None;
+        }
+        let matched = Self::match_int_args(&call.args, kinds, outer_len, env, uses)?;
+        uses.push(PlanUse::of(call));
+        Some(IntTest { op, args: matched })
+    }
+
+    /// Match one `if` branch: a same-arity `recur` (each step an
+    /// integer or threaded-map step per its kind), or the exit
+    /// expression (evaluated once with the final values).
+    fn match_loop_branch<'a>(
+        branch: &'a Expr,
+        ids: &IntLoopIds,
+        kinds: &[LoopVarKind],
+        outer_len: usize,
+        env: &Env,
+        uses: &mut Vec<PlanUse>,
+    ) -> Option<IntBranch<'a>> {
+        if let Expr::Recur(steps) = branch {
+            if steps.len() != kinds.len() {
+                return None;
+            }
+            if !kinds.contains(&LoopVarKind::Map) && !kinds.contains(&LoopVarKind::Vec) {
+                let matched = Self::match_int_steps(steps, kinds, outer_len, env, uses)?;
+                return Some(IntBranch::RecurInt(matched));
+            }
+            let mut matched = Self::match_mixed_steps(steps, kinds, ids, outer_len, env, uses)?;
+            Self::mark_shared_bases(&mut matched);
+            return Some(IntBranch::Recur(matched));
+        }
+        Some(IntBranch::Exit(branch))
+    }
+
+    /// Match integer-only `recur` steps.
+    fn match_int_steps(
+        steps: &[Expr],
+        kinds: &[LoopVarKind],
+        outer_len: usize,
+        env: &Env,
+        uses: &mut Vec<PlanUse>,
+    ) -> Option<Vec<IntExpr>> {
+        let mut matched = Vec::with_capacity(steps.len());
+        for step in steps {
+            matched.push(Self::match_int_expr(step, kinds, outer_len, env, uses)?);
+        }
+        Some(matched)
+    }
+
+    /// Match one `recur` step against its loop var's kind.
+    fn match_kind_step(
+        step: &Expr,
+        kind: LoopVarKind,
+        ids: &IntLoopIds,
+        kinds: &[LoopVarKind],
+        outer_len: usize,
+        env: &Env,
+        uses: &mut Vec<PlanUse>,
+    ) -> Option<LoopStep> {
+        match kind {
+            LoopVarKind::Int => {
+                Self::match_int_expr(step, kinds, outer_len, env, uses).map(LoopStep::Int)
+            }
+            LoopVarKind::Map => {
+                Self::match_map_step(step, ids, kinds, outer_len, env, uses).map(LoopStep::Map)
+            }
+            LoopVarKind::Vec => {
+                Self::match_vec_step(step, ids, kinds, outer_len, env, uses).map(LoopStep::Vec)
+            }
+        }
+    }
+
+    /// Match mixed-kind `recur` steps.
+    fn match_mixed_steps(
+        steps: &[Expr],
+        kinds: &[LoopVarKind],
+        ids: &IntLoopIds,
+        outer_len: usize,
+        env: &Env,
+        uses: &mut Vec<PlanUse>,
+    ) -> Option<Vec<LoopStep>> {
+        let mut matched = Vec::with_capacity(steps.len());
+        for (i, step) in steps.iter().enumerate() {
+            matched.push(Self::match_kind_step(
+                step, kinds[i], ids, kinds, outer_len, env, uses,
+            )?);
+        }
+        Some(matched)
+    }
+
+    /// A step's threaded base, tagged by buffer (map and vector
+    /// bases live in separate buffers, so only same-kind steps
+    /// share; `None` threads nothing).
+    fn step_base_kind(step: &LoopStep) -> Option<(bool, usize)> {
+        match step {
+            LoopStep::Map(ms) => Some((false, ms.base)),
+            LoopStep::Vec(vs) => Some((true, Self::vec_step_base(vs))),
+            LoopStep::Int(_) => None,
+        }
+    }
+
+    /// Whether a base is threaded by more than one step.
+    fn base_is_shared(bases: &[Option<(bool, usize)>], base: (bool, usize)) -> bool {
+        bases.iter().filter(|b| *b == &Some(base)).count() > 1
+    }
+
+    /// Install one step's shared-base flag (see
+    /// `MapStep`/`VecStep`; `Int` steps thread nothing, so the
+    /// `None` base arm doubles as their no-op — matching the step
+    /// and base jointly leaves no dead arm).
+    fn mark_step_shared(
+        step: &mut LoopStep,
+        base: Option<(bool, usize)>,
+        bases: &[Option<(bool, usize)>],
+    ) {
+        match (step, base) {
+            (LoopStep::Map(ms), Some(base)) => {
+                ms.shared_base = Self::base_is_shared(bases, base);
+            }
+            (LoopStep::Vec(vs), Some(base)) => {
+                Self::set_vec_shared(vs, Self::base_is_shared(bases, base));
+            }
+            _ => {}
+        }
+    }
+
+    /// Shared bases clone per round (see `MapStep`/`VecStep`).
+    fn mark_shared_bases(matched: &mut [LoopStep]) {
+        let bases: Vec<Option<(bool, usize)>> = matched.iter().map(Self::step_base_kind).collect();
+        for (step, base) in matched.iter_mut().zip(&bases) {
+            Self::mark_step_shared(step, *base, &bases);
+        }
+    }
+
+    /// Match one threaded-`assoc` key or value: a frozen constant or
+    /// a per-round integer expression.
+    fn match_map_keyval(
+        expr: &Expr,
+        kinds: &[LoopVarKind],
+        outer_len: usize,
+        env: &Env,
+        uses: &mut Vec<PlanUse>,
+    ) -> Option<MapKeyVal> {
+        match expr {
+            Expr::Literal(v) => Some(MapKeyVal::Const(v.clone())),
+            Expr::Local(s) if *s < outer_len => Some(MapKeyVal::Const(env.get(*s))),
+            _ => Self::match_int_expr(expr, kinds, outer_len, env, uses).map(MapKeyVal::Int),
+        }
+    }
+
+    /// Match one threaded map step: a 3-arg `assoc` chain onto a
+    /// loop-carried map (nested assocs flatten inner-first, like the
+    /// interpreter; anything else declines).
+    fn match_map_step(
+        expr: &Expr,
+        ids: &IntLoopIds,
+        kinds: &[LoopVarKind],
+        outer_len: usize,
+        env: &Env,
+        uses: &mut Vec<PlanUse>,
+    ) -> Option<MapStep> {
+        let mut assocs = Vec::new();
+        let mut cur = expr;
+        let base = loop {
+            let call = match cur {
+                // `assoc` rides `DirectNative` with `fast == None`
+                // (it observes roots): var identity plus the
+                // analyzed root's installed display (verified at the
+                // plan, see `try_int_loop`).
+                Expr::DirectNative(call)
+                    if call.fast == FastArith::None
+                        && Self::direct_expect_is(call, ids.assoc, "clojure.core/assoc") =>
+                {
+                    call
+                }
+                Expr::Local(s) => {
+                    if *s < outer_len {
+                        return None;
+                    }
+                    let idx = *s - outer_len;
+                    if kinds.get(idx) != Some(&LoopVarKind::Map) {
+                        return None;
+                    }
+                    break idx;
+                }
+                _ => return None,
+            };
+            if call.args.len() != 3 {
+                return None;
+            }
+            uses.push(PlanUse::of(call));
+            let key = Self::match_map_keyval(&call.args[1], kinds, outer_len, env, uses)?;
+            let val = Self::match_map_keyval(&call.args[2], kinds, outer_len, env, uses)?;
+            assocs.push((key, val));
+            cur = &call.args[0];
+        };
+        assocs.reverse();
+        Some(MapStep {
+            base,
+            assocs,
+            shared_base: false,
+        })
+    }
+
+    /// Match one threaded vector step: a loop-var passthrough, a
+    /// flat multi-pair `assoc` onto a loop-carried vector, or an
+    /// `if` over an integer comparison with threaded branches.
+    /// Every read and write must hit a single base (mixed-base
+    /// steps decline — cross-step read/write aliasing stays on the
+    /// slow path). Nested `assoc` chains decline too (their
+    /// inner-applies-first order differs from flat multi-pair arg
+    /// order once `nth` reads appear in outer pairs).
+    fn match_vec_step(
+        expr: &Expr,
+        ids: &IntLoopIds,
+        kinds: &[LoopVarKind],
+        outer_len: usize,
+        env: &Env,
+        uses: &mut Vec<PlanUse>,
+    ) -> Option<VecStep> {
+        let step = Self::match_vec_step_inner(expr, ids, kinds, outer_len, env, uses)?;
+        let base = Self::vec_step_base(&step);
+        Self::vec_step_single_base(&step, base).then_some(step)
+    }
+
+    /// Match one threaded vector step without the single-base check
+    /// (see [`Evaluator::match_vec_step`]).
+    fn match_vec_step_inner(
+        expr: &Expr,
+        ids: &IntLoopIds,
+        kinds: &[LoopVarKind],
+        outer_len: usize,
+        env: &Env,
+        uses: &mut Vec<PlanUse>,
+    ) -> Option<VecStep> {
+        match expr {
+            Expr::Local(s) => {
+                let base = Self::match_vec_base(*s, kinds, outer_len)?;
+                Some(VecStep::Pass {
+                    base,
+                    shared_base: false,
+                })
+            }
+            Expr::DirectNative(call) => {
+                Self::match_vec_assoc(call, ids, kinds, outer_len, env, uses)
+            }
+            Expr::If { test, then, els } => {
+                let (op, lhs, rhs) = Self::match_vec_cond(test, ids, kinds, outer_len, env, uses)?;
+                let then = Self::match_vec_step_inner(then, ids, kinds, outer_len, env, uses)?;
+                let els = Self::match_vec_step_inner(els, ids, kinds, outer_len, env, uses)?;
+                Some(VecStep::If {
+                    op,
+                    lhs,
+                    rhs,
+                    then: Box::new(then),
+                    els: Box::new(els),
+                })
+            }
+            _ => None,
+        }
+    }
+
+    /// Match a loop-carried vector local to its base index.
+    fn match_vec_base(s: usize, kinds: &[LoopVarKind], outer_len: usize) -> Option<usize> {
+        if s < outer_len {
+            return None;
+        }
+        let idx = s - outer_len;
+        if kinds.get(idx) != Some(&LoopVarKind::Vec) {
+            return None;
+        }
+        Some(idx)
+    }
+
+    /// Match a flat multi-pair `assoc` onto a loop-carried vector
+    /// (even trailing args stay on the slow path, which arity
+    /// checks exactly).
+    fn match_vec_assoc(
+        call: &DirectCall,
+        ids: &IntLoopIds,
+        kinds: &[LoopVarKind],
+        outer_len: usize,
+        env: &Env,
+        uses: &mut Vec<PlanUse>,
+    ) -> Option<VecStep> {
+        // `assoc` rides `DirectNative` with `fast == None` (it
+        // observes roots): var identity plus the analyzed root's
+        // installed display (verified at the plan, see
+        // `try_int_loop`).
+        if call.fast != FastArith::None
+            || !Self::direct_expect_is(call, ids.assoc, "clojure.core/assoc")
+        {
+            return None;
+        }
+        if call.args.len() < 3 || call.args.len() % 2 == 0 {
+            return None;
+        }
+        let Expr::Local(s) = &call.args[0] else {
+            return None;
+        };
+        let base = Self::match_vec_base(*s, kinds, outer_len)?;
+        let mut pairs = Vec::with_capacity(call.args.len() / 2);
+        for pair in call.args[1..].chunks_exact(2) {
+            let index = Self::match_vec_val(&pair[0], ids, kinds, outer_len, env, uses)?;
+            let val = Self::match_vec_val(&pair[1], ids, kinds, outer_len, env, uses)?;
+            pairs.push((index, val));
+        }
+        uses.push(PlanUse::of(call));
+        Some(VecStep::Assoc {
+            base,
+            pairs,
+            shared_base: false,
+        })
+    }
+
+    /// Match one threaded-vector operand: a per-round integer
+    /// expression or an `nth` read against a loop-carried vector.
+    fn match_vec_val(
+        expr: &Expr,
+        ids: &IntLoopIds,
+        kinds: &[LoopVarKind],
+        outer_len: usize,
+        env: &Env,
+        uses: &mut Vec<PlanUse>,
+    ) -> Option<VecVal> {
+        if let Some(e) = Self::match_int_expr(expr, kinds, outer_len, env, uses) {
+            return Some(VecVal::Int(e));
+        }
+        let Expr::DirectNative(call) = expr else {
+            return None;
+        };
+        // `nth` rides `DirectNative` with `fast == None` (it
+        // observes roots): var identity plus the analyzed root's
+        // installed display (verified at the plan, see
+        // `try_int_loop`).
+        if call.fast != FastArith::None
+            || !Self::direct_expect_is(call, ids.nth, "clojure.core/nth")
+        {
+            return None;
+        }
+        // Two-arg `nth` only (the not-found arity stays slow).
+        let [coll, index] = call.args.as_slice() else {
+            return None;
+        };
+        let Expr::Local(s) = coll else {
+            return None;
+        };
+        let idx = Self::match_vec_base(*s, kinds, outer_len)?;
+        let index = Self::match_int_expr(index, kinds, outer_len, env, uses)?;
+        uses.push(PlanUse::of(call));
+        Some(VecVal::Nth {
+            base: idx,
+            idx: index,
+        })
+    }
+
+    /// Match an `if` condition over threaded vectors: a binary
+    /// integer comparison (indirect or linked) between threaded
+    /// operands.
+    fn match_vec_cond(
+        test: &Expr,
+        ids: &IntLoopIds,
+        kinds: &[LoopVarKind],
+        outer_len: usize,
+        env: &Env,
+        uses: &mut Vec<PlanUse>,
+    ) -> Option<(IntCmp, VecVal, VecVal)> {
+        let Expr::DirectNative(call) = test else {
+            return None;
+        };
+        let op = match call.fast {
+            FastArith::Lt => IntCmp::Lt,
+            FastArith::Lte => IntCmp::Le,
+            FastArith::Gt => IntCmp::Gt,
+            FastArith::Gte => IntCmp::Ge,
+            FastArith::None if Self::direct_expect_is(call, ids.eq, "clojure.core/=") => IntCmp::Eq,
+            _ => return None,
+        };
+        let [lhs, rhs] = call.args.as_slice() else {
+            return None;
+        };
+        let lhs = Self::match_vec_val(lhs, ids, kinds, outer_len, env, uses)?;
+        let rhs = Self::match_vec_val(rhs, ids, kinds, outer_len, env, uses)?;
+        uses.push(PlanUse::of(call));
+        Some((op, lhs, rhs))
+    }
+
+    /// The single base a vector step threads (see
+    /// [`Evaluator::match_vec_step`]).
+    fn vec_step_base(step: &VecStep) -> usize {
+        match step {
+            VecStep::Pass { base, .. } | VecStep::Assoc { base, .. } => *base,
+            VecStep::If { then, .. } => Self::vec_step_base(then),
+        }
+    }
+
+    /// Whether every read and write in a vector step hits `base`.
+    fn vec_step_single_base(step: &VecStep, base: usize) -> bool {
+        match step {
+            VecStep::Pass { base: b, .. } | VecStep::Assoc { base: b, .. } => {
+                if *b != base {
+                    return false;
+                }
+                if let VecStep::Assoc { pairs, .. } = step {
+                    for (index, val) in pairs {
+                        if !Self::vec_val_single_base(index, base)
+                            || !Self::vec_val_single_base(val, base)
+                        {
+                            return false;
+                        }
+                    }
+                }
+                true
+            }
+            VecStep::If {
+                lhs,
+                rhs,
+                then,
+                els,
+                ..
+            } => {
+                Self::vec_val_single_base(lhs, base)
+                    && Self::vec_val_single_base(rhs, base)
+                    && Self::vec_step_single_base(then, base)
+                    && Self::vec_step_single_base(els, base)
+            }
+        }
+    }
+
+    /// Whether an operand reads no vector base but `base`.
+    fn vec_val_single_base(val: &VecVal, base: usize) -> bool {
+        match val {
+            VecVal::Int(_) => true,
+            VecVal::Nth { base: b, .. } => *b == base,
+        }
+    }
+
+    /// Install the shared-base flag through a vector step (see
+    /// `match_loop_branch`).
+    fn set_vec_shared(step: &mut VecStep, shared: bool) {
+        match step {
+            VecStep::Pass { shared_base, .. } | VecStep::Assoc { shared_base, .. } => {
+                *shared_base = shared;
+            }
+            VecStep::If { then, els, .. } => {
+                Self::set_vec_shared(then, shared);
+                Self::set_vec_shared(els, shared);
+            }
+        }
+    }
+
+    /// Evaluate one threaded map step: unique bases move (the round
+    /// owns them), shared bases clone (every step sees the pre-round
+    /// map); `None` is an overflowing key or value (bail to the
+    /// interpreter, which throws `long overflow` like the JVM).
+    fn eval_map_step(step: &MapStep, ints: &[i64], maps: &mut [Option<Map>]) -> Option<Map> {
+        let mut base = if step.shared_base {
+            maps.get(step.base)?.as_ref()?.clone()
+        } else {
+            maps.get_mut(step.base)?.take()?
+        };
+        for (k, v) in &step.assocs {
+            let key = Self::eval_map_keyval(k, ints)?;
+            let val = Self::eval_map_keyval(v, ints)?;
+            base = base.insert_threaded(key, val);
+        }
+        Some(base)
+    }
+
+    /// Evaluate one threaded-`assoc` key or value.
+    fn eval_map_keyval(kv: &MapKeyVal, ints: &[i64]) -> Option<Value> {
+        match kv {
+            MapKeyVal::Const(v) => Some(v.clone()),
+            MapKeyVal::Int(e) => Self::eval_int_expr(ints, e).map(Value::Int),
+        }
+    }
+
+    /// Evaluate one threaded vector step: unique bases move (the
+    /// round owns them), shared bases clone (every step sees the
+    /// pre-round vector); `None` bails to the interpreter (an
+    /// overflowing index/value throws `long overflow` there, an out
+    /// of bounds one throws exactly — the partial round is
+    /// discarded and the slow path recomputes from entry).
+    fn eval_vec_step(step: &VecStep, ints: &[i64], vecs: &mut [Option<Vector>]) -> Option<Vector> {
+        let base = Self::vec_step_base(step);
+        let shared = Self::vec_step_shared(step);
+        let v = if shared {
+            vecs.get(base)?.as_ref()?.clone()
+        } else {
+            vecs.get_mut(base)?.take()?
+        };
+        Self::eval_vec_step_owned(step, ints, v)
+    }
+
+    /// The shared-base flag of a vector step's head (see
+    /// `match_loop_branch` — every nested flag carries the same
+    /// value).
+    fn vec_step_shared(step: &VecStep) -> bool {
+        match step {
+            VecStep::Pass { shared_base, .. } | VecStep::Assoc { shared_base, .. } => *shared_base,
+            VecStep::If { then, .. } => Self::vec_step_shared(then),
+        }
+    }
+
+    /// Evaluate a vector step against its owned (moved or cloned)
+    /// base: conditions and operands read the pre-step vector, like
+    /// the interpreter (which evaluates every argument before
+    /// applying any pair).
+    fn eval_vec_step_owned(step: &VecStep, ints: &[i64], v: Vector) -> Option<Vector> {
+        match step {
+            VecStep::Pass { .. } => Some(v),
+            VecStep::Assoc { pairs, .. } => Self::eval_vec_assoc_owned(pairs, ints, v),
+            VecStep::If {
+                op,
+                lhs,
+                rhs,
+                then,
+                els,
+            } => {
+                let l = Self::eval_vec_val(lhs, ints, &v)?;
+                let r = Self::eval_vec_val(rhs, ints, &v)?;
+                let branch = if Self::apply_int_cmp(*op, l, r) {
+                    then
+                } else {
+                    els
+                };
+                Self::eval_vec_step_owned(branch, ints, v)
+            }
+        }
+    }
+
+    /// Apply one multi-pair `assoc` against its owned base: all
+    /// indexes and values first (in arg order — the first failure
+    /// bails, like the interpreter), then the pairs apply left to
+    /// right.
+    fn eval_vec_assoc_owned(
+        pairs: &[(VecVal, VecVal)],
+        ints: &[i64],
+        mut v: Vector,
+    ) -> Option<Vector> {
+        let mut done: SmallVec<[(i64, i64); 4]> = SmallVec::new();
+        for (index, val) in pairs {
+            let index = Self::eval_vec_val(index, ints, &v)?;
+            let val = Self::eval_vec_val(val, ints, &v)?;
+            done.push((index, val));
+        }
+        for (index, val) in done {
+            let at = usize::try_from(index).ok()?;
+            if !v.assoc_int_threaded(at, val) {
+                return None;
+            }
+        }
+        Some(v)
+    }
+
+    /// Apply one integer comparison.
+    fn apply_int_cmp(op: IntCmp, l: i64, r: i64) -> bool {
+        match op {
+            IntCmp::Lt => l < r,
+            IntCmp::Le => l <= r,
+            IntCmp::Gt => l > r,
+            IntCmp::Ge => l >= r,
+            IntCmp::Eq => l == r,
+        }
+    }
+
+    /// Evaluate one threaded-vector operand against the pre-step
+    /// vector.
+    fn eval_vec_val(val: &VecVal, ints: &[i64], v: &Vector) -> Option<i64> {
+        match val {
+            VecVal::Int(e) => Self::eval_int_expr(ints, e),
+            VecVal::Nth { idx, .. } => {
+                let at = usize::try_from(Self::eval_int_expr(ints, idx)?).ok()?;
+                v.nth_int(at)
+            }
+        }
+    }
+
+    /// Evaluate one integer expression: leaves and leaf-built
+    /// steps compute directly (no stack, no call — the counted-loop
+    /// shapes stay in registers); anything nested runs the general
+    /// machine. `None` is overflow (bail to the interpreter, which
+    /// throws `long overflow` like the JVM).
+    fn eval_int_expr(state: &[i64], expr: &IntExpr) -> Option<i64> {
+        let ops = &expr.ops;
+        if ops.len() == 1 {
+            if let IntOp::Var(v) = ops[0] {
+                return state.get(v).copied();
+            }
+            if let IntOp::Const(c) = ops[0] {
+                return Some(c);
+            }
+        }
+        Self::eval_int_compound(state, ops)
+    }
+
+    /// Evaluate a multi-op expression (see
+    /// [`Evaluator::eval_int_expr`]).
+    fn eval_int_compound(state: &[i64], ops: &[IntOp]) -> Option<i64> {
+        // `inc`/`dec` over a leaf (the counted-loop step).
+        if ops.len() == 2 {
+            if let IntOp::Inc = ops[1] {
+                if let Some(x) = Self::int_leaf(state, &ops[0]) {
+                    return x.checked_add(1);
+                }
+            }
+            if let IntOp::Dec = ops[1] {
+                if let Some(x) = Self::int_leaf(state, &ops[0]) {
+                    return x.checked_sub(1);
+                }
+            }
+        }
+        if let Some(folded) = Self::try_fold_leaves(state, ops) {
+            return Some(folded);
+        }
+        Self::eval_int_general(state, ops)
+    }
+
+    /// Read one leaf operand (`None` is a non-leaf — the caller
+    /// falls back to the general machine).
+    fn int_leaf(state: &[i64], op: &IntOp) -> Option<i64> {
+        if let IntOp::Var(v) = op {
+            return state.get(*v).copied();
+        }
+        if let IntOp::Const(c) = op {
+            return Some(*c);
+        }
+        None
+    }
+
+    /// Fold a counted op over all-leaf operands (`None` declines to
+    /// the general machine — any non-leaf operand).
+    fn try_fold_leaves(state: &[i64], ops: &[IntOp]) -> Option<i64> {
+        let (op, operands) = ops.split_last()?;
+        match op {
+            IntOp::Add(n) if operands.len() == *n => {
+                let mut acc = 0i64;
+                for op in operands {
+                    acc = acc.checked_add(Self::int_leaf(state, op)?)?;
+                }
+                Some(acc)
+            }
+            IntOp::Sub(n) if operands.len() == *n && *n >= 1 => {
+                let mut rest = operands.iter();
+                let first = Self::int_leaf(state, rest.next()?)?;
+                if rest.len() == 0 {
+                    return first.checked_neg();
+                }
+                let mut acc = first;
+                for op in rest {
+                    acc = acc.checked_sub(Self::int_leaf(state, op)?)?;
+                }
+                Some(acc)
+            }
+            IntOp::Mul(n) if operands.len() == *n => {
+                let mut acc = 1i64;
+                for op in operands {
+                    acc = acc.checked_mul(Self::int_leaf(state, op)?)?;
+                }
+                Some(acc)
+            }
+            _ => None,
+        }
+    }
+
+    /// Evaluate a nested expression iteratively over a scratch
+    /// stack (no recursion — deeply nested source can't overflow
+    /// the native stack): `None` bails to the interpreter.
+    fn eval_int_general(state: &[i64], ops: &[IntOp]) -> Option<i64> {
+        // Stack-inline scratch (spills past depth 8): nested
+        // expressions are cold, so one scratch per eval is fine.
+        let mut stack: SmallVec<[i64; 8]> = SmallVec::new();
+        for op in ops {
+            match op {
+                IntOp::Var(v) => stack.push(*state.get(*v)?),
+                IntOp::Const(c) => stack.push(*c),
+                IntOp::Inc => {
+                    let x = stack.pop()?;
+                    stack.push(x.checked_add(1)?);
+                }
+                IntOp::Dec => {
+                    let x = stack.pop()?;
+                    stack.push(x.checked_sub(1)?);
+                }
+                IntOp::Add(n) => Self::eval_int_add(&mut stack, *n)?,
+                IntOp::Sub(n) => Self::eval_int_sub(&mut stack, *n)?,
+                IntOp::Mul(n) => Self::eval_int_mul(&mut stack, *n)?,
+            }
+        }
+        stack.pop()
+    }
+
+    /// Fold the top `n` stack slots with `+` (`(+)` is `0`, like the
+    /// JVM).
+    fn eval_int_add(stack: &mut SmallVec<[i64; 8]>, n: usize) -> Option<()> {
+        let base = stack.len().checked_sub(n)?;
+        let mut acc = 0i64;
+        for x in &stack[base..] {
+            acc = acc.checked_add(*x)?;
+        }
+        stack.truncate(base);
+        stack.push(acc);
+        Some(())
+    }
+
+    /// Fold the top `n` stack slots with `-` (unary negates, like the
+    /// JVM).
+    fn eval_int_sub(stack: &mut SmallVec<[i64; 8]>, n: usize) -> Option<()> {
+        let base = stack.len().checked_sub(n)?;
+        let mut rest = stack[base..].iter();
+        let first = *rest.next()?;
+        let acc = if rest.len() == 0 {
+            first.checked_neg()?
+        } else {
+            let mut acc = first;
+            for x in rest {
+                acc = acc.checked_sub(*x)?;
+            }
+            acc
+        };
+        stack.truncate(base);
+        stack.push(acc);
+        Some(())
+    }
+
+    /// Fold the top `n` stack slots with `*` (`(*)` is `1`, like the
+    /// JVM).
+    fn eval_int_mul(stack: &mut SmallVec<[i64; 8]>, n: usize) -> Option<()> {
+        let base = stack.len().checked_sub(n)?;
+        let mut acc = 1i64;
+        for x in &stack[base..] {
+            acc = acc.checked_mul(*x)?;
+        }
+        stack.truncate(base);
+        stack.push(acc);
+        Some(())
+    }
+
+    /// Evaluate the chained test (`None` is an overflowing operand —
+    /// comparisons themselves cannot overflow).
+    fn eval_int_test(state: &[i64], test: &IntTest) -> Option<bool> {
+        let mut prev = Self::eval_int_expr(state, &test.args[0])?;
+        for arg in &test.args[1..] {
+            let next = Self::eval_int_expr(state, arg)?;
+            if !Self::apply_int_cmp(test.op, prev, next) {
+                return Some(false);
+            }
+            prev = next;
+        }
+        Some(true)
+    }
     /// `(loop …)`: bind once, then run the body, rebinding through
     /// the patterns on every `recur`.
     fn eval_loop(
@@ -1735,6 +3521,17 @@ impl Evaluator {
         // closures from this iteration keep observing the old
         // frame).
         let pats: SmallVec<[&Pattern; 8]> = bindings.iter().map(|(pat, _)| pat).collect();
+        // Counted integer loops run without interpreter dispatch
+        // (see [`Evaluator::try_int_loop`]): `Slow` reruns from the
+        // entry `env`, `Resume` binds the carried values first (an
+        // exit already ran — rerunning would repeat its effects).
+        match self.try_int_loop(bindings, body, &mut env, &outer) {
+            LoopAccel::Done(result) => return result,
+            LoopAccel::Slow => {}
+            LoopAccel::Resume(vals) => {
+                env = self.bind_values(&pats, vals, &outer)?;
+            }
+        }
         loop {
             match self.eval_body(body, &env) {
                 Ok(v) => return Ok(v),
@@ -1897,6 +3694,18 @@ impl Evaluator {
     /// memoized seq chunks free as they advance, like the JVM's
     /// dead locals); everything else borrows it (the buffer drops
     /// at return, as before).
+    /// The closure a local-head call applies directly (`None`
+    /// takes generic dispatch). Closure calls never observe the
+    /// span (every span reader sits behind its own native call);
+    /// the depth guard and conveyed bindings still apply, so the
+    /// caller funnels through `apply_closure`.
+    fn local_closure<'v>(head: &Expr, callee: &'v Value) -> Option<&'v Closure> {
+        if !matches!(head, Expr::Local(_)) {
+            return None;
+        }
+        as_closure(callee)
+    }
+
     fn invoke_args(
         &mut self,
         callee: &Value,
@@ -2444,6 +4253,69 @@ impl Evaluator {
 
     /// Bind one arity's parameters (sequentially, like `let`) and
     /// run the body, looping on `recur`.
+    /// Apply one fixed arity with a caller-reused frame (the
+    /// peeled-map/filter hot path): the first apply binds fresh,
+    /// later applies rebind in place when unobserved, else bind
+    /// fresh — the [`apply_arity`](Self::apply_arity)
+    /// copy-on-capture promise across applies as well as recurs.
+    /// Caller guarantees `arity` is `closure`'s only arity, fixed,
+    /// matching `args`, with no conveyed bindings; the depth guard
+    /// and stack growth match [`apply_closure`](Self::apply_closure)
+    /// apply-for-apply.
+    pub(crate) fn apply_reused(
+        &mut self,
+        closure: &Closure,
+        arity: &crate::expr::Arity,
+        frame: &mut Option<Env>,
+        args: &[Value],
+    ) -> Result<Value, Signal> {
+        if self.call_depth >= MAX_CALL_DEPTH {
+            return Err(self.throw(NativeError::new(
+                ThrowClass::StackOverflowError,
+                String::new(),
+            )));
+        }
+        self.call_depth += 1;
+        let result = stacker::maybe_grow(STACK_RED_ZONE, STACK_SEGMENT, || {
+            self.apply_reused_inner(closure, arity, frame, args)
+        });
+        self.call_depth -= 1;
+        result
+    }
+
+    /// Bind (or rebind) the reused frame and run the body, looping
+    /// on `recur` to the fn (see [`apply_reused`](Self::apply_reused)).
+    fn apply_reused_inner(
+        &mut self,
+        closure: &Closure,
+        arity: &crate::expr::Arity,
+        frame: &mut Option<Env>,
+        args: &[Value],
+    ) -> Result<Value, Signal> {
+        let outer = closure.env.clone();
+        let pats: SmallVec<[&Pattern; 8]> = arity.fixed.iter().collect();
+        let fr = match frame.as_mut() {
+            Some(fr) => {
+                if let Err(values) = fr.try_rebind(&outer, args.to_vec()) {
+                    *fr = self.bind_values(&pats, values, &outer)?;
+                }
+                fr
+            }
+            None => frame.insert(self.bind_values(&pats, args.to_vec(), &outer)?),
+        };
+        loop {
+            match self.eval_body(&arity.body, fr) {
+                Ok(v) => return Ok(v),
+                Err(Signal::Recur(values)) => {
+                    if let Err(values) = fr.try_rebind(&outer, values) {
+                        *fr = self.bind_values(&pats, values, &outer)?;
+                    }
+                }
+                Err(signal) => return Err(signal),
+            }
+        }
+    }
+
     /// Bind precomputed values against patterns (call params, `recur`
     /// rebinds — no inits evaluate here, so no observer can see an
     /// intermediate frame): all-symbol patterns extend once, with a
@@ -3651,5 +5523,112 @@ mod tests {
         assert_eq!(Evaluator::fast_int2(FastArith::None, 1, 2), None);
         assert_eq!(Evaluator::fast_int2(Inc, 1, 2), None);
         assert_eq!(Evaluator::fast_int2(Dec, 1, 2), None);
+    }
+
+    #[test]
+    fn int_rounds_bail_on_mixed_branch() {
+        // Defense in depth: an integer-only plan never matches a
+        // mixed `Recur` branch (see `match_loop_branch`), so the
+        // bail arm is pinned directly with a hand-built plan.
+        let mut eval = Evaluator::new("test");
+        let exit = Expr::Literal(Value::Nil);
+        let plan = IntLoopPlan {
+            test: IntTest {
+                op: IntCmp::Gt,
+                args: vec![
+                    IntExpr::single(IntOp::Const(1)),
+                    IntExpr::single(IntOp::Const(0)),
+                ],
+            },
+            then_act: IntBranch::Recur(vec![]),
+            else_act: IntBranch::Exit(&exit),
+            kinds: vec![LoopVarKind::Int],
+            guard_epoch: eval.registry.epoch(),
+        };
+        let outcome = eval.run_int_rounds(&plan, &Env::new(), vec![0]);
+        assert!(matches!(outcome, RoundOutcome::Bail));
+    }
+
+    #[test]
+    fn loop_rounds_bail_on_int_branch() {
+        // Defense in depth: a mixed plan never matches an
+        // integer-only `RecurInt` branch (see
+        // `match_loop_branch`), so the bail arm is pinned
+        // directly with a hand-built plan.
+        let mut eval = Evaluator::new("test");
+        let exit = Expr::Literal(Value::Nil);
+        let plan = IntLoopPlan {
+            test: IntTest {
+                op: IntCmp::Gt,
+                args: vec![
+                    IntExpr::single(IntOp::Const(1)),
+                    IntExpr::single(IntOp::Const(0)),
+                ],
+            },
+            then_act: IntBranch::RecurInt(vec![]),
+            else_act: IntBranch::Exit(&exit),
+            kinds: vec![LoopVarKind::Map],
+            guard_epoch: eval.registry.epoch(),
+        };
+        let outcome = eval.run_loop_rounds(&plan, &Env::new(), vec![0], vec![None], vec![None]);
+        assert!(matches!(outcome, RoundOutcome::Bail));
+    }
+
+    #[test]
+    fn loop_take_rejects_drained_buffers() {
+        // Defense in depth: round-start buffers are always full in
+        // real flow (entry fills, recur swaps, exit-continue
+        // reseeds), so the take-failure arm is pinned directly with
+        // a hand-built plan over drained buffers.
+        let mut eval = Evaluator::new("test");
+        let exit = Expr::Literal(Value::Nil);
+        let plan = IntLoopPlan {
+            test: IntTest {
+                op: IntCmp::Gt,
+                args: vec![
+                    IntExpr::single(IntOp::Const(1)),
+                    IntExpr::single(IntOp::Const(0)),
+                ],
+            },
+            then_act: IntBranch::Exit(&exit),
+            else_act: IntBranch::Exit(&exit),
+            kinds: vec![LoopVarKind::Map],
+            guard_epoch: eval.registry.epoch(),
+        };
+        let outcome = eval.run_loop_rounds(&plan, &Env::new(), vec![0], vec![None], vec![None]);
+        assert!(matches!(outcome, RoundOutcome::Bail));
+    }
+
+    #[test]
+    fn loop_reseed_rejects_mismatched_shapes() {
+        // Defense in depth: the analyzer arity-checks every
+        // `recur` (see `analyze_recur`), so reseeds always match
+        // — the mismatch arms are pinned directly.
+        let mut ints = vec![0i64];
+        assert!(Evaluator::reseed_ints(vec![Value::Int(1), Value::Int(2)], 1, &mut ints).is_err());
+        let kinds = vec![LoopVarKind::Int];
+        let mut maps: Vec<Option<Map>> = vec![];
+        let mut vecs: Vec<Option<Vector>> = vec![];
+        assert!(
+            Evaluator::reseed_from_vals(
+                &kinds,
+                vec![Value::Int(1), Value::Int(2)],
+                &mut ints,
+                &mut maps,
+                &mut vecs
+            )
+            .is_err()
+        );
+        let ids = IntLoopIds {
+            assoc: 11,
+            nth: 12,
+            eq: 5,
+        };
+        let branch = Expr::Recur(vec![Expr::Literal(Value::Int(1))]);
+        let kinds = vec![LoopVarKind::Int, LoopVarKind::Int];
+        assert!(
+            Evaluator::match_loop_branch(&branch, &ids, &kinds, 0, &Env::new(), &mut Vec::new())
+                .is_none()
+        );
     }
 }

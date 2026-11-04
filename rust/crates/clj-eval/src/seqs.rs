@@ -21,7 +21,8 @@ use smallvec::SmallVec;
 use crate::core::{as_reduced, cce_err, check_ifn, jvm_compare, repeat_count, take_count};
 use crate::error::{NativeError, jvm_class_of};
 use crate::eval::Evaluator;
-use crate::ext::{FastArith, NativeFn, NativeImpl, as_native};
+use crate::expr::Arity;
+use crate::ext::{Closure, FastArith, NativeFn, NativeImpl, as_closure, as_native};
 use crate::lazy::{
     PeelOp, as_range, as_subvector, collect_all, collect_packed, concat_thunk, cycle_thunk,
     dedupe_thunk, distinct_thunk, drop_value, drop_while_thunk, empty_list_value, filter_thunk,
@@ -262,6 +263,22 @@ fn apply_peeled_op(
     }
 }
 
+/// A peeled-map/filter fn eligible for the reused-frame apply:
+/// a closure with exactly one fixed arity of one (no rest, no
+/// conveyed bindings — anything else applies generically, with
+/// identical dispatch and errors).
+fn peeled_closure(f: &Value) -> Option<(&Closure, &Arity)> {
+    let closure = as_closure(f)?;
+    if closure.conveyed.is_some() || closure.arities.len() != 1 {
+        return None;
+    }
+    let arity = &closure.arities[0];
+    if arity.rest.is_some() || arity.fixed.len() != 1 {
+        return None;
+    }
+    Some((closure, arity))
+}
+
 /// Map one chunk in place.
 fn apply_peeled_map(
     eval: &mut Evaluator,
@@ -269,6 +286,15 @@ fn apply_peeled_map(
     buf: &mut SmallVec<[Value; 32]>,
 ) -> Result<(), crate::error::Signal> {
     check_ifn(eval, f)?;
+    if let Some((closure, arity)) = peeled_closure(f) {
+        // One arity, one frame for the chunk (see
+        // [`Evaluator::apply_reused`]).
+        let mut frame: Option<crate::env::Env> = None;
+        for v in buf.iter_mut() {
+            *v = eval.apply_reused(closure, arity, &mut frame, std::slice::from_ref(v))?;
+        }
+        return Ok(());
+    }
     for v in buf.iter_mut() {
         *v = eval.call(f, std::slice::from_ref(v))?;
     }
@@ -283,6 +309,25 @@ fn apply_peeled_filter(
     buf: &mut SmallVec<[Value; 32]>,
 ) -> Result<bool, crate::error::Signal> {
     check_ifn(eval, f)?;
+    if let Some((closure, arity)) = peeled_closure(f) {
+        // One arity, one frame for the chunk (see
+        // [`Evaluator::apply_reused`]).
+        let mut frame: Option<crate::env::Env> = None;
+        let mut write = 0;
+        for i in 0..buf.len() {
+            let item = std::mem::replace(&mut buf[i], Value::Nil);
+            if eval
+                .apply_reused(closure, arity, &mut frame, std::slice::from_ref(&item))?
+                .is_truthy()
+                != invert
+            {
+                buf[write] = item;
+                write += 1;
+            }
+        }
+        buf.truncate(write);
+        return Ok(buf.is_empty());
+    }
     let mut write = 0;
     for i in 0..buf.len() {
         let item = std::mem::replace(&mut buf[i], Value::Nil);

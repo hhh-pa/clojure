@@ -287,3 +287,86 @@ fn plus_range_edge_pins() {
         "java.lang.ArithmeticException | Non-terminating decimal expansion; no exact representable decimal result."
     );
 }
+
+#[test]
+fn peel_reused_frame_pins() {
+    let mut eval = boot();
+    // Captures observe their own apply (the shared frame falls back
+    // to a fresh bind per apply).
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [fs (doall (map (fn [x] (fn [] x)) (range 3)))] (mapv (fn [f] (f)) fs))"
+        ),
+        "[0 1 2]"
+    );
+    // `recur` to the mapped fn loops like `apply_arity`.
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(doall (map (fn [x] (if (> x 0) (recur (dec x)) :done)) (range 3)))"
+        ),
+        "(:done :done :done)"
+    );
+    // Capture plus `recur` (the shared frame rebinds fresh, and
+    // each capture keeps its own round).
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [a (atom [])] (doall (map (fn [x] (do (swap! a conj (fn [] x)) (if (> x 0) (recur (dec x)) :done))) (range 2))) [(count @a) (mapv (fn [f] (f)) @a)])"
+        ),
+        "[3 [0 1 0]]"
+    );
+    // A throwing map fn propagates (like the generic apply).
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(try (doall (map (fn [x] (if (= x 1) (throw (ex-info \"b\" {})) x)) (range 3))) (catch Exception e :caught))"
+        ),
+        ":caught"
+    );
+    // The specialized filter arm (closure predicate).
+    assert_eq!(
+        run_last(&mut eval, "(doall (filter #(> % 1) (range 4)))"),
+        "(2 3)"
+    );
+    // Ineligible fns apply generically (identical values).
+    assert_eq!(
+        run_last(&mut eval, "(doall (map (fn ([x] x) ([x y] y)) (range 3)))"),
+        "(0 1 2)"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(doall (map (bound-fn [x] (* x 2)) (range 3)))"),
+        "(0 2 4)"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(doall (map (fn [& xs] (count xs)) (range 3)))"),
+        "(1 1 1)"
+    );
+}
+
+fn on_worker<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+    std::thread::Builder::new()
+        .stack_size(256 * 1024 * 1024)
+        .spawn(f)
+        .expect("spawn worker")
+        .join()
+        .expect("worker panicked")
+}
+
+#[test]
+fn peel_reused_depth_parity() {
+    // Nested peeled maps trip the same `StackOverflowError` as the
+    // generic path (the guard matches `apply_closure`
+    // apply-for-apply).
+    on_worker(|| {
+        let mut eval = boot();
+        assert_eq!(
+            run_last(
+                &mut eval,
+                "(try (doall (map (fn f [n] (if (zero? n) 0 (first (doall (map f (range (dec n) n)))))) [100000])) (catch StackOverflowError e :so))"
+            ),
+            ":so"
+        );
+    });
+}
