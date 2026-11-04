@@ -1909,4 +1909,18 @@ mod tests {
         b.pop_frame();
         assert!(b.is_empty());
     }
+
+    #[test]
+    fn rebind_declines_patchable_frames() {
+        // `Patchable` (`letfn` setup) frames never rebind in place
+        // (`recur` binds fresh since #171): the decline leaves the
+        // values untouched for the caller's fresh bind. No
+        // Clojure-level `recur` targets a setup frame, so this pins
+        // the contract directly.
+        let outer = Env::new();
+        let mut frame = outer.extend_patchable(2);
+        let mut values = vec![Value::Int(1), Value::Int(2)];
+        assert!(!frame.try_rebind(&outer, &mut values));
+        assert_eq!(values, vec![Value::Int(1), Value::Int(2)]);
+    }
 }
