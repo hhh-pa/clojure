@@ -200,9 +200,18 @@ fn fast_local_arith_overflow_fallback() {
         uncaught(&mut eval, "(let [x 9223372036854775807 y 1] (+ x y))"),
         "java.lang.ArithmeticException | long overflow"
     );
+    assert_eq!(
+        uncaught(&mut eval, "(let [x -9223372036854775808 y 1] (- x y))"),
+        "java.lang.ArithmeticException | long overflow"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(let [x 9223372036854775807 y 2] (* x y))"),
+        "java.lang.ArithmeticException | long overflow"
+    );
 }
 
-/// Non-integer local operands fall through correctly to the native road.
+/// Non-integer and mixed local operands fall through correctly to
+/// the native road (both `(Int, Double)` and `(Double, Int)` orders).
 #[test]
 fn fast_local_arith_non_integer_fallback() {
     let mut eval = boot();
@@ -212,6 +221,10 @@ fn fast_local_arith_non_integer_fallback() {
             "(let [x 10.5 y 2.0] [(+ x y) (- x y) (* x y) (< x y)])"
         ),
         "[12.5 8.5 21.0 false]"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(let [x 10] [(+ x 1.5) (+ 1.5 x) (< x 10.5)])"),
+        "[11.5 11.5 true]"
     );
 }
 

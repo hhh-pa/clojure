@@ -2015,10 +2015,10 @@ impl Evaluator {
             return self.call_direct_general(call, env);
         };
         if let Some(x) = self.eval_as_i64(arg, env) {
-            let res = if call.fast == FastArith::Inc {
-                x.checked_add(1)
-            } else {
-                x.checked_sub(1)
+            let res = match call.fast {
+                FastArith::Inc => x.checked_add(1),
+                FastArith::Dec => x.checked_sub(1),
+                _ => None,
             };
             if let Some(y) = res {
                 return Ok(Value::Int(y));
