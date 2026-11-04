@@ -242,3 +242,31 @@ fn equality_spans_representations() {
     assert!(!hashed.is_shaped());
     assert_eq!(Value::Map(shaped), Value::Map(hashed));
 }
+
+/// Mass shape churn stays correct under the adaptive cleanup
+/// cadence (#235): resident shapes defer cleanup until the scan
+/// amortizes, then dropped shapes clean out — maps read back
+/// exactly throughout.
+#[test]
+fn adaptive_cleanup_survives_churn() {
+    // 200 live single-key maps (distinct resident shapes).
+    let mut live = Vec::new();
+    for i in 0..200_i64 {
+        live.push(new_map().insert(Value::Int(i), Value::Int(i)));
+    }
+    // Fresh-key churn past both cadence arms (defer, then clean).
+    for i in 200..600_i64 {
+        let m = new_map().insert(Value::Int(i), Value::Int(i));
+        assert_eq!(m.get(&Value::Int(i)), Some(&Value::Int(i)));
+    }
+    // Live maps still read back exactly.
+    for (i, m) in live.iter().enumerate() {
+        assert_eq!(m.get(&Value::Int(i as i64)), Some(&Value::Int(i as i64)));
+    }
+    // Drop the residents; churn again so dead entries clean out.
+    drop(live);
+    for i in 1000..1400_i64 {
+        let m = new_map().insert(Value::Int(i), Value::Int(i));
+        assert_eq!(m.get(&Value::Int(i)), Some(&Value::Int(i)));
+    }
+}

@@ -408,6 +408,33 @@ fn loop_recur() {
     );
 }
 
+/// Pooled `recur` buffers (#235): nested loops check out
+/// several buffers without colliding, and a captured-frame
+/// fallback followed by in-place rebinds never leaks a stale
+/// buffer (the escapee keeps iteration 0's frame).
+#[test]
+fn recur_pool_nested_and_fallback() {
+    let (mut eval, _) = rigged();
+    // Nested loops (inner and outer recurs interleave pool
+    // checkouts): 3 * (0+1+2+3) = 18.
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(loop [i 0 acc 0] (if (t-zero? (t-minus 3 i)) acc (recur (t-plus i 1) (t-plus acc (loop [j 0 b 0] (if (t-zero? (t-minus 4 j)) b (recur (t-plus j 1) (t-plus b j))))))))"
+        ),
+        "18"
+    );
+    // Fallback once (captured frame drops its buffer), then
+    // in-place rebinds (pool reuse): [0 4], not [4 4] or stale.
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(loop [i 0] (if (t-zero? i) (do (def h235 (fn [] i)) (recur 1)) (if (t-zero? (t-minus 4 i)) [(h235) i] (recur (t-plus i 1)))))"
+        ),
+        "[0 4]"
+    );
+}
+
 #[test]
 fn variadics() {
     let (mut eval, _) = rigged();

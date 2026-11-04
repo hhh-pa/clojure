@@ -85,6 +85,15 @@ pub(crate) fn lookup_present(
     coll: &Value,
     key: &Value,
 ) -> Result<Option<Value>, NativeError> {
+    // Maps dispatch before the record/struct probe (disjoint
+    // types — `get` over maps is a hot loop staple, #235).
+    if let Value::Map(m) = coll {
+        if m.is_sorted() {
+            return sorted_lookup_map(eval, m, key);
+        }
+        let key = crate::lazy::realize_key(eval, key).map_err(signal_to_native)?;
+        return Ok(m.get(&key).cloned());
+    }
     // Records read their content map (oracle `rec-pos`,
     // `rec-get`); structs likewise (S12 oracle `sm-get-basis`);
     // every other host value misses (oracle `dtor-get`).
@@ -94,11 +103,6 @@ pub(crate) fn lookup_present(
     }
     match coll {
         Value::Nil => Ok(None),
-        Value::Map(m) if m.is_sorted() => sorted_lookup_map(eval, m, key),
-        Value::Map(m) => {
-            let key = crate::lazy::realize_key(eval, key).map_err(signal_to_native)?;
-            Ok(m.get(&key).cloned())
-        }
         Value::Vector(x) => Ok(lookup_vector_slot(x, key)),
         Value::MapEntry {
             key: ek, val: ev, ..
@@ -1517,7 +1521,10 @@ fn nth_walk(
 enum StrScan {
     Ascii,
     Indexed {
-        byte_at: Vec<usize>,
+        // Shared (not a `Vec`): scans clone per `nth` hit, and a
+        // deep table copy per read would dwarf the read itself
+        // (#235).
+        byte_at: Arc<[usize]>,
         utf16_len: usize,
     },
 }
@@ -1535,28 +1542,32 @@ struct StrScanEntry {
 /// wins.
 static STR_SCAN_CACHE: Mutex<Vec<StrScanEntry>> = Mutex::new(Vec::new());
 
-/// The index threshold past which the scan cache pays (at or
-/// below it a direct `chars().nth` is cheaper than the
-/// lookup).
-const STR_SCAN_DIRECT_MAX: usize = 64;
+/// Strings at or below this byte length never consult the scan
+/// cache: a direct decode is bounded (64 chars), and parse loops
+/// `nth` thousands of distinct small tokens whose cache entries
+/// would churn the global mutex for no reuse (#235).
+const STR_SCAN_SMALL_MAX: usize = 64;
 
 // The last string-scan hit, per thread: parse loops `nth` one
 // `Arc<str>` millions of times, and the memo answers repeats
-// without the global cache mutex. `Weak` keeps the global
-// cache's no-pin/no-ABA properties.
+// without the global cache mutex — and without touching
+// refcounts, since a strong key compares by `ptr_eq` alone
+// (sound: `Arc<str>` is immutable, so the same allocation is
+// the same string, and liveness pins the address against
+// ABA). One pinned string per thread at most (freed on the
+// next memoize); the global cache stays `Weak` (8 slots must
+// not pin).
 thread_local! {
-    static LAST_SCAN: std::cell::RefCell<Option<(Weak<str>, StrScan)>> =
+    static LAST_SCAN: std::cell::RefCell<Option<(Arc<str>, StrScan)>> =
         const { std::cell::RefCell::new(None) };
 }
 
 /// The memoized scan for a string, if it was the last one scanned.
 fn last_scan_hit(s: &Arc<str>) -> Option<StrScan> {
     LAST_SCAN.with(|memo| {
-        memo.borrow().as_ref().and_then(|(key, scan)| {
-            key.upgrade()
-                .filter(|a| Arc::ptr_eq(a, s))
-                .map(|_| scan.clone())
-        })
+        memo.borrow()
+            .as_ref()
+            .and_then(|(key, scan)| Arc::ptr_eq(key, s).then(|| scan.clone()))
     })
 }
 
@@ -1564,7 +1575,7 @@ fn last_scan_hit(s: &Arc<str>) -> Option<StrScan> {
 /// fresh build, so repeats skip the mutex).
 fn memoize_scan(s: &Arc<str>, scan: &StrScan) {
     LAST_SCAN.with(|memo| {
-        *memo.borrow_mut() = Some((Arc::downgrade(s), scan.clone()));
+        *memo.borrow_mut() = Some((Arc::clone(s), scan.clone()));
     });
 }
 
@@ -1623,13 +1634,23 @@ fn build_str_scan(s: &str) -> Option<StrScan> {
         byte_at.push(b);
         utf16_len += c.len_utf16();
     }
-    Some(StrScan::Indexed { byte_at, utf16_len })
+    Some(StrScan::Indexed {
+        byte_at: byte_at.into(),
+        utf16_len,
+    })
 }
 
-/// The char at `idx`, via the scan cache past small indexes
-/// (`None` reads out of bounds).
+/// The char at `idx` (`None` reads out of bounds). Small strings
+/// decode directly — ASCII short-circuits through one SIMD check
+/// to a byte load, skipping per-char decode entirely; big
+/// strings ride the memoized scan at every index (a cached
+/// `Ascii` flag answers in one byte load even for small
+/// indexes, where a direct scan would re-decode, #235).
 fn str_char_at(s: &Arc<str>, idx: usize) -> Option<char> {
-    if idx <= STR_SCAN_DIRECT_MAX {
+    if s.len() <= STR_SCAN_SMALL_MAX {
+        if s.is_ascii() {
+            return s.as_bytes().get(idx).map(|b| *b as char);
+        }
         return s.chars().nth(idx);
     }
     match str_scan(s) {
@@ -1699,20 +1720,23 @@ pub(crate) fn native_nth_owned(
     if let Value::Array(a) = coll {
         return nth_array(a, n, not_found);
     }
-    if let Value::Str(s) = coll {
-        return nth_str(s, n, not_found.as_ref());
-    }
+    // (Strings dispatch in `nth_fast`, above.)
     if matches!(coll, Value::List(_)) || is_seq_value(coll) {
         return nth_walk(eval, coll, n, not_found.as_ref());
     }
     Err(nth_unsupported(coll))
 }
 
-/// The `nth` fast paths (`nil`/negative-`not-found`/chunk/indexed;
-/// `None` falls through to array/string/seq dispatch).
+/// The `nth` fast paths (`nil`/string/negative-`not-found`/
+/// chunk/indexed; `None` falls through to array/seq dispatch).
+/// Strings dispatch before the chunk/subvector probes (disjoint
+/// types — search loops `nth` strings millions of times, #235).
 fn nth_fast(coll: &Value, n: i32, not_found: &Option<Value>) -> Option<Result<Value, NativeError>> {
     if matches!(coll, Value::Nil) {
         return Some(Ok(not_found.clone().unwrap_or(Value::Nil)));
+    }
+    if let Value::Str(s) = coll {
+        return Some(nth_str(s, n, not_found.as_ref()));
     }
     if not_found.is_some() && n < 0 {
         return Some(Ok(not_found.clone().unwrap_or(Value::Nil)));

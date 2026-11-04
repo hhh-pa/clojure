@@ -82,7 +82,11 @@ impl Keyword {
 // so a future field cannot silently join the identity).
 impl PartialEq for Keyword {
     fn eq(&self, other: &Self) -> bool {
-        self.ns == other.ns && self.name == other.name
+        // Interned arcs (see [`new`](Keyword::new)): pointer
+        // equality decides first, so map-key scans and `=` over
+        // keywords skip the string compare; the content compare
+        // covers any uninterned pair (#235).
+        self.ptr_eq(other) || (self.ns == other.ns && self.name == other.name)
     }
 }
 
