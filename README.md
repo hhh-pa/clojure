@@ -10,7 +10,7 @@ Java implementation (sources, `pom.xml`, Maven workflows) was removed
 in PR #11 once the port completed its specification; the Rust
 workspace below is the sole implementation.
 
-- Binary: `clojure-rs` (`eval`, `run`, `repl`, `build`).
+- Binary: `clojure-rs` (`eval`, `run`, `repl`, `build`, `jit`).
 - Language: a documented Clojure subset, differentially verified
   against JVM Clojure (same input, same printed output).
 - Codegen: LLVM only, via inkwell 0.10.0 (`llvm22-1`, LLVM 22.1.8).
@@ -47,13 +47,15 @@ $ clojure-rs run hello.clj          # prints hello
 $ clojure-rs repl                   # interactive, history at ~/.clojure-rs/history
 $ clojure-rs build hello.clj -o hello && ./hello
 42
+$ clojure-rs jit hello.clj          # JIT-run pure subset, no binary emitted
 ```
 
 `eval` takes `--edn` (EDN-only reader); `run` binds extra args to
 `*command-line-args*`; `repl` takes `--history-file` / `--no-history`;
 `build` takes `--emit-ir` / `--emit-obj` (skip linking) and
 `--runtime-archive` (default: next to the binary — release archives
-ship both). Exit codes: 0 success, 1 evaluation/compile error
+ship both); `jit` takes a file plus args passed to `-main` as argv.
+Exit codes: 0 success, 1 evaluation/compile error
 (`file:line:col: message`), 2 usage error, 3 I/O error.
 
 Prefer a download? Every CI run keeps per-platform
@@ -63,10 +65,11 @@ release.
 
 ## What is ported
 
-**CLI.** All four entry points: `eval` (one form), `run` (script
+**CLI.** All five entry points: `eval` (one form), `run` (script
 file), `repl` (rustyline: history, `clojure.core` completion,
 multi-line input, `*1`/`*2`/`*3`/`*e`, Ctrl-C cancels, Ctrl-D exits;
-non-tty stdin degrades to streaming eval), `build` (LLVM AOT, below).
+non-tty stdin degrades to streaming eval), `build` (LLVM AOT,
+below), `jit` (LLVM JIT over the same pure subset, below).
 
 **Reader.** Symbols, keywords (incl. auto-resolve `::`), integers,
 doubles, strings (escapes + unicode), chars, booleans, nil, lists,
@@ -100,16 +103,21 @@ contract, and `with-open` (reverse-order `finally` closes).
 strings (the port has no class literals).
 
 **Multimethods.** `defmulti` (dispatch fn, docstring/attr head,
-`:default` option only — `:hierarchy` is rejected until the
-`derive` / `isa?` follow-up), `defmethod` (single- and
-multi-arity tails), `prefer-method` (edges stored, never
-consulted), `get-method` / `methods` / `remove-method` (exact
-entry else default entry, whole-table view, missing-entry
-no-op). Dispatch is exact-value plus the default entry; misses
-fail with `No method in multimethod 'name' for dispatch value:
-<pr>`; table updates install a new var root under the var-alter
+`:default` and `:hierarchy` options — absent `:hierarchy`
+means the global hierarchy, explicit nil NPEs at the call),
+`defmethod` (single- and multi-arity tails), `prefer-method`
+(edges break `isa?` ties), `get-method` / `methods` /
+`remove-method` / `remove-all-methods` (best-match entry else
+default entry, whole-table view, missing-entry no-op).
+Dispatch consults the resolved hierarchy: exact entry, then
+the best `isa?` match with preference edges breaking ties,
+then the default entry; unrelated competing methods raise
+the JVM ambiguity error, and total misses fail with
+`No method in multimethod 'name' for dispatch value: <pr>`;
+table updates install a new var root under the var-alter
 lock, so values captured before an update keep their old table
-(the JVM mutates the one object).
+(the JVM mutates the one object). Hierarchies (`derive` /
+`isa?`, global plus per-multifn) match the JVM.
 
 **Language core.** Special forms `def if do let letfn loop recur fn
 fn* quote var throw try/catch/finally set!` (`set!` on dynamic vars
@@ -138,7 +146,10 @@ real: expansion evaluates the macro fn on unevaluated forms.
 (binding conveyance, cached failures) / `promise` / `deliver`,
 `pcalls` / `pvalues`, agents (`send` on a fixed pool, `send-off`
 unbounded, `:fail` / `:continue` error modes, `await` / `await-for`,
-`restart-agent`, `shutdown-agents`), STM (`dosync` over `ref`s —
+`restart-agent`, `shutdown-agents`), custom executors
+(port-added `(executor)` fresh single-thread pools;
+`set-agent-send-executor!` / `set-agent-send-off-executor!`
+route sends through them), STM (`dosync` over `ref`s —
 `alter` / `commute` / `ensure` / `ref-set`, `io!`, validators,
 watches, history vars), `locking`, `add-watch` /
 `remove-watch`, `realized?`.
@@ -149,8 +160,9 @@ CI-enforced: listed vars must resolve, excluded ones must not).
 
 **AOT (`build`).** Compiles the pure subset — top-level fixed-arity
 `defn` over Int/Double/Bool/Str/Keyword/Vector value flow, `if`/`do`/`let`
-+ direct self-recursion, calls to a closed 13-primitive set
-(`+ - * quot < <= > >= = count nth get conj`), `print` — to a
++ direct self-recursion, calls to a closed 19-primitive set
+(`+ - * quot < <= > >= = count nth get conj long int
+transient conj! assoc! persistent!`), `print` — to a
 native binary linked against the shipped `clj-rt` runtime archive.
 Anything else fails the compile with
 `path:line:col: unsupported form in AOT subset: form (hint)`;
@@ -160,6 +172,9 @@ tail-call optimization (deep self-recursion overflows like the
 JVM); `main` drops every slot and takes no arguments
 (`*command-line-args*` is unconveyed). Primitives dispatch through
 the interpreter's own natives, so AOT and `run` cannot drift.
+`jit` runs the same pure subset in-process through the LLVM JIT
+(no binary emitted); its file args reach `-main` as argv, unlike
+`build`'s unconveyed arguments.
 
 ## Accepted differences
 
@@ -216,7 +231,7 @@ counting reclaims storage on drop:
   Instant Uri TaggedLiteral
   ReaderConditional Var Unbound Throwable Transient Atom Delay
   Future Promise Agent Volatile Ref Extension HostType MultiFn
-  Class Array PrimitiveVector`). Heap payloads — strings,
+  Class Array PrimitiveVector Executor`). Heap payloads — strings,
   collections, metadata, extension values — sit behind `Arc`.
 - Collections are thread-safe `rpds` persistent types with an
   `Arc` metadata slot plus insertion-order sidecars (small JVM
@@ -259,12 +274,13 @@ docs/t1174/             design spec, per-area contracts, oracle pins,
                         differential corpora, TLA+ models
 scripts/ci/             Go CI tooling + quality-gate container image
 .github/workflows/     rust.yml (CI) + rust-release.yml (v* releases)
+                        + storyboard.yml (board sync)
 epl-v10.html            license text
 ```
 
 ## CI and releases
 
-- `rust.yml` runs per PR and master push: 12 jobs on
+- `rust.yml` runs per PR and master push: 11 jobs on
   Linux/Windows (fmt+clippy, test, MSRV 1.85, LLVM-free unlinked
   tests, loom models, TLA+ model check, quality gates, Go
   CI-tools tests, release builds). Ordinary CI skips macOS for
@@ -277,9 +293,10 @@ epl-v10.html            license text
   complexity caps, and **100% line + patch coverage** floors
   (llvm-cov over nextest, JUnit test-results — both uploaded to
   Codecov).
-- Concurrency is model-checked, not just tested: 18 loom
-  schedule-exploration tests plus a TLA+ agent-queue model
-  discharged by TLC in CI.
+- Concurrency is model-checked, not just tested: 42 loom
+  schedule-exploration tests plus TLA+ agent-queue,
+  channel-mailbox, and executor models discharged by TLC
+  in CI.
 - Merging to master requires one approving review
   (`CODEOWNERS` auto-requests it) and verified signed
   commits (SSH: `gpg.format=ssh`, `commit.gpgsign=true`,
