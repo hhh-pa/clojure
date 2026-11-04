@@ -256,6 +256,15 @@ enum VectorInner {
     Packed(Arc<Vec<i64>>),
 }
 
+/// Longest packed `i64` run (#227): a shared packed update clones
+/// the whole run (`Arc::make_mut`), and loop-threaded vectors are
+/// shared at update time (the old binding is alive while the new
+/// value is computed), so an unbounded run turns `conj`/`assoc`
+/// chains quadratic. Past this length `Int` vectors ride the
+/// generic trie (log-time shared updates); at or below it a shared
+/// update clones at most 8KB.
+const MAX_PACKED_LEN: usize = 1024;
+
 /// Owned-value vector iteration (packed ints box on read). Neither
 /// `Clone` nor `Debug`: the generic arm wraps rpds's iterator,
 /// which implements neither.
@@ -584,7 +593,7 @@ impl Vector {
 
     /// Build a vector from items in order (packed when every item
     /// is an `Int` — one pass, completing generically at the first
-    /// foreign value).
+    /// foreign value or past `MAX_PACKED_LEN`).
     #[must_use]
     pub fn from_vec(items: Vec<Value>) -> Self {
         let mut items = items.into_iter();
@@ -615,9 +624,22 @@ impl Vector {
 
     /// Build a packed vector from `i64`s in order (no scan — for
     /// callers that already know, like ranges and packed
-    /// transients).
+    /// transients). Past `MAX_PACKED_LEN` the vector rides the
+    /// generic trie instead (a long packed run would clone per
+    /// shared update — #227).
     #[must_use]
     pub fn from_ints(ints: Vec<i64>) -> Self {
+        if ints.len() > MAX_PACKED_LEN {
+            let mut trie = RpdsVector::new_sync();
+            for n in ints {
+                trie.push_back_mut(Value::Int(n));
+            }
+            return Self {
+                inner: VectorInner::Generic(trie),
+                meta: None,
+                id: next_vector_id(),
+            };
+        }
         Self {
             inner: VectorInner::Packed(Arc::new(ints)),
             meta: None,
@@ -650,10 +672,15 @@ impl Vector {
         // empty trie `Arc::new`s its root, one alloc per `conj`
         // before #227), so uniquely-owned `conj` chains mutate in
         // place while versions shared with other handles still
-        // path-copy. Packed storage meeting a foreign value
-        // rebuilds once (unpack), like
+        // path-copy. Packed storage meeting a foreign value — or an
+        // `Int` at `MAX_PACKED_LEN` — rebuilds once (unpack), like
         // [`set_nth_owned`](Self::set_nth_owned).
-        if matches!(&self.inner, VectorInner::Packed(_)) && !matches!(v, Value::Int(_)) {
+        let unpack = match (&self.inner, &v) {
+            (VectorInner::Packed(ints), Value::Int(_)) => ints.len() >= MAX_PACKED_LEN,
+            (VectorInner::Packed(_), _) => true,
+            (VectorInner::Generic(_), _) => false,
+        };
+        if unpack {
             let mut out = RpdsVector::new_sync();
             for n in self.packed_slice().expect("guarded packed above") {
                 out.push_back_mut(Value::Int(*n));
@@ -675,10 +702,11 @@ impl Vector {
             VectorInner::Packed(ints) => {
                 // Owned packed storage mutates in place when
                 // unique; `make_mut` copies the 8-byte run when
-                // shared (like any copy-on-write array — repeated
-                // `conj` onto one shared big packed vector is
-                // linear per conj, the one packing tradeoff).
-                // `Int`-only here (foreign values unpacked above).
+                // shared — at most `MAX_PACKED_LEN` ints, since
+                // longer runs unpack above (a shared big run would
+                // clone per `conj`, turning chains quadratic — #227).
+                // `Int`-only below the cap here (foreign values and
+                // at-cap pushes unpacked above).
                 if let Value::Int(n) = v {
                     Arc::make_mut(ints).push(n);
                 }
@@ -708,7 +736,10 @@ impl Vector {
     /// accumulator through an `assoc` chain mutates in place after
     /// the first step instead of path-copying per step. Packed `Int`
     /// storage mutates through `Arc::make_mut` (in place when
-    /// unique); a foreign value unpacks once, like [`push_back`](Self::push_back).
+    /// unique, at most `MAX_PACKED_LEN` ints when shared —
+    /// [`from_ints`](Self::from_ints) and
+    /// [`push_back`](Self::push_back) never build longer runs); a
+    /// foreign value unpacks once, like [`push_back`](Self::push_back).
     #[must_use]
     pub fn set_nth_owned(mut self, index: usize, v: Value) -> Option<Self> {
         // Packed storage meeting a foreign value rebuilds once
@@ -769,7 +800,8 @@ impl Vector {
     /// The #212 pattern (`mut self` + `drop_last_mut`): packed
     /// storage pops through `Arc::make_mut`, so `pop` chains over
     /// uniquely-owned vectors mutate in place while versions shared
-    /// with other handles still path-copy.
+    /// with other handles still path-copy (at most
+    /// `MAX_PACKED_LEN` ints — longer runs never pack).
     #[must_use]
     pub fn drop_last_owned(mut self) -> Option<Self> {
         // Through `&mut` (no `mem::replace` placeholder — even an

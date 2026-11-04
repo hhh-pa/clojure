@@ -241,6 +241,72 @@ fn transient_generic_arms() {
     assert!(tv.pop().is_err());
 }
 
+/// Long runs never pack (#227): a shared packed update clones
+/// the whole run, so past the cap `Int` vectors ride the generic
+/// trie (log-time shared updates, no quadratic chains). The cap is
+/// 1024 (mirrors `MAX_PACKED_LEN` in value.rs).
+#[test]
+fn long_runs_stay_generic() {
+    let v = Vector::from_vec(ints(1024));
+    assert!(v.is_packed());
+    let v = Vector::from_vec(ints(1025));
+    assert!(!v.is_packed());
+    let back: Vec<Value> = v.iter().collect();
+    assert_eq!(back, ints(1025));
+    let w = Vector::from_ints((0..2000).collect());
+    assert!(!w.is_packed());
+    assert_eq!(w.len(), 2000);
+    assert_eq!(w.get(1999), Some(Value::Int(1999)));
+}
+
+/// `push_back` past the cap unpacks once; both versions stay
+/// correct (persistence holds across the unpack).
+#[test]
+fn push_back_past_cap_unpacks_once() {
+    let mut v = Vector::from_vec(ints(1024));
+    assert!(v.is_packed());
+    v = v.push_back(Value::Int(1024));
+    assert!(!v.is_packed());
+    assert_eq!(v.len(), 1025);
+    let back: Vec<Value> = v.iter().collect();
+    assert_eq!(back, ints(1025));
+    // Shared updates on the long vector keep every version intact.
+    let shared = v.clone();
+    let w = v.push_back(Value::Int(1025));
+    assert_eq!(w.len(), 1026);
+    assert_eq!(shared.len(), 1025);
+    assert_eq!(shared.get(1024), Some(Value::Int(1024)));
+    assert_eq!(w.get(1025), Some(Value::Int(1025)));
+}
+
+/// `assoc` on a long `Int` vector keeps every version intact (the
+/// generic trie path-copies; no whole-run clone per update).
+#[test]
+fn set_nth_long_int_vector_persists() {
+    let v = Vector::from_vec(ints(5000));
+    assert!(!v.is_packed());
+    let w = v.set_nth(4999, Value::Int(7)).unwrap();
+    assert_eq!(w.get(4999), Some(Value::Int(7)));
+    assert_eq!(v.get(4999), Some(Value::Int(4999)));
+    assert_eq!(w.len(), 5000);
+}
+
+/// `persistent!` of a long packed transient freezes generically
+/// with every item intact.
+#[test]
+fn transient_persistent_long_freezes_generic() {
+    let mut tv = TransientVector::new();
+    for i in 0..2000 {
+        tv.conj(Value::Int(i)).unwrap();
+    }
+    assert!(tv.is_packed());
+    let frozen = tv.persistent().unwrap();
+    assert!(!frozen.is_packed());
+    assert_eq!(frozen.len(), 2000);
+    let back: Vec<Value> = frozen.iter().collect();
+    assert_eq!(back, ints(2000));
+}
+
 /// Metadata rides alongside packed storage (vectors stay `IObj`).
 #[test]
 fn meta_survives_packing() {
