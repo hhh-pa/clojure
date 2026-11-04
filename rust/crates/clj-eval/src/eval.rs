@@ -175,7 +175,21 @@ pub struct Evaluator {
     /// process abort. STM retries restore the entry depth (see
     /// `sync_begin`), like the bindings stack.
     pub(crate) call_depth: usize,
+    /// Pooled `recur` arg buffers (#235): `Expr::Recur` checks
+    /// one out (or allocates cold) and the landing site returns
+    /// the drained buffer, so steady-state loops allocate
+    /// nothing here. A LIFO stack (nested loops check out
+    /// several without colliding); pooled buffers are always
+    /// empty (drained by `try_rebind`, cleared on checkout).
+    /// Capped ([`RECUR_POOL_MAX`]): pathological nesting never
+    /// parks megabytes on a long-lived evaluator.
+    recur_pool: Vec<Vec<Value>>,
 }
+
+/// Pooled `recur` buffers retained per evaluator (see
+/// `recur_pool`): real nests run a few deep; past this the
+/// landing site drops the spare.
+const RECUR_POOL_MAX: usize = 8;
 
 /// Pending closure applications past this point throw the
 /// catchable `StackOverflowError` (#205, raised #220): the
@@ -250,6 +264,7 @@ impl Evaluator {
             root_cache: FxHashMap::default(),
             root_epoch: 0,
             call_depth: 0,
+            recur_pool: Vec::new(),
         }
     }
 
@@ -300,6 +315,9 @@ impl Evaluator {
             root_epoch: self.registry.epoch(),
             // A fork starts unwound (its stack is its own).
             call_depth: 0,
+            // A fork starts with an empty pool (buffers never
+            // cross threads).
+            recur_pool: Vec::new(),
         }
     }
 
@@ -939,7 +957,11 @@ impl Evaluator {
             Expr::LetFn { fns, body } => self.eval_letfn(fns, body, env),
             Expr::Fn(fun) => Ok(Value::Extension(Arc::new(self.make_closure(fun, env)))),
             Expr::Recur(args) => {
-                let mut values = Vec::with_capacity(args.len());
+                // Pooled arg buffer (see `recur_pool`): steady-state
+                // loops never allocate here.
+                let mut values = self.recur_pool.pop().unwrap_or_default();
+                values.clear();
+                values.reserve(args.len());
                 for arg in args {
                     values.push(self.eval(arg, env)?);
                 }
@@ -1720,7 +1742,13 @@ impl Evaluator {
                     // Rebind in place when unobserved (#221 R2: no
                     // allocation on the hot path); a captured frame
                     // falls back to the fresh-frame copy-on-`recur`.
-                    if let Err(values) = env.try_rebind(&outer, values) {
+                    let mut values = values;
+                    if env.try_rebind(&outer, &mut values) {
+                        // Recycle the drained buffer (see `recur_pool`).
+                        if self.recur_pool.len() < RECUR_POOL_MAX {
+                            self.recur_pool.push(values);
+                        }
+                    } else {
                         env = self.bind_values(&pats, values, &outer)?;
                     }
                 }
@@ -2434,7 +2462,13 @@ impl Evaluator {
                 Err(Signal::Recur(values)) => {
                     // In-place rebind when unobserved (#221 R2);
                     // captured frames keep the fresh-frame promise.
-                    if let Err(values) = frame.try_rebind(&outer, values) {
+                    let mut values = values;
+                    if frame.try_rebind(&outer, &mut values) {
+                        // Recycle the drained buffer (see `recur_pool`).
+                        if self.recur_pool.len() < RECUR_POOL_MAX {
+                            self.recur_pool.push(values);
+                        }
+                    } else {
                         frame = self.bind_values(&pats, values, &outer)?;
                     }
                 }

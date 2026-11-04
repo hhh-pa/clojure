@@ -1462,33 +1462,41 @@ impl Env {
     /// matching length. Any closure capturing this env — or a child
     /// of it, whose parent chain shares this frame — bumps the
     /// count and forces the fresh-frame fallback, preserving the
-    /// copy-on-`recur` promise exactly. Anything unqualified
-    /// returns the values for the caller to bind fresh.
-    pub fn try_rebind(&mut self, outer: &Env, values: Vec<Value>) -> Result<(), Vec<Value>> {
+    /// copy-on-`recur` promise exactly (`true` = rebound in
+    /// place). Anything unqualified leaves `values` untouched
+    /// for the caller to bind fresh; a successful rebind drains
+    /// it (the caller recycles the buffer — see `recur_pool`).
+    pub fn try_rebind(&mut self, outer: &Env, values: &mut Vec<Value>) -> bool {
         // Each guard doubles as a cheap safety net: a captured
         // frame (or any shape surprise) falls through to the
         // fresh-frame path. Slots ride with their frame (never
         // shared alone — that `expect` never fires).
         let Some(frame) = Arc::get_mut(&mut self.frame) else {
-            return Err(values);
+            return false;
         };
         let flat_over_outer = frame.parent.as_ref().is_some_and(|parent| {
             Arc::ptr_eq(&parent.frame, &outer.frame) && frame.base == outer.len()
         });
         if flat_over_outer {
             let Slots::Shared(slots) = &mut frame.slots else {
-                return Err(values);
+                return false;
             };
             let dst = Arc::get_mut(slots).expect("slots ride with their frame");
             // Destructuring loops bind fewer values than slots (one
             // per pattern), so a mismatch falls back to a fresh
-            // bind — only exact rebinds go in place.
+            // bind — only exact rebinds go in place. Values move
+            // (never clone): each assignment drops the old slot
+            // value, and the drain leaves the buffer for the
+            // caller's pool (#235: a `clone_from_slice` here
+            // cloned every slot per `recur`).
             if dst.len() == values.len() {
-                dst.clone_from_slice(&values);
-                return Ok(());
+                for (slot, new_val) in dst.iter_mut().zip(values.drain(..)) {
+                    *slot = new_val;
+                }
+                return true;
             }
         }
-        Err(values)
+        false
     }
 
     /// Extend with one fresh slot (the single-name `bind_pattern`

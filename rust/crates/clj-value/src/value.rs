@@ -370,19 +370,25 @@ struct SmallMap {
 /// Interned shapes by key-set. Entries are `Weak`: a shape dies
 /// with its last map, and the registry drops the dead entry at
 /// the next cleanup — a fresh-keys loop (ever-changing key
-/// sets) retains at most [`SHAPE_CLEANUP_EVERY`] dead entries,
-/// never the shapes themselves.
+/// sets) retains at most ~1/8th of the table plus
+/// [`SHAPE_CLEANUP_EVERY`] dead entries, never the shapes
+/// themselves.
 struct ShapeRegistry {
     map: HashMap<Vec<Value>, Weak<MapShape>, FxBuildHasher>,
     since_cleanup: usize,
 }
 
-/// Dead-entry cleanup cadence: the registry holds at most this
-/// many dead entries between cleanups, and each cleanup scans
-/// at most live + this many entries (~1 amortized step per
-/// intern). Small enough that tests reach it (coverage), large
-/// enough that cleanup never dominates.
+/// Dead-entry cleanup cadence: a cleanup scans the whole table,
+/// so past this many misses it additionally waits until the
+/// scan amortizes to [`SHAPE_CLEANUP_AMORT`] visits per miss (a
+/// fixed cadence re-scans a big live table per handful of
+/// misses — 109M entry-visits for one 150k-char suffix-tree
+/// input, #235). Small enough that tests reach it (coverage),
+/// large enough that cleanup never dominates.
 const SHAPE_CLEANUP_EVERY: usize = 16;
+/// Amortized retain-scan visits per miss past the
+/// [`SHAPE_CLEANUP_EVERY`] floor (see above).
+const SHAPE_CLEANUP_AMORT: usize = 8;
 
 thread_local! {
     static SHAPE_REGISTRY: RefCell<ShapeRegistry> = RefCell::new(ShapeRegistry {
@@ -407,7 +413,9 @@ fn intern_shape(keys: &[Value]) -> Arc<MapShape> {
         });
         reg.map.insert(keys.to_vec(), Arc::downgrade(&shape));
         reg.since_cleanup += 1;
-        if reg.since_cleanup >= SHAPE_CLEANUP_EVERY {
+        if reg.since_cleanup >= SHAPE_CLEANUP_EVERY
+            && reg.since_cleanup.saturating_mul(SHAPE_CLEANUP_AMORT) >= reg.map.len()
+        {
             reg.map.retain(|_, weak| weak.strong_count() > 0);
             reg.since_cleanup = 0;
         }
