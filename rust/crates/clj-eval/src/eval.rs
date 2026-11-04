@@ -1994,6 +1994,19 @@ impl Evaluator {
         out
     }
 
+    /// Read an integer operand without cloning a [`Value`] (#226:
+    /// local reads and integer literals evaluate directly as `i64`).
+    fn eval_as_i64(&self, expr: &Expr, env: &Env) -> Option<i64> {
+        match expr {
+            Expr::Literal(Value::Int(n)) => Some(*n),
+            Expr::Local(idx) => match env.get_ref(*idx) {
+                Some(Value::Int(n)) => Some(*n),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
     /// A validated `inc`/`dec` call: the `Int` step computes
     /// inline, anything else (non-`Int`, overflow, arity) runs
     /// the genuine native.
@@ -2001,6 +2014,19 @@ impl Evaluator {
         let [arg] = call.args.as_slice() else {
             return self.call_direct_general(call, env);
         };
+        if let Some(x) = self.eval_as_i64(arg, env) {
+            // Dispatch routes only `Inc`/`Dec` here, so the `else`
+            // is `Dec` — kept as `if/else` (not `match`) so no
+            // unreachable arm can trip the 100% line-coverage floor.
+            let res = if call.fast == FastArith::Inc {
+                x.checked_add(1)
+            } else {
+                x.checked_sub(1)
+            };
+            if let Some(y) = res {
+                return Ok(Value::Int(y));
+            }
+        }
         let value = self.eval(arg, env)?;
         match (call.fast, &value) {
             (FastArith::Inc, Value::Int(x)) => match x.checked_add(1) {
@@ -2022,6 +2048,11 @@ impl Evaluator {
         let [lhs, rhs] = call.args.as_slice() else {
             return self.call_direct_general(call, env);
         };
+        if let (Some(x), Some(y)) = (self.eval_as_i64(lhs, env), self.eval_as_i64(rhs, env)) {
+            if let Some(v) = Self::fast_int2(call.fast, x, y) {
+                return Ok(v);
+            }
+        }
         let a = self.eval(lhs, env)?;
         let b = self.eval(rhs, env)?;
         if let (Value::Int(x), Value::Int(y)) = (&a, &b) {
