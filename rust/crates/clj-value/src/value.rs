@@ -258,6 +258,8 @@ enum VectorInner {
 
 /// Packed tail-chunk capacity: mutating ops copy at most one chunk
 /// (512 bytes), while freezes append one chunk in O(log n).
+/// (Chunked packing instead of #234's single-run cap — see #240
+/// for the reconcile/unify follow-up with proxy comparisons.)
 const PACKED_CHUNK: usize = 64;
 
 /// Frozen full chunks of a packed int run (each exactly
