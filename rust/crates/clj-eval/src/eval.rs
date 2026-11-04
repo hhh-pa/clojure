@@ -3540,6 +3540,28 @@ impl Evaluator {
     }
     /// `(loop …)`: bind once, then run the body, rebinding through
     /// the patterns on every `recur`.
+    /// Run the counted-loop accelerator for one `(loop …)`:
+    /// `Some` already finished; `None` runs the slow loop — a
+    /// `Resume` rebinds the carried values into `env` first (an
+    /// exit already ran, so rerunning would repeat its effects).
+    fn run_loop_accel(
+        &mut self,
+        bindings: &[(Pattern, Expr)],
+        body: &[Expr],
+        env: &mut Env,
+        outer: &Env,
+        pats: &[&Pattern],
+    ) -> Result<Option<Result<Value, Signal>>, Signal> {
+        match self.try_int_loop(bindings, body, env, outer) {
+            LoopAccel::Done(result) => Ok(Some(result)),
+            LoopAccel::Slow => Ok(None),
+            LoopAccel::Resume(vals) => {
+                *env = self.bind_values(pats, vals, outer)?;
+                Ok(None)
+            }
+        }
+    }
+
     fn eval_loop(
         &mut self,
         bindings: &[(Pattern, Expr)],
@@ -3560,15 +3582,10 @@ impl Evaluator {
         // frame).
         let pats: SmallVec<[&Pattern; 8]> = bindings.iter().map(|(pat, _)| pat).collect();
         // Counted integer loops run without interpreter dispatch
-        // (see [`Evaluator::try_int_loop`]): `Slow` reruns from the
-        // entry `env`, `Resume` binds the carried values first (an
-        // exit already ran — rerunning would repeat its effects).
-        match self.try_int_loop(bindings, body, &mut env, &outer) {
-            LoopAccel::Done(result) => return result,
-            LoopAccel::Slow => {}
-            LoopAccel::Resume(vals) => {
-                env = self.bind_values(&pats, vals, &outer)?;
-            }
+        // (see [`Evaluator::try_int_loop`]): `Some` already
+        // finished, `None` runs the slow loop below.
+        if let Some(finished) = self.run_loop_accel(bindings, body, &mut env, &outer, &pats)? {
+            return finished;
         }
         loop {
             match self.eval_body(body, &env) {
