@@ -435,3 +435,71 @@ fn meta_survives_packing() {
     let back: Vec<Value> = vm.iter().collect();
     assert_eq!(back, ints(10));
 }
+/// Long runs stay packed (chunked packing supersedes #234's
+/// 1024 cap: updates touch one 64-item chunk, never the whole run,
+/// so long `Int` vectors keep packed storage with no quadratic
+/// chains — same values, every version intact).
+#[test]
+fn long_runs_stay_packed() {
+    let v = Vector::from_vec(ints(1024));
+    assert!(v.is_packed());
+    let v = Vector::from_vec(ints(1025));
+    assert!(v.is_packed());
+    let back: Vec<Value> = v.iter().collect();
+    assert_eq!(back, ints(1025));
+    let w = Vector::from_ints((0..2000).collect());
+    assert!(w.is_packed());
+    assert_eq!(w.len(), 2000);
+    assert_eq!(w.get(1999), Some(Value::Int(1999)));
+}
+
+/// `push_back` past the old cap stays packed (one chunk copied);
+/// shared pushes keep every version intact (persistence holds
+/// across the chunk detach).
+#[test]
+fn push_back_past_old_cap_stays_packed() {
+    let v = Vector::from_vec(ints(1024));
+    assert!(v.is_packed());
+    let v = v.push_back(Value::Int(1024));
+    assert!(v.is_packed());
+    assert_eq!(v.len(), 1025);
+    let back: Vec<Value> = v.iter().collect();
+    assert_eq!(back, ints(1025));
+    // Shared pushes keep every version intact.
+    let shared = v.clone();
+    let w = v.push_back(Value::Int(1025));
+    assert!(w.is_packed());
+    assert_eq!(w.len(), 1026);
+    assert_eq!(shared.len(), 1025);
+    assert_eq!(shared.get(1024), Some(Value::Int(1024)));
+    assert_eq!(w.get(1025), Some(Value::Int(1025)));
+}
+
+/// `assoc` on a long `Int` vector keeps every version intact (one
+/// chunk detaches per update; no whole-run clone).
+#[test]
+fn set_nth_long_int_vector_persists() {
+    let v = Vector::from_vec(ints(5000));
+    assert!(v.is_packed());
+    let w = v.set_nth(4999, Value::Int(7)).unwrap();
+    assert!(w.is_packed());
+    assert_eq!(w.get(4999), Some(Value::Int(7)));
+    assert_eq!(v.get(4999), Some(Value::Int(4999)));
+    assert_eq!(w.len(), 5000);
+}
+
+/// `persistent!` of a long packed transient freezes packed with
+/// every item intact.
+#[test]
+fn transient_persistent_long_stays_packed() {
+    let mut tv = TransientVector::new();
+    for i in 0..2000 {
+        tv.conj(Value::Int(i)).unwrap();
+    }
+    assert!(tv.is_packed());
+    let frozen = tv.persistent().unwrap();
+    assert!(frozen.is_packed());
+    assert_eq!(frozen.len(), 2000);
+    let back: Vec<Value> = frozen.iter().collect();
+    assert_eq!(back, ints(2000));
+}
