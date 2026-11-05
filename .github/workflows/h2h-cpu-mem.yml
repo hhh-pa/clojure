@@ -4,19 +4,20 @@
 # runs a JVM leg plus TWO clojure-rs legs (rs-from, rs-to), sharded
 # 8 ways (48 measure jobs); the h2h-compare job unions the shards
 # per leg and gates on per-case median cpu_s + maxrss_kb. The gate
-# rule: clojure-rs must beat JVM Clojure, AND rs-to must
-# win-or-tie vs rs-from on every case — ANY loss fails the PR.
+# rule: clojure-rs must beat JVM Clojure, AND rs-from must
+# win-or-tie vs rs-to on every case — ANY loss fails the PR.
 # (Near-tie wobble can in principle red the native leg on a no-op
 # change; if the tables show only marginal losses, consider a
 # noise margin rather than weakening the rule silently.)
 #
-# Revision pairs: on pull_request, from = PR base SHA, to = PR head
-# (github.sha, the merge commit CI tests) — stacked PRs compare
-# against their parent branch automatically. On workflow_dispatch,
-# from defaults to master and to to the dispatched ref, so
-# dispatching on a branch compares <branch> vs <master>; the
-# rs_from/rs_to inputs override either side (40-char SHA or any
-# branch/tag, for bisection).
+# Revision pairs ("PR from head to base" parlance): from is the
+# change under test, to is its baseline. On pull_request, from =
+# PR head (github.sha, the merge commit CI tests), to = PR base
+# SHA — stacked PRs compare against their parent branch
+# automatically. On workflow_dispatch, from defaults to the
+# dispatched ref and to to master, so dispatching on a branch
+# compares <branch> vs <master>; the rs_from/rs_to inputs override
+# either side (40-char SHA or any branch/tag, for bisection).
 #
 # This is a gate, not a tracker: it reports no Bencher history.
 # Triage mode: dispatch with report_only=true to get the verdict
@@ -52,11 +53,11 @@ on:
         required: false
         default: ''
       rs_from:
-        description: 'Native-vs-native base: 40-char SHA or branch/tag (empty = PR base, or master on dispatch)'
+        description: 'Native-vs-native head: 40-char SHA or branch/tag (empty = PR head, or dispatched ref)'
         required: false
         default: ''
       rs_to:
-        description: 'Native-vs-native head: 40-char SHA or branch/tag (empty = PR head, or dispatched ref)'
+        description: 'Native-vs-native base: 40-char SHA or branch/tag (empty = PR base, or master on dispatch)'
         required: false
         default: ''
       report_only:
@@ -87,9 +88,9 @@ jobs:
   # Resolve the suite revisions AND the native-vs-native revision
   # pair ONCE per run so all 48 measure legs sweep the same commits.
   # Suite defaults: the pinned SHAs above; a manual dispatch may pin
-  # either input instead (bisection). Native pair: PR base/head by
+  # either input instead (bisection). Native pair: PR head/base by
   # default on pull_request (stacked PRs diff against their parent),
-  # master/dispatched-ref on workflow_dispatch; rs_from/rs_to take a
+  # dispatched-ref/master on workflow_dispatch; rs_from/rs_to take a
   # 40-char SHA or any branch/tag.
   resolve:
     runs-on: ubuntu-latest
@@ -107,14 +108,14 @@ jobs:
           [ -z "$algos" ] && algos="${{ env.ALGORITHMS_SHA_DEFAULT }}"
           from="${{ inputs.rs_from }}"
           to="${{ inputs.rs_to }}"
-          if [ -z "$from" ]; then
+          [ -z "$from" ] && from="${{ github.sha }}"
+          if [ -z "$to" ]; then
             if [ "${{ github.event_name }}" = "pull_request" ]; then
-              from="${{ github.event.pull_request.base.sha }}"
+              to="${{ github.event.pull_request.base.sha }}"
             else
-              from="master"
+              to="master"
             fi
           fi
-          [ -z "$to" ] && to="${{ github.sha }}"
           to_sha() {
             # Print the 40-char SHA for a SHA-or-ref input.
             if printf '%s' "$1" | grep -Eq '^[0-9a-f]{40}$'; then
@@ -146,7 +147,7 @@ jobs:
 
   # The two native revisions under test (interpreter-only release:
   # `run` needs no LLVM), each fanned out to its 16 measure legs as
-  # an artifact. rs-to is what the JVM gate tests; rs-from is its
+  # an artifact. rs-from is what the JVM gate tests; rs-to is its
   # comparison base (PR base, or master on dispatch).
   build-rs:
     needs: [resolve]
@@ -437,32 +438,32 @@ jobs:
           python3 scripts/ci/h2h_compare.py \
             --label recipes \
             --jvm h2h-recipes-jvm-shard-*/h2h-recipes-jvm-shard-*.json \
-            --rs h2h-recipes-rs-to-shard-*/h2h-recipes-rs-to-shard-*.json \
+            --rs h2h-recipes-rs-from-shard-*/h2h-recipes-rs-from-shard-*.json \
             --merged-jvm h2h-recipes-jvm-merged.json \
-            --merged-rs h2h-recipes-rs-to-merged.json \
+            --merged-rs h2h-recipes-rs-from-merged.json \
             --summary-file "$GITHUB_STEP_SUMMARY" $report_only || rc=$?
           python3 scripts/ci/h2h_compare.py \
             --label algos \
             --jvm h2h-algos-jvm-shard-*/h2h-algos-jvm-shard-*.json \
-            --rs h2h-algos-rs-to-shard-*/h2h-algos-rs-to-shard-*.json \
+            --rs h2h-algos-rs-from-shard-*/h2h-algos-rs-from-shard-*.json \
             --merged-jvm h2h-algos-jvm-merged.json \
-            --merged-rs h2h-algos-rs-to-merged.json \
+            --merged-rs h2h-algos-rs-from-merged.json \
             --summary-file "$GITHUB_STEP_SUMMARY" $report_only || rc=$?
           python3 scripts/ci/h2h_compare.py \
             --label recipes-rsrs \
-            --base-name rs-from --challenger-name rs-to \
-            --jvm h2h-recipes-rs-from-shard-*/h2h-recipes-rs-from-shard-*.json \
-            --rs h2h-recipes-rs-to-shard-*/h2h-recipes-rs-to-shard-*.json \
-            --merged-jvm h2h-recipes-rs-from-merged.json \
-            --merged-rs h2h-recipes-rs-to-merged.json \
+            --base-name rs-to --challenger-name rs-from \
+            --jvm h2h-recipes-rs-to-shard-*/h2h-recipes-rs-to-shard-*.json \
+            --rs h2h-recipes-rs-from-shard-*/h2h-recipes-rs-from-shard-*.json \
+            --merged-jvm h2h-recipes-rs-to-merged.json \
+            --merged-rs h2h-recipes-rs-from-merged.json \
             --summary-file "$GITHUB_STEP_SUMMARY" $report_only || rc=$?
           python3 scripts/ci/h2h_compare.py \
             --label algos-rsrs \
-            --base-name rs-from --challenger-name rs-to \
-            --jvm h2h-algos-rs-from-shard-*/h2h-algos-rs-from-shard-*.json \
-            --rs h2h-algos-rs-to-shard-*/h2h-algos-rs-to-shard-*.json \
-            --merged-jvm h2h-algos-rs-from-merged.json \
-            --merged-rs h2h-algos-rs-to-merged.json \
+            --base-name rs-to --challenger-name rs-from \
+            --jvm h2h-algos-rs-to-shard-*/h2h-algos-rs-to-shard-*.json \
+            --rs h2h-algos-rs-from-shard-*/h2h-algos-rs-from-shard-*.json \
+            --merged-jvm h2h-algos-rs-to-merged.json \
+            --merged-rs h2h-algos-rs-from-merged.json \
             --summary-file "$GITHUB_STEP_SUMMARY" $report_only || rc=$?
           exit $rc
 
