@@ -1,12 +1,13 @@
-# Head-to-head CPU/RSS gate: clojure-rs revisions vs CPython
+# Head-to-head ins/RSS gate: clojure-rs revisions vs CPython
 # and vs each other, across the snippet suite (hhh-pa/clojure-code-snippet).
 # The suite runs a CPython baseline leg plus TWO clojure-rs legs
 # (rs-from, rs-to), every leg instrumented in a single sweep: GNU
-# time (cpu_s, maxrss_kb) plus Intel Pin instruction counts, which
-# feed a deterministic ins gate (1% margin) for rs-from vs rs-to,
-# immune to the wall-time wobble that reds the cpu/rsrs leg on
-# no-op changes. python-code-snippet mirrors clojure-code-snippet
-# case by case, so instruction counts and RSS compare directly.
+# time (cpu_s, maxrss_kb) plus Intel Pin instruction counts. The
+# gate compares instruction counts and RSS only (1% margin):
+# cpu_s is collected but never gated, immune to the wall-time
+# wobble that reds a cpu gate on no-op changes.
+# python-code-snippet mirrors clojure-code-snippet case by case,
+# so instruction counts and RSS compare directly.
 # Sharding is asymmetric because Pin slows interpreters ~40x:
 # 8 ways x 2 native runtimes (16 jobs) vs 32 ways x CPython (32
 # jobs), 48 measure jobs total; the h2h-compare job unions the
@@ -96,7 +97,7 @@ env:
   # need harness support, so old-SHA bisection of the
   # instrumentation legs fails loud on the unknown flag by design.
   SNIPPETS_SHA_DEFAULT: 98612a1f52cd5fd097904e9ac6dcd9282cad2c20
-  PYTHON_SNIPPETS_SHA_DEFAULT: b3f699443936f5b27216e06437f411885460e848
+  PYTHON_SNIPPETS_SHA_DEFAULT: aedfe048c9c77dcfc8daddc0f43fcc1be411bd48
   # Pinned (not floating "3.11"): interpreter micro versions move
   # cpu numbers and the sweep must stay comparable run to run.
   # Bump deliberately.
@@ -372,7 +373,9 @@ jobs:
   # clear of Pin's reserved region under address randomization.
   # python-code-snippet mirrors clojure-code-snippet case by case;
   # --label-style snip keys the rows identically so instruction and
-  # RSS medians compare directly.
+  # RSS medians compare directly. Pin counts instructions only
+  # (--no-alloc-shim): no memory tracing — RSS from GNU time is
+  # the memory signal.
   measure-recipes-python:
     needs: [resolve]
     runs-on: ubuntu-latest
@@ -440,7 +443,7 @@ jobs:
           python3 tools/measure.py --resources tests/resources \
             --repeat 3 --jobs 3 --timeout 300 --label-style snip \
             --pin --pin-bin "$INSTRUMENTATION_BIN" --pin-tool "$INSTRUMENTATION_TOOL" \
-            --pin-repeat 2 --pin-timeout 600 \
+            --pin-repeat 2 --pin-timeout 600 --no-alloc-shim \
             --shard ${{ matrix.shard }}/32 \
             --output "h2h-recipes-python-shard-${{ matrix.shard }}.json" \
             --summary-file "$GITHUB_STEP_SUMMARY"
@@ -455,15 +458,12 @@ jobs:
 
   # Fan-in: union the shards per leg and diff the legs. Strict
   # across-the-board gate, both directions: CPython vs rs-from AND
-  # rs-from vs rs-to on cpu/mem, plus rs-from vs rs-to on
-  # instrumented instruction counts (1% margin) — any loss (or
-  # failure, missing, not-ok, drift, leg mismatch) fails the PR.
-  # Memory is RSS (maxrss_kb) only: the Pin tool counts
-  # instructions, never allocations. The native legs carry the
-  # instrument signal in the same shard JSONs (no second sweep),
-  # so the ins comparison below reuses the h2h-* legs and writes
-  # no extra merged files. No Bencher reporting by design: this
-  # job gates, it does not track history.
+  # rs-from vs rs-to on instruction counts and RSS (1% margin) —
+  # any loss (or failure, missing, not-ok, drift, leg mismatch)
+  # fails the PR. cpu_s is collected but never gated. Memory is
+  # RSS (maxrss_kb) only: the Pin tool counts instructions, never
+  # allocations. No Bencher reporting by design: this job gates,
+  # it does not track history.
   h2h-compare:
     name: h2h cpu/mem gate
     needs: [measure-recipes, measure-recipes-python]
@@ -497,8 +497,10 @@ jobs:
           report_only=""
           if [ "${{ inputs.report_only }}" = "true" ]; then report_only="--report-only"; fi
           rc=0
-          # Three comparisons, all verdict tables in the summary; any
+          # Two comparisons, all verdict tables in the summary; any
           # can fail the job unless triage mode greens everything.
+          # Both gate instruction counts + RSS only (1% margin):
+          # cpu_s is collected but never compared.
           $compare \
             --label recipes \
             --base-name python \
@@ -506,6 +508,7 @@ jobs:
             --rs h2h-recipes-rs-from-shard-*/h2h-recipes-rs-from-shard-*.json \
             --merged-jvm h2h-recipes-python-merged.json \
             --merged-rs h2h-recipes-rs-from-merged.json \
+            --metrics mem,ins --margin 0.01 \
             --summary-file "$GITHUB_STEP_SUMMARY" $report_only || rc=$?
           $compare \
             --label recipes-rsrs \
@@ -514,13 +517,7 @@ jobs:
             --rs h2h-recipes-rs-from-shard-*/h2h-recipes-rs-from-shard-*.json \
             --merged-jvm h2h-recipes-rs-to-merged.json \
             --merged-rs h2h-recipes-rs-from-merged.json \
-            --summary-file "$GITHUB_STEP_SUMMARY" $report_only || rc=$?
-          $compare \
-            --label recipes-rsrs-ins \
-            --base-name rs-to --challenger-name rs-from \
-            --jvm h2h-recipes-rs-to-shard-*/h2h-recipes-rs-to-shard-*.json \
-            --rs h2h-recipes-rs-from-shard-*/h2h-recipes-rs-from-shard-*.json \
-            --metrics ins --margin 0.01 \
+            --metrics mem,ins --margin 0.01 \
             --summary-file "$GITHUB_STEP_SUMMARY" $report_only || rc=$?
           exit $rc
 
