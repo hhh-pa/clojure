@@ -3,11 +3,12 @@
 # and the algorithms suite (hhh-pa/clojure-algorithms). Each suite
 # runs a JVM leg plus TWO clojure-rs legs (rs-from, rs-to), sharded
 # 8 ways (48 measure jobs); the h2h-compare job unions the shards
-# per leg and gates on per-case median cpu_s + maxrss_kb: ANY JVM
-# loss fails the PR. The rs-from-vs-rs-to tables are informational
-# (report-only): same-machine medians still wobble on near-tie
-# cases, so native-vs-native is not a hard gate (one-line flip in
-# the compare job if that ever changes).
+# per leg and gates on per-case median cpu_s + maxrss_kb. The gate
+# rule: clojure-rs must beat JVM Clojure, AND rs-to must
+# win-or-tie vs rs-from on every case — ANY loss fails the PR.
+# (Near-tie wobble can in principle red the native leg on a no-op
+# change; if the tables show only marginal losses, consider a
+# noise margin rather than weakening the rule silently.)
 #
 # Revision pairs: on pull_request, from = PR base SHA, to = PR head
 # (github.sha, the merge commit CI tests) — stacked PRs compare
@@ -405,12 +406,10 @@ jobs:
           retention-days: 7
 
   # Fan-in: union the 8 shards per leg and diff the legs. Strict
-  # across-the-board gate on JVM vs rs-to — any CPU/RSS loss (or
-  # failure, missing, not-ok, drift, leg mismatch) fails the PR. The
-  # rs-from-vs-rs-to tables are informational (report-only): they
-  # show what the PR (or branch) changed against its base without
-  # failing on near-tie wobble. No Bencher reporting by design:
-  # this job gates, it does not track history.
+  # across-the-board gate, both directions: JVM vs rs-to AND
+  # rs-from vs rs-to — any CPU/RSS loss (or failure, missing,
+  # not-ok, drift, leg mismatch) fails the PR. No Bencher reporting
+  # by design: this job gates, it does not track history.
   h2h-compare:
     name: h2h cpu/mem gate
     needs: [measure-recipes, measure-algos]
@@ -427,10 +426,11 @@ jobs:
         with:
           pattern: h2h-*-shard-*
 
-      - name: Compare legs (strict JVM gate + informational native diff)
+      - name: Compare legs (strict gate, both directions)
         run: |
           # All four comparisons always run (all verdict tables land
-          # in the summary); only the JVM gates can fail the job.
+          # in the summary) and any of them can fail the job, unless
+          # triage mode greens everything.
           report_only=""
           if [ "${{ inputs.report_only }}" = "true" ]; then report_only="--report-only"; fi
           rc=0
@@ -455,7 +455,7 @@ jobs:
             --rs h2h-recipes-rs-to-shard-*/h2h-recipes-rs-to-shard-*.json \
             --merged-jvm h2h-recipes-rs-from-merged.json \
             --merged-rs h2h-recipes-rs-to-merged.json \
-            --summary-file "$GITHUB_STEP_SUMMARY" --report-only || rc=$?
+            --summary-file "$GITHUB_STEP_SUMMARY" $report_only || rc=$?
           python3 scripts/ci/h2h_compare.py \
             --label algos-rsrs \
             --base-name rs-from --challenger-name rs-to \
@@ -463,7 +463,7 @@ jobs:
             --rs h2h-algos-rs-to-shard-*/h2h-algos-rs-to-shard-*.json \
             --merged-jvm h2h-algos-rs-from-merged.json \
             --merged-rs h2h-algos-rs-to-merged.json \
-            --summary-file "$GITHUB_STEP_SUMMARY" --report-only || rc=$?
+            --summary-file "$GITHUB_STEP_SUMMARY" $report_only || rc=$?
           exit $rc
 
       - name: Upload merged leg JSONs
