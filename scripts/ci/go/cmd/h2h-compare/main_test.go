@@ -85,31 +85,6 @@ func TestGoldenIns(t *testing.T) {
 	}
 }
 
-func TestGoldenAlloc(t *testing.T) {
-	bin := cmdtest.Build(t, ".")
-	work := t.TempDir()
-	summary := filepath.Join(work, "summary.md")
-	stdout, code := cmdtest.Run(t, bin, ".",
-		"--label", "recipes-alloc",
-		"--jvm", "testdata/base-shard-0.json", "testdata/base-shard-1.json",
-		"--rs", "testdata/chal.json",
-		"--metrics", "alloc", "--margin", "0.01",
-		"--summary-file", summary)
-	if code != 1 {
-		t.Fatalf("exit = %d, want 1", code)
-	}
-	if stdout != cmdtest.Golden(t, "testdata/golden-alloc.txt") {
-		t.Fatalf("stdout differs from golden:\n%s", diffText(cmdtest.Golden(t, "testdata/golden-alloc.txt"), stdout))
-	}
-	gotSummary, err := os.ReadFile(summary)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(gotSummary) != cmdtest.Golden(t, "testdata/golden-summary-alloc.md") {
-		t.Fatalf("summary differs from golden:\n%s", diffText(cmdtest.Golden(t, "testdata/golden-summary-alloc.md"), string(gotSummary)))
-	}
-}
-
 func TestGoldenReportOnly(t *testing.T) {
 	bin := cmdtest.Build(t, ".")
 	stdout, code := cmdtest.Run(t, bin, ".",

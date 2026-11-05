@@ -43,11 +43,6 @@
      "min": 99000,
      "median": 100000,
      "max": 101000
-    },
-    "pin_allocated_bytes": {
-     "min": 9900,
-     "median": 10000,
-     "max": 10100
     }
    }
   },
@@ -84,11 +79,6 @@
      "min": 2490000,
      "median": 2500000,
      "max": 2510000
-    },
-    "pin_allocated_bytes": {
-     "min": 247500,
-     "median": 250000,
-     "max": 252500
     }
    }
   },
@@ -125,11 +115,6 @@
      "min": 2990000,
      "median": 3000000,
      "max": 3010000
-    },
-    "pin_allocated_bytes": {
-     "min": 297000,
-     "median": 300000,
-     "max": 303000
     }
    }
   },
@@ -166,11 +151,6 @@
      "min": 100,
      "median": 100,
      "max": 100
-    },
-    "pin_allocated_bytes": {
-     "min": 9900,
-     "median": 10000,
-     "max": 10100
     }
    }
   },
@@ -207,11 +187,6 @@
      "min": 390000,
      "median": 400000,
      "max": 410000
-    },
-    "pin_allocated_bytes": {
-     "min": 39600,
-     "median": 40000,
-     "max": 40400
     }
    }
   },
@@ -248,11 +223,6 @@
      "min": 100000,
      "median": 100500,
      "max": 101000
-    },
-    "pin_allocated_bytes": {
-     "min": 9950,
-     "median": 10050,
-     "max": 10150
     }
    }
   },
@@ -315,11 +285,6 @@
      "min": 990000,
      "median": 1000000,
      "max": 1010000
-    },
-    "pin_allocated_bytes": {
-     "min": 99000,
-     "median": 100000,
-     "max": 101000
     }
    }
   },
@@ -360,11 +325,6 @@
      "min": 1990000,
      "median": 2000000,
      "max": 2010000
-    },
-    "pin_allocated_bytes": {
-     "min": 198000,
-     "median": 200000,
-     "max": 202000
     }
    }
   },
@@ -401,11 +361,6 @@
      "min": 490,
      "median": 500,
      "max": 510
-    },
-    "pin_allocated_bytes": {
-     "min": 495,
-     "median": 500,
-     "max": 505
     }
    }
   }

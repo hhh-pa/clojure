@@ -34,10 +34,9 @@ type metric struct {
 const pinKey = "pin_instructions"
 
 var metrics = map[string]metric{
-	"cpu":   {key: "cpu_s", tag: "CPU", unit: "s", summary: "median cpu_s", format: fmt3},
-	"mem":   {key: "maxrss_kb", tag: "MEM", unit: "K", summary: "median maxrss_kb", format: fmt0},
-	"ins":   {key: "instructions", tag: "INS", unit: "", summary: "median instructions", format: fmtComma},
-	"alloc": {key: "pin_allocated_bytes", tag: "ALLOC", unit: "B", summary: "median allocated bytes", format: fmtComma},
+	"cpu": {key: "cpu_s", tag: "CPU", unit: "s", summary: "median cpu_s", format: fmt3},
+	"mem": {key: "maxrss_kb", tag: "MEM", unit: "K", summary: "median maxrss_kb", format: fmt0},
+	"ins": {key: "instructions", tag: "INS", unit: "", summary: "median instructions", format: fmtComma},
 }
 
 // fmt3 renders a ratio like Python's f"{x:.3f}" (including inf).
@@ -620,7 +619,7 @@ func compareLegs(o options, jm, rm map[caseKey]entry, jFail, rFail, jMiss, rMiss
 	}
 	for _, m := range selected {
 		if _, ok := metrics[m]; !ok {
-			fmt.Fprintf(os.Stderr, "h2h_compare: unknown metric '%s' (want csv of cpu,mem,ins,alloc)\n", m)
+			fmt.Fprintf(os.Stderr, "h2h_compare: unknown metric '%s' (want csv of cpu,mem,ins)\n", m)
 			return 2
 		}
 	}

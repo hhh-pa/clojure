@@ -3,8 +3,8 @@
 # and the algorithms suite (hhh-pa/clojure-algorithms). Each suite
 # runs a JVM leg plus TWO clojure-rs legs (rs-from, rs-to), every
 # leg instrumented in a single sweep: GNU time (cpu_s, maxrss_kb)
-# plus Intel Pin instruction + allocation counts, which feed a
-# deterministic ins/alloc gate (1% margin) for rs-from vs rs-to,
+# plus Intel Pin instruction counts, which feed a deterministic
+# ins gate (1% margin) for rs-from vs rs-to,
 # immune to the wall-time wobble that reds the cpu/rsrs leg on
 # no-op changes. Sharding is asymmetric because Pin slows HotSpot
 # ~40x: 8 ways x 2 native runtimes (16 jobs/suite) vs 32 ways x
@@ -13,14 +13,24 @@
 # gate rule: clojure-rs must beat JVM Clojure, AND rs-from must
 # win-or-tie vs rs-to on every case — ANY loss fails the PR.
 #
+# Triggering (separated from rust.yml): this gate does NOT run on
+# pull_request. It fires on workflow_run when the rust workflow
+# completes green for a PR, so broken revisions never burn the
+# ~100 instrumented legs and the sweep never starves the Rust
+# signal of runners. Non-PR rust completions (master, schedule)
+# resolve to a skipped run: there is no PR to gate. workflow_run
+# subscriptions only exist post-merge (GitHub reads triggers from
+# the default branch), so pre-merge validation uses
+# workflow_dispatch on this branch.
+#
 # Revision pairs ("PR from head to base" parlance): from is the
-# change under test, to is its baseline. On pull_request, from =
-# PR head (github.sha, the merge commit CI tests), to = PR base
-# SHA — stacked PRs compare against their parent branch
-# automatically. On workflow_dispatch, from defaults to the
-# dispatched ref and to to master, so dispatching on a branch
-# compares <branch> vs <master>; the rs_from/rs_to inputs override
-# either side (40-char SHA or any branch/tag, for bisection).
+# change under test, to is its baseline. On a rust-passed run,
+# from = the PR head the rust run tested, to = PR base SHA —
+# stacked PRs compare against their parent branch automatically.
+# On workflow_dispatch, from defaults to the dispatched ref and
+# to to master, so dispatching on a branch compares <branch> vs
+# <master>; the rs_from/rs_to inputs override either side
+# (40-char SHA or any branch/tag, for bisection).
 #
 # This is a gate, not a tracker: it reports no Bencher history.
 # Triage mode: dispatch with report_only=true to get the verdict
@@ -44,47 +54,53 @@
 name: h2h-cpu-mem
 
 on:
-  pull_request:
+  workflow_run:
+    workflows: [rust]
+    types: [completed]
+    branches-ignore: [master]
   workflow_dispatch:
     inputs:
       snippets_sha:
-        description: 'Pin clojure-code-snippet to this revision (40-char SHA; empty = pinned default)'
+        description: 'Pin clojure-code-snippet to this revision (dispatch only; 40-char SHA; empty = pinned default)'
         required: false
         default: ''
       algorithms_sha:
-        description: 'Pin clojure-algorithms to this revision (40-char SHA; empty = pinned default)'
+        description: 'Pin clojure-algorithms to this revision (dispatch only; 40-char SHA; empty = pinned default)'
         required: false
         default: ''
       rs_from:
-        description: 'Native-vs-native head: 40-char SHA or branch/tag (empty = PR head, or dispatched ref)'
+        description: 'Native-vs-native head: 40-char SHA or branch/tag (dispatch only; empty = dispatched ref)'
         required: false
         default: ''
       rs_to:
-        description: 'Native-vs-native base: 40-char SHA or branch/tag (empty = PR base, or master on dispatch)'
+        description: 'Native-vs-native base: 40-char SHA or branch/tag (dispatch only; empty = master)'
         required: false
         default: ''
       report_only:
-        description: 'Triage mode: print verdicts but keep the gate green'
+        description: 'Triage mode: print verdicts but keep the gate green (dispatch only)'
         required: false
         default: false
         type: boolean
 
-# One run per branch at a time, like rust.yml: a new push
-# supersedes the in-flight sweep instead of queueing behind it.
+# One run per branch at a time, like rust.yml: a new rust-passed
+# run supersedes the in-flight sweep instead of queueing behind
+# it. head_ref is empty on workflow_run, so the triggering PR
+# branch leads the group (dispatched runs fall back as before).
 concurrency:
-  group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
+  group: ${{ github.workflow }}-${{ github.event.workflow_run.head_branch || github.head_ref || github.ref_name }}
   cancel-in-progress: true
 
 permissions:
   contents: read
 
 env:
-  # Pinned suite revisions: the pin-inscount branches (snippet PR#52,
-  # algos PR#7) until they merge, then back to master SHAs. The --pin
-  # legs below need harness support, so old-SHA bisection of the
-  # instrumentation legs fails loud on the unknown flag by design.
-  SNIPPETS_SHA_DEFAULT: 3b9c524f2d19469040b1aef8c6fa99597d1c2a9b
-  ALGORITHMS_SHA_DEFAULT: 005645115db4331b93637deb941b7c5ef43a88f0
+  # Pinned suite revisions: ins-only measure-phase heads (snippet
+  # pin-inscount-measure branch, algos pin-inscount) until they
+  # merge, then back to master SHAs. The --pin legs below need
+  # harness support, so old-SHA bisection of the instrumentation
+  # legs fails loud on the unknown flag by design.
+  SNIPPETS_SHA_DEFAULT: 4d53f3bc665348505c7191497fc9f567abf3085b
+  ALGORITHMS_SHA_DEFAULT: bc8e7223bfa4c7ba7a940171ecd5d9c8e478eafb
   # Pinned (not floating "21"): JDK micro versions move cpu numbers
   # and the sweep must stay comparable run to run. Bump deliberately.
   JAVA_VERSION: '21.0.13'
@@ -94,11 +110,14 @@ jobs:
   # Resolve the suite revisions AND the native-vs-native revision
   # pair ONCE per run so all 96 measure legs sweep the same commits.
   # Suite defaults: the pinned SHAs above; a manual dispatch may pin
-  # either input instead (bisection). Native pair: PR head/base by
-  # default on pull_request (stacked PRs diff against their parent),
+  # either input instead (bisection). Native pair: rust-passed PR
+  # head/base by default (stacked PRs diff against their parent),
   # dispatched-ref/master on workflow_dispatch; rs_from/rs_to take a
   # 40-char SHA or any branch/tag.
+  # Runs only for green PR rust runs (plus manual dispatch):
+  # anything else skips here, which skips the whole sweep.
   resolve:
+    if: github.event_name == 'workflow_dispatch' || (github.event.workflow_run.event == 'pull_request' && github.event.workflow_run.conclusion == 'success')
     runs-on: ubuntu-latest
     outputs:
       snippets_sha: ${{ steps.resolve.outputs.snippets_sha }}
@@ -114,13 +133,12 @@ jobs:
           [ -z "$algos" ] && algos="${{ env.ALGORITHMS_SHA_DEFAULT }}"
           from="${{ inputs.rs_from }}"
           to="${{ inputs.rs_to }}"
-          [ -z "$from" ] && from="${{ github.sha }}"
-          if [ -z "$to" ]; then
-            if [ "${{ github.event_name }}" = "pull_request" ]; then
-              to="${{ github.event.pull_request.base.sha }}"
-            else
-              to="master"
-            fi
+          if [ "${{ github.event_name }}" = "workflow_run" ]; then
+            [ -z "$from" ] && from="${{ github.event.workflow_run.head_sha }}"
+            [ -z "$to" ] && to="${{ github.event.workflow_run.pull_requests[0].base.sha }}"
+          else
+            [ -z "$from" ] && from="${{ github.sha }}"
+            [ -z "$to" ] && to="master"
           fi
           to_sha() {
             # Print the 40-char SHA for a SHA-or-ref input.
@@ -154,7 +172,8 @@ jobs:
   # The two native revisions under test (interpreter-only release:
   # `run` needs no LLVM), each fanned out to its 16 measure legs as
   # an artifact. rs-from is what the JVM gate tests; rs-to is its
-  # comparison base (PR base, or master on dispatch).
+  # comparison base (PR base on rust-passed runs, master on
+  # dispatch).
   build-rs:
     needs: [resolve]
     runs-on: ubuntu-latest
@@ -263,6 +282,9 @@ jobs:
       - name: Check out instrumentation tooling
         uses: actions/checkout@v5
         with:
+          # workflow_run defaults to master; pin the tested PR head
+          # (empty on dispatch, which is the dispatched ref).
+          ref: ${{ github.event.workflow_run.head_sha }}
           path: h2h
 
       - name: Cache instrumentation kit
@@ -378,6 +400,9 @@ jobs:
       - name: Check out instrumentation tooling
         uses: actions/checkout@v5
         with:
+          # workflow_run defaults to master; pin the tested PR head
+          # (empty on dispatch, which is the dispatched ref).
+          ref: ${{ github.event.workflow_run.head_sha }}
           path: h2h
 
       - name: Cache instrumentation kit
@@ -470,6 +495,9 @@ jobs:
       - name: Check out instrumentation tooling
         uses: actions/checkout@v5
         with:
+          # workflow_run defaults to master; pin the tested PR head
+          # (empty on dispatch, which is the dispatched ref).
+          ref: ${{ github.event.workflow_run.head_sha }}
           path: h2h
 
       - name: Cache instrumentation kit
@@ -568,6 +596,9 @@ jobs:
       - name: Check out instrumentation tooling
         uses: actions/checkout@v5
         with:
+          # workflow_run defaults to master; pin the tested PR head
+          # (empty on dispatch, which is the dispatched ref).
+          ref: ${{ github.event.workflow_run.head_sha }}
           path: h2h
 
       - name: Cache instrumentation kit
@@ -605,13 +636,14 @@ jobs:
   # Fan-in: union the shards per leg and diff the legs. Strict
   # across-the-board gate, both directions: JVM vs rs-from AND
   # rs-from vs rs-to on cpu/mem, plus rs-from vs rs-to on
-  # instrumented instruction counts and allocated bytes (1%
-  # margin) — any loss (or failure, missing, not-ok, drift, leg
-  # mismatch) fails the PR. The native legs carry the instrument
-  # signals in the same shard JSONs (no second sweep), so the ins
-  # comparisons below reuse the h2h-* legs and write no extra
-  # merged files. No Bencher reporting by design: this job gates,
-  # it does not track history.
+  # instrumented instruction counts (1% margin) — any loss (or
+  # failure, missing, not-ok, drift, leg mismatch) fails the PR.
+  # Memory is RSS (maxrss_kb) only: the Pin tool counts
+  # instructions, never allocations. The native legs carry the
+  # instrument signal in the same shard JSONs (no second sweep),
+  # so the ins comparisons below reuse the h2h-* legs and write
+  # no extra merged files. No Bencher reporting by design: this
+  # job gates, it does not track history.
   h2h-compare:
     name: h2h cpu/mem gate
     needs: [measure-recipes, measure-recipes-jvm, measure-algos, measure-algos-jvm]
@@ -622,6 +654,10 @@ jobs:
       actions: write # shard download + merged upload
     steps:
       - uses: actions/checkout@v5
+        with:
+          # workflow_run defaults to master; pin the tested PR head
+          # (empty on dispatch, which is the dispatched ref).
+          ref: ${{ github.event.workflow_run.head_sha }}
 
       - name: Download shard results
         uses: actions/download-artifact@v6
@@ -682,14 +718,14 @@ jobs:
             --base-name rs-to --challenger-name rs-from \
             --jvm h2h-recipes-rs-to-shard-*/h2h-recipes-rs-to-shard-*.json \
             --rs h2h-recipes-rs-from-shard-*/h2h-recipes-rs-from-shard-*.json \
-            --metrics ins,alloc --margin 0.01 \
+            --metrics ins --margin 0.01 \
             --summary-file "$GITHUB_STEP_SUMMARY" $report_only || rc=$?
           $compare \
             --label algos-rsrs-ins \
             --base-name rs-to --challenger-name rs-from \
             --jvm h2h-algos-rs-to-shard-*/h2h-algos-rs-to-shard-*.json \
             --rs h2h-algos-rs-from-shard-*/h2h-algos-rs-from-shard-*.json \
-            --metrics ins,alloc --margin 0.01 \
+            --metrics ins --margin 0.01 \
             --summary-file "$GITHUB_STEP_SUMMARY" $report_only || rc=$?
           exit $rc
 
