@@ -1,5 +1,6 @@
 // Command h2h-compare is the head-to-head gate: reference leg vs
-// challenger leg on cpu_s + maxrss_kb (+ pin_instructions).
+// challenger leg on cpu_s + maxrss_kb (+ pin_instructions and
+// pin_allocated_bytes via --metrics).
 //
 // Usage:
 //

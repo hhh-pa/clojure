@@ -2,16 +2,15 @@
 # and vs each other, across the snippet suite (hhh-pa/clojure-code-snippet)
 # and the algorithms suite (hhh-pa/clojure-algorithms). Each suite
 # runs a JVM leg plus TWO clojure-rs legs (rs-from, rs-to), sharded
-# 8 ways (48 measure jobs), plus native-only instrumentation legs
-# for the rs pair, sharded 16 ways (64 jobs); the h2h-compare job
-# unions the shards per leg and gates on per-case median cpu_s +
+# 8 ways (48 measure jobs, one sweep); the h2h-compare job unions
+# the shards per leg and gates on per-case median cpu_s +
 # maxrss_kb. The gate rule: clojure-rs must beat JVM Clojure, AND
 # rs-from must win-or-tie vs rs-to on every case — ANY loss fails
-# the PR. The instrumentation legs measure each case once, under
-# Intel Pin only (--repeat 0), and add a deterministic
-# instruction-count gate (1% margin) for rs-from vs rs-to, immune
-# to the wall-time wobble that reds the cpu/rsrs leg on no-op
-# changes.
+# the PR. The native legs additionally count instructions and
+# allocated bytes under Intel Pin in the same sweep (no second job
+# set), feeding a deterministic instruction/allocation gate (1%
+# margin) for rs-from vs rs-to, immune to the wall-time wobble
+# that reds the cpu/rsrs leg on no-op changes.
 #
 # Revision pairs ("PR from head to base" parlance): from is the
 # change under test, to is its baseline. On pull_request, from =
@@ -83,8 +82,8 @@ env:
   # algos PR#7) until they merge, then back to master SHAs. The --pin
   # legs below need harness support, so old-SHA bisection of the
   # instrumentation legs fails loud on the unknown flag by design.
-  SNIPPETS_SHA_DEFAULT: 4fe8d865d275e1e606e459c87e64563845de8d78
-  ALGORITHMS_SHA_DEFAULT: c630c0bd223ab9042f474b44383db939d33609bb
+  SNIPPETS_SHA_DEFAULT: acef0694e892c467f574158ffb94c73ff1d916fb
+  ALGORITHMS_SHA_DEFAULT: 1fd2e7205e670b9ed1c0d2272764c872618f07e1
   # Pinned (not floating "21"): JDK micro versions move cpu numbers
   # and the sweep must stay comparable run to run. Bump deliberately.
   JAVA_VERSION: '21.0.13'
@@ -92,7 +91,7 @@ env:
 
 jobs:
   # Resolve the suite revisions AND the native-vs-native revision
-  # pair ONCE per run so all 112 measure legs sweep the same commits.
+  # pair ONCE per run so all 48 measure legs sweep the same commits.
   # Suite defaults: the pinned SHAs above; a manual dispatch may pin
   # either input instead (bisection). Native pair: PR head/base by
   # default on pull_request (stacked PRs diff against their parent),
@@ -196,10 +195,10 @@ jobs:
   measure-recipes:
     needs: [resolve, build-rs]
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
     permissions:
-      contents: read # suite checkout
-      actions: write # jars cache + shard artifact
+      contents: read # suite + instrumentation tooling checkouts
+      actions: write # jars + instrumentation caches + shard artifact
     strategy:
       # Let every shard finish so partial artifacts upload for diagnosis.
       fail-fast: false
@@ -284,12 +283,35 @@ jobs:
           chmod +x "$GITHUB_WORKSPACE/cljrs-bin/clojure-rs"
           echo "$GITHUB_WORKSPACE/cljrs-bin" >> "$GITHUB_PATH"
 
+      - name: Check out instrumentation tooling
+        if: matrix.runtime != 'jvm'
+        uses: actions/checkout@v5
+        with:
+          path: h2h
+
+      - name: Cache instrumentation kit
+        if: matrix.runtime != 'jvm'
+        id: instrumentation-cache
+        uses: actions/cache@v5
+        with:
+          path: ~/instrumentation
+          key: instrumentation-pin-4.4-${{ hashFiles('h2h/scripts/ci/setup-instrumentation.sh', 'h2h/scripts/ci/instrumentation/inscount.cpp') }}
+
+      - name: Provision instrumentation
+        if: matrix.runtime != 'jvm'
+        run: |
+          bash h2h/scripts/ci/setup-instrumentation.sh
+
       - name: Measure head-to-head shard
         working-directory: snippets
         run: |
           flags=(--runtime "${{ matrix.runtime }}")
           if [ "${{ matrix.runtime }}" != "jvm" ]; then
             flags+=(--command-template 'clojure-rs run {script}')
+            # Native legs also count instructions + allocated bytes
+            # under Pin (same sweep, no second job set).
+            flags+=(--pin --pin-bin "$INSTRUMENTATION_BIN" --pin-tool "$INSTRUMENTATION_TOOL")
+            flags+=(--pin-repeat 2 --pin-timeout 1500)
           fi
           ./scripts/ci/go/snip measure --resources tests/resources \
             --repeat 3 --no-alloc --no-perf --jobs 3 --timeout 300 \
@@ -315,8 +337,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 90
     permissions:
-      contents: read # suite checkout
-      actions: write # jars cache + shard artifact
+      contents: read # suite + instrumentation tooling checkouts
+      actions: write # jars + instrumentation caches + shard artifact
     strategy:
       # Let every shard finish so partial artifacts upload for diagnosis.
       fail-fast: false
@@ -387,6 +409,25 @@ jobs:
           chmod +x "$GITHUB_WORKSPACE/cljrs-bin/clojure-rs"
           echo "$GITHUB_WORKSPACE/cljrs-bin" >> "$GITHUB_PATH"
 
+      - name: Check out instrumentation tooling
+        if: matrix.runtime != 'jvm'
+        uses: actions/checkout@v5
+        with:
+          path: h2h
+
+      - name: Cache instrumentation kit
+        if: matrix.runtime != 'jvm'
+        id: instrumentation-cache
+        uses: actions/cache@v5
+        with:
+          path: ~/instrumentation
+          key: instrumentation-pin-4.4-${{ hashFiles('h2h/scripts/ci/setup-instrumentation.sh', 'h2h/scripts/ci/instrumentation/inscount.cpp') }}
+
+      - name: Provision instrumentation
+        if: matrix.runtime != 'jvm'
+        run: |
+          bash h2h/scripts/ci/setup-instrumentation.sh
+
       - name: Measure head-to-head shard
         working-directory: algos
         run: |
@@ -396,6 +437,10 @@ jobs:
             flags+=(--cp "$jars:src:test:resources")
           else
             flags+=(--command-template 'clojure-rs run perf/driver.clj {ns} src test resources')
+            # Native legs also count instructions + allocated bytes
+            # under Pin (same sweep, no second job set).
+            flags+=(--pin --pin-bin "$INSTRUMENTATION_BIN" --pin-tool "$INSTRUMENTATION_TOOL")
+            flags+=(--pin-repeat 2 --pin-timeout 1200)
           fi
           ./scripts/ci/go/algoperf measure \
             --repeat 3 --no-alloc --no-perf --jobs 3 --timeout 1800 \
@@ -412,216 +457,19 @@ jobs:
           path: algos/h2h-algos-${{ matrix.runtime }}-shard-${{ matrix.shard }}.json
           retention-days: 7
 
-  # Instrumentation legs: deterministic instruction counts for
-  # the native pair (rs-from, rs-to), 16 shards each (64 jobs).
-  # Each case is measured once, under Pin only (--repeat 0; the
-  # first Pin run still gates output correctness); the ins gate
-  # compares pin_instructions medians with a 1% margin.
-  # Native-only by design: JVM-under-Pin trips Pin 4.4's memory
-  # manager (mmap-overlap exit 127) and costs ~40x wall, while the
-  # wall-time cpu/mem gates already cover JVM-vs-RS at ~10x
-  # margins. The monster recipes cases (bfs t5: 146s native, ~20min
-  # under Pin) set the 1500s instrumentation timeout and 16-way
-  # sharding.
-  measure-recipes-instrumentation:
-    needs: [resolve, build-rs]
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    permissions:
-      contents: read # suite + tool checkouts
-      actions: write # instrumentation cache + shard artifact
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
-        runtime: [rs-from, rs-to]
-    name: recipes-instrumentation ${{ matrix.runtime }} (shard ${{ matrix.shard }}/16)
-    steps:
-      - name: Check out snippet suite
-        uses: actions/checkout@v5
-        with:
-          repository: hhh-pa/clojure-code-snippet
-          ref: ${{ needs.resolve.outputs.snippets_sha }}
-          path: snippets
-
-      - name: Check out instrumentation tooling
-        uses: actions/checkout@v5
-        with:
-          path: h2h
-
-      - name: Set up Go
-        uses: actions/setup-go@v6
-        with:
-          go-version-file: snippets/scripts/ci/go/go.mod
-          cache: false # stdlib-only module: nothing to cache but the build below
-
-      - name: Build snip
-        run: |
-          cd snippets/scripts/ci/go
-          go build -o snip ./cmd/snip
-
-      - name: Cache instrumentation kit
-        id: instrumentation-cache
-        uses: actions/cache@v5
-        with:
-          path: ~/instrumentation
-          key: instrumentation-pin-4.4-${{ hashFiles('h2h/scripts/ci/setup-instrumentation.sh', 'h2h/scripts/ci/instrumentation/inscount.cpp') }}
-
-      - name: Provision instrumentation
-        run: |
-          bash h2h/scripts/ci/setup-instrumentation.sh
-
-      - name: Decrypt and extract resources
-        env:
-          RESOURCES_PASSPHRASE: ${{ secrets.RESOURCES_PASSPHRASE }}
-        working-directory: snippets
-        run: |
-          if [ -z "$RESOURCES_PASSPHRASE" ]; then
-            echo "error: the RESOURCES_PASSPHRASE secret (organization level, with access to hhh-pa/clojure) is not configured." >&2
-            exit 1
-          fi
-          mkdir -p tests/resources
-          gpg --batch --yes --pinentry-mode loopback \
-            --passphrase "$RESOURCES_PASSPHRASE" \
-            -d tests/resources.tar.xz.asc | tar -xJ -C tests/resources --strip-components=1
-
-      - name: Install GNU time
-        run: |
-          sudo DEBIAN_FRONTEND=noninteractive apt-get update
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y time
-
-      - name: Use built clojure-rs
-        uses: actions/download-artifact@v6
-        with:
-          name: cljrs-${{ matrix.runtime }}
-          path: cljrs-bin
-
-      - name: Add clojure-rs to PATH
-        run: |
-          # download-artifact does not preserve the executable bit.
-          chmod +x "$GITHUB_WORKSPACE/cljrs-bin/clojure-rs"
-          echo "$GITHUB_WORKSPACE/cljrs-bin" >> "$GITHUB_PATH"
-
-      - name: Measure instrumentation shard
-        working-directory: snippets
-        run: |
-          ./scripts/ci/go/snip measure --resources tests/resources \
-            --repeat 0 --no-alloc --no-perf --jobs 3 \
-            --runtime "${{ matrix.runtime }}" \
-            --command-template 'clojure-rs run {script}' \
-            --pin --pin-bin "$INSTRUMENTATION_BIN" --pin-tool "$INSTRUMENTATION_TOOL" \
-            --pin-repeat 2 --pin-timeout 1500 \
-            --shard ${{ matrix.shard }}/16 \
-            --output "instrumentation-recipes-${{ matrix.runtime }}-shard-${{ matrix.shard }}.json" \
-            --summary-file "$GITHUB_STEP_SUMMARY"
-
-      - name: Upload shard results
-        if: always()
-        uses: actions/upload-artifact@v6
-        with:
-          name: instrumentation-recipes-${{ matrix.runtime }}-shard-${{ matrix.shard }}
-          path: snippets/instrumentation-recipes-${{ matrix.runtime }}-shard-${{ matrix.shard }}.json
-          retention-days: 7
-
-  # Algos instrumentation legs: same shape as
-  # recipes-instrumentation (16 shards x the native pair). No
-  # decrypt step: this suite carries its resources/ in-repo.
-  measure-algos-instrumentation:
-    needs: [resolve, build-rs]
-    runs-on: ubuntu-latest
-    timeout-minutes: 90
-    permissions:
-      contents: read # suite + tool checkouts
-      actions: write # instrumentation cache + shard artifact
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
-        runtime: [rs-from, rs-to]
-    name: algos-instrumentation ${{ matrix.runtime }} (shard ${{ matrix.shard }}/16)
-    steps:
-      - name: Check out algorithms suite
-        uses: actions/checkout@v5
-        with:
-          repository: hhh-pa/clojure-algorithms
-          ref: ${{ needs.resolve.outputs.algorithms_sha }}
-          path: algos
-
-      - name: Check out instrumentation tooling
-        uses: actions/checkout@v5
-        with:
-          path: h2h
-
-      - name: Set up Go
-        uses: actions/setup-go@v6
-        with:
-          go-version-file: algos/scripts/ci/go/go.mod
-          cache: false # stdlib-only module: nothing to cache but the build below
-
-      - name: Build algoperf
-        run: |
-          cd algos/scripts/ci/go
-          go build -o algoperf ./cmd/algoperf
-
-      - name: Cache instrumentation kit
-        id: instrumentation-cache
-        uses: actions/cache@v5
-        with:
-          path: ~/instrumentation
-          key: instrumentation-pin-4.4-${{ hashFiles('h2h/scripts/ci/setup-instrumentation.sh', 'h2h/scripts/ci/instrumentation/inscount.cpp') }}
-
-      - name: Provision instrumentation
-        run: |
-          bash h2h/scripts/ci/setup-instrumentation.sh
-
-      - name: Install GNU time
-        run: |
-          sudo DEBIAN_FRONTEND=noninteractive apt-get update
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y time
-
-      - name: Use built clojure-rs
-        uses: actions/download-artifact@v6
-        with:
-          name: cljrs-${{ matrix.runtime }}
-          path: cljrs-bin
-
-      - name: Add clojure-rs to PATH
-        run: |
-          # download-artifact does not preserve the executable bit.
-          chmod +x "$GITHUB_WORKSPACE/cljrs-bin/clojure-rs"
-          echo "$GITHUB_WORKSPACE/cljrs-bin" >> "$GITHUB_PATH"
-
-      - name: Measure instrumentation shard
-        working-directory: algos
-        run: |
-          ./scripts/ci/go/algoperf measure \
-            --repeat 0 --no-alloc --no-perf --jobs 3 \
-            --runtime "${{ matrix.runtime }}" \
-            --command-template 'clojure-rs run perf/driver.clj {ns} src test resources' \
-            --pin --pin-bin "$INSTRUMENTATION_BIN" --pin-tool "$INSTRUMENTATION_TOOL" \
-            --pin-repeat 2 --pin-timeout 1200 \
-            --shard ${{ matrix.shard }}/16 \
-            --output "instrumentation-algos-${{ matrix.runtime }}-shard-${{ matrix.shard }}.json" \
-            --summary-file "$GITHUB_STEP_SUMMARY"
-
-      - name: Upload shard results
-        if: always()
-        uses: actions/upload-artifact@v6
-        with:
-          name: instrumentation-algos-${{ matrix.runtime }}-shard-${{ matrix.shard }}
-          path: algos/instrumentation-algos-${{ matrix.runtime }}-shard-${{ matrix.shard }}.json
-          retention-days: 7
-
   # Fan-in: union the shards per leg and diff the legs. Strict
   # across-the-board gate, both directions: JVM vs rs-from AND
   # rs-from vs rs-to on cpu/mem, plus rs-from vs rs-to on
-  # instrumented instruction counts (1% margin) — any loss (or failure,
-  # missing, not-ok, drift, leg mismatch) fails the PR. No
-  # Bencher reporting by design: this job gates, it does not
-  # track history.
+  # instrumented instruction counts and allocated bytes (1%
+  # margin) — any loss (or failure, missing, not-ok, drift, leg
+  # mismatch) fails the PR. The native legs carry the instrument
+  # signals in the same shard JSONs (no second sweep), so the ins
+  # comparisons below reuse the h2h-* legs and write no extra
+  # merged files. No Bencher reporting by design: this job gates,
+  # it does not track history.
   h2h-compare:
     name: h2h cpu/mem gate
-    needs: [measure-recipes, measure-algos, measure-recipes-instrumentation, measure-algos-instrumentation]
+    needs: [measure-recipes, measure-algos]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -634,11 +482,6 @@ jobs:
         uses: actions/download-artifact@v6
         with:
           pattern: h2h-*-shard-*
-
-      - name: Download instrumentation shard results
-        uses: actions/download-artifact@v6
-        with:
-          pattern: instrumentation-*-shard-*
 
       - name: Set up Go
         uses: actions/setup-go@v6
@@ -692,20 +535,16 @@ jobs:
           $compare \
             --label recipes-rsrs-ins \
             --base-name rs-to --challenger-name rs-from \
-            --jvm instrumentation-recipes-rs-to-shard-*/instrumentation-recipes-rs-to-shard-*.json \
-            --rs instrumentation-recipes-rs-from-shard-*/instrumentation-recipes-rs-from-shard-*.json \
-            --metrics ins --margin 0.01 \
-            --merged-jvm instrumentation-recipes-rs-to-merged.json \
-            --merged-rs instrumentation-recipes-rs-from-merged.json \
+            --jvm h2h-recipes-rs-to-shard-*/h2h-recipes-rs-to-shard-*.json \
+            --rs h2h-recipes-rs-from-shard-*/h2h-recipes-rs-from-shard-*.json \
+            --metrics ins,alloc --margin 0.01 \
             --summary-file "$GITHUB_STEP_SUMMARY" $report_only || rc=$?
           $compare \
             --label algos-rsrs-ins \
             --base-name rs-to --challenger-name rs-from \
-            --jvm instrumentation-algos-rs-to-shard-*/instrumentation-algos-rs-to-shard-*.json \
-            --rs instrumentation-algos-rs-from-shard-*/instrumentation-algos-rs-from-shard-*.json \
-            --metrics ins --margin 0.01 \
-            --merged-jvm instrumentation-algos-rs-to-merged.json \
-            --merged-rs instrumentation-algos-rs-from-merged.json \
+            --jvm h2h-algos-rs-to-shard-*/h2h-algos-rs-to-shard-*.json \
+            --rs h2h-algos-rs-from-shard-*/h2h-algos-rs-from-shard-*.json \
+            --metrics ins,alloc --margin 0.01 \
             --summary-file "$GITHUB_STEP_SUMMARY" $report_only || rc=$?
           exit $rc
 
@@ -714,7 +553,5 @@ jobs:
         uses: actions/upload-artifact@v6
         with:
           name: h2h-merged
-          path: |
-            h2h-*-merged.json
-            instrumentation-*-merged.json
+          path: h2h-*-merged.json
           retention-days: 14
