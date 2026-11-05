@@ -6,7 +6,7 @@
 // the terms of this license.
 
 //! Promises (S6B): single-shot latches mirroring the `promise` reify
-//! (`docs/t1174/concurrency-contract.md`, `docs/t1174/s6-pins.md` P4,
+//! (`docs/spec/t1174/concurrency-contract.md`, `docs/spec/t1174/s6-pins.md` P4,
 //! `/tmp/s6b-probe*.clj`).
 //!
 //! A promise starts [`PromiseState::Pending`]; the first

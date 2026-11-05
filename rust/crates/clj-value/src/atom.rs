@@ -6,7 +6,7 @@
 // the terms of this license.
 
 //! Atoms (S6A): shared mutable cells mirroring `clojure.lang.Atom`
-//! (`docs/t1174/concurrency-contract.md`, `s6-pins.md` P2).
+//! (`docs/spec/t1174/concurrency-contract.md`, `s6-pins.md` P2).
 //!
 //! The cell holds the current value, the `:validator` fn (if any),
 //! the `:meta` map (if any), and the watches map (`{key fn}`, fired

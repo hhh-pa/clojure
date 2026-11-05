@@ -777,7 +777,7 @@ mod tests {
 
     #[test]
     fn oracle_fx2_entry_hash() {
-        // `docs/t1192/probes/fx2-mapentry3.out` (`entry-hash`,
+        // `docs/spec/t1192/probes/fx2-mapentry3.out` (`entry-hash`,
         // `vec-hash`): an entry hashes exactly like its 2-vector.
         let k = kw(None, "a");
         assert_eq!(hasheq(&crate::map_entry(k.clone(), int(1))), -1_809_393_901);
@@ -789,7 +789,7 @@ mod tests {
 
     #[test]
     fn oracle_fx2_entry_percent_h() {
-        // `docs/t1192/probes/fx2-mapentry16.out` (`pcth-eq`):
+        // `docs/spec/t1192/probes/fx2-mapentry16.out` (`pcth-eq`):
         // `.hashCode` matches the 2-vector exactly.
         let k = kw(None, "a");
         assert_eq!(

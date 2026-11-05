@@ -6,7 +6,7 @@
 // the terms of this license.
 
 //! Refs (S19): STM shared cells mirroring `clojure.lang.Ref`
-//! (`docs/zero-oos-s19-stm/specification.md` §1a).
+//! (`docs/spec/zero-oos-s19-stm/specification.md` §1a).
 //!
 //! The cell holds the current value plus its commit point, the
 //! history chain (`(point, value)` pairs, newest first — the MVCC

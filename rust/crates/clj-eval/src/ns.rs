@@ -6,7 +6,7 @@
 // the terms of this license.
 
 //! S5A2 namespace vars, the loader, and `boot` (normative:
-//! `docs/t1174/namespaces-contract.md`, oracles probe35-36).
+//! `docs/spec/t1174/namespaces-contract.md`, oracles probe35-36).
 //!
 //! Natives receive the live evaluator (§N), so `in-ns` switches the
 //! registry current, `require` evaluates files, and `eval` re-enters

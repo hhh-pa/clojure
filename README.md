@@ -26,8 +26,8 @@ workspace below is the sole implementation.
 
 Normative details live with the code: the
 [core coverage list](rust/core-coverage.md) (machine-checked by CI),
-the [design spec](docs/t1174/specification.md) and its contracts
-(`docs/t1174/*-contract.md`), and the [workspace
+the [design spec](docs/spec/t1174/specification.md) and its contracts
+(`docs/spec/t1174/*-contract.md`), and the [workspace
 README](rust/README.md) (LLVM setup, build commands).
 
 ## Quick start
@@ -274,7 +274,7 @@ rust/                   Cargo workspace (binary + 7 crates, edition 2024)
   crates/clj-rt/        AOT runtime archive (safe prim dispatch + rt_* shims)
   core-coverage.md      normative core var coverage (CI-enforced)
   tests/                integration suites + fixtures + vendored corpus inputs
-docs/t1174/             design spec, per-area contracts, oracle pins,
+docs/spec/t1174/        design spec, per-area contracts, oracle pins,
                         differential corpora, TLA+ models
 scripts/ci/             Go CI tooling + quality-gate container image
 .github/workflows/     rust.yml (CI) + rust-release.yml (v* releases)
@@ -309,12 +309,15 @@ epl-v10.html            license text
 
 ## Further reading
 
-- [Roadmap](docs/roadmap/specification.md) — what needs to be done (goals, queue, backlog).
-- [Design spec](docs/t1174/specification.md) — goals, non-goals,
+- [Roadmap](docs/spec/roadmap/specification.md) — what needs to be done (goals, queue, backlog).
+- [Design spec](docs/spec/t1174/specification.md) — goals, non-goals,
   CLI/language contracts, slice plan (S1–S9, all landed).
 - [Core coverage](rust/core-coverage.md) — every var's
   implemented/divergent/out-of-scope state.
-- [Per-area contracts](docs/t1174/) — reader, evaluator, values,
+- [Per-area contracts](docs/spec/t1174/) — reader, evaluator, values,
   namespaces, vars, macros, concurrency (pinned divergences).
 - [Workspace README](rust/README.md) — LLVM setup per platform,
   build/test commands, crate layout.
+- [pprint user docs](docs/user/clojure/pprint/PrettyPrinting.markdown) —
+  pretty-printer usage (`CommonLispFormat.markdown` beside it covers
+  the format directives).

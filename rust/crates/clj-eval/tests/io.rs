@@ -283,7 +283,7 @@ fn gap2_read_string_shape_rows() {
 
 // ---- S-instream (issue #36): `*in*`, `read`, `read-line`,
 // `line-seq`, `with-in-str`. Every test cites the
-// `docs/i36-instream/probes/instream.out` row it pins.
+// `docs/spec/i36-instream/probes/instream.out` row it pins.
 // Tests never touch the real stdin root (it would block CI):
 // string readers everywhere.
 
@@ -1015,7 +1015,7 @@ fn instream_read_string_deny_row() {
 }
 
 // ---- F-read-opts (issue #40): `read-string` opts arity. Every
-// assert cites the `docs/i40-readopts/probes/read-opts.out` row it
+// assert cites the `docs/spec/i40-readopts/probes/read-opts.out` row it
 // pins; errors are bare `RuntimeException`s (no `ReaderException`
 // wrapper anywhere in the oracle).
 

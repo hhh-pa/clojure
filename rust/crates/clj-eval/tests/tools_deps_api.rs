@@ -14,7 +14,7 @@
 //! `util/concurrent.clj`); `clojure.set` / `clojure.string`
 //! (`blank?`/`join`) for the local helpers. Each test cites the
 //! upstream behavior it pins. Divergences are the spec's C1–C14,
-//! R4, X1 (`docs/gap-124/slice-3.md`).
+//! R4, X1 (`docs/spec/gap-124/slice-3.md`).
 //!
 //! Each test boots its own `Evaluator`, so the global session var
 //! cannot leak across tests; every filesystem case uses a unique

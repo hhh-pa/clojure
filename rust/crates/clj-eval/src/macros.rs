@@ -10,7 +10,7 @@
 //! call (`list`, `apply`, `vector`, `hash-map`, `hash-set` —
 //! `seq`/`concat` live in `lazy`/`seqs` since S5D went lazy per
 //! C4). Oracle: probe38; rules:
-//! `docs/t1174/macros-contract.md`. The wrap partition is
+//! `docs/spec/t1174/macros-contract.md`. The wrap partition is
 //! source-read from `Compiler.macroexpand1`.
 
 use std::sync::Arc;

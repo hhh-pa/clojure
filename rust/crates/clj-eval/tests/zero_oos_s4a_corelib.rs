@@ -8,7 +8,7 @@
 //! Zero-oos S4a corelib small vars: probe replay for `some->` /
 //! `some->>` / `when-first` / `while`, the `parse-*` natives,
 //! `printf` / `println-str` / `prn-str`, `rand-nth`, and `test`
-//! (see `docs/zero-oos-s4a-corelib/probes/corelib.{clj,out}`).
+//! (see `docs/spec/zero-oos-s4a-corelib/probes/corelib.{clj,out}`).
 //! RNG pins are shape/range only — exact draws differ across
 //! runtimes by design.
 

@@ -12,7 +12,7 @@
 ;; `coord-summary`, `license-info`, and the equal-sha fast path of
 ;; `compare-versions`.
 ;;
-;; Port decisions (see docs/gap-124/slice-2.md N1/B11):
+;; Port decisions (see docs/spec/gap-124/slice-2.md N1/B11):
 ;; - Every arm needing `gitlibs` (tag validity/resolution,
 ;;   procure, tag listing, ancestor checks) throws not-yet ex-info
 ;;   naming the git-network slice; pure arms are upstream-exact.

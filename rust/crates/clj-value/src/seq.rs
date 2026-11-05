@@ -6,7 +6,7 @@
 // the terms of this license.
 
 //! Seqs (S3, C4): lazy, chunked (32), nil-punned sequences over
-//! collections (`docs/t1174/probes/probe18.clj`).
+//! collections (`docs/spec/t1174/probes/probe18.clj`).
 //!
 //! [`Seq::first`]/[`Seq::next`]/[`Seq::more`] mirror the JVM
 //! (`next` yields `None` at the end, `more` the empty seq).

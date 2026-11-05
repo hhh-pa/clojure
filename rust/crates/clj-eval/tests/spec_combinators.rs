@@ -15,7 +15,7 @@
 //! `clojure/spec/alpha.clj`,
 //! used as a TEXT oracle only (no JVM was executed for this
 //! slice; pins are derived by code-reading per
-//! `docs/gap-122/slice-B.md`). Upstream line references name the
+//! `docs/spec/gap-122/slice-B.md`). Upstream line references name the
 //! construct each test pins.
 
 use clj_eval::{Evaluator, SourceError, boot};

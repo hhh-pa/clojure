@@ -11,7 +11,7 @@
 ;; (coord-deps, coord-paths, manifest-file, coord-usage,
 ;; prep-command) over string paths.
 ;;
-;; Port adaptations (see docs/gap-124/slice-2.md B3/B4/B5):
+;; Port adaptations (see docs/spec/gap-124/slice-2.md B3/B4/B5):
 ;; - The session key and `manifest-file` use canonical paths
 ;;   (upstream: absolute); the read itself stays cwd-relative for
 ;;   relative roots, as upstream.

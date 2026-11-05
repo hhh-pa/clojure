@@ -8,11 +8,11 @@
 //! Gap-122 slice-A tests: map specs (`s/keys` + `s/merge`).
 //!
 //! Oracle: upstream `clojure/spec/alpha.clj` from
-//! `org.clojure/spec.alpha-0.5.238` (see `docs/gap-122/slice-A.md`
+//! `org.clojure/spec.alpha-0.5.238` (see `docs/spec/gap-122/slice-A.md`
 //! for the jar pin + hashes). The JVM was never executed: every
 //! expectation below is derived by reading the upstream source,
 //! and each test cites the oracle lines. Scenario numbers refer to
-//! `docs/gap-122/slice-A.md`.
+//! `docs/spec/gap-122/slice-A.md`.
 
 use clj_eval::{Evaluator, SourceError, boot};
 use clj_value::{PrintOpts, Value, pr_to_string};

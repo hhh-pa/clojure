@@ -20,9 +20,9 @@
 //! [`install_async_ns`], called from `load_one`), so boot is
 //! untouched and unqualified use without a require fails with the
 //! stock "no such namespace", like the JVM without the require.
-//! Oracle: `docs/gap-123/g123-*.clj`; pins:
-//! `docs/gap-123/probes.md`, `docs/gap-123/slice-2.md`,
-//! `docs/gap-123/slice-3.md`.
+//! Oracle: `docs/spec/gap-123/g123-*.clj`; pins:
+//! `docs/spec/gap-123/probes.md`, `docs/spec/gap-123/slice-2.md`,
+//! `docs/spec/gap-123/slice-3.md`.
 //!
 //! Documented deviations (D1–D7 in `slice-2.md`, D9–D12 in
 //! `slice-3.md`): `closed?` is public here (the JVM keeps it in

@@ -15,7 +15,7 @@
 //! Rust code builds them through the `pub` constructors
 //! below — the only construction surface — and Clojure code
 //! consumes what it is given. Oracle:
-//! `docs/zero-oos-s17-jdkio/probes/jdkio.out`.
+//! `docs/spec/zero-oos-s17-jdkio/probes/jdkio.out`.
 
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};

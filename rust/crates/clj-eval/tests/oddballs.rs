@@ -7,7 +7,7 @@
 
 //! Zero-oos S20 oddballs: guard-row absence pins, `*repl*`, and the
 //! error-shape natives (see
-//! `docs/zero-oos-s20-oddballs/probes/{guards,errors,errors2,errors3,errors4}.{clj,out}`).
+//! `docs/spec/zero-oos-s20-oddballs/probes/{guards,errors,errors2,errors3,errors4}.{clj,out}`).
 //! Every test names the probe labels it replays. The session-true
 //! leg of `*repl*` lives in `clj-repl/tests/session.rs`
 //! (`s20_repl_*`) — a `Session` cannot be built here without a

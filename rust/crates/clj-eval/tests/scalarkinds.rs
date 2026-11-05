@@ -8,7 +8,7 @@
 //! Zero-oos S9 scalar kinds: probe replay for `parse-uuid` /
 //! `random-uuid` / `uuid?` / `uri?` / `Inst` / `inst-ms` /
 //! `inst-ms*` / `inst?` (see
-//! `docs/zero-oos-s9-scalarkinds/probes/*.{clj,out}`). Labels name
+//! `docs/spec/zero-oos-s9-scalarkinds/probes/*.{clj,out}`). Labels name
 //! the replayed pins (`u-*` in `uuid.out`, `i-*` in `inst.out`,
 //! `r-*` in `uri.out`, `e-*` in `edges.out`).
 //!

@@ -11,7 +11,7 @@
 ;; canonicalize, manifest-type, find-versions, compare-versions,
 ;; coord-summary, license-info, and the `:jar` manifest rules.
 ;;
-;; Port decisions (see docs/gap-124/slice-2.md R2/B8/B10):
+;; Port decisions (see docs/spec/gap-124/slice-2.md R2/B8/B10):
 ;; - `lib-location :local` stays in the shell (B8 layout rule —
 ;;   the shell owns all of `lib-location`).
 ;; - A file `:local/root` is REFUSED in `manifest-type` (R2), as

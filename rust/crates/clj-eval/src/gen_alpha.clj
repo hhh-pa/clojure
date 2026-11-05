@@ -11,7 +11,7 @@
 ;; itself uses. No test.check is ported; generator fns answer plain
 ;; values (no rose trees, no shrinking — that is slice I).
 ;;
-;; Port adaptations (see docs/gap-122/slice-F1.md for the full list):
+;; Port adaptations (see docs/spec/gap-122/slice-F1.md for the full list):
 ;; - No syntax-quote and no `::auto-resolve` anywhere in this file:
 ;;   the port reads a whole load batch before evaluating it, so both
 ;;   would qualify against the *requiring* namespace instead of this
@@ -32,7 +32,7 @@
 ;; wiring needs (`delay`/`delay-impl`, `hash-map`,
 ;; `vector-distinct` + `the-shuffle-fn`), restoring
 ;; `coll-distinct-by` to the upstream arg shape and the ns
-;; `:exclude` to upstream's list (see docs/gap-122/slice-F2.md,
+;; `:exclude` to upstream's list (see docs/spec/gap-122/slice-F2.md,
 ;; pinned by `rust/crates/clj-eval/tests/gen_wiring.rs`).
 (ns clojure.spec.gen.alpha
   (:refer-clojure :exclude [boolean bytes cat hash-map list map not-empty set vector

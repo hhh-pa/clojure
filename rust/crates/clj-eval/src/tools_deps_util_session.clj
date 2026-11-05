@@ -10,8 +10,8 @@
 ;; brought `session` + `retrieve`; slice 3 adds `with-session` and
 ;; `retrieve-local`, completing the namespace.
 ;;
-;; Port adaptations (see docs/gap-124/slice-2.md B2 and
-;; docs/gap-124/slice-3.md C9/C10):
+;; Port adaptations (see docs/spec/gap-124/slice-2.md B2 and
+;; docs/spec/gap-124/slice-3.md C9/C10):
 ;; - `session` is an `(atom {})`, not a `ConcurrentHashMap`;
 ;;   `retrieve` is check-then-swap (a repeated compute under races
 ;;   is benign — cached values are content-derived).

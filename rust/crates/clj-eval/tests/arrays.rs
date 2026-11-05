@@ -6,8 +6,8 @@
 // the terms of this license.
 
 //! S15 Java arrays: one test per var replaying the
-//! `docs/zero-oos-s15-arrays/probes/*.out` and
-//! `docs/zero-oos-s15-arrays/mi-3d/*.out` labels verbatim
+//! `docs/spec/zero-oos-s15-arrays/probes/*.out` and
+//! `docs/spec/zero-oos-s15-arrays/mi-3d/*.out` labels verbatim
 //! (oracle label → port assertion, quoting the `.out` line),
 //! plus port-only pins (D1–D6, keyword designators, the OOM
 //! guard).

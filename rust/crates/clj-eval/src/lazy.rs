@@ -744,7 +744,7 @@ fn force_pending(eval: &mut Evaluator, p: &PendingSeq) -> Result<Forced, Signal>
 
 /// Step a pending seq (forcing one step; forced chunks are
 /// non-empty by construction — see the no-empty-chunk proof in
-/// `docs/t1174/s8-coverage.md`).
+/// `docs/spec/t1174/s8-coverage.md`).
 fn step_pending_unit(eval: &mut Evaluator, p: &PendingSeq) -> Result<StepUnit, Signal> {
     match force_pending(eval, p)? {
         Forced::Empty => Ok(StepUnit::Empty),

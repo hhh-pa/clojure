@@ -747,7 +747,7 @@ No slice on this branch: hard-never reasons stand alone, design-blocked rows nam
 | `construct-proxy` | implemented | S14 proxy instance of the named class (nil fn map; no ctor args); typeinternals.rs construct_proxy_rows, construct_proxy_errors (S14, #58) |
 | `create-struct` | implemented | tests/collmisc.rs structmap_rows |
 | `dec'` | implemented | core.rs native_dec_prime (promoting step; `inc'` retargeted at the promoting step — in-slice fix); tests/extarith.rs s11_prime_steps_rows (S11, #56; probes `dp-*`, `ip-*`) |
-| `default-data-readers` | implemented | S6 map var (`inst`/`uuid` natives); zero_oos_s6_datareaders.rs default_data_readers_table, default_readers_direct_calls, default_root_wipe_falls_through, default_root_borked_extra_replaced (#94; probes `h-*` in docs/gap-94/probes/ddr.out) |
+| `default-data-readers` | implemented | S6 map var (`inst`/`uuid` natives); zero_oos_s6_datareaders.rs default_data_readers_table, default_readers_direct_calls, default_root_wipe_falls_through, default_root_borked_extra_replaced (#94; probes `h-*` in docs/spec/gap-94/probes/ddr.out) |
 | `definline` | implemented | core.clj macro (eval-built specimen; `:inline` recorded, never honored — the port is an interpreter); tests/zero_oos_s4b_macros.rs s4b_definline_rows |
 | `defstruct` | implemented | tests/collmisc.rs structmap_rows (macro; expansion shape) |
 | `derive` | implemented | hierarchy.rs hier_make_and_explicit_derive, hier_derive_errors, hier_derive_tag_shapes, hier_derive_relation_errors, hier_global_arities (S13, #57; probes h-*, n-*) |
@@ -817,7 +817,7 @@ No slice on this branch: hard-never reasons stand alone, design-blocked rows nam
 | `selector` | implemented | core.clj macro over private selector-impl (rides the destructuring outlets); tests/zero_oos_s4b_macros.rs s4b_selector_rows |
 | `seq-to-map-for-destructuring` | implemented | destructure_expand.rs (assoc pairs; 1-elem first as-is; odd 3+ complex-path tail conj); tests/zero_oos_s4b_macros.rs s4b_seq_to_map_rows |
 | `seque` | implemented | tests/collmisc.rs seque_rows (feeder+queue; int-cast capacities) |
-| `set-agent-send-executor!` | implemented | cellstaps.rs exec_install_send (installs: executor/nil ok, else ExecutorService CCE; sends read the field per send — gap-96, docs/gap-96/) |
+| `set-agent-send-executor!` | implemented | cellstaps.rs exec_install_send (installs: executor/nil ok, else ExecutorService CCE; sends read the field per send — gap-96, docs/spec/gap-96/) |
 | `set-agent-send-off-executor!` | implemented | cellstaps.rs exec_install_send_off (install mirror of the send slot; send-off/future-call read it per call — gap-96) |
 | `short-array` | implemented | S15 arrays (#59): arrays.rs ctor_array (Numbers rules); tests/arrays.rs ctors_zero, ctors_seq, ctors_init, ctors_sizes (probes a-short-*, b-short-*, e-short-*) |
 | `shorts` | implemented | S15 arrays (#59): arrays.rs cast_array (exact [S checkcast); tests/arrays.rs casts_bytesq (probes d-shorts-*) |

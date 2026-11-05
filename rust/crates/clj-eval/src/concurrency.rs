@@ -10,7 +10,7 @@
 //! `realized?` — `delay` itself is a `core.clj` macro over the
 //! `delay*` evaluator form, mirroring `lazy-seq*`; `memoize` is a
 //! `core.clj` port). Oracle: `/tmp/s6a-probe*.clj`; rules:
-//! `docs/t1174/concurrency-contract.md`, `docs/t1174/s6-pins.md` P1/P2.
+//! `docs/spec/t1174/concurrency-contract.md`, `docs/spec/t1174/s6-pins.md` P1/P2.
 //!
 //! S6B adds the first threads: `future-call` (plus the `future`
 //! macro in `core.clj`), `future?`/`future-done?`/`future-cancel`,
@@ -29,7 +29,7 @@
 //! the cell queue ([`Agent::enqueue`](clj_value::Agent::enqueue)):
 //! nested sends from an action run after it (no self-deadlock).
 //! Oracles: `/tmp/s6c-probe*.clj`; rules:
-//! `docs/t1174/concurrency-contract.md`, `docs/t1174/s6-pins.md` P5.
+//! `docs/spec/t1174/concurrency-contract.md`, `docs/spec/t1174/s6-pins.md` P5.
 //!
 //! S6D adds `set-error-handler!`/`set-error-mode!` and the `locking`
 //! monitor (per-object striped reentrant locks since fence 3b —
@@ -42,8 +42,8 @@
 //! (`set-agent-send-executor!`/`set-agent-send-off-executor!`,
 //! installed since gap-96 — each `send`/`send-off`/`future-call`
 //! reads its slot, like the JVM's volatile pool fields). Oracle:
-//! `docs/zero-oos-s10-cells/probes/`; rules: the S10 specification.
-//! Gap-96 oracles: `docs/gap-96/`.
+//! `docs/spec/zero-oos-s10-cells/probes/`; rules: the S10 specification.
+//! Gap-96 oracles: `docs/spec/gap-96/`.
 //!
 //! Publish discipline: validators run BEFORE publishing (vetoes and
 //! `f` failures leave the state untouched and fire no watches);
@@ -2638,7 +2638,7 @@ const TAP_LOOP_NAME: &str = "clojure.core/tap-loop";
 /// The lineage's tap system (S10): one registry set plus one bounded
 /// FIFO queue, served by a single lazily started daemon dispatcher —
 /// the JVM's `tapset` atom + `tapq` + `tap-loop` thread
-/// (`docs/zero-oos-s10-cells/specification.md` §1b). Per-lineage like
+/// (`docs/spec/zero-oos-s10-cells/specification.md` §1b). Per-lineage like
 /// [`AgentSystem`] (one runtime is one lineage here); forked
 /// evaluators share the system. The dispatcher thread is detached
 /// (daemon), so tap tests never block suite exit.

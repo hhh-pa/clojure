@@ -26,7 +26,7 @@
 //! Collection literals are duplicate-checked on construction
 //! ([`Map::from_kvs_checked`], [`Set::from_items_checked`]) with the
 //! JVM `RT.map` / `PersistentHashSet.createWithCheck` rules
-//! (`docs/t1174/reader-contract.md` §19): a small-map pairwise scan
+//! (`docs/spec/t1174/reader-contract.md` §19): a small-map pairwise scan
 //! reporting the FIRST key, otherwise an incremental scan reporting
 //! the NEW key, comparing with a line-by-line port of
 //! `Util.equiv`/`Util.equals` (see [`jvm_equiv`]).

@@ -6,7 +6,7 @@
 // the terms of this license.
 
 //! Issue #60 (S16) class-emulation tests: every feasible pin in
-//! `docs/zero-oos-s16-classemu/probes/*.out` reproduced against the
+//! `docs/spec/zero-oos-s16-classemu/probes/*.out` reproduced against the
 //! port, plus the documented divergences. Test names follow the
 //! spec's §1.15 plan (`ns_imports_*`, `instance_*`, `type_*`,
 //! `class_*`, `bases_*`, `supers_*`, `import_*`, `dotdot_*`,
@@ -17,7 +17,7 @@
 //! Oracle command (see the spec's §2.6):
 //! `CP=.../clojure-1.13.0-alpha10.jar:... java -Duser.language=en
 //! -Duser.country=US -Duser.timezone=UTC -cp $CP clojure.main
-//! docs/zero-oos-s16-classemu/probes/<probe>.clj`.
+//! docs/spec/zero-oos-s16-classemu/probes/<probe>.clj`.
 
 use clj_eval::{Evaluator, SourceError, boot};
 use clj_value::{PrintOpts, Value, pr_to_string};
@@ -2966,7 +2966,7 @@ fn identical_kinds() {
     );
 }
 
-// Fence 4a: the boxing caches, exactly (oracle `docs/fence-4a-identity/probes.md`
+// Fence 4a: the boxing caches, exactly (oracle `docs/spec/fence-4a-identity/probes.md`
 // P1). Fresh boxes come from arithmetic (literals would share the
 // analyzer's constants); same-binding rows pin the unboxed-locals
 // rebox rule (outside the cache there is no object to share).
@@ -3089,7 +3089,7 @@ fn identical_heap() {
 }
 
 // Fence 4a-big: big-number identity (oracle
-// `docs/fence-4a-identity/probes.md` P5). `BigInt`/`BigInteger`/
+// `docs/spec/fence-4a-identity/probes.md` P5). `BigInt`/`BigInteger`/
 // `Ratio` box fresh per construction (only same bindings — and
 // same-object pass-throughs — are identical); `BigDec`
 // literals box fresh while arithmetic results share

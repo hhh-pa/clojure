@@ -8,7 +8,7 @@
 //! Zero-oos S11 extended arith (issue #56): probe replay for
 //! `+'`/`-'`/`*'`/`dec'`/`inc'`, the 21 `unchecked-*`, and
 //! the 12 bitwise fns (see
-//! `docs/zero-oos-s11-arith/probes/*.{clj,out}`). Every oracle
+//! `docs/spec/zero-oos-s11-arith/probes/*.{clj,out}`). Every oracle
 //! label replays below; the documented port mappings (runtime
 //! arity errors for the `:inline`d fns, no
 //! `Integer`/`Short`/`Byte`/`Float` kinds, exact-double

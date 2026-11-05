@@ -12,7 +12,7 @@
 ;; no counterpart (`future-call` owns its threads) and is not
 ;; ported.
 ;;
-;; Port adaptations (see docs/gap-124/slice-3.md C4):
+;; Port adaptations (see docs/spec/gap-124/slice-3.md C4):
 ;; - `new-executor` returns an opaque `{:threads n}` token (no
 ;;   `ExecutorService`); `submit-task` is `future-call`, whose
 ;;   binding conveyance matches upstream's `bound-fn*` + submit.

@@ -26,7 +26,7 @@ on:
       # every job; without this, edits to them never trigger CI.
       - ".github/actions/**"
       # The tla job checks the specs; spec-only edits must trigger.
-      - "docs/t1174/models/**"
+      - "docs/spec/t1174/models/**"
   pull_request:
     paths:
       - "rust/**"
@@ -34,7 +34,7 @@ on:
       - ".dockerignore"
       - ".github/workflows/rust.yml"
       - ".github/actions/**"
-      - "docs/t1174/models/**"
+      - "docs/spec/t1174/models/**"
 
 # One run per branch at a time: a new push supersedes in-flight runs
 # (rapid rounds would otherwise pile up behind slow platform
@@ -87,7 +87,7 @@ jobs:
                   # Workflow edits validate every leg.
                   .github/workflows/*) rust=true; models=true;;
                   # Models gate the tla leg (before the docs skip).
-                  docs/t1174/models/*) models=true;;
+                  docs/spec/t1174/models/*) models=true;;
                   # Tests, embedded .clj, and docs need no slow legs.
                   */tests/*|*/test_*.rs|*.clj|*.cljc|*.md|docs/*) ;;
                   # Rust sources, manifests, toolchain actions,
@@ -280,7 +280,7 @@ jobs:
       actions: write # tla2tools cache
     defaults:
       run:
-        working-directory: docs/t1174/models
+        working-directory: docs/spec/t1174/models
     steps:
       - uses: actions/checkout@v5
       - name: set up Java

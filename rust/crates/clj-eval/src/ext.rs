@@ -72,7 +72,7 @@ fn munge_char_rest(c: char, out: &mut String) {
 }
 
 /// The true `Compiler/munge` for the `munge` var (S4b, oracle
-/// `mg-*` in `docs/zero-oos-s4b-macros/probes/macros.out`).
+/// `mg-*` in `docs/spec/zero-oos-s4b-macros/probes/macros.out`).
 /// Same table as the display [`munge`] except `/` (which is
 /// `_SLASH_` here, `$` for display names) and `\`
 /// (`_BSLASH_` here, passthrough for display).

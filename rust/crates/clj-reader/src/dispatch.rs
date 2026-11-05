@@ -757,7 +757,7 @@ mod tests {
             let span = err.span();
             assert_eq!((span.line, span.col), (1, 3), "{input}");
         }
-        // #125 (forward spec `docs/gap-125/specification.md` §1):
+        // #125 (forward spec `docs/spec/gap-125/specification.md` §1):
         // the entry span tracks the `#=` position (the probe1
         // rule), so a nested denial sits mid-form.
         let opts = ReaderOpts {

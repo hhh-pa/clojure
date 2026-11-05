@@ -6,7 +6,7 @@
 // the terms of this license.
 
 //! The Clojure reader: text to [`Value`](clj_value::Value), replicating
-//! JVM `LispReader` behavior per `docs/t1174/reader-contract.md`
+//! JVM `LispReader` behavior per `docs/spec/t1174/reader-contract.md`
 //! (positions, tokens, numbers, escapes, wrappers, meta, fn,
 //! syntax-quote, conditionals, tags, ns-maps, collections, `##`).
 //!

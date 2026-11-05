@@ -7,8 +7,8 @@
 
 //! Gap-123 slice 3: `go` blocks + parking ops (`go`/`go-loop`,
 //! `<!`/`>!`/`alts!` inside `go`, `alt!`/`alt!!`; oracle
-//! `docs/gap-123/g123-go.clj` + `docs/gap-123/g123-goalt.clj`,
-//! pins `docs/gap-123/slice-3.md`).
+//! `docs/spec/gap-123/g123-go.clj` + `docs/spec/gap-123/g123-goalt.clj`,
+//! pins `docs/spec/gap-123/slice-3.md`).
 //!
 //! Go-channel takes always ride the `goo` prelude helper (a
 //! future + deref timeout — a stuck op fails the test instead of

@@ -6,7 +6,7 @@
 // the terms of this license.
 
 //! Ordering (S3, C2): a port of `Util.compare` + `Numbers.compare`
-//! (`docs/t1174/probes/probe17.clj`).
+//! (`docs/spec/t1174/probes/probe17.clj`).
 //!
 //! Numbers compare numerically across `Int`/`Double` (the JVM lt-pair,
 //! so NaN equals everything and `-0.0` equals `0.0`); chars, bools,

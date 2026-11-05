@@ -13,7 +13,7 @@
 //! (sha256 `68925dc5...`, 1996 lines — byte-identical to the 0.5.238
 //! file pinned by slice 1). The JVM was NEVER executed for this
 //! slice: every expected value below is derived by reading the
-//! upstream source (see `docs/gap-122/slice-D2.md` for the line
+//! upstream source (see `docs/spec/gap-122/slice-D2.md` for the line
 //! pins). Pins that diverge from the oracle say so.
 
 use clj_eval::{Evaluator, SourceError, boot};

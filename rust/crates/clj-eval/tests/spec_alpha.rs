@@ -9,12 +9,12 @@
 //! (registry, `def`, predicate specs, `s/and`, `valid?`,
 //! `conform`/`unform`, basic `explain`).
 //!
-//! Oracle: `docs/gap-122/probes/slice1.out`, produced by
-//! `docs/gap-122/probes/slice1.clj` under
+//! Oracle: `docs/spec/gap-122/probes/slice1.out`, produced by
+//! `docs/spec/gap-122/probes/slice1.clj` under
 //! `CP=clojure-1.12.6.jar:spec.alpha-0.5.238.jar:core.specs.alpha-0.4.74.jar`
-//! (`java -cp $CP clojure.main docs/gap-122/probes/slice1.clj`).
+//! (`java -cp $CP clojure.main docs/spec/gap-122/probes/slice1.clj`).
 //! Pins that diverge from the oracle say so (each divergence is
-//! listed in `docs/gap-122/slice-1.md`).
+//! listed in `docs/spec/gap-122/slice-1.md`).
 
 use clj_eval::{Evaluator, SourceError, boot};
 use clj_value::{PrintOpts, Value, pr_to_string};

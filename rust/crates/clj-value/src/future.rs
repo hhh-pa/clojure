@@ -6,8 +6,8 @@
 // the terms of this license.
 
 //! Futures (S6B): shared outcome cells mirroring the
-//! `future-call` reify (`docs/t1174/concurrency-contract.md`,
-//! `docs/t1174/s6-pins.md` P3, `/tmp/s6b-probe*.clj`).
+//! `future-call` reify (`docs/spec/t1174/concurrency-contract.md`,
+//! `docs/spec/t1174/s6-pins.md` P3, `/tmp/s6b-probe*.clj`).
 //!
 //! A future starts [`FutureState::Pending`]; its worker thread
 //! publishes one [`FutureOutcome`] (a value or the body's cached

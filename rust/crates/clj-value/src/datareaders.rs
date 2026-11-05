@@ -10,7 +10,7 @@
 //! The reader validates string payloads read-side (spanful errors)
 //! while the evaluator's default table reuses the same checks for
 //! direct calls; both layers report the JVM texts verbatim (oracle
-//! `docs/zero-oos-s6-datareaders/probes/datareaders.out`, labels
+//! `docs/spec/zero-oos-s6-datareaders/probes/datareaders.out`, labels
 //! `d-inst-*` / `d-uuid-*`). Non-string payloads never reach here:
 //! the reader defers them for the eval-side type dispatch (nil is
 //! the NPE, anything else fails the `CharSequence` cast — except

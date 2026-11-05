@@ -5,7 +5,7 @@
 // By using this software in any fashion, you are agreeing to be bound by
 // the terms of this license.
 
-//! S7 transcript corpus (`docs/t1174/s7-corpus/`): replay every
+//! S7 transcript corpus (`docs/spec/t1174/s7-corpus/`): replay every
 //! session script through the built binary's streaming `repl` and
 //! assert the pinned transcript byte-exact (no JVM needed; the JVM
 //! differential half lives in the corpus MANIFEST).
@@ -17,7 +17,7 @@ use std::path::PathBuf;
 
 fn corpus_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../docs/t1174/s7-corpus")
+        .join("../docs/spec/t1174/s7-corpus")
         .canonicalize()
         .expect("s7-corpus dir")
 }

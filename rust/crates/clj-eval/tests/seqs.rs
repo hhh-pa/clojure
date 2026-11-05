@@ -608,7 +608,7 @@ fn invoke_non_fn_extension_is_cast_error() {
 }
 
 /// T1200 D1 (red first): stateless transducer builders. Oracle
-/// `docs/t1200/probes/xform.out`: `map-*`, `filter-step-*`,
+/// `docs/spec/t1200/probes/xform.out`: `map-*`, `filter-step-*`,
 /// `remove-step`, `keep-step-*`, `map-indexed-step`,
 /// `interpose-step`, `mapcat-step`, `cat-*`.
 #[test]

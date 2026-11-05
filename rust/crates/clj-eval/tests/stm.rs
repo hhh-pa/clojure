@@ -6,7 +6,7 @@
 // the terms of this license.
 
 //! S19 STM pins: every oracle row in
-//! `docs/zero-oos-s19-stm/probes/{refs,txn,errors,portside}.out`
+//! `docs/spec/zero-oos-s19-stm/probes/{refs,txn,errors,portside}.out`
 //! (46 + 70 + 58 + 38), transcribed probe-identically except
 //! where noted.
 //!

@@ -10,7 +10,7 @@
 //! `__inst_millis*` backing the `Inst` extension. (`Inst`,
 //! `inst-ms*`, `inst-ms`, `inst?` are `core.clj` protocol
 //! definitions over these kinds.) Oracle:
-//! `docs/zero-oos-s9-scalarkinds/probes/*.out`.
+//! `docs/spec/zero-oos-s9-scalarkinds/probes/*.out`.
 
 use std::str::FromStr;
 

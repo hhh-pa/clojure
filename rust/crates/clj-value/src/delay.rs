@@ -6,7 +6,7 @@
 // the terms of this license.
 
 //! Delays (S6A): run-once thunks mirroring `clojure.lang.Delay`
-//! (`docs/t1174/concurrency-contract.md`, `s6-pins.md` P1).
+//! (`docs/spec/t1174/concurrency-contract.md`, `s6-pins.md` P1).
 //!
 //! A delay starts [`DelayState::Pending`] over its zero-arg fn (the
 //! `delay*` evaluator form traps the body as a closure, so forcing is

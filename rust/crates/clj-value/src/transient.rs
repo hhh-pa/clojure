@@ -7,7 +7,7 @@
 
 //! Transients (S3): bulk-build buffers mirroring
 //! `TransientVector`/`TransientArrayMap`/`TransientHashSet`
-//! (`docs/t1174/probes/probe19.clj`).
+//! (`docs/spec/t1174/probes/probe19.clj`).
 //!
 //! Every op validates the edit flag, exactly like the JVM: any use
 //! after [`TransientVector::persistent`] (mutating ops, reads, or a

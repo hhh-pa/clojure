@@ -7,7 +7,7 @@
 
 //! S5D collection natives: the `Collections` matrix rows over
 //! persistent vectors/maps/sets/lists, subvectors, and transients
-//! (`docs/t1174/s5d-coll-pins.md`). Shapes follow `core.clj` + the
+//! (`docs/spec/t1174/s5d-coll-pins.md`). Shapes follow `core.clj` + the
 //! `RT`/`APersistent*` sources exactly; the `into`/`merge-with`
 //! transient fast paths are plain loops (same values and errors —
 //! transients never escape).

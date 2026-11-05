@@ -8,7 +8,7 @@
 //! S19 STM: refs (`ref`, the history accessors), transactions
 //! (`dosync`/`sync`/`io!`), the updaters (`alter`/`commute`/
 //! `ref-set`/`ensure`), and the MVCC commit path. Oracle:
-//! `docs/zero-oos-s19-stm/probes/`; rules: the S19 specification
+//! `docs/spec/zero-oos-s19-stm/probes/`; rules: the S19 specification
 //! (§1/§2 — the commit steps below cite theirs).
 //!
 //! The running transaction lives in the [`Evaluator`] (`tx`), never
