@@ -2,14 +2,16 @@
 # and vs each other, across the snippet suite (hhh-pa/clojure-code-snippet)
 # and the algorithms suite (hhh-pa/clojure-algorithms). Each suite
 # runs a JVM leg plus TWO clojure-rs legs (rs-from, rs-to), sharded
-# 8 ways (48 measure jobs), plus native-only Pin inscount legs for
-# the rs pair, sharded 16 ways (64 jobs); the h2h-compare job
+# 8 ways (48 measure jobs), plus native-only instrumentation legs
+# for the rs pair, sharded 16 ways (64 jobs); the h2h-compare job
 # unions the shards per leg and gates on per-case median cpu_s +
 # maxrss_kb. The gate rule: clojure-rs must beat JVM Clojure, AND
 # rs-from must win-or-tie vs rs-to on every case — ANY loss fails
-# the PR. The Pin legs add a deterministic instruction-count gate
-# (1% margin) for rs-from vs rs-to, immune to the wall-time wobble
-# that reds the cpu/rsrs leg on no-op changes.
+# the PR. The instrumentation legs measure each case once, under
+# Intel Pin only (--repeat 0), and add a deterministic
+# instruction-count gate (1% margin) for rs-from vs rs-to, immune
+# to the wall-time wobble that reds the cpu/rsrs leg on no-op
+# changes.
 #
 # Revision pairs ("PR from head to base" parlance): from is the
 # change under test, to is its baseline. On pull_request, from =
@@ -79,10 +81,10 @@ permissions:
 env:
   # Pinned suite revisions: the pin-inscount branches (snippet PR#52,
   # algos PR#7) until they merge, then back to master SHAs. The --pin
-  # legs below need harness support, so old-SHA bisection of the pin
-  # legs fails loud on the unknown flag by design.
-  SNIPPETS_SHA_DEFAULT: 87f74811daa0a42d6c750914179bc6bbae3bbf2a
-  ALGORITHMS_SHA_DEFAULT: cb630ab7f35724c6173ee881a352fb283dd2b89f
+  # legs below need harness support, so old-SHA bisection of the
+  # instrumentation legs fails loud on the unknown flag by design.
+  SNIPPETS_SHA_DEFAULT: 4fe8d865d275e1e606e459c87e64563845de8d78
+  ALGORITHMS_SHA_DEFAULT: c630c0bd223ab9042f474b44383db939d33609bb
   # Pinned (not floating "21"): JDK micro versions move cpu numbers
   # and the sweep must stay comparable run to run. Bump deliberately.
   JAVA_VERSION: '21.0.13'
@@ -410,28 +412,30 @@ jobs:
           path: algos/h2h-algos-${{ matrix.runtime }}-shard-${{ matrix.shard }}.json
           retention-days: 7
 
-  # Pin legs: deterministic instruction counts for the native pair
-  # (rs-from, rs-to), 16 shards each (64 jobs). One timed rep per
-  # case (correctness + wall baseline) plus two Pin reps; the
-  # ins gate compares pin_instructions medians with a 1% margin.
+  # Instrumentation legs: deterministic instruction counts for
+  # the native pair (rs-from, rs-to), 16 shards each (64 jobs).
+  # Each case is measured once, under Pin only (--repeat 0; the
+  # first Pin run still gates output correctness); the ins gate
+  # compares pin_instructions medians with a 1% margin.
   # Native-only by design: JVM-under-Pin trips Pin 4.4's memory
   # manager (mmap-overlap exit 127) and costs ~40x wall, while the
   # wall-time cpu/mem gates already cover JVM-vs-RS at ~10x
   # margins. The monster recipes cases (bfs t5: 146s native, ~20min
-  # under Pin) set the 1500s pin timeout and 16-way sharding.
-  measure-recipes-pin:
+  # under Pin) set the 1500s instrumentation timeout and 16-way
+  # sharding.
+  measure-recipes-instrumentation:
     needs: [resolve, build-rs]
     runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:
       contents: read # suite + tool checkouts
-      actions: write # pin cache + shard artifact
+      actions: write # instrumentation cache + shard artifact
     strategy:
       fail-fast: false
       matrix:
         shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
         runtime: [rs-from, rs-to]
-    name: recipes-pin ${{ matrix.runtime }} (shard ${{ matrix.shard }}/16)
+    name: recipes-instrumentation ${{ matrix.runtime }} (shard ${{ matrix.shard }}/16)
     steps:
       - name: Check out snippet suite
         uses: actions/checkout@v5
@@ -440,7 +444,7 @@ jobs:
           ref: ${{ needs.resolve.outputs.snippets_sha }}
           path: snippets
 
-      - name: Check out Pin tooling
+      - name: Check out instrumentation tooling
         uses: actions/checkout@v5
         with:
           path: h2h
@@ -456,16 +460,16 @@ jobs:
           cd snippets/scripts/ci/go
           go build -o snip ./cmd/snip
 
-      - name: Cache Pin kit
-        id: pin-cache
+      - name: Cache instrumentation kit
+        id: instrumentation-cache
         uses: actions/cache@v5
         with:
-          path: ~/pin
-          key: pin-4.4-${{ hashFiles('h2h/scripts/ci/setup-pin.sh', 'h2h/scripts/ci/pintool/inscount.cpp') }}
+          path: ~/instrumentation
+          key: instrumentation-pin-4.4-${{ hashFiles('h2h/scripts/ci/setup-instrumentation.sh', 'h2h/scripts/ci/instrumentation/inscount.cpp') }}
 
-      - name: Provision Pin
+      - name: Provision instrumentation
         run: |
-          bash h2h/scripts/ci/setup-pin.sh
+          bash h2h/scripts/ci/setup-instrumentation.sh
 
       - name: Decrypt and extract resources
         env:
@@ -498,43 +502,43 @@ jobs:
           chmod +x "$GITHUB_WORKSPACE/cljrs-bin/clojure-rs"
           echo "$GITHUB_WORKSPACE/cljrs-bin" >> "$GITHUB_PATH"
 
-      - name: Measure Pin shard
+      - name: Measure instrumentation shard
         working-directory: snippets
         run: |
           ./scripts/ci/go/snip measure --resources tests/resources \
-            --repeat 1 --no-alloc --no-perf --jobs 3 --timeout 300 \
+            --repeat 0 --no-alloc --no-perf --jobs 3 \
             --runtime "${{ matrix.runtime }}" \
             --command-template 'clojure-rs run {script}' \
-            --pin --pin-bin "$PIN_BIN" --pin-tool "$PIN_TOOL" \
+            --pin --pin-bin "$INSTRUMENTATION_BIN" --pin-tool "$INSTRUMENTATION_TOOL" \
             --pin-repeat 2 --pin-timeout 1500 \
             --shard ${{ matrix.shard }}/16 \
-            --output "pin-recipes-${{ matrix.runtime }}-shard-${{ matrix.shard }}.json" \
+            --output "instrumentation-recipes-${{ matrix.runtime }}-shard-${{ matrix.shard }}.json" \
             --summary-file "$GITHUB_STEP_SUMMARY"
 
       - name: Upload shard results
         if: always()
         uses: actions/upload-artifact@v6
         with:
-          name: pin-recipes-${{ matrix.runtime }}-shard-${{ matrix.shard }}
-          path: snippets/pin-recipes-${{ matrix.runtime }}-shard-${{ matrix.shard }}.json
+          name: instrumentation-recipes-${{ matrix.runtime }}-shard-${{ matrix.shard }}
+          path: snippets/instrumentation-recipes-${{ matrix.runtime }}-shard-${{ matrix.shard }}.json
           retention-days: 7
 
-  # Algos Pin legs: same shape as recipes-pin (16 shards x the
-  # native pair). No decrypt step: this suite carries its
-  # resources/ in-repo.
-  measure-algos-pin:
+  # Algos instrumentation legs: same shape as
+  # recipes-instrumentation (16 shards x the native pair). No
+  # decrypt step: this suite carries its resources/ in-repo.
+  measure-algos-instrumentation:
     needs: [resolve, build-rs]
     runs-on: ubuntu-latest
     timeout-minutes: 90
     permissions:
       contents: read # suite + tool checkouts
-      actions: write # pin cache + shard artifact
+      actions: write # instrumentation cache + shard artifact
     strategy:
       fail-fast: false
       matrix:
         shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
         runtime: [rs-from, rs-to]
-    name: algos-pin ${{ matrix.runtime }} (shard ${{ matrix.shard }}/16)
+    name: algos-instrumentation ${{ matrix.runtime }} (shard ${{ matrix.shard }}/16)
     steps:
       - name: Check out algorithms suite
         uses: actions/checkout@v5
@@ -543,7 +547,7 @@ jobs:
           ref: ${{ needs.resolve.outputs.algorithms_sha }}
           path: algos
 
-      - name: Check out Pin tooling
+      - name: Check out instrumentation tooling
         uses: actions/checkout@v5
         with:
           path: h2h
@@ -559,16 +563,16 @@ jobs:
           cd algos/scripts/ci/go
           go build -o algoperf ./cmd/algoperf
 
-      - name: Cache Pin kit
-        id: pin-cache
+      - name: Cache instrumentation kit
+        id: instrumentation-cache
         uses: actions/cache@v5
         with:
-          path: ~/pin
-          key: pin-4.4-${{ hashFiles('h2h/scripts/ci/setup-pin.sh', 'h2h/scripts/ci/pintool/inscount.cpp') }}
+          path: ~/instrumentation
+          key: instrumentation-pin-4.4-${{ hashFiles('h2h/scripts/ci/setup-instrumentation.sh', 'h2h/scripts/ci/instrumentation/inscount.cpp') }}
 
-      - name: Provision Pin
+      - name: Provision instrumentation
         run: |
-          bash h2h/scripts/ci/setup-pin.sh
+          bash h2h/scripts/ci/setup-instrumentation.sh
 
       - name: Install GNU time
         run: |
@@ -587,37 +591,37 @@ jobs:
           chmod +x "$GITHUB_WORKSPACE/cljrs-bin/clojure-rs"
           echo "$GITHUB_WORKSPACE/cljrs-bin" >> "$GITHUB_PATH"
 
-      - name: Measure Pin shard
+      - name: Measure instrumentation shard
         working-directory: algos
         run: |
           ./scripts/ci/go/algoperf measure \
-            --repeat 1 --no-alloc --no-perf --jobs 3 --timeout 1800 \
+            --repeat 0 --no-alloc --no-perf --jobs 3 \
             --runtime "${{ matrix.runtime }}" \
             --command-template 'clojure-rs run perf/driver.clj {ns} src test resources' \
-            --pin --pin-bin "$PIN_BIN" --pin-tool "$PIN_TOOL" \
+            --pin --pin-bin "$INSTRUMENTATION_BIN" --pin-tool "$INSTRUMENTATION_TOOL" \
             --pin-repeat 2 --pin-timeout 1200 \
             --shard ${{ matrix.shard }}/16 \
-            --output "pin-algos-${{ matrix.runtime }}-shard-${{ matrix.shard }}.json" \
+            --output "instrumentation-algos-${{ matrix.runtime }}-shard-${{ matrix.shard }}.json" \
             --summary-file "$GITHUB_STEP_SUMMARY"
 
       - name: Upload shard results
         if: always()
         uses: actions/upload-artifact@v6
         with:
-          name: pin-algos-${{ matrix.runtime }}-shard-${{ matrix.shard }}
-          path: algos/pin-algos-${{ matrix.runtime }}-shard-${{ matrix.shard }}.json
+          name: instrumentation-algos-${{ matrix.runtime }}-shard-${{ matrix.shard }}
+          path: algos/instrumentation-algos-${{ matrix.runtime }}-shard-${{ matrix.shard }}.json
           retention-days: 7
 
   # Fan-in: union the shards per leg and diff the legs. Strict
   # across-the-board gate, both directions: JVM vs rs-from AND
-  # rs-from vs rs-to on cpu/mem, plus rs-from vs rs-to on Pin
-  # instruction counts (1% margin) — any loss (or failure,
+  # rs-from vs rs-to on cpu/mem, plus rs-from vs rs-to on
+  # instrumented instruction counts (1% margin) — any loss (or failure,
   # missing, not-ok, drift, leg mismatch) fails the PR. No
   # Bencher reporting by design: this job gates, it does not
   # track history.
   h2h-compare:
     name: h2h cpu/mem gate
-    needs: [measure-recipes, measure-algos, measure-recipes-pin, measure-algos-pin]
+    needs: [measure-recipes, measure-algos, measure-recipes-instrumentation, measure-algos-instrumentation]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -631,10 +635,10 @@ jobs:
         with:
           pattern: h2h-*-shard-*
 
-      - name: Download Pin shard results
+      - name: Download instrumentation shard results
         uses: actions/download-artifact@v6
         with:
-          pattern: pin-*-shard-*
+          pattern: instrumentation-*-shard-*
 
       - name: Set up Go
         uses: actions/setup-go@v6
@@ -688,20 +692,20 @@ jobs:
           $compare \
             --label recipes-rsrs-ins \
             --base-name rs-to --challenger-name rs-from \
-            --jvm pin-recipes-rs-to-shard-*/pin-recipes-rs-to-shard-*.json \
-            --rs pin-recipes-rs-from-shard-*/pin-recipes-rs-from-shard-*.json \
+            --jvm instrumentation-recipes-rs-to-shard-*/instrumentation-recipes-rs-to-shard-*.json \
+            --rs instrumentation-recipes-rs-from-shard-*/instrumentation-recipes-rs-from-shard-*.json \
             --metrics ins --margin 0.01 \
-            --merged-jvm pin-recipes-rs-to-merged.json \
-            --merged-rs pin-recipes-rs-from-merged.json \
+            --merged-jvm instrumentation-recipes-rs-to-merged.json \
+            --merged-rs instrumentation-recipes-rs-from-merged.json \
             --summary-file "$GITHUB_STEP_SUMMARY" $report_only || rc=$?
           $compare \
             --label algos-rsrs-ins \
             --base-name rs-to --challenger-name rs-from \
-            --jvm pin-algos-rs-to-shard-*/pin-algos-rs-to-shard-*.json \
-            --rs pin-algos-rs-from-shard-*/pin-algos-rs-from-shard-*.json \
+            --jvm instrumentation-algos-rs-to-shard-*/instrumentation-algos-rs-to-shard-*.json \
+            --rs instrumentation-algos-rs-from-shard-*/instrumentation-algos-rs-from-shard-*.json \
             --metrics ins --margin 0.01 \
-            --merged-jvm pin-algos-rs-to-merged.json \
-            --merged-rs pin-algos-rs-from-merged.json \
+            --merged-jvm instrumentation-algos-rs-to-merged.json \
+            --merged-rs instrumentation-algos-rs-from-merged.json \
             --summary-file "$GITHUB_STEP_SUMMARY" $report_only || rc=$?
           exit $rc
 
@@ -712,5 +716,5 @@ jobs:
           name: h2h-merged
           path: |
             h2h-*-merged.json
-            pin-*-merged.json
+            instrumentation-*-merged.json
           retention-days: 14
