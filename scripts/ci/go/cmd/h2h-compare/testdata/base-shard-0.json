@@ -43,11 +43,6 @@
      "min": 990000,
      "median": 1000000,
      "max": 1010000
-    },
-    "pin_allocated_bytes": {
-     "min": 99000,
-     "median": 100000,
-     "max": 101000
     }
    }
   },
@@ -84,11 +79,6 @@
      "min": 990000,
      "median": 1000000,
      "max": 1010000
-    },
-    "pin_allocated_bytes": {
-     "min": 99000,
-     "median": 100000,
-     "max": 101000
     }
    }
   },
@@ -125,11 +115,6 @@
      "min": 2990000,
      "median": 3000000,
      "max": 3010000
-    },
-    "pin_allocated_bytes": {
-     "min": 297000,
-     "median": 300000,
-     "max": 303000
     }
    }
   },
@@ -166,11 +151,6 @@
      "min": 100,
      "median": 100,
      "max": 100
-    },
-    "pin_allocated_bytes": {
-     "min": 9900,
-     "median": 10000,
-     "max": 10100
     }
    }
   },
@@ -215,11 +195,6 @@
      "max": 1010
     },
     "instructions": {
-     "min": 990,
-     "median": 1000,
-     "max": 1010
-    },
-    "pin_allocated_bytes": {
      "min": 990,
      "median": 1000,
      "max": 1010

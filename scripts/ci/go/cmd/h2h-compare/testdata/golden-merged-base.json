@@ -44,11 +44,6 @@
      "min": 990,
      "median": 1000,
      "max": 1010
-    },
-    "pin_allocated_bytes": {
-     "min": 990,
-     "median": 1000,
-     "max": 1010
     }
    }
   },
@@ -89,11 +84,6 @@
      "min": 3990000,
      "median": 4000000,
      "max": 4010000
-    },
-    "pin_allocated_bytes": {
-     "min": 396000,
-     "median": 400000,
-     "max": 404000
     }
    }
   },
@@ -134,11 +124,6 @@
      "min": 1990000,
      "median": 2000000,
      "max": 2010000
-    },
-    "pin_allocated_bytes": {
-     "min": 198000,
-     "median": 200000,
-     "max": 202000
     }
    }
   },
@@ -175,11 +160,6 @@
      "min": 990000,
      "median": 1000000,
      "max": 1010000
-    },
-    "pin_allocated_bytes": {
-     "min": 99000,
-     "median": 100000,
-     "max": 101000
     }
    }
   },
@@ -216,11 +196,6 @@
      "min": 990000,
      "median": 1000000,
      "max": 1010000
-    },
-    "pin_allocated_bytes": {
-     "min": 99000,
-     "median": 100000,
-     "max": 101000
     }
    }
   },
@@ -257,11 +232,6 @@
      "min": 990000,
      "median": 1000000,
      "max": 1010000
-    },
-    "pin_allocated_bytes": {
-     "min": 99000,
-     "median": 100000,
-     "max": 101000
     }
    }
   },
@@ -298,11 +268,6 @@
      "min": 2990000,
      "median": 3000000,
      "max": 3010000
-    },
-    "pin_allocated_bytes": {
-     "min": 297000,
-     "median": 300000,
-     "max": 303000
     }
    }
   },
@@ -339,11 +304,6 @@
      "min": 100,
      "median": 100,
      "max": 100
-    },
-    "pin_allocated_bytes": {
-     "min": 9900,
-     "median": 10000,
-     "max": 10100
     }
    }
   },
@@ -380,11 +340,6 @@
      "min": 490000,
      "median": 500000,
      "max": 510000
-    },
-    "pin_allocated_bytes": {
-     "min": 49500,
-     "median": 50000,
-     "max": 50500
     }
    }
   },
@@ -421,11 +376,6 @@
      "min": 99000,
      "median": 100000,
      "max": 101000
-    },
-    "pin_allocated_bytes": {
-     "min": 9900,
-     "median": 10000,
-     "max": 10100
     }
    }
   },
