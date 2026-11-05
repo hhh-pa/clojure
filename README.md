@@ -1,5 +1,9 @@
 # clojure-rs — native Clojure in Rust
 
+> **Stability note:** `master` is under active development and may be
+> unstable. Tagged `v*` releases are the tested, stable snapshots —
+> please rely on the latest release for anything important.
+
 A self-contained native Clojure runtime, REPL, and LLVM AOT compiler
 with no JDK required, tracking upstream Clojure master
 (`clojure/clojure`). (`clojure-version` still reports `1.13.0-alpha9`
