@@ -8,7 +8,7 @@
 //! S-rng-tower regex + RNG: probe replay for `re-pattern` /
 //! `re-find` / `re-matches` / `re-seq` shapes and `rand` /
 //! `rand-int` / `shuffle` / `random-sample` (see
-//! `docs/i32-rng-tower/probes/re_rng.{clj,out}`). RNG pins are
+//! `docs/spec/i32-rng-tower/probes/re_rng.{clj,out}`). RNG pins are
 //! shape/range only — exact draws differ across runtimes by
 //! design.
 

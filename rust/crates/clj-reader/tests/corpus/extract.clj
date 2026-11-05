@@ -5,7 +5,7 @@
 ;   By using this software in any fashion, you are agreeing to be bound by
 ;   the terms of this license.
 
-;; Extractor: mechanical translation of docs/t1174/probes/probe*.clj
+;; Extractor: mechanical translation of docs/spec/t1174/probes/probe*.clj
 ;; reader inputs into corpus case records.
 ;;
 ;; Reads each probe file as DATA (no eval), walks the top-level forms,
@@ -22,8 +22,8 @@
 (require '[clojure.java.io :as io])
 
 (def probe-dir
-  ;; <repo>/rust/crates/clj-reader/tests/corpus → <repo>/docs/t1174/probes
-  (io/file (.getParent (io/file *file*)) "../../../../../docs/t1174/probes"))
+  ;; <repo>/rust/crates/clj-reader/tests/corpus → <repo>/docs/spec/t1174/probes
+  (io/file (.getParent (io/file *file*)) "../../../../../docs/spec/t1174/probes"))
 (def allow {:read-cond :allow})
 (def feat-ab {:read-cond :allow :features [:a :b]})
 (def deny {:read-cond :deny})

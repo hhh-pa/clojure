@@ -8,7 +8,7 @@
 //! S5D scalar natives: arithmetic (C1), comparison (C2), predicates,
 //! the `str` family, `format` (US-locale subset), the `ex-info`
 //! family, `trampoline`, and `reduced`. Oracle: probe39; rules:
-//! `docs/t1174/s5d-contract.md`.
+//! `docs/spec/t1174/s5d-contract.md`.
 
 use std::any::Any;
 use std::collections::HashSet;
@@ -1700,7 +1700,7 @@ fn is_sorted(v: &Value) -> bool {
 // `IPersistentVector` (vectors, map entries, subvectors) implements
 // `clojure.lang.Reversible`, as do sorted maps and sets (FT6).
 // Lists, hash maps, hash sets, queues, seqs (including `rseq`),
-// and transients do not (`docs/t1192/probes/fx2b-reversible`).
+// and transients do not (`docs/spec/t1192/probes/fx2b-reversible`).
 fn is_reversible(v: &Value) -> bool {
     matches!(
         v,

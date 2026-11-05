@@ -10,7 +10,7 @@
 ;; the runtime basis, load-path emission, and print-tree, all
 ;; source-only. Closes #124.
 ;;
-;; Port decisions (see docs/gap-124/slice-3.md C1-C14/R4/X1):
+;; Port decisions (see docs/spec/gap-124/slice-3.md C1-C14/R4/X1):
 ;; - Queues are vectors with `q-peek`/`q-pop` (no PersistentQueue);
 ;;   plain path vectors keep native `peek`/`pop` (C1).
 ;; - `clojure.set`/`clojure.string` are unported: local

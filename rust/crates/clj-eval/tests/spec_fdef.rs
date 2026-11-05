@@ -20,7 +20,7 @@
 //! `gen/sample` draws from a random-seeded RNG (slice-F1), so every
 //! fdef pins input-independent outcomes (a good fn passes on every
 //! input, a bad fn fails on every input) rather than exact draws.
-//! See `docs/gap-122/slice-fdef.md` for the divergences pinned here
+//! See `docs/spec/gap-122/slice-fdef.md` for the divergences pinned here
 //! (no shrinking, `prn` summaries, `:num-tests`-only check driver,
 //! `*check-asserts*` dynamic, plain-fn `macroexpand-check`, core
 //! `NaN?`/`infinite?`, behavior-preserving kwargs flattener, absent

@@ -8,7 +8,7 @@
 //! Zero-oos S12 collections misc (issue #54): structmaps, chunks,
 //! `hash-combine`/`mix-collection-hash`, `seque`, `iteration`,
 //! `file-seq`, and the `re-matcher`/`re-groups` handle pair.
-//! Oracle: `docs/zero-oos-s12-collmisc/probes/*.out` (228 pins).
+//! Oracle: `docs/spec/zero-oos-s12-collmisc/probes/*.out` (228 pins).
 
 use std::collections::HashMap;
 use std::hash::Hasher;

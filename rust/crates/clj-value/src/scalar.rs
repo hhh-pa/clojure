@@ -14,7 +14,7 @@
 //! (`SimpleDateFormat` / `Date.toString` emulations, UTC);
 //! [`Uri`] ports the JDK single-arg parser plus `equals` /
 //! `hashCode` / `compareTo`. Oracle:
-//! `docs/zero-oos-s9-scalarkinds/probes/*.out`.
+//! `docs/spec/zero-oos-s9-scalarkinds/probes/*.out`.
 
 use std::cmp::Ordering;
 use std::str::FromStr;

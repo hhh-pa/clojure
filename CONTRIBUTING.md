@@ -65,8 +65,8 @@ Notes for contributors:
   checks — a PR that drops coverage or trips a gate will not merge.
 - Behavior changes should match JVM Clojure (same input, same printed
   output). If a difference is intentional, document and pin it: update
-  the [design spec](docs/t1174/specification.md) / per-area contracts
-  (`docs/t1174/*-contract.md`) and the normative
+  the [design spec](docs/spec/t1174/specification.md) / per-area contracts
+  (`docs/spec/t1174/*-contract.md`) and the normative
   [core coverage list](rust/core-coverage.md), which CI machine-checks.
 - New code is `Copyright (c) Hao Hu` under EPL-1.0; keep the
   `Copyright (c) Rich Hickey` notices on vendored upstream sources,
@@ -76,7 +76,7 @@ Notes for contributors:
 
 - This port: the [root README](README.md) (scope, CLI, accepted
   differences), the [workspace README](rust/README.md) (LLVM setup,
-  build commands), the [design spec](docs/t1174/specification.md), and
+  build commands), the [design spec](docs/spec/t1174/specification.md), and
   the [core coverage list](rust/core-coverage.md).
 - The Clojure language: [reference](https://clojure.org/reference),
   [guides](https://clojure.org/guides), and [API](https://clojure.org/api/api).

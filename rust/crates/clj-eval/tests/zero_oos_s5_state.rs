@@ -10,7 +10,7 @@
 //! `set-validator!` / `reset-vals!` / `swap-vals!` / `disj!` /
 //! `find-var` / `requiring-resolve` / `release-pending-sends` /
 //! `await1` / `agent-errors` / `clear-agent-errors` /
-//! `replicate` (see `docs/zero-oos-s5-state/probes/state.{clj,out}`).
+//! `replicate` (see `docs/spec/zero-oos-s5-state/probes/state.{clj,out}`).
 //! Every label below replays its oracle line verbatim except the
 //! future `IRef` casts (the port's reify class carries no numeric
 //! suffix) and `identical?` reads (the port has no identity

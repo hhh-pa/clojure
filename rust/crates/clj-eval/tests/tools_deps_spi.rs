@@ -14,7 +14,7 @@
 //! `extensions/git.clj`, `extensions/deps.clj`,
 //! `extensions/pom.clj`, `util/session.clj`, `util/io.clj`); each
 //! test cites the upstream file/behavior it pins. Divergences are
-//! the spec's B1-B12/N1/R2 (`docs/gap-124/slice-2.md`).
+//! the spec's B1-B12/N1/R2 (`docs/spec/gap-124/slice-2.md`).
 //!
 //! The session cache is process-global with no `with-session`
 //! scoping yet (slice 3), so every filesystem case uses a unique

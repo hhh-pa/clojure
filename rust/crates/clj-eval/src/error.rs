@@ -6,7 +6,7 @@
 // the terms of this license.
 
 //! Errors: the analyzer's [`CompileError`] (wrapper + cause, per
-//! `docs/t1174/evaluator-contract.md` §E1) and the evaluator's
+//! `docs/spec/t1174/evaluator-contract.md` §E1) and the evaluator's
 //! [`Signal`] control flow (thrown values + `recur`).
 //!
 //! JVM class names for values ([`jvm_class_of`]) and `nth` simple

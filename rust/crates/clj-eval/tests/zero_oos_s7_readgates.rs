@@ -8,7 +8,7 @@
 //! Zero-oos S7 read gates: probe replay for `*read-eval*`,
 //! `*suppress-read*`, `*reader-resolver*`, `read+string`,
 //! `load-reader`, and `with-loading-context` (see
-//! `docs/zero-oos-s7-readgates/probes/{gates,trio}.{clj,out}`).
+//! `docs/spec/zero-oos-s7-readgates/probes/{gates,trio}.{clj,out}`).
 //! Every test names the probe labels it replays; port-only pins
 //! (host-fenced divergences) say so inline.
 

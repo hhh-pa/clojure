@@ -8,11 +8,11 @@
 //! Issue #120 slice 2: emulated construction — `(new Class …)`,
 //! `(Class. …)`, `(Class/new …)` for `String`/`Object` over the
 //! emulated lattice, with JVM-text misses elsewhere. Every pin
-//! cites its oracle label (`docs/gap-120-slice2/probes/ctor*.out`;
+//! cites its oracle label (`docs/spec/gap-120-slice2/probes/ctor*.out`;
 //! `java -Duser.language=en -Duser.country=US -Duser.timezone=UTC
 //! -Dfile.encoding=UTF-8 -cp clojure-1.13.0-alpha9.jar:…
 //! clojure.main`). Narrowings N1–N9: see
-//! `docs/gap-120-slice2/spec.md`.
+//! `docs/spec/gap-120-slice2/spec.md`.
 
 use clj_eval::{Evaluator, SourceError, boot};
 use clj_reader::{NoHooks, ReaderOpts, read_str};

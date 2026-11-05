@@ -6,7 +6,7 @@
 // the terms of this license.
 
 //! Issue #33 stage-1 tests: every feasible pin in
-//! `docs/i33-typechain/probes/types.out` reproduced against the
+//! `docs/spec/i33-typechain/probes/types.out` reproduced against the
 //! port, plus macro-shape errors, fenced-surface errors, and the
 //! documented divergences. Pins that need out-of-scope vars
 //! (`supers`, `class`, `instance?`) or the JVM's identity hashes
@@ -15,7 +15,7 @@
 //! Oracle command (see the probe header):
 //! `CP=.../clojure-1.13.0-alpha10.jar:... java -Duser.language=en
 //! -Duser.country=US -Duser.timezone=UTC -cp $CP clojure.main
-//! docs/i33-typechain/probes/types.clj`.
+//! docs/spec/i33-typechain/probes/types.clj`.
 
 use clj_eval::{Evaluator, SourceError, boot};
 use clj_value::{PrintOpts, Value, pr_to_string};

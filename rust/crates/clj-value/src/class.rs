@@ -8,7 +8,7 @@
 //! A JVM class as a value (S16): `ClassVal` carries the binary name,
 //! the interface flag, and the ordered direct-supertype names (the
 //! `getSuperclass`/`getInterfaces` order from
-//! `docs/zero-oos-s16-classemu/probes/lattice.out`). The lattice
+//! `docs/spec/zero-oos-s16-classemu/probes/lattice.out`). The lattice
 //! itself (name → `(iface, bases)`, dynamic rules, closure walks)
 //! lives in `clj-eval`'s `classemu` module; this struct is the inert
 //! carrier shared across crates.

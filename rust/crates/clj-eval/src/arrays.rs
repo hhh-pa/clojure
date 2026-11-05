@@ -10,7 +10,7 @@
 //! (narrowing fills, exact-wrapper inits), access through the
 //! `RT.aset`/`RT.aget` overload shape (direct first step, raw
 //! `Array.get`/`set` tails), and `vector-of` through the per-type
-//! core coercions. Oracle: `docs/zero-oos-s15-arrays/probes/`.
+//! core coercions. Oracle: `docs/spec/zero-oos-s15-arrays/probes/`.
 
 use std::sync::{Arc, LazyLock};
 

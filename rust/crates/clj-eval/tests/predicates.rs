@@ -9,7 +9,7 @@
 //! / `map-entry?` / `indexed?` / `NaN?` / `infinite?` / `nat-int?`
 //! / `neg-int?` / `pos-int?` / `find-keyword` / `special-symbol?`
 //! / `ffirst` (see
-//! `docs/zero-oos-s1-predicates/probes/predicates.{clj,out}`).
+//! `docs/spec/zero-oos-s1-predicates/probes/predicates.{clj,out}`).
 //! Each test replays its probe labels verbatim, plus one shared
 //! arity-miss test. The `int?`-boundary probes (`p-intp-*`) are
 //! record-only: the port does not redefine `int?`.

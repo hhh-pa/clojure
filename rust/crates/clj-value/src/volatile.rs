@@ -6,7 +6,7 @@
 // the terms of this license.
 
 //! Volatile cells (S10): single-threaded shared cells mirroring
-//! `clojure.lang.Volatile` (`docs/zero-oos-s10-cells/specification.md`
+//! `clojure.lang.Volatile` (`docs/spec/zero-oos-s10-cells/specification.md`
 //! §1a).
 //!
 //! The cell holds the current value only — no watches, validators,

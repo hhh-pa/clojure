@@ -6,7 +6,7 @@
 // the terms of this license.
 
 //! S18 compiler surface (normative:
-//! `docs/zero-oos-s18-compiler/specification.md`).
+//! `docs/spec/zero-oos-s18-compiler/specification.md`).
 //!
 //! This module owns the knob roots, `add-classpath`, `native_compile`,
 //! the leading-`ns` strip, the §1.4 object path, and the injected AOT

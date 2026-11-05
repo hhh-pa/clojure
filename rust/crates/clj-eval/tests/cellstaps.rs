@@ -9,7 +9,7 @@
 //! `vswap!`, `add-tap`, `remove-tap`, `tap>`, `tap->`, `comparator`,
 //! `hash-ordered-coll`, `hash-unordered-coll`,
 //! `set-agent-send-executor!`, `set-agent-send-off-executor!`).
-//! Every oracle row in `docs/zero-oos-s10-cells/probes/*.out` is
+//! Every oracle row in `docs/spec/zero-oos-s10-cells/probes/*.out` is
 //! pinned here (row ids in comments):
 //!
 //! - cells (31): `volatile_ctor_print` (`c-new`, `c-new-nil`,

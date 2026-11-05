@@ -8,7 +8,7 @@
 //! Interactive REPL loop over `rustyline`: prompt/history/completion,
 //! `*1`/`*2`/`*3`/`*e` bindings, streaming fallback off-tty.
 //!
-//! Lands in slice S7 (`docs/t1174/specification.md`).
+//! Lands in slice S7 (`docs/spec/t1174/specification.md`).
 //!
 //! S7B ships the PTY-less core first: [`Session`] runs one loop over
 //! generic IO (the S7C tty adapter owns line editing, history, and

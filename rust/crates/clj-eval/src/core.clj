@@ -1764,7 +1764,7 @@
 ;; `partitionv-all` / `update-vals` / `update-keys`, ported from
 ;; alpha10 `clojure/core.clj` (docstrings and `:added` kept;
 ;; `:static` dropped — nothing compiles statically). Oracle:
-;; `docs/zero-oos-s3-seqs/probes/seqwalks.{clj,out}`.
+;; `docs/spec/zero-oos-s3-seqs/probes/seqwalks.{clj,out}`.
 ;;
 ;; Port deltas from upstream (each probed):
 ;; - `reduce-kv` dispatches in clj (no `IKVReduce` exists):
@@ -2017,7 +2017,7 @@
 ;; `core.clj` macros except `unchecked-inc`/`unchecked-inc-int`
 ;; become `inc` (those vars do not exist in the port; the port's
 ;; own `dotimes` substitutes `inc` the same way). Oracles:
-;; `docs/zero-oos-s15-arrays/probes/interop.{clj,out}` (`e-amap*`,
+;; `docs/spec/zero-oos-s15-arrays/probes/interop.{clj,out}` (`e-amap*`,
 ;; `e-areduce*`, `e-expand-*`).
 (defmacro amap
   "Maps an expression across an array a, using an index named idx, and
@@ -2051,7 +2051,7 @@
 ;; dropped — nothing compiles statically). Strings are leaf
 ;; nodes, not skipped (oracle `e-walk`); laziness rides
 ;; `tree-seq`. Oracle:
-;; `docs/zero-oos-s17-jdkio/probes/jdkio.{clj,out}`.
+;; `docs/spec/zero-oos-s17-jdkio/probes/jdkio.{clj,out}`.
 (defn xml-seq
   "A tree seq on the xml elements as per xml/parse"
   {:added "1.0"}

@@ -8,7 +8,7 @@
 //! S5D collections: probe replay for the `Collections` matrix rows
 //! (`count`, `conj`/`assoc`/`dissoc`, `get`/`nth`, `vec`/`merge`,
 //! transients, `peek`/`pop`, `subvec`, `replace`, `into`,
-//! `distinct?` — see `docs/t1174/s5d-coll-pins.md`).
+//! `distinct?` — see `docs/spec/t1174/s5d-coll-pins.md`).
 
 use clj_eval::{Evaluator, SourceError, boot, jvm_class_of};
 use clj_value::{PrintOpts, Value, pr_to_string};
@@ -2298,7 +2298,7 @@ fn subvec_invoke_out_of_bounds() {
 }
 
 /// Issue #31 (F-sorted, red first): sorted collections. Oracle
-/// `docs/i31-sorted/probes/sorted.out` (alpha10 jars).
+/// `docs/spec/i31-sorted/probes/sorted.out` (alpha10 jars).
 #[test]
 fn sorted_construction_rows() {
     let mut eval = boot();
@@ -2335,7 +2335,7 @@ fn sorted_construction_rows() {
 }
 
 /// Issue #31 (F-sorted, red first): sortedness is sticky and
-/// observable. Oracle `docs/i31-sorted/probes/sorted.out`.
+/// observable. Oracle `docs/spec/i31-sorted/probes/sorted.out`.
 #[test]
 fn sorted_sticky_rows() {
     let mut eval = boot();
@@ -2444,7 +2444,7 @@ fn sorted_sticky_rows() {
 }
 
 /// Issue #31 (F-sorted, red first): `subseq`/`rsubseq` bound
-/// walks. Oracle `docs/i31-sorted/probes/sorted.out`.
+/// walks. Oracle `docs/spec/i31-sorted/probes/sorted.out`.
 #[test]
 fn sorted_subseq_rows() {
     let mut eval = boot();
@@ -2499,7 +2499,7 @@ fn sorted_subseq_rows() {
 /// nil/entries arms, transient-set rejection, `dissoc`/`disj`
 /// misses, set `contains?`/`get`, the `subseq` drop-to-nil and
 /// `rsubseq` descending/empty/nil paths, and non-symbol bound
-/// tests. Oracles `docs/i31-sorted/probes/sorted.out` (`conj-map-nil`,
+/// tests. Oracles `docs/spec/i31-sorted/probes/sorted.out` (`conj-map-nil`,
 /// `conj-map-map`, `dissoc-miss`, `disj-miss`, `subseq-drop`,
 /// `subseq5e`, `rsubseq-empty`, `rsubseq-5b`, `rsubseq-below`,
 /// `rsubseq-5set`, `rsubseq-5keep`, `trans-set`, `set-find`,

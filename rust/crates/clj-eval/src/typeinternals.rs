@@ -19,7 +19,7 @@
 //! defs (value equality); proxies carry their fn map in the
 //! `HostInst::proxy_map` cell, which `__meth*` dispatch consults;
 //! the protocol class walk runs over the probed lattice below
-//! (see `docs/zero-oos-s14-typeinternals/`).
+//! (see `docs/spec/zero-oos-s14-typeinternals/`).
 
 use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, LazyLock};

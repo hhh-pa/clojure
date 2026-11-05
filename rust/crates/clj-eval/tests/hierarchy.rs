@@ -6,7 +6,7 @@
 // the terms of this license.
 
 //! Issue #57 tests: every pin in
-//! `docs/zero-oos-s13-hierarchy/probes/*.out` replayed against the
+//! `docs/spec/zero-oos-s13-hierarchy/probes/*.out` replayed against the
 //! port, plus guards, `HostDef` relations, unknown-class names,
 //! and garbage relation values. Class pins name classes by string
 //! (the port has no class literals); multi-element sets assert

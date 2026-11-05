@@ -12,7 +12,7 @@
 ;; redesign markers (`:mvn` refusal, `:git` not-yet, `:pom`
 ;; refusals). Slice 1 covered `lib-location` only.
 ;;
-;; Port decisions (see docs/gap-124/slice-2.md B1/B5/B6/B8/B9):
+;; Port decisions (see docs/spec/gap-124/slice-2.md B1/B5/B6/B8/B9):
 ;; - `coord-type` keeps slice-1's hardcoded kind detection: the
 ;;   port's defmulti has no `getMethodTable`, so `procurer-types`
 ;;   is the fixed embedded set and the registry cannot drive

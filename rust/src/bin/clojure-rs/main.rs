@@ -9,8 +9,8 @@
 //!
 //! Slices S1+S7A: CLI shell plus `eval`/`run` wiring over the booted
 //! `clj-eval` core. `repl` landed in S7B/C, `build` in S8 (spec
-//! `docs/t1174/`), `jit` in gap-121 slice 1 (spec
-//! `docs/gap-121/slice-1.md`).
+//! `docs/spec/t1174/`), `jit` in gap-121 slice 1 (spec
+//! `docs/spec/gap-121/slice-1.md`).
 
 use clap::{Parser, Subcommand};
 use clj_eval::{Evaluator, SourceError, boot, compile_diagnostic, compile_head};

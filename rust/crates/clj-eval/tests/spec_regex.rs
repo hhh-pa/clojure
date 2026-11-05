@@ -13,7 +13,7 @@
 //! `org.clojure/spec.alpha-0.6.249.jar`, read as TEXT ONLY (the JVM
 //! was never executed for this slice). Every expected value is
 //! derived by reading the upstream source; derivations live in
-//! `docs/gap-122/slice-E.md`, whose scenario numbers prefix each
+//! `docs/spec/gap-122/slice-E.md`, whose scenario numbers prefix each
 //! test name below.
 
 use clj_eval::{Evaluator, SourceError, boot};

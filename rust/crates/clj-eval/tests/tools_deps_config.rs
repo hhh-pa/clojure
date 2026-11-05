@@ -15,7 +15,7 @@
 //! `org.clojure/tools.deps` (`extensions.clj`,
 //! `extensions/local.clj`); each test cites the upstream
 //! file/behavior it pins. Divergences are the spec's A1-A5/D1/R1-R3
-//! (`docs/gap-124/slice-1.md`).
+//! (`docs/spec/gap-124/slice-1.md`).
 //!
 //! Env-mutating coverage lives in ONE serial test
 //! (`user_config_dir_serial`) with save/restore — env vars are

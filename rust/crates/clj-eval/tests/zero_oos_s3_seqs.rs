@@ -9,7 +9,7 @@
 //! `flatten` / `merge-deep` / `merge-deep-with` / `partitionv` /
 //! `partitionv-all` / `reduce-kv` / `run!` / `splitv-at` /
 //! `tree-seq` / `update-keys` / `update-vals` (see
-//! `docs/zero-oos-s3-seqs/probes/seqwalks.{clj,out}`). Labels name
+//! `docs/spec/zero-oos-s3-seqs/probes/seqwalks.{clj,out}`). Labels name
 //! the oracle rows they replay.
 
 use clj_eval::{Evaluator, SourceError, boot};

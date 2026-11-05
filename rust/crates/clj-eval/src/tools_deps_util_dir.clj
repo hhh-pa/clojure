@@ -13,7 +13,7 @@
 ;; DEPRECATED `as-canonical` is not ported (it is deprecated there
 ;; too, and the slice contract lists the four live vars only).
 ;;
-;; Port adaptations (see docs/gap-124/slice-1.md A3/A4):
+;; Port adaptations (see docs/spec/gap-124/slice-1.md A3/A4):
 ;; - `canonicalize` resolves against `*the-dir*` via the substrate
 ;;   2-arity `canonical-path` (prefix-walk when the leaf is
 ;;   missing — Rust `fs::canonicalize` requires existence).

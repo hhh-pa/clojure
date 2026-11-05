@@ -9,7 +9,7 @@
 //! fns, plus the transducer core (`transduce`, `sequence`,
 //! `eduction`, `completing`, `ensure-reduced`, `unreduced`,
 //! `preserving-reduced`, `halt-when`, `cat`). Oracle:
-//! `docs/t1200/probes/xform.out` (alpha10 jars); step contracts
+//! `docs/spec/t1200/probes/xform.out` (alpha10 jars); step contracts
 //! cross-checked against `core.clj` in the alpha10 jar.
 //!
 //! A transducer is a [`NativeFn`] taking the downstream reducing

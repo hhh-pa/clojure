@@ -13,7 +13,7 @@
 //! `spec.alpha-0.6.249` `clojure/spec/gen/alpha.clj` (227 lines) and
 //! `test.check-1.1.3` `generators.cljc` for combinator shapes, default
 //! sizes, and assert/exception texts (listed in
-//! `docs/gap-122/slice-F1.md`). Seed streams intentionally do NOT
+//! `docs/spec/gap-122/slice-F1.md`). Seed streams intentionally do NOT
 //! match the JVM (documented divergence 1): these tests pin
 //! distribution/shape properties and determinism (same seed ⇒ same
 //! value), never JVM stream equality. Values pinned exactly are

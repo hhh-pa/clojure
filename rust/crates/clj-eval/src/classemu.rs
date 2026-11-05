@@ -13,7 +13,7 @@
 //! before the host dispatch.
 //!
 //! The lattice is one static table (transcribed verbatim from
-//! `docs/zero-oos-s16-classemu/probes/lattice.out`, plus the five
+//! `docs/spec/zero-oos-s16-classemu/probes/lattice.out`, plus the five
 //! documented synthetic rows, the two unprobed import-only rows,
 //! and the 72 #74 rows)
 //! with four dynamic rules: the HostDef
@@ -2790,7 +2790,7 @@ fn native_classp(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeE
 }
 
 /// `identical?`: the JVM `==` model (fence 4a — oracle battery
-/// `docs/fence-4a-identity/probes.md`).
+/// `docs/spec/fence-4a-identity/probes.md`).
 ///
 /// Unboxed numbers/characters follow the boxing caches, exactly
 /// (JVM locals rebox per use, so outside the cache there is no

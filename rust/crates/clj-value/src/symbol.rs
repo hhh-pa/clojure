@@ -57,7 +57,7 @@ impl Symbol {
         }
     }
 
-    /// `Symbol::intern` semantics (`docs/t1174/reader-contract.md` §4):
+    /// `Symbol::intern` semantics (`docs/spec/t1174/reader-contract.md` §4):
     /// split on the FIRST `/` (`a/b/c` ⇒ ns `a`, name `b/c`; `/`
     /// alone ⇒ no-ns name `/`). Used by the reader; API users who
     /// already split the parts want [`new`](Symbol::new).

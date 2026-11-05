@@ -10,7 +10,7 @@
 ;; and the `clojure.tools.deps.util.port` substrate (no
 ;; java.io/Reader/clojure.string here).
 ;;
-;; Port adaptations (see docs/gap-124/slice-1.md A1/A2/A5/D1/R3):
+;; Port adaptations (see docs/spec/gap-124/slice-1.md A1/A2/A5/D1/R3):
 ;; - `read-edn` takes a string, not a Reader (A1); callers `slurp`
 ;;   first. Error *shapes* match upstream (ex-info + `:path`);
 ;;   message *texts* are port-canonical (R3).

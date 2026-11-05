@@ -10,7 +10,7 @@
 ;; only. `read-edn`/`slurp-edn`/`write-file` are deferred: nothing
 ;; in this slice needs them (the `edn` ns owns reading).
 ;;
-;; Port adaptations (see docs/gap-124/slice-2.md B7/B12):
+;; Port adaptations (see docs/spec/gap-124/slice-2.md B7/B12):
 ;; - `join-space` stands in for `clojure.string/join`
 ;;   (`clojure.string` is unported — the slice-1 `edn` ns carries
 ;;   its own copy too, mirroring upstream, whose `edn.clj` cannot

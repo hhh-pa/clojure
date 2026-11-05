@@ -6,7 +6,7 @@
 ;   the terms of this license.
 
 ;; Cross-check: the driver's raw JVM outcomes must reproduce the
-;; original docs/t1174/probes/probe*.out `>>>` lines (same input →
+;; original docs/spec/t1174/probes/probe*.out `>>>` lines (same input →
 ;; same raw pr-strs / same error triple), modulo gensym-id and
 ;; identity-hash normalization.
 ;;
@@ -18,7 +18,7 @@
          '[clojure.string :as str])
 
 (def corpus-dir (.getParent (io/file *file*)))
-(def probe-dir (io/file corpus-dir "../../../../../docs/t1174/probes"))
+(def probe-dir (io/file corpus-dir "../../../../../docs/spec/t1174/probes"))
 (def jar-probe-out
   ;; Fresh probe outputs are NOT regenerated here (probe.sh does that);
   ;; the check reads whichever probe*.out files exist under OUT.
@@ -54,7 +54,7 @@
 (defn probe-expectations []
   (let [files ["probe.out" "probe-all.out" "probe3.out" "probe4.out" "probe5.out"
                "probe6.out" "probe7.out" "probe8.out" "probe9.out" "probe10.out" "probe11.out"]
-        ;; probe.sh outputs (run docs/t1174/probes/probe.sh first).
+        ;; probe.sh outputs (run docs/spec/t1174/probes/probe.sh first).
         out (or (System/getenv "PROBE_OUT") "/tmp/t1174-repro")]
     (->> files
          (map #(io/file out %))

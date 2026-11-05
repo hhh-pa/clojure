@@ -8,7 +8,7 @@
 //! Analyzer and tree-walking interpreter for Clojure (T1174 S4).
 //!
 //! [`Analyzer`] turns reader values into [`Expr`]s enforcing the
-//! `docs/t1174/evaluator-contract.md` shape rules; [`Evaluator`]
+//! `docs/spec/t1174/evaluator-contract.md` shape rules; [`Evaluator`]
 //! runs them. Single namespace (`user`), no prelude yet (S5).
 
 pub mod aot_subset;

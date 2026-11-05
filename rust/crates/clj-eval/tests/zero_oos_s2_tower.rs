@@ -8,7 +8,7 @@
 //! Zero-oos S2 tower math (issue #44): probe replay for `abs` /
 //! `biginteger` / `decimal?` / `denominator` / `numerator` /
 //! `ratio?` / `rational?` / `*math-context*` / `with-precision`
-//! (see `docs/zero-oos-s2-tower/probes/towermath*.{clj,out}`,
+//! (see `docs/spec/zero-oos-s2-tower/probes/towermath*.{clj,out}`,
 //! nine rounds). Every `throwof` label replays verbatim except
 //! the documented port mappings (bad `:rounding` modes fail at
 //! the runtime ctor, not at compile time) and the untestable

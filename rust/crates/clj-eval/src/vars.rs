@@ -9,7 +9,7 @@
 //! predicates (`bound?`, `thread-bound?`), thread-binding frames
 //! (`push-`/`pop-`/`get-thread-bindings`, `with-bindings*`), and
 //! metadata (`meta`, `with-meta`, `vary-meta`, `alter-meta!`,
-//! `reset-meta!`). Oracle: probe37; rules: `docs/t1174/vars-contract.md`.
+//! `reset-meta!`). Oracle: probe37; rules: `docs/spec/t1174/vars-contract.md`.
 
 use std::sync::Arc;
 

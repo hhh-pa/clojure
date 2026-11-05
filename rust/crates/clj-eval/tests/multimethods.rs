@@ -6,7 +6,7 @@
 // the terms of this license.
 
 //! Issue #33 stage-3 tests: every pin in
-//! `docs/i33-typechain/probes/multimethods.out` reproduced against the
+//! `docs/spec/i33-typechain/probes/multimethods.out` reproduced against the
 //! port, plus predicate edges, macro-shape errors, and the documented
 //! divergences. Pins that need the JVM's `class` core fn assert the
 //! port's mechanism instead (dispatch values evaluate, so the
@@ -15,7 +15,7 @@
 //! Oracle command (see the probe header):
 //! `CP=.../clojure-1.13.0-alpha10.jar:... java -Duser.language=en
 //! -Duser.country=US -Duser.timezone=UTC -cp $CP clojure.main
-//! docs/i33-typechain/probes/multimethods.clj`.
+//! docs/spec/i33-typechain/probes/multimethods.clj`.
 
 use clj_eval::{Evaluator, SourceError, boot};
 use clj_value::{PrintOpts, Value, pr_to_string};

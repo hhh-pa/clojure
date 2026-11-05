@@ -25,7 +25,7 @@ Behavioral scope: the full ported surface on `master`, including
 reader, values, analyzer builtins (`macroexpand-1` over the nine
 builtins), real `MapEntry` values with entry-conformant natives,
 `reversible?`, destructuring outlets, and the LLVM AOT path —
-every behavior pinned by oracle probes under `docs/t1192/probes/`
+every behavior pinned by oracle probes under `docs/spec/t1192/probes/`
 and the `clj-core` coverage matrix.
 
 Known divergences: the `divergent` rows of

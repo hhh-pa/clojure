@@ -6,7 +6,7 @@
 // the terms of this license.
 
 //! Issue #32 tower tests: every probe in
-//! `docs/i32-rng-tower/probes/tower.out` pinned verbatim (except
+//! `docs/spec/i32-rng-tower/probes/tower.out` pinned verbatim (except
 //! `promo-types`, which needs the out-of-scope `type` var — the
 //! result kinds are visible in the printed values instead).
 

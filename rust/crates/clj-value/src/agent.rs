@@ -6,7 +6,7 @@
 // the terms of this license.
 
 //! Agents (S6C): shared cells mirroring `clojure.lang.Agent`
-//! (`docs/t1174/concurrency-contract.md`, `docs/t1174/s6-pins.md` P5).
+//! (`docs/spec/t1174/concurrency-contract.md`, `docs/spec/t1174/s6-pins.md` P5).
 //!
 //! The cell holds the current state, the `:validator` fn (if any),
 //! the `:meta` map (if any), the watches map (`{key fn}`, fired in

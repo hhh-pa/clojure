@@ -13,7 +13,7 @@
 //! `proxy-super`, `update-proxy`, `method-sig`), and protocol
 //! introspection (`-cache-protocol-fn`, `-reset-methods`,
 //! `find-protocol-impl`, `find-protocol-method`, `extenders`).
-//! See `docs/zero-oos-s14-typeinternals/probes/*.out`. Every test
+//! See `docs/spec/zero-oos-s14-typeinternals/probes/*.out`. Every test
 //! names the probe labels it replays; port-only pins say so
 //! inline, with the JVM value in comments where they diverge.
 

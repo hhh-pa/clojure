@@ -9,7 +9,7 @@
 //! `*default-data-reader-fn*` / `default-data-readers` /
 //! `reader-conditional` / `reader-conditional?` / `tagged-literal` /
 //! `tagged-literal?` plus the tag-table read path (see
-//! `docs/zero-oos-s6-datareaders/probes/*.{clj,out}`). Labels name
+//! `docs/spec/zero-oos-s6-datareaders/probes/*.{clj,out}`). Labels name
 //! the replayed pins (`d-*` in `datareaders.out`, the rest in
 //! `tagreads.out`).
 
@@ -1474,7 +1474,7 @@ fn exotic_tables_and_tags() {
 
 /// Run `body` with the `default-data-readers` root swapped to `root`
 /// (restored after — gap #94 probes `h-*` in
-/// `docs/gap-94/probes/ddr.out`).
+/// `docs/spec/gap-94/probes/ddr.out`).
 fn with_ddr(root: &str, body: &str) -> String {
     format!(
         "(let [saved94 default-data-readers] (try (do (alter-var-root #'default-data-readers (constantly {root})) {body}) (finally (alter-var-root #'default-data-readers (constantly saved94)))))"

@@ -6,7 +6,7 @@
 // the terms of this license.
 
 //! Issue #33 stage-2 tests: every pin in
-//! `docs/i33-typechain/probes/protocols.out` reproduced against the
+//! `docs/spec/i33-typechain/probes/protocols.out` reproduced against the
 //! port, plus predicate edges, macro-shape errors, the `Closeable`
 //! contract, and the documented divergences. Pins that need the
 //! JVM's fn class names assert the port's shape instead; each such
@@ -15,7 +15,7 @@
 //! Oracle command (see the probe header):
 //! `CP=.../clojure-1.13.0-alpha10.jar:... java -Duser.language=en
 //! -Duser.country=US -Duser.timezone=UTC -cp $CP clojure.main
-//! docs/i33-typechain/probes/protocols.clj`.
+//! docs/spec/i33-typechain/probes/protocols.clj`.
 
 use clj_eval::{Evaluator, SourceError, boot};
 use clj_value::{PrintOpts, Value, pr_to_string};

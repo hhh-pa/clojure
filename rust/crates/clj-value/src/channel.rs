@@ -12,7 +12,7 @@
 //! condvars (plain ops) or on one shared `Waiter` (`alts!!`, whose
 //! first-wins commit mirrors `do-alts`' flag). Semantics mirror
 //! `clojure.core.async.impl.channels/ManyToManyChannel` (oracle:
-//! `docs/gap-123/g123-*.clj`): takes drain the buffer first, then
+//! `docs/spec/gap-123/g123-*.clj`): takes drain the buffer first, then
 //! rendezvous with queued putters, then (when closed) yield nil;
 //! puts rendezvous with queued takers first, then buffer (fixed
 //! blocks when full; dropping/sliding never block), then queue;

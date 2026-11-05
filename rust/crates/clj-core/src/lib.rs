@@ -8,7 +8,7 @@
 //! Namespaces, vars, macroexpansion, the loader, and the Rust-backed
 //! `clojure.core` subset with its coverage list.
 //!
-//! Lands in slice S5 (`docs/t1174/specification.md`).
+//! Lands in slice S5 (`docs/spec/t1174/specification.md`).
 
 /// Boot a fresh evaluator with `clojure.core` installed and referred
 /// into `user` (S5A2 wires the namespace vars and the loader; later

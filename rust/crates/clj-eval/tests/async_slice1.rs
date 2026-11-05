@@ -7,8 +7,8 @@
 
 //! Gap-123 slice 1: channels + blocking ops probe replay (`chan`
 //! with fixed/dropping/sliding buffers, `>!!`/`<!!`, `close!`/
-//! `closed?`, `alts!!`; oracle `docs/gap-123/g123-*.clj`, pins
-//! `docs/gap-123/probes.md`).
+//! `closed?`, `alts!!`; oracle `docs/spec/gap-123/g123-*.clj`, pins
+//! `docs/spec/gap-123/probes.md`).
 //!
 //! Blocking futures always deref with a timeout (a stuck op fails
 //! the test instead of hanging the suite); short sleeps ride

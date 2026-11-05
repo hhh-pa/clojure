@@ -9,7 +9,7 @@
 //! `destructure` / `seq-to-map-for-destructuring` / `unquote` /
 //! `unquote-splicing` / `munge` / `namespace-munge` /
 //! `with-local-vars` (see
-//! `docs/zero-oos-s4b-macros/probes/macros.{clj,out}`).
+//! `docs/spec/zero-oos-s4b-macros/probes/macros.{clj,out}`).
 //! Expansion cases boot a fresh evaluator each (deterministic
 //! `next_gensym` counters, the `fx4_macroexpand` `fresh`
 //! pattern); only reader-issued `__auto__` ids and object hexes

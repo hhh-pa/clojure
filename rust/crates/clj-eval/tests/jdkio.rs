@@ -7,7 +7,7 @@
 
 //! S17 JDK/IO adapters: handle shapes, seq adapters, stream
 //! consumers, resultset rows, file walks, xml walks.
-//! Oracle: `docs/zero-oos-s17-jdkio/probes/jdkio.out`
+//! Oracle: `docs/spec/zero-oos-s17-jdkio/probes/jdkio.out`
 //! (labels cited per assertion).
 
 use clj_eval::{Evaluator, SourceError, boot, jdkio};

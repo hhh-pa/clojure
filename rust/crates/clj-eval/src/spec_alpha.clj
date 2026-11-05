@@ -18,10 +18,10 @@
 ;; 822-908, 1195-1221), narrowed like slice 1 (no `:gen`, no
 ;; conformers; slice F2 restores `:gen`): `MapSpec`/`MergeSpec`
 ;; records, `pvalid?`, and the list-built `keys`/`merge` macros
-;; (see docs/gap-122/slice-A.md).
+;; (see docs/spec/gap-122/slice-A.md).
 ;;
-;; Port adaptations (see docs/gap-122/slice-1.md,
-;; docs/gap-122/slice-A.md and docs/gap-122/slice-E.md for the full lists):
+;; Port adaptations (see docs/spec/gap-122/slice-1.md,
+;; docs/spec/gap-122/slice-A.md and docs/spec/gap-122/slice-E.md for the full lists):
 ;; - No syntax-quote and no `::auto-resolve` anywhere in this file:
 ;;   the port reads a whole load batch before evaluating it, so both
 ;;   would qualify against the *requiring* namespace instead of this
@@ -59,7 +59,7 @@
 ;;   registers `::kvs->map`, unblocking runtime use.
 ;;
 ;; gap-122 slice D2 adds `tuple`/`multi-spec`/`conformer`/
-;; `nonconforming` (see docs/gap-122/slice-D2.md): `PredSpec`
+;; `nonconforming` (see docs/spec/gap-122/slice-D2.md): `PredSpec`
 ;; carries the upstream `cpred?`/`unc` conformer flags,
 ;; `spec-impl`/`dt` grow the upstream conformer arities
 ;; (minus the `:gen` parameter), and the new `TupleSpec`/
@@ -69,7 +69,7 @@
 ;; `clojure.core/get-method` plus the `__dispatch_fn*` glue
 ;; native (the port has no `.dispatchFn`/`.getMethod` interop).
 ;;
-;; gap-122 slice B (see docs/gap-122/slice-B.md) appends the
+;; gap-122 slice B (see docs/spec/gap-122/slice-B.md) appends the
 ;; `s/or`, `s/nilable`, `s/every`, `s/every-kv`,
 ;; `s/coll-of`, and `s/map-of` combinators below the slice-D2
 ;; code (`every-kv` reuses slice D2's `s/tuple`).
@@ -82,11 +82,11 @@
 ;; gap-122 slice F2 wires `gen*`/`with-gen*` on every record above
 ;; (plus `s/gen`, `s/with-gen`, `s/exercise`, `s/exercise-fn` and
 ;; the `:gen` kwargs of `s/spec`/`s/keys`/`s/every`; see
-;; docs/gap-122/slice-F2.md). Records carry the upstream `gfn`
+;; docs/spec/gap-122/slice-F2.md). Records carry the upstream `gfn`
 ;; (Or/Multi/Map also the `id`); `-impl` ctors keep short arities
 ;; delegating with nil `gfn`, as upstream.
 ;;
-;; gap-122 slice FDEF (finale; see docs/gap-122/slice-fdef.md)
+;; gap-122 slice FDEF (finale; see docs/spec/gap-122/slice-fdef.md)
 ;; appends `*fspec-iterations*`, `call-valid?`/`validate-fn`, the
 ;; `FspecSpec` record + `fspec-impl`, the `fspec`/`fdef` macros,
 ;; `macroexpand-check` (plain fn, no compiler hook), the
@@ -2137,7 +2137,7 @@ if value does not match spec, else the (possibly destructured) value."
     (->EverySpec form pred opts spec kfn cfns gfn))))
 
 ;; ---- gap-122 slice FDEF (finale): fspec/fdef/assert/ranges ----
-;; (see docs/gap-122/slice-fdef.md). Appended below the slice-B/F2
+;; (see docs/spec/gap-122/slice-fdef.md). Appended below the slice-B/F2
 ;; code; nothing above changes. `exercise-fn` (F2) now resolves
 ;; real fspecs, closing F2 divergence 5.
 

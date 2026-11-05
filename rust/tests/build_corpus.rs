@@ -5,8 +5,8 @@
 // By using this software in any fashion, you are agreeing to be bound by
 // the terms of this license.
 
-//! S8D corpus replay: every `docs/t1174/s8-corpus` file plus every
-//! `docs/i214-jit-subset/corpus` file, differentially `run` vs
+//! S8D corpus replay: every `docs/spec/t1174/s8-corpus` file plus every
+//! `docs/spec/i214-jit-subset/corpus` file, differentially `run` vs
 //! `build`+execute vs `jit` (rules in each `MANIFEST.md`).
 //! Supported files must print byte-identical stdout on all paths
 //! (exit 0, empty stderr); error programs pin the abort stderr
@@ -28,14 +28,14 @@ fn bin() -> Command {
 /// The corpus dir (absolute, canonicalized — diagnostics embed the
 /// exact path passed to `build`).
 fn corpus_dir() -> PathBuf {
-    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../docs/t1174/s8-corpus");
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../docs/spec/t1174/s8-corpus");
     dir.canonicalize().expect("corpus dir")
 }
 
 /// The #214 subset-expansion corpus dir (same replay contract as
-/// [`corpus_dir`]; lives outside `docs/t1174`, which is frozen).
+/// [`corpus_dir`]; lives outside `docs/spec/t1174`, which is frozen).
 fn corpus_i214_dir() -> PathBuf {
-    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../docs/i214-jit-subset/corpus");
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../docs/spec/i214-jit-subset/corpus");
     dir.canonicalize().expect("i214 corpus dir")
 }
 

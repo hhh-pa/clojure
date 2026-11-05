@@ -8,7 +8,7 @@
 //! `clojure.core/format`: `java.util.Formatter` parity over the
 //! `%[index$][flags][width][.precision][t]conversion` grammar.
 //!
-//! Everything here is oracle-pinned (`docs/t1174/s5d-pins.md`
+//! Everything here is oracle-pinned (`docs/spec/t1174/s5d-pins.md`
 //! "Format", corpus 12/13/14, the `s5d-fmt*` probe batches):
 //! - Parse failures (end of string or a non-`[a-zA-Z%]` char where
 //!   the conversion belongs) report the char AFTER `%` (or `%`

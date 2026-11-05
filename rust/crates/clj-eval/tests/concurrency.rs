@@ -8,7 +8,7 @@
 //! S6A concurrency: probe replay for atoms (`atom`, `deref`, `swap!`,
 //! `reset!`, `compare-and-set!`, `add-watch`/`remove-watch`), delays
 //! (`delay`, `force`, `realized?`), and `memoize` (see
-//! `docs/t1174/s6-pins.md` P1/P2 and `/tmp/s6a-probe*.clj`).
+//! `docs/spec/t1174/s6-pins.md` P1/P2 and `/tmp/s6a-probe*.clj`).
 
 use clj_eval::{Evaluator, SourceError, boot, jvm_class_of};
 use clj_value::{PrintOpts, Value, pr_to_string};

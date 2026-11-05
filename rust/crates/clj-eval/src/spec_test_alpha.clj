@@ -9,7 +9,7 @@
 ;; clojure.spec.test.alpha (upstream spec.alpha-0.6.249,
 ;; clojure/spec/test/alpha.clj, 579 lines) covering `instrument`/
 ;; `unstrument`, `check`/`check-fn`, and the reporting fns (see
-;; docs/gap-122/slice-fdef.md).
+;; docs/spec/gap-122/slice-fdef.md).
 ;;
 ;; Port adaptations:
 ;; - No `clojure.pprint` / `clojure.string` requires (neither is

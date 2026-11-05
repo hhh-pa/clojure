@@ -9,11 +9,11 @@
 # Usage: ./regen.sh [outdir]  (default: /tmp/t1174-corpus)
 # Requires: target/clojure-1.13.0-master-SNAPSHOT.jar plus the
 #   spec/test.check jars (same classpath as
-#   docs/t1174/probes/probe.sh). The jar is a local build artifact
+#   docs/spec/t1174/probes/probe.sh). The jar is a local build artifact
 #   (gitignored) and can no longer be rebuilt from this repo — the
 #   JVM tree was removed; if it is missing, fetch org.clojure/clojure
 #   from Maven Central instead (see the oracle strategy in
-#   docs/t1174/java-removal-checklist.md).
+#   docs/spec/t1174/java-removal-checklist.md).
 # Writes: expectations.edn + files.edn (checked in; :ours snapshots and
 #   :exclude marks carried forward), raw dumps + cross-check report
 #   under outdir.
@@ -29,6 +29,6 @@ echo "== driver (DUMP=1 for the cross-check) =="
 DUMP=1 java -cp "$CP" clojure.main rust/crates/clj-reader/tests/corpus/driver.clj 2>"$OUT/driver.err" | tee "$OUT/driver.log"
 code=${PIPESTATUS[0]}
 if [ "$code" != 0 ]; then echo "driver failed ($code); see $OUT/driver.err"; exit 1; fi
-echo "== cross-check vs docs/t1174/probes outputs =="
+echo "== cross-check vs docs/spec/t1174/probes outputs =="
 java -cp "$CP" clojure.main rust/crates/clj-reader/tests/corpus/check.clj "$OUT/raw-dump.edn" 2>&1 | tee "$OUT/check.log"
 echo "outputs in $OUT"

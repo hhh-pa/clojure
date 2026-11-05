@@ -7,8 +7,8 @@
 
 //! Gap-123 slice 2: channel transducers (`chan` xform/ex-handler
 //! arities, stepping on the put path, completion on close and
-//! closed takes; oracle `docs/gap-123/g123-xform.clj`, pins
-//! `docs/gap-123/slice-2.md`).
+//! closed takes; oracle `docs/spec/gap-123/g123-xform.clj`, pins
+//! `docs/spec/gap-123/slice-2.md`).
 //!
 //! Blocking futures always deref with a timeout (a stuck op fails
 //! the test instead of hanging the suite); short sleeps ride

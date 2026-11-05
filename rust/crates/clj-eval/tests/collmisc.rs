@@ -9,7 +9,7 @@
 //! structmap surface, the chunk machinery, `hash-combine` /
 //! `mix-collection-hash`, `seque`, `iteration`, `file-seq`, and
 //! the `re-matcher` / `re-groups` handle pair (see
-//! `docs/zero-oos-s12-collmisc/probes/*.{clj,out}` — 228 pins).
+//! `docs/spec/zero-oos-s12-collmisc/probes/*.{clj,out}` — 228 pins).
 //! Every `sm-*`/`ch-*`/`mh-*`/`sq-*`/`it-*`/`fs-*`/`rm-*` label
 //! below names its oracle row; `(derived)` marks a port-test
 //! assertion derived from an oracle pin rather than quoted by it.
