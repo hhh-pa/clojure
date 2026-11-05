@@ -1,10 +1,16 @@
 #!/usr/bin/env python3
-"""Head-to-head gate: clojure-rs (this PR) vs JVM Clojure on cpu_s + maxrss_kb.
+"""Head-to-head gate: reference leg vs challenger leg on cpu_s + maxrss_kb.
 
 Usage:
   h2h_compare.py --jvm JVM.json [JVM.json ...] --rs RS.json [RS.json ...]
                  --label SUITE [--summary-file FILE] [--report-only]
                  [--merged-jvm FILE] [--merged-rs FILE]
+                 [--base-name NAME] [--challenger-name NAME]
+
+--jvm takes the reference leg, --rs the challenger leg (a "win" is
+challenger-faster). The JVM-vs-native gate uses the defaults; the
+native-vs-native comparison passes two clojure-rs legs with
+--base-name/--challenger-name (e.g. rs-from/rs-to).
 
 Compares per-case medians (primary) and cross-checks the README
 convention (cpu min-of-repeats, rss max-of-repeats). Multiple JSONs
@@ -84,11 +90,15 @@ def norm_counts(label, counts):
 
 
 def parse_args(argv):
-    p = argparse.ArgumentParser(description="JVM vs clojure-rs CPU/RSS gate")
-    p.add_argument("--jvm", nargs="+", required=True, metavar="JVM.json",
-                   help="one merged leg JSON, or one JSON per shard")
-    p.add_argument("--rs", nargs="+", required=True, metavar="RS.json",
-                   help="one merged leg JSON, or one JSON per shard")
+    p = argparse.ArgumentParser(description="Reference-vs-challenger CPU/RSS gate")
+    p.add_argument("--jvm", nargs="+", required=True, metavar="BASE.json",
+                   help="reference leg: one merged JSON, or one JSON per shard")
+    p.add_argument("--rs", nargs="+", required=True, metavar="CHALLENGER.json",
+                   help="challenger leg: one merged JSON, or one JSON per shard")
+    p.add_argument("--base-name", default="jvm",
+                   help="display name of the reference leg (default: jvm)")
+    p.add_argument("--challenger-name", default="rs",
+                   help="display name of the challenger leg (default: rs)")
     p.add_argument("--label", required=True, help="suite name (recipes, algos)")
     p.add_argument("--summary-file", default=None,
                    help="append a Markdown verdict table (GITHUB_STEP_SUMMARY)")
@@ -121,8 +131,8 @@ def write_merged(path, first_doc, results, failures, missing):
 def main(argv):
     args = parse_args(argv)
     try:
-        jm, j_fail, j_miss = union(args.jvm, "jvm")
-        rm, r_fail, r_miss = union(args.rs, "rs")
+        jm, j_fail, j_miss = union(args.jvm, args.base_name)
+        rm, r_fail, r_miss = union(args.rs, args.challenger_name)
     except (OSError, ValueError, KeyError, json.JSONDecodeError) as e:
         print(f"h2h_compare: error loading leg JSONs: {e}", file=sys.stderr)
         return 2
@@ -131,19 +141,20 @@ def main(argv):
     if args.merged_rs:
         write_merged(args.merged_rs, load(args.rs[0]), rm, r_fail, r_miss)
 
+    an, bn = args.base_name, args.challenger_name
     print(f"== {args.label} ==")
-    print(f"jvm: shards={len(args.jvm)} results={len(jm)} "
+    print(f"{an}: shards={len(args.jvm)} results={len(jm)} "
           f"failures={len(j_fail)} missing={len(j_miss)}")
-    print(f"rs : shards={len(args.rs)} results={len(rm)} "
+    print(f"{bn}: shards={len(args.rs)} results={len(rm)} "
           f"failures={len(r_fail)} missing={len(r_miss)}")
     only_jvm = sorted(set(jm) - set(rm))
     only_rs = sorted(set(rm) - set(jm))
     print(f"common cases: {len(set(jm) & set(rm))} "
-          f"only-jvm: {len(only_jvm)} only-rs: {len(only_rs)}")
+          f"only-{an}: {len(only_jvm)} only-{bn}: {len(only_rs)}")
     for k in only_jvm[:10]:
-        print("  only-jvm:", "/".join(k))
+        print(f"  only-{an}:", "/".join(k))
     for k in only_rs[:10]:
-        print("  only-rs:", "/".join(k))
+        print(f"  only-{bn}:", "/".join(k))
 
     n_cpu_win = n_cpu_loss = n_cpu_tie = 0
     n_mem_win = n_mem_loss = n_mem_tie = 0
@@ -201,49 +212,49 @@ def main(argv):
 
     n = n_cpu_win + n_cpu_loss + n_cpu_tie
     print(f"compared ok-cases: {n}")
-    print(f"CPU (median): RS wins {n_cpu_win}, losses {n_cpu_loss}, ties {n_cpu_tie}")
-    print(f"MEM (median): RS wins {n_mem_win}, losses {n_mem_loss}, ties {n_mem_tie}")
+    print(f"CPU (median): {bn} wins {n_cpu_win}, losses {n_cpu_loss}, ties {n_cpu_tie}")
+    print(f"MEM (median): {bn} wins {n_mem_win}, losses {n_mem_loss}, ties {n_mem_tie}")
     print(f"both-win cases: {n_both_win}/{n}")
     if worst_cpu_margin is not None:
-        print(f"worst RS cpu ratio: {worst_cpu_margin[0]:.3f}x ({worst_cpu_margin[1]})")
-        print(f"worst RS mem ratio: {worst_mem_margin[0]:.3f}x ({worst_mem_margin[1]})")
+        print(f"worst {bn} cpu ratio: {worst_cpu_margin[0]:.3f}x ({worst_cpu_margin[1]})")
+        print(f"worst {bn} mem ratio: {worst_mem_margin[0]:.3f}x ({worst_mem_margin[1]})")
     else:
-        print("worst RS cpu ratio: n/a (no compared cases)")
-        print("worst RS mem ratio: n/a (no compared cases)")
+        print(f"worst {bn} cpu ratio: n/a (no compared cases)")
+        print(f"worst {bn} mem ratio: n/a (no compared cases)")
     if cpu_losses:
         print(f"--- CPU LOSSES ({len(cpu_losses)}) ---")
         for ratio, name, j, r in sorted(cpu_losses, reverse=True)[:50]:
-            print(f"  {ratio:.3f}x {name} jvm={j:.3f}s rs={r:.3f}s")
+            print(f"  {ratio:.3f}x {name} {an}={j:.3f}s {bn}={r:.3f}s")
     if mem_losses:
         print(f"--- MEM LOSSES ({len(mem_losses)}) ---")
         for ratio, name, j, r in sorted(mem_losses, reverse=True)[:50]:
-            print(f"  {ratio:.3f}x {name} jvm={j:.0f}K rs={r:.0f}K")
+            print(f"  {ratio:.3f}x {name} {an}={j:.0f}K {bn}={r:.0f}K")
     if skipped:
         print(f"--- SKIPPED-NO-RUNS ({len(skipped)}) ---")
         for name, aj, bj in skipped[:20]:
-            print(f"  {name} jvm_runs={aj} rs_runs={bj}")
+            print(f"  {name} {an}_runs={aj} {bn}_runs={bj}")
     if not_ok:
         print(f"--- NOT-OK ({len(not_ok)}) ---")
         for name, je, re in not_ok[:50]:
-            print(f"  {name} jvm_err={je} rs_err={re}")
+            print(f"  {name} {an}_err={je} {bn}_err={re}")
     if drift:
         print(f"--- TEST-COUNT DRIFT ({len(drift)}) ---")
         for name, j, r in drift[:20]:
             print(f"  {name} jvm={j} rs={r}")
     if j_fail:
-        print(f"--- JVM failures ({len(j_fail)}) ---")
+        print(f"--- {an.upper()} failures ({len(j_fail)}) ---")
         for f in j_fail[:20]:
             print(" ", f)
     if r_fail:
-        print(f"--- RS failures ({len(r_fail)}) ---")
+        print(f"--- {bn.upper()} failures ({len(r_fail)}) ---")
         for f in r_fail[:20]:
             print(" ", f)
     if j_miss:
-        print(f"--- JVM missing ({len(j_miss)}) ---")
+        print(f"--- {an.upper()} missing ({len(j_miss)}) ---")
         for f in j_miss[:20]:
             print(" ", f)
     if r_miss:
-        print(f"--- RS missing ({len(r_miss)}) ---")
+        print(f"--- {bn.upper()} missing ({len(r_miss)}) ---")
         for f in r_miss[:20]:
             print(" ", f)
 
@@ -257,12 +268,12 @@ def main(argv):
     if drift:
         problems.append(f"{len(drift)} test-count drifts")
     if only_jvm or only_rs:
-        problems.append(f"leg mismatch (only-jvm {len(only_jvm)}, "
-                        f"only-rs {len(only_rs)})")
+        problems.append(f"leg mismatch (only-{an} {len(only_jvm)}, "
+                        f"only-{bn} {len(only_rs)})")
     if j_fail or r_fail:
-        problems.append(f"sweep failures (jvm {len(j_fail)}, rs {len(r_fail)})")
+        problems.append(f"sweep failures ({an} {len(j_fail)}, {bn} {len(r_fail)})")
     if j_miss or r_miss:
-        problems.append(f"missing cases (jvm {len(j_miss)}, rs {len(r_miss)})")
+        problems.append(f"missing cases ({an} {len(j_miss)}, {bn} {len(r_miss)})")
     if n == 0:
         problems.append("no compared cases")
 
@@ -280,17 +291,17 @@ def main(argv):
         worst_mem = ("n/a" if worst_mem_margin is None else
                      f"{worst_mem_margin[0]:.3f}x ({worst_mem_margin[1]})")
         lines = [
-            f"## h2h {args.label}: JVM vs clojure-rs",
+            f"## h2h {args.label}: {an} vs {bn}",
             "",
-            f"common cases: {n} (jvm shards {len(args.jvm)}, "
-            f"rs shards {len(args.rs)}); both-win {n_both_win}/{n}",
+            f"common cases: {n} ({an} shards {len(args.jvm)}, "
+            f"{bn} shards {len(args.rs)}); both-win {n_both_win}/{n}",
             "",
-            "| metric | RS wins | losses | ties |",
+            f"| metric | {bn} wins | losses | ties |",
             "| --- | ---: | ---: | ---: |",
             f"| CPU (median cpu_s) | {n_cpu_win} | {n_cpu_loss} | {n_cpu_tie} |",
             f"| MEM (median maxrss_kb) | {n_mem_win} | {n_mem_loss} | {n_mem_tie} |",
             "",
-            f"worst RS cpu ratio: {worst_cpu}; worst RS mem ratio: {worst_mem}",
+            f"worst {bn} cpu ratio: {worst_cpu}; worst {bn} mem ratio: {worst_mem}",
             "",
             f"### GATE: {'PASS' if gate_pass else 'FAIL'}",
         ]
@@ -300,7 +311,7 @@ def main(argv):
         if cpu_losses:
             lines += ["", "<details><summary>CPU losses "
                       f"({len(cpu_losses)}, worst first)</summary>", "",
-                      "| ratio | case | jvm | rs |",
+                      f"| ratio | case | {an} | {bn} |",
                       "| ---: | --- | ---: | ---: |"]
             for ratio, name, j, r in sorted(cpu_losses, reverse=True)[:30]:
                 lines.append(f"| {ratio:.3f}x | {name} | {j:.3f}s | {r:.3f}s |")
@@ -308,7 +319,7 @@ def main(argv):
         if mem_losses:
             lines += ["", "<details><summary>MEM losses "
                       f"({len(mem_losses)}, worst first)</summary>", "",
-                      "| ratio | case | jvm | rs |",
+                      f"| ratio | case | {an} | {bn} |",
                       "| ---: | --- | ---: | ---: |"]
             for ratio, name, j, r in sorted(mem_losses, reverse=True)[:30]:
                 lines.append(f"| {ratio:.3f}x | {name} | {j:.0f}K | {r:.0f}K |")

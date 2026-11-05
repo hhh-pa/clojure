@@ -1,14 +1,25 @@
-# Head-to-head CPU/RSS gate: clojure-rs built from THIS PR vs JVM
-# Clojure, across the snippet suite (hhh-pa/clojure-code-snippet)
+# Head-to-head CPU/RSS gate: clojure-rs revisions vs JVM Clojure
+# and vs each other, across the snippet suite (hhh-pa/clojure-code-snippet)
 # and the algorithms suite (hhh-pa/clojure-algorithms). Each suite
-# runs a JVM leg and a clojure-rs leg, sharded 8 ways (32 measure
-# jobs); the h2h-compare job unions the shards per leg and gates on
-# per-case median cpu_s + maxrss_kb: ANY loss fails the PR.
+# runs a JVM leg plus TWO clojure-rs legs (rs-from, rs-to), sharded
+# 8 ways (48 measure jobs); the h2h-compare job unions the shards
+# per leg and gates on per-case median cpu_s + maxrss_kb: ANY JVM
+# loss fails the PR. The rs-from-vs-rs-to tables are informational
+# (report-only): same-machine medians still wobble on near-tie
+# cases, so native-vs-native is not a hard gate (one-line flip in
+# the compare job if that ever changes).
 #
-# This is a gate, not a tracker: it reports no Bencher history, it
-# just reds the PR when the native runtime regresses against the
-# JVM on any case. Triage mode: dispatch with report_only=true (or
-# flip the reviewer note below) to get the verdict tables green.
+# Revision pairs: on pull_request, from = PR base SHA, to = PR head
+# (github.sha, the merge commit CI tests) — stacked PRs compare
+# against their parent branch automatically. On workflow_dispatch,
+# from defaults to master and to to the dispatched ref, so
+# dispatching on a branch compares <branch> vs <master>; the
+# rs_from/rs_to inputs override either side (40-char SHA or any
+# branch/tag, for bisection).
+#
+# This is a gate, not a tracker: it reports no Bencher history.
+# Triage mode: dispatch with report_only=true to get the verdict
+# tables green.
 #
 # Session recipe: the flags below encode the workstation h2h sweep
 # (PR225 test plan): --repeat 3 --no-alloc --no-perf --jobs 3, GNU
@@ -20,11 +31,10 @@
 # clojure_rs_sha pattern of the snippet repos.
 #
 # REQUIRED SECRET: RESOURCES_PASSPHRASE (the snippet resource-bundle
-# passphrase) must exist on hhh-pa/clojure too — copy the value over
-# from hhh-pa/clojure-code-snippet (Settings -> Secrets and
-# variables -> Actions). The recipes legs fail loud without it.
-# (The algorithms suite carries its resources in-repo and needs no
-# decrypt.)
+# passphrase) at organization level with access to hhh-pa/clojure
+# (visibility chosen when the secret was moved). The recipes legs
+# fail loud without it. (The algorithms suite carries its
+# resources/ in-repo and needs no decrypt.)
 
 name: h2h-cpu-mem
 
@@ -38,6 +48,14 @@ on:
         default: ''
       algorithms_sha:
         description: 'Pin clojure-algorithms to this revision (40-char SHA; empty = pinned default)'
+        required: false
+        default: ''
+      rs_from:
+        description: 'Native-vs-native base: 40-char SHA or branch/tag (empty = PR base, or master on dispatch)'
+        required: false
+        default: ''
+      rs_to:
+        description: 'Native-vs-native head: 40-char SHA or branch/tag (empty = PR head, or dispatched ref)'
         required: false
         default: ''
       report_only:
@@ -65,14 +83,20 @@ env:
   JARS_CACHE_KEY: clojure-jars-1.12.0-spec0.5.238-core0.4.74-v1
 
 jobs:
-  # Resolve the suite revisions ONCE per run so all 32 measure legs
-  # sweep the same commits. Defaults: the pinned SHAs above; a
-  # manual dispatch may pin either input instead (bisection).
-  resolve-suites:
+  # Resolve the suite revisions AND the native-vs-native revision
+  # pair ONCE per run so all 48 measure legs sweep the same commits.
+  # Suite defaults: the pinned SHAs above; a manual dispatch may pin
+  # either input instead (bisection). Native pair: PR base/head by
+  # default on pull_request (stacked PRs diff against their parent),
+  # master/dispatched-ref on workflow_dispatch; rs_from/rs_to take a
+  # 40-char SHA or any branch/tag.
+  resolve:
     runs-on: ubuntu-latest
     outputs:
       snippets_sha: ${{ steps.resolve.outputs.snippets_sha }}
       algorithms_sha: ${{ steps.resolve.outputs.algorithms_sha }}
+      rs_from_sha: ${{ steps.resolve.outputs.rs_from_sha }}
+      rs_to_sha: ${{ steps.resolve.outputs.rs_to_sha }}
     steps:
       - id: resolve
         run: |
@@ -80,31 +104,65 @@ jobs:
           algos="${{ inputs.algorithms_sha }}"
           [ -z "$snippets" ] && snippets="${{ env.SNIPPETS_SHA_DEFAULT }}"
           [ -z "$algos" ] && algos="${{ env.ALGORITHMS_SHA_DEFAULT }}"
-          for sha in "$snippets" "$algos"; do
+          from="${{ inputs.rs_from }}"
+          to="${{ inputs.rs_to }}"
+          if [ -z "$from" ]; then
+            if [ "${{ github.event_name }}" = "pull_request" ]; then
+              from="${{ github.event.pull_request.base.sha }}"
+            else
+              from="master"
+            fi
+          fi
+          [ -z "$to" ] && to="${{ github.sha }}"
+          to_sha() {
+            # Print the 40-char SHA for a SHA-or-ref input.
+            if printf '%s' "$1" | grep -Eq '^[0-9a-f]{40}$'; then
+              printf '%s' "$1"
+            else
+              git ls-remote https://github.com/hhh-pa/clojure "$1" | awk '{print $1}' | head -n 1
+            fi
+          }
+          from_sha="$(to_sha "$from")"
+          to_sha="$(to_sha "$to")"
+          for sha in "$snippets" "$algos" "$from_sha" "$to_sha"; do
             if ! printf '%s' "$sha" | grep -Eq '^[0-9a-f]{40}$'; then
-              echo "error: suite revision is not a 40-char SHA: '$sha'" >&2
+              echo "error: resolved revision is not a 40-char SHA: '$sha'" >&2
               exit 1
             fi
           done
           echo "snippets_sha=$snippets" >> "$GITHUB_OUTPUT"
           echo "algorithms_sha=$algos" >> "$GITHUB_OUTPUT"
+          echo "rs_from_sha=$from_sha" >> "$GITHUB_OUTPUT"
+          echo "rs_to_sha=$to_sha" >> "$GITHUB_OUTPUT"
           {
             echo "suite revisions:"
             echo "  clojure-code-snippet: \`$snippets\`"
             echo "  clojure-algorithms: \`$algos\`"
+            echo "native-vs-native revisions:"
+            echo "  from: \`$from_sha\` ($from)"
+            echo "  to: \`$to_sha\` ($to)"
           } >> "$GITHUB_STEP_SUMMARY"
 
-  # The runtime under test, built once per run FROM THE PR ITSELF
-  # (interpreter-only release: `run` needs no LLVM) and fanned out
-  # to the 16 native legs as an artifact.
+  # The two native revisions under test (interpreter-only release:
+  # `run` needs no LLVM), each fanned out to its 16 measure legs as
+  # an artifact. rs-to is what the JVM gate tests; rs-from is its
+  # comparison base (PR base, or master on dispatch).
   build-rs:
+    needs: [resolve]
     runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:
       contents: read # checkout
       actions: write # cargo cache + binary artifact
+    strategy:
+      fail-fast: false
+      matrix:
+        rev: [rs-from, rs-to]
+    name: build-rs ${{ matrix.rev }}
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ matrix.rev == 'rs-from' && needs.resolve.outputs.rs_from_sha || needs.resolve.outputs.rs_to_sha }}
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -116,19 +174,19 @@ jobs:
           cargo build --release --locked --no-default-features
           mkdir -p "$GITHUB_WORKSPACE/cljrs-bin"
           cp target/release/clojure-rs "$GITHUB_WORKSPACE/cljrs-bin/"
-          echo "clojure-rs under test: \`${{ github.sha }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "clojure-rs ${{ matrix.rev }}: \`${{ matrix.rev == 'rs-from' && needs.resolve.outputs.rs_from_sha || needs.resolve.outputs.rs_to_sha }}\`" >> "$GITHUB_STEP_SUMMARY"
       - name: Upload clojure-rs binary
         uses: actions/upload-artifact@v6
         with:
-          name: cljrs-bin
+          name: cljrs-${{ matrix.rev }}
           path: cljrs-bin/
           retention-days: 1
 
-  # Recipes legs (session legs 1-2): 8 shards x 2 runtimes.
+  # Recipes legs: 8 shards x 3 runtimes (jvm, rs-from, rs-to).
   # Full-suite workstation time was ~65min JVM / ~30min RS at
   # --jobs 3, so ~10min/shard; the 60min cap is generous headroom.
   measure-recipes:
-    needs: [resolve-suites, build-rs]
+    needs: [resolve, build-rs]
     runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:
@@ -140,14 +198,14 @@ jobs:
       matrix:
         # 0-based K/8: snip measure --shard needs 0 <= K < N.
         shard: [0, 1, 2, 3, 4, 5, 6, 7]
-        runtime: [jvm, clojure-rs]
+        runtime: [jvm, rs-from, rs-to]
     name: recipes ${{ matrix.runtime }} (shard ${{ matrix.shard }}/8)
     steps:
       - name: Check out snippet suite
         uses: actions/checkout@v5
         with:
           repository: hhh-pa/clojure-code-snippet
-          ref: ${{ needs.resolve-suites.outputs.snippets_sha }}
+          ref: ${{ needs.resolve.outputs.snippets_sha }}
           path: snippets
 
       - name: Set up Go
@@ -191,8 +249,7 @@ jobs:
         working-directory: snippets
         run: |
           if [ -z "$RESOURCES_PASSPHRASE" ]; then
-            echo "error: the RESOURCES_PASSPHRASE repository secret is not configured on hhh-pa/clojure." >&2
-            echo "Copy the value over from hhh-pa/clojure-code-snippet (Settings -> Secrets and variables -> Actions)." >&2
+            echo "error: the RESOURCES_PASSPHRASE secret (organization level, with access to hhh-pa/clojure) is not configured." >&2
             exit 1
           fi
           mkdir -p tests/resources
@@ -205,15 +262,15 @@ jobs:
           sudo DEBIAN_FRONTEND=noninteractive apt-get update
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y time
 
-      - name: Use PR-built clojure-rs
-        if: matrix.runtime == 'clojure-rs'
+      - name: Use built clojure-rs
+        if: matrix.runtime != 'jvm'
         uses: actions/download-artifact@v6
         with:
-          name: cljrs-bin
+          name: cljrs-${{ matrix.runtime }}
           path: cljrs-bin
 
       - name: Add clojure-rs to PATH
-        if: matrix.runtime == 'clojure-rs'
+        if: matrix.runtime != 'jvm'
         run: |
           # download-artifact does not preserve the executable bit.
           chmod +x "$GITHUB_WORKSPACE/cljrs-bin/clojure-rs"
@@ -223,7 +280,7 @@ jobs:
         working-directory: snippets
         run: |
           flags=(--runtime "${{ matrix.runtime }}")
-          if [ "${{ matrix.runtime }}" = "clojure-rs" ]; then
+          if [ "${{ matrix.runtime }}" != "jvm" ]; then
             flags+=(--command-template 'clojure-rs run {script}')
           fi
           ./scripts/ci/go/snip measure --resources tests/resources \
@@ -241,12 +298,12 @@ jobs:
           path: snippets/h2h-recipes-${{ matrix.runtime }}-shard-${{ matrix.shard }}.json
           retention-days: 7
 
-  # Algos legs (session legs 3-4): 8 shards x 2 runtimes. The
+  # Algos legs: 8 shards x 3 runtimes (jvm, rs-from, rs-to). The
   # per-case timeout is 1800s (vs 300s for recipes), hence the
   # roomier job cap. No decrypt step: this suite carries its
   # resources/ in-repo.
   measure-algos:
-    needs: [resolve-suites, build-rs]
+    needs: [resolve, build-rs]
     runs-on: ubuntu-latest
     timeout-minutes: 90
     permissions:
@@ -258,14 +315,14 @@ jobs:
       matrix:
         # 0-based K/8: algoperf measure --shard needs 0 <= K < N.
         shard: [0, 1, 2, 3, 4, 5, 6, 7]
-        runtime: [jvm, clojure-rs]
+        runtime: [jvm, rs-from, rs-to]
     name: algos ${{ matrix.runtime }} (shard ${{ matrix.shard }}/8)
     steps:
       - name: Check out algorithms suite
         uses: actions/checkout@v5
         with:
           repository: hhh-pa/clojure-algorithms
-          ref: ${{ needs.resolve-suites.outputs.algorithms_sha }}
+          ref: ${{ needs.resolve.outputs.algorithms_sha }}
           path: algos
 
       - name: Set up Go
@@ -308,15 +365,15 @@ jobs:
           sudo DEBIAN_FRONTEND=noninteractive apt-get update
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y time
 
-      - name: Use PR-built clojure-rs
-        if: matrix.runtime == 'clojure-rs'
+      - name: Use built clojure-rs
+        if: matrix.runtime != 'jvm'
         uses: actions/download-artifact@v6
         with:
-          name: cljrs-bin
+          name: cljrs-${{ matrix.runtime }}
           path: cljrs-bin
 
       - name: Add clojure-rs to PATH
-        if: matrix.runtime == 'clojure-rs'
+        if: matrix.runtime != 'jvm'
         run: |
           # download-artifact does not preserve the executable bit.
           chmod +x "$GITHUB_WORKSPACE/cljrs-bin/clojure-rs"
@@ -326,11 +383,11 @@ jobs:
         working-directory: algos
         run: |
           flags=(--runtime "${{ matrix.runtime }}")
-          if [ "${{ matrix.runtime }}" = "clojure-rs" ]; then
-            flags+=(--command-template 'clojure-rs run perf/driver.clj {ns} src test resources')
-          else
+          if [ "${{ matrix.runtime }}" = "jvm" ]; then
             jars=".ci/jars/clojure.jar:.ci/jars/spec.alpha.jar:.ci/jars/core.specs.alpha.jar"
             flags+=(--cp "$jars:src:test:resources")
+          else
+            flags+=(--command-template 'clojure-rs run perf/driver.clj {ns} src test resources')
           fi
           ./scripts/ci/go/algoperf measure \
             --repeat 3 --no-alloc --no-perf --jobs 3 --timeout 1800 \
@@ -347,10 +404,13 @@ jobs:
           path: algos/h2h-algos-${{ matrix.runtime }}-shard-${{ matrix.shard }}.json
           retention-days: 7
 
-  # Fan-in: union the 8 shards per leg and diff JVM vs native.
-  # Strict across-the-board gate — any CPU/RSS loss (or failure,
-  # missing, not-ok, drift, leg mismatch) fails the PR. No Bencher
-  # reporting by design: this job gates, it does not track history.
+  # Fan-in: union the 8 shards per leg and diff the legs. Strict
+  # across-the-board gate on JVM vs rs-to — any CPU/RSS loss (or
+  # failure, missing, not-ok, drift, leg mismatch) fails the PR. The
+  # rs-from-vs-rs-to tables are informational (report-only): they
+  # show what the PR (or branch) changed against its base without
+  # failing on near-tie wobble. No Bencher reporting by design:
+  # this job gates, it does not track history.
   h2h-compare:
     name: h2h cpu/mem gate
     needs: [measure-recipes, measure-algos]
@@ -367,27 +427,43 @@ jobs:
         with:
           pattern: h2h-*-shard-*
 
-      - name: Compare JVM vs clojure-rs (strict gate)
+      - name: Compare legs (strict JVM gate + informational native diff)
         run: |
-          # Both suites always compare (both verdict tables land in
-          # the summary) and the job fails if either gate fails.
+          # All four comparisons always run (all verdict tables land
+          # in the summary); only the JVM gates can fail the job.
           report_only=""
           if [ "${{ inputs.report_only }}" = "true" ]; then report_only="--report-only"; fi
           rc=0
           python3 scripts/ci/h2h_compare.py \
             --label recipes \
             --jvm h2h-recipes-jvm-shard-*/h2h-recipes-jvm-shard-*.json \
-            --rs h2h-recipes-clojure-rs-shard-*/h2h-recipes-clojure-rs-shard-*.json \
+            --rs h2h-recipes-rs-to-shard-*/h2h-recipes-rs-to-shard-*.json \
             --merged-jvm h2h-recipes-jvm-merged.json \
-            --merged-rs h2h-recipes-clojure-rs-merged.json \
+            --merged-rs h2h-recipes-rs-to-merged.json \
             --summary-file "$GITHUB_STEP_SUMMARY" $report_only || rc=$?
           python3 scripts/ci/h2h_compare.py \
             --label algos \
             --jvm h2h-algos-jvm-shard-*/h2h-algos-jvm-shard-*.json \
-            --rs h2h-algos-clojure-rs-shard-*/h2h-algos-clojure-rs-shard-*.json \
+            --rs h2h-algos-rs-to-shard-*/h2h-algos-rs-to-shard-*.json \
             --merged-jvm h2h-algos-jvm-merged.json \
-            --merged-rs h2h-algos-clojure-rs-merged.json \
+            --merged-rs h2h-algos-rs-to-merged.json \
             --summary-file "$GITHUB_STEP_SUMMARY" $report_only || rc=$?
+          python3 scripts/ci/h2h_compare.py \
+            --label recipes-rsrs \
+            --base-name rs-from --challenger-name rs-to \
+            --jvm h2h-recipes-rs-from-shard-*/h2h-recipes-rs-from-shard-*.json \
+            --rs h2h-recipes-rs-to-shard-*/h2h-recipes-rs-to-shard-*.json \
+            --merged-jvm h2h-recipes-rs-from-merged.json \
+            --merged-rs h2h-recipes-rs-to-merged.json \
+            --summary-file "$GITHUB_STEP_SUMMARY" --report-only || rc=$?
+          python3 scripts/ci/h2h_compare.py \
+            --label algos-rsrs \
+            --base-name rs-from --challenger-name rs-to \
+            --jvm h2h-algos-rs-from-shard-*/h2h-algos-rs-from-shard-*.json \
+            --rs h2h-algos-rs-to-shard-*/h2h-algos-rs-to-shard-*.json \
+            --merged-jvm h2h-algos-rs-from-merged.json \
+            --merged-rs h2h-algos-rs-to-merged.json \
+            --summary-file "$GITHUB_STEP_SUMMARY" --report-only || rc=$?
           exit $rc
 
       - name: Upload merged leg JSONs
