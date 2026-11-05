@@ -13,24 +13,26 @@
 # gate rule: clojure-rs must beat JVM Clojure, AND rs-from must
 # win-or-tie vs rs-to on every case — ANY loss fails the PR.
 #
-# Triggering (separated from rust.yml): this gate does NOT run on
-# pull_request. It fires on workflow_run when the rust workflow
-# completes green for a PR, so broken revisions never burn the
-# ~100 instrumented legs and the sweep never starves the Rust
-# signal of runners. Non-PR rust completions (master, schedule)
-# resolve to a skipped run: there is no PR to gate. workflow_run
-# subscriptions only exist post-merge (GitHub reads triggers from
-# the default branch), so pre-merge validation uses
-# workflow_dispatch on this branch.
+# Triggering (rust.yml is the prerequisite): this gate runs on
+# pull_request, but every leg waits behind the wait-rust job,
+# which polls the rust workflow's conclusion for the same SHA and
+# proceeds only on success — broken revisions fail fast instead of
+# burning the ~100 instrumented legs, and the sweep never starts
+# ahead of the Rust signal. (A workflow_run trigger was tried and
+# dropped: its subscriptions only exist post-merge, leaving the PR
+# itself with no chaining at all.) If this gate fails, the PR
+# fails with it: all jobs report as checks next to the commit.
 #
 # Revision pairs ("PR from head to base" parlance): from is the
-# change under test, to is its baseline. On a rust-passed run,
-# from = the PR head the rust run tested, to = PR base SHA —
-# stacked PRs compare against their parent branch automatically.
-# On workflow_dispatch, from defaults to the dispatched ref and
-# to to master, so dispatching on a branch compares <branch> vs
-# <master>; the rs_from/rs_to inputs override either side
-# (40-char SHA or any branch/tag, for bisection).
+# change under test, to is its baseline. On pull_request, from =
+# PR head (github.sha, the merge commit CI tests), to = PR base
+# SHA — stacked PRs compare against their parent branch
+# automatically. On workflow_dispatch, from defaults to the
+# dispatched ref and to to master, so dispatching on a branch
+# compares <branch> vs <master>; the rs_from/rs_to inputs override
+# either side (40-char SHA or any branch/tag, for bisection).
+# Dispatch skips the rust wait (there may be no rust run for an
+# ad-hoc SHA); it exists for triage and bisection.
 #
 # This is a gate, not a tracker: it reports no Bencher history.
 # Triage mode: dispatch with report_only=true to get the verdict
@@ -54,40 +56,35 @@
 name: h2h-cpu-mem
 
 on:
-  workflow_run:
-    workflows: [rust]
-    types: [completed]
-    branches-ignore: [master]
+  pull_request:
   workflow_dispatch:
     inputs:
       snippets_sha:
-        description: 'Pin clojure-code-snippet to this revision (dispatch only; 40-char SHA; empty = pinned default)'
+        description: 'Pin clojure-code-snippet to this revision (40-char SHA; empty = pinned default)'
         required: false
         default: ''
       algorithms_sha:
-        description: 'Pin clojure-algorithms to this revision (dispatch only; 40-char SHA; empty = pinned default)'
+        description: 'Pin clojure-algorithms to this revision (40-char SHA; empty = pinned default)'
         required: false
         default: ''
       rs_from:
-        description: 'Native-vs-native head: 40-char SHA or branch/tag (dispatch only; empty = dispatched ref)'
+        description: 'Native-vs-native head: 40-char SHA or branch/tag (empty = PR head, or dispatched ref)'
         required: false
         default: ''
       rs_to:
-        description: 'Native-vs-native base: 40-char SHA or branch/tag (dispatch only; empty = master)'
+        description: 'Native-vs-native base: 40-char SHA or branch/tag (empty = PR base, or master on dispatch)'
         required: false
         default: ''
       report_only:
-        description: 'Triage mode: print verdicts but keep the gate green (dispatch only)'
+        description: 'Triage mode: print verdicts but keep the gate green'
         required: false
         default: false
         type: boolean
 
-# One run per branch at a time, like rust.yml: a new rust-passed
-# run supersedes the in-flight sweep instead of queueing behind
-# it. head_ref is empty on workflow_run, so the triggering PR
-# branch leads the group (dispatched runs fall back as before).
+# One run per branch at a time, like rust.yml: a new push
+# supersedes the in-flight sweep instead of queueing behind it.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.workflow_run.head_branch || github.head_ref || github.ref_name }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
   cancel-in-progress: true
 
 permissions:
@@ -107,17 +104,62 @@ env:
   JARS_CACHE_KEY: clojure-jars-1.12.0-spec0.5.238-core0.4.74-v1
 
 jobs:
+  # Prerequisite gate: hold the whole sweep until the rust workflow
+  # concludes on this exact SHA, and proceed only on success. The
+  # legs behind resolve queue without consuming runners while this
+  # polls (one tiny runner, 60s cadence). Re-resolves the newest
+  # rust run every iteration so a re-run supersedes a stale
+  # conclusion; any non-success conclusion fails fast. The 600min
+  # cap matches rust's longest leg (gates-shard). Dispatch skips
+  # the wait: ad-hoc SHAs may have no rust run at all.
+  wait-rust:
+    runs-on: ubuntu-latest
+    timeout-minutes: 600
+    permissions:
+      contents: read
+      actions: read # poll the rust workflow conclusion
+    steps:
+      - name: Wait for the rust signal
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            echo "manual dispatch: skipping the rust prerequisite wait"
+            exit 0
+          fi
+          sha="${{ github.sha }}"
+          echo "waiting for the rust workflow on $sha ..."
+          i=0
+          while [ "$i" -lt 599 ]; do
+            i=$((i + 1))
+            run_id="$(gh run list --repo hhh-pa/clojure --workflow rust.yml --commit "$sha" --limit 1 --json databaseId --jq '.[0].databaseId // empty')"
+            if [ -n "$run_id" ]; then
+              state="$(gh run view "$run_id" --repo hhh-pa/clojure --json status,conclusion --jq '"\(.status)/\(.conclusion // "")"')"
+              case "$state" in
+                completed/success)
+                  echo "rust run $run_id green; proceeding"
+                  exit 0
+                  ;;
+                completed/*)
+                  echo "error: rust run $run_id concluded ${state#completed/}; failing fast" >&2
+                  exit 1
+                  ;;
+              esac
+            fi
+            sleep 60
+          done
+          echo "error: timed out waiting for the rust workflow on $sha" >&2
+          exit 1
+
   # Resolve the suite revisions AND the native-vs-native revision
   # pair ONCE per run so all 96 measure legs sweep the same commits.
   # Suite defaults: the pinned SHAs above; a manual dispatch may pin
-  # either input instead (bisection). Native pair: rust-passed PR
-  # head/base by default (stacked PRs diff against their parent),
+  # either input instead (bisection). Native pair: PR head/base by
+  # default on pull_request (stacked PRs diff against their parent),
   # dispatched-ref/master on workflow_dispatch; rs_from/rs_to take a
   # 40-char SHA or any branch/tag.
-  # Runs only for green PR rust runs (plus manual dispatch):
-  # anything else skips here, which skips the whole sweep.
   resolve:
-    if: github.event_name == 'workflow_dispatch' || (github.event.workflow_run.event == 'pull_request' && github.event.workflow_run.conclusion == 'success')
+    needs: [wait-rust]
     runs-on: ubuntu-latest
     outputs:
       snippets_sha: ${{ steps.resolve.outputs.snippets_sha }}
@@ -133,12 +175,13 @@ jobs:
           [ -z "$algos" ] && algos="${{ env.ALGORITHMS_SHA_DEFAULT }}"
           from="${{ inputs.rs_from }}"
           to="${{ inputs.rs_to }}"
-          if [ "${{ github.event_name }}" = "workflow_run" ]; then
-            [ -z "$from" ] && from="${{ github.event.workflow_run.head_sha }}"
-            [ -z "$to" ] && to="${{ github.event.workflow_run.pull_requests[0].base.sha }}"
-          else
-            [ -z "$from" ] && from="${{ github.sha }}"
-            [ -z "$to" ] && to="master"
+          [ -z "$from" ] && from="${{ github.sha }}"
+          if [ -z "$to" ]; then
+            if [ "${{ github.event_name }}" = "pull_request" ]; then
+              to="${{ github.event.pull_request.base.sha }}"
+            else
+              to="master"
+            fi
           fi
           to_sha() {
             # Print the 40-char SHA for a SHA-or-ref input.
@@ -172,8 +215,7 @@ jobs:
   # The two native revisions under test (interpreter-only release:
   # `run` needs no LLVM), each fanned out to its 16 measure legs as
   # an artifact. rs-from is what the JVM gate tests; rs-to is its
-  # comparison base (PR base on rust-passed runs, master on
-  # dispatch).
+  # comparison base (PR base, or master on dispatch).
   build-rs:
     needs: [resolve]
     runs-on: ubuntu-latest
@@ -282,9 +324,6 @@ jobs:
       - name: Check out instrumentation tooling
         uses: actions/checkout@v5
         with:
-          # workflow_run defaults to master; pin the tested PR head
-          # (empty on dispatch, which is the dispatched ref).
-          ref: ${{ github.event.workflow_run.head_sha }}
           path: h2h
 
       - name: Cache instrumentation kit
@@ -400,9 +439,6 @@ jobs:
       - name: Check out instrumentation tooling
         uses: actions/checkout@v5
         with:
-          # workflow_run defaults to master; pin the tested PR head
-          # (empty on dispatch, which is the dispatched ref).
-          ref: ${{ github.event.workflow_run.head_sha }}
           path: h2h
 
       - name: Cache instrumentation kit
@@ -495,9 +531,6 @@ jobs:
       - name: Check out instrumentation tooling
         uses: actions/checkout@v5
         with:
-          # workflow_run defaults to master; pin the tested PR head
-          # (empty on dispatch, which is the dispatched ref).
-          ref: ${{ github.event.workflow_run.head_sha }}
           path: h2h
 
       - name: Cache instrumentation kit
@@ -596,9 +629,6 @@ jobs:
       - name: Check out instrumentation tooling
         uses: actions/checkout@v5
         with:
-          # workflow_run defaults to master; pin the tested PR head
-          # (empty on dispatch, which is the dispatched ref).
-          ref: ${{ github.event.workflow_run.head_sha }}
           path: h2h
 
       - name: Cache instrumentation kit
@@ -654,10 +684,6 @@ jobs:
       actions: write # shard download + merged upload
     steps:
       - uses: actions/checkout@v5
-        with:
-          # workflow_run defaults to master; pin the tested PR head
-          # (empty on dispatch, which is the dispatched ref).
-          ref: ${{ github.event.workflow_run.head_sha }}
 
       - name: Download shard results
         uses: actions/download-artifact@v6
