@@ -57,25 +57,15 @@ pub(crate) struct MacroRef {
 
 /// Whether a var id is a macro (`:macro` meta truthy).
 pub(crate) fn is_macro_var(eval: &Evaluator, id: u64) -> bool {
-    let probe = Value::Keyword(Keyword::new(None, "macro"));
-    eval.registry.state(id).is_some_and(|s| {
-        s.meta
-            .as_ref()
-            .and_then(|m| m.get(&probe))
-            .is_some_and(Value::is_truthy)
-    })
+    eval.registry
+        .meta_flag(id, &clj_value::static_keyword!("macro"))
 }
 
 /// Whether a var id is private (`:private` meta truthy; cleared
 /// metas read public).
 pub(crate) fn is_private_var(eval: &Evaluator, id: u64) -> bool {
-    let probe = Value::Keyword(Keyword::new(None, "private"));
-    eval.registry.state(id).is_some_and(|s| {
-        s.meta
-            .as_ref()
-            .and_then(|m| m.get(&probe))
-            .is_some_and(Value::is_truthy)
-    })
+    eval.registry
+        .meta_flag(id, &clj_value::static_keyword!("private"))
 }
 
 /// Fence macros that stay identity (real macros on the JVM; the
@@ -136,7 +126,10 @@ fn is_identity_head(eval: &Evaluator, op: &Value) -> bool {
 /// macro var. Private cross-namespace macros are the bare
 /// `IllegalStateException` (callers wrap per position); anything
 /// unresolvable or non-macro is `Ok(None)`.
-pub(crate) fn lookup_macro(eval: &Evaluator, op: &Value) -> Result<Option<MacroRef>, NativeError> {
+pub(crate) fn lookup_macro(
+    eval: &mut Evaluator,
+    op: &Value,
+) -> Result<Option<MacroRef>, NativeError> {
     let (id, target) = match op {
         Value::Symbol(sym) => {
             let cur = eval.current_ns_name();
@@ -148,6 +141,9 @@ pub(crate) fn lookup_macro(eval: &Evaluator, op: &Value) -> Result<Option<MacroR
         Value::Var(v) => (v.id, v.sym.clone()),
         _ => return Ok(None),
     };
+    // Every list head resolves here first: a lazy `core.clj` var
+    // (fn or macro) forces before any metadata decides its role.
+    eval.force_lazy(id);
     if !is_macro_var(eval, id) {
         return Ok(None);
     }

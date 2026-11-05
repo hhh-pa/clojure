@@ -20,7 +20,7 @@ use std::sync::Arc;
 use clj_reader::Span;
 use clj_value::{
     ClassVal, ExtensionValue, HostVal, Keyword, List, Map, PrintOpts, Symbol, Value, Var, Vector,
-    map_entry, new_map, pr_to_string, print_to_string,
+    map_entry, pr_to_string, print_to_string,
 };
 
 use crate::core::cce_message;
@@ -145,6 +145,10 @@ pub enum Expr {
         sym: Symbol,
         doc: Option<String>,
         init: Option<Box<Expr>>,
+        /// The name's metadata pairs when they hold forms to evaluate
+        /// (`^{:arglists '([x])}`, `^String` — the JVM's `DefExpr`
+        /// evaluates the map; constant maps stay on `sym`).
+        meta: Option<Vec<(Expr, Expr)>>,
         span: Span,
     },
     If {
@@ -706,6 +710,29 @@ pub struct Analyzer<'a> {
     /// Plan-path recursion budget (`None` on the run path, which
     /// keeps today's unbounded behavior).
     limit: Option<usize>,
+    /// The display of the innermost enclosing fn (`None` at the
+    /// top level): nested fns name themselves under it, like the
+    /// JVM's `enclosingMethod.objx.name` class prefix.
+    fn_base: Option<String>,
+    /// Whether the top-level form runs inside the JVM's `eval`
+    /// wrapper fn (every form not headed by a `def…` symbol):
+    /// its fns name under `{ns}/eval{N}`, a `def`'s under `{ns}`.
+    pub(crate) top_wrapped: bool,
+    /// A `def`/`let` binding name waiting for the init form: a fn
+    /// form (or a macro's expansion) takes it, like the JVM's
+    /// `analyze(context, form, name)`.
+    hint: Option<String>,
+    /// The hint handed to the `fn`/`fn*` parser of this form.
+    fn_hint: Option<String>,
+}
+
+/// How a new fn names itself (see [`Analyzer::fn_display`]).
+enum FnLabel<'s> {
+    Anon,
+    /// `(fn name …)`, `letfn`: always the id suffix.
+    Own(&'s str),
+    /// A `def`/`let` binding name: suffixed below the top level.
+    Hint(&'s str),
 }
 
 impl<'a> Analyzer<'a> {
@@ -723,14 +750,48 @@ impl<'a> Analyzer<'a> {
             eval_seq,
             depth: 0,
             limit,
+            fn_base: None,
+            top_wrapped: true,
+            hint: None,
+            fn_hint: None,
         }
+    }
+
+    /// The display for a new fn — the JVM class name, demunged:
+    /// under the enclosing fn's name, else the namespace (plus the
+    /// `eval{N}` wrapper for non-`def` top-level forms). Own names
+    /// always take the id suffix; a `def`/`let` name only below the
+    /// top level (`(defn bar …)` is `foo/bar`);
+    /// anonymous fns are `fn--{id}`.
+    fn fn_display(&mut self, label: FnLabel<'_>) -> String {
+        let seq = self.eval.next_fn_seq();
+        let nested = self.fn_base.is_some() || self.top_wrapped;
+        let base = match &self.fn_base {
+            Some(base) => base.clone(),
+            None if self.top_wrapped => format!("{}/eval{}", self.current_ns(), self.eval_seq),
+            None => self.current_ns().to_string(),
+        };
+        match label {
+            FnLabel::Own(name) => format!("{base}/{name}--{seq}"),
+            FnLabel::Hint(name) if nested => format!("{base}/{name}--{seq}"),
+            FnLabel::Hint(name) => format!("{base}/{name}"),
+            FnLabel::Anon => format!("{base}/fn--{seq}"),
+        }
+    }
+
+    /// Run `f` with `display` as the enclosing fn name.
+    fn under_fn<T>(&mut self, display: &str, f: impl FnOnce(&mut Self) -> T) -> T {
+        let saved = self.fn_base.replace(display.to_owned());
+        let out = f(self);
+        self.fn_base = saved;
+        out
     }
 
     /// The `*ns*`-synced current namespace name (every resolve
     /// check and installation reads this, never the raw registry
     /// current).
-    fn current_ns(&self) -> String {
-        self.eval.current_ns_name()
+    fn current_ns(&self) -> Arc<str> {
+        self.eval.current_ns_arc()
     }
 
     fn err(
@@ -782,13 +843,17 @@ impl<'a> Analyzer<'a> {
         tail: bool,
     ) -> Result<Expr, CompileError> {
         let span = analyze_span(form, fallback);
+        // A pending `def`/`let` name is for this form only.
+        let hint = self.hint.take();
         match form {
             Value::Symbol(sym) => self.analyze_symbol(sym, span),
             Value::List(list) if !list.is_empty() => {
                 let items: Vec<&Value> = list.iter().collect();
-                self.analyze_list(form, &items, span, tail)
+                self.analyze_list(form, &items, span, tail, hint)
             }
-            form if crate::lazy::is_seq_value(form) => self.analyze_seq_form(form, span, tail),
+            form if crate::lazy::is_seq_value(form) => {
+                self.analyze_seq_form(form, span, tail, hint)
+            }
             Value::Vector(v) => self.analyze_vec_lit(v, span),
             // Entries in code (syntax-quote can embed them) analyze
             // like vector literals, answering plain vectors (Oracle
@@ -814,6 +879,7 @@ impl<'a> Analyzer<'a> {
         form: &Value,
         span: Span,
         tail: bool,
+        hint: Option<String>,
     ) -> Result<Expr, CompileError> {
         let items = match crate::lazy::collect_all(self.eval, form.clone()) {
             Ok(items) => items,
@@ -824,7 +890,7 @@ impl<'a> Analyzer<'a> {
             return Ok(Expr::Literal(form.clone()));
         }
         let refs: Vec<&Value> = items.iter().collect();
-        self.analyze_list(form, &refs, span, tail)
+        self.analyze_list(form, &refs, span, tail, hint)
     }
 
     /// A vector literal (elements analyze left to right).
@@ -838,6 +904,18 @@ impl<'a> Analyzer<'a> {
 
     /// A map literal (keys and values analyze left to right).
     fn analyze_map_lit(&mut self, m: &Map, span: Span) -> Result<Expr, CompileError> {
+        Ok(Expr::MapLit(
+            self.analyze_map_pairs(m, span)?,
+            m.meta().cloned(),
+        ))
+    }
+
+    /// A map literal's pairs (keys and values analyze left to right).
+    fn analyze_map_pairs(
+        &mut self,
+        m: &Map,
+        span: Span,
+    ) -> Result<Vec<(Expr, Expr)>, CompileError> {
         let mut out = Vec::with_capacity(m.size());
         for (k, val) in m.iter() {
             out.push((
@@ -845,7 +923,7 @@ impl<'a> Analyzer<'a> {
                 self.analyze(val, span, false)?,
             ));
         }
-        Ok(Expr::MapLit(out, m.meta().cloned()))
+        Ok(out)
     }
 
     /// A set literal (elements analyze left to right).
@@ -948,6 +1026,7 @@ impl<'a> Analyzer<'a> {
         }
         let cur = self.current_ns();
         if let Some((target, id)) = self.eval.registry.resolve_target_and_id(&cur, sym) {
+            self.eval.force_lazy(id);
             // Value-position checks (private, then macro — see
             // `global_value_expr`).
             return self.global_value_expr(sym, span, &cur, target, id);
@@ -1056,14 +1135,16 @@ impl<'a> Analyzer<'a> {
         items: &[&Value],
         span: Span,
         tail: bool,
+        mut hint: Option<String>,
     ) -> Result<Expr, CompileError> {
         let head = items[0];
-        if let Some(expr) = self.try_head_intercept(head, items, span, tail)? {
+        if let Some(expr) = self.intercept_with_hint(head, items, span, tail, &mut hint)? {
             return Ok(expr);
         }
         // Macro expansion (`analyzeSeq` order: specials, then
         // macros): an expanded form re-analyzes from the top.
         if let Some(expanded) = self.try_expand_macro(form, head, &items[1..], span)? {
+            self.hint = hint;
             let out = self.analyze(&expanded, span, tail);
             // B1: macro outputs are the one unbounded-depth class
             // (30k threading steps build 30k-deep output). Dropping
@@ -1140,6 +1221,25 @@ impl<'a> Analyzer<'a> {
             args,
             span,
         }))
+    }
+
+    /// [`try_head_intercept`](Self::try_head_intercept) with a
+    /// binding name: a `fn` form's parser takes it (a macro's
+    /// expansion takes what is left).
+    fn intercept_with_hint(
+        &mut self,
+        head: &Value,
+        items: &[&Value],
+        span: Span,
+        tail: bool,
+        hint: &mut Option<String>,
+    ) -> Result<Option<Expr>, CompileError> {
+        if is_fn_head(head) {
+            self.fn_hint = hint.take();
+        }
+        let intercepted = self.try_head_intercept(head, items, span, tail);
+        self.fn_hint = None;
+        intercepted
     }
 
     /// Head interceptions before macro expansion (split from
@@ -1398,7 +1498,7 @@ impl<'a> Analyzer<'a> {
         }
         let sym = Symbol::new(None, ns_part);
         let (target, id) = self.eval.registry.resolve_target_and_id(cur, &sym)?;
-        let root = self.eval.deref_var(id, &target);
+        let root = self.eval.deref_var_unforced(id, &target);
         let Value::HostType(h) = root else {
             return None;
         };
@@ -1607,11 +1707,15 @@ impl<'a> Analyzer<'a> {
         if self.locals.is_empty() {
             Value::Nil
         } else {
-            let mut out = new_map();
-            for name in &self.locals {
-                out = out.insert(Value::Symbol(Symbol::new(None, name)), Value::Bool(true));
-            }
-            Value::Map(out)
+            // One build (each chained `insert` interned a fresh shape
+            // per prefix — quadratic in the locals, per expansion);
+            // shadowed names keep their first key, as `insert` did.
+            Value::Map(Map::from_kvs_last_wins(
+                self.locals
+                    .iter()
+                    .map(|name| (Value::Symbol(Symbol::new(None, name)), Value::Bool(true)))
+                    .collect(),
+            ))
         }
     }
 
@@ -1628,8 +1732,7 @@ impl<'a> Analyzer<'a> {
         }
         self.eval
             .registry
-            .get("clojure.core")
-            .and_then(|ns| ns.lookup(&target))
+            .lookup_in_ns("clojure.core", &target)
             .is_some_and(|id| crate::macros::is_macro_var(self.eval, id))
     }
 
@@ -1642,7 +1745,7 @@ impl<'a> Analyzer<'a> {
             return Ok(());
         };
         let home = target.namespace().unwrap_or("");
-        if home == cur {
+        if home == &*cur {
             return Ok(());
         }
         if crate::macros::is_macro_var(self.eval, id) {
@@ -1720,7 +1823,14 @@ impl<'a> Analyzer<'a> {
         let Some(mac) = mac else {
             return Ok(None);
         };
-        let env = self.macro_env();
+        // Native expanders (the `core_macros`/FX4 ports) never read
+        // `&env`: only interpreted macros get the locals map, built
+        // per expansion.
+        let env = if crate::ext::as_native(&mac.root).is_some() {
+            Value::Nil
+        } else {
+            self.macro_env()
+        };
         let arg_vals: Vec<Value> = args.iter().map(|a| (*a).clone()).collect();
         let expanded =
             crate::macros::expand1(self.eval, head, &mac.root, form, &env, &arg_vals, span)?;
@@ -1737,11 +1847,7 @@ impl<'a> Analyzer<'a> {
             return false;
         };
         if target.namespace() == Some("clojure.core") && target.name() == sym.name() {
-            let id = self
-                .eval
-                .registry
-                .get("clojure.core")
-                .and_then(|ns| ns.lookup(&target));
+            let id = self.eval.registry.lookup_in_ns("clojure.core", &target);
             return id.is_none_or(|id| !crate::macros::is_macro_var(self.eval, id));
         }
         true
@@ -1831,7 +1937,7 @@ impl<'a> Analyzer<'a> {
     /// `declare-qualified`).
     fn check_def_target(&self, sym: &Symbol, span: Span) -> Result<(), CompileError> {
         let cur = self.current_ns();
-        if sym.namespace().is_some_and(|ns| ns != cur) {
+        if sym.namespace().is_some_and(|ns| ns != &*cur) {
             let message = if self.eval.registry.resolve_in(&cur, sym).is_some() {
                 "Can't create defs outside of current ns"
             } else {
@@ -1871,13 +1977,24 @@ impl<'a> Analyzer<'a> {
             .qualify_in(&cur, sym)
             .with_meta(sym.meta().cloned());
         self.eval.registry.intern_def_target(&qualified);
+        // The metadata analyzes before the init (`DefExpr.Parser`).
+        let meta = match sym.meta() {
+            Some(m) if m.iter().any(|(k, v)| needs_eval(k) || needs_eval(v)) => {
+                Some(self.analyze_map_pairs(m, span)?)
+            }
+            _ => None,
+        };
         let init = init
-            .map(|form| self.analyze(form, span, false).map(Box::new))
+            .map(|form| {
+                self.hint = Some(sym.name().to_owned());
+                self.analyze(form, span, false).map(Box::new)
+            })
             .transpose()?;
         Ok(Expr::Def {
             sym: qualified,
             doc,
             init,
+            meta,
             span,
         })
     }
@@ -2175,6 +2292,27 @@ fn is_ident(v: &Value) -> bool {
 /// Bound names of a pattern in canonical slot order (entries, then
 /// keys, then `:as`/outlets; fixed, then rest, then `:as`). The
 /// builder and the evaluator share this order.
+/// How many names [`pattern_names`] lists (no allocation).
+pub(crate) fn pattern_count(pat: &Pattern) -> usize {
+    match pat {
+        Pattern::Symbol(_) => 1,
+        Pattern::Vec(v) => {
+            v.fixed.iter().map(pattern_count).sum::<usize>()
+                + v.rest.as_deref().map_or(0, pattern_count)
+                + usize::from(v.as_sym.is_some())
+        }
+        Pattern::Map(m) => {
+            let outlets = [&m.as_sym, &m.select, &m.all, &m.excess, &m.missing];
+            m.entries
+                .iter()
+                .map(|(p, ..)| pattern_count(p))
+                .sum::<usize>()
+                + m.keys.len()
+                + outlets.iter().filter(|o| o.is_some()).count()
+        }
+    }
+}
+
 pub(crate) fn pattern_names(pat: &Pattern) -> Vec<String> {
     match pat {
         Pattern::Symbol(name) => vec![name.clone()],
@@ -2213,6 +2351,22 @@ impl<'a> Analyzer<'a> {
     /// the `recur` fence; catches and `finally` analyze non-tail
     /// (probe25).
     fn parse_try(
+        &mut self,
+        items: &[&Value],
+        span: Span,
+        tail: bool,
+    ) -> Result<Expr, CompileError> {
+        match self.lift_seq_clauses(items, span)? {
+            Some(forms) => {
+                let refs: Vec<&Value> = forms.iter().collect();
+                self.parse_try_items(&refs, span, tail)
+            }
+            None => self.parse_try_items(items, span, tail),
+        }
+    }
+
+    /// [`parse_try`](Self::parse_try) over list-shaped clauses.
+    fn parse_try_items(
         &mut self,
         items: &[&Value],
         span: Span,
@@ -2301,6 +2455,33 @@ impl<'a> Analyzer<'a> {
     /// `try` (the clause is parsed inline, without rebinding —
     /// probe25 `catch-nonsym`, probe32 `catch-*-nope`); only the
     /// clause body descends (via [`Analyzer::analyze`]).
+    /// Macro-built `catch`/`finally` clauses arrive as seqs (`Cons`,
+    /// `LazySeq`, ...): the JVM tests `ISeq` and reads the first
+    /// item, so seq clauses read as lists here (`None` when no item
+    /// needs it; non-clause seqs stay as they are).
+    fn lift_seq_clauses(
+        &mut self,
+        items: &[&Value],
+        span: Span,
+    ) -> Result<Option<Vec<Value>>, CompileError> {
+        let mut out: Option<Vec<Value>> = None;
+        for (i, form) in items.iter().enumerate().skip(1) {
+            if matches!(form, Value::List(_)) || !crate::lazy::is_seq_value(form) {
+                continue;
+            }
+            let head = crate::lazy::first_value(self.eval, form)
+                .map_err(|s| form_force_err(&self.source, s, span))?;
+            if !is_clause_head(&head) {
+                continue;
+            }
+            let all = crate::lazy::collect_all(self.eval, (*form).clone())
+                .map_err(|s| form_force_err(&self.source, s, span))?;
+            let forms = out.get_or_insert_with(|| items.iter().map(|f| (*f).clone()).collect());
+            forms[i] = Value::List(List::from_vec(all));
+        }
+        Ok(out)
+    }
+
     fn parse_catch(&mut self, list: &List, span: Span) -> Result<Catch, CompileError> {
         let parts: Vec<&Value> = list.iter().collect();
         let class = match parts.get(1) {
@@ -2622,7 +2803,7 @@ impl<'a> Analyzer<'a> {
     /// evaluator replays with a conveyed closure.
     fn parse_bound_fn(&mut self, items: &[&Value], span: Span) -> Result<Expr, CompileError> {
         let (name, raw) = self.parse_fn_front(&items[1..], span)?;
-        let (fun, _) = self.build_fun(name.clone(), &raw, span)?;
+        let (fun, _) = self.build_fun(name.clone(), None, &raw, span)?;
         Ok(Expr::BoundFn { name, fun })
     }
 
@@ -2703,7 +2884,7 @@ impl<'a> Analyzer<'a> {
             clause.fixed.insert(0, ampenv.clone());
             clause.fixed.insert(0, ampform.clone());
         }
-        let (mut fun, _) = self.build_fun(None, &raw, span)?;
+        let (mut fun, _) = self.build_fun(None, None, &raw, span)?;
         let cur = self.current_ns();
         fun.display = format!("{cur}/{}", name_sym.name());
         let qualified =
@@ -2836,14 +3017,41 @@ fn form_force_err(source: &Arc<str>, s: Signal, span: Span) -> CompileError {
 fn as_clause(form: &Value) -> Option<(&str, &List)> {
     match form {
         Value::List(list) => match list.first() {
-            Some(Value::Symbol(sym)) if sym.namespace().is_none() => match sym.name() {
-                "catch" | "finally" => Some((sym.name(), list)),
-                _ => None,
-            },
+            Some(Value::Symbol(sym)) if is_clause_sym(sym) => Some((sym.name(), list)),
             _ => None,
         },
         _ => None,
     }
+}
+
+/// Whether a metadata form evaluates to something other than
+/// itself (symbols, non-empty lists, and collections holding them).
+fn needs_eval(v: &Value) -> bool {
+    match v {
+        Value::Symbol(_) => true,
+        Value::List(l) => !l.is_empty(),
+        Value::Vector(items) => items.iter().any(|x| needs_eval(&x)),
+        Value::Set(items) => items.iter().any(needs_eval),
+        Value::Map(m) => m.iter().any(|(k, x)| needs_eval(k) || needs_eval(x)),
+        other => crate::lazy::is_seq_value(other),
+    }
+}
+
+/// A `fn`/`fn*` head (a binding name hint reaches its parser).
+fn is_fn_head(head: &Value) -> bool {
+    matches!(head, Value::Symbol(sym) if match sym.namespace() {
+        None => matches!(sym.name(), "fn" | "fn*"),
+        Some(ns) => ns == "clojure.core" && sym.name() == "fn",
+    })
+}
+
+/// A clause head: unqualified `catch` or `finally`.
+fn is_clause_head(head: &Value) -> bool {
+    matches!(head, Value::Symbol(sym) if is_clause_sym(sym))
+}
+
+fn is_clause_sym(sym: &Symbol) -> bool {
+    sym.namespace().is_none() && matches!(sym.name(), "catch" | "finally")
 }
 
 /// A binding-pattern shape (spec- or star-validated before building).
@@ -3663,8 +3871,7 @@ impl<'a> Analyzer<'a> {
     /// `lazy-seq*` — the body runs at force time, as the JVM's
     /// `(fn* [] …)` does). The display names the trapped closure.
     fn parse_delay_star(&mut self, items: &[&Value], span: Span) -> Result<Expr, CompileError> {
-        let seq = self.eval.next_fn_seq();
-        let display = format!("user/eval{}/delay--{seq}", self.eval_seq);
+        let display = self.fn_display(FnLabel::Own("delay"));
         let saved_recur = self.recur;
         let saved_no_recur = self.no_recur;
         self.recur = Some(0);
@@ -3948,6 +4155,9 @@ impl<'a> Analyzer<'a> {
         let base = self.locals.len();
         let mut bindings_out = Vec::with_capacity(pats.len());
         for i in (0..forms.len()).step_by(2) {
+            if let Value::Symbol(name) = &forms[i] {
+                self.hint = Some(name.name().to_owned());
+            }
             let init = self.analyze(&forms[i + 1], span, false)?;
             let validated = as_pat(&forms[i]).expect("patterns validated before building");
             let (pat, names) = self.build_pattern(validated, span)?;
@@ -4412,8 +4622,9 @@ impl<'a> Analyzer<'a> {
     /// (20-count, parameter walk under the emitted `let`'s wrapper,
     /// body, dup checks; fixed-vs-variadic last).
     fn parse_fn(&mut self, items: &[&Value], span: Span) -> Result<Expr, CompileError> {
+        let hint = self.fn_hint.take();
         let (name, raw) = self.parse_fn_front(&items[1..], span)?;
-        self.finish_fn(name, &raw, span)
+        self.finish_fn(name, hint, &raw, span)
     }
 
     /// `(fn …)`/`(bound-fn …)` front: the optional name plus the
@@ -4454,6 +4665,7 @@ impl<'a> Analyzer<'a> {
     /// seq cast and dies at the arglist-NPE like `()` (probe33
     /// `fn*-nil`); anything else is the `ISeq` CCE.
     fn parse_fn_star(&mut self, items: &[&Value], span: Span) -> Result<Expr, CompileError> {
+        let hint = self.fn_hint.take();
         let mut rest = &items[1..];
         let mut name: Option<String> = None;
         if let Some((Value::Symbol(sym), tail)) = rest.split_first() {
@@ -4488,7 +4700,7 @@ impl<'a> Analyzer<'a> {
         };
         let slices: Vec<&[&Value]> = owned.iter().map(Vec::as_slice).collect();
         let raw = self.parse_star_clauses(&slices, span)?;
-        self.finish_fn(name, &raw, span)
+        self.finish_fn(name, hint, &raw, span)
     }
 
     /// Shared `fn`/`fn*` tail: display name, the self-recursion
@@ -4499,14 +4711,16 @@ impl<'a> Analyzer<'a> {
     fn build_fun(
         &mut self,
         name: Option<String>,
+        hint: Option<&str>,
         raw: &[RawClause],
         span: Span,
     ) -> Result<(FunExpr, Option<(String, usize)>), CompileError> {
-        let seq = self.eval.next_fn_seq();
-        let display = match &name {
-            Some(n) => format!("user/eval{}/{}--{seq}", self.eval_seq, n),
-            None => format!("user/eval{}/fn--{seq}", self.eval_seq),
+        let label = match (&name, hint) {
+            (Some(n), _) => FnLabel::Own(n),
+            (None, Some(h)) => FnLabel::Hint(h),
+            (None, None) => FnLabel::Anon,
         };
+        let display = self.fn_display(label);
         let base = self.locals.len();
         let name_slot = if let Some(n) = &name {
             self.locals.push(n.clone());
@@ -4514,7 +4728,7 @@ impl<'a> Analyzer<'a> {
         } else {
             None
         };
-        let arities = self.analyze_arities(raw, span)?;
+        let arities = self.under_fn(&display, |a| a.analyze_arities(raw, span))?;
         self.locals.truncate(base);
         let fun = FunExpr {
             display,
@@ -4526,14 +4740,31 @@ impl<'a> Analyzer<'a> {
         }
     }
 
+    /// A fn displayed under its own `name` without a self-recursion
+    /// slot (`letfn*` binds the names itself).
+    fn build_labeled(
+        &mut self,
+        name: Option<&str>,
+        raw: &[RawClause],
+        span: Span,
+    ) -> Result<FunExpr, CompileError> {
+        let display = self.fn_display(name.map_or(FnLabel::Anon, FnLabel::Own));
+        let arities = self.under_fn(&display, |a| a.analyze_arities(raw, span))?;
+        Ok(FunExpr {
+            display,
+            arities: arities.into(),
+        })
+    }
+
     /// Shared `fn`/`fn*` tail: the `LetFn` wrap for names.
     fn finish_fn(
         &mut self,
         name: Option<String>,
+        hint: Option<String>,
         raw: &[RawClause],
         span: Span,
     ) -> Result<Expr, CompileError> {
-        let (fun, bound) = self.build_fun(name, raw, span)?;
+        let (fun, bound) = self.build_fun(name, hint.as_deref(), raw, span)?;
         // A named `fn` is a one-function `letfn`: the frame extends
         // first, the closure captures it, then the slot fills
         // (self-recursion). A `let` wrap would capture the
@@ -4858,13 +5089,12 @@ impl<'a> Analyzer<'a> {
         }
         let mut fns = Vec::with_capacity(validated.len());
         for spec in &validated {
-            let seq = self.eval.next_fn_seq();
-            let display = format!("user/eval{}/{}--{seq}", self.eval_seq, spec.name);
+            let display = self.fn_display(FnLabel::Own(&spec.name));
             let tail_refs: Vec<&Value> = spec.tail.iter().collect();
             let owned = self.collect_fn_clauses(&tail_refs, span)?;
             let slices: Vec<&[&Value]> = owned.iter().map(Vec::as_slice).collect();
             let raw = self.parse_clause_slices(&slices, span)?;
-            let arities = self.analyze_arities(&raw, span)?;
+            let arities = self.under_fn(&display, |a| a.analyze_arities(&raw, span))?;
             fns.push((
                 spec.name.clone(),
                 FunExpr {
@@ -5279,10 +5509,7 @@ impl<'a> Analyzer<'a> {
             if rest.len() != items.len() {
                 let refs: Vec<&Value> = rest.iter().collect();
                 let (name, raw) = self.parse_fn_front(&refs, span)?;
-                let (mut fun, _) = self.build_fun(None, &raw, span)?;
-                if let Some(n) = name {
-                    fun.display = fun.display.replacen("/fn--", &format!("/{n}--"), 1);
-                }
+                let fun = self.build_labeled(name.as_deref(), &raw, span)?;
                 return Ok(LetFnInit::Fun(fun));
             }
         }
@@ -5343,6 +5570,7 @@ fn seq_refs(v: &Value) -> Vec<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clj_value::new_map;
 
     #[test]
     fn seq_values_non_seqable_is_empty() {

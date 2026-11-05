@@ -19,6 +19,7 @@
 //! a `Symbol` per read, so distinct-but-equal symbols are never
 //! identical.
 
+use std::borrow::Borrow;
 use std::cmp::Ordering;
 use std::fmt;
 use std::hash::{Hash, Hasher};
@@ -57,6 +58,18 @@ impl Symbol {
         }
     }
 
+    /// Build a symbol from already-shared parts (no copies; tables
+    /// keyed by name hand theirs over).
+    #[must_use]
+    pub fn from_shared(ns: Option<Arc<str>>, name: Arc<str>) -> Self {
+        Self {
+            ns,
+            name,
+            meta: None,
+            id: next_symbol_id(),
+        }
+    }
+
     /// `Symbol::intern` semantics (`docs/spec/t1174/reader-contract.md` §4):
     /// split on the FIRST `/` (`a/b/c` ⇒ ns `a`, name `b/c`; `/`
     /// alone ⇒ no-ns name `/`). Used by the reader; API users who
@@ -79,6 +92,13 @@ impl Symbol {
     /// The name part.
     #[must_use]
     pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// The name part's shared string (tables keyed by simple name
+    /// share it instead of copying).
+    #[must_use]
+    pub fn name_arc(&self) -> &Arc<str> {
         &self.name
     }
 
@@ -122,6 +142,61 @@ impl Hash for Symbol {
     }
 }
 
+/// A borrowed `(ns, name)` view of a symbol: hashes and compares
+/// exactly like [`Symbol`] (metadata and id ignored), so a
+/// symbol-keyed map probes `(Some("ns"), "name")` without building
+/// (and allocating) a symbol — `map.get(&(ns, name) as &dyn SymKey)`.
+pub trait SymKey {
+    /// The namespace part, if any.
+    fn key_ns(&self) -> Option<&str>;
+    /// The name part.
+    fn key_name(&self) -> &str;
+}
+
+impl SymKey for Symbol {
+    fn key_ns(&self) -> Option<&str> {
+        self.ns.as_deref()
+    }
+
+    fn key_name(&self) -> &str {
+        &self.name
+    }
+}
+
+impl SymKey for (Option<&str>, &str) {
+    fn key_ns(&self) -> Option<&str> {
+        self.0
+    }
+
+    fn key_name(&self) -> &str {
+        self.1
+    }
+}
+
+// Byte-identical to `Symbol`'s hash: `Option<Arc<str>>` and
+// `Option<&str>` hash the same discriminant, and `Arc<str>`/`&str`
+// both hash as `str`.
+impl Hash for dyn SymKey + '_ {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.key_ns().hash(state);
+        self.key_name().hash(state);
+    }
+}
+
+impl PartialEq for dyn SymKey + '_ {
+    fn eq(&self, other: &Self) -> bool {
+        self.key_ns() == other.key_ns() && self.key_name() == other.key_name()
+    }
+}
+
+impl Eq for dyn SymKey + '_ {}
+
+impl<'a> Borrow<dyn SymKey + 'a> for Symbol {
+    fn borrow(&self) -> &(dyn SymKey + 'a) {
+        self
+    }
+}
+
 impl PartialOrd for Symbol {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
@@ -145,6 +220,34 @@ impl fmt::Display for Symbol {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    // Symbol keys carry (immutable) metadata maps; hashing ignores it.
+    #[allow(clippy::mutable_key_type)]
+    fn sym_key_probes_like_a_symbol() {
+        use super::{SymKey, Symbol};
+        use std::collections::HashMap;
+        use std::hash::{BuildHasher, BuildHasherDefault};
+        let fx = BuildHasherDefault::<rustc_hash::FxHasher>::default();
+        let std_hash = std::collections::hash_map::RandomState::new();
+        for (ns, name) in [
+            (Some("user"), "x"),
+            (None, "x"),
+            (Some(""), ""),
+            (None, "a/b"),
+        ] {
+            let sym = Symbol::new(ns, name);
+            let key: &dyn SymKey = &(ns, name);
+            assert_eq!(fx.hash_one(&sym), fx.hash_one(key));
+            assert_eq!(std_hash.hash_one(&sym), std_hash.hash_one(key));
+        }
+        let mut map: HashMap<Symbol, u64> = HashMap::new();
+        map.insert(Symbol::new(Some("user"), "x"), 1);
+        map.insert(Symbol::new(None, "x"), 2);
+        assert_eq!(map.get(&(Some("user"), "x") as &dyn SymKey), Some(&1));
+        assert_eq!(map.get(&(None, "x") as &dyn SymKey), Some(&2));
+        assert_eq!(map.get(&(Some("other"), "x") as &dyn SymKey), None);
+    }
+
     use super::Symbol;
 
     #[test]

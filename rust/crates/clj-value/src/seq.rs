@@ -285,6 +285,47 @@ impl Seq {
         self.next().unwrap_or_else(Self::empty)
     }
 
+    /// The remaining item count, read off the backing arrays without
+    /// cloning items (the JVM's counted seqs count in O(1), and
+    /// `empty?` counts counted seqs). Cons cells and lazy tails still
+    /// step, forcing like a [`first`](Self::first)/[`next`](Self::next)
+    /// walk, which this matches item for item.
+    #[must_use]
+    pub fn count(&self) -> usize {
+        let mut n = 0;
+        let mut cur = self.forced();
+        while let Some(s) = cur {
+            cur = match s {
+                Seq::Eager { items, pos } => {
+                    n += items.len().saturating_sub(*pos);
+                    None
+                }
+                Seq::Chunked { chunks, chunk, pos } => {
+                    if let Some(c) = chunks.get(*chunk).filter(|c| *pos < c.len()) {
+                        n += c.len() - pos;
+                        // A walk stops at an empty chunk (`first` is `None`).
+                        n += chunks[chunk + 1..]
+                            .iter()
+                            .take_while(|c| !c.is_empty())
+                            .map(|c| c.len())
+                            .sum::<usize>();
+                    }
+                    None
+                }
+                Seq::ChunkCons { chunk, pos, tail } => {
+                    n += chunk.len().saturating_sub(*pos);
+                    tail.forced()
+                }
+                Seq::Cons { tail, .. } => {
+                    n += 1;
+                    tail.as_deref().and_then(Seq::forced)
+                }
+                l @ Seq::Lazy { .. } => l.forced(),
+            };
+        }
+        n
+    }
+
     /// The current chunk plus the seq after it (`None` unless this
     /// seq is chunked here). The rest is the empty seq past the last
     /// chunk.
@@ -989,6 +1030,27 @@ impl RangeValue {
         Some((head, next))
     }
 
+    /// [`stepped`](Self::stepped) in place: the head, with this range
+    /// advanced past it and its metadata dropped (`None` when done).
+    /// The flag is `false` on `Int`+`Int` overflow, which leaves the
+    /// range unadvanced (the walk ends there). Chunk fills step 32
+    /// heads per tail, so they skip `stepped`'s fresh tail per head.
+    pub fn step_in_place(&mut self) -> Option<(Value, bool)> {
+        if self.done() {
+            return None;
+        }
+        let head = self.cur.value();
+        match self.advance() {
+            Some(nxt) => {
+                self.cur = nxt;
+                self.count = self.count.map(|c| c - 1);
+                self.meta = None;
+                Some((head, true))
+            }
+            None => Some((head, false)),
+        }
+    }
+
     /// Call `f` per item (pure walk; infinite ranges never return,
     /// like the JVM's `hashCode` walk; a `long overflow` ends the
     /// walk early — the `hash` fn realizes first and reports it).
@@ -1523,6 +1585,54 @@ mod tests {
         let mut h = DefaultHasher::new();
         v.hash(&mut h);
         h.finish()
+    }
+
+    fn ints(r: std::ops::Range<i64>) -> Vec<Value> {
+        r.map(int).collect()
+    }
+
+    /// `count` must equal the `first`/`next` walk length (what it
+    /// replaced) on every shape, crafted cursor states included.
+    #[test]
+    fn count_matches_walk_on_every_shape() {
+        let walked = |s: &Seq| RealizedSeq::new(s.clone()).items().len();
+        let chunked = Seq::chunked(ints(0..70)).expect("chunked");
+        let mut cases = vec![
+            Seq::empty(),
+            Seq::eager(ints(0..5)).expect("eager"),
+            chunked.clone(),
+            Seq::chunk_cons(ints(0..3), Seq::eager(ints(3..5)).expect("tail")),
+            Seq::cons(int(0), Some(Seq::cons(int(1), None))),
+            Seq::cons(int(0), Some(Seq::empty())),
+            Seq::lazy(|| None),
+            Seq::lazy(|| Some(Seq::lazy(|| Seq::eager(ints(0..4))))),
+            // A spent cursor and an empty middle chunk end the walk.
+            Seq::Chunked {
+                chunks: Arc::from(vec![Arc::from(ints(0..2))]),
+                chunk: 0,
+                pos: 5,
+            },
+            Seq::Chunked {
+                chunks: Arc::from(vec![
+                    Arc::from(ints(0..2)),
+                    Arc::from(Vec::new()),
+                    Arc::from(ints(2..3)),
+                ]),
+                chunk: 0,
+                pos: 0,
+            },
+        ];
+        // Mid-walk cursors: inside and across chunk boundaries.
+        let mut cur = chunked;
+        for _ in 0..69 {
+            cur = cur.next().expect("70 items");
+            cases.push(cur.clone());
+        }
+        for s in &cases {
+            assert_eq!(s.count(), walked(s), "{s:?}");
+        }
+        assert_eq!(cases[2].count(), 70);
+        assert_eq!(cases[9].count(), 2);
     }
 
     #[test]

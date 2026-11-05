@@ -1502,22 +1502,24 @@ pub(crate) const PRINTSYS_NATIVES: &[(&str, NativeFnPtr)] = &[
 /// char-map vars, and the writer-fn arglists. Called from `boot`
 /// after the natives install.
 pub(crate) fn boot_print_system(eval: &mut Evaluator) {
-    let mut methods = new_map();
-    methods = methods.insert(
+    // One build per table (chained `insert`s interned a fresh shape
+    // per prefix); the pair order is the insertion order.
+    let mut pairs = vec![(
         Value::Nil,
         method_fn_value(eval, "print-method", scalar_default),
-    );
+    )];
     for (token, f) in METHOD_TABLE {
-        methods = methods.insert(
+        pairs.push((
             Value::Str(Arc::from(*token)),
             method_fn_value(eval, "print-method", *f),
-        );
+        ));
     }
     let default_key = Value::Keyword(Keyword::new(None, "default"));
-    methods = methods.insert(
+    pairs.push((
         default_key.clone(),
         method_fn_value(eval, "print-method", method_default),
-    );
+    ));
+    let methods = Map::from_kvs_last_wins(pairs);
     let method_dispatch = method_fn_value(eval, "print-method", dispatch_method);
     install_plain_root(
         eval,
@@ -1531,14 +1533,14 @@ pub(crate) fn boot_print_system(eval: &mut Evaluator) {
             hierarchy: None,
         })),
     );
-    let mut dup_methods = new_map();
-    dup_methods = dup_methods.insert(Value::Nil, method_fn_value(eval, "print-dup", dup_delegate));
+    let mut dup_pairs = vec![(Value::Nil, method_fn_value(eval, "print-dup", dup_delegate))];
     for (token, f) in DUP_TABLE {
-        dup_methods = dup_methods.insert(
+        dup_pairs.push((
             Value::Str(Arc::from(*token)),
             method_fn_value(eval, "print-dup", *f),
-        );
+        ));
     }
+    let dup_methods = Map::from_kvs_last_wins(dup_pairs);
     let dup_dispatch = method_fn_value(eval, "print-dup", dispatch_dup);
     install_plain_root(
         eval,
@@ -1588,11 +1590,12 @@ fn set_arglists(eval: &mut Evaluator, name: &str, params: &[&str]) {
 
 /// A char-map var root from a single-source table.
 fn char_map_value(table: &[(char, &str)]) -> Value {
-    let mut map = new_map();
-    for (c, s) in table {
-        map = map.insert(Value::Char(*c), Value::Str(Arc::from(*s)));
-    }
-    Value::Map(map)
+    Value::Map(Map::from_kvs_last_wins(
+        table
+            .iter()
+            .map(|(c, s)| (Value::Char(*c), Value::Str(Arc::from(*s))))
+            .collect(),
+    ))
 }
 
 #[cfg(test)]
@@ -1825,6 +1828,7 @@ mod tests {
             env: Env::new(),
             meta: Some(with_type.clone()),
             conveyed: None,
+            vm: None,
         };
         // `:type`-only fn meta strips to nothing ...
         let stripped = strip_type_meta(&Value::Extension(Arc::new(closure.clone())));

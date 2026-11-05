@@ -14,8 +14,42 @@
 //! harness supplies live `*ns*` maps).
 
 use std::collections::{HashMap, HashSet};
+use std::hash::BuildHasher;
+use std::sync::Arc;
 
 use clj_value::{Keyword, Symbol};
+
+/// Referred-var lookup for syntax-quote: a simple name's qualified
+/// target `(ns, name)`. The evaluator hands over its namespace's own
+/// refer table (shared, never copied per read — `user` refers every
+/// `clojure.core` public); plain string maps serve tests.
+pub trait Refers: Send + Sync + std::fmt::Debug {
+    /// The target `(ns, name)` a simple name refers to, if any.
+    fn target(&self, name: &str) -> Option<(&str, &str)>;
+}
+
+impl<S: BuildHasher + Send + Sync + std::fmt::Debug> Refers
+    for HashMap<String, (String, String), S>
+{
+    fn target(&self, name: &str) -> Option<(&str, &str)> {
+        self.get(name).map(|(ns, n)| (ns.as_str(), n.as_str()))
+    }
+}
+
+/// A host refer table: simple name → target symbol plus whatever
+/// the host pins beside it (the evaluator's var id). An unqualified
+/// target is no refer to syntax-quote (it qualifies to the current
+/// namespace instead).
+impl<X, S> Refers for HashMap<Arc<str>, (Symbol, X), S>
+where
+    X: Send + Sync + std::fmt::Debug,
+    S: BuildHasher + Send + Sync + std::fmt::Debug,
+{
+    fn target(&self, name: &str) -> Option<(&str, &str)> {
+        let (sym, _) = self.get(name)?;
+        Some((sym.namespace()?, sym.name()))
+    }
+}
 
 /// `:read-cond` handling: process conditionals, preserve them as
 /// [`Value::ReaderConditional`](clj_value::Value::ReaderConditional),
@@ -44,12 +78,17 @@ pub struct ReaderOpts {
     pub line_numbers: bool,
     /// Current namespace name (for `::` and syntax-quote).
     pub current_ns: String,
-    /// Namespace aliases (`str` → `clojure.string`).
-    pub aliases: HashMap<String, String>,
+    /// Namespace aliases (`str` → `clojure.string`). The three
+    /// resolver maps are shared, not owned: [`Reader::set_opts`]
+    /// clones the options once per form, and `user` refers every
+    /// `clojure.core` public.
+    ///
+    /// [`Reader::set_opts`]: crate::Reader::set_opts
+    pub aliases: Arc<HashMap<String, String>>,
     /// Referred vars (`map` → `(clojure.core, map)`).
-    pub refers: HashMap<String, (String, String)>,
+    pub refers: Arc<dyn Refers>,
     /// Imported classes (`String` → `java.lang.String`).
-    pub class_map: HashMap<String, String>,
+    pub class_map: Arc<HashMap<String, String>>,
     /// Eval-side data-reader resolution (S6): the tag consult
     /// runs read-side (table keys, then the default-layer keys,
     /// then the default-fn flag, else the `UnknownTag` throw), while
@@ -106,9 +145,9 @@ impl Default for ReaderOpts {
             features: HashSet::from([Keyword::new(None, "clj")]),
             line_numbers: true,
             current_ns: "user".to_owned(),
-            aliases: HashMap::new(),
-            refers: HashMap::new(),
-            class_map: HashMap::new(),
+            aliases: Arc::default(),
+            refers: Arc::new(HashMap::<String, (String, String)>::new()),
+            class_map: Arc::default(),
             data_readers: false,
             data_reader_keys: HashSet::new(),
             data_readers_borked: None,

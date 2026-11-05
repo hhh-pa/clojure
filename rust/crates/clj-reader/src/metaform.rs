@@ -391,7 +391,7 @@ impl Reader {
         }
         if let Some(dotted) = self.opts.class_map.get(&name) {
             sym = Symbol::new(None, dotted);
-        } else if let Some((ns, name)) = self.opts.refers.get(&name) {
+        } else if let Some((ns, name)) = self.opts.refers.target(&name) {
             sym = Symbol::new(Some(ns), name);
         } else {
             let current = self.opts.current_ns.clone();
@@ -664,9 +664,9 @@ mod tests {
         );
         // ... but a class namespace still rewrites first.
         let mut opts = ReaderOpts::default();
-        opts.class_map
+        std::sync::Arc::make_mut(&mut opts.class_map)
             .insert("String".to_owned(), "java.lang.String".to_owned());
-        opts.aliases
+        std::sync::Arc::make_mut(&mut opts.aliases)
             .insert("str".to_owned(), "clojure.string".to_owned());
         assert_eq!(
             read_quoted("`String/b.c", &opts),

@@ -1317,10 +1317,10 @@ fn load_reader_errors() {
         ),
         "clojure.lang.Compiler$CompilerException | Syntax error reading source at (2:1)."
     );
-    // The port reads all forms before evaluating (pre-existing
-    // load-loop semantics — the JVM interleaves, probes
-    // `l-err-read-defined`, `l-err-trunc-defined`).
-    assert_eq!(run_last(&mut eval, "(resolve 'evlr2)"), "nil");
+    // Form by form, like the JVM (probes `l-err-read-defined`,
+    // `l-err-trunc-defined`): the defs before the bad reads stand.
+    assert_eq!(run_last(&mut eval, "(resolve 'evlr2)"), "#'user/evlr2");
+    assert_eq!(run_last(&mut eval, "(resolve 'evlr3)"), "#'user/evlr3");
 }
 
 #[test]
@@ -1411,8 +1411,9 @@ fn load_string_eval_read_errors() {
         uncaught(&mut eval, "(load-string \"(def evw 1) (w\")"),
         "clojure.lang.Compiler$CompilerException | Syntax error reading source at (2:1)."
     );
-    // Read-all-first again (probe `m-loadstring-trunc-defined`).
-    assert_eq!(run_last(&mut eval, "(resolve 'evw)"), "nil");
+    // Form by form, like the JVM (probe `m-loadstring-trunc-defined`):
+    // the def before the truncated form stands.
+    assert_eq!(run_last(&mut eval, "(resolve 'evw)"), "#'user/evw");
 }
 
 #[test]

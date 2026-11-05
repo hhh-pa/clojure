@@ -2765,10 +2765,10 @@ fn str_of_realized(eval: &mut Evaluator, v: &Value) -> Result<String, NativeErro
         // `Date.toString` instants) — `print` stays tagged while
         // `str` goes bare.
         Value::Uuid(_) | Value::Instant(_) | Value::Uri(_) => clj_value::java_debug(&r),
-        // Extensions with a `str` display (only `MathContext`,
-        // S2 oracle `wp-str`) render it; the rest print
-        // readably.
-        Value::Extension(e) => match e.print_str() {
+        // Extensions with a `toString` or `str` display (namespaces,
+        // `MathContext` — S2 oracle `wp-str`) render it; the rest
+        // print readably.
+        Value::Extension(e) => match e.java_str().or_else(|| e.print_str()) {
             Some(s) => s,
             None => clj_value::pr_to_string(&r, &clj_value::PrintOpts::pr()),
         },
@@ -4541,7 +4541,7 @@ fn native_unchecked_negate(eval: &mut Evaluator, args: &[Value]) -> Result<Value
 /// `double`; nil is the `charValue` NPE quirk, chars and
 /// everything else fail to `Number` (chars do NOT convert
 /// here, unlike `int` — oracle `xi-char`).
-fn intcast(v: &Value) -> Result<i32, NativeError> {
+pub(crate) fn intcast(v: &Value) -> Result<i32, NativeError> {
     match v {
         Value::Int(i) => int_exact_long(*i),
         Value::Double(d) => int_cast_double(*d),

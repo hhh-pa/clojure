@@ -155,6 +155,20 @@ fn eval_multi_form_prints_each_value() {
 }
 
 #[test]
+fn eval_reads_each_form_after_the_previous_evaluates() {
+    // JVM `-e` parity: `clojure.main` reads each form after the
+    // previous one evaluates, so `ns` reaches a later `::kw` and
+    // earlier values print before a later read error.
+    let out = run(["eval", "(ns cli.kw) ::kw"]);
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(stdout(&out), ":cli.kw/kw\n");
+    let out = run(["eval", "1 )"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(stdout(&out), "1\n");
+    assert_eq!(stderr(&out), "<eval>:1:4: Unmatched delimiter: )\n");
+}
+
+#[test]
 fn eval_suppresses_nil_results() {
     // JVM `-e` prints nothing for nil (pins P5).
     let out = run(["eval", "nil"]);

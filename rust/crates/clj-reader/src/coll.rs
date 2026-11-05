@@ -13,7 +13,7 @@
 //! first line (bare without line numbers). Maps check oddness after
 //! the full read, then duplicate-check; sets duplicate-check.
 
-use clj_value::{Keyword, List, Map, Set, Value, Vector, java_debug};
+use clj_value::{List, Map, Set, Value, Vector, java_debug};
 
 use crate::Reader;
 use crate::error::ReaderError;
@@ -59,15 +59,18 @@ impl Reader {
         }
         let mut list = List::from_vec(items);
         if let Some((line, col)) = meta_pos {
-            let meta = clj_value::new_map()
-                .insert(
-                    Value::Keyword(Keyword::new(None, "line")),
+            // One shape intern for both keys (every list read pays
+            // this; the `insert` chain built two versions).
+            let meta = clj_value::Map::from_kvs_last_wins(vec![
+                (
+                    Value::Keyword(clj_value::static_keyword!("line")),
                     Value::Int(i64::from(line)),
-                )
-                .insert(
-                    Value::Keyword(Keyword::new(None, "column")),
+                ),
+                (
+                    Value::Keyword(clj_value::static_keyword!("column")),
                     Value::Int(i64::from(col)),
-                );
+                ),
+            ]);
             list = list.with_meta(Some(meta));
         }
         Ok(Some(Value::List(list)))

@@ -110,6 +110,12 @@ impl Reader {
         }
     }
 
+    /// Report lines from `line` on (see [`CharStream::set_line`]):
+    /// an embedded file's form evaluated alone keeps its file lines.
+    pub fn set_start_line(&mut self, line: u32) {
+        self.stream.set_line(line);
+    }
+
     /// Take the fired-discards log (S6): tags read under `#_` in
     /// defer mode, oldest first. The evaluator drains this before
     /// resolving each form (invoking for effect, in read order).

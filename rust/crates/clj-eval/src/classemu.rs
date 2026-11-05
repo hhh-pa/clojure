@@ -2290,6 +2290,16 @@ const DEFAULT_IMPORTS: &[&str] = &[
 /// namespace seeding. Every name resolves: a missing row is a
 /// lattice bug and fails loud here rather than seeding a
 /// divergent fallback.
+/// [`default_imports`] as a namespace's starting imports table:
+/// built once per process and shared (namespaces copy it on their
+/// first import change), so namespace creation skips ~170 class
+/// lookups.
+pub(crate) fn default_import_map() -> Arc<crate::env::FxHashMap<String, Arc<ClassVal>>> {
+    static MAP: std::sync::LazyLock<Arc<crate::env::FxHashMap<String, Arc<ClassVal>>>> =
+        std::sync::LazyLock::new(|| Arc::new(default_imports().collect()));
+    Arc::clone(&MAP)
+}
+
 pub(crate) fn default_imports() -> impl Iterator<Item = (String, Arc<ClassVal>)> {
     DEFAULT_IMPORTS.iter().map(|fqn| {
         let simple = fqn.rsplit('.').next().unwrap_or(fqn).to_owned();
@@ -3958,7 +3968,7 @@ fn static_character_digit(args: &[Value]) -> Result<Value, NativeError> {
 }
 
 /// The Java whitespace predicate (see `static_character_is_whitespace`).
-fn java_is_whitespace(c: char) -> bool {
+pub(crate) fn java_is_whitespace(c: char) -> bool {
     matches!(c, '\u{1C}'..='\u{1F}')
         || (c.is_whitespace() && !matches!(c, '\u{85}' | '\u{A0}' | '\u{2007}' | '\u{202F}'))
 }
@@ -5191,9 +5201,7 @@ fn identity_hash_ptr(v: &Value) -> Option<i32> {
 
 /// Read an import mapping (shared with name resolution).
 pub(crate) fn import_in(eval: &Evaluator, ns: &str, simple: &str) -> Option<Arc<ClassVal>> {
-    eval.registry
-        .with_ns_mut(ns, |ns| ns.get_import(simple))
-        .flatten()
+    eval.registry.import_in(ns, simple)
 }
 
 /// A bean key.
@@ -7322,6 +7330,19 @@ pub(crate) struct StringBuilder {
 
 static NEXT_BUILDER: AtomicU64 = AtomicU64::new(1);
 
+/// The text of a `CharSequence` argument (strings and
+/// `StringBuilder`s; `None` for anything else).
+pub(crate) fn char_sequence_text(v: &Value) -> Option<Arc<str>> {
+    match v {
+        Value::Str(s) => Some(Arc::clone(s)),
+        Value::Extension(e) => e
+            .as_any()
+            .downcast_ref::<StringBuilder>()
+            .map(|sb| Arc::from(sb.lock().as_str())),
+        _ => None,
+    }
+}
+
 impl StringBuilder {
     pub(crate) fn fresh(content: String) -> Self {
         Self {
@@ -7489,14 +7510,28 @@ impl ExtensionValue for StringBuilder {
         "java.lang.StringBuilder".to_owned()
     }
 
+    /// `print-object`: the `toString` (the buffer) printed
+    /// readably.
     fn print(&self) -> String {
+        let text = Value::Str(Arc::from(self.lock().as_str()));
         format!(
-            "#object[java.lang.StringBuilder 0x{:x} \"java.lang.StringBuilder@{:x}\"]",
-            self.id, self.id
+            "#object[java.lang.StringBuilder 0x{:x} {}]",
+            self.id,
+            clj_value::pr_to_string(&text, &clj_value::PrintOpts::pr())
         )
     }
 
+    /// Not readably, the buffer goes in unquoted.
     fn print_str(&self) -> Option<String> {
+        Some(format!(
+            "#object[java.lang.StringBuilder 0x{:x} {}]",
+            self.id,
+            self.lock()
+        ))
+    }
+
+    /// `toString` is the buffer.
+    fn java_str(&self) -> Option<String> {
         Some(self.lock().clone())
     }
 

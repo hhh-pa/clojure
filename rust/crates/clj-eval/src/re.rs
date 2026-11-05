@@ -49,8 +49,30 @@ fn pattern_syntax(err: regex::Error) -> NativeError {
 /// stale value still reports `PatternSyntaxException`).
 /// `\Q...\E` quotations translate first (the crate has no
 /// quotation syntax — `Pattern/quote` output must compile).
-pub(crate) fn compile_source(source: &str) -> Result<Regex, NativeError> {
-    Regex::new(&translate_quotations(source)).map_err(pattern_syntax)
+pub(crate) fn compile_source(source: &str) -> Result<Arc<Regex>, NativeError> {
+    // Memoized per thread: a compile costs far more than the matches
+    // one call runs (a `split` per input line recompiled its literal
+    // every line). Handed out shared, never cloned: each `Regex`
+    // clone starts an empty search-cache pool, so a clone per call
+    // rebuilt the lazy DFA cache on every match. A full table
+    // clears, bounding programs that mint patterns. Failures are not
+    // cached (each use reports its own syntax error).
+    thread_local! {
+        static COMPILED: std::cell::RefCell<crate::env::FxHashMap<String, Arc<Regex>>> =
+            std::cell::RefCell::new(crate::env::FxHashMap::default());
+    }
+    if let Some(re) = COMPILED.with(|c| c.borrow().get(source).cloned()) {
+        return Ok(re);
+    }
+    let re = Arc::new(Regex::new(&translate_quotations(source)).map_err(pattern_syntax)?);
+    COMPILED.with(|c| {
+        let mut c = c.borrow_mut();
+        if c.len() >= 256 {
+            c.clear();
+        }
+        c.insert(source.to_owned(), Arc::clone(&re));
+    });
+    Ok(re)
 }
 
 /// Translate `\Q...\E` quotation spans to escaped literals

@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use crate::{Map, Value};
 
-type RpdsVector = rpds::VectorSync<Value>;
+type RpdsVector = crate::trie::PVec;
 
 /// The eight `vector-of` element types.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

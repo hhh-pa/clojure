@@ -52,7 +52,8 @@ use crate::{
 pub type FxBuildHasher = std::hash::BuildHasherDefault<rustc_hash::FxHasher>;
 
 type RpdsList = rpds::ListSync<Value>;
-type RpdsVector = rpds::VectorSync<Value>;
+/// The persistent vector trie (#226: items inline, an O(1) tail).
+type RpdsVector = crate::trie::PVec;
 type RpdsMap = rpds::HashTrieMapSync<Value, Value, FxBuildHasher>;
 type RpdsSet = rpds::HashTrieSetSync<Value, FxBuildHasher>;
 
@@ -273,7 +274,7 @@ pub struct VectorIter<'a> {
 }
 
 enum VectorIterInner<'a> {
-    Generic(rpds::vector::Iter<'a, Value, archery::ArcTK>),
+    Generic(crate::trie::Iter<'a>),
     Packed(std::slice::Iter<'a, i64>),
 }
 
@@ -376,6 +377,10 @@ struct SmallMap {
 struct ShapeRegistry {
     map: HashMap<Vec<Value>, Weak<MapShape>, FxBuildHasher>,
     since_cleanup: usize,
+    /// The last all-keyword shape interned: runs of same-shape maps
+    /// (every fresh var's `{:ns … :name …}`) skip the hash probe.
+    /// Kept alive here, so its table entry never goes stale.
+    last: Option<Arc<MapShape>>,
 }
 
 /// Dead-entry cleanup cadence: a cleanup scans the whole table,
@@ -394,6 +399,7 @@ thread_local! {
     static SHAPE_REGISTRY: RefCell<ShapeRegistry> = RefCell::new(ShapeRegistry {
         map: HashMap::default(),
         since_cleanup: 0,
+        last: None,
     });
 }
 
@@ -405,13 +411,27 @@ thread_local! {
 fn intern_shape(keys: &[Value]) -> Arc<MapShape> {
     SHAPE_REGISTRY.with(|reg| {
         let mut reg = reg.borrow_mut();
+        // Keyword keys compare unambiguously (no cross-type `=`), so
+        // the shortcut agrees with the table's own `Eq`.
+        let keywords = keys.iter().all(|k| matches!(k, Value::Keyword(_)));
+        if keywords {
+            if let Some(last) = reg.last.as_ref().filter(|l| *l.keys == *keys) {
+                return Arc::clone(last);
+            }
+        }
         if let Some(shape) = reg.map.get(keys).and_then(Weak::upgrade) {
+            if keywords {
+                reg.last = Some(Arc::clone(&shape));
+            }
             return shape;
         }
         let shape = Arc::new(MapShape {
             keys: keys.to_vec().into_boxed_slice(),
         });
         reg.map.insert(keys.to_vec(), Arc::downgrade(&shape));
+        if keywords {
+            reg.last = Some(Arc::clone(&shape));
+        }
         reg.since_cleanup += 1;
         if reg.since_cleanup >= SHAPE_CLEANUP_EVERY
             && reg.since_cleanup.saturating_mul(SHAPE_CLEANUP_AMORT) >= reg.map.len()
@@ -612,14 +632,11 @@ impl Vector {
                 None => return Self::from_ints(ints),
                 Some(Value::Int(n)) => ints.push(n),
                 Some(v) => {
-                    let mut trie = RpdsVector::new_sync();
-                    for n in ints {
-                        trie.push_back_mut(Value::Int(n));
-                    }
-                    trie.push_back_mut(v);
-                    for v in items {
-                        trie.push_back_mut(v);
-                    }
+                    let mut all = Vec::with_capacity(ints.len() + 1 + items.len());
+                    all.extend(ints.into_iter().map(Value::Int));
+                    all.push(v);
+                    all.extend(items);
+                    let trie = RpdsVector::from_vec(all);
                     return Self {
                         inner: VectorInner::Generic(trie),
                         meta: None,
@@ -1017,6 +1034,28 @@ impl Map {
             vals.push(v);
         }
         Self::from_parts(keys, vals, hashy)
+    }
+
+    /// A small map over distinct keyword `keys` (in order) and their
+    /// `vals`: no dedupe scan, and a run of same-keyed maps reuses
+    /// the last interned shape without probing (every fresh var's
+    /// `{:ns … :name …}`). Callers guarantee the keys are distinct
+    /// keywords, at most 8 (array-classed, like the JVM's).
+    #[must_use]
+    pub fn from_distinct_keywords(keys: &[Value], vals: Vec<Value>) -> Self {
+        debug_assert!(keys.len() == vals.len() && keys.len() <= 8 && !keys.is_empty());
+        debug_assert!(keys.iter().all(|k| matches!(k, Value::Keyword(_))));
+        Self {
+            inner: None,
+            small: Some(Arc::new(SmallMap {
+                shape: intern_shape(keys),
+                vals: vals.into_boxed_slice(),
+            })),
+            keys: EMPTY_MAP_KEYS.clone(),
+            meta: None,
+            hashy: false,
+            sort: None,
+        }
     }
 
     /// Build from deduped parallel keys/vals (big maps take the
@@ -1424,6 +1463,23 @@ impl Map {
             Some(small) => Arc::as_ptr(small).addr() as u64,
             None => Arc::as_ptr(&self.keys).addr() as u64,
         }
+    }
+}
+
+/// A persistent membership set (no order, no metadata, no
+/// identity): O(1) clone, O(log n) insert even when shared — for
+/// lazy-seq state that must survive per-step clones (`distinct`).
+#[derive(Clone, Debug, Default)]
+pub struct MemberSet(RpdsSet);
+
+impl MemberSet {
+    /// Insert `v`; `false` when it was already a member.
+    pub fn insert(&mut self, v: Value) -> bool {
+        if self.0.contains(&v) {
+            return false;
+        }
+        self.0.insert_mut(v);
+        true
     }
 }
 

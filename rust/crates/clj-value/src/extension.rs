@@ -367,11 +367,15 @@ fn throw_parent_format(jvm_name: &str) -> Option<&'static str> {
 }
 
 /// The array/error branch of [`throw_parent`] (S15, split for the
-/// complexity budget): `AIOOBE` under `IOOBE`, store/size under
+/// complexity budget): `AIOOBE` (and the string `SIOOBE`, #226) under
+/// `IOOBE`, store/size under
 /// `RuntimeException`, `OOM` through `VirtualMachineError`.
 fn throw_parent_array(jvm_name: &str) -> Option<&'static str> {
     match jvm_name {
-        "java.lang.ArrayIndexOutOfBoundsException" => Some("java.lang.IndexOutOfBoundsException"),
+        "java.lang.ArrayIndexOutOfBoundsException"
+        | "java.lang.StringIndexOutOfBoundsException" => {
+            Some("java.lang.IndexOutOfBoundsException")
+        }
         "java.lang.ArrayStoreException" | "java.lang.NegativeArraySizeException" => {
             Some("java.lang.RuntimeException")
         }
@@ -431,8 +435,17 @@ pub trait ExtensionValue: std::fmt::Debug + Send + Sync {
 
     /// The `str`/`print` display (used when not `readably`):
     /// `None` keeps [`print`](ExtensionValue::print) (the default
-    /// — only `MathContext` overrides it, S2 oracle `wp-str`).
+    /// — only `MathContext` and namespaces override it, S2 oracle
+    /// `wp-str`).
     fn print_str(&self) -> Option<String> {
+        None
+    }
+
+    /// The Java `toString` (`str`, `%s`, `.toString`) when it
+    /// differs from the non-readable display: `None` keeps
+    /// [`print_str`](ExtensionValue::print_str) (only namespaces
+    /// override it — their name).
+    fn java_str(&self) -> Option<String> {
         None
     }
 }

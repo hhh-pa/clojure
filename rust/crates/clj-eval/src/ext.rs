@@ -138,6 +138,10 @@ pub struct Closure {
     pub env: Env,
     pub meta: Option<Map>,
     pub conveyed: Option<Bindings>,
+    /// The register VM's code and captured values (`None` for
+    /// closures the tree evaluator made, which run `arities` over
+    /// `env`).
+    pub(crate) vm: Option<crate::vm::VmCode>,
 }
 
 impl ExtensionValue for Closure {
@@ -313,6 +317,20 @@ impl ExtensionValue for NsHandle {
             "#object[clojure.lang.Namespace 0x{:x} \"{}\"]",
             self.id, self.name
         )
+    }
+
+    /// `print-object` writes the `toString` unquoted when not
+    /// readably.
+    fn print_str(&self) -> Option<String> {
+        Some(format!(
+            "#object[clojure.lang.Namespace 0x{:x} {}]",
+            self.id, self.name
+        ))
+    }
+
+    /// `Namespace.toString` is the name.
+    fn java_str(&self) -> Option<String> {
+        Some(self.name.to_string())
     }
 
     fn dyn_eq(&self, other: &dyn ExtensionValue) -> bool {

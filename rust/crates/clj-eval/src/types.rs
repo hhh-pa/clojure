@@ -54,7 +54,7 @@ pub const TYPES_NATIVES: &[(&str, NativeFnPtr)] = &[
 fn var_root(eval: &Evaluator, sym: &Symbol) -> Option<Value> {
     let cur = eval.current_ns_name();
     let (_, id) = eval.registry.resolve_target_and_id(&cur, sym)?;
-    Some(eval.deref_var(id, sym))
+    Some(eval.deref_var_unforced(id, sym))
 }
 
 /// The `Unable to resolve symbol` runtime error (the analyzer's
@@ -115,7 +115,7 @@ fn lookup_root(eval: &Evaluator, sym: &Symbol) -> Option<Value> {
                 .registry
                 .resolve_in(ns_part, &simple)
                 .and_then(|q| eval.registry.lookup(&q).map(|id| (id, q)))
-                .map(|(id, q)| eval.deref_var(id, &q));
+                .map(|(id, q)| eval.deref_var_unforced(id, &q));
         }
         if let Some(root) = var_root(eval, sym) {
             return Some(root);

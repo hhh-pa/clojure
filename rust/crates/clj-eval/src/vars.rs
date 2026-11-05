@@ -69,6 +69,7 @@ fn is_bound(eval: &Evaluator, id: u64) -> bool {
 fn native_alter_var_root(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_min_arity("clojure.core/alter-var-root", args, 2)?;
     let var = as_var(&args[0])?.clone();
+    eval.force_lazy(var.id);
     // Per-var reentrant exclusion across read-f-install (T1192
     // FX1), like the JVM's var monitor: concurrent alters
     // serialize (no lost update), same-thread reentry nests.
@@ -92,6 +93,7 @@ fn native_bound(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErr
     // each arg cast in order (probe37 `bound-*`).
     for arg in args {
         let var = as_var(arg)?;
+        eval.force_lazy(var.id);
         if !is_bound(eval, var.id) {
             return Ok(Value::Bool(false));
         }
@@ -112,6 +114,7 @@ fn native_thread_bound(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Na
 fn native_var_get(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/var-get", args, &[1])?;
     let var = as_var(&args[0])?;
+    eval.force_lazy(var.id);
     Ok(eval.deref_var(var.id, &var.sym))
 }
 
@@ -261,6 +264,7 @@ fn extension_meta(eval: &Evaluator, v: &Value) -> Option<Map> {
 
 fn native_meta(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/meta", args, &[1])?;
+    force_var_arg(eval, &args[0]);
     Ok(meta_of(eval, &args[0]).map_or(Value::Nil, Value::Map))
 }
 
@@ -502,6 +506,7 @@ fn push_checked_entry(
 
 fn native_alter_meta(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_min_arity("clojure.core/alter-meta!", args, 2)?;
+    force_var_arg(eval, &args[0]);
     let target = as_ref_target(&args[0])?;
     let current = ref_meta(eval, &target).map_or(Value::Nil, Value::Map);
     let mut f_args = Vec::with_capacity(args.len() - 1);
@@ -516,10 +521,20 @@ fn native_alter_meta(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nati
 
 fn native_reset_meta(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/reset-meta!", args, &[2])?;
+    force_var_arg(eval, &args[0]);
     let target = as_ref_target(&args[0])?;
     let meta = as_meta_value(&args[1])?;
     install_ref_meta(eval, &target, meta.clone());
     Ok(meta.map_or(Value::Nil, Value::Map))
+}
+
+/// Force a lazy `core.clj` var argument before a native reads or
+/// replaces its metadata (see `core_lazy`).
+fn force_var_arg(eval: &mut Evaluator, v: &Value) {
+    if let Value::Var(var) = v {
+        eval.force_lazy(var.id);
+        crate::core_lazy::force_meta(eval, var.id);
+    }
 }
 
 /// The S5B natives installed into `clojure.core` by [`boot`](crate::ns::boot).

@@ -23,12 +23,12 @@ use crate::error::{NativeError, jvm_class_of};
 use crate::eval::Evaluator;
 use crate::ext::{FastArith, NativeFn, NativeImpl};
 use crate::lazy::{
-    as_subvector, collect_all, collect_packed, concat_thunk, cycle_thunk, dedupe_thunk,
-    distinct_thunk, drop_value, drop_while_thunk, empty_list_value, filter_thunk, first_value,
-    interleave_thunk, interpose_thunk, iterate_thunk, keep_indexed_thunk, keep_thunk, keys_thunk,
-    map_indexed_thunk, map_thunk, mapcat_thunk, next_value, nthrest_value, partition_all_thunk,
-    partition_by_thunk, partition_thunk, range1, range2, range3, realized_value, reductions_thunk,
-    repeat_thunk, repeatedly_thunk, seq_value, take_nth_thunk, take_thunk, take_walk_coll,
+    StepUnit, as_subvector, collect_all, collect_packed, concat_thunk, cycle_thunk, dedupe_thunk,
+    distinct_thunk, drop_value, drop_while_thunk, empty_list_value, filter_thunk, interleave_thunk,
+    interpose_thunk, iterate_thunk, keep_indexed_thunk, keep_thunk, keys_thunk, map_indexed_thunk,
+    map_thunk, mapcat_thunk, next_value, nthrest_value, partition_all_thunk, partition_by_thunk,
+    partition_thunk, range1, range2, range3, realized_value, reductions_thunk, repeat_thunk,
+    repeatedly_thunk, seq_value, step_unit, take_nth_thunk, take_thunk, take_walk_coll,
     take_while_thunk,
 };
 use crate::ns::{NativeFnPtr, check_arity, deref_core, signal_to_native};
@@ -88,20 +88,89 @@ fn walk_seq(
     coll: Value,
     mut visit: impl FnMut(&mut Evaluator, &Value) -> Result<Walk, NativeError>,
 ) -> Result<(), NativeError> {
+    if let Some(done) = walk_direct(eval, &coll, &mut visit) {
+        return done;
+    }
     let mut seq = seq_value(eval, &coll).map_err(signal_to_native)?;
     // The walk holds `seq`, never `coll`: owned callers nilled the
     // arg slot (`take_walk_coll`), so dropping the head here frees
     // memoized chunks as the walk advances (borrow callers pass a
     // cheap clone, retaining as before).
     drop(coll);
-    while !matches!(seq, Value::Nil) {
-        let head = first_value(eval, &seq).map_err(signal_to_native)?;
-        if matches!(visit(eval, &head)?, Walk::Stop) {
-            return Ok(());
+    // Step-wise, not `first`/`next` per head: a chunked step hands
+    // over its whole chunk (a range rebuilt its 32-item chunk for
+    // every `first`). Forcing order is unchanged: each step forces
+    // exactly what `first` on that seq would, after the previous
+    // head's visit.
+    loop {
+        match step_unit(eval, &seq).map_err(signal_to_native)? {
+            StepUnit::Empty => return Ok(()),
+            StepUnit::One { head, tail } => {
+                if matches!(visit(eval, &head)?, Walk::Stop) {
+                    return Ok(());
+                }
+                seq = tail;
+            }
+            StepUnit::Chunk { items, tail } => {
+                for head in items.iter() {
+                    if matches!(visit(eval, head)?, Walk::Stop) {
+                        return Ok(());
+                    }
+                }
+                seq = tail;
+            }
         }
-        seq = next_value(eval, &seq).map_err(signal_to_native)?;
     }
-    Ok(())
+}
+
+/// Walk a vector, a finite repeat, or a counted `long` range in
+/// place (#226): no chunk seq copies the items 32 at a time — the
+/// order and items are the seq's (`None`: walk the seq).
+fn walk_direct(
+    eval: &mut Evaluator,
+    coll: &Value,
+    visit: &mut impl FnMut(&mut Evaluator, &Value) -> Result<Walk, NativeError>,
+) -> Option<Result<(), NativeError>> {
+    let mut each = |items: &mut dyn Iterator<Item = Value>| {
+        for head in items {
+            if matches!(visit(eval, &head)?, Walk::Stop) {
+                break;
+            }
+        }
+        Ok(())
+    };
+    if let Value::Vector(v) = coll {
+        return Some(each(&mut v.iter()));
+    }
+    if let Some((x, n)) = finite_repeat(coll) {
+        return Some(each(&mut (0..n).map(|_| x.clone())));
+    }
+    let (cur, step, n) = long_range(coll)?;
+    Some(each(&mut (0..n).map(|k| Value::Int(cur + k * step))))
+}
+
+/// A finite `repeat`'s item and count.
+fn finite_repeat(coll: &Value) -> Option<(Value, i64)> {
+    let Value::Extension(e) = coll else {
+        return None;
+    };
+    let r = e.as_any().downcast_ref::<clj_value::RepeatValue>()?;
+    Some((r.x().clone(), r.n()?.max(0)))
+}
+
+/// A counted `long` range's start, step, and count (items stay in
+/// `i64`: the range's own bound checked its last item).
+fn long_range(coll: &Value) -> Option<(i64, i64, i64)> {
+    let Value::Extension(e) = coll else {
+        return None;
+    };
+    let r = e.as_any().downcast_ref::<clj_value::RangeValue>()?;
+    match (r.cur(), r.step(), r.count().filter(|_| r.is_long())) {
+        (clj_value::RangeNum::Int(cur), clj_value::RangeNum::Int(step), Some(n)) => {
+            Some((cur, step, n.max(0)))
+        }
+        _ => None,
+    }
 }
 
 /// Force one step plus `n` heads (mirrors `dorun`'s walk: the
@@ -417,8 +486,11 @@ pub(crate) fn native_reduce_owned(
             ecoll.clone(),
         );
     }
+    // The init moves out (nothing reads `args[1]` again): a kept
+    // copy would pin every subtree the first step leaves untouched,
+    // so later steps would path-copy instead of updating in place.
     let (mut acc, has_acc) = if args.len() == 3 {
-        (args[1].clone(), true)
+        (std::mem::replace(&mut args[1], Value::Nil), true)
     } else {
         (Value::Nil, false)
     };
@@ -426,6 +498,9 @@ pub(crate) fn native_reduce_owned(
     let coll = take_walk_coll(&mut args, coll_idx);
     let mut first = true;
     let mut empty = true;
+    // The step fn resolves once (#226): a VM fn takes each step's
+    // args straight into registers, a native runs its entry.
+    let prepared = crate::vm::Prepared::of(&f, 2);
     walk_seq(eval, coll, |eval, head| {
         empty = false;
         if !has_acc && first {
@@ -439,10 +514,7 @@ pub(crate) fn native_reduce_owned(
         // mutates in place inside an owned `conj` instead of
         // path-copying per step.
         let acc_taken = std::mem::replace(&mut acc, Value::Nil);
-        let mut step_args = SmallVec::new();
-        step_args.push(acc_taken);
-        step_args.push(head.clone());
-        acc = call_checked_owned(eval, &f, step_args)?;
+        acc = reduce_step(eval, &f, prepared.as_ref(), acc_taken, head)?;
         if let Some(inner) = as_reduced(&acc) {
             acc = inner.clone();
             return Ok(Walk::Stop);
@@ -453,6 +525,26 @@ pub(crate) fn native_reduce_owned(
         return call_checked(eval, &f, &[]);
     }
     Ok(acc)
+}
+
+/// One `reduce` step over the moved accumulator: through the
+/// prepared callee, else the checked general call.
+fn reduce_step(
+    eval: &mut Evaluator,
+    f: &Value,
+    prepared: Option<&crate::vm::Prepared<'_>>,
+    acc: Value,
+    head: &Value,
+) -> Result<Value, NativeError> {
+    match prepared {
+        Some(p) => p.call2(eval, acc, head.clone()).map_err(signal_to_native),
+        None => {
+            let mut step_args = SmallVec::new();
+            step_args.push(acc);
+            step_args.push(head.clone());
+            call_checked_owned(eval, f, step_args)
+        }
+    }
 }
 
 fn native_take_last(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
@@ -791,6 +883,19 @@ pub(crate) fn native_mapv_owned(
     // walk holds the only handles and input heads free as it
     // advances (#221).
     let inputs: Vec<Value> = args.drain(1..).collect();
+    // One input under a VM fn walks it in place (#226): no lazy map
+    // in between, the fn resolved once.
+    if let ([_], Some(p)) = (&inputs[..], crate::vm::Prepared::of(&args[0], 1)) {
+        let input = inputs.into_iter().next().unwrap_or(Value::Nil);
+        let mut tv = clj_value::TransientVector::new();
+        walk_seq(eval, input, |eval, head| {
+            let out = p.call1(eval, head.clone()).map_err(signal_to_native)?;
+            tv.conj(out).expect("fresh transient accepts conj");
+            Ok(Walk::Continue)
+        })?;
+        let vec = tv.persistent().expect("fresh transient is valid at freeze");
+        return Ok(Value::Vector(vec));
+    }
     let mapped = map_thunk(args[0].clone(), inputs);
     // Packed streaming (#227): no intermediate `Vec<Value>`, and
     // all-`Int` results freeze to packed storage zero-copy.

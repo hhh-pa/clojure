@@ -3683,10 +3683,8 @@ fn surface_tostring_divergent() {
         normboth(&run(&mut eval, "(.. (fn [x] x) (toString))")),
         "\"#object[user$evalN$fn__N 0xH \\\"user$evalN$fn__N@L\\\"]\""
     );
-    assert_eq!(
-        normhex(&run(&mut eval, "(.. *ns* (toString))")),
-        "\"#object[clojure.lang.Namespace 0xH \\\"user\\\"]\""
-    );
+    // `Namespace.toString` is the name (no longer divergent).
+    assert_eq!(run(&mut eval, "(.. *ns* (toString))"), "\"user\"");
     assert_eq!(
         run(&mut eval, "(.. (ex-info \"m\" {}) (toString))"),
         "\"#error {:cause \\\"m\\\" :data {} :via [{:type clojure.lang.ExceptionInfo :message \\\"m\\\" :data {}}] :trace []}\""

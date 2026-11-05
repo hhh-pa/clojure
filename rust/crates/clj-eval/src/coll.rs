@@ -726,7 +726,7 @@ fn count_fallback(eval: &mut Evaluator, v: &Value) -> Result<i64, NativeError> {
         return Ok(r.walked_len() as i64);
     }
     if let Some(s) = as_realized(v) {
-        return Ok(s.items().len() as i64);
+        return Ok(s.seq().count() as i64);
     }
     if let Some(n) = as_repeat(v).and_then(|r| r.n()) {
         return Ok(n.max(0));
@@ -1548,34 +1548,47 @@ static STR_SCAN_CACHE: Mutex<Vec<StrScanEntry>> = Mutex::new(Vec::new());
 /// would churn the global mutex for no reuse (#235).
 const STR_SCAN_SMALL_MAX: usize = 64;
 
-// The last string-scan hit, per thread: parse loops `nth` one
-// `Arc<str>` millions of times, and the memo answers repeats
-// without the global cache mutex — and without touching
-// refcounts, since a strong key compares by `ptr_eq` alone
-// (sound: `Arc<str>` is immutable, so the same allocation is
-// the same string, and liveness pins the address against
-// ABA). One pinned string per thread at most (freed on the
-// next memoize); the global cache stays `Weak` (8 slots must
-// not pin).
+// The last string-scan hits, per thread: parse loops `nth` one
+// `Arc<str>` millions of times, and search loops alternate two (a
+// text and a pattern — #226: one slot ping-ponged through the global
+// mutex per read). The memo answers repeats without the global
+// cache mutex — and without touching refcounts, since a strong key
+// compares by `ptr_eq` alone (sound: `Arc<str>` is immutable, so the
+// same allocation is the same string, and liveness pins the address
+// against ABA). At most `LAST_SCAN_SLOTS` strings pinned per thread
+// (each freed when its slot is reused); the global cache stays
+// `Weak` (8 slots must not pin).
+const LAST_SCAN_SLOTS: usize = 4;
+
+/// The memo slots plus the next slot to reuse.
+type ScanMemo = ([Option<(Arc<str>, StrScan)>; LAST_SCAN_SLOTS], usize);
+
 thread_local! {
-    static LAST_SCAN: std::cell::RefCell<Option<(Arc<str>, StrScan)>> =
-        const { std::cell::RefCell::new(None) };
+    static LAST_SCAN: std::cell::RefCell<ScanMemo> =
+        const { std::cell::RefCell::new(([None, None, None, None], 0)) };
 }
 
-/// The memoized scan for a string, if it was the last one scanned.
-fn last_scan_hit(s: &Arc<str>) -> Option<StrScan> {
+/// Answer `f` over the memoized scan for a string, if it is one of
+/// the last few scanned (no `StrScan` clone on a hit).
+fn with_scan_hit<T>(s: &Arc<str>, f: impl FnOnce(&StrScan) -> T) -> Option<T> {
     LAST_SCAN.with(|memo| {
-        memo.borrow()
-            .as_ref()
-            .and_then(|(key, scan)| Arc::ptr_eq(key, s).then(|| scan.clone()))
+        let memo = memo.borrow();
+        memo.0
+            .iter()
+            .flatten()
+            .find(|(key, _)| Arc::ptr_eq(key, s))
+            .map(|(_, scan)| f(scan))
     })
 }
 
 /// Memoize a string's scan (called on every global-cache hit and
-/// fresh build, so repeats skip the mutex).
+/// fresh build, so repeats skip the mutex), reusing slots in turn.
 fn memoize_scan(s: &Arc<str>, scan: &StrScan) {
     LAST_SCAN.with(|memo| {
-        *memo.borrow_mut() = Some((Arc::clone(s), scan.clone()));
+        let mut memo = memo.borrow_mut();
+        let slot = memo.1;
+        memo.0[slot] = Some((Arc::clone(s), scan.clone()));
+        memo.1 = (slot + 1) % LAST_SCAN_SLOTS;
     });
 }
 
@@ -1587,9 +1600,7 @@ const STR_SCAN_INDEX_CAP: usize = 2_000_000;
 /// (one O(n) pass; ASCII costs no table). `None` reads over
 /// the index cap (uncached slow path).
 fn str_scan(s: &Arc<str>) -> Option<StrScan> {
-    if let Some(hit) = last_scan_hit(s) {
-        return Some(hit);
-    }
+    // (Callers consult the per-thread memo first.)
     {
         let mut cache = STR_SCAN_CACHE.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(pos) = cache
@@ -1646,19 +1657,27 @@ fn build_str_scan(s: &str) -> Option<StrScan> {
 /// strings ride the memoized scan at every index (a cached
 /// `Ascii` flag answers in one byte load even for small
 /// indexes, where a direct scan would re-decode, #235).
-fn str_char_at(s: &Arc<str>, idx: usize) -> Option<char> {
+pub(crate) fn str_char_at(s: &Arc<str>, idx: usize) -> Option<char> {
     if s.len() <= STR_SCAN_SMALL_MAX {
         if s.is_ascii() {
             return s.as_bytes().get(idx).map(|b| *b as char);
         }
         return s.chars().nth(idx);
     }
+    if let Some(hit) = with_scan_hit(s, |scan| scan_char_at(s, scan, idx)) {
+        return hit;
+    }
     match str_scan(s) {
-        Some(StrScan::Ascii) => s.as_bytes().get(idx).map(|b| *b as char),
-        Some(StrScan::Indexed { byte_at, .. }) => {
-            byte_at.get(idx).and_then(|b| s[*b..].chars().next())
-        }
+        Some(scan) => scan_char_at(s, &scan, idx),
         None => s.chars().nth(idx),
+    }
+}
+
+/// The char at `idx` through a string's scan.
+fn scan_char_at(s: &str, scan: &StrScan, idx: usize) -> Option<char> {
+    match scan {
+        StrScan::Ascii => s.as_bytes().get(idx).map(|b| *b as char),
+        StrScan::Indexed { byte_at, .. } => byte_at.get(idx).and_then(|b| s[*b..].chars().next()),
     }
 }
 
@@ -1669,6 +1688,13 @@ fn str_char_at(s: &Arc<str>, idx: usize) -> Option<char> {
 pub fn str_utf16_len(s: &Arc<str>) -> usize {
     if s.len() <= 256 {
         return s.encode_utf16().count();
+    }
+    let memo = with_scan_hit(s, |scan| match scan {
+        StrScan::Ascii => s.len(),
+        StrScan::Indexed { utf16_len, .. } => *utf16_len,
+    });
+    if let Some(n) = memo {
+        return n;
     }
     match str_scan(s) {
         Some(StrScan::Ascii) => s.len(),
@@ -3044,6 +3070,21 @@ pub(crate) const COLL_NATIVES: &[(&str, NativeFnPtr)] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn str_scan_global_cache_answers_memo_evictions() {
+        // More big strings than memo slots: the first falls out of
+        // the per-thread memo but stays in the global cache, which
+        // answers (and re-memoizes) it.
+        let strings: Vec<Arc<str>> = (0..LAST_SCAN_SLOTS + 2)
+            .map(|i| Arc::from(format!("{i}").repeat(100)))
+            .collect();
+        for s in &strings {
+            assert!(str_char_at(s, 10).is_some());
+        }
+        assert_eq!(str_char_at(&strings[0], 99), Some('0'));
+        assert_eq!(str_utf16_len(&strings[0]), 100);
+    }
 
     #[test]
     fn str_scan_memo_answers_repeats() {

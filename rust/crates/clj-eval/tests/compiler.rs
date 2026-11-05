@@ -814,7 +814,10 @@ fn broken_plan_diagnostic() {
         uncaught_chain(&mut eval, &fx.within("(load \"/my/rd\")")),
         rd_chain
     );
-    assert_eq!(run_last(&mut eval, "(loaded-libs)"), "#{my.broken}");
+    // The load evaluates `(ns my.rd)` before the later form fails
+    // to read (form by form, like `Compiler.load`), so it self-marks
+    // too.
+    assert_eq!(run_last(&mut eval, "(loaded-libs)"), "#{my.broken my.rd}");
 }
 
 /// Eval failures reuse the load's exact shape with no artifact

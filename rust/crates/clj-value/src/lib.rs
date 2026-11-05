@@ -38,6 +38,7 @@ mod seq;
 mod symbol;
 mod tower;
 mod transient;
+mod trie;
 mod value;
 mod volatile;
 
@@ -83,7 +84,7 @@ pub use seq::{
     CHUNK_SIZE, ConsValue, CycleValue, IterateValue, KeySeqValue, RangeNum, RangeValue,
     RealizedSeq, RepeatValue, Seq, SeqKind, SubVectorValue, ValSeqValue, seq_vec,
 };
-pub use symbol::Symbol;
+pub use symbol::{SymKey, Symbol};
 pub use tower::{
     BAD_CTX_FORMAT, BigDec, DIGITS_LT_0, MathContext, NON_TERMINATING, ROUNDING_NECESSARY,
     RoundingMode, bigint_parse, bigint_parse_radix,
@@ -92,8 +93,8 @@ pub use transient::{
     Transient, TransientError, TransientKind, TransientMap, TransientSet, TransientVector,
 };
 pub use value::{
-    FxBuildHasher, List, Map, Set, SortSpec, Value, Vector, bigdec_result, extension_supports_meta,
-    extension_with_meta, intern_literal_strings, intern_string, intern_string_value, map_entry,
-    new_map, new_set, reader_conditional, tagged_literal,
+    FxBuildHasher, List, Map, MemberSet, Set, SortSpec, Value, Vector, bigdec_result,
+    extension_supports_meta, extension_with_meta, intern_literal_strings, intern_string,
+    intern_string_value, map_entry, new_map, new_set, reader_conditional, tagged_literal,
 };
 pub use volatile::Volatile;

@@ -210,8 +210,28 @@ fn arity_error(name: &str, argc: usize) -> String {
     )
 }
 
+/// History-count pins need no other transaction in flight: a
+/// concurrent attempt's read point pins the oldest entry against
+/// trimming (`trim_history`'s sole-pinned rule), and the test
+/// harness runs this binary's tests on parallel threads. The pinning
+/// tests take the gate exclusively; every other test shares it.
+static TXN_GATE: std::sync::RwLock<()> = std::sync::RwLock::new(());
+
+fn shared_gate() -> std::sync::RwLockReadGuard<'static, ()> {
+    TXN_GATE
+        .read()
+        .expect("an STM test panicked holding the gate")
+}
+
+fn exclusive_gate() -> std::sync::RwLockWriteGuard<'static, ()> {
+    TXN_GATE
+        .write()
+        .expect("an STM test panicked holding the gate")
+}
+
 #[test]
 fn ref_ctor_opts() {
+    let _gate = shared_gate();
     let mut eval = boot();
     // r-odd-opts (shared `atom_options` shape).
     assert_eq!(
@@ -319,6 +339,7 @@ fn ref_ctor_opts() {
 
 #[test]
 fn invoke_and_predicates() {
+    let _gate = shared_gate();
     let mut eval = boot();
     // r-deref, r-deref-reader.
     assert_eq!(run_last(&mut eval, "(deref (ref 5))"), "5");
@@ -375,6 +396,7 @@ fn invoke_and_predicates() {
 
 #[test]
 fn atomic_commit() {
+    let _gate = shared_gate();
     let mut eval = boot_stm();
     // t-body-value, t-empty.
     assert_eq!(run_last(&mut eval, "(dosync 1 2)"), "2");
@@ -431,6 +453,7 @@ fn atomic_commit() {
 
 #[test]
 fn commute_compose() {
+    let _gate = shared_gate();
     let mut eval = boot();
     // t-alter-returns, t-refset-returns, t-commute-returns.
     assert_eq!(run_last(&mut eval, "(dosync (alter (ref 0) + 1 2))"), "3");
@@ -519,6 +542,7 @@ fn commute_compose() {
 
 #[test]
 fn nesting_join() {
+    let _gate = shared_gate();
     let mut eval = boot();
     // t-nested (inner joins: one commit).
     assert_eq!(
@@ -548,6 +572,7 @@ fn nesting_join() {
 
 #[test]
 fn validator_watch_timing() {
+    let _gate = shared_gate();
     let mut eval = boot_stm();
     // t-validator-calls (construction over the initial value, then
     // once at commit over the final — intermediates never).
@@ -750,6 +775,7 @@ fn validator_watch_timing() {
 /// re-runs execute before the lock phase).
 #[test]
 fn validator_may_read_ensured_ref() {
+    let _gate = shared_gate();
     let mut eval = boot_stm();
     run_last(&mut eval, "(def r1 (ref 1)) (def r2 (ref 2))");
     run_last(&mut eval, "(set-validator! r2 (fn [x] (deref r1) true))");
@@ -765,6 +791,7 @@ fn validator_may_read_ensured_ref() {
 /// watches fire before sends, in the same terminal step).
 #[test]
 fn watch_throw_drops_outbox() {
+    let _gate = shared_gate();
     let mut eval = boot_stm();
     assert_eq!(
         run_last(
@@ -777,6 +804,7 @@ fn watch_throw_drops_outbox() {
 
 #[test]
 fn send_deferral() {
+    let _gate = shared_gate();
     let mut eval = boot_stm();
     // t-send-defer (the action observes the committed value).
     assert_eq!(
@@ -857,6 +885,7 @@ fn send_deferral() {
 
 #[test]
 fn installed_field_send_defers_through_txn() {
+    let _gate = shared_gate();
     // Gap-96: an in-txn `send` captures the installed field at
     // send time (like the JVM's per-`Action` executor). The fixed
     // pools shut first, so only the fresh custom can run the
@@ -882,6 +911,7 @@ fn installed_field_send_defers_through_txn() {
 
 #[test]
 fn await_gates() {
+    let _gate = shared_gate();
     let mut eval = boot();
     // t-await-noargs-in, t-await-noargs-out (the gate fires even with
     // zero agents; outside, the zero-agent call is nil).
@@ -919,6 +949,7 @@ fn await_gates() {
 
 #[test]
 fn io_gate() {
+    let _gate = shared_gate();
     let mut eval = boot();
     // t-io-in, t-io-out, t-io-multi, t-io-empty.
     assert_eq!(
@@ -948,6 +979,7 @@ fn io_gate() {
 
 #[test]
 fn macro_shapes() {
+    let _gate = shared_gate();
     let mut eval = boot();
     // t-shape-dosync (byte-identical to the JVM expansion).
     assert_eq!(
@@ -987,6 +1019,7 @@ fn macro_shapes() {
 
 #[test]
 fn boundfn_conveyance() {
+    let _gate = shared_gate();
     let mut eval = boot();
     // t-bound-fn (same-thread calls observe the transaction).
     assert_eq!(
@@ -1008,6 +1041,7 @@ fn boundfn_conveyance() {
 
 #[test]
 fn outside_tx_gate() {
+    let _gate = exclusive_gate();
     let mut eval = boot();
     // e-alter-outside, e-refset-outside, e-commute-outside,
     // e-ensure-outside.
@@ -1153,6 +1187,7 @@ fn outside_tx_gate() {
 
 #[test]
 fn print_and_str() {
+    let _gate = shared_gate();
     let mut eval = boot();
     // Divergence (r-new, r-new-nil, r-new-coll): the JVM renders
     // `{:status :ready, :val …}`; the port prints every transient
@@ -1191,6 +1226,7 @@ fn print_and_str() {
 
 #[test]
 fn history_trim() {
+    let _gate = exclusive_gate();
     let mut eval = boot();
     // r-history-init, r-history-after, r-history-after2 (defaults
     // trim to zero).
@@ -1243,6 +1279,7 @@ fn history_trim() {
 
 #[test]
 fn history_accessors() {
+    let _gate = exclusive_gate();
     let mut eval = boot();
     // e-min-nonref, e-max-nonref, e-count-nonref, e-count-nil,
     // e-min-get-nil, e-max-get-nil.
@@ -1408,6 +1445,7 @@ fn history_accessors() {
 
 #[test]
 fn stm_portside_pins() {
+    let _gate = exclusive_gate();
     let mut eval = boot_stm();
     // A send to a failed agent throws EAGERLY in-txn (the body
     // aborts before later forms run — oracle `u-send-failed-pos`).
@@ -1761,6 +1799,7 @@ fn stm_portside_pins() {
 
 #[test]
 fn stm_retry_under_contention() {
+    let _gate = shared_gate();
     // A genuine conflict retry, deterministically: the reader opens
     // (fixing its start point), a writer commits twice past
     // `max-history 0` (force-trimming the reader's version), the
@@ -1778,6 +1817,7 @@ fn stm_retry_under_contention() {
 
 #[test]
 fn stm_revalidate_retry() {
+    let _gate = shared_gate();
     // A genuine revalidation retry, deterministically: the reader
     // records version 0, a writer commits past it (`min-history 1`
     // keeps the version resolvable, so the attempt reaches commit
@@ -1795,6 +1835,7 @@ fn stm_revalidate_retry() {
 
 #[test]
 fn seam_suites_green() {
+    let _gate = shared_gate();
     // Agent/future/atom smoke through the §1f seam: outside a
     // transaction every send path is byte-identical (these rows
     // mirror the `concurrency.rs` suite's core shapes).

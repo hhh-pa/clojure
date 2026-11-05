@@ -33,6 +33,7 @@ clj-aot = { path = "crates/clj-aot", optional = true }
 clj-eval = { path = "crates/clj-eval" }
 clj-repl = { path = "crates/clj-repl" }
 clj-value = { path = "crates/clj-value" }
+mimalloc = { version = "0.1.52", default-features = false }
 
 [features]
 default = ["aot"]
@@ -42,6 +43,12 @@ aot = ["clj-aot"]
 # so Windows builds never compile it.
 [target.'cfg(unix)'.dev-dependencies]
 rustix = { version = "1", features = ["pipe", "stdio"] }
+
+# Release builds ship the interpreter (#226): one codegen unit and
+# fat LTO let the hot value/eval paths inline across the crate seams.
+[profile.release]
+lto = "fat"
+codegen-units = 1
 
 # Deny the `unused` lint group workspace-wide, on every platform and
 # profile: clippy's `-D warnings` only runs on Linux CI, so without
