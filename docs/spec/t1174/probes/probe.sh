@@ -4,7 +4,7 @@
 # Requires: target/clojure-1.13.0-master-SNAPSHOT.jar
 #   (mvn -ntp -B -Plocal -Dmaven.test.skip=true package)
 set -u
-cd "$(dirname "$0")/../../.."
+cd "$(dirname "$0")/../../../.."
 OUT=${1:-/tmp/t1174-repro}
 mkdir -p "$OUT"
 CP="target/clojure-1.13.0-master-SNAPSHOT.jar:$HOME/.m2/repository/org/clojure/spec.alpha/0.6.249/spec.alpha-0.6.249.jar:$HOME/.m2/repository/org/clojure/core.specs.alpha/0.6.133-alpha10/core.specs.alpha-0.6.133-alpha10.jar:$HOME/.m2/repository/org/clojure/test.check/1.1.3/test.check-1.1.3.jar"
