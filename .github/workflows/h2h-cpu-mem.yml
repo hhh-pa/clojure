@@ -99,7 +99,7 @@ env:
   # merge, then back to master SHAs. The --pin legs below need
   # harness support, so old-SHA bisection of the instrumentation
   # legs fails loud on the unknown flag by design.
-  SNIPPETS_SHA_DEFAULT: 8466c12b56c059a2f93e264b24aced02b7f448cf
+  SNIPPETS_SHA_DEFAULT: 98612a1f52cd5fd097904e9ac6dcd9282cad2c20
   ALGORITHMS_SHA_DEFAULT: bc8e7223bfa4c7ba7a940171ecd5d9c8e478eafb
   # Pinned (not floating "21"): JDK micro versions move cpu numbers
   # and the sweep must stay comparable run to run. Bump deliberately.
