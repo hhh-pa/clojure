@@ -127,13 +127,17 @@ jobs:
             echo "manual dispatch: skipping the rust prerequisite wait"
             exit 0
           fi
-          sha="${{ github.sha }}"
-          echo "waiting for the rust workflow on $sha ..."
+          # Runs key on the PR head, NOT the merge commit
+          # (github.sha): polling the merge SHA matches nothing.
+          sha="${{ github.event.pull_request.head.sha }}"
+          echo "waiting for the rust workflow on PR head $sha ..."
           i=0
           while [ "$i" -lt 599 ]; do
             i=$((i + 1))
             run_id="$(gh run list --repo hhh-pa/clojure --workflow rust.yml --commit "$sha" --limit 1 --json databaseId --jq '.[0].databaseId // empty')"
-            if [ -n "$run_id" ]; then
+            if [ -z "$run_id" ]; then
+              echo "[$(date -u +%H:%M:%S)] iteration $i: no rust run for $sha yet"
+            else
               state="$(gh run view "$run_id" --repo hhh-pa/clojure --json status,conclusion --jq '"\(.status)/\(.conclusion // "")"')"
               case "$state" in
                 completed/success)
@@ -143,6 +147,9 @@ jobs:
                 completed/*)
                   echo "error: rust run $run_id concluded ${state#completed/}; failing fast" >&2
                   exit 1
+                  ;;
+                *)
+                  echo "[$(date -u +%H:%M:%S)] iteration $i: rust run $run_id $state"
                   ;;
               esac
             fi
