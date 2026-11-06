@@ -100,7 +100,7 @@ env:
   # they merge, then back to master SHAs. The --pin legs below
   # need harness support, so old-SHA bisection of the
   # instrumentation legs fails loud on the unknown flag by design.
-  SNIPPETS_SHA_DEFAULT: 98612a1f52cd5fd097904e9ac6dcd9282cad2c20
+  SNIPPETS_SHA_DEFAULT: d7e5e7bbcaace86ca3e90fde4db8865326204144
   PYTHON_SNIPPETS_SHA_DEFAULT: aedfe048c9c77dcfc8daddc0f43fcc1be411bd48
   # Pinned (not floating "3.11"): interpreter micro versions move
   # cpu numbers and the sweep must stay comparable run to run.
