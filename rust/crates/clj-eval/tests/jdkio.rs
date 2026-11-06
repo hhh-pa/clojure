@@ -909,18 +909,17 @@ fn xml_seq_rows() {
         "\"A tree seq on the xml elements as per xml/parse\""
     );
     assert_eq!(run_last(&mut eval, "(-> #'xml-seq meta :added)"), "\"1.0\"");
-    // `g-xml-arity*` (prefix-pinned: `core.clj` closures name
-    // the eval site — the S3/S4a convention).
+    // `g-xml-arity*`: `core.clj` defns name their var, like the JVM.
     for (src, count) in [
         ("(xml-seq)".to_owned(), 0),
         (format!("(xml-seq {tree} {tree})"), 2),
     ] {
-        let got = uncaught(&mut eval, &src);
-        assert!(
-            got.starts_with(&format!(
-                "clojure.lang.ArityException | Wrong number of args ({count}) passed to: user/"
-            )) && got.contains("/fn--"),
-            "for {src}: {got}"
+        assert_eq!(
+            uncaught(&mut eval, &src),
+            format!(
+                "clojure.lang.ArityException | Wrong number of args ({count}) passed to: clojure.core/xml-seq"
+            ),
+            "for {src}"
         );
     }
 }

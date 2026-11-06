@@ -49,6 +49,13 @@ impl CharStream {
         this
     }
 
+    /// Count lines from `line` instead of 1 (a source slice that
+    /// begins at that line of its file reports the file's lines).
+    /// Only before the first read.
+    pub fn set_line(&mut self, line: u32) {
+        self.line = line;
+    }
+
     /// Append `chunk` with the same normalization as [`Self::new`].
     /// A chunk-trailing `\r` stages instead of pushing (a later leading
     /// `\n` completes the split `\r\n`); empty chunks preserve the flag.

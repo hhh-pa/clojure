@@ -16,6 +16,7 @@
 //! memoizes through [`OnceLock`], so thunks run once even under
 //! contention, like `synchronized` `LazySeq`.
 
+use std::borrow::Cow;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::{List, Map, Set, Value, Vector};
@@ -68,6 +69,21 @@ pub enum Seq {
         thunk: Arc<dyn Fn() -> Option<Seq> + Send + Sync>,
         memo: Arc<OnceLock<Option<Seq>>>,
     },
+    /// A vector from index `pos` (`pos < v.len()`; `head` is the
+    /// item there): `seq`/`next` share the vector — O(1), no copy,
+    /// like the JVM's `PersistentVector$ChunkedSeq` — and chunks are
+    /// the vector's own 32-item leaves.
+    Vec { v: Vector, pos: usize, head: Value },
+    /// A string from byte offset `pos`, char `idx` of the walk
+    /// (`pos < s.len()`; `head` is the char there): O(1) steps over
+    /// the shared string, like the JVM's `StringSeq`. Chunks stay the
+    /// 32-char blocks of the walk from its first char.
+    Str {
+        s: Arc<str>,
+        pos: usize,
+        idx: usize,
+        head: Value,
+    },
 }
 
 impl std::fmt::Debug for Seq {
@@ -91,6 +107,16 @@ impl std::fmt::Debug for Seq {
                 .finish(),
             Seq::Cons { head, .. } => f.debug_tuple("Cons").field(head).finish(),
             Seq::Lazy { .. } => f.write_str("Lazy(..)"),
+            Seq::Vec { v, pos, .. } => f
+                .debug_struct("Vec")
+                .field("len", &v.len())
+                .field("pos", pos)
+                .finish(),
+            Seq::Str { s, pos, .. } => f
+                .debug_struct("Str")
+                .field("len", &s.len())
+                .field("pos", pos)
+                .finish(),
         }
     }
 }
@@ -169,6 +195,26 @@ impl Seq {
         }
     }
 
+    /// A vector's seq from index `pos` (`None` at or past the end).
+    #[must_use]
+    pub fn vector_from(v: Vector, pos: usize) -> Option<Self> {
+        let head = v.get(pos)?;
+        Some(Seq::Vec { v, pos, head })
+    }
+
+    /// A string's seq from byte offset `pos` (a char boundary), char
+    /// `idx` of the walk (`None` at or past the end).
+    #[must_use]
+    pub fn string_from(s: Arc<str>, pos: usize, idx: usize) -> Option<Self> {
+        let ch = s.get(pos..)?.chars().next()?;
+        Some(Seq::Str {
+            s,
+            pos,
+            idx,
+            head: Value::Char(ch),
+        })
+    }
+
     /// Seq over a list's items (sequential, like the JVM list seq).
     #[must_use]
     pub fn from_list(l: &List) -> Option<Self> {
@@ -213,7 +259,7 @@ impl Seq {
             Some(Seq::Eager { items, pos }) => *pos >= items.len(),
             Some(Seq::Chunked { .. }) => false,
             Some(Seq::ChunkCons { chunk, pos, tail }) => *pos >= chunk.len() && tail.is_empty(),
-            Some(Seq::Cons { .. }) => false,
+            Some(Seq::Cons { .. } | Seq::Vec { .. } | Seq::Str { .. }) => false,
             Some(l @ Seq::Lazy { .. }) => l.is_empty(),
         }
     }
@@ -225,7 +271,7 @@ impl Seq {
             Seq::Eager { items, pos } => items.get(*pos),
             Seq::Chunked { chunks, chunk, pos } => chunks.get(*chunk).and_then(|c| c.get(*pos)),
             Seq::ChunkCons { chunk, pos, tail } => chunk.get(*pos).or_else(|| tail.first()),
-            Seq::Cons { head, .. } => Some(head),
+            Seq::Cons { head, .. } | Seq::Vec { head, .. } | Seq::Str { head, .. } => Some(head),
             l @ Seq::Lazy { .. } => l.first(),
         }
     }
@@ -234,34 +280,11 @@ impl Seq {
     #[must_use]
     pub fn next(&self) -> Option<Seq> {
         match self.forced()? {
-            Seq::Eager { items, pos } => {
-                if pos + 1 < items.len() {
-                    Some(Seq::Eager {
-                        items: Arc::clone(items),
-                        pos: pos + 1,
-                    })
-                } else {
-                    None
-                }
-            }
-            Seq::Chunked { chunks, chunk, pos } => {
-                let len = chunks.get(*chunk).map_or(0, |c| c.len());
-                if pos + 1 < len {
-                    Some(Seq::Chunked {
-                        chunks: Arc::clone(chunks),
-                        chunk: *chunk,
-                        pos: pos + 1,
-                    })
-                } else if chunk + 1 < chunks.len() {
-                    Some(Seq::Chunked {
-                        chunks: Arc::clone(chunks),
-                        chunk: chunk + 1,
-                        pos: 0,
-                    })
-                } else {
-                    None
-                }
-            }
+            Seq::Eager { items, pos } => (pos + 1 < items.len()).then(|| Seq::Eager {
+                items: Arc::clone(items),
+                pos: pos + 1,
+            }),
+            Seq::Chunked { chunks, chunk, pos } => Seq::next_chunked(chunks, *chunk, *pos),
             Seq::ChunkCons { chunk, pos, tail } => {
                 if pos + 1 < chunk.len() {
                     Some(Seq::ChunkCons {
@@ -276,6 +299,66 @@ impl Seq {
             }
             Seq::Cons { tail, .. } => tail.clone().map(|t| *t),
             l @ Seq::Lazy { .. } => l.next(),
+            Seq::Vec { v, pos, .. } => Seq::vector_from(v.clone(), pos + 1),
+            Seq::Str { s, pos, idx, .. } => {
+                let step = s[*pos..].chars().next().map_or(1, char::len_utf8);
+                Seq::string_from(Arc::clone(s), pos + step, idx + 1)
+            }
+        }
+    }
+
+    /// `next` of a [`Seq::Chunked`] at `chunk`/`pos`.
+    fn next_chunked(chunks: &Arc<[Arc<[Value]>]>, chunk: usize, pos: usize) -> Option<Seq> {
+        let len = chunks.get(chunk).map_or(0, |c| c.len());
+        if pos + 1 < len {
+            Some(Seq::Chunked {
+                chunks: Arc::clone(chunks),
+                chunk,
+                pos: pos + 1,
+            })
+        } else if chunk + 1 < chunks.len() {
+            Some(Seq::Chunked {
+                chunks: Arc::clone(chunks),
+                chunk: chunk + 1,
+                pos: 0,
+            })
+        } else {
+            None
+        }
+    }
+
+    /// Step past the head in place (`false`, unchanged, when nothing
+    /// follows it): vector and string seqs bump their position over
+    /// the storage they keep; other shapes become their `next`.
+    fn step_in_place(&mut self) -> bool {
+        match self {
+            Seq::Vec { v, pos, head } => match v.get(*pos + 1) {
+                Some(x) => {
+                    *pos += 1;
+                    *head = x;
+                    true
+                }
+                None => false,
+            },
+            Seq::Str { s, pos, idx, head } => {
+                let step = s[*pos..].chars().next().map_or(1, char::len_utf8);
+                match s[*pos + step..].chars().next() {
+                    Some(c) => {
+                        *pos += step;
+                        *idx += 1;
+                        *head = Value::Char(c);
+                        true
+                    }
+                    None => false,
+                }
+            }
+            other => match other.next() {
+                Some(rest) if !rest.is_empty() => {
+                    *other = rest;
+                    true
+                }
+                _ => false,
+            },
         }
     }
 
@@ -285,11 +368,60 @@ impl Seq {
         self.next().unwrap_or_else(Self::empty)
     }
 
+    /// The remaining item count, read off the backing arrays without
+    /// cloning items (the JVM's counted seqs count in O(1), and
+    /// `empty?` counts counted seqs). Cons cells and lazy tails still
+    /// step, forcing like a [`first`](Self::first)/[`next`](Self::next)
+    /// walk, which this matches item for item.
+    #[must_use]
+    pub fn count(&self) -> usize {
+        let mut n = 0;
+        let mut cur = self.forced();
+        while let Some(s) = cur {
+            cur = match s {
+                Seq::Eager { items, pos } => {
+                    n += items.len().saturating_sub(*pos);
+                    None
+                }
+                Seq::Chunked { chunks, chunk, pos } => {
+                    if let Some(c) = chunks.get(*chunk).filter(|c| *pos < c.len()) {
+                        n += c.len() - pos;
+                        // A walk stops at an empty chunk (`first` is `None`).
+                        n += chunks[chunk + 1..]
+                            .iter()
+                            .take_while(|c| !c.is_empty())
+                            .map(|c| c.len())
+                            .sum::<usize>();
+                    }
+                    None
+                }
+                Seq::ChunkCons { chunk, pos, tail } => {
+                    n += chunk.len().saturating_sub(*pos);
+                    tail.forced()
+                }
+                Seq::Cons { tail, .. } => {
+                    n += 1;
+                    tail.as_deref().and_then(Seq::forced)
+                }
+                l @ Seq::Lazy { .. } => l.forced(),
+                Seq::Vec { v, pos, .. } => {
+                    n += v.len() - pos;
+                    None
+                }
+                Seq::Str { s, pos, .. } => {
+                    n += s[*pos..].chars().count();
+                    None
+                }
+            };
+        }
+        n
+    }
+
     /// The current chunk plus the seq after it (`None` unless this
     /// seq is chunked here). The rest is the empty seq past the last
     /// chunk.
     #[must_use]
-    pub fn chunk_next(&self) -> Option<(&[Value], Seq)> {
+    pub fn chunk_next(&self) -> Option<(Cow<'_, [Value]>, Seq)> {
         match self.forced()? {
             Seq::Chunked { chunks, chunk, pos } => {
                 let rest = if chunk + 1 < chunks.len() {
@@ -301,11 +433,11 @@ impl Seq {
                 } else {
                     Seq::empty()
                 };
-                Some((&chunks[*chunk][*pos..], rest))
+                Some((Cow::Borrowed(&chunks[*chunk][*pos..]), rest))
             }
             Seq::ChunkCons { chunk, pos, tail } => {
                 if *pos < chunk.len() {
-                    Some((&chunk[*pos..], (**tail).clone()))
+                    Some((Cow::Borrowed(&chunk[*pos..]), (**tail).clone()))
                 } else {
                     tail.chunk_next()
                 }
@@ -313,6 +445,25 @@ impl Seq {
             // A forced lazy is a nested lazy: force through (like
             // `first`/`next` — the JVM forces recursively).
             Seq::Lazy { .. } => self.forced()?.chunk_next(),
+            Seq::Vec { v, pos, .. } => {
+                let chunk = v.chunk_from(*pos);
+                let rest =
+                    Seq::vector_from(v.clone(), pos + chunk.len()).unwrap_or_else(Seq::empty);
+                Some((chunk, rest))
+            }
+            Seq::Str { s, pos, idx, .. } => {
+                // Up to the walk's next 32-char boundary.
+                let want = (idx / CHUNK_SIZE + 1) * CHUNK_SIZE - idx;
+                let mut chunk = Vec::with_capacity(want);
+                let mut end = *pos;
+                for ch in s[*pos..].chars().take(want) {
+                    chunk.push(Value::Char(ch));
+                    end += ch.len_utf8();
+                }
+                let n = chunk.len();
+                let rest = Seq::string_from(Arc::clone(s), end, idx + n).unwrap_or_else(Seq::empty);
+                Some((Cow::Owned(chunk), rest))
+            }
             _ => None,
         }
     }
@@ -372,7 +523,8 @@ impl SeqKind {
     #[must_use]
     pub fn of_shape(seq: &Seq) -> Self {
         match seq {
-            Seq::Chunked { .. } | Seq::ChunkCons { .. } => SeqKind::Chunked,
+            Seq::Chunked { .. } | Seq::ChunkCons { .. } | Seq::Vec { .. } => SeqKind::Chunked,
+            Seq::Str { .. } => SeqKind::Str,
             Seq::Cons { .. } => SeqKind::Cons,
             Seq::Lazy { .. } => SeqKind::Lazy,
             Seq::Eager { .. } => SeqKind::Array,
@@ -475,6 +627,21 @@ impl RealizedSeq {
         self.meta = meta;
         self
     }
+
+    /// Step past the first item in place, for `next`/`rest` of a seq
+    /// held once (no new seq value): `false`, changing nothing, when
+    /// nothing follows it. Metadata stays only on string seqs, like
+    /// a fresh tail (`StringSeq.next` keeps it, every other `next`
+    /// drops it).
+    pub fn advance(&mut self) -> bool {
+        if !self.seq.step_in_place() {
+            return false;
+        }
+        if self.kind != SeqKind::Str {
+            self.meta = None;
+        }
+        true
+    }
 }
 
 impl crate::ExtensionValue for RealizedSeq {
@@ -518,6 +685,10 @@ impl crate::ExtensionValue for RealizedSeq {
 
     fn as_any(&self) -> &dyn std::any::Any {
         self
+    }
+
+    fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
+        Some(self)
     }
 }
 
@@ -987,6 +1158,27 @@ impl RangeValue {
             meta: None,
         });
         Some((head, next))
+    }
+
+    /// [`stepped`](Self::stepped) in place: the head, with this range
+    /// advanced past it and its metadata dropped (`None` when done).
+    /// The flag is `false` on `Int`+`Int` overflow, which leaves the
+    /// range unadvanced (the walk ends there). Chunk fills step 32
+    /// heads per tail, so they skip `stepped`'s fresh tail per head.
+    pub fn step_in_place(&mut self) -> Option<(Value, bool)> {
+        if self.done() {
+            return None;
+        }
+        let head = self.cur.value();
+        match self.advance() {
+            Some(nxt) => {
+                self.cur = nxt;
+                self.count = self.count.map(|c| c - 1);
+                self.meta = None;
+                Some((head, true))
+            }
+            None => Some((head, false)),
+        }
     }
 
     /// Call `f` per item (pure walk; infinite ranges never return,
@@ -1525,6 +1717,54 @@ mod tests {
         h.finish()
     }
 
+    fn ints(r: std::ops::Range<i64>) -> Vec<Value> {
+        r.map(int).collect()
+    }
+
+    /// `count` must equal the `first`/`next` walk length (what it
+    /// replaced) on every shape, crafted cursor states included.
+    #[test]
+    fn count_matches_walk_on_every_shape() {
+        let walked = |s: &Seq| RealizedSeq::new(s.clone()).items().len();
+        let chunked = Seq::chunked(ints(0..70)).expect("chunked");
+        let mut cases = vec![
+            Seq::empty(),
+            Seq::eager(ints(0..5)).expect("eager"),
+            chunked.clone(),
+            Seq::chunk_cons(ints(0..3), Seq::eager(ints(3..5)).expect("tail")),
+            Seq::cons(int(0), Some(Seq::cons(int(1), None))),
+            Seq::cons(int(0), Some(Seq::empty())),
+            Seq::lazy(|| None),
+            Seq::lazy(|| Some(Seq::lazy(|| Seq::eager(ints(0..4))))),
+            // A spent cursor and an empty middle chunk end the walk.
+            Seq::Chunked {
+                chunks: Arc::from(vec![Arc::from(ints(0..2))]),
+                chunk: 0,
+                pos: 5,
+            },
+            Seq::Chunked {
+                chunks: Arc::from(vec![
+                    Arc::from(ints(0..2)),
+                    Arc::from(Vec::new()),
+                    Arc::from(ints(2..3)),
+                ]),
+                chunk: 0,
+                pos: 0,
+            },
+        ];
+        // Mid-walk cursors: inside and across chunk boundaries.
+        let mut cur = chunked;
+        for _ in 0..69 {
+            cur = cur.next().expect("70 items");
+            cases.push(cur.clone());
+        }
+        for s in &cases {
+            assert_eq!(s.count(), walked(s), "{s:?}");
+        }
+        assert_eq!(cases[2].count(), 70);
+        assert_eq!(cases[9].count(), 2);
+    }
+
     #[test]
     fn seq_debug_names_shapes() {
         assert_eq!(format!("{:?}", Seq::empty()), "Eager { len: 0, pos: 0 }");
@@ -1930,5 +2170,67 @@ mod tests {
         let other_val = ValSeqValue::new(int(1));
         assert!(!val.dyn_eq(&other_val));
         assert_eq!(hash_val(&g), hash_val(&g));
+    }
+
+    /// #226: O(1) vector and string seqs — their shapes, `Debug`,
+    /// counts, chunk boundaries (borrowed from generic storage, boxed
+    /// from packed), and the in-place step (`RealizedSeq::advance`)
+    /// over every shape, including the ends that leave a seq as is.
+    #[test]
+    fn vector_and_string_seqs_step_in_place() {
+        let generic = Vector::from_vec(vec![Value::Nil; 40]);
+        let packed = Vector::from_vec(ints(0..40));
+        assert!(packed.is_packed() && !generic.is_packed());
+        for v in [&generic, &packed] {
+            let s = Seq::vector_from(v.clone(), 0).expect("non-empty");
+            assert_eq!(SeqKind::of_shape(&s), SeqKind::Chunked);
+            assert_eq!(format!("{s:?}"), "Vec { len: 40, pos: 0 }");
+            assert_eq!(s.count(), 40);
+            let (chunk, rest) = s.chunk_next().expect("vector seqs chunk");
+            assert_eq!(chunk.len(), 32);
+            assert_eq!(rest.count(), 8);
+            let (tail, end) = rest.chunk_next().expect("the last chunk");
+            assert_eq!(tail.len(), 8);
+            assert!(end.is_empty());
+        }
+        assert!(Seq::vector_from(packed.clone(), 40).is_none());
+        assert!(packed.chunk_from(41).is_empty());
+        let s = Seq::string_from(Arc::from("aé"), 0, 0).expect("non-empty");
+        assert_eq!(SeqKind::of_shape(&s), SeqKind::Str);
+        assert_eq!(format!("{s:?}"), "Str { len: 3, pos: 0 }");
+        assert_eq!(s.count(), 2);
+        assert!(Seq::string_from(Arc::from("aé"), 2, 1).is_none());
+        // In place: vector and string seqs walk to their last item and
+        // stop there; metadata survives string seqs only.
+        let meta = crate::Map::from_kvs_last_wins(vec![(int(1), int(2))]);
+        let mut r = RealizedSeq::flagged(
+            Seq::string_from(Arc::from("xyz"), 0, 0).expect("chars"),
+            true,
+            true,
+            SeqKind::Str,
+        )
+        .with_meta(Some(meta.clone()));
+        assert!(r.advance() && r.advance());
+        assert!(!r.advance());
+        assert_eq!(r.seq().first(), Some(&Value::Char('z')));
+        assert!(r.meta().is_some());
+        let mut r = RealizedSeq::flagged(
+            Seq::vector_from(packed, 38).expect("items"),
+            true,
+            true,
+            SeqKind::Chunked,
+        )
+        .with_meta(Some(meta));
+        assert!(r.advance());
+        assert!(!r.advance());
+        assert_eq!(r.seq().first(), Some(&int(39)));
+        assert!(r.meta().is_none());
+        // Other shapes step to their `next`, and stop at the end.
+        let mut r = RealizedSeq::new(Seq::eager(ints(0..2)).expect("items"));
+        assert!(r.advance());
+        assert!(!r.advance());
+        assert_eq!(r.seq().first(), Some(&int(1)));
+        let mut cell = RealizedSeq::new(Seq::empty());
+        assert!(cell.as_any_mut().is_some());
     }
 }

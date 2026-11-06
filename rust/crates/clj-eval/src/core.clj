@@ -1193,22 +1193,45 @@
               :else
               (throw-illegal-arg! (str "Invalid " kind " spec: " (pr-str s))))))))
 
+(defn- type-class-name [name]
+  (str (namespace-munge *ns*) "." name))
+
+;; `build-positional-factory`: `->Name` with the JVM's doc and
+;; arglists, nested in `(let [] …)` like the JVM expansion (its fn
+;; names under the `eval` wrapper: `user/eval12/->Point--13`).
+(defn- positional-factory [name fields]
+  (let [arrow (symbol (str "->" name))
+        doc (str "Positional factory function for class " (type-class-name name) ".")]
+    (list 'let []
+      (list 'def (with-meta arrow {:arglists (list 'quote (list fields)) :doc doc})
+        ;; The captured descriptor binding is a gensym: the fn
+        ;; params ARE the field names, so a literal `t` would be
+        ;; shadowed by a field named `t` (#205 `Matrix [t n]`).
+        (let [t (gensym "t")]
+          (list 'let [t name]
+            (list 'fn arrow fields
+              (apply list 'clojure.core/__new* t fields))))))))
+
 (defmacro deftype [name & args]
   (let [{:keys [doc attr fields specs]} (parse-type-head "deftype" name args)
         {:keys [ifaces triples]} (parse-type-specs "deftype" specs)]
-    (finish-type-def name doc attr
-      (list 'clojure.core/__deftype*
-        (list 'str (list 'ns-name '*ns*))
-        (str name)
-        (list 'quote fields)
-        (emit-type-methods "deftype" triples fields)
-        (list 'quote (vec ifaces))))))
+    (list 'do
+      (finish-type-def name doc attr
+        (list 'clojure.core/__deftype*
+          (list 'str (list 'ns-name '*ns*))
+          (str name)
+          (list 'quote fields)
+          (emit-type-methods "deftype" triples fields)
+          (list 'quote (vec ifaces))))
+      (positional-factory name fields)
+      name)))
 
 (defmacro defrecord [name & args]
   (let [{:keys [doc attr fields specs]} (parse-type-head "defrecord" name args)
         {:keys [ifaces triples]} (parse-type-specs "defrecord" specs)
-        arrow (symbol (str "->" name))
-        map-arrow (symbol (str "map->" name))]
+        map-arrow (symbol (str "map->" name))
+        map-doc (str "Factory function for class " (type-class-name name)
+                     ", taking a map of keywords to field values.")]
     (list 'do
       (finish-type-def name doc attr
         (list 'clojure.core/__record*
@@ -1217,18 +1240,12 @@
           (list 'quote fields)
           (emit-type-methods "defrecord" triples fields)
           (list 'quote (vec ifaces))))
-      (list 'def arrow
-        ;; The captured descriptor binding is a gensym: the fn
-        ;; params ARE the field names, so a literal `t` would be
-        ;; shadowed by a field named `t` (#205 `Matrix [t n]`).
-        (let [t (gensym "t")]
-          (list 'let [t name]
-            (list 'fn arrow fields
-              (apply list 'clojure.core/__new* t fields)))))
-      (list 'def map-arrow
-        (list 'let ['t name]
-          (list 'fn map-arrow '[m]
-            (list 'clojure.core/__record_map* 't 'm))))
+      (positional-factory name fields)
+      (list 'let []
+        (list 'def (with-meta map-arrow {:arglists (list 'quote '([m])) :doc map-doc})
+          (list 'let ['t name]
+            (list 'fn map-arrow '[m]
+              (list 'clojure.core/__record_map* 't 'm)))))
       name)))
 
 (defmacro reify [& specs]

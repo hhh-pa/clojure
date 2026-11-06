@@ -17,13 +17,13 @@ use std::sync::Arc;
 
 use clj_reader::{ReaderError, Span};
 use clj_value::{
-    Keyword, List, Map, PrintOpts, Ref, Set, SortSpec, Symbol, ThrowClass, Throwable, Value, Var,
-    Vector, new_map, new_set, pr_to_string, seq_vec,
+    Keyword, List, Map, Ref, Set, SortSpec, Symbol, ThrowClass, Throwable, Value, Var, Vector,
+    new_map, new_set, seq_vec,
 };
 
 use crate::concurrency::DEREF_NIL;
 use crate::core::cce_err;
-use crate::env::{Env, Namespace, SharedRegistry};
+use crate::env::{Env, Namespace, ReferTable, SharedRegistry};
 use crate::error::{NativeError, Signal, jvm_class_of, site_of};
 use crate::eval::{Evaluator, SourceError};
 use crate::expr::{Expr, NsClause};
@@ -49,7 +49,7 @@ const NIL_NAME_NPE: &str = "Cannot invoke \"clojure.lang.Named.getName()\" becau
 /// The embedded `clojure.core` composites: `boot` loads this with
 /// the current namespace already `clojure.core` (so the file carries
 /// intentionally no `ns` form), then refers the publics into `user`.
-const CORE_CLJ: &str = include_str!("core.clj");
+pub(crate) static CORE_CLJ: &str = include_str!("core.clj");
 
 /// The embedded `clojure.spec.alpha` slice-1 source (gap-122):
 /// `resolve_source` serves this for `clojure/spec/alpha` (unlike
@@ -80,7 +80,7 @@ const JAVA_SHELL_CLJ: &str = include_str!("java_shell.clj");
 /// `clojure/string` + `clojure/set` through the ordinary
 /// `require` path (the `spec_alpha.clj` shape), so scripts work
 /// with zero install steps.
-const STDLIB_STRING_CLJ: &str = include_str!("stdlib/clojure/string.clj");
+pub(crate) static STDLIB_STRING_CLJ: &str = include_str!("stdlib/clojure/string.clj");
 const STDLIB_SET_CLJ: &str = include_str!("stdlib/clojure/set.clj");
 // W1 (verbatim+pure) — do not merge by hand, integrator resolves.
 const STDLIB_W1_TEMPLATE_CLJ: &str = include_str!("stdlib/clojure/template.clj");
@@ -174,7 +174,7 @@ pub(crate) fn cast_err(v: &Value, to: &str) -> NativeError {
 pub(crate) fn str_of(v: &Value) -> String {
     match v {
         Value::Nil => String::new(),
-        _ => pr_to_string(v, &PrintOpts::print()),
+        _ => clj_value::str_of_value(v),
     }
 }
 
@@ -213,7 +213,7 @@ fn the_ns_name(reg: &SharedRegistry, v: &Value) -> Result<String, NativeError> {
 }
 
 /// A namespace handle value for a live-or-removed namespace.
-fn ns_value(name: &str, id: u64) -> Value {
+pub(crate) fn ns_value(name: &str, id: u64) -> Value {
     Value::Extension(Arc::new(NsHandle {
         name: Arc::from(name),
         id,
@@ -346,14 +346,14 @@ pub(crate) fn signal_to_native(s: Signal) -> NativeError {
 fn native_create_ns(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/create-ns", args, &[1])?;
     let key = sym_str(strict_sym(&args[0])?);
-    let id = eval.registry.ensure_ns_id(&key);
+    let id = eval.registry.ensure_ns(&key);
     Ok(ns_value(&key, id))
 }
 
 fn native_in_ns(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/in-ns", args, &[1])?;
     let key = sym_str(strict_sym(&args[0])?);
-    let id = eval.registry.ensure_ns_id(&key);
+    let id = eval.registry.ensure_ns(&key);
     eval.registry.set_current(&key);
     // `RT.inNamespace` is a thread-local `set`: the top frame when
     // bound (boot pushes a base frame, so the root never moves),
@@ -543,9 +543,8 @@ fn native_alias(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErr
     // (handles); tombstones persist, so this lookup cannot miss.
     let target_id = eval
         .registry
-        .ns_live_or_removed(&target)
-        .expect("alias target is live or tombstoned")
-        .id();
+        .ns_live_or_removed_id(&target)
+        .expect("alias target is live or tombstoned");
     let alias_sym = match &args[0] {
         Value::Nil => return Err(npe("Expecting Symbol + Namespace")),
         Value::Symbol(s) => s,
@@ -611,17 +610,6 @@ fn check_sequential(v: &Value) -> Result<Vec<Value>, NativeError> {
 /// source's publics into the current namespace, subject to filters.
 /// A namespace's public vars, sorted by name: qualified symbol
 /// plus the id pinned for each refer.
-fn refer_publics(eval: &Evaluator, home: &Namespace) -> Vec<(Symbol, u64)> {
-    let mut publics = Vec::new();
-    for (s, i) in home.interns() {
-        if is_public(&eval.registry, i) {
-            publics.push((s.clone(), i));
-        }
-    }
-    publics.sort_by(|a, b| a.0.name().cmp(b.0.name()));
-    publics
-}
-
 /// The `refer` work list: `(or (:refer fs) (:only fs) (keys
 /// nspublics))`, with nils falling through and `:all` meaning every
 /// public (core.clj `refer`).
@@ -656,7 +644,7 @@ fn refer_exclude(pairs: &[(&Value, &Value)]) -> Result<Vec<Value>, NativeError> 
 fn refer_target(
     eval: &Evaluator,
     lib_key: &str,
-    publics: &[(Symbol, u64)],
+    publics: &ReferTable,
     item: &Value,
 ) -> Result<(Symbol, Symbol, u64), NativeError> {
     let item_sym = match item {
@@ -668,13 +656,12 @@ fn refer_target(
             ));
         }
     };
-    match publics.iter().find(|(s, _)| s.name() == item_sym.name()) {
-        Some((s, i)) => Ok(((*item_sym).clone(), s.clone(), *i)),
+    match publics.get(item_sym.name()) {
+        Some((target, id)) => Ok(((*item_sym).clone(), target.clone(), *id)),
         None => {
             let interned = eval
                 .registry
-                .get(lib_key)
-                .and_then(|home| home.lookup(&Symbol::new(Some(lib_key), item_sym.name())))
+                .lookup_in_ns(lib_key, &Symbol::new(Some(lib_key), item_sym.name()))
                 .is_some();
             let why = if interned {
                 "is not public"
@@ -722,39 +709,121 @@ fn refer_renamed(
 
 fn refer_into(eval: &mut Evaluator, lib: &Value, filters: &[Value]) -> Result<Value, NativeError> {
     let lib_key = sym_str(strict_sym(lib)?);
-    let Some(home) = eval.registry.get(&lib_key) else {
+    let Some(publics) = eval.registry.publics_table(&lib_key) else {
         return Err(ex(format!("No namespace: {lib_key}")));
     };
     let pairs = opt_pairs(filters)?;
-    let publics = refer_publics(eval, &home);
-    let public_names: Vec<Value> = publics
+    match refer_all_exclude(&pairs)? {
+        Some(exclude) => {
+            refer_all_into_current(eval, &publics, &exclude);
+            Ok(Value::Nil)
+        }
+        None => refer_filtered(eval, &lib_key, &publics.table, &pairs),
+    }
+}
+
+/// Every public minus `:exclude` (boot's `user`, each `ns` form's
+/// `refer-clojure`): the lib's shared table.
+fn refer_all_into_current(
+    eval: &mut Evaluator,
+    publics: &crate::env::PublicsTable,
+    exclude: &[Value],
+) {
+    let exclude: Vec<&str> = exclude
         .iter()
-        .map(|(s, _)| Value::Symbol(Symbol::new(None, s.name())))
+        .filter_map(|e| match e {
+            Value::Symbol(x) if x.namespace().is_none() => Some(x.name()),
+            _ => None,
+        })
         .collect();
-    let to_do = refer_todo(public_names, &pairs)?;
-    let exclude = refer_exclude(&pairs)?;
-    let rename = match opt_get(&pairs, "rename") {
+    let cur = eval.current_ns_name();
+    eval.registry.ensure_ns(&cur);
+    eval.registry
+        .with_ns_mut(&cur, |home| home.refer_all(publics, &exclude));
+}
+
+/// `refer` with `:only`/`:refer`/`:rename`: item by item, in name
+/// order (the per-item order — `:rename` fn calls, the stop at a
+/// failing item — stays deterministic).
+fn refer_filtered(
+    eval: &mut Evaluator,
+    lib_key: &str,
+    publics: &ReferTable,
+    pairs: &[(&Value, &Value)],
+) -> Result<Value, NativeError> {
+    let mut names: Vec<&Arc<str>> = publics.keys().collect();
+    names.sort_unstable();
+    let public_names: Vec<Value> = names
+        .into_iter()
+        .map(|n| Value::Symbol(Symbol::new(None, n)))
+        .collect();
+    let to_do = refer_todo(public_names, pairs)?;
+    let exclude = refer_exclude(pairs)?;
+    let rename = match opt_get(pairs, "rename") {
         None | Some(Value::Nil) | Some(Value::Bool(false)) => None,
         Some(v) => Some(v),
     };
-    for item in &to_do {
-        if exclude.contains(item) {
-            continue;
-        }
-        let (item_sym, target_q, var_id) = refer_target(eval, &lib_key, &publics, item)?;
-        let renamed = refer_renamed(eval, rename, &item_sym, item)?;
-        // Interns win over refers (the JVM's REJECTED warning waits
-        // for `*err*` in S5D).
-        let cur = eval.current_ns_name();
-        eval.registry.ensure_ns(&cur);
-        let q = Symbol::new(Some(cur.as_str()), renamed.name());
-        eval.registry.with_ns_mut(&cur, |home| {
-            if home.lookup(&q).is_none() {
-                home.add_refer(renamed.name(), target_q, var_id);
-            }
+    // A `:rename` fn runs user code per item, which may observe the
+    // refers installed so far; otherwise one batch installs them
+    // (`user` refers every `clojure.core` public at boot). Items
+    // before a failing one stay installed either way.
+    let per_item = rename.is_some_and(|r| !matches!(r, Value::Map(_)));
+    let mut pending = Vec::new();
+    let mut failure = None;
+    for item in to_do.iter().filter(|item| !exclude.contains(item)) {
+        let step = refer_target(eval, lib_key, publics, item).and_then(|(item_sym, target, id)| {
+            Ok((refer_renamed(eval, rename, &item_sym, item)?, target, id))
         });
+        match step {
+            Ok(refer) => pending.push(refer),
+            Err(e) => {
+                failure = Some(e);
+                break;
+            }
+        }
+        if per_item {
+            install_refers(eval, &mut pending);
+        }
     }
-    Ok(Value::Nil)
+    install_refers(eval, &mut pending);
+    failure.map_or(Ok(Value::Nil), Err)
+}
+
+/// Install pending `(name, target, var id)` refers into the current
+/// namespace (only the first symbol's name is read). Interns win
+/// over refers (the JVM's REJECTED warning waits for `*err*` in
+/// S5D); a namespace without interns skips the check.
+fn install_refers(eval: &mut Evaluator, pending: &mut Vec<(Symbol, Symbol, u64)>) {
+    if pending.is_empty() {
+        return;
+    }
+    let cur = eval.current_ns_name();
+    eval.registry.ensure_ns(&cur);
+    eval.registry.with_ns_mut(&cur, |home| {
+        let check = home.interns().next().is_some();
+        for (renamed, target, id) in pending.drain(..) {
+            if check
+                && home
+                    .lookup(&Symbol::new(Some(home.name()), renamed.name()))
+                    .is_some()
+            {
+                continue;
+            }
+            home.add_refer(renamed.name(), target, id);
+        }
+    });
+}
+
+/// `refer`'s options when they select every public (no `:refer`,
+/// `:only`, or `:rename`): the `:exclude` list, else `None`.
+fn refer_all_exclude(pairs: &[(&Value, &Value)]) -> Result<Option<Vec<Value>>, NativeError> {
+    let unset = |k| opt_get(pairs, k).is_none_or(|v| matches!(v, Value::Nil));
+    let no_rename =
+        opt_get(pairs, "rename").is_none_or(|v| matches!(v, Value::Nil | Value::Bool(false)));
+    if unset("refer") && unset("only") && no_rename {
+        return refer_exclude(pairs).map(Some);
+    }
+    Ok(None)
 }
 
 fn native_refer(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
@@ -811,6 +880,10 @@ fn native_intern(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeEr
     let q = Symbol::new(Some(ns_name.as_str()), name.name());
     let pinned = as_ns(&args[0]).map(|h| h.id);
     let (id, home) = intern_routed(eval, &ns_name, pinned, &q)?;
+    // A lazy `core.clj` var forces first (a later force would undo
+    // this intern's root and meta).
+    eval.force_lazy(id);
+    eval.registry.take_meta_lazy(id);
     // The var adopts the name symbol's meta, if any (core.clj
     // `intern`); 3-arity resets the root on the same var. The
     // `:ns`/`:name` keys are always (re)stamped (JVM
@@ -1177,7 +1250,7 @@ pub(crate) fn set_arglists_multi(eval: &mut Evaluator, name: &str, arities: &[&[
 /// boot installs every var the loader touches).
 pub(crate) fn deref_core(eval: &Evaluator, name: &str) -> Value {
     match core_var(eval, name) {
-        Some(id) => eval.deref_var(id, &Symbol::new(Some("clojure.core"), name)),
+        Some(id) => eval.deref_var_unforced(id, &Symbol::new(Some("clojure.core"), name)),
         None => Value::Nil,
     }
 }
@@ -1579,6 +1652,19 @@ fn run_loaded(
     text: &str,
     isolate_ns: bool,
 ) -> Result<Vec<Value>, SourceError> {
+    in_load_frame(eval, file_star, isolate_ns, |eval| {
+        eval.load_source(spans, text)
+    })
+}
+
+/// [`run_loaded`]'s frame around any load body (the lazy library
+/// load shares it).
+fn in_load_frame<R>(
+    eval: &mut Evaluator,
+    file_star: Value,
+    isolate_ns: bool,
+    body: impl FnOnce(&mut Evaluator) -> R,
+) -> R {
     let cur = eval.registry.current().to_owned();
     let depth = eval.bindings_depth();
     let source_path = source_path_value(&file_star);
@@ -1603,10 +1689,39 @@ fn run_loaded(
     if let Some(id) = core_var(eval, "*read-eval*") {
         eval.push_binding(core_var_handle(id, "*read-eval*"), Value::Bool(true));
     }
-    let out = eval.load_source(spans, text);
+    let out = body(eval);
     eval.registry.set_current(&cur);
     eval.pop_bindings(depth);
     out
+}
+
+/// Embedded libraries that load lazily (see `core_lazy::load_lazy`):
+/// every `run` requires `clojure.string`, and its defs are plain.
+const LAZY_LIBS: &[&str] = &["clojure/string"];
+
+/// Load an allow-listed embedded library lazily (`None` for any
+/// other root): its prefix and non-def forms run in the ordinary
+/// load frame, its defs defer.
+fn load_lazy_lib(
+    eval: &mut Evaluator,
+    root: &str,
+    file_star: &str,
+) -> Option<Result<Vec<Value>, SourceError>> {
+    if !LAZY_LIBS.contains(&root) {
+        return None;
+    }
+    let &(_, _, text) = EMBEDDED_SOURCES.iter().find(|(r, _, _)| *r == root)?;
+    let file = Value::Str(Arc::from(file_star));
+    Some(in_load_frame(eval, file, true, |eval| {
+        let prev = eval.swap_source(Arc::from(file_star));
+        let lazy = crate::core_lazy::load_lazy(eval, file_star, text);
+        eval.swap_source(prev);
+        match lazy {
+            Ok(true) => Ok(Vec::new()),
+            Ok(false) => eval.load_source(file_star, text),
+            Err(e) => Err(e),
+        }
+    }))
 }
 
 /// The `*source-path*` value for a load (S18): file loads bind the
@@ -1699,7 +1814,7 @@ pub(crate) fn load_one(
         eval,
         std::slice::from_ref(&Value::Str(Arc::from(root.as_str()))),
     )?;
-    if need_ns && eval.registry.get(&sym_str(lib)).is_none() {
+    if need_ns && eval.registry.ns_id(&sym_str(lib)).is_none() {
         return Err(ex(format!(
             "namespace '{}' not found after loading '{}'",
             sym_str(lib),
@@ -1827,7 +1942,7 @@ fn load_lib_phase(
             }
         }
         None => {
-            if opts.need_ns && eval.registry.get(&sym_str(joined_sym)).is_none() {
+            if opts.need_ns && eval.registry.ns_id(&sym_str(joined_sym)).is_none() {
                 Err(ex(format!("namespace '{}' not found", sym_str(joined_sym))))
             } else {
                 Ok(())
@@ -1889,7 +2004,7 @@ fn load_lib(
     let opts = lib_opts(&pairs);
     let loaded = libs_set(eval)?.contains(&joined);
     let joined_sym = strict_sym(&joined)?.clone();
-    let undefined_on_entry = eval.registry.get(&sym_str(&joined_sym)).is_none();
+    let undefined_on_entry = eval.registry.ns_id(&sym_str(&joined_sym)).is_none();
     let load = select_load(&opts, loaded);
     load_lib_phase(eval, &joined_sym, &opts, load, undefined_on_entry)?;
     load_lib_finish(eval, &joined_sym, &pairs, &opts)
@@ -2259,13 +2374,16 @@ fn load_one_path(eval: &mut Evaluator, full: &str, pending: &List) -> Result<(),
         core_var_handle(id, "*pending-paths*"),
         Value::List(pending.clone().push_front(Value::Str(Arc::from(full)))),
     );
-    let out = run_loaded(
-        eval,
-        Value::Str(Arc::from(file_star.as_str())),
-        &file_star,
-        &text,
-        true,
-    );
+    let out = match load_lazy_lib(eval, &root, &file_star) {
+        Some(out) => out,
+        None => run_loaded(
+            eval,
+            Value::Str(Arc::from(file_star.as_str())),
+            &file_star,
+            &text,
+            true,
+        ),
+    };
     eval.pop_bindings(pending_depth);
     match out {
         Ok(_) => {
@@ -2389,17 +2507,15 @@ fn load_reader_arg(args: &[Value]) -> Result<&crate::reader::StreamReader, Nativ
     }
 }
 
-/// `load-reader`: read every form from a reader and evaluate
-/// them, returning the last value (nil when empty — S7; probes
-/// `l-*`). `*file*` is nil, `*ns*` is isolated, `*read-eval*` is
-/// forced true (visibly), and `*pending-paths*` is untouched.
+/// `load-reader`: read and evaluate every form from a reader,
+/// returning the last value (nil when empty — S7; probes `l-*`).
+/// `*file*` is nil, `*ns*` is isolated, `*read-eval*` is forced true
+/// (visibly), and `*pending-paths*` is untouched.
 fn native_load_reader(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     let reader = load_reader_arg(args)?;
     crate::reader::check_reader_open(reader)?;
     // `Compiler.load` consumes leading whitespace before its entry
-    // checks, so entry failures blame the post-skip position; the
-    // parser stays out of its lock for the whole read phase (the
-    // hook runs user code, which may read the same reader again).
+    // checks, so entry failures blame the post-skip position.
     let mut opts = clj_reader::ReaderOpts {
         read_cond: clj_reader::ReadCond::Allow,
         ..clj_reader::ReaderOpts::default()
@@ -2407,58 +2523,74 @@ fn native_load_reader(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nat
     let (mut parser, _) = crate::reader::take_parser(reader, &opts);
     parser.consume_whitespaces();
     let (line, col) = (parser.line(), parser.col());
+    crate::reader::restore_parser(reader, parser);
     let seed = match crate::reader::seed_load_gates(eval) {
         Ok(seed) => seed,
         Err(cce) => {
             let wrap =
                 crate::reader::executing_wrap(line, col, &cce, eval.next_id(), eval.next_id());
-            crate::reader::restore_parser(reader, parser);
             return Err(source_to_native(eval, "", wrap));
         }
     };
-    crate::reader::sync_reader_ns(eval, &mut opts);
     opts.read_eval = seed.read_eval;
     opts.suppress_read = seed.suppress_read;
     opts.resolver_bound = seed.resolver_bound;
-    parser.set_opts(&opts);
-    let mut forms = Vec::new();
-    loop {
-        // Per-form S6 consult (B1 — mirrors `read_forms_loop`):
-        // snapshot, read, drain, resolve. Data-reader failures
-        // surface like `load`'s (raw uncaught throwables, not
-        // `CompilerException` wraps).
-        let (outcome, suppressed) = match load_reader_step(eval, &mut opts, &mut parser) {
-            Ok(step) => step,
-            Err(e) => {
-                crate::reader::restore_parser(reader, parser);
-                let thrown = eval.throwable(e);
-                return Err(source_to_native(eval, "", SourceError::Uncaught(thrown)));
-            }
-        };
-        match outcome {
-            Ok(Some(form)) => match crate::core::resolve_data_readers(eval, form, suppressed) {
-                Ok(form) => forms.push(form),
-                Err(e) => {
-                    crate::reader::restore_parser(reader, parser);
-                    let thrown = eval.throwable(e);
-                    return Err(source_to_native(eval, "", SourceError::Uncaught(thrown)));
-                }
-            },
-            Ok(None) => break,
-            Err(e) => {
-                crate::reader::restore_parser(reader, parser);
-                return Err(source_to_native(eval, "", SourceError::Reader(e)));
-            }
-        }
-    }
-    crate::reader::restore_parser(reader, parser);
-    run_loaded_values(eval, forms)
+    let frame = push_load_frame(eval);
+    let out = load_reader_forms(eval, reader, &mut opts);
+    pop_load_frame(eval, frame);
+    out.map_err(|e| source_to_native(eval, "", e))
 }
 
-/// Evaluate loaded forms under the `load-reader` frame (`*file*`
-/// nil, `*ns*` isolated, `*read-eval*` forced true) and return the
-/// last value (nil when empty).
-fn run_loaded_values(eval: &mut Evaluator, forms: Vec<Value>) -> Result<Value, NativeError> {
+/// Read and evaluate one form at a time, like `Compiler.load`: each
+/// form reads after the previous one evaluates (a later read error
+/// leaves the earlier defs standing — oracle `l-err-read-defined`).
+fn load_reader_forms(
+    eval: &mut Evaluator,
+    reader: &crate::reader::StreamReader,
+    opts: &mut clj_reader::ReaderOpts,
+) -> Result<Value, SourceError> {
+    let mut out = Value::Nil;
+    while let Some(form) = load_reader_next(eval, reader, opts)? {
+        out = eval.eval_top_form(&form)?;
+    }
+    Ok(out)
+}
+
+/// One `load-reader` read: the namespace view re-synced, the parser
+/// out of its lock for the read (the hook runs user code, which may
+/// read the same reader again), the per-form S6 consult (B1 —
+/// snapshot, read, drain, resolve). Data-reader failures surface
+/// like `load`'s (raw uncaught throwables, not `CompilerException`
+/// wraps).
+fn load_reader_next(
+    eval: &mut Evaluator,
+    reader: &crate::reader::StreamReader,
+    opts: &mut clj_reader::ReaderOpts,
+) -> Result<Option<Value>, SourceError> {
+    crate::reader::sync_reader_ns(eval, opts);
+    let (mut parser, _) = crate::reader::take_parser(reader, opts);
+    let read = match load_reader_step(eval, opts, &mut parser) {
+        Ok((Ok(Some(form)), suppressed)) => {
+            // `Compiler.load` skips the whitespace after a form before
+            // evaluating it (a `read-line` there starts past it).
+            parser.consume_whitespaces();
+            crate::core::resolve_data_readers(eval, form, suppressed).map(Some)
+        }
+        Ok((Ok(None), _)) => Ok(None),
+        Ok((Err(e), _)) => {
+            crate::reader::restore_parser(reader, parser);
+            return Err(SourceError::Reader(e));
+        }
+        Err(e) => Err(e),
+    };
+    crate::reader::restore_parser(reader, parser);
+    read.map_err(|e| SourceError::Uncaught(eval.throwable(e)))
+}
+
+/// The `load-reader` evaluation frame (`*file*` nil, `*ns*`
+/// isolated, `*read-eval*` forced true): the namespace and binding
+/// depth [`pop_load_frame`] restores.
+fn push_load_frame(eval: &mut Evaluator) -> (String, usize) {
     let cur = eval.registry.current().to_owned();
     let depth = eval.bindings_depth();
     if let Some(id) = core_var(eval, "*file*") {
@@ -2481,20 +2613,12 @@ fn run_loaded_values(eval: &mut Evaluator, forms: Vec<Value>) -> Result<Value, N
     if let Some(id) = core_var(eval, "*read-eval*") {
         eval.push_binding(core_var_handle(id, "*read-eval*"), Value::Bool(true));
     }
-    let mut out = Value::Nil;
-    for form in &forms {
-        match eval.eval_top_form(form) {
-            Ok(v) => out = v,
-            Err(e) => {
-                eval.registry.set_current(&cur);
-                eval.pop_bindings(depth);
-                return Err(source_to_native(eval, "", e));
-            }
-        }
-    }
+    (cur, depth)
+}
+
+fn pop_load_frame(eval: &mut Evaluator, (cur, depth): (String, usize)) {
     eval.registry.set_current(&cur);
     eval.pop_bindings(depth);
-    Ok(out)
 }
 
 fn native_loaded_libs(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
@@ -2524,6 +2648,7 @@ pub(crate) type OwnedNativeFnPtr =
 /// literally with `owned: None`).
 const OWNED_ENTRIES: &[(&str, OwnedNativeFnPtr)] = &[
     ("assoc", crate::coll::native_assoc_owned),
+    ("assoc-in", crate::coll::native_assoc_in_owned),
     ("butlast", crate::seqs::native_butlast_owned),
     ("conj", crate::coll::native_conj_owned),
     ("count", crate::coll::native_count_owned),
@@ -2550,6 +2675,8 @@ const OWNED_ENTRIES: &[(&str, OwnedNativeFnPtr)] = &[
     ("str", crate::core::native_str_owned),
     ("take-last", crate::seqs::native_take_last_owned),
     ("transduce", crate::xform::native_transduce_owned),
+    ("update", crate::coll::native_update_owned),
+    ("update-in", crate::coll::native_update_in_owned),
     ("vec", crate::coll::native_vec_owned),
 ];
 
@@ -2748,15 +2875,6 @@ fn def_var(eval: &mut Evaluator, name: &str, root: Value, dynamic: bool, private
     });
 }
 
-/// Evaluate one boot form: the embedded boot sequence is fixed, so
-/// any failure is a port bug (pinned by `core_loads`), never user
-/// input.
-fn boot_eval(eval: &mut Evaluator, src: &str) {
-    if let Err(e) = eval.eval_source(src) {
-        unreachable!("boot form failed ({src}): {e:?}");
-    }
-}
-
 /// Boot a fresh evaluator: `clojure.core` plus `user` (current),
 /// the §N natives and vars installed, every public install referred
 /// into `user` (JVM boot refers `clojure.core`), a permanent `*ns*`
@@ -2768,7 +2886,7 @@ fn boot_eval(eval: &mut Evaluator, src: &str) {
 pub fn boot() -> Evaluator {
     let mut eval = Evaluator::new_bare("user");
     eval.registry.ensure_ns("clojure.core");
-    let user_ns = eval.registry.ensure_ns("user").id();
+    let user_ns = eval.registry.ensure_ns("user");
     eval.registry.set_current("user");
     boot_install_natives(&mut eval);
     boot_install_builtin_macros(&mut eval);
@@ -2777,26 +2895,38 @@ pub fn boot() -> Evaluator {
     boot_core_vars(&mut eval, user_handle.clone());
     crate::printsys::boot_print_system(&mut eval);
     crate::reader::boot_read_arglists(&mut eval);
-    boot_refer_user(&mut eval);
     if let Some(id) = core_var(&eval, "*ns*") {
         eval.push_binding(core_var_handle(id, "*ns*"), user_handle);
     }
     // Embedded `core.clj` composites (their privates resolve in
     // `clojure.core`), then `user` refers the publics — the file
-    // carries no `ns` form by design.
-    boot_eval(&mut eval, "(in-ns 'clojure.core)");
-    boot_eval(&mut eval, CORE_CLJ);
-    boot_eval(&mut eval, "(in-ns 'user)");
-    boot_eval(&mut eval, "(refer 'clojure.core)");
+    // carries no `ns` form by design. Its defs register lazily: the
+    // first resolution of each var evaluates its form (#226). The
+    // namespace switches and the refer run directly (evaluating
+    // `(in-ns …)`/`(refer …)` needed `user` to refer them first).
+    boot_in_ns(&mut eval, "clojure.core");
+    crate::core_lazy::boot_lazy(&mut eval, CORE_CLJ);
+    boot_in_ns(&mut eval, "user");
+    let core = Value::Symbol(Symbol::new(None, "clojure.core"));
+    refer_into(&mut eval, &core, &[]).expect("boot refers clojure.core into user");
     // The load's macroexpansions consume `gensym` numbers; the
     // user-visible counter restarts from 1 (S5C pins `G__1` first).
     eval.reset_gensym();
     eval
 }
 
+/// `in-ns` at boot (see [`native_in_ns`]), without evaluating a form.
+fn boot_in_ns(eval: &mut Evaluator, name: &str) {
+    let id = eval.registry.ensure_ns(name);
+    eval.registry.set_current(name);
+    if let Some(var_id) = core_var(eval, "*ns*") {
+        set_ns_current(eval, var_id, ns_value(name, id));
+    }
+}
+
 /// Install the §N natives into `clojure.core`.
 fn boot_install_natives(eval: &mut Evaluator) {
-    for (name, f) in NATIVES
+    let natives = NATIVES
         .iter()
         .chain(crate::vars::VAR_NATIVES.iter())
         .chain(crate::macros::MACRO_NATIVES.iter())
@@ -2826,7 +2956,9 @@ fn boot_install_natives(eval: &mut Evaluator) {
         .chain(crate::classemu::CLASS_EMU_NATIVES.iter())
         .chain(crate::classemu::CLASS_EMU_HIDDEN.iter())
         .chain(crate::reflect::REFLECT_HIDDEN.iter())
-    {
+        .collect::<Vec<_>>();
+    eval.registry.reserve_vars("clojure.core", natives.len());
+    for (name, f) in natives {
         eval.install_native_ptr("clojure.core", name, *f);
     }
 }
@@ -2934,100 +3066,6 @@ fn boot_core_vars(eval: &mut Evaluator, user_handle: Value) {
     );
 }
 
-/// Refer every public install into `user` (JVM boot refers
-/// `clojure.core`).
-fn boot_refer_user(eval: &mut Evaluator) {
-    let mut names: Vec<String> = NATIVES
-        .iter()
-        .chain(crate::vars::VAR_NATIVES.iter())
-        .chain(crate::macros::MACRO_NATIVES.iter())
-        .chain(crate::lazy::LAZY_NATIVES.iter())
-        .chain(crate::core::CORE_NATIVES.iter())
-        .chain(crate::seqs::SEQS_NATIVES.iter())
-        .chain(crate::coll::COLL_NATIVES.iter())
-        .chain(crate::re::RE_NATIVES.iter())
-        .chain(crate::rng::RNG_NATIVES.iter())
-        .chain(crate::io::IO_NATIVES.iter())
-        .chain(crate::reader::READER_NATIVES.iter())
-        .chain(crate::concurrency::CONC_NATIVES.iter())
-        .chain(crate::stm::STM_NATIVES.iter())
-        .chain(crate::fx4_host::FX4_NATIVES.iter())
-        .chain(crate::collmisc::COLLMISC_NATIVES.iter())
-        .chain(crate::printsys::PRINTSYS_NATIVES.iter())
-        .chain(crate::classemu::CLASS_EMU_NATIVES.iter())
-        .map(|(n, _)| (*n).to_owned())
-        .collect();
-    names.extend(
-        crate::macros::BUILTIN_MACROS
-            .iter()
-            .map(|s| (*s).to_owned()),
-    );
-    names.extend(
-        [
-            "*ns*",
-            "*file*",
-            "*loaded-libs*",
-            "*pending-paths*",
-            "*loading-verbosely*",
-            "*load-path*",
-            "*out*",
-            "*err*",
-            "*in*",
-            "*assert*",
-            "*unchecked-math*",
-            "*warn-on-reflection*",
-            "*allow-unresolved-vars*",
-            "*print-meta*",
-            "*print-readably*",
-            "*print-dup*",
-            "*read-eval*",
-            "*suppress-read*",
-            "*reader-resolver*",
-            "*flush-on-newline*",
-            "print-method",
-            "print-dup",
-            "char-escape-string",
-            "char-name-string",
-            "*agent*",
-            "*math-context*",
-            "*print-length*",
-            "*print-level*",
-            "*print-namespace-maps*",
-            "*1",
-            "*2",
-            "*3",
-            "*e",
-            "*command-line-args*",
-            "*clojure-version*",
-            "*data-readers*",
-            "*default-data-reader-fn*",
-            "default-data-readers",
-            "*compile-path*",
-            "*compile-files*",
-            "*compiler-options*",
-            "*source-path*",
-            "*fn-loader*",
-            "*use-context-classloader*",
-            "*verbose-defrecords*",
-            "primitives-classnames",
-        ]
-        .iter()
-        .map(|s| (*s).to_owned()),
-    );
-    let mut refers: Vec<(String, Symbol, u64)> = Vec::new();
-    for name in &names {
-        let q = Symbol::new(Some("clojure.core"), name);
-        if let Some(id) = id_of(&eval.registry, &q).filter(|id| is_public(&eval.registry, *id)) {
-            refers.push((name.clone(), q, id));
-        }
-    }
-    eval.registry.with_ns_mut("user", |user| {
-        for (name, q, id) in refers {
-            user.add_refer(&name, q, id);
-        }
-    });
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3052,13 +3090,6 @@ mod tests {
                 .message
                 .contains("recur escaped its loop or fn")
         );
-    }
-
-    #[test]
-    #[should_panic(expected = "boot form failed")]
-    fn boot_eval_panics_loudly() {
-        let mut eval = boot();
-        boot_eval(&mut eval, "(defn broken [)");
     }
 
     #[test]
@@ -3154,13 +3185,17 @@ mod tests {
     }
 
     #[test]
-    fn run_loaded_values_without_vars_is_idle() {
-        // S18 `load-reader`: a bare evaluator binds nothing and
-        // answers nil for empty input (the missing-var arms are the
-        // pin — every `if let` here must tolerate absence).
+    fn load_frame_without_vars_is_idle() {
+        // S18 `load-reader`: a bare evaluator binds nothing (the
+        // missing-var arms are the pin — every `if let` here must
+        // tolerate absence).
         let mut eval = Evaluator::new_bare("user");
-        let out = run_loaded_values(&mut eval, Vec::new()).expect("bare empty load-reader");
-        assert_eq!(out, Value::Nil);
+        let depth = eval.bindings_depth();
+        let cur = eval.registry.current().to_owned();
+        let frame = push_load_frame(&mut eval);
+        assert_eq!(eval.bindings_depth(), depth);
+        pop_load_frame(&mut eval, frame);
+        assert_eq!(eval.registry.current(), cur);
     }
 
     #[test]

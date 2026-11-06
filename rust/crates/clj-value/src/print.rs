@@ -42,6 +42,11 @@ pub(crate) mod print_opts {
         /// readable). Undupable kinds render the plain fallback —
         /// the driver throws before the engine ever asks.
         pub dup: bool,
+        /// `str`/`String.valueOf` rendering: tower kinds print bare
+        /// (`5`, `5.0`) like `toString`. Otherwise `BigInt`/`BigDec`
+        /// carry their suffix (`5N`, `5M`) in every print path —
+        /// the JVM print-method ignores `readably` for them.
+        pub str_form: bool,
     }
 
     impl Default for PrintOpts {
@@ -53,6 +58,7 @@ pub(crate) mod print_opts {
                 readably: false,
                 meta: false,
                 dup: false,
+                str_form: false,
             }
         }
     }
@@ -126,6 +132,20 @@ pub fn print_to_string(v: &Value) -> String {
 #[must_use]
 pub fn print(v: &Value, opts: &PrintOpts) -> String {
     pr_to_string(v, opts)
+}
+
+/// `str`/`String.valueOf` of one value: like `print`, but tower
+/// kinds render bare (`5`, `5.0`). Error-message formatters use
+/// this too — the JVM builds messages with `String.valueOf`.
+#[must_use]
+pub fn str_of_value(v: &Value) -> String {
+    pr_to_string(
+        v,
+        &PrintOpts {
+            str_form: true,
+            ..PrintOpts::print()
+        },
+    )
 }
 
 /// Remaining level budget (`None` = unlimited), threaded exactly like
@@ -351,8 +371,9 @@ fn print_named(v: &Value, out: &mut String) {
     }
 }
 
-/// Readable tower suffixes (`5N`, `5.0M`); `str`/`print` use
-/// the plain `toString` (`5`, `5.0`). `BigInteger` prints bare
+/// Tower suffixes (`5N`, `5.0M`) in every print path; only
+/// `str_form` (core `str`, `String.valueOf` formatters) uses the
+/// plain `toString` (`5`, `5.0`). `BigInteger` prints bare
 /// either way (S2 oracle `bi-pr`/`bi-str`); ratios print `n/d`
 /// either way. Chained so each match stays under the complexity
 /// gate.
@@ -360,7 +381,7 @@ fn print_tower(v: &Value, opts: &PrintOpts, out: &mut String) {
     match v {
         Value::BigInt(n) => {
             write!(out, "{n}").unwrap();
-            if opts.readably {
+            if !opts.str_form {
                 out.push('N');
             }
         }
@@ -369,7 +390,7 @@ fn print_tower(v: &Value, opts: &PrintOpts, out: &mut String) {
         }
         Value::BigDec(d) => {
             out.push_str(&d.to_bigdec_string());
-            if opts.readably {
+            if !opts.str_form {
                 out.push('M');
             }
         }
@@ -2080,10 +2101,11 @@ mod tests {
             "\"hi\""
         );
         assert_eq!(pr_to_string(&Value::Char('a'), &unreadable), "\\a");
-        // BigInt keeps ambient readably (no forced `N`).
+        // Tower suffixes ignore readably (JVM print-dup falls
+        // back to the print-method: `5N`, never bare `5`).
         assert_eq!(
             pr_to_string(&Value::BigInt(Arc::new(5.into())), &unreadable),
-            "5"
+            "5N"
         );
     }
 

@@ -221,7 +221,7 @@ fn to_f64_value(v: &Value) -> Option<f64> {
         Value::Double(d) => Some(*d),
         Value::BigInt(n) | Value::BigInteger(n) => n.to_f64(),
         Value::BigDec(d) => Some(d.to_f64()),
-        Value::Ratio(r) => r.to_f64(),
+        Value::Ratio(r) => Some(crate::ratio_to_f64(r)),
         _ => None,
     }
 }

@@ -373,3 +373,20 @@ fn insert_mut_hash_existing_unique_keeps_identity() {
     assert_eq!(m.get(&Value::Int(5)), Some(&Value::Int(99)));
     assert_eq!(m.size(), 20);
 }
+
+#[test]
+fn take_nth_generic_and_ints() {
+    let mut g = generic(100);
+    // Tree node (< 64 offset)
+    assert_eq!(g.take_nth(5), Some(Value::Int(5)));
+    assert_eq!(g.get(5), Some(Value::Nil));
+    // Tail node (>= tail_offset)
+    assert_eq!(g.take_nth(95), Some(Value::Int(95)));
+    assert_eq!(g.get(95), Some(Value::Nil));
+    // Out of bounds
+    assert_eq!(g.take_nth(1000), None);
+
+    let mut iv = Vector::from_vec(vec![Value::Int(10), Value::Int(20)]);
+    assert_eq!(iv.take_nth(1), Some(Value::Int(20)));
+    assert_eq!(iv.take_nth(5), None);
+}

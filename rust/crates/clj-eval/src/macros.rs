@@ -57,25 +57,15 @@ pub(crate) struct MacroRef {
 
 /// Whether a var id is a macro (`:macro` meta truthy).
 pub(crate) fn is_macro_var(eval: &Evaluator, id: u64) -> bool {
-    let probe = Value::Keyword(Keyword::new(None, "macro"));
-    eval.registry.state(id).is_some_and(|s| {
-        s.meta
-            .as_ref()
-            .and_then(|m| m.get(&probe))
-            .is_some_and(Value::is_truthy)
-    })
+    eval.registry
+        .meta_flag(id, &clj_value::static_keyword!("macro"))
 }
 
 /// Whether a var id is private (`:private` meta truthy; cleared
 /// metas read public).
 pub(crate) fn is_private_var(eval: &Evaluator, id: u64) -> bool {
-    let probe = Value::Keyword(Keyword::new(None, "private"));
-    eval.registry.state(id).is_some_and(|s| {
-        s.meta
-            .as_ref()
-            .and_then(|m| m.get(&probe))
-            .is_some_and(Value::is_truthy)
-    })
+    eval.registry
+        .meta_flag(id, &clj_value::static_keyword!("private"))
 }
 
 /// Fence macros that stay identity (real macros on the JVM; the
@@ -136,7 +126,10 @@ fn is_identity_head(eval: &Evaluator, op: &Value) -> bool {
 /// macro var. Private cross-namespace macros are the bare
 /// `IllegalStateException` (callers wrap per position); anything
 /// unresolvable or non-macro is `Ok(None)`.
-pub(crate) fn lookup_macro(eval: &Evaluator, op: &Value) -> Result<Option<MacroRef>, NativeError> {
+pub(crate) fn lookup_macro(
+    eval: &mut Evaluator,
+    op: &Value,
+) -> Result<Option<MacroRef>, NativeError> {
     let (id, target) = match op {
         Value::Symbol(sym) => {
             let cur = eval.current_ns_name();
@@ -148,6 +141,9 @@ pub(crate) fn lookup_macro(eval: &Evaluator, op: &Value) -> Result<Option<MacroR
         Value::Var(v) => (v.id, v.sym.clone()),
         _ => return Ok(None),
     };
+    // Every list head resolves here first: a lazy `core.clj` var
+    // (fn or macro) forces before any metadata decides its role.
+    eval.force_lazy(id);
     if !is_macro_var(eval, id) {
         return Ok(None);
     }
@@ -495,13 +491,24 @@ fn native_apply(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErr
     if args.len() < 2 {
         return Err(NativeError::arity("clojure.core/apply", args.len()));
     }
-    let mut call_args: Vec<Value> = args[1..args.len() - 1].to_vec();
+    if crate::ext::as_native(&args[0]).is_some_and(|n| &*n.display == "clojure.core/str") {
+        if let Some(s) = crate::core::apply_str_direct(eval, &args[1..])? {
+            return Ok(s);
+        }
+    }
     // The spread realizes (JVM `spreadToArray`); any seq value —
     // including the lazy ones syntax-quote expansions build — seqs.
-    let spread =
+    // With no leading args it is the argument array as is (one copy
+    // of the items, not two).
+    let mut spread =
         crate::lazy::collect_all(eval, args[args.len() - 1].clone()).map_err(signal_to_native)?;
-    call_args.extend(spread);
-    eval.call(&args[0], &call_args).map_err(signal_to_native)
+    if args.len() > 2 {
+        let mut call_args = Vec::with_capacity(args.len() - 2 + spread.len());
+        call_args.extend_from_slice(&args[1..args.len() - 1]);
+        call_args.append(&mut spread);
+        spread = call_args;
+    }
+    eval.call(&args[0], &spread).map_err(signal_to_native)
 }
 
 /// The S5C natives installed into `clojure.core` by [`boot`](crate::ns::boot).

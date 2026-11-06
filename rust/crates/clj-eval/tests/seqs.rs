@@ -349,6 +349,35 @@ fn mapv_filterv_rows() {
     assert_eq!(run_last(&mut eval, "(mapv inc [1 2 3])"), "[2 3 4]");
     assert_eq!(run_last(&mut eval, "(mapv + [1 2] [10 20 30])"), "[11 22]");
     assert_eq!(run_last(&mut eval, "(filterv odd? [1 2 3 4])"), "[1 3]");
+    assert_eq!(run_last(&mut eval, "(filterv pos? [])"), "[]");
+    assert_eq!(run_last(&mut eval, "(filterv pos? [1 2 3])"), "[1 2 3]");
+    assert_eq!(run_last(&mut eval, "(filterv #{1 2} [1 2 3])"), "[1 2]");
+    assert_eq!(
+        run_last(&mut eval, "(filterv seq [\"\" \"a\" nil [] [1]])"),
+        "[\"a\" [1]]"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(filterv seq [(first {:a 1})])"),
+        "[[:a 1]]"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(doall (filter seq [\"\" \"hello\" nil [] [42]]))"
+        ),
+        "(\"hello\" [42])"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(doall (filter seq [(first {:a 1})]))"),
+        "([:a 1])"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(doall (remove seq [\"\" \"hello\" nil [] [42]]))"
+        ),
+        "(\"\" nil [])"
+    );
 }
 
 #[test]

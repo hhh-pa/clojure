@@ -500,12 +500,10 @@ fn update_keys_rows() {
 #[test]
 fn arity_miss_rows() {
     let mut eval = boot();
-    // Oracle seqwalks.out (shape only — the house `defn` emits
-    // anonymous fns, so arity misses name the volatile
-    // `user/evalN/fn--M` display where the JVM names
-    // `clojure.core/NAME`): bc-arity1 bc-arity3 ts-arity2 fl-arity0
-    // fl-arity2 mdw-arity0 pv-arity1 pva-arity0 rk-arity2 run-arity1
-    // sv-arity1 uv-arity1 uk-arity1.
+    // Oracle seqwalks.out: `core.clj` defns name their var
+    // (`clojure.core/NAME`, like the JVM): bc-arity1 bc-arity3
+    // ts-arity2 fl-arity0 fl-arity2 mdw-arity0 pv-arity1 pva-arity0
+    // rk-arity2 run-arity1 sv-arity1 uv-arity1 uk-arity1.
     for (src, count) in [
         ("(bounded-count 1)", 1),
         ("(bounded-count 1 2 3)", 3),
@@ -521,13 +519,13 @@ fn arity_miss_rows() {
         ("(update-vals {:a 1})", 1),
         ("(update-keys {:a 1})", 1),
     ] {
-        let got = uncaught(&mut eval, src);
-        let prefix = format!(
-            "clojure.lang.ArityException | Wrong number of args ({count}) passed to: user/"
-        );
-        assert!(
-            got.starts_with(&prefix) && got.contains("/fn--"),
-            "for {src}: {got}"
+        let name = src[1..].split([' ', ')']).next().expect("a head");
+        assert_eq!(
+            uncaught(&mut eval, src),
+            format!(
+                "clojure.lang.ArityException | Wrong number of args ({count}) passed to: clojure.core/{name}"
+            ),
+            "for {src}"
         );
     }
 }

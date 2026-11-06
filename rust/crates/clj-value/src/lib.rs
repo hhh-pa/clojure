@@ -38,6 +38,7 @@ mod seq;
 mod symbol;
 mod tower;
 mod transient;
+mod trie;
 mod value;
 mod volatile;
 
@@ -73,7 +74,7 @@ pub use keyword::Keyword;
 pub use multifn::{MultiFn, method_for, multifn_hex, multifn_str};
 pub use print::{
     CHAR_ESCAPES, CHAR_NAMES, class_java_debug, java_debug, java_double_string, lift_ns,
-    pr_to_string, print, print_opts::PrintOpts, print_to_string,
+    pr_to_string, print, print_opts::PrintOpts, print_to_string, str_of_value,
 };
 pub use promise::{Promise, PromiseState};
 pub use pvec::{Elem8, PrimitiveVector};
@@ -83,17 +84,17 @@ pub use seq::{
     CHUNK_SIZE, ConsValue, CycleValue, IterateValue, KeySeqValue, RangeNum, RangeValue,
     RealizedSeq, RepeatValue, Seq, SeqKind, SubVectorValue, ValSeqValue, seq_vec,
 };
-pub use symbol::Symbol;
+pub use symbol::{SymKey, Symbol};
 pub use tower::{
     BAD_CTX_FORMAT, BigDec, DIGITS_LT_0, MathContext, NON_TERMINATING, ROUNDING_NECESSARY,
-    RoundingMode, bigint_parse, bigint_parse_radix,
+    RoundingMode, bigint_parse, bigint_parse_radix, ratio_to_f64,
 };
 pub use transient::{
     Transient, TransientError, TransientKind, TransientMap, TransientSet, TransientVector,
 };
 pub use value::{
-    FxBuildHasher, List, Map, Set, SortSpec, Value, Vector, bigdec_result, extension_supports_meta,
-    extension_with_meta, intern_literal_strings, intern_string, intern_string_value, map_entry,
-    new_map, new_set, reader_conditional, tagged_literal,
+    FxBuildHasher, List, Map, MemberSet, Set, SortSpec, Value, Vector, bigdec_result,
+    extension_supports_meta, extension_with_meta, intern_literal_strings, intern_string,
+    intern_string_value, map_entry, new_map, new_set, reader_conditional, tagged_literal,
 };
 pub use volatile::Volatile;

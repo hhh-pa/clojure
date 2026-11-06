@@ -68,7 +68,7 @@ pub(crate) fn read_global(eval: &Evaluator) -> Result<Value, NativeError> {
     let Some(id) = global_id(eval) else {
         return Err(unresolvable_global());
     };
-    Ok(eval.deref_var(id, &Symbol::new(Some("clojure.core"), "global-hierarchy")))
+    Ok(eval.deref_var_unforced(id, &Symbol::new(Some("clojure.core"), "global-hierarchy")))
 }
 
 /// Alter the global hierarchy under the var-alter lock

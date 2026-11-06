@@ -11,7 +11,7 @@
 //! its arcs, so `identical?` is pointer equality.
 
 use std::cmp::Ordering;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, LazyLock, Mutex};
@@ -21,13 +21,34 @@ use crate::FxBuildHasher;
 /// One interned keyword's canonical arcs.
 type CanonicalKeyword = (Option<Arc<str>>, Arc<str>);
 
-/// The intern table (fence 4a): `(ns, name)` arcs canonicalized
-/// across every construction, like the JVM's `KeywordTable` (strong
-/// refs — entries live as long as the process, same as interned
-/// keywords on the JVM). Fx-hashed: every keyword construction
-/// probes this table.
-static KEYWORD_TABLE: LazyLock<Mutex<HashMap<CanonicalKeyword, CanonicalKeyword, FxBuildHasher>>> =
-    LazyLock::new(|| Mutex::new(HashMap::default()));
+/// The intern tables (fence 4a): arcs canonicalized across every
+/// construction, like the JVM's `KeywordTable` (strong refs —
+/// entries live as long as the process, same as interned keywords
+/// on the JVM). Fx-hashed: every keyword construction probes them.
+/// Plain keywords (most: `:line` on every read list, `:macro` on
+/// every analyzed head) probe by `&str`, allocating only on first
+/// interning; qualified ones probe by their `(ns, name)` pair.
+#[derive(Default)]
+struct KeywordTable {
+    plain: HashSet<Arc<str>, FxBuildHasher>,
+    qualified: HashMap<CanonicalKeyword, CanonicalKeyword, FxBuildHasher>,
+}
+
+static KEYWORD_TABLE: LazyLock<Mutex<KeywordTable>> =
+    LazyLock::new(|| Mutex::new(KeywordTable::default()));
+
+/// A plain keyword interned once per call site
+/// (`static_keyword!("line")`): later uses clone the cached arcs
+/// instead of probing the intern table under its lock. The cached
+/// value came from [`Keyword::new`], so identity is canonical.
+#[macro_export]
+macro_rules! static_keyword {
+    ($name:literal) => {{
+        static KW: ::std::sync::LazyLock<$crate::Keyword> =
+            ::std::sync::LazyLock::new(|| $crate::Keyword::new(None, $name));
+        KW.clone()
+    }};
+}
 
 /// A Clojure keyword such as `:ok` or `:user/id`.
 #[derive(Clone, Debug)]
@@ -43,8 +64,20 @@ impl Keyword {
     #[must_use]
     pub fn new(ns: Option<&str>, name: &str) -> Self {
         let mut table = KEYWORD_TABLE.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(ns) = ns else {
+            let name = match table.plain.get(name) {
+                Some(arc) => Arc::clone(arc),
+                None => {
+                    let arc: Arc<str> = Arc::from(name);
+                    table.plain.insert(Arc::clone(&arc));
+                    arc
+                }
+            };
+            return Self { ns: None, name };
+        };
         let entry = table
-            .entry((ns.map(Arc::from), Arc::from(name)))
+            .qualified
+            .entry((Some(Arc::from(ns)), Arc::from(name)))
             .or_insert_with_key(|k| k.clone());
         Self {
             ns: entry.0.clone(),

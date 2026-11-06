@@ -3683,10 +3683,8 @@ fn surface_tostring_divergent() {
         normboth(&run(&mut eval, "(.. (fn [x] x) (toString))")),
         "\"#object[user$evalN$fn__N 0xH \\\"user$evalN$fn__N@L\\\"]\""
     );
-    assert_eq!(
-        normhex(&run(&mut eval, "(.. *ns* (toString))")),
-        "\"#object[clojure.lang.Namespace 0xH \\\"user\\\"]\""
-    );
+    // `Namespace.toString` is the name (no longer divergent).
+    assert_eq!(run(&mut eval, "(.. *ns* (toString))"), "\"user\"");
     assert_eq!(
         run(&mut eval, "(.. (ex-info \"m\" {}) (toString))"),
         "\"#error {:cause \\\"m\\\" :data {} :via [{:type clojure.lang.ExceptionInfo :message \\\"m\\\" :data {}}] :trace []}\""
@@ -4605,38 +4603,40 @@ fn surface_strings() {
         ("(.. \"abc\" (endsWith \"\"))", "true"),
         ("(.. \"abc\" (endsWith \"abc\"))", "true"),
         ("(.. \"abc\" (endsWith \"zabc\"))", "false"),
-        // The JDK `split` doc examples.
+        // The JDK `split` doc examples (content through `vec` —
+        // the member answers `String[]`, pinned in
+        // `string_split_member_array`).
         (
-            "(.. \"boo:and:foo\" (split \":\"))",
+            "(vec (.. \"boo:and:foo\" (split \":\")))",
             "[\"boo\" \"and\" \"foo\"]",
         ),
         (
-            "(.. \"boo:and:foo\" (split \"o\"))",
+            "(vec (.. \"boo:and:foo\" (split \"o\")))",
             "[\"b\" \"\" \":and:f\"]",
         ),
         (
-            "(.. \"boo:and:foo\" (split \":\" 2))",
+            "(vec (.. \"boo:and:foo\" (split \":\" 2)))",
             "[\"boo\" \"and:foo\"]",
         ),
         (
-            "(.. \"boo:and:foo\" (split \":\" 5))",
+            "(vec (.. \"boo:and:foo\" (split \":\" 5)))",
             "[\"boo\" \"and\" \"foo\"]",
         ),
         (
-            "(.. \"boo:and:foo\" (split \":\" -1))",
+            "(vec (.. \"boo:and:foo\" (split \":\" -1)))",
             "[\"boo\" \"and\" \"foo\"]",
         ),
         (
-            "(.. \"boo:and:foo\" (split \"o\" -1))",
+            "(vec (.. \"boo:and:foo\" (split \"o\" -1)))",
             "[\"b\" \"\" \":and:f\" \"\" \"\"]",
         ),
-        ("(.. \"a,\" (split \",\"))", "[\"a\"]"),
-        ("(.. \"a,\" (split \",\" -1))", "[\"a\" \"\"]"),
-        ("(.. \"abc\" (split \",\"))", "[\"abc\"]"),
-        ("(.. \"\" (split \",\"))", "[\"\"]"),
-        ("(.. \"abc\" (split \"\"))", "[\"a\" \"b\" \"c\"]"),
-        ("(.. \"abc\" (split \"\" 2))", "[\"a\" \"bc\"]"),
-        ("(.. \"abc\" (split \"\" 1))", "[\"abc\"]"),
+        ("(vec (.. \"a,\" (split \",\")))", "[\"a\"]"),
+        ("(vec (.. \"a,\" (split \",\" -1)))", "[\"a\" \"\"]"),
+        ("(vec (.. \"abc\" (split \",\")))", "[\"abc\"]"),
+        ("(vec (.. \"\" (split \",\")))", "[\"\"]"),
+        ("(vec (.. \"abc\" (split \"\")))", "[\"a\" \"b\" \"c\"]"),
+        ("(vec (.. \"abc\" (split \"\" 2)))", "[\"a\" \"bc\"]"),
+        ("(vec (.. \"abc\" (split \"\" 1)))", "[\"abc\"]"),
         ("(.. \"  ab  \" (trim))", "\"ab\""),
         ("(.. \"\" (trim))", "\"\""),
         ("(.. \"\\t a \\n\" (trim))", "\"a\""),
@@ -5040,18 +5040,54 @@ fn number_parse_math_statics_201() {
 #[test]
 fn pattern_split_member_201() {
     let mut eval = boot();
+    // JVM `Pattern.split` answers `String[]` (content pinned
+    // through `vec`, shape through the array fns).
     assert_eq!(
-        run(&mut eval, "(.split #\"\\s+\" \"a b  c\")"),
+        run(&mut eval, "(vec (.split #\"\\s+\" \"a b  c\"))"),
         "[\"a\" \"b\" \"c\"]"
     );
-    assert_eq!(run(&mut eval, "(.split #\",\" \"a,b,\")"), "[\"a\" \"b\"]");
     assert_eq!(
-        run(&mut eval, "(.split #\",\" \"a,b,\" -1)"),
+        run(&mut eval, "(vec (.split #\",\" \"a,b,\"))"),
+        "[\"a\" \"b\"]"
+    );
+    assert_eq!(
+        run(&mut eval, "(vec (.split #\",\" \"a,b,\" -1))"),
         "[\"a\" \"b\" \"\"]"
     );
     assert_eq!(
-        run(&mut eval, "(.split #\",\" \"a,b,c\" 2)"),
+        run(&mut eval, "(vec (.split #\",\" \"a,b,c\" 2))"),
         "[\"a\" \"b,c\"]"
+    );
+    assert_eq!(
+        run(&mut eval, "(class (.split #\",\" \"a,b,\"))"),
+        "[Ljava.lang.String;"
+    );
+    assert_eq!(run(&mut eval, "(aget (.split #\",\" \"a,b,\") 1)"), "\"b\"");
+    assert_eq!(run(&mut eval, "(alength (.split #\",\" \"a,b,\"))"), "2");
+}
+
+#[test]
+fn string_split_member_array() {
+    let mut eval = boot();
+    // JVM `String.split` answers `String[]`, not a vector.
+    assert_eq!(
+        run(&mut eval, "(class (.split \"a,b,\" \",\"))"),
+        "[Ljava.lang.String;"
+    );
+    assert_eq!(
+        run(&mut eval, "(vec (.split \"a,b,\" \",\"))"),
+        "[\"a\" \"b\"]"
+    );
+    assert_eq!(
+        run(&mut eval, "(vec (.split \"a,b,\" \",\" -1))"),
+        "[\"a\" \"b\" \"\"]"
+    );
+    assert_eq!(run(&mut eval, "(aget (.split \"a,b\" \",\") 1)"), "\"b\"");
+    assert_eq!(run(&mut eval, "(count (.split \"a,b\" \",\"))"), "2");
+    assert_eq!(run(&mut eval, "(alength (.split \"a,b\" \",\"))"), "2");
+    assert_eq!(
+        run(&mut eval, "(seq (.split \"a,b\" \",\"))"),
+        "(\"a\" \"b\")"
     );
 }
 

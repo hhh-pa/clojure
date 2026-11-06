@@ -22,6 +22,8 @@ pub mod collmisc;
 pub mod compiler;
 pub mod concurrency;
 pub mod core;
+pub(crate) mod core_lazy;
+pub(crate) mod core_macros;
 pub mod ctor;
 pub mod destructure_expand;
 pub mod emucoll;
@@ -54,10 +56,15 @@ pub mod rng;
 pub mod scalars;
 pub mod seqs;
 pub mod shell;
+pub(crate) mod stdlib_natives;
 pub mod stm;
 pub mod typeinternals;
 pub mod types;
 pub mod vars;
+pub(crate) mod vm;
+pub(crate) mod vm_intrinsics;
+pub(crate) mod vm_live;
+pub(crate) mod vm_ops;
 // W6 (runtime-ish) — do not merge by hand, integrator resolves.
 pub mod w6_runtime;
 pub mod xform;
@@ -70,7 +77,7 @@ pub use error::{
     CompileError, NativeError, Signal, Verb, compile_diagnostic, compile_head, jvm_class_of,
     simple_class_of, span_of,
 };
-pub use eval::{Evaluator, SourceError};
+pub use eval::{Evaluator, LiveForms, SourceError};
 pub use expr::{
     Analyzer, Arity, Catch, Expr, FunExpr, KeyBinding, MapPattern, Pattern, VecPattern,
 };

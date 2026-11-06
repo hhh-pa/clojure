@@ -656,22 +656,15 @@ fn comparator_sort() {
 
 #[test]
 fn comparator_errors() {
-    // k-arity, k-nonfn-pred. The arity display carries boot-order
-    // `evalN`/`fn--N` counters, so the shape (not the numbers) is
-    // pinned: `Wrong number of args (1) passed to: user/evalN/fn--M`.
+    // k-arity, k-nonfn-pred. The closure names under `comparator`
+    // like the JVM's `clojure.core/comparator/fn--N`; only the
+    // counter differs, so the shape is pinned.
     let mut eval = boot();
     let msg = uncaught(&mut eval, "((comparator <) 1)");
-    let prefix = "clojure.lang.ArityException | Wrong number of args (1) passed to: user/eval";
-    let tail = msg
+    let prefix = "clojure.lang.ArityException | Wrong number of args (1) passed to: clojure.core/comparator/fn--";
+    let fn_n = msg
         .strip_prefix(prefix)
         .unwrap_or_else(|| panic!("bad arity shape: {msg}"));
-    let (eval_n, fn_n) = tail
-        .split_once("/fn--")
-        .unwrap_or_else(|| panic!("bad arity shape: {msg}"));
-    assert!(
-        !eval_n.is_empty() && eval_n.chars().all(|c| c.is_ascii_digit()),
-        "bad arity shape: {msg}"
-    );
     assert!(
         !fn_n.is_empty() && fn_n.chars().all(|c| c.is_ascii_digit()),
         "bad arity shape: {msg}"

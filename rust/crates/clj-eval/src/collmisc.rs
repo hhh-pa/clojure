@@ -989,7 +989,7 @@ struct MatcherState {
 /// and `find` requires the match at the search offset).
 #[derive(Clone, Debug)]
 pub struct MatcherHandle {
-    re: regex::Regex,
+    re: Arc<regex::Regex>,
     anchored: bool,
     text: Arc<str>,
     state: Arc<Mutex<MatcherState>>,

@@ -386,7 +386,7 @@ mod tests {
     #[test]
     fn auto_resolve() {
         let mut opts = ReaderOpts::default();
-        opts.aliases
+        std::sync::Arc::make_mut(&mut opts.aliases)
             .insert("str".to_owned(), "clojure.string".to_owned());
         assert_eq!(
             interpret_token("::foo", &opts, &mut NoHooks)

@@ -1634,6 +1634,44 @@ fn corpus_in_gaps() {
         uncaught(&mut eval, "(get-in)"),
         "clojure.lang.ArityException | Wrong number of args (0) passed to: clojure.core/get-in"
     );
+
+    // List/seq keypaths (KeyStep::Seq)
+    assert_eq!(
+        run_last(&mut eval, "(assoc-in {:a {:b 1}} '(:a :b) 2)"),
+        "{:a {:b 2}}"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(assoc-in {:a 1} '() 2)"),
+        "{:a 1, nil 2}"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(update-in {:a {:b 1}} '(:a :b) inc)"),
+        "{:a {:b 2}}"
+    );
+    assert_eq!(run_last(&mut eval, "(get-in {:a {:b 1}} '(:a :b))"), "1");
+    assert_eq!(run_last(&mut eval, "(get-in {:a 1} '())"), "{:a 1}");
+
+    // Transient map intrinsic paths (get and assoc!)
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [tm (transient {:a 1})] [(get tm :a) (get tm :missing :default)])"
+        ),
+        "[1 :default]"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [tm (transient {})] (persistent! (assoc! tm :a 10)))"
+        ),
+        "{:a 10}"
+    );
+
+    // Multi-pair assoc update op
+    assert_eq!(
+        run_last(&mut eval, "(let [m {:a 1}] (assoc m :b 2 :c 3))"),
+        "{:a 1, :b 2, :c 3}"
+    );
 }
 
 /// Corpus gaps (P3 select-keys/zipmap/replace gaps (07).)

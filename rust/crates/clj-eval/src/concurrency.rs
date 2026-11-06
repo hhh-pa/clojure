@@ -556,7 +556,10 @@ fn native_deref(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErr
         Value::Delay(d) => force_delay(eval, d).map_err(signal_to_native),
         Value::Future(f) => future_outcome(&f.get()),
         Value::Promise(p) => Ok(p.get()),
-        Value::Var(v) => Ok(eval.deref_var(v.id, &v.sym)),
+        Value::Var(v) => {
+            eval.force_lazy(v.id);
+            Ok(eval.deref_var(v.id, &v.sym))
+        }
         Value::Nil => Err(npe(DEREF_NIL)),
         other => Err(cce_err(other, "java.util.concurrent.Future")),
     }
@@ -1661,7 +1664,7 @@ fn agent_var(eval: &Evaluator) -> Option<Var> {
 
 /// Whether `*agent*` is bound (await refuses inside actions).
 fn agent_is_bound(eval: &Evaluator) -> bool {
-    agent_var(eval).is_some_and(|v| eval.deref_var(v.id, &v.sym).is_truthy())
+    agent_var(eval).is_some_and(|v| eval.deref_var_unforced(v.id, &v.sym).is_truthy())
 }
 
 /// Bind `*agent*` around an action fn (skipped when the lineage has

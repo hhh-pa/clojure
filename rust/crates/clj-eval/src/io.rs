@@ -769,9 +769,9 @@ fn native_read_string(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nat
     };
     // Live-or-removed (the detached `*ns*` keeps aliases/refers,
     // like the JVM; #80).
-    if let Some(ns) = eval.registry.ns_live_or_removed(&cur) {
-        opts.aliases = ns.alias_map();
-        opts.refers = ns.refer_map();
+    if let Some(maps) = eval.registry.reader_maps(&cur) {
+        opts.aliases = maps.aliases;
+        opts.refers = maps.refers;
     }
     crate::core::snapshot_data_readers(eval, &mut opts)?;
     opts.read_eval = seed.read_eval;

@@ -23,9 +23,8 @@ use smallvec::SmallVec;
 
 use clj_reader::{ReadCond, Reader, ReaderOpts};
 use clj_value::{
-    ExtensionValue, Instant, Keyword, List, Map, PrintOpts, Set, Symbol, TagError, ThrowClass,
-    Throwable, Uuid, Value, Vector, bigdec_result, new_map, new_set, pr_to_string, seq_vec,
-    validate_uuid,
+    ExtensionValue, Instant, Keyword, List, Map, Set, Symbol, TagError, ThrowClass, Throwable,
+    Uuid, Value, Vector, bigdec_result, new_map, new_set, seq_vec, validate_uuid,
 };
 
 use crate::error::{NativeError, jvm_class_of};
@@ -865,7 +864,7 @@ fn to_f64(n: Num) -> f64 {
     match n {
         Num::Int(i) => i as f64,
         Num::BigInt(n) => n.to_f64().unwrap_or(f64::NAN),
-        Num::Ratio(r) => r.to_f64().unwrap_or(f64::NAN),
+        Num::Ratio(r) => clj_value::ratio_to_f64(&r),
         Num::BigDec(d) => d.to_f64(),
         Num::Double(d) => d,
     }
@@ -2504,7 +2503,7 @@ fn resolve_opt_meta(eval: &mut Evaluator, meta: Option<Map>) -> Result<Option<Ma
     }
 }
 
-/// One resolved map: keys and values in insertion order (the JVM
+/// One resolved map: entries rebuilt in iteration order (the JVM
 /// builds from resolved entries too), plus the meta.
 fn resolve_map(eval: &mut Evaluator, m: Map) -> Result<Map, NativeError> {
     let mut out = new_map();
@@ -2680,6 +2679,7 @@ pub fn print_opts(
         readably: readably.unwrap_or_else(|| deref_core(eval, "*print-readably*").is_truthy()),
         meta: deref_core(eval, "*print-meta*").is_truthy(),
         dup: deref_core(eval, "*print-dup*").is_truthy(),
+        str_form: false,
     })
 }
 
@@ -2765,14 +2765,14 @@ fn str_of_realized(eval: &mut Evaluator, v: &Value) -> Result<String, NativeErro
         // `Date.toString` instants) — `print` stays tagged while
         // `str` goes bare.
         Value::Uuid(_) | Value::Instant(_) | Value::Uri(_) => clj_value::java_debug(&r),
-        // Extensions with a `str` display (only `MathContext`,
-        // S2 oracle `wp-str`) render it; the rest print
-        // readably.
-        Value::Extension(e) => match e.print_str() {
+        // Extensions with a `toString` or `str` display (namespaces,
+        // `MathContext` — S2 oracle `wp-str`) render it; the rest
+        // print readably.
+        Value::Extension(e) => match e.java_str().or_else(|| e.print_str()) {
             Some(s) => s,
             None => clj_value::pr_to_string(&r, &clj_value::PrintOpts::pr()),
         },
-        _ => pr_to_string(&r, &PrintOpts::print()),
+        _ => clj_value::str_of_value(&r),
     })
 }
 
@@ -2781,9 +2781,56 @@ fn str_of_realized(eval: &mut Evaluator, v: &Value) -> Result<String, NativeErro
 fn str_concat(eval: &mut Evaluator, args: &[Value]) -> Result<String, NativeError> {
     let mut out = String::new();
     for arg in args {
-        out.push_str(&str_of_one(eval, arg)?);
+        str_push(&mut out, eval, arg)?;
     }
     Ok(out)
+}
+
+/// Append `v`'s `str` piece ([`str_of_one`]; chars, strings and nil
+/// append in place, with no piece string).
+fn str_push(out: &mut String, eval: &mut Evaluator, v: &Value) -> Result<(), NativeError> {
+    match v {
+        Value::Nil => {}
+        Value::Str(s) => out.push_str(s),
+        Value::Char(c) => out.push(*c),
+        // A long's `toString` is its decimal digits (the printer's
+        // rendering, without the print machinery).
+        Value::Int(n) => {
+            use std::fmt::Write;
+            write!(out, "{n}").expect("writing to a String cannot fail");
+        }
+        _ => out.push_str(&str_of_one(eval, v)?),
+    }
+    Ok(())
+}
+
+/// `(apply str a … coll)` without spreading `coll` into an argument
+/// array, when `coll` is already realized (a vector, list, string or
+/// nil — no realization effects to order before the pieces): the
+/// pieces append into one buffer, so a 600K-char vector costs its
+/// text, not 64 bytes per char. `None` leaves other colls to the
+/// spread (a lazy seq realizes first, like the JVM's
+/// `spreadToArray`).
+pub(crate) fn apply_str_direct(
+    eval: &mut Evaluator,
+    args: &[Value],
+) -> Result<Option<Value>, NativeError> {
+    let (coll, lead) = args.split_last().expect("apply passes its spread");
+    let items: Box<dyn Iterator<Item = Value> + '_> = match coll {
+        Value::Nil => Box::new(std::iter::empty()),
+        Value::Vector(x) => Box::new(x.iter()),
+        Value::List(l) => Box::new(l.iter().cloned()),
+        Value::Str(s) => Box::new(s.chars().map(Value::Char)),
+        _ => return Ok(None),
+    };
+    let mut out = String::new();
+    for arg in lead {
+        str_push(&mut out, eval, arg)?;
+    }
+    for item in items {
+        str_push(&mut out, eval, &item)?;
+    }
+    Ok(Some(Value::Str(Arc::from(out.as_str()))))
 }
 
 pub(crate) fn native_str(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
@@ -3226,7 +3273,7 @@ pub(crate) fn native_double(_eval: &mut Evaluator, args: &[Value]) -> Result<Val
         Value::Int(i) => *i as f64,
         Value::Double(d) => *d,
         Value::BigInt(n) | Value::BigInteger(n) => n.to_f64().unwrap_or(f64::NAN),
-        Value::Ratio(r) => r.to_f64().unwrap_or(f64::NAN),
+        Value::Ratio(r) => clj_value::ratio_to_f64(r),
         Value::BigDec(d) => d.to_f64(),
         Value::Nil => return Err(npe_double_value()),
         // Characters rejected (fixprobe11 `:dbl-ch`).
@@ -3579,10 +3626,9 @@ pub(crate) fn native_float(_eval: &mut Evaluator, args: &[Value]) -> Result<Valu
             n.to_f64().unwrap_or(f64::NAN),
             Num::BigInt(n.as_ref().clone()),
         )?,
-        Value::Ratio(r) => float_checked(
-            r.to_f64().unwrap_or(f64::NAN),
-            Num::Ratio(r.as_ref().clone()),
-        )?,
+        Value::Ratio(r) => {
+            float_checked(clj_value::ratio_to_f64(r), Num::Ratio(r.as_ref().clone()))?
+        }
         Value::BigDec(d) => float_checked(d.to_f64(), Num::BigDec(d.as_ref().clone()))?,
         Value::Nil => return Err(npe_double_value()),
         v => return Err(cce_err(v, "java.lang.Number")),
@@ -3663,6 +3709,9 @@ const ND_STARTS: &[u32] = &[
 
 /// `Character.digit(c, 10)`: the decimal value of any Nd char.
 fn decimal_value(c: char) -> Option<u32> {
+    if c.is_ascii_digit() {
+        return Some(u32::from(c as u8 - b'0'));
+    }
     let cp = c as u32;
     let i = ND_STARTS.partition_point(|&s| s <= cp).checked_sub(1)?;
     let d = cp.checked_sub(ND_STARTS[i])?;
@@ -3799,12 +3848,16 @@ fn native_parse_boolean(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, 
     }
 }
 
-fn native_parse_long(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
-    check_arity("clojure.core/parse-long", args, &[1])?;
-    match &args[0] {
+pub(crate) fn parse_long_1(v: &Value) -> Result<Value, NativeError> {
+    match v {
         Value::Str(s) => Ok(parse_long_str(s).map(Value::Int).unwrap_or(Value::Nil)),
         other => Err(parsing_err(other)),
     }
+}
+
+fn native_parse_long(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.core/parse-long", args, &[1])?;
+    parse_long_1(&args[0])
 }
 
 fn native_parse_double(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
@@ -4541,7 +4594,7 @@ fn native_unchecked_negate(eval: &mut Evaluator, args: &[Value]) -> Result<Value
 /// `double`; nil is the `charValue` NPE quirk, chars and
 /// everything else fail to `Number` (chars do NOT convert
 /// here, unlike `int` — oracle `xi-char`).
-fn intcast(v: &Value) -> Result<i32, NativeError> {
+pub(crate) fn intcast(v: &Value) -> Result<i32, NativeError> {
     match v {
         Value::Int(i) => int_exact_long(*i),
         Value::Double(d) => int_cast_double(*d),

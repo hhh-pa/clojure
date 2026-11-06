@@ -93,9 +93,9 @@ fn edn_reader_opts(eval: &mut Evaluator) -> Result<ReaderOpts, NativeError> {
         read_eval: false,
         ..Default::default()
     };
-    if let Some(ns) = eval.registry.ns_live_or_removed(&cur) {
-        opts.aliases = ns.alias_map();
-        opts.refers = ns.refer_map();
+    if let Some(maps) = eval.registry.reader_maps(&cur) {
+        opts.aliases = maps.aliases;
+        opts.refers = maps.refers;
     }
     crate::core::snapshot_data_readers(eval, &mut opts)?;
     Ok(opts)

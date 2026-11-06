@@ -22,6 +22,7 @@
 
 use std::borrow::Borrow;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use clj_reader::{NoHooks, ReadCond, ReaderOpts, read_all};
 use clj_value::{Keyword, PrintOpts, Symbol, Value, pr_to_string};
@@ -38,9 +39,9 @@ pub struct Case {
 /// The oracle resolution context (from `expectations.edn`).
 pub struct Resolver {
     pub current_ns: String,
-    pub aliases: HashMap<String, String>,
-    pub refers: HashMap<String, (String, String)>,
-    pub class_map: HashMap<String, String>,
+    pub aliases: Arc<HashMap<String, String>>,
+    pub refers: Arc<HashMap<String, (String, String)>>,
+    pub class_map: Arc<HashMap<String, String>>,
 }
 
 /// One read form's oracle/snapshot renderings (`None` when
@@ -180,9 +181,9 @@ pub fn parse_resolver(v: &Value) -> Resolver {
         .collect();
     Resolver {
         current_ns: expect_string(map_get(r, "current-ns").unwrap()),
-        aliases: str_map("aliases"),
-        refers,
-        class_map: str_map("class-map"),
+        aliases: Arc::new(str_map("aliases")),
+        refers: Arc::new(refers),
+        class_map: Arc::new(str_map("class-map")),
     }
 }
 

@@ -533,6 +533,7 @@ impl<'a> LiveReadHooks<'a> {
         var: clj_value::Var,
         rest: Vec<Value>,
     ) -> Result<Value, NativeError> {
+        self.eval.force_lazy(var.id);
         let root = self.eval.deref_var(var.id, &var.sym);
         if !is_invokable(&root) {
             return Err(cce_err(&root, "clojure.lang.IFn"));
@@ -567,7 +568,7 @@ impl<'a> LiveReadHooks<'a> {
     /// aliased in the current namespace (probes `c-qq`,
     /// `c-alias-head`).
     fn ns_or_alias_known(&self, ns_part: &str) -> bool {
-        if self.eval.registry.get(ns_part).is_some() {
+        if self.eval.registry.ns_id(ns_part).is_some() {
             return true;
         }
         let cur = self.eval.current_ns_name();
@@ -797,16 +798,13 @@ pub(crate) fn sync_reader_ns(eval: &Evaluator, opts: &mut ReaderOpts) {
     // Live-or-removed: a removed current namespace's tombstone keeps
     // its aliases/refers (the detached `*ns*` object, like the JVM),
     // so syntax-quote still resolves through refers (#80).
-    if let Some(ns) = eval.registry.ns_live_or_removed(&cur) {
-        opts.aliases = ns.alias_map();
-        opts.refers = ns.refer_map();
-        // #120: imports feed syntax-quote's class map, so `` `String ``
-        // and `` `String/m `` qualify to the imported class (oracle
-        // `rsq-imported`, `rsq-qual-imported`).
-        opts.class_map = ns
-            .imports()
-            .map(|(simple, class)| (simple.to_owned(), class.name().to_owned()))
-            .collect();
+    // #120: imports feed syntax-quote's class map, so `` `String ``
+    // and `` `String/m `` qualify to the imported class (oracle
+    // `rsq-imported`, `rsq-qual-imported`).
+    if let Some(maps) = eval.registry.reader_maps(&cur) {
+        opts.aliases = maps.aliases;
+        opts.refers = maps.refers;
+        opts.class_map = maps.class_map;
     }
 }
 

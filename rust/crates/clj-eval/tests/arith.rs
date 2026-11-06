@@ -244,6 +244,13 @@ fn coerce_rows() {
     );
     // `double`/`float`: characters rejected (unlike `int`/`long`).
     assert_eq!(run_last(&mut eval, "(double 1)"), "1.0");
+    // JVM `Ratio.doubleValue` (DECIMAL64, not IEEE division) —
+    // shared by `double`, mixed arithmetic, `==`, and `<`.
+    assert_eq!(run_last(&mut eval, "(double 2/3)"), "0.6666666666666667");
+    assert_eq!(run_last(&mut eval, "(double 10/3)"), "3.333333333333333");
+    assert_eq!(run_last(&mut eval, "(+ 2/3 0.0)"), "0.6666666666666667");
+    assert_eq!(run_last(&mut eval, "(< 2/3 0.6666666666666667)"), "false");
+    assert_eq!(run_last(&mut eval, "(== 2/3 0.6666666666666666)"), "false");
     assert_eq!(run_last(&mut eval, "(float 1)"), "1.0");
     assert_eq!(run_last(&mut eval, "(float ##NaN)"), "##NaN");
     assert_eq!(

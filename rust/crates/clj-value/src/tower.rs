@@ -1111,6 +1111,55 @@ fn round_quotient(
     Ok(BigDec { unscaled, scale })
 }
 
+const POW10_F64: [f64; 23] = [
+    1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 1e11, 1e12, 1e13, 1e14, 1e15, 1e16,
+    1e17, 1e18, 1e19, 1e20, 1e21, 1e22,
+];
+
+/// Fast path for `Ratio.doubleValue()` when both magnitudes fit in `u64`
+/// and the `DECIMAL64` quotient converts via exact IEEE-754 powers of 10.
+fn ratio_u64_to_f64(r: &BigRational) -> Option<f64> {
+    let n = u64::try_from(r.numer().magnitude()).ok()?;
+    let d = u64::try_from(r.denom().magnitude()).ok()?;
+    let mut scale = 16 - (i64::from(n.ilog10()) - i64::from(d.ilog10()));
+    let pow = 10u128.checked_pow(u32::try_from(scale).ok()?)?;
+    let num = u128::from(n).checked_mul(pow)?;
+    let den = u128::from(d);
+    let (mut q, mut rem) = (num / den, num % den);
+    if q < 10_000_000_000_000_000 {
+        let nr = rem * 10;
+        (q, rem) = (q * 10 + nr / den, nr % den);
+        scale += 1;
+    }
+    let g = q % 10;
+    let rest = (q / 10) as u64 + u64::from(g > 5 || (g == 5 && (rem != 0 || (q / 10) & 1 != 0)));
+    let mag =
+        (rest <= (1u64 << 53)).then_some((rest as f64) / *POW10_F64.get((scale - 1) as usize)?)?;
+    Some(if r.numer().is_negative() { -mag } else { mag })
+}
+
+/// JVM `Ratio.doubleValue()`: `BigDecimal(num).divide(den,
+/// DECIMAL64).doubleValue()` — 16 significant digits, HALF_EVEN,
+/// then correctly rounded to `f64`. Single-rounding IEEE division
+/// differs in the last digit (`(double 2/3)` is `...667`, not
+/// `...666`). The 16-digit decimal formats exactly and the float
+/// parse rounds it like `BigDecimal.doubleValue` (overflow →
+/// infinity, underflow → zero).
+#[must_use]
+pub fn ratio_to_f64(r: &BigRational) -> f64 {
+    if r.numer().is_zero() {
+        return 0.0;
+    }
+    if let Some(f) = ratio_u64_to_f64(r) {
+        return f;
+    }
+    let mc = MathContext::new(16, RoundingMode::HalfEven);
+    let dec = div_round(r.numer(), r.denom(), &mc).expect("HALF_EVEN division cannot fail");
+    format!("{}e{}", dec.unscaled, -dec.scale)
+        .parse()
+        .unwrap_or(f64::NAN)
+}
+
 /// A scale gap as `u32` for exact `pow10` expansion. Gaps past
 /// `u32::MAX` need multi-GB digit counts (only reachable through
 /// arithmetic-grown scales — literals cap at `i32`), where the
@@ -1565,5 +1614,26 @@ mod tests {
                 .to_bigdec_string(),
             "3.333333333E+99"
         );
+    }
+
+    #[test]
+    fn ratio_double_value_matches_jvm() {
+        use num_bigint::BigInt;
+        let rat = |n: i64, d: i64| BigRational::new(n.into(), d.into());
+        // JVM oracles (DECIMAL64 double-rounding, not IEEE division).
+        assert_eq!(ratio_to_f64(&rat(2, 3)), 0.6666666666666667);
+        assert_eq!(ratio_to_f64(&rat(1, 3)), 0.3333333333333333);
+        assert_eq!(ratio_to_f64(&rat(10, 3)), 3.333333333333333);
+        assert_eq!(ratio_to_f64(&rat(-2, 3)), -0.6666666666666667);
+        assert_eq!(ratio_to_f64(&rat(1, 2)), 0.5);
+        assert_eq!(ratio_to_f64(&rat(3, 2)), 1.5);
+        assert_eq!(ratio_to_f64(&rat(10, 11)), 0.9090909090909091);
+        assert_eq!(ratio_to_f64(&BigRational::from_integer(0.into())), 0.0);
+        let big: BigInt = BigInt::from(10).pow(1000u32);
+        assert_eq!(
+            ratio_to_f64(&BigRational::new(big.clone(), 3.into())),
+            f64::INFINITY
+        );
+        assert_eq!(ratio_to_f64(&BigRational::new(BigInt::from(1), big)), 0.0);
     }
 }

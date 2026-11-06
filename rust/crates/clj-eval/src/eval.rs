@@ -31,6 +31,17 @@ use crate::expr::{
 };
 use crate::ext::{Closure, FastArith, NativeFn, NsHandle, as_closure, as_native};
 
+/// A form-by-form live read of one source text (see
+/// [`Evaluator::live_forms`]).
+pub struct LiveForms {
+    reader: clj_reader::Reader,
+    opts: ReaderOpts,
+    fresh: bool,
+    /// The entry failure (the load-path resolver cast), reported by
+    /// the first read.
+    failed: Option<SourceError>,
+}
+
 /// `eval_source` failures: reader errors, analyzer errors, uncaught
 /// throwables, and (unreachable by construction) escaping `recur`s.
 #[derive(Debug)]
@@ -72,10 +83,41 @@ fn uncaught(s: Signal) -> SourceError {
 /// The throwable of a signal leaving a `try` region (`None`
 /// for `recur`, which the analyzer fences from crossing `try`
 /// — expr.rs `no_recur` — so `try` bodies only ever throw).
-fn try_thrown(signal: Signal) -> Option<Throwable> {
+/// One VM site's cached answer (see `Evaluator::vm_sites`); the
+/// default never matches a real epoch.
+#[derive(Clone)]
+struct SiteEntry {
+    epoch: u64,
+    bind: u64,
+    value: Value,
+}
+
+impl Default for SiteEntry {
+    fn default() -> Self {
+        Self {
+            epoch: u64::MAX,
+            bind: u64::MAX,
+            value: Value::Nil,
+        }
+    }
+}
+
+pub(crate) fn try_thrown(signal: Signal) -> Option<Throwable> {
     match signal {
         Signal::Throw(t) => Some(t),
         Signal::Recur(_) => None,
+    }
+}
+
+/// A list headed by a symbol whose name starts with `def` (the
+/// `Compiler.eval` test, after expansion, for forms that skip the
+/// `eval` wrapper).
+fn is_def_headed(form: &Value) -> bool {
+    match form {
+        Value::List(list) => {
+            matches!(list.first(), Some(Value::Symbol(sym)) if sym.name().starts_with("def"))
+        }
+        _ => false,
     }
 }
 
@@ -126,6 +168,9 @@ pub struct Evaluator {
     pub registry: SharedRegistry,
     bindings: Bindings,
     source: Arc<str>,
+    /// `clojure.core/*ns*`'s var id once [`current_ns_name`] found it
+    /// (0 = not yet; var ids start at 1).
+    star_ns_id: std::sync::atomic::AtomicU64,
     future_threads: Arc<std::sync::Mutex<Vec<std::thread::JoinHandle<()>>>>,
     agent_system: Arc<crate::concurrency::AgentSystem>,
     tap_system: Arc<crate::concurrency::TapSystem>,
@@ -170,6 +215,14 @@ pub struct Evaluator {
     root_cache: FxHashMap<u64, Value>,
     /// The lineage epoch [`root_cache`](Self::root_cache) was filled under.
     root_epoch: u64,
+    /// The VM's per-site caches (`vm` numbers its global reads and
+    /// direct calls): a value or a validation verdict, valid while
+    /// both the lineage epoch and the bindings version match.
+    vm_sites: Vec<SiteEntry>,
+    /// Direct-call sites last validated under `(epoch, bindings
+    /// version)` (only valid verdicts are recorded; a mismatch
+    /// revalidates).
+    vm_direct: Vec<(u64, u64)>,
     /// Pending closure applications (#205): the JVM's bounded
     /// stack as a catchable `StackOverflowError` instead of a
     /// process abort. STM retries restore the entry depth (see
@@ -215,6 +268,13 @@ const STACK_RED_ZONE: usize = 1024 * 1024;
 /// often as a native-sized stack would exhaust.
 const STACK_SEGMENT: usize = 8 * 1024 * 1024;
 
+/// Guarded calls probe the native stack at every this-many-th
+/// level only (#226: the probe reads thread-local state on each
+/// call). Between probes at most 15 levels run — ~120 KiB at the
+/// measured ~8 KiB per level — so a probe that found
+/// [`STACK_RED_ZONE`] free still leaves 8x margin at the next.
+const STACK_PROBE_EVERY: usize = 16;
+
 /// A `defmacro` definition's parts (bundles `eval_defmacro`'s
 /// parameters).
 #[derive(Clone, Copy)]
@@ -249,6 +309,7 @@ impl Evaluator {
             registry: SharedRegistry::new(),
             bindings: Bindings::new(),
             source: Arc::from(source),
+            star_ns_id: std::sync::atomic::AtomicU64::new(0),
             future_threads: Arc::new(std::sync::Mutex::new(Vec::new())),
             agent_system: Arc::new(crate::concurrency::AgentSystem::new()),
             tap_system: Arc::new(crate::concurrency::TapSystem::new()),
@@ -262,6 +323,8 @@ impl Evaluator {
             loaded_data_reader_files: HashSet::new(),
             canonical_default_readers: None,
             root_cache: FxHashMap::default(),
+            vm_sites: Vec::new(),
+            vm_direct: Vec::new(),
             root_epoch: 0,
             call_depth: 0,
             recur_pool: Vec::new(),
@@ -283,6 +346,9 @@ impl Evaluator {
             registry: self.registry.clone(),
             bindings,
             source: Arc::clone(&self.source),
+            star_ns_id: std::sync::atomic::AtomicU64::new(
+                self.star_ns_id.load(std::sync::atomic::Ordering::Relaxed),
+            ),
             future_threads: Arc::clone(&self.future_threads),
             agent_system: Arc::clone(&self.agent_system),
             tap_system: Arc::clone(&self.tap_system),
@@ -312,6 +378,8 @@ impl Evaluator {
             // lineage epoch (sibling writes end its generation like
             // any other evaluator's).
             root_cache: FxHashMap::default(),
+            vm_sites: Vec::new(),
+            vm_direct: Vec::new(),
             root_epoch: self.registry.epoch(),
             // A fork starts unwound (its stack is its own).
             call_depth: 0,
@@ -446,22 +514,47 @@ impl Evaluator {
     /// `in-ns` keeps both in sync), else the registry current.
     /// Public for S7 drivers (the REPL prompt tracks this).
     pub fn current_ns_name(&self) -> String {
-        // Static lookup key (equality/hash ignore the id/meta, so
-        // sharing one symbol is sound): this runs per analyzed
-        // symbol, and the direct id lookup skips the whole-namespace
-        // clone `get` + `lookup` paid before.
+        // The `*ns*` id lookup is static and cached (equality/hash
+        // ignore the id/meta, so sharing one symbol is sound; vars
+        // never change ids; an absent `*ns*` re-probes).
+        let id = self.star_ns_var();
+        self.bound_ns_name(id)
+            .map_or_else(|| self.registry.current(), |n| n.to_string())
+    }
+
+    /// [`current_ns_name`](Self::current_ns_name) as the bound
+    /// namespace handle's shared name (no copy on the common path:
+    /// the analyzer asks per symbol).
+    pub(crate) fn current_ns_arc(&self) -> Arc<str> {
+        let id = self.star_ns_var();
+        self.bound_ns_name(id)
+            .map_or_else(|| Arc::from(self.registry.current()), Arc::clone)
+    }
+
+    /// The `*ns*` var id (cached once found).
+    fn star_ns_var(&self) -> Option<u64> {
         static STAR_NS: LazyLock<Symbol> =
             LazyLock::new(|| Symbol::new(Some("clojure.core"), "*ns*"));
-        let bound = self
-            .registry
-            .lookup_in_ns("clojure.core", &STAR_NS)
-            .and_then(|id| self.bindings.get(id))
+        let cached = self.star_ns_id.load(std::sync::atomic::Ordering::Relaxed);
+        if cached != 0 {
+            return Some(cached);
+        }
+        let found = self.registry.lookup_in_ns("clojure.core", &STAR_NS);
+        if let Some(id) = found {
+            self.star_ns_id
+                .store(id, std::sync::atomic::Ordering::Relaxed);
+        }
+        found
+    }
+
+    /// The thread-bound `*ns*` handle's name, if any.
+    fn bound_ns_name(&self, id: Option<u64>) -> Option<&Arc<str>> {
+        id.and_then(|id| self.bindings.get(id))
             .and_then(|v| match v {
                 Value::Extension(h) => h.as_any().downcast_ref::<NsHandle>(),
                 _ => None,
             })
-            .map(|ns| ns.name.to_string());
-        bound.unwrap_or_else(|| self.registry.current().to_owned())
+            .map(|ns| &ns.name)
     }
 
     /// The next lineage identity (S7 drivers stamp
@@ -487,7 +580,11 @@ impl Evaluator {
     pub fn analyze(&mut self, form: &Value) -> Result<Expr, CompileError> {
         let source = Arc::clone(&self.source);
         let seq = self.registry.eval_seq();
-        Analyzer::new(&source, self, seq).analyze(form, Span::new(1, 1), true)
+        let mut analyzer = Analyzer::new(&source, self, seq);
+        // `Compiler.eval` wraps every form but `def…`-headed ones
+        // in an `eval{N}` fn, which names the fns inside it.
+        analyzer.top_wrapped = !is_def_headed(form);
+        analyzer.analyze(form, Span::new(1, 1), true)
     }
 
     /// Read every form in `text` against the synced current
@@ -508,11 +605,10 @@ impl Evaluator {
         text: &str,
         hook: &mut dyn clj_reader::ReadHooks,
     ) -> Result<Vec<Value>, SourceError> {
-        let (reader, seed) = Self::read_forms_pre(self, text);
-        match seed {
-            Ok(seed) => {
+        let (reader, opts) = Self::read_forms_pre(self, text, 1);
+        match opts {
+            Ok(mut opts) => {
                 let mut reader = reader;
-                let mut opts = Self::read_forms_opts(self, &seed);
                 Self::read_forms_loop(self, &mut reader, hook, &mut opts)
             }
             Err(cce) => Err(crate::reader::executing_wrap(
@@ -531,69 +627,67 @@ impl Evaluator {
     /// evaluator, which the per-form consult also needs mutably,
     /// so each attempt scopes its own hooks.
     pub fn read_forms_live(&mut self, text: &str) -> Result<Vec<Value>, SourceError> {
-        let (reader, seed) = Self::read_forms_pre(self, text);
-        match seed {
-            Ok(seed) => {
-                let mut reader = reader;
-                let mut opts = Self::read_forms_opts(self, &seed);
-                let mut forms = Vec::new();
-                loop {
-                    Self::snap_data_readers(self, &mut opts)?;
-                    reader.set_opts(&opts);
-                    let outcome = {
-                        let mut hooks = crate::reader::LiveReadHooks::new(self);
-                        reader.read_form(false, &mut hooks)
-                    };
-                    match outcome {
-                        Ok(Some(v)) => {
-                            Self::drain_data_readers(self, &mut reader, opts.suppress_read)?;
-                            forms.push(Self::resolve_data_readers(self, v, opts.suppress_read)?);
-                        }
-                        Ok(None) => {
-                            Self::drain_data_readers(self, &mut reader, opts.suppress_read)?;
-                            return Ok(forms);
-                        }
-                        Err(e) => {
-                            // Effects precede the failure (fired tags ran
-                            // during the read), so drain first.
-                            Self::drain_data_readers(self, &mut reader, opts.suppress_read)?;
-                            return Err(SourceError::Reader(e));
-                        }
-                    }
-                }
-            }
-            Err(cce) => {
-                let outer = self.next_id();
-                let cause = self.next_id();
-                Err(crate::reader::executing_wrap(
-                    reader.line(),
-                    reader.col(),
-                    &cce,
-                    outer,
-                    cause,
-                ))
-            }
+        self.read_forms_live_at(text, 1)
+    }
+
+    /// [`read_forms_live`](Self::read_forms_live) of a slice that
+    /// starts at `line` of its file.
+    fn read_forms_live_at(&mut self, text: &str, line: u32) -> Result<Vec<Value>, SourceError> {
+        let mut forms = self.live_forms_at(text, line);
+        let mut out = Vec::new();
+        while let Some(form) = self.next_live_form(&mut forms)? {
+            out.push(form);
+        }
+        Ok(out)
+    }
+
+    /// One live read: the next form with its data readers resolved
+    /// (`None` at EOF).
+    fn read_next_live(
+        &mut self,
+        reader: &mut clj_reader::Reader,
+        opts: &mut ReaderOpts,
+    ) -> Result<Option<Value>, SourceError> {
+        Self::snap_data_readers(self, opts)?;
+        reader.set_opts(opts);
+        let outcome = {
+            let mut hooks = crate::reader::LiveReadHooks::new(self);
+            reader.read_form(false, &mut hooks)
+        };
+        // Effects precede every exit (fired tags ran during the
+        // read, failures included), so drain first.
+        Self::drain_data_readers(self, reader, opts.suppress_read)?;
+        match outcome {
+            Ok(Some(v)) => Ok(Some(Self::resolve_data_readers(
+                self,
+                v,
+                opts.suppress_read,
+            )?)),
+            Ok(None) => Ok(None),
+            Err(e) => Err(SourceError::Reader(e)),
         }
     }
 
     /// The shared read prologue: synced options, leading
     /// whitespace consumed, gates seeded (entry failures keep the
     /// post-skip reader, so callers blame the position like
-    /// `Compiler.load`).
+    /// `Compiler.load`). Hands back the installed options so the
+    /// per-form loops start from them instead of re-syncing the
+    /// namespace maps.
     fn read_forms_pre(
         eval: &mut Evaluator,
         text: &str,
-    ) -> (
-        clj_reader::Reader,
-        Result<crate::reader::ReadGateSeed, NativeError>,
-    ) {
+        line: u32,
+    ) -> (clj_reader::Reader, Result<ReaderOpts, NativeError>) {
         let mut reader = clj_reader::Reader::new(text, &ReaderOpts::default());
+        reader.set_start_line(line);
         reader.consume_whitespaces();
-        let seed = crate::reader::seed_load_gates(eval);
-        if let Ok(seed) = &seed {
-            reader.set_opts(&Self::read_forms_opts(eval, seed));
-        }
-        (reader, seed)
+        let opts = crate::reader::seed_load_gates(eval).map(|seed| {
+            let opts = Self::read_forms_opts(eval, &seed);
+            reader.set_opts(&opts);
+            opts
+        });
+        (reader, opts)
     }
 
     /// The synced base options for [`read_forms`](Self::read_forms):
@@ -683,12 +777,68 @@ impl Evaluator {
     /// read form. Uncaught throwables (including bare macro-arity
     /// failures) abort the load.
     pub fn eval_source(&mut self, text: &str) -> Result<Vec<Value>, SourceError> {
-        let forms = self.read_forms_live(text)?;
-        let mut out = Vec::with_capacity(forms.len());
-        for form in &forms {
-            out.push(self.eval_top_form(form)?);
+        self.eval_source_at(text, 1)
+    }
+
+    /// [`eval_source`](Self::eval_source) of a slice that starts at
+    /// `line` of its file (embedded forms evaluated one by one keep
+    /// their file lines).
+    pub(crate) fn eval_source_at(
+        &mut self,
+        text: &str,
+        line: u32,
+    ) -> Result<Vec<Value>, SourceError> {
+        let mut forms = self.live_forms_at(text, line);
+        let mut out = Vec::new();
+        while let Some(form) = self.next_live_form(&mut forms)? {
+            out.push(self.eval_top_form(&form)?);
         }
         Ok(out)
+    }
+
+    /// Start reading `text` form by form with the live hooks, for
+    /// callers that evaluate each form before reading the next
+    /// (`load`, `-e`): see [`next_live_form`](Self::next_live_form).
+    pub fn live_forms(&mut self, text: &str) -> LiveForms {
+        self.live_forms_at(text, 1)
+    }
+
+    /// An entry failure (the load-path resolver cast) is the
+    /// `Syntax error executing` wrap at the post-skip position,
+    /// answered by the first read.
+    fn live_forms_at(&mut self, text: &str, line: u32) -> LiveForms {
+        let (reader, opts) = Self::read_forms_pre(self, text, line);
+        let (opts, failed) = match opts {
+            Ok(opts) => (opts, None),
+            Err(cce) => {
+                let outer = self.next_id();
+                let cause = self.next_id();
+                let wrap =
+                    crate::reader::executing_wrap(reader.line(), reader.col(), &cce, outer, cause);
+                (ReaderOpts::default(), Some(wrap))
+            }
+        };
+        LiveForms {
+            reader,
+            opts,
+            fresh: true,
+            failed,
+        }
+    }
+
+    /// The next form of a [`LiveForms`] read (`None` at EOF). Like
+    /// `Compiler.load`, each read after the first re-syncs the
+    /// namespace view, so an `ns`/`in-ns` switch and new aliases,
+    /// refers and imports from the forms evaluated so far reach the
+    /// next one (`::kw` after `(ns foo)` reads `:foo/kw`).
+    pub fn next_live_form(&mut self, forms: &mut LiveForms) -> Result<Option<Value>, SourceError> {
+        if let Some(failed) = forms.failed.take() {
+            return Err(failed);
+        }
+        if !std::mem::replace(&mut forms.fresh, false) {
+            crate::reader::sync_reader_ns(self, &mut forms.opts);
+        }
+        self.read_next_live(&mut forms.reader, &mut forms.opts)
     }
 
     /// Deep-realize a value for printing (like the JVM, whose
@@ -718,7 +868,8 @@ impl Evaluator {
         }
         self.registry.bump_eval_seq();
         let expr = self.analyze(&expanded).map_err(|e| self.compile_err(e))?;
-        match self.eval(&expr, &Env::new()) {
+        let code = crate::vm::compile_top(&expr);
+        match crate::vm::run_top(self, &code) {
             Ok(v) => Ok(v),
             Err(s) => Err(uncaught(s)),
         }
@@ -850,18 +1001,21 @@ impl Evaluator {
     ) -> Value {
         let id = self.next_id();
         let sym = Symbol::new(Some(ns), name);
-        let var_id = self.registry.intern(&sym);
+        // Built by hand: boot installs ~700 of these, and `format!`
+        // costs several times the copy.
+        let mut display = String::with_capacity(ns.len() + 1 + name.len());
+        display.push_str(ns);
+        display.push('/');
+        display.push_str(name);
         let native = Value::Extension(Arc::new(NativeFn {
             id,
-            display: Arc::from(format!("{ns}/{name}").as_str()),
+            display: Arc::from(display),
             func,
             owned: crate::ns::owned_entry(name),
             meta: None,
             fast,
         }));
-        self.registry.with_state_mut(var_id, |state| {
-            state.root = Some(native.clone());
-        });
+        self.registry.intern_with_root(&sym, native.clone());
         native
     }
 
@@ -895,11 +1049,86 @@ impl Evaluator {
     /// the var's own `Unbound` sentinel, never a throw). Public
     /// for S7 drivers (the REPL reads the current `*1`/`*2` to
     /// shift the window).
-    pub fn deref_var(&self, id: u64, sym: &Symbol) -> Value {
+    pub fn deref_var(&mut self, id: u64, sym: &Symbol) -> Value {
+        if let Some(v) = self.bindings.get(id) {
+            return v.clone();
+        }
+        self.force_lazy(id);
+        self.registry.root_or_unbound(id, sym)
+    }
+
+    /// [`deref_var`](Self::deref_var) for shared-borrow readers of
+    /// boot-installed vars (never lazy `core.clj` ones, so nothing
+    /// to force).
+    pub(crate) fn deref_var_unforced(&self, id: u64, sym: &Symbol) -> Value {
         if let Some(v) = self.bindings.get(id) {
             return v.clone();
         }
         self.registry.root_or_unbound(id, sym)
+    }
+
+    /// A VM global read at `site`: the cached value while nothing
+    /// changed (no root write anywhere, the same thread bindings),
+    /// else [`deref_var_cached`](Self::deref_var_cached), recorded.
+    #[inline(always)]
+    pub(crate) fn site_global(&mut self, site: usize, var: &Var) -> Value {
+        if let Some(e) = self.vm_sites.get(site) {
+            if e.epoch == self.registry.epoch() && e.bind == self.bindings.version() {
+                return crate::vm::clone_value(&e.value);
+            }
+        }
+        self.site_global_miss(site, var)
+    }
+
+    /// [`site_global`](Self::site_global)'s miss: read and record.
+    #[cold]
+    #[inline(never)]
+    fn site_global_miss(&mut self, site: usize, var: &Var) -> Value {
+        let value = self.deref_var_cached(var.id, &var.sym);
+        self.site_store(site, value.clone());
+        value
+    }
+
+    /// A VM direct call's validation at `site` (cached like
+    /// [`site_global`](Self::site_global)): no thread binding
+    /// shadows the var and its root is still the analyzed native.
+    /// The cached verdict checks inline; a miss re-validates out of
+    /// line.
+    #[inline(always)]
+    pub(crate) fn site_direct_valid(&mut self, site: usize, call: &DirectCall) -> bool {
+        let now = (self.registry.epoch(), self.bindings.version());
+        self.vm_direct.get(site) == Some(&now) || self.site_direct_check(site, call)
+    }
+
+    /// [`site_direct_valid`](Self::site_direct_valid)'s miss: check
+    /// the var and record a valid verdict under the current epochs.
+    #[cold]
+    #[inline(never)]
+    fn site_direct_check(&mut self, site: usize, call: &DirectCall) -> bool {
+        let valid = self.bindings.get(call.var.id).is_none()
+            && matches!(self.deref_var_cached(call.var.id, &call.var.sym),
+                Value::Extension(e) if Arc::ptr_eq(&e, &call.expect));
+        if valid {
+            if self.vm_direct.len() <= site {
+                self.vm_direct.resize(site + 1, (u64::MAX, u64::MAX));
+            }
+            // Read after the check, which may have forced a lazy var.
+            self.vm_direct[site] = (self.registry.epoch(), self.bindings.version());
+        }
+        valid
+    }
+
+    /// Record a site answer under the current epochs (read after the
+    /// computation, which may have forced a lazy var).
+    fn site_store(&mut self, site: usize, value: Value) {
+        if self.vm_sites.len() <= site {
+            self.vm_sites.resize(site + 1, SiteEntry::default());
+        }
+        self.vm_sites[site] = SiteEntry {
+            epoch: self.registry.epoch(),
+            bind: self.bindings.version(),
+            value,
+        };
     }
 
     /// The visible value of a var through the per-evaluator root
@@ -927,10 +1156,42 @@ impl Evaluator {
         } else if let Some(v) = self.root_cache.get(&id) {
             return v.clone();
         }
-        let value = self.registry.root_or_unbound(id, sym);
+        let mut value = self.registry.root_or_unbound(id, sym);
+        // Only unbound roots can be lazy `core.clj` vars (forcing
+        // bumps the epoch, so the stale-epoch insert below misses
+        // once and refills).
+        if matches!(value, Value::Unbound(_)) && self.force_lazy(id) {
+            value = self.registry.root_or_unbound(id, sym);
+        }
         self.root_cache.insert(id, value.clone());
         self.root_epoch = epoch;
         value
+    }
+
+    /// Force a lazy `core.clj` var (see `core_lazy`): `true` when
+    /// this call evaluated its form. A lock-free miss for every
+    /// other var.
+    pub(crate) fn force_lazy(&mut self, id: u64) -> bool {
+        self.registry.is_lazy(id) && crate::core_lazy::force(self, id)
+    }
+
+    /// Swap the source name (spans and `:file` metadata), returning
+    /// the old one.
+    pub(crate) fn swap_source(&mut self, source: Arc<str>) -> Arc<str> {
+        std::mem::replace(&mut self.source, source)
+    }
+
+    /// Swap the binding stack and source name (lazy forcing runs
+    /// isolated from the caller's bindings), returning the old pair.
+    pub(crate) fn swap_context(
+        &mut self,
+        bindings: Bindings,
+        source: Arc<str>,
+    ) -> (Bindings, Arc<str>) {
+        (
+            std::mem::replace(&mut self.bindings, bindings),
+            std::mem::replace(&mut self.source, source),
+        )
     }
 
     /// Evaluate an expression to a value (or a control signal).
@@ -947,8 +1208,16 @@ impl Evaluator {
                 sym,
                 doc,
                 init,
+                meta,
                 span,
-            } => self.eval_def(sym, doc.clone(), init.as_deref(), *span, env),
+            } => self.eval_def(
+                sym,
+                doc.clone(),
+                init.as_deref(),
+                meta.as_deref(),
+                *span,
+                env,
+            ),
             Expr::If { test, then, els } => self.eval_if(test, then, els, env),
             Expr::Do(exprs) => self.eval_body(exprs, env),
             Expr::Let { bindings, body } | Expr::Loop { bindings, body } => {
@@ -1108,6 +1377,11 @@ impl Evaluator {
         meta: Option<Map>,
         env: &Env,
     ) -> Result<Value, Signal> {
+        Ok(Value::Map(self.eval_map_pairs(pairs, env)?.with_meta(meta)))
+    }
+
+    /// A map literal's pairs, evaluated left to right.
+    fn eval_map_pairs(&mut self, pairs: &[(Expr, Expr)], env: &Env) -> Result<Map, Signal> {
         let mut pairs_out = Vec::with_capacity(pairs.len());
         for (k, v) in pairs {
             let key = self.eval(k, env)?;
@@ -1115,9 +1389,7 @@ impl Evaluator {
             let key = crate::lazy::realize_key(self, &key)?;
             pairs_out.push((key, val));
         }
-        Ok(Value::Map(
-            Map::from_kvs_last_wins(pairs_out).with_meta(meta),
-        ))
+        Ok(Map::from_kvs_last_wins(pairs_out))
     }
 
     /// A set literal (elements evaluate left to right).
@@ -1157,18 +1429,24 @@ impl Evaluator {
     /// `Throwable` cast error.
     fn eval_throw(&mut self, inner: &Expr, env: &Env) -> Result<Value, Signal> {
         let value = self.eval(inner, env)?;
+        Err(self.throw_value(value))
+    }
+
+    /// The signal `throw` raises for a value: throwables as-is,
+    /// anything else the cast (or `nil`) error.
+    pub(crate) fn throw_value(&mut self, value: Value) -> Signal {
         match value {
-            Value::Throwable(t) => Err(Signal::Throw(t)),
+            Value::Throwable(t) => Signal::Throw(t),
             // `nil` is not the cast error: the JVM throws a
             // Clojure-constructed NPE with stable text (probe29).
-            Value::Nil => Err(self.throw(NativeError::new(
+            Value::Nil => self.throw(NativeError::new(
                 ThrowClass::NullPointerException,
                 "Cannot throw exception because \"null\" is null".to_owned(),
-            ))),
-            other => Err(self.throw(NativeError::cast(
+            )),
+            other => self.throw(NativeError::cast(
                 &jvm_class_of(&other),
                 "java.lang.Throwable",
-            ))),
+            )),
         }
     }
 
@@ -1240,16 +1518,27 @@ impl Evaluator {
         if self.eval(test, env)?.is_truthy() {
             return Ok(Value::Nil);
         }
+        let message = match message {
+            None => None,
+            Some(m) => Some(self.eval(m, env)?),
+        };
+        Err(self.assert_failed(message, form))
+    }
+
+    /// The failed `assert`'s `AssertionError` (the message value,
+    /// when given, renders like `str`).
+    pub(crate) fn assert_failed(&mut self, message: Option<Value>, form: &str) -> Signal {
         let text = match message {
             None => format!("Assert failed: {form}"),
-            Some(m) => {
-                let mv = self.eval(m, env)?;
+            Some(mv) => {
                 // `native_str` of one arg is `str_of_one`.
-                let rendered = crate::core::str_of_one(self, &mv).map_err(|e| self.throw(e))?;
-                format!("Assert failed: {rendered}\n{form}")
+                match crate::core::str_of_one(self, &mv) {
+                    Ok(rendered) => format!("Assert failed: {rendered}\n{form}"),
+                    Err(e) => return self.throw(e),
+                }
             }
         };
-        Err(self.throw(NativeError::new(ThrowClass::AssertionError, text)))
+        self.throw(NativeError::new(ThrowClass::AssertionError, text))
     }
 
     /// `(time expr)`: wall-clock the expr, `prn` the JVM line to
@@ -1321,6 +1610,31 @@ impl Evaluator {
             Expr::Literal(reader),
         )];
         self.eval_binding(&pairs, body, env)
+    }
+
+    /// The `case*` dispatch probe for an evaluated target: the value
+    /// the hit's post-check compares (realized for hash tests) and
+    /// the shift-masked key — `None` when an `:int` test misses
+    /// outright (non-numbers).
+    pub(crate) fn case_probe(
+        &mut self,
+        v: Value,
+        shift: i32,
+        mask: i32,
+        test: CaseTest,
+    ) -> Result<Option<(Value, i32)>, Signal> {
+        if test == CaseTest::Int {
+            return Ok(case_int_value(&v).map(|key| (v, case_shift_mask(key, shift, mask))));
+        }
+        if clj_value::seq_hash_unsupported(&v) {
+            return Err(self.unsupported_hash());
+        }
+        let r = crate::lazy::realize_deep(self, &v)?;
+        if clj_value::seq_hash_unsupported(&r) {
+            return Err(self.unsupported_hash());
+        }
+        let key = case_shift_mask(clj_value::hash_code(&r), shift, mask);
+        Ok(Some((r, key)))
     }
 
     /// `(case* …)`: the interpreter's `CaseExpr.doEmit` on the boxed
@@ -1585,7 +1899,7 @@ impl Evaluator {
                 Value::Bool(true),
             );
             let sym = sym.clone().with_meta(Some(meta));
-            last = self.eval_def(&sym, None, None, span, env)?;
+            last = self.eval_def(&sym, None, None, None, span, env)?;
         }
         Ok(last)
     }
@@ -1668,39 +1982,49 @@ impl Evaluator {
         sym: &Symbol,
         doc: Option<String>,
         init: Option<&Expr>,
+        meta: Option<&[(Expr, Expr)]>,
         span: Span,
         env: &Env,
     ) -> Result<Value, Signal> {
-        let id = self.registry.intern_def_target(sym);
+        let id = self.def_begin(sym);
         let value = match init {
             Some(init) => Some(self.eval(init, env)?),
             None => None,
         };
+        // The evaluated name metadata (after the init, like
+        // `DefExpr.eval`), else the constant map on the name.
+        let name_meta = match meta {
+            Some(pairs) => Some(self.eval_map_pairs(pairs, env)?),
+            None => sym.meta().cloned(),
+        };
+        Ok(self.def_finish(id, sym, doc, value, name_meta, span))
+    }
+
+    /// A `def`'s first step, before the init evaluates: the target
+    /// var's id. Redefining a lazy `core.clj` var forces it first, so
+    /// a later force can never overwrite this def (a native-backed
+    /// macro's pending metadata source is dropped for the same
+    /// reason).
+    pub(crate) fn def_begin(&mut self, sym: &Symbol) -> u64 {
+        let id = self.registry.intern_def_target(sym);
+        self.force_lazy(id);
+        self.registry.take_meta_lazy(id);
+        id
+    }
+
+    /// A `def`'s last step: the root (when an init ran), the var
+    /// metadata, and the dynamic flag.
+    pub(crate) fn def_finish(
+        &mut self,
+        id: u64,
+        sym: &Symbol,
+        doc: Option<String>,
+        value: Option<Value>,
+        name_meta: Option<Map>,
+        span: Span,
+    ) -> Value {
         let dynamic = Self::dynamic_of(sym);
-        let cur = self.current_ns_name();
-        let cur_id = self.registry.ns_id(&cur).unwrap_or(0);
-        let mut meta = sym.meta().cloned().unwrap_or_else(new_map);
-        if let Some(doc) = doc {
-            let key = Value::Keyword(Keyword::new(None, "doc"));
-            meta = meta.insert(key, Value::Str(Arc::from(doc.as_str())));
-        }
-        let auto = [
-            ("line", Value::Int(i64::from(span.line))),
-            ("column", Value::Int(i64::from(span.col))),
-            ("file", Value::Str(Arc::clone(&self.source))),
-            ("name", Value::Symbol(Symbol::new(None, sym.name()))),
-            (
-                "ns",
-                Value::Extension(Arc::new(NsHandle {
-                    name: Arc::from(cur.as_str()),
-                    id: cur_id,
-                })),
-            ),
-        ];
-        for (key, val) in auto {
-            let key = Value::Keyword(Keyword::new(None, key));
-            meta = meta.insert(key, val);
-        }
+        let meta = self.def_var_meta(sym, name_meta.as_ref(), doc, span);
         self.registry.with_state_mut(id, |state| {
             if let Some(v) = value {
                 state.root = Some(v);
@@ -1708,10 +2032,66 @@ impl Evaluator {
             state.meta = Some(meta);
             state.dynamic = dynamic;
         });
-        Ok(Value::Var(Var {
+        Value::Var(Var {
             id,
             sym: sym.clone(),
-        }))
+        })
+    }
+
+    /// A `def`'s var metadata: the name's map, then `:doc`, then the
+    /// auto keys — one build with the `insert` chain's exact layout
+    /// (first occurrence keeps its position, the last value wins).
+    fn def_var_meta(
+        &self,
+        sym: &Symbol,
+        name_meta: Option<&clj_value::Map>,
+        doc: Option<String>,
+        span: Span,
+    ) -> clj_value::Map {
+        let cur = self.current_ns_name();
+        let cur_id = self.registry.ns_id(&cur).unwrap_or(0);
+        let mut pairs: Vec<(Value, Value)> = name_meta
+            .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+            .unwrap_or_default();
+        if let Some(doc) = doc {
+            pairs.push((
+                Value::Keyword(clj_value::static_keyword!("doc")),
+                Value::Str(Arc::from(doc.as_str())),
+            ));
+        }
+        pairs.extend([
+            (
+                Value::Keyword(clj_value::static_keyword!("line")),
+                Value::Int(i64::from(span.line)),
+            ),
+            (
+                Value::Keyword(clj_value::static_keyword!("column")),
+                Value::Int(i64::from(span.col)),
+            ),
+            (
+                Value::Keyword(clj_value::static_keyword!("file")),
+                Value::Str(Arc::clone(&self.source)),
+            ),
+            (
+                Value::Keyword(clj_value::static_keyword!("name")),
+                Value::Symbol(Symbol::new(None, sym.name())),
+            ),
+            (
+                Value::Keyword(clj_value::static_keyword!("ns")),
+                Value::Extension(Arc::new(NsHandle {
+                    name: Arc::from(cur.as_str()),
+                    id: cur_id,
+                })),
+            ),
+        ]);
+        match name_meta {
+            // Keep a hashy (or sorted) name map's own class.
+            Some(m) if m.is_hashy() => pairs
+                .into_iter()
+                .skip(m.size())
+                .fold(m.clone(), |acc, (k, v)| acc.insert(k, v)),
+            _ => clj_value::Map::from_kvs_last_wins(pairs),
+        }
     }
 
     /// `(loop …)`: bind once, then run the body, rebinding through
@@ -1832,6 +2212,7 @@ impl Evaluator {
             env: env.clone(),
             meta: None,
             conveyed: None,
+            vm: None,
         }
     }
 
@@ -1877,6 +2258,11 @@ impl Evaluator {
     /// Invoke any value (natives reuse this for `:rename`
     /// fallbacks and other higher-order calls).
     pub(crate) fn call(&mut self, callee: &Value, args: &[Value]) -> Result<Value, Signal> {
+        // A VM closure's fixed arity runs directly (#226: natives
+        // call back per item; no apply dispatch, no arg buffer).
+        if let Some((code, arity)) = crate::vm::fixed_target(callee, args.len()) {
+            return crate::vm::call_borrowed(self, code, arity, args);
+        }
         self.invoke(callee, args)
     }
 
@@ -1897,12 +2283,20 @@ impl Evaluator {
     /// memoized seq chunks free as they advance, like the JVM's
     /// dead locals); everything else borrows it (the buffer drops
     /// at return, as before).
-    fn invoke_args(
+    pub(crate) fn invoke_args(
         &mut self,
         callee: &Value,
         args: SmallVec<[Value; 4]>,
         span: Span,
     ) -> Result<Value, Signal> {
+        // VM closures take the buffer by move (accumulators stay
+        // uniquely owned through `reduce`-style step calls).
+        if let Some(closure) = crate::ext::as_closure(callee) {
+            if let (Some(code), None) = (&closure.vm, &closure.conveyed) {
+                let mut args = args;
+                return crate::vm::apply_moved(self, closure, code, &mut args);
+            }
+        }
         // The call site stays visible to natives for the
         // duration of the call (nesting saves/restores).
         let saved = self.native_call_span.replace(span);
@@ -1946,7 +2340,7 @@ impl Evaluator {
     /// the lineage epoch still matches (no root write since the
     /// cache generation), and the cached root is still the
     /// analyzed native by identity.
-    fn direct_valid(&self, call: &DirectCall) -> bool {
+    pub(crate) fn direct_valid(&self, call: &DirectCall) -> bool {
         if self.bindings.get(call.var.id).is_some() {
             return false;
         }
@@ -1985,10 +2379,20 @@ impl Evaluator {
         for arg in &call.args {
             values.push(self.eval(arg, env)?);
         }
+        self.call_direct_values(call, &mut values)
+    }
+
+    /// A validated direct call over evaluated args (the snapshot
+    /// entries — owned-args loopers take the buffer).
+    pub(crate) fn call_direct_values(
+        &mut self,
+        call: &DirectCall,
+        values: &mut SmallVec<[Value; 4]>,
+    ) -> Result<Value, Signal> {
         let saved = self.native_call_span.replace(call.span);
         let out = match &call.owned {
-            Some(owned) => owned(self, values).map_err(|e| self.throw(e)),
-            None => (call.func)(self, &values).map_err(|e| self.throw(e)),
+            Some(owned) => owned(self, std::mem::take(values)).map_err(|e| self.throw(e)),
+            None => (call.func)(self, values).map_err(|e| self.throw(e)),
         };
         self.native_call_span = saved;
         out
@@ -2068,7 +2472,7 @@ impl Evaluator {
     /// `*unchecked-math*` and every error text stay the native's;
     /// the trailing arm only serves direct unit tests — dispatch
     /// never routes those tags here).
-    fn fast_int2(op: FastArith, x: i64, y: i64) -> Option<Value> {
+    pub(crate) fn fast_int2(op: FastArith, x: i64, y: i64) -> Option<Value> {
         match op {
             FastArith::Add => x.checked_add(y).map(Value::Int),
             FastArith::Sub => x.checked_sub(y).map(Value::Int),
@@ -2086,7 +2490,11 @@ impl Evaluator {
     /// native, so errors and tower results stay exact — and every
     /// tagged native installs with `owned: None`, so the borrow
     /// entry is the whole story).
-    fn call_direct_fallback(&mut self, call: &DirectCall, args: &[Value]) -> Result<Value, Signal> {
+    pub(crate) fn call_direct_fallback(
+        &mut self,
+        call: &DirectCall,
+        args: &[Value],
+    ) -> Result<Value, Signal> {
         let saved = self.native_call_span.replace(call.span);
         let out = (call.func)(self, args).map_err(|e| self.throw(e));
         self.native_call_span = saved;
@@ -2188,8 +2596,8 @@ impl Evaluator {
     /// callee pays one extra failed downcast instead).
     fn invoke_extension(&mut self, callee: &Value, args: &[Value]) -> Result<Value, Signal> {
         if let Some(native) = as_native(callee) {
-            let func = Arc::clone(&native.func);
-            return func(self, args).map_err(|e| self.throw(e));
+            // The caller holds `callee` for the call (no `Arc` bump).
+            return (native.func)(self, args).map_err(|e| self.throw(e));
         }
         if let Some(closure) = as_closure(callee) {
             return self.apply_closure(closure, args);
@@ -2394,6 +2802,16 @@ impl Evaluator {
         // every thread stack size — and `maybe_grow` inlines
         // when stack suffices, keeping the hot path
         // allocation-free.
+        self.guarded_call(|ev| ev.apply_closure_frame(closure, args))
+    }
+
+    /// Run one unbounded application under the #205 call-depth
+    /// guard, on a grown stack segment when the native stack runs
+    /// low (see [`apply_closure`](Self::apply_closure)).
+    pub(crate) fn guarded_call(
+        &mut self,
+        f: impl FnOnce(&mut Self) -> Result<Value, Signal>,
+    ) -> Result<Value, Signal> {
         if self.call_depth >= MAX_CALL_DEPTH {
             return Err(self.throw(NativeError::new(
                 ThrowClass::StackOverflowError,
@@ -2401,9 +2819,11 @@ impl Evaluator {
             )));
         }
         self.call_depth += 1;
-        let result = stacker::maybe_grow(STACK_RED_ZONE, STACK_SEGMENT, || {
-            self.apply_closure_frame(closure, args)
-        });
+        let result = if self.call_depth % STACK_PROBE_EVERY == 0 {
+            stacker::maybe_grow(STACK_RED_ZONE, STACK_SEGMENT, || f(self))
+        } else {
+            f(self)
+        };
         self.call_depth -= 1;
         result
     }
@@ -2426,6 +2846,9 @@ impl Evaluator {
 
     /// The arity dispatch behind [`apply_closure`](Self::apply_closure).
     fn apply_closure_inner(&mut self, closure: &Closure, args: &[Value]) -> Result<Value, Signal> {
+        if let Some(code) = &closure.vm {
+            return crate::vm::apply(self, closure, code, args);
+        }
         let mut variadic: Option<&crate::expr::Arity> = None;
         for arity in closure.arities.iter() {
             if arity.rest.is_none() && arity.fixed.len() == args.len() {
@@ -2506,6 +2929,19 @@ impl Evaluator {
                 Err(signal) => return Err(signal),
             }
         }
+    }
+
+    /// [`destructure`](Self::destructure) for a binding (`:or`
+    /// defaults evaluate against `env`).
+    pub(crate) fn destructure_in(
+        &mut self,
+        pat: &Pattern,
+        value: &Value,
+        env: &Env,
+        out: &mut Vec<Value>,
+    ) -> Result<(), Signal> {
+        self.destructure(pat, value, env, out, ForceSet::default())
+            .map(|_| ())
     }
 
     /// Destructure a value against a pattern, pushing bound values
@@ -3246,7 +3682,7 @@ fn pr_of(v: &Value) -> String {
 }
 
 /// Variadic rest: `nil` when empty, else the list (§E5).
-fn rest_list(args: &[Value]) -> Value {
+pub(crate) fn rest_list(args: &[Value]) -> Value {
     if args.is_empty() {
         Value::Nil
     } else {

@@ -352,7 +352,7 @@ just decrement depth):
    reruns and validators ran lock-free at steps 2–3;
    watches and sends run unlocked like the JVM).
 9. Fire watches in ascending Ref-id order, each ref's
-   watches in insertion order (§1e).
+   watches in map seq order (§1e).
 10. Dispatch the outbox in issue order through the normal
     `enqueue` path (§1f).
 11. Answer the body value.

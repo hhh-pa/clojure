@@ -12,6 +12,17 @@
 //! `docs/spec/t1174/`), `jit` in gap-121 slice 1 (spec
 //! `docs/spec/gap-121/slice-1.md`).
 
+/// mimalloc (#226) off Linux: the interpreter allocates many small,
+/// short-lived blocks (reader lists, analyzed forms, seq steps), where
+/// it is markedly cheaper than the platform allocators. Linux keeps
+/// glibc's allocator for peak RSS: under the default `madvise`
+/// transparent-huge-page mode mimalloc's arenas take huge pages (a
+/// trivial run peaked at 19 MB instead of 9), and even without them a
+/// trivial run peaks 0.7 MB higher and data-heavy runs 20-30% higher.
+#[cfg(not(target_os = "linux"))]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use clap::{Parser, Subcommand};
 use clj_eval::{Evaluator, SourceError, boot, compile_diagnostic, compile_head};
 use clj_value::Value;
@@ -154,16 +165,20 @@ fn cmd_eval(form: &str, edn: bool) -> ExitCode {
 /// Evaluate and print each form (split from `cmd_eval` so the exit
 /// join runs on every path, success and failure alike).
 fn cmd_eval_forms(eval: &mut Evaluator, form: &str) -> ExitCode {
-    // Live hooks (S7): `#=` evaluates during the read, like `eval_source`.
-    let forms = match eval.read_forms_live(form) {
-        Ok(forms) => forms,
-        Err(e) => {
-            eprintln!("{}", eval_diagnostic(&e));
-            return ExitCode::from(1);
-        }
-    };
-    for form in &forms {
-        let value = match eval.eval_top_form(form) {
+    // Live hooks (S7): `#=` evaluates during the read, like
+    // `eval_source`; each form reads after the previous evaluates
+    // (clojure.main's `-e` loop), so `(ns foo) ::kw` is `:foo/kw`.
+    let mut forms = eval.live_forms(form);
+    loop {
+        let form = match eval.next_live_form(&mut forms) {
+            Ok(Some(form)) => form,
+            Ok(None) => break,
+            Err(e) => {
+                eprintln!("{}", eval_diagnostic(&e));
+                return ExitCode::from(1);
+            }
+        };
+        let value = match eval.eval_top_form(&form) {
             Ok(value) => value,
             Err(e) => {
                 eprintln!("{}", eval_diagnostic(&e));
@@ -312,6 +327,12 @@ fn cmd_run(file: &Path, args: &[String]) -> ExitCode {
     // Exit join (see `cmd_eval`): drained agents and futures print
     // before the process goes away, like the JVM's non-daemon wait.
     eval.join_drainers();
+    // The process ends here: tearing the runtime down var by var
+    // (every namespace, fn and value still reachable) is pure exit
+    // cost (#226), and the JVM runs no finalizers at exit either.
+    // Nothing buffers behind it: stdout is std's (flushed at exit)
+    // and file writers write through.
+    std::mem::forget(eval);
     code
 }
 

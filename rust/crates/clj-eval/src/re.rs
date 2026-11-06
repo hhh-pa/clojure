@@ -19,7 +19,7 @@
 
 use std::sync::Arc;
 
-use clj_value::{SeqKind, ThrowClass, Value, Vector};
+use clj_value::{Array, ArrayDesc, ArrayStore, BaseType, SeqKind, ThrowClass, Value, Vector};
 use regex::Regex;
 
 use crate::core::cce_err;
@@ -49,8 +49,30 @@ fn pattern_syntax(err: regex::Error) -> NativeError {
 /// stale value still reports `PatternSyntaxException`).
 /// `\Q...\E` quotations translate first (the crate has no
 /// quotation syntax — `Pattern/quote` output must compile).
-pub(crate) fn compile_source(source: &str) -> Result<Regex, NativeError> {
-    Regex::new(&translate_quotations(source)).map_err(pattern_syntax)
+pub(crate) fn compile_source(source: &str) -> Result<Arc<Regex>, NativeError> {
+    // Memoized per thread: a compile costs far more than the matches
+    // one call runs (a `split` per input line recompiled its literal
+    // every line). Handed out shared, never cloned: each `Regex`
+    // clone starts an empty search-cache pool, so a clone per call
+    // rebuilt the lazy DFA cache on every match. A full table
+    // clears, bounding programs that mint patterns. Failures are not
+    // cached (each use reports its own syntax error).
+    thread_local! {
+        static COMPILED: std::cell::RefCell<crate::env::FxHashMap<String, Arc<Regex>>> =
+            std::cell::RefCell::new(crate::env::FxHashMap::default());
+    }
+    if let Some(re) = COMPILED.with(|c| c.borrow().get(source).cloned()) {
+        return Ok(re);
+    }
+    let re = Arc::new(Regex::new(&translate_quotations(source)).map_err(pattern_syntax)?);
+    COMPILED.with(|c| {
+        let mut c = c.borrow_mut();
+        if c.len() >= 256 {
+            c.clear();
+        }
+        c.insert(source.to_owned(), Arc::clone(&re));
+    });
+    Ok(re)
 }
 
 /// Translate `\Q...\E` quotation spans to escaped literals
@@ -161,7 +183,7 @@ fn groups_value(caps: &regex::Captures<'_>) -> Value {
 /// The running state of the JDK split loop (split out so each
 /// half stays under the complexity ratchet).
 struct SplitAcc {
-    parts: Vec<String>,
+    parts: Vec<Value>,
     index: usize,
     count: i64,
 }
@@ -183,32 +205,154 @@ fn split_step(
     if !limited || acc.count < cap {
         let leader = acc.index == 0 && m_start == 0 && m_start == m_end;
         if !leader {
-            acc.parts.push(text[acc.index..m_start].to_owned());
+            acc.parts
+                .push(Value::Str(Arc::from(&text[acc.index..m_start])));
             acc.index = m_end;
             acc.count += 1;
         }
     } else if acc.count == cap {
-        acc.parts.push(text[acc.index..].to_owned());
+        acc.parts.push(Value::Str(Arc::from(&text[acc.index..])));
         acc.index = m_end;
         acc.count += 1;
     }
 }
 
 pub(crate) fn pattern_split(text: &str, source: &str, limit: i32) -> Result<Value, NativeError> {
+    let pieces = pattern_pieces(text, source, limit)?;
+    Ok(Value::Vector(Vector::from_vec(pieces)))
+}
+
+/// JVM `String.split`/`Pattern.split`: the pieces as a `String[]`
+/// (an `Object`-store array narrowed to `java.lang.String`, so
+/// the class reads `[Ljava.lang.String;` and stores check).
+pub(crate) fn pattern_split_array(
+    text: &str,
+    source: &str,
+    limit: i32,
+) -> Result<Value, NativeError> {
+    let store = ArrayStore::Objs(pattern_pieces(text, source, limit)?);
+    Ok(Value::Array(Array::new(
+        ArrayDesc {
+            base: BaseType::Object,
+            dims: 1,
+            component: Some(Arc::from("java.lang.String")),
+        },
+        store,
+    )))
+}
+
+const WS_TR: u64 = (1 << b' ') | (1 << b'\t') | (1 << b'\n') | (1 << b'\r');
+const WS_TRF: u64 = WS_TR | (1 << 0x0C);
+const WS_ASCII: u64 = WS_TRF | (1 << 0x0B);
+
+/// The hand-scanned split patterns (#226): the whitespace classes,
+/// `\r?\n`, and `\|` the snippet suite splits input on. Each finds
+/// exactly the crate's leftmost-first `find_iter` ranges, without
+/// compiling (and faulting in) the regex engine.
+#[derive(Clone, Copy)]
+enum CutKind {
+    /// A maximal run of bytes in an ASCII control/space mask.
+    Run(u64),
+    /// `\r?\n`.
+    Newline,
+    /// One literal byte.
+    Byte(u8),
+}
+
+fn cut_kind(text: &str, source: &str) -> Option<CutKind> {
+    Some(match source {
+        // `\s` is Unicode in the crate: only all-ASCII text reduces
+        // to the ASCII whitespace class.
+        r"\s+" if text.is_ascii() => CutKind::Run(WS_ASCII),
+        r"[ \t\n\r\f\x0B]+" => CutKind::Run(WS_ASCII),
+        r"[ \t\n\r\f]+" => CutKind::Run(WS_TRF),
+        r"[ \t\n\r]+" => CutKind::Run(WS_TR),
+        r"[\x00-\x20]+" => CutKind::Run((1u64 << 0x21) - 1),
+        r"\r?\n" => CutKind::Newline,
+        r"\|" => CutKind::Byte(b'|'),
+        _ => return None,
+    })
+}
+
+fn in_mask(b: u8, mask: u64) -> bool {
+    b <= 0x20 && mask & (1u64 << b) != 0
+}
+
+/// The match ranges of a [`CutKind`], streamed (no cut buffer).
+struct ByteCuts<'a> {
+    bytes: &'a [u8],
+    pos: usize,
+    kind: CutKind,
+}
+
+impl ByteCuts<'_> {
+    /// The end of a match starting at `i`, if one does.
+    fn match_end(&self, i: usize) -> Option<usize> {
+        let b = self.bytes[i];
+        match self.kind {
+            CutKind::Run(mask) if in_mask(b, mask) => Some(
+                i + 1
+                    + self.bytes[i + 1..]
+                        .iter()
+                        .take_while(|&&c| in_mask(c, mask))
+                        .count(),
+            ),
+            CutKind::Newline if b == b'\n' => Some(i + 1),
+            CutKind::Newline if b == b'\r' && self.bytes.get(i + 1) == Some(&b'\n') => Some(i + 2),
+            CutKind::Byte(c) if b == c => Some(i + 1),
+            _ => None,
+        }
+    }
+}
+
+impl Iterator for ByteCuts<'_> {
+    type Item = (usize, usize);
+
+    fn next(&mut self) -> Option<(usize, usize)> {
+        while self.pos < self.bytes.len() {
+            let start = self.pos;
+            if let Some(end) = self.match_end(start) {
+                self.pos = end;
+                return Some((start, end));
+            }
+            self.pos += 1;
+        }
+        None
+    }
+}
+
+/// The split pieces (engine-agnostic — the `regex` crate and the
+/// boundary scanner share the JDK loop in [`split_pieces`]).
+fn pattern_pieces(text: &str, source: &str, limit: i32) -> Result<Vec<Value>, NativeError> {
+    if let Some(kind) = cut_kind(text, source) {
+        let cuts = ByteCuts {
+            bytes: text.as_bytes(),
+            pos: 0,
+            kind,
+        };
+        return Ok(split_pieces(text, cuts, limit));
+    }
     // Pure-boundary patterns never reach the crate (which cannot
     // compile look-around); anything else splits as before.
     if let Some(alts) = boundary_alternatives(source) {
         let cuts = boundary_cuts(text, &alts)?;
-        return split_around(text, &cuts, limit);
+        return Ok(split_pieces(text, cuts, limit));
     }
     let re = compile_source(source)?;
-    let cuts: Vec<(usize, usize)> = re.find_iter(text).map(|m| (m.start(), m.end())).collect();
-    split_around(text, &cuts, limit)
+    Ok(split_pieces(
+        text,
+        re.find_iter(text).map(|m| (m.start(), m.end())),
+        limit,
+    ))
 }
 
-/// Run the JDK split loop over byte ranges (engine-agnostic —
-/// the `regex` crate and the boundary scanner share it).
-fn split_around(text: &str, cuts: &[(usize, usize)], limit: i32) -> Result<Value, NativeError> {
+/// Run the JDK split loop over byte ranges, collecting the piece
+/// strings (callers wrap them as a vector or a `String[]`).
+fn split_pieces(
+    text: &str,
+    cuts: impl IntoIterator<Item = (usize, usize)>,
+    limit: i32,
+) -> Vec<Value> {
     let limited = limit > 0;
     let cap = i64::from(limit) - 1;
     let mut acc = SplitAcc {
@@ -216,28 +360,25 @@ fn split_around(text: &str, cuts: &[(usize, usize)], limit: i32) -> Result<Value
         index: 0,
         count: 0,
     };
-    for &(start, end) in cuts {
+    for (start, end) in cuts {
         split_step(&mut acc, text, start, end, limited, cap);
     }
     if acc.index == 0 {
-        return Ok(Value::Vector(Vector::from_vec(vec![Value::Str(
-            Arc::from(text),
-        )])));
+        return vec![Value::Str(Arc::from(text))];
     }
     if !limited || acc.count < i64::from(limit) {
-        acc.parts.push(text[acc.index..].to_owned());
+        acc.parts.push(Value::Str(Arc::from(&text[acc.index..])));
     }
     if limit == 0 {
-        while acc.parts.last().is_some_and(|p| p.is_empty()) {
+        while acc
+            .parts
+            .last()
+            .is_some_and(|p| matches!(p, Value::Str(s) if s.is_empty()))
+        {
             acc.parts.pop();
         }
     }
-    Ok(Value::Vector(Vector::from_vec(
-        acc.parts
-            .into_iter()
-            .map(|p| Value::Str(Arc::from(p)))
-            .collect(),
-    )))
+    acc.parts
 }
 
 /// A single-char boundary atom, kept as source so atom tests run
@@ -529,17 +670,42 @@ fn anchored(source: &str) -> String {
     format!("\\A(?:{source})\\z")
 }
 
-/// `re-matches`: the whole string must match (`re-groups`
-/// shape, nil otherwise).
-fn native_re_matches(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
-    check_arity("clojure.core/re-matches", args, &[2])?;
-    let source = pattern_source(&args[0])?;
-    let text = match_text(&args[1])?;
+pub(crate) fn fast_re_matches(source: &str, text: &str) -> Option<bool> {
+    match source {
+        "[+-]?[0-9]+" => Some(match_int_digits(text.as_bytes(), true, usize::MAX)),
+        "-?[0-9]+" => Some(match_int_digits(text.as_bytes(), false, usize::MAX)),
+        "[+-]?[0-9]{1,18}" => Some(match_int_digits(text.as_bytes(), true, 18)),
+        _ => None,
+    }
+}
+
+fn match_int_digits(bytes: &[u8], allow_plus: bool, max_digits: usize) -> bool {
+    let rest = match bytes.first() {
+        Some(b'-') => &bytes[1..],
+        Some(b'+') if allow_plus => &bytes[1..],
+        _ => bytes,
+    };
+    !rest.is_empty() && rest.len() <= max_digits && rest.iter().all(u8::is_ascii_digit)
+}
+
+pub(crate) fn re_matches_2(pat: &Value, subj: &Value) -> Result<Value, NativeError> {
+    let source = pattern_source(pat)?;
+    let text = match_text(subj)?;
+    if let Some(matched) = fast_re_matches(source, text) {
+        return Ok(if matched { subj.clone() } else { Value::Nil });
+    }
     let re = compile_source(&anchored(source))?;
     Ok(match re.captures(text) {
         Some(caps) => groups_value(&caps),
         None => Value::Nil,
     })
+}
+
+/// `re-matches`: the whole string must match (`re-groups`
+/// shape, nil otherwise).
+fn native_re_matches(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.core/re-matches", args, &[2])?;
+    re_matches_2(&args[0], &args[1])
 }
 
 /// `re-seq`: successive `find` results (`re-groups` each — a

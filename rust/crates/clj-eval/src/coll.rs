@@ -726,7 +726,7 @@ fn count_fallback(eval: &mut Evaluator, v: &Value) -> Result<i64, NativeError> {
         return Ok(r.walked_len() as i64);
     }
     if let Some(s) = as_realized(v) {
-        return Ok(s.items().len() as i64);
+        return Ok(s.seq().count() as i64);
     }
     if let Some(n) = as_repeat(v).and_then(|r| r.n()) {
         return Ok(n.max(0));
@@ -928,57 +928,97 @@ fn merge_with3(eval: &mut Evaluator, f: &Value, x: Value, y: &Value) -> Result<V
     merge_with3_seq_tail(eval, f, x, y)
 }
 
-/// Split a keyseq into its head key and tail (`update-in` /
-/// `assoc-in` destructure `[k & ks]` by seqing once).
-fn seq_first_next(eval: &mut Evaluator, ks: &Value) -> Result<(Value, Value), NativeError> {
-    let s = seq_value(eval, ks).map_err(signal_to_native)?;
-    if matches!(s, Value::Nil) {
-        return Ok((Value::Nil, Value::Nil));
+fn take_lookup(
+    eval: &mut Evaluator,
+    coll: &mut Value,
+    key: &Value,
+) -> Result<Option<Value>, NativeError> {
+    match coll {
+        Value::Map(m) if !m.is_sorted() => {
+            let key = crate::lazy::realize_key(eval, key).map_err(signal_to_native)?;
+            Ok(m.take_value(&key))
+        }
+        Value::Vector(x) => Ok(int_key(key).and_then(|i| {
+            usize::try_from(i as i32)
+                .ok()
+                .and_then(|idx| x.take_nth(idx))
+        })),
+        other => lookup_present(eval, other, key),
     }
-    let k = first_value(eval, &s).map_err(signal_to_native)?;
-    let rest = next_value(eval, &s).map_err(signal_to_native)?;
-    Ok((k, rest))
 }
 
-/// The `update-in` recursion (`ks` already seqed).
+/// Cursor over a keypath (`update-in` / `assoc-in` / `get-in`):
+/// indexes `Value::Vector` directly without allocating `VectorSeq`
+/// nodes per depth level.
+enum KeyStep {
+    Vec(Vector, usize),
+    Seq(Value),
+}
+
+impl KeyStep {
+    fn from_val(eval: &mut Evaluator, v: &Value) -> Result<Option<(Value, Self)>, NativeError> {
+        if let Value::Vector(vec) = v {
+            return Ok(vec.get(0).map(|k| (k, Self::Vec(vec.clone(), 1))));
+        }
+        let s = seq_value(eval, v).map_err(signal_to_native)?;
+        if matches!(s, Value::Nil) {
+            return Ok(None);
+        }
+        let k = first_value(eval, &s).map_err(signal_to_native)?;
+        let rest = next_value(eval, &s).map_err(signal_to_native)?;
+        Ok(Some((k, Self::Seq(rest))))
+    }
+
+    fn next(self, eval: &mut Evaluator) -> Result<Option<(Value, Self)>, NativeError> {
+        match self {
+            Self::Vec(vec, i) => Ok(vec.get(i).map(|k| (k, Self::Vec(vec, i + 1)))),
+            Self::Seq(Value::Nil) => Ok(None),
+            Self::Seq(s) => {
+                let k = first_value(eval, &s).map_err(signal_to_native)?;
+                let rest = next_value(eval, &s).map_err(signal_to_native)?;
+                Ok(Some((k, Self::Seq(rest))))
+            }
+        }
+    }
+}
+
+/// The `update-in` recursion (`ks` already stepped once).
 fn update_in_up(
     eval: &mut Evaluator,
-    m: &Value,
+    mut m: Value,
     k: &Value,
-    ks: &Value,
+    ks: KeyStep,
     f: &Value,
     args: &[Value],
 ) -> Result<Value, NativeError> {
-    if !matches!(ks, Value::Nil) {
-        let inner = lookup_present(eval, m, k)?.unwrap_or(Value::Nil);
-        let (k2, ks2) = seq_first_next(eval, ks)?;
-        let updated = update_in_up(eval, &inner, &k2, &ks2, f, args)?;
-        assoc3(eval, m.clone(), k, updated)
+    if let Some((k2, ks2)) = ks.next(eval)? {
+        let inner = take_lookup(eval, &mut m, k)?.unwrap_or(Value::Nil);
+        let updated = update_in_up(eval, inner, &k2, ks2, f, args)?;
+        assoc3(eval, m, k, updated)
     } else {
-        let old = lookup_present(eval, m, k)?.unwrap_or(Value::Nil);
-        let mut call_args = Vec::with_capacity(args.len() + 1);
+        let old = take_lookup(eval, &mut m, k)?.unwrap_or(Value::Nil);
+        let mut call_args: SmallVec<[Value; 4]> = SmallVec::with_capacity(args.len() + 1);
         call_args.push(old);
         call_args.extend(args.iter().cloned());
-        let new = eval.call(f, &call_args).map_err(signal_to_native)?;
-        assoc3(eval, m.clone(), k, new)
+        let new = eval.call_owned(f, call_args).map_err(signal_to_native)?;
+        assoc3(eval, m, k, new)
     }
 }
 
-/// The `assoc-in` recursion (`ks` already seqed).
+/// The `assoc-in` recursion (`ks` already stepped once).
 fn assoc_in_up(
     eval: &mut Evaluator,
-    m: &Value,
+    mut m: Value,
     k: &Value,
-    ks: &Value,
-    v: &Value,
+    ks: KeyStep,
+    v: Value,
 ) -> Result<Value, NativeError> {
-    if !matches!(ks, Value::Nil) {
-        let inner = lookup_present(eval, m, k)?.unwrap_or(Value::Nil);
-        let (k2, ks2) = seq_first_next(eval, ks)?;
-        let updated = assoc_in_up(eval, &inner, &k2, &ks2, v)?;
-        assoc3(eval, m.clone(), k, updated)
+    if let Some((k2, ks2)) = ks.next(eval)? {
+        let inner = take_lookup(eval, &mut m, k)?.unwrap_or(Value::Nil);
+        let updated = assoc_in_up(eval, inner, &k2, ks2, v)?;
+        assoc3(eval, m, k, updated)
     } else {
-        assoc3(eval, m.clone(), k, v.clone())
+        assoc3(eval, m, k, v)
     }
 }
 
@@ -1548,34 +1588,47 @@ static STR_SCAN_CACHE: Mutex<Vec<StrScanEntry>> = Mutex::new(Vec::new());
 /// would churn the global mutex for no reuse (#235).
 const STR_SCAN_SMALL_MAX: usize = 64;
 
-// The last string-scan hit, per thread: parse loops `nth` one
-// `Arc<str>` millions of times, and the memo answers repeats
-// without the global cache mutex — and without touching
-// refcounts, since a strong key compares by `ptr_eq` alone
-// (sound: `Arc<str>` is immutable, so the same allocation is
-// the same string, and liveness pins the address against
-// ABA). One pinned string per thread at most (freed on the
-// next memoize); the global cache stays `Weak` (8 slots must
-// not pin).
+// The last string-scan hits, per thread: parse loops `nth` one
+// `Arc<str>` millions of times, and search loops alternate two (a
+// text and a pattern — #226: one slot ping-ponged through the global
+// mutex per read). The memo answers repeats without the global
+// cache mutex — and without touching refcounts, since a strong key
+// compares by `ptr_eq` alone (sound: `Arc<str>` is immutable, so the
+// same allocation is the same string, and liveness pins the address
+// against ABA). At most `LAST_SCAN_SLOTS` strings pinned per thread
+// (each freed when its slot is reused); the global cache stays
+// `Weak` (8 slots must not pin).
+const LAST_SCAN_SLOTS: usize = 4;
+
+/// The memo slots plus the next slot to reuse.
+type ScanMemo = ([Option<(Arc<str>, StrScan)>; LAST_SCAN_SLOTS], usize);
+
 thread_local! {
-    static LAST_SCAN: std::cell::RefCell<Option<(Arc<str>, StrScan)>> =
-        const { std::cell::RefCell::new(None) };
+    static LAST_SCAN: std::cell::RefCell<ScanMemo> =
+        const { std::cell::RefCell::new(([None, None, None, None], 0)) };
 }
 
-/// The memoized scan for a string, if it was the last one scanned.
-fn last_scan_hit(s: &Arc<str>) -> Option<StrScan> {
+/// Answer `f` over the memoized scan for a string, if it is one of
+/// the last few scanned (no `StrScan` clone on a hit).
+fn with_scan_hit<T>(s: &Arc<str>, f: impl FnOnce(&StrScan) -> T) -> Option<T> {
     LAST_SCAN.with(|memo| {
-        memo.borrow()
-            .as_ref()
-            .and_then(|(key, scan)| Arc::ptr_eq(key, s).then(|| scan.clone()))
+        let memo = memo.borrow();
+        memo.0
+            .iter()
+            .flatten()
+            .find(|(key, _)| Arc::ptr_eq(key, s))
+            .map(|(_, scan)| f(scan))
     })
 }
 
 /// Memoize a string's scan (called on every global-cache hit and
-/// fresh build, so repeats skip the mutex).
+/// fresh build, so repeats skip the mutex), reusing slots in turn.
 fn memoize_scan(s: &Arc<str>, scan: &StrScan) {
     LAST_SCAN.with(|memo| {
-        *memo.borrow_mut() = Some((Arc::clone(s), scan.clone()));
+        let mut memo = memo.borrow_mut();
+        let slot = memo.1;
+        memo.0[slot] = Some((Arc::clone(s), scan.clone()));
+        memo.1 = (slot + 1) % LAST_SCAN_SLOTS;
     });
 }
 
@@ -1587,9 +1640,7 @@ const STR_SCAN_INDEX_CAP: usize = 2_000_000;
 /// (one O(n) pass; ASCII costs no table). `None` reads over
 /// the index cap (uncached slow path).
 fn str_scan(s: &Arc<str>) -> Option<StrScan> {
-    if let Some(hit) = last_scan_hit(s) {
-        return Some(hit);
-    }
+    // (Callers consult the per-thread memo first.)
     {
         let mut cache = STR_SCAN_CACHE.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(pos) = cache
@@ -1646,19 +1697,27 @@ fn build_str_scan(s: &str) -> Option<StrScan> {
 /// strings ride the memoized scan at every index (a cached
 /// `Ascii` flag answers in one byte load even for small
 /// indexes, where a direct scan would re-decode, #235).
-fn str_char_at(s: &Arc<str>, idx: usize) -> Option<char> {
+pub(crate) fn str_char_at(s: &Arc<str>, idx: usize) -> Option<char> {
     if s.len() <= STR_SCAN_SMALL_MAX {
         if s.is_ascii() {
             return s.as_bytes().get(idx).map(|b| *b as char);
         }
         return s.chars().nth(idx);
     }
+    if let Some(hit) = with_scan_hit(s, |scan| scan_char_at(s, scan, idx)) {
+        return hit;
+    }
     match str_scan(s) {
-        Some(StrScan::Ascii) => s.as_bytes().get(idx).map(|b| *b as char),
-        Some(StrScan::Indexed { byte_at, .. }) => {
-            byte_at.get(idx).and_then(|b| s[*b..].chars().next())
-        }
+        Some(scan) => scan_char_at(s, &scan, idx),
         None => s.chars().nth(idx),
+    }
+}
+
+/// The char at `idx` through a string's scan.
+fn scan_char_at(s: &str, scan: &StrScan, idx: usize) -> Option<char> {
+    match scan {
+        StrScan::Ascii => s.as_bytes().get(idx).map(|b| *b as char),
+        StrScan::Indexed { byte_at, .. } => byte_at.get(idx).and_then(|b| s[*b..].chars().next()),
     }
 }
 
@@ -1669,6 +1728,13 @@ fn str_char_at(s: &Arc<str>, idx: usize) -> Option<char> {
 pub fn str_utf16_len(s: &Arc<str>) -> usize {
     if s.len() <= 256 {
         return s.encode_utf16().count();
+    }
+    let memo = with_scan_hit(s, |scan| match scan {
+        StrScan::Ascii => s.len(),
+        StrScan::Indexed { utf16_len, .. } => *utf16_len,
+    });
+    if let Some(n) = memo {
+        return n;
     }
     match str_scan(s) {
         Some(StrScan::Ascii) => s.len(),
@@ -1871,44 +1937,68 @@ fn native_select_keys(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nat
 }
 
 fn native_update(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
-    check_min_arity("clojure.core/update", args, 3)?;
-    let old = lookup_present(eval, &args[0], &args[1])?.unwrap_or(Value::Nil);
-    let mut call_args = Vec::with_capacity(args.len() - 2);
+    native_update_owned(eval, args.iter().cloned().collect())
+}
+
+pub(crate) fn native_update_owned(
+    eval: &mut Evaluator,
+    mut args: SmallVec<[Value; 4]>,
+) -> Result<Value, NativeError> {
+    check_min_arity("clojure.core/update", &args, 3)?;
+    let mut m = std::mem::replace(&mut args[0], Value::Nil);
+    let k = std::mem::replace(&mut args[1], Value::Nil);
+    let f = std::mem::replace(&mut args[2], Value::Nil);
+    let old = take_lookup(eval, &mut m, &k)?.unwrap_or(Value::Nil);
+    let mut call_args: SmallVec<[Value; 4]> = SmallVec::with_capacity(args.len() - 2);
     call_args.push(old);
-    call_args.extend(args[3..].iter().cloned());
-    let new = eval.call(&args[2], &call_args).map_err(signal_to_native)?;
-    assoc3(eval, args[0].clone(), &args[1], new)
+    call_args.extend(args.drain(3..));
+    let new = eval.call_owned(&f, call_args).map_err(signal_to_native)?;
+    assoc3(eval, m, &k, new)
 }
 
 fn native_update_in(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
-    check_min_arity("clojure.core/update-in", args, 3)?;
-    let (k, ks) = seq_first_next(eval, &args[1])?;
-    update_in_up(eval, &args[0], &k, &ks, &args[2], &args[3..])
+    native_update_in_owned(eval, args.iter().cloned().collect())
+}
+
+pub(crate) fn native_update_in_owned(
+    eval: &mut Evaluator,
+    mut args: SmallVec<[Value; 4]>,
+) -> Result<Value, NativeError> {
+    check_min_arity("clojure.core/update-in", &args, 3)?;
+    let m = std::mem::replace(&mut args[0], Value::Nil);
+    let (k, ks) =
+        KeyStep::from_val(eval, &args[1])?.unwrap_or((Value::Nil, KeyStep::Seq(Value::Nil)));
+    update_in_up(eval, m, &k, ks, &args[2], &args[3..])
 }
 
 fn native_assoc_in(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
-    check_arity("clojure.core/assoc-in", args, &[3])?;
-    let (k, ks) = seq_first_next(eval, &args[1])?;
-    assoc_in_up(eval, &args[0], &k, &ks, &args[2])
+    native_assoc_in_owned(eval, args.iter().cloned().collect())
+}
+
+pub(crate) fn native_assoc_in_owned(
+    eval: &mut Evaluator,
+    mut args: SmallVec<[Value; 4]>,
+) -> Result<Value, NativeError> {
+    check_arity("clojure.core/assoc-in", &args, &[3])?;
+    let m = std::mem::replace(&mut args[0], Value::Nil);
+    let v = std::mem::replace(&mut args[2], Value::Nil);
+    let (k, ks) =
+        KeyStep::from_val(eval, &args[1])?.unwrap_or((Value::Nil, KeyStep::Seq(Value::Nil)));
+    assoc_in_up(eval, m, &k, ks, v)
 }
 
 fn native_get_in(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/get-in", args, &[2, 3])?;
     let mut cur = args[0].clone();
-    let mut ks = seq_value(eval, &args[1]).map_err(signal_to_native)?;
-    loop {
-        if matches!(ks, Value::Nil) {
-            return Ok(cur);
-        }
-        let k = first_value(eval, &ks).map_err(signal_to_native)?;
+    let mut step = KeyStep::from_val(eval, &args[1])?;
+    while let Some((k, next)) = step {
         match lookup_present(eval, &cur, &k)? {
             Some(v) => cur = v,
-            None => {
-                return Ok(args.get(2).cloned().unwrap_or(Value::Nil));
-            }
+            None => return Ok(args.get(2).cloned().unwrap_or(Value::Nil)),
         }
-        ks = next_value(eval, &ks).map_err(signal_to_native)?;
+        step = next.next(eval)?;
     }
+    Ok(cur)
 }
 
 fn native_zipmap(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
@@ -3044,6 +3134,21 @@ pub(crate) const COLL_NATIVES: &[(&str, NativeFnPtr)] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn str_scan_global_cache_answers_memo_evictions() {
+        // More big strings than memo slots: the first falls out of
+        // the per-thread memo but stays in the global cache, which
+        // answers (and re-memoizes) it.
+        let strings: Vec<Arc<str>> = (0..LAST_SCAN_SLOTS + 2)
+            .map(|i| Arc::from(format!("{i}").repeat(100)))
+            .collect();
+        for s in &strings {
+            assert!(str_char_at(s, 10).is_some());
+        }
+        assert_eq!(str_char_at(&strings[0], 99), Some('0'));
+        assert_eq!(str_utf16_len(&strings[0]), 100);
+    }
 
     #[test]
     fn str_scan_memo_answers_repeats() {

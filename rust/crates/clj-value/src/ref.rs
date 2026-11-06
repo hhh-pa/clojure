@@ -13,7 +13,7 @@
 //! snapshot source), the `min_history`/`max_history` bounds (always
 //! int-range by construction — the §1a conversion), the `:validator`
 //! fn (if any), the `:meta` map (if any), and the watches map (`{key
-//! fn}`, fired in insertion order). Equality is shared-cell identity
+//! fn}`, fired in map seq order). Equality is shared-cell identity
 //! plus equal meta (like atoms); printing follows the transient
 //! `#object[…]` convention (never the JVM's `{:status :ready, :val
 //! …}` rendering — see the S19 spec §2f).

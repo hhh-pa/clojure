@@ -1,0 +1,368 @@
+{
+ "failures": [
+  "snap-fail-c"
+ ],
+ "missing": [
+  "m-chal-1"
+ ],
+ "config": {
+  "shard": "0/1",
+  "repeat": 3
+ },
+ "results": [
+  {
+   "label": "sort/bubble_sort",
+   "stem": "solution",
+   "script": "src/sort/bubble_sort/solution.clj",
+   "case": "test_case_0",
+   "ok": true,
+   "error": null,
+   "runs": [
+    {
+     "wall_s": 0.1
+    }
+   ],
+   "alloc_runs": [],
+   "summary": {
+    "cpu_s": {
+     "min": 0.09,
+     "median": 0.1,
+     "max": 0.11
+    },
+    "maxrss_kb": {
+     "min": 19000,
+     "median": 20000,
+     "max": 21000
+    },
+    "pin_instructions": {
+     "min": 99000,
+     "median": 100000,
+     "max": 101000
+    },
+    "instructions": {
+     "min": 99000,
+     "median": 100000,
+     "max": 101000
+    }
+   }
+  },
+  {
+   "label": "sort/bubble_sort",
+   "stem": "solution",
+   "script": "src/sort/bubble_sort/solution.clj",
+   "case": "test_case_1",
+   "ok": true,
+   "error": null,
+   "runs": [
+    {
+     "wall_s": 2.5
+    }
+   ],
+   "alloc_runs": [],
+   "summary": {
+    "cpu_s": {
+     "min": 2.4,
+     "median": 2.5,
+     "max": 2.6
+    },
+    "maxrss_kb": {
+     "min": 140000,
+     "median": 150000,
+     "max": 160000
+    },
+    "pin_instructions": {
+     "min": 2490000,
+     "median": 2500000,
+     "max": 2510000
+    },
+    "instructions": {
+     "min": 2490000,
+     "median": 2500000,
+     "max": 2510000
+    }
+   }
+  },
+  {
+   "label": "sort/bubble_sort",
+   "stem": "solution",
+   "script": "src/sort/bubble_sort/solution.clj",
+   "case": "test_case_2",
+   "ok": true,
+   "error": null,
+   "runs": [
+    {
+     "wall_s": 1.5
+    }
+   ],
+   "alloc_runs": [],
+   "summary": {
+    "cpu_s": {
+     "min": 1.4,
+     "median": 1.5,
+     "max": 1.6
+    },
+    "maxrss_kb": {
+     "min": 89000,
+     "median": 90000,
+     "max": 95000
+    },
+    "pin_instructions": {
+     "min": 2990000,
+     "median": 3000000,
+     "max": 3010000
+    },
+    "instructions": {
+     "min": 2990000,
+     "median": 3000000,
+     "max": 3010000
+    }
+   }
+  },
+  {
+   "label": "sort/bubble_sort",
+   "stem": "solution",
+   "script": "src/sort/bubble_sort/solution.clj",
+   "case": "test_case_3",
+   "ok": true,
+   "error": null,
+   "runs": [
+    {
+     "wall_s": 0.0
+    }
+   ],
+   "alloc_runs": [],
+   "summary": {
+    "cpu_s": {
+     "min": 0.0,
+     "median": 0.0,
+     "max": 0.0
+    },
+    "maxrss_kb": {
+     "min": 39000,
+     "median": 40000,
+     "max": 41000
+    },
+    "pin_instructions": {
+     "min": 100,
+     "median": 100,
+     "max": 100
+    },
+    "instructions": {
+     "min": 100,
+     "median": 100,
+     "max": 100
+    }
+   }
+  },
+  {
+   "label": "sort/bubble_sort",
+   "stem": "solution",
+   "script": "src/sort/bubble_sort/solution.clj",
+   "case": "test_case_4",
+   "ok": true,
+   "error": null,
+   "runs": [
+    {
+     "wall_s": 1.0
+    }
+   ],
+   "alloc_runs": [],
+   "summary": {
+    "cpu_s": {
+     "min": 0.6,
+     "median": 1.0,
+     "max": 1.1
+    },
+    "maxrss_kb": {
+     "min": 89000,
+     "median": 90000,
+     "max": 120000
+    },
+    "pin_instructions": {
+     "min": 390000,
+     "median": 400000,
+     "max": 410000
+    },
+    "instructions": {
+     "min": 390000,
+     "median": 400000,
+     "max": 410000
+    }
+   }
+  },
+  {
+   "label": "sort/bubble_sort",
+   "stem": "solution",
+   "script": "src/sort/bubble_sort/solution.clj",
+   "case": "test_case_5",
+   "ok": true,
+   "error": null,
+   "runs": [
+    {
+     "wall_s": 2.01
+    }
+   ],
+   "alloc_runs": [],
+   "summary": {
+    "cpu_s": {
+     "min": 2.0,
+     "median": 2.01,
+     "max": 2.02
+    },
+    "maxrss_kb": {
+     "min": 79000,
+     "median": 80000,
+     "max": 81000
+    },
+    "pin_instructions": {
+     "min": 100000,
+     "median": 100500,
+     "max": 101000
+    },
+    "instructions": {
+     "min": 100000,
+     "median": 100500,
+     "max": 101000
+    }
+   }
+  },
+  {
+   "label": "zzz/skipped_thing",
+   "stem": "solution",
+   "script": "src/zzz/skipped_thing/solution.clj",
+   "case": "test_case_9",
+   "ok": true,
+   "error": null,
+   "runs": [],
+   "alloc_runs": [],
+   "summary": {}
+  },
+  {
+   "label": "sort/broken_sort",
+   "stem": "solution",
+   "script": "src/sort/broken_sort/solution.clj",
+   "case": "test_case_0",
+   "ok": false,
+   "error": "exit 1: boom",
+   "runs": [],
+   "alloc_runs": [],
+   "summary": {}
+  },
+  {
+   "label": "my.ns/foo-test",
+   "case": "run",
+   "ok": true,
+   "error": null,
+   "runs": [
+    {
+     "wall_s": 1.0
+    }
+   ],
+   "alloc_runs": [],
+   "test_counts": {
+    "pass": 9,
+    "test": 10,
+    "fail": 1,
+    "error": 0
+   },
+   "summary": {
+    "cpu_s": {
+     "min": 0.9,
+     "median": 1.0,
+     "max": 1.1
+    },
+    "maxrss_kb": {
+     "min": 90000,
+     "median": 100000,
+     "max": 110000
+    },
+    "pin_instructions": {
+     "min": 990000,
+     "median": 1000000,
+     "max": 1010000
+    },
+    "instructions": {
+     "min": 990000,
+     "median": 1000000,
+     "max": 1010000
+    }
+   }
+  },
+  {
+   "label": "clojure-algorithms.graphs.karger-test",
+   "case": "run",
+   "ok": true,
+   "error": null,
+   "runs": [
+    {
+     "wall_s": 2.0
+    }
+   ],
+   "alloc_runs": [],
+   "test_counts": {
+    "pass": 97,
+    "test": 50,
+    "fail": 0,
+    "error": 0
+   },
+   "summary": {
+    "cpu_s": {
+     "min": 1.9,
+     "median": 2.0,
+     "max": 2.1
+    },
+    "maxrss_kb": {
+     "min": 140000,
+     "median": 150000,
+     "max": 160000
+    },
+    "pin_instructions": {
+     "min": 1990000,
+     "median": 2000000,
+     "max": 2010000
+    },
+    "instructions": {
+     "min": 1990000,
+     "median": 2000000,
+     "max": 2010000
+    }
+   }
+  },
+  {
+   "label": "aaa/only_here_chal",
+   "stem": "solution",
+   "script": "src/aaa/only_here_chal/solution.clj",
+   "case": "test_case_0",
+   "ok": true,
+   "error": null,
+   "runs": [
+    {
+     "wall_s": 0.5
+    }
+   ],
+   "alloc_runs": [],
+   "summary": {
+    "cpu_s": {
+     "min": 0.4,
+     "median": 0.5,
+     "max": 0.6
+    },
+    "maxrss_kb": {
+     "min": 49000,
+     "median": 50000,
+     "max": 51000
+    },
+    "pin_instructions": {
+     "min": 490,
+     "median": 500,
+     "max": 510
+    },
+    "instructions": {
+     "min": 490,
+     "median": 500,
+     "max": 510
+    }
+   }
+  }
+ ]
+}
