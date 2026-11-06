@@ -8,18 +8,22 @@
 # wobble that reds a cpu gate on no-op changes.
 # python-code-snippet mirrors clojure-code-snippet case by case,
 # so instruction counts and RSS compare directly.
-# Sharding is asymmetric because Pin slows interpreters ~40x:
-# 8 ways x 2 native runtimes (16 jobs) vs 32 ways x CPython (32
-# jobs), 48 measure jobs total; the h2h-compare job unions the
-# shards per leg and gates on per-case medians. The gate rule:
-# clojure-rs must beat CPython, AND rs-from must win-or-tie vs
-# rs-to on every case — ANY loss fails the PR.
+# All three legs of a shard run on the SAME runner: identical
+# binaries differed by up to 20% in Pin instruction counts across
+# the runners' CPU models, so cross-runner legs fail the
+# rs-from-vs-rs-to check on changes that affect nothing. Each of
+# the 32 measure jobs builds both native revisions (cargo cache),
+# then sweeps rs-from, rs-to and CPython over the same K/32 case
+# slice; the h2h-compare job unions the shards per leg and gates
+# on per-case medians. The gate rule: clojure-rs must beat
+# CPython, AND rs-from must win-or-tie vs rs-to on every case —
+# ANY loss fails the PR.
 #
 # Triggering (rust.yml is the prerequisite): this gate runs on
 # pull_request, but every leg waits behind the wait-rust job,
 # which polls the rust workflow's conclusion for the same SHA and
 # proceeds only on success — broken revisions fail fast instead of
-# burning the ~50 instrumented legs, and the sweep never starts
+# burning the ~100 instrumented legs, and the sweep never starts
 # ahead of the Rust signal. (A workflow_run trigger was tried and
 # dropped: its subscriptions only exist post-merge, leaving the PR
 # itself with no chaining at all.) If this gate fails, the PR
@@ -159,12 +163,13 @@ jobs:
           exit 1
 
   # Resolve the suite revisions AND the native-vs-native revision
-  # pair ONCE per run so all 48 measure legs sweep the same commits.
-  # Suite defaults: the pinned SHAs above; a manual dispatch may pin
-  # either input instead (bisection). Native pair: PR head/base by
-  # default on pull_request (stacked PRs diff against their parent),
-  # dispatched-ref/master on workflow_dispatch; rs_from/rs_to take a
-  # 40-char SHA or any branch/tag.
+  # pair ONCE per run so all 32 measure jobs sweep the same
+  # commits. Suite defaults: the pinned SHAs above; a manual
+  # dispatch may pin either input instead (bisection). Native pair:
+  # PR head/base by default on pull_request (stacked PRs diff
+  # against their parent), dispatched-ref/master on
+  # workflow_dispatch; rs_from/rs_to take a 40-char SHA or any
+  # branch/tag.
   resolve:
     needs: [wait-rust]
     runs-on: ubuntu-latest
@@ -219,72 +224,68 @@ jobs:
             echo "  to: \`$to_sha\` ($to)"
           } >> "$GITHUB_STEP_SUMMARY"
 
-  # The two native revisions under test (interpreter-only release:
-  # `run` needs no LLVM), each fanned out to its 16 measure legs as
-  # an artifact. rs-from is what the baseline gate tests; rs-to
-  # is its comparison base (PR base, or master on dispatch).
-  build-rs:
+  # All three legs of a shard on ONE runner: each job builds both
+  # native revisions (interpreter-only release: `run` needs no
+  # LLVM; the cargo cache makes the second revision and later runs
+  # cheap), then sweeps rs-from, rs-to and CPython over the same
+  # K/32 case slice. Same runner per slice keeps the rs-from vs
+  # rs-to check immune to the cross-runner CPU variance that reds
+  # it on no-op changes. python-code-snippet mirrors
+  # clojure-code-snippet case by case; --label-style snip keys the
+  # baseline rows identically so instruction and RSS medians compare
+  # directly. Pin counts instructions only: no memory tracing — RSS
+  # from GNU time is the memory signal. The three measure steps run
+  # even when an earlier leg fails (if: always) so one bad leg
+  # never hides the other two; the compare job still fails the run
+  # on the missing or not-ok leg.
+  measure:
     needs: [resolve]
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 240
     permissions:
-      contents: read # checkout
-      actions: write # cargo cache + binary artifact
-    strategy:
-      fail-fast: false
-      matrix:
-        rev: [rs-from, rs-to]
-    name: build-rs ${{ matrix.rev }}
-    steps:
-      - uses: actions/checkout@v5
-        with:
-          ref: ${{ matrix.rev == 'rs-from' && needs.resolve.outputs.rs_from_sha || needs.resolve.outputs.rs_to_sha }}
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: rust
-          save-if: 'true'
-      - name: Build clojure-rs
-        run: |
-          cd rust
-          cargo build --release --locked --no-default-features
-          mkdir -p "$GITHUB_WORKSPACE/cljrs-bin"
-          cp target/release/clojure-rs "$GITHUB_WORKSPACE/cljrs-bin/"
-          echo "clojure-rs ${{ matrix.rev }}: \`${{ matrix.rev == 'rs-from' && needs.resolve.outputs.rs_from_sha || needs.resolve.outputs.rs_to_sha }}\`" >> "$GITHUB_STEP_SUMMARY"
-      - name: Upload clojure-rs binary
-        uses: actions/upload-artifact@v6
-        with:
-          name: cljrs-${{ matrix.rev }}
-          path: cljrs-bin/
-          retention-days: 1
-
-  # Recipes native legs: 8 shards x 2 runtimes (rs-from, rs-to).
-  # The CPython baseline lives in measure-recipes-python below (32
-  # shards: Pin slows interpreters ~40x).
-  # Full-suite workstation time was ~30min RS at --jobs 3, so
-  # ~10min/shard; the 90min cap covers the Pin pass with margin.
-  measure-recipes:
-    needs: [resolve, build-rs]
-    runs-on: ubuntu-latest
-    timeout-minutes: 90
-    permissions:
-      contents: read # suite + instrumentation tooling checkouts
-      actions: write # instrumentation cache + shard artifact
+      contents: read # suite + revision checkouts
+      actions: write # cargo + instrumentation caches, shard artifacts
     strategy:
       # Let every shard finish so partial artifacts upload for diagnosis.
       fail-fast: false
       matrix:
-        # 0-based K/8: snip measure --shard needs 0 <= K < N.
-        shard: [0, 1, 2, 3, 4, 5, 6, 7]
-        runtime: [rs-from, rs-to]
-    name: recipes instrumentation ${{ matrix.runtime }} (shard ${{ matrix.shard }}/8)
+        # 0-based K/32: snip measure --shard needs 0 <= K < N.
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31]
+    name: recipes instrumentation (shard ${{ matrix.shard }}/32)
     steps:
+      - name: Check out rs-from revision
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.resolve.outputs.rs_from_sha }}
+          path: h2h-from
+          fetch-depth: 1
+
+      - name: Check out rs-to revision
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.resolve.outputs.rs_to_sha }}
+          path: h2h-to
+          fetch-depth: 1
+
+      - name: Check out instrumentation tooling
+        uses: actions/checkout@v5
+        with:
+          path: h2h
+          fetch-depth: 1
+
       - name: Check out snippet suite
         uses: actions/checkout@v5
         with:
           repository: hhh-pa/clojure-code-snippet
           ref: ${{ needs.resolve.outputs.snippets_sha }}
           path: snippets
+
+      - name: Check out python suite
+        uses: actions/checkout@v5
+        with:
+          repository: hhh-pa/python-code-snippet
+          ref: ${{ needs.resolve.outputs.python_snippets_sha }}
+          path: pysnippets
 
       - name: Set up Go
         uses: actions/setup-go@v6
@@ -297,10 +298,29 @@ jobs:
           cd snippets/scripts/ci/go
           go build -o snip ./cmd/snip
 
-      - name: Decrypt and extract resources
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Decrypt and extract clojure resources
         env:
           RESOURCES_PASSPHRASE: ${{ secrets.RESOURCES_PASSPHRASE }}
         working-directory: snippets
+        run: |
+          if [ -z "$RESOURCES_PASSPHRASE" ]; then
+            echo "error: the RESOURCES_PASSPHRASE secret (granted to ${{ github.repository }}) is not configured." >&2
+            exit 1
+          fi
+          mkdir -p tests/resources
+          gpg --batch --yes --pinentry-mode loopback \
+            --passphrase "$RESOURCES_PASSPHRASE" \
+            -d tests/resources.tar.xz.asc | tar -xJ -C tests/resources --strip-components=1
+
+      - name: Decrypt and extract python resources
+        env:
+          RESOURCES_PASSPHRASE: ${{ secrets.RESOURCES_PASSPHRASE }}
+        working-directory: pysnippets
         run: |
           if [ -z "$RESOURCES_PASSPHRASE" ]; then
             echo "error: the RESOURCES_PASSPHRASE secret (granted to ${{ github.repository }}) is not configured." >&2
@@ -316,22 +336,33 @@ jobs:
           sudo DEBIAN_FRONTEND=noninteractive apt-get update
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y time
 
-      - name: Use built clojure-rs
-        uses: actions/download-artifact@v6
-        with:
-          name: cljrs-${{ matrix.runtime }}
-          path: cljrs-bin
+      - uses: dtolnay/rust-toolchain@stable
 
-      - name: Add clojure-rs to PATH
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            h2h-from/rust
+            h2h-to/rust
+          save-if: 'true'
+          # Red runs still cache: the builds succeed even when the
+          # measures fail, and the next run reuses them.
+          cache-on-failure: 'true'
+
+      - name: Build rs-from clojure-rs
         run: |
-          # download-artifact does not preserve the executable bit.
-          chmod +x "$GITHUB_WORKSPACE/cljrs-bin/clojure-rs"
-          echo "$GITHUB_WORKSPACE/cljrs-bin" >> "$GITHUB_PATH"
+          cd h2h-from/rust
+          cargo build --release --locked --no-default-features
+          mkdir -p "$GITHUB_WORKSPACE/cljrs-from"
+          cp target/release/clojure-rs "$GITHUB_WORKSPACE/cljrs-from/"
+          echo "clojure-rs rs-from: \`${{ needs.resolve.outputs.rs_from_sha }}\`" >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Check out instrumentation tooling
-        uses: actions/checkout@v5
-        with:
-          path: h2h
+      - name: Build rs-to clojure-rs
+        run: |
+          cd h2h-to/rust
+          cargo build --release --locked --no-default-features
+          mkdir -p "$GITHUB_WORKSPACE/cljrs-to"
+          cp target/release/clojure-rs "$GITHUB_WORKSPACE/cljrs-to/"
+          echo "clojure-rs rs-to: \`${{ needs.resolve.outputs.rs_to_sha }}\`" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Cache instrumentation kit
         id: instrumentation-cache
@@ -344,100 +375,52 @@ jobs:
         run: |
           bash h2h/scripts/ci/setup-instrumentation.sh
 
-      - name: Measure head-to-head shard
+      - name: Measure rs-from shard
+        if: always()
         working-directory: snippets
         run: |
           ./scripts/ci/go/snip measure --resources tests/resources \
             --repeat 3 --no-alloc --no-perf --jobs 3 --timeout 300 \
-            --runtime "${{ matrix.runtime }}" \
-            --command-template 'clojure-rs run {script}' \
+            --runtime rs-from \
+            --command-template "$GITHUB_WORKSPACE/cljrs-from/clojure-rs run {script}" \
             --pin --pin-bin "$INSTRUMENTATION_BIN" --pin-tool "$INSTRUMENTATION_TOOL" \
             --pin-repeat 2 --pin-timeout 1500 \
-            --shard ${{ matrix.shard }}/8 \
-            --output "h2h-recipes-${{ matrix.runtime }}-shard-${{ matrix.shard }}.json" \
+            --shard ${{ matrix.shard }}/32 \
+            --output "h2h-recipes-rs-from-shard-${{ matrix.shard }}.json" \
             --summary-file "$GITHUB_STEP_SUMMARY"
 
-      - name: Upload shard results
+      - name: Upload rs-from shard results
         if: always()
         uses: actions/upload-artifact@v6
         with:
-          name: h2h-recipes-${{ matrix.runtime }}-shard-${{ matrix.shard }}
-          path: snippets/h2h-recipes-${{ matrix.runtime }}-shard-${{ matrix.shard }}.json
+          name: h2h-recipes-rs-from-shard-${{ matrix.shard }}
+          path: snippets/h2h-recipes-rs-from-shard-${{ matrix.shard }}.json
           retention-days: 7
 
-  # CPython baseline for the recipes suite. Dedicated job (not a runtime
-  # row of measure-recipes) because the baseline needs its own shard
-  # fan-out: Pin slows CPython ~40x, so 32 shards keep every shard
-  # under the 6h cap with margin; recalibrate after the first green
-  # run. setarch -R (inside the pin launcher) keeps CPython's mmaps
-  # clear of Pin's reserved region under address randomization.
-  # python-code-snippet mirrors clojure-code-snippet case by case;
-  # --label-style snip keys the rows identically so instruction and
-  # RSS medians compare directly. Pin counts instructions only
-  # (--no-alloc-shim): no memory tracing — RSS from GNU time is
-  # the memory signal.
-  measure-recipes-python:
-    needs: [resolve]
-    runs-on: ubuntu-latest
-    timeout-minutes: 360
-    permissions:
-      contents: read # suite + instrumentation tooling checkouts
-      actions: write # instrumentation cache + shard artifact
-    strategy:
-      fail-fast: false
-      matrix:
-        # 0-based K/32.
-        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31]
-    name: recipes instrumentation python (shard ${{ matrix.shard }}/32)
-    steps:
-      - name: Check out suite
-        uses: actions/checkout@v5
-        with:
-          repository: hhh-pa/python-code-snippet
-          ref: ${{ needs.resolve.outputs.python_snippets_sha }}
-          path: pysnippets
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-
-      - name: Decrypt and extract resources
-        env:
-          RESOURCES_PASSPHRASE: ${{ secrets.RESOURCES_PASSPHRASE }}
-        working-directory: pysnippets
+      - name: Measure rs-to shard
+        if: always()
+        working-directory: snippets
         run: |
-          if [ -z "$RESOURCES_PASSPHRASE" ]; then
-            echo "error: the RESOURCES_PASSPHRASE secret (granted to ${{ github.repository }}) is not configured." >&2
-            exit 1
-          fi
-          mkdir -p tests/resources
-          gpg --batch --yes --pinentry-mode loopback \
-            --passphrase "$RESOURCES_PASSPHRASE" \
-            -d tests/resources.tar.xz.asc | tar -xJ -C tests/resources --strip-components=1
+          ./scripts/ci/go/snip measure --resources tests/resources \
+            --repeat 3 --no-alloc --no-perf --jobs 3 --timeout 300 \
+            --runtime rs-to \
+            --command-template "$GITHUB_WORKSPACE/cljrs-to/clojure-rs run {script}" \
+            --pin --pin-bin "$INSTRUMENTATION_BIN" --pin-tool "$INSTRUMENTATION_TOOL" \
+            --pin-repeat 2 --pin-timeout 1500 \
+            --shard ${{ matrix.shard }}/32 \
+            --output "h2h-recipes-rs-to-shard-${{ matrix.shard }}.json" \
+            --summary-file "$GITHUB_STEP_SUMMARY"
 
-      - name: Install GNU time
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq time
-
-      - name: Check out instrumentation tooling
-        uses: actions/checkout@v5
+      - name: Upload rs-to shard results
+        if: always()
+        uses: actions/upload-artifact@v6
         with:
-          path: h2h
+          name: h2h-recipes-rs-to-shard-${{ matrix.shard }}
+          path: snippets/h2h-recipes-rs-to-shard-${{ matrix.shard }}.json
+          retention-days: 7
 
-      - name: Cache instrumentation kit
-        id: instrumentation-cache
-        uses: actions/cache@v5
-        with:
-          path: ~/instrumentation
-          key: instrumentation-pin-4.4-${{ hashFiles('h2h/scripts/ci/setup-instrumentation.sh', 'h2h/scripts/ci/instrumentation/inscount.cpp') }}
-
-      - name: Provision instrumentation
-        run: |
-          bash h2h/scripts/ci/setup-instrumentation.sh
-
-      - name: Measure head-to-head shard
+      - name: Measure python shard
+        if: always()
         working-directory: pysnippets
         run: |
           python3 tools/measure.py --resources tests/resources \
@@ -448,7 +431,7 @@ jobs:
             --output "h2h-recipes-python-shard-${{ matrix.shard }}.json" \
             --summary-file "$GITHUB_STEP_SUMMARY"
 
-      - name: Upload shard results
+      - name: Upload python shard results
         if: always()
         uses: actions/upload-artifact@v6
         with:
@@ -466,7 +449,7 @@ jobs:
   # it does not track history.
   h2h-compare:
     name: h2h cpu/mem gate
-    needs: [measure-recipes, measure-recipes-python]
+    needs: [measure]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
