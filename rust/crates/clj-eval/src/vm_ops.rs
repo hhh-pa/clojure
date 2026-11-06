@@ -1212,4 +1212,44 @@ mod tests {
         assert_eq!(<Inc as Op1>::test(&Value::Int(1)), Some(true));
         assert_eq!(<Count as Op1>::test(&Value::Bool(true)), None);
     }
+
+    #[test]
+    fn rematches_op2() {
+        let fast_pat = Value::Regex(Arc::from("-?[0-9]+"));
+        let s_123 = Value::Str(Arc::from("123"));
+        let s_abc = Value::Str(Arc::from("abc"));
+        assert_eq!(<ReMatches as Op2>::test(&fast_pat, &s_123), Some(true));
+        assert_eq!(<ReMatches as Op2>::test(&fast_pat, &s_abc), Some(false));
+        let slow_pat = Value::Regex(Arc::from("a+"));
+        let s_aaa = Value::Str(Arc::from("aaa"));
+        let s_bbb = Value::Str(Arc::from("bbb"));
+        assert_eq!(<ReMatches as Op2>::test(&slow_pat, &s_aaa), Some(true));
+        assert_eq!(<ReMatches as Op2>::test(&slow_pat, &s_bbb), Some(false));
+        assert_eq!(<ReMatches as Op2>::test(&slow_pat, &Value::Int(1)), None);
+        assert_eq!(
+            <ReMatches as Op2>::apply(&fast_pat, &s_123),
+            Some(s_123.clone())
+        );
+        assert_eq!(
+            <ReMatches as Op2>::apply(&fast_pat, &s_abc),
+            Some(Value::Nil)
+        );
+    }
+
+    #[test]
+    fn parse_long_and_is_string() {
+        let s_42 = Value::Str(Arc::from("42"));
+        let s_bad = Value::Str(Arc::from("bad"));
+        let s_hi = Value::Str(Arc::from("hi"));
+        assert_eq!(<ParseLong as Op1>::apply(&s_42), Some(Value::Int(42)));
+        assert_eq!(<ParseLong as Op1>::apply(&s_bad), Some(Value::Nil));
+        assert_eq!(<ParseLong as Op1>::apply(&Value::Int(1)), None);
+        assert_eq!(<IsString as Op1>::apply(&s_hi), Some(Value::Bool(true)));
+        assert_eq!(
+            <IsString as Op1>::apply(&Value::Int(1)),
+            Some(Value::Bool(false))
+        );
+        assert_eq!(<IsString as Op1>::test(&s_hi), Some(true));
+        assert_eq!(<IsString as Op1>::test(&Value::Int(1)), Some(false));
+    }
 }
