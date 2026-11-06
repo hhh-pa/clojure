@@ -1698,14 +1698,15 @@ fn build_str_scan(s: &str) -> Option<StrScan> {
 /// `Ascii` flag answers in one byte load even for small
 /// indexes, where a direct scan would re-decode, #235).
 pub(crate) fn str_char_at(s: &Arc<str>, idx: usize) -> Option<char> {
+    if let Some(hit) = with_scan_hit(s, |scan| scan_char_at(s, scan, idx)) {
+        return hit;
+    }
     if s.len() <= STR_SCAN_SMALL_MAX {
         if s.is_ascii() {
+            memoize_scan(s, &StrScan::Ascii);
             return s.as_bytes().get(idx).map(|b| *b as char);
         }
         return s.chars().nth(idx);
-    }
-    if let Some(hit) = with_scan_hit(s, |scan| scan_char_at(s, scan, idx)) {
-        return hit;
     }
     match str_scan(s) {
         Some(scan) => scan_char_at(s, &scan, idx),
@@ -3167,5 +3168,14 @@ mod tests {
         let t2: Arc<str> = Arc::from("z".repeat(200));
         drop(t);
         assert_eq!(str_char_at(&t2, 100), Some('z'));
+    }
+
+    #[test]
+    fn str_scan_small_ascii_memoizes_and_repeats() {
+        let s: Arc<str> = Arc::from("hello_world");
+        assert_eq!(str_char_at(&s, 0), Some('h'));
+        assert_eq!(str_char_at(&s, 1), Some('e'));
+        assert_eq!(str_char_at(&s, 10), Some('d'));
+        assert_eq!(str_char_at(&s, 11), None);
     }
 }
