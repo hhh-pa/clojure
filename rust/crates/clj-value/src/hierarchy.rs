@@ -1429,15 +1429,15 @@ fn derive_in_map(
     if set_has(ta.get(tag), parent) {
         return Err(HierError::exception(format!(
             "{} already has {} as ancestor",
-            crate::print_to_string(tag_orig),
-            crate::print_to_string(parent),
+            crate::str_of_value(tag_orig),
+            crate::str_of_value(parent),
         )));
     }
     if set_has(ta.get(parent), tag) {
         return Err(HierError::exception(format!(
             "Cyclic derivation: {} has {} as ancestor",
-            crate::print_to_string(parent),
-            crate::print_to_string(tag_orig),
+            crate::str_of_value(parent),
+            crate::str_of_value(tag_orig),
         )));
     }
     let td = as_map_opt(hm.get(&rel_key("descendants")), SOURCES_NPE)?;

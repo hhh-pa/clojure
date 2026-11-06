@@ -10,7 +10,7 @@
 //!
 //! The cell holds the current state, the `:validator` fn (if any),
 //! the `:meta` map (if any), the watches map (`{key fn}`, fired in
-//! insertion order), the error mode, the error handler (if any), the
+//! map seq order), the error mode, the error handler (if any), the
 //! latched failure (if any), and the FIFO action queue. At most one
 //! action runs per agent at a time: [`enqueue`](Agent::enqueue)
 //! hands the head to a pool thread only when nothing runs, and

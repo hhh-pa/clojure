@@ -306,20 +306,24 @@ impl DoubleEndedIterator for VectorIter<'_> {
 /// A persistent map of values (thread-safe rpds hash-trie map) with
 /// optional metadata. See [`List`].
 ///
-/// `keys` is the insertion-order sidecar: the JVM's small maps are
-/// insertion-ordered array-maps, and that order is observable —
-/// syntax-quote flattens maps in seq order, and `pr` prints small
-/// maps in insertion order. Re-inserting an existing key keeps its
-/// original position (and key object), like `assoc`. (Big JVM maps
-/// iterate in murmur-hash order, which no insertion record can
-/// reproduce; the harness canonicalizes map/set order away, so only
-/// syntax-quote expansion and rendering observe this.)
+/// Iteration order is observable — syntax-quote flattens maps in
+/// seq order, and `pr` prints in seq order — and follows the JVM
+/// per class: shaped maps iterate in insertion order (the JVM's
+/// array-maps; re-inserting an existing key keeps its original
+/// position and key object, like `assoc`), while plain hash-maps
+/// iterate the trie's own content-determined order (like the JVM's
+/// murmur-hash order — never insertion). (Byte-exact JVM order
+/// would need a from-scratch `PersistentHashMap`; the harness
+/// canonicalizes map/set order away, so only syntax-quote
+/// expansion and rendering observe this.)
 ///
-/// The sidecar rides behind an `Arc` (writes go through
-/// `Arc::make_mut`, which clones the O(1) persistent header when
-/// shared): the rpds vector header is 24 bytes, and every `Value`
-/// pays the largest variant's size inline (#221 R1). Cloning a map
-/// stays allocation-free, like the `meta` arc beside it.
+/// `keys` is the comparator-order sidecar, kept for sorted maps
+/// only (plain hash-maps iterate the trie, shaped maps the shape).
+/// It rides behind an `Arc` (writes go through `Arc::make_mut`,
+/// which clones the O(1) persistent header when shared): the rpds
+/// vector header is 24 bytes, and every `Value` pays the largest
+/// variant's size inline (#221 R1). Cloning a map stays
+/// allocation-free, like the `meta` arc beside it.
 ///
 /// `hashy` reports `PersistentHashMap` instead of
 /// `PersistentArrayMap`: promotion is one-way and history-dependent
@@ -327,13 +331,12 @@ impl DoubleEndedIterator for VectorIter<'_> {
 /// `array-map` forces array), so it is stored, not derived.
 ///
 /// `sort` carries the FT6 sorted-map order: `None` is an ordinary
-/// map; `Some` keeps `keys` in comparator order instead of
-/// insertion order (compare-0 duplicates collapse at insertion,
-/// like repeated `assoc`). The inner trie stays content-exact, so
-/// equality, hashing, printing, and seqs need no sorted branch —
-/// only order-sensitive writers (`assoc` position) and readers
-/// (`get`/`dissoc` by compare-0 key, `jvm_class_of`, `nth`,
-/// `sorted?`) consult it.
+/// map; `Some` keeps `keys` in comparator order (compare-0
+/// duplicates collapse at insertion, like repeated `assoc`). The
+/// inner trie stays content-exact, so equality, hashing, printing,
+/// and seqs need no sorted branch — only order-sensitive writers
+/// (`assoc` position) and readers (`get`/`dissoc` by compare-0 key,
+/// `jvm_class_of`, `nth`, `sorted?`) consult it.
 /// Entries at or below this count ride shaped (an interned
 /// key-set plus a flat values vec, no HAMT or sidecar allocs) —
 /// the JVM's `PersistentArrayMap` converts past 16 pairs.
@@ -442,12 +445,13 @@ fn intern_shape(keys: &[Value]) -> Arc<MapShape> {
 }
 
 /// Shared dummies for the authority a map isn't using: shaped
-/// maps hold `inner: None` and ignore `keys`, hash maps hold
-/// `small: None`, so small maps never allocate a HAMT root or a
-/// keys vector. The empty shape is shared, but every empty map
-/// carries a FRESH [`SmallMap`] allocation: identity is the entries
-/// `Arc` (see [`Map::id`]), so sharing one static would identify
-/// all empties.
+/// maps hold `inner: None` and ignore `keys`, plain hash-maps
+/// hold `small: None` and ignore `keys` (only sorted maps keep a
+/// comparator-order sidecar), so small maps never allocate a
+/// HAMT root or a keys vector. The empty shape is shared, but
+/// every empty map carries a FRESH [`SmallMap`] allocation:
+/// identity is the entries `Arc` (see [`Map::id`]), so sharing
+/// one static would identify all empties.
 static EMPTY_MAP_KEYS: LazyLock<Arc<RpdsVector>> =
     LazyLock::new(|| Arc::new(RpdsVector::new_sync()));
 static EMPTY_MAP_SHAPE: LazyLock<Arc<MapShape>> = LazyLock::new(|| intern_shape(&[]));
@@ -464,26 +468,28 @@ fn fresh_empty_small() -> Arc<SmallMap> {
 #[derive(Clone, Debug)]
 pub struct Map {
     /// The entries when `small` is `None` (`None` for shaped maps
-    /// — no dummy trie. Boxed (not inline) so `Map` fits 48 bytes
-    /// and `Value` fits 64).
-    inner: Option<Box<RpdsMap>>,
+    /// — no dummy trie. Behind an `Arc` (not inline) so `Map`
+    /// fits 48 bytes and `Value` fits 64; the `Arc` address is
+    /// the allocation identity (see [`Map::id`]).
+    inner: Option<Arc<RpdsMap>>,
     /// `Some` = shaped authoritative (an interned key-set plus
     /// this version's values, at most [`INLINE_MAP_MAX`] entries
-    /// in iteration order); `None` = `inner`/`keys`
-    /// authoritative. Writers mint a fresh entries `Arc` except
-    /// uniquely-owned in-place updates (see [`Map::id`]).
+    /// in iteration order); `None` = `inner` authoritative (plus
+    /// `keys` when sorted). Writers mint a fresh entries `Arc`
+    /// except uniquely-owned in-place updates (see [`Map::id`]).
     small: Option<Arc<SmallMap>>,
-    /// Insertion-order sidecar when `small` is `None` (a
-    /// shared-empty dummy otherwise). Writers mint a fresh
-    /// sidecar `Arc` except uniquely-owned in-place updates
-    /// (see [`Map::id`]).
+    /// Comparator-order sidecar for sorted maps when `small` is
+    /// `None` (a shared-empty dummy otherwise — plain hash-maps
+    /// iterate the trie, never this). Writers maintain it only
+    /// when sorted.
     keys: Arc<RpdsVector>,
     meta: Option<Arc<Map>>,
     hashy: bool,
     /// Boxed: sorted maps are rare, and the 8 bytes this saves
     /// keep `Map` — inline in `Value` — at 48 bytes (the R1
     /// budget, down from 72: identity rides the entries `Arc`
-    /// instead of a minted field, and the trie rides boxed).
+    /// instead of a minted field, and the trie rides behind an
+    /// `Arc` rather than inline).
     sort: Option<Box<SortSpec>>,
 }
 
@@ -920,9 +926,10 @@ pub(crate) enum TypedItems {
     Chars(Vec<char>),
 }
 
-/// Entries in iteration order (insertion order, or comparator
-/// order when sorted) — one concrete type over both
-/// representations so `Map::iter` stays allocation-free.
+/// Entries in iteration order (trie order for plain hash-maps,
+/// insertion order for shaped maps, comparator order for sorted
+/// ones) — one concrete type over all representations so
+/// `Map::iter` stays allocation-free.
 pub struct MapIter<'a> {
     inner: MapIterInner<'a>,
 }
@@ -932,19 +939,20 @@ enum MapIterInner<'a> {
         keys: std::slice::Iter<'a, Value>,
         vals: std::slice::Iter<'a, Value>,
     },
-    Hash(HashIter<'a>),
+    Ordered(OrderedIter<'a>),
+    Trie(TrieIter<'a>),
 }
 
-/// Hash-map iteration: position over the keys sidecar, resolving
-/// each key against the trie (every writer keeps both in sync,
-/// so every key resolves).
-struct HashIter<'a> {
+/// Sorted hash-map iteration: position over the comparator-order
+/// sidecar, resolving each key against the trie (every sorted
+/// writer keeps both in sync, so every key resolves).
+struct OrderedIter<'a> {
     keys: &'a RpdsVector,
     map: &'a RpdsMap,
     pos: usize,
 }
 
-impl<'a> Iterator for HashIter<'a> {
+impl<'a> Iterator for OrderedIter<'a> {
     type Item = (&'a Value, &'a Value);
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -953,14 +961,32 @@ impl<'a> Iterator for HashIter<'a> {
         }
         let k = self.keys.get(self.pos)?;
         self.pos += 1;
-        // Every writer keeps the sidecar and the trie in sync, so
-        // every iterated key resolves.
+        // Every sorted writer keeps the sidecar and the trie in
+        // sync, so every iterated key resolves.
         let v = self.map.get(k).expect("keys sidecar and trie stay in sync");
         Some((k, v))
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
         (0, Some(self.keys.len().saturating_sub(self.pos)))
+    }
+}
+
+/// Plain hash-map iteration: the trie's own order (deterministic
+/// per content, like the JVM's hash order — never insertion).
+struct TrieIter<'a> {
+    iter: rpds::map::hash_trie_map::Iter<'a, Value, Value, archery::ArcTK>,
+}
+
+impl<'a> Iterator for TrieIter<'a> {
+    type Item = (&'a Value, &'a Value);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.iter.next()
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.iter.size_hint()
     }
 }
 
@@ -973,7 +999,8 @@ impl<'a> Iterator for MapIter<'a> {
             // both sides end together; `zip` keeps the tail
             // from over-running on any divergence.
             MapIterInner::Shaped { keys, vals } => keys.next().zip(vals.next()),
-            MapIterInner::Hash(it) => it.next(),
+            MapIterInner::Ordered(it) => it.next(),
+            MapIterInner::Trie(it) => it.next(),
         }
     }
 
@@ -984,7 +1011,8 @@ impl<'a> Iterator for MapIter<'a> {
                 let (lv, uv) = vals.size_hint();
                 (lk.min(lv), uk.zip(uv).map(|(a, b)| a.min(b)))
             }
-            MapIterInner::Hash(it) => it.size_hint(),
+            MapIterInner::Ordered(it) => it.size_hint(),
+            MapIterInner::Trie(it) => it.size_hint(),
         }
     }
 }
@@ -999,9 +1027,12 @@ impl Map {
         self.inner.as_deref().expect("hash map holds a trie")
     }
 
-    /// The hash trie, mutably (hash arm only).
+    /// The hash trie, mutably (hash arm only). `make_mut`: in
+    /// place when unique; a header clone plus a path copy when
+    /// shared (exactly the old clone-then-write) — and fresh
+    /// identity exactly when shared (see [`Map::id`]).
     fn trie_mut(&mut self) -> &mut RpdsMap {
-        self.inner.as_deref_mut().expect("hash map holds a trie")
+        Arc::make_mut(self.inner.as_mut().expect("hash map holds a trie"))
     }
 
     pub fn from_kvs_checked(pairs: Vec<(Value, Value)>) -> Result<Self, Value> {
@@ -1074,15 +1105,15 @@ impl Map {
     fn from_parts(keys: Vec<Value>, vals: Vec<Value>, hashy: bool) -> Self {
         if keys.len() > INLINE_MAP_MAX {
             let mut inner = RpdsMap::new_with_hasher_and_ptr_kind(FxBuildHasher::default());
-            let mut keys_side = RpdsVector::new_sync();
             for (k, v) in keys.into_iter().zip(vals) {
-                keys_side.push_back_mut(k.clone());
                 inner.insert_mut(k, v);
             }
             return Self {
-                inner: Some(Box::new(inner)),
+                inner: Some(Arc::new(inner)),
                 small: None,
-                keys: Arc::new(keys_side),
+                // Plain (never sorted here): iteration is the
+                // trie's own order, so no sidecar.
+                keys: EMPTY_MAP_KEYS.clone(),
                 meta: None,
                 hashy,
                 sort: None,
@@ -1134,20 +1165,23 @@ impl Map {
         // Owned `self`: mutate the trie in place (same rationale as
         // `Vector::push_back` — rpds still path-copies nodes shared
         // with *other* versions, so persistence is preserved).
+        // `trie_mut` mints fresh identity exactly when shared (see
+        // [`Map::id`]), so the same-key early return needs no
+        // identity bookkeeping of its own.
         if self.trie().get(&k).is_some() {
             self.trie_mut().insert_mut(k, v);
-            // Fresh identity only when shared: a live alias must
-            // keep its sidecar `Arc` (see [`Map::id`]).
-            if Arc::strong_count(&self.keys) > 1 {
-                self.keys = Arc::new((*self.keys).clone());
-            }
             return;
         }
         let size = self.trie().size();
         let promote = !self.hashy && (size >= 64 || (size >= 8 && !matches!(k, Value::Keyword(_))));
-        // `make_mut`: in place when unique; a header clone plus a
-        // path copy when shared (exactly the old clone-then-push).
-        Arc::make_mut(&mut self.keys).push_back_mut(k.clone());
+        if self.sort.is_some() {
+            // Sorted maps keep the comparator-order sidecar
+            // alongside (plain maps iterate the trie, never the
+            // sidecar). In-repo sorted writes position through
+            // `with_ordered_entries`, so this arm only fires for
+            // direct out-of-crate writes.
+            Arc::make_mut(&mut self.keys).push_back_mut(k.clone());
+        }
         self.trie_mut().insert_mut(k, v);
         self.hashy = self.hashy || promote;
     }
@@ -1201,26 +1235,39 @@ impl Map {
     }
 
     /// Convert a shaped map to the hash trie, then insert the
-    /// overflowing pair (insertion order preserved through `keys`).
+    /// overflowing pair (iteration becomes the trie's own order,
+    /// or the comparator order when sorted).
     fn promote_with_mut(&mut self, small: &SmallMap, k: Value, v: Value) {
         let mut inner = RpdsMap::new_with_hasher_and_ptr_kind(FxBuildHasher::default());
+        // Sorted maps keep the comparator-order sidecar (entries
+        // arrive pre-sorted); plain maps iterate the trie, so no
+        // sidecar. In-repo sorted writes position through
+        // `with_ordered_entries`, so the sorted arm only fires for
+        // direct out-of-crate writes.
         let mut keys = RpdsVector::new_sync();
         for (ek, ev) in small.shape.keys.iter().zip(small.vals.iter()) {
-            keys.push_back_mut(ek.clone());
+            if self.sort.is_some() {
+                keys.push_back_mut(ek.clone());
+            }
             inner.insert_mut(ek.clone(), ev.clone());
         }
-        keys.push_back_mut(k.clone());
+        if self.sort.is_some() {
+            keys.push_back_mut(k.clone());
+        }
         inner.insert_mut(k, v);
-        self.inner = Some(Box::new(inner));
+        self.inner = Some(Arc::new(inner));
         self.small = None;
-        self.keys = Arc::new(keys);
+        if self.sort.is_some() {
+            self.keys = Arc::new(keys);
+        }
     }
 
     /// Remove a key (`dissoc` one key). A missing key is a no-op;
-    /// otherwise both the entries and the insertion-order sidecar
-    /// drop it, and later positions shift down. The class never
-    /// demotes (a shrunk hash-map stays a hash-map); neither does
-    /// the representation (a shrunk hash-map stays hashed).
+    /// otherwise the entries drop it (and the comparator-order
+    /// sidecar when sorted). The class never demotes (a shrunk
+    /// hash-map stays a hash-map); neither does the
+    /// representation (a shrunk hash-map stays hashed). Always
+    /// mints fresh identity on a hit (`dissoc` news on the JVM).
     #[must_use]
     pub fn without(mut self, k: &Value) -> Self {
         if let Some(small) = self.small.take() {
@@ -1258,21 +1305,28 @@ impl Map {
         if self.trie().get(k).is_none() {
             return self;
         }
-        let mut keys = RpdsVector::new_sync();
-        for key in self.keys.iter() {
-            if key != k {
-                keys.push_back_mut(key.clone());
+        // Unwrap-or-clone into a fresh `Arc`: uniquely-owned tries
+        // move (no clone), shared ones header-clone — and the
+        // fresh `Arc` mints identity either way (see [`Map::id`]).
+        let inner = self.inner.take().expect("hash map holds a trie");
+        let mut trie = match Arc::try_unwrap(inner) {
+            Ok(t) => t,
+            Err(shared) => (*shared).clone(),
+        };
+        trie.remove_mut(k);
+        self.inner = Some(Arc::new(trie));
+        if self.sort.is_some() {
+            // Sorted `dissoc` positions through here: prune the
+            // comparator-order sidecar alongside.
+            let mut keys = RpdsVector::new_sync();
+            for key in self.keys.iter() {
+                if key != k {
+                    keys.push_back_mut(key.clone());
+                }
             }
+            self.keys = Arc::new(keys);
         }
-        self.trie_mut().remove_mut(k);
-        Self {
-            inner: self.inner,
-            small: None,
-            meta: self.meta,
-            keys: Arc::new(keys),
-            hashy: self.hashy,
-            sort: self.sort,
-        }
+        self
     }
 
     /// Whether this reports `PersistentHashMap` (else array-map).
@@ -1310,26 +1364,34 @@ impl Map {
     }
 
     /// Mark this map sorted (or clear the order), preserving entries.
-    /// Callers maintain `keys` in comparator order alongside.
+    /// Callers maintain `keys` in comparator order alongside:
+    /// attaching `Some` to a map whose sidecar isn't (a plain
+    /// hash-map's dummy, an unsorted build) breaks iteration —
+    /// build through [`Map::with_ordered_entries`] or attach
+    /// before inserting.
     #[must_use]
     pub fn with_sort(mut self, sort: Option<SortSpec>) -> Self {
         self.sort = sort.map(Box::new);
         self
     }
 
-    /// Keys in iteration order (insertion order, or comparator
-    /// order when sorted). Owned: the sidecar is a persistent
-    /// vector, so only sorted paths (already linear) snapshot it.
+    /// Keys in iteration order (insertion order for shaped maps,
+    /// the trie's own order for plain hash-maps, comparator order
+    /// when sorted). Owned: only sorted paths (already linear)
+    /// snapshot the sidecar; the trie arm clones each key.
     #[must_use]
     pub fn ordered_keys(&self) -> Vec<Value> {
         match &self.small {
             Some(small) => small.shape.keys.to_vec(),
-            None => self.keys.iter().cloned().collect(),
+            None if self.sort.is_some() => self.keys.iter().cloned().collect(),
+            None => self.trie().keys().cloned().collect(),
         }
     }
 
     /// Rebuild from explicitly ordered entries, preserving metadata
     /// and the sort order (sorted `assoc` positions through here).
+    /// The given order sticks for shaped and sorted maps; plain
+    /// large maps iterate the trie's own order regardless.
     #[must_use]
     pub fn with_ordered_entries(self, entries: Vec<(Value, Value)>) -> Self {
         if entries.len() <= INLINE_MAP_MAX {
@@ -1365,16 +1427,25 @@ impl Map {
             };
         }
         let mut inner = RpdsMap::new_with_hasher_and_ptr_kind(FxBuildHasher::default());
+        // Only sorted maps keep the given order in the sidecar
+        // (plain maps iterate the trie, whatever order the
+        // entries arrive in).
         let mut keys = RpdsVector::new_sync();
         for (k, v) in entries {
-            keys.push_back_mut(k.clone());
+            if self.sort.is_some() {
+                keys.push_back_mut(k.clone());
+            }
             inner.insert_mut(k, v);
         }
         Self {
-            inner: Some(Box::new(inner)),
+            inner: Some(Arc::new(inner)),
             small: None,
             meta: self.meta,
-            keys: Arc::new(keys),
+            keys: if self.sort.is_some() {
+                Arc::new(keys)
+            } else {
+                EMPTY_MAP_KEYS.clone()
+            },
             hashy: self.hashy,
             sort: self.sort,
         }
@@ -1418,8 +1489,11 @@ impl Map {
         self.size() == 0
     }
 
-    /// Iterate entries in insertion order (the JVM small-map seq
-    /// order; see the `keys` sidecar).
+    /// Iterate entries in iteration order: insertion order for
+    /// shaped maps (the JVM small-map seq order), the trie's own
+    /// order for plain hash-maps (deterministic per content, like
+    /// the JVM's hash order — never insertion), comparator order
+    /// when sorted.
     pub fn iter(&self) -> MapIter<'_> {
         MapIter {
             inner: match &self.small {
@@ -1427,10 +1501,13 @@ impl Map {
                     keys: small.shape.keys.iter(),
                     vals: small.vals.iter(),
                 },
-                None => MapIterInner::Hash(HashIter {
+                None if self.sort.is_some() => MapIterInner::Ordered(OrderedIter {
                     keys: &self.keys,
                     map: self.trie(),
                     pos: 0,
+                }),
+                None => MapIterInner::Trie(TrieIter {
+                    iter: self.trie().iter(),
                 }),
             },
         }
@@ -1453,14 +1530,14 @@ impl Map {
                 shape: Arc::clone(&small.shape),
                 vals: small.vals.clone(),
             }));
-        } else {
-            self.keys = Arc::new((*self.keys).clone());
+        } else if let Some(inner) = self.inner.take() {
+            self.inner = Some(Arc::new((*inner).clone()));
         }
         self
     }
 
     /// The allocation identity for `identical?` (S16): the entries
-    /// `Arc` address (shaped) or the sidecar `Arc` address (hash).
+    /// `Arc` address (shaped) or the trie `Arc` address (hash).
     /// Writers mint a fresh `Arc` except uniquely-owned in-place
     /// updates (#227 — same address, unobservable: no live alias
     /// shares it), `Clone` shares it, and no-ops return `self` —
@@ -1472,7 +1549,7 @@ impl Map {
     pub fn id(&self) -> u64 {
         match &self.small {
             Some(small) => Arc::as_ptr(small).addr() as u64,
-            None => Arc::as_ptr(&self.keys).addr() as u64,
+            None => Arc::as_ptr(self.inner.as_ref().expect("hash map holds a trie")).addr() as u64,
         }
     }
 }
@@ -3540,8 +3617,8 @@ mod tests {
     }
 
     #[test]
-    fn insertion_order_sidecars() {
-        // Maps iterate in insertion order (JVM small-map seq).
+    fn insertion_order_shaped_maps_and_sets() {
+        // Shaped maps iterate in insertion order (JVM small-map seq).
         let m =
             super::Map::from_kvs_checked(vec![(kw("b"), Value::Int(1)), (kw("a"), Value::Int(2))])
                 .unwrap();

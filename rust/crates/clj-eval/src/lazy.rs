@@ -4062,15 +4062,18 @@ fn realize_deep_map(eval: &mut Evaluator, m: &Map) -> Result<Value, Signal> {
     for (k, val) in m.iter() {
         pairs.push((realize_deep(eval, k)?, realize_deep(eval, val)?));
     }
-    let mut out = clj_value::new_map();
+    // The sort order attaches BEFORE the insert loop: the loop
+    // maintains the comparator-order sidecar for sorted maps
+    // (see `Map::insert_mut`), so the realized map keeps its
+    // order (`pairs` arrive in source iteration order); plain
+    // maps iterate the trie either way.
+    let mut out = clj_value::new_map().with_sort(m.sort_spec().cloned());
     for (k, val) in pairs {
         out = out.insert(k, val);
     }
-    // Realization preserves the map class (sorted stays sorted,
-    // hashy stays hashy — the print driver dispatches on it).
-    let out = out
-        .with_sort(m.sort_spec().cloned())
-        .with_hashy(m.is_hashy());
+    // Realization preserves the map class (hashy stays hashy —
+    // the print driver dispatches on it).
+    let out = out.with_hashy(m.is_hashy());
     Ok(Value::Map(out.with_meta(m.meta().cloned())))
 }
 

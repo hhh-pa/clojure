@@ -17,8 +17,8 @@ use std::sync::Arc;
 
 use clj_reader::{ReaderError, Span};
 use clj_value::{
-    Keyword, List, Map, PrintOpts, Ref, Set, SortSpec, Symbol, ThrowClass, Throwable, Value, Var,
-    Vector, new_map, new_set, pr_to_string, seq_vec,
+    Keyword, List, Map, Ref, Set, SortSpec, Symbol, ThrowClass, Throwable, Value, Var, Vector,
+    new_map, new_set, seq_vec,
 };
 
 use crate::concurrency::DEREF_NIL;
@@ -174,7 +174,7 @@ pub(crate) fn cast_err(v: &Value, to: &str) -> NativeError {
 pub(crate) fn str_of(v: &Value) -> String {
     match v {
         Value::Nil => String::new(),
-        _ => pr_to_string(v, &PrintOpts::print()),
+        _ => clj_value::str_of_value(v),
     }
 }
 

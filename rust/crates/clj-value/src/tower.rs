@@ -1111,6 +1111,25 @@ fn round_quotient(
     Ok(BigDec { unscaled, scale })
 }
 
+/// JVM `Ratio.doubleValue()`: `BigDecimal(num).divide(den,
+/// DECIMAL64).doubleValue()` — 16 significant digits, HALF_EVEN,
+/// then correctly rounded to `f64`. Single-rounding IEEE division
+/// differs in the last digit (`(double 2/3)` is `...667`, not
+/// `...666`). The 16-digit decimal formats exactly and the float
+/// parse rounds it like `BigDecimal.doubleValue` (overflow →
+/// infinity, underflow → zero).
+#[must_use]
+pub fn ratio_to_f64(r: &BigRational) -> f64 {
+    if r.numer().is_zero() {
+        return 0.0;
+    }
+    let mc = MathContext::new(16, RoundingMode::HalfEven);
+    let dec = div_round(r.numer(), r.denom(), &mc).expect("HALF_EVEN division cannot fail");
+    format!("{}e{}", dec.unscaled, -dec.scale)
+        .parse()
+        .unwrap_or(f64::NAN)
+}
+
 /// A scale gap as `u32` for exact `pow10` expansion. Gaps past
 /// `u32::MAX` need multi-GB digit counts (only reachable through
 /// arithmetic-grown scales — literals cap at `i32`), where the
@@ -1565,5 +1584,24 @@ mod tests {
                 .to_bigdec_string(),
             "3.333333333E+99"
         );
+    }
+
+    #[test]
+    fn ratio_double_value_matches_jvm() {
+        use num_bigint::BigInt;
+        let rat = |n: i64, d: i64| BigRational::new(n.into(), d.into());
+        // JVM oracles (DECIMAL64 double-rounding, not IEEE division).
+        assert_eq!(ratio_to_f64(&rat(2, 3)), 0.6666666666666667);
+        assert_eq!(ratio_to_f64(&rat(1, 3)), 0.3333333333333333);
+        assert_eq!(ratio_to_f64(&rat(10, 3)), 3.333333333333333);
+        assert_eq!(ratio_to_f64(&rat(-2, 3)), -0.6666666666666667);
+        assert_eq!(ratio_to_f64(&rat(1, 2)), 0.5);
+        assert_eq!(ratio_to_f64(&BigRational::from_integer(0.into())), 0.0);
+        let big: BigInt = BigInt::from(10).pow(1000u32);
+        assert_eq!(
+            ratio_to_f64(&BigRational::new(big.clone(), 3.into())),
+            f64::INFINITY
+        );
+        assert_eq!(ratio_to_f64(&BigRational::new(BigInt::from(1), big)), 0.0);
     }
 }

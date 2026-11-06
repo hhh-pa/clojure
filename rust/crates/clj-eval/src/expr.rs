@@ -20,7 +20,7 @@ use std::sync::Arc;
 use clj_reader::Span;
 use clj_value::{
     ClassVal, ExtensionValue, HostVal, Keyword, List, Map, PrintOpts, Symbol, Value, Var, Vector,
-    map_entry, pr_to_string, print_to_string,
+    map_entry, pr_to_string,
 };
 
 use crate::core::cce_message;
@@ -538,7 +538,7 @@ fn str_of(v: &Value) -> String {
     if matches!(v, Value::Nil) {
         String::new()
     } else {
-        print_to_string(v)
+        clj_value::str_of_value(v)
     }
 }
 

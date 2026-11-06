@@ -262,7 +262,9 @@ fn transient_capacity(n: usize) -> usize {
 }
 
 /// A transient map: `assoc!`/`dissoc!` buffer with insertion-ordered
-/// freeze (re-assoc keeps the original key and position).
+/// freeze while the result stays shaped (re-assoc keeps the
+/// original key and position); bigger freezes iterate the trie's
+/// own order, like every plain hash-map.
 ///
 /// `len`/`cap` simulate the JVM array (slots, 2 per pair):
 /// appends below capacity never promote; a full array promotes to
@@ -294,8 +296,9 @@ impl TransientMap {
         }
     }
 
-    /// A transient over `m`'s entries (insertion order kept; hash
-    /// sources start promoted with their exact array size).
+    /// A transient over `m`'s entries (iteration order kept —
+    /// insertion for shaped maps, the trie's own for hashed ones;
+    /// hash sources start promoted with their exact array size).
     #[must_use]
     pub fn from_map(m: &Map) -> Self {
         let mut t = Self::new();

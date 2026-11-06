@@ -1503,7 +1503,8 @@ pub(crate) const PRINTSYS_NATIVES: &[(&str, NativeFnPtr)] = &[
 /// after the natives install.
 pub(crate) fn boot_print_system(eval: &mut Evaluator) {
     // One build per table (chained `insert`s interned a fresh shape
-    // per prefix); the pair order is the insertion order.
+    // per prefix). The tables hash, so they iterate in trie order,
+    // not pair order — dispatch is exact-match, never positional.
     let mut pairs = vec![(
         Value::Nil,
         method_fn_value(eval, "print-method", scalar_default),

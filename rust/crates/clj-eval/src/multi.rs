@@ -236,8 +236,8 @@ fn prefer_checked(
             ThrowClass::IllegalStateException,
             format!(
                 "Preference conflict in multimethod '{name}': {} is already preferred to {}",
-                clj_value::print_to_string(other),
-                clj_value::print_to_string(pref),
+                clj_value::str_of_value(other),
+                clj_value::str_of_value(pref),
             ),
         )),
         _ => Ok(()),

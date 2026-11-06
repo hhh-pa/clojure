@@ -632,6 +632,13 @@ fn loop_assert_errors() {
         "Syntax error macroexpanding loop at (test:1:1).",
         "java.lang.Exception | Unsupported binding form: 5",
     );
+    // Tower suffixes stay bare in `str`-rendered messages (JVM
+    // `String.valueOf`), even though `print` shows them.
+    check(
+        "(loop [[a :as 5N] [1]] a)",
+        "Syntax error macroexpanding loop at (test:1:1).",
+        "java.lang.Exception | Unsupported binding form: 5",
+    );
     check(
         "(loop [[a :as] [1]] a)",
         "Syntax error macroexpanding loop at (test:1:1).",

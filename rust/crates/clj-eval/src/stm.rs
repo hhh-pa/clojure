@@ -643,7 +643,7 @@ fn pop_commit(eval: &mut Evaluator) -> Vec<(Agent, QueuedAction)> {
 }
 
 /// Step 9: fire watches in ascending Ref-id order, each ref's in
-/// insertion order (like atoms; nil fns never fire).
+/// map seq order (like atoms; nil fns never fire).
 fn notify_refs(eval: &mut Evaluator, installed: &[Installed]) -> Result<(), Signal> {
     for n in installed {
         fire_ref_watches(eval, &n.reff, &n.old, &n.new, &n.watches)?;

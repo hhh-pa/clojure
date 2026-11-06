@@ -23,9 +23,8 @@ use smallvec::SmallVec;
 
 use clj_reader::{ReadCond, Reader, ReaderOpts};
 use clj_value::{
-    ExtensionValue, Instant, Keyword, List, Map, PrintOpts, Set, Symbol, TagError, ThrowClass,
-    Throwable, Uuid, Value, Vector, bigdec_result, new_map, new_set, pr_to_string, seq_vec,
-    validate_uuid,
+    ExtensionValue, Instant, Keyword, List, Map, Set, Symbol, TagError, ThrowClass, Throwable,
+    Uuid, Value, Vector, bigdec_result, new_map, new_set, seq_vec, validate_uuid,
 };
 
 use crate::error::{NativeError, jvm_class_of};
@@ -865,7 +864,7 @@ fn to_f64(n: Num) -> f64 {
     match n {
         Num::Int(i) => i as f64,
         Num::BigInt(n) => n.to_f64().unwrap_or(f64::NAN),
-        Num::Ratio(r) => r.to_f64().unwrap_or(f64::NAN),
+        Num::Ratio(r) => clj_value::ratio_to_f64(&r),
         Num::BigDec(d) => d.to_f64(),
         Num::Double(d) => d,
     }
@@ -2504,7 +2503,7 @@ fn resolve_opt_meta(eval: &mut Evaluator, meta: Option<Map>) -> Result<Option<Ma
     }
 }
 
-/// One resolved map: keys and values in insertion order (the JVM
+/// One resolved map: entries rebuilt in iteration order (the JVM
 /// builds from resolved entries too), plus the meta.
 fn resolve_map(eval: &mut Evaluator, m: Map) -> Result<Map, NativeError> {
     let mut out = new_map();
@@ -2680,6 +2679,7 @@ pub fn print_opts(
         readably: readably.unwrap_or_else(|| deref_core(eval, "*print-readably*").is_truthy()),
         meta: deref_core(eval, "*print-meta*").is_truthy(),
         dup: deref_core(eval, "*print-dup*").is_truthy(),
+        str_form: false,
     })
 }
 
@@ -2772,7 +2772,7 @@ fn str_of_realized(eval: &mut Evaluator, v: &Value) -> Result<String, NativeErro
             Some(s) => s,
             None => clj_value::pr_to_string(&r, &clj_value::PrintOpts::pr()),
         },
-        _ => pr_to_string(&r, &PrintOpts::print()),
+        _ => clj_value::str_of_value(&r),
     })
 }
 
@@ -3273,7 +3273,7 @@ pub(crate) fn native_double(_eval: &mut Evaluator, args: &[Value]) -> Result<Val
         Value::Int(i) => *i as f64,
         Value::Double(d) => *d,
         Value::BigInt(n) | Value::BigInteger(n) => n.to_f64().unwrap_or(f64::NAN),
-        Value::Ratio(r) => r.to_f64().unwrap_or(f64::NAN),
+        Value::Ratio(r) => clj_value::ratio_to_f64(r),
         Value::BigDec(d) => d.to_f64(),
         Value::Nil => return Err(npe_double_value()),
         // Characters rejected (fixprobe11 `:dbl-ch`).
@@ -3626,10 +3626,9 @@ pub(crate) fn native_float(_eval: &mut Evaluator, args: &[Value]) -> Result<Valu
             n.to_f64().unwrap_or(f64::NAN),
             Num::BigInt(n.as_ref().clone()),
         )?,
-        Value::Ratio(r) => float_checked(
-            r.to_f64().unwrap_or(f64::NAN),
-            Num::Ratio(r.as_ref().clone()),
-        )?,
+        Value::Ratio(r) => {
+            float_checked(clj_value::ratio_to_f64(r), Num::Ratio(r.as_ref().clone()))?
+        }
         Value::BigDec(d) => float_checked(d.to_f64(), Num::BigDec(d.as_ref().clone()))?,
         Value::Nil => return Err(npe_double_value()),
         v => return Err(cce_err(v, "java.lang.Number")),

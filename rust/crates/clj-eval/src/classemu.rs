@@ -6473,7 +6473,7 @@ fn str_split(s: &str, rest: &[Value]) -> Result<Value, NativeError> {
     } else {
         0
     };
-    crate::re::pattern_split(s, regex, limit)
+    crate::re::pattern_split_array(s, regex, limit)
 }
 
 /// The 0-arg string members (`length`, `trim`, case).
@@ -7680,7 +7680,7 @@ fn gated_regex_split(target: &Value, rest: &[Value]) -> Option<Result<Value, Nat
     } else {
         0
     };
-    Some(crate::re::pattern_split(text, source, limit))
+    Some(crate::re::pattern_split_array(text, source, limit))
 }
 
 /// The member surface for `__meth*`: `None` when the member misses

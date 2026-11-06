@@ -229,9 +229,10 @@ trailing map is the body (`((fn [x] {:pre [false]}) -5)` →
 to whole entry vectors (evaluated in map order, key then value —
 always truthy, so `((fn [x] {:pre {nil 1}} x) 1)` → `1`, probe33
 `pre-map-*`/`post-map-*`). Past the array-map threshold the JVM seqs
-entries in murmur-hash order, which the port's insertion-ordered maps
-cannot reproduce — entry side-effect order for big `:pre`/`:post`
-maps is a documented divergence (like `pr` order, `value.rs`).
+entries in murmur-hash order, which the port's Fx-ordered maps
+cannot reproduce byte-exactly — entry side-effect order for big
+`:pre`/`:post` maps is a documented divergence (like `pr` order,
+`value.rs`).
 
 Var-arg rest with no args binds `nil` (probe21 `variadic0 [1 nil]`).
 
@@ -334,8 +335,8 @@ so the port pins stable equivalents:
   `clojure.lang.PersistentList`; map with ≤8 pairs, or ≤64 pairs whose
   keys past the first 8 are all keywords, →
   `clojure.lang.PersistentArrayMap`, else `clojure.lang.PersistentHashMap`
-  (mirrors `canBePAM` exactly — our maps keep insertion order, so keys
-  past the first 8 pairs are checked for keyword-ness like the JVM);
+  (mirrors `canBePAM` exactly over the literal's pair order, like
+  the JVM);
   vector →
   `clojure.lang.PersistentVector`, set → `clojure.lang.PersistentHashSet`.
 - Runtime nil invoke: `NullPointerException | Cannot invoke nil as a

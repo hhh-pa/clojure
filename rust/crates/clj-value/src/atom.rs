@@ -10,7 +10,7 @@
 //!
 //! The cell holds the current value, the `:validator` fn (if any),
 //! the `:meta` map (if any), and the watches map (`{key fn}`, fired
-//! in insertion order). Equality is shared-cell identity plus
+//! in map seq order). Equality is shared-cell identity plus
 //! equal meta (atoms have no value equality on the JVM); printing
 //! follows the transient
 //! `#object[…]` convention (the JVM's `deref-as-map` rendering is

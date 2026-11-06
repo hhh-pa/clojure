@@ -8,14 +8,26 @@
 //! Shaped small-map pins (#221 suffix states): maps at or below 16
 //! entries share an interned key-set plus a flat values vec (no
 //! HAMT or sidecar allocs) and convert past 16. Representation is
-//! behavior-transparent — `get`, `iter`, `=`, insertion order,
-//! and the reported class must agree across the boundary.
+//! behavior-transparent — `get`, `=`, and the reported class agree
+//! across the boundary; iteration is insertion order while shaped
+//! and the trie's content-determined order once hashed (never
+//! insertion — the Bug 4 fix), comparator order when sorted.
 
-use clj_value::{Value, new_map};
+use clj_value::{SortSpec, Value, new_map};
 
 fn int_map(n: i64) -> clj_value::Map {
     let mut m = new_map();
     for i in 0..n {
+        m = m.insert(Value::Int(i), Value::Int(i * 10));
+    }
+    m
+}
+
+/// The same content inserted in reverse (pins that hashed
+/// iteration order is content-determined, not insertion order).
+fn int_map_rev(n: i64) -> clj_value::Map {
+    let mut m = new_map();
+    for i in (0..n).rev() {
         m = m.insert(Value::Int(i), Value::Int(i * 10));
     }
     m
@@ -68,10 +80,11 @@ fn get_agrees_across_boundary() {
 }
 
 /// Re-assoc keeps position and key; iteration order is insertion
-/// order on both sides of the boundary.
+/// order while shaped, and the trie's content-determined order
+/// (never insertion) once hashed.
 #[test]
 fn assoc_keeps_position_and_order() {
-    for n in [3, 16, 17, 40] {
+    for n in [3, 16] {
         let m = int_map(n);
         let m = m.insert(Value::Int(1), Value::Int(999));
         assert_eq!(m.size(), n as usize);
@@ -79,6 +92,23 @@ fn assoc_keeps_position_and_order() {
         let keys: Vec<Value> = m.iter().map(|(k, _)| k.clone()).collect();
         let want: Vec<Value> = (0..n).map(Value::Int).collect();
         assert_eq!(keys, want, "n={n}");
+    }
+    for n in [17, 40] {
+        let m = int_map(n);
+        let m = m.insert(Value::Int(1), Value::Int(999));
+        assert_eq!(m.size(), n as usize);
+        assert_eq!(m.get(&Value::Int(1)), Some(&Value::Int(999)));
+        // Same content built in reverse insertion order iterates
+        // identically (content-determined, like the JVM's hash
+        // order) — and not in insertion order.
+        let keys: Vec<Value> = m.iter().map(|(k, _)| k.clone()).collect();
+        let rev: Vec<Value> = int_map_rev(n)
+            .insert(Value::Int(1), Value::Int(999))
+            .iter()
+            .map(|(k, _)| k.clone())
+            .collect();
+        assert_eq!(keys, rev, "n={n}");
+        assert_ne!(keys, (0..n).map(Value::Int).collect::<Vec<_>>(), "n={n}");
     }
 }
 
@@ -130,7 +160,8 @@ fn literal_class_follows_jvm_rules() {
 }
 
 /// Big literals build the hash arm directly (one pass, same
-/// entries, order, and class as the incremental path).
+/// entries, class, and trie iteration order as the incremental
+/// path).
 #[test]
 fn big_literal_builds_hash_directly() {
     let pairs: Vec<(Value, Value)> = (0..40)
@@ -141,7 +172,8 @@ fn big_literal_builds_hash_directly() {
     assert_eq!(m.size(), 40);
     assert_eq!(Value::Map(m.clone()), Value::Map(int_map(40)));
     let keys: Vec<Value> = m.iter().map(|(k, _)| k.clone()).collect();
-    assert_eq!(keys, (0..40).map(Value::Int).collect::<Vec<_>>());
+    let looped: Vec<Value> = int_map(40).iter().map(|(k, _)| k.clone()).collect();
+    assert_eq!(keys, looped);
 }
 
 /// Empty literals and empty rebuilds ride the shared-empty shape.
@@ -269,4 +301,56 @@ fn adaptive_cleanup_survives_churn() {
         let m = new_map().insert(Value::Int(i), Value::Int(i));
         assert_eq!(m.get(&Value::Int(i)), Some(&Value::Int(i)));
     }
+}
+
+/// Sorted maps keep the comparator-order sidecar on every arm:
+/// rebuilds restore the given order, `dissoc` prunes it (the
+/// `sorted_without_map` path), and direct `insert` appends to it
+/// (in-repo sorted writes position through `with_ordered_entries`
+/// instead — this pins the escape hatch, not the funnel).
+#[test]
+fn sorted_large_maps_keep_comparator_order() {
+    let entries: Vec<(Value, Value)> = (0..20).map(|i| (Value::Int(i), Value::Int(i))).collect();
+    let m = new_map()
+        .with_sort(Some(SortSpec::Natural))
+        .with_ordered_entries(entries);
+    assert!(!m.is_shaped());
+    assert!(m.is_sorted());
+    let want: Vec<Value> = (0..20).map(Value::Int).collect();
+    assert_eq!(m.ordered_keys(), want);
+    let itered: Vec<Value> = m.iter().map(|(k, _)| k.clone()).collect();
+    assert_eq!(itered, want);
+    // `dissoc` prunes the sidecar alongside the trie.
+    let m = m.without(&Value::Int(5));
+    let want: Vec<Value> = (0..20).filter(|i| *i != 5).map(Value::Int).collect();
+    assert_eq!(m.ordered_keys(), want);
+    // Direct `insert` appends (the funnel re-sorts instead).
+    let m = m.insert(Value::Int(99), Value::Int(99));
+    let mut want = want;
+    want.push(Value::Int(99));
+    assert_eq!(m.ordered_keys(), want);
+    // Promotion carries the sidecar over.
+    let small = new_map()
+        .with_sort(Some(SortSpec::Natural))
+        .with_ordered_entries((0..16).map(|i| (Value::Int(i), Value::Int(i))).collect());
+    let m = small.insert(Value::Int(16), Value::Int(16));
+    assert!(!m.is_shaped());
+    assert_eq!(
+        m.ordered_keys(),
+        (0..17).map(Value::Int).collect::<Vec<_>>()
+    );
+}
+
+/// Plain large rebuilds ignore the given order (trie order wins),
+/// and `ordered_keys` matches iteration exactly.
+#[test]
+fn plain_large_rebuild_ignores_given_order() {
+    let entries: Vec<(Value, Value)> = (0..20).map(|i| (Value::Int(i), Value::Int(i))).collect();
+    let m = new_map().with_ordered_entries(entries);
+    assert!(!m.is_shaped());
+    let via_iter: Vec<Value> = m.iter().map(|(k, _)| k.clone()).collect();
+    assert_eq!(m.ordered_keys(), via_iter);
+    // Same content, same trie order as the incremental build.
+    let looped: Vec<Value> = int_map(20).iter().map(|(k, _)| k.clone()).collect();
+    assert_eq!(via_iter, looped);
 }

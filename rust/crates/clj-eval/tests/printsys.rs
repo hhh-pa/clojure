@@ -1650,3 +1650,66 @@ fn concurrent_println_lines_stay_atomic() {
     assert_eq!(lines, 400);
     eval.join_drainers();
 }
+
+#[test]
+fn print_tower_suffix_rows() {
+    let mut eval = boot();
+    // JVM oracle: tower suffixes show in every print path
+    // (`print`/`println`/`print-str`/`pr-str` alike) and ignore
+    // `readably`; only `str` renders them bare.
+    for (form, want) in [
+        ("(print-str 5N)", "\"5N\""),
+        ("(print-str 5M)", "\"5M\""),
+        ("(print-str 1/2)", "\"1/2\""),
+        ("(print-str (bigint 5))", "\"5N\""),
+        ("(print-str (biginteger 7))", "\"7\""),
+        ("(print-str 5N 5M)", "\"5N 5M\""),
+        ("(with-out-str (println 5N))", "\"5N\\n\""),
+        (
+            "(binding [*print-readably* false] (pr-str 5N 5M \"a\"))",
+            "\"5N 5M a\"",
+        ),
+        ("(str 5N)", "\"5\""),
+        ("(str 5M)", "\"5\""),
+    ] {
+        assert_eq!(run_last(&mut eval, form), want, "{form}");
+    }
+}
+
+#[test]
+fn large_map_prints_trie_order_not_insertion() {
+    let mut eval = boot();
+    // Bug 4: large hash-maps print in hash order on the JVM —
+    // never insertion order. Ours print the trie's own
+    // content-determined order: the same content built two ways
+    // prints identically, and neither is insertion order. Small
+    // maps still print insertion-ordered (the JVM array-map seq
+    // order).
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [m (into {} (map (fn [i] [i (* i 10)]) (range 20)))] [(= (pr-str m) (pr-str (into {} (reverse (seq m))))) (= (vec (keys m)) (vec (range 20)))])"
+        ),
+        "[true false]"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(pr-str (into {} (map (fn [i] [i (* i 10)]) (range 5))))"
+        ),
+        "\"{0 0, 1 10, 2 20, 3 30, 4 40}\""
+    );
+    // Sorted maps keep comparator order at any size, through
+    // deep realization (`run_last` realizes before printing).
+    let sorted = (0..20)
+        .map(|i| format!("{i} {i}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(pr-str (into (sorted-map) (map (fn [i] [i i]) (range 20))))"
+        ),
+        format!("\"{{{sorted}}}\"")
+    );
+}

@@ -19,7 +19,7 @@
 
 use std::sync::Arc;
 
-use clj_value::{SeqKind, ThrowClass, Value, Vector};
+use clj_value::{Array, ArrayDesc, ArrayStore, BaseType, SeqKind, ThrowClass, Value, Vector};
 use regex::Regex;
 
 use crate::core::cce_err;
@@ -217,20 +217,57 @@ fn split_step(
 }
 
 pub(crate) fn pattern_split(text: &str, source: &str, limit: i32) -> Result<Value, NativeError> {
+    let parts = pattern_pieces(text, source, limit)?;
+    Ok(Value::Vector(Vector::from_vec(
+        parts
+            .into_iter()
+            .map(|p| Value::Str(Arc::from(p)))
+            .collect(),
+    )))
+}
+
+/// JVM `String.split`/`Pattern.split`: the pieces as a `String[]`
+/// (an `Object`-store array narrowed to `java.lang.String`, so
+/// the class reads `[Ljava.lang.String;` and stores check).
+pub(crate) fn pattern_split_array(
+    text: &str,
+    source: &str,
+    limit: i32,
+) -> Result<Value, NativeError> {
+    let parts = pattern_pieces(text, source, limit)?;
+    let store = ArrayStore::Objs(
+        parts
+            .into_iter()
+            .map(|p| Value::Str(Arc::from(p)))
+            .collect(),
+    );
+    Ok(Value::Array(Array::new(
+        ArrayDesc {
+            base: BaseType::Object,
+            dims: 1,
+            component: Some(Arc::from("java.lang.String")),
+        },
+        store,
+    )))
+}
+
+/// The split pieces (engine-agnostic — the `regex` crate and the
+/// boundary scanner share the JDK loop in [`split_pieces`]).
+fn pattern_pieces(text: &str, source: &str, limit: i32) -> Result<Vec<String>, NativeError> {
     // Pure-boundary patterns never reach the crate (which cannot
     // compile look-around); anything else splits as before.
     if let Some(alts) = boundary_alternatives(source) {
         let cuts = boundary_cuts(text, &alts)?;
-        return split_around(text, &cuts, limit);
+        return Ok(split_pieces(text, &cuts, limit));
     }
     let re = compile_source(source)?;
     let cuts: Vec<(usize, usize)> = re.find_iter(text).map(|m| (m.start(), m.end())).collect();
-    split_around(text, &cuts, limit)
+    Ok(split_pieces(text, &cuts, limit))
 }
 
-/// Run the JDK split loop over byte ranges (engine-agnostic —
-/// the `regex` crate and the boundary scanner share it).
-fn split_around(text: &str, cuts: &[(usize, usize)], limit: i32) -> Result<Value, NativeError> {
+/// Run the JDK split loop over byte ranges, collecting the piece
+/// strings (callers wrap them as a vector or a `String[]`).
+fn split_pieces(text: &str, cuts: &[(usize, usize)], limit: i32) -> Vec<String> {
     let limited = limit > 0;
     let cap = i64::from(limit) - 1;
     let mut acc = SplitAcc {
@@ -242,9 +279,7 @@ fn split_around(text: &str, cuts: &[(usize, usize)], limit: i32) -> Result<Value
         split_step(&mut acc, text, start, end, limited, cap);
     }
     if acc.index == 0 {
-        return Ok(Value::Vector(Vector::from_vec(vec![Value::Str(
-            Arc::from(text),
-        )])));
+        return vec![text.to_owned()];
     }
     if !limited || acc.count < i64::from(limit) {
         acc.parts.push(text[acc.index..].to_owned());
@@ -254,12 +289,7 @@ fn split_around(text: &str, cuts: &[(usize, usize)], limit: i32) -> Result<Value
             acc.parts.pop();
         }
     }
-    Ok(Value::Vector(Vector::from_vec(
-        acc.parts
-            .into_iter()
-            .map(|p| Value::Str(Arc::from(p)))
-            .collect(),
-    )))
+    acc.parts
 }
 
 /// A single-char boundary atom, kept as source so atom tests run
