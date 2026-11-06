@@ -3577,6 +3577,13 @@ pub(crate) fn seq_fast(v: &Value) -> Option<Value> {
         Value::Nil => Some(Value::Nil),
         Value::List(l) => Some(if l.is_empty() { Value::Nil } else { v.clone() }),
         Value::Vector(x) => Some(seq_vector(x)),
+        Value::Array(a) => Some(realized_value(
+            a.snapshot(),
+            false,
+            true,
+            false,
+            SeqKind::Array,
+        )),
         Value::Str(s) => Some(seq_str(s)),
         _ => as_realized(v).map(|r| seq_realized(v, r)),
     }

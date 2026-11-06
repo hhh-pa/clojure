@@ -228,6 +228,10 @@ const CASES: &[(&str, &str)] = &[
         r#"[42 "user"]"#,
     ),
     (r#"lr.x/y"#, r#":lr.x/k"#),
+    (
+        r#"[(nth (.split "a:b:" ":") 0) (count (.split "a:b:" ":")) (reduce str (.split "ab" "x")) (vec (seq (.split "ab" "(?<=a)"))) (str/split "a b c" #" " 2) (str/split "a b " #" ")]"#,
+        r#"["a" 2 "ab" ["a" "b"] ["a" "b c"] ["a" "b"]]"#,
+    ),
 ];
 
 #[test]

@@ -183,7 +183,7 @@ fn groups_value(caps: &regex::Captures<'_>) -> Value {
 /// The running state of the JDK split loop (split out so each
 /// half stays under the complexity ratchet).
 struct SplitAcc {
-    parts: Vec<String>,
+    parts: Vec<Value>,
     index: usize,
     count: i64,
 }
@@ -205,25 +205,21 @@ fn split_step(
     if !limited || acc.count < cap {
         let leader = acc.index == 0 && m_start == 0 && m_start == m_end;
         if !leader {
-            acc.parts.push(text[acc.index..m_start].to_owned());
+            acc.parts
+                .push(Value::Str(Arc::from(&text[acc.index..m_start])));
             acc.index = m_end;
             acc.count += 1;
         }
     } else if acc.count == cap {
-        acc.parts.push(text[acc.index..].to_owned());
+        acc.parts.push(Value::Str(Arc::from(&text[acc.index..])));
         acc.index = m_end;
         acc.count += 1;
     }
 }
 
 pub(crate) fn pattern_split(text: &str, source: &str, limit: i32) -> Result<Value, NativeError> {
-    let parts = pattern_pieces(text, source, limit)?;
-    Ok(Value::Vector(Vector::from_vec(
-        parts
-            .into_iter()
-            .map(|p| Value::Str(Arc::from(p)))
-            .collect(),
-    )))
+    let pieces = pattern_pieces(text, source, limit)?;
+    Ok(Value::Vector(Vector::from_vec(pieces)))
 }
 
 /// JVM `String.split`/`Pattern.split`: the pieces as a `String[]`
@@ -234,13 +230,7 @@ pub(crate) fn pattern_split_array(
     source: &str,
     limit: i32,
 ) -> Result<Value, NativeError> {
-    let parts = pattern_pieces(text, source, limit)?;
-    let store = ArrayStore::Objs(
-        parts
-            .into_iter()
-            .map(|p| Value::Str(Arc::from(p)))
-            .collect(),
-    );
+    let store = ArrayStore::Objs(pattern_pieces(text, source, limit)?);
     Ok(Value::Array(Array::new(
         ArrayDesc {
             base: BaseType::Object,
@@ -253,21 +243,28 @@ pub(crate) fn pattern_split_array(
 
 /// The split pieces (engine-agnostic — the `regex` crate and the
 /// boundary scanner share the JDK loop in [`split_pieces`]).
-fn pattern_pieces(text: &str, source: &str, limit: i32) -> Result<Vec<String>, NativeError> {
+fn pattern_pieces(text: &str, source: &str, limit: i32) -> Result<Vec<Value>, NativeError> {
     // Pure-boundary patterns never reach the crate (which cannot
     // compile look-around); anything else splits as before.
     if let Some(alts) = boundary_alternatives(source) {
         let cuts = boundary_cuts(text, &alts)?;
-        return Ok(split_pieces(text, &cuts, limit));
+        return Ok(split_pieces(text, cuts, limit));
     }
     let re = compile_source(source)?;
-    let cuts: Vec<(usize, usize)> = re.find_iter(text).map(|m| (m.start(), m.end())).collect();
-    Ok(split_pieces(text, &cuts, limit))
+    Ok(split_pieces(
+        text,
+        re.find_iter(text).map(|m| (m.start(), m.end())),
+        limit,
+    ))
 }
 
 /// Run the JDK split loop over byte ranges, collecting the piece
 /// strings (callers wrap them as a vector or a `String[]`).
-fn split_pieces(text: &str, cuts: &[(usize, usize)], limit: i32) -> Vec<String> {
+fn split_pieces(
+    text: &str,
+    cuts: impl IntoIterator<Item = (usize, usize)>,
+    limit: i32,
+) -> Vec<Value> {
     let limited = limit > 0;
     let cap = i64::from(limit) - 1;
     let mut acc = SplitAcc {
@@ -275,17 +272,21 @@ fn split_pieces(text: &str, cuts: &[(usize, usize)], limit: i32) -> Vec<String> 
         index: 0,
         count: 0,
     };
-    for &(start, end) in cuts {
+    for (start, end) in cuts {
         split_step(&mut acc, text, start, end, limited, cap);
     }
     if acc.index == 0 {
-        return vec![text.to_owned()];
+        return vec![Value::Str(Arc::from(text))];
     }
     if !limited || acc.count < i64::from(limit) {
-        acc.parts.push(text[acc.index..].to_owned());
+        acc.parts.push(Value::Str(Arc::from(&text[acc.index..])));
     }
     if limit == 0 {
-        while acc.parts.last().is_some_and(|p| p.is_empty()) {
+        while acc
+            .parts
+            .last()
+            .is_some_and(|p| matches!(p, Value::Str(s) if s.is_empty()))
+        {
             acc.parts.pop();
         }
     }

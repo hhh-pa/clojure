@@ -444,16 +444,9 @@ fn intern_shape(keys: &[Value]) -> Arc<MapShape> {
     })
 }
 
-/// Shared dummies for the authority a map isn't using: shaped
-/// maps hold `inner: None` and ignore `keys`, plain hash-maps
-/// hold `small: None` and ignore `keys` (only sorted maps keep a
-/// comparator-order sidecar), so small maps never allocate a
-/// HAMT root or a keys vector. The empty shape is shared, but
-/// every empty map carries a FRESH [`SmallMap`] allocation:
-/// identity is the entries `Arc` (see [`Map::id`]), so sharing
-/// one static would identify all empties.
-static EMPTY_MAP_KEYS: LazyLock<Arc<RpdsVector>> =
-    LazyLock::new(|| Arc::new(RpdsVector::new_sync()));
+/// Shared empty shape (`Map::id` is the [`SmallMap`] `Arc`
+/// address, so every empty map still allocates a fresh
+/// [`SmallMap`] around this shared shape).
 static EMPTY_MAP_SHAPE: LazyLock<Arc<MapShape>> = LazyLock::new(|| intern_shape(&[]));
 
 /// A fresh empty entries allocation (identity-fresh; the shape is
@@ -479,10 +472,9 @@ pub struct Map {
     /// except uniquely-owned in-place updates (see [`Map::id`]).
     small: Option<Arc<SmallMap>>,
     /// Comparator-order sidecar for sorted maps when `small` is
-    /// `None` (a shared-empty dummy otherwise — plain hash-maps
-    /// iterate the trie, never this). Writers maintain it only
-    /// when sorted.
-    keys: Arc<RpdsVector>,
+    /// `None` (`None` otherwise — plain hash-maps iterate the
+    /// trie, never this). Writers maintain it only when sorted.
+    keys: Option<Arc<RpdsVector>>,
     meta: Option<Arc<Map>>,
     hashy: bool,
     /// Boxed: sorted maps are rare, and the 8 bytes this saves
@@ -928,8 +920,8 @@ pub(crate) enum TypedItems {
 
 /// Entries in iteration order (trie order for plain hash-maps,
 /// insertion order for shaped maps, comparator order for sorted
-/// ones) — one concrete type over all representations so
-/// `Map::iter` stays allocation-free.
+/// ones) — one concrete type over all representations (`TrieIter`
+/// boxed so `MapIter` stays 40 bytes on the shaped hot path).
 pub struct MapIter<'a> {
     inner: MapIterInner<'a>,
 }
@@ -940,7 +932,7 @@ enum MapIterInner<'a> {
         vals: std::slice::Iter<'a, Value>,
     },
     Ordered(OrderedIter<'a>),
-    Trie(TrieIter<'a>),
+    Trie(Box<TrieIter<'a>>),
 }
 
 /// Sorted hash-map iteration: position over the comparator-order
@@ -974,21 +966,7 @@ impl<'a> Iterator for OrderedIter<'a> {
 
 /// Plain hash-map iteration: the trie's own order (deterministic
 /// per content, like the JVM's hash order — never insertion).
-struct TrieIter<'a> {
-    iter: rpds::map::hash_trie_map::Iter<'a, Value, Value, archery::ArcTK>,
-}
-
-impl<'a> Iterator for TrieIter<'a> {
-    type Item = (&'a Value, &'a Value);
-
-    fn next(&mut self) -> Option<Self::Item> {
-        self.iter.next()
-    }
-
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        self.iter.size_hint()
-    }
-}
+type TrieIter<'a> = rpds::map::hash_trie_map::Iter<'a, Value, Value, archery::ArcTK>;
 
 impl<'a> Iterator for MapIter<'a> {
     type Item = (&'a Value, &'a Value);
@@ -1093,7 +1071,7 @@ impl Map {
                 shape: intern_shape(keys),
                 vals: vals.into_boxed_slice(),
             })),
-            keys: EMPTY_MAP_KEYS.clone(),
+            keys: None,
             meta: None,
             hashy: false,
             sort: None,
@@ -1113,7 +1091,7 @@ impl Map {
                 small: None,
                 // Plain (never sorted here): iteration is the
                 // trie's own order, so no sidecar.
-                keys: EMPTY_MAP_KEYS.clone(),
+                keys: None,
                 meta: None,
                 hashy,
                 sort: None,
@@ -1128,7 +1106,7 @@ impl Map {
                 shape: intern_shape(&keys),
                 vals: vals.into_boxed_slice(),
             })),
-            keys: EMPTY_MAP_KEYS.clone(),
+            keys: None,
             meta: None,
             hashy,
             sort: None,
@@ -1174,13 +1152,13 @@ impl Map {
         }
         let size = self.trie().size();
         let promote = !self.hashy && (size >= 64 || (size >= 8 && !matches!(k, Value::Keyword(_))));
-        if self.sort.is_some() {
+        if let Some(keys) = &mut self.keys {
             // Sorted maps keep the comparator-order sidecar
             // alongside (plain maps iterate the trie, never the
             // sidecar). In-repo sorted writes position through
             // `with_ordered_entries`, so this arm only fires for
             // direct out-of-crate writes.
-            Arc::make_mut(&mut self.keys).push_back_mut(k.clone());
+            Arc::make_mut(keys).push_back_mut(k.clone());
         }
         self.trie_mut().insert_mut(k, v);
         self.hashy = self.hashy || promote;
@@ -1258,7 +1236,7 @@ impl Map {
         self.inner = Some(Arc::new(inner));
         self.small = None;
         if self.sort.is_some() {
-            self.keys = Arc::new(keys);
+            self.keys = Some(Arc::new(keys));
         }
     }
 
@@ -1315,16 +1293,16 @@ impl Map {
         };
         trie.remove_mut(k);
         self.inner = Some(Arc::new(trie));
-        if self.sort.is_some() {
+        if let Some(old_keys) = &self.keys {
             // Sorted `dissoc` positions through here: prune the
             // comparator-order sidecar alongside.
             let mut keys = RpdsVector::new_sync();
-            for key in self.keys.iter() {
+            for key in old_keys.iter() {
                 if key != k {
                     keys.push_back_mut(key.clone());
                 }
             }
-            self.keys = Arc::new(keys);
+            self.keys = Some(Arc::new(keys));
         }
         self
     }
@@ -1381,10 +1359,10 @@ impl Map {
     /// snapshot the sidecar; the trie arm clones each key.
     #[must_use]
     pub fn ordered_keys(&self) -> Vec<Value> {
-        match &self.small {
-            Some(small) => small.shape.keys.to_vec(),
-            None if self.sort.is_some() => self.keys.iter().cloned().collect(),
-            None => self.trie().keys().cloned().collect(),
+        match (&self.small, &self.keys) {
+            (Some(small), _) => small.shape.keys.to_vec(),
+            (None, Some(keys)) => keys.iter().cloned().collect(),
+            (None, None) => self.trie().keys().cloned().collect(),
         }
     }
 
@@ -1399,7 +1377,7 @@ impl Map {
                 return Self {
                     inner: None,
                     small: Some(fresh_empty_small()),
-                    keys: EMPTY_MAP_KEYS.clone(),
+                    keys: None,
                     meta: self.meta,
                     hashy: self.hashy,
                     sort: self.sort,
@@ -1420,7 +1398,7 @@ impl Map {
                     shape: intern_shape(&keys),
                     vals: vals.into_boxed_slice(),
                 })),
-                keys: EMPTY_MAP_KEYS.clone(),
+                keys: None,
                 meta: self.meta,
                 hashy: self.hashy,
                 sort: self.sort,
@@ -1441,11 +1419,7 @@ impl Map {
             inner: Some(Arc::new(inner)),
             small: None,
             meta: self.meta,
-            keys: if self.sort.is_some() {
-                Arc::new(keys)
-            } else {
-                EMPTY_MAP_KEYS.clone()
-            },
+            keys: self.sort.is_some().then(|| Arc::new(keys)),
             hashy: self.hashy,
             sort: self.sort,
         }
@@ -1496,19 +1470,17 @@ impl Map {
     /// when sorted.
     pub fn iter(&self) -> MapIter<'_> {
         MapIter {
-            inner: match &self.small {
-                Some(small) => MapIterInner::Shaped {
+            inner: match (&self.small, &self.keys) {
+                (Some(small), _) => MapIterInner::Shaped {
                     keys: small.shape.keys.iter(),
                     vals: small.vals.iter(),
                 },
-                None if self.sort.is_some() => MapIterInner::Ordered(OrderedIter {
-                    keys: &self.keys,
+                (None, Some(keys)) => MapIterInner::Ordered(OrderedIter {
+                    keys,
                     map: self.trie(),
                     pos: 0,
                 }),
-                None => MapIterInner::Trie(TrieIter {
-                    iter: self.trie().iter(),
-                }),
+                (None, None) => MapIterInner::Trie(Box::new(self.trie().iter())),
             },
         }
     }
@@ -1806,12 +1778,13 @@ impl Hash for Set {
 }
 
 /// An empty [`Map`] (shaped, identity-fresh).
+#[inline(never)]
 #[must_use]
 pub fn new_map() -> Map {
     Map {
         inner: None,
         small: Some(fresh_empty_small()),
-        keys: EMPTY_MAP_KEYS.clone(),
+        keys: None,
         meta: None,
         hashy: false,
         sort: None,
@@ -3694,6 +3667,30 @@ mod tests {
             s_rebuilt.ordered_members(),
             vec![Value::Int(3), Value::Int(1)]
         );
+    }
+
+    #[test]
+    fn sorted_and_plain_large_map_sidecar() {
+        let mut sm = super::new_map().with_sort(Some(super::SortSpec::Natural));
+        for i in 0..18 {
+            sm = sm.insert(Value::Int(i), Value::Int(i * 10));
+        }
+        let sm_dropped = sm.clone().without(&Value::Int(5));
+        assert_eq!(sm_dropped.ordered_keys().len(), 17);
+        let it = sm_dropped.iter();
+        assert_eq!(it.size_hint(), (0, Some(17)));
+        assert_eq!(it.count(), 17);
+        let entries: Vec<(Value, Value)> =
+            (0..18).map(|i| (Value::Int(i), Value::Int(i))).collect();
+        let sm_rebuilt = sm.with_ordered_entries(entries.clone());
+        assert_eq!(sm_rebuilt.ordered_keys().len(), 18);
+        let pm = super::new_map().with_ordered_entries(entries);
+        assert_eq!(pm.ordered_keys().len(), 18);
+        let pm_it = pm.iter();
+        assert_eq!(pm_it.size_hint().0, 18);
+        assert_eq!(pm_it.count(), 18);
+        assert_eq!(pm.without(&Value::Int(5)).size(), 17);
+        assert!(sm_rebuilt.with_ordered_entries(Vec::new()).is_empty());
     }
 
     #[test]

@@ -1111,6 +1111,33 @@ fn round_quotient(
     Ok(BigDec { unscaled, scale })
 }
 
+const POW10_F64: [f64; 23] = [
+    1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 1e11, 1e12, 1e13, 1e14, 1e15, 1e16,
+    1e17, 1e18, 1e19, 1e20, 1e21, 1e22,
+];
+
+/// Fast path for `Ratio.doubleValue()` when both magnitudes fit in `u64`
+/// and the `DECIMAL64` quotient converts via exact IEEE-754 powers of 10.
+fn ratio_u64_to_f64(r: &BigRational) -> Option<f64> {
+    let n = u64::try_from(r.numer().magnitude()).ok()?;
+    let d = u64::try_from(r.denom().magnitude()).ok()?;
+    let mut scale = 16 - (i64::from(n.ilog10()) - i64::from(d.ilog10()));
+    let pow = 10u128.checked_pow(u32::try_from(scale).ok()?)?;
+    let num = u128::from(n).checked_mul(pow)?;
+    let den = u128::from(d);
+    let (mut q, mut rem) = (num / den, num % den);
+    if q < 10_000_000_000_000_000 {
+        let nr = rem * 10;
+        (q, rem) = (q * 10 + nr / den, nr % den);
+        scale += 1;
+    }
+    let g = q % 10;
+    let rest = (q / 10) as u64 + u64::from(g > 5 || (g == 5 && (rem != 0 || (q / 10) & 1 != 0)));
+    let mag =
+        (rest <= (1u64 << 53)).then_some((rest as f64) / *POW10_F64.get((scale - 1) as usize)?)?;
+    Some(if r.numer().is_negative() { -mag } else { mag })
+}
+
 /// JVM `Ratio.doubleValue()`: `BigDecimal(num).divide(den,
 /// DECIMAL64).doubleValue()` — 16 significant digits, HALF_EVEN,
 /// then correctly rounded to `f64`. Single-rounding IEEE division
@@ -1122,6 +1149,9 @@ fn round_quotient(
 pub fn ratio_to_f64(r: &BigRational) -> f64 {
     if r.numer().is_zero() {
         return 0.0;
+    }
+    if let Some(f) = ratio_u64_to_f64(r) {
+        return f;
     }
     let mc = MathContext::new(16, RoundingMode::HalfEven);
     let dec = div_round(r.numer(), r.denom(), &mc).expect("HALF_EVEN division cannot fail");
@@ -1596,6 +1626,8 @@ mod tests {
         assert_eq!(ratio_to_f64(&rat(10, 3)), 3.333333333333333);
         assert_eq!(ratio_to_f64(&rat(-2, 3)), -0.6666666666666667);
         assert_eq!(ratio_to_f64(&rat(1, 2)), 0.5);
+        assert_eq!(ratio_to_f64(&rat(3, 2)), 1.5);
+        assert_eq!(ratio_to_f64(&rat(10, 11)), 0.9090909090909091);
         assert_eq!(ratio_to_f64(&BigRational::from_integer(0.into())), 0.0);
         let big: BigInt = BigInt::from(10).pow(1000u32);
         assert_eq!(

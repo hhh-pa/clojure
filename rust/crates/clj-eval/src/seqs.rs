@@ -142,6 +142,9 @@ fn walk_direct(
     if let Value::Vector(v) = coll {
         return Some(each(&mut v.iter()));
     }
+    if let Value::Array(a) = coll {
+        return Some(each(&mut a.snapshot().into_iter()));
+    }
     if let Some((x, n)) = finite_repeat(coll) {
         return Some(each(&mut (0..n).map(|_| x.clone())));
     }

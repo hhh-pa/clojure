@@ -79,6 +79,7 @@ pub(crate) fn nth_of(coll: &Value, idx: &Value, not_found: Option<&Value>) -> Op
     let i = usize::try_from(n).ok();
     let found = match coll {
         Value::Vector(v) => i.and_then(|i| v.get(i)),
+        Value::Array(a) => i.and_then(|i| (i < a.len()).then(|| crate::arrays::array_read(a, i))),
         Value::Str(s) => i.and_then(|i| crate::coll::str_char_at(s, i).map(Value::Char)),
         Value::Transient(t) => transient_nth(t, i)?,
         _ => return None,
@@ -144,6 +145,7 @@ pub(crate) fn count_of(v: &Value) -> Option<Value> {
     let n = match v {
         Value::Nil => 0,
         Value::Vector(v) => v.len(),
+        Value::Array(a) => a.len(),
         Value::Map(m) => m.size(),
         Value::Set(s) => s.size(),
         Value::Str(s) => crate::coll::str_utf16_len(s),
