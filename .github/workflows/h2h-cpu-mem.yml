@@ -44,8 +44,9 @@
 # ad-hoc SHA); it exists for triage and bisection.
 #
 # This is a gate, not a tracker: it reports no Bencher history.
-# Triage mode: dispatch with report_only=true to get the verdict
-# tables green.
+# Triage mode: dispatch with report_only=true, tag '[waive-h2h]' in PR
+# title or commit message, or add PR label 'waive-h2h' (or 'waive-recipes'
+# for CPython only) and click "Re-run failed jobs" on the compare step.
 #
 # Session recipe: the flags below encode the workstation h2h sweep
 # (PR225 test plan): --repeat 3 --no-alloc --no-perf --jobs 3, GNU
@@ -474,6 +475,7 @@ jobs:
     permissions:
       contents: read # compare script checkout
       actions: write # shard download + merged upload
+      pull-requests: read # inspect PR labels for waiving
     steps:
       - uses: actions/checkout@v5
 
@@ -494,10 +496,57 @@ jobs:
           go build -o h2h-compare ./cmd/h2h-compare
 
       - name: Compare legs (strict gate, both directions)
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           compare=scripts/ci/go/h2h-compare
-          report_only=""
-          if [ "${{ inputs.report_only }}" = "true" ]; then report_only="--report-only"; fi
+
+          # Determine whether any check is manually waived
+          waive_all=false
+          waive_recipes=false
+
+          if [ "${{ inputs.report_only }}" = "true" ]; then
+            waive_all=true
+          fi
+
+          # Inspect PR title, body, and commit message for tags
+          tags="${{ github.event.pull_request.title }} ${{ github.event.pull_request.body }} ${{ github.event.head_commit.message }}"
+          if echo "$tags" | grep -Eq '\[(waive-h2h|waive h2h|report-only)\]'; then
+            waive_all=true
+          elif echo "$tags" | grep -Eq '\[(waive-recipes|waive recipes)\]'; then
+            waive_recipes=true
+          fi
+
+          # Inspect event payload labels
+          event_labels="${{ join(github.event.pull_request.labels.*.name, ' ') }}"
+          if echo "$event_labels" | grep -Eq '(waive-h2h|waive-gate|report-only)'; then
+            waive_all=true
+          elif echo "$event_labels" | grep -Eq 'waive-recipes'; then
+            waive_recipes=true
+          fi
+
+          # Inspect live PR labels (works even when clicking "Re-run failed jobs")
+          pr_num="${{ github.event.pull_request.number }}"
+          if [ "$waive_all" != "true" ] && [ -n "$pr_num" ] && [ -n "$GH_TOKEN" ]; then
+            labels="$(gh pr view "$pr_num" --json labels --jq '.labels[].name' 2>/dev/null || true)"
+            if echo "$labels" | grep -Eq '^(waive-h2h|waive-gate|report-only)$'; then
+              waive_all=true
+            elif echo "$labels" | grep -Eq '^waive-recipes$'; then
+              waive_recipes=true
+            fi
+          fi
+
+          recipes_flag=""
+          rsrs_flag=""
+          if [ "$waive_all" = "true" ]; then
+            echo "::notice::H2H gate fully waived (report-only mode enabled)."
+            recipes_flag="--report-only"
+            rsrs_flag="--report-only"
+          elif [ "$waive_recipes" = "true" ]; then
+            echo "::notice::H2H recipes (CPython baseline) gate waived (report-only mode enabled)."
+            recipes_flag="--report-only"
+          fi
+
           rc=0
           # Two comparisons, all verdict tables in the summary; any
           # can fail the job unless triage mode greens everything.
@@ -511,7 +560,7 @@ jobs:
             --merged-jvm h2h-recipes-python-merged.json \
             --merged-rs h2h-recipes-rs-from-merged.json \
             --metrics mem,ins --margin 0.15 \
-            --summary-file "$GITHUB_STEP_SUMMARY" $report_only || rc=$?
+            --summary-file "$GITHUB_STEP_SUMMARY" $recipes_flag || rc=$?
           $compare \
             --label recipes-rsrs \
             --base-name rs-to --challenger-name rs-from \
@@ -520,7 +569,7 @@ jobs:
             --merged-jvm h2h-recipes-rs-to-merged.json \
             --merged-rs h2h-recipes-rs-from-merged.json \
             --metrics mem,ins --margin 0.15 \
-            --summary-file "$GITHUB_STEP_SUMMARY" $report_only || rc=$?
+            --summary-file "$GITHUB_STEP_SUMMARY" $rsrs_flag || rc=$?
           exit $rc
 
       - name: Upload merged leg JSONs
