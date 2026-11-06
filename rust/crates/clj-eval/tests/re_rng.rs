@@ -116,6 +116,93 @@ fn re_matches_rows() {
         "[\"ax\" \"x\"]"
     );
     assert_eq!(run_last(&mut eval, "(re-matches #\"a*\" \"b\")"), "nil");
+
+    // Fast integer pattern paths: -?[0-9]+, [+-]?[0-9]+, [+-]?[0-9]{1,18}
+    assert_eq!(
+        run_last(&mut eval, "(re-matches #\"-?[0-9]+\" \"-123\")"),
+        "\"-123\""
+    );
+    assert_eq!(
+        run_last(&mut eval, "(re-matches #\"-?[0-9]+\" \"+123\")"),
+        "nil"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(re-matches #\"-?[0-9]+\" \"123\")"),
+        "\"123\""
+    );
+    assert_eq!(
+        run_last(&mut eval, "(re-matches #\"-?[0-9]+\" \"-\")"),
+        "nil"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(re-matches #\"-?[0-9]+\" \"\")"),
+        "nil"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(re-matches #\"-?[0-9]+\" \"abc\")"),
+        "nil"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(re-matches #\"[+-]?[0-9]+\" \"+123\")"),
+        "\"+123\""
+    );
+    assert_eq!(
+        run_last(&mut eval, "(re-matches #\"[+-]?[0-9]+\" \"-123\")"),
+        "\"-123\""
+    );
+    assert_eq!(
+        run_last(&mut eval, "(re-matches #\"[+-]?[0-9]+\" \"+\")"),
+        "nil"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(re-matches #\"[+-]?[0-9]{1,18}\" \"123456789012345678\")"
+        ),
+        "\"123456789012345678\""
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(re-matches #\"[+-]?[0-9]{1,18}\" \"1234567890123456789\")"
+        ),
+        "nil"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(re-matches #\"[+-]?[0-9]{1,18}\" \"+99\")"),
+        "\"+99\""
+    );
+    assert_eq!(
+        run_last(&mut eval, "(re-matches #\"[+-]?[0-9]{1,18}\" \"-99\")"),
+        "\"-99\""
+    );
+}
+
+#[test]
+fn split_cut_kinds() {
+    let mut eval = boot();
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(do (binding [*warn-on-reflection* *warn-on-reflection*] (require 'clojure.string)) (clojure.string/split \"a\\r\\nb\\nc\" #\"\\r?\\n\"))"
+        ),
+        "[\"a\" \"b\" \"c\"]"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(clojure.string/split \"a\\rb\" #\"\\r?\\n\")"),
+        "[\"a\\rb\"]"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(clojure.string/split \"foo|bar|baz\" #\"\\|\")"),
+        "[\"foo\" \"bar\" \"baz\"]"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(clojure.string/split \"foo\\r\\n\" #\"\\r?\\n\")"
+        ),
+        "[\"foo\"]"
+    );
 }
 
 #[test]

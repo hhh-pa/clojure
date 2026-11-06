@@ -354,3 +354,25 @@ fn plain_large_rebuild_ignores_given_order() {
     let looped: Vec<Value> = int_map(20).iter().map(|(k, _)| k.clone()).collect();
     assert_eq!(via_iter, looped);
 }
+
+#[test]
+fn take_value_shaped_and_trie() {
+    // Uniquely-owned shaped map
+    let mut m = int_map(3);
+    assert!(m.is_shaped());
+    assert_eq!(m.take_value(&Value::Int(1)), Some(Value::Int(10)));
+    assert_eq!(m.get(&Value::Int(1)), Some(&Value::Nil));
+    assert_eq!(m.take_value(&Value::Int(99)), None);
+
+    // Shared shaped map (Arc refcount > 1)
+    let mut m_shared = int_map(3);
+    let clone = m_shared.clone();
+    assert_eq!(m_shared.take_value(&Value::Int(1)), Some(Value::Int(10)));
+    assert_eq!(clone.get(&Value::Int(1)), Some(&Value::Int(10)));
+
+    // Large trie map (> 16 keys)
+    let mut big = int_map(20);
+    assert!(!big.is_shaped());
+    assert_eq!(big.take_value(&Value::Int(5)), Some(Value::Int(50)));
+    assert_eq!(big.take_value(&Value::Int(999)), None);
+}

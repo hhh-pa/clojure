@@ -67,11 +67,11 @@ on:
   workflow_dispatch:
     inputs:
       snippets_sha:
-        description: 'Pin clojure-code-snippet to this revision (40-char SHA; empty = pinned default)'
+        description: 'Pin clojure-code-snippet to this revision (40-char SHA or ref; empty = master branch head)'
         required: false
         default: ''
       python_snippets_sha:
-        description: 'Pin python-code-snippet to this revision (40-char SHA; empty = pinned default)'
+        description: 'Pin python-code-snippet to this revision (40-char SHA or ref; empty = master branch head)'
         required: false
         default: ''
       rs_from:
@@ -98,13 +98,12 @@ permissions:
   contents: read
 
 env:
-  # Pinned suite revisions: ins-only measure-phase heads (snippet
-  # pin-inscount-measure branch, python pin-inscount-h2h) until
-  # they merge, then back to master SHAs. The --pin legs below
-  # need harness support, so old-SHA bisection of the
-  # instrumentation legs fails loud on the unknown flag by design.
-  SNIPPETS_SHA_DEFAULT: d7e5e7bbcaace86ca3e90fde4db8865326204144
-  PYTHON_SNIPPETS_SHA_DEFAULT: aedfe048c9c77dcfc8daddc0f43fcc1be411bd48
+  # Default suite revisions: follow the head of master branch of
+  # https://github.com/hhh-pa/clojure-code-snippet and
+  # https://github.com/hhh-pa/python-code-snippet respectively.
+  # Manual dispatch may override either to a specific SHA/ref (bisection).
+  SNIPPETS_SHA_DEFAULT: master
+  PYTHON_SNIPPETS_SHA_DEFAULT: master
   # Pinned (not floating "3.11"): interpreter micro versions move
   # cpu numbers and the sweep must stay comparable run to run.
   # Bump deliberately.
@@ -167,8 +166,8 @@ jobs:
 
   # Resolve the suite revisions AND the native-vs-native revision
   # pair ONCE per run so all 32 measure jobs sweep the same
-  # commits. Suite defaults: the pinned SHAs above; a manual
-  # dispatch may pin either input instead (bisection). Native pair:
+  # commits. Suite defaults: master branch heads of the respective repos;
+  # a manual dispatch may pin either input instead (bisection). Native pair:
   # PR head/base by default on pull_request (stacked PRs diff
   # against their parent), dispatched-ref/master on
   # workflow_dispatch; rs_from/rs_to take a 40-char SHA or any
@@ -203,25 +202,27 @@ jobs:
             if printf '%s' "$1" | grep -Eq '^[0-9a-f]{40}$'; then
               printf '%s' "$1"
             else
-              git ls-remote https://github.com/${{ github.repository }} "$1" | awk '{print $1}' | head -n 1
+              git ls-remote "$2" "$1" | awk '{print $1}' | head -n 1
             fi
           }
-          from_sha="$(to_sha "$from")"
-          to_sha="$(to_sha "$to")"
-          for sha in "$snippets" "$pysnippets" "$from_sha" "$to_sha"; do
+          snippets_sha="$(to_sha "$snippets" https://github.com/hhh-pa/clojure-code-snippet)"
+          pysnippets_sha="$(to_sha "$pysnippets" https://github.com/hhh-pa/python-code-snippet)"
+          from_sha="$(to_sha "$from" https://github.com/${{ github.repository }})"
+          to_sha="$(to_sha "$to" https://github.com/${{ github.repository }})"
+          for sha in "$snippets_sha" "$pysnippets_sha" "$from_sha" "$to_sha"; do
             if ! printf '%s' "$sha" | grep -Eq '^[0-9a-f]{40}$'; then
               echo "error: resolved revision is not a 40-char SHA: '$sha'" >&2
               exit 1
             fi
           done
-          echo "snippets_sha=$snippets" >> "$GITHUB_OUTPUT"
-          echo "python_snippets_sha=$pysnippets" >> "$GITHUB_OUTPUT"
+          echo "snippets_sha=$snippets_sha" >> "$GITHUB_OUTPUT"
+          echo "python_snippets_sha=$pysnippets_sha" >> "$GITHUB_OUTPUT"
           echo "rs_from_sha=$from_sha" >> "$GITHUB_OUTPUT"
           echo "rs_to_sha=$to_sha" >> "$GITHUB_OUTPUT"
           {
             echo "suite revisions:"
-            echo "  clojure-code-snippet: \`$snippets\`"
-            echo "  python-code-snippet: \`$pysnippets\`"
+            echo "  clojure-code-snippet: \`$snippets_sha\` ($snippets)"
+            echo "  python-code-snippet: \`$pysnippets_sha\` ($pysnippets)"
             echo "native-vs-native revisions:"
             echo "  from: \`$from_sha\` ($from)"
             echo "  to: \`$to_sha\` ($to)"
