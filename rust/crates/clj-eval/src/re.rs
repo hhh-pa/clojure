@@ -241,9 +241,97 @@ pub(crate) fn pattern_split_array(
     )))
 }
 
+const WS_TR: u64 = (1 << b' ') | (1 << b'\t') | (1 << b'\n') | (1 << b'\r');
+const WS_TRF: u64 = WS_TR | (1 << 0x0C);
+const WS_ASCII: u64 = WS_TRF | (1 << 0x0B);
+
+/// The hand-scanned split patterns (#226): the whitespace classes,
+/// `\r?\n`, and `\|` the snippet suite splits input on. Each finds
+/// exactly the crate's leftmost-first `find_iter` ranges, without
+/// compiling (and faulting in) the regex engine.
+#[derive(Clone, Copy)]
+enum CutKind {
+    /// A maximal run of bytes in an ASCII control/space mask.
+    Run(u64),
+    /// `\r?\n`.
+    Newline,
+    /// One literal byte.
+    Byte(u8),
+}
+
+fn cut_kind(text: &str, source: &str) -> Option<CutKind> {
+    Some(match source {
+        // `\s` is Unicode in the crate: only all-ASCII text reduces
+        // to the ASCII whitespace class.
+        r"\s+" if text.is_ascii() => CutKind::Run(WS_ASCII),
+        r"[ \t\n\r\f\x0B]+" => CutKind::Run(WS_ASCII),
+        r"[ \t\n\r\f]+" => CutKind::Run(WS_TRF),
+        r"[ \t\n\r]+" => CutKind::Run(WS_TR),
+        r"[\x00-\x20]+" => CutKind::Run((1u64 << 0x21) - 1),
+        r"\r?\n" => CutKind::Newline,
+        r"\|" => CutKind::Byte(b'|'),
+        _ => return None,
+    })
+}
+
+fn in_mask(b: u8, mask: u64) -> bool {
+    b <= 0x20 && mask & (1u64 << b) != 0
+}
+
+/// The match ranges of a [`CutKind`], streamed (no cut buffer).
+struct ByteCuts<'a> {
+    bytes: &'a [u8],
+    pos: usize,
+    kind: CutKind,
+}
+
+impl ByteCuts<'_> {
+    /// The end of a match starting at `i`, if one does.
+    fn match_end(&self, i: usize) -> Option<usize> {
+        let b = self.bytes[i];
+        match self.kind {
+            CutKind::Run(mask) if in_mask(b, mask) => Some(
+                i + 1
+                    + self.bytes[i + 1..]
+                        .iter()
+                        .take_while(|&&c| in_mask(c, mask))
+                        .count(),
+            ),
+            CutKind::Newline if b == b'\n' => Some(i + 1),
+            CutKind::Newline if b == b'\r' && self.bytes.get(i + 1) == Some(&b'\n') => Some(i + 2),
+            CutKind::Byte(c) if b == c => Some(i + 1),
+            _ => None,
+        }
+    }
+}
+
+impl Iterator for ByteCuts<'_> {
+    type Item = (usize, usize);
+
+    fn next(&mut self) -> Option<(usize, usize)> {
+        while self.pos < self.bytes.len() {
+            let start = self.pos;
+            if let Some(end) = self.match_end(start) {
+                self.pos = end;
+                return Some((start, end));
+            }
+            self.pos += 1;
+        }
+        None
+    }
+}
+
 /// The split pieces (engine-agnostic — the `regex` crate and the
 /// boundary scanner share the JDK loop in [`split_pieces`]).
 fn pattern_pieces(text: &str, source: &str, limit: i32) -> Result<Vec<Value>, NativeError> {
+    if let Some(kind) = cut_kind(text, source) {
+        let cuts = ByteCuts {
+            bytes: text.as_bytes(),
+            pos: 0,
+            kind,
+        };
+        return Ok(split_pieces(text, cuts, limit));
+    }
     // Pure-boundary patterns never reach the crate (which cannot
     // compile look-around); anything else splits as before.
     if let Some(alts) = boundary_alternatives(source) {
@@ -582,17 +670,42 @@ fn anchored(source: &str) -> String {
     format!("\\A(?:{source})\\z")
 }
 
-/// `re-matches`: the whole string must match (`re-groups`
-/// shape, nil otherwise).
-fn native_re_matches(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
-    check_arity("clojure.core/re-matches", args, &[2])?;
-    let source = pattern_source(&args[0])?;
-    let text = match_text(&args[1])?;
+pub(crate) fn fast_re_matches(source: &str, text: &str) -> Option<bool> {
+    match source {
+        "[+-]?[0-9]+" => Some(match_int_digits(text.as_bytes(), true, usize::MAX)),
+        "-?[0-9]+" => Some(match_int_digits(text.as_bytes(), false, usize::MAX)),
+        "[+-]?[0-9]{1,18}" => Some(match_int_digits(text.as_bytes(), true, 18)),
+        _ => None,
+    }
+}
+
+fn match_int_digits(bytes: &[u8], allow_plus: bool, max_digits: usize) -> bool {
+    let rest = match bytes.first() {
+        Some(b'-') => &bytes[1..],
+        Some(b'+') if allow_plus => &bytes[1..],
+        _ => bytes,
+    };
+    !rest.is_empty() && rest.len() <= max_digits && rest.iter().all(u8::is_ascii_digit)
+}
+
+pub(crate) fn re_matches_2(pat: &Value, subj: &Value) -> Result<Value, NativeError> {
+    let source = pattern_source(pat)?;
+    let text = match_text(subj)?;
+    if let Some(matched) = fast_re_matches(source, text) {
+        return Ok(if matched { subj.clone() } else { Value::Nil });
+    }
     let re = compile_source(&anchored(source))?;
     Ok(match re.captures(text) {
         Some(caps) => groups_value(&caps),
         None => Value::Nil,
     })
+}
+
+/// `re-matches`: the whole string must match (`re-groups`
+/// shape, nil otherwise).
+fn native_re_matches(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.core/re-matches", args, &[2])?;
+    re_matches_2(&args[0], &args[1])
 }
 
 /// `re-seq`: successive `find` results (`re-groups` each — a

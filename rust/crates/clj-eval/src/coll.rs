@@ -928,57 +928,97 @@ fn merge_with3(eval: &mut Evaluator, f: &Value, x: Value, y: &Value) -> Result<V
     merge_with3_seq_tail(eval, f, x, y)
 }
 
-/// Split a keyseq into its head key and tail (`update-in` /
-/// `assoc-in` destructure `[k & ks]` by seqing once).
-fn seq_first_next(eval: &mut Evaluator, ks: &Value) -> Result<(Value, Value), NativeError> {
-    let s = seq_value(eval, ks).map_err(signal_to_native)?;
-    if matches!(s, Value::Nil) {
-        return Ok((Value::Nil, Value::Nil));
+fn take_lookup(
+    eval: &mut Evaluator,
+    coll: &mut Value,
+    key: &Value,
+) -> Result<Option<Value>, NativeError> {
+    match coll {
+        Value::Map(m) if !m.is_sorted() => {
+            let key = crate::lazy::realize_key(eval, key).map_err(signal_to_native)?;
+            Ok(m.take_value(&key))
+        }
+        Value::Vector(x) => Ok(int_key(key).and_then(|i| {
+            usize::try_from(i as i32)
+                .ok()
+                .and_then(|idx| x.take_nth(idx))
+        })),
+        other => lookup_present(eval, other, key),
     }
-    let k = first_value(eval, &s).map_err(signal_to_native)?;
-    let rest = next_value(eval, &s).map_err(signal_to_native)?;
-    Ok((k, rest))
 }
 
-/// The `update-in` recursion (`ks` already seqed).
+/// Cursor over a keypath (`update-in` / `assoc-in` / `get-in`):
+/// indexes `Value::Vector` directly without allocating `VectorSeq`
+/// nodes per depth level.
+enum KeyStep {
+    Vec(Vector, usize),
+    Seq(Value),
+}
+
+impl KeyStep {
+    fn from_val(eval: &mut Evaluator, v: &Value) -> Result<Option<(Value, Self)>, NativeError> {
+        if let Value::Vector(vec) = v {
+            return Ok(vec.get(0).map(|k| (k, Self::Vec(vec.clone(), 1))));
+        }
+        let s = seq_value(eval, v).map_err(signal_to_native)?;
+        if matches!(s, Value::Nil) {
+            return Ok(None);
+        }
+        let k = first_value(eval, &s).map_err(signal_to_native)?;
+        let rest = next_value(eval, &s).map_err(signal_to_native)?;
+        Ok(Some((k, Self::Seq(rest))))
+    }
+
+    fn next(self, eval: &mut Evaluator) -> Result<Option<(Value, Self)>, NativeError> {
+        match self {
+            Self::Vec(vec, i) => Ok(vec.get(i).map(|k| (k, Self::Vec(vec, i + 1)))),
+            Self::Seq(Value::Nil) => Ok(None),
+            Self::Seq(s) => {
+                let k = first_value(eval, &s).map_err(signal_to_native)?;
+                let rest = next_value(eval, &s).map_err(signal_to_native)?;
+                Ok(Some((k, Self::Seq(rest))))
+            }
+        }
+    }
+}
+
+/// The `update-in` recursion (`ks` already stepped once).
 fn update_in_up(
     eval: &mut Evaluator,
-    m: &Value,
+    mut m: Value,
     k: &Value,
-    ks: &Value,
+    ks: KeyStep,
     f: &Value,
     args: &[Value],
 ) -> Result<Value, NativeError> {
-    if !matches!(ks, Value::Nil) {
-        let inner = lookup_present(eval, m, k)?.unwrap_or(Value::Nil);
-        let (k2, ks2) = seq_first_next(eval, ks)?;
-        let updated = update_in_up(eval, &inner, &k2, &ks2, f, args)?;
-        assoc3(eval, m.clone(), k, updated)
+    if let Some((k2, ks2)) = ks.next(eval)? {
+        let inner = take_lookup(eval, &mut m, k)?.unwrap_or(Value::Nil);
+        let updated = update_in_up(eval, inner, &k2, ks2, f, args)?;
+        assoc3(eval, m, k, updated)
     } else {
-        let old = lookup_present(eval, m, k)?.unwrap_or(Value::Nil);
-        let mut call_args = Vec::with_capacity(args.len() + 1);
+        let old = take_lookup(eval, &mut m, k)?.unwrap_or(Value::Nil);
+        let mut call_args: SmallVec<[Value; 4]> = SmallVec::with_capacity(args.len() + 1);
         call_args.push(old);
         call_args.extend(args.iter().cloned());
-        let new = eval.call(f, &call_args).map_err(signal_to_native)?;
-        assoc3(eval, m.clone(), k, new)
+        let new = eval.call_owned(f, call_args).map_err(signal_to_native)?;
+        assoc3(eval, m, k, new)
     }
 }
 
-/// The `assoc-in` recursion (`ks` already seqed).
+/// The `assoc-in` recursion (`ks` already stepped once).
 fn assoc_in_up(
     eval: &mut Evaluator,
-    m: &Value,
+    mut m: Value,
     k: &Value,
-    ks: &Value,
-    v: &Value,
+    ks: KeyStep,
+    v: Value,
 ) -> Result<Value, NativeError> {
-    if !matches!(ks, Value::Nil) {
-        let inner = lookup_present(eval, m, k)?.unwrap_or(Value::Nil);
-        let (k2, ks2) = seq_first_next(eval, ks)?;
-        let updated = assoc_in_up(eval, &inner, &k2, &ks2, v)?;
-        assoc3(eval, m.clone(), k, updated)
+    if let Some((k2, ks2)) = ks.next(eval)? {
+        let inner = take_lookup(eval, &mut m, k)?.unwrap_or(Value::Nil);
+        let updated = assoc_in_up(eval, inner, &k2, ks2, v)?;
+        assoc3(eval, m, k, updated)
     } else {
-        assoc3(eval, m.clone(), k, v.clone())
+        assoc3(eval, m, k, v)
     }
 }
 
@@ -1897,44 +1937,68 @@ fn native_select_keys(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nat
 }
 
 fn native_update(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
-    check_min_arity("clojure.core/update", args, 3)?;
-    let old = lookup_present(eval, &args[0], &args[1])?.unwrap_or(Value::Nil);
-    let mut call_args = Vec::with_capacity(args.len() - 2);
+    native_update_owned(eval, args.iter().cloned().collect())
+}
+
+pub(crate) fn native_update_owned(
+    eval: &mut Evaluator,
+    mut args: SmallVec<[Value; 4]>,
+) -> Result<Value, NativeError> {
+    check_min_arity("clojure.core/update", &args, 3)?;
+    let mut m = std::mem::replace(&mut args[0], Value::Nil);
+    let k = std::mem::replace(&mut args[1], Value::Nil);
+    let f = std::mem::replace(&mut args[2], Value::Nil);
+    let old = take_lookup(eval, &mut m, &k)?.unwrap_or(Value::Nil);
+    let mut call_args: SmallVec<[Value; 4]> = SmallVec::with_capacity(args.len() - 2);
     call_args.push(old);
-    call_args.extend(args[3..].iter().cloned());
-    let new = eval.call(&args[2], &call_args).map_err(signal_to_native)?;
-    assoc3(eval, args[0].clone(), &args[1], new)
+    call_args.extend(args.drain(3..));
+    let new = eval.call_owned(&f, call_args).map_err(signal_to_native)?;
+    assoc3(eval, m, &k, new)
 }
 
 fn native_update_in(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
-    check_min_arity("clojure.core/update-in", args, 3)?;
-    let (k, ks) = seq_first_next(eval, &args[1])?;
-    update_in_up(eval, &args[0], &k, &ks, &args[2], &args[3..])
+    native_update_in_owned(eval, args.iter().cloned().collect())
+}
+
+pub(crate) fn native_update_in_owned(
+    eval: &mut Evaluator,
+    mut args: SmallVec<[Value; 4]>,
+) -> Result<Value, NativeError> {
+    check_min_arity("clojure.core/update-in", &args, 3)?;
+    let m = std::mem::replace(&mut args[0], Value::Nil);
+    let (k, ks) =
+        KeyStep::from_val(eval, &args[1])?.unwrap_or((Value::Nil, KeyStep::Seq(Value::Nil)));
+    update_in_up(eval, m, &k, ks, &args[2], &args[3..])
 }
 
 fn native_assoc_in(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
-    check_arity("clojure.core/assoc-in", args, &[3])?;
-    let (k, ks) = seq_first_next(eval, &args[1])?;
-    assoc_in_up(eval, &args[0], &k, &ks, &args[2])
+    native_assoc_in_owned(eval, args.iter().cloned().collect())
+}
+
+pub(crate) fn native_assoc_in_owned(
+    eval: &mut Evaluator,
+    mut args: SmallVec<[Value; 4]>,
+) -> Result<Value, NativeError> {
+    check_arity("clojure.core/assoc-in", &args, &[3])?;
+    let m = std::mem::replace(&mut args[0], Value::Nil);
+    let v = std::mem::replace(&mut args[2], Value::Nil);
+    let (k, ks) =
+        KeyStep::from_val(eval, &args[1])?.unwrap_or((Value::Nil, KeyStep::Seq(Value::Nil)));
+    assoc_in_up(eval, m, &k, ks, v)
 }
 
 fn native_get_in(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/get-in", args, &[2, 3])?;
     let mut cur = args[0].clone();
-    let mut ks = seq_value(eval, &args[1]).map_err(signal_to_native)?;
-    loop {
-        if matches!(ks, Value::Nil) {
-            return Ok(cur);
-        }
-        let k = first_value(eval, &ks).map_err(signal_to_native)?;
+    let mut step = KeyStep::from_val(eval, &args[1])?;
+    while let Some((k, next)) = step {
         match lookup_present(eval, &cur, &k)? {
             Some(v) => cur = v,
-            None => {
-                return Ok(args.get(2).cloned().unwrap_or(Value::Nil));
-            }
+            None => return Ok(args.get(2).cloned().unwrap_or(Value::Nil)),
         }
-        ks = next_value(eval, &ks).map_err(signal_to_native)?;
+        step = next.next(eval)?;
     }
+    Ok(cur)
 }
 
 fn native_zipmap(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {

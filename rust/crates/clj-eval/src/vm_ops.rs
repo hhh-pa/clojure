@@ -500,6 +500,11 @@ const BINARY: &[Row2] = &[
         Some(shape2::<Contains, AsTest>),
     ),
     ("conj!", shape2::<ConjBang, AsValue>, None),
+    (
+        "re-matches",
+        shape2::<ReMatches, AsValue>,
+        Some(shape2::<ReMatches, AsTest>),
+    ),
 ];
 
 /// The one-argument ops by core name (see [`BINARY`]).
@@ -534,6 +539,12 @@ const UNARY: &[Row1] = &[
         shape1::<IsSome, AsValue>,
         Some(shape1::<IsSome, AsTest>),
     ),
+    (
+        "string?",
+        shape1::<IsString, AsValue>,
+        Some(shape1::<IsString, AsTest>),
+    ),
+    ("parse-long", shape1::<ParseLong, AsValue>, None),
     ("count", shape1::<Count, AsValue>, None),
     (
         "first",
@@ -695,6 +706,27 @@ fn upd1<O: Upd>(c: Site, coll: Coll) -> Exec {
     })
 }
 
+/// An update op whose fast path is its owned native (`assoc-in`,
+/// `update`, `update-in`, and multi-pair `assoc`).
+fn upd_native(c: Site, coll: Coll, rest: Vec<Operand>) -> Exec {
+    Box::new(move |ev, f| {
+        let mut args: SmallVec<[Value; 4]> = SmallVec::with_capacity(rest.len() + 1);
+        args.push(match &coll {
+            Coll::Exec(e) => e(ev, f)?,
+            _ => Value::Nil,
+        });
+        for o in &rest {
+            args.push(o.eval(ev, f)?);
+        }
+        match &coll {
+            Coll::Take(r) => args[0] = std::mem::replace(&mut f.regs[*r], Value::Nil),
+            Coll::Read(o) => args[0] = o.eval(ev, f)?,
+            Coll::Exec(_) => {}
+        }
+        native(ev, &c, args)
+    })
+}
+
 /// The update ops by core name and arg count.
 /// An update-op table row: core name, arg count, code constructor.
 type UpdRow = (&'static str, usize, UpdCtor);
@@ -713,10 +745,16 @@ pub(crate) type UpdCtor = fn(Site, Coll, Vec<Operand>) -> Exec;
 /// is then read after the others (see [`upd`]).
 pub(crate) fn update_ctor(call: &DirectCall) -> Option<UpdCtor> {
     let name = core_name(call)?;
-    UPDATES
-        .iter()
-        .find(|(n, argc, _)| *n == name && *argc == call.args.len())
-        .map(|(.., ctor)| *ctor)
+    let argc = call.args.len();
+    if let Some((_, _, ctor)) = UPDATES.iter().find(|(n, a, _)| *n == name && *a == argc) {
+        return Some(*ctor);
+    }
+    match name {
+        "assoc" if argc >= 5 && argc % 2 == 1 => Some(upd_native),
+        "assoc-in" if argc == 3 => Some(upd_native),
+        "update" | "update-in" if argc >= 3 => Some(upd_native),
+        _ => None,
+    }
 }
 
 /// Whether `call` compiles as an update op (see [`update_ctor`]).
@@ -1128,6 +1166,35 @@ pred1!(Odd, |a| match a {
 pred1!(Not, |a| Some(!a.is_truthy()));
 pred1!(IsNil, |a| Some(matches!(a, Value::Nil)));
 pred1!(IsSome, |a| Some(!matches!(a, Value::Nil)));
+pred1!(IsString, |a| Some(matches!(a, Value::Str(_))));
+
+pub(crate) struct ParseLong;
+
+impl Op1 for ParseLong {
+    #[inline(always)]
+    fn apply(a: &Value) -> Option<Value> {
+        crate::core::parse_long_1(a).ok()
+    }
+}
+
+pub(crate) struct ReMatches;
+
+impl Op2 for ReMatches {
+    #[inline(always)]
+    fn apply(a: &Value, b: &Value) -> Option<Value> {
+        crate::re::re_matches_2(a, b).ok()
+    }
+
+    #[inline(always)]
+    fn test(a: &Value, b: &Value) -> Option<bool> {
+        if let (Value::Regex(src), Value::Str(s)) = (a, b) {
+            if let Some(m) = crate::re::fast_re_matches(src, s) {
+                return Some(m);
+            }
+        }
+        Self::apply(a, b).map(|v| v.is_truthy())
+    }
+}
 
 #[cfg(test)]
 mod tests {

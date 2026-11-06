@@ -781,6 +781,17 @@ impl Vector {
         Some(self)
     }
 
+    /// Extract the item at `index` on an owned vector (`None` when out of
+    /// bounds), replacing a generic slot with `Value::Nil` so nested
+    /// collections keep a refcount of 1 across `assoc-in` / `update`.
+    pub fn take_nth(&mut self, index: usize) -> Option<Value> {
+        if let VectorInner::Generic(t) = &mut self.inner {
+            t.replace_mut(index, Value::Nil)
+        } else {
+            self.get(index)
+        }
+    }
+
     /// The vector without its last item (`None` when empty).
     ///
     /// The shared-storage form, for callers holding only a `&Vector`:
@@ -1437,6 +1448,20 @@ impl Map {
                 .map(|idx| &small.vals[idx]),
             None => self.trie().get(k),
         }
+    }
+
+    /// Look up a key on an owned map, moving the value out of a uniquely-owned
+    /// shaped map (replacing the slot with `Value::Nil`) so nested collections
+    /// keep a refcount of 1 across `assoc-in` / `update`.
+    pub fn take_value(&mut self, k: &Value) -> Option<Value> {
+        if let Some(small) = &mut self.small {
+            let idx = small.shape.keys.iter().position(|ek| ek == k)?;
+            return Some(match Arc::get_mut(small) {
+                Some(entries) => std::mem::replace(&mut entries.vals[idx], Value::Nil),
+                None => small.vals[idx].clone(),
+            });
+        }
+        self.trie().get(k).cloned()
     }
 
     /// Whether a key is present.
