@@ -14,10 +14,13 @@
 # rs-from-vs-rs-to check on changes that affect nothing. Each of
 # the 32 measure jobs builds both native revisions (cargo cache),
 # then sweeps rs-from, rs-to and CPython over the same K/32 case
-# slice; the h2h-compare job unions the shards per leg and gates
-# on per-case medians. The gate rule: clojure-rs must beat
-# CPython, AND rs-from must win-or-tie vs rs-to on every case —
-# ANY loss fails the PR.
+# slice with the same snip measure binary (CPython via
+# --script-extension .py): identical discovery, grouping and
+# shard rule on every leg, so each shard covers exactly the same
+# algorithms everywhere by construction. The h2h-compare job
+# unions the shards per leg and gates on per-case medians. The
+# gate rule: clojure-rs must beat CPython, AND rs-from must
+# win-or-tie vs rs-to on every case — ANY loss fails the PR.
 #
 # Triggering (rust.yml is the prerequisite): this gate runs on
 # pull_request, but every leg waits behind the wait-rust job,
@@ -230,14 +233,18 @@ jobs:
   # cheap), then sweeps rs-from, rs-to and CPython over the same
   # K/32 case slice. Same runner per slice keeps the rs-from vs
   # rs-to check immune to the cross-runner CPU variance that reds
-  # it on no-op changes. python-code-snippet mirrors
-  # clojure-code-snippet case by case; --label-style snip keys the
-  # baseline rows identically so instruction and RSS medians compare
-  # directly. Pin counts instructions only: no memory tracing — RSS
-  # from GNU time is the memory signal. The three measure steps run
-  # even when an earlier leg fails (if: always) so one bad leg
-  # never hides the other two; the compare job still fails the run
-  # on the missing or not-ok leg.
+  # it on no-op changes. All three legs run the same snip measure
+  # binary (the CPython leg with --script-extension .py from the
+  # python checkout, which mirrors clojure-code-snippet case by
+  # case): one discovery, one (label, stem) grouping, one shard
+  # rule, so every shard covers exactly the same algorithms on
+  # every leg by construction, and rows join directly on
+  # (label, stem, case) for the instruction and RSS medians. Pin
+  # counts instructions only: no memory tracing — RSS from GNU
+  # time is the memory signal. The three measure steps run even
+  # when an earlier leg fails (if: always) so one bad leg never
+  # hides the other two; the compare job still fails the run on
+  # the missing or not-ok leg.
   measure:
     needs: [resolve]
     runs-on: ubuntu-latest
@@ -419,14 +426,25 @@ jobs:
           path: snippets/h2h-recipes-rs-to-shard-${{ matrix.shard }}.json
           retention-days: 7
 
+      # The python leg runs the SAME snip measure binary as the
+      # native legs (built from the pinned snippets checkout above),
+      # with --script-extension .py from the python checkout: one
+      # discovery, one (label, stem) grouping, one shard rule, so
+      # every shard covers exactly the same algorithms on all
+      # three legs by construction. (A separate tools/measure.py
+      # leg drifted: label formation and grouping differed, so
+      # 32/32 shards disagreed and 48 groups never joined.)
       - name: Measure python shard
         if: always()
         working-directory: pysnippets
         run: |
-          python3 tools/measure.py --resources tests/resources \
-            --repeat 3 --jobs 3 --timeout 300 --label-style snip \
+          ../snippets/scripts/ci/go/snip measure --resources tests/resources \
+            --repeat 3 --no-alloc --no-perf --jobs 3 --timeout 300 \
+            --runtime cpython \
+            --command-template "python3 {script}" \
+            --script-extension .py \
             --pin --pin-bin "$INSTRUMENTATION_BIN" --pin-tool "$INSTRUMENTATION_TOOL" \
-            --pin-repeat 2 --pin-timeout 600 --no-alloc-shim \
+            --pin-repeat 2 --pin-timeout 600 \
             --shard ${{ matrix.shard }}/32 \
             --output "h2h-recipes-python-shard-${{ matrix.shard }}.json" \
             --summary-file "$GITHUB_STEP_SUMMARY"
