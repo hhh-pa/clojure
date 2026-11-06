@@ -26,21 +26,21 @@ const MASK: usize = WIDTH - 1;
 
 /// A trie node: a branch's children, or a full leaf's items (the
 /// other side empty — the node's level says which, by construction).
-#[derive(Clone, Debug, Default)]
-struct Node {
-    kids: Vec<Arc<Node>>,
-    items: Vec<Value>,
+#[derive(Clone, Debug)]
+struct Node<T> {
+    kids: Vec<Arc<Node<T>>>,
+    items: Vec<T>,
 }
 
-impl Node {
-    fn branch(kids: Vec<Arc<Node>>) -> Self {
+impl<T> Node<T> {
+    fn branch(kids: Vec<Arc<Node<T>>>) -> Self {
         Self {
             kids,
             items: Vec::new(),
         }
     }
 
-    fn leaf(items: Vec<Value>) -> Self {
+    fn leaf(items: Vec<T>) -> Self {
         Self {
             kids: Vec::new(),
             items,
@@ -48,26 +48,27 @@ impl Node {
     }
 }
 
-/// A persistent vector of values.
+/// A persistent vector of values (or of a packed scalar type: the
+/// typed `Vector` storages keep `i64`/`char` items in the same trie).
 #[derive(Clone, Debug)]
-pub struct PVec {
+pub struct PVec<T = Value> {
     len: usize,
     /// The root's level: its children index by `(i >> shift) & MASK`
     /// (`BITS` when the root's children are leaves).
     shift: u32,
     /// The trie of full leaves (`None` while every item is in the
     /// tail).
-    root: Option<Arc<Node>>,
-    tail: Arc<Vec<Value>>,
+    root: Option<Arc<Node<T>>>,
+    tail: Arc<Vec<T>>,
 }
 
-impl Default for PVec {
+impl<T: Clone> Default for PVec<T> {
     fn default() -> Self {
         Self::new_sync()
     }
 }
 
-impl PVec {
+impl<T: Clone> PVec<T> {
     /// An empty vector.
     #[must_use]
     pub fn new_sync() -> Self {
@@ -82,7 +83,7 @@ impl PVec {
     /// A vector over `items` in order (up to 32 become the tail as
     /// is — no per-item push).
     #[must_use]
-    pub fn from_vec(items: Vec<Value>) -> Self {
+    pub fn from_vec(items: Vec<T>) -> Self {
         if items.len() <= WIDTH {
             return Self {
                 len: items.len(),
@@ -112,7 +113,7 @@ impl PVec {
     }
 
     /// The full leaf holding index `i` (below the tail offset).
-    fn leaf(&self, i: usize) -> &[Value] {
+    fn leaf(&self, i: usize) -> &[T] {
         let mut node = self
             .root
             .as_deref()
@@ -127,7 +128,7 @@ impl PVec {
 
     /// The item at `i` (`None` past the end).
     #[must_use]
-    pub fn get(&self, i: usize) -> Option<&Value> {
+    pub fn get(&self, i: usize) -> Option<&T> {
         if i >= self.len {
             return None;
         }
@@ -138,8 +139,24 @@ impl PVec {
         self.leaf(i).get(i & MASK)
     }
 
+    /// The items from `i` to the end of the leaf (or tail) holding
+    /// it, borrowed (empty past the end): a vector seq's current
+    /// chunk. Leaves and the tail start on multiples of 32, so the
+    /// chunks of a walk from 0 are the JVM's `ChunkedSeq` chunks.
+    #[must_use]
+    pub fn chunk_from(&self, i: usize) -> &[T] {
+        if i >= self.len {
+            return &[];
+        }
+        let off = self.tail_offset();
+        if i >= off {
+            return &self.tail[i - off..];
+        }
+        &self.leaf(i)[i & MASK..]
+    }
+
     /// Append an item.
-    pub fn push_back_mut(&mut self, v: Value) {
+    pub fn push_back_mut(&mut self, v: T) {
         if self.tail.len() < WIDTH {
             Arc::make_mut(&mut self.tail).push(v);
             self.len += 1;
@@ -167,7 +184,7 @@ impl PVec {
     }
 
     /// Replace the item at `i` (`false` when out of bounds).
-    pub fn set_mut(&mut self, i: usize, v: Value) -> bool {
+    pub fn set_mut(&mut self, i: usize, v: T) -> bool {
         if i >= self.len {
             return false;
         }
@@ -220,7 +237,7 @@ impl PVec {
 
     /// Items front to back.
     #[must_use]
-    pub fn iter(&self) -> Iter<'_> {
+    pub fn iter(&self) -> Iter<'_, T> {
         Iter {
             vec: self,
             front: 0,
@@ -234,7 +251,7 @@ impl PVec {
 }
 
 /// A path of branches from `level` down to `leaf`.
-fn new_path(level: u32, leaf: Arc<Node>) -> Arc<Node> {
+fn new_path<T>(level: u32, leaf: Arc<Node<T>>) -> Arc<Node<T>> {
     if level == 0 {
         return leaf;
     }
@@ -243,7 +260,7 @@ fn new_path(level: u32, leaf: Arc<Node>) -> Arc<Node> {
 
 /// Push a full leaf for index `at` into `node` (a branch at `level`
 /// with room below it).
-fn push_leaf(node: &mut Node, level: u32, at: usize, leaf: Arc<Node>) {
+fn push_leaf<T: Clone>(node: &mut Node<T>, level: u32, at: usize, leaf: Arc<Node<T>>) {
     let kids = &mut node.kids;
     let slot = (at >> level) & MASK;
     if level == BITS {
@@ -257,7 +274,7 @@ fn push_leaf(node: &mut Node, level: u32, at: usize, leaf: Arc<Node>) {
 
 /// Remove the last leaf under `node` (a branch at `level`), pruning
 /// branches it empties; answers the leaf's items.
-fn pop_leaf(node: &mut Node, level: u32) -> Vec<Value> {
+fn pop_leaf<T: Clone>(node: &mut Node<T>, level: u32) -> Vec<T> {
     let kids = &mut node.kids;
     if level == BITS {
         let leaf = kids.pop().expect("a branch holds at least one child");
@@ -273,19 +290,19 @@ fn pop_leaf(node: &mut Node, level: u32) -> Vec<Value> {
 
 /// Front-to-back item iteration (double-ended), one leaf lookup per
 /// 32 items.
-pub struct Iter<'a> {
-    vec: &'a PVec,
+pub struct Iter<'a, T = Value> {
+    vec: &'a PVec<T>,
     front: usize,
     back: usize,
-    front_leaf: &'a [Value],
+    front_leaf: &'a [T],
     front_base: usize,
-    back_leaf: &'a [Value],
+    back_leaf: &'a [T],
     back_base: usize,
 }
 
-impl<'a> Iter<'a> {
+impl<'a, T: Clone> Iter<'a, T> {
     /// The leaf (or tail) holding index `i`, with its first index.
-    fn chunk(&self, i: usize) -> (&'a [Value], usize) {
+    fn chunk(&self, i: usize) -> (&'a [T], usize) {
         let off = self.vec.tail_offset();
         if i >= off {
             (&self.vec.tail[..], off)
@@ -295,10 +312,10 @@ impl<'a> Iter<'a> {
     }
 }
 
-impl<'a> Iterator for Iter<'a> {
-    type Item = &'a Value;
+impl<'a, T: Clone> Iterator for Iter<'a, T> {
+    type Item = &'a T;
 
-    fn next(&mut self) -> Option<&'a Value> {
+    fn next(&mut self) -> Option<&'a T> {
         if self.front >= self.back {
             return None;
         }
@@ -316,7 +333,7 @@ impl<'a> Iterator for Iter<'a> {
     }
 }
 
-impl DoubleEndedIterator for Iter<'_> {
+impl<T: Clone> DoubleEndedIterator for Iter<'_, T> {
     fn next_back(&mut self) -> Option<Self::Item> {
         if self.front >= self.back {
             return None;
@@ -330,15 +347,143 @@ impl DoubleEndedIterator for Iter<'_> {
     }
 }
 
-impl ExactSizeIterator for Iter<'_> {}
+impl<T: Clone> ExactSizeIterator for Iter<'_, T> {}
 
-impl FromIterator<Value> for PVec {
-    fn from_iter<I: IntoIterator<Item = Value>>(items: I) -> Self {
+impl<T: Clone> FromIterator<T> for PVec<T> {
+    fn from_iter<I: IntoIterator<Item = T>>(items: I) -> Self {
         let mut out = PVec::new_sync();
         for v in items {
             out.push_back_mut(v);
         }
         out
+    }
+}
+
+/// Longest flat packed run: past it packed items live in the trie.
+/// A shared update clones a flat run whole (`Arc::make_mut`), and
+/// loop-threaded vectors are shared at update time, so an unbounded
+/// flat run turns `conj`/`assoc` chains quadratic (#227); at or below
+/// this a shared update copies at most 8 KB, and reads index directly.
+pub(crate) const FLAT_MAX: usize = 1024;
+
+/// Packed scalar storage (`i64`/`char` vector items, #226): a flat
+/// run up to [`FLAT_MAX`] items (direct reads, in-place writes when
+/// unique), the trie past it (log-time shared updates, still 8 or 4
+/// bytes per item).
+#[derive(Clone, Debug)]
+pub(crate) enum Packed<T> {
+    Flat(Arc<Vec<T>>),
+    Trie(PVec<T>),
+}
+
+impl<T: Copy> Packed<T> {
+    /// Packed storage over `items` in order.
+    pub(crate) fn from_vec(items: Vec<T>) -> Self {
+        if items.len() <= FLAT_MAX {
+            Packed::Flat(Arc::new(items))
+        } else {
+            Packed::Trie(PVec::from_vec(items))
+        }
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        match self {
+            Packed::Flat(a) => a.len(),
+            Packed::Trie(t) => t.len(),
+        }
+    }
+
+    pub(crate) fn get(&self, i: usize) -> Option<T> {
+        match self {
+            Packed::Flat(a) => a.get(i).copied(),
+            Packed::Trie(t) => t.get(i).copied(),
+        }
+    }
+
+    /// Append (a full flat run moves into the trie first).
+    pub(crate) fn push(&mut self, x: T) {
+        match self {
+            Packed::Flat(a) if a.len() < FLAT_MAX => Arc::make_mut(a).push(x),
+            Packed::Flat(a) => {
+                let mut t: PVec<T> = a.iter().copied().collect();
+                t.push_back_mut(x);
+                *self = Packed::Trie(t);
+            }
+            Packed::Trie(t) => t.push_back_mut(x),
+        }
+    }
+
+    /// Replace the item at `i` (`false` when out of bounds).
+    pub(crate) fn set(&mut self, i: usize, x: T) -> bool {
+        match self {
+            Packed::Flat(a) => match Arc::make_mut(a).get_mut(i) {
+                Some(slot) => {
+                    *slot = x;
+                    true
+                }
+                None => false,
+            },
+            Packed::Trie(t) => t.set_mut(i, x),
+        }
+    }
+
+    /// Drop the last item (`false` when empty).
+    pub(crate) fn pop(&mut self) -> bool {
+        match self {
+            Packed::Flat(a) => !a.is_empty() && Arc::make_mut(a).pop().is_some(),
+            Packed::Trie(t) => t.drop_last_mut(),
+        }
+    }
+
+    /// The items from `i` to the end of its 32-item chunk.
+    pub(crate) fn chunk_from(&self, i: usize) -> &[T] {
+        match self {
+            Packed::Flat(a) => {
+                let end = ((i / WIDTH + 1) * WIDTH).min(a.len());
+                a.get(i..end).unwrap_or(&[])
+            }
+            Packed::Trie(t) => t.chunk_from(i),
+        }
+    }
+
+    pub(crate) fn iter(&self) -> PackedIter<'_, T> {
+        match self {
+            Packed::Flat(a) => PackedIter::Flat(a.iter()),
+            Packed::Trie(t) => PackedIter::Trie(t.iter()),
+        }
+    }
+}
+
+/// Front-to-back (double-ended) iteration over [`Packed`] storage.
+pub(crate) enum PackedIter<'a, T> {
+    Flat(std::slice::Iter<'a, T>),
+    Trie(Iter<'a, T>),
+}
+
+impl<'a, T: Clone> Iterator for PackedIter<'a, T> {
+    type Item = &'a T;
+
+    fn next(&mut self) -> Option<&'a T> {
+        match self {
+            PackedIter::Flat(it) => it.next(),
+            PackedIter::Trie(it) => it.next(),
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        match self {
+            PackedIter::Flat(it) => it.size_hint(),
+            PackedIter::Trie(it) => it.size_hint(),
+        }
+    }
+}
+
+impl<T: Clone> DoubleEndedIterator for PackedIter<'_, T> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        match self {
+            PackedIter::Flat(it) => it.next_back(),
+            PackedIter::Trie(it) => it.next_back(),
+        }
     }
 }
 
@@ -412,13 +557,56 @@ mod tests {
         }
         assert!(it.next().is_none());
         assert!(it.next_back().is_none());
-        assert_eq!(PVec::default().len(), 0);
-        assert!(format!("{:?}", PVec::new_sync()).contains("PVec"));
+        assert_eq!(PVec::<Value>::default().len(), 0);
+        assert!(format!("{:?}", PVec::<Value>::new_sync()).contains("PVec"));
         let small = PVec::from_vec(vec![Value::Int(1), Value::Int(2)]);
         assert_eq!(ints(&small), vec![1, 2]);
         let big = PVec::from_vec((0..40).map(Value::Int).collect());
         assert_eq!(ints(&big), (0..40).collect::<Vec<_>>());
         let mixed = PVec::from_vec(vec![Value::Nil, Value::Int(3)]);
         assert_eq!(ints(&mixed), vec![3]);
+    }
+
+    #[test]
+    fn chunks_borrow_leaves_and_tail() {
+        let v: PVec = (0..70).map(Value::Int).collect();
+        // A leaf from its middle, the second leaf, then the tail.
+        assert_eq!(v.chunk_from(5).len(), 27);
+        assert_eq!(v.chunk_from(32).len(), 32);
+        assert_eq!(v.chunk_from(65).len(), 5);
+        assert!(v.chunk_from(70).is_empty());
+    }
+
+    /// [`Packed`]: flat up to `FLAT_MAX` items, the trie past it —
+    /// every operation on both shapes, and the move between them.
+    #[test]
+    fn packed_runs_go_flat_then_trie() {
+        let mut p: Packed<i64> = Packed::from_vec((0..FLAT_MAX as i64).collect());
+        assert!(matches!(p, Packed::Flat(_)));
+        assert_eq!(p.get(5), Some(5));
+        assert!(p.set(5, -5) && p.get(5) == Some(-5));
+        assert!(!p.set(FLAT_MAX, 0));
+        assert_eq!(p.chunk_from(30), &[30, 31][..]);
+        assert!(p.chunk_from(FLAT_MAX).is_empty());
+        assert_eq!(p.iter().size_hint(), (FLAT_MAX, Some(FLAT_MAX)));
+        assert_eq!(p.iter().next_back(), Some(&(FLAT_MAX as i64 - 1)));
+        assert!(p.pop() && p.len() == FLAT_MAX - 1);
+        p.push(7);
+        p.push(8);
+        assert!(matches!(p, Packed::Trie(_)));
+        assert_eq!(p.len(), FLAT_MAX + 1);
+        assert_eq!(p.get(FLAT_MAX), Some(8));
+        assert!(p.set(0, 9) && p.get(0) == Some(9));
+        assert_eq!(p.chunk_from(FLAT_MAX - 1).len(), 1);
+        assert_eq!(p.chunk_from(FLAT_MAX).len(), 1);
+        assert_eq!(p.iter().size_hint().0, FLAT_MAX + 1);
+        assert_eq!(p.iter().next_back(), Some(&8));
+        assert_eq!(p.iter().next(), Some(&9));
+        p.push(10);
+        assert!(p.pop() && p.len() == FLAT_MAX + 1);
+        let big: Packed<char> = Packed::from_vec(vec!['x'; FLAT_MAX + 1]);
+        assert!(matches!(big, Packed::Trie(_)));
+        let mut empty: Packed<char> = Packed::from_vec(Vec::new());
+        assert!(!empty.pop());
     }
 }
