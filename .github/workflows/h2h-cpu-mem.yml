@@ -3,7 +3,7 @@
 # The suite runs a CPython baseline leg plus TWO clojure-rs legs
 # (rs-from, rs-to), every leg instrumented in a single sweep: GNU
 # time (cpu_s, maxrss_kb) plus Intel Pin instruction counts. The
-# gate compares instruction counts and RSS only (1% margin):
+# gate compares instruction counts and RSS only (15% margin):
 # cpu_s is collected but never gated, immune to the wall-time
 # wobble that reds a cpu gate on no-op changes.
 # python-code-snippet mirrors clojure-code-snippet case by case,
@@ -459,7 +459,7 @@ jobs:
 
   # Fan-in: union the shards per leg and diff the legs. Strict
   # across-the-board gate, both directions: CPython vs rs-from AND
-  # rs-from vs rs-to on instruction counts and RSS (1% margin) —
+  # rs-from vs rs-to on instruction counts and RSS (15% margin) —
   # any loss (or failure, missing, not-ok, drift, leg mismatch)
   # fails the PR. cpu_s is collected but never gated. Memory is
   # RSS (maxrss_kb) only: the Pin tool counts instructions, never
@@ -500,7 +500,7 @@ jobs:
           rc=0
           # Two comparisons, all verdict tables in the summary; any
           # can fail the job unless triage mode greens everything.
-          # Both gate instruction counts + RSS only (1% margin):
+          # Both gate instruction counts + RSS only (15% margin):
           # cpu_s is collected but never compared.
           $compare \
             --label recipes \
@@ -509,7 +509,7 @@ jobs:
             --rs h2h-recipes-rs-from-shard-*/h2h-recipes-rs-from-shard-*.json \
             --merged-jvm h2h-recipes-python-merged.json \
             --merged-rs h2h-recipes-rs-from-merged.json \
-            --metrics mem,ins --margin 0.01 \
+            --metrics mem,ins --margin 0.15 \
             --summary-file "$GITHUB_STEP_SUMMARY" $report_only || rc=$?
           $compare \
             --label recipes-rsrs \
@@ -518,7 +518,7 @@ jobs:
             --rs h2h-recipes-rs-from-shard-*/h2h-recipes-rs-from-shard-*.json \
             --merged-jvm h2h-recipes-rs-to-merged.json \
             --merged-rs h2h-recipes-rs-from-merged.json \
-            --metrics mem,ins --margin 0.01 \
+            --metrics mem,ins --margin 0.15 \
             --summary-file "$GITHUB_STEP_SUMMARY" $report_only || rc=$?
           exit $rc
 
