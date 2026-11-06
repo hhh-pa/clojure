@@ -96,6 +96,21 @@ fn wait_failed(eval: &mut Evaluator, ag: &str) {
     }
 }
 
+/// Block until `expr` reads `want`: an action that delivers a
+/// rendezvous promise inside its fn body still has to return and
+/// commit the new agent state afterwards, and post-shutdown tests
+/// cannot `await` (barriers ride the shut default send pool).
+fn wait_published(eval: &mut Evaluator, expr: &str, want: &str) {
+    let start = std::time::Instant::now();
+    while run_last(eval, expr) != want {
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(10),
+            "{expr} never published {want}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+}
+
 /// Assert the transient-style `#object` rendering with matching hex
 /// identities (per-process ids, never pinned literally).
 fn assert_object_shape(pr: &str, class: &str) {
@@ -3914,7 +3929,7 @@ fn shutdown_shuts_installed_customs() {
     assert_eq!(run_last(&mut eval, "(shutdown-agents)"), "nil");
     run(&mut eval, "(deliver g9gate :open)");
     assert_eq!(run_last(&mut eval, "(deref g9done 8000 :timeout)"), ":ran");
-    assert_eq!(run_last(&mut eval, "@g9sa"), "41");
+    wait_published(&mut eval, "@g9sa", "41");
     // Post-shutdown sends are accepted but reject into the
     // handler (both installed sides).
     run(&mut eval, "(def g9sp (promise)) (def g9se (atom nil))");
@@ -4154,7 +4169,7 @@ fn release_pending_sends_post_shutdown_dispatches_own_exec() {
     run(&mut eval, "(deliver rph :go)");
     // The custom head ran on its executor despite the shutdown...
     assert_eq!(run_last(&mut eval, "(deref rpd 8000 :timeout)"), ":done");
-    assert_eq!(run_last(&mut eval, "@rpb"), "1");
+    wait_published(&mut eval, "@rpb", "1");
     // ... the pool head rejected (dropped, never runs)...
     assert_eq!(run_last(&mut eval, "(deref rpx2 200 :timeout)"), ":timeout");
     assert_eq!(run_last(&mut eval, "@rpe"), "0");
@@ -4297,7 +4312,7 @@ fn custom_handover_survives_shutdown() {
         run_last(&mut eval, "(deref hop 8000 :timeout)"),
         ":custom-ran"
     );
-    assert_eq!(run_last(&mut eval, "@hoa"), ":custom-done");
+    wait_published(&mut eval, "@hoa", ":custom-done");
 }
 
 #[test]
@@ -4322,7 +4337,7 @@ fn restart_custom_resume_runs_post_shutdown() {
     run(&mut eval, "(shutdown-agents)");
     assert_eq!(run_last(&mut eval, "(restart-agent rsa 0)"), "0");
     assert_eq!(run_last(&mut eval, "(deref rsp 8000 :timeout)"), ":resumed");
-    assert_eq!(run_last(&mut eval, "@rsa"), "9");
+    wait_published(&mut eval, "@rsa", "9");
 }
 
 #[test]
