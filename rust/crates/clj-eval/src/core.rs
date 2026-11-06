@@ -3709,6 +3709,9 @@ const ND_STARTS: &[u32] = &[
 
 /// `Character.digit(c, 10)`: the decimal value of any Nd char.
 fn decimal_value(c: char) -> Option<u32> {
+    if c.is_ascii_digit() {
+        return Some(u32::from(c as u8 - b'0'));
+    }
     let cp = c as u32;
     let i = ND_STARTS.partition_point(|&s| s <= cp).checked_sub(1)?;
     let d = cp.checked_sub(ND_STARTS[i])?;
@@ -3845,12 +3848,16 @@ fn native_parse_boolean(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, 
     }
 }
 
-fn native_parse_long(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
-    check_arity("clojure.core/parse-long", args, &[1])?;
-    match &args[0] {
+pub(crate) fn parse_long_1(v: &Value) -> Result<Value, NativeError> {
+    match v {
         Value::Str(s) => Ok(parse_long_str(s).map(Value::Int).unwrap_or(Value::Nil)),
         other => Err(parsing_err(other)),
     }
+}
+
+fn native_parse_long(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.core/parse-long", args, &[1])?;
+    parse_long_1(&args[0])
 }
 
 fn native_parse_double(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {

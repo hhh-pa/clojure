@@ -1733,6 +1733,15 @@ fn chain_tail(remainder: &[Value], tail: &Value) -> Value {
     }
 }
 
+pub(crate) fn filter_pred(eval: &mut Evaluator, f: &Value, item: &Value) -> Result<bool, Signal> {
+    if crate::ext::as_native(f).is_some_and(|n| &*n.display == "clojure.core/seq") {
+        if let Some(empty) = empty_fast(item) {
+            return Ok(!empty);
+        }
+    }
+    Ok(eval.call(f, std::slice::from_ref(item))?.is_truthy())
+}
+
 /// `filter`/`remove`: consume whole units, testing each item in
 /// order, until a non-empty chunk (or the end).
 fn step_filter(
@@ -1750,7 +1759,7 @@ fn step_filter(
         crate::core::check_ifn(eval, f)?;
         let mut kept = Vec::new();
         for item in &items {
-            let pass = eval.call(f, std::slice::from_ref(item))?.is_truthy() != invert;
+            let pass = filter_pred(eval, f, item)? != invert;
             if pass {
                 kept.push(item.clone());
             }

@@ -610,7 +610,7 @@ pub(crate) fn native_butlast_owned(
 ) -> Result<Value, NativeError> {
     check_arity("clojure.core/butlast", &args, &[1])?;
     let coll = take_walk_coll(&mut args, 0);
-    let items = collect_all(eval, coll.clone()).map_err(signal_to_native)?;
+    let items = collect_all(eval, coll).map_err(signal_to_native)?;
     if items.len() < 2 {
         return Ok(Value::Nil);
     }
@@ -645,7 +645,7 @@ pub(crate) fn native_reverse_owned(
 ) -> Result<Value, NativeError> {
     check_arity("clojure.core/reverse", &args, &[1])?;
     let coll = take_walk_coll(&mut args, 0);
-    let mut items = collect_all(eval, coll.clone()).map_err(signal_to_native)?;
+    let mut items = collect_all(eval, coll).map_err(signal_to_native)?;
     items.reverse();
     Ok(Value::List(List::from_vec(items)))
 }
@@ -765,7 +765,7 @@ pub(crate) fn native_sort_owned(
     };
     let coll_idx = if args.len() == 1 { 0 } else { 1 };
     let coll = take_walk_coll(&mut args, coll_idx);
-    let mut items = collect_all(eval, coll.clone()).map_err(signal_to_native)?;
+    let mut items = collect_all(eval, coll).map_err(signal_to_native)?;
     match comp {
         None => sort_by_checked(&mut items, jvm_compare)?,
         Some(comp) => {
@@ -807,7 +807,7 @@ pub(crate) fn native_sort_by_owned(
     };
     let coll_idx = if args.len() == 2 { 1 } else { 2 };
     let coll = take_walk_coll(&mut args, coll_idx);
-    let mut items = collect_all(eval, coll.clone()).map_err(signal_to_native)?;
+    let mut items = collect_all(eval, coll).map_err(signal_to_native)?;
     sort_by_checked(&mut items, |a, b| {
         // `(comp (keyfn x) (keyfn y))` directly (the keyfn runs per
         // comparison; no int mapping).
@@ -906,6 +906,40 @@ pub(crate) fn native_mapv_owned(
     Ok(Value::Vector(vec))
 }
 
+fn filterv_vector(eval: &mut Evaluator, f: &Value, v: Vector) -> Result<Value, NativeError> {
+    if v.is_empty() {
+        return Ok(Value::Vector(v.with_meta(None)));
+    }
+    crate::core::check_ifn(eval, f).map_err(signal_to_native)?;
+    let prep = crate::vm::Prepared::of(f, 1);
+    let mut tv: Option<clj_value::TransientVector> = None;
+    for i in 0..v.len() {
+        let item = v.get(i).expect("index in bounds");
+        let pass = match &prep {
+            Some(p) => p.call1(eval, item.clone()).map(|r| r.is_truthy()),
+            None => crate::lazy::filter_pred(eval, f, &item),
+        }
+        .map_err(signal_to_native)?;
+        if let Some(tv) = &mut tv {
+            if pass {
+                tv.conj(item).expect("fresh transient accepts conj");
+            }
+        } else if !pass {
+            let mut new_tv = clj_value::TransientVector::new();
+            for j in 0..i {
+                new_tv
+                    .conj(v.get(j).expect("index in bounds"))
+                    .expect("fresh transient accepts conj");
+            }
+            tv = Some(new_tv);
+        }
+    }
+    Ok(Value::Vector(match tv {
+        Some(mut tv) => tv.persistent().expect("fresh transient is valid at freeze"),
+        None => v.with_meta(None),
+    }))
+}
+
 fn native_filterv(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     // Borrow-path compat shim (see [`OwnedNativeImpl`]).
     native_filterv_owned(eval, args.iter().cloned().collect())
@@ -917,6 +951,9 @@ pub(crate) fn native_filterv_owned(
 ) -> Result<Value, NativeError> {
     check_arity("clojure.core/filterv", &args, &[2])?;
     let input = take_walk_coll(&mut args, 1);
+    if let Value::Vector(v) = input {
+        return filterv_vector(eval, &args[0], v);
+    }
     let filtered = filter_thunk(args[0].clone(), input, false);
     // Packed streaming (#227): no intermediate `Vec<Value>`, and
     // all-`Int` results freeze to packed storage zero-copy.

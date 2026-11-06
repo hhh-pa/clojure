@@ -183,15 +183,17 @@ impl<T: Clone> PVec<T> {
         self.len += 1;
     }
 
-    /// Replace the item at `i` (`false` when out of bounds).
-    pub fn set_mut(&mut self, i: usize, v: T) -> bool {
+    /// Replace the item at `i`, returning the old item (`None` when out of bounds).
+    pub fn replace_mut(&mut self, i: usize, v: T) -> Option<T> {
         if i >= self.len {
-            return false;
+            return None;
         }
         let off = self.tail_offset();
         if i >= off {
-            Arc::make_mut(&mut self.tail)[i - off] = v;
-            return true;
+            return Some(std::mem::replace(
+                &mut Arc::make_mut(&mut self.tail)[i - off],
+                v,
+            ));
         }
         let mut node = Arc::make_mut(
             self.root
@@ -203,8 +205,12 @@ impl<T: Clone> PVec<T> {
             node = Arc::make_mut(&mut node.kids[(i >> level) & MASK]);
             level -= BITS;
         }
-        node.items[i & MASK] = v;
-        true
+        Some(std::mem::replace(&mut node.items[i & MASK], v))
+    }
+
+    /// Replace the item at `i` (`false` when out of bounds).
+    pub fn set_mut(&mut self, i: usize, v: T) -> bool {
+        self.replace_mut(i, v).is_some()
     }
 
     /// Drop the last item (`false` when empty).

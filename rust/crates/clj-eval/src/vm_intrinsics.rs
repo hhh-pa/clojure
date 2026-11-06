@@ -120,6 +120,13 @@ pub(crate) fn get_of(coll: &Value, key: &Value, not_found: Option<&Value>) -> Op
             let i = index(key)?;
             Some(v.get(i).unwrap_or_else(missing))
         }
+        Value::Transient(t) if is_scalar_key(key) => {
+            let guard = t.lock();
+            let TransientKind::Map(tm) = &*guard else {
+                return None;
+            };
+            Some(tm.get(key).ok()?.cloned().unwrap_or_else(missing))
+        }
         _ => None,
     }
 }
@@ -178,22 +185,27 @@ pub(crate) fn scalar_eq(a: &Value, b: &Value) -> Option<bool> {
     })
 }
 
-/// `(assoc! tv i x)` on a live transient vector with `i` at most
-/// its length.
+/// `(assoc! t k v)` on a live transient vector (with `k` at most
+/// its length) or transient map (with a scalar key).
 fn assoc_bang(args: &[&Value]) -> Option<Value> {
     let Value::Transient(t) = args[0] else {
         return None;
     };
-    let i = index(args[1])?;
     {
         let mut guard = t.lock();
-        let TransientKind::Vector(tv) = &mut *guard else {
-            return None;
-        };
-        if i > tv.len().ok()? {
-            return None;
+        match &mut *guard {
+            TransientKind::Vector(tv) => {
+                let i = index(args[1])?;
+                if i > tv.len().ok()? {
+                    return None;
+                }
+                tv.assoc(i, args[2].clone()).ok()?;
+            }
+            TransientKind::Map(tm) if is_scalar_key(args[1]) => {
+                tm.assoc(args[1].clone(), args[2].clone()).ok()?;
+            }
+            _ => return None,
         }
-        tv.assoc(i, args[2].clone()).ok()?;
     }
     Some(args[0].clone())
 }
