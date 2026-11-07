@@ -1612,11 +1612,16 @@ fn with_scan_hit<T>(s: &Arc<str>, f: impl FnOnce(&StrScan) -> T) -> Option<T> {
                 return Some(f(scan));
             }
         }
-        for i in 1..LAST_SCAN_SLOTS {
+        if let Some((key, scan)) = &memo.0[1] {
+            if Arc::ptr_eq(key, s) {
+                return Some(f(scan));
+            }
+        }
+        for i in 2..LAST_SCAN_SLOTS {
             if let Some((key, scan)) = &memo.0[i] {
                 if Arc::ptr_eq(key, s) {
                     let hit = f(scan);
-                    memo.0.swap(0, i);
+                    memo.0.swap(1, i);
                     return Some(hit);
                 }
             }
@@ -3201,5 +3206,16 @@ mod tests {
         assert_eq!(str_char_at(&s, 1), Some('e'));
         assert_eq!(str_char_at(&s, 10), Some('d'));
         assert_eq!(str_char_at(&s, 11), None);
+    }
+
+    #[test]
+    fn str_scan_memo_slot_swap() {
+        let s0: Arc<str> = Arc::from("0".repeat(200));
+        let s1: Arc<str> = Arc::from("1".repeat(200));
+        let s2: Arc<str> = Arc::from("2".repeat(200));
+        assert_eq!(str_char_at(&s0, 0), Some('0'));
+        assert_eq!(str_char_at(&s1, 0), Some('1'));
+        assert_eq!(str_char_at(&s2, 0), Some('2'));
+        assert_eq!(str_char_at(&s2, 10), Some('2'));
     }
 }

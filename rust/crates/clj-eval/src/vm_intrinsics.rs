@@ -241,10 +241,11 @@ fn assoc_bang(args: &[&Value]) -> Option<Value> {
         match &mut *guard {
             TransientKind::Vector(tv) => {
                 let i = index(args[1])?;
-                if i > tv.len().ok()? {
-                    return None;
+                if let Value::Int(n) = args[2] {
+                    tv.assoc_int(i, *n).ok()?;
+                } else {
+                    tv.assoc(i, args[2].clone()).ok()?;
                 }
-                tv.assoc(i, args[2].clone()).ok()?;
             }
             TransientKind::Map(tm) if is_scalar_key(args[1]) => {
                 tm.assoc(args[1].clone(), args[2].clone()).ok()?;

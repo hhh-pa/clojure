@@ -213,6 +213,21 @@ impl TransientVector {
         Ok(())
     }
 
+    /// Set index `idx` to an integer (`idx == len` appends, past that errors).
+    pub fn assoc_int(&mut self, idx: usize, n: i64) -> Result<(), TransientError> {
+        self.check()?;
+        match &mut self.items {
+            TransientItems::Ints(x) => {
+                if idx > x.len() {
+                    return Err(TransientError::IndexOutOfBounds);
+                }
+                put_at(x, idx, n);
+                Ok(())
+            }
+            _ => self.assoc(idx, Value::Int(n)),
+        }
+    }
+
     /// Read index `idx` (`None` past the end).
     pub fn nth(&self, idx: usize) -> Result<Option<Value>, TransientError> {
         self.check()?;
@@ -699,6 +714,22 @@ mod tests {
         t.conj(Value::Int(1)).unwrap();
         assert!(!t.is_empty().unwrap());
         assert_eq!(t.len().unwrap(), 1);
+    }
+
+    #[test]
+    fn vector_assoc_int_branches() {
+        let mut t = TransientVector::new();
+        t.assoc_int(0, 42).unwrap();
+        assert_eq!(t.nth(0).unwrap(), Some(Value::Int(42)));
+        t.assoc_int(0, 100).unwrap();
+        assert_eq!(t.nth(0).unwrap(), Some(Value::Int(100)));
+        assert_eq!(
+            t.assoc_int(5, 999).unwrap_err(),
+            TransientError::IndexOutOfBounds
+        );
+        let mut tc = TransientVector::from_vector(&crate::Vector::from_vec(vec![Value::Char('a')]));
+        tc.assoc_int(0, 123).unwrap();
+        assert_eq!(tc.nth(0).unwrap(), Some(Value::Int(123)));
     }
 
     #[test]

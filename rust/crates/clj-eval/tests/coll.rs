@@ -416,6 +416,14 @@ fn nth_rows() {
     assert_eq!(run_last(&mut eval, "(nth \"abc\" 5 :nf)"), ":nf");
     assert_eq!(run_last(&mut eval, "(nth (transient [1 2]) 1)"), "2");
     assert_eq!(run_last(&mut eval, "(nth (transient [1 2]) 5 :nf)"), ":nf");
+    assert!(
+        uncaught(&mut eval, "(nth (transient {:a 1}) 0 :nf)")
+            .starts_with("java.lang.UnsupportedOperationException")
+    );
+    assert!(
+        uncaught(&mut eval, "(nth (transient #{1}) 0 :nf)")
+            .starts_with("java.lang.UnsupportedOperationException")
+    );
     assert_eq!(run_last(&mut eval, "(nth [1 2] 1.9)"), "2");
     assert_eq!(run_last(&mut eval, "(nth (map inc [1 2]) 1)"), "3");
     assert_eq!(
@@ -1677,6 +1685,20 @@ fn corpus_in_gaps() {
             "(let [tm (transient {})] (persistent! (assoc! tm :a 10)))"
         ),
         "{:a 10}"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [tv (transient [1 2])] (persistent! (assoc! tv 0 42)))"
+        ),
+        "[42 2]"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [tv (transient [1 2])] (persistent! (assoc! tv 0 :keyword)))"
+        ),
+        "[:keyword 2]"
     );
 
     // Multi-pair assoc update op
