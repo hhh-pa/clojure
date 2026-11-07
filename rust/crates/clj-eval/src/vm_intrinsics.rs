@@ -188,6 +188,14 @@ pub(crate) fn count_of(v: &Value) -> Option<Value> {
         Value::Map(m) => m.size(),
         Value::Set(s) => s.size(),
         Value::Str(s) => crate::coll::str_utf16_len(s),
+        Value::Transient(t) => {
+            let guard = t.lock();
+            match &*guard {
+                TransientKind::Vector(tv) => tv.len().ok()?,
+                TransientKind::Map(tm) => tm.len().ok()?,
+                TransientKind::Set(ts) => ts.len().ok()?,
+            }
+        }
         Value::Extension(_) => crate::lazy::as_subvector(v)?.len(),
         _ => return None,
     };
