@@ -34,6 +34,9 @@ pub(crate) const STRING_NATIVES: &[(&str, Native)] = &[
     ("join", native_join),
     ("trim", native_trim),
     ("blank?", native_blank),
+    ("starts-with?", native_starts_with),
+    ("ends-with?", native_ends_with),
+    ("includes?", native_includes),
 ];
 
 /// Call the interpreted upstream definition of `clojure.string/name`
@@ -128,6 +131,33 @@ fn native_blank(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErr
             s.chars().all(crate::classemu::java_is_whitespace),
         )),
         _ => upstream(eval, "blank?", args),
+    }
+}
+
+/// `(starts-with? s substr)`: for two strings, the UTF-8 byte
+/// prefix test equals the upstream UTF-16 unit test (a valid
+/// string's unit prefix is its char prefix). Anything else (nil,
+/// other `CharSequence`s, odd arities) takes the upstream path.
+fn native_starts_with(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    match args {
+        [Value::Str(s), Value::Str(p)] => Ok(Value::Bool(s.starts_with(p.as_ref()))),
+        _ => upstream(eval, "starts-with?", args),
+    }
+}
+
+/// `(ends-with? s suffix)`: byte suffix test, as `starts-with?`.
+fn native_ends_with(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    match args {
+        [Value::Str(s), Value::Str(p)] => Ok(Value::Bool(s.ends_with(p.as_ref()))),
+        _ => upstream(eval, "ends-with?", args),
+    }
+}
+
+/// `(includes? s substr)`: substring test, as `starts-with?`.
+fn native_includes(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    match args {
+        [Value::Str(s), Value::Str(p)] => Ok(Value::Bool(s.contains(p.as_ref()))),
+        _ => upstream(eval, "includes?", args),
     }
 }
 

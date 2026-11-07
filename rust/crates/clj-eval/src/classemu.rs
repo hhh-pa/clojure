@@ -6422,6 +6422,12 @@ fn str_starts_with(s: &str, rest: &[Value]) -> Result<Value, NativeError> {
 /// The unit-slice prefix test (the `startsWith` body past the
 /// bounds check — `to >= 0` by construction).
 fn units_start_with(s: &str, prefix: &str, to: i32) -> bool {
+    if s.is_ascii() && prefix.is_ascii() {
+        return s
+            .as_bytes()
+            .get(to as usize..)
+            .is_some_and(|rest| rest.starts_with(prefix.as_bytes()));
+    }
     let text: Vec<u16> = s.encode_utf16().collect();
     let pre: Vec<u16> = prefix.encode_utf16().collect();
     if i64::from(to) > text.len() as i64 - pre.len() as i64 {
