@@ -182,6 +182,23 @@ fn groups_value(caps: &regex::Captures<'_>) -> Value {
 /// `PatternSyntaxException` (the crate text, like `re-pattern`).
 /// The running state of the JDK split loop (split out so each
 /// half stays under the complexity ratchet).
+/// A split piece as a string value. Single-byte pieces (always
+/// ASCII) share one cached allocation, mirroring CPython's
+/// single-char string cache: token-heavy splits over short tokens
+/// then allocate nothing per piece.
+fn piece_value(s: &str) -> Value {
+    if s.len() == 1 {
+        static CACHE: std::sync::OnceLock<Vec<Arc<str>>> = std::sync::OnceLock::new();
+        let cache = CACHE.get_or_init(|| {
+            (0u8..128)
+                .map(|b| Arc::from(char::from(b).to_string().as_str()))
+                .collect()
+        });
+        return Value::Str(cache[s.as_bytes()[0] as usize].clone());
+    }
+    Value::Str(Arc::from(s))
+}
+
 struct SplitAcc {
     parts: Vec<Value>,
     index: usize,
@@ -205,13 +222,12 @@ fn split_step(
     if !limited || acc.count < cap {
         let leader = acc.index == 0 && m_start == 0 && m_start == m_end;
         if !leader {
-            acc.parts
-                .push(Value::Str(Arc::from(&text[acc.index..m_start])));
+            acc.parts.push(piece_value(&text[acc.index..m_start]));
             acc.index = m_end;
             acc.count += 1;
         }
     } else if acc.count == cap {
-        acc.parts.push(Value::Str(Arc::from(&text[acc.index..])));
+        acc.parts.push(piece_value(&text[acc.index..]));
         acc.index = m_end;
         acc.count += 1;
     }
@@ -367,7 +383,7 @@ fn split_pieces(
         return vec![Value::Str(Arc::from(text))];
     }
     if !limited || acc.count < i64::from(limit) {
-        acc.parts.push(Value::Str(Arc::from(&text[acc.index..])));
+        acc.parts.push(piece_value(&text[acc.index..]));
     }
     if limit == 0 {
         while acc

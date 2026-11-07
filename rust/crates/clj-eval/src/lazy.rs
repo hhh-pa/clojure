@@ -1708,7 +1708,12 @@ fn step_map_one(eval: &mut Evaluator, f: &Value, input: Value) -> Result<Forced,
         }
         None => {
             for item in items.iter() {
-                out.push(eval.call(f, std::slice::from_ref(item))?);
+                let slice = std::slice::from_ref(item);
+                let val = match crate::vm::invoke_lookup(f, slice) {
+                    Some(v) => v,
+                    None => eval.call(f, slice)?,
+                };
+                out.push(val);
             }
         }
     }
@@ -1739,7 +1744,23 @@ pub(crate) fn filter_pred(eval: &mut Evaluator, f: &Value, item: &Value) -> Resu
             return Ok(!empty);
         }
     }
-    Ok(eval.call(f, std::slice::from_ref(item))?.is_truthy())
+    let slice = std::slice::from_ref(item);
+    if let Some(v) = crate::vm::invoke_lookup(f, slice) {
+        return Ok(v.is_truthy());
+    }
+    Ok(eval.call(f, slice)?.is_truthy())
+}
+
+fn test_filter_item(
+    eval: &mut Evaluator,
+    f: &Value,
+    prep: Option<&crate::vm::Prepared>,
+    item: &Value,
+) -> Result<bool, Signal> {
+    match prep {
+        Some(p) => Ok(p.call1(eval, crate::vm::clone_value(item))?.is_truthy()),
+        None => filter_pred(eval, f, item),
+    }
 }
 
 /// `filter`/`remove`: consume whole units, testing each item in
@@ -1750,17 +1771,22 @@ fn step_filter(
     mut input: Value,
     invert: bool,
 ) -> Result<Forced, Signal> {
+    let is_seq = crate::ext::as_native(f).is_some_and(|n| &*n.display == "clojure.core/seq");
+    let prep = if is_seq {
+        None
+    } else {
+        crate::vm::Prepared::of(f, 1)
+    };
     loop {
-        let (items, tail) = match step_unit(eval, &input)? {
+        let (items, tail): (Arc<[Value]>, Value) = match step_unit(eval, &input)? {
             StepUnit::Empty => return Ok(Forced::Empty),
-            StepUnit::One { head, tail } => (vec![head], tail),
-            StepUnit::Chunk { items, tail } => (items.to_vec(), tail),
+            StepUnit::One { head, tail } => (Arc::from([head]), tail),
+            StepUnit::Chunk { items, tail } => (items, tail),
         };
         crate::core::check_ifn(eval, f)?;
         let mut kept = Vec::new();
-        for item in &items {
-            let pass = filter_pred(eval, f, item)? != invert;
-            if pass {
+        for item in items.iter() {
+            if test_filter_item(eval, f, prep.as_ref(), item)? != invert {
                 kept.push(item.clone());
             }
         }
@@ -3720,10 +3746,13 @@ pub(crate) fn collect_packed(eval: &mut Evaluator, v: Value) -> Result<Vector, S
     }
 }
 
-/// A finite `repeat` or a counted `long` range built without walking
-/// its seq (#226: `(vec (repeat n 0))` builds DP tables; the items
-/// are exactly the seq's).
+/// A string, finite `repeat`, or counted `long` range built without
+/// walking its seq (#226: `(vec (repeat n 0))` builds DP tables and
+/// `(vec s)` builds char vectors; the items are exactly the seq's).
 fn collect_direct(v: &Value) -> Option<Vector> {
+    if let Value::Str(s) = v {
+        return Some(Vector::from_chars(s.chars().collect()));
+    }
     let Value::Extension(e) = v else {
         return None;
     };

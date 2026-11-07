@@ -142,11 +142,11 @@ fn lookup_pv_slot(p: &PrimitiveVector, key: &Value) -> Option<Value> {
     })
 }
 
-fn lookup_str_slot(s: &str, key: &Value) -> Option<Value> {
+fn lookup_str_slot(s: &Arc<str>, key: &Value) -> Option<Value> {
     num_index(key).and_then(|i| {
         usize::try_from(i)
             .ok()
-            .and_then(|idx| s.chars().nth(idx).map(Value::Char))
+            .and_then(|idx| str_char_at(s, idx).map(Value::Char))
     })
 }
 
@@ -779,18 +779,12 @@ pub(crate) fn count_of(eval: &mut Evaluator, v: &Value) -> Result<i64, NativeErr
 /// place instead of path-copying per step.
 fn into_inner(eval: &mut Evaluator, to: Value, from: Value) -> Result<Value, NativeError> {
     let mut acc = to;
-    let mut cur = seq_value(eval, &from).map_err(signal_to_native)?;
-    // Owned callers nilled the arg slot: dropping the head here
-    // frees memoized chunks as the walk advances (#221).
-    drop(from);
-    loop {
-        if matches!(cur, Value::Nil) {
-            return Ok(acc);
-        }
-        let head = first_value(eval, &cur).map_err(signal_to_native)?;
-        acc = conj_one(eval, acc, head)?;
-        cur = next_value(eval, &cur).map_err(signal_to_native)?;
-    }
+    crate::seqs::walk_seq(eval, from, |eval, head| {
+        let cur = std::mem::replace(&mut acc, Value::Nil);
+        acc = conj_one(eval, cur, head.clone())?;
+        Ok(crate::seqs::Walk::Continue)
+    })?;
+    Ok(acc)
 }
 
 /// Two-way `merge` (`([x y] (if (and x y) (into x y) (or x y)))`).
@@ -1727,6 +1721,9 @@ fn scan_char_at(s: &str, scan: &StrScan, idx: usize) -> Option<char> {
 /// mutex/evaluator roundtrip, never this).
 pub fn str_utf16_len(s: &Arc<str>) -> usize {
     if s.len() <= 256 {
+        if s.is_ascii() {
+            return s.len();
+        }
         return s.encode_utf16().count();
     }
     let memo = with_scan_hit(s, |scan| match scan {
@@ -3167,5 +3164,14 @@ mod tests {
         let t2: Arc<str> = Arc::from("z".repeat(200));
         drop(t);
         assert_eq!(str_char_at(&t2, 100), Some('z'));
+    }
+
+    #[test]
+    fn str_scan_small_ascii_memoizes_and_repeats() {
+        let s: Arc<str> = Arc::from("hello_world");
+        assert_eq!(str_char_at(&s, 0), Some('h'));
+        assert_eq!(str_char_at(&s, 1), Some('e'));
+        assert_eq!(str_char_at(&s, 10), Some('d'));
+        assert_eq!(str_char_at(&s, 11), None);
     }
 }

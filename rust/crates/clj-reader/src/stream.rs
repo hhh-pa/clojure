@@ -150,6 +150,15 @@ impl CharStream {
         self.col -= 1;
     }
 
+    /// Drop consumed chars so a long-lived stream fed line by line
+    /// retains only the unconsumed tail (the pushback char, when
+    /// present, stays: it is part of that tail).
+    pub fn compact(&mut self) {
+        let keep_from = self.capture_mark();
+        self.chars.drain(..keep_from);
+        self.pos -= keep_from;
+    }
+
     /// The logical read position: unread chars count as unconsumed
     /// (S7 `read+string` capture brackets).
     #[must_use]
@@ -248,6 +257,24 @@ mod tests {
                 (None, 3, 1),
             ]
         );
+    }
+
+    #[test]
+    fn compact_drops_consumed_keeps_pushback() {
+        let mut s = CharStream::new("ab\ncd");
+        assert_eq!(s.read(), Some('a'));
+        assert_eq!(s.read(), Some('b'));
+        s.compact();
+        assert_eq!(s.read(), Some('\n'));
+        s.unread('\n');
+        s.compact();
+        assert_eq!(s.read(), Some('\n'));
+        assert_eq!(s.read(), Some('c'));
+        s.compact();
+        s.extend("e");
+        assert_eq!(s.read(), Some('d'));
+        assert_eq!(s.read(), Some('e'));
+        assert_eq!(s.read(), None);
     }
 
     #[test]

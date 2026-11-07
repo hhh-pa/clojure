@@ -120,15 +120,14 @@ pub(crate) fn close_reader_value(
 pub(crate) fn slurp_reader(r: &StreamReader) -> Result<String, NativeError> {
     check_reader_open(r)?;
     let mut out = String::new();
-    loop {
-        let next = lock_state(r).parser.read_char();
-        match next {
-            Some(c) => out.push(c),
-            None => {
-                let mut state = lock_state(r);
-                if !more_input(&mut state)? {
-                    break;
-                }
+    {
+        let mut state = lock_state(r);
+        loop {
+            while let Some(c) = state.parser.read_char() {
+                out.push(c);
+            }
+            if !more_input(&mut state)? {
+                break;
             }
         }
     }
@@ -138,7 +137,9 @@ pub(crate) fn slurp_reader(r: &StreamReader) -> Result<String, NativeError> {
 
 /// Latch a stream reader closed (idempotent).
 fn close_stream_reader(r: &StreamReader) -> Result<(), NativeError> {
-    lock_state(r).closed = true;
+    let mut state = lock_state(r);
+    state.closed = true;
+    state.parser = Reader::new("", &ReaderOpts::default());
     Ok(())
 }
 
@@ -246,6 +247,7 @@ fn next_chunk(state: &mut StreamState) -> Result<Option<String>, NativeError> {
 /// cover the dispatch while `pull_line` unit tests cover the feed
 /// itself). Tests drain scripted lines first.
 fn more_input(state: &mut StreamState) -> Result<bool, NativeError> {
+    state.parser.compact_stream();
     #[cfg(test)]
     if let Some(line) = state.script_lines.pop_front() {
         state.parser.extend(&line);

@@ -546,6 +546,7 @@ const UNARY: &[Row1] = &[
     ),
     ("parse-long", shape1::<ParseLong, AsValue>, None),
     ("count", shape1::<Count, AsValue>, None),
+    ("peek", shape1::<Peek, AsValue>, None),
     (
         "first",
         shape1::<First, AsValue>,
@@ -734,6 +735,7 @@ type UpdRow = (&'static str, usize, UpdCtor);
 const UPDATES: &[UpdRow] = &[
     ("assoc", 3, upd::<Assoc>),
     ("conj", 2, upd::<Conj>),
+    ("pop", 1, upd::<Pop>),
     ("next", 1, upd::<Next>),
     ("rest", 1, upd::<Rest>),
 ];
@@ -1023,6 +1025,45 @@ impl Op1 for Count {
     }
 }
 
+/// `(peek coll)` over `nil`, lists, and plain (unmarked) vectors.
+pub(crate) struct Peek;
+
+impl Op1 for Peek {
+    #[inline(always)]
+    fn apply(a: &Value) -> Option<Value> {
+        match a {
+            Value::Nil => Some(Value::Nil),
+            Value::List(l) => Some(l.first().cloned().unwrap_or(Value::Nil)),
+            Value::Vector(x) if x.meta().is_none() => Some(if x.is_empty() {
+                Value::Nil
+            } else {
+                x.get(x.len() - 1).unwrap_or(Value::Nil)
+            }),
+            _ => None,
+        }
+    }
+}
+
+/// `(pop coll)` over a non-empty plain (unmarked) vector: a last-use
+/// operand moves out and drops its last item in place.
+pub(crate) struct Pop;
+
+impl Upd for Pop {
+    #[inline(always)]
+    fn apply(args: &mut [Value]) -> Option<Value> {
+        let [coll] = args else { return None };
+        match std::mem::replace(coll, Value::Nil) {
+            Value::Vector(x) if !x.is_empty() && x.meta().is_none() => {
+                x.drop_last_owned().map(Value::Vector)
+            }
+            other => {
+                *coll = other;
+                None
+            }
+        }
+    }
+}
+
 /// `(first coll)` over nil, lists, vectors, strings and realized
 /// seqs ([`crate::lazy::first_fast`]).
 pub(crate) struct First;
@@ -1251,5 +1292,54 @@ mod tests {
         );
         assert_eq!(<IsString as Op1>::test(&s_hi), Some(true));
         assert_eq!(<IsString as Op1>::test(&Value::Int(1)), Some(false));
+    }
+
+    #[test]
+    fn peek_pop_and_lookup_fast_paths() {
+        let v_empty = Value::Vector(clj_value::Vector::new_sync());
+        let v_one = Value::Vector(clj_value::Vector::from_vec(vec![Value::Int(7)]));
+        let l_empty = Value::List(clj_value::List::new_sync());
+        let l_one = Value::List(clj_value::List::from_vec(vec![Value::Int(9)]));
+        assert_eq!(<Peek as Op1>::apply(&Value::Nil), Some(Value::Nil));
+        assert_eq!(<Peek as Op1>::apply(&l_empty), Some(Value::Nil));
+        assert_eq!(<Peek as Op1>::apply(&l_one), Some(Value::Int(9)));
+        assert_eq!(<Peek as Op1>::apply(&v_empty), Some(Value::Nil));
+        assert_eq!(<Peek as Op1>::apply(&v_one), Some(Value::Int(7)));
+        assert_eq!(<Peek as Op1>::apply(&Value::Int(1)), None);
+
+        assert_eq!(<Pop as Upd>::apply(&mut []), None);
+        assert_eq!(<Pop as Upd>::apply(&mut [v_empty.clone()]), None);
+        assert_eq!(
+            <Pop as Upd>::apply(&mut [v_one.clone()]),
+            Some(v_empty.clone())
+        );
+
+        let mut ev = crate::boot();
+        let res = ev
+            .eval_source(
+                r#"
+                (let [s #{:a :b}
+                      v [10 20 30]
+                      st "hello"]
+                  [(s :a) (s :c :nf) (get s :b) (get s :c :nf)
+                   (v 1) (get st 1) (get st 99 :nf) (get st :bad)
+                   (get (transient [1]) 0) (get (transient {:a 1}) [1 2])
+                   (nth (subvec v 1) 0) (count (subvec v 1))
+                   (get (subvec v 1) 0) (get (subvec v 1) 99 :nf)
+                   (reduce + 0 (subvec v 1))
+                   (apply nth [(subvec v 1) 0])
+                   (apply peek [nil]) (apply peek [(vec (range 5))])
+                   (#{[1 2]} [1 2] :nf) (#{[1 2]} [3 4] :nf)
+                   (vec "abc") (into [] "xy")
+                   (vec (map s [:a :c])) (vec (map #(inc %) [1 2]))
+                   (vec (map (var inc) [1 2]))
+                   (vec (filter s [:a :c])) (vec (filter seq ["a" ""]))
+                   (vec (filter (var pos?) [1 -1]))
+                   (every? s [:a :b]) (every? (var pos?) [1 2])
+                   (some s [:c :a]) (some (var pos?) [-1 2])])
+                "#,
+            )
+            .unwrap();
+        assert!(matches!(res.last(), Some(Value::Vector(_))));
     }
 }

@@ -78,12 +78,12 @@ fn native_fn(
 
 /// Head-by-head seq walking (short-circuitable; errors map to
 /// native errors at each step).
-enum Walk {
+pub(crate) enum Walk {
     Continue,
     Stop,
 }
 
-fn walk_seq(
+pub(crate) fn walk_seq(
     eval: &mut Evaluator,
     coll: Value,
     mut visit: impl FnMut(&mut Evaluator, &Value) -> Result<Walk, NativeError>,
@@ -141,6 +141,12 @@ fn walk_direct(
     };
     if let Value::Vector(v) = coll {
         return Some(each(&mut v.iter()));
+    }
+    if let Some(sv) = crate::lazy::as_subvector(coll) {
+        return Some(each(&mut (0..sv.len()).filter_map(|i| sv.nth(i))));
+    }
+    if let Value::Str(s) = coll {
+        return Some(each(&mut s.chars().map(Value::Char)));
     }
     if let Value::Array(a) = coll {
         return Some(each(&mut a.snapshot().into_iter()));
@@ -748,6 +754,133 @@ fn sort_by_checked(
     Ok(())
 }
 
+/// Order two `Int` values (any other pair ties, for the
+/// guard-bypassing direct unit tests).
+fn cmp_ints(a: &Value, b: &Value) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    match (a, b) {
+        (Value::Int(x), Value::Int(y)) => x.cmp(y),
+        _ => Ordering::Equal,
+    }
+}
+
+/// Sort all-`Int` items as `i64`; `false` when any item is not `Int`.
+fn sort_all_ints(items: &mut [Value]) -> bool {
+    if !items.iter().all(|v| matches!(v, Value::Int(_))) {
+        return false;
+    }
+    items.sort_by(cmp_ints);
+    true
+}
+
+/// Order two string values by bytes (any other pair ties).
+fn cmp_strs(a: &Value, b: &Value) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    match (a, b) {
+        (Value::Str(x), Value::Str(y)) => x.cmp(y),
+        _ => Ordering::Equal,
+    }
+}
+
+/// Sort all-ASCII-string items by bytes (identical to UTF-16 unit
+/// order on ASCII); `false` when any item is not an ASCII string.
+fn sort_all_ascii_strs(items: &mut [Value]) -> bool {
+    if !items
+        .iter()
+        .all(|v| matches!(v, Value::Str(s) if s.is_ascii()))
+    {
+        return false;
+    }
+    items.sort_by(cmp_strs);
+    true
+}
+
+/// Whether `v` is a 2-vector `[ascii-string int]`.
+fn is_str_int_pair(v: &Value) -> bool {
+    match v {
+        Value::Vector(vec) => {
+            vec.len() == 2
+                && matches!(vec.get(0), Some(Value::Str(s)) if s.is_ascii())
+                && matches!(vec.get(1), Some(Value::Int(_)))
+        }
+        _ => false,
+    }
+}
+
+/// Order two `[ascii-string int]` pairs.
+fn cmp_str_int_pair(a: &Value, b: &Value) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    let (Value::Vector(x), Value::Vector(y)) = (a, b) else {
+        return Ordering::Equal;
+    };
+    let (Some(Value::Str(p)), Some(Value::Str(q))) = (x.get(0), y.get(0)) else {
+        return Ordering::Equal;
+    };
+    match p.cmp(&q) {
+        Ordering::Equal => match (x.get(1), y.get(1)) {
+            (Some(Value::Int(u)), Some(Value::Int(v))) => u.cmp(&v),
+            _ => Ordering::Equal,
+        },
+        ord => ord,
+    }
+}
+
+/// Sort all-`[ascii-string int]` pair items; `false` otherwise.
+fn sort_str_int_pairs(items: &mut [Value]) -> bool {
+    if items.is_empty() || !items.iter().all(is_str_int_pair) {
+        return false;
+    }
+    items.sort_by(cmp_str_int_pair);
+    true
+}
+
+/// Whether `v` is a vector whose items are all `Int`.
+fn is_int_vector(v: &Value) -> bool {
+    match v {
+        Value::Vector(vec) => vec.iter().all(|e| matches!(e, Value::Int(_))),
+        _ => false,
+    }
+}
+
+/// Order two all-`Int` vectors lexicographically.
+fn cmp_int_vectors(a: &Value, b: &Value) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    let (Value::Vector(x), Value::Vector(y)) = (a, b) else {
+        return Ordering::Equal;
+    };
+    for (u, w) in x.iter().zip(y.iter()) {
+        if let (Value::Int(p), Value::Int(q)) = (&u, &w) {
+            match p.cmp(q) {
+                Ordering::Equal => {}
+                ord => return ord,
+            }
+        }
+    }
+    x.len().cmp(&y.len())
+}
+
+/// Sort all-int-vector items; `false` otherwise.
+fn sort_int_vectors(items: &mut [Value]) -> bool {
+    if items.is_empty() || !items.iter().all(is_int_vector) {
+        return false;
+    }
+    items.sort_by(cmp_int_vectors);
+    true
+}
+
+/// Default `sort` order: homogeneous fast paths first, then the
+/// generic `jvm_compare` machinery for mixed or other items.
+fn sort_default(items: &mut [Value]) -> Result<(), NativeError> {
+    if sort_all_ints(items)
+        || sort_all_ascii_strs(items)
+        || sort_str_int_pairs(items)
+        || sort_int_vectors(items)
+    {
+        return Ok(());
+    }
+    sort_by_checked(items, jvm_compare)
+}
+
 fn native_sort(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     // Borrow-path compat shim (see [`OwnedNativeImpl`]).
     native_sort_owned(eval, args.iter().cloned().collect())
@@ -767,7 +900,7 @@ pub(crate) fn native_sort_owned(
     let coll = take_walk_coll(&mut args, coll_idx);
     let mut items = collect_all(eval, coll).map_err(signal_to_native)?;
     match comp {
-        None => sort_by_checked(&mut items, jvm_compare)?,
+        None => sort_default(&mut items)?,
         Some(comp) => {
             sort_by_checked(&mut items, |a, b| {
                 let r = call_checked(eval, &comp, &[a.clone(), b.clone()])?;
@@ -886,6 +1019,26 @@ pub(crate) fn native_mapv_owned(
     // walk holds the only handles and input heads free as it
     // advances (#221).
     let inputs: Vec<Value> = args.drain(1..).collect();
+    // `(mapv parse-long string-vector)` parses in one Rust loop:
+    // token-heavy readers otherwise pay a prepared call per token.
+    // A non-string item falls through to the generic paths, which
+    // raise the same cast error `parse-long` would.
+    if inputs.len() == 1
+        && crate::ext::as_native(&args[0]).is_some_and(|n| &*n.display == "clojure.core/parse-long")
+    {
+        if let Value::Vector(vec) = &inputs[0] {
+            if vec.iter().all(|v| matches!(v, Value::Str(_))) {
+                let mut tv = clj_value::TransientVector::new();
+                for v in vec.iter() {
+                    let out =
+                        crate::core::parse_long_1(&v).expect("parse-long on a string never errors");
+                    tv.conj(out).expect("fresh transient accepts conj");
+                }
+                let vec = tv.persistent().expect("fresh transient is valid at freeze");
+                return Ok(Value::Vector(vec));
+            }
+        }
+    }
     // One input under a VM fn walks it in place (#226): no lazy map
     // in between, the fn resolved once.
     if let ([_], Some(p)) = (&inputs[..], crate::vm::Prepared::of(&args[0], 1)) {
@@ -1305,6 +1458,24 @@ fn native_fnil(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErro
     }))
 }
 
+fn call_pred1(
+    eval: &mut Evaluator,
+    pred: &Value,
+    prep: Option<&crate::vm::Prepared<'_>>,
+    head: &Value,
+) -> Result<Value, NativeError> {
+    if let Some(p) = prep {
+        return p
+            .call1(eval, crate::vm::clone_value(head))
+            .map_err(signal_to_native);
+    }
+    let slice = std::slice::from_ref(head);
+    if let Some(v) = crate::vm::invoke_lookup(pred, slice) {
+        return Ok(v);
+    }
+    call_checked(eval, pred, slice)
+}
+
 fn native_every_p(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     // Borrow-path compat shim (see [`OwnedNativeImpl`]).
     native_every_p_owned(eval, args.iter().cloned().collect())
@@ -1316,10 +1487,11 @@ pub(crate) fn native_every_p_owned(
 ) -> Result<Value, NativeError> {
     check_arity("clojure.core/every?", &args, &[2])?;
     let pred = args[0].clone();
+    let prep = crate::vm::Prepared::of(&pred, 1);
     let mut all = true;
     let coll = take_walk_coll(&mut args, 1);
     walk_seq(eval, coll, |eval, head| {
-        if !call_checked(eval, &pred, std::slice::from_ref(head))?.is_truthy() {
+        if !call_pred1(eval, &pred, prep.as_ref(), head)?.is_truthy() {
             all = false;
             return Ok(Walk::Stop);
         }
@@ -1339,10 +1511,11 @@ pub(crate) fn native_some_owned(
 ) -> Result<Value, NativeError> {
     check_arity("clojure.core/some", &args, &[2])?;
     let pred = args[0].clone();
+    let prep = crate::vm::Prepared::of(&pred, 1);
     let mut found = Value::Nil;
     let coll = take_walk_coll(&mut args, 1);
     walk_seq(eval, coll, |eval, head| {
-        let r = call_checked(eval, &pred, std::slice::from_ref(head))?;
+        let r = call_pred1(eval, &pred, prep.as_ref(), head)?;
         if r.is_truthy() {
             found = r;
             return Ok(Walk::Stop);
@@ -1363,10 +1536,11 @@ pub(crate) fn native_not_any_p_owned(
 ) -> Result<Value, NativeError> {
     check_arity("clojure.core/not-any?", &args, &[2])?;
     let pred = args[0].clone();
+    let prep = crate::vm::Prepared::of(&pred, 1);
     let mut none = true;
     let coll = take_walk_coll(&mut args, 1);
     walk_seq(eval, coll, |eval, head| {
-        if call_checked(eval, &pred, std::slice::from_ref(head))?.is_truthy() {
+        if call_pred1(eval, &pred, prep.as_ref(), head)?.is_truthy() {
             none = false;
             return Ok(Walk::Stop);
         }
@@ -1386,10 +1560,11 @@ pub(crate) fn native_not_every_p_owned(
 ) -> Result<Value, NativeError> {
     check_arity("clojure.core/not-every?", &args, &[2])?;
     let pred = args[0].clone();
+    let prep = crate::vm::Prepared::of(&pred, 1);
     let mut all = true;
     let coll = take_walk_coll(&mut args, 1);
     walk_seq(eval, coll, |eval, head| {
-        if !call_checked(eval, &pred, std::slice::from_ref(head))?.is_truthy() {
+        if !call_pred1(eval, &pred, prep.as_ref(), head)?.is_truthy() {
             all = false;
             return Ok(Walk::Stop);
         }
@@ -1464,3 +1639,63 @@ pub(crate) const SEQS_NATIVES: &[(&str, NativeFnPtr)] = &[
     ("not-any?", native_not_any_p),
     ("not-every?", native_not_every_p),
 ];
+
+#[cfg(test)]
+mod sort_fast_path_tests {
+    use super::{cmp_int_vectors, cmp_ints, cmp_str_int_pair, cmp_strs};
+    use clj_value::{Value, Vector};
+    use std::cmp::Ordering;
+    use std::sync::Arc;
+
+    fn ints(xs: &[i64]) -> Value {
+        Value::Vector(Vector::from_vec(
+            xs.iter().map(|n| Value::Int(*n)).collect(),
+        ))
+    }
+
+    #[test]
+    fn defensive_arms_tie() {
+        assert_eq!(cmp_ints(&Value::Int(1), &Value::Int(2)), Ordering::Less);
+        assert_eq!(
+            cmp_ints(&Value::Bool(true), &Value::Int(2)),
+            Ordering::Equal
+        );
+        assert_eq!(
+            cmp_strs(&Value::Str(Arc::from("b")), &Value::Str(Arc::from("a"))),
+            Ordering::Greater
+        );
+        assert_eq!(
+            cmp_strs(&Value::Int(1), &Value::Str(Arc::from("a"))),
+            Ordering::Equal
+        );
+        assert_eq!(
+            cmp_str_int_pair(&Value::Int(1), &Value::Int(2)),
+            Ordering::Equal
+        );
+        assert_eq!(
+            cmp_str_int_pair(&ints(&[1, 2]), &ints(&[1, 3])),
+            Ordering::Equal
+        );
+        let p = |s: &str, n: &str| {
+            Value::Vector(Vector::from_vec(vec![
+                Value::Str(Arc::from(s)),
+                Value::Str(Arc::from(n)),
+            ]))
+        };
+        assert_eq!(
+            cmp_str_int_pair(&p("a", "x"), &p("a", "y")),
+            Ordering::Equal
+        );
+        assert_eq!(
+            cmp_int_vectors(&Value::Int(1), &Value::Int(2)),
+            Ordering::Equal
+        );
+        assert_eq!(
+            cmp_int_vectors(&ints(&[1, 2]), &ints(&[1, 3])),
+            Ordering::Less
+        );
+        assert_eq!(cmp_int_vectors(&ints(&[1]), &ints(&[1, 0])), Ordering::Less);
+        let strs = |s: &str| Value::Vector(Vector::from_vec(vec![Value::Str(Arc::from(s))]));
+        assert_eq!(cmp_int_vectors(&strs("a"), &strs("b")), Ordering::Equal);
+    }
+}

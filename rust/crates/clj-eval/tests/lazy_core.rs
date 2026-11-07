@@ -74,6 +74,12 @@ fn string_natives_answer_strings_and_regexes() {
             (r#"(str/blank? "")"#, "true"),
             (r#"(str/blank? " \t\n\u000b\u001c")"#, "true"),
             (r#"(str/blank? " ")"#, "false"),
+            (r#"(str/starts-with? "abc" "ab")"#, "true"),
+            (r#"(str/starts-with? "abc" "ac")"#, "false"),
+            (r#"(str/ends-with? "abc" "bc")"#, "true"),
+            (r#"(str/ends-with? "abc" "ab")"#, "false"),
+            (r#"(str/includes? "abc" "b")"#, "true"),
+            (r#"(str/includes? "abc" "x")"#, "false"),
         ],
     );
 }
@@ -123,6 +129,25 @@ fn string_natives_hand_other_arguments_to_upstream() {
                 "(str/trim nil)",
                 "java.lang.NullPointerException: Cannot invoke \"Object.getClass()\" because \"target\" is null",
             ),
+            (
+                r#"(str/starts-with? nil "a")"#,
+                "java.lang.NullPointerException: Cannot invoke \"Object.getClass()\" because \"target\" is null",
+            ),
+            (
+                r#"(str/ends-with? nil "a")"#,
+                "java.lang.NullPointerException: Cannot invoke \"Object.getClass()\" because \"target\" is null",
+            ),
+            (
+                r#"(str/includes? nil "a")"#,
+                "java.lang.NullPointerException: Cannot invoke \"Object.getClass()\" because \"target\" is null",
+            ),
+            (r#"(.startsWith "abc" "ab")"#, "true"),
+            (r#"(.startsWith "abc" "b" 1)"#, "true"),
+            (r#"(.startsWith "abc" "b" 5)"#, "false"),
+            (r#"(.startsWith "abc" "a" -1)"#, "false"),
+            (r#"(.startsWith "héllo" "é" 1)"#, "true"),
+            (r#"(.startsWith "héllo" "x" 1)"#, "false"),
+            (r#"(.startsWith "hé" "ééé" 1)"#, "false"),
             (
                 "(str/blank? 5)",
                 "java.lang.IllegalArgumentException: No matching field found: length for class java.lang.Long",

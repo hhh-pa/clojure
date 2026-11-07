@@ -1612,6 +1612,9 @@ impl Set {
     /// returns the member, not the key).
     #[must_use]
     pub fn get(&self, v: &Value) -> Option<&Value> {
+        if !self.inner.contains(v) {
+            return None;
+        }
         self.members.iter().find(|m| *m == v)
     }
 

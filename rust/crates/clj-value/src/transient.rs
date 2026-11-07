@@ -17,10 +17,12 @@
 //! rule statically. `persistent` drops metadata (a fresh transient
 //! carries none).
 
+use std::cell::UnsafeCell;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::ops::{Deref, DerefMut};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::{FxBuildHasher, Map, Set, Value, Vector, new_map, new_set};
 
@@ -528,6 +530,70 @@ impl TransientKind {
 /// Fresh transient identities (print-only; equality is shared-cell).
 static TRANSIENT_ID: AtomicU64 = AtomicU64::new(1);
 
+/// A fast spinlock cell for single-threaded transient operations.
+/// Transients are thread-confined by Clojure specification; this lock
+/// satisfies `Send + Sync` with minimal atomic overhead instead of
+/// OS-level mutex primitives.
+pub struct TransientLock {
+    locked: AtomicBool,
+    data: UnsafeCell<TransientKind>,
+}
+
+unsafe impl Send for TransientLock {}
+unsafe impl Sync for TransientLock {}
+
+impl fmt::Debug for TransientLock {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TransientLock").finish_non_exhaustive()
+    }
+}
+
+impl TransientLock {
+    #[must_use]
+    pub fn new(kind: TransientKind) -> Self {
+        Self {
+            locked: AtomicBool::new(false),
+            data: UnsafeCell::new(kind),
+        }
+    }
+
+    #[inline]
+    pub fn lock(&self) -> TransientGuard<'_> {
+        while self.locked.swap(true, Ordering::Acquire) {
+            std::hint::spin_loop();
+        }
+        TransientGuard { lock: self }
+    }
+}
+
+/// RAII lock guard for [`TransientLock`].
+pub struct TransientGuard<'a> {
+    lock: &'a TransientLock,
+}
+
+impl Deref for TransientGuard<'_> {
+    type Target = TransientKind;
+
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        unsafe { &*self.lock.data.get() }
+    }
+}
+
+impl DerefMut for TransientGuard<'_> {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        unsafe { &mut *self.lock.data.get() }
+    }
+}
+
+impl Drop for TransientGuard<'_> {
+    #[inline]
+    fn drop(&mut self) {
+        self.lock.locked.store(false, Ordering::Release);
+    }
+}
+
 /// A first-class transient value: shared mutable buffer plus the
 /// source metadata (invisible to `meta`, restored by
 /// `persistent!`). Identity equality (same cell); only `counted?`
@@ -537,7 +603,7 @@ static TRANSIENT_ID: AtomicU64 = AtomicU64::new(1);
 #[derive(Clone, Debug)]
 pub struct Transient {
     id: u64,
-    cell: Arc<Mutex<TransientKind>>,
+    cell: Arc<TransientLock>,
     meta: Option<Arc<Map>>,
 }
 
@@ -553,7 +619,7 @@ impl Transient {
     pub fn with_meta(kind: TransientKind, meta: Option<Map>) -> Self {
         Self {
             id: TRANSIENT_ID.fetch_add(1, Ordering::Relaxed),
-            cell: Arc::new(Mutex::new(kind)),
+            cell: Arc::new(TransientLock::new(kind)),
             meta: meta.map(Arc::new),
         }
     }
@@ -577,8 +643,8 @@ impl Transient {
     }
 
     /// Lock the buffer (single-threaded use; poison is unreachable).
-    pub fn lock(&self) -> MutexGuard<'_, TransientKind> {
-        self.cell.lock().unwrap_or_else(|e| e.into_inner())
+    pub fn lock(&self) -> TransientGuard<'_> {
+        self.cell.lock()
     }
 
     /// The JVM class name of the buffer kind (live: map
@@ -595,6 +661,7 @@ mod tests {
         Transient, TransientError, TransientKind, TransientMap, TransientSet, TransientVector,
     };
     use crate::{Keyword, Value};
+    use std::sync::atomic::Ordering;
 
     fn kw(name: &str) -> Value {
         Value::Keyword(Keyword::new(None, name))
@@ -688,5 +755,31 @@ mod tests {
         assert!(t.same_cell(&t.clone()));
         let u = Transient::new(TransientKind::Vector(TransientVector::new()));
         assert!(!t.same_cell(&u));
+    }
+
+    #[test]
+    fn transient_lock_debug_and_guard() {
+        let t = Transient::new(TransientKind::Vector(TransientVector::new()));
+        let dbg = format!("{t:?}");
+        assert!(dbg.contains("TransientLock"));
+        let mut guard = t.lock();
+        assert_eq!(
+            guard.jvm_class(),
+            "clojure.lang.PersistentVector$TransientVector"
+        );
+        let _ = &*guard;
+        let _ = &mut *guard;
+        drop(guard);
+
+        // Exercise the spin loop when the lock is already held.
+        t.cell.locked.store(true, Ordering::SeqCst);
+        let cell = &t.cell;
+        std::thread::scope(|s| {
+            s.spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                cell.locked.store(false, Ordering::SeqCst);
+            });
+            let _g = t.lock();
+        });
     }
 }
