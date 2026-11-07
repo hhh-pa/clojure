@@ -449,6 +449,10 @@ const PORT_ROWS: &[(&str, &str)] = &[
         r#":redef"#,
     ),
     (
+        r#"(do (defn r-conj [c x] (conj c x)) (with-redefs [conj (fn [c x] :redef)] (r-conj [] 1)))"#,
+        r#":redef"#,
+    ),
+    (
         r#"(do (defn r-lt [a b] (if (< a b) :lt :ge)) (with-redefs [< >] (r-lt 1 2)))"#,
         r#":ge"#,
     ),

@@ -171,11 +171,13 @@ impl<T: Clone> PVec<T> {
     }
 
     /// Where the tail starts.
+    #[inline]
     fn tail_offset(&self) -> usize {
         self.len - self.tail.len()
     }
 
     /// The full leaf holding index `i` (below the tail offset).
+    #[inline]
     fn leaf(&self, i: usize) -> &[T] {
         let mut node = self
             .root
@@ -190,6 +192,7 @@ impl<T: Clone> PVec<T> {
     }
 
     /// The item at `i` (`None` past the end).
+    #[inline]
     #[must_use]
     pub fn get(&self, i: usize) -> Option<&T> {
         if i >= self.len {
@@ -469,6 +472,7 @@ impl<T: Copy> Packed<T> {
         }
     }
 
+    #[inline]
     pub(crate) fn get(&self, i: usize) -> Option<T> {
         match self {
             Packed::Flat(a) => a.get(i).copied(),

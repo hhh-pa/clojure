@@ -357,6 +357,37 @@ pub(crate) const INLINE_MAP_MAX: usize = 16;
 #[derive(Debug)]
 struct MapShape {
     keys: Box<[Value]>,
+    ascii_map: [u8; 128],
+}
+
+fn build_ascii_map(keys: &[Value]) -> [u8; 128] {
+    let mut ascii_map = [0xFFu8; 128];
+    for (idx, k) in keys.iter().enumerate() {
+        if let Value::Char(c) = k {
+            let cu = *c as u32;
+            if cu < 128 {
+                ascii_map[cu as usize] = idx as u8;
+            }
+        }
+    }
+    ascii_map
+}
+
+impl MapShape {
+    #[inline]
+    fn find_key(&self, k: &Value) -> Option<usize> {
+        if let Value::Char(c) = k {
+            let cu = *c as u32;
+            if cu < 128 {
+                let idx = self.ascii_map[cu as usize];
+                if idx != 0xFF {
+                    return Some(idx as usize);
+                }
+                return None;
+            }
+        }
+        self.keys.iter().position(|ek| ek == k)
+    }
 }
 
 /// A small map's entries: the shared shape plus this version's
@@ -466,6 +497,7 @@ fn intern_shape(keys: &[Value]) -> Arc<MapShape> {
         }
         let shape = Arc::new(MapShape {
             keys: keys.to_vec().into_boxed_slice(),
+            ascii_map: build_ascii_map(keys),
         });
         reg.insert_shape(keys, &shape);
         if exact {
@@ -906,6 +938,7 @@ impl Vector {
 
     /// The item at `index` (`None` past the end; logarithmic — indexed
     /// callers must use this, not `iter().nth()`).
+    #[inline]
     #[must_use]
     pub fn get(&self, index: usize) -> Option<Value> {
         match &self.inner {
@@ -1252,7 +1285,7 @@ impl Map {
     /// shared); new keys intern the extended key-set (hits
     /// allocate nothing past values).
     fn insert_shaped_mut(&mut self, mut small: Arc<SmallMap>, k: Value, v: Value) {
-        if let Some(idx) = small.shape.keys.iter().position(|ek| ek == &k) {
+        if let Some(idx) = small.shape.find_key(&k) {
             // `get_mut` succeeds only with no live alias (not even
             // the consumed input survives), so the write is
             // invisible and the entries `Arc` (see [`Map::id`])
@@ -1329,7 +1362,7 @@ impl Map {
     #[must_use]
     pub fn without(mut self, k: &Value) -> Self {
         if let Some(small) = self.small.take() {
-            let Some(idx) = small.shape.keys.iter().position(|ek| ek == k) else {
+            let Some(idx) = small.shape.find_key(k) else {
                 self.small = Some(small);
                 return self;
             };
@@ -1509,12 +1542,7 @@ impl Map {
     #[must_use]
     pub fn get(&self, k: &Value) -> Option<&Value> {
         match &self.small {
-            Some(small) => small
-                .shape
-                .keys
-                .iter()
-                .position(|ek| ek == k)
-                .map(|idx| &small.vals[idx]),
+            Some(small) => small.shape.find_key(k).map(|idx| &small.vals[idx]),
             None => self.trie().get(k),
         }
     }
@@ -1524,7 +1552,7 @@ impl Map {
     /// keep a refcount of 1 across `assoc-in` / `update`.
     pub fn take_value(&mut self, k: &Value) -> Option<Value> {
         if let Some(small) = &mut self.small {
-            let idx = small.shape.keys.iter().position(|ek| ek == k)?;
+            let idx = small.shape.find_key(k)?;
             return Some(match Arc::get_mut(small) {
                 Some(entries) => std::mem::replace(&mut entries.vals[idx], Value::Nil),
                 None => small.vals[idx].clone(),
@@ -1537,7 +1565,7 @@ impl Map {
     #[must_use]
     pub fn contains_key(&self, k: &Value) -> bool {
         match &self.small {
-            Some(small) => small.shape.keys.iter().any(|ek| ek == k),
+            Some(small) => small.shape.find_key(k).is_some(),
             None => self.trie().get(k).is_some(),
         }
     }

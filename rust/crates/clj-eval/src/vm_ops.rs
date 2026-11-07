@@ -774,21 +774,6 @@ pub(crate) enum Coll {
     Read(Operand),
 }
 
-#[inline(always)]
-fn resolve_coll(
-    coll: &Coll,
-    first: Option<Value>,
-    ev: &mut Evaluator,
-    f: &mut Frame,
-) -> Result<Value, Signal> {
-    match (first, coll) {
-        (Some(v), _) => Ok(v),
-        (None, Coll::Take(r)) => Ok(std::mem::replace(&mut f.regs[*r], Value::Nil)),
-        (None, Coll::Read(o)) => o.eval(ev, f),
-        _ => Ok(Value::Nil),
-    }
-}
-
 /// An update op (`assoc`, `conj`): a computed collection runs
 /// first, then the other operands in order, then a local
 /// collection is read — last, so the last-use analysis can move it
@@ -797,39 +782,12 @@ fn upd<O: Upd>(c: Site, coll: Coll, mut rest: Vec<Operand>) -> Exec {
     match rest.len() {
         0 => upd1::<O>(c, coll),
         1 => upd2::<O>(c, coll, rest.pop().unwrap()),
-        2 => {
+        _ => {
             let o2 = rest.pop().unwrap();
             let o1 = rest.pop().unwrap();
             upd3::<O>(c, coll, o1, o2)
         }
-        _ => upd_n::<O>(c, coll, rest),
     }
-}
-
-/// A many-operand update op (3+ operands).
-fn upd_n<O: Upd>(c: Site, coll: Coll, rest: Vec<Operand>) -> Exec {
-    Box::new(move |ev, f| {
-        let valid = ev.site_direct_valid(c.sid, &c.call);
-        let mut args: SmallVec<[Value; 4]> = SmallVec::new();
-        args.push(match &coll {
-            Coll::Exec(e) => e(ev, f)?,
-            _ => Value::Nil,
-        });
-        for o in &rest {
-            args.push(o.eval(ev, f)?);
-        }
-        match &coll {
-            Coll::Take(r) => args[0] = std::mem::replace(&mut f.regs[*r], Value::Nil),
-            Coll::Read(o) => args[0] = o.eval(ev, f)?,
-            Coll::Exec(_) => {}
-        }
-        if valid {
-            if let Some(v) = O::apply(&mut args) {
-                return Ok(v);
-            }
-        }
-        native(ev, &c, args)
-    })
 }
 
 /// A one-operand update op (`next`, `rest`): the collection alone,
@@ -855,12 +813,16 @@ fn upd1<O: Upd>(c: Site, coll: Coll) -> Exec {
 fn upd2<O: Upd>(c: Site, coll: Coll, o1: Operand) -> Exec {
     Box::new(move |ev, f| {
         let valid = ev.site_direct_valid(c.sid, &c.call);
-        let first = match &coll {
-            Coll::Exec(e) => Some(e(ev, f)?),
-            _ => None,
+        let mut a = match &coll {
+            Coll::Exec(e) => e(ev, f)?,
+            _ => Value::Nil,
         };
         let b = o1.eval(ev, f)?;
-        let a = resolve_coll(&coll, first, ev, f)?;
+        match &coll {
+            Coll::Take(r) => a = std::mem::replace(&mut f.regs[*r], Value::Nil),
+            Coll::Read(o) => a = o.eval(ev, f)?,
+            Coll::Exec(_) => {}
+        }
         let mut args = [a, b];
         if valid {
             if let Some(v) = O::apply(&mut args) {
@@ -876,13 +838,17 @@ fn upd2<O: Upd>(c: Site, coll: Coll, o1: Operand) -> Exec {
 fn upd3<O: Upd>(c: Site, coll: Coll, o1: Operand, o2: Operand) -> Exec {
     Box::new(move |ev, f| {
         let valid = ev.site_direct_valid(c.sid, &c.call);
-        let first = match &coll {
-            Coll::Exec(e) => Some(e(ev, f)?),
-            _ => None,
+        let mut a = match &coll {
+            Coll::Exec(e) => e(ev, f)?,
+            _ => Value::Nil,
         };
         let b = o1.eval(ev, f)?;
         let c_val = o2.eval(ev, f)?;
-        let a = resolve_coll(&coll, first, ev, f)?;
+        match &coll {
+            Coll::Take(r) => a = std::mem::replace(&mut f.regs[*r], Value::Nil),
+            Coll::Read(o) => a = o.eval(ev, f)?,
+            Coll::Exec(_) => {}
+        }
         let mut args = [a, b, c_val];
         if valid {
             if let Some(v) = O::apply(&mut args) {

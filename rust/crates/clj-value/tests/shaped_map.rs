@@ -421,12 +421,54 @@ fn shape_registry_mru_exact_keys() {
 }
 
 #[test]
+fn map_shape_ascii_map_lookups() {
+    let mut m = clj_value::Map::from_kvs_last_wins(vec![
+        (Value::Char('a'), Value::Int(10)),
+        (Value::Char('\u{100}'), Value::Int(20)),
+        (Value::Keyword(clj_value::Keyword::new(None, "k")), Value::Int(30)),
+    ]);
+    assert!(m.is_shaped());
+
+    // ASCII char lookup
+    assert_eq!(m.get(&Value::Char('a')), Some(&Value::Int(10)));
+    assert!(m.contains_key(&Value::Char('a')));
+    assert_eq!(m.get(&Value::Char('b')), None);
+    assert!(!m.contains_key(&Value::Char('b')));
+
+    // Non-ASCII char lookup
+    assert_eq!(m.get(&Value::Char('\u{100}')), Some(&Value::Int(20)));
+    assert!(m.contains_key(&Value::Char('\u{100}')));
+    assert_eq!(m.get(&Value::Char('\u{101}')), None);
+    assert!(!m.contains_key(&Value::Char('\u{101}')));
+
+    // Non-char lookup
+    let kw = Value::Keyword(clj_value::Keyword::new(None, "k"));
+    let kw_missing = Value::Keyword(clj_value::Keyword::new(None, "missing"));
+    assert_eq!(m.get(&kw), Some(&Value::Int(30)));
+    assert!(m.contains_key(&kw));
+    assert_eq!(m.get(&kw_missing), None);
+    assert!(!m.contains_key(&kw_missing));
+
+    // without on existing and missing ASCII / non-ASCII keys
+    let m2 = m.clone().without(&Value::Char('b'));
+    assert_eq!(m2.size(), 3);
+    let m3 = m.clone().without(&Value::Char('a'));
+    assert_eq!(m3.size(), 2);
+    assert_eq!(m3.get(&Value::Char('a')), None);
+
+    // take_value on ASCII char
+    assert_eq!(m.take_value(&Value::Char('a')), Some(Value::Int(10)));
+}
+
+#[test]
 fn shape_registry_capacity_cap() {
+    let mut maps = Vec::with_capacity(600);
     for i in 0..600 {
         let m = clj_value::Map::from_kvs_last_wins(vec![(
             Value::Keyword(clj_value::Keyword::new(None, &format!("k{i}"))),
             Value::Int(i),
         )]);
         assert!(m.is_shaped());
+        maps.push(m);
     }
 }
