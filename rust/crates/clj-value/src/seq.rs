@@ -121,6 +121,32 @@ impl std::fmt::Debug for Seq {
     }
 }
 
+#[inline(always)]
+fn step_str_in_place(s: &str, pos: &mut usize, idx: &mut usize, head: &mut Value) -> bool {
+    let bytes = s.as_bytes();
+    let Some(&b) = bytes.get(*pos) else {
+        return false;
+    };
+    let step = if b < 128 {
+        1
+    } else {
+        s[*pos..].chars().next().map_or(1, char::len_utf8)
+    };
+    let next_pos = *pos + step;
+    let Some(&nb) = bytes.get(next_pos) else {
+        return false;
+    };
+    let next_char = if nb < 128 {
+        nb as char
+    } else {
+        s[next_pos..].chars().next().unwrap_or('\0')
+    };
+    *pos = next_pos;
+    *idx += 1;
+    *head = Value::Char(next_char);
+    true
+}
+
 impl Seq {
     /// The empty seq (`more` at the end).
     #[must_use]
@@ -340,32 +366,7 @@ impl Seq {
                 }
                 None => false,
             },
-            Seq::Str { s, pos, idx, head } => {
-                let bytes = s.as_bytes();
-                if let Some(&b) = bytes.get(*pos) {
-                    let step = if b < 128 {
-                        1
-                    } else {
-                        s[*pos..].chars().next().map_or(1, char::len_utf8)
-                    };
-                    let next_pos = *pos + step;
-                    if let Some(&nb) = bytes.get(next_pos) {
-                        let next_char = if nb < 128 {
-                            nb as char
-                        } else {
-                            s[next_pos..].chars().next().unwrap_or('\0')
-                        };
-                        *pos = next_pos;
-                        *idx += 1;
-                        *head = Value::Char(next_char);
-                        true
-                    } else {
-                        false
-                    }
-                } else {
-                    false
-                }
-            }
+            Seq::Str { s, pos, idx, head } => step_str_in_place(s, pos, idx, head),
             other => match other.next() {
                 Some(rest) if !rest.is_empty() => {
                     *other = rest;

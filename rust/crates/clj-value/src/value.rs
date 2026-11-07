@@ -412,6 +412,24 @@ const SHAPE_CLEANUP_AMORT: usize = 8;
 /// unbounded memory growth on high-cardinality ad-hoc keys.
 const SHAPE_REGISTRY_CAP: usize = 512;
 
+impl ShapeRegistry {
+    fn insert_shape(&mut self, keys: &[Value], shape: &Arc<MapShape>) {
+        if self.map.len() >= SHAPE_REGISTRY_CAP {
+            self.map.retain(|_, weak| weak.strong_count() > 0);
+        }
+        if self.map.len() < SHAPE_REGISTRY_CAP {
+            self.map.insert(keys.to_vec(), Arc::downgrade(shape));
+        }
+        self.since_cleanup += 1;
+        if self.since_cleanup >= SHAPE_CLEANUP_EVERY
+            && self.since_cleanup.saturating_mul(SHAPE_CLEANUP_AMORT) >= self.map.len()
+        {
+            self.map.retain(|_, weak| weak.strong_count() > 0);
+            self.since_cleanup = 0;
+        }
+    }
+}
+
 thread_local! {
     static SHAPE_REGISTRY: RefCell<ShapeRegistry> = RefCell::new(ShapeRegistry {
         map: HashMap::default(),
@@ -449,22 +467,10 @@ fn intern_shape(keys: &[Value]) -> Arc<MapShape> {
         let shape = Arc::new(MapShape {
             keys: keys.to_vec().into_boxed_slice(),
         });
-        if reg.map.len() >= SHAPE_REGISTRY_CAP {
-            reg.map.retain(|_, weak| weak.strong_count() > 0);
-        }
-        if reg.map.len() < SHAPE_REGISTRY_CAP {
-            reg.map.insert(keys.to_vec(), Arc::downgrade(&shape));
-        }
+        reg.insert_shape(keys, &shape);
         if exact {
             reg.last[1] = reg.last[0].take();
             reg.last[0] = Some(Arc::clone(&shape));
-        }
-        reg.since_cleanup += 1;
-        if reg.since_cleanup >= SHAPE_CLEANUP_EVERY
-            && reg.since_cleanup.saturating_mul(SHAPE_CLEANUP_AMORT) >= reg.map.len()
-        {
-            reg.map.retain(|_, weak| weak.strong_count() > 0);
-            reg.since_cleanup = 0;
         }
         shape
     })

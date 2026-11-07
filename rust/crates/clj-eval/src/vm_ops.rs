@@ -802,29 +802,34 @@ fn upd<O: Upd>(c: Site, coll: Coll, mut rest: Vec<Operand>) -> Exec {
             let o1 = rest.pop().unwrap();
             upd3::<O>(c, coll, o1, o2)
         }
-        _ => Box::new(move |ev, f| {
-            let valid = ev.site_direct_valid(c.sid, &c.call);
-            let mut args: SmallVec<[Value; 4]> = SmallVec::new();
-            args.push(match &coll {
-                Coll::Exec(e) => e(ev, f)?,
-                _ => Value::Nil,
-            });
-            for o in &rest {
-                args.push(o.eval(ev, f)?);
-            }
-            match &coll {
-                Coll::Take(r) => args[0] = std::mem::replace(&mut f.regs[*r], Value::Nil),
-                Coll::Read(o) => args[0] = o.eval(ev, f)?,
-                Coll::Exec(_) => {}
-            }
-            if valid {
-                if let Some(v) = O::apply(&mut args) {
-                    return Ok(v);
-                }
-            }
-            native(ev, &c, args)
-        }),
+        _ => upd_n::<O>(c, coll, rest),
     }
+}
+
+/// A many-operand update op (3+ operands).
+fn upd_n<O: Upd>(c: Site, coll: Coll, rest: Vec<Operand>) -> Exec {
+    Box::new(move |ev, f| {
+        let valid = ev.site_direct_valid(c.sid, &c.call);
+        let mut args: SmallVec<[Value; 4]> = SmallVec::new();
+        args.push(match &coll {
+            Coll::Exec(e) => e(ev, f)?,
+            _ => Value::Nil,
+        });
+        for o in &rest {
+            args.push(o.eval(ev, f)?);
+        }
+        match &coll {
+            Coll::Take(r) => args[0] = std::mem::replace(&mut f.regs[*r], Value::Nil),
+            Coll::Read(o) => args[0] = o.eval(ev, f)?,
+            Coll::Exec(_) => {}
+        }
+        if valid {
+            if let Some(v) = O::apply(&mut args) {
+                return Ok(v);
+            }
+        }
+        native(ev, &c, args)
+    })
 }
 
 /// A one-operand update op (`next`, `rest`): the collection alone,
