@@ -247,9 +247,7 @@ fn next_chunk(state: &mut StreamState) -> Result<Option<String>, NativeError> {
 /// cover the dispatch while `pull_line` unit tests cover the feed
 /// itself). Tests drain scripted lines first.
 fn more_input(state: &mut StreamState) -> Result<bool, NativeError> {
-    let line_no = state.parser.line();
-    state.parser = Reader::new("", &ReaderOpts::default());
-    state.parser.set_start_line(line_no);
+    state.parser.compact_stream();
     #[cfg(test)]
     if let Some(line) = state.script_lines.pop_front() {
         state.parser.extend(&line);

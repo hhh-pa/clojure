@@ -1692,15 +1692,14 @@ fn build_str_scan(s: &str) -> Option<StrScan> {
 /// `Ascii` flag answers in one byte load even for small
 /// indexes, where a direct scan would re-decode, #235).
 pub(crate) fn str_char_at(s: &Arc<str>, idx: usize) -> Option<char> {
-    if let Some(hit) = with_scan_hit(s, |scan| scan_char_at(s, scan, idx)) {
-        return hit;
-    }
     if s.len() <= STR_SCAN_SMALL_MAX {
         if s.is_ascii() {
-            memoize_scan(s, &StrScan::Ascii);
             return s.as_bytes().get(idx).map(|b| *b as char);
         }
         return s.chars().nth(idx);
+    }
+    if let Some(hit) = with_scan_hit(s, |scan| scan_char_at(s, scan, idx)) {
+        return hit;
     }
     match str_scan(s) {
         Some(scan) => scan_char_at(s, &scan, idx),

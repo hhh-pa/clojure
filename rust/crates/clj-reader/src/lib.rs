@@ -135,6 +135,11 @@ impl Reader {
         self.suppress = self.opts.suppress_read;
     }
 
+    /// Drop consumed stream chars (see [`CharStream::compact`]).
+    pub fn compact_stream(&mut self) {
+        self.stream.compact();
+    }
+
     /// The S7 `read+string` capture mark (see [`CharStream`]).
     #[must_use]
     pub fn capture_mark(&self) -> usize {
