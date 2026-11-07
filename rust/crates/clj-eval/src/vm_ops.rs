@@ -972,7 +972,29 @@ op2!(Ushr, |a, b| ints(a, b, |x, n| Some(
 )));
 op2!(Min, |a, b| ints(a, b, |x, y| Some(x.min(y))));
 op2!(Max, |a, b| ints(a, b, |x, y| Some(x.max(y))));
-op2!(Nth, |a, b| crate::vm_intrinsics::nth_of(a, b, None));
+pub(crate) struct Nth;
+
+impl Op2 for Nth {
+    #[inline(always)]
+    fn apply(a: &Value, b: &Value) -> Option<Value> {
+        let Value::Int(n) = b else {
+            return None;
+        };
+        let idx = usize::try_from(i32::try_from(*n).ok()?).ok()?;
+        match a {
+            Value::Vector(v) => v.get(idx),
+            Value::Str(s) => crate::coll::str_char_at(s, idx).map(Value::Char),
+            Value::Transient(t) => {
+                let guard = t.lock();
+                match &*guard {
+                    clj_value::TransientKind::Vector(tv) => tv.nth(idx).ok()?,
+                    _ => None,
+                }
+            }
+            _ => crate::vm_intrinsics::nth_of(a, b, None),
+        }
+    }
+}
 op2!(Get, |a, b| crate::vm_intrinsics::get_of(a, b, None));
 
 pub(crate) struct Inc;

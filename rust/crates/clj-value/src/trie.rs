@@ -83,16 +83,79 @@ impl<T: Clone> PVec<T> {
     /// A vector over `items` in order (up to 32 become the tail as
     /// is — no per-item push).
     #[must_use]
-    pub fn from_vec(items: Vec<T>) -> Self {
-        if items.len() <= WIDTH {
+    pub fn from_vec(mut items: Vec<T>) -> Self {
+        let len = items.len();
+        if len <= WIDTH {
             return Self {
-                len: items.len(),
+                len,
                 shift: BITS,
                 root: None,
                 tail: Arc::new(items),
             };
         }
-        items.into_iter().collect()
+        let tail_len = if len % WIDTH == 0 { WIDTH } else { len % WIDTH };
+        let trie_len = len - tail_len;
+        let tail = Arc::new(items.split_off(trie_len));
+        let mut leaves: Vec<Arc<Node<T>>> = Vec::with_capacity(trie_len / WIDTH);
+        let mut drain = items.into_iter();
+        while drain.len() > 0 {
+            let chunk: Vec<T> = drain.by_ref().take(WIDTH).collect();
+            leaves.push(Arc::new(Node::leaf(chunk)));
+        }
+        let mut branches: Vec<Arc<Node<T>>> = Vec::with_capacity(leaves.len().div_ceil(WIDTH));
+        let mut drain = leaves.into_iter();
+        while drain.len() > 0 {
+            let kids: Vec<Arc<Node<T>>> = drain.by_ref().take(WIDTH).collect();
+            branches.push(Arc::new(Node::branch(kids)));
+        }
+        let mut current = branches;
+        let mut shift = BITS;
+        while current.len() > 1 {
+            let mut next = Vec::with_capacity(current.len().div_ceil(WIDTH));
+            let mut drain = current.into_iter();
+            while drain.len() > 0 {
+                let kids: Vec<Arc<Node<T>>> = drain.by_ref().take(WIDTH).collect();
+                next.push(Arc::new(Node::branch(kids)));
+            }
+            current = next;
+            shift += BITS;
+        }
+        let root = current.pop();
+        Self {
+            len,
+            shift,
+            root,
+            tail,
+        }
+    }
+
+    /// Extract all items into a flat `Vec<T>`, unwrapping unshared nodes.
+    #[must_use]
+    pub fn into_vec(self) -> Vec<T> {
+        if self.len == 0 {
+            return Vec::new();
+        }
+        let Some(root) = self.root else {
+            return Arc::unwrap_or_clone(self.tail);
+        };
+        let mut out = Vec::with_capacity(self.len);
+        fn collect<T: Clone>(node: Arc<Node<T>>, level: u32, out: &mut Vec<T>) {
+            let node = Arc::unwrap_or_clone(node);
+            if level == BITS {
+                for leaf in node.kids {
+                    let mut items = Arc::unwrap_or_clone(leaf).items;
+                    out.append(&mut items);
+                }
+            } else {
+                for kid in node.kids {
+                    collect(kid, level - BITS, out);
+                }
+            }
+        }
+        collect(root, self.shift, &mut out);
+        let mut tail_items = Arc::unwrap_or_clone(self.tail);
+        out.append(&mut tail_items);
+        out
     }
 
     /// The item count.
@@ -399,6 +462,13 @@ impl<T: Copy> Packed<T> {
         }
     }
 
+    pub(crate) fn into_vec(self) -> Vec<T> {
+        match self {
+            Packed::Flat(a) => Arc::unwrap_or_clone(a),
+            Packed::Trie(t) => t.into_vec(),
+        }
+    }
+
     pub(crate) fn get(&self, i: usize) -> Option<T> {
         match self {
             Packed::Flat(a) => a.get(i).copied(),
@@ -614,5 +684,22 @@ mod tests {
         assert!(matches!(big, Packed::Trie(_)));
         let mut empty: Packed<char> = Packed::from_vec(Vec::new());
         assert!(!empty.pop());
+    }
+
+    #[test]
+    fn pvec_into_vec_deep_roundtrip() {
+        let items: Vec<i64> = (0..2500).collect();
+        let pvec = PVec::from_vec(items.clone());
+        assert_eq!(pvec.len(), 2500);
+        let back = pvec.into_vec();
+        assert_eq!(back, items);
+
+        // Tail-only into_vec (< 32 items, root is None)
+        let small: Vec<i64> = vec![1, 2, 3, 4, 5];
+        let pvec_small = PVec::from_vec(small.clone());
+        assert_eq!(pvec_small.into_vec(), small);
+
+        let empty: PVec<i64> = PVec::new_sync();
+        assert!(empty.into_vec().is_empty());
     }
 }

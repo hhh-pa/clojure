@@ -3751,7 +3751,7 @@ pub(crate) fn collect_packed(eval: &mut Evaluator, v: Value) -> Result<Vector, S
 /// `(vec s)` builds char vectors; the items are exactly the seq's).
 fn collect_direct(v: &Value) -> Option<Vector> {
     if let Value::Str(s) = v {
-        return Some(Vector::from_chars(s.chars().collect()));
+        return Some(Vector::from_flat_chars(s.chars().collect()));
     }
     let Value::Extension(e) = v else {
         return None;
@@ -3760,8 +3760,8 @@ fn collect_direct(v: &Value) -> Option<Vector> {
     if let Some(r) = any.downcast_ref::<clj_value::RepeatValue>() {
         let n = usize::try_from(r.n()?.max(0)).ok()?;
         return Some(match r.x() {
-            Value::Int(x) => Vector::from_ints(vec![*x; n]),
-            Value::Char(c) => Vector::from_chars(vec![*c; n]),
+            Value::Int(x) => Vector::from_flat_ints(vec![*x; n]),
+            Value::Char(c) => Vector::from_flat_chars(vec![*c; n]),
             x => Vector::from_vec(vec![x.clone(); n]),
         });
     }
@@ -3774,7 +3774,7 @@ fn collect_direct(v: &Value) -> Option<Vector> {
     let ints = (0..n.max(0))
         .map(|k| k.checked_mul(step).and_then(|d| cur.checked_add(d)))
         .collect::<Option<Vec<i64>>>()?;
-    Some(Vector::from_ints(ints))
+    Some(Vector::from_flat_ints(ints))
 }
 
 pub(crate) fn collect_all(eval: &mut Evaluator, v: Value) -> Result<Vec<Value>, Signal> {

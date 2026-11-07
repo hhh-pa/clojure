@@ -162,6 +162,18 @@ impl TransientVector {
         Self { items, valid: true }
     }
 
+    /// A transient over an owned `v`'s items, stealing unique buffers
+    /// where available without reallocating.
+    #[must_use]
+    pub fn from_vector_owned(v: Vector) -> Self {
+        let items = match v.into_typed_items() {
+            Ok(crate::value::TypedItems::Ints(x)) => TransientItems::Ints(x),
+            Ok(crate::value::TypedItems::Chars(x)) => TransientItems::Chars(x),
+            Err(v) => TransientItems::Generic(v.iter().collect()),
+        };
+        Self { items, valid: true }
+    }
+
     fn check(&self) -> Result<(), TransientError> {
         ensure(self.valid)
     }
@@ -239,11 +251,11 @@ impl TransientVector {
         Ok(match items {
             TransientItems::Ints(mut x) => {
                 x.shrink_to_fit();
-                Vector::from_ints(x)
+                Vector::from_flat_ints(x)
             }
             TransientItems::Chars(mut x) => {
                 x.shrink_to_fit();
-                Vector::from_chars(x)
+                Vector::from_flat_chars(x)
             }
             TransientItems::Generic(x) => Vector::from_vec(x),
         })

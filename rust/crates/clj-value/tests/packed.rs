@@ -410,3 +410,25 @@ fn meta_survives_packing() {
     let back: Vec<Value> = vm.iter().collect();
     assert_eq!(back, ints(10));
 }
+
+/// `from_vector_owned` unwraps packed ints, chars, and generic vectors.
+#[test]
+fn transient_from_vector_owned_arms() {
+    let gv = Vector::from_vec(vec![Value::Nil, Value::Int(1)]);
+    let tv = TransientVector::from_vector_owned(gv);
+    assert!(!tv.is_packed());
+
+    let cv = Vector::from_chars(vec!['a', 'b', 'c']);
+    let tv = TransientVector::from_vector_owned(cv);
+    assert!(tv.is_packed());
+
+    let iv_flat = Vector::from_ints(vec![1, 2, 3]);
+    let tv = TransientVector::from_vector_owned(iv_flat);
+    assert!(tv.is_packed());
+
+    let big_ints = (0..2000).collect::<Vec<i64>>();
+    let iv_big = Vector::from_ints(big_ints);
+    let tv = TransientVector::from_vector_owned(iv_big);
+    assert!(tv.is_packed());
+    assert_eq!(tv.len().unwrap(), 2000);
+}

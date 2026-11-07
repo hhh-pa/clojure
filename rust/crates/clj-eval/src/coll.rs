@@ -1603,15 +1603,25 @@ thread_local! {
 }
 
 /// Answer `f` over the memoized scan for a string, if it is one of
-/// the last few scanned (no `StrScan` clone on a hit).
+/// the last few scanned (no `StrScan` clone on a hit, slot 0 MRU).
 fn with_scan_hit<T>(s: &Arc<str>, f: impl FnOnce(&StrScan) -> T) -> Option<T> {
     LAST_SCAN.with(|memo| {
-        let memo = memo.borrow();
-        memo.0
-            .iter()
-            .flatten()
-            .find(|(key, _)| Arc::ptr_eq(key, s))
-            .map(|(_, scan)| f(scan))
+        let mut memo = memo.borrow_mut();
+        if let Some((key, scan)) = &memo.0[0] {
+            if Arc::ptr_eq(key, s) {
+                return Some(f(scan));
+            }
+        }
+        for i in 1..LAST_SCAN_SLOTS {
+            if let Some((key, scan)) = &memo.0[i] {
+                if Arc::ptr_eq(key, s) {
+                    let hit = f(scan);
+                    memo.0.swap(0, i);
+                    return Some(hit);
+                }
+            }
+        }
+        None
     })
 }
 
@@ -1692,14 +1702,15 @@ fn build_str_scan(s: &str) -> Option<StrScan> {
 /// `Ascii` flag answers in one byte load even for small
 /// indexes, where a direct scan would re-decode, #235).
 pub(crate) fn str_char_at(s: &Arc<str>, idx: usize) -> Option<char> {
+    if let Some(hit) = with_scan_hit(s, |scan| scan_char_at(s, scan, idx)) {
+        return hit;
+    }
     if s.len() <= STR_SCAN_SMALL_MAX {
         if s.is_ascii() {
+            memoize_scan(s, &StrScan::Ascii);
             return s.as_bytes().get(idx).map(|b| *b as char);
         }
         return s.chars().nth(idx);
-    }
-    if let Some(hit) = with_scan_hit(s, |scan| scan_char_at(s, scan, idx)) {
-        return hit;
     }
     match str_scan(s) {
         Some(scan) => scan_char_at(s, &scan, idx),
@@ -2036,36 +2047,53 @@ fn ioobe() -> NativeError {
     NativeError::new(ThrowClass::IndexOutOfBoundsException, String::new())
 }
 
-fn native_transient(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
-    check_arity("clojure.core/transient", args, &[1])?;
-    match &args[0] {
-        Value::Vector(x) => Ok(Value::Transient(Transient::with_meta(
-            TransientKind::Vector(TransientVector::from_vector(x)),
-            x.meta().cloned(),
-        ))),
+pub(crate) fn native_transient_owned(
+    _eval: &mut Evaluator,
+    mut args: SmallVec<[Value; 4]>,
+) -> Result<Value, NativeError> {
+    check_arity("clojure.core/transient", &args, &[1])?;
+    let val = args.pop().unwrap();
+    match val {
+        Value::Vector(x) => {
+            let meta = x.meta().cloned();
+            Ok(Value::Transient(Transient::with_meta(
+                TransientKind::Vector(TransientVector::from_vector_owned(x)),
+                meta,
+            )))
+        }
         // Sorted maps/sets are not editable on the JVM either
         // (probe `trans-sorted`).
         Value::Map(m) if m.is_sorted() => {
-            Err(cce_err(&args[0], "clojure.lang.IEditableCollection"))
+            Err(cce_err(&Value::Map(m), "clojure.lang.IEditableCollection"))
         }
-        Value::Map(m) => Ok(Value::Transient(Transient::with_meta(
-            TransientKind::Map(TransientMap::from_map(m)),
-            m.meta().cloned(),
-        ))),
+        Value::Map(m) => {
+            let meta = m.meta().cloned();
+            Ok(Value::Transient(Transient::with_meta(
+                TransientKind::Map(TransientMap::from_map(&m)),
+                meta,
+            )))
+        }
         Value::Set(s) if s.is_sorted() => {
-            Err(cce_err(&args[0], "clojure.lang.IEditableCollection"))
+            Err(cce_err(&Value::Set(s), "clojure.lang.IEditableCollection"))
         }
-        Value::Set(s) => Ok(Value::Transient(Transient::with_meta(
-            TransientKind::Set(TransientSet::from_set(s)),
-            s.meta().cloned(),
-        ))),
+        Value::Set(s) => {
+            let meta = s.meta().cloned();
+            Ok(Value::Transient(Transient::with_meta(
+                TransientKind::Set(TransientSet::from_set(&s)),
+                meta,
+            )))
+        }
         Value::Nil => Err(NativeError::new(
             ThrowClass::NullPointerException,
             "Cannot invoke \"clojure.lang.IEditableCollection.asTransient()\" because \"coll\" is null"
                 .to_owned(),
         )),
-        other => Err(cce_err(other, "clojure.lang.IEditableCollection")),
+        other => Err(cce_err(&other, "clojure.lang.IEditableCollection")),
     }
+}
+
+fn native_transient(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    native_transient_owned(eval, args.iter().cloned().collect())
 }
 
 fn native_persistent(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {

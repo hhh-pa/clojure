@@ -660,10 +660,24 @@ impl Vector {
         Self::of(VectorInner::Ints(crate::trie::Packed::from_vec(ints)))
     }
 
+    /// Build a packed `Int` vector keeping flat buffer until shared mutation.
+    #[must_use]
+    pub fn from_flat_ints(ints: Vec<i64>) -> Self {
+        Self::of(VectorInner::Ints(crate::trie::Packed::Flat(Arc::new(ints))))
+    }
+
     /// Build a packed char vector from `char`s in order (no scan).
     #[must_use]
     pub fn from_chars(chars: Vec<char>) -> Self {
         Self::of(VectorInner::Chars(crate::trie::Packed::from_vec(chars)))
+    }
+
+    /// Build a packed char vector keeping flat buffer until shared mutation.
+    #[must_use]
+    pub fn from_flat_chars(chars: Vec<char>) -> Self {
+        Self::of(VectorInner::Chars(crate::trie::Packed::Flat(Arc::new(
+            chars,
+        ))))
     }
 
     /// Whether this vector rides on packed `i64` or `char` storage.
@@ -679,6 +693,16 @@ impl Vector {
             VectorInner::Generic(_) => None,
             VectorInner::Ints(t) => Some(TypedItems::Ints(t.iter().copied().collect())),
             VectorInner::Chars(t) => Some(TypedItems::Chars(t.iter().copied().collect())),
+        }
+    }
+
+    /// The packed items when typed, moving out of an owned vector
+    /// without re-allocating where possible.
+    pub(crate) fn into_typed_items(self) -> Result<TypedItems, Self> {
+        match self.inner {
+            VectorInner::Generic(_) => Err(self),
+            VectorInner::Ints(t) => Ok(TypedItems::Ints(t.into_vec())),
+            VectorInner::Chars(t) => Ok(TypedItems::Chars(t.into_vec())),
         }
     }
 
