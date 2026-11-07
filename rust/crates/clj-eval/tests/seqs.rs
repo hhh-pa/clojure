@@ -370,6 +370,15 @@ fn dorun_doall_n_rows() {
 fn mapv_filterv_rows() {
     let mut eval = boot();
     assert_eq!(run_last(&mut eval, "(mapv inc [1 2 3])"), "[2 3 4]");
+    assert_eq!(
+        run_last(&mut eval, "(mapv parse-long [\"1\" \"x\" \"-3\"])"),
+        "[1 nil -3]"
+    );
+    assert_eq!(run_last(&mut eval, "(mapv parse-long [])"), "[]");
+    assert_eq!(
+        uncaught(&mut eval, "(mapv parse-long [\"1\" 2])"),
+        "java.lang.IllegalArgumentException | Expected string, got java.lang.Long"
+    );
     assert_eq!(run_last(&mut eval, "(mapv + [1 2] [10 20 30])"), "[11 22]");
     assert_eq!(run_last(&mut eval, "(filterv odd? [1 2 3 4])"), "[1 3]");
     assert_eq!(run_last(&mut eval, "(filterv pos? [])"), "[]");
