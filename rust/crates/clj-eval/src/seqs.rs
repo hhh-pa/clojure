@@ -1019,6 +1019,26 @@ pub(crate) fn native_mapv_owned(
     // walk holds the only handles and input heads free as it
     // advances (#221).
     let inputs: Vec<Value> = args.drain(1..).collect();
+    // `(mapv parse-long string-vector)` parses in one Rust loop:
+    // token-heavy readers otherwise pay a prepared call per token.
+    // A non-string item falls through to the generic paths, which
+    // raise the same cast error `parse-long` would.
+    if inputs.len() == 1
+        && crate::ext::as_native(&args[0]).is_some_and(|n| &*n.display == "clojure.core/parse-long")
+    {
+        if let Value::Vector(vec) = &inputs[0] {
+            if vec.iter().all(|v| matches!(v, Value::Str(_))) {
+                let mut tv = clj_value::TransientVector::new();
+                for v in vec.iter() {
+                    let out =
+                        crate::core::parse_long_1(&v).expect("parse-long on a string never errors");
+                    tv.conj(out).expect("fresh transient accepts conj");
+                }
+                let vec = tv.persistent().expect("fresh transient is valid at freeze");
+                return Ok(Value::Vector(vec));
+            }
+        }
+    }
     // One input under a VM fn walks it in place (#226): no lazy map
     // in between, the fn resolved once.
     if let ([_], Some(p)) = (&inputs[..], crate::vm::Prepared::of(&args[0], 1)) {
