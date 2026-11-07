@@ -74,6 +74,12 @@ fn string_natives_answer_strings_and_regexes() {
             (r#"(str/blank? "")"#, "true"),
             (r#"(str/blank? " \t\n\u000b\u001c")"#, "true"),
             (r#"(str/blank? " ")"#, "false"),
+            (r#"(str/starts-with? "abc" "ab")"#, "true"),
+            (r#"(str/starts-with? "abc" "ac")"#, "false"),
+            (r#"(str/ends-with? "abc" "bc")"#, "true"),
+            (r#"(str/ends-with? "abc" "ab")"#, "false"),
+            (r#"(str/includes? "abc" "b")"#, "true"),
+            (r#"(str/includes? "abc" "x")"#, "false"),
         ],
     );
 }
