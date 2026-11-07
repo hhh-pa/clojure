@@ -774,36 +774,57 @@ pub(crate) enum Coll {
     Read(Operand),
 }
 
+#[inline(always)]
+fn resolve_coll(
+    coll: &Coll,
+    first: Option<Value>,
+    ev: &mut Evaluator,
+    f: &mut Frame,
+) -> Result<Value, Signal> {
+    match (first, coll) {
+        (Some(v), _) => Ok(v),
+        (None, Coll::Take(r)) => Ok(std::mem::replace(&mut f.regs[*r], Value::Nil)),
+        (None, Coll::Read(o)) => o.eval(ev, f),
+        (None, Coll::Exec(_)) => Ok(Value::Nil),
+    }
+}
+
 /// An update op (`assoc`, `conj`): a computed collection runs
 /// first, then the other operands in order, then a local
 /// collection is read — last, so the last-use analysis can move it
 /// even when the other operands read it ([`update_order`]).
-fn upd<O: Upd>(c: Site, coll: Coll, rest: Vec<Operand>) -> Exec {
-    if rest.is_empty() {
-        return upd1::<O>(c, coll);
-    }
-    Box::new(move |ev, f| {
-        let valid = ev.site_direct_valid(c.sid, &c.call);
-        let mut args: SmallVec<[Value; 4]> = SmallVec::new();
-        args.push(match &coll {
-            Coll::Exec(e) => e(ev, f)?,
-            _ => Value::Nil,
-        });
-        for o in &rest {
-            args.push(o.eval(ev, f)?);
+fn upd<O: Upd>(c: Site, coll: Coll, mut rest: Vec<Operand>) -> Exec {
+    match rest.len() {
+        0 => upd1::<O>(c, coll),
+        1 => upd2::<O>(c, coll, rest.pop().unwrap()),
+        2 => {
+            let o2 = rest.pop().unwrap();
+            let o1 = rest.pop().unwrap();
+            upd3::<O>(c, coll, o1, o2)
         }
-        match &coll {
-            Coll::Take(r) => args[0] = std::mem::replace(&mut f.regs[*r], Value::Nil),
-            Coll::Read(o) => args[0] = o.eval(ev, f)?,
-            Coll::Exec(_) => {}
-        }
-        if valid {
-            if let Some(v) = O::apply(&mut args) {
-                return Ok(v);
+        _ => Box::new(move |ev, f| {
+            let valid = ev.site_direct_valid(c.sid, &c.call);
+            let mut args: SmallVec<[Value; 4]> = SmallVec::new();
+            args.push(match &coll {
+                Coll::Exec(e) => e(ev, f)?,
+                _ => Value::Nil,
+            });
+            for o in &rest {
+                args.push(o.eval(ev, f)?);
             }
-        }
-        native(ev, &c, args)
-    })
+            match &coll {
+                Coll::Take(r) => args[0] = std::mem::replace(&mut f.regs[*r], Value::Nil),
+                Coll::Read(o) => args[0] = o.eval(ev, f)?,
+                Coll::Exec(_) => {}
+            }
+            if valid {
+                if let Some(v) = O::apply(&mut args) {
+                    return Ok(v);
+                }
+            }
+            native(ev, &c, args)
+        }),
+    }
 }
 
 /// A one-operand update op (`next`, `rest`): the collection alone,
@@ -822,6 +843,49 @@ fn upd1<O: Upd>(c: Site, coll: Coll) -> Exec {
             }
         }
         native(ev, &c, smallvec![a])
+    })
+}
+
+/// A two-operand update op (`conj`): stack-allocated args without SmallVec.
+fn upd2<O: Upd>(c: Site, coll: Coll, o1: Operand) -> Exec {
+    Box::new(move |ev, f| {
+        let valid = ev.site_direct_valid(c.sid, &c.call);
+        let first = match &coll {
+            Coll::Exec(e) => Some(e(ev, f)?),
+            _ => None,
+        };
+        let b = o1.eval(ev, f)?;
+        let a = resolve_coll(&coll, first, ev, f)?;
+        let mut args = [a, b];
+        if valid {
+            if let Some(v) = O::apply(&mut args) {
+                return Ok(v);
+            }
+        }
+        let [a, b] = args;
+        native(ev, &c, smallvec![a, b])
+    })
+}
+
+/// A three-operand update op (`assoc`): stack-allocated args without SmallVec.
+fn upd3<O: Upd>(c: Site, coll: Coll, o1: Operand, o2: Operand) -> Exec {
+    Box::new(move |ev, f| {
+        let valid = ev.site_direct_valid(c.sid, &c.call);
+        let first = match &coll {
+            Coll::Exec(e) => Some(e(ev, f)?),
+            _ => None,
+        };
+        let b = o1.eval(ev, f)?;
+        let c_val = o2.eval(ev, f)?;
+        let a = resolve_coll(&coll, first, ev, f)?;
+        let mut args = [a, b, c_val];
+        if valid {
+            if let Some(v) = O::apply(&mut args) {
+                return Ok(v);
+            }
+        }
+        let [a, b, c_val] = args;
+        native(ev, &c, smallvec![a, b, c_val])
     })
 }
 
@@ -917,8 +981,10 @@ impl Upd for Assoc {
                     None
                 }
             },
-            (Value::Map(m), k) if !m.is_sorted() && crate::vm_intrinsics::is_scalar_key(k) => {
-                Some(Value::Map(m.insert(k.clone(), take(v))))
+            (Value::Map(m), k_ref)
+                if !m.is_sorted() && crate::vm_intrinsics::is_scalar_key(k_ref) =>
+            {
+                Some(Value::Map(m.insert(take(k), take(v))))
             }
             (other, _) => {
                 *coll = other;

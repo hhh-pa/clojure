@@ -341,15 +341,29 @@ impl Seq {
                 None => false,
             },
             Seq::Str { s, pos, idx, head } => {
-                let step = s[*pos..].chars().next().map_or(1, char::len_utf8);
-                match s[*pos + step..].chars().next() {
-                    Some(c) => {
-                        *pos += step;
+                let bytes = s.as_bytes();
+                if let Some(&b) = bytes.get(*pos) {
+                    let step = if b < 128 {
+                        1
+                    } else {
+                        s[*pos..].chars().next().map_or(1, char::len_utf8)
+                    };
+                    let next_pos = *pos + step;
+                    if let Some(&nb) = bytes.get(next_pos) {
+                        let next_char = if nb < 128 {
+                            nb as char
+                        } else {
+                            s[next_pos..].chars().next().unwrap_or('\0')
+                        };
+                        *pos = next_pos;
                         *idx += 1;
-                        *head = Value::Char(c);
+                        *head = Value::Char(next_char);
                         true
+                    } else {
+                        false
                     }
-                    None => false,
+                } else {
+                    false
                 }
             }
             other => match other.next() {
@@ -2214,6 +2228,17 @@ mod tests {
         assert!(!r.advance());
         assert_eq!(r.seq().first(), Some(&Value::Char('z')));
         assert!(r.meta().is_some());
+        let mut r_utf8 = RealizedSeq::flagged(
+            Seq::string_from(Arc::from("aé!"), 0, 0).expect("chars"),
+            true,
+            true,
+            SeqKind::Str,
+        );
+        assert!(r_utf8.advance());
+        assert_eq!(r_utf8.seq().first(), Some(&Value::Char('é')));
+        assert!(r_utf8.advance());
+        assert_eq!(r_utf8.seq().first(), Some(&Value::Char('!')));
+        assert!(!r_utf8.advance());
         let mut r = RealizedSeq::flagged(
             Seq::vector_from(packed, 38).expect("items"),
             true,

@@ -302,22 +302,35 @@ fn transient_capacity(n: usize) -> usize {
 /// starts promoted. `dissoc!` swap-removes (the JVM moves the last
 /// pair into the hole).
 #[derive(Clone, Debug)]
+enum TransientMapStorage {
+    Small {
+        entries: Vec<(Value, Value)>,
+        index: HashMap<Value, usize, FxBuildHasher>,
+    },
+    Promoted {
+        map: HashMap<Value, Value, FxBuildHasher>,
+    },
+}
+
+#[derive(Clone, Debug)]
 pub struct TransientMap {
-    entries: Vec<(Value, Value)>,
-    index: HashMap<Value, usize, FxBuildHasher>,
+    storage: TransientMapStorage,
     valid: bool,
     len: usize,
     cap: usize,
     promoted: bool,
 }
 
+#[allow(clippy::mutable_key_type)]
 impl TransientMap {
     /// An empty transient map.
     #[must_use]
     pub fn new() -> Self {
         Self {
-            entries: Vec::new(),
-            index: HashMap::default(),
+            storage: TransientMapStorage::Small {
+                entries: Vec::new(),
+                index: HashMap::default(),
+            },
             valid: true,
             len: 0,
             cap: 16,
@@ -330,15 +343,33 @@ impl TransientMap {
     /// hash sources start promoted with their exact array size).
     #[must_use]
     pub fn from_map(m: &Map) -> Self {
-        let mut t = Self::new();
-        for (k, v) in m.iter() {
-            t.index.insert(k.clone(), t.entries.len());
-            t.entries.push((k.clone(), v.clone()));
+        if m.is_hashy() {
+            let mut map = HashMap::with_capacity_and_hasher(m.size(), FxBuildHasher::default());
+            for (k, v) in m.iter() {
+                map.insert(k.clone(), v.clone());
+            }
+            Self {
+                storage: TransientMapStorage::Promoted { map },
+                valid: true,
+                len: m.size() * 2,
+                cap: (m.size() * 2).max(16),
+                promoted: true,
+            }
+        } else {
+            let mut entries = Vec::with_capacity(m.size());
+            let mut index = HashMap::with_capacity_and_hasher(m.size(), FxBuildHasher::default());
+            for (k, v) in m.iter() {
+                index.insert(k.clone(), entries.len());
+                entries.push((k.clone(), v.clone()));
+            }
+            Self {
+                storage: TransientMapStorage::Small { entries, index },
+                valid: true,
+                len: m.size() * 2,
+                cap: (m.size() * 2).max(16),
+                promoted: false,
+            }
         }
-        t.len = t.entries.len() * 2;
-        t.cap = t.len.max(16);
-        t.promoted = m.is_hashy();
-        t
     }
 
     fn check(&self) -> Result<(), TransientError> {
@@ -354,23 +385,40 @@ impl TransientMap {
     /// Assoc a key/value pair.
     pub fn assoc(&mut self, k: Value, v: Value) -> Result<(), TransientError> {
         self.check()?;
-        if let Some(&i) = self.index.get(&k) {
-            self.entries[i].1 = v;
-            return Ok(());
-        }
-        if !self.promoted {
-            if self.len < self.cap {
-                self.len += 2;
-            } else if self.len >= 128 || !matches!(k, Value::Keyword(_)) {
-                self.promoted = true;
-                self.len += 2;
-            } else {
-                self.cap = transient_capacity(self.cap);
-                self.len += 2;
+        match &mut self.storage {
+            TransientMapStorage::Promoted { map } => {
+                map.insert(k, v);
+            }
+            TransientMapStorage::Small { entries, index } => {
+                if let Some(&i) = index.get(&k) {
+                    entries[i].1 = v;
+                    return Ok(());
+                }
+                let promote = !self.promoted
+                    && (self.len >= 128 || (self.len >= 16 && !matches!(k, Value::Keyword(_))));
+                if promote {
+                    self.promoted = true;
+                    let mut map = HashMap::with_capacity_and_hasher(
+                        entries.len() + 1,
+                        FxBuildHasher::default(),
+                    );
+                    for (ek, ev) in std::mem::take(entries) {
+                        map.insert(ek, ev);
+                    }
+                    map.insert(k, v);
+                    self.storage = TransientMapStorage::Promoted { map };
+                } else {
+                    if self.len < self.cap {
+                        self.len += 2;
+                    } else {
+                        self.cap = transient_capacity(self.cap);
+                        self.len += 2;
+                    }
+                    index.insert(k.clone(), entries.len());
+                    entries.push((k, v));
+                }
             }
         }
-        self.index.insert(k.clone(), self.entries.len());
-        self.entries.push((k, v));
         Ok(())
     }
 
@@ -378,12 +426,19 @@ impl TransientMap {
     /// hole, like the JVM).
     pub fn dissoc(&mut self, k: &Value) -> Result<(), TransientError> {
         self.check()?;
-        if let Some(i) = self.index.remove(k) {
-            self.entries.swap_remove(i);
-            self.len = self.len.saturating_sub(2);
-            if let Some((moved, _)) = self.entries.get(i) {
-                let moved = moved.clone();
-                self.index.insert(moved, i);
+        match &mut self.storage {
+            TransientMapStorage::Promoted { map } => {
+                map.remove(k);
+            }
+            TransientMapStorage::Small { entries, index } => {
+                if let Some(i) = index.remove(k) {
+                    entries.swap_remove(i);
+                    self.len = self.len.saturating_sub(2);
+                    if let Some((moved, _)) = entries.get(i) {
+                        let moved = moved.clone();
+                        index.insert(moved, i);
+                    }
+                }
             }
         }
         Ok(())
@@ -392,13 +447,21 @@ impl TransientMap {
     /// Look up a key.
     pub fn get(&self, k: &Value) -> Result<Option<&Value>, TransientError> {
         self.check()?;
-        Ok(self.index.get(k).map(|&i| &self.entries[i].1))
+        match &self.storage {
+            TransientMapStorage::Promoted { map } => Ok(map.get(k)),
+            TransientMapStorage::Small { entries, index } => {
+                Ok(index.get(k).map(|&i| &entries[i].1))
+            }
+        }
     }
 
     /// The entry count.
     pub fn len(&self) -> Result<usize, TransientError> {
         self.check()?;
-        Ok(self.entries.len())
+        match &self.storage {
+            TransientMapStorage::Promoted { map } => Ok(map.len()),
+            TransientMapStorage::Small { entries, .. } => Ok(entries.len()),
+        }
     }
 
     /// Whether the map is empty.
@@ -409,20 +472,33 @@ impl TransientMap {
     /// Freeze into a persistent map (invalidates this transient).
     /// The class comes from the promotion simulation, never the
     /// content (an unpromoted array keeps array class at any size).
-    /// The lookup index is dropped before the build (not after), so
-    /// its duplicate keys are not live alongside the persistent map
-    /// under construction (#221 R3: peak trim for transient builds).
     pub fn persistent(&mut self) -> Result<Map, TransientError> {
         self.check()?;
         self.valid = false;
-        let entries = std::mem::take(&mut self.entries);
-        self.index.clear();
-        self.index.shrink_to_fit();
-        let mut map = new_map();
-        for (k, v) in entries {
-            map = map.insert(k, v);
+        match std::mem::replace(
+            &mut self.storage,
+            TransientMapStorage::Small {
+                entries: Vec::new(),
+                index: HashMap::default(),
+            },
+        ) {
+            TransientMapStorage::Promoted { map } => {
+                let mut keys = Vec::with_capacity(map.len());
+                let mut vals = Vec::with_capacity(map.len());
+                for (k, v) in map {
+                    keys.push(k);
+                    vals.push(v);
+                }
+                Ok(Map::from_parts(keys, vals, true))
+            }
+            TransientMapStorage::Small { entries, .. } => {
+                let mut map = new_map();
+                for (k, v) in entries {
+                    map = map.insert(k, v);
+                }
+                Ok(map.with_hashy(self.promoted))
+            }
         }
-        Ok(map.with_hashy(self.promoted))
     }
 }
 

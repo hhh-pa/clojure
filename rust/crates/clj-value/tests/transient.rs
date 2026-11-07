@@ -204,3 +204,45 @@ fn transient_round_trip_preserves_collections() {
     let mut ts = TransientSet::from_set(&s);
     assert_eq!(ts.persistent().unwrap(), s);
 }
+
+#[test]
+fn map_transient_promoted_operations() {
+    let mut tm = TransientMap::new();
+    // Add 20 integer keys to trigger promotion (len >= 16 with non-keyword keys).
+    for i in 0..20 {
+        tm.assoc(int(i), int(i * 10)).unwrap();
+    }
+    assert!(tm.is_hashy());
+    assert!(!tm.is_empty().unwrap());
+    assert_eq!(tm.len().unwrap(), 20);
+
+    // Get hit and miss
+    assert_eq!(tm.get(&int(5)).unwrap(), Some(&int(50)));
+    assert_eq!(tm.get(&int(99)).unwrap(), None);
+
+    // Overwrite existing key
+    tm.assoc(int(5), int(555)).unwrap();
+    assert_eq!(tm.get(&int(5)).unwrap(), Some(&int(555)));
+
+    // Dissoc existing and missing key
+    tm.dissoc(&int(5)).unwrap();
+    assert_eq!(tm.get(&int(5)).unwrap(), None);
+    assert_eq!(tm.len().unwrap(), 19);
+    tm.dissoc(&int(999)).unwrap();
+    assert_eq!(tm.len().unwrap(), 19);
+
+    // Persistent freeze from promoted storage
+    let frozen = tm.persistent().unwrap();
+    assert_eq!(frozen.size(), 19);
+    assert_eq!(frozen.get(&int(0)), Some(&int(0)));
+    assert_eq!(frozen.get(&int(5)), None);
+
+    // Also test from_map with hashy map
+    let mut tm2 = TransientMap::from_map(&frozen);
+    assert!(tm2.is_hashy());
+    assert_eq!(tm2.len().unwrap(), 19);
+    tm2.assoc(int(100), int(200)).unwrap();
+    assert_eq!(tm2.len().unwrap(), 20);
+    let frozen2 = tm2.persistent().unwrap();
+    assert_eq!(frozen2.size(), 20);
+}

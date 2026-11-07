@@ -343,7 +343,7 @@ impl DoubleEndedIterator for VectorIter<'_> {
 /// Representation is orthogonal to the reported class
 /// (`hashy`): a 9-pair all-keyword map stays array-classed
 /// whether shaped or hashed.
-const INLINE_MAP_MAX: usize = 16;
+pub(crate) const INLINE_MAP_MAX: usize = 16;
 
 /// A small map's shared key-set (#221 suffix states: 200k maps
 /// share ONE `[:len :link :next]` shape, so per-map memory is
@@ -408,6 +408,9 @@ const SHAPE_CLEANUP_EVERY: usize = 16;
 /// Amortized retain-scan visits per miss past the
 /// [`SHAPE_CLEANUP_EVERY`] floor (see above).
 const SHAPE_CLEANUP_AMORT: usize = 8;
+/// Maximum entries in the thread-local shape registry map to prevent
+/// unbounded memory growth on high-cardinality ad-hoc keys.
+const SHAPE_REGISTRY_CAP: usize = 512;
 
 thread_local! {
     static SHAPE_REGISTRY: RefCell<ShapeRegistry> = RefCell::new(ShapeRegistry {
@@ -446,7 +449,12 @@ fn intern_shape(keys: &[Value]) -> Arc<MapShape> {
         let shape = Arc::new(MapShape {
             keys: keys.to_vec().into_boxed_slice(),
         });
-        reg.map.insert(keys.to_vec(), Arc::downgrade(&shape));
+        if reg.map.len() >= SHAPE_REGISTRY_CAP {
+            reg.map.retain(|_, weak| weak.strong_count() > 0);
+        }
+        if reg.map.len() < SHAPE_REGISTRY_CAP {
+            reg.map.insert(keys.to_vec(), Arc::downgrade(&shape));
+        }
         if exact {
             reg.last[1] = reg.last[0].take();
             reg.last[0] = Some(Arc::clone(&shape));
@@ -1146,7 +1154,7 @@ impl Map {
 
     /// Build from deduped parallel keys/vals (big maps take the
     /// hash trie directly; small ones intern one shape).
-    fn from_parts(keys: Vec<Value>, vals: Vec<Value>, hashy: bool) -> Self {
+    pub(crate) fn from_parts(keys: Vec<Value>, vals: Vec<Value>, hashy: bool) -> Self {
         if keys.len() > INLINE_MAP_MAX {
             let mut inner = RpdsMap::new_with_hasher_and_ptr_kind(FxBuildHasher::default());
             for (k, v) in keys.into_iter().zip(vals) {

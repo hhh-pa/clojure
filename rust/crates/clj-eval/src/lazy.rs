@@ -3699,6 +3699,26 @@ pub(crate) fn rest_value(eval: &mut Evaluator, v: &Value) -> Result<Value, Signa
 
 /// `next`: like `rest` but nil at the end (forcing one step).
 pub(crate) fn next_value(eval: &mut Evaluator, v: &Value) -> Result<Value, Signal> {
+    if let Some(r) = as_realized(v) {
+        let more = r.seq().more();
+        if more.is_empty() {
+            return Ok(Value::Nil);
+        }
+        return Ok(Value::Extension(Arc::new(seq_tail(
+            more,
+            r.is_counted(),
+            r.is_idrop(),
+            r.kind(),
+            r.meta(),
+        ))));
+    }
+    if let Value::List(l) = v {
+        return Ok(l
+            .drop_first()
+            .filter(|t| !t.is_empty())
+            .map(|t| Value::List(t.with_meta(None)))
+            .unwrap_or(Value::Nil));
+    }
     let rest = rest_value(eval, v)?;
     // `next` nil-puns empty tails (spent repeats, done ranges —
     // like the JVM's `next.seq()`).
