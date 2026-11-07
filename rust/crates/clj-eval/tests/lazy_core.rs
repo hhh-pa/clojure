@@ -145,6 +145,9 @@ fn string_natives_hand_other_arguments_to_upstream() {
             (r#"(.startsWith "abc" "b" 1)"#, "true"),
             (r#"(.startsWith "abc" "b" 5)"#, "false"),
             (r#"(.startsWith "abc" "a" -1)"#, "false"),
+            (r#"(.startsWith "héllo" "é" 1)"#, "true"),
+            (r#"(.startsWith "héllo" "x" 1)"#, "false"),
+            (r#"(.startsWith "hé" "ééé" 1)"#, "false"),
             (
                 "(str/blank? 5)",
                 "java.lang.IllegalArgumentException: No matching field found: length for class java.lang.Long",
