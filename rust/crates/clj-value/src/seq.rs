@@ -124,22 +124,18 @@ impl std::fmt::Debug for Seq {
 #[inline(always)]
 fn step_str_in_place(s: &str, pos: &mut usize, idx: &mut usize, head: &mut Value) -> bool {
     let bytes = s.as_bytes();
-    let Some(&b) = bytes.get(*pos) else {
-        return false;
-    };
-    let step = if b < 128 {
-        1
-    } else {
-        s[*pos..].chars().next().map_or(1, char::len_utf8)
+    let step = match bytes.get(*pos) {
+        Some(&b) if b < 128 => 1,
+        _ => s[*pos..].chars().next().map_or(1, char::len_utf8),
     };
     let next_pos = *pos + step;
-    let Some(&nb) = bytes.get(next_pos) else {
+    let Some(&b) = bytes.get(next_pos) else {
         return false;
     };
-    let next_char = if nb < 128 {
-        nb as char
+    let next_char = if b < 128 {
+        b as char
     } else {
-        s[next_pos..].chars().next().unwrap_or('\0')
+        s[next_pos..].chars().next().expect("valid utf-8")
     };
     *pos = next_pos;
     *idx += 1;

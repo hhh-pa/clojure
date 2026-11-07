@@ -419,3 +419,14 @@ fn shape_registry_mru_exact_keys() {
         assert_eq!(b.get(&Value::Char('y')), Some(&Value::Int(2)));
     }
 }
+
+#[test]
+fn shape_registry_capacity_cap() {
+    for i in 0..600 {
+        let m = clj_value::Map::from_kvs_last_wins(vec![(
+            Value::Keyword(clj_value::Keyword::new(None, &format!("k{i}"))),
+            Value::Int(i),
+        )]);
+        assert!(m.is_shaped());
+    }
+}

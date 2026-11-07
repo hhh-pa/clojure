@@ -316,6 +316,10 @@ const JVM_ROWS: &[(&str, &str)] = &[
         r#"[(conj (vec "abc") \d) (conj (vec "ab") 1) (assoc (vec "ab") 0 \z) (assoc (vec "ab") 1 :x) (pop (vec "ab")) (conj (pop [\a]) 1) (= (vec "ab") [\a \b]) (hash (vec "ab"))]"#,
         r#"[[\a \b \c \d] [\a \b 1] [\z \b] [\a :x] [\a] [1] true -338459411]"#,
     ),
+    (
+        r#"[(assoc {:a 1} :b 2 :c 3) (conj [1] 2 3 4) (conj {:a 1} [:b 2]) (assoc (identity [1 2]) 0 9) (assoc {:a 1} [1] 2)]"#,
+        r#"[{:a 1, :b 2, :c 3} [1 2 3 4] {:a 1, :b 2} [9 2] {:a 1, [1] 2}]"#,
+    ),
     // Maps and keywords called as fns answer inline as the `get` they
     // are; the promoting ops share `+`/`-`/`*` until a long overflows;
     // `str` of a long writes its digits.

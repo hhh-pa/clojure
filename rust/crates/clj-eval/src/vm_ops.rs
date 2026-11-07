@@ -785,7 +785,7 @@ fn resolve_coll(
         (Some(v), _) => Ok(v),
         (None, Coll::Take(r)) => Ok(std::mem::replace(&mut f.regs[*r], Value::Nil)),
         (None, Coll::Read(o)) => o.eval(ev, f),
-        (None, Coll::Exec(_)) => Ok(Value::Nil),
+        _ => Ok(Value::Nil),
     }
 }
 
