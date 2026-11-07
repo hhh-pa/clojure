@@ -379,6 +379,10 @@ fn mapv_filterv_rows() {
         uncaught(&mut eval, "(mapv parse-long [\"1\" 2])"),
         "java.lang.IllegalArgumentException | Expected string, got java.lang.Long"
     );
+    assert_eq!(
+        run_last(&mut eval, "(mapv parse-long (list \"1\" \"2\"))"),
+        "[1 2]"
+    );
     assert_eq!(run_last(&mut eval, "(mapv + [1 2] [10 20 30])"), "[11 22]");
     assert_eq!(run_last(&mut eval, "(filterv odd? [1 2 3 4])"), "[1 3]");
     assert_eq!(run_last(&mut eval, "(filterv pos? [])"), "[]");
