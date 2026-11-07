@@ -754,6 +754,54 @@ fn sort_by_checked(
     Ok(())
 }
 
+/// Default `sort` order with homogeneous fast paths: all-`Int`
+/// items compare as `i64`, all-ASCII-string items compare by bytes
+/// (identical to UTF-16 unit order on ASCII), and all-int-vector
+/// items compare lexicographically without the generic compare
+/// machinery. Mixed or other items take `jvm_compare`.
+fn sort_default(items: &mut [Value]) -> Result<(), NativeError> {
+    use std::cmp::Ordering;
+    if items.iter().all(|v| matches!(v, Value::Int(_))) {
+        items.sort_by(|a, b| match (a, b) {
+            (Value::Int(x), Value::Int(y)) => x.cmp(y),
+            _ => Ordering::Equal,
+        });
+        return Ok(());
+    }
+    if items
+        .iter()
+        .all(|v| matches!(v, Value::Str(s) if s.is_ascii()))
+    {
+        items.sort_by(|a, b| match (a, b) {
+            (Value::Str(x), Value::Str(y)) => x.cmp(y),
+            _ => Ordering::Equal,
+        });
+        return Ok(());
+    }
+    let int_vector = |v: &Value| match v {
+        Value::Vector(vec) => vec.iter().all(|e| matches!(e, Value::Int(_))),
+        _ => false,
+    };
+    if !items.is_empty() && items.iter().all(int_vector) {
+        items.sort_by(|a, b| match (a, b) {
+            (Value::Vector(x), Value::Vector(y)) => {
+                for (u, w) in x.iter().zip(y.iter()) {
+                    if let (Value::Int(p), Value::Int(q)) = (&u, &w) {
+                        match p.cmp(q) {
+                            Ordering::Equal => {}
+                            ord => return ord,
+                        }
+                    }
+                }
+                x.len().cmp(&y.len())
+            }
+            _ => Ordering::Equal,
+        });
+        return Ok(());
+    }
+    sort_by_checked(items, jvm_compare)
+}
+
 fn native_sort(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     // Borrow-path compat shim (see [`OwnedNativeImpl`]).
     native_sort_owned(eval, args.iter().cloned().collect())
@@ -773,7 +821,7 @@ pub(crate) fn native_sort_owned(
     let coll = take_walk_coll(&mut args, coll_idx);
     let mut items = collect_all(eval, coll).map_err(signal_to_native)?;
     match comp {
-        None => sort_by_checked(&mut items, jvm_compare)?,
+        None => sort_default(&mut items)?,
         Some(comp) => {
             sort_by_checked(&mut items, |a, b| {
                 let r = call_checked(eval, &comp, &[a.clone(), b.clone()])?;

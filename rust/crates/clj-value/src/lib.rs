@@ -90,7 +90,8 @@ pub use tower::{
     RoundingMode, bigint_parse, bigint_parse_radix, ratio_to_f64,
 };
 pub use transient::{
-    Transient, TransientError, TransientKind, TransientMap, TransientSet, TransientVector,
+    Transient, TransientError, TransientGuard, TransientKind, TransientLock, TransientMap,
+    TransientSet, TransientVector,
 };
 pub use value::{
     FxBuildHasher, List, Map, MemberSet, Set, SortSpec, Value, Vector, bigdec_result,

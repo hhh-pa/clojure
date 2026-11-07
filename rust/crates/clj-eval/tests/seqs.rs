@@ -334,6 +334,25 @@ fn sort_by_rows() {
 }
 
 #[test]
+fn sort_default_fast_path_rows() {
+    let mut eval = boot();
+    assert_eq!(run_last(&mut eval, "(sort [3 1 2 1])"), "(1 1 2 3)");
+    assert_eq!(
+        run_last(&mut eval, "(sort [\"pear\" \"apple\" \"fig\"])"),
+        "(\"apple\" \"fig\" \"pear\")"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(sort [[1 2] [1 1] [0 9] [1]])"),
+        "([0 9] [1] [1 1] [1 2])"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(sort [\"b\" \"é\" \"a\"])"),
+        "(\"a\" \"b\" \"é\")"
+    );
+    assert_eq!(run_last(&mut eval, "(sort [])"), "()");
+}
+
+#[test]
 fn dorun_doall_n_rows() {
     let mut eval = boot();
     assert_eq!(run_last(&mut eval, "(dorun 2 [1 2 3])"), "nil");
