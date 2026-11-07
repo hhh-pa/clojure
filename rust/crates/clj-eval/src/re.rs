@@ -183,7 +183,7 @@ fn groups_value(caps: &regex::Captures<'_>) -> Value {
 /// The running state of the JDK split loop (split out so each
 /// half stays under the complexity ratchet).
 struct SplitAcc {
-    parts: Vec<Value>,
+    parts: Vector,
     index: usize,
     count: i64,
 }
@@ -195,31 +195,34 @@ struct SplitAcc {
 /// later matches are dead (the `count == cap` arm fires exactly
 /// once).
 fn split_step(
-    acc: &mut SplitAcc,
+    mut acc: SplitAcc,
     text: &str,
     m_start: usize,
     m_end: usize,
     limited: bool,
     cap: i64,
-) {
+) -> SplitAcc {
     if !limited || acc.count < cap {
         let leader = acc.index == 0 && m_start == 0 && m_start == m_end;
         if !leader {
-            acc.parts
-                .push(Value::Str(Arc::from(&text[acc.index..m_start])));
+            acc.parts = acc
+                .parts
+                .push_back(Value::Str(Arc::from(&text[acc.index..m_start])));
             acc.index = m_end;
             acc.count += 1;
         }
     } else if acc.count == cap {
-        acc.parts.push(Value::Str(Arc::from(&text[acc.index..])));
+        acc.parts = acc
+            .parts
+            .push_back(Value::Str(Arc::from(&text[acc.index..])));
         acc.index = m_end;
         acc.count += 1;
     }
+    acc
 }
 
 pub(crate) fn pattern_split(text: &str, source: &str, limit: i32) -> Result<Value, NativeError> {
-    let pieces = pattern_pieces(text, source, limit)?;
-    Ok(Value::Vector(Vector::from_vec(pieces)))
+    Ok(Value::Vector(pattern_pieces(text, source, limit)?))
 }
 
 /// JVM `String.split`/`Pattern.split`: the pieces as a `String[]`
@@ -230,7 +233,7 @@ pub(crate) fn pattern_split_array(
     source: &str,
     limit: i32,
 ) -> Result<Value, NativeError> {
-    let store = ArrayStore::Objs(pattern_pieces(text, source, limit)?);
+    let store = ArrayStore::Objs(pattern_pieces(text, source, limit)?.iter().collect());
     Ok(Value::Array(Array::new(
         ArrayDesc {
             base: BaseType::Object,
@@ -323,7 +326,7 @@ impl Iterator for ByteCuts<'_> {
 
 /// The split pieces (engine-agnostic — the `regex` crate and the
 /// boundary scanner share the JDK loop in [`split_pieces`]).
-fn pattern_pieces(text: &str, source: &str, limit: i32) -> Result<Vec<Value>, NativeError> {
+fn pattern_pieces(text: &str, source: &str, limit: i32) -> Result<Vector, NativeError> {
     if let Some(kind) = cut_kind(text, source) {
         let cuts = ByteCuts {
             bytes: text.as_bytes(),
@@ -348,34 +351,34 @@ fn pattern_pieces(text: &str, source: &str, limit: i32) -> Result<Vec<Value>, Na
 
 /// Run the JDK split loop over byte ranges, collecting the piece
 /// strings (callers wrap them as a vector or a `String[]`).
-fn split_pieces(
-    text: &str,
-    cuts: impl IntoIterator<Item = (usize, usize)>,
-    limit: i32,
-) -> Vec<Value> {
+fn split_pieces(text: &str, cuts: impl IntoIterator<Item = (usize, usize)>, limit: i32) -> Vector {
     let limited = limit > 0;
     let cap = i64::from(limit) - 1;
     let mut acc = SplitAcc {
-        parts: Vec::new(),
+        parts: Vector::new_sync(),
         index: 0,
         count: 0,
     };
     for (start, end) in cuts {
-        split_step(&mut acc, text, start, end, limited, cap);
+        acc = split_step(acc, text, start, end, limited, cap);
     }
     if acc.index == 0 {
-        return vec![Value::Str(Arc::from(text))];
+        return Vector::from_vec(vec![Value::Str(Arc::from(text))]);
     }
     if !limited || acc.count < i64::from(limit) {
-        acc.parts.push(Value::Str(Arc::from(&text[acc.index..])));
+        acc.parts = acc
+            .parts
+            .push_back(Value::Str(Arc::from(&text[acc.index..])));
     }
     if limit == 0 {
         while acc
             .parts
-            .last()
+            .len()
+            .checked_sub(1)
+            .and_then(|last| acc.parts.get(last))
             .is_some_and(|p| matches!(p, Value::Str(s) if s.is_empty()))
         {
-            acc.parts.pop();
+            acc.parts = acc.parts.drop_last_owned().expect("non-empty");
         }
     }
     acc.parts
