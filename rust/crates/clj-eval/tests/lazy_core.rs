@@ -130,6 +130,22 @@ fn string_natives_hand_other_arguments_to_upstream() {
                 "java.lang.NullPointerException: Cannot invoke \"Object.getClass()\" because \"target\" is null",
             ),
             (
+                r#"(str/starts-with? nil "a")"#,
+                "java.lang.NullPointerException: Cannot invoke \"Object.getClass()\" because \"target\" is null",
+            ),
+            (
+                r#"(str/ends-with? nil "a")"#,
+                "java.lang.NullPointerException: Cannot invoke \"Object.getClass()\" because \"target\" is null",
+            ),
+            (
+                r#"(str/includes? nil "a")"#,
+                "java.lang.NullPointerException: Cannot invoke \"Object.getClass()\" because \"target\" is null",
+            ),
+            (r#"(.startsWith "abc" "ab")"#, "true"),
+            (r#"(.startsWith "abc" "b" 1)"#, "true"),
+            (r#"(.startsWith "abc" "b" 5)"#, "false"),
+            (r#"(.startsWith "abc" "a" -1)"#, "false"),
+            (
                 "(str/blank? 5)",
                 "java.lang.IllegalArgumentException: No matching field found: length for class java.lang.Long",
             ),
