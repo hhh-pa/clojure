@@ -75,19 +75,24 @@ pub(crate) fn nth_of(coll: &Value, idx: &Value, not_found: Option<&Value>) -> Op
     let Value::Int(n) = idx else {
         return None;
     };
-    let n = i32::try_from(*n).ok()?;
-    let i = usize::try_from(n).ok();
-    let found = match coll {
-        Value::Vector(v) => i.and_then(|i| v.get(i)),
-        Value::Array(a) => i.and_then(|i| (i < a.len()).then(|| crate::arrays::array_read(a, i))),
-        Value::Str(s) => i.and_then(|i| crate::coll::str_char_at(s, i).map(Value::Char)),
-        Value::Transient(t) => transient_nth(t, i)?,
-        _ => return None,
-    };
-    match (found, not_found) {
+    let i = usize::try_from(i32::try_from(*n).ok()?).ok();
+    match (nth_item(coll, i)?, not_found) {
         (Some(v), _) => Some(v),
         (None, Some(nf)) => Some(nf.clone()),
         (None, None) => None,
+    }
+}
+
+fn nth_item(coll: &Value, i: Option<usize>) -> Option<Option<Value>> {
+    match coll {
+        Value::Vector(v) => Some(i.and_then(|i| v.get(i))),
+        Value::Array(a) => {
+            Some(i.and_then(|i| (i < a.len()).then(|| crate::arrays::array_read(a, i))))
+        }
+        Value::Str(s) => Some(i.and_then(|i| crate::coll::str_char_at(s, i).map(Value::Char))),
+        Value::Transient(t) => transient_nth(t, i),
+        Value::Extension(_) => crate::lazy::as_subvector(coll).map(|sv| i.and_then(|i| sv.nth(i))),
+        _ => None,
     }
 }
 
@@ -107,28 +112,55 @@ fn get(args: &[&Value]) -> Option<Value> {
     get_of(args[0], args[1], args.get(2).copied())
 }
 
-/// `get` of a map (scalar keys) or a vector (in-range `int` keys),
-/// `nil` included.
+/// `get` of a map/set (scalar keys), vector (in-range `int` keys),
+/// or string (`int` keys), `nil` included.
 pub(crate) fn get_of(coll: &Value, key: &Value, not_found: Option<&Value>) -> Option<Value> {
-    let missing = || not_found.map_or(Value::Nil, Value::clone);
-    match coll {
-        Value::Nil => Some(missing()),
-        Value::Map(m) if !m.is_sorted() && is_scalar_key(key) => {
-            Some(m.get(key).cloned().unwrap_or_else(missing))
-        }
-        Value::Vector(v) => {
-            let i = index(key)?;
-            Some(v.get(i).unwrap_or_else(missing))
-        }
-        Value::Transient(t) if is_scalar_key(key) => {
-            let guard = t.lock();
-            let TransientKind::Map(tm) = &*guard else {
-                return None;
-            };
-            Some(tm.get(key).ok()?.cloned().unwrap_or_else(missing))
-        }
+    let found = match coll {
+        Value::Nil => Some(None),
+        Value::Map(m) => get_map(m, key),
+        Value::Set(s) => get_set(s, key),
+        Value::Vector(v) => index(key).map(|i| v.get(i)),
+        Value::Str(s) => get_str(s, key),
+        Value::Transient(t) => get_transient(t, key),
+        Value::Extension(_) => get_subvec(coll, key),
         _ => None,
+    }?;
+    Some(found.unwrap_or_else(|| not_found.map_or(Value::Nil, Value::clone)))
+}
+
+fn get_map(m: &clj_value::Map, key: &Value) -> Option<Option<Value>> {
+    (!m.is_sorted() && is_scalar_key(key)).then(|| m.get(key).cloned())
+}
+
+fn get_set(s: &clj_value::Set, key: &Value) -> Option<Option<Value>> {
+    (!s.is_sorted() && is_scalar_key(key)).then(|| s.get(key).cloned())
+}
+
+fn get_subvec(coll: &Value, key: &Value) -> Option<Option<Value>> {
+    let sv = crate::lazy::as_subvector(coll)?;
+    Some(index(key).and_then(|i| sv.nth(i)))
+}
+
+fn get_str(s: &std::sync::Arc<str>, key: &Value) -> Option<Option<Value>> {
+    let Value::Int(n) = key else {
+        return None;
+    };
+    Some(
+        usize::try_from(*n as i32)
+            .ok()
+            .and_then(|i| crate::coll::str_char_at(s, i).map(Value::Char)),
+    )
+}
+
+fn get_transient(t: &clj_value::Transient, key: &Value) -> Option<Option<Value>> {
+    if !is_scalar_key(key) {
+        return None;
     }
+    let guard = t.lock();
+    let TransientKind::Map(tm) = &*guard else {
+        return None;
+    };
+    Some(tm.get(key).ok()?.cloned())
 }
 
 /// Keys whose lookup needs no realization (equality is structural
@@ -156,6 +188,7 @@ pub(crate) fn count_of(v: &Value) -> Option<Value> {
         Value::Map(m) => m.size(),
         Value::Set(s) => s.size(),
         Value::Str(s) => crate::coll::str_utf16_len(s),
+        Value::Extension(_) => crate::lazy::as_subvector(v)?.len(),
         _ => return None,
     };
     i64::try_from(n).ok().map(Value::Int)

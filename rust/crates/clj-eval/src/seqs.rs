@@ -78,12 +78,12 @@ fn native_fn(
 
 /// Head-by-head seq walking (short-circuitable; errors map to
 /// native errors at each step).
-enum Walk {
+pub(crate) enum Walk {
     Continue,
     Stop,
 }
 
-fn walk_seq(
+pub(crate) fn walk_seq(
     eval: &mut Evaluator,
     coll: Value,
     mut visit: impl FnMut(&mut Evaluator, &Value) -> Result<Walk, NativeError>,
@@ -141,6 +141,12 @@ fn walk_direct(
     };
     if let Value::Vector(v) = coll {
         return Some(each(&mut v.iter()));
+    }
+    if let Some(sv) = crate::lazy::as_subvector(coll) {
+        return Some(each(&mut (0..sv.len()).filter_map(|i| sv.nth(i))));
+    }
+    if let Value::Str(s) = coll {
+        return Some(each(&mut s.chars().map(Value::Char)));
     }
     if let Value::Array(a) = coll {
         return Some(each(&mut a.snapshot().into_iter()));
@@ -1305,6 +1311,24 @@ fn native_fnil(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErro
     }))
 }
 
+fn call_pred1(
+    eval: &mut Evaluator,
+    pred: &Value,
+    prep: Option<&crate::vm::Prepared<'_>>,
+    head: &Value,
+) -> Result<Value, NativeError> {
+    if let Some(p) = prep {
+        return p
+            .call1(eval, crate::vm::clone_value(head))
+            .map_err(signal_to_native);
+    }
+    let slice = std::slice::from_ref(head);
+    if let Some(v) = crate::vm::invoke_lookup(pred, slice) {
+        return Ok(v);
+    }
+    call_checked(eval, pred, slice)
+}
+
 fn native_every_p(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     // Borrow-path compat shim (see [`OwnedNativeImpl`]).
     native_every_p_owned(eval, args.iter().cloned().collect())
@@ -1316,10 +1340,11 @@ pub(crate) fn native_every_p_owned(
 ) -> Result<Value, NativeError> {
     check_arity("clojure.core/every?", &args, &[2])?;
     let pred = args[0].clone();
+    let prep = crate::vm::Prepared::of(&pred, 1);
     let mut all = true;
     let coll = take_walk_coll(&mut args, 1);
     walk_seq(eval, coll, |eval, head| {
-        if !call_checked(eval, &pred, std::slice::from_ref(head))?.is_truthy() {
+        if !call_pred1(eval, &pred, prep.as_ref(), head)?.is_truthy() {
             all = false;
             return Ok(Walk::Stop);
         }
@@ -1339,10 +1364,11 @@ pub(crate) fn native_some_owned(
 ) -> Result<Value, NativeError> {
     check_arity("clojure.core/some", &args, &[2])?;
     let pred = args[0].clone();
+    let prep = crate::vm::Prepared::of(&pred, 1);
     let mut found = Value::Nil;
     let coll = take_walk_coll(&mut args, 1);
     walk_seq(eval, coll, |eval, head| {
-        let r = call_checked(eval, &pred, std::slice::from_ref(head))?;
+        let r = call_pred1(eval, &pred, prep.as_ref(), head)?;
         if r.is_truthy() {
             found = r;
             return Ok(Walk::Stop);
@@ -1363,10 +1389,11 @@ pub(crate) fn native_not_any_p_owned(
 ) -> Result<Value, NativeError> {
     check_arity("clojure.core/not-any?", &args, &[2])?;
     let pred = args[0].clone();
+    let prep = crate::vm::Prepared::of(&pred, 1);
     let mut none = true;
     let coll = take_walk_coll(&mut args, 1);
     walk_seq(eval, coll, |eval, head| {
-        if call_checked(eval, &pred, std::slice::from_ref(head))?.is_truthy() {
+        if call_pred1(eval, &pred, prep.as_ref(), head)?.is_truthy() {
             none = false;
             return Ok(Walk::Stop);
         }
@@ -1386,10 +1413,11 @@ pub(crate) fn native_not_every_p_owned(
 ) -> Result<Value, NativeError> {
     check_arity("clojure.core/not-every?", &args, &[2])?;
     let pred = args[0].clone();
+    let prep = crate::vm::Prepared::of(&pred, 1);
     let mut all = true;
     let coll = take_walk_coll(&mut args, 1);
     walk_seq(eval, coll, |eval, head| {
-        if !call_checked(eval, &pred, std::slice::from_ref(head))?.is_truthy() {
+        if !call_pred1(eval, &pred, prep.as_ref(), head)?.is_truthy() {
             all = false;
             return Ok(Walk::Stop);
         }
