@@ -425,7 +425,10 @@ fn map_shape_ascii_map_lookups() {
     let mut m = clj_value::Map::from_kvs_last_wins(vec![
         (Value::Char('a'), Value::Int(10)),
         (Value::Char('\u{100}'), Value::Int(20)),
-        (Value::Keyword(clj_value::Keyword::new(None, "k")), Value::Int(30)),
+        (
+            Value::Keyword(clj_value::Keyword::new(None, "k")),
+            Value::Int(30),
+        ),
     ]);
     assert!(m.is_shaped());
 
