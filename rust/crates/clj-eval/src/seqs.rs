@@ -754,33 +754,44 @@ fn sort_by_checked(
     Ok(())
 }
 
+/// Order two `Int` values (any other pair ties, for the
+/// guard-bypassing direct unit tests).
+fn cmp_ints(a: &Value, b: &Value) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    match (a, b) {
+        (Value::Int(x), Value::Int(y)) => x.cmp(y),
+        _ => Ordering::Equal,
+    }
+}
+
 /// Sort all-`Int` items as `i64`; `false` when any item is not `Int`.
 fn sort_all_ints(items: &mut [Value]) -> bool {
-    use std::cmp::Ordering;
     if !items.iter().all(|v| matches!(v, Value::Int(_))) {
         return false;
     }
-    items.sort_by(|a, b| match (a, b) {
-        (Value::Int(x), Value::Int(y)) => x.cmp(y),
-        _ => Ordering::Equal,
-    });
+    items.sort_by(cmp_ints);
     true
+}
+
+/// Order two string values by bytes (any other pair ties).
+fn cmp_strs(a: &Value, b: &Value) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    match (a, b) {
+        (Value::Str(x), Value::Str(y)) => x.cmp(y),
+        _ => Ordering::Equal,
+    }
 }
 
 /// Sort all-ASCII-string items by bytes (identical to UTF-16 unit
 /// order on ASCII); `false` when any item is not an ASCII string.
 fn sort_all_ascii_strs(items: &mut [Value]) -> bool {
-    use std::cmp::Ordering;
     if !items
         .iter()
         .all(|v| matches!(v, Value::Str(s) if s.is_ascii()))
     {
         return false;
     }
-    items.sort_by(|a, b| match (a, b) {
-        (Value::Str(x), Value::Str(y)) => x.cmp(y),
-        _ => Ordering::Equal,
-    });
+    items.sort_by(cmp_strs);
     true
 }
 
@@ -1608,3 +1619,63 @@ pub(crate) const SEQS_NATIVES: &[(&str, NativeFnPtr)] = &[
     ("not-any?", native_not_any_p),
     ("not-every?", native_not_every_p),
 ];
+
+#[cfg(test)]
+mod sort_fast_path_tests {
+    use super::{cmp_int_vectors, cmp_ints, cmp_str_int_pair, cmp_strs};
+    use clj_value::{Value, Vector};
+    use std::cmp::Ordering;
+    use std::sync::Arc;
+
+    fn ints(xs: &[i64]) -> Value {
+        Value::Vector(Vector::from_vec(
+            xs.iter().map(|n| Value::Int(*n)).collect(),
+        ))
+    }
+
+    #[test]
+    fn defensive_arms_tie() {
+        assert_eq!(cmp_ints(&Value::Int(1), &Value::Int(2)), Ordering::Less);
+        assert_eq!(
+            cmp_ints(&Value::Bool(true), &Value::Int(2)),
+            Ordering::Equal
+        );
+        assert_eq!(
+            cmp_strs(&Value::Str(Arc::from("b")), &Value::Str(Arc::from("a"))),
+            Ordering::Greater
+        );
+        assert_eq!(
+            cmp_strs(&Value::Int(1), &Value::Str(Arc::from("a"))),
+            Ordering::Equal
+        );
+        assert_eq!(
+            cmp_str_int_pair(&Value::Int(1), &Value::Int(2)),
+            Ordering::Equal
+        );
+        assert_eq!(
+            cmp_str_int_pair(&ints(&[1, 2]), &ints(&[1, 3])),
+            Ordering::Equal
+        );
+        let p = |s: &str, n: &str| {
+            Value::Vector(Vector::from_vec(vec![
+                Value::Str(Arc::from(s)),
+                Value::Str(Arc::from(n)),
+            ]))
+        };
+        assert_eq!(
+            cmp_str_int_pair(&p("a", "x"), &p("a", "y")),
+            Ordering::Equal
+        );
+        assert_eq!(
+            cmp_int_vectors(&Value::Int(1), &Value::Int(2)),
+            Ordering::Equal
+        );
+        assert_eq!(
+            cmp_int_vectors(&ints(&[1, 2]), &ints(&[1, 3])),
+            Ordering::Less
+        );
+        assert_eq!(cmp_int_vectors(&ints(&[1]), &ints(&[1, 0])), Ordering::Less);
+        let strs = |s: &str| Value::Vector(Vector::from_vec(vec![Value::Str(Arc::from(s))]));
+        assert_eq!(cmp_int_vectors(&strs("a"), &strs("b")), Ordering::Equal);
+    }
+}

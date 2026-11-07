@@ -93,6 +93,14 @@ fn count_rows() {
     assert_eq!(run_last(&mut eval, "(count #{1 2})"), "2");
     assert_eq!(run_last(&mut eval, "(count '(1 2 3))"), "3");
     assert_eq!(run_last(&mut eval, "(count (transient [1 2]))"), "2");
+    assert_eq!(
+        run_last(&mut eval, "(apply count [(transient {:a 1 :b 2})])"),
+        "2"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(apply count [(transient #{1 2 3})])"),
+        "3"
+    );
     assert_eq!(run_last(&mut eval, "(count (subvec [1 2 3] 1))"), "2");
     assert_eq!(run_last(&mut eval, "(count (range 5))"), "5");
     assert_eq!(run_last(&mut eval, "(count (range 0 5.0))"), "5");
