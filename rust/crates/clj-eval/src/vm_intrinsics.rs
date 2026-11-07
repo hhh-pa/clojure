@@ -21,25 +21,6 @@
 
 use clj_value::{TransientKind, Value};
 
-/// An intrinsic's fast path: the inline answer for the args, or
-/// `None` to run the native.
-pub(crate) type Fast = fn(&[&Value]) -> Option<Value>;
-
-/// The `clojure.core` three-argument calls with inline fast paths
-/// (the one- and two-argument ops compile in `crate::vm_ops`).
-const TABLE: &[(&str, Fast)] = &[("nth", nth), ("get", get), ("assoc!", assoc_bang)];
-
-/// The fast path for a three-argument direct call to the
-/// `clojure.core` native `call` analyzed (by the native's own name,
-/// never the var's; `None`: the general direct call).
-pub(crate) fn intrinsic_of(call: &crate::expr::DirectCall) -> Option<Fast> {
-    let name = crate::vm_ops::core_name(call)?;
-    let (_, fast) = TABLE
-        .iter()
-        .find(|(n, _)| *n == name && call.args.len() == 3)?;
-    Some(*fast)
-}
-
 /// `mod` over `Int`s (`None` for a zero divisor): Java `%`
 /// adjusted to the divisor's sign (`(mod MIN -1)` is 0).
 pub(crate) fn java_mod(x: i64, y: i64) -> Option<i64> {
@@ -56,15 +37,11 @@ pub(crate) fn java_mod(x: i64, y: i64) -> Option<i64> {
 
 /// An index that every `int`-coercing reader takes as-is
 /// (`0..=i32::MAX`).
-fn index(v: &Value) -> Option<usize> {
+pub(crate) fn index(v: &Value) -> Option<usize> {
     match v {
         Value::Int(n) if (0..=i64::from(i32::MAX)).contains(n) => usize::try_from(*n).ok(),
         _ => None,
     }
-}
-
-fn nth(args: &[&Value]) -> Option<Value> {
-    nth_of(args[0], args[1], args.get(2).copied())
 }
 
 /// `nth` of a vector, transient vector, or string at an `int`
@@ -106,10 +83,6 @@ fn transient_nth(t: &clj_value::Transient, i: Option<usize>) -> Option<Option<Va
         },
         _ => None,
     }
-}
-
-fn get(args: &[&Value]) -> Option<Value> {
-    get_of(args[0], args[1], args.get(2).copied())
 }
 
 /// `get` of a map/set (scalar keys), vector (in-range `int` keys),
@@ -228,30 +201,4 @@ pub(crate) fn scalar_eq(a: &Value, b: &Value) -> Option<bool> {
         (Value::Str(x), Value::Str(y)) => x == y,
         _ => return None,
     })
-}
-
-/// `(assoc! t k v)` on a live transient vector (with `k` at most
-/// its length) or transient map (with a scalar key).
-fn assoc_bang(args: &[&Value]) -> Option<Value> {
-    let Value::Transient(t) = args[0] else {
-        return None;
-    };
-    {
-        let mut guard = t.lock();
-        match &mut *guard {
-            TransientKind::Vector(tv) => {
-                let i = index(args[1])?;
-                if let Value::Int(n) = args[2] {
-                    tv.assoc_int(i, *n).ok()?;
-                } else {
-                    tv.assoc(i, args[2].clone()).ok()?;
-                }
-            }
-            TransientKind::Map(tm) if is_scalar_key(args[1]) => {
-                tm.assoc(args[1].clone(), args[2].clone()).ok()?;
-            }
-            _ => return None,
-        }
-    }
-    Some(args[0].clone())
 }

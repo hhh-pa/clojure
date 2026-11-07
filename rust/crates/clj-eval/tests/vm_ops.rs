@@ -384,6 +384,43 @@ const JVM_ROWS: &[(&str, &str)] = &[
         r#"(reduce (fn [{:keys [n s]} x] {:n (inc n) :s (+ s x)}) {:n 0 :s 0} [1 2 3])"#,
         r#"{:n 3, :s 6}"#,
     ),
+    // 3-arg direct calls (#250): assoc!, nth with default, get with default
+    (
+        r#"((fn [v i x] (let [t (transient v)] [(persistent! (assoc! t i x)) (persistent! (assoc! (transient [1 2]) 0 :sym)) (persistent! (assoc! (transient {:a 1}) :b 2))])) [1 2 3] 1 99)"#,
+        r#"[[1 99 3] [:sym 2] {:a 1, :b 2}]"#,
+    ),
+    (
+        r#"((fn [t] [(persistent! (assoc! t (+ 0 1) 88)) (persistent! (assoc! (transient [1 2]) 0 (+ 5 5))) (persistent! (assoc! (transient [1 2]) (inc 0) (+ 5 5)))]) (transient [10 20]))"#,
+        r#"[[10 88] [10 2] [1 10]]"#,
+    ),
+    (
+        r#"[(nth [10 20] 0 :d) (nth [10 20] 5 :d) (nth nil 0 :d) (nth "abc" 1 :d) (nth "abc" 5 :d) (get {:a 1} :a :d) (get {:a 1} :b :d) (get nil :a :d) (get [10 20] 1 :d) (get [10 20] 5 :d)]"#,
+        r#"[10 :d :d \b :d 1 :d :d 20 :d]"#,
+    ),
+    (
+        r#"((fn [m] [(:k m) (:missing m :default) (:k nil :default) (:k "not-map") (:k m (+ 1 2))]) {:k 42})"#,
+        r#"[42 :default :default nil 42]"#,
+    ),
+    (
+        r#"((fn [v] [(try (assoc! v 0 1) (catch Exception e :err)) (try (assoc! (transient [1]) :not-int 1) (catch Exception e :ierr)) (try (assoc! (transient [1]) 99 1) (catch Exception e :oob)) (persistent! (assoc! (transient {}) [1 2] 3)) (try (assoc! (transient #{1}) 0 1) (catch Exception e :serr)) (try (let [t (persistent! (transient {}))] (assoc! t :a 1)) (catch Exception e :perr))]) [10])"#,
+        r#"[:err :ierr :oob {[1 2] 3} :serr :perr]"#,
+    ),
+    (
+        r#"(let [k :c] ((fn [m] (persistent! (assoc! (transient m) k 3))) {:a 1}))"#,
+        r#"{:a 1, :c 3}"#,
+    ),
+    (
+        r#"(let [a 1 b 2 c 3 d 4] [(if (< a b c d) :yes :no) (if (> a b c d) :y :no)])"#,
+        r#"[:yes :no]"#,
+    ),
+    (
+        r#"(let [v [1 2] k 0 x 99] (try (assoc! v k x) (catch Exception e :caught)))"#,
+        r#":caught"#,
+    ),
+    (
+        r#"(let [t (transient [1 2]) k 0 x 99] (persistent! (assoc! t k x)))"#,
+        r#"[99 2]"#,
+    ),
 ];
 
 const PORT_ROWS: &[(&str, &str)] = &[

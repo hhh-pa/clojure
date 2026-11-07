@@ -1700,6 +1700,36 @@ fn build_str_scan(s: &str) -> Option<StrScan> {
     })
 }
 
+/// Direct fast-path read from the thread-local scan slots (0 and 1)
+/// without closure indirection or mutable borrow overhead.
+#[inline(always)]
+pub(crate) fn fast_str_char_at(s: &Arc<str>, idx: usize) -> Option<char> {
+    LAST_SCAN.with(|memo| {
+        let memo = memo.borrow();
+        if let Some((key, scan)) = &memo.0[0] {
+            if Arc::ptr_eq(key, s) {
+                return match scan {
+                    StrScan::Ascii => s.as_bytes().get(idx).map(|b| *b as char),
+                    StrScan::Indexed { byte_at, .. } => {
+                        byte_at.get(idx).and_then(|b| s[*b..].chars().next())
+                    }
+                };
+            }
+        }
+        if let Some((key, scan)) = &memo.0[1] {
+            if Arc::ptr_eq(key, s) {
+                return match scan {
+                    StrScan::Ascii => s.as_bytes().get(idx).map(|b| *b as char),
+                    StrScan::Indexed { byte_at, .. } => {
+                        byte_at.get(idx).and_then(|b| s[*b..].chars().next())
+                    }
+                };
+            }
+        }
+        None
+    })
+}
+
 /// The char at `idx` (`None` reads out of bounds). Small strings
 /// decode directly — ASCII short-circuits through one SIMD check
 /// to a byte load, skipping per-char decode entirely; big
@@ -1707,6 +1737,9 @@ fn build_str_scan(s: &str) -> Option<StrScan> {
 /// `Ascii` flag answers in one byte load even for small
 /// indexes, where a direct scan would re-decode, #235).
 pub(crate) fn str_char_at(s: &Arc<str>, idx: usize) -> Option<char> {
+    if let Some(c) = fast_str_char_at(s, idx) {
+        return Some(c);
+    }
     if let Some(hit) = with_scan_hit(s, |scan| scan_char_at(s, scan, idx)) {
         return hit;
     }
@@ -3217,5 +3250,17 @@ mod tests {
         assert_eq!(str_char_at(&s1, 0), Some('1'));
         assert_eq!(str_char_at(&s2, 0), Some('2'));
         assert_eq!(str_char_at(&s2, 10), Some('2'));
+    }
+
+    #[test]
+    fn str_scan_fast_indexed_slot0() {
+        let s: Arc<str> = Arc::from("é".repeat(200));
+        let scan = build_str_scan(&s).unwrap();
+        LAST_SCAN.with(|memo| {
+            let mut memo = memo.borrow_mut();
+            memo.0[0] = Some((Arc::clone(&s), scan));
+        });
+        assert_eq!(fast_str_char_at(&s, 5), Some('é'));
+        assert_eq!(fast_str_char_at(&s, 250), None);
     }
 }

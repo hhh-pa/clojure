@@ -2875,3 +2875,40 @@ fn owned_churn_scale_smoke() {
         "[10 10]"
     );
 }
+
+#[test]
+fn fast_str_char_at_memo_and_index() {
+    let mut eval = boot();
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [s \"éàüö\"] [(nth s 0) (nth s 1) (nth s 2) (nth s 3)])"
+        ),
+        "[\\é \\à \\ü \\ö]"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [s (apply str (repeat 100 \"é\"))] [(nth s 0) (nth s 1) (nth s 50)])"
+        ),
+        "[\\é \\é \\é]"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [s1 \"hello\" s2 \"world\"] [(nth s1 0) (nth s2 0) (nth s1 1) (nth s2 1)])"
+        ),
+        "[\\h \\w \\e \\o]"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [s \"abcdefghijklmnopqrstuvwxyz\"] [(nth s 0) (nth s 25) (nth s 12)])"
+        ),
+        "[\\a \\z \\m]"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(nth \"abc\" 10)"),
+        "java.lang.StringIndexOutOfBoundsException | Index 10 out of bounds for length 3"
+    );
+}

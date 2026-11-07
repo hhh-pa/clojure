@@ -432,3 +432,25 @@ fn transient_from_vector_owned_arms() {
     assert!(tv.is_packed());
     assert_eq!(tv.len().unwrap(), 2000);
 }
+
+#[test]
+fn vector_push_to_string() {
+    let flat_cv = Vector::from_chars(vec!['h', 'e', 'l', 'l', 'o']);
+    let mut s = String::new();
+    assert!(flat_cv.push_to_string(&mut s));
+    assert_eq!(s, "hello");
+
+    let big_chars: Vec<char> = (0..2000)
+        .map(|i| if i % 2 == 0 { 'a' } else { 'b' })
+        .collect();
+    let trie_cv = Vector::from_chars(big_chars.clone());
+    let mut s2 = String::new();
+    assert!(trie_cv.push_to_string(&mut s2));
+    assert_eq!(s2.len(), 2000);
+    assert_eq!(s2, big_chars.into_iter().collect::<String>());
+
+    let iv = Vector::from_ints(vec![1, 2, 3]);
+    let mut s3 = String::new();
+    assert!(!iv.push_to_string(&mut s3));
+    assert!(s3.is_empty());
+}

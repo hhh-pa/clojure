@@ -35,6 +35,11 @@ use crate::eval::Evaluator;
 use crate::expr::DirectCall;
 use crate::vm::{Code, Exec, Frame, Loc, Operand, direct_slow_values, local, next_site};
 
+/// A three-argument op's inline answer (`None` runs the native).
+pub(crate) trait Op3: Send + Sync + 'static {
+    fn apply(a: &Value, b: &Value, c: &Value) -> Option<Value>;
+}
+
 /// A two-argument op's inline answer (`None` runs the native).
 pub(crate) trait Op2: Send + Sync + 'static {
     fn apply(a: &Value, b: &Value) -> Option<Value>;
@@ -202,6 +207,12 @@ fn native(ev: &mut Evaluator, c: &Site, mut values: SmallVec<[Value; 4]>) -> Res
 
 #[cold]
 #[inline(never)]
+fn native3(ev: &mut Evaluator, c: &Site, a: &Value, b: &Value, d: &Value) -> Result<Value, Signal> {
+    native(ev, c, smallvec![a.clone(), b.clone(), d.clone()])
+}
+
+#[cold]
+#[inline(never)]
 fn native2(ev: &mut Evaluator, c: &Site, a: &Value, b: &Value) -> Result<Value, Signal> {
     native(ev, c, smallvec![a.clone(), b.clone()])
 }
@@ -329,6 +340,53 @@ fn shape1<O: Op1, T: Out>(c: Site, a: Operand) -> Code<T::T> {
     }
 }
 
+fn unshape(s: Shape) -> Operand {
+    match s {
+        Shape::Reg(r) => Operand::Loc(Loc::Reg(r), false),
+        Shape::Up(u) => Operand::Loc(Loc::Up(u), false),
+        Shape::Kst(v) => Operand::Const(v),
+        Shape::Exec(e) => Operand::Exec(e),
+    }
+}
+
+fn sss<A: Src, B: Src, C: Src, O: Op3>(c: Site, a: A, b: B, d: C) -> Exec {
+    Box::new(move |ev, f| {
+        if ev.site_direct_valid(c.sid, &c.call) {
+            if let Some(v) = O::apply(a.read(f), b.read(f), d.read(f)) {
+                return Ok(v);
+            }
+        }
+        native3(ev, &c, a.read(f), b.read(f), d.read(f))
+    })
+}
+
+fn any3<O: Op3>(c: Site, a: Operand, b: Operand, d: Operand) -> Exec {
+    Box::new(move |ev, f| {
+        let valid = ev.site_direct_valid(c.sid, &c.call);
+        let ca = a.computed(ev, f)?;
+        let cb = b.computed(ev, f)?;
+        let cd = d.computed(ev, f)?;
+        let va = a.read(f, ca.as_ref());
+        let vb = b.read(f, cb.as_ref());
+        let vd = d.read(f, cd.as_ref());
+        if valid {
+            if let Some(v) = O::apply(va, vb, vd) {
+                return Ok(v);
+            }
+        }
+        native3(ev, &c, va, vb, vd)
+    })
+}
+
+fn shape3<O: Op3>(c: Site, a: Operand, b: Operand, d: Operand) -> Exec {
+    match (shape(a), shape(b), shape(d)) {
+        (Shape::Reg(ra), Shape::Reg(rb), Shape::Reg(rc)) => {
+            sss::<Reg, Reg, Reg, O>(c, Reg(ra), Reg(rb), Reg(rc))
+        }
+        (sa, sb, sd) => any3::<O>(c, unshape(sa), unshape(sb), unshape(sd)),
+    }
+}
+
 /// An n-ary call's computed operands, evaluated in source order
 /// into `out` (filled in place: a returned buffer would copy its
 /// inline storage per call).
@@ -445,14 +503,25 @@ const NARY: &[RowN] = &[
     ),
 ];
 
+type Ctor3<T> = fn(Site, Operand, Operand, Operand) -> Code<T>;
 type Ctor2<T> = fn(Site, Operand, Operand) -> Code<T>;
 type Ctor1<T> = fn(Site, Operand) -> Code<T>;
+
+/// See [`RowN`].
+type Row3 = (&'static str, Ctor3<Value>);
 
 /// See [`RowN`].
 type Row2 = (&'static str, Ctor2<Value>, Option<Ctor2<bool>>);
 
 /// See [`RowN`].
 type Row1 = (&'static str, Ctor1<Value>, Option<Ctor1<bool>>);
+
+/// The three-argument ops by core name (value code).
+const TERNARY: &[Row3] = &[
+    ("assoc!", shape3::<AssocBang>),
+    ("nth", shape3::<Nth3>),
+    ("get", shape3::<Get3>),
+];
 
 /// The two-argument ops by core name: the value code, and the
 /// test code for the predicates.
@@ -581,6 +650,7 @@ pub(crate) fn core_name(call: &DirectCall) -> Option<&str> {
 pub(crate) enum Ctor<T: 'static> {
     One(Ctor1<T>),
     Two(Ctor2<T>),
+    Three(Ctor3<T>),
     N(CtorN<T>),
 }
 
@@ -596,9 +666,46 @@ impl<T: 'static> Ctor<T> {
                 let a = next();
                 c(site, a, next())
             }
+            Ctor::Three(c) => {
+                let a = next();
+                let b = next();
+                c(site, a, b, next())
+            }
             Ctor::N(c) => c(site, ops.collect()),
         }
     }
+}
+
+fn unary_value_ctor(name: &str) -> Option<Ctor<Value>> {
+    UNARY
+        .iter()
+        .find(|(n, ..)| *n == name)
+        .map(|(_, v, _)| Ctor::One(*v))
+}
+
+fn binary_value_ctor(name: &str) -> Option<Ctor<Value>> {
+    BINARY
+        .iter()
+        .find(|(n, ..)| *n == name)
+        .map(|(_, v, _)| Ctor::Two(*v))
+}
+
+fn ternary_value_ctor(name: &str) -> Option<Ctor<Value>> {
+    TERNARY
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|(_, v)| Ctor::Three(*v))
+        .or_else(|| {
+            NARY.iter()
+                .find(|(n, ..)| *n == name)
+                .map(|(_, v, _)| Ctor::N(*v))
+        })
+}
+
+fn nary_value_ctor(name: &str) -> Option<Ctor<Value>> {
+    NARY.iter()
+        .find(|(n, ..)| *n == name)
+        .map(|(_, v, _)| Ctor::N(*v))
 }
 
 /// The specialized value code for `call`, if its op has one. Its
@@ -607,29 +714,40 @@ impl<T: 'static> Ctor<T> {
 pub(crate) fn value_ctor(call: &DirectCall) -> Option<Ctor<Value>> {
     let name = core_name(call)?;
     match call.args.len() {
-        1 => UNARY
-            .iter()
-            .find(|(n, ..)| *n == name)
-            .map(|(_, v, _)| Ctor::One(*v)),
-        2 => BINARY
-            .iter()
-            .find(|(n, ..)| *n == name)
-            .map(|(_, v, _)| Ctor::Two(*v)),
-        3.. => NARY
-            .iter()
-            .find(|(n, ..)| *n == name)
-            .map(|(_, v, _)| Ctor::N(*v)),
+        1 => unary_value_ctor(name),
+        2 => binary_value_ctor(name),
+        3 => ternary_value_ctor(name),
+        4.. => nary_value_ctor(name),
         _ => None,
     }
+}
+
+fn unary_test_ctor(name: &str) -> Option<Ctor<bool>> {
+    UNARY.iter().find(|(n, ..)| *n == name)?.2.map(Ctor::One)
+}
+
+fn binary_test_ctor(name: &str) -> Option<Ctor<bool>> {
+    BINARY.iter().find(|(n, ..)| *n == name)?.2.map(Ctor::Two)
+}
+
+fn ternary_test_ctor(name: &str) -> Option<Ctor<bool>> {
+    NARY.iter()
+        .find(|(n, ..)| *n == name)
+        .and_then(|(_, _, t)| t.map(Ctor::N))
+}
+
+fn nary_test_ctor(name: &str) -> Option<Ctor<bool>> {
+    NARY.iter().find(|(n, ..)| *n == name)?.2.map(Ctor::N)
 }
 
 /// The specialized test code for `call`, if its op is a predicate.
 pub(crate) fn test_ctor(call: &DirectCall) -> Option<Ctor<bool>> {
     let name = core_name(call)?;
     match call.args.len() {
-        1 => UNARY.iter().find(|(n, ..)| *n == name)?.2.map(Ctor::One),
-        2 => BINARY.iter().find(|(n, ..)| *n == name)?.2.map(Ctor::Two),
-        3.. => NARY.iter().find(|(n, ..)| *n == name)?.2.map(Ctor::N),
+        1 => unary_test_ctor(name),
+        2 => binary_test_ctor(name),
+        3 => ternary_test_ctor(name),
+        4.. => nary_test_ctor(name),
         _ => None,
     }
 }
@@ -1212,6 +1330,60 @@ impl Op2 for ConjBang {
         tv.conj(b.clone()).ok()?;
         drop(guard);
         Some(a.clone())
+    }
+}
+
+/// `(assoc! t k v)` on a live transient vector or transient map
+/// (the cell updates in place; anything else runs the native).
+pub(crate) struct AssocBang;
+
+impl Op3 for AssocBang {
+    #[inline(always)]
+    fn apply(a: &Value, b: &Value, c: &Value) -> Option<Value> {
+        let Value::Transient(t) = a else {
+            return None;
+        };
+        let mut guard = t.lock();
+        match &mut *guard {
+            clj_value::TransientKind::Vector(tv) => {
+                let Value::Int(n) = b else {
+                    return None;
+                };
+                let i = usize::try_from(i32::try_from(*n).ok()?).ok()?;
+                if let Value::Int(x) = c {
+                    tv.assoc_int(i, *x).ok()?;
+                } else {
+                    tv.assoc(i, c.clone()).ok()?;
+                }
+            }
+            clj_value::TransientKind::Map(tm) => {
+                if !crate::vm_intrinsics::is_scalar_key(b) {
+                    return None;
+                }
+                tm.assoc(b.clone(), c.clone()).ok()?;
+            }
+            _ => return None,
+        }
+        drop(guard);
+        Some(a.clone())
+    }
+}
+
+pub(crate) struct Nth3;
+
+impl Op3 for Nth3 {
+    #[inline(always)]
+    fn apply(a: &Value, b: &Value, c: &Value) -> Option<Value> {
+        crate::vm_intrinsics::nth_of(a, b, Some(c))
+    }
+}
+
+pub(crate) struct Get3;
+
+impl Op3 for Get3 {
+    #[inline(always)]
+    fn apply(a: &Value, b: &Value, c: &Value) -> Option<Value> {
+        crate::vm_intrinsics::get_of(a, b, Some(c))
     }
 }
 

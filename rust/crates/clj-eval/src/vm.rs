@@ -819,12 +819,6 @@ impl Compiler {
                 let ops = self.in_place_operands(call);
                 return ctor.code(site_of(call), ops);
             }
-            if let (None, Some(op)) = (
-                crate::vm_ops::value_ctor(call),
-                crate::vm_intrinsics::intrinsic_of(call),
-            ) {
-                return self.intrinsic_test(call, op);
-            }
         }
         let e = self.compile(expr);
         Box::new(move |ev, f| Ok(e(ev, f)?.is_truthy()))
@@ -858,11 +852,6 @@ impl Compiler {
     /// place (never moved out).
     fn in_place_operands(&mut self, call: &DirectCall) -> Vec<Operand> {
         call.args.iter().map(|a| self.operand(a, false)).collect()
-    }
-
-    fn intrinsic_test(&mut self, call: &DirectCall, fast: crate::vm_intrinsics::Fast) -> Test {
-        let ops = self.in_place_operands(call);
-        intrinsic_test_exec(site_of(call), ops, fast)
     }
 
     /// `let`: a symbol's init writes its register directly (no
@@ -1194,6 +1183,11 @@ impl Compiler {
     /// with a fixed arity for the arg count takes them straight into
     /// its registers.
     fn compile_invoke(&mut self, head: &Expr, args: &[Expr], span: Span) -> Exec {
+        if let Expr::Literal(Value::Keyword(kw)) = head {
+            if let Some(exec) = self.compile_literal_keyword_invoke(kw, args, span) {
+                return exec;
+            }
+        }
         let head = self.compile(head);
         let args: Vec<Operand> = args.iter().map(|a| self.operand(a, true)).collect();
         Box::new(move |ev, f| {
@@ -1205,6 +1199,48 @@ impl Compiler {
             eval_operands(ev, f, &args, &mut values)?;
             call_value(ev, &callee, &mut values, span)
         })
+    }
+
+    /// Fast-path literal keyword invocations (`(:kw target)` or `(:kw target fallback)`).
+    fn compile_literal_keyword_invoke(
+        &mut self,
+        kw: &clj_value::Keyword,
+        args: &[Expr],
+        span: Span,
+    ) -> Option<Exec> {
+        if args.len() == 1 {
+            let target = self.operand(&args[0], false);
+            let kw_val = Value::Keyword(kw.clone());
+            Some(Box::new(move |ev, f| {
+                let comp = target.computed(ev, f)?;
+                let m = target.read(f, comp.as_ref());
+                if let Some(v) = crate::vm_intrinsics::get_of(m, &kw_val, None) {
+                    return Ok(v);
+                }
+                let mut values: SmallVec<[Value; 4]> = SmallVec::new();
+                values.push(m.clone());
+                call_value(ev, &kw_val, &mut values, span)
+            }))
+        } else if args.len() == 2 {
+            let target = self.operand(&args[0], false);
+            let fallback = self.operand(&args[1], false);
+            let kw_val = Value::Keyword(kw.clone());
+            Some(Box::new(move |ev, f| {
+                let comp_target = target.computed(ev, f)?;
+                let comp_fb = fallback.computed(ev, f)?;
+                let m = target.read(f, comp_target.as_ref());
+                let fb = fallback.read(f, comp_fb.as_ref());
+                if let Some(v) = crate::vm_intrinsics::get_of(m, &kw_val, Some(fb)) {
+                    return Ok(v);
+                }
+                let mut values: SmallVec<[Value; 4]> = SmallVec::new();
+                values.push(m.clone());
+                values.push(fb.clone());
+                call_value(ev, &kw_val, &mut values, span)
+            }))
+        } else {
+            None
+        }
     }
 
     /// A direct-call operand; `may_move` lets a last-use local move
@@ -1233,10 +1269,6 @@ impl Compiler {
         if let Some(ctor) = crate::vm_ops::update_ctor(call) {
             let ops: Vec<Operand> = call.args.iter().map(|a| self.operand(a, true)).collect();
             return crate::vm_ops::update_code(ctor, site, ops);
-        }
-        if let Some(op) = crate::vm_intrinsics::intrinsic_of(call) {
-            let ops = self.in_place_operands(call);
-            return direct_intrinsic(site, ops, op);
         }
         let ops: Vec<Operand> = call.args.iter().map(|a| self.operand(a, true)).collect();
         direct_general(site, ops)
@@ -1614,7 +1646,11 @@ pub(crate) enum Operand {
 
 impl Operand {
     /// A computed operand's value (`None` for in-place operands).
-    fn computed(&self, ev: &mut Evaluator, f: &mut Frame<'_>) -> Result<Option<Value>, Signal> {
+    pub(crate) fn computed(
+        &self,
+        ev: &mut Evaluator,
+        f: &mut Frame<'_>,
+    ) -> Result<Option<Value>, Signal> {
         match self {
             Operand::Exec(e) => e(ev, f).map(Some),
             _ => Ok(None),
@@ -1622,7 +1658,7 @@ impl Operand {
     }
 
     /// The operand in place (`computed` holds an `Exec`'s value).
-    fn read<'v>(&'v self, f: &'v Frame<'_>, computed: Option<&'v Value>) -> &'v Value {
+    pub(crate) fn read<'v>(&'v self, f: &'v Frame<'_>, computed: Option<&'v Value>) -> &'v Value {
         match self {
             Operand::Const(v) => v,
             Operand::Loc(l, _) => f.get(*l),
@@ -1691,61 +1727,6 @@ fn site_of(call: &DirectCall) -> Arc<DirectCall> {
         args: Vec::new(),
         span: call.span,
     })
-}
-
-/// A three-argument intrinsic direct call: computed operands
-/// evaluate first (in order — locals and literals have no effects,
-/// and no argument rewrites a live local's register), then the fast
-/// path reads every operand in place; a miss runs the native over
-/// clones.
-fn direct_intrinsic(
-    site: Arc<DirectCall>,
-    ops: Vec<Operand>,
-    fast: crate::vm_intrinsics::Fast,
-) -> Exec {
-    let sid = next_site();
-    let [a, b, c] = <[Operand; 3]>::try_from(ops).ok().expect("three operands");
-    Box::new(move |ev, f| intrinsic3(ev, f, sid, &site, [&a, &b, &c], fast))
-}
-
-/// [`direct_intrinsic`] as a branch test (the same call, truth
-/// taken directly).
-fn intrinsic_test_exec(
-    site: Arc<DirectCall>,
-    ops: Vec<Operand>,
-    fast: crate::vm_intrinsics::Fast,
-) -> Test {
-    let sid = next_site();
-    let [a, b, c] = <[Operand; 3]>::try_from(ops).ok().expect("three operands");
-    Box::new(move |ev, f| Ok(intrinsic3(ev, f, sid, &site, [&a, &b, &c], fast)?.is_truthy()))
-}
-
-#[inline(always)]
-fn intrinsic3(
-    ev: &mut Evaluator,
-    f: &mut Frame<'_>,
-    sid: usize,
-    site: &DirectCall,
-    [a, b, c]: [&Operand; 3],
-    fast: crate::vm_intrinsics::Fast,
-) -> Result<Value, Signal> {
-    if !ev.site_direct_valid(sid, site) {
-        let values = smallvec::smallvec![a.eval(ev, f)?, b.eval(ev, f)?, c.eval(ev, f)?];
-        return direct_slow_values(ev, site, values);
-    }
-    let (ta, tb, tc) = (a.computed(ev, f)?, b.computed(ev, f)?, c.computed(ev, f)?);
-    let (va, vb, vc) = (
-        a.read(f, ta.as_ref()),
-        b.read(f, tb.as_ref()),
-        c.read(f, tc.as_ref()),
-    );
-    match fast(&[va, vb, vc]) {
-        Some(v) => Ok(v),
-        None => {
-            let mut values = smallvec::smallvec![va.clone(), vb.clone(), vc.clone()];
-            ev.call_direct_values(site, &mut values)
-        }
-    }
 }
 
 /// [`direct_slow`] over already-evaluated args.

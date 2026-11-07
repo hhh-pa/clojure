@@ -378,10 +378,23 @@ struct SmallMap {
 struct ShapeRegistry {
     map: HashMap<Vec<Value>, Weak<MapShape>, FxBuildHasher>,
     since_cleanup: usize,
-    /// The last all-keyword shape interned: runs of same-shape maps
-    /// (every fresh var's `{:ns … :name …}`) skip the hash probe.
-    /// Kept alive here, so its table entry never goes stale.
-    last: Option<Arc<MapShape>>,
+    /// The last exact shapes interned (MRU slots 0 and 1): runs of
+    /// same-shape maps or alternating shapes skip the hash probe.
+    /// Kept alive here, so their table entries never go stale.
+    last: [Option<Arc<MapShape>>; 2],
+}
+
+#[inline]
+fn is_exact_key(k: &Value) -> bool {
+    matches!(
+        k,
+        Value::Keyword(_)
+            | Value::Char(_)
+            | Value::Str(_)
+            | Value::Symbol(_)
+            | Value::Bool(_)
+            | Value::Nil
+    )
 }
 
 /// Dead-entry cleanup cadence: a cleanup scans the whole table,
@@ -400,7 +413,7 @@ thread_local! {
     static SHAPE_REGISTRY: RefCell<ShapeRegistry> = RefCell::new(ShapeRegistry {
         map: HashMap::default(),
         since_cleanup: 0,
-        last: None,
+        last: [None, None],
     });
 }
 
@@ -412,17 +425,21 @@ thread_local! {
 fn intern_shape(keys: &[Value]) -> Arc<MapShape> {
     SHAPE_REGISTRY.with(|reg| {
         let mut reg = reg.borrow_mut();
-        // Keyword keys compare unambiguously (no cross-type `=`), so
+        // Exact keys compare unambiguously (no cross-type `=`), so
         // the shortcut agrees with the table's own `Eq`.
-        let keywords = keys.iter().all(|k| matches!(k, Value::Keyword(_)));
-        if keywords {
-            if let Some(last) = reg.last.as_ref().filter(|l| *l.keys == *keys) {
-                return Arc::clone(last);
+        let exact = keys.iter().all(is_exact_key);
+        if exact {
+            if let Some(l0) = reg.last[0].as_ref().filter(|l| *l.keys == *keys) {
+                return Arc::clone(l0);
+            }
+            if let Some(l1) = reg.last[1].as_ref().filter(|l| *l.keys == *keys) {
+                return Arc::clone(l1);
             }
         }
         if let Some(shape) = reg.map.get(keys).and_then(Weak::upgrade) {
-            if keywords {
-                reg.last = Some(Arc::clone(&shape));
+            if exact {
+                reg.last[1] = reg.last[0].take();
+                reg.last[0] = Some(Arc::clone(&shape));
             }
             return shape;
         }
@@ -430,8 +447,9 @@ fn intern_shape(keys: &[Value]) -> Arc<MapShape> {
             keys: keys.to_vec().into_boxed_slice(),
         });
         reg.map.insert(keys.to_vec(), Arc::downgrade(&shape));
-        if keywords {
-            reg.last = Some(Arc::clone(&shape));
+        if exact {
+            reg.last[1] = reg.last[0].take();
+            reg.last[0] = Some(Arc::clone(&shape));
         }
         reg.since_cleanup += 1;
         if reg.since_cleanup >= SHAPE_CLEANUP_EVERY
@@ -701,6 +719,21 @@ impl Vector {
             VectorInner::Generic(_) => Err(self),
             VectorInner::Ints(t) => Ok(TypedItems::Ints(t.into_vec())),
             VectorInner::Chars(t) => Ok(TypedItems::Chars(t.into_vec())),
+        }
+    }
+
+    /// If this vector is packed chars, append all chars directly to `out`
+    /// without boxing into `Value::Char`. Returns true if handled.
+    pub fn push_to_string(&self, out: &mut String) -> bool {
+        match &self.inner {
+            VectorInner::Chars(packed) => {
+                out.reserve(packed.len());
+                for &c in packed.iter() {
+                    out.push(c);
+                }
+                true
+            }
+            _ => false,
         }
     }
 

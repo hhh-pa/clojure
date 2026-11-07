@@ -2823,9 +2823,11 @@ pub(crate) fn apply_str_direct(
     match coll {
         Value::Nil => {}
         Value::Vector(x) => {
-            out.reserve(x.len());
-            for v in x.iter() {
-                str_push(&mut out, eval, &v)?;
+            if !x.push_to_string(&mut out) {
+                out.reserve(x.len());
+                for v in x.iter() {
+                    str_push(&mut out, eval, &v)?;
+                }
             }
         }
         Value::List(l) => {

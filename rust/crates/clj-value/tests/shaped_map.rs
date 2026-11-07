@@ -376,3 +376,46 @@ fn take_value_shaped_and_trie() {
     assert_eq!(big.take_value(&Value::Int(5)), Some(Value::Int(50)));
     assert_eq!(big.take_value(&Value::Int(999)), None);
 }
+
+#[test]
+fn shape_registry_mru_exact_keys() {
+    let char_pairs = vec![
+        (Value::Char('a'), Value::Int(1)),
+        (Value::Char('b'), Value::Int(2)),
+    ];
+    let m1 = clj_value::Map::from_kvs_last_wins(char_pairs.clone());
+    let m2 = clj_value::Map::from_kvs_last_wins(char_pairs);
+    assert!(m1.is_shaped());
+    assert!(m2.is_shaped());
+
+    let str_pairs = vec![(Value::Str(std::sync::Arc::from("k")), Value::Int(1))];
+    let m3 = clj_value::Map::from_kvs_last_wins(str_pairs.clone());
+    let m4 = clj_value::Map::from_kvs_last_wins(str_pairs);
+    assert!(m3.is_shaped());
+    assert!(m4.is_shaped());
+
+    let sym_pairs = vec![(
+        Value::Symbol(clj_value::Symbol::new(None, "sym")),
+        Value::Int(1),
+    )];
+    let m5 = clj_value::Map::from_kvs_last_wins(sym_pairs.clone());
+    let m6 = clj_value::Map::from_kvs_last_wins(sym_pairs);
+    assert!(m5.is_shaped());
+    assert!(m6.is_shaped());
+
+    let bool_nil_pairs = vec![
+        (Value::Bool(true), Value::Int(1)),
+        (Value::Nil, Value::Int(2)),
+    ];
+    let m7 = clj_value::Map::from_kvs_last_wins(bool_nil_pairs.clone());
+    let m8 = clj_value::Map::from_kvs_last_wins(bool_nil_pairs);
+    assert!(m7.is_shaped());
+    assert!(m8.is_shaped());
+
+    for _ in 0..10 {
+        let a = clj_value::Map::from_kvs_last_wins(vec![(Value::Char('x'), Value::Int(1))]);
+        let b = clj_value::Map::from_kvs_last_wins(vec![(Value::Char('y'), Value::Int(2))]);
+        assert_eq!(a.get(&Value::Char('x')), Some(&Value::Int(1)));
+        assert_eq!(b.get(&Value::Char('y')), Some(&Value::Int(2)));
+    }
+}
