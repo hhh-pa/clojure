@@ -754,49 +754,117 @@ fn sort_by_checked(
     Ok(())
 }
 
-/// Default `sort` order with homogeneous fast paths: all-`Int`
-/// items compare as `i64`, all-ASCII-string items compare by bytes
-/// (identical to UTF-16 unit order on ASCII), and all-int-vector
-/// items compare lexicographically without the generic compare
-/// machinery. Mixed or other items take `jvm_compare`.
-fn sort_default(items: &mut [Value]) -> Result<(), NativeError> {
+/// Sort all-`Int` items as `i64`; `false` when any item is not `Int`.
+fn sort_all_ints(items: &mut [Value]) -> bool {
     use std::cmp::Ordering;
-    if items.iter().all(|v| matches!(v, Value::Int(_))) {
-        items.sort_by(|a, b| match (a, b) {
-            (Value::Int(x), Value::Int(y)) => x.cmp(y),
-            _ => Ordering::Equal,
-        });
-        return Ok(());
+    if !items.iter().all(|v| matches!(v, Value::Int(_))) {
+        return false;
     }
-    if items
+    items.sort_by(|a, b| match (a, b) {
+        (Value::Int(x), Value::Int(y)) => x.cmp(y),
+        _ => Ordering::Equal,
+    });
+    true
+}
+
+/// Sort all-ASCII-string items by bytes (identical to UTF-16 unit
+/// order on ASCII); `false` when any item is not an ASCII string.
+fn sort_all_ascii_strs(items: &mut [Value]) -> bool {
+    use std::cmp::Ordering;
+    if !items
         .iter()
         .all(|v| matches!(v, Value::Str(s) if s.is_ascii()))
     {
-        items.sort_by(|a, b| match (a, b) {
-            (Value::Str(x), Value::Str(y)) => x.cmp(y),
-            _ => Ordering::Equal,
-        });
-        return Ok(());
+        return false;
     }
-    let int_vector = |v: &Value| match v {
+    items.sort_by(|a, b| match (a, b) {
+        (Value::Str(x), Value::Str(y)) => x.cmp(y),
+        _ => Ordering::Equal,
+    });
+    true
+}
+
+/// Whether `v` is a 2-vector `[ascii-string int]`.
+fn is_str_int_pair(v: &Value) -> bool {
+    match v {
+        Value::Vector(vec) => {
+            vec.len() == 2
+                && matches!(vec.get(0), Some(Value::Str(s)) if s.is_ascii())
+                && matches!(vec.get(1), Some(Value::Int(_)))
+        }
+        _ => false,
+    }
+}
+
+/// Order two `[ascii-string int]` pairs.
+fn cmp_str_int_pair(a: &Value, b: &Value) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    let (Value::Vector(x), Value::Vector(y)) = (a, b) else {
+        return Ordering::Equal;
+    };
+    let (Some(Value::Str(p)), Some(Value::Str(q))) = (x.get(0), y.get(0)) else {
+        return Ordering::Equal;
+    };
+    match p.cmp(&q) {
+        Ordering::Equal => match (x.get(1), y.get(1)) {
+            (Some(Value::Int(u)), Some(Value::Int(v))) => u.cmp(&v),
+            _ => Ordering::Equal,
+        },
+        ord => ord,
+    }
+}
+
+/// Sort all-`[ascii-string int]` pair items; `false` otherwise.
+fn sort_str_int_pairs(items: &mut [Value]) -> bool {
+    if items.is_empty() || !items.iter().all(is_str_int_pair) {
+        return false;
+    }
+    items.sort_by(cmp_str_int_pair);
+    true
+}
+
+/// Whether `v` is a vector whose items are all `Int`.
+fn is_int_vector(v: &Value) -> bool {
+    match v {
         Value::Vector(vec) => vec.iter().all(|e| matches!(e, Value::Int(_))),
         _ => false,
+    }
+}
+
+/// Order two all-`Int` vectors lexicographically.
+fn cmp_int_vectors(a: &Value, b: &Value) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    let (Value::Vector(x), Value::Vector(y)) = (a, b) else {
+        return Ordering::Equal;
     };
-    if !items.is_empty() && items.iter().all(int_vector) {
-        items.sort_by(|a, b| match (a, b) {
-            (Value::Vector(x), Value::Vector(y)) => {
-                for (u, w) in x.iter().zip(y.iter()) {
-                    if let (Value::Int(p), Value::Int(q)) = (&u, &w) {
-                        match p.cmp(q) {
-                            Ordering::Equal => {}
-                            ord => return ord,
-                        }
-                    }
-                }
-                x.len().cmp(&y.len())
+    for (u, w) in x.iter().zip(y.iter()) {
+        if let (Value::Int(p), Value::Int(q)) = (&u, &w) {
+            match p.cmp(q) {
+                Ordering::Equal => {}
+                ord => return ord,
             }
-            _ => Ordering::Equal,
-        });
+        }
+    }
+    x.len().cmp(&y.len())
+}
+
+/// Sort all-int-vector items; `false` otherwise.
+fn sort_int_vectors(items: &mut [Value]) -> bool {
+    if items.is_empty() || !items.iter().all(is_int_vector) {
+        return false;
+    }
+    items.sort_by(cmp_int_vectors);
+    true
+}
+
+/// Default `sort` order: homogeneous fast paths first, then the
+/// generic `jvm_compare` machinery for mixed or other items.
+fn sort_default(items: &mut [Value]) -> Result<(), NativeError> {
+    if sort_all_ints(items)
+        || sort_all_ascii_strs(items)
+        || sort_str_int_pairs(items)
+        || sort_int_vectors(items)
+    {
         return Ok(());
     }
     sort_by_checked(items, jvm_compare)

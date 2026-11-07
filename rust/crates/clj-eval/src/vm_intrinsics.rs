@@ -180,6 +180,17 @@ pub(crate) fn is_scalar_key(k: &Value) -> bool {
 
 /// `count` of `nil`, a vector, map, set, or string (UTF-16 units,
 /// like the native).
+/// `count` of a live transient, by kind (`None` once frozen, so
+/// the caller falls back to the native error).
+fn transient_len(t: &clj_value::Transient) -> Option<usize> {
+    let guard = t.lock();
+    match &*guard {
+        TransientKind::Vector(tv) => tv.len().ok(),
+        TransientKind::Map(tm) => tm.len().ok(),
+        TransientKind::Set(ts) => ts.len().ok(),
+    }
+}
+
 pub(crate) fn count_of(v: &Value) -> Option<Value> {
     let n = match v {
         Value::Nil => 0,
@@ -188,14 +199,7 @@ pub(crate) fn count_of(v: &Value) -> Option<Value> {
         Value::Map(m) => m.size(),
         Value::Set(s) => s.size(),
         Value::Str(s) => crate::coll::str_utf16_len(s),
-        Value::Transient(t) => {
-            let guard = t.lock();
-            match &*guard {
-                TransientKind::Vector(tv) => tv.len().ok()?,
-                TransientKind::Map(tm) => tm.len().ok()?,
-                TransientKind::Set(ts) => ts.len().ok()?,
-            }
-        }
+        Value::Transient(t) => transient_len(t)?,
         Value::Extension(_) => crate::lazy::as_subvector(v)?.len(),
         _ => return None,
     };
