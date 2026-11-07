@@ -2816,19 +2816,26 @@ pub(crate) fn apply_str_direct(
     args: &[Value],
 ) -> Result<Option<Value>, NativeError> {
     let (coll, lead) = args.split_last().expect("apply passes its spread");
-    let items: Box<dyn Iterator<Item = Value> + '_> = match coll {
-        Value::Nil => Box::new(std::iter::empty()),
-        Value::Vector(x) => Box::new(x.iter()),
-        Value::List(l) => Box::new(l.iter().cloned()),
-        Value::Str(s) => Box::new(s.chars().map(Value::Char)),
-        _ => return Ok(None),
-    };
     let mut out = String::new();
     for arg in lead {
         str_push(&mut out, eval, arg)?;
     }
-    for item in items {
-        str_push(&mut out, eval, &item)?;
+    match coll {
+        Value::Nil => {}
+        Value::Vector(x) => {
+            out.reserve(x.len());
+            for v in x.iter() {
+                str_push(&mut out, eval, &v)?;
+            }
+        }
+        Value::List(l) => {
+            out.reserve(l.len());
+            for v in l.iter() {
+                str_push(&mut out, eval, v)?;
+            }
+        }
+        Value::Str(s) => out.push_str(s),
+        _ => return Ok(None),
     }
     Ok(Some(Value::Str(Arc::from(out.as_str()))))
 }

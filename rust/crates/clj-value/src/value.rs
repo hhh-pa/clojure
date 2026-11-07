@@ -660,10 +660,10 @@ impl Vector {
         Self::of(VectorInner::Ints(crate::trie::Packed::from_vec(ints)))
     }
 
-    /// Build a packed `Int` vector keeping flat buffer until shared mutation.
+    /// Build a packed `Int` vector from `i64`s in order (no scan).
     #[must_use]
     pub fn from_flat_ints(ints: Vec<i64>) -> Self {
-        Self::of(VectorInner::Ints(crate::trie::Packed::Flat(Arc::new(ints))))
+        Self::of(VectorInner::Ints(crate::trie::Packed::from_vec(ints)))
     }
 
     /// Build a packed char vector from `char`s in order (no scan).
@@ -672,12 +672,10 @@ impl Vector {
         Self::of(VectorInner::Chars(crate::trie::Packed::from_vec(chars)))
     }
 
-    /// Build a packed char vector keeping flat buffer until shared mutation.
+    /// Build a packed char vector from `char`s in order (no scan).
     #[must_use]
     pub fn from_flat_chars(chars: Vec<char>) -> Self {
-        Self::of(VectorInner::Chars(crate::trie::Packed::Flat(Arc::new(
-            chars,
-        ))))
+        Self::of(VectorInner::Chars(crate::trie::Packed::from_vec(chars)))
     }
 
     /// Whether this vector rides on packed `i64` or `char` storage.
@@ -1629,6 +1627,9 @@ impl Set {
     /// Whether a value is present.
     #[must_use]
     pub fn contains(&self, v: &Value) -> bool {
+        if self.members.len() <= 4 {
+            return self.members.iter().any(|m| m == v);
+        }
         self.inner.contains(v)
     }
 

@@ -93,6 +93,8 @@ fn count_rows() {
     assert_eq!(run_last(&mut eval, "(count #{1 2})"), "2");
     assert_eq!(run_last(&mut eval, "(count '(1 2 3))"), "3");
     assert_eq!(run_last(&mut eval, "(count (transient [1 2]))"), "2");
+    assert_eq!(run_last(&mut eval, "(count (transient {:a 1 :b 2}))"), "2");
+    assert_eq!(run_last(&mut eval, "(count (transient #{1 2 3}))"), "3");
     assert_eq!(
         run_last(&mut eval, "(apply count [(transient {:a 1 :b 2})])"),
         "2"
@@ -361,6 +363,8 @@ fn contains_rows() {
     assert_eq!(run_last(&mut eval, "(contains? \"ab\" 5)"), "false");
     assert_eq!(run_last(&mut eval, "(contains? nil :a)"), "false");
     assert_eq!(run_last(&mut eval, "(contains? #{1} 1)"), "true");
+    assert_eq!(run_last(&mut eval, "(contains? #{1 2 3 4 5} 5)"), "true");
+    assert_eq!(run_last(&mut eval, "(contains? #{1 2 3 4 5} 9)"), "false");
     assert_eq!(run_last(&mut eval, "(contains? (transient [1]) 0)"), "true");
     assert_eq!(
         run_last(&mut eval, "(contains? (subvec [1 2] 0) :a)"),
