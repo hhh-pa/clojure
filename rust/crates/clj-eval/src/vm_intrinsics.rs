@@ -215,13 +215,18 @@ pub(crate) fn scalar_eq(a: &Value, b: &Value) -> Option<bool> {
 mod tests {
     use super::*;
     use clj_value::{
-        Array, ArrayDesc, ArrayStore, BaseType, Transient, TransientKind, TransientVector, Vector,
+        Array, ArrayDesc, ArrayStore, BaseType, Keyword, Transient, TransientKind, TransientVector,
+        Vector,
     };
 
     #[test]
     fn nth_of_coverage_arms() {
         let v = Value::Vector(Vector::new_sync());
+        assert_eq!(nth_of(&v, &Value::Nil, None), None);
         assert_eq!(nth_of(&v, &Value::Int(99), None), None);
+
+        let s = Value::Str(std::sync::Arc::from("abc"));
+        assert_eq!(nth_of(&s, &Value::Int(0), None), Some(Value::Char('a')));
 
         let arr = Value::Array(Array::new(
             ArrayDesc::flat(BaseType::Object),
@@ -237,5 +242,21 @@ mod tests {
             nth_of(&tv, &Value::Int(-1), Some(&Value::Nil)),
             Some(Value::Nil)
         );
+
+        let tm = Value::Transient(Transient::new(TransientKind::Map(
+            clj_value::TransientMap::new(),
+        )));
+        assert_eq!(nth_of(&tm, &Value::Int(0), None), None);
+
+        let kw = Value::Keyword(Keyword::new(None, "k"));
+        assert_eq!(get_of(&tm, &Value::Vector(Vector::new_sync()), None), None);
+        assert_eq!(get_of(&tm, &kw, None), Some(Value::Nil));
+        assert_eq!(get_of(&tm, &kw, Some(&Value::Int(7))), Some(Value::Int(7)));
+        assert_eq!(get_of(&tv, &kw, None), None);
+
+        let mut t_map = clj_value::TransientMap::new();
+        t_map.assoc(kw.clone(), Value::Int(99)).unwrap();
+        let tm_with_val = Value::Transient(Transient::new(TransientKind::Map(t_map)));
+        assert_eq!(get_of(&tm_with_val, &kw, None), Some(Value::Int(99)));
     }
 }

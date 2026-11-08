@@ -462,6 +462,10 @@ const PORT_ROWS: &[(&str, &str)] = &[
         r#"3"#,
     ),
     (
+        r#"(do (defn r-sxs-op3 [a b c] [(+ a (identity b) c) (+ a b (identity c)) (+ (identity a) (identity b) c)]) (with-redefs [+ (fn [x y z] :redef3)] (r-sxs-op3 1 2 3)))"#,
+        r#"[:redef3 :redef3 :redef3]"#,
+    ),
+    (
         r#"(do (defn r-asc [m] (assoc m :a 1)) (with-redefs [assoc (fn [m k v] :redef)] (r-asc {})))"#,
         r#":redef"#,
     ),

@@ -1208,15 +1208,6 @@ impl Op2 for Get {
             Value::Map(m) if !m.is_sorted() && crate::vm_intrinsics::is_scalar_key(b) => {
                 Some(m.get(b).cloned().unwrap_or(Value::Nil))
             }
-            Value::Transient(t) if crate::vm_intrinsics::is_scalar_key(b) => {
-                let guard = t.lock();
-                if let clj_value::TransientKind::Map(tm) = &*guard {
-                    let v = tm.get(b).ok()?.cloned().unwrap_or(Value::Nil);
-                    drop(guard);
-                    return Some(v);
-                }
-                None
-            }
             _ => crate::vm_intrinsics::get_of(a, b, None),
         }
     }
@@ -1536,15 +1527,6 @@ impl Op3 for Get3 {
         match a {
             Value::Map(m) if !m.is_sorted() && crate::vm_intrinsics::is_scalar_key(b) => {
                 Some(m.get(b).cloned().unwrap_or_else(|| c.clone()))
-            }
-            Value::Transient(t) if crate::vm_intrinsics::is_scalar_key(b) => {
-                let guard = t.lock();
-                if let clj_value::TransientKind::Map(tm) = &*guard {
-                    let v = tm.get(b).ok()?.cloned().unwrap_or_else(|| c.clone());
-                    drop(guard);
-                    return Some(v);
-                }
-                None
             }
             _ => crate::vm_intrinsics::get_of(a, b, Some(c)),
         }
