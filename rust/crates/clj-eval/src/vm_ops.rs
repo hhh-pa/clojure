@@ -1187,9 +1187,7 @@ impl Op2 for Nth {
         let idx = *n as usize;
         match a {
             Value::Vector(v) => v.get(idx),
-            Value::Str(s) => crate::coll::fast_str_char_at(s, idx)
-                .or_else(|| crate::coll::str_char_at(s, idx))
-                .map(Value::Char),
+            Value::Str(s) => crate::coll::str_char_at(s, idx).map(Value::Char),
             Value::Transient(t) => {
                 let guard = t.lock();
                 match &*guard {
@@ -1513,11 +1511,9 @@ impl Op3 for Nth3 {
         let idx = i32_n as usize;
         match a {
             Value::Vector(v) => Some(v.get(idx).unwrap_or_else(|| c.clone())),
-            Value::Str(s) => Some(
-                crate::coll::fast_str_char_at(s, idx)
-                    .or_else(|| crate::coll::str_char_at(s, idx))
-                    .map_or_else(|| c.clone(), Value::Char),
-            ),
+            Value::Str(s) => {
+                Some(crate::coll::str_char_at(s, idx).map_or_else(|| c.clone(), Value::Char))
+            }
             Value::Transient(t) => {
                 let guard = t.lock();
                 if let clj_value::TransientKind::Vector(tv) = &*guard {

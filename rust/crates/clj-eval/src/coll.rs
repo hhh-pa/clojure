@@ -1586,22 +1586,33 @@ const STR_SCAN_SMALL_MAX: usize = 64;
 // `Arc<str>` millions of times, and search loops alternate two (a
 // text and a pattern — #226: one slot ping-ponged through the global
 // mutex per read). The memo answers repeats without the global
-// cache mutex — and without touching refcounts, since a strong key
-// compares by `ptr_eq` alone (sound: `Arc<str>` is immutable, so the
-// same allocation is the same string, and liveness pins the address
-// against ABA). At most `LAST_SCAN_SLOTS` strings pinned per thread
-// (each freed when its slot is reused); the global cache stays
-// `Weak` (8 slots must not pin).
+// cache mutex — and without touching refcounts on hits. The memo
+// stores `Weak<str>` so multi-megabyte string buffers are deallocated
+// immediately when dropped by the evaluator, avoiding peak RSS bloat.
 const LAST_SCAN_SLOTS: usize = 4;
 
 /// The memo slots plus the next slot to reuse.
-type ScanMemo = ([Option<(Arc<str>, StrScan)>; LAST_SCAN_SLOTS], usize);
+type ScanMemo = (
+    [Option<(std::sync::Weak<str>, StrScan)>; LAST_SCAN_SLOTS],
+    usize,
+);
+const ASCII_CACHE_SLOTS: usize = 4;
+type AsciiCache = [(usize, usize, bool); ASCII_CACHE_SLOTS];
 
 thread_local! {
     static LAST_SCAN: std::cell::RefCell<ScanMemo> =
         const { std::cell::RefCell::new(([None, None, None, None], 0)) };
-    static ASCII_SLOT_0: std::cell::Cell<(usize, bool)> = const { std::cell::Cell::new((0, false)) };
-    static ASCII_SLOT_1: std::cell::Cell<(usize, bool)> = const { std::cell::Cell::new((0, false)) };
+    static ASCII_SLOTS: std::cell::Cell<AsciiCache> =
+        const { std::cell::Cell::new([(0, 0, false); ASCII_CACHE_SLOTS]) };
+}
+
+#[inline(always)]
+fn set_ascii_slot(slot: usize, ptr: usize, len: usize, is_ascii: bool) {
+    if slot < ASCII_CACHE_SLOTS {
+        let mut slots = ASCII_SLOTS.get();
+        slots[slot] = (ptr, len, is_ascii);
+        ASCII_SLOTS.set(slots);
+    }
 }
 
 /// Answer `f` over the memoized scan for a string, if it is one of
@@ -1611,13 +1622,15 @@ fn promote_scan_hit<T>(
     s: &Arc<str>,
     f: impl FnOnce(&StrScan) -> T,
 ) -> Option<T> {
+    let ptr = Arc::as_ptr(s) as *const () as usize;
+    let len = s.len();
     for i in 2..LAST_SCAN_SLOTS {
-        if let Some((key, scan)) = &memo.0[i] {
-            if Arc::ptr_eq(key, s) {
+        if let Some((weak, scan)) = &memo.0[i] {
+            if weak.upgrade().is_some_and(|k| Arc::ptr_eq(&k, s)) {
                 let hit = f(scan);
                 let is_ascii = matches!(scan, StrScan::Ascii);
                 memo.0.swap(1, i);
-                ASCII_SLOT_1.set((Arc::as_ptr(s) as *const () as usize, is_ascii));
+                set_ascii_slot(1, ptr, len, is_ascii);
                 return Some(hit);
             }
         }
@@ -1628,13 +1641,13 @@ fn promote_scan_hit<T>(
 fn with_scan_hit<T>(s: &Arc<str>, f: impl FnOnce(&StrScan) -> T) -> Option<T> {
     LAST_SCAN.with(|memo| {
         let mut memo = memo.borrow_mut();
-        if let Some((key, scan)) = &memo.0[0] {
-            if Arc::ptr_eq(key, s) {
+        if let Some((weak, scan)) = &memo.0[0] {
+            if weak.upgrade().is_some_and(|k| Arc::ptr_eq(&k, s)) {
                 return Some(f(scan));
             }
         }
-        if let Some((key, scan)) = &memo.0[1] {
-            if Arc::ptr_eq(key, s) {
+        if let Some((weak, scan)) = &memo.0[1] {
+            if weak.upgrade().is_some_and(|k| Arc::ptr_eq(&k, s)) {
                 return Some(f(scan));
             }
         }
@@ -1646,17 +1659,14 @@ fn with_scan_hit<T>(s: &Arc<str>, f: impl FnOnce(&StrScan) -> T) -> Option<T> {
 /// fresh build, so repeats skip the mutex), reusing slots in turn.
 fn memoize_scan(s: &Arc<str>, scan: &StrScan) {
     let ptr = Arc::as_ptr(s) as *const () as usize;
+    let len = s.len();
     let is_ascii = matches!(scan, StrScan::Ascii);
     LAST_SCAN.with(|memo| {
         let mut memo = memo.borrow_mut();
         let slot = memo.1;
-        memo.0[slot] = Some((Arc::clone(s), scan.clone()));
+        memo.0[slot] = Some((Arc::downgrade(s), scan.clone()));
         memo.1 = (slot + 1) % LAST_SCAN_SLOTS;
-        if slot == 0 {
-            ASCII_SLOT_0.set((ptr, is_ascii));
-        } else if slot == 1 {
-            ASCII_SLOT_1.set((ptr, is_ascii));
-        }
+        set_ascii_slot(slot, ptr, len, is_ascii);
     });
 }
 
@@ -1719,29 +1729,36 @@ fn build_str_scan(s: &str) -> Option<StrScan> {
     })
 }
 
-fn slot_scan_char(entry: &Option<(Arc<str>, StrScan)>, s: &Arc<str>, idx: usize) -> Option<char> {
-    if let Some((key, scan)) = entry {
-        if Arc::ptr_eq(key, s) {
+fn slot_scan_char(
+    entry: &Option<(std::sync::Weak<str>, StrScan)>,
+    s: &Arc<str>,
+    idx: usize,
+) -> Option<char> {
+    if let Some((weak, scan)) = entry {
+        if weak.upgrade().is_some_and(|k| Arc::ptr_eq(&k, s)) {
             return scan_char_at(s, scan, idx);
         }
     }
     None
 }
 
-/// Direct fast-path read from the thread-local scan slots (0 and 1)
+/// Direct fast-path read from the thread-local scan slots
 /// without closure indirection or mutable borrow overhead.
 #[inline(always)]
 pub(crate) fn fast_str_char_at(s: &Arc<str>, idx: usize) -> Option<char> {
     let ptr = Arc::as_ptr(s) as *const () as usize;
-    let (p0, a0) = ASCII_SLOT_0.get();
-    if p0 == ptr && a0 {
-        return s.as_bytes().get(idx).map(|b| *b as char);
+    let len = s.len();
+    let slots = ASCII_SLOTS.get();
+    for &(p, l, is_ascii) in &slots {
+        if p == ptr && l == len {
+            if is_ascii {
+                return s.as_bytes().get(idx).map(|b| *b as char);
+            }
+            break;
+        }
     }
-    let (p1, a1) = ASCII_SLOT_1.get();
-    if p1 == ptr && a1 {
-        return s.as_bytes().get(idx).map(|b| *b as char);
-    }
-    if s.len() <= STR_SCAN_SMALL_MAX && s.is_ascii() {
+    if len <= STR_SCAN_SMALL_MAX && s.is_ascii() {
+        set_ascii_slot(0, ptr, len, true);
         return s.as_bytes().get(idx).map(|b| *b as char);
     }
     LAST_SCAN.with(|memo| {
@@ -1760,6 +1777,10 @@ pub(crate) fn str_char_at(s: &Arc<str>, idx: usize) -> Option<char> {
     if let Some(c) = fast_str_char_at(s, idx) {
         return Some(c);
     }
+    str_char_at_slow(s, idx)
+}
+
+fn str_char_at_slow(s: &Arc<str>, idx: usize) -> Option<char> {
     if s.len() <= STR_SCAN_SMALL_MAX {
         return s.chars().nth(idx);
     }
@@ -3295,7 +3316,7 @@ mod tests {
         let scan = build_str_scan(&s).unwrap();
         LAST_SCAN.with(|memo| {
             let mut memo = memo.borrow_mut();
-            memo.0[0] = Some((Arc::clone(&s), scan));
+            memo.0[0] = Some((Arc::downgrade(&s), scan));
         });
         assert_eq!(fast_str_char_at(&s, 5), Some('é'));
         assert_eq!(fast_str_char_at(&s, 250), None);

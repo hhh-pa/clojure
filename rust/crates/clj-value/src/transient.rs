@@ -69,6 +69,7 @@ impl fmt::Display for TransientError {
 
 impl std::error::Error for TransientError {}
 
+#[inline]
 fn ensure(valid: bool) -> Result<(), TransientError> {
     if valid {
         Ok(())
@@ -92,6 +93,7 @@ impl TransientItems {
     /// Put `v` at `idx` (`idx == len` appends; callers bound `idx`):
     /// an empty packed buffer retypes to `v`'s type, a foreign value
     /// converts a packed buffer to generic.
+    #[inline]
     fn put(&mut self, idx: usize, v: Value) {
         let converted = match self {
             TransientItems::Generic(x) => return put_at(x, idx, v),
@@ -109,6 +111,7 @@ impl TransientItems {
         *self = converted;
     }
 
+    #[inline]
     fn len(&self) -> usize {
         match self {
             TransientItems::Ints(x) => x.len(),
@@ -126,6 +129,7 @@ fn boxed_with<T: Copy>(x: &[T], box_item: fn(T) -> Value, idx: usize, v: Value) 
 }
 
 /// Set `x[idx]`, or append at `idx == len`.
+#[inline]
 fn put_at<T>(x: &mut Vec<T>, idx: usize, v: T) {
     if idx == x.len() {
         x.push(v);
@@ -174,6 +178,7 @@ impl TransientVector {
         Self { items, valid: true }
     }
 
+    #[inline]
     fn check(&self) -> Result<(), TransientError> {
         ensure(self.valid)
     }
@@ -182,6 +187,7 @@ impl TransientVector {
     /// core fn's job in S5). A foreign value into a packed buffer
     /// converts it to generic in place (the foreign value stays, so
     /// the buffer never re-packs).
+    #[inline]
     pub fn conj(&mut self, v: Value) -> Result<(), TransientError> {
         self.check()?;
         let len = self.items.len();
@@ -190,6 +196,7 @@ impl TransientVector {
     }
 
     /// Drop the last value (empty errors).
+    #[inline]
     pub fn pop(&mut self) -> Result<(), TransientError> {
         self.check()?;
         let empty = match &mut self.items {
@@ -204,6 +211,7 @@ impl TransientVector {
     }
 
     /// Set index `idx` (`idx == len` appends, past that errors).
+    #[inline]
     pub fn assoc(&mut self, idx: usize, v: Value) -> Result<(), TransientError> {
         self.check()?;
         if idx > self.items.len() {
@@ -214,6 +222,7 @@ impl TransientVector {
     }
 
     /// Append one integer (`conj!` fast path).
+    #[inline]
     pub fn conj_int(&mut self, n: i64) -> Result<(), TransientError> {
         self.check()?;
         match &mut self.items {
@@ -226,6 +235,7 @@ impl TransientVector {
     }
 
     /// Set index `idx` to an integer (`idx == len` appends, past that errors).
+    #[inline]
     pub fn assoc_int(&mut self, idx: usize, n: i64) -> Result<(), TransientError> {
         self.check()?;
         match &mut self.items {
@@ -241,6 +251,7 @@ impl TransientVector {
     }
 
     /// Read index `idx` (`None` past the end).
+    #[inline]
     pub fn nth(&self, idx: usize) -> Result<Option<Value>, TransientError> {
         self.check()?;
         Ok(match &self.items {
@@ -251,12 +262,14 @@ impl TransientVector {
     }
 
     /// The item count.
+    #[inline]
     pub fn len(&self) -> Result<usize, TransientError> {
         self.check()?;
         Ok(self.items.len())
     }
 
     /// Whether the vector is empty.
+    #[inline]
     pub fn is_empty(&self) -> Result<bool, TransientError> {
         Ok(self.len()? == 0)
     }
