@@ -714,6 +714,13 @@ fn transient_rows() {
     assert_eq!(
         run_last(
             &mut eval,
+            "(let [t (transient [1 2])] (apply pop! [t]) (persistent! t))"
+        ),
+        "[1]"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
             "(let [t (transient #{1})] (conj! t 2) (persistent! t))"
         ),
         "#{1 2}"
