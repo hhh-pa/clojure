@@ -5639,16 +5639,21 @@ fn string_optimizations_coverage() {
     assert_eq!(run(&mut eval, "(.indexOf \"abc\" \"\" 1)"), "1");
     assert_eq!(run(&mut eval, "(.indexOf \"héllo\" \"é\")"), "1");
     assert_eq!(run(&mut eval, "(.indexOf \"hello\" \"é\")"), "-1");
+    assert_eq!(run(&mut eval, "(.indexOf \"héllo\" \"\" 1)"), "1");
+    assert_eq!(run(&mut eval, "(.indexOf \"héllo\" \"é\" 10)"), "-1");
 
     // lastIndexOf edges
     assert_eq!(run(&mut eval, "(.lastIndexOf \"a\" \"abc\")"), "-1");
     assert_eq!(run(&mut eval, "(.lastIndexOf \"héllo\" \"é\")"), "1");
     assert_eq!(run(&mut eval, "(.lastIndexOf \"hello\" \"é\")"), "-1");
+    assert_eq!(run(&mut eval, "(.lastIndexOf \"héllo\" \"é\" -1)"), "-1");
+    assert_eq!(run(&mut eval, "(.lastIndexOf \"héllo\" \"\")"), "5");
 
     // parse_long_str with Unicode digits
     assert_eq!(run(&mut eval, "(Long/parseLong \"١٢\")"), "12");
     assert_eq!(run(&mut eval, "(Long/parseLong \"-١٢\")"), "-12");
     assert_eq!(run(&mut eval, "(Long/parseLong \"+١٢\")"), "12");
+    assert_eq!(run(&mut eval, "(Long/parseLong \"١2\")"), "12");
     assert_eq!(
         uncaught(&mut eval, "(Long/parseLong \"-\")"),
         "java.lang.NumberFormatException | For input string: \"-\""
