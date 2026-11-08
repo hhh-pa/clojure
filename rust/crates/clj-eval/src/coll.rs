@@ -1606,6 +1606,29 @@ thread_local! {
 
 /// Answer `f` over the memoized scan for a string, if it is one of
 /// the last few scanned (no `StrScan` clone on a hit, slot 0 MRU).
+fn promote_scan_hit<T>(
+    memo: &mut ScanMemo,
+    s: &Arc<str>,
+    f: impl FnOnce(&StrScan) -> T,
+) -> Option<T> {
+    for i in 2..LAST_SCAN_SLOTS {
+        if let Some((key, scan)) = &memo.0[i] {
+            if Arc::ptr_eq(key, s) {
+                let hit = f(scan);
+                memo.0.swap(1, i);
+                if let Some((k1, s1)) = &memo.0[1] {
+                    ASCII_SLOT_1.set((
+                        Arc::as_ptr(k1) as *const () as usize,
+                        matches!(s1, StrScan::Ascii),
+                    ));
+                }
+                return Some(hit);
+            }
+        }
+    }
+    None
+}
+
 fn with_scan_hit<T>(s: &Arc<str>, f: impl FnOnce(&StrScan) -> T) -> Option<T> {
     LAST_SCAN.with(|memo| {
         let mut memo = memo.borrow_mut();
@@ -1619,22 +1642,7 @@ fn with_scan_hit<T>(s: &Arc<str>, f: impl FnOnce(&StrScan) -> T) -> Option<T> {
                 return Some(f(scan));
             }
         }
-        for i in 2..LAST_SCAN_SLOTS {
-            if let Some((key, scan)) = &memo.0[i] {
-                if Arc::ptr_eq(key, s) {
-                    let hit = f(scan);
-                    memo.0.swap(1, i);
-                    if let Some((k1, s1)) = &memo.0[1] {
-                        ASCII_SLOT_1.set((
-                            Arc::as_ptr(k1) as *const () as usize,
-                            matches!(s1, StrScan::Ascii),
-                        ));
-                    }
-                    return Some(hit);
-                }
-            }
-        }
-        None
+        promote_scan_hit(&mut memo, s, f)
     })
 }
 
@@ -1715,6 +1723,15 @@ fn build_str_scan(s: &str) -> Option<StrScan> {
     })
 }
 
+fn slot_scan_char(entry: &Option<(Arc<str>, StrScan)>, s: &Arc<str>, idx: usize) -> Option<char> {
+    if let Some((key, scan)) = entry {
+        if Arc::ptr_eq(key, s) {
+            return scan_char_at(s, scan, idx);
+        }
+    }
+    None
+}
+
 /// Direct fast-path read from the thread-local scan slots (0 and 1)
 /// without closure indirection or mutable borrow overhead.
 #[inline(always)]
@@ -1730,27 +1747,7 @@ pub(crate) fn fast_str_char_at(s: &Arc<str>, idx: usize) -> Option<char> {
     }
     LAST_SCAN.with(|memo| {
         let memo = memo.borrow();
-        if let Some((key, scan)) = &memo.0[0] {
-            if Arc::ptr_eq(key, s) {
-                return match scan {
-                    StrScan::Ascii => s.as_bytes().get(idx).map(|b| *b as char),
-                    StrScan::Indexed { byte_at, .. } => {
-                        byte_at.get(idx).and_then(|b| s[*b..].chars().next())
-                    }
-                };
-            }
-        }
-        if let Some((key, scan)) = &memo.0[1] {
-            if Arc::ptr_eq(key, s) {
-                return match scan {
-                    StrScan::Ascii => s.as_bytes().get(idx).map(|b| *b as char),
-                    StrScan::Indexed { byte_at, .. } => {
-                        byte_at.get(idx).and_then(|b| s[*b..].chars().next())
-                    }
-                };
-            }
-        }
-        None
+        slot_scan_char(&memo.0[0], s, idx).or_else(|| slot_scan_char(&memo.0[1], s, idx))
     })
 }
 
