@@ -449,6 +449,11 @@ pub(crate) enum Packed<T> {
 }
 
 impl<T: Copy> Packed<T> {
+    /// Flat packed storage (direct reads, unwrap on owned transient).
+    pub(crate) fn flat(items: Vec<T>) -> Self {
+        Packed::Flat(Arc::new(items))
+    }
+
     /// Packed storage over `items` in order.
     pub(crate) fn from_vec(items: Vec<T>) -> Self {
         if items.len() <= FLAT_MAX {
@@ -496,13 +501,22 @@ impl<T: Copy> Packed<T> {
     /// Replace the item at `i` (`false` when out of bounds).
     pub(crate) fn set(&mut self, i: usize, x: T) -> bool {
         match self {
-            Packed::Flat(a) => match Arc::make_mut(a).get_mut(i) {
-                Some(slot) => {
-                    *slot = x;
-                    true
+            Packed::Flat(a) => {
+                if Arc::strong_count(a) > 1 && a.len() > FLAT_MAX {
+                    let mut t: PVec<T> = a.iter().copied().collect();
+                    let ok = t.set_mut(i, x);
+                    *self = Packed::Trie(t);
+                    ok
+                } else {
+                    match Arc::make_mut(a).get_mut(i) {
+                        Some(slot) => {
+                            *slot = x;
+                            true
+                        }
+                        None => false,
+                    }
                 }
-                None => false,
-            },
+            }
             Packed::Trie(t) => t.set_mut(i, x),
         }
     }
@@ -510,7 +524,16 @@ impl<T: Copy> Packed<T> {
     /// Drop the last item (`false` when empty).
     pub(crate) fn pop(&mut self) -> bool {
         match self {
-            Packed::Flat(a) => !a.is_empty() && Arc::make_mut(a).pop().is_some(),
+            Packed::Flat(a) => {
+                if Arc::strong_count(a) > 1 && a.len() > FLAT_MAX {
+                    let mut t: PVec<T> = a.iter().copied().collect();
+                    let ok = t.drop_last_mut();
+                    *self = Packed::Trie(t);
+                    ok
+                } else {
+                    !a.is_empty() && Arc::make_mut(a).pop().is_some()
+                }
+            }
             Packed::Trie(t) => t.drop_last_mut(),
         }
     }

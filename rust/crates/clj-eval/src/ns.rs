@@ -2666,6 +2666,7 @@ const OWNED_ENTRIES: &[(&str, OwnedNativeFnPtr)] = &[
     ("not-any?", crate::seqs::native_not_any_p_owned),
     ("not-every?", crate::seqs::native_not_every_p_owned),
     ("nth", crate::coll::native_nth_owned),
+    ("persistent!", crate::coll::native_persistent_owned),
     ("reduce", crate::seqs::native_reduce_owned),
     ("reverse", crate::seqs::native_reverse_owned),
     ("set", crate::coll::native_set_owned),

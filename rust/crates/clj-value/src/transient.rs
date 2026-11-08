@@ -213,6 +213,18 @@ impl TransientVector {
         Ok(())
     }
 
+    /// Append one integer (`conj!` fast path).
+    pub fn conj_int(&mut self, n: i64) -> Result<(), TransientError> {
+        self.check()?;
+        match &mut self.items {
+            TransientItems::Ints(x) => {
+                x.push(n);
+                Ok(())
+            }
+            _ => self.conj(Value::Int(n)),
+        }
+    }
+
     /// Set index `idx` to an integer (`idx == len` appends, past that errors).
     pub fn assoc_int(&mut self, idx: usize, n: i64) -> Result<(), TransientError> {
         self.check()?;
@@ -662,8 +674,14 @@ impl TransientLock {
 
     #[inline]
     pub fn lock(&self) -> TransientGuard<'_> {
-        while self.locked.swap(true, Ordering::Acquire) {
-            std::hint::spin_loop();
+        if self
+            .locked
+            .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            while self.locked.swap(true, Ordering::Acquire) {
+                std::hint::spin_loop();
+            }
         }
         TransientGuard { lock: self }
     }

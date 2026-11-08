@@ -721,25 +721,25 @@ impl Vector {
     /// callers that already know, like ranges and packed transients).
     #[must_use]
     pub fn from_ints(ints: Vec<i64>) -> Self {
-        Self::of(VectorInner::Ints(crate::trie::Packed::from_vec(ints)))
+        Self::of(VectorInner::Ints(crate::trie::Packed::flat(ints)))
     }
 
     /// Build a packed `Int` vector from `i64`s in order (no scan).
     #[must_use]
     pub fn from_flat_ints(ints: Vec<i64>) -> Self {
-        Self::of(VectorInner::Ints(crate::trie::Packed::from_vec(ints)))
+        Self::of(VectorInner::Ints(crate::trie::Packed::flat(ints)))
     }
 
     /// Build a packed char vector from `char`s in order (no scan).
     #[must_use]
     pub fn from_chars(chars: Vec<char>) -> Self {
-        Self::of(VectorInner::Chars(crate::trie::Packed::from_vec(chars)))
+        Self::of(VectorInner::Chars(crate::trie::Packed::flat(chars)))
     }
 
     /// Build a packed char vector from `char`s in order (no scan).
     #[must_use]
     pub fn from_flat_chars(chars: Vec<char>) -> Self {
-        Self::of(VectorInner::Chars(crate::trie::Packed::from_vec(chars)))
+        Self::of(VectorInner::Chars(crate::trie::Packed::flat(chars)))
     }
 
     /// Whether this vector rides on packed `i64` or `char` storage.

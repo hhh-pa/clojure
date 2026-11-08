@@ -259,6 +259,19 @@ const JVM_ROWS: &[(&str, &str)] = &[
         r#"[\a \é \z]"#,
     ),
     (
+        r#"(let [t (transient [1 2])] (persistent! (conj! t 3)))"#,
+        r#"[1 2 3]"#,
+    ),
+    (
+        r#"(let [t (transient [1 2])] (persistent! (conj! t :kw)))"#,
+        r#"[1 2 :kw]"#,
+    ),
+    (r#"(let [s "hello"] [(nth s 0) (nth s 4)])"#, r#"[\h \o]"#),
+    (
+        r#"(let [s "world"] [(nth s 0 :def) (nth s 10 :def)])"#,
+        r#"[\w :def]"#,
+    ),
+    (
         r#"(loop [s (seq [1 2 3]) acc []] (if (seq s) (let [x (first s)] (recur (rest s) (conj acc x))) acc))"#,
         r#"[1 2 3]"#,
     ),
@@ -484,6 +497,14 @@ const PORT_ROWS: &[(&str, &str)] = &[
     (
         r#"(do (defn r-rest [s] [(rest s) (first s)]) (with-redefs [rest (fn [s] :redef)] (r-rest [1 2])))"#,
         r#"[:redef 1]"#,
+    ),
+    (
+        r#"(do (defn r-trans [v] (transient v)) (with-redefs [transient (fn [v] :trans-redef)] (r-trans [1 2])))"#,
+        r#":trans-redef"#,
+    ),
+    (
+        r#"(do (defn r-pers [t] (persistent! t)) (with-redefs [persistent! (fn [t] :pers-redef)] (r-pers (transient [1 2]))))"#,
+        r#":pers-redef"#,
     ),
 ];
 

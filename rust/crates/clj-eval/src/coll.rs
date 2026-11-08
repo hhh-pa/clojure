@@ -1600,6 +1600,8 @@ type ScanMemo = ([Option<(Arc<str>, StrScan)>; LAST_SCAN_SLOTS], usize);
 thread_local! {
     static LAST_SCAN: std::cell::RefCell<ScanMemo> =
         const { std::cell::RefCell::new(([None, None, None, None], 0)) };
+    static ASCII_SLOT_0: std::cell::Cell<(usize, bool)> = const { std::cell::Cell::new((0, false)) };
+    static ASCII_SLOT_1: std::cell::Cell<(usize, bool)> = const { std::cell::Cell::new((0, false)) };
 }
 
 /// Answer `f` over the memoized scan for a string, if it is one of
@@ -1622,6 +1624,12 @@ fn with_scan_hit<T>(s: &Arc<str>, f: impl FnOnce(&StrScan) -> T) -> Option<T> {
                 if Arc::ptr_eq(key, s) {
                     let hit = f(scan);
                     memo.0.swap(1, i);
+                    if let Some((k1, s1)) = &memo.0[1] {
+                        ASCII_SLOT_1.set((
+                            Arc::as_ptr(k1) as *const () as usize,
+                            matches!(s1, StrScan::Ascii),
+                        ));
+                    }
                     return Some(hit);
                 }
             }
@@ -1633,11 +1641,18 @@ fn with_scan_hit<T>(s: &Arc<str>, f: impl FnOnce(&StrScan) -> T) -> Option<T> {
 /// Memoize a string's scan (called on every global-cache hit and
 /// fresh build, so repeats skip the mutex), reusing slots in turn.
 fn memoize_scan(s: &Arc<str>, scan: &StrScan) {
+    let ptr = Arc::as_ptr(s) as *const () as usize;
+    let is_ascii = matches!(scan, StrScan::Ascii);
     LAST_SCAN.with(|memo| {
         let mut memo = memo.borrow_mut();
         let slot = memo.1;
         memo.0[slot] = Some((Arc::clone(s), scan.clone()));
         memo.1 = (slot + 1) % LAST_SCAN_SLOTS;
+        if slot == 0 {
+            ASCII_SLOT_0.set((ptr, is_ascii));
+        } else if slot == 1 {
+            ASCII_SLOT_1.set((ptr, is_ascii));
+        }
     });
 }
 
@@ -1704,6 +1719,15 @@ fn build_str_scan(s: &str) -> Option<StrScan> {
 /// without closure indirection or mutable borrow overhead.
 #[inline(always)]
 pub(crate) fn fast_str_char_at(s: &Arc<str>, idx: usize) -> Option<char> {
+    let ptr = Arc::as_ptr(s) as *const () as usize;
+    let (p0, a0) = ASCII_SLOT_0.get();
+    if p0 == ptr && a0 {
+        return s.as_bytes().get(idx).map(|b| *b as char);
+    }
+    let (p1, a1) = ASCII_SLOT_1.get();
+    if p1 == ptr && a1 {
+        return s.as_bytes().get(idx).map(|b| *b as char);
+    }
     LAST_SCAN.with(|memo| {
         let memo = memo.borrow();
         if let Some((key, scan)) = &memo.0[0] {
@@ -2134,9 +2158,13 @@ fn native_transient(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nativ
     native_transient_owned(eval, args.iter().cloned().collect())
 }
 
-fn native_persistent(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
-    check_arity("clojure.core/persistent!", args, &[1])?;
-    match &args[0] {
+pub(crate) fn native_persistent_owned(
+    _eval: &mut Evaluator,
+    mut args: SmallVec<[Value; 4]>,
+) -> Result<Value, NativeError> {
+    check_arity("clojure.core/persistent!", &args, &[1])?;
+    let val = args.pop().unwrap();
+    match val {
         Value::Transient(t) => {
             let meta = t.source_meta().cloned();
             let mut guard = t.lock();
@@ -2157,8 +2185,12 @@ fn native_persistent(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nat
             "Cannot invoke \"clojure.lang.ITransientCollection.persistent()\" because \"coll\" is null"
                 .to_owned(),
         )),
-        other => Err(cce_err(other, "clojure.lang.ITransientCollection")),
+        other => Err(cce_err(&other, "clojure.lang.ITransientCollection")),
     }
+}
+
+fn native_persistent(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    native_persistent_owned(eval, args.iter().cloned().collect())
 }
 
 /// The `conj!` map plan (computed unlocked: seqing the
@@ -3250,6 +3282,19 @@ mod tests {
         assert_eq!(str_char_at(&s1, 0), Some('1'));
         assert_eq!(str_char_at(&s2, 0), Some('2'));
         assert_eq!(str_char_at(&s2, 10), Some('2'));
+        assert_eq!(fast_str_char_at(&s0, 5), Some('0'));
+        assert_eq!(fast_str_char_at(&s2, 5), Some('2'));
+        assert_eq!(str_char_at(&s1, 5), Some('1'));
+    }
+
+    #[test]
+    fn native_persistent_borrowed_fallback() {
+        let mut eval = crate::boot();
+        let tv = Value::Transient(clj_value::Transient::new(clj_value::TransientKind::Vector(
+            clj_value::TransientVector::new(),
+        )));
+        let res = native_persistent(&mut eval, &[tv]).expect("persistent!");
+        assert!(matches!(res, Value::Vector(_)));
     }
 
     #[test]

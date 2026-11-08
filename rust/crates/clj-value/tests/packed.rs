@@ -454,3 +454,32 @@ fn vector_push_to_string() {
     assert!(!iv.push_to_string(&mut s3));
     assert!(s3.is_empty());
 }
+
+#[test]
+fn packed_flat_shared_set_and_pop_promotion_to_trie() {
+    let big: Vec<i64> = (0..2000).collect();
+    let v = Vector::from_flat_ints(big);
+    // Clone to make strong_count > 1
+    let v_clone1 = v.clone();
+    assert_eq!(v_clone1.get(10), Some(Value::Int(10)));
+    let updated = v_clone1.set_nth(10, Value::Int(999)).unwrap();
+    assert_eq!(updated.get(10), Some(Value::Int(999)));
+
+    let v_clone2 = v.clone();
+    assert_eq!(v_clone2.len(), 2000);
+    let popped = v_clone2.drop_last().unwrap();
+    assert_eq!(popped.len(), 1999);
+}
+
+#[test]
+fn transient_conj_int_arms() {
+    let mut tv_ints = TransientVector::from_vector_owned(Vector::from_ints(vec![1, 2]));
+    assert!(tv_ints.conj_int(3).is_ok());
+    assert_eq!(tv_ints.len().unwrap(), 3);
+    assert_eq!(tv_ints.nth(2).unwrap(), Some(Value::Int(3)));
+
+    let mut tv_chars = TransientVector::from_vector_owned(Vector::from_chars(vec!['a', 'b']));
+    assert!(tv_chars.conj_int(4).is_ok());
+    assert_eq!(tv_chars.len().unwrap(), 3);
+    assert_eq!(tv_chars.nth(2).unwrap(), Some(Value::Int(4)));
+}

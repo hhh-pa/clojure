@@ -953,6 +953,7 @@ pub(crate) fn update_ctor(call: &DirectCall) -> Option<UpdCtor> {
         "assoc" if argc >= 5 && argc % 2 == 1 => Some(upd_native),
         "assoc-in" if argc == 3 => Some(upd_native),
         "update" | "update-in" if argc >= 3 => Some(upd_native),
+        "transient" | "persistent!" if argc == 1 => Some(upd_native),
         _ => None,
     }
 }
@@ -1186,7 +1187,9 @@ impl Op2 for Nth {
         let idx = *n as usize;
         match a {
             Value::Vector(v) => v.get(idx),
-            Value::Str(s) => crate::coll::str_char_at(s, idx).map(Value::Char),
+            Value::Str(s) => crate::coll::fast_str_char_at(s, idx)
+                .or_else(|| crate::coll::str_char_at(s, idx))
+                .map(Value::Char),
             Value::Transient(t) => {
                 let guard = t.lock();
                 match &*guard {
@@ -1440,7 +1443,11 @@ impl Op2 for ConjBang {
         let clj_value::TransientKind::Vector(tv) = &mut *guard else {
             return None;
         };
-        tv.conj(b.clone()).ok()?;
+        if let Value::Int(n) = b {
+            tv.conj_int(*n).ok()?;
+        } else {
+            tv.conj(b.clone()).ok()?;
+        }
         drop(guard);
         Some(a.clone())
     }
@@ -1502,9 +1509,11 @@ impl Op3 for Nth3 {
         let idx = i32_n as usize;
         match a {
             Value::Vector(v) => Some(v.get(idx).unwrap_or_else(|| c.clone())),
-            Value::Str(s) => {
-                Some(crate::coll::str_char_at(s, idx).map_or_else(|| c.clone(), Value::Char))
-            }
+            Value::Str(s) => Some(
+                crate::coll::fast_str_char_at(s, idx)
+                    .or_else(|| crate::coll::str_char_at(s, idx))
+                    .map_or_else(|| c.clone(), Value::Char),
+            ),
             Value::Transient(t) => {
                 let guard = t.lock();
                 if let clj_value::TransientKind::Vector(tv) = &*guard {
