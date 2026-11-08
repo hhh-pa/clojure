@@ -661,6 +661,8 @@ const UNARY: &[Row1] = &[
     ("parse-long", shape1::<ParseLong, AsValue>, None),
     ("count", shape1::<Count, AsValue>, None),
     ("peek", shape1::<Peek, AsValue>, None),
+    ("pop!", shape1::<PopBang, AsValue>, None),
+    ("bit-not", shape1::<BitNot, AsValue>, None),
     (
         "first",
         shape1::<First, AsValue>,
@@ -1274,6 +1276,19 @@ impl Op1 for Dec {
     }
 }
 
+/// `(bit-not x)` on an integer.
+pub(crate) struct BitNot;
+
+impl Op1 for BitNot {
+    #[inline(always)]
+    fn apply(a: &Value) -> Option<Value> {
+        let Value::Int(x) = a else {
+            return None;
+        };
+        Some(Value::Int(!x))
+    }
+}
+
 pub(crate) struct Count;
 
 impl Op1 for Count {
@@ -1428,6 +1443,26 @@ impl Op1 for DoubleCast {
             Value::Double(x) => Some(Value::Double(*x)),
             _ => None,
         }
+    }
+}
+
+/// `(pop! t)` over a live transient vector (drops its last item in
+/// place; anything else runs the native).
+pub(crate) struct PopBang;
+
+impl Op1 for PopBang {
+    #[inline(always)]
+    fn apply(a: &Value) -> Option<Value> {
+        let Value::Transient(t) = a else {
+            return None;
+        };
+        let mut guard = t.lock();
+        let clj_value::TransientKind::Vector(tv) = &mut *guard else {
+            return None;
+        };
+        tv.pop().ok()?;
+        drop(guard);
+        Some(a.clone())
     }
 }
 
@@ -1696,5 +1731,26 @@ mod tests {
             )
             .unwrap();
         assert!(matches!(res.last(), Some(Value::Vector(_))));
+    }
+
+    #[test]
+    fn pop_bang_and_bit_not() {
+        assert_eq!(<BitNot as Op1>::apply(&Value::Int(0)), Some(Value::Int(-1)));
+        assert_eq!(<BitNot as Op1>::apply(&Value::Int(-1)), Some(Value::Int(0)));
+        assert_eq!(<BitNot as Op1>::apply(&Value::Nil), None);
+
+        let tv = Value::Transient(clj_value::Transient::new(clj_value::TransientKind::Vector(
+            clj_value::TransientVector::new(),
+        )));
+        assert_eq!(<PopBang as Op1>::apply(&tv), None);
+        assert_eq!(<PopBang as Op1>::apply(&Value::Nil), None);
+
+        assert!(<ConjBang as Op2>::apply(&tv, &Value::Int(123)).is_some());
+        assert_eq!(<PopBang as Op1>::apply(&tv), Some(tv.clone()));
+
+        let tm = Value::Transient(clj_value::Transient::new(clj_value::TransientKind::Map(
+            clj_value::TransientMap::new(),
+        )));
+        assert_eq!(<PopBang as Op1>::apply(&tm), None);
     }
 }
