@@ -62,6 +62,12 @@ runs:
         restore-keys: |
           setup-llvm-win-vcpkg-${{ steps.vcpkg-baseline.outputs.sha }}-
           setup-llvm-win-vcpkg-
+    - if: runner.os == 'Windows'
+      id: llvm-binary-cache
+      uses: actions/cache@v5
+      with:
+        path: .llvm-cache/llvm-${{ inputs.patch }}
+        key: setup-llvm-win-bin-${{ inputs.patch }}-${{ runner.os }}-${{ runner.arch }}
     - if: runner.os == 'Linux'
       shell: bash
       run: |
@@ -94,6 +100,8 @@ runs:
         echo "LLVM_SYS_221_PREFIX=$dir" >> "$GITHUB_ENV"
     - if: runner.os == 'Windows'
       shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
       run: |
         set -euo pipefail
         # The choco llvm package's install omits llvm-config.exe, which
@@ -105,13 +113,27 @@ runs:
         # msys mkdir/tar resolve inconsistently; the normalized form
         # works for both msys tools and the Windows API.
         dir="$(printf '%s' "$GITHUB_WORKSPACE" | tr '\\' '/')/.llvm-cache/llvm-$V"
-        rm -rf "$dir"
-        mkdir -p "$dir"
-        curl -sSLf --retry 3 -o /tmp/llvm.tar.xz \
-          "https://github.com/llvm/llvm-project/releases/download/llvmorg-$V/$asset"
-        test -s /tmp/llvm.tar.xz
-        tar -xJf /tmp/llvm.tar.xz -C "$dir" --strip-components=1
-        rm /tmp/llvm.tar.xz
+        if [ ! -x "$dir/bin/llvm-config.exe" ]; then
+          rm -rf "$dir"
+          mkdir -p "$dir"
+          # Download via gh release download (uses GitHub API/storage redirect,
+          # avoiding frontend 504 timeouts on github.com release downloads).
+          if command -v gh >/dev/null 2>&1 && gh release download "llvmorg-$V" -R llvm/llvm-project -p "$asset" --dir /tmp; then
+            mv "/tmp/$asset" /tmp/llvm.tar.xz
+          else
+            aid="$(curl -sSL "https://api.github.com/repos/llvm/llvm-project/releases/tags/llvmorg-$V" | grep -B 2 "\"name\": \"$asset\"" | grep '"id":' | head -1 | tr -dc '0-9' || true)"
+            if [ -n "$aid" ]; then
+              curl -sSLf --retry 3 -H "Accept: application/octet-stream" -o /tmp/llvm.tar.xz \
+                "https://api.github.com/repos/llvm/llvm-project/releases/assets/$aid"
+            else
+              curl -sSLf --retry 3 -o /tmp/llvm.tar.xz \
+                "https://github.com/llvm/llvm-project/releases/download/llvmorg-$V/$asset"
+            fi
+          fi
+          test -s /tmp/llvm.tar.xz
+          tar -xJf /tmp/llvm.tar.xz -C "$dir" --strip-components=1
+          rm -f /tmp/llvm.tar.xz
+        fi
         echo "--- key tools:"; ls "$dir/bin" | grep -iE '^(llvm-config|clang|lld)' || true
         test -x "$dir/bin/llvm-config.exe"
         "$dir/bin/llvm-config.exe" --version | grep -q '^22\.1\.'
